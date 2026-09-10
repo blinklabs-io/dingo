@@ -550,6 +550,166 @@ func applyGuardExpiredLeaderScenario(
 	return res
 }
 
+// TestStakeRewardEpochHelpersDivergeAtBootstrapRound pins the divergence that
+// let the Byron guard in applyStakeRewards miss the round it exists to catch.
+//
+// The guard must resolve its epochs through the same helper as the path it
+// guards (calculateStakeRewardApplication at :190,
+// precomputedStakeRewardApplication at :670). Resolved through
+// stakeRewardEpochsForNewEpoch instead, the guard reports nothing to guard at
+// newEpoch == 2 while the application path resolves the bootstrap round
+// against performance epoch 0 -- which is Byron on every network the Byron
+// prefix affects, and therefore has no persisted pparams.
+//
+// This covers the helper contract only. The end-to-end rollover failure was
+// reproduced by the reviewer against real database rows and has no unit-level
+// fixture here.
+func TestStakeRewardEpochHelpersDivergeAtBootstrapRound(t *testing.T) {
+	for _, newEpoch := range []uint64{1, 2} {
+		_, ok := stakeRewardEpochsForNewEpoch(newEpoch)
+		require.False(
+			t,
+			ok,
+			"stakeRewardEpochsForNewEpoch must still report no round at "+
+				"bootstrap epoch %d; the guard compensates by using the "+
+				"application helper instead",
+			newEpoch,
+		)
+
+		app, ok := stakeRewardEpochsForApplication(newEpoch)
+		require.True(
+			t,
+			ok,
+			"the application path acts on bootstrap round %d",
+			newEpoch,
+		)
+		require.Equal(
+			t,
+			uint64(0),
+			app.performance,
+			"bootstrap round %d resolves against the performance epoch "+
+				"with no pparams",
+			newEpoch,
+		)
+		require.True(
+			t,
+			app.bootstrap,
+			"newEpoch %d is a bootstrap round",
+			newEpoch,
+		)
+	}
+
+	// From epoch 3 up the two helpers agree, which is what made guarding on
+	// either of them look equivalent.
+	for newEpoch := uint64(3); newEpoch < 8; newEpoch++ {
+		narrow, narrowOK := stakeRewardEpochsForNewEpoch(newEpoch)
+		wide, wideOK := stakeRewardEpochsForApplication(newEpoch)
+		require.Equal(t, narrowOK, wideOK, "newEpoch %d", newEpoch)
+		require.Equal(t, narrow, wide, "newEpoch %d", newEpoch)
+	}
+}
+
+// TestApplyStakeRewardsSkipsBootstrapRoundWithByronPerformanceEpoch drives the
+// production guard at the one epoch where stakeRewardEpochsForApplication and
+// stakeRewardEpochsForNewEpoch differ. Without the application helper in the
+// guard, the bootstrap round reaches rewardParameters and fails because Byron
+// legitimately has no persisted protocol parameters.
+func TestApplyStakeRewardsSkipsBootstrapRoundWithByronPerformanceEpoch(
+	t *testing.T,
+) {
+	ls, db := newRewardCalculationTestLedger(t)
+	meta := db.Metadata()
+
+	require.NoError(t, meta.SetEpoch(
+		0,
+		0,
+		nil,
+		nil,
+		nil,
+		nil,
+		eras.ByronEraDesc.Id,
+		1,
+		21_600,
+		nil,
+	))
+	require.NoError(t, meta.SetEpoch(
+		21_600,
+		1,
+		nil,
+		nil,
+		nil,
+		nil,
+		eras.ByronEraDesc.Id,
+		1,
+		21_600,
+		nil,
+	))
+	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+		Epoch:        1,
+		Reserves:     100_000_000,
+		CapturedSlot: 21_600,
+	}, nil))
+	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+		Epoch:        0,
+		SnapshotType: "mark",
+		CapturedSlot: 0,
+		BoundarySlot: 0,
+	}, nil))
+
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return ls.applyStakeRewards(txn, 2, 43_200)
+	}))
+}
+
+// TestApplyStakeRewardsSkipsEpochOneRoundWithByronPerformanceEpoch is the
+// negative case for the 0->1 bootstrap round added for dingo #3381. A network
+// with a Byron prefix has no Shelley reward round at that boundary, so the
+// Byron performance-epoch guard must suppress it and leave the slot-0 pots
+// untouched -- even though the epoch 0 ADA pots row now exists.
+func TestApplyStakeRewardsSkipsEpochOneRoundWithByronPerformanceEpoch(
+	t *testing.T,
+) {
+	ls, db := newRewardCalculationTestLedger(t)
+	meta := db.Metadata()
+
+	require.NoError(t, meta.SetEpoch(
+		0,
+		0,
+		nil,
+		nil,
+		nil,
+		nil,
+		eras.ByronEraDesc.Id,
+		1,
+		21_600,
+		nil,
+	))
+	require.NoError(t, meta.SetNetworkState(0, 100_000_000, 0, nil))
+	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+		Epoch:        0,
+		Reserves:     100_000_000,
+		CapturedSlot: 0,
+	}, nil))
+	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+		Epoch:        0,
+		SnapshotType: "mark",
+		CapturedSlot: 0,
+		BoundarySlot: 0,
+	}, nil))
+
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return ls.applyStakeRewards(txn, 1, 21_600)
+	}))
+
+	state, err := meta.GetNetworkState(nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Equal(t, uint64(0), uint64(state.Treasury))
+	require.Equal(t, uint64(100_000_000), uint64(state.Reserves))
+}
+
 // TestApplyStakeRewardsGuardsExpiredRewardAccount is the Task 10 reward-crediting
 // guard test: a pool reward (leader) account expired as of the reward snapshot
 // epoch must not be credited, and its reward must be routed to undistributed ->
@@ -4892,6 +5052,7 @@ func TestProcessEpochRolloverSnapshotEventUsesProtocolMajor(t *testing.T) {
 			},
 			eras.ShelleyEraDesc,
 			pparams,
+			false,
 		)
 		return err
 	})

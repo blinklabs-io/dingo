@@ -22,8 +22,8 @@
             },
             "network": "Testnet"
           },
-          "cost": 0,
           "blsKey": null,
+          "cost": 0,
           "margin": 0,
           "metadata": null,
           "owners": [],

@@ -958,10 +958,10 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		// the volatile fetch path below pull the remainder.
 		var validateErr error
 		if resumeGapEnd == ledgerStateSlot {
-			validateErr = validateStoredGapBlocks(
+			validateErr = validateCompleteGapBlocks(
 				storedGapBlocks,
-				immutableTip,
-				ledgerStateHash,
+				ocommon.NewPoint(immutableTip.Slot, immutableTip.Hash),
+				ocommon.NewPoint(ledgerStateSlot, ledgerStateHash),
 			)
 		} else {
 			validateErr = validateStoredGapContinuity(

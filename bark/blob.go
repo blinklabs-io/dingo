@@ -343,6 +343,19 @@ func (b *BlobStoreBark) GetBlock(
 	return archiveCbor, merged, nil
 }
 
+// GetBlockLocal bypasses Bark's archive fallback. Nested wrappers are
+// unwrapped through the same optional interface.
+func (b *BlobStoreBark) GetBlockLocal(
+	txn types.Txn,
+	slot uint64,
+	hash []byte,
+) ([]byte, types.BlockMetadata, error) {
+	if reader, ok := b.upstream.(blob.LocalBlockReader); ok {
+		return reader.GetBlockLocal(txn, slot, hash)
+	}
+	return b.upstream.GetBlock(txn, slot, hash)
+}
+
 // fetchBlockFromArchive resolves a (slot, hash) block via the bark archive
 // service: requests a signed URL, downloads the CBOR, and returns it along
 // with the metadata carried in the archive response.

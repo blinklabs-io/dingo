@@ -121,14 +121,13 @@ type BootstrapConfig struct {
 	// CleanupAfterLoad controls whether temporary files are removed
 	// after loading completes.
 	CleanupAfterLoad bool
-	// VerifyCertificateChain enables certificate chain verification
-	// against the aggregator. When true, the bootstrap process
-	// walks the certificate chain from the snapshot back to the
-	// genesis certificate to verify the chain is unbroken.
+	// VerifyCertificateChain enables STM certificate verification against the
+	// aggregator. When true, GenesisVerificationKey is required and the
+	// bootstrap process verifies the chain back to that pinned genesis key.
 	VerifyCertificateChain bool
-	// GenesisVerificationKey is the Mithril genesis verification key loaded
-	// from Cardano network config. It is validated for parseability now and
-	// will be used by full STM verification.
+	// GenesisVerificationKey is the pinned Mithril trust anchor used by STM
+	// certificate verification. It is loaded from Cardano network config and
+	// validated for parseability before any aggregator request.
 	GenesisVerificationKey string
 	// AncillaryVerificationKey is the Mithril ancillary verification key loaded
 	// from Cardano network config. It is validated for parseability now and
@@ -342,13 +341,16 @@ func Bootstrap(
 	}
 	cfg.Backend = normalizeBackend(cfg.Backend)
 	if cfg.VerifyCertificateChain {
-		if cfg.GenesisVerificationKey != "" {
-			if _, err := ParseVerificationKey(cfg.GenesisVerificationKey); err != nil {
-				return nil, fmt.Errorf(
-					"parsing Mithril genesis verification key: %w",
-					err,
-				)
-			}
+		if strings.TrimSpace(cfg.GenesisVerificationKey) == "" {
+			return nil, errors.New(
+				"verified Mithril bootstrap requires a genesis verification key",
+			)
+		}
+		if _, err := ParseVerificationKey(cfg.GenesisVerificationKey); err != nil {
+			return nil, fmt.Errorf(
+				"parsing Mithril genesis verification key: %w",
+				err,
+			)
 		}
 		if cfg.AncillaryVerificationKey != "" {
 			if _, err := ParseVerificationKey(cfg.AncillaryVerificationKey); err != nil {
@@ -469,16 +471,12 @@ func Bootstrap(
 			"component", "mithril",
 			"certificate_hash", snapshot.CertificateHash,
 		)
-		verificationMode := VerificationModeStructural
-		if cfg.GenesisVerificationKey != "" {
-			verificationMode = VerificationModeSTM
-		}
 		verificationResult, err := VerifyCertificateChainWithMode(
 			ctx,
 			client,
 			snapshot.CertificateHash,
 			snapshot.Digest,
-			verificationMode,
+			VerificationModeSTM,
 		)
 		if err != nil {
 			return nil, fmt.Errorf(
@@ -486,22 +484,20 @@ func Bootstrap(
 				err,
 			)
 		}
-		if cfg.GenesisVerificationKey != "" {
-			if verificationResult == nil ||
-				verificationResult.GenesisCertificate == nil {
-				return nil, errors.New(
-					"genesis verification key provided but no genesis certificate found in chain",
-				)
-			}
-			if err := VerifyGenesisCertificateSignature(
-				verificationResult.GenesisCertificate,
-				cfg.GenesisVerificationKey,
-			); err != nil {
-				return nil, fmt.Errorf(
-					"genesis certificate verification failed: %w",
-					err,
-				)
-			}
+		if verificationResult == nil ||
+			verificationResult.GenesisCertificate == nil {
+			return nil, errors.New(
+				"verified certificate chain has no genesis certificate",
+			)
+		}
+		if err := VerifyGenesisCertificateSignature(
+			verificationResult.GenesisCertificate,
+			cfg.GenesisVerificationKey,
+		); err != nil {
+			return nil, fmt.Errorf(
+				"genesis certificate verification failed: %w",
+				err,
+			)
 		}
 		verificationMaterial, err := BuildVerificationMaterial(
 			ctx,

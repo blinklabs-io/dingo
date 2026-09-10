@@ -25,6 +25,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -707,6 +708,124 @@ func TestDownloadSnapshotSizeMismatch(t *testing.T) {
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "download size mismatch")
+}
+
+// TestDownloadSnapshotRejectsPreexistingSymlinkEscape proves the TOCTOU
+// fix for issue #3147: a symlink placed at the download destination
+// path *before* the download starts, pointing outside DestDir, must
+// not be followed. Before routing file creation through os.Root, a
+// plain os.OpenFile(destPath, ...) would re-resolve the path through
+// the OS and follow such a symlink, writing attacker-controlled data
+// outside DestDir.
+func TestDownloadSnapshotRejectsPreexistingSymlinkEscape(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks requires elevated privileges on windows")
+	}
+
+	content := []byte("attacker-controlled")
+	server := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write(content)
+		}),
+	)
+	t.Cleanup(server.Close)
+
+	destDir := t.TempDir()
+	outsideDir := t.TempDir()
+	outsideTarget := filepath.Join(outsideDir, "pwned.txt")
+
+	require.NoError(
+		t,
+		os.Symlink(outsideTarget, filepath.Join(destDir, "snapshot.tar.zst")),
+	)
+
+	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
+		URL:               server.URL + "/snapshot.tar.zst",
+		AllowInsecureHTTP: true,
+		DestDir:           destDir,
+	})
+	require.Error(t, err)
+	_, statErr := os.Stat(outsideTarget)
+	require.True(
+		t,
+		os.IsNotExist(statErr),
+		"download must not write through the symlink outside DestDir",
+	)
+}
+
+// TestDownloadSnapshotRefusesSymlinkedDestDir proves DownloadSnapshot
+// refuses to create/open its destination through a pre-existing symlink
+// at DestDir itself, as opposed to the file it writes there (the
+// preceding test). A bare os.MkdirAll(cfg.DestDir)+os.OpenRoot(cfg.DestDir)
+// would silently succeed and write through such a symlink, because
+// neither call inspects what it is binding to before using it.
+func TestDownloadSnapshotRefusesSymlinkedDestDir(t *testing.T) {
+	server := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte("data"))
+		}),
+	)
+	t.Cleanup(server.Close)
+
+	parent := t.TempDir()
+	outside := t.TempDir()
+	destDir := filepath.Join(parent, "dest")
+	requireSymlinkSupport(t, outside, destDir)
+
+	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
+		URL:               server.URL + "/snapshot.tar.zst",
+		AllowInsecureHTTP: true,
+		DestDir:           destDir,
+	})
+	require.Error(t, err)
+
+	entries, readErr := os.ReadDir(outside)
+	require.NoError(t, readErr)
+	assert.Empty(
+		t, entries,
+		"download must not write through the symlinked DestDir",
+	)
+}
+
+// TestOsRootRejectsFinalSymlinkWithTrailingSlash directly exercises the
+// exact shape of GO-2026-4970 (CVE-2026-39822) against the os.Root API
+// this fix depends on: on Unix, os.Root.Open("symlink/") — the final
+// path component is a symlink and the name ends in a trailing slash —
+// escaped the root before Go 1.26.5, opening the symlink's target
+// instead of refusing it. dingo's own call sites (ExtractArchive,
+// DownloadSnapshot) never reach this exact shape themselves, because
+// path.Clean/filepath.Base already strip trailing slashes before a name
+// is ever passed to a Root method; this test instead pins the toolchain
+// guarantee directly, independent of that incidental normalization, per
+// the issue's 2026-08-21 runtime-prerequisite note. A regression here
+// would also be caught by the govulncheck release gate (see Makefile,
+// publish.yml), but this proves the behavior rather than just the
+// absence of a CVE identifier.
+func TestOsRootRejectsFinalSymlinkWithTrailingSlash(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks requires elevated privileges on windows")
+	}
+
+	destDir := t.TempDir()
+	outsideDir := t.TempDir()
+	require.NoError(
+		t,
+		os.Symlink(outsideDir, filepath.Join(destDir, "escape")),
+	)
+
+	root, err := os.OpenRoot(destDir)
+	require.NoError(t, err)
+	defer root.Close()
+
+	f, openErr := root.Open("escape/")
+	if f != nil {
+		f.Close()
+	}
+	require.Error(
+		t,
+		openErr,
+		"os.Root must refuse a final symlink with a trailing slash, not follow it outside the root",
+	)
 }
 
 func TestDownloadSnapshotDefaultFilename(t *testing.T) {

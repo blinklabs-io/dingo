@@ -24,9 +24,12 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 )
 
-// bootstrapProtocolVersion is the highest protocol major version during
-// the Conway bootstrap phase where governance voting thresholds are not
-// yet enforced and any yes vote ratifies a proposal.
+// bootstrapProtocolVersion is the Conway protocol major version during which
+// the bootstrap governance rules apply. Bootstrap changes the DRep threshold
+// and committee minimum-size behavior, but keeps the per-body SPO and CC
+// requirements for each eligible action. Bootstrap waives the committee
+// minimum-size requirement, but an absent committee still cannot approve a
+// committee-gated action.
 const bootstrapProtocolVersion = 9
 
 // RatifyDecision holds the outcome of evaluating a proposal's tally
@@ -57,8 +60,9 @@ type RatifyInputs struct {
 // its current tally, the protocol parameters, and the active state of
 // DReps and CC. Follows CIP-1694 bootstrap and post-bootstrap logic.
 //
-// MajorVersion is the current protocol major version; before and
-// including version 9 (bootstrap), thresholds are effectively zero.
+// MajorVersion is the current protocol major version. During PV9 bootstrap,
+// DRep thresholds are effectively zero for eligible non-Info actions, while
+// action-specific SPO and constitutional-committee requirements remain.
 func ShouldRatify(in RatifyInputs) RatifyDecision {
 	decision := RatifyDecision{}
 	if in.Tally == nil || in.PParams == nil {
@@ -73,20 +77,28 @@ func ShouldRatify(in RatifyInputs) RatifyDecision {
 		return decision
 	}
 
-	// Bootstrap phase: any yes vote ratifies.
-	if in.MajorVersion <= bootstrapProtocolVersion {
-		// #nosec G115 -- CCYesCount is bounded by CC size (< 100).
-		yes := in.Tally.DRepYesStake + in.Tally.SPOYesStake +
-			uint64(in.Tally.CCYesCount)
-		if yes == 0 {
-			decision.FailureReason = "bootstrap: no yes vote"
+	inBootstrap := in.MajorVersion == bootstrapProtocolVersion
+	if inBootstrap {
+		// Conway validation admits only InfoAction, ParameterChange, and
+		// HardForkInitiation proposals during bootstrap. Keep this guard in
+		// the ratification path as well so imported or otherwise malformed
+		// state cannot ratify a disabled action.
+		switch actionType {
+		case lcommon.GovActionTypeParameterChange,
+			lcommon.GovActionTypeHardForkInitiation:
+			// Eligible bootstrap actions continue through the per-body
+			// DRep, SPO, and CC checks below.
+		case lcommon.GovActionTypeTreasuryWithdrawal,
+			lcommon.GovActionTypeNoConfidence,
+			lcommon.GovActionTypeUpdateCommittee,
+			lcommon.GovActionTypeNewConstitution,
+			lcommon.GovActionTypeInfo:
+			decision.FailureReason = "action is not eligible during bootstrap"
+			return decision
+		default:
+			decision.FailureReason = "action is not eligible during bootstrap"
 			return decision
 		}
-		decision.Ratified = true
-		decision.DRepApproved = true
-		decision.SPOApproved = true
-		decision.CCApproved = true
-		return decision
 	}
 
 	// DRep approval: actions with no DRep gate or a zero threshold pass
@@ -95,8 +107,7 @@ func ShouldRatify(in RatifyInputs) RatifyDecision {
 	drepThreshold := getDRepThreshold(
 		actionType, in.PParams, in.ParamUpdate, in.CommitteeNoConfidence,
 	)
-	if drepThreshold == nil ||
-		drepThreshold.Sign() == 0 {
+	if inBootstrap || drepThreshold == nil || drepThreshold.Sign() == 0 {
 		decision.DRepApproved = true
 	} else {
 		ratio := in.Tally.DRepYesRatio()
@@ -128,10 +139,12 @@ func ShouldRatify(in RatifyInputs) RatifyDecision {
 	case in.ActiveCCCount == 0:
 		// Check zero-members before the min-size comparison so the
 		// failure reason distinguishes "no members" from "below
-		// minimum" even when MinCommitteeSize >= 1.
+		// minimum" even when MinCommitteeSize >= 1. Bootstrap bypasses
+		// only the minimum-size gate; it does not create committee approval
+		// when no active members exist.
 		decision.CCApproved = false
 		decision.FailureReason = "cc has no active members"
-	case in.ActiveCCCount < int(in.PParams.MinCommitteeSize): //nolint:gosec
+	case !inBootstrap && in.ActiveCCCount < int(in.PParams.MinCommitteeSize): //nolint:gosec
 		decision.CCApproved = false
 		decision.FailureReason = "cc below minimum committee size"
 	case in.CCQuorum == nil || in.CCQuorum.Sign() == 0:

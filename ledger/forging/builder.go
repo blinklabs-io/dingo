@@ -188,6 +188,13 @@ func (b *DefaultBlockBuilder) BuildBlock(
 	return b.buildBlock(slot, kesPeriod, LeiosBlockData{})
 }
 
+// BlockForger.buildBlock discovers the Leios capability with a runtime type
+// assertion on the BlockBuilder it was handed and fails the forge when it
+// misses, so drift in BuildBlockWithLeios would break Leios forging at forge
+// time rather than at build time. Unlike the session-provider assertion above
+// this one is loud, but it is the same class of defect the guard prevents.
+var _ LeiosBlockBuilder = (*DefaultBlockBuilder)(nil)
+
 // BuildBlockWithLeios creates a Dijkstra block with Leios prototype
 // announcement or certificate data committed into the block body/header.
 func (b *DefaultBlockBuilder) BuildBlockWithLeios(

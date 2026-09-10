@@ -25,24 +25,30 @@ import (
 const ChainsyncResyncEventType = EventType("chainsync.resync")
 
 const (
-	ChainsyncResyncReasonLocalTipPlateau                = "local_tip_plateau"
-	ChainsyncResyncReasonPostPlateauRealign             = "post_plateau_realign"
-	ChainsyncResyncReasonRollbackAhead                  = "rollback point ahead of local tip"
-	ChainsyncResyncReasonRollbackNotFound               = "rollback point not found"
-	ChainsyncResyncReasonRollbackLoop                   = "rollback loop detected"
-	ChainsyncResyncReasonPersistentFork                 = "persistent chain fork"
-	ChainsyncResyncReasonRollbackExceedsK               = "rollback exceeds security parameter K"
-	ChainsyncResyncReasonRollbackExceedsMithril         = "rollback exceeds Mithril trust boundary"
-	ChainsyncResyncReasonPeerTipBehindMithril           = "peer tip behind Mithril trust boundary"
-	ChainsyncResyncReasonForkResolutionExceedsK         = "fork resolution exceeds security parameter K"
-	ChainsyncResyncReasonLocalLedgerRollback            = "local ledger rollback"
-	ChainsyncResyncReasonLiveTxValidationRecovery       = "live tx validation recovery"
-	ChainsyncResyncReasonReplayRecoveryNonConverging    = "replay tx validation recovery not converging"
-	ChainsyncResyncReasonChainSwitchCursorAhead         = "chain switch cursor ahead of local tip"
-	ChainsyncResyncReasonBlockfetchTimeoutRetryFailed   = "blockfetch timeout retry failed on all available connections"
-	ChainsyncResyncReasonBlockfetchRangeUnavailable     = "blockfetch could not obtain the queued header range"
-	ChainsyncResyncReasonHeaderValidationRecovery       = "deferred header validation recovery"
-	ChainsyncResyncReasonForkQueueOverflowRestartFailed = "failed to restart blockfetch after fork-resolution header-queue overflow"
+	ChainsyncResyncReasonLocalTipPlateau                   = "local_tip_plateau"
+	ChainsyncResyncReasonPostPlateauRealign                = "post_plateau_realign"
+	ChainsyncResyncReasonRollbackAhead                     = "rollback point ahead of local tip"
+	ChainsyncResyncReasonRollbackNotFound                  = "rollback point not found"
+	ChainsyncResyncReasonRollbackLoop                      = "rollback loop detected"
+	ChainsyncResyncReasonPersistentFork                    = "persistent chain fork"
+	ChainsyncResyncReasonRollbackExceedsK                  = "rollback exceeds security parameter K"
+	ChainsyncResyncReasonRollbackExceedsMithril            = "rollback exceeds Mithril trust boundary"
+	ChainsyncResyncReasonPeerTipBehindMithril              = "peer tip behind Mithril trust boundary"
+	ChainsyncResyncReasonForkResolutionExceedsK            = "fork resolution exceeds security parameter K"
+	ChainsyncResyncReasonLocalLedgerRollback               = "local ledger rollback"
+	ChainsyncResyncReasonLiveTxValidationRecovery          = "live tx validation recovery"
+	ChainsyncResyncReasonDeterministicTxValidationRecovery = "deterministic tx validation recovery"
+	ChainsyncResyncReasonReplayRecoveryNonConverging       = "replay tx validation recovery not converging"
+	ChainsyncResyncReasonChainSwitchCursorAhead            = "chain switch cursor ahead of local tip"
+	ChainsyncResyncReasonBlockfetchTimeoutRetryFailed      = "blockfetch timeout retry failed on all available connections"
+	ChainsyncResyncReasonBlockfetchRangeUnavailable        = "blockfetch could not obtain the queued header range"
+	ChainsyncResyncReasonHeaderValidationRecovery          = "deferred header validation recovery"
+	ChainsyncResyncReasonForkQueueOverflowRestartFailed    = "failed to restart blockfetch after fork-resolution header-queue overflow"
+	// ChainsyncResyncReasonFutureHeaderAdmissionRecovery re-intersects the
+	// ChainSync mini-protocol after a resolvable header was deliberately dropped
+	// outside the permitted clock-skew window. It is not a peer-fault signal and
+	// does not require a fresh connection or peer cooldown.
+	ChainsyncResyncReasonFutureHeaderAdmissionRecovery = "future header admission recovery"
 )
 
 // ChainsyncResyncEvent carries the connection ID that should

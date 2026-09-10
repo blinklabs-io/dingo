@@ -78,6 +78,10 @@ INSERT INTO "transaction" (
 	if stake := addr.StakeKeyHash(); stake != lcommon.NewBlake2b224(nil) {
 		row.StakingKey = stake.Bytes()
 	}
+	paymentKey := any(row.PaymentKey)
+	if addr.PaymentKeyHash() == lcommon.NewBlake2b224(nil) {
+		paymentKey = nil
+	}
 	_, err = raw.Exec(`
 INSERT INTO utxo (
     transaction_id, tx_id, payment_key, staking_key, credential_tag,
@@ -85,7 +89,7 @@ INSERT INTO utxo (
 ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, FALSE)`,
 		txID,
 		row.TxId,
-		row.PaymentKey,
+		paymentKey,
 		row.StakingKey,
 		row.CredentialTag,
 		row.AddedSlot,
@@ -477,29 +481,41 @@ func TestUtxosByAddressExceedsSQLiteParameterLimit(t *testing.T) {
 // GetUtxosByAddress's chunking must not rely on bind-argument count alone
 // to decide when to flush a chunk, or a long run of these zero-arg branches
 // would never trigger a flush and would overflow SQLite's OR-expression
-// tree depth. Every address's UTxO must still come back exactly once.
+// tree depth. The coarse branch returns the one NULL-credential candidate from
+// every chunk, which must be deduplicated before its CBOR is exactly matched
+// against the requested addresses.
 func TestUtxosByAddressManyZeroArgBranches(t *testing.T) {
+	const patternCount = 1_000
+
+	db := openTestDB(t)
+	raw := rawSQLiteMetadataFixture(t, db)
 	zeroPayment := bytes.Repeat([]byte{0x00}, lcommon.AddressHashSize)
 	zeroHash := lcommon.NewBlake2b224(nil)
-	seedManyUtxoAddressesAndAssertRoundTrip(
-		t, 2000, func(i int) lcommon.Address {
-			payload := make([]byte, 4)
-			binary.BigEndian.PutUint32(payload, uint32(i)+1)
-			addr, err := lcommon.NewByronAddressFromParts(
-				0,
-				zeroPayment,
-				lcommon.ByronAddressAttributes{Payload: payload},
-			)
-			require.NoError(t, err)
-			require.Equal(
-				t, zeroHash, addr.PaymentKeyHash(),
-				"fixture invariant: payment hash must be zero",
-			)
-			require.Equal(
-				t, zeroHash, addr.StakeKeyHash(),
-				"fixture invariant: staking hash must be zero",
-			)
-			return addr
-		},
-	)
+	addrs := make([]lcommon.Address, patternCount)
+	for i := range addrs {
+		payload := make([]byte, 4)
+		binary.BigEndian.PutUint32(payload, uint32(i)+1)
+		addr, err := lcommon.NewByronAddressFromParts(
+			0,
+			zeroPayment,
+			lcommon.ByronAddressAttributes{Payload: payload},
+		)
+		require.NoError(t, err)
+		require.Equal(
+			t, zeroHash, addr.PaymentKeyHash(),
+			"fixture invariant: payment hash must be zero",
+		)
+		require.Equal(
+			t, zeroHash, addr.StakeKeyHash(),
+			"fixture invariant: staking hash must be zero",
+		)
+		addrs[i] = addr
+	}
+
+	want := seedExactAddressUtxo(t, db, raw, addrs[0], 1, 0x42)
+	got, err := db.UtxosByAddress(addrs, nil)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, want.TxId, got[0].TxId)
+	assert.Equal(t, want.OutputIdx, got[0].OutputIdx)
 }

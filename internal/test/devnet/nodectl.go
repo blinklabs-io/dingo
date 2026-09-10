@@ -19,11 +19,9 @@ package devnet
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"time"
 )
@@ -118,31 +116,29 @@ func (n *NodeControl) ContainerStatus(ctx context.Context) (string, error) {
 	return out, err
 }
 
-// Logs returns a service's container logs.
+// Logs returns a service's container logs. A positive tailLines limits
+// the result to that many trailing lines; see CapturedLogTailLines for
+// why a capture asks for a bound rather than everything the daemon holds.
 func (n *NodeControl) Logs(
 	ctx context.Context,
 	service string,
+	tailLines int,
 ) (string, error) {
-	return runCompose(
-		ctx, n.composeFile, "logs", "--no-color", "--no-log-prefix", service,
-	)
-}
-
-// ArtifactDir returns the directory failure evidence is written to, and
-// whether one is configured. run-tests.sh creates it and preserves it on
-// failure.
-func ArtifactDir() (string, bool) {
-	dir := os.Getenv("DEVNET_ARTIFACT_DIR")
-	return dir, dir != ""
+	args := []string{"logs", "--no-color", "--no-log-prefix"}
+	if tailLines > 0 {
+		args = append(args, "--tail", strconv.Itoa(tailLines))
+	}
+	args = append(args, service)
+	return runCompose(ctx, n.composeFile, args...)
 }
 
 // CaptureFailureArtifacts writes the evidence a failed scenario needs to
 // be diagnosable after the network is gone: what every node's chain
 // actually did, which containers were up, and each service's logs.
 //
-// It is best-effort by design — a capture error must not mask the test
-// failure that triggered it — so problems are logged rather than
-// returned.
+// The writing itself lives in artifacts.go, untagged, so what a failure
+// preserves is covered by an ordinary test run. This method supplies the
+// Docker side of it.
 func (n *NodeControl) CaptureFailureArtifacts(
 	ctx context.Context,
 	name string,
@@ -156,40 +152,17 @@ func (n *NodeControl) CaptureFailureArtifacts(
 		)
 		return
 	}
-	dir = filepath.Join(dir, name)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		n.logf("nodectl: creating %s: %v", dir, err)
-		return
-	}
-
-	if data, err := json.MarshalIndent(snapshots, "", "  "); err != nil {
-		n.logf("nodectl: encoding chain events: %v", err)
-	} else {
-		n.writeArtifact(dir, "observed-chains.json", data)
-	}
-
-	if status, err := n.ContainerStatus(ctx); err != nil {
-		n.logf("nodectl: container status: %v", err)
-	} else {
-		n.writeArtifact(dir, "container-status.txt", []byte(status))
-	}
-
-	for _, svc := range services {
-		logs, err := n.Logs(ctx, svc)
-		if err != nil {
-			n.logf("nodectl: logs for %s: %v", svc, err)
-			continue
-		}
-		n.writeArtifact(dir, svc+".log", []byte(logs))
-	}
-	n.logf("nodectl: failure artifacts written to %s", dir)
-}
-
-func (n *NodeControl) writeArtifact(dir, name string, data []byte) {
-	path := filepath.Join(dir, name)
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		n.logf("nodectl: writing %s: %v", path, err)
-	}
+	WriteFailureArtifacts(
+		ctx,
+		n,
+		FailureCapturePlan{
+			Root:     dir,
+			Name:     ArtifactName(name),
+			Services: services,
+		},
+		snapshots,
+		n.logf,
+	)
 }
 
 // runCompose invokes docker compose against the DevNet compose file. The

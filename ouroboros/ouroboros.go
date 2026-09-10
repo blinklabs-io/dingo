@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -116,6 +117,21 @@ type Ouroboros struct {
 	// ChainSync measurement tracking for peer scoring
 	chainsyncStats map[ouroboros.ConnectionId]*chainsyncPeerStats
 	chainsyncMutex sync.Mutex
+	// Future-header admission runs on the per-peer ChainSync callback before
+	// any observed-tip, dedup, or ledger mutation. Resync timers recover the
+	// protocol cursor after a deliberate beyond-skew drop without recycling
+	// the connection; one earliest-onset timer is retained per connection.
+	chainsyncHeaderAdmission chainsyncHeaderAdmissionFunc
+	chainsyncHeaderSlotTime  func(uint64) (time.Time, error)
+	chainsyncScheduleAt      chainsyncScheduleAtFunc
+	// chainsyncArrivalNow is an instance-local clock seam for deterministic
+	// arrival-order tests. Production instances use time.Now.
+	chainsyncArrivalNow      func() time.Time
+	futureHeaderResyncMu     sync.Mutex
+	futureHeaderResyncs      map[ouroboros.ConnectionId]*scheduledChainsyncResync
+	futureHeaderResyncCtx    context.Context
+	futureHeaderResyncCancel context.CancelFunc
+	futureHeaderResyncClosed bool
 	// Per-connection mutex to serialize chainsync restarts
 	restartMu sync.Map // ouroboros.ConnectionId → *sync.Mutex
 	// Per-peer rate limiter for TxSubmission server
@@ -359,6 +375,9 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 	cfg.ChainsyncBlockTimeout = effectiveChainsyncBlockTimeout(
 		cfg.ChainsyncBlockTimeout,
 	)
+	futureHeaderResyncCtx, futureHeaderResyncCancel := context.WithCancel(
+		context.Background(),
+	)
 	o := &Ouroboros{
 		config:           cfg,
 		registerer:       newTrackingRegisterer(cfg.PromRegistry),
@@ -375,6 +394,13 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		chainsyncStats: make(
 			map[ouroboros.ConnectionId]*chainsyncPeerStats,
 		),
+		chainsyncScheduleAt: defaultChainsyncScheduleAt,
+		chainsyncArrivalNow: time.Now,
+		futureHeaderResyncs: make(
+			map[ouroboros.ConnectionId]*scheduledChainsyncResync,
+		),
+		futureHeaderResyncCtx:      futureHeaderResyncCtx,
+		futureHeaderResyncCancel:   futureHeaderResyncCancel,
 		blockDecodeCache:           newDecodeCache[gledger.Block](),
 		headerDecodeCache:          newDecodeCache[gledger.BlockHeader](),
 		leiosEndorserBlocks:        make(map[string]*leiosEndorserBlockData),
@@ -384,6 +410,10 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		leiosDeferredAnnouncements: make(map[string]leiosDeferredAnnouncement),
 		leiosAnnouncementSizes:     make(map[string]uint64),
 		leiosAnnouncementElections: make(map[string]map[string]struct{}),
+	}
+	if o.ledgerState != nil {
+		o.chainsyncHeaderAdmission = o.ledgerState.AwaitChainsyncHeaderAdmission
+		o.chainsyncHeaderSlotTime = o.ledgerState.SlotToTime
 	}
 	// Initialize per-peer TxSubmission rate limiter
 	txRate := cfg.MaxTxSubmissionsPerSecond
@@ -635,6 +665,7 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 		return
 	}
 	connId := e.ConnectionId
+	o.cancelFutureHeaderResync(connId)
 
 	// Record connection stability observation for peer scoring
 	// Connection closure indicates reduced stability
@@ -717,8 +748,10 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 	if !o.hasDependencies() {
 		o.config.Logger.Error(
 			"dropping outbound connection event received before wiring completed",
-			"component", "network",
-			"connection_id", connId.String(),
+			"component",
+			"network",
+			"connection_id",
+			connId.String(),
 		)
 		return
 	}
@@ -862,8 +895,10 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 	if !o.hasDependencies() {
 		o.config.Logger.Error(
 			"dropping inbound connection event received before wiring completed",
-			"component", "network",
-			"connection_id", connId.String(),
+			"component",
+			"network",
+			"connection_id",
+			connId.String(),
 		)
 		return
 	}

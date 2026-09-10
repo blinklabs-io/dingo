@@ -654,6 +654,7 @@ func (i *ImmutableDb) GetBlock(point ocommon.Point) (*Block, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer func() { _ = chunk.Close() }()
 	var tmpBlock *Block
 	for {
 		tmpBlock, err = chunk.Next()

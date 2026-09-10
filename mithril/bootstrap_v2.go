@@ -443,16 +443,12 @@ func verifyArtifactCertificateV2(
 		"artifact", "cardano_database",
 		"certificate_hash", artifact.CertificateHash,
 	)
-	verificationMode := VerificationModeStructural
-	if cfg.GenesisVerificationKey != "" {
-		verificationMode = VerificationModeSTM
-	}
 	verificationResult, err := VerifyCertificateChainWithMode(
 		ctx,
 		client,
 		artifact.CertificateHash,
 		"", // v2 leaf binding uses cardano_database_merkle_root below
-		verificationMode,
+		VerificationModeSTM,
 	)
 	if err != nil {
 		return fmt.Errorf(
@@ -460,22 +456,20 @@ func verifyArtifactCertificateV2(
 			err,
 		)
 	}
-	if cfg.GenesisVerificationKey != "" {
-		if verificationResult == nil ||
-			verificationResult.GenesisCertificate == nil {
-			return errors.New(
-				"genesis verification key provided but no genesis certificate found in chain",
-			)
-		}
-		if err := VerifyGenesisCertificateSignature(
-			verificationResult.GenesisCertificate,
-			cfg.GenesisVerificationKey,
-		); err != nil {
-			return fmt.Errorf(
-				"genesis certificate verification failed: %w",
-				err,
-			)
-		}
+	if verificationResult == nil ||
+		verificationResult.GenesisCertificate == nil {
+		return errors.New(
+			"verified certificate chain has no genesis certificate",
+		)
+	}
+	if err := VerifyGenesisCertificateSignature(
+		verificationResult.GenesisCertificate,
+		cfg.GenesisVerificationKey,
+	); err != nil {
+		return fmt.Errorf(
+			"genesis certificate verification failed: %w",
+			err,
+		)
 	}
 	verificationMaterial, err := BuildVerificationMaterial(
 		ctx,
@@ -762,13 +756,18 @@ func downloadImmutables(
 		return err
 	}
 	defer immutableRoot.Close()
+
+	// archiveDir is not created here. A create-then-close-then-hand-off-
+	// the-bare-path step would itself be a TOCTOU window: a symlink
+	// swapped in for it between this function returning and the first
+	// download would be followed by whatever opens it next. Instead,
+	// DownloadSnapshot (called below, once per archive) creates and
+	// verifies its own DestDir through a handle on its parent every time
+	// it runs, closing that window at the point it actually matters.
 	archiveDir := filepath.Join(
 		downloadDir,
 		filepath.Base("immutable-archives-"+truncateDigest(artifact.Hash)),
 	)
-	if err := os.MkdirAll(archiveDir, 0o750); err != nil {
-		return fmt.Errorf("creating archive directory: %w", err)
-	}
 
 	locations := make(
 		[]*CardanoDatabaseLocation,
@@ -922,10 +921,11 @@ func downloadImmutables(
 					archiveDir, extractDir,
 				); err != nil {
 					lastErr = err
+					// fetchImmutableArchive has already removed its own
+					// archive file, through the root it downloaded
+					// through, on every exit -- no bare-path cleanup of
+					// archiveDir needed here.
 					removeImmutableTrio(immutableRoot, num)
-					_ = os.Remove(
-						immutableArchivePath(archiveDir, num),
-					)
 					cfg.Logger.Warn(
 						"immutable archive location failed, trying next",
 						"component", "mithril",
@@ -941,9 +941,6 @@ func downloadImmutables(
 				)
 				if lastErr != nil {
 					removeImmutableTrio(immutableRoot, num)
-					_ = os.Remove(
-						immutableArchivePath(archiveDir, num),
-					)
 					cfg.Logger.Warn(
 						"immutable archive verification failed, trying next",
 						"component", "mithril",
@@ -1073,6 +1070,19 @@ func newImmutableProgressWithContext(
 
 // fetchImmutableArchive downloads and extracts a single immutable
 // archive, then removes the archive file to bound disk usage.
+//
+// The download, the extraction, and the removal are all anchored to the
+// same directory handle DownloadSnapshot's internal directory verification
+// opens on archiveDir, rather than each re-resolving archiveDir by name.
+// archiveDir is shared by every archive this pool downloads and is deleted
+// out from under the process on every success (see the comment below), so a
+// directory swapped in for its name between this call's steps would, with a
+// bare path, redirect extraction to attacker-controlled content and let
+// os.Remove delete an external file. Passing the retained root and a
+// root-relative filename to extraction and removal instead means a later
+// swap of archiveDir's name cannot affect either operation: they resolve
+// through the handle opened before the swap could happen, not through the
+// name.
 func fetchImmutableArchive(
 	ctx context.Context,
 	cfg BootstrapConfig,
@@ -1087,13 +1097,13 @@ func fetchImmutableArchive(
 	// and reach the operator. extractLogger (discarded) is still used for
 	// the extraction step to suppress per-file INFO noise.
 	dlLogger := cfg.Logger.With("immutable_file_number", num)
-	archivePath, err := DownloadSnapshot(
+	archivePath := immutableArchivePath(archiveDir, num)
+	archiveFilename := filepath.Base(archivePath)
+	_, root, dlErr := downloadSnapshot(
 		ctx, DownloadConfig{
-			URL:     location.ImmutableArchiveURI(num),
-			DestDir: archiveDir,
-			Filename: filepath.Base(
-				immutableArchivePath(archiveDir, num),
-			),
+			URL:                 location.ImmutableArchiveURI(num),
+			DestDir:             archiveDir,
+			Filename:            archiveFilename,
 			Logger:              dlLogger,
 			HTTPClient:          cfg.httpClient,
 			IdleTimeout:         cfg.DownloadIdleTimeout,
@@ -1102,25 +1112,48 @@ func fetchImmutableArchive(
 			AllowInsecureHTTP:   cfg.AllowInsecureHTTP,
 		},
 	)
-	if err != nil {
-		return err
+	if root != nil {
+		// Removed here, through the same root every other operation in
+		// this function uses, on every exit -- success, download failure
+		// leaving a partial file, or extraction failure leaving a
+		// complete one. The caller used to repeat this cleanup itself by
+		// joining archiveDir (a bare path) with the filename after this
+		// function returned; a directory swapped in for archiveDir's name
+		// in that gap made that cleanup delete a same-named external file
+		// through the replacement instead of this one. Doing it here,
+		// still anchored to root, closes that gap on the failure path the
+		// same way the success path was already closed.
+		defer func() {
+			if removeErr := root.Remove(archiveFilename); removeErr != nil &&
+				!os.IsNotExist(removeErr) {
+				cfg.Logger.Warn(
+					"failed to remove immutable archive after fetch",
+					"component", "mithril",
+					"path", archivePath,
+					"error", removeErr,
+				)
+			}
+			root.Close()
+		}()
 	}
+	if dlErr != nil {
+		return dlErr
+	}
+
+	file, err := root.Open(archiveFilename)
+	if err != nil {
+		return fmt.Errorf("opening downloaded archive: %w", err)
+	}
+	defer file.Close()
+
 	// Merge: every immutable archive extracts into one shared directory,
 	// concurrently, so this destination accumulates across calls and must
 	// not be staged-and-swapped.
-	if _, err := ExtractArchive(
-		ctx, archivePath, extractDir, extractLogger,
+	if _, err := extractArchiveFile(
+		ctx, file, archivePath, extractDir, extractLogger,
 		WithMergeIntoDestination(),
 	); err != nil {
 		return fmt.Errorf("extracting: %w", err)
-	}
-	if err := os.Remove(archivePath); err != nil {
-		cfg.Logger.Warn(
-			"failed to remove immutable archive after extraction",
-			"component", "mithril",
-			"path", archivePath,
-			"error", err,
-		)
 	}
 	return nil
 }

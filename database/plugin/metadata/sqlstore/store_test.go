@@ -63,13 +63,13 @@ func TestTransactionSavepointAndCommit(t *testing.T) {
 		"CREATE TABLE item (id INTEGER PRIMARY KEY, value TEXT)",
 	)
 	require.NoError(t, err)
-	transaction := store.Transaction()
+	transaction := store.Transaction(t.Context())
 	savepointer, ok := transaction.(interface {
 		SavePoint(string) error
 		RollbackTo(string) error
 	})
 	require.True(t, ok)
-	queryer, err := store.dbFromTxn(transaction)
+	queryer, _, err := store.dbFromTxn(transaction)
 	require.NoError(t, err)
 	_, err = queryer.ExecContext(
 		context.Background(),
@@ -99,11 +99,11 @@ func TestSQLiteBulkModeKeepsPlannerAndWritersAvailable(t *testing.T) {
 	require.NoError(t, store.SetBulkLoadPragmas())
 	require.NoError(t, store.UpdatePlannerStats())
 
-	first := store.Transaction()
+	first := store.Transaction(t.Context())
 	secondStarted := make(chan struct{})
 	secondDone := make(chan error, 1)
 	go func() {
-		second := store.Transaction()
+		second := store.Transaction(t.Context())
 		close(secondStarted)
 		secondDone <- second.Commit()
 	}()
@@ -133,9 +133,9 @@ func TestSumUint64RowsPreservesFullRange(t *testing.T) {
 		"18446744073709551615",
 	)
 	require.NoError(t, err)
-	db, err := store.readDBFromTxn(nil)
+	db, ctx, err := store.readDBFromTxn(nil)
 	require.NoError(t, err)
-	value, err := sumUint64Rows(db, "SELECT amount FROM amounts")
+	value, err := sumUint64Rows(ctx, db, "SELECT amount FROM amounts")
 	require.NoError(t, err)
 	require.Equal(t, ^uint64(0), value)
 }
@@ -346,7 +346,7 @@ func TestImportPoolPersistsLeiosKeyRoundTrip(t *testing.T) {
 func TestTransactionRejectsUnsafeSavepoint(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
-	transaction := store.Transaction()
+	transaction := store.Transaction(t.Context())
 	savepointer := transaction.(interface {
 		SavePoint(string) error
 	})
@@ -358,8 +358,8 @@ func TestStoreRejectsForeignTransaction(t *testing.T) {
 	t.Parallel()
 	first := newTestStore(t)
 	second := newTestStore(t)
-	transaction := first.Transaction()
-	_, err := second.dbFromTxn(transaction)
+	transaction := first.Transaction(t.Context())
+	_, _, err := second.dbFromTxn(transaction)
 	require.ErrorContains(t, err, "another store")
 	require.NoError(t, transaction.Rollback())
 }
@@ -376,7 +376,7 @@ func TestStoreReadinessGatesTransactions(t *testing.T) {
 	require.NoError(t, err)
 	store, err := New(Config{WriteDB: db, Dialect: SQLiteDialect()})
 	require.NoError(t, err)
-	transaction := store.Transaction()
+	transaction := store.Transaction(t.Context())
 	require.ErrorContains(t, transaction.Commit(), "not ready")
 	require.NoError(t, store.Start(context.Background()))
 	require.True(t, store.Ready())

@@ -524,3 +524,61 @@ func TestCanonicalizeByronGenesisJSON(t *testing.T) {
 		t.Errorf("Canonicalization is not idempotent: %s != %s", hash, hash2nd)
 	}
 }
+
+// TestDeclaredVersusScheduledHardForkEpoch pins the distinction between the two
+// questions the TestXHardForkAtEpoch fields answer.
+//
+// preview ships TestShelleyHardForkAtEpoch: 0 with
+// ExperimentalHardForksEnabled: False, so a caller that needs to know whether
+// the network begins after Byron cannot use HardForkEpoch -- it reports nothing
+// scheduled, correctly, because cardano-node does not honour the override
+// without the flag. DeclaredHardForkEpoch reports what the file says.
+func TestDeclaredVersusScheduledHardForkEpoch(t *testing.T) {
+	t.Run("declared with the flag off", func(t *testing.T) {
+		cfg := &CardanoNodeConfig{
+			TestShelleyHardForkAtEpoch: new(uint64),
+		}
+
+		epoch, declared := cfg.DeclaredHardForkEpoch("shelley")
+		require.True(t, declared, "the declaration must be visible")
+		require.Equal(t, uint64(0), epoch)
+
+		_, scheduled := cfg.HardForkEpoch("shelley")
+		require.False(
+			t,
+			scheduled,
+			"nothing is scheduled without ExperimentalHardForksEnabled",
+		)
+	})
+
+	t.Run("declared with the flag on", func(t *testing.T) {
+		enabled := true
+		five := uint64(5)
+		cfg := &CardanoNodeConfig{
+			ExperimentalHardForksEnabled: &enabled,
+			TestShelleyHardForkAtEpoch:   &five,
+		}
+
+		epoch, declared := cfg.DeclaredHardForkEpoch("shelley")
+		require.True(t, declared)
+		require.Equal(t, uint64(5), epoch)
+
+		epoch, scheduled := cfg.HardForkEpoch("shelley")
+		require.True(t, scheduled)
+		require.Equal(t, uint64(5), epoch, "both must report the same epoch")
+	})
+
+	t.Run("absent", func(t *testing.T) {
+		cfg := &CardanoNodeConfig{}
+		_, declared := cfg.DeclaredHardForkEpoch("shelley")
+		require.False(t, declared)
+		_, scheduled := cfg.HardForkEpoch("shelley")
+		require.False(t, scheduled)
+	})
+
+	t.Run("unknown era", func(t *testing.T) {
+		cfg := &CardanoNodeConfig{}
+		_, declared := cfg.DeclaredHardForkEpoch("nosucherathere")
+		require.False(t, declared)
+	})
+}

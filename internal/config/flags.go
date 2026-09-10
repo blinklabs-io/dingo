@@ -168,6 +168,12 @@ var flagSpecs = []flagSpec{
 	),
 	uintFlag("PrivatePort", "private-port", "private/NtC port"),
 	uintFlag("MetricsPort", "metrics-port", "metrics port"),
+	stringFlag(
+		"DebugBindAddr",
+		"debug-bind-addr",
+		"",
+		"pprof bind address (wildcard exposure requires an explicit override)",
+	),
 	uintFlag("DebugPort", "debug-port", "debug pprof port (0 = disabled)"),
 	boolPtrFlag(
 		"PeerSharing",
@@ -319,10 +325,25 @@ var flagSpecs = []flagSpec{
 		"midnight-enabled",
 		`enable the Midnight indexer (requires storageMode "api")`,
 	),
+	boolFlag(
+		"Midnight.ServerEnabled",
+		"midnight-server-enabled",
+		`enable the Midnight gRPC server (requires storageMode "api")`,
+	),
+	boolFlag(
+		"Midnight.ReflectionEnabled",
+		"midnight-reflection-enabled",
+		"enable Midnight gRPC reflection",
+	),
+	boolFlag(
+		"Midnight.AllowInsecureRemote",
+		"midnight-allow-insecure-remote",
+		"allow plaintext Midnight gRPC on a non-loopback address",
+	),
 	uintFlag(
 		"Midnight.Port",
 		"midnight-port",
-		"Midnight gRPC port (0 disables gRPC server)",
+		"Midnight gRPC port (must be non-zero when the server is enabled)",
 	),
 	stringFlag(
 		"Midnight.Host",
@@ -412,7 +433,7 @@ var flagSpecs = []flagSpec{
 	intFlag(
 		"KoiosParity.AccountChunkMaxBytes",
 		"koios-parity-account-chunk-max-bytes",
-		"max encoded body size per /account_reward_history request (0 = package default, 32KiB)",
+		"max encoded body size per /account_reward_history request (0 = package default, 4KiB)",
 	),
 
 	// Peer governance
@@ -430,6 +451,11 @@ var flagSpecs = []flagSpec{
 		"TargetNumberOfActivePeers",
 		"target-active-peers",
 		"target number of active peers",
+	),
+	intFlag(
+		"TargetNumberOfRootPeers",
+		"target-root-peers",
+		"target number of root peers",
 	),
 	intFlag(
 		"ActivePeersTopologyQuota",

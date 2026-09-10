@@ -551,23 +551,32 @@ func TestExtractPParamsDataBabbageGovState(t *testing.T) {
 	pparams := testBabbagePParams()
 	pparamsData, err := cbor.Encode(pparams)
 	require.NoError(t, err)
+	previous := *pparams
+	previous.MinFeeA++
+	previousData, err := cbor.Encode(&previous)
+	require.NoError(t, err)
 
 	govStateData, err := cbor.Encode([]any{
 		uint64(1),
 		uint64(2),
 		cbor.RawMessage(pparamsData),
-		uint64(4),
+		cbor.RawMessage(previousData),
 	})
 	require.NoError(t, err)
 
-	got, err := extractPParamsData(EraBabbage, govStateData)
+	got, gotPrevious, err := extractPParamsData(EraBabbage, govStateData)
 	require.NoError(t, err)
 	require.Equal(t, pparamsData, []byte(got))
+	require.Equal(t, previousData, []byte(gotPrevious))
 }
 
 func TestExtractPParamsDataConwayGovStateMap(t *testing.T) {
 	pparams := testConwayPParams()
 	pparamsData, err := cbor.Encode(pparams)
+	require.NoError(t, err)
+	previous := *pparams
+	previous.MinFeeA++
+	previousData, err := cbor.Encode(&previous)
 	require.NoError(t, err)
 
 	govStateData, err := cbor.Encode(map[uint64]any{
@@ -575,13 +584,14 @@ func TestExtractPParamsDataConwayGovStateMap(t *testing.T) {
 		1: uint64(2),
 		2: uint64(3),
 		3: cbor.RawMessage(pparamsData),
-		4: uint64(5),
+		4: cbor.RawMessage(previousData),
 	})
 	require.NoError(t, err)
 
-	got, err := extractPParamsData(EraConway, govStateData)
+	got, gotPrevious, err := extractPParamsData(EraConway, govStateData)
 	require.NoError(t, err)
 	require.Equal(t, pparamsData, []byte(got))
+	require.Equal(t, previousData, []byte(gotPrevious))
 }
 
 func TestExtractPParamsDataDetectsEraSpecificType(t *testing.T) {
@@ -598,7 +608,7 @@ func TestExtractPParamsDataDetectsEraSpecificType(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	got, err := extractPParamsData(EraConway, govStateData)
+	got, _, err := extractPParamsData(EraConway, govStateData)
 	require.NoError(t, err)
 	require.Equal(t, conwayData, []byte(got))
 }

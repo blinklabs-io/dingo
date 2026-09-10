@@ -60,6 +60,23 @@ type transactionWriteState struct {
 	Outputs          int
 }
 
+func requireTransactionWriteAccount(
+	t *testing.T,
+	store transactionWriteStore,
+	credentialTag uint8,
+	stakingKey []byte,
+) *models.Account {
+	t.Helper()
+	account, err := store.GetAccountByCredential(
+		credentialTag, stakingKey, true, nil,
+	)
+	require.NoError(t, err)
+	if account == nil {
+		t.Fatal("account lookup returned nil without an error")
+	}
+	return account
+}
+
 func TestSharedSQLStoreTransactionWriteParity(t *testing.T) {
 	t.Parallel()
 	store, raw := newSharedSQLStore(t)
@@ -111,6 +128,279 @@ func TestSharedSQLStoreWithdrawalWitnessGate(t *testing.T) {
 			)
 			require.Equal(t, tc.wantWitnesses, state.WithdrawalProofs)
 			require.Equal(t, 1, state.WithdrawalDeltas)
+		})
+	}
+}
+
+func TestSharedSQLStoreWithdrawalRejectsExcessiveBalance(t *testing.T) {
+	t.Parallel()
+	store, raw := newSharedSQLStore(t)
+	stakeKey := bytes.Repeat([]byte{0xc1}, lcommon.AddressHashSize)
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
+		StakingKey: stakeKey,
+		Reward:     1234,
+		Active:     true,
+	}))
+	address, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		stakeKey,
+	)
+	require.NoError(t, err)
+	transactionHash := lcommon.Blake2b256{0xd1}
+	transaction := &mockTransaction{
+		hash:        transactionHash,
+		isValid:     true,
+		withdrawals: map[*lcommon.Address]*big.Int{&address: big.NewInt(1235)},
+	}
+	err = store.SetTransaction(
+		transaction,
+		ocommon.Point{Slot: 10, Hash: bytes.Repeat([]byte{0xd2}, 32)},
+		0,
+		nil,
+		false,
+		nil,
+	)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "reward withdrawal amount 1235 exceeds")
+
+	account := requireTransactionWriteAccount(t, store, 0, stakeKey)
+	require.Equal(t, uint64(1234), uint64(account.Reward))
+	var deltas int
+	require.NoError(t, raw.QueryRow(
+		"SELECT COUNT(*) FROM account_reward_delta",
+	).Scan(&deltas))
+	require.Zero(t, deltas)
+	var witnesses int
+	require.NoError(t, raw.QueryRow(
+		"SELECT COUNT(*) FROM account_withdrawal_witness",
+	).Scan(&witnesses))
+	require.Zero(t, witnesses)
+	stored, err := store.GetTransactionByHash(transactionHash.Bytes(), nil)
+	require.NoError(t, err)
+	require.Nil(t, stored)
+	excessiveHash := lcommon.Blake2b256{0xd3}
+	excessive := &mockTransaction{
+		hash:        excessiveHash,
+		isValid:     true,
+		withdrawals: map[*lcommon.Address]*big.Int{&address: big.NewInt(1236)},
+	}
+	err = store.SetTransaction(
+		excessive,
+		ocommon.Point{Slot: 11, Hash: bytes.Repeat([]byte{0xd4}, 32)},
+		0,
+		nil,
+		true,
+		nil,
+	)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "reward withdrawal amount 1236 exceeds")
+	account = requireTransactionWriteAccount(t, store, 0, stakeKey)
+	require.Equal(t, uint64(1234), uint64(account.Reward))
+}
+
+func TestSharedSQLStoreWithdrawalCredentialTagsRemainDistinct(t *testing.T) {
+	t.Parallel()
+	store, _ := newSharedSQLStore(t)
+	stakeKey := bytes.Repeat([]byte{0xe1}, lcommon.AddressHashSize)
+	for _, tag := range []uint8{0, 1} {
+		require.NoError(t, store.CreateAccount(nil, &models.Account{
+			StakingKey:    stakeKey,
+			CredentialTag: tag,
+			Reward:        17,
+			Active:        true,
+		}))
+	}
+	for i, tag := range []uint8{0, 1} {
+		addressType := uint8(lcommon.AddressTypeNoneKey)
+		if tag == 1 {
+			addressType = lcommon.AddressTypeNoneScript
+		}
+		address, err := lcommon.NewAddressFromParts(
+			addressType,
+			lcommon.AddressNetworkTestnet,
+			nil,
+			stakeKey,
+		)
+		require.NoError(t, err)
+		hash := lcommon.Blake2b256{byte(0xe2 + i)}
+		transaction := &mockTransaction{
+			hash:        hash,
+			isValid:     true,
+			withdrawals: map[*lcommon.Address]*big.Int{&address: big.NewInt(17)},
+		}
+		require.NoError(t, store.SetTransaction(
+			transaction,
+			ocommon.Point{Slot: uint64(20 + i), Hash: bytes.Repeat([]byte{byte(0xe4 + i)}, 32)},
+			0,
+			nil,
+			true,
+			nil,
+		))
+	}
+	for tag := range uint8(2) {
+		account := requireTransactionWriteAccount(t, store, tag, stakeKey)
+		require.Zero(t, account.Reward)
+	}
+}
+
+func TestSharedSQLStoreWithdrawalAllowsPartialBalance(t *testing.T) {
+	t.Parallel()
+	store, raw := newSharedSQLStore(t)
+	stakeKey := bytes.Repeat([]byte{0xf1}, lcommon.AddressHashSize)
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
+		StakingKey: stakeKey,
+		Reward:     1234,
+		Active:     true,
+	}))
+	address, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		stakeKey,
+	)
+	require.NoError(t, err)
+	zero := &mockTransaction{
+		hash:        lcommon.Blake2b256{0xf0},
+		isValid:     true,
+		withdrawals: map[*lcommon.Address]*big.Int{&address: big.NewInt(0)},
+	}
+	require.NoError(t, store.SetTransaction(
+		zero,
+		ocommon.Point{Slot: 20, Hash: bytes.Repeat([]byte{0xf6}, 32)},
+		0,
+		nil,
+		true,
+		nil,
+	))
+	account := requireTransactionWriteAccount(t, store, 0, stakeKey)
+	require.Equal(t, uint64(1234), uint64(account.Reward))
+	transactionHash := lcommon.Blake2b256{0xf2}
+	transaction := &mockTransaction{
+		hash:        transactionHash,
+		isValid:     true,
+		withdrawals: map[*lcommon.Address]*big.Int{&address: big.NewInt(234)},
+	}
+	point := ocommon.Point{Slot: 30, Hash: bytes.Repeat([]byte{0xf3}, 32)}
+	require.NoError(t, store.SetTransaction(
+		transaction, point, 0, nil, true, nil,
+	))
+	account = requireTransactionWriteAccount(t, store, 0, stakeKey)
+	require.Equal(t, uint64(1000), uint64(account.Reward))
+
+	// Replaying the same transaction must not debit the remaining balance again.
+	require.NoError(t, store.SetTransaction(
+		transaction, point, 0, nil, true, nil,
+	))
+	account = requireTransactionWriteAccount(t, store, 0, stakeKey)
+	require.Equal(t, uint64(1000), uint64(account.Reward))
+
+	excessive := &mockTransaction{
+		hash:        lcommon.Blake2b256{0xf4},
+		isValid:     true,
+		withdrawals: map[*lcommon.Address]*big.Int{&address: big.NewInt(1001)},
+	}
+	err = store.SetTransaction(
+		excessive,
+		ocommon.Point{Slot: 31, Hash: bytes.Repeat([]byte{0xf5}, 32)},
+		0,
+		nil,
+		true,
+		nil,
+	)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "exceeds account balance 1000")
+	account = requireTransactionWriteAccount(t, store, 0, stakeKey)
+	require.Equal(t, uint64(1000), uint64(account.Reward))
+
+	// Rollback restores the pre-withdrawal balance from the journal.
+	require.NoError(t, store.DeleteAccountRewardsAfterSlot(29, nil))
+	account = requireTransactionWriteAccount(t, store, 0, stakeKey)
+	require.Equal(t, uint64(1234), uint64(account.Reward))
+	var deltas int
+	require.NoError(t, raw.QueryRow(
+		"SELECT COUNT(*) FROM account_reward_delta",
+	).Scan(&deltas))
+	require.Zero(t, deltas)
+}
+
+func TestSharedSQLStoreZeroWithdrawalValidatesAccountAndBalance(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		reward     uint64
+		active     bool
+		create     bool
+		wantError  string
+		wantReward uint64
+	}{
+		{
+			name:       "registered nonzero balance",
+			reward:     12,
+			active:     true,
+			create:     true,
+			wantReward: 12,
+		},
+		{
+			name:       "registered zero balance",
+			active:     true,
+			create:     true,
+			wantReward: 0,
+		},
+		{
+			name:      "missing account",
+			wantError: "account not found",
+		},
+		{
+			name:       "inactive account",
+			reward:     12,
+			create:     true,
+			wantError:  "account not found",
+			wantReward: 12,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, _ := newSharedSQLStore(t)
+			stakeKey := bytes.Repeat([]byte{0xf7}, lcommon.AddressHashSize)
+			if tc.create {
+				require.NoError(t, store.CreateAccount(nil, &models.Account{
+					StakingKey: stakeKey,
+					Reward:     types.Uint64(tc.reward),
+					Active:     tc.active,
+				}))
+			}
+			address, err := lcommon.NewAddressFromParts(
+				lcommon.AddressTypeNoneKey,
+				lcommon.AddressNetworkTestnet,
+				nil,
+				stakeKey,
+			)
+			require.NoError(t, err)
+			transaction := &mockTransaction{
+				hash:        lcommon.Blake2b256{0xf8},
+				isValid:     true,
+				withdrawals: map[*lcommon.Address]*big.Int{&address: big.NewInt(0)},
+			}
+			err = store.SetTransaction(
+				transaction,
+				ocommon.Point{Slot: 40, Hash: bytes.Repeat([]byte{0xf9}, 32)},
+				0,
+				nil,
+				true,
+				nil,
+			)
+			if tc.wantError != "" {
+				require.Error(t, err)
+				require.ErrorContains(t, err, tc.wantError)
+			} else {
+				require.NoError(t, err)
+			}
+			if !tc.create {
+				return
+			}
+			account := requireTransactionWriteAccount(t, store, 0, stakeKey)
+			require.Equal(t, tc.wantReward, uint64(account.Reward))
 		})
 	}
 }
@@ -417,9 +707,7 @@ func exerciseTransactionWriteStore(
 	produced, err := store.GetUtxo(transactionHash.Bytes(), 0, nil)
 	require.NoError(t, err)
 	require.NotNil(t, produced)
-	account, err := store.GetAccountByCredential(0, stakeKey, true, nil)
-	require.NoError(t, err)
-	require.NotNil(t, account)
+	account := requireTransactionWriteAccount(t, store, 0, stakeKey)
 	deltas, witnesses := counts()
 	return transactionWriteState{
 		Slot:             stored.Slot,

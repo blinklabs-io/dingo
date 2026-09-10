@@ -16,7 +16,6 @@ package ledgerstate
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -25,59 +24,60 @@ import (
 func extractPParamsData(
 	eraIndex int,
 	govStateData cbor.RawMessage,
-) (cbor.RawMessage, error) {
+) (cbor.RawMessage, cbor.RawMessage, error) {
 	if len(govStateData) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	govFields, err := decodeRawElements(govStateData)
 	if err != nil {
-		return nil, fmt.Errorf("decoding GovState: %w", err)
+		return nil, nil, fmt.Errorf("decoding GovState: %w", err)
 	}
 
-	tried := make(map[int]struct{}, len(govFields))
-	var errs []string
-	for _, idx := range pparamsCandidateIndexes(eraIndex, len(govFields)) {
-		if idx < 0 || idx >= len(govFields) || len(govFields[idx]) == 0 {
-			continue
-		}
-		tried[idx] = struct{}{}
-		if err := validatePParamsData(eraIndex, govFields[idx]); err == nil {
-			return govFields[idx], nil
-		} else {
-			errs = append(errs, fmt.Sprintf("field %d: %v", idx, err))
-		}
-	}
-	for idx, field := range govFields {
-		if len(field) == 0 {
-			continue
-		}
-		if _, ok := tried[idx]; ok {
-			continue
-		}
-		if err := validatePParamsData(eraIndex, field); err == nil {
-			return field, nil
-		} else {
-			errs = append(errs, fmt.Sprintf("field %d: %v", idx, err))
-		}
-	}
-	if len(errs) == 0 {
-		return nil, nil
-	}
-	return nil, fmt.Errorf(
-		"detecting %s protocol parameters: %s",
-		EraName(eraIndex),
-		strings.Join(errs, "; "),
+	currentIndex, previousIndex := pparamsFieldIndexes(eraIndex)
+	current, err := protocolParametersField(
+		eraIndex, govFields, currentIndex, "current",
 	)
+	if err != nil {
+		return nil, nil, err
+	}
+	var previous cbor.RawMessage
+	if previousIndex >= 0 && previousIndex < len(govFields) {
+		previous = govFields[previousIndex]
+	}
+	// Do not validate the previous payload as though it belonged to the
+	// snapshot's era. At a hard fork GovState can carry a previous-epoch
+	// value while the snapshot itself is already in the new era. The import
+	// phase has the full era telescope and validates this raw payload against
+	// the actual epoch whose row it would populate.
+	return current, previous, nil
 }
 
-func pparamsCandidateIndexes(eraIndex, fieldCount int) []int {
-	candidates := make([]int, 0, min(fieldCount, 4))
+func pparamsFieldIndexes(eraIndex int) (current int, previous int) {
 	if eraIndex >= EraConway {
-		candidates = append(candidates, 3, 4, 5, 2)
-	} else {
-		candidates = append(candidates, 2, 3, 4, 5)
+		return 3, 4
 	}
-	return candidates
+	return 2, 3
+}
+
+func protocolParametersField(
+	eraIndex int,
+	fields [][]byte,
+	index int,
+	name string,
+) (cbor.RawMessage, error) {
+	if index < 0 || index >= len(fields) || len(fields[index]) == 0 {
+		return nil, nil
+	}
+	if err := validatePParamsData(eraIndex, fields[index]); err != nil {
+		return nil, fmt.Errorf(
+			"validating %s %s protocol parameters in GovState field %d: %w",
+			name,
+			EraName(eraIndex),
+			index,
+			err,
+		)
+	}
+	return fields[index], nil
 }
 
 func validatePParamsData(eraIndex int, data []byte) error {

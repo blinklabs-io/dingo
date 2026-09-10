@@ -310,8 +310,8 @@ func ValidateTxAlonzo(
 				redeemer.Data,
 				sc.ToPlutusData(),
 				lcommon.ExUnits{
-					Steps:  restrictiveEnormousBudget,
-					Memory: restrictiveEnormousBudget,
+					Steps:  tmpPparams.MaxTxExUnits.Steps,
+					Memory: tmpPparams.MaxTxExUnits.Memory,
 				},
 				evalContext,
 			)

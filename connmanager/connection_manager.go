@@ -60,6 +60,7 @@ type ConnectionManager struct {
 	peerConnectivity map[string]peerConnectionSummary
 	metrics          *connectionManagerMetrics
 	listeners        []net.Listener
+	pendingConns     map[net.Conn]struct{}
 	config           ConnectionManagerConfig
 	// resolveDeferredOnce guards the one-time evaluation of
 	// ListenersProvider/OutboundConnOptsProvider. Using sync.Once also
@@ -176,6 +177,7 @@ func NewConnectionManager(cfg ConnectionManagerConfig) *ConnectionManager {
 		),
 		inboundPeerAddrs: make(map[string]int),
 		peerConnectivity: make(map[string]peerConnectionSummary),
+		pendingConns:     make(map[net.Conn]struct{}),
 		ipConns:          make(map[string]int),
 	}
 	if cfg.PromRegistry != nil {
@@ -557,6 +559,11 @@ func (c *ConnectionManager) stopListeners() {
 		}
 	}
 	c.listeners = nil
+	pendingConns := make([]net.Conn, 0, len(c.pendingConns))
+	for conn := range c.pendingConns {
+		pendingConns = append(pendingConns, conn)
+	}
+	clear(c.pendingConns)
 	c.listenersMutex.Unlock()
 
 	for _, listener := range listeners {
@@ -566,6 +573,13 @@ func (c *ConnectionManager) stopListeners() {
 				"error", err,
 			)
 		}
+	}
+	for _, conn := range pendingConns {
+		closeConnAndLog(
+			c.config.Logger,
+			conn,
+			"error closing pending inbound connection",
+		)
 	}
 }
 

@@ -11,34 +11,33 @@
 package mithril
 
 import (
+	"fmt"
 	"os"
-	"path/filepath"
 
 	"golang.org/x/sys/windows"
 )
 
-// MoveFile refuses an existing destination, unlike os.Root.Rename on
-// Windows, which uses MoveFileEx with replacement semantics. Exclusive
-// publication must never replace a non-directory destination implicitly.
+// Exclusive publication must never replace a non-directory destination
+// implicitly, so this refuses an existing destination the way MoveFile does,
+// unlike os.Root.Rename on Windows, which uses MoveFileEx with replacement
+// semantics.
 //
-// Both names are resolved the way removeExtractedFile resolves its target,
-// and for the same reason: MoveFile addresses paths, so handing it a path
-// rebuilt from root.Name() lets it follow a reparse point substituted for any
-// component after extraction's symlink checks ran. Each component is instead
-// walked through its parent's handle and confirmed to be the entry the name
-// denotes (openVerifiedParent), and those handles are held across the move.
+// Both endpoints are resolved the way removeExtractedFile resolves its
+// target, and for the same reason: a path handed to the kernel to resolve on
+// its own would let it follow a reparse point substituted for any component
+// after extraction's symlink checks ran. Each component is instead walked
+// through its parent's handle and confirmed to be the entry the name denotes
+// (openVerifiedParent), and those handles are held across the move.
 //
-// What that does and does not buy is worth stating exactly, because an earlier
-// version of this comment overstated it. The walk rejects a symlink or reparse
-// point that is already in place when it runs, which is the planted-component
-// case. It does not make the parents unswappable: os.Root opens every handle
-// with FILE_SHARE_DELETE (see internal/syscall/windows/at_windows.go), so
-// holding them does not stop another process renaming or deleting a verified
-// directory, and MoveFile resolves the parents' own names a second time.
-//
-// The race between the walk and the call therefore remains. Closing it needs
-// NtSetInformationFile with FileRenameInformation against the parent handle,
-// which is genuinely handle-relative; see issue #3228.
+// The rename itself is then handle-relative rather than path-based:
+// NtSetInformationFile's FileRenameInformation renames the object an
+// already-open handle refers to, naming the destination by its verified
+// parent's own handle and a single component rather than a path the kernel
+// resolves again — see extract_handlerelative_windows.go. That closes the gap
+// an earlier version of this comment described and issue #3228 tracked: this
+// no longer resolves either parent's name a second time, so a directory
+// renamed or deleted out from under a held parent handle no longer redirects
+// the move.
 func renameExtractedDirectory(root *os.Root, oldname, newname string) error {
 	oldParent, oldBase, releaseOld, err := openVerifiedParent(root, oldname)
 	if err != nil {
@@ -51,17 +50,25 @@ func renameExtractedDirectory(root *os.Root, oldname, newname string) error {
 	}
 	defer releaseNew()
 
-	oldpath, err := windows.UTF16PtrFromString(
-		filepath.Join(oldParent.Name(), oldBase),
-	)
+	oldDirFile, oldDir, err := rootDirHandle(oldParent)
 	if err != nil {
-		return err
+		return fmt.Errorf("opening rename source directory: %w", err)
 	}
-	newpath, err := windows.UTF16PtrFromString(
-		filepath.Join(newParent.Name(), newBase),
-	)
+	defer oldDirFile.Close()
+	newDirFile, newDir, err := rootDirHandle(newParent)
 	if err != nil {
-		return err
+		return fmt.Errorf("opening rename destination directory: %w", err)
 	}
-	return windows.MoveFile(oldpath, newpath)
+	defer newDirFile.Close()
+
+	source, err := openRelativeForRename(oldDir, oldBase)
+	if err != nil {
+		return &os.LinkError{Op: "rename", Old: oldname, New: newname, Err: err}
+	}
+	defer func() { _ = windows.CloseHandle(source) }()
+
+	if err := renameRelativeHandle(source, newDir, newBase, false); err != nil {
+		return &os.LinkError{Op: "rename", Old: oldname, New: newname, Err: err}
+	}
+	return nil
 }

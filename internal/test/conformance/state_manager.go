@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/ouroboros-mock/conformance"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/blinklabs-io/plutigo/data"
 	utxorpc "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 )
@@ -92,7 +93,8 @@ type DingoStateManager struct {
 	utxos map[string]common.Utxo
 
 	// stakeRegistrations tracks registered stake credentials and their balances
-	stakeRegistrations map[common.Blake2b224]uint64
+	// by full credential identity.
+	stakeRegistrations map[mockledger.RewardAccountKey]uint64
 
 	// poolRegistrations tracks registered pools
 	poolRegistrations map[common.Blake2b224]bool
@@ -125,7 +127,7 @@ func NewDingoStateManager() (*DingoStateManager, error) {
 		db:                   &mirrorDB{},
 		govState:             conformance.NewGovernanceState(),
 		utxos:                make(map[string]common.Utxo),
-		stakeRegistrations:   make(map[common.Blake2b224]uint64),
+		stakeRegistrations:   make(map[mockledger.RewardAccountKey]uint64),
 		poolRegistrations:    make(map[common.Blake2b224]bool),
 		drepRegistrations:    make(map[common.Blake2b224]bool),
 		committeeMembers:     make(map[common.Blake2b224]uint64),
@@ -145,7 +147,7 @@ func (m *DingoStateManager) LoadInitialState(
 
 	// Clear existing state
 	m.utxos = make(map[string]common.Utxo)
-	m.stakeRegistrations = make(map[common.Blake2b224]uint64)
+	m.stakeRegistrations = make(map[mockledger.RewardAccountKey]uint64)
 	m.poolRegistrations = make(map[common.Blake2b224]bool)
 	m.drepRegistrations = make(map[common.Blake2b224]bool)
 	m.committeeMembers = make(map[common.Blake2b224]uint64)
@@ -158,22 +160,42 @@ func (m *DingoStateManager) LoadInitialState(
 		return fmt.Errorf("failed to clear database: %w", err)
 	}
 
-	// Load stake registrations with reward balances
-	for hash, registered := range state.StakeRegistrations {
-		if registered {
-			balance := state.RewardAccounts[hash]
-			m.stakeRegistrations[hash] = balance
-
-			// Insert into database
-			account := models.Account{
-				StakingKey: hash[:],
-				AddedSlot:  0,
-				Active:     true,
-				Reward:     types.Uint64(balance),
+	// Load stake registrations with reward balances. Prefer full credential
+	// identity. Legacy hash-only registrations represent key credentials.
+	if len(state.StakeRegistrationsByCredential) > 0 {
+		for credential, registered := range state.StakeRegistrationsByCredential {
+			if !registered {
+				continue
 			}
-			if err := m.db.Create(&account).Error; err != nil {
-				return fmt.Errorf("failed to insert account: %w", err)
+			balance, exists := state.RewardAccountBalances[credential]
+			if !exists {
+				balance = state.RewardAccounts[credential.Credential]
 			}
+			m.stakeRegistrations[credential] = balance
+		}
+	} else if len(state.RewardAccountBalances) > 0 {
+		maps.Copy(m.stakeRegistrations, state.RewardAccountBalances)
+	} else {
+		for hash, registered := range state.StakeRegistrations {
+			if !registered {
+				continue
+			}
+			m.stakeRegistrations[mockledger.RewardAccountKey{
+				CredType:   common.CredentialTypeAddrKeyHash,
+				Credential: hash,
+			}] = state.RewardAccounts[hash]
+		}
+	}
+	for credential, balance := range m.stakeRegistrations {
+		account := models.Account{
+			StakingKey:    credential.Credential[:],
+			CredentialTag: conformanceCredentialTag(credential.AsCredential()),
+			AddedSlot:     0,
+			Active:        true,
+			Reward:        types.Uint64(balance),
+		}
+		if err := m.db.Create(&account).Error; err != nil {
+			return fmt.Errorf("failed to insert account: %w", err)
 		}
 	}
 
@@ -238,6 +260,7 @@ func (m *DingoStateManager) LoadInitialState(
 	// Load governance state
 	m.govState = conformance.NewGovernanceState()
 	m.govState.LoadFromParsedState(state)
+	m.syncRewardBalanceMirrors()
 
 	// Insert governance proposals into database
 	for id, proposal := range state.Proposals {
@@ -490,8 +513,7 @@ func (m *DingoStateManager) processCertificate(
 		if regCert, ok := cert.(*common.StakeRegistrationCertificate); ok {
 			stakeCredential := regCert.StakeCredential
 			credential := stakeCredential.Credential
-			m.stakeRegistrations[credential] = 0
-			m.govState.RegisterStake(credential)
+			m.registerStakeCredential(stakeCredential)
 			credentialTag := conformanceCredentialTag(stakeCredential)
 
 			// Insert into database
@@ -508,8 +530,7 @@ func (m *DingoStateManager) processCertificate(
 		if regCert, ok := cert.(*common.RegistrationCertificate); ok {
 			stakeCredential := regCert.StakeCredential
 			credential := stakeCredential.Credential
-			m.stakeRegistrations[credential] = 0
-			m.govState.RegisterStake(credential)
+			m.registerStakeCredential(stakeCredential)
 			credentialTag := conformanceCredentialTag(stakeCredential)
 
 			// Insert into database
@@ -526,8 +547,7 @@ func (m *DingoStateManager) processCertificate(
 		if regCert, ok := cert.(*common.StakeRegistrationDelegationCertificate); ok {
 			stakeCredential := regCert.StakeCredential
 			credential := stakeCredential.Credential
-			m.stakeRegistrations[credential] = 0
-			m.govState.RegisterStake(credential)
+			m.registerStakeCredential(stakeCredential)
 			credentialTag := conformanceCredentialTag(stakeCredential)
 
 			// Insert into database
@@ -544,9 +564,8 @@ func (m *DingoStateManager) processCertificate(
 		if regCert, ok := cert.(*common.VoteRegistrationDelegationCertificate); ok {
 			stakeCredential := regCert.StakeCredential
 			credential := stakeCredential.Credential
-			m.stakeRegistrations[credential] = 0
-			m.govState.RegisterStake(credential)
-			m.govState.DRepDelegations[credential] = regCert.Drep
+			m.registerStakeCredential(stakeCredential)
+			m.govState.SetDRepDelegation(stakeCredential, regCert.Drep)
 			credentialTag := conformanceCredentialTag(stakeCredential)
 
 			// Insert into database
@@ -563,9 +582,8 @@ func (m *DingoStateManager) processCertificate(
 		if regCert, ok := cert.(*common.StakeVoteRegistrationDelegationCertificate); ok {
 			stakeCredential := regCert.StakeCredential
 			credential := stakeCredential.Credential
-			m.stakeRegistrations[credential] = 0
-			m.govState.RegisterStake(credential)
-			m.govState.DRepDelegations[credential] = regCert.Drep
+			m.registerStakeCredential(stakeCredential)
+			m.govState.SetDRepDelegation(stakeCredential, regCert.Drep)
 			credentialTag := conformanceCredentialTag(stakeCredential)
 
 			// Insert into database
@@ -580,23 +598,25 @@ func (m *DingoStateManager) processCertificate(
 
 	case common.CertificateTypeVoteDelegation:
 		if voteCert, ok := cert.(*common.VoteDelegationCertificate); ok {
-			credential := voteCert.StakeCredential.Credential
-			m.govState.DRepDelegations[credential] = voteCert.Drep
+			m.govState.SetDRepDelegation(
+				voteCert.StakeCredential,
+				voteCert.Drep,
+			)
 		}
 
 	case common.CertificateTypeStakeVoteDelegation:
 		if voteCert, ok := cert.(*common.StakeVoteDelegationCertificate); ok {
-			credential := voteCert.StakeCredential.Credential
-			m.govState.DRepDelegations[credential] = voteCert.Drep
+			m.govState.SetDRepDelegation(
+				voteCert.StakeCredential,
+				voteCert.Drep,
+			)
 		}
 
 	case common.CertificateTypeStakeDeregistration:
 		if deregCert, ok := cert.(*common.StakeDeregistrationCertificate); ok {
 			stakeCredential := deregCert.StakeCredential
 			credential := stakeCredential.Credential
-			delete(m.stakeRegistrations, credential)
-			delete(m.govState.DRepDelegations, credential)
-			m.govState.DeregisterStake(credential)
+			m.deregisterStakeCredential(stakeCredential)
 			credentialTag := conformanceCredentialTag(stakeCredential)
 
 			// Update database
@@ -613,9 +633,7 @@ func (m *DingoStateManager) processCertificate(
 		if deregCert, ok := cert.(*common.DeregistrationCertificate); ok {
 			stakeCredential := deregCert.StakeCredential
 			credential := stakeCredential.Credential
-			delete(m.stakeRegistrations, credential)
-			delete(m.govState.DRepDelegations, credential)
-			m.govState.DeregisterStake(credential)
+			m.deregisterStakeCredential(stakeCredential)
 			credentialTag := conformanceCredentialTag(stakeCredential)
 
 			// Update database
@@ -735,6 +753,20 @@ func (m *DingoStateManager) processCertificate(
 	default:
 		// Other certificate types not relevant for state tracking
 	}
+}
+
+func (m *DingoStateManager) registerStakeCredential(
+	credential common.Credential,
+) {
+	m.stakeRegistrations[mockledger.NewRewardAccountKey(credential)] = 0
+	m.govState.RegisterStakeCredential(credential)
+}
+
+func (m *DingoStateManager) deregisterStakeCredential(
+	credential common.Credential,
+) {
+	delete(m.stakeRegistrations, mockledger.NewRewardAccountKey(credential))
+	m.govState.DeregisterStakeCredential(credential)
 }
 
 // ProcessEpochBoundary implements conformance.StateManager.ProcessEpochBoundary.
@@ -994,21 +1026,66 @@ func (m *DingoStateManager) GetGovernanceState() *conformance.GovernanceState {
 func (m *DingoStateManager) SetRewardBalances(
 	balances map[common.Blake2b224]uint64,
 ) {
-	for cred, balance := range balances {
-		if _, exists := m.stakeRegistrations[cred]; exists {
-			m.stakeRegistrations[cred] = balance
-			m.db.Model(&models.Account{}).
-				Where("staking_key = ?", cred[:]).
-				Update("reward", types.Uint64(balance))
+	for credential := range m.stakeRegistrations {
+		balance, exists := balances[credential.Credential]
+		if !exists {
+			continue
+		}
+		m.setRewardAccountBalance(credential, balance)
+	}
+	m.syncRewardBalanceMirrors()
+}
+
+// SetRewardAccountBalances implements conformance.RewardAccountBalanceSetter.
+// It updates registered accounts by full credential identity without creating
+// or removing registrations.
+func (m *DingoStateManager) SetRewardAccountBalances(
+	balances map[mockledger.RewardAccountKey]uint64,
+) {
+	for credential := range m.stakeRegistrations {
+		balance, exists := balances[credential]
+		if !exists {
+			continue
+		}
+		m.setRewardAccountBalance(credential, balance)
+	}
+	m.syncRewardBalanceMirrors()
+}
+
+func (m *DingoStateManager) setRewardAccountBalance(
+	credential mockledger.RewardAccountKey,
+	balance uint64,
+) {
+	m.stakeRegistrations[credential] = balance
+	m.db.Model(&models.Account{}).
+		Where(
+			"credential_tag = ? AND staking_key = ?",
+			conformanceCredentialTag(credential.AsCredential()),
+			credential.Credential[:],
+		).
+		Update("reward", types.Uint64(balance))
+}
+
+func (m *DingoStateManager) syncRewardBalanceMirrors() {
+	if m.govState == nil {
+		return
+	}
+	m.govState.RewardAccountBalances = maps.Clone(m.stakeRegistrations)
+	m.govState.RewardAccounts = rewardBalancesByHash(m.stakeRegistrations)
+}
+
+func rewardBalancesByHash(
+	balances map[mockledger.RewardAccountKey]uint64,
+) map[common.Blake2b224]uint64 {
+	result := make(map[common.Blake2b224]uint64, len(balances))
+	for credential, balance := range balances {
+		_, exists := result[credential.Credential]
+		if !exists ||
+			credential.CredType == common.CredentialTypeAddrKeyHash {
+			result[credential.Credential] = balance
 		}
 	}
-	if m.govState != nil {
-		for cred, balance := range balances {
-			if m.govState.StakeRegistrations[cred] {
-				m.govState.RewardAccounts[cred] = balance
-			}
-		}
-	}
+	return result
 }
 
 // GetProtocolParameters implements conformance.StateManager.GetProtocolParameters.
@@ -1021,7 +1098,7 @@ func (m *DingoStateManager) Reset() error {
 	m.protocolParams = nil
 	m.currentEpoch = 0
 	m.utxos = make(map[string]common.Utxo)
-	m.stakeRegistrations = make(map[common.Blake2b224]uint64)
+	m.stakeRegistrations = make(map[mockledger.RewardAccountKey]uint64)
 	m.poolRegistrations = make(map[common.Blake2b224]bool)
 	m.drepRegistrations = make(map[common.Blake2b224]bool)
 	m.committeeMembers = make(map[common.Blake2b224]uint64)

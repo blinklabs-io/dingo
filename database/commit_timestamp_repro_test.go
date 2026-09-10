@@ -59,7 +59,7 @@ func TestCheckCommitTimestamp_MetadataOnly(t *testing.T) {
 	require.NoError(t, err)
 	dataDir := db.config.DataDir
 
-	metaTxn := db.Metadata().Transaction()
+	metaTxn := db.Metadata().Transaction(t.Context())
 	require.NoError(t, db.Metadata().SetCommitTimestamp(123456789, metaTxn))
 	require.NoError(t, metaTxn.Commit())
 	require.NoError(t, closeTestDatabase(db))

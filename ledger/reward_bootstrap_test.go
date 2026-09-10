@@ -24,13 +24,27 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestStakeRewardEpochsForInitialApplication pins the two bootstrap rounds.
+// cardano-ledger applies monetary expansion and the treasury tax at every
+// boundary from the first Shelley-era epoch onward, so a network that declares
+// Shelley at genesis has a round at the boundary into epoch 1 reading the
+// slot-0 pots, and another into epoch 2 reading epoch 1's. Both distribute
+// nothing. Byron-prefix networks are suppressed by applyStakeRewards' Byron
+// performance-epoch guard, not by this helper.
 func TestStakeRewardEpochsForInitialApplication(t *testing.T) {
-	for _, epoch := range []uint64{0, 1} {
-		_, ok := stakeRewardEpochsForApplication(epoch)
-		require.False(t, ok, "epoch %d must not apply stake rewards", epoch)
-	}
+	_, ok := stakeRewardEpochsForApplication(0)
+	require.False(t, ok, "epoch 0 is not a boundary and applies no rewards")
 
-	epochs, ok := stakeRewardEpochsForApplication(2)
+	epochs, ok := stakeRewardEpochsForApplication(1)
+	require.True(t, ok)
+	require.Equal(t, stakeRewardEpochs{
+		snapshot:    0,
+		performance: 0,
+		pots:        0,
+		bootstrap:   true,
+	}, epochs)
+
+	epochs, ok = stakeRewardEpochsForApplication(2)
 	require.True(t, ok)
 	require.Equal(t, stakeRewardEpochs{
 		snapshot:    0,

@@ -49,14 +49,16 @@ import (
 //     maxMapEntries (10,000,000 entries, matching gouroboros's map
 //     limit above) for both definite- and indefinite-length maps.
 //   - parseUTxOsStreamingWithProgress (UTxO map streaming decode):
-//     for the definite-length map, the DecodeMapHeader-reported
-//     count is checked against the same maxMapEntries cap
-//     (checkUTxOMapEntryCount) before entries are streamed, so a
-//     corrupted or adversarial header cannot drive an unbounded
-//     loop. The indefinite-length map has no header count to check
-//     up front, so parseIndefiniteUTxOMapWithProgress instead
-//     enforces the same cap as a running check
-//     (checkUTxOMapRunningEntryCount) against every streamed entry.
+//     UTxO maps have their own maxUTxOMapEntries (100,000,000) cap
+//     because valid chain state can exceed the generic 10,000,000-map
+//     limit. For the definite-length map, the DecodeMapHeader-reported
+//     count is checked against that cap (checkUTxOMapEntryCount)
+//     before entries are streamed, so a corrupted or adversarial
+//     header cannot drive an unbounded loop. The indefinite-length
+//     map has no header count to check up front, so
+//     parseIndefiniteUTxOMapWithProgress instead enforces the UTxO cap
+//     as a running check (checkUTxOMapRunningEntryCount) against every
+//     streamed entry.
 //     Unlike the definite-length path, the running check can only
 //     reject after entries below the cap have already been streamed
 //     to importUTxOs's batch callback and committed to the database.
@@ -87,9 +89,9 @@ import (
 //     traversal): recursion capped at MaxTelescopeDepth (16); real
 //     data has at most 7 Cardano eras (Byron through Conway).
 //
-// If any of these limits is ever raised, update this comment and
-// DATABASE.md's CBOR/offset encoding notes together, and extend the
-// regression tests in cbor_decode_test.go to cover the new boundary.
+// If any of these limits is ever raised, update this comment and the
+// corresponding architecture policy, and extend the regression tests in
+// cbor_decode_test.go to cover the new boundary.
 
 // decodeRawArray decodes a CBOR array, returning elements as raw
 // byte slices. Each element's raw CBOR is preserved for deferred

@@ -210,6 +210,7 @@ func TestFetchLeiosEbTxsBatchedUntilPastDeadline(t *testing.T) {
 		requester,
 		point,
 		200,
+		nil,
 		time.Now().Add(-time.Second),
 	)
 	require.Error(t, err)
@@ -291,6 +292,7 @@ func TestFetchLeiosEbTxsBatchedUntilAbandonsSlowRelay(t *testing.T) {
 		requester,
 		point,
 		txCount,
+		nil,
 		time.Now().Add(60*time.Millisecond),
 	)
 	require.Error(t, err)
@@ -318,6 +320,7 @@ func TestFetchLeiosEbTxsBatchedNoDeadlineStillCompletes(t *testing.T) {
 		&cappingBlockTxsRequester{maxPerResp: 50, includeBitmaps: true},
 		point,
 		200,
+		nil,
 		time.Time{}, // zero deadline: no per-attempt bound
 	)
 	require.NoError(t, err)

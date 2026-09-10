@@ -135,9 +135,9 @@ func (ls *LedgerState) emitRollbackTransactionEvents(
 // the shared worker pool reorders (blinklabs-io/dingo#2287).
 //
 // This stays asynchronous rather than becoming a PublishBlocking like
-// publishBlockEvent: the forward-path caller runs inside the block-apply
-// database transaction, so parking it on subscriber backpressure would hold
-// that transaction open.
+// publishBlockEvent: the forward path calls it from a database AfterCommit
+// callback. Enqueueing here keeps subscriber work out of Commit while still
+// ensuring the transaction is durable before any Apply becomes visible.
 func (ls *LedgerState) publishTransactionEvent(evt TransactionEvent) {
 	if ls.config.EventBus == nil {
 		return

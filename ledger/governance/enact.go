@@ -200,6 +200,17 @@ func decodeGovActionForPParams(
 	return decodeGovAction(data, actionType)
 }
 
+// DecodeGovActionForPParams re-hydrates a persisted governance action using
+// the active protocol parameters to select the era-specific parameter-change
+// representation.
+func DecodeGovActionForPParams(
+	data []byte,
+	actionType uint8,
+	pparams lcommon.ProtocolParameters,
+) (lcommon.GovAction, error) {
+	return decodeGovActionForPParams(data, actionType, pparams)
+}
+
 // applyTreasuryWithdrawal debits the treasury by the sum of the
 // per-address amounts, credits registered destination reward accounts,
 // and leaves unclaimed withdrawals in the treasury. proposal identifies the

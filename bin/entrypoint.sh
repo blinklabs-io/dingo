@@ -66,6 +66,94 @@ warn() { echo "[entrypoint] WARNING: $*" >&2; }
 die()  { echo "[entrypoint] ERROR: $*" >&2; exit 1; }
 
 # --------------------------------------------------------------------------- #
+# Managed child and signal handling
+# --------------------------------------------------------------------------- #
+
+MANAGED_CHILD_PID=""
+PENDING_SIGNAL=""
+PENDING_SIGNAL_EXIT_CODE=""
+SIGNAL_FORWARDING="false"
+MANAGED_WAIT_INTERRUPTED="false"
+
+forward_signal() {
+  local signal_name="$1"
+  local signal_exit_code="$2"
+
+  # A trap can run between starting a background child and assigning $!.
+  # Retain that signal so run_managed_dingo either exits before launch or
+  # forwards it immediately after publishing the child PID.
+  if [[ -z "${MANAGED_CHILD_PID}" ]]; then
+    PENDING_SIGNAL="${signal_name}"
+    PENDING_SIGNAL_EXIT_CODE="${signal_exit_code}"
+    return 0
+  fi
+
+  # A second signal can interrupt the wait in the first handler. Forward it
+  # too, then let the first handler re-wait for the child's actual status.
+  if [[ "${SIGNAL_FORWARDING}" == "true" ]]; then
+    if kill -s "${signal_name}" "${MANAGED_CHILD_PID}" 2>/dev/null; then
+      MANAGED_WAIT_INTERRUPTED="true"
+    fi
+    return 0
+  fi
+
+  SIGNAL_FORWARDING="true"
+  if ! kill -s "${signal_name}" "${MANAGED_CHILD_PID}" 2>/dev/null; then
+    # The ordinary wait may already have reaped the child. Leave its captured
+    # status intact instead of replacing it with a second wait's status 127.
+    SIGNAL_FORWARDING="false"
+    return 0
+  fi
+  log "Received ${signal_name}, forwarding to dingo (PID ${MANAGED_CHILD_PID})..."
+
+  local child_exit_code
+  while true; do
+    MANAGED_WAIT_INTERRUPTED="false"
+    if wait "${MANAGED_CHILD_PID}"; then
+      child_exit_code=0
+    else
+      child_exit_code=$?
+    fi
+    if [[ "${MANAGED_WAIT_INTERRUPTED}" != "true" ]]; then
+      break
+    fi
+  done
+  MANAGED_CHILD_PID=""
+  exit "${child_exit_code}"
+}
+
+run_managed_dingo() {
+  local output_file="$1"
+  shift
+
+  # A shutdown request received before a child exists must not start new work.
+  if [[ -n "${PENDING_SIGNAL}" ]]; then
+    exit "${PENDING_SIGNAL_EXIT_CODE}"
+  fi
+
+  if [[ -n "${output_file}" ]]; then
+    dingo "$@" >>"${output_file}" 2>&1 &
+  else
+    dingo "$@" &
+  fi
+  MANAGED_CHILD_PID=$!
+
+  # Close the start/$! assignment race described in forward_signal.
+  if [[ -n "${PENDING_SIGNAL}" ]]; then
+    forward_signal "${PENDING_SIGNAL}" "${PENDING_SIGNAL_EXIT_CODE}"
+  fi
+
+  local child_exit_code
+  if wait "${MANAGED_CHILD_PID}"; then
+    child_exit_code=0
+  else
+    child_exit_code=$?
+  fi
+  MANAGED_CHILD_PID=""
+  return "${child_exit_code}"
+}
+
+# --------------------------------------------------------------------------- #
 # Configuration validation
 # --------------------------------------------------------------------------- #
 
@@ -175,10 +263,12 @@ bootstrap_if_needed() {
     fi
     sync_args+=("mithril" "sync")
 
-    dingo "${sync_args[@]}"
-
-    log "Mithril bootstrap complete"
-    return 0
+    if run_managed_dingo "" "${sync_args[@]}"; then
+      log "Mithril bootstrap complete"
+      return 0
+    else
+      return $?
+    fi
   fi
 
   if [[ -n "${RESTORE_SNAPSHOT:-}" ]] && has_incomplete_sync; then
@@ -190,28 +280,17 @@ bootstrap_if_needed() {
     fi
     sync_args+=("mithril" "sync")
 
-    dingo "${sync_args[@]}"
-
-    log "Mithril sync resume complete"
-    return 0
+    if run_managed_dingo "" "${sync_args[@]}"; then
+      log "Mithril sync resume complete"
+      return 0
+    else
+      return $?
+    fi
   fi
 
   if [[ -n "${RESTORE_SNAPSHOT:-}" ]] && ! is_first_run; then
     log "Database already exists, skipping Mithril snapshot bootstrap"
   fi
-}
-
-# --------------------------------------------------------------------------- #
-# Signal handling for graceful shutdown
-# --------------------------------------------------------------------------- #
-
-cleanup() {
-  if [[ -n "${DINGO_PID:-}" ]]; then
-    log "Received shutdown signal, forwarding to dingo (PID ${DINGO_PID})..."
-    kill -TERM "${DINGO_PID}" 2>/dev/null || true
-    wait "${DINGO_PID}" 2>/dev/null || true
-  fi
-  exit 0
 }
 
 # --------------------------------------------------------------------------- #
@@ -224,6 +303,10 @@ mkdir -p "$(dirname "${DINGO_SOCKET_PATH}")"
 # --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
+
+# Install the handlers before a first-run or resumed Mithril bootstrap starts.
+trap 'forward_signal SIGTERM 143' SIGTERM
+trap 'forward_signal SIGINT 130' SIGINT
 
 # Run Mithril bootstrap if applicable
 bootstrap_if_needed
@@ -251,17 +334,12 @@ if [[ -n "${DINGO_LOG_FILE:-}" ]]; then
   mkdir -p "$(dirname "${DINGO_LOG_FILE}")"
   touch "${DINGO_LOG_FILE}"
   chmod 0644 "${DINGO_LOG_FILE}"
-  dingo "${DINGO_ARGS[@]}" >>"${DINGO_LOG_FILE}" 2>&1 &
-else
-  dingo "${DINGO_ARGS[@]}" &
 fi
-DINGO_PID=$!
-trap cleanup SIGTERM SIGINT
 
-# Wait for dingo to exit
-set +e
-wait "${DINGO_PID}"
-exit_code=$?
-set -e
-DINGO_PID=""
+# Start dingo and preserve its exit status, including after a forwarded signal.
+if run_managed_dingo "${DINGO_LOG_FILE:-}" "${DINGO_ARGS[@]}"; then
+  exit_code=0
+else
+  exit_code=$?
+fi
 exit "${exit_code}"

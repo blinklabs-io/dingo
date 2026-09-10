@@ -379,16 +379,15 @@ func checkEpoch(
 		return nil, fmt.Errorf("get koios pool epoch: %w", err)
 	}
 
-	// Clear previous mismatch records for this epoch before writing new ones.
-	if err := cache.DeleteEpochMismatches(network, epoch); err != nil {
-		return nil, fmt.Errorf("delete old mismatches: %w", err)
-	}
-
 	// Pre-staking epochs (Koios active_stake=null) have no reference data to
 	// compare against — record PASS with zero mismatches rather than running
 	// comparisons against an empty pool set, which would spuriously flag every
-	// Dingo-side pool as pool_only_dingo.
+	// Dingo-side pool as pool_only_dingo. Nothing fallible needs to complete
+	// first, so it's safe to replace any prior evidence immediately.
 	if koiosEpoch.PreStaking {
+		if err := cache.CommitEpochMismatches(network, epoch, nil); err != nil {
+			return nil, fmt.Errorf("commit mismatches: %w", err)
+		}
 		if err := cache.UpsertCheckEpochStatus(CheckEpochStatus{
 			Network:       network,
 			Epoch:         epoch,
@@ -612,8 +611,13 @@ func checkEpoch(
 
 	status := DetermineStatus(allMismatches)
 
-	if err := cache.InsertMismatches(allMismatches); err != nil {
-		return nil, fmt.Errorf("insert mismatches: %w", err)
+	// Every fallible read above has already succeeded by this point, so it's
+	// safe to replace prior evidence now. CommitEpochMismatches deletes and
+	// (re)inserts in one transaction: if the insert fails partway through,
+	// the delete rolls back with it and the previous record is left intact
+	// instead of being erased with nothing to replace it.
+	if err := cache.CommitEpochMismatches(network, epoch, allMismatches); err != nil {
+		return nil, fmt.Errorf("commit mismatches: %w", err)
 	}
 
 	if err := cache.UpsertCheckEpochStatus(CheckEpochStatus{

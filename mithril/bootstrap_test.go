@@ -18,6 +18,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -95,6 +96,31 @@ func finalizeTestCertificate(t *testing.T, cert *Certificate) {
 	hash, err := cert.ComputeHash()
 	require.NoError(t, err)
 	cert.Hash = hash
+}
+
+func testGenesisKeyPair(t *testing.T) (string, ed25519.PrivateKey) {
+	t.Helper()
+	publicKey, privateKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	return fmt.Sprintf(
+		`{"type":"GenesisVerificationKey_ed25519","cborHex":"5820%s"}`,
+		hex.EncodeToString(publicKey),
+	), privateKey
+}
+
+func signTestGenesisCertificate(
+	t *testing.T,
+	cert *Certificate,
+	privateKey ed25519.PrivateKey,
+) {
+	t.Helper()
+	cert.SignedMessage = cert.ProtocolMessage.ComputeHash()
+	cert.GenesisSignature = hex.EncodeToString(
+		ed25519.Sign(privateKey, []byte(cert.SignedMessage)),
+	)
+	finalizeTestCertificate(t, cert)
+	cert.PreviousHash = cert.Hash
+	finalizeTestCertificate(t, cert)
 }
 
 func TestBootstrap(t *testing.T) {
@@ -246,6 +272,7 @@ func TestBootstrapUsesDigestSpecificExtractDir(t *testing.T) {
 }
 
 func TestBootstrapCertVerifyNoCertHash(t *testing.T) {
+	genesisVerificationKey, _ := testGenesisKeyPair(t)
 	snapshots := []SnapshotListItem{
 		{
 			SnapshotBase: SnapshotBase{
@@ -271,6 +298,7 @@ func TestBootstrapCertVerifyNoCertHash(t *testing.T) {
 		AggregatorURL:          server.URL,
 		AllowInsecureHTTP:      true,
 		VerifyCertificateChain: true,
+		GenesisVerificationKey: genesisVerificationKey,
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "no certificate hash")
@@ -339,6 +367,78 @@ func TestBootstrapInvalidGenesisVerificationKey(t *testing.T) {
 		err.Error(),
 		"parsing Mithril genesis verification key",
 	)
+}
+
+func TestBootstrapRequiresGenesisVerificationKey(t *testing.T) {
+	for _, backend := range []string{BackendV1, BackendV2} {
+		for _, testKey := range []struct {
+			name  string
+			value string
+		}{
+			{name: "empty"},
+			{name: "whitespace", value: " \n\t"},
+		} {
+			t.Run(backend+"/"+testKey.name, func(t *testing.T) {
+				var requests atomic.Int32
+				server := httptest.NewServer(http.HandlerFunc(
+					func(w http.ResponseWriter, _ *http.Request) {
+						requests.Add(1)
+						w.Header().Set("Content-Type", "application/json")
+						_, _ = w.Write([]byte("[]"))
+					},
+				))
+				t.Cleanup(server.Close)
+
+				_, err := Bootstrap(context.Background(), BootstrapConfig{
+					Network:                "preview",
+					Backend:                backend,
+					AggregatorURL:          server.URL,
+					AllowInsecureHTTP:      true,
+					VerifyCertificateChain: true,
+					GenesisVerificationKey: testKey.value,
+				})
+				require.EqualError(
+					t,
+					err,
+					"verified Mithril bootstrap requires a genesis verification key",
+				)
+				assert.Zero(t, requests.Load())
+			})
+		}
+	}
+}
+
+func TestBootstrapWithoutVerificationAllowsMissingGenesisVerificationKey(
+	t *testing.T,
+) {
+	for _, backend := range []string{BackendV1, BackendV2} {
+		t.Run(backend, func(t *testing.T) {
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(
+				func(w http.ResponseWriter, _ *http.Request) {
+					requests.Add(1)
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte("[]"))
+				},
+			))
+			t.Cleanup(server.Close)
+
+			_, err := Bootstrap(context.Background(), BootstrapConfig{
+				Network:                "preview",
+				Backend:                backend,
+				AggregatorURL:          server.URL,
+				AllowInsecureHTTP:      true,
+				VerifyCertificateChain: false,
+			})
+			require.Error(t, err)
+			assert.NotContains(
+				t,
+				err.Error(),
+				"genesis verification key",
+			)
+			assert.Equal(t, int32(1), requests.Load())
+		})
+	}
 }
 
 func TestBootstrapUnknownNetwork(t *testing.T) {
@@ -991,8 +1091,8 @@ func TestVerifyCertificateChainWithModeReturnsDetails(t *testing.T) {
 }
 
 func TestBootstrapRejectsUnexpectedSignedEntityKind(t *testing.T) {
-	_, _, g1, g2 := bls12381.Generators()
-	g1Hex := hex.EncodeToString(g1.Marshal())
+	genesisVerificationKey, genesisPrivateKey := testGenesisKeyPair(t)
+	_, _, _, g2 := bls12381.Generators()
 	g2Hex := hex.EncodeToString(g2.Marshal())
 	snapshots := []SnapshotListItem{
 		{
@@ -1012,9 +1112,7 @@ func TestBootstrapRejectsUnexpectedSignedEntityKind(t *testing.T) {
 	}
 	certs := map[string]Certificate{
 		"cert_leaf": {
-			Epoch:                    270,
-			AggregateVerificationKey: g2Hex,
-			MultiSignature:           g1Hex,
+			Epoch: 270,
 			SignedEntityType: SignedEntityType{
 				raw: json.RawMessage(
 					`{"MithrilStakeDistribution":{"epoch":270,"immutable_file_number":5320}}`,
@@ -1022,7 +1120,7 @@ func TestBootstrapRejectsUnexpectedSignedEntityKind(t *testing.T) {
 			},
 			Metadata: CertificateMetadata{
 				Network:     "preprod",
-				Parameters:  ProtocolParameters{K: 1, M: 2, PhiF: 0.5},
+				Parameters:  ProtocolParameters{K: 1, M: 1, PhiF: 1.0},
 				InitiatedAt: "2026-02-10T00:00:00Z",
 				SealedAt:    "2026-02-10T00:01:00Z",
 				Signers: []StakeDistributionParty{
@@ -1037,32 +1135,34 @@ func TestBootstrapRejectsUnexpectedSignedEntityKind(t *testing.T) {
 			},
 		},
 		"cert_genesis": {
-			Epoch:            269,
-			GenesisSignature: "genesis",
+			Epoch: 269,
 			Metadata: CertificateMetadata{
-				Parameters:  ProtocolParameters{K: 1, M: 2, PhiF: 0.5},
+				Parameters:  ProtocolParameters{K: 1, M: 1, PhiF: 1.0},
 				InitiatedAt: "2026-02-09T00:00:00Z",
 				SealedAt:    "2026-02-09T00:01:00Z",
 			},
 			ProtocolMessage: ProtocolMessage{
 				MessageParts: map[string]string{
-					"current_epoch":                   "269",
-					"next_aggregate_verification_key": g2Hex,
+					"current_epoch": "269",
 					"next_protocol_parameters": ProtocolParameters{
 						K:    1,
-						M:    2,
-						PhiF: 0.5,
+						M:    1,
+						PhiF: 1.0,
 					}.ComputeHash(),
 				},
 			},
 		},
 	}
-	genesis := certs["cert_genesis"]
-	finalizeTestCertificate(t, &genesis)
-	genesis.PreviousHash = genesis.Hash
-	finalizeTestCertificate(t, &genesis)
-	certs["cert_genesis"] = genesis
 	leaf := certs["cert_leaf"]
+	leaf.SignedMessage = leaf.ProtocolMessage.ComputeHash()
+	leaf.AggregateVerificationKey, leaf.MultiSignature =
+		testCreateEncodedSTMProof(t, []byte(leaf.SignedMessage))
+	genesis := certs["cert_genesis"]
+	genesis.ProtocolMessage.
+		MessageParts["next_aggregate_verification_key"] =
+		leaf.AggregateVerificationKey
+	signTestGenesisCertificate(t, &genesis, genesisPrivateKey)
+	certs["cert_genesis"] = genesis
 	leaf.PreviousHash = genesis.Hash
 	finalizeTestCertificate(t, &leaf)
 	certs["cert_leaf"] = leaf
@@ -1118,6 +1218,7 @@ func TestBootstrapRejectsUnexpectedSignedEntityKind(t *testing.T) {
 		AggregatorURL:          server.URL,
 		AllowInsecureHTTP:      true,
 		VerifyCertificateChain: true,
+		GenesisVerificationKey: genesisVerificationKey,
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "unexpected signed entity kind")

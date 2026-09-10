@@ -802,6 +802,21 @@ func (q *Queries) DeletePoolStakeSnapshotsForEpoch(ctx context.Context, arg Dele
 	return err
 }
 
+const deleteProvisionalRewardSnapshot = `-- name: DeleteProvisionalRewardSnapshot :exec
+DELETE FROM reward_snapshot
+WHERE epoch = ? AND snapshot_type = ? AND authoritative = false
+`
+
+type DeleteProvisionalRewardSnapshotParams struct {
+	Epoch        int64
+	SnapshotType string
+}
+
+func (q *Queries) DeleteProvisionalRewardSnapshot(ctx context.Context, arg DeleteProvisionalRewardSnapshotParams) error {
+	_, err := q.db.ExecContext(ctx, deleteProvisionalRewardSnapshot, arg.Epoch, arg.SnapshotType)
+	return err
+}
+
 const deleteRewardAccountOutputsAfterSlot = `-- name: DeleteRewardAccountOutputsAfterSlot :exec
 DELETE FROM reward_account_output
 WHERE captured_slot > ? OR boundary_slot > ?

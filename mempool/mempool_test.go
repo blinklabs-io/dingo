@@ -4036,6 +4036,27 @@ func TestMempoolConsumer_BlockingNextTxReleasedOnStop(t *testing.T) {
 	), "shutdown returns nil rather than a transaction")
 }
 
+// Removing a connection-owned consumer must release a blocking NextTx. The
+// TxSubmission callback owns no goroutine beyond this wait, so retaining it
+// after a connection closes would leak the callback indefinitely.
+func TestMempoolConsumer_BlockingNextTxReleasedOnConsumerRemoval(t *testing.T) {
+	m := newTestMempool(t)
+	connId := newTestConnectionId(0)
+	consumer := m.AddConsumer(connId)
+	require.NotNil(t, consumer)
+	waiting := make(chan struct{})
+	consumer.onWaitForTx = func() { close(waiting) }
+
+	got := make(chan *MempoolTransaction, 1)
+	go func() { got <- consumer.NextTx(true) }()
+	dingotestutil.RequireReceive(t, waiting, 2*time.Second, "blocking NextTx")
+
+	m.RemoveConsumer(connId)
+	assert.Nil(t, dingotestutil.RequireReceive(
+		t, got, 2*time.Second, "blocking NextTx released by consumer removal",
+	))
+}
+
 // blockingRejectingValidator blocks until released like
 // blockingSessionValidator, then reports one designated transaction invalid so
 // a test can observe whether revalidation actually published its result.

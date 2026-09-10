@@ -15,6 +15,7 @@
 package koiosparity
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 	"sort"
@@ -23,6 +24,34 @@ import (
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestDefaultAccountChunkPlanFitsKoiosPublicRequestLimit(t *testing.T) {
+	const koiosPublicRequestLimit = 5 * 1024
+
+	addrs := make([]string, koiosAccountChunkSize)
+	for i := range addrs {
+		addrs[i] = "stake_test1" + strings.Repeat("q", 52) + fmt.Sprintf("%03d", i)
+	}
+	groups := chunkAddressesByCountAndSize(
+		addrs,
+		koiosAccountChunkSize,
+		koiosAccountChunkMaxBytesDefault-koiosAccountRequestEnvelopeOverhead,
+	)
+	require.Greater(t, len(groups), 1,
+		"the default must split the 100-address request that Koios rejected live")
+	for _, group := range groups {
+		body, err := json.Marshal(struct {
+			StakeAddresses []string `json:"_stake_addresses"`
+			EpochNo        uint64   `json:"_epoch_no"`
+		}{
+			StakeAddresses: group,
+			EpochNo:        2,
+		})
+		require.NoError(t, err)
+		require.Less(t, len(body), koiosPublicRequestLimit,
+			"default request body must stay below Koios's public 5120-byte limit")
+	}
+}
 
 // TestChunkAddressesByCountAndSizeEmptyInput proves an empty or nil address
 // list produces no chunks at all, rather than one spurious empty chunk.

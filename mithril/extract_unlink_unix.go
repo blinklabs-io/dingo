@@ -45,8 +45,8 @@ import (
 // symlink whose target stays inside it, which is enough to unlink a different
 // file in the tree.
 //
-// fullPath is unused here; the Windows implementation needs it because it has
-// no handle-relative removal to address the entry through.
+// fullPath is unused here; the Windows implementation keeps it only to name
+// the operation in its returned error, not to address the entry.
 func removeExtractedFile(root *os.Root, name, _ string) error {
 	parent, base, release, err := openVerifiedParent(root, name)
 	if err != nil {

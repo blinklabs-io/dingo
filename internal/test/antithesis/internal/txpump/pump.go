@@ -357,17 +357,18 @@ func (p *Pump) submitPayment(client *NodeClient, batchSize int) bool {
 			"tx_id", txID,
 			"send_lovelace", sendAmount,
 		)
-		// Return both outputs to the wallet immediately so chained
-		// transactions can spend them within the same batch.
+		// Quarantine submitted outputs for the configured confirmation window
+		// so an early fork cannot invalidate an immediate dependency chain.
+		confirmationDelay := p.cfg.confirmationDelay()
 		if signingKey != nil {
-			p.wallet.Add(UTxO{TxHash: txID, Index: 0, Amount: sendAmount, SigningKey: signingKey})
+			p.wallet.AddAfter(confirmationDelay, UTxO{TxHash: txID, Index: 0, Amount: sendAmount, SigningKey: signingKey})
 		}
 		if change > 0 {
 			changeUTxO := UTxO{TxHash: txID, Index: 1, Amount: change}
 			if signingKey != nil {
 				changeUTxO.SigningKey = signingKey
 			}
-			p.wallet.Add(changeUTxO)
+			p.wallet.AddAfter(confirmationDelay, changeUTxO)
 		}
 	}
 
@@ -449,7 +450,7 @@ func (p *Pump) submitDelegation(client *NodeClient, batchSize int) bool {
 		// Return the change output to the wallet so future transactions can
 		// spend it.
 		if change > 0 {
-			p.wallet.Add(UTxO{TxHash: txID, Index: 0, Amount: change})
+			p.wallet.AddAfter(p.cfg.confirmationDelay(), UTxO{TxHash: txID, Index: 0, Amount: change})
 		}
 	}
 	if p.txlog != nil {
@@ -547,7 +548,7 @@ func (p *Pump) submitGovernance(client *NodeClient, batchSize int) bool {
 		// Return the change output to the wallet so future transactions can
 		// spend it.
 		if change > 0 {
-			p.wallet.Add(UTxO{TxHash: txID, Index: 0, Amount: change})
+			p.wallet.AddAfter(p.cfg.confirmationDelay(), UTxO{TxHash: txID, Index: 0, Amount: change})
 		}
 	}
 	if p.txlog != nil {
@@ -666,7 +667,7 @@ func (p *Pump) submitPlutus(client *NodeClient, batchSize int) bool {
 		entry.Status = "submitted"
 		p.logger.Info("plutus tx submitted", "kind", txKind, "tx_id", txID)
 		if txKind == "plutus_lock" {
-			p.addLockedPlutusUTxO(UTxO{
+			p.addLockedPlutusUTxOAfter(p.cfg.confirmationDelay(), UTxO{
 				TxHash: txID,
 				Index:  0,
 				Amount: minSendAmount,
@@ -680,7 +681,7 @@ func (p *Pump) submitPlutus(client *NodeClient, batchSize int) bool {
 			if txKind == "plutus_lock" {
 				changeIdx = 1
 			}
-			p.wallet.Add(UTxO{TxHash: txID, Index: changeIdx, Amount: change})
+			p.wallet.AddAfter(p.cfg.confirmationDelay(), UTxO{TxHash: txID, Index: changeIdx, Amount: change})
 		}
 	}
 	if p.txlog != nil {
@@ -695,14 +696,27 @@ func (p *Pump) addLockedPlutusUTxO(utxo UTxO) {
 	p.plutusLocked = append(p.plutusLocked, utxo)
 }
 
-func (p *Pump) takeLockedPlutusUTxO() (UTxO, bool) {
-	if len(p.plutusLocked) == 0 {
-		return UTxO{}, false
+func (p *Pump) addLockedPlutusUTxOAfter(delay time.Duration, utxo UTxO) {
+	if delay > 0 {
+		utxo.availableAt = time.Now().Add(delay)
 	}
-	last := len(p.plutusLocked) - 1
-	utxo := p.plutusLocked[last]
-	p.plutusLocked = p.plutusLocked[:last]
-	return utxo, true
+	p.addLockedPlutusUTxO(utxo)
+}
+
+func (p *Pump) takeLockedPlutusUTxO() (UTxO, bool) {
+	now := time.Now()
+	for i := len(p.plutusLocked) - 1; i >= 0; i-- {
+		utxo := p.plutusLocked[i]
+		if !utxo.availableAt.IsZero() && utxo.availableAt.After(now) {
+			continue
+		}
+		p.plutusLocked = append(
+			p.plutusLocked[:i],
+			p.plutusLocked[i+1:]...,
+		)
+		return utxo, true
+	}
+	return UTxO{}, false
 }
 
 // cooldown waits for a random duration in [CooldownMin, CooldownMax]ms.

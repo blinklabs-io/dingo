@@ -32,11 +32,13 @@ import (
 // fetch/hand off more" -- so a concurrent goroutine can probe whether
 // blockPipelineGatherMutex is held during that window.
 type pausingLedgerReadIterator struct {
-	results    []*chain.ChainIteratorResult
-	pauseAtIdx int
-	calls      int
-	paused     chan struct{}
-	resume     chan struct{}
+	ctx                 context.Context
+	results             []*chain.ChainIteratorResult
+	pauseAtIdx          int
+	calls               int
+	paused              chan struct{}
+	resume              chan struct{}
+	blockingNextStarted chan struct{}
 }
 
 func (p *pausingLedgerReadIterator) Next(
@@ -54,10 +56,12 @@ func (p *pausingLedgerReadIterator) Next(
 	if !blocking {
 		return nil, chain.ErrIteratorChainTip
 	}
-	// This test never exercises a genuinely blocking call; block briefly
-	// rather than forever so a misuse fails fast instead of hanging.
-	<-time.After(2 * time.Second)
-	return nil, chain.ErrIteratorChainTip
+	close(p.blockingNextStarted)
+	// Mirror a real blocking iterator call: cancellation releases the call.
+	// blockingNextStarted lets the test order cancellation after entry without
+	// using a wall-clock delay as its sequencing mechanism.
+	<-p.ctx.Done()
+	return nil, p.ctx.Err()
 }
 
 // TestLedgerReadChainIteratorHoldsGatherMutexAcrossGather is a regression
@@ -85,6 +89,7 @@ func TestLedgerReadChainIteratorHoldsGatherMutexAcrossGather(t *testing.T) {
 	defer cancel()
 
 	iter := &pausingLedgerReadIterator{
+		ctx: ctx,
 		results: []*chain.ChainIteratorResult{
 			{Point: point1, Block: block1},
 			{Point: point2, Block: block2},
@@ -92,9 +97,10 @@ func TestLedgerReadChainIteratorHoldsGatherMutexAcrossGather(t *testing.T) {
 		// Pause immediately before the second Next call, i.e. after the
 		// first raw block has already been appended to the reader's
 		// local batch and it is about to fetch more.
-		pauseAtIdx: 1,
-		paused:     make(chan struct{}),
-		resume:     make(chan struct{}),
+		pauseAtIdx:          1,
+		paused:              make(chan struct{}),
+		resume:              make(chan struct{}),
+		blockingNextStarted: make(chan struct{}),
 	}
 
 	ls := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
@@ -144,9 +150,13 @@ func TestLedgerReadChainIteratorHoldsGatherMutexAcrossGather(t *testing.T) {
 	)
 
 	close(result.done)
+	testutil.RequireReceive(
+		t, iter.blockingNextStarted, 2*time.Second,
+		"reader never entered the blocking iterator call",
+	)
 	cancel()
 	testutil.RequireReceive(
-		t, readerDone, 2*time.Second,
+		t, readerDone, time.Second,
 		"ledgerReadChainIterator did not exit after cancellation",
 	)
 }

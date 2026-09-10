@@ -54,7 +54,7 @@ func TestOpenDatabaseReturnsRecoveryErrorOnRuntime(t *testing.T) {
 		require.NoError(t, firstRuntime.Close(ctx))
 	})
 
-	metaTxn := runtime.Database.Metadata().Transaction()
+	metaTxn := runtime.Database.Metadata().Transaction(t.Context())
 	require.NoError(
 		t,
 		runtime.Database.Metadata().SetCommitTimestamp(123456789, metaTxn),

@@ -94,6 +94,7 @@ func TestFetchLeiosEbTxsBatchedReRequestsUntilComplete(t *testing.T) {
 		&cappingBlockTxsRequester{maxPerResp: 50, includeBitmaps: true},
 		point,
 		639,
+		nil,
 	)
 	require.NoError(t, err)
 	requireTxsInIndexOrder(t, txs, 639)
@@ -108,6 +109,7 @@ func TestFetchLeiosEbTxsBatchedPrefixFallback(t *testing.T) {
 		&cappingBlockTxsRequester{maxPerResp: 40, includeBitmaps: false},
 		point,
 		116,
+		nil,
 	)
 	require.NoError(t, err)
 	requireTxsInIndexOrder(t, txs, 116)
@@ -121,6 +123,7 @@ func TestFetchLeiosEbTxsBatchedFullResponse(t *testing.T) {
 		&cappingBlockTxsRequester{maxPerResp: 0, includeBitmaps: true},
 		point,
 		200,
+		nil,
 	)
 	require.NoError(t, err)
 	requireTxsInIndexOrder(t, txs, 200)
@@ -135,6 +138,7 @@ func TestFetchLeiosEbTxsBatchedNoProgressErrors(t *testing.T) {
 		&cappingBlockTxsRequester{serveNothing: true, includeBitmaps: true},
 		point,
 		10,
+		nil,
 	)
 	require.Error(t, err)
 	require.Empty(t, txs)
@@ -151,6 +155,7 @@ func TestFetchLeiosEbTxsBatchedRejectsUnrepresentableWindowCount(
 		requester,
 		point,
 		leiosTxFetchWindowSize*leiosTxFetchMaxWindows+1,
+		nil,
 	)
 	require.Error(t, err)
 	require.Nil(t, txs)
@@ -290,7 +295,7 @@ func TestFetchLeiosEbTxsBatchedBatchesWindowsPerRequest(t *testing.T) {
 	// serves the whole request, this completes in 2 rounds (8 + 2 windows),
 	// not 10 — proving requests batch multiple windows.
 	requester := &servingBlockTxsRequester{}
-	txs, err := o.fetchLeiosEbTxsBatched(requester, point, 600)
+	txs, err := o.fetchLeiosEbTxsBatched(requester, point, 600, nil)
 	require.NoError(t, err)
 	requireTxsInIndexOrder(t, txs, 600)
 	require.Equal(t, 2, requester.calls)

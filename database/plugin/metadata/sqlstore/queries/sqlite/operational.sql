@@ -422,6 +422,10 @@ ON CONFLICT (epoch, snapshot_type) DO UPDATE SET
     calculation_version = excluded.calculation_version
 RETURNING id;
 
+-- name: DeleteProvisionalRewardSnapshot :exec
+DELETE FROM reward_snapshot
+WHERE epoch = ? AND snapshot_type = ? AND authoritative = false;
+
 -- name: InsertRewardSnapshot :one
 INSERT INTO reward_snapshot (
     epoch, snapshot_type, total_active_stake, total_pool_count,

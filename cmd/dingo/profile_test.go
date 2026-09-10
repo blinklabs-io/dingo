@@ -19,6 +19,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/blinklabs-io/dingo/internal/config"
 )
 
 // A profile file that fails to close must be reported to stderr, not
@@ -61,5 +63,29 @@ func TestCloseProfileFileStaysQuietOnSuccess(t *testing.T) {
 			"expected no output on successful close, got: %q",
 			buf.String(),
 		)
+	}
+}
+
+func TestMithrilPprofServerUsesDedicatedBindAddress(t *testing.T) {
+	cfg := &config.Config{
+		BindAddr:      "0.0.0.0",
+		DebugBindAddr: "127.0.0.1",
+		DebugPort:     6060,
+	}
+	srv := newDebugPprofHTTPServer(cfg)
+	if srv == nil {
+		t.Fatal("expected enabled pprof server")
+	}
+	if got, want := srv.Addr, "127.0.0.1:6060"; got != want {
+		t.Fatalf("pprof address = %q, want %q", got, want)
+	}
+
+	cfg.DebugBindAddr = "0.0.0.0"
+	srv = newDebugPprofHTTPServer(cfg)
+	if srv == nil {
+		t.Fatal("expected explicitly exposed pprof server")
+	}
+	if got, want := srv.Addr, "0.0.0.0:6060"; got != want {
+		t.Fatalf("explicit wildcard pprof address = %q, want %q", got, want)
 	}
 }

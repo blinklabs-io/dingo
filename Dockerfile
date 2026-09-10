@@ -1,3 +1,11 @@
+# 1.26.3-1 is the newest published tag of this image, and it is behind the Go
+# patch releases that fix the standard-library advisories govulncheck finds
+# reachable from this module (the last of them fixed in 1.26.6). What actually
+# compiles the release binary is go.mod's `toolchain` floor, not this tag:
+# GOTOOLCHAIN is `auto` in this image, so the build fetches that toolchain and
+# uses it in place of the image's own go1.26.3. Advance this tag when
+# blinklabs-io/docker-go publishes a newer one; never lower the go.mod floor to
+# match it.
 FROM ghcr.io/blinklabs-io/go:1.26.3-1 AS build
 
 ARG VERSION
@@ -67,8 +75,8 @@ RUN apt-get update -y && \
     postgresql-client-16 \
     sqlite3 && \
   rm -rf /var/lib/apt/lists/*
-ENV LD_LIBRARY_PATH="/usr/local/lib:$LD_LIBRARY_PATH"
-ENV PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH"
+ENV LD_LIBRARY_PATH="/usr/local/lib"
+ENV PKG_CONFIG_PATH="/usr/local/lib/pkgconfig"
 COPY --from=build /code/dingo /bin/
 COPY --from=cardano-cli /usr/local/bin/cardano-cli /usr/local/bin/
 COPY --from=cardano-cli /usr/local/include/ /usr/local/include/

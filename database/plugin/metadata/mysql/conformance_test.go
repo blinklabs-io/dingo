@@ -164,7 +164,7 @@ func TestMetadataStoreResourceCleanup(t *testing.T) {
 		)
 		require.NoError(t, err)
 		require.NoError(t, store.Start(t.Context()))
-		txn := store.Transaction()
+		txn := store.Transaction(t.Context())
 		require.NoError(t, store.SetCommitTimestamp(1, txn))
 		require.NoError(t, txn.Commit())
 		require.NoError(t, store.Close())

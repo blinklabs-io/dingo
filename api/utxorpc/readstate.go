@@ -23,7 +23,7 @@ import (
 
 	"connectrpc.com/connect"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	betacardano "github.com/utxorpc/go-codegen/utxorpc/v1beta/cardano"
 	betaquery "github.com/utxorpc/go-codegen/utxorpc/v1beta/query"
 )
@@ -170,7 +170,7 @@ func (s *betaQueryServiceServer) readStakePoolDistribution(
 		})
 	}
 
-	tip := s.utxorpc.betaChainPoint(dist.Tip.Point)
+	tip := s.utxorpc.betaChainPoint(dist.Tip)
 	return connect.NewResponse(&betaquery.ReadStateResponse{
 		Result: &betaquery.AnyChainStateData{
 			Result: &betaquery.AnyChainStateData_Cardano{
@@ -245,21 +245,16 @@ func poolKeyHashFilter(
 // across an epoch boundary names an epoch whose stake snapshot is not the one
 // the reply carries.
 //
-// A point whose block cannot be read still has a slot and a hash, which is what
-// identifies it; only the height is unknown. Failing the whole query over a
-// missing height would withhold an answer the node does have.
+// The whole tip is passed rather than just its point because it already
+// carries the block number. Re-reading the block to recover a height the
+// caller already holds can fail, and `height` is a plain proto3 uint64 with no
+// encoding for "unknown": a zero beside a non-origin slot and hash asserts
+// that the point is the origin block rather than admitting the height is
+// unknown, and a client cannot tell the two apart.
 func (u *Utxorpc) betaChainPoint(
-	point ocommon.Point,
+	tip ochainsync.Tip,
 ) *betaquery.ChainPoint {
-	br := blockRef{Slot: point.Slot, Hash: point.Hash}
-	if model, err := u.config.LedgerState.GetBlock(point); err != nil {
-		u.config.Logger.Warn(
-			"failed to look up tip block for height; using height=0",
-			"error", err,
-		)
-	} else {
-		br = blockRefFromModel(model)
-	}
+	br := blockRefFromTip(tip)
 	return &betaquery.ChainPoint{
 		Slot:   br.Slot,
 		Hash:   br.Hash,

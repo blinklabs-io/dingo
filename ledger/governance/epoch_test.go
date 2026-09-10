@@ -21,6 +21,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -334,6 +335,63 @@ func TestProcessEpochReturnsMissingRewardAccountRefundToTreasury(
 	require.NotNil(t, proposal.ExpiredSlot)
 	assert.Equal(t, uint64(5), *proposal.ExpiredEpoch)
 	assert.Equal(t, uint64(500), *proposal.ExpiredSlot)
+}
+
+// TestProcessEpochBootstrapParameterChangeWithoutCommitteeDoesNotRatify
+// verifies that the epoch-boundary caller does not treat PV9's committee
+// minimum-size exception as approval from an absent committee.
+func TestProcessEpochBootstrapParameterChangeWithoutCommitteeDoesNotRatify(
+	t *testing.T,
+) {
+	db, _ := newTallyTestDB(t)
+	poolDeposit := uint(1234)
+	actionCbor, err := cbor.Encode(&conway.ConwayParameterChangeGovAction{
+		Type: uint(lcommon.GovActionTypeParameterChange),
+		ParamUpdate: conway.ConwayProtocolParameterUpdate{
+			PoolDeposit: &poolDeposit,
+		},
+	})
+	require.NoError(t, err)
+
+	txHash := testBytes(32, 0x61)
+	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
+		TxHash:        txHash,
+		ActionIndex:   0,
+		ActionType:    uint8(lcommon.GovActionTypeParameterChange),
+		ProposedEpoch: stabilityTestEpoch - 1,
+		ExpiresEpoch:  stabilityTestEpoch + 10,
+		AnchorURL:     "https://example.invalid/bootstrap-boundary",
+		AnchorHash:    testBytes(32, 0x62),
+		ReturnAddress: testBytes(29, 0x63),
+		GovActionCbor: actionCbor,
+		AddedSlot:     100,
+		Deposit:       1_000,
+	}, nil))
+
+	txn := db.MetadataTxn(true)
+	defer txn.Release()
+	out, err := ProcessEpoch(&EpochInput{
+		DB:           db,
+		Txn:          txn,
+		PrevEpoch:    stabilityTestEpoch - 1,
+		NewEpoch:     stabilityTestEpoch,
+		BoundarySlot: 500,
+		PParams:      conwayPParamsFixture(9),
+		UpdateFn: func(
+			pparams lcommon.ProtocolParameters,
+			_ any,
+		) (lcommon.ProtocolParameters, error) {
+			return pparams, nil
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, txn.Commit())
+
+	assert.Equal(t, 0, out.RatifiedCount)
+	proposal, err := db.GetGovernanceProposal(txHash, 0, nil)
+	require.NoError(t, err)
+	assert.Nil(t, proposal.RatifiedEpoch)
+	assert.Nil(t, proposal.RatifiedSlot)
 }
 
 func TestProcessEpochReplaysBoundaryTreasuryWithdrawalAfterStakeRewardReset(

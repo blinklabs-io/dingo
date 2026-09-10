@@ -55,18 +55,18 @@ jobs:
     outputs:
       image_tag: ${{ steps.image-tag.outputs.tag }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 https://github.com/actions/checkout/releases/tag/v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
           fetch-depth: 0
       - name: Set image tag
         id: image-tag
         run: echo "tag=sha-${{ github.sha }}" >> "$GITHUB_OUTPUT"
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0 https://github.com/docker/setup-buildx-action/releases/tag/v4.2.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0 https://github.com/docker/setup-buildx-action/releases/tag/v4.3.0
       - name: Validate Antithesis testnet wiring
         run: internal/test/antithesis/scripts/validate-config.sh
       - name: Login to GHCR
-        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0 https://github.com/docker/login-action/releases/tag/v4.0.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0 https://github.com/docker/login-action/releases/tag/v4.6.0
         with:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
@@ -264,7 +264,7 @@ jobs:
           echo "hours=$HOURS" >> "$GITHUB_OUTPUT"
 
       - name: Checkout repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 https://github.com/actions/checkout/releases/tag/v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
           persist-credentials: false
 

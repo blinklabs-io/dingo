@@ -245,6 +245,7 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 		client,
 		point,
 		data.txCount,
+		data.blockRaw,
 		deadline,
 	)
 	if err != nil {
@@ -254,6 +255,9 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 			data.txCount,
 			err,
 		)
+	}
+	if err := validateLeiosEndorserBlockTxs(data.blockRaw, txs); err != nil {
+		return fmt.Errorf("validate tx references: %w", err)
 	}
 	if err := o.storeLeiosEndorserBlock(point, data.blockRaw, txs); err != nil {
 		return fmt.Errorf("store txs: %w", err)

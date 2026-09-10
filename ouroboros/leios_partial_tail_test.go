@@ -79,7 +79,7 @@ func TestFetchLeiosEbTxsRetainsPartialTailOnIncompleteFetch(t *testing.T) {
 	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
 
 	requester := &diffusingBlockTxsRequester{available: diffused}
-	txs, err := o.fetchLeiosEbTxsBatched(requester, point, txCount)
+	txs, err := o.fetchLeiosEbTxsBatched(requester, point, txCount, nil)
 	require.Error(t, err)
 	requireTxsInIndexOrder(t, txs, diffused)
 
@@ -108,12 +108,12 @@ func TestFetchLeiosEbTxsCompletesPartialTailOnReoffer(t *testing.T) {
 	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
 
 	first := &diffusingBlockTxsRequester{available: diffused}
-	_, err := o.fetchLeiosEbTxsBatched(first, point, txCount)
+	_, err := o.fetchLeiosEbTxsBatched(first, point, txCount, nil)
 	require.Error(t, err)
 
 	// The relay finished diffusing and re-offers the block.
 	second := &diffusingBlockTxsRequester{available: txCount}
-	txs, err := o.fetchLeiosEbTxsBatched(second, point, txCount)
+	txs, err := o.fetchLeiosEbTxsBatched(second, point, txCount, nil)
 	require.NoError(t, err)
 	requireTxsInIndexOrder(t, txs, txCount)
 
@@ -157,7 +157,7 @@ func TestStoreLeiosEndorserBlockManifestKeepsPartialTail(t *testing.T) {
 	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
 
 	requester := &diffusingBlockTxsRequester{available: diffused}
-	_, err := o.fetchLeiosEbTxsBatched(requester, point, txCount)
+	_, err := o.fetchLeiosEbTxsBatched(requester, point, txCount, nil)
 	require.Error(t, err)
 
 	for range 3 {
@@ -207,7 +207,7 @@ func TestRetainLeiosPartialTxsUnionsAcrossAttempts(t *testing.T) {
 	// A fetch seeded from the union needs no further transactions from the
 	// relay at all.
 	requester := &diffusingBlockTxsRequester{available: 0}
-	txs, err := o.fetchLeiosEbTxsBatched(requester, point, txCount)
+	txs, err := o.fetchLeiosEbTxsBatched(requester, point, txCount, nil)
 	require.NoError(t, err)
 	requireTxsInIndexOrder(t, txs, txCount)
 	require.Zero(t, requester.calls)
@@ -239,7 +239,7 @@ func TestStoreLeiosEndorserBlockPartialDoesNotRefreshCacheTTL(t *testing.T) {
 	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
 
 	requester := &diffusingBlockTxsRequester{available: diffused}
-	_, err := o.fetchLeiosEbTxsBatched(requester, point, txCount)
+	_, err := o.fetchLeiosEbTxsBatched(requester, point, txCount, nil)
 	require.Error(t, err)
 
 	// Age the entry to just short of its TTL, the window in which a re-offer

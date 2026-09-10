@@ -99,11 +99,11 @@ func (s *Store) SetGenesisStaking(
 		}
 		refs = append(refs, models.NewStakeCredentialRef(0, staker))
 	}
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
-	return s.refreshRewardLiveStakeRefs(db, refs, 0)
+	return s.refreshRewardLiveStakeRefs(ctx, db, refs, 0)
 }
 
 func (s *Store) SetGenesisGovernance(
@@ -143,7 +143,7 @@ func (s *Store) SetGenesisGovernance(
 			return fmt.Errorf("create genesis drep: %w", err)
 		}
 	}
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
@@ -181,7 +181,7 @@ func (s *Store) SetGenesisGovernance(
 				delegatee.Type,
 			)
 		}
-		if _, err := db.ExecContext(context.Background(), `
+		if _, err := db.ExecContext(ctx, `
 INSERT INTO account (
     staking_key, pool, drep, reward, id, active, added_slot,
     credential_tag, drep_type, expiration_epoch, created_slot
@@ -197,7 +197,7 @@ ON CONFLICT (credential_tag, staking_key) DO UPDATE SET
 		); err != nil {
 			return err
 		}
-		if _, err := db.ExecContext(context.Background(), `
+		if _, err := db.ExecContext(ctx, `
 INSERT INTO registration (
     staking_key, certificate_id, credential_tag, added_slot, deposit_amount
 )
@@ -216,6 +216,7 @@ WHERE NOT EXISTS (
 		switch delegatee.Type {
 		case conway.ConwayGenesisDelegateeTypeStake:
 			err = insertGenesisDelegation(
+				ctx,
 				db,
 				"stake_delegation",
 				"pool_key_hash",
@@ -226,6 +227,7 @@ WHERE NOT EXISTS (
 			)
 		case conway.ConwayGenesisDelegateeTypeVote:
 			err = insertGenesisDelegation(
+				ctx,
 				db,
 				"vote_delegation",
 				"drep",
@@ -235,7 +237,7 @@ WHERE NOT EXISTS (
 				drepType,
 			)
 		case conway.ConwayGenesisDelegateeTypeStakeVote:
-			_, err = db.ExecContext(context.Background(), `
+			_, err = db.ExecContext(ctx, `
 INSERT INTO stake_vote_delegation (
     staking_key, drep, pool_key_hash, certificate_id, credential_tag,
     drep_type, added_slot
@@ -259,10 +261,11 @@ WHERE NOT EXISTS (
 		}
 		refs = append(refs, models.NewStakeCredentialRef(tag, stakeKey))
 	}
-	return s.refreshRewardLiveStakeRefs(db, refs, 0)
+	return s.refreshRewardLiveStakeRefs(ctx, db, refs, 0)
 }
 
 func insertGenesisDelegation(
+	ctx context.Context,
 	db queryer,
 	table string,
 	valueColumn string,
@@ -287,7 +290,7 @@ func insertGenesisDelegation(
 			stakeKey,
 		}
 	}
-	_, err := db.ExecContext(context.Background(), `
+	_, err := db.ExecContext(ctx, `
 INSERT INTO `+table+` (`+columns+`)
 SELECT `+values+`
 WHERE NOT EXISTS (

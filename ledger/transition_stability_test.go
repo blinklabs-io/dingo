@@ -23,6 +23,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -81,21 +82,24 @@ const (
 
 // stabilityFixtureLedgerState assembles a LedgerState wired with
 // real-shaped Shelley genesis (so calculateStabilityWindowForEra returns
-// the expected 25_920) and an in-memory DB. The caller seeds proposal /
+// the expected 25_920) and a file-backed SQLite DB. The caller seeds proposal /
 // vote rows on db, sets currentTip and transitionInfo, and invokes
 // evaluateHardForkInitiationStability.
 //
 // Setting currentPParams to Conway pparams with the supplied major
 // version exercises the post-Conway code path inside the helper.
-// Bootstrap (major <= 9) uses the simplest ratification semantics
-// (single yes vote suffices) so a typical test only needs one DRep
-// fixture.
+// Bootstrap (major 9) waives the DRep threshold but preserves the
+// action-specific SPO and committee thresholds, so ratifiable fixtures must
+// include both voting bodies.
 func stabilityFixtureLedgerState(
 	t *testing.T,
 	major uint,
 ) (*LedgerState, *database.Database) {
 	t.Helper()
-	db := newTestDB(t)
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+	})
+	require.NoError(t, err)
 	pparams := mockledger.NewMockConwayProtocolParams()
 	pparams.ProtocolVersion.Major = major
 	ls := &LedgerState{
@@ -120,8 +124,8 @@ func stabilityFixtureLedgerState(
 
 // seedRatifiableBootstrapHardForkInitiation primes the DB so that the
 // governance ratifiability helper returns a non-nil result when the
-// bootstrap (major<=9) ratification rule is in effect — a HardForkInitiation
-// proposal in the active set plus a single DRep yes vote.
+// bootstrap (major 9) ratification rule is in effect — a HardForkInitiation
+// proposal in the active set plus the required CC and SPO yes votes.
 func seedRatifiableBootstrapHardForkInitiation(
 	t *testing.T,
 	db *database.Database,
@@ -178,6 +182,42 @@ func seedRatifiableBootstrapHardForkInitiation(
 		ProposalID:      loaded.ID,
 		VoterType:       models.VoterTypeDRep,
 		VoterCredential: drepCred,
+		Vote:            models.VoteYes,
+		AddedSlot:       2,
+	}, nil))
+	coldCred := repeatByte(28, 0xCE)
+	hotCred := repeatByte(28, 0xCF)
+	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{
+		{ColdCredHash: coldCred, ExpiresEpoch: currentEpoch + 10},
+	}, nil))
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	_, err = raw.Exec(`
+INSERT INTO auth_committee_hot (
+    cold_credential, host_credential, certificate_id, added_slot
+) VALUES (?, ?, ?, ?)`, coldCred, hotCred, 1, 1)
+	require.NoError(t, err)
+	require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
+		ProposalID:      loaded.ID,
+		VoterType:       models.VoterTypeCC,
+		VoterCredential: hotCred,
+		Vote:            models.VoteYes,
+		AddedSlot:       2,
+	}, nil))
+	poolCred := repeatByte(28, 0xDD)
+	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
+		&models.PoolStakeSnapshot{
+			Epoch:        currentEpoch - 2,
+			SnapshotType: models.PoolStakeSnapshotTypeMark,
+			PoolKeyHash:  poolCred,
+			TotalStake:   types.Uint64(1_000),
+		},
+		nil,
+	))
+	require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
+		ProposalID:      loaded.ID,
+		VoterType:       models.VoterTypeSPO,
+		VoterCredential: poolCred,
 		Vote:            models.VoteYes,
 		AddedSlot:       2,
 	}, nil))

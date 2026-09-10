@@ -199,3 +199,99 @@ func TestGenesisReserveBalanceRejectsInvalidInputs(t *testing.T) {
 	_, err = genesisReserveBalance(0, utxos)
 	require.ErrorContains(t, err, "exceeds max lovelace supply")
 }
+
+// TestCreateGenesisBlockSeedsEpochZeroRewardAdaPots pins the epoch-0
+// reward_ada_pots row against the same slot-0 baseline as the network state.
+// The delayed reward calculation reads the pots row for epoch newEpoch-1, so
+// without a row for epoch 0 the 0->1 boundary has no pot inputs and its
+// monetary expansion is skipped (dingo #3381). Fees are 0 because no epoch
+// precedes epoch 0.
+func TestCreateGenesisBlockSeedsEpochZeroRewardAdaPots(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		"musashi/config.json",
+		"musashi",
+		cardano.EmbeddedConfigFS,
+	)
+	require.NoError(t, err)
+
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Database:          db,
+			CardanoNodeConfig: nodeCfg,
+			Logger: slog.New(
+				slog.NewTextHandler(io.Discard, nil),
+			),
+		},
+	}
+	require.NoError(t, ls.createGenesisBlock())
+
+	pots, err := db.Metadata().GetRewardAdaPots(0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, pots)
+	require.Equal(t, uint64(0), pots.Epoch)
+	require.Equal(t, uint64(0), uint64(pots.Treasury))
+	require.Equal(
+		t,
+		uint64(14_999_999_100_000_000),
+		uint64(pots.Reserves),
+	)
+	require.Equal(t, uint64(0), uint64(pots.Fees))
+	require.Equal(t, uint64(0), pots.CapturedSlot)
+}
+
+// TestCreateGenesisBlockBackfillsMissingEpochZeroRewardAdaPots covers the
+// pre-existing-genesis-database path, which reaches ensureGenesisNetworkState
+// instead of the full genesis write.
+func TestCreateGenesisBlockBackfillsMissingEpochZeroRewardAdaPots(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		"musashi/config.json",
+		"musashi",
+		cardano.EmbeddedConfigFS,
+	)
+	require.NoError(t, err)
+	genesisHash, err := GenesisBlockHash(nodeCfg)
+	require.NoError(t, err)
+	require.NoError(t, db.SetGenesisCbor(
+		0,
+		genesisHash[:],
+		[]byte{0x80},
+		nil,
+	))
+
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Database:          db,
+			CardanoNodeConfig: nodeCfg,
+			Logger: slog.New(
+				slog.NewTextHandler(io.Discard, nil),
+			),
+		},
+	}
+	ls.currentTip.Point.Slot = 42
+	require.NoError(t, ls.createGenesisBlock())
+
+	pots, err := db.Metadata().GetRewardAdaPots(0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, pots)
+	require.Equal(t, uint64(0), uint64(pots.Treasury))
+	require.Equal(
+		t,
+		uint64(14_999_999_100_000_000),
+		uint64(pots.Reserves),
+	)
+	require.Equal(t, uint64(0), uint64(pots.Fees))
+}

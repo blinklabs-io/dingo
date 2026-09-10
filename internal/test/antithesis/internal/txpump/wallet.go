@@ -20,14 +20,16 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"time"
 )
 
 // UTxO represents an unspent transaction output.
 type UTxO struct {
-	TxHash     string
-	Index      uint32
-	Amount     uint64   // lovelace
-	SigningKey *UTxOKey // optional: Ed25519 key for signing inputs from this UTxO
+	TxHash      string
+	Index       uint32
+	Amount      uint64   // lovelace
+	SigningKey  *UTxOKey // optional: Ed25519 key for signing inputs from this UTxO
+	availableAt time.Time
 }
 
 // ErrInsufficientFunds is returned by SelectCoins when the wallet does not
@@ -39,11 +41,38 @@ var ErrInsufficientFunds = errors.New("wallet: insufficient funds")
 type Wallet struct {
 	mu    sync.Mutex
 	utxos []UTxO
+	now   func() time.Time
 }
 
 // NewWallet returns an empty Wallet.
 func NewWallet() *Wallet {
-	return &Wallet{}
+	return &Wallet{now: time.Now}
+}
+
+func (w *Wallet) currentTime() time.Time {
+	if w.now != nil {
+		return w.now()
+	}
+	return time.Now()
+}
+
+// AddAfter appends UTxOs that become available for coin selection after the
+// supplied delay. It is used for outputs of submitted transactions so txpump
+// does not immediately build an unconfirmed dependency chain.
+func (w *Wallet) AddAfter(delay time.Duration, utxos ...UTxO) {
+	if delay <= 0 {
+		w.Add(utxos...)
+		return
+	}
+	availableAt := w.currentTime().Add(delay)
+	for i := range utxos {
+		utxos[i].availableAt = availableAt
+	}
+	w.Add(utxos...)
+}
+
+func (w *Wallet) isAvailable(utxo UTxO, now time.Time) bool {
+	return utxo.availableAt.IsZero() || !utxo.availableAt.After(now)
 }
 
 // Add appends one or more UTxOs to the wallet.
@@ -59,7 +88,11 @@ func (w *Wallet) Balance() uint64 {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	var total uint64
+	now := w.currentTime()
 	for _, u := range w.utxos {
+		if !w.isAvailable(u, now) {
+			continue
+		}
 		if u.Amount > math.MaxUint64-total {
 			return math.MaxUint64
 		}
@@ -72,7 +105,14 @@ func (w *Wallet) Balance() uint64 {
 func (w *Wallet) Len() int {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return len(w.utxos)
+	now := w.currentTime()
+	available := 0
+	for _, u := range w.utxos {
+		if w.isAvailable(u, now) {
+			available++
+		}
+	}
+	return available
 }
 
 // SelectCoins selects UTxOs using a largest-first strategy to cover at least
@@ -91,8 +131,13 @@ func (w *Wallet) SelectCoins(targetAmount uint64) ([]UTxO, uint64, error) {
 	defer w.mu.Unlock()
 
 	// Sort descending by amount (largest first).
-	sorted := make([]UTxO, len(w.utxos))
-	copy(sorted, w.utxos)
+	now := w.currentTime()
+	sorted := make([]UTxO, 0, len(w.utxos))
+	for _, utxo := range w.utxos {
+		if w.isAvailable(utxo, now) {
+			sorted = append(sorted, utxo)
+		}
+	}
 	sort.Slice(sorted, func(i, j int) bool {
 		return sorted[i].Amount > sorted[j].Amount
 	})

@@ -257,6 +257,24 @@ func (b *Blockfrost) handleLatestEpochParams(
 ) {
 	info, err := b.node.CurrentProtocolParams()
 	if err != nil {
+		// A Byron prefix carries no protocol parameters, which is an
+		// expected stage of a from-genesis sync rather than a node fault.
+		// Reporting 500 here reads as an outage and trips alerting, so
+		// answer 404 as the absent-epoch path already does.
+		if errors.Is(err, ErrProtocolParamsUnavailable) {
+			b.logger.Debug(
+				"no protocol params for current era",
+				"error", err,
+			)
+			writeError(
+				w,
+				http.StatusNotFound,
+				"Not Found",
+				"Protocol parameters are not available for the "+
+					"current era.",
+			)
+			return
+		}
 		b.logger.Error(
 			"failed to get protocol params",
 			"error", err,
@@ -294,12 +312,31 @@ func (b *Blockfrost) handleEpochParams(
 	}
 	info, err := b.node.EpochProtocolParams(epoch)
 	if err != nil {
-		b.logger.Error(
-			"failed to get protocol params for epoch",
-			"epoch", epoch,
-			"error", err,
-		)
+		// Log after classifying, not before: an epoch the node does not
+		// hold and a Byron epoch that has no parameters are both expected
+		// answers, and logging them at error level fills the log with
+		// alerts for ordinary queries. This mirrors handleLatestEpochParams.
+		if errors.Is(err, ErrProtocolParamsUnavailable) {
+			b.logger.Debug(
+				"no protocol params for epoch era",
+				"epoch", epoch,
+				"error", err,
+			)
+			writeError(
+				w,
+				http.StatusNotFound,
+				"Not Found",
+				"Protocol parameters are not available for the "+
+					"requested epoch.",
+			)
+			return
+		}
 		if errors.Is(err, ErrEpochNotFound) {
+			b.logger.Debug(
+				"epoch not found",
+				"epoch", epoch,
+				"error", err,
+			)
 			writeError(
 				w,
 				http.StatusNotFound,
@@ -308,6 +345,11 @@ func (b *Blockfrost) handleEpochParams(
 			)
 			return
 		}
+		b.logger.Error(
+			"failed to get protocol params for epoch",
+			"epoch", epoch,
+			"error", err,
+		)
 		writeError(
 			w,
 			http.StatusInternalServerError,

@@ -18,6 +18,7 @@ package devnet
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"net"
 	"sort"
@@ -39,22 +40,6 @@ const DefaultNetworkMagic = 42
 // as soon as a node opens its socket — well before that. This covers the
 // pre-genesis wait plus the first few slot-leader draws.
 const ChainStartTimeout = 90 * time.Second
-
-// NodeEndpoint describes a node that the test harness can connect to
-// using the Ouroboros Node-to-Node mini-protocol over TCP.
-type NodeEndpoint struct {
-	Name        string
-	Address     string // host:port
-	Role        string // "producer" or "relay"
-	IsDingo     bool   // node runs Dingo
-	IsReference bool   // node runs the cardano-node reference impl
-	// Container is the compose service name, used by the scenario to
-	// interrupt and restart the node. A disruption step against an
-	// endpoint with no container fails rather than being skipped: a run
-	// that quietly omitted its interruption phases would not be the
-	// release evidence it claims to be.
-	Container string
-}
 
 // TestHarness manages connections to DevNet nodes and provides
 // helper methods for querying chain state and verifying consensus.
@@ -81,7 +66,61 @@ func NewTestHarness(
 	for _, opt := range opts {
 		opt(h)
 	}
+	h.startFailureCapture()
 	return h
+}
+
+// captureTimeout bounds the post-failure evidence collection. It runs
+// after the test has already failed, so it must not be able to hold the
+// suite open indefinitely.
+const captureTimeout = time.Minute
+
+// startFailureCapture makes a canonical scenario preserve what the
+// accelerated scenario preserves. Without it a canonical failure leaves
+// only the Go test log and whatever the compose logs still hold after the
+// run: enough to see that every node sat at one frozen tip, not enough to
+// say whether nobody forged, nobody propagated, or block production was
+// briefly held. The observed chain events are what separate those.
+//
+// Capture is wired here rather than in each scenario so a new scenario
+// cannot forget it. It stays off unless run-tests.sh gave it somewhere to
+// write and the topology names containers to read, which keeps it out of
+// the way of tests that construct endpoints they never dial.
+func (h *TestHarness) startFailureCapture() {
+	root, _ := ArtifactDir()
+	plan, ok := PlanFailureCapture(root, h.t.Name(), h.endpoints)
+	if !ok {
+		return
+	}
+	obsCtx, cancelObs := context.WithCancel(context.Background())
+	observers := StartObservers(
+		obsCtx, h.endpoints, h.networkMagic, h.t.Logf,
+	)
+	h.t.Cleanup(func() {
+		// Stop before reading, so no observer goroutine is still
+		// logging once this cleanup returns.
+		cancelObs()
+		observers.Stop()
+		if !h.t.Failed() {
+			return
+		}
+		snapshots := observers.Group().Snapshots()
+		capCtx, cancelCap := context.WithTimeout(
+			context.Background(), captureTimeout,
+		)
+		defer cancelCap()
+		// A nil source still preserves the observed chains, which
+		// are recorded in-process and need no Docker.
+		var src ArtifactSource
+		if ctl, err := NewNodeControl(h.t.Logf); err != nil {
+			h.t.Logf(
+				"harness: docker unusable for failure capture: %v", err,
+			)
+		} else {
+			src = ctl
+		}
+		WriteFailureArtifacts(capCtx, src, plan, snapshots, h.t.Logf)
+	})
 }
 
 // HarnessOptionFunc configures a TestHarness.

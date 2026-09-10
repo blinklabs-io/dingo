@@ -19,6 +19,7 @@ package aws
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log/slog"
@@ -143,6 +144,36 @@ func TestBackupRestoreRoundTrip(t *testing.T) {
 	require.Equal(t, []byte("value-b"), value)
 }
 
+// TestResetRemovesMultipleS3ListingPages exercises the real S3 paginator,
+// not only blobbackup.Reset's fake iterator. The production page-size default
+// is 1,000; this test lowers it to two so three real MinIO objects cross the
+// same page boundary without spending minutes on 1,001 individual PUTs.
+func TestResetRemovesMultipleS3ListingPages(t *testing.T) {
+	store := newTestS3Store(
+		t,
+		fmt.Sprintf("reset-multipage-%d/", time.Now().UnixNano()),
+	)
+	store.listPageSize = 2
+	txn := store.NewTransaction(true)
+	for i := range 3 {
+		require.NoError(t, store.Set(
+			txn,
+			fmt.Appendf(nil, "key-%04d", i),
+			[]byte("value"),
+		))
+	}
+	require.NoError(t, txn.Commit())
+
+	require.NoError(t, store.Reset(t.Context()))
+	readTxn := store.NewTransaction(false)
+	defer readTxn.Rollback() //nolint:errcheck
+	it := store.NewIterator(readTxn, types.BlobIteratorOptions{})
+	require.NotNil(t, it)
+	defer it.Close()
+	require.NoError(t, it.Err())
+	require.False(t, it.Valid())
+}
+
 // TestRestoreRejectsNonEmptyStore validates that Restore refuses to run
 // against a real store that already has a key in it, instead of merging
 // the backup's contents into whatever is already there.
@@ -185,4 +216,40 @@ func TestRestoreRejectsUnknownMagic(t *testing.T) {
 	)
 	err := store.Restore(context.Background(), bytes.NewReader([]byte("nope!")))
 	require.Error(t, err)
+}
+
+func TestValidateBackupRejectsTruncatedStreamWithoutCredentials(t *testing.T) {
+	var records bytes.Buffer
+	require.NoError(t, blobbackup.WriteRecord(
+		&records, []byte("key"), []byte("value"), maxBlobReadBytes,
+	))
+	stream := append(
+		append(blobbackup.Magic[:], blobbackup.Version), records.Bytes()...,
+	)
+
+	err := (&BlobStoreS3{}).ValidateBackup(
+		context.Background(), bytes.NewReader(stream),
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "terminator")
+}
+
+func TestValidateBackupRejectsChecksumMismatchWithoutCredentials(t *testing.T) {
+	var records bytes.Buffer
+	require.NoError(t, blobbackup.WriteRecord(
+		&records, []byte("key"), []byte("value"), maxBlobReadBytes,
+	))
+	var terminator [16]byte
+	binary.BigEndian.PutUint32(terminator[0:4], ^uint32(0))
+	binary.BigEndian.PutUint64(terminator[4:12], 1)
+	binary.BigEndian.PutUint32(terminator[12:16], 0xdeadbeef)
+	stream := append(blobbackup.Magic[:], blobbackup.Version)
+	stream = append(stream, records.Bytes()...)
+	stream = append(stream, terminator[:]...)
+
+	err := (&BlobStoreS3{}).ValidateBackup(
+		context.Background(), bytes.NewReader(stream),
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "corrupted")
 }

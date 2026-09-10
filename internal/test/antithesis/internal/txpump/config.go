@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -50,11 +51,13 @@ type Config struct {
 	CooldownMin int
 	CooldownMax int
 
-	// ConfirmationSlots is reserved for future use. The payment flow currently
-	// returns outputs to the wallet immediately after submission (0 = immediate
-	// spend is intentional). Any non-zero value set via TXPUMP_CONFIRMATION_SLOTS
-	// is accepted but has no effect.
+	// ConfirmationSlots is the number of slots newly submitted outputs remain
+	// unavailable for coin selection. Zero permits immediate chained spending.
 	ConfirmationSlots uint64
+
+	// SlotLength is the wall-clock duration of one network slot. It is loaded
+	// from the genesis file and used with ConfirmationSlots.
+	SlotLength time.Duration
 
 	// Types is the set of transaction types to generate.
 	// Recognised values: "payment", "delegation", "governance", "plutus".
@@ -112,6 +115,7 @@ func LoadConfig() (*Config, error) {
 		CooldownMin:       500,
 		CooldownMax:       2000,
 		ConfirmationSlots: 30,
+		SlotLength:        time.Second,
 		Types: []string{
 			"payment",
 			"delegation",
@@ -222,6 +226,7 @@ func LoadConfig() (*Config, error) {
 			)
 		}
 		cfg.EpochLength = gcfg.EpochLength
+		cfg.SlotLength = time.Duration(gcfg.SlotLength * float64(time.Second))
 		cfg.SystemStartUnix = gcfg.SystemStartUnix
 		if os.Getenv("TXPUMP_NETWORK_MAGIC") == "" {
 			cfg.NetworkMagic = gcfg.NetworkMagic
@@ -233,6 +238,17 @@ func LoadConfig() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func (c *Config) confirmationDelay() time.Duration {
+	if c.ConfirmationSlots == 0 || c.SlotLength <= 0 {
+		return 0
+	}
+	slotNanos := uint64(c.SlotLength)
+	if c.ConfirmationSlots > uint64(math.MaxInt64)/slotNanos {
+		return time.Duration(math.MaxInt64)
+	}
+	return time.Duration(c.ConfirmationSlots * slotNanos)
 }
 
 func parseStartupTimeout(value string) (time.Duration, error) {

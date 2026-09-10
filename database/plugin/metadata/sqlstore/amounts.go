@@ -25,8 +25,13 @@ import (
 // it to a signed integer. Metadata amounts are persisted as decimal text and
 // may occupy the full uint64 range, while SUM/INTEGER is signed (and differs
 // across SQLite, PostgreSQL, and MySQL).
-func sumUint64Rows(db queryer, query string, args ...any) (uint64, error) {
-	rows, err := db.QueryContext(context.Background(), query, args...)
+func sumUint64Rows(
+	ctx context.Context,
+	db queryer,
+	query string,
+	args ...any,
+) (uint64, error) {
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return 0, err
 	}

@@ -309,7 +309,6 @@ func (b *Bark) Start(ctx context.Context) error {
 			Addr:              listenAddr,
 			Handler:           handler,
 			ReadHeaderTimeout: 60 * time.Second,
-			WriteTimeout:      30 * time.Second,
 			IdleTimeout:       120 * time.Second,
 		}
 	} else {
@@ -321,7 +320,6 @@ func (b *Bark) Start(ctx context.Context) error {
 			Handler:           handler,
 			Protocols:         unencryptedHTTP2Protocols(),
 			ReadHeaderTimeout: 60 * time.Second,
-			WriteTimeout:      30 * time.Second,
 			IdleTimeout:       120 * time.Second,
 		}
 	}

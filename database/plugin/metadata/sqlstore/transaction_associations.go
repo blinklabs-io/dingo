@@ -25,6 +25,7 @@ import (
 )
 
 func (s *Store) hydrateTransactionSlice(
+	ctx context.Context,
 	db queryer,
 	transactions []models.Transaction,
 ) error {
@@ -43,6 +44,7 @@ func (s *Store) hydrateTransactionSlice(
 		transactions[i].ReferenceInputs = nil
 	}
 	outputs, err := s.transactionUtxosBatch(
+		ctx,
 		db,
 		"transaction_id",
 		ids,
@@ -57,6 +59,7 @@ func (s *Store) hydrateTransactionSlice(
 		return err
 	}
 	returns, err := s.transactionUtxosBatch(
+		ctx,
 		db,
 		"collateral_return_for_tx_id",
 		ids,
@@ -71,6 +74,7 @@ func (s *Store) hydrateTransactionSlice(
 		return err
 	}
 	inputs, err := s.transactionUtxosBatch(
+		ctx,
 		db,
 		"spent_at_tx_id",
 		hashes,
@@ -80,6 +84,7 @@ func (s *Store) hydrateTransactionSlice(
 		return err
 	}
 	collateral, err := s.transactionUtxosBatch(
+		ctx,
 		db,
 		"collateral_by_tx_id",
 		hashes,
@@ -88,30 +93,30 @@ func (s *Store) hydrateTransactionSlice(
 	if err != nil {
 		return err
 	}
-	references, err := s.referenceInputsBatch(db, hashes)
+	references, err := s.referenceInputsBatch(ctx, db, hashes)
 	if err != nil {
 		return err
 	}
-	if err := s.loadUtxoAssetsBatch(db, outputs, returns, inputs, collateral, references); err != nil {
+	if err := s.loadUtxoAssetsBatch(ctx, db, outputs, returns, inputs, collateral, references); err != nil {
 		return err
 	}
-	certs, err := s.loadTransactionCertificatesBatch(db, ids)
+	certs, err := s.loadTransactionCertificatesBatch(ctx, db, ids)
 	if err != nil {
 		return err
 	}
-	witnesses, err := s.loadTransactionKeyWitnessesBatch(db, ids)
+	witnesses, err := s.loadTransactionKeyWitnessesBatch(ctx, db, ids)
 	if err != nil {
 		return err
 	}
-	scripts, err := s.loadTransactionWitnessScriptsBatch(db, ids)
+	scripts, err := s.loadTransactionWitnessScriptsBatch(ctx, db, ids)
 	if err != nil {
 		return err
 	}
-	redeemers, err := s.loadTransactionRedeemersBatch(db, ids)
+	redeemers, err := s.loadTransactionRedeemersBatch(ctx, db, ids)
 	if err != nil {
 		return err
 	}
-	plutus, err := s.loadTransactionPlutusDataBatch(db, ids)
+	plutus, err := s.loadTransactionPlutusDataBatch(ctx, db, ids)
 	if err != nil {
 		return err
 	}
@@ -164,6 +169,7 @@ func (s *Store) hydrateTransactionSlice(
 // The legacy UTxO column remains populated for compatibility, but cannot
 // represent two transactions referencing the same output.
 func (s *Store) referenceInputsBatch(
+	ctx context.Context,
 	db queryer,
 	hashes []any,
 ) (map[string][]models.Utxo, error) {
@@ -178,7 +184,7 @@ FROM utxo AS utxo
 JOIN utxo_reference_input AS r ON r.utxo_id = utxo.id
 WHERE r.transaction_hash IN (` + bindPlaceholders(end-start) + `) ORDER BY utxo.id`
 		rows, err := db.QueryContext(
-			context.Background(),
+			ctx,
 			s.dialect.Rebind(query),
 			hashes[start:end]...)
 		if err != nil {
@@ -245,6 +251,7 @@ func scanSQLiteUtxoWithReference(
 }
 
 func (s *Store) transactionIDRows(
+	ctx context.Context,
 	db queryer,
 	columns, table string,
 	ids []any,
@@ -259,7 +266,7 @@ func (s *Store) transactionIDRows(
 			end-start,
 		) + ") ORDER BY id"
 		rows, err := db.QueryContext(
-			context.Background(),
+			ctx,
 			s.dialect.Rebind(query),
 			ids[start:end]...)
 		if err != nil {
@@ -282,11 +289,13 @@ func (s *Store) transactionIDRows(
 }
 
 func (s *Store) loadTransactionCertificatesBatch(
+	ctx context.Context,
 	db queryer,
 	ids []any,
 ) (map[string][]models.Certificate, error) {
 	ret := make(map[string][]models.Certificate)
 	err := s.transactionIDRows(
+		ctx,
 		db,
 		"block_hash, id, transaction_id, certificate_id, slot, cert_index, cert_type",
 		"certs",
@@ -309,11 +318,13 @@ func (s *Store) loadTransactionCertificatesBatch(
 }
 
 func (s *Store) loadTransactionKeyWitnessesBatch(
+	ctx context.Context,
 	db queryer,
 	ids []any,
 ) (map[string][]models.KeyWitness, error) {
 	ret := make(map[string][]models.KeyWitness)
 	err := s.transactionIDRows(
+		ctx,
 		db,
 		"vkey, signature, public_key, chain_code, attributes, id, transaction_id, type",
 		"key_witness",
@@ -334,11 +345,13 @@ func (s *Store) loadTransactionKeyWitnessesBatch(
 }
 
 func (s *Store) loadTransactionWitnessScriptsBatch(
+	ctx context.Context,
 	db queryer,
 	ids []any,
 ) (map[string][]models.WitnessScripts, error) {
 	ret := make(map[string][]models.WitnessScripts)
 	err := s.transactionIDRows(
+		ctx,
 		db,
 		"script_hash, id, transaction_id, type",
 		"witness_scripts",
@@ -359,6 +372,7 @@ func (s *Store) loadTransactionWitnessScriptsBatch(
 }
 
 func (s *Store) loadTransactionRedeemersBatch(
+	ctx context.Context,
 	db queryer,
 	ids []any,
 ) (map[string][]models.Redeemer, error) {
@@ -367,6 +381,7 @@ func (s *Store) loadTransactionRedeemersBatch(
 		"index",
 	) + ", tag"
 	err := s.transactionIDRows(
+		ctx,
 		db,
 		columns,
 		"redeemer",
@@ -387,11 +402,13 @@ func (s *Store) loadTransactionRedeemersBatch(
 }
 
 func (s *Store) loadTransactionPlutusDataBatch(
+	ctx context.Context,
 	db queryer,
 	ids []any,
 ) (map[string][]models.PlutusData, error) {
 	ret := make(map[string][]models.PlutusData)
 	err := s.transactionIDRows(
+		ctx,
 		db,
 		"data, id, transaction_id",
 		"plutus_data",
@@ -412,11 +429,12 @@ func (s *Store) loadTransactionPlutusDataBatch(
 }
 
 func (s *Store) hydrateTransaction(
+	ctx context.Context,
 	db queryer,
 	transaction *models.Transaction,
 ) error {
 	items := []models.Transaction{*transaction}
-	if err := s.hydrateTransactionSlice(db, items); err != nil {
+	if err := s.hydrateTransactionSlice(ctx, db, items); err != nil {
 		return err
 	}
 	*transaction = items[0]
@@ -427,6 +445,7 @@ func (s *Store) hydrateTransaction(
 // in parameter-limited batches. The result key is either a transaction ID or
 // hash, as selected by key.
 func (s *Store) transactionUtxosBatch(
+	ctx context.Context,
 	db queryer,
 	column string,
 	args []any,
@@ -442,7 +461,7 @@ func (s *Store) transactionUtxosBatch(
 			end-start,
 		) + ") ORDER BY id"
 		rows, err := db.QueryContext(
-			context.Background(),
+			ctx,
 			s.dialect.Rebind(query),
 			args[start:end]...)
 		if err != nil {

@@ -18,6 +18,7 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	sync "github.com/utxorpc/go-codegen/utxorpc/v1alpha/sync"
 )
 
@@ -36,6 +37,22 @@ func blockRefFromModel(b models.Block) blockRef {
 		Slot:   b.Slot,
 		Hash:   b.Hash,
 		Height: b.Number,
+	}
+}
+
+// blockRefFromTip builds a blockRef from a chain tip.
+//
+// The tip already carries its own block number, so a chain point built from it
+// needs no block lookup and cannot report a height that disagrees with the
+// slot and hash beside it. Re-deriving the height from storage could fail,
+// and `height` is a plain proto3 uint64 with no way to encode "unknown": a
+// zero beside a non-origin point asserts the tip is the origin block, which a
+// client cannot tell apart from the truth.
+func blockRefFromTip(tip ochainsync.Tip) blockRef {
+	return blockRef{
+		Slot:   tip.Point.Slot,
+		Hash:   tip.Point.Hash,
+		Height: tip.BlockNumber,
 	}
 }
 

@@ -126,6 +126,64 @@ func TestSnapshotImportTargetsNilSnapshots(t *testing.T) {
 	}
 }
 
+func TestImportSnapShotsPreservesBoundaryCaptureProvenance(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	state, err := ParseSnapshot(testdataLedgerSnapshot)
+	require.NoError(t, err)
+	require.NotNil(t, state.Tip)
+
+	cfg := ImportConfig{
+		Database: db,
+		State:    state,
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		EpochLength: func(uint) (uint, uint, error) {
+			return 1, 500, nil
+		},
+	}
+	ctx := context.Background()
+	progress := func(ImportProgress) {}
+	_, err = importCertState(ctx, cfg, state.Tip.Slot, progress)
+	require.NoError(t, err)
+	require.NoError(t, importSnapShots(
+		ctx,
+		cfg,
+		state.Tip.Slot,
+		progress,
+		false,
+	))
+
+	snapshots, err := ParseSnapShots(state.SnapShotsData)
+	require.NoError(t, err)
+	for _, target := range snapshotImportTargets(state.Epoch, snapshots) {
+		rows, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(
+			target.targetEpoch,
+			models.PoolStakeSnapshotTypeMark,
+			nil,
+		)
+		require.NoError(t, err)
+		require.NotEmpty(t, rows, "%s snapshot has no pool rows", target.name)
+
+		epochStart, ok := importedEpochStartSlot(cfg, target.targetEpoch)
+		require.True(t, ok)
+		wantCaptureSlot := uint64(0)
+		if epochStart > 0 {
+			wantCaptureSlot = epochStart - 1
+		}
+		for _, row := range rows {
+			require.Equal(
+				t,
+				wantCaptureSlot,
+				row.CapturedSlot,
+				"%s snapshot must retain its epoch-boundary provenance",
+				target.name,
+			)
+		}
+	}
+}
+
 func TestImportedEpochSummaryUsesCurrentEpochMetadata(t *testing.T) {
 	nonce := []byte{0x01, 0x02, 0x03}
 

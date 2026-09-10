@@ -320,7 +320,7 @@ func TestPhase1SkippedOnRecoveryPathButCatchesMismatchOnceReCheckable(
 	// Induce a commit-timestamp mismatch the same way
 	// TestCheckCommitTimestamp_MetadataOnly does: give metadata a commit
 	// timestamp with none on the blob side.
-	metaTxn := db.Metadata().Transaction()
+	metaTxn := db.Metadata().Transaction(t.Context())
 	require.NoError(t, db.Metadata().SetCommitTimestamp(123456789, metaTxn))
 	require.NoError(t, metaTxn.Commit())
 	require.NoError(t, closeTestDatabase(db))

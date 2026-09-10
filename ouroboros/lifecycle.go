@@ -135,6 +135,10 @@ func (o *Ouroboros) subscribeTracked(
 // Close is idempotent, so Run()'s deferred shutdown and an explicit
 // live-restore teardown can both call it.
 func (o *Ouroboros) Close() error {
+	// Cancel admission-recovery publication before waiting for EventBus
+	// handlers. A timer that fired concurrently with Close must not keep
+	// shutdown waiting on an ordered-lane enqueue.
+	o.stopFutureHeaderResyncs()
 	o.subscriptionsMu.Lock()
 	subs := o.subscriptions
 	o.subscriptions = nil

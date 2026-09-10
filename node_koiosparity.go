@@ -45,10 +45,9 @@ const defaultKoiosParityCacheSubdir = ".koios/cache.db"
 // the event has already committed.
 //
 // A strict-mode failure (the default — see KoiosParityConfig) calls
-// n.cancel via FatalFunc, matching every other FatalErrorFunc-style
-// composition callback in Run() (ledger, Midnight indexer): a Koios/tool
-// error or exact parity mismatch stops the node rather than being logged as
-// ordinary operation.
+// n.cancelForFatal via FatalFunc: a Koios/tool error or exact parity mismatch
+// stops the node and is returned by Run so the process exits non-zero rather
+// than being logged as ordinary operation or mistaken for a clean signal.
 func (n *Node) startKoiosParityObserver() error {
 	cfg := n.config.koiosParity
 
@@ -102,7 +101,7 @@ func (n *Node) startKoiosParityObserver() error {
 				"fatal koios parity validation failure, initiating shutdown",
 				"error", err,
 			)
-			n.cancel()
+			n.cancelForFatal(err)
 		},
 	})
 	if err != nil {

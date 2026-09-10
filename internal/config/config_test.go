@@ -43,6 +43,7 @@ func resetGlobalConfig() {
 		StrictUtxoValidation:        true,
 		Network:                     "preview",
 		MetricsPort:                 12798,
+		DebugBindAddr:               DefaultDebugBindAddr,
 		PrivateBindAddr:             "127.0.0.1",
 		PrivatePort:                 3002,
 		RelayPort:                   3001,
@@ -73,8 +74,17 @@ func resetGlobalConfig() {
 	globalTopologyConfig = &topology.TopologyConfig{}
 }
 
+func unsetDebugBindAddrEnv(t *testing.T) {
+	t.Helper()
+	// Preserve the caller's environment while ensuring config tests that
+	// exercise defaults or YAML precedence do not inherit this override.
+	t.Setenv("DINGO_DEBUG_BIND_ADDR", "")
+	require.NoError(t, os.Unsetenv("DINGO_DEBUG_BIND_ADDR"))
+}
+
 func TestLoad_CompareFullStruct(t *testing.T) {
 	resetGlobalConfig()
+	unsetDebugBindAddrEnv(t)
 	yamlContent := `
 plugins:
   mempool:
@@ -162,6 +172,7 @@ mithril:
 		StrictUtxoValidation: true,
 		Network:              "preview",
 		MetricsPort:          8088,
+		DebugBindAddr:        DefaultDebugBindAddr,
 		PrivateBindAddr:      "127.0.0.1",
 		PrivatePort:          8000,
 		RelayPort:            4000,
@@ -252,6 +263,7 @@ func TestLoad_DAGMempoolProvider(t *testing.T) {
 
 func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 	resetGlobalConfig()
+	unsetDebugBindAddrEnv(t)
 
 	// Without Config file
 	cfg, err := LoadConfig("")
@@ -278,6 +290,7 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 		StrictUtxoValidation: true,
 		Network:              "preview",
 		MetricsPort:          12798,
+		DebugBindAddr:        DefaultDebugBindAddr,
 		PrivateBindAddr:      "127.0.0.1",
 		PrivatePort:          3002,
 		RelayPort:            3001,
@@ -1305,6 +1318,10 @@ func TestLoad_MidnightConfig(t *testing.T) {
 	resetGlobalConfig()
 	yamlContent := `
 midnight:
+  enabled: true
+  serverEnabled: true
+  reflectionEnabled: true
+  allowInsecureRemote: true
   port: 50060
   host: "127.0.0.2"
   cnightPolicyId: "cnight-policy"
@@ -1334,6 +1351,10 @@ network: "preview"
 	}
 
 	expected := MidnightConfig{
+		Enabled:                     true,
+		ServerEnabled:               true,
+		ReflectionEnabled:           true,
+		AllowInsecureRemote:         true,
 		Port:                        50060,
 		Host:                        "127.0.0.2",
 		CNightPolicyID:              "cnight-policy",
@@ -1358,6 +1379,9 @@ network: "preview"
 
 func TestLoad_MidnightEnvOverridesYAML(t *testing.T) {
 	resetGlobalConfig()
+	t.Setenv("DINGO_MIDNIGHT_SERVER_ENABLED", "true")
+	t.Setenv("DINGO_MIDNIGHT_REFLECTION_ENABLED", "true")
+	t.Setenv("DINGO_MIDNIGHT_ALLOW_INSECURE_REMOTE", "true")
 	t.Setenv("DINGO_MIDNIGHT_PORT", "50070")
 	t.Setenv("DINGO_MIDNIGHT_HOST", "127.0.0.3")
 	yamlContent := `
@@ -1382,6 +1406,10 @@ network: "preview"
 
 	if cfg.Midnight.Port != 50070 {
 		t.Fatalf("expected env midnight port 50070, got %d", cfg.Midnight.Port)
+	}
+	if !cfg.Midnight.ServerEnabled || !cfg.Midnight.ReflectionEnabled ||
+		!cfg.Midnight.AllowInsecureRemote {
+		t.Fatalf("expected environment to enable Midnight server policy: %+v", cfg.Midnight)
 	}
 	if cfg.Midnight.Host != "127.0.0.3" {
 		t.Fatalf(

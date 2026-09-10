@@ -89,7 +89,12 @@ func (s *Store) EnsureOffchainMetadataPointers(
 	txn types.Txn,
 ) (int, error) {
 	ctx = nonNilContext(ctx)
-	db, err := s.dbFromTxn(txn)
+	// The txn-carried ctx is not used here: this method already takes an
+	// explicit ctx from its caller (and is always invoked with txn == nil,
+	// the autocommit path, so dbFromTxn's own ctx would only ever be
+	// context.Background() -- using it would silently discard the ctx this
+	// method was actually given).
+	db, _, err := s.dbFromTxn(txn)
 	if err != nil {
 		return 0, err
 	}
@@ -186,7 +191,9 @@ func (s *Store) GetOffchainMetadataFetchBatch(
 	if limit <= 0 {
 		limit = 1
 	}
-	db, err := s.dbFromTxn(txn)
+	// See EnsureOffchainMetadataPointers: the txn-carried ctx is discarded
+	// in favor of this method's own explicit ctx parameter.
+	db, _, err := s.dbFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -265,7 +272,9 @@ func (s *Store) SetOffchainMetadataFetchResult(
 		return errors.New("off-chain metadata fetch result missing row ID")
 	}
 	ctx = nonNilContext(ctx)
-	db, err := s.dbFromTxn(txn)
+	// See EnsureOffchainMetadataPointers: the txn-carried ctx is discarded
+	// in favor of this method's own explicit ctx parameter.
+	db, _, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
@@ -316,13 +325,13 @@ func (s *Store) GetOffchainMetadata(
 	hash []byte,
 	txn types.Txn,
 ) (*models.OffchainMetadata, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
 	q := s.operationalQueries(db)
 	row, err := q.GetOffchainMetadata(
-		context.Background(),
+		ctx,
 		sqlitequery.GetOffchainMetadataParams{
 			SourceType: sourceType,
 			Url:        strings.TrimSpace(url),
@@ -360,7 +369,7 @@ func (s *Store) GetOffchainMetadataBatch(
 	if len(unique) == 0 {
 		return nil, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -375,7 +384,7 @@ func (s *Store) GetOffchainMetadataBatch(
 			args = append(args, url)
 		}
 		rows, err := db.QueryContext(
-			context.Background(),
+			ctx,
 			s.dialect.Rebind(`
 SELECT fetched_at, next_fetch_after, created_at, updated_at, url,
        source_type, status, content_type, last_error, hash, body_hash,

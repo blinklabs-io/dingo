@@ -718,8 +718,10 @@ func (m *Mempool) NewConsumer(connId ouroboros.ConnectionId) Consumer {
 
 func (m *Mempool) RemoveConsumer(connId ouroboros.ConnectionId) {
 	m.consumersMutex.Lock()
+	consumer := m.consumers[connId]
 	delete(m.consumers, connId)
 	m.consumersMutex.Unlock()
+	consumer.cancel()
 }
 
 func (m *Mempool) Stop(ctx context.Context) error {

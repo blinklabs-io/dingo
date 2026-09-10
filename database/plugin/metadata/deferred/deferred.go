@@ -37,6 +37,9 @@ package deferred
 //     (import_checkpoint.import_key, backfill_checkpoint.phase).
 //   - The utxo (tx_id, output_idx) lookup index, required to
 //     resolve transaction inputs during backfill UTxO spending.
+//   - Indexes the import path's own predicates filter on. Those are
+//     listed in Retained, which the drop and rebuild paths keep
+//     present rather than dropping.
 //   - Cross-row uniqueness constraints used by ledger-state import
 //     (pool_stake_snapshot, reward_snapshot, reward_pool_input,
 //     network_state, account.staking_key, drep.credential, etc.).
@@ -46,14 +49,20 @@ package deferred
 //
 //  1. Does any import path (ledger-state import, immutable blob
 //     load, backfill block replay) rely on the index for an ON
-//     CONFLICT target, FK enforcement, or constraint lookup? If
-//     yes, leave it out of the manifest.
+//     CONFLICT target, FK enforcement, constraint lookup, or the
+//     WHERE clause of a per-row idempotency delete or aggregate
+//     refresh? If yes, leave it out of the manifest. A predicate an
+//     import path runs once per transaction cannot afford a scan of
+//     a table the same import path is growing.
 //  2. Does the index only serve API/query/rollback paths that do
 //     not run during Mithril sync? If yes, add it here.
 //  3. Composite indexes share state with their constituent columns. If a field
 //     has both a deferrable single-column query index and a protected composite
 //     unique index, give the single-column index an explicit name and list that
 //     name here instead of the field.
+//  4. Taking an index back out of the manifest means adding it to
+//     Retained. Deleting the entry alone leaves it missing on every
+//     database an older binary had already dropped it from.
 //
 // See deferred_test.go for manifest invariants.
 type Index struct {
@@ -242,12 +251,19 @@ var Manifest = []Index{
 		Columns: []string{"cert_type"},
 		Notes:   "Certificate type filter",
 	},
-	{
-		Name:    "idx_redeemer_transaction_id",
-		Table:   "redeemer",
-		Columns: []string{"transaction_id"},
-		Notes:   "Redeemer transaction lookup",
-	},
+	// idx_redeemer_transaction_id, idx_key_witness_transaction_id, and
+	// idx_witness_scripts_transaction_id are deliberately NOT deferred.
+	// storeTransactionWitnesses (database/plugin/metadata/sqlstore) rewrites
+	// the witness tables on every API-mode SetTransaction, and clears the
+	// previous attempt's rows first with an unconditional
+	// DELETE ... WHERE transaction_id = ? per table. With those indexes
+	// dropped each delete is a full scan of a table that gains a row per
+	// transaction written, so per-transaction cost grows with the rows
+	// already present and historical backfill turns quadratic: measured on
+	// preview, Mithril backfill fell from 3311 to 9 blocks/sec by 2%
+	// progress while its own ETA climbed from 30m to 177h (issue #3253).
+	// plutus_data, the fourth table the same loop clears, was never
+	// deferred; these three now match it.
 	{
 		Name:    "idx_redeemer_index",
 		Table:   "redeemer",
@@ -259,12 +275,6 @@ var Manifest = []Index{
 		Table:   "redeemer",
 		Columns: []string{"tag"},
 		Notes:   "Redeemer tag filter",
-	},
-	{
-		Name:    "idx_key_witness_transaction_id",
-		Table:   "key_witness",
-		Columns: []string{"transaction_id"},
-		Notes:   "Witness transaction lookup",
 	},
 	{
 		Name:    "idx_key_witness_type",
@@ -279,15 +289,77 @@ var Manifest = []Index{
 		Notes:   "Script hash lookup",
 	},
 	{
-		Name:    "idx_witness_scripts_transaction_id",
-		Table:   "witness_scripts",
-		Columns: []string{"transaction_id"},
-		Notes:   "Script transaction lookup",
-	},
-	{
 		Name:    "idx_witness_scripts_type",
 		Table:   "witness_scripts",
 		Columns: []string{"type"},
 		Notes:   "Script type filter",
+	},
+}
+
+// Retained names the indexes deliberately excluded from Manifest because an
+// import path's own predicates need them resident during bulk load.
+//
+// Removing an entry from Manifest does not restore it on databases already on
+// disk. A shipped binary whose manifest still held the entry drops it at the
+// start of a bulk-load cycle and recreates it only in the full rebuild, so a
+// database interrupted inside that window -- a multi-hour Mithril backfill,
+// for issue #3253 -- still has the index missing. The newer binary's
+// BuildDeferredIndexes no longer carries the entry, and the versioned
+// migration that created it is already recorded complete, so
+// CREATE INDEX IF NOT EXISTS never runs again: the full-table scan the
+// exclusion exists to prevent becomes permanent.
+//
+// The drop and full-rebuild paths therefore create any absent entry here
+// before touching the manifest, which repairs such a database at the start of
+// the next cycle -- including the cycle the operator starts by upgrading to
+// the binary that carries the exclusion. Entries already present cost one
+// catalog lookup each.
+var Retained = []Index{
+	{
+		Name:  "idx_utxo_staking_deleted_amount",
+		Table: "utxo",
+		Columns: []string{
+			"credential_tag",
+			"staking_key",
+			"deleted_slot",
+			"amount",
+		},
+		Notes: "Per-batch live-stake SUM during API-mode backfill",
+	},
+	{
+		Name:    "idx_key_witness_transaction_id",
+		Table:   "key_witness",
+		Columns: []string{"transaction_id"},
+		Notes:   "SetTransaction witness idempotency delete",
+	},
+	{
+		Name:    "idx_witness_scripts_transaction_id",
+		Table:   "witness_scripts",
+		Columns: []string{"transaction_id"},
+		Notes:   "SetTransaction witness idempotency delete",
+	},
+	{
+		Name:    "idx_redeemer_transaction_id",
+		Table:   "redeemer",
+		Columns: []string{"transaction_id"},
+		Notes:   "SetTransaction witness idempotency delete",
+	},
+	{
+		Name:    "idx_plutus_data_transaction_id",
+		Table:   "plutus_data",
+		Columns: []string{"transaction_id"},
+		Notes:   "SetTransaction witness idempotency delete",
+	},
+	{
+		Name:    "idx_address_transaction_transaction_id",
+		Table:   "address_transaction",
+		Columns: []string{"transaction_id"},
+		Notes:   "SetTransaction address index idempotency delete",
+	},
+	{
+		Name:    "idx_certs_transaction_id",
+		Table:   "certs",
+		Columns: []string{"transaction_id"},
+		Notes:   "SetTransaction certificate idempotency delete subquery",
 	},
 }

@@ -154,12 +154,17 @@ type TokenRegistryConfig struct {
 // MidnightConfig controls the Midnight indexer and optional gRPC listener.
 // Indexing is only active when Enabled is true AND Dingo is running in API
 // storage mode -- both are required, since the indexer depends on the
-// api-mode indexes to function. Port 0 disables the gRPC listener while
-// leaving indexing eligible to run.
+// api-mode indexes to function. ServerEnabled independently opts into the
+// listener so persisted Midnight data can be served without running the
+// indexer. Reflection and non-loopback plaintext exposure are separate,
+// default-off decisions.
 type MidnightConfig struct {
-	Enabled bool
-	Port    uint
-	Host    string
+	Enabled             bool
+	ServerEnabled       bool
+	ReflectionEnabled   bool
+	AllowInsecureRemote bool
+	Port                uint
+	Host                string
 
 	CNightPolicyID              string
 	CNightAssetName             string
@@ -226,6 +231,7 @@ type Config struct {
 	shutdownTimeout                                                                     time.Duration
 	DatabaseWorkerPoolConfig                                                            ledger.DatabaseWorkerPoolConfig
 	targetNumberOfKnownPeers, targetNumberOfEstablishedPeers, targetNumberOfActivePeers int
+	targetNumberOfRootPeers                                                             int
 	activePeersTopologyQuota, activePeersGossipQuota, activePeersLedgerQuota            int
 	minHotPeers                                                                         int
 	reconcileInterval, inactivityTimeout                                                time.Duration
@@ -763,6 +769,9 @@ func (c *Config) syncCompatFields() {
 	}
 	c.midnight = MidnightConfig{
 		Enabled:                     c.cfg.Midnight.Enabled,
+		ServerEnabled:               c.cfg.Midnight.ServerEnabled,
+		ReflectionEnabled:           c.cfg.Midnight.ReflectionEnabled,
+		AllowInsecureRemote:         c.cfg.Midnight.AllowInsecureRemote,
 		Port:                        c.cfg.Midnight.Port,
 		Host:                        c.cfg.Midnight.Host,
 		CNightPolicyID:              c.cfg.Midnight.CNightPolicyID,
@@ -790,6 +799,7 @@ func (c *Config) syncCompatFields() {
 		TaskQueueSize:  c.cfg.DatabaseQueueSize,
 	}
 	c.targetNumberOfKnownPeers, c.targetNumberOfEstablishedPeers, c.targetNumberOfActivePeers = c.cfg.TargetNumberOfKnownPeers, c.cfg.TargetNumberOfEstablishedPeers, c.cfg.TargetNumberOfActivePeers
+	c.targetNumberOfRootPeers = c.cfg.TargetNumberOfRootPeers
 	c.activePeersTopologyQuota, c.activePeersGossipQuota, c.activePeersLedgerQuota = c.cfg.ActivePeersTopologyQuota, c.cfg.ActivePeersGossipQuota, c.cfg.ActivePeersLedgerQuota
 	c.minHotPeers, c.reconcileInterval, c.inactivityTimeout = c.cfg.MinHotPeers, c.cfg.ReconcileInterval, c.cfg.InactivityTimeout
 	c.inboundWarmTarget, c.inboundHotQuota, c.inboundMinTenure = c.cfg.InboundWarmTarget, c.cfg.InboundHotQuota, c.cfg.InboundMinTenure
@@ -1219,6 +1229,14 @@ func WithPeerTargets(
 	}
 }
 
+// WithRootPeerTarget specifies the target number of root peers from topology.
+// Use 0 to use the default target, or -1 for unlimited.
+func WithRootPeerTarget(targetRoot int) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.TargetNumberOfRootPeers = targetRoot
+	}
+}
+
 // WithActivePeersQuotas specifies the per-source quotas for active peers.
 // Use 0 to use the default quota, or a negative value to disable enforcement.
 // Default quotas: topology=20, gossip=20, ledger=20
@@ -1592,6 +1610,9 @@ func WithMidnightConfig(cfg MidnightConfig) ConfigOptionFunc {
 		}
 		c.cfg.Midnight = internalconfig.MidnightConfig{
 			Enabled:                     cfg.Enabled,
+			ServerEnabled:               cfg.ServerEnabled,
+			ReflectionEnabled:           cfg.ReflectionEnabled,
+			AllowInsecureRemote:         cfg.AllowInsecureRemote,
 			Port:                        cfg.Port,
 			Host:                        cfg.Host,
 			CNightPolicyID:              cfg.CNightPolicyID,
@@ -1964,6 +1985,11 @@ func (c *Config) TargetNumberOfActivePeers() int {
 // This is used when applying cardano-node config fallbacks.
 func (c *Config) SetTargetNumberOfActivePeers(n int) {
 	c.cfg.TargetNumberOfActivePeers = n
+}
+
+// TargetNumberOfRootPeers returns the target number of root peers.
+func (c *Config) TargetNumberOfRootPeers() int {
+	return c.cfg.TargetNumberOfRootPeers
 }
 
 // ActivePeersTopologyQuota returns the per-source quota for topology peers.

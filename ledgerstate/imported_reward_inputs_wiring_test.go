@@ -89,6 +89,7 @@ func TestSeedImportedRewardInputsWritesRows(t *testing.T) {
 		txn.Metadata(),
 		snapshots,
 		func(uint64) (map[string]*ParsedPool, error) { return params, nil },
+		nil,
 		state.Epoch,
 		state.Tip.Slot,
 		logger,
@@ -152,7 +153,7 @@ func TestSeedImportedRewardInputsUsesSnapshotPoolParams(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	txn := db.MetadataTxn(true)
 	require.NoError(t, seedImportedRewardInputs(
-		db.Metadata(), txn.Metadata(), snapshots, nil,
+		db.Metadata(), txn.Metadata(), snapshots, nil, nil,
 		state.Epoch, state.Tip.Slot, logger,
 	))
 	require.NoError(t, txn.Commit())
@@ -190,7 +191,7 @@ func TestSeedImportedRewardInputsWritesNothingWithoutPoolParams(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	txn := db.MetadataTxn(true)
 	require.NoError(t, seedImportedRewardInputs(
-		db.Metadata(), txn.Metadata(), snapshots, nil,
+		db.Metadata(), txn.Metadata(), snapshots, nil, nil,
 		state.Epoch, state.Tip.Slot, logger,
 	))
 	require.NoError(t, txn.Commit())

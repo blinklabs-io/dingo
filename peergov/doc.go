@@ -31,6 +31,25 @@
 // modeled as their own governed source with explicit budget controls
 // (InboundWarmTarget, InboundHotQuota) and validation policy knobs.
 //
+// # Ledger peer discovery
+//
+// Ledger discovery re-offers the full on-chain relay set on every round, so
+// the per-candidate path is deliberately cheap: the deny list and the known-
+// peer set are consulted before any DNS lookup, and a relay hostname that
+// fails to resolve is negatively cached (negativeDNSCacheTTL) so it is not
+// re-resolved every round. A pool publishing a dead relay hostname is a fact
+// about the chain rather than an operator-actionable fault, so the failure is
+// logged at debug level.
+//
+// Discovery normally runs at LedgerPeerRefreshInterval. While the node has
+// fewer eligible upstreams than MinHotPeers it switches to the emergency
+// cadence (EmergencyLedgerPeerRefreshInterval) so a collapsed peer pool
+// recovers in seconds. That cadence doubles for each consecutive round the
+// node stays short of upstreams, capped at LedgerPeerRefreshInterval, and
+// resets on recovery: a transient collapse is still served immediately, while
+// a persistently unusable relay set (dead hostnames, wrong-network relays)
+// stops re-walking the whole set every emergency interval indefinitely.
+//
 // # Churn
 //
 // A reconcile loop periodically compares the current active set to

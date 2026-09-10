@@ -35,3 +35,22 @@ type Restorer interface {
 	// Restore replaces the store's contents with the backup read from r.
 	Restore(ctx context.Context, r io.Reader) error
 }
+
+// BackupValidator is implemented by blob store plugins that can validate a
+// backup stream completely without writing to the target store. Live restore
+// uses this before either store is mutated, so a truncated record, a checksum
+// mismatch, or trailing data cannot be discovered only after metadata has
+// already been replaced.
+type BackupValidator interface {
+	ValidateBackup(ctx context.Context, r io.Reader) error
+}
+
+// Resettable is implemented by remote blob stores whose configured target is
+// independent of the local data directory passed to the provider. A live
+// restore cannot obtain an empty target for these providers by restoring into
+// a sibling directory, so it takes a rollback backup and then calls Reset
+// before loading the replacement. Callers must not use Reset without first
+// retaining a restorable copy of the current contents.
+type Resettable interface {
+	Reset(ctx context.Context) error
+}

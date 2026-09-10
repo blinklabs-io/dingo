@@ -28,7 +28,7 @@ import (
 // this package, it proves the limit is accepted exactly at the
 // boundary and rejected one past it, using synthetic fixtures rather
 // than mainnet-scale data (which would be impractical to check in or
-// generate at test time for a 10,000,000-entry cap).
+// generate at test time for production-scale caps).
 
 // mustEncodeCbor encodes v and fails the test on error.
 func mustEncodeCbor(t *testing.T, v any) []byte {
@@ -148,7 +148,7 @@ func TestDecodeMapEntriesLimit_IndefiniteLength_OverLimitRejected(
 // TestDecodeMapEntries_ProductionLimitIsExplicit locks the documented
 // production cap. If this constant is ever changed, this test forces
 // an update to both this test and the "Local CBOR decode limits
-// policy" doc comment (and DATABASE.md, per CLAUDE.md doc parity).
+// policy" doc comment.
 func TestDecodeMapEntries_ProductionLimitIsExplicit(t *testing.T) {
 	t.Parallel()
 	require.Equal(t, 10_000_000, maxMapEntries)
@@ -168,23 +168,23 @@ func TestDecodeMapEntries_ProductionCapRejectsOversizedHeader(t *testing.T) {
 	require.Contains(t, err.Error(), "exceeds max (10000000)")
 }
 
-func TestCheckUTxOMapEntryCount(t *testing.T) {
+func TestCheckUTxOMapEntryCountSupportsHundredMillion(t *testing.T) {
 	t.Parallel()
 
 	require.NoError(t, checkUTxOMapEntryCount(0))
-	require.NoError(t, checkUTxOMapEntryCount(maxMapEntries))
+	require.NoError(t, checkUTxOMapEntryCount(100_000_000))
 
-	err := checkUTxOMapEntryCount(maxMapEntries + 1)
+	err := checkUTxOMapEntryCount(100_000_001)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "exceeds max")
+	require.Contains(t, err.Error(), "exceeds max (100000000)")
 }
 
 func TestParseUTxOsStreaming_RejectsOversizedMapHeader(t *testing.T) {
 	t.Parallel()
-	// Header-only fixture claiming one more than maxMapEntries; the
+	// Header-only fixture claiming one more than the UTxO-specific cap; the
 	// new checkUTxOMapEntryCount guard must reject it before the
 	// streaming loop (and therefore the callback) ever runs.
-	header := cborTypeHeader(cborMajorMap, uint64(maxMapEntries+1))
+	header := cborTypeHeader(cborMajorMap, 100_000_001)
 	callbackInvoked := false
 
 	_, err := ParseUTxOsStreaming(

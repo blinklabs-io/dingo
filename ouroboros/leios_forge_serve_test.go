@@ -26,8 +26,10 @@ import (
 
 func TestEnqueueLeiosPrototypeVote(t *testing.T) {
 	o := &Ouroboros{leiosEBLog: newLeiosForgedEBLog()}
-	const connKey = "peer-a"
-	o.leiosEBLog.registerConn(connKey)
+	const connA = "peer-a"
+	const connB = "peer-b"
+	o.leiosEBLog.registerConn(connA)
+	o.leiosEBLog.registerConn(connB)
 	vote := lcommon.LeiosPrototypeVote{
 		AnnouncingRbHash: lcommon.NewBlake2b256([]byte("announcing-rb")),
 		VoterId:          7,
@@ -35,11 +37,159 @@ func TestEnqueueLeiosPrototypeVote(t *testing.T) {
 	}
 
 	o.EnqueueLeiosPrototypeVote(vote)
-	entry, _ := o.leiosEBLog.next(connKey)
+	for _, connKey := range []string{connA, connB} {
+		entry, _ := o.leiosEBLog.next(connKey)
+		require.NotNil(t, entry)
+		require.NotNil(t, entry.vote)
+		require.Equal(t, vote, *entry.vote)
+		require.Nil(t, entry.point)
+	}
+}
+
+func TestEnqueueLeiosPrototypeVoteFromPeerExcludesOrigin(t *testing.T) {
+	o := &Ouroboros{leiosEBLog: newLeiosForgedEBLog()}
+	const originConn = "peer-origin"
+	const otherConn = "peer-other"
+	o.leiosEBLog.registerConn(originConn)
+	o.leiosEBLog.registerConn(otherConn)
+	vote := lcommon.LeiosPrototypeVote{
+		AnnouncingRbHash: lcommon.NewBlake2b256([]byte("announcing-rb")),
+		VoterId:          7,
+		VoteSignature:    make([]byte, lcommon.LeiosBlsSignatureSize),
+	}
+
+	o.EnqueueLeiosPrototypeVoteFromPeer(vote, originConn)
+
+	// The caught-up origin advances during append. It neither pins the entry
+	// while idle nor creates a delivery reservation or retry claim.
+	require.Equal(t, 1, o.leiosEBLog.cursors[originConn])
+	require.NotContains(t, o.leiosEBLog.reservations, originConn)
+	require.NotContains(t, o.leiosEBLog.retryCursors, originConn)
+	require.Empty(t, o.leiosEBLog.retries)
+	entry, _ := o.leiosEBLog.next(originConn)
+	require.Nil(t, entry)
+
+	entry, _ = o.leiosEBLog.next(otherConn)
 	require.NotNil(t, entry)
 	require.NotNil(t, entry.vote)
 	require.Equal(t, vote, *entry.vote)
-	require.Nil(t, entry.point)
+	o.leiosEBLog.complete(otherConn, true)
+
+	// Once the other peer receives the vote, the skipped origin cursor no
+	// longer prevents normal head pruning.
+	require.Empty(t, o.leiosEBLog.items)
+	require.Equal(t, 1, o.leiosEBLog.base)
+}
+
+func TestLeiosForgedEBLogSkipsOriginAfterPriorDelivery(t *testing.T) {
+	o := &Ouroboros{leiosEBLog: newLeiosForgedEBLog()}
+	const originConn = "peer-origin"
+	const otherConn = "peer-other"
+	o.leiosEBLog.registerConn(originConn)
+	o.leiosEBLog.registerConn(otherConn)
+	localBefore := lcommon.LeiosPrototypeVote{VoterId: 1}
+	fromOriginA := lcommon.LeiosPrototypeVote{VoterId: 2}
+	fromOriginB := lcommon.LeiosPrototypeVote{VoterId: 4}
+	localAfter := lcommon.LeiosPrototypeVote{VoterId: 3}
+
+	o.EnqueueLeiosPrototypeVote(localBefore)
+	originEntry, _ := o.leiosEBLog.next(originConn)
+	require.NotNil(t, originEntry)
+	require.Equal(t, localBefore, *originEntry.vote)
+
+	// The origin is still reserved on the preceding local vote, so append
+	// cannot advance it across the excluded entries yet.
+	o.EnqueueLeiosPrototypeVoteFromPeer(fromOriginA, originConn)
+	o.EnqueueLeiosPrototypeVoteFromPeer(fromOriginB, originConn)
+	require.Equal(t, 0, o.leiosEBLog.cursors[originConn])
+	o.leiosEBLog.complete(originConn, true)
+
+	// Completing the preceding delivery advances across both excluded votes
+	// without creating a reservation. The following local vote is still sent.
+	require.Equal(t, 3, o.leiosEBLog.cursors[originConn])
+	require.NotContains(t, o.leiosEBLog.reservations, originConn)
+	require.NotContains(t, o.leiosEBLog.retryCursors, originConn)
+	require.Empty(t, o.leiosEBLog.retries)
+	o.EnqueueLeiosPrototypeVote(localAfter)
+	originEntry, _ = o.leiosEBLog.next(originConn)
+	require.NotNil(t, originEntry)
+	require.Equal(t, localAfter, *originEntry.vote)
+
+	for _, want := range []lcommon.LeiosPrototypeVote{
+		localBefore,
+		fromOriginA,
+		fromOriginB,
+		localAfter,
+	} {
+		otherEntry, _ := o.leiosEBLog.next(otherConn)
+		require.NotNil(t, otherEntry)
+		require.Equal(t, want, *otherEntry.vote)
+		o.leiosEBLog.complete(otherConn, true)
+	}
+	o.leiosEBLog.complete(originConn, true)
+	require.Empty(t, o.leiosEBLog.items)
+}
+
+func TestLeiosForgedEBLogOriginReconnectSkipsExcludedRetry(t *testing.T) {
+	log := newLeiosForgedEBLog()
+	const originConn = "peer-origin"
+	const failedConnA = "peer-failed-a"
+	const failedConnB = "peer-failed-b"
+	log.registerConn(originConn)
+	log.registerConn(failedConnA)
+	log.registerConn(failedConnB)
+	excludedVote := lcommon.LeiosPrototypeVote{VoterId: 1}
+	eligibleVote := lcommon.LeiosPrototypeVote{VoterId: 2}
+	log.append(leiosForgedEBEntry{
+		vote:           &excludedVote,
+		excludeConnKey: originConn,
+	})
+	log.append(leiosForgedEBEntry{vote: &eligibleVote})
+
+	entry, _ := log.next(failedConnA)
+	require.NotNil(t, entry)
+	require.Equal(t, excludedVote, *entry.vote)
+	log.complete(failedConnA, false)
+	log.removeConn(failedConnA)
+
+	entry, _ = log.next(failedConnB)
+	require.NotNil(t, entry)
+	require.Equal(t, excludedVote, *entry.vote)
+	log.complete(failedConnB, true)
+	entry, _ = log.next(failedConnB)
+	require.NotNil(t, entry)
+	require.Equal(t, eligibleVote, *entry.vote)
+	log.complete(failedConnB, false)
+	log.removeConn(failedConnB)
+
+	// Re-registering the source must leave the excluded retry owed and claim
+	// only the eligible retry. Delivering the latter must decrement its own
+	// count rather than being misclassified as a normal delivery.
+	log.removeConn(originConn)
+	log.registerConn(originConn)
+	require.Equal(t, 1, log.cursors[originConn])
+	require.Equal(t, 1, log.retryCursors[originConn])
+	require.Equal(t, 1, log.retries[0])
+	require.Equal(t, 1, log.retries[1])
+	entry, _ = log.next(originConn)
+	require.NotNil(t, entry)
+	require.Equal(t, eligibleVote, *entry.vote)
+	require.True(t, log.reservations[originConn].retry)
+	log.complete(originConn, true)
+	require.Equal(t, 1, log.retries[0])
+	require.NotContains(t, log.retries, 1)
+
+	const eligibleRetryConn = "peer-eligible-retry"
+	log.registerConn(eligibleRetryConn)
+	entry, _ = log.next(eligibleRetryConn)
+	require.NotNil(t, entry)
+	require.Equal(t, excludedVote, *entry.vote)
+	require.True(t, log.reservations[eligibleRetryConn].retry)
+	log.complete(eligibleRetryConn, true)
+	log.removeConn(eligibleRetryConn)
+	log.removeConn(originConn)
+	require.Empty(t, log.items)
+	require.Empty(t, log.retries)
 }
 
 func TestLeiosForgedEBLogCommitsOnlyAfterDelivery(t *testing.T) {

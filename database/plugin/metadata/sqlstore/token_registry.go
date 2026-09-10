@@ -53,7 +53,12 @@ func (s *Store) UpsertTokenRegistryEntries(
 		return 0, nil
 	}
 	ctx = nonNilContext(ctx)
-	db, err := s.dbFromTxn(txn)
+	// The txn-carried ctx is not used here: this method already takes an
+	// explicit ctx from its caller (and is always invoked with txn == nil,
+	// the autocommit path, so dbFromTxn's own ctx would only ever be
+	// context.Background() -- using it would silently discard the ctx this
+	// method was actually given).
+	db, _, err := s.dbFromTxn(txn)
 	if err != nil {
 		return 0, err
 	}
@@ -103,12 +108,12 @@ func (s *Store) GetTokenRegistryEntry(
 	if normalized == "" {
 		return nil, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
 	q := s.operationalQueries(db)
-	row, err := q.GetTokenRegistryEntry(context.Background(), normalized)
+	row, err := q.GetTokenRegistryEntry(ctx, normalized)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -135,7 +140,9 @@ func (s *Store) PruneTokenRegistryEntriesBefore(
 	txn types.Txn,
 ) (int, error) {
 	ctx = nonNilContext(ctx)
-	db, err := s.dbFromTxn(txn)
+	// See UpsertTokenRegistryEntries: the txn-carried ctx is discarded in
+	// favor of this method's own explicit ctx parameter.
+	db, _, err := s.dbFromTxn(txn)
 	if err != nil {
 		return 0, err
 	}

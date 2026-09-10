@@ -577,6 +577,101 @@ func TestCheckDetectsMissingKoiosTotalsOnUpgradedCache(t *testing.T) {
 	require.Equal(t, StatusError, statuses[0].Status)
 }
 
+// TestCheckEpochPreservesPriorMismatchEvidenceOnLaterReadFailure guards
+// against #3410: checkEpoch used to clear an epoch's persisted mismatch rows
+// before every fallible Dingo/cache read for that epoch had completed, so a
+// later read failure (here, cache.GetTotals erroring instead of returning
+// sql.ErrNoRows) erased the last known evidence and left nothing behind. The
+// koios_totals table is dropped after seeding to force GetTotals to fail
+// with a real DB error partway through checkEpoch, well after the point
+// where the old code had already deleted the prior rows.
+func TestCheckEpochPreservesPriorMismatchEvidenceOnLaterReadFailure(t *testing.T) {
+	const network = "preview"
+	const koiosEpoch = uint64(10)
+
+	dingoDir, gdb := newTestDingoDB(t)
+	require.NoError(t, gdb.Create(&models.EpochSummary{
+		Epoch:            9,
+		TotalActiveStake: types.Uint64(5_000_000),
+		SnapshotReady:    true,
+	}).Error)
+	require.NoError(t, gdb.Create(&models.EpochSummary{
+		Epoch:            koiosEpoch,
+		TotalActiveStake: types.Uint64(5_000_000),
+		SnapshotReady:    true,
+	}).Error)
+	require.NoError(t, gdb.Create(&models.RewardAdaPots{
+		Epoch:    koiosEpoch,
+		Treasury: types.Uint64(1_000),
+		Reserves: types.Uint64(2_000),
+		Fees:     types.Uint64(300),
+	}).Error)
+	sqlDB, err := gdb.DB()
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.Close())
+
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	cache, err := OpenCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	fetchedAt := time.Now().Add(-time.Hour).UTC()
+	require.NoError(t, cache.CommitEpochData(
+		KoiosEpochInfo{
+			Network:      network,
+			Epoch:        koiosEpoch,
+			ActiveStake:  "5000000",
+			EpochEndTime: fetchedAt,
+			FetchedAt:    fetchedAt,
+		},
+		nil,
+		nil,
+	))
+
+	// Prior evidence from an earlier successful check of this epoch.
+	priorEvidence := []CheckMismatch{{
+		Network:    network,
+		Epoch:      koiosEpoch,
+		Field:      "prior_evidence",
+		DingoValue: "1",
+		KoiosValue: "2",
+		Category:   CategoryDBError,
+		CheckedAt:  fetchedAt,
+	}}
+	require.NoError(t, cache.CommitEpochMismatches(network, koiosEpoch, priorEvidence))
+
+	// Force cache.GetTotals to fail with a real DB error (not sql.ErrNoRows),
+	// simulating the koios_totals read failing partway through checkEpoch.
+	_, err = cache.db.Exec("DROP TABLE koios_totals")
+	require.NoError(t, err)
+
+	dingoSource, err := OpenDingoDB(DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir})
+	require.NoError(t, err)
+	defer dingoSource.Close() //nolint:errcheck
+
+	_, err = CheckEpoch(
+		context.Background(),
+		cache,
+		dingoSource,
+		network,
+		koiosEpoch,
+		0,
+		false,
+		slog.New(slog.DiscardHandler),
+	)
+	require.Error(t, err, "a failed koios_totals read must surface as an error")
+
+	got, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	require.Len(
+		t,
+		got,
+		1,
+		"a later read failure must never erase the prior mismatch evidence",
+	)
+	require.Equal(t, "prior_evidence", got[0].Field)
+}
+
 // TestCheckAccountsCoverageIncompleteIsError proves that enabling
 // CheckConfig.AccountsEnabled without ever having run a successful account
 // fetch (no koios_account_coverage row for the epoch) surfaces as ERROR

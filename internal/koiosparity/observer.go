@@ -646,11 +646,21 @@ func (o *Observer) fetchPoolsIfNeeded(ctx context.Context, epoch uint64) error {
 // call's retry loop (mirroring fetchPoolsIfNeeded's identical pool-universe
 // resolution pattern) and unioned with Dingo's own known addresses via
 // BuildAccountAddressUniverse on every attempt (cheap: a single in-process
-// RewardParitySource call, not a Koios request).
+// RewardParitySource call, not a Koios request). A cached pre-staking marker
+// returns before both the coverage lookup and account-universe request: those
+// epochs have no account parity surface and intentionally no coverage row.
 func (o *Observer) fetchAccountsIfNeeded(
 	ctx context.Context,
 	epoch uint64,
 ) error {
+	info, infoErr := o.cache.GetEpochInfo(o.cfg.Network, epoch)
+	if infoErr != nil && !errors.Is(infoErr, sql.ErrNoRows) {
+		return fmt.Errorf("get epoch info before account fetch: %w", infoErr)
+	}
+	if info != nil && info.PreStaking {
+		return nil
+	}
+
 	cov, covErr := o.cache.GetAccountCoverage(o.cfg.Network, epoch)
 	// sql.ErrNoRows ("no fetch attempted yet") is legitimately incomplete
 	// coverage and falls through to the fetch loop below; any other error is

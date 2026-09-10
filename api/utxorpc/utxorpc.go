@@ -52,6 +52,11 @@ const (
 	DefaultMaxUtxoKeys     = 1000
 	DefaultMaxHistoryItems = 10000
 	DefaultMaxDataKeys     = 1000
+	// DefaultMaxRequestBody bounds each Connect message before it is decoded
+	// or authenticated. Connect applies the same limit to the compressed wire
+	// message and to its decompressed form, preventing a small compressed body
+	// from expanding without bound during unary request decoding.
+	DefaultMaxRequestBody = 1 << 20 // 1 MiB
 	// DefaultMaxPoolFilter caps ReadState's pool_keyhashes filter. Matching
 	// the other key-list caps: a caller wanting every pool sends an empty
 	// filter, so a long explicit list is not the way to ask for the whole
@@ -315,7 +320,10 @@ func (u *Utxorpc) buildServer() *http.Server {
 // reconstruction of them.
 func (u *Utxorpc) newServeMux() *http.ServeMux {
 	mux := http.NewServeMux()
-	compress1KB := connect.WithCompressMinBytes(1024)
+	compress1KB := connect.WithOptions(
+		connect.WithCompressMinBytes(1024),
+		connect.WithReadMaxBytes(DefaultMaxRequestBody),
+	)
 	// When authentication is enabled, every Connect/gRPC handler this mux
 	// registers -- including health and reflection -- requires a valid
 	// credential; there is no separate unauthenticated allowlist for

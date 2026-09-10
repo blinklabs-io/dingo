@@ -15,6 +15,7 @@
 package chainselection
 
 import (
+	"bytes"
 	"fmt"
 	"math"
 	"net"
@@ -28,6 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
 func newTestConnectionId(n int) ouroboros.ConnectionId {
@@ -1803,6 +1805,150 @@ func TestUpdatePeerTipAcceptsDuringCatchUp(t *testing.T) {
 	)
 }
 
+func TestUpdatePeerTipAcceptsNextObservedBlockWhenAdvertisedTipIsFarAhead(
+	t *testing.T,
+) {
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: 432, // preview k
+	})
+
+	localTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 118000000, Hash: []byte("local")},
+		BlockNumber: 4588334,
+	}
+	cs.SetLocalTip(localTip)
+
+	connId := newTestConnectionId(1)
+	staleAdvertisedTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 110000000, Hash: []byte("stale")},
+		BlockNumber: 4260191,
+	}
+	require.True(t, cs.updatePeerTipObserved(
+		connId,
+		staleAdvertisedTip,
+		localTip,
+		nil,
+	))
+
+	advertisedTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 118010000, Hash: []byte("network")},
+		BlockNumber: 4589660,
+	}
+	nextObservedTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 118000020, Hash: []byte("next")},
+		BlockNumber: localTip.BlockNumber + 1,
+	}
+
+	require.True(
+		t,
+		cs.updatePeerTipObserved(
+			connId,
+			advertisedTip,
+			nextObservedTip,
+			nil,
+		),
+		"the next delivered block must not be rejected because the network tip is far ahead",
+	)
+	peerTip := cs.GetPeerTip(connId)
+	require.NotNil(t, peerTip)
+	assert.Equal(t, advertisedTip, peerTip.Tip)
+	assert.Equal(t, nextObservedTip, peerTip.ObservedTip)
+}
+
+func TestAdvertisedTipOutlierDoesNotSuppressObservedFrontier(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: 10,
+	})
+	cs.SetLocalTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 1000, Hash: []byte("local")},
+		BlockNumber: 1000,
+	})
+
+	outlierConn := newTestConnectionId(1)
+	require.True(t, cs.updatePeerTipObserved(
+		outlierConn,
+		ochainsync.Tip{
+			Point: ocommon.Point{
+				Slot: math.MaxUint64,
+				Hash: []byte("advertised-outlier"),
+			},
+			BlockNumber: math.MaxUint64,
+		},
+		ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 1001, Hash: []byte("observed-1")},
+			BlockNumber: 1001,
+		},
+		nil,
+	))
+
+	honestConn := newTestConnectionId(2)
+	require.True(t, cs.updatePeerTipObserved(
+		honestConn,
+		ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 1004, Hash: []byte("honest")},
+			BlockNumber: 1004,
+		},
+		ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 1004, Hash: []byte("honest")},
+			BlockNumber: 1004,
+		},
+		nil,
+	))
+
+	bestPeer := cs.GetBestPeer()
+	require.NotNil(t, bestPeer)
+	assert.Equal(
+		t,
+		honestConn,
+		*bestPeer,
+		"an advertised outlier must not make a better delivered frontier unselectable",
+	)
+}
+
+func TestChainSwitchEventIncludesObservedFrontier(t *testing.T) {
+	eventBus := event.NewEventBus(nil, nil)
+	defer eventBus.Stop()
+	cs := NewChainSelector(ChainSelectorConfig{
+		EventBus:      eventBus,
+		SecurityParam: 10,
+	})
+	_, eventCh := eventBus.Subscribe(ChainSwitchEventType)
+
+	advertisedTip := ochainsync.Tip{
+		Point: ocommon.Point{
+			Slot: math.MaxUint64,
+			Hash: []byte("advertised-outlier"),
+		},
+		BlockNumber: math.MaxUint64,
+	}
+	observedTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 1001, Hash: []byte("observed")},
+		BlockNumber: 1001,
+	}
+	require.True(t, cs.updatePeerTipObserved(
+		newTestConnectionId(1),
+		advertisedTip,
+		observedTip,
+		nil,
+	))
+
+	evt := testutil.RequireReceive(
+		t,
+		eventCh,
+		2*time.Second,
+		"chain switch event",
+	)
+	switchEvent, ok := evt.Data.(ChainSwitchEvent)
+	require.True(t, ok)
+	assert.Equal(t, advertisedTip, switchEvent.NewTip)
+	assert.Equal(t, observedTip, switchEvent.NewObservedTip)
+	assert.True(
+		t,
+		switchEvent.NewObservedTipSet,
+		"producers in this package always mark the frontier as present",
+	)
+}
+
 func TestUpdatePeerTipRejectsKnownPeerJumpFromZero(t *testing.T) {
 	// A known peer whose previous tip was at block 0 must still be
 	// checked. Without this, a malicious peer could send tip=0 first,
@@ -2305,4 +2451,72 @@ func TestSelectBestChainAllowsPlausiblyBehindPeer(t *testing.T) {
 	bestPeer := cs.SelectBestChain()
 	require.NotNil(t, bestPeer)
 	assert.Equal(t, behindConn, *bestPeer)
+}
+
+// TestOmittedObservedFrontierIsNotPromotedToAdvertisedTip asserts that a peer
+// tip update carrying no delivered frontier is recorded as having delivered
+// nothing, rather than being credited with its untrusted advertised tip. The
+// accompanying Praos view describes the absent delivered header, so promoting
+// the advertised tip would also leave the stored view and the stored frontier
+// on different slots, which UpdateTipWithObservedPraosView forbids.
+func TestOmittedObservedFrontierIsNotPromotedToAdvertisedTip(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{SecurityParam: 10})
+	cs.SetLocalTip(tip(99, 999, "local"))
+
+	// First peer: no reference frontier exists yet, so the plausibility bound
+	// cannot reject it. It advertises a tip far ahead but delivers no headers.
+	farConn := newTestConnectionId(1)
+	farAdvertised := tip(1_000_000, 5_000_000, "advertised-far")
+	farVRF := bytes.Repeat([]byte{0x01}, VRFOutputSize)
+	require.True(t, cs.updatePeerTipObservedPraosView(
+		farConn,
+		farAdvertised,
+		ochainsync.Tip{},
+		farVRF,
+		NewPraosTiebreakerViewFull(
+			ochainsync.Tip{},
+			[]byte("issuer-far"),
+			1,
+			farVRF,
+			PraosTiebreakerConfigBeforeConway(),
+		),
+	))
+
+	farTip := cs.GetPeerTip(farConn)
+	require.NotNil(t, farTip)
+	assert.Equal(
+		t,
+		ochainsync.Tip{},
+		farTip.SelectionTip(),
+		"an omitted delivered frontier must not be replaced by the advertised tip",
+	)
+
+	// A peer that actually delivered a header must outrank the peer that
+	// delivered nothing, and must not be measured for plausibility against the
+	// undelivered claim.
+	honestConn := newTestConnectionId(2)
+	honestTip := tip(100, 1000, "honest")
+	honestVRF := bytes.Repeat([]byte{0xff}, VRFOutputSize)
+	require.True(t, cs.updatePeerTipObservedPraosView(
+		honestConn,
+		honestTip,
+		honestTip,
+		honestVRF,
+		NewPraosTiebreakerViewFull(
+			honestTip,
+			[]byte("issuer-honest"),
+			1,
+			honestVRF,
+			PraosTiebreakerConfigBeforeConway(),
+		),
+	))
+
+	bestPeer := cs.GetBestPeer()
+	require.NotNil(t, bestPeer)
+	assert.Equal(
+		t,
+		honestConn,
+		*bestPeer,
+		"a peer that delivered no headers must not hold selection on its advertised tip",
+	)
 }

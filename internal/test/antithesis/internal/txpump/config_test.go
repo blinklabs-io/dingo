@@ -40,6 +40,8 @@ activeSlotsCoeff: 0.4
 securityParam: 100
 `
 
+// TestLoadConfig_LoadsGenesisSystemStartUnix verifies that txpump loads the
+// network magic, epoch length, slot length, and system start from genesis.
 func TestLoadConfig_LoadsGenesisSystemStartUnix(t *testing.T) {
 	clearTxpumpEnv(t)
 
@@ -55,7 +57,19 @@ func TestLoadConfig_LoadsGenesisSystemStartUnix(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint32(314159), cfg.NetworkMagic)
 	require.Equal(t, uint64(1500), cfg.EpochLength)
+	require.Equal(t, time.Second, cfg.SlotLength)
 	require.Equal(t, int64(1700000000), cfg.SystemStartUnix)
+}
+
+// TestConfigConfirmationDelay verifies that the output-quarantine duration is
+// derived from confirmation slots and the genesis slot length, and that zero
+// confirmation slots preserve the explicitly requested immediate behavior.
+func TestConfigConfirmationDelay(t *testing.T) {
+	cfg := Config{ConfirmationSlots: 30, SlotLength: 500 * time.Millisecond}
+	require.Equal(t, 15*time.Second, cfg.confirmationDelay())
+
+	cfg.ConfirmationSlots = 0
+	require.Zero(t, cfg.confirmationDelay())
 }
 
 func TestLoadConfig_LoadsConfirmationSlots(t *testing.T) {

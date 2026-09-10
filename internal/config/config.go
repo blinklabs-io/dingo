@@ -22,6 +22,7 @@ import (
 	"io"
 	"io/fs"
 	"maps"
+	"net"
 	"os"
 	"path"
 	"path/filepath"
@@ -84,6 +85,7 @@ func FromContext(ctx context.Context) *Config {
 
 const (
 	DefaultBlobPlugin                  = "badger"
+	DefaultDebugBindAddr               = "127.0.0.1"
 	DefaultMetadataPlugin              = "sqlite"
 	DefaultEvictionWatermark           = 0.0
 	DefaultRejectionWatermark          = 1.0
@@ -471,14 +473,25 @@ func DefaultLoggingConfig() LoggingConfig {
 // optional gRPC API surface. Indexing is only active when Enabled is true
 // AND Dingo is running in API storage mode -- both are required, since the
 // indexer depends on the API-mode indexes to function; Validate rejects
-// Enabled without API storage mode. Port 0 disables only the gRPC server.
+// Enabled without API storage mode. ServerEnabled independently opts into
+// serving the stored Midnight state; when enabled, Port must be non-zero.
 type MidnightConfig struct {
 	// Enabled opts into running the Midnight indexer. Default false: an
 	// api-mode deployment that wants Midnight indexing must set this
 	// explicitly.
-	Enabled bool   `yaml:"enabled" envconfig:"DINGO_MIDNIGHT_ENABLED"`
-	Port    uint   `yaml:"port"    envconfig:"DINGO_MIDNIGHT_PORT"`
-	Host    string `yaml:"host"    envconfig:"DINGO_MIDNIGHT_HOST"`
+	Enabled bool `yaml:"enabled" envconfig:"DINGO_MIDNIGHT_ENABLED"`
+	// ServerEnabled independently opts into the Midnight gRPC listener.
+	// Indexing and serving persisted Midnight rows are separate operations.
+	ServerEnabled bool `yaml:"serverEnabled" envconfig:"DINGO_MIDNIGHT_SERVER_ENABLED"`
+	// ReflectionEnabled exposes gRPC service discovery when the server is
+	// enabled. It defaults off because reflection broadens the public surface.
+	ReflectionEnabled bool `yaml:"reflectionEnabled" envconfig:"DINGO_MIDNIGHT_REFLECTION_ENABLED"`
+	// AllowInsecureRemote permits a plaintext listener on a non-loopback
+	// address. It is an explicit escape hatch for deployments that provide
+	// transport security outside Dingo.
+	AllowInsecureRemote bool   `yaml:"allowInsecureRemote" envconfig:"DINGO_MIDNIGHT_ALLOW_INSECURE_REMOTE"`
+	Port                uint   `yaml:"port"                envconfig:"DINGO_MIDNIGHT_PORT"`
+	Host                string `yaml:"host"                envconfig:"DINGO_MIDNIGHT_HOST"`
 
 	CNightPolicyID              string `yaml:"cnightPolicyId"`
 	CNightAssetName             string `yaml:"cnightAssetName"`
@@ -497,7 +510,7 @@ type MidnightConfig struct {
 func DefaultMidnightConfig() MidnightConfig {
 	return MidnightConfig{
 		Port: 50051,
-		Host: "0.0.0.0",
+		Host: "127.0.0.1",
 	}
 }
 
@@ -541,8 +554,13 @@ type Config struct {
 	BarkClientCAFilePath string   `yaml:"barkClientCaFilePath"         envconfig:"DINGO_BARK_CLIENT_CA_FILE_PATH"`
 	CORSAllowedOrigins   []string `yaml:"corsAllowedOrigins"           envconfig:"DINGO_CORS_ALLOWED_ORIGINS"`
 	MetricsPort          uint     `yaml:"metricsPort"                                                                    split_words:"true"`
-	DebugPort            uint     `yaml:"debugPort"                    envconfig:"DINGO_DEBUG_PORT"`
-	IntersectTip         bool     `yaml:"intersectTip"                                                                   split_words:"true"`
+	// DebugBindAddr is the interface used by the unauthenticated pprof
+	// listener. It defaults to loopback independently of BindAddr and
+	// PrivateBindAddr; operators must set this field explicitly to expose
+	// pprof on a wildcard or management-network address.
+	DebugBindAddr string `yaml:"debugBindAddr" envconfig:"DINGO_DEBUG_BIND_ADDR"`
+	DebugPort     uint   `yaml:"debugPort"                    envconfig:"DINGO_DEBUG_PORT"`
+	IntersectTip  bool   `yaml:"intersectTip"                                                                   split_words:"true"`
 	// ValidateHistorical validates the complete replay from the selected
 	// intersection. The default from-origin sync path must not trust peers to
 	// have validated historical blocks for us.
@@ -587,6 +605,7 @@ type Config struct {
 	TargetNumberOfKnownPeers       int `yaml:"targetNumberOfKnownPeers"       envconfig:"DINGO_TARGET_KNOWN_PEERS"`
 	TargetNumberOfEstablishedPeers int `yaml:"targetNumberOfEstablishedPeers" envconfig:"DINGO_TARGET_ESTABLISHED_PEERS"`
 	TargetNumberOfActivePeers      int `yaml:"targetNumberOfActivePeers"      envconfig:"DINGO_TARGET_ACTIVE_PEERS"`
+	TargetNumberOfRootPeers        int `yaml:"targetNumberOfRootPeers"        envconfig:"DINGO_TARGET_ROOT_PEERS"`
 
 	// Per-source quotas for active peers (0 = use default, negative = disable)
 	ActivePeersTopologyQuota int `yaml:"activePeersTopologyQuota" envconfig:"DINGO_ACTIVE_PEERS_TOPOLOGY_QUOTA"`
@@ -754,12 +773,13 @@ type APIPluginsConfig struct {
 // internal/apiconfig for the merge/validation rules; composition (node.go)
 // performs the actual per-provider merge, not this package.
 //
-// bindAddr and corsAllowedOrigins deliberately stay at the Config root
-// rather than moving under this section: bindAddr is not API-specific
-// (the relay/NtN and metrics/debug listeners use it too), and
-// corsAllowedOrigins already applies uniformly to all three API providers
+// bindAddr, debugBindAddr, and corsAllowedOrigins deliberately stay at the
+// Config root rather than moving under this section: bindAddr is not
+// API-specific (the relay/NtN and metrics listeners use it too),
+// debugBindAddr controls the separate pprof listener, and corsAllowedOrigins
+// already applies uniformly to all three API providers
 // today with no override need identified by dingo#2996/#2998, so
-// duplicating either here would only add a second source of truth for no
+// duplicating any of them here would only add a second source of truth for no
 // behavioral gain.
 type APIConfig struct {
 	TLS  apiconfig.TLSPolicy  `yaml:"tls"`
@@ -961,10 +981,10 @@ type MithrilConfig struct {
 	// CleanupAfterLoad controls whether temporary files are removed
 	// after the ImmutableDB has been loaded.
 	CleanupAfterLoad bool `yaml:"cleanupAfterLoad"       envconfig:"DINGO_MITHRIL_CLEANUP"`
-	// VerifyCertificates enables certificate chain verification
-	// during bootstrap. When true, the bootstrap process walks
-	// the Mithril certificate chain from the snapshot back to the
-	// genesis certificate to verify the chain is unbroken.
+	// VerifyCertificates enables STM certificate-chain verification during
+	// bootstrap. When true, bootstrap requires the Cardano network config's
+	// pinned Mithril genesis verification key and verifies the chain back to it.
+	// False explicitly selects the unverified bootstrap flow.
 	VerifyCertificates bool `yaml:"verifyCertificates"     envconfig:"DINGO_MITHRIL_VERIFY_CERTS"`
 }
 
@@ -976,7 +996,9 @@ type MithrilConfig struct {
 // replacement for it.
 type DatabaseLifecycleConfig struct {
 	// SnapshotEnabled controls whether automatic epoch-boundary database
-	// snapshots are captured. Manual snapshots via the CLI are always
+	// snapshots are captured. It is unsupported when the primary blob provider
+	// is s3 or gcs because their backup walk would hold the commit barrier for
+	// an unbounded remote-object read. Manual snapshots via the CLI are always
 	// available regardless of this setting.
 	SnapshotEnabled bool `yaml:"snapshotEnabled"                envconfig:"DINGO_DB_LIFECYCLE_SNAPSHOT_ENABLED"`
 	// SnapshotDir is the local filesystem directory automatic snapshots
@@ -1042,6 +1064,7 @@ var globalConfig = &Config{
 	Network:              "preview",
 	NetworkMagic:         0,
 	MetricsPort:          12798,
+	DebugBindAddr:        DefaultDebugBindAddr,
 	DebugPort:            0,
 	PrivateBindAddr:      "127.0.0.1",
 	PrivatePort:          3002,
@@ -1415,6 +1438,17 @@ func (c *Config) ApplyDefaults() {
 	if c.RunMode == "" {
 		c.RunMode = RunModeServe
 	}
+	// Never let an empty debug address inherit the public wildcard bind.
+	// This also keeps manually constructed Config values fail-safe.
+	if c.DebugBindAddr == "" {
+		c.DebugBindAddr = DefaultDebugBindAddr
+	}
+	// Match the Midnight server's safe default before validation so an
+	// explicitly empty YAML or environment value does not look like a remote
+	// plaintext listener and require the insecure-remote escape hatch.
+	if c.Midnight.Host == "" {
+		c.Midnight.Host = DefaultMidnightConfig().Host
+	}
 	if c.Plugins.Mempool.Config == nil {
 		c.Plugins.Mempool.Config = make(map[string]any)
 	}
@@ -1457,6 +1491,20 @@ func (c *Config) ApplyDefaults() {
 	if c.KoiosParity.GraceHours == 0 {
 		c.KoiosParity.GraceHours = 24
 	}
+}
+
+// DebugListenAddress returns the dedicated pprof TCP listen address. The
+// listener remains disabled when DebugPort is zero; callers check that before
+// binding.
+func (c *Config) DebugListenAddress() string {
+	host := c.DebugBindAddr
+	if host == "" {
+		host = DefaultDebugBindAddr
+	}
+	return net.JoinHostPort(
+		host,
+		strconv.FormatUint(uint64(c.DebugPort), 10),
+	)
 }
 
 func pluginInt64(value any) int64 {

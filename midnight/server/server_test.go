@@ -243,9 +243,10 @@ func TestHealthCheckServing(t *testing.T) {
 	}
 }
 
-// Reflection must be enabled and advertise the MidnightState service.
+// Reflection is an explicit opt-in and advertises the MidnightState service
+// when enabled.
 func TestReflectionListsService(t *testing.T) {
-	addr := startTestServer(t)
+	addr := startTestServerConfig(t, server.Config{ReflectionEnabled: true})
 	client := reflectionpb.NewServerReflectionClient(dial(t, addr))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -267,6 +268,24 @@ func TestReflectionListsService(t *testing.T) {
 	require.Contains(t, names, midnight.MidnightState_ServiceDesc.ServiceName)
 }
 
+func TestReflectionDisabledByDefault(t *testing.T) {
+	addr := startTestServer(t)
+	client := reflectionpb.NewServerReflectionClient(dial(t, addr))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	stream, err := client.ServerReflectionInfo(ctx)
+	require.NoError(t, err)
+	require.NoError(t, stream.Send(&reflectionpb.ServerReflectionRequest{
+		MessageRequest: &reflectionpb.ServerReflectionRequest_ListServices{
+			ListServices: "*",
+		},
+	}))
+	_, err = stream.Recv()
+	require.Error(t, err)
+	require.Equal(t, codes.Unimplemented, status.Code(err))
+}
+
 // New rejects a half-configured TLS pair (cert without key, or key without
 // cert).
 func TestNewRequiresBothTLSPaths(t *testing.T) {
@@ -274,6 +293,30 @@ func TestNewRequiresBothTLSPaths(t *testing.T) {
 	require.Error(t, err)
 	_, err = server.New(server.Config{TLSKeyFilePath: "key.pem"})
 	require.Error(t, err)
+}
+
+func TestNewRejectsRemotePlaintextByDefault(t *testing.T) {
+	for _, host := range []string{"0.0.0.0", "::", "192.0.2.1", "example.test"} {
+		t.Run(host, func(t *testing.T) {
+			_, err := server.New(server.Config{Host: host})
+			require.ErrorContains(t, err, "not loopback")
+		})
+	}
+}
+
+func TestNewAllowsExplicitRemotePolicy(t *testing.T) {
+	_, err := server.New(server.Config{
+		Host:                "0.0.0.0",
+		AllowInsecureRemote: true,
+	})
+	require.NoError(t, err)
+
+	_, err = server.New(server.Config{
+		Host:            "192.0.2.1",
+		TLSCertFilePath: "server.crt",
+		TLSKeyFilePath:  "server.key",
+	})
+	require.NoError(t, err)
 }
 
 // Cancelling the context passed to Start must shut the server down.

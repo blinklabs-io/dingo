@@ -16,6 +16,7 @@ package txpump
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -23,6 +24,44 @@ import (
 
 func makeUTxO(hash string, idx uint32, amount uint64) UTxO {
 	return UTxO{TxHash: hash, Index: idx, Amount: amount}
+}
+
+// TestWallet_AddAfterQuarantinesSubmittedOutputs verifies that a submitted
+// output is excluded from balance and coin selection until its confirmation
+// delay expires, then becomes spendable at the boundary.
+func TestWallet_AddAfterQuarantinesSubmittedOutputs(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	w := NewWallet()
+	w.now = func() time.Time { return now }
+	w.AddAfter(15*time.Second, makeUTxO("pending", 0, 5_000_000))
+
+	require.Zero(t, w.Len())
+	require.Zero(t, w.Balance())
+	_, _, err := w.SelectCoins(1_000_000)
+	require.ErrorIs(t, err, ErrInsufficientFunds)
+
+	now = now.Add(15 * time.Second)
+	require.Equal(t, 1, w.Len())
+	require.Equal(t, uint64(5_000_000), w.Balance())
+	selected, _, err := w.SelectCoins(1_000_000)
+	require.NoError(t, err)
+	require.Equal(t, "pending", selected[0].TxHash)
+}
+
+// TestWallet_ZeroValueRemainsUsable verifies that adding the injectable clock
+// does not break callers that construct Wallet using its zero value.
+func TestWallet_ZeroValueRemainsUsable(t *testing.T) {
+	var w Wallet
+	w.Add(makeUTxO("available", 0, 2_000_000))
+	w.AddAfter(time.Hour, makeUTxO("pending", 0, 3_000_000))
+
+	require.Equal(t, 1, w.Len())
+	require.Equal(t, uint64(2_000_000), w.Balance())
+	selected, change, err := w.SelectCoins(1_000_000)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1_000_000), change)
+	require.Equal(t, "available", selected[0].TxHash)
+	require.Zero(t, w.Len())
 }
 
 func TestWallet_EmptyBalance(t *testing.T) {

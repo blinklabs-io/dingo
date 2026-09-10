@@ -28,6 +28,29 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type hotCacheSnapshot struct {
+	entries    map[string][]byte
+	totalBytes int64
+}
+
+func snapshotHotCache(cache *HotCache) *hotCacheSnapshot {
+	cache.updateMu.Lock()
+	defer cache.updateMu.Unlock()
+	data := &hotCacheSnapshot{
+		entries:    make(map[string][]byte, cache.size),
+		totalBytes: cache.totalBytes,
+	}
+	for i := range cache.shards {
+		shard := &cache.shards[i]
+		shard.mu.RLock()
+		for key, entry := range shard.entries {
+			data.entries[key] = entry.value
+		}
+		shard.mu.RUnlock()
+	}
+	return data
+}
+
 func TestHotCacheGetPut(t *testing.T) {
 	cache := NewHotCache(100, 0)
 
@@ -68,6 +91,24 @@ func TestHotCacheGetPut(t *testing.T) {
 		require.True(t, ok, "expected key%d to be found", i)
 		assert.Equal(t, expectedValue, got, "expected value%d to match", i)
 	}
+}
+
+func TestHotCacheMutationIsolation(t *testing.T) {
+	cache := NewHotCache(10, 0)
+	key := []byte("key")
+	value := []byte("original")
+	cache.Put(key, value)
+
+	key[0] = 'X'
+	value[0] = 'X'
+	got, ok := cache.Get([]byte("key"))
+	require.True(t, ok)
+	require.Equal(t, []byte("original"), got)
+
+	got[0] = 'X'
+	gotAgain, ok := cache.Get([]byte("key"))
+	require.True(t, ok)
+	require.Equal(t, []byte("original"), gotAgain)
 }
 
 func TestHotCacheConcurrent(t *testing.T) {
@@ -156,13 +197,13 @@ func TestHotCacheEviction(t *testing.T) {
 		)
 	}
 
-	// Verify cache size is controlled (may be slightly over due to concurrent ops)
-	data := cache.data.Load()
+	// Verify cache size is controlled exactly after Put returns.
+	data := snapshotHotCache(cache)
 	assert.LessOrEqual(
 		t,
 		len(data.entries),
-		maxSize+5,
-		"cache should be close to maxSize after eviction",
+		maxSize,
+		"cache should not exceed maxSize after eviction",
 	)
 }
 
@@ -171,7 +212,7 @@ func TestHotCacheMemoryLimit(t *testing.T) {
 	cache := NewHotCache(1000, maxBytes)
 
 	// Add entries that together exceed maxBytes
-	valueSize := 100
+	valueSize := 90
 	for i := range 20 {
 		key := fmt.Appendf(nil, "key%d", i)
 		value := make([]byte, valueSize)
@@ -184,9 +225,9 @@ func TestHotCacheMemoryLimit(t *testing.T) {
 	// Memory usage should be controlled
 	assert.LessOrEqual(
 		t,
-		cache.data.Load().totalBytes,
-		maxBytes+int64(valueSize*3),
-		"memory should be close to maxBytes after eviction",
+		snapshotHotCache(cache).totalBytes,
+		maxBytes,
+		"memory should not exceed maxBytes after eviction",
 	)
 
 	// Test that oversized entries are rejected
@@ -238,8 +279,119 @@ func TestHotCacheLFUEviction(t *testing.T) {
 	assert.True(t, ok, "moderately accessed key should survive eviction")
 }
 
+// TestHotCacheOperationsHaveBoundedAllocations guards against cache
+// cardinality leaking into replacement, unique-admission, and sampled-access
+// paths. Each operation may allocate for its key/value and fixed eviction
+// sample, but never for a copy of every retained entry.
+func TestHotCacheOperationsHaveBoundedAllocations(t *testing.T) {
+	const cardinality = 1000
+	cache := NewHotCache(cardinality, 0)
+	for i := range cardinality {
+		cache.Put(
+			fmt.Appendf(nil, "key-%04d", i),
+			[]byte("cached-value"),
+		)
+	}
+
+	key := []byte("key-0000")
+	putAllocs := testing.AllocsPerRun(10, func() {
+		cache.Put(key, []byte("replacement"))
+	})
+	assert.LessOrEqual(
+		t,
+		putAllocs,
+		float64(8),
+		"Put must not allocate in proportion to cache cardinality",
+	)
+
+	churnIndex := 0
+	churnAllocs := testing.AllocsPerRun(10, func() {
+		cache.Put(
+			fmt.Appendf(nil, "churn-key-%04d", churnIndex),
+			[]byte("replacement"),
+		)
+		churnIndex++
+	})
+	assert.LessOrEqual(
+		t,
+		churnAllocs,
+		float64(12),
+		"overflow admission must allocate only for a bounded eviction sample",
+	)
+
+	accessAllocs := testing.AllocsPerRun(10, func() {
+		cache.incrementAccess(key)
+	})
+	assert.LessOrEqual(
+		t,
+		accessAllocs,
+		float64(1),
+		"sampled access tracking must not allocate in proportion to cache cardinality",
+	)
+}
+
+func TestHotCacheOperationBytesDoNotScaleWithCardinality(t *testing.T) {
+	const (
+		smallCardinality = 128
+		largeCardinality = 4096
+	)
+
+	for _, operation := range []struct {
+		name  string
+		churn bool
+	}{
+		{name: "replacement"},
+		{name: "unique admission churn", churn: true},
+	} {
+		t.Run(operation.name, func(t *testing.T) {
+			smallBytes := benchmarkHotCachePutBytes(
+				smallCardinality,
+				operation.churn,
+			)
+			largeBytes := benchmarkHotCachePutBytes(
+				largeCardinality,
+				operation.churn,
+			)
+
+			// Runtime and allocator bookkeeping can add small fixed noise. A
+			// two-times-plus-1 KiB allowance is deliberately generous to that
+			// noise, but still rejects copying a retained map whose allocation
+			// grows linearly from 128 to 4096 entries.
+			assert.LessOrEqual(
+				t,
+				largeBytes,
+				smallBytes*2+1024,
+				"bytes per operation must remain independent of retained cardinality: small=%d large=%d",
+				smallBytes,
+				largeBytes,
+			)
+		})
+	}
+}
+
+func benchmarkHotCachePutBytes(cardinality int, churn bool) int64 {
+	result := testing.Benchmark(func(b *testing.B) {
+		cache, replacementKey := populatedHotCache(cardinality)
+		value := []byte("replacement-value")
+		nextKey := cardinality
+		key := make([]byte, 0, 32)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for b.Loop() {
+			if churn {
+				key = fmt.Appendf(key[:0], "churn-%08d", nextKey)
+				nextKey++
+			} else {
+				key = replacementKey
+			}
+			cache.Put(key, value)
+		}
+	})
+	return result.AllocedBytesPerOp()
+}
+
 // TestHotCacheConcurrentPutsCompleteUnderHighContention drives many more
-// concurrent writers (and readers, to exercise incrementAccess's CAS path
+// concurrent writers (and readers, to exercise incrementAccess's update path
 // too) against a small, heavily-contended cache than TestHotCacheConcurrent
 // and asserts every call returns within a bounded time. This validates the
 // acceptance criteria that cache insertion cannot spin indefinitely under
@@ -264,9 +416,9 @@ func TestHotCacheConcurrentPutsCompleteUnderHighContention(t *testing.T) {
 				}
 			}(i)
 		}
-		// Readers exercise incrementAccess's CAS path (see accessSampleRate)
+		// Readers exercise incrementAccess's update path (see accessSampleRate)
 		// concurrently with the writers above, so stats.Attempts genuinely
-		// reflects contention across both CAS paths it claims to cover.
+		// reflects contention across both update paths it claims to cover.
 		for i := range numGoroutines {
 			go func(id int) {
 				defer wg.Done()
@@ -290,21 +442,6 @@ func TestHotCacheConcurrentPutsCompleteUnderHighContention(t *testing.T) {
 
 	stats := cache.CASStats()
 	assert.Positive(t, stats.Attempts, "writers should attempt cache commits")
-	// SuccessfulCommitsAfterBackoff/SuccessfulCommitBackoffTime only count
-	// commits that needed a *sleeping* backoff (attempt >= casYieldThreshold);
-	// a writer that wins after just one or two zero-duration yields
-	// contributes to neither, so asserting either is positive is flaky on a
-	// lightly-loaded or single-core runner. Attempts exceeding the total
-	// number of Put calls is a threshold-independent proof that contention
-	// forced at least one writer to retry rather than succeed on its first
-	// CAS attempt every time.
-	assert.Greater(
-		t,
-		stats.Attempts,
-		uint64(numGoroutines*numOperations),
-		"heavy contention should force at least one writer to retry, "+
-			"not succeed on the first CAS attempt every time",
-	)
 
 	_, ok := cache.Get([]byte("key-0"))
 	assert.True(
@@ -314,47 +451,35 @@ func TestHotCacheConcurrentPutsCompleteUnderHighContention(t *testing.T) {
 	)
 }
 
-// TestHotCacheRetryBudgetFallback deterministically exercises the CAS
-// retry-budget fallback by allowing one CAS attempt and hammering a shared
-// cache with concurrent writers, then asserts the cache degrades gracefully
-// (no panic, no hang) and reports writers that drop their best-effort update.
+// TestHotCacheRetryBudgetFallback deterministically holds the update lock
+// while a one-attempt Put runs, then asserts the cache degrades gracefully
+// and remains usable after dropping the best-effort update.
 func TestHotCacheRetryBudgetFallback(t *testing.T) {
 	cache := NewHotCache(50, 0)
 	cache.maxCASAttempts = 1
 
-	const numGoroutines = 100
-	const numOperations = 100
-
+	cache.updateMu.Lock()
 	done := make(chan struct{})
 	go func() {
-		var wg sync.WaitGroup
-		wg.Add(numGoroutines)
-		for i := range numGoroutines {
-			go func(id int) {
-				defer wg.Done()
-				for j := range numOperations {
-					key := fmt.Appendf(nil, "key-%d", j%10)
-					value := fmt.Appendf(nil, "value-%d-%d", id, j)
-					cache.Put(key, value)
-				}
-			}(i)
-		}
-		wg.Wait()
+		cache.Put([]byte("blocked"), []byte("dropped"))
 		close(done)
 	}()
 
 	select {
 	case <-done:
 	case <-time.After(30 * time.Second):
+		cache.updateMu.Unlock()
 		t.Fatal(
 			"Put calls did not complete within timeout under a tiny retry budget",
 		)
 	}
+	cache.updateMu.Unlock()
 
-	assert.Positive(
+	assert.Equal(
 		t,
+		uint64(1),
 		cache.CASStats().WritersAbortedAfterBudget,
-		"expected at least one writer to exhaust a one-attempt budget under contention",
+		"the blocked writer should exhaust its one-attempt budget",
 	)
 
 	// Cache must remain usable after the fallback triggers.
@@ -370,7 +495,7 @@ func TestHotCacheRetryBudgetFallback(t *testing.T) {
 
 // TestHotCacheLogsWriterAbortedOnBudgetExhaustion deterministically forces
 // the writer-aborted-after-budget path (by setting maxCASAttempts to 0, so
-// the CAS loop body never runs) and asserts a configured logger reports it,
+// the update loop body never runs) and asserts a configured logger reports it,
 // with no reliance on real contention or goroutine timing.
 func TestHotCacheLogsWriterAbortedOnBudgetExhaustion(t *testing.T) {
 	cache := NewHotCache(10, 0)
@@ -385,7 +510,7 @@ func TestHotCacheLogsWriterAbortedOnBudgetExhaustion(t *testing.T) {
 	assert.Contains(
 		t,
 		logOutput,
-		"hot cache dropped a best-effort update after exhausting its CAS retry budget",
+		"hot cache dropped a best-effort update after exhausting its retry budget",
 	)
 	assert.Contains(t, logOutput, "cache=test-cache")
 	assert.Contains(t, logOutput, "op=put")
@@ -443,10 +568,9 @@ func TestHotCacheNilLoggerDoesNotPanic(t *testing.T) {
 	assert.Equal(t, uint64(1), cache.CASStats().WritersAbortedAfterBudget)
 }
 
-// TestHotCacheRegisterCASMetrics verifies that RegisterCASMetrics exposes
-// live CAS contention counters on a Prometheus registry, that the counters
-// reflect this cache's actual state, and that registering twice on the same
-// registry is a safe no-op rather than an error or duplicate series.
+// TestHotCacheRegisterCASMetrics verifies that the compatibility metrics
+// expose live update contention on a Prometheus registry, reflect this
+// cache's actual state, and safely tolerate duplicate registration.
 func TestHotCacheRegisterCASMetrics(t *testing.T) {
 	cache := NewHotCache(10, 0)
 	registry := prometheus.NewRegistry()
@@ -521,7 +645,7 @@ func TestHotCacheZeroMaxSize(t *testing.T) {
 
 	// All entries should be present (limited only by bytes)
 	count := 0
-	data := cache.data.Load()
+	data := snapshotHotCache(cache)
 	if data != nil {
 		count = len(data.entries)
 	}
@@ -542,7 +666,7 @@ func TestHotCacheSmallMaxSize(t *testing.T) {
 	cache.Put([]byte("key2"), []byte("value2"))
 
 	// At least one entry should exist (either key1 or key2)
-	data := cache.data.Load()
+	data := snapshotHotCache(cache)
 	assert.NotNil(t, data)
 	assert.GreaterOrEqual(
 		t,
@@ -550,23 +674,15 @@ func TestHotCacheSmallMaxSize(t *testing.T) {
 		1,
 		"cache with maxSize=1 should keep at least 1 entry",
 	)
-	assert.LessOrEqual(
-		t,
-		len(data.entries),
-		2,
-		"cache with maxSize=1 should have at most 2 entries",
-	)
+	assert.LessOrEqual(t, len(data.entries), 1)
 }
 
 // TestHotCachePutNeverPermanentlyExceedsMaxSizeUnderGetContention reproduces
 // the reported regression: eviction run as a separate operation after Put
 // could lose its own CAS race against concurrent access-count updates from
-// Get, and since only Put retries eviction, a cache that never received
-// another Put stayed oversized forever. Each round fills a small cache,
-// races heavy Get-driven incrementAccess contention against a single
-// overflow Put, and asserts the final state never exceeds maxSize. Because
-// eviction is now folded into the overflowing Put's own CAS attempt (see
-// HotCache.evictToFit), this must hold on every round, not just on average.
+// Get, leaving a cache oversized when no later Put retried eviction. The
+// sharded implementation keeps membership and limit enforcement under the
+// same update lock, so this must hold on every round.
 func TestHotCachePutNeverPermanentlyExceedsMaxSizeUnderGetContention(
 	t *testing.T,
 ) {
@@ -587,7 +703,7 @@ func TestHotCachePutNeverPermanentlyExceedsMaxSizeUnderGetContention(
 		wg.Add(numReaders + 1)
 
 		// Concurrent readers hammer Get() on existing keys, forcing
-		// incrementAccess CAS contention against the overflow Put below.
+		// incrementAccess contention against the overflow Put below.
 		for r := range numReaders {
 			go func(id int) {
 				defer wg.Done()
@@ -607,7 +723,7 @@ func TestHotCachePutNeverPermanentlyExceedsMaxSizeUnderGetContention(
 
 		wg.Wait()
 
-		data := cache.data.Load()
+		data := snapshotHotCache(cache)
 		require.NotNil(t, data)
 		assert.LessOrEqual(
 			t,
@@ -620,115 +736,83 @@ func TestHotCachePutNeverPermanentlyExceedsMaxSizeUnderGetContention(
 	}
 }
 
-// TestEvictToFitNoEvictionWhenWithinLimits verifies evictToFit is a no-op
-// (returns the inputs and zero bytes removed) when neither maxSize nor
-// maxBytes is exceeded.
-func TestEvictToFitNoEvictionWhenWithinLimits(t *testing.T) {
-	cache := NewHotCache(10, 100)
-	entries := map[string][]byte{"a": []byte("1"), "b": []byte("2")}
-	accessCnt := map[string]uint64{"a": 5, "b": 3}
+func TestHotCacheCombinedLimitsUnderChurn(t *testing.T) {
+	testCases := []struct {
+		name      string
+		maxSize   int
+		maxBytes  int64
+		valueSize int
+	}{
+		{
+			name:      "entry count is tighter",
+			maxSize:   5,
+			maxBytes:  1000,
+			valueSize: 80,
+		},
+		{
+			name:      "byte count is tighter",
+			maxSize:   50,
+			maxBytes:  1000,
+			valueSize: 85,
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			cache := NewHotCache(testCase.maxSize, testCase.maxBytes)
+			for i := range 200 {
+				cache.Put(
+					fmt.Appendf(nil, "key-%03d", i),
+					make([]byte, testCase.valueSize),
+				)
+			}
 
-	gotEntries, gotAccessCnt, bytesRemoved := cache.evictToFit(
-		entries,
-		accessCnt,
-		4,
-	)
-
-	assert.Equal(t, entries, gotEntries)
-	assert.Equal(t, accessCnt, gotAccessCnt)
-	assert.Zero(t, bytesRemoved)
+			data := snapshotHotCache(cache)
+			var actualBytes int64
+			for key, value := range data.entries {
+				actualBytes += int64(len(key) + len(value))
+			}
+			require.Equal(t, actualBytes, data.totalBytes)
+			assert.NotEmpty(t, data.entries)
+			assert.LessOrEqual(t, len(data.entries), testCase.maxSize)
+			assert.LessOrEqual(t, actualBytes, testCase.maxBytes)
+		})
+	}
 }
 
-// TestEvictToFitRemovesLeastFrequentlyUsedFirstBySize verifies size-based
-// eviction trims down to the target size and keeps the most frequently
-// accessed entries, removing the least frequently accessed ones first.
-func TestEvictToFitRemovesLeastFrequentlyUsedFirstBySize(t *testing.T) {
-	cache := NewHotCache(4, 0)
-	entries := map[string][]byte{
-		"most":     []byte("v"),
-		"more":     []byte("v"),
-		"less":     []byte("v"),
-		"least":    []byte("v"),
-		"overflow": []byte("v"),
+func TestHotCacheBoundedAdmissionDropPreservesExistingEntries(t *testing.T) {
+	const maxBytes = int64(1000)
+	cache := NewHotCache(0, maxBytes)
+	for i := range hotCacheEvictionSampleSize {
+		cache.Put([]byte{byte(i)}, nil)
 	}
-	accessCnt := map[string]uint64{
-		"most":     100,
-		"more":     50,
-		"less":     10,
-		"least":    1,
-		"overflow": 1,
+	for i := range 10 {
+		cache.Put([]byte{0xff, byte(i)}, make([]byte, 90))
 	}
+	before := snapshotHotCache(cache)
+	require.Equal(t, int64(984), before.totalBytes)
 
-	gotEntries, gotAccessCnt, bytesRemoved := cache.evictToFit(
-		entries,
-		accessCnt,
-		0,
-	)
+	// The pending 100-byte entry needs 84 bytes of space, while the fixed
+	// candidate window contains 64 one-byte entries. Admission must drop the
+	// pending value without partially evicting that window.
+	pendingKey := []byte{0xfe}
+	cache.Put(pendingKey, make([]byte, 99))
 
-	// target size = max(1, 4*3/4) = 3
-	assert.LessOrEqual(t, len(gotEntries), 3)
-	assert.Contains(
-		t,
-		gotEntries,
-		"most",
-		"highest access count must survive eviction",
-	)
-	assert.Contains(
-		t,
-		gotEntries,
-		"more",
-		"second highest access count must survive eviction",
-	)
-	assert.NotContains(
-		t,
-		gotEntries,
-		"least",
-		"lowest access count should be evicted first",
-	)
-	assert.Equal(t, len(gotEntries), len(gotAccessCnt))
-	assert.Positive(t, bytesRemoved)
-}
+	after := snapshotHotCache(cache)
+	assert.Equal(t, before.totalBytes, after.totalBytes)
+	assert.Equal(t, before.entries, after.entries)
+	_, ok := cache.Get(pendingKey)
+	assert.False(t, ok)
 
-// TestEvictToFitByBytes verifies byte-based eviction trims down to the
-// target byte budget, again preferring to keep the most frequently accessed
-// entries.
-func TestEvictToFitByBytes(t *testing.T) {
-	cache := NewHotCache(0, 100) // maxBytes=100, maxSize unlimited
-	entries := map[string][]byte{
-		"a": make([]byte, 40),
-		"b": make([]byte, 40),
-		"c": make([]byte, 40),
-	}
-	accessCnt := map[string]uint64{"a": 10, "b": 5, "c": 1}
-
-	var estimatedBytes int64
-	for k, v := range entries {
-		estimatedBytes += int64(len(k) + len(v))
-	}
-
-	gotEntries, _, bytesRemoved := cache.evictToFit(
-		entries,
-		accessCnt,
-		estimatedBytes,
-	)
-
-	// Each entry is 1 (key) + 40 (value) = 41 bytes; target = 100*3/4 = 75,
-	// so only the highest-count entry ("a") fits.
-	assert.Equal(t, int64(82), bytesRemoved)
-	assert.Equal(t, map[string][]byte{"a": entries["a"]}, gotEntries)
-}
-
-// TestEvictToFitKeepsAtLeastOneEntryWhenMaxSizeIsOne is the size=1 edge
-// case: eviction must never trim a non-empty cache down to zero entries.
-func TestEvictToFitKeepsAtLeastOneEntryWhenMaxSizeIsOne(t *testing.T) {
-	cache := NewHotCache(1, 0)
-	entries := map[string][]byte{"a": []byte("1"), "b": []byte("2")}
-	accessCnt := map[string]uint64{"a": 5, "b": 1}
-
-	gotEntries, _, _ := cache.evictToFit(entries, accessCnt, 0)
-
-	assert.GreaterOrEqual(t, len(gotEntries), 1)
-	assert.LessOrEqual(t, len(gotEntries), 2)
+	// The failed bounded sample advances instead of permanently freezing
+	// admission behind the same undersized candidates. A retry can inspect the
+	// larger entries that follow and admit the pending value within the same
+	// fixed work bound.
+	cache.Put(pendingKey, make([]byte, 99))
+	afterRetry := snapshotHotCache(cache)
+	assert.LessOrEqual(t, afterRetry.totalBytes, maxBytes)
+	value, ok := cache.Get(pendingKey)
+	require.True(t, ok)
+	assert.Len(t, value, 99)
 }
 
 // TestHotCacheTotalBytesStaysAccurateAcrossEvictions replaces an earlier
@@ -736,12 +820,9 @@ func TestEvictToFitKeepsAtLeastOneEntryWhenMaxSizeIsOne(t *testing.T) {
 // separate curBytes atomic (cache.curBytes.Store(0)) to simulate a delayed
 // concurrent writer, then showing Put trusted the stale value and let the
 // cache grow over maxBytes. That attack is no longer expressible at all:
-// totalBytes now lives inside hotCacheData itself, so every read of it is
-// tied to the exact entries snapshot it describes -- there is no separate
-// counter left to desync. This test instead verifies the new invariant
-// directly: after many sequential Puts (some of which force eviction),
-// data.totalBytes must always equal the real, independently-computed sum of
-// entry sizes, and must never exceed maxBytes.
+// totalBytes is now serialized with membership updates, so there is no
+// separately committed entries snapshot and byte counter to desynchronize.
+// This test verifies the invariant directly after repeated evictions.
 func TestHotCacheTotalBytesStaysAccurateAcrossEvictions(t *testing.T) {
 	const maxBytes = 1000             // per-entry cutoff = maxBytes/10 = 100
 	cache := NewHotCache(0, maxBytes) // maxSize unlimited: purely byte-driven
@@ -753,7 +834,7 @@ func TestHotCacheTotalBytesStaysAccurateAcrossEvictions(t *testing.T) {
 		) // 95 bytes each; forces repeated eviction
 	}
 
-	data := cache.data.Load()
+	data := snapshotHotCache(cache)
 	require.NotNil(t, data)
 	var actualBytes int64
 	for k, v := range data.entries {
@@ -780,8 +861,8 @@ func TestHotCacheTotalBytesStaysAccurateAcrossEvictions(t *testing.T) {
 // instructions wide -- narrow enough that a direct probe with 300 concurrent
 // writers over 50 rounds reproduced zero failures even on the buggy code
 // (see TestHotCacheTotalBytesStaysAccurateAcrossEvictions for how that gap
-// was proven instead). Now that the byte total lives inside hotCacheData
-// itself, this test holds deterministically, every round, by construction.
+// was proven instead). The sharded implementation serializes membership and
+// byte accounting, so this test holds deterministically every round.
 func TestHotCachePutNeverPermanentlyExceedsMaxBytesUnderPutContention(
 	t *testing.T,
 ) {
@@ -807,7 +888,7 @@ func TestHotCachePutNeverPermanentlyExceedsMaxBytesUnderPutContention(
 		}
 		wg.Wait()
 
-		data := cache.data.Load()
+		data := snapshotHotCache(cache)
 		require.NotNil(t, data)
 		var actualBytes int64
 		for k, v := range data.entries {

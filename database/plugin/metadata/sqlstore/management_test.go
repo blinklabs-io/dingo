@@ -90,7 +90,7 @@ func TestCommitTimestamp(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, timestamp)
 
-	transaction := store.Transaction()
+	transaction := store.Transaction(t.Context())
 	require.NoError(t, store.SetCommitTimestamp(1234, transaction))
 	require.NoError(t, transaction.Commit())
 	timestamp, err = store.GetCommitTimestamp()

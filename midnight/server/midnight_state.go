@@ -92,13 +92,13 @@ type eventStore interface {
 		limit int,
 		txn types.Txn,
 	) ([]models.MidnightDeregistration, error)
-	// ReadTransaction opens a read-only, repeatable-read transaction.
-	// GetUtxoEvents shares one across its four Find*From calls so they
-	// observe a single consistent point in time — without it, the four
-	// independent reads could straddle the live indexer committing a new
-	// block between them, each table then reflecting a different "as of"
-	// point and corrupting the merged next_position cursor.
-	ReadTransaction() types.Txn
+	// ReadTransaction opens a read-only, repeatable-read transaction bound
+	// to ctx. GetUtxoEvents shares one across its four Find*From calls so
+	// they observe a single consistent point in time — without it, the
+	// four independent reads could straddle the live indexer committing a
+	// new block between them, each table then reflecting a different "as
+	// of" point and corrupting the merged next_position cursor.
+	ReadTransaction(ctx context.Context) types.Txn
 }
 
 // GetAssetCreates returns cNIGHT UTxO creations starting strictly after
@@ -253,7 +253,7 @@ type utxoEventMergeItem struct {
 // smaller-or-equal rows ahead of it in that single table, so it cannot be
 // among the smallest tx_capacity rows overall.
 func (s *service) GetUtxoEvents(
-	_ context.Context,
+	ctx context.Context,
 	req *midnight.UtxoEventsRequest,
 ) (*midnight.UtxoEventsResponse, error) {
 	if s.metadata == nil {
@@ -274,7 +274,7 @@ func (s *service) GetUtxoEvents(
 	// Find*From call would independently see whatever the live indexer had
 	// most recently committed, so the four reads could straddle a block
 	// commit and disagree on "as of" which block/tx they cover.
-	txn := s.metadata.ReadTransaction()
+	txn := s.metadata.ReadTransaction(ctx)
 	defer txn.Rollback() //nolint:errcheck
 
 	creates, err := s.metadata.FindMidnightAssetCreatesFrom(

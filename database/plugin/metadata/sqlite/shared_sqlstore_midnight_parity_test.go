@@ -15,6 +15,7 @@
 package sqlite
 
 import (
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -23,7 +24,7 @@ import (
 )
 
 type midnightStore interface {
-	Transaction() types.Txn
+	Transaction(ctx context.Context) types.Txn
 	CreateMidnightAssetCreate(types.Txn, *models.MidnightAssetCreate) error
 	CreateMidnightAssetSpend(types.Txn, *models.MidnightAssetSpend) error
 	CreateMidnightRegistration(types.Txn, *models.MidnightRegistration) error
@@ -125,7 +126,7 @@ func TestSharedSQLStoreMidnightParity(t *testing.T) {
 
 func exerciseMidnightStore(t *testing.T, store midnightStore) midnightState {
 	t.Helper()
-	txn := store.Transaction()
+	txn := store.Transaction(t.Context())
 	for _, row := range []*models.MidnightAssetCreate{
 		{
 			Address: []byte("address-a"), Quantity: 10,
@@ -249,7 +250,7 @@ func exerciseMidnightStore(t *testing.T, store midnightStore) midnightState {
 		)
 	require.NoError(t, err)
 
-	rollback := store.Transaction()
+	rollback := store.Transaction(t.Context())
 	ret.deletedCreates, err = store.DeleteMidnightAssetCreatesByBlock(
 		rollback,
 		11,

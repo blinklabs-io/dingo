@@ -177,6 +177,7 @@ type ChainProvider interface {
 type ObservedHeader struct {
 	ConnectionId ouroboros.ConnectionId
 	BlockHeader  gledger.BlockHeader
+	ArrivalTime  time.Time
 	Point        ocommon.Point
 	Tip          ochainsync.Tip
 	BlockNumber  uint64

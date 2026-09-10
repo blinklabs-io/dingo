@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/rewards"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
@@ -50,6 +51,38 @@ func (ls *LedgerState) applyStakeRewards(
 	newEpoch uint64,
 	boundarySlot uint64,
 ) error {
+	// Byron has no Shelley-era reward parameters. During the Byron prefix,
+	// the delayed reward round reaches a boundary before its performance epoch
+	// can have pparams; the first Shelley boundary has the same shape because
+	// its performance epoch is still Byron. There are no stake rewards to
+	// apply for that epoch, so continue the rollover without entering the
+	// Shelley reward calculation path.
+	//
+	// Resolved through stakeRewardEpochsForApplication, the same helper the
+	// guarded path uses (calculateStakeRewardApplication,
+	// precomputedStakeRewardApplication). The two helpers agree from newEpoch
+	// 3 up; at newEpoch 1 and 2 stakeRewardEpochsForNewEpoch reports ok=false
+	// for being below 3 while the application path resolves a bootstrap round
+	// against performance epoch 0. Guarding on the narrower helper skipped
+	// exactly the rounds this guard exists to catch, and epochs 1 and 2 are
+	// inside the Byron prefix on every network this affects.
+	if rewardEpochs, ok := stakeRewardEpochsForApplication(newEpoch); ok {
+		performanceEpoch, err := ls.db.Metadata().GetEpoch(
+			rewardEpochs.performance,
+			txn.Metadata(),
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"get reward performance epoch %d: %w",
+				rewardEpochs.performance,
+				err,
+			)
+		}
+		if performanceEpoch != nil &&
+			performanceEpoch.EraId == eras.ByronEraDesc.Id {
+			return nil
+		}
+	}
 	app, ok, err := ls.precomputedStakeRewardApplication(
 		txn,
 		newEpoch,
@@ -652,9 +685,9 @@ func (ls *LedgerState) precomputedStakeRewardApplication(
 	if pots == nil || pots.Rewards == 0 {
 		return nil, false, nil
 	}
-	// The bootstrap calculation has no durable output rows with which to
-	// validate the precompute against rollbacks. Always recalculate it at the
-	// epoch-2 boundary rather than treating pots.Rewards alone as provenance.
+	// A bootstrap calculation has no durable output rows with which to
+	// validate the precompute against rollbacks. Always recalculate it at its
+	// boundary rather than treating pots.Rewards alone as provenance.
 	if epochs.bootstrap {
 		return nil, false, nil
 	}
@@ -2342,15 +2375,28 @@ type stakeRewardEpochs struct {
 func stakeRewardEpochsForApplication(
 	newEpoch uint64,
 ) (stakeRewardEpochs, bool) {
-	// The first RUPD calculation is made during epoch 1 from epoch 0's block
-	// performance and the epoch 1 ADA pots. The Go stake distribution is
-	// still empty, so the epoch 2 NEWEPOCH rule applies monetary expansion
-	// and treasury tax but distributes no pool or account rewards.
-	if newEpoch == 2 {
+	// cardano-ledger's NEWEPOCH rule applies monetary expansion and the
+	// treasury tax at every boundary from the network's first Shelley-era
+	// epoch onward, including the two boundaries that precede any Go stake
+	// distribution. Both are bootstrap rounds: the pots move, but no pool or
+	// account rewards are distributed.
+	//
+	// Into epoch 1, the pot inputs are the slot-0 genesis baseline (the epoch
+	// 0 ADA pots row) and the fee pot is empty, because no epoch precedes
+	// epoch 0. Into epoch 2, the first RUPD calculation is made during epoch 1
+	// from epoch 0's block performance and the epoch 1 ADA pots.
+	//
+	// Networks with a Byron prefix have no Shelley reward round at either
+	// boundary, and applyStakeRewards' Byron performance-epoch guard
+	// suppresses both there. Networks that declare Shelley at genesis run
+	// both: preview's epoch 0 is Alonzo, and omitting the 0->1 round left its
+	// treasury at 0 and its reserves at the genesis value, which propagated
+	// into every later epoch (dingo #3381).
+	if newEpoch == 1 || newEpoch == 2 {
 		return stakeRewardEpochs{
 			snapshot:    0,
 			performance: 0,
-			pots:        1,
+			pots:        newEpoch - 1,
 			bootstrap:   true,
 		}, true
 	}
@@ -2379,9 +2425,10 @@ func stakeRewardEpochsForApplication(
 // counted, because a node in this state is silently diverging from the
 // network and only says so when it eventually rejects a block.
 //
-// The inputs are absent chiefly after a Mithril bootstrap: applying the round
-// at the boundary into N needs this node's own reward snapshot for N-3 and
-// ADA pots for N-1, and those epochs predate the import.
+// The inputs can be absent after a Mithril bootstrap, but the cause is not
+// necessarily that they predate the import: an imported reward basis can also
+// have failed reconciliation and therefore never been persisted. The warning
+// stays factual and points to the earlier diagnostics rather than guessing.
 func (ls *LedgerState) reportSkippedStakeRewards(
 	newEpoch uint64,
 	reason string,
@@ -2396,8 +2443,8 @@ func (ls *LedgerState) reportSkippedStakeRewards(
 		"skipping stake rewards: "+reason+
 			"; this epoch's rewards will never be credited, leaving reward"+
 			" balances and the leadership stake distribution permanently"+
-			" short (expected after a Mithril bootstrap, whose preceding"+
-			" epochs this node never saw)",
+			" short (the required basis was never persisted; inspect earlier"+
+			" bootstrap and ledgerstate import warnings for the cause)",
 		"component", "ledger",
 		"new_epoch", newEpoch,
 		epochKey, epochValue,

@@ -16,7 +16,6 @@
 package sqlstore
 
 import (
-	"context"
 	"database/sql"
 	"errors"
 
@@ -31,13 +30,13 @@ func (s *Store) GetAssetByPolicyAndName(
 	assetName []byte,
 	txn types.Txn,
 ) (models.Asset, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return models.Asset{}, err
 	}
 	q := s.operationalQueries(db)
 	row, err := q.GetAssetByPolicyAndName(
-		context.Background(),
+		ctx,
 		sqlitequery.GetAssetByPolicyAndNameParams{
 			PolicyID: policyID[:],
 			Name:     assetName,
@@ -72,11 +71,11 @@ func (s *Store) GetAssetQuantityByPolicyAndName(
 	assetName []byte,
 	txn types.Txn,
 ) (uint64, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return 0, err
 	}
-	rows, err := db.QueryContext(context.Background(), s.dialect.Rebind(`
+	rows, err := db.QueryContext(ctx, s.dialect.Rebind(`
 SELECT asset.amount
 FROM asset
 INNER JOIN utxo ON asset.utxo_id = utxo.id
@@ -116,13 +115,13 @@ func (s *Store) GetAssetMintBurnInfo(
 	assetName []byte,
 	txn types.Txn,
 ) ([]byte, int, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, 0, err
 	}
 	q := s.operationalQueries(db)
 	row, err := q.GetAssetMintBurnInfo(
-		context.Background(),
+		ctx,
 		sqlitequery.GetAssetMintBurnInfoParams{
 			PolicyID:   policyID[:],
 			Name:       assetName,
