@@ -18,29 +18,31 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 )
 
 // queryShelleyCurrentProtocolParams answers GetCurrentPParams.
 //
-// at is Query's pinned point (unpinned = live). Unlike stake distribution,
-// there is no persisted historical record of protocol parameters by
-// epoch -- currentPParams is a single in-memory value, overwritten in place
-// on every governance/epoch transition. So a pinned point can only be
-// answered safely when it names a slot in the same epoch the live tip is
-// currently in: protocol parameters only change at epoch boundaries, so
-// within one epoch "as of at" and "live right now" are the same value. A
-// pin spanning an epoch boundary since at returns ErrHistoricalStateUnavailable
-// rather than silently answering with a live value that may no longer
-// match what was true at that point (blinklabs-io/dingo#382). Building
-// real historical-by-epoch pparams storage (or replaying governance
-// enactments) to lift this restriction is a materially larger,
-// not-yet-attempted piece of work.
+// at is Query's pinned point (unpinned = live). When the pinned point falls
+// in the live tip's current epoch, the live in-memory snapshot answers it
+// directly (protocol parameters only change at epoch boundaries, so within
+// one epoch "as of at" and "live right now" are the same value). Otherwise
+// this falls back to the persisted per-epoch pparams row
+// (database.Database.GetPParams / loadPersistedProtocolParameters) that
+// SetPParams already writes on every era transition and every
+// governance-enacted parameter update -- the same row Blockfrost's
+// epoch-parameters endpoint and koios-parity's reward comparison already
+// read historically. An epoch with no persisted row (never had a parameter
+// change recorded, or one pruned by DeletePParamsAfterSlot after a
+// rollback) returns ErrHistoricalStateUnavailable rather than silently
+// answering with a live value that may no longer match what was true at
+// that point (blinklabs-io/dingo#382).
 //
 // Takes the whole QueryPoint, not a bare slot -- see resolveAsOfEpoch's
 // doc comment for why a bare uint64 would silently mistreat a real point
 // pinned at slot 0 as live.
 //
-// The live epoch and the returned parameters both come from one
+// The live epoch and the live-case parameters both come from one
 // loadConsensusSnapshot() call, not two separate reads: an earlier version
 // compared the live epoch (from txn's database transaction) against
 // targetEpoch, then separately called GetCurrentPParamsForReporting (which
@@ -48,6 +50,14 @@ import (
 // commit landing between those two reads could pass targetEpoch == liveEpoch
 // while returning the parameters of the epoch that had already replaced it.
 // Deriving both from the same snapshot value closes that window.
+//
+// The historical path also runs withoutSyntheticV2CostModel, same as the
+// live path, but re-derives synthetic-ness from the persisted value itself
+// rather than trusting ls.syntheticV2CostModel (which describes only the
+// current era's object): transitionToEraFrom persists newPParams verbatim
+// into the pparams row, so a historical epoch whose fabricated PlutusV2
+// cost model had not yet been replaced by real data carries that same
+// fabrication in its persisted CBOR (blinklabs-io/dingo#382 review).
 func (ls *LedgerState) queryShelleyCurrentProtocolParams(
 	at QueryPoint,
 	txn *database.Txn,
@@ -69,21 +79,84 @@ func (ls *LedgerState) queryShelleyCurrentProtocolParams(
 		return nil, err
 	}
 	liveEpoch := snapshot.currentEpoch.EpochId
-	if targetEpoch != liveEpoch {
+	if targetEpoch == liveEpoch {
+		return []any{withoutSyntheticV2CostModel(
+			snapshot.currentPParams,
+			snapshot.syntheticV2CostModelInEffect,
+			ls.config.Logger,
+		)}, nil
+	}
+	epochRow, err := ls.db.GetEpoch(targetEpoch, txn)
+	if err != nil {
+		return nil, err
+	}
+	if epochRow == nil {
 		return nil, fmt.Errorf(
 			"%w: protocol parameters at slot %d (epoch %d) cannot be "+
-				"reconstructed while the live tip is in epoch %d -- "+
-				"historical protocol-parameter values across an epoch "+
-				"boundary are not yet supported",
+				"reconstructed -- no epoch record exists for epoch %d",
+			ErrHistoricalStateUnavailable,
+			at.Slot,
+			targetEpoch,
+			targetEpoch,
+		)
+	}
+	era := eras.GetEraById(epochRow.EraId)
+	if era == nil {
+		return nil, fmt.Errorf(
+			"%w: protocol parameters at slot %d (epoch %d) cannot be "+
+				"reconstructed -- epoch %d names unknown era %d",
+			ErrHistoricalStateUnavailable,
+			at.Slot,
+			targetEpoch,
+			targetEpoch,
+			epochRow.EraId,
+		)
+	}
+	pparams, err := ls.loadPersistedProtocolParameters(targetEpoch, *era, txn)
+	if err != nil {
+		return nil, err
+	}
+	if pparams == nil {
+		return nil, fmt.Errorf(
+			"%w: protocol parameters at slot %d (epoch %d) cannot be "+
+				"reconstructed while the live tip is in epoch %d -- no "+
+				"persisted protocol-parameter row exists for epoch %d",
 			ErrHistoricalStateUnavailable,
 			at.Slot,
 			targetEpoch,
 			liveEpoch,
+			targetEpoch,
 		)
 	}
+	// pparams is a persisted, historical value -- never ls.currentPParams --
+	// so the live case's tracked ls.syntheticV2CostModel flag (which
+	// describes only the CURRENT era's object) does not apply to it. Its own
+	// CBOR may still carry HardForkBabbage's fabricated PlutusV2 cost model
+	// (transitionToEraFrom persists newPParams verbatim, synthetic or not).
+	//
+	// Prefer the durable cleared-epoch provenance (confirmed: real data
+	// landed at or before that epoch) over re-deriving synthetic-ness from
+	// the value alone -- the value-based heuristic
+	// (resolveSyntheticV2CostModel) cannot tell a real update that happens
+	// to re-affirm the exact fabricated default from an actually-synthetic
+	// one, while the cleared-epoch marker knows which epoch really
+	// confirmed real data. Only fall back to the heuristic for the
+	// genuinely ambiguous case: no confirmation recorded at all, or
+	// targetEpoch predates the one that confirmed it (blinklabs-io/dingo#382
+	// review).
+	clearedEpoch, cleared, err := database.SyntheticV2CostModelClearedEpoch(
+		ls.db, txn,
+	)
+	if err != nil {
+		return nil, err
+	}
+	synthetic := resolveSyntheticV2CostModel("", pparams)
+	if cleared && targetEpoch >= clearedEpoch {
+		synthetic = false
+	}
 	return []any{withoutSyntheticV2CostModel(
-		snapshot.currentPParams,
-		snapshot.syntheticV2CostModelInEffect,
+		pparams,
+		synthetic,
 		ls.config.Logger,
 	)}, nil
 }
