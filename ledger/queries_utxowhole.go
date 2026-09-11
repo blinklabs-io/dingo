@@ -139,12 +139,23 @@ func (ls *LedgerState) queryShelleyUtxoWhole() (any, error) {
 	// IterateLiveUtxos' Txn.Do, whose recover converts a panic to
 	// ErrTxnPanic). Precedent: callRewardPrecompute
 	// (ledger/reward_calculation.go) (chrisguiney review).
+	//
+	// The recovered error wraps database.ErrTxnPanic via NewTxnPanicError,
+	// not a bare fmt.Errorf, so it matches the same sentinel the
+	// sequential path's Txn.Do recovery would have produced: a caller
+	// using errors.Is(err, database.ErrTxnPanic) to distinguish "the
+	// worker's transaction machinery panicked" from an ordinary resolve
+	// failure must see the same sentinel regardless of which
+	// implementation answered the query (cubic review).
 	resolveRow := func(txn *database.Txn, ref database.UtxoRef) (r resolved) {
 		defer func() {
 			if rec := recover(); rec != nil {
-				r = resolved{err: fmt.Errorf(
-					"resolve utxo cbor %x#%d panicked: %v",
-					ref.TxId[:8], ref.OutputIdx, rec,
+				r = resolved{err: database.NewTxnPanicError(
+					fmt.Sprintf(
+						"resolve utxo cbor %x#%d",
+						ref.TxId[:8], ref.OutputIdx,
+					),
+					rec,
 				)}
 			}
 		}()

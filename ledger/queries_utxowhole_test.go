@@ -230,6 +230,13 @@ func TestQueryShelleyUtxoWhole_WorkerPanicDoesNotCrashProcess(t *testing.T) {
 	}, "a worker panic must not escape and crash the process")
 	require.Error(t, queryErr)
 	require.Contains(t, queryErr.Error(), "panicked")
+	require.ErrorIs(
+		t, queryErr, database.ErrTxnPanic,
+		"a recovered worker panic must be identifiable via "+
+			"errors.Is(err, database.ErrTxnPanic), matching the "+
+			"sequential implementation's Txn.Do recovery contract "+
+			"(cubic review)",
+	)
 }
 
 // TestQueryShelleyUtxoWhole_AbortsEarlyOnFirstFailure is the regression

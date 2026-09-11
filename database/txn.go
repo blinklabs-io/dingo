@@ -341,12 +341,25 @@ func (t *Txn) withMetadataForRecovery() (*Txn, func()) {
 // discarding a write-capable caller's uncommitted metadata as a side
 // effect of a call that only meant to add blob access).
 //
-// Only valid for a read-only t; no caller passes a write-capable
-// metadata-only Txn into ResolveUtxoCborWithRecovery today.
+// aug.readWrite is hardcoded false regardless of t's own readWrite: aug's
+// cleanup is always aug.Release, which unconditionally rolls back
+// (Release calls Rollback, never Commit), so aug.blobTxn can never
+// outlive this one recovery call. repairUtxoBlob checks
+// txn.IsReadWrite() to decide whether to write the recovered offset
+// through the given txn's own blob handle (its caller's responsibility to
+// later commit) or open and commit an independent write transaction of
+// its own. A write-capable t made aug.readWrite true too, which put
+// repairUtxoBlob on the first branch -- writing into aug.blobTxn as if
+// its eventual commit were someone else's job, when aug.blobTxn's only
+// possible fate is the rollback above. The repair was silently discarded
+// every time, regardless of whether t itself ever committed (cubic
+// review). Forcing false here routes every repair through
+// repairUtxoBlob's independent-writer branch instead, which commits on
+// its own.
 func (t *Txn) withBlobForRecovery() (*Txn, func()) {
 	aug := &Txn{
 		db:             t.db,
-		readWrite:      t.readWrite,
+		readWrite:      false,
 		metadataTxn:    t.metadataTxn,
 		sharedMetadata: true,
 		blobStore:      t.blobStore,

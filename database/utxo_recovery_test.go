@@ -254,6 +254,93 @@ func TestResolveUtxoCborWithRecoveryUpgradesMetadataOnlyTxnForRecovery(
 	require.Equal(t, []byte(wantCbor), recovered)
 }
 
+// TestResolveUtxoCborWithRecoveryMetadataOnlyWriteCapableCallerPersistsRepair
+// is the regression test for a cubic review finding on PR #4084:
+// withBlobForRecovery copied t.readWrite into aug.readWrite, so a
+// write-capable metadata-only caller made aug's freshly-opened blobTxn
+// write-capable too. repairUtxoBlob then took its "use the caller's own
+// blob txn" branch (txn.IsReadWrite() true) and wrote the recovered offset
+// into aug.blobTxn expecting the caller to eventually commit it -- but
+// aug.blobTxn is never the caller's own handle and is always torn down by
+// ResolveUtxoCborWithRecovery's deferred cleanup (aug.Release, which only
+// ever rolls back), discarding the repair every time regardless of
+// whether the caller's own txn ever committed.
+//
+// Proves the fix: even with a write-capable metadata-only caller, the
+// repaired offset is durably persisted in the blob store once
+// ResolveUtxoCborWithRecovery returns -- because withBlobForRecovery now
+// forces aug.readWrite false, routing the write through repairUtxoBlob's
+// independent-writer branch, which commits on its own.
+func TestResolveUtxoCborWithRecoveryMetadataOnlyWriteCapableCallerPersistsRepair(
+	t *testing.T,
+) {
+	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	defer db.Close() //nolint:errcheck
+
+	candidate := findGapConsumeCandidateWithoutCertificates(t)
+	require.NotEmpty(t, candidate.producers)
+	producer := candidate.producers[0]
+	storeBlockOffsetsOnly(t, db, producer.block)
+	metaTxn := db.MetadataTxn(true)
+	t.Cleanup(metaTxn.Release)
+	require.NoError(
+		t,
+		metaTxn.Do(func(txn *Txn) error {
+			return db.Metadata().SetGapBlockTransaction(
+				producer.tx, producer.point, 0, nil, txn.Metadata(),
+			)
+		}),
+	)
+	metaTxn.Release()
+
+	produced := producer.tx.Produced()
+	require.NotEmpty(t, produced)
+	utxo := produced[0]
+	txId := utxo.Id.Id().Bytes()
+	outputIdx := utxo.Id.Index()
+
+	blob := db.Blob()
+	require.NotNil(t, blob)
+	writeTxn := db.Transaction(true)
+	t.Cleanup(writeTxn.Release)
+	require.NoError(
+		t,
+		blob.DeleteUtxo(writeTxn.Blob(), txId, outputIdx),
+	)
+	require.NoError(
+		t,
+		blob.DeleteTx(writeTxn.Blob(), txId),
+	)
+	require.NoError(t, writeTxn.Commit())
+
+	// Write-capable, unlike the sibling upgrade test above -- this is the
+	// caller shape the finding is about.
+	metadataOnlyTxn := db.MetadataTxn(true)
+	defer metadataOnlyTxn.Release()
+	require.Nil(
+		t, metadataOnlyTxn.Blob(),
+		"test setup must reproduce a genuinely metadata-only txn",
+	)
+	require.True(
+		t, metadataOnlyTxn.IsReadWrite(),
+		"test setup must reproduce a genuinely write-capable caller",
+	)
+
+	_, err = db.ResolveUtxoCborWithRecovery(txId, outputIdx, metadataOnlyTxn)
+	require.NoError(t, err, "UTxO must recover successfully")
+
+	checkTxn := blob.NewTransaction(false)
+	defer checkTxn.Rollback() //nolint:errcheck
+	repaired, err := blob.GetUtxo(checkTxn, txId, outputIdx)
+	require.NoError(
+		t, err,
+		"repair must be durably committed to the blob store, not "+
+			"discarded by aug's deferred rollback",
+	)
+	require.NotEmpty(t, repaired)
+}
+
 // TestResolveUtxoCborWithRecoverySharedBlobRollbackDoesNotFinishCallersTxn
 // is the regression test for a chrisguiney review finding on PR #4084: the
 // !t.sharedBlob guard added to Txn.rollback() (see withMetadataForRecovery)
