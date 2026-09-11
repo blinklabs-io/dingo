@@ -316,10 +316,17 @@ func (d *DingoDB) GetEarliestAvailableEpoch(
 	if slot == 0 {
 		return 0, false, nil
 	}
+	// Bounded at both ends, matching database/plugin/metadata/sqlstore's
+	// GetEpochBySlot query verbatim: the boundary must resolve to the epoch
+	// the slot is actually in, and a slot no epoch row covers must resolve
+	// to nothing rather than to the last epoch that happens to start before
+	// it. TestGetEarliestAvailableEpochImplementationsAgree pins this copy
+	// against that one.
 	var epochID sql.NullInt64
 	err = d.queryRow(
 		ctx,
-		`SELECT epoch_id FROM epoch WHERE start_slot <= ? ORDER BY start_slot DESC LIMIT 1`,
+		`SELECT epoch_id FROM epoch WHERE start_slot <= ? AND ? < start_slot + length_in_slots ORDER BY start_slot DESC LIMIT 1`,
+		slot,
 		slot,
 	).Scan(&epochID)
 	if err != nil {

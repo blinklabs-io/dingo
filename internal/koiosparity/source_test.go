@@ -913,3 +913,99 @@ func TestDatabaseSourceGetEarliestAvailableEpochResolvesBoundaryEpoch(t *testing
 	require.True(t, ok)
 	require.Equal(t, uint64(11), epoch)
 }
+
+// TestGetEarliestAvailableEpochImplementationsAgree pins both
+// RewardParitySource implementations to one answer for the Mithril bootstrap
+// boundary, against one physical metadata.sqlite on the real migrated schema.
+// DatabaseSource resolves the boundary slot through Database.GetEpochBySlot,
+// whose query is bounded at both ends (`start_slot <= ?` and
+// `? < start_slot + length_in_slots`), so a slot no epoch row covers resolves
+// to nothing. DingoDB carries its own copy of that SQL on a separate
+// connection, and nothing else in the tree requires the copy to keep matching
+// — the same drift TestGetPoolsRetiredByEpochImplementationsAgree exists to
+// catch, on the query a Mithril-bootstrapped node's bound is derived from.
+func TestGetEarliestAvailableEpochImplementationsAgree(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name          string
+		lengthInSlots uint
+		boundarySlot  string
+		wantEpoch     uint64
+		wantOK        bool
+	}{
+		{
+			// Slot 1_000 is the first slot of epoch 10, so the boundary
+			// resolves to epoch 10 and the first comparable epoch is 11.
+			name:          "boundary inside a known epoch",
+			lengthInSlots: 432_000,
+			boundarySlot:  "1000",
+			wantEpoch:     11,
+			wantOK:        true,
+		},
+		{
+			// Epoch 10 spans [1_000, 1_100) here, so slot 5_000 is in no
+			// epoch the table describes. Neither implementation may name
+			// an epoch the slot is not in; the boundary is unresolvable
+			// and no bound is applied.
+			name:          "boundary past the last known epoch",
+			lengthInSlots: 100,
+			boundarySlot:  "5000",
+			wantEpoch:     0,
+			wantOK:        false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			db, err := dbtest.NewDatabase(
+				t,
+				&database.Config{DataDir: dir},
+			)
+			require.NoError(t, err)
+			require.NoError(t, db.SetEpoch(
+				1_000, 10, nil, nil, nil, nil, 5, 20, tc.lengthInSlots, nil,
+			))
+			require.NoError(t, db.SetSyncState(
+				"mithril_ledger_slot",
+				tc.boundarySlot,
+				nil,
+			))
+
+			source, err := NewDatabaseSource(db)
+			require.NoError(t, err)
+			storeEpoch, storeOK, err := source.GetEarliestAvailableEpoch(
+				context.Background(),
+			)
+			require.NoError(t, err)
+
+			dingoDB, err := OpenDingoDB(
+				DingoDBConfig{Plugin: "sqlite", DataDir: dir},
+			)
+			require.NoError(t, err)
+			defer dingoDB.Close() //nolint:errcheck
+			cliEpoch, cliOK, err := dingoDB.GetEarliestAvailableEpoch(
+				context.Background(),
+			)
+			require.NoError(t, err)
+
+			require.Equal(t, tc.wantEpoch, storeEpoch)
+			require.Equal(t, tc.wantOK, storeOK)
+			require.Equal(
+				t,
+				tc.wantEpoch,
+				cliEpoch,
+				"DingoDB must resolve the boundary epoch the same way the "+
+					"in-process source does",
+			)
+			require.Equal(
+				t,
+				tc.wantOK,
+				cliOK,
+				"DingoDB must resolve the boundary epoch the same way the "+
+					"in-process source does",
+			)
+		})
+	}
+}

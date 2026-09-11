@@ -7093,8 +7093,13 @@ second sync:
     (derived from the same `mithril_ledger_slot` sync-state key
     `ledger.LedgerState.loadMithrilTrustBoundary` reads, resolved to an
     epoch via `Database.GetEpochBySlot`); `ok` is false for a non-Mithril,
-    genesis-synced node, leaving `seedBacklog` and `checkEpoch` unchanged
-    from before this existed. `checkEpoch` applies the same bound directly
+    genesis-synced node, and for a boundary slot falling inside no epoch
+    the node's own `epoch` table describes, leaving `seedBacklog` and
+    `checkEpoch` unchanged from before this existed. `DingoDB` carries its
+    own copy of that slot-to-epoch SQL for the standalone CLI, bounded at
+    both ends exactly as the store query is, with
+    `TestGetEarliestAvailableEpochImplementationsAgree` pinning the two
+    together. `checkEpoch` applies the same bound directly
     (independent of whether an epoch was ever seeded), so a standalone
     `Check` run against an already-fetched cache is covered too, not just
     the in-process observer's own backlog seeding.

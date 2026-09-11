@@ -131,10 +131,13 @@ type RewardParitySource interface {
 	// data for them.
 	//
 	// ok is false when no Mithril boundary is recorded at all (a
-	// non-Mithril, genesis-synced node, or one where the boundary read
-	// failed/was absent) — callers must then apply no lower bound beyond
-	// the existing preStakingThroughEpoch floor, leaving behavior exactly as
-	// it was before this method existed. When ok is true, epoch is the
+	// non-Mithril, genesis-synced node), and when a recorded boundary slot
+	// falls inside no epoch the node's own epoch table describes, which
+	// names no epoch to bound against — callers must then apply no lower
+	// bound beyond the existing preStakingThroughEpoch floor, leaving
+	// behavior exactly as it was before this method existed. A boundary
+	// that is recorded but unreadable or malformed is an error, not ok =
+	// false. When ok is true, epoch is the
 	// first Koios reporting epoch a caller should ever attempt to compare;
 	// every epoch below it should be treated the same way a pre-staking
 	// epoch is treated today (a recorded PASS with nothing compared, not a

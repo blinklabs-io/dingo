@@ -570,15 +570,18 @@ func TestDingoDBGetEarliestAvailableEpochNoBoundary(t *testing.T) {
 // bootstrap boundary at slot 1_000, inside epoch 10, and confirms
 // GetEarliestAvailableEpoch resolves it to epoch 11 — one past the boundary
 // epoch, since that epoch (and everything before it) was inherited from the
-// Mithril snapshot rather than computed locally.
+// Mithril snapshot rather than computed locally. The row carries
+// length_in_slots because every epoch row the metadata store writes does, and
+// the resolution query is bounded by it at the upper end.
 func TestDingoDBGetEarliestAvailableEpochResolvesBoundaryEpoch(t *testing.T) {
 	t.Parallel()
 
 	db, gdb := openTestDingoDB(t)
 
 	require.NoError(t, gdb.Exec(
-		`INSERT INTO epoch (epoch_id, start_slot) VALUES (?, ?)`,
-		10, 1_000,
+		`INSERT INTO epoch (epoch_id, start_slot, length_in_slots)
+		 VALUES (?, ?, ?)`,
+		10, 1_000, 432_000,
 	).Error)
 	require.NoError(t, gdb.Exec(
 		`INSERT INTO sync_state (sync_key, value) VALUES (?, ?)`,
