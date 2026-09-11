@@ -159,8 +159,8 @@ topology: ""
 metricsPort: 12798
 
 # TCP port for the liveness/readiness probe listener. 0 disables it.
-# Binds bindAddr, like the relay and metrics listeners (not the API bind
-# address): a kubelet or load-balancer probe reaches the container from
+# Binds bindAddr, like the relay and metrics listeners: a kubelet or
+# load-balancer probe reaches the container from
 # outside, so loopback would fail those closed.
 #
 #   GET /health, GET /healthz  -> liveness. 200 whenever the process is up
