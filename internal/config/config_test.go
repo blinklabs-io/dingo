@@ -70,6 +70,15 @@ func resetGlobalConfig() {
 			CleanupAfterLoad:   true,
 			VerifyCertificates: true,
 		},
+		// Fail closed: mirrors newDefaultConfig's own ValidateForgedBlock
+		// default (issue #3528) so this test-only reset does not silently
+		// diverge from what an operator actually gets. Unlike the several
+		// fields above left at their zero value on purpose (StorageMode,
+		// Cache, Chainsync, SlotsPerKESPeriod, ...), so tests can observe
+		// their own fill-in-if-empty defaulting logic in isolation,
+		// ValidateForgedBlock's production default is an unconditional
+		// literal with no separate fill-in step to test around.
+		ValidateForgedBlock: true,
 	}
 	globalTopologyConfig = &topology.TopologyConfig{}
 }
@@ -211,6 +220,7 @@ mithril:
 		},
 		ForgeSyncToleranceSlots:     321,
 		ForgeStaleGapThresholdSlots: 654,
+		ValidateForgedBlock:         true,
 		Mithril: MithrilConfig{
 			Enabled:                false,
 			AggregatorURL:          "https://mithril.example.net",
@@ -317,6 +327,7 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 		}(),
 		ForgeSyncToleranceSlots:     DefaultForgeSyncToleranceSlots,
 		ForgeStaleGapThresholdSlots: DefaultForgeStaleGapThresholdSlots,
+		ValidateForgedBlock:         true,
 		Mithril: MithrilConfig{
 			Enabled:            true,
 			CleanupAfterLoad:   true,

@@ -16,6 +16,7 @@ package koiosparity
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -89,6 +90,55 @@ type DingoProtocolParams struct {
 	// than Dingo's stored numeric keys, so the two sides are directly
 	// comparable. nil in Shelley/Allegra/Mary, where no scripts are priced.
 	CostModels map[string][]int64
+
+	// SyntheticV2CostModel reports whether CostModels["PlutusV2"], if
+	// present, is still HardForkBabbage's fabricated default (dingo #3825)
+	// for this epoch rather than real governance/protocol-update data --
+	// i.e. whether Dingo has a PlutusV2 model in force before the chain
+	// actually enacted one. Callers (GetProtocolParams's own
+	// implementations) populate this from the durable
+	// synthetic_v2_cost_model_cleared_epoch marker the ledger package
+	// maintains, mirroring ledger.queryShelleyCurrentProtocolParams's
+	// historical-epoch resolution exactly (see isSyntheticV2CostModel).
+	// compareCostModels reads it to classify a PlutusV2-only-on-Dingo
+	// divergence as informational rather than a real mismatch when this is
+	// true (dingo #4127) -- Koios's absence and Dingo's placeholder both
+	// correctly describe "no real PlutusV2 model exists on chain yet".
+	// Always false when CostModels has no "PlutusV2" entry.
+	SyntheticV2CostModel bool
+}
+
+// isSyntheticV2CostModel reports whether v2 (targetEpoch's decoded PlutusV2
+// cost model, if hasV2) should be treated as HardForkBabbage's fabricated
+// default rather than real data, mirroring
+// ledger.queryShelleyCurrentProtocolParams's historical-epoch resolution
+// (dingo #4127, following #3825's design):
+//
+//   - No PlutusV2 model at all: not synthetic (there is nothing to fabricate
+//     a divergence from).
+//   - The durable cleared-epoch marker is authoritative when present:
+//     targetEpoch at or after clearedEpoch means real PlutusV2 data was
+//     already confirmed on chain by then, whatever the value itself
+//     compares equal to (a real update can legitimately re-affirm the exact
+//     default array).
+//   - Otherwise (no confirmation recorded yet, e.g. a database that
+//     predates the marker, or the real update has not landed) fall back to
+//     the value-based heuristic: synthetic exactly when v2 is byte-for-byte
+//     eras.DefaultPlutusV2CostModel.
+func isSyntheticV2CostModel(
+	v2 []int64,
+	hasV2 bool,
+	targetEpoch uint64,
+	clearedEpoch uint64,
+	cleared bool,
+) bool {
+	if !hasV2 {
+		return false
+	}
+	if cleared && targetEpoch >= clearedEpoch {
+		return false
+	}
+	return slices.Equal(v2, eras.DefaultPlutusV2CostModel)
 }
 
 // decodeProtocolParams decodes one stored `pparams` CBOR blob as the given

@@ -359,7 +359,9 @@ func (n *Node) initBlockForger(
 	}
 
 	// Always enforce aggregate reference-script limits before AddBlock.
-	// Header crypto and per-transaction self-validation remain opt-in.
+	// Full self-validation (header crypto, body-hash, per-tx ledger checks)
+	// runs too unless the operator explicitly opts out (issue #3528: fail
+	// closed by default).
 	blockValidator := newForgedBlockValidator(
 		n.ledgerState,
 		n.config.validateForgedBlock,

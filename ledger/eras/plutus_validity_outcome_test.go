@@ -483,6 +483,9 @@ func TestValidateTxRequiresDeclaredValidityToMatchExecution(
 							Steps:  10_000_000,
 							Memory: 10_000_000,
 						},
+						CostModels: map[uint][]int64{
+							0: syntheticFullCostModel(t, lang.LanguageVersionV1),
+						},
 					},
 				)
 			},
@@ -501,6 +504,9 @@ func TestValidateTxRequiresDeclaredValidityToMatchExecution(
 							Steps:  10_000_000,
 							Memory: 10_000_000,
 						},
+						CostModels: map[uint][]int64{
+							0: syntheticFullCostModel(t, lang.LanguageVersionV1),
+						},
 					},
 				)
 			},
@@ -518,6 +524,9 @@ func TestValidateTxRequiresDeclaredValidityToMatchExecution(
 						MaxTxExUnits: lcommon.ExUnits{
 							Steps:  10_000_000,
 							Memory: 10_000_000,
+						},
+						CostModels: map[uint][]int64{
+							1: syntheticFullCostModel(t, lang.LanguageVersionV2),
 						},
 					},
 				)
@@ -539,6 +548,9 @@ func TestValidateTxRequiresDeclaredValidityToMatchExecution(
 							Steps:  10_000_000,
 							Memory: 10_000_000,
 						},
+						CostModels: map[uint][]int64{
+							0: syntheticFullCostModel(t, lang.LanguageVersionV1),
+						},
 					},
 				)
 			},
@@ -558,6 +570,9 @@ func TestValidateTxRequiresDeclaredValidityToMatchExecution(
 						MaxTxExUnits: lcommon.ExUnits{
 							Steps:  10_000_000,
 							Memory: 10_000_000,
+						},
+						CostModels: map[uint][]int64{
+							1: syntheticFullCostModel(t, lang.LanguageVersionV2),
 						},
 					},
 				)

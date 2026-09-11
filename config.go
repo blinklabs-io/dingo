@@ -649,6 +649,22 @@ func (n *Node) configValidate() error {
 				shelleyGenesis.NetworkMagic,
 			)
 		}
+		if byronGenesis := n.config.CardanoNodeConfig().ByronGenesis(); byronGenesis != nil {
+			byronProtocolMagic := byronGenesis.ProtocolConsts.ProtocolMagic
+			if byronProtocolMagic < 0 || byronProtocolMagic > math.MaxUint32 {
+				return fmt.Errorf(
+					"byron genesis protocol magic %d is out of uint32 range",
+					byronProtocolMagic,
+				)
+			}
+			if n.config.cfg.NetworkMagic != uint32(byronProtocolMagic) { // #nosec G115 -- range-checked above
+				return fmt.Errorf(
+					"network magic (%d) doesn't match value from Byron genesis (%d)",
+					n.config.cfg.NetworkMagic,
+					byronProtocolMagic,
+				)
+			}
+		}
 	}
 	return nil
 }
@@ -662,17 +678,24 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 	// Start with a default internal config
 	c := Config{
 		cfg: &internalconfig.Config{
-			BindAddr:           "0.0.0.0",
-			StorageMode:        string(StorageModeCore),
-			RunMode:            internalconfig.RunModeServe,
-			Cache:              internalconfig.DefaultCacheConfig(),
-			Chainsync:          internalconfig.DefaultChainsyncConfig(),
-			GenesisBootstrap:   internalconfig.DefaultGenesisBootstrapConfig(),
-			HistoryExpiry:      internalconfig.DefaultHistoryExpiryConfig(),
-			KoiosParity:        internalconfig.DefaultKoiosParityConfig(),
-			Logging:            internalconfig.DefaultLoggingConfig(),
-			Midnight:           internalconfig.DefaultMidnightConfig(),
-			CORSAllowedOrigins: []string{"*"},
+			BindAddr:    "0.0.0.0",
+			StorageMode: string(StorageModeCore),
+			RunMode:     internalconfig.RunModeServe,
+			// Fail closed: self-validate locally-forged blocks before
+			// adoption and diffusion unless an operator explicitly opts
+			// out. Mirrors internalconfig's own package-level default
+			// (globalConfig, built by its unexported newDefaultConfig)
+			// -- this literal is a separate default source, not backfilled
+			// from that one, so it must be set here too.
+			ValidateForgedBlock: true,
+			Cache:               internalconfig.DefaultCacheConfig(),
+			Chainsync:           internalconfig.DefaultChainsyncConfig(),
+			GenesisBootstrap:    internalconfig.DefaultGenesisBootstrapConfig(),
+			HistoryExpiry:       internalconfig.DefaultHistoryExpiryConfig(),
+			KoiosParity:         internalconfig.DefaultKoiosParityConfig(),
+			Logging:             internalconfig.DefaultLoggingConfig(),
+			Midnight:            internalconfig.DefaultMidnightConfig(),
+			CORSAllowedOrigins:  []string{"*"},
 			Plugins: internalconfig.PluginsConfig{
 				Storage: internalconfig.StoragePluginsConfig{
 					Blob: hostplugin.Selection{
@@ -1482,11 +1505,12 @@ func WithForgeStaleGapThresholdSlots(slots uint64) ConfigOptionFunc {
 	}
 }
 
-// WithValidateForgedBlock enables self-validation of locally-forged blocks
+// WithValidateForgedBlock controls self-validation of locally-forged blocks
 // before they are adopted onto the chain and diffused to peers. When enabled,
 // the forger runs VRF/KES header crypto, body-hash consistency, and per-tx
 // ledger validation on each forged block. A failing block is dropped without
-// being adopted or diffused. Disabled by default.
+// being adopted or diffused. Enabled by default; pass false only to
+// explicitly opt out.
 func WithValidateForgedBlock(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.ValidateForgedBlock = enabled

@@ -126,6 +126,12 @@ func cloudPrimaryTestProvider(
 						badger.WithLogger(deps.Logger),
 						badger.WithGc(false),
 						badger.WithDeferOpen(),
+						badger.WithValueLogFileSize(
+							testutil.TestBadgerValueLogFileSize,
+						),
+						badger.WithMemTableSize(
+							testutil.TestBadgerMemTableSize,
+						),
 					)
 					if err != nil {
 						return nil, nil, err

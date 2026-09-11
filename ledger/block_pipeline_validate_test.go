@@ -373,18 +373,26 @@ func TestDecodeReadChainBatchMirrorsSerialValidationGates(t *testing.T) {
 	tests := []struct {
 		name   string
 		mutate func(*LedgerState, models.Block)
+		// wantOk records whether the block should still decode despite the
+		// wrong nonce configured below. Issue #3528: a coarse
+		// ValidateHistorical=false historical-sync toggle must not exempt
+		// header VRF/KES/OpCert crypto from validation -- only a slot a
+		// Mithril certificate already covers may skip it.
+		wantOk bool
 	}{
 		{
 			name: "historical validation disabled",
 			mutate: func(ls *LedgerState, _ models.Block) {
 				ls.validationEnabled = false
 			},
+			wantOk: false,
 		},
 		{
 			name: "inside Mithril trust boundary",
 			mutate: func(ls *LedgerState, block models.Block) {
 				ls.mithrilLedgerSlot = block.Slot
 			},
+			wantOk: true,
 		},
 	}
 	for index, tt := range tests {
@@ -416,8 +424,10 @@ func TestDecodeReadChainBatchMirrorsSerialValidationGates(t *testing.T) {
 				t.Context(),
 				[]models.Block{block},
 			)
-			require.True(t, ok)
-			require.Len(t, decoded, 1)
+			require.Equal(t, tt.wantOk, ok)
+			if tt.wantOk {
+				require.Len(t, decoded, 1)
+			}
 		})
 	}
 }

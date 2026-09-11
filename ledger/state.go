@@ -4770,49 +4770,33 @@ func (ls *LedgerState) securityParamForCurrentEraSnapshot() int {
 	return ls.securityParamForEraOrDefault(eraId)
 }
 
-// shouldSkipPhase2ValidationForBlock reports whether a block is deep enough
-// behind the reference tip that its producer-supplied isValid flag can be
-// trusted for replay-only Plutus Phase 2 results.
-func (ls *LedgerState) shouldSkipPhase2ValidationForBlock(
-	blockNumber uint64,
-	referenceBlockNumber uint64,
-	eraId uint,
-) bool {
-	securityParam, ok := ls.securityParamForEra(eraId)
-	if !ok || referenceBlockNumber < securityParam {
-		return false
-	}
-	immutableBlockNumber := referenceBlockNumber - securityParam
-	return blockNumber <= immutableBlockNumber
-}
-
-// shouldSkipPhase2ValidationForBlockAtCurrentTip samples the primary chain tip
-// for this specific block. The chain can advance or roll back while ledger
-// processing drains a read batch, so callers must not reuse a sub-batch-start
-// reference tip for all blocks in the transaction.
-func (ls *LedgerState) shouldSkipPhase2ValidationForBlockAtCurrentTip(
-	blockNumber uint64,
-	eraId uint,
-) bool {
-	referenceTip := ls.chain.Tip()
-	return ls.shouldSkipPhase2ValidationForBlock(
-		blockNumber,
-		referenceTip.BlockNumber,
-		eraId,
-	)
-}
-
-// shouldSkipConfiguredPhase2Validation preserves the trusted-replay shortcut
-// only when historical validation is disabled. When ValidateHistorical is
-// enabled, local phase-2 evaluation is the purpose of that setting and must
-// remain active across the stability boundary.
-func shouldSkipConfiguredPhase2Validation(
-	validationEnabled bool,
-	shouldValidateBlock bool,
-	deepHistoricalBlock bool,
-) bool {
-	return !validationEnabled && shouldValidateBlock && deepHistoricalBlock
-}
+// Issue #3528: the historical-sync phase-2 shortcut that used to live here
+// (shouldSkipPhase2ValidationForBlock, shouldSkipPhase2ValidationForBlockAtCurrentTip,
+// shouldSkipConfiguredPhase2Validation) skipped re-running Plutus evaluation
+// for a deep, already-immutable block whenever ValidateHistorical was
+// disabled -- the ordinary ValidateHistorical=false bulk-sync case, not a
+// TrustedReplay import; the original condition (!validationEnabled &&
+// shouldValidateBlock && deepHistoricalBlock) never tested TrustedReplay at
+// all, and historicalBlockValidationDecision's validationEnabled==false
+// branch already made shouldValidateBlock true for exactly this catch-up
+// case, so it was genuinely reachable in production. A later revision here
+// added a trustedReplay requirement, which -- because
+// historicalBlockValidationDecision forces shouldValidateBlock to false
+// whenever TrustedReplay is true -- made that specific 4-way combination
+// unreachable; that dead 4-way form, not the original mechanism, is what
+// got removed. Phase 2 now always evaluates whenever per-tx validation runs
+// at all, which is the safer contract issue #3528 asks for, but it has a
+// real cost worth naming plainly -- narrower than "every deep historical
+// block", though: historicalBlockValidationDecision's !validationEnabled
+// branch only returns shouldValidate=true once blockSlot reaches the
+// near-tip stability-window cutoff, so anything below that cutoff never
+// entered per-tx validation and never paid for phase 2 either way. The
+// removed shortcut only fired on blocks that were simultaneously at or
+// above that cutoff (by slot) and more than the security parameter behind
+// the tip (by block number, deepHistoricalBlock's own dimension) -- an
+// operator running ValidateHistorical=false now pays Plutus phase-2
+// evaluation on exactly that intersection, where it was previously
+// skipped.
 
 // StabilityWindow returns the Ouroboros security stability window for the
 // current era in slots. For Byron the window is 2k; for Shelley+ it is 3k/f.
@@ -6799,15 +6783,18 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 							blocksProcessed++
 							continue
 						}
-						// Process block
-						skipPhase2Validation := shouldSkipConfiguredPhase2Validation(
-							snapshotValidationEnabled,
-							shouldValidateBlock,
-							ls.shouldSkipPhase2ValidationForBlockAtCurrentTip(
-								next.BlockNumber(),
-								snapshotEra.Id,
-							),
-						)
+						// Process block. Phase 2 (Plutus evaluation) always
+						// runs when per-tx validation runs at all -- see the
+						// issue #3528 removal note above
+						// historicalBlockValidationDecision for why the old
+						// historical-sync/TrustedReplay phase-2 shortcut was
+						// deleted rather than reworked. This is the only
+						// production caller of ledgerProcessBlock, so hardcoding
+						// false here makes LedgerView.skipPhase2Validation and
+						// every era's phase2ValidationSkipper call site dead in
+						// production; see LedgerView's field doc comment for
+						// why that plumbing is retained rather than deleted.
+						const skipPhase2Validation = false
 						delta, err = ls.ledgerProcessBlock(
 							txn,
 							tmpPoint,
