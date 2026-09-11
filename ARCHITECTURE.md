@@ -6248,8 +6248,8 @@ applied as a read deadline in `decodeRequest` and cleared once the body is
 read, caps how long it may take to send them. A request that breaches either
 bound fails as the existing `ErrInvalidRequest`, so callers see no new error.
 `listenerReadTimeout` (60s, the listener's `http.Server.ReadTimeout`) is the
-backstop for a request whose body no handler reads — an unknown route, or one
-rejected by authentication before the handler runs — which the per-request
+backstop for a request whose body no handler reads — an unknown route, for
+example — which the per-request
 deadline never sees.
 
 The server depends on four narrow interfaces (`api/mesh/node_interface.go`) —
@@ -8469,7 +8469,8 @@ tier, the plugin-form name takes precedence when both forms are set.
 The `api.tls` shared defaults (`--api-tls-mode`/`DINGO_API_TLS_MODE`/
 `api.tls.mode` and their `certFilePath`/`keyFilePath` counterparts; see "API
 security" under External Interfaces) participate in this same CLI >
-environment > YAML > defaults source precedence like any other `Config`
+environment > YAML > defaults source precedence like any other `Config` field.
+
 `LoadConfig` (`internal/config`) only parses and merges the YAML and
 environment sources; it makes no semantic judgments about the merged values,
 because CLI flags are a higher-precedence source merged afterwards by
@@ -8932,18 +8933,13 @@ A secret classification -- including the unrecognized-key default --
 covers the whole subtree beneath the key and is applied before any
 recursion, because walking into it would reclassify the inner keys by
 their own names and an inner key classified plain (`host`, `mode`) would
-then render part of a secret-bearing value. The API providers nest their
-`tls` and `auth` policies, so those two keys carry a container
-classification of their own: the section beneath them is walked and its
-policy keys are classified individually, while a value of any other shape
-at the same key -- a scalar, a slice, a map this walk cannot key into --
-is redacted whole. The key says only that a container belongs there, so it
-classifies nothing about what a scalar there would hold. The key's class
-and the value's shape are reconciled in one place, which is what keeps
-every container key from needing its own shape check. The URI class is
-held to the same rule: only a shape that holds strings can have its
-credentials removed, so any other shape under a URI field is redacted
-rather than rendered untransformed.
+then render part of a secret-bearing value. An unrecognized provider key
+redacts its whole subtree before recursion. The
+`tls` policy is the deliberate container exception: its map is walked and
+known non-secret TLS settings remain visible, while non-map values at `tls`
+are redacted. The URI class is held to the same rule: only a shape that holds
+strings can have its credentials removed, so any other shape under a URI
+field is redacted rather than rendered untransformed.
 
 Both the URI parameters and the provider keys are decided by one
 credential classifier, `isCredentialKeyName`, which works per key-name

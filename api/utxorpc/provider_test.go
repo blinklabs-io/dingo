@@ -64,7 +64,7 @@ func providerDeps(t *testing.T) ProviderDependencies {
 }
 
 // resolveOnFreePortWithConfig resolves the built-in UTxO RPC provider on a
-// free loopback port with extra config fields (e.g. "tls"/"auth") merged
+// free loopback port with extra config fields (e.g. "tls") merged
 // alongside "port", retrying on a lost race for the port. The provider
 // dependencies (including the EventBus) are built once and reused across
 // every attempt, rather than one per attempt.

@@ -52,9 +52,7 @@ const (
 	// logProviderSection is the class of a provider configuration key
 	// that names a nested section rather than a value of its own. The
 	// section is walked so its own keys are classified by name, and a
-	// value of any other shape at the same key is redacted: the key says
-	// only that a container belongs there, so it classifies nothing
-	// about a scalar, a slice, or a map this walk cannot key into.
+	// value of any other shape at the same key is redacted.
 	logProviderSection
 )
 
@@ -288,19 +286,14 @@ var providerConfigPlainKeys = []string{
 	// mempool
 	"capacity", "evictionwatermark", "rejectionwatermark",
 	"revalidationdeltacap",
-	// api/{blockfrost,mesh,utxorpc} policy keys inside the tls and auth
-	// sections
-	"mode", "certfilepath", "keyfilepath", "tokenfilepath",
+	// api/{blockfrost,mesh,utxorpc} TLS policy keys
+	"mode", "certfilepath", "keyfilepath",
 }
 
 // providerConfigSectionKeys are provider configuration keys whose value is
-// a nested section of further keys. The API providers nest their tls and
-// auth policies there, so the section has to stay walkable or the whole
-// policy disappears from a startup log -- but only a section is walkable,
-// and classifying these keys separately from the values that carry no
-// secret is what keeps a non-section value at the same key from being
-// rendered as one.
-var providerConfigSectionKeys = []string{"auth", "tls"}
+// a nested section of further keys. TLS settings remain walkable so their
+// non-secret policy values stay useful in startup logs.
+var providerConfigSectionKeys = []string{"tls"}
 
 // providerConfigURIKeys are provider configuration keys holding a URI or
 // database DSN, rendered with only their credential components removed.
@@ -530,11 +523,8 @@ func providerConfigValue(v reflect.Value) slog.Value {
 // inner key that happens to be classified plain ("host", "mode") would
 // then render part of a value whose enclosing key is a secret.
 //
-// A logProviderSection class is the one place where the key's class and
-// the value's shape have to agree: the key says a container belongs
-// there, so a section is walked and anything else is redacted. Deciding
-// that here, once, is what keeps every container key from needing its own
-// shape check.
+// A logProviderSection class requires a map-shaped value so a section is
+// walked and anything else is redacted.
 func providerConfigEntry(v reflect.Value, class logClass) slog.Value {
 	if !v.IsValid() {
 		return slog.AnyValue(nil)

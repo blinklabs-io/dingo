@@ -94,9 +94,7 @@ func TestConnectRequestBodyLimitRejectsOversizedCompressedMessage(
 	// Keep the wire body small while making the decoded protobuf message exceed
 	// the limit. The Connect handler must bound the buffered compressed and
 	// decompressed bytes before the request reaches an interceptor or service
-	// method. Because authentication is enabled but this request has no
-	// credential, a size error rather than an authentication error also pins
-	// that ordering down.
+	// method.
 	body := protowire.AppendTag(nil, 100, protowire.BytesType)
 	body = protowire.AppendBytes(
 		body,

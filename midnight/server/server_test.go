@@ -379,13 +379,8 @@ func TestNewAllowsRemotePlaintextByDefault(t *testing.T) {
 	}
 }
 
-func TestNewAllowsExplicitRemotePolicy(t *testing.T) {
+func TestNewAllowsRemoteHostWithTLS(t *testing.T) {
 	_, err := server.New(server.Config{
-		Host: "0.0.0.0",
-	})
-	require.NoError(t, err)
-
-	_, err = server.New(server.Config{
 		Host:            "192.0.2.1",
 		TLSCertFilePath: "server.crt",
 		TLSKeyFilePath:  "server.key",

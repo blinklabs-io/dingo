@@ -903,43 +903,6 @@ func TestProviderConfigSecretSubtreeIsRedactedWhole(t *testing.T) {
 	}
 }
 
-// TestProviderConfigNestedSectionsAreWalked is the counterweight to
-// redacting a secret subtree whole: nested provider settings must retain
-// non-secret fields while redacting credentials.
-func TestProviderConfigNestedSectionsAreWalked(t *testing.T) {
-	t.Parallel()
-
-	value := providerConfigValue(reflect.ValueOf(map[string]any{
-		"auth": map[string]any{
-			"mode":          "token",
-			"tokenFilePath": "/etc/dingo/token",
-			"token":         "nested-auth-token",
-		},
-		"tls": map[string]any{
-			"mode":         "manual",
-			"certFilePath": "/etc/dingo/api.crt",
-		},
-	}))
-	rendered := value.String()
-	if strings.Contains(rendered, "nested-auth-token") {
-		t.Errorf("provider config leaks nested auth token: %s", rendered)
-	}
-	for _, want := range []string{
-		"token",
-		"/etc/dingo/token",
-		"manual",
-		"/etc/dingo/api.crt",
-	} {
-		if !strings.Contains(rendered, want) {
-			t.Errorf(
-				"provider config dropped nested policy %q: %s",
-				want,
-				rendered,
-			)
-		}
-	}
-}
-
 // TestProviderConfigKeyClassesAreUnambiguous catches a provider key listed
 // under two classes, where the effective class would depend on map
 // iteration order.
@@ -965,10 +928,10 @@ func TestProviderConfigKeyClassesAreUnambiguous(t *testing.T) {
 }
 
 // TestProviderConfigSectionKeyRequiresASection is the value-shape
-// counterpart to classifying "auth" and "tls" as containers. Those keys
-// name a nested section, so a section is walked and classified key by key
+// counterpart to classifying "tls" as a container. That key
+// names a nested section, so a section is walked and classified key by key
 // while a value of any other shape at the same key is not a policy this
-// walk can classify at all and is redacted whole. Classifying them
+// walk can classify at all and is redacted whole. Classifying it
 // renderable instead rendered a scalar there as plain text.
 func TestProviderConfigSectionKeyRequiresASection(t *testing.T) {
 	t.Parallel()
@@ -1014,16 +977,26 @@ func TestProviderConfigSectionKeyRequiresASection(t *testing.T) {
 }
 
 // TestProviderConfigSectionKeyNilValue pins that an explicitly empty
-// section renders as itself. A nil discloses nothing, and "auth: " with
+// section renders as itself. A nil discloses nothing, and "tls: " with
 // nothing under it is what an operator needs to see about their file.
 func TestProviderConfigSectionKeyNilValue(t *testing.T) {
 	t.Parallel()
 
 	rendered := providerConfigValue(reflect.ValueOf(
-		map[string]any{"auth": nil},
+		map[string]any{"tls": nil},
 	)).String()
 	if !strings.Contains(rendered, "<nil>") {
 		t.Errorf("nil section is not rendered as nil: %s", rendered)
+	}
+}
+
+func TestProviderConfigTLSSectionIsWalked(t *testing.T) {
+	t.Parallel()
+	rendered := providerConfigValue(reflect.ValueOf(map[string]any{"tls": map[string]any{
+		"mode": "manual", "certFilePath": "/etc/dingo/api.crt", "token": "secret",
+	}})).String()
+	if !strings.Contains(rendered, "manual") || !strings.Contains(rendered, "/etc/dingo/api.crt") || strings.Contains(rendered, "secret") {
+		t.Errorf("tls section rendered incorrectly: %s", rendered)
 	}
 }
 

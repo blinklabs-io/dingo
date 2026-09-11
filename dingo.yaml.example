@@ -127,8 +127,8 @@ logging:
 # TLS on upgrade. To secure Blockfrost and/or Mesh (or to override UTxO
 # RPC's own certificate independently of this shared one), use the top-level
 # api.tls section or each provider's own plugins.api.<name>.config.tls --
-# see the "api:" section above and README.md's "API TLS". TLS is optional; a complete certificate/key pair
-# is required only when TLS is enabled.
+# see the "api:" section above and README.md's "API TLS". TLS is optional;
+# a complete certificate/key pair is required only when TLS is enabled.
 #
 # Can be overridden with the TLS_CERT_FILE_PATH environment variable
 tlsCertFilePath: ""

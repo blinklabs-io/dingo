@@ -209,6 +209,7 @@ func TestNewRejectsInvalidMergedAPITLSPolicy(t *testing.T) {
 // TestNewAllowsUnauthenticatedPublicAPI verifies the shared Node constructor
 // permits an intentionally public API without requiring authentication.
 func TestNewAllowsUnauthenticatedPublicAPI(t *testing.T) {
+	t.Parallel()
 	cardanoCfg := newNodeTestCardanoNodeCfg(t)
 	node, err := New(NewConfig(
 		WithDatabasePath(t.TempDir()),

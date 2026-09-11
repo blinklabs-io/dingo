@@ -25,6 +25,7 @@ import (
 )
 
 func TestNodeRunPublicAPIsUseSharedBindAddress(t *testing.T) {
+	t.Parallel()
 	for _, bind := range []string{"0.0.0.0", "127.0.0.2"} {
 		t.Run(bind, func(t *testing.T) {
 			n := newAPIPluginRuntimeNode(t)

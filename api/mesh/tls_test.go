@@ -27,6 +27,7 @@ import (
 )
 
 func TestMeshAnonymousPlaintextTLSAndCORS(t *testing.T) {
+	t.Parallel()
 	const origin = "https://wallet.example"
 	cert, key := testutil.GenerateTestTLSCertKey(t)
 	for _, tc := range []struct {

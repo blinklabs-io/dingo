@@ -46,7 +46,7 @@ func freeLoopbackPort(t *testing.T) uint {
 }
 
 // resolveOnFreePortWithConfig resolves the built-in Blockfrost provider on
-// a free loopback port with extra config fields (e.g. "tls"/"auth")
+// a free loopback port with extra config fields (e.g. "tls")
 // merged alongside "port", retrying on a lost race for the port.
 func resolveOnFreePortWithConfig(
 	t *testing.T,

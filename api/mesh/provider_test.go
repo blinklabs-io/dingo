@@ -79,7 +79,7 @@ func resolveOnFreePort(
 }
 
 // resolveOnFreePortWithConfig is resolveOnFreePort with additional
-// provider config fields (e.g. "tls"/"auth") merged alongside "port".
+// provider config fields (e.g. "tls") merged alongside "port".
 func resolveOnFreePortWithConfig(
 	t *testing.T,
 	host *plugin.Host,
@@ -281,9 +281,6 @@ func TestProviderRejectsPartialTLSPair(t *testing.T) {
 	require.ErrorContains(t, err, "must both be set")
 }
 
-// TestProviderRejectsInvalidAuthMode asserts an unrecognized auth.mode is
-// rejected at resolution, with an error naming the full provider config
-// path.
 // TestProviderPropagatesTLS asserts a valid provider TLS config reaches the server.
 func TestProviderPropagatesTLS(t *testing.T) {
 	t.Parallel()
