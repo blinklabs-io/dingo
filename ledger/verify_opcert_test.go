@@ -204,11 +204,13 @@ func TestVerifyOpCertHeaderCrypto_ExpiredKESPeriod(t *testing.T) {
 	assert.Contains(t, err.Error(), "KES period")
 }
 
-// TestVerifyOpCertHeaderCrypto_MaxKESEvolutionsZeroSkipsExpiry verifies the
-// expiry check degrades gracefully when the genesis parameter is unavailable:
-// the same far-future slot that expired above passes when maxKesEvolutions is
-// zero, leaving the lighter future-cert guard inside VerifyBlock in charge.
-func TestVerifyOpCertHeaderCrypto_MaxKESEvolutionsZeroSkipsExpiry(
+// TestVerifyOpCertHeaderCrypto_MaxKESEvolutionsZeroFailsClosed verifies a
+// missing genesis KES-evolution limit is treated as a configuration failure
+// rather than silently falling back to the lighter future-cert-only guard
+// VerifyBlock already ran (which never rejects an expired opcert). Issue
+// #3528: fail closed on missing validation configuration instead of letting
+// an expired opcert through unchecked.
+func TestVerifyOpCertHeaderCrypto_MaxKESEvolutionsZeroFailsClosed(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -221,7 +223,24 @@ func TestVerifyOpCertHeaderCrypto_MaxKESEvolutionsZeroSkipsExpiry(
 		slotsPerKesPeriod,
 		0,
 	)
-	require.NoError(t, err)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "maxKesEvolutions")
+}
+
+// TestVerifyOpCertHeaderCrypto_SlotsPerKesPeriodZeroFailsClosed mirrors the
+// maxKesEvolutions case for the other genesis parameter.
+func TestVerifyOpCertHeaderCrypto_SlotsPerKesPeriodZeroFailsClosed(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{17}, 18, tamperNone)
+	err := verifyOpCertHeaderCrypto(
+		tb.block.Header(),
+		tb.block.SlotNumber(),
+		0,
+		62,
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "slotsPerKesPeriod")
 }
 
 // TestValidateOpCertCounter exercises the counter rules applied at block-apply

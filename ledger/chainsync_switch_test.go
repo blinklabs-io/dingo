@@ -461,6 +461,12 @@ func TestHandleEventBlockfetchBlockAllowsBlocksFromActiveBatch(t *testing.T) {
 	ls := &LedgerState{
 		activeBlockfetchConnId:       connId1,
 		chainsyncBlockfetchReadyChan: make(chan struct{}),
+		// mockBabbageBlock carries no real VRF/KES material to verify. Mark
+		// its slot Mithril-covered so the header crypto gate (issue #3528:
+		// required by default, exempt only for a Mithril-certified slot)
+		// exempts it, letting this test isolate batch-ownership bookkeeping
+		// from crypto verification.
+		mithrilLedgerSlot: 2,
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			BlockfetchRequestRangeFunc: func(
@@ -556,6 +562,12 @@ func TestHandleEventBlockfetchBlockAllowsEquivalentConnectionId(t *testing.T) {
 	ls := &LedgerState{
 		activeBlockfetchConnId:       connId1,
 		chainsyncBlockfetchReadyChan: make(chan struct{}),
+		// mockBabbageBlock carries no real VRF/KES material to verify. Mark
+		// its slot Mithril-covered so the header crypto gate (issue #3528:
+		// required by default, exempt only for a Mithril-certified slot)
+		// exempts it, letting this test isolate connection-equivalence
+		// bookkeeping from crypto verification.
+		mithrilLedgerSlot: 2,
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			BlockfetchRequestRangeFunc: func(
@@ -1452,6 +1464,12 @@ func TestHandleEventChainsyncRecordsOnlyAdmittedHeaderFrontier(t *testing.T) {
 		blockNumber: fixture.currentTip.BlockNumber + 1,
 		slot:        fixture.currentTip.Point.Slot + 1,
 	}
+	// mockHeader carries no real VRF/KES material to verify. Mark its slot
+	// Mithril-covered so the header crypto gate (issue #3528: required by
+	// default, exempt only for a Mithril-certified slot) exempts it, letting
+	// this test isolate frontier-tracking from crypto verification.
+	ls.mithrilLedgerSlot = accepted.slot
+	ls.publishSnapshotsLocked()
 	advertisedSlot := ^uint64(0)
 	require.NoError(t, ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
 		ConnectionId: connID,
@@ -1536,6 +1554,12 @@ func TestHandleEventChainsyncBlockHeaderBuffersIncompatibleNonOwnerConnection(
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	// mockHeader carries no real VRF/KES material to verify. Mark its slot
+	// Mithril-covered so the header crypto gate (issue #3528: required by
+	// default, exempt only for a Mithril-certified slot) exempts it, letting
+	// this test isolate connection-buffering from crypto verification.
+	ls.mithrilLedgerSlot = header1.slot
+	ls.publishSnapshotsLocked()
 
 	err := ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
 		ConnectionId: connId1,
@@ -1841,6 +1865,12 @@ func TestHandleEventBlockfetchBatchDoneReplaysBufferedHeadersAfterDrain(
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	// mockHeader carries no real VRF/KES material to verify. Mark its slot
+	// Mithril-covered so the header crypto gate (issue #3528: required by
+	// default, exempt only for a Mithril-certified slot) exempts it, letting
+	// this test isolate buffered-header replay from crypto verification.
+	ls.mithrilLedgerSlot = 1
+	ls.publishSnapshotsLocked()
 
 	err := handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
 		ConnectionId: connId1,

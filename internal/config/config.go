@@ -686,7 +686,10 @@ type Config struct {
 	ShelleyOperationalCertificate string `yaml:"shelleyOperationalCertificate" envconfig:"SHELLEY_OPERATIONAL_CERTIFICATE"`
 	ForgeSyncToleranceSlots       uint64 `yaml:"forgeSyncToleranceSlots"       envconfig:"DINGO_FORGE_SYNC_TOLERANCE_SLOTS"`
 	ForgeStaleGapThresholdSlots   uint64 `yaml:"forgeStaleGapThresholdSlots"   envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
-	ValidateForgedBlock           bool   `yaml:"validateForgedBlock"           envconfig:"DINGO_VALIDATE_FORGED_BLOCK"`
+	// ValidateForgedBlock self-validates locally-forged blocks before
+	// adoption and diffusion. Defaults to true (fail closed); set to false
+	// only to explicitly opt out.
+	ValidateForgedBlock bool `yaml:"validateForgedBlock"           envconfig:"DINGO_VALIDATE_FORGED_BLOCK"`
 
 	// MinPoolMargin is the CIP-23 minimum pool margin (minimum variable fee) in
 	// basis points, [0, 10000] (150 = 1.5%); 0 disables it. Consensus-affecting
@@ -1056,78 +1059,97 @@ type DatabaseLifecycleConfig struct {
 
 var configMu sync.RWMutex
 
-var globalConfig = &Config{
-	Plugins:                             defaultPluginsConfig(),
-	BindAddr:                            "0.0.0.0",
-	CardanoConfig:                       "", // Will be set dynamically based on network
-	DatabasePath:                        ".dingo",
-	SocketPath:                          "dingo.socket",
-	IntersectTip:                        false,
-	ValidateHistorical:                  true,
-	StrictUtxoValidation:                true,
-	Tracing:                             false,
-	TracingStdout:                       false,
-	Network:                             "preview",
-	NetworkMagic:                        0,
-	MetricsPort:                         12798,
-	DebugBindAddr:                       DefaultDebugBindAddr,
-	DebugPort:                           0,
-	PrivateBindAddr:                     "127.0.0.1",
-	PrivatePort:                         3002,
-	RelayPort:                           3001,
-	BarkBaseUrl:                         "",
-	BarkPort:                            0,
-	BarkHost:                            "",
-	BarkClientCAFilePath:                "",
-	BarkOperatorCertificateFingerprints: nil,
-	CORSAllowedOrigins:                  []string{"*"},
-	Topology:                            "",
-	TlsCertFilePath:                     "",
-	TlsKeyFilePath:                      "",
-	StorageMode:                         "core",
-	RunMode:                             RunModeServe,
-	StartEra:                            StartEraDefault,
-	ImmutableDbPath:                     "",
-	ShutdownTimeout:                     DefaultShutdownTimeout,
-	LedgerCatchupTimeout:                DefaultLedgerCatchupTimeout,
-	// Defaults for database worker pool and API backfill tuning
-	DatabaseWorkers:   5,
-	DatabaseQueueSize: 50,
-	BackfillBatchSize: 100,
-	// CIP-50 default L (feature disabled by default via PledgeLeverageEnabled)
-	PledgeLeverage: 100,
-	// Cache configuration defaults
-	Cache: DefaultCacheConfig(),
-	// Chainsync configuration defaults
-	Chainsync: DefaultChainsyncConfig(),
-	// Genesis bootstrap defaults
-	GenesisBootstrap: DefaultGenesisBootstrapConfig(),
-	// History expiry defaults
-	HistoryExpiry: DefaultHistoryExpiryConfig(),
-	// Koios parity observer defaults (disabled)
-	KoiosParity: DefaultKoiosParityConfig(),
-	// Logging defaults (text output at info level)
-	Logging: DefaultLoggingConfig(),
-	// Midnight defaults
-	Midnight: DefaultMidnightConfig(),
-	// KES configuration defaults (mainnet values)
-	SlotsPerKESPeriod: 129600, // 1.5 days at 1 second per slot
-	MaxKESEvolutions:  62,     // 2^6 - 2 for KES depth 6
-	// Mithril defaults
-	Mithril: MithrilConfig{
-		Enabled:            true,
-		Backend:            "v2",
-		CleanupAfterLoad:   true,
-		VerifyCertificates: true,
-	},
-	// Database lifecycle defaults
-	DatabaseLifecycle: DatabaseLifecycleConfig{
-		SnapshotEveryNEpochs: 1,
-	},
-	// Forging defaults
-	ForgeSyncToleranceSlots:     DefaultForgeSyncToleranceSlots,
-	ForgeStaleGapThresholdSlots: DefaultForgeStaleGapThresholdSlots,
+// newDefaultConfig returns a fresh Config carrying every built-in default.
+// This is the single source of truth for those defaults: globalConfig
+// (mutated over the process lifetime by LoadConfig/ApplyFlags) is seeded
+// from it. A test that needs to pin one of these defaults directly --
+// rather than through resetGlobalConfig's own, deliberately narrower test
+// literal (config_test.go), which leaves several fields at their zero
+// value on purpose so other tests can exercise fill-in-if-empty
+// defaulting logic in isolation -- should call this instead of adding a
+// third hand-maintained copy. TestValidateForgedBlockDefaultsToTrue
+// (flags_test.go) is a regression test for exactly this: this literal
+// gained ValidateForgedBlock: true for issue #3528, but
+// resetGlobalConfig's copy did not, and no test noticed.
+func newDefaultConfig() *Config {
+	return &Config{
+		Plugins:                             defaultPluginsConfig(),
+		BindAddr:                            "0.0.0.0",
+		CardanoConfig:                       "", // Will be set dynamically based on network
+		DatabasePath:                        ".dingo",
+		SocketPath:                          "dingo.socket",
+		IntersectTip:                        false,
+		ValidateHistorical:                  true,
+		StrictUtxoValidation:                true,
+		Tracing:                             false,
+		TracingStdout:                       false,
+		Network:                             "preview",
+		NetworkMagic:                        0,
+		MetricsPort:                         12798,
+		DebugBindAddr:                       DefaultDebugBindAddr,
+		DebugPort:                           0,
+		PrivateBindAddr:                     "127.0.0.1",
+		PrivatePort:                         3002,
+		RelayPort:                           3001,
+		BarkBaseUrl:                         "",
+		BarkPort:                            0,
+		BarkHost:                            "",
+		BarkClientCAFilePath:                "",
+		BarkOperatorCertificateFingerprints: nil,
+		CORSAllowedOrigins:                  []string{"*"},
+		Topology:                            "",
+		TlsCertFilePath:                     "",
+		TlsKeyFilePath:                      "",
+		StorageMode:                         "core",
+		RunMode:                             RunModeServe,
+		StartEra:                            StartEraDefault,
+		ImmutableDbPath:                     "",
+		ShutdownTimeout:                     DefaultShutdownTimeout,
+		LedgerCatchupTimeout:                DefaultLedgerCatchupTimeout,
+		// Defaults for database worker pool and API backfill tuning
+		DatabaseWorkers:   5,
+		DatabaseQueueSize: 50,
+		BackfillBatchSize: 100,
+		// CIP-50 default L (feature disabled by default via PledgeLeverageEnabled)
+		PledgeLeverage: 100,
+		// Cache configuration defaults
+		Cache: DefaultCacheConfig(),
+		// Chainsync configuration defaults
+		Chainsync: DefaultChainsyncConfig(),
+		// Genesis bootstrap defaults
+		GenesisBootstrap: DefaultGenesisBootstrapConfig(),
+		// History expiry defaults
+		HistoryExpiry: DefaultHistoryExpiryConfig(),
+		// Koios parity observer defaults (disabled)
+		KoiosParity: DefaultKoiosParityConfig(),
+		// Logging defaults (text output at info level)
+		Logging: DefaultLoggingConfig(),
+		// Midnight defaults
+		Midnight: DefaultMidnightConfig(),
+		// KES configuration defaults (mainnet values)
+		SlotsPerKESPeriod: 129600, // 1.5 days at 1 second per slot
+		MaxKESEvolutions:  62,     // 2^6 - 2 for KES depth 6
+		// Mithril defaults
+		Mithril: MithrilConfig{
+			Enabled:            true,
+			Backend:            "v2",
+			CleanupAfterLoad:   true,
+			VerifyCertificates: true,
+		},
+		// Database lifecycle defaults
+		DatabaseLifecycle: DatabaseLifecycleConfig{
+			SnapshotEveryNEpochs: 1,
+		},
+		// Forging defaults
+		ForgeSyncToleranceSlots:     DefaultForgeSyncToleranceSlots,
+		ForgeStaleGapThresholdSlots: DefaultForgeStaleGapThresholdSlots,
+		// Fail closed: self-validate locally-forged blocks before adoption and
+		// diffusion unless an operator explicitly opts out.
+		ValidateForgedBlock: true,
+	}
 }
+
+var globalConfig = newDefaultConfig()
 
 // deepCopyPluginValue duplicates the reference-typed values a YAML plugin
 // config can hold. A nested `plugins.*.config` mapping or sequence decodes into
