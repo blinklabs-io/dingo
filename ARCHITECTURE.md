@@ -7146,6 +7146,25 @@ second sync:
   permanent Dingo subsystem — SQLite (or whichever metadata backend the node
   itself runs) remains the only backend involved, since `DatabaseSource`
   reads the live node's own store rather than opening a second connection.
+  - **Reward-state retention (dingo #4188).** `Run()` and
+    `reinitializeBackgroundManagers` both call
+    `n.snapshotMgr.SetRewardAccountOutputRetentionUnbounded(
+    n.config.koiosParity.Enabled)` immediately after configuring the
+    snapshot manager's other options, before `CaptureGenesisSnapshot`/`Start`.
+    This is necessary because the observer only validates a closed epoch
+    after fetching and comparing against Koios over the network — work that
+    can fall arbitrarily far behind chain progression during a from-genesis
+    or catch-up sync — while `ledger/snapshot.cleanupOldSnapshots` otherwise
+    prunes `reward_account_output` to a fixed 4-epoch window on every epoch
+    transition (see DATABASE.md, Snapshot and Reward-State Retention).
+    Without this, an epoch's reward rows are routinely gone by the time the
+    observer's backlog reaches that epoch, and every koios-parity account
+    check for it fails permanently with a row that genuinely no longer
+    exists rather than one Koios and Dingo actually disagree on. The setter
+    mirrors API storage mode's pre-existing unbounded retention (#1875) and
+    is not consensus-affecting (it only widens local historical retention),
+    so unlike `SetDelegatorInactivity` it carries no `configurationLocked`
+    gate.
   - **Live database Restore/Truncate.** `node_lifecycle.go`'s
     `quiesceForLiveLifecycleOp` stops the `Observer` (blocking until its
     background goroutine has exited, same as `shutdown()`) and unsubscribes
