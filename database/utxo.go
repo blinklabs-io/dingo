@@ -601,7 +601,17 @@ func repairUtxoBlob(
 		_ = writeBlobTxn.Rollback()
 		return err
 	}
-	return writeBlobTxn.Commit()
+	if err := writeBlobTxn.Commit(); err != nil {
+		// A failed Commit does not itself discard the underlying provider
+		// transaction (e.g. badgerTxn.Commit leaves finished=false on a
+		// failed t.tx.Commit), so Rollback is still needed here to release
+		// it -- recoverUtxoCbor only logs a repair failure and moves on,
+		// so a caller that never rolls back would leak one of these per
+		// failed repair attempt.
+		_ = writeBlobTxn.Rollback()
+		return err
+	}
+	return nil
 }
 
 func (d *Database) UtxoByRef(
