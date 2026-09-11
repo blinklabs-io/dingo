@@ -84,7 +84,6 @@ func FromContext(ctx context.Context) *Config {
 }
 
 const (
-	DefaultAPIBindAddr                 = "127.0.0.1"
 	DefaultBlobPlugin                  = "badger"
 	DefaultDebugBindAddr               = "127.0.0.1"
 	DefaultMetadataPlugin              = "sqlite"
@@ -498,13 +497,9 @@ type MidnightConfig struct {
 	ServerEnabled bool `yaml:"serverEnabled"       envconfig:"DINGO_MIDNIGHT_SERVER_ENABLED"`
 	// ReflectionEnabled exposes gRPC service discovery when the server is
 	// enabled. It defaults off because reflection broadens the public surface.
-	ReflectionEnabled bool `yaml:"reflectionEnabled"   envconfig:"DINGO_MIDNIGHT_REFLECTION_ENABLED"`
-	// AllowInsecureRemote permits a plaintext listener on a non-loopback
-	// address. It is an explicit escape hatch for deployments that provide
-	// transport security outside Dingo.
-	AllowInsecureRemote bool   `yaml:"allowInsecureRemote" envconfig:"DINGO_MIDNIGHT_ALLOW_INSECURE_REMOTE"`
-	Port                uint   `yaml:"port"                envconfig:"DINGO_MIDNIGHT_PORT"`
-	Host                string `yaml:"host"                envconfig:"DINGO_MIDNIGHT_HOST"`
+	ReflectionEnabled bool   `yaml:"reflectionEnabled"   envconfig:"DINGO_MIDNIGHT_REFLECTION_ENABLED"`
+	Port              uint   `yaml:"port"                envconfig:"DINGO_MIDNIGHT_PORT"`
+	Host              string `yaml:"host"                envconfig:"DINGO_MIDNIGHT_HOST"`
 
 	CNightPolicyID              string `yaml:"cnightPolicyId"`
 	CNightAssetName             string `yaml:"cnightAssetName"`
@@ -529,30 +524,26 @@ func DefaultMidnightConfig() MidnightConfig {
 
 type Config struct {
 	Plugins PluginsConfig `yaml:"plugins"`
-	// API holds shared TLS/auth policy defaults for every selected
+	// API holds shared TLS policy defaults for every selected
 	// plugins.api.* provider. See APIConfig's own doc comment.
-	API             APIConfig `yaml:"api"`
-	TlsKeyFilePath  string    `yaml:"tlsKeyFilePath"                      envconfig:"TLS_KEY_FILE_PATH"`
-	Topology        string    `yaml:"topology"`
-	CardanoConfig   string    `yaml:"cardanoConfig"                       envconfig:"config"`
-	DatabasePath    string    `yaml:"databasePath"                                                                                 split_words:"true"`
-	SocketPath      string    `yaml:"socketPath"                                                                                   split_words:"true"`
-	TlsCertFilePath string    `yaml:"tlsCertFilePath"                     envconfig:"TLS_CERT_FILE_PATH"`
-	BindAddr        string    `yaml:"bindAddr"                                                                                     split_words:"true"`
-	// APIBindAddr is the interface used by the Blockfrost, Mesh, and UTxO
-	// RPC listeners. It is separate from BindAddr because the latter also
-	// serves the relay and metrics listeners.
-	APIBindAddr            string   `yaml:"apiBindAddr"                       envconfig:"DINGO_API_BIND_ADDR"`
-	PrivateBindAddr        string   `yaml:"privateBindAddr"                                                                              split_words:"true"`
-	ShutdownTimeout        string   `yaml:"shutdownTimeout"                                                                              split_words:"true"`
-	LedgerCatchupTimeout   string   `yaml:"ledgerCatchupTimeout"                envconfig:"DINGO_LEDGER_CATCHUP_TIMEOUT"`
-	Network                string   `yaml:"network"`
-	NetworkMagic           uint32   `yaml:"networkMagic"                                                                                 split_words:"true"`
-	PrivatePort            uint     `yaml:"privatePort"                                                                                  split_words:"true"`
-	RelayPort              uint     `yaml:"relayPort"                           envconfig:"port"`
-	BarkBaseUrl            string   `yaml:"barkBaseUrl"                         envconfig:"DINGO_BARK_BASE_URL"`
-	BarkBlockDownloadHosts []string `yaml:"barkBlockDownloadHosts"              envconfig:"DINGO_BARK_BLOCK_DOWNLOAD_HOSTS"`
-	BarkPort               uint     `yaml:"barkPort"                            envconfig:"DINGO_BARK_PORT"`
+	API                    APIConfig `yaml:"api"`
+	TlsKeyFilePath         string    `yaml:"tlsKeyFilePath"                      envconfig:"TLS_KEY_FILE_PATH"`
+	Topology               string    `yaml:"topology"`
+	CardanoConfig          string    `yaml:"cardanoConfig"                       envconfig:"config"`
+	DatabasePath           string    `yaml:"databasePath"                                                                                 split_words:"true"`
+	SocketPath             string    `yaml:"socketPath"                                                                                   split_words:"true"`
+	TlsCertFilePath        string    `yaml:"tlsCertFilePath"                     envconfig:"TLS_CERT_FILE_PATH"`
+	BindAddr               string    `yaml:"bindAddr"                                                                                     split_words:"true"`
+	PrivateBindAddr        string    `yaml:"privateBindAddr"                                                                              split_words:"true"`
+	ShutdownTimeout        string    `yaml:"shutdownTimeout"                                                                              split_words:"true"`
+	LedgerCatchupTimeout   string    `yaml:"ledgerCatchupTimeout"                envconfig:"DINGO_LEDGER_CATCHUP_TIMEOUT"`
+	Network                string    `yaml:"network"`
+	NetworkMagic           uint32    `yaml:"networkMagic"                                                                                 split_words:"true"`
+	PrivatePort            uint      `yaml:"privatePort"                                                                                  split_words:"true"`
+	RelayPort              uint      `yaml:"relayPort"                           envconfig:"port"`
+	BarkBaseUrl            string    `yaml:"barkBaseUrl"                         envconfig:"DINGO_BARK_BASE_URL"`
+	BarkBlockDownloadHosts []string  `yaml:"barkBlockDownloadHosts"              envconfig:"DINGO_BARK_BLOCK_DOWNLOAD_HOSTS"`
+	BarkPort               uint      `yaml:"barkPort"                            envconfig:"DINGO_BARK_PORT"`
 	// BarkHost is the interface Bark binds to. Left empty, node.go defaults
 	// it to loopback-only (127.0.0.1) whenever the database lifecycle
 	// service (Restore/Truncate and friends — gated on BarkClientCAFilePath,
@@ -782,25 +773,23 @@ type APIPluginsConfig struct {
 	Utxorpc    hostplugin.Selection `yaml:"utxorpc"`
 }
 
-// APIConfig holds the shared TLS and authentication policy defaults
+// APIConfig holds the shared TLS policy defaults
 // applied to every selected plugins.api.* provider (Blockfrost, Mesh,
-// UTxORPC) unless that provider's own plugins.api.<name>.config.tls/auth
+// UTxORPC) unless that provider's own plugins.api.<name>.config.tls
 // overrides a field. See ARCHITECTURE.md's "API security" section and
 // internal/apiconfig for the merge/validation rules; composition (node.go)
 // performs the actual per-provider merge, not this package.
 //
-// bindAddr, apiBindAddr, debugBindAddr, and corsAllowedOrigins deliberately
+// bindAddr, debugBindAddr, and corsAllowedOrigins deliberately
 // stay at the Config root rather than moving under this section: bindAddr is
 // not API-specific (the relay/NtN and metrics listeners use it too),
-// apiBindAddr is the separate safe bind for the API listeners,
 // debugBindAddr controls the separate pprof listener, and corsAllowedOrigins
 // already applies uniformly to all three API providers
 // today with no override need identified by dingo#2996/#2998, so
 // duplicating any of them here would only add a second source of truth for no
 // behavioral gain.
 type APIConfig struct {
-	TLS  apiconfig.TLSPolicy  `yaml:"tls"`
-	Auth apiconfig.AuthPolicy `yaml:"auth"`
+	TLS apiconfig.TLSPolicy `yaml:"tls"`
 }
 
 func defaultPluginsConfig() PluginsConfig {
@@ -1070,7 +1059,6 @@ var configMu sync.RWMutex
 var globalConfig = &Config{
 	Plugins:                             defaultPluginsConfig(),
 	BindAddr:                            "0.0.0.0",
-	APIBindAddr:                         DefaultAPIBindAddr,
 	CardanoConfig:                       "", // Will be set dynamically based on network
 	DatabasePath:                        ".dingo",
 	SocketPath:                          "dingo.socket",
@@ -1194,7 +1182,7 @@ func cloneStringPtr(p *string) *string {
 	return &v
 }
 
-// cloneTLSPolicy and cloneAuthPolicy deep-copy every pointer field so a
+// cloneTLSPolicy deep-copies every pointer field so a
 // clone never shares a *string with the Config it was cloned from --
 // matching PeerSharing's own defensive-copy discipline just above, even
 // though every pointer in practice is replaced wholesale (never mutated
@@ -1204,14 +1192,6 @@ func cloneTLSPolicy(p apiconfig.TLSPolicy) apiconfig.TLSPolicy {
 		Mode:         cloneStringPtr(p.Mode),
 		CertFilePath: cloneStringPtr(p.CertFilePath),
 		KeyFilePath:  cloneStringPtr(p.KeyFilePath),
-	}
-}
-
-func cloneAuthPolicy(p apiconfig.AuthPolicy) apiconfig.AuthPolicy {
-	return apiconfig.AuthPolicy{
-		Mode:          cloneStringPtr(p.Mode),
-		Token:         cloneStringPtr(p.Token),
-		TokenFilePath: cloneStringPtr(p.TokenFilePath),
 	}
 }
 
@@ -1234,7 +1214,6 @@ func cloneConfig(cfg *Config) *Config {
 		clone.PeerSharing = &peerSharing
 	}
 	clone.API.TLS = cloneTLSPolicy(cfg.API.TLS)
-	clone.API.Auth = cloneAuthPolicy(cfg.API.Auth)
 	clone.Plugins.Storage.Blob = clonePluginSelection(
 		cfg.Plugins.Storage.Blob,
 	)
@@ -1464,12 +1443,8 @@ func (c *Config) ApplyDefaults() {
 	if c.DebugBindAddr == "" {
 		c.DebugBindAddr = DefaultDebugBindAddr
 	}
-	if c.APIBindAddr == "" {
-		c.APIBindAddr = DefaultAPIBindAddr
-	}
-	// Match the Midnight server's safe default before validation so an
-	// explicitly empty YAML or environment value does not look like a remote
-	// plaintext listener and require the insecure-remote escape hatch.
+	// Match the Midnight server's default for explicitly empty YAML or
+	// environment values.
 	if c.Midnight.Host == "" {
 		c.Midnight.Host = DefaultMidnightConfig().Host
 	}
