@@ -3189,6 +3189,74 @@ and go stake are all zero are omitted; without a pool filter, the result
 contains the union of pools present in those snapshots and the corresponding
 totals.
 
+**Acquiring a specific historical point (blinklabs-io/dingo#382).** A real
+NtC client can `Acquire` LocalStateQuery at a specific past point, not just
+the live tip -- `ouroboros/localstatequery.go`'s server-side `Acquire`
+callback previously ignored this entirely and always answered every query
+at the live tip regardless of what was requested. It now records the
+acquired point per connection (`ledger.QueryPoint{Slot, Hash}`, keyed by
+connection ID; cleared on `Release`, on re-`Acquire`ing the live/immutable
+tip instead of a specific point, and on the connection closing without a
+clean `Release` -- both the NtN path (`Ouroboros.HandleConnClosedEvent`) and
+the NtC-only path (`Node.handleConnManagerClosed`, which the EventBus's
+connection-closed fan-out deliberately excludes NtC from) clear it, so a
+disconnecting client can't leak a map entry) and threads it into every
+`LedgerState.Query` call as `at`. `QueryPoint.pinned()` treats only the
+all-zero value as unpinned -- a slot-0 point with a nonempty hash is a real
+chain point, not the origin sentinel, and still goes through validation
+*and* dispatch: every point-aware handler takes the whole `QueryPoint` and
+checks `at.pinned()`, not a bare `asOfSlot uint64` compared against zero --
+an earlier version derived `asOfSlot` from `at.Slot` before dispatching,
+which correctly validated a slot-0 pin but then had every handler treat
+that same zero as "live," silently discarding the pin one layer down from
+where it was checked. Both slot and hash are recorded, not slot alone,
+because a fork switch can leave a different block at the same slot than the
+one the caller acquired.
+`Query` opens one read transaction whenever `at` is pinned and reuses it for
+both `verifyPointOnChain` and whichever handler below honors `at`, so the
+validated point and the historical read it guards describe the same
+snapshot -- a rollback committing between the two cannot make the handler
+answer for a point that already left the canonical chain. `verifyPointOnChain`
+rejects with `ErrPointNotOnChain` when `at.Slot` is ahead of that
+transaction's own tip (a block can be retained in the blob store at a slot
+beyond what has actually been applied -- e.g. a header-ahead-of-ledger
+buffer entry -- and a purely slot-keyed lookup has no notion of "applied"
+at all) or when the chain's block at `at.Slot` doesn't have hash `at.Hash`
+(rolled back after acquisition, or never on this node's chain at all).
+
+Only some query types honor a pinned point today: `GetPoolDistr2`
+(`PoolStakeDistribution`, resolving the pinned slot to the epoch that
+governed it and reading that epoch's already-persisted mark snapshot --
+rejecting a point outside the pool-snapshot retention window, ahead of the
+live epoch, or ahead of the live tip's own slot with
+`ErrHistoricalStateUnavailable`; the retention check compares the *derived
+mark-snapshot epoch* (`praos.StakeSnapshotEpoch(targetEpoch)`, one epoch
+further back than `targetEpoch` itself) against the cleanup floor, not
+`targetEpoch` directly -- comparing `targetEpoch` itself is off by that same
+one-epoch shift), `GetCurrentProtocolParams` (safe only when the pinned
+point's epoch matches the live tip's, since protocol parameters have no
+persisted historical-by-epoch record -- both the live-epoch comparison and
+the returned parameters come from one `loadConsensusSnapshot()` call, not
+two separate reads, so an epoch-boundary commit landing between them can't
+make the comparison pass against one epoch while returning another's
+parameters), and `GetEpochNo` (unconditionally safe: epoch records are
+never pruned and carry no other coupled state). `GetStakeDistribution`
+shares `PoolStakeDistribution` with `GetPoolDistr2` but rejects any pinned
+point outright with `ErrHistoricalStateUnavailable`: unlike `GetPoolDistr2`
+(whose denominator, `TotalActiveStake`, is itself a historical per-epoch
+snapshot total), `GetStakeDistribution`'s denominator is
+`TotalCirculatingSupply`, computed from `GetNetworkState`'s reserves row --
+and `GetNetworkState` only ever returns the latest row, with no
+historical-by-slot lookup yet, so honoring a pin here would silently mix a
+correct historical numerator with the current live reserves. `GetUTxOWhole`
+is not yet one of the honoring types either -- pinning only matters for a
+query slow enough that the live tip could move underneath it before
+finishing, and a paginated form built to actually need that is tracked
+separately as blinklabs-io/dingo#4082. `ledger/queries.go`'s
+`queryShelleyLeaf` carries a full audit of every remaining query type,
+classified as intentionally live-only, or a real gap left for a caller that
+needs it.
+
 Credential filters are bounded by `ledger.MaxLocalStateQueryItems` (currently
 1000) for `GetDRepState`, `GetStakeDelegDeposits`,
 `GetFilteredDelegationsAndRewardAccounts`, and `GetFilteredVoteDelegatees`.

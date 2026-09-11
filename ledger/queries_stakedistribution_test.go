@@ -95,7 +95,7 @@ func TestQueryShelleyStakeDistribution_ReportsFractionAndVrf(t *testing.T) {
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.Query(stakeDistributionQuery())
+	result, err := ls.Query(stakeDistributionQuery(), QueryPoint{})
 	require.NoError(t, err)
 	dist := decodeStakeDistributionResult(t, result)
 	require.Len(t, dist.Results, 2)
@@ -157,7 +157,7 @@ func TestQueryShelleyStakeDistribution_ViaGetCBOR(t *testing.T) {
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.Query(stakeDistributionCborQuery())
+	result, err := ls.Query(stakeDistributionCborQuery(), QueryPoint{})
 	require.NoError(t, err, "GetCBOR-wrapped GetStakeDistribution must not error")
 
 	arr, ok := result.([]any)
@@ -235,7 +235,7 @@ func TestQueryShelleyStakeDistribution_UsesCirculationNotGetPoolDistr2sTotal(
 
 	// GetPoolDistr2 must be unaffected: still sum-of-delegated (2_000_000),
 	// so each pool is 1/2.
-	poolDistr2Result, err := ls.Query(poolDistr2Query())
+	poolDistr2Result, err := ls.Query(poolDistr2Query(), QueryPoint{})
 	require.NoError(t, err)
 	poolDistr2 := decodePoolDistr2Result(t, poolDistr2Result)
 	entryA2, ok := poolDistr2.Pools[lcommon.PoolId(pkhA)]
@@ -246,7 +246,7 @@ func TestQueryShelleyStakeDistribution_UsesCirculationNotGetPoolDistr2sTotal(
 
 	// GetStakeDistribution must use circulation (4_000_000) instead, so each
 	// pool is 1/4 -- not 1/2.
-	stakeDistResult, err := ls.Query(stakeDistributionQuery())
+	stakeDistResult, err := ls.Query(stakeDistributionQuery(), QueryPoint{})
 	require.NoError(t, err)
 	stakeDist := decodeStakeDistributionResult(t, stakeDistResult)
 	entryA, ok := stakeDist.Results[lcommon.PoolId(pkhA)]
@@ -267,7 +267,7 @@ func TestQueryShelleyStakeDistribution_EmptySnapshot(t *testing.T) {
 	db := newTestDB(t)
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.queryShelleyStakeDistribution()
+	result, err := ls.queryShelleyStakeDistribution(QueryPoint{}, nil)
 	require.NoError(t, err)
 	dist := decodeStakeDistributionResult(t, result)
 	assert.Empty(t, dist.Results)
