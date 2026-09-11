@@ -7758,7 +7758,9 @@ cmd/node-parity/           # thin Cobra CLI wrapper: only 'check' and 'watch' ar
 ```
 
 **Usage:** neither node is started or managed by this tool -- point it at
-two already-running, already-synced NtC listeners.
+two already-running, already-synced NtC listeners. `watch`'s `--mode`
+defaults to `incremental`; pass `--mode full` explicitly for the
+whole-ledger-state comparison instead.
 
 ```shell
 # One-shot: run a single comparison cycle and exit non-zero on divergence
@@ -7768,31 +7770,32 @@ node-parity check \
   --dingo-addr localhost:3002 \
   --cardano-addr /path/to/cardano-node.socket
 
-# Continuous, full mode (--mode=full, the baseline mode): react to each node's tip
-# changes, with a periodic backstop check (--fallback-interval) in case a
-# watcher's subscription silently stalls, and --check-timeout bounding how
-# long any one cycle (fallback-triggered or block-triggered) may take --
-# both flags' own out-of-the-box values (2m/20m) rarely need overriding;
-# raise --check-timeout only if a target network's UTxO-set scale exceeds
-# the measured 7-9 minute walk that value already covers with headroom.
-# Serves Prometheus metrics on --metrics-addr (commonly :9464).
+# Continuous, incremental mode: validate one block at a time in strict
+# chain order, with periodic full checkpoints (--full-check-interval
+# blocks) and a persisted cursor (--cursor-file, required) so a restart
+# resumes rather than re-baselining.
 node-parity watch \
   --network preprod \
   --dingo-addr localhost:3002 \
   --cardano-addr /path/to/cardano-node.socket \
-  --metrics-addr :9464
-
-# Continuous, incremental mode: validate one block at a time in strict chain
-# order, with periodic full checkpoints (--full-check-interval blocks) and a
-# persisted cursor (--cursor-file) so a restart resumes rather than
-# re-baselining.
-node-parity watch \
-  --network preprod \
-  --dingo-addr localhost:3002 \
-  --cardano-addr /path/to/cardano-node.socket \
-  --mode incremental \
   --full-check-interval 1000 \
   --cursor-file /var/lib/node-parity/preprod-cursor.json \
+  --metrics-addr :9464
+
+# Continuous, full mode: react to each node's tip changes with a whole-
+# ledger-state comparison every time, with a periodic backstop check
+# (--fallback-interval) in case a watcher's subscription silently stalls,
+# and --check-timeout bounding how long any one cycle (fallback-triggered
+# or block-triggered) may take -- both flags' own out-of-the-box values
+# (2m/20m) rarely need overriding; raise --check-timeout only if a target
+# network's UTxO-set scale exceeds the measured 7-9 minute walk that value
+# already covers with headroom. Serves Prometheus metrics on
+# --metrics-addr (commonly :9464).
+node-parity watch \
+  --network preprod \
+  --dingo-addr localhost:3002 \
+  --cardano-addr /path/to/cardano-node.socket \
+  --mode full \
   --metrics-addr :9464
 
 # Explicit historical mode (check only): compare an exact past block
@@ -7832,11 +7835,11 @@ cycle. `watch` originally polled on a fixed `--interval` matching
 blocks (at ~20s each) completely unchecked between cycles — acceptable for
 koios-parity, whose epoch-closed reward data only changes once an epoch, but
 not for block-level ledger state, which changes every block. `watch`'s
-`--mode=full` (the default) now follows both nodes' live chains instead
-(`nodeparity.Watcher`, one persistent ChainSync session per node) and runs a
-full `Check` the moment either one's tip changes, so it reacts within a
-fraction of a second of a new block landing rather than missing everything
-produced between clock ticks. `--fallback-interval` (default 2m) still runs a
+`--mode=full` now follows both nodes' live chains instead (`nodeparity.Watcher`,
+one persistent ChainSync session per node) and runs a full `Check` the moment
+either one's tip changes, so it reacts within a fraction of a second of a new
+block landing rather than missing everything produced between clock ticks.
+`--fallback-interval` (default 2m) still runs a
 check on a fixed schedule regardless, purely as a backstop in case a
 watcher's subscription silently stalls without erroring.
 
@@ -7880,7 +7883,10 @@ A `Watcher` reconnects on its own (bounded exponential backoff, matching
 `internal/test/devnet/observer.go`'s pattern) if its session drops, so a
 node restart does not require the operator to do anything.
 
-**`--mode=incremental`:** validates one block at a time, in strict chain
+**`--mode=incremental`, the default (finalized after the mode's own
+introduction below, once full mode's per-cycle cost against a real
+Preview-scale UTxO set was measured — see "Measured, not just reasoned
+about" above):** validates one block at a time, in strict chain
 order (`internal/nodeparity/incremental.go`, `RunIncremental`), trading full
 independent re-derivation of the whole ledger state for a cost bounded by
 what one block actually touches rather than the whole UTxO set. Its own

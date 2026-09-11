@@ -168,6 +168,7 @@ func TestWatchCommand_FallbackIntervalMustBePositive(t *testing.T) {
 
 	cmd := watchCommand()
 	cmd.SetContext(context.Background())
+	require.NoError(t, cmd.Flags().Set("mode", "full"))
 	require.NoError(t, cmd.Flags().Set("fallback-interval", "0s"))
 
 	err := watchRun(cmd, nil)
@@ -317,6 +318,7 @@ func TestWatchCommand_CheckTimeoutMustBePositive(t *testing.T) {
 
 	cmd := watchCommand()
 	cmd.SetContext(context.Background())
+	require.NoError(t, cmd.Flags().Set("mode", "full"))
 	require.NoError(t, cmd.Flags().Set("check-timeout", "0s"))
 
 	err := watchRun(cmd, nil)
@@ -404,6 +406,20 @@ func TestHandleIncrementalSessionError_RecordsCheckError(t *testing.T) {
 	assert.Equal(
 		t, float64(1), promtestutil.ToFloat64(metrics.checkErrorsTotal),
 	)
+}
+
+// TestWatchCommand_DefaultModeIsIncremental locks in the finalized default:
+// an operator running plain `watch` with no --mode gets incremental mode,
+// not full mode. Asserts against a caller that never touched --mode at
+// all, not just that "incremental" happens to validate -- a caller who
+// explicitly wants full mode still passes --mode=full themselves.
+func TestWatchCommand_DefaultModeIsIncremental(t *testing.T) {
+	cmd := watchCommand()
+
+	modeFlag := cmd.Flags().Lookup("mode")
+	require.NotNil(t, modeFlag)
+	assert.Equal(t, "incremental", modeFlag.DefValue)
+	assert.Equal(t, "incremental", modeFlag.Value.String())
 }
 
 // TestWatchCommand_ModeMustBeFullOrIncremental covers --mode's validation:

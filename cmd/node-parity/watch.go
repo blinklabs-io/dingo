@@ -68,31 +68,37 @@ func watchCommand() *cobra.Command {
 		Long: `Runs a comparison cycle triggered by real chain activity instead of a
 clock, in one of two modes selected by --mode:
 
---mode=full (the default) runs the same whole-ledger-state comparison as
-'check' every time either node's tip changes: it follows both nodes'
-ChainSync feeds and reacts within a fraction of a second of a new block
-landing, rather than waiting out a fixed interval and missing everything
-that happened in between. --fallback-interval also runs a check on that
+--mode=incremental (the default) validates one block at a time, in strict
+chain order (block N, then N+1, then N+2, ...), comparing only the UTxOs
+each block's transactions actually consumed or produced rather than the
+whole ledger state -- far cheaper per cycle, at the cost of never
+independently re-deriving the parts of the ledger a single block's delta
+cannot reveal on its own. It always starts with one full check to
+establish a trusted baseline (this doubles as the "full check on restart"
+case), persists its sequential cursor to --cursor-file (required) so a
+restart resumes rather than re-baselining from scratch, and periodically
+re-runs a full check anyway (--full-check-interval blocks, or immediately
+on a rollback, an epoch transition, or any incremental block's own
+mismatch) as a checkpoint against whatever a single block's delta cannot
+catch by itself.
+
+--mode=full instead runs the same whole-ledger-state comparison as 'check'
+every time either node's tip changes: it follows both nodes' ChainSync
+feeds and reacts within a fraction of a second of a new block landing,
+rather than waiting out a fixed interval and missing everything that
+happened in between. --fallback-interval also runs a check on that
 schedule regardless of block activity, purely as a safety net in case a
 watcher's subscription silently stalls without erroring; --check-timeout
 separately bounds how long any single check cycle (fallback-triggered or
 block-triggered) may run before it is treated as failed -- a real
 whole-UTxO comparison against a Preview-scale node measured 7-9+ minutes,
 so --check-timeout's default is comfortably above that, independent of
---fallback-interval's own, much smaller default.
-
---mode=incremental instead validates one block at a time, in strict chain
-order (block N, then N+1, then N+2, ...), comparing only the UTxOs each
-block's transactions actually consumed or produced rather than the whole
-ledger state -- far cheaper per cycle, at the cost of never independently
-re-deriving the parts of the ledger a single block's delta cannot reveal on
-its own. It always starts with one full check to establish a trusted
-baseline (this doubles as the "full check on restart" case), persists its
-sequential cursor to --cursor-file so a restart resumes rather than
-re-baselining from scratch, and periodically re-runs a full check anyway
-(--full-check-interval blocks, or immediately on a rollback, an epoch
-transition, or any incremental block's own mismatch) as a checkpoint against
-whatever a single block's delta cannot catch by itself.
+--fallback-interval's own, much smaller default. Chosen over incremental
+mode only when every triggered check needs the strongest available
+guarantee (stake distribution and protocol params compared fresh, not just
+relied on from an earlier checkpoint) -- at the cost of skipping whatever
+blocks land during a multi-minute whole-UTxO query, which incremental
+mode's per-block coverage does not.
 
 Logs each cycle's outcome and, when --metrics-addr is set, exposes
 Prometheus counters for completed cycles, skipped cycles, and per-field
@@ -123,8 +129,8 @@ not cover incremental mode.`,
 		"full mode only: how long a single check cycle may take before it is treated as failed -- must comfortably exceed how long a full comparison actually takes against the target network's UTxO-set scale (measured at 7-9+ minutes against a Preview-scale node), independent of --fallback-interval",
 	)
 	cmd.Flags().String(
-		"mode", "full",
-		"comparison mode: 'full' (whole ledger state, triggered per block) or 'incremental' (sequential per-block UTxO delta, with periodic full checkpoints)",
+		"mode", "incremental",
+		"comparison mode: 'incremental' (default; sequential per-block UTxO delta, with periodic full checkpoints) or 'full' (whole ledger state, triggered per block)",
 	)
 	cmd.Flags().Uint64(
 		"full-check-interval", defaultFullCheckInterval,
