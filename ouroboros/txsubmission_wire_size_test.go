@@ -140,8 +140,9 @@ func TestValidateTxsubmissionReplyAcceptsWireSizeAdvertisement(t *testing.T) {
 }
 
 // TestValidateTxsubmissionReplyRejectsGenuineSizeMismatch verifies the
-// wire-size allowance does not turn the size check into a range check: only
-// the unwrapped body size and the exact derived wire size are accepted.
+// wire-size allowance does not turn the size check into an unbounded range:
+// only sizes within the reference discrepancy of the unwrapped body or exact
+// derived wire size are accepted.
 func TestValidateTxsubmissionReplyRejectsGenuineSizeMismatch(t *testing.T) {
 	t.Parallel()
 
@@ -163,14 +164,14 @@ func TestValidateTxsubmissionReplyRejectsGenuineSizeMismatch(t *testing.T) {
 		// An advertisement below the body size is a size mismatch like
 		// any other, and must be classified as one rather than falling
 		// through to the aggregate byte-budget error.
-		{name: "one below body", size: bodySize - 1, match: "size mismatch"},
+		{name: "beyond body tolerance below", size: bodySize - 33, match: "size mismatch"},
 		{name: "zero", size: 0, match: "size mismatch"},
-		{name: "one above body", size: bodySize + 1, match: "size mismatch"},
-		{name: "one below wire", size: wireSize - 1, match: "size mismatch"},
-		{name: "one above wire", size: wireSize + 1, match: "size mismatch"},
+		{name: "beyond body tolerance above", size: bodySize + 40, match: "size mismatch"},
+		{name: "beyond wire tolerance below", size: wireSize - 40, match: "size mismatch"},
+		{name: "beyond wire tolerance above", size: wireSize + 33, match: "size mismatch"},
 		{
 			name:  "beyond wrapper overhead",
-			size:  bodySize + 8,
+			size:  bodySize + 40,
 			match: "size mismatch",
 		},
 		{name: "double", size: bodySize * 2, match: "size mismatch"},
@@ -315,7 +316,7 @@ func TestValidateTxsubmissionReplyUndersizedAdvertisementIsCounted(
 	requested := []txsubmission.TxIdAndSize{
 		{
 			TxId: fixture.txId,
-			Size: uint32(len(fixture.body)) - 1, // #nosec G115 -- fixture
+			Size: uint32(len(fixture.body)) - 33, // #nosec G115 -- fixture
 		},
 	}
 
@@ -406,7 +407,7 @@ func TestRecordTxsubmissionReplyOutcomeCountsBodies(t *testing.T) {
 			func(t *testing.T) {
 				bad := make([]txsubmission.TxIdAndSize, len(requested))
 				copy(bad, requested)
-				bad[badIdx].Size += 8
+				bad[badIdx].Size += 40
 				reg := prometheus.NewRegistry()
 				o := newOuroboros(OuroborosConfig{PromRegistry: reg})
 				validated, err := validateTxsubmissionReply(bad, returned)
