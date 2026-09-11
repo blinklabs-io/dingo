@@ -2559,6 +2559,18 @@ because prior pot transitions cannot be repaired safely without replay.
 
 ### Era-Specific Validation
 
+Validated Conway and Dijkstra block admission checks the aggregate consumed
+reference-script size before validating the block's individual transactions.
+Imported blocks use the same database transaction as application, after any
+applicable endorser transactions and before the ranking block's own mutations.
+Forged blocks check a read view of the pre-block state even when full
+self-validation is disabled. Aggregate dispatch rejects missing or typed-nil
+era parameters with an error before the upstream rule dereferences them.
+The upstream era rules
+provide protocol-version-aware input accounting, intra-block output handling,
+and the era's aggregate limit. The explicit non-validating Musashi profile
+retains its Dijkstra validation bypass.
+
 The `ledger/eras/` package provides era-specific validation rules for each Cardano era. The default active era table is Byron through Conway. Experimental Dijkstra support is added to the active table when Dingo starts on the `musashi` network (the IOG Leios prototype testnet, matched by network name or magic 164), with `runMode: "leios"`, or with `startEra: "dijkstra"` — see `Config.experimentalDijkstraEnabled`. Keying on the network lets `dingo -n musashi` follow the Musashi testnet past the Conway-to-Dijkstra hard fork without an explicit run mode. The Dijkstra descriptor uses `github.com/blinklabs-io/gouroboros/ledger/dijkstra`, including that release's generated CDDL shape for the nullable Leios/Peras certificate slots.
 
 Several eras replace or drop an upstream `UtxoValidationRules` entry so Dingo
@@ -3107,6 +3119,10 @@ large-DB startup for minutes (#2771).
 
 The `LedgerView` interface provides query access to ledger state:
 - UTXO lookups by address or output reference
+- Block reference-script budget checks use a narrow PV10 aggregate-accounting
+  view: a genuinely absent reference UTxO contributes zero, matching Conway's
+  pre-block restricted-map rule, while storage/decode errors and normal
+  per-transaction validation remain fail-closed.
 - Protocol parameter queries
 - Stake distribution queries
 - Account registration checks
@@ -5008,7 +5024,7 @@ When Dijkstra/Leios is active, `DefaultBlockBuilder` emits the Musashi prototype
 
 #### Optional Self-Validation (`DINGO_VALIDATE_FORGED_BLOCK`)
 
-When `validateForgedBlock` is enabled in config, the forger invokes `LedgerState.ValidateForgedBlock` between steps 5 and 7. This runs three checks: (a) VRF proof and KES signature verification of the block header, (b) body-hash non-zero guard, and (c) per-transaction ledger rule validation against the current UTxO state with an intra-block overlay so outputs created by earlier transactions in the same block are visible to later ones. A failing block is logged, counted in `dingo_forge_validation_failed_total`, and dropped without being adopted or diffused. Validation wall-clock time is recorded in the `dingo_forge_validation_duration_seconds` histogram. Disabled by default; intended for block producers who want defence-in-depth against builder bugs at the cost of additional forge-to-diffusion latency.
+The node always validates the aggregate reference-script budget between steps 5 and 7, before adoption or diffusion. When `validateForgedBlock` is enabled, `LedgerState.ValidateForgedBlock` additionally runs VRF/KES header verification, the body-hash non-zero guard, and per-transaction ledger rules with an intra-block UTxO overlay. A failing block is logged, counted in `dingo_forge_validation_failed_total`, and dropped. Validation duration is recorded in `dingo_forge_validation_duration_seconds`. Full self-validation is disabled by default; the aggregate budget check is mandatory in node wiring and retains the explicit Musashi prototype bypass.
 
 ### Pool Credentials (`ledger/forging/keys.go`, `keystore/`)
 
@@ -7071,16 +7087,47 @@ second sync:
   guarantees network I/O only ever starts once the transaction that produced
   the event has already committed — never while holding the ledger write
   transaction or lock.
-  - **Backlog and checkpointing.** `Start` seeds the pending set from every
-    epoch the cache (`cache.db`) has not yet fetched/checked, up to
-    `Source.GetLatestEpoch() - 1` (a floor derived from Dingo's own current
-    epoch number, not an exact koios-epoch bound — good enough for a
+  - **Backlog and checkpointing.** `Start` (via the factored-out
+    `seedBacklog`) seeds the pending set from every epoch the cache
+    (`cache.db`) has not yet fetched/checked, in
+    `[Source.GetEarliestAvailableEpoch(), Source.GetLatestEpoch() - 1]` when
+    a Mithril boundary is recorded, and `[0, Source.GetLatestEpoch() - 1]`
+    when none is (the upper bound is a floor derived from Dingo's own
+    current epoch number, not an exact koios-epoch bound — good enough for a
     one-time historical backfill on first attach, since anything it
     undershoots by a small margin is still covered by the live event
-    subscription going forward). No separate checkpoint file exists: the
-    cache's own persisted `check_epoch_status`/`koios_epoch_info` rows are
-    the sole resumable state, matching the issue's "persist only the minimal
-    resumable checkpoint state actually needed."
+    subscription going forward). `preStakingThroughEpoch` is not a seed
+    bound: on a genesis-synced node epochs 0-1 are still queued, and
+    `checkEpoch`'s `PreStaking` branch is what records their
+    PASS-with-nothing-compared verdict. No separate checkpoint file exists:
+    the cache's own persisted `check_epoch_status`/`koios_epoch_info` rows
+    are the sole resumable state, matching the issue's "persist only the
+    minimal resumable checkpoint state actually needed."
+  - **Mithril bootstrap boundary (dingo #4172).** A Mithril-bootstrapped
+    node has no ledger history before its own bootstrap boundary by
+    construction, so every epoch through that boundary is in the same
+    position as the protocol-wide `preStakingThroughEpoch` floor — no local
+    reward-calculation state exists to compare, regardless of whether Koios
+    (full protocol history) has real reference data for it.
+    `RewardParitySource.GetEarliestAvailableEpoch` surfaces this boundary
+    (derived from the same `mithril_ledger_slot` sync-state key
+    `ledger.LedgerState.loadMithrilTrustBoundary` reads, resolved to an
+    epoch via `Database.GetEpochBySlot`); `ok` is false for a non-Mithril,
+    genesis-synced node, and for a boundary slot falling inside no epoch
+    the node's own `epoch` table describes, leaving `seedBacklog` and
+    `checkEpoch` unchanged from before this existed. A boundary that *is*
+    recorded but cannot be read, is empty, or does not parse is an error
+    rather than `ok = false`: `seedBacklog` aborts the seed and `checkEpoch`
+    fails the check, since absorbing it as "no boundary recorded" would
+    restore the unbounded pre-#4172 behavior on exactly the node whose
+    boundary could not be confirmed. `DingoDB` carries its
+    own copy of that slot-to-epoch SQL for the standalone CLI, bounded at
+    both ends exactly as the store query is, with
+    `TestGetEarliestAvailableEpochImplementationsAgree` pinning the two
+    together. `checkEpoch` applies the same bound directly
+    (independent of whether an epoch was ever seeded), so a standalone
+    `Check` run against an already-fetched cache is covered too, not just
+    the in-process observer's own backlog seeding.
   - **Rapid transitions, replay, and rollback.** Pending epochs are a *set*,
     not a single high-water-mark counter, so a burst of events collapses
     duplicates (dingo's own block-based and slot-clock-based epoch.transition
