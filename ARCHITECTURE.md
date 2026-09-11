@@ -4900,9 +4900,10 @@ context, so a caller composing it into a larger shutdown adds its own
 component name and deadline.
 
 `dmq.add_message` / `dmq.remove_message` events publish outside the pool's
-lock, matching the mempool package's event-publication rule. `EventBus` is
-optional (nil-safe) so the package is usable standalone ahead of node
-composition.
+lock, matching the mempool package's event-publication rule. Their payloads
+are `AddMessageEvent` and `RemoveMessageEvent`, each carrying a 32-byte
+`MessageID` field. `EventBus` is optional (nil-safe) so the package is usable
+standalone ahead of node composition.
 
 ## Block Production
 

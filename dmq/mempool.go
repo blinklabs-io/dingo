@@ -15,6 +15,7 @@
 package dmq
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -46,10 +47,12 @@ type RemoveMessageEvent struct {
 
 // Sentinel errors returned by MessageMempool.Add.
 var (
-	// ErrInvalidMessageID is returned when a message's ID (explicit or
-	// computed) is not exactly 32 bytes.
+	// ErrInvalidMessageID is returned when a message's explicitly supplied
+	// ID is not exactly 32 bytes, or does not equal the Blake2b-256 hash of
+	// its own payload (ComputeDmqMessageID) -- a caller cannot pick an
+	// arbitrary ID for a payload and bypass dedup by content.
 	ErrInvalidMessageID = errors.New(
-		"dmq: message id must be exactly 32 bytes",
+		"dmq: message id must be the 32-byte hash of its payload",
 	)
 	// ErrExpired is returned when a submitted message's expiresAt has
 	// already passed.
@@ -118,6 +121,14 @@ type MessageMempool struct {
 	startOnce sync.Once
 	stopOnce  sync.Once
 	wg        sync.WaitGroup
+
+	// testBeforeLock, when non-nil, runs in Add immediately before the
+	// write-lock section that performs the final admission checks and
+	// insert. It exists only so tests can deterministically simulate a
+	// message expiring (or being concurrently admitted) in the window
+	// between Add's early checks and the write lock -- a race otherwise
+	// too narrow to hit reliably.
+	testBeforeLock func()
 }
 
 // NewMessageMempool constructs a MessageMempool. Call Start to begin the
@@ -191,26 +202,37 @@ func (p *MessageMempool) expireLoop() {
 // Add inserts msg into the pool. It returns (true, nil) when the message is
 // newly admitted, (false, nil) when a message with the same ID is already
 // present, and (false, err) when the message is rejected outright: an
-// unset/malformed ID (ErrInvalidMessageID), an already-expired message
-// (ErrExpired), or a full pool (ErrFull).
+// unset/malformed/mismatched ID (ErrInvalidMessageID), an already-expired
+// message (ErrExpired), or a full pool (ErrFull).
 //
-// A message with no MessageID set has one computed and attached before any
-// other check, matching gouroboros' own MarshalCBOR/ID behavior.
+// A message's ID is always verified against ComputeDmqMessageID(msg.Payload):
+// one left unset has the computed ID attached, matching gouroboros' own
+// MarshalCBOR/ID behavior, and one explicitly supplied must equal that hash
+// or the message is rejected -- a caller cannot submit identical payloads
+// under different IDs to bypass dedup and consume separate capacity.
+//
+// Expiry is checked before dedup, so a message whose expiresAt has passed is
+// always rejected with ErrExpired even if an expired copy of it is still
+// present awaiting the next TTL sweep; dedup applies only to resubmissions
+// that are still valid.
 func (p *MessageMempool) Add(msg ocommon.DmqMessage) (bool, error) {
-	id := msg.ID()
-	if len(id) == 0 {
-		computed, err := ocommon.ComputeDmqMessageID(msg.Payload)
-		if err != nil {
-			return false, fmt.Errorf("dmq: compute message id: %w", err)
+	computedID, err := ocommon.ComputeDmqMessageID(msg.Payload)
+	if err != nil {
+		return false, fmt.Errorf("dmq: compute message id: %w", err)
+	}
+	if suppliedID := msg.ID(); len(suppliedID) != 0 {
+		if len(suppliedID) != 32 || !bytes.Equal(suppliedID, computedID) {
+			return false, ErrInvalidMessageID
 		}
-		msg.SetMessageID(computed)
-		id = computed
 	}
-	if len(id) != 32 {
-		return false, ErrInvalidMessageID
-	}
+	msg.SetMessageID(computedID)
+
 	var key [32]byte
-	copy(key[:], id)
+	copy(key[:], computedID)
+
+	if !msg.IsValidAt(p.now()) {
+		return false, ErrExpired
+	}
 
 	// Cheap early duplicate check before paying for a CBOR encode below;
 	// re-checked under the write lock since this read is not atomic with
@@ -222,17 +244,25 @@ func (p *MessageMempool) Add(msg ocommon.DmqMessage) (bool, error) {
 		return false, nil
 	}
 
-	if !msg.IsValidAt(p.now()) {
-		return false, ErrExpired
-	}
-
 	encoded, err := msg.MarshalCBOR()
 	if err != nil {
 		return false, fmt.Errorf("dmq: encode message: %w", err)
 	}
 	size := int64(len(encoded))
+	stored := cloneDmqMessage(msg)
+
+	if p.testBeforeLock != nil {
+		p.testBeforeLock()
+	}
 
 	p.mu.Lock()
+	// Re-check expiry: enough time may have passed since the check above
+	// (CBOR encode, lock contention) for the message to have expired in the
+	// interim.
+	if !stored.IsValidAt(p.now()) {
+		p.mu.Unlock()
+		return false, ErrExpired
+	}
 	if _, exists := p.byID[key]; exists {
 		p.mu.Unlock()
 		return false, nil
@@ -246,7 +276,7 @@ func (p *MessageMempool) Add(msg ocommon.DmqMessage) (bool, error) {
 		return false, ErrFull
 	}
 	p.nextSeq++
-	e := &entry{seq: p.nextSeq, id: key, msg: msg, size: size}
+	e := &entry{seq: p.nextSeq, id: key, msg: stored, size: size}
 	p.byID[key] = e
 	p.order = append(p.order, e)
 	p.curBytes += size
@@ -255,13 +285,18 @@ func (p *MessageMempool) Add(msg ocommon.DmqMessage) (bool, error) {
 	if p.eventBus != nil {
 		p.eventBus.Publish(
 			AddMessageEventType,
-			event.NewEvent(AddMessageEventType, AddMessageEvent{MessageID: id}),
+			event.NewEvent(
+				AddMessageEventType,
+				AddMessageEvent{MessageID: computedID},
+			),
 		)
 	}
 	return true, nil
 }
 
-// Get returns the pooled message with the given ID, if present.
+// Get returns the pooled message with the given ID, if present. The returned
+// message is an independent copy: mutating it cannot affect the pool's
+// retained data.
 func (p *MessageMempool) Get(id []byte) (ocommon.DmqMessage, bool) {
 	if len(id) != 32 {
 		return ocommon.DmqMessage{}, false
@@ -275,7 +310,7 @@ func (p *MessageMempool) Get(id []byte) (ocommon.DmqMessage, bool) {
 	if !ok {
 		return ocommon.DmqMessage{}, false
 	}
-	return e.msg, true
+	return cloneDmqMessage(e.msg), true
 }
 
 // NextForPeer returns the next message peerID has not yet seen, in arrival
@@ -283,7 +318,9 @@ func (p *MessageMempool) Get(id []byte) (ocommon.DmqMessage, bool) {
 // message and false once the peer has caught up to the current log. An
 // unknown peerID is registered on first call, starting from the beginning
 // of the currently retained log -- a newly connected peer sees the pool's
-// full backlog before anything arriving after it connected.
+// full backlog before anything arriving after it connected. The returned
+// message is an independent copy: mutating it cannot affect the pool's
+// retained data.
 func (p *MessageMempool) NextForPeer(peerID string) (ocommon.DmqMessage, bool) {
 	cursor := p.cursorFor(peerID)
 
@@ -301,7 +338,7 @@ func (p *MessageMempool) NextForPeer(peerID string) (ocommon.DmqMessage, bool) {
 	}
 	e := p.order[idx]
 	cursor.lastSeq = e.seq
-	return e.msg, true
+	return cloneDmqMessage(e.msg), true
 }
 
 // RemovePeer releases the FIFO cursor tracked for peerID. Callers should
@@ -371,4 +408,33 @@ func (p *MessageMempool) removeExpired() {
 			),
 		)
 	}
+}
+
+// cloneDmqMessage returns msg with every byte-slice field backed by a fresh
+// array, so neither the pool nor a caller can mutate data the other still
+// holds a reference to. DmqMessage's scalar fields (KESPeriod, ExpiresAt,
+// IssueNumber) copy by value already.
+func cloneDmqMessage(msg ocommon.DmqMessage) ocommon.DmqMessage {
+	msg.MessageID = cloneBytes(msg.MessageID)
+	msg.Payload.MessageID = cloneBytes(msg.Payload.MessageID)
+	msg.Payload.MessageBody = cloneBytes(msg.Payload.MessageBody)
+	msg.KESSignature = cloneBytes(msg.KESSignature)
+	msg.OperationalCertificate.KESVerificationKey = cloneBytes(
+		msg.OperationalCertificate.KESVerificationKey,
+	)
+	msg.OperationalCertificate.ColdSignature = cloneBytes(
+		msg.OperationalCertificate.ColdSignature,
+	)
+	msg.ColdVerificationKey = cloneBytes(msg.ColdVerificationKey)
+	return msg
+}
+
+// cloneBytes returns an independent copy of src, or nil if src is nil.
+func cloneBytes(src []byte) []byte {
+	if src == nil {
+		return nil
+	}
+	dst := make([]byte, len(src))
+	copy(dst, src)
+	return dst
 }

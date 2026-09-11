@@ -89,6 +89,51 @@ func TestMessageMempool_AddComputesIDAndRoundTrips(t *testing.T) {
 	require.Equal(t, msg.Payload.MessageBody, decoded.Payload.MessageBody)
 }
 
+func TestMessageMempool_AddClonesStoredMessage(t *testing.T) {
+	t.Parallel()
+
+	mp := NewMessageMempool(Config{})
+	body := []byte("original")
+	msg := newTestMessage(body, futureExpiry(t))
+	wantID, err := ocommon.ComputeDmqMessageID(msg.Payload)
+	require.NoError(t, err)
+
+	added, err := mp.Add(msg)
+	require.NoError(t, err)
+	require.True(t, added)
+
+	// Mutate the caller's own backing array after Add returns. The pool
+	// must own an independent copy, not an alias into it.
+	body[0] = 'X'
+
+	got, ok := mp.Get(wantID)
+	require.True(t, ok)
+	require.Equal(t, []byte("original"), got.Payload.MessageBody)
+}
+
+func TestMessageMempool_GetReturnsIndependentCopy(t *testing.T) {
+	t.Parallel()
+
+	mp := NewMessageMempool(Config{})
+	msg := newTestMessage([]byte("original"), futureExpiry(t))
+	wantID, err := ocommon.ComputeDmqMessageID(msg.Payload)
+	require.NoError(t, err)
+
+	added, err := mp.Add(msg)
+	require.NoError(t, err)
+	require.True(t, added)
+
+	got, ok := mp.Get(wantID)
+	require.True(t, ok)
+	got.Payload.MessageBody[0] = 'X'
+
+	// A second, independent Get must not observe the mutation above: Get
+	// must return a copy the caller cannot use to corrupt retained data.
+	got2, ok := mp.Get(wantID)
+	require.True(t, ok)
+	require.Equal(t, []byte("original"), got2.Payload.MessageBody)
+}
+
 func TestMessageMempool_AddDedup(t *testing.T) {
 	t.Parallel()
 
@@ -119,6 +164,21 @@ func TestMessageMempool_AddInvalidMessageID(t *testing.T) {
 	require.Equal(t, 0, mp.Len())
 }
 
+func TestMessageMempool_AddRejectsMismatchedMessageID(t *testing.T) {
+	t.Parallel()
+
+	mp := NewMessageMempool(Config{})
+	msg := newTestMessage([]byte("mismatched"), futureExpiry(t))
+	wrongID := make([]byte, 32)
+	wrongID[0] = 0xAB
+	msg.SetMessageID(wrongID)
+
+	added, err := mp.Add(msg)
+	require.False(t, added)
+	require.ErrorIs(t, err, ErrInvalidMessageID)
+	require.Equal(t, 0, mp.Len())
+}
+
 func TestMessageMempool_AddExpired(t *testing.T) {
 	t.Parallel()
 
@@ -131,6 +191,39 @@ func TestMessageMempool_AddExpired(t *testing.T) {
 		[]byte("expired"),
 		uint32(fixedNow.Add(-time.Minute).Unix()),
 	)
+
+	added, err := mp.Add(msg)
+	require.False(t, added)
+	require.ErrorIs(t, err, ErrExpired)
+	require.Equal(t, 0, mp.Len())
+}
+
+func TestMessageMempool_AddRechecksExpiryUnderLock(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	now := time.Unix(2_000_000_000, 0)
+	nowFn := func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return now
+	}
+
+	mp := NewMessageMempool(Config{Now: nowFn})
+	// Simulate the message's expiresAt passing in the window between Add's
+	// early (unlocked) expiry check and the write lock that actually admits
+	// it -- a race otherwise too narrow to hit deterministically.
+	mp.testBeforeLock = func() {
+		mu.Lock()
+		now = now.Add(2 * time.Minute)
+		mu.Unlock()
+	}
+
+	mu.Lock()
+	// #nosec G115 -- fixed test timestamp
+	expiresAt := uint32(now.Add(time.Minute).Unix())
+	mu.Unlock()
+	msg := newTestMessage([]byte("race"), expiresAt)
 
 	added, err := mp.Add(msg)
 	require.False(t, added)
@@ -173,6 +266,7 @@ func TestMessageMempool_AddPublishesEvent(t *testing.T) {
 	t.Parallel()
 
 	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
 	mp := NewMessageMempool(Config{EventBus: bus})
 	_, addCh := bus.Subscribe(AddMessageEventType)
 
@@ -204,6 +298,7 @@ func TestMessageMempool_TTLExpirySweepsAndPublishes(t *testing.T) {
 	}
 
 	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
 	mp := NewMessageMempool(Config{
 		Now:             nowFn,
 		CleanupInterval: 10 * time.Millisecond,
