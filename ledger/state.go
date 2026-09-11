@@ -5278,8 +5278,8 @@ func (ls *LedgerState) drainBlockPipelineErrors() {
 // block.Era().Id, so this function's classification only affects operator
 // visibility, never whether a block is accepted.
 //
-// Two cases are expected/transient and logged at debug level under their
-// own counters so a full sync does not spam the logs at error level:
+// The cases below are expected/transient and logged at debug level under
+// their own counters so a full sync does not spam the logs at error level:
 //   - errBlockPipelineEta0Unavailable: the cached epoch entry has no Praos
 //     nonce. This is expected for Byron and can be transient for later eras;
 //     this function cannot inspect the item's era, so the log remains neutral.
