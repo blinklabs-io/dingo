@@ -1067,8 +1067,8 @@ rollback across the boundary where those rewards were applied. It only ever
 deletes rows below that window (but see the deferred-header retention pin
 below, which can hold `pool_stake_snapshot` rows longer).
 
-`reward_account_output` is the one exception to "not operator/config
-configurable": it is retained WITHOUT BOUND, instead of pruned to the window
+`reward_account_output` is the one table whose retention depends on node
+configuration: it is retained WITHOUT BOUND, instead of pruned to the window
 below, whenever the database is in API storage mode (`types.StorageModeAPI`,
 issue #1875, so the Blockfrost account reward-history endpoint can serve an
 account's full history) or the in-process Koios parity observer is enabled
