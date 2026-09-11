@@ -23,7 +23,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	hostplugin "github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/assert"
@@ -48,7 +47,6 @@ func validTestConfig() *Config {
 		Chainsync:            DefaultChainsyncConfig(),
 		HistoryExpiry:        DefaultHistoryExpiryConfig(),
 		Midnight:             DefaultMidnightConfig(),
-		APIBindAddr:          DefaultAPIBindAddr,
 		Mithril: MithrilConfig{
 			Enabled: true,
 			Backend: "v2",
@@ -74,7 +72,7 @@ func TestValidateDefaultsPass(t *testing.T) {
 func TestValidateAPIExposureAllowsUnauthenticatedRemoteBind(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.StorageMode = storageModeAPI
-	cfg.APIBindAddr = "0.0.0.0"
+	cfg.BindAddr = "0.0.0.0"
 
 	require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
 }
@@ -82,34 +80,7 @@ func TestValidateAPIExposureAllowsUnauthenticatedRemoteBind(t *testing.T) {
 func TestValidateAPIExposureAllowsUnauthenticatedLoopback(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.StorageMode = storageModeAPI
-	cfg.APIBindAddr = "127.0.0.1"
-
-	require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
-}
-
-func TestValidateAPIExposureAllowsAuthenticatedRemoteBind(t *testing.T) {
-	cfg := validTestConfig()
-	cfg.StorageMode = storageModeAPI
-	cfg.APIBindAddr = "192.0.2.10"
-	mode := string(apiconfig.AuthModeToken)
-	tokenPath := "/run/secrets/api-token"
-	cfg.API.Auth.Mode = &mode
-	cfg.API.Auth.TokenFilePath = &tokenPath
-
-	require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
-}
-
-func TestValidateAPIExposurePreservesProviderAuthOverride(t *testing.T) {
-	cfg := validTestConfig()
-	cfg.StorageMode = storageModeAPI
-	cfg.APIBindAddr = "192.0.2.10"
-	mode := string(apiconfig.AuthModeToken)
-	tokenPath := "/run/secrets/api-token"
-	cfg.API.Auth.Mode = &mode
-	cfg.API.Auth.TokenFilePath = &tokenPath
-	cfg.Plugins.API.Mesh.Config["auth"] = map[string]any{
-		"mode": "disabled",
-	}
+	cfg.BindAddr = "127.0.0.1"
 
 	require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
 }
@@ -266,13 +237,13 @@ func TestValidate(t *testing.T) {
 			},
 		},
 		{
-			name: "mesh uses API bind address for port collision checks",
+			name: "mesh shares bind address with metrics for collision checks",
 			modify: func(c *Config) {
 				c.StorageMode = storageModeAPI
 				c.BindAddr = "127.0.0.2"
-				c.APIBindAddr = "127.0.0.1"
 				c.MetricsPort = APIPluginPort(c.Plugins.API.Mesh)
 			},
+			wantErr: "is assigned to both",
 		},
 		{
 			name: "bark on distinct bind address may share a port",
@@ -740,48 +711,35 @@ func TestValidateMidnightServerPolicy(t *testing.T) {
 			},
 		},
 		{
-			name: "remote plaintext denied",
+			name: "remote plaintext allowed",
 			configure: func(c *Config) {
 				c.StorageMode = storageModeAPI
 				c.Midnight.ServerEnabled = true
 				c.Midnight.Host = "192.0.2.1"
 			},
-			wantErr: "midnight.allowInsecureRemote",
 		},
 		{
-			name: "wildcard ipv4 plaintext denied",
+			name: "wildcard ipv4 plaintext allowed",
 			configure: func(c *Config) {
 				c.StorageMode = storageModeAPI
 				c.Midnight.ServerEnabled = true
 				c.Midnight.Host = "0.0.0.0"
 			},
-			wantErr: "midnight.allowInsecureRemote",
 		},
 		{
-			name: "wildcard ipv6 plaintext denied",
+			name: "wildcard ipv6 plaintext allowed",
 			configure: func(c *Config) {
 				c.StorageMode = storageModeAPI
 				c.Midnight.ServerEnabled = true
 				c.Midnight.Host = "::"
 			},
-			wantErr: "midnight.allowInsecureRemote",
 		},
 		{
-			name: "unspecified plaintext denied",
+			name: "unspecified plaintext allowed",
 			configure: func(c *Config) {
 				c.StorageMode = storageModeAPI
 				c.Midnight.ServerEnabled = true
 				c.Midnight.Host = ""
-			},
-			wantErr: "midnight.allowInsecureRemote",
-		},
-		{
-			name: "remote plaintext explicit override",
-			configure: func(c *Config) {
-				c.StorageMode = storageModeAPI
-				c.Midnight.ServerEnabled = true
-				c.Midnight.Host = "192.0.2.1"
-				c.Midnight.AllowInsecureRemote = true
 			},
 		},
 		{

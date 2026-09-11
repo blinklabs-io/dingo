@@ -146,9 +146,6 @@ The following environment variables modify Dingo's behavior:
 - `DINGO_MIDNIGHT_REFLECTION_ENABLED`
   - Enable gRPC reflection on the Midnight server; requires the server
     (default: `false`)
-- `DINGO_MIDNIGHT_ALLOW_INSECURE_REMOTE`
-  - Permit a plaintext Midnight listener on a wildcard, hostname, or concrete
-    non-loopback address (default: `false`)
 - `DINGO_MIDNIGHT_HOST`
   - Midnight gRPC listen address (default: `127.0.0.1`)
 - `DINGO_MIDNIGHT_PORT`
@@ -294,19 +291,19 @@ Midnight indexing and serving are separate opt-ins. `midnight.enabled` starts
 the indexer, while `midnight.serverEnabled` starts the gRPC listener for rows
 already present in the Midnight tables; either may be enabled independently in
 API storage mode. The listener defaults to `127.0.0.1:50051`. Reflection is
-available only with `midnight.reflectionEnabled`. Plaintext wildcard, hostname,
-and concrete non-loopback binds are rejected unless
-`midnight.allowInsecureRemote` is set; configuring both
-`tlsCertFilePath` and `tlsKeyFilePath` permits a remote TLS listener. Dingo does
-not add authentication to this Acropolis-compatible service.
+available only with `midnight.reflectionEnabled`. Configuring both
+`tlsCertFilePath` and `tlsKeyFilePath` enables TLS; plaintext is also
+supported. Dingo does not add authentication to this
+Acropolis-compatible service.
 
 Bark is Dingo's own Dingo-to-Dingo archive protocol rather than an application
 API. It is configured separately with `barkPort` and `barkBaseUrl`.
 
 For public client access, the API listeners may be exposed directly or placed
-behind a reverse proxy or API gateway. UTxO RPC, Blockfrost, and Mesh share one
-optional in-process TLS/authentication surface, so an operator can secure any
-subset of them without a proxy in front.
+behind a reverse proxy or API gateway. UTxO RPC, Blockfrost, and Mesh support
+optional in-process TLS. They do not enforce bearer-token authentication. If a
+deployment relied on Dingo's former API token protection, put the listeners
+behind a reverse proxy or API gateway and configure authentication there.
 
 The shorter `DINGO_UTXORPC_PORT`, `DINGO_BLOCKFROST_PORT`, and
 `DINGO_MESH_PORT` names remain supported for compatibility. If both a
@@ -339,15 +336,17 @@ plugins:
     utxorpc: {provider: builtin, config: {port: 9090}}
 ```
 
-### API TLS and Authentication
+### API TLS
 
-`api.tls`/`api.auth` set a shared default TLS and authentication policy for
-every selected `plugins.api.*` provider (Blockfrost, Mesh, UTxO RPC). Each
-field resolves independently: `plugins.api.<name>.config.tls`/`config.auth`
-overrides any field for that provider only, and an explicit
-`mode: disabled` at the provider level turns off an inherited policy rather
-than merely leaving it unset. The default everywhere is `disabled`, so an
-existing reverse-proxy/no-auth deployment is unaffected on upgrade.
+`api.tls` sets a shared default TLS policy for every selected
+`plugins.api.*` provider (Blockfrost, Mesh, UTxO RPC). Each field resolves
+independently: `plugins.api.<name>.config.tls` overrides a field for that
+provider only, otherwise the shared value is used and an unset policy remains
+plaintext. A partial certificate/key pair is rejected at startup before the
+listener binds; TLS remains optional. Explicit `mode: disabled` keeps a
+provider plaintext even when a shared TLS policy is configured. CLI and
+environment values for the shared TLS policy retain the normal
+CLI > environment > YAML > default precedence.
 
 ```yaml
 api:
@@ -355,25 +354,17 @@ api:
     mode: server
     certFilePath: /run/secrets/api.crt
     keyFilePath: /run/secrets/api.key
-  auth:
-    mode: token
-    tokenFilePath: /run/secrets/api-token
-
 plugins:
   api:
-    # Inherits TLS and auth from api.tls/api.auth above unchanged.
+    # Inherits TLS from api.tls above.
     utxorpc:
       provider: builtin
       config:
         port: 9090
-    # Explicitly opts out of the inherited token auth (e.g. this listener
-    # sits behind its own gateway that already authenticates callers).
     mesh:
       provider: builtin
       config:
         port: 8080
-        auth:
-          mode: disabled
     # Overrides just the certificate/key for this provider; the inherited
     # api.tls.mode ("server") still applies.
     blockfrost:
@@ -385,47 +376,13 @@ plugins:
           keyFilePath: /run/secrets/blockfrost.key
 ```
 
-Credential locations:
+API routes require no credentials.
+TLS certificate/key file contents are never written to logs, error messages,
+or effective-config output.
 
-- **HTTP** (Blockfrost, Mesh, UTxO RPC's own REST/JSON access): send
-  `Authorization: Bearer <token>`. Blockfrost also accepts its own
-  `project_id: <token>` header as an alias for the same shared token — real
-  Blockfrost clients already send their API key that way, so
-  `auth.mode: token` secures Blockfrost against both header styles from one
-  configured token.
-- **Connect/gRPC** (UTxO RPC): send the identical
-  `Authorization: Bearer <token>` request header; every Connect/gRPC
-  handler UTxO RPC serves, including health checking and reflection,
-  requires it once auth is enabled.
-- **Liveness/readiness probes.** This is deliberate, not an oversight: once
-  `auth.mode: token` is set for a provider, *every* route it serves requires
-  the credential, with no separate unauthenticated allowlist for health
-  checking — Blockfrost's `GET /health` and UTxO RPC's
-  `grpc.health.v1.Health/Check` are no exception, matching how every other
-  route on that listener behaves. A container-orchestrator probe (e.g. a
-  Kubernetes liveness/readiness check) that cannot attach the shared
-  credential will therefore fail once auth is enabled. Configure the probe
-  to send the same `Authorization: Bearer <token>` header the rest of your
-  clients use (most probe mechanisms support a custom header/exec command),
-  or point liveness/readiness checks at a plain TCP connect to the listener
-  port instead of the HTTP/gRPC health route, or run the probe against an
-  unauthenticated in-cluster path (e.g. a `mode: disabled` provider carrying
-  only observability traffic) rather than the public listener.
-- A missing or invalid credential fails closed: `401` over HTTP,
-  `Unauthenticated` over Connect/gRPC. A browser's CORS preflight
-  (`OPTIONS`) never needs a credential — browsers never attach
-  `Authorization` to one — but every other request, including a
-  non-preflight `OPTIONS`, still authenticates normally.
-- A partial `certFilePath`/`keyFilePath` pair (only one set) fails
-  validation at startup, before any listener binds, with an error naming
-  the full config path (e.g. `plugins.api.blockfrost.config.tls`).
-- Tokens and certificate/key file *contents* are never written to logs,
-  error messages, or effective-config output — only file paths and mode
-  names are.
-
-The pre-existing root `tlsCertFilePath`/`tlsKeyFilePath` fields remain a
-supported compatibility input with two consumers. The Midnight gRPC server
-uses the pair directly when explicitly enabled. UTxO RPC merges it as the
+The pre-existing root `tlsCertFilePath`/`tlsKeyFilePath` fields remain
+supported compatibility inputs: Midnight uses the pair directly when its
+listener is enabled, and UTxO RPC merges it as the
 lowest-priority policy, field by field, alongside the shared `api.tls` default
 and its own `tls` config — not as an all-or-nothing fallback that applies only
 when both newer scopes are completely unset. For example, if shared `api.tls`
@@ -435,7 +392,8 @@ promoted onto Blockfrost or Mesh, since doing so would silently switch a
 previously plaintext listener to TLS on upgrade. `bindAddr` and
 `corsAllowedOrigins` are unrelated to this policy and remain root-level
 settings shared by all listeners (`bindAddr` is also used by the relay/NtN
-listener, not just the APIs).
+listener, not just the APIs). API listeners use `bindAddr`, whose default is
+`0.0.0.0`; CORS remains operator-chosen through `corsAllowedOrigins`.
 
 ### Archive And History Expiry Nodes
 

@@ -119,7 +119,6 @@ func TestConfigLogClassesAreUnambiguous(t *testing.T) {
 // sentinelSecrets are the distinctive values planted in the configuration
 // below. None of them may appear in a rendered log line.
 var sentinelSecrets = []string{
-	"SENTINEL-API-AUTH-TOKEN",
 	"SENTINEL-KOIOS-API-KEY",
 	"SENTINEL-BARK-PASSWORD",
 	"SENTINEL-BARK-HOST-PASSWORD",
@@ -131,21 +130,18 @@ var sentinelSecrets = []string{
 	"SENTINEL-DSN-PASSWORD",
 	"SENTINEL-DSN-KEYWORD-PASSWORD",
 	"SENTINEL-UNKNOWN-PROVIDER-KEY",
-	"SENTINEL-BLOCKFROST-TOKEN",
 	"SENTINEL-NESTED-PROVIDER-SECRET",
 	"SENTINEL-MEMPOOL-LIST-SECRET",
 	// An AWS access key ID is half of a credential pair, and
 	// "accessKeyId" is exactly the spelling a left-anchored
 	// access[-_]?key pattern cannot reach past the "Id" suffix.
 	"AKIAEXAMPLE",
-	"SENTINEL-NESTED-AUTH-SECRET",
 	"SENTINEL-SCALAR-AUTH-SECTION",
 }
 
 // sentinelSecretConfig plants a sentinel in every secret-bearing field and
 // provider-map key, alongside non-secret values that must survive.
 func sentinelSecretConfig() *Config {
-	authToken := "SENTINEL-API-AUTH-TOKEN"
 	certPath := "/etc/dingo/api.crt"
 	return &Config{
 		Network:      "preview",
@@ -153,8 +149,7 @@ func sentinelSecretConfig() *Config {
 		StorageMode:  "api",
 		Logging:      LoggingConfig{Format: "json", Level: "debug"},
 		API: APIConfig{
-			TLS:  apiconfig.TLSPolicy{CertFilePath: &certPath},
-			Auth: apiconfig.AuthPolicy{Token: &authToken},
+			TLS: apiconfig.TLSPolicy{CertFilePath: &certPath},
 		},
 		KoiosParity: KoiosParityConfig{
 			Enabled: true,
@@ -220,13 +215,6 @@ func sentinelSecretConfig() *Config {
 					Provider: "blockfrost",
 					Config: map[string]any{
 						"port": 3000,
-						"auth": map[string]any{
-							"mode": "token",
-							"token": map[string]any{
-								"host":  "SENTINEL-NESTED-AUTH-SECRET",
-								"value": "SENTINEL-BLOCKFROST-TOKEN",
-							},
-						},
 						"futureSection": map[string]any{
 							"deeper": map[string]any{
 								"anything": "SENTINEL-NESTED-" +
@@ -916,9 +904,8 @@ func TestProviderConfigSecretSubtreeIsRedactedWhole(t *testing.T) {
 }
 
 // TestProviderConfigNestedSectionsAreWalked is the counterweight to
-// redacting a secret subtree whole: the API providers nest their tls and
-// auth policies, so those sections have to stay renderable containers or
-// the whole policy disappears from a startup log.
+// redacting a secret subtree whole: nested provider settings must retain
+// non-secret fields while redacting credentials.
 func TestProviderConfigNestedSectionsAreWalked(t *testing.T) {
 	t.Parallel()
 

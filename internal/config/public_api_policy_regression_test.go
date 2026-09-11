@@ -25,7 +25,7 @@ func TestPublicAPIAnonymousRemoteRegression(t *testing.T) {
 		t.Run(bind, func(t *testing.T) {
 			cfg := validTestConfig()
 			cfg.StorageMode = storageModeAPI
-			cfg.APIBindAddr = bind
+			cfg.BindAddr = bind
 			require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
 		})
 	}

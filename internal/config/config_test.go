@@ -282,7 +282,6 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 			return plugins
 		}(),
 		BindAddr:             "0.0.0.0",
-		APIBindAddr:          DefaultAPIBindAddr,
 		CardanoConfig:        "", // Resolved by consumers using cfg.Network
 		DatabasePath:         ".dingo",
 		SocketPath:           "dingo.socket",
@@ -853,7 +852,6 @@ func TestWatermarkDefaultingAndValidation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			resetGlobalConfig()
-			globalConfig.APIBindAddr = DefaultAPIBindAddr
 			globalConfig.Plugins.Mempool.Config["evictionWatermark"] = tt.eviction
 			globalConfig.Plugins.Mempool.Config["rejectionWatermark"] = tt.rejection
 			globalConfig.RunMode = RunModeDev
@@ -1323,7 +1321,6 @@ midnight:
   enabled: true
   serverEnabled: true
   reflectionEnabled: true
-  allowInsecureRemote: true
   port: 50060
   host: "127.0.0.2"
   cnightPolicyId: "cnight-policy"
@@ -1356,7 +1353,6 @@ network: "preview"
 		Enabled:                     true,
 		ServerEnabled:               true,
 		ReflectionEnabled:           true,
-		AllowInsecureRemote:         true,
 		Port:                        50060,
 		Host:                        "127.0.0.2",
 		CNightPolicyID:              "cnight-policy",
@@ -1383,7 +1379,6 @@ func TestLoad_MidnightEnvOverridesYAML(t *testing.T) {
 	resetGlobalConfig()
 	t.Setenv("DINGO_MIDNIGHT_SERVER_ENABLED", "true")
 	t.Setenv("DINGO_MIDNIGHT_REFLECTION_ENABLED", "true")
-	t.Setenv("DINGO_MIDNIGHT_ALLOW_INSECURE_REMOTE", "true")
 	t.Setenv("DINGO_MIDNIGHT_PORT", "50070")
 	t.Setenv("DINGO_MIDNIGHT_HOST", "127.0.0.3")
 	yamlContent := `
@@ -1409,8 +1404,7 @@ network: "preview"
 	if cfg.Midnight.Port != 50070 {
 		t.Fatalf("expected env midnight port 50070, got %d", cfg.Midnight.Port)
 	}
-	if !cfg.Midnight.ServerEnabled || !cfg.Midnight.ReflectionEnabled ||
-		!cfg.Midnight.AllowInsecureRemote {
+	if !cfg.Midnight.ServerEnabled || !cfg.Midnight.ReflectionEnabled {
 		t.Fatalf(
 			"expected environment to enable Midnight server policy: %+v",
 			cfg.Midnight,

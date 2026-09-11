@@ -160,15 +160,13 @@ type TokenRegistryConfig struct {
 // storage mode -- both are required, since the indexer depends on the
 // api-mode indexes to function. ServerEnabled independently opts into the
 // listener so persisted Midnight data can be served without running the
-// indexer. Reflection and non-loopback plaintext exposure are separate,
-// default-off decisions.
+// indexer. Reflection remains a separate, default-off decision. TLS is optional.
 type MidnightConfig struct {
-	Enabled             bool
-	ServerEnabled       bool
-	ReflectionEnabled   bool
-	AllowInsecureRemote bool
-	Port                uint
-	Host                string
+	Enabled           bool
+	ServerEnabled     bool
+	ReflectionEnabled bool
+	Port              uint
+	Host              string
 
 	CNightPolicyID              string
 	CNightAssetName             string
@@ -211,11 +209,10 @@ type Config struct {
 	// canonical loaded configuration; these are refreshed by syncCompatFields.
 	dataDir                         string
 	bindAddr                        string
-	apiBindAddr                     string
 	pluginSelections                map[hostplugin.Capability]hostplugin.Selection
 	network                         string
 	tlsCertFilePath, tlsKeyFilePath string
-	// apiConfig mirrors cfg.API -- the shared api.tls/api.auth policy
+	// apiConfig mirrors cfg.API -- the shared api.tls policy
 	// defaults merged into every selected plugins.api.* provider's own
 	// config by node.go before that provider resolves. See
 	// ARCHITECTURE.md's "API security" section.
@@ -666,7 +663,6 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 	c := Config{
 		cfg: &internalconfig.Config{
 			BindAddr:           "0.0.0.0",
-			APIBindAddr:        internalconfig.DefaultAPIBindAddr,
 			StorageMode:        string(StorageModeCore),
 			RunMode:            internalconfig.RunModeServe,
 			Cache:              internalconfig.DefaultCacheConfig(),
@@ -728,10 +724,6 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 
 func (c *Config) syncCompatFields() {
 	c.dataDir, c.bindAddr = c.cfg.DatabasePath, c.cfg.BindAddr
-	c.apiBindAddr = c.cfg.APIBindAddr
-	if c.apiBindAddr == "" {
-		c.apiBindAddr = internalconfig.DefaultAPIBindAddr
-	}
 	c.network, c.networkMagic = c.cfg.Network, c.cfg.NetworkMagic
 	c.tlsCertFilePath, c.tlsKeyFilePath = c.cfg.TlsCertFilePath, c.cfg.TlsKeyFilePath
 	c.apiConfig = c.cfg.API
@@ -800,7 +792,6 @@ func (c *Config) syncCompatFields() {
 		Enabled:                     c.cfg.Midnight.Enabled,
 		ServerEnabled:               c.cfg.Midnight.ServerEnabled,
 		ReflectionEnabled:           c.cfg.Midnight.ReflectionEnabled,
-		AllowInsecureRemote:         c.cfg.Midnight.AllowInsecureRemote,
 		Port:                        c.cfg.Midnight.Port,
 		Host:                        c.cfg.Midnight.Host,
 		CNightPolicyID:              c.cfg.Midnight.CNightPolicyID,
@@ -1006,19 +997,11 @@ func WithCardanoNodeConfig(
 	}
 }
 
-// WithBindAddr specifies the IP address used by relay and metrics listeners.
-// API listeners use WithAPIBindAddr.
+// WithBindAddr specifies the IP address used by relay, metrics, and public
+// Blockfrost, Mesh, and UTxO RPC listeners. The default is 0.0.0.0.
 func WithBindAddr(addr string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BindAddr = addr
-	}
-}
-
-// WithAPIBindAddr specifies the IP address used by the Blockfrost, Mesh, and
-// UTxO RPC listeners. It defaults to loopback; remote binds require API auth.
-func WithAPIBindAddr(addr string) ConfigOptionFunc {
-	return func(c *Config) {
-		c.cfg.APIBindAddr = addr
 	}
 }
 
@@ -1113,9 +1096,9 @@ func WithUtxorpcPort(port uint) ConfigOptionFunc {
 	}
 }
 
-// WithAPIConfig sets the shared api.tls/api.auth policy applied to every
+// WithAPIConfig sets the shared api.tls policy applied to every
 // selected plugins.api.* provider (Blockfrost, Mesh, UTxORPC) unless that
-// provider's own plugins.api.<name>.config.tls/auth overrides a field.
+// provider's own plugins.api.<name>.config.tls overrides a field.
 // See internal/apiconfig and ARCHITECTURE.md's "API security" section.
 func WithAPIConfig(cfg internalconfig.APIConfig) ConfigOptionFunc {
 	return func(c *Config) {
@@ -1649,7 +1632,6 @@ func WithMidnightConfig(cfg MidnightConfig) ConfigOptionFunc {
 			Enabled:                     cfg.Enabled,
 			ServerEnabled:               cfg.ServerEnabled,
 			ReflectionEnabled:           cfg.ReflectionEnabled,
-			AllowInsecureRemote:         cfg.AllowInsecureRemote,
 			Port:                        cfg.Port,
 			Host:                        cfg.Host,
 			CNightPolicyID:              cfg.CNightPolicyID,
@@ -1788,15 +1770,6 @@ func (c *Config) BindAddr() string {
 	return c.cfg.BindAddr
 }
 
-// APIBindAddr returns the IP address for the Blockfrost, Mesh, and UTxO RPC
-// listeners.
-func (c *Config) APIBindAddr() string {
-	if c.cfg.APIBindAddr == "" {
-		return internalconfig.DefaultAPIBindAddr
-	}
-	return c.cfg.APIBindAddr
-}
-
 // PrivateBindAddr returns the IP address for the private NtC listener.
 func (c *Config) PrivateBindAddr() string {
 	return c.cfg.PrivateBindAddr
@@ -1868,7 +1841,7 @@ func (c *Config) TlsKeyFilePath() string {
 	return c.cfg.TlsKeyFilePath
 }
 
-// APIConfig returns the shared api.tls/api.auth policy defaults applied to
+// APIConfig returns the shared api.tls policy defaults applied to
 // every selected plugins.api.* provider unless overridden. See
 // WithAPIConfig and ARCHITECTURE.md's "API security" section.
 func (c *Config) APIConfig() internalconfig.APIConfig {
@@ -2177,7 +2150,7 @@ func (c *Config) CORSAllowedOrigins() []string {
 	return c.cfg.CORSAllowedOrigins
 }
 
-// API returns the shared api.tls/api.auth policy defaults applied to
+// API returns the shared api.tls policy defaults applied to
 // every selected plugins.api.* provider. See WithAPIConfig.
 func (c *Config) API() internalconfig.APIConfig {
 	return c.cfg.API

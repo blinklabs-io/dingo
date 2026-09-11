@@ -23,9 +23,7 @@ import (
 	"sync"
 )
 
-// redactedPlaceholder replaces a secret-bearing value in a rendered log. It
-// matches internal/apiconfig's own AuthPolicy.LogValue placeholder so an
-// operator sees one spelling everywhere.
+// redactedPlaceholder replaces a secret-bearing value in a rendered log.
 const redactedPlaceholder = "***redacted***"
 
 // logClass says how one configuration value is rendered for logging.
@@ -63,8 +61,6 @@ const (
 // logSecretConfigFields are the Config field paths (dotted Go field names)
 // whose values are secrets in themselves and are never rendered.
 var logSecretConfigFields = []string{
-	// Inline shared secret for API token authentication.
-	"API.Auth.Token",
 	// Koios Bearer token.
 	"KoiosParity.APIKey",
 }
@@ -104,11 +100,8 @@ var logProviderConfigFields = []string{
 // key registries all belong here; the key material behind a path does not
 // pass through Config at all.
 var logPlainConfigFields = []string{
-	"API.Auth.Mode",
-	"API.Auth.TokenFilePath",
 	"API.TLS.CertFilePath",
 	"API.TLS.KeyFilePath",
-	"APIBindAddr",
 	"API.TLS.Mode",
 	"ActivePeersGossipQuota",
 	"ActivePeersLedgerQuota",
@@ -183,7 +176,6 @@ var logPlainConfigFields = []string{
 	"MetricsPort",
 	"Midnight.AuthTokenAssetName",
 	"Midnight.AuthTokenPolicyID",
-	"Midnight.AllowInsecureRemote",
 	"Midnight.CNightAssetName",
 	"Midnight.CNightPolicyID",
 	"Midnight.CommitteeCandidateAddress",

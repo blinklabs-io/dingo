@@ -12,29 +12,34 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package dingo
+package blockfrost
 
 import (
+	"context"
 	"testing"
 
-	"github.com/stretchr/testify/require"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
-func TestProgrammaticPublicAPIAllowsAnonymousRemoteBind(t *testing.T) {
-	t.Parallel()
-	for _, bind := range []string{"0.0.0.0", "::", "192.0.2.10"} {
-		t.Run(bind, func(t *testing.T) {
-			cfg := NewConfig(
-				WithStorageMode(StorageModeAPI),
-				WithBindAddr(bind),
-				WithNetworkMagic(42),
-				WithListeners(ListenerConfig{
-					ListenNetwork: "tcp",
-					ListenAddress: "127.0.0.1:0",
-				}),
-			)
-			node := &Node{config: cfg}
-			require.NoError(t, node.configValidate())
-		})
+func startOnFreePort(
+	t *testing.T,
+	ctx context.Context,
+	cfg BlockfrostConfig,
+) (*Blockfrost, string) {
+	t.Helper()
+	var lastErr error
+	for range testutil.BindAttempts {
+		addr := testutil.FreePort(t)
+		cfg.ListenAddress = addr
+		srv := New(cfg, &mockNode{}, nil)
+		attemptCtx, cancel := context.WithCancel(ctx)
+		lastErr = srv.Start(attemptCtx)
+		if lastErr == nil {
+			t.Cleanup(cancel)
+			return srv, addr
+		}
+		cancel()
 	}
+	t.Fatalf("could not start on a free loopback port: %v", lastErr)
+	return nil, ""
 }

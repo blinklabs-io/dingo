@@ -22,8 +22,6 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/internal/apiauth"
-	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/encoding/protowire"
 )
@@ -43,7 +41,6 @@ func sendHealthRequest(
 	handler http.Handler,
 	body []byte,
 	compressed bool,
-	authHeader string,
 ) *httptest.ResponseRecorder {
 	t.Helper()
 	contentEncoding := ""
@@ -63,9 +60,6 @@ func sendHealthRequest(
 	if contentEncoding != "" {
 		req.Header.Set("Content-Encoding", contentEncoding)
 	}
-	if authHeader != "" {
-		req.Header.Set("Authorization", authHeader)
-	}
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, req)
 	return response
@@ -84,7 +78,6 @@ func TestConnectRequestBodyLimitPreservesValidMessages(t *testing.T) {
 					handler,
 					[]byte("{}"),
 					compressed,
-					"",
 				)
 				require.Equal(t, http.StatusOK, resp.Code)
 			},
@@ -92,38 +85,10 @@ func TestConnectRequestBodyLimitPreservesValidMessages(t *testing.T) {
 	}
 }
 
-func TestConnectRequestBodyLimitPreservesAuthentication(t *testing.T) {
-	u := NewUtxorpc(UtxorpcConfig{})
-	verifier, err := apiauth.NewVerifier(apiconfig.EffectiveAuth{
-		Enabled: true,
-		Token:   "shared-secret",
-	})
-	require.NoError(t, err)
-	u.verifier = verifier
-	handler := u.newServeMux()
-
-	missing := sendHealthRequest(t, handler, []byte("{}"), false, "")
-	require.Equal(t, http.StatusUnauthorized, missing.Code)
-	valid := sendHealthRequest(
-		t,
-		handler,
-		[]byte("{}"),
-		false,
-		"Bearer shared-secret",
-	)
-	require.Equal(t, http.StatusOK, valid.Code)
-}
-
 func TestConnectRequestBodyLimitRejectsOversizedCompressedMessage(
 	t *testing.T,
 ) {
 	u := NewUtxorpc(UtxorpcConfig{})
-	verifier, err := apiauth.NewVerifier(apiconfig.EffectiveAuth{
-		Enabled: true,
-		Token:   "shared-secret",
-	})
-	require.NoError(t, err)
-	u.verifier = verifier
 	handler := u.newServeMux()
 
 	// Keep the wire body small while making the decoded protobuf message exceed
@@ -159,12 +124,6 @@ func TestConnectRequestBodyLimitRejectsOversizedCompressedWireBody(
 	t *testing.T,
 ) {
 	u := NewUtxorpc(UtxorpcConfig{})
-	verifier, err := apiauth.NewVerifier(apiconfig.EffectiveAuth{
-		Enabled: true,
-		Token:   "shared-secret",
-	})
-	require.NoError(t, err)
-	u.verifier = verifier
 	handler := u.newServeMux()
 
 	// Connect bounds the raw request bytes before it decompresses them, which
@@ -174,7 +133,7 @@ func TestConnectRequestBodyLimitRejectsOversizedCompressedWireBody(
 	// exceeds it. Only the pre-decompression limit can reject this request.
 	// The tag and length prefix for a bytes field this size occupy five bytes.
 	payload := make([]byte, DefaultMaxRequestBody-5)
-	_, err = rand.Read(payload)
+	_, err := rand.Read(payload)
 	require.NoError(t, err)
 	body := protowire.AppendTag(nil, 100, protowire.BytesType)
 	body = protowire.AppendBytes(body, payload)
