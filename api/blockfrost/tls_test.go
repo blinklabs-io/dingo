@@ -39,8 +39,10 @@ func TestBlockfrostAnonymousPlaintextTLSAndCORS(t *testing.T) {
 		{"tls", apiconfig.EffectiveTLS{Enabled: true, CertFilePath: cert, KeyFilePath: key}, "https://", testutil.InsecureHTTPClient()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(t.Context())
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			t.Cleanup(cancel)
+			client := *tc.cli
+			client.Timeout = 5 * time.Second
 			srv, addr := startOnFreePort(
 				t,
 				ctx,
@@ -58,18 +60,24 @@ func TestBlockfrostAnonymousPlaintextTLSAndCORS(t *testing.T) {
 				require.NoError(t, srv.Stop(stopCtx))
 			})
 			req, err := http.NewRequestWithContext(
-				t.Context(),
+				ctx,
 				http.MethodGet,
 				tc.url+addr+"/health",
 				nil,
 			)
 			require.NoError(t, err)
-			resp, err := tc.cli.Do(req)
+			req.Header.Set("Origin", origin)
+			resp, err := client.Do(req)
 			require.NoError(t, err)
 			defer resp.Body.Close()
 			require.Equal(t, http.StatusOK, resp.StatusCode)
+			require.Equal(
+				t,
+				origin,
+				resp.Header.Get("Access-Control-Allow-Origin"),
+			)
 			preflight, err := http.NewRequestWithContext(
-				t.Context(),
+				ctx,
 				http.MethodOptions,
 				tc.url+addr+"/health",
 				nil,
@@ -80,10 +88,15 @@ func TestBlockfrostAnonymousPlaintextTLSAndCORS(t *testing.T) {
 				"Access-Control-Request-Method",
 				http.MethodGet,
 			)
-			corsResp, err := tc.cli.Do(preflight)
+			corsResp, err := client.Do(preflight)
 			require.NoError(t, err)
 			defer corsResp.Body.Close()
 			require.Equal(t, http.StatusNoContent, corsResp.StatusCode)
+			require.Equal(
+				t,
+				origin,
+				corsResp.Header.Get("Access-Control-Allow-Origin"),
+			)
 		})
 	}
 }

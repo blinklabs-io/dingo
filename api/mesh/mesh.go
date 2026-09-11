@@ -53,8 +53,8 @@ const (
 
 	// listenerReadTimeout bounds the whole request read at the
 	// connection, covering the requests whose body no handler reads --
-	// an unknown route, or one rejected by authentication before the
-	// handler runs -- which the per-request deadline above never sees.
+	// such as an unknown route -- which the per-request deadline above
+	// never sees.
 	// api/utxorpc's listener carries the same bound.
 	listenerReadTimeout = 60 * time.Second
 

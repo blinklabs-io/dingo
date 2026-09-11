@@ -339,8 +339,8 @@ func providerConfigKeyClass(key string) logClass {
 
 // LogValue renders c for structured logging with every secret-bearing
 // value replaced by redactedPlaceholder, so `slog` never persists a Koios
-// API key, an inline API auth token, a provider password, or a DSN
-// credential. Unexported fields are not rendered at all.
+// API key, a provider password, or a DSN credential. Unexported fields are
+// not rendered at all.
 //
 // The walk is uniform and does not defer to a nested type's own
 // slog.LogValuer implementation: one classification table with one

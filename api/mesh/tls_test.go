@@ -40,8 +40,10 @@ func TestMeshAnonymousPlaintextTLSAndCORS(t *testing.T) {
 		{"tls", apiconfig.EffectiveTLS{Enabled: true, CertFilePath: cert, KeyFilePath: key}, "https://", testutil.InsecureHTTPClient()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(t.Context())
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			t.Cleanup(cancel)
+			client := *tc.cli
+			client.Timeout = 5 * time.Second
 			srv, addr := startOnFreePort(
 				t,
 				ctx,
@@ -58,19 +60,25 @@ func TestMeshAnonymousPlaintextTLSAndCORS(t *testing.T) {
 			})
 			body := `{"network_identifier":{"blockchain":"cardano","network":"testnet"}}`
 			req, err := http.NewRequestWithContext(
-				t.Context(),
+				ctx,
 				http.MethodPost,
 				tc.url+addr+"/network/list",
 				strings.NewReader(body),
 			)
 			require.NoError(t, err)
 			req.Header.Set("Content-Type", "application/json")
-			resp, err := tc.cli.Do(req)
+			req.Header.Set("Origin", origin)
+			resp, err := client.Do(req)
 			require.NoError(t, err)
 			defer resp.Body.Close()
 			require.Equal(t, http.StatusOK, resp.StatusCode)
+			require.Equal(
+				t,
+				origin,
+				resp.Header.Get("Access-Control-Allow-Origin"),
+			)
 			preflight, err := http.NewRequestWithContext(
-				t.Context(),
+				ctx,
 				http.MethodOptions,
 				tc.url+addr+"/network/list",
 				nil,
@@ -81,10 +89,19 @@ func TestMeshAnonymousPlaintextTLSAndCORS(t *testing.T) {
 				"Access-Control-Request-Method",
 				http.MethodPost,
 			)
-			corsResp, err := tc.cli.Do(preflight)
+			preflight.Header.Set(
+				"Access-Control-Request-Headers",
+				"Content-Type",
+			)
+			corsResp, err := client.Do(preflight)
 			require.NoError(t, err)
 			defer corsResp.Body.Close()
 			require.Equal(t, http.StatusNoContent, corsResp.StatusCode)
+			require.Equal(
+				t,
+				origin,
+				corsResp.Header.Get("Access-Control-Allow-Origin"),
+			)
 		})
 	}
 }

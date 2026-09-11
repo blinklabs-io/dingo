@@ -23,7 +23,7 @@ import (
 // This checks configuration acceptance, not socket binding. The removed
 // startup gate rejected these configurations; Node.Run binding has separate
 // provider-dependency coverage in TestNodeRunPublicAPIsUseSharedBindAddress.
-func TestProgrammaticPublicAPIAllowsAnonymousRemoteBind(t *testing.T) {
+func TestProgrammaticPublicAPIConfigAcceptsRemoteAddresses(t *testing.T) {
 	t.Parallel()
 	for _, bind := range []string{"0.0.0.0", "::", "192.0.2.10"} {
 		t.Run(bind, func(t *testing.T) {

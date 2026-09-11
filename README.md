@@ -301,9 +301,7 @@ API. It is configured separately with `barkPort` and `barkBaseUrl`.
 
 For public client access, the API listeners may be exposed directly or placed
 behind a reverse proxy or API gateway. UTxO RPC, Blockfrost, and Mesh support
-optional in-process TLS. They do not enforce bearer-token authentication. If a
-deployment relied on Dingo's former API token protection, put the listeners
-behind a reverse proxy or API gateway and configure authentication there.
+optional in-process TLS and accept requests without credentials.
 
 The shorter `DINGO_UTXORPC_PORT`, `DINGO_BLOCKFROST_PORT`, and
 `DINGO_MESH_PORT` names remain supported for compatibility. If both a
@@ -342,9 +340,9 @@ plugins:
 `plugins.api.*` provider (Blockfrost, Mesh, UTxO RPC). Each field resolves
 independently: `plugins.api.<name>.config.tls` overrides a field for that
 provider only, otherwise the shared value is used and an unset policy remains
-plaintext. A partial certificate/key pair is rejected at startup before the
-listener binds; TLS remains optional. Explicit `mode: disabled` keeps a
-provider plaintext even when a shared TLS policy is configured. CLI and
+plaintext. With `mode: server`, both certificate and key paths are required
+before the listener binds; TLS remains optional. Explicit `mode: disabled`
+keeps a provider plaintext even when a shared TLS policy is configured. CLI and
 environment values for the shared TLS policy retain the normal
 CLI > environment > YAML > default precedence.
 

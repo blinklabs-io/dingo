@@ -51,8 +51,8 @@ const (
 	DefaultMaxUtxoKeys     = 1000
 	DefaultMaxHistoryItems = 10000
 	DefaultMaxDataKeys     = 1000
-	// DefaultMaxRequestBody bounds each Connect message before it is decoded
-	// or authenticated. Connect applies the same limit to the compressed wire
+	// DefaultMaxRequestBody bounds each Connect message before it is decoded.
+	// Connect applies the same limit to the compressed wire
 	// message and to its decompressed form, preventing a small compressed body
 	// from expanding without bound during unary request decoding.
 	DefaultMaxRequestBody = 1 << 20 // 1 MiB

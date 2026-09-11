@@ -69,15 +69,7 @@ func TestValidateDefaultsPass(t *testing.T) {
 	assert.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
 }
 
-func TestValidateAPIExposureAllowsUnauthenticatedRemoteBind(t *testing.T) {
-	cfg := validTestConfig()
-	cfg.StorageMode = storageModeAPI
-	cfg.BindAddr = "0.0.0.0"
-
-	require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
-}
-
-func TestValidateAPIExposureAllowsUnauthenticatedLoopback(t *testing.T) {
+func TestValidatePublicAPIAllowsLoopback(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.StorageMode = storageModeAPI
 	cfg.BindAddr = "127.0.0.1"

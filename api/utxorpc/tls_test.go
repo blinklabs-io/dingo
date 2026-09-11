@@ -15,9 +15,11 @@
 package utxorpc
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -37,20 +39,29 @@ func TestUtxorpcAnonymousPlaintextTLSAndCORS(t *testing.T) {
 		{"tls", apiconfig.EffectiveTLS{Enabled: true, CertFilePath: cert, KeyFilePath: key}, "https://", testutil.InsecureHTTPClient()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			t.Cleanup(cancel)
+			client := *tc.cli
+			client.Timeout = 5 * time.Second
 			u, addr := startOnFreePort(
 				t,
-				t.Context(),
+				ctx,
 				tc.tls,
 				func(cfg *UtxorpcConfig) {
 					cfg.CORSAllowedOrigins = []string{origin}
 				},
 			)
 			t.Cleanup(func() { stopUtxorpc(t, u) })
-			resp := healthCheckAnonymous(t, tc.cli, tc.url+addr)
+			resp := healthCheckAnonymous(t, ctx, &client, tc.url+addr, origin)
 			defer resp.Body.Close()
 			require.Equal(t, http.StatusOK, resp.StatusCode)
+			require.Equal(
+				t,
+				origin,
+				resp.Header.Get("Access-Control-Allow-Origin"),
+			)
 			preflight, err := http.NewRequestWithContext(
-				t.Context(),
+				ctx,
 				http.MethodOptions,
 				tc.url+addr+"/grpc.health.v1.Health/Check",
 				nil,
@@ -61,7 +72,11 @@ func TestUtxorpcAnonymousPlaintextTLSAndCORS(t *testing.T) {
 				"Access-Control-Request-Method",
 				http.MethodPost,
 			)
-			corsResp, err := tc.cli.Do(preflight)
+			preflight.Header.Set(
+				"Access-Control-Request-Headers",
+				"Content-Type, Connect-Protocol-Version",
+			)
+			corsResp, err := client.Do(preflight)
 			require.NoError(t, err)
 			defer corsResp.Body.Close()
 			require.Equal(t, http.StatusNoContent, corsResp.StatusCode)
@@ -76,12 +91,14 @@ func TestUtxorpcAnonymousPlaintextTLSAndCORS(t *testing.T) {
 
 func healthCheckAnonymous(
 	t *testing.T,
+	ctx context.Context,
 	client *http.Client,
 	baseURL string,
+	origin string,
 ) *http.Response {
 	t.Helper()
 	req, err := http.NewRequestWithContext(
-		t.Context(),
+		ctx,
 		http.MethodPost,
 		baseURL+"/grpc.health.v1.Health/Check",
 		strings.NewReader("{}"),
@@ -89,6 +106,7 @@ func healthCheckAnonymous(
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Connect-Protocol-Version", "1")
+	req.Header.Set("Origin", origin)
 	resp, err := client.Do(req)
 	require.NoError(t, err)
 	return resp

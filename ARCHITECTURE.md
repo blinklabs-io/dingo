@@ -31,10 +31,12 @@ observed it, so the normal shutdown triggered by that cancellation cannot
 mistake an earlier unconfirmed drain for a successful second close and close
 the database underneath the outstanding worker.
 API providers are resolved for lifecycle only because node composition has no
-in-process consumer of their concrete server values. TLS configuration is
-validated during API composition and remains optional; legacy API
-configuration is optional and uses the shared root bind and TLS settings
-described under External Interfaces.
+in-process consumer of their concrete server values. Composition merges the
+shared `api.tls` defaults with each provider's TLS overrides, passing the
+merged `TLSPolicy` rather than a resolved listener policy. `Node.New` validates
+that effective configuration early; each provider also resolves it during
+construction. TLS remains optional. See External Interfaces for precedence
+and shared bind settings.
 
 Command and bootstrap composition that opens a standalone database uses
 `internal/plugins.OpenDatabase`. Its return contract keeps ownership
@@ -5971,22 +5973,23 @@ Dingo provides three client-facing APIs plus Bark. All are optional and gated by
 ### API security (TLS)
 
 Blockfrost, Mesh, and UTxO RPC share one optional TLS contract. TLS is
-validated before listeners bind: a partial certificate/key pair or invalid
-mode is rejected at construction. TLS may be configured through the shared
-`api.tls` policy or a provider's `plugins.api.<name>.config.tls` fields.
+validated before listeners bind: an invalid mode is rejected at construction,
+and `mode: server` requires both certificate and key paths. TLS may be configured
+through the shared `api.tls` policy or a provider's
+`plugins.api.<name>.config.tls` fields.
 
 TLS fields merge independently: an explicit provider field overrides the
 shared `api.tls` value, while the legacy UTxO RPC certificate/key fields are
 the lowest-priority compatibility input for UTxO RPC only. An explicit
 provider `mode: disabled` keeps that listener plaintext. Shared TLS values
 follow the normal CLI > environment > YAML > default precedence before this
-scope merge; a partial certificate/key pair is rejected before any listener
-binds.
+scope merge. Certificate files are loaded when the listener starts.
 
 API routes require no credentials, including health and reflection routes.
 
 The legacy root `tlsCertFilePath`/`tlsKeyFilePath` fields remain a UTxO
-RPC-only TLS compatibility input; they are not promoted to Blockfrost or Mesh.
+RPC-only TLS compatibility input among these three providers; Midnight also
+uses the pair directly. They are not promoted to Blockfrost or Mesh.
 The three API listeners use the root `bindAddr`, whose default is
 `0.0.0.0`. `debugBindAddr` remains the separate pprof
 listener setting. `corsAllowedOrigins` remains a root-level, operator-chosen
