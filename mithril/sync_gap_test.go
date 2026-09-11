@@ -191,6 +191,8 @@ func testGapHash28(seed string) []byte {
 }
 
 func TestValidateCompleteGapBlocks(t *testing.T) {
+	t.Parallel()
+
 	immutableTip := models.Block{
 		Slot: 10,
 		Hash: testGapHash32("immutable-tip"),
@@ -297,6 +299,8 @@ func TestValidateCompleteGapBlocks(t *testing.T) {
 }
 
 func TestFetchGapBlocksFromPeersFallsThroughOnMismatchedRange(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	start := ocommon.NewPoint(10, testGapHash32("start"))
 	end := ocommon.NewPoint(12, testGapHash32("end"))
@@ -353,6 +357,8 @@ func testGapConwayProtocolParameters() *conway.ConwayProtocolParameters {
 func TestProcessGapBlockTransactionsProcessesGovernance(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 
 	db, err := dbtest.NewDatabase(t, &database.Config{
@@ -459,13 +465,17 @@ func TestProcessGapBlockTransactionsProcessesGovernance(
 		UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
 	}
 
+	conwayPParams := testGapConwayProtocolParameters()
 	err = processGapBlockTransactions(
 		db,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		point,
 		[]lcommon.Transaction{proposalTx, voteTx},
 		offsets,
 		100,
-		testGapConwayProtocolParameters(),
+		conway.EraIdConway,
+		conwayPParams,
+		conwayPParams,
 	)
 	require.NoError(t, err)
 
@@ -494,6 +504,8 @@ func TestProcessGapBlockTransactionsProcessesGovernance(
 }
 
 func TestProcessGapBlocksNoOpWithoutUint64Overflow(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 
 	db, err := dbtest.NewDatabase(t, &database.Config{
@@ -587,6 +599,8 @@ func TestProcessGapBlocksNoOpWithoutUint64Overflow(t *testing.T) {
 }
 
 func TestDeleteBlobBlocksAboveSlot(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: tmpDir,
@@ -638,6 +652,8 @@ func TestDeleteBlobBlocksAboveSlot(t *testing.T) {
 }
 
 func TestDeleteBlobBlocksAboveSlotKeepsBoundaryTip(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: tmpDir,
@@ -685,6 +701,8 @@ func TestDeleteBlobBlocksAboveSlotKeepsBoundaryTip(t *testing.T) {
 }
 
 func TestLoadGapBlocksFromBlob(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 
 	db, err := dbtest.NewDatabase(t, &database.Config{

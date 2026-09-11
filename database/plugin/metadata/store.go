@@ -34,6 +34,20 @@ import (
 // model-specific error when the public method contract requires one.
 var ErrNotFound = errors.New("metadata not found")
 
+// The interfaces below are the compiled-in metadata provider contract
+// (database/plugin/PLUGIN_DEVELOPMENT.md). A provider maintained outside this
+// repository builds against a pinned module version, so adding a method or a
+// parameter here breaks it at compile time on the version bump that carries
+// the change.
+//
+// That break is the intended behaviour, not an oversight to be smoothed over.
+// Several of these methods feed consensus-visible stake and reward
+// arithmetic, where a provider that silently kept an older, narrower
+// implementation would return an answer that is wrong rather than absent. A
+// runtime capability probe or a defaulted shim would produce exactly that, so
+// changes are made to the interface directly and a provider is required to
+// fail the build until it implements them.
+
 // LifecycleStore is the narrow lifecycle capability used by composition code.
 type LifecycleStore interface {
 	// Close closes the metadata store and releases all resources.
@@ -636,9 +650,13 @@ type UtxoStore interface {
 	// GetUtxosByAddressWithOrdering). The database layer performs full
 	// exact-address CBOR filtering when ExactAddress is set. An empty
 	// patterns slice returns (nil, nil), matching the coordinated
-	// Database.UtxosByAddress's empty-input handling.
+	// Database.UtxosByAddress's empty-input handling. maxResults is a
+	// required, positive bound on the number of candidate rows returned;
+	// exceeding it yields models.ErrTooManyUtxoResults instead of an
+	// unbounded or silently truncated result.
 	GetUtxosByAddress(
 		[]models.UtxoAddressPattern,
+		int,
 		types.Txn,
 	) ([]models.Utxo, error)
 
@@ -982,6 +1000,7 @@ type TransactionStore interface {
 		lcommon.Transaction,
 		ocommon.Point,
 		uint32, // idx
+		map[int]uint64, // certDeposits; see SetTransaction
 		types.Txn,
 	) error
 
@@ -1124,6 +1143,23 @@ type StakeSnapshotStore interface {
 		uint64, // boundarySlot
 		uint64, // expiryEpoch (0 = gate off)
 		uint64, // inactivityPeriod
+		types.Txn,
+	) ([]*models.RewardStakeInput, error)
+
+	// GetPointerStakeInputsForPools returns the per-credential stake held at a
+	// pointer address for pools in poolKeyHashes, resolved and delegated as of
+	// slot. It is additive: the caller adds it to what
+	// GetLiveStakeInputsForPools returned, because reward_live_stake never
+	// carries pointer-derived UTxO stake -- attribution depends on certificate
+	// history at slot, not on anything the live aggregate's incremental
+	// maintenance can express. boundarySlot is the epoch-boundary era gate
+	// (0 = no boundary; see GetEpochBoundaryStakeByPools), and expiryEpoch
+	// drives the same live CIP-0163 gate GetLiveStakeInputsForPools applies.
+	GetPointerStakeInputsForPools(
+		[][]byte, // poolKeyHashes
+		uint64, // slot
+		uint64, // boundarySlot (0 = no boundary)
+		uint64, // expiryEpoch (0 = gate off)
 		types.Txn,
 	) ([]*models.RewardStakeInput, error)
 
@@ -1830,8 +1866,11 @@ type MetadataStore interface {
 	// GetPoolsRetiringAtEpoch returns the pools whose effective retirement
 	// (the latest retirement not cancelled by a later re-registration, as of
 	// the boundary slot) takes effect at the given epoch, along with the
-	// reward account and deposit from their active registration. Used to apply
-	// POOLREAP deposit refunds at the epoch boundary.
+	// reward account from their active registration and the deposit that
+	// registration holds -- the amount paid by the first registration since
+	// the pool's most recent completed reap, not what the current protocol
+	// parameters would charge. Used to apply POOLREAP deposit refunds at the
+	// epoch boundary.
 	GetPoolsRetiringAtEpoch(
 		epoch uint64,
 		boundarySlot uint64,

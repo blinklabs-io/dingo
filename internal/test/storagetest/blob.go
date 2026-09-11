@@ -31,7 +31,10 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/blinklabs-io/ouroboros-mock/fixtures"
 	"github.com/stretchr/testify/require"
 )
 
@@ -196,19 +199,34 @@ func RunBlobStoreConformance(
 	})
 
 	t.Run("BlockRoundTrip", func(t *testing.T) {
-		slot := uint64(100)
-		hash := conformanceKey(t, "block-hash")
-		cbor := []byte{0x82, 0x01, 0x02}
+		// Real, decodable block content (not arbitrary bytes): S3 and GCS
+		// re-verify a fetched block's content against its own hash and
+		// era before GetBlock returns it (see database/plugin/blob/
+		// internal/blockverify), a contract badger doesn't need locally
+		// but which this shared suite must still satisfy so the same
+		// subtest exercises every backend identically.
+		blocks, err := fixtures.GenerateConwayChain(
+			1, lcommon.Blake2b256{}, 100, 1, 1,
+		)
+		require.NoError(t, err)
+		require.Len(t, blocks, 1)
+		block := blocks[0]
+		slot := block.SlotNumber()
+		hash := block.Hash()
+		cbor := block.Cbor()
 
 		writeTxn := store.NewTransaction(true)
 		require.NoError(
 			t,
-			store.SetBlock(writeTxn, slot, hash, cbor, 1, 0, 7, nil),
+			store.SetBlock(
+				writeTxn, slot, hash[:], cbor,
+				1, uint(gledger.BlockTypeConway), 7, nil,
+			),
 		)
 		require.NoError(t, writeTxn.Commit())
 
 		readTxn := store.NewTransaction(false)
-		gotCbor, gotMeta, err := store.GetBlock(readTxn, slot, hash)
+		gotCbor, gotMeta, err := store.GetBlock(readTxn, slot, hash[:])
 		require.NoError(t, err)
 		require.Equal(t, cbor, gotCbor)
 		require.Equal(t, uint64(1), gotMeta.ID)
@@ -216,12 +234,12 @@ func RunBlobStoreConformance(
 		require.NoError(t, readTxn.Rollback())
 
 		deleteTxn := store.NewTransaction(true)
-		require.NoError(t, store.DeleteBlock(deleteTxn, slot, hash, 1))
+		require.NoError(t, store.DeleteBlock(deleteTxn, slot, hash[:], 1))
 		require.NoError(t, deleteTxn.Commit())
 
 		verifyTxn := store.NewTransaction(false)
 		defer func() { require.NoError(t, verifyTxn.Rollback()) }()
-		_, _, err = store.GetBlock(verifyTxn, slot, hash)
+		_, _, err = store.GetBlock(verifyTxn, slot, hash[:])
 		require.ErrorIs(t, err, types.ErrBlobKeyNotFound)
 	})
 
@@ -461,7 +479,10 @@ func RunBlobStoreConformance(
 
 		// Blocks are the largest values a real node ever stores through this
 		// interface, so exercise the same payload through the block path
-		// specifically rather than only the raw KV path above.
+		// specifically rather than only the raw KV path above. ID 0 (like
+		// Database.SetGenesisCbor's synthetic entries) since this payload
+		// is arbitrary, not a decodable block: S3 and GCS skip content
+		// verification for ID 0 for exactly that reason.
 		blockHash := conformanceKey(t, "large-block-hash")
 		writeBlockTxn := store.NewTransaction(true)
 		require.NoError(t, store.SetBlock(
@@ -469,7 +490,7 @@ func RunBlobStoreConformance(
 			99_000,
 			blockHash,
 			payload,
-			1,
+			0,
 			0,
 			1,
 			nil,

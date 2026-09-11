@@ -230,7 +230,7 @@ type LeiosCertificateProvider interface {
 		ebHash lcommon.Blake2b256,
 		ebSlot uint64,
 	) (hashes []string, ok bool)
-	MarkEndorserBlockEmbedded(ebHash lcommon.Blake2b256)
+	MarkEndorserBlockEmbedded(ebHash lcommon.Blake2b256, ebSlot uint64)
 }
 
 // LeiosParentAnnouncementProvider reports the EB announced by the parent
@@ -374,10 +374,10 @@ type ForgerConfig struct {
 	// chain tip is far ahead of the slot clock. Zero uses the default.
 	ForgeStaleGapThresholdSlots uint64
 
-	// BlockValidator, when non-nil, validates the forged block (VRF/KES
-	// header crypto, body-hash consistency, per-tx ledger rules) before
-	// AddBlock is called. A validation failure drops the block without
-	// adopting or diffusing it. Nil disables self-validation (default).
+	// BlockValidator runs its implementation's checks before AddBlock.
+	// A failure prevents adoption and diffusion. The node always supplies
+	// aggregate reference-script validation and optionally full validation.
+	// Nil disables validation for callers embedding this package directly.
 	BlockValidator BlockValidator
 
 	// Prometheus metrics registry (optional)
@@ -790,11 +790,16 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 			f.incCouldNotForge()
 			f.logger.Warn(
 				"slot battle lost: rival block at tip for a slot this node already forged",
-				"current_slot", currentSlot,
-				"tip_slot", tipSlot,
-				"last_forged_slot", f.lastForgedSlot,
-				"our_block_hash", hex.EncodeToString(ourHash),
-				"tip_block_hash", hex.EncodeToString(tipHash),
+				"current_slot",
+				currentSlot,
+				"tip_slot",
+				tipSlot,
+				"last_forged_slot",
+				f.lastForgedSlot,
+				"our_block_hash",
+				hex.EncodeToString(ourHash),
+				"tip_block_hash",
+				hex.EncodeToString(tipHash),
 			)
 			return nil
 		case fenceCovers:
@@ -1012,8 +1017,10 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		f.incCouldNotForge()
 		f.logger.Warn(
 			"forge skip: leader slot already holds another block; forging an alternative is not supported",
-			"current_slot", currentSlot,
-			"tip_slot", tipSlot,
+			"current_slot",
+			currentSlot,
+			"tip_slot",
+			tipSlot,
 		)
 		return nil
 	}
@@ -1218,7 +1225,7 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		f.metrics.forgeAdopted.Inc()
 	}
 	if embeddedEb != nil && f.leiosCerts != nil {
-		f.leiosCerts.MarkEndorserBlockEmbedded(*embeddedEb)
+		f.leiosCerts.MarkEndorserBlockEmbedded(*embeddedEb, embeddedEbSlot)
 	}
 
 	// Record the forged block for slot battle detection

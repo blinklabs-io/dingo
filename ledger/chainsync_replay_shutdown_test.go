@@ -25,6 +25,8 @@ import (
 // Close has been observed, so its goroutine can never reach DB reads
 // after the database is closed.
 func TestReplayBufferedHeadersAsyncSkippedAfterClose(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 
@@ -51,6 +53,8 @@ func TestReplayBufferedHeadersAsyncSkippedAfterClose(t *testing.T) {
 // before returning, so callers (Node.shutdown phase 3) can safely close
 // the database without racing the replay's DB reads.
 func TestCloseWaitsForInFlightReplay(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 

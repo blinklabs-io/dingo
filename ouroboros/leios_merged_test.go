@@ -230,6 +230,8 @@ func testLeiosEndorserBlockRawWithRefs(
 }
 
 func TestMergedLeiosRankingBlockCborIsNoopForDijkstra(t *testing.T) {
+	t.Parallel()
+
 	_, blockRaw := testDijkstraBlockRaw(t, 1)
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
@@ -240,6 +242,8 @@ func TestMergedLeiosRankingBlockCborIsNoopForDijkstra(t *testing.T) {
 }
 
 func TestLeiosTxsFromBitmapPreservesRequestedOrder(t *testing.T) {
+	t.Parallel()
+
 	txs := []cbor.RawMessage{
 		mustCbor(t, "tx0"),
 		mustCbor(t, "tx1"),
@@ -275,6 +279,8 @@ func TestLeiosFetchServerMissingDataUsesUnavailableErrors(t *testing.T) {
 }
 
 func TestLeiosFetchServerBlockTxsRejectsIncompleteCache(t *testing.T) {
+	t.Parallel()
+
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 10, 2)
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
@@ -300,6 +306,8 @@ func TestLeiosFetchServerBlockTxsRejectsIncompleteCache(t *testing.T) {
 }
 
 func TestLeiosFetchServerBlockTxsRejectsOutOfRangeBitmap(t *testing.T) {
+	t.Parallel()
+
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 10, 2)
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
@@ -326,6 +334,8 @@ func TestLeiosFetchServerBlockTxsRejectsOutOfRangeBitmap(t *testing.T) {
 }
 
 func TestLeiosNotifyBlockTxsOfferCacheMissIsNonFatal(t *testing.T) {
+	t.Parallel()
+
 	cm := connmanager.NewConnectionManager(
 		connmanager.ConnectionManagerConfig{},
 	)
@@ -351,6 +361,8 @@ func TestLeiosNotifyBlockTxsOfferCacheMissIsNonFatal(t *testing.T) {
 }
 
 func TestLeiosNotifyBlockAnnouncementIsConsumedAndDeduplicated(t *testing.T) {
+	t.Parallel()
+
 	cm := connmanager.NewConnectionManager(
 		connmanager.ConnectionManagerConfig{},
 	)
@@ -461,6 +473,8 @@ func TestLeiosNotifyBlockAnnouncementIsConsumedAndDeduplicated(t *testing.T) {
 }
 
 func TestLeiosNotifyAnnouncementOCINVerdictControlsDiffusion(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name        string
 		staleness   ledger.LeiosAnnouncementOCINStaleness
@@ -534,6 +548,8 @@ func TestLeiosNotifyAnnouncementOCINVerdictControlsDiffusion(t *testing.T) {
 }
 
 func TestAcceptLeiosAnnouncementRejectsWithoutLedgerState(t *testing.T) {
+	t.Parallel()
+
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	o.leiosDeferredAnnouncements["pending"] = leiosDeferredAnnouncement{
 		raw: []byte("deferred"), source: "peer",
@@ -574,6 +590,8 @@ func (o *Ouroboros) fetchCachedLeiosEndorserBlockTxs(
 func TestFetchCachedLeiosEndorserBlockTxsReturnsCompleteCacheWithoutFetch(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 10)
 	txRaw := mustCbor(t, "tx0")
 
@@ -600,6 +618,8 @@ func TestFetchCachedLeiosEndorserBlockTxsReturnsCompleteCacheWithoutFetch(
 }
 
 func TestEndorserBlockTxHashesByHashReturnsManifestHashes(t *testing.T) {
+	t.Parallel()
+
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 10, 2)
 	block, err := lcommon.NewLeiosEndorserBlockFromCbor(blockRaw)
 	require.NoError(t, err)
@@ -629,6 +649,8 @@ func TestEndorserBlockTxHashesByHashReturnsManifestHashes(t *testing.T) {
 func TestLeiosEndorserBlockLookupReloadsFromDBAndServesFetchRequests(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tx0, ref0 := testLeiosManifestTx(t, 0)
 	tx1, ref1 := testLeiosManifestTx(t, 1)
 	blockRaw, err := lcommon.LeiosEndorserBlock{
@@ -702,6 +724,8 @@ func TestLeiosEndorserBlockLookupReloadsFromDBAndServesFetchRequests(
 }
 
 func TestStoreLeiosEndorserBlockRejectsPointHashMismatch(t *testing.T) {
+	t.Parallel()
+
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 10)
 	point.Hash[0] ^= 0xff
 
@@ -723,6 +747,8 @@ func TestStoreLeiosEndorserBlockRejectsPointHashMismatch(t *testing.T) {
 }
 
 func TestLeiosEndorserBlockLookupExpiresStaleEntries(t *testing.T) {
+	t.Parallel()
+
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	point, raw := testLeiosEndorserBlockRaw(t, 1)
 	require.NoError(
@@ -746,6 +772,8 @@ func TestLeiosEndorserBlockLookupExpiresStaleEntries(t *testing.T) {
 }
 
 func TestLeiosEndorserBlockCachePrunesExpiredEntries(t *testing.T) {
+	t.Parallel()
+
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	oldPoint, oldRaw := testLeiosEndorserBlockRaw(t, 1)
 	require.NoError(
@@ -783,6 +811,8 @@ func TestLeiosEndorserBlockCachePrunesExpiredEntries(t *testing.T) {
 }
 
 func TestLeiosEndorserBlockCachePrunesBySize(t *testing.T) {
+	t.Parallel()
+
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	var lastPoint ocommon.Point
 	for idx := range leiosEndorserBlockCacheMaxEntries + 1 {
@@ -918,6 +948,8 @@ func testLeiosManifestTx(
 }
 
 func TestValidateLeiosEndorserBlockTxsBindsManifestOrder(t *testing.T) {
+	t.Parallel()
+
 	tx1, ref1 := testLeiosManifestTx(t, 1)
 	tx2, ref2 := testLeiosManifestTx(t, 2)
 	manifestRaw, err := lcommon.LeiosEndorserBlock{
@@ -942,6 +974,8 @@ func TestValidateLeiosEndorserBlockTxsBindsManifestOrder(t *testing.T) {
 }
 
 func TestValidateLeiosEndorserBlockTxsRejectsMalformedManifest(t *testing.T) {
+	t.Parallel()
+
 	tx, ref := testLeiosManifestTx(t, 1)
 	hashRaw, err := cbor.Encode(ref.TransactionHash)
 	require.NoError(t, err)
@@ -973,6 +1007,8 @@ func TestValidateLeiosEndorserBlockTxsRejectsMalformedManifest(t *testing.T) {
 func TestValidateLeiosEndorserBlockTxsRejectsWrongSizeAndMalformedBody(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tx, ref := testLeiosManifestTx(t, 1)
 	manifestRaw, err := lcommon.LeiosEndorserBlock{
 		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
@@ -1051,6 +1087,8 @@ func (r *recordingManifestTxRequester) BlockTxsRequest(
 func TestFetchLeiosEbTxsBatchedRefetchesMismatchedRetainedPartial(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tx1, ref1 := testLeiosManifestTx(t, 1)
 	tx2, ref2 := testLeiosManifestTx(t, 2)
 	manifestRaw, err := lcommon.LeiosEndorserBlock{
@@ -1097,6 +1135,8 @@ func TestFetchLeiosEbTxsBatchedRefetchesMismatchedRetainedPartial(
 func TestValidatedLeiosFetchRejectsMismatchBeforePartialRetention(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tx1, ref1 := testLeiosManifestTx(t, 1)
 	tx2, ref2 := testLeiosManifestTx(t, 2)
 	manifestRaw, err := lcommon.LeiosEndorserBlock{
@@ -1155,6 +1195,8 @@ func TestValidatedLeiosFetchRejectsMismatchBeforePartialRetention(
 func TestLoadLeiosEBFromDBRejectsTransactionsThatMismatchManifest(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	_, ref := testLeiosManifestTx(t, 1)
 	mismatchedTx, _ := testLeiosManifestTx(t, 2)
 	manifestRaw, err := lcommon.LeiosEndorserBlock{
@@ -1186,6 +1228,8 @@ func TestLoadLeiosEBFromDBRejectsTransactionsThatMismatchManifest(
 }
 
 func TestLoadLeiosEBFromDBAcceptsTransactionsThatMatchManifest(t *testing.T) {
+	t.Parallel()
+
 	validTx, ref := testLeiosManifestTx(t, 1)
 	manifestRaw, err := lcommon.LeiosEndorserBlock{
 		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
@@ -1212,6 +1256,8 @@ func TestLoadLeiosEBFromDBAcceptsTransactionsThatMatchManifest(t *testing.T) {
 }
 
 func TestSpliceEndorserTxsIntoDijkstraBlockFillsCertRB(t *testing.T) {
+	t.Parallel()
+
 	certRB := testDijkstraCertRBRaw(
 		t,
 		100,
@@ -1264,6 +1310,8 @@ func TestSpliceEndorserTxsIntoDijkstraBlockFillsCertRB(t *testing.T) {
 }
 
 func TestSpliceEndorserTxsRejectsBlockWithExistingTxs(t *testing.T) {
+	t.Parallel()
+
 	ext := []cbor.RawMessage{mustCbor(t, true), mustCbor(t, nil)}
 	body := testDijkstraCertRBBodyElems(t)
 	body[1] = mustCbor(t, []cbor.RawMessage{testDijkstraTx(t, 9)}) // non-empty
@@ -1277,6 +1325,8 @@ func TestSpliceEndorserTxsRejectsBlockWithExistingTxs(t *testing.T) {
 }
 
 func TestSpliceEndorserTxsRejectsWrongShape(t *testing.T) {
+	t.Parallel()
+
 	// A three-element top-level array is not a Dijkstra [header, block_body].
 	notADijkstraBlock := mustCbor(t, []cbor.RawMessage{
 		mustCbor(t, 1), mustCbor(t, 2), mustCbor(t, 3),
@@ -1286,6 +1336,8 @@ func TestSpliceEndorserTxsRejectsWrongShape(t *testing.T) {
 }
 
 func TestLeiosAnnouncementFromBlockCbor(t *testing.T) {
+	t.Parallel()
+
 	ebHash := make([]byte, lcommon.Blake2b256Size)
 	ebHash[0] = 0xAB
 	announcement := mustCbor(t, []any{ebHash, uint64(4096)})
@@ -1319,6 +1371,8 @@ func TestLeiosAnnouncementFromBlockCbor(t *testing.T) {
 }
 
 func TestResolveCertifiedEndorserTxsGuards(t *testing.T) {
+	t.Parallel()
+
 	// A non-certifying Dijkstra block is never merged.
 	_, blockRaw := testDijkstraBlockRaw(t, 1)
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
@@ -1334,6 +1388,8 @@ func TestResolveCertifiedEndorserTxsGuards(t *testing.T) {
 func TestMergedLeiosRankingBlockCborServesRawForCertRBWithoutLedger(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	certRB := testDijkstraCertRBRaw(t, 3, make([]byte, lcommon.Blake2b256Size))
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	got, ok, err := o.mergedLeiosRankingBlockCbor(certRB)
@@ -1343,6 +1399,8 @@ func TestMergedLeiosRankingBlockCborServesRawForCertRBWithoutLedger(
 }
 
 func TestCertifiedEndorserBlockHashTriState(t *testing.T) {
+	t.Parallel()
+
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 
 	// A non-certifying Dijkstra block is not a CertRB: certified=false.
@@ -1366,6 +1424,8 @@ func TestCertifiedEndorserBlockHashTriState(t *testing.T) {
 func TestServeLeiosRankingBlockCborDisconnectsOnUnresolvedCertifiedBlock(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	// No ledger state, so a CertRB's parent announcement cannot be resolved.
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	certRB := testDijkstraCertRBRaw(t, 5, make([]byte, lcommon.Blake2b256Size))
@@ -1380,6 +1440,8 @@ func TestServeLeiosRankingBlockCborDisconnectsOnUnresolvedCertifiedBlock(
 }
 
 func TestServeLeiosRankingBlockCborServesRawForNonCertifiedBlock(t *testing.T) {
+	t.Parallel()
+
 	// A non-certifying Dijkstra block is served unchanged.
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	_, blockRaw := testDijkstraBlockRaw(t, 6)
@@ -1391,6 +1453,8 @@ func TestServeLeiosRankingBlockCborServesRawForNonCertifiedBlock(t *testing.T) {
 }
 
 func TestWaitForLeiosEndorserClosureReturnsWhenAlreadyCached(t *testing.T) {
+	t.Parallel()
+
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 10)
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
@@ -1410,6 +1474,8 @@ func TestWaitForLeiosEndorserClosureReturnsWhenAlreadyCached(t *testing.T) {
 }
 
 func TestWaitForLeiosEndorserClosureWakesOnStore(t *testing.T) {
+	t.Parallel()
+
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 11)
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
@@ -1460,6 +1526,8 @@ func TestWaitForLeiosEndorserClosureWakesOnStore(t *testing.T) {
 }
 
 func TestWaitForLeiosEndorserClosureTimesOutAndCleansUp(t *testing.T) {
+	t.Parallel()
+
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	ebHash := make([]byte, lcommon.Blake2b256Size)
 	ebHash[0] = 0xbb
@@ -1475,6 +1543,8 @@ func TestWaitForLeiosEndorserClosureTimesOutAndCleansUp(t *testing.T) {
 }
 
 func TestAwaitMergedLeiosRankingBlockTimesOut(t *testing.T) {
+	t.Parallel()
+
 	certRB := testDijkstraCertRBRaw(t, 42, make([]byte, lcommon.Blake2b256Size))
 	var ebHash lcommon.Blake2b256
 	ebHash[0] = 0xcc
@@ -1491,6 +1561,8 @@ func TestAwaitMergedLeiosRankingBlockTimesOut(t *testing.T) {
 }
 
 func TestLeiosCertRbMetricsRecordOutcomes(t *testing.T) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	o := newOuroboros(OuroborosConfig{EnableLeios: true, PromRegistry: reg})
 	require.NotNil(t, o.leiosMetrics)
@@ -1519,6 +1591,8 @@ func TestLeiosCertRbMetricsRecordOutcomes(t *testing.T) {
 }
 
 func TestLeiosCertRbMetricsNilSafe(t *testing.T) {
+	t.Parallel()
+
 	// Without a PromRegistry, metrics are not initialized; recording must be
 	// a no-op rather than panicking.
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
@@ -1530,6 +1604,8 @@ func TestLeiosCertRbMetricsNilSafe(t *testing.T) {
 }
 
 func TestLeiosClosureWaitTimeoutPrecedence(t *testing.T) {
+	t.Parallel()
+
 	// Explicit config override wins.
 	o := newOuroboros(OuroborosConfig{
 		EnableLeios:             true,
@@ -1549,6 +1625,8 @@ func TestLeiosClosureWaitTimeoutPrecedence(t *testing.T) {
 }
 
 func TestServeLeiosCertRbWithWaitErrorsOnTimeout(t *testing.T) {
+	t.Parallel()
+
 	// A certifying ranking block whose endorser closure never arrives must
 	// surface an error (so the caller closes the connection) rather than
 	// serving the raw, empty-transaction block.
@@ -1584,6 +1662,8 @@ func TestServeLeiosCertRbWithWaitErrorsOnTimeout(t *testing.T) {
 // Replacing the cache entry then drops the transaction set, making a complete
 // endorser block report itself unavailable again.
 func TestStoreLeiosEndorserBlockManifestDoesNotClobberCachedTxs(t *testing.T) {
+	t.Parallel()
+
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 2636557, 2)
 	txsRaw := []cbor.RawMessage{
 		mustCbor(t, "tx0"),
@@ -1656,6 +1736,8 @@ func TestStoreLeiosEndorserBlockManifestDoesNotClobberCachedTxs(t *testing.T) {
 // a store never shrinks a cached endorser block's transaction set, whichever
 // caller supplies the smaller one.
 func TestStoreLeiosEndorserBlockKeepsLargerTxSet(t *testing.T) {
+	t.Parallel()
+
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 4242, 3)
 	full := []cbor.RawMessage{
 		mustCbor(t, "tx0"),
@@ -1737,6 +1819,8 @@ func testDijkstraAnnouncingBlockRaw(
 // inserted into the ledger's chain), not just the cache lookup, so it also
 // guards that resolved=true alone is not treated as sufficient.
 func TestResolveCertifiedEndorserTxsWithholdsUnverifiedSlot(t *testing.T) {
+	t.Parallel()
+
 	manifestPoint, manifestRaw := testLeiosEndorserBlockRawWithRefs(t, 10, 1)
 	ebHash := testEbHash(manifestPoint)
 

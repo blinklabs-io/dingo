@@ -44,6 +44,8 @@ func encodeRoots(t *testing.T, ids [4]*ParsedGovActionId) []byte {
 }
 
 func TestParseProposalsRootsEmpty(t *testing.T) {
+	t.Parallel()
+
 	got, err := parseProposalsRoots(nil)
 	require.NoError(t, err)
 	require.Nil(t, got)
@@ -56,6 +58,8 @@ func TestParseProposalsRootsEmpty(t *testing.T) {
 }
 
 func TestParseProposalsRootsAllSNothing(t *testing.T) {
+	t.Parallel()
+
 	data := encodeRoots(t, [4]*ParsedGovActionId{nil, nil, nil, nil})
 	got, err := parseProposalsRoots(data)
 	require.NoError(t, err)
@@ -63,6 +67,8 @@ func TestParseProposalsRootsAllSNothing(t *testing.T) {
 }
 
 func TestParseProposalsRootsAllSet(t *testing.T) {
+	t.Parallel()
+
 	pp := &ParsedGovActionId{
 		TxHash:      bytes.Repeat([]byte{0x11}, 32),
 		ActionIndex: 0,
@@ -103,6 +109,8 @@ func TestParseProposalsRootsAllSet(t *testing.T) {
 }
 
 func TestParseProposalsRootsPartial(t *testing.T) {
+	t.Parallel()
+
 	hf := &ParsedGovActionId{
 		TxHash:      bytes.Repeat([]byte{0xAA}, 32),
 		ActionIndex: 7,
@@ -120,6 +128,8 @@ func TestParseProposalsRootsPartial(t *testing.T) {
 }
 
 func TestParseProposalsRootsBadShape(t *testing.T) {
+	t.Parallel()
+
 	// 3-element array is not a valid GovRelation.
 	data, err := cbor.Encode([]any{[]any{}, []any{}, []any{}})
 	require.NoError(t, err)
@@ -130,6 +140,8 @@ func TestParseProposalsRootsBadShape(t *testing.T) {
 }
 
 func TestParseStrictMaybeGovActionIdNullSentinel(t *testing.T) {
+	t.Parallel()
+
 	// CBOR null (0xf6) is treated as SNothing.
 	got, err := parseStrictMaybeGovActionId([]byte{0xf6})
 	require.NoError(t, err)
@@ -137,6 +149,8 @@ func TestParseStrictMaybeGovActionIdNullSentinel(t *testing.T) {
 }
 
 func TestParseStrictMaybeGovActionIdDirectGovActionId(t *testing.T) {
+	t.Parallel()
+
 	// Tolerate a non-canonical encoder that emits the GovActionId
 	// directly without the SJust 1-element wrapper.
 	txHash := bytes.Repeat([]byte{0x55}, 32)
@@ -150,6 +164,8 @@ func TestParseStrictMaybeGovActionIdDirectGovActionId(t *testing.T) {
 }
 
 func TestParseStrictMaybeGovActionIdShortTxHash(t *testing.T) {
+	t.Parallel()
+
 	short := bytes.Repeat([]byte{0x77}, 16)
 	data, err := cbor.Encode([]any{[]any{short, uint64(0)}})
 	require.NoError(t, err)
@@ -160,6 +176,8 @@ func TestParseStrictMaybeGovActionIdShortTxHash(t *testing.T) {
 }
 
 func TestParseProposalsIncludesRoots(t *testing.T) {
+	t.Parallel()
+
 	// End-to-end: parseProposals returns both the OMap proposals
 	// and the per-purpose roots.
 	pp := &ParsedGovActionId{

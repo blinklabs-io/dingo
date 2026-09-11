@@ -196,6 +196,15 @@ var epochStoreMethods = []string{
 // calculation, so its subject is live stake rather than a snapshot.
 // GetRewardStakeInputsForPools is implemented in historical_stake.go but was
 // never on MetadataStore, so there is nothing to move.
+//
+// GetPointerStakeInputsForPools is implemented in pointer_stake.go but is
+// listed here, not with live_stake.go's methods: its subject is the same
+// slot-evaluated, certificate-history-driven attribution as
+// GetEpochBoundaryStakeByPools -- it reuses the identical
+// activeDelegationSQL/pointerResolutionSQL join -- and it exists because
+// reward_live_stake (the live_stake.go domain) cannot express that
+// attribution incrementally. The snapshot path's live fast path adds its
+// result to GetLiveStakeInputsForPools's.
 var stakeSnapshotStoreMethods = []string{
 	"SavePoolStakeSnapshot",
 	"SavePoolStakeSnapshots",
@@ -214,6 +223,7 @@ var stakeSnapshotStoreMethods = []string{
 	"GetEpochBoundaryStakeByPools",
 	"GetPoolOwnerStakeAtSlot",
 	"GetEpochBoundaryRewardStakeInputsForPools",
+	"GetPointerStakeInputsForPools",
 }
 
 // certificateStoreMethods is the certificate domain: sqlstore's

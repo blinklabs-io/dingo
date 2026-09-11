@@ -132,6 +132,8 @@ func retiredPoolKeyHash(seed byte) []byte {
 // later registration puts the pool back, and on this chain seven pools have
 // a registration filed after a retirement certificate.
 func TestGetPoolKeyHashesRetiredByEpoch(t *testing.T) {
+	t.Parallel()
+
 	const (
 		queryEpoch   = uint64(7)
 		boundarySlot = uint64(1_000)
@@ -347,6 +349,8 @@ func TestGetPoolKeyHashesRetiredByEpoch(t *testing.T) {
 // exclusion is now the only thing keeping reconcile rows out of boundary
 // refund processing, so it is asserted rather than assumed.
 func TestGetPoolsRetiringAtEpochSameSlotResolution(t *testing.T) {
+	t.Parallel()
+
 	const boundarySlot = uint64(1_000)
 	var (
 		poolSyntheticSameSlot  = retiredPoolKeyHash(0xB1)

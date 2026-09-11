@@ -1010,9 +1010,13 @@ func (ls *LedgerState) ledgerTipBehindSlot(slot uint64) bool {
 // even when the decentralization parameter enables overlay slots elsewhere in
 // the same epoch.
 //
-// Byron blocks are skipped (PBFT). A missing total-stake or unavailable active
-// slot coefficient is logged and skipped rather than rejecting, to tolerate
-// early-chain bootstrap states where the genesis snapshot is not yet written.
+// Byron blocks are skipped (PBFT). A state that leaves the threshold
+// unevaluable -- a zero total active stake, a missing or non-positive active
+// slot coefficient, or a post-Mithril mark row reconstructed after its target
+// boundary -- is rejected rather than skipped; only the explicitly selected
+// prototype profile logs it and trusts the block. The snapshot cases carry
+// errLeaderStakeSnapshotUnavailable, so header verification running ahead of
+// the ledger apply cursor defers instead of rejecting.
 //
 // epochCacheSnapshot returns the published epoch cache, or nil when no
 // snapshot has been published. The test-helper wrappers that pin a cache for
@@ -1189,17 +1193,23 @@ func (ls *LedgerState) verifyBlockLeaderEligibilityWithCache(
 	)
 	ls.metrics.observeLeaderThresholdMargin(margin)
 	if !belowThreshold {
-		// dingo's leadership stake is delegated UTxO only; staking rewards are
-		// not yet computed, so reward-account balances are missing from the
-		// stake distribution. On the prototype network the dominant pool's
-		// reward accrual pushes its true relative stake above the UTxO-only
-		// figure, so this UTxO-only threshold spuriously rejects its eligible
-		// blocks. Trust the block there (all cryptographic header checks above
-		// still passed) rather than wedge the chain; enforce elsewhere. See
+		// The leadership stake includes reward-account balances:
+		// refreshRewardLiveStakeAggregate stores total_stake =
+		// utxo_stake + reward_stake (reward_stake from account.reward) and
+		// GetLiveStakeInputsForPools selects total_stake; the historical
+		// reconstruction adds the same term in getStakeByPoolsAtSlot. An
+		// earlier comment here claimed the stake was delegated UTxO only.
+		// That was stale, and #3165 was diagnosed from it rather than from
+		// the code.
+		//
+		// On the concentrated prototype topology this check still rejected
+		// the dominant pool's eligible blocks and wedged the chain, so it is
+		// downgraded to a warning there; all cryptographic header checks
+		// above still passed. See
 		// LedgerStateConfig.SkipLeaderStakeThresholdCheck.
 		if ls.config.SkipLeaderStakeThresholdCheck {
 			ls.config.Logger.Warn(
-				"leader eligibility below stake-derived threshold; trusting block (leadership stake omits reward balances)",
+				"leader eligibility below stake-derived threshold; trusting block (prototype trust bypass)",
 				"slot",
 				block.SlotNumber(),
 				"pool",
@@ -1398,25 +1408,47 @@ func (ls *LedgerState) leaderEligibilityStakeWithCache(
 	if ls.shouldSkipPostMithrilMarkEligibilityWithCache(
 		snapshot, snapshotEpoch, epochCache,
 	) {
-		if ls.config.Logger != nil {
-			ls.config.Logger.Warn(
-				"skipping leader eligibility check: post-Mithril mark snapshot was reconstructed after the target boundary",
-				"slot",
-				block.SlotNumber(),
-				"epoch",
-				epochId,
-				"snapshot_epoch",
-				snapshotEpoch,
-				"snapshot_type",
-				snapshotType,
-				"captured_slot",
-				snapshot.CapturedSlot,
-				"component",
-				"ledger",
-			)
+		// The reconstructed row makes a hard threshold *comparison* unsafe,
+		// but that means eligibility is unevaluable, not automatically
+		// satisfied. Mirror the zero-active-stake and missing-coefficient
+		// guards above: only the explicitly selected prototype profile may
+		// trust the block anyway; a standard profile must reject (wrapped so
+		// header verification running ahead of the ledger apply cursor
+		// defers instead).
+		if ls.config.SkipLeaderStakeThresholdCheck {
+			if ls.config.Logger != nil {
+				ls.config.Logger.Warn(
+					"skipping leader eligibility check: post-Mithril mark snapshot was reconstructed after the target boundary (prototype profile)",
+					"slot",
+					block.SlotNumber(),
+					"epoch",
+					epochId,
+					"snapshot_epoch",
+					snapshotEpoch,
+					"snapshot_type",
+					snapshotType,
+					"captured_slot",
+					snapshot.CapturedSlot,
+					"component",
+					"ledger",
+				)
+			}
+			return uint64(snapshot.TotalStake), 0, snapshotEpoch, snapshotType,
+				true, nil
 		}
-		return uint64(snapshot.TotalStake), 0, snapshotEpoch, snapshotType,
-			true, nil
+		return 0, 0, snapshotEpoch, snapshotType, false,
+			fmt.Errorf(
+				"%w: block header verification rejected at slot %d: "+
+					"post-Mithril mark snapshot for epoch %d was "+
+					"reconstructed after the target boundary "+
+					"(captured slot %d); leader eligibility for "+
+					"producer pool %x cannot be evaluated",
+				errLeaderStakeSnapshotUnavailable,
+				block.SlotNumber(),
+				snapshotEpoch,
+				snapshot.CapturedSlot,
+				poolKeyHash[:],
+			)
 	}
 	totalStake, err := ls.db.Metadata().GetTotalActiveStake(
 		snapshotEpoch,
@@ -1617,6 +1649,37 @@ func (ls *LedgerState) electingVrfKeyHashWithCache(
 			var hash lcommon.Blake2b256
 			copy(hash[:], vrfKeyHash)
 			return hash, true, nil
+		}
+		// Both lookups missed. That is ordinarily the unanswerable gap the
+		// error below reports, but it is also exactly what a Mithril
+		// bootstrap produces for the epoch boundary the node crosses right
+		// after import: the snapshot import writes only the pool's live
+		// registration, stamped at the import slot, and never replays the
+		// certificate history that produced it. So a pool that has in fact
+		// been continuously registered the whole time has no row at or
+		// before a cutoff/capture slot that predates the import (issue
+		// #4047).
+		//
+		// mithrilLedgerSlot pins that import slot for the life of the
+		// process (set once at startup, like the other reads of this field
+		// in this file), so a capture at or below it is diagnostic: the
+		// snapshot that elected this pool was captured no later than the
+		// bootstrap boundary, which only a bootstrap-created gap explains.
+		// Falling back to the live registration here is the same trust
+		// electingVrfKeyHashWithCache already extends when ok is false --
+		// no snapshot at all -- applied to the narrower case of a snapshot
+		// whose registration history the import could not carry. It is not
+		// the general "no history found" fallback #3842 removed: outside
+		// this bootstrap-anchor window, a genuine gap still hard-rejects
+		// rather than resolving the pool's current (possibly rotated) key.
+		if ls.mithrilLedgerSlot != 0 && capturedSlot <= ls.mithrilLedgerSlot {
+			pool, poolErr := ls.db.GetPool(poolKeyHash, true, nil)
+			if poolErr != nil && !errors.Is(poolErr, models.ErrPoolNotFound) {
+				return lcommon.Blake2b256{}, false, poolErr
+			}
+			if hash, ok := registeredPoolVrfKeyHash(pool); ok {
+				return hash, true, nil
+			}
 		}
 		return lcommon.Blake2b256{}, false, fmt.Errorf(
 			"%w at cutoff slot %d or capture slot %d for pool %x",

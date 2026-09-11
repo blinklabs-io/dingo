@@ -34,6 +34,8 @@ import (
 // stalled until the primary or the timeout fired, defeating the point of
 // dispatching a shadow at all.
 func TestHandleEventBlockfetchBatchDoneAcceptsShadowCompletion(t *testing.T) {
+	t.Parallel()
+
 	testChain := &chain.Chain{}
 	require.NoError(t, testChain.AddBlockHeader(mockHeader{
 		hash:        lcommon.NewBlake2b256([]byte("hdr-1")),
@@ -111,6 +113,8 @@ func TestHandleEventBlockfetchBatchDoneAcceptsShadowCompletion(t *testing.T) {
 func TestHandleEventBlockfetchBatchDoneDropsStaleShadowAfterCleanup(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	testChain := &chain.Chain{}
 	require.NoError(t, testChain.AddBlockHeader(mockHeader{
 		hash:        lcommon.NewBlake2b256([]byte("hdr-1")),
@@ -192,6 +196,8 @@ func TestHandleEventBlockfetchBatchDoneDropsStaleShadowAfterCleanup(
 // leak into the new batch and let the previous shadow's blocks be accepted
 // against the new request.
 func TestStartQueuedBlockfetchAfterForkRestartClearsShadowState(t *testing.T) {
+	t.Parallel()
+
 	testChain := &chain.Chain{}
 	require.NoError(t, testChain.AddBlockHeader(mockHeader{
 		hash:        lcommon.NewBlake2b256([]byte("hdr-1")),

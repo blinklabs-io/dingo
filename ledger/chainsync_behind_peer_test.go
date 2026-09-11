@@ -183,6 +183,8 @@ func (f *behindPeerFixture) requireNoResyncEvent(t *testing.T) {
 // no re-sync, no denial, and no unrecoverable-divergence escalation telling the
 // operator to re-bootstrap a perfectly canonical database.
 func TestHandleEventChainsyncRollbackKeepsPeerBehindOnOurChain(t *testing.T) {
+	t.Parallel()
+
 	f := newBehindPeerFixture(t)
 	localTip := f.ls.chain.Tip()
 
@@ -226,6 +228,8 @@ func TestHandleEventChainsyncRollbackKeepsPeerBehindOnOurChain(t *testing.T) {
 func TestHandleEventChainsyncRollbackBehindPeerRepeatDoesNotEscalate(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	f := newBehindPeerFixture(t)
 	localTip := f.ls.chain.Tip()
 
@@ -255,6 +259,8 @@ func TestHandleEventChainsyncRollbackBehindPeerRepeatDoesNotEscalate(
 // roll back further than K is a genuine deep fork. It must still be rejected
 // and evicted — the fix must not weaken the security-parameter gate.
 func TestHandleEventChainsyncRollbackStillRejectsDeepForkPeer(t *testing.T) {
+	t.Parallel()
+
 	f := newBehindPeerFixture(t)
 	localTip := f.ls.chain.Tip()
 
@@ -292,6 +298,8 @@ func TestHandleEventChainsyncRollbackStillRejectsDeepForkPeer(t *testing.T) {
 // Control: an unknown (zero) peer tip carries no evidence that the peer is
 // behind rather than forked, so it must fail safe to the existing rejection.
 func TestHandleEventChainsyncRollbackRejectsUnknownPeerTipOverK(t *testing.T) {
+	t.Parallel()
+
 	f := newBehindPeerFixture(t)
 
 	err := f.ls.handleEventChainsyncRollback(
@@ -319,6 +327,8 @@ func TestHandleEventChainsyncRollbackRejectsUnknownPeerTipOverK(t *testing.T) {
 // competing longer chain, not a prefix of ours, even when the rollback point
 // itself is on our chain. It must keep the over-K rejection.
 func TestHandleEventChainsyncRollbackRejectsPeerTipAheadOfUs(t *testing.T) {
+	t.Parallel()
+
 	f := newBehindPeerFixture(t)
 	localTip := f.ls.chain.Tip()
 
@@ -355,6 +365,8 @@ func TestHandleEventChainsyncRollbackRejectsPeerTipAheadOfUs(t *testing.T) {
 // is offering a competing chain", and the counter is the signal that
 // distinguishes them.
 func TestHandleEventChainsyncRollbackBehindPeerCounter(t *testing.T) {
+	t.Parallel()
+
 	f := newBehindPeerFixture(t)
 
 	require.NoError(t, f.ls.handleEventChainsyncRollback(
@@ -397,6 +409,8 @@ func TestHandleEventChainsyncRollbackBehindPeerCounter(t *testing.T) {
 // a rollback past K from there is intersect drift, not a lagging peer, and must
 // keep the existing rejection.
 func TestHandleEventChainsyncRollbackRejectsPeerTipEqualToOurs(t *testing.T) {
+	t.Parallel()
+
 	f := newBehindPeerFixture(t)
 	localTip := f.ls.chain.Tip()
 
@@ -428,6 +442,8 @@ func TestHandleEventChainsyncRollbackRejectsPeerTipEqualToOurs(t *testing.T) {
 // the number riding along with it is untrusted peer input, and it is what an
 // operator reads out of the log and the metric.
 func TestChainsyncPeerBehindDepthIgnoresAdvertisedBlockNumber(t *testing.T) {
+	t.Parallel()
+
 	f := newBehindPeerFixture(t)
 
 	peerTip := f.tipAtDepth(6)
