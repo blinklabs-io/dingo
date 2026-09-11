@@ -303,10 +303,10 @@ not add authentication to this Acropolis-compatible service.
 Bark is Dingo's own Dingo-to-Dingo archive protocol rather than an application
 API. It is configured separately with `barkPort` and `barkBaseUrl`.
 
-For public client access, place the API listeners behind a reverse proxy or API
-gateway — that remains fully supported. In addition, UTxO RPC, Blockfrost, and
-Mesh share one in-process TLS/authentication surface, so an operator can also
-secure any subset of them without a proxy in front.
+For public client access, the API listeners may be exposed directly or placed
+behind a reverse proxy or API gateway. UTxO RPC, Blockfrost, and Mesh share one
+optional in-process TLS/authentication surface, so an operator can secure any
+subset of them without a proxy in front.
 
 The shorter `DINGO_UTXORPC_PORT`, `DINGO_BLOCKFROST_PORT`, and
 `DINGO_MESH_PORT` names remain supported for compatibility. If both a

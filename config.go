@@ -519,12 +519,6 @@ func (n *Node) configValidate() error {
 			StorageModeAPI,
 		)
 	}
-	if err := internalconfig.ValidateAPIExposure(
-		n.config.cfg,
-		internalconfig.RunMode(n.config.cfg.RunMode),
-	); err != nil {
-		return fmt.Errorf("invalid API exposure: %w", err)
-	}
 	if !n.config.cfg.StartEra.Valid() {
 		return fmt.Errorf(
 			"invalid start era %q: must be empty or %q",

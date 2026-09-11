@@ -64,7 +64,7 @@ var flagSpecs = []flagSpec{
 		"data directory for all storage plugins (overrides CARDANO_DATABASE_PATH)",
 	),
 	stringFlag("BindAddr", "bind-addr", "", "public bind address"),
-	stringFlag("APIBindAddr", "api-bind-addr", "", "API bind address (remote exposure requires authentication)"),
+	stringFlag("APIBindAddr", "api-bind-addr", "", "API bind address"),
 	stringFlag("SocketPath", "socket-path", "", "path to UNIX socket file"),
 	transformStringFlag(
 		"RunMode",

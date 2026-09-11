@@ -265,11 +265,11 @@ func TestNewRejectsInvalidAPIAuthMode(t *testing.T) {
 	assert.Contains(t, err.Error(), "invalid mode")
 }
 
-// TestNewRejectsUnauthenticatedRemoteAPI verifies the shared Node constructor
-// enforces the same API exposure policy as CLI configuration validation.
-func TestNewRejectsUnauthenticatedRemoteAPI(t *testing.T) {
+// TestNewAllowsUnauthenticatedPublicAPI verifies the shared Node constructor
+// permits an intentionally public API without requiring optional authentication.
+func TestNewAllowsUnauthenticatedPublicAPI(t *testing.T) {
 	cardanoCfg := newNodeTestCardanoNodeCfg(t)
-	_, err := New(NewConfig(
+	node, err := New(NewConfig(
 		WithDatabasePath(t.TempDir()),
 		WithCardanoNodeConfig(cardanoCfg),
 		WithNetworkMagic(cardanoCfg.ShelleyGenesis().NetworkMagic),
@@ -284,7 +284,9 @@ func TestNewRejectsUnauthenticatedRemoteAPI(t *testing.T) {
 		WithShutdownTimeout(5*time.Second),
 	))
 
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid API exposure")
-	assert.Contains(t, err.Error(), "without authentication")
+	require.NoError(t, err)
+	require.NotNil(t, node)
+	t.Cleanup(func() {
+		assert.NoError(t, node.Stop())
+	})
 }

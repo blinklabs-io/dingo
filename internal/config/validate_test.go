@@ -71,15 +71,12 @@ func TestValidateDefaultsPass(t *testing.T) {
 	assert.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
 }
 
-func TestValidateAPIExposureRequiresAuthOnRemoteBind(t *testing.T) {
+func TestValidateAPIExposureAllowsUnauthenticatedRemoteBind(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.StorageMode = storageModeAPI
 	cfg.APIBindAddr = "0.0.0.0"
 
-	err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "without authentication")
-	assert.Contains(t, err.Error(), "blockfrost")
+	require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
 }
 
 func TestValidateAPIExposureAllowsUnauthenticatedLoopback(t *testing.T) {
@@ -102,7 +99,7 @@ func TestValidateAPIExposureAllowsAuthenticatedRemoteBind(t *testing.T) {
 	require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
 }
 
-func TestValidateAPIExposureHonorsProviderAuthOverride(t *testing.T) {
+func TestValidateAPIExposurePreservesProviderAuthOverride(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.StorageMode = storageModeAPI
 	cfg.APIBindAddr = "192.0.2.10"
@@ -114,10 +111,7 @@ func TestValidateAPIExposureHonorsProviderAuthOverride(t *testing.T) {
 		"mode": "disabled",
 	}
 
-	err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "plugins.api.mesh.config")
-	assert.Contains(t, err.Error(), "without authentication")
+	require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
 }
 
 func TestValidate(t *testing.T) {

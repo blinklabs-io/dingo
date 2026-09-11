@@ -5987,15 +5987,11 @@ Dingo provides three client-facing APIs plus Bark. All are optional and gated by
 Blockfrost, Mesh, and UTxO RPC share one TLS/authentication contract
 (dingo#2996/#2998), rather than each exposing its own ad hoc surface. A
 reverse proxy or API gateway in front of these listeners remains fully
-supported — TLS/auth here is additive, not a replacement requirement — but
-an operator can now also secure any subset of the three in-process. Startup validation
-also refuses an enabled API on a non-loopback bind address
-when its effective authentication policy is disabled. This guard evaluates
-the shared `api.auth` policy after each provider override is merged, while
-loopback-only APIs may remain unauthenticated for local clients. An operator
-who intentionally exposes an API must configure token authentication (or put
-an authenticated reverse proxy in front and keep the Dingo listener on
-loopback).
+supported — TLS/auth here is additive, not a replacement requirement — and an
+operator can secure any subset of the three in-process. Authentication is
+optional: the effective `api.auth` policy is disabled unless an operator
+enables it, and anonymous public API deployments remain supported. An operator
+may also terminate authentication in a reverse proxy or API gateway.
 
 - **Policy types (`internal/apiconfig`).** `TLSPolicy` (`mode`,
   `certFilePath`, `keyFilePath`) and `AuthPolicy` (`mode`, `token`,
