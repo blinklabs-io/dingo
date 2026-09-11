@@ -32,6 +32,8 @@ import (
 func TestLedgerProcessBlockRunsPhase1ForPhase2InvalidTransaction(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const (
 		blockSlot     = uint64(10)
 		invalidBefore = uint64(11)
@@ -117,6 +119,7 @@ func TestLedgerProcessBlockRunsPhase1ForPhase2InvalidTransaction(
 			pparams,
 			nil,
 			0,
+			false,
 		)
 		return err
 	})

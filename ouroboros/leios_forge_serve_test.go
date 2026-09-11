@@ -25,6 +25,8 @@ import (
 )
 
 func TestEnqueueLeiosPrototypeVote(t *testing.T) {
+	t.Parallel()
+
 	o := &Ouroboros{leiosEBLog: newLeiosForgedEBLog()}
 	const connA = "peer-a"
 	const connB = "peer-b"
@@ -47,6 +49,8 @@ func TestEnqueueLeiosPrototypeVote(t *testing.T) {
 }
 
 func TestEnqueueLeiosPrototypeVoteFromPeerExcludesOrigin(t *testing.T) {
+	t.Parallel()
+
 	o := &Ouroboros{leiosEBLog: newLeiosForgedEBLog()}
 	const originConn = "peer-origin"
 	const otherConn = "peer-other"
@@ -82,6 +86,8 @@ func TestEnqueueLeiosPrototypeVoteFromPeerExcludesOrigin(t *testing.T) {
 }
 
 func TestLeiosForgedEBLogSkipsOriginAfterPriorDelivery(t *testing.T) {
+	t.Parallel()
+
 	o := &Ouroboros{leiosEBLog: newLeiosForgedEBLog()}
 	const originConn = "peer-origin"
 	const otherConn = "peer-other"
@@ -131,6 +137,8 @@ func TestLeiosForgedEBLogSkipsOriginAfterPriorDelivery(t *testing.T) {
 }
 
 func TestLeiosForgedEBLogOriginReconnectSkipsExcludedRetry(t *testing.T) {
+	t.Parallel()
+
 	log := newLeiosForgedEBLog()
 	const originConn = "peer-origin"
 	const failedConnA = "peer-failed-a"
@@ -193,6 +201,8 @@ func TestLeiosForgedEBLogOriginReconnectSkipsExcludedRetry(t *testing.T) {
 }
 
 func TestLeiosForgedEBLogCommitsOnlyAfterDelivery(t *testing.T) {
+	t.Parallel()
+
 	log := newLeiosForgedEBLog()
 	const connKey = "peer-a"
 	log.registerConn(connKey)
@@ -216,6 +226,8 @@ func TestLeiosForgedEBLogCommitsOnlyAfterDelivery(t *testing.T) {
 }
 
 func TestLeiosForgedEBLogRetriesFailedDeliveryAfterReconnect(t *testing.T) {
+	t.Parallel()
+
 	log := newLeiosForgedEBLog()
 	const failedConn = "peer-a"
 	log.registerConn(failedConn)
@@ -252,6 +264,8 @@ func TestLeiosForgedEBLogRetriesFailedDeliveryAfterReconnect(t *testing.T) {
 }
 
 func TestLeiosForgedEBLogOtherPeerDoesNotConsumeFailedRetry(t *testing.T) {
+	t.Parallel()
+
 	log := newLeiosForgedEBLog()
 	const failedConn = "peer-a"
 	const healthyConn = "peer-b"
@@ -281,6 +295,8 @@ func TestLeiosForgedEBLogOtherPeerDoesNotConsumeFailedRetry(t *testing.T) {
 }
 
 func TestLeiosForgedEBLogReconnectClearsConsecutiveRetries(t *testing.T) {
+	t.Parallel()
+
 	log := newLeiosForgedEBLog()
 	const firstFailedConn = "peer-a"
 	const secondFailedConn = "peer-b"
@@ -332,6 +348,8 @@ func TestLeiosForgedEBLogReconnectClearsConsecutiveRetries(t *testing.T) {
 // bitmap. Each served transaction is the on-the-wire byte-string wrap of the
 // forged body, so it decodes back to the original body on the requesting side.
 func TestServeForgedEndorserBlockTxs(t *testing.T) {
+	t.Parallel()
+
 	o := &Ouroboros{leiosEBLog: newLeiosForgedEBLog()}
 
 	// Three forged transaction bodies (arbitrary raw CBOR is fine; they are

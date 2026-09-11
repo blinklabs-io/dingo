@@ -230,7 +230,7 @@ type LeiosCertificateProvider interface {
 		ebHash lcommon.Blake2b256,
 		ebSlot uint64,
 	) (hashes []string, ok bool)
-	MarkEndorserBlockEmbedded(ebHash lcommon.Blake2b256)
+	MarkEndorserBlockEmbedded(ebHash lcommon.Blake2b256, ebSlot uint64)
 }
 
 // LeiosParentAnnouncementProvider reports the EB announced by the parent
@@ -374,10 +374,10 @@ type ForgerConfig struct {
 	// chain tip is far ahead of the slot clock. Zero uses the default.
 	ForgeStaleGapThresholdSlots uint64
 
-	// BlockValidator, when non-nil, validates the forged block (VRF/KES
-	// header crypto, body-hash consistency, per-tx ledger rules) before
-	// AddBlock is called. A validation failure drops the block without
-	// adopting or diffusing it. Nil disables self-validation (default).
+	// BlockValidator runs its implementation's checks before AddBlock.
+	// A failure prevents adoption and diffusion. The node always supplies
+	// aggregate reference-script validation and optionally full validation.
+	// Nil disables validation for callers embedding this package directly.
 	BlockValidator BlockValidator
 
 	// Prometheus metrics registry (optional)
@@ -790,11 +790,16 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 			f.incCouldNotForge()
 			f.logger.Warn(
 				"slot battle lost: rival block at tip for a slot this node already forged",
-				"current_slot", currentSlot,
-				"tip_slot", tipSlot,
-				"last_forged_slot", f.lastForgedSlot,
-				"our_block_hash", hex.EncodeToString(ourHash),
-				"tip_block_hash", hex.EncodeToString(tipHash),
+				"current_slot",
+				currentSlot,
+				"tip_slot",
+				tipSlot,
+				"last_forged_slot",
+				f.lastForgedSlot,
+				"our_block_hash",
+				hex.EncodeToString(ourHash),
+				"tip_block_hash",
+				hex.EncodeToString(tipHash),
 			)
 			return nil
 		case fenceCovers:
@@ -821,13 +826,14 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// and resync loops.
 	// See forgeSyncToleranceSlots for the tolerance rationale.
 	upstreamTip, upstreamActive := f.slotClock.UpstreamSyncStatus()
-	if upstreamActive && (upstreamTip == 0 ||
-		(upstreamTip > tipSlot &&
-			upstreamTip-tipSlot > f.forgeSyncToleranceSlots)) {
+	if upstreamActive &&
+		f.upstreamSyncSkipsForge(currentSlot, tipSlot, upstreamTip) {
 		if f.metrics != nil {
 			gap := uint64(0)
 			if upstreamTip > tipSlot {
 				gap = upstreamTip - tipSlot
+			} else if upstreamTip == 0 && currentSlot > tipSlot {
+				gap = currentSlot - tipSlot
 			}
 			f.metrics.forgeSyncSkip.Inc()
 			f.metrics.tipGapSlots.Set(
@@ -1011,8 +1017,10 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		f.incCouldNotForge()
 		f.logger.Warn(
 			"forge skip: leader slot already holds another block; forging an alternative is not supported",
-			"current_slot", currentSlot,
-			"tip_slot", tipSlot,
+			"current_slot",
+			currentSlot,
+			"tip_slot",
+			tipSlot,
 		)
 		return nil
 	}
@@ -1217,7 +1225,7 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		f.metrics.forgeAdopted.Inc()
 	}
 	if embeddedEb != nil && f.leiosCerts != nil {
-		f.leiosCerts.MarkEndorserBlockEmbedded(*embeddedEb)
+		f.leiosCerts.MarkEndorserBlockEmbedded(*embeddedEb, embeddedEbSlot)
 	}
 
 	// Record the forged block for slot battle detection
@@ -1489,6 +1497,49 @@ func (f *BlockForger) checkOpCertSequence(
 		opCert.IssueNumber,
 		!limits.era.isTPraos(),
 	)
+}
+
+// upstreamSyncSkipsForge reports whether the upstream-sync gate declines
+// currentSlot. Two states reach it and they carry different evidence.
+//
+// A known target is direct evidence. The peer has told us, through a header we
+// authenticated and admitted, where its chain ends, so we are behind exactly
+// when that target leads our tip by more than the tolerance.
+//
+// A target of zero is not evidence of anything. LedgerState publishes it for
+// the whole window between an active-connection switch and the newly selected
+// peer's first admitted trusted header (publishActiveUpstream stores the new
+// connection key with targetSlot zero; only publishAdmittedUpstreamTarget
+// lifts it), so it means "we have not heard from this peer yet", not "this
+// peer is ahead of us".
+//
+// Declining unconditionally on it is what wedged an all-producer network: no
+// node forges because each is inside that window, so no new header is produced
+// anywhere, so none is admitted, so nothing lifts the target off zero, so no
+// node forges. Forging is the only source of new headers there, so the state
+// that suppressed forging prevented its own exit, and every node reported
+// healthy and connected throughout. That is issue #4010.
+//
+// The only evidence available in that window is our own tip's lag behind the
+// wall clock, so the same tolerance is applied to it. A node whose tip is
+// stale still waits, which is the protection this gate exists for -- a node
+// that has just switched peers does not forge on a stale view. A node at tip
+// forges, and the header it produces is what ends the window.
+func (f *BlockForger) upstreamSyncSkipsForge(
+	currentSlot, tipSlot, upstreamTip uint64,
+) bool {
+	if upstreamTip == 0 {
+		// The tip-ahead gate above returns for currentSlot < tipSlot and
+		// the equal case is contested, so currentSlot >= tipSlot here.
+		// Guard the subtraction anyway so a future reordering of the
+		// gates cannot turn this into a wrap.
+		if currentSlot <= tipSlot {
+			return false
+		}
+		return currentSlot-tipSlot > f.forgeSyncToleranceSlots
+	}
+	return upstreamTip > tipSlot &&
+		upstreamTip-tipSlot > f.forgeSyncToleranceSlots
 }
 
 // logGateSkip logs a slot dropped by a gate that runs before leader

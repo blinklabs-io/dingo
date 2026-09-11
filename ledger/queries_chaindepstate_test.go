@@ -76,10 +76,12 @@ func newChainDepStateLedger(
 // cardano-cli reports only a closed bearer — which is what `query
 // leadership-schedule` hits, since it reads the epoch nonce from this state.
 func TestQueryShelleyDebugChainDepState_Dispatches(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	ls := newChainDepStateLedger(t, db)
 
-	result, err := ls.Query(chainDepStateQuery())
+	result, err := ls.Query(chainDepStateQuery(), QueryPoint{})
 	require.NoError(t, err,
 		"the query must be handled rather than aborting the protocol")
 	require.NotNil(t, result)
@@ -95,6 +97,8 @@ func TestQueryShelleyDebugChainDepState_Dispatches(t *testing.T) {
 // last-epoch-block nonces in that order. Getting the arity or order wrong
 // still produces valid CBOR, so the shape is pinned by decoding it.
 func TestQueryShelleyDebugChainDepState_DecodesAsPraosState(t *testing.T) {
+	t.Parallel()
+
 	// The ledger state under test reports epoch 0, so the record has to sit
 	// there for the query to find it.
 	const epochID = 0
@@ -138,7 +142,7 @@ func TestQueryShelleyDebugChainDepState_DecodesAsPraosState(t *testing.T) {
 
 	ls := newChainDepStateLedger(t, db)
 
-	result, err := ls.Query(chainDepStateQuery())
+	result, err := ls.Query(chainDepStateQuery(), QueryPoint{})
 	require.NoError(t, err)
 
 	// Results travel wrapped in the single-element MsgResult array.
@@ -201,6 +205,8 @@ func TestQueryShelleyDebugChainDepState_DecodesAsPraosState(t *testing.T) {
 func TestQueryShelleyDebugChainDepState_TPraosEraUsesTPraosLayout(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	// Shelley's window is 3k/f = 3*6/0.4 = 45 slots, so with the epoch running
@@ -271,7 +277,7 @@ func TestQueryShelleyDebugChainDepState_TPraosEraUsesTPraosLayout(
 
 	ls := newChainDepStateLedger(t, db)
 
-	result, err := ls.Query(chainDepStateQuery())
+	result, err := ls.Query(chainDepStateQuery(), QueryPoint{})
 	require.NoError(t, err)
 	arr, _ := result.([]any)
 	require.Len(t, arr, 1)
@@ -323,6 +329,8 @@ func TestQueryShelleyDebugChainDepState_TPraosEraUsesTPraosLayout(
 func TestQueryShelleyDebugChainDepState_LayoutFollowsConsensusMode(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	for _, era := range eras.ErasWithDijkstra {
 		t.Run(era.Name, func(t *testing.T) {
 			db := newTestDB(t)
@@ -344,7 +352,7 @@ func TestQueryShelleyDebugChainDepState_LayoutFollowsConsensusMode(
 
 			ls := newChainDepStateLedger(t, db)
 
-			result, err := ls.Query(chainDepStateQuery())
+			result, err := ls.Query(chainDepStateQuery(), QueryPoint{})
 			require.NoError(t, err)
 			arr, ok := result.([]any)
 			require.True(t, ok)
@@ -385,6 +393,8 @@ func TestQueryShelleyDebugChainDepState_LayoutFollowsConsensusMode(
 func TestQueryShelleyDebugChainDepState_NoncesTrackTipNotEpochCheckpoint(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	// Conway's window is 4k/f = 4*6/0.4 = 60 slots, so with the epoch running
@@ -456,7 +466,7 @@ func TestQueryShelleyDebugChainDepState_NoncesTrackTipNotEpochCheckpoint(
 
 	ls := newChainDepStateLedger(t, db)
 
-	result, err := ls.Query(chainDepStateQuery())
+	result, err := ls.Query(chainDepStateQuery(), QueryPoint{})
 	require.NoError(t, err)
 	arr, _ := result.([]any)
 	require.Len(t, arr, 1)
@@ -505,6 +515,8 @@ func TestQueryShelleyDebugChainDepState_NoncesTrackTipNotEpochCheckpoint(
 func TestQueryShelleyDebugChainDepState_NoncesStopAtTipNotAtStoredBlocks(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	// Conway's window is 4k/f = 4*6/0.4 = 60 slots, so with the epoch running
@@ -584,7 +596,7 @@ func TestQueryShelleyDebugChainDepState_NoncesStopAtTipNotAtStoredBlocks(
 
 	ls := newChainDepStateLedger(t, db)
 
-	result, err := ls.Query(chainDepStateQuery())
+	result, err := ls.Query(chainDepStateQuery(), QueryPoint{})
 	require.NoError(t, err)
 	arr, _ := result.([]any)
 	require.Len(t, arr, 1)
@@ -622,6 +634,8 @@ func TestQueryShelleyDebugChainDepState_NoncesStopAtTipNotAtStoredBlocks(
 // block of the epoch lands; after that, reporting the carried value in the lab
 // field is a stale answer for a field the chain has already moved on from.
 func TestQueryShelleyDebugChainDepState_LabNonceTracksTipParent(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	carriedLab := bytes.Repeat([]byte{0x31}, 32)
@@ -683,7 +697,7 @@ func TestQueryShelleyDebugChainDepState_LabNonceTracksTipParent(t *testing.T) {
 
 	ls := newChainDepStateLedger(t, db)
 
-	result, err := ls.Query(chainDepStateQuery())
+	result, err := ls.Query(chainDepStateQuery(), QueryPoint{})
 	require.NoError(t, err)
 	arr, ok := result.([]any)
 	require.True(t, ok)
@@ -721,6 +735,8 @@ func TestQueryShelleyDebugChainDepState_LabNonceTracksTipParent(t *testing.T) {
 // carried value and report a stale lab. The tip's slot and hash together
 // address the block directly, so the index is not needed to find it.
 func TestQueryShelleyDebugChainDepState_LabNonceWithoutHashIndex(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	carriedLab := bytes.Repeat([]byte{0x51}, 32)
@@ -767,7 +783,7 @@ func TestQueryShelleyDebugChainDepState_LabNonceWithoutHashIndex(t *testing.T) {
 
 	ls := newChainDepStateLedger(t, db)
 
-	result, err := ls.Query(chainDepStateQuery())
+	result, err := ls.Query(chainDepStateQuery(), QueryPoint{})
 	require.NoError(t, err)
 	arr, _ := result.([]any)
 	require.Len(t, arr, 1)
@@ -792,6 +808,8 @@ func TestQueryShelleyDebugChainDepState_LabNonceWithoutHashIndex(t *testing.T) {
 func TestQueryShelleyDebugChainDepState_LabNonceCarriesWithoutBlocks(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	carriedLab := bytes.Repeat([]byte{0x41}, 32)
 	require.NoError(t, db.Metadata().SetEpoch(
@@ -800,7 +818,7 @@ func TestQueryShelleyDebugChainDepState_LabNonceCarriesWithoutBlocks(
 
 	ls := newChainDepStateLedger(t, db)
 
-	result, err := ls.Query(chainDepStateQuery())
+	result, err := ls.Query(chainDepStateQuery(), QueryPoint{})
 	require.NoError(t, err)
 	arr, _ := result.([]any)
 	require.Len(t, arr, 1)
@@ -828,6 +846,8 @@ func TestQueryShelleyDebugChainDepState_LabNonceCarriesWithoutBlocks(
 func TestQueryShelleyDebugChainDepState_LabNonceTipBlockUnavailable(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	carriedLab := bytes.Repeat([]byte{0x61}, 32)
 	absentTip := bytes.Repeat([]byte{0x62}, 32)
@@ -843,7 +863,7 @@ func TestQueryShelleyDebugChainDepState_LabNonceTipBlockUnavailable(
 
 	ls := newChainDepStateLedger(t, db)
 
-	result, err := ls.Query(chainDepStateQuery())
+	result, err := ls.Query(chainDepStateQuery(), QueryPoint{})
 	require.NoError(t, err,
 		"an unreadable tip block must not abort the protocol")
 	arr, _ := result.([]any)
@@ -872,6 +892,8 @@ func TestQueryShelleyDebugChainDepState_LabNonceTipBlockUnavailable(
 func TestQueryShelleyDebugChainDepState_ReportsPreviousEpochNonce(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	previousNonce := make([]byte, 32)
 	for i := range previousNonce {
 		previousNonce[i] = 0x55
@@ -915,7 +937,7 @@ func TestQueryShelleyDebugChainDepState_ReportsPreviousEpochNonce(
 
 	ls := newChainDepStateLedger(t, db)
 
-	result, err := ls.Query(chainDepStateQuery())
+	result, err := ls.Query(chainDepStateQuery(), QueryPoint{})
 	require.NoError(t, err)
 	arr, ok := result.([]any)
 	require.True(t, ok)
@@ -948,6 +970,8 @@ func TestQueryShelleyDebugChainDepState_ReportsPreviousEpochNonce(
 // half of the reply: the operational-certificate counters the chain has
 // accepted, keyed by each pool's cold-key hash.
 func TestQueryShelleyDebugChainDepState_ReportsOpCertCounters(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	poolKeyHash := make([]byte, 28)
 	for i := range poolKeyHash {
@@ -993,7 +1017,7 @@ func TestQueryShelleyDebugChainDepState_ReportsOpCertCounters(t *testing.T) {
 
 	ls := newChainDepStateLedger(t, db)
 
-	result, err := ls.Query(chainDepStateQuery())
+	result, err := ls.Query(chainDepStateQuery(), QueryPoint{})
 	require.NoError(t, err)
 	arr, ok := result.([]any)
 	require.True(t, ok)
@@ -1024,6 +1048,8 @@ func TestQueryShelleyDebugChainDepState_ReportsOpCertCounters(t *testing.T) {
 func TestQueryShelleyDebugChainDepState_CountersOutliveRegistration(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	require.NoError(t, db.SetTip(
 		ochainsync.Tip{Point: ocommon.NewPoint(100, []byte("tip"))},
@@ -1044,7 +1070,7 @@ func TestQueryShelleyDebugChainDepState_CountersOutliveRegistration(
 
 	ls := newChainDepStateLedger(t, db)
 
-	result, err := ls.Query(chainDepStateQuery())
+	result, err := ls.Query(chainDepStateQuery(), QueryPoint{})
 	require.NoError(t, err)
 	arr, ok := result.([]any)
 	require.True(t, ok)
@@ -1067,6 +1093,8 @@ func TestQueryShelleyDebugChainDepState_CountersOutliveRegistration(
 // highest already accepted, so the reply has to carry that highest number
 // rather than whichever row happens to come back first.
 func TestQueryShelleyDebugChainDepState_HighestCounterPerPool(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	require.NoError(t, db.SetTip(
 		ochainsync.Tip{Point: ocommon.NewPoint(100, []byte("tip"))},
@@ -1090,7 +1118,7 @@ func TestQueryShelleyDebugChainDepState_HighestCounterPerPool(t *testing.T) {
 
 	ls := newChainDepStateLedger(t, db)
 
-	result, err := ls.Query(chainDepStateQuery())
+	result, err := ls.Query(chainDepStateQuery(), QueryPoint{})
 	require.NoError(t, err)
 	arr, _ := result.([]any)
 	require.Len(t, arr, 1)

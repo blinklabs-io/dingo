@@ -77,6 +77,8 @@ func (s *publishBlockingProbeSubscriber) Deliver(evt event.Event) error {
 func (s *publishBlockingProbeSubscriber) Close() {}
 
 func TestEventBusSingleSubscriber(t *testing.T) {
+	t.Parallel()
+
 	var testEvtData int = 999
 	var testEvtType event.EventType = "test.event"
 	eb := event.NewEventBus(nil, nil)
@@ -101,6 +103,8 @@ func TestEventBusSingleSubscriber(t *testing.T) {
 }
 
 func TestEventBusMultipleSubscribers(t *testing.T) {
+	t.Parallel()
+
 	var testEvtData int = 999
 	var testEvtType event.EventType = "test.event"
 	eb := event.NewEventBus(nil, nil)
@@ -152,6 +156,8 @@ func TestEventBusMultipleSubscribers(t *testing.T) {
 }
 
 func TestEventBusUnsubscribe(t *testing.T) {
+	t.Parallel()
+
 	var testEvtData int = 999
 	var testEvtType event.EventType = "test.event"
 	eb := event.NewEventBus(nil, nil)
@@ -171,6 +177,8 @@ func TestEventBusUnsubscribe(t *testing.T) {
 }
 
 func TestEventBusStop(t *testing.T) {
+	t.Parallel()
+
 	var testEvtType event.EventType = "test.event"
 	eb := event.NewEventBus(nil, nil)
 
@@ -245,6 +253,8 @@ func TestEventBusStop(t *testing.T) {
 }
 
 func TestEventBusClose(t *testing.T) {
+	t.Parallel()
+
 	var testEvtType event.EventType = "test.close"
 	eb := event.NewEventBus(nil, nil)
 	t.Cleanup(eb.Close)
@@ -295,6 +305,8 @@ func TestEventBusClose(t *testing.T) {
 }
 
 func TestEventBusCloseDiscardsQueuedSubscriberEvents(t *testing.T) {
+	t.Parallel()
+
 	const testEvtType event.EventType = "test.close.discard"
 	eb := event.NewEventBus(nil, nil)
 
@@ -335,6 +347,8 @@ func TestEventBusCloseDiscardsQueuedSubscriberEvents(t *testing.T) {
 }
 
 func TestEventBusUnsubscribePreservesQueuedSubscriberEvents(t *testing.T) {
+	t.Parallel()
+
 	const testEvtType event.EventType = "test.unsubscribe.preserves"
 	eb := event.NewEventBus(nil, nil)
 	// Close, not Stop: NewEventBus starts an async worker unconditionally, and
@@ -384,6 +398,8 @@ func TestEventBusUnsubscribePreservesQueuedSubscriberEvents(t *testing.T) {
 }
 
 func TestUnsubscribeAndWaitContextBoundsTheWait(t *testing.T) {
+	t.Parallel()
+
 	const testEvtType event.EventType = "test.unsubscribe.ctx"
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Close()
@@ -447,6 +463,8 @@ func TestUnsubscribeAndWaitContextBoundsTheWait(t *testing.T) {
 }
 
 func TestUnsubscribeAndWaitContextReturnsNilOnceHandlerFinishes(t *testing.T) {
+	t.Parallel()
+
 	const testEvtType event.EventType = "test.unsubscribe.ctx.ok"
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Close()
@@ -465,6 +483,8 @@ func TestUnsubscribeAndWaitContextReturnsNilOnceHandlerFinishes(t *testing.T) {
 }
 
 func TestSubscribeFuncPanicRecovery(t *testing.T) {
+	t.Parallel()
+
 	var testEvtType event.EventType = "test.panic"
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
@@ -499,6 +519,8 @@ func TestSubscribeFuncPanicRecovery(t *testing.T) {
 // recovered value, and the subscription is torn down so a later publish is
 // not delivered to it.
 func TestSubscribeFuncStrictPanicRecovery(t *testing.T) {
+	t.Parallel()
+
 	var testEvtType event.EventType = "test.strict.panic"
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
@@ -570,6 +592,8 @@ func TestSubscribeFuncStrictPanicRecovery(t *testing.T) {
 // the subscription is still torn down, and the EventBus itself remains
 // usable, even when onPanic panics.
 func TestSubscribeFuncStrictOnPanicHookPanicIsContained(t *testing.T) {
+	t.Parallel()
+
 	var testEvtType event.EventType = "test.strict.onpanic.panic"
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
@@ -629,6 +653,8 @@ func TestSubscribeFuncStrictOnPanicHookPanicIsContained(t *testing.T) {
 // backpressures instead of dropping (#2932), so the subscriber is drained
 // concurrently and the assertion is that repeatedly hitting the full-buffer
 // path spawns no per-event goroutines.
+// Not t.Parallel: runtime.NumGoroutine is a process-wide measurement that
+// concurrent tests perturb.
 func TestPublishNoGoroutineLeak(t *testing.T) {
 	const testEvtType event.EventType = "test.leak"
 	eb := event.NewEventBus(nil, nil)
@@ -691,6 +717,8 @@ func TestPublishNoGoroutineLeak(t *testing.T) {
 // internally, which previously used publishWithTimeout. Since #2932 the async
 // queue backpressures instead of dropping, so the subscriber is drained
 // concurrently.
+// Not t.Parallel: runtime.NumGoroutine is a process-wide measurement that
+// concurrent tests perturb.
 func TestPublishAsyncNoGoroutineLeak(t *testing.T) {
 	const testEvtType event.EventType = "test.async.leak"
 	eb := event.NewEventBus(nil, nil)
@@ -758,6 +786,8 @@ func TestPublishAsyncNoGoroutineLeak(t *testing.T) {
 // blinklabs-io/dingo#2932, which replaced the drop-on-full behavior this test
 // previously asserted.
 func TestPublishBlocksOnFullBufferAndLosesNothing(t *testing.T) {
+	t.Parallel()
+
 	const testEvtType event.EventType = "test.backpressure"
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
@@ -806,6 +836,8 @@ func TestPublishBlocksOnFullBufferAndLosesNothing(t *testing.T) {
 }
 
 func TestPublishBlockingWaitsForSubscriberCapacity(t *testing.T) {
+	t.Parallel()
+
 	const testEvtType event.EventType = "test.blocking"
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
@@ -881,6 +913,8 @@ func TestPublishBlockingWaitsForSubscriberCapacity(t *testing.T) {
 }
 
 func TestPublishBlockingUnblocksOnStop(t *testing.T) {
+	t.Parallel()
+
 	const testEvtType event.EventType = "test.blocking.stop"
 	eb := event.NewEventBus(nil, nil)
 
@@ -916,6 +950,8 @@ func TestPublishBlockingUnblocksOnStop(t *testing.T) {
 func TestPublishBlockingReturnsErrWhenStopCompletesDuringDelivery(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const testEvtType event.EventType = "test.blocking.stop.remote"
 	eb := event.NewEventBus(nil, nil)
 
@@ -963,6 +999,8 @@ func TestPublishBlockingReturnsErrWhenStopCompletesDuringDelivery(
 }
 
 func TestPublishBlockingReturnsErrWhenClosed(t *testing.T) {
+	t.Parallel()
+
 	const testEvtType event.EventType = "test.blocking.closed"
 	eb := event.NewEventBus(nil, nil)
 	eb.Close()
@@ -980,6 +1018,8 @@ func TestPublishBlockingReturnsErrWhenClosed(t *testing.T) {
 // the EventQueueSize allocation. Verified by capacity, since cap on a
 // receive-only channel reports the underlying buffer size.
 func TestSubscribeUsesSmallDefaultBuffer(t *testing.T) {
+	t.Parallel()
+
 	const testEvtType event.EventType = "test.default.buffer"
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()

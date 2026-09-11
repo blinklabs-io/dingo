@@ -20,7 +20,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/blinklabs-io/dingo/internal/config"
 	hostplugin "github.com/blinklabs-io/dingo/plugin"
 )
@@ -29,13 +28,9 @@ import (
 // distinctive sentinel value, alongside non-secret values that must survive
 // redaction.
 func sentinelConfig() (*config.Config, []string) {
-	token := "SENTINEL-API-AUTH-TOKEN"
 	cfg := &config.Config{
 		Network:      "preview",
 		DatabasePath: "/var/lib/dingo",
-		API: config.APIConfig{
-			Auth: apiconfig.AuthPolicy{Token: &token},
-		},
 		KoiosParity: config.KoiosParityConfig{
 			Enabled: true,
 			APIKey:  "SENTINEL-KOIOS-API-KEY",
@@ -59,28 +54,15 @@ func sentinelConfig() (*config.Config, []string) {
 					},
 				},
 			},
-			API: config.APIPluginsConfig{
-				Blockfrost: hostplugin.Selection{
-					Provider: "blockfrost",
-					Config: map[string]any{
-						"auth": map[string]any{
-							"mode":  "token",
-							"token": "SENTINEL-BLOCKFROST-TOKEN",
-						},
-					},
-				},
-			},
 		},
 	}
 	return cfg, []string{
-		"SENTINEL-API-AUTH-TOKEN",
 		"SENTINEL-KOIOS-API-KEY",
 		"SENTINEL-BARK-PASSWORD",
 		"SENTINEL-MITHRIL-KEY",
 		"SENTINEL-PG-PASSWORD",
 		"SENTINEL-DSN-PASSWORD",
 		"SENTINEL-UNKNOWN-PROVIDER-KEY",
-		"SENTINEL-BLOCKFROST-TOKEN",
 	}
 }
 

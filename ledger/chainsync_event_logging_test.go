@@ -54,6 +54,8 @@ func assertLogContains(t *testing.T, buf *bytes.Buffer, wants []string) {
 }
 
 func TestHandleEventChainsync_WarnsOnUnexpectedEventDataType(t *testing.T) {
+	t.Parallel()
+
 	ls, logBuf := newTestLedgerStateWithBuffer()
 	evt := event.Event{
 		Type:      event.EventType("chainsync.test"),
@@ -74,6 +76,8 @@ func TestHandleEventChainsync_WarnsOnUnexpectedEventDataType(t *testing.T) {
 }
 
 func TestHandleEventBlockfetch_WarnsOnUnexpectedEventDataType(t *testing.T) {
+	t.Parallel()
+
 	ls, logBuf := newTestLedgerStateWithBuffer()
 	evt := event.Event{
 		Type:      event.EventType("blockfetch.test"),

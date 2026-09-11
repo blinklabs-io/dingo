@@ -29,6 +29,8 @@ import (
 )
 
 func TestKeepaliveClientResponsePublishesPeerActivity(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	_, evtCh := bus.Subscribe(chainselection.PeerActivityEventType)
 	o := newOuroboros(OuroborosConfig{EventBus: bus})
@@ -62,6 +64,8 @@ func keepaliveTimeoutFor(cfgTimeout time.Duration) time.Duration {
 }
 
 func TestKeepaliveConnOptsTimeout(t *testing.T) {
+	t.Parallel()
+
 	// Unset: gouroboros default (10s) is left in place.
 	assert.Equal(
 		t,

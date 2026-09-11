@@ -34,6 +34,20 @@ import (
 // model-specific error when the public method contract requires one.
 var ErrNotFound = errors.New("metadata not found")
 
+// The interfaces below are the compiled-in metadata provider contract
+// (database/plugin/PLUGIN_DEVELOPMENT.md). A provider maintained outside this
+// repository builds against a pinned module version, so adding a method or a
+// parameter here breaks it at compile time on the version bump that carries
+// the change.
+//
+// That break is the intended behaviour, not an oversight to be smoothed over.
+// Several of these methods feed consensus-visible stake and reward
+// arithmetic, where a provider that silently kept an older, narrower
+// implementation would return an answer that is wrong rather than absent. A
+// runtime capability probe or a defaulted shim would produce exactly that, so
+// changes are made to the interface directly and a provider is required to
+// fail the build until it implements them.
+
 // LifecycleStore is the narrow lifecycle capability used by composition code.
 type LifecycleStore interface {
 	// Close closes the metadata store and releases all resources.
@@ -518,6 +532,33 @@ type GovernanceStore interface {
 		types.Txn,
 	) (uint64, error)
 
+	// GetDrepLastRegistrationDeposit returns the deposit amount recorded
+	// against the most recent registration certificate for the DRep
+	// credential, or 0 when no registration certificate history exists.
+	// The live drep row does not carry a deposit amount (registration and
+	// deregistration certificates supply/refund it, but nothing persists
+	// it on the current-state row), so deregistration-refund validation
+	// must read it from the registration_drep history instead.
+	GetDrepLastRegistrationDeposit(
+		uint8, // credentialTag
+		[]byte, // credential
+		types.Txn,
+	) (*uint64, error)
+
+	// GetDrepLastRegistrationDeposits is the set form of
+	// GetDrepLastRegistrationDeposit over the active DRep set: it returns
+	// the most recent registration deposit of every DRep GetActiveDreps
+	// reports, keyed by models.DrepDepositKey. Credentials with no
+	// registration_drep row are absent from the map, which reads back as
+	// the same 0 the singular form returns. Restricting it to the active
+	// set matches the callers, which are all listing exactly that set, and
+	// keeps the scan from growing with the registration history of DReps
+	// that have since deregistered. Listing them one at a time otherwise
+	// costs one query per DRep.
+	GetDrepLastRegistrationDeposits(
+		types.Txn,
+	) (map[string]uint64, error)
+
 	// CreateDrep inserts a Drep row directly. Used by callers (e.g.
 	// fixture seeding from outside the plugin packages) that already
 	// have a fully-populated model and want a single-row insert without
@@ -578,6 +619,28 @@ type UtxoStore interface {
 		types.Txn,
 	) ([]models.Utxo, error)
 
+	// GetUtxosByRefsAsOf retrieves the UTxOs matching refs as they stood at
+	// atSlot: a row is included when its AddedSlot is at-or-before atSlot
+	// and it was either never spent (DeletedSlot == 0) or was spent
+	// strictly after atSlot. Refs with no matching row under that
+	// predicate are simply absent from the result, the same as
+	// GetUtxosByRefs.
+	//
+	// Unlike GetUtxosByRefs, "no matching row" is ambiguous once atSlot is
+	// old enough: it means either "genuinely never live at atSlot" or "was
+	// live at atSlot but its spend record has since been hard-deleted by
+	// the periodic stability-window cleanup" (see UtxosDeleteConsumed).
+	// This method has no way to tell the two apart -- callers pinning a
+	// historical point (ledger.Query, blinklabs-io/dingo#382/#1900) must
+	// reject a point older than their own retention floor themselves
+	// before calling this, rather than trust a possibly-incomplete result
+	// here.
+	GetUtxosByRefsAsOf(
+		refs []models.UtxoId,
+		atSlot uint64,
+		txn types.Txn,
+	) ([]models.Utxo, error)
+
 	// DeleteUtxo removes a single unspent transaction output.
 	DeleteUtxo(models.UtxoId, types.Txn) error
 
@@ -609,9 +672,13 @@ type UtxoStore interface {
 	// GetUtxosByAddressWithOrdering). The database layer performs full
 	// exact-address CBOR filtering when ExactAddress is set. An empty
 	// patterns slice returns (nil, nil), matching the coordinated
-	// Database.UtxosByAddress's empty-input handling.
+	// Database.UtxosByAddress's empty-input handling. maxResults is a
+	// required, positive bound on the number of candidate rows returned;
+	// exceeding it yields models.ErrTooManyUtxoResults instead of an
+	// unbounded or silently truncated result.
 	GetUtxosByAddress(
 		[]models.UtxoAddressPattern,
+		int,
 		types.Txn,
 	) ([]models.Utxo, error)
 
@@ -955,6 +1022,7 @@ type TransactionStore interface {
 		lcommon.Transaction,
 		ocommon.Point,
 		uint32, // idx
+		map[int]uint64, // certDeposits; see SetTransaction
 		types.Txn,
 	) error
 
@@ -1097,6 +1165,23 @@ type StakeSnapshotStore interface {
 		uint64, // boundarySlot
 		uint64, // expiryEpoch (0 = gate off)
 		uint64, // inactivityPeriod
+		types.Txn,
+	) ([]*models.RewardStakeInput, error)
+
+	// GetPointerStakeInputsForPools returns the per-credential stake held at a
+	// pointer address for pools in poolKeyHashes, resolved and delegated as of
+	// slot. It is additive: the caller adds it to what
+	// GetLiveStakeInputsForPools returned, because reward_live_stake never
+	// carries pointer-derived UTxO stake -- attribution depends on certificate
+	// history at slot, not on anything the live aggregate's incremental
+	// maintenance can express. boundarySlot is the epoch-boundary era gate
+	// (0 = no boundary; see GetEpochBoundaryStakeByPools), and expiryEpoch
+	// drives the same live CIP-0163 gate GetLiveStakeInputsForPools applies.
+	GetPointerStakeInputsForPools(
+		[][]byte, // poolKeyHashes
+		uint64, // slot
+		uint64, // boundarySlot (0 = no boundary)
+		uint64, // expiryEpoch (0 = gate off)
 		types.Txn,
 	) ([]*models.RewardStakeInput, error)
 
@@ -2278,7 +2363,10 @@ type MetadataStore interface {
 	// SaveImportedPoolBlockCounts records the per-pool block counts a bootstrap
 	// snapshot carries for one epoch, which is the only source of pool
 	// performance for an epoch that ended below the trust anchor.
-	SaveImportedPoolBlockCounts([]models.ImportedPoolBlockCount, types.Txn) error
+	SaveImportedPoolBlockCounts(
+		[]models.ImportedPoolBlockCount,
+		types.Txn,
+	) error
 
 	// SaveImportedEpochBlockTotal records that an epoch's block counts came
 	// from a bootstrap snapshot and the total its per-pool rows sum to. It is
@@ -2400,6 +2488,12 @@ type MetadataStore interface {
 
 	// GetNetworkState retrieves the most recent network state.
 	GetNetworkState(types.Txn) (*models.NetworkState, error)
+
+	// GetNetworkStateAsOfSlot retrieves the most recent network state
+	// recorded at or before the given slot, for a historical
+	// GetStakeDistribution answer (blinklabs-io/dingo#382) rather than
+	// GetNetworkState's always-latest row.
+	GetNetworkStateAsOfSlot(uint64, types.Txn) (*models.NetworkState, error)
 
 	// DeleteNetworkStateAfterSlot removes network state records
 	// added after the given slot. This is used during chain
