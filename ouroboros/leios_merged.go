@@ -183,7 +183,11 @@ func (o *Ouroboros) registerLeiosNotifyServeWaiter(
 ) (done <-chan struct{}, cancel func()) {
 	if o.connManager != nil && o.connManager.GetConnectionById(connId) == nil {
 		o.leiosServeWaitersMu.Lock()
-		alreadyReleased := o.leiosServeWaitersReleased[connId]
+		releasedAt, alreadyReleased := o.leiosServeWaitersReleased[connId]
+		if alreadyReleased && time.Since(releasedAt) >= time.Minute {
+			delete(o.leiosServeWaitersReleased, connId)
+			alreadyReleased = false
+		}
 		o.leiosServeWaitersMu.Unlock()
 		if alreadyReleased {
 			done := make(chan struct{})
@@ -241,9 +245,15 @@ func (o *Ouroboros) ReleaseLeiosServeWaiters(
 ) {
 	o.leiosServeWaitersMu.Lock()
 	if o.leiosServeWaitersReleased == nil {
-		o.leiosServeWaitersReleased = make(map[ouroboros.ConnectionId]bool)
+		o.leiosServeWaitersReleased = make(map[ouroboros.ConnectionId]time.Time)
 	}
-	o.leiosServeWaitersReleased[connId] = true
+	now := time.Now()
+	for id, releasedAt := range o.leiosServeWaitersReleased {
+		if now.Sub(releasedAt) >= time.Minute {
+			delete(o.leiosServeWaitersReleased, id)
+		}
+	}
+	o.leiosServeWaitersReleased[connId] = now
 	waiters := o.leiosServeWaiters[connId]
 	delete(o.leiosServeWaiters, connId)
 	o.leiosServeWaitersMu.Unlock()

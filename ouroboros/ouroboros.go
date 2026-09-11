@@ -182,7 +182,7 @@ type Ouroboros struct {
 	// signal has to come from connmanager's per-connection ErrorChan watcher
 	// instead (see ReleaseLeiosServeWaiters).
 	leiosServeWaiters         map[ouroboros.ConnectionId][]chan struct{}
-	leiosServeWaitersReleased map[ouroboros.ConnectionId]bool
+	leiosServeWaitersReleased map[ouroboros.ConnectionId]time.Time
 	leiosServeWaitersMu       sync.Mutex
 	// NtC CertRB closure-resolution metrics.
 	leiosMetrics *leiosMetrics
