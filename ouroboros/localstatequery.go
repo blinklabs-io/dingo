@@ -33,6 +33,28 @@ func (o *Ouroboros) localstatequeryServerConnOpts() []olocalstatequery.LocalStat
 		olocalstatequery.WithReleaseFunc(
 			o.instrumentLocalstatequeryRelease(o.localstatequeryServerRelease),
 		),
+		// WithMuxerSegmentReadTimeout(0) (ConfigureListeners) only removes
+		// the transport-level cap; LocalStateQuery's client-side protocol
+		// also carries its own, separate 180s per-query state-transition
+		// timer (QueryTimeout) that fires the same way once a query
+		// outlives it -- confirmed live against a real Preview node's
+		// whole-UTxO query, which the mux fix alone still let get torn
+		// down (ErrProtocolShuttingDown) at almost exactly 180s. Disabled
+		// for the same reason as the mux timeout: LocalStateQuery has no
+		// protocol-level timeout at all (Ouroboros Network Specification
+		// section 3.13.4), and NtC is a trusted channel where a
+		// slow-but-legitimate reply must not be killed either
+		// (blinklabs-io/dingo#4082).
+		//
+		// MaxReadBufferSize likewise overrides gouroboros' default 16MB
+		// cap on a reassembled multi-segment reply: confirmed live that a
+		// real Preview-scale whole-UTxO-set reply exceeds 512MiB. 2GiB
+		// gives headroom for further chain growth without removing the
+		// cap outright -- unlike the two timeouts above, an unbounded
+		// buffer here is a real unbounded memory-growth risk, not just an
+		// unnecessary wait.
+		olocalstatequery.WithQueryTimeout(0),
+		olocalstatequery.WithMaxReadBufferSize(2 << 30),
 	}
 }
 
