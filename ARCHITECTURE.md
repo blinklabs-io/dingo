@@ -6138,8 +6138,16 @@ when `Stop` returns, and the address is rebindable afterwards.
 
 ### Blockfrost API (`api/blockfrost/`)
 
-TLS is configured through `plugins.api.blockfrost.config.tls`; see "API
-security" above.
+Blockfrost submission and both evaluation endpoints bound request body reads
+by their existing byte limits and a 15-second read deadline. The deadline is
+cleared after a successful read, before transaction processing; stalled or
+truncated bodies retain the existing HTTP 400 response. The HTTP listener also
+sets a 60-second read timeout as a backstop, independently of its header,
+write, and idle timeouts.
+
+TLS and token authentication (including the `project_id` header alias) are
+configured through `plugins.api.blockfrost.config.tls`/`config.auth`; see
+"API security" above.
 
 A Blockfrost-compatible REST API that provides read access to chain data,
 transaction evaluation, and transaction submission. Transaction evaluation is
