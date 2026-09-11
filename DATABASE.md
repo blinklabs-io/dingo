@@ -1063,18 +1063,32 @@ leader-threshold rejection.
 Every epoch transition runs `cleanupOldSnapshots`, which prunes to the four
 epochs the Shelley rotation and delayed reward model need: current, current-1,
 current-2 for Go, and current-3 so reward calculation can be replayed after a
-rollback across the boundary where those rewards were applied. Retention is not
-operator-configurable, and it only ever deletes rows below that window (but see
-the deferred-header retention pin below, which can hold `pool_stake_snapshot`
-rows longer).
+rollback across the boundary where those rewards were applied. It only ever
+deletes rows below that window (but see the deferred-header retention pin
+below, which can hold `pool_stake_snapshot` rows longer).
+
+`reward_account_output` is the one exception to "not operator/config
+configurable": it is retained WITHOUT BOUND, instead of pruned to the window
+below, whenever the database is in API storage mode (`types.StorageModeAPI`,
+issue #1875, so the Blockfrost account reward-history endpoint can serve an
+account's full history) or the in-process Koios parity observer is enabled
+(`Manager.SetRewardAccountOutputRetentionUnbounded`, wired from
+`KoiosParityConfig.Enabled` in `node.go`/`node_lifecycle.go`, issue #4188). The
+observer validates a closed epoch only after fetching and comparing against
+Koios over the network, which can fall arbitrarily far behind chain
+progression during a from-genesis or catch-up sync — well past the fixed
+4-epoch window — so without this a checked epoch's `reward_account_output`
+rows are routinely gone before the observer ever reads them.
+`reward_stake_input` is pruned to the window in every case, including both of
+the above.
 
 Pruned at `epoch < current-3`:
 
 | Table | Scales with | Pruned by |
 |---|---|---|
 | `pool_stake_snapshot` | pools per epoch | `DeletePoolStakeSnapshotsBeforeEpoch` |
-| `reward_stake_input` | delegators per epoch | `DeleteRewardStateBeforeEpoch` |
-| `reward_account_output` | delegators per epoch | `DeleteRewardStateBeforeEpoch` |
+| `reward_stake_input` | delegators per epoch | `DeleteRewardStateBeforeEpoch` / `DeleteRewardStakeInputBeforeEpoch` |
+| `reward_account_output` | delegators per epoch | `DeleteRewardStateBeforeEpoch` (CORE mode, observer disabled only) |
 
 Retained for the life of the database: `epoch`, `epoch_summary`,
 `reward_ada_pots`, `reward_snapshot`, `reward_seed_failure`,
