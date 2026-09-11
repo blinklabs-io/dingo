@@ -250,7 +250,7 @@ func TestPruneAccountCoverageBoundsCheckpointRows(t *testing.T) {
 	require.Empty(t, CompareAccountEpoch(
 		"preview", oldEpoch, oldRows,
 		[]DingoAccountReward{{StakeAddress: "stake1reward", RewardType: "member", Amount: "42"}},
-		now, 0, time.Time{},
+		now, 0, time.Time{}, false,
 	))
 }
 

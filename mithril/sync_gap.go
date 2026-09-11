@@ -518,7 +518,11 @@ func processGapBlocks(
 	if err != nil {
 		return fmt.Errorf("loading epochs for gap blocks: %w", err)
 	}
-	conwayPParamsCache := make(map[uint64]*conway.ConwayProtocolParameters)
+	// Protocol parameters per epoch, loaded once per gap and reused across
+	// its blocks. They serve two consumers: Conway governance processing
+	// needs the Conway-typed record, and certificate deposits are derived
+	// from them for every era that has a CertDepositFunc.
+	pparamsCache := make(map[uint64]lcommon.ProtocolParameters)
 	for _, block := range blocks {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("cancelled: %w", err)
@@ -562,14 +566,17 @@ func processGapBlocks(
 				err,
 			)
 		}
-		blockConwayPParams := (*conway.ConwayProtocolParameters)(nil)
-		if epoch.EraId == conway.EraIdConway {
-			cached, ok := conwayPParamsCache[epoch.EpochId]
-			if !ok {
+		blockPParams, cached := pparamsCache[epoch.EpochId]
+		if !cached {
+			// Byron has no protocol-parameter record and no decode
+			// function; leaving blockPParams nil is correct there, and
+			// it also carries no deposit-bearing certificates.
+			if era := eras.GetEraById(epoch.EraId); era != nil &&
+				era.DecodePParamsFunc != nil {
 				pparams, err := db.GetPParams(
 					epoch.EpochId,
-					eras.ConwayEraDesc.Id,
-					eras.ConwayEraDesc.DecodePParamsFunc,
+					era.Id,
+					era.DecodePParamsFunc,
 					nil,
 				)
 				if err != nil {
@@ -580,27 +587,32 @@ func processGapBlocks(
 						err,
 					)
 				}
-				if pparams != nil {
-					cached, ok = pparams.(*conway.ConwayProtocolParameters)
-					if !ok {
-						return fmt.Errorf(
-							"unexpected protocol params %T for gap block at slot %d (epoch %d)",
-							pparams,
-							block.Slot,
-							epoch.EpochId,
-						)
-					}
-				}
-				conwayPParamsCache[epoch.EpochId] = cached
+				blockPParams = pparams
 			}
-			blockConwayPParams = cached
+			pparamsCache[epoch.EpochId] = blockPParams
+		}
+		blockConwayPParams := (*conway.ConwayProtocolParameters)(nil)
+		if epoch.EraId == conway.EraIdConway && blockPParams != nil {
+			conwayPParams, ok := blockPParams.(*conway.ConwayProtocolParameters)
+			if !ok {
+				return fmt.Errorf(
+					"unexpected protocol params %T for gap block at slot %d (epoch %d)",
+					blockPParams,
+					block.Slot,
+					epoch.EpochId,
+				)
+			}
+			blockConwayPParams = conwayPParams
 		}
 		if err := processGapBlockTransactions(
 			db,
+			logger,
 			point,
 			txs,
 			offsets,
 			epoch.EpochId,
+			epoch.EraId,
+			blockPParams,
 			blockConwayPParams,
 		); err != nil {
 			return fmt.Errorf(
@@ -620,10 +632,13 @@ func processGapBlocks(
 
 func processGapBlockTransactions(
 	db *database.Database,
+	logger *slog.Logger,
 	point ocommon.Point,
 	txs []lcommon.Transaction,
 	offsets *database.BlockIngestionResult,
 	epochId uint64,
+	eraId uint,
+	pparams lcommon.ProtocolParameters,
 	conwayPParams *conway.ConwayProtocolParameters,
 ) error {
 	txn := db.Transaction(true)
@@ -636,6 +651,7 @@ func processGapBlockTransactions(
 			tx,
 			point,
 			uint32(i), // #nosec G115 -- tx index within a block
+			gapCertDeposits(logger, tx, point, eraId, pparams),
 			offsets,
 			txn,
 		); err != nil {
@@ -685,6 +701,63 @@ func processGapBlockTransactions(
 		return fmt.Errorf("commit transaction: %w", err)
 	}
 	return nil
+}
+
+// gapCertDeposits calculates the deposit each of a gap block transaction's
+// certificates paid, keyed by the certificate's index within the transaction.
+//
+// A gap block is replayed from raw CBOR with no ledger delta, so nothing
+// upstream has calculated these. They are still derivable: processGapBlocks
+// resolves the block's epoch and era and loads that epoch's protocol
+// parameters, which is everything eras.CertDepositFunc needs.
+//
+// Deriving them matters because the deposit is recorded on the certificate row
+// and read back much later: GetPoolsRetiringAtEpoch takes a retiring pool's
+// latest pool_registration row, and applyPoolRetirements credits that amount as
+// the refund. A pool that re-registered inside a Mithril gap has its gap row as
+// the latest one, so without this the refund is whatever an absent deposit
+// reads back as -- zero -- rather than the deposit actually paid.
+//
+// A certificate whose deposit cannot be derived is left out of the map rather
+// than defaulted to zero, and SetGapBlockTransaction records NULL for it. Byron
+// (no CertDepositFunc) and an epoch with no stored protocol parameters return
+// an empty map for the same reason.
+func gapCertDeposits(
+	logger *slog.Logger,
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	eraId uint,
+	pparams lcommon.ProtocolParameters,
+) map[int]uint64 {
+	certs := tx.Certificates()
+	if len(certs) == 0 || pparams == nil {
+		return nil
+	}
+	era := eras.GetEraById(eraId)
+	if era == nil || era.CertDepositFunc == nil {
+		return nil
+	}
+	deposits := make(map[int]uint64, len(certs))
+	for i, cert := range certs {
+		deposit, err := era.CertDepositFunc(cert, pparams)
+		if err != nil {
+			// Mirrors the backfill path: a certificate the era cannot
+			// price is skipped rather than failing the gap, which would
+			// stall a sync over a block the network accepted.
+			if !errors.Is(err, eras.ErrIncompatibleProtocolParams) {
+				logger.Debug(
+					"gap certificate deposit calculation failed",
+					"component", "mithril",
+					"slot", point.Slot,
+					"cert_index", i,
+					"error", err,
+				)
+			}
+			continue
+		}
+		deposits[i] = deposit
+	}
+	return deposits
 }
 
 // gapBlockEpoch resolves the epoch containing slot from a slice of

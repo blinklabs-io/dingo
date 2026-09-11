@@ -378,7 +378,7 @@ func TestQueryShelleyCurrentProtocolParams_OmitsSyntheticV2CostModel(
 	ls.syntheticV2CostModel = true
 	ls.publishSnapshotsLocked()
 
-	result, err := ls.Query(protocolParamsQuery())
+	result, err := ls.Query(protocolParamsQuery(), QueryPoint{})
 	require.NoError(t, err)
 
 	arr, ok := result.([]any)
@@ -436,7 +436,7 @@ func TestQueryShelleyCurrentProtocolParams_IncludesRealV2CostModel(
 	ls.syntheticV2CostModel = false
 	ls.publishSnapshotsLocked()
 
-	result, err := ls.Query(protocolParamsQuery())
+	result, err := ls.Query(protocolParamsQuery(), QueryPoint{})
 	require.NoError(t, err)
 
 	arr, ok := result.([]any)

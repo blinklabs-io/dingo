@@ -35,7 +35,7 @@ import (
 
 // BindAttempts bounds how many ports a test tries before giving up when
 // racing another process for a loopback port (see FreePort). Shared by
-// every built-in API provider's TLS/auth test suite (Blockfrost, Mesh,
+// every built-in API provider's TLS test suite (Blockfrost, Mesh,
 // UTxO RPC).
 const BindAttempts = 8
 

@@ -257,6 +257,7 @@ func TestLedgerProcessBlockDijkstraValidityOutcomeStateTransitions(
 						pparams,
 						nil,
 						0,
+						false,
 					)
 					return err
 				})
@@ -417,6 +418,7 @@ func TestLedgerProcessBlockHistoricalValidationRunsPhase2(t *testing.T) {
 						pparams,
 						nil,
 						0,
+						false,
 					)
 					return err
 				})
@@ -510,6 +512,7 @@ func TestLedgerProcessBlockEnforcesTransactionValidationOutcomes(
 					nil,
 					nil,
 					0,
+					false,
 				)
 				return err
 			})

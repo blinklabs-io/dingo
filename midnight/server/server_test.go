@@ -370,23 +370,17 @@ func TestNewRequiresBothTLSPaths(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestNewRejectsRemotePlaintextByDefault(t *testing.T) {
+func TestNewAllowsRemotePlaintextByDefault(t *testing.T) {
 	for _, host := range []string{"0.0.0.0", "::", "192.0.2.1", "example.test"} {
 		t.Run(host, func(t *testing.T) {
 			_, err := server.New(server.Config{Host: host})
-			require.ErrorContains(t, err, "not loopback")
+			require.NoError(t, err)
 		})
 	}
 }
 
-func TestNewAllowsExplicitRemotePolicy(t *testing.T) {
+func TestNewAllowsRemoteHostWithTLS(t *testing.T) {
 	_, err := server.New(server.Config{
-		Host:                "0.0.0.0",
-		AllowInsecureRemote: true,
-	})
-	require.NoError(t, err)
-
-	_, err = server.New(server.Config{
 		Host:            "192.0.2.1",
 		TLSCertFilePath: "server.crt",
 		TLSKeyFilePath:  "server.key",

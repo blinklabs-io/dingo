@@ -358,14 +358,12 @@ func (n *Node) initBlockForger(
 		)
 	}
 
-	// Wire self-validation when the operator opts in. The validator runs
-	// header crypto, body-hash, and per-tx ledger checks before AddBlock.
-	var blockValidator forging.BlockValidator
-	if n.config.validateForgedBlock {
-		blockValidator = &forgedBlockValidatorAdapter{
-			ledgerState: n.ledgerState,
-		}
-	}
+	// Always enforce aggregate reference-script limits before AddBlock.
+	// Header crypto and per-transaction self-validation remain opt-in.
+	blockValidator := newForgedBlockValidator(
+		n.ledgerState,
+		n.config.validateForgedBlock,
+	)
 
 	// Create the block forger with the real leader election
 	forger, err := forging.NewBlockForger(forging.ForgerConfig{
@@ -876,13 +874,32 @@ func (a *leiosPipelineAdapter) ParentLeiosAnnouncement() (
 // forging.BlockValidator so the forger can self-validate blocks before
 // adoption without importing the ledger package from within forging.
 type forgedBlockValidatorAdapter struct {
-	ledgerState *ledger.LedgerState
+	ledgerState    forgedBlockValidationState
+	fullValidation bool
+}
+
+type forgedBlockValidationState interface {
+	ValidateForgedBlock(gledger.Block, []byte) error
+	ValidateBlockReferenceScripts(gledger.Block) error
+}
+
+func newForgedBlockValidator(
+	state forgedBlockValidationState,
+	fullValidation bool,
+) forging.BlockValidator {
+	return &forgedBlockValidatorAdapter{
+		ledgerState:    state,
+		fullValidation: fullValidation,
+	}
 }
 
 func (a *forgedBlockValidatorAdapter) ValidateForgedBlock(
 	block gledger.Block,
 	blockCbor []byte,
 ) error {
+	if !a.fullValidation {
+		return a.ledgerState.ValidateBlockReferenceScripts(block)
+	}
 	return a.ledgerState.ValidateForgedBlock(block, blockCbor)
 }
 
