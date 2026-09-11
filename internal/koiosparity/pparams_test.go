@@ -1251,6 +1251,110 @@ func TestCompareEpochProtocolParamsRealV2CostModelAheadOfKoiosStillFails(t *test
 	require.Equal(t, 1, CountSignificant(got))
 }
 
+// TestCompareEpochProtocolParamsSyntheticDowngradeIsNarrow pins the two
+// bounds on #4127's downgrade, which are what keep it from widening into a
+// suppression of real divergences while SyntheticV2CostModel is true:
+//
+//   - It applies to PlutusV2 only. During the synthetic window Dingo also
+//     prices PlutusV1, so a language guard that classified by the flag alone
+//     would downgrade a genuine one-sided PlutusV1 (or a future PlutusV3)
+//     model in the same epoch, and a wedge-class divergence would stop
+//     failing the epoch.
+//   - It applies to a Koios-side absence only. When Koios prices PlutusV2
+//     too, the two sides disagree about a model both hold, which the flag
+//     says nothing about — the length and entry branches stay
+//     value_mismatch/FAIL.
+//
+// Discriminates: dropping the `language == "PlutusV2"` condition, or moving
+// the classification out of the `!inKoios` branch, turns a FAIL here into a
+// PASS.
+func TestCompareEpochProtocolParamsSyntheticDowngradeIsNarrow(t *testing.T) {
+	t.Parallel()
+
+	models := costModelFixture(t)
+	realV2 := append([]int64{}, eras.DefaultPlutusV2CostModel...)
+	realV2[0]++ // provably not the fabricated default
+
+	t.Run("only PlutusV2 is downgraded", func(t *testing.T) {
+		t.Parallel()
+
+		dingo := dingoPParamsPreview380()
+		dingo.CostModels = map[string][]int64{
+			"PlutusV1": models["PlutusV1"],
+			"PlutusV2": eras.DefaultPlutusV2CostModel,
+			"PlutusV3": models["PlutusV2"],
+		}
+		dingo.SyntheticV2CostModel = true
+		koios := koiosPParamsPreview380()
+		koios.CostModels = ""
+
+		got := CompareEpochProtocolParams(
+			"preview", 5, koios, dingo, nil, time.Now(), 0, time.Time{},
+		)
+		require.Len(t, got, 3)
+		byField := map[string]string{}
+		for _, m := range got {
+			byField[m.Field] = m.Category
+		}
+		require.Equal(t, map[string]string{
+			"pparams_cost_model_plutus_v1": CategoryValueMismatch,
+			"pparams_cost_model_plutus_v2": CategoryCostModelSynthetic,
+			"pparams_cost_model_plutus_v3": CategoryValueMismatch,
+		}, byField)
+		require.Equal(t, StatusFail, DetermineStatus(got))
+		require.Equal(t, 2, CountSignificant(got))
+	})
+
+	t.Run("a PlutusV2 entry difference still fails", func(t *testing.T) {
+		t.Parallel()
+
+		dingo := dingoPParamsPreview380()
+		dingo.CostModels = map[string][]int64{
+			"PlutusV2": eras.DefaultPlutusV2CostModel,
+		}
+		dingo.SyntheticV2CostModel = true
+		koios := koiosPParamsPreview380()
+		koios.CostModels = koiosCostModelsJSON(
+			t, map[string][]int64{"PlutusV2": realV2},
+		)
+
+		got := CompareEpochProtocolParams(
+			"preview", 5, koios, dingo, nil, time.Now(), 0, time.Time{},
+		)
+		require.Len(t, got, 1)
+		require.Equal(t, "pparams_cost_model_plutus_v2", got[0].Field)
+		require.Equal(t, CategoryValueMismatch, got[0].Category)
+		require.Equal(t, StatusFail, DetermineStatus(got))
+		require.Equal(t, 1, CountSignificant(got))
+	})
+
+	t.Run("a PlutusV2 length difference still fails", func(t *testing.T) {
+		t.Parallel()
+
+		dingo := dingoPParamsPreview380()
+		dingo.CostModels = map[string][]int64{
+			"PlutusV2": eras.DefaultPlutusV2CostModel,
+		}
+		dingo.SyntheticV2CostModel = true
+		koios := koiosPParamsPreview380()
+		koios.CostModels = koiosCostModelsJSON(
+			t,
+			map[string][]int64{
+				"PlutusV2": eras.DefaultPlutusV2CostModel[:10],
+			},
+		)
+
+		got := CompareEpochProtocolParams(
+			"preview", 5, koios, dingo, nil, time.Now(), 0, time.Time{},
+		)
+		require.Len(t, got, 1)
+		require.Equal(t, "pparams_cost_model_plutus_v2", got[0].Field)
+		require.Equal(t, CategoryValueMismatch, got[0].Category)
+		require.Equal(t, StatusFail, DetermineStatus(got))
+		require.Equal(t, 1, CountSignificant(got))
+	})
+}
+
 // TestDingoDBGetProtocolParamsMarksSyntheticV2CostModel is the DB-layer half
 // of #4127's regression, using the exact shape the issue reported: a real
 // preview Babbage pparams row (pparams_preview_epoch2_babbage.hex) whose
