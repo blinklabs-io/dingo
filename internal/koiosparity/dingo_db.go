@@ -273,6 +273,71 @@ func (d *DingoDB) GetLatestEpoch(ctx context.Context) (uint64, error) {
 	), nil
 }
 
+// mithrilLedgerSlotSyncKey mirrors the sync-state key mithril/sync_import.go
+// writes at import time (also duplicated at the database-package level in
+// database/transaction.go, for the same reason noted there: DingoDB reads a
+// separate raw SQL connection with no dependency on either the ledger or
+// database packages).
+const mithrilLedgerSlotSyncKey = "mithril_ledger_slot"
+
+// GetEarliestAvailableEpoch implements RewardParitySource by resolving the
+// standalone connection's own Mithril bootstrap boundary from its
+// sync_state/epoch tables into the first Koios reporting epoch this Dingo
+// database could plausibly have genuinely computed local reward state for
+// — see DatabaseSource.GetEarliestAvailableEpoch's doc comment for the
+// derivation and dingo #4172 for why this is needed at all. ctx is forwarded
+// to the DB driver so a cancelled context aborts the query.
+func (d *DingoDB) GetEarliestAvailableEpoch(
+	ctx context.Context,
+) (uint64, bool, error) {
+	var val sql.NullString
+	err := d.queryRow(
+		ctx,
+		`SELECT value FROM sync_state WHERE sync_key = ?`,
+		mithrilLedgerSlotSyncKey,
+	).Scan(&val)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, false, nil
+		}
+		return 0, false, fmt.Errorf("read mithril trust boundary: %w", err)
+	}
+	if !val.Valid || val.String == "" {
+		return 0, false, nil
+	}
+	slot, err := strconv.ParseUint(val.String, 10, 64)
+	if err != nil {
+		return 0, false, fmt.Errorf(
+			"parse mithril trust boundary %q: %w",
+			val.String,
+			err,
+		)
+	}
+	if slot == 0 {
+		return 0, false, nil
+	}
+	var epochID sql.NullInt64
+	err = d.queryRow(
+		ctx,
+		`SELECT epoch_id FROM epoch WHERE start_slot <= ? ORDER BY start_slot DESC LIMIT 1`,
+		slot,
+	).Scan(&epochID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, false, nil
+		}
+		return 0, false, fmt.Errorf(
+			"resolve epoch for mithril boundary slot %d: %w",
+			slot,
+			err,
+		)
+	}
+	if !epochID.Valid {
+		return 0, false, nil
+	}
+	return uint64(epochID.Int64) + 1, true, nil //nolint:gosec // epoch values are non-negative
+}
+
 // GetEpochData returns epoch-level aggregates for the given epoch.
 // Returns nil, nil when Dingo has not yet recorded an epoch_summary row.
 // ctx is forwarded to the DB driver so that a cancelled context aborts the query.

@@ -7071,16 +7071,33 @@ second sync:
   guarantees network I/O only ever starts once the transaction that produced
   the event has already committed — never while holding the ledger write
   transaction or lock.
-  - **Backlog and checkpointing.** `Start` seeds the pending set from every
-    epoch the cache (`cache.db`) has not yet fetched/checked, up to
-    `Source.GetLatestEpoch() - 1` (a floor derived from Dingo's own current
-    epoch number, not an exact koios-epoch bound — good enough for a
-    one-time historical backfill on first attach, since anything it
-    undershoots by a small margin is still covered by the live event
-    subscription going forward). No separate checkpoint file exists: the
-    cache's own persisted `check_epoch_status`/`koios_epoch_info` rows are
-    the sole resumable state, matching the issue's "persist only the minimal
-    resumable checkpoint state actually needed."
+  - **Backlog and checkpointing.** `Start` (via the factored-out
+    `seedBacklog`) seeds the pending set from every epoch the cache
+    (`cache.db`) has not yet fetched/checked, in
+    `[max(preStakingThroughEpoch+1, Source.GetEarliestAvailableEpoch()),
+    Source.GetLatestEpoch() - 1]` (the upper bound is a floor derived from
+    Dingo's own current epoch number, not an exact koios-epoch bound — good
+    enough for a one-time historical backfill on first attach, since
+    anything it undershoots by a small margin is still covered by the live
+    event subscription going forward). No separate checkpoint file exists:
+    the cache's own persisted `check_epoch_status`/`koios_epoch_info` rows
+    are the sole resumable state, matching the issue's "persist only the
+    minimal resumable checkpoint state actually needed."
+  - **Mithril bootstrap boundary (dingo #4172).** A Mithril-bootstrapped
+    node has no ledger history before its own bootstrap boundary by
+    construction, so every epoch through that boundary is in the same
+    position as the protocol-wide `preStakingThroughEpoch` floor — no local
+    reward-calculation state exists to compare, regardless of whether Koios
+    (full protocol history) has real reference data for it.
+    `RewardParitySource.GetEarliestAvailableEpoch` surfaces this boundary
+    (derived from the same `mithril_ledger_slot` sync-state key
+    `ledger.LedgerState.loadMithrilTrustBoundary` reads, resolved to an
+    epoch via `Database.GetEpochBySlot`); `ok` is false for a non-Mithril,
+    genesis-synced node, leaving `seedBacklog` and `checkEpoch` unchanged
+    from before this existed. `checkEpoch` applies the same bound directly
+    (independent of whether an epoch was ever seeded), so a standalone
+    `Check` run against an already-fetched cache is covered too, not just
+    the in-process observer's own backlog seeding.
   - **Rapid transitions, replay, and rollback.** Pending epochs are a *set*,
     not a single high-water-mark counter, so a burst of events collapses
     duplicates (dingo's own block-based and slot-clock-based epoch.transition

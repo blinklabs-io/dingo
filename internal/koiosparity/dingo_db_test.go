@@ -550,3 +550,43 @@ func TestGetPoolEpochDataMapSpendableMemberAbsentWhenEpochPruned(t *testing.T) {
 	assert.False(t, data.SpendableMemberRewardPresent)
 	assert.Equal(t, "500", data.MemberRewardTotal)
 }
+
+// TestDingoDBGetEarliestAvailableEpochNoBoundary covers a non-Mithril,
+// genesis-synced database: no mithril_ledger_slot row was ever written, so
+// ok must be false and callers must apply no lower bound beyond
+// preStakingThroughEpoch (dingo #4172).
+func TestDingoDBGetEarliestAvailableEpochNoBoundary(t *testing.T) {
+	t.Parallel()
+
+	db, _ := openTestDingoDB(t)
+
+	epoch, ok, err := db.GetEarliestAvailableEpoch(context.Background())
+	require.NoError(t, err)
+	require.False(t, ok)
+	require.Zero(t, epoch)
+}
+
+// TestDingoDBGetEarliestAvailableEpochResolvesBoundaryEpoch seeds a Mithril
+// bootstrap boundary at slot 1_000, inside epoch 10, and confirms
+// GetEarliestAvailableEpoch resolves it to epoch 11 — one past the boundary
+// epoch, since that epoch (and everything before it) was inherited from the
+// Mithril snapshot rather than computed locally.
+func TestDingoDBGetEarliestAvailableEpochResolvesBoundaryEpoch(t *testing.T) {
+	t.Parallel()
+
+	db, gdb := openTestDingoDB(t)
+
+	require.NoError(t, gdb.Exec(
+		`INSERT INTO epoch (epoch_id, start_slot) VALUES (?, ?)`,
+		10, 1_000,
+	).Error)
+	require.NoError(t, gdb.Exec(
+		`INSERT INTO sync_state (sync_key, value) VALUES (?, ?)`,
+		mithrilLedgerSlotSyncKey, "1000",
+	).Error)
+
+	epoch, ok, err := db.GetEarliestAvailableEpoch(context.Background())
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, uint64(11), epoch)
+}

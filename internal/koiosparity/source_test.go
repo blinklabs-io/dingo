@@ -870,3 +870,46 @@ func TestGetPoolsRetiredByEpochImplementationsAgree(t *testing.T) {
 		"the two RewardParitySource implementations must not drift",
 	)
 }
+
+// TestDatabaseSourceGetEarliestAvailableEpochNoBoundary covers a
+// non-Mithril, genesis-synced database: no mithril_ledger_slot sync-state
+// row was ever written, so ok must be false and callers must apply no lower
+// bound beyond preStakingThroughEpoch (dingo #4172).
+func TestDatabaseSourceGetEarliestAvailableEpochNoBoundary(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDatabaseSourceDB(t)
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+
+	epoch, ok, err := source.GetEarliestAvailableEpoch(context.Background())
+	require.NoError(t, err)
+	require.False(t, ok)
+	require.Zero(t, epoch)
+}
+
+// TestDatabaseSourceGetEarliestAvailableEpochResolvesBoundaryEpoch seeds a
+// Mithril bootstrap boundary at slot 1_000, inside epoch 10 (the same
+// mithril_ledger_slot sync-state key mithril/sync_import.go writes, and the
+// same epoch table ledger.LedgerState.SlotToEpoch/database.GetEpochBySlot
+// already resolve slots against), and confirms GetEarliestAvailableEpoch
+// resolves it to epoch 11 -- one past the boundary epoch, since that epoch
+// (and everything before it) was inherited from the Mithril snapshot rather
+// than computed locally.
+func TestDatabaseSourceGetEarliestAvailableEpochResolvesBoundaryEpoch(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDatabaseSourceDB(t)
+	require.NoError(t, db.SetEpoch(
+		1_000, 10, nil, nil, nil, nil, 5, 20, 432_000, nil,
+	))
+	require.NoError(t, db.SetSyncState("mithril_ledger_slot", "1000", nil))
+
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+
+	epoch, ok, err := source.GetEarliestAvailableEpoch(context.Background())
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, uint64(11), epoch)
+}

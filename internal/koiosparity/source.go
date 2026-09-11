@@ -120,6 +120,28 @@ type RewardParitySource interface {
 		ctx context.Context,
 		epoch uint64,
 	) ([]*models.RewardAccountOutput, error)
+	// GetEarliestAvailableEpoch returns the earliest Koios reporting epoch
+	// this node could plausibly have genuine, locally computed
+	// reward-calculation state for, derived from its own Mithril bootstrap
+	// boundary (dingo #4172). A Mithril-bootstrapped node has no ledger
+	// history before that boundary by construction — epochs 0-1 are not the
+	// only ones that can never have local data; every epoch through the
+	// bootstrap boundary itself is in the same position, regardless of
+	// whether Koios (which has full protocol history) has real reference
+	// data for them.
+	//
+	// ok is false when no Mithril boundary is recorded at all (a
+	// non-Mithril, genesis-synced node, or one where the boundary read
+	// failed/was absent) — callers must then apply no lower bound beyond
+	// the existing preStakingThroughEpoch floor, leaving behavior exactly as
+	// it was before this method existed. When ok is true, epoch is the
+	// first Koios reporting epoch a caller should ever attempt to compare;
+	// every epoch below it should be treated the same way a pre-staking
+	// epoch is treated today (a recorded PASS with nothing compared, not a
+	// hard mismatch).
+	GetEarliestAvailableEpoch(
+		ctx context.Context,
+	) (epoch uint64, ok bool, err error)
 }
 
 var (
@@ -192,6 +214,44 @@ func (s *DatabaseSource) GetLatestEpoch(ctx context.Context) (uint64, error) {
 		return 0, errors.New("koiosparity: no epoch_summary rows found")
 	}
 	return summary.Epoch, nil
+}
+
+// GetEarliestAvailableEpoch implements RewardParitySource by resolving this
+// node's own Mithril bootstrap boundary (the mithril_ledger_slot sync-state
+// key mithril/sync_import.go writes at import time, surfaced at the
+// database-package level as MithrilTrustBoundarySlotStrict/GetEpochBySlot —
+// see dingo #4172) into the first Koios reporting epoch this node could
+// plausibly have genuinely computed local reward state for: one past the
+// epoch that slot falls in, since the epoch containing (and every epoch
+// before) the boundary slot was inherited from the Mithril snapshot rather
+// than computed by this node's own epoch-transition reward calculation.
+func (s *DatabaseSource) GetEarliestAvailableEpoch(
+	ctx context.Context,
+) (uint64, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, false, err
+	}
+	txn := s.db.Transaction(false)
+	defer txn.Release()
+	slot, err := s.db.MithrilTrustBoundarySlotStrict(txn)
+	if err != nil {
+		return 0, false, fmt.Errorf("mithril trust boundary: %w", err)
+	}
+	if slot == 0 {
+		return 0, false, nil
+	}
+	boundaryEpoch, err := s.db.GetEpochBySlot(slot, txn)
+	if err != nil {
+		return 0, false, fmt.Errorf(
+			"epoch for mithril boundary slot %d: %w",
+			slot,
+			err,
+		)
+	}
+	if boundaryEpoch == nil {
+		return 0, false, nil
+	}
+	return boundaryEpoch.EpochId + 1, true, nil
 }
 
 // GetEpochData returns epoch-level aggregates for the given epoch, or nil,
