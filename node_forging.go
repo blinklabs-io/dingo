@@ -358,14 +358,14 @@ func (n *Node) initBlockForger(
 		)
 	}
 
-	// Wire self-validation when the operator opts in. The validator runs
-	// header crypto, body-hash, and per-tx ledger checks before AddBlock.
-	var blockValidator forging.BlockValidator
-	if n.config.validateForgedBlock {
-		blockValidator = &forgedBlockValidatorAdapter{
-			ledgerState: n.ledgerState,
-		}
-	}
+	// Always enforce aggregate reference-script limits before AddBlock.
+	// Full self-validation (header crypto, body-hash, per-tx ledger checks)
+	// runs too unless the operator explicitly opts out (issue #3528: fail
+	// closed by default).
+	blockValidator := newForgedBlockValidator(
+		n.ledgerState,
+		n.config.validateForgedBlock,
+	)
 
 	// Create the block forger with the real leader election
 	forger, err := forging.NewBlockForger(forging.ForgerConfig{
@@ -768,19 +768,14 @@ func (a *slotClockAdapter) ChainTip() ocommon.Point {
 	return a.ledgerState.Tip().Point
 }
 
-// ChainTipHash satisfies forging.ChainTipHashProvider. It lets the
-// forger tell its own block at the current slot from a rival's by hash
-// rather than inferring it from the forge fence, which is in-memory only
-// when no fence store is wired. Both this and ChainTip read the same
-// tip snapshot; a tip that moves between the two reads simply fails the
-// hash match and falls back to the fence.
+// ChainTipHash satisfies the deprecated forging.ChainTipHashProvider. The
+// forger no longer calls it: it takes the tip hash from ChainTip above,
+// which returns slot and hash from one snapshot. Kept so the adapter still
+// satisfies that exported interface for any external caller.
 func (a *slotClockAdapter) ChainTipHash() []byte {
 	return a.ledgerState.Tip().Point.Hash
 }
 
-// The forger type-asserts for this optional interface, so losing the
-// method would silently fall back to the fence rather than fail to
-// build.
 var _ forging.ChainTipHashProvider = (*slotClockAdapter)(nil)
 
 // PrimaryChainTip returns the primary chain's BLOCK tip -- chain.Tip(), the
@@ -897,13 +892,32 @@ func (a *leiosPipelineAdapter) ParentLeiosAnnouncement() (
 // forging.BlockValidator so the forger can self-validate blocks before
 // adoption without importing the ledger package from within forging.
 type forgedBlockValidatorAdapter struct {
-	ledgerState *ledger.LedgerState
+	ledgerState    forgedBlockValidationState
+	fullValidation bool
+}
+
+type forgedBlockValidationState interface {
+	ValidateForgedBlock(gledger.Block, []byte) error
+	ValidateBlockReferenceScripts(gledger.Block) error
+}
+
+func newForgedBlockValidator(
+	state forgedBlockValidationState,
+	fullValidation bool,
+) forging.BlockValidator {
+	return &forgedBlockValidatorAdapter{
+		ledgerState:    state,
+		fullValidation: fullValidation,
+	}
 }
 
 func (a *forgedBlockValidatorAdapter) ValidateForgedBlock(
 	block gledger.Block,
 	blockCbor []byte,
 ) error {
+	if !a.fullValidation {
+		return a.ledgerState.ValidateBlockReferenceScripts(block)
+	}
 	return a.ledgerState.ValidateForgedBlock(block, blockCbor)
 }
 

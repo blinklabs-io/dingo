@@ -112,12 +112,21 @@ type Ouroboros struct {
 	// multiple connections delivering byte-identical data (the common case
 	// when several peers relay the same block) decode once instead of once
 	// per connection. See #489 and decode_cache.go.
-	blockDecodeCache         *decodeCache[gledger.Block]
-	headerDecodeCache        *decodeCache[gledger.BlockHeader]
-	decodeCacheMetrics       *decodeCacheMetrics
-	blockFetchStarts         map[ouroboros.ConnectionId]time.Time
-	blockFetchMutex          sync.Mutex
-	blockfetchNoBlocksCounts map[ouroboros.ConnectionId]blockfetchNoBlocksState
+	blockDecodeCache   *decodeCache[gledger.Block]
+	headerDecodeCache  *decodeCache[gledger.BlockHeader]
+	decodeCacheMetrics *decodeCacheMetrics
+	blockFetchStarts   map[ouroboros.ConnectionId]time.Time
+	blockFetchMutex    sync.Mutex
+	// localstatequeryAcquiredPoints records the pinned point (zero value =
+	// no pin, answer from live state) an NtC client acquired on this
+	// connection's LocalStateQuery session, keyed by ConnectionId so
+	// multiple simultaneous NtC clients don't share state. Populated by
+	// localstatequeryServerAcquire when the client names a specific point
+	// (blinklabs-io/dingo#382), read by localstatequeryServerQuery, and
+	// cleared by localstatequeryServerRelease and on connection close.
+	localstatequeryAcquiredPoints map[ouroboros.ConnectionId]ledger.QueryPoint
+	localstatequeryAcquireMutex   sync.Mutex
+	blockfetchNoBlocksCounts      map[ouroboros.ConnectionId]blockfetchNoBlocksState
 	// ChainSync measurement tracking for peer scoring
 	chainsyncStats map[ouroboros.ConnectionId]*chainsyncPeerStats
 	chainsyncMutex sync.Mutex
@@ -464,6 +473,9 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		chainsyncState:          cfg.ChainsyncState,
 		peerGov:                 cfg.PeerGov,
 		blockFetchStarts:        make(map[ouroboros.ConnectionId]time.Time),
+		localstatequeryAcquiredPoints: make(
+			map[ouroboros.ConnectionId]ledger.QueryPoint,
+		),
 		blockfetchNoBlocksCounts: make(
 			map[ouroboros.ConnectionId]blockfetchNoBlocksState,
 		),
@@ -779,6 +791,11 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	delete(o.blockFetchStarts, connId)
 	delete(o.blockfetchNoBlocksCounts, connId)
 	o.blockFetchMutex.Unlock()
+	// Clean up any LocalStateQuery acquired point: a client that disconnects
+	// without a clean Release must not leak its map entry.
+	o.localstatequeryAcquireMutex.Lock()
+	delete(o.localstatequeryAcquiredPoints, connId)
+	o.localstatequeryAcquireMutex.Unlock()
 	// Clean up chainsync stats
 	o.chainsyncMutex.Lock()
 	delete(o.chainsyncStats, connId)

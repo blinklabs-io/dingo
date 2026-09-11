@@ -47,6 +47,56 @@ func praosVRFNonceValue(vrfOutput []byte) []byte {
 
 var ErrIncompatibleProtocolParams = errors.New("pparams are not expected type")
 
+// ErrNoCostModelForPlutusV2 is returned when a transaction's PlutusV2
+// redeemer is evaluated against HardForkBabbage's fabricated cost model
+// rather than real governance/protocol-update data (blinklabs-io/dingo#3962).
+// Real cardano-ledger rejects such a transaction outright, at the UTXOW
+// level, before any script evaluation runs: the formal rule "languages txw
+// ⊆ dom(costmdls pp)" (eras/alonzo/impl/src/Cardano/Ledger/Alonzo/Rules/Utxow.hs,
+// eras/babbage/impl/src/Cardano/Ledger/Babbage/Rules/Utxow.hs, both in
+// IntersectMBO/cardano-ledger) is checked unconditionally against the
+// languages the transaction's witnesses actually use, raising `NoCostModel`
+// (Cardano.Ledger.Alonzo.Plutus.Context.CollectError) when a used language
+// has no entry in the current protocol parameters' cost-models map at all.
+// On a real network during the pre-update gap, PlutusV2 genuinely has no
+// entry in that map, so this is not a hypothetical: a real
+// IntersectMBO/cardano-node bug report (cardano-node#4050) shows exactly
+// this rejection reachable in practice, and cardano-ledger's own Conway
+// conformance suite (Test.Cardano.Ledger.Conway.Imp.UtxosSpec) has the
+// identical-shaped test for PlutusV3 at the Conway boundary. Dingo's
+// HardForkBabbage instead fabricates a value specifically so CostModels[1]
+// is never genuinely absent (needed for eras.DefaultPlutusV2CostModel's own
+// internal-validation-continuity purpose), so a literal "is the language a
+// map key" check would never fire here -- the equivalent condition is
+// "is the entry still the fabricated one", tracked as
+// LedgerState.syntheticV2CostModel and reachable from era-package validation
+// code via syntheticV2CostModelReporter.
+var ErrNoCostModelForPlutusV2 = errors.New(
+	"no cost model for PlutusV2 script (still HardForkBabbage's synthetic default)",
+)
+
+// syntheticV2CostModelReporter is implemented by ledger.LedgerView
+// (ledger/view.go's SyntheticV2CostModelInEffect), declared locally here to
+// avoid a package cycle: this package cannot import ledger, which already
+// imports this package. Every ValidateTxFunc/EvaluateTxFunc caller in
+// ledger/state.go always passes a *ledger.LedgerView as the
+// lcommon.LedgerState argument, so the type assertion below succeeds in
+// practice; a caller passing some other lcommon.LedgerState implementation
+// (e.g. a test-only stub) simply skips this check, which is safe -- it does
+// not itself validate anything else this check depends on.
+type syntheticV2CostModelReporter interface {
+	SyntheticV2CostModelInEffect() bool
+}
+
+// syntheticV2CostModelInEffect reports whether ls (the lcommon.LedgerState
+// passed into a ValidateTxFunc/EvaluateTxFunc implementation) reports that
+// the current PlutusV2 cost model is still HardForkBabbage's fabricated
+// default. See syntheticV2CostModelReporter and ErrNoCostModelForPlutusV2.
+func syntheticV2CostModelInEffect(ls lcommon.LedgerState) bool {
+	reporter, ok := ls.(syntheticV2CostModelReporter)
+	return ok && reporter.SyntheticV2CostModelInEffect()
+}
+
 // paramUpdateHasPlutusV2CostModel reports whether a decoded protocol-
 // parameter update's CostModels map explicitly specifies a PlutusV2 cost
 // model (key 1). Shared by every era's EraDesc.ParamUpdateHasPlutusV2CostModelFunc

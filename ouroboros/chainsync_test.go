@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"maps"
 	"net"
 	"strings"
 	"sync"
@@ -325,12 +324,6 @@ func snapshotChainsyncNtNTimeouts() map[string]struct {
 
 func TestNewOuroborosDoesNotMutateChainsyncNtNTimeouts(t *testing.T) {
 	t.Parallel()
-
-	originalStateMap := ochainsync.StateMapNtN.Copy()
-	t.Cleanup(func() {
-		clear(ochainsync.StateMapNtN)
-		maps.Copy(ochainsync.StateMapNtN, originalStateMap)
-	})
 
 	before := snapshotChainsyncNtNTimeouts()
 

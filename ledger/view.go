@@ -61,6 +61,19 @@ type LedgerView struct {
 	consumedUtxos map[string]struct{}
 	// skipPhase2Validation is set for accepted block replay, where
 	// the producer's isValid flag is authoritative for Phase-2 results.
+	// Currently unreachable from production: ledgerProcessBlock's sole
+	// caller (ledger/state.go) hardcodes skipPhase2Validation=false,
+	// because issue #3528 made Phase 2 always evaluate whenever per-tx
+	// validation runs at all. Retained rather than deleted because it is
+	// a narrower, more targeted mechanism than the coarse
+	// shouldValidateBlock=false gate TrustedReplay currently uses to skip
+	// per-tx validation (phase 1 and phase 2 together): a future
+	// TrustedReplay caller that wants phase-1 UTXO checks re-run while
+	// still trusting the producer's isValid flag for phase 2 has this
+	// already built, wired through every era's phase2ValidationSkipper
+	// call site, and tested (TestLedgerViewSkipPhase2Validation and the
+	// per-era skip tests) -- only the production call site's hardcoded
+	// false needs to change to use it.
 	skipPhase2Validation bool
 	// horizonAnchorSlot is the slot the era forecast horizon is measured
 	// from when this view converts slots to time. Block application sets it
@@ -70,6 +83,24 @@ type LedgerView struct {
 	// in charge, which is correct for every caller with no applied block in
 	// hand (mempool validation, standalone evaluation).
 	horizonAnchorSlot uint64
+	// syntheticV2CostModel is pinned from the same snapshot pparams (pp) was
+	// captured from -- see pinSyntheticV2CostModel and
+	// SyntheticV2CostModelInEffect. It must not be re-read live from
+	// ls.loadConsensusSnapshot() at query time: a validation operation can
+	// run long enough (evaluating scripts) that the writer publishes a
+	// newer snapshot in the meantime, which would let this disagree with pp
+	// -- the exact protocol parameters this operation is actually
+	// evaluating against. See blinklabs-io/dingo#3962's PR review.
+	syntheticV2CostModel bool
+}
+
+// pinSyntheticV2CostModel records whether the PlutusV2 cost model was still
+// synthetic in the same snapshot pp (passed to ValidateTxFunc/EvaluateTxFunc
+// alongside this view) was captured from. Every call site that pins
+// committee state alongside pp also pins this.
+func (lv *LedgerView) pinSyntheticV2CostModel(inEffect bool) *LedgerView {
+	lv.syntheticV2CostModel = inEffect
+	return lv
 }
 
 func uint64Ptr(value uint64) *uint64 {
@@ -622,6 +653,24 @@ func (lv *LedgerView) CostModels() map[lcommon.PlutusLanguage]lcommon.CostModel 
 		return map[lcommon.PlutusLanguage]lcommon.CostModel{}
 	}
 	return extractCostModelsFromPParams(pp)
+}
+
+// SyntheticV2CostModelInEffect reports whether the PlutusV2 cost model
+// currently in force is still HardForkBabbage's fabricated default rather
+// than real governance/protocol-update data -- see
+// LedgerState.syntheticV2CostModel (blinklabs-io/dingo#3825,
+// blinklabs-io/dingo#3962). ledger/eras validation code (which cannot import
+// this package) type-asserts its lcommon.LedgerState parameter against a
+// locally declared interface with this exact method signature to reach it
+// without a package cycle.
+//
+// Returns the value pinSyntheticV2CostModel recorded, not a live read of
+// ls.loadConsensusSnapshot() -- see syntheticV2CostModel's field doc
+// comment for why a live read would be unsound here. A *LedgerView this
+// wasn't called on (e.g. a test constructing one directly) reports false,
+// matching the field's zero value.
+func (lv *LedgerView) SyntheticV2CostModelInEffect() bool {
+	return lv.syntheticV2CostModel
 }
 
 // costModelsProvider is an optional interface implemented by

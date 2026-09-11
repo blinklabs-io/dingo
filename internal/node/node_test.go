@@ -197,7 +197,7 @@ func TestShutdownNodeResourcesReturnsNilWithoutErrors(t *testing.T) {
 }
 
 // TestBuildDingoConfigWiresAPIConfig asserts that a loaded
-// internal/config.Config's api.tls/api.auth policy (as set via YAML/env/CLI)
+// internal/config.Config's api.tls policy (as set via YAML/env/CLI)
 // actually reaches the dingo.Config that Run() hands to dingo.New() --
 // regression test for the top-level API security defaults (dingo#2998)
 // being silently dropped because Run's real composition call never invoked
@@ -211,10 +211,6 @@ func TestBuildDingoConfigWiresAPIConfig(t *testing.T) {
 				Mode:         new("server"),
 				CertFilePath: new("/shared/cert.pem"),
 				KeyFilePath:  new("/shared/key.pem"),
-			},
-			Auth: apiconfig.AuthPolicy{
-				Mode:  new("token"),
-				Token: new("shared-secret"),
 			},
 		},
 	}
@@ -241,15 +237,6 @@ func TestBuildDingoConfigWiresAPIConfig(t *testing.T) {
 		t.Fatalf(
 			"expected api.tls.certFilePath to flow through, got %+v",
 			got.TLS,
-		)
-	}
-	if got.Auth.Mode == nil || *got.Auth.Mode != "token" {
-		t.Fatalf("expected api.auth.mode to flow through, got %+v", got.Auth)
-	}
-	if got.Auth.Token == nil || *got.Auth.Token != "shared-secret" {
-		t.Fatalf(
-			"expected api.auth.token to flow through, got %+v",
-			got.Auth,
 		)
 	}
 }
@@ -302,7 +289,6 @@ func TestBuildDingoConfigWiresMidnightServerPolicy(t *testing.T) {
 			Enabled:                     true,
 			ServerEnabled:               true,
 			ReflectionEnabled:           true,
-			AllowInsecureRemote:         true,
 			Port:                        50052,
 			Host:                        "127.0.0.2",
 			CNightPolicyID:              "policy",

@@ -37,6 +37,9 @@ import (
 // Second, that the Shelley epochLength leaves room for the randomness
 // stabilisation window; see validateEpochLengthFitsNonceWindow.
 func (c *CardanoNodeConfig) validateGenesisConsistency() error {
+	if err := c.validateMaxKESEvolutionsPresent(); err != nil {
+		return err
+	}
 	if c.byronGenesis == nil || c.shelleyGenesis == nil {
 		return nil
 	}
@@ -52,6 +55,30 @@ func (c *CardanoNodeConfig) validateGenesisConsistency() error {
 	}
 	if err := c.validateEpochLengthFitsNonceWindow(); err != nil {
 		return err
+	}
+	return nil
+}
+
+// validateMaxKESEvolutionsPresent asserts the Shelley genesis carries a
+// positive maxKESEvolutions. ledger's maxKESEvolutions() returns 0 when
+// this is missing or non-positive, and verifyOpCertHeaderCrypto
+// (ledger/verify_opcert.go) treats a zero maxKesEvolutions as a
+// configuration error and fails closed -- but only once header
+// verification actually runs, repeated on every single header, with
+// nothing naming the genesis field as the cause. A non-deferred failure
+// on every post-Byron header (issue #3528 made header crypto verification
+// unconditional) recycles the peer connection indefinitely rather than
+// stalling once with a diagnosable error. Failing here, once, at load
+// time, gives an operator a clear message instead of a silent sync stall.
+func (c *CardanoNodeConfig) validateMaxKESEvolutionsPresent() error {
+	if c.shelleyGenesis == nil {
+		return nil
+	}
+	if c.shelleyGenesis.MaxKESEvolutions <= 0 {
+		return fmt.Errorf(
+			"shelley genesis maxKESEvolutions must be positive, got %d; opcert KES-period validation requires it and fails closed on every header once verification runs",
+			c.shelleyGenesis.MaxKESEvolutions,
+		)
 	}
 	return nil
 }
