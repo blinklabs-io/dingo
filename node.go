@@ -214,8 +214,8 @@ func New(cfg Config) (*Node, error) {
 	}
 	for capability, selection := range cfg.pluginSelections {
 		// API capabilities are validated against their *merged* config
-		// (shared api.tls/api.auth defaults folded in) so an invalid
-		// effective TLS/auth policy -- e.g. a partial certificate/key
+		// (shared api.tls defaults folded in) so an invalid
+		// effective TLS policy -- e.g. a partial certificate/key
 		// pair -- is rejected here, before any listener starts, using
 		// the exact same merge apiPluginSelection applies at Start()/
 		// reinitializeAPIServers time. See apiProviderConfig.
@@ -292,9 +292,9 @@ func legacyUtxorpcTLSPolicy(cfg *Config) apiconfig.TLSPolicy {
 	}
 }
 
-// apiProviderConfig merges the shared api.tls/api.auth policy (and, for
+// apiProviderConfig merges the shared api.tls policy (and, for
 // UTxORPC only, the legacy root TLS compatibility fields) into selection's
-// own "tls"/"auth" config sections, field by field, and returns the result.
+// own "tls" config section, field by field, and returns the result.
 // It is the single place this merge happens, called both by the early
 // plugin-selection validation in New() and by apiPluginSelection, so a
 // provider config validated at startup and the one actually resolved at
@@ -311,7 +311,6 @@ func (c *Config) apiProviderConfig(
 		selection.Config,
 		legacyTLS,
 		c.apiConfig.TLS,
-		c.apiConfig.Auth,
 	)
 	if err != nil {
 		return selection, fmt.Errorf(
@@ -326,7 +325,7 @@ func (c *Config) apiProviderConfig(
 // apiProviderConfigPath maps each API capability to the dotted config path
 // its provider config lives at, for error messages -- see
 // validateAPIProviderSecurityPolicy and each provider's own
-// cfg.TLS.Resolve/cfg.Auth.Resolve call, which use the identical path.
+// cfg.TLS.Resolve call, which uses the identical path.
 var apiProviderConfigPath = map[plugin.Capability]string{
 	plugin.CapabilityAPIBlockfrost: "plugins.api.blockfrost.config",
 	plugin.CapabilityAPIMesh:       "plugins.api.mesh.config",
@@ -334,8 +333,8 @@ var apiProviderConfigPath = map[plugin.Capability]string{
 }
 
 // validateAPIProviderSecurityPolicy resolves and validates the merged
-// tls/auth sections of an API provider's config (already merged with the
-// shared api.tls/api.auth defaults by apiProviderConfig), surfacing a
+// tls section of an API provider's config (already merged with the
+// shared api.tls defaults by apiProviderConfig), surfacing a
 // partial certificate/key pair or an invalid mode before any listener
 // starts -- the same validation each provider's own RegisterProvider
 // factory performs at Resolve()/Start() time, run here again so New()
@@ -350,13 +349,6 @@ func validateAPIProviderSecurityPolicy(
 		return fmt.Errorf("%s.tls: %w", configPath, err)
 	}
 	if _, err := tlsPolicy.Resolve(configPath + ".tls"); err != nil {
-		return err
-	}
-	authPolicy, err := apiconfig.DecodeAuthPolicy(rawConfig)
-	if err != nil {
-		return fmt.Errorf("%s.auth: %w", configPath, err)
-	}
-	if _, err := authPolicy.Resolve(configPath + ".auth"); err != nil {
 		return err
 	}
 	return nil
@@ -1486,16 +1478,15 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 					}
 					return block.Number, true, nil
 				},
-				Host:                n.config.midnight.Host,
-				Port:                n.config.midnight.Port,
-				TLSCertFilePath:     n.config.tlsCertFilePath,
-				TLSKeyFilePath:      n.config.tlsKeyFilePath,
-				AllowInsecureRemote: n.config.midnight.AllowInsecureRemote,
-				ReflectionEnabled:   n.config.midnight.ReflectionEnabled,
-				ShutdownTimeout:     n.config.shutdownTimeout,
-				Database:            midnightserver.NewDatabase(n.db),
-				SlotTimer:           n.ledgerState,
-				PromRegistry:        n.config.promRegistry,
+				Host:              n.config.midnight.Host,
+				Port:              n.config.midnight.Port,
+				TLSCertFilePath:   n.config.tlsCertFilePath,
+				TLSKeyFilePath:    n.config.tlsKeyFilePath,
+				ReflectionEnabled: n.config.midnight.ReflectionEnabled,
+				ShutdownTimeout:   n.config.shutdownTimeout,
+				Database:          midnightserver.NewDatabase(n.db),
+				SlotTimer:         n.ledgerState,
+				PromRegistry:      n.config.promRegistry,
 			},
 		)
 		if err != nil {
@@ -1826,12 +1817,16 @@ func (n *Node) handleConnManagerClosed(
 	if n.chainsyncState != nil {
 		n.chainsyncState.RemoveClient(connId)
 	}
-	// Wake any NtC chainsync server callback parked waiting for this
-	// connection's certified endorser closure. connmanager drives this
-	// callback from its own per-connection goroutine, so it runs even while
-	// that server callback still owns gouroboros's receive loop.
 	if o := n.ouroboros(); o != nil {
+		// Wake any NtC chainsync server callback parked waiting for this
+		// connection's certified endorser closure. connmanager drives this
+		// callback from its own per-connection goroutine, so it runs even
+		// while that server callback still owns gouroboros's receive loop.
 		o.ReleaseLeiosServeWaiters(connId)
+		// Clear any LocalStateQuery pinned point this connection acquired:
+		// a client that disconnects without a clean Release must not leak
+		// its map entry (blinklabs-io/dingo#382).
+		o.ReleaseLocalStateQueryAcquiredPoint(connId)
 	}
 }
 

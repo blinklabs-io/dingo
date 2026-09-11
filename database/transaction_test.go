@@ -299,6 +299,55 @@ func TestMithrilTrustBoundarySlotSwallowsParseError(t *testing.T) {
 	require.Zero(t, db.MithrilTrustBoundarySlot(nil))
 }
 
+// TestMithrilTrustBoundarySlotStrictRejectsEmptyRecordedValue covers the gap
+// an unparseable value does not: GetSyncState reports an absent key as the
+// empty string, so a sync_state row that exists and holds nothing was
+// indistinguishable from "no snapshot was ever imported" and returned
+// (0, nil). That defeats every fail-closed caller — lifecycle.Truncate would
+// enforce no floor, and koiosparity's bootstrap bound would switch itself off
+// — at exactly the moment the boundary could not be confirmed. A recorded
+// empty value is a malformed boundary, not the absence of one.
+func TestMithrilTrustBoundarySlotStrictRejectsEmptyRecordedValue(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	require.NoError(t, db.SetSyncState(mithrilLedgerSlotSyncKey, "", nil))
+
+	slot, err := db.MithrilTrustBoundarySlotStrict(nil)
+	require.ErrorContains(t, err, "empty value")
+	require.Zero(t, slot)
+}
+
+// TestMithrilTrustBoundarySlotStrictTreatsAbsentKeyAsNoBoundary is the
+// control for the test above: with no sync_state row at all — a genesis-
+// synced node — the strict accessor must still report "no boundary
+// recorded" rather than erroring, or every such node fails the checks that
+// consume it.
+func TestMithrilTrustBoundarySlotStrictTreatsAbsentKeyAsNoBoundary(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := openTestDB(t)
+
+	slot, err := db.MithrilTrustBoundarySlotStrict(nil)
+	require.NoError(t, err)
+	require.Zero(t, slot)
+}
+
+// TestMithrilTrustBoundarySlotSwallowsEmptyRecordedValue confirms
+// MithrilTrustBoundarySlot's fail-open contract is unchanged for a recorded
+// empty value now that the strict variant rejects it: the consumed-UTxO
+// recovery heuristic must still read 0, not propagate an error.
+func TestMithrilTrustBoundarySlotSwallowsEmptyRecordedValue(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	require.NoError(t, db.SetSyncState(mithrilLedgerSlotSyncKey, "", nil))
+
+	require.Zero(t, db.MithrilTrustBoundarySlot(nil))
+}
+
 func TestDeleteTxBlobsUsesCallerBlobTxn(t *testing.T) {
 	t.Parallel()
 
@@ -652,6 +701,7 @@ func TestSetTransactionRecoveryPopulatesProducerFK(t *testing.T) {
 					producer.tx,
 					producer.point,
 					0,
+					nil,
 					txn.Metadata(),
 				)
 			}),
@@ -854,6 +904,7 @@ func TestEnsureTransactionConsumedUtxosStrictAppliedInputConservation(
 					producer.tx,
 					producer.point,
 					0,
+					nil,
 					txn.Metadata(),
 				)
 			}))
@@ -956,6 +1007,7 @@ func TestEnsureTransactionConsumedUtxosStrictAppliedInputConservation(
 					producer.tx,
 					producer.point,
 					0,
+					nil,
 					txn.Metadata(),
 				)
 			}))

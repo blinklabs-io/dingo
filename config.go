@@ -160,15 +160,13 @@ type TokenRegistryConfig struct {
 // storage mode -- both are required, since the indexer depends on the
 // api-mode indexes to function. ServerEnabled independently opts into the
 // listener so persisted Midnight data can be served without running the
-// indexer. Reflection and non-loopback plaintext exposure are separate,
-// default-off decisions.
+// indexer. Reflection remains a separate, default-off decision. TLS is optional.
 type MidnightConfig struct {
-	Enabled             bool
-	ServerEnabled       bool
-	ReflectionEnabled   bool
-	AllowInsecureRemote bool
-	Port                uint
-	Host                string
+	Enabled           bool
+	ServerEnabled     bool
+	ReflectionEnabled bool
+	Port              uint
+	Host              string
 
 	CNightPolicyID              string
 	CNightAssetName             string
@@ -214,7 +212,7 @@ type Config struct {
 	pluginSelections                map[hostplugin.Capability]hostplugin.Selection
 	network                         string
 	tlsCertFilePath, tlsKeyFilePath string
-	// apiConfig mirrors cfg.API -- the shared api.tls/api.auth policy
+	// apiConfig mirrors cfg.API -- the shared api.tls policy
 	// defaults merged into every selected plugins.api.* provider's own
 	// config by node.go before that provider resolves. See
 	// ARCHITECTURE.md's "API security" section.
@@ -794,7 +792,6 @@ func (c *Config) syncCompatFields() {
 		Enabled:                     c.cfg.Midnight.Enabled,
 		ServerEnabled:               c.cfg.Midnight.ServerEnabled,
 		ReflectionEnabled:           c.cfg.Midnight.ReflectionEnabled,
-		AllowInsecureRemote:         c.cfg.Midnight.AllowInsecureRemote,
 		Port:                        c.cfg.Midnight.Port,
 		Host:                        c.cfg.Midnight.Host,
 		CNightPolicyID:              c.cfg.Midnight.CNightPolicyID,
@@ -1000,8 +997,8 @@ func WithCardanoNodeConfig(
 	}
 }
 
-// WithBindAddr specifies the IP address used for API listeners
-// (Blockfrost, Mesh, UTxO RPC). The default is "0.0.0.0" (all interfaces).
+// WithBindAddr specifies the IP address used by relay, metrics, and public
+// Blockfrost, Mesh, and UTxO RPC listeners. The default is 0.0.0.0.
 func WithBindAddr(addr string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BindAddr = addr
@@ -1099,9 +1096,9 @@ func WithUtxorpcPort(port uint) ConfigOptionFunc {
 	}
 }
 
-// WithAPIConfig sets the shared api.tls/api.auth policy applied to every
+// WithAPIConfig sets the shared api.tls policy applied to every
 // selected plugins.api.* provider (Blockfrost, Mesh, UTxORPC) unless that
-// provider's own plugins.api.<name>.config.tls/auth overrides a field.
+// provider's own plugins.api.<name>.config.tls overrides a field.
 // See internal/apiconfig and ARCHITECTURE.md's "API security" section.
 func WithAPIConfig(cfg internalconfig.APIConfig) ConfigOptionFunc {
 	return func(c *Config) {
@@ -1635,7 +1632,6 @@ func WithMidnightConfig(cfg MidnightConfig) ConfigOptionFunc {
 			Enabled:                     cfg.Enabled,
 			ServerEnabled:               cfg.ServerEnabled,
 			ReflectionEnabled:           cfg.ReflectionEnabled,
-			AllowInsecureRemote:         cfg.AllowInsecureRemote,
 			Port:                        cfg.Port,
 			Host:                        cfg.Host,
 			CNightPolicyID:              cfg.CNightPolicyID,
@@ -1769,7 +1765,7 @@ func (c *Config) MetadataPlugin() string {
 	return c.cfg.Plugins.Storage.Metadata.Provider
 }
 
-// BindAddr returns the IP address for API listeners.
+// BindAddr returns the IP address for relay and metrics listeners.
 func (c *Config) BindAddr() string {
 	return c.cfg.BindAddr
 }
@@ -1845,7 +1841,7 @@ func (c *Config) TlsKeyFilePath() string {
 	return c.cfg.TlsKeyFilePath
 }
 
-// APIConfig returns the shared api.tls/api.auth policy defaults applied to
+// APIConfig returns the shared api.tls policy defaults applied to
 // every selected plugins.api.* provider unless overridden. See
 // WithAPIConfig and ARCHITECTURE.md's "API security" section.
 func (c *Config) APIConfig() internalconfig.APIConfig {
@@ -2154,7 +2150,7 @@ func (c *Config) CORSAllowedOrigins() []string {
 	return c.cfg.CORSAllowedOrigins
 }
 
-// API returns the shared api.tls/api.auth policy defaults applied to
+// API returns the shared api.tls policy defaults applied to
 // every selected plugins.api.* provider. See WithAPIConfig.
 func (c *Config) API() internalconfig.APIConfig {
 	return c.cfg.API

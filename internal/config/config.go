@@ -497,13 +497,9 @@ type MidnightConfig struct {
 	ServerEnabled bool `yaml:"serverEnabled"       envconfig:"DINGO_MIDNIGHT_SERVER_ENABLED"`
 	// ReflectionEnabled exposes gRPC service discovery when the server is
 	// enabled. It defaults off because reflection broadens the public surface.
-	ReflectionEnabled bool `yaml:"reflectionEnabled"   envconfig:"DINGO_MIDNIGHT_REFLECTION_ENABLED"`
-	// AllowInsecureRemote permits a plaintext listener on a non-loopback
-	// address. It is an explicit escape hatch for deployments that provide
-	// transport security outside Dingo.
-	AllowInsecureRemote bool   `yaml:"allowInsecureRemote" envconfig:"DINGO_MIDNIGHT_ALLOW_INSECURE_REMOTE"`
-	Port                uint   `yaml:"port"                envconfig:"DINGO_MIDNIGHT_PORT"`
-	Host                string `yaml:"host"                envconfig:"DINGO_MIDNIGHT_HOST"`
+	ReflectionEnabled bool   `yaml:"reflectionEnabled"   envconfig:"DINGO_MIDNIGHT_REFLECTION_ENABLED"`
+	Port              uint   `yaml:"port"                envconfig:"DINGO_MIDNIGHT_PORT"`
+	Host              string `yaml:"host"                envconfig:"DINGO_MIDNIGHT_HOST"`
 
 	CNightPolicyID              string `yaml:"cnightPolicyId"`
 	CNightAssetName             string `yaml:"cnightAssetName"`
@@ -528,7 +524,7 @@ func DefaultMidnightConfig() MidnightConfig {
 
 type Config struct {
 	Plugins PluginsConfig `yaml:"plugins"`
-	// API holds shared TLS/auth policy defaults for every selected
+	// API holds shared TLS policy defaults for every selected
 	// plugins.api.* provider. See APIConfig's own doc comment.
 	API                    APIConfig `yaml:"api"`
 	TlsKeyFilePath         string    `yaml:"tlsKeyFilePath"                      envconfig:"TLS_KEY_FILE_PATH"`
@@ -777,24 +773,23 @@ type APIPluginsConfig struct {
 	Utxorpc    hostplugin.Selection `yaml:"utxorpc"`
 }
 
-// APIConfig holds the shared TLS and authentication policy defaults
+// APIConfig holds the shared TLS policy defaults
 // applied to every selected plugins.api.* provider (Blockfrost, Mesh,
-// UTxORPC) unless that provider's own plugins.api.<name>.config.tls/auth
+// UTxORPC) unless that provider's own plugins.api.<name>.config.tls
 // overrides a field. See ARCHITECTURE.md's "API security" section and
 // internal/apiconfig for the merge/validation rules; composition (node.go)
 // performs the actual per-provider merge, not this package.
 //
-// bindAddr, debugBindAddr, and corsAllowedOrigins deliberately stay at the
-// Config root rather than moving under this section: bindAddr is not
-// API-specific (the relay/NtN and metrics listeners use it too),
+// bindAddr, debugBindAddr, and corsAllowedOrigins deliberately
+// stay at the Config root rather than moving under this section: bindAddr is
+// not API-specific (the relay/NtN and metrics listeners use it too),
 // debugBindAddr controls the separate pprof listener, and corsAllowedOrigins
 // already applies uniformly to all three API providers
 // today with no override need identified by dingo#2996/#2998, so
 // duplicating any of them here would only add a second source of truth for no
 // behavioral gain.
 type APIConfig struct {
-	TLS  apiconfig.TLSPolicy  `yaml:"tls"`
-	Auth apiconfig.AuthPolicy `yaml:"auth"`
+	TLS apiconfig.TLSPolicy `yaml:"tls"`
 }
 
 func defaultPluginsConfig() PluginsConfig {
@@ -1187,7 +1182,7 @@ func cloneStringPtr(p *string) *string {
 	return &v
 }
 
-// cloneTLSPolicy and cloneAuthPolicy deep-copy every pointer field so a
+// cloneTLSPolicy deep-copies every pointer field so a
 // clone never shares a *string with the Config it was cloned from --
 // matching PeerSharing's own defensive-copy discipline just above, even
 // though every pointer in practice is replaced wholesale (never mutated
@@ -1197,14 +1192,6 @@ func cloneTLSPolicy(p apiconfig.TLSPolicy) apiconfig.TLSPolicy {
 		Mode:         cloneStringPtr(p.Mode),
 		CertFilePath: cloneStringPtr(p.CertFilePath),
 		KeyFilePath:  cloneStringPtr(p.KeyFilePath),
-	}
-}
-
-func cloneAuthPolicy(p apiconfig.AuthPolicy) apiconfig.AuthPolicy {
-	return apiconfig.AuthPolicy{
-		Mode:          cloneStringPtr(p.Mode),
-		Token:         cloneStringPtr(p.Token),
-		TokenFilePath: cloneStringPtr(p.TokenFilePath),
 	}
 }
 
@@ -1227,7 +1214,6 @@ func cloneConfig(cfg *Config) *Config {
 		clone.PeerSharing = &peerSharing
 	}
 	clone.API.TLS = cloneTLSPolicy(cfg.API.TLS)
-	clone.API.Auth = cloneAuthPolicy(cfg.API.Auth)
 	clone.Plugins.Storage.Blob = clonePluginSelection(
 		cfg.Plugins.Storage.Blob,
 	)
@@ -1457,9 +1443,8 @@ func (c *Config) ApplyDefaults() {
 	if c.DebugBindAddr == "" {
 		c.DebugBindAddr = DefaultDebugBindAddr
 	}
-	// Match the Midnight server's safe default before validation so an
-	// explicitly empty YAML or environment value does not look like a remote
-	// plaintext listener and require the insecure-remote escape hatch.
+	// Match the Midnight server's default for explicitly empty YAML or
+	// environment values.
 	if c.Midnight.Host == "" {
 		c.Midnight.Host = DefaultMidnightConfig().Host
 	}
