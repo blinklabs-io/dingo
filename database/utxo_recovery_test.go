@@ -50,7 +50,7 @@ func TestResolveUtxoCborWithRecoveryReconstructsMissingBlob(t *testing.T) {
 		t,
 		metaTxn.Do(func(txn *Txn) error {
 			return db.Metadata().SetGapBlockTransaction(
-				producer.tx, producer.point, 0, txn.Metadata(),
+				producer.tx, producer.point, 0, nil, txn.Metadata(),
 			)
 		}),
 	)
@@ -121,7 +121,7 @@ func TestResolveUtxoCborWithRecoveryUpgradesBlobOnlyTxnForRecovery(
 		t,
 		metaTxn.Do(func(txn *Txn) error {
 			return db.Metadata().SetGapBlockTransaction(
-				producer.tx, producer.point, 0, txn.Metadata(),
+				producer.tx, producer.point, 0, nil, txn.Metadata(),
 			)
 		}),
 	)
