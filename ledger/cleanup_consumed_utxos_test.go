@@ -157,6 +157,55 @@ func TestCleanupConsumedUtxos_PersistsPruneFloor(t *testing.T) {
 	)
 }
 
+// TestCleanupConsumedUtxos_SkipsDeleteWhenPruneFloorPersistFails covers the
+// ordering invariant persistConsumedUtxoPruneFloor's doc comment depends on:
+// a failure to durably record the floor must abort this run before any row
+// is actually hard-deleted, not just be logged and ignored. Otherwise real
+// rows could be pruned with no durable record that floor was ever used,
+// letting a later pinned query at or above that floor see no persisted
+// floor to reject against and silently answer "absent" for a ref that was
+// actually there (blinklabs-io/dingo#382 review, Cubic). Drops the
+// sync_state table (via a raw connection to the same file) so SetSyncState
+// fails while the utxo table -- and so UtxosDeleteConsumed -- stays fully
+// functional, isolating the failure to exactly the call this test cares
+// about.
+func TestCleanupConsumedUtxos_SkipsDeleteWhenPruneFloorPersistFails(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir:     t.TempDir(),
+		StorageMode: types.StorageModeCore,
+	})
+	require.NoError(t, err)
+
+	txId := bytes.Repeat([]byte{0xD2}, 32)
+	const (
+		addedSlot   uint64 = 1_000
+		deletedSlot uint64 = 5_000
+		tipSlot     uint64 = 100_000 // > 50_000 default stability window
+	)
+	seedSpentUtxoForCleanup(t, db, txId, 0, addedSlot, deletedSlot)
+
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	_, err = raw.Exec("DROP TABLE sync_state")
+	require.NoError(t, err)
+
+	ls := newLedgerStateForCleanup(db, tipSlot)
+	ls.cleanupConsumedUtxos()
+
+	post, err := db.Metadata().GetUtxoIncludingSpent(txId, 0, nil)
+	require.NoError(t, err)
+	assert.NotNil(
+		t, post,
+		"cleanup must not delete rows when persisting the prune floor "+
+			"fails, since that would prune without any durable record "+
+			"that pruning happened",
+	)
+}
+
 func TestCleanupConsumedUtxos_ProcessesOneBoundedBatch(t *testing.T) {
 	t.Parallel()
 

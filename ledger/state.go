@@ -3086,20 +3086,24 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 	}
 	if tipSlot > stabilityWindow {
 		floor := tipSlot - stabilityWindow
-		// Recorded regardless of the delete outcome below, and before it
-		// runs: this durably records that rows at-or-behind floor are now
-		// ELIGIBLE for pruning, which is what checkUtxoRetentionWindow
-		// needs to reject a pin against -- whether this specific batched
-		// call actually reaches every eligible row yet (see
-		// UtxosDeleteConsumed's own batching) doesn't change that
-		// eligibility, and persisting first fails a pin closed rather than
-		// open if the process dies before the delete below completes.
+		// Persisted before the delete below, and this run must not proceed
+		// to delete anything if the persist itself fails: this durably
+		// records that rows at-or-behind floor are now ELIGIBLE for
+		// pruning, which is what checkUtxoRetentionWindow needs to reject
+		// a pin against. A delete that runs anyway on a failed persist
+		// would hard-delete real rows with no durable record that floor
+		// was ever used, letting a later pinned query at or above floor
+		// see no persisted floor to reject against and silently answer
+		// "absent" for a ref that was actually there (blinklabs-io/dingo#382
+		// review). Returning here just skips this run; the next periodic
+		// tick tries again from the same (or a later) floor.
 		if err := ls.persistConsumedUtxoPruneFloor(floor, nil); err != nil {
 			ls.config.Logger.Error(
 				"failed to persist consumed UTxO prune floor",
 				"component", "ledger",
 				"error", err,
 			)
+			return
 		}
 		// No lock needed here - the database handles its own consistency
 		// and we're not accessing any in-memory LedgerState fields.
