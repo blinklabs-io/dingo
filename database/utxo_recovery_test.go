@@ -15,6 +15,7 @@
 package database
 
 import (
+	"bytes"
 	"errors"
 	"testing"
 
@@ -176,6 +177,105 @@ func TestResolveUtxoCborWithRecoveryUpgradesBlobOnlyTxnForRecovery(
 	wantCbor := utxo.Output.Cbor()
 	require.NotEmpty(t, wantCbor, "fixture output must carry its own CBOR")
 	require.Equal(t, []byte(wantCbor), recovered)
+}
+
+// TestResolveUtxoCborWithRecoverySharedBlobRollbackDoesNotFinishCallersTxn
+// is the regression test for a chrisguiney review finding on PR #4084: the
+// !t.sharedBlob guard added to Txn.rollback() (see withMetadataForRecovery)
+// was load-bearing but untested -- every existing recovery test resolves
+// only one row per caller txn, so removing the guard still left
+// go test ./database/... ./ledger/... green.
+//
+// queryShelleyUtxoWhole's worker pool reuses one BlobTxn(false) across every
+// job it handles. Without the guard, recovering the first row's missing
+// blob calls withMetadataForRecovery, which shares the caller's blobTxn;
+// releasing that augmented Txn afterward would then roll back -- and so
+// finish -- the underlying provider transaction the caller's own txn still
+// points at, failing every resolve attempted through it afterward.
+//
+// Reproduces that shape directly: two independent UTxOs resolved through
+// the same blob-only Txn, the first needing recovery and the second not.
+func TestResolveUtxoCborWithRecoverySharedBlobRollbackDoesNotFinishCallersTxn(
+	t *testing.T,
+) {
+	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	defer db.Close() //nolint:errcheck
+
+	// UTxO A: recoverable -- blob and tx-offset entries deleted below, so
+	// resolving it requires reconstructing from the producing block.
+	candidate := findGapConsumeCandidateWithoutCertificates(t)
+	require.NotEmpty(t, candidate.producers)
+	producer := candidate.producers[0]
+	storeBlockOffsetsOnly(t, db, producer.block)
+	metaTxn := db.MetadataTxn(true)
+	t.Cleanup(metaTxn.Release)
+	require.NoError(
+		t,
+		metaTxn.Do(func(txn *Txn) error {
+			return db.Metadata().SetGapBlockTransaction(
+				producer.tx, producer.point, 0, nil, txn.Metadata(),
+			)
+		}),
+	)
+	metaTxn.Release()
+
+	producedA := producer.tx.Produced()
+	require.NotEmpty(t, producedA)
+	utxoA := producedA[0]
+	txIdA := utxoA.Id.Id().Bytes()
+	outputIdxA := utxoA.Id.Index()
+
+	blob := db.Blob()
+	require.NotNil(t, blob)
+	writeTxn := db.Transaction(true)
+	t.Cleanup(writeTxn.Release)
+	require.NoError(
+		t,
+		blob.DeleteUtxo(writeTxn.Blob(), txIdA, outputIdxA),
+	)
+	require.NoError(
+		t,
+		blob.DeleteTx(writeTxn.Blob(), txIdA),
+	)
+
+	// UTxO B: independent and blob-intact -- resolves via the bare
+	// tiered-cache path, no recovery involved. Seeded through the same
+	// write txn as A's deletions above, committed together below.
+	txIdB := bytes.Repeat([]byte{0xB2}, 32)
+	const outputIdxB = uint32(0)
+	require.NoError(t, db.CreateUtxo(writeTxn, &models.Utxo{
+		TxId:      txIdB,
+		OutputIdx: outputIdxB,
+		AddedSlot: 100,
+	}))
+	wantCborB := []byte{0xDE, 0xAD, 0xBE, 0xEF}
+	require.NoError(
+		t,
+		blob.SetUtxo(writeTxn.Blob(), txIdB, outputIdxB, wantCborB),
+	)
+	require.NoError(t, writeTxn.Commit())
+
+	callerTxn := db.BlobTxn(false)
+	defer callerTxn.Release()
+	require.Nil(
+		t, callerTxn.Metadata(),
+		"test setup must reproduce a genuinely blob-only txn",
+	)
+
+	_, err = db.ResolveUtxoCborWithRecovery(txIdA, outputIdxA, callerTxn)
+	require.NoError(t, err, "UTxO A must recover successfully")
+
+	recoveredB, err := db.ResolveUtxoCborWithRecovery(
+		txIdB, outputIdxB, callerTxn,
+	)
+	require.NoError(
+		t, err,
+		"resolving B through the same caller txn afterward must still "+
+			"succeed -- recovering A must not have finished the shared "+
+			"underlying blob transaction",
+	)
+	require.Equal(t, wantCborB, recoveredB)
 }
 
 // TestResolveUtxoCborWithRecoveryPropagatesUnrecoverable proves a UTxO whose

@@ -592,10 +592,18 @@ func (t *Txn) Commit() error {
 	if !t.readWrite {
 		return t.rollback()
 	}
-	// Update the commit timestamp in both DBs if using both.
-	// Track timestamp for error reporting if partial commit occurs.
+	// Update the commit timestamp in both DBs if using both. Skipped
+	// entirely when sharedBlob (mirrors the guard below): t.blobTxn is
+	// borrowed from another Txn (see withMetadataForRecovery) that still
+	// owns committing or rolling it back, so writing a timestamp into it
+	// here -- left staged but never actually committed by this call --
+	// would either sit uncommitted until the owner's own Commit runs, or
+	// be overwritten by the owner's own timestamp; neither is this Txn's
+	// to decide (chrisguiney review; not reachable by any caller today,
+	// since the only current sharedBlob wrapper is only ever
+	// Released/Rolled back, never committed).
 	var commitTimestamp int64
-	if t.blobTxn != nil && t.metadataTxn != nil {
+	if t.blobTxn != nil && t.metadataTxn != nil && !t.sharedBlob {
 		commitTimestamp = time.Now().UnixMilli()
 		if err := t.db.updateCommitTimestamp(t, commitTimestamp); err != nil {
 			// Rollback both transactions on timestamp update failure
@@ -605,8 +613,11 @@ func (t *Txn) Commit() error {
 			return fmt.Errorf("failed to update commit timestamp: %w", err)
 		}
 	}
-	// Commit blob transaction first (so if this fails, metadata never commits)
-	if t.blobTxn != nil {
+	// Commit blob transaction first (so if this fails, metadata never
+	// commits). Guarded by !t.sharedBlob for the same ownership reason as
+	// above and as rollback's own identical guard: committing a borrowed
+	// blobTxn here would commit its owner's transaction out from under it.
+	if t.blobTxn != nil && !t.sharedBlob {
 		if err := t.blobTxn.Commit(); err != nil {
 			// Blob commit failed - rollback metadata only
 			// Note: Most DB engines auto-rollback on commit failure
