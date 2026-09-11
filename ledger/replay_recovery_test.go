@@ -231,6 +231,81 @@ func TestTryRecoverFromTxValidationErrorRollsBackToEarliestProducerParent(
 	assert.Equal(t, parentTip, dbTip)
 }
 
+func TestFindReplayRecoveryCandidateFallsBackWhenProducerParentIsMissing(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+
+	anchorBlock := testRawBlock("missing-parent-anchor", 80, 1, nil)
+	parentBlock := testRawBlock(
+		"missing-parent", 100, 2, anchorBlock.Hash,
+	)
+	producerBlock := testRawBlock(
+		"missing-producer-parent",
+		120,
+		3,
+		parentBlock.Hash,
+	)
+	currentBlock := testRawBlock(
+		"missing-parent-current",
+		140,
+		4,
+		producerBlock.Hash,
+	)
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks(
+		[]chain.RawBlock{anchorBlock, parentBlock, producerBlock, currentBlock},
+	))
+	storedParent, err := database.BlockByHash(db, parentBlock.Hash)
+	require.NoError(t, err)
+	txn := db.BlobTxn(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return database.BlockDeleteTxn(txn, storedParent)
+	}))
+
+	nodeConfig := newTestShelleyGenesisCfg(t)
+	nodeConfig.ShelleyGenesis().SecurityParam = 3
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: nodeConfig,
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	ls.currentEra.Id = 1
+	require.NoError(t, cm.SetLedger(ls))
+	ls.metrics.init(prometheus.NewRegistry())
+
+	currentTip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(currentBlock.Slot, currentBlock.Hash),
+		BlockNumber: currentBlock.BlockNumber,
+	}
+	require.NoError(t, db.SetTip(currentTip, nil))
+	ls.currentTip = currentTip
+	ls.publishSnapshotsLocked()
+
+	producerTxHash := testHashBytes("producer-with-missing-parent")
+	seedReplayRecoveryTransaction(
+		t, db, producerTxHash, producerBlock.Hash, producerBlock.Slot,
+	)
+	candidate, err := ls.findReplayRecoveryCandidate(&txValidationError{
+		BlockPoint: currentTip.Point,
+		TxHash:     testHashBytes("missing-parent-failure"),
+		Inputs: []lcommon.TransactionInput{
+			&replayRecoveryInput{txId: producerTxHash, index: 0},
+		},
+		Cause: errors.New("bad input"),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, candidate)
+	assert.Equal(t, "security-param-fallback", candidate.Strategy)
+	assert.Equal(t, anchorBlock.Hash, candidate.ProducerBlock.Hash)
+}
+
 func TestTryRecoverFromTxValidationErrorRejectsReplayBelowMithrilBoundary(
 	t *testing.T,
 ) {

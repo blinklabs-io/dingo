@@ -1601,6 +1601,14 @@ func (ls *LedgerState) findReplayRecoveryCandidate(
 			resolved.ProducerBlock,
 		)
 		if err != nil {
+			if errors.Is(err, models.ErrBlockNotFound) {
+				// The transaction metadata identifies a producer, but its
+				// parent is outside the locally retained chain. Treat the
+				// provenance as unresolved so the bounded security-parameter
+				// fallback can choose a safe local anchor.
+				unresolvedInputs = append(unresolvedInputs, resolved.Input)
+				continue
+			}
 			return nil, err
 		}
 		if candidate == nil ||
