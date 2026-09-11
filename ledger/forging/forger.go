@@ -130,15 +130,22 @@ const (
 	forgeStaleTipReasonPrimaryTipBehind = "primary_tip_behind_applied"
 	forgeStaleTipReasonAppliedStale     = "applied_tip_stale"
 	forgeStaleTipReasonEbManifestAhead  = "eb_manifest_ahead"
-	// This reason is recorded from a PRE-leader-check refusal: the primary
-	// chain tip already holds a block at the current slot that the ledger has
-	// not applied, so forging would parent a block for slot S on a tip already
-	// at slot S. The others are counted after leader selection has proven this
-	// node elected; this one is counted from the precomputed VRF schedule
-	// (isScheduledLeaderSlot), which the path already consults to choose its
-	// log level. That basis fails quiet -- a checker with no cached schedule
-	// for the epoch reports false -- so the series can under-count, never
-	// over-count.
+	// The fourth reason is recorded from a PRE-leader-check refusal: the
+	// primary chain tip already holds a block at the current slot that the
+	// ledger has not applied, so forging would parent a block for slot S on a
+	// tip already at slot S. The other three are counted after leader
+	// selection has proven this node elected; this one is counted from the
+	// precomputed VRF schedule (isScheduledLeaderSlot), which the path already
+	// consults to choose its log level. That basis fails quiet -- a checker
+	// with no cached schedule for the epoch reports false -- so the series can
+	// under-count.
+	//
+	// It does not count this node's own unapplied block: the refusal first
+	// asks unappliedTipOwnership whose block sits at the primary chain tip,
+	// by hash against SlotTracker and falling back to the forge fence, and
+	// skips at Debug without counting when the answer is ours. An
+	// inconclusive answer is counted, so a slot lost while both signals were
+	// unavailable is still reported.
 	forgeStaleTipReasonUnappliedRival = "unapplied_rival_at_leader_slot"
 )
 
@@ -1201,9 +1208,15 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// This is deliberately separate from the contested-slot branch above.
 	// There the competing block is applied, so tipBlockOwnership can compare
 	// it against SlotTracker by hash and tell our own block from a rival's.
-	// Here the block is unapplied: tipBlockOwnership reads the applied tip and
-	// answers tipOwnershipUnknown, and the fence only covers slots this node
-	// committed to, so nothing downstream would stop the forge.
+	// Here the block is unapplied, so that helper cannot: it compares against
+	// the APPLIED tip hash, which by construction names an earlier block, and
+	// answers tipOwnershipUnknown for everything that reaches this branch.
+	// Ownership is still decidable, just from the other tip --
+	// unappliedTipOwnership compares SlotTracker's hash for this slot against
+	// the PRIMARY chain tip's -- and it has to be decided, because this
+	// node's own just-forged, not-yet-applied block arrives here too: the
+	// refusal is right for it (a second block for the slot would equivocate)
+	// but calling it a rival that cost us a leader slot is not.
 	//
 	// Routed through logGateSkip because this runs before leader selection, so
 	// a slot this node was scheduled to lead would otherwise vanish at Debug.
@@ -1225,6 +1238,27 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// one series. It is the only reason counted from the VRF schedule rather
 	// than from a completed leader check; see forgeStaleTipReasonUnappliedRival.
 	if currentSlot == parentSlot && parentSlot > tipSlot {
+		// The unapplied block at the primary chain tip is one this node
+		// forged: the slot produced a block rather than losing one, so this
+		// is the routine re-entry the equal-applied-tip branch above logs at
+		// Debug with no counter, and it must read the same way here. Counting
+		// it would make the series over-report a lost leader slot purely
+		// because the ledger has not caught up with our own block yet, which
+		// is the split on pipeline timing this gate exists to remove.
+		if ownership, matchedBy := f.unappliedTipOwnership(
+			currentSlot,
+			primaryTip.Hash,
+		); ownership == tipOwnershipOurs {
+			f.logger.Debug(
+				"forge skip: slot already has our own block",
+				"current_slot", currentSlot,
+				"tip_slot", tipSlot,
+				"primary_tip_slot", primaryTip.Slot,
+				"last_forged_slot", f.lastForgedSlot,
+				"matched_by", matchedBy,
+			)
+			return nil
+		}
 		// One schedule read, shared by the counter and the log level, so a
 		// skip does not run the lookup (or the panic recovery around it)
 		// twice.
@@ -1992,6 +2026,39 @@ func (f *BlockForger) tipBlockOwnership(
 		return tipOwnershipOurs, forgedHash, tipHash
 	}
 	return tipOwnershipRival, forgedHash, tipHash
+}
+
+// unappliedTipOwnership decides whether the block sitting at the PRIMARY
+// chain tip for slot is one this node forged, without reading the applied
+// tip. tipBlockOwnership cannot answer that question for an unapplied block:
+// it compares SlotTracker against ChainTipHash(), the applied tip, which for
+// every caller of this helper names an earlier block, so it returns
+// tipOwnershipUnknown. Callers must therefore pass the primary chain tip's
+// hash, and may only call this where that tip is known to sit at slot.
+//
+// The hash comparison is the strong signal. When it cannot be made -- no
+// tracked hash for the slot, or an empty hash on either side -- the forge
+// fence is the weaker fallback the equal-applied-tip branch already uses: it
+// records the slots this node committed to without saying which block won, so
+// it can call a lost slot battle ours. That direction is deliberate; it
+// under-reports a loss rather than reporting a block we produced as lost.
+func (f *BlockForger) unappliedTipOwnership(
+	slot uint64,
+	tipHash []byte,
+) (tipOwnership, string) {
+	if f.slotTracker != nil && len(tipHash) > 0 {
+		forgedHash, ok := f.slotTracker.WasForgedByUs(slot)
+		if ok && len(forgedHash) > 0 {
+			if bytes.Equal(forgedHash, tipHash) {
+				return tipOwnershipOurs, "forged_block_hash"
+			}
+			return tipOwnershipRival, "forged_block_hash"
+		}
+	}
+	if f.fenceLoaded && slot <= f.lastForgedSlot {
+		return tipOwnershipOurs, "forge_fence"
+	}
+	return tipOwnershipUnknown, ""
 }
 
 func (f *BlockForger) incCouldNotForge() {

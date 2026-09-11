@@ -1402,3 +1402,128 @@ func TestForgeReadsUpstreamSyncStatusOncePerCycle(t *testing.T) {
 	)
 	require.Equal(t, 1, builder.calls)
 }
+
+// TestForgeDoesNotCountOurOwnUnappliedBlockAsLostLeaderSlot pins the
+// discriminator on the unapplied-tip refusal. The refusal itself is right for
+// every block at the primary chain tip -- forging again for that slot would
+// equivocate -- but only a RIVAL block there cost this node a leader slot.
+// Our own just-forged block reaches the same branch while the ledger has not
+// applied it yet, and it is at a scheduled leader slot by construction: the
+// node was elected there, which is why it forged. Counting that as
+// unapplied_rival_at_leader_slot reports a lost block for a slot that produced
+// one, and raises it to WARN with leader_slot=true.
+//
+// tipBlockOwnership cannot separate the two here -- it compares against the
+// APPLIED tip, which by construction names an earlier block -- so the branch
+// compares SlotTracker's hash for the slot against the PRIMARY chain tip's,
+// with the forge fence as the weaker fallback.
+func TestForgeDoesNotCountOurOwnUnappliedBlockAsLostLeaderSlot(t *testing.T) {
+	const leaderSlot = uint64(200)
+	appliedHash := bytes.Repeat([]byte{0xAA}, 32)
+	primaryTipHash := bytes.Repeat([]byte{0xBB}, 32)
+	rivalOurHash := bytes.Repeat([]byte{0xCC}, 32)
+
+	for _, tc := range []struct {
+		name string
+		// setup runs after the forger is built and before the forge
+		// cycle, standing up the ownership signals for the case.
+		setup     func(f *BlockForger)
+		wantCount float64
+		wantLevel string
+		wantLog   string
+		wantField string
+	}{
+		{
+			// SlotTracker holds our hash for the slot and it is the
+			// block on the primary chain tip: provably ours.
+			name: "our own block identified by hash is not counted",
+			setup: func(f *BlockForger) {
+				f.slotTracker.RecordForgedBlock(
+					leaderSlot,
+					primaryTipHash,
+				)
+			},
+			wantCount: 0,
+			wantLevel: `"level":"DEBUG"`,
+			wantLog:   "forge skip: slot already has our own block",
+			wantField: `"matched_by":"forged_block_hash"`,
+		},
+		{
+			// No tracked hash (a restart drops the in-memory
+			// tracker), but the durable fence says this node
+			// committed to the slot. Weaker, and deliberately
+			// resolved in favour of "ours".
+			name: "our own block identified by the fence is not counted",
+			setup: func(f *BlockForger) {
+				f.fenceLoaded = true
+				f.lastForgedSlot = leaderSlot
+			},
+			wantCount: 0,
+			wantLevel: `"level":"DEBUG"`,
+			wantLog:   "forge skip: slot already has our own block",
+			wantField: `"matched_by":"forge_fence"`,
+		},
+		{
+			// The control: we forged a DIFFERENT block for this
+			// slot, so the unapplied block at the tip is a rival's
+			// and the slot really was lost. The fence covers the
+			// slot too, proving the hash is the stronger signal
+			// and does not get masked by it.
+			name: "a rival block is still counted",
+			setup: func(f *BlockForger) {
+				f.slotTracker.RecordForgedBlock(
+					leaderSlot,
+					rivalOurHash,
+				)
+				f.fenceLoaded = true
+				f.lastForgedSlot = leaderSlot
+			},
+			wantCount: 1,
+			wantLevel: `"level":"WARN"`,
+			wantLog: "forge skip: primary chain tip already has " +
+				"a block at this slot",
+			wantField: `"leader_slot":true`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			forger, builder, broadcaster := newStaleTipTestForgerWithLeader(
+				t,
+				&forgerScheduleAwareLeader{
+					scheduled: map[uint64]struct{}{
+						leaderSlot: {},
+					},
+				},
+				leaderSlot,   // current slot
+				leaderSlot-2, // ledger-applied tip, still behind
+				leaderSlot,   // primary chain tip holds this slot
+				appliedHash,
+				primaryTipHash,
+				&logs,
+			)
+			tc.setup(forger)
+
+			require.NoError(
+				t,
+				forger.checkAndForgeProduction(context.Background()),
+			)
+
+			// The refusal is unconditional either way: a second
+			// block for a slot the chain already has one for is
+			// never forged, whoever produced the first.
+			require.Zero(t, builder.calls)
+			require.Zero(t, broadcaster.calls)
+
+			require.Contains(t, logs.String(), tc.wantLog)
+			require.Contains(t, logs.String(), tc.wantLevel)
+			require.Contains(t, logs.String(), tc.wantField)
+			require.Equal(
+				t,
+				tc.wantCount,
+				testutil.ToFloat64(
+					forger.metrics.forgeStaleTipSkipUnappliedRival,
+				),
+			)
+		})
+	}
+}

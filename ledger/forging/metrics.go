@@ -88,7 +88,11 @@ type forgingMetrics struct {
 	// could_not_forge -- so it is counted from the precomputed VRF schedule
 	// (isScheduledLeaderSlot), the same read that raises its log line to WARN.
 	// That basis fails quiet when no schedule is cached for the epoch, so it
-	// can under-count, never over-count.
+	// can under-count. It excludes this node's OWN just-forged block: when
+	// the unapplied block at the primary chain tip is one SlotTracker (or,
+	// failing that, the forge fence) claims for this slot, the skip is logged
+	// at Debug and nothing is counted, because that slot produced a block
+	// rather than losing one.
 	//
 	// The reasons do not share a diagnosis: "slot_gap",
 	// "primary_tip_hash_diverged" and "unapplied_rival_at_leader_slot" mean
