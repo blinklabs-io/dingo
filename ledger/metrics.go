@@ -151,11 +151,21 @@ type stateMetrics struct {
 	// cache advances, per this section's own doc comment); the unexpected
 	// counter tracks everything else reaching errorsChan (decode errors,
 	// non-Byron validation failures, apply-stage invariant violations),
-	// which should stay at 0 in healthy operation. Unlike the *Errors gauges
-	// above (owned by the pipeline's own snapshot), these are counters
+	// which should stay at 0 in healthy operation; the apply-pending-limit
+	// counter tracks pipeline.ErrPendingLimitExceeded (the apply stage's
+	// out-of-order buffer grew past MaxPendingBlocks because one stage
+	// worker fell behind its siblings -- a load signal, not a block
+	// failure: the item stays buffered and is applied in sequence); the
+	// shutdown counter tracks context.Canceled/context.DeadlineExceeded
+	// (BlockPipeline.Stop cancels the pipeline context before draining, so
+	// a stage worker mid-item at shutdown can report the cancellation
+	// instead of its item's outcome). Unlike the *Errors gauges above
+	// (owned by the pipeline's own snapshot), these are counters
 	// incremented directly as each error is drained.
 	blockPipelineExpectedEta0Errors       prometheus.Counter
 	blockPipelineDeferredEpochCacheErrors prometheus.Counter
+	blockPipelineApplyPendingLimitErrors  prometheus.Counter
+	blockPipelineShutdownErrors           prometheus.Counter
 	blockPipelineUnexpectedErrors         prometheus.Counter
 }
 
@@ -206,6 +216,33 @@ func (m *stateMetrics) incBlockPipelineDeferredEpochCacheError() {
 		return
 	}
 	m.blockPipelineDeferredEpochCacheErrors.Inc()
+}
+
+// incBlockPipelineApplyPendingLimitError records a block-processing pipeline
+// apply-stage backpressure signal drained from errorsChan
+// (pipeline.ErrPendingLimitExceeded): more out-of-order blocks were buffered
+// waiting for an earlier sequence number than MaxPendingBlocks allows. The
+// item is still buffered and still applied in sequence, so this is a
+// throughput/scheduling signal rather than a decode, validation, or apply
+// failure.
+func (m *stateMetrics) incBlockPipelineApplyPendingLimitError() {
+	if m == nil || m.blockPipelineApplyPendingLimitErrors == nil {
+		return
+	}
+	m.blockPipelineApplyPendingLimitErrors.Inc()
+}
+
+// incBlockPipelineShutdownError records a block-processing pipeline stage
+// worker reporting its own context cancellation
+// (context.Canceled/context.DeadlineExceeded) rather than an item outcome.
+// BlockPipeline.Stop cancels the pipeline context before it drains the
+// stages, so any worker mid-item when shutdown starts can report this; it
+// says the node is stopping, not that a block failed.
+func (m *stateMetrics) incBlockPipelineShutdownError() {
+	if m == nil || m.blockPipelineShutdownErrors == nil {
+		return
+	}
+	m.blockPipelineShutdownErrors.Inc()
 }
 
 // incBlockPipelineUnexpectedError records a block-processing pipeline error
@@ -501,6 +538,18 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_block_pipeline_deferred_epoch_cache_errors_total",
 			Help: "block-processing pipeline validate-stage errors drained from errorsChan classified as a transient epoch-cache lag behind an already-committed block; expected to resolve once the epoch cache catches up",
+		},
+	)
+	m.blockPipelineApplyPendingLimitErrors = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_block_pipeline_apply_pending_limit_errors_total",
+			Help: "block-processing pipeline apply-stage backpressure signals drained from errorsChan because the out-of-order pending buffer exceeded MaxPendingBlocks; the block is still buffered and applied in sequence, so this reports stage-worker scheduling lag rather than a block failure",
+		},
+	)
+	m.blockPipelineShutdownErrors = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_block_pipeline_shutdown_errors_total",
+			Help: "block-processing pipeline stage-worker context cancellations drained from errorsChan while the pipeline was stopping; expected on any shutdown with blocks still in flight and not a block failure",
 		},
 	)
 	m.blockPipelineUnexpectedErrors = promautoFactory.NewCounter(

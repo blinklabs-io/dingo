@@ -10281,10 +10281,17 @@ turning an unavailable nonce into a rejected chain.
 The pipeline's bounded `errorsChan` is continuously drained by
 `drainBlockPipelineErrors` for the lifetime of `LedgerState`; otherwise the
 workers would deadlock after enough deferred nonce-state errors. The drain
-classifies `errBlockPipelineEta0Unavailable` and
-`errHeaderVerificationDeferred` at debug level and reports other stage errors
-at error level. Enforcement happens from each `BlockItem`, where the decoded
-era and slot are available; the bare errors channel is observability only.
+classifies `errBlockPipelineEta0Unavailable`, `errHeaderVerificationDeferred`
+and `pipeline.ErrPendingLimitExceeded` at debug level, each under its own
+counter, and reports other stage errors at error level.
+`pipeline.ErrPendingLimitExceeded` is apply-stage backpressure rather than a
+block failure: when one stage worker falls behind its siblings, the sequence
+number the apply stage is waiting for stalls and later items pile into its
+out-of-order buffer. Past `MaxPendingBlocks` the item is still buffered and
+still applied in sequence, so a burst of these reports scheduling lag, not a
+block that failed or was dropped. Enforcement happens from each `BlockItem`,
+where the decoded era and slot are available; the bare errors channel is
+observability only.
 
 A genuine VRF/KES/OpCert rejection after persistence is returned as a
 `headerValidationError` carrying the rejected block point.
