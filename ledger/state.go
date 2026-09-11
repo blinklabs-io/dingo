@@ -3150,7 +3150,6 @@ func (ls *LedgerState) rollbackWithBlocks(
 	rollbackBlocks []models.Block,
 	publishResync bool,
 ) error {
-
 	// Rolling back to the point we already sit at is a no-op. Skip
 	// it entirely so we don't publish a "local ledger rollback"
 	// resync event for a rollback that didn't move the ledger. That
