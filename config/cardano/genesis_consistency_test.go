@@ -273,9 +273,13 @@ func TestEmbeddedConfigsPassGenesisConsistency(t *testing.T) {
 
 	for _, network := range networks {
 		t.Run(network, func(t *testing.T) {
+			configFile := network + "/config.json"
+			if network == "prime-testnet" {
+				configFile = network + "/configuration.yaml"
+			}
 			cfg, err := NewCardanoNodeConfigFromEmbedFS(
 				EmbeddedConfigFS,
-				network+"/config.json",
+				configFile,
 			)
 			require.NoError(t, err)
 			require.NoError(t, cfg.validateGenesisConsistency())
