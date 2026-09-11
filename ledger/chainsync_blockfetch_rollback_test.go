@@ -113,11 +113,17 @@ func newBlockfetchRollbackFixture(t *testing.T) *blockfetchRollbackFixture {
 		}),
 	)
 	base.ls.config.BlockfetchRequestRangeFunc = func(
-		_ ouroboros.ConnectionId,
+		connId ouroboros.ConnectionId,
 		start ocommon.Point,
 		_ ocommon.Point,
 	) error {
 		f.requests = append(f.requests, start)
+		// The production callback returns after BatchDone has been emitted.
+		// This synthetic callback has no protocol event, so release the
+		// request reservation before returning to the ledger.
+		f.ls.chainsyncBlockfetchMutex.Lock()
+		f.ls.completeBlockfetchRequestLocked(connId)
+		f.ls.chainsyncBlockfetchMutex.Unlock()
 		return nil
 	}
 	bus.SubscribeFunc(

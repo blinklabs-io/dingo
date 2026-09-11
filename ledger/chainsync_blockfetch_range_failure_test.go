@@ -53,8 +53,16 @@ func startQueuedBlockfetchForTest(
 	pending *pendingPublishes,
 ) error {
 	ls.chainsyncBlockfetchMutex.Lock()
-	defer ls.chainsyncBlockfetchMutex.Unlock()
-	return ls.startQueuedBlockfetchLocked(connId, pending)
+	err := ls.startQueuedBlockfetchLocked(connId, pending)
+	// The production callback returns after BatchDone has been emitted. This
+	// helper's synthetic callback returns without emitting an event, so model
+	// that protocol completion explicitly for callers that need to reuse the
+	// connection.
+	if err == nil {
+		ls.completeBlockfetchRequestLocked(connId)
+	}
+	ls.chainsyncBlockfetchMutex.Unlock()
+	return err
 }
 
 func startQueuedBlockfetchWithWaitSignalForTest(
@@ -144,6 +152,13 @@ func TestStartQueuedBlockfetchReleasesMutexAroundRequest(t *testing.T) {
 	require.NoError(t, err)
 
 	ls.chainsyncBlockfetchMutex.Lock()
+	assert.Contains(
+		t,
+		ls.blockfetchRequestsInFlight,
+		connIdKey(connId),
+		"a completed protocol request stays in flight until BatchDone is handled",
+	)
+	ls.completeBlockfetchRequestLocked(connId)
 	ls.blockfetchRequestRangeCleanup()
 	ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 	ls.chainsyncBlockfetchMutex.Unlock()

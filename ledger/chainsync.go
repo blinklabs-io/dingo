@@ -4536,7 +4536,6 @@ func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 		return err
 	}
 	ls.chainsyncBlockfetchMutex.Lock()
-	ls.endBlockfetchRequestLocked(connId, primaryRequestDone)
 	if ls.blockfetchPrimaryRequestGeneration == primaryRequestGeneration {
 		ls.blockfetchPrimaryRequestGeneration = 0
 		ls.resetBlockfetchInFlightTimeoutsLocked()
@@ -4630,7 +4629,9 @@ func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 					headerEnd,
 				)
 				ls.chainsyncBlockfetchMutex.Lock()
-				ls.endBlockfetchRequestLocked(shadowConn, shadowRequestDone)
+				if err != nil {
+					ls.endBlockfetchRequestLocked(shadowConn, shadowRequestDone)
+				}
 				delete(ls.blockfetchShadowRequestsInFlight, shadowConnKey)
 				if ls.chainsyncBlockfetchReadyChan != batchReadyChan {
 					return nil
@@ -4751,6 +4752,7 @@ func (ls *LedgerState) startQueuedBlockfetchFromEventLocked(
 // moves publication to after the mutex is released. A nil pubs publishes
 // immediately (the unlocked / test path), per pendingPublishes' nil-receiver
 // contract.
+//
 // blockfetchBatchSuperseded reports whether the primary chain has rolled back
 // since the batch that produced the buffered blocks was requested.
 //
@@ -4764,6 +4766,8 @@ func (ls *LedgerState) blockfetchBatchSuperseded() bool {
 		ls.chainRollbackGeneration.Load()
 }
 
+// flushPendingBlockfetchBlocksDeferred flushes the pending blocks into the
+// chain and queues their updates for publication after the mutex is released.
 func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 	pubs *pendingPublishes,
 ) error {
@@ -6902,6 +6906,21 @@ func (ls *LedgerState) endBlockfetchRequestLocked(
 	}
 }
 
+// completeBlockfetchRequestLocked releases a request after its BatchDone
+// event has been handled. GetBlockRange can return before the EventBus
+// subscriber drains that event; keeping the request in flight until then
+// prevents a same-connection restart from admitting old queued events.
+// The caller owns chainsyncBlockfetchMutex.
+func (ls *LedgerState) completeBlockfetchRequestLocked(
+	connId ouroboros.ConnectionId,
+) {
+	key := connIdKey(connId)
+	if done, ok := ls.blockfetchRequestsInFlight[key]; ok {
+		delete(ls.blockfetchRequestsInFlight, key)
+		close(done)
+	}
+}
+
 func (ls *LedgerState) resetBlockfetchInFlightTimeoutsLocked() {
 	ls.blockfetchInFlightTimeoutGeneration = 0
 	ls.blockfetchInFlightTimeoutCount = 0
@@ -7074,6 +7093,10 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(
 	e BlockfetchEvent,
 	pending *pendingPublishes,
 ) error {
+	// GetBlockRange may have returned before this event reached the ledger
+	// subscriber. Complete the request here so a same-connection restart waits
+	// for the old protocol request's events to drain.
+	ls.completeBlockfetchRequestLocked(e.ConnectionId)
 	// Drop batch-done from a stale connection (e.g., after connection switch).
 	// Accept it from either the primary or the shadow peer: in the near-tip
 	// shadow path the shadow can win the race and emit BatchDone before the
