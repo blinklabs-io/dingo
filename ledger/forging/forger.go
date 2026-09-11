@@ -389,13 +389,17 @@ type SlotClockProvider interface {
 }
 
 // ChainTipHashProvider is an optional extension of SlotClockProvider.
-// When the wired slot clock implements it, the forger can identify the
-// block sitting at the chain tip by hash instead of inferring ownership
-// of a slot from the forge fence alone.
 //
-// It is deliberately a separate, optional interface so that existing
-// SlotClockProvider implementations outside this repository keep
-// compiling; a clock that does not implement it falls back to the fence.
+// DEPRECATED, and no longer consulted by this package. It existed because
+// the previous SlotClockProvider.ChainTipSlot returned a bare slot, so the
+// tip hash had to be fetched through a second, separately-read method;
+// ChainTip now returns a point carrying both from one snapshot, which is
+// strictly better (the pair cannot straddle two tips), so tipBlockOwnership
+// takes the hash from there.
+//
+// The interface is retained rather than removed because it is exported API
+// that implementations outside this repository may still satisfy, and
+// satisfying it is harmless. Removing it is a separate API decision.
 type ChainTipHashProvider interface {
 	// ChainTipHash returns the block hash of the current chain tip, or
 	// nil when the chain is empty or the hash is unavailable.
@@ -1769,6 +1773,10 @@ const (
 // The result can only choose between skipping quietly and skipping
 // loudly; no branch of the equal-slot gate forges, so a wrong answer
 // here cannot produce a block.
+//
+// The tip is read once, not twice: ChainTip contracts for slot and hash
+// from a single snapshot, so this no longer compares a hash taken from
+// one tip against a slot taken from another.
 func (f *BlockForger) tipBlockOwnership(
 	slot uint64,
 ) (tipOwnership, []byte, []byte) {
@@ -1779,28 +1787,24 @@ func (f *BlockForger) tipBlockOwnership(
 	if !ok || len(forgedHash) == 0 {
 		return tipOwnershipUnknown, nil, nil
 	}
-	provider, hasTipHash := f.slotClock.(ChainTipHashProvider)
-	if !hasTipHash {
+	// The caller's tipSlot was sampled at the top of the forge cycle and the
+	// chain can move underneath it, so the tip is re-read here and nothing is
+	// concluded unless it still sits at the slot being decided.
+	//
+	// Slot and hash come from this ONE call because SlotClockProvider
+	// requires ChainTip to answer both from a single snapshot. That closes
+	// the window rather than narrowing it: the pair cannot straddle two
+	// different tips, so the hash compared below is by construction the hash
+	// of the block at tip.Slot, and a tip that moves mid-cycle can no longer
+	// have one block's hash judged against another block's slot.
+	tip := f.slotClock.ChainTip()
+	if tip.Slot != slot || len(tip.Hash) == 0 {
 		return tipOwnershipUnknown, nil, nil
 	}
-	tipHash := provider.ChainTipHash()
-	if len(tipHash) == 0 {
-		return tipOwnershipUnknown, nil, nil
+	if bytes.Equal(tip.Hash, forgedHash) {
+		return tipOwnershipOurs, forgedHash, tip.Hash
 	}
-	// The caller's tipSlot was sampled at the top of the forge cycle and
-	// the chain can move underneath it, so this hash need not belong to
-	// the slot being decided. Re-read the tip slot next to the hash and
-	// refuse to conclude anything if the tip is no longer at this slot.
-	// The two reads are still not atomic, so this narrows the window
-	// rather than closing it; every remaining disagreement resolves to
-	// tipOwnershipUnknown or to a Warn, never to a forge.
-	if f.slotClock.ChainTip().Slot != slot {
-		return tipOwnershipUnknown, nil, nil
-	}
-	if bytes.Equal(tipHash, forgedHash) {
-		return tipOwnershipOurs, forgedHash, tipHash
-	}
-	return tipOwnershipRival, forgedHash, tipHash
+	return tipOwnershipRival, forgedHash, tip.Hash
 }
 
 // unappliedTipOwnership decides whether the block sitting at the PRIMARY

@@ -760,19 +760,14 @@ func (a *slotClockAdapter) ChainTip() ocommon.Point {
 	return a.ledgerState.Tip().Point
 }
 
-// ChainTipHash satisfies forging.ChainTipHashProvider. It lets the
-// forger tell its own block at the current slot from a rival's by hash
-// rather than inferring it from the forge fence, which is in-memory only
-// when no fence store is wired. Both this and ChainTip read the same
-// tip snapshot; a tip that moves between the two reads simply fails the
-// hash match and falls back to the fence.
+// ChainTipHash satisfies the deprecated forging.ChainTipHashProvider. The
+// forger no longer calls it: it takes the tip hash from ChainTip above,
+// which returns slot and hash from one snapshot. Kept so the adapter still
+// satisfies that exported interface for any external caller.
 func (a *slotClockAdapter) ChainTipHash() []byte {
 	return a.ledgerState.Tip().Point.Hash
 }
 
-// The forger type-asserts for this optional interface, so losing the
-// method would silently fall back to the fence rather than fail to
-// build.
 var _ forging.ChainTipHashProvider = (*slotClockAdapter)(nil)
 
 // PrimaryChainTip returns the primary chain's BLOCK tip -- chain.Tip(), the
