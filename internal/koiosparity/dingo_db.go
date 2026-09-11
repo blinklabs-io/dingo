@@ -469,11 +469,54 @@ func (d *DingoDB) GetProtocolParams(
 		}
 		return nil, fmt.Errorf("pparams epoch %d: %w", epoch, err)
 	}
+
+	// See isSyntheticV2CostModel's doc comment and
+	// syntheticV2CostModelClearedEpochSyncKey for why this is read here
+	// rather than skipped: without it, a PlutusV2 model Dingo still holds
+	// only because HardForkBabbage fabricated it (dingo #3825) reads as a
+	// real value and compareCostModels has no way to tell it apart from an
+	// actual divergence (dingo #4127).
+	var clearedEpochVal sql.NullString
+	if err := queryRow(
+		`SELECT value FROM sync_state WHERE sync_key = ?`,
+		syntheticV2CostModelClearedEpochSyncKey,
+	).Scan(&clearedEpochVal); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf(
+			"synthetic v2 cost model cleared epoch: %w", err,
+		)
+	}
+	var clearedEpoch uint64
+	cleared := clearedEpochVal.Valid && clearedEpochVal.String != ""
+	if cleared {
+		clearedEpoch, err = strconv.ParseUint(clearedEpochVal.String, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"parse synthetic v2 cost model cleared epoch %q: %w",
+				clearedEpochVal.String,
+				err,
+			)
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit protocol params read: %w", err)
 	}
-	return decodeProtocolParams(cborBytes, eraID, sourceEpoch)
+	out, err := decodeProtocolParams(cborBytes, eraID, sourceEpoch)
+	if err != nil {
+		return nil, err
+	}
+	v2, hasV2 := out.CostModels["PlutusV2"]
+	out.SyntheticV2CostModel = isSyntheticV2CostModel(
+		v2, hasV2, epoch, clearedEpoch, cleared,
+	)
+	return out, nil
 }
+
+// syntheticV2CostModelClearedEpochSyncKey mirrors
+// database.SyntheticV2CostModelClearedEpochSyncKey (dingo #3825), duplicated
+// for the same reason mithrilLedgerSlotSyncKey above is: DingoDB reads a
+// separate raw SQL connection with no dependency on the database package.
+const syntheticV2CostModelClearedEpochSyncKey = "synthetic_v2_cost_model_cleared_epoch"
 
 // GetPoolEpochDataMap returns per-pool reward data assembled for Koios
 // reporting epoch K, keyed by pool-key-hash hex. Dingo's reward_pool_input/

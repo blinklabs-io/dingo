@@ -30,6 +30,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/stretchr/testify/require"
 )
 
@@ -642,6 +643,47 @@ func TestDatabaseSourceGetProtocolParams(t *testing.T) {
 	require.Nil(t, got)
 }
 
+// TestDatabaseSourceGetProtocolParamsMarksSyntheticV2CostModel is
+// DatabaseSource's half of TestDingoDBGetProtocolParamsMarksSyntheticV2CostModel
+// (dingo #4127): both RewardParitySource implementations must classify the
+// same fabricated-default row the same way, since checkEpoch's comparison
+// logic is shared between them.
+func TestDatabaseSourceGetProtocolParamsMarksSyntheticV2CostModel(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDatabaseSourceDB(t)
+	sqlDB := sourceSQLDB(t, db)
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+
+	seedEpochEra(t, sqlDB, 3, 5)
+	seedPParams(t, sqlDB, 1, 259_200, 3, 5,
+		loadPParamsFixture(t, "pparams_preview_epoch2_babbage.hex"))
+
+	got, err := source.GetProtocolParams(context.Background(), 3)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.True(t, got.SyntheticV2CostModel)
+
+	require.NoError(t, sqlDB.Exec(
+		`INSERT INTO sync_state (sync_key, value) VALUES (?, ?)`,
+		syntheticV2CostModelClearedEpochSyncKey, "9",
+	).Error)
+
+	got, err = source.GetProtocolParams(context.Background(), 3)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.True(t, got.SyntheticV2CostModel,
+		"epoch 3 predates the epoch-9 confirmation and must stay synthetic")
+
+	seedEpochEra(t, sqlDB, 9, 5)
+	got, err = source.GetProtocolParams(context.Background(), 9)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.False(t, got.SyntheticV2CostModel,
+		"epoch 9 is at the confirming epoch and must no longer read as synthetic")
+}
+
 // seedProtocolParamsCheckFixture builds the smallest Dingo+cache pair that
 // Check reports a clean PASS for at koiosEpoch, so a test can then perturb
 // exactly one protocol-parameter input and attribute the result to it.
@@ -1054,4 +1096,214 @@ func TestDingoDBGetProtocolParamsDecodesCostModels(t *testing.T) {
 	// Entry-for-entry equality with what Koios publishes for the same epoch
 	// is the property the comparison depends on.
 	require.Equal(t, costModelFixture(t), got.CostModels)
+}
+
+// TestIsSyntheticV2CostModel pins isSyntheticV2CostModel's classification
+// (dingo #4127): the durable cleared-epoch marker is authoritative when
+// present, and the value-based comparison against
+// eras.DefaultPlutusV2CostModel is only a fallback for when it is absent.
+func TestIsSyntheticV2CostModel(t *testing.T) {
+	t.Parallel()
+
+	realModel := append([]int64{}, eras.DefaultPlutusV2CostModel...)
+	realModel[0]++ // any value that is provably not the fabricated default
+
+	cases := []struct {
+		name         string
+		v2           []int64
+		hasV2        bool
+		targetEpoch  uint64
+		clearedEpoch uint64
+		cleared      bool
+		want         bool
+	}{
+		{
+			name:  "no V2 model at all is never synthetic",
+			hasV2: false,
+			v2:    eras.DefaultPlutusV2CostModel,
+			want:  false,
+		},
+		{
+			name:         "cleared and at the confirming epoch overrides a default-looking value",
+			hasV2:        true,
+			v2:           eras.DefaultPlutusV2CostModel,
+			targetEpoch:  9,
+			clearedEpoch: 9,
+			cleared:      true,
+			want:         false,
+		},
+		{
+			name:         "cleared and past the confirming epoch",
+			hasV2:        true,
+			v2:           eras.DefaultPlutusV2CostModel,
+			targetEpoch:  12,
+			clearedEpoch: 9,
+			cleared:      true,
+			want:         false,
+		},
+		{
+			name:         "cleared but the target epoch predates confirmation, value is the default",
+			hasV2:        true,
+			v2:           eras.DefaultPlutusV2CostModel,
+			targetEpoch:  5,
+			clearedEpoch: 9,
+			cleared:      true,
+			want:         true,
+		},
+		{
+			name:         "cleared but the target epoch predates confirmation, value is real",
+			hasV2:        true,
+			v2:           realModel,
+			targetEpoch:  5,
+			clearedEpoch: 9,
+			cleared:      true,
+			want:         false,
+		},
+		{
+			name:        "no cleared-epoch marker, value matches the fabricated default",
+			hasV2:       true,
+			v2:          eras.DefaultPlutusV2CostModel,
+			targetEpoch: 5,
+			cleared:     false,
+			want:        true,
+		},
+		{
+			name:        "no cleared-epoch marker, value is real",
+			hasV2:       true,
+			v2:          realModel,
+			targetEpoch: 5,
+			cleared:     false,
+			want:        false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := isSyntheticV2CostModel(
+				tc.v2, tc.hasV2, tc.targetEpoch, tc.clearedEpoch, tc.cleared,
+			)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestCompareEpochProtocolParamsSyntheticV2CostModelIsInformational is the
+// regression for dingo #4127: a from-genesis Preview replay reported
+// pparams_cost_model_plutus_v2 as a FAIL for epochs 3-8, where Dingo holds
+// HardForkBabbage's fabricated PlutusV2 default (dingo #3825) and Koios
+// correctly has no PlutusV2 model at all -- both sides agree no real model
+// exists yet, so this must classify as informational, not a divergence.
+//
+// Discriminates: with SyntheticV2CostModel left false (or the classification
+// removed), this reports CategoryValueMismatch and DetermineStatus is FAIL.
+func TestCompareEpochProtocolParamsSyntheticV2CostModelIsInformational(t *testing.T) {
+	t.Parallel()
+
+	models := costModelFixture(t)
+	dingo := dingoPParamsPreview380()
+	dingo.CostModels = map[string][]int64{
+		"PlutusV1": models["PlutusV1"],
+		"PlutusV2": eras.DefaultPlutusV2CostModel,
+	}
+	dingo.SyntheticV2CostModel = true
+	koios := koiosPParamsPreview380()
+	koios.CostModels = koiosCostModelsJSON(
+		t, map[string][]int64{"PlutusV1": models["PlutusV1"]},
+	)
+
+	got := CompareEpochProtocolParams(
+		"preview", 5, koios, dingo, nil, time.Now(), 0, time.Time{},
+	)
+	require.Len(t, got, 1)
+	require.Equal(t, "pparams_cost_model_plutus_v2", got[0].Field)
+	require.Equal(t, CategoryCostModelSynthetic, got[0].Category)
+	require.Equal(t, StatusPass, DetermineStatus(got))
+	require.Equal(t, 0, CountSignificant(got))
+}
+
+// TestCompareEpochProtocolParamsRealV2CostModelAheadOfKoiosStillFails is the
+// negative case for #4127's fix: when Dingo's PlutusV2 model is NOT flagged
+// synthetic, a Koios-side absence stays a real, wedge-class divergence
+// (FAIL) exactly as before. SyntheticV2CostModel is the only thing that may
+// downgrade this classification.
+func TestCompareEpochProtocolParamsRealV2CostModelAheadOfKoiosStillFails(t *testing.T) {
+	t.Parallel()
+
+	models := costModelFixture(t)
+	dingo := dingoPParamsPreview380()
+	dingo.CostModels = map[string][]int64{
+		"PlutusV1": models["PlutusV1"],
+		"PlutusV2": models["PlutusV2"],
+	}
+	dingo.SyntheticV2CostModel = false
+	koios := koiosPParamsPreview380()
+	koios.CostModels = koiosCostModelsJSON(
+		t, map[string][]int64{"PlutusV1": models["PlutusV1"]},
+	)
+
+	got := CompareEpochProtocolParams(
+		"preview", 5, koios, dingo, nil, time.Now(), 0, time.Time{},
+	)
+	require.Len(t, got, 1)
+	require.Equal(t, "pparams_cost_model_plutus_v2", got[0].Field)
+	require.Equal(t, CategoryValueMismatch, got[0].Category)
+	require.Equal(t, StatusFail, DetermineStatus(got))
+	require.Equal(t, 1, CountSignificant(got))
+}
+
+// TestDingoDBGetProtocolParamsMarksSyntheticV2CostModel is the DB-layer half
+// of #4127's regression, using the exact shape the issue reported: a real
+// preview Babbage pparams row (pparams_preview_epoch2_babbage.hex) whose
+// PlutusV2 cost model is byte-for-byte HardForkBabbage's fabricated default,
+// resolved for epochs before and after the durable cleared-epoch marker
+// records the real update landing.
+func TestDingoDBGetProtocolParamsMarksSyntheticV2CostModel(t *testing.T) {
+	t.Parallel()
+
+	dingo, gdb := openTestDingoDB(t)
+	defer dingo.Close() //nolint:errcheck
+
+	seedEpochEra(t, gdb, 3, 5)
+	seedPParams(t, gdb, 1, 259_200, 3, 5,
+		loadPParamsFixture(t, "pparams_preview_epoch2_babbage.hex"))
+
+	// No cleared-epoch marker recorded yet: falls back to the value-based
+	// heuristic, and this fixture's PlutusV2 model is exactly the default.
+	got, err := dingo.GetProtocolParams(context.Background(), 3)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.True(t, got.SyntheticV2CostModel)
+
+	// Record that real PlutusV2 data was confirmed at epoch 9 (the boundary
+	// the issue reported).
+	require.NoError(t, gdb.Exec(
+		`INSERT INTO sync_state (sync_key, value) VALUES (?, ?)`,
+		syntheticV2CostModelClearedEpochSyncKey, "9",
+	).Error)
+
+	// Epoch 5 still resolves to the epoch-3 fabricated row and still
+	// predates the confirming epoch: still synthetic.
+	seedEpochEra(t, gdb, 5, 5)
+	got, err = dingo.GetProtocolParams(context.Background(), 5)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.True(t, got.SyntheticV2CostModel)
+
+	// Epoch 9 itself is at the confirming epoch: no longer synthetic, even
+	// though no new pparams row has landed yet and the value is unchanged.
+	seedEpochEra(t, gdb, 9, 5)
+	got, err = dingo.GetProtocolParams(context.Background(), 9)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.False(t, got.SyntheticV2CostModel)
+
+	// A real update landing at epoch 9 also resolves as not synthetic
+	// through the normal value path, matching the marker.
+	seedPParams(t, gdb, 2, 2_000_000, 9, 5,
+		loadPParamsFixture(t, "pparams_preview_epoch22_babbage.hex"))
+	got, err = dingo.GetProtocolParams(context.Background(), 9)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, uint64(9), got.SourceEpoch)
+	require.False(t, got.SyntheticV2CostModel)
 }

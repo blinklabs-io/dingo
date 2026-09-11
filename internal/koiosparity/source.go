@@ -588,11 +588,33 @@ func (s *DatabaseSource) GetProtocolParams(
 	if len(rows) == 0 {
 		return nil, nil
 	}
-	return decodeProtocolParams(
+	out, err := decodeProtocolParams(
 		rows[0].Cbor,
 		epochRow.EraId,
 		rows[0].Epoch,
 	)
+	if err != nil {
+		return nil, err
+	}
+	// See isSyntheticV2CostModel's doc comment (dingo #4127, following
+	// #3825's design): the durable cleared-epoch marker is the same one
+	// ledger.queryShelleyCurrentProtocolParams reads for its own historical
+	// path, read here directly via the database package rather than
+	// DingoDB's duplicated raw-SQL copy since this source already holds a
+	// live *database.Database.
+	clearedEpoch, cleared, err := database.SyntheticV2CostModelClearedEpoch(
+		s.db, txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"synthetic v2 cost model cleared epoch: %w", err,
+		)
+	}
+	v2, hasV2 := out.CostModels["PlutusV2"]
+	out.SyntheticV2CostModel = isSyntheticV2CostModel(
+		v2, hasV2, epoch, clearedEpoch, cleared,
+	)
+	return out, nil
 }
 
 // GetRewardAccountOutputs returns every per-account reward calculation
