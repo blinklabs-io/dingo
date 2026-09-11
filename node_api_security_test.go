@@ -27,9 +27,11 @@ import (
 )
 
 // TestAPIProviderConfigMergesTopLevelDefault asserts a provider selection
-// with no tls/auth of its own inherits the shared api.tls/api.auth
+// with no tls of its own inherits the shared api.tls
 // policy.
 func TestAPIProviderConfigMergesTopLevelDefault(t *testing.T) {
+	t.Parallel()
+
 	cfg := Config{
 		apiConfig: internalconfig.APIConfig{
 			TLS: apiconfig.TLSPolicy{
@@ -61,6 +63,8 @@ func TestAPIProviderConfigMergesTopLevelDefault(t *testing.T) {
 // TestAPIProviderConfigProviderOverrideWins asserts an explicit provider
 // field beats the shared top-level default for that field only.
 func TestAPIProviderConfigProviderOverrideWins(t *testing.T) {
+	t.Parallel()
+
 	cfg := Config{
 		apiConfig: internalconfig.APIConfig{
 			TLS: apiconfig.TLSPolicy{
@@ -95,35 +99,6 @@ func TestAPIProviderConfigProviderOverrideWins(t *testing.T) {
 	assert.Equal(t, "/shared/key.pem", effective.KeyFilePath)
 }
 
-// TestAPIProviderConfigExplicitDisableOverridesInherited asserts a
-// provider can turn off an inherited auth policy explicitly.
-func TestAPIProviderConfigExplicitDisableOverridesInherited(t *testing.T) {
-	cfg := Config{
-		apiConfig: internalconfig.APIConfig{
-			Auth: apiconfig.AuthPolicy{
-				Mode:  new("token"),
-				Token: new("shared-secret"),
-			},
-		},
-	}
-	selection := plugin.Selection{
-		Provider: "builtin",
-		Config: map[string]any{
-			"port": uint(8080),
-			"auth": map[string]any{"mode": "disabled"},
-		},
-	}
-
-	merged, err := cfg.apiProviderConfig(plugin.CapabilityAPIMesh, selection)
-	require.NoError(t, err)
-
-	authPolicy, err := apiconfig.DecodeAuthPolicy(merged.Config)
-	require.NoError(t, err)
-	effective, err := authPolicy.Resolve("test")
-	require.NoError(t, err)
-	assert.False(t, effective.Enabled)
-}
-
 // TestLegacyUtxorpcTLSPolicyIsUtxorpcOnly asserts the legacy root
 // tlsCertFilePath/tlsKeyFilePath compatibility fields feed only UTxORPC's
 // default TLS policy, never Blockfrost's or Mesh's -- promoting them to
@@ -131,6 +106,8 @@ func TestAPIProviderConfigExplicitDisableOverridesInherited(t *testing.T) {
 // to TLS on upgrade for any deployment that had set them (see
 // legacyUtxorpcTLSPolicy's own doc comment).
 func TestLegacyUtxorpcTLSPolicyIsUtxorpcOnly(t *testing.T) {
+	t.Parallel()
+
 	cfg := Config{
 		tlsCertFilePath: "/legacy/cert.pem",
 		tlsKeyFilePath:  "/legacy/key.pem",
@@ -172,6 +149,8 @@ func TestLegacyUtxorpcTLSPolicyIsUtxorpcOnly(t *testing.T) {
 // the canonical-over-compatibility precedence used elsewhere (e.g.
 // applyAPIPortCompatibilityEnvironment).
 func TestLegacyUtxorpcTLSPolicyYieldsToExplicitPolicy(t *testing.T) {
+	t.Parallel()
+
 	cfg := Config{
 		tlsCertFilePath: "/legacy/cert.pem",
 		tlsKeyFilePath:  "/legacy/key.pem",
@@ -199,6 +178,8 @@ func TestLegacyUtxorpcTLSPolicyYieldsToExplicitPolicy(t *testing.T) {
 // key pair in the shared api.tls default is rejected at New(), before any
 // listener starts -- not merely logged or deferred to Start() time.
 func TestNewRejectsInvalidMergedAPITLSPolicy(t *testing.T) {
+	t.Parallel()
+
 	cardanoCfg := newNodeTestCardanoNodeCfg(t)
 	_, err := New(NewConfig(
 		WithDatabasePath(t.TempDir()),
@@ -225,28 +206,29 @@ func TestNewRejectsInvalidMergedAPITLSPolicy(t *testing.T) {
 	assert.Contains(t, err.Error(), "must both be set")
 }
 
-// TestNewRejectsInvalidAPIAuthMode asserts an invalid auth mode is
-// likewise rejected at New().
-func TestNewRejectsInvalidAPIAuthMode(t *testing.T) {
+// TestNewAllowsUnauthenticatedPublicAPI verifies the shared Node constructor
+// permits an intentionally public API without requiring authentication.
+func TestNewAllowsUnauthenticatedPublicAPI(t *testing.T) {
+	t.Parallel()
 	cardanoCfg := newNodeTestCardanoNodeCfg(t)
-	_, err := New(NewConfig(
+	node, err := New(NewConfig(
 		WithDatabasePath(t.TempDir()),
 		WithCardanoNodeConfig(cardanoCfg),
 		WithNetworkMagic(cardanoCfg.ShelleyGenesis().NetworkMagic),
 		WithPrometheusRegistry(prometheus.NewRegistry()),
 		WithStorageMode(StorageModeAPI),
+		WithBindAddr("0.0.0.0"),
 		WithListeners(ListenerConfig{
 			ListenNetwork: "tcp",
 			ListenAddress: "127.0.0.1:0",
 		}),
 		WithMidnightConfig(MidnightConfig{Port: 0}),
 		WithShutdownTimeout(5*time.Second),
-		WithAPIConfig(internalconfig.APIConfig{
-			Auth: apiconfig.AuthPolicy{Mode: new("bogus")},
-		}),
 	))
 
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "config.auth")
-	assert.Contains(t, err.Error(), "invalid mode")
+	require.NoError(t, err)
+	require.NotNil(t, node)
+	t.Cleanup(func() {
+		assert.NoError(t, node.Stop())
+	})
 }

@@ -39,6 +39,8 @@ import (
 // (η == candidateNonce) and failing every leader-VRF check in that epoch (the
 // Dijkstra/Leios at-tip wedge).
 func TestHealEmptyLabNoncesRepairsAndRecomputes(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
@@ -131,6 +133,8 @@ func TestHealEmptyLabNoncesRepairsAndRecomputes(t *testing.T) {
 // runtime nonce, so an epoch older than the window must be left untouched even
 // when it has a repairable (empty) lab.
 func TestHealEmptyLabNoncesBoundsToRecentEpochs(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
@@ -185,6 +189,8 @@ func TestHealEmptyLabNoncesBoundsToRecentEpochs(t *testing.T) {
 // rather than left stale. Without the predecessor the first in-window nonce
 // check has no verified previous lab and is skipped.
 func TestHealEmptyLabNoncesRepairsOldestInWindowNonce(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
@@ -247,6 +253,8 @@ func TestHealEmptyLabNoncesRepairsOldestInWindowNonce(t *testing.T) {
 // no-op when no epoch has a repairable lab mismatch — it must not perturb
 // correct state.
 func TestHealEmptyLabNoncesLeavesValidRecordsUntouched(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
@@ -277,6 +285,8 @@ func TestHealEmptyLabNoncesLeavesValidRecordsUntouched(t *testing.T) {
 }
 
 func TestHealEmptyLabNoncesLeavesParentHashLabUntouched(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
@@ -327,6 +337,8 @@ func TestHealEmptyLabNoncesLeavesParentHashLabUntouched(t *testing.T) {
 // epoch's nonce cannot be re-verified would wedge the next rollover. The
 // nonce itself must be left untouched (no candidate to recompute it from).
 func TestHealEmptyLabNoncesRepairsLabWhenCandidateMissing(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
@@ -377,6 +389,8 @@ func TestHealEmptyLabNoncesRepairsLabWhenCandidateMissing(t *testing.T) {
 // TestHealEmptyLabNoncesRepairsEmptyLabWithoutCandidate mirrors the test above
 // for an empty (rather than stale) lab.
 func TestHealEmptyLabNoncesRepairsEmptyLabWithoutCandidate(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
@@ -423,6 +437,8 @@ func TestHealEmptyLabNoncesRepairsEmptyLabWithoutCandidate(t *testing.T) {
 func TestHealEmptyLabNoncesSkipsMissingCandidateBeforeBoundaryLookup(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	oldLab := bytes.Repeat([]byte{0x99}, 32)
 	oldNonce := bytes.Repeat([]byte{0xaa}, 32)
 	epochs := []models.Epoch{
@@ -457,6 +473,8 @@ func TestHealEmptyLabNoncesSkipsMissingCandidateBeforeBoundaryLookup(
 // nil lab — rewriting it would diverge the next boundary's eta on any chain
 // with a Byron era (mainnet, preprod).
 func TestHealEmptyLabNoncesLeavesFirstPraosEpochLabNeutral(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
@@ -509,6 +527,8 @@ func TestHealEmptyLabNoncesLeavesFirstPraosEpochLabNeutral(t *testing.T) {
 }
 
 func TestHealEmptyLabNoncesTrustsMithrilCoveredEpoch(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
@@ -554,6 +574,8 @@ func TestHealEmptyLabNoncesTrustsMithrilCoveredEpoch(t *testing.T) {
 }
 
 func TestHealEmptyLabNoncesInPlaceRepairsReloadedEpochs(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
@@ -609,6 +631,8 @@ func TestHealEmptyLabNoncesInPlaceRepairsReloadedEpochs(t *testing.T) {
 }
 
 func TestLoadEpochsRefreshesCurrentEpochAfterHealing(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)

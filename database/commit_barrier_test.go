@@ -43,6 +43,8 @@ import (
 // it — the open transaction can't reach Commit's release because
 // PauseCommits already holds the exclusive side.
 func TestPauseCommitsBlocksNewReadWriteTxns(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 
 	resume := db.PauseCommits()
@@ -107,6 +109,8 @@ func TestPauseCommitsBlocksNewReadWriteTxns(t *testing.T) {
 // blob-only Txn opens promptly even while a PauseCommits call is queued
 // and blocked behind an unrelated open read-write Txn.
 func TestBlobOnlyTxnDoesNotBlockOnPendingPauseCommits(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 
 	outer := db.Transaction(true)
@@ -167,6 +171,8 @@ func TestBlobOnlyTxnDoesNotBlockOnPendingPauseCommits(t *testing.T) {
 // abandoned acquisition attempt underneath self-released rather than
 // leaving the barrier stranded held with no one left to call resume.
 func TestPauseCommitsContextReturnsPromptlyWhenCancelled(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 
 	outer := db.Transaction(true)
@@ -249,6 +255,8 @@ func TestPauseCommitsContextReturnsPromptlyWhenCancelled(t *testing.T) {
 // naive "just stop waiting" cancellation leaves the new RLock blocked
 // until the original reader eventually releases.
 func TestPauseCommitsContextCancellationDoesNotStallLaterTxns(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 
 	db.commitBarrier.RLock()
@@ -343,6 +351,8 @@ func (c *controlledCtx) setErr(err error) {
 // lockContext's blocked select to wake is that reader release -- exactly
 // the race window the fix must catch.
 func TestPauseCommitsContextChecksCtxErrAfterReaderReleaseRace(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 
 	// Simulated reader, occupying the barrier's read side -- see
@@ -406,6 +416,8 @@ func TestPauseCommitsContextChecksCtxErrAfterReaderReleaseRace(t *testing.T) {
 // non-cancelled path still works exactly like PauseCommits when nothing
 // is holding the barrier.
 func TestPauseCommitsContextSucceedsWhenUncontended(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 	resume, err := db.PauseCommitsContext(context.Background())
 	require.NoError(t, err)
@@ -417,6 +429,8 @@ func TestPauseCommitsContextSucceedsWhenUncontended(t *testing.T) {
 // second time panics instead of silently succeeding as a no-op, matching
 // the one-shot contract PauseCommits/PauseCommitsContext document.
 func TestUnlockPanicsOnDoubleUnlock(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 	resume := db.PauseCommits()
 	resume()
@@ -433,6 +447,8 @@ func TestUnlockPanicsOnDoubleUnlock(t *testing.T) {
 // the time the stale call runs, reopening that later holder's critical
 // section to new read-write Txns before its own resume was ever called.
 func TestUnlockRejectsStaleTokenAfterLaterAcquisition(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 
 	resume1 := db.PauseCommits()
@@ -469,6 +485,8 @@ func TestUnlockRejectsStaleTokenAfterLaterAcquisition(t *testing.T) {
 // new read-write transactions, not reads — a paused snapshot must not
 // stall unrelated read-only query traffic against the same database.
 func TestPauseCommitsAllowsConcurrentReads(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 	require.NoError(t, db.BlockCreate(testIndexedBlock(10, 1, 0x01), nil))
 

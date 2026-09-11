@@ -45,6 +45,8 @@ func testManifest() lifecycle.Manifest {
 // TestManifestRoundTrip verifies that a written manifest reads back with
 // matching fields, a valid checksum, and the current format version.
 func TestManifestRoundTrip(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	require.NoError(t, lifecycle.WriteManifest(dir, testManifest()))
 
@@ -59,6 +61,8 @@ func TestManifestRoundTrip(t *testing.T) {
 // TestManifestDetectsTamperedContent verifies that a hand-edited manifest
 // fails checksum validation with the ErrManifestCorrupted sentinel.
 func TestManifestDetectsTamperedContent(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	require.NoError(t, lifecycle.WriteManifest(dir, testManifest()))
 
@@ -89,6 +93,8 @@ func TestManifestDetectsTamperedContent(t *testing.T) {
 // TestManifestRejectsNewerFormatVersion verifies that a manifest whose
 // formatVersion exceeds what this build understands is rejected.
 func TestManifestRejectsNewerFormatVersion(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	m := testManifest()
 	require.NoError(t, lifecycle.WriteManifest(dir, m))
@@ -118,6 +124,8 @@ func TestManifestRejectsNewerFormatVersion(t *testing.T) {
 // WriteManifest cleans up after itself: only the final manifest.json
 // remains, no stray same-directory temp file used for the atomic rename.
 func TestWriteManifestLeavesNoLeftoverTempFile(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	require.NoError(t, lifecycle.WriteManifest(dir, testManifest()))
 
@@ -141,6 +149,8 @@ func TestWriteManifestLeavesNoLeftoverTempFile(t *testing.T) {
 // touching whatever was already there, and without leaving its own temp
 // file behind.
 func TestWriteManifestFailureLeavesExistingManifestUntouched(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	manifestPath := filepath.Join(dir, lifecycle.ManifestFileName)
 	require.NoError(t, os.Mkdir(manifestPath, 0o755))
@@ -164,6 +174,8 @@ func TestWriteManifestFailureLeavesExistingManifestUntouched(t *testing.T) {
 }
 
 func TestCheckPluginMatch(t *testing.T) {
+	t.Parallel()
+
 	m := testManifest()
 	require.NoError(t, m.CheckPluginMatch("badger", "sqlite"))
 	require.Error(t, m.CheckPluginMatch("gcs", "sqlite"))
@@ -173,6 +185,8 @@ func TestCheckPluginMatch(t *testing.T) {
 // TestLabelSnapshotSetsNameAndDescription verifies that LabelSnapshot
 // sets Name/Description and rewrites the manifest with all else unchanged.
 func TestLabelSnapshotSetsNameAndDescription(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	require.NoError(t, lifecycle.WriteManifest(dir, testManifest()))
 
@@ -192,6 +206,8 @@ func TestLabelSnapshotSetsNameAndDescription(t *testing.T) {
 // TestLabelSnapshotMissingManifestErrors verifies that labeling a
 // directory with no manifest.json returns an error.
 func TestLabelSnapshotMissingManifestErrors(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	err := lifecycle.LabelSnapshot(dir, "name", "description")
 	require.Error(t, err)
@@ -201,6 +217,8 @@ func TestLabelSnapshotMissingManifestErrors(t *testing.T) {
 // passes when a gate the manifest recorded has an identical value in the
 // caller's configured map.
 func TestCheckGateMatchAcceptsIdenticalGates(t *testing.T) {
+	t.Parallel()
+
 	m := lifecycle.Manifest{Gates: nodesettings.Values{"network_magic": "1"}}
 	require.NoError(
 		t,
@@ -211,6 +229,8 @@ func TestCheckGateMatchAcceptsIdenticalGates(t *testing.T) {
 // TestCheckGateMatchRejectsDifferingGate verifies that CheckGateMatch
 // errors, naming the gate, when a gate present in both maps disagrees.
 func TestCheckGateMatchRejectsDifferingGate(t *testing.T) {
+	t.Parallel()
+
 	m := lifecycle.Manifest{Gates: nodesettings.Values{"network_magic": "1"}}
 	err := m.CheckGateMatch(nodesettings.Values{"network_magic": "2"})
 	require.Error(t, err)
@@ -222,6 +242,8 @@ func TestCheckGateMatchRejectsDifferingGate(t *testing.T) {
 // (e.g. a genesis hash gate when the caller has no cardano config loaded)
 // is not an error -- CheckGateMatch only compares gates present in both.
 func TestCheckGateMatchIgnoresGatesTheTargetDoesNotKnow(t *testing.T) {
+	t.Parallel()
+
 	m := lifecycle.Manifest{Gates: nodesettings.Values{
 		"network_magic":         "1",
 		"dijkstra_genesis_hash": "dddd",
@@ -237,6 +259,8 @@ func TestCheckGateMatchIgnoresGatesTheTargetDoesNotKnow(t *testing.T) {
 // use, rather than reaching for the unexported checksum method: two
 // manifests differing only in Gates must produce different checksums.
 func TestChecksumCoversGates(t *testing.T) {
+	t.Parallel()
+
 	dirA, dirB := t.TempDir(), t.TempDir()
 	a := lifecycle.Manifest{Gates: nodesettings.Values{"network_magic": "1"}}
 	b := lifecycle.Manifest{Gates: nodesettings.Values{"network_magic": "2"}}
@@ -254,6 +278,8 @@ func TestChecksumCoversGates(t *testing.T) {
 // IS the snapshot's, so its identity always differs from whatever the
 // caller had, and comparing it would fail every restore.
 func TestCheckGateMatchIgnoresBlobStoreID(t *testing.T) {
+	t.Parallel()
+
 	m := lifecycle.Manifest{Gates: nodesettings.Values{
 		"blob_store_id": "aaaa-from-snapshot",
 	}}
@@ -269,6 +295,8 @@ func TestCheckGateMatchIgnoresBlobStoreID(t *testing.T) {
 // mismatch -- otherwise every older snapshot becomes unrestorable the
 // moment a new gate is added to the registry.
 func TestCheckGateMatchToleratesGateMissingFromOlderSnapshot(t *testing.T) {
+	t.Parallel()
+
 	m := lifecycle.Manifest{Gates: nodesettings.Values{
 		"network_magic": "1",
 	}}
@@ -285,6 +313,8 @@ func TestCheckGateMatchToleratesGateMissingFromOlderSnapshot(t *testing.T) {
 // upgrade at startup (LatchBool moves off-to-on, never back). Restore must
 // agree with startup enforcement instead of being stricter than it.
 func TestCheckGateMatchAcceptsPermittedLatchUpgrade(t *testing.T) {
+	t.Parallel()
+
 	m := lifecycle.Manifest{Gates: nodesettings.Values{
 		"history_expiry_active": "off",
 	}}
@@ -299,6 +329,8 @@ func TestCheckGateMatchAcceptsPermittedLatchUpgrade(t *testing.T) {
 // off once a database has run with it on), so applying the registry's
 // policy instead of raw equality must not accidentally loosen this side.
 func TestCheckGateMatchRejectsForbiddenLatchDowngrade(t *testing.T) {
+	t.Parallel()
+
 	m := lifecycle.Manifest{Gates: nodesettings.Values{
 		"history_expiry_active": "on",
 	}}

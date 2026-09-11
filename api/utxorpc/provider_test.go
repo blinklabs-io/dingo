@@ -64,7 +64,7 @@ func providerDeps(t *testing.T) ProviderDependencies {
 }
 
 // resolveOnFreePortWithConfig resolves the built-in UTxO RPC provider on a
-// free loopback port with extra config fields (e.g. "tls"/"auth") merged
+// free loopback port with extra config fields (e.g. "tls") merged
 // alongside "port", retrying on a lost race for the port. The provider
 // dependencies (including the EventBus) are built once and reused across
 // every attempt, rather than one per attempt.
@@ -139,27 +139,7 @@ func TestProviderRejectsPartialTLSPair(t *testing.T) {
 	require.ErrorContains(t, err, "must both be set")
 }
 
-func TestProviderRejectsInvalidAuthMode(t *testing.T) {
-	host := newProviderHost(t)
-
-	_, err := plugin.Resolve[*Utxorpc](
-		t.Context(),
-		host,
-		plugin.CapabilityAPIUtxorpc,
-		"builtin",
-		map[string]any{
-			"port": freeLoopbackPort(t),
-			"auth": map[string]any{"mode": "bogus"},
-		},
-		providerDeps(t),
-	)
-
-	require.Error(t, err)
-	require.ErrorContains(t, err, "plugins.api.utxorpc.config.auth")
-	require.ErrorContains(t, err, "invalid mode")
-}
-
-func TestProviderPropagatesTLSAndAuth(t *testing.T) {
+func TestProviderPropagatesTLS(t *testing.T) {
 	host := newProviderHost(t)
 	certPath, keyPath := testutil.GenerateTestTLSCertKey(t)
 
@@ -169,15 +149,9 @@ func TestProviderPropagatesTLSAndAuth(t *testing.T) {
 			"certFilePath": certPath,
 			"keyFilePath":  keyPath,
 		},
-		"auth": map[string]any{
-			"mode":  "token",
-			"token": "shared-secret",
-		},
 	})
 
 	require.True(t, srv.config.TLS.Enabled)
 	require.Equal(t, certPath, srv.config.TLS.CertFilePath)
 	require.Equal(t, keyPath, srv.config.TLS.KeyFilePath)
-	require.True(t, srv.config.Auth.Enabled)
-	require.Equal(t, "shared-secret", srv.config.Auth.Token)
 }

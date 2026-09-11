@@ -115,7 +115,10 @@ type Node struct {
 	cancel                       context.CancelFunc
 	fatalErrMu                   sync.Mutex
 	fatalErr                     error
-	shutdownOnce                 sync.Once
+	shutdownMu                   sync.Mutex
+	shutdownWait                 chan struct{}
+	shutdownRunning              bool
+	shutdownDone                 bool
 	shutdownErr                  error
 	// startupLifecycleMu keeps the startup rollback and normal shutdown from
 	// operating on the same partially initialized component concurrently. Run
@@ -149,6 +152,9 @@ type Node struct {
 
 	// liveLifecycleMu serializes live database Restore/Truncate calls
 	// (node_lifecycle.go) so two can never quiesce/rebuild concurrently.
+	// Shutdown takes this mutex before cancelling components or closing
+	// storage, so it cannot tear down a live operation in progress. The lock
+	// order with snapshotMu is always liveLifecycleMu, then snapshotMu.
 	// Deliberately NOT held by Snapshot (see snapshotMu): Snapshot never
 	// nils/rebuilds n.ledgerState or n.chainsyncState the way Restore/
 	// Truncate do, so a background reader like the chainsync recycler
@@ -172,8 +178,9 @@ type Node struct {
 	// a concurrent Restore/Truncate (which closes n.db out from under an
 	// in-progress Snapshot if not excluded), and is what enforces bark
 	// DatabaseService's "one operation at a time" invariant for Snapshot
-	// specifically. Restore/Truncate take both this and liveLifecycleMu;
-	// Snapshot takes only this one -- so a long-running Snapshot (a full
+	// specifically. Restore/Truncate take both this and liveLifecycleMu, and
+	// shutdown takes both in that same order; Snapshot takes only this one --
+	// so a long-running Snapshot (a full
 	// local copy plus cloud upload) never blocks a background reader that
 	// only cares about liveLifecycleMu, such as the chainsync recycler
 	// tick's stall-detection/plateau-recovery check, matching Snapshot's
@@ -207,8 +214,8 @@ func New(cfg Config) (*Node, error) {
 	}
 	for capability, selection := range cfg.pluginSelections {
 		// API capabilities are validated against their *merged* config
-		// (shared api.tls/api.auth defaults folded in) so an invalid
-		// effective TLS/auth policy -- e.g. a partial certificate/key
+		// (shared api.tls defaults folded in) so an invalid
+		// effective TLS policy -- e.g. a partial certificate/key
 		// pair -- is rejected here, before any listener starts, using
 		// the exact same merge apiPluginSelection applies at Start()/
 		// reinitializeAPIServers time. See apiProviderConfig.
@@ -233,15 +240,17 @@ func New(cfg Config) (*Node, error) {
 	if err := n.configPopulateNetworkMagic(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
+	// Invalid configuration must not leave collectors in a caller-owned
+	// registry: callers may correct it and retry construction with that registry.
+	if err := n.configValidate(); err != nil {
+		return nil, fmt.Errorf("invalid configuration: %w", err)
+	}
 	// Wrap the prometheus registry with a "network" label so all metrics
 	// registered by subsystems carry the network name automatically.
 	// This must happen before any component registers metrics.
 	n.configWrapPromRegistry()
 	n.registerBuildInfo()
 	n.registerRTSMetrics()
-	if err := n.configValidate(); err != nil {
-		return nil, fmt.Errorf("invalid configuration: %w", err)
-	}
 	// NewEventBus starts background async-worker goroutines, so create the bus
 	// only after configuration validates. If it were created earlier, a
 	// validation failure would return a nil Node while leaving those goroutines
@@ -283,9 +292,9 @@ func legacyUtxorpcTLSPolicy(cfg *Config) apiconfig.TLSPolicy {
 	}
 }
 
-// apiProviderConfig merges the shared api.tls/api.auth policy (and, for
+// apiProviderConfig merges the shared api.tls policy (and, for
 // UTxORPC only, the legacy root TLS compatibility fields) into selection's
-// own "tls"/"auth" config sections, field by field, and returns the result.
+// own "tls" config section, field by field, and returns the result.
 // It is the single place this merge happens, called both by the early
 // plugin-selection validation in New() and by apiPluginSelection, so a
 // provider config validated at startup and the one actually resolved at
@@ -302,7 +311,6 @@ func (c *Config) apiProviderConfig(
 		selection.Config,
 		legacyTLS,
 		c.apiConfig.TLS,
-		c.apiConfig.Auth,
 	)
 	if err != nil {
 		return selection, fmt.Errorf(
@@ -317,7 +325,7 @@ func (c *Config) apiProviderConfig(
 // apiProviderConfigPath maps each API capability to the dotted config path
 // its provider config lives at, for error messages -- see
 // validateAPIProviderSecurityPolicy and each provider's own
-// cfg.TLS.Resolve/cfg.Auth.Resolve call, which use the identical path.
+// cfg.TLS.Resolve call, which uses the identical path.
 var apiProviderConfigPath = map[plugin.Capability]string{
 	plugin.CapabilityAPIBlockfrost: "plugins.api.blockfrost.config",
 	plugin.CapabilityAPIMesh:       "plugins.api.mesh.config",
@@ -325,8 +333,8 @@ var apiProviderConfigPath = map[plugin.Capability]string{
 }
 
 // validateAPIProviderSecurityPolicy resolves and validates the merged
-// tls/auth sections of an API provider's config (already merged with the
-// shared api.tls/api.auth defaults by apiProviderConfig), surfacing a
+// tls section of an API provider's config (already merged with the
+// shared api.tls defaults by apiProviderConfig), surfacing a
 // partial certificate/key pair or an invalid mode before any listener
 // starts -- the same validation each provider's own RegisterProvider
 // factory performs at Resolve()/Start() time, run here again so New()
@@ -341,13 +349,6 @@ func validateAPIProviderSecurityPolicy(
 		return fmt.Errorf("%s.tls: %w", configPath, err)
 	}
 	if _, err := tlsPolicy.Resolve(configPath + ".tls"); err != nil {
-		return err
-	}
-	authPolicy, err := apiconfig.DecodeAuthPolicy(rawConfig)
-	if err != nil {
-		return fmt.Errorf("%s.auth: %w", configPath, err)
-	}
-	if _, err := authPolicy.Resolve(configPath + ".auth"); err != nil {
 		return err
 	}
 	return nil
@@ -817,68 +818,14 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// are required: the indexer depends on the api-mode indexes to function,
 	// and storage mode alone is no longer sufficient to start it (an api-mode
 	// deployment may not want Midnight indexing at all).
-	if n.config.midnight.Enabled && n.config.storageMode.IsAPI() {
+	if midnightIndexerActive(n.config.storageMode, n.config.midnight) {
 		if err := n.ledgerState.PrepareEpochCacheForStartup(); err != nil {
 			return fmt.Errorf(
 				"load epoch cache before Midnight indexer start: %w",
 				err,
 			)
 		}
-		midnightIdx, err := midnightindexer.New(midnightindexer.Config{
-			EventBus:                n.eventBus,
-			Metadata:                n.db.Metadata(),
-			SlotTimer:               n.ledgerState,
-			Logger:                  n.config.logger,
-			PromRegistry:            n.config.promRegistry,
-			CNightPolicyID:          n.config.midnight.CNightPolicyID,
-			CNightAssetName:         n.config.midnight.CNightAssetName,
-			MappingValidatorAddress: n.config.midnight.MappingValidatorAddress,
-			AuthTokenPolicyID:       n.config.midnight.AuthTokenPolicyID,
-			AuthTokenAssetName:      n.config.midnight.AuthTokenAssetName,
-			// Governance / Ariadne / candidate scanning
-			TechnicalCommitteeAddress:   n.config.midnight.TechnicalCommitteeAddress,
-			TechnicalCommitteePolicyID:  n.config.midnight.TechnicalCommitteePolicyID,
-			CouncilAddress:              n.config.midnight.CouncilAddress,
-			CouncilPolicyID:             n.config.midnight.CouncilPolicyID,
-			PermissionedCandidatePolicy: n.config.midnight.PermissionedCandidatePolicy,
-			CommitteeCandidateAddress:   n.config.midnight.CommitteeCandidateAddress,
-			SlotToEpoch: func(slot uint64) (uint64, error) {
-				epoch, err := n.ledgerState.SlotToEpoch(slot)
-				if err != nil {
-					return 0, err
-				}
-				return epoch.EpochId, nil
-			},
-			BlockIterator: func(startSlot, endSlot uint64, fn func(models.Block) error) error {
-				return database.ForEachBlockInRangeDB(
-					n.db,
-					startSlot,
-					endSlot,
-					fn,
-				)
-			},
-			// Read the applied ledger tip straight from metadata rather than
-			// from n.ledgerState.Tip(): LedgerState only loads its in-memory
-			// tip inside Start, which runs after this indexer has already
-			// backfilled, so Tip() would still be the zero value here. Blocks
-			// stored above this slot -- the whole post-snapshot suffix on a
-			// Mithril-bootstrapped node -- are replayed by LedgerState.Start
-			// and reach the indexer as live block events instead.
-			LedgerTipSlot: func() (uint64, error) {
-				tip, err := n.db.GetTip(nil)
-				if err != nil {
-					return 0, err
-				}
-				return tip.Point.Slot, nil
-			},
-			FatalErrorFunc: func(err error) {
-				n.config.logger.Error(
-					"fatal midnight indexer error, initiating shutdown",
-					"error", err,
-				)
-				n.cancel()
-			},
-		})
+		midnightIdx, err := midnightindexer.New(n.midnightIndexerConfig())
 		if err != nil {
 			return fmt.Errorf("creating midnight indexer: %w", err)
 		}
@@ -1533,16 +1480,15 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 					}
 					return block.Number, true, nil
 				},
-				Host:                n.config.midnight.Host,
-				Port:                n.config.midnight.Port,
-				TLSCertFilePath:     n.config.tlsCertFilePath,
-				TLSKeyFilePath:      n.config.tlsKeyFilePath,
-				AllowInsecureRemote: n.config.midnight.AllowInsecureRemote,
-				ReflectionEnabled:   n.config.midnight.ReflectionEnabled,
-				ShutdownTimeout:     n.config.shutdownTimeout,
-				Database:            midnightserver.NewDatabase(n.db),
-				SlotTimer:           n.ledgerState,
-				PromRegistry:        n.config.promRegistry,
+				Host:              n.config.midnight.Host,
+				Port:              n.config.midnight.Port,
+				TLSCertFilePath:   n.config.tlsCertFilePath,
+				TLSKeyFilePath:    n.config.tlsKeyFilePath,
+				ReflectionEnabled: n.config.midnight.ReflectionEnabled,
+				ShutdownTimeout:   n.config.shutdownTimeout,
+				Database:          midnightserver.NewDatabase(n.db),
+				SlotTimer:         n.ledgerState,
+				PromRegistry:      n.config.promRegistry,
 			},
 		)
 		if err != nil {
@@ -1873,12 +1819,16 @@ func (n *Node) handleConnManagerClosed(
 	if n.chainsyncState != nil {
 		n.chainsyncState.RemoveClient(connId)
 	}
-	// Wake any NtC chainsync server callback parked waiting for this
-	// connection's certified endorser closure. connmanager drives this
-	// callback from its own per-connection goroutine, so it runs even while
-	// that server callback still owns gouroboros's receive loop.
 	if o := n.ouroboros(); o != nil {
+		// Wake any NtC chainsync server callback parked waiting for this
+		// connection's certified endorser closure. connmanager drives this
+		// callback from its own per-connection goroutine, so it runs even
+		// while that server callback still owns gouroboros's receive loop.
 		o.ReleaseLeiosServeWaiters(connId)
+		// Clear any LocalStateQuery pinned point this connection acquired:
+		// a client that disconnects without a clean Release must not leak
+		// its map entry (blinklabs-io/dingo#382).
+		o.ReleaseLocalStateQueryAcquiredPoint(connId)
 	}
 }
 

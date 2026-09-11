@@ -44,6 +44,8 @@ func newMithrilTestDB(t *testing.T) *database.Database {
 }
 
 func TestEnsureMithrilBackfillCheckpointCreatesMissing(t *testing.T) {
+	t.Parallel()
+
 	db := newMithrilTestDB(t)
 
 	require.NoError(t, ensureMithrilBackfillCheckpoint(db))
@@ -60,6 +62,8 @@ func TestEnsureMithrilBackfillCheckpointCreatesMissing(t *testing.T) {
 }
 
 func TestEnsureMithrilBackfillCheckpointPreservesIncomplete(t *testing.T) {
+	t.Parallel()
+
 	db := newMithrilTestDB(t)
 	startedAt := time.Now().Add(-time.Hour)
 	updatedAt := time.Now().Add(-time.Minute)
@@ -90,6 +94,8 @@ func TestEnsureMithrilBackfillCheckpointPreservesIncomplete(t *testing.T) {
 }
 
 func TestEnsureMithrilBackfillCheckpointReopensCompleted(t *testing.T) {
+	t.Parallel()
+
 	db := newMithrilTestDB(t)
 	startedAt := time.Now().Add(-time.Hour)
 	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
@@ -121,6 +127,8 @@ func TestEnsureMithrilBackfillCheckpointReopensCompleted(t *testing.T) {
 func TestUpdateMithrilReadyStateKeepsTrustBoundaryAtStableLedgerTip(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newMithrilTestDB(t)
 	tipHash := bytes.Repeat([]byte{0x11}, 32)
 	ledgerStateHash := bytes.Repeat([]byte{0x22}, 32)
@@ -160,6 +168,8 @@ func TestUpdateMithrilReadyStateKeepsTrustBoundaryAtStableLedgerTip(
 }
 
 func TestSetStableMithrilLedgerTipUsesCertifiedBlockNumber(t *testing.T) {
+	t.Parallel()
+
 	db := newMithrilTestDB(t)
 	ledgerStateHash := bytes.Repeat([]byte{0x23}, 32)
 	require.NoError(t, db.BlockCreate(models.Block{
@@ -190,6 +200,8 @@ func TestSetStableMithrilLedgerTipUsesCertifiedBlockNumber(t *testing.T) {
 func TestSetStableMithrilLedgerTipRejectsPointOutsideCertifiedChain(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newMithrilTestDB(t)
 	certifiedHash := bytes.Repeat([]byte{0x24}, 32)
 	require.NoError(t, db.BlockCreate(models.Block{
@@ -212,6 +224,8 @@ func TestSetStableMithrilLedgerTipRejectsPointOutsideCertifiedChain(
 func TestUpdateMithrilReadyStateStoresTrustBoundaryFromLedgerState(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newMithrilTestDB(t)
 	ledgerStateHash := bytes.Repeat([]byte{0x33}, 32)
 	require.NoError(t, db.SetTip(ochainsync.Tip{
@@ -239,6 +253,8 @@ func TestUpdateMithrilReadyStateStoresTrustBoundaryFromLedgerState(
 func TestUpdateMithrilReadyStateClearsStaleTrustBoundaryHash(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newMithrilTestDB(t)
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: ocommon.NewPoint(30, nil),

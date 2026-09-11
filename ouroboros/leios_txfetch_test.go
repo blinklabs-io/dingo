@@ -87,6 +87,8 @@ func requireTxsInIndexOrder(t *testing.T, txs []cbor.RawMessage, want int) {
 }
 
 func TestFetchLeiosEbTxsBatchedReRequestsUntilComplete(t *testing.T) {
+	t.Parallel()
+
 	o := &Ouroboros{}
 	point := ocommon.Point{Slot: 100, Hash: []byte{0x01, 0x02}}
 	// 639 txs across 10 windows; relay caps each response at 50, so most
@@ -102,6 +104,8 @@ func TestFetchLeiosEbTxsBatchedReRequestsUntilComplete(t *testing.T) {
 }
 
 func TestFetchLeiosEbTxsBatchedPrefixFallback(t *testing.T) {
+	t.Parallel()
+
 	o := &Ouroboros{}
 	point := ocommon.Point{Slot: 100, Hash: []byte{0x01, 0x02}}
 	// Response omits bitmaps, so the fetch must assume a served prefix of the
@@ -117,6 +121,8 @@ func TestFetchLeiosEbTxsBatchedPrefixFallback(t *testing.T) {
 }
 
 func TestFetchLeiosEbTxsBatchedFullResponse(t *testing.T) {
+	t.Parallel()
+
 	o := &Ouroboros{}
 	point := ocommon.Point{Slot: 1, Hash: []byte{0x09}}
 	// No cap: every window served whole in one round.
@@ -131,6 +137,8 @@ func TestFetchLeiosEbTxsBatchedFullResponse(t *testing.T) {
 }
 
 func TestFetchLeiosEbTxsBatchedNoProgressErrors(t *testing.T) {
+	t.Parallel()
+
 	o := &Ouroboros{}
 	point := ocommon.Point{Slot: 1, Hash: []byte{0x09}}
 	// A relay that serves nothing must not loop forever; it returns an error
@@ -148,6 +156,8 @@ func TestFetchLeiosEbTxsBatchedNoProgressErrors(t *testing.T) {
 func TestFetchLeiosEbTxsBatchedRejectsUnrepresentableWindowCount(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	requester := &cappingBlockTxsRequester{}
 	o := &Ouroboros{}
 	point := ocommon.Point{Slot: 1, Hash: []byte{0x09}}
@@ -165,6 +175,8 @@ func TestFetchLeiosEbTxsBatchedRejectsUnrepresentableWindowCount(
 }
 
 func TestLeiosBitmapTxIndices(t *testing.T) {
+	t.Parallel()
+
 	// MSB-first: window 0 offsets 0,1 are bits 63,62; window 2 offset 3 is
 	// bit 60 -> indices 0,1,131 ascending.
 	got := leiosBitmapTxIndices(
@@ -175,6 +187,8 @@ func TestLeiosBitmapTxIndices(t *testing.T) {
 }
 
 func TestLeiosWindowNeededMask(t *testing.T) {
+	t.Parallel()
+
 	result := make([]cbor.RawMessage, 70)
 	result[0] = cbor.RawMessage{0x00} // present
 	result[2] = cbor.RawMessage{0x00} // present
@@ -202,6 +216,8 @@ func TestLeiosWindowNeededMask(t *testing.T) {
 // guards the request encode, the decode, and the server serve/validate paths
 // against silently reverting to LSB (which a self-consistent mock would miss).
 func TestLeiosBitmapMSBFirstWireConvention(t *testing.T) {
+	t.Parallel()
+
 	// 131 txs: windows 0,1 full; final window 2 holds just offsets 0,1,2
 	// (indices 128,129,130) -- the small-final-window the LSB bug never served.
 	const txCount = 131
@@ -233,6 +249,8 @@ func TestLeiosBitmapMSBFirstWireConvention(t *testing.T) {
 }
 
 func TestLeiosNeededBitmap(t *testing.T) {
+	t.Parallel()
+
 	// 600 txs spans 10 windows (0..9); none fetched yet.
 	result := make([]cbor.RawMessage, 600)
 	// A batch is capped at maxWindows lowest-indexed windows.
@@ -341,6 +359,8 @@ func (r *oversizedBitmapRequester) BlockTxsRequest(
 // mentioning "leios-fetch response bitmap"), not silently expanded into a
 // huge index list (issue #3523).
 func TestFetchLeiosEbTxsBatchedRejectsOversizedResponseBitmap(t *testing.T) {
+	t.Parallel()
+
 	o := &Ouroboros{}
 	point := ocommon.Point{Slot: 1, Hash: []byte{0x09}}
 	// txCount 1 fits entirely in window 0; the relay also sets every bit of
@@ -364,6 +384,8 @@ func TestFetchLeiosEbTxsBatchedRejectsOversizedResponseBitmap(t *testing.T) {
 // rejected, proving the bound check is exact rather than merely "roughly
 // close enough".
 func TestFetchLeiosEbTxsBatchedRejectsResponseBitmapPastBoundary(t *testing.T) {
+	t.Parallel()
+
 	o := &Ouroboros{}
 	point := ocommon.Point{Slot: 1, Hash: []byte{0x09}}
 	// txCount 64 exactly fills window 0 (indices 0..63); window 1 has no valid
@@ -387,6 +409,8 @@ func TestFetchLeiosEbTxsBatchedRejectsResponseBitmapPastBoundary(t *testing.T) {
 // and the fetch must complete normally, proving the new bound check does not
 // reject legitimate, exactly-sized replies.
 func TestFetchLeiosEbTxsBatchedAcceptsExactBoundaryResponseBitmap(t *testing.T) {
+	t.Parallel()
+
 	o := &Ouroboros{}
 	point := ocommon.Point{Slot: 1, Hash: []byte{0x09}}
 	// txCount 64 exactly fills window 0; a response bitmap covering only
@@ -402,6 +426,8 @@ func TestFetchLeiosEbTxsBatchedAcceptsExactBoundaryResponseBitmap(t *testing.T) 
 // rather than being rejected as malformed.
 
 func TestFetchLeiosEbTxsBatchedBatchesWindowsPerRequest(t *testing.T) {
+	t.Parallel()
+
 	o := &Ouroboros{}
 	point := ocommon.Point{Slot: 100, Hash: []byte{0x01}}
 	// 600 txs = 10 windows. With up-to-8-windows-per-request and a relay that

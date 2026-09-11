@@ -46,6 +46,8 @@ import (
 // The rollback must instead be refused as "point not found" so chainsync
 // re-intersects with the peer.
 func TestChainsyncRollbackToAbandonedForkDoesNotSpliceChain(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 	abandonedPoint := fixture.currentTip.Point
@@ -101,6 +103,8 @@ func TestChainsyncRollbackToAbandonedForkDoesNotSpliceChain(t *testing.T) {
 // otherwise the detector keeps re-applying the splice instead of breaking the
 // loop.
 func TestValidateRollbackRejectsAbandonedForkPoint(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 	abandonedPoint := fixture.currentTip.Point
@@ -205,6 +209,8 @@ func mustSpliceAuditInput(
 // loudly, naming the peer that delivered it and the fork the node rolled back
 // to.
 func TestContinuationAuditReportsUnresolvableProducer(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 	var logBuf strings.Builder
@@ -272,6 +278,8 @@ func TestContinuationAuditReportsUnresolvableProducer(t *testing.T) {
 // the ledger, so the continuation audit must remain disarmed rather than
 // reporting unapplied history as missing producers.
 func TestRollbackAheadOfLedgerDoesNotArmContinuationAudit(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 	ls.armContinuationAudit(fixture.ancestorTip.Point, "prior rollback")
@@ -299,6 +307,8 @@ func TestRollbackAheadOfLedgerDoesNotArmContinuationAudit(t *testing.T) {
 // delivered earlier in the same audit window is on the local chain even though
 // no UTxO row exists for it yet.
 func TestContinuationAuditAcceptsProducerInSameWindow(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 	var logBuf strings.Builder
@@ -370,6 +380,8 @@ func TestContinuationAuditAcceptsProducerInSameWindow(t *testing.T) {
 // TestContinuationAuditBudgetIsBounded verifies the audit stops on its own so a
 // long-lived node never pays for it outside a fork-churn window.
 func TestContinuationAuditBudgetIsBounded(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 	ls.config.Logger = slog.New(slog.NewJSONHandler(&strings.Builder{}, nil))
@@ -397,6 +409,8 @@ func TestContinuationAuditBudgetIsBounded(t *testing.T) {
 // delivered after a fork restart is not allowed to seed the producer window.
 // The body fails chain insertion, so the audit must not inspect it.
 func TestContinuationAuditIgnoresAbandonedFetchedBodies(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 	var logBuf strings.Builder

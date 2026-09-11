@@ -28,6 +28,8 @@ import (
 func TestMithrilBoundaryOpCertCertifiedBaselineIgnoresStaleHistory(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
@@ -71,6 +73,8 @@ func TestMithrilBoundaryOpCertCertifiedBaselineIgnoresStaleHistory(
 func TestMithrilBoundaryOpCertPoolWithoutCertifiedCounterAllowsFirst(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
@@ -101,6 +105,8 @@ func TestMithrilBoundaryOpCertPoolWithoutCertifiedCounterAllowsFirst(
 // rather than a plain MAX that would trust a stale pre-boundary row a
 // Mithril import left in the table.
 func TestLatestOpCertSequenceRespectsMithrilBoundary(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
@@ -152,6 +158,8 @@ func TestLatestOpCertSequenceRespectsMithrilBoundary(t *testing.T) {
 }
 
 func TestMithrilBoundaryOpCertContiguousRotationIsEnforced(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })

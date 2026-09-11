@@ -59,6 +59,8 @@ func peerSnapshotTopology(snapshotMagic uint32) *topology.TopologyConfig {
 // bootstrap list — a failure that looks like a network outage rather than the
 // misconfiguration it is.
 func TestPeerSnapshotFromAnotherNetworkRejected(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name          string
 		network       string
@@ -98,6 +100,8 @@ func TestPeerSnapshotFromAnotherNetworkRejected(t *testing.T) {
 // the node's own network must still start, or the check would break every
 // Genesis bootstrap it is meant to protect.
 func TestPeerSnapshotMatchingNetworkAccepted(t *testing.T) {
+	t.Parallel()
+
 	n, err := New(NewConfig(
 		WithPrometheusRegistry(prometheus.NewRegistry()),
 		WithListeners(ListenerConfig{
@@ -112,6 +116,8 @@ func TestPeerSnapshotMatchingNetworkAccepted(t *testing.T) {
 }
 
 func TestPeerSnapshotWithoutNetworkMagicRejected(t *testing.T) {
+	t.Parallel()
+
 	_, err := New(NewConfig(
 		WithPrometheusRegistry(prometheus.NewRegistry()),
 		WithListeners(ListenerConfig{

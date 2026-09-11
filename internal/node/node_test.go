@@ -21,6 +21,9 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -96,6 +99,8 @@ func TestServeAuxiliaryListenerBindFailureIsNonFatal(t *testing.T) {
 }
 
 func TestPprofDebugServerUsesDedicatedBindAddress(t *testing.T) {
+	t.Parallel()
+
 	cfg := &config.Config{
 		BindAddr:      "0.0.0.0",
 		DebugBindAddr: "127.0.0.1",
@@ -192,7 +197,7 @@ func TestShutdownNodeResourcesReturnsNilWithoutErrors(t *testing.T) {
 }
 
 // TestBuildDingoConfigWiresAPIConfig asserts that a loaded
-// internal/config.Config's api.tls/api.auth policy (as set via YAML/env/CLI)
+// internal/config.Config's api.tls policy (as set via YAML/env/CLI)
 // actually reaches the dingo.Config that Run() hands to dingo.New() --
 // regression test for the top-level API security defaults (dingo#2998)
 // being silently dropped because Run's real composition call never invoked
@@ -206,10 +211,6 @@ func TestBuildDingoConfigWiresAPIConfig(t *testing.T) {
 				Mode:         new("server"),
 				CertFilePath: new("/shared/cert.pem"),
 				KeyFilePath:  new("/shared/key.pem"),
-			},
-			Auth: apiconfig.AuthPolicy{
-				Mode:  new("token"),
-				Token: new("shared-secret"),
 			},
 		},
 	}
@@ -236,15 +237,6 @@ func TestBuildDingoConfigWiresAPIConfig(t *testing.T) {
 		t.Fatalf(
 			"expected api.tls.certFilePath to flow through, got %+v",
 			got.TLS,
-		)
-	}
-	if got.Auth.Mode == nil || *got.Auth.Mode != "token" {
-		t.Fatalf("expected api.auth.mode to flow through, got %+v", got.Auth)
-	}
-	if got.Auth.Token == nil || *got.Auth.Token != "shared-secret" {
-		t.Fatalf(
-			"expected api.auth.token to flow through, got %+v",
-			got.Auth,
 		)
 	}
 }
@@ -297,7 +289,6 @@ func TestBuildDingoConfigWiresMidnightServerPolicy(t *testing.T) {
 			Enabled:                     true,
 			ServerEnabled:               true,
 			ReflectionEnabled:           true,
-			AllowInsecureRemote:         true,
 			Port:                        50052,
 			Host:                        "127.0.0.2",
 			CNightPolicyID:              "policy",
@@ -368,4 +359,79 @@ func TestRootPeerTargetComposition(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestKoiosParityConfigForwardsEveryField pins that the serve path hands the
+// node every KoiosParity setting.
+//
+// internal/node builds the dingo.KoiosParityConfig by hand, so a field added to
+// internal/config is silently dropped until someone remembers to add it here —
+// which is exactly what happened to AccountChunkSize and AccountChunkMaxBytes,
+// and then to BaseURL. A dropped field does not fail: the option keeps its
+// package default and the operator's setting is ignored with no diagnostic,
+// which for BaseURL meant a run aimed at a self-hosted host silently querying
+// the public one.
+func TestKoiosParityConfigForwardsEveryField(t *testing.T) {
+	src := reflect.TypeOf(config.KoiosParityConfig{})
+	dst := reflect.TypeOf(dingo.KoiosParityConfig{})
+
+	for i := range src.NumField() {
+		name := src.Field(i).Name
+		if _, ok := dst.FieldByName(name); !ok {
+			continue // not part of the node-facing config
+		}
+		// Match the assignment, not just the field name: checking only that
+		// the name appears would accept a cross-wiring such as
+		// "AccountChunkSize: cfg.KoiosParity.AccountChunkMaxBytes".
+		assign := regexp.MustCompile(
+			`\b` + regexp.QuoteMeta(name) +
+				`:\s*&?cfg\.KoiosParity\.` + regexp.QuoteMeta(name) + `\b`,
+		)
+		if !assign.MatchString(nodeSourceForKoiosParity(t)) {
+			t.Errorf(
+				"internal/config KoiosParityConfig.%s is not forwarded from "+
+					"cfg.KoiosParity.%s in WithKoiosParity; the operator's "+
+					"setting would be silently ignored or cross-wired",
+				name, name,
+			)
+		}
+	}
+}
+
+// TestKoiosParityForwardingGuardCatchesCrossWiring proves the guard checks the
+// assignment rather than the field name. Matching only the name would accept a
+// field wired from the wrong source, which fails exactly as silently as a field
+// left out entirely.
+func TestKoiosParityForwardingGuardCatchesCrossWiring(t *testing.T) {
+	crossWired := `dingo.WithKoiosParity(dingo.KoiosParityConfig{
+		AccountChunkSize: cfg.KoiosParity.AccountChunkMaxBytes,
+	`
+	assign := regexp.MustCompile(
+		`\bAccountChunkSize:\s*&?cfg\.KoiosParity\.AccountChunkSize\b`,
+	)
+	if assign.MatchString(crossWired) {
+		t.Error("guard accepted a cross-wired assignment")
+	}
+	if !strings.Contains(crossWired, "AccountChunkSize:") {
+		t.Error("the weaker name-only check would have accepted it")
+	}
+}
+
+// nodeSourceForKoiosParity returns the WithKoiosParity call site's source.
+func nodeSourceForKoiosParity(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile("node.go")
+	if err != nil {
+		t.Fatalf("read node.go: %v", err)
+	}
+	s := string(b)
+	start := strings.Index(s, "dingo.WithKoiosParity(")
+	if start < 0 {
+		t.Fatal("WithKoiosParity call not found in node.go")
+	}
+	end := strings.Index(s[start:], "}),")
+	if end < 0 {
+		t.Fatal("WithKoiosParity call not terminated")
+	}
+	return s[start : start+end]
 }

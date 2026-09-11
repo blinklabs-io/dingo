@@ -90,6 +90,8 @@ func testShelleyGenesis(t testing.TB) *shelley.ShelleyGenesis {
 }
 
 func TestSlotTimeConverter_SlotZeroIsSystemStart(t *testing.T) {
+	t.Parallel()
+
 	genesis := testShelleyGenesis(t)
 	conv := NewSlotTimeConverter(SlotTimeConverterDeps{
 		ShelleyGenesis: func() *shelley.ShelleyGenesis { return genesis },
@@ -105,6 +107,8 @@ func TestSlotTimeConverter_SlotZeroIsSystemStart(t *testing.T) {
 }
 
 func TestSlotTimeConverter_NoGenesisErrors(t *testing.T) {
+	t.Parallel()
+
 	conv := NewSlotTimeConverter(SlotTimeConverterDeps{
 		ShelleyGenesis: func() *shelley.ShelleyGenesis { return nil },
 	})
@@ -117,6 +121,8 @@ func TestSlotTimeConverter_NoGenesisErrors(t *testing.T) {
 }
 
 func TestSlotTimeConverter_RoundTrip(t *testing.T) {
+	t.Parallel()
+
 	genesis := testShelleyGenesis(t)
 	const slotLength = time.Second
 	const epochSize = 100
@@ -143,6 +149,8 @@ func TestSlotTimeConverter_RoundTrip(t *testing.T) {
 }
 
 func TestSlotTimeConverter_TimeToSlot_BeforeGenesis(t *testing.T) {
+	t.Parallel()
+
 	genesis := testShelleyGenesis(t)
 	conv := NewSlotTimeConverter(SlotTimeConverterDeps{
 		ShelleyGenesis: func() *shelley.ShelleyGenesis { return genesis },
@@ -153,6 +161,8 @@ func TestSlotTimeConverter_TimeToSlot_BeforeGenesis(t *testing.T) {
 }
 
 func TestSlotTimeConverter_HardForkSummaryUnset(t *testing.T) {
+	t.Parallel()
+
 	genesis := testShelleyGenesis(t)
 	conv := NewSlotTimeConverter(SlotTimeConverterDeps{
 		ShelleyGenesis: func() *shelley.ShelleyGenesis { return genesis },
@@ -175,6 +185,8 @@ func TestSlotTimeConverter_HardForkSummaryUnset(t *testing.T) {
 // wrong) hardfork.Summary — mirroring the former LedgerState.EpochInfo
 // behavior of preferring the authoritative persisted epoch cache.
 func TestSlotTimeConverter_EpochInfoPrefersCache(t *testing.T) {
+	t.Parallel()
+
 	cached := []models.Epoch{
 		{
 			EpochId:       7,
@@ -206,6 +218,8 @@ func TestSlotTimeConverter_EpochInfoPrefersCache(t *testing.T) {
 // near-now window, and that the near-now extrapolation still resolves the
 // very next slot boundary.
 func TestSlotTimeConverter_PastHorizon(t *testing.T) {
+	t.Parallel()
+
 	genesis := testShelleyGenesis(t)
 	const slotLength = time.Second
 	const epochSize = 100
@@ -241,6 +255,8 @@ func TestSlotTimeConverter_PastHorizon(t *testing.T) {
 }
 
 func TestSlotTimeConverter_EndorserBlockWaitDuration(t *testing.T) {
+	t.Parallel()
+
 	genesis := testShelleyGenesis(t)
 	conv := NewSlotTimeConverter(SlotTimeConverterDeps{
 		ShelleyGenesis: func() *shelley.ShelleyGenesis { return genesis },
@@ -264,6 +280,8 @@ func TestSlotTimeConverter_EndorserBlockWaitDuration(t *testing.T) {
 // multiplication is rejected (returns 0) instead of silently wrapping to a
 // negative time.Duration.
 func TestSlotTimeConverter_EndorserBlockWaitDurationOverflow(t *testing.T) {
+	t.Parallel()
+
 	genesis := testShelleyGenesis(t)
 	conv := NewSlotTimeConverter(SlotTimeConverterDeps{
 		ShelleyGenesis: func() *shelley.ShelleyGenesis { return genesis },
@@ -284,6 +302,8 @@ func TestSlotTimeConverter_EndorserBlockWaitDurationOverflow(t *testing.T) {
 // the real wall clock — so a test-injected nowFunc consistently gates and
 // computes the fallback from the same time.
 func TestSlotTimeConverter_TimeToSlotNearNowUsesInjectedClock(t *testing.T) {
+	t.Parallel()
+
 	genesis := testShelleyGenesis(t)
 	// A synthetic "now" far from the real wall clock: if the fallback ever
 	// read time.Since(SystemStart) directly, this would compute a wildly
@@ -400,6 +420,8 @@ func previewSlotTime(systemStart time.Time, slot uint64) time.Time {
 func TestSlotTimeConverter_SlotToTimeWithHorizonFromAnchorsAtParent(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	genesis := testShelleyGenesis(t)
 	conv := NewSlotTimeConverter(SlotTimeConverterDeps{
 		ShelleyGenesis: func() *shelley.ShelleyGenesis { return genesis },
@@ -465,6 +487,8 @@ func TestSlotTimeConverter_SlotToTimeWithHorizonFromAnchorsAtParent(
 // anchored path. HardForkSummary walks the whole epoch cache and allocates on
 // every call, and this conversion runs once per Plutus transaction.
 func TestSlotTimeConverter_SlotToTimeWithHorizonFromSharesPrelude(t *testing.T) {
+	t.Parallel()
+
 	genesis := testShelleyGenesis(t)
 	const slotLength = time.Second
 	const epochSize = 100
@@ -520,6 +544,8 @@ func TestSlotTimeConverter_SlotToTimeWithHorizonFromSharesPrelude(t *testing.T) 
 // across an announced boundary, but the latest persisted epoch identifies the
 // era whose parameters are actually current.
 func TestSlotTimeConverter_NearNowUsesCachedCurrentEra(t *testing.T) {
+	t.Parallel()
+
 	genesis := testShelleyGenesis(t)
 	currentSlotLength := time.Second
 	currentEraEnd := hardfork.Bound{
@@ -596,6 +622,8 @@ func TestSlotTimeConverter_NearNowUsesCachedCurrentEra(t *testing.T) {
 // Summary's ErrPastHorizon result instead of selecting an unrelated era by
 // position.
 func TestSlotTimeConverter_SnapshotMismatchFailsClosed(t *testing.T) {
+	t.Parallel()
+
 	genesis := testShelleyGenesis(t)
 	const slotLength = time.Second
 	const epochSize = 100

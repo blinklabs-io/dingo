@@ -15,8 +15,6 @@
 package apiconfig
 
 import (
-	"log/slog"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -69,60 +67,6 @@ func TestMergeTLSUnsetInheritsBaseUnchanged(t *testing.T) {
 	assert.Equal(t, "/base/key.pem", effective.KeyFilePath)
 }
 
-func TestMergeAuthExplicitDisableOverridesInheritedToken(t *testing.T) {
-	base := AuthPolicy{
-		Mode:  new(string(AuthModeToken)),
-		Token: new("shared-secret"),
-	}
-	override := AuthPolicy{Mode: new(string(AuthModeDisabled))}
-	merged := MergeAuth(base, override)
-	effective, err := merged.Resolve("test")
-	require.NoError(t, err)
-	assert.False(t, effective.Enabled)
-}
-
-// TestMergeAuthOverrideSwitchesCredentialSource asserts that a provider
-// override which sets only TokenFilePath (switching credential source away
-// from a base policy's inline Token, not adding to it) fully replaces the
-// base's credential fields rather than leaving both Token and
-// TokenFilePath set -- which would make Resolve always fail with "mutually
-// exclusive" and make it impossible for a provider to ever switch
-// credential source away from an inherited one.
-func TestMergeAuthOverrideSwitchesCredentialSource(t *testing.T) {
-	base := AuthPolicy{
-		Mode:  new(string(AuthModeToken)),
-		Token: new("shared-secret"),
-	}
-	override := AuthPolicy{TokenFilePath: new("/override/token")}
-	merged := MergeAuth(base, override)
-	assert.Nil(t, merged.Token)
-	require.NotNil(t, merged.TokenFilePath)
-	assert.Equal(t, "/override/token", *merged.TokenFilePath)
-
-	effective, err := merged.Resolve("test")
-	require.NoError(t, err)
-	assert.True(t, effective.Enabled)
-	assert.Empty(t, effective.Token)
-	assert.Equal(t, "/override/token", effective.TokenFilePath)
-}
-
-// TestMergeAuthUnsetCredentialInheritsBaseUnchanged asserts that when the
-// override sets neither Token nor TokenFilePath, the base's credential
-// source passes through unchanged (mirroring MergeTLS's per-field
-// inheritance for every other field).
-func TestMergeAuthUnsetCredentialInheritsBaseUnchanged(t *testing.T) {
-	base := AuthPolicy{
-		Mode:  new(string(AuthModeToken)),
-		Token: new("shared-secret"),
-	}
-	merged := MergeAuth(base, AuthPolicy{})
-	effective, err := merged.Resolve("test")
-	require.NoError(t, err)
-	assert.True(t, effective.Enabled)
-	assert.Equal(t, "shared-secret", effective.Token)
-	assert.Empty(t, effective.TokenFilePath)
-}
-
 func TestTLSResolveDefaultsToDisabled(t *testing.T) {
 	effective, err := TLSPolicy{}.Resolve("plugins.api.mesh.config.tls")
 	require.NoError(t, err)
@@ -151,34 +95,6 @@ func TestTLSResolveInvalidMode(t *testing.T) {
 	assert.Contains(t, err.Error(), "invalid mode")
 }
 
-func TestAuthResolveDefaultsToDisabled(t *testing.T) {
-	effective, err := AuthPolicy{}.Resolve("plugins.api.mesh.config.auth")
-	require.NoError(t, err)
-	assert.Equal(t, EffectiveAuth{}, effective)
-}
-
-func TestAuthResolveTokenAndTokenFilePathMutuallyExclusive(t *testing.T) {
-	_, err := AuthPolicy{
-		Mode:          new(string(AuthModeToken)),
-		Token:         new("secret"),
-		TokenFilePath: new("/path/to/token"),
-	}.Resolve("api.auth")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "mutually exclusive")
-}
-
-func TestAuthResolveTokenModeRequiresCredential(t *testing.T) {
-	_, err := AuthPolicy{Mode: new(string(AuthModeToken))}.Resolve("api.auth")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "required")
-}
-
-func TestAuthResolveInvalidMode(t *testing.T) {
-	_, err := AuthPolicy{Mode: new("bogus")}.Resolve("api.auth")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid mode")
-}
-
 func TestMergeProviderConfigPrecedenceProviderOverTopLevelOverLegacy(
 	t *testing.T,
 ) {
@@ -192,14 +108,13 @@ func TestMergeProviderConfigPrecedenceProviderOverTopLevelOverLegacy(
 		CertFilePath: new("/toplevel/cert.pem"),
 		KeyFilePath:  new("/toplevel/key.pem"),
 	}
-	apiAuth := AuthPolicy{Mode: new(string(AuthModeDisabled))}
 	raw := map[string]any{
 		"port": 3000,
 		"tls": map[string]any{
 			"certFilePath": "/provider/cert.pem",
 		},
 	}
-	merged, err := MergeProviderConfig(raw, legacyTLS, apiTLS, apiAuth)
+	merged, err := MergeProviderConfig(raw, legacyTLS, apiTLS)
 	require.NoError(t, err)
 	// Untouched keys pass through.
 	assert.Equal(t, 3000, merged["port"])
@@ -225,7 +140,6 @@ func TestMergeProviderConfigLegacyOnlyAppliesWhenNothingElseSet(t *testing.T) {
 		map[string]any{"port": 9090},
 		legacyTLS,
 		TLSPolicy{},
-		AuthPolicy{},
 	)
 	require.NoError(t, err)
 	providerTLS, err := DecodeTLSPolicy(merged)
@@ -241,7 +155,7 @@ func TestMergeProviderConfigDoesNotMutateInput(t *testing.T) {
 		"tls": map[string]any{"certFilePath": "/provider/cert.pem"},
 	}
 	apiTLS := TLSPolicy{Mode: new(string(TLSModeServer))}
-	_, err := MergeProviderConfig(raw, TLSPolicy{}, apiTLS, AuthPolicy{})
+	_, err := MergeProviderConfig(raw, TLSPolicy{}, apiTLS)
 	require.NoError(t, err)
 	// raw's own "tls" section must be untouched by the merge.
 	tlsSection, ok := raw["tls"].(map[string]any)
@@ -259,7 +173,6 @@ func TestMergeProviderConfigDeterministicRegardlessOfInputMapOrder(
 		CertFilePath: new("/a/cert.pem"),
 		KeyFilePath:  new("/a/key.pem"),
 	}
-	apiAuth := AuthPolicy{Mode: new(string(AuthModeToken)), Token: new("t")}
 
 	// Two maps built by inserting keys in different orders (Go map literals
 	// don't guarantee iteration order, but constructing them differently
@@ -273,9 +186,9 @@ func TestMergeProviderConfigDeterministicRegardlessOfInputMapOrder(
 	rawB["tls"] = map[string]any{"certFilePath": "/provider/cert.pem"}
 	rawB["port"] = 8080
 
-	mergedA, err := MergeProviderConfig(rawA, legacyTLS, apiTLS, apiAuth)
+	mergedA, err := MergeProviderConfig(rawA, legacyTLS, apiTLS)
 	require.NoError(t, err)
-	mergedB, err := MergeProviderConfig(rawB, legacyTLS, apiTLS, apiAuth)
+	mergedB, err := MergeProviderConfig(rawB, legacyTLS, apiTLS)
 	require.NoError(t, err)
 
 	tlsA, err := DecodeTLSPolicy(mergedA)
@@ -287,35 +200,4 @@ func TestMergeProviderConfigDeterministicRegardlessOfInputMapOrder(
 	effB, err := tlsB.Resolve("test")
 	require.NoError(t, err)
 	assert.Equal(t, effA, effB)
-}
-
-func TestAuthPolicyLogValueRedactsToken(t *testing.T) {
-	policy := AuthPolicy{
-		Mode:          new(string(AuthModeToken)),
-		Token:         new("super-secret"),
-		TokenFilePath: new("/path/token"),
-	}
-	rendered := renderLogValue(t, policy)
-	assert.NotContains(t, rendered, "super-secret")
-	assert.Contains(t, rendered, "***redacted***")
-	assert.Contains(t, rendered, "/path/token")
-}
-
-func TestEffectiveAuthLogValueRedactsToken(t *testing.T) {
-	effective := EffectiveAuth{Enabled: true, Token: "super-secret"}
-	rendered := renderLogValue(t, effective)
-	assert.NotContains(t, rendered, "super-secret")
-	assert.Contains(t, rendered, "***redacted***")
-}
-
-// renderLogValue renders v through a real slog.Logger (as node.go's own
-// logging would) and returns the emitted line, so the test exercises the
-// same LogValue path a structured log call takes rather than calling
-// LogValue directly.
-func renderLogValue(t *testing.T, v any) string {
-	t.Helper()
-	var buf strings.Builder
-	logger := slog.New(slog.NewTextHandler(&buf, nil))
-	logger.Info("test", "value", v)
-	return buf.String()
 }
