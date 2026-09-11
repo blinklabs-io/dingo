@@ -5808,7 +5808,12 @@ that. That cap does NOT extend to manual header-reading APIs
 read a raw count/byte off the wire with no built-in bound from the decoder
 itself, so every such call site enforces its own explicit check.
 `ledgerstate`'s hand-rolled map/array walkers (`decodeMapEntries`) retain the
-generic 10,000,000-entry cap. The streaming UTxO decoder instead has an
+generic 10,000,000-entry cap. Before reserving a definite map's entry slice,
+the decoder also checks that the remaining input contains at least two bytes
+per declared entry (the minimum one-byte key and one-byte value). Truncated
+maps cannot reserve capacity solely from their declared count. Indefinite
+maps grow their entry slice only as key/value pairs are parsed.
+The streaming UTxO decoder instead has an
 explicit 100,000,000-entry cap because a valid chain UTxO set can exceed the
 generic map limit; the larger bound still limits work on malformed or
 adversarial input. The definite-length UTxO map's
