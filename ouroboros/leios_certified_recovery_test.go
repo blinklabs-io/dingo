@@ -655,6 +655,85 @@ func TestFetchEndorserBlockByPointDeadlineDoesNotCoolDownPeer(t *testing.T) {
 	require.False(t, guard.inCooldown(time.Now()))
 }
 
+// TestLeiosFetchRequestContextReusesParentAtEqualDeadline pins the boundary
+// that made TestFetchEndorserBlockByPointDeadlineDoesNotCoolDownPeer flaky
+// under load (observed on Windows CI): the last (or only) backfill candidate
+// gets the caller's whole remaining budget, so its per-attempt deadline is
+// computed to equal the caller's own context deadline exactly. context.
+// WithDeadline only reuses a parent's own cancellation timer when the
+// parent's deadline is *strictly* earlier than the requested one
+// (cur.Before(d)); an equal deadline does not qualify, so without this
+// boundary check leiosFetchRequestContext would arm a second, independent
+// timer racing the caller's own. Under scheduling contention that second
+// timer can fire fractionally before the caller's, so
+// fetchEndorserBlockOnConn's ctx.Err() check (which reads the caller's
+// context specifically) observes it as not-yet-expired and misattributes the
+// caller's own deadline to the peer, incrementing consecutiveFailures on a
+// connection that did nothing wrong.
+//
+// This does not race real timers to prove the point: whether an independent
+// timer got armed is not black-box observable without either racing it or
+// reflecting into context's unexported types, so the decision that prevents
+// it is pinned directly instead.
+func TestLeiosFetchRequestContextReusesParentAtEqualDeadline(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	for _, tc := range []struct {
+		name              string
+		parentDeadline    time.Time
+		hasParentDeadline bool
+		deadline          time.Time
+		wantReusesParent  bool
+	}{
+		{
+			name:              "no parent deadline always gets its own timer",
+			hasParentDeadline: false,
+			deadline:          now.Add(time.Second),
+			wantReusesParent:  false,
+		},
+		{
+			// The exact scenario that made the flake possible: the last/only
+			// backfill candidate's attempt deadline equals the caller's own.
+			name:              "equal deadline reuses parent",
+			parentDeadline:    now,
+			hasParentDeadline: true,
+			deadline:          now,
+			wantReusesParent:  true,
+		},
+		{
+			name:              "parent deadline strictly earlier reuses parent",
+			parentDeadline:    now.Add(-time.Second),
+			hasParentDeadline: true,
+			deadline:          now,
+			wantReusesParent:  true,
+		},
+		{
+			// A genuinely truncated multi-candidate attempt must still get
+			// its own independent timer, preserving backfill failover
+			// (dingo #2819 / #3552): ctx.Err() being nil for this attempt's
+			// failure is correct, not a bug.
+			name:              "deadline strictly earlier than parent needs its own timer",
+			parentDeadline:    now,
+			hasParentDeadline: true,
+			deadline:          now.Add(-time.Second),
+			wantReusesParent:  false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(
+				t,
+				tc.wantReusesParent,
+				leiosFetchRequestContextReusesParent(
+					tc.parentDeadline,
+					tc.hasParentDeadline,
+					tc.deadline,
+				),
+			)
+		})
+	}
+}
+
 // TestFetchEndorserBlockByPointTxsUnavailableIsNotAnAllPeerDecline covers the
 // diffusion case: a peer that answers MsgNoBlockTxs may hold the manifest with
 // a still-incomplete transaction cache (dingo's own leios-fetch server answers
