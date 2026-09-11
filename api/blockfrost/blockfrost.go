@@ -26,13 +26,6 @@ import (
 	"github.com/blinklabs-io/dingo/internal/httpcors"
 )
 
-// blockfrostProjectIDHeader is the header real Blockfrost clients send
-// their API key in. Presenting the shared token there authenticates
-// exactly as presenting it via "Authorization: Bearer <token>" does --
-// see ARCHITECTURE.md/README.md's "API security" section for this
-// compatibility decision.
-const blockfrostProjectIDHeader = "project_id"
-
 // Leave time to report a stalled body before the 30-second write deadline.
 const defaultRequestBodyTimeout = 15 * time.Second
 
