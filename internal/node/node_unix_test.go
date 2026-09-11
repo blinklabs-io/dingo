@@ -32,6 +32,8 @@ import (
 // handling to the connection manager at bind time. In particular, unrelated
 // startup validation must not delete an existing filesystem entry first.
 func TestRunDoesNotPreRemoveSocketPath(t *testing.T) {
+	t.Parallel()
+
 	testCases := []struct {
 		name   string
 		create func(*testing.T, string)

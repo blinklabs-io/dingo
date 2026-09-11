@@ -466,6 +466,61 @@ SELECT id, epoch, snapshot_type, total_active_stake, total_pool_count,
 FROM reward_snapshot
 WHERE epoch = ? AND snapshot_type = ?;
 
+-- name: SaveRewardSeedFailure :exec
+INSERT INTO reward_seed_failure (
+    epoch, snapshot_type, failure_reason, captured_slot
+) VALUES (?, ?, ?, ?)
+ON CONFLICT (epoch, snapshot_type) DO UPDATE SET
+    failure_reason = CASE
+        WHEN excluded.captured_slot < reward_seed_failure.captured_slot
+        THEN excluded.failure_reason
+        ELSE reward_seed_failure.failure_reason
+    END,
+    captured_slot = MIN(reward_seed_failure.captured_slot, excluded.captured_slot);
+
+-- name: GetRewardSeedFailure :one
+SELECT failure_reason
+FROM reward_seed_failure
+WHERE epoch = ? AND snapshot_type = ?;
+
+-- name: DeleteRewardSeedFailure :exec
+DELETE FROM reward_seed_failure
+WHERE epoch = ? AND snapshot_type = ?;
+
+-- name: SaveImportedPoolBlockCount :exec
+INSERT INTO imported_pool_block_count (
+    epoch, pool_key_hash, blocks_produced, captured_slot
+) VALUES (?, ?, ?, ?)
+ON CONFLICT (epoch, pool_key_hash) DO UPDATE SET
+    blocks_produced = excluded.blocks_produced,
+    captured_slot = excluded.captured_slot;
+
+-- name: GetImportedPoolBlockCounts :many
+SELECT pool_key_hash, blocks_produced
+FROM imported_pool_block_count
+WHERE epoch = ?;
+
+-- name: DeleteImportedPoolBlockCountsForEpoch :exec
+DELETE FROM imported_pool_block_count
+WHERE epoch = ?;
+
+-- name: SaveImportedEpochBlockTotal :exec
+INSERT INTO imported_epoch_block_total (
+    epoch, total_blocks, captured_slot
+) VALUES (?, ?, ?)
+ON CONFLICT (epoch) DO UPDATE SET
+    total_blocks = excluded.total_blocks,
+    captured_slot = excluded.captured_slot;
+
+-- name: GetImportedEpochBlockTotal :one
+SELECT total_blocks
+FROM imported_epoch_block_total
+WHERE epoch = ?;
+
+-- name: DeleteImportedEpochBlockTotalForEpoch :exec
+DELETE FROM imported_epoch_block_total
+WHERE epoch = ?;
+
 -- name: ReleaseFallbackRewardSnapshotGuard :execrows
 DELETE FROM reward_snapshot
 WHERE id = ? AND authoritative = FALSE;
@@ -589,6 +644,18 @@ DELETE FROM reward_ada_pots WHERE captured_slot > ?;
 -- name: DeleteRewardSnapshotsAfterSlot :exec
 DELETE FROM reward_snapshot
 WHERE captured_slot > ? OR boundary_slot > ?;
+
+-- name: DeleteImportedPoolBlockCountsAfterSlot :exec
+DELETE FROM imported_pool_block_count
+WHERE captured_slot > ?;
+
+-- name: DeleteImportedEpochBlockTotalsAfterSlot :exec
+DELETE FROM imported_epoch_block_total
+WHERE captured_slot > ?;
+
+-- name: DeleteRewardSeedFailuresAfterSlot :exec
+DELETE FROM reward_seed_failure
+WHERE captured_slot > ?;
 
 -- name: DeleteRewardPoolInputsAfterSlot :exec
 DELETE FROM reward_pool_input
@@ -854,6 +921,9 @@ FROM asset
 WHERE utxo_id = ?
 ORDER BY id;
 
+-- Order by added_slot before id so the sort is the reverse of
+-- idx_utxo_added_slot's own order; ordering by id alone costs a full table
+-- scan. See the Store wrapper for the full rationale.
 -- name: GetUtxosAddedAfterSlot :many
 SELECT transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
        staking_key, credential_tag, datum_hash, spent_at_tx_id,
@@ -861,7 +931,7 @@ SELECT transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
        deleted_slot, amount, output_idx, payment_script
 FROM utxo
 WHERE added_slot > ?
-ORDER BY id DESC;
+ORDER BY added_slot DESC, id DESC;
 
 -- name: GetLiveUtxoRefsBySlot :many
 SELECT tx_id, output_idx
@@ -1107,6 +1177,40 @@ SELECT CAST(COALESCE(MAX(added_slot), 0) AS INTEGER)
 FROM registration_drep
 WHERE credential_tag = ? AND drep_credential = ?
   AND certificate_id IS NOT NULL AND certificate_id != 0;
+
+-- name: GetDrepLastRegistrationDeposit :one
+-- Unlike GetDrepLastRegistrationSlot, this does not exclude certificate_id
+-- = 0 rows: those are the Mithril ledger-state import's bootstrap-slot
+-- registrations (see ImportDrepRegistration), and their deposit_amount is
+-- the real amount owed on deregistration. On a bootstrapped node such a
+-- row is often a DRep's only registration, so excluding it here would
+-- compute a refund of 0 for a deposit that was actually paid.
+SELECT deposit_amount
+FROM registration_drep
+WHERE credential_tag = ? AND drep_credential = ?
+ORDER BY added_slot DESC
+LIMIT 1;
+
+-- name: GetDrepLastRegistrationDeposits :many
+-- The set form of GetDrepLastRegistrationDeposit, for reading the deposits
+-- of the active DReps GetActiveDreps returns in one round trip instead of
+-- one query per DRep. Same certificate_id treatment: bootstrap-slot import
+-- rows count, because their deposit_amount is the real amount owed.
+-- Drive this lookup from active drep rows. The correlated lookup uses the
+-- registration credential index for each active DRep, so history left behind
+-- by DReps that have since deregistered does not become the outer scan.
+SELECT r.credential_tag, r.drep_credential, r.deposit_amount
+FROM drep d
+JOIN registration_drep r
+  ON r.id = (
+      SELECT reg.id
+      FROM registration_drep reg
+      WHERE reg.credential_tag = d.credential_tag
+        AND reg.drep_credential = d.credential
+      ORDER BY reg.added_slot DESC, reg.id DESC
+      LIMIT 1
+  )
+WHERE d.active = TRUE;
 
 -- name: GetTransactionByHash :one
 SELECT hash, block_hash, metadata, slot, type, id, fee, collateral_fee,

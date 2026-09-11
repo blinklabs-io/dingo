@@ -970,28 +970,41 @@ func referencedScriptUtxos(
 	return utxos, nil
 }
 
-// DeclaredExUnits returns the total execution units
-// declared across all redeemers in a transaction's
-// witness set. These are the budgets the transaction
-// builder committed to (not the evaluated actuals).
-// Returns an error if the summation would overflow
-// int64.
+// DeclaredExUnits returns the total execution units declared across all
+// redeemers in a transaction, including Dijkstra subtransaction witness sets.
+// These are the budgets the transaction builder committed to (not the
+// evaluated actuals). Returns an error for negative values or if the summation
+// would overflow int64.
 func DeclaredExUnits(
 	tx lcommon.Transaction,
 ) (lcommon.ExUnits, error) {
 	var total lcommon.ExUnits
-	wits := tx.Witnesses()
-	if wits == nil {
-		return total, nil
+	addWitnessSet := func(wits lcommon.TransactionWitnessSet) error {
+		if wits == nil {
+			return nil
+		}
+		redeemers := wits.Redeemers()
+		if redeemers == nil {
+			return nil
+		}
+		for _, val := range redeemers.Iter() {
+			var err error
+			total, err = SafeAddExUnits(total, val.ExUnits)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
 	}
-	redeemers := wits.Redeemers()
-	if redeemers == nil {
-		return total, nil
+
+	if err := addWitnessSet(tx.Witnesses()); err != nil {
+		return lcommon.ExUnits{}, fmt.Errorf(
+			"summing redeemer execution units: %w",
+			err,
+		)
 	}
-	for _, val := range redeemers.Iter() {
-		var err error
-		total, err = SafeAddExUnits(total, val.ExUnits)
-		if err != nil {
+	for _, wits := range lcommon.SubTransactionWitnessSetsFromTransaction(tx) {
+		if err := addWitnessSet(wits); err != nil {
 			return lcommon.ExUnits{}, fmt.Errorf(
 				"summing redeemer execution units: %w",
 				err,

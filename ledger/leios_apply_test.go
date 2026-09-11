@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"io"
 	"log/slog"
@@ -26,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -122,6 +124,8 @@ func requireLeiosApplyTestEndorserBlob(
 }
 
 func TestApplyEndorserBlockAppliesTransaction(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newLeiosApplyTestLedger(t)
 	ls.config.LeiosApplyEndorserBlockTxs = true // CIP-conformant path
 	rawTx, bodyCbor, tx := leiosApplyTestTx(t, 0x01)
@@ -156,6 +160,8 @@ func TestApplyEndorserBlockAppliesTransaction(t *testing.T) {
 }
 
 func TestApplyEndorserBlockAppliesMultipleTransactions(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newLeiosApplyTestLedger(t)
 	ls.config.LeiosApplyEndorserBlockTxs = true // CIP-conformant path
 	rawTx1, body1, _ := leiosApplyTestTx(t, 0x02)
@@ -187,6 +193,8 @@ func TestApplyEndorserBlockAppliesMultipleTransactions(t *testing.T) {
 }
 
 func TestApplyEndorserBlockDeduplicatesCIPTransactions(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newLeiosApplyTestLedger(t)
 	ls.config.LeiosApplyEndorserBlockTxs = true // CIP-conformant path
 	rawTx1, body1, _ := leiosApplyTestTx(t, 0x04)
@@ -267,6 +275,8 @@ func TestApplyEndorserBlockDeduplicatesCIPTransactions(t *testing.T) {
 // are stored. Previously this path stored metadata only and did not apply the
 // transactions, which diverged the UTxO set from the reference.
 func TestApplyEndorserBlockHaskellPathAppliesTransactions(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newLeiosApplyTestLedger(t)
 	// LeiosApplyEndorserBlockTxs defaults to false (Haskell-conformant).
 	rawTx, bodyCbor, tx := leiosApplyTestTx(t, 0x06)
@@ -341,6 +351,8 @@ func leiosApplyTestTxWithOutput(
 // recording metadata only left the produced outputs missing, which zeroed
 // delegator stake and drove the "pool has no stake in epoch snapshot" rejection.
 func TestApplyEndorserBlockHaskellPathProducesUtxo(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newLeiosApplyTestLedger(t)
 	// LeiosApplyEndorserBlockTxs defaults to false (Haskell-conformant).
 	rawTx, tx := leiosApplyTestTxWithOutput(t, 0x6a)
@@ -376,6 +388,8 @@ SELECT added_slot, deleted_slot FROM utxo WHERE tx_id = ?`,
 }
 
 func TestApplyEndorserBlockHaskellPathDeduplicatesMetadata(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newLeiosApplyTestLedger(t)
 	rawTx, bodyCbor, tx := leiosApplyTestTx(t, 0x07)
 	firstPoint := leiosApplyTestRankingPoint(0x91)
@@ -484,6 +498,8 @@ func leiosTestCertifiedBlockPair(
 func TestEnsureReferencedEndorserBlocksRequiresCertifiedMusashiClosure(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	parent, certifier, ebHash := leiosTestCertifiedBlockPair(t)
 	available := false
 	ls := &LedgerState{
@@ -535,6 +551,8 @@ func TestEnsureReferencedEndorserBlocksRequiresCertifiedMusashiClosure(
 func TestEnsureReferencedEndorserBlocksRejectsProviderResultAtWrongSlot(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	parent, certifier, ebHash := leiosTestCertifiedBlockPair(t)
 	ls := &LedgerState{
 		config: LedgerStateConfig{
@@ -565,6 +583,8 @@ func TestEnsureReferencedEndorserBlocksRejectsProviderResultAtWrongSlot(
 func TestEnsureReferencedEndorserBlocksKeepsCIPAnnouncementsBestEffort(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	parent, certifier, _ := leiosTestCertifiedBlockPair(t)
 	ls := &LedgerState{
 		config: LedgerStateConfig{
@@ -588,6 +608,8 @@ func TestEnsureReferencedEndorserBlocksKeepsCIPAnnouncementsBestEffort(
 func TestEnsureReferencedEndorserBlocksRejectsUnresolvedCertifyingParent(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	_, certifier, _ := leiosTestCertifiedBlockPair(t)
 	ls := &LedgerState{
 		config: LedgerStateConfig{
@@ -618,13 +640,15 @@ func TestEnsureReferencedEndorserBlocksRejectsUnresolvedCertifyingParent(
 // the *first* slot's fetch cleared the shared key, leaving the second slot's
 // requirement never fetched at all.
 func TestLeiosBackfillerSpawnDedupsByHashAndSlotIndependently(t *testing.T) {
+	t.Parallel()
+
 	var mu sync.Mutex
 	var calls []uint64
 	release := make(chan struct{})
 
 	hash := lcommon.NewBlake2b256(leiosTestHash(0xAB))
 	b := &leiosBackfiller{
-		fetch: func(slot uint64, _ []byte) error {
+		fetch: func(_ context.Context, slot uint64, _ []byte) error {
 			mu.Lock()
 			calls = append(calls, slot)
 			mu.Unlock()
@@ -647,7 +671,7 @@ func TestLeiosBackfillerSpawnDedupsByHashAndSlotIndependently(t *testing.T) {
 
 	// Slot 100's fetch starts and blocks inside fetch (simulating a live
 	// in-flight network request).
-	b.spawn(leiosEbRef{slot: 100, hash: hash})
+	b.spawn(context.Background(), leiosEbRef{slot: 100, hash: hash})
 	require.Eventually(
 		t,
 		func() bool { return callCount() == 1 },
@@ -657,7 +681,7 @@ func TestLeiosBackfillerSpawnDedupsByHashAndSlotIndependently(t *testing.T) {
 
 	// Slot 200 requires the same hash while slot 100's fetch is still in
 	// flight. It must be dispatched independently, not suppressed.
-	b.spawn(leiosEbRef{slot: 200, hash: hash})
+	b.spawn(context.Background(), leiosEbRef{slot: 200, hash: hash})
 	require.Eventually(
 		t,
 		func() bool { return callCount() == 2 },
@@ -670,6 +694,66 @@ func TestLeiosBackfillerSpawnDedupsByHashAndSlotIndependently(t *testing.T) {
 	mu.Unlock()
 }
 
+// TestLeiosBackfillerFetchOnceDedupsWithSpawnInFlight verifies that the
+// mandatory retry path observes the best-effort fetch marker for the same
+// (slot, hash) reference instead of starting a redundant fetch.
+func TestLeiosBackfillerFetchOnceDedupsWithSpawnInFlight(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	calls := 0
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	fetchDone := make(chan struct{})
+
+	hash := lcommon.NewBlake2b256(leiosTestHash(0xEE))
+	r := leiosEbRef{slot: 100, hash: hash}
+	b := &leiosBackfiller{
+		fetch: func(_ context.Context, _ uint64, _ []byte) error {
+			mu.Lock()
+			calls++
+			mu.Unlock()
+			started <- struct{}{}
+			<-release
+			return nil
+		},
+		provider: func([]byte, uint64) ([]cbor.RawMessage, bool) {
+			return nil, false
+		},
+		logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		sem:    make(chan struct{}, leiosBackfillConcurrency),
+	}
+
+	b.spawn(t.Context(), r)
+	testutil.RequireReceive(
+		t,
+		started,
+		time.Second,
+		"spawn fetch never started",
+	)
+	go func() {
+		defer close(fetchDone)
+		_ = b.fetchOnce(t.Context(), r, time.Millisecond)
+	}()
+	testutil.RequireNoReceive(
+		t,
+		started,
+		200*time.Millisecond,
+		"fetchOnce started a redundant fetch for spawn's in-flight reference",
+	)
+
+	mu.Lock()
+	require.Equal(t, 1, calls)
+	mu.Unlock()
+	close(release)
+	testutil.RequireReceive(
+		t,
+		fetchDone,
+		time.Second,
+		"fetchOnce did not finish",
+	)
+}
+
 // TestLeiosBackfillerAwaitFetchDoesNotSkipFastOnDifferentSlotCompletion is the
 // companion regression targeting awaitFetch directly: with both slots' fetches
 // genuinely in flight at once, slot 100 finishing (and clearing its own
@@ -679,6 +763,8 @@ func TestLeiosBackfillerSpawnDedupsByHashAndSlotIndependently(t *testing.T) {
 func TestLeiosBackfillerAwaitFetchDoesNotSkipFastOnDifferentSlotCompletion(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	var mu sync.Mutex
 	completed := map[uint64]bool{}
 	releaseA := make(chan struct{})
@@ -686,7 +772,7 @@ func TestLeiosBackfillerAwaitFetchDoesNotSkipFastOnDifferentSlotCompletion(
 	hash := lcommon.NewBlake2b256(leiosTestHash(0xCD))
 
 	b := &leiosBackfiller{
-		fetch: func(slot uint64, _ []byte) error {
+		fetch: func(_ context.Context, slot uint64, _ []byte) error {
 			switch slot {
 			case 100:
 				<-releaseA
@@ -711,8 +797,8 @@ func TestLeiosBackfillerAwaitFetchDoesNotSkipFastOnDifferentSlotCompletion(
 	}
 
 	// Both slots' fetches are genuinely in flight at once.
-	b.spawn(leiosEbRef{slot: 100, hash: hash})
-	b.spawn(leiosEbRef{slot: 200, hash: hash})
+	b.spawn(context.Background(), leiosEbRef{slot: 100, hash: hash})
+	b.spawn(context.Background(), leiosEbRef{slot: 200, hash: hash})
 
 	// Slot 100 finishes first, while slot 200 is still in flight.
 	close(releaseA)
@@ -757,6 +843,8 @@ func TestLeiosBackfillerAwaitFetchDoesNotSkipFastOnDifferentSlotCompletion(
 func TestClassifyEndorserBlockFetchesKeepsDistinctSlotsOfSameHash(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	sameHash := lcommon.NewBlake2b256(leiosTestHash(0xFE))
 	hashX := leiosTestHash(0x11)
 	hashY := leiosTestHash(0x22)
@@ -784,6 +872,8 @@ func TestClassifyEndorserBlockFetchesKeepsDistinctSlotsOfSameHash(
 // in the settled backlog only certified parent announcements are fetched and
 // uncertified historical announcements are skipped.
 func TestClassifyEndorserBlockFetches(t *testing.T) {
+	t.Parallel()
+
 	var (
 		hashA = leiosTestHash(0xA1) // announces ebA (historical)
 		hashC = leiosTestHash(0xC1) // certifies, parent = A (historical)
@@ -896,6 +986,8 @@ func TestClassifyEndorserBlockFetches(t *testing.T) {
 }
 
 func TestRequiredCertifiedEndorserBlocksKeepsDistinctSlots(t *testing.T) {
+	t.Parallel()
+
 	parentA := leiosTestHash(0xA2)
 	parentB := leiosTestHash(0xB2)
 	sharedHash := lcommon.NewBlake2b256(leiosTestHash(0xC2))

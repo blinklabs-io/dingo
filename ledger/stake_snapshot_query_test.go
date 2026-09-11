@@ -112,7 +112,7 @@ func epochSummary(epoch, total uint64) *models.EpochSummary {
 // GetCBOR result shape along the way.
 func serialisedInner(t *testing.T, ls *LedgerState, payloadHex string) []byte {
 	t.Helper()
-	result, err := ls.Query(blockQueryFromHex(t, payloadHex))
+	result, err := ls.Query(blockQueryFromHex(t, payloadHex), QueryPoint{})
 	require.NoError(t, err)
 	outer, ok := result.([]any)
 	require.True(t, ok, "expected []any MsgResult wire form")
@@ -134,6 +134,8 @@ func serialisedInner(t *testing.T, ls *LedgerState, payloadHex string) []byte {
 // scenario captured from cardano-node and asserts dingo emits byte-identical
 // serialised CBOR. Reproduces and guards the fix for issue #2917.
 func TestQueryStakeSnapshotSpecificPool(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	meta := db.Metadata()
 	// Only pool1 has a current-epoch (mark) snapshot; set/go are empty.
@@ -164,6 +166,8 @@ func TestQueryStakeSnapshotSpecificPool(t *testing.T) {
 // from cardano-node and asserts byte-identical serialised CBOR, including the
 // canonical (sorted) pool-map key order.
 func TestQueryStakeSnapshotAllPools(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	meta := db.Metadata()
 	require.NoError(t, meta.SavePoolStakeSnapshots(
@@ -202,6 +206,8 @@ func TestQueryStakeSnapshotAllPools(t *testing.T) {
 // decode the totals as NonZero). This mirrors cardano-node 11.0.1 on a fresh
 // devnet, which reports total set/go = 1 while every pool's set/go stake is 0.
 func TestQueryStakeSnapshotEarlyEpochsNonZeroTotals(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	meta := db.Metadata()
 	require.NoError(t, meta.SavePoolStakeSnapshots(
@@ -252,6 +258,8 @@ func TestQueryStakeSnapshotEarlyEpochsNonZeroTotals(t *testing.T) {
 // that has retired keeps historical set/go stake and must still be reported
 // even though it has no current-epoch (mark) snapshot.
 func TestQueryStakeSnapshotAllPoolsIncludesRetiredPool(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	meta := db.Metadata()
 	// pool1 is active (mark@epoch 2). pool2 retired: it only appears in the
@@ -313,6 +321,8 @@ func consensusAtVersion(epoch uint64, major uint) *consensusSnapshot {
 // explicitly requested pool with no stake is still returned, all-zero,
 // matching pre-PV11 cardano-ledger GetStakeSnapshots semantics.
 func TestQueryStakeSnapshotNonexistentPoolPV10(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	ls := &LedgerState{db: db}
 	ls.consensus.Store(consensusAtVersion(2, 10))
@@ -338,6 +348,8 @@ func TestQueryStakeSnapshotNonexistentPoolPV10(t *testing.T) {
 // explicitly requested pool whose mark/set/go are all zero is omitted
 // (cardano-ledger issue 5581).
 func TestQueryStakeSnapshotNonexistentPoolPV11(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	ls := &LedgerState{db: db}
 	ls.consensus.Store(consensusAtVersion(2, 11))
@@ -356,6 +368,8 @@ func TestQueryStakeSnapshotNonexistentPoolPV11(t *testing.T) {
 // all-pools query drops a pool whose snapshots are all zero while keeping
 // pools that carry stake.
 func TestQueryStakeSnapshotAllPoolsPV11OmitsZeroStake(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	meta := db.Metadata()
 	require.NoError(t, meta.SavePoolStakeSnapshots(

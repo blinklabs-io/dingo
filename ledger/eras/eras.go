@@ -47,18 +47,93 @@ func praosVRFNonceValue(vrfOutput []byte) []byte {
 
 var ErrIncompatibleProtocolParams = errors.New("pparams are not expected type")
 
+// ErrNoCostModelForPlutusV2 is returned when a transaction's PlutusV2
+// redeemer is evaluated against HardForkBabbage's fabricated cost model
+// rather than real governance/protocol-update data (blinklabs-io/dingo#3962).
+// Real cardano-ledger rejects such a transaction outright, at the UTXOW
+// level, before any script evaluation runs: the formal rule "languages txw
+// ⊆ dom(costmdls pp)" (eras/alonzo/impl/src/Cardano/Ledger/Alonzo/Rules/Utxow.hs,
+// eras/babbage/impl/src/Cardano/Ledger/Babbage/Rules/Utxow.hs, both in
+// IntersectMBO/cardano-ledger) is checked unconditionally against the
+// languages the transaction's witnesses actually use, raising `NoCostModel`
+// (Cardano.Ledger.Alonzo.Plutus.Context.CollectError) when a used language
+// has no entry in the current protocol parameters' cost-models map at all.
+// On a real network during the pre-update gap, PlutusV2 genuinely has no
+// entry in that map, so this is not a hypothetical: a real
+// IntersectMBO/cardano-node bug report (cardano-node#4050) shows exactly
+// this rejection reachable in practice, and cardano-ledger's own Conway
+// conformance suite (Test.Cardano.Ledger.Conway.Imp.UtxosSpec) has the
+// identical-shaped test for PlutusV3 at the Conway boundary. Dingo's
+// HardForkBabbage instead fabricates a value specifically so CostModels[1]
+// is never genuinely absent (needed for eras.DefaultPlutusV2CostModel's own
+// internal-validation-continuity purpose), so a literal "is the language a
+// map key" check would never fire here -- the equivalent condition is
+// "is the entry still the fabricated one", tracked as
+// LedgerState.syntheticV2CostModel and reachable from era-package validation
+// code via syntheticV2CostModelReporter.
+var ErrNoCostModelForPlutusV2 = errors.New(
+	"no cost model for PlutusV2 script (still HardForkBabbage's synthetic default)",
+)
+
+// syntheticV2CostModelReporter is implemented by ledger.LedgerView
+// (ledger/view.go's SyntheticV2CostModelInEffect), declared locally here to
+// avoid a package cycle: this package cannot import ledger, which already
+// imports this package. Every ValidateTxFunc/EvaluateTxFunc caller in
+// ledger/state.go always passes a *ledger.LedgerView as the
+// lcommon.LedgerState argument, so the type assertion below succeeds in
+// practice; a caller passing some other lcommon.LedgerState implementation
+// (e.g. a test-only stub) simply skips this check, which is safe -- it does
+// not itself validate anything else this check depends on.
+type syntheticV2CostModelReporter interface {
+	SyntheticV2CostModelInEffect() bool
+}
+
+// syntheticV2CostModelInEffect reports whether ls (the lcommon.LedgerState
+// passed into a ValidateTxFunc/EvaluateTxFunc implementation) reports that
+// the current PlutusV2 cost model is still HardForkBabbage's fabricated
+// default. See syntheticV2CostModelReporter and ErrNoCostModelForPlutusV2.
+func syntheticV2CostModelInEffect(ls lcommon.LedgerState) bool {
+	reporter, ok := ls.(syntheticV2CostModelReporter)
+	return ok && reporter.SyntheticV2CostModelInEffect()
+}
+
+// paramUpdateHasPlutusV2CostModel reports whether a decoded protocol-
+// parameter update's CostModels map explicitly specifies a PlutusV2 cost
+// model (key 1). Shared by every era's EraDesc.ParamUpdateHasPlutusV2CostModelFunc
+// implementation.
+func paramUpdateHasPlutusV2CostModel(costModels map[uint][]int64) bool {
+	_, ok := costModels[1]
+	return ok
+}
+
 type EraDesc struct {
 	DecodePParamsFunc       func([]byte) (lcommon.ProtocolParameters, error)
 	DecodePParamsUpdateFunc func([]byte) (any, error)
 	PParamsUpdateFunc       func(lcommon.ProtocolParameters, any) (lcommon.ProtocolParameters, error)
-	HardForkFunc            func(*cardano.CardanoNodeConfig, lcommon.ProtocolParameters) (lcommon.ProtocolParameters, error)
-	EpochLengthFunc         func(*cardano.CardanoNodeConfig) (uint, uint, error)
-	CalculateEtaVFunc       func(*cardano.CardanoNodeConfig, []byte, ledger.Block) ([]byte, error)
-	CertDepositFunc         func(lcommon.Certificate, lcommon.ProtocolParameters) (uint64, error)
-	ValidateTxFunc          func(lcommon.Transaction, uint64, lcommon.LedgerState, lcommon.ProtocolParameters) error
-	EvaluateTxFunc          func(lcommon.Transaction, lcommon.LedgerState, lcommon.ProtocolParameters) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error)
-	Name                    string
-	Id                      uint
+	// ParamUpdateHasPlutusV2CostModelFunc reports whether a decoded
+	// DecodePParamsUpdateFunc value (the enacted update itself, not the
+	// merged result) explicitly specifies a PlutusV2 cost model (map key
+	// 1). This is the pre-Conway equivalent of
+	// governance.EnactmentResult.PlutusV2CostModelWritten, used by
+	// database.ComputeAndApplyPParamUpdates: on a network that forks into
+	// Babbage before receiving a real PlutusV2 cost model, that model can
+	// arrive through this classic Shelley-style update system rather than
+	// CIP-1694 governance (as it did on real mainnet, well before Conway
+	// governance existed), and that path needs the same real-write
+	// provenance signal EnactProposal provides for Conway/Dijkstra --
+	// comparing the merged result's value before and after is unsound for
+	// the same reason it is there. See blinklabs-io/dingo#3825's PR review.
+	// nil for eras with no CostModels concept at all (Byron, Shelley,
+	// Allegra, Mary).
+	ParamUpdateHasPlutusV2CostModelFunc func(any) bool
+	HardForkFunc                        func(*cardano.CardanoNodeConfig, lcommon.ProtocolParameters) (lcommon.ProtocolParameters, error)
+	EpochLengthFunc                     func(*cardano.CardanoNodeConfig) (uint, uint, error)
+	CalculateEtaVFunc                   func(*cardano.CardanoNodeConfig, []byte, ledger.Block) ([]byte, error)
+	CertDepositFunc                     func(lcommon.Certificate, lcommon.ProtocolParameters) (uint64, error)
+	ValidateTxFunc                      func(lcommon.Transaction, uint64, lcommon.LedgerState, lcommon.ProtocolParameters) error
+	EvaluateTxFunc                      func(lcommon.Transaction, lcommon.LedgerState, lcommon.ProtocolParameters) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error)
+	Name                                string
+	Id                                  uint
 	// MinMajorVersion and MaxMajorVersion are the inclusive protocol-major
 	// version range covered by this era. Adjacent eras must meet without
 	// gap or overlap (cur.MinMajorVersion == prev.MaxMajorVersion + 1).

@@ -64,6 +64,8 @@ func stakeDistributionQuery() *olocalstatequery.BlockQuery {
 // helper as GetPoolDistr2 (queryShelleyPoolDistr2), so the two queries
 // cannot silently disagree about the same chain's stake distribution.
 func TestQueryShelleyStakeDistribution_ReportsFractionAndVrf(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	vrfA := make([]byte, 32)
@@ -93,7 +95,7 @@ func TestQueryShelleyStakeDistribution_ReportsFractionAndVrf(t *testing.T) {
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.Query(stakeDistributionQuery())
+	result, err := ls.Query(stakeDistributionQuery(), QueryPoint{})
 	require.NoError(t, err)
 	dist := decodeStakeDistributionResult(t, result)
 	require.Len(t, dist.Results, 2)
@@ -138,6 +140,8 @@ func stakeDistributionCborQuery() *olocalstatequery.BlockQuery {
 // StructAsArray result, or whether it strips a wrapping layer the real
 // client-side type still expects.
 func TestQueryShelleyStakeDistribution_ViaGetCBOR(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	vrfA := make([]byte, 32)
@@ -153,7 +157,7 @@ func TestQueryShelleyStakeDistribution_ViaGetCBOR(t *testing.T) {
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.Query(stakeDistributionCborQuery())
+	result, err := ls.Query(stakeDistributionCborQuery(), QueryPoint{})
 	require.NoError(t, err, "GetCBOR-wrapped GetStakeDistribution must not error")
 
 	arr, ok := result.([]any)
@@ -194,6 +198,8 @@ func TestQueryShelleyStakeDistribution_ViaGetCBOR(t *testing.T) {
 func TestQueryShelleyStakeDistribution_UsesCirculationNotGetPoolDistr2sTotal(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	const snapshotEpoch = 0
@@ -229,7 +235,7 @@ func TestQueryShelleyStakeDistribution_UsesCirculationNotGetPoolDistr2sTotal(
 
 	// GetPoolDistr2 must be unaffected: still sum-of-delegated (2_000_000),
 	// so each pool is 1/2.
-	poolDistr2Result, err := ls.Query(poolDistr2Query())
+	poolDistr2Result, err := ls.Query(poolDistr2Query(), QueryPoint{})
 	require.NoError(t, err)
 	poolDistr2 := decodePoolDistr2Result(t, poolDistr2Result)
 	entryA2, ok := poolDistr2.Pools[lcommon.PoolId(pkhA)]
@@ -240,7 +246,7 @@ func TestQueryShelleyStakeDistribution_UsesCirculationNotGetPoolDistr2sTotal(
 
 	// GetStakeDistribution must use circulation (4_000_000) instead, so each
 	// pool is 1/4 -- not 1/2.
-	stakeDistResult, err := ls.Query(stakeDistributionQuery())
+	stakeDistResult, err := ls.Query(stakeDistributionQuery(), QueryPoint{})
 	require.NoError(t, err)
 	stakeDist := decodeStakeDistributionResult(t, stakeDistResult)
 	entryA, ok := stakeDist.Results[lcommon.PoolId(pkhA)]
@@ -256,10 +262,12 @@ func TestQueryShelleyStakeDistribution_UsesCirculationNotGetPoolDistr2sTotal(
 // stake snapshot yet: the query must return an empty, non-nil map rather
 // than failing.
 func TestQueryShelleyStakeDistribution_EmptySnapshot(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.queryShelleyStakeDistribution()
+	result, err := ls.queryShelleyStakeDistribution(QueryPoint{}, nil)
 	require.NoError(t, err)
 	dist := decodeStakeDistributionResult(t, result)
 	assert.Empty(t, dist.Results)

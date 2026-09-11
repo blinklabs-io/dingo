@@ -48,6 +48,8 @@ func stopNow(t *testing.T, srv *Blockfrost) error {
 // a released ephemeral address here could instead reach another package's
 // listener when the suite runs concurrently.
 func TestServerRebindsAfterStop(t *testing.T) {
+	t.Parallel()
+
 	srv, addr := startOnFreePort(t, t.Context(), BlockfrostConfig{})
 	require.NoError(t, stopNow(t, srv))
 

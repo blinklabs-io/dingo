@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"math/big"
 	"time"
@@ -32,6 +33,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
 
 // ErrNilDecodedOutput is returned when a decoded UTxO output is nil.
@@ -60,6 +62,36 @@ type LedgerView struct {
 	// skipPhase2Validation is set for accepted block replay, where
 	// the producer's isValid flag is authoritative for Phase-2 results.
 	skipPhase2Validation bool
+	// horizonAnchorSlot is the slot the era forecast horizon is measured
+	// from when this view converts slots to time. Block application sets it
+	// to the applied block's immediate predecessor, which is what the
+	// reference implementation ticks from; the published tip trails that by
+	// up to a whole block batch during replay. Zero leaves the published tip
+	// in charge, which is correct for every caller with no applied block in
+	// hand (mempool validation, standalone evaluation).
+	horizonAnchorSlot uint64
+	// syntheticV2CostModel is pinned from the same snapshot pparams (pp) was
+	// captured from -- see pinSyntheticV2CostModel and
+	// SyntheticV2CostModelInEffect. It must not be re-read live from
+	// ls.loadConsensusSnapshot() at query time: a validation operation can
+	// run long enough (evaluating scripts) that the writer publishes a
+	// newer snapshot in the meantime, which would let this disagree with pp
+	// -- the exact protocol parameters this operation is actually
+	// evaluating against. See blinklabs-io/dingo#3962's PR review.
+	syntheticV2CostModel bool
+}
+
+// pinSyntheticV2CostModel records whether the PlutusV2 cost model was still
+// synthetic in the same snapshot pp (passed to ValidateTxFunc/EvaluateTxFunc
+// alongside this view) was captured from. Every call site that pins
+// committee state alongside pp also pins this.
+func (lv *LedgerView) pinSyntheticV2CostModel(inEffect bool) *LedgerView {
+	lv.syntheticV2CostModel = inEffect
+	return lv
+}
+
+func uint64Ptr(value uint64) *uint64 {
+	return &value
 }
 
 func (lv *LedgerView) pinCommitteeState(
@@ -117,6 +149,16 @@ var _ lcommon.DRepDelegationState = (*LedgerView)(nil)
 // ByronProtocolMagic would reject every Byron transaction carrying those
 // witnesses rather than fail to build.
 var _ eras.ByronProtocolMagicProvider = (*LedgerView)(nil)
+
+// UtxoValidateValueNotConservedUtxo discovers this capability with a runtime
+// type assertion and, unlike the assertions above, degrades rather than fails
+// when it misses: a failed assertion silently refunds a legacy stake
+// deregistration at the current KeyDeposit instead of the deposit actually
+// recorded at registration. Value conservation then passes on the wrong
+// number for every credential registered under a different KeyDeposit, with
+// no error anywhere. A missed assertion is therefore invisible at runtime,
+// which is exactly why it has to be a compile error here.
+var _ lcommon.StakeCredentialDepositState = (*LedgerView)(nil)
 
 func (lv *LedgerView) NetworkId() uint {
 	genesis := lv.ls.config.CardanoNodeConfig.ShelleyGenesis()
@@ -294,8 +336,13 @@ func (lv *LedgerView) StakeCredentialDeposit(
 	if len(history) == 0 || history[0].Action != "registered" {
 		return nil, nil
 	}
-	deposit := history[0].Deposit
-	return &deposit, nil
+	// A NULL deposit_amount reaches here as a nil Deposit and must stay nil:
+	// the registration was ingested without a computable deposit, so the
+	// recorded value is unknown and value conservation has to fall back to the
+	// current KeyDeposit. A recorded zero is a non-nil zero and is returned as
+	// an authoritative zero -- the devnet's "keyDeposit": 0 makes that the
+	// normal case there, so the two must not be conflated.
+	return history[0].Deposit, nil
 }
 
 // It returns the most recent active pool registration certificate
@@ -414,6 +461,24 @@ func (lv *LedgerView) PoolCurrentState(
 	return currentReg, pendingEpoch, nil
 }
 
+// EpochForSlot returns the epoch containing the given slot, satisfying
+// gouroboros' optional common.EpochState capability.
+//
+// Several ledger rules are expressed relative to the current epoch and degrade
+// to a weaker check when the ledger state cannot supply one. Without this the
+// pool-deposit decision cannot tell a retired pool from a registered one, so a
+// registration for an already-retired pool is charged no deposit and the
+// transaction fails value conservation by exactly that amount
+// (issue #3908); the retirement-epoch bound on pool retirement certificates is
+// skipped for the same reason.
+func (lv *LedgerView) EpochForSlot(slot uint64) (uint64, error) {
+	epoch, err := lv.ls.epochForSlot(slot)
+	if err != nil {
+		return 0, err
+	}
+	return epoch.EpochId, nil
+}
+
 // IsPoolRegistered checks if a pool is currently registered
 func (lv *LedgerView) IsPoolRegistered(pkh lcommon.PoolKeyHash) bool {
 	reg, _, err := lv.PoolCurrentState(pkh)
@@ -443,9 +508,16 @@ func (lv *LedgerView) IsVrfKeyInUse(
 	), nil
 }
 
-// SlotToTime returns the current time for a given slot based on known epochs
+// SlotToTime returns the current time for a given slot based on known epochs.
+//
+// This is the converter transaction validation sees, and a Plutus script
+// context must convert the transaction's validity interval through it. The
+// forecast horizon stays in force, matching cardano-ledger's
+// TimeTranslationPastHorizon failure, but it is measured from this view's
+// horizon anchor so a block being applied is judged against its own
+// predecessor rather than a tip that has not been published yet (issue #3844).
 func (lv *LedgerView) SlotToTime(slot uint64) (time.Time, error) {
-	return lv.ls.SlotToTime(slot)
+	return lv.ls.SlotToTimeWithHorizonFrom(lv.horizonAnchorSlot, slot)
 }
 
 // TimeToSlot returns the slot number for a given time based on known epochs
@@ -570,6 +642,24 @@ func (lv *LedgerView) CostModels() map[lcommon.PlutusLanguage]lcommon.CostModel 
 	return extractCostModelsFromPParams(pp)
 }
 
+// SyntheticV2CostModelInEffect reports whether the PlutusV2 cost model
+// currently in force is still HardForkBabbage's fabricated default rather
+// than real governance/protocol-update data -- see
+// LedgerState.syntheticV2CostModel (blinklabs-io/dingo#3825,
+// blinklabs-io/dingo#3962). ledger/eras validation code (which cannot import
+// this package) type-asserts its lcommon.LedgerState parameter against a
+// locally declared interface with this exact method signature to reach it
+// without a package cycle.
+//
+// Returns the value pinSyntheticV2CostModel recorded, not a live read of
+// ls.loadConsensusSnapshot() -- see syntheticV2CostModel's field doc
+// comment for why a live read would be unsound here. A *LedgerView this
+// wasn't called on (e.g. a test constructing one directly) reports false,
+// matching the field's zero value.
+func (lv *LedgerView) SyntheticV2CostModelInEffect() bool {
+	return lv.syntheticV2CostModel
+}
+
 // costModelsProvider is an optional interface implemented by
 // era-specific protocol parameter types that expose raw cost
 // model data as map[uint][]int64.
@@ -615,6 +705,10 @@ func extractCostModelsFromPParams(
 // extractRawCostModels retrieves the raw cost model data from
 // protocol parameters. It tries the costModelsProvider interface
 // first, then falls back to type assertions for known era types.
+//
+// A concrete-typed nil (pp holding e.g. a nil *conway.ConwayProtocolParameters)
+// still matches its type's case below; every case guards against nil before
+// dereferencing, matching withoutSyntheticV2CostModel's identical guard.
 func extractRawCostModels(
 	pp lcommon.ProtocolParameters,
 ) map[uint][]int64 {
@@ -628,14 +722,123 @@ func extractRawCostModels(
 	// Fall back to concrete era type assertions.
 	switch p := pp.(type) {
 	case *alonzo.AlonzoProtocolParameters:
+		if p == nil {
+			return nil
+		}
 		return p.CostModels
 	case *babbage.BabbageProtocolParameters:
+		if p == nil {
+			return nil
+		}
 		return p.CostModels
 	case *conway.ConwayProtocolParameters:
+		if p == nil {
+			return nil
+		}
+		return p.CostModels
+	case *dijkstra.DijkstraProtocolParameters:
+		if p == nil {
+			return nil
+		}
 		return p.CostModels
 	default:
 		return nil
 	}
+}
+
+// withoutSyntheticV2CostModel returns pp unchanged unless synthetic is true,
+// in which case it returns a shallow copy with the PlutusV2 cost model (map
+// key 1) removed.
+//
+// See LedgerState.syntheticV2CostModel (blinklabs-io/dingo#3825): the real
+// struct backing pp always carries HardForkBabbage's fabricated PlutusV2
+// cost model once real data hasn't yet replaced it, because internal script
+// validation needs it (a real V2 script can arrive before a real update
+// does). This is called only at the LocalStateQuery reply boundary, so a
+// caller asking "what are the current protocol parameters" sees only what
+// the chain has actually committed to -- matching what a real cardano-node
+// reports during the same window -- without touching the live struct
+// internal validation still reads.
+//
+// The shallow copy (`modified := *p`) is safe: it produces a new struct
+// value referencing the original's other fields, then replaces only
+// CostModels with a freshly built map, so the original -- still reachable
+// from ls.currentPParams / the published snapshot -- is never mutated.
+//
+// logger receives a warning when synthetic is true but pp's concrete type
+// matches none of the cases below: unlike every other branch, that combination
+// returns pp unfiltered, silently reintroducing #3825 for a future era type
+// this switch hasn't been taught yet. logger may be nil (e.g. in tests that
+// don't care about this diagnostic).
+func withoutSyntheticV2CostModel(
+	pp lcommon.ProtocolParameters,
+	synthetic bool,
+	logger *slog.Logger,
+) lcommon.ProtocolParameters {
+	if !synthetic {
+		return pp
+	}
+	// A concrete-typed nil (pp holding e.g. a nil *conway.ConwayProtocolParameters)
+	// still matches its type's case below; guard every case before
+	// dereferencing rather than relying on the interface-level pp == nil
+	// check callers already do elsewhere in this file.
+	switch p := pp.(type) {
+	case *alonzo.AlonzoProtocolParameters:
+		if p == nil {
+			return pp
+		}
+		modified := *p
+		modified.CostModels = withoutV2CostModelKey(p.CostModels)
+		return &modified
+	case *babbage.BabbageProtocolParameters:
+		if p == nil {
+			return pp
+		}
+		modified := *p
+		modified.CostModels = withoutV2CostModelKey(p.CostModels)
+		return &modified
+	case *conway.ConwayProtocolParameters:
+		if p == nil {
+			return pp
+		}
+		modified := *p
+		modified.CostModels = withoutV2CostModelKey(p.CostModels)
+		return &modified
+	case *dijkstra.DijkstraProtocolParameters:
+		if p == nil {
+			return pp
+		}
+		modified := *p
+		modified.CostModels = withoutV2CostModelKey(p.CostModels)
+		return &modified
+	default:
+		if logger != nil {
+			logger.Warn(
+				"synthetic PlutusV2 cost model filter does not recognize this protocol-parameters type; returning it unfiltered",
+				"component", "ledger",
+				"type", fmt.Sprintf("%T", pp),
+			)
+		}
+		return pp
+	}
+}
+
+// withoutV2CostModelKey returns a new map holding every entry of m except
+// the PlutusV2 key (1).
+func withoutV2CostModelKey(
+	m map[uint][]int64,
+) map[uint][]int64 {
+	if m == nil {
+		return nil
+	}
+	out := make(map[uint][]int64, len(m))
+	for k, v := range m {
+		if k == 1 {
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 // CommitteeStateAvailable reports whether this view can authoritatively answer
@@ -1078,8 +1281,17 @@ func (lv *LedgerView) DRepRegistration(
 		}
 		return nil, fmt.Errorf("get drep: %w", err)
 	}
+	deposit, err := lv.ls.db.GetDrepLastRegistrationDeposit(
+		drep.CredentialTag,
+		credential[:],
+		lv.txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get drep last registration deposit: %w", err)
+	}
 	reg := &lcommon.DRepRegistration{
 		Credential: credential,
+		Deposit:    deposit,
 	}
 	if drep.AnchorURL != "" || len(drep.AnchorHash) > 0 {
 		if len(drep.AnchorHash) != 32 {
@@ -1104,10 +1316,36 @@ func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
 	if err != nil {
 		return nil, fmt.Errorf("get active dreps: %w", err)
 	}
+	// One batched read rather than a deposit query per DRep, because
+	// mainnet has thousands of active DReps, and scoped to the same active
+	// credential set fetched above so registration history left behind by
+	// DReps that have since deregistered cannot grow this. A credential
+	// with no registration row is absent from the map and reads back as
+	// the zero value, matching the singular form above.
+	//
+	// This method is not itself on the validation path: gouroboros
+	// declares it on common.DRepState but the Conway rules reach DRep
+	// state only through the singular DRepRegistration, and nothing in
+	// either tree calls the plural form outside gouroboros's own test
+	// mocks. The batching bounds the cost of a caller that does appear
+	// rather than one that exists today.
+	deposits, err := lv.ls.db.GetDrepLastRegistrationDeposits(lv.txn)
+	if err != nil {
+		return nil, fmt.Errorf("get drep last registration deposits: %w", err)
+	}
 	registrations := make([]lcommon.DRepRegistration, 0, len(dreps))
 	for _, drep := range dreps {
+		deposit, ok := deposits[models.DrepDepositKey(
+			drep.CredentialTag,
+			drep.Credential,
+		)]
+		var depositPtr *uint64
+		if ok {
+			depositPtr = uint64Ptr(deposit)
+		}
 		reg := lcommon.DRepRegistration{
 			Credential: lcommon.NewBlake2b224(drep.Credential),
+			Deposit:    depositPtr,
 		}
 		if drep.AnchorURL != "" || len(drep.AnchorHash) > 0 {
 			if len(drep.AnchorHash) != 32 {

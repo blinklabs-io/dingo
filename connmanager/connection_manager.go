@@ -45,7 +45,9 @@ const (
 	// simultaneous inbound connections accepted by the connection manager.
 	// This prevents resource exhaustion from malicious or accidental
 	// connection floods.
-	DefaultMaxInboundConnections = 100
+	DefaultMaxInboundConnections  = 100
+	DefaultMaxNtCConnections      = 100
+	DefaultMaxNtCConnectionsPerIP = 5
 )
 
 type connectionInfo struct {
@@ -85,6 +87,9 @@ type ConnectionManager struct {
 	duplexPeers          int
 	prunableConns        int
 	trackedConnCount     int
+	ntcAdmissionMutex    sync.Mutex
+	ntcCount             int
+	ntcIPConns           map[string]int
 }
 
 // DefaultMaxConnectionsPerIP is the default maximum number of concurrent
@@ -112,11 +117,15 @@ type ConnectionManagerConfig struct {
 	ListenersProvider        func() []ListenerConfig
 	OutboundConnOptsProvider func() []ouroboros.ConnectionOptionFunc
 	OutboundSourcePort       uint
-	MaxInboundConns          int // 0 means use DefaultMaxInboundConnections
+	// OutboundDialer overrides TCP dialing for controlled tests.
+	OutboundDialer  func(context.Context, string) (net.Conn, error)
+	MaxInboundConns int // 0 means use DefaultMaxInboundConnections
 	// MaxConnectionsPerIP limits the number of concurrent inbound
 	// connections from the same IP address. IPv6 addresses are grouped
 	// by /64 prefix. A value of 0 means use DefaultMaxConnectionsPerIP.
-	MaxConnectionsPerIP int
+	MaxConnectionsPerIP    int
+	MaxNtCConns            int
+	MaxNtCConnectionsPerIP int
 }
 
 type connectionManagerMetrics struct {
@@ -126,6 +135,7 @@ type connectionManagerMetrics struct {
 	duplexConns         prometheus.Gauge
 	fullDuplexConns     prometheus.Gauge
 	prunableConns       prometheus.Gauge
+	ntcRejectedConns    *prometheus.CounterVec
 }
 
 type peerConnectionSummary struct {
@@ -174,6 +184,12 @@ func NewConnectionManager(cfg ConnectionManagerConfig) *ConnectionManager {
 	if cfg.MaxConnectionsPerIP <= 0 {
 		cfg.MaxConnectionsPerIP = DefaultMaxConnectionsPerIP
 	}
+	if cfg.MaxNtCConns <= 0 {
+		cfg.MaxNtCConns = DefaultMaxNtCConnections
+	}
+	if cfg.MaxNtCConnectionsPerIP <= 0 {
+		cfg.MaxNtCConnectionsPerIP = DefaultMaxNtCConnectionsPerIP
+	}
 	c := &ConnectionManager{
 		config: cfg,
 		connections: make(
@@ -183,6 +199,7 @@ func NewConnectionManager(cfg ConnectionManagerConfig) *ConnectionManager {
 		peerConnectivity: make(map[string]peerConnectionSummary),
 		pendingConns:     make(map[net.Conn]struct{}),
 		ipConns:          make(map[string]int),
+		ntcIPConns:       make(map[string]int),
 	}
 	if cfg.PromRegistry != nil {
 		c.initMetrics()
@@ -241,6 +258,13 @@ func (c *ConnectionManager) consumeInboundSlot() {
 func (c *ConnectionManager) initMetrics() {
 	promautoFactory := promauto.With(c.config.PromRegistry)
 	c.metrics = &connectionManagerMetrics{}
+	c.metrics.ntcRejectedConns = promautoFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: metricNamePrefix + "ntcRejectedConns_total",
+			Help: "number of node-to-client connections rejected by admission limits",
+		},
+		[]string{"reason"},
+	)
 	c.metrics.incomingConns = promautoFactory.NewGauge(prometheus.GaugeOpts{
 		Name: metricNamePrefix + "incomingConns",
 		Help: "number of incoming connections",
@@ -659,7 +683,7 @@ func (c *ConnectionManager) AddConnection(
 	isInbound bool,
 	peerAddr string,
 ) bool {
-	return c.addConnectionImpl(conn, isInbound, false, peerAddr, "")
+	return c.addConnectionImpl(conn, isInbound, false, peerAddr, "", nil)
 }
 
 func (c *ConnectionManager) addConnectionWithIPKey(
@@ -668,16 +692,7 @@ func (c *ConnectionManager) addConnectionWithIPKey(
 	peerAddr string,
 	ipKey string,
 ) bool {
-	return c.addConnectionImpl(conn, isInbound, false, peerAddr, ipKey)
-}
-
-func (c *ConnectionManager) addNtCConnectionWithIPKey(
-	conn *ouroboros.Connection,
-	isInbound bool,
-	peerAddr string,
-	ipKey string,
-) bool {
-	return c.addConnectionImpl(conn, isInbound, true, peerAddr, ipKey)
+	return c.addConnectionImpl(conn, isInbound, false, peerAddr, ipKey, nil)
 }
 
 func (c *ConnectionManager) addConnectionImpl(
@@ -686,6 +701,7 @@ func (c *ConnectionManager) addConnectionImpl(
 	isNtC bool,
 	peerAddr string,
 	ipKey string,
+	onClose func(),
 ) bool {
 	// Check if shutting down before adding to WaitGroup to prevent panic
 	// during Stop()'s Wait() call. Must hold the same lock used to set closing.
@@ -842,10 +858,21 @@ func (c *ConnectionManager) addConnectionImpl(
 	c.updateConnectionMetrics()
 	go func() {
 		defer c.goroutineWg.Done()
+		defer func() {
+			if onClose != nil {
+				onClose()
+			}
+		}()
 		err := <-conn.ErrorChan()
 		// Remove connection (also releases IP slot)
 		if !c.RemoveConnection(connId, conn) {
 			return
+		}
+		// Release admission before invoking user callbacks. A callback may
+		// block while the listener still needs to admit a replacement.
+		if onClose != nil {
+			onClose()
+			onClose = nil
 		}
 		// Generate event, but only for node-to-node connections. Every
 		// subscriber to this event does node-to-node peer management --

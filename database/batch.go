@@ -193,7 +193,7 @@ func (d *Database) SetTransactionBatchedWithOpts(
 		}()
 	}
 
-	blob := txn.DB().Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}

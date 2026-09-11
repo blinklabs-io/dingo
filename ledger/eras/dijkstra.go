@@ -36,12 +36,19 @@ var DijkstraEraDesc = EraDesc{
 	DecodePParamsFunc:       DecodePParamsDijkstra,
 	DecodePParamsUpdateFunc: DecodePParamsUpdateDijkstra,
 	PParamsUpdateFunc:       PParamsUpdateDijkstra,
-	HardForkFunc:            HardForkDijkstra,
-	EpochLengthFunc:         EpochLengthShelley,
-	CalculateEtaVFunc:       CalculateEtaVDijkstra,
-	CertDepositFunc:         CertDepositDijkstra,
-	ValidateTxFunc:          ValidateTxDijkstra,
-	EvaluateTxFunc:          EvaluateTxDijkstra,
+	ParamUpdateHasPlutusV2CostModelFunc: func(u any) bool {
+		upd, ok := u.(gdijkstra.DijkstraProtocolParameterUpdate)
+		if !ok {
+			return false
+		}
+		return paramUpdateHasPlutusV2CostModel(upd.CostModels)
+	},
+	HardForkFunc:      HardForkDijkstra,
+	EpochLengthFunc:   EpochLengthShelley,
+	CalculateEtaVFunc: CalculateEtaVDijkstra,
+	CertDepositFunc:   CertDepositDijkstra,
+	ValidateTxFunc:    ValidateTxDijkstra,
+	EvaluateTxFunc:    EvaluateTxDijkstra,
 }
 
 func DecodePParamsDijkstra(data []byte) (lcommon.ProtocolParameters, error) {
@@ -263,6 +270,20 @@ func ValidateTxDijkstra(
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
+	// Applied before the skip-phase-2 shortcut below, and before delegating
+	// to gdijkstra.UtxoValidatePlutusScripts, so a transaction using a
+	// synthetic-cost-model PlutusV2 script cannot slip through either path
+	// -- see dijkstraSyntheticV2CostModelGuard.
+	if syntheticV2CostModelInEffect(ls) {
+		if err := dijkstraSyntheticV2CostModelGuard(
+			tx,
+			slot,
+			ls,
+			tmpPparams,
+		); err != nil {
+			return err
+		}
+	}
 	if shouldSkipPhase2Validation(ls) {
 		return nil
 	}
@@ -283,6 +304,47 @@ func ValidateTxDijkstra(
 		tmpPparams,
 	)
 	return validatePlutusOutcome(tx, phase2Err)
+}
+
+// dijkstraSyntheticV2CostModelGuard rejects a transaction that uses --
+// directly witnesses, or resolves via a reference script or a Dijkstra
+// sub-transaction -- a PlutusV2 script while HardForkBabbage's fabricated
+// default is still the only PlutusV2 cost model in force; see
+// ErrNoCostModelForPlutusV2. ValidateTxDijkstra delegates phase-2 validation
+// entirely to gdijkstra.UtxoValidatePlutusScripts, and skips it outright
+// when phase-2 validation is disabled -- neither path knows about Dingo's
+// synthetic marker. Rather than reimplementing gdijkstra's reference-script
+// and sub-transaction script resolution locally, this reuses its own
+// exported UtxoValidateCostModelsPresent (the same NoCostModel rule
+// Babbage/Conway's local phase-2 evaluation encodes by hand) against a
+// pruned copy of pp with the PlutusV2 entry (map key 1) removed.
+func dijkstraSyntheticV2CostModelGuard(
+	tx lcommon.Transaction,
+	slot uint64,
+	ls lcommon.LedgerState,
+	pp *gdijkstra.DijkstraProtocolParameters,
+) error {
+	prunedCostModels := make(map[uint][]int64, len(pp.CostModels))
+	for version, model := range pp.CostModels {
+		if version == 1 {
+			continue
+		}
+		prunedCostModels[version] = model
+	}
+	prunedPParams := *pp
+	prunedPParams.CostModels = prunedCostModels
+	err := gdijkstra.UtxoValidateCostModelsPresent(tx, slot, ls, &prunedPParams)
+	if err == nil {
+		return nil
+	}
+	var missing lcommon.MissingCostModelError
+	if errors.As(err, &missing) && missing.Version == 1 {
+		return fmt.Errorf(
+			"dijkstra plutus validation: %w",
+			ErrNoCostModelForPlutusV2,
+		)
+	}
+	return err
 }
 
 var dijkstraPhase1UtxoValidationRules = buildDijkstraValidationRules()

@@ -163,6 +163,22 @@ func (n *Node) validateBlockProducerLedgerWithView(
 	if creds == nil {
 		return errors.New("nil pool credentials")
 	}
+	// Startup deliberately checks only for a stale counter, not the
+	// era-scoped no-gap rule the forge loop and block application enforce.
+	// The era for "now" would have to come from LedgerState.CurrentSlot,
+	// which is wall-clock and valid regardless of sync state; the baseline
+	// comes from LatestOpCertSequence, which reflects only the applied
+	// chain. On a node whose applied tip is behind wall-clock time (an
+	// interrupted initial sync, a resume after downtime, a restore to an
+	// older snapshot), those two can disagree: the era resolves to
+	// whatever the wall clock says while the baseline is still the stale,
+	// pre-catch-up counter, so a pool several rotations into its life
+	// would look gapped and fail startup -- unable to then sync to the
+	// point that would make the baseline correct. The forge loop's own
+	// gate does not have this problem: it runs after the upstream-sync
+	// skip and the leader check, so both its era and its baseline come
+	// from near-tip state, and it fails closed per slot rather than
+	// refusing to start the node at all.
 	registered, vrfMatched, err := creds.ValidateAgainstLedger(view)
 	if err != nil {
 		if errors.Is(err, forging.ErrVRFKeyHashMismatch) &&
@@ -342,14 +358,12 @@ func (n *Node) initBlockForger(
 		)
 	}
 
-	// Wire self-validation when the operator opts in. The validator runs
-	// header crypto, body-hash, and per-tx ledger checks before AddBlock.
-	var blockValidator forging.BlockValidator
-	if n.config.validateForgedBlock {
-		blockValidator = &forgedBlockValidatorAdapter{
-			ledgerState: n.ledgerState,
-		}
-	}
+	// Always enforce aggregate reference-script limits before AddBlock.
+	// Header crypto and per-transaction self-validation remain opt-in.
+	blockValidator := newForgedBlockValidator(
+		n.ledgerState,
+		n.config.validateForgedBlock,
+	)
 
 	// Create the block forger with the real leader election
 	forger, err := forging.NewBlockForger(forging.ForgerConfig{
@@ -373,6 +387,10 @@ func (n *Node) initBlockForger(
 		LeiosTxValidator:                n.ledgerState,
 		LeiosCertificateProvider:        leiosCerts,
 		LeiosParentAnnouncementProvider: leiosParent,
+		OpCertLedgerView: blockProducerLedgerView{
+			ls: n.ledgerState,
+		},
+		EraParams: n.ledgerState,
 	})
 	if err != nil {
 		// Stop election to prevent goroutine leak
@@ -504,6 +522,9 @@ func (b *blockBroadcaster) AddBlock(
 // snapshot rotation semantics as other ledger queries.
 type stakeDistributionAdapter struct {
 	ledgerState *ledger.LedgerState
+	// afterPoolStakeReadFn is a test-only hook for coordinating a concurrent
+	// snapshot recapture after the transaction has read the numerator.
+	afterPoolStakeReadFn func()
 }
 
 func (a *stakeDistributionAdapter) getStakeDistribution(
@@ -597,6 +618,12 @@ func (a *stakeDistributionAdapter) GetPoolAndTotalActiveStake(
 			poolKey,
 			err,
 		)
+	}
+	// Test-only synchronization seam. The transaction has already observed
+	// the numerator, so a concurrent recapture can commit before the
+	// denominator query without changing this transaction's snapshot.
+	if a.afterPoolStakeReadFn != nil {
+		a.afterPoolStakeReadFn()
 	}
 	totalActiveStake, err = view.GetTotalActiveStake(epoch)
 	if err != nil {
@@ -728,6 +755,21 @@ func (a *slotClockAdapter) ChainTipSlot() uint64 {
 	return a.ledgerState.ChainTipSlot()
 }
 
+// ChainTipHash satisfies forging.ChainTipHashProvider. It lets the
+// forger tell its own block at the current slot from a rival's by hash
+// rather than inferring it from the forge fence, which is in-memory only
+// when no fence store is wired. Both this and ChainTipSlot read the same
+// tip snapshot; a tip that moves between the two reads simply fails the
+// hash match and falls back to the fence.
+func (a *slotClockAdapter) ChainTipHash() []byte {
+	return a.ledgerState.Tip().Point.Hash
+}
+
+// The forger type-asserts for this optional interface, so losing the
+// method would silently fall back to the fence rather than fail to
+// build.
+var _ forging.ChainTipHashProvider = (*slotClockAdapter)(nil)
+
 func (a *slotClockAdapter) NextSlotTime() (time.Time, error) {
 	return a.ledgerState.NextSlotTime()
 }
@@ -789,8 +831,9 @@ func (a *leiosPipelineAdapter) CertifiedEndorserBlockTxHashes(
 
 func (a *leiosPipelineAdapter) MarkEndorserBlockEmbedded(
 	ebHash lcommon.Blake2b256,
+	ebSlot uint64,
 ) {
-	a.mgr.MarkEmbedded(ebHash)
+	a.mgr.MarkEmbedded(ebSlot, ebHash)
 }
 
 func (a *leiosPipelineAdapter) ParentLeiosAnnouncement() (
@@ -831,13 +874,32 @@ func (a *leiosPipelineAdapter) ParentLeiosAnnouncement() (
 // forging.BlockValidator so the forger can self-validate blocks before
 // adoption without importing the ledger package from within forging.
 type forgedBlockValidatorAdapter struct {
-	ledgerState *ledger.LedgerState
+	ledgerState    forgedBlockValidationState
+	fullValidation bool
+}
+
+type forgedBlockValidationState interface {
+	ValidateForgedBlock(gledger.Block, []byte) error
+	ValidateBlockReferenceScripts(gledger.Block) error
+}
+
+func newForgedBlockValidator(
+	state forgedBlockValidationState,
+	fullValidation bool,
+) forging.BlockValidator {
+	return &forgedBlockValidatorAdapter{
+		ledgerState:    state,
+		fullValidation: fullValidation,
+	}
 }
 
 func (a *forgedBlockValidatorAdapter) ValidateForgedBlock(
 	block gledger.Block,
 	blockCbor []byte,
 ) error {
+	if !a.fullValidation {
+		return a.ledgerState.ValidateBlockReferenceScripts(block)
+	}
 	return a.ledgerState.ValidateForgedBlock(block, blockCbor)
 }
 

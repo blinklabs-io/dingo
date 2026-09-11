@@ -39,6 +39,8 @@ func newAccountActivityRequest(
 // --- /accounts/{stake_address}/utxos ---
 
 func TestHandleAccountUTXOs(t *testing.T) {
+	t.Parallel()
+
 	dataHash := "dh1"
 	inlineDatum := "19a6aa"
 	refScript := "13a3efd8"
@@ -111,6 +113,8 @@ func TestHandleAccountUTXOs(t *testing.T) {
 }
 
 func TestHandleAccountUTXOsNullableFieldsNull(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		accountUTXOs: []AccountUTXOInfo{
 			{
@@ -141,6 +145,8 @@ func TestHandleAccountUTXOsNullableFieldsNull(t *testing.T) {
 }
 
 func TestHandleAccountUTXOsEmpty(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
 
@@ -156,6 +162,8 @@ func TestHandleAccountUTXOsEmpty(t *testing.T) {
 }
 
 func TestHandleAccountUTXOsInvalidStakeAddress(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{accountUTXOsErr: ErrInvalidStakeAddress}
 	b := newTestBlockfrost(mock)
 
@@ -170,6 +178,8 @@ func TestHandleAccountUTXOsInvalidStakeAddress(t *testing.T) {
 }
 
 func TestHandleAccountUTXOsNotFound(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{accountUTXOsErr: models.ErrAccountNotFound}
 	b := newTestBlockfrost(mock)
 
@@ -181,6 +191,8 @@ func TestHandleAccountUTXOsNotFound(t *testing.T) {
 }
 
 func TestHandleAccountUTXOsQueryError(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{accountUTXOsErr: errors.New("boom")}
 	b := newTestBlockfrost(mock)
 
@@ -192,6 +204,8 @@ func TestHandleAccountUTXOsQueryError(t *testing.T) {
 }
 
 func TestHandleAccountUTXOsInvalidPagination(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
 
@@ -207,6 +221,8 @@ func TestHandleAccountUTXOsInvalidPagination(t *testing.T) {
 // --- /accounts/{stake_address}/withdrawals ---
 
 func TestHandleAccountWithdrawals(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		accountWithdrawals: []AccountWithdrawalInfo{
 			{
@@ -257,6 +273,8 @@ func TestHandleAccountWithdrawals(t *testing.T) {
 }
 
 func TestHandleAccountWithdrawalsEmpty(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
 
@@ -273,6 +291,8 @@ func TestHandleAccountWithdrawalsEmpty(t *testing.T) {
 }
 
 func TestHandleAccountWithdrawalsInvalidStakeAddress(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{accountWithdrawalsErr: ErrInvalidStakeAddress}
 	b := newTestBlockfrost(mock)
 
@@ -286,6 +306,8 @@ func TestHandleAccountWithdrawalsInvalidStakeAddress(t *testing.T) {
 }
 
 func TestHandleAccountWithdrawalsNotFound(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{accountWithdrawalsErr: models.ErrAccountNotFound}
 	b := newTestBlockfrost(mock)
 
@@ -299,6 +321,8 @@ func TestHandleAccountWithdrawalsNotFound(t *testing.T) {
 }
 
 func TestHandleAccountWithdrawalsQueryError(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{accountWithdrawalsErr: errors.New("boom")}
 	b := newTestBlockfrost(mock)
 
@@ -314,6 +338,8 @@ func TestHandleAccountWithdrawalsQueryError(t *testing.T) {
 // --- /accounts/{stake_address}/transactions ---
 
 func TestHandleAccountTransactions(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		accountTransactions: []AccountTransactionInfo{
 			{
@@ -364,6 +390,8 @@ func TestHandleAccountTransactions(t *testing.T) {
 }
 
 func TestHandleAccountTransactionsEmpty(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
 
@@ -380,6 +408,8 @@ func TestHandleAccountTransactionsEmpty(t *testing.T) {
 }
 
 func TestHandleAccountTransactionsInvalidStakeAddress(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{accountTransactionsErr: ErrInvalidStakeAddress}
 	b := newTestBlockfrost(mock)
 
@@ -393,6 +423,8 @@ func TestHandleAccountTransactionsInvalidStakeAddress(t *testing.T) {
 }
 
 func TestHandleAccountTransactionsNotFound(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{accountTransactionsErr: models.ErrAccountNotFound}
 	b := newTestBlockfrost(mock)
 
@@ -406,6 +438,8 @@ func TestHandleAccountTransactionsNotFound(t *testing.T) {
 }
 
 func TestHandleAccountTransactionsQueryError(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{accountTransactionsErr: errors.New("boom")}
 	b := newTestBlockfrost(mock)
 
@@ -419,6 +453,8 @@ func TestHandleAccountTransactionsQueryError(t *testing.T) {
 }
 
 func TestHandleAccountTransactionsInvalidPagination(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
 
@@ -432,6 +468,8 @@ func TestHandleAccountTransactionsInvalidPagination(t *testing.T) {
 }
 
 func TestHandleAccountTransactionsFromToParsed(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
 
@@ -465,6 +503,8 @@ func TestHandleAccountTransactionsFromToParsed(t *testing.T) {
 }
 
 func TestHandleAccountTransactionsFromMalformed(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
 
@@ -482,6 +522,8 @@ func TestHandleAccountTransactionsFromMalformed(t *testing.T) {
 }
 
 func TestHandleAccountTransactionsToMalformed(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
 
@@ -494,6 +536,8 @@ func TestHandleAccountTransactionsToMalformed(t *testing.T) {
 }
 
 func TestHandleAccountTransactionsInvertedRange(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
 
@@ -506,6 +550,8 @@ func TestHandleAccountTransactionsInvertedRange(t *testing.T) {
 }
 
 func TestHandleAccountTransactionsInvertedRangeSameBlock(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
 
@@ -518,6 +564,8 @@ func TestHandleAccountTransactionsInvertedRangeSameBlock(t *testing.T) {
 }
 
 func TestHandleAccountTransactionsValidRangeSameBlockNotInverted(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
 
@@ -534,6 +582,8 @@ func TestHandleAccountTransactionsValidRangeSameBlockNotInverted(t *testing.T) {
 // --- parseBlockRangePosition / blockRangeInverted unit coverage ---
 
 func TestParseBlockRangePosition(t *testing.T) {
+	t.Parallel()
+
 	pos, err := parseBlockRangePosition("100")
 	require.NoError(t, err)
 	assert.Equal(t, uint64(100), pos.Block)
@@ -553,6 +603,8 @@ func TestParseBlockRangePosition(t *testing.T) {
 }
 
 func TestBlockRangeInverted(t *testing.T) {
+	t.Parallel()
+
 	idx := func(v uint32) *uint32 { return &v }
 
 	assert.True(t, blockRangeInverted(

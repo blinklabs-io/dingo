@@ -15,7 +15,10 @@
 package koiosparity
 
 import (
+	"bytes"
 	"context"
+	"database/sql"
+	"encoding/binary"
 	"encoding/hex"
 	"math/big"
 	"testing"
@@ -24,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -55,6 +59,8 @@ func sourceSQLDB(t *testing.T, db *database.Database) *testDB {
 }
 
 func TestNewDatabaseSourceRejectsNilDatabase(t *testing.T) {
+	t.Parallel()
+
 	_, err := NewDatabaseSource(nil)
 	require.Error(t, err)
 }
@@ -65,12 +71,15 @@ func TestNewDatabaseSourceRejectsNilDatabase(t *testing.T) {
 // (a separate read-only transaction against the same live database, not a
 // second connection) and confirms every field lands exactly as committed.
 func TestDatabaseSourceGetEpochData(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	sqlDB := sourceSQLDB(t, db)
 
 	require.NoError(t, sqlDB.Create(&models.EpochSummary{
 		Epoch:            5,
 		TotalActiveStake: types.Uint64(123_456_789),
+		BoundarySlot:     4_320_000,
 		SnapshotReady:    true,
 	}).Error)
 	require.NoError(t, sqlDB.Create(&models.RewardAdaPots{
@@ -93,6 +102,7 @@ func TestDatabaseSourceGetEpochData(t *testing.T) {
 	require.Equal(t, "2000", data.Reserves)
 	require.Equal(t, "3000", data.Fees)
 	require.Equal(t, "4000", data.TotalRewards)
+	require.Equal(t, uint64(4_320_000), data.BoundarySlot)
 }
 
 // TestDatabaseSourceGetEpochDataMissingOrNotReady covers both "no row at
@@ -100,6 +110,8 @@ func TestDatabaseSourceGetEpochData(t *testing.T) {
 // write Dingo will repair later) -- both must read back as (nil, nil), never
 // an error and never a spurious zero-value comparison.
 func TestDatabaseSourceGetEpochDataMissingOrNotReady(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	sqlDB := sourceSQLDB(t, db)
 	source, err := NewDatabaseSource(db)
@@ -125,6 +137,8 @@ func TestDatabaseSourceGetEpochDataMissingOrNotReady(t *testing.T) {
 // false (a real dingo_db_missing mismatch upstream), not as legitimately
 // empty/zero pots.
 func TestDatabaseSourceGetEpochDataRewardAdaPotsAbsent(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	sqlDB := sourceSQLDB(t, db)
 	require.NoError(t, sqlDB.Create(&models.EpochSummary{
@@ -148,6 +162,8 @@ func TestDatabaseSourceGetEpochDataRewardAdaPotsAbsent(t *testing.T) {
 // MemberRewardTotal from stakeEpoch's reward_pool_output -- each field
 // group's *Present flag reflects only whether its own row existed.
 func TestDatabaseSourceGetPoolEpochDataMap(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	sqlDB := sourceSQLDB(t, db)
 	poolKeyHash := []byte("POOLKEYHASH-28-BYTES-LONG!!!")
@@ -207,6 +223,8 @@ func TestDatabaseSourceGetPoolEpochDataMap(t *testing.T) {
 // *Present flag must reflect only whether its own row actually exists, not
 // whether any row exists for the pool at all.
 func TestDatabaseSourceGetPoolEpochDataMapPartialPresence(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	sqlDB := sourceSQLDB(t, db)
 	poolKeyHash := []byte("POOLKEYHASH-28-BYTES-LONG!!!")
@@ -240,6 +258,8 @@ func TestDatabaseSourceGetPoolEpochDataMapPartialPresence(t *testing.T) {
 }
 
 func TestDatabaseSourceGetLatestEpoch(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	source, err := NewDatabaseSource(db)
 	require.NoError(t, err)
@@ -258,6 +278,8 @@ func TestDatabaseSourceGetLatestEpoch(t *testing.T) {
 }
 
 func TestDatabaseSourceGetRewardAccountOutputs(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	sqlDB := sourceSQLDB(t, db)
 	stakingKey := []byte("STAKING-KEY-28-BYTES-LONG!!!")
@@ -298,6 +320,8 @@ func TestDatabaseSourceGetRewardAccountOutputs(t *testing.T) {
 // late is indistinguishable from reading an epoch that was simply never
 // computed.
 func TestDatabaseSourceCoreModePruningTiming(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	sqlDB := sourceSQLDB(t, db)
 	poolKeyHash := []byte("POOLKEYHASH-28-BYTES-LONG!!!")
@@ -350,6 +374,8 @@ func TestDatabaseSourceCoreModePruningTiming(t *testing.T) {
 func TestDatabaseSourceGetPoolEpochDataMapTracksChangingPoolParams(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	source, err := NewDatabaseSource(db)
 	require.NoError(t, err)
@@ -411,5 +437,436 @@ func TestDatabaseSourceGetPoolEpochDataMapTracksChangingPoolParams(
 		blocksAtParamEpoch,
 		data.BlocksProduced,
 		"blocks_produced still comes from the param epoch",
+	)
+}
+
+// TestDatabaseSourceReportsRewardsPendingForMissingRow is the DatabaseSource
+// half of the dingo #3857 guard. DingoDB has its own case for this in
+// dingo_db_test.go, and the two derive the applying boundary differently -- one
+// through GetEpoch, the other through raw SQL -- so a divergence between them
+// would otherwise go unnoticed.
+//
+// A reward_pool_output row for a stake epoch is not written until well after
+// that epoch closes, so an observer near the tip asks about epochs Dingo has
+// not computed yet. That must read as a lag, not as a missing row.
+func TestDatabaseSourceReportsRewardsPendingForMissingRow(t *testing.T) {
+	const (
+		stakeEpoch = uint64(9)
+		paramEpoch = uint64(10)
+		applyStart = int64(500_000)
+	)
+	poolHash := bytes.Repeat([]byte{0x42}, 28)
+
+	seed := func(t *testing.T, tipSlot int64, seedApplyEpoch bool) *DingoPoolEpochData {
+		t.Helper()
+		db := newTestDatabaseSourceDB(t)
+		sqlDB := sourceSQLDB(t, db)
+		// A reward_pool_input row so the pool is in the map, and deliberately
+		// no reward_pool_output row: this is the not-yet-computed case.
+		require.NoError(t, sqlDB.Exec(
+			`INSERT INTO reward_pool_input
+			 (pool_key_hash, epoch, pledge, delegated_stake, owner_stake,
+			  cost, delegator_count, captured_slot, boundary_slot)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			poolHash, stakeEpoch, "0", "1000", "0", "0", 1, 0, 0).Error)
+		require.NoError(t, sqlDB.Exec(
+			`INSERT INTO tip (hash, slot, block_number) VALUES (?, ?, ?)`,
+			[]byte{0x01}, tipSlot, 1).Error)
+		if seedApplyEpoch {
+			require.NoError(t, sqlDB.Exec(
+				`INSERT INTO epoch (epoch_id, start_slot, length_in_slots)
+				 VALUES (?, ?, ?)`,
+				stakeEpoch+3, applyStart, 86_400).Error)
+		}
+		source, err := NewDatabaseSource(db)
+		require.NoError(t, err)
+		m, err := source.GetPoolEpochDataMap(
+			context.Background(), stakeEpoch, paramEpoch,
+		)
+		require.NoError(t, err)
+		data, ok := m[hex.EncodeToString(poolHash)]
+		require.True(t, ok, "pool missing from the map")
+		require.False(t, data.MemberRewardPresent,
+			"fixture must have no reward_pool_output row")
+		return data
+	}
+
+	t.Run("before the applying boundary it is pending", func(t *testing.T) {
+		assert.True(t, seed(t, applyStart-1, true).RewardsPending,
+			"a row Dingo has not computed yet is a lag, not a gap")
+	})
+
+	t.Run("at the applying boundary it is a real gap", func(t *testing.T) {
+		assert.False(t, seed(t, applyStart, true).RewardsPending,
+			"once Dingo has had its chance, absence is genuine")
+	})
+
+	t.Run("an epoch the node has not reached is pending", func(t *testing.T) {
+		assert.True(t, seed(t, applyStart, false).RewardsPending,
+			"no row for the applying epoch means the node is not there yet")
+	})
+}
+
+// TestDatabaseSourceGetPoolsRetiredByEpoch proves the in-process source
+// resolves departure the same way DingoDB's raw-SQL twin does, including the
+// case that makes "a retirement certificate exists" the wrong predicate: a
+// registration filed after the retirement puts the pool back. Both halves are
+// asserted from one seeding, so a query that simply returned every pool with
+// a retirement row would fail on the re-registered pool.
+func TestDatabaseSourceGetPoolsRetiredByEpoch(t *testing.T) {
+	t.Parallel()
+
+	const (
+		queryEpoch   = uint64(7)
+		boundarySlot = uint64(1_000)
+	)
+	db := newTestDatabaseSourceDB(t)
+	sqlDB := sourceSQLDB(t, db)
+
+	departed := testPoolKeyHash(t, 0x21)
+	reregistered := testPoolKeyHash(t, 0x22)
+	retiringLater := testPoolKeyHash(t, 0x23)
+
+	seed := func(keyHash []byte, regSlots []uint64, retSlot, retEpoch uint64) {
+		t.Helper()
+		raw, err := sqlDB.DB()
+		require.NoError(t, err)
+		res, err := raw.Exec(
+			`INSERT INTO pool (pool_key_hash) VALUES (?)`,
+			keyHash,
+		)
+		require.NoError(t, err)
+		poolID, err := res.LastInsertId()
+		require.NoError(t, err)
+		for _, slot := range regSlots {
+			require.NoError(t, sqlDB.Exec(`
+INSERT INTO pool_registration (pool_id, pool_key_hash, added_slot)
+VALUES (?, ?, ?)`, poolID, keyHash, slot).Error)
+		}
+		require.NoError(t, sqlDB.Exec(`
+INSERT INTO pool_retirement (pool_id, pool_key_hash, epoch, added_slot)
+VALUES (?, ?, ?, ?)`, poolID, keyHash, retEpoch, retSlot).Error)
+	}
+	seed(departed, []uint64{100}, 200, queryEpoch-2)
+	seed(reregistered, []uint64{100, 300}, 200, queryEpoch-2)
+	seed(retiringLater, []uint64{100}, 200, queryEpoch+1)
+
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+
+	retired, err := source.GetPoolsRetiredByEpoch(
+		context.Background(),
+		queryEpoch,
+		boundarySlot,
+	)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		map[string]struct{}{hex.EncodeToString(departed): {}},
+		retired,
+	)
+}
+
+// retiredParityCert is one seeded certificate. blockIndex is the
+// transaction's index within its block and certIndex the certificate's index
+// within that transaction, which together break added_slot ties exactly the
+// way a registration and a retirement filed in one block do on chain.
+//
+// reconcile writes the row the way Store.RetirePools does — certificate_id = 0
+// with no certs/transaction row behind it — so such a row has no
+// block_index/cert_index of its own and is ordered by the synthetic_ret key
+// instead. Retirements only.
+type retiredParityCert struct {
+	slot       uint64
+	blockIndex uint64
+	certIndex  uint64
+	epoch      uint64 // retirements only
+	reconcile  bool   // retirements only
+}
+
+// retiredParitySeeder seeds pool certificate histories into the real,
+// migrated metadata schema. Every certificate-backed registration and
+// retirement gets a transaction/certs row so added_slot ties are broken on
+// block_index then cert_index, which is the only way to exercise the same-slot
+// half of the cancellation rule.
+type retiredParitySeeder struct {
+	t   *testing.T
+	raw *sql.DB
+	seq uint64
+}
+
+func (s *retiredParitySeeder) cert(slot, blockIndex, certIndex uint64) int64 {
+	s.t.Helper()
+	s.seq++
+	hash := make([]byte, 32)
+	binary.BigEndian.PutUint64(hash, s.seq)
+	res, err := s.raw.Exec(
+		`INSERT INTO "transaction" (hash, slot, block_index) VALUES (?, ?, ?)`,
+		hash, slot, blockIndex,
+	)
+	require.NoError(s.t, err)
+	txID, err := res.LastInsertId()
+	require.NoError(s.t, err)
+	res, err = s.raw.Exec(
+		`INSERT INTO certs (transaction_id, slot, cert_index) VALUES (?, ?, ?)`,
+		txID, slot, certIndex,
+	)
+	require.NoError(s.t, err)
+	certID, err := res.LastInsertId()
+	require.NoError(s.t, err)
+	return certID
+}
+
+// seed writes one pool with the given registration and retirement history.
+func (s *retiredParitySeeder) seed(
+	keyHash []byte,
+	regs []retiredParityCert,
+	rets []retiredParityCert,
+) {
+	s.t.Helper()
+	res, err := s.raw.Exec(
+		`INSERT INTO pool (pool_key_hash) VALUES (?)`,
+		keyHash,
+	)
+	require.NoError(s.t, err)
+	poolID, err := res.LastInsertId()
+	require.NoError(s.t, err)
+	for _, reg := range regs {
+		certID := s.cert(reg.slot, reg.blockIndex, reg.certIndex)
+		_, err := s.raw.Exec(`
+INSERT INTO pool_registration (
+    pool_id, pool_key_hash, certificate_id, added_slot, deposit_amount
+) VALUES (?, ?, ?, ?, '500')`,
+			poolID, keyHash, certID, reg.slot,
+		)
+		require.NoError(s.t, err)
+	}
+	for _, ret := range rets {
+		var certID int64
+		if !ret.reconcile {
+			certID = s.cert(ret.slot, ret.blockIndex, ret.certIndex)
+		}
+		_, err := s.raw.Exec(`
+INSERT INTO pool_retirement (
+    pool_id, pool_key_hash, certificate_id, epoch, added_slot
+) VALUES (?, ?, ?, ?, ?)`,
+			poolID, keyHash, certID, ret.epoch, ret.slot,
+		)
+		require.NoError(s.t, err)
+	}
+}
+
+// TestGetPoolsRetiredByEpochImplementationsAgree runs both RewardParitySource
+// implementations against one physical metadata.sqlite on the real migrated
+// schema: DatabaseSource through MetadataStore.GetPoolKeyHashesRetiredByEpoch,
+// and DingoDB through its own copy of that SQL on a read-only connection to
+// the same file.
+//
+// Two things are asserted, and both are needed. Equality between the
+// implementations is what pins them against drift — nothing else in the tree
+// requires DingoDB's hand-written SQL to keep matching the store query, and
+// the end-to-end checks exercise only DingoDB while
+// TestDatabaseSourceGetPoolsRetiredByEpoch exercises only the store. Equality
+// against an explicit expected set is what stops two identically-broken
+// implementations from agreeing with each other and passing.
+//
+// The fixture is built so that every clause of the predicate is load-bearing
+// for at least one pool: the `<=` comparison, the `added_slot < boundarySlot`
+// visibility cut, the cancellation guard, both directions of the same-slot
+// block_index and cert_index tie-breaks, latest_ret's own cert_index ordering,
+// and the synthetic_ret key that ranks a reconcile retirement
+// (`certificate_id = 0`) ahead of certificate-backed rows in its own slot and
+// exempts it from cancellation. Neutralising any one of them in either
+// implementation fails this test.
+//
+// The reconcile pools matter because the two implementations diverged on
+// exactly them: DingoDB carried synthetic_ret while the store query did not,
+// so a node bootstrapped from a ledger-state snapshot — where ImportPool and
+// RetirePools write a registration and a certificate_id = 0 retirement in one
+// slot — would have the standalone CLI and the in-process observer classify
+// the same pool differently.
+func TestGetPoolsRetiredByEpochImplementationsAgree(t *testing.T) {
+	t.Parallel()
+
+	const (
+		queryEpoch   = uint64(7)
+		boundarySlot = uint64(1_000)
+	)
+	dir := t.TempDir()
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: dir})
+	require.NoError(t, err)
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	seeder := &retiredParitySeeder{t: t, raw: raw}
+
+	var (
+		departedEarlier      = testPoolKeyHash(t, 0x31)
+		departedAtEpoch      = testPoolKeyHash(t, 0x32)
+		retiringLater        = testPoolKeyHash(t, 0x33)
+		reregistered         = testPoolKeyHash(t, 0x34)
+		reregisteredSameSlot = testPoolKeyHash(t, 0x35)
+		retiredSameSlotAfter = testPoolKeyHash(t, 0x36)
+		retiredAfterBoundary = testPoolKeyHash(t, 0x37)
+		neverRetired         = testPoolKeyHash(t, 0x38)
+		reregisteredAtBound  = testPoolKeyHash(t, 0x39)
+		retiredLaterTx       = testPoolKeyHash(t, 0x3A)
+		reregisteredLaterTx  = testPoolKeyHash(t, 0x3B)
+		retiredTwiceSameSlot = testPoolKeyHash(t, 0x3C)
+		reconcileSameSlot    = testPoolKeyHash(t, 0x3D)
+		reconcileOverCertRet = testPoolKeyHash(t, 0x3E)
+	)
+	// Retired several epochs ago and still departed — the `<=` clause.
+	seeder.seed(
+		departedEarlier,
+		[]retiredParityCert{{slot: 100}},
+		[]retiredParityCert{{slot: 200, epoch: 5}},
+	)
+	seeder.seed(
+		departedAtEpoch,
+		[]retiredParityCert{{slot: 100}},
+		[]retiredParityCert{{slot: 200, epoch: queryEpoch}},
+	)
+	seeder.seed(
+		retiringLater,
+		[]retiredParityCert{{slot: 100}},
+		[]retiredParityCert{{slot: 200, epoch: 9}},
+	)
+	// The cancellation guard: a later registration puts the pool back.
+	seeder.seed(
+		reregistered,
+		[]retiredParityCert{{slot: 100}, {slot: 300}},
+		[]retiredParityCert{{slot: 200, epoch: 5}},
+	)
+	// Same slot and same transaction, registration ordered after the
+	// retirement by cert_index.
+	seeder.seed(
+		reregisteredSameSlot,
+		[]retiredParityCert{{slot: 100}, {slot: 200, certIndex: 2}},
+		[]retiredParityCert{{slot: 200, certIndex: 1, epoch: 5}},
+	)
+	// Same slot and same transaction, retirement ordered after the
+	// registration.
+	seeder.seed(
+		retiredSameSlotAfter,
+		[]retiredParityCert{{slot: 100}, {slot: 200, certIndex: 1}},
+		[]retiredParityCert{{slot: 200, certIndex: 2, epoch: 5}},
+	)
+	// Not yet visible at the boundary.
+	seeder.seed(
+		retiredAfterBoundary,
+		[]retiredParityCert{{slot: 100}},
+		[]retiredParityCert{{slot: boundarySlot, epoch: 5}},
+	)
+	seeder.seed(neverRetired, []retiredParityCert{{slot: 100}}, nil)
+	// The re-registration lands exactly on the boundary slot, so it is not
+	// yet visible and cannot cancel: the pool is still departed. This is the
+	// only pool for which the registration-side `added_slot < boundarySlot`
+	// cut is load-bearing — every other cancellation here is decided by the
+	// ordering guard instead.
+	seeder.seed(
+		reregisteredAtBound,
+		[]retiredParityCert{{slot: 100}, {slot: boundarySlot}},
+		[]retiredParityCert{{slot: 200, epoch: 5}},
+	)
+	// Same slot, different transactions: the retirement is in the later
+	// transaction of the block, so it stands. cert_index cannot decide this
+	// pair — both are 0 — so only the block_index comparison can.
+	seeder.seed(
+		retiredLaterTx,
+		[]retiredParityCert{{slot: 100}, {slot: 200, blockIndex: 1}},
+		[]retiredParityCert{{slot: 200, blockIndex: 2, epoch: 5}},
+	)
+	// The mirror image: the registration is in the later transaction, so it
+	// cancels. Together these two pin both directions of the block_index
+	// comparison, which no other pool here exercises.
+	seeder.seed(
+		reregisteredLaterTx,
+		[]retiredParityCert{{slot: 100}, {slot: 200, blockIndex: 2}},
+		[]retiredParityCert{{slot: 200, blockIndex: 1, epoch: 5}},
+	)
+	// Two retirement certificates in one transaction naming different
+	// effective epochs. latest_ret must pick the higher cert_index, so the
+	// pool is departed by 5 rather than still retiring at 9. The epoch-9 row
+	// is seeded first so insertion order disagrees with cert_index order,
+	// which is what makes latest_ret's ORDER BY key load-bearing rather than
+	// incidentally satisfied by the scan order.
+	seeder.seed(
+		retiredTwiceSameSlot,
+		[]retiredParityCert{{slot: 100}},
+		[]retiredParityCert{
+			{slot: 200, certIndex: 1, epoch: 9},
+			{slot: 200, certIndex: 2, epoch: 5},
+		},
+	)
+	// A reconcile retirement (certificate_id = 0) in a certificate-backed
+	// registration's own slot. It has no certs row, so both its indices are
+	// zero and it would lose the tie-break without the synthetic_ret
+	// exemption. This is the shape ledgerstate's snapshot import writes, so
+	// it is on every node bootstrapped from a ledger-state snapshot.
+	seeder.seed(
+		reconcileSameSlot,
+		[]retiredParityCert{{slot: 100}, {slot: 200, certIndex: 1}},
+		[]retiredParityCert{{slot: 200, epoch: 5, reconcile: true}},
+	)
+	// A reconcile retirement sharing a slot with a certificate-backed
+	// retirement effective after the queried epoch. The reconcile row is the
+	// ledger state's answer and must win the ROW_NUMBER ordering despite its
+	// zero indices.
+	seeder.seed(
+		reconcileOverCertRet,
+		[]retiredParityCert{{slot: 100}},
+		[]retiredParityCert{
+			{slot: 200, certIndex: 3, epoch: 9},
+			{slot: 200, epoch: 5, reconcile: true},
+		},
+	)
+
+	want := map[string]struct{}{
+		hex.EncodeToString(departedEarlier):      {},
+		hex.EncodeToString(departedAtEpoch):      {},
+		hex.EncodeToString(retiredSameSlotAfter): {},
+		hex.EncodeToString(reregisteredAtBound):  {},
+		hex.EncodeToString(retiredLaterTx):       {},
+		hex.EncodeToString(retiredTwiceSameSlot): {},
+		hex.EncodeToString(reconcileSameSlot):    {},
+		hex.EncodeToString(reconcileOverCertRet): {},
+	}
+
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+	fromStore, err := source.GetPoolsRetiredByEpoch(
+		context.Background(),
+		queryEpoch,
+		boundarySlot,
+	)
+	require.NoError(t, err)
+
+	dingoDB, err := OpenDingoDB(DingoDBConfig{Plugin: "sqlite", DataDir: dir})
+	require.NoError(t, err)
+	defer dingoDB.Close() //nolint:errcheck
+	fromDingoDB, err := dingoDB.GetPoolsRetiredByEpoch(
+		context.Background(),
+		queryEpoch,
+		boundarySlot,
+	)
+	require.NoError(t, err)
+
+	require.Equal(
+		t,
+		want,
+		fromStore,
+		"DatabaseSource/MetadataStore resolved the wrong departure set",
+	)
+	require.Equal(
+		t,
+		want,
+		fromDingoDB,
+		"DingoDB resolved the wrong departure set",
+	)
+	require.Equal(
+		t,
+		fromStore,
+		fromDingoDB,
+		"the two RewardParitySource implementations must not drift",
 	)
 }

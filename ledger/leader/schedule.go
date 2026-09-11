@@ -25,6 +25,7 @@ import (
 	"slices"
 	"sync"
 
+	"github.com/blinklabs-io/dingo/consensus/leaderthreshold"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/vrf"
@@ -35,13 +36,14 @@ import (
 // are computed (e.g. the consensus mode threading added with the
 // per-era TPraos/CPraos split, the epoch slot range becoming era-aware, or
 // the active slot coefficient switching from a float64 approximation to the
-// exact Shelley genesis rational): older persisted schedules then fail
+// exact Shelley genesis rational, or the protocol-correct leader threshold):
+// older persisted schedules then fail
 // validatePersistedSchedule and are recomputed from scratch instead of being
 // silently reused with stale assumptions. validatePersistedSchedule re-checks
 // the epoch nonce and both sigma inputs but not the active slot coefficient,
 // so the version bump is the only thing that retires a schedule computed with
 // a different f.
-const ScheduleFormatVersion = 3
+const ScheduleFormatVersion = 4
 
 // EpochSlotRange identifies the absolute slot range covered by an epoch.
 // StartSlot is inclusive and SlotCount is the number of slots to evaluate.
@@ -61,8 +63,8 @@ type Schedule struct {
 	EpochNonce    []byte              // Epoch nonce for VRF
 	LeaderSlots   []uint64            // Slots where pool is leader, ascending-sorted
 
-	// Threshold is the certified-natural leadership threshold every slot in
-	// this epoch was compared against, i.e. floor(2^bits * (1 - (1-f)^sigma)).
+	// Threshold is the integer comparison threshold every slot in this epoch
+	// was compared against: ceil(2^bits * (1 - (1-f)^sigma)).
 	// It is written once by CalculateSchedule before the schedule is published
 	// to any other goroutine and is read-only afterwards, so it needs no lock.
 	// It is deliberately NOT persisted: a reloaded schedule carries only the
@@ -293,7 +295,7 @@ func (c *Calculator) CalculateSchedule(
 	// for the epoch — so computing it inside the per-slot loop (which
 	// is what IsSlotLeaderWithMode does) wastes two 20-term big.Rat
 	// Taylor series and a 2^N multiply per slot.
-	threshold, err := consensus.CertifiedNatThresholdWithMode(
+	threshold, err := leaderthreshold.Threshold(
 		poolStake,
 		totalStake,
 		activeSlotCoeff,
@@ -364,10 +366,10 @@ func vrfInputForMode(
 	}
 }
 
-// Threshold calculates the leadership threshold for a given stake ratio
-// as a float64 approximation. This is provided for backward compatibility;
-// the actual leader election uses arbitrary-precision arithmetic via
-// consensus.CertifiedNatThreshold.
+// Threshold calculates the leadership probability for a given stake ratio as
+// a float64 approximation. This is provided for backward compatibility; the
+// actual leader election uses arbitrary-precision arithmetic via
+// leaderthreshold.Threshold.
 //
 // threshold(sigma) = 1 - (1-f)^sigma
 // where f is the active slot coefficient and sigma is the relative stake.

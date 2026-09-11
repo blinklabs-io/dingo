@@ -48,6 +48,8 @@ import (
 // retired pools; the lookup here covers snapshots in the compact shape, which
 // carry only a VRF key.
 func TestSeedImportedRewardInputsResolvesParamsPerEpoch(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 
@@ -118,6 +120,10 @@ func TestSeedImportedRewardInputsResolvesParamsPerEpoch(t *testing.T) {
 				"epoch %d was seeded with another epoch's parameters",
 				epoch)
 		}
+		failure, err := db.Metadata().GetRewardSeedFailure(epoch, "mark", nil)
+		require.NoError(t, err)
+		require.Empty(t, failure,
+			"a successfully seeded imported basis must not retain a failure marker")
 	}
 }
 
@@ -127,6 +133,8 @@ func TestSeedImportedRewardInputsResolvesParamsPerEpoch(t *testing.T) {
 // remaining epochs from an answer that never came would write a basis with
 // no relation to what was asked for.
 func TestSeedImportedRewardInputsPropagatesParamsError(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 
@@ -163,6 +171,8 @@ func TestSeedImportedRewardInputsPropagatesParamsError(t *testing.T) {
 func TestImportSnapShotsPrefersSnapshotPoolParamsOverRegistrations(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 
@@ -303,6 +313,8 @@ func importTestPoolRegistration(
 // round without them; dropping it here would lose a round that was fully
 // derivable, which is the failure this seeding exists to prevent.
 func TestSeedImportedRewardInputsSeedsWithoutAParamsWindow(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 
@@ -346,6 +358,8 @@ func TestSeedImportedRewardInputsSeedsWithoutAParamsWindow(t *testing.T) {
 // does-not-reconcile grounds as any other underivable basis, and the epochs
 // that can be derived are unaffected.
 func TestSeedImportedRewardInputsSkipsEpochsWithNoParamsWindow(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 
@@ -392,6 +406,10 @@ func TestSeedImportedRewardInputsSkipsEpochsWithNoParamsWindow(t *testing.T) {
 		"with no snapshot parameters and no registration window there is "+
 			"nothing to derive from, so the round must be left uncredited "+
 			"rather than seeded from a guess")
+	failure, err := db.Metadata().GetRewardSeedFailure(unplaceable, "mark", nil)
+	require.NoError(t, err)
+	require.Contains(t, failure, "has no reward account",
+		"an underivable imported basis must leave durable provenance for the later reward skip")
 
 	// One underivable epoch must not cost the others their rounds.
 	for _, epoch := range []uint64{state.Epoch, state.Epoch - 1} {
@@ -400,4 +418,49 @@ func TestSeedImportedRewardInputsSkipsEpochsWithNoParamsWindow(t *testing.T) {
 		require.NotNil(t, seeded,
 			"epoch %d is derivable and must still be seeded", epoch)
 	}
+}
+
+func TestEmptyRewardSeedFailureReasonReportsMissingParameters(t *testing.T) {
+	t.Parallel()
+
+	pools := ParsedSnapShot{
+		Stake: map[string]uint64{"credential": 1},
+		Delegations: map[string][]byte{
+			"credential": []byte{0x01, 0x02},
+		},
+	}
+
+	reason := emptyRewardSeedFailureReason(&pools)
+	require.Equal(t,
+		"derived reward basis contains no pool inputs: pool 0102 has no parameters",
+		reason,
+	)
+}
+
+func TestSeedImportedRewardInputsPreservesFailureForEmptyBundle(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+
+	txn := db.MetadataTxn(true)
+	require.NoError(t, seedImportedRewardInputs(
+		db.Metadata(),
+		txn.Metadata(),
+		&ParsedSnapShots{
+			Mark: ParsedSnapShot{},
+			Set:  ParsedSnapShot{},
+			Go:   ParsedSnapShot{},
+		},
+		nil,
+		nil,
+		2,
+		100,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	))
+	require.NoError(t, txn.Commit())
+
+	reason, err := db.Metadata().GetRewardSeedFailure(2, "mark", nil)
+	require.NoError(t, err)
+	require.Equal(t, "derived reward basis contains no pool inputs", reason)
 }

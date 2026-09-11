@@ -84,6 +84,8 @@ func leiosFetchHandshake() []ouroboros_mock.ConversationEntry {
 // time so backfill can move to another peer, whose MsgBlockTxs response then
 // makes the certified endorser block available to both ledger and serving.
 func TestLeiosBlockTxsAbandonedSlotFailsOverAndBecomesAvailable(t *testing.T) {
+	t.Parallel()
+
 	tx, ref := testLeiosManifestTx(t, 0x22)
 	manifestRaw, err := lcommon.LeiosEndorserBlock{
 		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
@@ -166,6 +168,7 @@ func TestLeiosBlockTxsAbandonedSlotFailsOverAndBecomesAvailable(t *testing.T) {
 
 	deadline := time.Now().Add(1500 * time.Millisecond)
 	txs, err := o.fetchLeiosEbTxsBatchedUntil(
+		context.Background(),
 		abandonedConn.LeiosFetch().Client,
 		point,
 		1,
@@ -179,11 +182,19 @@ func TestLeiosBlockTxsAbandonedSlotFailsOverAndBecomesAvailable(t *testing.T) {
 	// abandoned-slot error must cool it down (or retire the connection) and let
 	// the healthy peer complete.
 	o.leiosFetchGuardFor(abandonedConn.Id()).markFetchOK()
-	require.NoError(t, o.FetchEndorserBlockByPoint(point.Slot, point.Hash))
+	require.NoError(
+		t,
+		o.FetchEndorserBlockByPoint(
+			context.Background(),
+			point.Slot,
+			point.Hash,
+		),
+	)
 	abandonedRetired := cm.GetConnectionById(abandonedConn.Id()) == nil
 	require.True(
 		t,
-		abandonedRetired || o.leiosFetchGuardFor(abandonedConn.Id()).inCooldown(time.Now()),
+		abandonedRetired ||
+			o.leiosFetchGuardFor(abandonedConn.Id()).inCooldown(time.Now()),
 		"abandoned peer was neither cooled down nor retired",
 	)
 	require.True(

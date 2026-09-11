@@ -35,6 +35,8 @@ type testPtr struct {
 }
 
 func TestParseCredentialMapConwayAccountState(t *testing.T) {
+	t.Parallel()
+
 	stakingKey := bytes.Repeat([]byte{0x11}, 28)
 	poolHash := bytes.Repeat([]byte{0x22}, 28)
 	drepHash := bytes.Repeat([]byte{0x33}, 28)
@@ -83,6 +85,8 @@ func TestParseCredentialMapConwayAccountState(t *testing.T) {
 }
 
 func TestParseCredentialMapShelleyAccountState(t *testing.T) {
+	t.Parallel()
+
 	stakingKey := bytes.Repeat([]byte{0x44}, 28)
 	poolHash := bytes.Repeat([]byte{0x55}, 28)
 
@@ -121,6 +125,8 @@ func TestParseCredentialMapShelleyAccountState(t *testing.T) {
 }
 
 func TestParseCredentialMapLegacyUMElem(t *testing.T) {
+	t.Parallel()
+
 	stakingKey := bytes.Repeat([]byte{0x66}, 28)
 	poolHash := bytes.Repeat([]byte{0x77}, 28)
 
@@ -161,6 +167,8 @@ func TestParseCredentialMapLegacyUMElem(t *testing.T) {
 }
 
 func TestParseCredentialMapLegacyRewardOnlyDepositIsUnknown(t *testing.T) {
+	t.Parallel()
+
 	stakingKey := bytes.Repeat([]byte{0x78}, 28)
 	data := encodeCredentialMapEntry(
 		t,
@@ -181,6 +189,8 @@ func TestParseCredentialMapLegacyRewardOnlyDepositIsUnknown(t *testing.T) {
 }
 
 func TestParseCredentialMapPresentZeroDeposit(t *testing.T) {
+	t.Parallel()
+
 	stakingKey := bytes.Repeat([]byte{0x79}, 28)
 	data := encodeCredentialMapEntry(
 		t,
@@ -201,6 +211,8 @@ func TestParseCredentialMapPresentZeroDeposit(t *testing.T) {
 }
 
 func TestParsePStateSelectsUTxOHDPoolMap(t *testing.T) {
+	t.Parallel()
+
 	poolHash := bytes.Repeat([]byte{0x11}, 28)
 	vrfHash := bytes.Repeat([]byte{0x22}, 32)
 	rewardHash := bytes.Repeat([]byte{0x33}, 28)
@@ -303,6 +315,8 @@ func TestParsePStateSelectsUTxOHDPoolMap(t *testing.T) {
 }
 
 func TestParsePStateDijkstraLeiosKeyField(t *testing.T) {
+	t.Parallel()
+
 	poolHash := bytes.Repeat([]byte{0x61}, 28)
 	vrfHash := bytes.Repeat([]byte{0x62}, 32)
 	rewardHash := bytes.Repeat([]byte{0x63}, 28)
@@ -407,6 +421,8 @@ func TestParsePStateDijkstraLeiosKeyField(t *testing.T) {
 // TestParseRewardAccountNormalizesAddressBytes verifies full reward
 // addresses are stored as 28-byte hashes plus their credential tag.
 func TestParseRewardAccountNormalizesAddressBytes(t *testing.T) {
+	t.Parallel()
+
 	rewardHash := bytes.Repeat([]byte{0x62}, 28)
 
 	cases := []struct {
@@ -470,6 +486,8 @@ func encodeCredentialMapEntry(t *testing.T, key any, value any) []byte {
 }
 
 func TestParseCommitteeVStatePreservesTaggedAuthorizations(t *testing.T) {
+	t.Parallel()
+
 	keyHash := bytes.Repeat([]byte{0x11}, 28)
 	scriptHash := bytes.Repeat([]byte{0x22}, 28)
 	hotHash := bytes.Repeat([]byte{0x33}, 28)
@@ -538,6 +556,8 @@ func committeeVStateFixture(t *testing.T) (hotMap, resignMap []byte) {
 // A nested committee state followed by a dormant-epoch field must still be
 // unwrapped; the field count cannot be the signal.
 func TestParseCommitteeVStateUnwrapsNestedStateWithTrailingFields(t *testing.T) {
+	t.Parallel()
+
 	hotMap, resignMap := committeeVStateFixture(t)
 	nested := append([]byte{0x82}, hotMap...)
 	nested = append(nested, resignMap...)
@@ -564,6 +584,8 @@ func TestParseCommitteeVStateUnwrapsNestedStateWithTrailingFields(t *testing.T) 
 // The flattened Conway CertState inlines the VState fields, so committee state
 // must be recovered there too rather than silently dropped.
 func TestParseCertStateConwayRecoversCommitteeState(t *testing.T) {
+	t.Parallel()
+
 	hotMap, resignMap := committeeVStateFixture(t)
 	poolState := []byte{0x87, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0}
 
@@ -633,6 +655,8 @@ func TestParseCertStateConwayRecoversCommitteeState(t *testing.T) {
 // DState and ccHotKeys are both credential-keyed, so picking DState by map size
 // alone claimed the committee map whenever DState was empty or smaller.
 func TestParseCertStateConwayCommitteeSurvivesSmallDState(t *testing.T) {
+	t.Parallel()
+
 	hotMap, resignMap := committeeVStateFixture(t)
 	poolState := []byte{0x87, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0}
 	drepHash := bytes.Repeat([]byte{0x8a}, 28)

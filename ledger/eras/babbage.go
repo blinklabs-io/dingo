@@ -42,12 +42,19 @@ var BabbageEraDesc = EraDesc{
 	DecodePParamsFunc:       DecodePParamsBabbage,
 	DecodePParamsUpdateFunc: DecodePParamsUpdateBabbage,
 	PParamsUpdateFunc:       PParamsUpdateBabbage,
-	HardForkFunc:            HardForkBabbage,
-	EpochLengthFunc:         EpochLengthShelley,
-	CalculateEtaVFunc:       CalculateEtaVBabbage,
-	CertDepositFunc:         CertDepositBabbage,
-	ValidateTxFunc:          ValidateTxBabbage,
-	EvaluateTxFunc:          EvaluateTxBabbage,
+	ParamUpdateHasPlutusV2CostModelFunc: func(u any) bool {
+		upd, ok := u.(babbage.BabbageProtocolParameterUpdate)
+		if !ok {
+			return false
+		}
+		return paramUpdateHasPlutusV2CostModel(upd.CostModels)
+	},
+	HardForkFunc:      HardForkBabbage,
+	EpochLengthFunc:   EpochLengthShelley,
+	CalculateEtaVFunc: CalculateEtaVBabbage,
+	CertDepositFunc:   CertDepositBabbage,
+	ValidateTxFunc:    ValidateTxBabbage,
+	EvaluateTxFunc:    EvaluateTxBabbage,
 }
 
 func DecodePParamsBabbage(data []byte) (lcommon.ProtocolParameters, error) {
@@ -366,6 +373,16 @@ func ValidateTxBabbage(
 				)
 			}
 		case lcommon.PlutusV2Script:
+			// Real cardano-ledger rejects this transaction outright at the
+			// UTXOW level, before any script runs, when PlutusV2 has no real
+			// cost model yet -- see ErrNoCostModelForPlutusV2.
+			if syntheticV2CostModelInEffect(ls) {
+				return fmt.Errorf(
+					"script %s: %w",
+					tmpScript.Hash(),
+					ErrNoCostModelForPlutusV2,
+				)
+			}
 			txInfoV2, err := script.NewTxInfoV2FromTransaction(
 				ls,
 				tx,
@@ -568,13 +585,25 @@ func EvaluateTxBabbage(
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, err
 			}
-			retTotalExUnits.Steps += usedBudget.Steps
-			retTotalExUnits.Memory += usedBudget.Memory
+			retTotalExUnits, err = SafeAddExUnits(retTotalExUnits, usedBudget)
+			if err != nil {
+				return 0, lcommon.ExUnits{}, nil, fmt.Errorf("aggregate execution units: %w", err)
+			}
 			retRedeemerExUnits[lcommon.RedeemerKey{
 				Tag:   redeemer.Tag,
 				Index: redeemer.Index,
 			}] = usedBudget
 		case lcommon.PlutusV2Script:
+			// Mirrors ValidateTxBabbage's identical check: a transaction
+			// that would be rejected outright at validation time must not
+			// be quoted a fee/ex-units estimate implying it's valid.
+			if syntheticV2CostModelInEffect(ls) {
+				return 0, lcommon.ExUnits{}, nil, fmt.Errorf(
+					"script %s: %w",
+					tmpScript.Hash(),
+					ErrNoCostModelForPlutusV2,
+				)
+			}
 			txInfoV2, err := script.NewTxInfoV2FromTransaction(
 				ls,
 				tx,
@@ -611,8 +640,10 @@ func EvaluateTxBabbage(
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, err
 			}
-			retTotalExUnits.Steps += usedBudget.Steps
-			retTotalExUnits.Memory += usedBudget.Memory
+			retTotalExUnits, err = SafeAddExUnits(retTotalExUnits, usedBudget)
+			if err != nil {
+				return 0, lcommon.ExUnits{}, nil, fmt.Errorf("aggregate execution units: %w", err)
+			}
 			retRedeemerExUnits[lcommon.RedeemerKey{
 				Tag:   redeemer.Tag,
 				Index: redeemer.Index,

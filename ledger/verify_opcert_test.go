@@ -68,23 +68,24 @@ func addLeiosOCINChainBlocks(
 
 func leiosOCINHeader(
 	issuer lcommon.IssuerVkey,
-	sequence uint32,
+	sequence uint64,
 ) *dijkstra.DijkstraBlockHeader {
-	return &dijkstra.DijkstraBlockHeader{
+	header := &dijkstra.DijkstraBlockHeader{
 		BabbageBlockHeader: babbage.BabbageBlockHeader{
 			Body: babbage.BabbageBlockHeaderBody{
 				IssuerVkey: issuer,
-				OpCert: babbage.BabbageOpCert{
-					SequenceNumber: sequence,
-				},
 			},
 		},
 	}
+	setOpCertSequenceNumber(&header.Body.OpCert.SequenceNumber, sequence)
+	return header
 }
 
 // TestOpCertFromHeader_Babbage verifies the per-era extractor pulls the opcert
 // fields off a Babbage-family header body.
 func TestOpCertFromHeader_Babbage(t *testing.T) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{10}, 9, tamperNone)
 	opCert, ok := opCertFromHeader(tb.block.Header())
 	require.True(t, ok)
@@ -100,6 +101,8 @@ func TestOpCertFromHeader_Babbage(t *testing.T) {
 // TestOpCertFromHeader_NonPraosReturnsFalse verifies headers without an opcert
 // (Byron) report ok=false so they are skipped by opcert validation.
 func TestOpCertFromHeader_NonPraosReturnsFalse(t *testing.T) {
+	t.Parallel()
+
 	opCert, ok := opCertFromHeader(&byron.ByronMainBlockHeader{})
 	assert.False(t, ok)
 	assert.Nil(t, opCert)
@@ -115,6 +118,8 @@ func TestOpCertFromHeader_NonPraosReturnsFalse(t *testing.T) {
 // the inbound check or its upstream dependency has drifted from real cardano
 // and would stall the chain by rejecting valid blocks.
 func TestVerifyOpCertColdSignature_RealCardanoCliCert(t *testing.T) {
+	t.Parallel()
+
 	mustHex := func(s string) []byte {
 		b, err := hex.DecodeString(s)
 		require.NoError(t, err)
@@ -151,6 +156,8 @@ func TestVerifyOpCertColdSignature_RealCardanoCliCert(t *testing.T) {
 // TestVerifyOpCertHeaderCrypto_Valid verifies a well-formed opcert passes the
 // inbound cold-signature and KES-period checks.
 func TestVerifyOpCertHeaderCrypto_Valid(t *testing.T) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{11}, 13, tamperNone)
 	err := verifyOpCertHeaderCrypto(
 		tb.block.Header(),
@@ -165,6 +172,8 @@ func TestVerifyOpCertHeaderCrypto_Valid(t *testing.T) {
 // cold-key signature is now rejected at header verification — this is the
 // behavior gap issue #2608 closes.
 func TestVerifyOpCertHeaderCrypto_TamperedColdSignature(t *testing.T) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{12}, 14, tamperOpCertSig)
 	err := verifyOpCertHeaderCrypto(
 		tb.block.Header(),
@@ -181,6 +190,8 @@ func TestVerifyOpCertHeaderCrypto_TamperedColdSignature(t *testing.T) {
 // period 0, so evaluating it five KES periods later with a max of three
 // evolutions is expired.
 func TestVerifyOpCertHeaderCrypto_ExpiredKESPeriod(t *testing.T) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{13}, 15, tamperNone)
 	const slotsPerKesPeriod = uint64(100)
 	err := verifyOpCertHeaderCrypto(
@@ -200,6 +211,8 @@ func TestVerifyOpCertHeaderCrypto_ExpiredKESPeriod(t *testing.T) {
 func TestVerifyOpCertHeaderCrypto_MaxKESEvolutionsZeroSkipsExpiry(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{14}, 16, tamperNone)
 	const slotsPerKesPeriod = uint64(100)
 	err := verifyOpCertHeaderCrypto(
@@ -217,6 +230,8 @@ func TestVerifyOpCertHeaderCrypto_MaxKESEvolutionsZeroSkipsExpiry(
 // enforceNoGap: a TPraos block (enforceNoGap=false) accepts a jump, a Praos
 // block (enforceNoGap=true) rejects it.
 func TestValidateOpCertCounter(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name         string
 		stored       uint64
@@ -276,6 +291,13 @@ func TestValidateOpCertCounter(t *testing.T) {
 			candidate:    7,
 			enforceNoGap: false,
 		},
+		{
+			name:         "equal counters at max uint64 do not wrap into a gap",
+			stored:       ^uint64(0),
+			found:        true,
+			candidate:    ^uint64(0),
+			enforceNoGap: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -296,6 +318,8 @@ func TestValidateOpCertCounter(t *testing.T) {
 }
 
 func TestLeiosAnnouncementOCINStalenessUsesImmutableTip(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(nil, nil)
 	require.NoError(t, err)
@@ -320,7 +344,7 @@ func TestLeiosAnnouncementOCINStalenessUsesImmutableTip(t *testing.T) {
 	tests := []struct {
 		name      string
 		issuer    lcommon.IssuerVkey
-		candidate uint32
+		candidate uint64
 		want      LeiosAnnouncementOCINStaleness
 	}{
 		{
@@ -366,6 +390,8 @@ func TestLeiosAnnouncementOCINStalenessUsesImmutableTip(t *testing.T) {
 func TestLeiosAnnouncementOCINStalenessTreatsPreKChainAsOrigin(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(nil, nil)
 	require.NoError(t, err)
@@ -394,6 +420,8 @@ func TestLeiosAnnouncementOCINStalenessTreatsPreKChainAsOrigin(
 func TestValidateLeiosAnnouncementHeaderRunsCryptoBeforeOCINClassification(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{0xD4}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	seedBlockPoolRegistration(t, db, tb.block)
@@ -427,6 +455,8 @@ func TestValidateLeiosAnnouncementHeaderRunsCryptoBeforeOCINClassification(
 // TestOpCertNoGapRuleApplies pins the TPraos→Praos boundary: the opcert no-gap
 // rule is off through Alonzo (TPraos) and on from Babbage onward (Praos).
 func TestOpCertNoGapRuleApplies(t *testing.T) {
+	t.Parallel()
+
 	assert.False(
 		t,
 		opCertNoGapRuleApplies(alonzo.EraIdAlonzo),

@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -272,6 +273,10 @@ func (s *Server) handleConstructionPreprocess(
 	var inputRefs []string
 	var requiredKeys []*AccountIdentifier
 	for _, op := range req.Operations {
+		if op == nil {
+			writeError(w, ErrInvalidRequest)
+			return
+		}
 		if op.Type != OpInput {
 			continue
 		}
@@ -319,7 +324,13 @@ func (s *Server) handleConstructionMetadata(
 		return
 	}
 
-	pparams := s.config.LedgerState.GetCurrentPParams()
+	// GetCurrentPParamsForReporting matches every other "report the current
+	// protocol parameters" surface (LocalStateQuery, Blockfrost, UTXORPC) --
+	// see blinklabs-io/dingo#3825. This handler only reads MinFeeCoefficient/
+	// MinFeeConstant from the result today, so the filter has no effect on
+	// its response, but using the reporting accessor here keeps this
+	// endpoint correct if it ever surfaces more of the converted value.
+	pparams := s.config.LedgerState.GetCurrentPParamsForReporting()
 	if pparams == nil {
 		writeError(w, wrapErr(
 			ErrUnavailable,
@@ -403,6 +414,10 @@ func (s *Server) handleConstructionPayloads(
 	var maxOutputIdx int
 
 	for _, op := range req.Operations {
+		if op == nil {
+			writeError(w, ErrInvalidRequest)
+			return
+		}
 		switch op.Type {
 		case OpInput:
 			if op.CoinChange == nil ||
@@ -457,7 +472,7 @@ func (s *Server) handleConstructionPayloads(
 				return
 			}
 			idx, err := strconv.Atoi(parts[1])
-			if err != nil || idx < 0 {
+			if err != nil || idx < 0 || uint64(idx) > math.MaxUint32 {
 				writeError(w, wrapErr(
 					ErrInvalidRequest,
 					fmt.Errorf(
@@ -684,6 +699,10 @@ func (s *Server) handleConstructionPayloads(
 	if len(req.PublicKeys) > 0 {
 		seen := make(map[string]struct{})
 		for _, pk := range req.PublicKeys {
+			if pk == nil {
+				writeError(w, ErrInvalidPublicKey)
+				return
+			}
 			if _, dup := seen[pk.HexBytes]; dup {
 				continue
 			}
@@ -778,6 +797,10 @@ func (s *Server) handleConstructionCombine(
 		[]lcommon.VkeyWitness, 0, len(req.Signatures),
 	)
 	for _, sig := range req.Signatures {
+		if sig == nil {
+			writeError(w, ErrInvalidRequest)
+			return
+		}
 		if sig.PublicKey == nil {
 			writeError(w, wrapErr(
 				ErrInvalidPublicKey,
