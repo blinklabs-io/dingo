@@ -160,15 +160,13 @@ type TokenRegistryConfig struct {
 // storage mode -- both are required, since the indexer depends on the
 // api-mode indexes to function. ServerEnabled independently opts into the
 // listener so persisted Midnight data can be served without running the
-// indexer. Reflection and non-loopback plaintext exposure are separate,
-// default-off decisions.
+// indexer. Reflection remains a separate, default-off decision. TLS is optional.
 type MidnightConfig struct {
-	Enabled             bool
-	ServerEnabled       bool
-	ReflectionEnabled   bool
-	AllowInsecureRemote bool
-	Port                uint
-	Host                string
+	Enabled           bool
+	ServerEnabled     bool
+	ReflectionEnabled bool
+	Port              uint
+	Host              string
 
 	CNightPolicyID              string
 	CNightAssetName             string
@@ -214,7 +212,7 @@ type Config struct {
 	pluginSelections                map[hostplugin.Capability]hostplugin.Selection
 	network                         string
 	tlsCertFilePath, tlsKeyFilePath string
-	// apiConfig mirrors cfg.API -- the shared api.tls/api.auth policy
+	// apiConfig mirrors cfg.API -- the shared api.tls policy
 	// defaults merged into every selected plugins.api.* provider's own
 	// config by node.go before that provider resolves. See
 	// ARCHITECTURE.md's "API security" section.
@@ -652,6 +650,22 @@ func (n *Node) configValidate() error {
 				shelleyGenesis.NetworkMagic,
 			)
 		}
+		if byronGenesis := n.config.CardanoNodeConfig().ByronGenesis(); byronGenesis != nil {
+			byronProtocolMagic := byronGenesis.ProtocolConsts.ProtocolMagic
+			if byronProtocolMagic < 0 || byronProtocolMagic > math.MaxUint32 {
+				return fmt.Errorf(
+					"byron genesis protocol magic %d is out of uint32 range",
+					byronProtocolMagic,
+				)
+			}
+			if n.config.cfg.NetworkMagic != uint32(byronProtocolMagic) { // #nosec G115 -- range-checked above
+				return fmt.Errorf(
+					"network magic (%d) doesn't match value from Byron genesis (%d)",
+					n.config.cfg.NetworkMagic,
+					byronProtocolMagic,
+				)
+			}
+		}
 	}
 	return nil
 }
@@ -665,17 +679,24 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 	// Start with a default internal config
 	c := Config{
 		cfg: &internalconfig.Config{
-			BindAddr:           "0.0.0.0",
-			StorageMode:        string(StorageModeCore),
-			RunMode:            internalconfig.RunModeServe,
-			Cache:              internalconfig.DefaultCacheConfig(),
-			Chainsync:          internalconfig.DefaultChainsyncConfig(),
-			GenesisBootstrap:   internalconfig.DefaultGenesisBootstrapConfig(),
-			HistoryExpiry:      internalconfig.DefaultHistoryExpiryConfig(),
-			KoiosParity:        internalconfig.DefaultKoiosParityConfig(),
-			Logging:            internalconfig.DefaultLoggingConfig(),
-			Midnight:           internalconfig.DefaultMidnightConfig(),
-			CORSAllowedOrigins: []string{"*"},
+			BindAddr:    "0.0.0.0",
+			StorageMode: string(StorageModeCore),
+			RunMode:     internalconfig.RunModeServe,
+			// Fail closed: self-validate locally-forged blocks before
+			// adoption and diffusion unless an operator explicitly opts
+			// out. Mirrors internalconfig's own package-level default
+			// (globalConfig, built by its unexported newDefaultConfig)
+			// -- this literal is a separate default source, not backfilled
+			// from that one, so it must be set here too.
+			ValidateForgedBlock: true,
+			Cache:               internalconfig.DefaultCacheConfig(),
+			Chainsync:           internalconfig.DefaultChainsyncConfig(),
+			GenesisBootstrap:    internalconfig.DefaultGenesisBootstrapConfig(),
+			HistoryExpiry:       internalconfig.DefaultHistoryExpiryConfig(),
+			KoiosParity:         internalconfig.DefaultKoiosParityConfig(),
+			Logging:             internalconfig.DefaultLoggingConfig(),
+			Midnight:            internalconfig.DefaultMidnightConfig(),
+			CORSAllowedOrigins:  []string{"*"},
 			Plugins: internalconfig.PluginsConfig{
 				Storage: internalconfig.StoragePluginsConfig{
 					Blob: hostplugin.Selection{
@@ -795,7 +816,6 @@ func (c *Config) syncCompatFields() {
 		Enabled:                     c.cfg.Midnight.Enabled,
 		ServerEnabled:               c.cfg.Midnight.ServerEnabled,
 		ReflectionEnabled:           c.cfg.Midnight.ReflectionEnabled,
-		AllowInsecureRemote:         c.cfg.Midnight.AllowInsecureRemote,
 		Port:                        c.cfg.Midnight.Port,
 		Host:                        c.cfg.Midnight.Host,
 		CNightPolicyID:              c.cfg.Midnight.CNightPolicyID,
@@ -1002,8 +1022,8 @@ func WithCardanoNodeConfig(
 	}
 }
 
-// WithBindAddr specifies the IP address used for API listeners
-// (Blockfrost, Mesh, UTxO RPC). The default is "0.0.0.0" (all interfaces).
+// WithBindAddr specifies the IP address used by relay, metrics, and public
+// Blockfrost, Mesh, and UTxO RPC listeners. The default is 0.0.0.0.
 func WithBindAddr(addr string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BindAddr = addr
@@ -1101,9 +1121,9 @@ func WithUtxorpcPort(port uint) ConfigOptionFunc {
 	}
 }
 
-// WithAPIConfig sets the shared api.tls/api.auth policy applied to every
+// WithAPIConfig sets the shared api.tls policy applied to every
 // selected plugins.api.* provider (Blockfrost, Mesh, UTxORPC) unless that
-// provider's own plugins.api.<name>.config.tls/auth overrides a field.
+// provider's own plugins.api.<name>.config.tls overrides a field.
 // See internal/apiconfig and ARCHITECTURE.md's "API security" section.
 func WithAPIConfig(cfg internalconfig.APIConfig) ConfigOptionFunc {
 	return func(c *Config) {
@@ -1475,11 +1495,12 @@ func WithForgeStaleGapThresholdSlots(slots uint64) ConfigOptionFunc {
 	}
 }
 
-// WithValidateForgedBlock enables self-validation of locally-forged blocks
+// WithValidateForgedBlock controls self-validation of locally-forged blocks
 // before they are adopted onto the chain and diffused to peers. When enabled,
 // the forger runs VRF/KES header crypto, body-hash consistency, and per-tx
 // ledger validation on each forged block. A failing block is dropped without
-// being adopted or diffused. Disabled by default.
+// being adopted or diffused. Enabled by default; pass false only to
+// explicitly opt out.
 func WithValidateForgedBlock(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.ValidateForgedBlock = enabled
@@ -1646,7 +1667,6 @@ func WithMidnightConfig(cfg MidnightConfig) ConfigOptionFunc {
 			Enabled:                     cfg.Enabled,
 			ServerEnabled:               cfg.ServerEnabled,
 			ReflectionEnabled:           cfg.ReflectionEnabled,
-			AllowInsecureRemote:         cfg.AllowInsecureRemote,
 			Port:                        cfg.Port,
 			Host:                        cfg.Host,
 			CNightPolicyID:              cfg.CNightPolicyID,
@@ -1780,7 +1800,7 @@ func (c *Config) MetadataPlugin() string {
 	return c.cfg.Plugins.Storage.Metadata.Provider
 }
 
-// BindAddr returns the IP address for API listeners.
+// BindAddr returns the IP address for relay and metrics listeners.
 func (c *Config) BindAddr() string {
 	return c.cfg.BindAddr
 }
@@ -1856,7 +1876,7 @@ func (c *Config) TlsKeyFilePath() string {
 	return c.cfg.TlsKeyFilePath
 }
 
-// APIConfig returns the shared api.tls/api.auth policy defaults applied to
+// APIConfig returns the shared api.tls policy defaults applied to
 // every selected plugins.api.* provider unless overridden. See
 // WithAPIConfig and ARCHITECTURE.md's "API security" section.
 func (c *Config) APIConfig() internalconfig.APIConfig {
@@ -2165,7 +2185,7 @@ func (c *Config) CORSAllowedOrigins() []string {
 	return c.cfg.CORSAllowedOrigins
 }
 
-// API returns the shared api.tls/api.auth policy defaults applied to
+// API returns the shared api.tls policy defaults applied to
 // every selected plugins.api.* provider. See WithAPIConfig.
 func (c *Config) API() internalconfig.APIConfig {
 	return c.cfg.API

@@ -71,6 +71,15 @@ func resetGlobalConfig() {
 			CleanupAfterLoad:   true,
 			VerifyCertificates: true,
 		},
+		// Fail closed: mirrors newDefaultConfig's own ValidateForgedBlock
+		// default (issue #3528) so this test-only reset does not silently
+		// diverge from what an operator actually gets. Unlike the several
+		// fields above left at their zero value on purpose (StorageMode,
+		// Cache, Chainsync, SlotsPerKESPeriod, ...), so tests can observe
+		// their own fill-in-if-empty defaulting logic in isolation,
+		// ValidateForgedBlock's production default is an unconditional
+		// literal with no separate fill-in step to test around.
+		ValidateForgedBlock: true,
 	}
 	globalTopologyConfig = &topology.TopologyConfig{}
 }
@@ -243,6 +252,7 @@ mithril:
 		ForgeStaleGapThresholdSlots: 654,
 		// Not set by the fixture's YAML/env, so ApplyDefaults fills it.
 		ForgePrimaryChainTipToleranceSlots: DefaultForgePrimaryChainTipToleranceSlots,
+		ValidateForgedBlock:                true,
 		Mithril: MithrilConfig{
 			Enabled:                false,
 			AggregatorURL:          "https://mithril.example.net",
@@ -351,6 +361,7 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 		ForgeSyncToleranceSlots:            DefaultForgeSyncToleranceSlots,
 		ForgeStaleGapThresholdSlots:        DefaultForgeStaleGapThresholdSlots,
 		ForgePrimaryChainTipToleranceSlots: DefaultForgePrimaryChainTipToleranceSlots,
+		ValidateForgedBlock:                true,
 		Mithril: MithrilConfig{
 			Enabled:            true,
 			CleanupAfterLoad:   true,
@@ -1355,7 +1366,6 @@ midnight:
   enabled: true
   serverEnabled: true
   reflectionEnabled: true
-  allowInsecureRemote: true
   port: 50060
   host: "127.0.0.2"
   cnightPolicyId: "cnight-policy"
@@ -1388,7 +1398,6 @@ network: "preview"
 		Enabled:                     true,
 		ServerEnabled:               true,
 		ReflectionEnabled:           true,
-		AllowInsecureRemote:         true,
 		Port:                        50060,
 		Host:                        "127.0.0.2",
 		CNightPolicyID:              "cnight-policy",
@@ -1415,7 +1424,6 @@ func TestLoad_MidnightEnvOverridesYAML(t *testing.T) {
 	resetGlobalConfig()
 	t.Setenv("DINGO_MIDNIGHT_SERVER_ENABLED", "true")
 	t.Setenv("DINGO_MIDNIGHT_REFLECTION_ENABLED", "true")
-	t.Setenv("DINGO_MIDNIGHT_ALLOW_INSECURE_REMOTE", "true")
 	t.Setenv("DINGO_MIDNIGHT_PORT", "50070")
 	t.Setenv("DINGO_MIDNIGHT_HOST", "127.0.0.3")
 	yamlContent := `
@@ -1441,8 +1449,7 @@ network: "preview"
 	if cfg.Midnight.Port != 50070 {
 		t.Fatalf("expected env midnight port 50070, got %d", cfg.Midnight.Port)
 	}
-	if !cfg.Midnight.ServerEnabled || !cfg.Midnight.ReflectionEnabled ||
-		!cfg.Midnight.AllowInsecureRemote {
+	if !cfg.Midnight.ServerEnabled || !cfg.Midnight.ReflectionEnabled {
 		t.Fatalf(
 			"expected environment to enable Midnight server policy: %+v",
 			cfg.Midnight,

@@ -37,12 +37,6 @@ func TestRegisterFlags_CoversAllExportedConfigFields(t *testing.T) {
 
 	specFields := map[string]string{}
 	yamlOnlyFields := map[string]struct{}{
-		// Deliberately has no CLI flag (unlike every sibling api.auth/
-		// api.tls field): a raw inline secret should not be encouraged
-		// onto a command line, where it is visible via `ps` and shell
-		// history. Use --api-auth-token-file-path (API.Auth.TokenFilePath)
-		// or YAML instead. See AuthPolicy.Token's own doc comment.
-		"API.Auth.Token":                       {},
 		"Plugins.Storage.Blob.Config":          {},
 		"Plugins.Storage.Metadata.Config":      {},
 		"Plugins.Mempool.Config":               {},
@@ -140,6 +134,44 @@ func TestDebugBindAddressDefaultsToLoopback(t *testing.T) {
 		t,
 		"127.0.0.1:6060",
 		(&Config{DebugPort: 6060}).DebugListenAddress(),
+	)
+}
+
+// TestValidateForgedBlockDefaultsToTrue is a regression test for a
+// human-review finding: DefaultConfig's ValidateForgedBlock: true literal
+// (issue #3528's fail-closed forging default) had no test on the actual
+// operator path -- LoadConfig -> GetConfig -> RegisterFlags -- unlike the
+// separate NewConfig literal covered by
+// TestNewConfigDefaultsValidateForgedBlock in the parent package. Deleting
+// or flipping this literal previously left every test in this package and
+// ./cmd/... green.
+func TestValidateForgedBlockDefaultsToTrue(t *testing.T) {
+	// Pins the real production literal directly (internal/config/config.go's
+	// newDefaultConfig), independent of resetGlobalConfig's own separately
+	// hand-maintained copy below and of whatever state earlier tests left
+	// package-level globalConfig in.
+	require.True(t, newDefaultConfig().ValidateForgedBlock)
+
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	cfg.ApplyDefaults()
+	require.True(
+		t,
+		cfg.ValidateForgedBlock,
+		"LoadConfig+ApplyDefaults must enable self-validation of forged blocks by default",
+	)
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	got, err := cmd.PersistentFlags().GetBool("validate-forged-block")
+	require.NoError(t, err)
+	require.True(
+		t,
+		got,
+		"the --validate-forged-block flag's registered default must match DefaultConfig.ValidateForgedBlock",
 	)
 }
 
@@ -596,13 +628,11 @@ func TestApplyFlags_MidnightServerPolicy(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("DINGO_MIDNIGHT_SERVER_ENABLED", "false")
 	t.Setenv("DINGO_MIDNIGHT_REFLECTION_ENABLED", "false")
-	t.Setenv("DINGO_MIDNIGHT_ALLOW_INSECURE_REMOTE", "false")
 	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
 	require.NoError(t, os.WriteFile(configFile, []byte(
 		"midnight:\n"+
 			"  serverEnabled: true\n"+
-			"  reflectionEnabled: true\n"+
-			"  allowInsecureRemote: true\n",
+			"  reflectionEnabled: true\n",
 	), 0o600))
 
 	cfg, err := LoadConfig(configFile)
@@ -613,27 +643,16 @@ func TestApplyFlags_MidnightServerPolicy(t *testing.T) {
 		cfg.Midnight.ReflectionEnabled,
 		"environment overrides YAML",
 	)
-	require.False(
-		t,
-		cfg.Midnight.AllowInsecureRemote,
-		"environment overrides YAML",
-	)
 
 	cmd := &cobra.Command{Use: "dingo"}
 	RegisterFlags(cmd)
 	require.NoError(t, cmd.ParseFlags([]string{
 		"--midnight-server-enabled=true",
 		"--midnight-reflection-enabled=true",
-		"--midnight-allow-insecure-remote=true",
 	}))
 	require.NoError(t, ApplyFlags(cmd, cfg))
 	require.True(t, cfg.Midnight.ServerEnabled, "CLI overrides environment")
 	require.True(t, cfg.Midnight.ReflectionEnabled, "CLI overrides environment")
-	require.True(
-		t,
-		cfg.Midnight.AllowInsecureRemote,
-		"CLI overrides environment",
-	)
 }
 
 func TestApplyFlags_NetworkOverrideReappliesMidnightDefaults(t *testing.T) {
@@ -832,7 +851,7 @@ func TestPipeline_EmptyMidnightHostUsesLoopbackDefault(t *testing.T) {
 
 	cfg, err := loadConfigThroughPipeline(
 		t,
-		"storageMode: \"api\"\n",
+		"bindAddr: 127.0.0.1\nstorageMode: \"api\"\n",
 		nil,
 	)
 	if err != nil {

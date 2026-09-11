@@ -1180,15 +1180,16 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// headers never reach the ledger's own chainsync header-queue
 		// verification, since that only runs for headers actually applied.
 		//
-		// Verification is skipped under the same conditions the ledger's own
-		// header pipeline already skips it (bulk historical/catch-up
-		// loading, or a Mithril-covered slot), so fast sync and a
-		// Mithril-restored bootstrap are unaffected. A deferred result (local
-		// state has not caught up to this header's slot yet) also leaves the
-		// header eligible -- that is the normal shape of a peer legitimately
-		// racing ahead of local ledger application, not a peer fault. Only a
-		// definite crypto/eligibility failure excludes the header from
-		// observation and recycles the connection.
+		// Verification is skipped only for a slot an imported Mithril
+		// snapshot already covers (issue #3528); a coarse bulk
+		// historical/catch-up loading toggle no longer exempts it, so a
+		// Mithril-restored bootstrap is unaffected but ordinary fast sync is
+		// not. A deferred result (local state has not caught up to this
+		// header's slot yet) also leaves the header eligible -- that is the
+		// normal shape of a peer legitimately racing ahead of local ledger
+		// application, not a peer fault. Only a definite crypto/eligibility
+		// failure excludes the header from observation and recycles the
+		// connection.
 		if ingressEligible && o.chainSelectionShouldVerifyHeaderCrypto != nil &&
 			o.chainSelectionShouldVerifyHeaderCrypto(blockSlot) {
 			if verifyErr := o.chainSelectionVerifyHeaderCrypto(v); verifyErr != nil {

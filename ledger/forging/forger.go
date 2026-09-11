@@ -472,10 +472,13 @@ type ForgerConfig struct {
 	// chain tip is far ahead of the slot clock. Zero uses the default.
 	ForgeStaleGapThresholdSlots uint64
 
-	// BlockValidator, when non-nil, validates the forged block (VRF/KES
-	// header crypto, body-hash consistency, per-tx ledger rules) before
-	// AddBlock is called. A validation failure drops the block without
-	// adopting or diffusing it. Nil disables self-validation (default).
+	// BlockValidator runs its implementation's checks before AddBlock.
+	// A failure prevents adoption and diffusion. The node always supplies
+	// aggregate reference-script validation and, unless an operator
+	// explicitly opts out via ValidateForgedBlock=false (issue #3528: fail
+	// closed by default), full VRF/KES header crypto, body-hash, and
+	// per-tx ledger rule validation too. Nil disables validation for
+	// callers embedding this package directly.
 	BlockValidator BlockValidator
 
 	// Prometheus metrics registry (optional)

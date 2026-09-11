@@ -144,11 +144,18 @@ func NewDatabaseWithOptions(
 		blobRegister = badger.RegisterProvider
 	}
 	blobConfig := opts.Blob.Config
-	if blobConfig == nil && blobName == "badger" {
-		// Keep the on-disk files a test's badger store reserves small;
-		// see testutil.BadgerBlobConfig. A caller that supplies its own
-		// config owns the sizing.
-		blobConfig = testutil.BadgerBlobConfig()
+	if blobName == "badger" {
+		// Apply the bounded sizes as defaults rather than only when the
+		// caller supplied no config at all. The badger provider decodes
+		// its config from the production defaults (provider.go:44), so a
+		// caller config that sets some other knob and says nothing about
+		// sizes decodes back to the 2GiB reservation. Caller keys win, so
+		// a test that needs production sizing still asks for it.
+		merged := testutil.BadgerBlobConfig()
+		for k, v := range blobConfig {
+			merged[k] = v
+		}
+		blobConfig = merged
 	}
 	metadataName := opts.Metadata.Name
 	if metadataName == "" {
