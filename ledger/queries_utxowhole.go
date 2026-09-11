@@ -216,6 +216,21 @@ func (ls *LedgerState) queryShelleyUtxoWhole() (any, error) {
 	go func() {
 		defer close(jobs)
 		for _, ref := range live {
+			// Checked separately, and first, from the send below: once
+			// done is closed, a worker simultaneously ready to receive on
+			// jobs makes both cases of a single select ready together, and
+			// select picks uniformly at random between ready cases rather
+			// than preferring done -- so the abort was not actually
+			// guaranteed to stop feeding promptly, only increasingly
+			// likely to over repeated iterations (cubic review). A
+			// non-blocking check up front gives done priority; the second
+			// select still catches the remaining narrow window where done
+			// closes between this check and the send.
+			select {
+			case <-done:
+				return
+			default:
+			}
 			select {
 			case jobs <- ref:
 			case <-done:
