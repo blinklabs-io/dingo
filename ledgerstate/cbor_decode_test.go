@@ -159,6 +159,8 @@ func TestDecodeMapEntriesLimit_DefiniteLength_TruncatedPayloadDoesNotAllocate(
 func TestDecodeMapEntriesLimit_DefiniteLength_RemainingByteBoundaries(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tests := []struct {
 		name string
 		data []byte
