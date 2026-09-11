@@ -2741,6 +2741,26 @@ func (q *Queries) GetMidnightRegistrationsByBlock(ctx context.Context, blockNumb
 	return items, nil
 }
 
+const getNetworkStateAsOfSlot = `-- name: GetNetworkStateAsOfSlot :one
+SELECT id, treasury, reserves, slot
+FROM network_state
+WHERE slot <= ?
+ORDER BY slot DESC
+LIMIT 1
+`
+
+func (q *Queries) GetNetworkStateAsOfSlot(ctx context.Context, slot int64) (NetworkState, error) {
+	row := q.db.QueryRowContext(ctx, getNetworkStateAsOfSlot, slot)
+	var i NetworkState
+	err := row.Scan(
+		&i.ID,
+		&i.Treasury,
+		&i.Reserves,
+		&i.Slot,
+	)
+	return i, err
+}
+
 const getOffchainMetadata = `-- name: GetOffchainMetadata :one
 SELECT fetched_at, next_fetch_after, created_at, updated_at, url,
        source_type, status, content_type, last_error, hash, body_hash,
