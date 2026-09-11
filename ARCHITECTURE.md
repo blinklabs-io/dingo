@@ -108,13 +108,15 @@ fixtures when schema seeding or assertions require raw SQL.
 Startup reserves the write connection, acquires the backend migration lock,
 rejects unversioned metadata tables (users must delete the data directory,
 including metadata and blob stores, and resync), and validates/resumes versioned expand/backfill/contract work before
-advertising readiness. The current registry has migrations 1 through 10:
+advertising readiness. The current registry has migrations 1 through 13:
 `v1alpha1`, `leios-key-registration`, `token-registry-metadata`,
 `account-import-baseline`, `leios-snapshot-keys`,
 `governance-ratification-history`, `account-import-deposit`,
-`committee-credential-tags`, `committee-term-start-presence`, and
-`reward-seed-failure`. `DATABASE.md` is the source of truth for their schema
-changes and upgrade behavior. It then checks the read pool. File-backed
+`committee-credential-tags`, `committee-term-start-presence`,
+`reward-seed-failure`, `imported-pool-block-count`,
+`pool-registration-deposit-held`, and `pointer-address-stake`. `DATABASE.md`
+is the source of truth for their schema changes and upgrade behavior. It then checks the read
+pool. File-backed
 SQLite uses a
 cross-process lock file; isolated in-memory databases use a process lock. A
 failed or interrupted phase leaves readiness false and carries the migration
@@ -9392,19 +9394,50 @@ behavior lives in `database/plugin/metadata/sqlstore` and is exercised through
 the SQLite contract suite.
 
 `RewardLiveStake` supplies the credential-level input bundle for reward
-snapshots; the leader-election Mark snapshot remains on its independent,
-slot-aware path. Metadata write paths refresh only credentials touched by UTxO creation/spending, account
+snapshots; the leader-election Mark snapshot's authoritative SNAP-point capture
+reads it too, as its fast path (see below). The slot-aware historical
+reconstruction remains available as the fallback capture for a boundary the
+SNAP-point hook missed. Metadata write paths refresh only credentials touched by UTxO creation/spending, account
 registration or delegation, and reward credits or withdrawals, in the same
 transaction as the source change. Refresh derives total stake, registration,
 current pool delegation, and delegation certificate order; rollback therefore
 restores the aggregate from the same historical metadata used by normal account
 and UTxO repair. Malformed non-empty stake credentials are rejected before they
-enter the aggregate. The aggregate currently attributes only base-address stake:
-UTxO metadata does not retain the pointer triple needed to resolve pointer
-addresses to stake credentials, so lovelace at otherwise resolvable pointer
-addresses is omitted. Consumers must not treat `RewardLiveStake` as an exact
-replacement for the ledger stake distribution for eras where pointer-address
-stake matters.
+enter the aggregate. The aggregate itself attributes only base-address stake,
+because it keys on `utxo.staking_key` and a pointer address leaves that column
+empty; the pointer position is retained in `utxo_pointer` instead. Resolving it
+is inherently slot-evaluated -- a registration or de-registration anywhere can
+change which credential an existing pointer output belongs to -- which this
+aggregate's incremental, tip-keyed maintenance cannot express without reacting
+to every certificate event out of band, so `RebuildRewardLiveStake` and the
+per-write refresh both leave it out identically, on purpose, rather than one of
+the two learning it and the other not.
+
+The leader-election SNAP-point path
+(`ledger/snapshot.Calculator.calculateLiveStakeDistributionInTxn`) is the one
+consumer that still needs pointer-address stake pre-Conway, so it adds it back
+itself: `GetPointerStakeInputsForPools` recomputes the same
+`active_delegation`/`pointer_resolution` join the historical path uses,
+restricted to slot and the epoch boundary, and the result is added to what this
+aggregate returned rather than folded into the aggregate. That closes a prior
+divergence between dingo's two Mark-capture routes -- the event-driven fallback
+already reconstructed historically and resolved pointer stake; the SNAP-point
+hook read only this aggregate and did not (blinklabs-io/dingo#3854). The
+SNAP-point read cannot resolve the incoming epoch's era, because it runs before
+that epoch's row is written, so the persist half discards its distribution
+whenever the boundary changes era and reconstructs historically instead; see
+`GetPointerStakeInputsForPools` in `DATABASE.md`. Every
+other consumer of this aggregate -- `GetStakeByPools`, DRep voting power, and a
+`GetRewardStakeInputsForPools` query with `expiryEpoch == 0`, `boundarySlot == 0`
+and no boundary awareness, which is the only shape of that call that reads the
+aggregate at all -- is unchanged and still attributes only base-address stake.
+Any other shape of `GetRewardStakeInputsForPools`, including one with the
+CIP-0163 inactivity gate on, goes through `historicalStakeCTE` and resolves
+pointer stake there. That is correct once the live tip has
+passed the Conway fork, where pointer addresses confer no stake at all, and
+understates a pre-Conway tip. Consumers must not treat `RewardLiveStake` on its
+own as an exact replacement for the ledger stake distribution for eras where
+pointer-address stake matters.
 
 `RebuildRewardLiveStake` provides a composition-neutral full rebuild from the
 union of account credentials and live UTxO stake credentials. It retains
