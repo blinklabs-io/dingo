@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
+	hostplugin "github.com/blinklabs-io/dingo/plugin"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 )
 
@@ -278,6 +279,11 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	apiListeners := serving &&
 		(effectiveMode == RunModeDev || c.RunMode.IsDevMode() ||
 			c.StorageMode == storageModeAPI)
+	if apiListeners {
+		if err := ValidateAPIExposure(c, effectiveMode); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	midnightServer := apiListeners && c.Midnight.ServerEnabled
 	utxorpcPort := APIPluginPort(c.Plugins.API.Utxorpc)
 	blockfrostPort := APIPluginPort(c.Plugins.API.Blockfrost)
@@ -300,21 +306,21 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		{"barkPort", c.BarkHost, c.BarkPort, serving, false},
 		{
 			"plugins.api.utxorpc.config.port",
-			c.BindAddr,
+			c.APIBindAddr,
 			utxorpcPort,
 			apiListeners,
 			false,
 		},
 		{
 			"plugins.api.blockfrost.config.port",
-			c.BindAddr,
+			c.APIBindAddr,
 			blockfrostPort,
 			apiListeners,
 			false,
 		},
 		{
 			"plugins.api.mesh.config.port",
-			c.BindAddr,
+			c.APIBindAddr,
 			meshPort,
 			apiListeners,
 			false,
@@ -804,6 +810,83 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	}
 
 	return errors.Join(errs...)
+}
+
+// ValidateAPIExposure applies the API exposure policy to a fully merged
+// configuration. It is exported so the programmatic Node constructor can
+// enforce the same policy as the CLI path.
+// It prevents an enabled API from serving without authentication on a
+// non-loopback bind address. The API providers expose mutating endpoints, so
+// an operator must explicitly configure authentication before making them
+// reachable beyond the local host.
+func ValidateAPIExposure(c *Config, effectiveMode RunMode) error {
+	apiListeners := effectiveMode.RequiresListeners() &&
+		(effectiveMode == RunModeDev || c.RunMode.IsDevMode() ||
+			c.StorageMode == storageModeAPI)
+	if !apiListeners {
+		return nil
+	}
+	return errors.Join(validateAPIExposure(c)...)
+}
+
+func validateAPIExposure(c *Config) []error {
+	bindAddr := c.APIBindAddr
+	if bindAddr == "" {
+		bindAddr = DefaultAPIBindAddr
+	}
+	if isLoopbackAddr(bindAddr) {
+		return nil
+	}
+	providers := []struct {
+		name      string
+		selection hostplugin.Selection
+	}{
+		{"blockfrost", c.Plugins.API.Blockfrost},
+		{"mesh", c.Plugins.API.Mesh},
+		{"utxorpc", c.Plugins.API.Utxorpc},
+	}
+	var errs []error
+	for _, provider := range providers {
+		if APIPluginPort(provider.selection) == 0 {
+			continue
+		}
+		merged, err := apiconfig.MergeProviderConfig(
+			provider.selection.Config,
+			apiconfig.TLSPolicy{},
+			c.API.TLS,
+			c.API.Auth,
+		)
+		if err != nil {
+			errs = append(errs, fmt.Errorf(
+				"plugins.api.%s.config: validate security policy: %w",
+				provider.name, err,
+			))
+			continue
+		}
+		authPolicy, err := apiconfig.DecodeAuthPolicy(merged)
+		if err != nil {
+			errs = append(errs, fmt.Errorf(
+				"plugins.api.%s.config.auth: %w", provider.name, err,
+			))
+			continue
+		}
+		auth, err := authPolicy.Resolve(
+			"plugins.api." + provider.name + ".config.auth",
+		)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if !auth.Enabled {
+			errs = append(errs, fmt.Errorf(
+				"plugins.api.%s.config binds to non-loopback address %q "+
+					"without authentication: configure api.auth or a provider "+
+					"auth policy",
+				provider.name, bindAddr,
+			))
+		}
+	}
+	return errs
 }
 
 // validateAPIMode rejects a mode value that is neither unset (inherit/

@@ -1396,7 +1396,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			utxorpc.ProviderDependencies{
 				Logger: n.config.logger, EventBus: n.eventBus,
 				LedgerState: n.ledgerState, Mempool: n.mempool,
-				Host:               n.config.bindAddr,
+				Host:               n.config.apiBindAddr,
 				CORSAllowedOrigins: n.config.corsAllowedOrigins,
 			},
 		)
@@ -1537,7 +1537,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			n.ctx, n.pluginHost, plugin.CapabilityAPIBlockfrost,
 			blockfrostSelection.Provider, blockfrostSelection.Config,
 			blockfrost.ProviderDependencies{
-				Node: adapter, Logger: n.config.logger, Host: n.config.bindAddr,
+				Node: adapter, Logger: n.config.logger, Host: n.config.apiBindAddr,
 				CORSAllowedOrigins: n.config.corsAllowedOrigins,
 			},
 		)
@@ -1580,7 +1580,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 				Database:            mesh.NewMeshDatabase(n.db),
 				Chain:               n.ledgerState.Chain(),
 				Mempool:             n.mempool,
-				Host:                n.config.bindAddr,
+				Host:                n.config.apiBindAddr,
 				Network:             n.config.network,
 				NetworkMagic:        n.config.networkMagic,
 				GenesisHash:         genesisHash,
@@ -1826,12 +1826,16 @@ func (n *Node) handleConnManagerClosed(
 	if n.chainsyncState != nil {
 		n.chainsyncState.RemoveClient(connId)
 	}
-	// Wake any NtC chainsync server callback parked waiting for this
-	// connection's certified endorser closure. connmanager drives this
-	// callback from its own per-connection goroutine, so it runs even while
-	// that server callback still owns gouroboros's receive loop.
 	if o := n.ouroboros(); o != nil {
+		// Wake any NtC chainsync server callback parked waiting for this
+		// connection's certified endorser closure. connmanager drives this
+		// callback from its own per-connection goroutine, so it runs even
+		// while that server callback still owns gouroboros's receive loop.
 		o.ReleaseLeiosServeWaiters(connId)
+		// Clear any LocalStateQuery pinned point this connection acquired:
+		// a client that disconnects without a clean Release must not leak
+		// its map entry (blinklabs-io/dingo#382).
+		o.ReleaseLocalStateQueryAcquiredPoint(connId)
 	}
 }
 

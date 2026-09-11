@@ -232,6 +232,83 @@ func TestHandleConnManagerClosed_NtC_ReleasesLeiosServeWaiters(t *testing.T) {
 	)
 }
 
+// TestHandleConnManagerClosed_NtC_ReleasesLocalStateQueryAcquiredPoint covers
+// the NtC-close half of blinklabs-io/dingo#382's point-pinning: a client
+// that pins a point and then disconnects without a clean Release must not
+// leak its map entry, since NtC closes never reach
+// Ouroboros.HandleConnClosedEvent (the EventBus's ConnectionClosedEventType
+// is intentionally NtN-only) and localstatequeryServerRelease is therefore
+// never invoked for it. Without ReleaseLocalStateQueryAcquiredPoint wired
+// into handleConnManagerClosed, this assertion fails: the entry
+// SetLocalStateQueryAcquiredPointForTesting seeded is still present after
+// the simulated close.
+func TestHandleConnManagerClosed_NtC_ReleasesLocalStateQueryAcquiredPoint(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	n := newHandleConnManagerClosedTestNode(t)
+	bus := event.NewEventBus(nil, logger)
+	t.Cleanup(bus.Stop)
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) })
+	chainManager, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
+		Database:     db,
+		ChainManager: chainManager,
+		Logger:       logger,
+	})
+	require.NoError(t, err)
+	harnessMempool, err := mempool.NewMempool(mempool.MempoolConfig{
+		Logger:          logger,
+		PromRegistry:    prometheus.NewRegistry(),
+		Validator:       ledgerState,
+		MempoolCapacity: 1024 * 1024,
+	})
+	require.NoError(t, err)
+	connManager := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{Logger: logger},
+	)
+	o, err := ouroborosPkg.NewOuroboros(ouroborosPkg.OuroborosConfig{
+		Logger:         logger,
+		EventBus:       bus,
+		LedgerState:    ledgerState,
+		Mempool:        &mempool.FIFO{Mempool: harnessMempool},
+		ChainsyncState: chainsync.NewState(bus, ledgerState),
+		ConnManager:    connManager,
+		PeerGov: peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
+			Logger:      logger,
+			EventBus:    bus,
+			ConnManager: connManager,
+		}),
+	})
+	require.NoError(t, err)
+	n.ouroborosRef.Store(o)
+
+	connId := newNtCTestConnId(6)
+	o.SetLocalStateQueryAcquiredPointForTesting(connId, ledger.QueryPoint{
+		Slot: 100,
+		Hash: []byte{0xAB},
+	})
+	require.True(
+		t,
+		o.HasLocalStateQueryAcquiredPointForTesting(connId),
+		"precondition: pinned point recorded",
+	)
+
+	n.handleConnManagerClosed(connId, true, nil)
+
+	require.False(
+		t,
+		o.HasLocalStateQueryAcquiredPointForTesting(connId),
+		"NtC close must release the pinned LocalStateQuery point",
+	)
+}
+
 // TestHandleConnManagerClosed_NilOuroboros guards the same restore window as
 // TestHandleConnManagerClosed_NilChainsyncState for the added ouroboros
 // dereference: n.ouroboros() is nil before Run wires it.

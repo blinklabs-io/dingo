@@ -125,9 +125,15 @@ func (m mockTransactionInput) ToPlutusData() data.PlutusData { return nil }
 
 type mockTransactionOutput struct {
 	amount *big.Int
+	// address defaults to the zero Address, which carries neither a payment
+	// nor a staking credential. Set it to exercise the address-derived
+	// columns of the produced utxo row -- payment/staking credential,
+	// script-locked classification, and the pointer position of a pointer
+	// address.
+	address lcommon.Address
 }
 
-func (m *mockTransactionOutput) Address() lcommon.Address { return lcommon.Address{} }
+func (m *mockTransactionOutput) Address() lcommon.Address { return m.address }
 func (m *mockTransactionOutput) Amount() *big.Int         { return m.amount }
 
 func (m *mockTransactionOutput) Assets() *lcommon.MultiAsset[lcommon.MultiAssetTypeOutput] {

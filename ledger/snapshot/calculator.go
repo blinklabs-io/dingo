@@ -134,14 +134,21 @@ func boundaryRewardSlot(slot, boundarySlot uint64) uint64 {
 // rollover hook calls this at the SNAP point, before any new-epoch block is
 // applied, so the live rows are already the exact slot state and avoid a
 // genesis-to-slot certificate and UTxO reconstruction.
+//
+// boundarySlot is the mark snapshot's boundary (slot+1); pass 0 for a call
+// that is not reconstructing an epoch boundary. It is threaded to the pointer
+// stake overlay's era gate exactly as calculateHistoricalBoundaryStakeDistributionInTxn's
+// is -- see pointerStakeCounted -- so this path and the historical fallback
+// agree at the era cutover, not only away from it.
 func (c *Calculator) calculateStakeDistributionInTxn(
 	ctx context.Context,
 	txn *database.Txn,
 	slot uint64,
+	boundarySlot uint64,
 	expiryEpoch uint64,
 ) (*StakeDistribution, error) {
 	dist, err := c.calculateLiveStakeDistributionInTxn(
-		ctx, txn, slot, expiryEpoch,
+		ctx, txn, slot, boundarySlot, expiryEpoch,
 	)
 	if err != nil {
 		return nil, err
@@ -182,7 +189,7 @@ func (c *Calculator) calculateBoundaryStakeDistributionInTxn(
 	hasTip := tip.BlockNumber > 0 || len(tip.Point.Hash) > 0
 	if hasTip && tip.Point.Slot <= slot {
 		return c.calculateStakeDistributionInTxn(
-			ctx, txn, slot, expiryEpoch,
+			ctx, txn, slot, boundarySlot, expiryEpoch,
 		)
 	}
 	return c.calculateHistoricalBoundaryStakeDistributionInTxn(
@@ -237,6 +244,7 @@ func (c *Calculator) calculateLiveStakeDistributionInTxn(
 	ctx context.Context,
 	txn *database.Txn,
 	slot uint64,
+	boundarySlot uint64,
 	expiryEpoch uint64,
 ) (*StakeDistribution, error) {
 	dist := &StakeDistribution{
@@ -263,6 +271,26 @@ func (c *Calculator) calculateLiveStakeDistributionInTxn(
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get live stake inputs: %w", err)
+	}
+	// reward_live_stake never carries pointer-derived UTxO stake (see
+	// database/plugin/metadata/sqlstore/pointer_stake.go): a registration or
+	// de-registration anywhere can change which credential an existing
+	// pointer output belongs to, which an incrementally maintained aggregate
+	// keyed on (credential_tag, staking_key) cannot express without reacting
+	// to every certificate event out of band. Add it back from the same
+	// slot-evaluated resolution the historical fallback uses, so this path
+	// and calculateHistoricalBoundaryStakeDistributionInTxn agree for the
+	// same (slot, boundarySlot) -- including at the era cutover, since both
+	// now resolve pointerStakeCounted from the same two arguments.
+	pointerInputs, err := meta.GetPointerStakeInputsForPools(
+		poolKeyHashBytes, slot, boundarySlot, expiryEpoch, metaTxn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get pointer stake inputs: %w", err)
+	}
+	rawInputs, err = mergePointerStakeInputs(rawInputs, pointerInputs)
+	if err != nil {
+		return nil, err
 	}
 	inputs, err := rewardStakeInputsFromRows(rawInputs)
 	if err != nil {
@@ -579,6 +607,93 @@ func (c *Calculator) getBatchPoolsHistoricalStake(
 type rewardStakeAggregation struct {
 	inputs []StakeInput
 	values map[lcommon.PoolKeyHash]uint64
+}
+
+// mergePointerStakeInputs adds pointer-derived stake onto the live rows
+// GetLiveStakeInputsForPools returned, one credential at a time.
+//
+// This has to be additive rather than a second row headed for
+// dedupeStakeInputs: dedupeStakeInputs keeps the greatest of two rows sharing a
+// credential, on the theory that duplicates are the same value reaching it
+// twice (the reward_live_stake seeding bug its own doc describes). A pointer
+// overlay row is not a duplicate of the live row -- it is the portion of the
+// same credential's stake the live aggregate cannot see -- so picking the
+// greater of the two would silently discard whichever happened to be smaller.
+//
+// A credential a pointer resolves to is, by construction, registered and
+// currently delegated to the pool GetPointerStakeInputsForPools reports (it
+// requires an active_delegation match at the same slot GetLiveStakeInputsForPools
+// was evaluated at), so it is expected to already have a live row from the
+// account/reward_live_stake side; the pointer amount is added to it. The
+// fallback branch that appends a new row instead of erroring exists only for
+// an inconsistent database (a live row missing for a credential the
+// certificate history says is delegated) -- it keeps the pointer stake from
+// being silently dropped rather than papering over the inconsistency.
+func mergePointerStakeInputs(
+	rawInputs []*models.RewardStakeInput,
+	pointerInputs []*models.RewardStakeInput,
+) ([]*models.RewardStakeInput, error) {
+	if len(pointerInputs) == 0 {
+		return rawInputs, nil
+	}
+	key := func(tag uint8, stakingKey []byte) string {
+		return string([]byte{tag}) + string(stakingKey)
+	}
+	index := make(map[string]*models.RewardStakeInput, len(rawInputs))
+	for _, in := range rawInputs {
+		if in == nil {
+			continue
+		}
+		k := key(in.CredentialTag, in.StakingKey)
+		if existing, ok := index[k]; ok &&
+			!outranksForDedupe(in, existing) {
+			continue
+		}
+		index[k] = in
+	}
+	merged := append([]*models.RewardStakeInput(nil), rawInputs...)
+	for _, p := range pointerInputs {
+		if p == nil {
+			continue
+		}
+		k := key(p.CredentialTag, p.StakingKey)
+		if existing, ok := index[k]; ok {
+			if uint64(existing.Stake) > ^uint64(0)-uint64(p.Stake) {
+				return nil, fmt.Errorf(
+					"pointer stake overlay overflow for credential %d:%x",
+					p.CredentialTag,
+					p.StakingKey,
+				)
+			}
+			existing.Stake += p.Stake
+			continue
+		}
+		clone := *p
+		index[k] = &clone
+		merged = append(merged, &clone)
+	}
+	return merged, nil
+}
+
+// outranksForDedupe reports whether a would be kept over b by
+// dedupeStakeInputs, for two rows that already share a credential: pool first,
+// then stake, then registration state.
+//
+// A legacy database can carry duplicate reward_live_stake rows for one
+// credential -- the shape dedupeStakeInputs exists for. The pointer overlay has
+// to be added to the duplicate that survives that deduplication, or the
+// aggregate keeps a different row and the pointer stake is silently dropped.
+// Adding stake cannot change which row wins: pool is compared before stake, and
+// where the pools are equal the overlay only raises the stake of the row that
+// was already winning.
+func outranksForDedupe(a, b *models.RewardStakeInput) bool {
+	if c := bytes.Compare(a.PoolKeyHash, b.PoolKeyHash); c != 0 {
+		return c > 0
+	}
+	if a.Stake != b.Stake {
+		return a.Stake > b.Stake
+	}
+	return a.Registered && !b.Registered
 }
 
 // rewardStakeInputsFromRows converts and canonically deduplicates reward rows
