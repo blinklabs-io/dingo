@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strconv"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -512,11 +513,15 @@ func (d *DingoDB) GetProtocolParams(
 	return out, nil
 }
 
-// syntheticV2CostModelClearedEpochSyncKey mirrors
-// database.SyntheticV2CostModelClearedEpochSyncKey (dingo #3825), duplicated
-// for the same reason mithrilLedgerSlotSyncKey above is: DingoDB reads a
-// separate raw SQL connection with no dependency on the database package.
-const syntheticV2CostModelClearedEpochSyncKey = "synthetic_v2_cost_model_cleared_epoch"
+// syntheticV2CostModelClearedEpochSyncKey is the sync-state key DingoDB reads
+// over its own raw SQL connection (dingo #3825). Unlike mithrilLedgerSlotSyncKey
+// above it is bound to the owning package's constant rather than re-typed as a
+// literal: this package already depends on database (DatabaseSource reads the
+// same marker through database.SyntheticV2CostModelClearedEpoch), so a
+// duplicated literal buys no decoupling and would let the two
+// RewardParitySource implementations read different keys if the owning
+// constant ever changed.
+const syntheticV2CostModelClearedEpochSyncKey = database.SyntheticV2CostModelClearedEpochSyncKey
 
 // GetPoolEpochDataMap returns per-pool reward data assembled for Koios
 // reporting epoch K, keyed by pool-key-hash hex. Dingo's reward_pool_input/
