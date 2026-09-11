@@ -119,7 +119,6 @@ func TestConfigLogClassesAreUnambiguous(t *testing.T) {
 // sentinelSecrets are the distinctive values planted in the configuration
 // below. None of them may appear in a rendered log line.
 var sentinelSecrets = []string{
-	"SENTINEL-API-AUTH-TOKEN",
 	"SENTINEL-KOIOS-API-KEY",
 	"SENTINEL-BARK-PASSWORD",
 	"SENTINEL-BARK-HOST-PASSWORD",
@@ -131,21 +130,18 @@ var sentinelSecrets = []string{
 	"SENTINEL-DSN-PASSWORD",
 	"SENTINEL-DSN-KEYWORD-PASSWORD",
 	"SENTINEL-UNKNOWN-PROVIDER-KEY",
-	"SENTINEL-BLOCKFROST-TOKEN",
 	"SENTINEL-NESTED-PROVIDER-SECRET",
 	"SENTINEL-MEMPOOL-LIST-SECRET",
 	// An AWS access key ID is half of a credential pair, and
 	// "accessKeyId" is exactly the spelling a left-anchored
 	// access[-_]?key pattern cannot reach past the "Id" suffix.
 	"AKIAEXAMPLE",
-	"SENTINEL-NESTED-AUTH-SECRET",
 	"SENTINEL-SCALAR-AUTH-SECTION",
 }
 
 // sentinelSecretConfig plants a sentinel in every secret-bearing field and
 // provider-map key, alongside non-secret values that must survive.
 func sentinelSecretConfig() *Config {
-	authToken := "SENTINEL-API-AUTH-TOKEN"
 	certPath := "/etc/dingo/api.crt"
 	return &Config{
 		Network:      "preview",
@@ -153,8 +149,7 @@ func sentinelSecretConfig() *Config {
 		StorageMode:  "api",
 		Logging:      LoggingConfig{Format: "json", Level: "debug"},
 		API: APIConfig{
-			TLS:  apiconfig.TLSPolicy{CertFilePath: &certPath},
-			Auth: apiconfig.AuthPolicy{Token: &authToken},
+			TLS: apiconfig.TLSPolicy{CertFilePath: &certPath},
 		},
 		KoiosParity: KoiosParityConfig{
 			Enabled: true,
@@ -220,13 +215,6 @@ func sentinelSecretConfig() *Config {
 					Provider: "blockfrost",
 					Config: map[string]any{
 						"port": 3000,
-						"auth": map[string]any{
-							"mode": "token",
-							"token": map[string]any{
-								"host":  "SENTINEL-NESTED-AUTH-SECRET",
-								"value": "SENTINEL-BLOCKFROST-TOKEN",
-							},
-						},
 						"futureSection": map[string]any{
 							"deeper": map[string]any{
 								"anything": "SENTINEL-NESTED-" +
@@ -915,44 +903,6 @@ func TestProviderConfigSecretSubtreeIsRedactedWhole(t *testing.T) {
 	}
 }
 
-// TestProviderConfigNestedSectionsAreWalked is the counterweight to
-// redacting a secret subtree whole: the API providers nest their tls and
-// auth policies, so those sections have to stay renderable containers or
-// the whole policy disappears from a startup log.
-func TestProviderConfigNestedSectionsAreWalked(t *testing.T) {
-	t.Parallel()
-
-	value := providerConfigValue(reflect.ValueOf(map[string]any{
-		"auth": map[string]any{
-			"mode":          "token",
-			"tokenFilePath": "/etc/dingo/token",
-			"token":         "nested-auth-token",
-		},
-		"tls": map[string]any{
-			"mode":         "manual",
-			"certFilePath": "/etc/dingo/api.crt",
-		},
-	}))
-	rendered := value.String()
-	if strings.Contains(rendered, "nested-auth-token") {
-		t.Errorf("provider config leaks nested auth token: %s", rendered)
-	}
-	for _, want := range []string{
-		"token",
-		"/etc/dingo/token",
-		"manual",
-		"/etc/dingo/api.crt",
-	} {
-		if !strings.Contains(rendered, want) {
-			t.Errorf(
-				"provider config dropped nested policy %q: %s",
-				want,
-				rendered,
-			)
-		}
-	}
-}
-
 // TestProviderConfigKeyClassesAreUnambiguous catches a provider key listed
 // under two classes, where the effective class would depend on map
 // iteration order.
@@ -978,10 +928,10 @@ func TestProviderConfigKeyClassesAreUnambiguous(t *testing.T) {
 }
 
 // TestProviderConfigSectionKeyRequiresASection is the value-shape
-// counterpart to classifying "auth" and "tls" as containers. Those keys
-// name a nested section, so a section is walked and classified key by key
+// counterpart to classifying "tls" as a container. That key
+// names a nested section, so a section is walked and classified key by key
 // while a value of any other shape at the same key is not a policy this
-// walk can classify at all and is redacted whole. Classifying them
+// walk can classify at all and is redacted whole. Classifying it
 // renderable instead rendered a scalar there as plain text.
 func TestProviderConfigSectionKeyRequiresASection(t *testing.T) {
 	t.Parallel()
@@ -1027,16 +977,26 @@ func TestProviderConfigSectionKeyRequiresASection(t *testing.T) {
 }
 
 // TestProviderConfigSectionKeyNilValue pins that an explicitly empty
-// section renders as itself. A nil discloses nothing, and "auth: " with
+// section renders as itself. A nil discloses nothing, and "tls: " with
 // nothing under it is what an operator needs to see about their file.
 func TestProviderConfigSectionKeyNilValue(t *testing.T) {
 	t.Parallel()
 
 	rendered := providerConfigValue(reflect.ValueOf(
-		map[string]any{"auth": nil},
+		map[string]any{"tls": nil},
 	)).String()
 	if !strings.Contains(rendered, "<nil>") {
 		t.Errorf("nil section is not rendered as nil: %s", rendered)
+	}
+}
+
+func TestProviderConfigTLSSectionIsWalked(t *testing.T) {
+	t.Parallel()
+	rendered := providerConfigValue(reflect.ValueOf(map[string]any{"tls": map[string]any{
+		"mode": "manual", "certFilePath": "/etc/dingo/api.crt", "token": "secret",
+	}})).String()
+	if !strings.Contains(rendered, "manual") || !strings.Contains(rendered, "/etc/dingo/api.crt") || strings.Contains(rendered, "secret") {
+		t.Errorf("tls section rendered incorrectly: %s", rendered)
 	}
 }
 

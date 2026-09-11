@@ -117,17 +117,17 @@ func TestNewConfigMempoolCapacityDefaultsFromRunMode(t *testing.T) {
 	}
 }
 
-func TestNewConfigAPIBindAddressDefaultsToLoopback(t *testing.T) {
+func TestNewConfigPublicBindAddressDefaultsToWildcard(t *testing.T) {
 	cfg := NewConfig(
 		WithRunMode(string(internalconfig.RunModeDev)),
-		WithBindAddr("0.0.0.0"),
 	)
 
 	assert.Equal(t, "0.0.0.0", cfg.BindAddr())
-	assert.Equal(t, internalconfig.DefaultAPIBindAddr, cfg.APIBindAddr())
+	assert.Equal(t, cfg.BindAddr(), cfg.bindAddr)
 
-	cfg = NewConfig(WithAPIBindAddr("192.0.2.10"))
-	assert.Equal(t, "192.0.2.10", cfg.APIBindAddr())
+	cfg = NewConfig(WithBindAddr("192.0.2.10"))
+	assert.Equal(t, "192.0.2.10", cfg.BindAddr())
+	assert.Equal(t, "192.0.2.10", cfg.bindAddr)
 }
 
 func TestNewConfigPreservesExplicitMempoolCapacity(t *testing.T) {
@@ -268,7 +268,6 @@ func TestWithMidnightConfig(t *testing.T) {
 		Enabled:                     true,
 		ServerEnabled:               true,
 		ReflectionEnabled:           true,
-		AllowInsecureRemote:         true,
 		Port:                        50052,
 		Host:                        "127.0.0.1",
 		CNightPolicyID:              "policy1",
@@ -321,7 +320,6 @@ func TestSyncCompatFieldsMidnightAllFieldsMirrored(t *testing.T) {
 		Enabled:                     true,
 		ServerEnabled:               true,
 		ReflectionEnabled:           true,
-		AllowInsecureRemote:         true,
 		Port:                        50099,
 		Host:                        "127.0.0.1",
 		CNightPolicyID:              "policy1",

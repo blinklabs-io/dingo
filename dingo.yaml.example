@@ -70,16 +70,14 @@ plugins:
       provider: "builtin"
       config:
         port: 3000
-        # Per-provider overrides of the shared api.tls/api.auth defaults
-        # below (uncomment to use). Any field left unset here inherits the
-        # corresponding api.tls/api.auth field; mode: disabled explicitly
-        # turns off an inherited policy for this provider only.
+        # Per-provider override of the shared api.tls default below
+        # (uncomment to use). Any field left unset here inherits the
+        # corresponding api.tls field; mode: disabled explicitly keeps this
+        # provider plaintext.
         # tls:
         #   mode: server
         #   certFilePath: "/run/secrets/blockfrost.crt"
         #   keyFilePath: "/run/secrets/blockfrost.key"
-        # auth:
-        #   mode: disabled
     mesh:
       provider: "builtin"
       config:
@@ -89,12 +87,12 @@ plugins:
       config:
         port: 9090
 
-# Shared TLS and authentication defaults for every selected plugins.api.*
-# provider (Blockfrost, Mesh, UTxO RPC). Each field resolves independently:
-# plugins.api.<name>.config.tls/config.auth overrides any field for that
-# provider only (see the commented example above). The default everywhere
-# is "disabled", so leaving this section out changes nothing for an
-# existing deployment.
+# Shared optional TLS default for every selected plugins.api.* provider
+# (Blockfrost, Mesh, UTxO RPC). Each field resolves independently:
+# plugins.api.<name>.config.tls overrides a field for that provider only
+# (see the commented example above). Leaving this section out keeps the API
+# listeners plaintext. API listeners use the root bindAddr, whose default is
+# 0.0.0.0. CORS remains operator-chosen through corsAllowedOrigins.
 #
 # api:
 #   tls:
@@ -102,18 +100,6 @@ plugins:
 #     mode: server
 #     certFilePath: "/run/secrets/api.crt"
 #     keyFilePath: "/run/secrets/api.key"
-#   auth:
-#     # "disabled" (default) or "token". Callers present the shared secret
-#     # as "Authorization: Bearer <token>" (HTTP and Connect/gRPC); the
-#     # built-in Blockfrost API also accepts it via its own "project_id"
-#     # header, matching real Blockfrost clients. token and tokenFilePath
-#     # are mutually exclusive; tokenFilePath is preferred (also settable
-#     # via DINGO_API_AUTH_TOKEN_FILE_PATH -- token has no environment
-#     # variable of its own, to avoid encouraging secrets into a
-#     # container's env dump).
-#     mode: token
-#     tokenFilePath: "/run/secrets/api-token"
-
 # Path to the UNIX domain socket file used by the server
 # CLI: --socket-path
 socketPath: "dingo.socket"
@@ -141,7 +127,8 @@ logging:
 # TLS on upgrade. To secure Blockfrost and/or Mesh (or to override UTxO
 # RPC's own certificate independently of this shared one), use the top-level
 # api.tls section or each provider's own plugins.api.<name>.config.tls --
-# see the "api:" section above and README.md's "API TLS and Authentication".
+# see the "api:" section above and README.md's "API TLS". TLS is optional;
+# a complete certificate/key pair is required only when TLS is enabled.
 #
 # Can be overridden with the TLS_CERT_FILE_PATH environment variable
 tlsCertFilePath: ""
@@ -633,13 +620,13 @@ genesisBootstrap:
 # Indexing requires BOTH enabled: true AND API storage mode; either alone is
 # not enough. The gRPC server is a separate, explicit opt-in and also requires
 # API storage mode. It can serve persisted Midnight rows without running the
-# indexer. Plaintext is loopback-only unless allowInsecureRemote is set; use
-# tlsCertFilePath/tlsKeyFilePath for a protected remote listener.
+# indexer. Plaintext and TLS are supported; use tlsCertFilePath/tlsKeyFilePath
+# when TLS transport is desired.
 # CLI: --midnight-enabled, --midnight-server-enabled,
-#   --midnight-reflection-enabled, --midnight-allow-insecure-remote,
+#   --midnight-reflection-enabled,
 #   --midnight-port, --midnight-host
 # Env: DINGO_MIDNIGHT_ENABLED, DINGO_MIDNIGHT_SERVER_ENABLED,
-#   DINGO_MIDNIGHT_REFLECTION_ENABLED, DINGO_MIDNIGHT_ALLOW_INSECURE_REMOTE,
+#   DINGO_MIDNIGHT_REFLECTION_ENABLED,
 #   DINGO_MIDNIGHT_PORT, DINGO_MIDNIGHT_HOST
 # Midnight chain addresses and policy-ID/asset-name constants are YAML only.
 midnight:
@@ -649,12 +636,9 @@ midnight:
   serverEnabled: false
   # Expose gRPC service discovery. Requires serverEnabled. Default: false.
   reflectionEnabled: false
-  # Allow plaintext on a wildcard, hostname, or concrete non-loopback bind.
-  # Use only when transport security is supplied outside Dingo. Default: false.
-  allowInsecureRemote: false
   # gRPC listen port. Must be non-zero when serverEnabled is true.
   port: 50051
-  # gRPC listen address. Plaintext defaults to loopback-only.
+  # gRPC listen address. Plaintext is supported.
   host: "127.0.0.1"
   # Midnight network constants. Known network defaults are applied when
   # available; set these explicitly for custom networks or overrides.
