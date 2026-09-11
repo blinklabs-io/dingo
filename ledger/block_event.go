@@ -261,7 +261,23 @@ func (ls *LedgerState) validateAndEmitRollbackUndoEmitted(
 	if err := ls.chain.ValidateRollback(point); err != nil {
 		return false, err
 	}
-	blocks := ls.blocksAboveSlot(point.Slot)
+	// The primary chain can be ahead of the applied ledger during catch-up.
+	// No ledger state will be rolled back in that case, so do not persist an
+	// intent that a crash could later misinterpret as an interrupted rollback.
+	durableTip, err := ls.db.GetTip(nil)
+	if err != nil {
+		return false, fmt.Errorf("read durable ledger tip: %w", err)
+	}
+	if point.Slot > durableTip.Point.Slot {
+		return false, nil
+	}
+	blocks, err := ls.readBlocksAboveSlot(point.Slot)
+	if err != nil {
+		return false, fmt.Errorf("read rollback undo blocks: %w", err)
+	}
+	if err := persistRollbackIntent(ls.db, point, blocks); err != nil {
+		return false, err
+	}
 	ls.emitRollbackTransactionEvents(blocks)
 	return len(blocks) > 0, nil
 }
