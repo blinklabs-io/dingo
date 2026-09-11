@@ -325,13 +325,17 @@ func ValidateTxBabbage(
 				datum = tmp.Datum
 			}
 			sc := script.NewScriptContextV1V2(txInfoV1, purpose)
+			costModel, err := requiredCostModel(tmpPparams.CostModels, 0, "PlutusV1")
+			if err != nil {
+				return err
+			}
 			evalContext, err := cek.NewEvalContext(
 				lang.LanguageVersionV1,
 				cek.ProtoVersion{
 					Major: tmpPparams.ProtocolMajor,
 					Minor: tmpPparams.ProtocolMinor,
 				},
-				tmpPparams.CostModels[0],
+				costModel,
 			)
 			if err != nil {
 				return fmt.Errorf("build evaluation context: %w", err)
@@ -398,13 +402,17 @@ func ValidateTxBabbage(
 				datum = tmp.Datum
 			}
 			sc := script.NewScriptContextV1V2(txInfoV2, purpose)
+			costModel, err := requiredCostModel(tmpPparams.CostModels, 1, "PlutusV2")
+			if err != nil {
+				return err
+			}
 			evalContext, err := cek.NewEvalContext(
 				lang.LanguageVersionV2,
 				cek.ProtoVersion{
 					Major: tmpPparams.ProtocolMajor,
 					Minor: tmpPparams.ProtocolMinor,
 				},
-				tmpPparams.CostModels[1],
+				costModel,
 			)
 			if err != nil {
 				return fmt.Errorf("build evaluation context: %w", err)
@@ -564,13 +572,17 @@ func EvaluateTxBabbage(
 				datum = tmp.Datum
 			}
 			sc := script.NewScriptContextV1V2(txInfoV1, purpose)
+			costModel, err := requiredCostModel(tmpPparams.CostModels, 0, "PlutusV1")
+			if err != nil {
+				return 0, lcommon.ExUnits{}, nil, err
+			}
 			evalContext, err := cek.NewEvalContext(
 				lang.LanguageVersionV1,
 				cek.ProtoVersion{
 					Major: tmpPparams.ProtocolMajor,
 					Minor: tmpPparams.ProtocolMinor,
 				},
-				tmpPparams.CostModels[0],
+				costModel,
 			)
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
@@ -619,13 +631,17 @@ func EvaluateTxBabbage(
 				datum = tmp.Datum
 			}
 			sc := script.NewScriptContextV1V2(txInfoV2, purpose)
+			costModel, err := requiredCostModel(tmpPparams.CostModels, 1, "PlutusV2")
+			if err != nil {
+				return 0, lcommon.ExUnits{}, nil, err
+			}
 			evalContext, err := cek.NewEvalContext(
 				lang.LanguageVersionV2,
 				cek.ProtoVersion{
 					Major: tmpPparams.ProtocolMajor,
 					Minor: tmpPparams.ProtocolMinor,
 				},
-				tmpPparams.CostModels[1],
+				costModel,
 			)
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)

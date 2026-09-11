@@ -576,6 +576,39 @@ func TestContinuationAuditRearmDoesNotRaceWithBlockfetchAudit(t *testing.T) {
 	wg.Wait()
 }
 
+// TestContinuationAuditProducerKeepsLowestSlot pins which slot a repeated
+// producer is recorded at. The slot answers "which rollback takes this
+// producer off the chain", so a transaction delivered by blocks at two slots
+// leaves the chain only when the lower one is truncated. Repeats are ordinary
+// once endorser-block transactions are producers: the same transaction can
+// appear in more than one endorser block, and the same closure can be
+// certified from more than one ranking block in a window. Keeping the later
+// slot would drop a producer a rearm did not truncate, which is the false
+// report this window records slots to prevent.
+func TestContinuationAuditProducerKeepsLowestSlot(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	ls.armContinuationAudit(fixture.ancestorTip.Point, "first rollback")
+	window := ls.continuationAudit.Load()
+	require.NotNil(t, window)
+
+	producerTxId := testHashBytes("repeated-producer-tx")
+	_, ok := window.recordProducers([][]byte{producerTxId}, 30)
+	require.True(t, ok)
+	_, ok = window.recordProducers([][]byte{producerTxId}, 50)
+	require.True(t, ok)
+
+	assert.Equal(t, uint64(30), window.producedTxs[string(producerTxId)])
+	assert.Contains(
+		t,
+		window.producersAtOrBelow(40),
+		string(producerTxId),
+		"a rearm above the earliest delivering block must keep the producer",
+	)
+}
+
 // TestContinuationAuditBudgetIsBounded verifies the audit stops on its own so a
 // long-lived node never pays for it outside a fork-churn window.
 func TestContinuationAuditBudgetIsBounded(t *testing.T) {

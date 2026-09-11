@@ -2589,9 +2589,12 @@ that declaration before applying the transaction delta. A transaction marked
 valid must execute every Plutus script successfully; a transaction marked
 invalid must produce a local script-execution failure. Either mismatch rejects
 the block transaction before its regular-input or collateral effects can commit.
-Historical blocks already at least `k` deep retain the explicit replay-only
-phase-2 skip; their declared outcomes are trusted only inside that immutable
-replay window.
+Phase 2 now always evaluates independently of block depth, whenever per-tx
+validation runs at all (issue #3528). A historical block already at least
+`k` deep no longer gets a replay-only phase-2 skip that trusts its declared
+outcome: that shortcut fired on ordinary `ValidateHistorical=false`
+catch-up, not only a trusted-chain-dump import, so it was removed rather
+than narrowed to the trusted-import case its name implied.
 
 Era transitions run the target era's `HardForkFunc` to translate protocol parameters before persisting the new pparams. At an epoch boundary, the rollover enacts pending protocol-parameter updates in the source era first and applies the successor transitions afterward. This is required because an update submitted in the source era can contain a field removed by the successor era (for example, Alonzo's decentralization field in the Babbage update shape). The boundary block body's era is authoritative for ordinary advancement: a source-era block can advertise the next protocol major in its header without activating that successor. Header elevation is used only after the body itself advances, where it can validate the exceptional two-consecutive-era boundary path. Transitions can also rewrite ratified-but-not-yet-enacted governance action payloads into the target era's CBOR shape; the Conway to Dijkstra path translates parameter-change proposals so the Dijkstra enactment update function receives `DijkstraProtocolParameterUpdate` rather than a stale Conway update.
 
@@ -2806,7 +2809,7 @@ selector uses the same transaction-wide declared-budget helper, so it cannot
 construct a candidate that inbound envelope validation would reject on that
 block-wide budget.
 
-During accepted block replay, Alonzo-and-newer validation runs the UTXO/Phase 1 rule set and keeps declared ExUnit limit checks. Plutus Phase 2 execution is skipped only for blocks at or before the immutable tip (`tipBlockNo - securityParam`), where the block producer's `isValid` flag is treated as authoritative until the local Plutus VM is consensus-equivalent. Volatile block replay, local transaction validation for mempool submission, and forging continue to run Plutus execution.
+During accepted block replay, Alonzo-and-newer validation runs the UTXO/Phase 1 rule set and keeps declared ExUnit limit checks. Plutus Phase 2 execution now always runs whenever per-tx validation runs at all (issue #3528), including for blocks at or before the immutable tip: the previous shortcut that trusted the block producer's `isValid` flag as authoritative for those blocks fired more broadly than intended -- on ordinary `ValidateHistorical=false` catch-up, not only a trusted-chain-dump import -- and was removed rather than narrowed. Volatile block replay, local transaction validation for mempool submission, and forging continue to run Plutus execution as before.
 
 Restrictive Phase 2 validation runs the CEK machine against the protocol's
 per-transaction `MaxTxExUnits` limit and compares the complete measured cost
@@ -3030,7 +3033,10 @@ dependency across two points in the pipeline:
   array that does not match real opcerts), and `ledger.ValidateKesPeriod`
   (against `maxKESEvolutions` from Shelley genesis) checks expiry. Running
   here rejects forged or expired opcerts before the block body is fetched.
-  These checks share the existing skip-during-historical-sync gating.
+  These checks now run unconditionally except for the same single
+  exemption header verification uses elsewhere in this document: a slot
+  an imported Mithril snapshot already covers (issue #3528). A coarse
+  historical-sync toggle no longer skips them.
 - **Counter monotonicity at block apply** (`validateOpCertCounter`, invoked
   from `ledgerProcessBlock` under `shouldValidate`, before the block's
   transactions are validated): a read-before-write of the pool's stored opcert
@@ -3815,12 +3821,12 @@ it. Dingo implements this as a **corroboration gate**
   ingress-eligible peer — not only the currently apply-eligible one, since a
   competing candidate's headers never reach the ledger's own chainsync
   header-queue verification (that only runs for headers actually applied).
-  Verification is skipped under the same fast-sync/Mithril-import exemptions
-  the ledger's own header-queue path already applies, and a result showing
-  local state has not caught up to the header's slot
-  (`IsHeaderVerificationDeferred`) still leaves the header eligible — both
-  preserve legitimate catch-up behavior. Only a definite failure excludes the
-  header from observation and publishes
+  Verification is skipped only for a slot an imported Mithril snapshot
+  already covers, the same exemption the ledger's own header-queue path
+  applies (issue #3528); a result showing local state has not caught up to
+  the header's slot (`IsHeaderVerificationDeferred`) still leaves the header
+  eligible — both preserve legitimate catch-up behavior. Only a definite
+  failure excludes the header from observation and publishes
   `ledger.ConnectionRecycleRequestedEventType`
   (`"header_verification_failure"`, translated to a connmanager recycle by
   node composition, the same as the ledger's own header-queue failures).
@@ -4494,14 +4500,49 @@ and applied ledger at the same point — chainsync rollback via
 `continuationAuditWindow` there. A chainsync rollback point ahead of the applied
 ledger instead disarms any prior window because its fork point no longer
 describes the continuation being fetched. While armed, every body
-delivered by blockfetch above that point is checked input by input: an input
-resolves when its producing transaction was created by a block already seen in
-the window (fetched and on the chain, not yet applied), when the ledger still
-holds the UTxO, or when transaction metadata records the producer. Anything
-left over logs `continuation block spends an input with no producer on the
-local applied chain` with the delivering peer, the block, the offending input,
-and the fork point the node had rolled back to, and increments
-`dingo_ledger_continuation_input_unresolved_total`. The audit never rejects a
+delivered by blockfetch above that point is checked input by input, against
+four resolution paths: an input resolves when its producing transaction was
+created by a block already seen in the window (fetched and on the chain, not
+yet applied), when the ledger still holds the UTxO, when transaction metadata
+records the producer, or — on a Leios chain — when it was created by the
+certified endorser block whose transactions the audited ranking block carries.
+That fourth path exists because a cert-driven ranking block has an empty body:
+its transactions arrive separately over leios-fetch and are applied later, so
+"the block was fetched" no longer implies "its transactions are in hand". The
+audit resolves the reference the way the apply path does — the block's own
+announcement on the CIP path, the parent's on the cert-driven path — and reads
+the transactions through the configured `EndorserBlockProvider`, which is
+normally an in-memory cache hit but falls back to a blob-store read for an
+occurrence whose in-memory entry has expired.
+
+Resolving an endorser block is therefore scheduled rather than eager. It is
+deferred until an input fails the other three paths, memoized per
+`(endorser block hash, slot)` so a closure certified by many ranking blocks in
+one window costs one resolution, and bounded by
+`continuationAuditMaxEndorserBlocksPerBlock` per audited body; the budget is
+owned by the body rather than by a single drain, so several unresolvable inputs
+in one body share one allowance and report one stop between them. References
+past the budget stay queued for a later body.
+
+Outcomes are counted on `dingo_ledger_continuation_audit_outcomes_total`,
+labelled by `result`. An input that resolves counts `clean`. An input with no
+producer counts `missing_producer`, logs `continuation block spends an input
+with no producer on the local applied chain` with the delivering peer, the
+block, the offending input, and the fork point the node had rolled back to, and
+increments `dingo_ledger_continuation_input_unresolved_total` as before. But
+when a certified endorser block has not been fetched yet the window's producer
+set is knowingly incomplete, and an unresolved input then counts
+`inconclusive_eb_pending` and is recorded at `Debug` *instead of* taking the
+`missing_producer` path — no `ERROR`, and no increment of
+`continuation_input_unresolved_total`. Reporting ledger corruption from a set
+the audit knows is short would be a guaranteed false positive on a healthy
+node, so an endorser-block backlog reads as "not covering this node" rather
+than as a fault. Two further results are per-window and per-reference rather
+than per-input: `skipped_budget` once per body whose endorser-block budget was
+exhausted, and `ref_unresolvable` for a reference abandoned because resolving
+it failed for a reason retrying cannot fix. `disarmed_cap` is covered below.
+
+The audit never rejects a
 block; the splice it detects is prevented upstream in the chain layer, and
 bodies that still fail reach the ordinary validation and recovery guards
 unchanged. Arming only after an aligned rollback is both the cost gate — a
@@ -4518,10 +4559,15 @@ spend of their outputs as a false missing-producer splice (issue #4102).
 Producers recorded above the new rollback point are dropped: that rollback
 deleted their blocks, so a body spending them is the splice the audit exists to
 report, and the blocks that do belong above the point are re-delivered and
-re-recorded. Recovery rewinds truncate the primary chain outside this path and
-therefore discard the window outright. Each arming inspects at most
+re-recorded. An endorser block's transactions are recorded against the slot of
+the ranking block that carries the reference, since that is the block whose
+truncation takes them off the chain, and a producer offered at two slots keeps
+the lower one. Recovery rewinds truncate the primary chain outside this path
+and therefore discard the window outright. Each arming inspects at most
 `continuationAuditBlockBudget` bodies and retains at most
-`continuationAuditMaxProducedTxs` in-window producers. The audit is also skipped
+`continuationAuditMaxProducedTxs` in-window producers; reaching that producer
+cap disarms the window, logs at `Warn` and counts `disarmed_cap`, so "the audit
+stopped covering this node" does not read the same as "this node is clean". The audit is also skipped
 while block validation is off, which is how historical catch-up runs: the splice
 it diagnoses is a live tip-band failure, and bulk sync fetches far too many
 bodies per second to pay for the probes.
@@ -5022,9 +5068,9 @@ Steps 3, 6, and 7 each call into a pluggable interface (`LeaderChecker`, `BlockV
 
 When Dijkstra/Leios is active, `DefaultBlockBuilder` emits the Musashi prototype's 12-field Dijkstra header body for every forged Dijkstra ranking block: the standard Praos/Babbage fields plus `leios_certified` and `leios_announcement`. A locally forged endorser block is announced in the same-slot ranking block's `leios_announcement` as `[eb_hash, eb_size]`; `eb_size` is rejected before header construction if it exceeds the CDDL `uint .size 4` bound. If the pipeline has a certified, non-equivocated EB inside its inclusion window whose hash matches the parent ranking block's `LeiosAnnouncement`, the forger also populates the prototype `DijkstraLeiosCertificate` body field and sets `leios_certified=true`. Prototype-2026w29 permits that CertRB to carry the new same-slot announcement as well as the certificate for its parent's EB. Before constructing the new EB, the forger reads the certified EB's manifest and filters those transaction hashes from its mempool view, matching the prototype's post-certificate rebase without mutating the live mempool before block adoption; if the certified closure is unavailable, it safely forges the certificate-only RB. The certified EB is marked embedded only after the CertRB is adopted locally.
 
-#### Optional Self-Validation (`DINGO_VALIDATE_FORGED_BLOCK`)
+#### Self-Validation (`DINGO_VALIDATE_FORGED_BLOCK`)
 
-The node always validates the aggregate reference-script budget between steps 5 and 7, before adoption or diffusion. When `validateForgedBlock` is enabled, `LedgerState.ValidateForgedBlock` additionally runs VRF/KES header verification, the body-hash non-zero guard, and per-transaction ledger rules with an intra-block UTxO overlay. A failing block is logged, counted in `dingo_forge_validation_failed_total`, and dropped. Validation duration is recorded in `dingo_forge_validation_duration_seconds`. Full self-validation is disabled by default; the aggregate budget check is mandatory in node wiring and retains the explicit Musashi prototype bypass.
+The node always validates the aggregate reference-script budget between steps 5 and 7, before adoption or diffusion, via `newForgedBlockValidator`'s mandatory `ValidateBlockReferenceScripts` call. Unless `validateForgedBlock` is explicitly disabled in config (issue #3528: enabled by default, fail closed), that same call additionally runs full self-validation: (a) VRF proof and KES signature verification of the block header, (b) body-hash non-zero guard, and (c) per-transaction ledger rule validation against the current UTxO state with an intra-block overlay so outputs created by earlier transactions in the same block are visible to later ones. A failing block is logged, counted in `dingo_forge_validation_failed_total`, and dropped without being adopted or diffused. Validation wall-clock time is recorded in the `dingo_forge_validation_duration_seconds` histogram. An operator may set `validateForgedBlock: false` to skip the full self-validation and accept that risk in exchange for lower forge-to-diffusion latency; the aggregate reference-script budget check still runs regardless, and retains the explicit Musashi prototype bypass.
 
 ### Pool Credentials (`ledger/forging/keys.go`, `keystore/`)
 
@@ -6107,8 +6153,16 @@ when `Stop` returns, and the address is rebindable afterwards.
 
 ### Blockfrost API (`api/blockfrost/`)
 
-TLS is configured through `plugins.api.blockfrost.config.tls`; see "API
-security" above.
+Blockfrost submission and both evaluation endpoints bound request body reads
+by their existing byte limits and a 15-second read deadline. The deadline is
+cleared after a successful read, before transaction processing; stalled or
+truncated bodies retain the existing HTTP 400 response. The HTTP listener also
+sets a 60-second read timeout as a backstop, independently of its header,
+write, and idle timeouts.
+
+TLS and token authentication (including the `project_id` header alias) are
+configured through `plugins.api.blockfrost.config.tls`/`config.auth`; see
+"API security" above.
 
 A Blockfrost-compatible REST API that provides read access to chain data,
 transaction evaluation, and transaction submission. Transaction evaluation is
@@ -6539,6 +6593,26 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   "this era does not define it", so one-sided absence is a disagreement about
   the shape of the ledger state, which is what an era-gating bug looks like.
 
+  One cost-model divergence is exempt from that rule. Between the Babbage
+  transition and the first real PlutusV2 update, Dingo carries
+  `HardForkBabbage`'s fabricated PlutusV2 cost model (`synthetic_v2_cost_model`,
+  dingo #3825) while Koios correctly reports no PlutusV2 model at all — both
+  sides agree no real model exists yet and disagree only about reporting a
+  placeholder, so failing those epochs was a false divergence (dingo #4127).
+  `GetProtocolParams` (both `RewardParitySource` implementations) resolves
+  `DingoProtocolParams.SyntheticV2CostModel` from the durable
+  `synthetic_v2_cost_model_cleared_epoch` marker, mirroring
+  `ledger.queryShelleyCurrentProtocolParams`'s historical-epoch resolution:
+  the marker is authoritative for epochs at or after the epoch it records,
+  and an absent marker falls back to comparing the stored model against
+  `eras.DefaultPlutusV2CostModel`. `compareCostModels` then reports
+  `cost_model_synthetic` (informational) instead of `value_mismatch` for
+  exactly that shape. The exemption is narrow by construction: it applies
+  only to PlutusV2 and only to a Koios-side absence, so a one-sided PlutusV1
+  or PlutusV3 model in the same epoch, a length or entry difference on a
+  model both sides price, and any PlutusV2 divergence once the flag is false
+  all stay `value_mismatch`/FAIL.
+
   **Epoch alignment.** Koios reports everything for a reporting epoch K, but
   Dingo's `epoch_summary`/`reward_pool_input`/`reward_pool_output` rows do not
   all use K for the same ledger period, so `checkEpoch` (`check.go`) never
@@ -6844,9 +6918,12 @@ reward_type) row within one side — a data-integrity problem, not a value
 disagreement), `acct_zero_reward_row` (informational: a reward row worth zero
 lovelace present on one side only — nothing was credited either way, so the
 two sides agree about every lovelace and the one-sided row is a
-representational difference, not a divergence), and `acct_coverage_incomplete`
+representational difference, not a divergence), `acct_coverage_incomplete`
 (the per-account Koios fetch for this epoch never completed across every chunk
-— see "Per-account exact parity (#3097)" below). Results are stored in
+— see "Per-account exact parity (#3097)" below), and `cost_model_synthetic`
+(informational: Dingo prices PlutusV2 only because `HardForkBabbage`
+fabricated the model before the chain enacted a real one — see "Protocol
+parameter resolution" above). Results are stored in
 `check_mismatches` and summarised in `check_epoch_status`.
 
 Epochs 0-1 predate a valid Shelley "go" stake snapshot (mark→set→go takes 3
@@ -7092,6 +7169,25 @@ second sync:
   permanent Dingo subsystem — SQLite (or whichever metadata backend the node
   itself runs) remains the only backend involved, since `DatabaseSource`
   reads the live node's own store rather than opening a second connection.
+  - **Reward-state retention (dingo #4188).** `Run()` and
+    `reinitializeBackgroundManagers` both call
+    `n.snapshotMgr.SetRewardAccountOutputRetentionUnbounded(
+    n.config.koiosParity.Enabled)` immediately after configuring the
+    snapshot manager's other options, before `CaptureGenesisSnapshot`/`Start`.
+    This is necessary because the observer only validates a closed epoch
+    after fetching and comparing against Koios over the network — work that
+    can fall arbitrarily far behind chain progression during a from-genesis
+    or catch-up sync — while `ledger/snapshot.cleanupOldSnapshots` otherwise
+    prunes `reward_account_output` to a fixed 4-epoch window on every epoch
+    transition (see DATABASE.md, Snapshot and Reward-State Retention).
+    Without this, an epoch's reward rows are routinely gone by the time the
+    observer's backlog reaches that epoch, and every koios-parity account
+    check for it fails permanently with a row that genuinely no longer
+    exists rather than one Koios and Dingo actually disagree on. The setter
+    mirrors API storage mode's pre-existing unbounded retention (#1875) and
+    is not consensus-affecting (it only widens local historical retention),
+    so unlike `SetDelegatorInactivity` it carries no `configurationLocked`
+    gate.
   - **Live database Restore/Truncate.** `node_lifecycle.go`'s
     `quiesceForLiveLifecycleOp` stops the `Observer` (blocking until its
     background goroutine has exited, same as `shutdown()`) and unsubscribes
@@ -10338,10 +10434,23 @@ turning an unavailable nonce into a rejected chain.
 The pipeline's bounded `errorsChan` is continuously drained by
 `drainBlockPipelineErrors` for the lifetime of `LedgerState`; otherwise the
 workers would deadlock after enough deferred nonce-state errors. The drain
-classifies `errBlockPipelineEta0Unavailable` and
-`errHeaderVerificationDeferred` at debug level and reports other stage errors
-at error level. Enforcement happens from each `BlockItem`, where the decoded
-era and slot are available; the bare errors channel is observability only.
+classifies `errBlockPipelineEta0Unavailable`, `errHeaderVerificationDeferred`,
+`pipeline.ErrPendingLimitExceeded`, and a stage worker's own
+`context.Canceled`/`context.DeadlineExceeded` at debug level, each under its
+own counter, and reports other stage errors at error level.
+`pipeline.ErrPendingLimitExceeded` is apply-stage backpressure rather than a
+block failure: when one stage worker falls behind its siblings, the sequence
+number the apply stage is waiting for stalls and later items pile into its
+out-of-order buffer. Past `MaxPendingBlocks` the item is still buffered and
+still applied in sequence, so a burst of these reports scheduling lag, not a
+block that failed or was dropped. `context.Canceled`/`context.DeadlineExceeded`
+report a stage worker's own cancellation rather than an item outcome:
+`BlockPipeline.Stop` cancels the pipeline context before it drains the
+stages, so a worker mid-item at shutdown can lose the race between sending
+its error and observing its own `ctx.Done()`; any shutdown with blocks still
+in flight can produce a handful of these. Enforcement happens from each
+`BlockItem`, where the decoded era and slot are available; the bare errors
+channel is observability only.
 
 A genuine VRF/KES/OpCert rejection after persistence is returned as a
 `headerValidationError` carrying the rejected block point.
