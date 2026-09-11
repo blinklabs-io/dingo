@@ -142,13 +142,13 @@ func TestBlockReferenceScriptLimitAdmission(t *testing.T) {
 					}
 					currentParams.ProtocolVersion.Major = dijkstra.MinProtocolVersionDijkstra
 					return db.Transaction(true).Do(func(txn *database.Txn) error {
-						_, err := ls.ledgerProcessBlock(txn, ocommon.NewPoint(1, block.Hash().Bytes()), block, true, false, false, nil, envelopeParent{origin: true}, nil, eras.DijkstraEraDesc, currentParams, pp, 0)
+						_, err := ls.ledgerProcessBlock(txn, ocommon.NewPoint(1, block.Hash().Bytes()), block, true, false, false, nil, envelopeParent{origin: true}, nil, eras.DijkstraEraDesc, currentParams, pp, 0, false)
 						return err
 					})
 				},
 				"imported": func() error {
 					return db.Transaction(true).Do(func(txn *database.Txn) error {
-						_, err := ls.ledgerProcessBlock(txn, ocommon.NewPoint(1, block.Hash().Bytes()), block, true, false, false, nil, envelopeParent{origin: true}, nil, era, pp, nil, 0)
+						_, err := ls.ledgerProcessBlock(txn, ocommon.NewPoint(1, block.Hash().Bytes()), block, true, false, false, nil, envelopeParent{origin: true}, nil, era, pp, nil, 0, false)
 						return err
 					})
 				},
