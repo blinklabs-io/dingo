@@ -87,6 +87,48 @@ func TestRequireAddrs(t *testing.T) {
 	})
 }
 
+// TestRequireAtPoint covers --at-slot/--at-hash's validation: neither flag
+// set means live-tip-agreement mode (nil, nil); both must be set together,
+// since a historical point (blinklabs-io/dingo#382) is ambiguous by slot
+// alone (see Tip.point); and --at-hash must be valid hex.
+func TestRequireAtPoint(t *testing.T) {
+	t.Run("neither set means live mode", func(t *testing.T) {
+		withGlobalFlags(t, "", "/tmp/dingo.socket", "/tmp/cardano.socket")
+		at, err := requireAtPoint()
+		require.NoError(t, err)
+		assert.Nil(t, at)
+	})
+	t.Run("both set resolves a Tip", func(t *testing.T) {
+		withGlobalFlags(t, "", "/tmp/dingo.socket", "/tmp/cardano.socket")
+		globalFlags.atSlot = 12345
+		globalFlags.atHash = "aabbcc"
+		at, err := requireAtPoint()
+		require.NoError(t, err)
+		require.NotNil(t, at)
+		assert.Equal(t, uint64(12345), at.Slot)
+		assert.Equal(t, "aabbcc", at.Hash)
+	})
+	t.Run("slot without hash is rejected", func(t *testing.T) {
+		withGlobalFlags(t, "", "/tmp/dingo.socket", "/tmp/cardano.socket")
+		globalFlags.atSlot = 12345
+		_, err := requireAtPoint()
+		require.Error(t, err)
+	})
+	t.Run("hash without slot is rejected", func(t *testing.T) {
+		withGlobalFlags(t, "", "/tmp/dingo.socket", "/tmp/cardano.socket")
+		globalFlags.atHash = "aabbcc"
+		_, err := requireAtPoint()
+		require.Error(t, err)
+	})
+	t.Run("invalid hex hash is rejected", func(t *testing.T) {
+		withGlobalFlags(t, "", "/tmp/dingo.socket", "/tmp/cardano.socket")
+		globalFlags.atSlot = 12345
+		globalFlags.atHash = "not-hex"
+		_, err := requireAtPoint()
+		require.Error(t, err)
+	})
+}
+
 // TestNetworkMagic covers networkMagic's resolution of a network name to
 // its real Ouroboros network magic: both supported networks must resolve
 // to a real (non-zero) magic, the two magics must actually differ from

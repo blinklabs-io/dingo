@@ -20,6 +20,7 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -74,19 +75,19 @@ func TestHandleCheckResult_Skipped(t *testing.T) {
 
 	handleCheckResult(&nodeparity.CheckResult{
 		Skipped:    true,
-		SkipReason: nodeparity.SkipTipAdvanced,
-		SkipDetail: "tip advanced during the query round trip",
+		SkipReason: nodeparity.SkipTipMismatch,
+		SkipDetail: "tips did not match: dingo at slot 1, cardano-node at slot 2",
 	}, nil, logger, metrics)
 
 	assert.Contains(t, buf.String(), "check skipped")
-	assert.Contains(t, buf.String(), "tip advanced during the query round trip")
+	assert.Contains(t, buf.String(), "tips did not match")
 	assert.Equal(t, float64(0), promtestutil.ToFloat64(metrics.checksTotal))
 	assert.Equal(
 		t,
 		float64(1),
 		promtestutil.ToFloat64(
 			metrics.checksSkippedTotal.WithLabelValues(
-				nodeparity.SkipTipAdvanced,
+				nodeparity.SkipTipMismatch,
 			),
 		),
 	)
@@ -116,7 +117,7 @@ func TestHandleCheckResult_Matched(t *testing.T) {
 		float64(0),
 		promtestutil.ToFloat64(
 			metrics.checksSkippedTotal.WithLabelValues(
-				nodeparity.SkipTipAdvanced,
+				nodeparity.SkipTipMismatch,
 			),
 		),
 	)
@@ -306,4 +307,243 @@ func TestRunWatchCycle_BoundedByTimeoutAgainstStalledPeer(t *testing.T) {
 	assert.Equal(
 		t, float64(1), promtestutil.ToFloat64(metrics.checkErrorsTotal),
 	)
+}
+
+// TestWatchCommand_CheckTimeoutMustBePositive covers --check-timeout's own
+// validation, the same way --fallback-interval's is validated: a zero or
+// negative value would make every full-mode cycle self-cancel instantly.
+func TestWatchCommand_CheckTimeoutMustBePositive(t *testing.T) {
+	withGlobalFlags(t, "preview", "127.0.0.1:1", "127.0.0.1:1")
+
+	cmd := watchCommand()
+	cmd.SetContext(context.Background())
+	require.NoError(t, cmd.Flags().Set("check-timeout", "0s"))
+
+	err := watchRun(cmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--check-timeout must be positive")
+}
+
+// TestWatchRunFull_ChecksAreBoundedByCheckTimeoutNotFallbackInterval is a
+// regression test for blinklabs-io/dingo#1900's audit finding: full mode's
+// default --fallback-interval (2m) used to double as runWatchCycle's own
+// per-cycle deadline, so a genuinely slow (not stuck) full comparison --
+// measured at 7-9+ minutes against a Preview-scale node -- self-cancelled
+// long before it could complete, making full mode fail by default out of
+// the box. --check-timeout must now bound the cycle instead, independent of
+// the much shorter --fallback-interval: a cycle against a peer that never
+// responds must survive past --fallback-interval without being recorded as
+// a check error, and only fail once --check-timeout itself elapses.
+func TestWatchRunFull_ChecksAreBoundedByCheckTimeoutNotFallbackInterval(
+	t *testing.T,
+) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		// Accept and hold the connection open without ever writing to it, so
+		// the handshake never completes on its own.
+		t.Cleanup(func() { _ = conn.Close() })
+	}()
+
+	withGlobalFlags(t, "preview", listener.Addr().String(), "127.0.0.1:1")
+	metrics, _ := newTestParityMetrics(t)
+	logger, _ := testLogger()
+
+	const fallbackInterval = 100 * time.Millisecond
+	const checkTimeout = 1500 * time.Millisecond
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		_ = watchRunFull(
+			ctx,
+			42,
+			fallbackInterval,
+			checkTimeout,
+			logger,
+			metrics,
+		)
+		close(done)
+	}()
+
+	// Comfortably past fallbackInterval but well before checkTimeout: if the
+	// cycle were (incorrectly) bounded by fallbackInterval, this would
+	// already observe a recorded check error.
+	time.Sleep(fallbackInterval + 400*time.Millisecond)
+	assert.Equal(
+		t,
+		float64(0),
+		promtestutil.ToFloat64(metrics.checkErrorsTotal),
+		"a stalled cycle must not be cut off at --fallback-interval; it must run until --check-timeout",
+	)
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("watchRunFull did not stop after its context was cancelled")
+	}
+}
+
+// TestHandleIncrementalSessionError_RecordsCheckError covers the wiring for
+// blinklabs-io/dingo#1900's incremental-mode audit finding: a per-block
+// query failure ending an incrementalSession must be recorded via the same
+// checkErrorsTotal counter any other Check failure uses, so the existing
+// NodeParityCheckErrors alert rule can actually see this failure class.
+func TestHandleIncrementalSessionError_RecordsCheckError(t *testing.T) {
+	metrics, _ := newTestParityMetrics(t)
+
+	handleIncrementalSessionError(errors.New("dingo query: boom"), metrics)
+
+	assert.Equal(
+		t, float64(1), promtestutil.ToFloat64(metrics.checkErrorsTotal),
+	)
+}
+
+// TestWatchCommand_ModeMustBeFullOrIncremental covers --mode's validation:
+// only "full" and "incremental" are accepted, matching --network's own
+// closed-set style (main_test.go's TestRequireNetwork) rather than passing
+// an arbitrary string through to dispatch logic that would otherwise fail
+// less clearly deeper in the call stack.
+func TestWatchCommand_ModeMustBeFullOrIncremental(t *testing.T) {
+	withGlobalFlags(t, "preview", "127.0.0.1:1", "127.0.0.1:1")
+
+	cmd := watchCommand()
+	cmd.SetContext(context.Background())
+	require.NoError(t, cmd.Flags().Set("mode", "bogus"))
+
+	err := watchRun(cmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--mode must be 'full' or 'incremental'")
+}
+
+// TestWatchCommand_IncrementalRequiresCursorFile covers --mode=incremental's
+// own required flag: unlike full mode (whose --fallback-interval has a sane
+// default), incremental mode cannot run at all without somewhere to persist
+// its cursor, so this must be validated before anything dials either node.
+func TestWatchCommand_IncrementalRequiresCursorFile(t *testing.T) {
+	withGlobalFlags(t, "preview", "127.0.0.1:1", "127.0.0.1:1")
+
+	cmd := watchCommand()
+	cmd.SetContext(context.Background())
+	require.NoError(t, cmd.Flags().Set("mode", "incremental"))
+
+	err := watchRun(cmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--cursor-file is required")
+}
+
+// TestWatchCommand_IncrementalRequiresPositiveFullCheckInterval covers
+// --full-check-interval's validation: a zero value would mean incremental
+// mode never advances past forcing a full checkpoint every single block,
+// defeating the point of the mode, so it is rejected the same way
+// --fallback-interval's zero is rejected for full mode.
+func TestWatchCommand_IncrementalRequiresPositiveFullCheckInterval(
+	t *testing.T,
+) {
+	withGlobalFlags(t, "preview", "127.0.0.1:1", "127.0.0.1:1")
+
+	cmd := watchCommand()
+	cmd.SetContext(context.Background())
+	require.NoError(t, cmd.Flags().Set("mode", "incremental"))
+	require.NoError(t, cmd.Flags().Set(
+		"cursor-file", filepath.Join(t.TempDir(), "cursor.json"),
+	))
+	require.NoError(t, cmd.Flags().Set("full-check-interval", "0"))
+
+	err := watchRun(cmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--full-check-interval must be positive")
+}
+
+// TestHandleIncrementalBlockCheck_Matched and
+// TestHandleIncrementalBlockCheck_Diverged cover the incremental per-block
+// outcome handler the same way TestHandleCheckResult_Matched/_Diverged
+// cover full mode's: logged at the right level, and recorded via
+// incrementalBlocksTotal/incrementalMismatchTotal rather than full mode's
+// checksTotal.
+func TestHandleIncrementalBlockCheck_Matched(t *testing.T) {
+	metrics, _ := newTestParityMetrics(t)
+	logger, buf := testLogger()
+
+	handleIncrementalBlockCheck(
+		nodeparity.Tip{Slot: 111, BlockNumber: 22},
+		nodeparity.Diff{},
+		logger, metrics,
+	)
+
+	assert.Contains(t, buf.String(), "incremental block matched")
+	assert.Equal(
+		t, float64(1), promtestutil.ToFloat64(metrics.incrementalBlocksTotal),
+	)
+	assert.Equal(
+		t, float64(0), promtestutil.ToFloat64(metrics.incrementalMismatchTotal),
+	)
+}
+
+func TestHandleIncrementalBlockCheck_Diverged(t *testing.T) {
+	metrics, _ := newTestParityMetrics(t)
+	logger, buf := testLogger()
+
+	handleIncrementalBlockCheck(
+		nodeparity.Tip{Slot: 111, BlockNumber: 22},
+		nodeparity.Diff{
+			UTxO: []string{
+				"utxo abc#0 should be spent but is still present in dingo: x",
+			},
+		},
+		logger,
+		metrics,
+	)
+
+	assert.Contains(t, buf.String(), "incremental block diverged")
+	assert.Contains(t, buf.String(), "should be spent")
+	assert.Equal(
+		t, float64(1), promtestutil.ToFloat64(metrics.incrementalBlocksTotal),
+	)
+	assert.Equal(
+		t, float64(1), promtestutil.ToFloat64(metrics.incrementalMismatchTotal),
+	)
+	assert.Equal(
+		t,
+		float64(1),
+		promtestutil.ToFloat64(metrics.divergenceTotal.WithLabelValues("utxo")),
+		"an incremental mismatch must also count toward the shared divergenceTotal series",
+	)
+}
+
+// TestHandleIncrementalFullCheck_RecordsReason covers the reason label
+// incremental mode's own full checkpoints are recorded under, distinct from
+// full mode's per-block-triggered checks (which never call this function at
+// all).
+func TestHandleIncrementalFullCheck_RecordsReason(t *testing.T) {
+	metrics, _ := newTestParityMetrics(t)
+	logger, _ := testLogger()
+
+	handleIncrementalFullCheck(
+		nodeparity.FullCheckEpochTransition,
+		&nodeparity.CheckResult{Tip: nodeparity.Tip{Slot: 1}},
+		nil, logger, metrics,
+	)
+
+	assert.Equal(
+		t, float64(1),
+		promtestutil.ToFloat64(
+			metrics.fullCheckTriggersTotal.WithLabelValues("epoch_transition"),
+		),
+	)
+	assert.Equal(
+		t, float64(0),
+		promtestutil.ToFloat64(
+			metrics.fullCheckTriggersTotal.WithLabelValues("rollback"),
+		),
+		"only the reason actually passed must be incremented",
+	)
+	assert.Equal(t, float64(1), promtestutil.ToFloat64(metrics.checksTotal))
 }

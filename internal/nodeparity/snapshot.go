@@ -20,13 +20,18 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"sort"
 	"strings"
+	"time"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	utxorpccardano "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 )
 
@@ -66,43 +71,120 @@ type StakeDistributionEntry struct {
 	VrfHash       ledger.Blake2b256
 }
 
-// QuerySnapshot acquires the volatile tip on an already-dialed connection
-// and queries protocol parameters, stake distribution, and the whole UTxO
-// set as a single LocalStateQuery session, so all three reflect one
-// consistent view of that node's ledger state.
+// QuerySnapshot acquires point (or the volatile tip, if point is nil) on an
+// already-dialed connection and queries protocol parameters, stake
+// distribution, and the whole UTxO set as a single LocalStateQuery session,
+// via the standard GetUTxOWhole every Ouroboros LocalStateQuery server
+// (Dingo or a real cardano-node) answers directly.
 //
-// This intentionally does not support pinning an exact historical block via
-// Acquire(point): Dingo's LocalStateQuery server (ouroboros/localstatequery.go)
-// currently answers every Acquire against its live tip regardless of the
-// requested point (no point-specific ledger view yet; see
-// blinklabs-io/dingo#382), so Check sandwiches this call between two tip
-// reads and discards the result if the tip moved in between, rather than
-// relying on Acquire(point) to pin a block itself.
-func QuerySnapshot(conn *ouroboros.Connection) (*Snapshot, error) {
+// point pins the session to a specific historical block instead of
+// whatever's live when each individual query runs (blinklabs-io/dingo#382)
+// -- the whole-UTxO walk can take on the order of minutes against Dingo's
+// disk-backed store, long enough for a live testnet's tip to advance many
+// blocks before it finishes. A real cardano-node's Acquire(point) genuinely
+// pins its whole reply (every query on the session), but Dingo's
+// server-side Acquire (ouroboros/localstatequery.go) only recognizes the
+// pinned point for GetStakeDistribution/GetPoolDistr2, not GetUTxOWhole --
+// GetCurrentProtocolParams and GetStakeDistribution against Dingo still
+// answer at Dingo's live tip when GetUTxOWhole is the slow half of the
+// session, an accepted MVP gap: those two are single round-trip queries
+// issued immediately after Acquire, so the window for Dingo's live tip to
+// move underneath them is negligible next to the multi-minute UTxO walk.
+// The UTxO comparison itself relies on Check's own tip-sandwich
+// (sandwichOK) rather than on point-pinning for its consistency guarantee.
+func QuerySnapshot(
+	conn *ouroboros.Connection,
+	point *pcommon.Point,
+) (*Snapshot, error) {
+	snap, _, err := querySnapshot(conn, point)
+	return snap, err
+}
+
+// querySnapshot is QuerySnapshot's implementation, additionally returning
+// every UTxO ref it saw. Check uses those refs to drive
+// QueryReferenceUTxOSnapshot against the reference cardano-node instead of
+// asking it for its own whole UTxO set -- see that function's doc comment
+// for why.
+func querySnapshot(
+	conn *ouroboros.Connection,
+	point *pcommon.Point,
+) (*Snapshot, []localstatequery.UtxoId, error) {
 	lsq := conn.LocalStateQuery()
 	if lsq == nil || lsq.Client == nil {
-		return nil, errors.New("LocalStateQuery client unavailable")
+		return nil, nil, errors.New("LocalStateQuery client unavailable")
 	}
 	client := lsq.Client
-	if err := client.AcquireVolatileTip(); err != nil {
-		return nil, fmt.Errorf("acquire tip: %w", err)
+	if err := client.Acquire(point); err != nil {
+		return nil, nil, fmt.Errorf("acquire point: %w", err)
 	}
 	defer client.Release() //nolint:errcheck
 
+	ppProto, stakeDist, err := queryProtocolParamsAndStakeDistribution(client)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	entries, refs, err := queryUTxOWhole(client)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return &Snapshot{
+		ProtocolParams:    ppProto,
+		StakeDistribution: stakeDist,
+		UTxOEntries:       entries,
+	}, refs, nil
+}
+
+// queryProtocolParams runs GetCurrentProtocolParams and converts the result
+// to its utxorpc representation. Split out from
+// queryProtocolParamsAndStakeDistribution so incremental.go's per-block
+// check (queryIncrementalHalf) -- which cannot also query stake
+// distribution, since Dingo's GetStakeDistribution handler only answers
+// when the pinned point equals its live tip, never true for a per-block
+// walk that is behind tip by design (see
+// ledger/queries_stakedistribution.go's queryShelleyStakeDistribution;
+// blinklabs-io/dingo#1900 incremental-mode audit finding) -- can reuse just
+// this half without also querying stake distribution.
+func queryProtocolParams(
+	client *localstatequery.Client,
+) (*utxorpccardano.PParams, error) {
 	pp, err := client.GetCurrentProtocolParams()
 	if err != nil {
 		return nil, fmt.Errorf("protocol params query: %w", err)
 	}
 	ppProto, err := pp.Utxorpc()
 	if err != nil {
-		return nil, fmt.Errorf("converting protocol params to utxorpc: %w", err)
+		return nil, fmt.Errorf(
+			"converting protocol params to utxorpc: %w", err,
+		)
+	}
+	return ppProto, nil
+}
+
+// queryProtocolParamsAndStakeDistribution runs the two small, fast queries
+// every full Snapshot needs beyond its UTxO half -- shared by querySnapshot
+// and QueryReferenceUTxOSnapshot so both build these two fields identically.
+// Both of those pin at the live tip (directly, or via Check's tip-sandwich),
+// which is exactly the one point GetStakeDistribution answers -- see
+// queryProtocolParams's doc comment for the per-block case that cannot use
+// this.
+func queryProtocolParamsAndStakeDistribution(
+	client *localstatequery.Client,
+) (*utxorpccardano.PParams, map[lcommon.PoolId]StakeDistributionEntry, error) {
+	ppProto, err := queryProtocolParams(client)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	sd, err := client.GetStakeDistribution()
 	if err != nil {
-		return nil, fmt.Errorf("stake distribution query: %w", err)
+		return nil, nil, fmt.Errorf("stake distribution query: %w", err)
 	}
-	stakeDist := make(map[lcommon.PoolId]StakeDistributionEntry, len(sd.Results))
+	stakeDist := make(
+		map[lcommon.PoolId]StakeDistributionEntry,
+		len(sd.Results),
+	)
 	for poolID, entry := range sd.Results {
 		if entry.StakeFraction == nil {
 			continue
@@ -112,15 +194,67 @@ func QuerySnapshot(conn *ouroboros.Connection) (*Snapshot, error) {
 			VrfHash:       entry.VrfHash,
 		}
 	}
+	return ppProto, stakeDist, nil
+}
 
-	utxos, err := client.GetUTxOWhole()
-	if err != nil {
-		return nil, fmt.Errorf("whole UTxO query: %w", err)
+// utxoByTxInBatchSize bounds how many UTxO refs QueryReferenceUTxOSnapshot
+// asks for per GetUTxOByTxIn call. GetUTxOByTxIn is a real, standard
+// LocalStateQuery type every cardano-node answers directly; keeping each
+// batch bounded keeps every round trip small regardless of how large the
+// caller's whole ref list is.
+const utxoByTxInBatchSize = 5_000
+
+// QueryReferenceUTxOSnapshot builds a Snapshot for a reference node (a real
+// cardano-node) the same way querySnapshot does for protocol parameters and
+// stake distribution, but resolves the UTxO half from exactly the refs
+// named by knownRefs -- via batched GetUTxOByTxIn calls -- rather than
+// asking the node for its own whole UTxO set.
+//
+// This exists because a real cardano-node's plain GetUTxOWhole was found,
+// live against Preview, to silently close the connection partway through
+// assembling a reply at the network's current UTxO-set scale (~3.17M
+// entries): confirmed to fail consistently after roughly 11 seconds,
+// independent of any bridge/proxy in the connection path (reproduced over
+// a direct Unix-domain-socket connection to the node, no intermediary at
+// all) and independent of gouroboros's own 120s mux read timeout -- the
+// server itself is what ends the session, not a client-side timeout.
+// GetUTxOByTxIn has no such problem: it is a real, standard, bounded query
+// every cardano-node answers directly, confirmed working live at every
+// batch size tried.
+//
+// The comparison this produces is intentionally asymmetric: it can only
+// tell you whether the reference node agrees on the UTxOs the caller
+// already knows about (typically Dingo's own paginated walk, via
+// querySnapshot's second return value) -- it cannot discover a UTxO the
+// reference node has that the caller's own list never named, since there
+// is no cheap, reliable way left to ask a real cardano-node for its total
+// UTxO set at this scale. That gap is accepted: this still catches the
+// more likely and more actionable class of divergence (the caller
+// computing wrong or stale state for a UTxO it does have), without
+// requiring the one query that does not work.
+func QueryReferenceUTxOSnapshot(
+	conn *ouroboros.Connection,
+	point *pcommon.Point,
+	knownRefs []localstatequery.UtxoId,
+) (*Snapshot, error) {
+	lsq := conn.LocalStateQuery()
+	if lsq == nil || lsq.Client == nil {
+		return nil, errors.New("LocalStateQuery client unavailable")
 	}
-	entries := make(map[string]string, len(utxos.Results))
-	for id, out := range utxos.Results {
-		key := fmt.Sprintf("%s#%d", id.Hash.String(), id.Idx)
-		entries[key] = canonicalUTxOEntry(out)
+	client := lsq.Client
+	if err := client.Acquire(point); err != nil {
+		return nil, fmt.Errorf("acquire point: %w", err)
+	}
+	defer client.Release() //nolint:errcheck
+
+	ppProto, stakeDist, err := queryProtocolParamsAndStakeDistribution(client)
+	if err != nil {
+		return nil, err
+	}
+
+	entries, err := queryUTxOByRefs(client, knownRefs)
+	if err != nil {
+		return nil, err
 	}
 
 	return &Snapshot{
@@ -130,17 +264,92 @@ func QuerySnapshot(conn *ouroboros.Connection) (*Snapshot, error) {
 	}, nil
 }
 
+// queryUTxOByRefs asks for exactly the named UTxO refs, in bounded batches
+// via the real, standard GetUTxOByTxIn query -- see
+// QueryReferenceUTxOSnapshot's doc comment for why this exists instead of
+// GetUTxOWhole. A ref the server does not return (already spent, or never
+// existed on its chain) is simply absent from the result map; the caller's
+// diff already reports "present in a, missing in b" for that case, so no
+// special handling is needed here for a missing ref.
+func queryUTxOByRefs(
+	client *localstatequery.Client,
+	refs []localstatequery.UtxoId,
+) (map[string]string, error) {
+	entries := make(map[string]string, len(refs))
+	for start := 0; start < len(refs); start += utxoByTxInBatchSize {
+		end := min(start+utxoByTxInBatchSize, len(refs))
+		batch := refs[start:end]
+		txIns := make([]lcommon.TransactionInput, len(batch))
+		for i, ref := range batch {
+			txIns[i] = shelley.NewShelleyTransactionInput(
+				ref.Hash.String(), ref.Idx,
+			)
+		}
+		page, err := client.GetUTxOByTxIn(txIns)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"utxo by txin batch [%d:%d]: %w", start, end, err,
+			)
+		}
+		for id, out := range page.Results {
+			key := fmt.Sprintf("%s#%d", id.Hash.String(), id.Idx)
+			entries[key] = canonicalUTxOEntry(out)
+		}
+	}
+	return entries, nil
+}
+
+// queryUTxOWhole fetches the whole live UTxO set in one shot -- the
+// standard query any Ouroboros LocalStateQuery server (including a real
+// cardano-node) answers. Also returns every ref it saw, so a caller (Check)
+// can drive QueryReferenceUTxOSnapshot's batched GetUTxOByTxIn comparison
+// against the reference node from Dingo's own walk instead of asking the
+// reference node for its own whole set -- see QueryReferenceUTxOSnapshot's
+// doc comment for why the direct route doesn't work.
+func queryUTxOWhole(
+	client *localstatequery.Client,
+) (map[string]string, []localstatequery.UtxoId, error) {
+	start := time.Now()
+	utxos, err := client.GetUTxOWhole()
+	elapsed := time.Since(start)
+	if err != nil {
+		slog.Error(
+			"whole UTxO query failed",
+			"elapsed", elapsed,
+			"error", err,
+		)
+		return nil, nil, fmt.Errorf("whole UTxO query: %w", err)
+	}
+	slog.Info(
+		"whole UTxO query complete",
+		"elapsed", elapsed,
+		"entries", len(utxos.Results),
+	)
+	entries := make(map[string]string, len(utxos.Results))
+	refs := make([]localstatequery.UtxoId, 0, len(utxos.Results))
+	for id, out := range utxos.Results {
+		key := fmt.Sprintf("%s#%d", id.Hash.String(), id.Idx)
+		entries[key] = canonicalUTxOEntry(out)
+		refs = append(refs, id)
+	}
+	return entries, refs, nil
+}
+
 // SnapshotAtTip dials addr and calls QuerySnapshot in one step, closing the
 // connection before returning. Use this for a one-off look at a single
 // node; Check manages its own connections directly so it can interleave tip
 // reads around the query. See Dial for ctx's role.
-func SnapshotAtTip(ctx context.Context, addr string, magic uint32) (*Snapshot, error) {
+func SnapshotAtTip(
+	ctx context.Context,
+	addr string,
+	magic uint32,
+) (*Snapshot, error) {
 	conn, err := Dial(ctx, addr, magic)
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close() //nolint:errcheck
-	return QuerySnapshot(conn)
+	return QuerySnapshot(conn, nil)
 }
 
 // canonicalUTxOEntry builds a deterministic string encoding of a UTxO's

@@ -575,6 +575,20 @@ func (o *Ouroboros) ConfigureListeners(
 			l.ConnectionOpts = append(
 				l.ConnectionOpts,
 				ouroboros.WithNetworkMagic(o.config.NetworkMagic),
+				// NtC is a trusted local (or operator-bridged) channel, and
+				// LocalStateQuery has no protocol-level timeout at all
+				// (Ouroboros Network Specification section 3.13.4: "No
+				// timeouts") -- a large query, like a whole-UTxO-set walk
+				// against this node's disk-backed store, can legitimately
+				// take minutes. gouroboros' mux applies a fixed 120s
+				// segment-read timeout by default as an anti-DoS guard
+				// against an untrusted remote peer, which does not describe
+				// an NtC client; disabling it here is what stops a
+				// slow-but-legitimate reply from getting the connection
+				// killed mid-flight (blinklabs-io/dingo#4082). Real
+				// cardano-node's own mux applies no equivalent timeout on
+				// local NtC connections either.
+				ouroboros.WithMuxerSegmentReadTimeout(0),
 				ouroboros.WithChainSyncConfig(
 					ochainsync.NewConfig(
 						o.chainsyncServerConnOpts()...,
