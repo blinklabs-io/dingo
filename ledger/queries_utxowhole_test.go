@@ -16,7 +16,9 @@ package ledger
 
 import (
 	"bytes"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -185,6 +187,116 @@ func TestQueryShelleyUtxoWhole_UnrecoverableRowFailsQuery(t *testing.T) {
 
 	_, err = ls.queryShelleyUtxoWhole()
 	require.Error(t, err)
+}
+
+// TestQueryShelleyUtxoWhole_WorkerPanicDoesNotCrashProcess is the
+// regression test for a chrisguiney review finding on PR #4084: a panic
+// during a worker's resolve or decode step used to escape the worker
+// goroutine entirely and terminate the whole node process, where the
+// previous sequential implementation (running inside IterateLiveUtxos'
+// Txn.Do, whose own recover converts a panic to ErrTxnPanic) would have
+// turned it into an ordinary query error instead. Uses the
+// decodeUtxoWholeCborFunc seam to inject a real panic deterministically,
+// rather than hunting for a specific CBOR byte sequence that happens to
+// panic the real decoder.
+func TestQueryShelleyUtxoWhole_WorkerPanicDoesNotCrashProcess(t *testing.T) {
+	// Not t.Parallel: swaps the package-level decodeUtxoWholeCborFunc seam.
+	db := newTestDB(t)
+
+	addrA, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0xAA}, lcommon.AddressHashSize),
+		nil,
+	)
+	require.NoError(t, err)
+	seedBabbageUtxo(t, db, 0xA1, 0, addrA, 1_000_000)
+
+	original := decodeUtxoWholeCborFunc
+	decodeUtxoWholeCborFunc = func(
+		_ database.UtxoRef,
+		_ []byte,
+	) (ledger.TransactionOutput, error) {
+		panic("simulated decode panic")
+	}
+	t.Cleanup(func() { decodeUtxoWholeCborFunc = original })
+
+	ls := newPoolDistr2Ledger(t, db)
+
+	var queryErr error
+	require.NotPanics(t, func() {
+		_, queryErr = ls.queryShelleyUtxoWhole()
+	}, "a worker panic must not escape and crash the process")
+	require.Error(t, queryErr)
+	require.Contains(t, queryErr.Error(), "panicked")
+}
+
+// TestQueryShelleyUtxoWhole_AbortsEarlyOnFirstFailure is the regression
+// test for a chrisguiney review finding on PR #4084: once one row's
+// resolve fails, the previous implementation kept feeding every remaining
+// row to the worker pool instead of stopping -- unlike the earlier
+// sequential implementation, which aborted its whole traversal on the
+// first failure via the error it returned from IterateLiveUtxos'
+// callback. Seeds one immediately-failing (unrecoverable) row alongside
+// many artificially slow, otherwise-resolvable rows: without the early
+// abort, every slow row still gets decoded before the query returns its
+// error; with it, the feeder stops once the fast failure is detected,
+// well before the slow rows can all complete.
+func TestQueryShelleyUtxoWhole_AbortsEarlyOnFirstFailure(t *testing.T) {
+	// Not t.Parallel: swaps the package-level decodeUtxoWholeCborFunc seam.
+	db := newTestDB(t)
+
+	// Seeded first so it is likely to reach a worker before most of the
+	// slow rows below -- not load-bearing for correctness (the query fails
+	// regardless of ordering, see TestQueryShelleyUtxoWhole_
+	// UnrecoverableRowFailsQuery), only for how early the abort fires
+	// relative to the slow rows' total count.
+	unrecoverableTxId := bytes.Repeat([]byte{0xC3}, 32)
+	txn := db.Transaction(true)
+	require.NoError(t, db.CreateUtxo(txn, &models.Utxo{
+		TxId:      unrecoverableTxId,
+		OutputIdx: 0,
+		AddedSlot: 100,
+	}))
+	require.NoError(t, txn.Commit())
+
+	const slowRowCount = 100
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0xAA}, lcommon.AddressHashSize),
+		nil,
+	)
+	require.NoError(t, err)
+	for i := range slowRowCount {
+		seedBabbageUtxo(
+			t, db, byte(i), uint32(i), addr, 1_000_000, //nolint:gosec
+		)
+	}
+
+	var decodedCount atomic.Int64
+	original := decodeUtxoWholeCborFunc
+	decodeUtxoWholeCborFunc = func(
+		ref database.UtxoRef,
+		cborBytes []byte,
+	) (ledger.TransactionOutput, error) {
+		// Long enough that the unrecoverable row's near-instant failure is
+		// detected well before all slowRowCount rows can be decoded, short
+		// enough to keep the test fast.
+		time.Sleep(10 * time.Millisecond)
+		decodedCount.Add(1)
+		return decodeUtxoWholeCbor(ref, cborBytes)
+	}
+	t.Cleanup(func() { decodeUtxoWholeCborFunc = original })
+
+	ls := newPoolDistr2Ledger(t, db)
+
+	_, err = ls.queryShelleyUtxoWhole()
+	require.Error(t, err)
+	require.Less(
+		t, decodedCount.Load(), int64(slowRowCount),
+		"early abort must stop the feeder before every slow row is decoded",
+	)
 }
 
 // TestDecodeUtxoWholeCborMalformedCborSurfacesError covers a row whose

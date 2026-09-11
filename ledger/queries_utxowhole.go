@@ -96,22 +96,26 @@ const utxoWholeResolveWorkers = 16
 // see the linked issue for the full investigation and a recommended next
 // step (streaming the reply instead of fully materializing it).
 func (ls *LedgerState) queryShelleyUtxoWhole() (any, error) {
-	type liveUtxo struct {
-		id  olocalstatequery.UtxoId
-		ref database.UtxoRef
-	}
-	var live []liveUtxo
+	// A bare UtxoRef, not a ref-plus-UtxoId pair: UtxoId is trivially
+	// reconstructed from a ref (see resolveRow below), so storing it here
+	// too would retain the same 32-byte hash and index twice per entry --
+	// 80 bytes/entry instead of UtxoRef's 36, about 140MB of pure
+	// duplication at the 3.17M live UTxOs measured against a real Preview
+	// node (chrisguiney review). Holding the full live set in memory at
+	// all (rather than a bounded window) is a further, larger memory cost
+	// this doc comment already tracks as future work -- see the linked
+	// issue's "streaming the reply" note -- deliberately not attempted
+	// here: IterateLiveUtxoRefs' enumeration transaction would have to
+	// stay open for the whole resolve phase instead of the current brief
+	// enumeration pass, holding one more connection from the same scarce
+	// metadata pool this PR's worker-side blob-only-txn fix exists to
+	// stop starving (wolf31o2 review).
+	var live []database.UtxoRef
 	err := ls.db.IterateLiveUtxoRefs(nil, func(u *models.Utxo) error {
 		var ref database.UtxoRef
 		copy(ref.TxId[:], u.TxId)
 		ref.OutputIdx = u.OutputIdx
-		live = append(live, liveUtxo{
-			id: olocalstatequery.UtxoId{
-				Hash: ledger.NewBlake2b256(u.TxId),
-				Idx:  int(u.OutputIdx),
-			},
-			ref: ref,
-		})
+		live = append(live, ref)
 		return nil
 	})
 	if err != nil {
@@ -123,8 +127,68 @@ func (ls *LedgerState) queryShelleyUtxoWhole() (any, error) {
 		txOut ledger.TransactionOutput
 		err   error
 	}
-	jobs := make(chan liveUtxo)
+	// resolveRow resolves and decodes one row, recovering any panic from
+	// either step into an ordinary error result instead of letting it
+	// escape the worker goroutine below. A panic here cannot be recovered
+	// by the goroutine that spawned this worker -- Go does not propagate a
+	// panic across a wg.Go boundary the way Txn.Do's own recover contains
+	// one on the caller's own goroutine -- so without this, a single
+	// malformed row would terminate the whole node process instead of
+	// failing the query with an ordinary error the way the previous
+	// sequential implementation did (its resolve loop ran inside
+	// IterateLiveUtxos' Txn.Do, whose recover converts a panic to
+	// ErrTxnPanic). Precedent: callRewardPrecompute
+	// (ledger/reward_calculation.go) (chrisguiney review).
+	resolveRow := func(txn *database.Txn, ref database.UtxoRef) (r resolved) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				r = resolved{err: fmt.Errorf(
+					"resolve utxo cbor %x#%d panicked: %v",
+					ref.TxId[:8], ref.OutputIdx, rec,
+				)}
+			}
+		}()
+		id := olocalstatequery.UtxoId{
+			Hash: ledger.NewBlake2b256(ref.TxId[:]),
+			Idx:  int(ref.OutputIdx),
+		}
+		// WithRecovery, not the tiered cache's bare ResolveUtxoCbor: a
+		// missing blob is not necessarily gone for good -- IterateLiveUtxos'
+		// inline loadCbor reconstructs it from the producing block when
+		// possible, and this reply must not silently regress to omitting a
+		// row that path would have recovered. Even once recovery itself
+		// confirms the CBOR is unrecoverable (ErrUtxoCborUnavailable), this
+		// is still a live row GetUTxOWhole's contract can't omit -- main
+		// fails the whole query on that sentinel rather than silently
+		// returning a short set, since #1900's cross-node comparison would
+		// otherwise read a dropped row as a ledger divergence rather than a
+		// storage fault.
+		cborBytes, err := ls.db.ResolveUtxoCborWithRecovery(
+			ref.TxId[:],
+			ref.OutputIdx,
+			txn,
+		)
+		if err != nil {
+			return resolved{err: fmt.Errorf(
+				"resolve utxo cbor %x#%d: %w",
+				ref.TxId[:8], ref.OutputIdx, err,
+			)}
+		}
+		txOut, err := decodeUtxoWholeCborFunc(ref, cborBytes)
+		return resolved{id: id, txOut: txOut, err: err}
+	}
+
+	jobs := make(chan database.UtxoRef)
 	results := make(chan resolved)
+	// done is closed the moment the first resolve failure arrives on
+	// results, telling the feeder goroutine below to stop sending new
+	// jobs. Without it, a node with one unrecoverable row still paid the
+	// full resolve cost (and full peak memory) for every other row before
+	// returning the error it already had at the first one -- the previous
+	// sequential implementation aborted its whole traversal on the first
+	// failure, via the error it returned from IterateLiveUtxos' callback
+	// (chrisguiney review).
+	done := make(chan struct{})
 	workerCount := min(utxoWholeResolveWorkers, len(live))
 	var wg sync.WaitGroup
 	for range workerCount {
@@ -144,41 +208,20 @@ func (ls *LedgerState) queryShelleyUtxoWhole() (any, error) {
 			// phase's entire duration (blinklabs-io/dingo#1900 review).
 			txn := ls.db.BlobTxn(false)
 			defer txn.Release()
-			for u := range jobs {
-				// WithRecovery, not the tiered cache's bare ResolveUtxoCbor:
-				// a missing blob is not necessarily gone for good --
-				// IterateLiveUtxos' inline loadCbor reconstructs it from
-				// the producing block when possible, and this reply must
-				// not silently regress to omitting a row that path would
-				// have recovered. Even once recovery itself confirms the
-				// CBOR is unrecoverable (ErrUtxoCborUnavailable), this is
-				// still a live row GetUTxOWhole's contract can't omit --
-				// main fails the whole query on that sentinel rather than
-				// silently returning a short set, since #1900's cross-node
-				// comparison would otherwise read a dropped row as a
-				// ledger divergence rather than a storage fault.
-				cborBytes, err := ls.db.ResolveUtxoCborWithRecovery(
-					u.ref.TxId[:],
-					u.ref.OutputIdx,
-					txn,
-				)
-				if err != nil {
-					results <- resolved{err: fmt.Errorf(
-						"resolve utxo cbor %x#%d: %w",
-						u.ref.TxId[:8], u.ref.OutputIdx, err,
-					)}
-					continue
-				}
-				txOut, err := decodeUtxoWholeCbor(u.ref, cborBytes)
-				results <- resolved{id: u.id, txOut: txOut, err: err}
+			for ref := range jobs {
+				results <- resolveRow(txn, ref)
 			}
 		})
 	}
 	go func() {
-		for _, u := range live {
-			jobs <- u
+		defer close(jobs)
+		for _, ref := range live {
+			select {
+			case jobs <- ref:
+			case <-done:
+				return
+			}
 		}
-		close(jobs)
 	}()
 	go func() {
 		wg.Wait()
@@ -201,6 +244,7 @@ func (ls *LedgerState) queryShelleyUtxoWhole() (any, error) {
 		if r.err != nil {
 			if firstErr == nil {
 				firstErr = r.err
+				close(done)
 			}
 			continue
 		}
@@ -211,6 +255,16 @@ func (ls *LedgerState) queryShelleyUtxoWhole() (any, error) {
 	}
 	return []any{ret}, nil
 }
+
+// decodeUtxoWholeCborFunc is decodeUtxoWholeCbor by default. resolveRow
+// calls it through this package-level variable rather than the function
+// directly so a test can substitute a stub -- e.g. one that panics, to
+// prove resolveRow's recover actually contains a panic from this step
+// without depending on a specific CBOR byte sequence that happens to
+// panic the real decoder, which isn't itself a documented, stable
+// behavior to write a test against. Not t.Parallel-safe for a test that
+// swaps it.
+var decodeUtxoWholeCborFunc = decodeUtxoWholeCbor
 
 // decodeUtxoWholeCbor decodes one resolved UTxO's CBOR into
 // GetUTxOWhole's reply shape. Split out from queryShelleyUtxoWhole so it
