@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -616,21 +617,33 @@ func TestRunnerDoesNotSkipNonAddColumnFailure(t *testing.T) {
 // interrupted upgrade. Replaying expand also replays backfill and contract, so
 // this covers every phase of every shipped version against a database that
 // already has the version's full effect applied.
+//
+// Every subtest's first Run() call was byte-for-byte identical work -- same
+// fresh database, same full registry, same stateless NewProcessLocker -- so it
+// is built once here and shared as a byte copy instead of being replayed by
+// every subtest. That first replay is ~400 individually autocommitted
+// DDL/state writes (13 migrations, each a separate fsync'd transaction under
+// SQLite's default synchronous=FULL/journal_mode=DELETE); redoing it in every
+// one of the ~13 parallel subtests is what pushes this package toward the
+// per-package -timeout bound on a CI runner where fsync is expensive
+// (dingo#4171). The per-migration replay under test -- resetting one version
+// to PhaseExpand and calling Run() again -- still runs against each subtest's
+// own independent copy, so the coverage this test exists for is unchanged.
 func TestRunnerReplaysEveryShippedVersionFromExpand(t *testing.T) {
 	t.Parallel()
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
+	baseline := fullyMigratedBaseline(t, registry)
 	for _, migration := range registry {
 		t.Run(migration.Name, func(t *testing.T) {
 			t.Parallel()
-			db := openTestDB(t)
+			db := openTestDBFromBaseline(t, baseline)
 			runner := &Runner{
 				DB:       db,
 				Dialect:  "sqlite",
 				Registry: registry,
 				Locker:   NewProcessLocker(),
 			}
-			require.NoError(t, runner.Run(context.Background()))
 
 			_, err := db.Exec(`
 UPDATE schema_migrations
@@ -657,4 +670,47 @@ SELECT phase, dirty, completed_at FROM schema_migrations WHERE version = ?`,
 			require.True(t, completed.Valid)
 		})
 	}
+}
+
+// fullyMigratedBaseline runs the full registry once against a fresh database
+// and returns its file bytes. Run() leaves no journal file behind under the
+// default journal_mode=DELETE (the rollback journal is removed on commit), so
+// the closed file alone is a complete, valid database each subtest can copy.
+func fullyMigratedBaseline(t *testing.T, registry []Migration) []byte {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "baseline.sqlite")
+	db, err := sql.Open(
+		"sqlite",
+		"file:"+path+"?_pragma=foreign_keys(1)",
+	)
+	require.NoError(t, err)
+	runner := &Runner{
+		DB:       db,
+		Dialect:  "sqlite",
+		Registry: registry,
+		Locker:   NewProcessLocker(),
+	}
+	require.NoError(t, runner.Run(context.Background()))
+	require.NoError(t, db.Close())
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	return data
+}
+
+// openTestDBFromBaseline seeds a subtest's own database file from a byte copy
+// of an already fully-migrated database, replacing a second full 13-migration
+// replay with one file write.
+func openTestDBFromBaseline(t *testing.T, baseline []byte) *sql.DB {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "metadata.sqlite")
+	require.NoError(t, os.WriteFile(path, baseline, 0o600))
+	db, err := sql.Open(
+		"sqlite",
+		"file:"+path+"?_pragma=foreign_keys(1)",
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, db.Close())
+	})
+	return db
 }

@@ -15,6 +15,8 @@
 package ledger
 
 import (
+	"time"
+
 	"github.com/blinklabs-io/gouroboros/pipeline"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -36,6 +38,33 @@ type stateMetrics struct {
 	shelleyStartTime    prometheus.Gauge
 	epochLengthSlots    prometheus.Gauge
 	shadowGateDecisions *prometheus.CounterVec
+	// Wall-clock time the ledger apply path spent waiting for a referenced
+	// Leios endorser block, by outcome ("arrived", "timeout", "cancelled" or
+	// "unavailable"). It covers both waits the apply path can take: the
+	// diffusion window, and the CIP grace phase that waits out an in-flight
+	// by-point fetch. This wait is taken ahead of the batch's DB transaction
+	// on the single ledger pipeline, so it is time every block queued behind
+	// the batch also spends waiting.
+	// Only references ledger application actually reads are waited on (see
+	// leiosApplyReadsOwnAnnouncement); the rest are prefetched in the
+	// background and never observed here.
+	leiosEbWaitSeconds *prometheus.HistogramVec
+	// Pre-materialized observers for the outcome label values, so the apply
+	// path does not resolve a label on every wait.
+	leiosEbWaitArrived     prometheus.Observer
+	leiosEbWaitTimedOut    prometheus.Observer
+	leiosEbWaitCancelled   prometheus.Observer
+	leiosEbWaitUnavailable prometheus.Observer
+	// Waits that ran to a full bound without the endorser block arriving --
+	// the diffusion window, or the CIP grace phase's hard bound. A rising
+	// value against a flat leios_eb_wait_seconds "arrived" count means the
+	// wait is buying nothing and is pure apply latency.
+	//
+	// Two outcomes are deliberately excluded because neither is a bound
+	// expiring: "cancelled" says nothing about endorser-block availability,
+	// and "unavailable" means the fetch COMPLETED without caching, which is
+	// routine on a CIP node and would swamp the counter.
+	leiosEbWaitTimeouts prometheus.Counter
 	// Incremented when a stored governance proposal's CBOR fails to
 	// decode during the mid-epoch ratifiability check, so the failures
 	// surface as a metric instead of just log volume.
@@ -179,6 +208,63 @@ func (m *stateMetrics) observeLeaderThresholdMargin(margin float64) {
 		return
 	}
 	m.leaderThresholdMargin.Observe(margin)
+}
+
+// Outcome label values for dingo_metrics_leios_eb_wait_seconds.
+//
+//   - arrived:   the endorser block became available during the wait.
+//   - timeout:   a bound elapsed without it -- the diffusion window, or the
+//     CIP grace phase's hard bound. This is the outcome that means the wait
+//     cost apply latency and bought nothing.
+//   - unavailable: the CIP grace phase's by-point fetch COMPLETED without
+//     caching, because no peer holds the endorser block. Nothing timed out,
+//     and this is the common ending on a CIP node, so it is deliberately not
+//     folded into timeout: doing so would inflate the timeout rate and its
+//     counter on routine operation.
+//   - cancelled: the wait ended because the block-processing context was
+//     cancelled (node shutdown, or the pass being aborted and restarted).
+//     Nothing was learned about the endorser block's availability, so this is
+//     kept out of the timeout counter: folding it in would inflate the
+//     timeout rate exactly when a node is shutting down or restarting its
+//     pipeline, which is when the metric is most likely to be read.
+const (
+	leiosEbWaitOutcomeArrived   = "arrived"
+	leiosEbWaitOutcomeTimeout   = "timeout"
+	leiosEbWaitOutcomeCancelled = "cancelled"
+	// leiosEbWaitOutcomeUnavailable is the CIP grace phase's routine ending:
+	// the by-point fetch COMPLETED without caching, because no peer holds the
+	// endorser block. Nothing timed out and nothing was cancelled, so folding
+	// it into either would overstate both -- and it is the most common ending
+	// on a CIP node, so it would overstate them badly.
+	leiosEbWaitOutcomeUnavailable = "unavailable"
+)
+
+// observeLeiosEbWait records one apply-path endorser-block wait under the
+// given outcome. Recording the duration under every outcome (rather than only
+// timeouts) is what makes the metric answer the question that matters: whether
+// the wait is delivering endorser blocks or just costing apply latency before
+// proceeding without one.
+func (m *stateMetrics) observeLeiosEbWait(d time.Duration, outcome string) {
+	if m == nil {
+		return
+	}
+	var obs prometheus.Observer
+	switch outcome {
+	case leiosEbWaitOutcomeArrived:
+		obs = m.leiosEbWaitArrived
+	case leiosEbWaitOutcomeTimeout:
+		obs = m.leiosEbWaitTimedOut
+		if m.leiosEbWaitTimeouts != nil {
+			m.leiosEbWaitTimeouts.Inc()
+		}
+	case leiosEbWaitOutcomeCancelled:
+		obs = m.leiosEbWaitCancelled
+	case leiosEbWaitOutcomeUnavailable:
+		obs = m.leiosEbWaitUnavailable
+	}
+	if obs != nil {
+		obs.Observe(d.Seconds())
+	}
 }
 
 func (m *stateMetrics) incLeaderThresholdRejections() {
@@ -398,6 +484,39 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 			Help: "shadow blockfetch gate decisions, by path and cutoff source",
 		},
 		[]string{"path", "cutoff"},
+	)
+	m.leiosEbWaitSeconds = promautoFactory.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "dingo_metrics_leios_eb_wait_seconds",
+			Help: "wall-clock time the ledger apply path spent waiting for a referenced Leios endorser block, across both the diffusion window and the CIP in-flight-fetch grace phase, by outcome (arrived, timeout, cancelled, unavailable)",
+			// 5ms to ~164s. The lower end covers sub-slot arrivals; the
+			// upper end must clear the LONGEST wait this histogram now
+			// records, the CIP grace phase's leiosTipFetchHardBound
+			// (leiosBackfillMaxWait, 120s). At 15 buckets the top edge was
+			// ~82s, so every wedged-fetch wait -- the most anomalous ones,
+			// and the reason the grace phase is instrumented at all --
+			// collapsed into +Inf with no resolution.
+			Buckets: prometheus.ExponentialBuckets(0.005, 2, 16),
+		},
+		[]string{"outcome"},
+	)
+	m.leiosEbWaitArrived = m.leiosEbWaitSeconds.WithLabelValues(
+		leiosEbWaitOutcomeArrived,
+	)
+	m.leiosEbWaitTimedOut = m.leiosEbWaitSeconds.WithLabelValues(
+		leiosEbWaitOutcomeTimeout,
+	)
+	m.leiosEbWaitCancelled = m.leiosEbWaitSeconds.WithLabelValues(
+		leiosEbWaitOutcomeCancelled,
+	)
+	m.leiosEbWaitUnavailable = m.leiosEbWaitSeconds.WithLabelValues(
+		leiosEbWaitOutcomeUnavailable,
+	)
+	m.leiosEbWaitTimeouts = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_metrics_leios_eb_wait_timeouts_total",
+			Help: "ledger apply-path waits for a referenced Leios endorser block that ran to a full bound without it arriving: the diffusion window, or the CIP in-flight-fetch grace phase hard bound",
+		},
 	)
 	m.governanceProposalDecodeFailures = promautoFactory.NewCounter(
 		prometheus.CounterOpts{

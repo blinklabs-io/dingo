@@ -108,13 +108,15 @@ fixtures when schema seeding or assertions require raw SQL.
 Startup reserves the write connection, acquires the backend migration lock,
 rejects unversioned metadata tables (users must delete the data directory,
 including metadata and blob stores, and resync), and validates/resumes versioned expand/backfill/contract work before
-advertising readiness. The current registry has migrations 1 through 10:
+advertising readiness. The current registry has migrations 1 through 13:
 `v1alpha1`, `leios-key-registration`, `token-registry-metadata`,
 `account-import-baseline`, `leios-snapshot-keys`,
 `governance-ratification-history`, `account-import-deposit`,
-`committee-credential-tags`, `committee-term-start-presence`, and
-`reward-seed-failure`. `DATABASE.md` is the source of truth for their schema
-changes and upgrade behavior. It then checks the read pool. File-backed
+`committee-credential-tags`, `committee-term-start-presence`,
+`reward-seed-failure`, `imported-pool-block-count`,
+`pool-registration-deposit-held`, and `pointer-address-stake`. `DATABASE.md`
+is the source of truth for their schema changes and upgrade behavior. It then checks the read
+pool. File-backed
 SQLite uses a
 cross-process lock file; isolated in-memory databases use a process lock. A
 failed or interrupted phase leaves readiness false and carries the migration
@@ -506,6 +508,47 @@ truncation. If Apply wins, its events reach the ordered lane before an Undo can
 be read from the committed state. If rollback wins, truncation and the ledger
 rewind make the waiting block batch stale, and the tip recheck rejects it
 instead of publishing Apply after Undo.
+
+Both mutation paths stage their in-memory state against the durable commit.
+`Chain.AddBlocks` and `Chain.addRawBlocks` advance `currentTip`,
+`tipBlockIndex`, the queued headers, and the ephemeral block buffer per block
+inside the batch transaction, so they snapshot those fields first and restore
+them on either failure mode.
+Without the restore a rolled-back batch leaves the chain naming a tip whose
+block the database no longer holds.
+
+The two failure modes are restored in different places, and the difference
+matters. A block the closure rejects is restored **inside the closure**, under
+the same `c.mutex` / `c.manager.mutex` the mutation held, so the rejected
+batch's tip is never published: no reader observes it, and no concurrent
+mutation can be overwritten by the restore. A `Commit` failure cannot be
+handled that way — `txn.Do` runs `Commit` after the closure's deferred unlocks
+— so the commit-failure path re-acquires both locks, and a mutation can have
+landed in between. Every chain mutation takes `c.mutex` and bumps
+`mutationGeneration`, which is what `batchRestoreIsSafeLocked` tests (it
+compares the staged fields too, as a fail-safe for a path that ever forgets to
+bump; the counter is the test that works, because a retry re-committing the
+same blocks reproduces every field exactly).
+
+The rollback halves cannot be staged the same way, because they commit
+separately: `rollbackChainAndStateDeferred` truncates the primary chain first
+(`chain.RollbackDeferred`, whose per-block deletions commit as they go) and
+rolls the ledger back second (`LedgerState.rollback`). A ledger failure after
+that point cannot be undone, so it is invalidated explicitly instead — the
+continuation-audit window is discarded and the failure is reported as
+`ErrChainTruncatedLedgerRollbackFailed`. That identity is deliberately distinct
+from the refusals that mean no state changed (`models.ErrBlockNotFound`,
+`chain.ErrRollbackExceedsSecurityParam`, `ErrRollbackExceedsMithrilBoundary`),
+each of which `handleEventChainsyncRollback` and `tryResolveFork` recover from
+with a plain re-intersect; recovering that way here would resume from a ledger
+tip whose block the chain has already deleted.
+
+That reporting is scoped to an actual split. `LedgerState.rollback` can also
+fail with the ledger tip already **on** the rollback point — both
+`enforceDurableTipFloor` call sites do — and there the two halves agree, so the
+failure keeps the ordinary wrapped error and the recovery it has always had.
+The check is the same `pointMatches(ls.Tip().Point, point)` test the success
+path uses to decide whether to arm the continuation audit.
 
 `LedgerState.rollback` will not accept a target that shares the applied tip's
 slot with a different hash. The UTxO and transaction predicates in
@@ -2516,6 +2559,18 @@ because prior pot transitions cannot be repaired safely without replay.
 
 ### Era-Specific Validation
 
+Validated Conway and Dijkstra block admission checks the aggregate consumed
+reference-script size before validating the block's individual transactions.
+Imported blocks use the same database transaction as application, after any
+applicable endorser transactions and before the ranking block's own mutations.
+Forged blocks check a read view of the pre-block state even when full
+self-validation is disabled. Aggregate dispatch rejects missing or typed-nil
+era parameters with an error before the upstream rule dereferences them.
+The upstream era rules
+provide protocol-version-aware input accounting, intra-block output handling,
+and the era's aggregate limit. The explicit non-validating Musashi profile
+retains its Dijkstra validation bypass.
+
 The `ledger/eras/` package provides era-specific validation rules for each Cardano era. The default active era table is Byron through Conway. Experimental Dijkstra support is added to the active table when Dingo starts on the `musashi` network (the IOG Leios prototype testnet, matched by network name or magic 164), with `runMode: "leios"`, or with `startEra: "dijkstra"` — see `Config.experimentalDijkstraEnabled`. Keying on the network lets `dingo -n musashi` follow the Musashi testnet past the Conway-to-Dijkstra hard fork without an explicit run mode. The Dijkstra descriptor uses `github.com/blinklabs-io/gouroboros/ledger/dijkstra`, including that release's generated CDDL shape for the nullable Leios/Peras certificate slots.
 
 Several eras replace or drop an upstream `UtxoValidationRules` entry so Dingo
@@ -3064,6 +3119,10 @@ large-DB startup for minutes (#2771).
 
 The `LedgerView` interface provides query access to ledger state:
 - UTXO lookups by address or output reference
+- Block reference-script budget checks use a narrow PV10 aggregate-accounting
+  view: a genuinely absent reference UTxO contributes zero, matching Conway's
+  pre-block restricted-map rule, while storage/decode errors and normal
+  per-transaction validation remain fail-closed.
 - Protocol parameter queries
 - Stake distribution queries
 - Account registration checks
@@ -3188,6 +3247,74 @@ totals. For protocol version 11 and later, requested pools whose mark, set,
 and go stake are all zero are omitted; without a pool filter, the result
 contains the union of pools present in those snapshots and the corresponding
 totals.
+
+**Acquiring a specific historical point (blinklabs-io/dingo#382).** A real
+NtC client can `Acquire` LocalStateQuery at a specific past point, not just
+the live tip -- `ouroboros/localstatequery.go`'s server-side `Acquire`
+callback previously ignored this entirely and always answered every query
+at the live tip regardless of what was requested. It now records the
+acquired point per connection (`ledger.QueryPoint{Slot, Hash}`, keyed by
+connection ID; cleared on `Release`, on re-`Acquire`ing the live/immutable
+tip instead of a specific point, and on the connection closing without a
+clean `Release` -- both the NtN path (`Ouroboros.HandleConnClosedEvent`) and
+the NtC-only path (`Node.handleConnManagerClosed`, which the EventBus's
+connection-closed fan-out deliberately excludes NtC from) clear it, so a
+disconnecting client can't leak a map entry) and threads it into every
+`LedgerState.Query` call as `at`. `QueryPoint.pinned()` treats only the
+all-zero value as unpinned -- a slot-0 point with a nonempty hash is a real
+chain point, not the origin sentinel, and still goes through validation
+*and* dispatch: every point-aware handler takes the whole `QueryPoint` and
+checks `at.pinned()`, not a bare `asOfSlot uint64` compared against zero --
+an earlier version derived `asOfSlot` from `at.Slot` before dispatching,
+which correctly validated a slot-0 pin but then had every handler treat
+that same zero as "live," silently discarding the pin one layer down from
+where it was checked. Both slot and hash are recorded, not slot alone,
+because a fork switch can leave a different block at the same slot than the
+one the caller acquired.
+`Query` opens one read transaction whenever `at` is pinned and reuses it for
+both `verifyPointOnChain` and whichever handler below honors `at`, so the
+validated point and the historical read it guards describe the same
+snapshot -- a rollback committing between the two cannot make the handler
+answer for a point that already left the canonical chain. `verifyPointOnChain`
+rejects with `ErrPointNotOnChain` when `at.Slot` is ahead of that
+transaction's own tip (a block can be retained in the blob store at a slot
+beyond what has actually been applied -- e.g. a header-ahead-of-ledger
+buffer entry -- and a purely slot-keyed lookup has no notion of "applied"
+at all) or when the chain's block at `at.Slot` doesn't have hash `at.Hash`
+(rolled back after acquisition, or never on this node's chain at all).
+
+Only some query types honor a pinned point today: `GetPoolDistr2`
+(`PoolStakeDistribution`, resolving the pinned slot to the epoch that
+governed it and reading that epoch's already-persisted mark snapshot --
+rejecting a point outside the pool-snapshot retention window, ahead of the
+live epoch, or ahead of the live tip's own slot with
+`ErrHistoricalStateUnavailable`; the retention check compares the *derived
+mark-snapshot epoch* (`praos.StakeSnapshotEpoch(targetEpoch)`, one epoch
+further back than `targetEpoch` itself) against the cleanup floor, not
+`targetEpoch` directly -- comparing `targetEpoch` itself is off by that same
+one-epoch shift), `GetCurrentProtocolParams` (safe only when the pinned
+point's epoch matches the live tip's, since protocol parameters have no
+persisted historical-by-epoch record -- both the live-epoch comparison and
+the returned parameters come from one `loadConsensusSnapshot()` call, not
+two separate reads, so an epoch-boundary commit landing between them can't
+make the comparison pass against one epoch while returning another's
+parameters), and `GetEpochNo` (unconditionally safe: epoch records are
+never pruned and carry no other coupled state). `GetStakeDistribution`
+shares `PoolStakeDistribution` with `GetPoolDistr2` but rejects any pinned
+point outright with `ErrHistoricalStateUnavailable`: unlike `GetPoolDistr2`
+(whose denominator, `TotalActiveStake`, is itself a historical per-epoch
+snapshot total), `GetStakeDistribution`'s denominator is
+`TotalCirculatingSupply`, computed from `GetNetworkState`'s reserves row --
+and `GetNetworkState` only ever returns the latest row, with no
+historical-by-slot lookup yet, so honoring a pin here would silently mix a
+correct historical numerator with the current live reserves. `GetUTxOWhole`
+is not yet one of the honoring types either -- pinning only matters for a
+query slow enough that the live tip could move underneath it before
+finishing, and a paginated form built to actually need that is tracked
+separately as blinklabs-io/dingo#4082. `ledger/queries.go`'s
+`queryShelleyLeaf` carries a full audit of every remaining query type,
+classified as intentionally live-only, or a real gap left for a caller that
+needs it.
 
 Credential filters are bounded by `ledger.MaxLocalStateQueryItems` (currently
 1000) for `GetDRepState`, `GetStakeDelegDeposits`,
@@ -4897,7 +5024,7 @@ When Dijkstra/Leios is active, `DefaultBlockBuilder` emits the Musashi prototype
 
 #### Optional Self-Validation (`DINGO_VALIDATE_FORGED_BLOCK`)
 
-When `validateForgedBlock` is enabled in config, the forger invokes `LedgerState.ValidateForgedBlock` between steps 5 and 7. This runs three checks: (a) VRF proof and KES signature verification of the block header, (b) body-hash non-zero guard, and (c) per-transaction ledger rule validation against the current UTxO state with an intra-block overlay so outputs created by earlier transactions in the same block are visible to later ones. A failing block is logged, counted in `dingo_forge_validation_failed_total`, and dropped without being adopted or diffused. Validation wall-clock time is recorded in the `dingo_forge_validation_duration_seconds` histogram. Disabled by default; intended for block producers who want defence-in-depth against builder bugs at the cost of additional forge-to-diffusion latency.
+The node always validates the aggregate reference-script budget between steps 5 and 7, before adoption or diffusion. When `validateForgedBlock` is enabled, `LedgerState.ValidateForgedBlock` additionally runs VRF/KES header verification, the body-hash non-zero guard, and per-transaction ledger rules with an intra-block UTxO overlay. A failing block is logged, counted in `dingo_forge_validation_failed_total`, and dropped. Validation duration is recorded in `dingo_forge_validation_duration_seconds`. Full self-validation is disabled by default; the aggregate budget check is mandatory in node wiring and retains the explicit Musashi prototype bypass.
 
 ### Pool Credentials (`ledger/forging/keys.go`, `keystore/`)
 
@@ -6960,16 +7087,47 @@ second sync:
   guarantees network I/O only ever starts once the transaction that produced
   the event has already committed — never while holding the ledger write
   transaction or lock.
-  - **Backlog and checkpointing.** `Start` seeds the pending set from every
-    epoch the cache (`cache.db`) has not yet fetched/checked, up to
-    `Source.GetLatestEpoch() - 1` (a floor derived from Dingo's own current
-    epoch number, not an exact koios-epoch bound — good enough for a
+  - **Backlog and checkpointing.** `Start` (via the factored-out
+    `seedBacklog`) seeds the pending set from every epoch the cache
+    (`cache.db`) has not yet fetched/checked, in
+    `[Source.GetEarliestAvailableEpoch(), Source.GetLatestEpoch() - 1]` when
+    a Mithril boundary is recorded, and `[0, Source.GetLatestEpoch() - 1]`
+    when none is (the upper bound is a floor derived from Dingo's own
+    current epoch number, not an exact koios-epoch bound — good enough for a
     one-time historical backfill on first attach, since anything it
     undershoots by a small margin is still covered by the live event
-    subscription going forward). No separate checkpoint file exists: the
-    cache's own persisted `check_epoch_status`/`koios_epoch_info` rows are
-    the sole resumable state, matching the issue's "persist only the minimal
-    resumable checkpoint state actually needed."
+    subscription going forward). `preStakingThroughEpoch` is not a seed
+    bound: on a genesis-synced node epochs 0-1 are still queued, and
+    `checkEpoch`'s `PreStaking` branch is what records their
+    PASS-with-nothing-compared verdict. No separate checkpoint file exists:
+    the cache's own persisted `check_epoch_status`/`koios_epoch_info` rows
+    are the sole resumable state, matching the issue's "persist only the
+    minimal resumable checkpoint state actually needed."
+  - **Mithril bootstrap boundary (dingo #4172).** A Mithril-bootstrapped
+    node has no ledger history before its own bootstrap boundary by
+    construction, so every epoch through that boundary is in the same
+    position as the protocol-wide `preStakingThroughEpoch` floor — no local
+    reward-calculation state exists to compare, regardless of whether Koios
+    (full protocol history) has real reference data for it.
+    `RewardParitySource.GetEarliestAvailableEpoch` surfaces this boundary
+    (derived from the same `mithril_ledger_slot` sync-state key
+    `ledger.LedgerState.loadMithrilTrustBoundary` reads, resolved to an
+    epoch via `Database.GetEpochBySlot`); `ok` is false for a non-Mithril,
+    genesis-synced node, and for a boundary slot falling inside no epoch
+    the node's own `epoch` table describes, leaving `seedBacklog` and
+    `checkEpoch` unchanged from before this existed. A boundary that *is*
+    recorded but cannot be read, is empty, or does not parse is an error
+    rather than `ok = false`: `seedBacklog` aborts the seed and `checkEpoch`
+    fails the check, since absorbing it as "no boundary recorded" would
+    restore the unbounded pre-#4172 behavior on exactly the node whose
+    boundary could not be confirmed. `DingoDB` carries its
+    own copy of that slot-to-epoch SQL for the standalone CLI, bounded at
+    both ends exactly as the store query is, with
+    `TestGetEarliestAvailableEpochImplementationsAgree` pinning the two
+    together. `checkEpoch` applies the same bound directly
+    (independent of whether an epoch was ever seeded), so a standalone
+    `Check` run against an already-fetched cache is covered too, not just
+    the in-process observer's own backlog seeding.
   - **Rapid transitions, replay, and rollback.** Pending epochs are a *set*,
     not a single high-water-mark counter, so a burst of events collapses
     duplicates (dingo's own block-based and slot-clock-based epoch.transition
@@ -9324,19 +9482,50 @@ behavior lives in `database/plugin/metadata/sqlstore` and is exercised through
 the SQLite contract suite.
 
 `RewardLiveStake` supplies the credential-level input bundle for reward
-snapshots; the leader-election Mark snapshot remains on its independent,
-slot-aware path. Metadata write paths refresh only credentials touched by UTxO creation/spending, account
+snapshots; the leader-election Mark snapshot's authoritative SNAP-point capture
+reads it too, as its fast path (see below). The slot-aware historical
+reconstruction remains available as the fallback capture for a boundary the
+SNAP-point hook missed. Metadata write paths refresh only credentials touched by UTxO creation/spending, account
 registration or delegation, and reward credits or withdrawals, in the same
 transaction as the source change. Refresh derives total stake, registration,
 current pool delegation, and delegation certificate order; rollback therefore
 restores the aggregate from the same historical metadata used by normal account
 and UTxO repair. Malformed non-empty stake credentials are rejected before they
-enter the aggregate. The aggregate currently attributes only base-address stake:
-UTxO metadata does not retain the pointer triple needed to resolve pointer
-addresses to stake credentials, so lovelace at otherwise resolvable pointer
-addresses is omitted. Consumers must not treat `RewardLiveStake` as an exact
-replacement for the ledger stake distribution for eras where pointer-address
-stake matters.
+enter the aggregate. The aggregate itself attributes only base-address stake,
+because it keys on `utxo.staking_key` and a pointer address leaves that column
+empty; the pointer position is retained in `utxo_pointer` instead. Resolving it
+is inherently slot-evaluated -- a registration or de-registration anywhere can
+change which credential an existing pointer output belongs to -- which this
+aggregate's incremental, tip-keyed maintenance cannot express without reacting
+to every certificate event out of band, so `RebuildRewardLiveStake` and the
+per-write refresh both leave it out identically, on purpose, rather than one of
+the two learning it and the other not.
+
+The leader-election SNAP-point path
+(`ledger/snapshot.Calculator.calculateLiveStakeDistributionInTxn`) is the one
+consumer that still needs pointer-address stake pre-Conway, so it adds it back
+itself: `GetPointerStakeInputsForPools` recomputes the same
+`active_delegation`/`pointer_resolution` join the historical path uses,
+restricted to slot and the epoch boundary, and the result is added to what this
+aggregate returned rather than folded into the aggregate. That closes a prior
+divergence between dingo's two Mark-capture routes -- the event-driven fallback
+already reconstructed historically and resolved pointer stake; the SNAP-point
+hook read only this aggregate and did not (blinklabs-io/dingo#3854). The
+SNAP-point read cannot resolve the incoming epoch's era, because it runs before
+that epoch's row is written, so the persist half discards its distribution
+whenever the boundary changes era and reconstructs historically instead; see
+`GetPointerStakeInputsForPools` in `DATABASE.md`. Every
+other consumer of this aggregate -- `GetStakeByPools`, DRep voting power, and a
+`GetRewardStakeInputsForPools` query with `expiryEpoch == 0`, `boundarySlot == 0`
+and no boundary awareness, which is the only shape of that call that reads the
+aggregate at all -- is unchanged and still attributes only base-address stake.
+Any other shape of `GetRewardStakeInputsForPools`, including one with the
+CIP-0163 inactivity gate on, goes through `historicalStakeCTE` and resolves
+pointer stake there. That is correct once the live tip has
+passed the Conway fork, where pointer addresses confer no stake at all, and
+understates a pre-Conway tip. Consumers must not treat `RewardLiveStake` on its
+own as an exact replacement for the ledger stake distribution for eras where
+pointer-address stake matters.
 
 `RebuildRewardLiveStake` provides a composition-neutral full rebuild from the
 union of account credentials and live UTxO stake credentials. It retains
@@ -10932,11 +11121,105 @@ section above, split into two sync_state markers
 `database.RecomputeSyntheticV2CostModelMarkerAfterTruncate` is the
 CIP-0163-style shared recompute: called from both
 `ledger.LedgerState.rollback` and `database/lifecycle.Truncate`, it deletes
-the cleared-epoch marker and restores the boolean to `"true"` when a
-rollback or truncate crosses back before the epoch that marker recorded, so
-a re-sync (potentially onto a fork that never re-enacts the confirming
-write) re-derives synthetic status instead of trusting a stale
-confirmation that no longer applies to the surviving chain.
+both the cleared-epoch marker and the boolean marker itself (not forcing the
+boolean to `"true"`) when a rollback or truncate crosses back before the
+epoch the cleared-epoch marker recorded. Deleting rather than forcing
+matters on a database that predates these markers: a real (non-default)
+PlutusV2 model can already have been in force long before the first
+`clearedEpoch` this build ever records, so forcing `"true"` would mislabel
+that pre-existing real data as synthetic. Leaving the boolean absent instead
+defers to the exact same fallback (`ledger.resolveSyntheticV2CostModel`,
+comparing the live value against the known default) that database already
+relies on for bootstrapping.
+
+#### Consensus-critical script validation (blinklabs-io/dingo#3962)
+
+Real `cardano-ledger` does not merely omit the synthetic model from
+reporting: the formal UTXOW rule `languages txw ⊆ dom(costmdls pp)`
+(`eras/{alonzo,babbage}/impl/src/Cardano/Ledger/*/Rules/Utxow.hs`,
+`IntersectMBO/cardano-ledger`) rejects a transaction outright — at the
+UTXOW level, before any script evaluation runs — whenever it uses a Plutus
+language absent from the current protocol parameters' cost-models map,
+raising `NoCostModel` (`Cardano.Ledger.Alonzo.Plutus.Context.CollectError`,
+realized in `.../Plutus/Evaluate.hs`). On a real network during the
+pre-update gap, PlutusV2 genuinely has no entry in that map, so a real node
+rejects such a transaction; `IntersectMBO/cardano-node#4050` documents this
+exact rejection reachable in practice, and cardano-ledger's own Conway
+conformance suite (`Test.Cardano.Ledger.Conway.Imp.UtxosSpec`) has the
+identical-shaped test for PlutusV3 at the Conway boundary.
+
+Dingo's fabricated default means `CostModels[1]` is never genuinely absent
+internally, so a literal transcription of the formal rule against Dingo's
+own map would never fire. `ledger/eras/babbage.go`'s `ValidateTxBabbage`/
+`EvaluateTxBabbage` and `ledger/eras/conway.go`'s `evaluateConwayPlutusScript`
+(shared by `ValidateTxConway`'s `validateTxPlutusConwayWithContext` and
+`EvaluateTxConway`) instead check the equivalent real-world condition —
+`syntheticV2CostModelInEffect(ls)`, still `true` — immediately before
+evaluating a PlutusV2 script, returning `ErrNoCostModelForPlutusV2` rather
+than pricing the script against the fabricated value. The check reaches
+`ls` (an `lcommon.LedgerState` interface value) via a package-local
+`syntheticV2CostModelReporter` interface declared in `ledger/eras/eras.go`
+(this package cannot import `ledger`, which already imports it); `ledger.LedgerView`
+implements it (`SyntheticV2CostModelInEffect`, `ledger/view.go`), and every
+`ValidateTxFunc`/`EvaluateTxFunc` call site in `ledger/state.go` always
+passes a `*ledger.LedgerView`, so the type assertion succeeds in practice —
+any other `lcommon.LedgerState` implementation (e.g. a test stub) simply
+skips the check.
+
+`LedgerView.SyntheticV2CostModelInEffect` returns a value pinned at
+construction time (`pinSyntheticV2CostModel`, mirroring the existing
+`pinCommitteeState` pattern) rather than a live read of
+`ls.loadConsensusSnapshot()`: a script-evaluation-heavy validation can run
+long enough that the writer publishes a newer snapshot mid-operation, which
+would let a live read disagree with `pp` — the exact protocol parameters
+that operation is actually evaluating against. Every `ValidateTxFunc`/
+`EvaluateTxFunc` call site pins this alongside `pp` itself, sourced from
+`ledger.LedgerState.syntheticV2CostModel` (or its snapshot mirror). Since
+that tracked flag describes the *current* era's own `pparams` specifically,
+a call site validating an era-1 transaction against `prevEraPParams` instead
+re-derives the answer directly from `prevEraPParams`'s own value
+(`syntheticV2CostModelForValidation`, the same bootstrap heuristic
+`resolveSyntheticV2CostModel`'s empty-marker branch uses) rather than
+reusing the current era's flag for a different pparams object.
+
+The block-application call site (`ledgerProcessBlock`) cannot source this
+from a snapshot mirror the way mempool/standalone validation do, since it
+runs from parameters its caller already captured directly from `ls`'s
+mutable fields. `ledgerProcessBlocksFromSource` reads
+`ls.syntheticV2CostModel` under the same `ls.RLock()` it already holds to
+capture `snapshotPParams`/`snapshotPrevEraPParams`, and passes the result
+into `ledgerProcessBlock` as an explicit parameter rather than letting
+`ledgerProcessBlock` read the live field itself — a concurrent rollback
+(`RecoverCommitTimestampConflict`) mutates `ls.syntheticV2CostModel` outside
+that lock, so a live read inside `ledgerProcessBlock` could pair the wrong
+marker with the already-snapshotted `pparams` it validates against.
+
+**Dijkstra:** `ValidateTxDijkstra` delegates phase-2 script validation
+entirely to gouroboros's own `dijkstra.UtxoValidatePlutusScripts` (which
+itself falls back to gouroboros's own `conway.UtxoValidatePlutusScripts` for
+non-Dijkstra-shaped transactions) — neither of which is Dingo's
+`ledger/eras/conway.go` code, and neither type-asserts its `LedgerState`
+against `syntheticV2CostModelReporter`, so the Babbage/Conway-style check
+cannot reach either path directly. Since `LedgerState.syntheticV2CostModel`
+persists across era transitions until real data actually clears it, a chain
+that reaches Dijkstra without ever receiving a real PlutusV2 update would
+otherwise remain exposed for transactions validated in that era, including
+past `shouldSkipPhase2Validation`'s early return (which runs before the
+delegate is ever reached).
+
+`ValidateTxDijkstra` instead calls `dijkstraSyntheticV2CostModelGuard`
+(`ledger/eras/dijkstra.go`) before both that early return and the
+delegation, whenever the synthetic marker is set. Rather than
+reimplementing gouroboros's reference-script and Dijkstra sub-transaction
+script resolution locally, the guard reuses gouroboros's own exported
+`dijkstra.UtxoValidateCostModelsPresent` — the same `NoCostModel` rule
+Babbage/Conway's local phase-2 evaluation encodes by hand, already handling
+directly-witnessed scripts, reference scripts, and Dijkstra sub-transaction
+levels — against a pruned copy of `pp` with the PlutusV2 entry (cost-models
+map key 1) removed, translating a resulting `MissingCostModelError{Version:
+1}` into `ErrNoCostModelForPlutusV2` for consistency with the other eras.
+Any other language's missing-cost-model error passes through unchanged,
+since only PlutusV2 is ever fabricated.
 
 ### Live Restore/Truncate LedgerStateConfig Parity
 
