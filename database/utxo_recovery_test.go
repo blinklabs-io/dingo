@@ -353,6 +353,82 @@ func TestResolveUtxoCborWithRecoverySharedBlobRollbackDoesNotFinishCallersTxn(
 	require.Equal(t, wantCborB, recoveredB)
 }
 
+// TestResolveUtxoCborWithRecoverySharedMetadataRollbackDoesNotFinishCallersTxn
+// is the regression test for a cubic review finding on PR #4084:
+// withBlobForRecovery's aug borrows the caller's metadataTxn (the mirror
+// image of withMetadataForRecovery's borrowed blobTxn) but an earlier
+// version left sharedMetadata unset. Releasing aug after recovery then
+// rolled back -- and so finished -- the caller's own metadata transaction,
+// discarding a write-capable caller's uncommitted metadata as a side
+// effect of a call that only meant to add blob access for one recovery.
+//
+// Proves the caller's own metadata handle is still usable after recovery
+// completes: a plain read through metadataOnlyTxn.Metadata() must not fail
+// with "transaction already finished".
+func TestResolveUtxoCborWithRecoverySharedMetadataRollbackDoesNotFinishCallersTxn(
+	t *testing.T,
+) {
+	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	defer db.Close() //nolint:errcheck
+
+	candidate := findGapConsumeCandidateWithoutCertificates(t)
+	require.NotEmpty(t, candidate.producers)
+	producer := candidate.producers[0]
+	storeBlockOffsetsOnly(t, db, producer.block)
+	metaTxn := db.MetadataTxn(true)
+	t.Cleanup(metaTxn.Release)
+	require.NoError(
+		t,
+		metaTxn.Do(func(txn *Txn) error {
+			return db.Metadata().SetGapBlockTransaction(
+				producer.tx, producer.point, 0, nil, txn.Metadata(),
+			)
+		}),
+	)
+	metaTxn.Release()
+
+	produced := producer.tx.Produced()
+	require.NotEmpty(t, produced)
+	utxo := produced[0]
+	txId := utxo.Id.Id().Bytes()
+	outputIdx := utxo.Id.Index()
+
+	blob := db.Blob()
+	require.NotNil(t, blob)
+	writeTxn := db.Transaction(true)
+	t.Cleanup(writeTxn.Release)
+	require.NoError(
+		t,
+		blob.DeleteUtxo(writeTxn.Blob(), txId, outputIdx),
+	)
+	require.NoError(
+		t,
+		blob.DeleteTx(writeTxn.Blob(), txId),
+	)
+	require.NoError(t, writeTxn.Commit())
+
+	metadataOnlyTxn := db.MetadataTxn(false)
+	defer metadataOnlyTxn.Release()
+	require.Nil(
+		t, metadataOnlyTxn.Blob(),
+		"test setup must reproduce a genuinely metadata-only txn",
+	)
+
+	_, err = db.ResolveUtxoCborWithRecovery(txId, outputIdx, metadataOnlyTxn)
+	require.NoError(t, err, "UTxO must recover successfully")
+
+	_, err = db.Metadata().GetTransactionByHash(
+		txId, metadataOnlyTxn.Metadata(),
+	)
+	require.NoError(
+		t, err,
+		"using the caller's own metadata handle after recovery must "+
+			"still succeed -- recovering must not have finished the "+
+			"shared underlying metadata transaction",
+	)
+}
+
 // TestResolveUtxoCborWithRecoveryPropagatesUnrecoverable proves a UTxO whose
 // producing block cannot be located at all (recovery itself fails) surfaces
 // ErrUtxoCborUnavailable rather than being silently treated as resolved --
