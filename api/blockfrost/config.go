@@ -25,9 +25,5 @@ type BlockfrostConfig struct {
 	// CORSAllowedOrigins configures Access-Control-Allow-Origin.
 	// Empty disables CORS.
 	CORSAllowedOrigins []string
-	// TLS and Auth are the resolved (merged, validated) TLS/authentication
-	// policy for this listener -- see ProviderConfig's doc comment and
-	// ARCHITECTURE.md's "API security" section.
-	TLS  apiconfig.EffectiveTLS
-	Auth apiconfig.EffectiveAuth
+	TLS                apiconfig.EffectiveTLS
 }

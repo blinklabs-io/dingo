@@ -17,6 +17,7 @@ package koiosparity
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -1553,4 +1554,126 @@ func TestObserverFailureReportsSignificantMismatchCount(t *testing.T) {
 		CountSignificant(result.Mismatches),
 		len(result.Mismatches),
 	))
+}
+
+// TestObserverSeedBacklogExcludesEpochsBeforeEarliestAvailableEpoch guards
+// against dingo #4172: a fresh Mithril-bootstrapped node has no local ledger
+// history before its own bootstrap boundary, so seeding the backlog from
+// epoch 0 (as before this fix) queues a Koios fetch+check for every historical
+// epoch the node can never have local data for -- on preview/preprod that can
+// be well over a thousand epochs, and checkEpoch would fatal-FAIL the first
+// one Koios has genuine (non-pre-staking) reference data for.
+//
+// This drives seedBacklog directly (rather than Start, which immediately
+// launches the draining goroutine and would race a direct read of
+// o.pending) with a Mithril boundary recorded at epoch 10 and Dingo's own
+// latest committed epoch at 12, so the "safely closed" floor (latest-1 = 11)
+// overlaps the earliest-available floor (boundary+1 = 11) at exactly one
+// epoch.
+func TestObserverSeedBacklogExcludesEpochsBeforeEarliestAvailableEpoch(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDatabaseSourceDB(t)
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+
+	// Mithril bootstrap boundary: slot 1_000 falls inside epoch 10, so this
+	// node's earliest available Koios reporting epoch is 11.
+	require.NoError(t, db.SetEpoch(
+		1_000, 10, nil, nil, nil, nil, 5, 20, 432_000, nil,
+	))
+	require.NoError(t, db.SetSyncState("mithril_ledger_slot", "1000", nil))
+
+	// This node has itself computed one local epoch transition past the
+	// boundary (epoch_summary at epoch 12), so GetLatestEpoch is 12 and
+	// Start's own "safely closed" floor (latest-1) is 11.
+	sqlDB := sourceSQLDB(t, source.db)
+	require.NoError(t, sqlDB.Create(&models.EpochSummary{
+		Epoch:            12,
+		TotalActiveStake: types.Uint64(1),
+		SnapshotReady:    true,
+	}).Error)
+
+	o, err := NewObserver(ObserverConfig{
+		Network:   "preview",
+		CachePath: filepath.Join(t.TempDir(), "cache.db"),
+		Source:    source,
+		Logger:    slog.New(slog.DiscardHandler),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = o.Stop(context.Background()) })
+
+	require.NoError(t, o.seedBacklog(context.Background()))
+
+	o.mu.Lock()
+	_, hasEpoch2 := o.pending[2]
+	_, hasEpoch11 := o.pending[11]
+	o.mu.Unlock()
+
+	require.False(t, hasEpoch2,
+		"epoch 2 predates this node's Mithril bootstrap boundary (epoch 10) "+
+			"and must never be queued for a Koios fetch/check")
+	require.True(t, hasEpoch11,
+		"epoch 11 is this node's earliest available epoch and should still "+
+			"be queued")
+}
+
+// earliestAvailableEpochErrStub wraps a RewardParitySource and fails every
+// GetEarliestAvailableEpoch call, standing in for a boundary that is
+// recorded but cannot be resolved (an empty or unparseable
+// mithril_ledger_slot value, or a failed sync_state read).
+type earliestAvailableEpochErrStub struct {
+	RewardParitySource
+}
+
+func (s *earliestAvailableEpochErrStub) GetEarliestAvailableEpoch(
+	context.Context,
+) (uint64, bool, error) {
+	return 0, false, errors.New("parse mithril trust boundary: empty value")
+}
+
+// TestObserverSeedBacklogFailsClosedOnUnresolvableBoundary pins the consumer
+// half of the bound's fail-closed contract: an unresolvable boundary must
+// abort seeding, not be absorbed as "no boundary recorded". Absorbed, the
+// backlog would silently revert to the unbounded epoch-0 seed this fix
+// exists to remove, on exactly the node whose boundary could not be
+// confirmed.
+func TestObserverSeedBacklogFailsClosedOnUnresolvableBoundary(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDatabaseSourceDB(t)
+	base, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+
+	sqlDB := sourceSQLDB(t, base.db)
+	require.NoError(t, sqlDB.Create(&models.EpochSummary{
+		Epoch:            12,
+		TotalActiveStake: types.Uint64(1),
+		SnapshotReady:    true,
+	}).Error)
+
+	o, err := NewObserver(ObserverConfig{
+		Network:   "preview",
+		CachePath: filepath.Join(t.TempDir(), "cache.db"),
+		Source:    &earliestAvailableEpochErrStub{RewardParitySource: base},
+		Logger:    slog.New(slog.DiscardHandler),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = o.Stop(context.Background()) })
+
+	require.ErrorContains(
+		t,
+		o.seedBacklog(context.Background()),
+		"resolve earliest available epoch",
+	)
+
+	o.mu.Lock()
+	pending := len(o.pending)
+	o.mu.Unlock()
+	require.Zero(
+		t,
+		pending,
+		"no epoch may be queued when the bootstrap boundary could not be "+
+			"resolved",
+	)
 }

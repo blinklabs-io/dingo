@@ -15,7 +15,6 @@
 package ledger
 
 import (
-	"fmt"
 	"math/big"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -52,32 +51,27 @@ type stakeDistributionEntry = struct {
 // -- see totalCirculatingSupply's doc comment (blinklabs-io/dingo#3824) for
 // the full story and why GetPoolDistr2 must not make the same change.
 //
-// at is Query's pinned point (unpinned = live), but a pinned at is rejected
-// here rather than answered: unlike GetPoolDistr2 (which uses
-// TotalActiveStake, itself a historical, per-epoch snapshot total), this
-// query's denominator is TotalCirculatingSupply, computed from
-// GetNetworkState's reserves row -- and GetNetworkState only ever returns
-// the latest row, with no historical-by-epoch or historical-by-slot lookup
-// yet. Answering a pinned point here would silently mix a correct
-// historical numerator (the pinned epoch's pool stakes) with the current
-// live reserves as the denominator, which is wrong whenever reserves have
-// moved between the pinned point and now (MIR, treasury donations,
-// monetary expansion). Rejecting with ErrHistoricalStateUnavailable until a
-// historical NetworkState lookup exists is safer than a plausible-looking
-// wrong fraction (blinklabs-io/dingo#382).
+// at is Query's pinned point (unpinned = live). Unlike GetPoolDistr2 (which
+// uses TotalActiveStake, itself a historical, per-epoch snapshot total),
+// this query's denominator is TotalCirculatingSupply, computed from the
+// network_state table's reserves row -- one row per slot its reserves or
+// treasury actually changed, not just a single always-current value. A
+// pinned at is answered by reading the reserves row that was in effect as
+// of at.Slot itself (GetNetworkStateAsOfSlot, via totalCirculatingSupply's
+// asOfSlot parameter) rather than always the latest one, so a correct
+// historical numerator (the pinned epoch's pool stakes, from
+// PoolStakeDistribution below) is paired with the reserves that were
+// genuinely true at that same point instead of whatever reserves happen to
+// be live now (MIR, treasury donations, and monetary expansion all move
+// reserves between an old pinned point and the live tip). All of the
+// retention-window and future-slot rejection this used to duplicate here
+// lives in PoolStakeDistribution itself (checkAsOfEpochRecency and its
+// at.Slot > tip.Point.Slot check), which every pinned caller already goes
+// through (blinklabs-io/dingo#382).
 func (ls *LedgerState) queryShelleyStakeDistribution(
 	at QueryPoint,
 	txn *database.Txn,
 ) (any, error) {
-	if at.pinned() {
-		return nil, fmt.Errorf(
-			"%w: GetStakeDistribution pinned to slot %d is not yet "+
-				"supported -- its circulating-supply denominator has no "+
-				"historical-by-slot record",
-			ErrHistoricalStateUnavailable,
-			at.Slot,
-		)
-	}
 	dist, err := ls.PoolStakeDistribution(nil, at, txn)
 	if err != nil {
 		return nil, err

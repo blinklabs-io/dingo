@@ -46,7 +46,7 @@ func freeLoopbackPort(t *testing.T) uint {
 }
 
 // resolveOnFreePortWithConfig resolves the built-in Blockfrost provider on
-// a free loopback port with extra config fields (e.g. "tls"/"auth")
+// a free loopback port with extra config fields (e.g. "tls")
 // merged alongside "port", retrying on a lost race for the port.
 func resolveOnFreePortWithConfig(
 	t *testing.T,
@@ -128,29 +128,7 @@ func TestProviderRejectsPartialTLSPair(t *testing.T) {
 	require.ErrorContains(t, err, "must both be set")
 }
 
-func TestProviderRejectsInvalidAuthMode(t *testing.T) {
-	t.Parallel()
-
-	host := newProviderHost(t)
-
-	_, err := plugin.Resolve[*Blockfrost](
-		t.Context(),
-		host,
-		plugin.CapabilityAPIBlockfrost,
-		"builtin",
-		map[string]any{
-			"port": freeLoopbackPort(t),
-			"auth": map[string]any{"mode": "bogus"},
-		},
-		ProviderDependencies{Node: &mockNode{}, Host: "127.0.0.1"},
-	)
-
-	require.Error(t, err)
-	require.ErrorContains(t, err, "plugins.api.blockfrost.config.auth")
-	require.ErrorContains(t, err, "invalid mode")
-}
-
-func TestProviderPropagatesTLSAndAuth(t *testing.T) {
+func TestProviderPropagatesTLS(t *testing.T) {
 	t.Parallel()
 
 	host := newProviderHost(t)
@@ -162,15 +140,9 @@ func TestProviderPropagatesTLSAndAuth(t *testing.T) {
 			"certFilePath": certPath,
 			"keyFilePath":  keyPath,
 		},
-		"auth": map[string]any{
-			"mode":  "token",
-			"token": "shared-secret",
-		},
 	})
 
 	require.True(t, srv.config.TLS.Enabled)
 	require.Equal(t, certPath, srv.config.TLS.CertFilePath)
 	require.Equal(t, keyPath, srv.config.TLS.KeyFilePath)
-	require.True(t, srv.config.Auth.Enabled)
-	require.Equal(t, "shared-secret", srv.config.Auth.Token)
 }
