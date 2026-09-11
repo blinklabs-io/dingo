@@ -558,9 +558,10 @@ func TestManagerPruningDeletesCloudMirror(t *testing.T) {
 	cloudPrefixDir := filepath.Join(cloudBackingDir, "prefix")
 	// Start launches a retry scan in the background. Give that scan an
 	// existing, nonnumeric epoch directory to upload before publishing any
-	// real epoch: receiving this upload proves the scan reached the probe,
-	// and retryMu orders the first epoch handler after the scan finishes.
-	// The nonnumeric suffix keeps the probe out of retention accounting.
+	// real epoch: receiving this upload proves the scan reached the probe;
+	// the wait below (not retryMu's incidental lock scope) is what proves
+	// the scan is actually done with it. The nonnumeric suffix keeps the
+	// probe out of retention accounting.
 	const startupProbeName = "epoch-startup-probe"
 	startupProbeDir := filepath.Join(snapshotDir, startupProbeName)
 	require.NoError(t, os.Mkdir(startupProbeDir, 0o755))
@@ -584,6 +585,19 @@ func TestManagerPruningDeletesCloudMirror(t *testing.T) {
 			snapshotWait,
 			"startup cloud-mirror retry scan did not reach its probe",
 		),
+	)
+	// Wait for the marker to actually exist AND record this destination,
+	// not just the mid-upload channel receive above -- see the detailed
+	// comment on the identical wait in
+	// TestManagerRetriesCloudMirrorAfterTransientFailureOnRedeliveredEvent.
+	// Without it, a redundant scan could still be retrying the probe when
+	// epoch 1 publishes below, sending a second, unexpected value on the
+	// shared uploaded channel that the loop's own RequireReceive calls
+	// would misattribute to an epoch's upload.
+	require.Eventually(t, func() bool {
+		return lifecycle.IsCloudMirroredTo(startupProbeDir, cloudDest)
+	}, snapshotWait, 10*time.Millisecond,
+		"startup cloud-mirror retry scan did not finish mirroring its probe",
 	)
 
 	for epoch := uint64(1); epoch <= 3; epoch++ {
@@ -1135,6 +1149,34 @@ func TestManagerRetriesCloudMirrorAfterTransientFailureOnRedeliveredEvent(
 		t, uploaded, snapshotWait,
 		"startup cloud-mirror retry scan did not reach its probe",
 	))
+	// The channel receive above only proves the scan's UploadDir call for
+	// the probe was reached, not that MirrorToCloud has returned and
+	// written the probe's .cloud-mirrored marker: UploadDir sends on
+	// uploaded before its caller does either. Relying on retryMu alone to
+	// order the rest of this test after that write would depend on
+	// retryMirrorToCloud/retryUnmirroredSnapshots continuing to hold
+	// retryMu across the actual upload+marker-write, an implementation
+	// detail this test must not assume -- if that lock were ever narrowed
+	// to just the directory scan (e.g. to stop blocking every other
+	// epoch's own retry scan for the duration of a slow upload), the
+	// embedded retryUnmirroredSnapshots call at the top of the next
+	// handleEpochTransition could run concurrently with the tail of this
+	// one, see the probe as still unmarked, and redundantly retry it --
+	// consuming the one simulated failure meant for epoch 9's own first
+	// attempt below. Wait for the marker to actually exist AND record this
+	// destination -- not just lifecycle.IsCloudMirrored's bare os.Stat,
+	// which can observe the marker file the instant os.WriteFile's
+	// internal O_CREATE|O_TRUNC open lands, before the content write that
+	// follows it: retryUnmirroredSnapshots' own idempotency check
+	// (IsCloudMirroredTo) reads that content, so matching it here is what
+	// actually closes the window instead of narrowing it.
+	require.Eventually(t, func() bool {
+		return lifecycle.IsCloudMirroredTo(
+			startupProbeDir, "faketestflaky://bucket/prefix",
+		)
+	}, snapshotWait, 10*time.Millisecond,
+		"startup cloud-mirror retry scan did not finish mirroring its probe",
+	)
 	flakyCloudMu.Lock()
 	flakyCloudFailed = false
 	flakyCloudUploaded = nil
@@ -1264,6 +1306,17 @@ func TestManagerRetriesUnmirroredSnapshotOnLaterEpochWithoutRedelivery(
 		t, uploaded, snapshotWait,
 		"startup cloud-mirror retry scan did not reach its probe",
 	))
+	// Wait for the marker to actually exist AND record this destination,
+	// not just the mid-upload channel receive above -- see the detailed
+	// comment on the identical wait in
+	// TestManagerRetriesCloudMirrorAfterTransientFailureOnRedeliveredEvent.
+	require.Eventually(t, func() bool {
+		return lifecycle.IsCloudMirroredTo(
+			startupProbeDir, "faketestflaky2://bucket/prefix",
+		)
+	}, snapshotWait, 10*time.Millisecond,
+		"startup cloud-mirror retry scan did not finish mirroring its probe",
+	)
 	flakyCloud2Mu.Lock()
 	flakyCloud2Failed = false
 	flakyCloud2Uploaded = nil
