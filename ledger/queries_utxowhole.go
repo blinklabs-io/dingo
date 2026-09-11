@@ -48,6 +48,15 @@ import (
 // worse than 16): badger's own per-lookup block-index seek cost
 // dominates over any further parallelism this pool can extract. See
 // blinklabs-io/dingo#4082 for the full sweep data.
+//
+// That sweep predates each worker holding a blob-only transaction instead
+// of a full one (blinklabs-io/dingo#1900 review): at the metadata read
+// pool's default size (DatabaseWorkers = 5), every trial from 8 workers up
+// was actually saturating at 5 concurrent metadata connections regardless
+// of this constant, so the 16-vs-8 gap above may partly reflect that
+// contention rather than pure disk-I/O parallelism. Worth re-sweeping now
+// that the worker transaction no longer takes a metadata connection at
+// all on the common path.
 const utxoWholeResolveWorkers = 16
 
 // queryShelleyUtxoWhole answers GetUTxOWhole: every live UTxO in the
@@ -122,8 +131,18 @@ func (ls *LedgerState) queryShelleyUtxoWhole() (any, error) {
 		wg.Go(func() {
 			// Each worker owns its own transaction -- see
 			// utxoWholeResolveWorkers' doc comment for why one *Txn can't
-			// be shared across these goroutines.
-			txn := ls.db.Transaction(false)
+			// be shared across these goroutines. Blob-only: the resolve
+			// hot path (TieredCborCache.ResolveUtxoCbor) never touches
+			// metadata, only ResolveUtxoCborWithRecovery's rare recovery
+			// fallback does, and it opens its own metadata-capable
+			// transaction on demand for that branch. A full
+			// Database.Transaction(false) here would hold a metadata read
+			// connection from the shared pool (sized by DatabaseWorkers,
+			// 5 by default) for this whole worker's lifetime, well past
+			// utxoWholeResolveWorkers workers deep -- starving every other
+			// concurrent metadata reader in the node for the resolve
+			// phase's entire duration (blinklabs-io/dingo#1900 review).
+			txn := ls.db.BlobTxn(false)
 			defer txn.Release()
 			for u := range jobs {
 				// WithRecovery, not the tiered cache's bare ResolveUtxoCbor:
@@ -167,6 +186,16 @@ func (ls *LedgerState) queryShelleyUtxoWhole() (any, error) {
 	}()
 
 	ret := make(map[olocalstatequery.UtxoId]ledger.TransactionOutput, len(live))
+	// firstErr is the first error to arrive on results, which is
+	// scheduling-dependent, not the first row in iteration order -- unlike
+	// the previous sequential implementation, which always failed on the
+	// same row for the same data. A deliberate choice, not an overlooked
+	// one: serializing worker completion order to make this deterministic
+	// would give up the parallelism this pool exists for, and every
+	// resolve failure is still reported (just possibly naming a different
+	// one of several unresolvable rows across runs), so nothing is lost
+	// except which specific ref is named first (blinklabs-io/dingo#1900
+	// review).
 	var firstErr error
 	for r := range results {
 		if r.err != nil {

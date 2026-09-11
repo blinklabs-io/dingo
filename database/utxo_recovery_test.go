@@ -90,6 +90,87 @@ func TestResolveUtxoCborWithRecoveryReconstructsMissingBlob(t *testing.T) {
 	require.Equal(t, []byte(wantCbor), recovered)
 }
 
+// TestResolveUtxoCborWithRecoveryUpgradesBlobOnlyTxnForRecovery covers a
+// human-review finding on PR #4084: a caller resolving many refs
+// concurrently (queryShelleyUtxoWhole's worker pool) passes a blob-only
+// *Txn (BlobTxn, Metadata() == nil) so the resolve hot path never holds a
+// metadata connection from the shared read pool. This proves recovery's
+// metadata-based fallback (utxoRecoveryBlockForTx, once the blob-based tx
+// lookup misses) still succeeds correctly end-to-end against that
+// blob-only txn, rather than failing or panicking for lack of a metadata
+// handle -- ResolveUtxoCborWithRecovery's own explicit on-demand upgrade
+// makes this guarantee independent of the metadata store's
+// GetTransactionByHash also separately tolerating a nil types.Txn
+// (confirmed: this test still passes with that explicit upgrade removed,
+// since GetTransactionByHash falls back to its own ad-hoc pooled
+// connection either way -- see ResolveUtxoCborWithRecovery's doc comment
+// for why the explicit upgrade is kept anyway).
+func TestResolveUtxoCborWithRecoveryUpgradesBlobOnlyTxnForRecovery(
+	t *testing.T,
+) {
+	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	defer db.Close() //nolint:errcheck
+
+	candidate := findGapConsumeCandidateWithoutCertificates(t)
+	require.NotEmpty(t, candidate.producers)
+	producer := candidate.producers[0]
+	storeBlockOffsetsOnly(t, db, producer.block)
+	metaTxn := db.MetadataTxn(true)
+	require.NoError(
+		t,
+		metaTxn.Do(func(txn *Txn) error {
+			return db.Metadata().SetGapBlockTransaction(
+				producer.tx, producer.point, 0, txn.Metadata(),
+			)
+		}),
+	)
+	metaTxn.Release()
+
+	produced := producer.tx.Produced()
+	require.NotEmpty(t, produced)
+	utxo := produced[0]
+	txId := utxo.Id.Id().Bytes()
+	outputIdx := utxo.Id.Index()
+
+	blob := db.Blob()
+	require.NotNil(t, blob)
+	writeTxn := db.Transaction(true)
+	require.NoError(
+		t,
+		blob.DeleteUtxo(writeTxn.Blob(), txId, outputIdx),
+	)
+	// Also delete the tx-offset blob entry storeBlockOffsetsOnly wrote:
+	// utxoRecoveryBlockForTx tries the blob-based tx lookup
+	// (fetchTxBlobSlotAndHash) first, and it would otherwise satisfy
+	// recovery without ever reaching the metadata-based fallback this test
+	// means to exercise.
+	require.NoError(
+		t,
+		blob.DeleteTx(writeTxn.Blob(), txId),
+	)
+	require.NoError(t, writeTxn.Commit())
+
+	blobOnlyTxn := db.BlobTxn(false)
+	defer blobOnlyTxn.Release()
+	require.Nil(
+		t, blobOnlyTxn.Metadata(),
+		"test setup must reproduce a genuinely blob-only txn",
+	)
+
+	recovered, err := db.ResolveUtxoCborWithRecovery(
+		txId, outputIdx, blobOnlyTxn,
+	)
+	require.NoError(
+		t, err,
+		"recovery must succeed even when the caller's txn has no "+
+			"metadata handle",
+	)
+	wantCbor := utxo.Output.Cbor()
+	require.NotEmpty(t, wantCbor, "fixture output must carry its own CBOR")
+	require.Equal(t, []byte(wantCbor), recovered)
+}
+
 // TestResolveUtxoCborWithRecoveryPropagatesUnrecoverable proves a UTxO whose
 // producing block cannot be located at all (recovery itself fails) surfaces
 // ErrUtxoCborUnavailable rather than being silently treated as resolved --

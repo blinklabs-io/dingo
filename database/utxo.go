@@ -284,6 +284,23 @@ func loadCbor(u *models.Utxo, txn *Txn) error {
 // ledger.queryShelleyUtxoWhole, which answers GetUTxOWhole and would
 // otherwise return an incomplete reply for a row IterateLiveUtxos'
 // loadCbor-based path would have recovered.
+//
+// txn may be blob-only (Metadata() == nil): the hot path above only ever
+// reaches the blob store (TieredCborCache.ResolveUtxoCbor), and a caller
+// resolving many refs concurrently (queryShelleyUtxoWhole's worker pool)
+// wants to avoid holding a metadata connection from the shared read pool
+// for the whole resolve phase when it is needed only on the rare recovery
+// branch below. Only recoverUtxoCbor's metadata-based fallback
+// (utxoRecoveryBlockForTx, once the blob-based lookup misses) actually
+// needs one, so a metadata-capable transaction is opened here, on demand,
+// just for that branch (blinklabs-io/dingo#1900 review). This is an
+// explicit, self-contained guarantee: sqlstore.Store.GetTransactionByHash
+// (what that fallback ultimately calls) separately tolerates a nil
+// types.Txn by borrowing its own ad-hoc pooled connection for just that one
+// query, so passing txn.Metadata() straight through would also work today
+// -- but relying on that would make this function's own resource behavior
+// depend on an incidental property of a different package's nil-handling
+// rather than on something stated and tested here.
 func (d *Database) ResolveUtxoCborWithRecovery(
 	txId []byte,
 	outputIdx uint32,
@@ -299,7 +316,12 @@ func (d *Database) ResolveUtxoCborWithRecovery(
 	cbor, err := d.CborCache().ResolveUtxoCbor(txId, outputIdx, txn)
 	if err != nil {
 		if errors.Is(err, types.ErrBlobKeyNotFound) {
-			return recoverUtxoCbor(d, txn, txId, outputIdx)
+			recoveryTxn := txn
+			if txn.Metadata() == nil {
+				recoveryTxn = d.Transaction(false)
+				defer recoveryTxn.Release()
+			}
+			return recoverUtxoCbor(d, recoveryTxn, txId, outputIdx)
 		}
 		return nil, err
 	}
