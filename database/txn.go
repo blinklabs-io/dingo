@@ -291,6 +291,12 @@ func (t *Txn) withMetadataForRecovery() (*Txn, func()) {
 	}
 	if t.db != nil {
 		if ms := t.db.Metadata(); ms != nil {
+			// Must be acquired before opening the metadata transaction
+			// below, not just around its eventual Commit -- see
+			// acquireCommitBarrier's own doc comment. Only actually
+			// takes the lock when aug.readWrite is true (checked
+			// internally), matching NewMetadataOnlyTxn's identical call.
+			acquireCommitBarrier(aug, true)
 			if aug.readWrite {
 				aug.metadataTxn = ms.Transaction(context.Background())
 			} else {

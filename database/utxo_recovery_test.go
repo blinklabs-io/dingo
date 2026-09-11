@@ -269,6 +269,17 @@ func TestRepairUtxoBlobWritesThroughCallersPinnedStore(t *testing.T) {
 		"test setup must pin the caller's txn to the original store",
 	)
 
+	// Confirm the scenario actually exercises recovery (and so the repair
+	// write-back this test asserts on): the bare tiered-cache resolve must
+	// miss first, same premise check as the sibling recovery tests. Without
+	// this, a tiered-cache entry surviving from setup would let
+	// ResolveUtxoCborWithRecovery return early on the cache hit, and this
+	// test would instead fail confusingly at the originalStore.GetUtxo
+	// check below rather than testing the pinned-store repair path.
+	_, err = db.CborCache().ResolveUtxoCbor(txId, outputIdx, callerTxn)
+	require.ErrorIs(t, err, types.ErrBlobKeyNotFound,
+		"test setup must reproduce a genuinely missing blob")
+
 	// Install a second, empty store -- simulating a blob-store rotation
 	// (e.g. bark) happening concurrently with this in-flight recovery.
 	// Sized down from badger's defaults (see TestBadgerValueLogFileSize's
