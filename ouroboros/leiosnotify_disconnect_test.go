@@ -116,7 +116,7 @@ func TestLeiosNotifyCompletedProtocolReturnsWithoutCursor(t *testing.T) {
 	require.Empty(t, o.leiosServeWaiters)
 }
 
-func TestLeiosNotifyUnregisteredConnectionWaitsForProtocolCompletion(t *testing.T) {
+func TestLeiosNotifyRemovedConnectionReturnsImmediately(t *testing.T) {
 	o := newOuroboros(OuroborosConfig{})
 	o.connManager = connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{})
 	server := leiosnotify.NewServer(protocol.ProtocolOptions{}, nil)
@@ -129,15 +129,9 @@ func TestLeiosNotifyUnregisteredConnectionWaitsForProtocolCompletion(t *testing.
 		finished <- err
 	}()
 	t.Cleanup(server.Stop)
-	testutil.RequireNoReceive(t, finished, 50*time.Millisecond,
-		"an unregistered connection must not be treated as a live-protocol disconnect")
-	server.Stop()
-	select {
-	case err := <-finished:
-		require.Error(t, err)
-	case <-time.After(time.Second):
-		t.Fatal("protocol completion must release the callback")
-	}
+	err := testutil.RequireReceive(t, finished, time.Second,
+		"removed connection to release the callback")
+	require.NoError(t, err)
 }
 
 // next lets log-only tests reserve entries without a connection lifecycle.

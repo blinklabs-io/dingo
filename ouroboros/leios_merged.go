@@ -170,23 +170,19 @@ func (o *Ouroboros) registerLeiosServeWaiter(
 	return ch, cancel
 }
 
-// registerLeiosNotifyServeWaiter registers a close waiter only for a
-// connection that is currently managed. A LeiosNotify server can receive its
-// first request before connmanager publishes the connection; treating that
-// short registration window as a disconnect would return a nil response and
-// make gouroboros tear down an otherwise live protocol. In that case the
-// caller falls back to the protocol completion channel.
+// registerLeiosNotifyServeWaiter registers a close waiter. A LeiosNotify
+// server can receive its first request before connmanager publishes the
+// connection, so a missing connection is checked after registration: an
+// already-closed waiter means the connection is gone, while an open waiter
+// leaves the caller able to fall back to protocol completion.
 func (o *Ouroboros) registerLeiosNotifyServeWaiter(
 	connId ouroboros.ConnectionId,
 ) (done <-chan struct{}, cancel func()) {
-	if o.connManager != nil && o.connManager.GetConnectionById(connId) == nil {
-		return nil, func() {}
-	}
 	done, cancel = o.registerLeiosServeWaiter(connId)
 	select {
 	case <-done:
 		cancel()
-		return nil, func() {}
+		return done, func() {}
 	default:
 		return done, cancel
 	}
