@@ -150,6 +150,7 @@ func TestRollbackUndoSurvivesMetadataTruncationFailure(t *testing.T) {
 	require.NoError(t, err)
 	cm, err = chain.NewManager(db, nil)
 	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
 
 	recoveryBus := event.NewEventBus(nil, nil)
 	t.Cleanup(recoveryBus.Stop)
