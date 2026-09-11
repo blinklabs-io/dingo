@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -269,6 +270,36 @@ func TestRepairUtxoBlobWritesThroughCallersPinnedStore(t *testing.T) {
 		"test setup must pin the caller's txn to the original store",
 	)
 
+	// Registered now, before newStore/drain exist below, via forward
+	// references closed over by the cleanup funcs -- so a require failure
+	// anywhere below (e.g. the pinned-store fix regressing) still releases
+	// callerTxn's pin and drains/closes both stores instead of leaking
+	// them past FailNow, which would otherwise leave callerTxn's pin held
+	// and mask the real failure behind a confusing hang or close error.
+	// t.Cleanup runs strictly after this function's own defers (checkTxn/
+	// newCheckTxn's Rollback below), and in the reverse of registration
+	// order, so registering newStore/originalStore's Close before drain's
+	// call before callerTxn's Release here gives the needed teardown
+	// order: release the pin, then drain, then close each store.
+	var (
+		newStore blob.BlobStore
+		drain    func()
+	)
+	t.Cleanup(func() {
+		if newStore != nil {
+			require.NoError(t, newStore.Close())
+		}
+	})
+	t.Cleanup(func() {
+		require.NoError(t, originalStore.Close())
+	})
+	t.Cleanup(func() {
+		if drain != nil {
+			drain()
+		}
+	})
+	t.Cleanup(callerTxn.Release)
+
 	// Confirm the scenario actually exercises recovery (and so the repair
 	// write-back this test asserts on): the bare tiered-cache resolve must
 	// miss first, same premise check as the sibling recovery tests. Without
@@ -285,13 +316,14 @@ func TestRepairUtxoBlobWritesThroughCallersPinnedStore(t *testing.T) {
 	// Sized down from badger's defaults (see TestBadgerValueLogFileSize's
 	// doc comment): the default reserves 2GiB per store on Windows, which
 	// a CI runner opening several of these concurrently can exhaust.
-	newStore, err := badger.New(
+	newStore, err = badger.New(
 		badger.WithDataDir(t.TempDir()),
 		badger.WithValueLogFileSize(testutil.TestBadgerValueLogFileSize),
 		badger.WithMemTableSize(testutil.TestBadgerMemTableSize),
 	)
 	require.NoError(t, err)
-	prev, drain := db.SetBlobStore(newStore)
+	var prev blob.BlobStore
+	prev, drain = db.SetBlobStore(newStore)
 	require.True(t, originalStore == prev)
 
 	recovered, err := db.ResolveUtxoCborWithRecovery(
@@ -303,24 +335,6 @@ func TestRepairUtxoBlobWritesThroughCallersPinnedStore(t *testing.T) {
 			"store, even though a different store is now installed",
 	)
 	require.NotEmpty(t, recovered)
-
-	// Release the caller's pin before draining: drain waits for every pin
-	// on the retired (original) store to clear, and callerTxn is the one
-	// still holding it.
-	callerTxn.Release()
-	drain()
-	// db.Close() does not close installed blob stores (it only stops the
-	// metrics goroutine), and originalStore is no longer the database's
-	// installed store once SetBlobStore swapped it out -- so it is this
-	// test's own responsibility to close it, the same as newStore below.
-	// Declared before the read-only check transactions' own defers so it
-	// runs after them (LIFO): those still need originalStore open.
-	defer func() {
-		require.NoError(t, originalStore.Close())
-	}()
-	defer func() {
-		require.NoError(t, newStore.Close())
-	}()
 
 	// The repair write-back must have landed in the *original* store...
 	checkTxn := originalStore.NewTransaction(false)
