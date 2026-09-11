@@ -4174,7 +4174,9 @@ func (ls *LedgerState) restartQueuedBlockfetchAfterForkLocked(
 		// The old protocol request cannot be cancelled. Keep late events from
 		// being admitted after the replacement generation is installed when
 		// the restart uses the same connection.
-		ls.blockfetchDiscardConnId = ls.activeBlockfetchConnId
+		if ls.blockfetchPrimaryRequestGeneration != 0 {
+			ls.blockfetchDiscardConnId = ls.activeBlockfetchConnId
+		}
 		if ls.chainsyncBlockfetchTimeoutTimer != nil {
 			ls.chainsyncBlockfetchTimeoutTimer.Stop()
 			ls.chainsyncBlockfetchTimeoutTimer = nil
