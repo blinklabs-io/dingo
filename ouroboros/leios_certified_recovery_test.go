@@ -795,6 +795,7 @@ func (d leiosFetchRequestContextTestDeadline) Deadline() (time.Time, bool) {
 func TestLeiosFetchRequestContextDoesNotArmIndependentTimerAtEqualOrEarlierParentDeadline(
 	t *testing.T,
 ) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name           string
 		parentDeadline time.Duration // relative to the bubble's fake start time
