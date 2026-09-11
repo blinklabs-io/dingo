@@ -3901,18 +3901,41 @@ func (ls *LedgerState) reportFailedLedgerRollbackAfterTruncation(
 		"ledger_tip_slot", ledgerTip.Point.Slot,
 		"ledger_tip_hash", hex.EncodeToString(ledgerTip.Point.Hash),
 	)
-	// cause is rendered as text, not wrapped: wrapping would put its
-	// identity back in the errors.Is chain, which is precisely what the
-	// callers must not be able to match on here.
+	// Preserve the original cause for diagnostics and tests, but keep rollback
+	// refusal sentinels out of the errors.Is chain. Callers must classify this
+	// state by ErrChainTruncatedLedgerRollbackFailed, because the primary chain
+	// has already been deleted through the rollback point.
 	return fmt.Errorf(
-		"%w: chain truncated to %d.%s, ledger tip left at %d.%s: %s",
+		"%w: chain truncated to %d.%s, ledger tip left at %d.%s: %w",
 		ErrChainTruncatedLedgerRollbackFailed,
 		point.Slot,
 		hex.EncodeToString(point.Hash),
 		ledgerTip.Point.Slot,
 		hex.EncodeToString(ledgerTip.Point.Hash),
-		cause.Error(),
+		rollbackTruncationCause{err: cause},
 	)
+}
+
+// rollbackTruncationCause retains a rollback failure for errors.Is callers
+// without allowing refusal sentinels to masquerade as an unapplied rollback
+// after the primary chain has already been truncated.
+type rollbackTruncationCause struct {
+	err error
+}
+
+func (e rollbackTruncationCause) Error() string {
+	return e.err.Error()
+}
+
+func (e rollbackTruncationCause) Is(target error) bool {
+	switch target {
+	case models.ErrBlockNotFound,
+		ErrRollbackExceedsMithrilBoundary,
+		chain.ErrRollbackExceedsSecurityParam:
+		return false
+	default:
+		return errors.Is(e.err, target)
+	}
 }
 
 // processChainIteratorRollback applies a rollback emitted by the primary
