@@ -290,6 +290,15 @@ func TestRepairUtxoBlobWritesThroughCallersPinnedStore(t *testing.T) {
 	// still holding it.
 	callerTxn.Release()
 	drain()
+	// db.Close() does not close installed blob stores (it only stops the
+	// metrics goroutine), and originalStore is no longer the database's
+	// installed store once SetBlobStore swapped it out -- so it is this
+	// test's own responsibility to close it, the same as newStore below.
+	// Declared before the read-only check transactions' own defers so it
+	// runs after them (LIFO): those still need originalStore open.
+	defer func() {
+		require.NoError(t, originalStore.Close())
+	}()
 	defer func() {
 		require.NoError(t, newStore.Close())
 	}()
