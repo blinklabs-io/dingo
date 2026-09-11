@@ -77,6 +77,25 @@ type continuationAuditWindow struct {
 // armContinuationAudit starts a bounded continuation audit at a rollback point.
 // Callers must have rolled back both the primary chain and the ledger to point,
 // which is what lets the audit treat blocks it has not yet seen as absent.
+//
+// Fork churn can call this more than once before the blocks an earlier window
+// already vetted are durably applied: chainsync is handled per connection, and
+// distinct connections routinely converge on rollback resolutions in quick
+// succession while the ledger apply pipeline (deliberately, see
+// auditContinuationBlock) lags behind blockfetch. A wholesale replace would
+// discard the prior window's producedTxs for any such in-flight block,
+// reporting it as a missing producer the moment something after it is
+// audited under the new window (issue #4102).
+//
+// carryForwardProducedTxs decides when that discard is actually safe. The
+// primary chain is a single linear structure: if the prior window's fork
+// point is still resolvable on it, right now, at its recorded slot, then it
+// was never removed by an intervening deeper rollback, so it must still sit
+// below the new arming point, and every producer it already vetted remains
+// legitimate evidence rather than baggage from an abandoned fork. When the
+// lookup fails or disagrees, the prior window's fork point is gone -- an
+// intervening rollback truncated past it -- and starting empty is what keeps
+// the audit sound against a genuinely different fork.
 func (ls *LedgerState) armContinuationAudit(
 	point ocommon.Point,
 	reason string,
@@ -87,8 +106,14 @@ func (ls *LedgerState) armContinuationAudit(
 			forkPeer = connId.String()
 		}
 	}
+	producedTxs := make(map[string]struct{})
+	if prior := ls.continuationAudit.Load(); prior != nil {
+		for txId := range ls.carryForwardProducedTxs(prior) {
+			producedTxs[txId] = struct{}{}
+		}
+	}
 	ls.continuationAudit.Store(&continuationAuditWindow{
-		producedTxs: make(map[string]struct{}),
+		producedTxs: producedTxs,
 		forkPoint: ocommon.Point{
 			Slot: point.Slot,
 			Hash: append([]byte(nil), point.Hash...),
@@ -97,6 +122,20 @@ func (ls *LedgerState) armContinuationAudit(
 		forkPeer:   forkPeer,
 		remaining:  continuationAuditBlockBudget,
 	})
+}
+
+// carryForwardProducedTxs returns prior's producer set when prior's fork
+// point is still resolvable on the current primary chain at its recorded
+// slot, and nil otherwise. See armContinuationAudit for why that check is
+// sufficient to prove the carried-forward producers are still legitimate.
+func (ls *LedgerState) carryForwardProducedTxs(
+	prior *continuationAuditWindow,
+) map[string]struct{} {
+	stillOnChain, err := ls.blockByHash(prior.forkPoint.Hash)
+	if err != nil || stillOnChain.Slot != prior.forkPoint.Slot {
+		return nil
+	}
+	return prior.producedTxs
 }
 
 // auditContinuationBlock checks that every input a freshly fetched body spends

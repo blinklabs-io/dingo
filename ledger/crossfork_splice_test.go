@@ -377,6 +377,87 @@ func TestContinuationAuditAcceptsProducerInSameWindow(t *testing.T) {
 	)
 }
 
+// TestContinuationAuditRearmPreservesInFlightProducer is the regression for
+// issue #4102: fork churn re-arms the continuation audit from more than one
+// chainsync connection in quick succession, before the ledger apply pipeline
+// (which deliberately lags blockfetch) durably applies a body an earlier
+// window already vetted as an in-window producer. A rearm to a point that is
+// still the same, still-on-chain rollback target must not forget that
+// producer, or the very next audited spend of its output is reported as
+// missing a producer on a chain that never actually diverged.
+func TestContinuationAuditRearmPreservesInFlightProducer(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	var logBuf strings.Builder
+	ls.config.Logger = slog.New(slog.NewJSONHandler(&logBuf, nil))
+	ls.armContinuationAudit(fixture.ancestorTip.Point, "first rollback")
+
+	producerTxId := testHashBytes("rearm-in-flight-producer")
+	producerBlock := &spliceAuditBlock{
+		slot: 30,
+		hash: lcommon.NewBlake2b256(testHashBytes("rearm-producer-block")),
+		txs: []lcommon.Transaction{
+			mustSpliceAuditTx(
+				t,
+				producerTxId,
+				[]lcommon.TransactionInput{
+					mustSpliceAuditInput(t, producerTxId, 9),
+				},
+			),
+		},
+	}
+	ls.auditContinuationBlock(BlockfetchEvent{
+		ConnectionId: fixture.connId,
+		Block:        producerBlock,
+		Point: ocommon.NewPoint(
+			producerBlock.slot,
+			producerBlock.hash.Bytes(),
+		),
+	}, true)
+	require.Contains(
+		t,
+		ls.continuationAudit.Load().producedTxs,
+		string(producerTxId),
+		"producer must be recorded before the rearm",
+	)
+
+	// A second connection resolves the same still-current rollback point
+	// (or any point that has not truncated past it) and re-arms the audit,
+	// exactly as concurrent fork-churn resolutions do.
+	ls.armContinuationAudit(fixture.ancestorTip.Point, "second rollback")
+
+	spenderBlock := &spliceAuditBlock{
+		slot: 40,
+		hash: lcommon.NewBlake2b256(testHashBytes("rearm-spender-block")),
+		txs: []lcommon.Transaction{
+			mustSpliceAuditTx(
+				t,
+				testHashBytes("rearm-in-flight-spender"),
+				[]lcommon.TransactionInput{
+					mustSpliceAuditInput(t, producerTxId, 0),
+				},
+			),
+		},
+	}
+	ls.auditContinuationBlock(BlockfetchEvent{
+		ConnectionId: fixture.connId,
+		Block:        spenderBlock,
+		Point: ocommon.NewPoint(
+			spenderBlock.slot,
+			spenderBlock.hash.Bytes(),
+		),
+	}, true)
+
+	assert.NotContains(
+		t,
+		logBuf.String(),
+		"no producer on the local applied chain",
+		"a producer vetted before a same-point rearm must not be forgotten",
+	)
+}
+
 // TestContinuationAuditBudgetIsBounded verifies the audit stops on its own so a
 // long-lived node never pays for it outside a fork-churn window.
 func TestContinuationAuditBudgetIsBounded(t *testing.T) {

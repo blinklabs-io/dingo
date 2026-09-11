@@ -4507,7 +4507,14 @@ bodies that still fail reach the ordinary validation and recovery guards
 unchanged. Arming only after an aligned rollback is both the cost gate — a
 healthy node never runs the per-input probes on the steady-state blockfetch
 path — and what makes the check sound, since every later block then arrives
-through the window. Each arming inspects at most
+through the window. Fork churn can re-arm the audit from more than one
+chainsync connection before a body an earlier window already vetted is
+durably applied, since ledger apply lags blockfetch by design; a rearm whose
+prior window's fork point is still resolvable on the current primary chain
+(proof that no intervening deeper rollback discarded it) carries that
+window's producers forward instead of discarding them, which is what a
+same-or-later rearm otherwise reported as a false missing-producer splice
+(issue #4102). Each arming inspects at most
 `continuationAuditBlockBudget` bodies and retains at most
 `continuationAuditMaxProducedTxs` in-window producers. The audit is also skipped
 while block validation is off, which is how historical catch-up runs: the splice
