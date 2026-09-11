@@ -64,6 +64,7 @@ var flagSpecs = []flagSpec{
 		"data directory for all storage plugins (overrides CARDANO_DATABASE_PATH)",
 	),
 	stringFlag("BindAddr", "bind-addr", "", "public bind address"),
+	stringFlag("APIBindAddr", "api-bind-addr", "", "API bind address (remote exposure requires authentication)"),
 	stringFlag("SocketPath", "socket-path", "", "path to UNIX socket file"),
 	transformStringFlag(
 		"RunMode",
@@ -414,6 +415,17 @@ var flagSpecs = []flagSpec{
 		"koios-parity-api-key",
 		"",
 		"Koios Bearer token for rate-limited access",
+	),
+	stringFlag(
+		"KoiosParity.BaseURL",
+		"koios-parity-base-url",
+		"",
+		"Koios v1 API root override for a self-hosted instance (default: the public host for --koios-parity-network)",
+	),
+	boolFlag(
+		"KoiosParity.AllowInsecureHTTP",
+		"koios-parity-allow-insecure-http",
+		"allow a plain-HTTP --koios-parity-base-url (local dev/test only; the API key is sent as a Bearer token)",
 	),
 	boolFlag(
 		"KoiosParity.Strict",

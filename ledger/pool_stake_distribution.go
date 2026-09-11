@@ -17,16 +17,72 @@ package ledger
 import (
 	"bytes"
 	"encoding/hex"
+	"fmt"
 	"math/big"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/consensus/praos"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 )
+
+// stakeSnapshotRetentionEpochs mirrors ledger/snapshot/rotation.go's pool
+// mark-snapshot pruning window (cleanupOldSnapshots' currentEpoch-3 default
+// window): rows older than that are physically deleted, so a historical
+// stake-distribution query pinned further back than this cannot be
+// reconstructed. Not shared as an exported constant from ledger/snapshot
+// because that package does not itself export it; kept in sync by comment
+// reference rather than by import to avoid coupling this query path to
+// snapshot rotation internals.
+const stakeSnapshotRetentionEpochs = 3
+
+// checkAsOfEpochRecency rejects a historical epoch already outside the pool
+// mark-snapshot retention window, or ahead of the live epoch
+// (blinklabs-io/dingo#382).
+//
+// The window is checked on the derived mark-snapshot epoch
+// (praos.StakeSnapshotEpoch(targetEpoch), i.e. targetEpoch-1), not on
+// targetEpoch itself: cleanupOldSnapshots' default retention floor
+// (liveEpoch-stakeSnapshotRetentionEpochs) is a floor on snapshot epochs,
+// and the snapshot a query at targetEpoch needs is one epoch further back
+// than targetEpoch. Comparing targetEpoch directly against that floor is
+// off by the same one-epoch shift: at liveEpoch 6, targetEpoch 3 resolves
+// to snapshot epoch 2, which the floor (6-3=3) has already pruned, but
+// 6-3=3 is not > 3 so the un-shifted comparison wrongly accepted it.
+func checkAsOfEpochRecency(targetEpoch, liveEpoch uint64) error {
+	if targetEpoch > liveEpoch {
+		return fmt.Errorf(
+			"%w: as-of epoch %d is ahead of the live epoch (%d)",
+			ErrHistoricalStateUnavailable,
+			targetEpoch,
+			liveEpoch,
+		)
+	}
+	if liveEpoch < stakeSnapshotRetentionEpochs {
+		// cleanupOldSnapshots itself does nothing below this floor (its own
+		// currentEpoch < 3 guard) -- nothing has ever been pruned yet.
+		return nil
+	}
+	deleteBeforeEpoch := liveEpoch - stakeSnapshotRetentionEpochs
+	snapshotEpoch := praos.StakeSnapshotEpoch(targetEpoch)
+	if snapshotEpoch < deleteBeforeEpoch {
+		return fmt.Errorf(
+			"%w: as-of epoch %d (mark snapshot epoch %d) is outside the "+
+				"retained pool-snapshot window (rows below epoch %d have "+
+				"been pruned) behind the live epoch (%d)",
+			ErrHistoricalStateUnavailable,
+			targetEpoch,
+			snapshotEpoch,
+			deleteBeforeEpoch,
+			liveEpoch,
+		)
+	}
+	return nil
+}
 
 // PoolStakeShare is one pool's entry in the active stake distribution.
 type PoolStakeShare struct {
@@ -94,29 +150,68 @@ type PoolStakeDistribution struct {
 // rather than reported with a zero VRF key hash, which would read as a real
 // key. Its stake stays in TotalActiveStake, so every reported pool's own
 // fraction is unaffected by the omission.
+//
+// at pins the distribution to the historical point instead of
+// live-right-now (blinklabs-io/dingo#382): unpinned means live (the
+// existing default). A pinned at resolves to the epoch that governed that
+// slot and uses that epoch's mark snapshot instead of the live tip's --
+// this is a real historical reconstruction, not an approximation, because
+// the mark snapshot is already persisted per-epoch for leader election.
+// checkAsOfEpochRecency rejects a historical epoch already outside the
+// mark-snapshot retention window (ledger/snapshot's pool-snapshot pruning),
+// since those rows are physically gone. at.Slot ahead of the transaction
+// tip is rejected directly (not just by epoch): GetEpochBySlot can resolve
+// a future slot within the live epoch to that same live epoch, which would
+// otherwise let a future-slot pin silently pass as "live epoch, therefore
+// fine" despite naming a point that has not happened yet.
+//
+// txn reuses an already-open transaction (Query's point-validation
+// transaction, when called through it) rather than opening a fresh one, so
+// a pinned call's point-validation and this read share one consistent
+// snapshot -- nil opens and releases one internally, for a caller (a
+// direct, unpinned RPC handler) with no such transaction of its own.
 func (ls *LedgerState) PoolStakeDistribution(
 	poolFilter []lcommon.PoolKeyHash,
+	at QueryPoint,
+	txn *database.Txn,
 ) (*PoolStakeDistribution, error) {
 	// The per-pool stakes, their total, and the epoch naming the snapshot they
 	// come from all have to come from one view: read separately, an epoch
 	// boundary landing in between would produce fractions that do not sum to
 	// one, or a distribution belonging to an epoch other than the one this
 	// query resolved.
-	txn := ls.db.Transaction(false)
-	defer txn.Release()
+	if txn == nil {
+		txn = ls.db.Transaction(false)
+		defer txn.Release()
+	}
 	metaTxn := txn.Metadata()
 
-	// The epoch comes from the tip inside this transaction rather than from the
-	// in-memory consensus snapshot; see epochAtTip for why. A chain that has
-	// applied no blocks has no epoch record covering its tip, and epoch zero is
-	// the right answer there.
-	tip, current, err := ls.epochAtTip(txn)
+	// The tip comes from this transaction rather than the in-memory
+	// consensus snapshot; see epochAtTip for why.
+	tip, err := ls.db.GetTip(txn)
 	if err != nil {
 		return nil, err
 	}
-	var epoch uint64
-	if current != nil {
-		epoch = current.EpochId
+	if at.pinned() && at.Slot > tip.Point.Slot {
+		return nil, fmt.Errorf(
+			"%w: as-of slot %d is ahead of the current tip (slot %d)",
+			ErrHistoricalStateUnavailable,
+			at.Slot,
+			tip.Point.Slot,
+		)
+	}
+	epoch, err := ls.resolveAsOfEpoch(txn, at)
+	if err != nil {
+		return nil, err
+	}
+	if at.pinned() {
+		liveEpoch, err := ls.resolveAsOfEpoch(txn, QueryPoint{})
+		if err != nil {
+			return nil, err
+		}
+		if err := checkAsOfEpochRecency(epoch, liveEpoch); err != nil {
+			return nil, err
+		}
 	}
 	snapshotEpoch := praos.StakeSnapshotEpoch(epoch)
 

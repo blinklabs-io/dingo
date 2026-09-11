@@ -33,6 +33,8 @@ import (
 // any work when the CIP-0163 delegator-inactivity gate is enabled, because a
 // Mithril bootstrap cannot carry reward-account expiration state.
 func TestMithrilSyncRefusedWithDelegatorInactivity(t *testing.T) {
+	t.Parallel()
+
 	cmd := &cobra.Command{}
 	cmd.SetContext(config.WithContext(context.Background(), &config.Config{
 		DelegatorInactivityEnabled: true,
@@ -47,6 +49,8 @@ func TestMithrilSyncRefusedWithDelegatorInactivity(t *testing.T) {
 // the gate is enabled AND the database was Mithril-bootstrapped. It is a no-op
 // with the gate off, and allowed on a fresh (genesis-synced) database.
 func TestCheckMithrilInactivityCompat(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Gate off: no-op, no database access.
@@ -87,6 +91,8 @@ func TestCheckMithrilInactivityCompat(t *testing.T) {
 // Serving with the gate enabled must still be refused, or such a database could
 // start with CIP-0163 enabled and diverge from a genesis-synced node.
 func TestCheckMithrilInactivityCompatLegacyMarker(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	dir := t.TempDir()

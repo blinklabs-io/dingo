@@ -69,7 +69,10 @@ func TestForgeEBCapsExplicitZeroDisablesThem(t *testing.T) {
 // on purpose; ledger/forging asserts the same literals from its side.
 func TestForgeEBCapDefaultsArePinned(t *testing.T) {
 	if DefaultForgeEBMaxTxRefs != 20000 {
-		t.Fatalf("forgeEbMaxTxRefs default drifted: %d", DefaultForgeEBMaxTxRefs)
+		t.Fatalf(
+			"forgeEbMaxTxRefs default drifted: %d",
+			DefaultForgeEBMaxTxRefs,
+		)
 	}
 	if DefaultForgeEBMaxBytes != 25165824 {
 		t.Fatalf("forgeEbMaxBytes default drifted: %d", DefaultForgeEBMaxBytes)

@@ -89,6 +89,8 @@ func seedRetentionRewardEpochs(t *testing.T, db *database.Database) {
 // validateRewardCalculatorInputs an unreconcilable snapshot, whose error would
 // fail the whole epoch rollover.
 func TestApplyStakeRewardsSkipsPrunedStakeInputs(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newRewardCalculationTestLedger(t)
 	meta := db.Metadata()
 
@@ -180,6 +182,8 @@ func TestApplyStakeRewardsSkipsPrunedStakeInputs(t *testing.T) {
 // credential set too, and must still reconcile as a normal (non-pruned)
 // snapshot rather than tripping the retention skip.
 func TestApplyStakeRewardsAcceptsZeroDelegatorSnapshot(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newRewardCalculationTestLedger(t)
 	meta := db.Metadata()
 

@@ -31,6 +31,8 @@ import (
 )
 
 func TestSlotCalc(t *testing.T) {
+	t.Parallel()
+
 	testLedgerState := &LedgerState{
 		epochCache: []models.Epoch{
 			{
@@ -155,6 +157,8 @@ func TestSlotCalc(t *testing.T) {
 }
 
 func TestSlotToEpochProjection(t *testing.T) {
+	t.Parallel()
+
 	// Test that SlotToEpoch correctly projects future epochs beyond known epochs
 	testLedgerState := &LedgerState{
 		epochCache: []models.Epoch{
@@ -268,6 +272,8 @@ func TestSlotToEpochProjection(t *testing.T) {
 }
 
 func TestSlotToEpochEmptyCache(t *testing.T) {
+	t.Parallel()
+
 	testLedgerState := &LedgerState{
 		epochCache: []models.Epoch{},
 	}
@@ -283,6 +289,8 @@ func TestSlotToEpochEmptyCache(t *testing.T) {
 }
 
 func TestSlotToEpochBeforeFirstEpoch(t *testing.T) {
+	t.Parallel()
+
 	// Test that slots before the first known epoch return an error
 	testLedgerState := &LedgerState{
 		epochCache: []models.Epoch{
@@ -370,6 +378,8 @@ func slotToTimeBehindHorizonState(
 // the wall clock is far ahead, every tick logged an error and retried after
 // 100ms instead of sleeping to the next slot boundary.
 func TestSlotToTimeExtrapolatesNextSlotWhileBehindHorizon(t *testing.T) {
+	t.Parallel()
+
 	const slotLengthMs = 1000
 	ls, nowSlot, now := slotToTimeBehindHorizonState(
 		t, slotLengthMs, 5_000_000,
@@ -423,6 +433,8 @@ func TestSlotToTimeExtrapolatesNextSlotWhileBehindHorizon(t *testing.T) {
 // window rejected it, SlotToTime returned ErrPastHorizon, and the clock fell
 // back into the 100ms error-retry loop this fallback exists to avoid.
 func TestSlotToTimeExtrapolatesNextSlotOnLongSlotEras(t *testing.T) {
+	t.Parallel()
+
 	const (
 		byronSlotLengthMs = 20_000
 		byronSlotLength   = 20 * time.Second
@@ -463,6 +475,8 @@ func TestSlotToTimeExtrapolatesNextSlotOnLongSlotEras(t *testing.T) {
 
 // The window scales with slot length but stays a bounded operational window.
 func TestWithinOperationalWindowScalesWithSlotLength(t *testing.T) {
+	t.Parallel()
+
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 	// With no slot length it is the plain near-now window.

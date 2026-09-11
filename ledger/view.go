@@ -70,6 +70,28 @@ type LedgerView struct {
 	// in charge, which is correct for every caller with no applied block in
 	// hand (mempool validation, standalone evaluation).
 	horizonAnchorSlot uint64
+	// syntheticV2CostModel is pinned from the same snapshot pparams (pp) was
+	// captured from -- see pinSyntheticV2CostModel and
+	// SyntheticV2CostModelInEffect. It must not be re-read live from
+	// ls.loadConsensusSnapshot() at query time: a validation operation can
+	// run long enough (evaluating scripts) that the writer publishes a
+	// newer snapshot in the meantime, which would let this disagree with pp
+	// -- the exact protocol parameters this operation is actually
+	// evaluating against. See blinklabs-io/dingo#3962's PR review.
+	syntheticV2CostModel bool
+}
+
+// pinSyntheticV2CostModel records whether the PlutusV2 cost model was still
+// synthetic in the same snapshot pp (passed to ValidateTxFunc/EvaluateTxFunc
+// alongside this view) was captured from. Every call site that pins
+// committee state alongside pp also pins this.
+func (lv *LedgerView) pinSyntheticV2CostModel(inEffect bool) *LedgerView {
+	lv.syntheticV2CostModel = inEffect
+	return lv
+}
+
+func uint64Ptr(value uint64) *uint64 {
+	return &value
 }
 
 func (lv *LedgerView) pinCommitteeState(
@@ -618,6 +640,24 @@ func (lv *LedgerView) CostModels() map[lcommon.PlutusLanguage]lcommon.CostModel 
 		return map[lcommon.PlutusLanguage]lcommon.CostModel{}
 	}
 	return extractCostModelsFromPParams(pp)
+}
+
+// SyntheticV2CostModelInEffect reports whether the PlutusV2 cost model
+// currently in force is still HardForkBabbage's fabricated default rather
+// than real governance/protocol-update data -- see
+// LedgerState.syntheticV2CostModel (blinklabs-io/dingo#3825,
+// blinklabs-io/dingo#3962). ledger/eras validation code (which cannot import
+// this package) type-asserts its lcommon.LedgerState parameter against a
+// locally declared interface with this exact method signature to reach it
+// without a package cycle.
+//
+// Returns the value pinSyntheticV2CostModel recorded, not a live read of
+// ls.loadConsensusSnapshot() -- see syntheticV2CostModel's field doc
+// comment for why a live read would be unsound here. A *LedgerView this
+// wasn't called on (e.g. a test constructing one directly) reports false,
+// matching the field's zero value.
+func (lv *LedgerView) SyntheticV2CostModelInEffect() bool {
+	return lv.syntheticV2CostModel
 }
 
 // costModelsProvider is an optional interface implemented by
@@ -1241,8 +1281,17 @@ func (lv *LedgerView) DRepRegistration(
 		}
 		return nil, fmt.Errorf("get drep: %w", err)
 	}
+	deposit, err := lv.ls.db.GetDrepLastRegistrationDeposit(
+		drep.CredentialTag,
+		credential[:],
+		lv.txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get drep last registration deposit: %w", err)
+	}
 	reg := &lcommon.DRepRegistration{
 		Credential: credential,
+		Deposit:    deposit,
 	}
 	if drep.AnchorURL != "" || len(drep.AnchorHash) > 0 {
 		if len(drep.AnchorHash) != 32 {
@@ -1267,10 +1316,36 @@ func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
 	if err != nil {
 		return nil, fmt.Errorf("get active dreps: %w", err)
 	}
+	// One batched read rather than a deposit query per DRep, because
+	// mainnet has thousands of active DReps, and scoped to the same active
+	// credential set fetched above so registration history left behind by
+	// DReps that have since deregistered cannot grow this. A credential
+	// with no registration row is absent from the map and reads back as
+	// the zero value, matching the singular form above.
+	//
+	// This method is not itself on the validation path: gouroboros
+	// declares it on common.DRepState but the Conway rules reach DRep
+	// state only through the singular DRepRegistration, and nothing in
+	// either tree calls the plural form outside gouroboros's own test
+	// mocks. The batching bounds the cost of a caller that does appear
+	// rather than one that exists today.
+	deposits, err := lv.ls.db.GetDrepLastRegistrationDeposits(lv.txn)
+	if err != nil {
+		return nil, fmt.Errorf("get drep last registration deposits: %w", err)
+	}
 	registrations := make([]lcommon.DRepRegistration, 0, len(dreps))
 	for _, drep := range dreps {
+		deposit, ok := deposits[models.DrepDepositKey(
+			drep.CredentialTag,
+			drep.Credential,
+		)]
+		var depositPtr *uint64
+		if ok {
+			depositPtr = uint64Ptr(deposit)
+		}
 		reg := lcommon.DRepRegistration{
 			Credential: lcommon.NewBlake2b224(drep.Credential),
+			Deposit:    depositPtr,
 		}
 		if drep.AnchorURL != "" || len(drep.AnchorHash) > 0 {
 			if len(drep.AnchorHash) != 32 {

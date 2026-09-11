@@ -107,6 +107,8 @@ func seedTestChain(
 // legal K-bounded rollback by construction no matter how far the chain has
 // advanced since the rewind began.
 func TestWindowedRewindConvergesWhilePrimaryChainExtends(t *testing.T) {
+	t.Parallel()
+
 	const (
 		securityParam = 8
 		blockCount    = 240
@@ -150,9 +152,7 @@ func TestWindowedRewindConvergesWhilePrimaryChainExtends(t *testing.T) {
 	// re-reads the live tip still converges.
 	stop := make(chan struct{})
 	var appender sync.WaitGroup
-	appender.Add(1)
-	go func() {
-		defer appender.Done()
+	appender.Go(func() {
 		lastPoint := pc.Tip().Point
 		for seq := 0; ; seq++ {
 			select {
@@ -182,7 +182,7 @@ func TestWindowedRewindConvergesWhilePrimaryChainExtends(t *testing.T) {
 			}
 			lastPoint = ocommon.NewPoint(next.Slot, next.Hash)
 		}
-	}()
+	})
 
 	target := ocommon.NewPoint(raw[0].Slot, raw[0].Hash)
 	rewindErr := ls.rollbackPrimaryChainInSecurityParamWindows(target)
@@ -211,6 +211,8 @@ func TestWindowedRewindConvergesWhilePrimaryChainExtends(t *testing.T) {
 // stuck-pipeline watchdog correctly announcing that the failure was
 // deterministic while the node kept retrying anyway.
 func TestDeterministicTxRecoveryHaltsOnUnreachableRewind(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	require.NoError(t, err)
@@ -277,6 +279,8 @@ func TestDeterministicTxRecoveryHaltsOnUnreachableRewind(t *testing.T) {
 // different one and must start with a fresh budget rather than inherit a tally
 // that has nothing to do with it.
 func TestRecoveryRewindHaltBudgetResetsOnTipProgress(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	require.NoError(t, err)
@@ -336,6 +340,8 @@ func TestRecoveryRewindHaltBudgetResetsOnTipProgress(t *testing.T) {
 // a different step target against a larger gap, and the halt must still
 // arrive.
 func TestRecoveryRewindHaltsThoughTargetMovesAndDepthGrows(t *testing.T) {
+	t.Parallel()
+
 	const (
 		chainK        = 4
 		ledgerWindow  = 8
@@ -401,6 +407,9 @@ func TestRecoveryRewindHaltsThoughTargetMovesAndDepthGrows(t *testing.T) {
 			validationErr,
 		)
 		require.ErrorIs(t, lastErr, chain.ErrRollbackExceedsSecurityParam)
+		// require.ErrorIs above fails the test on a nil lastErr, which nilaway
+		// does not model.
+		//nolint:nilaway // non-nil per the require.ErrorIs above
 		seenTargets[lastErr.Error()] = struct{}{}
 		if errors.Is(lastErr, errHaltLedgerPipeline) {
 			halted = true
@@ -445,6 +454,9 @@ func TestRecoveryRewindHaltsThoughTargetMovesAndDepthGrows(t *testing.T) {
 	)
 	require.Greater(
 		t,
+		// maxAttempts is a positive constant, so the loop above appended at
+		// least one tip; nilaway does not reason about the loop bound.
+		//nolint:nilaway // the loop above appends at least one entry
 		chainTips[len(chainTips)-1],
 		chainTips[0],
 		"the fork must extend while the applied ledger tip stays pinned",
@@ -473,6 +485,8 @@ func TestRecoveryRewindHaltsThoughTargetMovesAndDepthGrows(t *testing.T) {
 // the chain tip, so it is present by point and absent from the chain: the
 // store lookup accepts it and the chain's own membership check does not.
 func TestWindowedRewindRefusesRecoveryTargetTheChainDoesNotHold(t *testing.T) {
+	t.Parallel()
+
 	const (
 		securityParam = 8
 		blockCount    = 60
@@ -530,16 +544,20 @@ func TestWindowedRewindRefusesRecoveryTargetTheChainDoesNotHold(t *testing.T) {
 	)
 }
 
-// TestWindowedRewindRefusesSlotZeroTargetTheStoreDoesNotHold covers the one
-// target shape Chain.ValidateRollback cannot speak for.
+// TestWindowedRewindRefusesSlotZeroTargetTheStoreDoesNotHold pins the entry
+// check for a slot-zero target, from this package's side of the boundary.
 //
-// ValidateRollback reads every slot-zero point as origin and skips its
-// membership check there, and Chain.Rollback does the same: it truncates to
-// index zero and sets currentTip to the point it was given. A slot-zero point
-// carrying a hash would therefore pass the entry check and take the descent
-// all the way down, leaving the chain empty and its tip naming a block the
-// store need not hold, so the entry check keeps the store lookup for it.
+// Slot 0 is a real slot, so a point carrying a hash names a block there. When
+// ValidateRollback gated its lookup on point.Slot > 0 such a target skipped
+// membership validation, passed the entry check and took the descent all the
+// way down, leaving the chain empty and its tip naming a block the store need
+// not hold; this package compensated with its own store lookup. ValidateRollback
+// now resolves any hash-bearing point, so the refusal comes from the chain's
+// membership check and the local lookup is gone -- this test is what proves
+// the coverage moved rather than disappeared.
 func TestWindowedRewindRefusesSlotZeroTargetTheStoreDoesNotHold(t *testing.T) {
+	t.Parallel()
+
 	const (
 		securityParam = 8
 		blockCount    = 30

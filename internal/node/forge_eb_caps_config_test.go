@@ -146,6 +146,9 @@ func TestBuildDingoConfigWiresForgeEBSelectionReserve(t *testing.T) {
 	)
 
 	if got := built.ForgeEBSelectionReserve(); got != 750*time.Millisecond {
-		t.Fatalf("expected forgeEbSelectionReserve 750ms to flow through, got %s", got)
+		t.Fatalf(
+			"expected forgeEbSelectionReserve 750ms to flow through, got %s",
+			got,
+		)
 	}
 }

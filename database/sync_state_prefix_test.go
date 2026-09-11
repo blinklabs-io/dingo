@@ -29,6 +29,8 @@ import (
 // mishandle. The prefix also contains a LIKE wildcard ('_') to prove no
 // wildcard escaping is needed.
 func TestListSyncStateKeysByPrefix(t *testing.T) {
+	t.Parallel()
+
 	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, db.Close()) }()

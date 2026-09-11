@@ -73,6 +73,8 @@ var domainAccessors = []struct {
 // undo the narrowing, and a returned *sqlstore.Store satisfies the narrow
 // interface either way.
 func TestFacadesDependOnNarrowStores(t *testing.T) {
+	t.Parallel()
+
 	for _, a := range domainAccessors {
 		t.Run(a.name, func(t *testing.T) {
 			typ := reflect.TypeOf(a.accessor)
@@ -98,6 +100,8 @@ func TestFacadesDependOnNarrowStores(t *testing.T) {
 // wrong source. Comparing against the pointer that was installed is what
 // makes that a failure.
 func TestDomainAccessorsReturnBackingStore(t *testing.T) {
+	t.Parallel()
+
 	backing := &stubDomainMetadataStore{}
 	d := &Database{metadata: backing}
 

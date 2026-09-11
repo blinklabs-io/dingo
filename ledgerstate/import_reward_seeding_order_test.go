@@ -48,6 +48,8 @@ import (
 // first, and a row-level assertion alone would pass for reasons that have
 // nothing to do with the sequence.
 func TestImportSnapShotsSeedsAfterEveryPoolImportStage(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 
