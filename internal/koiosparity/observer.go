@@ -253,88 +253,8 @@ func (o *Observer) Start(ctx context.Context) error {
 		return err
 	}
 
-	latest, err := o.cfg.Source.GetLatestEpoch(ctx)
-	if err != nil {
-		o.cfg.Logger.Debug(
-			"koiosparity observer: no committed epoch data yet at startup",
-			"error", err,
-		)
-	} else if latest > 0 {
-		// latest is Dingo's own current (most recently started) epoch; only
-		// epochs strictly before it are safely closed — mirrors Fetch's own
-		// "tipEpoch - 1" bound.
-		throughEpoch := latest - 1
-		needing, err := o.cache.GetEpochsNeedingCheck(
-			o.cfg.Network,
-			o.cfg.AccountsEnabled,
-		)
-		if err != nil {
-			return fmt.Errorf("seed koiosparity observer backlog: %w", err)
-		}
-		uncached, err := o.cache.GetUncachedEpochs(o.cfg.Network, 0, throughEpoch)
-		if err != nil {
-			return fmt.Errorf("seed koiosparity observer backlog: %w", err)
-		}
-		o.mu.Lock()
-		for _, e := range needing {
-			if e <= throughEpoch {
-				o.pending[e] = struct{}{}
-			}
-		}
-		for _, e := range uncached {
-			o.pending[e] = struct{}{}
-		}
-		o.mu.Unlock()
-
-		// An epoch whose pool data/check status is already fine can still be
-		// missing #3097's per-account coverage entirely (e.g. it was fetched
-		// before AccountsEnabled was turned on) — neither GetEpochsNeedingCheck
-		// nor GetUncachedEpochs above would ever flag it purely for that
-		// reason once accountsEnabled's own staleness branch is satisfied by a
-		// prior check. Add those epochs to the backlog too, independent of why
-		// GetEpochsNeedingCheck/GetUncachedEpochs may or may not have already
-		// selected them, the same way fetchIfNeeded's fetchAccountsIfNeeded
-		// gates on account coverage independently of fetchPoolsIfNeeded.
-		if o.cfg.AccountsEnabled {
-			missingAccounts, err := o.cache.GetEpochsMissingAccountCoverage(
-				o.cfg.Network,
-				0,
-				throughEpoch,
-			)
-			if err != nil {
-				return fmt.Errorf(
-					"seed koiosparity observer backlog: %w",
-					err,
-				)
-			}
-			o.mu.Lock()
-			for _, e := range missingAccounts {
-				o.pending[e] = struct{}{}
-			}
-			o.mu.Unlock()
-		}
-
-		// Same shape, for the same reason, one column over: an epoch cached
-		// before protocol-parameter comparison existed has a
-		// koios_epoch_info row and a stored PASS, so neither
-		// GetEpochsNeedingCheck nor GetUncachedEpochs above ever returns it.
-		// Without this seed the epoch is never queued, processEpoch never
-		// runs, and fetchIfNeeded's fetchParamsIfNeeded gate is never
-		// reached — the parameter row would never arrive for exactly the
-		// caches that need backfilling.
-		missingParams, err := o.cache.GetEpochsMissingParams(
-			o.cfg.Network,
-			0,
-			throughEpoch,
-		)
-		if err != nil {
-			return fmt.Errorf("seed koiosparity observer backlog: %w", err)
-		}
-		o.mu.Lock()
-		for _, e := range missingParams {
-			o.pending[e] = struct{}{}
-		}
-		o.mu.Unlock()
+	if err := o.seedBacklog(ctx); err != nil {
+		return err
 	}
 
 	runCtx, cancel := context.WithCancel(ctx)
@@ -344,6 +264,136 @@ func (o *Observer) Start(ctx context.Context) error {
 		o.run(runCtx)
 	})
 	o.signalWake()
+	return nil
+}
+
+// seedBacklog implements Start's backlog-seed step: see Start's doc comment.
+// Factored out (rather than inlined in Start) so a test can exercise exactly
+// what gets added to o.pending without racing run's background goroutine,
+// which Start launches immediately afterward.
+func (o *Observer) seedBacklog(ctx context.Context) error {
+	latest, err := o.cfg.Source.GetLatestEpoch(ctx)
+	if err != nil {
+		o.cfg.Logger.Debug(
+			"koiosparity observer: no committed epoch data yet at startup",
+			"error", err,
+		)
+		return nil
+	}
+	if latest == 0 {
+		return nil
+	}
+
+	// latest is Dingo's own current (most recently started) epoch; only
+	// epochs strictly before it are safely closed — mirrors Fetch's own
+	// "tipEpoch - 1" bound.
+	throughEpoch := latest - 1
+
+	// seedFrom additionally bounds every backlog-seed query below at
+	// this node's own earliest available ledger epoch (its Mithril
+	// bootstrap boundary, when one is recorded), on top of the
+	// pre-staking floor checkEpoch already applies on its own. Without
+	// this, a fresh Mithril-bootstrapped node — which has no local
+	// ledger history before that boundary by construction — would seed
+	// its entire backlog from epoch 0 and spend a Koios fetch on every
+	// one of what can be well over a thousand epochs it can never have
+	// local data for (dingo #4172). haveEarliestAvailable is false for
+	// a non-Mithril, genesis-synced node, in which case seedFrom stays
+	// 0 and behavior is unchanged from before this bound existed.
+	seedFrom := uint64(0)
+	earliestAvailable, haveEarliestAvailable, err := o.cfg.Source.GetEarliestAvailableEpoch(
+		ctx,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"seed koiosparity observer backlog: resolve earliest available epoch: %w",
+			err,
+		)
+	}
+	if haveEarliestAvailable && earliestAvailable > seedFrom {
+		seedFrom = earliestAvailable
+	}
+
+	// A fresh Mithril-bootstrapped node may not have closed a single
+	// epoch past its own bootstrap boundary yet, in which case
+	// seedFrom > throughEpoch and there is nothing this node could
+	// possibly have local data for — leave the backlog empty rather
+	// than pass an inverted range to the queries below.
+	if seedFrom > throughEpoch {
+		return nil
+	}
+
+	needing, err := o.cache.GetEpochsNeedingCheck(
+		o.cfg.Network,
+		o.cfg.AccountsEnabled,
+	)
+	if err != nil {
+		return fmt.Errorf("seed koiosparity observer backlog: %w", err)
+	}
+	uncached, err := o.cache.GetUncachedEpochs(o.cfg.Network, seedFrom, throughEpoch)
+	if err != nil {
+		return fmt.Errorf("seed koiosparity observer backlog: %w", err)
+	}
+	o.mu.Lock()
+	for _, e := range needing {
+		if e >= seedFrom && e <= throughEpoch {
+			o.pending[e] = struct{}{}
+		}
+	}
+	for _, e := range uncached {
+		o.pending[e] = struct{}{}
+	}
+	o.mu.Unlock()
+
+	// An epoch whose pool data/check status is already fine can still be
+	// missing #3097's per-account coverage entirely (e.g. it was fetched
+	// before AccountsEnabled was turned on) — neither GetEpochsNeedingCheck
+	// nor GetUncachedEpochs above would ever flag it purely for that
+	// reason once accountsEnabled's own staleness branch is satisfied by a
+	// prior check. Add those epochs to the backlog too, independent of why
+	// GetEpochsNeedingCheck/GetUncachedEpochs may or may not have already
+	// selected them, the same way fetchIfNeeded's fetchAccountsIfNeeded
+	// gates on account coverage independently of fetchPoolsIfNeeded.
+	if o.cfg.AccountsEnabled {
+		missingAccounts, err := o.cache.GetEpochsMissingAccountCoverage(
+			o.cfg.Network,
+			seedFrom,
+			throughEpoch,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"seed koiosparity observer backlog: %w",
+				err,
+			)
+		}
+		o.mu.Lock()
+		for _, e := range missingAccounts {
+			o.pending[e] = struct{}{}
+		}
+		o.mu.Unlock()
+	}
+
+	// Same shape, for the same reason, one column over: an epoch cached
+	// before protocol-parameter comparison existed has a
+	// koios_epoch_info row and a stored PASS, so neither
+	// GetEpochsNeedingCheck nor GetUncachedEpochs above ever returns it.
+	// Without this seed the epoch is never queued, processEpoch never
+	// runs, and fetchIfNeeded's fetchParamsIfNeeded gate is never
+	// reached — the parameter row would never arrive for exactly the
+	// caches that need backfilling.
+	missingParams, err := o.cache.GetEpochsMissingParams(
+		o.cfg.Network,
+		seedFrom,
+		throughEpoch,
+	)
+	if err != nil {
+		return fmt.Errorf("seed koiosparity observer backlog: %w", err)
+	}
+	o.mu.Lock()
+	for _, e := range missingParams {
+		o.pending[e] = struct{}{}
+	}
+	o.mu.Unlock()
 	return nil
 }
 
