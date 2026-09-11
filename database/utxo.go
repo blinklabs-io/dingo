@@ -271,41 +271,6 @@ func loadCbor(u *models.Utxo, txn *Txn) error {
 	return nil
 }
 
-// ResolveUtxoCborWithRecovery resolves a UTxO's CBOR via the tiered cache,
-// falling back to reconstructing it from the producing block (the same
-// recovery loadCbor performs for UtxoByRef and IterateLiveUtxos) when the
-// blob has gone missing but is reconstructable. Returns
-// ErrUtxoCborUnavailable when recovery itself confirms the CBOR cannot be
-// reconstructed.
-//
-// Prefer this over CborCache().ResolveUtxoCbor for a caller that has only a
-// bare ref (not a *models.Utxo already loaded via GetUtxo) and must not
-// silently treat a recoverable missing blob as absent -- e.g.
-// ledger.queryShelleyUtxoWhole, which answers GetUTxOWhole and would
-// otherwise return an incomplete reply for a row IterateLiveUtxos'
-// loadCbor-based path would have recovered.
-func (d *Database) ResolveUtxoCborWithRecovery(
-	txId []byte,
-	outputIdx uint32,
-	txn *Txn,
-) ([]byte, error) {
-	// recoverUtxoCbor (unlike CborCache().ResolveUtxoCbor) requires a real
-	// *Txn -- mirror UtxoByRef's nil handling here rather than passing a nil
-	// txn through to it.
-	if txn == nil {
-		txn = d.Transaction(false)
-		defer txn.Release()
-	}
-	cbor, err := d.CborCache().ResolveUtxoCbor(txId, outputIdx, txn)
-	if err != nil {
-		if errors.Is(err, types.ErrBlobKeyNotFound) {
-			return recoverUtxoCbor(d, txn, txId, outputIdx)
-		}
-		return nil, err
-	}
-	return cbor, nil
-}
-
 func recoverUtxoCbor(
 	db *Database,
 	txn *Txn,
@@ -1306,28 +1271,6 @@ func (d *Database) IterateLiveUtxos(
 	}
 	return d.Transaction(false).Do(func(t *Txn) error {
 		return d.utxoStore().IterateLiveUtxos(t.Metadata(), withCbor(t))
-	})
-}
-
-// IterateLiveUtxoRefs invokes fn once for each live UTxO row (DeletedSlot ==
-// 0), like IterateLiveUtxos, but does not resolve u.Cbor -- it is left as
-// the store's raw stored value (a CborOffset reference, not the referenced
-// output CBOR). For a caller that needs every live UTxO's CBOR and wants to
-// resolve it itself (e.g. across a worker pool, rather than serially via
-// IterateLiveUtxos' inline loadCbor -- see ledger.queryShelleyUtxoWhole).
-// As with IterateLiveUtxos, the callback receives a pointer to a row whose
-// underlying buffer is reused between callbacks -- copy out anything (e.g.
-// u.TxId) you intend to retain past the current call.
-// When txn is nil a read transaction is opened internally.
-func (d *Database) IterateLiveUtxoRefs(
-	txn *Txn,
-	fn func(*models.Utxo) error,
-) error {
-	if txn != nil {
-		return d.utxoStore().IterateLiveUtxos(txn.Metadata(), fn)
-	}
-	return d.Transaction(false).Do(func(t *Txn) error {
-		return d.utxoStore().IterateLiveUtxos(t.Metadata(), fn)
 	})
 }
 

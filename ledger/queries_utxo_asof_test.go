@@ -17,9 +17,12 @@ package ledger
 import (
 	"bytes"
 	"encoding/hex"
+	"strings"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/config/cardano"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -319,6 +322,72 @@ func TestQueryShelleyUtxoByTxIn_RetentionWindow_APIModeNeverRejects(
 		nil,
 	)
 	require.NoError(t, err)
+}
+
+// TestQueryShelleyUtxoByTxIn_RetentionWindow_SurvivesEraWindowWidening covers
+// the gap a retention floor derived from only the CURRENT era's stability
+// window leaves open right after an era transition that widens it (Byron's
+// small 2k vs every Shelley+ era's much larger 3k/f): periodic cleanup
+// recomputes its own floor from whatever era was live each time it ran, so a
+// row pruned while still in Byron can already be gone even though the
+// current (Shelley+) era's own window alone would compute a floor far
+// enough back in time to call this pin "safe." checkUtxoRetentionWindow
+// must reject using the smaller of the two windows (minEverStabilityWindow),
+// not just the current era's.
+func TestQueryShelleyUtxoByTxIn_RetentionWindow_SurvivesEraWindowWidening(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	byronGenesisJSON := `{
+		"protocolConsts": {"k": 10, "protocolMagic": 2}
+	}`
+	shelleyGenesisJSON := `{
+		"activeSlotsCoeff": 0.05,
+		"securityParam": 10,
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`
+	cfg := &cardano.CardanoNodeConfig{}
+	require.NoError(
+		t,
+		cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)),
+	)
+	require.NoError(
+		t,
+		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+	)
+
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	ls.config.CardanoNodeConfig = cfg
+	// Byron window = 2*10 = 20; Shelley window = 3*10/0.05 = 600. Node is
+	// now past Byron, in a Shelley+ era.
+	ls.currentEra = eras.ShelleyEraDesc
+
+	const tipSlot = 1_000
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(tipSlot, repeatedBytes(32, 0x0B)),
+	}, nil))
+
+	// The current era's own window alone would compute floor = 1000 - 600 =
+	// 400, incorrectly accepting slot 500 as "safely retained." The correct,
+	// Byron-aware floor is 1000 - 20 = 980, which must reject it.
+	txIn := ledger.NewShelleyTransactionInput(
+		hex.EncodeToString(repeatedBytes(32, 0xEE)),
+		0,
+	)
+	_, err := ls.queryShelleyUtxoByTxIn(
+		[]ledger.ShelleyTransactionInput{txIn},
+		QueryPoint{Slot: 500},
+		nil,
+	)
+	require.Error(
+		t,
+		err,
+		"a pin the current era's window alone would wrongly call safe "+
+			"must still be rejected using the smaller Byron-era window",
+	)
+	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
 }
 
 // TestQuery_UtxoByTxIn_WiredThroughDispatch is an end-to-end check that

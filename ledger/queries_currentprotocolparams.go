@@ -51,14 +51,13 @@ import (
 // while returning the parameters of the epoch that had already replaced it.
 // Deriving both from the same snapshot value closes that window.
 //
-// The historical path deliberately does not run the live path's
-// withoutSyntheticV2CostModel stripping: that function corrects a
-// presentation quirk of the live, in-memory ls.currentPParams value; the
-// persisted CBOR row for a given epoch already reflects whatever
-// ls.currentPParams looked like at the moment SetPParams wrote it (see
-// transitionToEraFrom, which encodes workingPParams -- already
-// post-synthetic-injection when applicable -- into the very row this reads
-// back), so it needs no further correction.
+// The historical path also runs withoutSyntheticV2CostModel, same as the
+// live path, but re-derives synthetic-ness from the persisted value itself
+// rather than trusting ls.syntheticV2CostModel (which describes only the
+// current era's object): transitionToEraFrom persists newPParams verbatim
+// into the pparams row, so a historical epoch whose fabricated PlutusV2
+// cost model had not yet been replaced by real data carries that same
+// fabrication in its persisted CBOR (blinklabs-io/dingo#382 review).
 func (ls *LedgerState) queryShelleyCurrentProtocolParams(
 	at QueryPoint,
 	txn *database.Txn,
@@ -129,5 +128,18 @@ func (ls *LedgerState) queryShelleyCurrentProtocolParams(
 			targetEpoch,
 		)
 	}
-	return []any{pparams}, nil
+	// pparams is a persisted, historical value -- never ls.currentPParams --
+	// so the live case's tracked ls.syntheticV2CostModel flag (which
+	// describes only the CURRENT era's object) does not apply to it. Its own
+	// CBOR may still carry HardForkBabbage's fabricated PlutusV2 cost model
+	// (transitionToEraFrom persists newPParams verbatim, synthetic or not):
+	// re-derive synthetic-ness directly from this specific value, the same
+	// bootstrap heuristic syntheticV2CostModelForValidation already applies
+	// to a non-current pparams object, rather than assume "already
+	// persisted" implies "already real" (blinklabs-io/dingo#382 review).
+	return []any{withoutSyntheticV2CostModel(
+		pparams,
+		resolveSyntheticV2CostModel("", pparams),
+		ls.config.Logger,
+	)}, nil
 }

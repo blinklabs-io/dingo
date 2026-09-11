@@ -4500,6 +4500,33 @@ func (ls *LedgerState) calculateStabilityWindowForEra(eraId uint) uint64 {
 	return window.Uint64()
 }
 
+// minEverStabilityWindow returns the smallest stability window this chain
+// could ever have used to prune consumed UTxOs, across both stability-window
+// formulas this codebase has (Byron's 2k and every Shelley+ era's identical
+// 3k/f -- calculateStabilityWindowForEra's doc comment). A caller deriving a
+// retention floor from just the CURRENT era's window (calculateStabilityWindow)
+// would be wrong immediately after a Byron-to-Shelley transition: Byron's
+// window is far smaller than Shelley's, so periodic cleanup running while
+// still in Byron pruned rows using a floor much closer to the (then much
+// smaller) tip than the current era's own window would compute today. Using
+// the smaller of the two guarantees the floor this produces is never more
+// lenient than any floor real cleanup could actually have used at any point
+// in the chain's history -- see checkUtxoRetentionWindow, its only caller.
+func (ls *LedgerState) minEverStabilityWindow() uint64 {
+	current := ls.calculateStabilityWindow()
+	if ls.config.CardanoNodeConfig == nil ||
+		ls.config.CardanoNodeConfig.ByronGenesis() == nil {
+		// This chain never had a Byron era, so no Byron-era cleanup pass
+		// could have used a different (smaller) window than today's.
+		return current
+	}
+	byron := ls.calculateStabilityWindowForEra(0)
+	if byron < current {
+		return byron
+	}
+	return current
+}
+
 // CurrentTransitionInfo returns the current TransitionInfo from the lock-free
 // consensus snapshot.
 func (ls *LedgerState) CurrentTransitionInfo() hardfork.TransitionInfo {

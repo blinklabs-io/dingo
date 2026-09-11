@@ -279,8 +279,14 @@ func TestQueryShelleyStakeDistribution_UsesCirculationNotGetPoolDistr2sTotal(
 // query, including GetStakeDistribution, to whatever point the two nodes
 // just agreed was live -- so a pin naming exactly the current tip must
 // succeed rather than being rejected as an unsupported historical pin.
-// "now" and "the pinned point" are the same moment here, so live
-// circulating supply is definitionally correct as its denominator.
+// This asserts only that the call succeeds and returns a fraction, not a
+// specific value: the fixture leaves config.CardanoNodeConfig nil, so
+// totalCirculatingSupply answers from its totalActiveStake fallback here
+// rather than genesis-derived circulation -- the accept-vs-reject behavior
+// under test does not depend on which denominator path answered it. See
+// TestQueryShelleyStakeDistribution_UsesCirculationNotGetPoolDistr2sTotal
+// above for a test that does configure genesis/network_state and asserts
+// the resulting fraction.
 func TestQueryShelleyStakeDistribution_PinnedAtLiveTip_Succeeds(t *testing.T) {
 	t.Parallel()
 
@@ -392,6 +398,60 @@ func TestQueryShelleyStakeDistribution_PinnedBehindLiveTip_UsesHistoricalCircula
 	require.NotNil(t, liveEntryA.StakeFraction)
 	assert.Equal(t, int64(1), liveEntryA.StakeFraction.Num().Int64())
 	assert.Equal(t, int64(6), liveEntryA.StakeFraction.Denom().Int64())
+}
+
+// TestQueryShelleyStakeDistribution_PinnedBeforeAnyNetworkStateRow_Rejected
+// covers a pin older than every recorded network_state row: unlike
+// TestQueryShelleyStakeDistribution_PinnedBehindLiveTip_UsesHistoricalCirculatingSupply,
+// there is no historical reserves row to answer from, so this must fail
+// with ErrHistoricalStateUnavailable rather than silently fall back to
+// totalActiveStake -- a different, non-equivalent total (see
+// totalCirculatingSupply's doc comment) that would look like a plausible
+// answer instead of an honest rejection.
+func TestQueryShelleyStakeDistribution_PinnedBeforeAnyNetworkStateRow_Rejected(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	const snapshotEpoch = 0
+	seedPoolDistr2Fixture(
+		t, db, repeatedBytes(28, 0x11), repeatedBytes(32, 0xAA),
+		1_000_000, snapshotEpoch,
+	)
+	ls := newPoolDistr2Ledger(t, db)
+
+	cfg := &cardano.CardanoNodeConfig{
+		ShelleyGenesisHash: strings.Repeat("11", 32),
+	}
+	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+		"activeSlotsCoeff": 0.1,
+		"epochLength": 100,
+		"maxLovelaceSupply": 8000000,
+		"securityParam": 10,
+		"slotLength": 1,
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`)))
+	ls.config.CardanoNodeConfig = cfg
+
+	pastHash := bytes.Repeat([]byte{0xAB}, 32)
+	tipHash := bytes.Repeat([]byte{0xCD}, 32)
+	seedBlockAtSlot(t, ls, 100, pastHash)
+	seedBlockAtSlot(t, ls, 200, tipHash)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(200, tipHash),
+	}, nil))
+
+	// The only network_state row is at slot 200 -- after the slot-100 pin,
+	// so GetNetworkStateAsOfSlot(100) finds nothing.
+	require.NoError(t, db.Metadata().SetNetworkState(0, 2_000_000, 200, nil))
+
+	_, err := ls.Query(
+		stakeDistributionQuery(),
+		QueryPoint{Slot: 100, Hash: pastHash},
+	)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
 }
 
 // TestQueryShelleyStakeDistribution_EmptySnapshot covers a chain with no

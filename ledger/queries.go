@@ -1205,6 +1205,23 @@ func (ls *LedgerState) totalCirculatingSupply(
 		return 0, err
 	}
 	if state == nil {
+		if asOfSlot != nil {
+			// A pinned lookup found no network_state row at or before
+			// asOfSlot: falling back to totalActiveStake here would
+			// silently answer with a different, non-equivalent total (see
+			// this function's doc comment on why the two are genuinely
+			// different numbers) rather than admit the pinned point can't
+			// be reconstructed. The live case's fallback below stays --
+			// that covers a hand-built LedgerState with no network_state
+			// history at all, not a real historical gap.
+			return 0, fmt.Errorf(
+				"%w: circulating supply as of slot %d cannot be "+
+					"reconstructed -- no network_state row exists at or "+
+					"before that slot",
+				ErrHistoricalStateUnavailable,
+				*asOfSlot,
+			)
+		}
 		return fallback()
 	}
 	reserves := uint64(state.Reserves)
@@ -1963,7 +1980,7 @@ func (ls *LedgerState) queryShelleyUtxoByTxIn(
 // queryShelleyUtxoByTxIn's doc comment for the correctness risk this
 // guards against.
 //
-// The floor mirrors exactly what the periodic consumed-UTxO cleanup
+// The floor mirrors what the periodic consumed-UTxO cleanup
 // (cleanupConsumedUtxos/UtxosDeleteConsumed in state.go) actually prunes:
 // in every storage mode except API, a spent row becomes eligible for
 // hard-deletion once its DeletedSlot falls at-or-behind
@@ -1974,6 +1991,13 @@ func (ls *LedgerState) queryShelleyUtxoByTxIn(
 // older than the floor cannot make that guarantee -- D could fall between
 // at.Slot and the floor, in which case the row may already be gone and an
 // absent result would be silently wrong rather than an honest rejection.
+//
+// Uses minEverStabilityWindow, not the current era's window alone: cleanup
+// recomputes its own window from whatever era was live each time it ran, so
+// a row pruned while the node was still in Byron (a far smaller window than
+// any Shelley+ era) can already be gone even though the CURRENT era's own
+// window would compute a more lenient floor -- see minEverStabilityWindow's
+// doc comment.
 //
 // API storage mode never prunes spent rows at all (see
 // cleanupConsumedUtxos' identical check and PruneBlock's doc comment on
@@ -1992,7 +2016,7 @@ func (ls *LedgerState) checkUtxoRetentionWindow(
 	if err != nil {
 		return err
 	}
-	stabilityWindow := ls.calculateStabilityWindow()
+	stabilityWindow := ls.minEverStabilityWindow()
 	if stabilityWindow == 0 || tip.Point.Slot <= stabilityWindow {
 		// The chain is not yet older than one stability window, so nothing
 		// eligible for pruning could exist yet.

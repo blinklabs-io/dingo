@@ -302,6 +302,69 @@ func TestQueryShelleyCurrentProtocolParams_NoPersistedRow_Rejected(
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
 }
 
+// TestQueryShelleyCurrentProtocolParams_HistoricalRowStripsSyntheticV2CostModel
+// covers a pinned epoch whose persisted pparams row still carries
+// HardForkBabbage's fabricated PlutusV2 cost model (blinklabs-io/dingo#3825):
+// transitionToEraFrom persists newPParams verbatim, synthetic or not, so a
+// historical epoch from before real V2 data arrived carries that same
+// fabrication in its persisted CBOR. Answering it unfiltered would show a
+// value no real cardano-node ever reported during that window -- the exact
+// thing withoutSyntheticV2CostModel exists to prevent for the live path.
+func TestQueryShelleyCurrentProtocolParams_HistoricalRowStripsSyntheticV2CostModel(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	ls.currentEra = eras.ConwayEraDesc
+	// Live pparams already carry real V2 data (not the synthetic default),
+	// distinguishing the live-case result from the historical one below.
+	ls.currentPParams = conwayPParamsWithCostModels(
+		map[uint][]int64{1: {9, 9, 9}},
+	)
+	ls.currentEpoch = models.Epoch{EpochId: 6}
+	ls.publishSnapshotsLocked()
+
+	conwayEraId := uint(eras.ConwayEraDesc.Id)
+	require.NoError(t, ls.db.SetEpoch(
+		300, 3, nil, nil, nil, nil, conwayEraId, 1, 100, nil,
+	))
+	require.NoError(t, ls.db.SetEpoch(
+		600, 6, nil, nil, nil, nil, conwayEraId, 1, 100, nil,
+	))
+	// Epoch 3's persisted row still has the fabricated default -- real V2
+	// data had not landed yet at that historical point.
+	historicalPParams := conwayPParamsWithCostModels(
+		map[uint][]int64{1: eras.DefaultPlutusV2CostModel},
+	)
+	historicalCbor, err := cbor.Encode(historicalPParams)
+	require.NoError(t, err)
+	require.NoError(t, ls.db.SetPParams(
+		historicalCbor, 300, 3, conwayEraId, nil,
+	))
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(650, repeatedBytes(32, 0x0B)),
+	}, nil))
+
+	result, err := ls.queryShelleyCurrentProtocolParams(
+		QueryPoint{Slot: 350}, nil,
+	)
+	require.NoError(t, err)
+	results, ok := result.([]any)
+	require.True(t, ok)
+	require.Len(t, results, 1)
+	got, ok := results[0].(*conway.ConwayProtocolParameters)
+	require.True(t, ok)
+	_, hasV2 := got.CostModels[1]
+	assert.False(
+		t, hasV2,
+		"a historical row still carrying the fabricated PlutusV2 cost "+
+			"model must have it stripped, matching what a real "+
+			"cardano-node would have reported at that same point",
+	)
+}
+
 // TestQueryShelleyEpochNo_AsOfSlot_ReadsHistoricalEpoch covers GetEpochNo
 // pinned to a historical point: unlike stake distribution or protocol
 // parameters, epoch records carry no retention window or other coupled
