@@ -5278,8 +5278,8 @@ func (ls *LedgerState) drainBlockPipelineErrors() {
 // block.Era().Id, so this function's classification only affects operator
 // visibility, never whether a block is accepted.
 //
-// Two cases are expected/transient and logged at debug level under their
-// own counters so a full sync does not spam the logs at error level:
+// The cases below are expected/transient and logged at debug level under
+// their own counters so a full sync does not spam the logs at error level:
 //   - errBlockPipelineEta0Unavailable: the cached epoch entry has no Praos
 //     nonce. This is expected for Byron and can be transient for later eras;
 //     this function cannot inspect the item's era, so the log remains neutral.
@@ -5288,6 +5288,23 @@ func (ls *LedgerState) drainBlockPipelineErrors() {
 //     ("Block Processing Pipeline") documents this as a transient race that
 //     resolves once the epoch cache catches up, so it is not lumped in with
 //     genuine decode/validate/apply problems below.
+//   - context.Canceled/context.DeadlineExceeded: the pipeline context is
+//     cancelled by Stop() *before* it drains, so a stage worker that is
+//     mid-item when shutdown begins can lose the race between its
+//     `errors <- err` send and its own ctx.Done() arm and report the
+//     cancellation here. Every shutdown with blocks still in flight can
+//     therefore produce a handful of these; they say the node is stopping,
+//     not that a block failed.
+//   - pipeline.ErrPendingLimitExceeded: the apply stage's out-of-order buffer
+//     grew past MaxPendingBlocks because one stage worker fell behind its
+//     siblings, stalling the sequence number the apply stage is waiting for.
+//     The item is buffered anyway ("to prevent sequence gaps", per
+//     ApplyStage.ProcessWithStatus) and is still applied in sequence, so this
+//     reports scheduling lag, not a block that failed or was dropped. The
+//     read path submits at most batchSize blocks per batch and drains each
+//     batch before starting the next, so the apply stage's backlog stays far
+//     below the pipeline default of 2160; raising batchSize past that would
+//     make this counter live.
 //
 // Anything else reaching errorsChan indicates a genuine decode/validate/apply
 // problem the pipeline itself could not report any other way
@@ -5313,6 +5330,21 @@ func (ls *LedgerState) recordBlockPipelineError(err error) {
 		ls.metrics.incBlockPipelineDeferredEpochCacheError()
 		ls.config.Logger.Debug(
 			"block-processing pipeline: epoch cache does not yet cover validate-stage slot (expected transient, resolves once the epoch cache catches up)",
+			"error",
+			err,
+		)
+	case errors.Is(err, context.Canceled),
+		errors.Is(err, context.DeadlineExceeded):
+		ls.metrics.incBlockPipelineShutdownError()
+		ls.config.Logger.Debug(
+			"block-processing pipeline: stage worker reported its context cancellation during shutdown",
+			"error",
+			err,
+		)
+	case errors.Is(err, pipeline.ErrPendingLimitExceeded):
+		ls.metrics.incBlockPipelineApplyPendingLimitError()
+		ls.config.Logger.Debug(
+			"block-processing pipeline: apply stage buffered more out-of-order blocks than MaxPendingBlocks (backpressure only; the block is still buffered and applied in sequence)",
 			"error",
 			err,
 		)
