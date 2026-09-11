@@ -545,15 +545,17 @@ func TestWindowedRewindRefusesRecoveryTargetTheChainDoesNotHold(t *testing.T) {
 	)
 }
 
-// TestWindowedRewindRefusesSlotZeroTargetTheStoreDoesNotHold covers the one
-// target shape Chain.ValidateRollback cannot speak for.
+// TestWindowedRewindRefusesSlotZeroTargetTheStoreDoesNotHold pins the entry
+// check for a slot-zero target, from this package's side of the boundary.
 //
-// ValidateRollback reads every slot-zero point as origin and skips its
-// membership check there, and Chain.Rollback does the same: it truncates to
-// index zero and sets currentTip to the point it was given. A slot-zero point
-// carrying a hash would therefore pass the entry check and take the descent
-// all the way down, leaving the chain empty and its tip naming a block the
-// store need not hold, so the entry check keeps the store lookup for it.
+// Slot 0 is a real slot, so a point carrying a hash names a block there. When
+// ValidateRollback gated its lookup on point.Slot > 0 such a target skipped
+// membership validation, passed the entry check and took the descent all the
+// way down, leaving the chain empty and its tip naming a block the store need
+// not hold; this package compensated with its own store lookup. ValidateRollback
+// now resolves any hash-bearing point, so the refusal comes from the chain's
+// membership check and the local lookup is gone -- this test is what proves
+// the coverage moved rather than disappeared.
 func TestWindowedRewindRefusesSlotZeroTargetTheStoreDoesNotHold(t *testing.T) {
 	t.Parallel()
 

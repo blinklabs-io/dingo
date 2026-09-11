@@ -1826,12 +1826,16 @@ func (n *Node) handleConnManagerClosed(
 	if n.chainsyncState != nil {
 		n.chainsyncState.RemoveClient(connId)
 	}
-	// Wake any NtC chainsync server callback parked waiting for this
-	// connection's certified endorser closure. connmanager drives this
-	// callback from its own per-connection goroutine, so it runs even while
-	// that server callback still owns gouroboros's receive loop.
 	if o := n.ouroboros(); o != nil {
+		// Wake any NtC chainsync server callback parked waiting for this
+		// connection's certified endorser closure. connmanager drives this
+		// callback from its own per-connection goroutine, so it runs even
+		// while that server callback still owns gouroboros's receive loop.
 		o.ReleaseLeiosServeWaiters(connId)
+		// Clear any LocalStateQuery pinned point this connection acquired:
+		// a client that disconnects without a clean Release must not leak
+		// its map entry (blinklabs-io/dingo#382).
+		o.ReleaseLocalStateQueryAcquiredPoint(connId)
 	}
 }
 

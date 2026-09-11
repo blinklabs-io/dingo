@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
@@ -32,8 +33,14 @@ import (
 // into the node-to-client reply shape. Keeping the read in one place is what
 // stops the two surfaces reporting different VRF keys or different snapshots
 // for the same chain.
+//
+// at is Query's pinned point (unpinned = live); PoolStakeDistribution
+// resolves it to the historical epoch whose mark snapshot governed that
+// slot (blinklabs-io/dingo#382).
 func (ls *LedgerState) queryShelleyPoolDistr2(
 	q *olocalstatequery.ShelleyPoolDistr2Query,
+	at QueryPoint,
+	txn *database.Txn,
 ) (any, error) {
 	// PoolFilter reports all=true with a nil pool list when the query's
 	// StrictMaybe was SNothing, and all=false otherwise -- including for an
@@ -50,7 +57,7 @@ func (ls *LedgerState) queryShelleyPoolDistr2(
 		}
 	}
 
-	dist, err := ls.PoolStakeDistribution(poolFilter)
+	dist, err := ls.PoolStakeDistribution(poolFilter, at, txn)
 	if err != nil {
 		return nil, err
 	}
