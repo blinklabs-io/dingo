@@ -387,7 +387,10 @@ func TestNewTopologyConfigFromReader_ValidationErrors(t *testing.T) {
 			json: `{
   "localRoots": [
     {
-      "accessPoints": [{"address": "127.0.0.1", "port": 3001}],
+      "accessPoints": [
+        {"address": "127.0.0.1", "port": 3001},
+        {"address": "127.0.0.2", "port": 3001}
+      ],
 			"valency": 2,
 			"warmValency": 1
     }
@@ -424,7 +427,10 @@ func TestNewTopologyConfigFromReader_ValidationErrors(t *testing.T) {
 			json: `{
   "publicRoots": [
     {
-      "accessPoints": [{"address": "public.example.com", "port": 3001}],
+      "accessPoints": [
+        {"address": "public.example.com", "port": 3001},
+        {"address": "public2.example.com", "port": 3001}
+      ],
 			"valency": 2,
 			"warmValency": 1
     }
