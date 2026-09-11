@@ -894,8 +894,9 @@ func (d *DingoDB) GetPoolEpochDataMap(
 // Presence is epoch-level. A pool with no spendable member row legitimately
 // earned nothing, but only if the table holds the epoch at all —
 // cleanupOldSnapshots retains reward_account_output without bound in api
-// storage mode and prunes it in core, so an empty read must not be reported as
-// a pool-wide zero.
+// storage mode and, since dingo #4188, in core mode too when the node's
+// koios-parity observer is enabled; it prunes the table to a 4-epoch window
+// otherwise, so an empty read must not be reported as a pool-wide zero.
 func (d *DingoDB) addSpendableMemberRewards(
 	ctx context.Context,
 	m map[string]*DingoPoolEpochData,

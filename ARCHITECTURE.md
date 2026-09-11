@@ -4286,14 +4286,49 @@ and applied ledger at the same point — chainsync rollback via
 `continuationAuditWindow` there. A chainsync rollback point ahead of the applied
 ledger instead disarms any prior window because its fork point no longer
 describes the continuation being fetched. While armed, every body
-delivered by blockfetch above that point is checked input by input: an input
-resolves when its producing transaction was created by a block already seen in
-the window (fetched and on the chain, not yet applied), when the ledger still
-holds the UTxO, or when transaction metadata records the producer. Anything
-left over logs `continuation block spends an input with no producer on the
-local applied chain` with the delivering peer, the block, the offending input,
-and the fork point the node had rolled back to, and increments
-`dingo_ledger_continuation_input_unresolved_total`. The audit never rejects a
+delivered by blockfetch above that point is checked input by input, against
+four resolution paths: an input resolves when its producing transaction was
+created by a block already seen in the window (fetched and on the chain, not
+yet applied), when the ledger still holds the UTxO, when transaction metadata
+records the producer, or — on a Leios chain — when it was created by the
+certified endorser block whose transactions the audited ranking block carries.
+That fourth path exists because a cert-driven ranking block has an empty body:
+its transactions arrive separately over leios-fetch and are applied later, so
+"the block was fetched" no longer implies "its transactions are in hand". The
+audit resolves the reference the way the apply path does — the block's own
+announcement on the CIP path, the parent's on the cert-driven path — and reads
+the transactions through the configured `EndorserBlockProvider`, which is
+normally an in-memory cache hit but falls back to a blob-store read for an
+occurrence whose in-memory entry has expired.
+
+Resolving an endorser block is therefore scheduled rather than eager. It is
+deferred until an input fails the other three paths, memoized per
+`(endorser block hash, slot)` so a closure certified by many ranking blocks in
+one window costs one resolution, and bounded by
+`continuationAuditMaxEndorserBlocksPerBlock` per audited body; the budget is
+owned by the body rather than by a single drain, so several unresolvable inputs
+in one body share one allowance and report one stop between them. References
+past the budget stay queued for a later body.
+
+Outcomes are counted on `dingo_ledger_continuation_audit_outcomes_total`,
+labelled by `result`. An input that resolves counts `clean`. An input with no
+producer counts `missing_producer`, logs `continuation block spends an input
+with no producer on the local applied chain` with the delivering peer, the
+block, the offending input, and the fork point the node had rolled back to, and
+increments `dingo_ledger_continuation_input_unresolved_total` as before. But
+when a certified endorser block has not been fetched yet the window's producer
+set is knowingly incomplete, and an unresolved input then counts
+`inconclusive_eb_pending` and is recorded at `Debug` *instead of* taking the
+`missing_producer` path — no `ERROR`, and no increment of
+`continuation_input_unresolved_total`. Reporting ledger corruption from a set
+the audit knows is short would be a guaranteed false positive on a healthy
+node, so an endorser-block backlog reads as "not covering this node" rather
+than as a fault. Two further results are per-window and per-reference rather
+than per-input: `skipped_budget` once per body whose endorser-block budget was
+exhausted, and `ref_unresolvable` for a reference abandoned because resolving
+it failed for a reason retrying cannot fix. `disarmed_cap` is covered below.
+
+The audit never rejects a
 block; the splice it detects is prevented upstream in the chain layer, and
 bodies that still fail reach the ordinary validation and recovery guards
 unchanged. Arming only after an aligned rollback is both the cost gate — a
@@ -4301,7 +4336,9 @@ healthy node never runs the per-input probes on the steady-state blockfetch
 path — and what makes the check sound, since every later block then arrives
 through the window. Each arming inspects at most
 `continuationAuditBlockBudget` bodies and retains at most
-`continuationAuditMaxProducedTxs` in-window producers. The audit is also skipped
+`continuationAuditMaxProducedTxs` in-window producers; reaching that producer
+cap disarms the window, logs at `Warn` and counts `disarmed_cap`, so "the audit
+stopped covering this node" does not read the same as "this node is clean". The audit is also skipped
 while block validation is off, which is how historical catch-up runs: the splice
 it diagnoses is a live tip-band failure, and bulk sync fetches far too many
 bodies per second to pay for the probes.
@@ -5923,6 +5960,13 @@ when `Stop` returns, and the address is rebindable afterwards.
 
 ### Blockfrost API (`api/blockfrost/`)
 
+Blockfrost submission and both evaluation endpoints bound request body reads
+by their existing byte limits and a 15-second read deadline. The deadline is
+cleared after a successful read, before transaction processing; stalled or
+truncated bodies retain the existing HTTP 400 response. The HTTP listener also
+sets a 60-second read timeout as a backstop, independently of its header,
+write, and idle timeouts.
+
 TLS and token authentication (including the `project_id` header alias) are
 configured through `plugins.api.blockfrost.config.tls`/`config.auth`; see
 "API security" above.
@@ -6807,6 +6851,25 @@ second sync:
   permanent Dingo subsystem — SQLite (or whichever metadata backend the node
   itself runs) remains the only backend involved, since `DatabaseSource`
   reads the live node's own store rather than opening a second connection.
+  - **Reward-state retention (dingo #4188).** `Run()` and
+    `reinitializeBackgroundManagers` both call
+    `n.snapshotMgr.SetRewardAccountOutputRetentionUnbounded(
+    n.config.koiosParity.Enabled)` immediately after configuring the
+    snapshot manager's other options, before `CaptureGenesisSnapshot`/`Start`.
+    This is necessary because the observer only validates a closed epoch
+    after fetching and comparing against Koios over the network — work that
+    can fall arbitrarily far behind chain progression during a from-genesis
+    or catch-up sync — while `ledger/snapshot.cleanupOldSnapshots` otherwise
+    prunes `reward_account_output` to a fixed 4-epoch window on every epoch
+    transition (see DATABASE.md, Snapshot and Reward-State Retention).
+    Without this, an epoch's reward rows are routinely gone by the time the
+    observer's backlog reaches that epoch, and every koios-parity account
+    check for it fails permanently with a row that genuinely no longer
+    exists rather than one Koios and Dingo actually disagree on. The setter
+    mirrors API storage mode's pre-existing unbounded retention (#1875) and
+    is not consensus-affecting (it only widens local historical retention),
+    so unlike `SetDelegatorInactivity` it carries no `configurationLocked`
+    gate.
   - **Live database Restore/Truncate.** `node_lifecycle.go`'s
     `quiesceForLiveLifecycleOp` stops the `Observer` (blocking until its
     background goroutine has exited, same as `shutdown()`) and unsubscribes
