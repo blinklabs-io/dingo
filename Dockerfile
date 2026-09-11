@@ -96,9 +96,23 @@ VOLUME /ipc
 ENV DINGO_SOCKET_PATH=/ipc/dingo.socket
 ENV CARDANO_NODE_SOCKET_PATH=/ipc/dingo.socket
 ENV CARDANO_SOCKET_PATH=/ipc/dingo.socket
-EXPOSE 3001 3002 9090 12798
+EXPOSE 3001 3002 9090 12798 12799
+# Probes the dedicated health listener's LIVENESS path, not /readyz, and not
+# /metrics as this previously did.
+#
+#   - /metrics only proved the metrics listener had bound; it says nothing
+#     about the node, and it disappears if metricsPort is repurposed.
+#   - /readyz would be wrong here: Docker, Swarm and ECS respond to an
+#     unhealthy container by replacing it, and a node doing an initial sync
+#     is legitimately not ready for hours or days, so it would never survive
+#     long enough to finish. Readiness belongs in a Kubernetes
+#     readinessProbe or a load-balancer target check, where failing it
+#     drains traffic instead of killing the node.
+#
+# The liveness body still carries the readiness verdict and the observed tip
+# gap, so `docker inspect` shows why a live node is not yet serving.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-  CMD wget -qO/dev/null http://127.0.0.1:12798/metrics || exit 1
+  CMD wget -qO/dev/null http://127.0.0.1:12799/health || exit 1
 # UID/GID are pinned (not left to adduser's dynamic system-UID allocation)
 # so they're stable and documentable across image rebuilds: this container
 # never runs as root, so a custom --db-snapshot-dir (or any other data path)

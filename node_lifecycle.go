@@ -491,6 +491,12 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 func (n *Node) closeStorageForLiveLifecycleOp(ctx context.Context) error {
 	var err error
 
+	// Storage is going away, so the ledger that feeds the readiness probe
+	// stops ticking here and does not resume until the rebuilt one reaches
+	// its first tick. Drop the last reported tip gap rather than let
+	// /readyz keep answering 200 from it for the length of the rebuild.
+	n.health.forgetTipGap()
+
 	if n.ledgerState != nil {
 		if closeErr := n.ledgerState.Close(); closeErr != nil {
 			// Fail closed: do not nil n.ledgerState, close n.db, or stop
@@ -593,6 +599,9 @@ func (n *Node) closeStorageForLiveLifecycleOp(ctx context.Context) error {
 // (LedgerState, Mempool, ChainsyncState, ConnManager, PeerGov) once the new
 // objects exist, exactly like Run()'s late-binding setters do.
 func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
+	// The previous ledger's tip-gap observation must not make readiness look
+	// healthy while Restore or Truncate is rebuilding the core storage.
+	n.health.forgetTipGap()
 	deps := n.storageDependencies(n.config.dataDir)
 	deps.PromRegistry = n.config.promRegistry
 	stores, err := internalplugins.ResolveStorage(
