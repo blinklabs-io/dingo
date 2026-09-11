@@ -7074,12 +7074,16 @@ second sync:
   - **Backlog and checkpointing.** `Start` (via the factored-out
     `seedBacklog`) seeds the pending set from every epoch the cache
     (`cache.db`) has not yet fetched/checked, in
-    `[max(preStakingThroughEpoch+1, Source.GetEarliestAvailableEpoch()),
-    Source.GetLatestEpoch() - 1]` (the upper bound is a floor derived from
-    Dingo's own current epoch number, not an exact koios-epoch bound — good
-    enough for a one-time historical backfill on first attach, since
-    anything it undershoots by a small margin is still covered by the live
-    event subscription going forward). No separate checkpoint file exists:
+    `[Source.GetEarliestAvailableEpoch(), Source.GetLatestEpoch() - 1]` when
+    a Mithril boundary is recorded, and `[0, Source.GetLatestEpoch() - 1]`
+    when none is (the upper bound is a floor derived from Dingo's own
+    current epoch number, not an exact koios-epoch bound — good enough for a
+    one-time historical backfill on first attach, since anything it
+    undershoots by a small margin is still covered by the live event
+    subscription going forward). `preStakingThroughEpoch` is not a seed
+    bound: on a genesis-synced node epochs 0-1 are still queued, and
+    `checkEpoch`'s `PreStaking` branch is what records their
+    PASS-with-nothing-compared verdict. No separate checkpoint file exists:
     the cache's own persisted `check_epoch_status`/`koios_epoch_info` rows
     are the sole resumable state, matching the issue's "persist only the
     minimal resumable checkpoint state actually needed."
@@ -7095,7 +7099,12 @@ second sync:
     epoch via `Database.GetEpochBySlot`); `ok` is false for a non-Mithril,
     genesis-synced node, and for a boundary slot falling inside no epoch
     the node's own `epoch` table describes, leaving `seedBacklog` and
-    `checkEpoch` unchanged from before this existed. `DingoDB` carries its
+    `checkEpoch` unchanged from before this existed. A boundary that *is*
+    recorded but cannot be read, is empty, or does not parse is an error
+    rather than `ok = false`: `seedBacklog` aborts the seed and `checkEpoch`
+    fails the check, since absorbing it as "no boundary recorded" would
+    restore the unbounded pre-#4172 behavior on exactly the node whose
+    boundary could not be confirmed. `DingoDB` carries its
     own copy of that slot-to-epoch SQL for the standalone CLI, bounded at
     both ends exactly as the store query is, with
     `TestGetEarliestAvailableEpochImplementationsAgree` pinning the two

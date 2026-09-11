@@ -933,6 +933,7 @@ func TestGetEarliestAvailableEpochImplementationsAgree(t *testing.T) {
 		boundarySlot  string
 		wantEpoch     uint64
 		wantOK        bool
+		wantErr       string
 	}{
 		{
 			// Slot 1_000 is the first slot of epoch 10, so the boundary
@@ -953,6 +954,23 @@ func TestGetEarliestAvailableEpochImplementationsAgree(t *testing.T) {
 			boundarySlot:  "5000",
 			wantEpoch:     0,
 			wantOK:        false,
+		},
+		{
+			// A sync_state row that exists and holds nothing is a
+			// malformed boundary, not the absence of one. Returning
+			// ok = false here would switch the bound off on exactly the
+			// node whose boundary could not be confirmed, leaving
+			// seedBacklog and checkEpoch as unbounded as they were before
+			// this method existed. Both implementations must fail closed,
+			// and both reach that verdict through different code: the
+			// store source through Database.MithrilTrustBoundarySlotStrict,
+			// DingoDB through its own sql.ErrNoRows check on the raw row.
+			name:          "boundary recorded with an empty value",
+			lengthInSlots: 432_000,
+			boundarySlot:  "",
+			wantEpoch:     0,
+			wantOK:        false,
+			wantErr:       "empty value",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -975,20 +993,32 @@ func TestGetEarliestAvailableEpochImplementationsAgree(t *testing.T) {
 
 			source, err := NewDatabaseSource(db)
 			require.NoError(t, err)
-			storeEpoch, storeOK, err := source.GetEarliestAvailableEpoch(
+			storeEpoch, storeOK, storeErr := source.GetEarliestAvailableEpoch(
 				context.Background(),
 			)
-			require.NoError(t, err)
 
 			dingoDB, err := OpenDingoDB(
 				DingoDBConfig{Plugin: "sqlite", DataDir: dir},
 			)
 			require.NoError(t, err)
 			defer dingoDB.Close() //nolint:errcheck
-			cliEpoch, cliOK, err := dingoDB.GetEarliestAvailableEpoch(
+			cliEpoch, cliOK, cliErr := dingoDB.GetEarliestAvailableEpoch(
 				context.Background(),
 			)
-			require.NoError(t, err)
+
+			if tc.wantErr != "" {
+				require.ErrorContains(t, storeErr, tc.wantErr)
+				require.ErrorContains(
+					t,
+					cliErr,
+					tc.wantErr,
+					"DingoDB must fail closed on the same boundary the "+
+						"in-process source fails closed on",
+				)
+			} else {
+				require.NoError(t, storeErr)
+				require.NoError(t, cliErr)
+			}
 
 			require.Equal(t, tc.wantEpoch, storeEpoch)
 			require.Equal(t, tc.wantOK, storeOK)

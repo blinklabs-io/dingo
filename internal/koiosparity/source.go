@@ -136,8 +136,8 @@ type RewardParitySource interface {
 	// names no epoch to bound against — callers must then apply no lower
 	// bound beyond the existing preStakingThroughEpoch floor, leaving
 	// behavior exactly as it was before this method existed. A boundary
-	// that is recorded but unreadable or malformed is an error, not ok =
-	// false. When ok is true, epoch is the
+	// that is recorded but unreadable, empty, or otherwise malformed is an
+	// error, not ok = false. When ok is true, epoch is the
 	// first Koios reporting epoch a caller should ever attempt to compare;
 	// every epoch below it should be treated the same way a pre-staking
 	// epoch is treated today (a recorded PASS with nothing compared, not a
@@ -228,6 +228,13 @@ func (s *DatabaseSource) GetLatestEpoch(ctx context.Context) (uint64, error) {
 // epoch that slot falls in, since the epoch containing (and every epoch
 // before) the boundary slot was inherited from the Mithril snapshot rather
 // than computed by this node's own epoch-transition reward calculation.
+//
+// MithrilTrustBoundarySlotStrict, not MithrilTrustBoundarySlot: a boundary
+// that exists but cannot be read or parsed — including one recorded with an
+// empty value — must surface as an error here rather than as ok = false,
+// which callers apply no bound for. Reading a malformed boundary as an
+// absent one would restore the unbounded pre-#4172 behavior on exactly the
+// node whose boundary could not be confirmed.
 func (s *DatabaseSource) GetEarliestAvailableEpoch(
 	ctx context.Context,
 ) (uint64, bool, error) {

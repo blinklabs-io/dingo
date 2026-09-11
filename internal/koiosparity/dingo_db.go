@@ -303,7 +303,18 @@ func (d *DingoDB) GetEarliestAvailableEpoch(
 		return 0, false, fmt.Errorf("read mithril trust boundary: %w", err)
 	}
 	if !val.Valid || val.String == "" {
-		return 0, false, nil
+		// The sql.ErrNoRows branch above is the only "no boundary
+		// recorded" case. A row that exists and holds nothing is a
+		// malformed boundary, not the absence of one, and reporting it
+		// as absent would switch this bound off on exactly the node
+		// whose boundary could not be confirmed, leaving seedBacklog
+		// and checkEpoch as unbounded as they were before it existed.
+		// Same disposition the unparseable value below gets, and the
+		// same one Database.MithrilTrustBoundarySlotStrict reaches for
+		// DatabaseSource.
+		return 0, false, errors.New(
+			"parse mithril trust boundary: empty value",
+		)
 	}
 	slot, err := strconv.ParseUint(val.String, 10, 64)
 	if err != nil {

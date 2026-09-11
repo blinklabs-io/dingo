@@ -17,6 +17,7 @@ package koiosparity
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -1615,4 +1616,64 @@ func TestObserverSeedBacklogExcludesEpochsBeforeEarliestAvailableEpoch(t *testin
 	require.True(t, hasEpoch11,
 		"epoch 11 is this node's earliest available epoch and should still "+
 			"be queued")
+}
+
+// earliestAvailableEpochErrStub wraps a RewardParitySource and fails every
+// GetEarliestAvailableEpoch call, standing in for a boundary that is
+// recorded but cannot be resolved (an empty or unparseable
+// mithril_ledger_slot value, or a failed sync_state read).
+type earliestAvailableEpochErrStub struct {
+	RewardParitySource
+}
+
+func (s *earliestAvailableEpochErrStub) GetEarliestAvailableEpoch(
+	context.Context,
+) (uint64, bool, error) {
+	return 0, false, errors.New("parse mithril trust boundary: empty value")
+}
+
+// TestObserverSeedBacklogFailsClosedOnUnresolvableBoundary pins the consumer
+// half of the bound's fail-closed contract: an unresolvable boundary must
+// abort seeding, not be absorbed as "no boundary recorded". Absorbed, the
+// backlog would silently revert to the unbounded epoch-0 seed this fix
+// exists to remove, on exactly the node whose boundary could not be
+// confirmed.
+func TestObserverSeedBacklogFailsClosedOnUnresolvableBoundary(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDatabaseSourceDB(t)
+	base, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+
+	sqlDB := sourceSQLDB(t, base.db)
+	require.NoError(t, sqlDB.Create(&models.EpochSummary{
+		Epoch:            12,
+		TotalActiveStake: types.Uint64(1),
+		SnapshotReady:    true,
+	}).Error)
+
+	o, err := NewObserver(ObserverConfig{
+		Network:   "preview",
+		CachePath: filepath.Join(t.TempDir(), "cache.db"),
+		Source:    &earliestAvailableEpochErrStub{RewardParitySource: base},
+		Logger:    slog.New(slog.DiscardHandler),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = o.Stop(context.Background()) })
+
+	require.ErrorContains(
+		t,
+		o.seedBacklog(context.Background()),
+		"resolve earliest available epoch",
+	)
+
+	o.mu.Lock()
+	pending := len(o.pending)
+	o.mu.Unlock()
+	require.Zero(
+		t,
+		pending,
+		"no epoch may be queued when the bootstrap boundary could not be "+
+			"resolved",
+	)
 }
