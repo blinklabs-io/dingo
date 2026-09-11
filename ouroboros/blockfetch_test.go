@@ -389,14 +389,14 @@ func TestBlockfetchServerSendBatch_BatchDoneAtChainTip(t *testing.T) {
 		conn,
 	)
 
-	assert.Error(t, err)
+	assert.NoError(t, err)
 	assert.Equal(t, 1, server.startBatchCalls)
-	assert.Equal(t, 0, server.batchDoneCalls)
-	assert.Equal(t, 1, conn.closeCalls)
+	assert.Equal(t, 1, server.batchDoneCalls)
+	assert.Equal(t, 0, conn.closeCalls)
 	assert.Equal(t, 1, iter.cancelCalls)
 }
 
-func TestBlockfetchServerSendBatch_RollbackClosesConnectionWithoutServingBlock(
+func TestBlockfetchServerSendBatch_RollbackEndsBatchWithoutServingBlock(
 	t *testing.T,
 ) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
@@ -433,15 +433,15 @@ func TestBlockfetchServerSendBatch_RollbackClosesConnectionWithoutServingBlock(
 		conn,
 	)
 
-	assert.Error(t, err)
+	assert.NoError(t, err)
 	assert.Equal(t, 1, server.startBatchCalls)
 	// The rollback sentinel must NOT be streamed as a block.
 	assert.Equal(t, 0, server.blockCalls,
 		"rollback sentinel must not be streamed as a block")
-	// BatchDone would falsely report completion against the pre-rollback
-	// chain, so close the transport and let the client retry.
-	assert.Equal(t, 0, server.batchDoneCalls)
-	assert.Equal(t, 1, conn.closeCalls)
+	// Blockfetch has no rollback message, so end the batch cleanly and let the
+	// client re-request against its updated chain.
+	assert.Equal(t, 1, server.batchDoneCalls)
+	assert.Equal(t, 0, conn.closeCalls)
 	assert.Equal(t, 1, iter.cancelCalls)
 }
 

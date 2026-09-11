@@ -378,16 +378,10 @@ Loop:
 				// Serving it would stream a [0, null] block that a fetching
 				// peer decodes as a nil-header Byron EBB and crashes
 				// dereferencing it in SlotNumber(). Blockfetch has no
-				// rollback message, so close the transport; the client can
-				// re-request against its updated chain. Mirrors the
-				// next.Rollback handling in chainsync without reporting
-				// successful completion.
-				o.closeBlockfetchConnection(
-					conn,
-					connectionID,
-					"rollback during blockfetch range",
-				)
-				return errors.New("blockfetch chain rolled back during range")
+				// rollback message, so end the batch cleanly; the client
+				// re-requests against its updated chain. Mirrors the
+				// next.Rollback handling in chainsync.
+				break Loop
 			}
 			if next.Block.Slot > end.Slot {
 				o.closeBlockfetchConnection(
@@ -452,14 +446,6 @@ Loop:
 				break Loop
 			}
 		}
-	}
-	if !reachedEnd {
-		o.closeBlockfetchConnection(
-			conn,
-			connectionID,
-			"blockfetch range end was not reached",
-		)
-		return errors.New("blockfetch range end was not reached")
 	}
 	// Signal batch completion
 	if err := server.BatchDone(); err != nil {
