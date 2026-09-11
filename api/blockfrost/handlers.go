@@ -689,14 +689,8 @@ func (b *Blockfrost) handlePoolsExtended(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	params, err := ParsePagination(r)
-	if err != nil {
-		writeError(
-			w,
-			http.StatusBadRequest,
-			"Bad Request",
-			"Invalid pagination parameters.",
-		)
+	params, ok := parsePaginationOrWriteError(w, r)
+	if !ok {
 		return
 	}
 
@@ -2191,14 +2185,8 @@ func (b *Blockfrost) handleAccountAssociatedAddresses(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	params, err := ParsePagination(r)
-	if err != nil {
-		writeError(
-			w,
-			http.StatusBadRequest,
-			"Bad Request",
-			"Invalid pagination parameters.",
-		)
+	params, ok := parsePaginationOrWriteError(w, r)
+	if !ok {
 		return
 	}
 	items, total, err := b.node.AccountAssociatedAddresses(
@@ -2230,14 +2218,8 @@ func (b *Blockfrost) handleAccountDelegationHistory(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	params, err := ParsePagination(r)
-	if err != nil {
-		writeError(
-			w,
-			http.StatusBadRequest,
-			"Bad Request",
-			"Invalid pagination parameters.",
-		)
+	params, ok := parsePaginationOrWriteError(w, r)
+	if !ok {
 		return
 	}
 	items, total, err := b.node.AccountDelegationHistory(
@@ -2269,14 +2251,8 @@ func (b *Blockfrost) handleAccountRegistrationHistory(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	params, err := ParsePagination(r)
-	if err != nil {
-		writeError(
-			w,
-			http.StatusBadRequest,
-			"Bad Request",
-			"Invalid pagination parameters.",
-		)
+	params, ok := parsePaginationOrWriteError(w, r)
+	if !ok {
 		return
 	}
 	items, total, err := b.node.AccountRegistrationHistory(
@@ -2308,14 +2284,8 @@ func (b *Blockfrost) handleAccountRewardHistory(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	params, err := ParsePagination(r)
-	if err != nil {
-		writeError(
-			w,
-			http.StatusBadRequest,
-			"Bad Request",
-			"Invalid pagination parameters.",
-		)
+	params, ok := parsePaginationOrWriteError(w, r)
+	if !ok {
 		return
 	}
 	items, total, err := b.node.AccountRewardHistory(

@@ -45,6 +45,10 @@ func newBlobOrphanTestDB(store *mockBlobStore) *Database {
 // reclaims it. Returning nil there reports a clean deletion to the caller and
 // leaves the object to accumulate silently, so the failure has to reach the
 // caller and be counted.
+// Not t.Parallel: this and the other tests below assert on a delta of the
+// process-wide blobOrphans counter (BlobOrphanCount before and after), so a
+// concurrent test's recordBlobOrphans lands inside the window. Running just
+// these with -count=3 and t.Parallel reproduces it every time.
 func TestDeleteUtxoBlobsReportsUnreachableObjects(t *testing.T) {
 	store := &mockBlobStore{
 		deleteUtxoErrs: map[string]error{
@@ -113,6 +117,8 @@ func TestDeleteTxBlobsCountsNoOrphansOnSuccess(t *testing.T) {
 // already returned an error; the point is that the callers no longer discard
 // it, so the condition is visible rather than a silent no-op.
 func TestDeleteUtxoBlobsWithoutBlobStoreIsReported(t *testing.T) {
+	t.Parallel()
+
 	db := newBlobOrphanTestDB(nil)
 	db.SetBlobStore(nil)
 

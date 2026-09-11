@@ -55,6 +55,27 @@ var testDestinationRegistry = lifecycle.NewDestinationRegistry()
 // backup path can capture a version without holding the commit barrier. The
 // manager tests below exercise event handling and retention with a real
 // Badger-backed database; the policy itself has a focused test below.
+// snapshotWait bounds a wait on the manager actually doing its work: a
+// badger backup, a sqlite VACUUM INTO, a manifest write, and for the cloud
+// tests an upload and a pruning pass. That is real disk I/O, not the
+// in-memory signal the repository's 2-5s WaitForCondition convention is
+// written for, and nothing in the product promises it inside any particular
+// deadline -- so this bound exists only to stop a hung test running forever.
+//
+// It used to vary between 5s, 15s and 30s across this file with no reason
+// for the difference, and the short ones were flaky: a snapshot of an empty
+// database that finishes in under a second on a workstation took the full
+// five seconds on CI. Both observed failures were 5s waits and looked like
+// two different bugs -- on one run the snapshot landed just after the last
+// poll, on another it was still inside VACUUM INTO when the deferred Stop
+// cancelled its context and SQLite returned "interrupted (9)". Neither was
+// a manager defect. The 15s and 30s waits in the same file never failed.
+//
+// A genuine hang still fails, 30s later, and the package timeout still
+// backstops it. Keep every wait on manager-driven work on this constant so
+// the spread cannot come back.
+const snapshotWait = 30 * time.Second
+
 const testManagerBlobPlugin = "badger-test"
 
 func newManagerTestDB(t *testing.T) *database.Database {
@@ -143,6 +164,8 @@ func publishEpochTransition(eb *event.EventBus, newEpoch uint64) {
 // TestManagerDisabledByDefaultDoesNothing verifies that with
 // SnapshotEnabled false, an epoch-transition event never triggers a snapshot.
 func TestManagerDisabledByDefaultDoesNothing(t *testing.T) {
+	t.Parallel()
+
 	db := newManagerTestDB(t)
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
@@ -170,6 +193,8 @@ func TestManagerDisabledByDefaultDoesNothing(t *testing.T) {
 func TestManagerRejectsCloudPrimaryAutomaticSnapshotsButManualSnapshotsRemainAvailable(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	for _, blobPluginName := range []string{"s3", "gcs"} {
 		t.Run(blobPluginName, func(t *testing.T) {
 			var backupCalled atomic.Bool
@@ -237,6 +262,8 @@ func TestManagerRejectsCloudPrimaryAutomaticSnapshotsButManualSnapshotsRemainAva
 func TestManagerRejectsBadgerAutomaticSnapshotsButManualSnapshotsRemainAvailable(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newManagerTestDB(t)
 	eb := event.NewEventBus(nil, nil)
 	t.Cleanup(eb.Stop)
@@ -277,6 +304,8 @@ func TestManagerRejectsBadgerAutomaticSnapshotsButManualSnapshotsRemainAvailable
 // TestManagerCapturesSnapshotOnEpochBoundary verifies that an
 // epoch-transition event captures a real snapshot under epoch-<N>.
 func TestManagerCapturesSnapshotOnEpochBoundary(t *testing.T) {
+	t.Parallel()
+
 	db := newManagerTestDB(t)
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
@@ -297,12 +326,14 @@ func TestManagerCapturesSnapshotOnEpochBoundary(t *testing.T) {
 			filepath.Join(snapshotDir, "epoch-5", "manifest.json"),
 		)
 		return err == nil
-	}, 5*time.Second, 10*time.Millisecond)
+	}, snapshotWait, 10*time.Millisecond)
 }
 
 // TestManagerRespectsEveryNEpochsGating verifies that with
 // SnapshotEveryNEpochs=2, only an epoch divisible by 2 is captured.
 func TestManagerRespectsEveryNEpochsGating(t *testing.T) {
+	t.Parallel()
+
 	db := newManagerTestDB(t)
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
@@ -324,7 +355,7 @@ func TestManagerRespectsEveryNEpochsGating(t *testing.T) {
 			filepath.Join(snapshotDir, "epoch-4", "manifest.json"),
 		)
 		return err == nil
-	}, 30*time.Second, 10*time.Millisecond)
+	}, snapshotWait, 10*time.Millisecond)
 
 	require.NoDirExists(t, filepath.Join(snapshotDir, "epoch-3"))
 }
@@ -332,6 +363,8 @@ func TestManagerRespectsEveryNEpochsGating(t *testing.T) {
 // TestManagerRedeliveredEventIsNotFatal verifies that publishing the same
 // epoch's transition event twice does not crash or stall the manager.
 func TestManagerRedeliveredEventIsNotFatal(t *testing.T) {
+	t.Parallel()
+
 	db := newManagerTestDB(t)
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
@@ -351,7 +384,7 @@ func TestManagerRedeliveredEventIsNotFatal(t *testing.T) {
 			filepath.Join(snapshotDir, "epoch-7", "manifest.json"),
 		)
 		return err == nil
-	}, 5*time.Second, 10*time.Millisecond)
+	}, snapshotWait, 10*time.Millisecond)
 
 	// Redeliver the same epoch's event (simulating a restart replay) —
 	// must not crash the loop or leave it stuck; a later, new epoch must
@@ -363,12 +396,14 @@ func TestManagerRedeliveredEventIsNotFatal(t *testing.T) {
 			filepath.Join(snapshotDir, "epoch-8", "manifest.json"),
 		)
 		return err == nil
-	}, 5*time.Second, 10*time.Millisecond)
+	}, snapshotWait, 10*time.Millisecond)
 }
 
 // TestManagerPrunesOldSnapshotsBeyondRetention verifies that with
 // SnapshotRetention=2, capturing a 3rd snapshot deletes the oldest one.
 func TestManagerPrunesOldSnapshotsBeyondRetention(t *testing.T) {
+	t.Parallel()
+
 	db := newManagerTestDB(t)
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
@@ -396,13 +431,13 @@ func TestManagerPrunesOldSnapshotsBeyondRetention(t *testing.T) {
 				"manifest.json",
 			))
 			return err == nil
-		}, 30*time.Second, 10*time.Millisecond)
+		}, snapshotWait, 10*time.Millisecond)
 	}
 
 	require.Eventually(t, func() bool {
 		_, err := os.Stat(filepath.Join(snapshotDir, "epoch-1"))
 		return os.IsNotExist(err)
-	}, 30*time.Second, 10*time.Millisecond)
+	}, snapshotWait, 10*time.Millisecond)
 	require.DirExists(t, filepath.Join(snapshotDir, "epoch-2"))
 	require.DirExists(t, filepath.Join(snapshotDir, "epoch-3"))
 }
@@ -497,6 +532,8 @@ func setManagerFakeCloudBackingDir(t *testing.T, dir string) {
 // working cloud destination configured, pruning an epoch beyond
 // retention must also delete that epoch's cloud mirror.
 func TestManagerPruningDeletesCloudMirror(t *testing.T) {
+	t.Parallel()
+
 	db := newManagerTestDB(t)
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
@@ -521,9 +558,10 @@ func TestManagerPruningDeletesCloudMirror(t *testing.T) {
 	cloudPrefixDir := filepath.Join(cloudBackingDir, "prefix")
 	// Start launches a retry scan in the background. Give that scan an
 	// existing, nonnumeric epoch directory to upload before publishing any
-	// real epoch: receiving this upload proves the scan reached the probe,
-	// and retryMu orders the first epoch handler after the scan finishes.
-	// The nonnumeric suffix keeps the probe out of retention accounting.
+	// real epoch: receiving this upload proves the scan reached the probe;
+	// the wait below (not retryMu's incidental lock scope) is what proves
+	// the scan is actually done with it. The nonnumeric suffix keeps the
+	// probe out of retention accounting.
 	const startupProbeName = "epoch-startup-probe"
 	startupProbeDir := filepath.Join(snapshotDir, startupProbeName)
 	require.NoError(t, os.Mkdir(startupProbeDir, 0o755))
@@ -544,9 +582,22 @@ func TestManagerPruningDeletesCloudMirror(t *testing.T) {
 		testutil.RequireReceive(
 			t,
 			uploaded,
-			30*time.Second,
+			snapshotWait,
 			"startup cloud-mirror retry scan did not reach its probe",
 		),
+	)
+	// Wait for the marker to actually exist AND record this destination,
+	// not just the mid-upload channel receive above -- see the detailed
+	// comment on the identical wait in
+	// TestManagerRetriesCloudMirrorAfterTransientFailureOnRedeliveredEvent.
+	// Without it, a redundant scan could still be retrying the probe when
+	// epoch 1 publishes below, sending a second, unexpected value on the
+	// shared uploaded channel that the loop's own RequireReceive calls
+	// would misattribute to an epoch's upload.
+	require.Eventually(t, func() bool {
+		return lifecycle.IsCloudMirroredTo(startupProbeDir, cloudDest)
+	}, snapshotWait, 10*time.Millisecond,
+		"startup cloud-mirror retry scan did not finish mirroring its probe",
 	)
 
 	for epoch := uint64(1); epoch <= 3; epoch++ {
@@ -558,7 +609,7 @@ func TestManagerPruningDeletesCloudMirror(t *testing.T) {
 		require.Equal(t, epochDir, testutil.RequireReceive(
 			t,
 			uploaded,
-			30*time.Second,
+			snapshotWait,
 			"automatic snapshot cloud upload did not complete",
 		))
 		require.FileExists(t, filepath.Join(epochDir, "manifest.json"))
@@ -573,7 +624,7 @@ func TestManagerPruningDeletesCloudMirror(t *testing.T) {
 	testutil.WaitForCondition(t, func() bool {
 		_, err := os.Stat(filepath.Join(snapshotDir, "epoch-1"))
 		return os.IsNotExist(err)
-	}, 30*time.Second, "automatic snapshot local prune did not complete")
+	}, snapshotWait, "automatic snapshot local prune did not complete")
 	// Stop is the manager's drain barrier and proves the same handler has
 	// fully completed before inspecting either retained set.
 	require.NoError(t, m.Stop())
@@ -654,6 +705,8 @@ func init() {
 // unaffected by whatever epoch triggered the panic, a later epoch must
 // still be captured normally.
 func TestManagerSurvivesHandlerPanic(t *testing.T) {
+	t.Parallel()
+
 	db := newManagerTestDB(t)
 	logBuf := &syncBuffer{}
 	logger := slog.New(slog.NewTextHandler(logBuf, nil))
@@ -686,7 +739,7 @@ func TestManagerSurvivesHandlerPanic(t *testing.T) {
 			logBuf.String(),
 			"SubscribeFunc handler panicked",
 		)
-	}, 5*time.Second, 10*time.Millisecond, "the panic must be caught and logged by the EventBus")
+	}, snapshotWait, 10*time.Millisecond, "the panic must be caught and logged by the EventBus")
 
 	// The manager's dispatch must still be alive and fully, normally
 	// functional afterward -- not stuck, not dead, and not itself still
@@ -701,7 +754,7 @@ func TestManagerSurvivesHandlerPanic(t *testing.T) {
 			filepath.Join(snapshotDir, "epoch-21", "manifest.json"),
 		)
 		return err == nil
-	}, 5*time.Second, 10*time.Millisecond)
+	}, snapshotWait, 10*time.Millisecond)
 	require.Equal(
 		t, 1,
 		strings.Count(logBuf.String(), "SubscribeFunc handler panicked"),
@@ -745,6 +798,8 @@ func (b *syncBuffer) String() string {
 // keeps this test valid even if EventBus's own logging (e.g. a
 // SubscribeFunc handler panic) ever became relevant to what it checks.
 func TestManagerCloudUploadFailureIsNotSwallowed(t *testing.T) {
+	t.Parallel()
+
 	db := newManagerTestDB(t)
 
 	logBuf := &syncBuffer{}
@@ -769,7 +824,7 @@ func TestManagerCloudUploadFailureIsNotSwallowed(t *testing.T) {
 			logBuf.String(),
 			"automatic database snapshot failed",
 		)
-	}, 15*time.Second, 10*time.Millisecond)
+	}, snapshotWait, 10*time.Millisecond)
 
 	require.NotContains(
 		t,
@@ -831,6 +886,10 @@ func init() {
 // running against it. This is exactly the shape of a real node shutdown:
 // the top-level context gets cancelled, and Stop() is called on every
 // subsystem separately with no guaranteed ordering between the two.
+// Not t.Parallel: this and the other manager tests below drive package-level
+// fake-cloud fixtures (blockingCloudDest, flakyCloud3Failed,
+// permanentUploadFailureTarget, managerFakeCloudDir, flakyDeleteCloudFail)
+// that a concurrent test would observe.
 func TestManagerStopWaitsForInFlightHandlerAfterExternalContextCancellation(
 	t *testing.T,
 ) {
@@ -881,7 +940,7 @@ func TestManagerStopWaitsForInFlightHandlerAfterExternalContextCancellation(
 
 	publishEpochTransition(eb, 3)
 	testutil.RequireReceive(
-		t, dest.started, 5*time.Second,
+		t, dest.started, snapshotWait,
 		"the snapshot handler must have entered UploadDir",
 	)
 
@@ -917,16 +976,44 @@ func TestManagerStopWaitsForInFlightHandlerAfterExternalContextCancellation(
 // then succeeds on every subsequent call — simulating a transient cloud
 // outage that has cleared by the time the operation is retried, as
 // opposed to failingCloudDestination's permanent failure.
+//
+// uploaded, when non-nil, receives localDir after every UploadDir call,
+// success or failure. A test uses it to prove Start's background startup
+// retry scan has already made (and finished) its one attempt before the
+// test publishes the epoch event whose own upload is meant to be the
+// first, failing one — see the startup-probe comment in
+// TestManagerRetriesCloudMirrorAfterTransientFailureOnRedeliveredEvent.
+// Without that, the scan and the epoch handler's own SnapshotToCloud call
+// are not mutually exclusive (SnapshotToCloud never takes retryMu), so the
+// scan can find the freshly-written, not-yet-mirrored local snapshot and
+// retry its upload concurrently with the handler's own attempt — and since
+// both share this one *failed flag, whichever of the two acquires mu
+// second always succeeds, flipping IsCloudMirrored to true before (or
+// instead of) the handler's own attempt fails.
 type flakyCloudDestination struct {
-	failed *bool
-	mu     *sync.Mutex
+	failed   *bool
+	mu       *sync.Mutex
+	uploaded chan<- string
 }
 
-func (d flakyCloudDestination) UploadDir(context.Context, string) error {
+func (d flakyCloudDestination) UploadDir(
+	ctx context.Context,
+	localDir string,
+) error {
 	d.mu.Lock()
-	defer d.mu.Unlock()
-	if !*d.failed {
+	shouldFail := !*d.failed
+	if shouldFail {
 		*d.failed = true
+	}
+	d.mu.Unlock()
+	if d.uploaded != nil {
+		select {
+		case d.uploaded <- localDir:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if shouldFail {
 		return errors.New("simulated transient cloud upload failure")
 	}
 	return nil
@@ -937,12 +1024,14 @@ func (flakyCloudDestination) DownloadDir(context.Context, string) error {
 }
 
 var (
-	flakyCloudFailed  bool
-	flakyCloudMu      sync.Mutex
-	flakyCloud2Failed bool
-	flakyCloud2Mu     sync.Mutex
-	flakyCloud3Failed bool
-	flakyCloud3Mu     sync.Mutex
+	flakyCloudFailed    bool
+	flakyCloudMu        sync.Mutex
+	flakyCloudUploaded  chan<- string
+	flakyCloud2Failed   bool
+	flakyCloud2Mu       sync.Mutex
+	flakyCloud2Uploaded chan<- string
+	flakyCloud3Failed   bool
+	flakyCloud3Mu       sync.Mutex
 )
 
 func resetFlakyCloudState(failed *bool, mu *sync.Mutex) {
@@ -951,13 +1040,39 @@ func resetFlakyCloudState(failed *bool, mu *sync.Mutex) {
 	mu.Unlock()
 }
 
+// setFlakyCloudUploaded registers ch (see flakyCloudDestination.uploaded) for
+// the scheme guarded by mu, and clears it again at test cleanup so a later
+// parallel run of the same scheme (a fresh t.Run, not applicable here, but
+// kept consistent with this file's other fake-cloud setters) doesn't see a
+// stale channel.
+func setFlakyCloudUploaded(
+	t *testing.T,
+	mu *sync.Mutex,
+	slot *chan<- string,
+	ch chan<- string,
+) {
+	t.Helper()
+	mu.Lock()
+	*slot = ch
+	mu.Unlock()
+	t.Cleanup(func() {
+		mu.Lock()
+		*slot = nil
+		mu.Unlock()
+	})
+}
+
 func init() {
 	testDestinationRegistry.Register(
 		"faketestflaky",
 		func(*url.URL) (lifecycle.CloudDestination, error) {
+			flakyCloudMu.Lock()
+			uploaded := flakyCloudUploaded
+			flakyCloudMu.Unlock()
 			return flakyCloudDestination{
-				failed: &flakyCloudFailed,
-				mu:     &flakyCloudMu,
+				failed:   &flakyCloudFailed,
+				mu:       &flakyCloudMu,
+				uploaded: uploaded,
 			}, nil
 		},
 	)
@@ -979,6 +1094,8 @@ func init() {
 func TestManagerRetriesCloudMirrorAfterTransientFailureOnRedeliveredEvent(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	resetFlakyCloudState(&flakyCloudFailed, &flakyCloudMu)
 	db := newManagerTestDB(t)
 
@@ -989,6 +1106,36 @@ func TestManagerRetriesCloudMirrorAfterTransientFailureOnRedeliveredEvent(
 	defer eb.Stop()
 
 	snapshotDir := t.TempDir()
+	// Start launches a background startup retry scan (retryUnmirroredSnapshots)
+	// that is NOT mutually exclusive with the epoch handler's own first-time
+	// SnapshotToCloud call below: only the scan itself takes retryMu, so if
+	// the scan runs after epoch 9's local write lands but before its own
+	// upload attempt, both attempts race for the same destDir. Since both
+	// share flakyCloudFailed, whichever of the two acquires the mutex second
+	// always succeeds -- so the scan can silently mark epoch 9 mirrored
+	// before (or instead of) this test's own attempt gets to fail, flipping
+	// the "must not be marked mirrored" assertion below at random. Give the
+	// scan an existing, nonnumeric-suffixed probe directory to find and
+	// (successfully, see below) upload, and wait to observe that upload:
+	// since the scan runs exactly once, only from Start, having observed its
+	// one attempt proves it is done and cannot race epoch 9's own attempt.
+	const startupProbeName = "epoch-startup-probe"
+	startupProbeDir := filepath.Join(snapshotDir, startupProbeName)
+	require.NoError(t, os.Mkdir(startupProbeDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(startupProbeDir, "probe"), []byte("probe"), 0o600,
+	))
+	// The probe's own upload must not consume flakyCloudFailed's one
+	// simulated failure -- pre-mark it "already failed" so the probe's
+	// attempt succeeds as a no-op, then reset it below once the scan's
+	// attempt is confirmed, so epoch 9's own attempt is again the first
+	// (failing) one, as this test requires.
+	flakyCloudMu.Lock()
+	flakyCloudFailed = true
+	flakyCloudMu.Unlock()
+	uploaded := make(chan string)
+	setFlakyCloudUploaded(t, &flakyCloudMu, &flakyCloudUploaded, uploaded)
+
 	m := dblifecycle.NewManager(db, eb, config.DatabaseLifecycleConfig{
 		SnapshotEnabled:          true,
 		SnapshotDir:              snapshotDir,
@@ -998,24 +1145,59 @@ func TestManagerRetriesCloudMirrorAfterTransientFailureOnRedeliveredEvent(
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
-	// First delivery: local write succeeds, cloud upload fails.
+	require.Equal(t, startupProbeDir, testutil.RequireReceive(
+		t, uploaded, snapshotWait,
+		"startup cloud-mirror retry scan did not reach its probe",
+	))
+	// The channel receive above only proves the scan's UploadDir call for
+	// the probe was reached, not that MirrorToCloud has returned and
+	// written the probe's .cloud-mirrored marker: UploadDir sends on
+	// uploaded before its caller does either. Relying on retryMu alone to
+	// order the rest of this test after that write would depend on
+	// retryMirrorToCloud/retryUnmirroredSnapshots continuing to hold
+	// retryMu across the actual upload+marker-write, an implementation
+	// detail this test must not assume -- if that lock were ever narrowed
+	// to just the directory scan (e.g. to stop blocking every other
+	// epoch's own retry scan for the duration of a slow upload), the
+	// embedded retryUnmirroredSnapshots call at the top of the next
+	// handleEpochTransition could run concurrently with the tail of this
+	// one, see the probe as still unmarked, and redundantly retry it --
+	// consuming the one simulated failure meant for epoch 9's own first
+	// attempt below. Wait for the marker to actually exist AND record this
+	// destination -- not just lifecycle.IsCloudMirrored's bare os.Stat,
+	// which can observe the marker file the instant os.WriteFile's
+	// internal O_CREATE|O_TRUNC open lands, before the content write that
+	// follows it: retryUnmirroredSnapshots' own idempotency check
+	// (IsCloudMirroredTo) reads that content, so matching it here is what
+	// actually closes the window instead of narrowing it.
+	require.Eventually(t, func() bool {
+		return lifecycle.IsCloudMirroredTo(
+			startupProbeDir, "faketestflaky://bucket/prefix",
+		)
+	}, snapshotWait, 10*time.Millisecond,
+		"startup cloud-mirror retry scan did not finish mirroring its probe",
+	)
+	flakyCloudMu.Lock()
+	flakyCloudFailed = false
+	flakyCloudUploaded = nil
+	flakyCloudMu.Unlock()
+
+	// First delivery: local write succeeds, cloud upload fails. The startup
+	// scan above has already finished (its one and only run), so no other
+	// caller can race this attempt for the same destDir.
+	destDir := filepath.Join(snapshotDir, "epoch-9")
 	publishEpochTransition(eb, 9)
 	require.Eventually(t, func() bool {
 		return strings.Contains(
 			logBuf.String(),
 			"automatic database snapshot failed",
 		)
-	}, 5*time.Second, 10*time.Millisecond)
+	}, snapshotWait, 10*time.Millisecond)
 
-	entries, err := os.ReadDir(snapshotDir)
-	require.NoError(t, err)
-	require.Len(
-		t,
-		entries,
-		1,
+	require.DirExists(
+		t, destDir,
 		"the local snapshot must still exist despite the cloud failure",
 	)
-	destDir := filepath.Join(snapshotDir, entries[0].Name())
 	require.False(
 		t, lifecycle.IsCloudMirrored(destDir),
 		"must not be marked mirrored after a failed upload",
@@ -1032,18 +1214,25 @@ func TestManagerRetriesCloudMirrorAfterTransientFailureOnRedeliveredEvent(
 		// coalesced by the bus.
 		publishEpochTransition(eb, 9)
 		return lifecycle.IsCloudMirrored(destDir)
-	}, 15*time.Second, 10*time.Millisecond)
+	}, snapshotWait, 10*time.Millisecond)
 
 	require.True(
 		t, lifecycle.IsCloudMirrored(destDir),
 		"must be marked mirrored after the retried upload succeeds",
 	)
-	entries, err = os.ReadDir(snapshotDir)
+	entries, err := os.ReadDir(snapshotDir)
 	require.NoError(t, err)
-	require.Len(
+	var epochDirs []string
+	for _, entry := range entries {
+		if entry.Name() == startupProbeName {
+			continue
+		}
+		epochDirs = append(epochDirs, entry.Name())
+	}
+	require.Equal(
 		t,
-		entries,
-		1,
+		[]string{"epoch-9"},
+		epochDirs,
 		"the retry must reuse the existing local snapshot directory, not create a second one",
 	)
 }
@@ -1052,9 +1241,13 @@ func init() {
 	testDestinationRegistry.Register(
 		"faketestflaky2",
 		func(*url.URL) (lifecycle.CloudDestination, error) {
+			flakyCloud2Mu.Lock()
+			uploaded := flakyCloud2Uploaded
+			flakyCloud2Mu.Unlock()
 			return flakyCloudDestination{
-				failed: &flakyCloud2Failed,
-				mu:     &flakyCloud2Mu,
+				failed:   &flakyCloud2Failed,
+				mu:       &flakyCloud2Mu,
+				uploaded: uploaded,
 			}, nil
 		},
 	)
@@ -1071,6 +1264,8 @@ func init() {
 func TestManagerRetriesUnmirroredSnapshotOnLaterEpochWithoutRedelivery(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	resetFlakyCloudState(&flakyCloud2Failed, &flakyCloud2Mu)
 	db := newManagerTestDB(t)
 
@@ -1081,6 +1276,23 @@ func TestManagerRetriesUnmirroredSnapshotOnLaterEpochWithoutRedelivery(
 	defer eb.Stop()
 
 	snapshotDir := t.TempDir()
+	// See the identical probe technique and comment in
+	// TestManagerRetriesCloudMirrorAfterTransientFailureOnRedeliveredEvent:
+	// without it, Start's background startup retry scan can race epoch 9's
+	// own first upload attempt for the same destDir, since only the scan
+	// takes retryMu.
+	const startupProbeName = "epoch-startup-probe"
+	startupProbeDir := filepath.Join(snapshotDir, startupProbeName)
+	require.NoError(t, os.Mkdir(startupProbeDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(startupProbeDir, "probe"), []byte("probe"), 0o600,
+	))
+	flakyCloud2Mu.Lock()
+	flakyCloud2Failed = true
+	flakyCloud2Mu.Unlock()
+	uploaded := make(chan string)
+	setFlakyCloudUploaded(t, &flakyCloud2Mu, &flakyCloud2Uploaded, uploaded)
+
 	m := dblifecycle.NewManager(db, eb, config.DatabaseLifecycleConfig{
 		SnapshotEnabled:          true,
 		SnapshotDir:              snapshotDir,
@@ -1090,15 +1302,35 @@ func TestManagerRetriesUnmirroredSnapshotOnLaterEpochWithoutRedelivery(
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
+	require.Equal(t, startupProbeDir, testutil.RequireReceive(
+		t, uploaded, snapshotWait,
+		"startup cloud-mirror retry scan did not reach its probe",
+	))
+	// Wait for the marker to actually exist AND record this destination,
+	// not just the mid-upload channel receive above -- see the detailed
+	// comment on the identical wait in
+	// TestManagerRetriesCloudMirrorAfterTransientFailureOnRedeliveredEvent.
+	require.Eventually(t, func() bool {
+		return lifecycle.IsCloudMirroredTo(
+			startupProbeDir, "faketestflaky2://bucket/prefix",
+		)
+	}, snapshotWait, 10*time.Millisecond,
+		"startup cloud-mirror retry scan did not finish mirroring its probe",
+	)
+	flakyCloud2Mu.Lock()
+	flakyCloud2Failed = false
+	flakyCloud2Uploaded = nil
+	flakyCloud2Mu.Unlock()
+
+	destDir := filepath.Join(snapshotDir, "epoch-9")
 	publishEpochTransition(eb, 9)
 	require.Eventually(t, func() bool {
 		return strings.Contains(
 			logBuf.String(),
 			"automatic database snapshot failed",
 		)
-	}, 15*time.Second, 10*time.Millisecond)
+	}, snapshotWait, 10*time.Millisecond)
 
-	destDir := filepath.Join(snapshotDir, "epoch-9")
 	require.False(
 		t, lifecycle.IsCloudMirrored(destDir),
 		"must not be marked mirrored after a failed upload",
@@ -1109,7 +1341,7 @@ func TestManagerRetriesUnmirroredSnapshotOnLaterEpochWithoutRedelivery(
 	publishEpochTransition(eb, 10)
 	require.Eventually(t, func() bool {
 		return lifecycle.IsCloudMirrored(destDir)
-	}, 15*time.Second, 10*time.Millisecond,
+	}, snapshotWait, 10*time.Millisecond,
 		"epoch 9's stuck snapshot must be retried when epoch 10 transitions, "+
 			"without epoch 9's own event ever being redelivered",
 	)
@@ -1190,7 +1422,7 @@ func TestManagerRetriesUnmirroredSnapshotOnRestart(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		return lifecycle.IsCloudMirrored(destDir)
-	}, 15*time.Second, 10*time.Millisecond,
+	}, snapshotWait, 10*time.Millisecond,
 		"restart's startup scan must retry epoch 9's stuck snapshot "+
 			"without any epoch-transition event being delivered",
 	)
@@ -1373,7 +1605,7 @@ func TestManagerPruningPreservesNeverMirroredSnapshotLocally(t *testing.T) {
 	require.Eventually(t, func() bool {
 		_, err := os.Stat(filepath.Join(epoch1Dir, "manifest.json"))
 		return err == nil
-	}, 5*time.Second, 10*time.Millisecond)
+	}, snapshotWait, 10*time.Millisecond)
 	require.False(
 		t, lifecycle.IsCloudMirrored(epoch1Dir),
 		"must not be marked mirrored after a failed upload",
@@ -1390,7 +1622,7 @@ func TestManagerPruningPreservesNeverMirroredSnapshotLocally(t *testing.T) {
 			filepath.Join(cloudPrefixDir, "epoch-2", "manifest.json"),
 		)
 		return err == nil
-	}, 5*time.Second, 10*time.Millisecond)
+	}, snapshotWait, 10*time.Millisecond)
 
 	require.DirExists(
 		t,
@@ -1406,13 +1638,13 @@ func TestManagerPruningPreservesNeverMirroredSnapshotLocally(t *testing.T) {
 	publishEpochTransition(eb, 3)
 	require.Eventually(t, func() bool {
 		return lifecycle.IsCloudMirrored(epoch1Dir)
-	}, 15*time.Second, 10*time.Millisecond)
+	}, snapshotWait, 10*time.Millisecond)
 
 	require.Eventually(t, func() bool {
 		_, localErr := os.Stat(epoch1Dir)
 		_, cloudErr := os.Stat(filepath.Join(cloudPrefixDir, "epoch-1"))
 		return os.IsNotExist(localErr) && os.IsNotExist(cloudErr)
-	}, 15*time.Second, 10*time.Millisecond,
+	}, snapshotWait, 10*time.Millisecond,
 		"once mirrored for real, a later pruning pass must finish removing "+
 			"both copies of the now-retired epoch-1 snapshot",
 	)
@@ -1467,7 +1699,7 @@ func TestManagerCloudDestinationPrefixIsIncorporatedIntoUploadPath(
 			"manifest.json",
 		))
 		return err == nil
-	}, 5*time.Second, 10*time.Millisecond)
+	}, snapshotWait, 10*time.Millisecond)
 
 	require.NoDirExists(
 		t,
@@ -1477,6 +1709,8 @@ func TestManagerCloudDestinationPrefixIsIncorporatedIntoUploadPath(
 }
 
 func TestManagerRejectsUnsafeCloudDestinationPrefix(t *testing.T) {
+	t.Parallel()
+
 	for _, prefix := range []string{"..", ".", "nodes/a", `nodes\a`} {
 		t.Run(prefix, func(t *testing.T) {
 			eb := event.NewEventBus(nil, nil)
@@ -1513,6 +1747,8 @@ func TestManagerRejectsUnsafeCloudDestinationPrefix(t *testing.T) {
 // two nodes sharing one destination silently collide at the same
 // deterministic epoch-<N> remote key.
 func TestManagerWarnsWhenCloudDestinationConfiguredWithoutPrefix(t *testing.T) {
+	t.Parallel()
+
 	db := newManagerTestDB(t)
 	logBuf := &syncBuffer{}
 	logger := slog.New(slog.NewTextHandler(logBuf, nil))
@@ -1541,6 +1777,8 @@ func TestManagerWarnsWhenCloudDestinationConfiguredWithoutPrefix(t *testing.T) {
 // case: once a distinguishing prefix is configured, Start must not warn
 // about the same missing-prefix collision risk.
 func TestManagerDoesNotWarnWhenCloudDestinationPrefixIsSet(t *testing.T) {
+	t.Parallel()
+
 	db := newManagerTestDB(t)
 	logBuf := &syncBuffer{}
 	logger := slog.New(slog.NewTextHandler(logBuf, nil))
@@ -1607,7 +1845,7 @@ func TestManagerPruningKeepsLocalCopyUntilCloudDeleteSucceeds(t *testing.T) {
 				"manifest.json",
 			))
 			return err == nil
-		}, 5*time.Second, 10*time.Millisecond)
+		}, snapshotWait, 10*time.Millisecond)
 	}
 
 	// epoch-1 is beyond retention (2): pruning must have attempted to
@@ -1616,7 +1854,7 @@ func TestManagerPruningKeepsLocalCopyUntilCloudDeleteSucceeds(t *testing.T) {
 	require.Eventually(t, func() bool {
 		_, localErr := os.Stat(filepath.Join(snapshotDir, "epoch-1"))
 		return localErr == nil
-	}, 5*time.Second, 10*time.Millisecond)
+	}, snapshotWait, 10*time.Millisecond)
 	require.DirExists(
 		t,
 		filepath.Join(cloudPrefixDir, "epoch-1"),
@@ -1639,13 +1877,13 @@ func TestManagerPruningKeepsLocalCopyUntilCloudDeleteSucceeds(t *testing.T) {
 			"manifest.json",
 		))
 		return err == nil
-	}, 5*time.Second, 10*time.Millisecond)
+	}, snapshotWait, 10*time.Millisecond)
 
 	require.Eventually(t, func() bool {
 		_, localErr := os.Stat(filepath.Join(snapshotDir, "epoch-1"))
 		_, cloudErr := os.Stat(filepath.Join(cloudPrefixDir, "epoch-1"))
 		return os.IsNotExist(localErr) && os.IsNotExist(cloudErr)
-	}, 5*time.Second, 10*time.Millisecond,
+	}, snapshotWait, 10*time.Millisecond,
 		"once the cloud outage clears, a later pruning pass must finish "+
 			"removing both the local and cloud copies of the retried epoch",
 	)

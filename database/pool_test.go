@@ -24,6 +24,8 @@ import (
 )
 
 func TestImportPoolRejectsTransactionWithoutMetadataWriteHandle(t *testing.T) {
+	t.Parallel()
+
 	db, err := newTestDatabase(t, &Config{DataDir: ""})
 	require.NoError(t, err)
 

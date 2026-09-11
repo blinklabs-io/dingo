@@ -124,6 +124,8 @@ var (
 )
 
 func TestChainBasic(t *testing.T) {
+	t.Parallel()
+
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error creating chain manager: %s", err)
@@ -225,6 +227,8 @@ func TestChainBasic(t *testing.T) {
 }
 
 func TestChainBlockBeforeSlotUsesCanonicalChainIndex(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, dbConfig)
 	if err != nil {
 		t.Fatalf("unexpected error creating database: %s", err)
@@ -283,6 +287,8 @@ func TestChainBlockBeforeSlotUsesCanonicalChainIndex(t *testing.T) {
 // 60, 80, 100): below all, at a block slot, between blocks, and above the tip.
 // It guards the #2771 change from the linear backward walk to a binary search.
 func TestChainBlockBeforeSlotBinarySearchBoundaries(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, dbConfig)
 	if err != nil {
 		t.Fatalf("unexpected error creating database: %s", err)
@@ -357,6 +363,8 @@ func TestChainBlockBeforeSlotBinarySearchBoundaries(t *testing.T) {
 }
 
 func TestChainIteratorReverseFromTipInclusive(t *testing.T) {
+	t.Parallel()
+
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error creating chain manager: %s", err)
@@ -421,6 +429,8 @@ func TestChainIteratorReverseFromTipInclusive(t *testing.T) {
 }
 
 func TestChainIteratorReverseFromTipNonInclusive(t *testing.T) {
+	t.Parallel()
+
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error creating chain manager: %s", err)
@@ -457,6 +467,8 @@ func TestChainIteratorReverseFromTipNonInclusive(t *testing.T) {
 }
 
 func TestChainIteratorReverseFromMiddleInclusive(t *testing.T) {
+	t.Parallel()
+
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error creating chain manager: %s", err)
@@ -505,6 +517,8 @@ func TestChainIteratorReverseFromMiddleInclusive(t *testing.T) {
 }
 
 func TestChainIteratorReverseFromOrigin(t *testing.T) {
+	t.Parallel()
+
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error creating chain manager: %s", err)
@@ -532,6 +546,8 @@ func TestChainIteratorReverseFromOrigin(t *testing.T) {
 }
 
 func TestChainIteratorReverseFromGenesisNonInclusive(t *testing.T) {
+	t.Parallel()
+
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error creating chain manager: %s", err)
@@ -564,6 +580,8 @@ func TestChainIteratorReverseFromGenesisNonInclusive(t *testing.T) {
 }
 
 func TestChainIteratorReverseBlockingTerminatesAtOrigin(t *testing.T) {
+	t.Parallel()
+
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error creating chain manager: %s", err)
@@ -605,6 +623,8 @@ func TestChainIteratorReverseBlockingTerminatesAtOrigin(t *testing.T) {
 }
 
 func TestChainIteratorReverseIgnoresRollback(t *testing.T) {
+	t.Parallel()
+
 	eventBus := event.NewEventBus(nil, nil)
 	cm, err := chain.NewManager(nil, eventBus)
 	if err != nil {
@@ -699,6 +719,8 @@ func TestChainIteratorReverseIgnoresRollback(t *testing.T) {
 // index 0 (pre-genesis), so the clamp must trigger when rollbackBlockIndex
 // is 0 as well.
 func TestChainIteratorReverseRollbackToOriginClamps(t *testing.T) {
+	t.Parallel()
+
 	eventBus := event.NewEventBus(nil, nil)
 	cm, err := chain.NewManager(nil, eventBus)
 	if err != nil {
@@ -758,6 +780,8 @@ func TestChainIteratorReverseRollbackToOriginClamps(t *testing.T) {
 }
 
 func TestAddLocalBlockIgnoresAndClearsPendingPeerHeaders(t *testing.T) {
+	t.Parallel()
+
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error creating chain manager: %s", err)
@@ -798,6 +822,8 @@ func TestAddLocalBlockIgnoresAndClearsPendingPeerHeaders(t *testing.T) {
 func TestAddLocalBlockRejectsStaleParentAndPreservesPendingHeaders(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error creating chain manager: %s", err)
@@ -836,6 +862,8 @@ func TestAddLocalBlockRejectsStaleParentAndPreservesPendingHeaders(
 }
 
 func TestChainRollback(t *testing.T) {
+	t.Parallel()
+
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error creating chain manager: %s", err)
@@ -942,6 +970,8 @@ func TestChainRollback(t *testing.T) {
 // hash, silently discarding a real block's hash and truncating the whole
 // chain instead of the requested single block.
 func TestChainRollbackToSlotZeroBlockDoesNotCollapseToOrigin(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	if err != nil {
@@ -1026,6 +1056,8 @@ func TestChainRollbackToSlotZeroBlockDoesNotCollapseToOrigin(t *testing.T) {
 }
 
 func TestChainHeaderRange(t *testing.T) {
+	t.Parallel()
+
 	testBlockCount := 3
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
@@ -1074,6 +1106,8 @@ func TestChainHeaderRange(t *testing.T) {
 // points instead of panicking on an out-of-range slice index when count is
 // zero or negative (issue #3531).
 func TestChainHeaderRangeNonPositiveCount(t *testing.T) {
+	t.Parallel()
+
 	for _, count := range []int{0, -1, -1000} {
 		t.Run(fmt.Sprintf("count=%d", count), func(t *testing.T) {
 			cm, err := chain.NewManager(nil, nil)
@@ -1114,6 +1148,8 @@ func TestChainHeaderRangeNonPositiveCount(t *testing.T) {
 // would have already pruned by the time it discovers the target is invalid
 // (issue #3531).
 func TestChainRollbackInvalidHeaderTargetPreservesQueue(t *testing.T) {
+	t.Parallel()
+
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error creating chain manager: %s", err)
@@ -1156,6 +1192,8 @@ func TestChainRollbackInvalidHeaderTargetPreservesQueue(t *testing.T) {
 // discarded; the matched header itself stays queued and the chain tip moves
 // to it (issue #3531).
 func TestChainRollbackToQueuedHeaderSucceeds(t *testing.T) {
+	t.Parallel()
+
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error creating chain manager: %s", err)
@@ -1217,6 +1255,8 @@ func TestChainRollbackToQueuedHeaderSucceeds(t *testing.T) {
 func TestChainFirstVerifiedHeaderMatchesPointRequiresVerifiedHeader(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error creating chain manager: %s", err)
@@ -1245,6 +1285,8 @@ func TestChainFirstVerifiedHeaderMatchesPointRequiresVerifiedHeader(
 }
 
 func TestChainHeaderBlock(t *testing.T) {
+	t.Parallel()
+
 	testBlockCount := 3
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
@@ -1272,6 +1314,8 @@ func TestChainHeaderBlock(t *testing.T) {
 }
 
 func TestChainHeaderWrongBlock(t *testing.T) {
+	t.Parallel()
+
 	testBlockCount := 3
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
@@ -1313,6 +1357,8 @@ func TestChainHeaderWrongBlock(t *testing.T) {
 }
 
 func TestChainHeaderRollback(t *testing.T) {
+	t.Parallel()
+
 	testBlockCount := 3
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
@@ -1371,6 +1417,8 @@ func mustSetLedger(t *testing.T, cm *chain.ChainManager, securityParam int) {
 }
 
 func TestSetLedgerRejectsNonPositiveSecurityParam(t *testing.T) {
+	t.Parallel()
+
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
@@ -1418,6 +1466,8 @@ func makeLinkedHeaders(
 }
 
 func TestHeaderQueueLimitDefault(t *testing.T) {
+	t.Parallel()
+
 	// K=1 yields max(2, DefaultMaxQueuedHeaders) == DefaultMaxQueuedHeaders
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
@@ -1461,6 +1511,8 @@ func TestHeaderQueueLimitDefault(t *testing.T) {
 }
 
 func TestHeaderQueueLimitFromSecurityParam(t *testing.T) {
+	t.Parallel()
+
 	// securityParam must be large enough that sp*2 exceeds
 	// DefaultMaxQueuedHeaders, otherwise the default floor applies.
 	securityParam := chain.DefaultMaxQueuedHeaders/2 + 1
@@ -1506,6 +1558,8 @@ func TestHeaderQueueLimitFromSecurityParam(t *testing.T) {
 }
 
 func TestHeaderQueueAcceptsWithinLimit(t *testing.T) {
+	t.Parallel()
+
 	securityParam := 10
 	expectedLimit := securityParam * 2
 
@@ -1538,6 +1592,8 @@ func TestHeaderQueueAcceptsWithinLimit(t *testing.T) {
 }
 
 func TestChainFromIntersect(t *testing.T) {
+	t.Parallel()
+
 	testForkPointIndex := 2
 	testIntersectPoints := []ocommon.Point{
 		{
@@ -1576,6 +1632,8 @@ func TestChainFromIntersect(t *testing.T) {
 }
 
 func TestRecentPointsNoDatabase(t *testing.T) {
+	t.Parallel()
+
 	// Create a chain manager with no database. Blocks are stored
 	// in memory only. RecentPoints must return the in-memory
 	// chain points even though there is no blob store.
@@ -1664,6 +1722,8 @@ func TestRecentPointsNoDatabase(t *testing.T) {
 }
 
 func TestPointAtDepthNoDatabase(t *testing.T) {
+	t.Parallel()
+
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error creating chain manager: %s", err)
@@ -1701,6 +1761,8 @@ func TestPointAtDepthNoDatabase(t *testing.T) {
 }
 
 func TestInMemoryForkPointEnumerationConcurrentWithForkCreation(t *testing.T) {
+	t.Parallel()
+
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error creating chain manager: %s", err)
@@ -1756,6 +1818,8 @@ func TestInMemoryForkPointEnumerationConcurrentWithForkCreation(t *testing.T) {
 }
 
 func TestRecentPointsWithDatabase(t *testing.T) {
+	t.Parallel()
+
 	// Create a chain manager with a real database. RecentPoints
 	// should still return the correct in-memory tip even though
 	// block storage goes through the blob store.
@@ -1810,6 +1874,8 @@ func TestRecentPointsWithDatabase(t *testing.T) {
 }
 
 func TestIntersectPointsIncludesOlderSamples(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	if err != nil {
@@ -1916,6 +1982,8 @@ func generateTestChain(
 }
 
 func TestChainRollbackExceedsSecurityParam(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	if err != nil {
@@ -1977,6 +2045,8 @@ func TestChainRollbackExceedsSecurityParam(t *testing.T) {
 // leave the header queue exactly as it was, the same as it leaves the
 // persisted chain untouched.
 func TestChainRollbackPreservesQueuedHeadersOnOverKRejection(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	if err != nil {
@@ -2033,6 +2103,8 @@ func TestChainRollbackPreservesQueuedHeadersOnOverKRejection(t *testing.T) {
 }
 
 func TestChainRollbackWithinSecurityParam(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	if err != nil {
@@ -2097,6 +2169,8 @@ func TestChainRollbackWithinSecurityParam(t *testing.T) {
 // re-intersect and recover. The saturating fork-depth arithmetic that fixed the
 // underflow is retained and covered directly by TestRollbackForkDepthSaturates.
 func TestChainRollbackPointAheadOfTipIsNotDeepFork(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	if err != nil {
@@ -2185,6 +2259,8 @@ func TestChainRollbackPointAheadOfTipIsNotDeepFork(t *testing.T) {
 }
 
 func TestRewindPrimaryChainToPointPrunesPersistentTail(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	if err != nil {
@@ -2254,6 +2330,8 @@ func TestRewindPrimaryChainToPointPrunesPersistentTail(t *testing.T) {
 // chain and every block it holds untouched when it does, so NtC clients stay
 // consistent after a rejected rewind.
 func TestRewindPrimaryChainToPointRejectsOverLimitRewind(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	if err != nil {
@@ -2309,6 +2387,8 @@ func TestRewindPrimaryChainToPointRejectsOverLimitRewind(t *testing.T) {
 // rollback, the same signal downstream NtC consumers rely on for a live
 // Chain.Rollback.
 func TestRewindPrimaryChainToPointSignalsRollback(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	eventBus := event.NewEventBus(nil, nil)
 	cm, err := chain.NewManager(db, eventBus)
@@ -2403,6 +2483,8 @@ func TestRewindPrimaryChainToPointSignalsRollback(t *testing.T) {
 // with no corruption or deadlock; run with -race to catch any lock-ordering
 // regression reintroduced around the shared rollback path.
 func TestRewindPrimaryChainToPointConcurrentRewinds(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	if err != nil {
@@ -2465,6 +2547,8 @@ func TestRewindPrimaryChainToPointConcurrentRewinds(t *testing.T) {
 }
 
 func TestChainRollbackRequiresSecurityParamConfigured(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	if err != nil {
@@ -2504,6 +2588,8 @@ func TestChainRollbackRequiresSecurityParamConfigured(t *testing.T) {
 // path instead would fail node startup outright over a local, already-durable
 // divergence that has nothing to do with an untrusted peer.
 func TestChainRollbackUnboundedSkipsSecurityParamCheck(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	if err != nil {
@@ -2546,6 +2632,8 @@ func TestChainRollbackUnboundedSkipsSecurityParamCheck(t *testing.T) {
 func TestChainRollbackEphemeralChainNotRestricted(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	if err != nil {
@@ -2624,6 +2712,8 @@ func TestChainRollbackEphemeralChainNotRestricted(
 }
 
 func TestChainFork(t *testing.T) {
+	t.Parallel()
+
 	testForkPointIndex := 2
 	testIntersectPoints := []ocommon.Point{
 		{
@@ -2785,6 +2875,8 @@ func TestChainFork(t *testing.T) {
 // retained in the LRU cache to re-anchor the fork against the shorter
 // primary chain.
 func TestChainIterateNonPrimaryAfterPrimaryRollbackPastFork(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	if err != nil {
@@ -2899,6 +2991,8 @@ func TestChainIterateNonPrimaryAfterPrimaryRollbackPastFork(t *testing.T) {
 //     point followed by ErrIteratorChainTip;
 //   - a fresh iterator from origin delivers exactly P1, P2, P3.
 func TestChainRollbackNonPrimaryAfterPrimaryRollback(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	if err != nil {
@@ -3071,6 +3165,8 @@ func TestChainRollbackNonPrimaryAfterPrimaryRollback(t *testing.T) {
 // retained primary prefix plus that fork's divergent tail. Rolling
 // back fork A then leaves fork B's view unchanged.
 func TestChainMultipleNonPrimaryChainsIndependentRollback(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	if err != nil {
@@ -3239,6 +3335,8 @@ func TestChainMultipleNonPrimaryChainsIndependentRollback(t *testing.T) {
 // lastCommonBlockIndex to P2 while preserving P3 as the fork's
 // in-memory tip; otherwise iteration silently truncates at P2.
 func TestChainReconcileEmptyForkPreservesOrphanedTip(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	if err != nil {
@@ -3311,6 +3409,8 @@ func TestChainReconcileEmptyForkPreservesOrphanedTip(t *testing.T) {
 // TestIteratorNonInclusiveStartPoint verifies that an iterator created with
 // inclusive=false skips the start block and begins at the block after it.
 func TestIteratorNonInclusiveStartPoint(t *testing.T) {
+	t.Parallel()
+
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
@@ -3360,6 +3460,8 @@ func TestIteratorNonInclusiveStartPoint(t *testing.T) {
 // when the iterator is at tip and unblocks with the new block once a block is
 // added to the chain.
 func TestIteratorBlockingNextDeliversBlock(t *testing.T) {
+	t.Parallel()
+
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
@@ -3431,6 +3533,8 @@ func TestIteratorBlockingNextDeliversBlock(t *testing.T) {
 // a rollback signal, subsequent Next() calls deliver blocks after the rollback
 // point.
 func TestIteratorPostRollbackBlockDelivery(t *testing.T) {
+	t.Parallel()
+
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)

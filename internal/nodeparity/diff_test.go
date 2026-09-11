@@ -51,6 +51,8 @@ func emptySnapshot() *Snapshot {
 // identical protocol params, stake distribution, and UTxO set must diff as
 // completely empty, so a real match is never mistaken for a divergence.
 func TestDiffSnapshots_Identical(t *testing.T) {
+	t.Parallel()
+
 	a := emptySnapshot()
 	b := emptySnapshot()
 	d := DiffSnapshots(a, b)
@@ -68,6 +70,8 @@ func TestDiffSnapshots_Identical(t *testing.T) {
 // counting divergences by field (e.g. the Prometheus label) attributes it
 // correctly.
 func TestDiffSnapshots_ProtocolParamsDiffer(t *testing.T) {
+	t.Parallel()
+
 	a := emptySnapshot()
 	b := emptySnapshot()
 	b.ProtocolParams = &utxorpccardano.PParams{MaxTxSize: 32768}
@@ -85,6 +89,8 @@ func TestDiffSnapshots_ProtocolParamsDiffer(t *testing.T) {
 // only in b. All three must be reported as separate lines, and neither
 // protocol params nor UTxO should be touched by a stake-only divergence.
 func TestDiffSnapshots_StakeDistribution(t *testing.T) {
+	t.Parallel()
+
 	a := emptySnapshot()
 	b := emptySnapshot()
 
@@ -115,6 +121,8 @@ func TestDiffSnapshots_StakeDistribution(t *testing.T) {
 // a real leader-election-relevant divergence between the two nodes' views
 // of the same pool.
 func TestDiffSnapshots_StakeDistributionVrfKeyDiffers(t *testing.T) {
+	t.Parallel()
+
 	a := emptySnapshot()
 	b := emptySnapshot()
 
@@ -142,6 +150,8 @@ func TestDiffSnapshots_StakeDistributionVrfKeyDiffers(t *testing.T) {
 // only the fraction mismatch, silently shadowing the VRF divergence for
 // that pool -- exactly the class of pool this test targets.
 func TestDiffSnapshots_StakeDistributionBothFieldsDiffer(t *testing.T) {
+	t.Parallel()
+
 	a := emptySnapshot()
 	b := emptySnapshot()
 
@@ -173,6 +183,8 @@ func TestDiffSnapshots_StakeDistributionBothFieldsDiffer(t *testing.T) {
 // only in b -- three divergence lines, with no truncation since the count
 // is well under the cap.
 func TestDiffSnapshots_UTxOSetDiffers(t *testing.T) {
+	t.Parallel()
+
 	a := emptySnapshot()
 	b := emptySnapshot()
 
@@ -193,6 +205,8 @@ func TestDiffSnapshots_UTxOSetDiffers(t *testing.T) {
 // divergences whenever TruncatedUTxO is nonzero. Count() must report the
 // true total instead.
 func TestDiff_CountIncludesTruncatedEntries(t *testing.T) {
+	t.Parallel()
+
 	d := Diff{
 		ProtocolParamsDiff: "protocol parameters differ",
 		StakeDistribution:  []string{"pool a differs"},
@@ -216,6 +230,8 @@ func TestDiff_CountIncludesTruncatedEntries(t *testing.T) {
 // capped sample itself, must never see something that looks like it
 // changed when the underlying snapshots did not.
 func TestDiffSnapshots_OrderIsDeterministic(t *testing.T) {
+	t.Parallel()
+
 	a := emptySnapshot()
 	b := emptySnapshot()
 
@@ -250,6 +266,8 @@ func TestDiffSnapshots_OrderIsDeterministic(t *testing.T) {
 // exactly one human-readable summary line for that overflow -- not one per
 // omitted entry, and not silently dropped.
 func TestDiffSnapshots_UTxODiffCapped(t *testing.T) {
+	t.Parallel()
+
 	a := emptySnapshot()
 	b := emptySnapshot()
 

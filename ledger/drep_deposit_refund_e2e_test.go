@@ -141,6 +141,8 @@ func seedImportedDrep(
 // defect was a plausible internal value becoming the wrong consensus
 // decision.
 func TestDRepDeregistrationRefundsRecordedDeposit(t *testing.T) {
+	t.Parallel()
+
 	lv, db := newStakeRefundTestView(t)
 	cred := drepRefundTestCredential(0xd1)
 	seedImportedDrep(t, db, cred, drepRefundTestRecordedDeposit, 100, true)
@@ -195,6 +197,8 @@ func TestDRepDeregistrationRefundsRecordedDeposit(t *testing.T) {
 // reads its deposits through the batched query, so this is what executes
 // GetDrepLastRegistrationDeposits' derived-table join.
 func TestDRepRegistrationsReportRecordedDeposits(t *testing.T) {
+	t.Parallel()
+
 	lv, db := newStakeRefundTestView(t)
 	active := drepRefundTestCredential(0xd2)
 	inactive := drepRefundTestCredential(0xd3)
@@ -216,6 +220,8 @@ func TestDRepRegistrationsReportRecordedDeposits(t *testing.T) {
 // registration_drep history reports no deposit rather than an error, through
 // both views.
 func TestDRepRegistrationReportsNilForUnregisteredCredential(t *testing.T) {
+	t.Parallel()
+
 	lv, db := newStakeRefundTestView(t)
 	cred := drepRefundTestCredential(0xd4)
 	tag, err := models.CredentialTagFromUint(uint(cred.CredType))

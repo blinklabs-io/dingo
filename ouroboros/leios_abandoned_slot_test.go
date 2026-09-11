@@ -84,6 +84,8 @@ func leiosFetchHandshake() []ouroboros_mock.ConversationEntry {
 // time so backfill can move to another peer, whose MsgBlockTxs response then
 // makes the certified endorser block available to both ledger and serving.
 func TestLeiosBlockTxsAbandonedSlotFailsOverAndBecomesAvailable(t *testing.T) {
+	t.Parallel()
+
 	tx, ref := testLeiosManifestTx(t, 0x22)
 	manifestRaw, err := lcommon.LeiosEndorserBlock{
 		TransactionReferences: []lcommon.LeiosTransactionReference{ref},

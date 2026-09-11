@@ -106,6 +106,8 @@ func (t *validityOutcomeStateTx) Produced() []lcommon.Utxo {
 func TestLedgerProcessBlockDijkstraValidityOutcomeStateTransitions(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tests := []struct {
 		name          string
 		declaredValid bool
@@ -255,6 +257,7 @@ func TestLedgerProcessBlockDijkstraValidityOutcomeStateTransitions(
 						pparams,
 						nil,
 						0,
+						false,
 					)
 					return err
 				})
@@ -415,6 +418,7 @@ func TestLedgerProcessBlockHistoricalValidationRunsPhase2(t *testing.T) {
 						pparams,
 						nil,
 						0,
+						false,
 					)
 					return err
 				})
@@ -440,6 +444,8 @@ func (b *validityOutcomeTestBlock) BlockBodyHash() lcommon.Blake2b256 {
 func TestLedgerProcessBlockEnforcesTransactionValidationOutcomes(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tests := []struct {
 		name          string
 		declaredValid bool
@@ -506,6 +512,7 @@ func TestLedgerProcessBlockEnforcesTransactionValidationOutcomes(
 					nil,
 					nil,
 					0,
+					false,
 				)
 				return err
 			})
