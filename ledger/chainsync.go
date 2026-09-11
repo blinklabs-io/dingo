@@ -7079,13 +7079,13 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(
 	// shadow path the shadow can win the race and emit BatchDone before the
 	// slow primary, and waiting for the primary's BatchDone defeats the
 	// purpose of dispatching a shadow at all.
-	if ls.chainsyncBlockfetchReadyChan == nil {
-		return nil
-	}
 	if connIdKey(ls.blockfetchDiscardConnId) != "" &&
 		sameConnectionId(e.ConnectionId, ls.blockfetchDiscardConnId) {
 		// BatchDone is the ordering barrier for the abandoned request.
 		ls.blockfetchDiscardConnId = ouroboros.ConnectionId{}
+		return nil
+	}
+	if ls.chainsyncBlockfetchReadyChan == nil {
 		return nil
 	}
 	fromActive := sameConnectionId(e.ConnectionId, ls.activeBlockfetchConnId)
