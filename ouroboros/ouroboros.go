@@ -181,8 +181,9 @@ type Ouroboros struct {
 	// runs, so Protocol.DoneChan() cannot close underneath it; the release
 	// signal has to come from connmanager's per-connection ErrorChan watcher
 	// instead (see ReleaseLeiosServeWaiters).
-	leiosServeWaiters   map[ouroboros.ConnectionId][]chan struct{}
-	leiosServeWaitersMu sync.Mutex
+	leiosServeWaiters         map[ouroboros.ConnectionId][]chan struct{}
+	leiosServeWaitersReleased map[ouroboros.ConnectionId]bool
+	leiosServeWaitersMu       sync.Mutex
 	// NtC CertRB closure-resolution metrics.
 	leiosMetrics *leiosMetrics
 
