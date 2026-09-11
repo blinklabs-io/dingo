@@ -21,6 +21,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -270,7 +271,14 @@ func TestRepairUtxoBlobWritesThroughCallersPinnedStore(t *testing.T) {
 
 	// Install a second, empty store -- simulating a blob-store rotation
 	// (e.g. bark) happening concurrently with this in-flight recovery.
-	newStore, err := badger.New(badger.WithDataDir(t.TempDir()))
+	// Sized down from badger's defaults (see TestBadgerValueLogFileSize's
+	// doc comment): the default reserves 2GiB per store on Windows, which
+	// a CI runner opening several of these concurrently can exhaust.
+	newStore, err := badger.New(
+		badger.WithDataDir(t.TempDir()),
+		badger.WithValueLogFileSize(testutil.TestBadgerValueLogFileSize),
+		badger.WithMemTableSize(testutil.TestBadgerMemTableSize),
+	)
 	require.NoError(t, err)
 	prev, drain := db.SetBlobStore(newStore)
 	require.True(t, originalStore == prev)

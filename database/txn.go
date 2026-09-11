@@ -275,14 +275,27 @@ func (t *Txn) DB() *Database {
 // read-only t; the only current caller's t is always BlobTxn(false).
 func (t *Txn) withMetadataForRecovery() (*Txn, func()) {
 	aug := &Txn{
-		db:         t.db,
+		db: t.db,
+		// readWrite carried over from t, not defaulted to false: it is
+		// what repairUtxoBlob's IsReadWrite() check uses to decide
+		// whether to write the recovered offset through this shared
+		// blobTxn directly or open an independent transaction on the
+		// same store. Forcing it false here would make a write-capable
+		// caller's repair commit independently of the caller's own
+		// transaction, so a later rollback of that caller would no
+		// longer undo the repair (blinklabs-io/dingo#1900 review).
+		readWrite:  t.readWrite,
 		blobTxn:    t.blobTxn,
 		blobStore:  t.blobStore,
 		sharedBlob: true,
 	}
 	if t.db != nil {
 		if ms := t.db.Metadata(); ms != nil {
-			aug.metadataTxn = ms.ReadTransaction(context.Background())
+			if aug.readWrite {
+				aug.metadataTxn = ms.Transaction(context.Background())
+			} else {
+				aug.metadataTxn = ms.ReadTransaction(context.Background())
+			}
 		}
 	}
 	return aug, aug.Release
