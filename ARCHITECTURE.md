@@ -31,22 +31,12 @@ observed it, so the normal shutdown triggered by that cancellation cannot
 mistake an earlier unconfirmed drain for a successful second close and close
 the database underneath the outstanding worker.
 API providers are resolved for lifecycle only because node composition has no
-in-process consumer of their concrete server values. Each API provider's
-TLS/authentication policy goes through a merged-config handoff, not a
-pre-resolved one: node composition merges the shared `api.tls`/`api.auth`
-default into that provider's own `config.tls`/`config.auth` fields, field by
-field, before the provider ever decodes its config (see "API security" under
-External Interfaces) — so from a provider's point of view an inherited
-field and an inline one are indistinguishable — but the merged result is
-still the raw, tri-state `TLSPolicy`/`AuthPolicy` shape. Each provider's own
-`RegisterProvider` factory decodes that merged config and calls
-`Resolve` itself during construction, producing the concrete
-`EffectiveTLS`/`EffectiveAuth` its listener acts on. `Node.New` separately
-runs the same merge-and-resolve as an early validation pass against every
-configured API capability, so an invalid effective policy is rejected at
-construction time rather than deferred to listener startup — but that pass
-exists for fail-fast validation, not to hand a provider an already-resolved
-policy in place of provider-side resolution.
+in-process consumer of their concrete server values. Composition merges the
+shared `api.tls` defaults with each provider's TLS overrides, passing the
+merged `TLSPolicy` rather than a resolved listener policy. `Node.New` validates
+that effective configuration early; each provider also resolves it during
+construction. TLS remains optional. See External Interfaces for precedence
+and shared bind settings.
 
 Command and bootstrap composition that opens a standalone database uses
 `internal/plugins.OpenDatabase`. Its return contract keeps ownership
@@ -1890,11 +1880,9 @@ binds the listener synchronously (so bind/cert errors surface immediately)
 and serves in a goroutine; a context watcher performs a bounded
 `GracefulStop`, escalating to a hard `Stop` on timeout. The listener defaults
 to `127.0.0.1:50051`; an explicitly empty host is normalized to that loopback
-default before validation. Without TLS, any wildcard, hostname other than
-`localhost`, or concrete non-loopback host is rejected unless the operator
-sets `midnight.allowInsecureRemote: true`; that override is intended only when
-transport security and access control are supplied outside Dingo. Dingo does
-not add authentication to this Acropolis-compatible native gRPC surface.
+default before validation. Plaintext and TLS are both supported; TLS is
+enabled when the shared certificate/key pair is configured. Dingo does not
+add authentication to this Acropolis-compatible native gRPC surface.
 `Config.Validate` rejects `serverEnabled` outside API storage mode, a zero port
 while enabled, and `reflectionEnabled` without the server. When the server is
 disabled, its host and port are inactive and do not participate in port
@@ -2559,6 +2547,18 @@ because prior pot transitions cannot be repaired safely without replay.
 
 ### Era-Specific Validation
 
+Validated Conway and Dijkstra block admission checks the aggregate consumed
+reference-script size before validating the block's individual transactions.
+Imported blocks use the same database transaction as application, after any
+applicable endorser transactions and before the ranking block's own mutations.
+Forged blocks check a read view of the pre-block state even when full
+self-validation is disabled. Aggregate dispatch rejects missing or typed-nil
+era parameters with an error before the upstream rule dereferences them.
+The upstream era rules
+provide protocol-version-aware input accounting, intra-block output handling,
+and the era's aggregate limit. The explicit non-validating Musashi profile
+retains its Dijkstra validation bypass.
+
 The `ledger/eras/` package provides era-specific validation rules for each Cardano era. The default active era table is Byron through Conway. Experimental Dijkstra support is added to the active table when Dingo starts on the `musashi` network (the IOG Leios prototype testnet, matched by network name or magic 164), with `runMode: "leios"`, or with `startEra: "dijkstra"` — see `Config.experimentalDijkstraEnabled`. Keying on the network lets `dingo -n musashi` follow the Musashi testnet past the Conway-to-Dijkstra hard fork without an explicit run mode. The Dijkstra descriptor uses `github.com/blinklabs-io/gouroboros/ledger/dijkstra`, including that release's generated CDDL shape for the nullable Leios/Peras certificate slots.
 
 Several eras replace or drop an upstream `UtxoValidationRules` entry so Dingo
@@ -3107,6 +3107,10 @@ large-DB startup for minutes (#2771).
 
 The `LedgerView` interface provides query access to ledger state:
 - UTXO lookups by address or output reference
+- Block reference-script budget checks use a narrow PV10 aggregate-accounting
+  view: a genuinely absent reference UTxO contributes zero, matching Conway's
+  pre-block restricted-map rule, while storage/decode errors and normal
+  per-transaction validation remain fail-closed.
 - Protocol parameter queries
 - Stake distribution queries
 - Account registration checks
@@ -5008,7 +5012,7 @@ When Dijkstra/Leios is active, `DefaultBlockBuilder` emits the Musashi prototype
 
 #### Optional Self-Validation (`DINGO_VALIDATE_FORGED_BLOCK`)
 
-When `validateForgedBlock` is enabled in config, the forger invokes `LedgerState.ValidateForgedBlock` between steps 5 and 7. This runs three checks: (a) VRF proof and KES signature verification of the block header, (b) body-hash non-zero guard, and (c) per-transaction ledger rule validation against the current UTxO state with an intra-block overlay so outputs created by earlier transactions in the same block are visible to later ones. A failing block is logged, counted in `dingo_forge_validation_failed_total`, and dropped without being adopted or diffused. Validation wall-clock time is recorded in the `dingo_forge_validation_duration_seconds` histogram. Disabled by default; intended for block producers who want defence-in-depth against builder bugs at the cost of additional forge-to-diffusion latency.
+The node always validates the aggregate reference-script budget between steps 5 and 7, before adoption or diffusion. When `validateForgedBlock` is enabled, `LedgerState.ValidateForgedBlock` additionally runs VRF/KES header verification, the body-hash non-zero guard, and per-transaction ledger rules with an intra-block UTxO overlay. A failing block is logged, counted in `dingo_forge_validation_failed_total`, and dropped. Validation duration is recorded in `dingo_forge_validation_duration_seconds`. Full self-validation is disabled by default; the aggregate budget check is mandatory in node wiring and retains the explicit Musashi prototype bypass.
 
 ### Pool Credentials (`ledger/forging/keys.go`, `keystore/`)
 
@@ -5982,147 +5986,30 @@ those indexes in place while deferring the remaining manifest entries.
 
 Dingo provides three client-facing APIs plus Bark. All are optional and gated by port configuration. UTxO RPC, Blockfrost, and Mesh are general-purpose external APIs and require `storageMode: api`. Bark is different: it is Dingo's own protocol for Dingo-to-Dingo C2/archive services, not a general-purpose application API.
 
-### API security (TLS and authentication)
+### API security (TLS)
 
-Blockfrost, Mesh, and UTxO RPC share one TLS/authentication contract
-(dingo#2996/#2998), rather than each exposing its own ad hoc surface. A
-reverse proxy or API gateway in front of these listeners remains fully
-supported — TLS/auth here is additive, not a replacement requirement — but
-an operator can now also secure any subset of the three in-process. Startup validation
-also refuses an enabled API on a non-loopback bind address
-when its effective authentication policy is disabled. This guard evaluates
-the shared `api.auth` policy after each provider override is merged, while
-loopback-only APIs may remain unauthenticated for local clients. An operator
-who intentionally exposes an API must configure token authentication (or put
-an authenticated reverse proxy in front and keep the Dingo listener on
-loopback).
+Blockfrost, Mesh, and UTxO RPC share one optional TLS contract. TLS is
+validated before listeners bind: an invalid mode is rejected at construction,
+and `mode: server` requires both certificate and key paths. TLS may be configured
+through the shared `api.tls` policy or a provider's
+`plugins.api.<name>.config.tls` fields.
 
-- **Policy types (`internal/apiconfig`).** `TLSPolicy` (`mode`,
-  `certFilePath`, `keyFilePath`) and `AuthPolicy` (`mode`, `token`,
-  `tokenFilePath`) are YAML-decodable, tri-state structs: every field is a
-  pointer, so "not set at this scope" (nil) is distinguishable from an
-  explicit value such as `mode: disabled`. `mode` is `"disabled"` or
-  `"server"` for TLS, `"disabled"` or `"token"` for auth; an unset mode at
-  every scope resolves to `"disabled"`, so an upgraded deployment that
-  never configured either gets no behavior change. The same two types back
-  both the top-level `api:` policy (`internal/config.APIConfig`) and every
-  provider's own `plugins.api.<name>.config.tls`/`config.auth` — from a
-  provider's point of view an inherited field and an inline one are
-  indistinguishable.
-- **Field-level merge happens once, at composition; final validation and
-  resolution happen provider-side** — never inside an API domain package
-  for the merge step, but always inside one for `Resolve`. `node.go`'s
-  `apiPluginSelection`/`apiProviderConfig` merges, field by field
-  (`apiconfig.MergeProviderConfig`/`MergeTLS`/`MergeAuth`), three layers
-  from lowest to highest priority: the legacy UTxO RPC-only compatibility
-  fields (below), the shared top-level `api.tls`/`api.auth` default, and
-  the provider's own `config.tls`/`config.auth`. The merge is a plain
-  struct-field fold, not a map walk, so the result never depends on map
-  iteration order. The merge's output is still the raw, tri-state
-  `TLSPolicy`/`AuthPolicy` shape (a `ProviderConfig.TLS`/`ProviderConfig.Auth`
-  field, not an `EffectiveTLS`/`EffectiveAuth`) — composition hands a
-  provider a fully merged config, not a fully resolved policy. `Node.New`
-  runs this same merge, then calls `Resolve` on the result (see
-  `validateAPIProviderSecurityPolicy`), against every configured API
-  capability before constructing anything, so an invalid effective policy
-  — e.g. a partial certificate/key pair, or an unrecognized mode — is
-  rejected at construction time, before any listener starts, with an
-  error naming the full config path (`plugins.api.blockfrost.config.tls`,
-  not just `tls`). Each provider's own `RegisterProvider` factory
-  (`ProviderConfig.TLS.Resolve`/`ProviderConfig.Auth.Resolve`) repeats the
-  same validate-and-resolve step itself, immediately before constructing
-  its server — this is the one and only place a provider's `EffectiveTLS`/
-  `EffectiveAuth` is actually produced; `Node.New`'s earlier pass exists
-  for fail-fast validation, not to hand the provider a pre-resolved value in
-  its place. This makes each provider self-contained: it cannot be started
-  with an unresolved or unvalidated policy through any other code path, and
-  it never depends on `Node.New` having run first.
-- **Environment variable scope.** The shared top-level `api.tls`/`api.auth`
-  fields participate in the normal `DINGO_API_TLS_*`/`DINGO_API_AUTH_*`
-  environment variables and `--api-tls-*`/`--api-auth-*` CLI flags, layered
-  through the same CLI > environment > YAML > defaults precedence as any
-  other `Config` field. A per-provider override
-  (`plugins.api.<name>.config.tls`/`config.auth`) is YAML-only: the generic
-  `DINGO_PLUGINS_API_<NAME>_CONFIG_*` environment mechanism
-  (`plugin.ApplyEnvironment`) flattens its suffix to one field name and has
-  no way to address a nested `tls`/`auth` sub-object, by design (see
-  `setEnvironmentPath`'s own doc comment) — an operator who needs an
-  environment-driven per-provider override sets the whole provider config
-  through other means, or uses YAML for that provider's override alongside
-  environment variables for the shared default.
-- **Credential verification is one implementation (`internal/apiauth`),
-  adapted per transport.** `apiauth.Verifier.Verify` does a constant-time
-  comparison against the configured shared-secret token (inline `token` or
-  read once from `tokenFilePath` at listener startup, matching
-  `EffectiveTLS`'s own deferral of certificate loading to listener
-  startup rather than config-resolution time). `apiauth.Middleware` adapts
-  it to `net/http` (Blockfrost, Mesh, UTxO RPC's own HTTP mux), responding
-  `401` and never calling the wrapped handler on a missing/invalid
-  credential. `apiauth.Interceptor` adapts the identical `Verifier` to a
-  `connect.Interceptor` (UTxO RPC's Connect/gRPC handlers, including
-  health and reflection — there is no separate unauthenticated allowlist
-  for those two), responding `connect.CodeUnauthenticated` (surfaced over
-  HTTP as `401` by the Connect protocol). This is a deliberate design
-  choice, applied uniformly across all three providers, not a
-  UTxO-RPC-specific gap: Blockfrost's own `GET /health` route sits behind
-  the identical `apiauth.Middleware` wrapping its whole mux, so no provider
-  carves out an unauthenticated allowlist for health/liveness checking once
-  `auth.mode: token` is set. The operator-facing consequence — a
-  container-orchestrator liveness/readiness probe against these routes
-  needs to present the shared credential once auth is enabled, or must be
-  redirected to a plain TCP check or a separate unauthenticated path — is
-  documented in the README's "Authentication" section rather than solved
-  in code, to keep every route on an authenticated listener behind the
-  single uniform policy an operator configured. Neither adapter
-  re-implements comparison logic; both read a `Authorization: Bearer
-  <token>` header (or,
-  additionally, Blockfrost's own `project_id: <token>` header — see
-  below) and delegate to the same `Verify` call.
-- **Ordering with CORS.** `httpcors.Handler` must wrap `apiauth.Middleware`
-  (CORS outer, auth inner), not the reverse: it fully answers an `OPTIONS`
-  preflight itself and never invokes the wrapped handler for one, and
-  browsers never attach `Authorization` to a preflight request — requiring
-  a credential there would make cross-origin browser access impossible
-  regardless of what the real request later sends. Every other request,
-  including a non-preflight `OPTIONS`, still authenticates normally. All
-  three providers wire the chain in this order; `*_test.go`'s
-  `TestServerCORSPreflightBypassesAuth`/`TestBlockfrostCORSPreflightBypassesAuth`/
-  `TestUtxorpcCORSPreflightBypassesAuth` pin it down.
-- **Blockfrost's `project_id` header is an alias for the same shared
-  token**, not a separate credential mechanism: real Blockfrost clients
-  send their API key as `project_id: <value>` rather than a bearer
-  token, so `apiauth.Middleware(verifier, apiauth.WithAliasHeader("project_id"))`
-  accepts that header's raw value as equivalent to
-  `Authorization: Bearer <value>`. Configuring `auth.mode: token` secures
-  Blockfrost against both header styles from the one configured
-  `token`/`tokenFilePath` — there is no separate `project_id` setting.
-- **Redaction.** `AuthPolicy`/`EffectiveAuth` implement `slog.LogValuer`
-  (`LogValue`), replacing `token` with `"***redacted***"` in any
-  structured log call; `tokenFilePath` (a filesystem path, not a secret)
-  and `mode` are logged as-is. Error messages from `Resolve` never embed
-  the token or certificate/key file contents, only paths and mode names.
-- **Compatibility.** The pre-#2996 root `tlsCertFilePath`/`tlsKeyFilePath`
-  fields (and the `--utxorpc-tls-cert-file-path`/`--utxorpc-tls-key-file-path`
-  flags and `WithUtxorpcTlsCertFilePath`/`WithUtxorpcTlsKeyFilePath`
-  options that set them) remain exactly what they were: a **UTxO
-  RPC-only** default TLS policy, expressed as the lowest-priority input to
-  the merge above (`node.go`'s `legacyUtxorpcTLSPolicy`). They are
-  deliberately **not** promoted into the shared `api.tls` default: doing
-  so would silently switch Blockfrost/Mesh from plaintext to TLS on
-  upgrade for any deployment that had set them only for UTxO RPC, which
-  they never protected. An operator opting Blockfrost/Mesh into TLS does so
-  explicitly, through `api.tls` or their own `plugins.api.<name>.config.tls`.
-  `bindAddr`, `apiBindAddr`, `debugBindAddr`, and `corsAllowedOrigins` are
-  unaffected by any of this and stay at the `Config` root: `bindAddr` is not
-  API-specific (the relay/NtN and metrics listeners use it too), `apiBindAddr`
-  is the separate loopback-by-default bind for the three API listeners,
-  `debugBindAddr` controls the separate pprof listener, and `corsAllowedOrigins`'s single shared value
-  already applies uniformly to all three API providers today. Duplicating
-  these fields under `api:` would only add a second source of truth with no
-  behavioral gain.
-  Authentication has no legacy root field at all — its default is simply
-  `"disabled"` everywhere, so existing reverse-proxy/no-auth deployments
-  are unaffected regardless.
+TLS fields merge independently: an explicit provider field overrides the
+shared `api.tls` value, while the legacy UTxO RPC certificate/key fields are
+the lowest-priority compatibility input for UTxO RPC only. An explicit
+provider `mode: disabled` keeps that listener plaintext. Shared TLS values
+follow the normal CLI > environment > YAML > default precedence before this
+scope merge. Certificate files are loaded when the listener starts.
+
+API routes require no credentials, including health and reflection routes.
+
+The legacy root `tlsCertFilePath`/`tlsKeyFilePath` fields remain a UTxO
+RPC-only TLS compatibility input among these three providers; Midnight also
+uses the pair directly. They are not promoted to Blockfrost or Mesh.
+The three API listeners use the root `bindAddr`, whose default is
+`0.0.0.0`. `debugBindAddr` remains the separate pprof
+listener setting. `corsAllowedOrigins` remains a root-level, operator-chosen
+CORS setting shared by the API providers.
 
 ### API listener lifecycle (`internal/apilistener`)
 
@@ -6208,9 +6095,8 @@ when `Stop` returns, and the address is rebindable afterwards.
 
 ### Blockfrost API (`api/blockfrost/`)
 
-TLS and token authentication (including the `project_id` header alias) are
-configured through `plugins.api.blockfrost.config.tls`/`config.auth`; see
-"API security" above.
+TLS is configured through `plugins.api.blockfrost.config.tls`; see "API
+security" above.
 
 A Blockfrost-compatible REST API that provides read access to chain data,
 transaction evaluation, and transaction submission. Transaction evaluation is
@@ -6363,8 +6249,8 @@ before dereferencing them. Input indices must fit both the constructor's native
 integer and the serialized uint32 field; invalid inputs return the existing
 request error instead of panicking inside the handler.
 
-TLS and token authentication are configured through
-`plugins.api.mesh.config.tls`/`config.auth`; see "API security" above.
+TLS is configured through `plugins.api.mesh.config.tls`; see "API security"
+above.
 
 Implements the Mesh (formerly Rosetta) API specification for wallet integration and chain analysis. Provides endpoints for network status, account balances, block queries, transaction construction, and mempool access.
 
@@ -6381,8 +6267,8 @@ applied as a read deadline in `decodeRequest` and cleared once the body is
 read, caps how long it may take to send them. A request that breaches either
 bound fails as the existing `ErrInvalidRequest`, so callers see no new error.
 `listenerReadTimeout` (60s, the listener's `http.Server.ReadTimeout`) is the
-backstop for a request whose body no handler reads — an unknown route, or one
-rejected by authentication before the handler runs — which the per-request
+backstop for a request whose body no handler reads — an unknown route, for
+example — which the per-request
 deadline never sees.
 
 The server depends on four narrow interfaces (`api/mesh/node_interface.go`) —
@@ -6427,11 +6313,10 @@ predicate; `MovesAsset` retains its output and resolved-input matching behavior.
 
 Each Connect message is bounded to `DefaultMaxRequestBody` (1 MiB) with
 Connect's `WithReadMaxBytes` option. The limit applies to both compressed wire
-bytes and decompressed message bytes before unary decoding reaches the
-authentication interceptor; streaming RPCs retain per-message rather than
-whole-stream bounds.
+bytes and decompressed message bytes before unary decoding; streaming RPCs
+retain per-message rather than whole-stream bounds.
 
-A gRPC server implementing the UTxO RPC specification with query, submit, sync, and watch services. The same listener exposes both the `utxorpc.v1alpha` and `utxorpc.v1beta` service namespaces. Every method other than v1beta's additional `QueryService.ReadState` is wire-compatible across the two, so the beta routes rewrite the service path onto the alpha handlers; `ReadState` is served by `betaQueryServiceServer` (`api/utxorpc/readstate.go`) instead. It answers the one Cardano state query v1beta defines, `GetStakePoolDistribution`, from `ledger.LedgerState.PoolStakeDistribution` — the same read that backs the node-to-client `GetPoolDistr2` query. The `ledger_tip` it reports is the tip that read took inside its own transaction, carried back on the result, rather than one sampled while building the reply: the two can straddle an epoch boundary, and a later tip would name an epoch whose stake snapshot is not the one the reply carries. Its `height` comes from that same carried tip's block number rather than from a separate lookup of the tip's stored block, as it does for every tip this listener reports (`ReadTip` already did; `ReadParams`, `ReadUtxos`, `SearchUtxos`, `ReadData`, `ReadTx`, and `ReadState` were brought in line): the height is already known at the point the slot and hash are, and `height` is a plain proto3 `uint64` with no encoding for "unknown", so a zero — whether from a failed lookup or from never populating the field — asserts that the tip is the origin block rather than admitting the height could not be read. Chain points that name something other than a tip, such as the `block_ref` on a returned transaction, still come from that block's own stored model. `LedgerState` is an optional dependency that `Utxorpc.Start` admits as an untyped nil, so the handler checks it per request and reports `Unavailable` rather than panicking. The `pool_keyhashes` filter is capped by `MaxPoolFilter` (default 1000), like the `ReadUtxos` and `ReadData` key lists, since it sizes the snapshot and registration reads it drives; asking for every pool is an empty filter and one bulk read. An empty `pool_keyhashes` means every pool, per the proto; a filter entry that is not 28 bytes is rejected as `InvalidArgument` rather than padded or truncated into a different pool. Because the protobuf `RationalNumber` is an int32 over a uint32, a stake fraction whose exact ratio does not fit — the normal case on a real network, where the denominator is total active stake in lovelace — is rescaled onto a fixed denominator of 1e9 rather than failing. `newServeMux` is the single wiring site for the routing table, and one service-name list (`servedServiceNames`) feeds the `grpc_health_v1` checker and both reflection wire versions, so `grpc.reflection.v1` and `grpc.reflection.v1alpha` clients discover the same services — v1alpha is an older reflection protocol, not an older API surface. TLS and token authentication are configured through the shared `plugins.api.utxorpc.config.tls`/`config.auth` surface described in "API security" above (applied to every Connect/gRPC handler this listener serves, including health and reflection), not a UTxO RPC-specific mechanism; the legacy process-level `tlsCertFilePath`/`tlsKeyFilePath` fields remain a supported, UTxO RPC-only default for that same `tls` policy.
+A gRPC server implementing the UTxO RPC specification with query, submit, sync, and watch services. The same listener exposes both the `utxorpc.v1alpha` and `utxorpc.v1beta` service namespaces. Every method other than v1beta's additional `QueryService.ReadState` is wire-compatible across the two, so the beta routes rewrite the service path onto the alpha handlers; `ReadState` is served by `betaQueryServiceServer` (`api/utxorpc/readstate.go`) instead. It answers the one Cardano state query v1beta defines, `GetStakePoolDistribution`, from `ledger.LedgerState.PoolStakeDistribution` — the same read that backs the node-to-client `GetPoolDistr2` query. The `ledger_tip` it reports is the tip that read took inside its own transaction, carried back on the result, rather than one sampled while building the reply: the two can straddle an epoch boundary, and a later tip would name an epoch whose stake snapshot is not the one the reply carries. Its `height` comes from that same carried tip's block number rather than from a separate lookup of the tip's stored block, as it does for every tip this listener reports (`ReadTip` already did; `ReadParams`, `ReadUtxos`, `SearchUtxos`, `ReadData`, `ReadTx`, and `ReadState` were brought in line): the height is already known at the point the slot and hash are, and `height` is a plain proto3 `uint64` with no encoding for "unknown", so a zero — whether from a failed lookup or from never populating the field — asserts that the tip is the origin block rather than admitting the height could not be read. Chain points that name something other than a tip, such as the `block_ref` on a returned transaction, still come from that block's own stored model. `LedgerState` is an optional dependency that `Utxorpc.Start` admits as an untyped nil, so the handler checks it per request and reports `Unavailable` rather than panicking. The `pool_keyhashes` filter is capped by `MaxPoolFilter` (default 1000), like the `ReadUtxos` and `ReadData` key lists, since it sizes the snapshot and registration reads it drives; asking for every pool is an empty filter and one bulk read. An empty `pool_keyhashes` means every pool, per the proto; a filter entry that is not 28 bytes is rejected as `InvalidArgument` rather than padded or truncated into a different pool. Because the protobuf `RationalNumber` is an int32 over a uint32, a stake fraction whose exact ratio does not fit — the normal case on a real network, where the denominator is total active stake in lovelace — is rescaled onto a fixed denominator of 1e9 rather than failing. `newServeMux` is the single wiring site for the routing table, and one service-name list (`servedServiceNames`) feeds the `grpc_health_v1` checker and both reflection wire versions, so `grpc.reflection.v1` and `grpc.reflection.v1alpha` clients discover the same services — v1alpha is an older reflection protocol, not an older API surface. TLS is configured through `plugins.api.utxorpc.config.tls`; the legacy process-level `tlsCertFilePath`/`tlsKeyFilePath` fields remain a supported, UTxO RPC-only default for that TLS policy.
 
 `WaitForTx` rejects references that are not exactly 32 bytes before logging,
 allocating pending state, subscribing, or looking up transactions. Empty
@@ -7071,16 +6956,47 @@ second sync:
   guarantees network I/O only ever starts once the transaction that produced
   the event has already committed — never while holding the ledger write
   transaction or lock.
-  - **Backlog and checkpointing.** `Start` seeds the pending set from every
-    epoch the cache (`cache.db`) has not yet fetched/checked, up to
-    `Source.GetLatestEpoch() - 1` (a floor derived from Dingo's own current
-    epoch number, not an exact koios-epoch bound — good enough for a
+  - **Backlog and checkpointing.** `Start` (via the factored-out
+    `seedBacklog`) seeds the pending set from every epoch the cache
+    (`cache.db`) has not yet fetched/checked, in
+    `[Source.GetEarliestAvailableEpoch(), Source.GetLatestEpoch() - 1]` when
+    a Mithril boundary is recorded, and `[0, Source.GetLatestEpoch() - 1]`
+    when none is (the upper bound is a floor derived from Dingo's own
+    current epoch number, not an exact koios-epoch bound — good enough for a
     one-time historical backfill on first attach, since anything it
     undershoots by a small margin is still covered by the live event
-    subscription going forward). No separate checkpoint file exists: the
-    cache's own persisted `check_epoch_status`/`koios_epoch_info` rows are
-    the sole resumable state, matching the issue's "persist only the minimal
-    resumable checkpoint state actually needed."
+    subscription going forward). `preStakingThroughEpoch` is not a seed
+    bound: on a genesis-synced node epochs 0-1 are still queued, and
+    `checkEpoch`'s `PreStaking` branch is what records their
+    PASS-with-nothing-compared verdict. No separate checkpoint file exists:
+    the cache's own persisted `check_epoch_status`/`koios_epoch_info` rows
+    are the sole resumable state, matching the issue's "persist only the
+    minimal resumable checkpoint state actually needed."
+  - **Mithril bootstrap boundary (dingo #4172).** A Mithril-bootstrapped
+    node has no ledger history before its own bootstrap boundary by
+    construction, so every epoch through that boundary is in the same
+    position as the protocol-wide `preStakingThroughEpoch` floor — no local
+    reward-calculation state exists to compare, regardless of whether Koios
+    (full protocol history) has real reference data for it.
+    `RewardParitySource.GetEarliestAvailableEpoch` surfaces this boundary
+    (derived from the same `mithril_ledger_slot` sync-state key
+    `ledger.LedgerState.loadMithrilTrustBoundary` reads, resolved to an
+    epoch via `Database.GetEpochBySlot`); `ok` is false for a non-Mithril,
+    genesis-synced node, and for a boundary slot falling inside no epoch
+    the node's own `epoch` table describes, leaving `seedBacklog` and
+    `checkEpoch` unchanged from before this existed. A boundary that *is*
+    recorded but cannot be read, is empty, or does not parse is an error
+    rather than `ok = false`: `seedBacklog` aborts the seed and `checkEpoch`
+    fails the check, since absorbing it as "no boundary recorded" would
+    restore the unbounded pre-#4172 behavior on exactly the node whose
+    boundary could not be confirmed. `DingoDB` carries its
+    own copy of that slot-to-epoch SQL for the standalone CLI, bounded at
+    both ends exactly as the store query is, with
+    `TestGetEarliestAvailableEpochImplementationsAgree` pinning the two
+    together. `checkEpoch` applies the same bound directly
+    (independent of whether an epoch was ever seeded), so a standalone
+    `Check` run against an already-fetched cache is covered too, not just
+    the in-process observer's own backlog seeding.
   - **Rapid transitions, replay, and rollback.** Pending epochs are a *set*,
     not a single high-water-mark counter, so a burst of events collapses
     duplicates (dingo's own block-based and slot-clock-based epoch.transition
@@ -9027,18 +8943,10 @@ The pre-plugin API port names `DINGO_UTXORPC_PORT`,
 their `DINGO_PLUGINS_API_*_CONFIG_PORT` counterparts. Within the environment
 tier, the plugin-form name takes precedence when both forms are set.
 
-The `api.tls`/`api.auth` shared defaults (`--api-tls-mode`/`DINGO_API_TLS_MODE`/
-`api.tls.mode` and their `certFilePath`/`keyFilePath`/auth counterparts;
-see "API security" under External Interfaces) participate in this same
-CLI > environment > YAML > defaults source precedence like any other
-`Config` field. That is a separate, orthogonal axis from *scope*
-inheritance — explicit provider field (`plugins.api.<name>.config.tls`) >
-shared top-level default (`api.tls`) > disabled — which is resolved once at
-node composition (`node.go`'s `apiProviderConfig`), after every
-configuration source has already been merged into a single `Config`. A CLI
-flag can override which *value* the top-level default carries; it cannot
-skip the scope-resolution step that decides whether a given provider
-actually uses that value, an override of its own, or neither.
+The `api.tls` shared defaults (`--api-tls-mode`/`DINGO_API_TLS_MODE`/
+`api.tls.mode` and their `certFilePath`/`keyFilePath` counterparts; see "API
+security" under External Interfaces) participate in this same CLI >
+environment > YAML > defaults source precedence like any other `Config` field.
 
 `LoadConfig` (`internal/config`) only parses and merges the YAML and
 environment sources; it makes no semantic judgments about the merged values,
@@ -9456,7 +9364,7 @@ once regardless of metadata plugin.
 
 `internal/node`'s `logStartupConfig` debug-logs the whole effective
 configuration at startup, which means the configuration is the one place
-where a Koios API key, an inline API auth token, or a storage provider
+where a Koios API key or a storage provider
 password or DSN would be persisted into an operator's log files. It logs
 through `Config.LogValue` (`internal/config/redact.go`), the explicit
 `slog.LogValuer` representation of a `Config`, rather than formatting the
@@ -9502,18 +9410,13 @@ A secret classification -- including the unrecognized-key default --
 covers the whole subtree beneath the key and is applied before any
 recursion, because walking into it would reclassify the inner keys by
 their own names and an inner key classified plain (`host`, `mode`) would
-then render part of a secret-bearing value. The API providers nest their
-`tls` and `auth` policies, so those two keys carry a container
-classification of their own: the section beneath them is walked and its
-policy keys are classified individually, while a value of any other shape
-at the same key -- a scalar, a slice, a map this walk cannot key into --
-is redacted whole. The key says only that a container belongs there, so it
-classifies nothing about what a scalar there would hold. The key's class
-and the value's shape are reconciled in one place, which is what keeps
-every container key from needing its own shape check. The URI class is
-held to the same rule: only a shape that holds strings can have its
-credentials removed, so any other shape under a URI field is redacted
-rather than rendered untransformed.
+then render part of a secret-bearing value. An unrecognized provider key
+redacts its whole subtree before recursion. The
+`tls` policy is the deliberate container exception: its map is walked and
+known non-secret TLS settings remain visible, while non-map values at `tls`
+are redacted. The URI class is held to the same rule: only a shape that holds
+strings can have its credentials removed, so any other shape under a URI
+field is redacted rather than rendered untransformed.
 
 Both the URI parameters and the provider keys are decided by one
 credential classifier, `isCredentialKeyName`, which works per key-name
@@ -9560,7 +9463,7 @@ review exception (`midnight.authTokenPolicyId` and
 every path classified secret must read as one.
 
 The walk is deliberately uniform and does not defer to a nested type's own
-`slog.LogValuer` (`apiconfig.AuthPolicy` has one). One table with one
+`slog.LogValuer`. One table with one
 exhaustiveness test decides what a configuration log contains, so a nested
 `LogValue` cannot become a second, untested source of truth.
 

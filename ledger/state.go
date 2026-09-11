@@ -3085,11 +3085,32 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 		return
 	}
 	if tipSlot > stabilityWindow {
+		floor := tipSlot - stabilityWindow
+		// Persisted before the delete below, and this run must not proceed
+		// to delete anything if the persist itself fails: this durably
+		// records that rows at-or-behind floor are now ELIGIBLE for
+		// pruning, which is what checkUtxoRetentionWindow rejects a pin
+		// below. A delete that runs anyway on a failed persist would
+		// hard-delete real rows without ever advancing that durable
+		// record -- so a later pin at a slot the real deletion already
+		// reached, but that the stale (un-advanced) persisted floor
+		// doesn't cover, would not be rejected and would silently answer
+		// "absent" for a ref that was actually there (blinklabs-io/dingo#382
+		// review). Returning here just skips this run; the next periodic
+		// tick tries again from the same (or a later) floor.
+		if err := ls.persistConsumedUtxoPruneFloor(floor, nil); err != nil {
+			ls.config.Logger.Error(
+				"failed to persist consumed UTxO prune floor",
+				"component", "ledger",
+				"error", err,
+			)
+			return
+		}
 		// No lock needed here - the database handles its own consistency
 		// and we're not accessing any in-memory LedgerState fields.
 		// The tipSlot was captured above with a read lock.
 		_, err := ls.db.UtxosDeleteConsumed(
-			tipSlot-stabilityWindow,
+			floor,
 			cleanupConsumedUtxoBatchSize,
 			nil,
 		)
@@ -4576,6 +4597,88 @@ func (ls *LedgerState) calculateStabilityWindowForEra(eraId uint) uint64 {
 		return blockfetchBatchSlotThresholdDefault
 	}
 	return window.Uint64()
+}
+
+// consumedUtxoPruneFloorSyncKey is the durable sync_state marker key
+// recording the highest slot floor cleanupConsumedUtxos has ever computed
+// and begun pruning consumed UTxOs up to. See persistConsumedUtxoPruneFloor
+// and readConsumedUtxoPruneFloor.
+const consumedUtxoPruneFloorSyncKey = "consumed_utxo_prune_floor"
+
+// persistConsumedUtxoPruneFloor durably records floor as the highest slot
+// cleanupConsumedUtxos has ever begun pruning consumed UTxOs up to, so
+// checkUtxoRetentionWindow can reject a pin below it even after the tip
+// later moves in a way that would make a freshly-computed floor look more
+// lenient than what real cleanup already committed to:
+//
+//   - A rollback lowers the tip. Recomputing the floor from the new
+//     (lower) tip gives a smaller, more lenient floor than the one cleanup
+//     already used against the higher pre-rollback tip -- but rows already
+//     hard-deleted under that higher floor stay deleted; the rollback
+//     cannot undo them.
+//   - An era transition changes the stability-window formula (Byron's
+//     small 2k vs every Shelley+ era's much larger 3k/f). Cleanup
+//     recomputes its own window from whatever era was live each time it
+//     ran, so a row pruned while still in Byron can already be gone even
+//     though the current era's own (larger) window alone would compute a
+//     more lenient floor today.
+//
+// Monotonic: never writes a value lower than what's already persisted, and
+// never needs to be undone by rollback or truncate, since rows already
+// hard-deleted cannot become un-deleted -- unlike
+// SyntheticV2CostModelClearedEpochSyncKey, this marker has no
+// RecomputeAfterTruncate counterpart.
+func (ls *LedgerState) persistConsumedUtxoPruneFloor(
+	floor uint64,
+	txn *database.Txn,
+) error {
+	existing, err := ls.readConsumedUtxoPruneFloor(txn)
+	if err != nil {
+		return err
+	}
+	if floor <= existing {
+		return nil
+	}
+	if err := ls.db.SetSyncState(
+		consumedUtxoPruneFloorSyncKey,
+		strconv.FormatUint(floor, 10),
+		txn,
+	); err != nil {
+		return fmt.Errorf(
+			"persist consumed UTxO prune floor: %w",
+			err,
+		)
+	}
+	return nil
+}
+
+// readConsumedUtxoPruneFloor reads the durable marker
+// persistConsumedUtxoPruneFloor writes. Zero (with no error) means cleanup
+// has never yet pruned anything on this database -- nothing eligible for
+// pruning has existed yet, so no historical pin can already have lost data
+// to it.
+func (ls *LedgerState) readConsumedUtxoPruneFloor(
+	txn *database.Txn,
+) (uint64, error) {
+	marker, err := ls.db.GetSyncState(consumedUtxoPruneFloorSyncKey, txn)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"read consumed UTxO prune floor: %w",
+			err,
+		)
+	}
+	if marker == "" {
+		return 0, nil
+	}
+	floor, err := strconv.ParseUint(marker, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"parse consumed UTxO prune floor marker %q: %w",
+			marker,
+			err,
+		)
+	}
+	return floor, nil
 }
 
 // CurrentTransitionInfo returns the current TransitionInfo from the lock-free
@@ -7258,6 +7361,20 @@ func (ls *LedgerState) ledgerProcessBlock(
 
 	if err := ls.verifyDeferredBlockHeaderState(txn, point, block); err != nil {
 		return nil, err
+	}
+	// Check the ranking block after any applicable endorser transactions,
+	// using their resulting state but before its own transaction mutations.
+	// The explicitly non-validating Musashi prototype keeps its trust policy.
+	if shouldValidate && !ls.skipDijkstraTxValidation(currentEra.Id) {
+		referenceParams := pparams
+		if uint(block.Era().Id)+1 == currentEra.Id && prevEraPParams != nil {
+			referenceParams = prevEraPParams
+		}
+		if err := validateBlockReferenceScripts(block, referenceParams, &LedgerView{
+			txn: txn, ls: ls,
+		}); err != nil {
+			return nil, err
+		}
 	}
 	// Process transactions
 	var delta *LedgerDelta
