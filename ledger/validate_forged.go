@@ -18,9 +18,11 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 )
 
 // ValidateForgedBlock validates a locally-forged block before it is adopted
@@ -30,7 +32,8 @@ import (
 //     Byron-era blocks which use PBFT consensus and have no VRF/KES fields).
 //  2. Body-hash consistency — verifies that the body hash in the header is
 //     non-zero, catching any builder bug that would embed an all-zero hash.
-//  3. Per-transaction ledger rules — each transaction in the block is
+//  3. Aggregate reference-script limits, then per-transaction ledger rules.
+//     Each transaction in the block is
 //     validated against the current UTxO state. An intra-block overlay
 //     is maintained so that transactions spending outputs created earlier
 //     in the same block are correctly resolved.
@@ -108,6 +111,10 @@ func (ls *LedgerState) validateForgedTxs(block ledger.Block) error {
 		return nil
 	}
 
+	if err := ls.ValidateBlockReferenceScripts(block); err != nil {
+		return err
+	}
+
 	// consumedUtxos: inputs spent within this block (prevents intra-block
 	// double-spend); key: "<txId>:<outputIndex>".
 	// createdUtxos: outputs produced within this block and not yet in the
@@ -149,4 +156,32 @@ func (ls *LedgerState) validateForgedTxs(block ledger.Block) error {
 	}
 
 	return nil
+}
+
+// ValidateBlockReferenceScripts checks a locally built block's aggregate
+// reference-script budget before adoption. It does not run header crypto or
+// transaction scripts, and is required even when full self-validation is off.
+func (ls *LedgerState) ValidateBlockReferenceScripts(block ledger.Block) error {
+	if block == nil {
+		return errors.New("nil block")
+	}
+	if block.Era().Id < conway.EraIdConway || len(block.Transactions()) == 0 {
+		return nil
+	}
+	snapshot := ls.loadConsensusSnapshot()
+	if ls.skipDijkstraTxValidation(snapshot.currentEra.Id) {
+		return nil
+	}
+	pp := snapshot.currentPParams
+	if uint(block.Era().Id)+1 == snapshot.currentEra.Id &&
+		snapshot.prevEraPParams != nil {
+		pp = snapshot.prevEraPParams
+	}
+	return ls.db.Transaction(false).Do(func(txn *database.Txn) error {
+		return validateBlockReferenceScripts(
+			block,
+			pp,
+			&LedgerView{txn: txn, ls: ls},
+		)
+	})
 }

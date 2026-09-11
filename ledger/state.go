@@ -7259,6 +7259,20 @@ func (ls *LedgerState) ledgerProcessBlock(
 	if err := ls.verifyDeferredBlockHeaderState(txn, point, block); err != nil {
 		return nil, err
 	}
+	// Check the ranking block after any applicable endorser transactions,
+	// using their resulting state but before its own transaction mutations.
+	// The explicitly non-validating Musashi prototype keeps its trust policy.
+	if shouldValidate && !ls.skipDijkstraTxValidation(currentEra.Id) {
+		referenceParams := pparams
+		if uint(block.Era().Id)+1 == currentEra.Id && prevEraPParams != nil {
+			referenceParams = prevEraPParams
+		}
+		if err := validateBlockReferenceScripts(block, referenceParams, &LedgerView{
+			txn: txn, ls: ls,
+		}); err != nil {
+			return nil, err
+		}
+	}
 	// Process transactions
 	var delta *LedgerDelta
 	// Steady-state, at-tip, validated application refuses to recover an absent
