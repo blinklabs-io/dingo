@@ -432,13 +432,27 @@ func (ls *LedgerState) headerVerificationEpoch(
 ) (models.Epoch, error) {
 	// The epoch cache can be forecast forward for near-future headers, but it
 	// must never be advanced past the HFC safe zone or a known era boundary.
-	// Check the immutable summary first so ErrPastHorizon is surfaced before
-	// ensureEpochForSlot mutates any forecasted nonce state.
-	if len(ls.loadConsensusSnapshot().epochCache) > 0 {
+	// Resolve known epochs without requiring forecast configuration. Only
+	// future slots need the immutable summary before cache mutation.
+	_, cachedEpochErr := ls.epochForSlot(blockSlot)
+	if cachedEpochErr != nil && len(ls.loadConsensusSnapshot().epochCache) > 0 {
 		summary, err := ls.HardForkSummary()
 		if err != nil {
+			// A summary that cannot be BUILT says nothing about the header:
+			// the era shape, the genesis it is derived from, or the epoch
+			// cache is unavailable, all of which are local faults. Byron
+			// genesis alone is enough to reach here, because
+			// eras.BuildShapeForEras builds Byron era params for every
+			// config while ByronGenesisFile is optional. Since
+			// ouroboros/chainsync.go routes every non-deferred header error
+			// to ConnectionRecycleRequestedEvent, returning this unwrapped
+			// recycles the honest peer that served the header and stalls
+			// catch-up at each epoch boundary. Classify it as deferred so
+			// the block stays queued for in-order re-verification instead.
 			return models.Epoch{}, fmt.Errorf(
-				"block header verification rejected: build forecast for slot %d: %w",
+				"%w: block header verification deferred: "+
+					"build forecast for slot %d: %w",
+				errHeaderVerificationDeferred,
 				blockSlot,
 				err,
 			)
@@ -727,10 +741,18 @@ func (ls *LedgerState) genesisOverlayDelegationForBlock(
 	block ledger.Block,
 	shelleyGenesis *shelley.ShelleyGenesis,
 ) (genesisDelegation, genesisOverlaySlotStatus, error) {
+	pparams := ls.genesisOverlayProtocolParamsForBlock(block)
+	if pparams == nil {
+		return genesisDelegation{}, genesisOverlayNone, fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"protocol parameters unavailable for genesis overlay",
+			block.SlotNumber(),
+		)
+	}
 	return ls.genesisOverlayDelegationForSlotWithParams(
 		block.SlotNumber(),
 		shelleyGenesis,
-		ls.genesisOverlayProtocolParamsForBlock(block),
+		pparams,
 	)
 }
 
@@ -1136,7 +1158,20 @@ func (ls *LedgerState) verifyBlockLeaderEligibilityWithCache(
 	}
 
 	// Consensus mode determines the VRF leader-value derivation path.
-	mode := ls.ConsensusModeForEpoch(epochId)
+	mode, modeErr := ls.ConsensusModeForEpoch(epochId)
+	if modeErr != nil {
+		// The mode selects both the leader-value derivation and the
+		// threshold, so without it eligibility cannot be evaluated. The era
+		// shape it is resolved from comes from the local node configuration,
+		// so an unresolvable mode is not the peer's fault: defer instead of
+		// recycling the connection that served the header.
+		return fmt.Errorf(
+			"%w: block header verification deferred at slot %d: %w",
+			errHeaderVerificationDeferred,
+			block.SlotNumber(),
+			modeErr,
+		)
+	}
 
 	// Extract the VRF output from the header body CBOR.
 	vrfResult, ok, err := headerVrfResultFromBodyCbor(block.Header())

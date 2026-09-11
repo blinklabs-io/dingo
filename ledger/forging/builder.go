@@ -55,6 +55,7 @@ type ProtocolParamsProvider interface {
 	// in-memory ledger state, the returned pparams are the
 	// post-fork pparams. The forger uses this to produce
 	// era-correct blocks at fork boundaries.
+	// Returns nil when the slot's protocol parameters cannot be resolved.
 	ProtocolParamsForSlot(slot uint64) lcommon.ProtocolParameters
 }
 

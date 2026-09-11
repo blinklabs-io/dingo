@@ -7767,27 +7767,33 @@ func (ls *LedgerState) reconstructTransitionInfo() {
 	}
 }
 
-// eraShape returns the resolved hardfork.Shape for this LedgerState's
-// CardanoNodeConfig, building and caching it on first access. cfg is
-// immutable for the LedgerState's lifetime, so the cached shape is too.
-//
-// Returns an empty Shape (no error) when CardanoNodeConfig is unset or when
-// BuildShape fails; callers must treat an empty Shape as "shape unavailable"
-// and skip shape-derived work.
-func (ls *LedgerState) eraShape() hardfork.Shape {
+// eraShapeWithError returns the resolved hardfork.Shape for this LedgerState's
+// CardanoNodeConfig, building and caching it on first access. cfg is immutable
+// for the LedgerState's lifetime, so the cached shape is too.
+func (ls *LedgerState) eraShapeWithError() (hardfork.Shape, error) {
 	if s := ls.cachedShape.Load(); s != nil {
-		return *s
+		return *s, nil
 	}
 	cfg := ls.config.CardanoNodeConfig
 	if cfg == nil {
-		return hardfork.Shape{}
+		return hardfork.Shape{}, errors.New(
+			"cardano node config is unavailable",
+		)
 	}
 	s, err := eras.BuildShapeWithDijkstra(cfg, ls.config.EnableDijkstra)
 	if err != nil {
-		return hardfork.Shape{}
+		return hardfork.Shape{}, fmt.Errorf("build hard-fork shape: %w", err)
 	}
 	ls.cachedShape.CompareAndSwap(nil, &s)
-	return *ls.cachedShape.Load()
+	return *ls.cachedShape.Load(), nil
+}
+
+// eraShape returns the resolved hardfork.Shape, or an empty Shape when the
+// node configuration cannot supply one. Callers that use the shape as a
+// consensus forecast must call eraShapeWithError and fail closed instead.
+func (ls *LedgerState) eraShape() hardfork.Shape {
+	shape, _ := ls.eraShapeWithError()
+	return shape
 }
 
 // evaluateTriggerAtEpoch sets transitionInfo to TransitionKnown(e) when the
@@ -10032,6 +10038,8 @@ func (ls *LedgerState) GetCurrentPParamsForReporting() lcommon.ProtocolParameter
 // schedule was produced — administrative overrides, on-chain update
 // proposals, or HardForkInitiation gov actions all surface as
 // TriggerAtEpoch entries on the shape.
+// A future epoch whose configured shape or current era is unavailable returns
+// nil so callers cannot forge or verify it using stale current parameters.
 func (ls *LedgerState) ProtocolParamsForSlot(
 	slot uint64,
 ) lcommon.ProtocolParameters {
@@ -10072,9 +10080,12 @@ func (ls *LedgerState) ProtocolParamsForSlot(
 	if slotEpoch <= currentEpoch.EpochId {
 		return currentPParams
 	}
-	shape := ls.eraShape()
-	if len(shape.Eras) == 0 {
-		return currentPParams
+	shape, err := ls.eraShapeWithError()
+	if err != nil {
+		return nil
+	}
+	if _, ok := shape.EraForID(currentEra.Id); !ok {
+		return nil
 	}
 	pparams := currentPParams
 	// Before walking any era hard fork, apply the pending in-era
@@ -10089,9 +10100,13 @@ func (ls *LedgerState) ProtocolParamsForSlot(
 	// the already-collected proposals, so it does not depend on the
 	// target epoch's pparams row being persisted yet (it is not, during
 	// from-genesis before the node has ticked into that epoch).
-	if updated := ls.forecastPendingPParamUpdate(
+	updated, err := ls.forecastPendingPParamUpdate(
 		currentEra, currentEpoch.EpochId+1, pparams,
-	); updated != nil {
+	)
+	if err != nil {
+		return nil
+	}
+	if updated != nil {
 		pparams = updated
 	}
 	// Walk forward from the current era, applying each successor's
@@ -10112,7 +10127,7 @@ func (ls *LedgerState) ProtocolParamsForSlot(
 		nextID := eraID + 1
 		nextEraPtr, ok := ls.eraById(nextID)
 		if !ok || nextEraPtr == nil {
-			break
+			return nil
 		}
 		nextEra := *nextEraPtr
 		if nextEra.HardForkFunc == nil {
@@ -10132,7 +10147,7 @@ func (ls *LedgerState) ProtocolParamsForSlot(
 				"to_era", nextID,
 				"error", err,
 			)
-			return currentPParams
+			return nil
 		}
 		pparams = newPParams
 		eraID = nextID
@@ -10148,17 +10163,18 @@ func (ls *LedgerState) ProtocolParamsForSlot(
 // snapshot is never touched, and it performs no writes. It returns nil when
 // there is nothing to apply — no DB, missing era update funcs, or no
 // proposal meeting quorum for targetEpoch — in which case the caller keeps
-// the era-fork-only forecast, identical to prior behavior.
+// the era-fork-only forecast. Database, decode, clone, and apply failures return
+// an error so the caller cannot mistake a failed forecast for no pending update.
 func (ls *LedgerState) forecastPendingPParamUpdate(
 	era eras.EraDesc,
 	targetEpoch uint64,
 	pparams lcommon.ProtocolParameters,
-) lcommon.ProtocolParameters {
+) (lcommon.ProtocolParameters, error) {
 	if ls.db == nil ||
 		pparams == nil ||
 		era.DecodePParamsUpdateFunc == nil ||
 		era.PParamsUpdateFunc == nil {
-		return nil
+		return nil, nil
 	}
 	// Quorum is the Shelley-genesis updateQuorum, exactly as the rollover
 	// uses when enacting the same proposals (processEpochRollover).
@@ -10190,9 +10206,9 @@ func (ls *LedgerState) forecastPendingPParamUpdate(
 			"era", era.Id,
 			"error", err,
 		)
-		return nil
+		return nil, err
 	}
-	return updated
+	return updated, nil
 }
 
 // CurrentEpoch returns the current epoch number.
@@ -10221,9 +10237,17 @@ func (ls *LedgerState) CurrentEpoch() uint64 {
 //     overrides surface here too), advancing once per scheduled
 //     boundary at-or-before the target epoch.
 //  4. Fall back to the current era if nothing applies.
+//
+// Step 3 is a forecast, so it fails closed: an era shape the node
+// configuration cannot supply returns an error rather than the current
+// era's mode. Silently answering with the current era's mode for a future
+// epoch is what a scheduled hard fork changes, and the wrong mode changes
+// both the VRF leader-value derivation and the threshold, so callers must
+// decline to answer instead of producing a mode nothing established.
+// Steps 1, 2 and 4 read state the node already holds and never error.
 func (ls *LedgerState) ConsensusModeForEpoch(
 	epoch uint64,
-) consensus.ConsensusMode {
+) (consensus.ConsensusMode, error) {
 	snapshot := ls.loadConsensusSnapshot()
 	cache := snapshot.epochCache
 	currentEra := snapshot.currentEra
@@ -10232,12 +10256,12 @@ func (ls *LedgerState) ConsensusModeForEpoch(
 
 	for _, e := range cache {
 		if e.EpochId == epoch {
-			return consensusModeForEraID(e.EraId)
+			return consensusModeForEraID(e.EraId), nil
 		}
 	}
 
 	if epoch <= currentEpoch.EpochId {
-		return consensusModeForEraID(currentEra.Id)
+		return consensusModeForEraID(currentEra.Id), nil
 	}
 
 	// HardForkInitiation path: if a confirmed transition pins the next
@@ -10250,15 +10274,33 @@ func (ls *LedgerState) ConsensusModeForEpoch(
 		epoch >= transitionInfo.KnownEpoch {
 		nextID := currentEra.Id + 1
 		if _, ok := ls.eraById(nextID); ok {
-			return consensusModeForEraID(nextID)
+			return consensusModeForEraID(nextID), nil
 		}
 	}
 
-	shape := ls.eraShape()
+	shape, err := ls.eraShapeWithError()
+	if err != nil {
+		return 0, fmt.Errorf(
+			"consensus mode for epoch %d is unresolvable: %w",
+			epoch,
+			err,
+		)
+	}
 	eraID := currentEra.Id
 	for {
 		entry, ok := shape.EraForID(eraID)
-		if !ok || entry.NextEraTrigger.Kind != hardfork.TriggerAtEpoch {
+		if !ok {
+			// An era missing from the shape stops the walk before it can
+			// rule out a scheduled fork at or before the target epoch, so
+			// the forecast is unresolvable rather than "no fork".
+			return 0, fmt.Errorf(
+				"consensus mode for epoch %d is unresolvable: "+
+					"era %d is unavailable in the hard-fork shape",
+				epoch,
+				eraID,
+			)
+		}
+		if entry.NextEraTrigger.Kind != hardfork.TriggerAtEpoch {
 			break
 		}
 		if entry.NextEraTrigger.Epoch > epoch {
@@ -10266,11 +10308,16 @@ func (ls *LedgerState) ConsensusModeForEpoch(
 		}
 		nextID := eraID + 1
 		if _, ok := ls.eraById(nextID); !ok {
-			break
+			return 0, fmt.Errorf(
+				"consensus mode for epoch %d is unresolvable: "+
+					"successor era %d is unavailable",
+				epoch,
+				nextID,
+			)
 		}
 		eraID = nextID
 	}
-	return consensusModeForEraID(eraID)
+	return consensusModeForEraID(eraID), nil
 }
 
 // consensusModeForEraID maps an era ID to its Praos consensus variant.

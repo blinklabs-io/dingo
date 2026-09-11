@@ -2861,8 +2861,21 @@ main-block issuers. Byron epoch boundary blocks still enforce the current-slot
 bound and tick due delegations, but do not carry a PBFT issuer signature or
 advance the issuer window.
 
-Before resolving or eagerly forecasting an epoch for a live header,
+Cached epochs resolve without forecast configuration, but still require a
+published nonce. Before forecasting an uncached epoch for a live header,
 `headerVerificationEpoch` checks the slot against `LedgerState.HardForkSummary`.
+A summary that cannot be *built* at all is classified as deferred rather than
+rejected, separately from a slot past a horizon a built summary reports: the
+shape, the genesis behind it, and the epoch cache are all local inputs, and
+`ouroboros/chainsync.go` routes every non-deferred header error to
+`ConnectionRecycleRequestedEvent`, so reporting a local fault as a header
+rejection recycles the honest peer that served the header. `ByronGenesisFile` is
+optional while `eras.BuildShapeForEras` builds Byron era params for every
+config, so a Shelley-only config reaches that branch for every uncached slot.
+An unavailable configured shape or current era also makes future-slot protocol
+parameters unavailable, as do a missing scheduled successor, a failed hard fork,
+or a failed pending-parameter update. The forger and genesis-overlay validation
+reject those conditions instead of using current parameters for the future epoch.
 The in-memory summary reads the same configured era safe zone and
 `TransitionInfo` as the NtC era-history query, but the two horizons are not
 interchangeable: the NtC query answers a point in time, while the live summary
@@ -2973,9 +2986,15 @@ supply; the safety argument above does not depend on it, because apply-time
 re-validation is authoritative regardless.)
 
 Slot/epoch query adapters preserve `hardfork.ErrPastHorizon` in their error
-chains so callers can defer until the ledger advances. `EpochInfo` serves an
-already materialized epoch directly from the immutable epoch cache before
-forecasting. The operational slot clock is the deliberate exception to
+chains so callers can defer until the ledger advances. `EpochInfo` and
+`SlotToEpoch` serve an already materialized epoch directly from the immutable
+epoch cache before forecasting. `SlotToTime` does the same when no summary can
+be built: it walks the cache for the covering epoch and accumulates relative
+time from the first entry's `StartSlot`, the same anchor
+`hardForkSummaryAnchoredAt` uses, so a slot whose era parameters are already
+known converts without a forecast rather than dropping the slot clock into its
+retry loop. A slot the cache does not cover has no era parameters to read and
+still fails, subject only to the near-now fallback below. The operational slot clock is the deliberate exception to
 wall-clock forecast refusal: near-now `TimeToSlot` and `SlotToTime` calls
 extrapolate the current era while a stale node catches up, but arbitrary time
 queries and all header validation remain bounded. The accepted window is one
@@ -3367,7 +3386,15 @@ sync through the TPraos eras hands the client a payload it cannot read as
 promised. Which era is which is not restated for the wire: the layout is chosen
 from `consensusModeForEraID`, the same mapping `ConsensusModeForEpoch` uses to
 decide how leader eligibility is checked, so the protocol the reply names and
-the protocol the node elects under cannot disagree. Byron, which ran PBFT and
+the protocol the node elects under cannot disagree. `ConsensusModeForEpoch`
+answers a cached epoch, the current epoch or earlier, and a confirmed
+`HardForkInitiation` boundary from state the node already holds; only a further
+future epoch needs the configured era walk, and there it fails closed on an
+unresolvable shape rather than reporting the current era's mode across a
+scheduled fork. Header verification defers on that error (the shape is a local
+input, not the peer's fault) and leader-schedule computation declines to
+produce a schedule, since the mode selects both the VRF leader-value derivation
+and the threshold. Byron, which ran PBFT and
 has no state of this shape, maps to CPraos there and so takes the modern layout,
 along with any era not explicitly listed.
 

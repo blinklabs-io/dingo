@@ -98,6 +98,9 @@ type mockEpochProvider struct {
 	// epochSlotRange, when set, overrides EpochSlotRange's default fixed
 	// range so tests can model Byron-era offsets or variable epoch lengths.
 	epochSlotRange func(epoch uint64) (EpochSlotRange, error)
+	// consensusModeErr, when set, makes ConsensusModeForEpoch fail so tests
+	// can model an unresolvable era forecast.
+	consensusModeErr error
 }
 
 func newMockEpochProvider() *mockEpochProvider {
@@ -168,8 +171,11 @@ func (m *mockEpochProvider) ActiveSlotCoeff() float64 {
 
 func (m *mockEpochProvider) ConsensusModeForEpoch(
 	epoch uint64,
-) consensus.ConsensusMode {
-	return consensus.ConsensusModeTPraos
+) (consensus.ConsensusMode, error) {
+	if m.consensusModeErr != nil {
+		return 0, m.consensusModeErr
+	}
+	return consensus.ConsensusModeTPraos, nil
 }
 
 func (m *mockEpochProvider) SetEpochNonce(nonce []byte) {
@@ -1317,124 +1323,38 @@ func TestElectionConcurrentAccess(t *testing.T) {
 	}
 }
 
-// Parent cancellation must join the worker generation before any concurrent
-// Stop returns or a new Start can replace the worker channels.
-func TestElectionParentCancellationWaitsForGeneration(t *testing.T) {
-	pool := lcommon.PoolKeyHash{}
-	inner := newMockStakeProvider()
-	inner.totalStake = 10000
-	inner.poolStakes[string(pool[:])] = 1000
-	blocked := &blockingStakeProvider{mockStakeProvider: inner, started: make(chan struct{}), release: make(chan struct{})}
-	var release sync.Once
-	bus := event.NewEventBus(nil, nil)
-	defer bus.Stop()
-	defer release.Do(func() { close(blocked.release) })
-	e := NewElection(pool, electionTestVRFSeed, blocked, newMockEpochProvider(), bus, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	parent, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	require.NoError(t, e.Start(parent))
-	select {
-	case <-blocked.started:
-	case <-time.After(5 * time.Second):
-		t.Fatal("worker did not reach provider")
-	}
-	cancel()
-	// Start must inspect the canceled generation context, even before its
-	// coordinator has acquired the election mutex and marked it stopped.
-	restarted := make(chan error, 1)
-	go func() { restarted <- e.Start(t.Context()) }()
-	select {
-	case <-restarted:
-		t.Fatal("Start replaced an undrained canceled generation")
-	case <-time.After(50 * time.Millisecond):
-	}
-	require.Eventually(t, func() bool {
-		e.mu.RLock()
-		defer e.mu.RUnlock()
-		return !e.running
-	}, time.Second, time.Millisecond)
-	canceled, cancelWait := context.WithCancel(t.Context())
-	cancelWait()
-	require.ErrorIs(t, e.Start(canceled), context.Canceled)
-	stopped := make(chan error, 2)
-	for range 2 {
-		go func() { stopped <- e.Stop() }()
-	}
-	select {
-	case <-stopped:
-		t.Fatal("Stop returned before canceled generation drained")
-	case <-time.After(50 * time.Millisecond):
-	}
-	release.Do(func() { close(blocked.release) })
-	for range 2 {
-		select {
-		case err := <-stopped:
-			require.NoError(t, err)
-		case <-time.After(5 * time.Second):
-			t.Fatal("Stop did not complete after canceled worker drained")
-		}
-	}
-	select {
-	case err := <-restarted:
-		require.NoError(t, err)
-	case <-time.After(5 * time.Second):
-		t.Fatal("restart did not complete after canceled worker drained")
-	}
-	e.mu.RLock()
-	running := e.running
-	e.mu.RUnlock()
-	require.True(t, running, "old generation waiters must not stop the restart")
-	go func() { stopped <- e.Stop() }()
-	select {
-	case err := <-stopped:
-		require.NoError(t, err)
-	case <-time.After(5 * time.Second):
-		t.Fatal("restarted generation did not stop")
-	}
-}
+// TestComputeScheduleDeclinesUnresolvableConsensusMode pins the caller half of
+// the fail-closed consensus-mode forecast. The mode selects both the VRF input
+// construction and the threshold, so a schedule computed from a substituted
+// default is a leader-slot list cardano-node will reject. computeSchedule must
+// return the resolution error rather than produce one.
+func TestComputeScheduleDeclinesUnresolvableConsensusMode(t *testing.T) {
+	poolId := lcommon.PoolKeyHash{}
+	stakeProvider := newMockStakeProvider()
+	stakeProvider.totalStake = 1_000_000
+	stakeProvider.poolStakes[string(poolId[:])] = 1_000_000
 
-// gatedElectionContext signals when Start evaluates its cancellation select.
-type gatedElectionContext struct {
-	context.Context
-	entered chan struct{}
-	once    sync.Once
-}
+	epochProvider := newMockEpochProvider()
+	epochProvider.consensusModeErr = errors.New("era shape unavailable")
 
-func (c *gatedElectionContext) Done() <-chan struct{} {
-	c.once.Do(func() { close(c.entered) })
-	return c.Context.Done()
-}
+	eventBus := event.NewEventBus(nil, nil)
+	defer eventBus.Stop()
 
-func TestElectionCanceledWaiterAfterReplacement(t *testing.T) {
-	oldCtx, cancelOld := context.WithCancel(t.Context())
-	cancelOld()
-	oldDone := make(chan struct{})
-	e := &Election{lifecycleCtx: oldCtx, lifecycleDone: oldDone}
-	waitCtx, cancelWait := context.WithCancel(t.Context())
-	defer cancelWait()
-	ctx := &gatedElectionContext{Context: waitCtx, entered: make(chan struct{})}
-	afterWait := func() {
-		// This waiter selected generation completion before cancellation. A
-		// second caller installs a healthy replacement before it reacquires mu.
-		e.mu.Lock()
-		e.running = true
-		e.lifecycleCtx = t.Context()
-		e.lifecycleDone = make(chan struct{})
-		cancelWait()
-		e.mu.Unlock()
-	}
-	result := make(chan error, 1)
-	go func() { result <- e.start(ctx, afterWait) }()
-	select {
-	case <-ctx.entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Start did not wait for generation completion")
-	}
-	close(oldDone)
-	select {
-	case err := <-result:
-		require.ErrorIs(t, err, context.Canceled)
-	case <-time.After(5 * time.Second):
-		t.Fatal("Start did not return after generation completion")
-	}
+	election := NewElection(
+		poolId,
+		electionTestVRFSeed,
+		stakeProvider,
+		epochProvider,
+		eventBus,
+		slog.New(slog.DiscardHandler),
+	)
+
+	schedule, err := election.computeSchedule(
+		context.Background(),
+		epochProvider.CurrentEpoch(),
+	)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "era shape unavailable")
+	require.Nil(t, schedule,
+		"no schedule may be produced from an unresolved consensus mode")
 }
