@@ -130,15 +130,14 @@ const (
 	forgeStaleTipReasonPrimaryTipBehind = "primary_tip_behind_applied"
 	forgeStaleTipReasonAppliedStale     = "applied_tip_stale"
 	forgeStaleTipReasonEbManifestAhead  = "eb_manifest_ahead"
-	// The fourth reason is recorded from a PRE-leader-check refusal: the
-	// primary chain tip already holds a block at the current slot that the
-	// ledger has not applied, so forging would parent a block for slot S on a
-	// tip already at slot S. The other three are counted after leader
-	// selection has proven this node elected; this one is counted from the
-	// precomputed VRF schedule (isScheduledLeaderSlot), which the path already
-	// consults to choose its log level. That basis fails quiet -- a checker
-	// with no cached schedule for the epoch reports false -- so the series can
-	// under-count.
+	// This reason is recorded from a PRE-leader-check refusal: the primary
+	// chain tip already holds a block at the current slot that the ledger has
+	// not applied, so forging would parent a block for slot S on a tip already
+	// at slot S. The others are counted after leader selection has proven this
+	// node elected; this one is counted from the precomputed VRF schedule
+	// (isScheduledLeaderSlot), which the path already consults to choose its
+	// log level. That basis fails quiet -- a checker with no cached schedule
+	// for the epoch reports false -- so the series can under-count.
 	//
 	// It does not count this node's own unapplied block: the refusal first
 	// asks unappliedTipOwnership whose block sits at the primary chain tip,
