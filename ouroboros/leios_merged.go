@@ -188,16 +188,34 @@ func (o *Ouroboros) registerLeiosNotifyServeWaiter(
 			delete(o.leiosServeWaitersReleased, connId)
 			alreadyReleased = false
 		}
-		o.leiosServeWaitersMu.Unlock()
 		if alreadyReleased {
+			o.leiosServeWaitersMu.Unlock()
 			done := make(chan struct{})
 			close(done)
 			return done, func() {}
 		}
-		// The connection may be in the listener publication window. Register
-		// unconditionally so the connection manager can release this waiter
-		// if the connection subsequently closes.
-		done, cancel = o.registerLeiosServeWaiter(connId, false)
+		// Keep the marker check and waiter insertion under one lock. A close
+		// callback can otherwise record the release between those operations.
+		ch := make(chan struct{})
+		if o.leiosServeWaiters == nil {
+			o.leiosServeWaiters = make(map[ouroboros.ConnectionId][]chan struct{})
+		}
+		o.leiosServeWaiters[connId] = append(o.leiosServeWaiters[connId], ch)
+		o.leiosServeWaitersMu.Unlock()
+		return ch, func() {
+			o.leiosServeWaitersMu.Lock()
+			defer o.leiosServeWaitersMu.Unlock()
+			waiters := o.leiosServeWaiters[connId]
+			for i, waiter := range waiters {
+				if waiter == ch {
+					o.leiosServeWaiters[connId] = slices.Delete(waiters, i, i+1)
+					break
+				}
+			}
+			if len(o.leiosServeWaiters[connId]) == 0 {
+				delete(o.leiosServeWaiters, connId)
+			}
+		}
 	} else {
 		done, cancel = o.registerLeiosServeWaiter(connId)
 	}
