@@ -131,6 +131,8 @@ func newCancelOnRestoreTestHost(
 // remoteTestBlobStore, whose Stop always uses context.Background and so
 // cannot observe this race).
 func TestRestoreBlobStoreStopWaitsForProviderAfterCanceledRestore(t *testing.T) {
+	t.Parallel()
+
 	backupPath := filepath.Join(t.TempDir(), "blob.backup")
 	require.NoError(t, os.WriteFile(backupPath, nil, 0o600))
 	targetDir := t.TempDir()
