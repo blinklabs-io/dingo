@@ -780,6 +780,15 @@ func TestValidateTxsubmissionReply(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, validated, 1)
 	})
+	t.Run("under-advertisement uses per-body tolerance", func(t *testing.T) {
+		want := []txsubmission.TxIdAndSize{
+			{TxId: fixtures[0].txId, Size: uint32(len(fixtures[0].body) - 200)}, // #nosec G115 -- real fixture
+			{TxId: fixtures[1].txId, Size: uint32(len(fixtures[1].body) + 200)}, // #nosec G115 -- real fixture
+		}
+		validated, err := validateTxsubmissionReply(want, returned)
+		require.ErrorIs(t, err, errTxsubmissionReplySizeMismatch)
+		require.Nil(t, validated)
+	})
 
 	tests := []struct {
 		name   string

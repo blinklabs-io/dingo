@@ -206,9 +206,11 @@ func validateTxsubmissionReply(
 			// Peer advertised the unwrapped body size, as Dingo's own
 			// client did before it was corrected to advertise the wire
 			// size. Still accepted so that a mixed fleet interoperates.
+		case txsubmissionSizeMatches(advertisedSize, bodySize):
+			// Prefer the body-size classification when both fuzzy windows
+			// overlap; this keeps the metric meaningful for near-body peers.
 		case txsubmissionSizeMatches(advertisedSize, wireSize):
 			wireSizeAdvertised = true
-		case txsubmissionSizeMatches(advertisedSize, bodySize):
 		default:
 			return nil, fmt.Errorf(
 				"%w at index %d: advertised %d, body %d, wire %d, era %d",
@@ -550,12 +552,15 @@ func (o *Ouroboros) txsubmissionServerInit(
 					len(txIds),
 				)
 				if limitAdmission {
-					// The advertised size is the wrapped wire size for a
-					// spec-conformant peer, so it is an upper bound on the
-					// body that will be admitted. Reserving against it is
-					// conservative by the few bytes of wrapper.
-					if int64(txIds[0].Size) >
-						headroom.MaxAdmissionHeadroomBytes() {
+					// The advertised size may be up to the reference
+					// discrepancy below the actual body size. Reserve the
+					// complete accepted upper bound and reject offers whose
+					// upper bound cannot fit in admission headroom.
+					maxAdmissionBytes := headroom.MaxAdmissionHeadroomBytes()
+					advertisedBytes := int64(txIds[0].Size)
+					maxDiscrepancyBytes := int64(txsubmissionMaxSizeDiscrepancy)
+					if advertisedBytes >
+						maxAdmissionBytes-maxDiscrepancyBytes {
 						consecutiveImpossibleOffers++
 						o.config.Logger.Warn(
 							"peer offered transaction larger than mempool admission capacity",
@@ -584,7 +589,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 					}
 					consecutiveImpossibleOffers = 0
 					if !headroom.WaitForAdmissionHeadroom(
-						int64(txIds[0].Size),
+						advertisedBytes+maxDiscrepancyBytes,
 						conn.ErrorChan(),
 					) {
 						return

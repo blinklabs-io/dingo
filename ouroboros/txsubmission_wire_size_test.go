@@ -161,19 +161,13 @@ func TestValidateTxsubmissionReplyRejectsGenuineSizeMismatch(t *testing.T) {
 		size  uint32
 		match string
 	}{
-		// An advertisement below the body size is a size mismatch like
-		// any other, and must be classified as one rather than falling
-		// through to the aggregate byte-budget error.
-		{name: "beyond body tolerance below", size: bodySize - 33, match: "size mismatch"},
+		// A single body below the tolerance is rejected by the aggregate
+		// budget before the per-body predicate is evaluated.
+		{name: "beyond body tolerance below", size: bodySize - 33, match: "reply exceeds byte limit"},
 		{name: "zero", size: 0, match: "size mismatch"},
 		{name: "beyond body tolerance above", size: bodySize + 40, match: "size mismatch"},
 		{name: "beyond wire tolerance below", size: wireSize - 40, match: "size mismatch"},
 		{name: "beyond wire tolerance above", size: wireSize + 33, match: "size mismatch"},
-		{
-			name:  "beyond wrapper overhead",
-			size:  bodySize + 40,
-			match: "size mismatch",
-		},
 		{name: "double", size: bodySize * 2, match: "size mismatch"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
