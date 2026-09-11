@@ -399,10 +399,8 @@ func (lv *LedgerView) PoolCurrentState(
 		}
 		if reg.MetadataUrl != "" {
 			tmp.PoolMetadata = &lcommon.PoolMetadata{
-				Url: reg.MetadataUrl,
-				Hash: lcommon.PoolMetadataHash(
-					lcommon.NewBlake2b256(reg.MetadataHash).Bytes(),
-				),
+				Url:  reg.MetadataUrl,
+				Hash: lcommon.PoolMetadataHash(reg.MetadataHash),
 			}
 		}
 		currentReg = &tmp
