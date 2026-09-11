@@ -2347,6 +2347,26 @@ func (q *Queries) GetLatestNetworkState(ctx context.Context) (NetworkState, erro
 	return i, err
 }
 
+const getNetworkStateAsOfSlot = `-- name: GetNetworkStateAsOfSlot :one
+SELECT id, treasury, reserves, slot
+FROM network_state
+WHERE slot <= ?
+ORDER BY slot DESC
+LIMIT 1
+`
+
+func (q *Queries) GetNetworkStateAsOfSlot(ctx context.Context, slot int64) (NetworkState, error) {
+	row := q.db.QueryRowContext(ctx, getNetworkStateAsOfSlot, slot)
+	var i NetworkState
+	err := row.Scan(
+		&i.ID,
+		&i.Treasury,
+		&i.Reserves,
+		&i.Slot,
+	)
+	return i, err
+}
+
 const getLiveUtxo = `-- name: GetLiveUtxo :one
 SELECT transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
        staking_key, credential_tag, datum_hash, spent_at_tx_id,

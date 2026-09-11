@@ -132,6 +132,7 @@ type Querier interface {
 	GetLatestMidnightAriadneParams(ctx context.Context) (MidnightAriadneParam, error)
 	GetLatestMidnightGovernanceDatum(ctx context.Context, arg GetLatestMidnightGovernanceDatumParams) (MidnightGovernanceDatum, error)
 	GetLatestNetworkState(ctx context.Context) (NetworkState, error)
+	GetNetworkStateAsOfSlot(ctx context.Context, slot int64) (NetworkState, error)
 	GetLiveUtxo(ctx context.Context, arg GetLiveUtxoParams) (Utxo, error)
 	GetLiveUtxoRefsBySlot(ctx context.Context, addedSlot sql.NullInt64) ([]GetLiveUtxoRefsBySlotRow, error)
 	GetLiveUtxosByAsset(ctx context.Context, arg GetLiveUtxosByAssetParams) ([]Utxo, error)

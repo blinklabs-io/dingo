@@ -118,6 +118,7 @@ var utxoStoreMethods = []string{
 	"GetUtxo",
 	"GetUtxoIncludingSpent",
 	"GetUtxosByRefs",
+	"GetUtxosByRefsAsOf",
 	"GetUtxosAddedAfterSlot",
 	"GetLiveUtxosBySlot",
 	"GetUtxosBySlot",

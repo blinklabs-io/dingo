@@ -870,6 +870,45 @@ func (s *Store) GetUtxosByRefs(
 	return ret, nil
 }
 
+// GetUtxosByRefsAsOf retrieves the UTxOs matching refs as they stood at
+// atSlot: created at-or-before atSlot and either still live (deleted_slot =
+// 0) or spent strictly after it (deleted_slot > atSlot). See the UtxoStore
+// interface doc comment for the retention caveat callers must enforce
+// themselves -- a row spent long enough ago can already be hard-deleted by
+// the periodic stability-window cleanup regardless of atSlot.
+func (s *Store) GetUtxosByRefsAsOf(
+	refs []models.UtxoId,
+	atSlot uint64,
+	txn types.Txn,
+) ([]models.Utxo, error) {
+	ret := []models.Utxo{}
+	refs = dedupeUtxoIDs(refs)
+	sqlSlot, err := checkedInt64(atSlot)
+	if err != nil {
+		return nil, err
+	}
+	// Two bind variables per reference, plus the two slot bounds; 400
+	// keeps this portable to SQLite's conservative 999-parameter
+	// configuration, matching GetUtxosByRefs' own chunking.
+	for start := 0; start < len(refs); start += 400 {
+		end := min(start+400, len(refs))
+		predicate, idArgs := utxoIDPredicate(refs[start:end])
+		args := append([]any{sqlSlot, sqlSlot}, idArgs...)
+		utxos, err := s.queryUtxosWithAssets(
+			txn,
+			"added_slot <= ? AND (deleted_slot = 0 OR deleted_slot > ?) AND ("+
+				predicate+")",
+			args,
+			"",
+		)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, utxos...)
+	}
+	return ret, nil
+}
+
 // dedupeUtxoIDs returns ids with duplicate (Hash, Idx) pairs removed,
 // preserving the order of first occurrence.
 func dedupeUtxoIDs(ids []models.UtxoId) []models.UtxoId {

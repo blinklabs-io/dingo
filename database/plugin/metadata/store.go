@@ -605,6 +605,28 @@ type UtxoStore interface {
 		types.Txn,
 	) ([]models.Utxo, error)
 
+	// GetUtxosByRefsAsOf retrieves the UTxOs matching refs as they stood at
+	// atSlot: a row is included when its AddedSlot is at-or-before atSlot
+	// and it was either never spent (DeletedSlot == 0) or was spent
+	// strictly after atSlot. Refs with no matching row under that
+	// predicate are simply absent from the result, the same as
+	// GetUtxosByRefs.
+	//
+	// Unlike GetUtxosByRefs, "no matching row" is ambiguous once atSlot is
+	// old enough: it means either "genuinely never live at atSlot" or "was
+	// live at atSlot but its spend record has since been hard-deleted by
+	// the periodic stability-window cleanup" (see UtxosDeleteConsumed).
+	// This method has no way to tell the two apart -- callers pinning a
+	// historical point (ledger.Query, blinklabs-io/dingo#382/#1900) must
+	// reject a point older than their own retention floor themselves
+	// before calling this, rather than trust a possibly-incomplete result
+	// here.
+	GetUtxosByRefsAsOf(
+		refs []models.UtxoId,
+		atSlot uint64,
+		txn types.Txn,
+	) ([]models.Utxo, error)
+
 	// DeleteUtxo removes a single unspent transaction output.
 	DeleteUtxo(models.UtxoId, types.Txn) error
 
@@ -1834,11 +1856,8 @@ type MetadataStore interface {
 	// GetPoolsRetiringAtEpoch returns the pools whose effective retirement
 	// (the latest retirement not cancelled by a later re-registration, as of
 	// the boundary slot) takes effect at the given epoch, along with the
-	// reward account from their active registration and the deposit that
-	// registration holds -- the amount paid by the first registration since
-	// the pool's most recent completed reap, not what the current protocol
-	// parameters would charge. Used to apply POOLREAP deposit refunds at the
-	// epoch boundary.
+	// reward account and deposit from their active registration. Used to apply
+	// POOLREAP deposit refunds at the epoch boundary.
 	GetPoolsRetiringAtEpoch(
 		epoch uint64,
 		boundarySlot uint64,
@@ -2312,7 +2331,10 @@ type MetadataStore interface {
 	// SaveImportedPoolBlockCounts records the per-pool block counts a bootstrap
 	// snapshot carries for one epoch, which is the only source of pool
 	// performance for an epoch that ended below the trust anchor.
-	SaveImportedPoolBlockCounts([]models.ImportedPoolBlockCount, types.Txn) error
+	SaveImportedPoolBlockCounts(
+		[]models.ImportedPoolBlockCount,
+		types.Txn,
+	) error
 
 	// SaveImportedEpochBlockTotal records that an epoch's block counts came
 	// from a bootstrap snapshot and the total its per-pool rows sum to. It is
@@ -2434,6 +2456,12 @@ type MetadataStore interface {
 
 	// GetNetworkState retrieves the most recent network state.
 	GetNetworkState(types.Txn) (*models.NetworkState, error)
+
+	// GetNetworkStateAsOfSlot retrieves the most recent network state
+	// recorded at or before the given slot, for a historical
+	// GetStakeDistribution answer (blinklabs-io/dingo#382) rather than
+	// GetNetworkState's always-latest row.
+	GetNetworkStateAsOfSlot(uint64, types.Txn) (*models.NetworkState, error)
 
 	// DeleteNetworkStateAfterSlot removes network state records
 	// added after the given slot. This is used during chain

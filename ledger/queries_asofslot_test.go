@@ -20,7 +20,9 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
@@ -30,7 +32,11 @@ import (
 // seedEpochs writes an epoch record starting at each given slot, so
 // database.GetEpochBySlot can resolve which epoch covers an arbitrary slot
 // in between two consecutive entries.
-func seedEpochs(t *testing.T, ls *LedgerState, startSlotByEpoch map[uint64]uint64) {
+func seedEpochs(
+	t *testing.T,
+	ls *LedgerState,
+	startSlotByEpoch map[uint64]uint64,
+) {
 	t.Helper()
 	for startSlot, epoch := range startSlotByEpoch {
 		require.NoError(t, ls.db.SetEpoch(
@@ -44,7 +50,9 @@ func seedEpochs(t *testing.T, ls *LedgerState, startSlotByEpoch map[uint64]uint6
 // read that epoch's own mark snapshot, not the live tip's -- the two are
 // seeded with deliberately different stake for the same pool so a test that
 // silently fell back to live data would be caught.
-func TestPoolStakeDistribution_AsOfSlot_ReadsHistoricalEpochSnapshot(t *testing.T) {
+func TestPoolStakeDistribution_AsOfSlot_ReadsHistoricalEpochSnapshot(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	db := newTestDB(t)
@@ -52,7 +60,10 @@ func TestPoolStakeDistribution_AsOfSlot_ReadsHistoricalEpochSnapshot(t *testing.
 
 	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(repeatedBytes(28, 0x11)))
 	require.NoError(t, db.Metadata().ImportPool(
-		&models.Pool{PoolKeyHash: pkh.Bytes(), VrfKeyHash: repeatedBytes(32, 0xAA)},
+		&models.Pool{
+			PoolKeyHash: pkh.Bytes(),
+			VrfKeyHash:  repeatedBytes(32, 0xAA),
+		},
 		&models.PoolRegistration{
 			PoolKeyHash: pkh.Bytes(),
 			VrfKeyHash:  repeatedBytes(32, 0xAA),
@@ -61,7 +72,8 @@ func TestPoolStakeDistribution_AsOfSlot_ReadsHistoricalEpochSnapshot(t *testing.
 			Cost:        dbtypes.Uint64(1),
 		},
 		nil,
-	))
+	),
+	)
 
 	// Epoch 4's mark snapshot (praos.StakeSnapshotEpoch(4) == 3) -- exactly
 	// the retained-boundary case: at live epoch 6, cleanupOldSnapshots'
@@ -70,17 +82,23 @@ func TestPoolStakeDistribution_AsOfSlot_ReadsHistoricalEpochSnapshot(t *testing.
 	// snapshot would be epoch 2), is already pruned -- see
 	// TestPoolStakeDistribution_AsOfSlot_TooOldRejected's sibling case
 	// below and checkAsOfEpochRecency's doc comment for the exact shift.
-	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(&models.PoolStakeSnapshot{
-		Epoch: 3, SnapshotType: snapshotTypeMark,
-		PoolKeyHash: pkh.Bytes(), TotalStake: dbtypes.Uint64(1_000_000),
-		CapturedSlot: 1,
-	}, nil))
+	require.NoError(
+		t,
+		db.Metadata().SavePoolStakeSnapshot(&models.PoolStakeSnapshot{
+			Epoch: 3, SnapshotType: snapshotTypeMark,
+			PoolKeyHash: pkh.Bytes(), TotalStake: dbtypes.Uint64(1_000_000),
+			CapturedSlot: 1,
+		}, nil),
+	)
 	// Epoch 6's mark snapshot (praos.StakeSnapshotEpoch(6) == 5) -- live.
-	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(&models.PoolStakeSnapshot{
-		Epoch: 5, SnapshotType: snapshotTypeMark,
-		PoolKeyHash: pkh.Bytes(), TotalStake: dbtypes.Uint64(9_000_000),
-		CapturedSlot: 1,
-	}, nil))
+	require.NoError(
+		t,
+		db.Metadata().SavePoolStakeSnapshot(&models.PoolStakeSnapshot{
+			Epoch: 5, SnapshotType: snapshotTypeMark,
+			PoolKeyHash: pkh.Bytes(), TotalStake: dbtypes.Uint64(9_000_000),
+			CapturedSlot: 1,
+		}, nil),
+	)
 
 	seedEpochs(t, ls, map[uint64]uint64{300: 3, 400: 4, 600: 6})
 	ls.currentEpoch = models.Epoch{EpochId: 6}
@@ -151,13 +169,17 @@ func TestPoolStakeDistribution_AsOfSlot_AheadOfLiveRejected(t *testing.T) {
 // epoch as the live tip is answerable, since protocol parameters only
 // change at epoch boundaries -- "as of asOfSlot" and "live right now" are
 // necessarily the same value within one epoch.
-func TestQueryShelleyCurrentProtocolParams_SameEpochAsLive_Succeeds(t *testing.T) {
+func TestQueryShelleyCurrentProtocolParams_SameEpochAsLive_Succeeds(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	db := newTestDB(t)
 	ls := newPoolDistr2Ledger(t, db)
 	ls.currentEra = eras.ConwayEraDesc
-	ls.currentPParams = conwayPParamsWithCostModels(map[uint][]int64{0: {1, 1, 1}})
+	ls.currentPParams = conwayPParamsWithCostModels(
+		map[uint][]int64{0: {1, 1, 1}},
+	)
 	// The live epoch this handler compares against comes from the published
 	// consensus snapshot (loadConsensusSnapshot), not from a database read
 	// -- see queryShelleyCurrentProtocolParams' doc comment for why. So the
@@ -171,17 +193,24 @@ func TestQueryShelleyCurrentProtocolParams_SameEpochAsLive_Succeeds(t *testing.T
 		Point: ocommon.NewPoint(350, repeatedBytes(32, 0x0B)),
 	}, nil))
 
-	result, err := ls.queryShelleyCurrentProtocolParams(QueryPoint{Slot: 320}, nil)
+	result, err := ls.queryShelleyCurrentProtocolParams(
+		QueryPoint{Slot: 320},
+		nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 }
 
-// TestQueryShelleyCurrentProtocolParams_DifferentEpochFromLive_Rejected
-// covers the actual gap this session's review identified: protocol
-// parameters have no persisted historical-by-epoch record, so a pin naming
-// a slot in an epoch other than the live tip's must fail rather than
-// silently answer with the live (possibly different) value.
-func TestQueryShelleyCurrentProtocolParams_DifferentEpochFromLive_Rejected(
+// TestQueryShelleyCurrentProtocolParams_DifferentEpochFromLive_ReadsPersistedRow
+// covers the real fix: a pin naming a slot in an epoch other than the live
+// tip's is now answered from that epoch's own persisted pparams row
+// (database.Database.GetPParams / loadPersistedProtocolParameters), the
+// same row SetPParams already writes on every era transition and
+// governance-enacted update. Epoch 3's persisted cost models are seeded to
+// a value deliberately different from the live (epoch 6) in-memory value,
+// so a query that silently fell back to live data (the bug this closes)
+// would return the wrong cost models rather than merely succeeding.
+func TestQueryShelleyCurrentProtocolParams_DifferentEpochFromLive_ReadsPersistedRow(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -189,7 +218,9 @@ func TestQueryShelleyCurrentProtocolParams_DifferentEpochFromLive_Rejected(
 	db := newTestDB(t)
 	ls := newPoolDistr2Ledger(t, db)
 	ls.currentEra = eras.ConwayEraDesc
-	ls.currentPParams = conwayPParamsWithCostModels(map[uint][]int64{0: {1, 1, 1}})
+	ls.currentPParams = conwayPParamsWithCostModels(
+		map[uint][]int64{0: {9, 9, 9}},
+	)
 	// See the same-epoch test's comment: the live epoch this handler
 	// compares against comes from the published consensus snapshot, so it
 	// has to match the database epoch record seeded below for this test to
@@ -198,7 +229,70 @@ func TestQueryShelleyCurrentProtocolParams_DifferentEpochFromLive_Rejected(
 	ls.currentEpoch = models.Epoch{EpochId: 6}
 	ls.publishSnapshotsLocked()
 
-	seedEpochs(t, ls, map[uint64]uint64{300: 3, 600: 6})
+	conwayEraId := uint(eras.ConwayEraDesc.Id)
+	require.NoError(t, ls.db.SetEpoch(
+		300, 3, nil, nil, nil, nil, conwayEraId, 1, 100, nil,
+	))
+	require.NoError(t, ls.db.SetEpoch(
+		600, 6, nil, nil, nil, nil, conwayEraId, 1, 100, nil,
+	))
+	historicalPParams := conwayPParamsWithCostModels(
+		map[uint][]int64{0: {1, 1, 1}},
+	)
+	historicalCbor, err := cbor.Encode(historicalPParams)
+	require.NoError(t, err)
+	require.NoError(t, ls.db.SetPParams(
+		historicalCbor, 300, 3, conwayEraId, nil,
+	))
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(650, repeatedBytes(32, 0x0B)),
+	}, nil))
+
+	result, err := ls.queryShelleyCurrentProtocolParams(
+		QueryPoint{Slot: 350}, nil,
+	)
+	require.NoError(t, err, "a persisted historical row must now be answered")
+	results, ok := result.([]any)
+	require.True(t, ok)
+	require.Len(t, results, 1)
+	got, ok := results[0].(*conway.ConwayProtocolParameters)
+	require.True(t, ok)
+	assert.Equal(
+		t, []int64{1, 1, 1}, got.CostModels[0],
+		"must return epoch 3's own persisted cost models, not the live "+
+			"in-memory epoch 6 value",
+	)
+}
+
+// TestQueryShelleyCurrentProtocolParams_NoPersistedRow_Rejected covers an
+// epoch with no persisted pparams row at all (never had a parameter change
+// recorded, or one pruned after a rollback by DeletePParamsAfterSlot):
+// unlike TestQueryShelleyCurrentProtocolParams_DifferentEpochFromLive_ReadsPersistedRow,
+// there is nothing to answer from, so this must still fail with
+// ErrHistoricalStateUnavailable rather than silently falling back to live
+// data.
+func TestQueryShelleyCurrentProtocolParams_NoPersistedRow_Rejected(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	ls.currentEra = eras.ConwayEraDesc
+	ls.currentPParams = conwayPParamsWithCostModels(
+		map[uint][]int64{0: {9, 9, 9}},
+	)
+	ls.currentEpoch = models.Epoch{EpochId: 6}
+	ls.publishSnapshotsLocked()
+
+	conwayEraId := uint(eras.ConwayEraDesc.Id)
+	require.NoError(t, ls.db.SetEpoch(
+		300, 3, nil, nil, nil, nil, conwayEraId, 1, 100, nil,
+	))
+	require.NoError(t, ls.db.SetEpoch(
+		600, 6, nil, nil, nil, nil, conwayEraId, 1, 100, nil,
+	))
+	// Deliberately no SetPParams call for epoch 3.
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: ocommon.NewPoint(650, repeatedBytes(32, 0x0B)),
 	}, nil))
