@@ -564,25 +564,44 @@ func repairUtxoBlob(
 		return blob.SetUtxo(txn.Blob(), txId, outputIdx, offsetData)
 	}
 
-	// Open a dedicated write transaction when the caller txn is
-	// nil or its blob handle is read-only / absent.
-	writeTxn := NewBlobOnlyTxn(db, true)
-	blob := writeTxn.BlobStore()
-	if blob == nil {
-		writeTxn.Release()
-		return nil
+	// The caller's txn is read-only (or has no blob handle at all), so a
+	// separate write transaction is needed. When the caller already
+	// pinned a blob store, open the write transaction directly on that
+	// same store.BlobStore rather than NewBlobOnlyTxn, which re-pins
+	// whatever store is *currently* installed: recoverUtxoCbor's read
+	// above located this block through the caller's pinned store, and
+	// re-pinning here would let a concurrent SetBlobStore swap repair a
+	// different store than the one just read from, splitting the read
+	// and the write-back non-atomically across two stores
+	// (blinklabs-io/dingo#1900 review). The caller's own pin, still held
+	// for txn's lifetime (which spans this whole call), keeps that store
+	// from being drained out from under this write.
+	var store blob.BlobStore
+	if txn != nil {
+		store = txn.BlobStore()
 	}
-	if err := blob.SetUtxo(
-		writeTxn.Blob(), txId, outputIdx, offsetData,
+	if store == nil {
+		writeTxn := NewBlobOnlyTxn(db, true)
+		defer writeTxn.Release()
+		store = writeTxn.BlobStore()
+		if store == nil {
+			return nil
+		}
+		if err := store.SetUtxo(
+			writeTxn.Blob(), txId, outputIdx, offsetData,
+		); err != nil {
+			return err
+		}
+		return writeTxn.Commit()
+	}
+	writeBlobTxn := store.NewTransaction(true)
+	if err := store.SetUtxo(
+		writeBlobTxn, txId, outputIdx, offsetData,
 	); err != nil {
-		_ = writeTxn.Rollback()
+		_ = writeBlobTxn.Rollback()
 		return err
 	}
-	if err := writeTxn.Commit(); err != nil {
-		_ = writeTxn.Rollback()
-		return err
-	}
-	return nil
+	return writeBlobTxn.Commit()
 }
 
 func (d *Database) UtxoByRef(

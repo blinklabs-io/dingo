@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/stretchr/testify/require"
 )
@@ -201,4 +202,116 @@ func TestResolveUtxoCborWithRecoveryPropagatesUnrecoverable(t *testing.T) {
 	_, err = db.ResolveUtxoCborWithRecovery(txId, 0, nil)
 	require.True(t, errors.Is(err, ErrUtxoCborUnavailable),
 		"a UTxO with no indexed producer block must report unavailable, not succeed silently")
+}
+
+// TestRepairUtxoBlobWritesThroughCallersPinnedStore is a regression test for
+// a cubic finding on PR #4084: ResolveUtxoCborWithRecovery's block lookup was
+// fixed to read through the caller's already-pinned blob store rather than
+// whatever store is *currently* installed (see Txn.withMetadataForRecovery),
+// but repairUtxoBlob's write-back still opened a fresh NewBlobOnlyTxn, which
+// re-pins the current store -- splitting one logical recovery into a read
+// against one store and a repair write into a different one whenever a
+// SetBlobStore swap lands in between.
+//
+// Proves the fix end-to-end: install a second, empty store between the read
+// and the repair, and confirm the repaired offset lands in the store the
+// caller was actually pinned to (the one the block lookup used, and the only
+// one that has the producer block data at all), not the newly-installed one.
+func TestRepairUtxoBlobWritesThroughCallersPinnedStore(t *testing.T) {
+	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	defer db.Close() //nolint:errcheck
+
+	originalStore := db.Blob()
+	require.NotNil(t, originalStore)
+
+	candidate := findGapConsumeCandidateWithoutCertificates(t)
+	require.NotEmpty(t, candidate.producers)
+	producer := candidate.producers[0]
+	// Written against the original store, before any swap below.
+	storeBlockOffsetsOnly(t, db, producer.block)
+	metaTxn := db.MetadataTxn(true)
+	t.Cleanup(metaTxn.Release)
+	require.NoError(
+		t,
+		metaTxn.Do(func(txn *Txn) error {
+			return db.Metadata().SetGapBlockTransaction(
+				producer.tx, producer.point, 0, nil, txn.Metadata(),
+			)
+		}),
+	)
+	metaTxn.Release()
+
+	produced := producer.tx.Produced()
+	require.NotEmpty(t, produced)
+	utxo := produced[0]
+	txId := utxo.Id.Id().Bytes()
+	outputIdx := utxo.Id.Index()
+
+	// Delete just this output's blob entry so the resolve misses and
+	// recovery kicks in, same setup as the sibling recovery tests.
+	writeTxn := db.Transaction(true)
+	t.Cleanup(writeTxn.Release)
+	require.NoError(
+		t,
+		originalStore.DeleteUtxo(writeTxn.Blob(), txId, outputIdx),
+	)
+	require.NoError(t, writeTxn.Commit())
+
+	// Open a read-only Txn against the original store *before* the swap --
+	// this is what pins ResolveUtxoCborWithRecovery to the original store
+	// for the whole call, the same as a real caller already holding a txn
+	// opened earlier than a concurrent SetBlobStore.
+	callerTxn := db.BlobTxn(false)
+	require.True(
+		t, originalStore == callerTxn.BlobStore(),
+		"test setup must pin the caller's txn to the original store",
+	)
+
+	// Install a second, empty store -- simulating a blob-store rotation
+	// (e.g. bark) happening concurrently with this in-flight recovery.
+	newStore, err := badger.New(badger.WithDataDir(t.TempDir()))
+	require.NoError(t, err)
+	prev, drain := db.SetBlobStore(newStore)
+	require.True(t, originalStore == prev)
+
+	recovered, err := db.ResolveUtxoCborWithRecovery(
+		txId, outputIdx, callerTxn,
+	)
+	require.NoError(
+		t, err,
+		"recovery must succeed by reading the caller's pinned (original) "+
+			"store, even though a different store is now installed",
+	)
+	require.NotEmpty(t, recovered)
+
+	// Release the caller's pin before draining: drain waits for every pin
+	// on the retired (original) store to clear, and callerTxn is the one
+	// still holding it.
+	callerTxn.Release()
+	drain()
+	defer func() {
+		require.NoError(t, newStore.Close())
+	}()
+
+	// The repair write-back must have landed in the *original* store...
+	checkTxn := originalStore.NewTransaction(false)
+	defer checkTxn.Rollback() //nolint:errcheck
+	repaired, err := originalStore.GetUtxo(checkTxn, txId, outputIdx)
+	require.NoError(
+		t, err,
+		"repair must have written the offset back into the original store",
+	)
+	require.NotEmpty(t, repaired)
+
+	// ...and must not have landed in the newly-installed store, which would
+	// only happen if repairUtxoBlob re-pinned the current store instead of
+	// reusing the caller's.
+	newCheckTxn := newStore.NewTransaction(false)
+	defer newCheckTxn.Rollback() //nolint:errcheck
+	_, err = newStore.GetUtxo(newCheckTxn, txId, outputIdx)
+	require.ErrorIs(
+		t, err, types.ErrBlobKeyNotFound,
+		"repair must not write into the newly-installed store",
+	)
 }
