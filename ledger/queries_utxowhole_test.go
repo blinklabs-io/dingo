@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -237,30 +238,24 @@ func TestQueryShelleyUtxoWhole_WorkerPanicDoesNotCrashProcess(t *testing.T) {
 // row to the worker pool instead of stopping -- unlike the earlier
 // sequential implementation, which aborted its whole traversal on the
 // first failure via the error it returned from IterateLiveUtxos'
-// callback. Seeds one immediately-failing (unrecoverable) row alongside
-// many artificially slow, otherwise-resolvable rows: without the early
-// abort, every slow row still gets decoded before the query returns its
-// error; with it, the feeder stops once the fast failure is detected,
-// well before the slow rows can all complete.
+// callback.
+//
+// Every seeded row is otherwise identical and independently resolvable
+// (no single row is "the" unrecoverable one): whichever row a worker
+// happens to reach first fails immediately, and every row reached after
+// that is slow but succeeds. This is deliberate, per a cubic review
+// finding on an earlier version of this test that keyed the failure to a
+// specific seeded row: IterateLiveUtxos issues its live-row scan with no
+// ORDER BY, so which row a database iteration visits first is
+// unspecified, not a contract this test may depend on. Keying the
+// failure to "whichever row is first," rather than to a specific row's
+// identity, makes the test's outcome independent of that unspecified
+// order.
 func TestQueryShelleyUtxoWhole_AbortsEarlyOnFirstFailure(t *testing.T) {
 	// Not t.Parallel: swaps the package-level decodeUtxoWholeCborFunc seam.
 	db := newTestDB(t)
 
-	// Seeded first so it is likely to reach a worker before most of the
-	// slow rows below -- not load-bearing for correctness (the query fails
-	// regardless of ordering, see TestQueryShelleyUtxoWhole_
-	// UnrecoverableRowFailsQuery), only for how early the abort fires
-	// relative to the slow rows' total count.
-	unrecoverableTxId := bytes.Repeat([]byte{0xC3}, 32)
-	txn := db.Transaction(true)
-	require.NoError(t, db.CreateUtxo(txn, &models.Utxo{
-		TxId:      unrecoverableTxId,
-		OutputIdx: 0,
-		AddedSlot: 100,
-	}))
-	require.NoError(t, txn.Commit())
-
-	const slowRowCount = 100
+	const rowCount = 100
 	addr, err := lcommon.NewAddressFromParts(
 		lcommon.AddressTypeKeyNone,
 		lcommon.AddressNetworkTestnet,
@@ -268,20 +263,26 @@ func TestQueryShelleyUtxoWhole_AbortsEarlyOnFirstFailure(t *testing.T) {
 		nil,
 	)
 	require.NoError(t, err)
-	for i := range slowRowCount {
+	for i := range rowCount {
 		seedBabbageUtxo(
 			t, db, byte(i), uint32(i), addr, 1_000_000, //nolint:gosec
 		)
 	}
 
-	var decodedCount atomic.Int64
+	var (
+		decodedCount atomic.Int64
+		failed       atomic.Bool
+	)
 	original := decodeUtxoWholeCborFunc
 	decodeUtxoWholeCborFunc = func(
 		ref database.UtxoRef,
 		cborBytes []byte,
 	) (ledger.TransactionOutput, error) {
-		// Long enough that the unrecoverable row's near-instant failure is
-		// detected well before all slowRowCount rows can be decoded, short
+		if failed.CompareAndSwap(false, true) {
+			return nil, errors.New("simulated first-row failure")
+		}
+		// Long enough that the first row's near-instant failure is
+		// detected well before every other row can be decoded, short
 		// enough to keep the test fast.
 		time.Sleep(10 * time.Millisecond)
 		decodedCount.Add(1)
@@ -293,9 +294,16 @@ func TestQueryShelleyUtxoWhole_AbortsEarlyOnFirstFailure(t *testing.T) {
 
 	_, err = ls.queryShelleyUtxoWhole()
 	require.Error(t, err)
+	// A bound near utxoWholeResolveWorkers, not just under rowCount: only
+	// the one wave of rows already dispatched when the first (immediate)
+	// failure is detected should ever reach the sleep-then-decode branch.
+	// Without the early abort, every remaining row of the 99 still would
+	// (rowCount minus the one that failed), so this stays a meaningful
+	// regression check rather than one only a total mechanism removal
+	// could fail.
 	require.Less(
-		t, decodedCount.Load(), int64(slowRowCount),
-		"early abort must stop the feeder before every slow row is decoded",
+		t, decodedCount.Load(), int64(rowCount/2),
+		"early abort must stop the feeder well before every row is decoded",
 	)
 }
 
