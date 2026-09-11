@@ -3089,11 +3089,12 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 		// Persisted before the delete below, and this run must not proceed
 		// to delete anything if the persist itself fails: this durably
 		// records that rows at-or-behind floor are now ELIGIBLE for
-		// pruning, which is what checkUtxoRetentionWindow needs to reject
-		// a pin against. A delete that runs anyway on a failed persist
-		// would hard-delete real rows with no durable record that floor
-		// was ever used, letting a later pinned query at or above floor
-		// see no persisted floor to reject against and silently answer
+		// pruning, which is what checkUtxoRetentionWindow rejects a pin
+		// below. A delete that runs anyway on a failed persist would
+		// hard-delete real rows without ever advancing that durable
+		// record -- so a later pin at a slot the real deletion already
+		// reached, but that the stale (un-advanced) persisted floor
+		// doesn't cover, would not be rejected and would silently answer
 		// "absent" for a ref that was actually there (blinklabs-io/dingo#382
 		// review). Returning here just skips this run; the next periodic
 		// tick tries again from the same (or a later) floor.
