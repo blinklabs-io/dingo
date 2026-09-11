@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"fmt"
 	"log/slog"
+	"os"
 	"reflect"
 	"slices"
 	"strings"
@@ -25,6 +26,8 @@ import (
 
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	hostplugin "github.com/blinklabs-io/dingo/plugin"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/stretchr/testify/require"
 )
 
 // configLeafFieldPaths returns the dotted Go field path of every exported
@@ -116,7 +119,6 @@ func TestConfigLogClassesAreUnambiguous(t *testing.T) {
 // sentinelSecrets are the distinctive values planted in the configuration
 // below. None of them may appear in a rendered log line.
 var sentinelSecrets = []string{
-	"SENTINEL-API-AUTH-TOKEN",
 	"SENTINEL-KOIOS-API-KEY",
 	"SENTINEL-BARK-PASSWORD",
 	"SENTINEL-BARK-HOST-PASSWORD",
@@ -128,21 +130,18 @@ var sentinelSecrets = []string{
 	"SENTINEL-DSN-PASSWORD",
 	"SENTINEL-DSN-KEYWORD-PASSWORD",
 	"SENTINEL-UNKNOWN-PROVIDER-KEY",
-	"SENTINEL-BLOCKFROST-TOKEN",
 	"SENTINEL-NESTED-PROVIDER-SECRET",
 	"SENTINEL-MEMPOOL-LIST-SECRET",
 	// An AWS access key ID is half of a credential pair, and
 	// "accessKeyId" is exactly the spelling a left-anchored
 	// access[-_]?key pattern cannot reach past the "Id" suffix.
 	"AKIAEXAMPLE",
-	"SENTINEL-NESTED-AUTH-SECRET",
 	"SENTINEL-SCALAR-AUTH-SECTION",
 }
 
 // sentinelSecretConfig plants a sentinel in every secret-bearing field and
 // provider-map key, alongside non-secret values that must survive.
 func sentinelSecretConfig() *Config {
-	authToken := "SENTINEL-API-AUTH-TOKEN"
 	certPath := "/etc/dingo/api.crt"
 	return &Config{
 		Network:      "preview",
@@ -150,8 +149,7 @@ func sentinelSecretConfig() *Config {
 		StorageMode:  "api",
 		Logging:      LoggingConfig{Format: "json", Level: "debug"},
 		API: APIConfig{
-			TLS:  apiconfig.TLSPolicy{CertFilePath: &certPath},
-			Auth: apiconfig.AuthPolicy{Token: &authToken},
+			TLS: apiconfig.TLSPolicy{CertFilePath: &certPath},
 		},
 		KoiosParity: KoiosParityConfig{
 			Enabled: true,
@@ -164,11 +162,12 @@ func sentinelSecretConfig() *Config {
 		},
 		Mithril: MithrilConfig{
 			AggregatorURL: "https://aggregator.example/aggregator" +
-				"?apiKey=SENTINEL-MITHRIL-KEY&network=preview",
+				"?apiKey='prefix'SENTINEL-MITHRIL-KEY&network=preview",
 		},
 		TokenRegistry: TokenRegistryConfig{
 			SourceURL: "https://reg:SENTINEL-TOKEN-REGISTRY-PASSWORD" +
-				"@registry.example/registry.tar.gz",
+				"@registry.example/registry.tar.gz" +
+				"?apiKey='prefix'SENTINEL-TOKEN-REGISTRY-PASSWORD",
 		},
 		OffchainMetadata: OffchainMetadataConfig{
 			IPFSGatewayURL: "https://ipfs:SENTINEL-IPFS-PASSWORD" +
@@ -195,8 +194,9 @@ func sentinelSecretConfig() *Config {
 						"database": "dingo",
 						"sslMode":  "require",
 						"password": "SENTINEL-PG-PASSWORD",
-						"dsn": "postgres://dingo:SENTINEL-DSN-PASSWORD" +
-							"@db.example:5432/dingo?sslmode=require",
+						"dsn": "host=db.example port=5432 dbname=dingo " +
+							"password='SENTINEL-DSN-PASSWORD?part' " +
+							"sslmode=require",
 						"futureKey": "SENTINEL-UNKNOWN-PROVIDER-KEY",
 					},
 				},
@@ -215,13 +215,6 @@ func sentinelSecretConfig() *Config {
 					Provider: "blockfrost",
 					Config: map[string]any{
 						"port": 3000,
-						"auth": map[string]any{
-							"mode": "token",
-							"token": map[string]any{
-								"host":  "SENTINEL-NESTED-AUTH-SECRET",
-								"value": "SENTINEL-BLOCKFROST-TOKEN",
-							},
-						},
 						"futureSection": map[string]any{
 							"deeper": map[string]any{
 								"anything": "SENTINEL-NESTED-" +
@@ -359,10 +352,60 @@ func TestRedactURICredentials(t *testing.T) {
 				redactedPlaceholder + " dbname=dingo",
 		},
 		{
+			name: "keyword dsn question mark in password",
+			in:   "host=db.example password='secret?part' dbname=dingo",
+			want: "host=db.example password=" + redactedPlaceholder +
+				" dbname=dingo",
+		},
+		{
+			name: "keyword dsn leading whitespace and query-shaped password",
+			in:   "  password = 'prefix?apiKey=secret' dbname=dingo",
+			want: "  password = " + redactedPlaceholder + " dbname=dingo",
+		},
+		{
+			name: "relative query retains credential boundary",
+			in:   "path?apiKey=secret&page=2",
+			want: "path?apiKey=" + redactedPlaceholder + "&page=2",
+		},
+		{
+			name: "ambiguous unquoted dsn keeps query-shaped suffix secret",
+			in:   "password=secret?network=preview&apiKey=key",
+			want: "password=" + redactedPlaceholder,
+		},
+		{
+			name: "unquoted dsn retains whitespace-delimited database",
+			in:   "password=secret?network=preview dbname=dingo",
+			want: "password=" + redactedPlaceholder + " dbname=dingo",
+		},
+		{
+			name: "ambiguous relative query still redacts credentials",
+			in:   "path=value?apiKey=secret&page=2",
+			want: "path=value?apiKey=" + redactedPlaceholder + "&page=2",
+		},
+		{
+			name: "mysql query and userinfo",
+			in:   "dingo:secret@tcp(db.example:3306)/db?apiKey=key&parseTime=true",
+			want: "dingo:" + redactedPlaceholder +
+				"@tcp(db.example:3306)/db?apiKey=" +
+				redactedPlaceholder + "&parseTime=true",
+		},
+		{
 			name: "credential query parameter",
 			in:   "https://aggregator.example/x?apiKey=abc123&network=preview",
 			want: "https://aggregator.example/x?apiKey=" +
 				redactedPlaceholder + "&network=preview",
+		},
+		{
+			name: "query quotes are literal",
+			in:   "https://api.example/v1?apiKey='prefix'credential&page=2",
+			want: "https://api.example/v1?apiKey=" +
+				redactedPlaceholder + "&page=2",
+		},
+		{
+			name: "query quotes do not hide following parameter",
+			in:   "https://api.example/v1?apiKey='credential&page=2",
+			want: "https://api.example/v1?apiKey=" +
+				redactedPlaceholder + "&page=2",
 		},
 		{
 			name: "quoted keyword dsn password containing whitespace",
@@ -491,6 +534,35 @@ func TestRedactURICredentials(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRedactKeywordDSNMatchesPgxValueBoundary(t *testing.T) {
+	const dsn = "host=localhost user=dingo dbname=dingo sslmode=disable " +
+		"connect_timeout=5 password=secret?network=preview&apiKey=key"
+
+	for _, name := range []string{
+		"PGSERVICE", "PGSERVICEFILE", "PGPASSFILE", "PGTARGETSESSIONATTRS",
+		"PGSSLMODE", "PGHOST", "PGPORT", "PGUSER", "PGDATABASE", "PGOPTIONS",
+		"PGCONNECT_TIMEOUT",
+	} {
+		t.Setenv(name, "")
+	}
+	t.Setenv("PGSERVICEFILE", os.DevNull)
+	t.Setenv("PGPASSFILE", os.DevNull)
+	parsed, err := pgconn.ParseConfig(dsn)
+	require.NoError(t, err)
+	require.Equal(t, "secret?network=preview&apiKey=key", parsed.Password)
+	require.Equal(
+		t,
+		"host=localhost user=dingo dbname=dingo sslmode=disable "+
+			"connect_timeout=5 password="+redactedPlaceholder,
+		redactURICredentials(dsn),
+	)
+	require.Equal(
+		t,
+		"path=value?network=preview&apiKey="+redactedPlaceholder,
+		redactURICredentials("path=value?network=preview&apiKey=key"),
+	)
 }
 
 // TestProviderConfigUnknownKeyIsRedacted pins the fail-safe default for a
@@ -831,44 +903,6 @@ func TestProviderConfigSecretSubtreeIsRedactedWhole(t *testing.T) {
 	}
 }
 
-// TestProviderConfigNestedSectionsAreWalked is the counterweight to
-// redacting a secret subtree whole: the API providers nest their tls and
-// auth policies, so those sections have to stay renderable containers or
-// the whole policy disappears from a startup log.
-func TestProviderConfigNestedSectionsAreWalked(t *testing.T) {
-	t.Parallel()
-
-	value := providerConfigValue(reflect.ValueOf(map[string]any{
-		"auth": map[string]any{
-			"mode":          "token",
-			"tokenFilePath": "/etc/dingo/token",
-			"token":         "nested-auth-token",
-		},
-		"tls": map[string]any{
-			"mode":         "manual",
-			"certFilePath": "/etc/dingo/api.crt",
-		},
-	}))
-	rendered := value.String()
-	if strings.Contains(rendered, "nested-auth-token") {
-		t.Errorf("provider config leaks nested auth token: %s", rendered)
-	}
-	for _, want := range []string{
-		"token",
-		"/etc/dingo/token",
-		"manual",
-		"/etc/dingo/api.crt",
-	} {
-		if !strings.Contains(rendered, want) {
-			t.Errorf(
-				"provider config dropped nested policy %q: %s",
-				want,
-				rendered,
-			)
-		}
-	}
-}
-
 // TestProviderConfigKeyClassesAreUnambiguous catches a provider key listed
 // under two classes, where the effective class would depend on map
 // iteration order.
@@ -894,10 +928,10 @@ func TestProviderConfigKeyClassesAreUnambiguous(t *testing.T) {
 }
 
 // TestProviderConfigSectionKeyRequiresASection is the value-shape
-// counterpart to classifying "auth" and "tls" as containers. Those keys
-// name a nested section, so a section is walked and classified key by key
+// counterpart to classifying "tls" as a container. That key
+// names a nested section, so a section is walked and classified key by key
 // while a value of any other shape at the same key is not a policy this
-// walk can classify at all and is redacted whole. Classifying them
+// walk can classify at all and is redacted whole. Classifying it
 // renderable instead rendered a scalar there as plain text.
 func TestProviderConfigSectionKeyRequiresASection(t *testing.T) {
 	t.Parallel()
@@ -943,16 +977,26 @@ func TestProviderConfigSectionKeyRequiresASection(t *testing.T) {
 }
 
 // TestProviderConfigSectionKeyNilValue pins that an explicitly empty
-// section renders as itself. A nil discloses nothing, and "auth: " with
+// section renders as itself. A nil discloses nothing, and "tls: " with
 // nothing under it is what an operator needs to see about their file.
 func TestProviderConfigSectionKeyNilValue(t *testing.T) {
 	t.Parallel()
 
 	rendered := providerConfigValue(reflect.ValueOf(
-		map[string]any{"auth": nil},
+		map[string]any{"tls": nil},
 	)).String()
 	if !strings.Contains(rendered, "<nil>") {
 		t.Errorf("nil section is not rendered as nil: %s", rendered)
+	}
+}
+
+func TestProviderConfigTLSSectionIsWalked(t *testing.T) {
+	t.Parallel()
+	rendered := providerConfigValue(reflect.ValueOf(map[string]any{"tls": map[string]any{
+		"mode": "manual", "certFilePath": "/etc/dingo/api.crt", "token": "secret",
+	}})).String()
+	if !strings.Contains(rendered, "manual") || !strings.Contains(rendered, "/etc/dingo/api.crt") || strings.Contains(rendered, "secret") {
+		t.Errorf("tls section rendered incorrectly: %s", rendered)
 	}
 }
 

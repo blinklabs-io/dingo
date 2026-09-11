@@ -16,23 +16,14 @@ package blockfrost
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"time"
 
-	"github.com/blinklabs-io/dingo/internal/apiauth"
 	"github.com/blinklabs-io/dingo/internal/apilistener"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
 )
-
-// blockfrostProjectIDHeader is the header real Blockfrost clients send
-// their API key in. Presenting the shared token there authenticates
-// exactly as presenting it via "Authorization: Bearer <token>" does --
-// see ARCHITECTURE.md/README.md's "API security" section for this
-// compatibility decision.
-const blockfrostProjectIDHeader = "project_id"
 
 // Blockfrost is the Blockfrost-compatible REST API server.
 type Blockfrost struct {
@@ -43,7 +34,6 @@ type Blockfrost struct {
 	// listening socket as part of what Stop waits for -- see
 	// internal/apilistener.
 	listener *apilistener.Listener
-	verifier *apiauth.Verifier
 }
 
 // New creates a new Blockfrost API server instance.
@@ -277,20 +267,8 @@ func (b *Blockfrost) handler() http.Handler {
 	// as defense-in-depth against oversized payloads.
 	const maxRequestBodyBytes int64 = 1 << 20 // 1 MB
 	limited := http.MaxBytesHandler(mux, maxRequestBodyBytes)
-	// CORS must wrap authentication, not the reverse: httpcors.Handler
-	// fully answers an OPTIONS preflight itself and never calls the
-	// handler it wraps for one, so browsers -- which never attach
-	// Authorization to a preflight request -- never need a credential to
-	// pass CORS negotiation. Every other request, including a
-	// non-preflight OPTIONS, still reaches the mux normally. See
-	// internal/apiauth's Middleware doc comment for the general statement
-	// of this ordering rule.
-	authenticated := apiauth.Middleware(
-		b.verifier,
-		apiauth.WithAliasHeader(blockfrostProjectIDHeader),
-	)(limited)
 	return httpcors.Handler(
-		authenticated,
+		limited,
 		httpcors.Config{
 			AllowedOrigins: b.config.CORSAllowedOrigins,
 		},
@@ -301,17 +279,7 @@ func (b *Blockfrost) handler() http.Handler {
 func (b *Blockfrost) Start(
 	ctx context.Context,
 ) error {
-	// Built before the handler so handler() can install the shared
-	// credential-verification middleware (internal/apiauth).
-	verifier, err := apiauth.NewVerifier(b.config.Auth)
-	if err != nil {
-		return fmt.Errorf("blockfrost: %w", err)
-	}
-	// The verifier is installed inside the build callback so it is published
-	// with the server it belongs to: a second Start is rejected before the
-	// callback runs, and so cannot replace a running server's verifier.
 	server, bindDone, err := b.listener.Publish(func() *http.Server {
-		b.verifier = verifier
 		return &http.Server{
 			Addr:              b.config.ListenAddress,
 			Handler:           b.handler(),

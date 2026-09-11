@@ -1097,16 +1097,15 @@ func (n *Node) reinitializeAPIServers() error {
 					}
 					return block.Number, true, nil
 				},
-				Host:                n.config.midnight.Host,
-				Port:                n.config.midnight.Port,
-				TLSCertFilePath:     n.config.tlsCertFilePath,
-				TLSKeyFilePath:      n.config.tlsKeyFilePath,
-				AllowInsecureRemote: n.config.midnight.AllowInsecureRemote,
-				ReflectionEnabled:   n.config.midnight.ReflectionEnabled,
-				ShutdownTimeout:     n.config.shutdownTimeout,
-				Database:            midnightserver.NewDatabase(n.db),
-				SlotTimer:           n.ledgerState,
-				PromRegistry:        n.config.promRegistry,
+				Host:              n.config.midnight.Host,
+				Port:              n.config.midnight.Port,
+				TLSCertFilePath:   n.config.tlsCertFilePath,
+				TLSKeyFilePath:    n.config.tlsKeyFilePath,
+				ReflectionEnabled: n.config.midnight.ReflectionEnabled,
+				ShutdownTimeout:   n.config.shutdownTimeout,
+				Database:          midnightserver.NewDatabase(n.db),
+				SlotTimer:         n.ledgerState,
+				PromRegistry:      n.config.promRegistry,
 			},
 		)
 		if err != nil {

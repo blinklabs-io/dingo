@@ -23,9 +23,7 @@ import (
 	"sync"
 )
 
-// redactedPlaceholder replaces a secret-bearing value in a rendered log. It
-// matches internal/apiconfig's own AuthPolicy.LogValue placeholder so an
-// operator sees one spelling everywhere.
+// redactedPlaceholder replaces a secret-bearing value in a rendered log.
 const redactedPlaceholder = "***redacted***"
 
 // logClass says how one configuration value is rendered for logging.
@@ -54,17 +52,13 @@ const (
 	// logProviderSection is the class of a provider configuration key
 	// that names a nested section rather than a value of its own. The
 	// section is walked so its own keys are classified by name, and a
-	// value of any other shape at the same key is redacted: the key says
-	// only that a container belongs there, so it classifies nothing
-	// about a scalar, a slice, or a map this walk cannot key into.
+	// value of any other shape at the same key is redacted.
 	logProviderSection
 )
 
 // logSecretConfigFields are the Config field paths (dotted Go field names)
 // whose values are secrets in themselves and are never rendered.
 var logSecretConfigFields = []string{
-	// Inline shared secret for API token authentication.
-	"API.Auth.Token",
 	// Koios Bearer token.
 	"KoiosParity.APIKey",
 }
@@ -104,8 +98,6 @@ var logProviderConfigFields = []string{
 // key registries all belong here; the key material behind a path does not
 // pass through Config at all.
 var logPlainConfigFields = []string{
-	"API.Auth.Mode",
-	"API.Auth.TokenFilePath",
 	"API.TLS.CertFilePath",
 	"API.TLS.KeyFilePath",
 	"API.TLS.Mode",
@@ -182,7 +174,6 @@ var logPlainConfigFields = []string{
 	"MetricsPort",
 	"Midnight.AuthTokenAssetName",
 	"Midnight.AuthTokenPolicyID",
-	"Midnight.AllowInsecureRemote",
 	"Midnight.CNightAssetName",
 	"Midnight.CNightPolicyID",
 	"Midnight.CommitteeCandidateAddress",
@@ -295,19 +286,14 @@ var providerConfigPlainKeys = []string{
 	// mempool
 	"capacity", "evictionwatermark", "rejectionwatermark",
 	"revalidationdeltacap",
-	// api/{blockfrost,mesh,utxorpc} policy keys inside the tls and auth
-	// sections
-	"mode", "certfilepath", "keyfilepath", "tokenfilepath",
+	// api/{blockfrost,mesh,utxorpc} TLS policy keys
+	"mode", "certfilepath", "keyfilepath",
 }
 
 // providerConfigSectionKeys are provider configuration keys whose value is
-// a nested section of further keys. The API providers nest their tls and
-// auth policies there, so the section has to stay walkable or the whole
-// policy disappears from a startup log -- but only a section is walkable,
-// and classifying these keys separately from the values that carry no
-// secret is what keeps a non-section value at the same key from being
-// rendered as one.
-var providerConfigSectionKeys = []string{"auth", "tls"}
+// a nested section of further keys. TLS settings remain walkable so their
+// non-secret policy values stay useful in startup logs.
+var providerConfigSectionKeys = []string{"tls"}
 
 // providerConfigURIKeys are provider configuration keys holding a URI or
 // database DSN, rendered with only their credential components removed.
@@ -353,8 +339,8 @@ func providerConfigKeyClass(key string) logClass {
 
 // LogValue renders c for structured logging with every secret-bearing
 // value replaced by redactedPlaceholder, so `slog` never persists a Koios
-// API key, an inline API auth token, a provider password, or a DSN
-// credential. Unexported fields are not rendered at all.
+// API key, a provider password, or a DSN credential. Unexported fields are
+// not rendered at all.
 //
 // The walk is uniform and does not defer to a nested type's own
 // slog.LogValuer implementation: one classification table with one
@@ -537,11 +523,8 @@ func providerConfigValue(v reflect.Value) slog.Value {
 // inner key that happens to be classified plain ("host", "mode") would
 // then render part of a value whose enclosing key is a secret.
 //
-// A logProviderSection class is the one place where the key's class and
-// the value's shape have to agree: the key says a container belongs
-// there, so a section is walked and anything else is redacted. Deciding
-// that here, once, is what keeps every container key from needing its own
-// shape check.
+// A logProviderSection class requires a map-shaped value so a section is
+// walked and anything else is redacted.
 func providerConfigEntry(v reflect.Value, class logClass) slog.Value {
 	if !v.IsValid() {
 		return slog.AnyValue(nil)
@@ -617,6 +600,8 @@ func sortedStringKeys(v reflect.Value) []string {
 // operational value of knowing which host and database the node was
 // pointed at, which is most of the reason the configuration is logged at
 // all.
+// Ambiguous assignment-shaped inputs follow DSN value boundaries: a query-like
+// suffix inside a credential value is redacted too, since it may be secret.
 func redactURICredentials(s string) string {
 	if s == "" {
 		return s
@@ -635,6 +620,15 @@ func redactURICredentials(s string) string {
 // has no query string: its pairs are whitespace separated, whitespace
 // around '=' is optional, and a value containing whitespace is quoted.
 func redactCredentialParams(s string) string {
+	// net/url also accepts keyword DSNs as relative URLs. Sanitize their
+	// values first so a '?' inside a password cannot hide its prefix.
+	// Still scan any remaining query: a relative URI can also start with
+	// "name=value", so that shape alone must not disable query redaction.
+	// If the assignment itself is credential-named, its entire DSN value
+	// stays secret; a '?' suffix cannot safely be assumed to be a URL query.
+	if startsParam(s, skipParamSpace(s, 0), keywordDSNSyntax) {
+		s = redactParams(s, keywordDSNSyntax)
+	}
 	if start, end, ok := uriQuerySpan(s); ok {
 		return s[:start] +
 			redactParams(s[start:end], uriQuerySyntax) +
@@ -654,6 +648,8 @@ type paramSyntax struct {
 	// without them "api%5Fkey" scans as the two fragments "api" and
 	// "5Fkey", and neither of those reads as a credential.
 	encoded bool
+	// quoted reports whether quotes delimit values rather than being data.
+	quoted bool
 }
 
 var (
@@ -663,7 +659,7 @@ var (
 	// keywordDSNSyntax is the keyword-form database DSN: whitespace
 	// separates the pairs and the keywords are literal, because no DSN
 	// parser percent-decodes them.
-	keywordDSNSyntax = paramSyntax{delims: " \t\r\n"}
+	keywordDSNSyntax = paramSyntax{delims: " \t\r\n", quoted: true}
 )
 
 // isNameByte reports whether b belongs to a parameter name written in this
@@ -676,8 +672,8 @@ func (syntax paramSyntax) isNameByte(b byte) bool {
 }
 
 // uriQuerySpan returns the bounds of s's URI query string, if it has one.
-// net/url does the parsing, so a keyword DSN -- which is not a URI -- does
-// not get its whitespace-separated keywords treated as query parameters.
+// net/url does the parsing after any leading keyword-DSN form has been
+// sanitized, since net/url also accepts that form as a relative URI.
 // The span is verified against RawQuery before it is used, so a URI whose
 // '?' net/url located differently is left to the keyword scanner instead
 // of being spliced at the wrong offset.
@@ -764,9 +760,10 @@ func paramValueStart(s string, nameEnd int, syntax paramSyntax) (int, bool) {
 // paramValueEnd returns the index one past the value beginning at i. A
 // quoted value ends at its closing quote, so a keyword DSN password
 // containing whitespace is redacted whole rather than up to its first
-// space; an unquoted value ends at the first byte in delims.
+// space; URI query quotes are literal data. Other values end at the first
+// byte in delims.
 func paramValueEnd(s string, i int, syntax paramSyntax) int {
-	if i < len(s) && (s[i] == '\'' || s[i] == '"') {
+	if syntax.quoted && i < len(s) && (s[i] == '\'' || s[i] == '"') {
 		quote := s[i]
 		for j := i + 1; j < len(s); {
 			switch s[j] {

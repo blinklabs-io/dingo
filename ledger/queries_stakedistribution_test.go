@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"bytes"
 	"math/big"
 	"strings"
 	"testing"
@@ -22,6 +23,8 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -95,7 +98,7 @@ func TestQueryShelleyStakeDistribution_ReportsFractionAndVrf(t *testing.T) {
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.Query(stakeDistributionQuery())
+	result, err := ls.Query(stakeDistributionQuery(), QueryPoint{})
 	require.NoError(t, err)
 	dist := decodeStakeDistributionResult(t, result)
 	require.Len(t, dist.Results, 2)
@@ -157,8 +160,12 @@ func TestQueryShelleyStakeDistribution_ViaGetCBOR(t *testing.T) {
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.Query(stakeDistributionCborQuery())
-	require.NoError(t, err, "GetCBOR-wrapped GetStakeDistribution must not error")
+	result, err := ls.Query(stakeDistributionCborQuery(), QueryPoint{})
+	require.NoError(
+		t,
+		err,
+		"GetCBOR-wrapped GetStakeDistribution must not error",
+	)
 
 	arr, ok := result.([]any)
 	require.True(t, ok, "expected the []any result wrapper")
@@ -168,14 +175,23 @@ func TestQueryShelleyStakeDistribution_ViaGetCBOR(t *testing.T) {
 	assert.EqualValues(t, cbor.CborTagCbor, tag.Number)
 
 	content, ok := tag.Content.([]byte)
-	require.True(t, ok, "tag content must be raw CBOR bytes, got %T", tag.Content)
+	require.True(
+		t,
+		ok,
+		"tag content must be raw CBOR bytes, got %T",
+		tag.Content,
+	)
 
 	// The tag-24 content must decode via the same real client-side type a
 	// direct (non-GetCBOR) GetStakeDistribution reply does: proof that
 	// GetCBOR carries the identical value, just CBOR-in-CBOR encoded.
 	var dist olocalstatequery.StakeDistributionResult
 	_, err = cbor.Decode(content, &dist)
-	require.NoError(t, err, "tag-24 content must decode as a StakeDistributionResult")
+	require.NoError(
+		t,
+		err,
+		"tag-24 content must decode as a StakeDistributionResult",
+	)
 
 	entryA, ok := dist.Results[lcommon.PoolId(pkhA)]
 	require.True(t, ok, "pool missing from the GetCBOR-wrapped distribution")
@@ -235,7 +251,7 @@ func TestQueryShelleyStakeDistribution_UsesCirculationNotGetPoolDistr2sTotal(
 
 	// GetPoolDistr2 must be unaffected: still sum-of-delegated (2_000_000),
 	// so each pool is 1/2.
-	poolDistr2Result, err := ls.Query(poolDistr2Query())
+	poolDistr2Result, err := ls.Query(poolDistr2Query(), QueryPoint{})
 	require.NoError(t, err)
 	poolDistr2 := decodePoolDistr2Result(t, poolDistr2Result)
 	entryA2, ok := poolDistr2.Pools[lcommon.PoolId(pkhA)]
@@ -246,7 +262,7 @@ func TestQueryShelleyStakeDistribution_UsesCirculationNotGetPoolDistr2sTotal(
 
 	// GetStakeDistribution must use circulation (4_000_000) instead, so each
 	// pool is 1/4 -- not 1/2.
-	stakeDistResult, err := ls.Query(stakeDistributionQuery())
+	stakeDistResult, err := ls.Query(stakeDistributionQuery(), QueryPoint{})
 	require.NoError(t, err)
 	stakeDist := decodeStakeDistributionResult(t, stakeDistResult)
 	entryA, ok := stakeDist.Results[lcommon.PoolId(pkhA)]
@@ -258,6 +274,186 @@ func TestQueryShelleyStakeDistribution_UsesCirculationNotGetPoolDistr2sTotal(
 			"GetPoolDistr2's sum-of-delegated total")
 }
 
+// TestQueryShelleyStakeDistribution_PinnedAtLiveTip_Succeeds covers
+// node-parity's own usage (blinklabs-io/dingo#1900): Check pins every
+// query, including GetStakeDistribution, to whatever point the two nodes
+// just agreed was live -- so a pin naming exactly the current tip must
+// succeed rather than being rejected as an unsupported historical pin.
+// This asserts only that the call succeeds and returns a fraction, not a
+// specific value: the fixture leaves config.CardanoNodeConfig nil, so
+// totalCirculatingSupply answers from its totalActiveStake fallback here
+// rather than genesis-derived circulation -- the accept-vs-reject behavior
+// under test does not depend on which denominator path answered it. See
+// TestQueryShelleyStakeDistribution_UsesCirculationNotGetPoolDistr2sTotal
+// above for a test that does configure genesis/network_state and asserts
+// the resulting fraction.
+func TestQueryShelleyStakeDistribution_PinnedAtLiveTip_Succeeds(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	const snapshotEpoch = 0
+	pkhA := seedPoolDistr2Fixture(
+		t, db, repeatedBytes(28, 0x11), repeatedBytes(32, 0xAA),
+		3_000_000, snapshotEpoch,
+	)
+	ls := newPoolDistr2Ledger(t, db)
+
+	tipHash := bytes.Repeat([]byte{0xEF}, 32)
+	seedBlockAtSlot(t, ls, 100, tipHash)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(100, tipHash),
+	}, nil))
+
+	result, err := ls.Query(
+		stakeDistributionQuery(),
+		QueryPoint{Slot: 100, Hash: tipHash},
+	)
+	require.NoError(
+		t,
+		err,
+		"a pin naming exactly the live tip must be answered",
+	)
+	dist := decodeStakeDistributionResult(t, result)
+	entryA, ok := dist.Results[lcommon.PoolId(pkhA)]
+	require.True(t, ok)
+	require.NotNil(t, entryA.StakeFraction)
+}
+
+// TestQueryShelleyStakeDistribution_PinnedBehindLiveTip_UsesHistoricalCirculatingSupply
+// covers the real #382 fix this handler no longer works around: a pin naming
+// a real, on-chain point behind the live tip is now answered, and with the
+// circulating supply that was actually true at that point
+// (GetNetworkStateAsOfSlot), not whatever reserves are live now. Reserves
+// are seeded to a deliberately different value at the pinned slot than at
+// the live tip, so a query that silently fell back to live reserves (the
+// bug this closes) would report the wrong fraction rather than merely
+// erroring -- a stronger check than "does it return an error."
+func TestQueryShelleyStakeDistribution_PinnedBehindLiveTip_UsesHistoricalCirculatingSupply(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	const snapshotEpoch = 0
+	pkhA := seedPoolDistr2Fixture(
+		t, db, repeatedBytes(28, 0x11), repeatedBytes(32, 0xAA),
+		1_000_000, snapshotEpoch,
+	)
+	ls := newPoolDistr2Ledger(t, db)
+
+	cfg := &cardano.CardanoNodeConfig{
+		ShelleyGenesisHash: strings.Repeat("11", 32),
+	}
+	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+		"activeSlotsCoeff": 0.1,
+		"epochLength": 100,
+		"maxLovelaceSupply": 8000000,
+		"securityParam": 10,
+		"slotLength": 1,
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`)))
+	ls.config.CardanoNodeConfig = cfg
+
+	pastHash := bytes.Repeat([]byte{0xAB}, 32)
+	tipHash := bytes.Repeat([]byte{0xCD}, 32)
+	seedBlockAtSlot(t, ls, 100, pastHash)
+	seedBlockAtSlot(t, ls, 200, tipHash)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(200, tipHash),
+	}, nil))
+
+	// As of slot 100 (the pinned point): reserves 4_000_000, so circulation
+	// is 8_000_000 - 4_000_000 = 4_000_000 and pool A's 1_000_000 is 1/4.
+	require.NoError(t, db.Metadata().SetNetworkState(0, 4_000_000, 100, nil))
+	// As of slot 200 (the live tip, seeded later so it is the latest row):
+	// reserves drop to 2_000_000, so live circulation is 6_000_000 and pool
+	// A's own fraction would be 1/6 if this handler wrongly used live
+	// reserves for the slot-100 pin instead of the historical row above.
+	require.NoError(t, db.Metadata().SetNetworkState(0, 2_000_000, 200, nil))
+
+	result, err := ls.Query(
+		stakeDistributionQuery(),
+		QueryPoint{Slot: 100, Hash: pastHash},
+	)
+	require.NoError(t, err, "a real historical pin must now be answered")
+	dist := decodeStakeDistributionResult(t, result)
+	entryA, ok := dist.Results[lcommon.PoolId(pkhA)]
+	require.True(t, ok)
+	require.NotNil(t, entryA.StakeFraction)
+	assert.Equal(t, int64(1), entryA.StakeFraction.Num().Int64())
+	assert.Equal(
+		t, int64(4), entryA.StakeFraction.Denom().Int64(),
+		"must use slot 100's own reserves (4_000_000), not the live "+
+			"tip's (2_000_000)",
+	)
+
+	// The live (unpinned) query is unaffected: it still reads the latest
+	// NetworkState row, giving pool A a 1/6 fraction against 6_000_000
+	// circulation.
+	liveResult, err := ls.Query(stakeDistributionQuery(), QueryPoint{})
+	require.NoError(t, err)
+	liveDist := decodeStakeDistributionResult(t, liveResult)
+	liveEntryA, ok := liveDist.Results[lcommon.PoolId(pkhA)]
+	require.True(t, ok)
+	require.NotNil(t, liveEntryA.StakeFraction)
+	assert.Equal(t, int64(1), liveEntryA.StakeFraction.Num().Int64())
+	assert.Equal(t, int64(6), liveEntryA.StakeFraction.Denom().Int64())
+}
+
+// TestQueryShelleyStakeDistribution_PinnedBeforeAnyNetworkStateRow_Rejected
+// covers a pin older than every recorded network_state row: unlike
+// TestQueryShelleyStakeDistribution_PinnedBehindLiveTip_UsesHistoricalCirculatingSupply,
+// there is no historical reserves row to answer from, so this must fail
+// with ErrHistoricalStateUnavailable rather than silently fall back to
+// totalActiveStake -- a different, non-equivalent total (see
+// totalCirculatingSupply's doc comment) that would look like a plausible
+// answer instead of an honest rejection.
+func TestQueryShelleyStakeDistribution_PinnedBeforeAnyNetworkStateRow_Rejected(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	const snapshotEpoch = 0
+	seedPoolDistr2Fixture(
+		t, db, repeatedBytes(28, 0x11), repeatedBytes(32, 0xAA),
+		1_000_000, snapshotEpoch,
+	)
+	ls := newPoolDistr2Ledger(t, db)
+
+	cfg := &cardano.CardanoNodeConfig{
+		ShelleyGenesisHash: strings.Repeat("11", 32),
+	}
+	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+		"activeSlotsCoeff": 0.1,
+		"epochLength": 100,
+		"maxLovelaceSupply": 8000000,
+		"securityParam": 10,
+		"slotLength": 1,
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`)))
+	ls.config.CardanoNodeConfig = cfg
+
+	pastHash := bytes.Repeat([]byte{0xAB}, 32)
+	tipHash := bytes.Repeat([]byte{0xCD}, 32)
+	seedBlockAtSlot(t, ls, 100, pastHash)
+	seedBlockAtSlot(t, ls, 200, tipHash)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(200, tipHash),
+	}, nil))
+
+	// The only network_state row is at slot 200 -- after the slot-100 pin,
+	// so GetNetworkStateAsOfSlot(100) finds nothing.
+	require.NoError(t, db.Metadata().SetNetworkState(0, 2_000_000, 200, nil))
+
+	_, err := ls.Query(
+		stakeDistributionQuery(),
+		QueryPoint{Slot: 100, Hash: pastHash},
+	)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
+}
+
 // TestQueryShelleyStakeDistribution_EmptySnapshot covers a chain with no
 // stake snapshot yet: the query must return an empty, non-nil map rather
 // than failing.
@@ -267,7 +463,7 @@ func TestQueryShelleyStakeDistribution_EmptySnapshot(t *testing.T) {
 	db := newTestDB(t)
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.queryShelleyStakeDistribution()
+	result, err := ls.queryShelleyStakeDistribution(QueryPoint{}, nil)
 	require.NoError(t, err)
 	dist := decodeStakeDistributionResult(t, result)
 	assert.Empty(t, dist.Results)

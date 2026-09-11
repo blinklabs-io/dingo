@@ -227,6 +227,7 @@ type BlobStoreBadger struct {
 	runValueLogGC        func(float64) error
 	dataDir              string
 	gcWg                 sync.WaitGroup
+	gcMetrics            *badgerGCMetrics
 	closeOnce            sync.Once
 	closeDone            chan struct{}
 	closeErr             error
@@ -383,8 +384,25 @@ func (d *BlobStoreBadger) blobGc(
 			default:
 			}
 			for {
+				var beforeLSM, beforeVlog int64
+				if d.gcMetrics != nil {
+					d.gcMetrics.attempts.Inc()
+					beforeLSM, beforeVlog = d.DB().Size()
+				}
+				gcStarted := time.Now()
 				err := d.runValueLogGC(0.5)
+				if d.gcMetrics != nil {
+					d.gcMetrics.duration.Observe(time.Since(gcStarted).Seconds())
+				}
 				if err != nil {
+					if d.gcMetrics != nil {
+						if errors.Is(err, badger.ErrNoRewrite) {
+							d.gcMetrics.noRewrite.Inc()
+						} else {
+							d.gcMetrics.errors.Inc()
+						}
+						d.gcMetrics.consecutive.Set(0)
+					}
 					// Log any actual errors
 					if !errors.Is(err, badger.ErrNoRewrite) {
 						d.logger.Warn(
@@ -393,6 +411,21 @@ func (d *BlobStoreBadger) blobGc(
 						)
 					}
 					break
+				}
+				if d.gcMetrics != nil {
+					d.gcMetrics.successes.Inc()
+					afterLSM, afterVlog := d.DB().Size()
+					d.gcMetrics.lsmBytes.Set(float64(afterLSM))
+					d.gcMetrics.vlogBytes.Set(float64(afterVlog))
+					beforeSize := beforeLSM + beforeVlog
+					afterSize := afterLSM + afterVlog
+					if beforeSize > afterSize {
+						d.gcMetrics.reclaimedBytes.Set(float64(beforeSize - afterSize))
+					} else {
+						d.gcMetrics.reclaimedBytes.Set(0)
+					}
+					d.gcMetrics.consecutive.Inc()
+					d.gcMetrics.lastSuccess.SetToCurrentTime()
 				}
 				// A successful rewrite normally starts another pass. Check the
 				// stop signal first so shutdown bounds the cycle to the rewrite
@@ -448,6 +481,9 @@ func (d *BlobStoreBadger) CloseContext(ctx context.Context) error {
 		}
 		go func() {
 			d.gcWg.Wait()
+			if d.gcMetrics != nil && d.gcMetrics.cleanup != nil {
+				d.gcMetrics.cleanup()
+			}
 			if db := d.DB(); db != nil {
 				d.closeErr = db.Close()
 			}
@@ -461,6 +497,18 @@ func (d *BlobStoreBadger) CloseContext(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// Closed returns a channel that is closed once CloseContext's background
+// cleanup has actually finished -- GC has drained and the underlying
+// badger.DB.Close() call, which releases the on-disk directory lock, has
+// returned. CloseContext itself may return earlier, when its context's
+// deadline expires before that cleanup completes (see its doc comment); a
+// caller that needs to know the close is actually done, for example before
+// reopening the same data directory, must wait on this channel rather than
+// on CloseContext returning.
+func (d *BlobStoreBadger) Closed() <-chan struct{} {
+	return d.closeDone
 }
 
 // DB returns the database handle

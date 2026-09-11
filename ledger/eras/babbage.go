@@ -373,6 +373,16 @@ func ValidateTxBabbage(
 				)
 			}
 		case lcommon.PlutusV2Script:
+			// Real cardano-ledger rejects this transaction outright at the
+			// UTXOW level, before any script runs, when PlutusV2 has no real
+			// cost model yet -- see ErrNoCostModelForPlutusV2.
+			if syntheticV2CostModelInEffect(ls) {
+				return fmt.Errorf(
+					"script %s: %w",
+					tmpScript.Hash(),
+					ErrNoCostModelForPlutusV2,
+				)
+			}
 			txInfoV2, err := script.NewTxInfoV2FromTransaction(
 				ls,
 				tx,
@@ -584,6 +594,16 @@ func EvaluateTxBabbage(
 				Index: redeemer.Index,
 			}] = usedBudget
 		case lcommon.PlutusV2Script:
+			// Mirrors ValidateTxBabbage's identical check: a transaction
+			// that would be rejected outright at validation time must not
+			// be quoted a fee/ex-units estimate implying it's valid.
+			if syntheticV2CostModelInEffect(ls) {
+				return 0, lcommon.ExUnits{}, nil, fmt.Errorf(
+					"script %s: %w",
+					tmpScript.Hash(),
+					ErrNoCostModelForPlutusV2,
+				)
+			}
 			txInfoV2, err := script.NewTxInfoV2FromTransaction(
 				ls,
 				tx,

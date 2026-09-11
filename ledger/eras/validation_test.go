@@ -73,6 +73,21 @@ func (m *mockFeeTx) Type() int {
 	return m.txType
 }
 
+// CurrentTreasuryValue reports no current-treasury-value present (nil),
+// since the embedded lcommon.Transaction is otherwise left nil and would
+// panic if this method were left to promotion -- needed by
+// EvaluateTxConway, which unconditionally builds v3 TxInfo (and so calls
+// this) regardless of which Plutus language a test actually exercises.
+func (m *mockFeeTx) CurrentTreasuryValue() *big.Int {
+	return nil
+}
+
+// Donation mirrors CurrentTreasuryValue's reasoning: nil (no donation),
+// safe against the same otherwise-nil embedded interface.
+func (m *mockFeeTx) Donation() *big.Int {
+	return nil
+}
+
 func (m *mockFeeTx) Fee() *big.Int {
 	return m.fee
 }

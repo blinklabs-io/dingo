@@ -456,6 +456,49 @@ func checkEpoch(
 		}, nil
 	}
 
+	// Epochs before this node's own earliest available ledger epoch have no
+	// local reward-calculation state to compare against, regardless of
+	// whether Koios itself has real reference data for them: a
+	// Mithril-bootstrapped node has no ledger history before its bootstrap
+	// boundary by construction (dingo #4172), unlike preStakingThroughEpoch
+	// above, which is a protocol-wide floor Koios itself has no data below.
+	// Treated identically to the PreStaking branch — record PASS with zero
+	// mismatches rather than reading Dingo's total absence of local state as
+	// every field mismatching.
+	earliestAvailable, haveEarliestAvailable, earliestErr := dingo.GetEarliestAvailableEpoch(
+		ctx,
+	)
+	if earliestErr != nil {
+		return nil, fmt.Errorf(
+			"get earliest available epoch: %w",
+			earliestErr,
+		)
+	}
+	if haveEarliestAvailable && epoch < earliestAvailable {
+		if err := cache.CommitEpochMismatches(network, epoch, nil); err != nil {
+			return nil, fmt.Errorf("commit mismatches: %w", err)
+		}
+		if err := cache.UpsertCheckEpochStatus(CheckEpochStatus{
+			Network:       network,
+			Epoch:         epoch,
+			LastCheckedAt: now,
+			Status:        StatusPass,
+		}); err != nil {
+			return nil, fmt.Errorf("upsert check status: %w", err)
+		}
+		logger.Debug(
+			"koiosparity: epoch predates this node's earliest available ledger epoch, skipping comparison",
+			"network", network,
+			"epoch", epoch,
+			"earliest_available_epoch", earliestAvailable,
+		)
+		return &EpochCompareResult{
+			Network: network,
+			Epoch:   epoch,
+			Status:  StatusPass,
+		}, nil
+	}
+
 	var allMismatches []CheckMismatch
 
 	// Resolve the distinct Dingo epoch numbers this Koios epoch's fields

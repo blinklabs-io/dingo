@@ -37,6 +37,7 @@ import (
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/dingo/mempool"
@@ -881,6 +882,20 @@ func TestLiveTruncateCancelsWhenStorageProviderDrainIsUnconfirmed(
 	// close continues asynchronously.
 	n.deferredIndexMaintenanceDone = make(chan struct{})
 
+	// Capture the blob store's own completion signal before Truncate closes
+	// n.db out from under it: BlobStoreBadger.Closed() closes only once its
+	// background CloseContext cleanup (GC drain, then badger.DB.Close(),
+	// which releases the on-disk directory lock) has actually finished, so
+	// waiting on it -- instead of polling by repeatedly reopening the data
+	// directory -- proves drain completion directly rather than guessing at
+	// a bound. See BlobStoreBadger.Closed's doc comment for why CloseContext
+	// returning is not itself that signal.
+	blobCloser, ok := n.db.Blob().(interface{ Closed() <-chan struct{} })
+	require.True(
+		t, ok,
+		"test harness blob store does not expose a completion signal",
+	)
+
 	shortCtx, cancel := context.WithTimeout(
 		context.Background(),
 		20*time.Millisecond,
@@ -898,23 +913,27 @@ func TestLiveTruncateCancelsWhenStorageProviderDrainIsUnconfirmed(
 	require.Error(t, n.ctx.Err())
 	require.Nil(t, n.db, "storage must not be reopened before provider drain")
 
-	// Wait for the provider-owned background close before TempDir cleanup. A
-	// scratch runtime can acquire the same path only after the old Badger lock
-	// is released; the cancelled Node itself remains stopped and never reopens.
-	require.Eventually(t, func() bool {
-		deps := n.storageDependencies(n.config.dataDir)
-		deps.PromRegistry = n.config.promRegistry
-		runtime, openErr := internalplugins.OpenDatabase(
-			context.Background(),
-			n.databaseConfig(),
-			n.storageSelections(),
-			deps,
-		)
-		if openErr != nil {
-			return false
-		}
-		return runtime.Close(context.Background()) == nil
-	}, 5*time.Second, 10*time.Millisecond)
+	// Wait for the provider-owned background close before TempDir cleanup,
+	// via its own completion signal rather than a fixed bound: the cancelled
+	// Node itself remains stopped and never reopens.
+	testutil.RequireReceive(
+		t, blobCloser.Closed(), 30*time.Second,
+		"storage provider background close never confirmed drain",
+	)
+
+	// Once drain is confirmed, a scratch runtime opening the same data
+	// directory must succeed deterministically -- the old Badger lock is
+	// guaranteed released, so this is a single attempt, not a poll.
+	deps := n.storageDependencies(n.config.dataDir)
+	deps.PromRegistry = n.config.promRegistry
+	runtime, openErr := internalplugins.OpenDatabase(
+		context.Background(),
+		n.databaseConfig(),
+		n.storageSelections(),
+		deps,
+	)
+	require.NoError(t, openErr)
+	require.NoError(t, runtime.Close(context.Background()))
 }
 
 // TestLiveTruncateResumesAfterCompletedStorageStopFailure proves that an

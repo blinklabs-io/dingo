@@ -57,6 +57,23 @@ type certificateAccountState struct {
 	drepType uint64
 }
 
+// depositPolicy decides what applyTransactionCertificates does with a
+// deposit-bearing certificate when the caller supplied no deposit map at all.
+// It is a distinct non-boolean type so a call site cannot pass the polarity as
+// an unnamed literal and cannot get it backwards.
+type depositPolicy uint8
+
+const (
+	// requireKnownDeposits rejects the certificate. The live block-apply
+	// path uses it: the deposits there are computed from the same block, so
+	// a nil map is a programming error rather than chain data.
+	requireKnownDeposits depositPolicy = iota
+	// allowUnknownDeposits records NULL for the certificate's deposit. A
+	// Mithril gap block may legitimately arrive with no deposit map, and
+	// NULL stays distinguishable from a recorded zero.
+	allowUnknownDeposits
+)
+
 func (s *Store) applyTransactionCertificates(
 	ctx context.Context,
 	db queryer,
@@ -65,6 +82,7 @@ func (s *Store) applyTransactionCertificates(
 	point ocommon.Point,
 	blockIndex uint32,
 	deposits map[int]uint64,
+	policy depositPolicy,
 ) ([]models.StakeCredentialRef, error) {
 	if len(certificates) == 0 {
 		return nil, nil
@@ -115,7 +133,11 @@ RETURNING id`,
 		if value, found := deposits[certIndex]; found {
 			deposit = &value
 		}
-		if certificateRequiresDeposit(certificate) && deposits == nil {
+		// A gap block may legitimately arrive with no deposit map at all;
+		// SetGapBlockTransaction says so. Unknown then stays unknown (NULL)
+		// rather than being rejected, while the live path keeps the guard.
+		if certificateRequiresDeposit(certificate) && deposits == nil &&
+			policy != allowUnknownDeposits {
 			return nil, fmt.Errorf(
 				"missing certDeposits for deposit-bearing certificate at index %d",
 				certIndex,
