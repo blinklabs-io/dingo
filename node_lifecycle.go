@@ -599,6 +599,9 @@ func (n *Node) closeStorageForLiveLifecycleOp(ctx context.Context) error {
 // (LedgerState, Mempool, ChainsyncState, ConnManager, PeerGov) once the new
 // objects exist, exactly like Run()'s late-binding setters do.
 func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
+	// The previous ledger's tip-gap observation must not make readiness look
+	// healthy while Restore or Truncate is rebuilding the core storage.
+	n.health.forgetTipGap()
 	deps := n.storageDependencies(n.config.dataDir)
 	deps.PromRegistry = n.config.promRegistry
 	stores, err := internalplugins.ResolveStorage(
