@@ -6527,6 +6527,26 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   "this era does not define it", so one-sided absence is a disagreement about
   the shape of the ledger state, which is what an era-gating bug looks like.
 
+  One cost-model divergence is exempt from that rule. Between the Babbage
+  transition and the first real PlutusV2 update, Dingo carries
+  `HardForkBabbage`'s fabricated PlutusV2 cost model (`synthetic_v2_cost_model`,
+  dingo #3825) while Koios correctly reports no PlutusV2 model at all — both
+  sides agree no real model exists yet and disagree only about reporting a
+  placeholder, so failing those epochs was a false divergence (dingo #4127).
+  `GetProtocolParams` (both `RewardParitySource` implementations) resolves
+  `DingoProtocolParams.SyntheticV2CostModel` from the durable
+  `synthetic_v2_cost_model_cleared_epoch` marker, mirroring
+  `ledger.queryShelleyCurrentProtocolParams`'s historical-epoch resolution:
+  the marker is authoritative for epochs at or after the epoch it records,
+  and an absent marker falls back to comparing the stored model against
+  `eras.DefaultPlutusV2CostModel`. `compareCostModels` then reports
+  `cost_model_synthetic` (informational) instead of `value_mismatch` for
+  exactly that shape. The exemption is narrow by construction: it applies
+  only to PlutusV2 and only to a Koios-side absence, so a one-sided PlutusV1
+  or PlutusV3 model in the same epoch, a length or entry difference on a
+  model both sides price, and any PlutusV2 divergence once the flag is false
+  all stay `value_mismatch`/FAIL.
+
   **Epoch alignment.** Koios reports everything for a reporting epoch K, but
   Dingo's `epoch_summary`/`reward_pool_input`/`reward_pool_output` rows do not
   all use K for the same ledger period, so `checkEpoch` (`check.go`) never
@@ -6832,9 +6852,12 @@ reward_type) row within one side — a data-integrity problem, not a value
 disagreement), `acct_zero_reward_row` (informational: a reward row worth zero
 lovelace present on one side only — nothing was credited either way, so the
 two sides agree about every lovelace and the one-sided row is a
-representational difference, not a divergence), and `acct_coverage_incomplete`
+representational difference, not a divergence), `acct_coverage_incomplete`
 (the per-account Koios fetch for this epoch never completed across every chunk
-— see "Per-account exact parity (#3097)" below). Results are stored in
+— see "Per-account exact parity (#3097)" below), and `cost_model_synthetic`
+(informational: Dingo prices PlutusV2 only because `HardForkBabbage`
+fabricated the model before the chain enacted a real one — see "Protocol
+parameter resolution" above). Results are stored in
 `check_mismatches` and summarised in `check_epoch_status`.
 
 Epochs 0-1 predate a valid Shelley "go" stake snapshot (mark→set→go takes 3
