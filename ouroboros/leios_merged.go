@@ -143,7 +143,9 @@ func (o *Ouroboros) registerLeiosServeWaiter(
 			map[ouroboros.ConnectionId][]chan struct{},
 		)
 	}
-	if len(checkLiveness) == 0 || checkLiveness[0] {
+	if (len(checkLiveness) == 0 || checkLiveness[0]) &&
+		o.connManager != nil &&
+		o.connManager.GetConnectionById(connId) != nil {
 		delete(o.leiosServeWaitersReleased, connId)
 	}
 	o.leiosServeWaiters[connId] = append(o.leiosServeWaiters[connId], ch)
