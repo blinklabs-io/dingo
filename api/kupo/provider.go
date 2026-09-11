@@ -27,9 +27,8 @@ import (
 
 // ProviderConfig is the plugin configuration decoded by plugin.Host.
 type ProviderConfig struct {
-	Port uint                 `yaml:"port"`
-	TLS  apiconfig.TLSPolicy  `yaml:"tls"`
-	Auth apiconfig.AuthPolicy `yaml:"auth"`
+	Port uint                `yaml:"port"`
+	TLS  apiconfig.TLSPolicy `yaml:"tls"`
 }
 
 // ProviderDependencies are supplied by node composition.
@@ -59,10 +58,6 @@ func RegisterProvider(host *plugin.Host) error {
 			if err != nil {
 				return nil, nil, fmt.Errorf("kupo: %w", err)
 			}
-			auth, err := cfg.Auth.Resolve("plugins.api.kupo.config.auth")
-			if err != nil {
-				return nil, nil, fmt.Errorf("kupo: %w", err)
-			}
 			server := New(Config{
 				ListenAddress: net.JoinHostPort(
 					deps.Host,
@@ -70,7 +65,6 @@ func RegisterProvider(host *plugin.Host) error {
 				),
 				CORSAllowedOrigins: deps.CORSAllowedOrigins,
 				TLS:                tls,
-				Auth:               auth,
 			}, deps.Node, deps.Logger)
 			return server, server, nil
 		},

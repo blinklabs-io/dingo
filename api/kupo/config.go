@@ -21,5 +21,4 @@ type Config struct {
 	ListenAddress      string
 	CORSAllowedOrigins []string
 	TLS                apiconfig.EffectiveTLS
-	Auth               apiconfig.EffectiveAuth
 }

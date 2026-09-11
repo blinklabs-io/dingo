@@ -24,7 +24,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/blinklabs-io/dingo/internal/apiauth"
 	"github.com/blinklabs-io/dingo/internal/apilistener"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
 )
@@ -35,7 +34,6 @@ type Server struct {
 	logger    *slog.Logger
 	node      KupoNode
 	listener  *apilistener.Listener
-	verifier  *apiauth.Verifier
 	mu        sync.Mutex
 	lifecycle *serverLifecycle
 	startDone chan struct{}
@@ -75,8 +73,7 @@ func (s *Server) handler() http.Handler {
 
 	const maxRequestBodyBytes int64 = 1 << 20
 	limited := http.MaxBytesHandler(mux, maxRequestBodyBytes)
-	authenticated := apiauth.Middleware(s.verifier)(limited)
-	return httpcors.Handler(authenticated, httpcors.Config{
+	return httpcors.Handler(limited, httpcors.Config{
 		AllowedOrigins: s.config.CORSAllowedOrigins,
 	})
 }
@@ -137,14 +134,8 @@ func (s *Server) Start(ctx context.Context) error {
 	defer s.endStart(startDone)
 
 	serveCtx, cancel := context.WithCancel(ctx)
-	verifier, err := apiauth.NewVerifier(s.config.Auth)
-	if err != nil {
-		cancel()
-		return fmt.Errorf("kupo: %w", err)
-	}
 	s.mu.Lock()
 	server, bindDone, err := s.listener.Publish(func() *http.Server {
-		s.verifier = verifier
 		return &http.Server{
 			Addr:              s.config.ListenAddress,
 			Handler:           s.handler(),
