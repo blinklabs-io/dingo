@@ -1197,6 +1197,20 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	var buildStats forgeBuildStats
 	var buildDuration time.Duration
 	defer func() {
+		// A retried or transaction-free block is only credited with
+		// saving the slot once the slot's block is on the chain. Both
+		// counters used to be incremented at build time, which reported
+		// a slot as saved even when self-validation dropped the block or
+		// AddBlock rejected it. Every aborted selection still lands in
+		// exactly one bucket: the block that did not make it counts as
+		// lost, which is what the slot produced.
+		if buildStats.fallbackResult != "" {
+			result := buildStats.fallbackResult
+			if !forgeAdopted {
+				result = forgeSelectionResultLost
+			}
+			f.observeSelectionFallback(result)
+		}
 		f.logger.Info(
 			"forge timing",
 			"slot", currentSlot,
@@ -1239,6 +1253,22 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	buildDuration = time.Since(producingAt)
 	if err != nil {
 		f.incCouldNotForge()
+		if errors.Is(err, errChainTipAheadOfSlot) ||
+			errors.Is(err, errChainTipAtSlot) {
+			// The chain covered this slot while the forge was working.
+			// The entry gates decline exactly this without treating it
+			// as a failure, and so does re-checking it later: there is
+			// no fault here to report up the loop, only a slot that is
+			// no longer ours to take.
+			f.logger.Warn(
+				"forge skip: the chain took this slot during block production",
+				"slot", currentSlot,
+				"tip_slot", f.slotClock.ChainTipSlot(),
+				"attempts", stats.attempts,
+				"error", err,
+			)
+			return nil
+		}
 		return fmt.Errorf("failed to build block: %w", err)
 	}
 	forgeOutcome = forgeTimingOutcomeForged
@@ -1426,6 +1456,66 @@ var errBlockConstraintsUnsupported = errors.New(
 	"block builder does not support per-attempt selection constraints",
 )
 
+// The chain-tip gates checkAndForgeProduction runs at entry decide the slot
+// against a tip read once, before leader selection. Every build attempt made
+// later re-reads the tip and re-applies those same two decisions, because the
+// work in between -- Leios endorser-block production, the KES step, and each
+// selection pass -- is exactly the window in which a peer block can take the
+// slot. Without the re-read the forge computes a VRF proof and KES-signs a
+// block whose parent slot is not below its own, which ledger.validateBlockOrder
+// must then reject: AddBlock becomes the only thing standing between a
+// superseded slot and a signed block.
+var (
+	// errChainTipAheadOfSlot reports that the chain tip moved past the
+	// slot being forged. Mirrors the entry gate's currentSlot < tipSlot
+	// refusal.
+	errChainTipAheadOfSlot = errors.New(
+		"chain tip is ahead of the forged slot",
+	)
+	// errChainTipAtSlot reports that a rival block took the slot being
+	// forged. Mirrors the entry gate's currentSlot == tipSlot case, which
+	// declines the slot battle rather than forging an alternative.
+	errChainTipAtSlot = errors.New(
+		"leader slot already holds another block",
+	)
+)
+
+// chainTipSupersededSlot re-applies the entry gates' tip-slot ordering to
+// the live tip. It returns nil while the tip is still below slot, which is
+// the condition every build for slot depends on.
+//
+// The equal case counts slotBattlesTotal, as the entry gate does for the
+// identical condition: a rival block occupying our leader slot is the same
+// battle whether it arrived before the forge started or during it, and only
+// counting the first would under-report battles precisely on the producers
+// that lose them late.
+func (f *BlockForger) chainTipSupersededSlot(slot uint64) error {
+	if f.slotClock == nil {
+		return nil
+	}
+	tipSlot := f.slotClock.ChainTipSlot()
+	switch {
+	case tipSlot > slot:
+		return fmt.Errorf(
+			"%w: tip slot %d, forged slot %d",
+			errChainTipAheadOfSlot,
+			tipSlot,
+			slot,
+		)
+	case tipSlot == slot:
+		if f.metrics != nil {
+			f.metrics.slotBattlesTotal.Inc()
+		}
+		return fmt.Errorf(
+			"%w: tip slot %d",
+			errChainTipAtSlot,
+			tipSlot,
+		)
+	default:
+		return nil
+	}
+}
+
 // forgeLeiosState is the Leios payload a slot's ranking block is being
 // built with, together with the parent it was resolved against.
 //
@@ -1502,6 +1592,14 @@ type forgeBuildStats struct {
 	// empty is set when the block was produced by the transaction-free
 	// fallback rather than by a completed selection pass.
 	empty bool
+	// fallbackResult is the dingo_forge_selection_fallback_total label
+	// this slot has earned, held rather than counted. A retried or
+	// transaction-free block only saves the slot if it reaches the chain,
+	// so the caller counts it once adoption has succeeded and counts the
+	// slot lost otherwise. Empty when selection completed on the first
+	// attempt, and when the fallback build itself failed -- that path is
+	// already counted where it happens, because no adoption follows it.
+	fallbackResult string
 }
 
 // observeSelectionFallback records how a slot whose selection was aborted
@@ -1578,6 +1676,25 @@ func (f *BlockForger) buildBlockForSlot(
 		if !stats.aborted {
 			return nil, nil, stats, err
 		}
+		// The fallback is a fresh build, so the tip-slot ordering the
+		// entry gates established has to hold for it too. Selection was
+		// aborted by the chain moving, which makes this the one read
+		// most likely to have gone stale; building anyway would sign a
+		// block for a slot the chain has already covered.
+		if tipErr := f.chainTipSupersededSlot(slot); tipErr != nil {
+			f.logger.Warn(
+				"leader slot lost: the chain took the slot before the transaction-free fallback",
+				"slot", slot,
+				"attempts", stats.attempts,
+				"selection_error", err,
+				"error", tipErr,
+			)
+			return nil, nil, stats, fmt.Errorf(
+				"%w; the slot was superseded before the transaction-free fallback: %w",
+				err,
+				tipErr,
+			)
+		}
 		stats.attempts++
 		// The fallback is a fresh build against whatever the chain tip
 		// is now, so its Leios payload has to be resolved against that
@@ -1614,7 +1731,7 @@ func (f *BlockForger) buildBlockForSlot(
 			)
 		}
 		stats.empty = true
-		f.observeSelectionFallback(forgeSelectionResultEmpty)
+		stats.fallbackResult = forgeSelectionResultEmpty
 		f.logger.Warn(
 			"forging a transaction-free block: selection could not complete inside the slot",
 			"slot", slot,
@@ -1647,6 +1764,14 @@ func (f *BlockForger) buildBlockForSlot(
 		f.refreshLeiosForParent(slot, leiosState)
 	}
 	for {
+		// Re-apply the entry gates' tip-slot ordering before every
+		// attempt, including the first: the tip read that cleared them
+		// happened before leader selection, and Leios production, the
+		// KES step and each preceding selection pass all run inside the
+		// window a peer block can land in.
+		if tipErr := f.chainTipSupersededSlot(slot); tipErr != nil {
+			return nil, nil, stats, tipErr
+		}
 		stats.attempts++
 		block, blockCbor, err := f.buildBlock(
 			slot,
@@ -1657,9 +1782,7 @@ func (f *BlockForger) buildBlockForSlot(
 		)
 		if err == nil {
 			if stats.aborted {
-				f.observeSelectionFallback(
-					forgeSelectionResultRetried,
-				)
+				stats.fallbackResult = forgeSelectionResultRetried
 				f.logger.Info(
 					"block transactions re-selected after the chain moved mid-selection",
 					"slot", slot,
