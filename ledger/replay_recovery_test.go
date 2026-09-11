@@ -1812,6 +1812,31 @@ func TestReplayRecoveryArmsAuditAfterPrimaryAndLedgerRewind(t *testing.T) {
 	assert.Equal(t, ls.Tip().Point, window.forkPoint)
 }
 
+func TestReplayRecoveryFallbackWinsOverKnownProducer(t *testing.T) {
+	t.Parallel()
+
+	ls := newReplayRecoveryAuditLedger(t, true)
+	knownTxHash := testHashBytes("known-replay-producer")
+	parentHash := testHashBytes("audit-parent")
+	seedReplayRecoveryTransaction(
+		t, ls.db, knownTxHash, parentHash, 100,
+	)
+
+	candidate, err := ls.findReplayRecoveryCandidate(&txValidationError{
+		BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+		TxHash:     testHashBytes("mixed-provenance-failure"),
+		Inputs: []lcommon.TransactionInput{
+			&replayRecoveryInput{txId: knownTxHash, index: 0},
+			&replayRecoveryInput{txId: testHashBytes("unresolved-producer")},
+		},
+		Cause: errors.New("bad input"),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, candidate)
+	assert.Equal(t, "security-param-fallback", candidate.Strategy)
+	assert.Equal(t, uint64(100), candidate.ProducerBlock.Slot)
+}
+
 func TestReplayRecoveryRejectsDeterministicDuplicateInput(t *testing.T) {
 	t.Parallel()
 

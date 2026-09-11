@@ -1644,8 +1644,11 @@ func (ls *LedgerState) findReplayRecoveryCandidate(
 		if err != nil {
 			return nil, err
 		}
-		if fallbackCandidate != nil && (candidate == nil ||
-			fallbackCandidate.ProducerBlock.Slot < candidate.ProducerBlock.Slot) {
+		if fallbackCandidate != nil {
+			// Any unresolved provenance means the applied state may diverge
+			// before a metadata-known producer. Prefer the bounded fallback
+			// over a narrower known-producer rewind so recovery does not leave
+			// the unresolved input above the rollback point.
 			candidate = fallbackCandidate
 		}
 	}
