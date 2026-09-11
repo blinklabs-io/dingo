@@ -378,8 +378,10 @@ func (ls *LedgerState) auditContinuationBlock(
 	}
 	// Bodies at or below the fork point are in-flight leftovers from the
 	// batch the rollback abandoned. They cannot extend the chain, so auditing
-	// them would only add noise.
+	// them would only add noise -- but one of them may still be a producer
+	// this window is missing, so record before returning.
 	if e.Point.Slot <= window.forkPoint.Slot {
+		ls.recordLateProducers(window, e)
 		return
 	}
 	window.remaining--
@@ -503,6 +505,48 @@ func (ls *LedgerState) auditContinuationBlock(
 				window.blocksSeen,
 			)
 		}
+	}
+}
+
+// recordLateProducers records the producers of a body at or below the window's
+// fork point, when that body is still on the primary chain at its own point.
+//
+// It closes the one hole a carry-forward rearm leaves. A body is added to the
+// chain and audited as two steps of the blockfetch drain, under
+// chainsyncBlockfetchMutex; a chainsync rollback arms the next window from the
+// dispatch goroutine under chainsyncMutex, and neither lock covers both. A
+// rearm landing between those two steps snapshots a producer set that does not
+// hold the just-added body yet, and the body then arrives here below the new
+// fork point and would be dropped -- although its block survived the rollback
+// that armed this window, so its outputs are on the chain and their next
+// audited spend would be reported as a missing producer. That false report is
+// the one this window carries producers forward to remove.
+//
+// Chain membership is what makes recording it sound, and it is re-read rather
+// than assumed: a body from an abandoned fetch, or one a later rollback has
+// since removed, must not become a producer. The read is paid only for bodies
+// at or below the fork point, which are the leftovers of one rollback rather
+// than the steady-state blockfetch path.
+//
+// The body's inputs are not audited and no block budget is spent: it cannot
+// extend the chain above the fork point, which is what the audit inspects.
+//
+// Callers must hold ls.chainsyncBlockfetchMutex.
+func (ls *LedgerState) recordLateProducers(
+	window *continuationAuditWindow,
+	e BlockfetchEvent,
+) {
+	onChain, err := ls.blockByHash(e.Point.Hash)
+	if err != nil || onChain.Slot != e.Point.Slot {
+		return
+	}
+	ls.queueContinuationAuditEndorserRef(window, e)
+	if !ls.recordContinuationAuditProducers(
+		window,
+		blockProducerIds(e.Block.Transactions()),
+		e.Point.Slot,
+	) {
+		window.remaining = 0
 	}
 }
 

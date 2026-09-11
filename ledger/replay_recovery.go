@@ -1021,13 +1021,36 @@ func (ls *LedgerState) rewindPrimaryChainForRecovery(
 	// This is the funnel every recovery truncation of the primary chain
 	// passes through, and it runs outside the rollback path that arms and
 	// disarms the continuation audit. A window armed before it describes
-	// blocks the rewind may delete, and armContinuationAudit now carries a
-	// surviving window's producers into the next window, so discard it here
-	// rather than let those producers outlive the blocks that recorded them.
+	// blocks the rewind may delete, and armContinuationAudit carries a
+	// surviving window's producers into the next window, so the window is
+	// dropped for the duration rather than left to outlive the blocks that
+	// recorded it. Dropping it first is what keeps a rearm racing the
+	// truncation from carrying producers forward out of a window the rewind
+	// is in the middle of invalidating.
+	//
+	// It is restored when the rewind turns out to have truncated nothing.
+	// Several refusals precede the first truncation -- an unconfigured
+	// security parameter, a target the chain does not hold, a tip already at
+	// the target or behind it -- and on those the window still describes the
+	// chain exactly as it did before, so discarding it would cost the audit
+	// its coverage for no reason. The descent commits each step as it goes,
+	// so a partially committed rewind moves the tip too and keeps the drop.
+	// The restore is a compare-and-swap against nil, which yields to a
+	// window armed in the meantime instead of clobbering it.
+	//
 	// The recovery paths that want the audit arm a fresh window after their
 	// rewind returns.
+	prior := ls.continuationAudit.Load()
+	tipBefore := ls.chain.Tip().Point
 	ls.continuationAudit.Store(nil)
 	err := ls.rollbackPrimaryChainInSecurityParamWindows(point)
+	if prior != nil {
+		tipAfter := ls.chain.Tip().Point
+		if tipAfter.Slot == tipBefore.Slot &&
+			bytes.Equal(tipAfter.Hash, tipBefore.Hash) {
+			ls.continuationAudit.CompareAndSwap(nil, prior)
+		}
+	}
 	if err == nil ||
 		(!errors.Is(err, chain.ErrRollbackExceedsSecurityParam) &&
 			!errors.Is(err, errRecoveryRewindNotConverging)) {

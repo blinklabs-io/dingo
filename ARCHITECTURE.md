@@ -4562,8 +4562,16 @@ report, and the blocks that do belong above the point are re-delivered and
 re-recorded. An endorser block's transactions are recorded against the slot of
 the ranking block that carries the reference, since that is the block whose
 truncation takes them off the chain, and a producer offered at two slots keeps
-the lower one. Recovery rewinds truncate the primary chain outside this path
-and therefore discard the window outright. Each arming inspects at most
+the lower one.
+
+The rearm's snapshot and the blockfetch recording are not covered by one lock,
+so a body added to the chain but not yet audited when the rearm runs is absent
+from the snapshot. Such a body is recorded when it arrives, after re-reading
+its chain membership, rather than dropped for sitting at or below the new fork
+point. Recovery rewinds truncate the primary chain outside this path, so they
+drop the window for the duration and restore it only when the rewind turned
+out to truncate nothing — several refusals precede the first truncation, and on
+those the window still describes the chain unchanged. Each arming inspects at most
 `continuationAuditBlockBudget` bodies and retains at most
 `continuationAuditMaxProducedTxs` in-window producers; reaching that producer
 cap disarms the window, logs at `Warn` and counts `disarmed_cap`, so "the audit
