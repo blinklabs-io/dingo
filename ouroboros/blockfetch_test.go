@@ -455,6 +455,8 @@ func TestBlockfetchServerSendBatch_RollbackEndsBatchWithoutServingBlock(
 	// The rollback sentinel must NOT be streamed as a block.
 	assert.Equal(t, 0, server.blockCalls,
 		"rollback sentinel must not be streamed as a block")
+		// Blockfetch has no rollback message, so end the batch cleanly and let the
+		// client re-request against its updated chain.
 	assert.Equal(t, 1, server.batchDoneCalls)
 	assert.Equal(t, 0, conn.closeCalls)
 	assert.Equal(t, 1, iter.cancelCalls)
