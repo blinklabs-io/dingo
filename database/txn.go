@@ -64,8 +64,13 @@ type Txn struct {
 	// pin that keeps that store from being drained out from under the
 	// transaction; it is guarded by lock and cleared by
 	// releaseBlobPinLocked. See blob_store.go.
-	blobStore   blob.BlobStore
-	blobPin     *blobStoreRef
+	blobStore blob.BlobStore
+	blobPin   *blobStoreRef
+	// sharedBlob marks a Txn built by withMetadataForRecovery, whose
+	// blobTxn/blobStore are borrowed from another Txn rather than opened
+	// (and pinned) here. rollback must not tear down a handle it doesn't
+	// own -- see withMetadataForRecovery.
+	sharedBlob  bool
 	lock        sync.Mutex
 	finished    bool
 	committed   bool
@@ -246,6 +251,41 @@ func pinBlobStoreForTxn(t *Txn, db *Database) {
 
 func (t *Txn) DB() *Database {
 	return t.db
+}
+
+// withMetadataForRecovery returns a Txn that adds a metadata read
+// transaction to t's already-pinned blob handle, for a caller that holds a
+// blob-only Txn (t.Metadata() == nil) but needs metadata access for a rare
+// fallback path -- currently only ResolveUtxoCborWithRecovery's call into
+// utxoRecoveryBlockForTx.
+//
+// It deliberately does not go through Database.Transaction (which calls
+// pinBlobStoreForTxn and so re-pins whatever blob store is *currently*
+// installed): t already pinned a store when it was constructed, and that is
+// the store the caller's own resolve attempt just missed on. Re-pinning here
+// would let a concurrent SetBlobStore swap hand recovery a different store
+// than the one being recovered from -- silently failing to find data that is
+// only in the old store, or (if the store were ever a writable target here)
+// repairing the wrong one (blinklabs-io/dingo#1900 review).
+//
+// The returned Txn's blobTxn/blobStore are the same values as t's, marked
+// sharedBlob so Release/Rollback tears down only the metadata transaction
+// opened here, not the borrowed blob handle -- t (or whatever constructed
+// it) still owns that and keeps using it afterward. Only valid for a
+// read-only t; the only current caller's t is always BlobTxn(false).
+func (t *Txn) withMetadataForRecovery() (*Txn, func()) {
+	aug := &Txn{
+		db:         t.db,
+		blobTxn:    t.blobTxn,
+		blobStore:  t.blobStore,
+		sharedBlob: true,
+	}
+	if t.db != nil {
+		if ms := t.db.Metadata(); ms != nil {
+			aug.metadataTxn = ms.ReadTransaction(context.Background())
+		}
+	}
+	return aug, aug.Release
 }
 
 // BlobStore returns the blob store this transaction was opened on, which is
@@ -646,7 +686,7 @@ func (t *Txn) rollback() error {
 	// already run during the panic unwind.
 	defer t.finishLocked()
 	var errs []error
-	if t.blobTxn != nil {
+	if t.blobTxn != nil && !t.sharedBlob {
 		if err := safeProviderRollback(t.logger(), t.blobTxn); err != nil {
 			errs = append(errs, fmt.Errorf("blob rollback: %w", err))
 		}

@@ -46,6 +46,7 @@ func TestResolveUtxoCborWithRecoveryReconstructsMissingBlob(t *testing.T) {
 	// deleted below.
 	storeBlockOffsetsOnly(t, db, producer.block)
 	metaTxn := db.MetadataTxn(true)
+	t.Cleanup(metaTxn.Release)
 	require.NoError(
 		t,
 		metaTxn.Do(func(txn *Txn) error {
@@ -69,6 +70,7 @@ func TestResolveUtxoCborWithRecoveryReconstructsMissingBlob(t *testing.T) {
 	blob := db.Blob()
 	require.NotNil(t, blob)
 	writeTxn := db.Transaction(true)
+	t.Cleanup(writeTxn.Release)
 	require.NoError(
 		t,
 		blob.DeleteUtxo(writeTxn.Blob(), txId, outputIdx),
@@ -117,6 +119,7 @@ func TestResolveUtxoCborWithRecoveryUpgradesBlobOnlyTxnForRecovery(
 	producer := candidate.producers[0]
 	storeBlockOffsetsOnly(t, db, producer.block)
 	metaTxn := db.MetadataTxn(true)
+	t.Cleanup(metaTxn.Release)
 	require.NoError(
 		t,
 		metaTxn.Do(func(txn *Txn) error {
@@ -136,6 +139,7 @@ func TestResolveUtxoCborWithRecoveryUpgradesBlobOnlyTxnForRecovery(
 	blob := db.Blob()
 	require.NotNil(t, blob)
 	writeTxn := db.Transaction(true)
+	t.Cleanup(writeTxn.Release)
 	require.NoError(
 		t,
 		blob.DeleteUtxo(writeTxn.Blob(), txId, outputIdx),

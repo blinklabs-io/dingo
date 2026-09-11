@@ -318,8 +318,9 @@ func (d *Database) ResolveUtxoCborWithRecovery(
 		if errors.Is(err, types.ErrBlobKeyNotFound) {
 			recoveryTxn := txn
 			if txn.Metadata() == nil {
-				recoveryTxn = d.Transaction(false)
-				defer recoveryTxn.Release()
+				var cleanup func()
+				recoveryTxn, cleanup = txn.withMetadataForRecovery()
+				defer cleanup()
 			}
 			return recoverUtxoCbor(d, recoveryTxn, txId, outputIdx)
 		}
