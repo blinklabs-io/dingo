@@ -361,10 +361,17 @@ func (b *DefaultBlockBuilder) buildBlock(
 		transactionMetadataSet = make(map[uint]cbor.RawMessage)
 		blockSize              uint64
 		encodedBodySize        segmentedBodySize
-		totalExUnits           lcommon.ExUnits
-		maxTxSize              = limits.maxTxSize
-		maxBlockSize           = limits.maxBlockSize
-		maxExUnits             = limits.maxExUnits
+		// dijkstraBodySize is the exact encoded size of the Dijkstra
+		// block body holding the transactions selected so far. Appending
+		// one more transaction can only add to it -- at least the
+		// element's own bytes, plus any growth in the array header -- so
+		// it is the lower bound a candidate is screened against before
+		// anything expensive runs.
+		dijkstraBodySize uint64
+		totalExUnits     lcommon.ExUnits
+		maxTxSize        = limits.maxTxSize
+		maxBlockSize     = limits.maxBlockSize
+		maxExUnits       = limits.maxExUnits
 	)
 
 	b.logger.Debug(
@@ -430,6 +437,25 @@ func (b *DefaultBlockBuilder) buildBlock(
 		validate TxValidationFunc,
 		stillCurrent func() bool,
 	) error {
+		if limits.era == eraDijkstra {
+			// Base the cheap screen on the encoded size of an empty
+			// body rather than on zero, so it accounts for the body
+			// wrapper the transactions sit inside. Without it a
+			// transaction the size of the whole budget looks like it
+			// fits and pays for a re-validation to find out otherwise.
+			emptyBodyCbor, encodeErr := encodeDijkstraBlockBodyCbor(
+				[]cbor.RawMessage{},
+				[]uint{},
+				nil,
+			)
+			if encodeErr != nil {
+				return fmt.Errorf(
+					"failed to encode empty Dijkstra block body: %w",
+					encodeErr,
+				)
+			}
+			dijkstraBodySize = uint64(len(emptyBodyCbor))
+		}
 		for _, mempoolTx := range mempoolTxs {
 			if !stillCurrent() {
 				// A ledger publication landed mid-pass. Every
@@ -528,39 +554,23 @@ func (b *DefaultBlockBuilder) buildBlock(
 					)
 					continue
 				}
-				candidateTransactions := make(
-					[]cbor.RawMessage,
-					0,
-					len(transactions)+1,
-				)
-				candidateTransactions = append(
-					candidateTransactions,
-					transactions...)
-				candidateTransactions = append(
-					candidateTransactions,
-					blockTxCbor,
-				)
-				candidateBodyCbor, encodeErr := encodeDijkstraBlockBodyCbor(
-					candidateTransactions,
-					[]uint{},
-					nil,
-				)
-				if encodeErr != nil {
-					return fmt.Errorf(
-						"failed to encode candidate Dijkstra block body: %w",
-						encodeErr,
-					)
-				}
-				candidateBodySize := uint64(len(candidateBodyCbor))
-				if candidateBodySize > maxBlockSize {
+				// Cheap screen before the exact encode. Encoding the
+				// candidate body re-encodes every transaction selected
+				// so far, so it is O(selected) work per candidate; a
+				// transaction whose own bytes already overflow the
+				// remaining space cannot fit however it is encoded, and
+				// pays neither that encode nor the re-validation below.
+				if dijkstraBodySize+uint64(len(blockTxCbor)) >
+					maxBlockSize {
 					b.logger.Debug(
-						"block body size limit reached",
+						"skipping transaction - does not fit the remaining block body",
 						"component", "forging",
-						"candidate_body_size", candidateBodySize,
-						"tx_size", txSize,
+						"tx_hash", mempoolTx.Hash,
+						"selected_body_size", dijkstraBodySize,
+						"block_tx_size", len(blockTxCbor),
 						"max_block_body_size", maxBlockSize,
 					)
-					break
+					continue
 				}
 			}
 			// Re-validate the transaction against the current ledger
@@ -665,6 +675,50 @@ func (b *DefaultBlockBuilder) buildBlock(
 				}
 			}
 
+			if limits.era == eraDijkstra {
+				// Exact block-body size, checked once the candidate is
+				// known to be one the block could actually carry. Only a
+				// re-validated transaction may end the pass: a candidate
+				// that failed re-validation was never going into this
+				// block, so letting it stop selection would shorten the
+				// block for a reason unrelated to fullness -- on a
+				// mempool re-validating badly, that is most of it.
+				candidateTransactions := make(
+					[]cbor.RawMessage,
+					0,
+					len(transactions)+1,
+				)
+				candidateTransactions = append(
+					candidateTransactions,
+					transactions...)
+				candidateTransactions = append(
+					candidateTransactions,
+					blockTxCbor,
+				)
+				candidateBodyCbor, encodeErr := encodeDijkstraBlockBodyCbor(
+					candidateTransactions,
+					[]uint{},
+					nil,
+				)
+				if encodeErr != nil {
+					return fmt.Errorf(
+						"failed to encode candidate Dijkstra block body: %w",
+						encodeErr,
+					)
+				}
+				candidateBodySize := uint64(len(candidateBodyCbor))
+				if candidateBodySize > maxBlockSize {
+					b.logger.Debug(
+						"block body size limit reached",
+						"component", "forging",
+						"candidate_body_size", candidateBodySize,
+						"tx_size", txSize,
+						"max_block_body_size", maxBlockSize,
+					)
+					break
+				}
+				dijkstraBodySize = candidateBodySize
+			}
 			if limits.era != eraDijkstra {
 				candidateSize := encodedBodySize.withTransaction(
 					bodyBytes, witnessBytes, metadataCbor,
