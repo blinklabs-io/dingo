@@ -179,6 +179,81 @@ func TestResolveUtxoCborWithRecoveryUpgradesBlobOnlyTxnForRecovery(
 	require.Equal(t, []byte(wantCbor), recovered)
 }
 
+// TestResolveUtxoCborWithRecoveryUpgradesMetadataOnlyTxnForRecovery is the
+// regression test for a cubic review finding on PR #4084: the mirror image
+// of the blob-only case above. A metadata-only Txn (Blob() == nil) hitting
+// a missing blob was passed straight into recoverUtxoCbor with no blob
+// handle at all, so utxoRecoveryBlockForTx's block lookup
+// (BlockByPointTxn) returned ErrNilTxn instead of reconstructing the CBOR
+// -- recovery failed even though the metadata needed to locate the
+// producing block was right there.
+func TestResolveUtxoCborWithRecoveryUpgradesMetadataOnlyTxnForRecovery(
+	t *testing.T,
+) {
+	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	defer db.Close() //nolint:errcheck
+
+	candidate := findGapConsumeCandidateWithoutCertificates(t)
+	require.NotEmpty(t, candidate.producers)
+	producer := candidate.producers[0]
+	storeBlockOffsetsOnly(t, db, producer.block)
+	metaTxn := db.MetadataTxn(true)
+	t.Cleanup(metaTxn.Release)
+	require.NoError(
+		t,
+		metaTxn.Do(func(txn *Txn) error {
+			return db.Metadata().SetGapBlockTransaction(
+				producer.tx, producer.point, 0, nil, txn.Metadata(),
+			)
+		}),
+	)
+	metaTxn.Release()
+
+	produced := producer.tx.Produced()
+	require.NotEmpty(t, produced)
+	utxo := produced[0]
+	txId := utxo.Id.Id().Bytes()
+	outputIdx := utxo.Id.Index()
+
+	blob := db.Blob()
+	require.NotNil(t, blob)
+	writeTxn := db.Transaction(true)
+	t.Cleanup(writeTxn.Release)
+	require.NoError(
+		t,
+		blob.DeleteUtxo(writeTxn.Blob(), txId, outputIdx),
+	)
+	// Also delete the tx-offset blob entry so the blob-based lookup misses
+	// and utxoRecoveryBlockForTx falls to the metadata-based path -- the
+	// one this test means to exercise. See the sibling blob-only test's
+	// identical comment.
+	require.NoError(
+		t,
+		blob.DeleteTx(writeTxn.Blob(), txId),
+	)
+	require.NoError(t, writeTxn.Commit())
+
+	metadataOnlyTxn := db.MetadataTxn(false)
+	defer metadataOnlyTxn.Release()
+	require.Nil(
+		t, metadataOnlyTxn.Blob(),
+		"test setup must reproduce a genuinely metadata-only txn",
+	)
+
+	recovered, err := db.ResolveUtxoCborWithRecovery(
+		txId, outputIdx, metadataOnlyTxn,
+	)
+	require.NoError(
+		t, err,
+		"recovery must succeed even when the caller's txn has no blob "+
+			"handle",
+	)
+	wantCbor := utxo.Output.Cbor()
+	require.NotEmpty(t, wantCbor, "fixture output must carry its own CBOR")
+	require.Equal(t, []byte(wantCbor), recovered)
+}
+
 // TestResolveUtxoCborWithRecoverySharedBlobRollbackDoesNotFinishCallersTxn
 // is the regression test for a chrisguiney review finding on PR #4084: the
 // !t.sharedBlob guard added to Txn.rollback() (see withMetadataForRecovery)

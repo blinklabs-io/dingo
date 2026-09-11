@@ -307,6 +307,41 @@ func (t *Txn) withMetadataForRecovery() (*Txn, func()) {
 	return aug, aug.Release
 }
 
+// withBlobForRecovery returns a Txn that adds a fresh blob transaction to
+// t's already-pinned blob store, for a caller that holds a metadata-only
+// Txn (t.Blob() == nil) but needs blob access for a rare fallback path --
+// currently only ResolveUtxoCborWithRecovery's call into
+// utxoRecoveryBlockForTx/recoverUtxoCbor, which fetches the producing
+// block's raw CBOR from the blob store (cubic review: this case was
+// previously left with no blob handle at all, so BlockByPointTxn returned
+// ErrNilTxn instead of reconstructing the CBOR).
+//
+// Unlike withMetadataForRecovery, this needs no sharedBlob-style ownership
+// guard: NewMetadataOnlyTxn already pins t's blob store (BlobStore-
+// dependent helpers like recordBlobOrphansOnCommit work off any *Txn a
+// caller happens to hold), it just never opens a transaction on it. This
+// opens a genuinely new one, on that same already-pinned store rather than
+// whatever store is *currently* installed -- reusing t's own pin instead
+// of taking a new one, for the identical reason withMetadataForRecovery's
+// own doc comment gives. Because aug fully owns this blobTxn (not
+// borrowed from t), Release/Rollback tears it down normally; sharedBlob is
+// deliberately left false.
+//
+// Only valid for a read-only t; no caller passes a write-capable
+// metadata-only Txn into ResolveUtxoCborWithRecovery today.
+func (t *Txn) withBlobForRecovery() (*Txn, func()) {
+	aug := &Txn{
+		db:          t.db,
+		readWrite:   t.readWrite,
+		metadataTxn: t.metadataTxn,
+		blobStore:   t.blobStore,
+	}
+	if aug.blobStore != nil {
+		aug.blobTxn = aug.blobStore.NewTransaction(aug.readWrite)
+	}
+	return aug, aug.Release
+}
+
 // BlobStore returns the blob store this transaction was opened on, which is
 // the store its Blob transaction handle belongs to and the one every blob
 // operation in the transaction must use. It is stable for the transaction's

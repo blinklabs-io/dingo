@@ -317,9 +317,19 @@ func (d *Database) ResolveUtxoCborWithRecovery(
 	if err != nil {
 		if errors.Is(err, types.ErrBlobKeyNotFound) {
 			recoveryTxn := txn
-			if txn.Metadata() == nil {
-				var cleanup func()
+			var cleanup func()
+			switch {
+			case txn.Metadata() == nil:
 				recoveryTxn, cleanup = txn.withMetadataForRecovery()
+			case txn.Blob() == nil:
+				// A metadata-only caller: recoverUtxoCbor's block lookup
+				// (utxoRecoveryBlockForTx -> BlockByPointTxn) needs a blob
+				// handle to fetch the producing block's raw CBOR, which
+				// txn doesn't have. Mirrors the metadata-missing case
+				// above for the opposite gap (cubic review).
+				recoveryTxn, cleanup = txn.withBlobForRecovery()
+			}
+			if cleanup != nil {
 				defer cleanup()
 			}
 			return recoverUtxoCbor(d, recoveryTxn, txId, outputIdx)
