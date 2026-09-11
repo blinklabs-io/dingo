@@ -186,6 +186,17 @@ var ErrRollbackExceedsMithrilBoundary = errors.New(
 	"rollback exceeds Mithril trust boundary",
 )
 
+// ErrChainTruncatedLedgerRollbackFailed reports the one rollback outcome that
+// left the node's two halves disagreeing: the primary chain truncation
+// committed and the ledger rollback that follows it did not, so the ledger tip
+// names a block the chain has deleted. It is deliberately distinct from the
+// refusal errors above, which mean no state changed and a re-intersect is
+// enough; recovering from this one the same way resumes from the stale ledger
+// tip. See LedgerState.reportFailedLedgerRollbackAfterTruncation.
+var ErrChainTruncatedLedgerRollbackFailed = errors.New(
+	"primary chain truncated but ledger rollback failed",
+)
+
 // ErrNoAppliedAncestorBelowContestedSlot reports that a rollback target shares
 // the applied tip's slot with a different hash and no applied ancestor below
 // that slot could be found to rewind to. The contested slot's effects cannot be
