@@ -80,6 +80,7 @@ make govulncheck  # reachable Go vulnerabilities; needs network
 | `chainselection.chain_switch` | active peer changed |
 | `epoch.transition` | epoch boundary — triggers stake snapshot |
 | `mempool.add_tx` / `mempool.remove_tx` | tx lifecycle |
+| `dmq.add_message` / `dmq.remove_message` | CIP-0137 DMQ message pool lifecycle |
 | `connmanager.conn_closed` | connection closed |
 | `peergov.peer_churn` | peer rotation |
 
