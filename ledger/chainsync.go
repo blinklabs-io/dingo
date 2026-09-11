@@ -4040,6 +4040,10 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferred(
 	if ls.chainsyncBlockfetchReadyChan == nil {
 		return nil
 	}
+	if connIdKey(ls.blockfetchDiscardConnId) != "" &&
+		sameConnectionId(e.ConnectionId, ls.blockfetchDiscardConnId) {
+		return nil
+	}
 	fromPrimary := sameConnectionId(e.ConnectionId, ls.activeBlockfetchConnId)
 	fromShadow := connIdKey(ls.shadowBlockfetchConnId) != "" &&
 		sameConnectionId(e.ConnectionId, ls.shadowBlockfetchConnId)
@@ -4126,8 +4130,6 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferred(
 	}
 	ls.pendingBlockfetchEvents = append(ls.pendingBlockfetchEvents, e)
 	ls.batchBlocksReceived++
-	// If this block is the one a tracked range was failing to obtain, that
-	// range is fetchable after all and its failure record is stale.
 	if len(ls.pendingBlockfetchEvents) >= blockfetchCommitBatchSize {
 		if err := ls.flushPendingBlockfetchBlocksDeferred(pubs); err != nil {
 			return err
@@ -4169,6 +4171,10 @@ func (ls *LedgerState) restartQueuedBlockfetchAfterForkLocked(
 	pending *pendingPublishes,
 ) error {
 	if ls.chainsyncBlockfetchReadyChan != nil {
+		// The old protocol request cannot be cancelled. Keep late events from
+		// being admitted after the replacement generation is installed when
+		// the restart uses the same connection.
+		ls.blockfetchDiscardConnId = ls.activeBlockfetchConnId
 		if ls.chainsyncBlockfetchTimeoutTimer != nil {
 			ls.chainsyncBlockfetchTimeoutTimer.Stop()
 			ls.chainsyncBlockfetchTimeoutTimer = nil
@@ -4493,6 +4499,10 @@ func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 		headerEnd,
 	); err != nil {
 		ls.chainsyncBlockfetchMutex.Lock()
+		if connIdKey(ls.blockfetchDiscardConnId) != "" &&
+			sameConnectionId(ls.blockfetchDiscardConnId, connId) {
+			ls.blockfetchDiscardConnId = ouroboros.ConnectionId{}
+		}
 		ls.endBlockfetchRequestLocked(connId, primaryRequestDone)
 		if ls.blockfetchPrimaryRequestGeneration == primaryRequestGeneration {
 			ls.blockfetchPrimaryRequestGeneration = 0
@@ -4524,6 +4534,10 @@ func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 			)
 		}
 		return err
+	}
+	if connIdKey(ls.blockfetchDiscardConnId) != "" &&
+		sameConnectionId(ls.blockfetchDiscardConnId, connId) {
+		ls.blockfetchDiscardConnId = ouroboros.ConnectionId{}
 	}
 	ls.chainsyncBlockfetchMutex.Lock()
 	ls.endBlockfetchRequestLocked(connId, primaryRequestDone)
@@ -4803,6 +4817,9 @@ func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 		)
 		if addBlockErr == nil {
 			ls.batchBlocksApplied++
+			// Only a body accepted by chain insertion proves that the tracked
+			// range made progress. Received but rejected bodies retain the
+			// failure record so the retry guard can act on them.
 			ls.noteBlockfetchRangeProgress(pendingEvent.Point)
 			// Defer this block's chain.update past chainsyncBlockfetchMutex
 			// rather than publishing inline. AddBlockWithPointDeferred has
@@ -7067,6 +7084,10 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(
 	// slow primary, and waiting for the primary's BatchDone defeats the
 	// purpose of dispatching a shadow at all.
 	if ls.chainsyncBlockfetchReadyChan == nil {
+		return nil
+	}
+	if connIdKey(ls.blockfetchDiscardConnId) != "" &&
+		sameConnectionId(e.ConnectionId, ls.blockfetchDiscardConnId) {
 		return nil
 	}
 	fromActive := sameConnectionId(e.ConnectionId, ls.activeBlockfetchConnId)

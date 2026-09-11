@@ -1012,6 +1012,9 @@ type LedgerState struct {
 	// discarded rather than applied (issue #3771). Guarded by
 	// chainsyncBlockfetchMutex, like the rest of the per-batch state.
 	blockfetchBatchChainGeneration uint64
+	// blockfetchDiscardConnId identifies an abandoned request whose late
+	// blocks and BatchDone must be ignored until the replacement request starts.
+	blockfetchDiscardConnId ouroboros.ConnectionId
 	// chainRollbackGeneration counts attempted primary-chain rollbacks,
 	// including failed attempts. It is bumped before the chain is changed, so
 	// a reader that has observed a rollback's effect on the chain always
