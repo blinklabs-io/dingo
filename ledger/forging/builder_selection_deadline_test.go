@@ -208,9 +208,11 @@ var _ credentialGenerationBlockBuilder = (*constraintRecordingBuilder)(nil)
 // TestBuildDingoForgeHandsTheSlotDeadlineToSelection follows the runtime
 // composition path a production forge takes -- checkAndForgeProduction ->
 // buildBlockForSlot -> buildBlock -> buildBlockWithCredentialGeneration --
-// and proves the slot deadline actually arrives at the builder. A deadline
-// that exists in the config but never reaches selection bounds nothing.
+// and proves the configured selection deadline actually arrives at the
+// builder. A deadline that exists in the config but never reaches selection
+// bounds nothing.
 func TestBuildDingoForgeHandsTheSlotDeadlineToSelection(t *testing.T) {
+	const selectionMargin = 400 * time.Millisecond
 	block := newForgerTestBlock(10, 2)
 	builder := &constraintRecordingBuilder{block: block, cbor: block.cbor}
 	slotEnd := time.Now().Add(2 * time.Second)
@@ -220,17 +222,56 @@ func TestBuildDingoForgeHandsTheSlotDeadlineToSelection(t *testing.T) {
 		slotsPerKESPeriod: 100,
 		slotEnd:           slotEnd,
 	}
-	forger := newRetryForger(t, clock, builder, &forgerTestBroadcaster{})
+	forger := newRetryForger(
+		t,
+		clock,
+		builder,
+		&forgerTestBroadcaster{},
+		withSelectionDeadlineMargin(selectionMargin),
+	)
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
 	require.Len(t, builder.constraints, 1)
 	require.Equal(
 		t,
-		slotEnd.Add(-defaultForgeSelectionRetryMargin),
+		slotEnd.Add(-selectionMargin),
 		builder.constraints[0].deadline,
-		"selection must be bounded by the end of the slot being forged, less the retry margin",
+		"selection must be bounded by the end of the slot being forged, less the selection-deadline margin",
 	)
 	require.False(t, builder.constraints[0].emptyBody)
+}
+
+// TestForgeDoesNotTruncateSelectionByDefault pins the two budgets apart.
+// ForgeSelectionRetryMargin decides whether a second attempt is worth
+// starting; it used to double as the instant the first pass was cut short,
+// so simply enabling in-slot re-selection also made every producer stop
+// selecting 250ms before the end of its slot. How full blocks get is now
+// opt-in, and the default is what a producer always did.
+func TestForgeDoesNotTruncateSelectionByDefault(t *testing.T) {
+	block := newForgerTestBlock(10, 2)
+	builder := &constraintRecordingBuilder{block: block, cbor: block.cbor}
+	clock := &retryTestSlotClock{
+		currentSlot:       10,
+		chainTipSlot:      9,
+		slotsPerKESPeriod: 100,
+		// Most of the slot remains, so nothing but the margin itself
+		// could cut the pass short.
+		slotEnd: time.Now().Add(2 * time.Second),
+	}
+	forger := newRetryForger(t, clock, builder, &forgerTestBroadcaster{})
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+	require.Len(t, builder.constraints, 1)
+	require.True(
+		t,
+		builder.constraints[0].deadline.IsZero(),
+		"the retry margin must not truncate the selection pass",
+	)
+	require.NotZero(
+		t,
+		forger.forgeSelectionRetryMargin,
+		"the retry bound is still configured; it simply does not truncate",
+	)
 }
 
 // TestForgeDropsTheSelectionDeadlineWhenTheSlotIsOver is the other half:
@@ -245,7 +286,13 @@ func TestForgeDropsTheSelectionDeadlineWhenTheSlotIsOver(t *testing.T) {
 		slotsPerKESPeriod: 100,
 		slotEnd:           time.Now(),
 	}
-	forger := newRetryForger(t, clock, builder, &forgerTestBroadcaster{})
+	forger := newRetryForger(
+		t,
+		clock,
+		builder,
+		&forgerTestBroadcaster{},
+		withSelectionDeadlineMargin(250*time.Millisecond),
+	)
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
 	require.Len(t, builder.constraints, 1)
@@ -344,6 +391,9 @@ func TestForgeDropsTheSelectionDeadlineWhenTheClockHasLeftTheSlot(
 		BlockBroadcaster: &forgerTestBroadcaster{},
 		SlotClock:        clock,
 		PromRegistry:     prometheus.NewRegistry(),
+		// Truncation on, so a zero deadline here is the guard doing its
+		// job rather than the feature being off.
+		ForgeSelectionDeadlineMargin: 250 * time.Millisecond,
 	})
 	require.NoError(t, err)
 

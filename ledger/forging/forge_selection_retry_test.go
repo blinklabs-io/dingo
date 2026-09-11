@@ -86,9 +86,10 @@ func newRetryForger(
 	clock *retryTestSlotClock,
 	builder BlockBuilder,
 	broadcaster *forgerTestBroadcaster,
+	opts ...func(*ForgerConfig),
 ) *BlockForger {
 	t.Helper()
-	forger, err := NewBlockForger(ForgerConfig{
+	cfg := ForgerConfig{
 		Mode:             ModeProduction,
 		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		Credentials:      setupTestCredentials(t),
@@ -97,9 +98,24 @@ func newRetryForger(
 		BlockBroadcaster: broadcaster,
 		SlotClock:        clock,
 		PromRegistry:     prometheus.NewRegistry(),
-	})
+	}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	forger, err := NewBlockForger(cfg)
 	require.NoError(t, err)
 	return forger
+}
+
+// withSelectionDeadlineMargin turns the opt-in selection deadline on for a
+// test. It is off by default, so a test that means to exercise truncation
+// has to ask for it, exactly as an operator does.
+func withSelectionDeadlineMargin(
+	margin time.Duration,
+) func(*ForgerConfig) {
+	return func(cfg *ForgerConfig) {
+		cfg.ForgeSelectionDeadlineMargin = margin
+	}
 }
 
 // TestForgeRetriesSelectionWhenSnapshotChangesMidSlot is the regression for

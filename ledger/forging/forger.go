@@ -73,6 +73,18 @@ const (
 	// fallback instead.
 	defaultForgeSelectionRetryMargin = 250 * time.Millisecond
 
+	// defaultForgeSelectionDeadlineMargin is the margin subtracted from the
+	// end of the slot to get the instant transaction selection stops at.
+	// Zero disables it: selection runs to the end of the mempool, which is
+	// what a producer did before in-slot re-selection existed, and how full
+	// its blocks get does not change unless an operator asks for it.
+	//
+	// Truncating a pass is a throughput trade, not a safety bound -- the
+	// always-on bound is the snapshot check, which abandons a pass the
+	// moment the chain moves under it. An operator who would rather forge a
+	// shorter block inside the slot than a full one after it sets this.
+	defaultForgeSelectionDeadlineMargin = time.Duration(0)
+
 	// defaultForgeSelectionMaxRetries caps re-selection for one slot. The
 	// ledger can publish repeatedly inside a single slot on a busy chain;
 	// without a cap a producer would spend the whole slot re-selecting and
@@ -157,8 +169,9 @@ type BlockForger struct {
 
 	// Bounds on re-running transaction selection inside one slot after
 	// the chain moved underneath it.
-	forgeSelectionRetryMargin time.Duration
-	forgeSelectionMaxRetries  int
+	forgeSelectionRetryMargin    time.Duration
+	forgeSelectionDeadlineMargin time.Duration
+	forgeSelectionMaxRetries     int
 
 	// Optional self-validation before adoption (nil = disabled)
 	blockValidator BlockValidator
@@ -432,7 +445,23 @@ type ForgerConfig struct {
 	// the forger to re-run transaction selection after a concurrent
 	// ledger publication invalidated the candidate block. Zero uses
 	// defaultForgeSelectionRetryMargin.
+	//
+	// This bounds retrying only. It does not truncate a selection pass and
+	// so has no effect on how full a block gets; that is
+	// ForgeSelectionDeadlineMargin.
 	ForgeSelectionRetryMargin time.Duration
+	// ForgeSelectionDeadlineMargin, when positive, stops transaction
+	// selection at the end of the slot less this margin and forges what has
+	// been selected so far. It is a throughput setting: it trades a fuller
+	// block for one that is finished inside its slot, and the transactions
+	// it leaves behind stay in the mempool for the next block.
+	//
+	// Zero, the default, leaves selection untruncated, which is what a
+	// producer did before in-slot re-selection existed. Safety does not
+	// depend on it: a pass is abandoned the moment the chain moves under it
+	// regardless of this setting, and a slot that runs out of time still
+	// ends in the transaction-free fallback rather than in nothing.
+	ForgeSelectionDeadlineMargin time.Duration
 	// ForgeSelectionMaxRetries caps re-selection attempts within one
 	// slot. Zero uses defaultForgeSelectionMaxRetries; negative disables
 	// retrying.
@@ -490,6 +519,9 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 	if cfg.ForgeSelectionRetryMargin <= 0 {
 		cfg.ForgeSelectionRetryMargin = defaultForgeSelectionRetryMargin
 	}
+	if cfg.ForgeSelectionDeadlineMargin < 0 {
+		cfg.ForgeSelectionDeadlineMargin = defaultForgeSelectionDeadlineMargin
+	}
 	if cfg.ForgeSelectionMaxRetries == 0 {
 		cfg.ForgeSelectionMaxRetries = defaultForgeSelectionMaxRetries
 	}
@@ -499,6 +531,7 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 	f.forgeSyncToleranceSlots = cfg.ForgeSyncToleranceSlots
 	f.forgeStaleGapThresholdSlots = cfg.ForgeStaleGapThresholdSlots
 	f.forgeSelectionRetryMargin = cfg.ForgeSelectionRetryMargin
+	f.forgeSelectionDeadlineMargin = cfg.ForgeSelectionDeadlineMargin
 	f.forgeSelectionMaxRetries = cfg.ForgeSelectionMaxRetries
 
 	if cfg.Mode == ModeProduction {
@@ -1610,13 +1643,10 @@ func (f *BlockForger) observeSelectionFallback(result string) {
 	}
 }
 
-// slotSelectionDeadline returns the instant by which work for slot must
-// finish to still land inside the slot, less the configured retry margin.
-// ok is false when the slot clock cannot answer, which disables retrying
-// rather than guessing at a budget.
-func (f *BlockForger) slotSelectionDeadline(
-	slot uint64,
-) (time.Time, bool) {
+// slotEnd returns the instant the slot being forged ends. ok is false when
+// the slot clock cannot answer, which disables every budget derived from it
+// rather than guessing at one.
+func (f *BlockForger) slotEnd(slot uint64) (time.Time, bool) {
 	if f.slotClock == nil {
 		return time.Time{}, false
 	}
@@ -1627,16 +1657,45 @@ func (f *BlockForger) slotSelectionDeadline(
 	if clockSlot != slot {
 		// The wall clock has already left the slot being forged, so
 		// NextSlotTime describes a later slot's boundary and would
-		// hand this forge a budget it does not have. Anchor the
-		// deadline to the slot actually being built for: none of it
-		// remains.
+		// hand this forge a budget it does not have. Anchor to the
+		// slot actually being built for: none of it remains.
 		return time.Now(), true
 	}
 	slotEnd, err := f.slotClock.NextSlotTime()
 	if err != nil || slotEnd.IsZero() {
 		return time.Time{}, false
 	}
-	return slotEnd.Add(-f.forgeSelectionRetryMargin), true
+	return slotEnd, true
+}
+
+// slotRetryDeadline returns the instant past which starting another
+// selection attempt for slot is not worth it, the end of the slot less
+// ForgeSelectionRetryMargin.
+//
+// This decides only whether to retry. It never shortens a pass, so it
+// cannot change how full a block gets.
+func (f *BlockForger) slotRetryDeadline(slot uint64) (time.Time, bool) {
+	end, ok := f.slotEnd(slot)
+	if !ok {
+		return time.Time{}, false
+	}
+	return end.Add(-f.forgeSelectionRetryMargin), true
+}
+
+// slotSelectionDeadline returns the instant transaction selection must stop
+// at, the end of the slot less ForgeSelectionDeadlineMargin. ok is false
+// when that margin is unset, which is the default: truncating a pass trades
+// block fullness for finishing inside the slot, and an operator asks for
+// that trade rather than inheriting it from the retry bound.
+func (f *BlockForger) slotSelectionDeadline(slot uint64) (time.Time, bool) {
+	if f.forgeSelectionDeadlineMargin <= 0 {
+		return time.Time{}, false
+	}
+	end, ok := f.slotEnd(slot)
+	if !ok {
+		return time.Time{}, false
+	}
+	return end.Add(-f.forgeSelectionDeadlineMargin), true
 }
 
 // buildBlockForSlot builds the block for slot, re-running transaction
@@ -1654,17 +1713,23 @@ func (f *BlockForger) buildBlockForSlot(
 	generation *credentialGeneration,
 ) (ledger.Block, []byte, forgeBuildStats, error) {
 	var stats forgeBuildStats
-	deadline, haveDeadline := f.slotSelectionDeadline(slot)
+	// Two budgets, deliberately separate. The retry deadline decides
+	// whether another attempt is worth starting; the selection deadline
+	// truncates a pass and is off unless configured, because that one
+	// changes how full blocks get.
+	deadline, haveDeadline := f.slotRetryDeadline(slot)
+	selectionDeadline, haveSelectionDeadline := f.slotSelectionDeadline(slot)
 	// selectionConstraints bounds each attempt's selection pass by the
-	// slot deadline. When the slot is already over the bound is dropped:
-	// truncating the block would cost transactions without buying back
-	// any of the slot, and the in-loop snapshot check still limits the
+	// selection deadline. When the slot is already over the bound is
+	// dropped: truncating the block would cost transactions without buying
+	// back any of the slot, and the in-loop snapshot check still limits the
 	// work a doomed pass can waste.
 	selectionConstraints := func() blockSelectionConstraints {
-		if !haveDeadline || !time.Now().Before(deadline) {
+		if !haveSelectionDeadline ||
+			!time.Now().Before(selectionDeadline) {
 			return blockSelectionConstraints{}
 		}
-		return blockSelectionConstraints{deadline: deadline}
+		return blockSelectionConstraints{deadline: selectionDeadline}
 	}
 	// lost is the end of the ladder for an attempt whose selection was
 	// aborted by the chain moving: try a transaction-free block before
