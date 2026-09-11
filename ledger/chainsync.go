@@ -4174,9 +4174,7 @@ func (ls *LedgerState) restartQueuedBlockfetchAfterForkLocked(
 		// The old protocol request cannot be cancelled. Keep late events from
 		// being admitted after the replacement generation is installed when
 		// the restart uses the same connection.
-		if ls.blockfetchPrimaryRequestGeneration != 0 {
-			ls.blockfetchDiscardConnId = ls.activeBlockfetchConnId
-		}
+		ls.blockfetchDiscardConnId = ls.activeBlockfetchConnId
 		if ls.chainsyncBlockfetchTimeoutTimer != nil {
 			ls.chainsyncBlockfetchTimeoutTimer.Stop()
 			ls.chainsyncBlockfetchTimeoutTimer = nil
@@ -4536,10 +4534,6 @@ func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 			)
 		}
 		return err
-	}
-	if connIdKey(ls.blockfetchDiscardConnId) != "" &&
-		sameConnectionId(ls.blockfetchDiscardConnId, connId) {
-		ls.blockfetchDiscardConnId = ouroboros.ConnectionId{}
 	}
 	ls.chainsyncBlockfetchMutex.Lock()
 	ls.endBlockfetchRequestLocked(connId, primaryRequestDone)
@@ -7090,6 +7084,8 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(
 	}
 	if connIdKey(ls.blockfetchDiscardConnId) != "" &&
 		sameConnectionId(e.ConnectionId, ls.blockfetchDiscardConnId) {
+		// BatchDone is the ordering barrier for the abandoned request.
+		ls.blockfetchDiscardConnId = ouroboros.ConnectionId{}
 		return nil
 	}
 	fromActive := sameConnectionId(e.ConnectionId, ls.activeBlockfetchConnId)
