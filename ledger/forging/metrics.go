@@ -218,7 +218,7 @@ func initForgingMetrics(
 	m.forgeSelectionFallback = factory.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "dingo_forge_selection_fallback_total",
-			Help: "forge attempts whose transaction selection was aborted by a concurrent ledger publication or chain-tip move, by how the slot ended: retried (a later selection attempt succeeded), empty (a transaction-free block was forged instead), lost (no block was produced)",
+			Help: "forge attempts whose transaction selection was aborted by a concurrent ledger publication or chain-tip move, by how the slot ended, counted after local adoption: retried (a later selection attempt produced the adopted block), empty (a transaction-free block was adopted instead), lost (the slot produced no adopted block)",
 		},
 		[]string{"result"},
 	)
