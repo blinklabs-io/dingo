@@ -128,6 +128,35 @@ func TestCleanupConsumedUtxos_CoreModePrunes(t *testing.T) {
 	)
 }
 
+// TestCleanupConsumedUtxos_PersistsPruneFloor covers the durable marker
+// checkUtxoRetentionWindow relies on (ledger/queries.go): every run that
+// actually prunes must durably record the floor it used, so a later pin
+// check can reject against it even if the tip subsequently moves in a way
+// that would otherwise make a freshly-computed floor look more lenient
+// (blinklabs-io/dingo#382 review -- see persistConsumedUtxoPruneFloor's doc
+// comment for the rollback and era-transition cases this closes).
+func TestCleanupConsumedUtxos_PersistsPruneFloor(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDBForCleanup(t, types.StorageModeCore)
+	const tipSlot = 100_000 // > 50_000 default stability window
+
+	ls := newLedgerStateForCleanup(db, tipSlot)
+
+	before, err := ls.readConsumedUtxoPruneFloor(nil)
+	require.NoError(t, err)
+	assert.Zero(t, before, "no floor before cleanup has ever run")
+
+	ls.cleanupConsumedUtxos()
+
+	after, err := ls.readConsumedUtxoPruneFloor(nil)
+	require.NoError(t, err)
+	assert.Equal(
+		t, uint64(50_000), after,
+		"must persist tipSlot minus the default stability window",
+	)
+}
+
 func TestCleanupConsumedUtxos_ProcessesOneBoundedBatch(t *testing.T) {
 	t.Parallel()
 

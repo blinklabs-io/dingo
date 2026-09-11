@@ -1992,19 +1992,31 @@ func (ls *LedgerState) queryShelleyUtxoByTxIn(
 // at.Slot and the floor, in which case the row may already be gone and an
 // absent result would be silently wrong rather than an honest rejection.
 //
-// Uses minEverStabilityWindow, not the current era's window alone: cleanup
-// recomputes its own window from whatever era was live each time it ran, so
-// a row pruned while the node was still in Byron (a far smaller window than
-// any Shelley+ era) can already be gone even though the CURRENT era's own
-// window would compute a more lenient floor -- see minEverStabilityWindow's
-// doc comment.
+// The floor is the larger (stricter) of two independent bounds, since
+// either alone can be wrong:
+//
+//   - A fresh estimate from the CURRENT tip and era's own window
+//     (calculateStabilityWindow). This is right in steady state, but can be
+//     too lenient right after the tip moves in a way cleanup's own
+//     historical floor didn't: a rollback lowering the tip, or an era
+//     transition changing the stability-window formula (Byron's small 2k
+//     vs every Shelley+ era's much larger 3k/f) -- see
+//     persistConsumedUtxoPruneFloor's doc comment for both cases in detail.
+//   - The durably persisted floor (readConsumedUtxoPruneFloor) recording
+//     the highest slot cleanup has ever actually begun pruning up to. This
+//     is exactly right for what's already been pruned, but reads zero on a
+//     chain where cleanup has never run yet (nothing eligible existed), so
+//     it cannot stand alone either.
+//
+// A read error on the persisted floor fails the pin closed (rejected)
+// rather than silently skipping the check it exists to enforce.
 //
 // API storage mode never prunes spent rows at all (see
 // cleanupConsumedUtxos' identical check and PruneBlock's doc comment on
 // why their CBOR remains resolvable too), so no floor applies there.
 //
-// txn is used only to read the tip, consistently with the same point
-// verifyPointOnChain already validated at against.
+// txn is used only to read the tip and the persisted floor, consistently
+// with the same point verifyPointOnChain already validated at against.
 func (ls *LedgerState) checkUtxoRetentionWindow(
 	txn *database.Txn,
 	at QueryPoint,
@@ -2016,13 +2028,22 @@ func (ls *LedgerState) checkUtxoRetentionWindow(
 	if err != nil {
 		return err
 	}
-	stabilityWindow := ls.minEverStabilityWindow()
-	if stabilityWindow == 0 || tip.Point.Slot <= stabilityWindow {
-		// The chain is not yet older than one stability window, so nothing
-		// eligible for pruning could exist yet.
+	var retentionFloor uint64
+	stabilityWindow := ls.calculateStabilityWindow()
+	if stabilityWindow != 0 && tip.Point.Slot > stabilityWindow {
+		retentionFloor = tip.Point.Slot - stabilityWindow
+	}
+	persistedFloor, err := ls.readConsumedUtxoPruneFloor(txn)
+	if err != nil {
+		return err
+	}
+	if persistedFloor > retentionFloor {
+		retentionFloor = persistedFloor
+	}
+	if retentionFloor == 0 {
+		// Neither bound found anything eligible for pruning yet.
 		return nil
 	}
-	retentionFloor := tip.Point.Slot - stabilityWindow
 	if at.Slot < retentionFloor {
 		return fmt.Errorf(
 			"%w: GetUTxOByTxIn pinned to slot %d is older than this "+

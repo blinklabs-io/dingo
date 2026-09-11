@@ -17,6 +17,7 @@ package ledger
 import (
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -363,6 +364,71 @@ func TestQueryShelleyCurrentProtocolParams_HistoricalRowStripsSyntheticV2CostMod
 			"model must have it stripped, matching what a real "+
 			"cardano-node would have reported at that same point",
 	)
+}
+
+// TestQueryShelleyCurrentProtocolParams_HistoricalRowRealReaffirmedDefaultNotStripped
+// covers the opposite of the previous test: a persisted row whose PlutusV2
+// cost model happens to equal eras.DefaultPlutusV2CostModel by coincidence,
+// but where real (non-synthetic) data was already durably confirmed at or
+// before this epoch (SyntheticV2CostModelClearedEpoch). The value-based
+// heuristic alone (resolveSyntheticV2CostModel) cannot distinguish this from
+// genuinely-still-synthetic data; the cleared-epoch provenance can, and must
+// take precedence so a real value is never wrongly stripped from the reply.
+func TestQueryShelleyCurrentProtocolParams_HistoricalRowRealReaffirmedDefaultNotStripped(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	ls.currentEra = eras.ConwayEraDesc
+	ls.currentPParams = conwayPParamsWithCostModels(
+		map[uint][]int64{1: {9, 9, 9}},
+	)
+	ls.currentEpoch = models.Epoch{EpochId: 6}
+	ls.publishSnapshotsLocked()
+
+	conwayEraId := uint(eras.ConwayEraDesc.Id)
+	require.NoError(t, ls.db.SetEpoch(
+		300, 3, nil, nil, nil, nil, conwayEraId, 1, 100, nil,
+	))
+	require.NoError(t, ls.db.SetEpoch(
+		600, 6, nil, nil, nil, nil, conwayEraId, 1, 100, nil,
+	))
+	// Real data was confirmed as of epoch 2 -- before the targetEpoch (3)
+	// this test pins to.
+	require.NoError(t, database.SetSyntheticV2CostModelClearedEpoch(db, nil, 2))
+	// Epoch 3's persisted row happens to carry the exact same values as the
+	// fabricated default, but this is real, confirmed data, not the
+	// fabrication.
+	historicalPParams := conwayPParamsWithCostModels(
+		map[uint][]int64{1: eras.DefaultPlutusV2CostModel},
+	)
+	historicalCbor, err := cbor.Encode(historicalPParams)
+	require.NoError(t, err)
+	require.NoError(t, ls.db.SetPParams(
+		historicalCbor, 300, 3, conwayEraId, nil,
+	))
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(650, repeatedBytes(32, 0x0B)),
+	}, nil))
+
+	result, err := ls.queryShelleyCurrentProtocolParams(
+		QueryPoint{Slot: 350}, nil,
+	)
+	require.NoError(t, err)
+	results, ok := result.([]any)
+	require.True(t, ok)
+	require.Len(t, results, 1)
+	got, ok := results[0].(*conway.ConwayProtocolParameters)
+	require.True(t, ok)
+	v2, hasV2 := got.CostModels[1]
+	require.True(
+		t, hasV2,
+		"real, confirmed data must not be stripped just because it "+
+			"happens to match the fabricated default's value",
+	)
+	assert.Equal(t, []int64(eras.DefaultPlutusV2CostModel), v2)
 }
 
 // TestQueryShelleyEpochNo_AsOfSlot_ReadsHistoricalEpoch covers GetEpochNo

@@ -3085,11 +3085,27 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 		return
 	}
 	if tipSlot > stabilityWindow {
+		floor := tipSlot - stabilityWindow
+		// Recorded regardless of the delete outcome below, and before it
+		// runs: this durably records that rows at-or-behind floor are now
+		// ELIGIBLE for pruning, which is what checkUtxoRetentionWindow
+		// needs to reject a pin against -- whether this specific batched
+		// call actually reaches every eligible row yet (see
+		// UtxosDeleteConsumed's own batching) doesn't change that
+		// eligibility, and persisting first fails a pin closed rather than
+		// open if the process dies before the delete below completes.
+		if err := ls.persistConsumedUtxoPruneFloor(floor, nil); err != nil {
+			ls.config.Logger.Error(
+				"failed to persist consumed UTxO prune floor",
+				"component", "ledger",
+				"error", err,
+			)
+		}
 		// No lock needed here - the database handles its own consistency
 		// and we're not accessing any in-memory LedgerState fields.
 		// The tipSlot was captured above with a read lock.
 		_, err := ls.db.UtxosDeleteConsumed(
-			tipSlot-stabilityWindow,
+			floor,
 			cleanupConsumedUtxoBatchSize,
 			nil,
 		)
@@ -4500,31 +4516,86 @@ func (ls *LedgerState) calculateStabilityWindowForEra(eraId uint) uint64 {
 	return window.Uint64()
 }
 
-// minEverStabilityWindow returns the smallest stability window this chain
-// could ever have used to prune consumed UTxOs, across both stability-window
-// formulas this codebase has (Byron's 2k and every Shelley+ era's identical
-// 3k/f -- calculateStabilityWindowForEra's doc comment). A caller deriving a
-// retention floor from just the CURRENT era's window (calculateStabilityWindow)
-// would be wrong immediately after a Byron-to-Shelley transition: Byron's
-// window is far smaller than Shelley's, so periodic cleanup running while
-// still in Byron pruned rows using a floor much closer to the (then much
-// smaller) tip than the current era's own window would compute today. Using
-// the smaller of the two guarantees the floor this produces is never more
-// lenient than any floor real cleanup could actually have used at any point
-// in the chain's history -- see checkUtxoRetentionWindow, its only caller.
-func (ls *LedgerState) minEverStabilityWindow() uint64 {
-	current := ls.calculateStabilityWindow()
-	if ls.config.CardanoNodeConfig == nil ||
-		ls.config.CardanoNodeConfig.ByronGenesis() == nil {
-		// This chain never had a Byron era, so no Byron-era cleanup pass
-		// could have used a different (smaller) window than today's.
-		return current
+// consumedUtxoPruneFloorSyncKey is the durable sync_state marker key
+// recording the highest slot floor cleanupConsumedUtxos has ever computed
+// and begun pruning consumed UTxOs up to. See persistConsumedUtxoPruneFloor
+// and readConsumedUtxoPruneFloor.
+const consumedUtxoPruneFloorSyncKey = "consumed_utxo_prune_floor"
+
+// persistConsumedUtxoPruneFloor durably records floor as the highest slot
+// cleanupConsumedUtxos has ever begun pruning consumed UTxOs up to, so
+// checkUtxoRetentionWindow can reject a pin below it even after the tip
+// later moves in a way that would make a freshly-computed floor look more
+// lenient than what real cleanup already committed to:
+//
+//   - A rollback lowers the tip. Recomputing the floor from the new
+//     (lower) tip gives a smaller, more lenient floor than the one cleanup
+//     already used against the higher pre-rollback tip -- but rows already
+//     hard-deleted under that higher floor stay deleted; the rollback
+//     cannot undo them.
+//   - An era transition changes the stability-window formula (Byron's
+//     small 2k vs every Shelley+ era's much larger 3k/f). Cleanup
+//     recomputes its own window from whatever era was live each time it
+//     ran, so a row pruned while still in Byron can already be gone even
+//     though the current era's own (larger) window alone would compute a
+//     more lenient floor today.
+//
+// Monotonic: never writes a value lower than what's already persisted, and
+// never needs to be undone by rollback or truncate, since rows already
+// hard-deleted cannot become un-deleted -- unlike
+// SyntheticV2CostModelClearedEpochSyncKey, this marker has no
+// RecomputeAfterTruncate counterpart.
+func (ls *LedgerState) persistConsumedUtxoPruneFloor(
+	floor uint64,
+	txn *database.Txn,
+) error {
+	existing, err := ls.readConsumedUtxoPruneFloor(txn)
+	if err != nil {
+		return err
 	}
-	byron := ls.calculateStabilityWindowForEra(0)
-	if byron < current {
-		return byron
+	if floor <= existing {
+		return nil
 	}
-	return current
+	if err := ls.db.SetSyncState(
+		consumedUtxoPruneFloorSyncKey,
+		strconv.FormatUint(floor, 10),
+		txn,
+	); err != nil {
+		return fmt.Errorf(
+			"persist consumed UTxO prune floor: %w",
+			err,
+		)
+	}
+	return nil
+}
+
+// readConsumedUtxoPruneFloor reads the durable marker
+// persistConsumedUtxoPruneFloor writes. Zero (with no error) means cleanup
+// has never yet pruned anything on this database -- nothing eligible for
+// pruning has existed yet, so no historical pin can already have lost data
+// to it.
+func (ls *LedgerState) readConsumedUtxoPruneFloor(
+	txn *database.Txn,
+) (uint64, error) {
+	marker, err := ls.db.GetSyncState(consumedUtxoPruneFloorSyncKey, txn)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"read consumed UTxO prune floor: %w",
+			err,
+		)
+	}
+	if marker == "" {
+		return 0, nil
+	}
+	floor, err := strconv.ParseUint(marker, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"parse consumed UTxO prune floor marker %q: %w",
+			marker,
+			err,
+		)
+	}
+	return floor, nil
 }
 
 // CurrentTransitionInfo returns the current TransitionInfo from the lock-free
