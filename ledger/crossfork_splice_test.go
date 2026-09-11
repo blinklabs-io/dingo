@@ -25,7 +25,6 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
-	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	omockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
@@ -507,28 +506,23 @@ func TestContinuationAuditRearmDropsTruncatedProducer(t *testing.T) {
 	assert.Equal(t, "second rollback", report["fork_reason"])
 }
 
-// TestContinuationAuditRearmDoesNotRaceWithBlockfetchAudit pins the
-// synchronization the carry-forward needs. Recording producers runs on the
-// blockfetch dispatch goroutine under chainsyncBlockfetchMutex; the rearm
-// reads the outgoing window's producers on the chainsync dispatch goroutine
-// under chainsyncMutex. Neither lock covers both, so the producer set needs
-// its own, or a concurrent map iteration and write kills the node.
+// TestContinuationAuditRearmDoesNotRaceWithBlockfetchAudit pins the memory
+// safety the carry-forward needs. Recording producers runs on the blockfetch
+// dispatch goroutine under chainsyncBlockfetchMutex; the rearm reads the
+// outgoing window's producers on the chainsync dispatch goroutine under
+// chainsyncMutex. Neither lock covers both, so a concurrent map iteration and
+// write would kill the node.
+//
+// It is a detector test and nothing more. The lost update the same
+// interleaving can produce is a logical fault that no amount of -race proves
+// absent, and is pinned deterministically by
+// TestContinuationAuditRecordGoesToPublishedWindow.
 func TestContinuationAuditRearmDoesNotRaceWithBlockfetchAudit(t *testing.T) {
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 	ls.config.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
-	// Resolve the rearm's fork-point lookup in memory. Going to the database
-	// for it would put a shared lock between the two goroutines on every
-	// iteration, and that incidental ordering is enough to hide the
-	// unsynchronized map access from the race detector.
-	ls.lookupBlockByHash = func(hash []byte) (models.Block, error) {
-		return models.Block{
-			Slot: fixture.ancestorTip.Point.Slot,
-			Hash: append([]byte(nil), hash...),
-		}, nil
-	}
 	ls.armContinuationAudit(fixture.ancestorTip.Point, "initial rollback")
 
 	const iterations = 300
@@ -583,8 +577,11 @@ func TestContinuationAuditRearmDoesNotRaceWithBlockfetchAudit(t *testing.T) {
 // the chainsync dispatch goroutine under chainsyncMutex, so the rearm can land
 // between them and snapshot a producer set the body is not in yet.
 //
-// onChain decides what the fork-point and body membership lookups resolve, so
-// a body can be placed on or off the primary chain without a second database.
+// The producer block is put on the real primary chain, or abandoned onto a
+// fork whose blob the store still holds and whose block index a replacement
+// now owns. That second state is the one a hash lookup cannot tell from the
+// first, which is why the audit tests primary-chain membership instead.
+//
 // It returns the audit log produced after the rearm.
 func lateProducerFixture(
 	t *testing.T,
@@ -595,9 +592,10 @@ func lateProducerFixture(
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 	producerTxId := testHashBytes("late-producer-tx")
+	producerHash := testHashBytes("late-producer-block")
 	producerBlock := &spliceAuditBlock{
 		slot: 30,
-		hash: lcommon.NewBlake2b256(testHashBytes("late-producer-block")),
+		hash: lcommon.NewBlake2b256(producerHash),
 		txs: []lcommon.Transaction{
 			mustSpliceAuditTx(
 				t,
@@ -608,21 +606,42 @@ func lateProducerFixture(
 			),
 		},
 	}
-	onChain := map[string]uint64{
-		string(fixture.ancestorTip.Point.Hash): fixture.ancestorTip.Point.Slot,
-	}
-	if producerOnChain {
-		onChain[string(producerBlock.hash.Bytes())] = producerBlock.slot
-	}
-	ls.lookupBlockByHash = func(hash []byte) (models.Block, error) {
-		slot, ok := onChain[string(hash)]
-		if !ok {
-			return models.Block{}, models.ErrBlockNotFound
-		}
-		return models.Block{
-			Slot: slot,
-			Hash: append([]byte(nil), hash...),
-		}, nil
+	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{{
+		Slot:        producerBlock.slot,
+		Hash:        producerHash,
+		BlockNumber: fixture.currentTip.BlockNumber + 1,
+		Type:        1,
+		PrevHash:    fixture.currentTip.Point.Hash,
+		Cbor:        []byte{0x80},
+	}}))
+	if !producerOnChain {
+		// Abandon it and let a replacement take the block index it held.
+		// The blob store is append-only, so the abandoned block stays
+		// resolvable by hash.
+		require.NoError(t, ls.chain.Rollback(fixture.currentTip.Point))
+		require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{{
+			Slot:        31,
+			Hash:        testHashBytes("late-replacement-block"),
+			BlockNumber: fixture.currentTip.BlockNumber + 1,
+			Type:        1,
+			PrevHash:    fixture.currentTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		}}))
+		retained, err := ls.chain.BlockByPoint(
+			ocommon.NewPoint(producerBlock.slot, producerHash),
+			nil,
+		)
+		require.NoError(t, err)
+		indexed, err := ls.db.BlockPointByIndex(retained.ID, nil)
+		require.NoError(t, err)
+		require.NotEqual(
+			t,
+			producerBlock.slot,
+			indexed.Slot,
+			"the abandoned block must still be resolvable at a block ID "+
+				"the replacement now owns, or this fixture is not "+
+				"testing what it claims",
+		)
 	}
 
 	ls.armContinuationAudit(fixture.ancestorTip.Point, "first rollback")
@@ -695,12 +714,13 @@ func TestContinuationAuditRecordsBodyLandedBeforeRearm(t *testing.T) {
 	)
 }
 
-// TestContinuationAuditIgnoresOffChainBodyBelowForkPoint is the other half of
-// that contract. Chain membership is what makes recording a body below the
-// fork point sound, so a body the chain does not hold at its point -- an
-// abandoned fetch, or one a later rollback removed -- must not become a
-// producer and silence a genuine report.
-func TestContinuationAuditIgnoresOffChainBodyBelowForkPoint(t *testing.T) {
+// TestContinuationAuditIgnoresAbandonedBodyBelowForkPoint is the other half of
+// that contract, and it is why membership is tested against the primary chain
+// rather than by hash. The abandoned block is still in the append-only blob
+// store and still answers a hash lookup, but the block index its ID holds now
+// names the replacement. Accepting it would let a fork the node walked away
+// from supply producers and silence a genuine report.
+func TestContinuationAuditIgnoresAbandonedBodyBelowForkPoint(t *testing.T) {
 	t.Parallel()
 
 	report := findLogRecord(
@@ -716,59 +736,266 @@ func TestContinuationAuditIgnoresOffChainBodyBelowForkPoint(t *testing.T) {
 	)
 }
 
-// TestRecoveryRewindKeepsWindowWhenNothingTruncated covers the refusals that
-// precede the first truncation. rollbackPrimaryChainInSecurityParamWindows
-// validates primary-chain membership before descending precisely so that an
-// unreachable target shortens nothing, and on that path the window still
-// describes the chain exactly as it did before the call.
-func TestRecoveryRewindKeepsWindowWhenNothingTruncated(t *testing.T) {
+// TestContinuationAuditCarryForwardRejectsAbandonedForkPoint pins the same
+// membership rule on the rearm's own precondition. A prior window whose fork
+// point the node has abandoned describes a chain that no longer exists, and a
+// hash lookup still resolves that point out of the retained blob store.
+func TestContinuationAuditCarryForwardRejectsAbandonedForkPoint(t *testing.T) {
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
-	ls.armContinuationAudit(fixture.ancestorTip.Point, "chainsync rollback")
-	armed := ls.continuationAudit.Load()
-	require.NotNil(t, armed)
-	tipBefore := ls.chain.Tip().Point
+	abandonedPoint := fixture.currentTip.Point
 
-	err := ls.rewindPrimaryChainForRecovery(
-		ocommon.NewPoint(15, testHashBytes("not-on-the-primary-chain")),
+	ls.armContinuationAudit(abandonedPoint, "first rollback")
+	prior := ls.continuationAudit.Load()
+	require.NotNil(t, prior)
+	producerTxId := testHashBytes("abandoned-fork-producer")
+	_, ok := prior.recordProducers([][]byte{producerTxId}, 20)
+	require.True(t, ok)
+
+	// Abandon the fork point and let a replacement take its block index.
+	require.NoError(t, ls.chain.Rollback(fixture.ancestorTip.Point))
+	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{{
+		Slot:        21,
+		Hash:        testHashBytes("carry-forward-fork-block"),
+		BlockNumber: fixture.ancestorTip.BlockNumber + 1,
+		Type:        1,
+		PrevHash:    fixture.ancestorTip.Point.Hash,
+		Cbor:        []byte{0x80},
+	}}))
+	retained, err := ls.chain.BlockByPoint(abandonedPoint, nil)
+	require.NoError(t, err)
+	indexed, err := ls.db.BlockPointByIndex(retained.ID, nil)
+	require.NoError(t, err)
+	require.NotEqual(t, abandonedPoint.Slot, indexed.Slot)
+
+	ls.armContinuationAudit(
+		ocommon.NewPoint(25, testHashBytes("carry-forward-rearm")),
+		"second rollback",
 	)
 
-	require.Error(t, err)
-	assert.Equal(t, tipBefore.Slot, ls.chain.Tip().Point.Slot)
-	assert.Same(
+	assert.NotContains(
 		t,
-		armed,
-		ls.continuationAudit.Load(),
-		"a rewind that truncated nothing must leave the window armed",
+		ls.continuationAudit.Load().producedTxs,
+		string(producerTxId),
+		"producers of an abandoned fork must not be carried forward",
 	)
 }
 
-// TestRecoveryRewindDiscardsWindowWhenTruncated is the reason the window is
-// dropped at all. A committed truncation deletes blocks an armed window
-// recorded producers for, and armContinuationAudit carries a surviving
-// window's producers into the next one, so those producers must not outlive
-// the blocks.
-func TestRecoveryRewindDiscardsWindowWhenTruncated(t *testing.T) {
+// TestContinuationAuditRecordGoesToPublishedWindow pins the lifecycle contract
+// the producer set needs. A body is audited against the window published when
+// the blockfetch drain loaded it, and a rearm can publish a replacement before
+// the recording happens. Recording into the window the caller loaded would put
+// the producer somewhere nothing reads again, and the rearm's snapshot was
+// taken before the producer existed, so the producer is lost although its
+// block is on the chain.
+func TestContinuationAuditRecordGoesToPublishedWindow(t *testing.T) {
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
-	ls.armContinuationAudit(fixture.currentTip.Point, "chainsync rollback")
-	require.NotNil(t, ls.continuationAudit.Load())
+	ls.armContinuationAudit(fixture.ancestorTip.Point, "first rollback")
+	stale := ls.continuationAudit.Load()
+	require.NotNil(t, stale)
 
-	require.NoError(
+	// The rearm the blockfetch drain does not see. Its point is the primary
+	// chain tip, so the audited body at slot 20 survives it.
+	ls.armContinuationAudit(fixture.currentTip.Point, "second rollback")
+	published := ls.continuationAudit.Load()
+	require.NotSame(t, stale, published)
+
+	producerTxId := testHashBytes("published-window-producer")
+	require.True(t, ls.commitContinuationAuditProducers(
+		stale,
+		BlockfetchEvent{
+			ConnectionId: fixture.connId,
+			Point:        fixture.currentTip.Point,
+		},
+		[][]byte{producerTxId},
+	))
+
+	assert.Contains(
 		t,
-		ls.rewindPrimaryChainForRecovery(fixture.ancestorTip.Point),
+		published.producedTxs,
+		string(producerTxId),
+		"the producer must land in the window that is published now",
+	)
+	assert.NotContains(t, stale.producedTxs, string(producerTxId))
+}
+
+// TestContinuationAuditRecordRejectsOffChainRacedBody is the guard on that
+// redirection. The window published by the rearm may have been armed by a
+// rollback that deleted the audited block, so a body reaching a window it was
+// not audited against has to prove it is on the primary chain first.
+func TestContinuationAuditRecordRejectsOffChainRacedBody(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	ls.armContinuationAudit(fixture.ancestorTip.Point, "first rollback")
+	stale := ls.continuationAudit.Load()
+	ls.armContinuationAudit(fixture.currentTip.Point, "second rollback")
+	published := ls.continuationAudit.Load()
+	require.NotSame(t, stale, published)
+
+	producerTxId := testHashBytes("raced-off-chain-producer")
+	require.True(t, ls.commitContinuationAuditProducers(
+		stale,
+		BlockfetchEvent{
+			ConnectionId: fixture.connId,
+			Point: ocommon.NewPoint(
+				30,
+				testHashBytes("never-on-the-chain"),
+			),
+		},
+		[][]byte{producerTxId},
+	))
+
+	assert.NotContains(
+		t,
+		published.producedTxs,
+		string(producerTxId),
+		"a body the chain does not hold must not become a producer",
+	)
+}
+
+// TestSettleAuditAfterRewind pins what the audit window is once a recovery
+// rewind returns. The rewind clears the window and runs without the lifecycle
+// lock held, so the decision has to be made from the pointer as it stands
+// afterwards rather than from the one that was cleared.
+func TestSettleAuditAfterRewind(t *testing.T) {
+	t.Parallel()
+
+	target := ocommon.NewPoint(20, testHashBytes("rewind-target"))
+
+	t.Run("restores the cleared window when nothing was truncated", func(t *testing.T) {
+		t.Parallel()
+		fixture := newChainsyncRollbackFixture(t)
+		ls := fixture.ls
+		ls.armContinuationAudit(fixture.ancestorTip.Point, "rollback")
+		prior := ls.continuationAudit.Load()
+		ls.continuationAudit.Store(nil)
+
+		ls.settleAuditAfterRewind(prior, ls.chain.Tip().Point, target)
+
+		assert.Same(t, prior, ls.continuationAudit.Load())
+	})
+
+	t.Run("keeps a window armed while the rewind ran", func(t *testing.T) {
+		t.Parallel()
+		fixture := newChainsyncRollbackFixture(t)
+		ls := fixture.ls
+		ls.armContinuationAudit(fixture.ancestorTip.Point, "rollback")
+		prior := ls.continuationAudit.Load()
+		ls.continuationAudit.Store(nil)
+		// The arm the rewind could not see, at a point the rewind kept.
+		ls.armContinuationAudit(fixture.ancestorTip.Point, "concurrent")
+		armed := ls.continuationAudit.Load()
+		require.NotSame(t, prior, armed)
+
+		ls.settleAuditAfterRewind(prior, ls.chain.Tip().Point, target)
+
+		assert.Same(
+			t,
+			armed,
+			ls.continuationAudit.Load(),
+			"the newer window describes the chain the rewind left",
+		)
+	})
+
+	t.Run("drops a window the truncation invalidated", func(t *testing.T) {
+		t.Parallel()
+		fixture := newChainsyncRollbackFixture(t)
+		ls := fixture.ls
+		ls.armContinuationAudit(fixture.ancestorTip.Point, "rollback")
+		prior := ls.continuationAudit.Load()
+		ls.continuationAudit.Store(nil)
+		// A window armed during the rewind, above the rewind target: the
+		// truncation deleted the block its fork point names.
+		ls.armContinuationAudit(
+			ocommon.NewPoint(40, testHashBytes("above-the-target")),
+			"concurrent",
+		)
+		require.NotNil(t, ls.continuationAudit.Load())
+
+		ls.settleAuditAfterRewind(
+			prior,
+			ocommon.NewPoint(99, testHashBytes("tip-before-rewind")),
+			target,
+		)
+
+		assert.Nil(t, ls.continuationAudit.Load())
+	})
+
+	t.Run("does not restore after a committed truncation", func(t *testing.T) {
+		t.Parallel()
+		fixture := newChainsyncRollbackFixture(t)
+		ls := fixture.ls
+		ls.armContinuationAudit(fixture.ancestorTip.Point, "rollback")
+		prior := ls.continuationAudit.Load()
+		ls.continuationAudit.Store(nil)
+
+		ls.settleAuditAfterRewind(
+			prior,
+			ocommon.NewPoint(99, testHashBytes("tip-before-rewind")),
+			target,
+		)
+
+		assert.Nil(t, ls.continuationAudit.Load())
+	})
+}
+
+// TestContinuationAuditCarriesEndorserRefsItDidNotTruncate applies the
+// carry-forward rule to the other thing a window knows about a block. An
+// endorser-block reference names the ranking block that carries it, so a
+// reference at or below the rearm point belongs to a block the rollback left
+// on the chain -- and nothing re-queues it, because that block is not
+// re-fetched. Dropping it leaves the new window unable to resolve an
+// endorser-resident producer, which is the same false report in the shape
+// endorser transactions take.
+func TestContinuationAuditCarriesEndorserRefsItDidNotTruncate(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	ls.armContinuationAudit(fixture.ancestorTip.Point, "first rollback")
+	prior := ls.continuationAudit.Load()
+	require.NotNil(t, prior)
+	kept := continuationAuditEndorserRef{
+		certParentHash:  testHashBytes("kept-cert-parent"),
+		blockSlot:       30,
+		lastProbedBlock: 7,
+	}
+	truncated := continuationAuditEndorserRef{
+		certParentHash: testHashBytes("truncated-cert-parent"),
+		blockSlot:      40,
+	}
+	prior.requeueEndorserRef(kept)
+	prior.requeueEndorserRef(truncated)
+
+	ls.armContinuationAudit(
+		ocommon.NewPoint(35, testHashBytes("endorser-carry-rearm")),
+		"second rollback",
 	)
 
+	next := ls.continuationAudit.Load()
+	require.Len(t, next.pendingEndorserRefs, 1)
+	assert.Equal(t, uint64(30), next.pendingEndorserRefs[0].blockSlot)
 	assert.Equal(
 		t,
-		fixture.ancestorTip.Point.Slot,
-		ls.chain.Tip().Point.Slot,
+		0,
+		next.pendingEndorserRefs[0].lastProbedBlock,
+		"probe accounting belongs to the window that did the probing",
 	)
-	assert.Nil(t, ls.continuationAudit.Load())
+	assert.Contains(t, next.pendingEndorserSeen, kept.key())
+	assert.NotContains(t, next.pendingEndorserSeen, truncated.key())
+	assert.Empty(
+		t,
+		next.resolvedEndorserBlocks,
+		"the merged memo is not carried: re-merging is idempotent, a stale "+
+			"memo would suppress a merge the new window needs",
+	)
 }
 
 // TestContinuationAuditProducerKeepsLowestSlot pins which slot a repeated

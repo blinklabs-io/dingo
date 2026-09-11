@@ -318,14 +318,8 @@ func (ls *LedgerState) armContinuationAudit(
 			forkPeer = connId.String()
 		}
 	}
-	producedTxs := make(map[string]uint64)
-	if prior := ls.continuationAudit.Load(); prior != nil {
-		if carried := ls.carryForwardProducedTxs(prior, point); carried != nil {
-			producedTxs = carried
-		}
-	}
-	ls.continuationAudit.Store(&continuationAuditWindow{
-		producedTxs:            producedTxs,
+	next := &continuationAuditWindow{
+		producedTxs:            make(map[string]uint64),
 		pendingEndorserSeen:    make(map[string]struct{}),
 		resolvedEndorserBlocks: make(map[string]struct{}),
 		forkPoint: ocommon.Point{
@@ -335,22 +329,65 @@ func (ls *LedgerState) armContinuationAudit(
 		forkReason: reason,
 		forkPeer:   forkPeer,
 		remaining:  continuationAuditBlockBudget,
-	})
+	}
+	ls.continuationAuditMutex.Lock()
+	defer ls.continuationAuditMutex.Unlock()
+	if prior := ls.continuationAudit.Load(); prior != nil {
+		ls.carryForwardWindow(prior, next, point)
+	}
+	ls.continuationAudit.Store(next)
 }
 
-// carryForwardProducedTxs returns the producers prior recorded from blocks at
-// or below point, and nil when prior's fork point is no longer resolvable on
-// the primary chain at its recorded slot. See armContinuationAudit for why
-// those two conditions are what make a carried-forward producer legitimate.
-func (ls *LedgerState) carryForwardProducedTxs(
+// disarmContinuationAudit takes the window out of service. Every transition of
+// the pointer goes through continuationAuditMutex, so a disarm cannot land
+// between an arm reading the outgoing window and publishing its replacement.
+func (ls *LedgerState) disarmContinuationAudit() {
+	ls.continuationAuditMutex.Lock()
+	defer ls.continuationAuditMutex.Unlock()
+	ls.continuationAudit.Store(nil)
+}
+
+// carryForwardWindow moves what prior knows about blocks this rollback did not
+// truncate into next, and carries nothing when prior's fork point is no longer
+// on the primary chain. See armContinuationAudit for why those two conditions
+// are what make a carried-forward producer legitimate.
+//
+// Primary-chain membership is the test, not blob presence. Abandoned-fork
+// blocks stay in the append-only blob store and stay reachable by hash, so a
+// hash lookup would accept a fork point the node has since walked away from
+// and carry its producers onto a chain they were never part of.
+// primaryChainContainsPoint compares the point encoded at the block's index
+// entry, which is what identifies the current primary chain.
+//
+// Endorser-block references travel with the producers, on the same rule and
+// keyed by the same slot: a reference names the ranking block that carries it,
+// so a reference at or below the point belongs to a block the rollback left on
+// the chain. Dropping it would leave the new window unable to resolve an
+// endorser-resident producer that nothing re-queues -- the ranking block is
+// not re-fetched, because the chain still holds it -- which is the same false
+// report in the shape endorser transactions take. The already-merged memo is
+// deliberately not carried: re-merging a closure is idempotent (a repeat keeps
+// the lowest slot) and costs one hashing pass, where a stale memo would
+// suppress a merge the new window needs.
+func (ls *LedgerState) carryForwardWindow(
 	prior *continuationAuditWindow,
+	next *continuationAuditWindow,
 	point ocommon.Point,
-) map[string]uint64 {
-	stillOnChain, err := ls.blockByHash(prior.forkPoint.Hash)
-	if err != nil || stillOnChain.Slot != prior.forkPoint.Slot {
-		return nil
+) {
+	onChain, err := ls.primaryChainContainsPoint(prior.forkPoint)
+	if err != nil || !onChain {
+		return
 	}
-	return prior.producersAtOrBelow(point.Slot)
+	next.producedTxs = prior.producersAtOrBelow(point.Slot)
+	for _, ref := range prior.pendingEndorserRefs {
+		if ref.blockSlot > point.Slot {
+			continue
+		}
+		// lastProbedBlock counts against the window that recorded it, and
+		// next starts its own count.
+		ref.lastProbedBlock = 0
+		next.requeueEndorserRef(ref)
+	}
 }
 
 // auditContinuationBlock checks that every input a freshly fetched body spends
@@ -395,11 +432,7 @@ func (ls *LedgerState) auditContinuationBlock(
 	// the only transactions a certifying ranking block brings, its own body
 	// being empty.
 	ls.queueContinuationAuditEndorserRef(window, e)
-	if !ls.recordContinuationAuditProducers(
-		window,
-		blockProducerIds(txs),
-		e.Point.Slot,
-	) {
+	if !ls.commitContinuationAuditProducers(window, e, blockProducerIds(txs)) {
 		window.remaining = 0
 		return
 	}
@@ -536,18 +569,58 @@ func (ls *LedgerState) recordLateProducers(
 	window *continuationAuditWindow,
 	e BlockfetchEvent,
 ) {
-	onChain, err := ls.blockByHash(e.Point.Hash)
-	if err != nil || onChain.Slot != e.Point.Slot {
+	onChain, err := ls.primaryChainContainsPoint(e.Point)
+	if err != nil || !onChain {
 		return
 	}
 	ls.queueContinuationAuditEndorserRef(window, e)
-	if !ls.recordContinuationAuditProducers(
+	if !ls.commitContinuationAuditProducers(
 		window,
+		e,
 		blockProducerIds(e.Block.Transactions()),
-		e.Point.Slot,
 	) {
 		window.remaining = 0
 	}
+}
+
+// commitContinuationAuditProducers records ids against the window that is
+// published now, which is not always the window the caller has been auditing
+// against.
+//
+// Recording and arming are mutually exclusive under continuationAuditMutex, so
+// a rearm either copies these producers out of the caller's window or publishes
+// before them and receives them here. Without that ordering a rearm landing
+// between the caller's Load and its record snapshots a set the block is not in
+// yet and the record lands in a window nothing reads again: the producer is
+// lost although its block is on the chain, and the next audited spend of its
+// outputs is the false missing-producer report this window exists to prevent.
+//
+// A publication that actually raced is the only case that pays for a chain
+// read. The rollback that armed the published window may have deleted this
+// block, and primary-chain membership at the block's own point is what settles
+// it -- membership is also the whole justification for calling a block a
+// producer, and it does not depend on which window is published. When nothing
+// raced, the caller's window is the published one and no read is made.
+func (ls *LedgerState) commitContinuationAuditProducers(
+	window *continuationAuditWindow,
+	e BlockfetchEvent,
+	ids [][]byte,
+) bool {
+	ls.continuationAuditMutex.Lock()
+	defer ls.continuationAuditMutex.Unlock()
+	published := ls.continuationAudit.Load()
+	if published == nil {
+		// Disarmed while this body was being audited. There is no window
+		// left to poison, and the caller's own disarm is a no-op.
+		return true
+	}
+	if published != window {
+		onChain, err := ls.primaryChainContainsPoint(e.Point)
+		if err != nil || !onChain {
+			return true
+		}
+	}
+	return ls.recordContinuationAuditProducers(published, ids, e.Point.Slot)
 }
 
 // continuationInputHasProducer reports whether an input's producing

@@ -4564,14 +4564,35 @@ the ranking block that carries the reference, since that is the block whose
 truncation takes them off the chain, and a producer offered at two slots keeps
 the lower one.
 
-The rearm's snapshot and the blockfetch recording are not covered by one lock,
-so a body added to the chain but not yet audited when the rearm runs is absent
-from the snapshot. Such a body is recorded when it arrives, after re-reading
-its chain membership, rather than dropped for sitting at or below the new fork
-point. Recovery rewinds truncate the primary chain outside this path, so they
-drop the window for the duration and restore it only when the rewind turned
-out to truncate nothing — several refusals precede the first truncation, and on
-those the window still describes the chain unchanged. Each arming inspects at most
+Endorser-block references travel with the producers, on the same rule and keyed
+by the same slot, because nothing re-queues a reference for a block the
+rollback left on the chain — that block is not re-fetched. The already-merged
+memo is not carried, since re-merging a closure is idempotent and a stale memo
+would suppress a merge the new window needs.
+
+One lock owns every transition of the window pointer and every recording of a
+producer into the window it publishes. Arming reads the outgoing window,
+recovery clears and restores it, and blockfetch records into it, from
+goroutines that share no other lock; the atomic pointer makes each access safe
+on its own but does not order the sequence. Without that ownership a rearm
+landing between the blockfetch handler's read of the pointer and its recording
+snapshots a set the block is not in yet and the recording lands in a window
+nothing reads again — the producer is lost although its block is on the chain,
+which is the report this carry-forward exists to prevent. Producers are
+therefore recorded against the window published at the moment of recording, and
+a body that reaches a window it was not audited against must prove primary-chain
+membership at its own point first. Membership is always tested against the
+primary chain rather than by block presence, since a block the node has
+abandoned can outlive its place on the chain. The lock is never held across a
+chain truncation or a blockfetch drain.
+
+Recovery rewinds truncate the primary chain outside this path, so they clear
+the window for the duration and settle it afterwards from the pointer as it
+then stands: a window armed while the rewind ran is kept unless the truncation
+removed the block its fork point names, and otherwise the cleared window is
+restored only when the primary chain tip is exactly where it was. Several
+refusals precede the first truncation, and on those the window still describes
+the chain unchanged. Each arming inspects at most
 `continuationAuditBlockBudget` bodies and retains at most
 `continuationAuditMaxProducedTxs` in-window producers; reaching that producer
 cap disarms the window, logs at `Warn` and counts `disarmed_cap`, so "the audit

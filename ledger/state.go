@@ -1077,6 +1077,16 @@ type LedgerState struct {
 	// Cross-fork continuation audit (issue #3005). Armed by a local
 	// rollback and consumed by the blockfetch handler; see
 	// ledger/continuation_audit.go for the cost and soundness argument.
+	//
+	// continuationAuditMutex owns every transition of the pointer, and every
+	// recording of a producer into the window it publishes. The atomic makes
+	// each access safe on its own; it is the *sequence* that matters here,
+	// because arming reads the outgoing window and recovery clears and
+	// restores it, and those goroutines share no other lock. It is a leaf:
+	// it is always the innermost lock taken, and it is never held across a
+	// chain truncation or a blockfetch drain. See armContinuationAudit,
+	// commitContinuationAuditProducers and settleAuditAfterRewind.
+	continuationAuditMutex sync.Mutex
 	continuationAudit      atomic.Pointer[continuationAuditWindow]
 	mithrilLedgerSlot      uint64 // blocks at or below this slot are Mithril-verified; skip validation
 	mithrilLedgerHash      []byte // hash for mithrilLedgerSlot, used as a stable chainsync intersect point
@@ -3811,7 +3821,7 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 	if pointMatches(ls.Tip().Point, point) {
 		ls.armContinuationAudit(point, "chainsync rollback")
 	} else {
-		ls.continuationAudit.Store(nil)
+		ls.disarmContinuationAudit()
 	}
 	return nil
 }
@@ -3849,7 +3859,7 @@ func (ls *LedgerState) reportFailedLedgerRollbackAfterTruncation(
 	point ocommon.Point,
 	cause error,
 ) error {
-	ls.continuationAudit.Store(nil)
+	ls.disarmContinuationAudit()
 	ledgerTip := ls.Tip()
 	ls.config.Logger.Error(
 		"primary chain truncated but ledger rollback failed; "+

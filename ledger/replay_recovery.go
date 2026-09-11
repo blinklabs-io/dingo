@@ -1028,29 +1028,20 @@ func (ls *LedgerState) rewindPrimaryChainForRecovery(
 	// truncation from carrying producers forward out of a window the rewind
 	// is in the middle of invalidating.
 	//
-	// It is restored when the rewind turns out to have truncated nothing.
-	// Several refusals precede the first truncation -- an unconfigured
-	// security parameter, a target the chain does not hold, a tip already at
-	// the target or behind it -- and on those the window still describes the
-	// chain exactly as it did before, so discarding it would cost the audit
-	// its coverage for no reason. The descent commits each step as it goes,
-	// so a partially committed rewind moves the tip too and keeps the drop.
-	// The restore is a compare-and-swap against nil, which yields to a
-	// window armed in the meantime instead of clobbering it.
+	// Reading the outgoing window and clearing the pointer is one critical
+	// section. Split, an arm between the two is overwritten by the clear and
+	// then replaced by the older window the restore puts back -- a window
+	// describing a fork point the node has already moved off.
 	//
-	// The recovery paths that want the audit arm a fresh window after their
-	// rewind returns.
-	prior := ls.continuationAudit.Load()
+	// The lock is not held across the rewind itself. The descent commits a
+	// chain truncation per step under transactionEventMutex, and parking
+	// every chainsync rollback behind it for that long is a worse trade than
+	// the two states the gap leaves, both of which settleAuditAfterRewind
+	// resolves from the published pointer afterwards.
+	prior := ls.takeContinuationAuditForRewind()
 	tipBefore := ls.chain.Tip().Point
-	ls.continuationAudit.Store(nil)
 	err := ls.rollbackPrimaryChainInSecurityParamWindows(point)
-	if prior != nil {
-		tipAfter := ls.chain.Tip().Point
-		if tipAfter.Slot == tipBefore.Slot &&
-			bytes.Equal(tipAfter.Hash, tipBefore.Hash) {
-			ls.continuationAudit.CompareAndSwap(nil, prior)
-		}
-	}
+	ls.settleAuditAfterRewind(prior, tipBefore, point)
 	if err == nil ||
 		(!errors.Is(err, chain.ErrRollbackExceedsSecurityParam) &&
 			!errors.Is(err, errRecoveryRewindNotConverging)) {
@@ -1100,6 +1091,58 @@ func (ls *LedgerState) rewindPrimaryChainForRecovery(
 		)
 	}
 	return fmt.Errorf("%w (%w)", errHaltLedgerPipeline, err)
+}
+
+// takeContinuationAuditForRewind clears the audit window and returns what it
+// held, as one transition. See rewindPrimaryChainForRecovery.
+func (ls *LedgerState) takeContinuationAuditForRewind() *continuationAuditWindow {
+	ls.continuationAuditMutex.Lock()
+	defer ls.continuationAuditMutex.Unlock()
+	prior := ls.continuationAudit.Load()
+	ls.continuationAudit.Store(nil)
+	return prior
+}
+
+// settleAuditAfterRewind decides what the audit window should be once a
+// recovery rewind has returned, from the pointer as it stands now rather than
+// from the one the rewind cleared.
+//
+// Three outcomes, in the order they are tested:
+//
+// A window armed while the rewind ran is kept, unless the rewind truncated its
+// fork point away. That window describes the chain the arming rollback left,
+// which is newer than anything this function could restore. But a fork point
+// above the rewind target names a block the rewind deleted, so the window
+// describes a chain that no longer exists and is dropped instead; the next
+// rollback arms a fresh one.
+//
+// Otherwise the window the rewind cleared is restored, but only when the
+// primary chain tip is exactly where it was. Several refusals precede the
+// first truncation -- an unconfigured security parameter, a target the chain
+// does not hold, a tip already at or behind the target -- and on those the
+// window still describes the chain unchanged, so discarding it would cost the
+// audit its coverage for nothing. The descent commits each step as it goes, so
+// a partially committed rewind moves the tip and keeps the drop.
+func (ls *LedgerState) settleAuditAfterRewind(
+	prior *continuationAuditWindow,
+	tipBefore ocommon.Point,
+	target ocommon.Point,
+) {
+	ls.continuationAuditMutex.Lock()
+	defer ls.continuationAuditMutex.Unlock()
+	tipAfter := ls.chain.Tip().Point
+	truncated := tipAfter.Slot != tipBefore.Slot ||
+		!bytes.Equal(tipAfter.Hash, tipBefore.Hash)
+	if armed := ls.continuationAudit.Load(); armed != nil {
+		if truncated && armed.forkPoint.Slot > target.Slot {
+			ls.continuationAudit.Store(nil)
+		}
+		return
+	}
+	if prior == nil || truncated {
+		return
+	}
+	ls.continuationAudit.Store(prior)
 }
 
 func (ls *LedgerState) recoveryRollbackExceedsMithrilBoundary(
