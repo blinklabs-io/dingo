@@ -51,6 +51,22 @@ func newConwayDivergenceTx(
 	fee uint64,
 	outputAmount uint64,
 ) *conway.ConwayTransaction {
+	return newConwayDivergenceTxWithReference(
+		t,
+		inputHashByte,
+		fee,
+		outputAmount,
+		nil,
+	)
+}
+
+func newConwayDivergenceTxWithReference(
+	t *testing.T,
+	inputHashByte byte,
+	fee uint64,
+	outputAmount uint64,
+	referenceHash []byte,
+) *conway.ConwayTransaction {
 	t.Helper()
 
 	inputHash := make([]byte, 32)
@@ -72,6 +88,12 @@ func newConwayDivergenceTx(
 		addr[0] = 0x60
 		bodyMap[1] = []any{
 			[]any{addr, outputAmount},
+		}
+	}
+	if referenceHash != nil {
+		bodyMap[18] = cbor.Tag{
+			Number:  258,
+			Content: []any{[]any{referenceHash, uint64(0)}},
 		}
 	}
 	txCbor, err := cbor.Encode([]any{bodyMap, map[uint]any{}, true, nil})
@@ -188,6 +210,42 @@ func TestValidateTxConwayGenuinelyMissingInputStillRejected(t *testing.T) {
 		err.Error(),
 		fmt.Sprintf("conway utxo validation rule %d:", badInputsIndex),
 	)
+}
+
+// TestValidateTxConwayGenuinelyMissingReferenceInputStillRejected confirms
+// that the ordinary Conway transaction rules still reject an absent reference
+// input. Block-level PV10 accounting may omit that key for its size total, but
+// it must not make the transaction itself valid.
+func TestValidateTxConwayGenuinelyMissingReferenceInputStillRejected(
+	t *testing.T,
+) {
+	referenceHash := make([]byte, 32)
+	tx := newConwayDivergenceTxWithReference(
+		t,
+		0xab,
+		200_000,
+		4_800_000,
+		referenceHash,
+	)
+	referenceID := lcommon.NewBlake2b256(referenceHash)
+
+	ls := newMockLedgerState()
+	ls.addUtxo(tx.Inputs()[0], newTestOutput(5_000_000))
+
+	err := ValidateTxConway(
+		tx,
+		0,
+		ls,
+		func() *conway.ConwayProtocolParameters {
+			pp := conwayDivergencePparams()
+			pp.ProtocolVersion.Major = lcommon.ProtocolVersionPlomin
+			return pp
+		}(),
+	)
+	require.Error(t, err)
+	var referenceInput lcommon.ReferenceInputResolutionError
+	require.ErrorAs(t, err, &referenceInput)
+	assert.Contains(t, err.Error(), referenceID.String())
 }
 
 // TestValidateTxConwayGenuinelyUnbalancedStillRejected is the negative case for

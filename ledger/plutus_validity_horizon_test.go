@@ -195,6 +195,7 @@ func TestLedgerProcessBlockAnchorsValidationHorizonAtParent(t *testing.T) {
 						pparams,
 						nil,
 						previewEraStartEpoch,
+						false,
 					)
 					return err
 				})

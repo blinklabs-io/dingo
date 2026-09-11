@@ -264,3 +264,27 @@ func TestNewRejectsInvalidAPIAuthMode(t *testing.T) {
 	assert.Contains(t, err.Error(), "config.auth")
 	assert.Contains(t, err.Error(), "invalid mode")
 }
+
+// TestNewRejectsUnauthenticatedRemoteAPI verifies the shared Node constructor
+// enforces the same API exposure policy as CLI configuration validation.
+func TestNewRejectsUnauthenticatedRemoteAPI(t *testing.T) {
+	cardanoCfg := newNodeTestCardanoNodeCfg(t)
+	_, err := New(NewConfig(
+		WithDatabasePath(t.TempDir()),
+		WithCardanoNodeConfig(cardanoCfg),
+		WithNetworkMagic(cardanoCfg.ShelleyGenesis().NetworkMagic),
+		WithPrometheusRegistry(prometheus.NewRegistry()),
+		WithStorageMode(StorageModeAPI),
+		WithAPIBindAddr("0.0.0.0"),
+		WithListeners(ListenerConfig{
+			ListenNetwork: "tcp",
+			ListenAddress: "127.0.0.1:0",
+		}),
+		WithMidnightConfig(MidnightConfig{Port: 0}),
+		WithShutdownTimeout(5*time.Second),
+	))
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid API exposure")
+	assert.Contains(t, err.Error(), "without authentication")
+}

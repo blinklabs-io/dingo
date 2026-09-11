@@ -122,6 +122,14 @@ func Check(
 		return nil, fmt.Errorf("open cache: %w", err)
 	}
 	defer cache.Close() //nolint:errcheck
+	// Pin the oracle this run's verdicts are computed against. Check has no
+	// Koios client to name a source, but its writes are derived from one, so
+	// a concurrent re-point must fail those writes rather than let them
+	// repopulate the check evidence RecordKoiosSource just discarded under a
+	// source the verdicts never saw.
+	if err := cache.PinRecordedSource(cfg.Network); err != nil {
+		return nil, fmt.Errorf("pin koios source: %w", err)
+	}
 
 	dingo, err := OpenDingoDB(cfg.DingoDB)
 	if err != nil {
@@ -826,6 +834,7 @@ func checkEpoch(
 	// interrupted or not-yet-run account fetch can never be silently treated
 	// as "nothing to compare" — see KoiosAccountCoverage's doc comment.
 	if accountsEnabled && hasStakeEpoch {
+		rewardsPending := accountRewardsPending(dingoPoolMap)
 		allMismatches = append(
 			allMismatches,
 			compareEpochAccounts(
@@ -838,6 +847,7 @@ func checkEpoch(
 				now,
 				graceHours,
 				epochEndTime,
+				rewardsPending,
 				logger,
 			)...,
 		)
@@ -890,6 +900,32 @@ func checkEpoch(
 	}, nil
 }
 
+// accountRewardsPending reports whether the whole stake epoch's rewards are
+// still unapplied, which is the only condition under which an account-level
+// presence or amount difference is timing rather than divergence (#3857).
+//
+// An epoch Dingo has not computed yet makes every Koios reward look absent.
+// The pool rows already carry that answer: when the reward output for the
+// stake epoch has not been written, every entry reports RewardsPending. Two
+// guards keep the downgrade narrow, and both are deliberate:
+//
+//   - Requiring every entry, not any, so a single pool sitting before its own
+//     boundary cannot waive the whole epoch's account comparison.
+//   - An empty map says nothing about the epoch, so it never suppresses
+//     anything. Same for a nil entry: it is an absence of information, not a
+//     claim that the rewards are pending.
+func accountRewardsPending(dingoPoolMap map[string]*DingoPoolEpochData) bool {
+	if len(dingoPoolMap) == 0 {
+		return false
+	}
+	for _, dingoPool := range dingoPoolMap {
+		if dingoPool == nil || !dingoPool.RewardsPending {
+			return false
+		}
+	}
+	return true
+}
+
 // compareEpochAccounts runs #3097's per-account exact-parity comparison for
 // one epoch: it first consults KoiosAccountCoverage to make sure a complete
 // Koios account-reward fetch actually exists for this epoch (never treating
@@ -912,6 +948,7 @@ func compareEpochAccounts(
 	now time.Time,
 	graceHours int,
 	epochEndTime time.Time,
+	rewardsPending bool,
 	logger *slog.Logger,
 ) []CheckMismatch {
 	coverage, covErr := cache.GetAccountCoverage(network, epoch)
@@ -1006,6 +1043,7 @@ func compareEpochAccounts(
 			now,
 			graceHours,
 			epochEndTime,
+			rewardsPending,
 		)...,
 	)
 	out = append(

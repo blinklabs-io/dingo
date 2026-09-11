@@ -652,6 +652,7 @@ func TestSetTransactionRecoveryPopulatesProducerFK(t *testing.T) {
 					producer.tx,
 					producer.point,
 					0,
+					nil,
 					txn.Metadata(),
 				)
 			}),
@@ -854,6 +855,7 @@ func TestEnsureTransactionConsumedUtxosStrictAppliedInputConservation(
 					producer.tx,
 					producer.point,
 					0,
+					nil,
 					txn.Metadata(),
 				)
 			}))
@@ -956,6 +958,7 @@ func TestEnsureTransactionConsumedUtxosStrictAppliedInputConservation(
 					producer.tx,
 					producer.point,
 					0,
+					nil,
 					txn.Metadata(),
 				)
 			}))

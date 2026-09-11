@@ -262,9 +262,17 @@ func (c *ConnectionManager) startListener(
 				continue
 			}
 
-			// NtC connections bypass the inbound slot budget and per-IP
-			// limiting. Their handshake is still moved off the accept loop.
 			if l.UseNtC {
+				releaseNtCSlot := c.reserveNtCSlot(conn.RemoteAddr())
+				if releaseNtCSlot == nil {
+					closeConnAndLog(
+						c.config.Logger,
+						conn,
+						"listener: close rejected NtC connection failed",
+					)
+					c.untrackPendingConnection(conn)
+					continue
+				}
 				c.goroutineWg.Go(func() {
 					c.setupAcceptedConnection(
 						ctx,
@@ -272,6 +280,7 @@ func (c *ConnectionManager) startListener(
 						l,
 						defaultConnOpts,
 						false,
+						releaseNtCSlot,
 					)
 				})
 				continue
@@ -316,6 +325,7 @@ func (c *ConnectionManager) startListener(
 					l,
 					defaultConnOpts,
 					true,
+					nil,
 				)
 			})
 		}
@@ -357,9 +367,15 @@ func (c *ConnectionManager) setupAcceptedConnection(
 	l ListenerConfig,
 	defaultConnOpts []ouroboros.ConnectionOptionFunc,
 	inboundSlotReserved bool,
+	releaseNtCSlot func(),
 ) {
 	pendingConn := conn
 	defer c.untrackPendingConnection(pendingConn)
+	defer func() {
+		if releaseNtCSlot != nil {
+			releaseNtCSlot()
+		}
+	}()
 	stopOnCancel := context.AfterFunc(ctx, func() {
 		_ = pendingConn.Close()
 	})
@@ -469,9 +485,17 @@ func (c *ConnectionManager) setupAcceptedConnection(
 			"remote_addr",
 			peerAddr,
 		)
-		if !c.addNtCConnectionWithIPKey(oConn, true, peerAddr, "") {
+		if !c.addConnectionImpl(
+			oConn,
+			true,
+			true,
+			peerAddr,
+			"",
+			releaseNtCSlot,
+		) {
 			return
 		}
+		releaseNtCSlot = nil
 	} else {
 		c.config.Logger.Info("listener: inbound connection", "remote_addr", peerAddr)
 		c.consumeInboundSlot()
