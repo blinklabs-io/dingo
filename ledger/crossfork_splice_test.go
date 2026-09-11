@@ -17,11 +17,15 @@ package ledger
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"log/slog"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	omockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
@@ -377,16 +381,15 @@ func TestContinuationAuditAcceptsProducerInSameWindow(t *testing.T) {
 	)
 }
 
-// TestContinuationAuditRearmPreservesInFlightProducer is the regression for
-// issue #4102: fork churn re-arms the continuation audit from more than one
-// chainsync connection in quick succession, before the ledger apply pipeline
-// (which deliberately lags blockfetch) durably applies a body an earlier
-// window already vetted as an in-window producer. A rearm to a point that is
-// still the same, still-on-chain rollback target must not forget that
-// producer, or the very next audited spend of its output is reported as
-// missing a producer on a chain that never actually diverged.
-func TestContinuationAuditRearmPreservesInFlightProducer(t *testing.T) {
-	t.Parallel()
+// armRearmFixture drives one audit window through a producer body and a
+// rearm, then audits a body spending that producer's output under the new
+// window, and returns what was logged. rearmPoint is the second rollback's
+// point, which is what decides whether the producer survives the rearm.
+func armRearmFixture(
+	t *testing.T,
+	rearmPoint ocommon.Point,
+) (*LedgerState, string, []byte) {
+	t.Helper()
 
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
@@ -423,10 +426,7 @@ func TestContinuationAuditRearmPreservesInFlightProducer(t *testing.T) {
 		"producer must be recorded before the rearm",
 	)
 
-	// A second connection resolves the same still-current rollback point
-	// (or any point that has not truncated past it) and re-arms the audit,
-	// exactly as concurrent fork-churn resolutions do.
-	ls.armContinuationAudit(fixture.ancestorTip.Point, "second rollback")
+	ls.armContinuationAudit(rearmPoint, "second rollback")
 
 	spenderBlock := &spliceAuditBlock{
 		slot: 40,
@@ -450,12 +450,130 @@ func TestContinuationAuditRearmPreservesInFlightProducer(t *testing.T) {
 		),
 	}, true)
 
+	return ls, logBuf.String(), producerTxId
+}
+
+// TestContinuationAuditRearmPreservesInFlightProducer is the regression for
+// issue #4102. Fork churn re-arms the audit repeatedly, and every rollback
+// target in that issue's run sat ahead of the blocks the previous window had
+// already vetted. Such a rollback truncates nothing those blocks occupy, so
+// they stay on the primary chain -- unapplied, because ledger apply lags
+// blockfetch by design, and never re-fetched, because the chain still has
+// them. Forgetting them at the rearm therefore leaves the next audited spend
+// of their outputs with no way to resolve, which is the false report.
+func TestContinuationAuditRearmPreservesInFlightProducer(t *testing.T) {
+	t.Parallel()
+
+	// Slot 35 is above the producer at 30: the rollback this rearm follows
+	// left that producer's block on the chain.
+	_, logged, _ := armRearmFixture(
+		t,
+		ocommon.NewPoint(35, testHashBytes("rearm-above-producer")),
+	)
+
 	assert.NotContains(
 		t,
-		logBuf.String(),
+		logged,
 		"no producer on the local applied chain",
-		"a producer vetted before a same-point rearm must not be forgotten",
+		"a producer the rearm's rollback did not truncate must be kept",
 	)
+}
+
+// TestContinuationAuditRearmDropsTruncatedProducer is the other half of that
+// contract, and what keeps the audit worth having. A rearm below an earlier
+// window's producer follows a rollback that deleted the producer's block, so
+// a body spending its output is spending an output that is no longer on the
+// local chain -- the cross-fork splice the audit exists to report. Carrying
+// such a producer forward would silence exactly that report.
+func TestContinuationAuditRearmDropsTruncatedProducer(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	// The rearm point is the fixture's ancestor at slot 10, below the
+	// producer block at slot 30.
+	_, logged, producerTxId := armRearmFixture(t, fixture.ancestorTip.Point)
+
+	report := findLogRecord(
+		t,
+		logged,
+		"continuation block spends an input with no producer on the local applied chain",
+	)
+	assert.Equal(t, float64(40), report["block_slot"])
+	assert.Equal(
+		t,
+		lcommon.NewBlake2b256(producerTxId).String(),
+		report["producer_tx_hash"],
+	)
+	assert.Equal(t, "second rollback", report["fork_reason"])
+}
+
+// TestContinuationAuditRearmDoesNotRaceWithBlockfetchAudit pins the
+// synchronization the carry-forward needs. Recording producers runs on the
+// blockfetch dispatch goroutine under chainsyncBlockfetchMutex; the rearm
+// reads the outgoing window's producers on the chainsync dispatch goroutine
+// under chainsyncMutex. Neither lock covers both, so the producer set needs
+// its own, or a concurrent map iteration and write kills the node.
+func TestContinuationAuditRearmDoesNotRaceWithBlockfetchAudit(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	ls.config.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
+	// Resolve the rearm's fork-point lookup in memory. Going to the database
+	// for it would put a shared lock between the two goroutines on every
+	// iteration, and that incidental ordering is enough to hide the
+	// unsynchronized map access from the race detector.
+	ls.lookupBlockByHash = func(hash []byte) (models.Block, error) {
+		return models.Block{
+			Slot: fixture.ancestorTip.Point.Slot,
+			Hash: append([]byte(nil), hash...),
+		}, nil
+	}
+	ls.armContinuationAudit(fixture.ancestorTip.Point, "initial rollback")
+
+	const iterations = 300
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := range iterations {
+			block := &spliceAuditBlock{
+				slot: uint64(30 + i),
+				hash: lcommon.NewBlake2b256(
+					testHashBytes(strconv.Itoa(i) + "-race-block"),
+				),
+				txs: []lcommon.Transaction{
+					mustSpliceAuditTx(
+						t,
+						testHashBytes(strconv.Itoa(i)+"-race-tx"),
+						[]lcommon.TransactionInput{
+							mustSpliceAuditInput(
+								t,
+								testHashBytes("race-input"),
+								0,
+							),
+						},
+					),
+				},
+			}
+			ls.chainsyncBlockfetchMutex.Lock()
+			ls.auditContinuationBlock(BlockfetchEvent{
+				ConnectionId: fixture.connId,
+				Block:        block,
+				Point:        ocommon.NewPoint(block.slot, block.hash.Bytes()),
+			}, true)
+			ls.chainsyncBlockfetchMutex.Unlock()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for range iterations {
+			ls.chainsyncMutex.Lock()
+			ls.armContinuationAudit(fixture.ancestorTip.Point, "rearm")
+			ls.chainsyncMutex.Unlock()
+		}
+	}()
+	wg.Wait()
 }
 
 // TestContinuationAuditBudgetIsBounded verifies the audit stops on its own so a

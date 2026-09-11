@@ -4507,14 +4507,19 @@ bodies that still fail reach the ordinary validation and recovery guards
 unchanged. Arming only after an aligned rollback is both the cost gate — a
 healthy node never runs the per-input probes on the steady-state blockfetch
 path — and what makes the check sound, since every later block then arrives
-through the window. Fork churn can re-arm the audit from more than one
-chainsync connection before a body an earlier window already vetted is
-durably applied, since ledger apply lags blockfetch by design; a rearm whose
-prior window's fork point is still resolvable on the current primary chain
-(proof that no intervening deeper rollback discarded it) carries that
-window's producers forward instead of discarding them, which is what a
-same-or-later rearm otherwise reported as a false missing-producer splice
-(issue #4102). Each arming inspects at most
+through the window. Fork churn can re-arm the audit before a body an earlier
+window already vetted is durably applied, since ledger apply lags blockfetch by
+design, so a rearm carries forward the producers that its own rollback left on
+the chain: those recorded from blocks at or below the new rollback point, and
+only while the prior window's fork point is still resolvable on the primary
+chain at its recorded slot. Those blocks are neither truncated nor re-fetched,
+so nothing else would record them again, and discarding them is what reported a
+spend of their outputs as a false missing-producer splice (issue #4102).
+Producers recorded above the new rollback point are dropped: that rollback
+deleted their blocks, so a body spending them is the splice the audit exists to
+report, and the blocks that do belong above the point are re-delivered and
+re-recorded. Recovery rewinds truncate the primary chain outside this path and
+therefore discard the window outright. Each arming inspects at most
 `continuationAuditBlockBudget` bodies and retains at most
 `continuationAuditMaxProducedTxs` in-window producers. The audit is also skipped
 while block validation is off, which is how historical catch-up runs: the splice

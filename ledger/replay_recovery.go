@@ -1018,6 +1018,15 @@ func (ls *LedgerState) resetRecoveryRewindRejections(newTipSlot uint64) {
 func (ls *LedgerState) rewindPrimaryChainForRecovery(
 	point ocommon.Point,
 ) error {
+	// This is the funnel every recovery truncation of the primary chain
+	// passes through, and it runs outside the rollback path that arms and
+	// disarms the continuation audit. A window armed before it describes
+	// blocks the rewind may delete, and armContinuationAudit now carries a
+	// surviving window's producers into the next window, so discard it here
+	// rather than let those producers outlive the blocks that recorded them.
+	// The recovery paths that want the audit arm a fresh window after their
+	// rewind returns.
+	ls.continuationAudit.Store(nil)
 	err := ls.rollbackPrimaryChainInSecurityParamWindows(point)
 	if err == nil ||
 		(!errors.Is(err, chain.ErrRollbackExceedsSecurityParam) &&

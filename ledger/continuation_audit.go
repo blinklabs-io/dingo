@@ -17,6 +17,7 @@ package ledger
 import (
 	"encoding/hex"
 	"errors"
+	"sync"
 
 	"github.com/blinklabs-io/dingo/database"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -62,16 +63,74 @@ const (
 )
 
 // continuationAuditWindow is the state of one armed audit run. It is published
-// through an atomic pointer, but only the blockfetch handler mutates it, so the
-// counters and the producer set need no further synchronization: arming always
-// installs a freshly allocated window.
+// through an atomic pointer, and only the blockfetch handler mutates its
+// counters, so remaining and blocksSeen need no further synchronization:
+// arming always installs a freshly allocated window.
+//
+// The producer set is the exception, and producedTxsMutex is why. A rearm
+// carries the outgoing window's producers forward (see armContinuationAudit),
+// and it runs on the chainsync dispatch goroutine under chainsyncMutex while
+// the blockfetch goroutine is still recording producers into that same window
+// under chainsyncBlockfetchMutex. Neither of those locks covers both accesses,
+// and a concurrent map iteration and write is fatal at runtime -- the same
+// hazard bufferedHeaderMutex exists for. Reach producedTxs only through the
+// methods below; the mutex is a leaf, taken around map access alone.
 type continuationAuditWindow struct {
-	producedTxs map[string]struct{}
+	producedTxsMutex sync.Mutex
+	// producedTxs maps an in-window producer's transaction id to the slot of
+	// the block that delivered it. The slot is what lets a rearm tell the
+	// producers its own rollback just truncated off the chain from the ones
+	// still on it.
+	producedTxs map[string]uint64
 	forkPoint   ocommon.Point
 	forkReason  string
 	forkPeer    string
 	remaining   int
 	blocksSeen  int
+}
+
+// recordProducers records every transaction in a body as an in-window
+// producer at slot, and reports the resulting producer count. It records
+// nothing and reports false when the body would take the set past
+// continuationAuditMaxProducedTxs.
+func (w *continuationAuditWindow) recordProducers(
+	txs []lcommon.Transaction,
+	slot uint64,
+) (int, bool) {
+	w.producedTxsMutex.Lock()
+	defer w.producedTxsMutex.Unlock()
+	if len(w.producedTxs)+len(txs) > continuationAuditMaxProducedTxs {
+		return len(w.producedTxs), false
+	}
+	for _, tx := range txs {
+		w.producedTxs[string(tx.Hash().Bytes())] = slot
+	}
+	return len(w.producedTxs), true
+}
+
+// hasProducer reports whether txId was delivered as a producer in this window.
+func (w *continuationAuditWindow) hasProducer(txId string) bool {
+	w.producedTxsMutex.Lock()
+	defer w.producedTxsMutex.Unlock()
+	_, ok := w.producedTxs[txId]
+	return ok
+}
+
+// producersAtOrBelow copies out the producers delivered by blocks at or below
+// slot. The copy is what the next window owns, so the two windows never share
+// a map.
+func (w *continuationAuditWindow) producersAtOrBelow(
+	slot uint64,
+) map[string]uint64 {
+	w.producedTxsMutex.Lock()
+	defer w.producedTxsMutex.Unlock()
+	carried := make(map[string]uint64, len(w.producedTxs))
+	for txId, producedAt := range w.producedTxs {
+		if producedAt <= slot {
+			carried[txId] = producedAt
+		}
+	}
+	return carried
 }
 
 // armContinuationAudit starts a bounded continuation audit at a rollback point.
@@ -87,15 +146,24 @@ type continuationAuditWindow struct {
 // reporting it as a missing producer the moment something after it is
 // audited under the new window (issue #4102).
 //
-// carryForwardProducedTxs decides when that discard is actually safe. The
-// primary chain is a single linear structure: if the prior window's fork
-// point is still resolvable on it, right now, at its recorded slot, then it
-// was never removed by an intervening deeper rollback, so it must still sit
-// below the new arming point, and every producer it already vetted remains
-// legitimate evidence rather than baggage from an abandoned fork. When the
-// lookup fails or disagrees, the prior window's fork point is gone -- an
-// intervening rollback truncated past it -- and starting empty is what keeps
-// the audit sound against a genuinely different fork.
+// carryForwardProducedTxs decides which of the prior window's producers
+// survive that, and a producer survives only when both of these hold.
+//
+// The prior window's fork point is still resolvable on the primary chain at
+// its recorded slot. The primary chain is a single linear structure, so a
+// fork point still on it was never removed by an intervening rollback, and
+// the producers recorded against it describe this chain rather than one the
+// node has since abandoned wholesale.
+//
+// And the producer's own block is at or below this rollback point. A rollback
+// deletes every block above its point, so producers recorded above it are
+// exactly the ones this rollback just abandoned: a body spending one of them
+// is spending an output no longer on the local chain, which is the splice the
+// audit exists to report, and the peer re-delivers the blocks that do belong
+// above the point so their producers are re-recorded under the new window.
+// Producers at or below the point are untouched by the truncation, stay on
+// the chain, and are never re-fetched -- so nothing else would ever put them
+// back, and dropping them is what produced the false report in issue #4102.
 func (ls *LedgerState) armContinuationAudit(
 	point ocommon.Point,
 	reason string,
@@ -106,10 +174,10 @@ func (ls *LedgerState) armContinuationAudit(
 			forkPeer = connId.String()
 		}
 	}
-	producedTxs := make(map[string]struct{})
+	producedTxs := make(map[string]uint64)
 	if prior := ls.continuationAudit.Load(); prior != nil {
-		for txId := range ls.carryForwardProducedTxs(prior) {
-			producedTxs[txId] = struct{}{}
+		if carried := ls.carryForwardProducedTxs(prior, point); carried != nil {
+			producedTxs = carried
 		}
 	}
 	ls.continuationAudit.Store(&continuationAuditWindow{
@@ -124,18 +192,19 @@ func (ls *LedgerState) armContinuationAudit(
 	})
 }
 
-// carryForwardProducedTxs returns prior's producer set when prior's fork
-// point is still resolvable on the current primary chain at its recorded
-// slot, and nil otherwise. See armContinuationAudit for why that check is
-// sufficient to prove the carried-forward producers are still legitimate.
+// carryForwardProducedTxs returns the producers prior recorded from blocks at
+// or below point, and nil when prior's fork point is no longer resolvable on
+// the primary chain at its recorded slot. See armContinuationAudit for why
+// those two conditions are what make a carried-forward producer legitimate.
 func (ls *LedgerState) carryForwardProducedTxs(
 	prior *continuationAuditWindow,
-) map[string]struct{} {
+	point ocommon.Point,
+) map[string]uint64 {
 	stillOnChain, err := ls.blockByHash(prior.forkPoint.Hash)
 	if err != nil || stillOnChain.Slot != prior.forkPoint.Slot {
 		return nil
 	}
-	return prior.producedTxs
+	return prior.producersAtOrBelow(point.Slot)
 }
 
 // auditContinuationBlock checks that every input a freshly fetched body spends
@@ -174,18 +243,16 @@ func (ls *LedgerState) auditContinuationBlock(
 	// transaction may spend an output created by an earlier one in the same
 	// block, and treating the whole block as a producer errs toward silence
 	// rather than toward a false report.
-	if len(window.producedTxs)+len(txs) > continuationAuditMaxProducedTxs {
+	producedTxs, recorded := window.recordProducers(txs, e.Point.Slot)
+	if !recorded {
 		ls.config.Logger.Debug(
 			"disarming cross-fork continuation audit: producer set at capacity",
 			"component", "ledger",
 			"blocks_audited", window.blocksSeen,
-			"produced_txs", len(window.producedTxs),
+			"produced_txs", producedTxs,
 		)
 		window.remaining = 0
 		return
-	}
-	for _, tx := range txs {
-		window.producedTxs[string(tx.Hash().Bytes())] = struct{}{}
 	}
 	reports := 0
 	inputsAudited := 0
@@ -256,7 +323,7 @@ func (ls *LedgerState) continuationInputHasProducer(
 	input lcommon.TransactionInput,
 ) (bool, error) {
 	producerId := input.Id().Bytes()
-	if _, ok := window.producedTxs[string(producerId)]; ok {
+	if window.hasProducer(string(producerId)) {
 		return true, nil
 	}
 	utxo, err := ls.db.UtxoByRef(producerId, input.Index(), nil)
