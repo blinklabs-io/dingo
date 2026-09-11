@@ -1817,9 +1817,22 @@ func TestReplayRecoveryFallbackWinsOverKnownProducer(t *testing.T) {
 
 	ls := newReplayRecoveryAuditLedger(t, true)
 	knownTxHash := testHashBytes("known-replay-producer")
-	parentHash := testHashBytes("audit-parent")
+	producerBlock := testRawBlock(
+		"pruned-known-producer",
+		90,
+		99,
+		testHashBytes("pruned-known-parent"),
+	)
+	require.NoError(t, ls.db.BlockCreate(models.Block{
+		Hash:     producerBlock.Hash,
+		PrevHash: producerBlock.PrevHash,
+		Cbor:     producerBlock.Cbor,
+		Slot:     producerBlock.Slot,
+		Number:   producerBlock.BlockNumber,
+		Type:     producerBlock.Type,
+	}, nil))
 	seedReplayRecoveryTransaction(
-		t, ls.db, knownTxHash, parentHash, 100,
+		t, ls.db, knownTxHash, producerBlock.Hash, producerBlock.Slot,
 	)
 
 	candidate, err := ls.findReplayRecoveryCandidate(&txValidationError{
