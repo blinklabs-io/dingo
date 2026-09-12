@@ -94,12 +94,27 @@ fi
 if [[ "${ACCELERATED}" == "true" ]]; then
   ACTIVE_SPEC="${ACCELERATED_SPEC}"
   export DEVNET_ACCELERATED=1
+  # docker-compose.yml's checked-in TXPUMP_CONFIRMATION_SLOTS default (600)
+  # is tuned for the canonical profile's 1s slot length (a 600s
+  # confirmation window). Both accelerated specs use a 0.5s slot length,
+  # so the same slot count reaches a 300s window -- exactly
+  # ReferenceRunnerBudget, the accelerated scenario's hard timeout. Once
+  # txpump's funded outputs are all inside that window it stops
+  # submitting, silently starving the propagation phase (dingo#4215).
+  # Override it here so the accelerated window stays well inside budget;
+  # TestAcceleratedTxPumpConfirmationWindowFitsBudget in config_test.go
+  # checks this value against each accelerated spec's own slot length.
+  export TXPUMP_CONFIRMATION_SLOTS=60
 else
   ACTIVE_SPEC="${CANONICAL_SPEC}"
   # Only --accelerated enables the accelerated scenario. Inheriting a stale
   # DEVNET_ACCELERATED=1 would run it against the canonical-timing network,
   # whose budget it is designed not to meet, failing the whole suite.
   unset DEVNET_ACCELERATED
+  # Likewise, never inherit a stale accelerated override into a canonical
+  # run: docker-compose.yml's ${TXPUMP_CONFIRMATION_SLOTS:-600} must fall
+  # through to its checked-in default here.
+  unset TXPUMP_CONFIRMATION_SLOTS
 fi
 export "${SPEC_VAR}=${ACTIVE_SPEC}"
 export DEVNET_TESTNET_YAML="${SCRIPT_DIR}/${ACTIVE_SPEC#./}"

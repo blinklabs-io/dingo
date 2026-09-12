@@ -17,6 +17,7 @@
 package devnet
 
 import (
+	"fmt"
 	"os"
 	"regexp"
 	"slices"
@@ -69,6 +70,58 @@ func TestAcceleratedSpecsMeetTheRunnerBudget(t *testing.T) {
 			plan, err := NewScenarioPlan(cfg)
 			require.NoError(t, err)
 			require.LessOrEqual(t, plan.Total(), ReferenceRunnerBudget)
+		})
+	}
+}
+
+// TestAcceleratedTxPumpConfirmationWindowFitsBudget guards the fix for
+// dingo#4215: TXPUMP_CONFIRMATION_SLOTS's checked-in Compose default (600)
+// is tuned for the canonical profile's 1s slot length, giving a 600s
+// confirmation window. Both accelerated specs use a 0.5s slot length, so
+// the same slot count reaches a 300s window -- exactly
+// ReferenceRunnerBudget, the accelerated scenario's hard timeout. Once
+// txpump's funded outputs are all inside that window it stops submitting,
+// silently starving the propagation phase.
+//
+// run-tests.sh overrides TXPUMP_CONFIRMATION_SLOTS for --accelerated runs;
+// this test converts that override with each accelerated spec's own slot
+// length and fails if the resulting window is not well inside the hard
+// timeout, regardless of what slot length a future accelerated spec picks.
+func TestAcceleratedTxPumpConfirmationWindowFitsBudget(t *testing.T) {
+	data, err := os.ReadFile("run-tests.sh")
+	require.NoError(t, err)
+
+	overrideRe := regexp.MustCompile(
+		`(?m)^\s*export TXPUMP_CONFIRMATION_SLOTS=(\d+)\s*$`)
+	match := overrideRe.FindStringSubmatch(string(data))
+	require.NotEmpty(t, match,
+		"run-tests.sh must export an accelerated TXPUMP_CONFIRMATION_SLOTS"+
+			" override; without one, docker-compose.yml's checked-in 600"+
+			" default (tuned for the canonical 1s slot) applies to the"+
+			" accelerated profile too, reaching ReferenceRunnerBudget")
+	overrideSlots, err := strconv.ParseUint(match[1], 10, 64)
+	require.NoError(t, err)
+
+	for _, file := range []string{
+		"testnet-accelerated.yaml",
+		"testnet-dingo-accelerated.yaml",
+	} {
+		t.Run(file, func(t *testing.T) {
+			cfg, err := LoadDevNetConfigFrom(file)
+			require.NoError(t, err)
+
+			window := SlotsDuration(overrideSlots, cfg.SlotDuration())
+			require.Less(t, window, ReferenceRunnerBudget,
+				"%s: a %d-slot confirmation window at a %s slot length is"+
+					" %s, which reaches the %s accelerated hard timeout;"+
+					" txpump goes silent once every funded output is"+
+					" quarantined",
+				file, overrideSlots, cfg.SlotDuration(), window,
+				ReferenceRunnerBudget)
+			require.LessOrEqual(t, window, ReferenceRunnerBudget/2,
+				"%s: confirmation window %s should stay well inside the"+
+					" %s hard timeout, not merely under it",
+				file, window, ReferenceRunnerBudget)
 		})
 	}
 }
@@ -188,6 +241,37 @@ func requireComposeEnvInt(
 	require.Equal(t, want, got, message)
 }
 
+// requireComposeEnvDefaultInt asserts that a Compose environment value uses
+// the "${key:-N}" substitution form and that its fallback N equals want.
+// TXPUMP_CONFIRMATION_SLOTS uses this form, rather than a bare literal, so
+// run-tests.sh can override it for the accelerated profile without moving
+// the checked-in canonical default; see
+// TestAcceleratedTxPumpConfirmationWindowFitsBudget.
+func requireComposeEnvDefaultInt(
+	t *testing.T,
+	service string,
+	environment map[string]string,
+	key string,
+	want int,
+	message string,
+) {
+	t.Helper()
+	raw, ok := environment[key]
+	require.True(t, ok, "Compose service %s must define %s", service, key)
+
+	pattern := fmt.Sprintf(`^\$\{%s:-(-?\d+)\}$`, regexp.QuoteMeta(key))
+	match := regexp.MustCompile(pattern).FindStringSubmatch(raw)
+	require.NotEmpty(t, match,
+		`Compose service %s setting %s must be "${%s:-N}", got %q`,
+		service, key, key, raw)
+
+	got, err := strconv.Atoi(match[1])
+	require.NoError(t, err,
+		"Compose service %s setting %s default must be an integer",
+		service, key)
+	require.Equal(t, want, got, message)
+}
+
 func loadComposeTxPumpEnvironments(t *testing.T) map[string]map[string]string {
 	t.Helper()
 	composeData, err := os.ReadFile("docker-compose.yml")
@@ -233,9 +317,12 @@ func TestComposeTxPumpSubmitsOneTransactionPerBatch(t *testing.T) {
 					"DevNet txpump batches must not create unconfirmed dependency chains",
 				)
 			}
-			requireComposeEnvInt(t, service, environment,
+			requireComposeEnvDefaultInt(t, service, environment,
 				"TXPUMP_CONFIRMATION_SLOTS", 600,
-				"submitted outputs must remain quarantined across early forks")
+				"submitted outputs must remain quarantined across early"+
+					" forks on the canonical profile; the accelerated"+
+					" profile overrides this via run-tests.sh, checked by"+
+					" TestAcceleratedTxPumpConfirmationWindowFitsBudget")
 		})
 	}
 }
