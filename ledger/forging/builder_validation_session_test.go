@@ -42,11 +42,22 @@ type sessionMockTxValidator struct {
 	// parameter change) landing while transaction selection is still in
 	// progress.
 	staleAfterCalls int
+	// alwaysStale makes stillCurrent() report false from the moment the
+	// session opens, so a test can prove a candidate that validates
+	// nothing never consults it.
+	alwaysStale bool
 	// onValidate, when set, runs synchronously inside each validate call
 	// with the 1-indexed call number. Tests use it to mutate shared state
 	// (e.g. the chain tip) partway through selection, deterministically,
 	// rather than racing real goroutines against a sleep.
 	onValidate func(callNumber int)
+	// validateErr, when set, decides the result of each validate call by
+	// transaction hash, so a test can reject one candidate and accept the
+	// rest the way a UTxO consumed since mempool admission does.
+	validateErr func(txHash string) error
+	// validatedHashes records the hash of every transaction actually
+	// re-validated, so a test can prove which candidates paid for it.
+	validatedHashes []string
 }
 
 func (v *sessionMockTxValidator) ValidateTx(tx ledger.Transaction) error {
@@ -76,9 +87,9 @@ func (v *sessionMockTxValidator) WithTxValidationSession(
 	) error,
 ) error {
 	v.sessions++
-	stale := false
+	stale := v.alwaysStale
 	validate := func(
-		_ ledger.Transaction,
+		tx ledger.Transaction,
 		_ map[string]struct{},
 		_ map[string]lcommon.Utxo,
 	) error {
@@ -88,6 +99,15 @@ func (v *sessionMockTxValidator) WithTxValidationSession(
 		}
 		if v.staleAfterCalls > 0 && v.validateCalls >= v.staleAfterCalls {
 			stale = true
+		}
+		if tx != nil {
+			v.validatedHashes = append(
+				v.validatedHashes,
+				tx.Hash().String(),
+			)
+		}
+		if v.validateErr != nil && tx != nil {
+			return v.validateErr(tx.Hash().String())
 		}
 		return nil
 	}

@@ -1580,7 +1580,13 @@ func TestCheckAndForgeProductionCertifiesLeiosEBAfterAdoption(t *testing.T) {
 			}
 			require.Equal(t, []lcommon.Blake2b256{ebHash}, leiosCerts.marked)
 			require.Equal(t, []uint64{9}, leiosCerts.markedSlots)
-			require.Equal(t, 1, parent.calls)
+			// Twice: once resolving the payload, and once re-checking the
+			// parent immediately before the build. This block carries a
+			// certificate, which is bound to the parent it was selected
+			// for, so the forge confirms the parent has not moved across
+			// endorser-block production before committing to it. See
+			// buildBlockForSlot.
+			require.Equal(t, 2, parent.calls)
 			// CertifiedEndorserBlockTxHashes must be called with the
 			// eligible certificate's own slot (9, from eb.SlotNo above), not
 			// the forged ranking block's slot (10) or zero: the manifest is
@@ -1674,5 +1680,7 @@ func TestCheckAndForgeProductionCertifiesOnlyParentAnnouncedLeiosEB(
 	require.Same(t, parentCert, builder.leiosData.Certificate)
 	require.Equal(t, []lcommon.Blake2b256{parentHash}, leiosCerts.marked)
 	require.Equal(t, []uint64{9}, leiosCerts.markedSlots)
-	require.Equal(t, 1, parent.calls)
+	// Twice: the payload resolution, plus the pre-build parent re-check that
+	// protects the certificate this block carries. See buildBlockForSlot.
+	require.Equal(t, 2, parent.calls)
 }
