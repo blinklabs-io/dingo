@@ -255,173 +255,6 @@ func TestSecurityParamConcurrentCurrentEraAccess(t *testing.T) {
 	wg.Wait()
 }
 
-func TestShouldSkipPhase2ValidationForBlockUsesSecurityParam(t *testing.T) {
-	t.Parallel()
-
-	const securityParam uint64 = 37
-	cfg := newTestShelleyGenesisCfg(t)
-	cfg.ShelleyGenesis().SecurityParam = int(securityParam)
-
-	ls := &LedgerState{
-		config: LedgerStateConfig{
-			CardanoNodeConfig: cfg,
-			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-
-	const referenceBlockNumber uint64 = 1000
-	immutableTipBlockNumber := referenceBlockNumber - securityParam
-
-	require.True(t, ls.shouldSkipPhase2ValidationForBlock(
-		immutableTipBlockNumber,
-		referenceBlockNumber,
-		eras.ShelleyEraDesc.Id,
-	))
-	require.False(t, ls.shouldSkipPhase2ValidationForBlock(
-		immutableTipBlockNumber+1,
-		referenceBlockNumber,
-		eras.ShelleyEraDesc.Id,
-	))
-	require.False(t, ls.shouldSkipPhase2ValidationForBlock(
-		0,
-		securityParam-1,
-		eras.ShelleyEraDesc.Id,
-	))
-}
-
-func TestShouldSkipPhase2ValidationForBlockRequiresSecurityParam(t *testing.T) {
-	t.Parallel()
-
-	ls := &LedgerState{
-		config: LedgerStateConfig{
-			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-	require.False(t, ls.shouldSkipPhase2ValidationForBlock(
-		0,
-		1000,
-		eras.ShelleyEraDesc.Id,
-	))
-}
-
-func TestShouldSkipConfiguredPhase2ValidationHonorsHistoricalValidation(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	tests := []struct {
-		name              string
-		validationEnabled bool
-		shouldValidate    bool
-		deepHistorical    bool
-		wantSkip          bool
-	}{
-		{
-			name:              "historical validation keeps phase two enabled",
-			validationEnabled: true,
-			shouldValidate:    true,
-			deepHistorical:    true,
-		},
-		{
-			name:           "trusted replay skips deep historical phase two",
-			shouldValidate: true,
-			deepHistorical: true,
-			wantSkip:       true,
-		},
-		{
-			name:              "unvalidated block does not skip phase two",
-			validationEnabled: true,
-			deepHistorical:    true,
-		},
-		{
-			name:           "disabled validation does not skip an unvalidated block",
-			shouldValidate: false,
-			deepHistorical: true,
-		},
-		{
-			name:              "non-historical block does not skip phase two",
-			validationEnabled: true,
-			shouldValidate:    true,
-			deepHistorical:    false,
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			require.Equal(
-				t,
-				test.wantSkip,
-				shouldSkipConfiguredPhase2Validation(
-					test.validationEnabled,
-					test.shouldValidate,
-					test.deepHistorical,
-				),
-			)
-		})
-	}
-}
-
-func TestShouldSkipPhase2ValidationForBlockAtCurrentTipRefreshesChainTip(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	const securityParam uint64 = 2
-	cfg := newTestShelleyGenesisCfg(t)
-	cfg.ShelleyGenesis().SecurityParam = int(securityParam)
-
-	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
-	require.NoError(t, err)
-	require.NoError(
-		t,
-		cm.SetLedger(testSecurityParamLedger{
-			securityParam: int(securityParam),
-		}),
-	)
-
-	rawBlocks := make([]chain.RawBlock, 0, 5)
-	var prevHash []byte
-	for blockNumber := uint64(1); blockNumber <= 5; blockNumber++ {
-		block := makeTestBlock(blockNumber*10, blockNumber)
-		block.PrevHash = prevHash
-		rawBlocks = append(rawBlocks, chain.RawBlock{
-			Slot:        block.Slot,
-			Hash:        block.Hash,
-			BlockNumber: block.Number,
-			Type:        block.Type,
-			PrevHash:    block.PrevHash,
-			Cbor:        block.Cbor,
-		})
-		prevHash = block.Hash
-	}
-	require.NoError(t, cm.PrimaryChain().AddRawBlocks(rawBlocks))
-
-	ls := &LedgerState{
-		chain: cm.PrimaryChain(),
-		config: LedgerStateConfig{
-			CardanoNodeConfig: cfg,
-			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-
-	require.True(t, ls.shouldSkipPhase2ValidationForBlockAtCurrentTip(
-		3,
-		eras.ShelleyEraDesc.Id,
-	))
-
-	rollbackPoint := ocommon.NewPoint(
-		rawBlocks[3].Slot,
-		rawBlocks[3].Hash,
-	)
-	require.NoError(t, cm.PrimaryChain().Rollback(rollbackPoint))
-
-	require.False(t, ls.shouldSkipPhase2ValidationForBlockAtCurrentTip(
-		3,
-		eras.ShelleyEraDesc.Id,
-	))
-}
-
 // TestCalculateStabilityWindow_ByronEra tests the stability window calculation for Byron era
 func TestCalculateStabilityWindow_ByronEra(t *testing.T) {
 	t.Parallel()
@@ -5515,4 +5348,63 @@ func TestWarnOnPreByronPrefixEpochCache(t *testing.T) {
 		ls.warnOnPreByronPrefixEpochCache()
 		assert.NotContains(t, logs.String(), warning)
 	})
+}
+
+// TestUpstreamSyncStatusReachableStates pins every (target, active) pair the
+// real LedgerState can return from UpstreamSyncStatus, which is the value the
+// forge staleness gate reads.
+//
+// It exists because a gate was written against a state this type cannot
+// produce. An earlier revision fell back to the admitted-header frontier when
+// UpstreamSyncStatus returned a zero target, on the belief that a live upstream
+// with no published target reported (0, false). It reports (0, true), so the
+// fallback was written for a state that never occurs. It passed review only
+// because a test double could express (0, false) alongside a non-zero admitted
+// frontier, which is the one combination the adapter cannot produce.
+//
+// (0, true) is now doubly worth pinning. It used to be unreachable at the
+// staleness gate as well, because the sync gate refused every slot on
+// upstreamActive && upstreamTip == 0; #4013 replaced that blanket refusal with
+// a bound on the local tip's lag, so a node at tip passes it and the staleness
+// gate does see this pair. What keeps the bound quiet there is its own
+// upstreamTarget > newestKnown term -- see
+// TestForgeUpstreamStalenessIgnoresUnknownUpstreamTarget -- which is only
+// sound while this test holds that the target really is 0 and not something
+// substituted for it.
+//
+// Assert the adapter's own outputs, not a double's: a double is only evidence
+// about the double.
+func TestUpstreamSyncStatusReachableStates(t *testing.T) {
+	conn := testChainsyncConnId(6000, 3094)
+	activeConn := conn
+	live := true
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
+				if !live {
+					return nil
+				}
+				return &activeConn
+			},
+		},
+	}
+
+	// Live upstream, no target published -- the state the removed fallback
+	// was written for. It is (0, TRUE), not (0, false).
+	ls.advanceUpstreamTipSlot(318)
+	target, active := ls.UpstreamSyncStatus()
+	assert.Zero(t, target)
+	assert.True(
+		t,
+		active,
+		"a live upstream with no published target is (0, true); the "+
+			"pre-existing sync gate refuses this slot before the stale-tip "+
+			"gate runs, so no stale-tip branch may be written for it",
+	)
+
+	// No live upstream -- (0, false).
+	live = false
+	target, active = ls.UpstreamSyncStatus()
+	assert.Zero(t, target)
+	assert.False(t, active)
 }

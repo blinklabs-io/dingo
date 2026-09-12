@@ -359,7 +359,9 @@ func (n *Node) initBlockForger(
 	}
 
 	// Always enforce aggregate reference-script limits before AddBlock.
-	// Header crypto and per-transaction self-validation remain opt-in.
+	// Full self-validation (header crypto, body-hash, per-tx ledger checks)
+	// runs too unless the operator explicitly opts out (issue #3528: fail
+	// closed by default).
 	blockValidator := newForgedBlockValidator(
 		n.ledgerState,
 		n.config.validateForgedBlock,
@@ -367,17 +369,26 @@ func (n *Node) initBlockForger(
 
 	// Create the block forger with the real leader election
 	forger, err := forging.NewBlockForger(forging.ForgerConfig{
-		Mode:                            forging.ModeProduction,
-		Logger:                          n.config.logger,
-		Credentials:                     creds,
-		LeaderChecker:                   election,
-		BlockBuilder:                    builder,
-		BlockBroadcaster:                broadcaster,
-		ConfirmedTxs:                    mempoolAdapter,
-		BlockForged:                     blockForged,
-		SlotClock:                       slotClock,
-		ForgeSyncToleranceSlots:         n.config.forgeSyncToleranceSlots,
-		ForgeStaleGapThresholdSlots:     n.config.forgeStaleGapThresholdSlots,
+		Mode:                               forging.ModeProduction,
+		Logger:                             n.config.logger,
+		Credentials:                        creds,
+		LeaderChecker:                      election,
+		BlockBuilder:                       builder,
+		BlockBroadcaster:                   broadcaster,
+		ConfirmedTxs:                       mempoolAdapter,
+		BlockForged:                        blockForged,
+		SlotClock:                          slotClock,
+		ForgeSyncToleranceSlots:            n.config.forgeSyncToleranceSlots,
+		ForgeStaleGapThresholdSlots:        n.config.forgeStaleGapThresholdSlots,
+		ForgePrimaryChainTipToleranceSlots: n.config.forgePrimaryChainTipToleranceSlots,
+		ForgeUpstreamStalenessSlots:        n.config.forgeUpstreamStalenessSlots,
+		ForgeAppliedTipStalenessSlots:      n.config.forgeAppliedTipStalenessSlots,
+		ForgeEndorserBlockStalenessSlots:   n.config.forgeEndorserBlockStalenessSlots,
+		// Closure, not a method value: n.ouroboros is rebuilt live, so this
+		// resolves the current instance when the forge loop asks.
+		LeiosVerifiedEbSlot: func() uint64 {
+			return n.ouroboros().MaxVerifiedEndorserBlockSlot()
+		},
 		BlockValidator:                  blockValidator,
 		ForgeFence:                      forgeFence,
 		PromRegistry:                    n.config.promRegistry,
@@ -751,24 +762,31 @@ func (a *slotClockAdapter) SlotsPerKESPeriod() uint64 {
 	return a.ledgerState.SlotsPerKESPeriod()
 }
 
-func (a *slotClockAdapter) ChainTipSlot() uint64 {
-	return a.ledgerState.ChainTipSlot()
+// ChainTip returns the ledger-applied tip. LedgerState.Tip reads one atomic
+// tip snapshot, so the returned slot and hash are always from the same tip.
+func (a *slotClockAdapter) ChainTip() ocommon.Point {
+	return a.ledgerState.Tip().Point
 }
 
-// ChainTipHash satisfies forging.ChainTipHashProvider. It lets the
-// forger tell its own block at the current slot from a rival's by hash
-// rather than inferring it from the forge fence, which is in-memory only
-// when no fence store is wired. Both this and ChainTipSlot read the same
-// tip snapshot; a tip that moves between the two reads simply fails the
-// hash match and falls back to the fence.
+// ChainTipHash satisfies the deprecated forging.ChainTipHashProvider. The
+// forger no longer calls it: it takes the tip hash from ChainTip above,
+// which returns slot and hash from one snapshot. Kept so the adapter still
+// satisfies that exported interface for any external caller.
 func (a *slotClockAdapter) ChainTipHash() []byte {
 	return a.ledgerState.Tip().Point.Hash
 }
 
-// The forger type-asserts for this optional interface, so losing the
-// method would silently fall back to the fence rather than fail to
-// build.
 var _ forging.ChainTipHashProvider = (*slotClockAdapter)(nil)
+
+// PrimaryChainTip returns the primary chain's BLOCK tip -- chain.Tip(), the
+// newest block added to the chain, which runs ahead of the ledger-applied tip
+// while the pipeline replays. It is NOT the header frontier: that is
+// chain.HeaderTip(), and nothing in the forge gate reads it. The primary chain
+// returns its tip under one lock, so the returned slot and hash are always
+// from the same tip.
+func (a *slotClockAdapter) PrimaryChainTip() ocommon.Point {
+	return a.ledgerState.PrimaryChainTip().Point
+}
 
 func (a *slotClockAdapter) NextSlotTime() (time.Time, error) {
 	return a.ledgerState.NextSlotTime()

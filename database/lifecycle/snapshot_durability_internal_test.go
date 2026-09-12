@@ -120,7 +120,11 @@ func TestSnapshotInterruptedBeforeManifest(t *testing.T) {
 		t.Run(stage, func(t *testing.T) {
 			base := t.TempDir()
 			dir := filepath.Join(base, "interrupted")
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			// The child creates a fully migrated test database before it
+			// reaches the injected interruption point. That setup can exceed
+			// 30 seconds on Windows, so keep a bounded but sufficiently large
+			// deadline for the subprocess.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSnapshotInterruptedBeforeManifest$")
 			cmd.Env = append(os.Environ(), "TMPDIR="+base, "TMP="+base, "TEMP="+base, "DINGO_SNAPSHOT_INTERRUPT_STAGE="+stage, "DINGO_SNAPSHOT_INTERRUPT_DIR="+dir)

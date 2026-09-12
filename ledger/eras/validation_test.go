@@ -370,6 +370,16 @@ func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 	// that its CEK steps remain in the trailing slippage batch. Haskell flushes
 	// that batch on a successful return, producing the complete 112100 CPU / 800
 	// memory cost.
+	//
+	// The CostModels entries below use defaultMachineCostModel, which pins
+	// plutigo's real cek.DefaultMachineCosts values (see that helper's doc
+	// comment): this script never invokes an actual builtin function, only
+	// CEK machine steps, so it reproduces the exact 112100/800 numbers
+	// plutigo's own default cost model already produced before
+	// requiredCostModel (issue #3528) started rejecting the incomplete
+	// cost models that used to silently trigger that fallback. These
+	// numbers would still change if plutigo's DefaultMachineCosts changes,
+	// same as before.
 	program := &syn.Program[syn.DeBruijn]{
 		Version: lang.LanguageVersionV1,
 		Term: &syn.Lambda[syn.DeBruijn]{
@@ -400,6 +410,9 @@ func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 					&alonzo.AlonzoProtocolParameters{
 						ProtocolMajor: 5,
 						MaxTxExUnits:  maxTxExUnits,
+						CostModels: map[uint][]int64{
+							0: defaultMachineCostModel(t, lang.LanguageVersionV1),
+						},
 					},
 				)
 			},
@@ -417,6 +430,9 @@ func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 					&babbage.BabbageProtocolParameters{
 						ProtocolMajor: 7,
 						MaxTxExUnits:  maxTxExUnits,
+						CostModels: map[uint][]int64{
+							1: defaultMachineCostModel(t, lang.LanguageVersionV2),
+						},
 					},
 				)
 			},
