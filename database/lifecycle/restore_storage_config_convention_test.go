@@ -35,9 +35,9 @@ import (
 const restoreStorageConfigAllowBareMarker = "restoreconfig:zero-value-required"
 
 // restoreFuncNames are lifecycle's exported entry points whose final
-// parameter is a RestoreStorageConfig (see restore.go). Passing a bare
-// RestoreStorageConfig{} to any of them resolves the blob/metadata plugins
-// with a nil provider config, which for badger means the production 1 GiB
+// parameter is a RestoreStorageConfig (see restore.go). Passing one without
+// Blob to any of them resolves the blob plugin with a nil provider config,
+// which for badger means the production 1 GiB
 // value log / 128 MiB memtable defaults -- badger maps the value log at
 // twice that, so 2 GiB is really reserved the moment the store opens. On
 // Windows that reservation is not sparse, and it is real for as long as
@@ -53,8 +53,9 @@ var restoreFuncNames = map[string]bool{
 
 // TestRestoreCallSitesUseBoundedBadgerConfig statically scans every test file
 // in this directory for a call to Restore, RestoreValidated, or
-// RestoreRecoverable that passes a bare RestoreStorageConfig{}, and fails
-// naming each one found -- unless the line carries
+// RestoreRecoverable whose RestoreStorageConfig literal sets no Blob --
+// including the bare RestoreStorageConfig{} and a Metadata-only literal --
+// and fails naming each one found, unless the line carries
 // restoreStorageConfigAllowBareMarker.
 //
 // A runtime assertion cannot make this same distinction: badger truncates its
@@ -66,6 +67,8 @@ var restoreFuncNames = map[string]bool{
 // regression of a new or edited call site reintroducing the unbounded
 // default.
 func TestRestoreCallSitesUseBoundedBadgerConfig(t *testing.T) {
+	t.Parallel()
+
 	dir, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
@@ -100,8 +103,8 @@ func TestRestoreCallSitesUseBoundedBadgerConfig(t *testing.T) {
 			}
 			for _, arg := range call.Args {
 				lit, ok := arg.(*ast.CompositeLit)
-				if !ok || len(lit.Elts) != 0 ||
-					!isRestoreStorageConfigType(lit.Type) {
+				if !ok || !isRestoreStorageConfigType(lit.Type) ||
+					setsBlob(lit) {
 					continue
 				}
 				pos := fset.Position(lit.Pos())
@@ -115,10 +118,10 @@ func TestRestoreCallSitesUseBoundedBadgerConfig(t *testing.T) {
 					continue
 				}
 				violations = append(violations, fmt.Sprintf(
-					"%s:%d: bare RestoreStorageConfig{} resolves the "+
-						"restore's blob store with badger's unbounded "+
-						"default sizes; pass RestoreStorageConfig{Blob: "+
-						"testutil.BadgerBlobConfig()}, or mark the line "+
+					"%s:%d: RestoreStorageConfig without Blob resolves "+
+						"the restore's blob store with badger's unbounded "+
+						"default sizes; set Blob: "+
+						"testutil.BadgerBlobConfig(), or mark the line "+
 						"with %q if the target host's provider ignores "+
 						"its config",
 					name, pos.Line, restoreStorageConfigAllowBareMarker,
@@ -154,6 +157,22 @@ func isRestoreStorageConfigType(expr ast.Expr) bool {
 		return t.Name == "RestoreStorageConfig"
 	case *ast.SelectorExpr:
 		return t.Sel.Name == "RestoreStorageConfig"
+	}
+	return false
+}
+
+// setsBlob reports whether lit, a RestoreStorageConfig literal, supplies a
+// Blob provider config. An unkeyed literal with elements sets Blob, its
+// first field.
+func setsBlob(lit *ast.CompositeLit) bool {
+	for _, elt := range lit.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			return true
+		}
+		if key, ok := kv.Key.(*ast.Ident); ok && key.Name == "Blob" {
+			return true
+		}
 	}
 	return false
 }

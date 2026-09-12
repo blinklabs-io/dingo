@@ -192,6 +192,7 @@ func TestRestoreRejectsNonStringDataDirOverride(t *testing.T) {
 		snapshotDir,
 		targetDir,
 		lifecycle.RestoreStorageConfig{
+			Blob:     testutil.BadgerBlobConfig(),
 			Metadata: map[string]any{"dataDir": 42},
 		},
 	)
