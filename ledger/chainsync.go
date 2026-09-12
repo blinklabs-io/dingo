@@ -250,6 +250,13 @@ func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 	// node. See pendingPublishes.
 	var pending pendingPublishes
 	defer pending.flush()
+	// Every header-queue mutation below (admit, clear, fork replay,
+	// rollback) enqueues its chain.header event on the chain-level
+	// sequencer under c.mutex, which is what keeps announcements ordered
+	// against the invalidations that void them. Registering the drain here
+	// -- it is idempotent per chain -- means no individual mutation site
+	// has to remember to. See chain.Chain.PublishPendingChainUpdates.
+	pending.drainChain(ls.chain)
 	e, ok := evt.Data.(ChainsyncEvent)
 	if !ok {
 		ls.chainsyncMutex.Lock()
@@ -804,6 +811,11 @@ func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
 	// way. See pendingPublishes.
 	var pending pendingPublishes
 	defer pending.flush()
+	// Header-queue mutations enqueue their chain.header events on the
+	// chain-level sequencer; register the drain so they are published once
+	// the mutex is released. Idempotent per chain, and a missed drain only
+	// delays delivery -- the sequencer is FIFO, so order is never lost.
+	pending.drainChain(ls.chain)
 	ls.chainsyncBlockfetchMutex.Lock()
 	defer ls.chainsyncBlockfetchMutex.Unlock()
 	e, ok := evt.Data.(BlockfetchEvent)
@@ -902,6 +914,11 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 	// after the unlock. See pendingPublishes.
 	var pending pendingPublishes
 	defer pending.flush()
+	// Header-queue mutations enqueue their chain.header events on the
+	// chain-level sequencer; register the drain so they are published once
+	// the mutex is released. Idempotent per chain, and a missed drain only
+	// delays delivery -- the sequencer is FIFO, so order is never lost.
+	pending.drainChain(ls.chain)
 	var replayConnId ouroboros.ConnectionId
 	effectiveConnId := e.NewConnectionId
 	var effectiveObservedTip ochainsync.Tip
@@ -1030,6 +1047,17 @@ func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
 	if !ok {
 		return
 	}
+	// This handler discards the header queue when the dead connection owned
+	// the header pipeline, which queues a chain.header invalidation on the
+	// chain-level sequencer. Register the drain before the mutexes are taken
+	// so defer's LIFO order publishes it after they are released. Without
+	// it the invalidation waits for an unrelated handler to drain, and a
+	// peer stalling is exactly the case where no further event is
+	// guaranteed -- the announcement would stay armed past the vote window.
+	// See pendingPublishes and chain.Chain.PublishPendingChainUpdates.
+	var pending pendingPublishes
+	defer pending.flush()
+	pending.drainChain(ls.chain)
 	ls.chainsyncMutex.Lock()
 	defer ls.chainsyncMutex.Unlock()
 	ls.chainsyncBlockfetchMutex.Lock()
@@ -1411,6 +1439,20 @@ func (ls *LedgerState) bufferHeaderEvent(e ChainsyncEvent) {
 	ls.bufferedHeaderEvents[key] = events
 }
 
+// clearQueuedHeaders discards the header queue. Chain.ClearHeaders enqueues a
+// chain.header invalidation on the chain-level sequencer for the announcements
+// those headers carried, so every caller must ensure that sequencer is drained
+// once its own lock is released -- in practice by registering
+// pending.drainChain(ls.chain) in the handler that owns the call.
+//
+// The registration deliberately lives in the handlers rather than here. This
+// function has no access to the caller's pendingPublishes, and drainChain's
+// nil-receiver behaviour is to publish immediately; at all but two of its call
+// sites that would happen while chainsyncMutex or chainsyncBlockfetchMutex is
+// held, which is precisely the drain deadlock pendingPublishes exists to
+// prevent. Threading a required non-nil queue through all of them and their
+// callers would touch the most deadlock-sensitive code in the ledger for no
+// behavioural gain at the sites that already register it.
 func (ls *LedgerState) clearQueuedHeaders() {
 	ls.chain.ClearHeaders()
 	// The blockfetch range-failure record is deliberately NOT cleared here.
@@ -2065,6 +2107,11 @@ func (ls *LedgerState) replayBufferedHeadersAsync(
 		defer ls.replayWG.Done()
 		var pending pendingPublishes
 		defer pending.flush()
+		// Header-queue mutations enqueue their chain.header events on the
+		// chain-level sequencer; register the drain so they are published once
+		// the mutex is released. Idempotent per chain, and a missed drain only
+		// delays delivery -- the sequencer is FIFO, so order is never lost.
+		pending.drainChain(ls.chain)
 		ls.chainsyncMutex.Lock()
 		defer ls.chainsyncMutex.Unlock()
 		// Re-check after acquiring the mutex in case Close started
@@ -3063,6 +3110,11 @@ func (ls *LedgerState) RecoverAfterLocalRollback(
 ) LocalRollbackRecoveryResult {
 	var pending pendingPublishes
 	defer pending.flush()
+	// Header-queue mutations enqueue their chain.header events on the
+	// chain-level sequencer; register the drain so they are published once
+	// the mutex is released. Idempotent per chain, and a missed drain only
+	// delays delivery -- the sequencer is FIFO, so order is never lost.
+	pending.drainChain(ls.chain)
 	ls.chainsyncMutex.Lock()
 	defer ls.chainsyncMutex.Unlock()
 
@@ -3205,6 +3257,12 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	e ChainsyncEvent,
 	pending *pendingPublishes,
 ) error {
+	// Admitting, discarding or fork-replaying a header enqueues the
+	// matching chain.header event on the chain-level sequencer under
+	// c.mutex; register the drain so it is published once chainsyncMutex is
+	// released. Idempotent per chain. See
+	// chain.Chain.PublishPendingChainUpdates.
+	pending.drainChain(ls.chain)
 	// Detect connection switch so pipeline ownership is handed off
 	// even when the first post-switch event is a header rather than
 	// a rollback. Without this, headers from a newly-selected active
@@ -3382,7 +3440,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 			// chain and the peer's chain is ahead, we roll back to
 			// the common ancestor so chainsync can continue.
 			resolved, resolveErr := ls.tryResolveFork(
-				e, notFitErr, pending,
+				e, notFitErr, pending, headerCryptoVerified,
 			)
 			if resolveErr != nil {
 				if ls.headerMismatchCount > 0 {
@@ -3690,6 +3748,32 @@ func (ls *LedgerState) hasCachedEpochNonceForSlot(slot uint64) bool {
 	return err == nil && len(epoch.Nonce) > 0
 }
 
+// addForkPathHeader re-queues one header of a resolved fork path, carrying the
+// incoming header's crypto verdict but no other's.
+//
+// Only the header this ChainsyncEvent delivered was put through
+// chainsyncHeaderCryptoPolicy and verifyBlockHeaderOnlyCrypto by the admission
+// path above. The rest of forkPath is replayed out of recorded peer header
+// history, which does not retain a per-header verdict, so those are admitted
+// unverified exactly as they were before -- they are below the incoming header
+// and are announced, if at all, once blockfetch validates their blocks.
+//
+// This matters because Chain.addBlockHeader arms a Leios announcement only for
+// a crypto-verified header. Re-queueing the incoming header unverified here
+// would silently drop the announcement on the fork-resolution path, which is
+// precisely the near-tip reorg case where the vote window is still open.
+func (ls *LedgerState) addForkPathHeader(
+	forkEvent ChainsyncEvent,
+	incomingPoint ocommon.Point,
+	incomingCryptoVerified bool,
+) error {
+	if incomingCryptoVerified &&
+		pointMatches(forkEvent.Point, incomingPoint) {
+		return ls.chain.AddVerifiedBlockHeader(forkEvent.BlockHeader)
+	}
+	return ls.chain.AddBlockHeader(forkEvent.BlockHeader)
+}
+
 // tryResolveFork attempts to resolve a chain fork when an incoming header
 // doesn't fit the local chain tip. The incoming header's prevHash identifies
 // a block that exists on our local chain. If the peer's immediate prevHash
@@ -3706,6 +3790,7 @@ func (ls *LedgerState) tryResolveFork(
 	e ChainsyncEvent,
 	notFitErr chain.BlockNotFitChainTipError,
 	pending *pendingPublishes,
+	incomingCryptoVerified bool,
 ) (bool, error) {
 	localTip := ls.chain.Tip()
 	praosComparison := ls.compareIncomingHeaderToLocalTip(
@@ -3827,7 +3912,9 @@ func (ls *LedgerState) tryResolveFork(
 			"connection_id", e.ConnectionId.String(),
 		)
 		for _, forkEvent := range forkPath {
-			if err := ls.chain.AddBlockHeader(forkEvent.BlockHeader); err != nil {
+			if err := ls.addForkPathHeader(
+				forkEvent, e.Point, incomingCryptoVerified,
+			); err != nil {
 				ls.config.Logger.Warn(
 					"failed to queue header from fork extension",
 					"component", "ledger",
@@ -3993,7 +4080,9 @@ func (ls *LedgerState) tryResolveFork(
 	// works for one-block forks but fails once the winning fork is already
 	// several headers ahead.
 	for _, forkEvent := range forkPath {
-		if err := ls.chain.AddBlockHeader(forkEvent.BlockHeader); err != nil {
+		if err := ls.addForkPathHeader(
+			forkEvent, e.Point, incomingCryptoVerified,
+		); err != nil {
 			ls.config.Logger.Warn(
 				"failed to queue header after fork rollback",
 				"component", "ledger",
@@ -4707,6 +4796,19 @@ func (ls *LedgerState) startQueuedBlockfetchFromEventLocked(
 	go func() {
 		defer ls.blockfetchContinuationWG.Done()
 		var pending pendingPublishes
+		// This worker owns its pendingPublishes, so the drain registered
+		// by the handler that scheduled it does not cover anything this
+		// worker clears. Several paths below discard the header queue --
+		// the explicit failure branch, and noteBlockfetchRangeUnavailable
+		// reached through startQueuedBlockfetchOnLocked -- and
+		// Chain.ClearHeaders enqueues the announcements' invalidation on
+		// the chain-level sequencer. Undrained, those invalidations never
+		// reach the vote manager, which goes on holding votes armed for
+		// announcements whose ranking blocks were discarded. Registered
+		// here rather than beside each clear, as handleEventChainsync
+		// does, because the registration is idempotent per chain and the
+		// flush below already runs outside chainsyncBlockfetchMutex.
+		pending.drainChain(ls.chain)
 		ls.chainsyncBlockfetchMutex.Lock()
 		if ls.closed.Load() {
 			ls.blockfetchContinuationPending = false
@@ -6901,6 +7003,14 @@ func (ls *LedgerState) handleBlockfetchTimeoutLocked(
 	currentConnId ouroboros.ConnectionId,
 	pending *pendingPublishes,
 ) {
+	// This path discards the header queue and restarts blockfetch, both of
+	// which enqueue chain.header events on the chain-level sequencer. A
+	// blockfetch timeout means the peer stopped sending, so no later handler
+	// is guaranteed to drain it and an announcement would stay armed past
+	// the vote window. Registered here rather than in the timer callback so
+	// every caller of this function is covered. See
+	// chain.Chain.PublishPendingChainUpdates.
+	pending.drainChain(ls.chain)
 	if ls.blockfetchPrimaryRequestGeneration != 0 {
 		// The protocol request is still blocked outside the ledger mutex. Do
 		// not issue a duplicate range request while it is in flight; the

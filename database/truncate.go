@@ -15,11 +15,73 @@
 package database
 
 import (
+	"errors"
 	"fmt"
+	"sync"
+	"time"
 
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/prometheus/client_golang/prometheus"
 )
+
+// truncateAfterSlotDuration records how long a full TruncateAfterSlot sweep
+// takes. The sweep's cost is a function of table size rather than rollback
+// depth, so on a large metadata database a single depth-1 rollback can hold the
+// ledger write lock for tens of seconds. That window is not otherwise
+// observable: the ledger simply goes silent between "rolling back to X" and
+// "chain rolled back", and chainsync cannot make progress for its duration.
+//
+// The histogram is a package-level singleton rather than a promauto
+// registration so that registering the same or multiple registries never
+// panics; see RegisterBlockByHashMetrics for the same reasoning.
+var (
+	truncateAfterSlotDurationOnce sync.Once
+	truncateAfterSlotDuration     *prometheus.HistogramVec
+)
+
+// truncateResultSuccess and truncateResultFailure are the values of the
+// histogram's "result" label. A failed sweep can have a very different
+// duration profile from a successful one (it aborts at whichever sweep
+// failed), so mixing them into one distribution would misreport the
+// chain-freeze cost.
+const (
+	truncateResultSuccess = "success"
+	truncateResultFailure = "failure"
+)
+
+func truncateAfterSlotDurationHistogram() *prometheus.HistogramVec {
+	truncateAfterSlotDurationOnce.Do(func() {
+		truncateAfterSlotDuration = prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name: "dingo_database_truncate_after_slot_duration_seconds",
+				Help: "Duration of TruncateAfterSlot metadata rollback sweeps",
+				// 1ms to ~65s: a healthy rollback is milliseconds,
+				// a large-database sweep is tens of seconds.
+				Buckets: prometheus.ExponentialBuckets(0.001, 2, 17),
+			},
+			[]string{"result"},
+		)
+	})
+	return truncateAfterSlotDuration
+}
+
+// RegisterTruncateMetrics exposes the rollback-truncation duration histogram on
+// the given Prometheus registry. Registering the same registry more than once
+// is a no-op.
+func RegisterTruncateMetrics(reg prometheus.Registerer) error {
+	if reg == nil {
+		return nil
+	}
+	err := reg.Register(truncateAfterSlotDurationHistogram())
+	if err == nil {
+		return nil
+	}
+	if _, ok := errors.AsType[prometheus.AlreadyRegisteredError](err); !ok {
+		return err
+	}
+	return nil
+}
 
 // TruncateAfterSlot reverts all metadata rows and blob-referenced UTxO/
 // transaction CBOR added strictly after point.Slot: certificates, account
@@ -55,7 +117,55 @@ func (d *Database) TruncateAfterSlot(
 	point ocommon.Point,
 	mithrilFloor uint64,
 	txn *Txn,
-) (ochainsync.Tip, []byte, error) {
+) (retTip ochainsync.Tip, retNonce []byte, retErr error) {
+	started := time.Now()
+	// Set only when this call opened and committed its own transaction.
+	// Distinct from `owned`, which is also false when the caller supplied
+	// txn and therefore cannot express "durably committed here".
+	committedInternally := false
+	defer func() {
+		elapsed := time.Since(started)
+		// The duration is recorded either way -- a sweep that failed still
+		// held the ledger write lock for that long -- but under a label so
+		// success and failure are distinguishable.
+		result := truncateResultSuccess
+		if retErr != nil {
+			result = truncateResultFailure
+		}
+		truncateAfterSlotDurationHistogram().
+			WithLabelValues(result).
+			Observe(elapsed.Seconds())
+		if d.logger == nil {
+			return
+		}
+		// Logged at Info: the ledger holds its write lock across this call,
+		// so its duration is the length of a chain-freeze window and needs
+		// to be visible without enabling Debug.
+		//
+		// Note this reports the sweep, not the commit. When the caller
+		// supplies txn, it owns the commit and can still roll back after
+		// this returns, so the message deliberately says the sweep
+		// completed rather than claiming the truncation was durable.
+		if retErr != nil {
+			d.logger.Warn(
+				"metadata rollback truncation failed",
+				"component", "database",
+				"rollback_slot", point.Slot,
+				"duration", elapsed.String(),
+				"duration_seconds", elapsed.Seconds(),
+				"error", retErr,
+			)
+			return
+		}
+		d.logger.Info(
+			"metadata rollback truncation sweep complete",
+			"component", "database",
+			"rollback_slot", point.Slot,
+			"duration", elapsed.String(),
+			"duration_seconds", elapsed.Seconds(),
+			"committed", committedInternally,
+		)
+	}()
 	owned := false
 	if txn == nil {
 		txn = d.Transaction(true)
@@ -322,6 +432,7 @@ func (d *Database) TruncateAfterSlot(
 			)
 		}
 		owned = false
+		committedInternally = true
 	}
 	return newTip, newNonce, nil
 }
