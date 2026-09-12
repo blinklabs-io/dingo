@@ -557,6 +557,24 @@ block at the target is re-applied; when no such ancestor exists it fails with
 (issue #3678). `enforceDurableTipFloor` is the path that produces such a
 target.
 
+`rollbackWithResync` reloads `epochCache`, `currentEra`, `currentPParams` and
+the synthetic-PlutusV2-cost-model marker from the database *after* the
+metadata transaction that truncates it has already committed. A failure to
+reload any of them (a `GetEpochs` error, an unresolvable era ID, a
+`computePParams` error, or a failed marker read) cannot be treated as
+"nothing happened": the truncation is already durable, so leaving these
+caches at their pre-rollback values would validate later blocks against
+state the database no longer has. `rollbackWithResync` therefore invokes
+`LedgerStateConfig.FatalErrorFunc` directly for this class of failure — not
+merely returning an error and leaving escalation to whichever caller is on
+the stack — and reports it as a `rollbackCommittedError`, the same identity
+`enforceDurableTipFloor`'s own post-commit failure already uses. Calling
+`FatalErrorFunc` unconditionally from inside `rollbackWithResync` is what
+makes the guarantee caller-independent: every entry point (peer-driven
+rollback, primary-chain reconciliation, tip-floor enforcement) drives the
+same supervised restart, which reloads these caches fresh from the database
+before any further block is validated.
+
 Getting this wrong is subtle, so the constraint is worth stating plainly:
 **the undo events must be emitted before the truncation, by the rollback
 path.** `handleEventChainUpdate` deliberately does *not* emit them, even

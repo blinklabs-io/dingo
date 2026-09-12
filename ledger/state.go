@@ -3389,6 +3389,22 @@ func (ls *LedgerState) rollbackWithResync(
 		ppComputed  bool
 		eraResolved bool
 	)
+	// postCommitReloadErr records the first failure to reload
+	// epochCache/currentEra/currentPParams (or the synthetic-PlutusV2 marker)
+	// from the database below. The metadata transaction above has already
+	// committed the truncation by this point, so a failure here cannot
+	// un-truncate the database -- it can only leave these in-memory caches
+	// holding pre-rollback values while the database itself reflects the
+	// rolled-back chain. Continuing to serve those stale values as if the
+	// reload had succeeded is the defect this guards: every mutation below
+	// still runs (currentTip, nonce, etc. must still be updated to match the
+	// truncation that already happened), but the function reports this
+	// failure at the end instead of nil, and invokes FatalErrorFunc directly
+	// so a supervised restart reloads every one of these caches fresh from
+	// the database before any later block validates against them --
+	// regardless of which caller (chainsync rollback, primary-chain
+	// reconciliation, tip-floor enforcement) reached this function.
+	var postCommitReloadErr error
 	// Snapshot current era under read lock for fallback
 	ls.RLock()
 	newCurrentEra = ls.currentEra
@@ -3401,6 +3417,9 @@ func (ls *LedgerState) rollbackWithResync(
 			"failed to reload epochs after rollback",
 			"error", err,
 			"component", "ledger",
+		)
+		postCommitReloadErr = fmt.Errorf(
+			"reload epochs after rollback: %w", err,
 		)
 	}
 	if epochs != nil {
@@ -3428,6 +3447,12 @@ func (ls *LedgerState) rollbackWithResync(
 					newCurrentEpoch.EraId,
 					"component", "ledger",
 				)
+				if postCommitReloadErr == nil {
+					postCommitReloadErr = fmt.Errorf(
+						"unknown era ID %d after rollback",
+						newCurrentEpoch.EraId,
+					)
+				}
 			}
 		}
 	}
@@ -3454,6 +3479,11 @@ func (ls *LedgerState) rollbackWithResync(
 				"error", ppErr,
 				"component", "ledger",
 			)
+			if postCommitReloadErr == nil {
+				postCommitReloadErr = fmt.Errorf(
+					"reload protocol params after rollback: %w", ppErr,
+				)
+			}
 		} else {
 			newPParams = pp
 			newPrevPParams = prevPP
@@ -3477,6 +3507,12 @@ func (ls *LedgerState) rollbackWithResync(
 			"component",
 			"ledger",
 		)
+		if postCommitReloadErr == nil {
+			postCommitReloadErr = fmt.Errorf(
+				"reload synthetic PlutusV2 cost model marker after rollback: %w",
+				syntheticErr,
+			)
+		}
 	}
 	newSyntheticV2CostModel := resolveSyntheticV2CostModel(
 		newSyntheticV2CostModelValue, newPParams,
@@ -3591,6 +3627,23 @@ func (ls *LedgerState) rollbackWithResync(
 	)
 	if err := ls.enforceDurableTipFloor(); err != nil {
 		return &rollbackCommittedError{err: err}
+	}
+	if postCommitReloadErr != nil {
+		// The metadata rollback already committed and ls.currentTip already
+		// reflects it, but epochCache/currentEra/currentPParams (or the
+		// synthetic-PlutusV2 marker) could not be reloaded from the
+		// now-truncated database above, so at least one of them is still
+		// holding a pre-rollback value that no longer matches the database.
+		// Call FatalErrorFunc directly, rather than relying on whichever
+		// caller happens to be on the stack to notice the returned error and
+		// escalate it, so every caller of rollback/rollbackWithoutResync
+		// gets the same guarantee: a supervised restart reloads this state
+		// fresh from the database before the next block is validated
+		// against it.
+		if ls.config.FatalErrorFunc != nil {
+			ls.config.FatalErrorFunc(postCommitReloadErr)
+		}
+		return &rollbackCommittedError{err: postCommitReloadErr}
 	}
 	return nil
 }
