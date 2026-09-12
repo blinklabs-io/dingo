@@ -3625,9 +3625,7 @@ func (ls *LedgerState) rollbackWithResync(
 		"component",
 		"ledger",
 	)
-	if err := ls.enforceDurableTipFloor(); err != nil {
-		return &rollbackCommittedError{err: err}
-	}
+	floorErr := ls.enforceDurableTipFloor()
 	if postCommitReloadErr != nil {
 		// The metadata rollback already committed and ls.currentTip already
 		// reflects it, but epochCache/currentEra/currentPParams (or the
@@ -3639,11 +3637,19 @@ func (ls *LedgerState) rollbackWithResync(
 		// escalate it, so every caller of rollback/rollbackWithoutResync
 		// gets the same guarantee: a supervised restart reloads this state
 		// fresh from the database before the next block is validated
-		// against it.
-		if ls.config.FatalErrorFunc != nil {
-			ls.config.FatalErrorFunc(postCommitReloadErr)
+		// against it. This runs even when the tip-floor check failed too:
+		// a failing database read usually fails both.
+		fatalErr := postCommitReloadErr
+		if floorErr != nil {
+			fatalErr = errors.Join(postCommitReloadErr, floorErr)
 		}
-		return &rollbackCommittedError{err: postCommitReloadErr}
+		if ls.config.FatalErrorFunc != nil {
+			ls.config.FatalErrorFunc(fatalErr)
+		}
+		return &rollbackCommittedError{err: fatalErr}
+	}
+	if floorErr != nil {
+		return &rollbackCommittedError{err: floorErr}
 	}
 	return nil
 }
@@ -8319,13 +8325,18 @@ func (ls *LedgerState) computePParams(
 					nil,
 				)
 				if prevErr != nil {
-					ls.config.Logger.Warn(
-						"failed to load previous-era pparams",
-						"epoch", ep.EpochId,
-						"era", ep.EraId,
-						"error", prevErr,
+					// Era-1 transaction validation falls back to
+					// the current era's pparams when this is nil,
+					// so a failed read must not look like "no
+					// previous era".
+					return nil, nil, fmt.Errorf(
+						"computePParams: previous-era GetPParams "+
+							"epoch %d: %w",
+						ep.EpochId,
+						prevErr,
 					)
-				} else if prevPP != nil {
+				}
+				if prevPP != nil {
 					prevEraPParams = prevPP
 				}
 			}

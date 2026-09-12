@@ -561,14 +561,17 @@ target.
 the synthetic-PlutusV2-cost-model marker from the database *after* the
 metadata transaction that truncates it has already committed. A failure to
 reload any of them (a `GetEpochs` error, an unresolvable era ID, a
-`computePParams` error, or a failed marker read) cannot be treated as
-"nothing happened": the truncation is already durable, so leaving these
-caches at their pre-rollback values would validate later blocks against
-state the database no longer has. `rollbackWithResync` therefore invokes
-`LedgerStateConfig.FatalErrorFunc` directly for this class of failure — not
-merely returning an error and leaving escalation to whichever caller is on
-the stack — and reports it as a `rollbackCommittedError`, the same identity
-`enforceDurableTipFloor`'s own post-commit failure already uses. Calling
+`computePParams` error for the current or previous era's parameters, or a
+failed marker read) cannot be treated as "nothing happened": the truncation
+is already durable, so leaving these caches at their pre-rollback values
+would validate later blocks against state the database no longer has.
+`rollbackWithResync` therefore invokes `LedgerStateConfig.FatalErrorFunc`
+directly for this class of failure — not merely returning an error and
+leaving escalation to whichever caller is on the stack — and reports it as a
+`rollbackCommittedError`, the same identity `enforceDurableTipFloor`'s own
+post-commit failure already uses. The escalation still happens when that
+tip-floor check fails in the same call, since one failing database read
+usually fails both. Calling
 `FatalErrorFunc` unconditionally from inside `rollbackWithResync` is what
 makes the guarantee caller-independent: every entry point (peer-driven
 rollback, primary-chain reconciliation, tip-floor enforcement) drives the
