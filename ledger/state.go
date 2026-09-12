@@ -7392,9 +7392,13 @@ func (ls *LedgerState) ledgerProcessBlock(
 		if uint(block.Era().Id)+1 == currentEra.Id && prevEraPParams != nil {
 			referenceParams = prevEraPParams
 		}
-		if err := validateBlockReferenceScripts(block, referenceParams, &LedgerView{
-			txn: txn, ls: ls,
-		}); err != nil {
+		refScriptsLV := &LedgerView{txn: txn, ls: ls}
+		err := validateBlockReferenceScripts(
+			block,
+			referenceParams,
+			refScriptsLV,
+		)
+		if err := storageFaultOrErr(refScriptsLV, err); err != nil {
 			return nil, err
 		}
 	}
@@ -7499,6 +7503,18 @@ func (ls *LedgerState) ledgerProcessBlock(
 					lv,
 					pp,
 				)
+				// A LedgerView predicate that swallowed a genuine storage
+				// error into a false verdict (issue #1649) can have
+				// skewed this rule's verdict either way; surface the fault
+				// instead of trusting or rejecting on its basis.
+				if faultErr := storageFaultOrErr(lv, nil); faultErr != nil {
+					delta.Release()
+					return nil, fmt.Errorf(
+						"TX %s: %w",
+						tx.Hash(),
+						faultErr,
+					)
+				}
 				// The Musashi prototype trusts remaining Dijkstra validation
 				// disagreements because its certificate-driven closure is still
 				// evolving. Standard profiles leave the error intact and reject
@@ -11293,18 +11309,20 @@ func (ls *LedgerState) WithTxValidationSession(
 				isCurrentEraPParams,
 				snapshot.syntheticV2CostModelInEffect,
 			)
+			lv := (&LedgerView{
+				txn:             txn,
+				ls:              ls,
+				intraBlockUtxos: createdUtxos,
+				consumedUtxos:   consumedUtxos,
+			}).pinCommitteeState(snapshot.currentEpoch, pp).
+				pinSyntheticV2CostModel(synthetic)
 			err = validationEra.ValidateTxFunc(
 				tx,
 				snapshot.referenceSlot,
-				(&LedgerView{
-					txn:             txn,
-					ls:              ls,
-					intraBlockUtxos: createdUtxos,
-					consumedUtxos:   consumedUtxos,
-				}).pinCommitteeState(snapshot.currentEpoch, pp).
-					pinSyntheticV2CostModel(synthetic),
+				lv,
 				pp,
 			)
+			err = storageFaultOrErr(lv, err)
 			if err != nil {
 				return fmt.Errorf(
 					"TX %s failed validation: %w",
@@ -11355,8 +11373,9 @@ func (ls *LedgerState) validateTxCore(
 			snapshot.syntheticV2CostModelInEffect,
 		)
 		txn := ls.db.Transaction(false)
+		var lv *LedgerView
 		err := txn.Do(func(txn *database.Txn) error {
-			lv := buildLV(txn).pinCommitteeState(snapshot.currentEpoch, pp).
+			lv = buildLV(txn).pinCommitteeState(snapshot.currentEpoch, pp).
 				pinSyntheticV2CostModel(synthetic)
 			return validationEra.ValidateTxFunc(
 				tx,
@@ -11365,6 +11384,7 @@ func (ls *LedgerState) validateTxCore(
 				pp,
 			)
 		})
+		err = storageFaultOrErr(lv, err)
 		if err != nil {
 			return fmt.Errorf("TX %s failed validation: %w", tx.Hash(), err)
 		}
@@ -11439,8 +11459,9 @@ func (ls *LedgerState) EvaluateTx(
 			pp, isCurrentEraPParams, consensusState.syntheticV2CostModelInEffect,
 		)
 		txn := ls.db.Transaction(false)
+		var lv *LedgerView
 		err := txn.Do(func(txn *database.Txn) error {
-			lv := (&LedgerView{
+			lv = (&LedgerView{
 				txn: txn,
 				ls:  ls,
 			}).pinCommitteeState(
@@ -11455,6 +11476,7 @@ func (ls *LedgerState) EvaluateTx(
 			)
 			return err
 		})
+		err = storageFaultOrErr(lv, err)
 		if err != nil {
 			return 0, lcommon.ExUnits{}, nil, fmt.Errorf(
 				"TX %s failed evaluation: %w",

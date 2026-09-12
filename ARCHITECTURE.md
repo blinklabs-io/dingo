@@ -3120,7 +3120,16 @@ The `LedgerView` interface provides query access to ledger state:
   per-transaction validation remain fail-closed.
 - Protocol parameter queries
 - Stake distribution queries
-- Account registration checks
+- Account registration checks. `IsStakeCredentialRegistered`,
+  `IsPoolRegistered`, `IsRewardAccountRegistered`, and `GovActionExists`
+  implement gouroboros' bool-only `common.LedgerState` predicates. A lookup
+  error other than "not found" is recorded as the view's first storage fault.
+  Every `ValidateTxFunc`/`EvaluateTxFunc` call site in `ledger/state.go`, and
+  `ValidateBlockReferenceScripts`, returns that fault as
+  `ErrLedgerViewStorageFault` in place of the rule's result, so a storage
+  fault is neither reported as a not-registered verdict nor accepted on a
+  false negative. During block application it is a plain error, not a
+  transaction validation failure (issue #1649).
 - `DRepDelegation` lookup for a full, tag-aware stake credential. The lookup
   returns the account's current DRep delegate (including the non-credential
   always-abstain and always-no-confidence DRep types), or nil when the account
