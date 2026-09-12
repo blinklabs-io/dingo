@@ -77,6 +77,7 @@ func ensureWALJournalMode(ctx context.Context, databaseURI string) error {
 		"sqlite",
 		databaseURI+"?_pragma=busy_timeout(30000)",
 		"sqlite",
+		false, // one-shot startup helper; not worth tracing
 	)
 	if err != nil {
 		return fmt.Errorf("open SQLite database for WAL conversion: %w", err)
@@ -181,7 +182,9 @@ func openSQLStore(
 				"&_pragma=busy_timeout(30000)&_pragma=foreign_keys(1)",
 			sharedMemoryDBSequence.Add(1),
 		)
-		writeDB, err = sqlstore.OpenDB("sqlite", dsn, "sqlite")
+		writeDB, err = sqlstore.OpenDB(
+			"sqlite", dsn, "sqlite", dependencies.TracingEnabled,
+		)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -209,6 +212,7 @@ func openSQLStore(
 				sqliteCommonPragmas,
 			),
 			"sqlite",
+			dependencies.TracingEnabled,
 		)
 		if err != nil {
 			return nil, nil, nil, err
@@ -221,6 +225,7 @@ func openSQLStore(
 				sqliteCommonPragmas,
 			),
 			"sqlite",
+			dependencies.TracingEnabled,
 		)
 		if err != nil {
 			_ = writeDB.Close()

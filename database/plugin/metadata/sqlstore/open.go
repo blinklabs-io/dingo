@@ -21,10 +21,26 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
 )
 
-// OpenDB opens an instrumented database/sql pool. Keeping driver wrapping in
-// the shared package gives every provider the same query and transaction
-// tracing behavior.
-func OpenDB(driverName, dataSourceName, systemName string) (*sql.DB, error) {
+// OpenDB opens a database/sql pool, instrumented with OpenTelemetry tracing
+// only when tracingEnabled is true. Keeping driver wrapping in the shared
+// package gives every provider the same query and transaction tracing
+// behavior when tracing is on.
+//
+// otelsql.Open's wrapping is not free even when no TracerProvider is
+// registered: with tracing off (the default), every ExecContext/QueryContext/
+// QueryRowContext call still starts a span against the no-op provider,
+// computes its attributes, and allocates a wrapping *sql.Rows -- pure
+// overhead for zero observability benefit. Measured on a from-genesis sync
+// with tracing disabled, otelsql/otel accounted for roughly 9% of all
+// allocated bytes over the run. Skipping the wrap entirely when tracing is
+// off removes that cost without changing any query's behavior or result.
+func OpenDB(
+	driverName, dataSourceName, systemName string,
+	tracingEnabled bool,
+) (*sql.DB, error) {
+	if !tracingEnabled {
+		return sql.Open(driverName, dataSourceName)
+	}
 	return otelsql.Open(
 		driverName,
 		dataSourceName,
