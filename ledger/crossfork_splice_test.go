@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -942,11 +943,13 @@ func TestSettleAuditAfterRewind(t *testing.T) {
 		assert.Nil(t, ls.continuationAudit.Load())
 	})
 
-	// A nil pointer does not mean "still cleared by this rewind". Both
-	// disarm sites follow a committed chain truncation -- a chainsync
-	// rollback whose ledger tip did not reach its point, and a truncation
-	// whose ledger rollback failed -- and either can land after the
-	// post-rewind tip read and before the settle takes the lock. The tip
+	// A nil pointer does not mean "still cleared by this rewind". Every
+	// disarm follows a committed chain truncation -- a chainsync rollback
+	// whose ledger tip did not reach its point, a truncation whose ledger
+	// rollback failed, and the divergence reconciler's rewind (see
+	// TestReconcileTruncationTransitionsContinuationAudit) -- and each can
+	// land after the post-rewind tip read and before the settle takes the
+	// lock. The tip
 	// comparison was made before that truncation, so it reports nothing
 	// truncated, and restoring puts back a window whose fork point the
 	// rollback may have just deleted, over a disarm that was deliberate.
@@ -990,6 +993,112 @@ func TestSettleAuditAfterRewind(t *testing.T) {
 			)
 		})
 	}
+}
+
+// TestReconcileTruncationTransitionsContinuationAudit pins the divergence
+// reconciler as an owner of the audit window. Its common-ancestor branch
+// truncates the primary chain through ChainManager.RewindPrimaryChainToPoint,
+// outside both the rollback path that arms and disarms the window and the
+// recovery rewind that clears and settles it. A window left armed over that
+// truncation holds producers for blocks it deleted. A recovery rewind settling
+// afterwards cannot tell either: its restore is refused only by a moved pointer
+// generation, and a truncation that never transitions the pointer leaves the
+// generation where the rewind's own clear put it.
+func TestReconcileTruncationTransitionsContinuationAudit(t *testing.T) {
+	t.Parallel()
+
+	// divergedLedger puts the primary chain on a fork of the ledger tip and
+	// arms a window at a fork block. A deep fork exceeds the fixture's
+	// security parameter, so the reconciler's rewind is refused.
+	divergedLedger := func(
+		t *testing.T,
+		deep bool,
+	) *chainsyncRollbackFixture {
+		t.Helper()
+		fixture := newChainsyncRollbackFixture(t)
+		bus := event.NewEventBus(nil, nil)
+		t.Cleanup(bus.Stop)
+		fixture.ls.config.EventBus = bus
+		if deep {
+			putPrimaryChainOnForkBeyondK(t, fixture, "reconcile-audit")
+		} else {
+			require.NoError(
+				t,
+				fixture.ls.chain.Rollback(fixture.ancestorTip.Point),
+			)
+			require.NoError(
+				t,
+				fixture.ls.chain.AddRawBlocks([]chain.RawBlock{{
+					Slot:        fixture.currentTip.Point.Slot + 5,
+					Hash:        testHashBytes("reconcile-audit-fork"),
+					BlockNumber: fixture.currentTip.BlockNumber + 1,
+					Type:        1,
+					PrevHash:    fixture.ancestorTip.Point.Hash,
+					Cbor:        []byte{0x80},
+				}}),
+			)
+		}
+		fixture.ls.armContinuationAudit(
+			fixture.ls.chain.Tip().Point,
+			"rollback",
+		)
+		require.NotNil(t, fixture.ls.continuationAudit.Load())
+		return fixture
+	}
+
+	t.Run("disarms a window over the truncated block", func(t *testing.T) {
+		t.Parallel()
+		fixture := divergedLedger(t, false)
+		ls := fixture.ls
+
+		require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+
+		require.Equal(t, fixture.ancestorTip, ls.chain.Tip())
+		assert.Nil(t, ls.continuationAudit.Load())
+	})
+
+	t.Run("a rewind settling afterwards does not restore", func(t *testing.T) {
+		t.Parallel()
+		fixture := divergedLedger(t, false)
+		ls := fixture.ls
+		prior, gen := ls.takeContinuationAuditForRewind()
+		require.NotNil(t, prior)
+
+		// The reconciliation lands after the rewind's post-descent tip
+		// read, so the rewind reports nothing truncated.
+		require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+		ls.settleAuditAfterRewind(
+			prior,
+			gen,
+			false,
+			fixture.ancestorTip.Point,
+		)
+
+		assert.Nil(
+			t,
+			ls.continuationAudit.Load(),
+			"a restore must not outlive the reconciler's truncation",
+		)
+	})
+
+	t.Run("keeps the window when the rewind is refused", func(t *testing.T) {
+		t.Parallel()
+		fixture := divergedLedger(t, true)
+		ls := fixture.ls
+		armed := ls.continuationAudit.Load()
+		chainTip := ls.chain.Tip()
+
+		err := ls.reconcilePrimaryChainTipWithLedgerTip()
+
+		require.ErrorIs(t, err, chain.ErrRollbackExceedsSecurityParam)
+		require.Equal(t, chainTip, ls.chain.Tip())
+		assert.Same(
+			t,
+			armed,
+			ls.continuationAudit.Load(),
+			"a refused rewind deletes nothing the window describes",
+		)
+	})
 }
 
 // TestPrimaryChainTipRegressed pins which tip movements a recovery rewind may

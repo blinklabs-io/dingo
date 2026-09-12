@@ -9246,6 +9246,7 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		// pre-SetLedger case only -- it is never reachable from an
 		// untrusted peer, since every chainsync-driven path runs after
 		// SetLedger.
+		tipBeforeRewind := ls.chain.Tip().Point
 		rewindErr := func() error {
 			if ls.config.ChainManager.SecurityParamConfigured() {
 				return ls.config.ChainManager.RewindPrimaryChainToPoint(
@@ -9256,6 +9257,19 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 				ancestor,
 			)
 		}()
+		// This truncation runs outside both paths that transition the
+		// continuation-audit window: the rollback that arms and disarms
+		// it, and the recovery rewind that clears and settles it. A window
+		// left armed over it holds producers for blocks it deleted, and a
+		// recovery rewind settling afterwards restores the window it
+		// cleared unless the pointer generation moved, so the truncation
+		// must be a transition of its own. A rewind refused before its
+		// first deletion leaves the window describing an unchanged chain.
+		// See settleAuditAfterRewind.
+		if rewindErr == nil ||
+			primaryChainTipRegressed(tipBeforeRewind, ls.chain.Tip().Point) {
+			ls.disarmContinuationAudit()
+		}
 		if rewindErr != nil {
 			return rewindErr
 		}

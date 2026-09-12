@@ -4615,9 +4615,12 @@ append deletes nothing, and reading one as a truncation discards a window the
 rewind left entirely valid. The restore is refused outright when anything else
 moved the window pointer while the rewind ran. A nil pointer reads the same
 whether the rewind still owns the clear or a rollback has disarmed since, and
-both disarm sites follow a committed truncation, so a generation counted on
+every disarm follows a committed truncation, so a generation counted on
 every transition of the pointer is what keeps a rewind from undoing another
-owner's decision. Each arming inspects at most
+owner's decision. That holds only while every other truncation of the primary
+chain moves the pointer, so the divergence reconciler's rewind to a common
+ancestor disarms the window too, unless the rewind is refused before deleting
+anything. Each arming inspects at most
 `continuationAuditBlockBudget` bodies and retains at most
 `continuationAuditMaxProducedTxs` in-window producers; reaching that producer
 cap disarms the window, logs at `Warn` and counts `disarmed_cap`, so "the audit
