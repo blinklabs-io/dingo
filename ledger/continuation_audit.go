@@ -481,7 +481,19 @@ func (ls *LedgerState) armContinuationAudit(
 	if prior := ls.continuationAudit.Load(); prior != nil {
 		ls.carryForwardWindow(prior, next, point)
 	}
-	ls.continuationAudit.Store(next)
+	ls.publishContinuationAudit(next)
+}
+
+// publishContinuationAudit is the single writer of the window pointer, and
+// counts the transition so that a later caller can tell whether the pointer it
+// is looking at is still the one it left.
+//
+// Callers must hold ls.continuationAuditMutex.
+func (ls *LedgerState) publishContinuationAudit(
+	window *continuationAuditWindow,
+) {
+	ls.continuationAudit.Store(window)
+	ls.continuationAuditGen++
 }
 
 // disarmContinuationAudit takes the window out of service. Every transition of
@@ -490,7 +502,7 @@ func (ls *LedgerState) armContinuationAudit(
 func (ls *LedgerState) disarmContinuationAudit() {
 	ls.continuationAuditMutex.Lock()
 	defer ls.continuationAuditMutex.Unlock()
-	ls.continuationAudit.Store(nil)
+	ls.publishContinuationAudit(nil)
 }
 
 // carryForwardWindow moves what prior knows about blocks this rollback did not

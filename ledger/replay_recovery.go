@@ -1044,11 +1044,12 @@ func (ls *LedgerState) rewindPrimaryChainForRecovery(
 	// every chainsync rollback behind it for that long is a worse trade than
 	// the two states the gap leaves, both of which settleAuditAfterRewind
 	// resolves from the published pointer afterwards.
-	prior := ls.takeContinuationAuditForRewind()
+	prior, gen := ls.takeContinuationAuditForRewind()
 	tipBefore := ls.chain.Tip().Point
 	committed, err := ls.rollbackPrimaryChainInSecurityParamWindows(point)
 	ls.settleAuditAfterRewind(
 		prior,
+		gen,
 		committed || primaryChainTipRegressed(tipBefore, ls.chain.Tip().Point),
 		point,
 	)
@@ -1104,13 +1105,17 @@ func (ls *LedgerState) rewindPrimaryChainForRecovery(
 }
 
 // takeContinuationAuditForRewind clears the audit window and returns what it
-// held, as one transition. See rewindPrimaryChainForRecovery.
-func (ls *LedgerState) takeContinuationAuditForRewind() *continuationAuditWindow {
+// held, as one transition, with the pointer generation the clear left behind.
+// See rewindPrimaryChainForRecovery.
+func (ls *LedgerState) takeContinuationAuditForRewind() (
+	*continuationAuditWindow,
+	uint64,
+) {
 	ls.continuationAuditMutex.Lock()
 	defer ls.continuationAuditMutex.Unlock()
 	prior := ls.continuationAudit.Load()
-	ls.continuationAudit.Store(nil)
-	return prior
+	ls.publishContinuationAudit(nil)
+	return prior, ls.continuationAuditGen
 }
 
 // settleAuditAfterRewind decides what the audit window should be once a
@@ -1142,8 +1147,20 @@ func (ls *LedgerState) takeContinuationAuditForRewind() *continuationAuditWindow
 // the tip also moves forward underneath it, and a forward move deletes nothing
 // -- reading it as a truncation discarded a still-valid window and cost the
 // audit its coverage for an ordinary append.
+//
+// gen is the pointer generation the clear left behind, and it is what makes
+// the restore safe. A nil pointer does not mean "still cleared by this
+// rewind": a chainsync rollback whose ledger tip did not reach its point
+// truncates the chain and then disarms, as does a truncation whose ledger
+// rollback failed, and either can land after the post-rewind tip read and
+// before this lock is taken. truncated is then computed from a tip read that
+// predates that truncation, and the restore put back a window whose fork point
+// the rollback had just deleted -- over a disarm that was deliberate. A
+// generation that has moved says some other owner has decided what the pointer
+// should be, and this rewind does not get to undo it.
 func (ls *LedgerState) settleAuditAfterRewind(
 	prior *continuationAuditWindow,
+	gen uint64,
 	truncated bool,
 	target ocommon.Point,
 ) {
@@ -1151,14 +1168,14 @@ func (ls *LedgerState) settleAuditAfterRewind(
 	defer ls.continuationAuditMutex.Unlock()
 	if armed := ls.continuationAudit.Load(); armed != nil {
 		if truncated && armed.forkPoint.Slot > target.Slot {
-			ls.continuationAudit.Store(nil)
+			ls.publishContinuationAudit(nil)
 		}
 		return
 	}
-	if prior == nil || truncated {
+	if prior == nil || truncated || ls.continuationAuditGen != gen {
 		return
 	}
-	ls.continuationAudit.Store(prior)
+	ls.publishContinuationAudit(prior)
 }
 
 // primaryChainTipRegressed reports whether the primary chain tip moved back, or

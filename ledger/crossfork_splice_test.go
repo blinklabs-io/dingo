@@ -883,10 +883,9 @@ func TestSettleAuditAfterRewind(t *testing.T) {
 		fixture := newChainsyncRollbackFixture(t)
 		ls := fixture.ls
 		ls.armContinuationAudit(fixture.ancestorTip.Point, "rollback")
-		prior := ls.continuationAudit.Load()
-		ls.continuationAudit.Store(nil)
+		prior, gen := ls.takeContinuationAuditForRewind()
 
-		ls.settleAuditAfterRewind(prior, false, target)
+		ls.settleAuditAfterRewind(prior, gen, false, target)
 
 		assert.Same(t, prior, ls.continuationAudit.Load())
 	})
@@ -896,14 +895,13 @@ func TestSettleAuditAfterRewind(t *testing.T) {
 		fixture := newChainsyncRollbackFixture(t)
 		ls := fixture.ls
 		ls.armContinuationAudit(fixture.ancestorTip.Point, "rollback")
-		prior := ls.continuationAudit.Load()
-		ls.continuationAudit.Store(nil)
+		prior, gen := ls.takeContinuationAuditForRewind()
 		// The arm the rewind could not see, at a point the rewind kept.
 		ls.armContinuationAudit(fixture.ancestorTip.Point, "concurrent")
 		armed := ls.continuationAudit.Load()
 		require.NotSame(t, prior, armed)
 
-		ls.settleAuditAfterRewind(prior, false, target)
+		ls.settleAuditAfterRewind(prior, gen, false, target)
 
 		assert.Same(
 			t,
@@ -918,8 +916,7 @@ func TestSettleAuditAfterRewind(t *testing.T) {
 		fixture := newChainsyncRollbackFixture(t)
 		ls := fixture.ls
 		ls.armContinuationAudit(fixture.ancestorTip.Point, "rollback")
-		prior := ls.continuationAudit.Load()
-		ls.continuationAudit.Store(nil)
+		prior, gen := ls.takeContinuationAuditForRewind()
 		// A window armed during the rewind, above the rewind target: the
 		// truncation deleted the block its fork point names.
 		ls.armContinuationAudit(
@@ -928,7 +925,7 @@ func TestSettleAuditAfterRewind(t *testing.T) {
 		)
 		require.NotNil(t, ls.continuationAudit.Load())
 
-		ls.settleAuditAfterRewind(prior, true, target)
+		ls.settleAuditAfterRewind(prior, gen, true, target)
 
 		assert.Nil(t, ls.continuationAudit.Load())
 	})
@@ -938,13 +935,61 @@ func TestSettleAuditAfterRewind(t *testing.T) {
 		fixture := newChainsyncRollbackFixture(t)
 		ls := fixture.ls
 		ls.armContinuationAudit(fixture.ancestorTip.Point, "rollback")
-		prior := ls.continuationAudit.Load()
-		ls.continuationAudit.Store(nil)
+		prior, gen := ls.takeContinuationAuditForRewind()
 
-		ls.settleAuditAfterRewind(prior, true, target)
+		ls.settleAuditAfterRewind(prior, gen, true, target)
 
 		assert.Nil(t, ls.continuationAudit.Load())
 	})
+
+	// A nil pointer does not mean "still cleared by this rewind". Both
+	// disarm sites follow a committed chain truncation -- a chainsync
+	// rollback whose ledger tip did not reach its point, and a truncation
+	// whose ledger rollback failed -- and either can land after the
+	// post-rewind tip read and before the settle takes the lock. The tip
+	// comparison was made before that truncation, so it reports nothing
+	// truncated, and restoring puts back a window whose fork point the
+	// rollback may have just deleted, over a disarm that was deliberate.
+	for _, tc := range []struct {
+		name  string
+		clear func(ls *LedgerState)
+	}{
+		{
+			name: "a disarm landed in the gap",
+			clear: func(ls *LedgerState) {
+				ls.disarmContinuationAudit()
+			},
+		},
+		{
+			name: "an arm and a disarm landed in the gap",
+			clear: func(ls *LedgerState) {
+				ls.armContinuationAudit(
+					ocommon.NewPoint(40, testHashBytes("gap-arm")),
+					"concurrent",
+				)
+				ls.disarmContinuationAudit()
+			},
+		},
+	} {
+		t.Run("does not restore over "+tc.name, func(t *testing.T) {
+			t.Parallel()
+			fixture := newChainsyncRollbackFixture(t)
+			ls := fixture.ls
+			ls.armContinuationAudit(fixture.ancestorTip.Point, "rollback")
+			prior, gen := ls.takeContinuationAuditForRewind()
+			require.NotNil(t, prior)
+
+			tc.clear(ls)
+
+			ls.settleAuditAfterRewind(prior, gen, false, target)
+
+			assert.Nil(
+				t,
+				ls.continuationAudit.Load(),
+				"a rewind does not get to undo another owner's decision",
+			)
+		})
+	}
 }
 
 // TestPrimaryChainTipRegressed pins which tip movements a recovery rewind may
@@ -1466,8 +1511,11 @@ func TestContinuationAuditRearmDoesNotRaceWithEndorserRefDrain(t *testing.T) {
 		for range iterations {
 			ls.chainsyncMutex.Lock()
 			// The window a drain is working is the published one when a
-			// rollback re-arms underneath it.
-			ls.continuationAudit.Store(window)
+			// rollback re-arms underneath it. Published through the
+			// production writer so the pointer generation stays honest.
+			ls.continuationAuditMutex.Lock()
+			ls.publishContinuationAudit(window)
+			ls.continuationAuditMutex.Unlock()
 			ls.armContinuationAudit(fixture.ancestorTip.Point, "rearm")
 			ls.chainsyncMutex.Unlock()
 		}

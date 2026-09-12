@@ -1089,6 +1089,13 @@ type LedgerState struct {
 	// commitContinuationAuditBody and settleAuditAfterRewind.
 	continuationAuditMutex sync.Mutex
 	continuationAudit      atomic.Pointer[continuationAuditWindow]
+	// continuationAuditGen counts transitions of that pointer, under the
+	// same lock. A recovery rewind clears the pointer and may put it back
+	// afterwards, and the pointer alone cannot tell "still cleared by me"
+	// from "disarmed by a rollback in the meantime" -- both are nil. The
+	// generation distinguishes them, so a restore never overwrites another
+	// owner's decision. See publishContinuationAudit.
+	continuationAuditGen   uint64
 	mithrilLedgerSlot      uint64 // blocks at or below this slot are Mithril-verified; skip validation
 	mithrilLedgerHash      []byte // hash for mithrilLedgerSlot, used as a stable chainsync intersect point
 	lastLocalRollbackSeq   uint64
