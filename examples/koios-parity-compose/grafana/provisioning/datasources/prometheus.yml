@@ -1,0 +1,12 @@
+# Grafana provisioning: pre-configure the Prometheus datasource so the
+# starter dashboard renders without any manual click-ops setup.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
