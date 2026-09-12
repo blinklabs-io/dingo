@@ -100,9 +100,9 @@ const (
 // instead of the fixed count of 2 both stages ran at unconditionally before
 // this change. A 16-core host running with BlockPipelineEnabled used only 2
 // of those cores for decode and 2 for VRF/KES validate regardless of how
-// many were free; profiling during a from-genesis sync (blinklabs-io/dingo
-// issue to be filed for the block-application throughput investigation)
-// showed a single core saturated while 15 sat idle. This is the same fixed
+// many were free; profiling during a from-genesis sync (issue #4203, the
+// block-application throughput investigation) showed a single core saturated
+// while 15 sat idle. This is the same fixed
 // count for both stages that blockPipelineValidateWorkers' prior doc comment
 // described as provisional ("kept equal ... until there's a throughput
 // profile to size it against"); GOMAXPROCS is that profile input.

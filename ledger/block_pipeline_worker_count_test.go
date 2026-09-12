@@ -148,22 +148,23 @@ func runPipelineThroughput(
 	return float64(len(blocks)) / elapsed.Seconds()
 }
 
-// TestBlockPipelineWorkerCountThroughput quantifies the worker-count fix's
-// effect on the exact mechanism it changes: pipeline decode+VRF/KES-validate
-// throughput, measured in-process against genuinely valid blocks (no live
-// network, no database), so the comparison is not confounded by peer
-// availability, block density, or disk state the way a live sync run would
-// be. This is the methodology behind the before/after numbers posted to
-// blinklabs-io/dingo#4204.
+// TestBlockPipelineWorkerCountThroughput asserts the correctness property the
+// CPU-scaled worker count puts at risk -- that decode and VRF/KES validation
+// still produce a clean result for every block once more than two workers
+// share the stages -- and reports decode+validate throughput at the prior
+// fixed count and at this host's scaled count alongside it. Blocks are
+// genuinely valid and everything runs in-process, so neither the correctness
+// check nor the reported numbers depend on peer availability, block density,
+// or disk state.
 //
-// It compares blockPipelineMinWorkers (2 -- the hardcoded count every
-// pipeline ran at before this change) against blockPipelineWorkerCount()
-// (this host's CPU-scaled count) over several repetitions, and requires the
-// scaled count to be at least 30% faster on average -- a wide margin below
-// the ~2-2.5x this repository's CI hosts and a 16-core development host
-// both showed, so ordinary scheduling jitter cannot flip this into a false
-// failure while an actual regression (e.g. the worker count silently
-// reverting to a fixed value) still fails it.
+// It deliberately does not assert a speedup ratio. A wall-clock ratio states
+// something about the host as much as about the code: available parallelism
+// bounds it (a 3-CPU runner can reach at most 1.5x going from 2 workers to 3,
+// before the submit and drain goroutines take their share), and contention on
+// a shared CI runner erases what is left. The regression that would actually
+// matter here -- the worker count silently reverting to a fixed value -- is
+// pinned deterministically by TestBlockPipelineWorkerCount above, which is
+// where that assertion belongs.
 func TestBlockPipelineWorkerCountThroughput(t *testing.T) {
 	if testing.Short() {
 		t.Skip("throughput measurement, not a correctness check; skipped in -short")
@@ -177,14 +178,6 @@ func TestBlockPipelineWorkerCountThroughput(t *testing.T) {
 
 	oldWorkers := blockPipelineMinWorkers
 	newWorkers := blockPipelineWorkerCount()
-	if newWorkers <= oldWorkers {
-		t.Skipf(
-			"host GOMAXPROCS(0)=%d gives a scaled worker count (%d) no "+
-				"larger than the prior fixed count (%d); nothing to compare "+
-				"on this host",
-			runtime.GOMAXPROCS(0), newWorkers, oldWorkers,
-		)
-	}
 
 	var oldTotal, newTotal float64
 	for range repetitions {
@@ -197,16 +190,12 @@ func TestBlockPipelineWorkerCountThroughput(t *testing.T) {
 	}
 	oldAvg := oldTotal / repetitions
 	newAvg := newTotal / repetitions
-	speedup := newAvg / oldAvg
 
 	t.Logf(
-		"pipeline throughput: workers=%d avg=%.0f blocks/sec, workers=%d avg=%.0f blocks/sec, speedup=%.2fx",
-		oldWorkers, oldAvg, newWorkers, newAvg, speedup,
-	)
-	require.Greaterf(
-		t, speedup, 1.3,
-		"expected the CPU-scaled worker count (%d) to beat the prior fixed "+
-			"count (%d) by at least 30%%, got %.2fx (%.0f vs %.0f blocks/sec)",
-		newWorkers, oldWorkers, speedup, newAvg, oldAvg,
+		"pipeline throughput on GOMAXPROCS(0)=%d: workers=%d avg=%.0f blocks/sec, workers=%d avg=%.0f blocks/sec, ratio=%.2fx",
+		runtime.GOMAXPROCS(0),
+		oldWorkers, oldAvg,
+		newWorkers, newAvg,
+		newAvg/oldAvg,
 	)
 }
