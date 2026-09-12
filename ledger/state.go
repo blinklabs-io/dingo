@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"math"
 	"math/big"
+	"runtime"
 	"runtime/debug"
 	"slices"
 	"strconv"
@@ -77,20 +78,52 @@ const (
 	firstBlockIndex              = 1
 	mithrilLedgerSlotSyncKey     = "mithril_ledger_slot"
 	mithrilLedgerHashSyncKey     = "mithril_ledger_hash"
-	// blockPipelineDecodeWorkers is the fixed decode worker count for phase 1
-	// of the block-processing pipeline (issue #1894). Validation workers stay
-	// at 0 (disabled) unless LedgerStateConfig.BlockPipelineValidateEnabled
-	// turns them on (phase 3).
-	blockPipelineDecodeWorkers = 2
-	// blockPipelineValidateWorkers is the fixed VRF/KES validate worker count
-	// for phase 3 of the block-processing pipeline (issue #1894). VRF and KES
-	// verification are each substantially more expensive than a CBOR decode,
-	// so validation is the pipeline's throughput bottleneck; this is kept
-	// equal to blockPipelineDecodeWorkers for now rather than scaled
-	// differently, matching phase 1's fixed-worker-count approach until
-	// there's a throughput profile to size it against.
-	blockPipelineValidateWorkers = 2
+	// blockPipelineMinWorkers is the decode/validate worker count
+	// blockPipelineWorkerCount falls back to on a host that reports fewer
+	// CPUs than this (including GOMAXPROCS(1)). It is the prior hardcoded
+	// worker count for both phase 1 (decode, issue #1894) and phase 3
+	// (VRF/KES validate), kept as a floor so a constrained host never gets
+	// fewer workers than it did before this was made CPU-scaled.
+	blockPipelineMinWorkers = 2
+	// blockPipelineMaxWorkers caps blockPipelineWorkerCount. Both pipeline
+	// stages only prepare work for ledgerProcessBlocksFromSource's single
+	// apply goroutine (see "Why dingo's ledger apply is not wired into
+	// pipeline.ApplyFunc", issue #3227), so decode/validate throughput
+	// past this point outruns the one consumer that can ever drain it;
+	// more workers beyond the cap would only buffer further ahead of that
+	// consumer, not deliver blocks to it any faster.
+	blockPipelineMaxWorkers = 8
 )
+
+// blockPipelineWorkerCount derives the block-pipeline's decode (phase 1) and
+// validate (phase 3) worker count from the host's available CPU parallelism
+// instead of the fixed count of 2 both stages ran at unconditionally before
+// this change. A 16-core host running with BlockPipelineEnabled used only 2
+// of those cores for decode and 2 for VRF/KES validate regardless of how
+// many were free; profiling during a from-genesis sync (blinklabs-io/dingo
+// issue to be filed for the block-application throughput investigation)
+// showed a single core saturated while 15 sat idle. This is the same fixed
+// count for both stages that blockPipelineValidateWorkers' prior doc comment
+// described as provisional ("kept equal ... until there's a throughput
+// profile to size it against"); GOMAXPROCS is that profile input.
+//
+// Both stages remain purely a scheduling change per their existing
+// documentation (BlockPipelineEnabled/BlockPipelineValidateEnabled's config
+// doc comments): this does not alter validation or apply behavior, only how
+// many goroutines share the decode/VRF/KES work before
+// ledgerProcessBlocksFromSource's single-threaded apply consumes it in
+// submission order.
+func blockPipelineWorkerCount() int {
+	n := runtime.GOMAXPROCS(0)
+	switch {
+	case n < blockPipelineMinWorkers:
+		return blockPipelineMinWorkers
+	case n > blockPipelineMaxWorkers:
+		return blockPipelineMaxWorkers
+	default:
+		return n
+	}
+}
 
 // DatabaseOperation represents an asynchronous database operation
 type DatabaseOperation struct {
@@ -1450,8 +1483,9 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		// ledger/block_pipeline_apply_contract_test.go; if a gouroboros
 		// bump makes any of them fail, revisit the decision rather than
 		// the test.
+		workerCount := blockPipelineWorkerCount()
 		pipelineOpts := []pipeline.PipelineOption{
-			pipeline.WithDecodeWorkers(blockPipelineDecodeWorkers),
+			pipeline.WithDecodeWorkers(workerCount),
 		}
 		if cfg.BlockPipelineValidateEnabled {
 			// Wire VRF/KES validation (phase 3). Eta0Provider reads the
@@ -1466,7 +1500,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 			// ledger paths.
 			pipelineOpts = append(
 				pipelineOpts,
-				pipeline.WithValidateWorkers(blockPipelineValidateWorkers),
+				pipeline.WithValidateWorkers(workerCount),
 				pipeline.WithEta0Provider(ls.blockPipelineEta0Provider),
 				pipeline.WithSlotsPerKesPeriod(ls.SlotsPerKESPeriod()),
 				pipeline.WithVerifyConfig(lcommon.VerifyConfig{

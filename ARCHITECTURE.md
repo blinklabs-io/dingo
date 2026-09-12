@@ -10351,8 +10351,12 @@ primary chain (`chain.Chain`) and decodes them into
 before. When `LedgerStateConfig.BlockPipelineEnabled` is set (config
 `blockPipelineEnabled` / `DINGO_BLOCK_PIPELINE_ENABLED` /
 `--block-pipeline-enabled`; default off), `LedgerState` owns a
-`github.com/blinklabs-io/gouroboros/pipeline.BlockPipeline` with 2 decode
-workers and validation disabled (`ValidateWorkers: 0`). Each gathered batch
+`github.com/blinklabs-io/gouroboros/pipeline.BlockPipeline` with decode
+workers set by `blockPipelineWorkerCount()` (`ledger/state.go`) — the host's
+`GOMAXPROCS`, floored at `blockPipelineMinWorkers` (2, the prior fixed count)
+and capped at `blockPipelineMaxWorkers` (8) — and validation disabled
+(`ValidateWorkers: 0`) unless `BlockPipelineValidateEnabled` is also set, in
+which case validate workers use the same CPU-scaled count. Each gathered batch
 of raw blocks (`decodeReadChainBatch`) is submitted to the pipeline up
 front and drained back from `Results()` in submission order — the
 pipeline's apply stage guarantees this ordering regardless of which worker
