@@ -193,6 +193,42 @@ func writeMetadataTemplate(dir string) (map[string]any, error) {
 // path. It is a no-op when a metadata file is already present, so a caller
 // reusing a directory across two constructions keeps the first one's data.
 func seedMetadataTemplate(dir string) error {
+	raw, err := migratedMetadataTemplate()
+	if err != nil {
+		return err
+	}
+	return SeedMetadataTemplateBytes(dir, raw)
+}
+
+// MetadataTemplateBytes returns the bytes of a fully migrated SQLite
+// metadata database for this process, building it (once, via the same
+// sync.Once every other caller in this process shares) if nothing has
+// needed it yet.
+//
+// A caller that forks a child test process -- see database/lifecycle's
+// TestSnapshotInterruptedBeforeManifest -- can hand these bytes to the
+// child (there is no way to share the in-process cache itself across a
+// process boundary) and have the child seed its own data directory with
+// SeedMetadataTemplateBytes before ever calling NewDatabase. That skips
+// the child's own migration entirely, rather than merely repeating the
+// same one-per-process cost a second time in a fresh process.
+func MetadataTemplateBytes() ([]byte, error) {
+	return migratedMetadataTemplate()
+}
+
+// SeedMetadataTemplateBytes writes raw -- typically obtained from
+// MetadataTemplateBytes, possibly in another process -- into dir as an
+// already-migrated metadata.sqlite, so whatever provider later opens dir
+// finds a migrated database instead of an empty one needing a fresh
+// migration run.
+//
+// It is a no-op if dir already has a metadata file, mirroring
+// seedMetadataTemplate (which this now delegates to): a caller that seeds a
+// directory with an externally supplied template and then also constructs
+// through NewDatabaseWithOptions -- whose own seedMetadataTemplate call
+// would otherwise reach the same file -- must not have that second call
+// silently overwrite what this one just wrote.
+func SeedMetadataTemplateBytes(dir string, raw []byte) error {
 	path := filepath.Join(dir, metadataTemplateFile)
 	if _, err := os.Stat(path); err == nil {
 		return nil
@@ -201,10 +237,6 @@ func seedMetadataTemplate(dir string) error {
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create metadata data dir: %w", err)
-	}
-	raw, err := migratedMetadataTemplate()
-	if err != nil {
-		return err
 	}
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		return fmt.Errorf("write metadata template: %w", err)

@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -57,7 +58,7 @@ func TestSnapshotRestoreRoundTrip(t *testing.T) {
 		testDestinationRegistry,
 		snapshotDir,
 		targetDir,
-		lifecycle.RestoreStorageConfig{},
+		lifecycle.RestoreStorageConfig{Blob: testutil.BadgerBlobConfig()},
 	)
 	require.NoError(t, err)
 	require.Equal(t, snapMan.CommitTimestamp, restoreMan.CommitTimestamp)
@@ -108,7 +109,7 @@ func TestRestoreRefusesNonEmptyTargetDirectory(t *testing.T) {
 		testDestinationRegistry,
 		snapshotDir,
 		targetDir,
-		lifecycle.RestoreStorageConfig{},
+		lifecycle.RestoreStorageConfig{Blob: testutil.BadgerBlobConfig()},
 	)
 	require.Error(t, err)
 }
@@ -266,7 +267,7 @@ func TestRestoreValidatedRejectsPluginMismatchWithoutTouchingTarget(
 		func(m lifecycle.Manifest) error {
 			return m.CheckPluginMatch("gcs", "sqlite")
 		},
-		lifecycle.RestoreStorageConfig{},
+		lifecycle.RestoreStorageConfig{Blob: testutil.BadgerBlobConfig()},
 	)
 	require.Error(t, err)
 
@@ -314,7 +315,7 @@ func TestRestoreRejectsMismatchedTipBlockNumber(t *testing.T) {
 		testDestinationRegistry,
 		snapshotDir,
 		targetDir,
-		lifecycle.RestoreStorageConfig{},
+		lifecycle.RestoreStorageConfig{Blob: testutil.BadgerBlobConfig()},
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "does not match manifest tip")
