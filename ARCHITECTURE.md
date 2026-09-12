@@ -4737,8 +4737,11 @@ for acknowledging only the fetched prefix would permit batched requests.
 TxSubmission checks reply counts and aggregate body bytes against the
 outstanding request before decoding any transaction. Replies exceeding the
 advertised byte budget are classified and counted as size mismatches. Replies
-within that budget still require ordered hash/era matching and an exact body
-or wrapped-wire size match for each transaction before any mempool admission.
+within that budget still require matching requested hashes and eras and an
+exact body or wrapped-wire size match before any mempool admission. A peer may
+omit requested bodies or return them in a different order. Duplicate returned
+bodies are rejected; validated bodies are restored to request order before
+admission so reply ordering cannot reorder the mempool's dependencies.
 
 The selected pool manages pending transactions:
 
