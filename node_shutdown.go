@@ -128,6 +128,71 @@ func (n *Node) configuredShutdownTimeout() time.Duration {
 	return 30 * time.Second
 }
 
+// shutdownPhase1ComponentStops is every phase-1 component whose Stop cancels
+// its own context and then waits for a goroutine to exit with no deadline of
+// its own, mirroring quiesceComponentStops (node_lifecycle.go) for the live
+// restore/truncate path. #3558 bounded this same style of wait there but not
+// here, on the normal process-shutdown path (dingo#1649 case R9): a goroutine
+// that never observes n.cancel() could wedge Node.Stop past shutdownTimeout
+// with no error for the caller to act on.
+//
+// The stall recycler and selected-to-none waits are unconditional -- both
+// no-op internally when their worker was never started. Ordering matches the
+// direct calls this replaced: the selected-to-none worker must finish before
+// n.chainSelector is stopped below, since it reads the selector's state (see
+// waitChainSelectedNoneWorker's doc comment), so both context-owned waits run
+// first; the block forger stops next, to stop producing new blocks before
+// leader election tears down. n.chainSelector.Stop and n.peerGov.Stop(ctx)
+// stay direct calls immediately after this list runs (chainSelector.Stop only
+// cancels and does not wait; peerGov.Stop already takes and honors ctx) --
+// only the two storage-facing managers after them share this list's
+// unbounded-wait shape, and neither depends on chainSelector or peerGov
+// having already stopped.
+func (n *Node) shutdownPhase1ComponentStops() []namedStop {
+	stops := []namedStop{
+		{
+			name: "chainsync stall recycler",
+			stop: func() error { n.waitChainsyncStallRecycler(); return nil },
+		},
+		{
+			name: "chain-selected-to-none worker",
+			stop: func() error { n.waitChainSelectedNoneWorker(); return nil },
+		},
+	}
+	if n.blockForger != nil {
+		stops = append(stops, namedStop{
+			name: "block forger",
+			stop: func() error { n.blockForger.Stop(); return nil },
+		})
+	}
+	if n.leaderElection != nil {
+		stops = append(stops, namedStop{
+			name: "leader election",
+			stop: n.leaderElection.Stop,
+		})
+	}
+	if n.snapshotMgr != nil {
+		stops = append(stops, namedStop{
+			name: "snapshot manager",
+			stop: n.snapshotMgr.Stop,
+		})
+	}
+	if n.dbLifecycleMgr != nil {
+		stops = append(stops, namedStop{
+			name: "database lifecycle manager",
+			stop: n.dbLifecycleMgr.Stop,
+		})
+	}
+	return stops
+}
+
+// componentStopsForShutdownPhase1 is (*Node).shutdownPhase1ComponentStops,
+// indirected through a variable so a shutdown-level test can inject a stop
+// that blocks until released -- the same seam componentStopsForQuiesce uses,
+// and for the same reason: none of these components can be made to block
+// from outside the package.
+var componentStopsForShutdownPhase1 = (*Node).shutdownPhase1ComponentStops
+
 func (n *Node) shutdown() error {
 	shutdownTimeout := n.configuredShutdownTimeout()
 	deadline := time.Now().Add(shutdownTimeout)
@@ -175,25 +240,24 @@ func (n *Node) shutdown() error {
 	// Phase 1: Stop accepting new work
 	n.config.logger.Info("shutdown phase 1: stopping new work")
 
-	// n.cancel() above asks the stall recycler to stop; wait here so it cannot
-	// race later shutdown phases that close connection, ledger, or DB state.
-	n.waitChainsyncStallRecycler()
-	// The selected-to-none worker is also context-owned. Wait for it before
-	// tearing down the selector or the chainsync state it reads.
-	n.waitChainSelectedNoneWorker()
-
-	// Stop block forger first to prevent new blocks
-	if n.blockForger != nil {
-		n.blockForger.Stop()
-	}
-
-	// Stop leader election to clean up resources
-	if n.leaderElection != nil {
-		if stopErr := n.leaderElection.Stop(); stopErr != nil {
-			err = errors.Join(
-				err,
-				fmt.Errorf("leader election shutdown: %w", stopErr),
-			)
+	// n.cancel() above asks the stall recycler, the selected-to-none worker,
+	// the block forger, the leader election, the snapshot manager, and the
+	// database lifecycle manager to stop; each cancels its own context and
+	// then waits for a goroutine to exit with no deadline of its own, so
+	// bound each wait here rather than calling it directly -- see
+	// shutdownPhase1ComponentStops's doc comment for the ordering this
+	// preserves and stopWithDeadline's (node_lifecycle.go) for why an
+	// unfinished wait escalates to errStorageDrainUnconfirmed rather than
+	// being reported as an ordinary stop failure.
+	phase1DrainConfirmed := true
+	for _, cs := range componentStopsForShutdownPhase1(n) {
+		if stopErr := stopWithDeadline(
+			shutdownTimeout, cs.name, cs.stop,
+		); stopErr != nil {
+			if errors.Is(stopErr, errStorageDrainUnconfirmed) {
+				phase1DrainConfirmed = false
+			}
+			err = errors.Join(err, stopErr)
 		}
 	}
 
@@ -206,24 +270,6 @@ func (n *Node) shutdown() error {
 			err = errors.Join(
 				err,
 				fmt.Errorf("peer governor shutdown: %w", stopErr),
-			)
-		}
-	}
-
-	if n.snapshotMgr != nil {
-		if stopErr := n.snapshotMgr.Stop(); stopErr != nil {
-			err = errors.Join(
-				err,
-				fmt.Errorf("snapshot manager shutdown: %w", stopErr),
-			)
-		}
-	}
-
-	if n.dbLifecycleMgr != nil {
-		if stopErr := n.dbLifecycleMgr.Stop(); stopErr != nil {
-			err = errors.Join(
-				err,
-				fmt.Errorf("database lifecycle manager shutdown: %w", stopErr),
 			)
 		}
 	}
@@ -353,7 +399,11 @@ func (n *Node) shutdown() error {
 	// Phase 3: Flush state and close database
 	n.config.logger.Info("shutdown phase 3: flushing state")
 	phase3Start := time.Now()
-	ledgerStateDrainConfirmed := true
+	// Starts from phase1DrainConfirmed: a phase-1 component that never
+	// confirmed stopping may still be using n.db, exactly the same danger an
+	// unconfirmed ledgerState close guards against below, so either failure
+	// must skip the database close and plugin host shutdown that follow.
+	ledgerStateDrainConfirmed := phase1DrainConfirmed
 
 	if n.ledgerState != nil {
 		n.config.logger.Info("closing ledger state")

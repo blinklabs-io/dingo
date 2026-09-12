@@ -1243,12 +1243,13 @@ Graceful shutdown proceeds in phases:
 
 ```
 Phase 1: Stop accepting new work
-  Chainsync stall recycler (`Recycler.Stop`; shutdown blocks until
-  the recycler goroutine exits, so it cannot still be running once
-  ledger/database teardown begins),
+  Chainsync stall recycler and chain-selected-to-none worker (both
+  context-owned by `n.cancel()`; the latter must finish before the
+  chain selector is stopped, since it reads the selector's state),
+  block forger, leader election, snapshot manager, database lifecycle
+  manager (`shutdownPhase1ComponentStops`, `node_shutdown.go`),
   Midnight indexer (unsubscribes from BlockEventType),
-  Block forger, leader election, chain selector,
-  peer governor, snapshot manager, database lifecycle manager, UTxO RPC,
+  chain selector, peer governor, UTxO RPC,
   Bark C2/archive server, Midnight gRPC server,
   Blockfrost API, Mesh API, off-chain metadata fetcher,
   CIP-26 token registry sync
@@ -1263,6 +1264,20 @@ Phase 3: Flush state and close database
 Phase 4: Cleanup resources
   Registered shutdown functions
 ```
+
+The five phase-1 components listed above (`shutdownPhase1ComponentStops`)
+each cancel their own context and then wait for a goroutine to exit with no
+deadline of their own; each is routed through `stopWithDeadline`, the same
+helper `quiesceForLiveLifecycleOp` uses to bound the identical style of wait
+for live restore/truncate, so a goroutine that never observes `n.cancel()`
+cannot wedge `Node.Stop` past the configured shutdown timeout with no
+observable error (dingo#1649). An unfinished wait escalates to
+`errStorageDrainUnconfirmed` rather than being reported as an ordinary stop
+failure, and — like an unconfirmed `LedgerState.Close` in phase 3 — makes
+phase 3 skip the database close and plugin host shutdown, since the stuck
+goroutine may still be reading or writing `n.db`. `n.chainSelector.Stop` and
+`peerGov.Stop` are not part of this list: the former only cancels and does
+not wait, and the latter already takes and honors the shutdown context.
 
 `Node.Run` holds a startup lifecycle gate from entry until startup either
 completes or has unwound its LIFO rollback stack. Normal shutdown takes the
