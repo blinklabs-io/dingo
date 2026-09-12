@@ -166,7 +166,9 @@ func TestValidateTxsubmissionReplyRejectsGenuineSizeMismatch(t *testing.T) {
 		{name: "beyond body tolerance below", size: bodySize - 33, match: "reply exceeds byte limit"},
 		{name: "zero", size: 0, match: "size mismatch"},
 		{name: "beyond body tolerance above", size: bodySize + 40, match: "size mismatch"},
-		{name: "beyond wire tolerance below", size: wireSize - 40, match: "size mismatch"},
+		// This value is the same as bodySize-33 for this fixture, so the
+		// aggregate budget rejects it before the per-body predicate runs.
+		{name: "beyond wire tolerance below", size: wireSize - 40, match: "reply exceeds byte limit"},
 		{name: "beyond wire tolerance above", size: wireSize + 33, match: "size mismatch"},
 		{name: "double", size: bodySize * 2, match: "size mismatch"},
 	} {
