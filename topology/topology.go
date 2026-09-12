@@ -262,7 +262,11 @@ func NewTopologyConfigFromFS(
 
 // maxTopologySize is the maximum allowed size for a topology config file
 // (10 MB). This prevents unbounded memory allocation from untrusted readers.
-const maxTopologySize = 10 * 1024 * 1024
+const (
+	maxTopologySize     = 10 * 1024 * 1024
+	maxPeerSnapshotSize = 10 * 1024 * 1024
+	maxAccessPointPort  = 65535
+)
 
 func NewTopologyConfigFromReader(r io.Reader) (*TopologyConfig, error) {
 	t := &TopologyConfig{}
@@ -279,12 +283,11 @@ func NewTopologyConfigFromReader(r io.Reader) (*TopologyConfig, error) {
 	if err := json.Unmarshal(data, t); err != nil {
 		return nil, err
 	}
+	if err := t.validate(); err != nil {
+		return nil, err
+	}
 	return t, nil
 }
-
-// maxPeerSnapshotSize is the maximum allowed size for peer-snapshot.json
-// (10 MB). This matches topology config's defensive read limit.
-const maxPeerSnapshotSize = 10 * 1024 * 1024
 
 func NewPeerSnapshotConfigFromReader(
 	r io.Reader,
@@ -304,6 +307,96 @@ func NewPeerSnapshotConfigFromReader(
 		return nil, err
 	}
 	return s, nil
+}
+
+func validateAccessPoint(
+	ap TopologyConfigP2PAccessPoint,
+	field string,
+) error {
+	if strings.TrimSpace(ap.Address) == "" {
+		return fmt.Errorf("%s.address must not be empty", field)
+	}
+	if ap.Port == 0 || ap.Port > maxAccessPointPort {
+		return fmt.Errorf("%s.port must be in range 1-65535", field)
+	}
+	return nil
+}
+
+// validateRootValencies checks that valency (the hot/active target) does not
+// exceed warmValency (the warm/established target), matching the
+// ouroboros-network invariant that the warm target must be >= the hot target
+// (LocalRootPeers.hs: getWarmValency w >= getHotValency h). A warmValency of
+// zero means it was not set in the config; cardano-node's parser defaults it
+// to valency in that case, so no comparison is needed.
+//
+// Note: valency is intentionally not bounded by the number of configured
+// access points here. An access point may be a DNS name that resolves to
+// multiple addresses, and the upstream bound applies to that resolved group,
+// not to the raw access-point count.
+func validateRootValencies(
+	fieldPrefix string,
+	warmValency uint,
+	valency uint,
+) error {
+	if warmValency != 0 && valency > warmValency {
+		return fmt.Errorf(
+			"%s.valency must be <= %s.warmValency",
+			fieldPrefix,
+			fieldPrefix,
+		)
+	}
+	return nil
+}
+
+func (t *TopologyConfig) validate() error {
+	for idx, localRoot := range t.LocalRoots {
+		fieldPrefix := fmt.Sprintf("localRoots[%d]", idx)
+		for apIdx, ap := range localRoot.AccessPoints {
+			if err := validateAccessPoint(
+				ap,
+				fmt.Sprintf("%s.accessPoints[%d]", fieldPrefix, apIdx),
+			); err != nil {
+				return err
+			}
+		}
+		if err := validateRootValencies(
+			fieldPrefix,
+			localRoot.WarmValency,
+			localRoot.Valency,
+		); err != nil {
+			return err
+		}
+	}
+
+	for idx, publicRoot := range t.PublicRoots {
+		fieldPrefix := fmt.Sprintf("publicRoots[%d]", idx)
+		for apIdx, ap := range publicRoot.AccessPoints {
+			if err := validateAccessPoint(
+				ap,
+				fmt.Sprintf("%s.accessPoints[%d]", fieldPrefix, apIdx),
+			); err != nil {
+				return err
+			}
+		}
+		if err := validateRootValencies(
+			fieldPrefix,
+			publicRoot.WarmValency,
+			publicRoot.Valency,
+		); err != nil {
+			return err
+		}
+	}
+
+	for idx, bootstrapPeer := range t.BootstrapPeers {
+		if err := validateAccessPoint(
+			bootstrapPeer,
+			fmt.Sprintf("bootstrapPeers[%d]", idx),
+		); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func NewPeerSnapshotConfigFromFile(
