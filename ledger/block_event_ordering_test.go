@@ -1339,7 +1339,15 @@ func TestRejectedWindowedRollbackEmitsNoUndoEvents(t *testing.T) {
 	)
 
 	target := ocommon.NewPoint(raw[0].Slot, raw[0].Hash)
-	require.Error(t, ls.rollbackPrimaryChainInSecurityParamWindows(target))
+	committed, rewindErr := ls.rollbackPrimaryChainInSecurityParamWindows(
+		target,
+	)
+	require.Error(t, rewindErr)
+	require.False(
+		t,
+		committed,
+		"a rewind rejected on fork depth commits no truncation",
+	)
 
 	testutil.RequireNoReceive(
 		t, txCh, 250*time.Millisecond,
