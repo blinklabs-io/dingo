@@ -15,6 +15,7 @@
 package chain_test
 
 import (
+	"bytes"
 	"errors"
 	"testing"
 
@@ -260,5 +261,154 @@ func TestFreshChainAcceptsFirstBlockFromAnySource(t *testing.T) {
 				)
 			}
 		})
+	}
+}
+
+// queuedFirstHeader is the chain's genuine first header (block number 1), the
+// one a chain emptied back to origin legitimately accepts into its queue.
+func queuedFirstHeader() *MockBlock {
+	return &MockBlock{
+		MockBlockNumber: 1,
+		MockSlot:        3360,
+		MockHash:        testHashPrefix + "beef",
+	}
+}
+
+// rawBlockForHeader builds a raw block carrying the queued header's hash and
+// slot but the caller's block number and prev hash, so a test can offer a
+// block that matches the header by hash yet belongs further along the chain.
+func rawBlockForHeader(
+	header *MockBlock,
+	blockNumber uint64,
+	prevHash string,
+) chain.RawBlock {
+	return chain.RawBlock{
+		Slot:        header.MockSlot,
+		Hash:        header.Hash().Bytes(),
+		BlockNumber: blockNumber,
+		Type:        uint(header.Type()),
+		PrevHash:    decodeHex(prevHash),
+		Cbor:        []byte{0x80},
+	}
+}
+
+func assertStillAtOriginWithQueuedHeader(t *testing.T, c *chain.Chain) {
+	t.Helper()
+	if tip := c.Tip(); len(tip.Point.Hash) != 0 {
+		t.Fatalf(
+			"chain advanced past origin on a rejected block: tip %d.%x",
+			tip.Point.Slot,
+			tip.Point.Hash,
+		)
+	}
+	if got := c.HeaderCount(); got != 1 {
+		t.Fatalf(
+			"rejected block consumed the queued header: header count %d, want 1",
+			got,
+		)
+	}
+}
+
+// TestAddRawBlocksAfterRollbackToOriginWithQueuedHeader pins the origin check
+// to the chain's exported API rather than to the shape of the header queue.
+// A queued header binds the next block's hash, not its block number, so the
+// sequence rollback-to-origin -> AddBlockHeader(first header) ->
+// AddRawBlocks(same hash, block number 2) must still be rejected: accepting it
+// would delete the queued header and persist block number 2 as the chain's
+// first block, leaving the missing prefix of issue #4202. The variant with no
+// header queued is covered by
+// TestAddRawBlockAfterRollbackToOriginRequiresFirstBlock.
+func TestAddRawBlocksAfterRollbackToOriginWithQueuedHeader(t *testing.T) {
+	t.Parallel()
+
+	c := chainEmptiedToOrigin(t)
+	header := queuedFirstHeader()
+	if err := c.AddBlockHeader(header); err != nil {
+		t.Fatalf("chain must accept its first header after rollback: %s", err)
+	}
+	if got := c.HeaderCount(); got != 1 {
+		t.Fatalf("expected 1 queued header, got %d", got)
+	}
+	// Same hash as the queued header, but a block number from further along
+	// the chain.
+	err := c.AddRawBlocks(
+		[]chain.RawBlock{
+			rawBlockForHeader(header, 2, testHashPrefix+"0001"),
+		},
+	)
+	if err == nil {
+		t.Fatal(
+			"AddRawBlocks accepted block number 2 as the chain's first block " +
+				"because a header was queued; the chain would grow with a " +
+				"missing prefix",
+		)
+	}
+	var notFitErr chain.BlockNotFitChainTipError
+	if !errors.As(err, &notFitErr) {
+		t.Fatalf("expected BlockNotFitChainTipError, got %T: %s", err, err)
+	}
+	assertStillAtOriginWithQueuedHeader(t, c)
+	// The consistent raw block for that same header is still accepted and
+	// clears the queue.
+	if err := c.AddRawBlocks(
+		[]chain.RawBlock{rawBlockForHeader(header, 1, "")},
+	); err != nil {
+		t.Fatalf(
+			"chain must accept the raw block matching its queued first header: %s",
+			err,
+		)
+	}
+	if got := c.HeaderCount(); got != 0 {
+		t.Fatalf("accepted block left %d queued headers, want 0", got)
+	}
+	tip := c.Tip()
+	if !bytes.Equal(tip.Point.Hash, header.Hash().Bytes()) {
+		t.Fatalf(
+			"tip hash %x after accepted block, want %x",
+			tip.Point.Hash,
+			header.Hash().Bytes(),
+		)
+	}
+	if tip.BlockNumber != 1 {
+		t.Fatalf("tip block number %d after accepted block, want 1", tip.BlockNumber)
+	}
+}
+
+// TestAddBlockAfterRollbackToOriginUsesQueuedHeaderBlockNumber pins why the
+// decoded-block path needs no separate guard for the same sequence: when a
+// header is queued, addBlockLocked takes the block number (and prev hash) from
+// that header, which the origin check above already anchored at queue time. So
+// even a block whose own body claims a mid-chain number enters the chain as
+// the header's block number 1, not as a truncated prefix. RawBlock carries a
+// caller-supplied BlockNumber that is not derived from the queued header,
+// which is why AddRawBlocks is checked directly.
+func TestAddBlockAfterRollbackToOriginUsesQueuedHeaderBlockNumber(t *testing.T) {
+	t.Parallel()
+
+	c := chainEmptiedToOrigin(t)
+	header := queuedFirstHeader()
+	if err := c.AddBlockHeader(header); err != nil {
+		t.Fatalf("chain must accept its first header after rollback: %s", err)
+	}
+	midChainBlock := &MockBlock{
+		MockBlockNumber: 2,
+		MockSlot:        header.MockSlot,
+		MockHash:        header.MockHash,
+		MockPrevHash:    testHashPrefix + "0001",
+	}
+	if err := c.AddBlock(midChainBlock, nil); err != nil {
+		t.Fatalf(
+			"block matching the queued first header must be accepted: %s",
+			err,
+		)
+	}
+	if got := c.HeaderCount(); got != 0 {
+		t.Fatalf("accepted block left %d queued headers, want 0", got)
+	}
+	if tip := c.Tip(); tip.BlockNumber != 1 {
+		t.Fatalf(
+			"chain recorded block number %d, want the queued header's 1",
+			tip.BlockNumber,
+		)
 	}
 }

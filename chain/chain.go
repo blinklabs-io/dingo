@@ -172,10 +172,10 @@ const maxFirstBlockNumber uint64 = 1
 // against a chain at origin: there is no tip block to name.
 const originTipHash = "origin"
 
-// emptiedToOrigin reports whether this chain holds nothing -- no tip block and
-// no queued headers -- after having been mutated at least once. That is the
-// state rollbackLocked leaves behind for a rollback to origin: it drops every
-// queued header and resets tipBlockIndex to 0.
+// atOriginAfterMutation reports whether this chain sits at origin -- no tip
+// block -- after having been mutated at least once. That is the state
+// rollbackLocked leaves behind for a rollback to origin: it drops every queued
+// header and resets tipBlockIndex to 0.
 //
 // The distinction matters because the continuity checks below are skipped when
 // there is no tip to chain onto, and a rollback to origin can produce that
@@ -185,13 +185,24 @@ const originTipHash = "origin"
 // prefix, and the epoch nonce folded over it is wrong, so every header in the
 // next epoch fails VRF verification (issue #4202).
 //
+// The predicate deliberately ignores the header queue. A queued header does
+// not anchor an incoming raw block: addRawBlockLocked only checks that the
+// block's hash matches c.headers[0], while RawBlock.BlockNumber is whatever
+// the caller supplied. Queuing the chain's first header and then handing over
+// a same-hash block from further along the chain would otherwise skip this
+// check, delete the queued header and persist that block number. RawBlock and
+// AddRawBlocks are exported, so the chain cannot assume its callers derive
+// those fields consistently: the check has to hold for the exported API, not
+// only for the in-tree producers. (addBlockLocked takes the block number from
+// a matching queued header, which this same check anchored when the header was
+// queued.)
+//
 // A chain that has never been mutated is deliberately excluded. It has no
 // anchor yet -- the chain package does not know the network's genesis hash --
 // and it is the state the bulk block importer fills from a local immutable
 // database, which legitimately establishes the chain's first block itself.
-func (c *Chain) emptiedToOrigin() bool {
+func (c *Chain) atOriginAfterMutation() bool {
 	return c.tipBlockIndex < initialBlockIndex &&
-		len(c.headers) == 0 &&
 		c.mutationGeneration > 0
 }
 
@@ -312,11 +323,11 @@ func (c *Chain) addBlockHeader(
 				headerTip.BlockNumber,
 			)
 		}
-	} else if c.emptiedToOrigin() &&
+	} else if c.atOriginAfterMutation() &&
 		!firstBlockNumberValid(queued.blockNumber) {
-		// The chain was emptied back to origin, so there is no tip to chain
+		// The chain was rolled back to origin, so there is no tip to chain
 		// onto and the checks above cannot run. Anchor the first header on
-		// its block number instead; see emptiedToOrigin.
+		// its block number instead; see atOriginAfterMutation.
 		return newBlockNotFitChainOriginError(
 			headerHash.String(),
 			headerPrevHash.String(),
@@ -549,10 +560,11 @@ func (c *Chain) addBlockLocked(
 				c.currentTip.BlockNumber,
 			)
 		}
-	} else if c.emptiedToOrigin() && !firstBlockNumberValid(blockNumber) {
-		// Chain emptied back to origin: anchor the first block on its block
-		// number, the only continuity the chain can check here. See
-		// emptiedToOrigin.
+	} else if c.atOriginAfterMutation() && !firstBlockNumberValid(blockNumber) {
+		// Chain rolled back to origin: anchor the first block on its block
+		// number -- taken from the matching queued header when there is one --
+		// the only continuity the chain can check here. A queued header does
+		// not exempt the block from the check. See atOriginAfterMutation.
 		return event.Event{}, newBlockNotFitChainOriginError(
 			hex.EncodeToString(blockHashBytes),
 			hex.EncodeToString(blockPrevHashBytes),
@@ -790,10 +802,12 @@ func (c *Chain) addRawBlockLocked(
 				hex.EncodeToString(c.currentTip.Point.Hash),
 			)
 		}
-	} else if c.emptiedToOrigin() && !firstBlockNumberValid(rb.BlockNumber) {
-		// Chain emptied back to origin: anchor the first block on its block
-		// number, the only continuity the chain can check here. See
-		// emptiedToOrigin.
+	} else if c.atOriginAfterMutation() &&
+		!firstBlockNumberValid(rb.BlockNumber) {
+		// Chain rolled back to origin: anchor the first block on its block
+		// number, the only continuity the chain can check here. A queued
+		// header does not exempt the block -- the hash check above binds the
+		// hash, not the number. See atOriginAfterMutation.
 		return event.Event{}, newBlockNotFitChainOriginError(
 			hex.EncodeToString(rb.Hash),
 			hex.EncodeToString(rb.PrevHash),
