@@ -776,6 +776,10 @@ func (ls *LedgerState) publishReplayRecoveryNonConvergingResync(
 // the last committed intermediate point; startup/live reconciliation can then
 // replay or finish rolling metadata back to that valid primary-chain tip.
 //
+// It reports whether any step actually committed. Several refusals precede the
+// first truncation, and telling them apart from a partial descent is what lets
+// a caller know the primary chain is exactly as it found it.
+//
 // Every step's target is read from the chain's live tip (Chain.PointAtDepth),
 // not from a schedule computed once at entry. Nothing serialises this descent
 // against chain growth -- it holds transactionEventMutex while blockfetch
@@ -788,10 +792,10 @@ func (ls *LedgerState) publishReplayRecoveryNonConvergingResync(
 // construction however far the chain has moved.
 func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 	point ocommon.Point,
-) error {
+) (bool, error) {
 	securityParam := ls.SecurityParam()
 	if securityParam <= 0 {
-		return chain.ErrSecurityParamNotConfigured
+		return false, chain.ErrSecurityParamNotConfigured
 	}
 	// Keep every Undo enqueue and its corresponding chain truncation atomic
 	// with respect to a block-apply commit's AfterCommit Apply publication.
@@ -815,10 +819,11 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 	// this function windows, and every step is validated again on its own.
 	if err := ls.chain.ValidateRollback(point); err != nil &&
 		!errors.Is(err, chain.ErrRollbackExceedsSecurityParam) {
-		return fmt.Errorf("validate recovery target: %w", err)
+		return false, fmt.Errorf("validate recovery target: %w", err)
 	}
 	window := uint64(securityParam) //nolint:gosec // positive, checked above
 	var (
+		committed          bool
 		haveLastStep       bool
 		lastStepSlot       uint64
 		overKRetries       int
@@ -828,10 +833,10 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 		tip := ls.chain.Tip()
 		if tip.Point.Slot == point.Slot &&
 			bytes.Equal(tip.Point.Hash, point.Hash) {
-			return nil
+			return committed, nil
 		}
 		if tip.Point.Slot < point.Slot {
-			return fmt.Errorf(
+			return committed, fmt.Errorf(
 				"primary chain tip slot %d is behind recovery target slot %d",
 				tip.Point.Slot,
 				point.Slot,
@@ -844,7 +849,7 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 		next := point
 		windowPoint, found, err := ls.chain.PointAtDepth(window)
 		if err != nil {
-			return fmt.Errorf(
+			return committed, fmt.Errorf(
 				"lookup intermediate recovery point at depth %d: %w",
 				window,
 				err,
@@ -884,7 +889,7 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 				overKRetries++
 				continue
 			}
-			return stepErr(err)
+			return committed, stepErr(err)
 		}
 		if err := ls.chain.Rollback(next); err != nil {
 			if !emitted &&
@@ -893,10 +898,11 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 				overKRetries++
 				continue
 			}
-			return stepErr(err)
+			return committed, stepErr(err)
 		}
+		committed = true
 		if final {
-			return nil
+			return committed, nil
 		}
 		overKRetries = 0
 		// Each committed step must land below the previous one. It will not
@@ -907,7 +913,7 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 		if haveLastStep && next.Slot >= lastStepSlot {
 			nonConvergingSteps++
 			if nonConvergingSteps > maxWindowedRewindNonConvergingSteps {
-				return fmt.Errorf(
+				return committed, fmt.Errorf(
 					"%w: target slot %d, step slot %d, chain tip slot %d",
 					errRecoveryRewindNotConverging,
 					point.Slot,
@@ -1040,8 +1046,12 @@ func (ls *LedgerState) rewindPrimaryChainForRecovery(
 	// resolves from the published pointer afterwards.
 	prior := ls.takeContinuationAuditForRewind()
 	tipBefore := ls.chain.Tip().Point
-	err := ls.rollbackPrimaryChainInSecurityParamWindows(point)
-	ls.settleAuditAfterRewind(prior, tipBefore, point)
+	committed, err := ls.rollbackPrimaryChainInSecurityParamWindows(point)
+	ls.settleAuditAfterRewind(
+		prior,
+		committed || primaryChainTipRegressed(tipBefore, ls.chain.Tip().Point),
+		point,
+	)
 	if err == nil ||
 		(!errors.Is(err, chain.ErrRollbackExceedsSecurityParam) &&
 			!errors.Is(err, errRecoveryRewindNotConverging)) {
@@ -1116,23 +1126,29 @@ func (ls *LedgerState) takeContinuationAuditForRewind() *continuationAuditWindow
 // describes a chain that no longer exists and is dropped instead; the next
 // rollback arms a fresh one.
 //
-// Otherwise the window the rewind cleared is restored, but only when the
-// primary chain tip is exactly where it was. Several refusals precede the
-// first truncation -- an unconfigured security parameter, a target the chain
-// does not hold, a tip already at or behind the target -- and on those the
-// window still describes the chain unchanged, so discarding it would cost the
-// audit its coverage for nothing. The descent commits each step as it goes, so
-// a partially committed rewind moves the tip and keeps the drop.
+// Otherwise the window the rewind cleared is restored, but only when nothing
+// was truncated. Several refusals precede the descent's first truncation -- an
+// unconfigured security parameter, a target the chain does not hold, a tip
+// already at or behind the target -- and on those the window still describes
+// the chain unchanged, so discarding it would cost the audit its coverage for
+// nothing. The descent commits each step as it goes, so a partially committed
+// rewind still counts as truncated.
+//
+// truncated is the descent's own report that a step committed, widened by a
+// primary-chain tip that regressed while the rewind ran: the descent is not the
+// only path that truncates, and a window restored over another path's rollback
+// would hold producers for blocks that path deleted. It is deliberately not a
+// plain tip comparison. Nothing serialises this rewind against blockfetch, so
+// the tip also moves forward underneath it, and a forward move deletes nothing
+// -- reading it as a truncation discarded a still-valid window and cost the
+// audit its coverage for an ordinary append.
 func (ls *LedgerState) settleAuditAfterRewind(
 	prior *continuationAuditWindow,
-	tipBefore ocommon.Point,
+	truncated bool,
 	target ocommon.Point,
 ) {
 	ls.continuationAuditMutex.Lock()
 	defer ls.continuationAuditMutex.Unlock()
-	tipAfter := ls.chain.Tip().Point
-	truncated := tipAfter.Slot != tipBefore.Slot ||
-		!bytes.Equal(tipAfter.Hash, tipBefore.Hash)
 	if armed := ls.continuationAudit.Load(); armed != nil {
 		if truncated && armed.forkPoint.Slot > target.Slot {
 			ls.continuationAudit.Store(nil)
@@ -1143,6 +1159,18 @@ func (ls *LedgerState) settleAuditAfterRewind(
 		return
 	}
 	ls.continuationAudit.Store(prior)
+}
+
+// primaryChainTipRegressed reports whether the primary chain tip moved back, or
+// onto a different block at the same slot, between two reads. A tip that only
+// moved forward is an append: it adds blocks above an audit window's fork point
+// and deletes nothing, so it is not a truncation.
+func primaryChainTipRegressed(before, after ocommon.Point) bool {
+	if after.Slot < before.Slot {
+		return true
+	}
+	return after.Slot == before.Slot &&
+		!bytes.Equal(after.Hash, before.Hash)
 }
 
 func (ls *LedgerState) recoveryRollbackExceedsMithrilBoundary(

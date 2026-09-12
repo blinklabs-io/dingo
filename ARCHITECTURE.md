@@ -4568,7 +4568,10 @@ Endorser-block references travel with the producers, on the same rule and keyed
 by the same slot, because nothing re-queues a reference for a block the
 rollback left on the chain — that block is not re-fetched. The already-merged
 memo is not carried, since re-merging a closure is idempotent and a stale memo
-would suppress a merge the new window needs.
+would suppress a merge the new window needs. The queue is carried under its own
+lock, together with whatever a drain has in flight: a drain empties the queue,
+probes what it took and rebuilds it from the blockfetch goroutine, so a rearm
+reading only the queue would carry none of the references being probed.
 
 One lock owns every transition of the window pointer and every recording of a
 producer into the window it publishes. Arming reads the outgoing window,
@@ -4586,13 +4589,25 @@ primary chain rather than by block presence, since a block the node has
 abandoned can outlive its place on the chain. The lock is never held across a
 chain truncation or a blockfetch drain.
 
+A body whose window was replaced while it was being audited stops there rather
+than finishing against the window it loaded. Its producers went into the
+published window, so the window it holds no longer contains them, and a later
+transaction in the same body spending an earlier one's output would be reported
+as a cross-fork splice against the node's own block. The endorser-block
+reference a body carries is committed with its producers, on the same
+membership test and for the same reason: a cert-driven ranking block's body is
+empty, so the reference is the only thing it offers.
+
 Recovery rewinds truncate the primary chain outside this path, so they clear
 the window for the duration and settle it afterwards from the pointer as it
 then stands: a window armed while the rewind ran is kept unless the truncation
 removed the block its fork point names, and otherwise the cleared window is
-restored only when the primary chain tip is exactly where it was. Several
-refusals precede the first truncation, and on those the window still describes
-the chain unchanged. Each arming inspects at most
+restored only when the descent reports that no step committed and the primary
+chain tip has not regressed. Several refusals precede the first truncation, and
+on those the window still describes the chain unchanged. Nothing serialises the
+rewind against blockfetch, so the tip also moves forward underneath it; an
+append deletes nothing, and reading one as a truncation discards a window the
+rewind left entirely valid. Each arming inspects at most
 `continuationAuditBlockBudget` bodies and retains at most
 `continuationAuditMaxProducedTxs` in-window producers; reaching that producer
 cap disarms the window, logs at `Warn` and counts `disarmed_cap`, so "the audit

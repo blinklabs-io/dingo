@@ -114,16 +114,21 @@ const (
 // continuationAuditWindow is the state of one armed audit run. It is published
 // through an atomic pointer, and only the blockfetch handler mutates its
 // counters, so remaining and blocksSeen need no further synchronization:
-// arming always installs a freshly allocated window.
+// arming always installs a freshly allocated window. That holds for the
+// counters of a window the handler did not audit against either -- see
+// commitContinuationAuditBodyTo -- because the handler is still the only
+// writer.
 //
-// The producer set is the exception, and producedTxsMutex is why. A rearm
-// carries the outgoing window's producers forward (see armContinuationAudit),
-// and it runs on the chainsync dispatch goroutine under chainsyncMutex while
-// the blockfetch goroutine is still recording producers into that same window
-// under chainsyncBlockfetchMutex. Neither of those locks covers both accesses,
-// and a concurrent map iteration and write is fatal at runtime -- the same
-// hazard bufferedHeaderMutex exists for. Reach producedTxs only through the
-// methods below; the mutex is a leaf, taken around map access alone.
+// The two sets a rearm carries forward are the exception, and they have a
+// mutex each: producedTxsMutex for the producer set and endorserRefsMutex for
+// the pending endorser-block references (see armContinuationAudit). A rearm
+// runs on the chainsync dispatch goroutine under chainsyncMutex while the
+// blockfetch goroutine is still recording producers and queueing references
+// into that same window under chainsyncBlockfetchMutex. Neither of those locks
+// covers both accesses, and a concurrent map iteration and write is fatal at
+// runtime -- the same hazard bufferedHeaderMutex exists for. Reach either set
+// only through the methods below; both mutexes are leaves, taken around the
+// field access alone.
 type continuationAuditWindow struct {
 	producedTxsMutex sync.Mutex
 	// producedTxs maps an in-window producer's transaction id to the slot of
@@ -136,6 +141,11 @@ type continuationAuditWindow struct {
 	forkPeer    string
 	remaining   int
 	blocksSeen  int
+	// endorserRefsMutex guards pendingEndorserRefs, pendingEndorserSeen,
+	// drainingEndorserRefs and endorserRefsDropped -- the state a rearm
+	// reads out of the outgoing window, and the state
+	// endorserProducersIncomplete decides from.
+	endorserRefsMutex sync.Mutex
 	// endorserRefsDropped counts endorser-block references this window gave
 	// up on for good: the parent lookup failed for a reason retrying cannot
 	// fix. Those holes never close, so they keep the producer set
@@ -155,6 +165,14 @@ type continuationAuditWindow struct {
 	// several ranking blocks is queued once.
 	pendingEndorserRefs []continuationAuditEndorserRef
 	pendingEndorserSeen map[string]struct{}
+	// drainingEndorserRefs are the references a drain has taken off
+	// pendingEndorserRefs and not put back yet. A drain spends a
+	// parent-block read and a provider lookup per reference, so the queue
+	// is empty for as long as that takes, and a rearm reading only
+	// pendingEndorserRefs would carry none of them forward -- leaving the
+	// new window short an endorser block nothing re-queues, which is the
+	// hole carrying references forward exists to close.
+	drainingEndorserRefs []continuationAuditEndorserRef
 	// resolvedEndorserBlocks memoizes the (hash, slot) occurrences whose
 	// transaction ids are already in producedTxs, so no endorser block is
 	// hashed twice in a window.
@@ -209,11 +227,98 @@ func (r continuationAuditEndorserRef) key() string {
 // inconclusive for the rest of its life. Only a reference given up on for good
 // leaves a hole that never closes.
 func (w *continuationAuditWindow) endorserProducersIncomplete() bool {
-	return len(w.pendingEndorserRefs) > 0 || w.endorserRefsDropped > 0
+	w.endorserRefsMutex.Lock()
+	defer w.endorserRefsMutex.Unlock()
+	return len(w.pendingEndorserRefs) > 0 ||
+		len(w.drainingEndorserRefs) > 0 ||
+		w.endorserRefsDropped > 0
 }
 
-// requeueEndorserRef returns a reference the drain took and could not finish to
-// the pending queue, restoring the dedupe entry that was removed with it.
+// pendingEndorserRefCount is how many references are queued for a later body,
+// which is what decides whether an unresolved input is worth a drain.
+func (w *continuationAuditWindow) pendingEndorserRefCount() int {
+	w.endorserRefsMutex.Lock()
+	defer w.endorserRefsMutex.Unlock()
+	return len(w.pendingEndorserRefs)
+}
+
+// noteEndorserRefDropped records a reference given up on for good.
+func (w *continuationAuditWindow) noteEndorserRefDropped() {
+	w.endorserRefsMutex.Lock()
+	defer w.endorserRefsMutex.Unlock()
+	w.endorserRefsDropped++
+}
+
+// takeEndorserRefsForDrain hands the queue to a drain and records what it took,
+// so a rearm carrying references forward still sees the ones in flight.
+func (w *continuationAuditWindow) takeEndorserRefsForDrain() (
+	refs []continuationAuditEndorserRef,
+) {
+	w.endorserRefsMutex.Lock()
+	defer w.endorserRefsMutex.Unlock()
+	refs = w.pendingEndorserRefs
+	w.pendingEndorserRefs = nil
+	w.drainingEndorserRefs = refs
+	return refs
+}
+
+// finishEndorserDrain clears the in-flight record once the drain has put back
+// everything it did not finish.
+func (w *continuationAuditWindow) finishEndorserDrain() {
+	w.endorserRefsMutex.Lock()
+	defer w.endorserRefsMutex.Unlock()
+	w.drainingEndorserRefs = nil
+}
+
+// keepEndorserRefs moves references a drain took but did not probe back onto
+// the queue. They never lost their dedupe entry, so this is a one-for-one move
+// and cannot duplicate a key -- routing them through queueEndorserRef would see
+// their own entry and drop them.
+func (w *continuationAuditWindow) keepEndorserRefs(
+	refs ...continuationAuditEndorserRef,
+) {
+	w.endorserRefsMutex.Lock()
+	defer w.endorserRefsMutex.Unlock()
+	w.pendingEndorserRefs = append(w.pendingEndorserRefs, refs...)
+}
+
+// forgetEndorserRefKey drops a reference's dedupe entry, which a drain does
+// before probing it so that a requeue can put it back.
+func (w *continuationAuditWindow) forgetEndorserRefKey(key string) {
+	w.endorserRefsMutex.Lock()
+	defer w.endorserRefsMutex.Unlock()
+	delete(w.pendingEndorserSeen, key)
+}
+
+// endorserRefsForCarryForward copies out the references a rearm may carry: the
+// queued ones and the ones a drain has in flight.
+//
+// A reference can appear in both, and in two forms, when a drain resolved one
+// and put it back after its copy in drainingEndorserRefs was taken.
+// queueEndorserRef collapses what the slot filter leaves, and the one duplicate
+// a key cannot catch -- the deferred and resolved forms of a single reference
+// -- costs one extra parent read and then converges on the resolved key. Both
+// errors run in the safe direction: a reference too many keeps the new window
+// inconclusive, where a reference too few reports a producer that is on the
+// chain as missing.
+func (w *continuationAuditWindow) endorserRefsForCarryForward() (
+	refs []continuationAuditEndorserRef,
+) {
+	w.endorserRefsMutex.Lock()
+	defer w.endorserRefsMutex.Unlock()
+	refs = make(
+		[]continuationAuditEndorserRef,
+		0,
+		len(w.pendingEndorserRefs)+len(w.drainingEndorserRefs),
+	)
+	refs = append(refs, w.pendingEndorserRefs...)
+	refs = append(refs, w.drainingEndorserRefs...)
+	return refs
+}
+
+// queueEndorserRef puts a reference on the pending queue: one the audit has
+// just classified out of a body's header, or one a drain took and could not
+// finish. Both restore a dedupe entry the queue does not hold.
 //
 // It dedupes, because resolution can make two references converge. A deferred
 // certified reference is keyed by its parent hash, and two ranking blocks with
@@ -225,15 +330,17 @@ func (w *continuationAuditWindow) endorserProducersIncomplete() bool {
 // twice, and every later body probed it twice, spending budget other references
 // needed.
 //
-// Only callers that took a reference off the queue may use it. The drain's
-// once-per-body and budget paths never take the dedupe entry, so they move
-// their references back directly instead; routing them through here would see
-// their own entry and drop them. An already-merged occurrence cannot reach
-// here either: the drain consults resolvedEndorserBlocks before the provider,
-// which is the only step after which a merged reference could be requeued.
-func (w *continuationAuditWindow) requeueEndorserRef(
+// A caller still holding a reference's dedupe entry uses keepEndorserRefs
+// instead: the drain's once-per-body and budget paths never take the entry, so
+// routing them through here would see their own and drop them. An
+// already-merged occurrence cannot reach here either: the drain consults
+// resolvedEndorserBlocks before the provider, which is the only step after
+// which a merged reference could be requeued.
+func (w *continuationAuditWindow) queueEndorserRef(
 	ref continuationAuditEndorserRef,
 ) {
+	w.endorserRefsMutex.Lock()
+	defer w.endorserRefsMutex.Unlock()
 	key := ref.key()
 	if _, ok := w.pendingEndorserSeen[key]; ok {
 		return
@@ -379,14 +486,14 @@ func (ls *LedgerState) carryForwardWindow(
 		return
 	}
 	next.producedTxs = prior.producersAtOrBelow(point.Slot)
-	for _, ref := range prior.pendingEndorserRefs {
+	for _, ref := range prior.endorserRefsForCarryForward() {
 		if ref.blockSlot > point.Slot {
 			continue
 		}
 		// lastProbedBlock counts against the window that recorded it, and
 		// next starts its own count.
 		ref.lastProbedBlock = 0
-		next.requeueEndorserRef(ref)
+		next.queueEndorserRef(ref)
 	}
 }
 
@@ -431,9 +538,7 @@ func (ls *LedgerState) auditContinuationBlock(
 	// it has one, contributes producers too: on the cert-driven path those are
 	// the only transactions a certifying ranking block brings, its own body
 	// being empty.
-	ls.queueContinuationAuditEndorserRef(window, e)
-	if !ls.commitContinuationAuditProducers(window, e, blockProducerIds(txs)) {
-		window.remaining = 0
+	if !ls.commitContinuationAuditBody(window, e, blockProducerIds(txs)) {
 		return
 	}
 	reports := 0
@@ -463,7 +568,7 @@ func (ls *LedgerState) auditContinuationBlock(
 			// paying for the window's endorser blocks: an audited body
 			// that spends nothing endorser-resident never triggers a
 			// parent-block read or a transaction hash.
-			if !resolved && len(window.pendingEndorserRefs) > 0 {
+			if !resolved && window.pendingEndorserRefCount() > 0 {
 				if !ls.drainContinuationAuditEndorserRefs(
 					window,
 					&endorserBudget,
@@ -573,19 +678,18 @@ func (ls *LedgerState) recordLateProducers(
 	if err != nil || !onChain {
 		return
 	}
-	ls.queueContinuationAuditEndorserRef(window, e)
-	if !ls.commitContinuationAuditProducers(
+	ls.commitContinuationAuditBody(
 		window,
 		e,
 		blockProducerIds(e.Block.Transactions()),
-	) {
-		window.remaining = 0
-	}
+	)
 }
 
-// commitContinuationAuditProducers records ids against the window that is
-// published now, which is not always the window the caller has been auditing
-// against.
+// commitContinuationAuditBody records what an audited body offers -- its
+// producer ids and the endorser block it references -- against the window that
+// is published now, which is not always the window the caller has been
+// auditing against. It reports whether that is still the caller's window and
+// whether the window is still armed.
 //
 // Recording and arming are mutually exclusive under continuationAuditMutex, so
 // a rearm either copies these producers out of the caller's window or publishes
@@ -601,26 +705,68 @@ func (ls *LedgerState) recordLateProducers(
 // it -- membership is also the whole justification for calling a block a
 // producer, and it does not depend on which window is published. When nothing
 // raced, the caller's window is the published one and no read is made.
-func (ls *LedgerState) commitContinuationAuditProducers(
+//
+// A false return means the caller must stop auditing this body. Its window is
+// no longer the one this body's producers went into, so a later transaction in
+// the same body spending an earlier one's output resolves against a set the
+// body is not in and reads as having no producer at all -- the false report,
+// reintroduced from the other side. Nothing is lost by stopping: a rearm
+// publishes a window whose fork point is at or above this body, which is
+// exactly the body the audit does not inspect, and a truncated body is not on
+// the chain to inspect.
+//
+// The endorser-block reference travels with the producers for the same reason
+// and on the same membership test. A cert-driven ranking block's body is empty,
+// so the reference is the only thing it offers; queueing it against a window
+// nothing reads again leaves the published window unable to resolve an
+// endorser-resident producer, which is that same false report in the shape
+// Leios transactions take.
+func (ls *LedgerState) commitContinuationAuditBody(
 	window *continuationAuditWindow,
 	e BlockfetchEvent,
 	ids [][]byte,
 ) bool {
+	ref, hasRef := ls.continuationAuditEndorserRefFor(e)
 	ls.continuationAuditMutex.Lock()
 	defer ls.continuationAuditMutex.Unlock()
 	published := ls.continuationAudit.Load()
 	if published == nil {
 		// Disarmed while this body was being audited. There is no window
-		// left to poison, and the caller's own disarm is a no-op.
-		return true
+		// left to record into, and one that is out of service must not
+		// report.
+		return false
 	}
 	if published != window {
 		onChain, err := ls.primaryChainContainsPoint(e.Point)
-		if err != nil || !onChain {
-			return true
+		if err == nil && onChain {
+			ls.commitContinuationAuditBodyTo(published, e, ids, ref, hasRef)
 		}
+		return false
 	}
-	return ls.recordContinuationAuditProducers(published, ids, e.Point.Slot)
+	return ls.commitContinuationAuditBodyTo(window, e, ids, ref, hasRef)
+}
+
+// commitContinuationAuditBodyTo queues the body's endorser reference and
+// records its producers against target, and reports whether target is still
+// armed. Reaching the producer cap disarms whichever window reached it, which
+// is not always the window the caller audited against.
+//
+// Callers must hold ls.continuationAuditMutex.
+func (ls *LedgerState) commitContinuationAuditBodyTo(
+	target *continuationAuditWindow,
+	e BlockfetchEvent,
+	ids [][]byte,
+	ref continuationAuditEndorserRef,
+	hasRef bool,
+) bool {
+	if hasRef {
+		ls.queueContinuationAuditEndorserRef(target, ref)
+	}
+	if ls.recordContinuationAuditProducers(target, ids, e.Point.Slot) {
+		return true
+	}
+	target.remaining = 0
+	return false
 }
 
 // continuationInputHasProducer reports whether an input's producing
@@ -723,7 +869,7 @@ func (w *continuationAuditWindow) recordProducers(
 	return len(w.producedTxs), true
 }
 
-// queueContinuationAuditEndorserRef records, in header-only work, the endorser
+// continuationAuditEndorserRefFor classifies, in header-only work, the endorser
 // block an audited ranking block applies, so it can be turned into producers
 // later if any input needs it.
 //
@@ -738,52 +884,56 @@ func (w *continuationAuditWindow) recordProducers(
 // Non-Leios chains are unaffected: no endorser-block provider is configured,
 // and a header that neither announces nor certifies an endorser block queues
 // nothing.
-func (ls *LedgerState) queueContinuationAuditEndorserRef(
-	window *continuationAuditWindow,
+func (ls *LedgerState) continuationAuditEndorserRefFor(
 	e BlockfetchEvent,
-) {
-	if ls.config.EndorserBlockProvider == nil || e.Block == nil {
-		return
-	}
+) (continuationAuditEndorserRef, bool) {
 	var ref continuationAuditEndorserRef
+	if ls.config.EndorserBlockProvider == nil || e.Block == nil {
+		return ref, false
+	}
 	if ls.config.LeiosApplyEndorserBlockTxs {
 		referencer, ok := e.Block.Header().(leiosEndorserBlockReferencer)
 		if !ok {
-			return
+			return ref, false
 		}
 		ebHash, _, announced := referencer.LeiosAnnouncement()
 		if !announced {
-			return
+			return ref, false
 		}
-		ref = continuationAuditEndorserRef{
+		return continuationAuditEndorserRef{
 			ebHash:    ebHash,
 			ebSlot:    e.Block.SlotNumber(),
 			resolved:  true,
 			blockSlot: e.Point.Slot,
-		}
-	} else {
-		certifier, ok := e.Block.Header().(leiosEndorserBlockCertifier)
-		if !ok {
-			return
-		}
-		certified, present := certifier.LeiosCertified()
-		if !present || !certified {
-			return
-		}
-		ref = continuationAuditEndorserRef{
-			certParentHash: e.Block.PrevHash().Bytes(),
-			blockSlot:      e.Point.Slot,
-		}
+		}, true
 	}
-	key := ref.key()
-	if _, ok := window.pendingEndorserSeen[key]; ok {
+	certifier, ok := e.Block.Header().(leiosEndorserBlockCertifier)
+	if !ok {
+		return ref, false
+	}
+	certified, present := certifier.LeiosCertified()
+	if !present || !certified {
+		return ref, false
+	}
+	return continuationAuditEndorserRef{
+		certParentHash: e.Block.PrevHash().Bytes(),
+		blockSlot:      e.Point.Slot,
+	}, true
+}
+
+// queueContinuationAuditEndorserRef queues a classified reference against the
+// window that will be asked to resolve it, unless that window has already
+// merged the occurrence it names.
+// resolvedEndorserBlocks needs no lock of its own: the blockfetch handler is
+// its only reader and its only writer, whichever window it reaches.
+func (ls *LedgerState) queueContinuationAuditEndorserRef(
+	window *continuationAuditWindow,
+	ref continuationAuditEndorserRef,
+) {
+	if _, ok := window.resolvedEndorserBlocks[ref.key()]; ok {
 		return
 	}
-	if _, ok := window.resolvedEndorserBlocks[key]; ok {
-		return
-	}
-	window.pendingEndorserSeen[key] = struct{}{}
-	window.pendingEndorserRefs = append(window.pendingEndorserRefs, ref)
+	window.queueEndorserRef(ref)
 }
 
 // drainContinuationAuditEndorserRefs merges queued endorser blocks into the
@@ -820,8 +970,8 @@ func (ls *LedgerState) drainContinuationAuditEndorserRefs(
 	budget *int,
 	auditedSlot uint64,
 ) bool {
-	pending := window.pendingEndorserRefs
-	window.pendingEndorserRefs = nil
+	pending := window.takeEndorserRefsForDrain()
+	defer window.finishEndorserDrain()
 	armed := true
 	for i, ref := range pending {
 		if !armed || *budget <= 0 {
@@ -833,10 +983,7 @@ func (ls *LedgerState) drainContinuationAuditEndorserRefs(
 			// probe the same reference several times. These references
 			// were never taken off pendingEndorserSeen, so this is a
 			// one-for-one move and cannot duplicate a key.
-			window.pendingEndorserRefs = append(
-				window.pendingEndorserRefs,
-				pending[i:]...,
-			)
+			window.keepEndorserRefs(pending[i:]...)
 			if armed && *budget == 0 {
 				ls.countContinuationAuditOutcome(
 					continuationAuditResultSkippedBudget,
@@ -860,15 +1007,12 @@ func (ls *LedgerState) drainContinuationAuditEndorserRefs(
 		// One probe per reference per audited body: nothing that could
 		// change the outcome happens between two inputs of the same body.
 		// Its dedupe entry was never taken, so this moves the reference
-		// back one-for-one rather than going through requeueEndorserRef.
+		// back one-for-one rather than going through queueEndorserRef.
 		if ref.lastProbedBlock == window.blocksSeen {
-			window.pendingEndorserRefs = append(
-				window.pendingEndorserRefs,
-				ref,
-			)
+			window.keepEndorserRefs(ref)
 			continue
 		}
-		delete(window.pendingEndorserSeen, ref.key())
+		window.forgetEndorserRefKey(ref.key())
 		ref.lastProbedBlock = window.blocksSeen
 		*budget--
 		window.endorserResolutions++
@@ -887,13 +1031,13 @@ func (ls *LedgerState) drainContinuationAuditEndorserRefs(
 					"component", "ledger",
 					"slot", ref.blockSlot,
 				)
-				window.requeueEndorserRef(ref)
+				window.queueEndorserRef(ref)
 				continue
 			case err != nil:
 				// Anything else (I/O, a corrupt hash index) will not fix
 				// itself by retrying, so the hole is permanent and the
 				// window says so once rather than per body.
-				window.endorserRefsDropped++
+				window.noteEndorserRefDropped()
 				ls.countContinuationAuditOutcome(
 					continuationAuditResultRefUnresolvable,
 				)
@@ -935,12 +1079,12 @@ func (ls *LedgerState) drainContinuationAuditEndorserRefs(
 			)
 			// Keep it queued in resolved form: the parent read is done,
 			// and the block may be fetched before the window ends.
-			window.requeueEndorserRef(ref)
+			window.queueEndorserRef(ref)
 			continue
 		}
 		ids, err := endorserBlockTxIds(rawTxs)
 		if err != nil {
-			window.endorserRefsDropped++
+			window.noteEndorserRefDropped()
 			ls.countContinuationAuditOutcome(
 				continuationAuditResultRefUnresolvable,
 			)

@@ -1079,13 +1079,14 @@ type LedgerState struct {
 	// ledger/continuation_audit.go for the cost and soundness argument.
 	//
 	// continuationAuditMutex owns every transition of the pointer, and every
-	// recording of a producer into the window it publishes. The atomic makes
+	// recording of a body into the window it publishes. The atomic makes
 	// each access safe on its own; it is the *sequence* that matters here,
 	// because arming reads the outgoing window and recovery clears and
-	// restores it, and those goroutines share no other lock. It is a leaf:
-	// it is always the innermost lock taken, and it is never held across a
-	// chain truncation or a blockfetch drain. See armContinuationAudit,
-	// commitContinuationAuditProducers and settleAuditAfterRewind.
+	// restores it, and those goroutines share no other lock. It is the
+	// innermost of the ledger's locks -- only a window's own per-field
+	// mutexes are taken under it -- and it is never held across a chain
+	// truncation or a blockfetch drain. See armContinuationAudit,
+	// commitContinuationAuditBody and settleAuditAfterRewind.
 	continuationAuditMutex sync.Mutex
 	continuationAudit      atomic.Pointer[continuationAuditWindow]
 	mithrilLedgerSlot      uint64 // blocks at or below this slot are Mithril-verified; skip validation
