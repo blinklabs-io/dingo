@@ -820,6 +820,7 @@ func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
 		},
 		notFitErr,
 		nil,
+		false,
 	)
 	require.NoError(t, err)
 	require.True(t, resolved)
@@ -921,6 +922,7 @@ func TestTryResolveForkGenesisRejectsLongerSparseCandidate(t *testing.T) {
 		},
 		notFitErr,
 		nil,
+		false,
 	)
 
 	require.NoError(t, err)
@@ -1036,6 +1038,7 @@ func TestTryResolveForkUsesPraosAfterGenesisExit(t *testing.T) {
 		},
 		notFitErr,
 		nil,
+		false,
 	)
 
 	require.NoError(t, err)
@@ -1201,6 +1204,7 @@ func TestTryResolveForkExceedsKDeclinesReconcilingDivergedLedgerTip(
 		},
 		notFitErr,
 		nil,
+		false,
 	)
 	require.NoError(t, err)
 	// The not-fit error was handled (a resync was requested), even though
@@ -1277,6 +1281,7 @@ func TestTryResolveForkPropagatesAncestorLookupError(t *testing.T) {
 		},
 		notFitErr,
 		nil,
+		false,
 	)
 
 	require.False(t, resolved)
@@ -1414,6 +1419,7 @@ func TestTryResolveForkDoesNotAdvanceLaggingLedgerTip(t *testing.T) {
 		},
 		notFitErr,
 		nil,
+		false,
 	)
 	require.NoError(t, err)
 	require.True(t, resolved)
@@ -1493,6 +1499,7 @@ func TestTryResolveForkQueuesKnownPeerForkSegment(t *testing.T) {
 		},
 		notFitErr,
 		nil,
+		false,
 	)
 	require.NoError(t, err)
 	require.True(t, resolved)
@@ -1581,6 +1588,7 @@ func TestTryResolveForkUsesObservedPeerHistoryFallback(t *testing.T) {
 		},
 		notFitErr,
 		nil,
+		false,
 	)
 	require.NoError(t, err)
 	require.True(t, resolved)

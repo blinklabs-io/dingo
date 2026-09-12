@@ -175,6 +175,57 @@ func TestValidateForgedBlockDefaultsToTrue(t *testing.T) {
 	)
 }
 
+// TestForgePrimaryChainTipToleranceDefaultIsPinnedToTheProductionLiteral
+// guards the same failure class as TestValidateForgedBlockDefaultsToTrue
+// above, for the forging knob added in issue #3973. Merging main's
+// newDefaultConfig() rewrite could have dropped this field's line from that
+// literal silently: ApplyDefaults fills a zero
+// ForgePrimaryChainTipToleranceSlots with the same constant, so every test
+// that reaches the value through LoadConfig+ApplyDefaults stays green with
+// the literal gone, and resetGlobalConfig's separate copy (config_test.go)
+// carries its own line. The gap only shows on the two paths that read the
+// production literal without defaulting: globalConfig as flag registration
+// sees it, and newDefaultConfig() itself.
+func TestForgePrimaryChainTipToleranceDefaultIsPinnedToTheProductionLiteral(
+	t *testing.T,
+) {
+	// Pins internal/config/config.go's newDefaultConfig directly, with no
+	// ApplyDefaults in the path to refill a dropped field.
+	require.Equal(
+		t,
+		uint64(DefaultForgePrimaryChainTipToleranceSlots),
+		newDefaultConfig().ForgePrimaryChainTipToleranceSlots,
+		"newDefaultConfig must carry the primary-chain-tip tolerance default; ApplyDefaults refilling it hides a dropped literal",
+	)
+
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	cfg.ApplyDefaults()
+	require.Equal(
+		t,
+		uint64(DefaultForgePrimaryChainTipToleranceSlots),
+		cfg.ForgePrimaryChainTipToleranceSlots,
+	)
+
+	// RegisterFlags takes each flag's default from globalConfig, which is
+	// seeded from newDefaultConfig and never passes through ApplyDefaults,
+	// so this is the operator-visible half of the same guarantee.
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	got, err := cmd.PersistentFlags().
+		GetUint64("forge-primary-chain-tip-tolerance-slots")
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		uint64(DefaultForgePrimaryChainTipToleranceSlots),
+		got,
+		"the --forge-primary-chain-tip-tolerance-slots flag's registered default must match the production literal",
+	)
+}
+
 func TestDebugBindAddressExplicitOverridePrecedence(t *testing.T) {
 	resetGlobalConfig()
 	unsetDebugBindAddrEnv(t)
