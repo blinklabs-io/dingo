@@ -4140,6 +4140,10 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferred(
 	if ls.chainsyncBlockfetchReadyChan == nil {
 		return nil
 	}
+	if connIdKey(ls.blockfetchDiscardConnId) != "" &&
+		sameConnectionId(e.ConnectionId, ls.blockfetchDiscardConnId) {
+		return nil
+	}
 	fromPrimary := sameConnectionId(e.ConnectionId, ls.activeBlockfetchConnId)
 	fromShadow := connIdKey(ls.shadowBlockfetchConnId) != "" &&
 		sameConnectionId(e.ConnectionId, ls.shadowBlockfetchConnId)
@@ -4227,9 +4231,6 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferred(
 	}
 	ls.pendingBlockfetchEvents = append(ls.pendingBlockfetchEvents, e)
 	ls.batchBlocksReceived++
-	// If this block is the one a tracked range was failing to obtain, that
-	// range is fetchable after all and its failure record is stale.
-	ls.noteBlockfetchRangeProgress(e.Point)
 	if len(ls.pendingBlockfetchEvents) >= blockfetchCommitBatchSize {
 		if err := ls.flushPendingBlockfetchBlocksDeferred(pubs); err != nil {
 			return err
@@ -4271,6 +4272,10 @@ func (ls *LedgerState) restartQueuedBlockfetchAfterForkLocked(
 	pending *pendingPublishes,
 ) error {
 	if ls.chainsyncBlockfetchReadyChan != nil {
+		// The old protocol request cannot be cancelled. Keep late events from
+		// being admitted after the replacement generation is installed when
+		// the restart uses the same connection.
+		ls.blockfetchDiscardConnId = ls.activeBlockfetchConnId
 		if ls.chainsyncBlockfetchTimeoutTimer != nil {
 			ls.chainsyncBlockfetchTimeoutTimer.Stop()
 			ls.chainsyncBlockfetchTimeoutTimer = nil
@@ -4577,6 +4582,8 @@ func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 	ls.shadowBlockfetchConnId = ouroboros.ConnectionId{}
 	ls.shadowBlockReceivedHashes = nil
 	ls.batchBlocksReceived = 0
+	ls.batchBlocksApplied = 0
+	ls.blockfetchBatchChainGeneration = ls.chainRollbackGeneration.Load()
 	ls.activeBlockfetchStart = time.Now()
 	ls.firstBlockReceived = false
 	headerStart, headerEnd := ls.chain.HeaderRange(blockfetchBatchSize)
@@ -4593,6 +4600,10 @@ func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 		headerEnd,
 	); err != nil {
 		ls.chainsyncBlockfetchMutex.Lock()
+		if connIdKey(ls.blockfetchDiscardConnId) != "" &&
+			sameConnectionId(ls.blockfetchDiscardConnId, connId) {
+			ls.blockfetchDiscardConnId = ouroboros.ConnectionId{}
+		}
 		ls.endBlockfetchRequestLocked(connId, primaryRequestDone)
 		if ls.blockfetchPrimaryRequestGeneration == primaryRequestGeneration {
 			ls.blockfetchPrimaryRequestGeneration = 0
@@ -4626,7 +4637,6 @@ func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 		return err
 	}
 	ls.chainsyncBlockfetchMutex.Lock()
-	ls.endBlockfetchRequestLocked(connId, primaryRequestDone)
 	if ls.blockfetchPrimaryRequestGeneration == primaryRequestGeneration {
 		ls.blockfetchPrimaryRequestGeneration = 0
 		ls.resetBlockfetchInFlightTimeoutsLocked()
@@ -4720,7 +4730,9 @@ func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 					headerEnd,
 				)
 				ls.chainsyncBlockfetchMutex.Lock()
-				ls.endBlockfetchRequestLocked(shadowConn, shadowRequestDone)
+				if err != nil {
+					ls.endBlockfetchRequestLocked(shadowConn, shadowRequestDone)
+				}
 				delete(ls.blockfetchShadowRequestsInFlight, shadowConnKey)
 				if ls.chainsyncBlockfetchReadyChan != batchReadyChan {
 					return nil
@@ -4844,7 +4856,7 @@ func (ls *LedgerState) startQueuedBlockfetchFromEventLocked(
 	}()
 }
 
-// flushPendingBlockfetchBlocksDeferred is flushPendingBlockfetchBlocks that
+// flushPendingBlockfetchBlocksDeferred flushes pending blockfetch events and
 // queues each committed block's chain.update onto pubs instead of letting the
 // chain publish it inline. The blockfetch drain runs under
 // chainsyncBlockfetchMutex; an inline, back-pressured chain.update publish
@@ -4854,6 +4866,22 @@ func (ls *LedgerState) startQueuedBlockfetchFromEventLocked(
 // moves publication to after the mutex is released. A nil pubs publishes
 // immediately (the unlocked / test path), per pendingPublishes' nil-receiver
 // contract.
+//
+// blockfetchBatchSuperseded reports whether the primary chain has rolled back
+// since the batch that produced the buffered blocks was requested.
+//
+// The rollback paths take chainsyncBlockfetchMutex for the rollback, so a
+// rollback cannot interleave with a flush that holds it, and they publish the
+// new generation before they change the chain. A reader that has observed a
+// chain change caused by a rollback therefore always observes the new
+// generation here, whether it read under that mutex or not.
+func (ls *LedgerState) blockfetchBatchSuperseded() bool {
+	return ls.blockfetchBatchChainGeneration !=
+		ls.chainRollbackGeneration.Load()
+}
+
+// flushPendingBlockfetchBlocksDeferred flushes the pending blocks into the
+// chain and queues their updates for publication after the mutex is released.
 func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 	pubs *pendingPublishes,
 ) error {
@@ -4862,17 +4890,51 @@ func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 	}
 	pending := ls.pendingBlockfetchEvents
 	ls.pendingBlockfetchEvents = ls.pendingBlockfetchEvents[:0]
+	if ls.blockfetchBatchSuperseded() {
+		// The chain moved after this batch was requested, so these blocks
+		// continue a chain the node has abandoned. They cannot be applied, and
+		// handing them to chain insertion is not merely futile: fork
+		// resolution rolls back, re-queues the winning peer's header path and
+		// only then restarts blockfetch, so the first stale block would be
+		// rejected as not matching that replacement queue and would clear it,
+		// leaving nothing queued and nothing fetching (issue #3771). Drop them
+		// and let the restarted batch fetch the current continuation instead.
+		ls.config.Logger.Debug(
+			"discarding blockfetch blocks for superseded chain",
+			"component", "ledger",
+			"discarded_blocks", len(pending),
+		)
+		return nil
+	}
 	// Commit each block before exposing it on the primary chain. The chain tip
 	// is used immediately by fork detection, so batching blob writes behind an
 	// already-advanced in-memory tip can strand the node on a fork when ancestor
 	// lookups hit uncommitted state.
-	for _, pendingEvent := range pending {
+	for i, pendingEvent := range pending {
+		// A rollback holds chainsyncBlockfetchMutex for its whole duration, so
+		// it cannot land between two insertions of this loop while the flush
+		// holds the same mutex. Re-read anyway: the check is one atomic load,
+		// and it keeps the loop correct on its own terms rather than on a
+		// locking arrangement two files away.
+		if ls.blockfetchBatchSuperseded() {
+			ls.config.Logger.Debug(
+				"discarding blockfetch blocks for superseded chain",
+				"component", "ledger",
+				"discarded_blocks", len(pending)-i,
+			)
+			break
+		}
 		evt, addBlockErr := ls.chain.AddBlockWithPointDeferred(
 			pendingEvent.Block,
 			pendingEvent.Point,
 			nil,
 		)
 		if addBlockErr == nil {
+			ls.batchBlocksApplied++
+			// Only a body accepted by chain insertion proves that the tracked
+			// range made progress. Received but rejected bodies retain the
+			// failure record so the retry guard can act on them.
+			ls.noteBlockfetchRangeProgress(pendingEvent.Point)
 			// Defer this block's chain.update past chainsyncBlockfetchMutex
 			// rather than publishing inline. AddBlockWithPointDeferred has
 			// already enqueued evt on the chain's shared sequencer under
@@ -4917,7 +4979,16 @@ func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 			),
 		)
 		if errors.As(addBlockErr, &notMatchErr) {
-			ls.clearQueuedHeaders()
+			// Dropping the queue is only right when the queue this batch
+			// was fetching is still the one in place: clearing a
+			// replacement queue fork resolution has just filled is the
+			// #3771 wedge itself. The rollback paths publish the new
+			// generation before they touch the chain, so any mismatch a
+			// rollback caused is observed here as a generation that has
+			// already moved.
+			if !ls.blockfetchBatchSuperseded() {
+				ls.clearQueuedHeaders()
+			}
 		}
 		ls.checkSlotBattle(pendingEvent, addBlockErr)
 	}
@@ -6949,6 +7020,21 @@ func (ls *LedgerState) endBlockfetchRequestLocked(
 	}
 }
 
+// completeBlockfetchRequestLocked releases a request after its BatchDone
+// event has been handled. GetBlockRange can return before the EventBus
+// subscriber drains that event; keeping the request in flight until then
+// prevents a same-connection restart from admitting old queued events.
+// The caller owns chainsyncBlockfetchMutex.
+func (ls *LedgerState) completeBlockfetchRequestLocked(
+	connId ouroboros.ConnectionId,
+) {
+	key := connIdKey(connId)
+	if done, ok := ls.blockfetchRequestsInFlight[key]; ok {
+		delete(ls.blockfetchRequestsInFlight, key)
+		close(done)
+	}
+}
+
 func (ls *LedgerState) resetBlockfetchInFlightTimeoutsLocked() {
 	ls.blockfetchInFlightTimeoutGeneration = 0
 	ls.blockfetchInFlightTimeoutCount = 0
@@ -7129,11 +7215,21 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(
 	e BlockfetchEvent,
 	pending *pendingPublishes,
 ) error {
+	// GetBlockRange may have returned before this event reached the ledger
+	// subscriber. Complete the request here so a same-connection restart waits
+	// for the old protocol request's events to drain.
+	ls.completeBlockfetchRequestLocked(e.ConnectionId)
 	// Drop batch-done from a stale connection (e.g., after connection switch).
 	// Accept it from either the primary or the shadow peer: in the near-tip
 	// shadow path the shadow can win the race and emit BatchDone before the
 	// slow primary, and waiting for the primary's BatchDone defeats the
 	// purpose of dispatching a shadow at all.
+	if connIdKey(ls.blockfetchDiscardConnId) != "" &&
+		sameConnectionId(e.ConnectionId, ls.blockfetchDiscardConnId) {
+		// BatchDone is the ordering barrier for the abandoned request.
+		ls.blockfetchDiscardConnId = ouroboros.ConnectionId{}
+		return nil
+	}
 	if ls.chainsyncBlockfetchReadyChan == nil {
 		return nil
 	}
@@ -7160,12 +7256,17 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(
 		ls.chainsyncBlockfetchTimeoutTimer = nil
 	}
 	ls.chainsyncBlockfetchTimerGeneration++
-	receivedBlockCount := ls.batchBlocksReceived
 	if err := ls.flushPendingBlockfetchBlocksDeferred(pending); err != nil {
 		ls.blockfetchRequestRangeCleanup()
 		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 		return err
 	}
+	// The count that matters is blocks *applied*, not blocks received. A batch
+	// whose blocks all arrive and are then discarded or rejected leaves the
+	// header queue exactly where it was, so gating the recovery on delivery
+	// alone let the same range be re-requested without bound while every reply
+	// was thrown away (issue #3771).
+	appliedBlockCount := ls.batchBlocksApplied
 	// Continue fetching as long as there are queued headers
 	remainingHeaders := ls.chain.HeaderCount()
 	if remainingHeaders > 0 {
@@ -7179,19 +7280,19 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(
 	// queued is one of the two shapes of "could not obtain the queued range"
 	// (the other is a NoBlocks reply, recorded in
 	// startQueuedBlockfetchLocked). Both feed the same streak.
-	if receivedBlockCount == 0 && remainingHeaders > 0 {
+	if appliedBlockCount == 0 && remainingHeaders > 0 {
 		batchStart, _ := ls.chain.HeaderRange(blockfetchBatchSize)
 		if ls.noteBlockfetchRangeUnavailable(
 			e.ConnectionId,
 			batchStart,
-			"batch completed without delivering a block",
+			"batch completed without extending the chain",
 			pending,
 		) {
 			return nil
 		}
 	}
 	upstreamTipSlot := ls.UpstreamTipSlot()
-	if receivedBlockCount == 0 &&
+	if appliedBlockCount == 0 &&
 		remainingHeaders > 0 &&
 		upstreamTipSlot > ls.Tip().Point.Slot &&
 		upstreamTipSlot-ls.Tip().Point.Slot >= blockfetchMinBatchGapSlots {

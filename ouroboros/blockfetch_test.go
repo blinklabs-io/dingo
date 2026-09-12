@@ -454,11 +454,33 @@ func TestBlockfetchServerSendBatch_RollbackEndsBatchWithoutServingBlock(
 	// The rollback sentinel must NOT be streamed as a block.
 	assert.Equal(t, 0, server.blockCalls,
 		"rollback sentinel must not be streamed as a block")
-	// The batch ends cleanly so the client re-requests against its updated
-	// chain (blockfetch has no rollback message).
+	// Blockfetch has no rollback message, so end the batch cleanly and let the
+	// client re-request against its updated chain.
 	assert.Equal(t, 1, server.batchDoneCalls)
 	assert.Equal(t, 0, conn.closeCalls)
 	assert.Equal(t, 1, iter.cancelCalls)
+}
+
+func TestBlockfetchServerSendBatch_RejectsEndHashMismatch(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	o := newOuroboros(OuroborosConfig{Logger: logger})
+	iter := &stubBlockfetchIterator{steps: []blockfetchIteratorStep{
+		{result: testBlockfetchIteratorBlock(100)},
+	}}
+	server := &stubBlockfetchBatchServer{}
+	conn := &stubBlockfetchConnection{errChan: make(chan error)}
+	start := ocommon.NewPoint(100, []byte{100})
+	end := ocommon.NewPoint(100, []byte{0xff})
+
+	err := o.blockfetchServerSendBatch(
+		testConnId().String(), start, end, iter, server, conn,
+	)
+
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "end hash mismatch")
+	assert.Equal(t, 0, server.blockCalls)
+	assert.Equal(t, 0, server.batchDoneCalls)
+	assert.Equal(t, 1, conn.closeCalls)
 }
 
 func TestBlockfetchServerSendBatch_WaitsForSendDrainBetweenMessages(
@@ -482,7 +504,7 @@ func TestBlockfetchServerSendBatch_WaitsForSendDrainBetweenMessages(
 		errChan: make(chan error),
 	}
 	start := ocommon.NewPoint(100, []byte{0x01})
-	end := ocommon.NewPoint(101, []byte{0x02})
+	end := ocommon.NewPoint(101, []byte{101})
 
 	err := o.blockfetchServerSendBatch(
 		testConnId().String(),
@@ -528,7 +550,7 @@ func TestBlockfetchServerSendBatch_ClosesConnectionWhenSendDrainStalls(
 		errChan: make(chan error),
 	}
 	start := ocommon.NewPoint(100, []byte{0x01})
-	end := ocommon.NewPoint(101, []byte{0x02})
+	end := ocommon.NewPoint(101, []byte{101})
 
 	err := o.blockfetchServerSendBatch(
 		testConnId().String(),

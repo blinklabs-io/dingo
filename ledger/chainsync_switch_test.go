@@ -665,6 +665,7 @@ func TestHandleEventBlockfetchBatchDoneUsesSelectedConnectionAfterSwitch(
 		chain:                        testChain,
 		activeBlockfetchConnId:       connId1,
 		batchBlocksReceived:          1,
+		batchBlocksApplied:           1,
 		chainsyncBlockfetchReadyChan: make(chan struct{}),
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -725,6 +726,7 @@ func TestHandleEventBlockfetchBatchDoneFallsBackToCurrentConnection(
 		chain:                        testChain,
 		activeBlockfetchConnId:       connId,
 		batchBlocksReceived:          1,
+		batchBlocksApplied:           1,
 		chainsyncBlockfetchReadyChan: make(chan struct{}),
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),

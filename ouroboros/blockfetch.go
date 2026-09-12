@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"time"
@@ -234,6 +235,40 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 		)
 		return nil
 	}
+	// Validate that the end point exists in our chain (#397). Only the end
+	// slot was ever checked, so a peer could name an end point we do not hold
+	// -- or the right slot under the wrong hash -- and the range server would
+	// stream our own chain up to that slot number as if it had served the
+	// requested range. Resolve it the way the start point is resolved and
+	// answer NoBlocks when it does not, matching the other invalid-range
+	// rejections in this function.
+	//
+	// Chain.HoldsPoint resolves the point (block-by-point lookup plus the
+	// chain-membership check) without allocating an iterator, so this adds a
+	// point resolution per request, not a second chain walk. Whether the end
+	// point is reachable *from* start is still not checked: that is the walk,
+	// and the iterator loop below already stops at end.Slot.
+	if !o.ledgerState.Chain().HoldsPoint(end) {
+		o.config.Logger.Debug(
+			"blockfetch: end point not found in chain, sending NoBlocks",
+			"connection_id", ctx.ConnectionId.String(),
+			"start_slot", start.Slot,
+			"end_slot", end.Slot,
+		)
+		if err := ctx.Server.NoBlocks(); err != nil {
+			return fmt.Errorf(
+				"blockfetch NoBlocks after end point not found: %w",
+				err,
+			)
+		}
+		o.blockfetchRecordNoBlocksAndMaybeClose(
+			ctx.ConnectionId,
+			start,
+			"blockfetch: closing stuck peer after repeated missing-point requests",
+			"blockfetch: peer stuck on missing point",
+		)
+		return nil
+	}
 	// Validate that the start point exists in our chain (#397)
 	chainIter, err := o.ledgerState.GetChainFromPoint(start, true)
 	if err != nil {
@@ -313,6 +348,7 @@ func (o *Ouroboros) blockfetchServerSendBatch(
 	); err != nil {
 		return err
 	}
+	reachedEnd := false
 Loop:
 	for {
 		select {
@@ -353,7 +389,26 @@ Loop:
 				break Loop
 			}
 			if next.Block.Slot > end.Slot {
-				break Loop
+				o.closeBlockfetchConnection(
+					conn,
+					connectionID,
+					"blockfetch range end was not reached",
+				)
+				return errors.New("blockfetch range end was not reached")
+			}
+			if next.Block.Slot == end.Slot {
+				if !bytes.Equal(next.Point.Hash, end.Hash) {
+					o.closeBlockfetchConnection(
+						conn,
+						connectionID,
+						"blockfetch range end hash mismatch",
+					)
+					return fmt.Errorf(
+						"blockfetch range end hash mismatch at slot %d",
+						next.Block.Slot,
+					)
+				}
+				reachedEnd = true
 			}
 			blockBytes := next.Block.Cbor
 			err := server.Block(
@@ -392,7 +447,7 @@ Loop:
 				return err
 			}
 			// Make sure we don't hang waiting for the next block if we've already hit the end
-			if next.Block.Slot == end.Slot {
+			if reachedEnd {
 				break Loop
 			}
 		}

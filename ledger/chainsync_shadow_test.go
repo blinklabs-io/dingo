@@ -61,9 +61,11 @@ func TestHandleEventBlockfetchBatchDoneAcceptsShadowCompletion(t *testing.T) {
 		activeBlockfetchConnId:       primary,
 		shadowBlockfetchConnId:       shadow,
 		chainsyncBlockfetchReadyChan: make(chan struct{}),
-		// Skip the empty-batch retry path: pretend the shadow already
-		// delivered a block before sending BatchDone.
+		// Skip the unobtained-range retry path: pretend the shadow already
+		// delivered a block, and that it extended the chain, before sending
+		// BatchDone.
 		batchBlocksReceived: 1,
+		batchBlocksApplied:  1,
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			BlockfetchRequestRangeFunc: func(
@@ -137,6 +139,7 @@ func TestHandleEventBlockfetchBatchDoneDropsStaleShadowAfterCleanup(
 		shadowBlockfetchConnId:       shadow,
 		chainsyncBlockfetchReadyChan: make(chan struct{}),
 		batchBlocksReceived:          1,
+		batchBlocksApplied:           1,
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			BlockfetchRequestRangeFunc: func(
