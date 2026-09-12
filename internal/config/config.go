@@ -91,10 +91,38 @@ const (
 	DefaultRejectionWatermark          = 1.0
 	DefaultForgeSyncToleranceSlots     = 100
 	DefaultForgeStaleGapThresholdSlots = 1000
-	DefaultMempoolCapacityPraos        = 1048576  // 1 MiB
-	DefaultMempoolCapacityLeios        = 26214400 // 25 MiB
-	DefaultMempoolRevalidationDeltaCap = 64
-	DefaultMempoolImplementation       = "fifo"
+	// DefaultForgePrimaryChainTipToleranceSlots bounds how far the
+	// ledger-applied tip may trail this node's own primary chain tip before
+	// forging is skipped. Small by design: both tips are local and are meant
+	// to describe the same chain position, unlike ForgeSyncToleranceSlots
+	// which tolerates trailing the network while catching up.
+	DefaultForgePrimaryChainTipToleranceSlots = 5
+	// DefaultForgeUpstreamStalenessSlots is 0, which disables the upstream
+	// staleness bound. It is opt-in because the newest block this node holds
+	// is a BLOCK while the upstream target is published at HEADER admission,
+	// so the two legitimately differ by the inter-block gap and a small
+	// always-on bound refuses leader slots during ordinary operation.
+	DefaultForgeUpstreamStalenessSlots = 0
+	// DefaultForgeAppliedTipStalenessSlots is 0, which disables the wall-clock
+	// staleness backstop. It is off by default because "how old is my newest
+	// block" tracks the block interval, so any fixed bound refuses constantly
+	// on a low-throughput chain; set it only where the block interval is known
+	// and bounded.
+	DefaultForgeAppliedTipStalenessSlots = 0
+	// DefaultForgeEndorserBlockStalenessSlots is 0, which disables the
+	// endorser-block staleness bound. It is opt-in for the same reason the
+	// other two are: the corroborated endorser-block slot is a network-stage
+	// watermark published at leios-notify announcement time, while the applied
+	// tip is a locally applied BLOCK, so the two legitimately differ during
+	// ordinary operation. The watermark is also monotonic and never lowered on
+	// a fork, so an always-on bound can withhold leader slots for as long as
+	// the local chain sits below a slot corroborated for a chain this node
+	// does not adopt.
+	DefaultForgeEndorserBlockStalenessSlots = 0
+	DefaultMempoolCapacityPraos             = 1048576  // 1 MiB
+	DefaultMempoolCapacityLeios             = 26214400 // 25 MiB
+	DefaultMempoolRevalidationDeltaCap      = 64
+	DefaultMempoolImplementation            = "fifo"
 )
 
 // RunMode represents the operational mode of the dingo node
@@ -686,6 +714,38 @@ type Config struct {
 	ShelleyOperationalCertificate string `yaml:"shelleyOperationalCertificate" envconfig:"SHELLEY_OPERATIONAL_CERTIFICATE"`
 	ForgeSyncToleranceSlots       uint64 `yaml:"forgeSyncToleranceSlots"       envconfig:"DINGO_FORGE_SYNC_TOLERANCE_SLOTS"`
 	ForgeStaleGapThresholdSlots   uint64 `yaml:"forgeStaleGapThresholdSlots"   envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
+	// ForgePrimaryChainTipToleranceSlots bounds how far the ledger-applied tip
+	// may trail this node's own primary chain tip before forging is skipped.
+	// Raise it only if the ledger pipeline is legitimately slow on this
+	// deployment; raising it lets the node forge blocks whose contents were
+	// chosen against an older chain position than their parent.
+	ForgePrimaryChainTipToleranceSlots uint64 `yaml:"forgePrimaryChainTipToleranceSlots" envconfig:"DINGO_FORGE_PRIMARY_CHAIN_TIP_TOLERANCE_SLOTS"`
+	// ForgeUpstreamStalenessSlots bounds how far the newest block this node
+	// holds may trail the corroborated upstream sync target before forging is
+	// skipped. 0 (the default) disables it.
+	//
+	// Opt-in because the comparison is not like-for-like: the newest block
+	// this node holds is a BLOCK, while the upstream target is published when
+	// a HEADER is admitted, so the two differ by the inter-block gap during
+	// ordinary operation. Set it well above the expected gap for the network.
+	ForgeUpstreamStalenessSlots uint64 `yaml:"forgeUpstreamStalenessSlots" envconfig:"DINGO_FORGE_UPSTREAM_STALENESS_SLOTS"`
+	// ForgeAppliedTipStalenessSlots bounds how many slots older than the
+	// current slot the newest block this node holds may be before forging is
+	// skipped. 0 (the default) disables this wall-clock backstop; it is
+	// off by default because on a low-throughput chain a fixed bound refuses
+	// constantly. Set it only where the block interval is known and bounded.
+	ForgeAppliedTipStalenessSlots uint64 `yaml:"forgeAppliedTipStalenessSlots" envconfig:"DINGO_FORGE_APPLIED_TIP_STALENESS_SLOTS"`
+	// ForgeEndorserBlockStalenessSlots bounds how far a corroborated Leios
+	// endorser block may lead the ledger-applied tip before forging is
+	// skipped. 0 (the default) disables it.
+	//
+	// Opt-in and separate from ForgePrimaryChainTipToleranceSlots, which
+	// bounds a purely local block-against-block comparison. This one compares
+	// a network-stage announcement watermark against a local applied tip, and
+	// that watermark is monotonic and never lowered, so an always-on bound
+	// sharing the local tolerance would tie two unrelated risk budgets to one
+	// number and could withhold leader slots indefinitely.
+	ForgeEndorserBlockStalenessSlots uint64 `yaml:"forgeEndorserBlockStalenessSlots" envconfig:"DINGO_FORGE_ENDORSER_BLOCK_STALENESS_SLOTS"`
 	// ValidateForgedBlock self-validates locally-forged blocks before
 	// adoption and diffusion. Defaults to true (fail closed); set to false
 	// only to explicitly opt out.
@@ -1141,8 +1201,12 @@ func newDefaultConfig() *Config {
 			SnapshotEveryNEpochs: 1,
 		},
 		// Forging defaults
-		ForgeSyncToleranceSlots:     DefaultForgeSyncToleranceSlots,
-		ForgeStaleGapThresholdSlots: DefaultForgeStaleGapThresholdSlots,
+		ForgeSyncToleranceSlots:            DefaultForgeSyncToleranceSlots,
+		ForgeStaleGapThresholdSlots:        DefaultForgeStaleGapThresholdSlots,
+		ForgePrimaryChainTipToleranceSlots: DefaultForgePrimaryChainTipToleranceSlots,
+		ForgeUpstreamStalenessSlots:        DefaultForgeUpstreamStalenessSlots,
+		ForgeAppliedTipStalenessSlots:      DefaultForgeAppliedTipStalenessSlots,
+		ForgeEndorserBlockStalenessSlots:   DefaultForgeEndorserBlockStalenessSlots,
 		// Fail closed: self-validate locally-forged blocks before adoption and
 		// diffusion unless an operator explicitly opts out.
 		ValidateForgedBlock: true,
@@ -1503,6 +1567,12 @@ func (c *Config) ApplyDefaults() {
 	if c.ForgeStaleGapThresholdSlots == 0 {
 		c.ForgeStaleGapThresholdSlots = DefaultForgeStaleGapThresholdSlots
 	}
+	if c.ForgePrimaryChainTipToleranceSlots == 0 {
+		c.ForgePrimaryChainTipToleranceSlots = DefaultForgePrimaryChainTipToleranceSlots
+	}
+	// Neither staleness bound is defaulted here: for both, 0 is the "disabled"
+	// value rather than "unset", so filling one with a default would turn on a
+	// forge refusal an operator never asked for.
 	// Only an unset (zero) frequency takes the default; an explicitly
 	// negative value is preserved so Validate can reject it instead of
 	// the node silently starting the expiry worker on the default cadence
