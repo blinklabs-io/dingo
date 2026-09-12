@@ -1082,6 +1082,15 @@ type LedgerState struct {
 	mithrilLedgerHash      []byte // hash for mithrilLedgerSlot, used as a stable chainsync intersect point
 	lastLocalRollbackSeq   uint64
 	lastLocalRollbackPoint ocommon.Point
+	// rollbackTruncateAfterSlotFunc is a deterministic failure seam for the
+	// rollback recovery test. Production uses Database.TruncateAfterSlot;
+	// keeping the seam on LedgerState avoids changing the database contract just
+	// to make a provider failure reproducible.
+	rollbackTruncateAfterSlotFunc func(
+		ocommon.Point,
+		uint64,
+		*database.Txn,
+	) (ochainsync.Tip, []byte, error)
 
 	// Subscription IDs for event bus unsubscribe on close
 	chainsyncSubID           event.EventSubscriberId
@@ -1769,6 +1778,14 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 			event.EpochTransitionEventType,
 			ls.handleRewardPrecomputeEpochTransition,
 		)
+	}
+	// Complete any rollback whose chain mutation or metadata truncation was
+	// interrupted after its undo outbox was committed. This runs after the
+	// ledger-owned subscriptions are installed so a recovered undo can reach
+	// the same consumers as a live rollback, and before reconciliation or block
+	// processing can publish events for the restored chain.
+	if err := ls.recoverRollbackIntent(); err != nil {
+		return fmt.Errorf("recover interrupted ledger rollback: %w", err)
 	}
 	// Now that both tip and epoch are loaded, check whether the safe zone
 	// already covers the epoch end (TransitionImpossible).  This handles the
@@ -3125,42 +3142,12 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 }
 
 func (ls *LedgerState) rollback(point ocommon.Point) error {
-	return ls.rollbackWithResync(point, true)
+	return ls.rollbackWithBlocks(point, nil, true)
 }
 
-// rollbackCommittedError reports an error found after the metadata rollback
-// transaction and in-memory tip update have committed. Callers that publish
-// side effects separately must not treat this as an all-or-nothing failure.
-type rollbackCommittedError struct {
-	err error
-}
-
-func (e *rollbackCommittedError) Error() string { return e.err.Error() }
-
-func (e *rollbackCommittedError) Unwrap() error { return e.err }
-
-func (ls *LedgerState) rollbackWithoutResync(point ocommon.Point) error {
-	return ls.rollbackWithResync(point, false)
-}
-
-func (ls *LedgerState) publishLocalLedgerRollback(point ocommon.Point) {
-	if ls.config.EventBus == nil {
-		return
-	}
-	ls.config.EventBus.Publish(
-		event.ChainsyncResyncEventType,
-		event.NewEvent(
-			event.ChainsyncResyncEventType,
-			event.ChainsyncResyncEvent{
-				Reason: event.ChainsyncResyncReasonLocalLedgerRollback,
-				Point:  point,
-			},
-		),
-	)
-}
-
-func (ls *LedgerState) rollbackWithResync(
+func (ls *LedgerState) rollbackWithBlocks(
 	point ocommon.Point,
+	rollbackBlocks []models.Block,
 	publishResync bool,
 ) error {
 	// Rolling back to the point we already sit at is a no-op. Skip
@@ -3175,20 +3162,30 @@ func (ls *LedgerState) rollbackWithResync(
 	currentTip := ls.currentTip
 	mithrilLedgerSlot := ls.mithrilLedgerSlot
 	ls.RUnlock()
+	// The in-memory tip is still needed for the equal-point repair path. The
+	// durable tip is used below for the ahead check because commit callbacks can
+	// leave the in-memory value behind a committed block-apply transaction.
+	durableTip, err := ls.db.GetTip(nil)
+	if err != nil {
+		return fmt.Errorf("read durable ledger tip: %w", err)
+	}
 	if currentTip.Point.Slot == point.Slot &&
 		bytes.Equal(currentTip.Point.Hash, point.Hash) {
-		return ls.enforceDurableTipFloor()
+		if err := ls.enforceDurableTipFloor(); err != nil {
+			return err
+		}
+		return clearRollbackIntent(ls.db)
 	}
-	if point.Slot > currentTip.Point.Slot {
+	if point.Slot > durableTip.Point.Slot {
 		ls.config.Logger.Debug(
 			"rollback point ahead of ledger tip, skipping metadata rollback",
 			"component", "ledger",
 			"rollback_slot", point.Slot,
-			"ledger_tip_slot", currentTip.Point.Slot,
+			"ledger_tip_slot", durableTip.Point.Slot,
 			"rollback_hash", hex.EncodeToString(point.Hash),
-			"ledger_tip_hash", hex.EncodeToString(currentTip.Point.Hash),
+			"ledger_tip_hash", hex.EncodeToString(durableTip.Point.Hash),
 		)
-		return nil
+		return clearRollbackIntent(ls.db)
 	}
 	// A target sharing the applied tip's slot with a different hash cannot be
 	// expressed by the UTxO and transaction truncation predicates in
@@ -3267,6 +3264,9 @@ func (ls *LedgerState) rollbackWithResync(
 	if mithrilLedgerSlot > 0 && point.Slot < mithrilLedgerSlot {
 		return ErrRollbackExceedsMithrilBoundary
 	}
+	if err := ls.ensureRollbackIntent(point, rollbackBlocks); err != nil {
+		return fmt.Errorf("prepare rollback intent: %w", err)
+	}
 	// Bracket every rollback mutation so split reward precomputation cannot
 	// persist results that mixed pre- and post-rollback blocks, pots, protocol
 	// state, or account history. The active count also keeps overlapping
@@ -3286,7 +3286,7 @@ func (ls *LedgerState) rollbackWithResync(
 	// CIP-0163 reward-account expiration hooks (ledger-owned, since they
 	// need the epoch schedule) and captures the resulting tip/nonce for
 	// the in-memory cache reload below.
-	err := ls.SubmitAsyncDBTxn(func(txn *database.Txn) error {
+	err = ls.SubmitAsyncDBTxn(func(txn *database.Txn) error {
 		// CIP-0163: capture the reward-account credentials witnessed in the
 		// rolled-away blocks (added_slot > rollback slot) before
 		// TruncateAfterSlot's certificate/reward-withdrawal deletes remove
@@ -3308,11 +3308,19 @@ func (ls *LedgerState) rollbackWithResync(
 			}
 		}
 		var err error
-		newTip, newNonce, err = ls.db.TruncateAfterSlot(
-			point,
-			mithrilLedgerSlot,
-			txn,
-		)
+		if ls.rollbackTruncateAfterSlotFunc != nil {
+			newTip, newNonce, err = ls.rollbackTruncateAfterSlotFunc(
+				point,
+				mithrilLedgerSlot,
+				txn,
+			)
+		} else {
+			newTip, newNonce, err = ls.db.TruncateAfterSlot(
+				point,
+				mithrilLedgerSlot,
+				txn,
+			)
+		}
 		if err != nil {
 			return err
 		}
@@ -3589,7 +3597,38 @@ func (ls *LedgerState) rollbackWithResync(
 	if err := ls.enforceDurableTipFloor(); err != nil {
 		return &rollbackCommittedError{err: err}
 	}
-	return nil
+	return clearRollbackIntent(ls.db)
+}
+
+// rollbackCommittedError reports an error found after the metadata rollback
+// transaction and in-memory tip update have committed. Callers that publish
+// side effects separately must not treat this as an all-or-nothing failure.
+type rollbackCommittedError struct {
+	err error
+}
+
+func (e *rollbackCommittedError) Error() string { return e.err.Error() }
+
+func (e *rollbackCommittedError) Unwrap() error { return e.err }
+
+func (ls *LedgerState) rollbackWithoutResync(point ocommon.Point) error {
+	return ls.rollbackWithBlocks(point, nil, false)
+}
+
+func (ls *LedgerState) publishLocalLedgerRollback(point ocommon.Point) {
+	if ls.config.EventBus == nil {
+		return
+	}
+	ls.config.EventBus.Publish(
+		event.ChainsyncResyncEventType,
+		event.NewEvent(
+			event.ChainsyncResyncEventType,
+			event.ChainsyncResyncEvent{
+				Reason: event.ChainsyncResyncReasonLocalLedgerRollback,
+				Point:  point,
+			},
+		),
+	)
 }
 
 // drainBlockPipelineBeforeRollback waits, up to
@@ -3862,18 +3901,41 @@ func (ls *LedgerState) reportFailedLedgerRollbackAfterTruncation(
 		"ledger_tip_slot", ledgerTip.Point.Slot,
 		"ledger_tip_hash", hex.EncodeToString(ledgerTip.Point.Hash),
 	)
-	// cause is rendered as text, not wrapped: wrapping would put its
-	// identity back in the errors.Is chain, which is precisely what the
-	// callers must not be able to match on here.
+	// Preserve the original cause for diagnostics and tests, but keep rollback
+	// refusal sentinels out of the errors.Is chain. Callers must classify this
+	// state by ErrChainTruncatedLedgerRollbackFailed, because the primary chain
+	// has already been deleted through the rollback point.
 	return fmt.Errorf(
-		"%w: chain truncated to %d.%s, ledger tip left at %d.%s: %s",
+		"%w: chain truncated to %d.%s, ledger tip left at %d.%s: %w",
 		ErrChainTruncatedLedgerRollbackFailed,
 		point.Slot,
 		hex.EncodeToString(point.Hash),
 		ledgerTip.Point.Slot,
 		hex.EncodeToString(ledgerTip.Point.Hash),
-		cause.Error(),
+		rollbackTruncationCause{err: cause},
 	)
+}
+
+// rollbackTruncationCause retains a rollback failure for errors.Is callers
+// without allowing refusal sentinels to masquerade as an unapplied rollback
+// after the primary chain has already been truncated.
+type rollbackTruncationCause struct {
+	err error
+}
+
+func (e rollbackTruncationCause) Error() string {
+	return e.err.Error()
+}
+
+func (e rollbackTruncationCause) Is(target error) bool {
+	switch target {
+	case models.ErrBlockNotFound,
+		ErrRollbackExceedsMithrilBoundary,
+		chain.ErrRollbackExceedsSecurityParam:
+		return false
+	default:
+		return errors.Is(e.err, target)
+	}
 }
 
 // processChainIteratorRollback applies a rollback emitted by the primary
@@ -3936,6 +3998,7 @@ func (ls *LedgerState) reportFailedLedgerRollbackAfterTruncation(
 func (ls *LedgerState) processChainIteratorRollback(
 	ctx context.Context,
 	point ocommon.Point,
+	rollbackBlocks []models.Block,
 ) error {
 	ls.drainBlockPipelineBeforeRollback(ctx, "chain iterator rollback")
 	chainTip := ls.chain.Tip()
@@ -3982,7 +4045,7 @@ func (ls *LedgerState) processChainIteratorRollback(
 				"ledger_tip_hash",
 				hex.EncodeToString(currentTip.Point.Hash),
 			)
-			if err := ls.rollback(point); err != nil {
+			if err := ls.rollbackWithBlocks(point, rollbackBlocks, true); err != nil {
 				return err
 			}
 			return errRestartLedgerPipeline
@@ -4806,11 +4869,12 @@ func (ls *LedgerState) StabilityWindow() uint64 {
 }
 
 type readChainResult struct {
-	rollbackPoint ocommon.Point
-	blocks        []ledger.Block
-	err           error
-	rollback      bool
-	done          chan struct{}
+	rollbackPoint  ocommon.Point
+	rollbackBlocks []models.Block
+	blocks         []ledger.Block
+	err            error
+	rollback       bool
+	done           chan struct{}
 }
 
 func trimReadBatchForRollback(
@@ -5198,9 +5262,10 @@ func (ls *LedgerState) ledgerReadChainIterator(
 				}
 			} else {
 				result = readChainResult{
-					rollback:      true,
-					rollbackPoint: rollbackNext.Point,
-					done:          make(chan struct{}),
+					rollback:       true,
+					rollbackPoint:  rollbackNext.Point,
+					rollbackBlocks: rollbackNext.RollbackBlocks,
+					done:           make(chan struct{}),
 				}
 			}
 		}
@@ -6509,6 +6574,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					if err = ls.processChainIteratorRollback(
 						ctx,
 						result.rollbackPoint,
+						result.rollbackBlocks,
 					); err != nil {
 						completeReadResult()
 						return fmt.Errorf("process rollback: %w", err)
