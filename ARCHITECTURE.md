@@ -6613,6 +6613,15 @@ retract a confirmation already sent.
 applies before logging, point allocation, or ledger lookup, including duplicate
 references. Empty lists retain the current-tip fallback.
 
+`FollowTip` populates `Timestamp` on a `Reset` block reference and on every
+response's `Tip` from `LedgerState.SlotToTime`. `Timestamp` is a plain proto3
+`uint64` with the same "unknown" ambiguity `height` has (see the UTxO RPC
+server paragraph above): a zero beside a non-origin slot asserts the block
+was produced at the Unix epoch, which a client cannot tell apart from a
+`SlotToTime` failure. So a `SlotToTime` failure ends the stream with an error
+rather than reporting `Timestamp: 0`. A `Reset` to the origin point names no
+block and keeps `Timestamp: 0`.
+
 `WatchTx` retains up to 256 forward blocks in a per-stream undo history. A
 rollback within that history builds its `Undo` responses without reading
 persisted blocks. A deeper rollback walks persisted predecessors synchronously
