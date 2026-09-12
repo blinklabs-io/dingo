@@ -178,6 +178,11 @@ func TestSnapshotInterruptedBeforeManifest(t *testing.T) {
 		db := newRestoreInternalTestDBWithTemplate(t, templatePath)
 		if templatePath != "" {
 			requireMetadataTemplateSentinel(t, db)
+			require.False(
+				t, dbtest.MetadataTemplateBuilt(),
+				"child ran its own metadata migration despite the "+
+					"template the parent process provided",
+			)
 		}
 		require.NoError(t, db.BlockCreate(newRestoreInternalTestBlock(), nil))
 		syncSnapshotFile = func(file *os.File) error {

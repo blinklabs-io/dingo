@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
@@ -58,9 +59,10 @@ import (
 // anyway is logged rather than returned, because this result is cached (see
 // templateCleanupError).
 var (
-	metadataTemplateOnce sync.Once
-	metadataTemplate     []byte
-	metadataTemplateErr  error
+	metadataTemplateOnce  sync.Once
+	metadataTemplate      []byte
+	metadataTemplateErr   error
+	metadataTemplateBuilt atomic.Bool
 )
 
 // metadataTemplateFile is the SQLite database file the metadata provider owns
@@ -84,9 +86,17 @@ func metadataTemplateDirPrefix() string {
 // metadata database, running the migration exactly once per process.
 func migratedMetadataTemplate() ([]byte, error) {
 	metadataTemplateOnce.Do(func() {
+		metadataTemplateBuilt.Store(true)
 		metadataTemplate, metadataTemplateErr = buildMetadataTemplate()
 	})
 	return metadataTemplate, metadataTemplateErr
+}
+
+// MetadataTemplateBuilt reports whether this process has run the metadata
+// migration to build its template. A forked child seeded through
+// SeedMetadataTemplateBytes before NewDatabase must report false.
+func MetadataTemplateBuilt() bool {
+	return metadataTemplateBuilt.Load()
 }
 
 // templateCleanupError folds a failure to remove the scratch template
@@ -193,11 +203,7 @@ func writeMetadataTemplate(dir string) (map[string]any, error) {
 // path. It is a no-op when a metadata file is already present, so a caller
 // reusing a directory across two constructions keeps the first one's data.
 func seedMetadataTemplate(dir string) error {
-	raw, err := migratedMetadataTemplate()
-	if err != nil {
-		return err
-	}
-	return SeedMetadataTemplateBytes(dir, raw)
+	return seedMetadataFile(dir, migratedMetadataTemplate)
 }
 
 // MetadataTemplateBytes returns the bytes of a fully migrated SQLite
@@ -222,13 +228,17 @@ func MetadataTemplateBytes() ([]byte, error) {
 // finds a migrated database instead of an empty one needing a fresh
 // migration run.
 //
-// It is a no-op if dir already has a metadata file, mirroring
-// seedMetadataTemplate (which this now delegates to): a caller that seeds a
-// directory with an externally supplied template and then also constructs
-// through NewDatabaseWithOptions -- whose own seedMetadataTemplate call
-// would otherwise reach the same file -- must not have that second call
-// silently overwrite what this one just wrote.
+// Like seedMetadataTemplate, it is a no-op if dir already has a metadata
+// file. A later NewDatabase on the same directory therefore keeps the
+// seeded file and does not build this process's own template.
 func SeedMetadataTemplateBytes(dir string, raw []byte) error {
+	return seedMetadataFile(dir, func() ([]byte, error) { return raw, nil })
+}
+
+// seedMetadataFile writes the bytes template returns into dir unless dir
+// already has a metadata file. template is called only after that check,
+// so an existing file never costs a migration.
+func seedMetadataFile(dir string, template func() ([]byte, error)) error {
 	path := filepath.Join(dir, metadataTemplateFile)
 	if _, err := os.Stat(path); err == nil {
 		return nil
@@ -237,6 +247,10 @@ func SeedMetadataTemplateBytes(dir string, raw []byte) error {
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create metadata data dir: %w", err)
+	}
+	raw, err := template()
+	if err != nil {
+		return err
 	}
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		return fmt.Errorf("write metadata template: %w", err)
