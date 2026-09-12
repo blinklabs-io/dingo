@@ -369,15 +369,24 @@ func (n *Node) initBlockForger(
 
 	// Create the block forger with the real leader election
 	forger, err := forging.NewBlockForger(forging.ForgerConfig{
-		Mode:                            forging.ModeProduction,
-		Logger:                          n.config.logger,
-		Credentials:                     creds,
-		LeaderChecker:                   election,
-		BlockBuilder:                    builder,
-		BlockBroadcaster:                broadcaster,
-		ConfirmedTxs:                    mempoolAdapter,
-		BlockForged:                     blockForged,
-		SlotClock:                       slotClock,
+		Mode:             forging.ModeProduction,
+		Logger:           n.config.logger,
+		Credentials:      creds,
+		LeaderChecker:    election,
+		BlockBuilder:     builder,
+		BlockBroadcaster: broadcaster,
+		ConfirmedTxs:     mempoolAdapter,
+		BlockForged:      blockForged,
+		SlotClock:        slotClock,
+		// Equal-slot alternative forging. When a rival block already
+		// occupies the slot this node leads, the forger builds an
+		// alternative on the rival's predecessor and offers it to chain
+		// selection instead of conceding the slot -- ouroboros-consensus
+		// mkCurrentBlockContext's EQ case. The primary chain supplies the
+		// fork context; LedgerState arbitrates with the same Praos
+		// comparison a peer's competing block goes through.
+		ChainContext:                    n.chainManager.PrimaryChain(),
+		SiblingAdopter:                  n.ledgerState,
 		ForgeSyncToleranceSlots:         n.config.forgeSyncToleranceSlots,
 		ForgeStaleGapThresholdSlots:     n.config.forgeStaleGapThresholdSlots,
 		BlockValidator:                  blockValidator,
@@ -486,6 +495,18 @@ func (a *forgingMempoolAdapter) Transactions() []forging.MempoolTransaction {
 func (a *forgingMempoolAdapter) RemoveTxsByHash(hashes []string) {
 	a.source.RemoveTxsByHash(hashes)
 }
+
+// The equal-slot alternative path is wired from two existing components
+// rather than from adapters, so these assertions are what keeps that wiring
+// honest: chain.Chain answers the fork context the alternative is built on,
+// and LedgerState arbitrates between the alternative and the block already at
+// the tip. A signature change on either side fails the build here instead of
+// silently reverting block producers to conceding contested slots, which is
+// what a nil provider does.
+var (
+	_ forging.AlternativeChainContextProvider = (*chain.Chain)(nil)
+	_ forging.SiblingBlockAdopter             = (*ledger.LedgerState)(nil)
+)
 
 // blockBroadcaster implements forging.BlockBroadcaster through synchronous
 // local chain admission. Block proposals are requests, not notifications, so

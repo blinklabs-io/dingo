@@ -143,6 +143,74 @@ func (c *Chain) HeaderTip() ochainsync.Tip {
 	return c.headerTip()
 }
 
+// TipPredecessor reports the block context an alternative to the current chain
+// tip must be built on: the tip itself (the block that would be competed with)
+// and the point of the tip's immediate predecessor, which becomes the
+// alternative block's parent.
+//
+// This is the data ouroboros-consensus' mkCurrentBlockContext returns for its
+// EQ case, where a leader whose slot is already occupied forges an alternative
+// with the same block number as the occupant and the occupant's predecessor as
+// parent (Ouroboros/Consensus/NodeKernel/Forge.hs).
+//
+// ok is false whenever that context cannot be established: an empty chain, a
+// tip that is the first block on the chain (its parent is genesis, which is not
+// a rollback target here), or a predecessor the chain can no longer resolve.
+// Callers must treat that as "no alternative can be built" and must not fall
+// back to the live tip: binding the tip itself as parent produces a block whose
+// parent slot equals its own, which envelope validation and every Praos peer
+// reject.
+func (c *Chain) TipPredecessor() (
+	parent ocommon.Point,
+	tip ochainsync.Tip,
+	ok bool,
+) {
+	if c == nil {
+		return ocommon.Point{}, ochainsync.Tip{}, false
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	// Both lookups below go through blockByIndexLocked, which resolves a
+	// common-prefix index against the primary chain when this chain is an
+	// in-memory fork. That read needs the primary-chain lock as well as the
+	// manager lock, in the chain -> primary -> manager order this helper
+	// establishes; taking manager.mutex directly would let a concurrent
+	// primary-chain mutation move the common prefix between the two lookups
+	// and yield a tip and a parent that never sat next to each other.
+	unlockBlockIndexReadLocks := c.lockBlockIndexReadLocks()
+	defer unlockBlockIndexReadLocks()
+	// initialBlockIndex is the first block; it has no predecessor on this
+	// chain, and neither does an empty chain.
+	if c.tipBlockIndex <= initialBlockIndex {
+		return ocommon.Point{}, ochainsync.Tip{}, false
+	}
+	tipBlock, err := c.blockByIndexLocked(c.tipBlockIndex)
+	if err != nil {
+		return ocommon.Point{}, ochainsync.Tip{}, false
+	}
+	parentBlock, err := c.blockByIndexLocked(c.tipBlockIndex - 1)
+	if err != nil {
+		return ocommon.Point{}, ochainsync.Tip{}, false
+	}
+	// Cross-check the two records against each other and against the tip this
+	// chain advertises. The chain maintains all three invariants, but a caller
+	// of this function is about to sign a block against the answer, so a
+	// disagreement is reported as "no context" rather than resolved.
+	//
+	// The parent must also sit strictly below the tip's slot. That is the
+	// ordering contract this function's doc comment states, and the caller
+	// signs against the answer: a parent whose slot is at or above the
+	// contested slot produces a block Praos and envelope validation reject.
+	if !bytes.Equal(tipBlock.Hash, c.currentTip.Point.Hash) ||
+		!bytes.Equal(tipBlock.PrevHash, parentBlock.Hash) ||
+		parentBlock.Slot >= tipBlock.Slot {
+		return ocommon.Point{}, ochainsync.Tip{}, false
+	}
+	return ocommon.NewPoint(parentBlock.Slot, parentBlock.Hash),
+		c.currentTip,
+		true
+}
+
 // blockNumberContiguous reports whether a block number legitimately follows its
 // parent's. Shelley-era and later increment by exactly one per block. Byron
 // epoch-boundary blocks reuse the parent's block number (they do not increment),
@@ -261,7 +329,7 @@ func (c *Chain) AddBlock(
 	block ledger.Block,
 	txn *database.Txn,
 ) error {
-	evt, err := c.addBlockInternal(block, ocommon.Point{}, txn, true, false)
+	evt, err := c.addBlockInternal(block, ocommon.Point{}, txn, true, false, nil)
 	if err != nil {
 		return err
 	}
@@ -288,6 +356,7 @@ func (c *Chain) AddLocalBlock(block ledger.Block) error {
 		nil,
 		false,
 		false,
+		nil,
 	)
 	if err != nil {
 		return err
@@ -298,6 +367,29 @@ func (c *Chain) AddLocalBlock(block ledger.Block) error {
 	return nil
 }
 
+// AddLocalBlockDeferred adds a locally forged block exactly like AddLocalBlock
+// but, instead of publishing the resulting chain.update inline, enqueues it on
+// the chain-level sequencer under c.mutex and returns it. This is the entry
+// point for a forged block adopted from a path that holds a ledger mutex --
+// specifically the equal-slot alternative, which rolls the chain back to the
+// contested block's parent under chainsyncMutex and then adopts the local
+// sibling. Publishing inline from there is the drain deadlock described on
+// AddBlockWithPointDeferred; enqueuing under c.mutex also keeps this add
+// ordered behind the rollback that preceded it. A returned event with an empty
+// Type means there is nothing to publish.
+func (c *Chain) AddLocalBlockDeferred(
+	block ledger.Block,
+) (event.Event, error) {
+	return c.addBlockInternal(
+		block,
+		ocommon.Point{},
+		nil,
+		false,
+		true,
+		nil,
+	)
+}
+
 // AddBlockWithPoint adds a block using a caller-supplied point. This avoids
 // recomputing the block hash when the caller already has the canonical slot/hash
 // pair from a validated upstream source such as blockfetch.
@@ -306,7 +398,7 @@ func (c *Chain) AddBlockWithPoint(
 	point ocommon.Point,
 	txn *database.Txn,
 ) error {
-	evt, err := c.addBlockInternal(block, point, txn, true, false)
+	evt, err := c.addBlockInternal(block, point, txn, true, false, nil)
 	if err != nil {
 		return err
 	}
@@ -336,7 +428,33 @@ func (c *Chain) AddBlockWithPointDeferred(
 	point ocommon.Point,
 	txn *database.Txn,
 ) (event.Event, error) {
-	return c.addBlockInternal(block, point, txn, true, true)
+	return c.addBlockInternal(block, point, txn, true, true, nil)
+}
+
+// AddBlockWithPointDeferredIf is AddBlockWithPointDeferred with a caller
+// supplied admission predicate, evaluated while the chain mutex is held and
+// before any chain state is read or written. When admit reports false the add
+// is abandoned and ErrBlockAddNotAdmitted is returned; nothing is mutated and
+// no event is queued.
+//
+// It exists because a precondition checked by the caller before calling is
+// not a precondition of the mutation. The blockfetch drain holds
+// chainsyncBlockfetchMutex, not the chainsyncMutex the equal-slot alternative
+// adoption holds, so a rollback can publish a new generation and truncate the
+// chain in the window between the drain testing its batch and this add taking
+// the chain mutex. Passing the test as a predicate closes that window: the
+// generation comparison and the tip mutation it guards become one atomic step
+// under the same lock every other chain mutation takes.
+//
+// admit must not acquire the chain or manager mutex, and must not block: it
+// runs on the chain's own write path.
+func (c *Chain) AddBlockWithPointDeferredIf(
+	block ledger.Block,
+	point ocommon.Point,
+	txn *database.Txn,
+	admit func() bool,
+) (event.Event, error) {
+	return c.addBlockInternal(block, point, txn, true, true, admit)
 }
 
 // queueDeferredEventLocked appends evt to the chain-level sequencer. The caller
@@ -393,6 +511,7 @@ func (c *Chain) addBlockInternal(
 	txn *database.Txn,
 	matchPendingHeader bool,
 	deferred bool,
+	admit func() bool,
 ) (event.Event, error) {
 	if c == nil {
 		return event.Event{}, errors.New("chain is nil")
@@ -402,6 +521,14 @@ func (c *Chain) addBlockInternal(
 	// We get a write lock on the manager to cover the integrity checks and adding the block below
 	c.manager.mutex.Lock()
 	defer c.manager.mutex.Unlock()
+	// Ask the caller, under the same lock that serializes every chain
+	// mutation, whether this add is still wanted. Evaluating it here is the
+	// point: a caller that checks its own precondition before calling has
+	// already released whatever it inspected, so a rollback landing in
+	// between would leave that check stale. See AddBlockWithPointDeferredIf.
+	if admit != nil && !admit() {
+		return event.Event{}, ErrBlockAddNotAdmitted
+	}
 	// Verify chain integrity
 	if err := c.reconcile(); err != nil {
 		return event.Event{}, fmt.Errorf("reconcile chain: %w", err)
