@@ -446,8 +446,13 @@ func TestResolveUtxoCborWithRecoverySharedBlobRollbackDoesNotFinishCallersTxn(
 // image of withMetadataForRecovery's borrowed blobTxn) but an earlier
 // version left sharedMetadata unset. Releasing aug after recovery then
 // rolled back -- and so finished -- the caller's own metadata transaction,
-// discarding a write-capable caller's uncommitted metadata as a side
-// effect of a call that only meant to add blob access for one recovery.
+// a side effect of a call that only meant to add blob access for one
+// recovery. A write-capable caller reaching this path would lose any
+// uncommitted metadata writes to that premature rollback, but this
+// test's caller (metadataOnlyTxn) is read-only and writes nothing through
+// it, so it does not exercise that loss -- only the narrower property
+// below (cubic review: an earlier version of this comment described the
+// write-loss case as if this test's read-only setup demonstrated it).
 //
 // Proves the caller's own metadata handle is still usable after recovery
 // completes: a plain read through metadataOnlyTxn.Metadata() must not fail
