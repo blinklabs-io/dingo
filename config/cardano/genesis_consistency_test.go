@@ -28,10 +28,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// validSecurityParams returns Byron/Shelley security-parameter values that
-// pass validateSecurityParameters, so tests targeting an unrelated
-// invariant in validateGenesisConsistency are not also incidentally
-// exercising this one.
+// Byron/Shelley security-parameter values that pass
+// validateSecurityParameters, so tests targeting an unrelated invariant in
+// validateGenesisConsistency do not also exercise that one.
 const (
 	validByronK           = 432
 	validShelleySecParam  = 432
