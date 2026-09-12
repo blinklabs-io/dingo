@@ -107,6 +107,9 @@ if [[ "${ACCELERATED}" == "true" ]]; then
   echo "  go test -tags devnet -run TestAcceleratedScenarioTimeline \\"
   echo "    -timeout 8m ./internal/test/devnet/scenarios/"
 fi
+# txpump's confirmation window is a slot count, so it has to follow the
+# spec's slot length.
+devnet_txpump_confirmation_slots "${ACCELERATED}"
 
 echo "Starting DevNet containers (mode: ${MODE}, project: ${COMPOSE_PROJECT_NAME}, net: ${DEVNET_NET_BASE}.0/24)..."
 devnet_compose_up "${SCRIPT_DIR}/docker-compose.yml"

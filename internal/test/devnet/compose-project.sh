@@ -283,3 +283,26 @@ devnet_compose_up() {
     return 1
   done
 }
+
+# Select txpump's confirmation window for the network spec being brought up.
+# docker-compose.yml reads TXPUMP_CONFIRMATION_SLOTS with a 600-slot default
+# suited to the canonical specs' 1s slots. At the accelerated specs' 0.5s
+# slots, 600 slots is 300s, the accelerated scenario's hard timeout: txpump
+# stops submitting once every funded output is quarantined, and the
+# propagation phase times out (dingo#4215).
+#
+# 75 slots is the accelerated specs' blockfetch stability window (3k/f), so
+# an output stays out of coin selection until the block that created it is
+# past rollback. At 37.5s it still lets txpump submit again inside the
+# propagation phase. TestAcceleratedTxPumpConfirmationWindowFitsBudget checks
+# both bounds against each accelerated spec.
+#
+# Pass "true" for an --accelerated bring-up. Anything else clears an
+# inherited value, so the canonical default applies.
+devnet_txpump_confirmation_slots() {
+  if [[ "${1:-}" == "true" ]]; then
+    export TXPUMP_CONFIRMATION_SLOTS=75
+  else
+    unset TXPUMP_CONFIRMATION_SLOTS
+  fi
+}

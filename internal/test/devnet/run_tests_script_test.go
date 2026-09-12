@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -52,6 +53,10 @@ case "${1:-}" in
     case " $* " in
       *" ps --status running --quiet "*) printf 'fake-container\n' ;;
       *" exec -T "*) printf '1 0 0\n' ;;
+      *" up "*)
+        printf 'compose-up TXPUMP_CONFIRMATION_SLOTS=%s\n' \
+          "${TXPUMP_CONFIRMATION_SLOTS-<unset>}" >>"${FAKE_DOCKER_LOG}"
+        ;;
     esac
     ;;
   run)
@@ -177,6 +182,55 @@ func TestRunTestsPreservesCallerOwnedStakeDirectory(t *testing.T) {
 	assert.Equal(t, "caller-owned", string(contents))
 }
 
+// TestDevNetScriptsScopeTxPumpConfirmationWindow checks the
+// TXPUMP_CONFIRMATION_SLOTS value docker compose up receives from both
+// scripts that bring a DevNet up. --accelerated must pass the override
+// devnet_txpump_confirmation_slots selects, which
+// TestAcceleratedTxPumpConfirmationWindowFitsBudget bounds. Any other run
+// must clear an inherited value, so docker-compose.yml's canonical 600-slot
+// default applies.
+func TestDevNetScriptsScopeTxPumpConfirmationWindow(t *testing.T) {
+	t.Parallel()
+	accelerated, ok := devnetTxPumpConfirmationSlots(t, "true")
+	require.True(t, ok)
+	upEnvRe := regexp.MustCompile(
+		`(?m)^compose-up TXPUMP_CONFIRMATION_SLOTS=(.*)$`)
+
+	for _, script := range []string{"run-tests.sh", "start.sh"} {
+		for _, test := range []struct {
+			name string
+			args []string
+			want string
+		}{
+			{
+				name: "accelerated",
+				args: []string{"--accelerated"},
+				want: accelerated,
+			},
+			{name: "canonical", want: "<unset>"},
+		} {
+			t.Run(script+"/"+test.name, func(t *testing.T) {
+				t.Parallel()
+				// A stale value left by an earlier accelerated shell.
+				result := runFakeDevnetScript(t, script, 0, false,
+					map[string]string{"TXPUMP_CONFIRMATION_SLOTS": "1"},
+					test.args...)
+				require.Equal(t, 0, result.exitCode, result.output)
+				matches := upEnvRe.FindAllStringSubmatch(result.dockerLog, -1)
+				require.NotEmpty(t, matches,
+					"%s never ran docker compose up\n%s",
+					script, result.output)
+				for _, match := range matches {
+					require.Equal(t, test.want, match[1],
+						"%s %s: docker compose up received"+
+							" TXPUMP_CONFIRMATION_SLOTS=%s",
+						script, test.name, match[1])
+				}
+			})
+		}
+	}
+}
+
 func runFakeDevnet(
 	t *testing.T,
 	testExit int,
@@ -193,6 +247,23 @@ func runFakeDevnet(
 // from accidentally deciding which directory the cleanup trap removes.
 func runFakeDevnetWithEnv(
 	t *testing.T,
+	testExit int,
+	failRm bool,
+	envOverrides map[string]string,
+	runnerArgs ...string,
+) fakeDevnetResult {
+	t.Helper()
+	return runFakeDevnetScript(
+		t, "run-tests.sh", testExit, failRm, envOverrides, runnerArgs...,
+	)
+}
+
+// runFakeDevnetScript runs one of the DevNet scripts (run-tests.sh or
+// start.sh) under the same fake Docker and Go binaries as
+// runFakeDevnetWithEnv.
+func runFakeDevnetScript(
+	t *testing.T,
+	script string,
 	testExit int,
 	failRm bool,
 	envOverrides map[string]string,
@@ -227,7 +298,7 @@ func runFakeDevnetWithEnv(
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	args := []string{
-		filepath.Join(root, "internal", "test", "devnet", "run-tests.sh"),
+		filepath.Join(root, "internal", "test", "devnet", script),
 	}
 	args = append(args, runnerArgs...)
 	cmd := exec.CommandContext(ctx, "bash", args...)
@@ -250,7 +321,7 @@ func runFakeDevnetWithEnv(
 	cmd.Stderr = &output
 	err := cmd.Run()
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		t.Fatalf("run-tests.sh did not finish:\n%s", output.String())
+		t.Fatalf("%s did not finish:\n%s", script, output.String())
 	}
 
 	exitCode := 0
@@ -298,6 +369,9 @@ func cleanRunnerEnv(overrides map[string]string) []string {
 		"PATH":                {},
 		"STAKE_KEYS_HOST_DIR": {},
 		"TMPDIR":              {},
+		// An inherited value would decide what docker compose up receives;
+		// TestDevNetScriptsScopeTxPumpConfirmationWindow sets it explicitly.
+		"TXPUMP_CONFIRMATION_SLOTS": {},
 	}
 	env := make([]string, 0, len(os.Environ())+len(overrides))
 	for _, item := range os.Environ() {

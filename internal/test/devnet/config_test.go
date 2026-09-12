@@ -19,9 +19,11 @@ package devnet
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -76,54 +78,102 @@ func TestAcceleratedSpecsMeetTheRunnerBudget(t *testing.T) {
 
 // TestAcceleratedTxPumpConfirmationWindowFitsBudget guards the fix for
 // dingo#4215: TXPUMP_CONFIRMATION_SLOTS's checked-in Compose default (600)
-// is tuned for the canonical profile's 1s slot length, giving a 600s
-// confirmation window. Both accelerated specs use a 0.5s slot length, so
-// the same slot count reaches a 300s window -- exactly
-// ReferenceRunnerBudget, the accelerated scenario's hard timeout. Once
-// txpump's funded outputs are all inside that window it stops submitting,
-// silently starving the propagation phase.
+// is tuned for the canonical profile's 1s slot length. At the accelerated
+// specs' 0.5s slot length the same slot count is a 300s window, exactly
+// ReferenceRunnerBudget. Once txpump's funded outputs are all inside that
+// window it stops submitting, and the propagation phase times out waiting
+// for a transaction-bearing block.
 //
-// run-tests.sh overrides TXPUMP_CONFIRMATION_SLOTS for --accelerated runs;
-// this test converts that override with each accelerated spec's own slot
-// length and fails if the resulting window is not well inside the hard
-// timeout, regardless of what slot length a future accelerated spec picks.
+// devnet_txpump_confirmation_slots (compose-project.sh) selects the
+// accelerated override for run-tests.sh and start.sh. Converted with each
+// accelerated spec's own parameters, the override must:
+//
+//   - cover the blockfetch stability window (3k/f slots), so txpump spends
+//     an output only once the block that created it is past rollback. That
+//     is the early-fork protection the quarantine exists for.
+//   - end, with txpump's longest cooldown added, before the propagation
+//     phase deadline, so txpump submits again inside that phase however its
+//     earlier outputs were timed. That deadline precedes the hard timeout.
 func TestAcceleratedTxPumpConfirmationWindowFitsBudget(t *testing.T) {
-	data, err := os.ReadFile("run-tests.sh")
+	t.Parallel()
+	raw, ok := devnetTxPumpConfirmationSlots(t, "true")
+	require.True(t, ok,
+		"devnet_txpump_confirmation_slots must export an accelerated"+
+			" TXPUMP_CONFIRMATION_SLOTS; without one, docker-compose.yml's"+
+			" 600-slot canonical default applies to the accelerated profile")
+	overrideSlots, err := strconv.ParseUint(raw, 10, 64)
 	require.NoError(t, err)
 
-	overrideRe := regexp.MustCompile(
-		`(?m)^\s*export TXPUMP_CONFIRMATION_SLOTS=(\d+)\s*$`)
-	match := overrideRe.FindStringSubmatch(string(data))
-	require.NotEmpty(t, match,
-		"run-tests.sh must export an accelerated TXPUMP_CONFIRMATION_SLOTS"+
-			" override; without one, docker-compose.yml's checked-in 600"+
-			" default (tuned for the canonical 1s slot) applies to the"+
-			" accelerated profile too, reaching ReferenceRunnerBudget")
-	overrideSlots, err := strconv.ParseUint(match[1], 10, 64)
-	require.NoError(t, err)
-
-	for _, file := range []string{
-		"testnet-accelerated.yaml",
-		"testnet-dingo-accelerated.yaml",
+	environments := loadComposeTxPumpEnvironments(t)
+	for _, spec := range []struct {
+		file    string
+		service string
+	}{
+		{"testnet-accelerated.yaml", "txpump"},
+		{"testnet-dingo-accelerated.yaml", "txpump-dingo"},
 	} {
-		t.Run(file, func(t *testing.T) {
-			cfg, err := LoadDevNetConfigFrom(file)
+		t.Run(spec.file, func(t *testing.T) {
+			cfg, err := LoadDevNetConfigFrom(spec.file)
 			require.NoError(t, err)
+			plan, err := NewScenarioPlan(cfg)
+			require.NoError(t, err)
+			propagation, ok := plan.Phase(PhasePropagation)
+			require.True(t, ok)
 
+			stability := cfg.BlockFetchStabilityWindowSlots()
+			require.GreaterOrEqual(t, overrideSlots, stability,
+				"%s: a %d-slot confirmation window is shorter than the"+
+					" %d-slot blockfetch stability window (3k/f); txpump"+
+					" could spend an output whose block can still roll back",
+				spec.file, overrideSlots, stability)
+
+			cooldownMs, err := strconv.Atoi(
+				environments[spec.service]["TXPUMP_COOLDOWN_MAX"])
+			require.NoError(t, err)
+			cooldown := time.Duration(cooldownMs) * time.Millisecond
 			window := SlotsDuration(overrideSlots, cfg.SlotDuration())
-			require.Less(t, window, ReferenceRunnerBudget,
+			require.Less(t, window+cooldown, propagation.Deadline,
 				"%s: a %d-slot confirmation window at a %s slot length is"+
-					" %s, which reaches the %s accelerated hard timeout;"+
-					" txpump goes silent once every funded output is"+
-					" quarantined",
-				file, overrideSlots, cfg.SlotDuration(), window,
-				ReferenceRunnerBudget)
-			require.LessOrEqual(t, window, ReferenceRunnerBudget/2,
-				"%s: confirmation window %s should stay well inside the"+
-					" %s hard timeout, not merely under it",
-				file, window, ReferenceRunnerBudget)
+					" %s; with %s's %s maximum cooldown, txpump can stay"+
+					" silent past the %s propagation deadline",
+				spec.file, overrideSlots, cfg.SlotDuration(), window,
+				spec.service, cooldown, propagation.Deadline)
 		})
 	}
+}
+
+// devnetTxPumpConfirmationSlots sources compose-project.sh with a stale
+// TXPUMP_CONFIRMATION_SLOTS inherited, runs devnet_txpump_confirmation_slots
+// with the given --accelerated flag, and reports the value it leaves in the
+// environment, or false when it leaves the variable unset.
+func devnetTxPumpConfirmationSlots(
+	t *testing.T,
+	accelerated string,
+) (string, bool) {
+	t.Helper()
+	cmd := exec.Command(
+		"bash",
+		"-c",
+		`set -euo pipefail
+source "$1"
+devnet_txpump_confirmation_slots "$2"
+if [[ -v TXPUMP_CONFIRMATION_SLOTS ]]; then
+  printf 'set=%s' "${TXPUMP_CONFIRMATION_SLOTS}"
+else
+  printf 'unset'
+fi`,
+		"bash",
+		"compose-project.sh",
+		accelerated,
+	)
+	cmd.Env = append(os.Environ(), "TXPUMP_CONFIRMATION_SLOTS=1")
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	value, found := strings.CutPrefix(string(out), "set=")
+	if !found {
+		require.Equal(t, "unset", string(out))
+	}
+	return value, found
 }
 
 // The canonical specs must stay on canonical timing: they are what the
@@ -321,7 +371,8 @@ func TestComposeTxPumpSubmitsOneTransactionPerBatch(t *testing.T) {
 				"TXPUMP_CONFIRMATION_SLOTS", 600,
 				"submitted outputs must remain quarantined across early"+
 					" forks on the canonical profile; the accelerated"+
-					" profile overrides this via run-tests.sh, checked by"+
+					" profile overrides this through"+
+					" devnet_txpump_confirmation_slots, checked by"+
 					" TestAcceleratedTxPumpConfirmationWindowFitsBudget")
 		})
 	}
