@@ -92,7 +92,8 @@ func (c *CardanoNodeConfig) validateMaxKESEvolutionsPresent() error {
 
 // validateSecurityParameters asserts that a loaded Byron genesis carries a
 // positive security parameter k, and that a loaded Shelley genesis carries a
-// positive k and an activeSlotsCoeff f with 0 < f <= 1.
+// positive k and an activeSlotsCoeff f with 0 < f <= 1 whose 4k/f window
+// fits in uint64.
 //
 // Without this, an invalid genesis reaches LedgerState, whose own
 // securityParamForEra / calculateStabilityWindowForEra (ledger/state.go)
@@ -142,6 +143,22 @@ func (c *CardanoNodeConfig) validateSecurityParameters() error {
 			activeSlotsCoeff.String(),
 		)
 	}
+	// ledger's calculateStabilityWindowForEra substitutes 50000 when 3k/f
+	// does not fit in uint64, and its nonceStabilityWindow returns 0 (the
+	// candidate nonce never freezes) when 4k/f does not. 4k/f is the wider
+	// of the two, so bounding it covers both.
+	window := nonceStabilityWindow(
+		c.shelleyGenesis.SecurityParam,
+		activeSlotsCoeff,
+	)
+	if !window.IsUint64() {
+		return fmt.Errorf(
+			"shelley genesis: stability window 4k/f = %s overflows uint64 (securityParam %d, activeSlotsCoeff %s)",
+			window.String(),
+			c.shelleyGenesis.SecurityParam,
+			activeSlotsCoeff.RatString(),
+		)
+	}
 	return nil
 }
 
@@ -150,6 +167,23 @@ func (c *CardanoNodeConfig) validateSecurityParameters() error {
 // 3k/f, so checking against the Conway window is the conservative bound:
 // a genesis that satisfies it satisfies every era's window.
 const nonceWindowKMultiplier = 4
+
+// nonceStabilityWindow returns ceil(4 * k / f), matching
+// ledger.nonceStabilityWindow. k and f must both be positive.
+func nonceStabilityWindow(k int, activeSlotsCoeff *big.Rat) *big.Int {
+	numerator := big.NewInt(int64(k))
+	numerator.Mul(numerator, big.NewInt(nonceWindowKMultiplier))
+	numerator.Mul(numerator, activeSlotsCoeff.Denom())
+	window, remainder := new(big.Int).QuoRem(
+		numerator,
+		activeSlotsCoeff.Num(),
+		new(big.Int),
+	)
+	if remainder.Sign() != 0 {
+		window.Add(window, big.NewInt(1))
+	}
+	return window
+}
 
 // validateEpochLengthFitsNonceWindow asserts that the Shelley genesis
 // epochLength is strictly longer than the randomness stabilisation
@@ -178,18 +212,7 @@ func (c *CardanoNodeConfig) validateEpochLengthFitsNonceWindow() error {
 		activeSlotsCoeff.Num().Sign() <= 0 {
 		return nil
 	}
-	// window = ceil(4 * k / f), matching ledger.nonceStabilityWindow.
-	numerator := big.NewInt(int64(k))
-	numerator.Mul(numerator, big.NewInt(nonceWindowKMultiplier))
-	numerator.Mul(numerator, activeSlotsCoeff.Denom())
-	window, remainder := new(big.Int).QuoRem(
-		numerator,
-		activeSlotsCoeff.Num(),
-		new(big.Int),
-	)
-	if remainder.Sign() != 0 {
-		window.Add(window, big.NewInt(1))
-	}
+	window := nonceStabilityWindow(k, activeSlotsCoeff)
 	if window.Cmp(big.NewInt(int64(epochLength))) < 0 {
 		return nil
 	}

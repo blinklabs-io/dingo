@@ -329,6 +329,41 @@ func TestNewCardanoNodeConfigFromFileRejectsInvalidSecurityParam(t *testing.T) {
 	require.ErrorContains(t, err, "security parameter")
 }
 
+// TestValidateGenesisConsistencyRejectsOverflowingStabilityWindow pins the
+// uint64 bound on the 4k/f window. A positive k and an in-range
+// activeSlotsCoeff can still produce a window that does not fit in uint64;
+// calculateStabilityWindowForEra (ledger/state.go) then substitutes 50000
+// and nonceStabilityWindow (ledger/candidate_nonce.go) returns 0.
+// validateEpochLengthFitsNonceWindow bounds the window only when
+// epochLength is positive, so these fixtures leave epochLength at zero.
+func TestValidateGenesisConsistencyRejectsOverflowingStabilityWindow(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	t.Run("4k/f overflowing uint64 is rejected", func(t *testing.T) {
+		t.Parallel()
+		// 4 * 1 / (1/2^62) = 2^64; 3k/f = 3*2^62 still fits.
+		g := validShelleyGenesisForSecurityParamTests()
+		g.SecurityParam = 1
+		g.ActiveSlotsCoeff = genesisRat(1, 1<<62)
+		c := &CardanoNodeConfig{shelleyGenesis: g}
+		err := c.validateGenesisConsistency()
+		require.Error(t, err)
+		require.ErrorContains(t, err, "stability window")
+	})
+
+	t.Run("4k/f within uint64 is accepted", func(t *testing.T) {
+		t.Parallel()
+		// 4 * 1 / (1/(2^62-1)) = 2^64-4.
+		g := validShelleyGenesisForSecurityParamTests()
+		g.SecurityParam = 1
+		g.ActiveSlotsCoeff = genesisRat(1, 1<<62-1)
+		c := &CardanoNodeConfig{shelleyGenesis: g}
+		require.NoError(t, c.validateGenesisConsistency())
+	})
+}
+
 func TestValidateEpochLengthFitsNonceWindow(t *testing.T) {
 	t.Parallel()
 
