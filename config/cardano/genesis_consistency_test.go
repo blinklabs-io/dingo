@@ -16,6 +16,8 @@ package cardano
 
 import (
 	"math/big"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -26,6 +28,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// validSecurityParams returns Byron/Shelley security-parameter values that
+// pass validateSecurityParameters, so tests targeting an unrelated
+// invariant in validateGenesisConsistency are not also incidentally
+// exercising this one.
+const (
+	validByronK           = 432
+	validShelleySecParam  = 432
+	validShelleyActiveNum = 1
+	validShelleyActiveDen = 20
+)
+
 func TestValidateGenesisConsistencyNoGenesis(t *testing.T) {
 	t.Parallel()
 
@@ -34,7 +47,12 @@ func TestValidateGenesisConsistencyNoGenesis(t *testing.T) {
 	require.NoError(t, (&CardanoNodeConfig{}).validateGenesisConsistency())
 
 	onlyByron := &CardanoNodeConfig{
-		byronGenesis: &byron.ByronGenesis{StartTime: 1000},
+		byronGenesis: &byron.ByronGenesis{
+			StartTime: 1000,
+			ProtocolConsts: byron.ByronGenesisProtocolConsts{
+				K: validByronK,
+			},
+		},
 	}
 	require.NoError(t, onlyByron.validateGenesisConsistency())
 }
@@ -43,10 +61,20 @@ func TestValidateGenesisConsistencyMatch(t *testing.T) {
 	t.Parallel()
 
 	c := &CardanoNodeConfig{
-		byronGenesis: &byron.ByronGenesis{StartTime: 1666656000},
+		byronGenesis: &byron.ByronGenesis{
+			StartTime: 1666656000,
+			ProtocolConsts: byron.ByronGenesisProtocolConsts{
+				K: validByronK,
+			},
+		},
 		shelleyGenesis: &shelley.ShelleyGenesis{
 			SystemStart:      time.Unix(1666656000, 0).UTC(),
 			MaxKESEvolutions: 62,
+			SecurityParam:    validShelleySecParam,
+			ActiveSlotsCoeff: genesisRat(
+				validShelleyActiveNum,
+				validShelleyActiveDen,
+			),
 		},
 	}
 	require.NoError(t, c.validateGenesisConsistency())
@@ -56,13 +84,25 @@ func TestValidateGenesisConsistencyMismatch(t *testing.T) {
 	t.Parallel()
 
 	c := &CardanoNodeConfig{
-		byronGenesis: &byron.ByronGenesis{StartTime: 1506203091},
+		byronGenesis: &byron.ByronGenesis{
+			StartTime: 1506203091,
+			ProtocolConsts: byron.ByronGenesisProtocolConsts{
+				K: validByronK,
+			},
+		},
 		shelleyGenesis: &shelley.ShelleyGenesis{
 			SystemStart:      time.Unix(1666656000, 0).UTC(),
 			MaxKESEvolutions: 62,
+			SecurityParam:    validShelleySecParam,
+			ActiveSlotsCoeff: genesisRat(
+				validShelleyActiveNum,
+				validShelleyActiveDen,
+			),
 		},
 	}
-	require.Error(t, c.validateGenesisConsistency())
+	err := c.validateGenesisConsistency()
+	require.Error(t, err)
+	require.ErrorContains(t, err, "genesis system start mismatch")
 }
 
 // TestValidateGenesisConsistencyRejectsMissingMaxKESEvolutions is a
@@ -97,7 +137,14 @@ func TestValidateGenesisConsistencyRejectsMissingMaxKESEvolutions(t *testing.T) 
 	t.Run("positive maxKESEvolutions is accepted", func(t *testing.T) {
 		t.Parallel()
 		c := &CardanoNodeConfig{
-			shelleyGenesis: &shelley.ShelleyGenesis{MaxKESEvolutions: 62},
+			shelleyGenesis: &shelley.ShelleyGenesis{
+				MaxKESEvolutions: 62,
+				SecurityParam:    validShelleySecParam,
+				ActiveSlotsCoeff: genesisRat(
+					validShelleyActiveNum,
+					validShelleyActiveDen,
+				),
+			},
 		}
 		require.NoError(t, c.validateGenesisConsistency())
 	})
@@ -113,6 +160,173 @@ func TestValidateGenesisConsistencyRejectsMissingMaxKESEvolutions(t *testing.T) 
 
 func genesisRat(num, denom int64) cbor.Rat {
 	return cbor.Rat{Rat: big.NewRat(num, denom)}
+}
+
+// validShelleyGenesisForSecurityParamTests returns a Shelley genesis whose
+// security-parameter fields are valid, so each sub-test below only varies
+// the single field it names.
+func validShelleyGenesisForSecurityParamTests() *shelley.ShelleyGenesis {
+	return &shelley.ShelleyGenesis{
+		MaxKESEvolutions: 62,
+		SecurityParam:    validShelleySecParam,
+		ActiveSlotsCoeff: genesisRat(
+			validShelleyActiveNum,
+			validShelleyActiveDen,
+		),
+	}
+}
+
+// TestValidateGenesisConsistencyRejectsInvalidSecurityParameters is a
+// regression test for issue #1649 case R2. Neither
+// LoadShelleyGenesisFromReader/LoadByronGenesisFromReader (used broadly by
+// unit tests to build deliberately-invalid fixtures for other guards, e.g.
+// TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffRejects) nor
+// genesis_consistency.go rejected a non-positive Shelley securityParam or an
+// activeSlotsCoeff outside (0, 1], or a non-positive Byron k. That let an
+// invalid `serve` genesis reach LedgerState, whose securityParamForEra /
+// calculateStabilityWindowForEra (ledger/state.go) treat the value as
+// "unavailable" and silently substitute blockfetchBatchSlotThresholdDefault
+// (50000) as k and as the stability window for chain-selection rollback
+// depth, the consumed-UTxO prune window, and the hard-fork safe zone --
+// rather than failing the way internal/node/load.go's
+// loadSecurityParamForConfig and ledger/eras/shape.go's
+// StabilityWindowForEra already do for the same inputs.
+func TestValidateGenesisConsistencyRejectsInvalidSecurityParameters(t *testing.T) {
+	t.Parallel()
+
+	t.Run("zero shelley security param is rejected", func(t *testing.T) {
+		t.Parallel()
+		g := validShelleyGenesisForSecurityParamTests()
+		g.SecurityParam = 0
+		c := &CardanoNodeConfig{shelleyGenesis: g}
+		err := c.validateGenesisConsistency()
+		require.Error(t, err)
+		require.ErrorContains(t, err, "security parameter")
+	})
+
+	t.Run("negative shelley security param is rejected", func(t *testing.T) {
+		t.Parallel()
+		g := validShelleyGenesisForSecurityParamTests()
+		g.SecurityParam = -1
+		c := &CardanoNodeConfig{shelleyGenesis: g}
+		err := c.validateGenesisConsistency()
+		require.Error(t, err)
+		require.ErrorContains(t, err, "security parameter")
+	})
+
+	t.Run("zero activeSlotsCoeff is rejected", func(t *testing.T) {
+		t.Parallel()
+		g := validShelleyGenesisForSecurityParamTests()
+		g.ActiveSlotsCoeff = genesisRat(0, 1)
+		c := &CardanoNodeConfig{shelleyGenesis: g}
+		err := c.validateGenesisConsistency()
+		require.Error(t, err)
+		require.ErrorContains(t, err, "activeSlotsCoeff")
+	})
+
+	t.Run("nil activeSlotsCoeff is rejected", func(t *testing.T) {
+		t.Parallel()
+		g := validShelleyGenesisForSecurityParamTests()
+		g.ActiveSlotsCoeff = cbor.Rat{}
+		c := &CardanoNodeConfig{shelleyGenesis: g}
+		err := c.validateGenesisConsistency()
+		require.Error(t, err)
+		require.ErrorContains(t, err, "activeSlotsCoeff")
+	})
+
+	t.Run("activeSlotsCoeff above one is rejected", func(t *testing.T) {
+		t.Parallel()
+		g := validShelleyGenesisForSecurityParamTests()
+		g.ActiveSlotsCoeff = genesisRat(3, 2)
+		c := &CardanoNodeConfig{shelleyGenesis: g}
+		err := c.validateGenesisConsistency()
+		require.Error(t, err)
+		require.ErrorContains(t, err, "activeSlotsCoeff")
+	})
+
+	t.Run("activeSlotsCoeff exactly one is accepted", func(t *testing.T) {
+		t.Parallel()
+		g := validShelleyGenesisForSecurityParamTests()
+		g.ActiveSlotsCoeff = genesisRat(1, 1)
+		c := &CardanoNodeConfig{shelleyGenesis: g}
+		require.NoError(t, c.validateGenesisConsistency())
+	})
+
+	t.Run("zero byron k is rejected even without shelley genesis", func(t *testing.T) {
+		t.Parallel()
+		c := &CardanoNodeConfig{
+			byronGenesis: &byron.ByronGenesis{
+				ProtocolConsts: byron.ByronGenesisProtocolConsts{K: 0},
+			},
+		}
+		err := c.validateGenesisConsistency()
+		require.Error(t, err)
+		require.ErrorContains(t, err, "byron genesis: security parameter")
+	})
+
+	t.Run("negative byron k is rejected", func(t *testing.T) {
+		t.Parallel()
+		shelleyGenesis := validShelleyGenesisForSecurityParamTests()
+		shelleyGenesis.SystemStart = time.Unix(1666656000, 0).UTC()
+		c := &CardanoNodeConfig{
+			byronGenesis: &byron.ByronGenesis{
+				StartTime: 1666656000,
+				ProtocolConsts: byron.ByronGenesisProtocolConsts{
+					K: -1,
+				},
+			},
+			shelleyGenesis: shelleyGenesis,
+		}
+		err := c.validateGenesisConsistency()
+		require.Error(t, err)
+		require.ErrorContains(t, err, "byron genesis: security parameter")
+	})
+
+	t.Run("valid byron and shelley security parameters are accepted", func(t *testing.T) {
+		t.Parallel()
+		shelleyGenesis := validShelleyGenesisForSecurityParamTests()
+		shelleyGenesis.SystemStart = time.Unix(1666656000, 0).UTC()
+		c := &CardanoNodeConfig{
+			byronGenesis: &byron.ByronGenesis{
+				StartTime: 1666656000,
+				ProtocolConsts: byron.ByronGenesisProtocolConsts{
+					K: validByronK,
+				},
+			},
+			shelleyGenesis: shelleyGenesis,
+		}
+		require.NoError(t, c.validateGenesisConsistency())
+	})
+}
+
+// TestNewCardanoNodeConfigFromFileRejectsInvalidSecurityParam proves the
+// rejection reaches the real `serve` config-load entry point
+// (NewCardanoNodeConfigFromFile -> loadGenesisConfigs), not only the
+// unit-level validator: a Shelley genesis on disk with securityParam 0 must
+// fail to load, where before this fix it loaded silently and left
+// LedgerState to substitute a fabricated k=50000.
+func TestNewCardanoNodeConfigFromFileRejectsInvalidSecurityParam(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	shelleyGenesisJSON := `{
+		"activeSlotsCoeff": 0.05,
+		"securityParam": 0,
+		"maxKESEvolutions": 62,
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`
+	require.NoError(t, os.WriteFile(
+		filepath.Join(tmpDir, "shelley-genesis.json"),
+		[]byte(shelleyGenesisJSON),
+		0o600,
+	))
+	configJSON := `{"ShelleyGenesisFile": "shelley-genesis.json"}`
+	configPath := filepath.Join(tmpDir, "config.json")
+	require.NoError(t, os.WriteFile(configPath, []byte(configJSON), 0o600))
+
+	_, err := NewCardanoNodeConfigFromFile(configPath)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "security parameter")
 }
 
 func TestValidateEpochLengthFitsNonceWindow(t *testing.T) {

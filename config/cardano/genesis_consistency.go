@@ -15,6 +15,7 @@
 package cardano
 
 import (
+	"errors"
 	"fmt"
 	"math/big"
 	"time"
@@ -22,9 +23,12 @@ import (
 
 // validateGenesisConsistency cross-checks invariants that must hold
 // between, or within, genesis files but are not captured by any single
-// file's hash. It asserts two things.
+// file's hash. It asserts three things.
 //
-// First, that when both a Byron and a Shelley genesis are
+// First, that the loaded Byron/Shelley security parameters are usable; see
+// validateSecurityParameters.
+//
+// Second, that when both a Byron and a Shelley genesis are
 // present, the Byron startTime (Unix seconds) equals the Shelley
 // systemStart. On every real Cardano network these are the same instant:
 // the Shelley systemStart is the chain start time inherited from Byron.
@@ -34,10 +38,13 @@ import (
 // for Byron-era slots. Failing closed at load time surfaces such a
 // misconfiguration immediately rather than as silent time drift later.
 //
-// Second, that the Shelley epochLength leaves room for the randomness
+// Third, that the Shelley epochLength leaves room for the randomness
 // stabilisation window; see validateEpochLengthFitsNonceWindow.
 func (c *CardanoNodeConfig) validateGenesisConsistency() error {
 	if err := c.validateMaxKESEvolutionsPresent(); err != nil {
+		return err
+	}
+	if err := c.validateSecurityParameters(); err != nil {
 		return err
 	}
 	if c.byronGenesis == nil || c.shelleyGenesis == nil {
@@ -78,6 +85,61 @@ func (c *CardanoNodeConfig) validateMaxKESEvolutionsPresent() error {
 		return fmt.Errorf(
 			"shelley genesis maxKESEvolutions must be positive, got %d; opcert KES-period validation requires it and fails closed on every header once verification runs",
 			c.shelleyGenesis.MaxKESEvolutions,
+		)
+	}
+	return nil
+}
+
+// validateSecurityParameters asserts that a loaded Byron genesis carries a
+// positive security parameter k, and that a loaded Shelley genesis carries a
+// positive k and an activeSlotsCoeff f with 0 < f <= 1.
+//
+// Without this, an invalid genesis reaches LedgerState, whose own
+// securityParamForEra / calculateStabilityWindowForEra (ledger/state.go)
+// treat a non-positive k or an unusable activeSlotsCoeff as "unavailable"
+// and silently substitute blockfetchBatchSlotThresholdDefault (50000) as
+// both the security parameter and the stability window for every
+// consensus-relevant computation that depends on them: chain-selection
+// rollback depth, the consumed-UTxO prune window, and the hard-fork safe
+// zone. internal/node/load.go's loadSecurityParamForConfig and
+// ledger/eras/shape.go's StabilityWindowForEra already reject the same
+// malformed genesis for the `load` replay path and the HFC shape builder;
+// this makes the `serve` genesis-load path consistent with them instead of
+// quietly running consensus on a fabricated k.
+func (c *CardanoNodeConfig) validateSecurityParameters() error {
+	if c.byronGenesis != nil {
+		if k := c.byronGenesis.ProtocolConsts.K; k <= 0 {
+			return fmt.Errorf(
+				"byron genesis: security parameter (protocolConsts.k) must be positive, got %d",
+				k,
+			)
+		}
+	}
+	if c.shelleyGenesis == nil {
+		return nil
+	}
+	if k := c.shelleyGenesis.SecurityParam; k <= 0 {
+		return fmt.Errorf(
+			"shelley genesis: security parameter (securityParam) must be positive, got %d",
+			k,
+		)
+	}
+	activeSlotsCoeff := c.shelleyGenesis.ActiveSlotsCoeff.Rat
+	if activeSlotsCoeff == nil {
+		return errors.New(
+			"shelley genesis: activeSlotsCoeff is unset",
+		)
+	}
+	if activeSlotsCoeff.Sign() <= 0 {
+		return fmt.Errorf(
+			"shelley genesis: activeSlotsCoeff must be positive, got %s",
+			activeSlotsCoeff.String(),
+		)
+	}
+	if activeSlotsCoeff.Cmp(big.NewRat(1, 1)) > 0 {
+		return fmt.Errorf(
+			"shelley genesis: activeSlotsCoeff must be <= 1, got %s",
+			activeSlotsCoeff.String(),
 		)
 	}
 	return nil
