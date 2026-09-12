@@ -390,7 +390,7 @@ func ResolveBlockNumberBoundTxn(txn *Txn) (BlockNumberBound, error) {
 	if blobTxn == nil {
 		return BlockNumberBound{}, types.ErrNilTxn
 	}
-	blob := txn.DB().Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return BlockNumberBound{}, types.ErrBlobStoreUnavailable
 	}
@@ -592,7 +592,7 @@ func blockIndexEntryAtOrAfterTxn(
 	if blobTxn == nil {
 		return blockIndexEntry{}, types.ErrNilTxn
 	}
-	blob := txn.DB().Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return blockIndexEntry{}, types.ErrBlobStoreUnavailable
 	}
@@ -667,7 +667,7 @@ func blockMetadataByKey(
 	if blobTxn == nil {
 		return types.BlockMetadata{}, types.ErrNilTxn
 	}
-	blob := txn.DB().Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return types.BlockMetadata{}, types.ErrBlobStoreUnavailable
 	}

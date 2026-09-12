@@ -78,14 +78,10 @@ func TestPeerSharingShareRequestBoundsValidPeers(t *testing.T) {
 		t,
 		peerGov.AddPeer("10.0.0.1:3001", peergov.PeerSourceTopologyLocalRoot),
 	)
-	// Exercise every validation failure in the sharing adapter: an address
-	// without host:port structure, a split address whose host is not an IP,
-	// and a port outside the uint16 wire range.
+	// Exercise validation failures in the sharing adapter: an address without
+	// host:port structure and a port outside the uint16 wire range. Keep these
+	// inputs deterministic; AddPeer resolves non-IP hosts before storing them.
 	require.NoError(t, peerGov.AddPeer("malformed", peergov.PeerSourceP2PGossip))
-	require.NoError(
-		t,
-		peerGov.AddPeer("[44.0.0.9%invalid]:3001", peergov.PeerSourceP2PGossip),
-	)
 	require.NoError(
 		t,
 		peerGov.AddPeer("44.0.0.9:70000", peergov.PeerSourceP2PGossip),

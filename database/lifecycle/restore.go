@@ -659,6 +659,30 @@ func (r *RestoreRecovery) Rollback(ctx context.Context) error {
 	return nil
 }
 
+// stopBlobCapabilityUncancelable stops the blob capability using a context
+// that cannot be cut short by ctx's own cancellation. BlobStoreBadger.
+// CloseContext (the real on-disk "badger" provider's StopFunc) races ctx
+// against its own background close and returns as soon as ctx is Done,
+// before the underlying badger.DB.Close call -- which releases the OS-level
+// directory lock -- has actually run; see CloseContext's and Closed's doc
+// comments in database/plugin/blob/badger/database.go. Every blob
+// StopCapability call in this file that precedes a later in-process reopen
+// of the same directory (prepareRestore's preflight resolve,
+// restoreBlobStore's post-Restore stop, and the automatic rollback's own
+// reopen) used ctx directly, so a restore whose context was canceled mid-
+// Restore -- the ordinary case when a caller's own context is what just
+// failed Restore -- could leave that store's close still running in the
+// background while a subsequent resolve (the automatic rollback, or a
+// caller retrying against the same host) reopened the same path and lost
+// the race for the lock. Detaching cancellation here does not change
+// whether the restore itself is cancelable: only this cleanup step, which
+// must run to completion regardless of why it is running, is affected.
+func stopBlobCapabilityUncancelable(ctx context.Context, host *plugin.Host) error {
+	return host.StopCapability(
+		context.WithoutCancel(ctx), plugin.CapabilityStorageBlob,
+	)
+}
+
 // prepareRestore validates both incoming archives before either live store is
 // reset. When the live-node call path explicitly permits replacement of a
 // populated remote target, it also captures both original stores first. This
@@ -772,7 +796,7 @@ func prepareRestore(
 		))
 	}
 	if _, ok := blobStore.(blob.Restorer); !ok {
-		_ = host.StopCapability(ctx, plugin.CapabilityStorageBlob)
+		_ = stopBlobCapabilityUncancelable(ctx, host)
 		return cleanupOnError(fmt.Errorf(
 			"blob plugin %q does not support restore", manifest.BlobPlugin,
 		))
@@ -780,7 +804,7 @@ func prepareRestore(
 	blobBackupPath := filepath.Join(snapshotDir, BlobBackupFileName)
 	blobBackupFile, err := os.Open(blobBackupPath)
 	if err != nil {
-		_ = host.StopCapability(ctx, plugin.CapabilityStorageBlob)
+		_ = stopBlobCapabilityUncancelable(ctx, host)
 		return cleanupOnError(fmt.Errorf("open %q: %w", blobBackupPath, err))
 	}
 	if validator, ok := blobStore.(blob.BackupValidator); ok {
@@ -788,13 +812,13 @@ func prepareRestore(
 	}
 	closeErr := blobBackupFile.Close()
 	if err != nil {
-		_ = host.StopCapability(ctx, plugin.CapabilityStorageBlob)
+		_ = stopBlobCapabilityUncancelable(ctx, host)
 		return cleanupOnError(fmt.Errorf(
 			"validate blob backup %q: %w", blobBackupPath, err,
 		))
 	}
 	if closeErr != nil {
-		_ = host.StopCapability(ctx, plugin.CapabilityStorageBlob)
+		_ = stopBlobCapabilityUncancelable(ctx, host)
 		return cleanupOnError(fmt.Errorf(
 			"close blob backup %q after validation: %w",
 			blobBackupPath,
@@ -805,7 +829,7 @@ func prepareRestore(
 		metadata.ResetOfPopulatedTargetAllowed(ctx) {
 		backuper, ok := blobStore.(blob.Backuper)
 		if !ok {
-			_ = host.StopCapability(ctx, plugin.CapabilityStorageBlob)
+			_ = stopBlobCapabilityUncancelable(ctx, host)
 			return cleanupOnError(fmt.Errorf(
 				"blob plugin %q cannot retain a rollback backup",
 				manifest.BlobPlugin,
@@ -816,7 +840,7 @@ func prepareRestore(
 			rollback.blobPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600,
 		)
 		if openErr != nil {
-			_ = host.StopCapability(ctx, plugin.CapabilityStorageBlob)
+			_ = stopBlobCapabilityUncancelable(ctx, host)
 			return cleanupOnError(fmt.Errorf(
 				"create original blob rollback backup: %w", openErr,
 			))
@@ -827,19 +851,19 @@ func prepareRestore(
 		}
 		backupCloseErr := rollbackFile.Close()
 		if backupErr != nil {
-			_ = host.StopCapability(ctx, plugin.CapabilityStorageBlob)
+			_ = stopBlobCapabilityUncancelable(ctx, host)
 			return cleanupOnError(fmt.Errorf(
 				"backup original blob store before restore: %w", backupErr,
 			))
 		}
 		if backupCloseErr != nil {
-			_ = host.StopCapability(ctx, plugin.CapabilityStorageBlob)
+			_ = stopBlobCapabilityUncancelable(ctx, host)
 			return cleanupOnError(fmt.Errorf(
 				"close original blob rollback backup: %w", backupCloseErr,
 			))
 		}
 	}
-	if err := host.StopCapability(ctx, plugin.CapabilityStorageBlob); err != nil {
+	if err := stopBlobCapabilityUncancelable(ctx, host); err != nil {
 		return cleanupOnError(fmt.Errorf(
 			"stop blob plugin after restore preflight: %w", err,
 		))
@@ -856,7 +880,7 @@ func (r *restoreRollback) restore(
 ) error {
 	var errs []error
 	if r.blobMutated && r.blobPath != "" {
-		_ = host.StopCapability(ctx, plugin.CapabilityStorageBlob)
+		_ = stopBlobCapabilityUncancelable(ctx, host)
 		if err := restoreBlobStore(
 			ctx,
 			host,
@@ -1014,7 +1038,7 @@ func restoreBlobStore(
 	}
 	restorer, ok := store.(blob.Restorer)
 	if !ok {
-		_ = host.StopCapability(ctx, plugin.CapabilityStorageBlob)
+		_ = stopBlobCapabilityUncancelable(ctx, host)
 		return fmt.Errorf(
 			"blob plugin %q does not support restore",
 			manifest.BlobPlugin,
@@ -1023,14 +1047,14 @@ func restoreBlobStore(
 	if replacePopulated {
 		resettable, ok := store.(blob.Resettable)
 		if !ok {
-			_ = host.StopCapability(ctx, plugin.CapabilityStorageBlob)
+			_ = stopBlobCapabilityUncancelable(ctx, host)
 			return fmt.Errorf(
 				"blob plugin %q does not support replacing a populated store",
 				manifest.BlobPlugin,
 			)
 		}
 		if err := resettable.Reset(ctx); err != nil {
-			_ = host.StopCapability(ctx, plugin.CapabilityStorageBlob)
+			_ = stopBlobCapabilityUncancelable(ctx, host)
 			return fmt.Errorf(
 				"reset blob plugin %q before restore: %w",
 				manifest.BlobPlugin, err,
@@ -1039,12 +1063,12 @@ func restoreBlobStore(
 	}
 	backupFile, err := os.Open(backupPath)
 	if err != nil {
-		_ = host.StopCapability(ctx, plugin.CapabilityStorageBlob)
+		_ = stopBlobCapabilityUncancelable(ctx, host)
 		return fmt.Errorf("open %q: %w", backupPath, err)
 	}
 	restoreErr := restorer.Restore(ctx, backupFile)
 	closeErr := backupFile.Close()
-	stopErr := host.StopCapability(ctx, plugin.CapabilityStorageBlob)
+	stopErr := stopBlobCapabilityUncancelable(ctx, host)
 	if restoreErr != nil {
 		return fmt.Errorf("restore blob store: %w", restoreErr)
 	}

@@ -693,6 +693,12 @@ func (o *Ouroboros) publishLeiosEndorserBlock(
 	blockHash lcommon.Blake2b256,
 	data *leiosEndorserBlockData,
 ) {
+	// Record the corroborated slot as a lower bound on how far the chain has
+	// advanced. An endorser block shares the slot of the ranking block that
+	// announces it, so a verified occurrence at slot S is proof a ranking
+	// block exists at S -- knowledge the block producer may hold before the
+	// header itself arrives. See MaxVerifiedEndorserBlockSlot.
+	o.advanceLeiosVerifiedEbSlot(point.Slot)
 	// Queue manifest and (when complete) txs for asynchronous persistence to
 	// the blob store so they can be served to downstream peers after the
 	// in-memory cache expires. Best-effort and off the hot path: the write
@@ -709,6 +715,83 @@ func (o *Ouroboros) publishLeiosEndorserBlock(
 	if o.leiosPipeline != nil {
 		o.leiosPipeline.ObserveEndorserBlock(point.Slot, blockHash)
 	}
+}
+
+// MaxVerifiedEndorserBlockSlot returns the highest slot for which this node
+// has corroborated an endorser block, or 0 if none. Because an endorser block
+// shares its announcing ranking block's slot, this is proof that a ranking
+// block exists at that slot.
+//
+// It is a monotonic lower bound on chain progress, never a tip: it is not
+// rolled back on a fork, because the question it answers -- "is there a block
+// out there at least this recent?" -- stays true regardless of which fork
+// wins. Callers must treat it as advisory and must not use it as a parent.
+//
+// LIFECYCLE. The watermark has no lifecycle beyond that monotonic advance, and
+// the two ends fail in opposite directions, so a consumer must handle both:
+//
+//   - It is raised at startup, to the maximum slot over authoritative
+//     persisted manifests (restoreLeiosVerifiedEbSlot, from newOuroboros). If
+//     that read fails the watermark stays cold, which fails OPEN: it
+//     under-reports chain progress, so a consumer that uses it as evidence
+//     simply sees no evidence. Reloading an evicted manifest from the blob
+//     store does not raise it, and cannot need to: the startup restore
+//     already takes the maximum over every persisted manifest, and every
+//     manifest persisted after that went through publishLeiosEndorserBlock,
+//     which advances the watermark first -- so within a process the watermark
+//     is always at least the maximum persisted slot.
+//
+//   - It is NEVER lowered. An endorser block corroborated for a chain this
+//     node does not adopt leaves the watermark above the local tip
+//     permanently. Consumed as a hard comparison against a local tip, that
+//     fails CLOSED and stays closed for as long as the local chain sits below
+//     that slot -- while every local indicator reads healthy.
+//
+// Consequently a consumer must either treat the value as purely advisory
+// (logging, metrics, hints) or bound it with its own explicitly configured
+// tolerance. It must not be turned into an unconditional gate.
+//
+// The one gating consumer, the forge staleness check in ledger/forging, does
+// the latter: it is opt-in behind ForgeEndorserBlockStalenessSlots, which
+// defaults to 0 (disabled), so the refusal path does not exist unless an
+// operator sets a bound, and the bound is its own knob rather than the local
+// primary-chain-tip tolerance.
+func (o *Ouroboros) MaxVerifiedEndorserBlockSlot() uint64 {
+	if o == nil {
+		return 0
+	}
+	return o.leiosMaxVerifiedEbSlot.Load()
+}
+
+func (o *Ouroboros) advanceLeiosVerifiedEbSlot(slot uint64) {
+	for {
+		previous := o.leiosMaxVerifiedEbSlot.Load()
+		if slot <= previous || o.leiosMaxVerifiedEbSlot.CompareAndSwap(previous, slot) {
+			return
+		}
+	}
+}
+
+// restoreLeiosVerifiedEbSlot restores the monotonic Leios evidence watermark
+// from authoritative persisted manifests during startup, so the optional
+// forge staleness gate is still effective after a restart rather than reading
+// 0 until the next verification. It is the only path that raises the
+// watermark from persisted state; a cache eviction needs none, because the
+// watermark within a process is always at least the maximum persisted slot
+// (see MaxVerifiedEndorserBlockSlot).
+func (o *Ouroboros) restoreLeiosVerifiedEbSlot() {
+	if !o.config.EnableLeios || o.ledgerState == nil {
+		return
+	}
+	slot, err := o.ledgerState.Database().MaxLeiosEBSlot()
+	if err != nil {
+		o.config.Logger.Warn(
+			"failed to restore persisted leios EB watermark",
+			"error", err,
+		)
+		return
+	}
+	o.advanceLeiosVerifiedEbSlot(slot)
 }
 
 // bindLeiosEndorserBlockSlot reconciles a cached (slot, hash) occurrence
