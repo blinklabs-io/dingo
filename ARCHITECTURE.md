@@ -6137,7 +6137,18 @@ state cannot be reconstructed. Mithril sync persists the full boundary point in
 chainsync can always offer that point during `FindIntersect`, even if recent
 ledger-tip point generation is temporarily empty or stale. Slot-only older
 databases fall back to reconstructing the boundary point from canonical local
-chain data. The boundary block is always offered as an intersect point, so the
+chain data. `LedgerState.loadMithrilTrustBoundary` fails ledger `Start` when
+`mithril_ledger_slot` is present but cannot be read from the database or does
+not parse, rather than warning and continuing as a non-Mithril database
+(dingo#1649 case R8): silently leaving `mithrilLedgerSlot` at zero disables
+`healMithrilGapBlockNonces` and removes the boundary exemption from header
+verification, surfacing later as a VRF/nonce rejection that blames peers
+instead of the unreadable boundary. An absent key is unaffected and still
+starts as a non-Mithril database. A read or parse failure on
+`mithril_ledger_hash` alone does not fail startup, since the hash is optional
+and `mithrilTrustBoundaryPoint` already falls back to reconstructing it from
+canonical chain data (the "slot-only" case just above). The boundary block is
+always offered as an intersect point, so the
 peer's reported tip classifies the refusal: a peer whose own tip is below the
 boundary is treated as stale (it is simply behind and matched an old rung of the
 intersect ladder), while a peer claiming a tip at or above the boundary that
