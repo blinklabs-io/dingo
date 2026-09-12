@@ -113,8 +113,16 @@ type Chain struct {
 	//
 	// It covers only the transactions the chain itself owns. addBlockInternal
 	// takes a caller-supplied transaction whose commit the chain neither
-	// performs nor observes, so the same window remains open there.
+	// performs nor observes; pendingAdds closes the same window there, using
+	// this mutex's read side to exclude a record from appearing under a
+	// removal path that already holds it for write.
 	batchCommitMutex sync.RWMutex
+
+	// pendingAdds keeps a removal path from resolving a block index whose
+	// store write is still held in an uncommitted caller-supplied
+	// transaction. Only adds that carry such a transaction record with it.
+	// See pendingAddBarrier.
+	pendingAdds pendingAddBarrier
 }
 
 type queuedHeader struct {
@@ -397,6 +405,25 @@ func (c *Chain) addBlockInternal(
 	if c == nil {
 		return event.Event{}, errors.New("chain is nil")
 	}
+	if txn == nil && c.persistent {
+		endStandalone, err := c.beginStandaloneAdd()
+		if err != nil {
+			return event.Event{}, fmt.Errorf(
+				"wait for caller transaction adds: %w", err,
+			)
+		}
+		defer endStandalone()
+	}
+	// A caller-supplied transaction carries the block's store write out of the
+	// chain's sight: addBlockLocked advances the tip under c.mutex, and the
+	// caller commits at a moment the chain neither performs nor observes.
+	// Record it before the tip moves and release the record when that
+	// transaction concludes -- on commit and on rollback alike -- so a removal
+	// path in between cannot ask the store for the index it left behind. A nil
+	// transaction needs none of this: the chain's own write commits before the
+	// tip advances. See pendingAddBarrier.
+	endAdd := c.beginCallerTxnAdd(txn)
+	defer endAdd()
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	// We get a write lock on the manager to cover the integrity checks and adding the block below
@@ -406,6 +433,7 @@ func (c *Chain) addBlockInternal(
 	if err := c.reconcile(); err != nil {
 		return event.Event{}, fmt.Errorf("reconcile chain: %w", err)
 	}
+	c.recordCallerTxnAdd(txn)
 	evt, err := c.addBlockLocked(
 		block,
 		point,
@@ -414,6 +442,7 @@ func (c *Chain) addBlockInternal(
 		matchPendingHeader,
 	)
 	if err != nil {
+		c.pendingAdds.discardLast(txn)
 		return event.Event{}, err
 	}
 	// Deferred callers (the mutex-holding blockfetch drain) publish through the
@@ -1288,6 +1317,30 @@ func (c *Chain) rollbackLocked(
 	// batchCommitMutex field.
 	c.batchCommitMutex.Lock()
 	defer c.batchCommitMutex.Unlock()
+	// A queued-header rollback does not remove persistent blocks and therefore
+	// must not wait for unrelated caller transactions. Check that case before
+	// waiting; the full check is repeated below after the wait because headers
+	// can change while a caller transaction concludes.
+	c.mutex.Lock()
+	if len(c.headers) > 0 {
+		idx, err := c.findQueuedHeader(point)
+		if err != nil {
+			c.mutex.Unlock()
+			return nil, err
+		}
+		if idx >= 0 {
+			c.headers = slices.Delete(c.headers, idx+1, len(c.headers))
+			c.mutex.Unlock()
+			return nil, nil
+		}
+	}
+	c.mutex.Unlock()
+	// The write hold above excludes further caller-transaction adds; this waits
+	// for the ones already recorded, so no index the removal loop reaches is
+	// one the store has yet to be given. See pendingAddBarrier.
+	if err := c.awaitPendingCallerAdds(); err != nil {
+		return nil, fmt.Errorf("wait for pending caller transactions: %w", err)
+	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	// We get a write lock on the manager to cover the integrity checks and block deletions
