@@ -789,6 +789,15 @@ func TestValidateTxsubmissionReply(t *testing.T) {
 		require.ErrorIs(t, err, errTxsubmissionReplySizeMismatch)
 		require.Nil(t, validated)
 	})
+	t.Run("reordered reply preserves admission order", func(t *testing.T) {
+		got := []txsubmission.TxBody{returned[1], returned[0]}
+		validated, err := validateTxsubmissionReply(requested, got)
+		require.NoError(t, err)
+		require.Len(t, validated, 2)
+		require.Equal(t, returned[0], validated[0].body)
+		require.Equal(t, returned[1], validated[1].body)
+		require.Equal(t, returned[1], got[0], "do not mutate the reply")
+	})
 
 	tests := []struct {
 		name   string
@@ -800,11 +809,15 @@ func TestValidateTxsubmissionReply(t *testing.T) {
 			match: "count exceeds request",
 		},
 		{
-			name: "order",
+			name: "duplicate body",
 			mutate: func(_ []txsubmission.TxIdAndSize, got []txsubmission.TxBody) {
-				got[0], got[1] = got[1], got[0]
+				if len(got[0].TxBody) <= len(got[1].TxBody) {
+					got[1] = got[0]
+				} else {
+					got[0] = got[1]
+				}
 			},
-			match: "hash or order mismatch",
+			match: "duplicate transaction",
 		},
 		{
 			name: "era",
@@ -826,7 +839,7 @@ func TestValidateTxsubmissionReply(t *testing.T) {
 			mutate: func(want []txsubmission.TxIdAndSize, _ []txsubmission.TxBody) {
 				want[0].TxId.TxId[0] ^= 0xff
 			},
-			match: "hash or order mismatch",
+			match: "hash mismatch",
 		},
 	}
 	for _, tt := range tests {
@@ -842,6 +855,9 @@ func TestValidateTxsubmissionReply(t *testing.T) {
 			validated, err := validateTxsubmissionReply(want, got)
 			require.ErrorContains(t, err, tt.match)
 			require.Nil(t, validated)
+			if tt.name == "hash" {
+				require.Contains(t, err.Error(), "received "+fixtures[0].hash)
+			}
 		})
 	}
 }
@@ -985,6 +1001,9 @@ type txSubmissionRelayHarnessOpts struct {
 	// advertiseSizeDelta modifies the peer's TxId size announcements while
 	// leaving the real body and relay path untouched.
 	advertiseSizeDelta int64
+	// transformReplyB runs after the real callback consumes requested cache
+	// entries, so a wire-order change cannot alter cache lookup semantics.
+	transformReplyB func([]txsubmission.TxBody)
 	// promRegistryA installs protocol metrics on node A, whose
 	// txsubmission server runs the relay pull loop under test.
 	promRegistryA prometheus.Registerer
@@ -1103,6 +1122,23 @@ func newTxSubmissionRelayHarnessWithOpts(
 						return ids, nil
 					},
 				),
+			),
+		)
+	}
+	if opts.transformReplyB != nil {
+		nodeBClientOpts = append(
+			nodeBClientOpts,
+			txsubmission.WithRequestTxsFunc(
+				nodeB.instrumentTxsubmissionRequestTxs(func(
+					ctx txsubmission.CallbackContext,
+					ids []txsubmission.TxId,
+				) ([]txsubmission.TxBody, error) {
+					bodies, err := nodeB.txsubmissionClientRequestTxs(ctx, ids)
+					if err == nil {
+						opts.transformReplyB(bodies)
+					}
+					return bodies, err
+				}),
 			),
 		)
 	}
@@ -1686,4 +1722,50 @@ func TestTxSubmissionServerInitAcceptsOrderedSubset(t *testing.T) {
 	)
 	_, admitted := h.mA.GetTransaction(omitted.hash)
 	require.False(t, admitted)
+}
+
+// Observe the real FIFO after a peer reverses the two returned bodies.
+// These existing fixtures are not claimed to be a parent/child transaction
+// pair; the invariant is preservation of announcement order at admission.
+func TestTxSubmissionServerInitRestoresOrderForReorderedReply(t *testing.T) {
+	t.Parallel()
+	fixtures := txsubmissionTestFixtures(t)[:2]
+	replies := make(chan []txsubmission.TxBody, 1)
+	logBuf := &lockedBuffer{}
+	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
+		logger: slog.New(slog.NewJSONHandler(
+			logBuf, &slog.HandlerOptions{Level: slog.LevelDebug},
+		)),
+		batchRequestsA: true,
+		transformReplyB: func(bodies []txsubmission.TxBody) {
+			slices.Reverse(bodies)
+			if len(bodies) == 2 {
+				select {
+				case replies <- slices.Clone(bodies):
+				default:
+				}
+			}
+		},
+	})
+	defer h.close(t)
+	addTxSubmissionTestFixtures(t, h.mB, fixtures...)
+	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
+	select {
+	case reply := <-replies:
+		require.Equal(t, fixtures[1].body, reply[0].TxBody)
+		require.Equal(t, fixtures[0].body, reply[1].TxBody)
+	case <-time.After(5 * time.Second):
+		t.Fatalf("no reversed two-body reply: %s", logBuf.String())
+	}
+	require.Eventually(t, func() bool {
+		return len(h.mA.Transactions()) == 2 || strings.Contains(
+			logBuf.String(), "rejected mismatched txsubmission reply",
+		)
+	}, 5*time.Second, 10*time.Millisecond)
+	require.NotContains(t, logBuf.String(),
+		"rejected mismatched txsubmission reply")
+	admitted := h.mA.Transactions()
+	require.Len(t, admitted, 2)
+	require.Equal(t, fixtures[0].body, admitted[0].Cbor)
+	require.Equal(t, fixtures[1].body, admitted[1].Cbor)
 }

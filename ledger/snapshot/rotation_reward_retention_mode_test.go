@@ -161,6 +161,74 @@ func TestCleanupOldSnapshotsAPIModeRetainsRewardAccountOutput(t *testing.T) {
 	}
 }
 
+// TestCleanupOldSnapshotsKoiosParityRetentionUnbounded is the dingo #4188
+// regression test: enabling SetRewardAccountOutputRetentionUnbounded on a
+// CORE-mode database (the koios-parity observer's node.go wiring) must retain
+// reward_account_output without bound, exactly like API storage mode, instead
+// of pruning it to the 4-epoch rotation/reward-replay window. Without this,
+// the observer's own network-bound epoch validation routinely falls behind
+// chain progression during a catch-up sync and reads an epoch's
+// reward_account_output rows only after cleanupOldSnapshots has already
+// deleted them, making every koios-parity account check fail permanently with
+// a row that genuinely no longer exists.
+func TestCleanupOldSnapshotsKoiosParityRetentionUnbounded(t *testing.T) {
+	t.Parallel()
+
+	db := setupTestDBWithStorageMode(t, types.StorageModeCore)
+	require.Equal(t, types.StorageModeCore, db.StorageMode())
+	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr.SetRewardAccountOutputRetentionUnbounded(true)
+	require.True(t, mgr.RewardAccountOutputRetentionUnbounded())
+	meta := db.Metadata()
+
+	const currentEpoch = uint64(10)
+	const firstRetainedEpoch = currentEpoch - 3
+	poolKeyHash := bytes.Repeat([]byte{0x44}, 28)
+
+	seedRetentionRows(t, db, poolKeyHash, currentEpoch)
+	require.NoError(
+		t,
+		mgr.cleanupOldSnapshots(context.Background(), currentEpoch),
+	)
+
+	// reward_account_output survives for every epoch, including those
+	// outside the rotation/reward-replay window, exactly like API mode.
+	for epoch := uint64(0); epoch <= currentEpoch; epoch++ {
+		accountOutputs, err := meta.GetRewardAccountOutputs(epoch, nil)
+		require.NoError(t, err, "get reward account outputs %d", epoch)
+		require.Len(
+			t,
+			accountOutputs,
+			1,
+			"koios-parity retention must retain reward_account_output for epoch %d",
+			epoch,
+		)
+	}
+
+	// reward_stake_input is still pruned to the same window as core mode.
+	for epoch := range firstRetainedEpoch {
+		stakeInputs, err := meta.GetRewardStakeInputs(epoch, nil)
+		require.NoError(t, err, "get reward stake inputs %d", epoch)
+		require.Empty(
+			t,
+			stakeInputs,
+			"koios-parity retention must still prune reward_stake_input for epoch %d",
+			epoch,
+		)
+	}
+	for epoch := firstRetainedEpoch; epoch <= currentEpoch; epoch++ {
+		stakeInputs, err := meta.GetRewardStakeInputs(epoch, nil)
+		require.NoError(t, err, "get reward stake inputs %d", epoch)
+		require.Len(
+			t,
+			stakeInputs,
+			1,
+			"reward_stake_input for epoch %d is inside the retained window",
+			epoch,
+		)
+	}
+}
+
 // TestDeleteRewardStateAfterSlotUnaffectedByAPIModeRetention is the rollback
 // correctness check for dingo #1875: retaining reward_account_output without
 // bound in API storage mode must not stop a rollback from removing rows

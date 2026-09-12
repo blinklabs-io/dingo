@@ -1060,6 +1060,74 @@ func TestBuildBlockBlockSizeLimit(t *testing.T) {
 	)
 }
 
+// TestBuildBlockExcludesTransactionWhoseExactAssembledBodyExceedsLimit
+// exercises the boundary a raw-CBOR-size approximation cannot see: a single
+// minimal Conway tx's raw CBOR is 52 bytes, but the assembled block body
+// re-wraps decoded fields into separate transaction-body/witness-set arrays,
+// which is one byte larger (53) and not the same size as the raw tx CBOR. A
+// MaxBlockBodySize set to exactly the raw size would pass a raw-sum
+// approximation, but the build loop's segmented body-size accounting
+// (segmentedBodySize) tracks the real assembled size per candidate
+// transaction, so the transaction is excluded from the block before it is
+// ever added rather than only being caught by the final assembled-size
+// safety net after the whole block is built.
+func TestBuildBlockExcludesTransactionWhoseExactAssembledBodyExceedsLimit(
+	t *testing.T,
+) {
+	creds := setupTestCredentials(t)
+
+	txCbor := makeMinimalTxCbor(t, 0x01, 0)
+	rawSize := uint(len(txCbor))
+
+	mempool := &mockMempool{
+		transactions: []MempoolTransaction{
+			{Hash: "tx1", Cbor: txCbor, Type: conway.TxTypeConway},
+		},
+	}
+
+	// MaxBlockBodySize equals the transaction's raw CBOR length exactly, so
+	// a raw-sum approximation would admit it, but the exact assembled body
+	// is one byte larger and must be excluded.
+	pparams := &conway.ConwayProtocolParameters{
+		MaxTxSize:        rawSize,
+		MaxBlockBodySize: rawSize,
+		MaxBlockExUnits: lcommon.ExUnits{
+			Memory: 62000000,
+			Steps:  20000000000,
+		},
+	}
+	pparamsProvider := &mockPParamsProvider{pparams: pparams}
+
+	chainTip := &mockChainTip{
+		tip: ochainsync.Tip{
+			Point: ocommon.Point{
+				Slot: 1000,
+				Hash: make([]byte, 32),
+			},
+			BlockNumber: 100,
+		},
+	}
+
+	epochNonce := &mockEpochNonceProvider{epoch: 1, nonce: make([]byte, 32)}
+
+	builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
+		Mempool:         mempool,
+		PParamsProvider: pparamsProvider,
+		ChainTip:        chainTip,
+		EpochNonce:      epochNonce,
+		Credentials:     creds,
+	})
+	require.NoError(t, err)
+
+	block, _, err := builder.BuildBlock(1001, 0)
+	require.NoError(t, err)
+	assert.Empty(
+		t,
+		block.Transactions(),
+		"the only mempool transaction's exact assembled body exceeds MaxBlockBodySize and must be excluded, not silently included",
+	)
+}
+
 // mockTxValidator implements TxValidator for testing. It rejects
 // transactions whose hashes appear in the rejectHashes set.
 type mockTxValidator struct {

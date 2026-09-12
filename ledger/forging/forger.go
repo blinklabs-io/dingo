@@ -376,8 +376,11 @@ type ForgerConfig struct {
 
 	// BlockValidator runs its implementation's checks before AddBlock.
 	// A failure prevents adoption and diffusion. The node always supplies
-	// aggregate reference-script validation and optionally full validation.
-	// Nil disables validation for callers embedding this package directly.
+	// aggregate reference-script validation and, unless an operator
+	// explicitly opts out via ValidateForgedBlock=false (issue #3528: fail
+	// closed by default), full VRF/KES header crypto, body-hash, and
+	// per-tx ledger rule validation too. Nil disables validation for
+	// callers embedding this package directly.
 	BlockValidator BlockValidator
 
 	// Prometheus metrics registry (optional)

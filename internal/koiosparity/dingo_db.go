@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strconv"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -469,11 +470,58 @@ func (d *DingoDB) GetProtocolParams(
 		}
 		return nil, fmt.Errorf("pparams epoch %d: %w", epoch, err)
 	}
+
+	// See isSyntheticV2CostModel's doc comment and
+	// syntheticV2CostModelClearedEpochSyncKey for why this is read here
+	// rather than skipped: without it, a PlutusV2 model Dingo still holds
+	// only because HardForkBabbage fabricated it (dingo #3825) reads as a
+	// real value and compareCostModels has no way to tell it apart from an
+	// actual divergence (dingo #4127).
+	var clearedEpochVal sql.NullString
+	if err := queryRow(
+		`SELECT value FROM sync_state WHERE sync_key = ?`,
+		syntheticV2CostModelClearedEpochSyncKey,
+	).Scan(&clearedEpochVal); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf(
+			"synthetic v2 cost model cleared epoch: %w", err,
+		)
+	}
+	var clearedEpoch uint64
+	cleared := clearedEpochVal.Valid && clearedEpochVal.String != ""
+	if cleared {
+		clearedEpoch, err = strconv.ParseUint(clearedEpochVal.String, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"parse synthetic v2 cost model cleared epoch %q: %w",
+				clearedEpochVal.String,
+				err,
+			)
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit protocol params read: %w", err)
 	}
-	return decodeProtocolParams(cborBytes, eraID, sourceEpoch)
+	out, err := decodeProtocolParams(cborBytes, eraID, sourceEpoch)
+	if err != nil {
+		return nil, err
+	}
+	v2, hasV2 := out.CostModels["PlutusV2"]
+	out.SyntheticV2CostModel = isSyntheticV2CostModel(
+		v2, hasV2, epoch, clearedEpoch, cleared,
+	)
+	return out, nil
 }
+
+// syntheticV2CostModelClearedEpochSyncKey is the sync-state key DingoDB reads
+// over its own raw SQL connection (dingo #3825). Unlike mithrilLedgerSlotSyncKey
+// above it is bound to the owning package's constant rather than re-typed as a
+// literal: this package already depends on database (DatabaseSource reads the
+// same marker through database.SyntheticV2CostModelClearedEpoch), so a
+// duplicated literal buys no decoupling and would let the two
+// RewardParitySource implementations read different keys if the owning
+// constant ever changed.
+const syntheticV2CostModelClearedEpochSyncKey = database.SyntheticV2CostModelClearedEpochSyncKey
 
 // GetPoolEpochDataMap returns per-pool reward data assembled for Koios
 // reporting epoch K, keyed by pool-key-hash hex. Dingo's reward_pool_input/
@@ -846,8 +894,9 @@ func (d *DingoDB) GetPoolEpochDataMap(
 // Presence is epoch-level. A pool with no spendable member row legitimately
 // earned nothing, but only if the table holds the epoch at all —
 // cleanupOldSnapshots retains reward_account_output without bound in api
-// storage mode and prunes it in core, so an empty read must not be reported as
-// a pool-wide zero.
+// storage mode and, since dingo #4188, in core mode too when the node's
+// koios-parity observer is enabled; it prunes the table to a 4-epoch window
+// otherwise, so an empty read must not be reported as a pool-wide zero.
 func (d *DingoDB) addSpendableMemberRewards(
 	ctx context.Context,
 	m map[string]*DingoPoolEpochData,

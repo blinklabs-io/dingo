@@ -15,7 +15,6 @@
 package ouroboros
 
 import (
-	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -126,12 +125,18 @@ func validateTxsubmissionReply(
 		)
 	}
 	var requestedBytes uint64
-	for _, requestedTx := range requested {
+	requestedIndex := make(map[[32]byte]int, len(requested))
+	for index, requestedTx := range requested {
 		requestedSize := uint64(requestedTx.Size)
 		if requestedSize > math.MaxUint64-requestedBytes {
 			return nil, fmt.Errorf("%w: advertised byte budget overflow", errTxsubmissionReplySizeMismatch)
 		}
 		requestedBytes += requestedSize
+		// Preserve the first announcement if an ID appears more than once.
+		// Preserve the first announcement if an ID appears more than once.
+		if _, exists := requestedIndex[requestedTx.TxId.TxId]; !exists {
+			requestedIndex[requestedTx.TxId.TxId] = index
+		}
 	}
 	if uint64(len(returned)) > math.MaxUint64/txsubmissionMaxSizeDiscrepancy {
 		return nil, fmt.Errorf("%w: discrepancy budget overflow", errTxsubmissionReplySizeMismatch)
@@ -157,8 +162,7 @@ func validateTxsubmissionReply(
 		}
 		remainingBytes -= bodySize
 	}
-	ret := make([]validatedTxsubmissionBody, 0, len(returned))
-	nextRequested := 0
+	validatedByIndex := make(map[int]validatedTxsubmissionBody, len(returned))
 	for i, txBody := range returned {
 		tx, err := ledger.NewTransactionFromCbor(
 			uint(txBody.EraId),
@@ -172,18 +176,19 @@ func validateTxsubmissionReply(
 			)
 		}
 		txHash := tx.Hash()
-		matched := -1
-		for requestedIdx := nextRequested; requestedIdx < len(requested); requestedIdx++ {
-			if bytes.Equal(txHash[:], requested[requestedIdx].TxId.TxId[:]) {
-				matched = requestedIdx
-				break
-			}
-		}
-		if matched < 0 {
+		matched, found := requestedIndex[[32]byte(txHash)]
+		if !found {
 			return nil, fmt.Errorf(
-				"txsubmission reply hash or order mismatch at index %d: received %x",
+				"txsubmission reply hash mismatch at index %d: received %x",
 				i,
-				txHash,
+				txHash.Bytes(),
+			)
+		}
+		if _, duplicate := validatedByIndex[matched]; duplicate {
+			return nil, fmt.Errorf(
+				"txsubmission reply duplicate transaction at index %d: received %x",
+				i,
+				txHash.Bytes(),
 			)
 		}
 		want := requested[matched]
@@ -222,12 +227,19 @@ func validateTxsubmissionReply(
 				txBody.EraId,
 			)
 		}
-		nextRequested = matched + 1
-		ret = append(ret, validatedTxsubmissionBody{
+		validatedByIndex[matched] = validatedTxsubmissionBody{
 			body:               txBody,
 			tx:                 tx,
 			wireSizeAdvertised: wireSizeAdvertised,
-		})
+		}
+	}
+	// Reply order is not an admission-order contract. Preserve the requested
+	// order so an earlier transaction can be admitted before its dependents.
+	ret := make([]validatedTxsubmissionBody, 0, len(returned))
+	for requestedIdx := range requested {
+		if validated, ok := validatedByIndex[requestedIdx]; ok {
+			ret = append(ret, validated)
+		}
 	}
 	return ret, nil
 }
