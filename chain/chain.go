@@ -158,6 +158,67 @@ func blockNumberContiguous(eraId uint8, blockNumber, parentNumber uint64) bool {
 	return false
 }
 
+// maxFirstBlockNumber is the largest block number accepted for the first block
+// of a chain that has been emptied back to origin. Ouroboros numbers the first
+// block after genesis 0 -- the Byron epoch-boundary block on a Byron network,
+// the first block of the starting era on a post-Byron genesis network -- so 0
+// is the expected value. 1 is tolerated as well because some networks and
+// chain indexes number their first block 1; the tolerance costs nothing, since
+// a chain that started one block late is still caught at its second block by
+// the ordinary contiguity check above.
+const maxFirstBlockNumber uint64 = 1
+
+// originTipHash stands in for the tip hash when a block or header is rejected
+// against a chain at origin: there is no tip block to name.
+const originTipHash = "origin"
+
+// emptiedToOrigin reports whether this chain holds nothing -- no tip block and
+// no queued headers -- after having been mutated at least once. That is the
+// state rollbackLocked leaves behind for a rollback to origin: it drops every
+// queued header and resets tipBlockIndex to 0.
+//
+// The distinction matters because the continuity checks below are skipped when
+// there is no tip to chain onto, and a rollback to origin can produce that
+// state at any time during a run. A peer whose chainsync cursor is still ahead
+// then delivers block N rather than the network's first block, and it is
+// accepted as the chain's first block: the chain grows with a silently missing
+// prefix, and the epoch nonce folded over it is wrong, so every header in the
+// next epoch fails VRF verification (issue #4202).
+//
+// A chain that has never been mutated is deliberately excluded. It has no
+// anchor yet -- the chain package does not know the network's genesis hash --
+// and it is the state the bulk block importer fills from a local immutable
+// database, which legitimately establishes the chain's first block itself.
+func (c *Chain) emptiedToOrigin() bool {
+	return c.tipBlockIndex < initialBlockIndex &&
+		len(c.headers) == 0 &&
+		c.mutationGeneration > 0
+}
+
+// firstBlockNumberValid reports whether blockNumber is plausible for the first
+// block of a chain that has been emptied back to origin. The chain package has
+// no knowledge of the network's genesis hash, so the prev-hash half of the
+// continuity check cannot be applied at origin; the block number is the anchor
+// available here, and it is enough to reject a truncated prefix.
+func firstBlockNumberValid(blockNumber uint64) bool {
+	return blockNumber <= maxFirstBlockNumber
+}
+
+// newBlockNotFitChainOriginError builds the rejection for a block or header
+// offered as the first block of a chain sitting at origin. Reusing
+// BlockNotFitChainTipError keeps the ledger's existing recovery path, which
+// re-intersects the offending connection rather than failing the node.
+func newBlockNotFitChainOriginError(
+	blockHash string,
+	blockPrevHash string,
+) BlockNotFitChainTipError {
+	return NewBlockNotFitChainTipError(
+		blockHash,
+		blockPrevHash,
+		originTipHash,
+	)
+}
+
 func (c *Chain) headerTip() ochainsync.Tip {
 	if len(c.headers) == 0 {
 		return c.currentTip
@@ -251,6 +312,15 @@ func (c *Chain) addBlockHeader(
 				headerTip.BlockNumber,
 			)
 		}
+	} else if c.emptiedToOrigin() &&
+		!firstBlockNumberValid(queued.blockNumber) {
+		// The chain was emptied back to origin, so there is no tip to chain
+		// onto and the checks above cannot run. Anchor the first header on
+		// its block number instead; see emptiedToOrigin.
+		return newBlockNotFitChainOriginError(
+			headerHash.String(),
+			headerPrevHash.String(),
+		)
 	}
 	// Add header
 	c.headers = append(c.headers, queued)
@@ -479,6 +549,14 @@ func (c *Chain) addBlockLocked(
 				c.currentTip.BlockNumber,
 			)
 		}
+	} else if c.emptiedToOrigin() && !firstBlockNumberValid(blockNumber) {
+		// Chain emptied back to origin: anchor the first block on its block
+		// number, the only continuity the chain can check here. See
+		// emptiedToOrigin.
+		return event.Event{}, newBlockNotFitChainOriginError(
+			hex.EncodeToString(blockHashBytes),
+			hex.EncodeToString(blockPrevHashBytes),
+		)
 	}
 	// Build new block record
 	tmpPoint := point
@@ -712,6 +790,14 @@ func (c *Chain) addRawBlockLocked(
 				hex.EncodeToString(c.currentTip.Point.Hash),
 			)
 		}
+	} else if c.emptiedToOrigin() && !firstBlockNumberValid(rb.BlockNumber) {
+		// Chain emptied back to origin: anchor the first block on its block
+		// number, the only continuity the chain can check here. See
+		// emptiedToOrigin.
+		return event.Event{}, newBlockNotFitChainOriginError(
+			hex.EncodeToString(rb.Hash),
+			hex.EncodeToString(rb.PrevHash),
+		)
 	}
 	tmpPoint := ocommon.NewPoint(rb.Slot, rb.Hash)
 	newBlockIndex := c.tipBlockIndex + 1
