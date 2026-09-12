@@ -1863,8 +1863,8 @@ func (ls *LedgerState) subscribeBlockfetchEvents(
 	)
 }
 
-// loadMithrilTrustBoundary reads the persisted Mithril trust boundary
-// (dingo#1649 case R8). A read error or a malformed mithril_ledger_slot value
+// loadMithrilTrustBoundary reads the persisted Mithril trust boundary. A
+// read error, or a mithril_ledger_slot row that is empty or does not parse,
 // must fail ledger start rather than silently continuing as a non-Mithril
 // database: with mithrilLedgerSlot left at its zero value, the gap-nonce heal
 // (healMithrilGapBlockNonces) no-ops and the boundary exemption in header
@@ -1875,26 +1875,14 @@ func (ls *LedgerState) loadMithrilTrustBoundary() error {
 	// Read Mithril ledger state point if present. Blocks at or below
 	// this point were verified by the Mithril certificate chain during
 	// import and must not be re-validated during chainsync replay.
-	mithrilSlotStr, err := ls.db.GetSyncState(
-		mithrilLedgerSlotSyncKey,
-		nil,
-	)
+	// The strict accessor separates an absent key from a recorded empty
+	// value, which GetSyncState alone reports identically.
+	mls, err := ls.db.MithrilTrustBoundarySlotStrict(nil)
 	if err != nil {
-		return fmt.Errorf(
-			"failed to read Mithril trust boundary from database: %w",
-			err,
-		)
+		return fmt.Errorf("load %s: %w", mithrilLedgerSlotSyncKey, err)
 	}
-	if mithrilSlotStr == "" {
+	if mls == 0 {
 		return nil
-	}
-	mls, parseErr := strconv.ParseUint(mithrilSlotStr, 10, 64)
-	if parseErr != nil {
-		return fmt.Errorf(
-			"malformed mithril_ledger_slot value %q: %w",
-			mithrilSlotStr,
-			parseErr,
-		)
 	}
 
 	ls.mithrilLedgerSlot = mls

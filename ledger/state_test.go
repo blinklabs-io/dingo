@@ -2981,7 +2981,7 @@ func TestLoadMithrilTrustBoundaryLoadsPersistedHash(t *testing.T) {
 
 // TestLoadMithrilTrustBoundaryAbsentKeyStartsNotMithril proves that an
 // absent mithril_ledger_slot sync-state key (a non-Mithril-bootstrapped DB)
-// starts cleanly with no error, per dingo#1649 case R8.
+// starts cleanly with no error.
 func TestLoadMithrilTrustBoundaryAbsentKeyStartsNotMithril(t *testing.T) {
 	t.Parallel()
 
@@ -2999,9 +2999,9 @@ func TestLoadMithrilTrustBoundaryAbsentKeyStartsNotMithril(t *testing.T) {
 	require.Equal(t, uint64(0), ls.mithrilLedgerSlot)
 }
 
-// TestLoadMithrilTrustBoundaryMalformedSlotReturnsError proves dingo#1649
-// case R8: a malformed mithril_ledger_slot value must fail ledger start
-// rather than being silently ignored as "not a Mithril DB". Before the fix,
+// TestLoadMithrilTrustBoundaryMalformedSlotReturnsError: a malformed
+// mithril_ledger_slot value must fail ledger start rather than being
+// silently ignored as "not a Mithril DB". Before the fix,
 // this only logged a Warn and left mithrilLedgerSlot at its zero value,
 // which disables the gap-nonce heal (heal_mithril_gap_nonce.go) and removes
 // the Mithril boundary exemption, so header verification later fails a
@@ -3029,9 +3029,9 @@ func TestLoadMithrilTrustBoundaryMalformedSlotReturnsError(t *testing.T) {
 	assert.Equal(t, uint64(0), ls.mithrilLedgerSlot)
 }
 
-// TestLoadMithrilTrustBoundaryReadErrorReturnsError proves dingo#1649 case
-// R8: a sync_state database read error must fail ledger start rather than
-// being silently ignored as "not a Mithril DB".
+// TestLoadMithrilTrustBoundaryReadErrorReturnsError: a sync_state database
+// read error must fail ledger start rather than being silently ignored as
+// "not a Mithril DB".
 func TestLoadMithrilTrustBoundaryReadErrorReturnsError(t *testing.T) {
 	t.Parallel()
 
@@ -3056,6 +3056,57 @@ func TestLoadMithrilTrustBoundaryReadErrorReturnsError(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Mithril trust boundary")
+	assert.Equal(t, uint64(0), ls.mithrilLedgerSlot)
+}
+
+// TestLoadMithrilTrustBoundaryEmptyRecordedSlotReturnsError: GetSyncState
+// reports an absent key as "", so a mithril_ledger_slot row that exists and
+// holds nothing must not be read as "not a Mithril DB". Every other
+// fail-closed reader of the key (Database.MithrilTrustBoundarySlotStrict,
+// the sqlstore minted-block floor, koiosparity) already rejects it.
+func TestLoadMithrilTrustBoundaryEmptyRecordedSlotReturnsError(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	require.NoError(t, db.SetSyncState(mithrilLedgerSlotSyncKey, "", nil))
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	err := ls.loadMithrilTrustBoundary()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mithril_ledger_slot")
+	assert.Equal(t, uint64(0), ls.mithrilLedgerSlot)
+}
+
+// TestLedgerStateStartFailsOnMalformedMithrilTrustBoundary pins the
+// propagation out of Start: a loader error must abort ledger startup, not
+// be discarded at the call site.
+func TestLedgerStateStartFailsOnMalformedMithrilTrustBoundary(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	require.NoError(t, db.SetSyncState(mithrilLedgerSlotSyncKey, "x", nil))
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+		PromRegistry:      prometheus.NewRegistry(),
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	t.Cleanup(ls.publishCancel)
+
+	err = ls.Start(t.Context())
+
+	require.ErrorContains(t, err, "Mithril trust boundary")
+	require.ErrorContains(t, err, "mithril_ledger_slot")
 	assert.Equal(t, uint64(0), ls.mithrilLedgerSlot)
 }
 

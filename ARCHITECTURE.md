@@ -6137,24 +6137,22 @@ state cannot be reconstructed. Mithril sync persists the full boundary point in
 chainsync can always offer that point during `FindIntersect`, even if recent
 ledger-tip point generation is temporarily empty or stale. Slot-only older
 databases fall back to reconstructing the boundary point from canonical local
-chain data. `LedgerState.loadMithrilTrustBoundary` fails ledger `Start` when
-`mithril_ledger_slot` is present but cannot be read from the database or does
-not parse, rather than warning and continuing as a non-Mithril database
-(dingo#1649 case R8): silently leaving `mithrilLedgerSlot` at zero disables
-`healMithrilGapBlockNonces` and removes the boundary exemption from header
-verification, surfacing later as a VRF/nonce rejection that blames peers
-instead of the unreadable boundary. An absent key is unaffected and still
-starts as a non-Mithril database. A read or parse failure on
-`mithril_ledger_hash` alone does not fail startup, since the hash is optional
-and `mithrilTrustBoundaryPoint` already falls back to reconstructing it from
-canonical chain data (the "slot-only" case just above). The boundary block is
-always offered as an intersect point, so the
-peer's reported tip classifies the refusal: a peer whose own tip is below the
-boundary is treated as stale (it is simply behind and matched an old rung of the
-intersect ladder), while a peer claiming a tip at or above the boundary that
-still demands a rollback below it is rejected as genuinely divergent. Both
-classifications close the connection for a fresh intersect and deny the peer for
-a cooldown via peer governance.
+chain data. `LedgerState.loadMithrilTrustBoundary` fails ledger `Start` when the
+`mithril_ledger_slot` read fails or the recorded value is empty or does not
+parse, rather than continuing as a non-Mithril database: leaving
+`mithrilLedgerSlot` at zero disables `healMithrilGapBlockNonces` and removes the
+boundary exemption from header verification, which surfaces later as a VRF/nonce
+rejection that blames peers instead of the unreadable boundary. An absent key
+still starts as a non-Mithril database. A read or parse failure on
+`mithril_ledger_hash` alone is logged and does not fail startup, since the hash
+is optional and `mithrilTrustBoundaryPoint` reconstructs it from canonical chain
+data as in the slot-only case. The boundary block is always offered as an
+intersect point, so the peer's reported tip classifies the refusal: a peer whose
+own tip is below the boundary is treated as stale (it is simply behind and
+matched an old rung of the intersect ladder), while a peer claiming a tip at or
+above the boundary that still demands a rollback below it is rejected as
+genuinely divergent. Both classifications close the connection for a fresh
+intersect and deny the peer for a cooldown via peer governance.
 
 The same `mithril_ledger_slot` boundary gates how the database layer reacts to a
 consumed UTxO it cannot find or reconstruct from the blob store. By default
