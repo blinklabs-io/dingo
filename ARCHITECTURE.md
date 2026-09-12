@@ -1246,8 +1246,9 @@ Phase 1: Stop accepting new work
   Chainsync stall recycler and chain-selected-to-none worker (both
   context-owned by `n.cancel()`; the latter must finish before the
   chain selector is stopped, since it reads the selector's state),
-  block forger, leader election, snapshot manager, database lifecycle
-  manager (`shutdownPhase1ComponentStops`, `node_shutdown.go`),
+  block forger, leader election, Leios pipeline and vote managers,
+  snapshot manager, database lifecycle manager
+  (`shutdownPhase1ComponentStops`, `node_shutdown.go`),
   Midnight indexer (unsubscribes from BlockEventType),
   chain selector, peer governor, UTxO RPC,
   Bark C2/archive server, Midnight gRPC server,
@@ -1265,13 +1266,17 @@ Phase 4: Cleanup resources
   Registered shutdown functions
 ```
 
-The five phase-1 components listed above (`shutdownPhase1ComponentStops`)
-each cancel their own context and then wait for a goroutine to exit with no
-deadline of their own; each is routed through `stopWithDeadline`, the same
-helper `quiesceForLiveLifecycleOp` uses to bound the identical style of wait
-for live restore/truncate, so a goroutine that never observes `n.cancel()`
-cannot wedge `Node.Stop` past the configured shutdown timeout with no
-observable error (dingo#1649). An unfinished wait escalates to
+The phase-1 components enumerated by `shutdownPhase1ComponentStops` each
+wait for a goroutine to exit with no deadline of their own. That list is the
+two context-owned workers followed by `quiesceComponentStops`, the set
+`quiesceForLiveLifecycleOp` stops before live restore/truncate closes storage,
+so both paths stop the same storage-facing components. Each wait is routed
+through `stopWithDeadline` with whatever remains of the one shutdown deadline,
+not a fresh timeout per component, so a goroutine that never observes
+`n.cancel()` cannot hold `Node.Stop` past the configured shutdown timeout with
+no observable error (dingo#1649). The two workers touch node components only
+under `liveLifecycleMu`, which shutdown already holds, so bounding their wait
+cannot race teardown. An unfinished wait escalates to
 `errStorageDrainUnconfirmed` rather than being reported as an ordinary stop
 failure, and — like an unconfirmed `LedgerState.Close` in phase 3 — makes
 phase 3 skip the database close and plugin host shutdown, since the stuck

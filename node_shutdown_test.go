@@ -15,6 +15,7 @@
 package dingo
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"testing"
@@ -24,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/leader"
+	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -184,4 +186,90 @@ func TestNodeStopSkipsDatabaseCloseWhenPhase1DrainUnconfirmed(t *testing.T) {
 	// mutually exclusive with calling n.db.Close: its presence is direct
 	// proof the close branch did not run.
 	assert.ErrorContains(t, stopErr, "database close skipped")
+}
+
+// TestShutdownPhase1ComponentStopsCoverQuiesceComponentStops pins that every
+// component live restore/truncate bounds before tearing storage down is also
+// stopped, bounded, before shutdown's phase 3 tears the same storage down.
+// The Leios pipeline and vote managers read n.ledgerState from their own
+// goroutines and were previously stopped only by quiesce and the startup
+// rollback stack, never by shutdown.
+func TestShutdownPhase1ComponentStopsCoverQuiesceComponentStops(t *testing.T) {
+	t.Parallel()
+
+	n := &Node{
+		blockForger:          &forging.BlockForger{},
+		leaderElection:       &leader.Election{},
+		leiosPipelineManager: &leios.PipelineManager{},
+		leiosVoteManager:     &leios.VoteManager{},
+		snapshotMgr:          &snapshot.Manager{},
+		dbLifecycleMgr:       &dblifecycle.Manager{},
+	}
+
+	var quiesce []string
+	for _, cs := range n.quiesceComponentStops() {
+		quiesce = append(quiesce, cs.name)
+	}
+	require.Len(t, quiesce, 6, "fixture must populate every quiesce stop")
+
+	var shutdown []string
+	for _, cs := range n.shutdownPhase1ComponentStops() {
+		shutdown = append(shutdown, cs.name)
+	}
+	assert.Subset(t, shutdown, quiesce)
+}
+
+// TestNodeStopBoundsPhase1StopsByOneShutdownDeadline pins that phase-1 stops
+// share the single shutdown deadline rather than each getting a fresh
+// shutdown timeout. With a fresh budget per stop, N wedged components hold
+// Node.Stop for at least N timeouts; by then the shutdown context every
+// later phase uses has long expired, so the extra wait cannot buy a
+// confirmed ledger-state or database close.
+// Not t.Parallel: swaps the package-level componentStopsForShutdownPhase1
+// seam.
+func TestNodeStopBoundsPhase1StopsByOneShutdownDeadline(t *testing.T) {
+	const (
+		shutdownTimeout = 100 * time.Millisecond
+		wedgedStops     = 20
+	)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+
+	previous := componentStopsForShutdownPhase1
+	t.Cleanup(func() { componentStopsForShutdownPhase1 = previous })
+	componentStopsForShutdownPhase1 = func(*Node) []namedStop {
+		stops := make([]namedStop, wedgedStops)
+		for i := range stops {
+			stops[i] = namedStop{
+				name: fmt.Sprintf("wedged component %d", i),
+				stop: func() error {
+					<-release
+					return nil
+				},
+			}
+		}
+		return stops
+	}
+
+	n := &Node{}
+	n.config = NewConfig(WithShutdownTimeout(shutdownTimeout))
+	n.config.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	start := time.Now()
+	done := make(chan error, 1)
+	go func() { done <- n.Stop() }()
+
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Node.Stop did not return")
+	}
+	elapsed := time.Since(start)
+
+	require.ErrorIs(t, err, errStorageDrainUnconfirmed)
+	// A fresh budget per stop takes at least wedgedStops*shutdownTimeout
+	// (2s); one shared deadline returns shortly after shutdownTimeout.
+	assert.Less(t, elapsed, wedgedStops/2*shutdownTimeout,
+		"phase 1 stops must share the one shutdown deadline")
 }

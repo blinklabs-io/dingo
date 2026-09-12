@@ -130,26 +130,28 @@ func (n *Node) configuredShutdownTimeout() time.Duration {
 
 // shutdownPhase1ComponentStops is every phase-1 component whose Stop cancels
 // its own context and then waits for a goroutine to exit with no deadline of
-// its own, mirroring quiesceComponentStops (node_lifecycle.go) for the live
-// restore/truncate path. #3558 bounded this same style of wait there but not
-// here, on the normal process-shutdown path (dingo#1649 case R9): a goroutine
-// that never observes n.cancel() could wedge Node.Stop past shutdownTimeout
-// with no error for the caller to act on.
+// its own. #3558 bounded this style of wait for live restore/truncate but not
+// on the normal process-shutdown path (dingo#1649 case R9): a goroutine that
+// never observes n.cancel() could wedge Node.Stop past shutdownTimeout with
+// no error for the caller to act on.
 //
-// The stall recycler and selected-to-none waits are unconditional -- both
-// no-op internally when their worker was never started. Ordering matches the
-// direct calls this replaced: the selected-to-none worker must finish before
-// n.chainSelector is stopped below, since it reads the selector's state (see
-// waitChainSelectedNoneWorker's doc comment), so both context-owned waits run
-// first; the block forger stops next, to stop producing new blocks before
-// leader election tears down. n.chainSelector.Stop and n.peerGov.Stop(ctx)
-// stay direct calls immediately after this list runs (chainSelector.Stop only
-// cancels and does not wait; peerGov.Stop already takes and honors ctx) --
-// only the two storage-facing managers after them share this list's
-// unbounded-wait shape, and neither depends on chainSelector or peerGov
-// having already stopped.
+// The two context-owned waits run first and unconditionally -- both no-op
+// when their worker was never started. The selected-to-none worker must
+// finish before n.chainSelector is stopped below, since it reads the
+// selector's state. Both workers touch node components only while holding
+// liveLifecycleMu (via TryLock), which shutdown already holds by phase 1, so
+// bounding their wait cannot let teardown race a component they are using.
+//
+// The rest is quiesceComponentStops (node_lifecycle.go), reused rather than
+// copied: every component live restore/truncate must stop before closing
+// storage must equally stop before phase 3 closes it here, and a component
+// added to one list cannot then be missed by the other. None of them depends
+// on n.chainSelector or n.peerGov still running, and quiesce already stops
+// them before n.peerGov. n.chainSelector.Stop and n.peerGov.Stop(ctx) stay
+// direct calls after this list (chainSelector.Stop only cancels and does not
+// wait; peerGov.Stop already honors ctx).
 func (n *Node) shutdownPhase1ComponentStops() []namedStop {
-	stops := []namedStop{
+	return append([]namedStop{
 		{
 			name: "chainsync stall recycler",
 			stop: func() error { n.waitChainsyncStallRecycler(); return nil },
@@ -158,32 +160,7 @@ func (n *Node) shutdownPhase1ComponentStops() []namedStop {
 			name: "chain-selected-to-none worker",
 			stop: func() error { n.waitChainSelectedNoneWorker(); return nil },
 		},
-	}
-	if n.blockForger != nil {
-		stops = append(stops, namedStop{
-			name: "block forger",
-			stop: func() error { n.blockForger.Stop(); return nil },
-		})
-	}
-	if n.leaderElection != nil {
-		stops = append(stops, namedStop{
-			name: "leader election",
-			stop: n.leaderElection.Stop,
-		})
-	}
-	if n.snapshotMgr != nil {
-		stops = append(stops, namedStop{
-			name: "snapshot manager",
-			stop: n.snapshotMgr.Stop,
-		})
-	}
-	if n.dbLifecycleMgr != nil {
-		stops = append(stops, namedStop{
-			name: "database lifecycle manager",
-			stop: n.dbLifecycleMgr.Stop,
-		})
-	}
-	return stops
+	}, n.quiesceComponentStops()...)
 }
 
 // componentStopsForShutdownPhase1 is (*Node).shutdownPhase1ComponentStops,
@@ -240,19 +217,22 @@ func (n *Node) shutdown() error {
 	// Phase 1: Stop accepting new work
 	n.config.logger.Info("shutdown phase 1: stopping new work")
 
-	// n.cancel() above asks the stall recycler, the selected-to-none worker,
-	// the block forger, the leader election, the snapshot manager, and the
-	// database lifecycle manager to stop; each cancels its own context and
-	// then waits for a goroutine to exit with no deadline of its own, so
-	// bound each wait here rather than calling it directly -- see
-	// shutdownPhase1ComponentStops's doc comment for the ordering this
-	// preserves and stopWithDeadline's (node_lifecycle.go) for why an
-	// unfinished wait escalates to errStorageDrainUnconfirmed rather than
-	// being reported as an ordinary stop failure.
+	// Each of these components waits for a goroutine to exit with no deadline
+	// of its own, so bound each wait here rather than calling Stop directly --
+	// see shutdownPhase1ComponentStops for the set and its ordering, and
+	// stopWithDeadline (node_lifecycle.go) for why an unfinished wait
+	// escalates to errStorageDrainUnconfirmed rather than being reported as
+	// an ordinary stop failure.
+	//
+	// Unlike quiesceForLiveLifecycleOp, each stop gets only what remains of
+	// the one shutdown deadline, not a fresh shutdownTimeout: shutdown's
+	// timeout is a single absolute deadline shared by every phase, and once
+	// it has passed phase 3 cannot confirm the ledger-state close anyway, so
+	// waiting longer here would only delay the return.
 	phase1DrainConfirmed := true
 	for _, cs := range componentStopsForShutdownPhase1(n) {
 		if stopErr := stopWithDeadline(
-			shutdownTimeout, cs.name, cs.stop,
+			max(time.Until(deadline), 0), cs.name, cs.stop,
 		); stopErr != nil {
 			if errors.Is(stopErr, errStorageDrainUnconfirmed) {
 				phase1DrainConfirmed = false
