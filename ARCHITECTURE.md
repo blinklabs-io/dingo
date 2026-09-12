@@ -4571,7 +4571,11 @@ memo is not carried, since re-merging a closure is idempotent and a stale memo
 would suppress a merge the new window needs. The queue is carried under its own
 lock, together with whatever a drain has in flight: a drain empties the queue,
 probes what it took and rebuilds it from the blockfetch goroutine, so a rearm
-reading only the queue would carry none of the references being probed.
+reading only the queue would carry none of the references being probed. A
+reference the audit gave up on for good is carried too, as the slot it was
+dropped at: it never becomes a queued reference and nothing re-queues it, so
+only that record keeps the next window from reporting the closure's producers
+as missing.
 
 One lock owns every transition of the window pointer and every recording of a
 producer into the window it publishes. Arming reads the outgoing window,

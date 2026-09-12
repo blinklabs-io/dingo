@@ -148,11 +148,30 @@ type continuationAuditWindow struct {
 	endorserRefsMutex sync.Mutex
 	// endorserRefsDropped counts endorser-block references this window gave
 	// up on for good: the parent lookup failed for a reason retrying cannot
-	// fix. Those holes never close, so they keep the producer set
-	// permanently short. A reference that is merely unresolved so far is not
-	// counted here — it is still queued, and queued references are what
+	// fix, or the endorser block's transactions would not decode. Those
+	// holes never close, so they keep the producer set permanently short. A
+	// reference that is merely unresolved so far is not counted here — it is
+	// still queued, and queued references are what
 	// endorserProducersIncomplete reads.
+	//
+	// A hole carried forward from a prior window counts as one here however
+	// many that window dropped, because only the zero/non-zero state is
+	// read.
 	endorserRefsDropped int
+	// lowestDroppedRefSlot is the lowest slot among the ranking blocks whose
+	// references were dropped for good, and is meaningful only while
+	// endorserRefsDropped is non-zero.
+	//
+	// A permanent hole is carried across a rearm on the same rule as a
+	// producer and a queued reference, and needs a slot for the same reason:
+	// a hole in a block the rollback truncated closes by itself, because the
+	// peer re-delivers that block and the audit re-queues its reference,
+	// while a hole in a block the rollback left on the chain never closes --
+	// that block is not re-fetched. The lowest slot answers the carry
+	// question exactly: a hole survives the rollback if and only if the
+	// lowest one does, and when it does it is still the lowest of those that
+	// remain.
+	lowestDroppedRefSlot uint64
 	// endorserRefErrorLogged keeps a hard parent-resolution failure to one
 	// log line per window rather than one per audited body.
 	endorserRefErrorLogged bool
@@ -242,11 +261,31 @@ func (w *continuationAuditWindow) pendingEndorserRefCount() int {
 	return len(w.pendingEndorserRefs)
 }
 
-// noteEndorserRefDropped records a reference given up on for good.
-func (w *continuationAuditWindow) noteEndorserRefDropped() {
+// noteEndorserRefDropped records a reference given up on for good, at the slot
+// of the ranking block that carried it. Also used to inherit a prior window's
+// permanent hole, which is why the slot is a parameter rather than read off a
+// reference.
+func (w *continuationAuditWindow) noteEndorserRefDropped(blockSlot uint64) {
 	w.endorserRefsMutex.Lock()
 	defer w.endorserRefsMutex.Unlock()
+	if w.endorserRefsDropped == 0 || blockSlot < w.lowestDroppedRefSlot {
+		w.lowestDroppedRefSlot = blockSlot
+	}
 	w.endorserRefsDropped++
+}
+
+// droppedEndorserRefAtOrBelow reports the lowest slot this window dropped a
+// reference at, when that slot is at or below slot. It is what a rearm asks to
+// decide whether a permanent hole survives its rollback.
+func (w *continuationAuditWindow) droppedEndorserRefAtOrBelow(
+	slot uint64,
+) (uint64, bool) {
+	w.endorserRefsMutex.Lock()
+	defer w.endorserRefsMutex.Unlock()
+	if w.endorserRefsDropped == 0 || w.lowestDroppedRefSlot > slot {
+		return 0, false
+	}
+	return w.lowestDroppedRefSlot, true
 }
 
 // takeEndorserRefsForDrain hands the queue to a drain and records what it took,
@@ -476,6 +515,12 @@ func (ls *LedgerState) disarmContinuationAudit() {
 // deliberately not carried: re-merging a closure is idempotent (a repeat keeps
 // the lowest slot) and costs one hashing pass, where a stale memo would
 // suppress a merge the new window needs.
+//
+// A reference given up on for good travels on that rule too, as the slot it
+// was dropped at. It is not a queued reference and never becomes one, so only
+// endorserRefsDropped remembers that the producer set is short of it -- and a
+// hole in a block the rollback left on the chain never closes, because that
+// block is not re-fetched.
 func (ls *LedgerState) carryForwardWindow(
 	prior *continuationAuditWindow,
 	next *continuationAuditWindow,
@@ -486,6 +531,13 @@ func (ls *LedgerState) carryForwardWindow(
 		return
 	}
 	next.producedTxs = prior.producersAtOrBelow(point.Slot)
+	// A permanent hole travels on the same rule. Dropping it would let the
+	// new window report an endorser-resident producer as missing on exactly
+	// the closure the prior window knew it could not resolve, which is the
+	// false report this carry-forward exists to prevent.
+	if slot, ok := prior.droppedEndorserRefAtOrBelow(point.Slot); ok {
+		next.noteEndorserRefDropped(slot)
+	}
 	for _, ref := range prior.endorserRefsForCarryForward() {
 		if ref.blockSlot > point.Slot {
 			continue
@@ -1037,7 +1089,7 @@ func (ls *LedgerState) drainContinuationAuditEndorserRefs(
 				// Anything else (I/O, a corrupt hash index) will not fix
 				// itself by retrying, so the hole is permanent and the
 				// window says so once rather than per body.
-				window.noteEndorserRefDropped()
+				window.noteEndorserRefDropped(ref.blockSlot)
 				ls.countContinuationAuditOutcome(
 					continuationAuditResultRefUnresolvable,
 				)
@@ -1084,7 +1136,7 @@ func (ls *LedgerState) drainContinuationAuditEndorserRefs(
 		}
 		ids, err := endorserBlockTxIds(rawTxs)
 		if err != nil {
-			window.noteEndorserRefDropped()
+			window.noteEndorserRefDropped(ref.blockSlot)
 			ls.countContinuationAuditOutcome(
 				continuationAuditResultRefUnresolvable,
 			)

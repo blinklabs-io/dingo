@@ -1360,3 +1360,119 @@ func TestContinuationAuditReusesAnAlreadyMergedEndorserBlock(t *testing.T) {
 		"a reference resolved onto a merged occurrence is finished, not requeued",
 	)
 }
+
+// TestContinuationAuditCarriesAPermanentEndorserHole covers the one thing a
+// window knows about an endorser block that never becomes a queued reference.
+//
+// A reference the drain gives up on for good -- the parent lookup failed for a
+// reason retrying cannot fix, or the endorser block's transactions would not
+// decode -- leaves the producer set permanently short, and only
+// endorserRefsDropped records that. Nothing re-queues it, so a rearm that does
+// not carry the record hands the next window a producer set with a hole it
+// does not know about, and the next spend of an endorser-resident output is
+// reported as a splice on a chain that never diverged.
+//
+// It travels on the same rule as a producer and a queued reference: kept when
+// the rollback left the ranking block that carried it on the chain, dropped
+// when the rollback truncated that block, because the peer re-delivers it and
+// the reference is queued again.
+func TestContinuationAuditCarriesAPermanentEndorserHole(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name       string
+		rearmSlot  uint64
+		wantReport bool
+	}{
+		{
+			// Above the certifying block at slot 40: the rollback left it
+			// on the chain, so the hole it left never closes.
+			name:       "a rearm above the dropped reference keeps the hole",
+			rearmSlot:  45,
+			wantReport: false,
+		},
+		{
+			// Below it: that block is gone and will be re-delivered, so
+			// the new window has no hole and must still diagnose.
+			name:       "a rearm below it drops the hole",
+			rearmSlot:  35,
+			wantReport: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newLeiosAuditFixture(t)
+			ls := f.ls
+			// The closure resolves and then refuses to decode, which is
+			// what makes the drain give up on it for good rather than
+			// queue it for a later body.
+			ls.config.EndorserBlockProvider = func(
+				[]byte,
+				uint64,
+			) ([]cbor.RawMessage, bool) {
+				return []cbor.RawMessage{{0xff}}, true
+			}
+			ls.armContinuationAudit(f.ancestorTip.Point, "first rollback")
+
+			ls.auditContinuationBlock(BlockfetchEvent{
+				ConnectionId: f.connId,
+				Block:        f.certRB,
+				Point:        f.certPoint,
+			}, true)
+			ls.auditContinuationBlock(f.spenderBlock(t), true)
+			prior := ls.continuationAudit.Load()
+			require.NotNil(t, prior)
+			require.Equal(
+				t,
+				1,
+				prior.endorserRefsDropped,
+				"the fixture must have produced a permanent hole",
+			)
+			require.Empty(
+				t,
+				prior.pendingEndorserRefs,
+				"a dropped reference is not queued, which is why only the "+
+					"drop record carries the hole",
+			)
+
+			ls.armContinuationAudit(
+				ocommon.NewPoint(
+					tc.rearmSlot,
+					testHashBytes("permanent-hole-rearm"),
+				),
+				"second rollback",
+			)
+			before := f.logs.Len()
+
+			ls.auditContinuationBlock(
+				f.spenderBlockAt(t, 60, "permanent-hole-spender"),
+				true,
+			)
+
+			logged := f.logs.String()[before:]
+			if tc.wantReport {
+				record := findLogRecord(
+					t,
+					logged,
+					"continuation block spends an input with no producer on the local applied chain",
+				)
+				assert.Equal(t, float64(60), record["block_slot"])
+				return
+			}
+			assert.NotContains(
+				t,
+				logged,
+				"no producer on the local applied chain",
+				"a window that inherited a hole it cannot close must not "+
+					"assert a missing producer",
+			)
+			record := findLogRecord(
+				t,
+				logged,
+				"cross-fork continuation audit inconclusive: certified endorser block not fetched yet",
+			)
+			assert.Equal(t, float64(60), record["block_slot"])
+		})
+	}
+}
