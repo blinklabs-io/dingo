@@ -11068,11 +11068,11 @@ func (ls *LedgerState) ByronProtocolMagic() (uint32, error) {
 // ByronFeePolicy returns the fee policy from the active Byron genesis.
 func (ls *LedgerState) ByronFeePolicy() (int64, int64, error) {
 	if ls == nil || ls.config.CardanoNodeConfig == nil {
-		return 0, 0, errors.New("Byron genesis configuration is unavailable")
+		return 0, 0, errors.New("byron genesis configuration is unavailable")
 	}
 	genesis := ls.config.CardanoNodeConfig.ByronGenesis()
 	if genesis == nil {
-		return 0, 0, errors.New("Byron genesis configuration is unavailable")
+		return 0, 0, errors.New("byron genesis configuration is unavailable")
 	}
 	policy := genesis.BlockVersionData.TxFeePolicy
 	return policy.Summand, policy.Multiplier, nil
