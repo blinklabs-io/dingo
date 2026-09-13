@@ -157,11 +157,6 @@ func (lv *LedgerView) pinSyntheticV2CostModel(inEffect bool) *LedgerView {
 	return lv
 }
 
-//go:fix inline
-func uint64Ptr(value uint64) *uint64 {
-	return new(value)
-}
-
 func (lv *LedgerView) pinCommitteeState(
 	epoch uint64,
 	pparams lcommon.ProtocolParameters,
@@ -1276,6 +1271,9 @@ func (lv *LedgerView) CommitteeMembers() ([]lcommon.CommitteeMember, error) {
 	order := make([]credentialKey, 0, len(dbMembers))
 	tagsByHash := make(map[string]map[uint8]struct{}, len(dbMembers))
 	for _, m := range dbMembers {
+		if m == nil {
+			continue
+		}
 		key := credentialKey{
 			tag:  m.ColdCredentialTag,
 			hash: string(m.ColdCredHash),
@@ -1300,6 +1298,9 @@ func (lv *LedgerView) CommitteeMembers() ([]lcommon.CommitteeMember, error) {
 	credentials := make([]models.CommitteeCredential, 0, len(order))
 	for _, key := range order {
 		found := latest[key]
+		if found == nil {
+			continue
+		}
 		credentials = append(credentials, models.CommitteeCredential{
 			CredentialTag: found.ColdCredentialTag,
 			Credential:    found.ColdCredHash,
@@ -1320,6 +1321,9 @@ func (lv *LedgerView) CommitteeMembers() ([]lcommon.CommitteeMember, error) {
 			continue
 		}
 		found := latest[key]
+		if found == nil {
+			continue
+		}
 		coldCredential := lcommon.Credential{
 			CredType:   uint(found.ColdCredentialTag),
 			Credential: lcommon.NewBlake2b224(found.ColdCredHash),
