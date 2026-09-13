@@ -629,11 +629,16 @@ func (o *Ouroboros) txsubmissionServerInit(
 					if consecutiveReplyMismatches >= txsubmissionMaxConsecutiveReplyMismatches {
 						o.config.Logger.Error(
 							"stopping tx ingest after repeated mismatched txsubmission replies",
-							"component", "network",
-							"protocol", "tx-submission",
-							"role", "server",
-							"connection_id", ctx.ConnectionId.String(),
-							"consecutive_mismatches", consecutiveReplyMismatches,
+							"component",
+							"network",
+							"protocol",
+							"tx-submission",
+							"role",
+							"server",
+							"connection_id",
+							ctx.ConnectionId.String(),
+							"consecutive_mismatches",
+							consecutiveReplyMismatches,
 						)
 						return
 					}

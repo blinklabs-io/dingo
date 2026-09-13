@@ -128,7 +128,10 @@ func TestDecodeConwayBlockRejectsMalformedLeiosHeaderExtension(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			raw := testutil.ExtendConwayHeaderBody(t, standardRaw, tc.extraFields...)
+			raw := testutil.ExtendConwayHeaderBody(
+				t,
+				standardRaw,
+				tc.extraFields...)
 			_, err := DecodeConwayBlock(raw)
 			require.Error(t, err)
 		})

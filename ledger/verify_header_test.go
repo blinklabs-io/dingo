@@ -2290,9 +2290,24 @@ func TestOldestRequiredSnapshotEpoch(t *testing.T) {
 	// Build an epoch cache mapping distinct slot ranges to epochs 11, 14, 22
 	// so the required mark epochs are 10, 13, 21 (StakeSnapshotEpoch = E-1).
 	ls.epochCache = []models.Epoch{
-		{EpochId: 11, StartSlot: 1_100, LengthInSlots: 100, Nonce: tb.epochNonce},
-		{EpochId: 14, StartSlot: 1_400, LengthInSlots: 100, Nonce: tb.epochNonce},
-		{EpochId: 22, StartSlot: 2_200, LengthInSlots: 100, Nonce: tb.epochNonce},
+		{
+			EpochId:       11,
+			StartSlot:     1_100,
+			LengthInSlots: 100,
+			Nonce:         tb.epochNonce,
+		},
+		{
+			EpochId:       14,
+			StartSlot:     1_400,
+			LengthInSlots: 100,
+			Nonce:         tb.epochNonce,
+		},
+		{
+			EpochId:       22,
+			StartSlot:     2_200,
+			LengthInSlots: 100,
+			Nonce:         tb.epochNonce,
+		},
 	}
 	ls.publishSnapshotsLocked()
 
@@ -2303,9 +2318,15 @@ func TestOldestRequiredSnapshotEpoch(t *testing.T) {
 
 	// Defer three headers in epochs 22, 14, 11. The oldest required snapshot
 	// epoch is StakeSnapshotEpoch(11) == 10.
-	ls.markDeferredHeaderValidation(ocommon.Point{Slot: 2_250, Hash: []byte{0x22}})
-	ls.markDeferredHeaderValidation(ocommon.Point{Slot: 1_450, Hash: []byte{0x14}})
-	ls.markDeferredHeaderValidation(ocommon.Point{Slot: 1_150, Hash: []byte{0x11}})
+	ls.markDeferredHeaderValidation(
+		ocommon.Point{Slot: 2_250, Hash: []byte{0x22}},
+	)
+	ls.markDeferredHeaderValidation(
+		ocommon.Point{Slot: 1_450, Hash: []byte{0x14}},
+	)
+	ls.markDeferredHeaderValidation(
+		ocommon.Point{Slot: 1_150, Hash: []byte{0x11}},
+	)
 
 	floor, ok := ls.OldestRequiredSnapshotEpoch()
 	require.True(t, ok, "a deferred header must produce a retention pin")
@@ -2313,7 +2334,9 @@ func TestOldestRequiredSnapshotEpoch(t *testing.T) {
 
 	// Resolving the epoch-11 header releases the pin up to the next-oldest
 	// required snapshot epoch, StakeSnapshotEpoch(14) == 13.
-	ls.clearDeferredHeaderValidation(ocommon.Point{Slot: 1_150, Hash: []byte{0x11}})
+	ls.clearDeferredHeaderValidation(
+		ocommon.Point{Slot: 1_150, Hash: []byte{0x11}},
+	)
 	floor, ok = ls.OldestRequiredSnapshotEpoch()
 	require.True(t, ok)
 	assert.Equal(t, uint64(13), floor)
@@ -2323,9 +2346,15 @@ func TestOldestRequiredSnapshotEpoch(t *testing.T) {
 	// must signal retain-all (floor 0, ok true) so cleanup prunes nothing --
 	// otherwise the snapshot this header will need once the cache advances
 	// could be pruned now, looping the header on defer (issue #3727, gap 2).
-	ls.markDeferredHeaderValidation(ocommon.Point{Slot: 9_999_999, Hash: []byte{0xFF}})
+	ls.markDeferredHeaderValidation(
+		ocommon.Point{Slot: 9_999_999, Hash: []byte{0xFF}},
+	)
 	floor, ok = ls.OldestRequiredSnapshotEpoch()
-	require.True(t, ok, "an unmappable deferred slot must still pin (retain-all)")
+	require.True(
+		t,
+		ok,
+		"an unmappable deferred slot must still pin (retain-all)",
+	)
 	assert.Equal(
 		t,
 		uint64(0),
@@ -2335,7 +2364,9 @@ func TestOldestRequiredSnapshotEpoch(t *testing.T) {
 
 	// Once the unmappable slot is dropped, the floor returns to the real
 	// minimum over the remaining mappable headers.
-	ls.clearDeferredHeaderValidation(ocommon.Point{Slot: 9_999_999, Hash: []byte{0xFF}})
+	ls.clearDeferredHeaderValidation(
+		ocommon.Point{Slot: 9_999_999, Hash: []byte{0xFF}},
+	)
 	floor, ok = ls.OldestRequiredSnapshotEpoch()
 	require.True(t, ok)
 	assert.Equal(t, uint64(13), floor)
@@ -3887,8 +3918,12 @@ INSERT INTO pool_registration (
 		f.snapshotSlot, nil,
 	)
 	require.NoError(t, err)
-	require.Contains(t, hexPoolSet(active), hex.EncodeToString(reaped),
-		"the re-registered pool must be active again, or this test proves nothing")
+	require.Contains(
+		t,
+		hexPoolSet(active),
+		hex.EncodeToString(reaped),
+		"the re-registered pool must be active again, or this test proves nothing",
+	)
 
 	f.capture(t)
 
@@ -3975,8 +4010,18 @@ func TestPrunePoolSnapshotsWithRetentionFloor_FloorReadIsAtomic(
 	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
 	// Map slots to epochs 11 (snapshot 10) and 14 (snapshot 13).
 	ls.epochCache = []models.Epoch{
-		{EpochId: 11, StartSlot: 1_100, LengthInSlots: 100, Nonce: tb.epochNonce},
-		{EpochId: 14, StartSlot: 1_400, LengthInSlots: 100, Nonce: tb.epochNonce},
+		{
+			EpochId:       11,
+			StartSlot:     1_100,
+			LengthInSlots: 100,
+			Nonce:         tb.epochNonce,
+		},
+		{
+			EpochId:       14,
+			StartSlot:     1_400,
+			LengthInSlots: 100,
+			Nonce:         tb.epochNonce,
+		},
 	}
 	ls.publishSnapshotsLocked()
 
@@ -4078,8 +4123,18 @@ func TestPrunePoolSnapshotsWithRetentionFloor_RealPruneNoDeadlock(
 	tb := createTestBlock(t, [32]byte{73}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	ls.epochCache = []models.Epoch{
-		{EpochId: 11, StartSlot: 1_100, LengthInSlots: 100, Nonce: tb.epochNonce},
-		{EpochId: 14, StartSlot: 1_400, LengthInSlots: 100, Nonce: tb.epochNonce},
+		{
+			EpochId:       11,
+			StartSlot:     1_100,
+			LengthInSlots: 100,
+			Nonce:         tb.epochNonce,
+		},
+		{
+			EpochId:       14,
+			StartSlot:     1_400,
+			LengthInSlots: 100,
+			Nonce:         tb.epochNonce,
+		},
 	}
 	ls.publishSnapshotsLocked()
 
@@ -4207,7 +4262,12 @@ func TestPrunePoolSnapshotsWithRetentionFloor_UnmappableRetainsAll(
 	// Publish an epoch mapping so the deferred slot resolves to epoch 22
 	// (snapshot 21). Normal floor pruning resumes.
 	ls.epochCache = []models.Epoch{
-		{EpochId: 5, StartSlot: 0, LengthInSlots: 1_000_000, Nonce: tb.epochNonce},
+		{
+			EpochId:       5,
+			StartSlot:     0,
+			LengthInSlots: 1_000_000,
+			Nonce:         tb.epochNonce,
+		},
 		{
 			EpochId:       22,
 			StartSlot:     49_000_000,
@@ -4269,8 +4329,18 @@ func TestRepopulateDeferredHeaderValidation(t *testing.T) {
 	tb := createTestBlock(t, [32]byte{70}, 0, tamperNone)
 	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
 	ls.epochCache = []models.Epoch{
-		{EpochId: 11, StartSlot: 1_100, LengthInSlots: 100, Nonce: tb.epochNonce},
-		{EpochId: 14, StartSlot: 1_400, LengthInSlots: 100, Nonce: tb.epochNonce},
+		{
+			EpochId:       11,
+			StartSlot:     1_100,
+			LengthInSlots: 100,
+			Nonce:         tb.epochNonce,
+		},
+		{
+			EpochId:       14,
+			StartSlot:     1_400,
+			LengthInSlots: 100,
+			Nonce:         tb.epochNonce,
+		},
 	}
 	ls.publishSnapshotsLocked()
 
@@ -4387,7 +4457,12 @@ func TestPrunePoolSnapshotsWithRetentionFloor_EvictsStaleBehindCursor(
 	tb := createTestBlock(t, [32]byte{71}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	ls.epochCache = []models.Epoch{
-		{EpochId: 11, StartSlot: 1_100, LengthInSlots: 100, Nonce: tb.epochNonce},
+		{
+			EpochId:       11,
+			StartSlot:     1_100,
+			LengthInSlots: 100,
+			Nonce:         tb.epochNonce,
+		},
 	}
 	// Apply cursor is WELL AHEAD of the deferred header's slot.
 	ls.currentTip = ochainsync.Tip{Point: ocommon.Point{Slot: 500_000}}
@@ -4413,7 +4488,10 @@ func TestPrunePoolSnapshotsWithRetentionFloor_EvictsStaleBehindCursor(
 	assert.Equal(t, uint64(25), seenBefore, "evicted header must not pin")
 	_, ok = ls.OldestRequiredSnapshotEpoch()
 	assert.False(t, ok, "abandoned header must be evicted from the set")
-	marker, err := db.GetSyncState(deferredHeaderValidationSyncStateKey(stale), nil)
+	marker, err := db.GetSyncState(
+		deferredHeaderValidationSyncStateKey(stale),
+		nil,
+	)
 	require.NoError(t, err)
 	assert.Empty(t, marker, "evicted header's persisted marker must be deleted")
 }
@@ -4430,8 +4508,18 @@ func TestPrunePoolSnapshotsWithRetentionFloor_ResolveReleasesPin(
 	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
 	// Both headers are AHEAD of the cursor (tip 0) so eviction does not fire.
 	ls.epochCache = []models.Epoch{
-		{EpochId: 11, StartSlot: 1_100, LengthInSlots: 100, Nonce: tb.epochNonce},
-		{EpochId: 14, StartSlot: 1_400, LengthInSlots: 100, Nonce: tb.epochNonce},
+		{
+			EpochId:       11,
+			StartSlot:     1_100,
+			LengthInSlots: 100,
+			Nonce:         tb.epochNonce,
+		},
+		{
+			EpochId:       14,
+			StartSlot:     1_400,
+			LengthInSlots: 100,
+			Nonce:         tb.epochNonce,
+		},
 	}
 	ls.publishSnapshotsLocked()
 
@@ -4472,10 +4560,17 @@ func TestPrunePoolSnapshotsWithRetentionFloor_DepthCapBoundsRetention(
 	// Header maps to epoch 11 (needs snapshot 10) and is ahead of the cursor
 	// (tip 0) so it is not evicted; only the cap bounds it.
 	ls.epochCache = []models.Epoch{
-		{EpochId: 11, StartSlot: 1_100, LengthInSlots: 100, Nonce: tb.epochNonce},
+		{
+			EpochId:       11,
+			StartSlot:     1_100,
+			LengthInSlots: 100,
+			Nonce:         tb.epochNonce,
+		},
 	}
 	ls.publishSnapshotsLocked()
-	ls.markDeferredHeaderValidation(ocommon.Point{Slot: 1_150, Hash: []byte{0x11}})
+	ls.markDeferredHeaderValidation(
+		ocommon.Point{Slot: 1_150, Hash: []byte{0x11}},
+	)
 
 	floor, ok := ls.OldestRequiredSnapshotEpoch()
 	require.True(t, ok)
