@@ -97,7 +97,7 @@ func testAccountBaselineBackfill(
 ) {
 	t.Helper()
 	ctx := context.Background()
-	db, err := OpenDB(driver, dsn, dialectName)
+	db, err := OpenDB(driver, dsn, dialectName, false)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	runTo := func(versions []migrations.Migration) {
