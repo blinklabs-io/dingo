@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -174,6 +175,29 @@ func TestWatchCommand_FallbackIntervalMustBePositive(t *testing.T) {
 	err := watchRun(cmd, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--fallback-interval must be positive")
+}
+
+// TestWatchCommand_RejectsAtPointFlags is the regression test for a
+// blinklabs-io/dingo#4183 review nitpick: --at-slot/--at-hash are
+// registered on the root command (rootCmd.PersistentFlags()), so 'watch'
+// inherits and silently accepted them even though it has no
+// historical-point mode -- only 'check' (via requireAtPoint) does
+// anything with them. watchRun must now reject them explicitly, the same
+// way it already rejects an invalid --fallback-interval, rather than
+// accepting a flag combination that has no effect with no error or
+// warning at all.
+func TestWatchCommand_RejectsAtPointFlags(t *testing.T) {
+	withGlobalFlags(t, "preview", "127.0.0.1:1", "127.0.0.1:1")
+	globalFlags.atSlot = 12345
+	globalFlags.atHash = strings.Repeat("ab", 32)
+
+	cmd := watchCommand()
+	cmd.SetContext(context.Background())
+
+	err := watchRun(cmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--at-slot/--at-hash")
+	assert.Contains(t, err.Error(), "watch")
 }
 
 // TestResetFallbackTimer_NotYetFiredGetsFullInterval covers the ordinary

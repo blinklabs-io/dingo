@@ -155,6 +155,9 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 	if err := requireAddrs(); err != nil {
 		return err
 	}
+	if err := rejectAtPointFlags(cmd.Name()); err != nil {
+		return err
+	}
 	magic, err := networkMagic(network)
 	if err != nil {
 		return err

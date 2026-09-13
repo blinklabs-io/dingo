@@ -194,6 +194,23 @@ func requireAtPoint() (*nodeparity.Tip, error) {
 	}, nil
 }
 
+// rejectAtPointFlags errors if --at-slot/--at-hash were set, for a command
+// that has no historical-point mode. Both flags are registered on the root
+// command (rootCmd.PersistentFlags()), inherited by every subcommand
+// including 'watch', but only 'check' (via requireAtPoint) has any
+// historical-point mode to apply them to -- 'watch' silently accepted and
+// ignored them otherwise, with no error or warning that they had no effect
+// (blinklabs-io/dingo#4183 review).
+func rejectAtPointFlags(commandName string) error {
+	if globalFlags.atSlot == 0 && globalFlags.atHash == "" {
+		return nil
+	}
+	return fmt.Errorf(
+		"--at-slot/--at-hash are not supported by %q -- explicit historical mode is 'check'-only",
+		commandName,
+	)
+}
+
 // networkMagic resolves a network name to its Ouroboros network magic, the
 // same lookup the dingo binary itself uses (internal/config/config.go).
 func networkMagic(network string) (uint32, error) {
