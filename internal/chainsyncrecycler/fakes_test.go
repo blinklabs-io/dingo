@@ -135,6 +135,12 @@ func (f *fakeLedger) PrimaryChainTipSlot() uint64 {
 	return f.primaryChainTipSlot
 }
 
+func (f *fakeLedger) setPrimaryChainTipSlot(slot uint64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.primaryChainTipSlot = slot
+}
+
 func (f *fakeLedger) ReconcileLivePrimaryChainLedgerDivergence(
 	reason string,
 	connId ouroboros.ConnectionId,

@@ -44,6 +44,7 @@ const (
 	rewardSeedFailureSchemaRelease             = "reward-seed-failure"
 	importedPoolBlockCountSchemaRelease        = "imported-pool-block-count"
 	poolDepositHeldSchemaRelease               = "pool-registration-deposit-held"
+	pointerAddressStakeSchemaRelease           = "pointer-address-stake"
 )
 
 // schemaVersions names every migration in ascending version order.
@@ -72,6 +73,7 @@ var schemaVersions = []struct {
 	{Version: 10, Name: rewardSeedFailureSchemaRelease, Dir: "v10"},
 	{Version: 11, Name: importedPoolBlockCountSchemaRelease, Dir: "v11"},
 	{Version: 12, Name: poolDepositHeldSchemaRelease, Dir: "v12"},
+	{Version: 13, Name: pointerAddressStakeSchemaRelease, Dir: "v13"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -454,7 +456,10 @@ func committeeTermStartBackfill(
 	if batch.Cursor != "" {
 		parsed, err := strconv.ParseInt(batch.Cursor, 10, 64)
 		if err != nil {
-			return BatchResult{}, fmt.Errorf("parse committee backfill cursor: %w", err)
+			return BatchResult{}, fmt.Errorf(
+				"parse committee backfill cursor: %w",
+				err,
+			)
 		}
 		lastID = parsed
 	}
@@ -492,7 +497,10 @@ func committeeTermStartBackfill(
 			return BatchResult{}, err
 		}
 	}
-	return BatchResult{Cursor: strconv.FormatInt(ids[len(ids)-1], 10), Rows: int64(len(ids))}, nil
+	return BatchResult{
+		Cursor: strconv.FormatInt(ids[len(ids)-1], 10),
+		Rows:   int64(len(ids)),
+	}, nil
 }
 
 var (

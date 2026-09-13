@@ -157,7 +157,7 @@ func TestQueryShelleyPoolDistr2_ReportsStakeFractionAndVrf(t *testing.T) {
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.Query(poolDistr2Query())
+	result, err := ls.Query(poolDistr2Query(), QueryPoint{})
 	require.NoError(t, err)
 	distr := decodePoolDistr2Result(t, result)
 
@@ -244,7 +244,7 @@ func TestQueryShelleyPoolDistr2_FilterReportsOnlyRequestedPools(t *testing.T) {
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.Query(poolDistr2QueryFor(pkhA))
+	result, err := ls.Query(poolDistr2QueryFor(pkhA), QueryPoint{})
 	require.NoError(t, err)
 	distr := decodePoolDistr2Result(t, result)
 
@@ -301,7 +301,7 @@ func TestQueryShelleyPoolDistr2_FilterOmitsPoolAbsentFromSnapshot(
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.Query(poolDistr2QueryFor(pkhA, unknownPkh))
+	result, err := ls.Query(poolDistr2QueryFor(pkhA, unknownPkh), QueryPoint{})
 	require.NoError(t, err,
 		"a pool the snapshot does not hold is omitted, not an error")
 	distr := decodePoolDistr2Result(t, result)
@@ -322,7 +322,7 @@ func TestQueryShelleyPoolDistr2_ZeroTotalStakeDoesNotDivide(t *testing.T) {
 	db := newTestDB(t)
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.Query(poolDistr2Query())
+	result, err := ls.Query(poolDistr2Query(), QueryPoint{})
 	require.NoError(t, err,
 		"an empty snapshot reports an empty distribution, not an error")
 	distr := decodePoolDistr2Result(t, result)
@@ -387,7 +387,7 @@ func TestQueryShelleyPoolDistr2_OmitsPoolWithoutRegistrationRatherThanAborting(
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.Query(poolDistr2Query())
+	result, err := ls.Query(poolDistr2Query(), QueryPoint{})
 	require.NoError(t, err,
 		"an unregistered pool must not abort the protocol and drop the "+
 			"client's connection")
@@ -466,7 +466,7 @@ func TestQueryShelleyPoolDistr2_PrefersRegistrationVrfKey(t *testing.T) {
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.Query(poolDistr2Query())
+	result, err := ls.Query(poolDistr2Query(), QueryPoint{})
 	require.NoError(t, err)
 	distr := decodePoolDistr2Result(t, result)
 
@@ -556,7 +556,7 @@ func TestQueryShelleyPoolDistr2_VrfKeyMatchesHeaderValidation(t *testing.T) {
 		nil,
 	))
 
-	result, err := ls.Query(poolDistr2Query())
+	result, err := ls.Query(poolDistr2Query(), QueryPoint{})
 	require.NoError(t, err)
 	distr := decodePoolDistr2Result(t, result)
 	entry, ok := distr.Pools[lcommon.PoolId(pkh)]
@@ -654,7 +654,7 @@ func TestQueryShelleyPoolDistr2_EpochComesFromTheTransactionNotTheSnapshot(
 	ls.currentEpoch = models.Epoch{EpochId: staleEpoch}
 	ls.publishSnapshotsLocked()
 
-	result, err := ls.Query(poolDistr2Query())
+	result, err := ls.Query(poolDistr2Query(), QueryPoint{})
 	require.NoError(t, err)
 	distr := decodePoolDistr2Result(t, result)
 
@@ -736,7 +736,7 @@ func TestQueryShelleyPoolDistr2_TotalMatchesRowsWhenSummaryIsReady(
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.Query(poolDistr2Query())
+	result, err := ls.Query(poolDistr2Query(), QueryPoint{})
 	require.NoError(t, err)
 	distr := decodePoolDistr2Result(t, result)
 
@@ -803,7 +803,7 @@ func TestQueryShelleyPoolDistr2_ViaGetCBOR(t *testing.T) {
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.Query(poolDistr2CborQuery())
+	result, err := ls.Query(poolDistr2CborQuery(), QueryPoint{})
 	require.NoError(t, err, "GetCBOR-wrapped GetPoolDistr2 must not error")
 
 	arr, ok := result.([]any)

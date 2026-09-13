@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
@@ -102,12 +103,19 @@ func (l *forgerCountingLeader) callCount() int {
 }
 
 type forgerTestSlotClock struct {
-	currentSlot       uint64
-	chainTipSlot      uint64
-	chainTipHash      []byte
-	upstreamTipSlot   uint64
-	upstreamActive    bool
-	slotsPerKESPeriod uint64
+	currentSlot  uint64
+	chainTipSlot uint64
+	chainTipHash []byte
+	// primaryTipExplicit selects whether primaryTipSlot/primaryTipHash are
+	// used verbatim. When false the primary tip mirrors the applied tip,
+	// which is the caught-up steady state and what every test that does not
+	// care about the distinction wants.
+	primaryTipExplicit bool
+	primaryTipSlot     uint64
+	primaryTipHash     []byte
+	upstreamTipSlot    uint64
+	upstreamActive     bool
+	slotsPerKESPeriod  uint64
 }
 
 func (c forgerTestSlotClock) CurrentSlot() (uint64, error) {
@@ -118,8 +126,30 @@ func (c forgerTestSlotClock) SlotsPerKESPeriod() uint64 {
 	return c.slotsPerKESPeriod
 }
 
-func (c forgerTestSlotClock) ChainTipSlot() uint64 {
-	return c.chainTipSlot
+func (c forgerTestSlotClock) ChainTip() ocommon.Point {
+	return ocommon.Point{Slot: c.chainTipSlot, Hash: c.chainTipHash}
+}
+
+// PrimaryChainTip mirrors the applied tip unless the test describes a primary
+// tip of its own. Mirroring is the caught-up steady state, so a test that sets
+// no primary chain tip field observes no backlog and no divergence.
+//
+// Setting primaryTipSlot or primaryTipHash is itself enough to opt in: a test
+// that set primaryTipSlot but forgot primaryTipExplicit would otherwise
+// silently get the mirrored applied tip, so its gap would read 0 and it would
+// pass no matter what the forger did -- which is exactly what happened to the
+// configurable tolerance test. primaryTipExplicit remains for the one case the
+// values cannot express on their own: an explicitly empty primary tip (slot 0,
+// no hash), which is an uninitialised primary chain.
+//
+// The values are used verbatim, including a primary tip BEHIND the applied
+// tip, which is a real state the forger must handle and which a clamp would
+// hide.
+func (c forgerTestSlotClock) PrimaryChainTip() ocommon.Point {
+	if !c.primaryTipExplicit && c.primaryTipSlot == 0 && c.primaryTipHash == nil {
+		return ocommon.Point{Slot: c.chainTipSlot, Hash: c.chainTipHash}
+	}
+	return ocommon.Point{Slot: c.primaryTipSlot, Hash: c.primaryTipHash}
 }
 
 func (forgerTestSlotClock) NextSlotTime() (time.Time, error) {

@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
@@ -327,11 +328,28 @@ func TestForgeStillWaitsForUnknownUpstreamTargetWhileTipIsStale(
 		float64(1),
 		testutil.ToFloat64(forger.metrics.forgeSyncSkip),
 	)
+	// #4013 asserted 991 here, the local tip's lag behind the wall clock,
+	// because the sync-skip path was then the only writer that could make
+	// dingo_forge_tip_gap_slots non-zero on this branch. This PR gives that
+	// gauge a single meaning -- the ledger-apply backlog, primary chain tip
+	// minus applied tip -- and sets it once per leader check instead, so the
+	// skip paths no longer overwrite it. The primary tip mirrors the applied tip
+	// on this fixture, so the backlog is 0 and the gauge says so.
+	//
+	// The lag itself is not lost: ledger exports it continuously as
+	// dingo_tip_gap_slots ("slots between wall-clock slot and chain tip",
+	// ledger/state.go), on every slot tick rather than only on a leader-slot
+	// skip, and the gate's own log line carries current_slot and tip_slot.
+	// What this test pins is unchanged -- a stale tip still stops the forge
+	// when the upstream target is unknown; see
+	// TestForgeTakesLeaderSlotWhenUpstreamTargetUnknownAtTip for the at-tip
+	// half of that pair.
 	assert.Equal(
 		t,
-		float64(991),
+		float64(0),
 		testutil.ToFloat64(forger.metrics.tipGapSlots),
-		"unknown upstream targets report the local tip lag",
+		"dingo_forge_tip_gap_slots reports the ledger-apply backlog, "+
+			"not the wall-clock lag",
 	)
 }
 
@@ -754,10 +772,15 @@ func TestEqualSlotOwnBlockIsIdentifiedByHashNotByFence(t *testing.T) {
 }
 
 // forgerMovingTipSlotClock is a slot clock whose chain tip moves between
-// the read at the top of a forge cycle and the read taken next to the
-// tip hash. The first ChainTipSlot call answers chainTipSlot, every
-// later one answers movedTipSlot, which is what a rival block landing
-// mid-cycle looks like to the forger.
+// the read at the top of a forge cycle and the re-read tipBlockOwnership
+// takes. The first ChainTip call answers a point at chainTipSlot, every
+// later one a point at movedTipSlot, which is what a rival block landing
+// mid-cycle looks like to the forger. Both points carry chainTipHash: the
+// slot is what moves.
+//
+// hashReads counts calls to the optional ChainTipHashProvider, which
+// tipBlockOwnership no longer consults -- it takes slot and hash from the
+// one ChainTip snapshot. The counter is kept so the test can pin that.
 type forgerMovingTipSlotClock struct {
 	currentSlot       uint64
 	chainTipSlot      uint64
@@ -778,14 +801,31 @@ func (c *forgerMovingTipSlotClock) SlotsPerKESPeriod() uint64 {
 	return c.slotsPerKESPeriod
 }
 
-func (c *forgerMovingTipSlotClock) ChainTipSlot() uint64 {
+// ChainTip models a tip that moves between reads: the first read sees the
+// original slot and every later one sees the moved slot. Each read returns a
+// self-consistent point, as the SlotClockProvider contract requires, so the
+// staleness this double injects is between successive reads -- exactly the
+// case tipBlockOwnership's re-read exists to catch.
+func (c *forgerMovingTipSlotClock) ChainTip() ocommon.Point {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.tipReads++
+	slot := c.movedTipSlot
 	if c.tipReads == 1 {
-		return c.chainTipSlot
+		slot = c.chainTipSlot
 	}
-	return c.movedTipSlot
+	return ocommon.Point{Slot: slot, Hash: c.chainTipHash}
+}
+
+// PrimaryChainTip is pinned to the ORIGINAL tip and never moves. This double
+// exists to model the applied tip shifting between the two reads
+// tipBlockOwnership makes; letting the primary tip follow it would put the
+// primary tip ahead of the current slot and trip the past-slot guard before
+// the contested-slot branch this test is about.
+func (c *forgerMovingTipSlotClock) PrimaryChainTip() ocommon.Point {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return ocommon.Point{Slot: c.chainTipSlot, Hash: c.chainTipHash}
 }
 
 func (c *forgerMovingTipSlotClock) ChainTipHash() []byte {
@@ -928,16 +968,17 @@ func TestEqualSlotLostBattleUnderTheFenceIsNotSilent(t *testing.T) {
 // re-read inside the ownership check.
 //
 // tipSlot is sampled once at the top of checkAndForgeProduction, and the
-// chain can move before ChainTipHash is read. Comparing a hash from one
-// tip against a slot from another decides ownership from two different
-// blocks: here it would read a rival's hash and conclude we lost a
-// battle at slot 10 when the tip has in fact already moved past it.
+// chain can move before ownership is decided. Reusing that stale slot would
+// decide ownership from two different blocks: here it would judge a rival's
+// hash against a slot the tip has already moved past and report a lost
+// battle at slot 10.
 //
-// Re-reading the tip slot next to the hash makes that disagreement
-// inconclusive instead, and the decision falls back to the fence, which
-// is the conservative answer. The reads are still not atomic, so this
-// narrows the window rather than closing it; what it guarantees is that
-// a moved tip cannot manufacture a slot-battle report.
+// Re-reading the tip inside tipBlockOwnership makes that disagreement
+// inconclusive instead, and the decision falls back to the fence, which is
+// the conservative answer. Slot and hash now come from ONE ChainTip
+// snapshot, so the pair can no longer straddle two tips; what this pins is
+// that a tip which moved between the cycle's read and the ownership check
+// cannot manufacture a slot-battle report.
 func TestEqualSlotOwnershipIsInconclusiveWhenTheTipMoves(t *testing.T) {
 	const slot = uint64(10)
 	ourHash := bytes.Repeat([]byte{0xa1}, 32)
@@ -976,7 +1017,13 @@ func TestEqualSlotOwnershipIsInconclusiveWhenTheTipMoves(t *testing.T) {
 		"the tip slot must be re-read next to the hash, not reused "+
 			"from the top of the cycle",
 	)
-	assert.Equal(t, 1, hashReads)
+	assert.Equal(
+		t,
+		0,
+		hashReads,
+		"the hash must come from the same ChainTip snapshot as the slot, "+
+			"not from a second read through ChainTipHashProvider",
+	)
 
 	assert.Zero(t, builder.calls)
 	assert.Zero(t, broadcaster.calls)
