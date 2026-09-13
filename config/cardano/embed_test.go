@@ -170,3 +170,37 @@ func TestEmbedFS_AllNetworks(t *testing.T) {
 		})
 	}
 }
+
+func TestEmbedFS_PrimeTestnet(t *testing.T) {
+	t.Parallel()
+
+	const network = "prime-testnet"
+	expectedFiles := []string{
+		"configuration.yaml",
+		"topology.json",
+		"genesis/byron/genesis.json",
+		"genesis/shelley/genesis.json",
+		"genesis/shelley/genesis.alonzo.json",
+		"genesis/shelley/genesis.conway.json",
+	}
+
+	for _, file := range expectedFiles {
+		if _, err := EmbeddedConfigFS.Open(network + "/" + file); err != nil {
+			t.Errorf("expected to find %s/%s: %v", network, file, err)
+		}
+	}
+
+	cfg, err := NewCardanoNodeConfigFromEmbedFS(
+		EmbeddedConfigFS,
+		network+"/configuration.yaml",
+	)
+	if err != nil {
+		t.Fatalf("failed to load %s config: %v", network, err)
+	}
+	if cfg.ShelleyGenesis() == nil {
+		t.Fatal("expected ShelleyGenesis to be loaded")
+	}
+	if cfg.ByronGenesis() == nil {
+		t.Fatal("expected ByronGenesis to be loaded")
+	}
+}
