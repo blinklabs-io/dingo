@@ -16,6 +16,7 @@ package sqlstore
 
 import (
 	"fmt"
+	"math"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -205,6 +206,53 @@ func TestGetUtxosByRefsAsOfReturnsSameRows(t *testing.T) {
 	require.Len(t, legacy, 2, "expected rows 0 and 1 to qualify")
 	require.Len(t, got, len(legacy))
 	requireSameUtxoRefs(t, legacy, got)
+}
+
+// TestGetUtxosByRefsAsOfRejectsOutOfDomainSlot pins GetUtxosByRefsAsOf's
+// overflow contract: SQLite stores slots as signed INTEGERs, so an atSlot
+// above math.MaxInt64 is rejected with an error, as the SQL-bound form did
+// through checkedInt64, rather than compared in Go against a live row and
+// returned. The check runs before any lookup, so it holds with no refs too.
+func TestGetUtxosByRefsAsOfRejectsOutOfDomainSlot(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+
+	id := utxoIDAt(0)
+	_, err := store.writeDB.Exec(
+		"INSERT INTO utxo (tx_id, output_idx, staking_key, credential_tag, "+
+			"added_slot, deleted_slot, amount) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		id.Hash, id.Idx, make([]byte, 28), 0, 100, 0, "1000000",
+	)
+	require.NoError(t, err)
+	refs := []models.UtxoId{id}
+
+	t.Run("max in-domain slot", func(t *testing.T) {
+		t.Parallel()
+		got, err := store.GetUtxosByRefsAsOf(refs, math.MaxInt64, nil)
+		require.NoError(t, err)
+		requireSameUtxoRefs(
+			t,
+			[]models.Utxo{{TxId: id.Hash, OutputIdx: id.Idx}},
+			got,
+		)
+	})
+
+	for _, tc := range []struct {
+		name   string
+		refs   []models.UtxoId
+		atSlot uint64
+	}{
+		{"just past MaxInt64", refs, uint64(math.MaxInt64) + 1},
+		{"MaxUint64", refs, math.MaxUint64},
+		{"no refs", nil, uint64(math.MaxInt64) + 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := store.GetUtxosByRefsAsOf(tc.refs, tc.atSlot, nil)
+			require.ErrorContains(t, err, "exceeds int64")
+			require.Nil(t, got)
+		})
+	}
 }
 
 // requireSameUtxoRefs asserts a and b contain the same (tx_id, output_idx)

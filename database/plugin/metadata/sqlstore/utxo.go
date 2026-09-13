@@ -1020,6 +1020,12 @@ func (s *Store) GetUtxosByRefsAsOf(
 	atSlot uint64,
 	txn types.Txn,
 ) ([]models.Utxo, error) {
+	// Slots are stored as signed SQLite INTEGERs. atSlot is compared in Go
+	// below rather than bound to SQL, so reject an out-of-domain value here
+	// instead of silently matching every live row against it.
+	if _, err := checkedInt64(atSlot); err != nil {
+		return nil, err
+	}
 	utxos, wanted, err := s.utxoRefsByTxID(txn, refs)
 	if err != nil {
 		return nil, err
