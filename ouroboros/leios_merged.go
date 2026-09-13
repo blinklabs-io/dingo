@@ -123,9 +123,8 @@ func (c leiosConnDoneContext) Value(any) any {
 }
 
 // registerLeiosServeWaiter returns a channel closed when connId's connection
-// goes away, so an NtC serving wait on that connection is released as soon as
-// the client disconnects. The returned cancel function deregisters the waiter
-// and must always be called.
+// goes away, so a serving wait is released as soon as the peer disconnects.
+// The returned cancel function deregisters the waiter and must always be called.
 //
 // The liveness re-check after registration closes the race with a connection
 // that is already going away: connmanager removes the connection from its map
@@ -135,6 +134,7 @@ func (c leiosConnDoneContext) Value(any) any {
 // before it is returned.
 func (o *Ouroboros) registerLeiosServeWaiter(
 	connId ouroboros.ConnectionId,
+	checkLiveness ...bool,
 ) (done <-chan struct{}, cancel func()) {
 	ch := make(chan struct{})
 	o.leiosServeWaitersMu.Lock()
@@ -142,6 +142,11 @@ func (o *Ouroboros) registerLeiosServeWaiter(
 		o.leiosServeWaiters = make(
 			map[ouroboros.ConnectionId][]chan struct{},
 		)
+	}
+	if (len(checkLiveness) == 0 || checkLiveness[0]) &&
+		o.connManager != nil &&
+		o.connManager.GetConnectionById(connId) != nil {
+		delete(o.leiosServeWaitersReleased, connId)
 	}
 	o.leiosServeWaiters[connId] = append(o.leiosServeWaiters[connId], ch)
 	o.leiosServeWaitersMu.Unlock()
@@ -162,13 +167,67 @@ func (o *Ouroboros) registerLeiosServeWaiter(
 	}
 
 	// The connection manager is absent in unit tests that exercise the
-	// serving decision directly; there is no liveness to check, so the
-	// timeout remains the only bound.
-	if o.connManager != nil &&
+	// serving decision directly; there is no liveness to check. Such callers
+	// must arrange explicit release or their own timeout.
+	if (len(checkLiveness) == 0 || checkLiveness[0]) && o.connManager != nil &&
 		o.connManager.GetConnectionById(connId) == nil {
 		o.releaseLeiosServeWaiter(connId, ch)
 	}
 	return ch, cancel
+}
+
+// registerLeiosNotifyServeWaiter registers a close waiter even during the
+// short interval before connmanager publishes a newly accepted connection.
+// A prior release marker distinguishes that live publication window from a
+// connection already removed during teardown.
+func (o *Ouroboros) registerLeiosNotifyServeWaiter(
+	connId ouroboros.ConnectionId,
+) (done <-chan struct{}, cancel func()) {
+	if o.connManager != nil && o.connManager.GetConnectionById(connId) == nil {
+		o.leiosServeWaitersMu.Lock()
+		releasedAt, alreadyReleased := o.leiosServeWaitersReleased[connId]
+		if alreadyReleased && time.Since(releasedAt) >= time.Minute {
+			delete(o.leiosServeWaitersReleased, connId)
+			alreadyReleased = false
+		}
+		if alreadyReleased {
+			o.leiosServeWaitersMu.Unlock()
+			done := make(chan struct{})
+			close(done)
+			return done, func() {}
+		}
+		// Keep the marker check and waiter insertion under one lock. A close
+		// callback can otherwise record the release between those operations.
+		ch := make(chan struct{})
+		if o.leiosServeWaiters == nil {
+			o.leiosServeWaiters = make(map[ouroboros.ConnectionId][]chan struct{})
+		}
+		o.leiosServeWaiters[connId] = append(o.leiosServeWaiters[connId], ch)
+		o.leiosServeWaitersMu.Unlock()
+		return ch, func() {
+			o.leiosServeWaitersMu.Lock()
+			defer o.leiosServeWaitersMu.Unlock()
+			waiters := o.leiosServeWaiters[connId]
+			for i, waiter := range waiters {
+				if waiter == ch {
+					o.leiosServeWaiters[connId] = slices.Delete(waiters, i, i+1)
+					break
+				}
+			}
+			if len(o.leiosServeWaiters[connId]) == 0 {
+				delete(o.leiosServeWaiters, connId)
+			}
+		}
+	} else {
+		done, cancel = o.registerLeiosServeWaiter(connId)
+	}
+	select {
+	case <-done:
+		cancel()
+		return done, func() {}
+	default:
+		return done, cancel
+	}
 }
 
 // releaseLeiosServeWaiter deregisters one waiter channel and closes it, both
@@ -194,22 +253,38 @@ func (o *Ouroboros) releaseLeiosServeWaiter(
 	}
 }
 
-// ReleaseLeiosServeWaiters wakes every NtC serving wait pending on connId and
+// ReleaseLeiosServeWaiters wakes every serving wait pending on connId and
 // clears them. It is called from the node's connection-closed callback, which
 // connmanager drives from a per-connection goroutine blocked on the
 // connection's ErrorChan. That goroutine is independent of the chainsync
-// server callback, so it still runs while the callback is parked waiting for
-// an endorser closure -- which is precisely why the release cannot come from
+// or LeiosNotify server callback, so it still runs while a callback is parked
+// -- which is precisely why the release cannot come from
 // the protocol's own done channel.
 func (o *Ouroboros) ReleaseLeiosServeWaiters(
 	connId ouroboros.ConnectionId,
 ) {
 	o.leiosServeWaitersMu.Lock()
+	if o.leiosServeWaitersReleased == nil {
+		o.leiosServeWaitersReleased = make(map[ouroboros.ConnectionId]time.Time)
+	}
+	now := time.Now()
+	for id, releasedAt := range o.leiosServeWaitersReleased {
+		if now.Sub(releasedAt) >= time.Minute {
+			delete(o.leiosServeWaitersReleased, id)
+		}
+	}
+	o.leiosServeWaitersReleased[connId] = now
 	waiters := o.leiosServeWaiters[connId]
 	delete(o.leiosServeWaiters, connId)
 	o.leiosServeWaitersMu.Unlock()
 	for _, ch := range waiters {
 		close(ch)
+	}
+	// Cancel before removing the cursor: a racing notification request checks
+	// its cancellation channel under the same log lock before registering.
+	// This also covers a request returning an offer during disconnection.
+	if o.leiosEBLog != nil {
+		o.leiosEBLog.removeConn(leiosConnectionIdString(connId))
 	}
 }
 
