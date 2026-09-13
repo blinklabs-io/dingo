@@ -306,6 +306,96 @@ func TestFindReplayRecoveryCandidateFallsBackWhenProducerParentIsMissing(
 	assert.Equal(t, anchorBlock.Hash, candidate.ProducerBlock.Hash)
 }
 
+func TestFindReplayRecoveryCandidateHandlesPrunedFallbackTail(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name          string
+		securityParam int
+	}{
+		{name: "producer parent missing", securityParam: 1},
+		{name: "fallback index missing", securityParam: 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+			require.NoError(t, err)
+			cm, err := chain.NewManager(db, nil)
+			require.NoError(t, err)
+
+			blocks := []chain.RawBlock{
+				testRawBlock("pruned-tail-one", 80, 1, nil),
+				testRawBlock("pruned-tail-two", 100, 2, nil),
+				testRawBlock("pruned-tail-three", 120, 3, nil),
+				testRawBlock("pruned-tail-producer", 140, 4, nil),
+				testRawBlock("pruned-tail-current", 160, 5, nil),
+			}
+			for i := 1; i < len(blocks); i++ {
+				blocks[i].PrevHash = blocks[i-1].Hash
+			}
+			require.NoError(t, cm.PrimaryChain().AddRawBlocks(blocks))
+
+			stored := make([]models.Block, 3)
+			for i := range stored {
+				stored[i], err = database.BlockByHash(db, blocks[i].Hash)
+				require.NoError(t, err)
+			}
+			txn := db.BlobTxn(true)
+			require.NoError(t, txn.Do(func(txn *database.Txn) error {
+				for _, block := range stored {
+					if err := database.BlockDeleteTxn(txn, block); err != nil {
+						return err
+					}
+				}
+				return nil
+			}))
+
+			nodeConfig := newTestShelleyGenesisCfg(t)
+			nodeConfig.ShelleyGenesis().SecurityParam = tc.securityParam
+			ls, err := NewLedgerState(LedgerStateConfig{
+				Database:          db,
+				ChainManager:      cm,
+				CardanoNodeConfig: nodeConfig,
+				Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			})
+			require.NoError(t, err)
+			ls.currentEra.Id = 1
+			require.NoError(t, cm.SetLedger(ls))
+			ls.metrics.init(prometheus.NewRegistry())
+
+			currentTip := ochainsync.Tip{
+				Point:       ocommon.NewPoint(blocks[4].Slot, blocks[4].Hash),
+				BlockNumber: blocks[4].BlockNumber,
+			}
+			require.NoError(t, db.SetTip(currentTip, nil))
+			ls.currentTip = currentTip
+			ls.publishSnapshotsLocked()
+
+			producerTxHash := testHashBytes("pruned-tail-producer-tx")
+			seedReplayRecoveryTransaction(
+				t,
+				db,
+				producerTxHash,
+				blocks[3].Hash,
+				blocks[3].Slot,
+			)
+			candidate, err := ls.findReplayRecoveryCandidate(&txValidationError{
+				BlockPoint: currentTip.Point,
+				TxHash:     testHashBytes("pruned-tail-failure"),
+				Inputs: []lcommon.TransactionInput{
+					&replayRecoveryInput{txId: producerTxHash, index: 0},
+				},
+				Cause: errors.New("bad input"),
+			})
+			require.NoError(t, err)
+			require.Nil(t, candidate)
+		})
+	}
+}
+
 func TestTryRecoverFromTxValidationErrorRejectsReplayBelowMithrilBoundary(
 	t *testing.T,
 ) {
@@ -1810,6 +1900,40 @@ func TestReplayRecoveryArmsAuditAfterPrimaryAndLedgerRewind(t *testing.T) {
 	window := ls.continuationAudit.Load()
 	require.NotNil(t, window)
 	assert.Equal(t, ls.Tip().Point, window.forkPoint)
+}
+
+func TestReplayRecoveryKeepsPrimaryRewindForDeeperKnownProducer(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls := newReplayRecoveryAuditLedger(t, true)
+	producerBlock, err := ls.db.BlockByIndex(1, nil)
+	require.NoError(t, err)
+	knownTxHash := testHashBytes("known-producer-with-unresolved-sibling")
+	seedReplayRecoveryTransaction(
+		t,
+		ls.db,
+		knownTxHash,
+		producerBlock.Hash,
+		producerBlock.Slot,
+	)
+
+	candidate, err := ls.findReplayRecoveryCandidate(&txValidationError{
+		BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+		TxHash:     testHashBytes("mixed-provenance-failure"),
+		Inputs: []lcommon.TransactionInput{
+			&replayRecoveryInput{txId: knownTxHash, index: 0},
+			&replayRecoveryInput{txId: testHashBytes("unresolved-producer"), index: 0},
+		},
+		Cause: errors.New("bad input"),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, candidate)
+	assert.Equal(t, producerBlock.Slot, candidate.ProducerBlock.Slot)
+	assert.Equal(t, uint64(0), candidate.RollbackPoint.Slot)
+	assert.Equal(t, "metadata", candidate.Strategy)
+	assert.True(t, candidate.ProducerUnresolved)
 }
 
 func TestReplayRecoveryRejectsDeterministicDuplicateInput(t *testing.T) {

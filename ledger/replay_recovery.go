@@ -1606,6 +1606,17 @@ func (ls *LedgerState) findReplayRecoveryCandidate(
 				// parent is outside the locally retained chain. Treat the
 				// provenance as unresolved so the bounded security-parameter
 				// fallback can choose a safe local anchor.
+				if ls.config.Logger != nil {
+					ls.config.Logger.Warn(
+						"replay recovery producer parent is missing from the local block store",
+						"component", "ledger",
+						"producer_block_hash",
+						hex.EncodeToString(resolved.ProducerBlock.Hash),
+						"producer_block_slot", resolved.ProducerBlock.Slot,
+						"producer_parent_hash",
+						hex.EncodeToString(resolved.ProducerBlock.PrevHash),
+					)
+				}
 				unresolvedInputs = append(unresolvedInputs, resolved.Input)
 				continue
 			}
@@ -1647,6 +1658,10 @@ func (ls *LedgerState) findReplayRecoveryCandidate(
 		if fallbackCandidate != nil && (candidate == nil ||
 			fallbackCandidate.ProducerBlock.Slot < candidate.ProducerBlock.Slot) {
 			candidate = fallbackCandidate
+		} else if fallbackCandidate != nil {
+			// Keep the deeper known-producer anchor, but still rewind the
+			// primary chain because another input has unresolved provenance.
+			candidate.ProducerUnresolved = true
 		}
 	}
 	return candidate, nil
@@ -1908,6 +1923,13 @@ func (ls *LedgerState) replayRecoveryFallbackCandidate(
 	}
 	anchorBlock, err := ls.db.BlockByIndex(targetIndex, nil)
 	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			// A pruned prefix can put the security-parameter target below
+			// the retained block store. There is no safe local anchor to
+			// return in that case; let the caller continue without replay
+			// recovery rather than inventing a rollback point.
+			return nil, nil
+		}
 		return nil, fmt.Errorf(
 			"lookup replay fallback block %d: %w",
 			targetIndex,
@@ -1916,6 +1938,12 @@ func (ls *LedgerState) replayRecoveryFallbackCandidate(
 	}
 	rollbackPoint, err := ls.replayRecoveryParentPoint(anchorBlock)
 	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			// The retained anchor itself has no retained parent. Without a
+			// real parent point, rolling back would require guessing across
+			// the retention or trust boundary.
+			return nil, nil
+		}
 		return nil, err
 	}
 	return &replayRecoveryCandidate{
