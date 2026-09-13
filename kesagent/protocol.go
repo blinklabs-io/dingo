@@ -31,6 +31,14 @@
 // unbounded length prefix or an unresponsive peer. See MaxHelloFrameLen,
 // MaxKeyPushFrameLen, MaxSignFrameLen, and Client's HelloTimeout/SignTimeout.
 //
+// The two halves of a frame need separate bounds. Waiting for a header can be
+// legitimately unbounded -- a serve-key subscriber idles between pushes with
+// nothing to read -- but once a peer has declared a length, the body must
+// arrive promptly or the read has to give up, or a peer that announces a
+// frame and then stalls parks the reader forever. bursa's own server bounds
+// the same direction for the same reason (frameBodyReadTimeout); Client
+// mirrors it with Config.FrameBodyTimeout.
+//
 // # Handshake
 //
 // Immediately after connecting, the agent sends a Hello frame:
@@ -52,12 +60,12 @@
 package kesagent
 
 import (
-	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"runtime"
 )
 
 const (
@@ -129,6 +137,14 @@ var errFrameTooLarge = errors.New(
 	"kesagent: frame exceeds configured maximum size",
 )
 
+// errFrameBodyStalled wraps every failure to read a frame body whose length
+// the peer already declared, so a peer that announces a frame and then stops
+// sending is greppable in a node log and distinguishable from a clean EOF
+// between frames.
+var errFrameBodyStalled = errors.New(
+	"kesagent: frame body did not arrive after its length header",
+)
+
 // writeFrame writes a single length-prefixed JSON frame, rejecting a payload
 // larger than maxSize before ever writing to w.
 func writeFrame(w io.Writer, maxSize int, v any) error {
@@ -162,6 +178,21 @@ func writeFrame(w io.Writer, maxSize int, v any) error {
 // read more than maxSize bytes of payload regardless of what the length
 // prefix declares.
 func readFrame(r io.Reader, maxSize int, v any) error {
+	return readFrameGuarded(r, maxSize, nil, v)
+}
+
+// readFrameGuarded is readFrame with a hook that runs after the length header
+// has been read and before any of the body is: the one point at which a
+// caller whose header wait is legitimately unbounded can still put a deadline
+// on the body. A nil bodyGuard means the caller has already bounded the whole
+// read (Client.connectLocked and Client.Sign each set a whole-operation conn
+// deadline) or is reading from something that cannot stall (a test buffer).
+func readFrameGuarded(
+	r io.Reader,
+	maxSize int,
+	bodyGuard func() error,
+	v any,
+) error {
 	var hdr [4]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
 		return err // may be io.EOF; callers distinguish
@@ -180,12 +211,32 @@ func readFrame(r io.Reader, maxSize int, v any) error {
 			maxSize,
 		)
 	}
-	var buf bytes.Buffer
-	if _, err := io.CopyN(&buf, r, int64(n)); err != nil {
-		return fmt.Errorf("kesagent: read frame payload: %w", err)
+	if bodyGuard != nil {
+		if err := bodyGuard(); err != nil {
+			return fmt.Errorf("kesagent: bound frame body read: %w", err)
+		}
 	}
-	if err := json.Unmarshal(buf.Bytes(), v); err != nil {
+	// Sized exactly once from the already-bounds-checked length, so the
+	// payload lands in a single backing array this function can wipe --
+	// letting a bytes.Buffer grow into it instead would strand copies of
+	// pushed key material in unreachable intermediate arrays.
+	buf := make([]byte, n)
+	defer wipeBytes(buf)
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return fmt.Errorf("%w: %w", errFrameBodyStalled, err)
+	}
+	if err := json.Unmarshal(buf, v); err != nil {
 		return fmt.Errorf("kesagent: unmarshal frame: %w", err)
 	}
 	return nil
+}
+
+// wipeBytes zeroes b in place. It is used on every buffer that has held KES
+// signing key material, so a pushed key does not outlive its use in a heap
+// array nobody owns any more. Best-effort by nature: Go offers no way to
+// guarantee a wiped page was never swapped out first, and unlike bursa's
+// agent side this process does not mlock the pages it decodes into.
+func wipeBytes(b []byte) {
+	clear(b)
+	runtime.KeepAlive(b)
 }

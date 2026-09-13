@@ -44,6 +44,15 @@ const (
 	// ignores SignTimeout").
 	DefaultSignTimeout = 500 * time.Millisecond
 
+	// DefaultFrameBodyTimeout bounds how long a frame body may take to
+	// arrive once its length header has been read. It never applies to the
+	// header read itself, where a serve-key subscriber legitimately blocks
+	// between pushes, so a peer that announces a frame and then stops
+	// sending cannot park the subscription loop indefinitely. This mirrors
+	// the bound bursa's own agent puts on the same direction
+	// (internal/kesagent frameBodyReadTimeout, also 10s).
+	DefaultFrameBodyTimeout = 10 * time.Second
+
 	minReconnectBackoff = 250 * time.Millisecond
 	maxReconnectBackoff = 30 * time.Second
 
@@ -82,6 +91,9 @@ type Config struct {
 	// SignTimeout bounds one sign-mode round trip. Zero uses
 	// DefaultSignTimeout. Ignored in serve-key mode.
 	SignTimeout time.Duration
+	// FrameBodyTimeout bounds the body of a frame whose length header has
+	// already been read. Zero uses DefaultFrameBodyTimeout.
+	FrameBodyTimeout time.Duration
 	// KESVKey and OpCertStartPeriod are required for ModeSign only. The
 	// local operational certificate already commits to the agent's KES
 	// verification key and the KES period it was issued at, so Sign can
@@ -138,6 +150,9 @@ func NewClient(cfg Config) (*Client, error) {
 	}
 	if cfg.SignTimeout <= 0 {
 		cfg.SignTimeout = DefaultSignTimeout
+	}
+	if cfg.FrameBodyTimeout <= 0 {
+		cfg.FrameBodyTimeout = DefaultFrameBodyTimeout
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -316,6 +331,15 @@ type PushedKey struct {
 	OpCert *bursa.DecodedOpCert
 }
 
+// Wipe zeroes the KES signing key bytes this PushedKey carries. Callers own
+// the material AwaitPushedKey hands them and call this once they have
+// installed it: ledger/forging copies the bytes it keeps, so the copy here is
+// dead the moment the install returns and should not be left lying in the
+// heap. It is safe to call more than once and on a zero PushedKey.
+func (pk *PushedKey) Wipe() {
+	wipeBytes(pk.KESSKeyData)
+}
+
 // AwaitPushedKey blocks until the agent delivers the next serve-key push (or
 // ctx is done), validating it before returning. It performs no reconnect
 // looping itself; use Run to survive a mid-stream disconnect.
@@ -344,7 +368,12 @@ func (c *Client) AwaitPushedKey(ctx context.Context) (PushedKey, error) {
 	conn := c.conn
 	c.mu.Unlock()
 
+	// The header wait is deliberately left unbounded unless ctx bounds it:
+	// idling between pushes with nothing to read is the normal state of a
+	// serve-key subscriber, not a fault.
+	var ctxDeadline time.Time
 	if deadline, ok := ctx.Deadline(); ok {
+		ctxDeadline = deadline
 		if err := conn.SetReadDeadline(deadline); err != nil {
 			c.invalidateConn(conn)
 			return PushedKey{}, fmt.Errorf(
@@ -352,10 +381,27 @@ func (c *Client) AwaitPushedKey(ctx context.Context) (PushedKey, error) {
 				err,
 			)
 		}
-		defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
 	}
+	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
+
+	// Once the peer has declared a length, though, the body has to arrive.
+	// Never past a deadline ctx already imposed: this bounds the body read,
+	// it does not extend the caller's own bound.
+	bodyGuard := func() error {
+		deadline := time.Now().Add(c.cfg.FrameBodyTimeout)
+		if !ctxDeadline.IsZero() && ctxDeadline.Before(deadline) {
+			deadline = ctxDeadline
+		}
+		return conn.SetReadDeadline(deadline)
+	}
+
 	var push KeyPush
-	if err := readFrame(conn, MaxKeyPushFrameLen, &push); err != nil {
+	if err := readFrameGuarded(
+		conn,
+		MaxKeyPushFrameLen,
+		bodyGuard,
+		&push,
+	); err != nil {
 		c.invalidateConn(conn)
 		return PushedKey{}, fmt.Errorf("kesagent: read key push: %w", err)
 	}
@@ -373,6 +419,10 @@ func (c *Client) AwaitPushedKey(ctx context.Context) (PushedKey, error) {
 // all mutually consistent -- not merely present (P1: "pushed key material
 // accepted without validation").
 func validateKeyPush(push KeyPush) (PushedKey, error) {
+	// push is decoded for this call and discarded by the caller, and the
+	// probe below needs its own evolvable copy. Both hold the raw KES
+	// signing key, so neither outlives the validation.
+	defer wipeBytes(push.KESSignKey)
 	if push.Type != "key_push" {
 		return PushedKey{}, fmt.Errorf(
 			"kesagent: expected key_push frame, got type %q",
@@ -435,6 +485,7 @@ func validateKeyPush(push KeyPush) (PushedKey, error) {
 		Period: relativePeriod,
 		Data:   append([]byte(nil), push.KESSignKey...),
 	}
+	defer wipeBytes(probe.Data)
 	sig, err := kes.Sign(probe, relativePeriod, []byte(kesPushProbeMessage))
 	if err != nil {
 		return PushedKey{}, fmt.Errorf(
@@ -493,7 +544,9 @@ func (c *Client) Run(
 			}
 			continue
 		}
-		if err := install(pk); err != nil {
+		err = install(pk)
+		pk.Wipe()
+		if err != nil {
 			c.logger.Error(
 				"failed to install agent-pushed KES key",
 				"error", err,

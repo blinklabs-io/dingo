@@ -16,6 +16,7 @@ package kesagent
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"sync/atomic"
 	"testing"
@@ -131,20 +132,24 @@ func TestClient_RunRecoversAfterTransientFailures(t *testing.T) {
 	require.NoError(t, err)
 	defer c.Close()
 
-	installed := make(chan PushedKey, 1)
+	// The install callback owns the pushed key only for the duration of the
+	// call -- Run wipes it on return -- so the assertion is made against a
+	// copy taken inside that window, not against the caller's slice
+	// afterward.
+	installed := make(chan []byte, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	runErr := make(chan error, 1)
 	go func() {
 		runErr <- c.Run(ctx, func(pk PushedKey) error {
-			installed <- pk
+			installed <- append([]byte(nil), pk.KESSKeyData...)
 			return errors.New("stop Run after the first successful install")
 		})
 	}()
 
 	select {
-	case pk := <-installed:
-		require.Equal(t, skeyData, pk.KESSKeyData)
+	case installedKey := <-installed:
+		require.Equal(t, skeyData, installedKey)
 	case <-time.After(10 * time.Second):
 		t.Fatal(
 			"Run did not recover and install a key after transient failures",
@@ -195,4 +200,229 @@ func TestClient_ConnectBackoffBoundsDialAttempts(t *testing.T) {
 	// magnitude more in the same window.
 	require.LessOrEqual(t, int(accepts.Load()), 10)
 	require.GreaterOrEqual(t, int(accepts.Load()), 1)
+}
+
+// TestClient_StalledFrameBodyDoesNotParkTheSubscriber covers the half of a
+// frame read that an idle-tolerant subscriber must still bound. Waiting for a
+// length header is legitimately unbounded -- a serve-key agent with nothing to
+// say sends nothing -- but once a peer has declared a length, a body that
+// never arrives has to end the read. Without the bound the subscription loop
+// parks forever on a peer that announces a frame and then stops: no push, no
+// reconnect, no log, and a producer that keeps forging on its current key
+// until the first rotation it never received expires the operational
+// certificate.
+//
+// The peer here sends a valid Hello, then a well-formed length header for a
+// frame it never sends. FrameBodyTimeout is shortened so the assertion is
+// about the bound applying at all, not about its production value; the outer
+// select is a hang detector an order of magnitude larger, so a regression
+// fails this test in seconds instead of hanging CI until the suite timeout.
+func TestClient_StalledFrameBodyDoesNotParkTheSubscriber(t *testing.T) {
+	t.Parallel()
+
+	const bodyTimeout = 250 * time.Millisecond
+
+	ln, sockPath := listenUnix(t)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		sendHello(t, conn, ModeServeKey)
+		// A length header for a body that never follows.
+		var hdr [4]byte
+		binary.BigEndian.PutUint32(hdr[:], 512)
+		if _, err := conn.Write(hdr[:]); err != nil {
+			return
+		}
+		// Hold the connection open: the peer is stalled, not gone, so a
+		// plain EOF cannot be what ends the client's read.
+		buf := make([]byte, 1)
+		_, _ = conn.Read(buf)
+	}()
+
+	c, err := NewClient(Config{
+		SocketPath:       sockPath,
+		Mode:             ModeServeKey,
+		FrameBodyTimeout: bodyTimeout,
+	})
+	require.NoError(t, err)
+	defer c.Close()
+
+	// context.Background, not a timeout: a ctx deadline would bound the read
+	// on its own and prove nothing about FrameBodyTimeout.
+	done := make(chan error, 1)
+	go func() {
+		_, awaitErr := c.AwaitPushedKey(context.Background())
+		done <- awaitErr
+	}()
+
+	select {
+	case awaitErr := <-done:
+		require.ErrorIs(t, awaitErr, errFrameBodyStalled)
+	case <-time.After(30 * bodyTimeout):
+		t.Fatal(
+			"AwaitPushedKey parked on a declared frame body that never arrived",
+		)
+	}
+}
+
+// TestClient_HeaderWaitIsNotBoundedByFrameBodyTimeout is the control for the
+// test above: the bound must apply to a declared body, and must not turn an
+// idle subscriber -- an agent holding a connection open with nothing to push
+// -- into a reconnect loop. Without this, "bound the read" could be satisfied
+// by a deadline on the header too, which would tear down a healthy connection
+// every FrameBodyTimeout.
+func TestClient_HeaderWaitIsNotBoundedByFrameBodyTimeout(t *testing.T) {
+	t.Parallel()
+
+	const bodyTimeout = 100 * time.Millisecond
+
+	ln, sockPath := listenUnix(t)
+	pushNow := make(chan struct{})
+	skeyData, vkey, opCertCBOR := testKESMaterial(t)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		sendHello(t, conn, ModeServeKey)
+		<-pushNow
+		_ = writeFrame(conn, MaxKeyPushFrameLen, KeyPush{
+			Type:       "key_push",
+			Period:     0,
+			Depth:      kes.CardanoKesDepth,
+			KESSignKey: skeyData,
+			KESVKey:    vkey,
+			OpCert:     opCertCBOR,
+		})
+		buf := make([]byte, 1)
+		_, _ = conn.Read(buf)
+	}()
+
+	c, err := NewClient(Config{
+		SocketPath:       sockPath,
+		Mode:             ModeServeKey,
+		FrameBodyTimeout: bodyTimeout,
+	})
+	require.NoError(t, err)
+	defer c.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		_, awaitErr := c.AwaitPushedKey(context.Background())
+		done <- awaitErr
+	}()
+
+	// Idle well past FrameBodyTimeout with no header in flight, then push.
+	select {
+	case awaitErr := <-done:
+		t.Fatalf("idle subscriber was torn down before any push: %v", awaitErr)
+	case <-time.After(5 * bodyTimeout):
+	}
+	close(pushNow)
+
+	select {
+	case awaitErr := <-done:
+		require.NoError(t, awaitErr)
+	case <-time.After(10 * time.Second):
+		t.Fatal("push after an idle period was never delivered")
+	}
+}
+
+// TestClient_InstalledKeyMaterialIsWipedAfterInstall pins the ownership window
+// for pushed KES signing key material: the install callback may use it for the
+// duration of the call and no longer, because Run zeroes the client's copy as
+// soon as the callback returns. ledger/forging copies the bytes it keeps, so
+// nothing downstream depends on the copy surviving.
+//
+// The callback retains the slice header rather than a copy, so the assertion
+// reads the same backing array the client wiped.
+func TestClient_InstalledKeyMaterialIsWipedAfterInstall(t *testing.T) {
+	t.Parallel()
+
+	skeyData, vkey, opCertCBOR := testKESMaterial(t)
+	ln, sockPath := listenUnix(t)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		sendHello(t, conn, ModeServeKey)
+		_ = writeFrame(conn, MaxKeyPushFrameLen, KeyPush{
+			Type:       "key_push",
+			Period:     0,
+			Depth:      kes.CardanoKesDepth,
+			KESSignKey: skeyData,
+			KESVKey:    vkey,
+			OpCert:     opCertCBOR,
+		})
+		buf := make([]byte, 1)
+		_, _ = conn.Read(buf)
+	}()
+
+	c, err := NewClient(Config{SocketPath: sockPath, Mode: ModeServeKey})
+	require.NoError(t, err)
+	defer c.Close()
+
+	retained := make(chan []byte, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- c.Run(ctx, func(pk PushedKey) error {
+			// Inside the window the material must be the real key.
+			require.Equal(t, skeyData, pk.KESSKeyData)
+			retained <- pk.KESSKeyData
+			return errors.New("stop after the first install")
+		})
+	}()
+
+	var installedKey []byte
+	select {
+	case installedKey = <-retained:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no key was installed")
+	}
+	cancel()
+	<-runErr
+
+	require.NotEmpty(t, installedKey)
+	require.Equal(
+		t,
+		make([]byte, len(installedKey)),
+		installedKey,
+		"the client's copy of the pushed KES signing key must be zeroed once the install returns",
+	)
+}
+
+// TestValidateKeyPushWipesItsInputKeyMaterial pins the same ownership rule one
+// level down: validateKeyPush decodes a frame the caller discards and makes an
+// evolvable probe copy of the signing key, and neither may outlive the call.
+func TestValidateKeyPushWipesItsInputKeyMaterial(t *testing.T) {
+	t.Parallel()
+
+	skeyData, vkey, opCertCBOR := testKESMaterial(t)
+	push := KeyPush{
+		Type:       "key_push",
+		Period:     0,
+		Depth:      kes.CardanoKesDepth,
+		KESSignKey: append([]byte(nil), skeyData...),
+		KESVKey:    vkey,
+		OpCert:     opCertCBOR,
+	}
+	retained := push.KESSignKey
+
+	pk, err := validateKeyPush(push)
+	require.NoError(t, err)
+	require.Equal(t, skeyData, pk.KESSKeyData, "the validated copy survives")
+	require.Equal(
+		t,
+		make([]byte, len(retained)),
+		retained,
+		"the decoded frame's own copy of the signing key must be zeroed",
+	)
 }

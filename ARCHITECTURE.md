@@ -5468,6 +5468,17 @@ socket is attacker-reachable whenever its filesystem path is:
 
 - The initial handshake (`Client` dial + `Hello` read) is bounded by
   `HelloTimeout` (default 5s) in both size (`MaxHelloFrameLen`) and time.
+- The two halves of a frame are bounded separately. Waiting for a length
+  header is deliberately unbounded, because idling between pushes with
+  nothing to read is the normal state of a serve-key subscriber; but once a
+  peer has declared a length, the body is bounded by `FrameBodyTimeout`
+  (default 10s, the same bound bursa's own agent applies to this direction).
+  Without that split, a peer that announces a frame and then stops sending
+  parks the subscription loop forever: no push, no reconnect, and no log,
+  leaving a producer to forge on its current key until the first rotation it
+  never received lets the operational certificate expire. A stall now surfaces
+  as a read error, so the loop logs it, increments
+  `dingo_kes_agent_reconnect_failures_total`, and reconnects with backoff.
 - A sign-mode round trip is bounded by `SignTimeout` (default 500ms,
   validated to stay under one mainnet slot by
   `internal/config.ValidateKESAgentSignTimeout` — a sign call blocks the
@@ -5488,6 +5499,16 @@ both `shelleyKesKey` and `shelleyKesAgentSocket`, so an operator's explicit
 choice of key source is never silently overridden. `Config.Validate` no
 longer requires a local `shelleyKesKey` when a KES agent socket is
 configured — an agent-only configuration must be able to start.
+
+Pushed KES signing key material is zeroed as soon as each holder is done with
+it: the frame buffer it was decoded from (sized exactly once from the
+already-bounds-checked length, so no intermediate growth array is stranded),
+the decoded frame field, the evolvable copy the self-sign probe needs, and the
+`PushedKey` handed to the install callback, which owns it only for the
+duration of that call because `ledger/forging` copies the bytes it keeps.
+The wipe narrows the window rather than closing it: unlike bursa's agent side,
+this process does not lock those pages into memory, so it cannot rule out a
+copy having reached swap first.
 
 `Client.Close` never holds its mutex across a blocking network read: it only
 ever grabs and clears the current connection under the lock, then closes it

@@ -204,9 +204,14 @@ func (n *Node) startKESAgentServeKey(
 		_ = client.Close()
 		return fmt.Errorf("await initial KES agent key push: %w", err)
 	}
-	if err := install(pk); err != nil {
+	// ledger/forging copies the key bytes it keeps, so this copy is dead as
+	// soon as the install returns; Client.Run does the same for every later
+	// push.
+	installErr := install(pk)
+	pk.Wipe()
+	if installErr != nil {
 		_ = client.Close()
-		return err
+		return installErr
 	}
 
 	n.kesAgentClient = client
