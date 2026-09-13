@@ -261,6 +261,8 @@ func requireNextEvent(
 // tests below, which drain events in order rather than accepting the
 // first one that arrives.
 func TestWatchBlocks_ConnectsAndReceivesAnEvent(t *testing.T) {
+	t.Parallel()
+
 	w, server := newConnectedTestWatcher(t, 5)
 	requireNextEvent(
 		t, w, server, 5*time.Second,
@@ -280,6 +282,8 @@ func TestWatchBlocks_ConnectsAndReceivesAnEvent(t *testing.T) {
 // sync loop advances past a broken callback into later real
 // RollForwards on its own).
 func TestWatchBlocks_ReceivesRealRollForwardEvents(t *testing.T) {
+	t.Parallel()
+
 	w, server := newConnectedTestWatcher(t, 5)
 	requireNextEvent(
 		t, w, server, 5*time.Second,
@@ -296,6 +300,8 @@ func TestWatchBlocks_ReceivesRealRollForwardEvents(t *testing.T) {
 // between each, WatchBlocks must keep delivering fresh events for every
 // new block rather than the channel latching stuck after the first one.
 func TestWatchBlocks_ReceivesMultipleRealEvents(t *testing.T) {
+	t.Parallel()
+
 	w, server := newConnectedTestWatcher(t, 5)
 	// 1 initial RollBackward + 3 real RollForwards.
 	for i := range 4 {
@@ -319,6 +325,8 @@ func TestWatchBlocks_ReceivesMultipleRealEvents(t *testing.T) {
 // written with the exact backoff value about to be used, so this is a
 // deterministic check of the same property, not a timing-sensitive one.
 func TestWatchBlocks_ReconnectsQuicklyAfterEstablishedSessionDrops(t *testing.T) {
+	t.Parallel()
+
 	const magic = 42
 
 	// Reserve an address nothing is listening on yet (see unreachableAddr):

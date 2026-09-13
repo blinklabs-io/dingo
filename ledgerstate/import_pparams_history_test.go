@@ -34,6 +34,8 @@ const previewHistoricalPParamsSnapshotEpoch = uint64(1397)
 // evaluates epoch 1396's block performance, so both the snapshot's previous
 // and current parameters must survive the import as distinct historical rows.
 func TestImportPParamsPersistsPreviewRewardHistory(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -66,6 +68,8 @@ func TestImportPParamsPersistsPreviewRewardHistory(t *testing.T) {
 // usable current parameters instead of turning one skipped reward round into a
 // permanently failing bootstrap.
 func TestImportPParamsStoresCurrentWithoutUnavailableHistory(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -95,6 +99,8 @@ func TestImportPParamsStoresCurrentWithoutUnavailableHistory(t *testing.T) {
 }
 
 func TestImportPParamsReentryUsesStoredCrossEraHistory(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -138,6 +144,8 @@ func TestImportPParamsReentryUsesStoredCrossEraHistory(t *testing.T) {
 }
 
 func TestImportPParamsSkipsTranslatedCrossEraHistory(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -172,6 +180,8 @@ func TestImportPParamsSkipsTranslatedCrossEraHistory(t *testing.T) {
 }
 
 func TestImportSnapShotsSkipsGoBasisWithoutCrossEraHistory(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -262,6 +272,8 @@ func TestImportSnapShotsSkipsGoBasisWithoutCrossEraHistory(t *testing.T) {
 }
 
 func TestImportSnapShotsPreservesAuthoritativeRewardBasis(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {

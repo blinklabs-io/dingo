@@ -69,6 +69,8 @@ func previewWedgeLedgerState(t testing.TB) *LedgerState {
 // script context translates its validity interval through, so the anchor has to
 // reach the summary from there and the horizon has to survive the trip.
 func TestLedgerViewSlotToTimeUsesHorizonAnchor(t *testing.T) {
+	t.Parallel()
+
 	ls := previewWedgeLedgerState(t)
 
 	// Unanchored, this is the wedge: the view falls back to the published tip
@@ -112,6 +114,8 @@ var errHorizonProbeDone = errors.New("horizon probe complete")
 // whole block batch during replay — is what the safe zone must be measured
 // from.
 func TestLedgerProcessBlockAnchorsValidationHorizonAtParent(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name       string
 		parentSlot uint64
@@ -191,6 +195,7 @@ func TestLedgerProcessBlockAnchorsValidationHorizonAtParent(t *testing.T) {
 						pparams,
 						nil,
 						previewEraStartEpoch,
+						false,
 					)
 					return err
 				})

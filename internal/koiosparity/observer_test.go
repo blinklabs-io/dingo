@@ -17,6 +17,7 @@ package koiosparity
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -209,6 +210,8 @@ func lookupFakeEpoch(
 }
 
 func TestFetchAccountsIfNeededSkipsPreStakingEpoch(t *testing.T) {
+	t.Parallel()
+
 	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cache.Close() })
@@ -288,12 +291,15 @@ func setDingoActiveStake(
 
 func newTestObserver(
 	t *testing.T,
+	baseURL string,
 	source *DatabaseSource,
 	strict bool,
 	onResult func(*EpochCompareResult),
 ) *Observer {
 	t.Helper()
 	o, err := NewObserver(ObserverConfig{
+		BaseURL:            baseURL,
+		AllowInsecureHTTP:  true,
 		Network:            "preview",
 		CachePath:          filepath.Join(t.TempDir(), "cache.db"),
 		Source:             source,
@@ -324,6 +330,8 @@ func publishEpochTransition(eb *event.EventBus, previousEpoch uint64) {
 }
 
 func TestNewObserverRejectsNilSourceAndBadNetwork(t *testing.T) {
+	t.Parallel()
+
 	_, err := NewObserver(ObserverConfig{Network: "preview"})
 	require.Error(t, err)
 
@@ -341,6 +349,8 @@ func TestNewObserverRejectsNilSourceAndBadNetwork(t *testing.T) {
 // was committed to the shared *database.Database before the event fired)
 // and in-order event processing.
 func TestObserverCommitVisibilityAndEventOrdering(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	source, err := NewDatabaseSource(db)
 	require.NoError(t, err)
@@ -349,11 +359,11 @@ func TestObserverCommitVisibilityAndEventOrdering(t *testing.T) {
 		5: {activeStake: "1000000", treasury: "10", reserves: "20", fees: "30"},
 		6: {activeStake: "2000000", treasury: "11", reserves: "21", fees: "31"},
 	})
-	withTestKoiosBaseURL(t, srv.URL)
 
 	results := make(chan *EpochCompareResult, 8)
 	o := newTestObserver(
 		t,
+		srv.URL,
 		source,
 		true,
 		func(r *EpochCompareResult) { results <- r },
@@ -400,6 +410,8 @@ func TestObserverCommitVisibilityAndEventOrdering(t *testing.T) {
 // (slot-clock-driven and block-driven) and confirms the epoch is still left
 // in a single, consistent PASS state rather than duplicated/corrupted.
 func TestObserverDuplicateEventsAreIdempotent(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	source, err := NewDatabaseSource(db)
 	require.NoError(t, err)
@@ -407,11 +419,11 @@ func TestObserverDuplicateEventsAreIdempotent(t *testing.T) {
 	srv := newFakeKoiosServer(t, map[uint64]*fakeEpochRef{
 		5: {activeStake: "1000000", treasury: "10", reserves: "20", fees: "30"},
 	})
-	withTestKoiosBaseURL(t, srv.URL)
 
 	var resultCount atomic.Int32
 	o := newTestObserver(
 		t,
+		srv.URL,
 		source,
 		true,
 		func(r *EpochCompareResult) { resultCount.Add(1) },
@@ -494,6 +506,8 @@ func TestObserverDuplicateEventsAreIdempotent(t *testing.T) {
 func TestObserverRestartResumesBacklogWithoutReprocessingOrSkipping(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	source, err := NewDatabaseSource(db)
 	require.NoError(t, err)
@@ -502,12 +516,13 @@ func TestObserverRestartResumesBacklogWithoutReprocessingOrSkipping(
 		5: {activeStake: "1000000", treasury: "10", reserves: "20", fees: "30"},
 		6: {activeStake: "2000000", treasury: "11", reserves: "21", fees: "31"},
 	})
-	withTestKoiosBaseURL(t, srv.URL)
 
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
 
 	first, err := NewObserver(ObserverConfig{
-		Network: "preview", CachePath: cachePath, Source: source, Strict: false,
+		BaseURL:           srv.URL,
+		AllowInsecureHTTP: true,
+		Network:           "preview", CachePath: cachePath, Source: source, Strict: false,
 		Logger: slog.New(slog.DiscardHandler),
 	})
 	require.NoError(t, err)
@@ -550,7 +565,9 @@ func TestObserverRestartResumesBacklogWithoutReprocessingOrSkipping(
 	// tracking.)
 	seedDingoEpochAggregate(t, source, 6, 2_000_000, 11, 21, 31)
 	second, err := NewObserver(ObserverConfig{
-		Network: "preview", CachePath: cachePath, Source: source, Strict: false,
+		BaseURL:           srv.URL,
+		AllowInsecureHTTP: true,
+		Network:           "preview", CachePath: cachePath, Source: source, Strict: false,
 		Logger: slog.New(slog.DiscardHandler),
 	})
 	require.NoError(t, err)
@@ -583,6 +600,8 @@ func TestObserverRestartResumesBacklogWithoutReprocessingOrSkipping(
 // re-validated against the corrected state (here, deliberately made wrong),
 // not silently left at its stale PASS.
 func TestObserverRollbackReChecksSameEpoch(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	source, err := NewDatabaseSource(db)
 	require.NoError(t, err)
@@ -590,11 +609,11 @@ func TestObserverRollbackReChecksSameEpoch(t *testing.T) {
 	srv := newFakeKoiosServer(t, map[uint64]*fakeEpochRef{
 		5: {activeStake: "1000000", treasury: "10", reserves: "20", fees: "30"},
 	})
-	withTestKoiosBaseURL(t, srv.URL)
 
 	results := make(chan *EpochCompareResult, 8)
 	o := newTestObserver(
 		t,
+		srv.URL,
 		source,
 		false,
 		func(r *EpochCompareResult) { results <- r },
@@ -649,6 +668,8 @@ func TestObserverRollbackReChecksSameEpoch(t *testing.T) {
 // FatalFunc exactly once on the first failure and does not go on to process
 // a second, later-sorted epoch queued in the same batch.
 func TestObserverStrictModeCancelsOnFirstMismatch(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	source, err := NewDatabaseSource(db)
 	require.NoError(t, err)
@@ -666,13 +687,14 @@ func TestObserverStrictModeCancelsOnFirstMismatch(t *testing.T) {
 		}, // mismatch
 		6: {activeStake: "2000000", treasury: "11", reserves: "21", fees: "31"},
 	})
-	withTestKoiosBaseURL(t, srv.URL)
 
 	var fatalCount atomic.Int32
 	var fatalErr error
 	var mu sync.Mutex
 	o, err := NewObserver(ObserverConfig{
-		Network: "preview", CachePath: filepath.Join(t.TempDir(), "cache.db"),
+		BaseURL:           srv.URL,
+		AllowInsecureHTTP: true,
+		Network:           "preview", CachePath: filepath.Join(t.TempDir(), "cache.db"),
 		Source: source, Strict: true, Logger: slog.New(slog.DiscardHandler),
 		FatalFunc: func(err error) {
 			fatalCount.Add(1)
@@ -734,6 +756,8 @@ func TestObserverStrictModeCancelsOnFirstMismatch(t *testing.T) {
 // FatalFunc in strict mode exactly the same way. Epoch-level aggregates
 // match cleanly here, isolating the failure to the account phase alone.
 func TestObserverStrictModeCancelsOnAccountMismatch(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	source, err := NewDatabaseSource(db)
 	require.NoError(t, err)
@@ -763,17 +787,18 @@ func TestObserverStrictModeCancelsOnAccountMismatch(t *testing.T) {
 			}},
 		},
 	})
-	withTestKoiosBaseURL(t, srv.URL)
 
 	var fatalCount atomic.Int32
 	o, err := NewObserver(ObserverConfig{
-		Network:         "preview",
-		CachePath:       filepath.Join(t.TempDir(), "cache.db"),
-		Source:          source,
-		Strict:          true,
-		AccountsEnabled: true,
-		Logger:          slog.New(slog.DiscardHandler),
-		FatalFunc:       func(error) { fatalCount.Add(1) },
+		BaseURL:           srv.URL,
+		AllowInsecureHTTP: true,
+		Network:           "preview",
+		CachePath:         filepath.Join(t.TempDir(), "cache.db"),
+		Source:            source,
+		Strict:            true,
+		AccountsEnabled:   true,
+		Logger:            slog.New(slog.DiscardHandler),
+		FatalFunc:         func(error) { fatalCount.Add(1) },
 	})
 	require.NoError(t, err)
 	defer func() { _ = o.Stop(context.Background()) }()
@@ -810,6 +835,8 @@ func TestObserverStrictModeCancelsOnAccountMismatch(t *testing.T) {
 // records a failure but keeps validating subsequent epochs, and never calls
 // FatalFunc.
 func TestObserverNonStrictModeContinuesAfterFailure(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	source, err := NewDatabaseSource(db)
 	require.NoError(t, err)
@@ -828,11 +855,12 @@ func TestObserverNonStrictModeContinuesAfterFailure(t *testing.T) {
 			fees:        "31",
 		}, // passes
 	})
-	withTestKoiosBaseURL(t, srv.URL)
 
 	var fatalCount atomic.Int32
 	o, err := NewObserver(ObserverConfig{
-		Network: "preview", CachePath: filepath.Join(t.TempDir(), "cache.db"),
+		BaseURL:           srv.URL,
+		AllowInsecureHTTP: true,
+		Network:           "preview", CachePath: filepath.Join(t.TempDir(), "cache.db"),
 		Source: source, Strict: false, Logger: slog.New(slog.DiscardHandler),
 		FatalFunc: func(error) { fatalCount.Add(1) },
 	})
@@ -875,6 +903,8 @@ func TestObserverNonStrictModeContinuesAfterFailure(t *testing.T) {
 // passed to Start makes the background goroutine exit promptly, and that
 // Stop does not hang waiting for it.
 func TestObserverCancellationStopsPromptly(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	source, err := NewDatabaseSource(db)
 	require.NoError(t, err)
@@ -921,6 +951,8 @@ func TestObserverCancellationStopsPromptly(t *testing.T) {
 // instance. Before this fix, Stop() closed an owned "done" channel
 // unconditionally, so a second call panicked with "close of closed channel".
 func TestObserverStopIsIdempotent(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	source, err := NewDatabaseSource(db)
 	require.NoError(t, err)
@@ -946,6 +978,8 @@ func TestObserverStopIsIdempotent(t *testing.T) {
 // failure) and node_shutdown.go's shutdown() path can both end up calling
 // Stop() on the same Observer with no ordering guarantee between them.
 func TestObserverConcurrentStopCallsDoNotPanic(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	source, err := NewDatabaseSource(db)
 	require.NoError(t, err)
@@ -990,6 +1024,8 @@ func TestObserverConcurrentStopCallsDoNotPanic(t *testing.T) {
 // the stale pool-only PASS would persist forever with zero per-account
 // validation ever attempted, even with ObserverConfig.AccountsEnabled true.
 func TestObserverStartSeedsBacklogForMissingAccountCoverage(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	source, err := NewDatabaseSource(db)
 	require.NoError(t, err)
@@ -1021,11 +1057,11 @@ func TestObserverStartSeedsBacklogForMissingAccountCoverage(t *testing.T) {
 			},
 		},
 	)
-	withTestKoiosBaseURL(t, srv.URL)
 
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
 	cache, err := OpenCache(cachePath, nil)
 	require.NoError(t, err)
+	seedKoiosSource(t, cache, "preview", srv.URL)
 
 	fetchedAt := time.Now().Add(-time.Hour).UTC()
 	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
@@ -1118,6 +1154,8 @@ func TestObserverStartSeedsBacklogForMissingAccountCoverage(t *testing.T) {
 
 	results := make(chan *EpochCompareResult, 4)
 	o, err := NewObserver(ObserverConfig{
+		BaseURL:            srv.URL,
+		AllowInsecureHTTP:  true,
 		Network:            "preview",
 		CachePath:          cachePath,
 		Source:             source,
@@ -1162,6 +1200,8 @@ func TestObserverStartSeedsBacklogForMissingAccountCoverage(t *testing.T) {
 // retryable end_time==0 rejection) — a transient condition expected mainly
 // near live tip, distinct from a permanent (ErrKoiosPermanent) failure.
 func TestObserverFetchIfNeededRetriesTransientThenSucceeds(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	source, err := NewDatabaseSource(db)
 	require.NoError(t, err)
@@ -1175,10 +1215,11 @@ func TestObserverFetchIfNeededRetriesTransientThenSucceeds(t *testing.T) {
 			notYetClosedFor: 2,
 		},
 	})
-	withTestKoiosBaseURL(t, srv.URL)
 
 	o, err := NewObserver(ObserverConfig{
-		Network: "preview", CachePath: filepath.Join(t.TempDir(), "cache.db"),
+		BaseURL:           srv.URL,
+		AllowInsecureHTTP: true,
+		Network:           "preview", CachePath: filepath.Join(t.TempDir(), "cache.db"),
 		Source: source, Logger: slog.New(slog.DiscardHandler),
 		FetchRetryAttempts: 5, FetchRetryDelay: 5 * time.Millisecond,
 	})
@@ -1203,6 +1244,8 @@ func TestObserverFetchIfNeededRetriesTransientThenSucceeds(t *testing.T) {
 // error from the SELECT; fetchAccountsIfNeeded must propagate it directly
 // rather than treating it as "needs fetching".
 func TestObserverFetchAccountsIfNeededPropagatesCoverageDBError(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	source, err := NewDatabaseSource(db)
 	require.NoError(t, err)
@@ -1211,9 +1254,10 @@ func TestObserverFetchAccountsIfNeededPropagatesCoverageDBError(t *testing.T) {
 	// loop instead of propagating the coverage error, every request would
 	// permanently fail Koios-side and produce a different error message.
 	srv := newFakeKoiosServer(t, map[uint64]*fakeEpochRef{})
-	withTestKoiosBaseURL(t, srv.URL)
 
 	o, err := NewObserver(ObserverConfig{
+		BaseURL:            srv.URL,
+		AllowInsecureHTTP:  true,
 		Network:            "preview",
 		CachePath:          filepath.Join(t.TempDir(), "cache.db"),
 		Source:             source,
@@ -1243,15 +1287,18 @@ func TestObserverFetchAccountsIfNeededPropagatesCoverageDBError(t *testing.T) {
 // map, which 404s and the real client classifies as permanent) is not
 // retried FetchRetryAttempts times before failing.
 func TestObserverFetchIfNeededSurfacesPermanentErrorImmediately(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	source, err := NewDatabaseSource(db)
 	require.NoError(t, err)
 
 	srv := newFakeKoiosServer(t, map[uint64]*fakeEpochRef{})
-	withTestKoiosBaseURL(t, srv.URL)
 
 	o, err := NewObserver(ObserverConfig{
-		Network: "preview", CachePath: filepath.Join(t.TempDir(), "cache.db"),
+		BaseURL:           srv.URL,
+		AllowInsecureHTTP: true,
+		Network:           "preview", CachePath: filepath.Join(t.TempDir(), "cache.db"),
 		Source: source, Logger: slog.New(slog.DiscardHandler),
 		FetchRetryAttempts: 5, FetchRetryDelay: 5 * time.Millisecond,
 	})
@@ -1278,6 +1325,8 @@ func TestObserverFetchIfNeededSurfacesPermanentErrorImmediately(t *testing.T) {
 // the parameter row is the only thing missing, so the epoch is queued for
 // that reason or not at all.
 func TestObserverBackfillsParamsForAPreExistingCache(t *testing.T) {
+	t.Parallel()
+
 	const network = "preview"
 	// Epochs 0 and 1 are pre-staking; 2 is the upgraded-cache epoch under
 	// test. Dingo's latest epoch is 3, so the observer's safely-closed bound
@@ -1311,11 +1360,11 @@ func TestObserverBackfillsParamsForAPreExistingCache(t *testing.T) {
 		}),
 	)
 	defer srv.Close()
-	withTestKoiosBaseURL(t, srv.URL)
 
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
 	cache, err := OpenCache(cachePath, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
+	seedKoiosSource(t, cache, network, srv.URL)
 	fetchedAt := time.Now().UTC().Add(-time.Hour)
 	for e := uint64(0); e <= epoch; e++ {
 		// The upgraded-cache shape: pool-level data present, no parameter
@@ -1352,6 +1401,8 @@ func TestObserverBackfillsParamsForAPreExistingCache(t *testing.T) {
 	seedDingoEpochAggregate(t, source, 4, 1_000_000, 10, 20, 30)
 
 	o, err := NewObserver(ObserverConfig{
+		BaseURL:            srv.URL,
+		AllowInsecureHTTP:  true,
 		Network:            network,
 		CachePath:          cachePath,
 		Source:             source,
@@ -1394,6 +1445,8 @@ func TestObserverBackfillsParamsForAPreExistingCache(t *testing.T) {
 // DetermineStatus ignores by design, so a message quoting len(Mismatches)
 // reports twice the count that caused the failure.
 func TestObserverFailureReportsSignificantMismatchCount(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	source, err := NewDatabaseSource(db)
 	require.NoError(t, err)
@@ -1428,18 +1481,19 @@ func TestObserverFailureReportsSignificantMismatchCount(t *testing.T) {
 			}},
 		},
 	})
-	withTestKoiosBaseURL(t, srv.URL)
 
 	var mu sync.Mutex
 	var fatalErr error
 	var results []EpochCompareResult
 	o, err := NewObserver(ObserverConfig{
-		Network:         "preview",
-		CachePath:       filepath.Join(t.TempDir(), "cache.db"),
-		Source:          source,
-		Strict:          true,
-		AccountsEnabled: true,
-		Logger:          slog.New(slog.DiscardHandler),
+		BaseURL:           srv.URL,
+		AllowInsecureHTTP: true,
+		Network:           "preview",
+		CachePath:         filepath.Join(t.TempDir(), "cache.db"),
+		Source:            source,
+		Strict:            true,
+		AccountsEnabled:   true,
+		Logger:            slog.New(slog.DiscardHandler),
 		OnResult: func(r *EpochCompareResult) {
 			mu.Lock()
 			results = append(results, *r)
@@ -1500,4 +1554,126 @@ func TestObserverFailureReportsSignificantMismatchCount(t *testing.T) {
 		CountSignificant(result.Mismatches),
 		len(result.Mismatches),
 	))
+}
+
+// TestObserverSeedBacklogExcludesEpochsBeforeEarliestAvailableEpoch guards
+// against dingo #4172: a fresh Mithril-bootstrapped node has no local ledger
+// history before its own bootstrap boundary, so seeding the backlog from
+// epoch 0 (as before this fix) queues a Koios fetch+check for every historical
+// epoch the node can never have local data for -- on preview/preprod that can
+// be well over a thousand epochs, and checkEpoch would fatal-FAIL the first
+// one Koios has genuine (non-pre-staking) reference data for.
+//
+// This drives seedBacklog directly (rather than Start, which immediately
+// launches the draining goroutine and would race a direct read of
+// o.pending) with a Mithril boundary recorded at epoch 10 and Dingo's own
+// latest committed epoch at 12, so the "safely closed" floor (latest-1 = 11)
+// overlaps the earliest-available floor (boundary+1 = 11) at exactly one
+// epoch.
+func TestObserverSeedBacklogExcludesEpochsBeforeEarliestAvailableEpoch(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDatabaseSourceDB(t)
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+
+	// Mithril bootstrap boundary: slot 1_000 falls inside epoch 10, so this
+	// node's earliest available Koios reporting epoch is 11.
+	require.NoError(t, db.SetEpoch(
+		1_000, 10, nil, nil, nil, nil, 5, 20, 432_000, nil,
+	))
+	require.NoError(t, db.SetSyncState("mithril_ledger_slot", "1000", nil))
+
+	// This node has itself computed one local epoch transition past the
+	// boundary (epoch_summary at epoch 12), so GetLatestEpoch is 12 and
+	// Start's own "safely closed" floor (latest-1) is 11.
+	sqlDB := sourceSQLDB(t, source.db)
+	require.NoError(t, sqlDB.Create(&models.EpochSummary{
+		Epoch:            12,
+		TotalActiveStake: types.Uint64(1),
+		SnapshotReady:    true,
+	}).Error)
+
+	o, err := NewObserver(ObserverConfig{
+		Network:   "preview",
+		CachePath: filepath.Join(t.TempDir(), "cache.db"),
+		Source:    source,
+		Logger:    slog.New(slog.DiscardHandler),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = o.Stop(context.Background()) })
+
+	require.NoError(t, o.seedBacklog(context.Background()))
+
+	o.mu.Lock()
+	_, hasEpoch2 := o.pending[2]
+	_, hasEpoch11 := o.pending[11]
+	o.mu.Unlock()
+
+	require.False(t, hasEpoch2,
+		"epoch 2 predates this node's Mithril bootstrap boundary (epoch 10) "+
+			"and must never be queued for a Koios fetch/check")
+	require.True(t, hasEpoch11,
+		"epoch 11 is this node's earliest available epoch and should still "+
+			"be queued")
+}
+
+// earliestAvailableEpochErrStub wraps a RewardParitySource and fails every
+// GetEarliestAvailableEpoch call, standing in for a boundary that is
+// recorded but cannot be resolved (an empty or unparseable
+// mithril_ledger_slot value, or a failed sync_state read).
+type earliestAvailableEpochErrStub struct {
+	RewardParitySource
+}
+
+func (s *earliestAvailableEpochErrStub) GetEarliestAvailableEpoch(
+	context.Context,
+) (uint64, bool, error) {
+	return 0, false, errors.New("parse mithril trust boundary: empty value")
+}
+
+// TestObserverSeedBacklogFailsClosedOnUnresolvableBoundary pins the consumer
+// half of the bound's fail-closed contract: an unresolvable boundary must
+// abort seeding, not be absorbed as "no boundary recorded". Absorbed, the
+// backlog would silently revert to the unbounded epoch-0 seed this fix
+// exists to remove, on exactly the node whose boundary could not be
+// confirmed.
+func TestObserverSeedBacklogFailsClosedOnUnresolvableBoundary(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDatabaseSourceDB(t)
+	base, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+
+	sqlDB := sourceSQLDB(t, base.db)
+	require.NoError(t, sqlDB.Create(&models.EpochSummary{
+		Epoch:            12,
+		TotalActiveStake: types.Uint64(1),
+		SnapshotReady:    true,
+	}).Error)
+
+	o, err := NewObserver(ObserverConfig{
+		Network:   "preview",
+		CachePath: filepath.Join(t.TempDir(), "cache.db"),
+		Source:    &earliestAvailableEpochErrStub{RewardParitySource: base},
+		Logger:    slog.New(slog.DiscardHandler),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = o.Stop(context.Background()) })
+
+	require.ErrorContains(
+		t,
+		o.seedBacklog(context.Background()),
+		"resolve earliest available epoch",
+	)
+
+	o.mu.Lock()
+	pending := len(o.pending)
+	o.mu.Unlock()
+	require.Zero(
+		t,
+		pending,
+		"no epoch may be queued when the bootstrap boundary could not be "+
+			"resolved",
+	)
 }

@@ -25,6 +25,8 @@ import (
 // header's self-reported block number to its parent, preventing a forged
 // (inflated) number from entering the chain and winning chain selection.
 func TestBlockNumberContiguous(t *testing.T) {
+	t.Parallel()
+
 	const parent = uint64(100)
 	tests := []struct {
 		name   string

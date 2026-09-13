@@ -28,6 +28,8 @@ import (
 // database opens cleanly: a missing blob commit-timestamp key must be
 // treated like a missing metadata row (return 0), not as a fatal error.
 func TestCheckCommitTimestamp_FreshBlobAndMetadata(t *testing.T) {
+	t.Parallel()
+
 	db, err := newTestDatabase(t, &Config{
 		DataDir: t.TempDir(),
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -51,6 +53,8 @@ func TestCheckCommitTimestamp_FreshBlobAndMetadata(t *testing.T) {
 // (so the existing recovery path in node.Run can run), not as the raw
 // "blob key not found" plumbing leak.
 func TestCheckCommitTimestamp_MetadataOnly(t *testing.T) {
+	t.Parallel()
+
 	db, err := newTestDatabase(t, &Config{
 		DataDir: t.TempDir(),
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -95,6 +99,8 @@ func TestCheckCommitTimestamp_MetadataOnly(t *testing.T) {
 // TestCheckCommitTimestamp_MetadataOnly and must be handled by the same
 // recovery path.
 func TestCheckCommitTimestamp_BlobOnly(t *testing.T) {
+	t.Parallel()
+
 	db, err := newTestDatabase(t, &Config{
 		DataDir: t.TempDir(),
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),

@@ -84,7 +84,10 @@ func (s *Server) handleNetworkStatus(
 
 	tip := s.config.Chain.Tip()
 	tipTimestamp := s.slotToTimestamp(tip.Point.Slot)
-	synced := true
+	synced := false
+	if progress, ok := s.config.LedgerState.(MeshSyncProgress); ok {
+		synced = progress.SyncProgress() == 1
+	}
 
 	resp := &NetworkStatusResponse{
 		CurrentBlockIdentifier: s.tipBlockID(tip),

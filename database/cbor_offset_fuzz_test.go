@@ -117,6 +117,16 @@ func FuzzDecodeTxCborParts(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
 		decoded, err := DecodeTxCborParts(data)
 		if err != nil {
+			// IsTxCborPartsStorage is format recognition only (magic +
+			// size), deliberately independent of DecodeTxCborParts's
+			// additional IsValid-byte canonical-value check -- see
+			// IsTxCborPartsStorage's doc comment. So the only way these
+			// two can disagree is a recognizable-but-noncanonical
+			// IsValid byte; any other disagreement is a real bug.
+			if IsTxCborPartsStorage(data) &&
+				data[68] != 0 && data[68] != 1 {
+				return
+			}
 			if IsTxCborPartsStorage(data) {
 				t.Fatalf(
 					"storage detector accepted data DecodeTxCborParts rejected: %v",

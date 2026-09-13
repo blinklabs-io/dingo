@@ -155,6 +155,8 @@ WHERE tx_id = ? AND output_idx = ?`,
 func TestApplyEndorserBlockHaskellPathToleratesCrossEndorserDoubleConsume(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, db, gdb := newLeiosApplyTestLedger(t)
 	// LeiosApplyEndorserBlockTxs defaults to false (Haskell-conformant).
 	rawProducer, producerTx := leiosApplyTestProducerTx(t, 0xa1)
@@ -235,6 +237,8 @@ SELECT added_slot FROM utxo WHERE tx_id = ? AND output_idx = 0`,
 func TestApplyEndorserBlockCIPPathRejectsCrossEndorserDoubleConsume(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, db, gdb := newLeiosApplyTestLedger(t)
 	ls.config.LeiosApplyEndorserBlockTxs = true // CIP-conformant path
 	rawProducer, producerTx := leiosApplyTestProducerTx(t, 0xc1)
@@ -286,6 +290,8 @@ SELECT COUNT(*) FROM "transaction" WHERE hash = ?`,
 // input an earlier certified endorser-block transaction already spent is still
 // rejected as a double-spend.
 func TestRankingBlockDeltaKeepsHardConsumedInputConflict(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newLeiosApplyTestLedger(t)
 	// LeiosApplyEndorserBlockTxs defaults to false (Haskell-conformant).
 	rawProducer, producerTx := leiosApplyTestProducerTx(t, 0xe1)
@@ -363,6 +369,9 @@ func leiosApplyTestApplyRankingDelta(
 	copy(ebHash[:], leiosApplyTestEbHash(0x00))
 	_, offsets, err := buildEndorserBlockBlob(
 		[]lcommon.Transaction{tx},
+		// elems holds the decoded array of the caller-built rawTx, which the
+		// require.NoError above proves decoded, so index 0 exists.
+		//nolint:nilaway // rawTx decodes to a non-empty CBOR array
 		[][]byte{[]byte(elems[0])},
 		rbPoint.Slot,
 		ebHash,

@@ -31,6 +31,8 @@ import (
 // write is harmless. This exercises the asynchronous persistence path and the
 // merged single-commit SetLeiosEB writer.
 func TestLeiosPersistAsyncCoalescesManifestThenComplete(t *testing.T) {
+	t.Parallel()
+
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 10, 2)
 	txsRaw := []cbor.RawMessage{
 		mustCbor(t, "tx0"),
@@ -75,6 +77,62 @@ func TestLeiosPersistAsyncCoalescesManifestThenComplete(t *testing.T) {
 	require.Equal(t, txsRaw, gotTxs)
 }
 
+func TestLeiosVerifiedEbSlotRestoresFromPersistedManifest(t *testing.T) {
+	t.Parallel()
+
+	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 42, 1)
+	o := newTestOuroborosWithLeiosDB(t)
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		[]cbor.RawMessage{mustCbor(t, "tx0")},
+		leiosStoreAuthoritative,
+	))
+	o.StopLeiosPersistWriter()
+
+	// Simulate a restart: the persisted manifest remains, while the process
+	// watermark and in-memory cache are rebuilt from zero.
+	o.leiosMaxVerifiedEbSlot.Store(0)
+	o.leiosMu.Lock()
+	o.leiosEndorserBlocks = make(map[string]*leiosEndorserBlockData)
+	o.leiosMu.Unlock()
+	o.restoreLeiosVerifiedEbSlot()
+
+	require.Equal(t, point.Slot, o.MaxVerifiedEndorserBlockSlot())
+}
+
+// TestLeiosVerifiedEbSlotRestoredByNewOuroboros pins the call site rather
+// than the helper. The test above calls restoreLeiosVerifiedEbSlot directly,
+// so deleting the o.restoreLeiosVerifiedEbSlot() line from newOuroboros
+// leaves ./ouroboros/ fully green and the restore ships inert -- the same
+// class TestBuildDingoConfigWiresForgeTolerances was added for on the config
+// knobs (chrisguiney review). Constructing a second Ouroboros over the same
+// database and reading the exported watermark is what closes it.
+func TestLeiosVerifiedEbSlotRestoredByNewOuroboros(t *testing.T) {
+	t.Parallel()
+
+	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 4242, 1)
+	first := newTestOuroborosWithLeiosDB(t)
+	require.NoError(t, first.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		[]cbor.RawMessage{mustCbor(t, "tx0")},
+		leiosStoreAuthoritative,
+	))
+	first.StopLeiosPersistWriter()
+
+	// A restart: a brand-new Ouroboros over the same database, with nothing
+	// carried over in process and nothing called on it but the constructor.
+	second := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LedgerState:             first.ledgerState,
+		LeiosAnnouncementLedger: first.ledgerState,
+	})
+	t.Cleanup(second.StopLeiosPersistWriter)
+
+	require.Equal(t, point.Slot, second.MaxVerifiedEndorserBlockSlot())
+}
+
 // TestLeiosPersistTwoOccurrencesOfSameHashPersistIndependently is the cubic
 // P2 regression: the durable blob store used to be keyed by hash alone, so
 // when two live occurrences of the same content-addressed hash existed at
@@ -87,6 +145,8 @@ func TestLeiosPersistAsyncCoalescesManifestThenComplete(t *testing.T) {
 func TestLeiosPersistTwoOccurrencesOfSameHashPersistIndependently(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 30, 1)
 	second := ocommon.Point{Slot: point.Slot + 1, Hash: point.Hash}
 	txs1 := []cbor.RawMessage{mustCbor(t, "tx0")}
@@ -135,6 +195,8 @@ func TestLeiosPersistTwoOccurrencesOfSameHashPersistIndependently(
 // is a no-op when no endorser block was ever fetched (the writer never started)
 // and is safe to call more than once.
 func TestLeiosPersistWriterStopIsSafeWithoutStart(t *testing.T) {
+	t.Parallel()
+
 	o := newTestOuroborosWithLeiosDB(t)
 	require.NotPanics(t, func() {
 		o.StopLeiosPersistWriter()
@@ -148,6 +210,8 @@ func TestLeiosPersistWriterStopIsSafeWithoutStart(t *testing.T) {
 // returns after the drain timeout instead of blocking graceful shutdown
 // forever, and still closes the stop channel so the writer can exit later.
 func TestLeiosPersistStopDrainTimesOut(t *testing.T) {
+	t.Parallel()
+
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	// Simulate a started writer whose drain never completes.
 	o.leiosPersistStarted.Store(true)
@@ -182,6 +246,8 @@ func TestLeiosPersistStopDrainTimesOut(t *testing.T) {
 // pending map (where no drain would ever pick it up), so shutdown cannot report
 // completion while a freshly fetched endorser block is left unpersisted.
 func TestLeiosPersistEnqueueAfterStopIsRejected(t *testing.T) {
+	t.Parallel()
+
 	o := newTestOuroborosWithLeiosDB(t)
 
 	// Start the writer via a real enqueue, then drain and stop it.
@@ -232,6 +298,8 @@ func TestLeiosPersistEnqueueAfterStopIsRejected(t *testing.T) {
 func TestLeiosPersistPauseForLiveLifecycleOpDrainsOldDBAndRestartsOnNewDB(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	o := newTestOuroborosWithLeiosDB(t)
 	oldDB := o.leiosDatabase()
 	require.NotNil(t, oldDB)
@@ -282,6 +350,7 @@ func TestLeiosPersistPauseForLiveLifecycleOpDrainsOldDBAndRestartsOnNewDB(
 // next enqueue start a second writer against a freshly reset pending map
 // while the old one is still reading and deleting from that same map
 // (now repointed) under the shared mutex.
+// Not t.Parallel: swaps the package-level leiosPersistShutdownDrainTimeout.
 func TestLeiosPersistPauseForLiveLifecycleOpFailsClosedOnUnconfirmedDrain(
 	t *testing.T,
 ) {

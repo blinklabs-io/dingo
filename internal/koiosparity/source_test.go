@@ -15,6 +15,7 @@
 package koiosparity
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/binary"
@@ -26,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -57,6 +59,8 @@ func sourceSQLDB(t *testing.T, db *database.Database) *testDB {
 }
 
 func TestNewDatabaseSourceRejectsNilDatabase(t *testing.T) {
+	t.Parallel()
+
 	_, err := NewDatabaseSource(nil)
 	require.Error(t, err)
 }
@@ -67,6 +71,8 @@ func TestNewDatabaseSourceRejectsNilDatabase(t *testing.T) {
 // (a separate read-only transaction against the same live database, not a
 // second connection) and confirms every field lands exactly as committed.
 func TestDatabaseSourceGetEpochData(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	sqlDB := sourceSQLDB(t, db)
 
@@ -104,6 +110,8 @@ func TestDatabaseSourceGetEpochData(t *testing.T) {
 // write Dingo will repair later) -- both must read back as (nil, nil), never
 // an error and never a spurious zero-value comparison.
 func TestDatabaseSourceGetEpochDataMissingOrNotReady(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	sqlDB := sourceSQLDB(t, db)
 	source, err := NewDatabaseSource(db)
@@ -129,6 +137,8 @@ func TestDatabaseSourceGetEpochDataMissingOrNotReady(t *testing.T) {
 // false (a real dingo_db_missing mismatch upstream), not as legitimately
 // empty/zero pots.
 func TestDatabaseSourceGetEpochDataRewardAdaPotsAbsent(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	sqlDB := sourceSQLDB(t, db)
 	require.NoError(t, sqlDB.Create(&models.EpochSummary{
@@ -152,6 +162,8 @@ func TestDatabaseSourceGetEpochDataRewardAdaPotsAbsent(t *testing.T) {
 // MemberRewardTotal from stakeEpoch's reward_pool_output -- each field
 // group's *Present flag reflects only whether its own row existed.
 func TestDatabaseSourceGetPoolEpochDataMap(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	sqlDB := sourceSQLDB(t, db)
 	poolKeyHash := []byte("POOLKEYHASH-28-BYTES-LONG!!!")
@@ -211,6 +223,8 @@ func TestDatabaseSourceGetPoolEpochDataMap(t *testing.T) {
 // *Present flag must reflect only whether its own row actually exists, not
 // whether any row exists for the pool at all.
 func TestDatabaseSourceGetPoolEpochDataMapPartialPresence(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	sqlDB := sourceSQLDB(t, db)
 	poolKeyHash := []byte("POOLKEYHASH-28-BYTES-LONG!!!")
@@ -244,6 +258,8 @@ func TestDatabaseSourceGetPoolEpochDataMapPartialPresence(t *testing.T) {
 }
 
 func TestDatabaseSourceGetLatestEpoch(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	source, err := NewDatabaseSource(db)
 	require.NoError(t, err)
@@ -262,6 +278,8 @@ func TestDatabaseSourceGetLatestEpoch(t *testing.T) {
 }
 
 func TestDatabaseSourceGetRewardAccountOutputs(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	sqlDB := sourceSQLDB(t, db)
 	stakingKey := []byte("STAKING-KEY-28-BYTES-LONG!!!")
@@ -302,6 +320,8 @@ func TestDatabaseSourceGetRewardAccountOutputs(t *testing.T) {
 // late is indistinguishable from reading an epoch that was simply never
 // computed.
 func TestDatabaseSourceCoreModePruningTiming(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	sqlDB := sourceSQLDB(t, db)
 	poolKeyHash := []byte("POOLKEYHASH-28-BYTES-LONG!!!")
@@ -354,6 +374,8 @@ func TestDatabaseSourceCoreModePruningTiming(t *testing.T) {
 func TestDatabaseSourceGetPoolEpochDataMapTracksChangingPoolParams(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	source, err := NewDatabaseSource(db)
 	require.NoError(t, err)
@@ -418,6 +440,73 @@ func TestDatabaseSourceGetPoolEpochDataMapTracksChangingPoolParams(
 	)
 }
 
+// TestDatabaseSourceReportsRewardsPendingForMissingRow is the DatabaseSource
+// half of the dingo #3857 guard. DingoDB has its own case for this in
+// dingo_db_test.go, and the two derive the applying boundary differently -- one
+// through GetEpoch, the other through raw SQL -- so a divergence between them
+// would otherwise go unnoticed.
+//
+// A reward_pool_output row for a stake epoch is not written until well after
+// that epoch closes, so an observer near the tip asks about epochs Dingo has
+// not computed yet. That must read as a lag, not as a missing row.
+func TestDatabaseSourceReportsRewardsPendingForMissingRow(t *testing.T) {
+	const (
+		stakeEpoch = uint64(9)
+		paramEpoch = uint64(10)
+		applyStart = int64(500_000)
+	)
+	poolHash := bytes.Repeat([]byte{0x42}, 28)
+
+	seed := func(t *testing.T, tipSlot int64, seedApplyEpoch bool) *DingoPoolEpochData {
+		t.Helper()
+		db := newTestDatabaseSourceDB(t)
+		sqlDB := sourceSQLDB(t, db)
+		// A reward_pool_input row so the pool is in the map, and deliberately
+		// no reward_pool_output row: this is the not-yet-computed case.
+		require.NoError(t, sqlDB.Exec(
+			`INSERT INTO reward_pool_input
+			 (pool_key_hash, epoch, pledge, delegated_stake, owner_stake,
+			  cost, delegator_count, captured_slot, boundary_slot)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			poolHash, stakeEpoch, "0", "1000", "0", "0", 1, 0, 0).Error)
+		require.NoError(t, sqlDB.Exec(
+			`INSERT INTO tip (hash, slot, block_number) VALUES (?, ?, ?)`,
+			[]byte{0x01}, tipSlot, 1).Error)
+		if seedApplyEpoch {
+			require.NoError(t, sqlDB.Exec(
+				`INSERT INTO epoch (epoch_id, start_slot, length_in_slots)
+				 VALUES (?, ?, ?)`,
+				stakeEpoch+3, applyStart, 86_400).Error)
+		}
+		source, err := NewDatabaseSource(db)
+		require.NoError(t, err)
+		m, err := source.GetPoolEpochDataMap(
+			context.Background(), stakeEpoch, paramEpoch,
+		)
+		require.NoError(t, err)
+		data, ok := m[hex.EncodeToString(poolHash)]
+		require.True(t, ok, "pool missing from the map")
+		require.False(t, data.MemberRewardPresent,
+			"fixture must have no reward_pool_output row")
+		return data
+	}
+
+	t.Run("before the applying boundary it is pending", func(t *testing.T) {
+		assert.True(t, seed(t, applyStart-1, true).RewardsPending,
+			"a row Dingo has not computed yet is a lag, not a gap")
+	})
+
+	t.Run("at the applying boundary it is a real gap", func(t *testing.T) {
+		assert.False(t, seed(t, applyStart, true).RewardsPending,
+			"once Dingo has had its chance, absence is genuine")
+	})
+
+	t.Run("an epoch the node has not reached is pending", func(t *testing.T) {
+		assert.True(t, seed(t, applyStart, false).RewardsPending,
+			"no row for the applying epoch means the node is not there yet")
+	})
+}
+
 // TestDatabaseSourceGetPoolsRetiredByEpoch proves the in-process source
 // resolves departure the same way DingoDB's raw-SQL twin does, including the
 // case that makes "a retirement certificate exists" the wrong predicate: a
@@ -425,6 +514,8 @@ func TestDatabaseSourceGetPoolEpochDataMapTracksChangingPoolParams(
 // asserted from one seeding, so a query that simply returned every pool with
 // a retirement row would fail on the re-registered pool.
 func TestDatabaseSourceGetPoolsRetiredByEpoch(t *testing.T) {
+	t.Parallel()
+
 	const (
 		queryEpoch   = uint64(7)
 		boundarySlot = uint64(1_000)
@@ -595,6 +686,8 @@ INSERT INTO pool_retirement (
 // slot — would have the standalone CLI and the in-process observer classify
 // the same pool differently.
 func TestGetPoolsRetiredByEpochImplementationsAgree(t *testing.T) {
+	t.Parallel()
+
 	const (
 		queryEpoch   = uint64(7)
 		boundarySlot = uint64(1_000)
@@ -776,4 +869,173 @@ func TestGetPoolsRetiredByEpochImplementationsAgree(t *testing.T) {
 		fromDingoDB,
 		"the two RewardParitySource implementations must not drift",
 	)
+}
+
+// TestDatabaseSourceGetEarliestAvailableEpochNoBoundary covers a
+// non-Mithril, genesis-synced database: no mithril_ledger_slot sync-state
+// row was ever written, so ok must be false and callers must apply no lower
+// bound beyond preStakingThroughEpoch (dingo #4172).
+func TestDatabaseSourceGetEarliestAvailableEpochNoBoundary(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDatabaseSourceDB(t)
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+
+	epoch, ok, err := source.GetEarliestAvailableEpoch(context.Background())
+	require.NoError(t, err)
+	require.False(t, ok)
+	require.Zero(t, epoch)
+}
+
+// TestDatabaseSourceGetEarliestAvailableEpochResolvesBoundaryEpoch seeds a
+// Mithril bootstrap boundary at slot 1_000, inside epoch 10 (the same
+// mithril_ledger_slot sync-state key mithril/sync_import.go writes, and the
+// same epoch table ledger.LedgerState.SlotToEpoch/database.GetEpochBySlot
+// already resolve slots against), and confirms GetEarliestAvailableEpoch
+// resolves it to epoch 11 -- one past the boundary epoch, since that epoch
+// (and everything before it) was inherited from the Mithril snapshot rather
+// than computed locally.
+func TestDatabaseSourceGetEarliestAvailableEpochResolvesBoundaryEpoch(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDatabaseSourceDB(t)
+	require.NoError(t, db.SetEpoch(
+		1_000, 10, nil, nil, nil, nil, 5, 20, 432_000, nil,
+	))
+	require.NoError(t, db.SetSyncState("mithril_ledger_slot", "1000", nil))
+
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+
+	epoch, ok, err := source.GetEarliestAvailableEpoch(context.Background())
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, uint64(11), epoch)
+}
+
+// TestGetEarliestAvailableEpochImplementationsAgree pins both
+// RewardParitySource implementations to one answer for the Mithril bootstrap
+// boundary, against one physical metadata.sqlite on the real migrated schema.
+// DatabaseSource resolves the boundary slot through Database.GetEpochBySlot,
+// whose query is bounded at both ends (`start_slot <= ?` and
+// `? < start_slot + length_in_slots`), so a slot no epoch row covers resolves
+// to nothing. DingoDB carries its own copy of that SQL on a separate
+// connection, and nothing else in the tree requires the copy to keep matching
+// — the same drift TestGetPoolsRetiredByEpochImplementationsAgree exists to
+// catch, on the query a Mithril-bootstrapped node's bound is derived from.
+func TestGetEarliestAvailableEpochImplementationsAgree(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name          string
+		lengthInSlots uint
+		boundarySlot  string
+		wantEpoch     uint64
+		wantOK        bool
+		wantErr       string
+	}{
+		{
+			// Slot 1_000 is the first slot of epoch 10, so the boundary
+			// resolves to epoch 10 and the first comparable epoch is 11.
+			name:          "boundary inside a known epoch",
+			lengthInSlots: 432_000,
+			boundarySlot:  "1000",
+			wantEpoch:     11,
+			wantOK:        true,
+		},
+		{
+			// Epoch 10 spans [1_000, 1_100) here, so slot 5_000 is in no
+			// epoch the table describes. Neither implementation may name
+			// an epoch the slot is not in; the boundary is unresolvable
+			// and no bound is applied.
+			name:          "boundary past the last known epoch",
+			lengthInSlots: 100,
+			boundarySlot:  "5000",
+			wantEpoch:     0,
+			wantOK:        false,
+		},
+		{
+			// A sync_state row that exists and holds nothing is a
+			// malformed boundary, not the absence of one. Returning
+			// ok = false here would switch the bound off on exactly the
+			// node whose boundary could not be confirmed, leaving
+			// seedBacklog and checkEpoch as unbounded as they were before
+			// this method existed. Both implementations must fail closed,
+			// and both reach that verdict through different code: the
+			// store source through Database.MithrilTrustBoundarySlotStrict,
+			// DingoDB through its own sql.ErrNoRows check on the raw row.
+			name:          "boundary recorded with an empty value",
+			lengthInSlots: 432_000,
+			boundarySlot:  "",
+			wantEpoch:     0,
+			wantOK:        false,
+			wantErr:       "empty value",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			db, err := dbtest.NewDatabase(
+				t,
+				&database.Config{DataDir: dir},
+			)
+			require.NoError(t, err)
+			require.NoError(t, db.SetEpoch(
+				1_000, 10, nil, nil, nil, nil, 5, 20, tc.lengthInSlots, nil,
+			))
+			require.NoError(t, db.SetSyncState(
+				"mithril_ledger_slot",
+				tc.boundarySlot,
+				nil,
+			))
+
+			source, err := NewDatabaseSource(db)
+			require.NoError(t, err)
+			storeEpoch, storeOK, storeErr := source.GetEarliestAvailableEpoch(
+				context.Background(),
+			)
+
+			dingoDB, err := OpenDingoDB(
+				DingoDBConfig{Plugin: "sqlite", DataDir: dir},
+			)
+			require.NoError(t, err)
+			defer dingoDB.Close() //nolint:errcheck
+			cliEpoch, cliOK, cliErr := dingoDB.GetEarliestAvailableEpoch(
+				context.Background(),
+			)
+
+			if tc.wantErr != "" {
+				require.ErrorContains(t, storeErr, tc.wantErr)
+				require.ErrorContains(
+					t,
+					cliErr,
+					tc.wantErr,
+					"DingoDB must fail closed on the same boundary the "+
+						"in-process source fails closed on",
+				)
+			} else {
+				require.NoError(t, storeErr)
+				require.NoError(t, cliErr)
+			}
+
+			require.Equal(t, tc.wantEpoch, storeEpoch)
+			require.Equal(t, tc.wantOK, storeOK)
+			require.Equal(
+				t,
+				tc.wantEpoch,
+				cliEpoch,
+				"DingoDB must resolve the boundary epoch the same way the "+
+					"in-process source does",
+			)
+			require.Equal(
+				t,
+				tc.wantOK,
+				cliOK,
+				"DingoDB must resolve the boundary epoch the same way the "+
+					"in-process source does",
+			)
+		})
+	}
 }

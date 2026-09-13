@@ -25,6 +25,8 @@ import (
 )
 
 func TestHardForkEventType(t *testing.T) {
+	t.Parallel()
+
 	assert.Equal(
 		t,
 		event.EventType("hardfork.transition"),
@@ -33,6 +35,8 @@ func TestHardForkEventType(t *testing.T) {
 }
 
 func TestHardForkEventFields(t *testing.T) {
+	t.Parallel()
+
 	evt := event.HardForkEvent{
 		Slot:            432000,
 		EpochNo:         100,
@@ -55,6 +59,8 @@ func TestHardForkEventFields(t *testing.T) {
 }
 
 func TestHardForkEventPublishSubscribe(t *testing.T) {
+	t.Parallel()
+
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
 
@@ -115,6 +121,8 @@ func TestHardForkEventPublishSubscribe(t *testing.T) {
 }
 
 func TestHardForkEventSubscribeFunc(t *testing.T) {
+	t.Parallel()
+
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
 
@@ -199,6 +207,8 @@ func TestHardForkEventSubscribeFunc(t *testing.T) {
 }
 
 func TestHardForkEventZeroValues(t *testing.T) {
+	t.Parallel()
+
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
 

@@ -1309,6 +1309,13 @@ func (h *databaseServiceHandler) GetDatabaseInfo(
 	// (the s3/gcs blob plugins, which store nothing locally) returns
 	// (0, nil), so this degrades to 0 for those rather than erroring.
 	var sizeBytes uint64
+	// db.Blob() is non-nil here: database.New rejects a nil or typed-nil
+	// stores.Blob (database/database.go), and the only production
+	// SetBlobStore callers (node.go, node_lifecycle.go) install the non-nil
+	// wrapper bark.NewBarkBlobStore returns on a nil error. nilaway reports
+	// the nil-receiver branch of blobStoreRef.blobStore (database/
+	// blob_store.go) instead, which no installed database reaches.
+	//nolint:nilaway // database.New requires a non-nil blob store
 	if blobSize, err := db.Blob().DiskSize(); err == nil && blobSize > 0 {
 		sizeBytes += uint64(
 			blobSize,

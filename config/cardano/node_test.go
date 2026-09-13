@@ -60,6 +60,8 @@ var expectedCardanoNodeConfig = &CardanoNodeConfig{
 }
 
 func TestCardanoNodeConfig(t *testing.T) {
+	t.Parallel()
+
 	tmpPath := filepath.Join(
 		testDataDir,
 		"config.json",
@@ -109,6 +111,8 @@ func TestCardanoNodeConfig(t *testing.T) {
 }
 
 func TestCardanoNodeConfigMissingGenesisHashes(t *testing.T) {
+	t.Parallel()
+
 	cfgBytes := []byte(`{
   "AlonzoGenesisFile": "alonzo-genesis.json",
   "ByronGenesisFile": "byron-genesis.json",
@@ -154,6 +158,8 @@ func TestCardanoNodeConfigMissingGenesisHashes(t *testing.T) {
 }
 
 func TestCardanoNodeConfigLoadsDijkstraGenesis(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	genesisPath := filepath.Join(tmpDir, "dijkstra-genesis.json")
 	err := os.WriteFile(genesisPath, []byte(`{
@@ -186,6 +192,8 @@ func TestCardanoNodeConfigLoadsDijkstraGenesis(t *testing.T) {
 }
 
 func TestCardanoNodeConfigLoadsMithrilVerificationKeysFromDisk(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	genesisKey := "genesis-vkey-data\n"
 	ancillaryKey := "ancillary-vkey-data\n"
@@ -223,6 +231,8 @@ func TestCardanoNodeConfigLoadsMithrilVerificationKeysFromDisk(t *testing.T) {
 }
 
 func TestCardanoNodeConfigAutoDiscoversMithrilVerificationKeys(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	genesisKey := "genesis-vkey-data\n"
 	ancillaryKey := "ancillary-vkey-data\n"
@@ -266,6 +276,8 @@ func TestCardanoNodeConfigAutoDiscoversMithrilVerificationKeys(t *testing.T) {
 }
 
 func TestValidateGenesisHashCorrect(t *testing.T) {
+	t.Parallel()
+
 	// Correct hash should pass validation and return the hash
 	data := []byte("test genesis data")
 	expectedHash := lcommon.Blake2b256Hash(data).String()
@@ -276,6 +288,8 @@ func TestValidateGenesisHashCorrect(t *testing.T) {
 }
 
 func TestValidateGenesisHashWrong(t *testing.T) {
+	t.Parallel()
+
 	// Wrong hash should return an error
 	data := []byte("test genesis data")
 	wrongHash := "0000000000000000000000000000000000000000000000000000000000000000"
@@ -287,6 +301,8 @@ func TestValidateGenesisHashWrong(t *testing.T) {
 }
 
 func TestValidateGenesisHashEmpty(t *testing.T) {
+	t.Parallel()
+
 	// Empty expected hash should skip validation and return computed hash
 	data := []byte("test genesis data")
 	expectedHash := lcommon.Blake2b256Hash(data).String()
@@ -297,6 +313,8 @@ func TestValidateGenesisHashEmpty(t *testing.T) {
 }
 
 func TestCardanoNodeConfigPeerSharing(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name string
 		body string
@@ -323,6 +341,8 @@ func TestCardanoNodeConfigPeerSharing(t *testing.T) {
 }
 
 func TestGenesisHashMismatchFromFile(t *testing.T) {
+	t.Parallel()
+
 	// Config with wrong Byron genesis hash should fail to load
 	cfgBytes := []byte(`{
   "ByronGenesisFile": "byron-genesis.json",
@@ -337,6 +357,8 @@ func TestGenesisHashMismatchFromFile(t *testing.T) {
 }
 
 func TestGenesisHashMismatchShelley(t *testing.T) {
+	t.Parallel()
+
 	// Config with wrong Shelley genesis hash should fail to load
 	cfgBytes := []byte(`{
   "ShelleyGenesisFile": "shelley-genesis.json",
@@ -351,6 +373,8 @@ func TestGenesisHashMismatchShelley(t *testing.T) {
 }
 
 func TestGenesisHashMismatchAlonzo(t *testing.T) {
+	t.Parallel()
+
 	// Config with wrong Alonzo genesis hash should fail to load
 	cfgBytes := []byte(`{
   "AlonzoGenesisFile": "alonzo-genesis.json",
@@ -365,6 +389,8 @@ func TestGenesisHashMismatchAlonzo(t *testing.T) {
 }
 
 func TestGenesisHashMismatchConway(t *testing.T) {
+	t.Parallel()
+
 	// Config with wrong Conway genesis hash should fail to load
 	cfgBytes := []byte(`{
   "ConwayGenesisFile": "conway-genesis.json",
@@ -379,6 +405,8 @@ func TestGenesisHashMismatchConway(t *testing.T) {
 }
 
 func TestHardForkEpoch(t *testing.T) {
+	t.Parallel()
+
 	t.Run("enabled with all eras at epoch 0", func(t *testing.T) {
 		cfg := &CardanoNodeConfig{
 			ExperimentalHardForksEnabled: new(true),
@@ -459,6 +487,8 @@ func TestHardForkEpoch(t *testing.T) {
 }
 
 func TestCanonicalizeByronGenesisJSON(t *testing.T) {
+	t.Parallel()
+
 	// Test 1: Verify deterministic canonicalization
 	// Different whitespace/formatting should produce identical canonical bytes
 	originalJSON := `{
@@ -534,6 +564,8 @@ func TestCanonicalizeByronGenesisJSON(t *testing.T) {
 // scheduled, correctly, because cardano-node does not honour the override
 // without the flag. DeclaredHardForkEpoch reports what the file says.
 func TestDeclaredVersusScheduledHardForkEpoch(t *testing.T) {
+	t.Parallel()
+
 	t.Run("declared with the flag off", func(t *testing.T) {
 		cfg := &CardanoNodeConfig{
 			TestShelleyHardForkAtEpoch: new(uint64),

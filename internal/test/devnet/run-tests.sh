@@ -94,12 +94,16 @@ fi
 if [[ "${ACCELERATED}" == "true" ]]; then
   ACTIVE_SPEC="${ACCELERATED_SPEC}"
   export DEVNET_ACCELERATED=1
+  # 100 slots is 50s on the accelerated specs, leaving time for another round.
+  # This delays dependency reuse; it is not proof of on-chain confirmation.
+  export DEVNET_TXPUMP_CONFIRMATION_SLOTS=100
 else
   ACTIVE_SPEC="${CANONICAL_SPEC}"
   # Only --accelerated enables the accelerated scenario. Inheriting a stale
   # DEVNET_ACCELERATED=1 would run it against the canonical-timing network,
   # whose budget it is designed not to meet, failing the whole suite.
   unset DEVNET_ACCELERATED
+  export DEVNET_TXPUMP_CONFIRMATION_SLOTS=600
 fi
 export "${SPEC_VAR}=${ACTIVE_SPEC}"
 export DEVNET_TESTNET_YAML="${SCRIPT_DIR}/${ACTIVE_SPEC#./}"

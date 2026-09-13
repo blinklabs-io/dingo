@@ -223,7 +223,7 @@ func openStore(
 			return nil, err
 		}
 	}
-	db, err := sqlstore.OpenDB("mysql", dsn, "mysql")
+	db, err := sqlstore.OpenDB("mysql", dsn, "mysql", deps.TracingEnabled)
 	if err != nil {
 		return nil, err
 	}
@@ -315,7 +315,7 @@ func ensureDatabaseExists(
 	// IF NOT EXISTS. Only fall back to the administrator connection for the
 	// specific unknown-database error.
 	if driverConfig.DBName != "" {
-		probe, probeErr := sqlstore.OpenDB("mysql", dsn, "mysql")
+		probe, probeErr := sqlstore.OpenDB("mysql", dsn, "mysql", false)
 		if probeErr != nil {
 			return fmt.Errorf("open MySQL metadata connection: %w", probeErr)
 		}
@@ -334,7 +334,7 @@ func ensureDatabaseExists(
 		}
 	}
 	driverConfig.DBName = ""
-	admin, err := sqlstore.OpenDB("mysql", driverConfig.FormatDSN(), "mysql")
+	admin, err := sqlstore.OpenDB("mysql", driverConfig.FormatDSN(), "mysql", false)
 	if err != nil {
 		return fmt.Errorf("open MySQL admin connection: %w", err)
 	}

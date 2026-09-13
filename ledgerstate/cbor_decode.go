@@ -48,6 +48,9 @@ import (
 //     used for non-comparable Cardano credential keys): capped at
 //     maxMapEntries (10,000,000 entries, matching gouroboros's map
 //     limit above) for both definite- and indefinite-length maps.
+//     Definite maps also require at least two remaining bytes per
+//     declared entry before allocating capacity: each key and value
+//     needs at least one byte. Indefinite maps grow only as parsed.
 //   - parseUTxOsStreamingWithProgress (UTxO map streaming decode):
 //     UTxO maps have their own maxUTxOMapEntries (100,000,000) cap
 //     because valid chain state can exceed the generic 10,000,000-map
@@ -264,10 +267,21 @@ func decodeMapEntriesLimit(data []byte, limit int) ([]MapEntry, error) {
 			count, limit,
 		)
 	}
-	entries := make([]MapEntry, 0, count)
+	// #nosec G115 -- count is bounded by the non-negative int limit above.
+	countInt := int(count)
+	// Every map entry contains at least one byte for its key and one byte
+	// for its value. Reject a truncated payload before using the untrusted
+	// count as a slice capacity.
+	remaining := len(data) - headerLen
+	if countInt > remaining/2 {
+		return nil, fmt.Errorf(
+			"definite-length map claims %d entries, but only %d bytes remain",
+			count, remaining,
+		)
+	}
+	entries := make([]MapEntry, 0, countInt)
 	pos := headerLen
-	// #nosec G115
-	for i := 0; i < int(count); i++ {
+	for i := 0; i < countInt; i++ {
 		// Key
 		keySize, err := cborItemSize(data[pos:])
 		if err != nil {

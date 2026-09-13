@@ -17,6 +17,13 @@ FROM network_state
 ORDER BY slot DESC
 LIMIT 1;
 
+-- name: GetNetworkStateAsOfSlot :one
+SELECT id, treasury, reserves, slot
+FROM network_state
+WHERE slot <= ?
+ORDER BY slot DESC
+LIMIT 1;
+
 -- name: SetNetworkState :exec
 INSERT INTO network_state (treasury, reserves, slot)
 VALUES (?, ?, ?)
@@ -921,6 +928,9 @@ FROM asset
 WHERE utxo_id = ?
 ORDER BY id;
 
+-- Order by added_slot before id so the sort is the reverse of
+-- idx_utxo_added_slot's own order; ordering by id alone costs a full table
+-- scan. See the Store wrapper for the full rationale.
 -- name: GetUtxosAddedAfterSlot :many
 SELECT transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
        staking_key, credential_tag, datum_hash, spent_at_tx_id,
@@ -928,7 +938,7 @@ SELECT transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
        deleted_slot, amount, output_idx, payment_script
 FROM utxo
 WHERE added_slot > ?
-ORDER BY id DESC;
+ORDER BY added_slot DESC, id DESC;
 
 -- name: GetLiveUtxoRefsBySlot :many
 SELECT tx_id, output_idx
@@ -1174,6 +1184,40 @@ SELECT CAST(COALESCE(MAX(added_slot), 0) AS INTEGER)
 FROM registration_drep
 WHERE credential_tag = ? AND drep_credential = ?
   AND certificate_id IS NOT NULL AND certificate_id != 0;
+
+-- name: GetDrepLastRegistrationDeposit :one
+-- Unlike GetDrepLastRegistrationSlot, this does not exclude certificate_id
+-- = 0 rows: those are the Mithril ledger-state import's bootstrap-slot
+-- registrations (see ImportDrepRegistration), and their deposit_amount is
+-- the real amount owed on deregistration. On a bootstrapped node such a
+-- row is often a DRep's only registration, so excluding it here would
+-- compute a refund of 0 for a deposit that was actually paid.
+SELECT deposit_amount
+FROM registration_drep
+WHERE credential_tag = ? AND drep_credential = ?
+ORDER BY added_slot DESC
+LIMIT 1;
+
+-- name: GetDrepLastRegistrationDeposits :many
+-- The set form of GetDrepLastRegistrationDeposit, for reading the deposits
+-- of the active DReps GetActiveDreps returns in one round trip instead of
+-- one query per DRep. Same certificate_id treatment: bootstrap-slot import
+-- rows count, because their deposit_amount is the real amount owed.
+-- Drive this lookup from active drep rows. The correlated lookup uses the
+-- registration credential index for each active DRep, so history left behind
+-- by DReps that have since deregistered does not become the outer scan.
+SELECT r.credential_tag, r.drep_credential, r.deposit_amount
+FROM drep d
+JOIN registration_drep r
+  ON r.id = (
+      SELECT reg.id
+      FROM registration_drep reg
+      WHERE reg.credential_tag = d.credential_tag
+        AND reg.drep_credential = d.credential
+      ORDER BY reg.added_slot DESC, reg.id DESC
+      LIMIT 1
+  )
+WHERE d.active = TRUE;
 
 -- name: GetTransactionByHash :one
 SELECT hash, block_hash, metadata, slot, type, id, fee, collateral_fee,

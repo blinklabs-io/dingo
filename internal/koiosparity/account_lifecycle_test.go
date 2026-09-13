@@ -39,6 +39,8 @@ import (
 // separate lifecycle (newly-registered/deregistered) diff entirely, keeping
 // this test focused on zero-reward alone.
 func TestAccountLifecycleMismatchesReportsZeroReward(t *testing.T) {
+	t.Parallel()
+
 	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
@@ -81,6 +83,8 @@ func TestAccountLifecycleMismatchesReportsZeroReward(t *testing.T) {
 func TestAccountLifecycleMismatchesReportsNewlyRegisteredAndDeregistered(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
@@ -164,6 +168,8 @@ func TestAccountLifecycleMismatchesReportsNewlyRegisteredAndDeregistered(
 // exist, exactly one aggregate row must be produced, with an accurate total
 // count and a sample capped at maxAccountLifecycleSample.
 func TestAccountLifecycleMismatchesZeroRewardRowCountIsBounded(t *testing.T) {
+	t.Parallel()
+
 	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
@@ -207,6 +213,8 @@ func TestAccountLifecycleMismatchesZeroRewardRowCountIsBounded(t *testing.T) {
 func TestAccountLifecycleMismatchesStakeEpochZeroSkipsLifecycleReport(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
@@ -222,6 +230,8 @@ func TestAccountLifecycleMismatchesStakeEpochZeroSkipsLifecycleReport(
 // reward_account_output rows is reported as CategoryDBError, never silently
 // swallowed as if there were simply no lifecycle changes to report.
 func TestAccountLifecycleMismatchesPropagatesDingoErrorAsDBError(t *testing.T) {
+	t.Parallel()
+
 	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
@@ -260,6 +270,8 @@ func TestAccountLifecycleMismatchesPropagatesDingoErrorAsDBError(t *testing.T) {
 func TestAccountLifecycleMismatchesReportsMalformedPreviousRowAsDBError(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
@@ -316,6 +328,8 @@ func TestAccountLifecycleMismatchesReportsMalformedPreviousRowAsDBError(
 func TestAccountLifecycleMismatchesSkipsLifecycleDiffWhenCurrentRowsFailToDecode(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
@@ -399,6 +413,8 @@ func TestAccountLifecycleMismatchesSkipsLifecycleDiffWhenCurrentRowsFailToDecode
 func TestAccountLifecycleMismatchesSkipsLifecycleDiffForPrunableSource(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
@@ -442,6 +458,8 @@ func TestAccountLifecycleMismatchesSkipsLifecycleDiffForPrunableSource(
 // genuine cache failure while looking up zero-reward accounts is reported as
 // CategoryDBError, never silently swallowed.
 func TestAccountLifecycleMismatchesPropagatesCacheErrorAsDBError(t *testing.T) {
+	t.Parallel()
+
 	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
@@ -467,6 +485,8 @@ func TestAccountLifecycleMismatchesPropagatesCacheErrorAsDBError(t *testing.T) {
 func TestDetermineStatusAccountLifecycleCategoriesAreInformational(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	now := time.Now()
 	onlyInformational := []CheckMismatch{
 		{Category: CategoryAcctZeroReward, CheckedAt: now},

@@ -14,6 +14,8 @@
 
 package models
 
+import "math/big"
+
 // AccountDelegationHistoryRow holds delegation history
 // query results for a stake account.
 type AccountDelegationHistoryRow struct {
@@ -126,12 +128,25 @@ type AccountTransactionAssociationRow struct {
 // account, summed from persisted withdrawal and MIR state.
 type AccountSums struct {
 	// WithdrawalsSum is the total of all reward withdrawals
-	// made by the account.
+	// made by the account. Withdrawals are coin, so this total
+	// is unsigned.
 	WithdrawalsSum uint64
-	// ReservesSum is the total of all MIR transfers to the
-	// account sourced from the reserves pot.
-	ReservesSum uint64
-	// TreasurySum is the total of all MIR transfers to the
-	// account sourced from the treasury pot.
-	TreasurySum uint64
+	// ReservesSum is the signed total of all MIR deltas for the
+	// account sourced from the reserves pot. MIR deltas are
+	// delta_coin, so individual rows may be negative and the
+	// total is summed as a signed value. Never nil.
+	ReservesSum *big.Int
+	// TreasurySum is the signed total of all MIR deltas for the
+	// account sourced from the treasury pot. See ReservesSum.
+	TreasurySum *big.Int
+}
+
+// NewAccountSums returns an AccountSums with every total at zero and neither
+// signed total nil. Readers return it on their failure paths too, so the
+// non-nil guarantee does not depend on the caller checking the error first.
+func NewAccountSums() AccountSums {
+	return AccountSums{
+		ReservesSum: new(big.Int),
+		TreasurySum: new(big.Int),
+	}
 }

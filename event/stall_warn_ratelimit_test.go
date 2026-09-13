@@ -36,6 +36,7 @@ import (
 // produced 7.7 million identical warnings in a 40-minute run -- enough to bury
 // the one signal an operator needs to see, and to make the logs themselves a
 // second problem. The bound has to be per subscriber.
+// Not t.Parallel: swaps the package-level deliveryStallWarnInterval.
 func TestDeliverStallWarningIsRateLimitedPerSubscriber(t *testing.T) {
 	origInterval := deliveryStallWarnInterval
 	deliveryStallWarnInterval = 20 * time.Millisecond

@@ -16,6 +16,7 @@ package database
 
 import (
 	"bytes"
+	"fmt"
 	"math"
 	"testing"
 
@@ -24,6 +25,8 @@ import (
 )
 
 func TestCborOffsetEncodeDecode(t *testing.T) {
+	t.Parallel()
+
 	testCases := []struct {
 		name       string
 		blockSlot  uint64
@@ -214,6 +217,8 @@ func TestCborOffsetEncodeDecode(t *testing.T) {
 }
 
 func TestCborOffsetEncodeFormat(t *testing.T) {
+	t.Parallel()
+
 	// Test that encoding is big-endian and in the expected format
 	offset := CborOffset{
 		BlockSlot: 0x0102030405060708, // 8 bytes
@@ -331,6 +336,8 @@ func TestCborOffsetEncodeFormat(t *testing.T) {
 }
 
 func TestDecodeCborOffsetInvalidSize(t *testing.T) {
+	t.Parallel()
+
 	testCases := []struct {
 		name string
 		data []byte
@@ -373,6 +380,8 @@ func TestDecodeCborOffsetInvalidSize(t *testing.T) {
 }
 
 func TestDecodeCborOffsetInvalidMagic(t *testing.T) {
+	t.Parallel()
+
 	// Valid size but wrong magic
 	data := make([]byte, CborOffsetSize)
 	data[0] = 'X' // Wrong magic
@@ -392,6 +401,8 @@ func TestDecodeCborOffsetInvalidMagic(t *testing.T) {
 }
 
 func TestCborOffsetSizeConstant(t *testing.T) {
+	t.Parallel()
+
 	// Verify the constant matches expected value
 	// Layout: Magic (4) + BlockSlot (8) + BlockHash (32) + ByteOffset (4) + ByteLength (4) = 52
 	assert.Equal(t, 52, CborOffsetSize, "CborOffsetSize should be 52")
@@ -408,6 +419,8 @@ func TestCborOffsetSizeConstant(t *testing.T) {
 }
 
 func TestEncodeUtxoOffset(t *testing.T) {
+	t.Parallel()
+
 	offset := &CborOffset{
 		BlockSlot:  12345,
 		BlockHash:  [32]byte{0x01, 0x02, 0x03},
@@ -435,6 +448,8 @@ func TestEncodeUtxoOffset(t *testing.T) {
 }
 
 func TestIsUtxoOffsetStorage(t *testing.T) {
+	t.Parallel()
+
 	// Create a valid offset-encoded data
 	validOffset := make([]byte, CborOffsetSize)
 	copy(validOffset[0:4], offsetMagic[:])
@@ -490,6 +505,8 @@ func TestIsUtxoOffsetStorage(t *testing.T) {
 }
 
 func TestDecodeUtxoOffsetError(t *testing.T) {
+	t.Parallel()
+
 	// Invalid sizes should error
 	_, err := DecodeUtxoOffset(make([]byte, 51))
 	assert.Error(t, err)
@@ -510,6 +527,8 @@ func TestDecodeUtxoOffsetError(t *testing.T) {
 }
 
 func TestEncodeTxOffset(t *testing.T) {
+	t.Parallel()
+
 	offset := &CborOffset{
 		BlockSlot:  12345,
 		BlockHash:  [32]byte{0x01, 0x02, 0x03},
@@ -537,6 +556,8 @@ func TestEncodeTxOffset(t *testing.T) {
 }
 
 func TestIsTxOffsetStorage(t *testing.T) {
+	t.Parallel()
+
 	// Create a valid offset-encoded data
 	validOffset := make([]byte, CborOffsetSize)
 	copy(validOffset[0:4], offsetMagic[:])
@@ -592,6 +613,8 @@ func TestIsTxOffsetStorage(t *testing.T) {
 }
 
 func TestDecodeTxOffsetError(t *testing.T) {
+	t.Parallel()
+
 	// Invalid sizes should error
 	_, err := DecodeTxOffset(make([]byte, 51))
 	assert.Error(t, err)
@@ -612,6 +635,8 @@ func TestDecodeTxOffsetError(t *testing.T) {
 }
 
 func TestTxCborPartsEncodeDecode(t *testing.T) {
+	t.Parallel()
+
 	testCases := []struct {
 		name           string
 		blockSlot      uint64
@@ -775,6 +800,8 @@ func TestTxCborPartsEncodeDecode(t *testing.T) {
 }
 
 func TestTxCborPartsSizeConstant(t *testing.T) {
+	t.Parallel()
+
 	// Verify the constant matches expected value
 	// Layout: Magic (4) + BlockSlot (8) + BlockHash (32) +
 	//         BodyOffset (4) + BodyLength (4) +
@@ -795,6 +822,8 @@ func TestTxCborPartsSizeConstant(t *testing.T) {
 }
 
 func TestDecodeTxCborPartsInvalidSize(t *testing.T) {
+	t.Parallel()
+
 	testCases := []struct {
 		name string
 		data []byte
@@ -821,6 +850,8 @@ func TestDecodeTxCborPartsInvalidSize(t *testing.T) {
 }
 
 func TestDecodeTxCborPartsInvalidMagic(t *testing.T) {
+	t.Parallel()
+
 	// Valid size but wrong magic
 	data := make([]byte, TxCborPartsSize)
 	data[0] = 'X' // Wrong magic
@@ -839,7 +870,45 @@ func TestDecodeTxCborPartsInvalidMagic(t *testing.T) {
 	)
 }
 
+// TestDecodeTxCborPartsRejectsNoncanonicalIsValid proves a validity byte
+// other than the canonical 0/1 that Encode ever produces is rejected rather
+// than silently coerced to true by a `!= 0` check. IsTxCborPartsStorage
+// deliberately still recognizes the data as DTXP-shaped (format, not
+// content, validation): a UTxO-recovery caller must reach this decode
+// error rather than take a not-DTXP-shaped fallback path that would
+// silently treat the corrupted record as simply absent.
+func TestDecodeTxCborPartsRejectsNoncanonicalIsValid(t *testing.T) {
+	t.Parallel()
+
+	for _, isValidByte := range []byte{2, 0x7f, 0x80, 0xfe, 0xff} {
+		t.Run(
+			fmt.Sprintf("byte value %d", isValidByte),
+			func(t *testing.T) {
+				data := (&TxCborParts{IsValid: true}).Encode()
+				data[68] = isValidByte
+
+				decoded, err := DecodeTxCborParts(data)
+				assert.Error(
+					t,
+					err,
+					"decode should reject a noncanonical IsValid byte",
+				)
+				assert.Nil(t, decoded, "decoded should be nil on error")
+				assert.True(
+					t,
+					IsTxCborPartsStorage(data),
+					"format recognition must still see this as DTXP-shaped "+
+						"so a recovery caller reaches the decode error "+
+						"above instead of a not-DTXP-shaped fallback path",
+				)
+			},
+		)
+	}
+}
+
 func TestIsTxCborPartsStorage(t *testing.T) {
+	t.Parallel()
+
 	// Create valid TxCborParts data
 	validData := make([]byte, TxCborPartsSize)
 	copy(validData[0:4], txPartsMagic[:])
@@ -874,6 +943,8 @@ func TestIsTxCborPartsStorage(t *testing.T) {
 }
 
 func TestTxCborPartsHasMetadata(t *testing.T) {
+	t.Parallel()
+
 	// With metadata
 	withMeta := TxCborParts{MetadataLength: 100}
 	assert.True(t, withMeta.HasMetadata())
@@ -884,6 +955,8 @@ func TestTxCborPartsHasMetadata(t *testing.T) {
 }
 
 func TestTxCborPartsReassembleTxCbor(t *testing.T) {
+	t.Parallel()
+
 	// Create a mock block CBOR with embedded components
 	// Body: simple CBOR map {0: 1}
 	bodyCbor := []byte{0xa1, 0x00, 0x01}

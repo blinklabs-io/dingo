@@ -164,6 +164,8 @@ func assertChainPrevHashContiguous(t *testing.T, c *chain.Chain) {
 // point the chain does not hold, so the next block is appended above a block
 // that is not its parent: a cross-fork splice.
 func TestRollbackRejectsPointNotOnChain(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	c, abandoned, forkB := buildAbandonedForkChain(t, db)
 	forkBTip := mockBlockPoint(forkB[len(forkB)-1])
@@ -197,6 +199,8 @@ func TestRollbackRejectsPointNotOnChain(t *testing.T) {
 // reported as crossable, otherwise the detector keeps re-applying the very
 // rollback that splices the chain.
 func TestValidateRollbackRejectsPointNotOnChain(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	c, abandoned, _ := buildAbandonedForkChain(t, db)
 
@@ -217,6 +221,8 @@ func TestValidateRollbackRejectsPointNotOnChain(t *testing.T) {
 // fork. Iterating the chain then yields a block whose parent is absent, which is
 // what leaves the ledger unable to resolve the producer of that block's inputs.
 func TestRollbackToRetainedPointDoesNotSpliceChain(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	c, abandoned, _ := buildAbandonedForkChain(t, db)
 
@@ -252,6 +258,8 @@ func TestRollbackToRetainedPointDoesNotSpliceChain(t *testing.T) {
 // misclassified as exceeding the security parameter. Not-on-chain re-intersects
 // and recovers; over-K does not.
 func TestRollbackRejectsPointAheadOfTip(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	if err != nil {
@@ -335,6 +343,8 @@ func TestRollbackRejectsPointAheadOfTip(t *testing.T) {
 // ordinary rollbacks to blocks the chain still holds must keep working, and a
 // rollback to origin must remain possible.
 func TestRollbackStillAcceptsPointsOnChain(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	if err != nil {

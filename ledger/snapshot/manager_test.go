@@ -34,6 +34,8 @@ import (
 )
 
 func TestSetDelegatorInactivityRejectsInvalidPeriod(t *testing.T) {
+	t.Parallel()
+
 	mgr := NewManager(nil, nil, nil)
 
 	require.ErrorContains(t, mgr.SetDelegatorInactivity(true, 0), "[1, 10000]")
@@ -48,6 +50,8 @@ func TestSetDelegatorInactivityRejectsInvalidPeriod(t *testing.T) {
 }
 
 func TestSetDelegatorInactivityLockedAfterStart(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
 	require.NoError(t, mgr.SetDelegatorInactivity(true, 90))
@@ -71,6 +75,8 @@ func TestSetDelegatorInactivityLockedAfterStart(t *testing.T) {
 }
 
 func TestSetDelegatorInactivityLockedAfterGenesisCapture(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	seedEpochs(t, db, []models.Epoch{
 		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
@@ -86,6 +92,8 @@ func TestSetDelegatorInactivityLockedAfterGenesisCapture(t *testing.T) {
 }
 
 func TestSetDelegatorInactivityRemainsMutableAfterFailedStart(t *testing.T) {
+	t.Parallel()
+
 	mgr := NewManager(nil, event.NewEventBus(nil, nil), nil)
 	require.ErrorContains(t, mgr.Start(context.Background()), "nil database")
 	require.NoError(t, mgr.SetDelegatorInactivity(true, 90))
@@ -95,6 +103,8 @@ func TestSetDelegatorInactivityRemainsMutableAfterFailedStart(t *testing.T) {
 // bootstrap (where slot 0 has no pools but later epochs exist), the
 // snapshot manager seeds the recent historical window for the current epoch.
 func TestCaptureGenesisSnapshot_PostMithril(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 
 	// Simulate post-Mithril state: epoch 0 exists (from ledger state
@@ -176,6 +186,8 @@ func TestCaptureGenesisSnapshot_PostMithril(t *testing.T) {
 func TestCaptureGenesisSnapshot_PostMithrilSkipsUnsafeExpiryHistory(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 
 	seedEpochs(t, db, []models.Epoch{
@@ -223,6 +235,8 @@ func TestCaptureGenesisSnapshot_PostMithrilSkipsUnsafeExpiryHistory(
 }
 
 func TestCaptureGenesisSnapshot_PostMithrilSkipsExistingWindow(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 
 	seedEpochs(t, db, []models.Epoch{
@@ -289,6 +303,8 @@ func TestCaptureGenesisSnapshot_PostMithrilSkipsExistingWindow(t *testing.T) {
 func TestCaptureGenesisSnapshot_PostMithrilAutoVoteFlagOnlyOnCurrentEpoch(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 
 	seedEpochs(t, db, []models.Epoch{
@@ -388,6 +404,8 @@ func TestCaptureGenesisSnapshot_PostMithrilAutoVoteFlagOnlyOnCurrentEpoch(
 // (no Mithril), only epoch 0 gets a snapshot and no extra epochs are
 // seeded.
 func TestCaptureGenesisSnapshot_FreshSync(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 
 	// Fresh sync: only epoch 0 exists
@@ -452,6 +470,8 @@ func TestCaptureGenesisSnapshot_FreshSync(t *testing.T) {
 }
 
 func TestHandleEpochTransitionPersistsRewardStateInputs(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 
 	seedEpochs(t, db, []models.Epoch{
@@ -580,6 +600,8 @@ VALUES (?, ?, ?)`,
 }
 
 func TestCaptureMarkSnapshotReplacesPriorPoolSet(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	seedEpochs(t, db, []models.Epoch{{
 		EpochId:       0,
@@ -622,6 +644,8 @@ func TestCaptureMarkSnapshotReplacesPriorPoolSet(t *testing.T) {
 // input rows it cannot build. Silently skipping the Mark snapshot here would
 // leave a fallback-only deployment with no stake distribution for the epoch.
 func TestFallbackWithoutRewardMarkerStillWritesMarkSnapshot(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	seedEpochs(t, db, []models.Epoch{
 		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
@@ -704,6 +728,8 @@ func TestFallbackWithoutRewardMarkerStillWritesMarkSnapshot(t *testing.T) {
 }
 
 func TestFallbackWithoutRewardInputsPreservesAuthoritativeMark(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	authoritativePool := bytes.Repeat([]byte{0xa1}, 28)
 	fallbackPool := bytes.Repeat([]byte{0xb2}, 28)
@@ -792,6 +818,8 @@ func TestFallbackWithoutRewardInputsPreservesAuthoritativeMark(t *testing.T) {
 }
 
 func TestFallbackAuthoritativeNoopDoesNotRecordSuccessMetrics(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	seedEpochs(t, db, []models.Epoch{
 		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
@@ -855,6 +883,8 @@ func TestFallbackAuthoritativeNoopDoesNotRecordSuccessMetrics(t *testing.T) {
 }
 
 func TestHandleEpochTransitionCapturesSelfDelegatedOwnerStake(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 
 	seedEpochs(t, db, []models.Epoch{
@@ -965,6 +995,8 @@ func TestHandleEpochTransitionCapturesSelfDelegatedOwnerStake(t *testing.T) {
 func TestHandleEpochTransitionDoesNotTreatScriptCredentialAsOwner(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 
 	seedEpochs(t, db, []models.Epoch{
@@ -1043,6 +1075,8 @@ func TestHandleEpochTransitionDoesNotTreatScriptCredentialAsOwner(
 }
 
 func TestValidateRewardStakeInputTotals(t *testing.T) {
+	t.Parallel()
+
 	var poolA lcommon.PoolKeyHash
 	var poolB lcommon.PoolKeyHash
 	copy(poolA[:], bytes.Repeat([]byte{0x11}, len(poolA)))
@@ -1135,6 +1169,8 @@ func TestValidateRewardStakeInputTotals(t *testing.T) {
 // not include the pool, so retaining both assignments would reward one
 // credential twice.
 func TestRewardStakeDistributionDedupesDuplicateCredential(t *testing.T) {
+	t.Parallel()
+
 	var poolA lcommon.PoolKeyHash
 	var poolB lcommon.PoolKeyHash
 	copy(poolA[:], bytes.Repeat([]byte{0x11}, len(poolA)))
@@ -1180,6 +1216,8 @@ func TestRewardStakeDistributionDedupesDuplicateCredential(t *testing.T) {
 // no-op for input without duplicates: every distinct credential is preserved and
 // the pool total is the full sum.
 func TestRewardStakeDistributionPreservesDistinctCredentials(t *testing.T) {
+	t.Parallel()
+
 	var poolA lcommon.PoolKeyHash
 	var poolB lcommon.PoolKeyHash
 	copy(poolA[:], bytes.Repeat([]byte{0x11}, len(poolA)))
@@ -1206,6 +1244,8 @@ func TestRewardStakeDistributionPreservesDistinctCredentials(t *testing.T) {
 }
 
 func TestRewardInputsRejectMissingPoolRegistration(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	seedEpochs(t, db, []models.Epoch{
 		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
@@ -1239,6 +1279,8 @@ func TestRewardInputsRejectMissingPoolRegistration(t *testing.T) {
 }
 
 func TestRewardInputsRejectInvalidRewardAccountLength(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	seedEpochs(t, db, []models.Epoch{
 		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
@@ -1283,6 +1325,8 @@ func TestRewardInputsRejectInvalidRewardAccountLength(t *testing.T) {
 }
 
 func TestRewardInputsRejectInvalidRewardAccountCredentialTag(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	seedEpochs(t, db, []models.Epoch{
 		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
@@ -1330,6 +1374,8 @@ func TestRewardInputsRejectInvalidRewardAccountCredentialTag(t *testing.T) {
 }
 
 func TestRewardInputsRejectMissingPoolMargin(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	seedEpochs(t, db, []models.Epoch{
 		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
@@ -1375,6 +1421,8 @@ func TestRewardInputsRejectMissingPoolMargin(t *testing.T) {
 }
 
 func TestRewardInputsRejectInvalidPoolOwnerKeyHashLength(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	seedEpochs(t, db, []models.Epoch{
 		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
@@ -1424,6 +1472,8 @@ func TestRewardInputsRejectInvalidPoolOwnerKeyHashLength(t *testing.T) {
 }
 
 func TestHandleEpochTransitionKeepsBoundaryCapturedSnapshot(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 
 	seedEpochs(t, db, []models.Epoch{
@@ -1489,6 +1539,8 @@ func TestHandleEpochTransitionKeepsBoundaryCapturedSnapshot(t *testing.T) {
 }
 
 func TestHandleEpochTransitionRefreshesProvisionalSlotSnapshot(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 
 	seedEpochs(t, db, []models.Epoch{
@@ -1568,6 +1620,8 @@ func TestHandleEpochTransitionRefreshesProvisionalSlotSnapshot(t *testing.T) {
 }
 
 func TestHandleEpochTransitionReplacesStaleSnapshotRows(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 
 	seedEpochs(t, db, []models.Epoch{
@@ -1686,6 +1740,8 @@ func TestHandleEpochTransitionReplacesStaleSnapshotRows(t *testing.T) {
 // TestCaptureGenesisSnapshot_NoPools verifies that when no pools exist
 // at all, no snapshots are created and no error is returned.
 func TestCaptureGenesisSnapshot_NoPools(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 
 	// Epochs exist but no pools
@@ -1704,6 +1760,8 @@ func TestCaptureGenesisSnapshot_NoPools(t *testing.T) {
 // TestCaptureGenesisSnapshot_SmallEpoch verifies correct behavior when
 // the current epoch is less than 2 (edge case for the offset loop).
 func TestCaptureGenesisSnapshot_SmallEpoch(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 
 	// Simulate Mithril bootstrap to epoch 1 (no pools at slot 0)
@@ -1752,6 +1810,8 @@ func TestCaptureGenesisSnapshot_SmallEpoch(t *testing.T) {
 // inputs are unaffected, and the ground-truth stake reporting
 // (PoolStakeSnapshot/EpochSummary) still reflects both pools' real stake.
 func TestHandleEpochTransitionSkipsPoolWithMissingMargin(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 
 	seedEpochs(t, db, []models.Epoch{
@@ -1822,10 +1882,14 @@ func TestHandleEpochTransitionSkipsPoolWithMissingMargin(t *testing.T) {
 	rewardSnapshot, err := db.Metadata().GetRewardSnapshot(1, "mark", nil)
 	require.NoError(t, err)
 	require.NotNil(t, rewardSnapshot)
-	// Only the good pool's stake counts toward the reward snapshot.
+	// Only the good pool earns, so it is the only reward_pool_input row, but
+	// the bad pool's delegator stake stays in the snapshot's active stake:
+	// that total is the reward calculation's sigma_a denominator, and
+	// cardano-ledger derives it from every delegating credential rather than
+	// from the pools that appear in the snapshot.
 	require.Equal(
 		t,
-		uint64(50_000_000),
+		uint64(80_000_000),
 		uint64(rewardSnapshot.TotalActiveStake),
 	)
 	require.Equal(t, uint64(1), rewardSnapshot.TotalPoolCount)
@@ -1871,6 +1935,8 @@ func TestHandleEpochTransitionSkipsPoolWithMissingMargin(t *testing.T) {
 // the good pool's inputs and the returned (reward-input) distribution's
 // totals correctly reduced to match.
 func TestRewardInputsSkippingDegradedPoolsExcludesOnlyBadPools(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	seedEpochs(t, db, []models.Epoch{
 		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
@@ -1984,6 +2050,8 @@ func TestRewardInputsSkippingDegradedPoolsExcludesOnlyBadPools(t *testing.T) {
 // claim blocks the fallback write. The inverse case proves authoritative
 // capture can still replace a provisional fallback.
 func TestConcurrentFallbackAndAuthoritativeCaptureSerialization(t *testing.T) {
+	t.Parallel()
+
 	newFixture := func(t *testing.T) (
 		*Manager,
 		[]byte,
@@ -2202,6 +2270,8 @@ func TestConcurrentFallbackAndAuthoritativeCaptureSerialization(t *testing.T) {
 // slot 0 means the pool data predates the import rather than that no stake
 // existed; that case is keyed on a nonzero latest epoch and still skips.
 func TestCaptureGenesisSnapshot_FreshSyncNoGenesisPools(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 
 	// A true fresh sync: epoch 0 is the only epoch, and no pools exist.
@@ -2244,6 +2314,8 @@ func TestCaptureGenesisSnapshot_FreshSyncNoGenesisPools(t *testing.T) {
 func TestCaptureGenesisSnapshot_PostMithrilNoPoolsSkipsGenesisRow(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 
 	seedEpochs(t, db, []models.Epoch{
@@ -2283,6 +2355,8 @@ func TestCaptureGenesisSnapshot_PostMithrilNoPoolsSkipsGenesisRow(
 func TestCaptureGenesisSnapshot_EpochLookupFailureIsNotAFreshSync(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 
 	seedEpochs(t, db, []models.Epoch{

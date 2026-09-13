@@ -123,6 +123,8 @@ func governanceVoteTestTx(
 }
 
 func TestLedgerViewGovPurposeRoots(t *testing.T) {
+	t.Parallel()
+
 	lv, db := governanceTestView(t, &conway.ConwayProtocolParameters{})
 
 	// A non-nil empty set is authoritative. Returning nil would make
@@ -171,6 +173,8 @@ func TestLedgerViewGovPurposeRoots(t *testing.T) {
 }
 
 func TestLedgerViewGovPurposeRootsPropagatesDatabaseError(t *testing.T) {
+	t.Parallel()
+
 	lv, db := governanceTestView(t, &conway.ConwayProtocolParameters{})
 	require.NoError(t, dbtest.CloseDatabase(db))
 
@@ -180,6 +184,8 @@ func TestLedgerViewGovPurposeRootsPropagatesDatabaseError(t *testing.T) {
 }
 
 func TestLedgerViewGovernanceActionExpiryIsInclusive(t *testing.T) {
+	t.Parallel()
+
 	pparams := &conway.ConwayProtocolParameters{}
 	lv, db := governanceTestView(t, pparams)
 	require.NoError(t, db.SetEpoch(
@@ -215,6 +221,8 @@ func TestLedgerViewGovernanceActionExpiryIsInclusive(t *testing.T) {
 }
 
 func TestLedgerViewGovernanceProposalAncestry(t *testing.T) {
+	t.Parallel()
+
 	pparams := &conway.ConwayProtocolParameters{
 		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
 			Major: lcommon.ProtocolVersionConway,
@@ -278,6 +286,8 @@ func TestLedgerViewGovernanceProposalAncestry(t *testing.T) {
 }
 
 func TestLedgerViewGovernanceActionContentDrivesRules(t *testing.T) {
+	t.Parallel()
+
 	t.Run("hard fork succession", func(t *testing.T) {
 		pparams := &conway.ConwayProtocolParameters{
 			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
@@ -395,6 +405,8 @@ func TestLedgerViewGovernanceActionContentDrivesRules(t *testing.T) {
 }
 
 func TestLedgerViewDecodesHistoricalParameterActionForCurrentEra(t *testing.T) {
+	t.Parallel()
+
 	maxBlockBodySize := uint(90_112)
 	action, err := conway.NewConwayParameterChangeGovAction(
 		nil,

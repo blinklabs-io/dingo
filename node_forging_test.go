@@ -114,6 +114,8 @@ func newTestNodeForBP(
 }
 
 func TestValidateBlockProducerStartup_HappyPath(t *testing.T) {
+	t.Parallel()
+
 	vrf, kes, opcert := devnetCredPaths(t)
 	cardanoCfg := shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour))
 	n := newTestNodeForBP(t, true, vrf, kes, opcert, cardanoCfg)
@@ -127,6 +129,8 @@ func TestValidateBlockProducerStartup_HappyPath(t *testing.T) {
 }
 
 func TestValidateBlockProducerStartup_NoCardanoConfig(t *testing.T) {
+	t.Parallel()
+
 	vrf, kes, opcert := devnetCredPaths(t)
 	n := newTestNodeForBP(t, true, vrf, kes, opcert, nil)
 	_, err := n.validateBlockProducerStartup()
@@ -139,6 +143,8 @@ func TestValidateBlockProducerStartup_NoCardanoConfig(t *testing.T) {
 }
 
 func TestValidateBlockProducerStartup_ExpiredKESPeriod(t *testing.T) {
+	t.Parallel()
+
 	// systemStart a year in the past with slotsPerKESPeriod=10 means
 	// many KES periods have elapsed; maxKESEvolutions=1 makes anything
 	// past period 1 expired, so the devnet opcert (KESPeriod=0) is well
@@ -167,6 +173,8 @@ func TestValidateBlockProducerStartup_ExpiredKESPeriod(t *testing.T) {
 }
 
 func TestValidateBlockProducerStartup_MissingFile(t *testing.T) {
+	t.Parallel()
+
 	tmp := t.TempDir()
 	cardanoCfg := shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour))
 	n := newTestNodeForBP(
@@ -211,6 +219,8 @@ func mismatchedVRFHash() [32]byte {
 }
 
 func TestValidateBlockProducerLedger_NonDevnetVRFMismatchIsFatal(t *testing.T) {
+	t.Parallel()
+
 	vrf, kes, opcert := devnetCredPaths(t)
 	cardanoCfg := shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour))
 	n := newTestNodeForBP(t, true, vrf, kes, opcert, cardanoCfg)
@@ -232,6 +242,8 @@ func TestValidateBlockProducerLedger_NonDevnetVRFMismatchIsFatal(t *testing.T) {
 }
 
 func TestValidateBlockProducerLedger_DevnetVRFMismatchWarns(t *testing.T) {
+	t.Parallel()
+
 	vrf, kes, opcert := devnetCredPaths(t)
 	cardanoCfg := shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour))
 	n := newTestNodeForBP(t, true, vrf, kes, opcert, cardanoCfg)
@@ -253,6 +265,8 @@ func TestValidateBlockProducerLedger_DevnetVRFMismatchWarns(t *testing.T) {
 }
 
 func TestHandleGenesisSnapshotError_BlockProducerFatal(t *testing.T) {
+	t.Parallel()
+
 	n := &Node{
 		config: Config{
 			logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -273,6 +287,8 @@ func TestHandleGenesisSnapshotError_BlockProducerFatal(t *testing.T) {
 }
 
 func TestHandleGenesisSnapshotError_RelayWarnsAndContinues(t *testing.T) {
+	t.Parallel()
+
 	n := &Node{
 		config: Config{
 			logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -298,6 +314,8 @@ func (s testMempoolTransactionSource) RemoveTxsByHash(_ []string) {}
 // TestMempoolAdaptersPreservePendingTransactionView verifies the node-level
 // adapters preserve the pending transaction fields needed for block building.
 func TestMempoolAdaptersPreservePendingTransactionView(t *testing.T) {
+	t.Parallel()
+
 	source := testMempoolTransactionSource{
 		txs: []mempool.MempoolTransaction{
 			{
@@ -368,6 +386,8 @@ func (c testLeiosParentChain) BlockByPoint(
 func TestLeiosPipelineAdapterParentAnnouncementUsesLegacyHeaderExtension(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ebHashBytes := testLeiosHash(0x40)
 	parent := legacyLeiosParentBlock(t, ebHashBytes, 8192)
 	adapter := &leiosPipelineAdapter{

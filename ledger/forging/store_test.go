@@ -99,6 +99,10 @@ func TestSyncStateForgeFenceStoreIsPerPool(t *testing.T) {
 	first := NewSyncStateForgeFenceStore(backing, storeTestPoolID("poolA"))
 	second := NewSyncStateForgeFenceStore(backing, storeTestPoolID("poolB"))
 
+	// NewSyncStateForgeFenceStore returns nil only for a nil store
+	// (ledger/forging/store.go), and newMockSyncStateStore never returns
+	// nil, so the fence stores built above are non-nil.
+	//nolint:nilaway // newMockSyncStateStore returns a non-nil store
 	require.NoError(t, first.StoreLastForgedSlot(500))
 
 	slot, ok, err := second.LoadLastForgedSlot()
@@ -274,11 +278,9 @@ func TestSyncStateForgeFenceStoreConcurrentStoresKeepHighest(t *testing.T) {
 	const highest = 500
 	var wg sync.WaitGroup
 	for slot := 1; slot <= highest; slot++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			assert.NoError(t, store.StoreLastForgedSlot(uint64(slot)))
-		}()
+		})
 	}
 	wg.Wait()
 

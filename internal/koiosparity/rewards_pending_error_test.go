@@ -15,6 +15,8 @@ import (
 // from being treated as evidence that rewards are pending. The pending flag is
 // only valid for a missing epoch row; a database failure must reach the caller.
 func TestDingoDBPropagatesApplyingEpochLookupError(t *testing.T) {
+	t.Parallel()
+
 	db, gdb := openTestDingoDB(t)
 	pool := testPoolKeyHash(t, 0x41)
 	require.NoError(t, gdb.Exec(
@@ -35,6 +37,8 @@ func TestDingoDBPropagatesApplyingEpochLookupError(t *testing.T) {
 // contract through the in-process source. Both RewardParitySource
 // implementations must fail closed when their E+3 lookup cannot run.
 func TestDatabaseSourcePropagatesApplyingEpochLookupError(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	sqlDB := sourceSQLDB(t, db)
 	pool := testPoolKeyHash(t, 0x42)
@@ -57,6 +61,8 @@ func TestDatabaseSourcePropagatesApplyingEpochLookupError(t *testing.T) {
 }
 
 func TestMissingApplyingEpochIsThePendingCase(t *testing.T) {
+	t.Parallel()
+
 	t.Run("standalone source", func(t *testing.T) {
 		db, gdb := openTestDingoDB(t)
 		pool := testPoolKeyHash(t, 0x43)
@@ -102,6 +108,8 @@ func TestMissingApplyingEpochIsThePendingCase(t *testing.T) {
 }
 
 func TestPositiveSlotWithoutTipHashIsNotPending(t *testing.T) {
+	t.Parallel()
+
 	t.Run("standalone source", func(t *testing.T) {
 		db, gdb := openTestDingoDB(t)
 		pool := testPoolKeyHash(t, 0x45)
@@ -140,6 +148,8 @@ func TestPositiveSlotWithoutTipHashIsNotPending(t *testing.T) {
 }
 
 func TestZeroSlotWithTipHashIsNotPending(t *testing.T) {
+	t.Parallel()
+
 	t.Run("standalone source", func(t *testing.T) {
 		db, gdb := openTestDingoDB(t)
 		pool := testPoolKeyHash(t, 0x47)
@@ -176,6 +186,8 @@ func TestZeroSlotWithTipHashIsNotPending(t *testing.T) {
 }
 
 func TestComparePoolEpochUsesRewardsPending(t *testing.T) {
+	t.Parallel()
+
 	memberRewardMismatch := func(mismatches []CheckMismatch) CheckMismatch {
 		for _, mismatch := range mismatches {
 			if mismatch.Field == "member_rewards" {

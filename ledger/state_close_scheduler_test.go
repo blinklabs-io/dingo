@@ -47,6 +47,8 @@ import (
 // scheduler, not about forgeBlock's own logic, so a minimal stand-in
 // task exercises the exact same missing-Stop-call gap.
 func TestCloseStopsForgingScheduler(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),

@@ -126,7 +126,12 @@ func (o *Ouroboros) blockfetchClientConnOpts() []blockfetch.BlockFetchOptionFunc
 func (o *Ouroboros) decodeBlockfetchBlock(
 	blockType uint,
 	raw []byte,
-) (gledger.Block, error) {
+) (block gledger.Block, err error) {
+	defer func() {
+		if err == nil && block != nil {
+			block.Hash()
+		}
+	}()
 	if o.config.NetworkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic &&
 		blockType == gledger.BlockTypeConway {
 		return models.DecodeConwayBlock(raw)

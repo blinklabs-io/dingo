@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -87,6 +88,42 @@ type Chain struct {
 	pendingUpdates      []event.Event
 	pendingUpdatesMutex sync.Mutex
 	publishMutex        sync.Mutex
+
+	// batchCommitMutex keeps a rollback from resolving block indices that a
+	// chain-owned batch transaction has already applied to the in-memory
+	// chain but has not yet committed.
+	//
+	// addRawBlocks and AddBlocks advance c.tipBlockIndex, c.currentTip,
+	// c.headers and c.blocks inside their transaction's closure while holding
+	// c.mutex, and txn.Do only commits after that closure has returned and
+	// both chain locks have been released. Anything that takes c.mutex in the
+	// window between the two observes a tip index whose block the store
+	// cannot serve yet: ChainManager.removeBlockByIndex opens its own
+	// transaction, and no transaction can see another's uncommitted writes.
+	// rollbackLocked's removal loop starts at c.tipBlockIndex, so it failed
+	// its very first iteration with models.ErrBlockNotFound at an index the
+	// in-memory chain legitimately holds.
+	//
+	// A batch holds this for read from before it mutates memory until its
+	// transaction has concluded; rollbackLocked holds it for write, so the
+	// removal loop only ever runs against a store that has caught up with
+	// memory. The batch's read hold is deferred until txn.Do returns, so a
+	// transaction panic cannot leak the hold or strand a later rollback.
+	// Go's RWMutex is writer-preferring, so a waiting rollback also blocks
+	// further batches from starting rather than being starved by them.
+	//
+	// It covers only the transactions the chain itself owns. addBlockInternal
+	// takes a caller-supplied transaction whose commit the chain neither
+	// performs nor observes, so the same window remains open there.
+	batchCommitMutex sync.RWMutex
+
+	// headerSeq is the fallback chain-mutation counter used only by a Chain
+	// built without a ChainManager, which nothing outside this package's
+	// tests does. Every chain the manager builds stamps from the
+	// manager-owned counter instead, so the sequence is a total order
+	// across all publishers on the shared event bus; see
+	// nextHeaderSeqLocked and ChainManager.headerSeq. Guarded by c.mutex.
+	headerSeq uint64
 }
 
 type queuedHeader struct {
@@ -226,7 +263,139 @@ func (c *Chain) addBlockHeader(
 	}
 	// Add header
 	c.headers = append(c.headers, queued)
+	// Surface a Leios endorser-block announcement the moment its ranking
+	// block's header enters the queue. The apply-driven ChainUpdateEventType
+	// cannot serve this: applying an EB-announcing ranking block waits on
+	// fetching that same endorser block, so it lands long after the Leios
+	// vote window (measured from the announcing ranking block's slot) has
+	// closed. Emitting here rather than at the chainsync call site also
+	// covers the fork-resolution path, which queues headers through this
+	// same method and returns before the caller's ordinary bookkeeping.
+	// Enqueued under c.mutex so it is ordered against the invalidations
+	// emitted by rollbackLocked and ClearHeaders.
+	//
+	// Only a crypto-verified header announces. AddBlockHeader admits headers
+	// whose VRF/KES nobody has checked: chainsync queues a header unverified
+	// whenever the epoch nonce for its slot is not cached, deferring
+	// verification to blockfetch. Arming a Leios announcement from one would
+	// let any chainsync peer make this node sign and publish a BLS vote for a
+	// ranking block it never authenticated, and that vote occupies the
+	// (slot, voterId) pair, so the honest block's own vote for the same slot
+	// is then refused -- the "seated member does not vote" outcome this path
+	// exists to prevent.
+	//
+	// No votable announcement is lost by the gate. The other two unverified
+	// admissions are the validation-disabled and Mithril-covered paths, both
+	// of which are far enough behind the tip that VoteManager.slotWindowCheck
+	// declines anyway, and every unverified header that does turn out to be
+	// real is still announced from ChainUpdateEventType once its block is
+	// fetched, validated and applied (VoteManager.handleChainBlock), which is
+	// where all arming happened before the header stream existed.
+	if cryptoVerified {
+		if evt, ok := leiosAnnouncementEvent(
+			header,
+			headerHash,
+			c.nextHeaderSeqLocked(),
+		); ok {
+			c.queueDeferredEventLocked(evt)
+		}
+	}
 	return nil
+}
+
+// leiosAnnouncementEvent builds the header-arrival event for a ranking-block
+// header that announces a Leios endorser block. Headers from eras without
+// announcements, and announcement-capable headers that announce nothing,
+// return false, so a chain carrying no Leios traffic pays one type assertion
+// per header and enqueues nothing.
+func leiosAnnouncementEvent(
+	header ledger.BlockHeader,
+	headerHash lcommon.Blake2b256,
+	seq uint64,
+) (event.Event, bool) {
+	if header == nil {
+		return event.Event{}, false
+	}
+	announcer, ok := header.(interface {
+		LeiosAnnouncement() (lcommon.Blake2b256, uint64, bool)
+	})
+	if !ok {
+		return event.Event{}, false
+	}
+	ebHash, _, ok := announcer.LeiosAnnouncement()
+	if !ok {
+		return event.Event{}, false
+	}
+	return event.NewEvent(
+		ChainHeaderEventType,
+		ChainHeaderAnnouncementEvent{
+			Slot:   header.SlotNumber(),
+			RbHash: lcommon.NewBlake2b256(headerHash.Bytes()),
+			EbHash: ebHash,
+			Seq:    seq,
+		},
+	), true
+}
+
+// headerInvalidationEvent builds the counterpart to leiosAnnouncementEvent:
+// every announcement above point describes a ranking block that is no longer
+// on our chain.
+func headerInvalidationEvent(
+	point ocommon.Point,
+	reason string,
+	seq uint64,
+	rbHashes []lcommon.Blake2b256,
+) event.Event {
+	return event.NewEvent(
+		ChainHeaderEventType,
+		ChainHeaderInvalidationEvent{
+			Point:    point,
+			RbHashes: rbHashes,
+			Reason:   reason,
+			Seq:      seq,
+		},
+	)
+}
+
+// queuedHeaderHashes names the headers currently in the queue, for an
+// invalidation that must identify them individually. Callers must hold
+// c.mutex.
+func (c *Chain) queuedHeaderHashes() []lcommon.Blake2b256 {
+	if len(c.headers) == 0 {
+		return nil
+	}
+	hashes := make([]lcommon.Blake2b256, 0, len(c.headers))
+	for _, queued := range c.headers {
+		hashes = append(
+			hashes,
+			lcommon.NewBlake2b256(queued.point.Hash),
+		)
+	}
+	return hashes
+}
+
+// nextHeaderSeqLocked stamps the next chain-mutation sequence number. Callers
+// must hold c.mutex, so the number orders this chain's mutations exactly as
+// the sequencer orders the events they produce.
+//
+// The counter belongs to the ChainManager rather than to the Chain because
+// ChainHeaderEventType is one topic on the one event bus the manager hands to
+// every chain it builds, and a consumer compares the sequence numbers it
+// receives as a single total order. A per-chain counter would restart at 1 on
+// any second publishing chain, so that consumer would protect or prune state
+// belonging to the wrong mutation. It starts at 1: zero means "unsequenced" to
+// consumers.
+//
+// A Chain constructed without a manager -- only this package's tests do that,
+// by building the struct literal directly -- falls back to a chain-local
+// counter. Such a chain shares no bus with any other, so a local counter is
+// already a complete order for it.
+func (c *Chain) nextHeaderSeqLocked() uint64 {
+	if c.manager != nil {
+		return c.manager.nextHeaderSeq()
+	}
+	c.headerSeq++
+	return c.headerSeq
 }
 
 func (c *Chain) AddBlock(
@@ -237,6 +406,15 @@ func (c *Chain) AddBlock(
 	if err != nil {
 		return err
 	}
+	// addBlockLocked queued a header invalidation on the chain-level
+	// sequencer for any peer headers this block discarded, and a queued
+	// announcing header may have left its announcement there too. Drain
+	// before publishing the block, as AddLocalBlock does and for the same
+	// reason: nothing else on this path is guaranteed to drain, so the vote
+	// manager would keep votes armed for announcements whose ranking blocks
+	// are gone. Safe here because, as below, this path's callers are not
+	// under a ledger mutex.
+	c.PublishPendingChainUpdates()
 	// Publish event immediately for standalone (non-batched) callers.
 	// forgeBlock reaches this on the scheduler goroutine, not under a ledger
 	// mutex, so a backpressured Publish here cannot stall the chainsync
@@ -264,6 +442,12 @@ func (c *Chain) AddLocalBlock(block ledger.Block) error {
 	if err != nil {
 		return err
 	}
+	// addBlockLocked queued a header invalidation for the peer headers this
+	// block discarded on the chain-level sequencer. Drain it here, with
+	// c.mutex released: forging is the only caller, it runs on the scheduler
+	// goroutine rather than under a ledger mutex, and nothing else on this
+	// path is guaranteed to drain afterwards.
+	c.PublishPendingChainUpdates()
 	if c.eventBus != nil && evt.Type != "" {
 		c.eventBus.Publish(ChainUpdateEventType, evt)
 	}
@@ -282,6 +466,10 @@ func (c *Chain) AddBlockWithPoint(
 	if err != nil {
 		return err
 	}
+	// As in AddBlock: drain the sequencer this add may have written to
+	// before publishing the block. Callers that hold a ledger mutex must use
+	// AddBlockWithPointDeferred, which is what the blockfetch drain does.
+	c.PublishPendingChainUpdates()
 	if c.eventBus != nil && evt.Type != "" {
 		c.eventBus.Publish(ChainUpdateEventType, evt)
 	}
@@ -471,9 +659,11 @@ func (c *Chain) addBlockLocked(
 		c.blocks = append(c.blocks, tmpPoint)
 	}
 	// Remove matching header entry, if any
+	var discardedHeaders []lcommon.Blake2b256
 	if matchPendingHeader && len(c.headers) > 0 {
 		c.headers = slices.Delete(c.headers, 0, 1)
 	} else if !matchPendingHeader {
+		discardedHeaders = c.queuedHeaderHashes()
 		c.headers = c.headers[:0]
 	}
 	// Update tip
@@ -483,6 +673,40 @@ func (c *Chain) addBlockLocked(
 	}
 	c.tipBlockIndex = newBlockIndex
 	c.mutationGeneration++
+	// A locally forged block discards the queued peer headers without
+	// rolling anything back, so nothing else voids the Leios announcements
+	// they carried: the chain.update this produces is a block add, not a
+	// rollback. The chain grew, so those headers can sit at or below the
+	// new tip and Point cannot name them -- RbHashes does. Enqueued under
+	// c.mutex like every other header-lifecycle event, so it stays ordered
+	// against the announcements addBlockHeader queues.
+	if len(discardedHeaders) > 0 {
+		c.queueDeferredEventLocked(headerInvalidationEvent(
+			c.currentTip.Point,
+			HeaderInvalidationLocalBlock,
+			c.nextHeaderSeqLocked(),
+			discardedHeaders,
+		))
+	}
+	// A locally forged block never passes through addBlockHeader, so its own
+	// announcement would otherwise be armed only from ChainUpdateEventType,
+	// on a topic the consumer selects independently of this one. That is a
+	// race it cannot win when the block competes with a discarded peer
+	// header at the same slot: the peer's vote occupies the (slot, voter)
+	// vote id, the block's arming arrives first and its vote is rejected as
+	// a duplicate, and the invalidation above then frees the id with nothing
+	// left to retry. Announcing it here, sequenced immediately behind that
+	// invalidation, means the id is always free before the consumer arms it.
+	// The apply-driven path stays as an idempotent backstop.
+	if !matchPendingHeader {
+		if evt, ok := leiosAnnouncementEvent(
+			block.Header(),
+			lcommon.NewBlake2b256(blockHashBytes),
+			c.nextHeaderSeqLocked(),
+		); ok {
+			c.queueDeferredEventLocked(evt)
+		}
+	}
 	if notifyWaiters {
 		c.notifyWaitingIterators()
 	}
@@ -519,32 +743,104 @@ func (c *Chain) AddBlocks(blocks []ledger.Block) error {
 		// This prevents subscribers from observing rolled-back data
 		// when a later block in the batch fails.
 		pendingEvents := make([]event.Event, 0, batchSize)
-		txn := c.manager.db.BlobTxn(true)
-		err := txn.Do(func(txn *database.Txn) error {
-			c.mutex.Lock()
-			defer c.mutex.Unlock()
-			c.manager.mutex.Lock()
-			defer c.manager.mutex.Unlock()
-			if err := c.reconcile(); err != nil {
-				return fmt.Errorf("reconcile chain: %w", err)
-			}
-			for _, tmpBlock := range blocks[batchOffset : batchOffset+batchSize] {
-				evt, err := c.addBlockLocked(
-					tmpBlock,
-					ocommon.Point{},
-					txn,
-					false,
-					true,
-				)
-				if err != nil {
-					return err
+		// Hold the batch-commit barrier from before this batch mutates the
+		// in-memory chain until its transaction has concluded, so a
+		// concurrent rollback cannot resolve an index the store has yet to
+		// commit. See the batchCommitMutex field.
+		err := func() error {
+			c.batchCommitMutex.RLock()
+			defer c.batchCommitMutex.RUnlock()
+			txn := c.manager.db.BlobTxn(true)
+			var (
+				savedTip             ochainsync.Tip
+				savedTipBlockIndex   uint64
+				savedGeneration      uint64
+				savedHeaders         []queuedHeader
+				savedBlocks          []ocommon.Point
+				batchApplied         bool
+				appliedTip           ochainsync.Tip
+				appliedTipBlockIndex uint64
+				appliedGeneration    uint64
+			)
+			err := txn.Do(func(txn *database.Txn) error {
+				c.mutex.Lock()
+				defer c.mutex.Unlock()
+				c.manager.mutex.Lock()
+				defer c.manager.mutex.Unlock()
+				if err := c.reconcile(); err != nil {
+					return fmt.Errorf("reconcile chain: %w", err)
 				}
-				if evt.Type != "" {
-					pendingEvents = append(pendingEvents, evt)
+				savedTip = c.currentTip
+				savedTipBlockIndex = c.tipBlockIndex
+				savedGeneration = c.mutationGeneration
+				savedHeaders = slices.Clone(c.headers)
+				if !c.persistent {
+					savedBlocks = slices.Clone(c.blocks)
 				}
+				for _, tmpBlock := range blocks[batchOffset : batchOffset+batchSize] {
+					evt, err := c.addBlockLocked(
+						tmpBlock,
+						ocommon.Point{},
+						txn,
+						false,
+						true,
+					)
+					if err != nil {
+						c.currentTip = savedTip
+						c.tipBlockIndex = savedTipBlockIndex
+						c.mutationGeneration = savedGeneration
+						c.headers = savedHeaders
+						if !c.persistent {
+							c.blocks = savedBlocks
+						}
+						return err
+					}
+					if evt.Type != "" {
+						pendingEvents = append(pendingEvents, evt)
+					}
+				}
+				batchApplied = true
+				appliedTip = c.currentTip
+				appliedTipBlockIndex = c.tipBlockIndex
+				appliedGeneration = c.mutationGeneration
+				return nil
+			})
+			if err != nil && batchApplied {
+				c.mutex.Lock()
+				c.manager.mutex.Lock()
+				if c.batchRestoreIsSafeLocked(
+					appliedTip,
+					appliedTipBlockIndex,
+					appliedGeneration,
+				) {
+					c.currentTip = savedTip
+					c.tipBlockIndex = savedTipBlockIndex
+					c.mutationGeneration = savedGeneration
+					c.headers = savedHeaders
+					if !c.persistent {
+						c.blocks = savedBlocks
+					}
+				} else {
+					slog.Default().Error(
+						"skipped in-memory restore after block batch commit failure: chain moved under the batch",
+						"component", "chain",
+						"chain_id", c.id,
+						"applied_tip_block_index", appliedTipBlockIndex,
+						"tip_block_index", c.tipBlockIndex,
+						"applied_generation", appliedGeneration,
+						"mutation_generation", c.mutationGeneration,
+						"applied_tip_slot", appliedTip.Point.Slot,
+						"applied_tip_hash", hex.EncodeToString(appliedTip.Point.Hash),
+						"tip_slot", c.currentTip.Point.Slot,
+						"tip_hash", hex.EncodeToString(c.currentTip.Point.Hash),
+						"error", err,
+					)
+				}
+				c.manager.mutex.Unlock()
+				c.mutex.Unlock()
 			}
-			return nil
-		})
+			return err
+		}()
 		if err != nil {
 			return err
 		}
@@ -731,113 +1027,139 @@ func (c *Chain) addRawBlocks(
 		// publish them only after the transaction commits
 		// successfully.
 		pendingEvents := make([]event.Event, 0, batchSize)
-		txn := c.manager.db.BlobTxn(true)
-		// addRawBlockLocked mutates c.currentTip, c.tipBlockIndex,
-		// c.headers, and c.blocks before the txn commits. If a
-		// later block in the batch fails the closure restores the
-		// pre-batch state, but txn.Do also runs Commit *after* the
-		// closure returns and after the chain locks are released —
-		// a Commit failure rolls back the persistent state while
-		// leaving the in-memory chain advanced. Capture the
-		// snapshot here so we can also restore on Commit failure.
-		var (
-			savedTip             ochainsync.Tip
-			savedTipBlockIndex   uint64
-			savedGeneration      uint64
-			savedHeaders         []queuedHeader
-			savedBlocks          []ocommon.Point
-			batchApplied         bool
-			appliedTip           ochainsync.Tip
-			appliedTipBlockIndex uint64
-			appliedGeneration    uint64
-		)
-		err := txn.Do(func(txn *database.Txn) error {
-			batch := blocks[batchOffset : batchOffset+batchSize]
-			c.mutex.Lock()
-			defer c.mutex.Unlock()
-			c.manager.mutex.Lock()
-			defer c.manager.mutex.Unlock()
-			if err := c.reconcile(); err != nil {
-				return fmt.Errorf("reconcile: %w", err)
-			}
-			savedTip = c.currentTip
-			savedTipBlockIndex = c.tipBlockIndex
-			savedGeneration = c.mutationGeneration
-			savedHeaders = slices.Clone(c.headers)
-			if !c.persistent {
-				savedBlocks = slices.Clone(c.blocks)
-			}
-			for _, rb := range batch {
-				evt, err := c.addRawBlockLocked(
-					rb,
-					txn,
-					callback,
-				)
-				if err != nil {
-					c.currentTip = savedTip
-					c.tipBlockIndex = savedTipBlockIndex
-					c.mutationGeneration = savedGeneration
-					c.headers = savedHeaders
-					if !c.persistent {
-						c.blocks = savedBlocks
-					}
-					return err
-				}
-				if evt.Type != "" {
-					pendingEvents = append(
-						pendingEvents, evt,
-					)
-				}
-			}
-			// Record what this batch leaves behind so the Commit-failure
-			// path below can tell its own state from someone else's.
-			batchApplied = true
-			appliedTip = c.currentTip
-			appliedTipBlockIndex = c.tipBlockIndex
-			appliedGeneration = c.mutationGeneration
-			return nil
-		})
-		if err != nil {
-			// Cover the Commit-failure path: closure returned nil
-			// but txn.Do's later Commit failed, so memory still
-			// reflects the post-batch tip while the DB rolled
-			// back. Re-acquire the locks and restore -- but only
-			// while the chain still shows exactly what this batch
-			// left behind.
-			//
-			// The locks are released when the closure returns, so
-			// another goroutine can move the chain before this runs,
-			// and rolling the primary chain back while blockfetch
-			// appends to it is a normal pairing rather than a corner
-			// case: it is what every ledger recovery rewind does.
-			// Writing the pre-batch snapshot over a rollback's result
-			// raises tipBlockIndex back above blocks that rollback
-			// deleted, leaving the chain claiming a tip it does not
-			// store -- an inflated fork depth on the next rollback and
-			// a not-found lookup for any index in the resurrected
-			// span. A closure-internal error already restored under
-			// the lock, so there is nothing left to do for it here
-			// either.
-			if batchApplied {
+		// Hold the batch-commit barrier from before this batch mutates the
+		// in-memory chain until its transaction has concluded, so a
+		// concurrent rollback cannot resolve an index the store has yet to
+		// commit. See the batchCommitMutex field.
+		err := func() error {
+			c.batchCommitMutex.RLock()
+			defer c.batchCommitMutex.RUnlock()
+			txn := c.manager.db.BlobTxn(true)
+			// addRawBlockLocked mutates c.currentTip, c.tipBlockIndex,
+			// c.headers, and c.blocks before the txn commits. If a
+			// later block in the batch fails the closure restores the
+			// pre-batch state, but txn.Do also runs Commit *after* the
+			// closure returns and after the chain locks are released —
+			// a Commit failure rolls back the persistent state while
+			// leaving the in-memory chain advanced. Capture the
+			// snapshot here so we can also restore on Commit failure.
+			var (
+				savedTip             ochainsync.Tip
+				savedTipBlockIndex   uint64
+				savedGeneration      uint64
+				savedHeaders         []queuedHeader
+				savedBlocks          []ocommon.Point
+				batchApplied         bool
+				appliedTip           ochainsync.Tip
+				appliedTipBlockIndex uint64
+				appliedGeneration    uint64
+			)
+			err := txn.Do(func(txn *database.Txn) error {
+				batch := blocks[batchOffset : batchOffset+batchSize]
 				c.mutex.Lock()
+				defer c.mutex.Unlock()
 				c.manager.mutex.Lock()
-				if c.batchRestoreIsSafeLocked(
-					appliedTip,
-					appliedTipBlockIndex,
-					appliedGeneration,
-				) {
-					c.currentTip = savedTip
-					c.tipBlockIndex = savedTipBlockIndex
-					c.mutationGeneration = savedGeneration
-					c.headers = savedHeaders
-					if !c.persistent {
-						c.blocks = savedBlocks
+				defer c.manager.mutex.Unlock()
+				if err := c.reconcile(); err != nil {
+					return fmt.Errorf("reconcile: %w", err)
+				}
+				savedTip = c.currentTip
+				savedTipBlockIndex = c.tipBlockIndex
+				savedGeneration = c.mutationGeneration
+				savedHeaders = slices.Clone(c.headers)
+				if !c.persistent {
+					savedBlocks = slices.Clone(c.blocks)
+				}
+				for _, rb := range batch {
+					evt, err := c.addRawBlockLocked(
+						rb,
+						txn,
+						callback,
+					)
+					if err != nil {
+						c.currentTip = savedTip
+						c.tipBlockIndex = savedTipBlockIndex
+						c.mutationGeneration = savedGeneration
+						c.headers = savedHeaders
+						if !c.persistent {
+							c.blocks = savedBlocks
+						}
+						return err
+					}
+					if evt.Type != "" {
+						pendingEvents = append(
+							pendingEvents, evt,
+						)
 					}
 				}
-				c.manager.mutex.Unlock()
-				c.mutex.Unlock()
+				// Record what this batch leaves behind so the Commit-failure
+				// path below can tell its own state from someone else's.
+				batchApplied = true
+				appliedTip = c.currentTip
+				appliedTipBlockIndex = c.tipBlockIndex
+				appliedGeneration = c.mutationGeneration
+				return nil
+			})
+			if err != nil {
+				// Cover the Commit-failure path: closure returned nil
+				// but txn.Do's later Commit failed, so memory still
+				// reflects the post-batch tip while the DB rolled
+				// back. Re-acquire the locks and restore -- but only
+				// while the chain still shows exactly what this batch
+				// left behind.
+				//
+				// The batch-commit barrier remains held while this recovery runs, so
+				// another chain mutation cannot move the chain between the failed
+				// commit and the snapshot check. A closure-internal error already
+				// restored under the chain locks, so there is nothing left to do for
+				// it here either.
+				if batchApplied {
+					c.mutex.Lock()
+					c.manager.mutex.Lock()
+					if c.batchRestoreIsSafeLocked(
+						appliedTip,
+						appliedTipBlockIndex,
+						appliedGeneration,
+					) {
+						c.currentTip = savedTip
+						c.tipBlockIndex = savedTipBlockIndex
+						c.mutationGeneration = savedGeneration
+						c.headers = savedHeaders
+						if !c.persistent {
+							c.blocks = savedBlocks
+						}
+					} else {
+						// Skipping the restore is the correct choice -- writing
+						// the snapshot over whatever moved the chain is the
+						// divergence this guard exists to prevent -- but it
+						// leaves the in-memory chain holding a batch the commit
+						// discarded. Record it, so the missing block or inflated
+						// fork depth it later surfaces as is attributable to this
+						// commit failure instead of appearing without a cause.
+						slog.Default().Error(
+							"skipped in-memory restore after batch commit failure: chain moved under the batch",
+							"component", "chain",
+							"chain_id", c.id,
+							"applied_tip_block_index", appliedTipBlockIndex,
+							"tip_block_index", c.tipBlockIndex,
+							"applied_generation", appliedGeneration,
+							"mutation_generation", c.mutationGeneration,
+							"applied_tip_slot", appliedTip.Point.Slot,
+							"applied_tip_hash", hex.EncodeToString(appliedTip.Point.Hash),
+							"tip_slot", c.currentTip.Point.Slot,
+							"tip_hash", hex.EncodeToString(c.currentTip.Point.Hash),
+							"error", err,
+						)
+					}
+					c.manager.mutex.Unlock()
+					c.mutex.Unlock()
+				}
+				return fmt.Errorf("add raw block batch: %w", err)
 			}
-			return fmt.Errorf("add raw block batch: %w", err)
+			return nil
+		}()
+		if err != nil {
+			return err
 		}
 		c.notifyWaitingIterators()
 		// Publish events (only when eventBus is set). Not reached under a
@@ -864,23 +1186,36 @@ func (c *Chain) notifyWaitingIterators() {
 }
 
 func (c *Chain) Rollback(point ocommon.Point) error {
+	return c.rollback(point, false)
+}
+
+// RollbackUnbounded behaves like Rollback, but does not require the security
+// parameter K to be configured and does not reject a rollback for exceeding
+// it. It exists for reconciling a persistent chain against a caller's own
+// prior local state -- e.g. the primary chain against the ledger's own
+// applied tip at startup, before ChainManager.SetLedger has configured K --
+// where the depth is whatever the two locally-durable stores drifted, not a
+// peer-supplied point subject to the same-security-guarantee K exists to
+// enforce. Follow-on rollbacks initiated by an untrusted peer must always use
+// Rollback, never this.
+func (c *Chain) RollbackUnbounded(point ocommon.Point) error {
+	return c.rollback(point, true)
+}
+
+func (c *Chain) rollback(point ocommon.Point, unbounded bool) error {
 	if c == nil {
 		return errors.New("chain is nil")
 	}
-	pendingEvents, err := c.rollbackLocked(point, false)
-	if err != nil {
+	if _, err := c.rollbackLocked(point, unbounded); err != nil {
 		return err
 	}
-	// Publish events after locks are released to prevent deadlocks
-	// when subscribers call back into chain/manager state. The
-	// mutex-holding ledger rollback path uses RollbackDeferred instead,
-	// which returns these events for the ledger to publish after it
-	// releases chainsyncMutex.
-	if c.eventBus != nil {
-		for _, evt := range pendingEvents {
-			c.eventBus.Publish(evt.Type, evt)
-		}
-	}
+	// rollbackLocked queued this rollback's events on the chain-level
+	// sequencer under c.mutex, so draining here -- with the lock released,
+	// to avoid deadlocking a subscriber that calls back into chain/manager
+	// state -- publishes them in true chain-mutation order relative to any
+	// concurrent deferred add. Publishing them inline instead would let an
+	// add that mutated the chain after this rollback be published before it.
+	c.PublishPendingChainUpdates()
 	return nil
 }
 
@@ -906,7 +1241,7 @@ func (c *Chain) RollbackDeferred(
 	if c == nil {
 		return nil, errors.New("chain is nil")
 	}
-	return c.rollbackLocked(point, true)
+	return c.rollbackLocked(point, false)
 }
 
 // rollbackForkDepth returns the number of blocks a rollback to
@@ -1094,9 +1429,12 @@ func (c *Chain) ValidateRollback(point ocommon.Point) error {
 			return nil
 		}
 	}
-	// Lookup block for rollback point
+	// Lookup block for rollback point. Slot 0 is a real slot, so a point is
+	// only "names no block" when it carries neither a slot nor a hash --
+	// gating on the slot alone let a hash-bearing point at slot 0 skip
+	// membership validation and resolve against block index zero.
 	var rollbackBlockIndex uint64
-	if point.Slot > 0 {
+	if point.Slot > 0 || len(point.Hash) > 0 {
 		tmpBlock, err := c.rollbackPointBlock(point)
 		if err != nil {
 			return err
@@ -1128,10 +1466,24 @@ func (c *Chain) ValidateRollback(point ocommon.Point) error {
 
 // rollbackLocked performs all rollback logic under locks and returns
 // events to be published by the caller after locks are released.
+//
+// unbounded skips both the security-parameter-configured check and the
+// rollback-depth bound itself -- see RollbackUnbounded.
+//
+// rollbackLocked performs the rollback and enqueues the resulting events on the
+// chain-level sequencer. Both entry points publish through that sequencer; they
+// differ only in who drains it -- RollbackDeferred's caller once it releases
+// its outer ledger mutex, or Rollback itself before it returns.
 func (c *Chain) rollbackLocked(
 	point ocommon.Point,
-	deferred bool,
+	unbounded bool,
 ) ([]event.Event, error) {
+	// Wait for any chain-owned batch transaction that has already applied to
+	// the in-memory chain to conclude, so the removal loop below cannot ask
+	// the store for an index whose write has not committed yet. See the
+	// batchCommitMutex field.
+	c.batchCommitMutex.Lock()
+	defer c.batchCommitMutex.Unlock()
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	// We get a write lock on the manager to cover the integrity checks and block deletions
@@ -1141,12 +1493,13 @@ func (c *Chain) rollbackLocked(
 	if err := c.reconcile(); err != nil {
 		return nil, fmt.Errorf("reconcile chain: %w", err)
 	}
-	if c.persistent && c.manager.securityParam <= 0 {
+	if c.persistent && c.manager.securityParam <= 0 && !unbounded {
 		return nil, ErrSecurityParamNotConfigured
 	}
 	// Check headers for rollback point. The scan itself does not mutate
 	// c.headers, so a not-found error leaves the queue untouched; headers
-	// are only deleted once we know the rollback will actually apply.
+	// are only deleted once we know the rollback will actually apply
+	// (issue #3516 review; issue #3809).
 	if len(c.headers) > 0 {
 		idx, err := c.findQueuedHeader(point)
 		if err != nil {
@@ -1155,14 +1508,32 @@ func (c *Chain) rollbackLocked(
 		if idx >= 0 {
 			// Rollback point is a queued header. Drop only the headers
 			// after it and leave the matched header itself queued.
+			discarded := c.queuedHeaderHashes()[idx+1:]
+			dropped := len(discarded)
 			c.headers = slices.Delete(c.headers, idx+1, len(c.headers))
+			// Those headers never become blocks, so any announcement
+			// they carried is void. This path returns no chain.update
+			// event at all -- no block was removed -- so without this
+			// the announcements would stay armed with nothing left to
+			// void them.
+			if dropped > 0 {
+				c.queueDeferredEventLocked(headerInvalidationEvent(
+					point,
+					HeaderInvalidationRollback,
+					c.nextHeaderSeqLocked(),
+					discarded,
+				))
+			}
 			return nil, nil
 		}
 	}
-	// Lookup block for rollback point
+	// Lookup block for rollback point. See ValidateRollback: a point at slot
+	// 0 that carries a hash still names a block, and skipping the lookup for
+	// it deletes the chain tail while setting currentTip to a point whose
+	// block is not retained.
 	var rollbackBlockIndex uint64
 	var tmpBlock models.Block
-	if point.Slot > 0 {
+	if point.Slot > 0 || len(point.Hash) > 0 {
 		var err error
 		tmpBlock, err = c.rollbackPointBlock(point)
 		if err != nil {
@@ -1176,9 +1547,10 @@ func (c *Chain) rollbackLocked(
 	// the persistent chain. Ephemeral (fork-tracking) chains are
 	// not subject to this limit. When the chain is shorter than K
 	// blocks (initial sync), the entire chain can be safely
-	// replaced during sync.
+	// replaced during sync. An unbounded rollback skips this bound
+	// too -- see RollbackUnbounded.
 	securityParam := c.manager.securityParam
-	if c.persistent &&
+	if c.persistent && !unbounded &&
 		c.tipBlockIndex >= uint64(securityParam) && //nolint:gosec
 		forkDepth > uint64(securityParam) { //nolint:gosec
 		slog.Default().Warn(
@@ -1251,6 +1623,7 @@ func (c *Chain) rollbackLocked(
 		c.lastCommonBlockIndex = rollbackBlockIndex
 	}
 	// Clear out any headers
+	discardedHeaders := c.queuedHeaderHashes()
 	c.headers = slices.Delete(c.headers, 0, len(c.headers))
 	// Update tip
 	c.currentTip = ochainsync.Tip{
@@ -1297,6 +1670,24 @@ func (c *Chain) rollbackLocked(
 	c.notifyWaitingIterators()
 	// Build events for caller to publish after locks are released
 	var pendingEvents []event.Event
+	// The header invalidation always goes on the chain-level sequencer,
+	// deferred or not, and is never handed back to the caller. Its only
+	// ordering requirement is against the announcements queued by
+	// addBlockHeader, which are on that same sequencer; publishing it
+	// inline from Rollback would bypass the sequencer and could place it
+	// ahead of an announcement that was queued before it. Non-deferred
+	// Rollback drains the sequencer itself once the lock is released.
+	//
+	// It is emitted even when only queued headers were dropped: a header
+	// that never became a block still published an announcement, and the
+	// ChainRollbackEvent below is deliberately block-only.
+	rollbackSeq := c.nextHeaderSeqLocked()
+	c.queueDeferredEventLocked(headerInvalidationEvent(
+		point,
+		HeaderInvalidationRollback,
+		rollbackSeq,
+		discardedHeaders,
+	))
 	if len(rolledBackBlocks) > 0 {
 		// Rollback event - only emit when blocks were actually removed
 		pendingEvents = append(
@@ -1306,6 +1697,7 @@ func (c *Chain) rollbackLocked(
 				ChainRollbackEvent{
 					Point:            point,
 					RolledBackBlocks: rolledBackBlocks,
+					Seq:              rollbackSeq,
 				},
 			),
 		)
@@ -1325,18 +1717,22 @@ func (c *Chain) rollbackLocked(
 			)
 		}
 	}
-	// Deferred callers (the mutex-holding chainsync rollback path) publish
-	// through the chain-level sequencer rather than inline. Enqueue while
+	// Both modes publish through the chain-level sequencer. Enqueue while
 	// c.mutex is still held so this rollback is sequenced against concurrent
 	// blockfetch adds in true mutation order -- the rollback's chain.update
 	// then cannot be published ahead of an add that mutated the chain before
-	// it, or behind one that mutated after. The caller drains after releasing
-	// chainsyncMutex. See the pendingUpdates field and
-	// PublishPendingChainUpdates.
-	if deferred {
-		for _, evt := range pendingEvents {
-			c.queueDeferredEventLocked(evt)
-		}
+	// it, or behind one that mutated after.
+	//
+	// The non-deferred entry point used to publish these inline after
+	// draining, which reintroduced exactly that inversion: a deferred add
+	// that mutated the chain *after* this rollback is already on the
+	// sequencer, so the drain published it first and the rollback followed,
+	// inverting mutation order for the chain.update subscriber. Deferred
+	// callers drain after releasing their outer ledger mutex; Rollback drains
+	// itself. The slice is still returned for callers and tests that inspect
+	// it. See the pendingUpdates field and PublishPendingChainUpdates.
+	for _, evt := range pendingEvents {
+		c.queueDeferredEventLocked(evt)
 	}
 	return pendingEvents, nil
 }
@@ -1350,7 +1746,21 @@ func (c *Chain) ClearHeaders() {
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	discarded := c.queuedHeaderHashes()
+	hadHeaders := len(discarded) > 0
 	c.headers = c.headers[:0]
+	// Discarded headers never become blocks, so any announcement they
+	// carried is void, and no rollback is published for them because no
+	// block was ever added. Everything at or below the block tip survives;
+	// the queue held only what was above it.
+	if hadHeaders {
+		c.queueDeferredEventLocked(headerInvalidationEvent(
+			c.currentTip.Point,
+			HeaderInvalidationQueueCleared,
+			c.nextHeaderSeqLocked(),
+			discarded,
+		))
+	}
 }
 
 // RecentPoints returns up to count recent chain points in descending
@@ -1912,7 +2322,8 @@ func (c *Chain) iterNext(
 			ret.Rollback = true
 			iter.lastPoint = iter.rollbackPoint
 			iter.needsRollback = false
-			if iter.rollbackPoint.Slot > 0 {
+			if iter.rollbackPoint.Slot > 0 ||
+				len(iter.rollbackPoint.Hash) > 0 {
 				// Lookup block index for rollback point
 				tmpBlock, err := c.manager.blockByPoint(
 					iter.rollbackPoint,

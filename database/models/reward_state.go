@@ -19,7 +19,12 @@ import "github.com/blinklabs-io/dingo/database/types"
 // RewardStakeCalculationVersion identifies the stake-accounting algorithm
 // used to produce persisted live stake and consensus snapshots. Bump it when
 // changing that calculation so upgrades cannot trust older values.
-const RewardStakeCalculationVersion uint = 1
+//
+// Version 2: RewardSnapshot.TotalActiveStake carries the full observed
+// reward-stake total (the sigma_a denominator) rather than the total of the
+// pools that survived degraded-registration exclusion, so a version 1 row
+// understates the denominator for any epoch that excluded a pool.
+const RewardStakeCalculationVersion uint = 2
 
 // RewardAdaPots captures the reward-related ADA pots at an epoch boundary.
 type RewardAdaPots struct {

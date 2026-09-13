@@ -52,6 +52,8 @@ func standardTestMetadata() CertificateMetadata {
 }
 
 func TestListSnapshots(t *testing.T) {
+	t.Parallel()
+
 	expected := []SnapshotListItem{
 		{
 			SnapshotBase: SnapshotBase{
@@ -124,6 +126,8 @@ func TestListSnapshots(t *testing.T) {
 }
 
 func TestGetSnapshot(t *testing.T) {
+	t.Parallel()
+
 	expected := SnapshotListItem{
 		SnapshotBase: SnapshotBase{
 			Digest:  "abc123def456",
@@ -172,6 +176,8 @@ func TestGetSnapshot(t *testing.T) {
 }
 
 func TestGetCertificate(t *testing.T) {
+	t.Parallel()
+
 	expected := Certificate{
 		Hash:         "certhash123",
 		PreviousHash: "prevhash456",
@@ -245,6 +251,8 @@ func TestGetCertificate(t *testing.T) {
 }
 
 func TestGetCertificateGenesis(t *testing.T) {
+	t.Parallel()
+
 	expected := Certificate{
 		Hash:             "genesis_cert_hash",
 		PreviousHash:     "genesis_cert_hash",
@@ -274,6 +282,8 @@ func TestGetCertificateGenesis(t *testing.T) {
 }
 
 func TestGetLatestSnapshot(t *testing.T) {
+	t.Parallel()
+
 	snapshots := []SnapshotListItem{
 		{
 			SnapshotBase: SnapshotBase{
@@ -319,6 +329,8 @@ func TestGetLatestSnapshot(t *testing.T) {
 }
 
 func TestGetLatestSnapshotEmpty(t *testing.T) {
+	t.Parallel()
+
 	server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if _, err := w.Write([]byte("[]")); err != nil {
@@ -333,6 +345,8 @@ func TestGetLatestSnapshotEmpty(t *testing.T) {
 }
 
 func TestListMithrilStakeDistributions(t *testing.T) {
+	t.Parallel()
+
 	expected := []MithrilStakeDistributionListItem{
 		{
 			Hash:            "msd123",
@@ -359,6 +373,8 @@ func TestListMithrilStakeDistributions(t *testing.T) {
 }
 
 func TestGetMithrilStakeDistribution(t *testing.T) {
+	t.Parallel()
+
 	expected := MithrilStakeDistribution{
 		Hash:            "msd123",
 		CertificateHash: "cert123",
@@ -390,6 +406,8 @@ func TestGetMithrilStakeDistribution(t *testing.T) {
 }
 
 func TestListCardanoStakeDistributions(t *testing.T) {
+	t.Parallel()
+
 	expected := []CardanoStakeDistributionListItem{
 		{
 			Hash:            "csd123",
@@ -416,6 +434,8 @@ func TestListCardanoStakeDistributions(t *testing.T) {
 }
 
 func TestGetCardanoStakeDistribution(t *testing.T) {
+	t.Parallel()
+
 	expected := CardanoStakeDistribution{
 		Hash:            "csd123",
 		CertificateHash: "cert123",
@@ -447,6 +467,8 @@ func TestGetCardanoStakeDistribution(t *testing.T) {
 }
 
 func TestClientErrorHandling(t *testing.T) {
+	t.Parallel()
+
 	server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 	})
@@ -473,6 +495,8 @@ func TestClientErrorHandling(t *testing.T) {
 }
 
 func TestClientContextCancellation(t *testing.T) {
+	t.Parallel()
+
 	server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if _, err := w.Write([]byte("[]")); err != nil {
@@ -489,6 +513,8 @@ func TestClientContextCancellation(t *testing.T) {
 }
 
 func TestAggregatorURLForNetwork(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name    string
 		network string
@@ -531,6 +557,8 @@ func TestAggregatorURLForNetwork(t *testing.T) {
 }
 
 func TestSignedEntityTypeCardanoImmutableFilesFull(t *testing.T) {
+	t.Parallel()
+
 	raw := `{"CardanoImmutableFilesFull":{"epoch":270,"immutable_file_number":5320}}`
 	var set SignedEntityType
 	err := json.Unmarshal([]byte(raw), &set)
@@ -546,6 +574,8 @@ func TestSignedEntityTypeCardanoImmutableFilesFull(t *testing.T) {
 }
 
 func TestSignedEntityTypeMithrilStakeDistribution(t *testing.T) {
+	t.Parallel()
+
 	raw := `{"MithrilStakeDistribution":{"epoch":270}}`
 	var set SignedEntityType
 	err := json.Unmarshal([]byte(raw), &set)
@@ -563,6 +593,8 @@ func TestSignedEntityTypeMithrilStakeDistribution(t *testing.T) {
 }
 
 func TestSignedEntityTypeMithrilStakeDistributionScalar(t *testing.T) {
+	t.Parallel()
+
 	raw := `{"MithrilStakeDistribution":275}`
 	var set SignedEntityType
 	err := json.Unmarshal([]byte(raw), &set)
@@ -577,6 +609,8 @@ func TestSignedEntityTypeMithrilStakeDistributionScalar(t *testing.T) {
 }
 
 func TestProtocolMessageComputeHashMatchesUpstreamEnumOrder(t *testing.T) {
+	t.Parallel()
+
 	msg := ProtocolMessage{
 		MessageParts: map[string]string{
 			"current_epoch":                   "275",
@@ -593,6 +627,8 @@ func TestProtocolMessageComputeHashMatchesUpstreamEnumOrder(t *testing.T) {
 }
 
 func TestSignedEntityTypeCardanoStakeDistribution(t *testing.T) {
+	t.Parallel()
+
 	raw := `{"CardanoStakeDistribution":{"epoch":314}}`
 	var set SignedEntityType
 	err := json.Unmarshal([]byte(raw), &set)
@@ -607,6 +643,8 @@ func TestSignedEntityTypeCardanoStakeDistribution(t *testing.T) {
 }
 
 func TestSignedEntityTypeCardanoStakeDistributionScalar(t *testing.T) {
+	t.Parallel()
+
 	raw := `{"CardanoStakeDistribution":314}`
 	var set SignedEntityType
 	err := json.Unmarshal([]byte(raw), &set)
@@ -621,6 +659,8 @@ func TestSignedEntityTypeCardanoStakeDistributionScalar(t *testing.T) {
 }
 
 func TestSignedEntityTypeUnknownKind(t *testing.T) {
+	t.Parallel()
+
 	raw := `{"CardanoTransactions":{"epoch":271}}`
 	var set SignedEntityType
 	err := json.Unmarshal([]byte(raw), &set)
@@ -634,6 +674,8 @@ func TestSignedEntityTypeUnknownKind(t *testing.T) {
 }
 
 func TestSignedEntityTypeCardanoTransactions(t *testing.T) {
+	t.Parallel()
+
 	raw := `{"CardanoTransactions":{"epoch":271,"block_number":54321}}`
 	var set SignedEntityType
 	err := json.Unmarshal([]byte(raw), &set)
@@ -649,6 +691,8 @@ func TestSignedEntityTypeCardanoTransactions(t *testing.T) {
 }
 
 func TestSignedEntityTypeCardanoTransactionsFeedHash(t *testing.T) {
+	t.Parallel()
+
 	raw := `{"CardanoTransactions":{"epoch":271,"block_number":54321}}`
 	var set SignedEntityType
 	err := json.Unmarshal([]byte(raw), &set)
@@ -669,6 +713,8 @@ func TestSignedEntityTypeCardanoTransactionsFeedHash(t *testing.T) {
 }
 
 func TestNetworkConfigForNetwork(t *testing.T) {
+	t.Parallel()
+
 	const keyURLBase = "https://raw.githubusercontent.com/" +
 		"IntersectMBO/mithril/main/mithril-infra/configuration/"
 	testCases := map[string]NetworkConfig{
@@ -708,6 +754,8 @@ func TestNetworkConfigForNetwork(t *testing.T) {
 }
 
 func TestGenesisVerificationKeyURLForNetwork(t *testing.T) {
+	t.Parallel()
+
 	url, err := GenesisVerificationKeyURLForNetwork("mainnet")
 	require.NoError(t, err)
 	require.Equal(
@@ -719,6 +767,8 @@ func TestGenesisVerificationKeyURLForNetwork(t *testing.T) {
 }
 
 func TestAncillaryVerificationKeyURLForNetwork(t *testing.T) {
+	t.Parallel()
+
 	url, err := AncillaryVerificationKeyURLForNetwork("preprod")
 	require.NoError(t, err)
 	require.Equal(
@@ -730,6 +780,8 @@ func TestAncillaryVerificationKeyURLForNetwork(t *testing.T) {
 }
 
 func TestCertificateAggregateVerificationKeyBytes(t *testing.T) {
+	t.Parallel()
+
 	cert := &Certificate{
 		AggregateVerificationKey: "61626364",
 	}
@@ -739,6 +791,8 @@ func TestCertificateAggregateVerificationKeyBytes(t *testing.T) {
 }
 
 func TestCertificateMultiSignatureBytes(t *testing.T) {
+	t.Parallel()
+
 	cert := &Certificate{
 		MultiSignature: "YWJjZA==",
 	}
@@ -748,6 +802,8 @@ func TestCertificateMultiSignatureBytes(t *testing.T) {
 }
 
 func TestMithrilStakeDistributionPartyVerificationKeyBytes(t *testing.T) {
+	t.Parallel()
+
 	party := &MithrilStakeDistributionParty{
 		VerificationKey: "61626364",
 	}
@@ -757,6 +813,8 @@ func TestMithrilStakeDistributionPartyVerificationKeyBytes(t *testing.T) {
 }
 
 func TestSnapshotCreatedAtTime(t *testing.T) {
+	t.Parallel()
+
 	s := &SnapshotListItem{
 		SnapshotBase: SnapshotBase{
 			CreatedAt: "2026-02-10T00:24:56.094721055Z",
@@ -770,6 +828,8 @@ func TestSnapshotCreatedAtTime(t *testing.T) {
 }
 
 func TestWithHTTPClient(t *testing.T) {
+	t.Parallel()
+
 	customClient := &http.Client{}
 	client := NewClient(
 		"https://example.com",
@@ -782,6 +842,8 @@ func TestWithHTTPClient(t *testing.T) {
 // accepted, HTTP is rejected unless allowInsecureHTTP is set, and a
 // malformed URL is rejected regardless (DSA-2026-04-24-03).
 func TestRequireSecureURL(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name              string
 		rawURL            string
@@ -865,6 +927,8 @@ func TestRequireSecureURL(t *testing.T) {
 // rejected before it ever reaches redirect handling, since a downgrade or
 // SSRF target can be the first hop, not just a subsequent redirect.
 func TestClientRejectsPlainHTTPAggregatorByDefault(t *testing.T) {
+	t.Parallel()
+
 	called := false
 	server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		called = true
@@ -886,6 +950,8 @@ func TestClientRejectsPlainHTTPAggregatorByDefault(t *testing.T) {
 // WithAllowInsecureHTTP is a working, explicit escape hatch for local
 // development and tests against a plaintext aggregator.
 func TestClientAllowsPlainHTTPAggregatorWithEscapeHatch(t *testing.T) {
+	t.Parallel()
+
 	server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode([]SnapshotListItem{})
@@ -897,6 +963,8 @@ func TestClientAllowsPlainHTTPAggregatorWithEscapeHatch(t *testing.T) {
 }
 
 func TestVerifyCertChainGenesis(t *testing.T) {
+	t.Parallel()
+
 	cert := Certificate{
 		Epoch:            0,
 		PreviousHash:     "",
@@ -936,6 +1004,8 @@ func TestVerifyCertChainGenesis(t *testing.T) {
 }
 
 func TestVerifyCertChainThreeDeep(t *testing.T) {
+	t.Parallel()
+
 	g1Hex := testBLSG1Hex(t)
 	g2Hex := testBLSG2Hex(t)
 	certs := map[string]Certificate{
@@ -1028,6 +1098,8 @@ func TestVerifyCertChainThreeDeep(t *testing.T) {
 }
 
 func TestVerifyCertChainMissingCert(t *testing.T) {
+	t.Parallel()
+
 	g1Hex := testBLSG1Hex(t)
 	g2Hex := testBLSG2Hex(t)
 	certs := map[string]Certificate{
@@ -1090,6 +1162,8 @@ func TestVerifyCertChainMissingCert(t *testing.T) {
 }
 
 func TestVerifyCertChainEmptyPreviousHash(t *testing.T) {
+	t.Parallel()
+
 	g1Hex := testBLSG1Hex(t)
 	g2Hex := testBLSG2Hex(t)
 	cert := Certificate{
@@ -1129,6 +1203,8 @@ func TestVerifyCertChainEmptyPreviousHash(t *testing.T) {
 }
 
 func TestVerifyCertChainDigestMismatch(t *testing.T) {
+	t.Parallel()
+
 	g1Hex := testBLSG1Hex(t)
 	g2Hex := testBLSG2Hex(t)
 	certs := map[string]Certificate{
@@ -1204,6 +1280,8 @@ func TestVerifyCertChainDigestMismatch(t *testing.T) {
 }
 
 func TestVerifyCertChainDigestMatch(t *testing.T) {
+	t.Parallel()
+
 	g1Hex := testBLSG1Hex(t)
 	g2Hex := testBLSG2Hex(t)
 	certs := map[string]Certificate{
@@ -1286,6 +1364,8 @@ func TestVerifyCertChainDigestMatch(t *testing.T) {
 // hypothetical aggregator bug; this test confirms the chain
 // breaks on the stale reference.
 func TestVerifyCertChainRejectsStaleHashCrossReferences(t *testing.T) {
+	t.Parallel()
+
 	g1Hex := testBLSG1Hex(t)
 	g2Hex := testBLSG2Hex(t)
 	certA := Certificate{
@@ -1352,6 +1432,8 @@ func TestVerifyCertChainRejectsStaleHashCrossReferences(t *testing.T) {
 }
 
 func TestVerifyCertChainNilClient(t *testing.T) {
+	t.Parallel()
+
 	err := VerifyCertificateChain(
 		context.Background(),
 		nil,
@@ -1363,6 +1445,8 @@ func TestVerifyCertChainNilClient(t *testing.T) {
 }
 
 func TestVerifyCertChainEmptyHash(t *testing.T) {
+	t.Parallel()
+
 	client := NewClient("http://example.com")
 	err := VerifyCertificateChain(
 		context.Background(),
@@ -1375,6 +1459,8 @@ func TestVerifyCertChainEmptyHash(t *testing.T) {
 }
 
 func TestBootstrapWithCertVerification(t *testing.T) {
+	t.Parallel()
+
 	archiveData := createChunkArchive(t)
 	genesisPubKey, genesisPrivKey, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)

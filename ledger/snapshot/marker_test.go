@@ -33,6 +33,8 @@ type markerDelegation = struct {
 // TestCaptureEpochBoundarySnapshotMarksAuthoritative verifies the authoritative
 // (epoch-rollover) capture writes reward_snapshot.authoritative = true.
 func TestCaptureEpochBoundarySnapshotMarksAuthoritative(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	seedEpochs(t, db, []models.Epoch{
 		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
@@ -70,6 +72,8 @@ func TestCaptureEpochBoundarySnapshotMarksAuthoritative(t *testing.T) {
 // TestFallbackCaptureMarksNonAuthoritative verifies the event-driven fallback
 // capture writes reward_snapshot.authoritative = false.
 func TestFallbackCaptureMarksNonAuthoritative(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	seedEpochs(t, db, []models.Epoch{
 		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
@@ -103,6 +107,8 @@ func TestFallbackCaptureMarksNonAuthoritative(t *testing.T) {
 // fallback row in place, exercising the ClaimFallbackSnapshot replace branch,
 // and that it stays non-authoritative.
 func TestFallbackCaptureReplacesProvisionalFallback(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	seedEpochs(t, db, []models.Epoch{
 		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
@@ -151,6 +157,8 @@ func TestFallbackCaptureReplacesProvisionalFallback(t *testing.T) {
 // claim refuses to overwrite an existing authoritative row and forces the
 // authoritative flag off for a fresh fallback claim.
 func TestClaimFallbackRewardSnapshotSkipsAuthoritative(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	meta := db.Metadata()
 
@@ -197,6 +205,8 @@ func TestClaimFallbackRewardSnapshotSkipsAuthoritative(t *testing.T) {
 // TestClaimFallbackRewardSnapshotFreshAndReplace verifies a fresh claim writes a
 // non-authoritative row and a second fallback claim replaces it in place.
 func TestClaimFallbackRewardSnapshotFreshAndReplace(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	meta := db.Metadata()
 
@@ -243,6 +253,8 @@ func TestClaimFallbackRewardSnapshotFreshAndReplace(t *testing.T) {
 }
 
 func TestFallbackRewardSnapshotGuardTemporaryRow(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	meta := db.Metadata()
 	txn := db.Transaction(true)
@@ -274,6 +286,8 @@ func TestFallbackRewardSnapshotGuardTemporaryRow(t *testing.T) {
 }
 
 func TestFallbackRewardSnapshotGuardRefusesAuthoritative(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	meta := db.Metadata()
 	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
@@ -303,6 +317,8 @@ func TestFallbackRewardSnapshotGuardRefusesAuthoritative(t *testing.T) {
 }
 
 func TestFallbackRewardSnapshotGuardRequiresTransaction(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	meta := db.Metadata()
 

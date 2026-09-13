@@ -25,6 +25,8 @@ import (
 // report this as trustworthy (ok=true) with no skip reason or detail, so a
 // real comparison can proceed.
 func TestSandwichOK_TipsMatchAndHold(t *testing.T) {
+	t.Parallel()
+
 	tip := Tip{Slot: 100, Hash: "aa", BlockNumber: 10}
 	ok, reason, detail := sandwichOK(tip, tip, tip, tip)
 	assert.True(t, ok)
@@ -38,6 +40,8 @@ func TestSandwichOK_TipsMatchAndHold(t *testing.T) {
 // starting points is meaningless) and report it with the SkipTipMismatch
 // reason code, distinct from a mid-query advance.
 func TestSandwichOK_TipsNeverMatched(t *testing.T) {
+	t.Parallel()
+
 	dingo := Tip{Slot: 100, Hash: "aa"}
 	cardano := Tip{Slot: 105, Hash: "bb"}
 	ok, reason, detail := sandwichOK(dingo, cardano, dingo, cardano)
@@ -57,6 +61,8 @@ func TestSandwichOK_TipsNeverMatched(t *testing.T) {
 // rather than compare a dingo snapshot against a cardano-node snapshot
 // that may no longer describe the same block.
 func TestSandwichOK_DingoAdvancedDuringQuery(t *testing.T) {
+	t.Parallel()
+
 	before := Tip{Slot: 100, Hash: "aa"}
 	after := Tip{Slot: 101, Hash: "cc"}
 	ok, reason, detail := sandwichOK(before, before, after, before)
@@ -74,6 +80,8 @@ func TestSandwichOK_DingoAdvancedDuringQuery(t *testing.T) {
 // that moved mid-query, confirming the discard applies symmetrically to
 // either node, not just dingo.
 func TestSandwichOK_CardanoAdvancedDuringQuery(t *testing.T) {
+	t.Parallel()
+
 	before := Tip{Slot: 100, Hash: "aa"}
 	after := Tip{Slot: 101, Hash: "cc"}
 	ok, reason, detail := sandwichOK(before, before, before, after)
@@ -91,6 +99,8 @@ func TestSandwichOK_CardanoAdvancedDuringQuery(t *testing.T) {
 // coincidental hash match at a different slot is not realistic on a real
 // chain, but Tip.Equal must not treat it as equal regardless.
 func TestSandwichOK_SameHashDifferentSlotIsNotEqual(t *testing.T) {
+	t.Parallel()
+
 	a := Tip{Slot: 100, Hash: "aa"}
 	b := Tip{Slot: 200, Hash: "aa"}
 	assert.False(t, a.Equal(b))
@@ -101,6 +111,8 @@ func TestSandwichOK_SameHashDifferentSlotIsNotEqual(t *testing.T) {
 // identity, only slot+hash are), and a tip with a different hash is not
 // equal regardless of slot.
 func TestTip_Equal(t *testing.T) {
+	t.Parallel()
+
 	a := Tip{Slot: 100, Hash: "aa", BlockNumber: 5}
 	b := Tip{
 		Slot:        100,

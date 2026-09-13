@@ -28,6 +28,8 @@ import (
 // and marked spent) proves the in-flight lookup carries same-batch provenance
 // without depending on blob/metadata recovery.
 func TestSetTransactionBatched_SameBatchProducerSpentViaInFlight(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 	candidate := findBatchedCrossBlockSpendCandidate(t)
 
@@ -87,6 +89,8 @@ func TestSetTransactionBatched_SameBatchProducerSpentViaInFlight(t *testing.T) {
 // accumulator does not contain the producer. The spend must resolve through
 // the metadata-store fallthrough, exactly as before this optimisation.
 func TestSetTransactionBatched_CrossBatchProducerResolvesFromDB(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 	candidate := findBatchedCrossBlockSpendCandidate(t)
 
@@ -163,6 +167,8 @@ func TestSetTransactionBatched_CrossBatchProducerResolvesFromDB(t *testing.T) {
 // missing historical producer must not be hidden or fabricated: the in-flight
 // optimisation only short-circuits real same-batch producers.
 func TestSetTransactionBatched_MissingProducerNotFabricated(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 	candidate := findBatchedCrossBlockSpendCandidate(t)
 
@@ -247,6 +253,8 @@ func ingestSameBatchProducerConsumer(
 func TestSetTransactionBatched_InFlightDoesNotSkipExistingRowRepair(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := openTestDB(t)
 	candidate := findBatchedCrossBlockSpendCandidate(t)
 
