@@ -5400,6 +5400,24 @@ also carry completed/total archive counts. Bootstrap logs add the phase,
 artifact, snapshot identity, and archive/destination paths so interleaved
 download and extraction output remains attributable to one operation.
 
+Compressed downloads have a per-object limit of 1 TiB by default, matching
+the existing extracted-archive total limit. Library callers can set
+`SyncConfig.DownloadMaxBytes`, `BootstrapConfig.DownloadMaxBytes`, or
+`DownloadConfig.MaxBytes`; zero selects the default and negatives fail
+validation. The setting reaches both v1 archives and all v2 digest,
+immutable, and ancillary archives. `ExpectedSize`, when positive, remains
+an exact-size requirement and cannot exceed the configured maximum.
+Resumed prefixes count against the limit; responses without Content-Length
+are bounded while streaming. An extra byte is read only as an overflow
+probe and is never written. Size-limit errors are terminal for the downloader.
+An oversized existing file or a file that overflows while streaming is removed;
+ordinary header rejection can retain an existing in-budget partial file for a
+different mirror, while a malformed-range restart truncates the prefix before
+checking the replacement response. This is not an aggregate budget
+across archives, mirrors, retries, or a bootstrap's extracted files.
+The zstd decoder separately defaults to a 512 MiB window and 256 MiB decoder
+memory limit, configurable through `WithZstdLimits`.
+
 Both backends produce the same `BootstrapResult` (immutable directory,
 ancillary ledger-state directory, synthesized snapshot metadata), so
 everything downstream of `Bootstrap()` is backend-agnostic.

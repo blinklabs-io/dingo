@@ -54,7 +54,10 @@ type SnapshotEntry struct {
 // accumulated and returned via errors.Join alongside the entries found,
 // so a caller can log or surface it instead of the catalog silently
 // looking one snapshot smaller than it should.
-func ListSnapshots(baseDir string) ([]SnapshotEntry, error) {
+func ListSnapshots(baseDir string, opts ...ManifestOption) ([]SnapshotEntry, error) {
+	if _, err := manifestByteLimit(opts); err != nil {
+		return nil, err
+	}
 	entries, err := os.ReadDir(baseDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -70,7 +73,7 @@ func ListSnapshots(baseDir string) ([]SnapshotEntry, error) {
 			continue
 		}
 		dir := filepath.Join(baseDir, entry.Name())
-		m, err := ReadManifest(dir)
+		m, err := ReadManifest(dir, opts...)
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				continue

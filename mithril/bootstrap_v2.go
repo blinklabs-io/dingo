@@ -713,8 +713,9 @@ func downloadDigestsArchive(
 ) ([]CardanoDatabaseDigestEntry, error) {
 	archivePath, err := DownloadSnapshot(
 		ctx, DownloadConfig{
-			URL:     uri,
-			DestDir: downloadDir,
+			MaxBytes: cfg.DownloadMaxBytes,
+			URL:      uri,
+			DestDir:  downloadDir,
 			Filename: filepath.Base(fmt.Sprintf(
 				"digests-%s.tar.zst",
 				truncateDigest(artifact.Hash),
@@ -1210,6 +1211,7 @@ func fetchImmutableArchive(
 	archiveFilename := filepath.Base(archivePath)
 	_, root, dlErr := downloadSnapshot(
 		ctx, DownloadConfig{
+			MaxBytes:            cfg.DownloadMaxBytes,
 			URL:                 location.ImmutableArchiveURI(num),
 			DestDir:             archiveDir,
 			Filename:            archiveFilename,
@@ -1441,6 +1443,7 @@ func downloadAncillaryV2(
 		}
 		ancillaryPath, err = DownloadSnapshot(
 			ctx, DownloadConfig{
+				MaxBytes: cfg.DownloadMaxBytes,
 				URL:      loc.URI,
 				DestDir:  downloadDir,
 				Filename: ancillaryFilename,
@@ -1731,13 +1734,30 @@ func verifyAncillaryManifest(
 }
 
 // readFileIn reads a slash-separated path relative to root.
+// maxAncillaryManifestBytes bounds a manifest read out of an extracted
+// snapshot before it is JSON decoded. The archive is remote input, so its
+// manifest is sized by whoever produced it; the bound matches the one
+// applied to the snapshot manifest itself.
+const maxAncillaryManifestBytes = 1 << 20
+
 func readFileIn(root *os.Root, rel string) ([]byte, error) {
 	f, err := root.Open(filepath.FromSlash(rel))
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	return io.ReadAll(f)
+	data, err := io.ReadAll(io.LimitReader(f, maxAncillaryManifestBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxAncillaryManifestBytes {
+		return nil, fmt.Errorf(
+			"%s exceeds %d bytes",
+			rel,
+			maxAncillaryManifestBytes,
+		)
+	}
+	return data, nil
 }
 
 // sha256FileIn hashes a slash-separated path relative to root.

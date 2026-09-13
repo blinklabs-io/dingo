@@ -159,21 +159,23 @@ func SnapshotToCloud(
 	cloudDest string,
 	name string,
 	description string,
+	opts ...ManifestOption,
 ) (Manifest, error) {
 	manifest, err := Snapshot(
 		ctx, db, dir, trigger, dingoVersion, blobPluginName, metadataPluginName,
+		opts...,
 	)
 	if err != nil {
 		return Manifest{}, err
 	}
 	if name != "" || description != "" {
-		if err := LabelSnapshot(dir, name, description); err != nil {
+		if err := LabelSnapshot(dir, name, description, opts...); err != nil {
 			return manifest, fmt.Errorf(
 				"snapshot written locally to %q, but labeling it failed: %w",
 				dir, err,
 			)
 		}
-		manifest, err = ReadManifest(dir)
+		manifest, err = ReadManifest(dir, opts...)
 		if err != nil {
 			return manifest, fmt.Errorf(
 				"snapshot written locally to %q and labeled, but re-reading "+

@@ -285,6 +285,7 @@ type SyncConfig struct {
 	DownloadDir            string                     // optional; defaults to <DataDir>/.mithril-cache
 	DownloadIdleTimeout    string                     // optional; passed to BootstrapConfig
 	DownloadMaxIdleRetries int                        // must be >= 0
+	DownloadMaxBytes       int64                      // per compressed object; zero uses DefaultMaxDownloadBytes
 	VerifyCertChain        bool
 	CleanupAfterLoad       bool
 	StoragePlugins         StoragePlugins
@@ -419,6 +420,9 @@ func Sync(
 			"invalid Mithril download max idle retries %d: must be >= 0",
 			cfg.DownloadMaxIdleRetries,
 		)
+	}
+	if err := (DownloadConfig{MaxBytes: cfg.DownloadMaxBytes}).Validate(); err != nil {
+		return SyncResult{}, err
 	}
 
 	// Open the database before bootstrap so the immutable copy can overlap the
@@ -669,6 +673,7 @@ func Sync(
 			Logger:                 logger,
 			DownloadIdleTimeout:    downloadIdleTimeout,
 			DownloadMaxIdleRetries: cfg.DownloadMaxIdleRetries,
+			DownloadMaxBytes:       cfg.DownloadMaxBytes,
 			OnProgress: func() func(DownloadProgress) {
 				const progressLogInterval = 10 * time.Second
 				const progressLogPercentStep = 5.0

@@ -29,8 +29,8 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 )
 
-// File synchronization failures cannot be induced reliably on a healthy
-// filesystem. Keep this seam so publication failure tests exercise Snapshot.
+// File synchronization failures are injected by package tests through this
+// seam; production uses the file's Sync method.
 var syncSnapshotFile = (*os.File).Sync
 
 // BlobBackupFileName and MetadataBackupFileName are the fixed file names
@@ -73,7 +73,11 @@ func Snapshot(
 	dingoVersion string,
 	blobPluginName string,
 	metadataPluginName string,
+	opts ...ManifestOption,
 ) (m Manifest, err error) {
+	if _, err := manifestByteLimit(opts); err != nil {
+		return Manifest{}, err
+	}
 	// Pinned for the whole call: the Backup below runs long, and the store
 	// backing blobBackuper must not be drained and closed while it does.
 	blobStore, releaseBlob := db.PinBlob()
@@ -105,20 +109,6 @@ func Snapshot(
 	// the other (possibly still in-flight, possibly already-succeeded)
 	// caller's backup files out from under it. Only the call that
 	// actually wins Mkdir's exclusive creation may remove dir on failure.
-	// Record missing ancestors before creation. A concurrent creator may
-	// win a MkdirAll race; synchronizing its entry as well is harmless.
-	var newParents []string
-	for parent := filepath.Dir(dir); ; parent = filepath.Dir(parent) {
-		if _, err := os.Stat(parent); err == nil {
-			break
-		} else if !errors.Is(err, fs.ErrNotExist) {
-			return Manifest{}, fmt.Errorf("stat snapshot parent %q: %w", parent, err)
-		}
-		newParents = append(newParents, parent)
-		if filepath.Dir(parent) == parent {
-			break
-		}
-	}
 	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
 		return Manifest{}, fmt.Errorf(
 			"create snapshot parent directory %q: %w", filepath.Dir(dir), err,
@@ -245,10 +235,6 @@ func Snapshot(
 	if metadataErr != nil {
 		return Manifest{}, fmt.Errorf("backup metadata store: %w", metadataErr)
 	}
-	// Flush after releasing the commit barrier: both backup streams are
-	// complete, so making their files durable needs no further writer pause.
-	// Blob Backuper only writes to our io.Writer; neither backup interface
-	// requires the provider to synchronize its output.
 	if err := syncSnapshotFile(blobFile); err != nil {
 		return Manifest{}, fmt.Errorf("sync %q: %w", blobPath, err)
 	}
@@ -262,27 +248,7 @@ func Snapshot(
 	metadataSyncErr := syncSnapshotFile(metadataFile)
 	metadataCloseErr := metadataFile.Close()
 	if err := errors.Join(metadataSyncErr, metadataCloseErr); err != nil {
-		return Manifest{}, fmt.Errorf(
-			"sync and close %q: %w",
-			metadataPath,
-			err,
-		)
-	}
-	// Persist the backup names before a manifest can make them discoverable.
-	if err := syncDir(dir); err != nil {
-		return Manifest{}, fmt.Errorf("sync snapshot directory: %w", err)
-	}
-	if err := syncDir(filepath.Dir(dir)); err != nil {
-		return Manifest{}, fmt.Errorf("sync snapshot parent: %w", err)
-	}
-	for _, parent := range newParents {
-		if err := syncDir(filepath.Dir(parent)); err != nil {
-			return Manifest{}, fmt.Errorf(
-				"sync snapshot ancestor %q: %w",
-				parent,
-				err,
-			)
-		}
+		return Manifest{}, fmt.Errorf("sync and close %q: %w", metadataPath, err)
 	}
 
 	blobInfo, err := os.Stat(blobPath)
@@ -310,7 +276,7 @@ func Snapshot(
 		BlobBytes:       blobInfo.Size(),
 		MetadataBytes:   metadataInfo.Size(),
 	}
-	if err := WriteManifest(dir, manifest); err != nil {
+	if err := WriteManifest(dir, manifest, opts...); err != nil {
 		return Manifest{}, err
 	}
 	// WriteManifest computes the checksum (and fills in FormatVersion) on
@@ -318,7 +284,7 @@ func Snapshot(
 	// here is never updated, so re-read what was actually written rather
 	// than return a Manifest whose Checksum/FormatVersion don't match the
 	// file this function just produced.
-	written, err := ReadManifest(dir)
+	written, err := ReadManifest(dir, opts...)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("re-read manifest after write: %w", err)
 	}
