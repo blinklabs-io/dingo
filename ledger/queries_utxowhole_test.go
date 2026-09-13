@@ -23,6 +23,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -280,6 +281,7 @@ func TestQueryShelleyUtxoWhole_AbortsEarlyOnFirstFailure(t *testing.T) {
 		decodedCount atomic.Int64
 		failed       atomic.Bool
 	)
+	release := make(chan struct{})
 	original := decodeUtxoWholeCborFunc
 	decodeUtxoWholeCborFunc = func(
 		ref database.UtxoRef,
@@ -288,26 +290,53 @@ func TestQueryShelleyUtxoWhole_AbortsEarlyOnFirstFailure(t *testing.T) {
 		if failed.CompareAndSwap(false, true) {
 			return nil, errors.New("simulated first-row failure")
 		}
-		// Long enough that the first row's near-instant failure is
-		// detected well before every other row can be decoded, short
-		// enough to keep the test fast.
-		time.Sleep(10 * time.Millisecond)
+		// Block until the test releases this gate, rather than a
+		// fixed-duration time.Sleep: the test only opens it once it has
+		// deterministically observed (via utxoWholeAbortObservedFunc,
+		// below) that queryShelleyUtxoWhole has already closed its
+		// internal done channel, so nothing here depends on decode
+		// speed or on a hand-tuned sleep duration that could silently
+		// stop covering this if utxoWholeResolveWorkers or decode cost
+		// ever changed (cubic review).
+		<-release
 		decodedCount.Add(1)
 		return decodeUtxoWholeCbor(ref, cborBytes)
 	}
 	t.Cleanup(func() { decodeUtxoWholeCborFunc = original })
 
+	abortObserved := make(chan struct{})
+	originalAbortHook := utxoWholeAbortObservedFunc
+	utxoWholeAbortObservedFunc = func() { close(abortObserved) }
+	t.Cleanup(func() { utxoWholeAbortObservedFunc = originalAbortHook })
+
 	ls := newPoolDistr2Ledger(t, db)
 
-	_, err = ls.queryShelleyUtxoWhole()
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := ls.queryShelleyUtxoWhole()
+		errCh <- err
+	}()
+
+	// The CAS above guarantees exactly one decode call ever returns the
+	// simulated failure, and that is always the first result the main
+	// loop can receive (every other row is still parked on <-release),
+	// so this always fires -- deterministically, not racing a clock.
+	testutil.RequireReceive(
+		t, abortObserved, 5*time.Second,
+		"queryShelleyUtxoWhole must observe the abort",
+	)
+	close(release)
+
+	err = testutil.RequireReceive(
+		t, errCh, 5*time.Second, "queryShelleyUtxoWhole must return",
+	)
 	require.Error(t, err)
 	// A bound near utxoWholeResolveWorkers, not just under rowCount: only
-	// the one wave of rows already dispatched when the first (immediate)
-	// failure is detected should ever reach the sleep-then-decode branch.
-	// Without the early abort, every remaining row of the 99 still would
-	// (rowCount minus the one that failed), so this stays a meaningful
-	// regression check rather than one only a total mechanism removal
-	// could fail.
+	// the rows already dispatched by the time the abort above fired
+	// should ever reach the gated decode branch. Without the early
+	// abort, every remaining row of the 99 still would (rowCount minus
+	// the one that failed), so this stays a meaningful regression check
+	// rather than one only a total mechanism removal could fail.
 	require.Less(
 		t, decodedCount.Load(), int64(rowCount/2),
 		"early abort must stop the feeder well before every row is decoded",

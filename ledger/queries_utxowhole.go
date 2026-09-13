@@ -271,6 +271,9 @@ func (ls *LedgerState) queryShelleyUtxoWhole() (any, error) {
 			if firstErr == nil {
 				firstErr = r.err
 				close(done)
+				if utxoWholeAbortObservedFunc != nil {
+					utxoWholeAbortObservedFunc()
+				}
 			}
 			continue
 		}
@@ -291,6 +294,18 @@ func (ls *LedgerState) queryShelleyUtxoWhole() (any, error) {
 // behavior to write a test against. Not t.Parallel-safe for a test that
 // swaps it.
 var decodeUtxoWholeCborFunc = decodeUtxoWholeCbor
+
+// utxoWholeAbortObservedFunc, when non-nil, is called the instant
+// queryShelleyUtxoWhole's first resolve failure closes done. nil (its
+// production default) skips the call entirely. This lets a test observe
+// exactly when the abort signal fires without depending on a fixed number
+// of already-dispatched jobs or an arbitrary timing margin -- the feeder's
+// own done-select race (see its comment above) already means how many jobs
+// are in flight at that instant varies run to run, so a test asserting a
+// specific count would be asserting on an implementation detail this
+// function deliberately doesn't guarantee. Not t.Parallel-safe for a test
+// that swaps it, same as decodeUtxoWholeCborFunc above.
+var utxoWholeAbortObservedFunc func()
 
 // decodeUtxoWholeCbor decodes one resolved UTxO's CBOR into
 // GetUTxOWhole's reply shape. Split out from queryShelleyUtxoWhole so it
