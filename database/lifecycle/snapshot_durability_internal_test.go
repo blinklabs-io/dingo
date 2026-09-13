@@ -16,13 +16,18 @@ package lifecycle
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -79,7 +84,7 @@ func TestSnapshotDurabilityBeforeManifest(t *testing.T) {
 				require.NoError(t, err)
 				require.Len(t, entries, 1)
 				syncSnapshotFile, syncDir = originalFileSync, originalDirSync
-				_, err = Restore(context.Background(), newRestoreInternalTestHost(t), nil, dir, filepath.Join(t.TempDir(), "restored"), RestoreStorageConfig{})
+				_, err = Restore(context.Background(), newRestoreInternalTestHost(t), nil, dir, filepath.Join(t.TempDir(), "restored"), RestoreStorageConfig{Blob: testutil.BadgerBlobConfig()})
 				require.NoError(t, err)
 				return
 			}
@@ -92,11 +97,93 @@ func TestSnapshotDurabilityBeforeManifest(t *testing.T) {
 	}
 }
 
+// metadataTemplateSentinelTable is a marker table
+// writeMetadataTemplateWithSentinel adds to a copy of this process's
+// migrated metadata template, and requireMetadataTemplateSentinel checks
+// for afterward. Its presence in a database is what lets
+// TestSnapshotInterruptedBeforeManifest's forked child prove it actually
+// reused the parent-built template instead of silently rebuilding an
+// equivalent (but sentinel-free) one of its own -- a byte-for-byte
+// comparison of schemas would not otherwise distinguish the two, since a
+// fresh migration produces the same tables.
+const metadataTemplateSentinelTable = "dingo_snapshot_interrupt_template_sentinel"
+
+// writeMetadataTemplateWithSentinel materializes this process's migrated
+// metadata template at path, with metadataTemplateSentinelTable added and
+// populated.
+func writeMetadataTemplateWithSentinel(t *testing.T, path string) {
+	t.Helper()
+	raw, err := dbtest.MetadataTemplateBytes()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, raw, 0o600))
+
+	conn, err := sql.Open(
+		"sqlite", "file:"+path+"?_pragma=busy_timeout(30000)",
+	)
+	require.NoError(t, err)
+	_, err = conn.Exec(fmt.Sprintf(
+		`CREATE TABLE %s (id INTEGER PRIMARY KEY)`,
+		metadataTemplateSentinelTable,
+	))
+	require.NoError(t, err)
+	_, err = conn.Exec(fmt.Sprintf(
+		`INSERT INTO %s (id) VALUES (1)`, metadataTemplateSentinelTable,
+	))
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
+}
+
+// requireMetadataTemplateSentinel fails unless db's metadata store carries
+// metadataTemplateSentinelTable -- see writeMetadataTemplateWithSentinel.
+func requireMetadataTemplateSentinel(t *testing.T, db *database.Database) {
+	t.Helper()
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	var count int
+	require.NoError(t, raw.QueryRow(fmt.Sprintf(
+		`SELECT count(*) FROM %s`, metadataTemplateSentinelTable,
+	)).Scan(&count))
+	require.Equal(
+		t, 1, count,
+		"child rebuilt its own metadata template instead of reusing "+
+			"the one the parent process built and provided",
+	)
+}
+
+// newRestoreInternalTestDBWithTemplate is newRestoreInternalTestDB, but
+// seeds the database's data directory from templatePath (see
+// writeMetadataTemplateWithSentinel) before construction when templatePath
+// is non-empty, instead of letting dbtest.NewDatabase build and cache its
+// own migrated template in this process.
+func newRestoreInternalTestDBWithTemplate(
+	t *testing.T, templatePath string,
+) *database.Database {
+	t.Helper()
+	dir := t.TempDir()
+	if templatePath != "" {
+		raw, err := os.ReadFile(templatePath)
+		require.NoError(t, err)
+		require.NoError(t, dbtest.SeedMetadataTemplateBytes(dir, raw))
+	}
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: dir})
+	require.NoError(t, err)
+	return db
+}
+
 // A process exit bypasses Snapshot's cleanup, leaving an interrupted directory
 // on disk. A fresh reader must neither catalog nor restore that incomplete copy.
 func TestSnapshotInterruptedBeforeManifest(t *testing.T) {
 	if stage := os.Getenv("DINGO_SNAPSHOT_INTERRUPT_STAGE"); stage != "" {
-		db := newRestoreInternalTestDB(t)
+		templatePath := os.Getenv("DINGO_SNAPSHOT_INTERRUPT_METADATA_TEMPLATE")
+		db := newRestoreInternalTestDBWithTemplate(t, templatePath)
+		if templatePath != "" {
+			requireMetadataTemplateSentinel(t, db)
+			require.False(
+				t, dbtest.MetadataTemplateBuilt(),
+				"child ran its own metadata migration despite the "+
+					"template the parent process provided",
+			)
+		}
 		require.NoError(t, db.BlockCreate(newRestoreInternalTestBlock(), nil))
 		syncSnapshotFile = func(file *os.File) error {
 			if filepath.Base(file.Name()) == stage {
@@ -116,14 +203,34 @@ func TestSnapshotInterruptedBeforeManifest(t *testing.T) {
 		require.NoError(t, err)
 		t.Fatal("snapshot did not reach interruption boundary")
 	}
+
+	// Build the migrated metadata template once, in this process, and hand
+	// it to every forked child below instead of letting each of the four
+	// repeat the same one-per-process migration cost in its own fresh
+	// process -- see dbtest.MetadataTemplateBytes' doc comment. The
+	// sentinel table lets the child assertion above tell whether it
+	// actually reused these bytes.
+	templatePath := filepath.Join(t.TempDir(), "metadata-template.sqlite")
+	writeMetadataTemplateWithSentinel(t, templatePath)
+
 	for _, stage := range []string{BlobBackupFileName, MetadataBackupFileName, "directory", "parent"} {
 		t.Run(stage, func(t *testing.T) {
 			base := t.TempDir()
 			dir := filepath.Join(base, "interrupted")
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			// The child seeds its test database from the template built
+			// above instead of running its own migration, but still needs
+			// a bounded, generous deadline for the remaining setup and
+			// process-start overhead, which can be slow on Windows.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSnapshotInterruptedBeforeManifest$")
-			cmd.Env = append(os.Environ(), "TMPDIR="+base, "TMP="+base, "TEMP="+base, "DINGO_SNAPSHOT_INTERRUPT_STAGE="+stage, "DINGO_SNAPSHOT_INTERRUPT_DIR="+dir)
+			cmd.Env = append(
+				os.Environ(),
+				"TMPDIR="+base, "TMP="+base, "TEMP="+base,
+				"DINGO_SNAPSHOT_INTERRUPT_STAGE="+stage,
+				"DINGO_SNAPSHOT_INTERRUPT_DIR="+dir,
+				"DINGO_SNAPSHOT_INTERRUPT_METADATA_TEMPLATE="+templatePath,
+			)
 			output, err := cmd.CombinedOutput()
 			var exitErr *exec.ExitError
 			require.ErrorAs(t, err, &exitErr, "%s", output)
@@ -133,7 +240,7 @@ func TestSnapshotInterruptedBeforeManifest(t *testing.T) {
 			require.NoError(t, err)
 			require.Empty(t, entries, "interrupted snapshot appeared in catalog")
 			target := filepath.Join(t.TempDir(), "restore")
-			_, err = Restore(context.Background(), newRestoreInternalTestHost(t), nil, dir, target, RestoreStorageConfig{})
+			_, err = Restore(context.Background(), newRestoreInternalTestHost(t), nil, dir, target, RestoreStorageConfig{Blob: testutil.BadgerBlobConfig()})
 			require.ErrorIs(t, err, os.ErrNotExist)
 			require.NoDirExists(t, target)
 		})

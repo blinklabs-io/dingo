@@ -45,6 +45,20 @@ var ErrUtxoAlreadyConsumed = errors.New("UTxO already consumed")
 // ErrNotImplemented marks LedgerView stubs that are not implemented yet.
 var ErrNotImplemented = errors.New("not implemented")
 
+// ErrLedgerViewStorageFault marks an error recorded by a boolean
+// LedgerState predicate (IsStakeCredentialRegistered, IsPoolRegistered,
+// IsRewardAccountRegistered, GovActionExists) when its underlying storage
+// lookup fails for a reason other than "not found". gouroboros's
+// common.LedgerState interface returns only a bool from these predicates, so
+// a genuine storage fault (a timeout, a lost connection) cannot propagate
+// through the interface and would otherwise silently become a false
+// (unregistered/does-not-exist) verdict that the calling ledger rule cannot
+// distinguish from the real thing (blinklabs-io/dingo#1649). Every
+// ValidateTxFunc/EvaluateTxFunc call site that builds a LedgerView must check
+// storageFaultOrErr after the rule returns, and prefer this fault over
+// whatever verdict the rule produced from the false negative.
+var ErrLedgerViewStorageFault = errors.New("ledger view storage fault")
+
 type LedgerView struct {
 	ls  *LedgerState
 	txn *database.Txn
@@ -61,6 +75,19 @@ type LedgerView struct {
 	consumedUtxos map[string]struct{}
 	// skipPhase2Validation is set for accepted block replay, where
 	// the producer's isValid flag is authoritative for Phase-2 results.
+	// Currently unreachable from production: ledgerProcessBlock's sole
+	// caller (ledger/state.go) hardcodes skipPhase2Validation=false,
+	// because issue #3528 made Phase 2 always evaluate whenever per-tx
+	// validation runs at all. Retained rather than deleted because it is
+	// a narrower, more targeted mechanism than the coarse
+	// shouldValidateBlock=false gate TrustedReplay currently uses to skip
+	// per-tx validation (phase 1 and phase 2 together): a future
+	// TrustedReplay caller that wants phase-1 UTXO checks re-run while
+	// still trusting the producer's isValid flag for phase 2 has this
+	// already built, wired through every era's phase2ValidationSkipper
+	// call site, and tested (TestLedgerViewSkipPhase2Validation and the
+	// per-era skip tests) -- only the production call site's hardcoded
+	// false needs to change to use it.
 	skipPhase2Validation bool
 	// horizonAnchorSlot is the slot the era forecast horizon is measured
 	// from when this view converts slots to time. Block application sets it
@@ -70,6 +97,64 @@ type LedgerView struct {
 	// in charge, which is correct for every caller with no applied block in
 	// hand (mempool validation, standalone evaluation).
 	horizonAnchorSlot uint64
+	// syntheticV2CostModel is pinned from the same snapshot pparams (pp) was
+	// captured from -- see pinSyntheticV2CostModel and
+	// SyntheticV2CostModelInEffect. It must not be re-read live from
+	// ls.loadConsensusSnapshot() at query time: a validation operation can
+	// run long enough (evaluating scripts) that the writer publishes a
+	// newer snapshot in the meantime, which would let this disagree with pp
+	// -- the exact protocol parameters this operation is actually
+	// evaluating against. See blinklabs-io/dingo#3962's PR review.
+	syntheticV2CostModel bool
+	// storageErr is the first non-not-found storage error observed by one of
+	// this view's boolean LedgerState predicates. It is sticky: only the
+	// first recorded error is kept, matching the single LedgerView built per
+	// ValidateTxFunc/EvaluateTxFunc call. See ErrLedgerViewStorageFault.
+	storageErr error
+}
+
+// recordStorageErr records the first non-not-found error observed by a
+// boolean LedgerState predicate on this view. Later calls are no-ops: the
+// first fault is the one that could have skewed the earliest rule verdict,
+// and every call site treats presence, not identity, as the signal.
+func (lv *LedgerView) recordStorageErr(err error) {
+	if lv.storageErr == nil {
+		lv.storageErr = err
+	}
+}
+
+// StorageErr returns the first non-not-found storage error recorded by a
+// boolean LedgerState predicate on this view, or nil. A ValidateTxFunc or
+// EvaluateTxFunc call site must prefer this over the rule's own return value
+// -- see storageFaultOrErr.
+func (lv *LedgerView) StorageErr() error {
+	return lv.storageErr
+}
+
+// storageFaultOrErr returns lv's recorded storage fault, wrapped as
+// ErrLedgerViewStorageFault, when one was recorded; otherwise it returns
+// ruleErr unchanged. A LedgerView predicate that swallowed a genuine storage
+// error into a false/not-found verdict already corrupted the rule's verdict
+// by the time ValidateTxFunc/EvaluateTxFunc returns, so the fault always
+// takes precedence over ruleErr -- including replacing a nil ruleErr, the
+// case where the false negative caused the rule to wrongly accept.
+func storageFaultOrErr(lv *LedgerView, ruleErr error) error {
+	if lv == nil {
+		return ruleErr
+	}
+	if faultErr := lv.StorageErr(); faultErr != nil {
+		return fmt.Errorf("%w: %w", ErrLedgerViewStorageFault, faultErr)
+	}
+	return ruleErr
+}
+
+// pinSyntheticV2CostModel records whether the PlutusV2 cost model was still
+// synthetic in the same snapshot pp (passed to ValidateTxFunc/EvaluateTxFunc
+// alongside this view) was captured from. Every call site that pins
+// committee state alongside pp also pins this.
+func (lv *LedgerView) pinSyntheticV2CostModel(inEffect bool) *LedgerView {
+	lv.syntheticV2CostModel = inEffect
+	return lv
 }
 
 func uint64Ptr(value uint64) *uint64 {
@@ -256,6 +341,11 @@ func (lv *LedgerView) IsStakeCredentialRegistered(
 				"credential", cred.Hash().String(),
 				"error", err,
 			)
+			lv.recordStorageErr(fmt.Errorf(
+				"get account for stake credential %s: %w",
+				cred.Hash().String(),
+				err,
+			))
 		}
 		return false
 	}
@@ -399,10 +489,8 @@ func (lv *LedgerView) PoolCurrentState(
 		}
 		if reg.MetadataUrl != "" {
 			tmp.PoolMetadata = &lcommon.PoolMetadata{
-				Url: reg.MetadataUrl,
-				Hash: lcommon.PoolMetadataHash(
-					lcommon.NewBlake2b256(reg.MetadataHash),
-				),
+				Url:  reg.MetadataUrl,
+				Hash: lcommon.PoolMetadataHash(reg.MetadataHash),
 			}
 		}
 		currentReg = &tmp
@@ -465,6 +553,19 @@ func (lv *LedgerView) EpochForSlot(slot uint64) (uint64, error) {
 func (lv *LedgerView) IsPoolRegistered(pkh lcommon.PoolKeyHash) bool {
 	reg, _, err := lv.PoolCurrentState(pkh)
 	if err != nil {
+		// PoolCurrentState already converts models.ErrPoolNotFound into a
+		// nil error, so any error reaching here is a genuine storage fault.
+		lv.ls.config.Logger.Error(
+			"failed to get pool",
+			"component", "ledger",
+			"pool_key_hash", pkh.String(),
+			"error", err,
+		)
+		lv.recordStorageErr(fmt.Errorf(
+			"get pool %s: %w",
+			pkh.String(),
+			err,
+		))
 		return false
 	}
 	return reg != nil
@@ -568,6 +669,11 @@ func (lv *LedgerView) IsRewardAccountRegistered(
 				"credential", cred.Hash().String(),
 				"error", err,
 			)
+			lv.recordStorageErr(fmt.Errorf(
+				"get account for reward account %s: %w",
+				cred.Hash().String(),
+				err,
+			))
 		}
 		return false
 	}
@@ -622,6 +728,24 @@ func (lv *LedgerView) CostModels() map[lcommon.PlutusLanguage]lcommon.CostModel 
 		return map[lcommon.PlutusLanguage]lcommon.CostModel{}
 	}
 	return extractCostModelsFromPParams(pp)
+}
+
+// SyntheticV2CostModelInEffect reports whether the PlutusV2 cost model
+// currently in force is still HardForkBabbage's fabricated default rather
+// than real governance/protocol-update data -- see
+// LedgerState.syntheticV2CostModel (blinklabs-io/dingo#3825,
+// blinklabs-io/dingo#3962). ledger/eras validation code (which cannot import
+// this package) type-asserts its lcommon.LedgerState parameter against a
+// locally declared interface with this exact method signature to reach it
+// without a package cycle.
+//
+// Returns the value pinSyntheticV2CostModel recorded, not a live read of
+// ls.loadConsensusSnapshot() -- see syntheticV2CostModel's field doc
+// comment for why a live read would be unsound here. A *LedgerView this
+// wasn't called on (e.g. a test constructing one directly) reports false,
+// matching the field's zero value.
+func (lv *LedgerView) SyntheticV2CostModelInEffect() bool {
+	return lv.syntheticV2CostModel
 }
 
 // costModelsProvider is an optional interface implemented by
@@ -1660,6 +1784,24 @@ func (lv *LedgerView) GovActionExists(id lcommon.GovActionId) bool {
 		lv.txn,
 	)
 	if err != nil {
+		if !errors.Is(err, models.ErrGovernanceProposalNotFound) {
+			govActionID := fmt.Sprintf(
+				"%s#%d",
+				hex.EncodeToString(id.TransactionId[:]),
+				id.GovActionIdx,
+			)
+			lv.ls.config.Logger.Error(
+				"failed to get governance proposal",
+				"component", "ledger",
+				"gov_action_id", govActionID,
+				"error", err,
+			)
+			lv.recordStorageErr(fmt.Errorf(
+				"get governance proposal %s: %w",
+				govActionID,
+				err,
+			))
+		}
 		return false
 	}
 	// Voting procedures may target only pending actions. GovActionById also
