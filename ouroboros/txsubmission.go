@@ -133,7 +133,6 @@ func validateTxsubmissionReply(
 		}
 		requestedBytes += requestedSize
 		// Preserve the first announcement if an ID appears more than once.
-		// Preserve the first announcement if an ID appears more than once.
 		if _, exists := requestedIndex[requestedTx.TxId.TxId]; !exists {
 			requestedIndex[requestedTx.TxId.TxId] = index
 		}
