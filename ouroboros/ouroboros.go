@@ -426,6 +426,15 @@ type blockfetchMetrics struct {
 	blocksUnder1s      atomic.Int64
 	blocksUnder3s      atomic.Int64
 	blocksUnder5s      atomic.Int64
+	// Wall-clock time spent decoding one fetched block's raw CBOR bytes
+	// into a gledger.Block, by stage ("decode"). Only observed on a
+	// decode-cache miss, since a hit reuses another connection's already
+	// decoded result and does no decode work of its own. See
+	// dingo_ledger_block_stage_duration_seconds in the ledger package for
+	// the header-verify/validate/apply stages that follow once a decoded
+	// block reaches the ledger.
+	stageDuration *prometheus.HistogramVec
+	stageDecode   prometheus.Observer
 }
 
 // NewOuroboros builds a fully-wired Ouroboros. Every dependency is supplied up
@@ -572,6 +581,19 @@ func (o *Ouroboros) initBlockfetchMetrics() {
 			Help: "percentage of blocks fetched in less than 5 seconds",
 		},
 	)
+	o.blockfetchMetrics.stageDuration = promautoFactory.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "dingo_blockfetch_stage_duration_seconds",
+			Help: "wall-clock time spent in each blockfetch-owned stage of per-block processing, by stage: decode (CBOR-decoding one fetched block's raw bytes, on a decode-cache miss only)",
+			// 100us to ~3.3s, matching
+			// dingo_ledger_block_stage_duration_seconds so the two
+			// histograms are comparable across the same block's stages.
+			Buckets: prometheus.ExponentialBuckets(0.0001, 2, 16),
+		},
+		[]string{"stage"},
+	)
+	o.blockfetchMetrics.stageDecode = o.blockfetchMetrics.stageDuration.
+		WithLabelValues("decode")
 }
 
 func (o *Ouroboros) ConfigureListeners(
