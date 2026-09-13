@@ -70,7 +70,8 @@ func TestDial_CancelledContextUnblocksStalledHandshake(t *testing.T) {
 	select {
 	case <-done:
 		require.Error(
-			t, dialErr,
+			t,
+			dialErr,
 			"a cancelled dial against a stalled peer must return an error, not a connection",
 		)
 	case <-time.After(5 * time.Second):

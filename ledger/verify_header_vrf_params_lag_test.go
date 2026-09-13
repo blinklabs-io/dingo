@@ -121,8 +121,12 @@ func TestElectingVrfKeyHashLagsPoolParamsByOneEpoch(t *testing.T) {
 	gotKey, ok, err := ls.electingVrfKeyHash(tb.block, 40, pool)
 	require.NoError(t, err)
 	require.True(t, ok)
-	assert.Equal(t, newKey, gotKey.Bytes(),
-		"epoch 40 is elected by parameters in force through the end of epoch 37")
+	assert.Equal(
+		t,
+		newKey,
+		gotKey.Bytes(),
+		"epoch 40 is elected by parameters in force through the end of epoch 37",
+	)
 }
 
 // blockEpochId resolves the epoch a block falls in, the way
@@ -269,7 +273,12 @@ func TestLeaderEligibilityStakeUsesTheSuppliedEpochCache(t *testing.T) {
 	// Supplied cache places the same boundary in epoch 38, the epoch under
 	// verification, so the imported active distribution is the electing one.
 	supplied := []models.Epoch{
-		{EpochId: 38, StartSlot: 3_283_200, LengthInSlots: 172_800, Nonce: nonce},
+		{
+			EpochId:       38,
+			StartSlot:     3_283_200,
+			LengthInSlots: 172_800,
+			Nonce:         nonce,
+		},
 	}
 
 	pool := lcommon.PoolKeyHash(tb.block.IssuerVkey().Hash())
@@ -319,9 +328,24 @@ func TestLeaderEligibilityStakeSkipDecisionUsesTheSuppliedEpochCache(
 	// Supplied cache: epoch 38 starts after the capture, so the mark row was
 	// not reconstructed past its boundary and eligibility must be evaluated.
 	supplied := []models.Epoch{
-		{EpochId: 36, StartSlot: 2_900_000, LengthInSlots: 200_000, Nonce: nonce},
-		{EpochId: 37, StartSlot: 3_100_000, LengthInSlots: 200_000, Nonce: nonce},
-		{EpochId: 38, StartSlot: 3_300_000, LengthInSlots: 200_000, Nonce: nonce},
+		{
+			EpochId:       36,
+			StartSlot:     2_900_000,
+			LengthInSlots: 200_000,
+			Nonce:         nonce,
+		},
+		{
+			EpochId:       37,
+			StartSlot:     3_100_000,
+			LengthInSlots: 200_000,
+			Nonce:         nonce,
+		},
+		{
+			EpochId:       38,
+			StartSlot:     3_300_000,
+			LengthInSlots: 200_000,
+			Nonce:         nonce,
+		},
 	}
 
 	pool := lcommon.PoolKeyHash(tb.block.IssuerVkey().Hash())

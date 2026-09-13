@@ -2481,9 +2481,12 @@ func (m *VoteManager) emitPrototypeVoteLocked(
 			m.markSlotWindowWarned()
 			m.logger.Warn(
 				"announcing ranking block outside vote window, not voting; this node is seated on the leios committee and holds a voting key",
-				"slot", record.slot,
-				"epoch", record.epoch,
-				"error", err,
+				"slot",
+				record.slot,
+				"epoch",
+				record.epoch,
+				"error",
+				err,
 			)
 		} else {
 			m.logger.Debug(

@@ -87,7 +87,12 @@ func TestHashAcceptsLeiosExtendedConwayHeader(t *testing.T) {
 		"fixture invariant: the Leios-aware decoder must accept it")
 	hash := decoded.Hash()
 
-	verified, err := Hash(gledger.BlockTypeConway, testSlot, extendedRaw, hash[:])
+	verified, err := Hash(
+		gledger.BlockTypeConway,
+		testSlot,
+		extendedRaw,
+		hash[:],
+	)
 	require.NoError(t, err)
 	require.Equal(t, hash, verified.Hash())
 }

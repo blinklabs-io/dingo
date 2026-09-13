@@ -848,3 +848,60 @@ func TestForecastPParamUpdates_QuorumNotMet(t *testing.T) {
 		"should return the original pointer unchanged when quorum not met",
 	)
 }
+
+// TestPParamEnactmentPendingShortCircuitsTheWriter pins the read-only probe
+// that lets the txn == nil path avoid taking the single metadata writer.
+// Deciding whether anything will be enacted is a pure read, so only a
+// quorum-met proposal should report pending and go on to open a write
+// transaction.
+func TestPParamEnactmentPendingShortCircuitsTheWriter(t *testing.T) {
+	t.Parallel()
+
+	db, err := newTestDatabase(t, &Config{DataDir: ""})
+	require.NoError(t, err)
+	defer db.Close()
+
+	minFeeA := uint(100)
+	updateCbor, err := cbor.Encode(
+		&shelley.ShelleyProtocolParameterUpdate{MinFeeA: &minFeeA},
+	)
+	require.NoError(t, err)
+
+	// Epoch 0 has no submission epoch at all.
+	pending, err := db.pparamEnactmentPending(0, 1)
+	require.NoError(t, err)
+	require.False(t, pending)
+
+	// Nothing recorded for the submission epoch.
+	pending, err = db.pparamEnactmentPending(4, 3)
+	require.NoError(t, err)
+	require.False(t, pending)
+
+	txn := db.Transaction(true)
+	for i, gk := range [][]byte{
+		{0x01, 0x02, 0x03},
+		{0x04, 0x05, 0x06},
+	} {
+		require.NoError(t, db.SetPParamUpdate(
+			gk, updateCbor, uint64(300+i), 3, txn,
+		))
+	}
+	require.NoError(t, txn.Commit())
+
+	// Two unique proposals against a quorum of three: still nothing to enact,
+	// so the writer must not be taken.
+	pending, err = db.pparamEnactmentPending(4, 3)
+	require.NoError(t, err)
+	require.False(t, pending)
+
+	txn = db.Transaction(true)
+	require.NoError(t, db.SetPParamUpdate(
+		[]byte{0x07, 0x08, 0x09}, updateCbor, 302, 3, txn,
+	))
+	require.NoError(t, txn.Commit())
+
+	// Quorum met: an enactment will be written, so the writer is warranted.
+	pending, err = db.pparamEnactmentPending(4, 3)
+	require.NoError(t, err)
+	require.True(t, pending)
+}

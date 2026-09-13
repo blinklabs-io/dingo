@@ -173,7 +173,10 @@ func TestDecodeMapEntriesLimit_DefiniteLength_RemainingByteBoundaries(
 		{name: "truncated value", data: []byte{0xa1, 0x00}, err: true},
 		// Tags and indefinite nested values remain valid CBOR items.
 		{name: "tagged value", data: []byte{0xa1, 0x00, 0xc0, 0x00}},
-		{name: "indefinite nested value", data: []byte{0xa1, 0x00, 0x9f, 0x00, 0xff}},
+		{
+			name: "indefinite nested value",
+			data: []byte{0xa1, 0x00, 0x9f, 0x00, 0xff},
+		},
 	}
 
 	for _, tc := range tests {
