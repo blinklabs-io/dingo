@@ -5669,29 +5669,7 @@ const (
 	// noProgressStuckBackoffMax is retained for the backoff calculation and
 	// metric tests; the retry loop stops when the threshold is reached.
 	noProgressStuckBackoffMax = 30 * time.Second
-	// noProgressStuckReannounceInterval is how many further no-progress
-	// restarts pass between ERROR announcements once the pipeline is stuck.
-	// Announcing the transition once and then dropping to WARN every 100
-	// restarts made a node that had stopped following the chain look quiet
-	// to log-level alerting: one ERROR line covered 18 hours, mixed into
-	// 129k WARN lines from everything else (issue #3261). At the stuck
-	// backoff ceiling this re-announces roughly every ten minutes, which is
-	// often enough to alert on and rare enough not to become the noise it
-	// replaces.
-	noProgressStuckReannounceInterval = 20
 )
-
-// pipelineStuckShouldAnnounce reports whether a stuck no-progress restart
-// warrants an ERROR announcement. True on the transition into stuck and every
-// noProgressStuckReannounceInterval restarts after it, so the condition stays
-// visible for as long as it lasts rather than only when it began.
-func pipelineStuckShouldAnnounce(consecutiveNoProgress int) bool {
-	if consecutiveNoProgress < noProgressStuckThreshold {
-		return false
-	}
-	return (consecutiveNoProgress-noProgressStuckThreshold)%
-		noProgressStuckReannounceInterval == 0
-}
 
 // runLedgerReadChainAttempt runs one read+process attempt: it launches
 // readChain on a fresh child context of ctx, hands the result channel to
@@ -5804,13 +5782,6 @@ func (ls *LedgerState) stopStuckLedgerPipeline(
 			"tip_slot", progress.lastTipSlot,
 			"error", err,
 		)
-	}
-	if ls.config.FatalErrorFunc != nil {
-		ls.config.FatalErrorFunc(fmt.Errorf(
-			"ledger pipeline stopped after %d consecutive no-progress restarts: %w",
-			progress.consecutiveNoProgress,
-			err,
-		))
 	}
 }
 
@@ -5977,22 +5948,6 @@ func (ls *LedgerState) ledgerProcessBlocksWithAttempt(
 				ls.stopStuckLedgerPipeline(err, progress)
 				return
 			}
-			if endorserStuck &&
-				pipelineStuckShouldAnnounce(
-					progress.consecutiveNoProgress,
-				) {
-				ls.config.Logger.Error(
-					"ledger pipeline stuck: a certified endorser block has stayed unavailable across repeated restarts without advancing the tip; the node is no longer following the chain",
-					"component",
-					"ledger",
-					"consecutive_no_progress",
-					progress.consecutiveNoProgress,
-					"tip_slot",
-					progress.lastTipSlot,
-					"error",
-					err,
-				)
-			}
 			timer := time.NewTimer(
 				certifiedEndorserBlockPipelineRetryDelay(
 					progress.consecutiveNoProgress,
@@ -6024,30 +5979,6 @@ func (ls *LedgerState) ledgerProcessBlocksWithAttempt(
 			return
 		}
 		if progress.consecutiveNoProgress > 0 {
-			// Announce the stuck condition at ERROR on the transition and
-			// periodically for as long as it lasts: a deterministic failure
-			// is not going to clear on its own, and a node that has stopped
-			// following the chain must not fall silent at ERROR after one
-			// line while the WARN below is buried among unrelated warnings
-			// (issue #3261).
-			if stuck &&
-				pipelineStuckShouldAnnounce(
-					progress.consecutiveNoProgress,
-				) {
-				ls.config.Logger.Error(
-					"ledger pipeline stuck: repeated restarts are not advancing the tip, so the failure is deterministic and will not clear on its own; the node is no longer following the chain",
-					"component",
-					"ledger",
-					"consecutive_no_progress",
-					progress.consecutiveNoProgress,
-					"tip_slot",
-					tipSlot,
-					"backoff",
-					backoff,
-					"error",
-					err,
-				)
-			}
 			if progress.consecutiveNoProgress == 10 ||
 				progress.consecutiveNoProgress%100 == 0 {
 				ls.config.Logger.Warn(

@@ -132,7 +132,7 @@ func TestLedgerProcessBlocksKeepsRetryingRecoverableFailures(t *testing.T) {
 	)
 }
 
-func TestStopStuckLedgerPipelineInvokesFatalCallback(t *testing.T) {
+func TestStopStuckLedgerPipelineDoesNotInvokeFatalCallback(t *testing.T) {
 	t.Parallel()
 
 	ls := newPipelineLoopLedger(t)
@@ -146,44 +146,7 @@ func TestStopStuckLedgerPipelineInvokesFatalCallback(t *testing.T) {
 	}
 
 	ls.stopStuckLedgerPipeline(errors.New("rejected block"), progress)
-	require.Error(t, fatalErr)
-	assert.ErrorContains(t, fatalErr, "no-progress restarts")
-}
-
-// TestPipelineStuckAnnouncementStaysVisible covers the third ask of issue
-// #3261. The stuck condition was announced at ERROR exactly once and then only
-// at WARN, so a node that had stopped following the chain looked quiet to
-// log-level alerting for as long as it stayed wedged.
-func TestPipelineStuckAnnouncementStaysVisible(t *testing.T) {
-	t.Parallel()
-
-	for consecutive := range noProgressStuckThreshold {
-		assert.False(
-			t,
-			pipelineStuckShouldAnnounce(consecutive),
-			"restart %d is not stuck yet and must not announce",
-			consecutive,
-		)
-	}
-	assert.True(
-		t,
-		pipelineStuckShouldAnnounce(noProgressStuckThreshold),
-		"the transition into stuck must be announced",
-	)
-
-	announcements := 0
-	for consecutive := noProgressStuckThreshold; consecutive <= noProgressStuckThreshold+
-		4*noProgressStuckReannounceInterval; consecutive++ {
-		if pipelineStuckShouldAnnounce(consecutive) {
-			announcements++
-		}
-	}
-	assert.Equal(
-		t,
-		5,
-		announcements,
-		"a persistently stuck pipeline must keep announcing itself at a fixed cadence",
-	)
+	assert.NoError(t, fatalErr)
 }
 
 // TestResetMithrilBoundaryRejectionsRequiresAppliedTipProgress verifies that

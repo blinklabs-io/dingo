@@ -607,6 +607,13 @@ func parseCborTxOut(
 	if addr.Type()&lcommon.AddressTypeScriptBit == lcommon.AddressTypeScriptBit {
 		result.PaymentScript = true
 	}
+	if pointer, ok := addr.StakingPayload().(lcommon.AddressPayloadPointer); ok {
+		result.Pointer = &models.UtxoPointer{
+			Slot:      pointer.Slot,
+			TxIndex:   pointer.TxIndex,
+			CertIndex: pointer.CertIndex,
+		}
+	}
 
 	if dh := txOut.DatumHash(); dh != nil {
 		result.DatumHash = dh.Bytes()
