@@ -55,7 +55,7 @@ func TestSaveCursorLoadCursor_RoundTrips(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "cursor.json")
 	want := &IncrementalCursor{
-		Tip:                  Tip{Slot: 123, Hash: "abcd", BlockNumber: 45},
+		Tip:                  Tip{Slot: 123, Hash: "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd", BlockNumber: 45},
 		Epoch:                7,
 		BlocksSinceFullCheck: 89,
 	}
@@ -362,7 +362,7 @@ func TestHandleIncrementalRollback_NoOpWhenPointMatchesCursor(t *testing.T) {
 	t.Parallel()
 	cursorFile := filepath.Join(t.TempDir(), "cursor.json")
 	cursor := newCursorState(cursorFile, IncrementalCursor{
-		Tip: Tip{Slot: 100, Hash: "abcd", BlockNumber: 10}, Epoch: 5,
+		Tip: Tip{Slot: 100, Hash: "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd", BlockNumber: 10}, Epoch: 5,
 	})
 	cfg := IncrementalConfig{
 		DingoAddr:   "127.0.0.1:1",
@@ -377,7 +377,9 @@ func TestHandleIncrementalRollback_NoOpWhenPointMatchesCursor(t *testing.T) {
 	worker := &fullCheckWorker{
 		cfg: cfg, cursor: cursor, pending: make(chan fullCheckRequest, 1),
 	}
-	hashBytes, err := hex.DecodeString("abcd")
+	hashBytes, err := hex.DecodeString(
+		"abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd",
+	)
 	require.NoError(t, err)
 	samePoint := pcommon.NewPoint(100, hashBytes)
 
@@ -394,7 +396,7 @@ func TestHandleIncrementalRollback_NoOpWhenPointMatchesCursor(t *testing.T) {
 	default:
 	}
 	assert.Equal(
-		t, Tip{Slot: 100, Hash: "abcd", BlockNumber: 10}, cursor.snapshot().Tip,
+		t, Tip{Slot: 100, Hash: "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd", BlockNumber: 10}, cursor.snapshot().Tip,
 		"the cursor must be left unchanged by a no-op rollback",
 	)
 	_, statErr := os.Stat(cursorFile)
@@ -417,7 +419,7 @@ func TestHandleIncrementalRollback_TriggersFullCheckWhenPointDiffers(
 	t.Parallel()
 	cursorFile := filepath.Join(t.TempDir(), "cursor.json")
 	cursor := newCursorState(cursorFile, IncrementalCursor{
-		Tip: Tip{Slot: 100, Hash: "abcd", BlockNumber: 10}, Epoch: 5,
+		Tip: Tip{Slot: 100, Hash: "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd", BlockNumber: 10}, Epoch: 5,
 	})
 	cfg := IncrementalConfig{
 		DingoAddr:        "127.0.0.1:1",
@@ -498,7 +500,7 @@ func TestFullCheckWorker_FailedAttemptDoesNotResetCounter(t *testing.T) {
 	t.Parallel()
 	cursorFile := filepath.Join(t.TempDir(), "cursor.json")
 	cursor := newCursorState(cursorFile, IncrementalCursor{
-		Tip:                  Tip{Slot: 100, Hash: "abcd", BlockNumber: 10},
+		Tip:                  Tip{Slot: 100, Hash: "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd", BlockNumber: 10},
 		Epoch:                5,
 		BlocksSinceFullCheck: 42,
 	})
@@ -524,7 +526,7 @@ func TestFullCheckWorker_FailedAttemptDoesNotResetCounter(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	worker := startFullCheckWorker(ctx, cfg, cursor)
-	worker.request(FullCheckMismatch, Tip{Slot: 200, Hash: "ef01"})
+	worker.request(FullCheckMismatch, Tip{Slot: 200, Hash: "ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01"})
 
 	select {
 	case <-called:
@@ -570,7 +572,7 @@ func TestFullCheckWorker_SuccessfulCheckResetsCounter(t *testing.T) {
 
 	cursorFile := filepath.Join(t.TempDir(), "cursor.json")
 	cursor := newCursorState(cursorFile, IncrementalCursor{
-		Tip:                  Tip{Slot: 100, Hash: "abcd", BlockNumber: 10},
+		Tip:                  Tip{Slot: 100, Hash: "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd", BlockNumber: 10},
 		Epoch:                5,
 		BlocksSinceFullCheck: 42,
 	})
@@ -595,7 +597,7 @@ func TestFullCheckWorker_SuccessfulCheckResetsCounter(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	worker := startFullCheckWorker(ctx, cfg, cursor)
-	worker.request(FullCheckInterval, Tip{Slot: 200, Hash: "ef01"})
+	worker.request(FullCheckInterval, Tip{Slot: 200, Hash: "ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01"})
 
 	select {
 	case <-called:
