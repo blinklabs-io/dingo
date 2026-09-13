@@ -212,6 +212,58 @@ func (d *Database) ApplyPParamUpdates(
 	)
 }
 
+// pparamEnactmentPending reports whether ComputeAndApplyPParamUpdates would
+// actually enact a protocol parameter update for epoch, using a read-only
+// metadata transaction.
+//
+// It exists so the txn == nil path can answer that question without holding
+// the single metadata writer connection. Reads issued through a read-write
+// transaction execute on that transaction's own connection, so probing inside
+// one occupies the writer for the duration and contends with block
+// processing on SQLite.
+func (d *Database) pparamEnactmentPending(
+	epoch uint64,
+	quorum int,
+) (bool, error) {
+	if epoch == 0 {
+		// No prior (submission) epoch, so nothing to enact.
+		return false, nil
+	}
+	submissionEpoch := epoch - 1
+	var (
+		pending     bool
+		uniqueCount int
+	)
+	if err := d.MetadataTxn(false).Do(func(txn *Txn) error {
+		pparamUpdates, err := d.metadata.GetPParamUpdates(
+			submissionEpoch, txn.Metadata(),
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"get pparam updates for epoch %d: %w",
+				submissionEpoch,
+				err,
+			)
+		}
+		_, uniqueCount, pending = selectPParamUpdateForEnactment(
+			pparamUpdates, epoch, quorum,
+		)
+		return nil
+	}); err != nil {
+		return false, err
+	}
+	if !pending {
+		d.logger.Debug(
+			"pparam update quorum not met or none pending, skipping",
+			"enact_epoch", epoch,
+			"submission_epoch", submissionEpoch,
+			"uniqueProposals", uniqueCount,
+			"quorum", quorum,
+		)
+	}
+	return pending, nil
+}
+
 // ComputeAndApplyPParamUpdates computes the new protocol parameters by applying
 // the pending update to enact for the given epoch, and persists the result for
 // that epoch. The epoch parameter is the epoch where the updates take effect
@@ -253,6 +305,20 @@ func (d *Database) ComputeAndApplyPParamUpdates(
 	txn *Txn,
 ) (lcommon.ProtocolParameters, bool, error) {
 	if txn == nil {
+		// Deciding whether anything will be enacted is a pure read, and in the
+		// overwhelming majority of epochs it enacts nothing. Probe it on the
+		// read connection first and take the single metadata writer only when
+		// a write will actually follow: internal/node/backfill.go calls this
+		// once per epoch for the whole of a rebootstrap backfill, so holding
+		// the writer for the probe costs one writer acquisition per epoch of
+		// chain history to answer a question that is almost always "no".
+		pending, err := d.pparamEnactmentPending(epoch, quorum)
+		if err != nil {
+			return nil, false, err
+		}
+		if !pending {
+			return currentPParams, false, nil
+		}
 		tmpTxn := d.MetadataTxn(true)
 		defer tmpTxn.Release()
 		result, plutusV2CostModelWritten, err := d.ComputeAndApplyPParamUpdates(
