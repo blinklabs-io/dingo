@@ -428,6 +428,22 @@ func TestPoolDepositHeldUnknownDepositFallsBackToReregistration(t *testing.T) {
 	writeDepositHeldCert(t, store, 1_100, 0, depositHeldRegistration(pool), 800)
 	writeDepositHeldCert(t, store, 1_200, 0, depositHeldRetirement(pool, 3), 0)
 
+	var held []sql.NullString
+	rows, err := store.writeDB.Query(`
+SELECT deposit_held FROM pool_registration
+WHERE pool_key_hash = ? ORDER BY added_slot`, pool.Bytes())
+	require.NoError(t, err)
+	defer rows.Close()
+	for rows.Next() {
+		var value sql.NullString
+		require.NoError(t, rows.Scan(&value))
+		held = append(held, value)
+	}
+	require.NoError(t, rows.Err())
+	require.Len(t, held, 2)
+	require.False(t, held[0].Valid)
+	require.False(t, held[1].Valid)
+
 	require.Equal(
 		t,
 		uint64(800),

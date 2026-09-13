@@ -17,6 +17,7 @@ package ledgerstate
 import (
 	"encoding/binary"
 	"encoding/hex"
+	"runtime"
 	"testing"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -119,6 +120,73 @@ func TestDecodeMapEntriesLimit_DefiniteLength_OverLimitRejected(t *testing.T) {
 
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "exceeds max")
+}
+
+func TestDecodeMapEntriesLimit_DefiniteLength_TruncatedPayloadDoesNotAllocate(
+	t *testing.T,
+) {
+	// Not t.Parallel: TotalAlloc measures allocations across the process.
+	const count = 100_000
+	data := cborTypeHeader(cborMajorMap, count)
+
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	var errorsSeen int
+	var firstErr error
+	for range 3 {
+		_, err := decodeMapEntriesLimit(data, count)
+		if err != nil {
+			errorsSeen++
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	runtime.ReadMemStats(&after)
+
+	require.Equal(t, 3, errorsSeen)
+	require.Error(t, firstErr)
+	require.Less(
+		t,
+		after.TotalAlloc-before.TotalAlloc,
+		uint64(1<<20),
+		"truncated declared map count must not allocate its slice capacity",
+	)
+	require.Contains(t, firstErr.Error(), "but only")
+}
+
+func TestDecodeMapEntriesLimit_DefiniteLength_RemainingByteBoundaries(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		data []byte
+		err  bool
+	}{
+		{name: "empty", data: []byte{0xa0}},
+		{name: "smallest valid pair", data: []byte{0xa1, 0x00, 0x00}},
+		{name: "one byte short", data: []byte{0xa2, 0x00, 0x00}, err: true},
+		{name: "truncated key", data: []byte{0xa1}, err: true},
+		{name: "truncated value", data: []byte{0xa1, 0x00}, err: true},
+		// Tags and indefinite nested values remain valid CBOR items.
+		{name: "tagged value", data: []byte{0xa1, 0x00, 0xc0, 0x00}},
+		{name: "indefinite nested value", data: []byte{0xa1, 0x00, 0x9f, 0x00, 0xff}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := decodeMapEntriesLimit(tc.data, 5)
+			if tc.err {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), "but only")
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
 }
 
 func TestDecodeMapEntriesLimit_IndefiniteLength_AtLimitAccepted(t *testing.T) {

@@ -50,6 +50,17 @@ type Manager struct {
 	delegatorInactivityPeriod  uint64
 	configurationLocked        bool
 
+	// rewardAccountOutputRetentionUnbounded mirrors whether the in-process
+	// Koios parity observer (dingo #3098) is enabled, from node/load
+	// construction. When true, cleanupOldSnapshots retains reward_account_output
+	// without bound in CORE storage mode too, exactly as it already does
+	// unconditionally in API storage mode (dingo #1875) — see
+	// cleanupOldSnapshots's doc comment. Not consensus-affecting: it only
+	// widens local historical retention, so it carries no configurationLocked
+	// gate and may be changed at any time. Default false preserves CORE mode's
+	// existing pruning behavior when the observer is disabled (dingo #4188).
+	rewardAccountOutputRetentionUnbounded bool
+
 	mu             sync.RWMutex
 	running        bool
 	stopping       bool
@@ -125,6 +136,52 @@ func (m *Manager) takeBoundaryDistribution(
 		return nil
 	}
 	return pending.distribution
+}
+
+// boundaryChangesEra reports whether the epoch the boundary slot opens runs at
+// a different era than the epoch the snapshot slot closes.
+//
+// Era-sensitive stake rules are resolved against the incoming epoch's era,
+// because cardano-ledger's hard-fork combinator translates the ledger state
+// into that era in extendToSlot before the TICK whose SNAP produces the mark
+// snapshot (ouroboros-consensus HardFork/Combinator/Ledger.hs,
+// applyChainTickLedgerResult). The current such rule is the pointer-address
+// stake gate in database/plugin/metadata/sqlstore/pointer_stake.go: the
+// Babbage->Conway translation rebuilds the instant stake as
+// `ConwayInstantStake . sisCredentialStake` (Conway/Translation.hs), dropping
+// sisPtrStake, so the mark snapshot at that boundary carries no pointer stake.
+//
+// ComputeEpochBoundarySnapshot cannot apply that rule. It runs at
+// processEpochRollover's SNAP read, step 3 of its documented ordering, while
+// the incoming epoch's row -- and the enactment that decides its era -- are
+// written near the end of the same transaction. Every era lookup it makes
+// therefore resolves the outgoing epoch's era. The persist half runs after that
+// row exists, so it can detect the difference and drop a SNAP-point read that
+// was taken under the wrong era, deferring to the boundary-aware historical
+// reconstruction below, which resolves the era correctly.
+//
+// A missing epoch row on either side is not treated as a change: an era that
+// cannot be resolved at all is one no era-gated rule acts on.
+func (m *Manager) boundaryChangesEra(
+	txn *database.Txn,
+	evt event.EpochTransitionEvent,
+) (bool, error) {
+	snapshotEpoch, err := m.db.GetEpochBySlot(evt.SnapshotSlot, txn)
+	if err != nil {
+		return false, fmt.Errorf(
+			"resolve era at snapshot slot %d: %w", evt.SnapshotSlot, err,
+		)
+	}
+	boundaryEpoch, err := m.db.GetEpochBySlot(evt.BoundarySlot, txn)
+	if err != nil {
+		return false, fmt.Errorf(
+			"resolve era at boundary slot %d: %w", evt.BoundarySlot, err,
+		)
+	}
+	if snapshotEpoch == nil || boundaryEpoch == nil {
+		return false, nil
+	}
+	return snapshotEpoch.EraId != boundaryEpoch.EraId, nil
 }
 
 // NewManager creates a new snapshot manager.
@@ -218,6 +275,38 @@ func (m *Manager) inactivityPeriod() uint64 {
 		return 0
 	}
 	return m.delegatorInactivityPeriod
+}
+
+// SetRewardAccountOutputRetentionUnbounded mirrors whether the in-process
+// Koios parity observer (dingo #3098) is enabled into the snapshot manager's
+// cleanup path. When enabled is true, cleanupOldSnapshots retains
+// reward_account_output without bound in CORE storage mode, matching API
+// storage mode's existing unbounded retention (dingo #1875).
+//
+// The Koios parity observer validates each closed epoch against Koios only
+// after fetching and comparing over the network, which can fall arbitrarily
+// far behind chain progression during a from-genesis or catch-up sync —
+// unlike the fixed, small rotation/reward-replay window CORE mode's
+// cleanupOldSnapshots otherwise prunes to. Without this, reward_account_output
+// for an epoch is routinely pruned before the observer ever reads it, and the
+// koios-parity check for that epoch fails permanently with a
+// reward_account_output row that genuinely no longer exists (dingo #4188).
+//
+// Not consensus-affecting — it only widens local historical retention — so
+// unlike SetDelegatorInactivity this is not gated by configurationLocked and
+// may be called or changed at any time, including after Start.
+func (m *Manager) SetRewardAccountOutputRetentionUnbounded(enabled bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.rewardAccountOutputRetentionUnbounded = enabled
+}
+
+// RewardAccountOutputRetentionUnbounded reports the current value set by
+// SetRewardAccountOutputRetentionUnbounded, for tests and diagnostics.
+func (m *Manager) RewardAccountOutputRetentionUnbounded() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.rewardAccountOutputRetentionUnbounded
 }
 
 // SetPromRegistry enables snapshot manager metrics.
@@ -580,6 +669,7 @@ func (m *Manager) ComputeEpochBoundarySnapshot(
 		ctx,
 		txn,
 		evt.SnapshotSlot,
+		evt.BoundarySlot,
 		expiryEpoch,
 	)
 	if err != nil {
@@ -629,6 +719,28 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 	expiryEpoch := m.expiryEpoch(evt.NewEpoch)
 
 	distribution := m.takeBoundaryDistribution(txn, evt, expiryEpoch)
+	if distribution != nil {
+		crossed, err := m.boundaryChangesEra(txn, evt)
+		if err != nil {
+			if m.metrics != nil {
+				m.metrics.captureFailureTotal.Inc()
+				m.metrics.captureDurationSeconds.Observe(
+					time.Since(start).Seconds(),
+				)
+			}
+			return err
+		}
+		if crossed {
+			m.logger.Info(
+				"discarding snap-point stake distribution across an era "+
+					"change; reconstructing at persist time",
+				"component", "snapshot",
+				"epoch", evt.NewEpoch,
+				"boundary_slot", evt.BoundarySlot,
+			)
+			distribution = nil
+		}
+	}
 	if distribution == nil {
 		m.logger.Debug(
 			"no snap-point stake distribution for boundary; reading at persist time",

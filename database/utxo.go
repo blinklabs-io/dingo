@@ -598,6 +598,38 @@ func (d *Database) UtxosByRefs(
 	return utxos, nil
 }
 
+// UtxosByRefsAsOf returns the UTxOs matching refs as they stood at atSlot:
+// a ref is included when it was created at-or-before atSlot and is either
+// still live or was spent strictly after atSlot. As with UtxosByRefs, a
+// ref with no matching row is simply absent from the result -- but unlike
+// UtxosByRefs, that absence is ambiguous once atSlot is older than this
+// node's spent-UTxO retention floor: it could mean "genuinely never live
+// at atSlot" or "was live at atSlot but its spend record has since been
+// hard-deleted by the periodic stability-window cleanup"
+// (UtxosDeleteConsumed). Callers pinning a historical point (ledger.Query,
+// blinklabs-io/dingo#382/#1900) must reject that case themselves before
+// calling this -- see ledger's checkUtxoRetentionWindow.
+func (d *Database) UtxosByRefsAsOf(
+	refs []models.UtxoId,
+	atSlot uint64,
+	txn *Txn,
+) ([]models.Utxo, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	utxos, err := d.utxoStore().GetUtxosByRefsAsOf(refs, atSlot, txn.Metadata())
+	if err != nil {
+		return nil, err
+	}
+	for i := range utxos {
+		if err := loadCbor(&utxos[i], txn); err != nil {
+			return nil, err
+		}
+	}
+	return utxos, nil
+}
+
 // CreateUtxo inserts a Utxo row directly. The normal block-application
 // path uses AddUtxos with UtxoSlot inputs; this is the simple-insert
 // variant for callers that already have a populated model. When txn

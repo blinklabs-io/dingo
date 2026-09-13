@@ -995,6 +995,7 @@ func newTestShelleyGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
 		"slotLength": 1,
 		"epochLength": 432000,
 		"slotsPerKESPeriod": 129600,
+		"maxKESEvolutions": 62,
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
@@ -1640,6 +1641,7 @@ func newHighFreqShelleyGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
 		"slotLength": 1,
 		"epochLength": 432000,
 		"slotsPerKESPeriod": 129600,
+		"maxKESEvolutions": 62,
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
@@ -1680,6 +1682,7 @@ func newGenesisDelegateShelleyGenesisCfgWithActiveSlots(
 		"slotLength": 1,
 		"epochLength": 432000,
 		"slotsPerKESPeriod": 129600,
+		"maxKESEvolutions": 62,
 		"systemStart": "2022-10-25T00:00:00Z",
 		"protocolParams": {
 			"decentralisationParam": 1
@@ -3394,6 +3397,7 @@ func newZeroCoeffGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
 		"activeSlotsCoeff": 0,
 		"securityParam": 432,
 		"slotsPerKESPeriod": 129600,
+		"maxKESEvolutions": 62,
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
