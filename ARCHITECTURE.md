@@ -179,6 +179,7 @@ Dingo is a high-performance Cardano blockchain node implementation in Go. This d
 - [Network and Protocol Handling](#network-and-protocol-handling)
 - [Peer Governance](#peer-governance)
 - [Transaction Mempool](#transaction-mempool)
+- [DMQ Message Pool](#dmq-message-pool)
 - [Block Production](#block-production)
 - [Mithril Bootstrap](#mithril-bootstrap)
 - [External Interfaces](#external-interfaces)
@@ -4921,6 +4922,68 @@ responsible for transactions confirmed by peer blocks. This local fast path
 prevents confirmed transactions from accumulating when sustained admissions
 make a long rebuild repeatedly lose its pinned ledger generation.
 
+## DMQ Message Pool
+
+`dmq.MessageMempool` is phase 1 of CIP-0137's Decentralized Message Queue
+(issue #1948 of 7; primary use case: Mithril signature diffusion). It is a
+standalone package, not yet wired into `node.go`, the plugin host, or any
+network protocol client/server -- that composition, a feature flag, and peer
+manager are later phases (issue #1953).
+
+The wire types are not redefined here. `Message`, `MessagePayload`, and
+`OperationalCertificate` from CIP-0137's CDDL, along with their CBOR
+encode/decode and Blake2b-256 message-ID computation, already exist upstream
+as `github.com/blinklabs-io/gouroboros/protocol/common`'s `DmqMessage`,
+`DmqMessagePayload`, and `OperationalCertificate`. `dmq` imports them directly.
+
+```
+                     MessageMempool
+    -------------------------------------------------
+    | Message Log                                    |
+    |   Dedup by 32-byte message ID                  |
+    |   Arrival-ordered, sequence-tagged entries     |
+    |   Capacity limits (bytes and/or count)         |
+    |   Reject-on-full backpressure (ErrFull)        |
+    |   TTL expiry via CIP-0137 expiresAt            |
+    |                                                 |
+    | Per-Peer Diffusion Cursor                      |
+    |   FIFO cursor over the arrival-ordered log      |
+    |   New peer starts from the retained backlog    |
+    -------------------------------------------------
+```
+
+`Add` de-duplicates by the message's 32-byte ID (computing one from the
+payload via `ComputeDmqMessageID` when the caller left it unset), rejects an
+already-expired message with `ErrExpired`, and rejects one that would exceed
+`Config.Capacity` or `Config.MaxMessages` with `ErrFull`. A duplicate ID
+returns `(false, nil)` rather than an error -- distinct from an outright
+rejection, since later phases translate each case into a different CIP-0137
+`RejectReason`. `Add` computes the CBOR-encoded size and admits under a single
+write-locked check to avoid a race between a concurrent capacity check and
+insert.
+
+`NextForPeer` gives each peer identifier its own FIFO cursor (a last-seen
+sequence number, not a slice index, so TTL compaction never invalidates it)
+over the arrival-ordered log, mirroring CIP-0137's per-peer outstanding
+message-ids queue for the node-to-node message-submission mini-protocol
+(protocol 18) without implementing that protocol's blocking/non-blocking
+request state machine itself -- that is phase 3 (issue #1950). A peer new to
+the pool sees the full retained backlog before anything arriving after it
+connects; `RemovePeer` releases a disconnected peer's cursor.
+
+A background goroutine (`Start`/`Stop`) sweeps expired messages on
+`Config.CleanupInterval` (default 30s), compacting the retained log and
+removing them from the dedup index. `Stop` follows this codebase's lifecycle
+convention: it returns an unprefixed error and bounds its wait on the caller's
+context, so a caller composing it into a larger shutdown adds its own
+component name and deadline.
+
+`dmq.add_message` / `dmq.remove_message` events publish outside the pool's
+lock, matching the mempool package's event-publication rule. Their payloads
+are `AddMessageEvent` and `RemoveMessageEvent`, each carrying a 32-byte
+`MessageID` field. `EventBus` is optional (nil-safe) so the package is usable
+standalone ahead of node composition.
+
 ## Block Production
 
 When running as a stake pool operator, Dingo can produce blocks. This involves three subsystems under `ledger/`:
@@ -6374,8 +6437,8 @@ listeners `Serve` registered, which is exactly the set that may be missing ours.
 
 Two consequences worth noting. `Publish` takes a build callback that runs under
 the listener's lock once the already-started check has passed, so each server
-installs its credential verifier atomically with the server it belongs to and a
-rejected second `Start` cannot replace a running server's. `Bind` reports
+constructs its handler chain atomically with publication and a rejected second
+`Start` cannot replace a running server's handlers. `Bind` reports
 whether it handed the socket to `Serve` rather than closing it, so a `Start`
 whose server was detached mid-bind returns without logging that a listener
 came up when none did. One window stays open by construction: a `Stop` landing
@@ -6405,9 +6468,8 @@ truncated bodies retain the existing HTTP 400 response. The HTTP listener also
 sets a 60-second read timeout as a backstop, independently of its header,
 write, and idle timeouts.
 
-TLS and token authentication (including the `project_id` header alias) are
-configured through `plugins.api.blockfrost.config.tls`/`config.auth`; see
-"API security" above.
+Optional TLS is configured through `plugins.api.blockfrost.config.tls`;
+requests do not require credentials. See "API security" above.
 
 A Blockfrost-compatible REST API that provides read access to chain data,
 transaction evaluation, and transaction submission. Transaction evaluation is
@@ -9753,7 +9815,41 @@ distinguishes an upgraded database with accounts but no aggregate rows from a
 legitimately fresh empty database. Node startup performs the check and rebuild
 after database recovery and before ledger processing. Mithril ledger-state
 import also invokes the rebuild directly, at the end of import once accounts and
-UTxOs are populated. `idx_utxo_staking_deleted_amount` is deliberately kept
+UTxOs are populated.
+
+Both startup probes — `RewardLiveStakeNeedsBackfill` and
+`StaleConsensusStakeSnapshotsExist` — are read-only and run inside a read-only
+metadata transaction, so they resolve against the read connection pool. The
+write pool is engaged only when a probe has already determined a rebuild is
+required, in a second transaction opened for that rebuild alone. Holding the
+single writer connection open merely to ask the questions would contend with
+block processing on SQLite, and in the skipped case would spend the writer on
+work the flag exists to avoid. Splitting the two is safe because both call
+sites run before ledger processing can advance the chain, so nothing can
+write `reward_live_stake` between the probe and the rebuild.
+
+`skipRewardLiveStakeBackfillCheck` (`--skip-reward-live-stake-backfill-check`,
+`CARDANO_SKIP_REWARD_LIVE_STAKE_BACKFILL_CHECK`, default false) skips the
+`RewardLiveStakeNeedsBackfill` probe and any rebuild it would trigger, and logs
+a warning. The cost it avoids is the check itself, not just a repair: deciding
+whether a backfill is needed scans the live UTxO table, so on a mainnet-scale
+database every startup pays close to the price of a rebuild whether or not one
+is required. It is a diagnostic control, not a tuning knob — the check is what
+catches a stale or pre-migration `reward_live_stake` table, so skipping it is
+only safe against a database already known to be consistent (repeated restarts
+while investigating an unrelated problem) and is unsafe to leave enabled. It is
+deliberately not a provenance-gated field: it records no persisted
+node-settings gate state and does not change how the chain is validated, only
+whether this one startup check runs.
+
+The flag's scope stops there. The same startup step also runs
+`StaleConsensusStakeSnapshotsExist`, and that check is unconditional: it is a
+pair of indexed `EXISTS` probes against `pool_stake_snapshot` and
+`reward_snapshot` whose cost does not grow with the UTxO set, so none of the
+cost argument above applies to it. It fails closed — a database whose consensus
+stake snapshots came from an older accounting version cannot be safely
+reconstructed and must be rebootstrapped — and the flag deliberately does not
+disable it. `idx_utxo_staking_deleted_amount` is deliberately kept
 out of the deferred-index manifest: the API-mode metadata backfill refreshes
 per-credential live-stake aggregates on every flushed batch, and without the
 index each refresh degenerates into a full scan of the growing `utxo` table,

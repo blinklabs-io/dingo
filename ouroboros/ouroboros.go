@@ -937,9 +937,12 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 				o.chainsyncState.RemoveClientConnId(connId)
 				o.config.Logger.Error(
 					"failed to start chainsync client, closing outbound connection",
-					"component", "network",
-					"connection_id", connId.String(),
-					"error", err,
+					"component",
+					"network",
+					"connection_id",
+					connId.String(),
+					"error",
+					err,
 				)
 				// Close the connection so peer governance observes the
 				// failure and applies its reconnect backoff.
@@ -1031,9 +1034,12 @@ func (o *Ouroboros) closeOutboundConnAfterChainsyncFailure(
 	if current := o.connManager.GetConnectionById(connId); current != startedConn {
 		o.config.Logger.Debug(
 			"outbound connection no longer current after chainsync start failure, not closing",
-			"component", "network",
-			"connection_id", connId.String(),
-			"replaced", current != nil,
+			"component",
+			"network",
+			"connection_id",
+			connId.String(),
+			"replaced",
+			current != nil,
 		)
 		return
 	}

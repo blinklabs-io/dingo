@@ -35,22 +35,39 @@ func TestSnapshotDurabilityBeforeManifest(t *testing.T) {
 	for _, failAt := range []string{"", BlobBackupFileName, MetadataBackupFileName, "directory", "parent"} {
 		t.Run("failure_"+failAt, func(t *testing.T) {
 			db := newRestoreInternalTestDB(t)
-			require.NoError(t, db.BlockCreate(newRestoreInternalTestBlock(), nil))
+			require.NoError(
+				t,
+				db.BlockCreate(newRestoreInternalTestBlock(), nil),
+			)
 			base := t.TempDir()
 			dir := filepath.Join(base, "snapshot")
 			originalFileSync, originalDirSync := syncSnapshotFile, syncDir
-			t.Cleanup(func() { syncSnapshotFile, syncDir = originalFileSync, originalDirSync })
+			t.Cleanup(
+				func() { syncSnapshotFile, syncDir = originalFileSync, originalDirSync },
+			)
 			injected := errors.New("snapshot durability failure")
 			var calls []string
 			check := func(stage string) error {
 				calls = append(calls, stage)
 				_, err := ReadManifest(dir)
-				require.ErrorIs(t, err, os.ErrNotExist, "manifest published before backup durability")
+				require.ErrorIs(
+					t,
+					err,
+					os.ErrNotExist,
+					"manifest published before backup durability",
+				)
 				// Persistence no longer needs the snapshot's commit pause.
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				ctx, cancel := context.WithTimeout(
+					context.Background(),
+					5*time.Second,
+				)
 				defer cancel()
 				resume, err := db.PauseCommitsContext(ctx)
-				require.NoError(t, err, "durability work retained the commit barrier")
+				require.NoError(
+					t,
+					err,
+					"durability work retained the commit barrier",
+				)
 				resume()
 				if stage == failAt {
 					return injected
@@ -60,7 +77,11 @@ func TestSnapshotDurabilityBeforeManifest(t *testing.T) {
 			syncSnapshotFile = func(file *os.File) error {
 				info, err := file.Stat()
 				require.NoError(t, err)
-				require.Positive(t, info.Size(), "sync must follow completed backup")
+				require.Positive(
+					t,
+					info.Size(),
+					"sync must follow completed backup",
+				)
 				if err := check(filepath.Base(file.Name())); err != nil {
 					return err
 				}
@@ -76,19 +97,48 @@ func TestSnapshotDurabilityBeforeManifest(t *testing.T) {
 				}
 				return originalDirSync(path)
 			}
-			_, err := Snapshot(context.Background(), db, dir, TriggerManual, "test", "badger", "sqlite")
+			_, err := Snapshot(
+				context.Background(),
+				db,
+				dir,
+				TriggerManual,
+				"test",
+				"badger",
+				"sqlite",
+			)
 			if failAt == "" {
 				require.NoError(t, err)
-				require.Equal(t, []string{BlobBackupFileName, MetadataBackupFileName, "directory", "parent"}, calls)
+				require.Equal(
+					t,
+					[]string{
+						BlobBackupFileName,
+						MetadataBackupFileName,
+						"directory",
+						"parent",
+					},
+					calls,
+				)
 				entries, err := ListSnapshots(base)
 				require.NoError(t, err)
 				require.Len(t, entries, 1)
 				syncSnapshotFile, syncDir = originalFileSync, originalDirSync
-				_, err = Restore(context.Background(), newRestoreInternalTestHost(t), nil, dir, filepath.Join(t.TempDir(), "restored"), RestoreStorageConfig{Blob: testutil.BadgerBlobConfig()})
+				_, err = Restore(
+					context.Background(),
+					newRestoreInternalTestHost(t),
+					nil,
+					dir,
+					filepath.Join(t.TempDir(), "restored"),
+					RestoreStorageConfig{Blob: testutil.BadgerBlobConfig()},
+				)
 				require.NoError(t, err)
 				return
 			}
-			require.ErrorIs(t, err, injected, "snapshot accepted an unsynchronized backup")
+			require.ErrorIs(
+				t,
+				err,
+				injected,
+				"snapshot accepted an unsynchronized backup",
+			)
 			require.NoDirExists(t, dir)
 			entries, err := ListSnapshots(base)
 			require.NoError(t, err)
@@ -199,7 +249,15 @@ func TestSnapshotInterruptedBeforeManifest(t *testing.T) {
 			}
 			return originalDirSync(path)
 		}
-		_, err := Snapshot(context.Background(), db, os.Getenv("DINGO_SNAPSHOT_INTERRUPT_DIR"), TriggerManual, "test", "badger", "sqlite")
+		_, err := Snapshot(
+			context.Background(),
+			db,
+			os.Getenv("DINGO_SNAPSHOT_INTERRUPT_DIR"),
+			TriggerManual,
+			"test",
+			"badger",
+			"sqlite",
+		)
 		require.NoError(t, err)
 		t.Fatal("snapshot did not reach interruption boundary")
 	}
@@ -221,9 +279,16 @@ func TestSnapshotInterruptedBeforeManifest(t *testing.T) {
 			// above instead of running its own migration, but still needs
 			// a bounded, generous deadline for the remaining setup and
 			// process-start overhead, which can be slow on Windows.
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			ctx, cancel := context.WithTimeout(
+				context.Background(),
+				2*time.Minute,
+			)
 			defer cancel()
-			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSnapshotInterruptedBeforeManifest$")
+			cmd := exec.CommandContext(
+				ctx,
+				os.Args[0],
+				"-test.run=^TestSnapshotInterruptedBeforeManifest$",
+			)
 			cmd.Env = append(
 				os.Environ(),
 				"TMPDIR="+base, "TMP="+base, "TEMP="+base,
@@ -238,9 +303,20 @@ func TestSnapshotInterruptedBeforeManifest(t *testing.T) {
 			require.DirExists(t, dir)
 			entries, err := ListSnapshots(base)
 			require.NoError(t, err)
-			require.Empty(t, entries, "interrupted snapshot appeared in catalog")
+			require.Empty(
+				t,
+				entries,
+				"interrupted snapshot appeared in catalog",
+			)
 			target := filepath.Join(t.TempDir(), "restore")
-			_, err = Restore(context.Background(), newRestoreInternalTestHost(t), nil, dir, target, RestoreStorageConfig{Blob: testutil.BadgerBlobConfig()})
+			_, err = Restore(
+				context.Background(),
+				newRestoreInternalTestHost(t),
+				nil,
+				dir,
+				target,
+				RestoreStorageConfig{Blob: testutil.BadgerBlobConfig()},
+			)
 			require.ErrorIs(t, err, os.ErrNotExist)
 			require.NoDirExists(t, target)
 		})

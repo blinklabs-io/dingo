@@ -346,21 +346,24 @@ func TestEntryPointExecutionFaultDetectsBypassedValidator(t *testing.T) {
 		)
 	})
 
-	t.Run("rejecting validator that reads no state is detected", func(t *testing.T) {
-		routing := route(func(
-			common.Transaction,
-			uint64,
-			common.LedgerState,
-			common.ProtocolParameters,
-		) error {
-			return errors.New("rejected without looking")
-		})
-		require.Error(
-			t,
-			entryPointExecutionFault(routing),
-			"returning an error is not evidence the validation path ran",
-		)
-	})
+	t.Run(
+		"rejecting validator that reads no state is detected",
+		func(t *testing.T) {
+			routing := route(func(
+				common.Transaction,
+				uint64,
+				common.LedgerState,
+				common.ProtocolParameters,
+			) error {
+				return errors.New("rejected without looking")
+			})
+			require.Error(
+				t,
+				entryPointExecutionFault(routing),
+				"returning an error is not evidence the validation path ran",
+			)
+		},
+	)
 }
 
 // entryPointProbe is a single real corpus transaction plus the state it was

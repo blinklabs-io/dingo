@@ -146,7 +146,8 @@ func (c forgerTestSlotClock) ChainTip() ocommon.Point {
 // tip, which is a real state the forger must handle and which a clamp would
 // hide.
 func (c forgerTestSlotClock) PrimaryChainTip() ocommon.Point {
-	if !c.primaryTipExplicit && c.primaryTipSlot == 0 && c.primaryTipHash == nil {
+	if !c.primaryTipExplicit && c.primaryTipSlot == 0 &&
+		c.primaryTipHash == nil {
 		return ocommon.Point{Slot: c.chainTipSlot, Hash: c.chainTipHash}
 	}
 	return ocommon.Point{Slot: c.primaryTipSlot, Hash: c.primaryTipHash}

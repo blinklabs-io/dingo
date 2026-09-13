@@ -567,10 +567,14 @@ func seedImportedRewardInputs(
 			if logger != nil {
 				logger.Warn(
 					"not seeding reward inputs for an imported epoch: the derived basis contains no pool inputs, so that epoch's reward round will be skipped and its rewards never credited",
-					"component", "ledgerstate",
-					"epoch", c.epoch,
-					"snapshot", c.name,
-					"error", reason,
+					"component",
+					"ledgerstate",
+					"epoch",
+					c.epoch,
+					"snapshot",
+					c.name,
+					"error",
+					reason,
 				)
 			}
 			continue
@@ -691,7 +695,10 @@ func emptyRewardSeedFailureReason(snap *ParsedSnapShot) string {
 	reasons := make([]string, 0, len(pools))
 	for _, pool := range pools {
 		pool = boundRewardSeedFailurePoolKey(pool)
-		reasons = append(reasons, fmt.Sprintf("pool %s has no parameters", pool))
+		reasons = append(
+			reasons,
+			fmt.Sprintf("pool %s has no parameters", pool),
+		)
 	}
 	return generic + ": " + boundRewardSeedFailureReasons(reasons)
 }

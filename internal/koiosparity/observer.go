@@ -330,7 +330,11 @@ func (o *Observer) seedBacklog(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("seed koiosparity observer backlog: %w", err)
 	}
-	uncached, err := o.cache.GetUncachedEpochs(o.cfg.Network, seedFrom, throughEpoch)
+	uncached, err := o.cache.GetUncachedEpochs(
+		o.cfg.Network,
+		seedFrom,
+		throughEpoch,
+	)
 	if err != nil {
 		return fmt.Errorf("seed koiosparity observer backlog: %w", err)
 	}
@@ -679,7 +683,10 @@ func (o *Observer) fetchIfNeeded(ctx context.Context, epoch uint64) error {
 // Pre-staking epochs are skipped: Koios publishes no parameter row for them
 // (preprod /epoch_params returns [] for epochs 0 and 1), and fetchEpoch does
 // not request one either.
-func (o *Observer) fetchParamsIfNeeded(ctx context.Context, epoch uint64) error {
+func (o *Observer) fetchParamsIfNeeded(
+	ctx context.Context,
+	epoch uint64,
+) error {
 	info, err := o.cache.GetEpochInfo(o.cfg.Network, epoch)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("get epoch info before params fetch: %w", err)

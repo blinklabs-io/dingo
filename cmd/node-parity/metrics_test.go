@@ -217,7 +217,8 @@ func TestNewParityMetricsIn_PreMaterializesZeroSeries(t *testing.T) {
 
 	skipped := byName["node_parity_checks_skipped_total"]
 	require.NotNil(
-		t, skipped,
+		t,
+		skipped,
 		"node_parity_checks_skipped_total must already be exposed before any skip is recorded",
 	)
 	gotReasons := make(map[string]float64, len(skipped.GetMetric()))
@@ -238,7 +239,8 @@ func TestNewParityMetricsIn_PreMaterializesZeroSeries(t *testing.T) {
 
 	divergence := byName["node_parity_divergence_total"]
 	require.NotNil(
-		t, divergence,
+		t,
+		divergence,
 		"node_parity_divergence_total must already be exposed before any divergence is recorded",
 	)
 	gotFields := make(map[string]float64, len(divergence.GetMetric()))
