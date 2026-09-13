@@ -90,11 +90,10 @@ func New(name string, logger *slog.Logger) *Listener {
 // It reports an error if a server is already running, which is what makes a
 // second Start fail rather than strand the first server's socket.
 //
-// build runs only once that check has passed, so a caller can initialize the
-// state its handler chain reads -- its credential verifier, typically --
-// atomically with publication, and a rejected second Start cannot disturb the
-// running server's. build must not call back into the Listener: the lock is
-// already held.
+// build runs only once that check has passed, so a caller can construct its
+// handler chain atomically with publication, and a rejected second Start
+// cannot disturb the running server. build must not call back into the
+// Listener: the lock is already held.
 func (l *Listener) Publish(
 	build func() *http.Server,
 ) (*http.Server, chan struct{}, error) {

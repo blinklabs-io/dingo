@@ -39,6 +39,10 @@ func (s *Store) applyTransactionMetadataLabels(
 		return nil
 	}
 	for _, label := range labels {
+		var jsonValue any
+		if label.JSONError == nil {
+			jsonValue = label.JsonValue
+		}
 		if _, err := db.ExecContext(ctx, `
 INSERT INTO transaction_metadata_label (
     transaction_id, label, slot, cbor_value, json_value
@@ -51,7 +55,7 @@ ON CONFLICT (transaction_id, label) DO UPDATE SET
 			decimalUint64(types.Uint64(label.Label)),
 			slot,
 			label.CborValue,
-			label.JsonValue,
+			jsonValue,
 		); err != nil {
 			return fmt.Errorf(
 				"create transaction metadata label %d: %w",

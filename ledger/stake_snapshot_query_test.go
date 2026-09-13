@@ -112,7 +112,7 @@ func epochSummary(epoch, total uint64) *models.EpochSummary {
 // GetCBOR result shape along the way.
 func serialisedInner(t *testing.T, ls *LedgerState, payloadHex string) []byte {
 	t.Helper()
-	result, err := ls.Query(blockQueryFromHex(t, payloadHex))
+	result, err := ls.Query(blockQueryFromHex(t, payloadHex), QueryPoint{})
 	require.NoError(t, err)
 	outer, ok := result.([]any)
 	require.True(t, ok, "expected []any MsgResult wire form")

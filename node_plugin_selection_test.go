@@ -37,6 +37,7 @@ type apiProbeConfig struct {
 }
 
 type apiLifecycleProbe struct {
+	host     string
 	starts   atomic.Int32
 	stops    atomic.Int32
 	startErr error
@@ -72,10 +73,11 @@ func registerAPIProbe(
 			descriptor,
 			func() apiProbeConfig { return apiProbeConfig{} },
 			func(
-				context.Context,
-				apiProbeConfig,
-				utxorpc.ProviderDependencies,
+				_ context.Context,
+				_ apiProbeConfig,
+				deps utxorpc.ProviderDependencies,
 			) (string, plugin.Instance, error) {
+				probe.host = deps.Host
 				return name, probe.instance(), nil
 			},
 		)
@@ -85,10 +87,11 @@ func registerAPIProbe(
 			descriptor,
 			func() apiProbeConfig { return apiProbeConfig{} },
 			func(
-				context.Context,
-				apiProbeConfig,
-				blockfrost.ProviderDependencies,
+				_ context.Context,
+				_ apiProbeConfig,
+				deps blockfrost.ProviderDependencies,
 			) (string, plugin.Instance, error) {
+				probe.host = deps.Host
 				return name, probe.instance(), nil
 			},
 		)
@@ -111,10 +114,11 @@ func registerAPIProbe(
 			descriptor,
 			func() apiProbeConfig { return apiProbeConfig{} },
 			func(
-				context.Context,
-				apiProbeConfig,
-				mesh.ProviderDependencies,
+				_ context.Context,
+				_ apiProbeConfig,
+				deps mesh.ProviderDependencies,
 			) (string, plugin.Instance, error) {
+				probe.host = deps.Host
 				return name, probe.instance(), nil
 			},
 		)

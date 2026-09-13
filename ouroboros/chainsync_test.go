@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"maps"
 	"net"
 	"strings"
 	"sync"
@@ -41,6 +40,7 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gcbor "github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/protocol"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/protocol/keepalive"
@@ -326,12 +326,6 @@ func snapshotChainsyncNtNTimeouts() map[string]struct {
 func TestNewOuroborosDoesNotMutateChainsyncNtNTimeouts(t *testing.T) {
 	t.Parallel()
 
-	originalStateMap := ochainsync.StateMapNtN.Copy()
-	t.Cleanup(func() {
-		clear(ochainsync.StateMapNtN)
-		maps.Copy(ochainsync.StateMapNtN, originalStateMap)
-	})
-
 	before := snapshotChainsyncNtNTimeouts()
 
 	_ = newOuroboros(OuroborosConfig{
@@ -355,10 +349,73 @@ func TestChainsyncConnOptsUseConfiguredBlockTimeout(t *testing.T) {
 	})
 
 	clientCfg := ochainsync.NewConfig(o.chainsyncClientConnOpts()...)
-	serverCfg := ochainsync.NewConfig(o.chainsyncServerConnOpts()...)
+	serverCfg := ochainsync.NewConfig(o.chainsyncServerConnOpts(
+		newChainsyncFindIntersectRateLimiter(200, 1000),
+	)...)
 
 	require.Equal(t, blockTimeout, clientCfg.BlockTimeout)
 	require.Equal(t, blockTimeout, serverCfg.BlockTimeout)
+}
+
+// TestChainsyncConnectionConfigOptionCreatesPerConnectionBudget verifies that
+// reusing the cached production option for two connections does not share the
+// FindIntersect work budget. Each connection must be able to spend its own
+// full burst, while a second request on the same connection is refused.
+func TestChainsyncConnectionConfigOptionCreatesPerConnectionBudget(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	o := newFindIntersectTestOuroboros(t)
+	option := o.chainsyncConnectionConfigOption(false)
+	points := makeFindIntersectPoints(chainsyncMaxFindIntersectPoints)
+
+	for range 2 {
+		mockConn := ouroboros_mock.NewConnection(
+			ouroboros_mock.ProtocolRoleServer,
+			[]ouroboros_mock.ConversationEntry{
+				ouroboros_mock.ConversationEntryHandshakeRequestOutput,
+				ouroboros_mock.ConversationEntryHandshakeNtCResponseInput,
+				ouroboros_mock.ConversationEntryOutput{
+					ProtocolId: ochainsync.ProtocolIdNtC,
+					Messages:   []protocol.Message{ochainsync.NewMsgFindIntersect(points)},
+				},
+				ouroboros_mock.ConversationEntryInput{
+					ProtocolId:      ochainsync.ProtocolIdNtC,
+					IsResponse:      true,
+					MessageType:     ochainsync.MessageTypeIntersectFound,
+					MsgFromCborFunc: ochainsync.NewMsgFromCborNtC,
+				},
+				ouroboros_mock.ConversationEntryOutput{
+					ProtocolId: ochainsync.ProtocolIdNtC,
+					Messages:   []protocol.Message{ochainsync.NewMsgFindIntersect(points)},
+				},
+				ouroboros_mock.ConversationEntryInput{
+					ProtocolId:      ochainsync.ProtocolIdNtC,
+					IsResponse:      true,
+					MessageType:     ochainsync.MessageTypeIntersectNotFound,
+					MsgFromCborFunc: ochainsync.NewMsgFromCborNtC,
+				},
+				ouroboros_mock.ConversationEntryClose{},
+			},
+		)
+		t.Cleanup(func() { _ = mockConn.Close() })
+		conn, err := ouroboros.NewConnection(
+			ouroboros.WithConnection(mockConn),
+			ouroboros.WithNetworkMagic(ouroboros_mock.MockNetworkMagic),
+			ouroboros.WithServer(true),
+			option,
+		)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = conn.Close() })
+		select {
+		case err, ok := <-mockConn.(*ouroboros_mock.Connection).ErrorChan():
+			require.NoError(t, err)
+			require.False(t, ok)
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for scripted FindIntersect exchange")
+		}
+	}
 }
 
 // TestCloseChainsyncServerConnTearsDownTransport verifies that the async
@@ -462,7 +519,9 @@ func TestChainsyncServerFindIntersect_LedgerErrorPropagates(
 
 	// Submit a malformed point hash that causes the ledger lookup to fail
 	// while resolving the candidate block.
+	limiter := newChainsyncFindIntersectRateLimiter(200, 1000)
 	_, _, err := o.chainsyncServerFindIntersect(
+		limiter,
 		ochainsync.CallbackContext{ConnectionId: connId},
 		[]ocommon.Point{ocommon.NewPoint(10, []byte{0xff})},
 	)
@@ -488,7 +547,9 @@ func TestChainsyncServerFindIntersect_ClientRegistrationFailure(
 
 	// Perform FindIntersect with origin so registration is the first failing
 	// operation after a successful intersection.
+	limiter := newChainsyncFindIntersectRateLimiter(200, 1000)
 	_, _, err := o.chainsyncServerFindIntersect(
+		limiter,
 		ochainsync.CallbackContext{ConnectionId: connId},
 		[]ocommon.Point{ocommon.NewPointOrigin()},
 	)
@@ -2319,9 +2380,12 @@ func newFindIntersectTestOuroboros(t *testing.T) *Ouroboros {
 func makeFindIntersectPoints(n int) []ocommon.Point {
 	points := make([]ocommon.Point, n)
 	for i := range points {
+		hash := make([]byte, 32)
+		hash[0] = byte(i)
+		hash[1] = byte(i >> 8)
 		points[i] = ocommon.NewPoint(
 			uint64(i+1),
-			[]byte{byte(i), byte(i >> 8)},
+			hash,
 		)
 	}
 	return points
@@ -2409,14 +2473,21 @@ func TestChainsyncClientRollBackwardUpdatesTrackedClient(t *testing.T) {
 			connID := newTestConnId("127.0.0.1:6000", "10.0.0.1:3001")
 			require.True(t, state.AddClientConnId(connID))
 			previous := ocommon.NewPoint(100, []byte("previous"))
-			state.UpdateClientTip(connID, previous, ochainsync.Tip{Point: previous})
+			state.UpdateClientTip(
+				connID,
+				previous,
+				ochainsync.Tip{Point: previous},
+			)
 			state.MarkClientSynced(connID)
 			before := state.GetTrackedClient(connID)
 			point := ocommon.NewPoint(90, []byte("rollback"))
 			if origin {
 				point = ocommon.NewPointOrigin()
 			}
-			tip := ochainsync.Tip{Point: ocommon.NewPoint(110, []byte("tip")), BlockNumber: 10}
+			tip := ochainsync.Tip{
+				Point:       ocommon.NewPoint(110, []byte("tip")),
+				BlockNumber: 10,
+			}
 			observed := false
 			o := newOuroboros(OuroborosConfig{
 				ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool { return true },
@@ -2426,8 +2497,15 @@ func TestChainsyncClientRollBackwardUpdatesTrackedClient(t *testing.T) {
 					current := state.GetTrackedClient(connID)
 					require.Equal(t, point, current.Cursor)
 					require.Equal(t, tip, current.Tip)
-					require.Equal(t, dchainsync.ClientStatusSyncing, current.Status)
-					require.False(t, current.LastActivity.Before(before.LastActivity))
+					require.Equal(
+						t,
+						dchainsync.ClientStatusSyncing,
+						current.Status,
+					)
+					require.False(
+						t,
+						current.LastActivity.Before(before.LastActivity),
+					)
 					require.Equal(t, before.HeadersRecv, current.HeadersRecv)
 					return true
 				},
