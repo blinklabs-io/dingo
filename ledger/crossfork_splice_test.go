@@ -528,37 +528,44 @@ func TestContinuationAuditRearmDoesNotRaceWithBlockfetchAudit(t *testing.T) {
 	ls.config.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	ls.armContinuationAudit(fixture.ancestorTip.Point, "initial rollback")
 
+	// Built up front: the mock builders assert through t, which a
+	// non-test goroutine may not do.
 	const iterations = 300
+	events := make([]BlockfetchEvent, 0, iterations)
+	for i := range iterations {
+		block := &spliceAuditBlock{
+			slot: uint64(30 + i),
+			hash: lcommon.NewBlake2b256(
+				testHashBytes(strconv.Itoa(i) + "-race-block"),
+			),
+			txs: []lcommon.Transaction{
+				mustSpliceAuditTx(
+					t,
+					testHashBytes(strconv.Itoa(i)+"-race-tx"),
+					[]lcommon.TransactionInput{
+						mustSpliceAuditInput(
+							t,
+							testHashBytes("race-input"),
+							0,
+						),
+					},
+				),
+			},
+		}
+		events = append(events, BlockfetchEvent{
+			ConnectionId: fixture.connId,
+			Block:        block,
+			Point:        ocommon.NewPoint(block.slot, block.hash.Bytes()),
+		})
+	}
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		for i := range iterations {
-			block := &spliceAuditBlock{
-				slot: uint64(30 + i),
-				hash: lcommon.NewBlake2b256(
-					testHashBytes(strconv.Itoa(i) + "-race-block"),
-				),
-				txs: []lcommon.Transaction{
-					mustSpliceAuditTx(
-						t,
-						testHashBytes(strconv.Itoa(i)+"-race-tx"),
-						[]lcommon.TransactionInput{
-							mustSpliceAuditInput(
-								t,
-								testHashBytes("race-input"),
-								0,
-							),
-						},
-					),
-				},
-			}
+		for _, e := range events {
 			ls.chainsyncBlockfetchMutex.Lock()
-			ls.auditContinuationBlock(BlockfetchEvent{
-				ConnectionId: fixture.connId,
-				Block:        block,
-				Point:        ocommon.NewPoint(block.slot, block.hash.Bytes()),
-			}, true)
+			ls.auditContinuationBlock(e, true)
 			ls.chainsyncBlockfetchMutex.Unlock()
 		}
 	}()
