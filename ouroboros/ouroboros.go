@@ -197,8 +197,9 @@ type Ouroboros struct {
 	// runs, so Protocol.DoneChan() cannot close underneath it; the release
 	// signal has to come from connmanager's per-connection ErrorChan watcher
 	// instead (see ReleaseLeiosServeWaiters).
-	leiosServeWaiters   map[ouroboros.ConnectionId][]chan struct{}
-	leiosServeWaitersMu sync.Mutex
+	leiosServeWaiters         map[ouroboros.ConnectionId][]chan struct{}
+	leiosServeWaitersReleased map[ouroboros.ConnectionId]time.Time
+	leiosServeWaitersMu       sync.Mutex
 	// NtC CertRB closure-resolution metrics.
 	leiosMetrics *leiosMetrics
 
@@ -466,16 +467,17 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		context.Background(),
 	)
 	o := &Ouroboros{
-		config:                  cfg,
-		registerer:              newTrackingRegisterer(cfg.PromRegistry),
-		eventBus:                cfg.EventBus,
-		connManager:             cfg.ConnManager,
-		ledgerState:             cfg.LedgerState,
-		leiosAnnouncementLedger: cfg.LeiosAnnouncementLedger,
-		mempool:                 cfg.Mempool,
-		chainsyncState:          cfg.ChainsyncState,
-		peerGov:                 cfg.PeerGov,
-		blockFetchStarts:        make(map[ouroboros.ConnectionId]time.Time),
+		config:                    cfg,
+		registerer:                newTrackingRegisterer(cfg.PromRegistry),
+		eventBus:                  cfg.EventBus,
+		connManager:               cfg.ConnManager,
+		ledgerState:               cfg.LedgerState,
+		leiosAnnouncementLedger:   cfg.LeiosAnnouncementLedger,
+		mempool:                   cfg.Mempool,
+		chainsyncState:            cfg.ChainsyncState,
+		peerGov:                   cfg.PeerGov,
+		blockFetchStarts:          make(map[ouroboros.ConnectionId]time.Time),
+		leiosServeWaitersReleased: make(map[ouroboros.ConnectionId]time.Time),
 		localstatequeryAcquiredPoints: make(
 			map[ouroboros.ConnectionId]ledger.QueryPoint,
 		),
@@ -937,9 +939,12 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 				o.chainsyncState.RemoveClientConnId(connId)
 				o.config.Logger.Error(
 					"failed to start chainsync client, closing outbound connection",
-					"component", "network",
-					"connection_id", connId.String(),
-					"error", err,
+					"component",
+					"network",
+					"connection_id",
+					connId.String(),
+					"error",
+					err,
 				)
 				// Close the connection so peer governance observes the
 				// failure and applies its reconnect backoff.
@@ -1031,9 +1036,12 @@ func (o *Ouroboros) closeOutboundConnAfterChainsyncFailure(
 	if current := o.connManager.GetConnectionById(connId); current != startedConn {
 		o.config.Logger.Debug(
 			"outbound connection no longer current after chainsync start failure, not closing",
-			"component", "network",
-			"connection_id", connId.String(),
-			"replaced", current != nil,
+			"component",
+			"network",
+			"connection_id",
+			connId.String(),
+			"replaced",
+			current != nil,
 		)
 		return
 	}

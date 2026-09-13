@@ -603,11 +603,37 @@ func (c *Cache) UpsertEpochParams(p KoiosEpochParams) error {
 			 decentralisation=excluded.decentralisation,
 			 min_utxo_value=excluded.min_utxo_value, coins_per_utxo_size=excluded.coins_per_utxo_size,
 			 fetched_at=excluded.fetched_at`,
-			p.Network, p.Epoch, p.Era, p.MinFeeA, p.MinFeeB, p.MaxBlockBodySize, p.MaxTxSize,
-			p.MaxBlockHeaderSize, p.KeyDeposit, p.PoolDeposit, p.MaxEpoch, p.NOpt, p.A0, p.Rho, p.Tau,
-			p.ProtocolMajor, p.ProtocolMinor, p.MinPoolCost, p.PriceMem, p.PriceStep, p.MaxTxExMem,
-			p.MaxTxExSteps, p.MaxBlockExMem, p.MaxBlockExSteps, p.MaxValueSize, p.CollateralPercentage,
-			p.MaxCollateralInputs, p.CostModels, p.Decentralisation, p.MinUtxoValue, p.CoinsPerUtxoSize,
+			p.Network,
+			p.Epoch,
+			p.Era,
+			p.MinFeeA,
+			p.MinFeeB,
+			p.MaxBlockBodySize,
+			p.MaxTxSize,
+			p.MaxBlockHeaderSize,
+			p.KeyDeposit,
+			p.PoolDeposit,
+			p.MaxEpoch,
+			p.NOpt,
+			p.A0,
+			p.Rho,
+			p.Tau,
+			p.ProtocolMajor,
+			p.ProtocolMinor,
+			p.MinPoolCost,
+			p.PriceMem,
+			p.PriceStep,
+			p.MaxTxExMem,
+			p.MaxTxExSteps,
+			p.MaxBlockExMem,
+			p.MaxBlockExSteps,
+			p.MaxValueSize,
+			p.CollateralPercentage,
+			p.MaxCollateralInputs,
+			p.CostModels,
+			p.Decentralisation,
+			p.MinUtxoValue,
+			p.CoinsPerUtxoSize,
 			p.FetchedAt,
 		)
 		return err
@@ -640,14 +666,15 @@ func (c *Cache) GetEpochParams(
 	err := c.db.QueryRow(
 		`SELECT `+epochParamsColumns+` FROM koios_epoch_params WHERE network = ? AND epoch = ?`,
 		network, epoch,
-	).Scan(
-		&p.Network, &p.Epoch, &p.Era, &p.MinFeeA, &p.MinFeeB, &p.MaxBlockBodySize, &p.MaxTxSize,
-		&p.MaxBlockHeaderSize, &p.KeyDeposit, &p.PoolDeposit, &p.MaxEpoch, &p.NOpt, &p.A0, &p.Rho, &p.Tau,
-		&p.ProtocolMajor, &p.ProtocolMinor, &p.MinPoolCost, &p.PriceMem, &p.PriceStep, &p.MaxTxExMem,
-		&p.MaxTxExSteps, &p.MaxBlockExMem, &p.MaxBlockExSteps, &p.MaxValueSize, &p.CollateralPercentage,
-		&p.MaxCollateralInputs, &p.CostModels, &p.Decentralisation, &p.MinUtxoValue, &p.CoinsPerUtxoSize,
-		&p.FetchedAt,
-	)
+	).
+		Scan(
+			&p.Network, &p.Epoch, &p.Era, &p.MinFeeA, &p.MinFeeB, &p.MaxBlockBodySize, &p.MaxTxSize,
+			&p.MaxBlockHeaderSize, &p.KeyDeposit, &p.PoolDeposit, &p.MaxEpoch, &p.NOpt, &p.A0, &p.Rho, &p.Tau,
+			&p.ProtocolMajor, &p.ProtocolMinor, &p.MinPoolCost, &p.PriceMem, &p.PriceStep, &p.MaxTxExMem,
+			&p.MaxTxExSteps, &p.MaxBlockExMem, &p.MaxBlockExSteps, &p.MaxValueSize, &p.CollateralPercentage,
+			&p.MaxCollateralInputs, &p.CostModels, &p.Decentralisation, &p.MinUtxoValue, &p.CoinsPerUtxoSize,
+			&p.FetchedAt,
+		)
 	if err != nil {
 		return nil, err
 	}
@@ -1209,7 +1236,10 @@ func (c *Cache) GetZeroRewardSummary(
 // sequential epoch check). An evicted incomplete epoch is correct to restart
 // from scratch; retaining it indefinitely would let repeated failed backfills
 // defeat the bound.
-func (c *Cache) PruneAccountCoverage(network string, throughEpoch uint64) error {
+func (c *Cache) PruneAccountCoverage(
+	network string,
+	throughEpoch uint64,
+) error {
 	if throughEpoch < accountCheckpointRetentionEpochs {
 		return nil
 	}
@@ -2080,7 +2110,9 @@ func (c *Cache) assertClaimedSource(tx *sql.Tx, network string) error {
 	if current != claimed {
 		return fmt.Errorf(
 			"koios source for %q changed from %q to %q while this run was writing; refusing to write another host's answers into this cache",
-			network, claimed, current,
+			network,
+			claimed,
+			current,
 		)
 	}
 	return nil

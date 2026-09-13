@@ -431,7 +431,9 @@ func TestPointerAddressStakeIsEraGated(t *testing.T) {
 // era gate against the incoming epoch's era, not the outgoing one, in both
 // directions: a boundary that stays in Babbage must still count the pointer,
 // and one that crosses into Conway must not.
-func TestPointerAddressStakeEraGateUsesTheIncomingEpochAtTheBoundary(t *testing.T) {
+func TestPointerAddressStakeEraGateUsesTheIncomingEpochAtTheBoundary(
+	t *testing.T,
+) {
 	t.Parallel()
 	paymentKey := bytes.Repeat([]byte{0x22}, lcommon.AddressHashSize)
 	for _, tc := range []struct {
@@ -592,7 +594,12 @@ func TestGetPointerStakeInputsForPoolsStopsAtDeregistration(t *testing.T) {
 		[][]byte{f.pool}, 175, 0, 0, nil,
 	)
 	require.NoError(t, err)
-	require.Len(t, inputs, 1, "the pointer resolves while its registration stands")
+	require.Len(
+		t,
+		inputs,
+		1,
+		"the pointer resolves while its registration stands",
+	)
 	require.Equal(t, uint64(600), uint64(inputs[0].Stake))
 
 	f.apply(t, 200, 0, []lcommon.Certificate{f.deregister()})
@@ -822,7 +829,9 @@ func (f *pointerStakeFixture) pointerRowCount(t *testing.T) int {
 // reconstruction, and the overlay has to read the same column or a credential
 // would contribute its pointer stake to a snapshot that excluded its
 // base-address stake.
-func TestGetPointerStakeInputsForPoolsAppliesTheLiveInactivityGate(t *testing.T) {
+func TestGetPointerStakeInputsForPoolsAppliesTheLiveInactivityGate(
+	t *testing.T,
+) {
 	t.Parallel()
 	f := newPointerStakeFixture(t)
 	f.setEra(t, babbage.EraIdBabbage)

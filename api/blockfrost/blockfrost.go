@@ -384,7 +384,11 @@ func (b *Blockfrost) readRequestBody(
 		// drain the unread body before sending the error response.
 		if err := http.NewResponseController(w).SetReadDeadline(time.Time{}); err != nil &&
 			!errors.Is(err, http.ErrNotSupported) {
-			b.logger.Debug("could not clear request body deadline", "error", err)
+			b.logger.Debug(
+				"could not clear request body deadline",
+				"error",
+				err,
+			)
 		}
 	}
 	return body, err
