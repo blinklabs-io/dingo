@@ -5435,7 +5435,13 @@ set):
   agent-served material is indistinguishable from a local key file to every
   existing credentialGeneration-gated signing path. A background
   `Client.Run` loop keeps installing every subsequent push (a key rotation)
-  for the life of the node.
+  for the life of the node. Installing a push clears the validated KES
+  protocol lifetime, exactly as `LoadFromFiles` does, so no credential
+  inherits a policy that was never checked against the material now
+  installed; startup re-establishes it for the first push and the loop
+  re-runs `ValidateOpCert`/`ValidateKESPeriod` itself for every later one.
+  Without that, `credentialGeneration.kesSign` refuses every signature after
+  the first rotation with "operational certificate is not validated".
 - **sign**: the node forwards header bytes to the agent and receives
   signatures back; the KES secret key never enters the node process.
   `PoolCredentials.LoadFromAgentSign` installs VRF/opcert material as usual
