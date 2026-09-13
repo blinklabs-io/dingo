@@ -1665,7 +1665,9 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 		ls.metrics.epochLengthSlots.Set(float64(ls.currentEpoch.LengthInSlots))
 	}
 
-	ls.loadMithrilTrustBoundary()
+	if err := ls.loadMithrilTrustBoundary(); err != nil {
+		return fmt.Errorf("failed to load Mithril trust boundary: %w", err)
+	}
 	// Repopulate the in-memory deferred-header set from the persisted markers
 	// so the snapshot retention floor covers headers still awaiting apply from
 	// before the restart (issue #3727, finding 3): without this the first
@@ -1861,37 +1863,33 @@ func (ls *LedgerState) subscribeBlockfetchEvents(
 	)
 }
 
-func (ls *LedgerState) loadMithrilTrustBoundary() {
+// loadMithrilTrustBoundary reads the persisted Mithril trust boundary. A
+// read error, or a mithril_ledger_slot row that is empty or does not parse,
+// must fail ledger start rather than silently continuing as a non-Mithril
+// database: with mithrilLedgerSlot left at its zero value, the gap-nonce heal
+// (healMithrilGapBlockNonces) no-ops and the boundary exemption in header
+// verification disappears, so header verification later fails a VRF/nonce
+// check that misattributes the cause to peers. An absent key is the
+// legitimate "not a Mithril DB" case and must continue to return nil.
+func (ls *LedgerState) loadMithrilTrustBoundary() error {
 	// Read Mithril ledger state point if present. Blocks at or below
 	// this point were verified by the Mithril certificate chain during
 	// import and must not be re-validated during chainsync replay.
-	mithrilSlotStr, err := ls.db.GetSyncState(
-		mithrilLedgerSlotSyncKey,
-		nil,
-	)
+	// The strict accessor separates an absent key from a recorded empty
+	// value, which GetSyncState alone reports identically.
+	mls, err := ls.db.MithrilTrustBoundarySlotStrict(nil)
 	if err != nil {
-		ls.config.Logger.Warn(
-			"failed to read Mithril trust boundary from database",
-			"component", "ledger",
-			"error", err,
-		)
-		return
+		return fmt.Errorf("load %s: %w", mithrilLedgerSlotSyncKey, err)
 	}
-	if mithrilSlotStr == "" {
-		return
-	}
-	mls, parseErr := strconv.ParseUint(mithrilSlotStr, 10, 64)
-	if parseErr != nil {
-		ls.config.Logger.Warn(
-			"malformed mithril_ledger_slot value, ignoring",
-			"component", "ledger",
-			"value", mithrilSlotStr,
-			"error", parseErr,
-		)
-		return
+	if mls == 0 {
+		return nil
 	}
 
 	ls.mithrilLedgerSlot = mls
+	// A hash read error or malformed hash value does not disable the trust
+	// boundary itself: the slot is already committed above, and
+	// mithrilTrustBoundaryPoint documents a fallback that derives the
+	// intersect hash from the authoritative chain when no hash is loaded.
 	hashStr, err := ls.db.GetSyncState(mithrilLedgerHashSyncKey, nil)
 	if err != nil {
 		ls.config.Logger.Warn(
@@ -1900,7 +1898,7 @@ func (ls *LedgerState) loadMithrilTrustBoundary() {
 			"mithril_ledger_slot", mls,
 			"error", err,
 		)
-		return
+		return nil
 	}
 	if hashStr != "" {
 		hash, decodeErr := hex.DecodeString(hashStr)
@@ -1929,6 +1927,7 @@ func (ls *LedgerState) loadMithrilTrustBoundary() {
 		)
 	}
 	ls.config.Logger.Info("loaded Mithril trust boundary", attrs...)
+	return nil
 }
 
 func (ls *LedgerState) RecoverCommitTimestampConflict() error {
