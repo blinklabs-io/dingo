@@ -36,12 +36,23 @@ var addColumnPattern = regexp.MustCompile(
 		"ADD\\s+COLUMN\\s+[`\"]?([a-zA-Z0-9_]+)[`\"]?(?:\\s+(.*))?$",
 )
 
+// testDBPragmas relaxes durability for throwaway per-test SQLite databases:
+// each one is created, migrated, asserted against, and deleted inside a
+// single test, so an fsync'd rollback journal buys nothing and is expensive
+// on a contended CI runner (dingo#4171). No test in this package kills a
+// connection mid-transaction, simulates crash recovery, or inspects a
+// journal/WAL file -- "interruption" tests resume from a schema_migrations
+// row an in-process UPDATE or a returned error puts into the dirty state, not
+// from an actual process crash -- so relaxing durability does not change what
+// any assertion observes.
+const testDBPragmas = "_pragma=journal_mode(MEMORY)&_pragma=synchronous(OFF)"
+
 func openTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	db, err := sql.Open(
 		"sqlite",
 		"file:"+filepath.Join(t.TempDir(), "metadata.sqlite")+
-			"?_pragma=foreign_keys(1)",
+			"?_pragma=foreign_keys(1)&"+testDBPragmas,
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -622,13 +633,13 @@ func TestRunnerDoesNotSkipNonAddColumnFailure(t *testing.T) {
 // fresh database, same full registry, same stateless NewProcessLocker -- so it
 // is built once here and shared as a byte copy instead of being replayed by
 // every subtest. That first replay is ~400 individually autocommitted
-// DDL/state writes (13 migrations, each a separate fsync'd transaction under
-// SQLite's default synchronous=FULL/journal_mode=DELETE); redoing it in every
-// one of the ~13 parallel subtests is what pushes this package toward the
-// per-package -timeout bound on a CI runner where fsync is expensive
-// (dingo#4171). The per-migration replay under test -- resetting one version
-// to PhaseExpand and calling Run() again -- still runs against each subtest's
-// own independent copy, so the coverage this test exists for is unchanged.
+// DDL/state writes (13 migrations, each a separate transaction); sharing it
+// avoids redoing that work in every one of the ~13 parallel subtests, and
+// testDBPragmas removes the per-write fsync from both the shared baseline and
+// each subtest's own per-version replay (dingo#4171). The per-migration
+// replay under test -- resetting one version to PhaseExpand and calling
+// Run() again -- still runs against each subtest's own independent copy, so
+// the coverage this test exists for is unchanged.
 func TestRunnerReplaysEveryShippedVersionFromExpand(t *testing.T) {
 	t.Parallel()
 	registry, err := SQLiteRegistry()
@@ -673,15 +684,15 @@ SELECT phase, dirty, completed_at FROM schema_migrations WHERE version = ?`,
 }
 
 // fullyMigratedBaseline runs the full registry once against a fresh database
-// and returns its file bytes. Run() leaves no journal file behind under the
-// default journal_mode=DELETE (the rollback journal is removed on commit), so
-// the closed file alone is a complete, valid database each subtest can copy.
+// and returns its file bytes. journal_mode=MEMORY never materializes a
+// rollback journal file at all, so the closed database file alone is a
+// complete, valid database each subtest can copy.
 func fullyMigratedBaseline(t *testing.T, registry []Migration) []byte {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "baseline.sqlite")
 	db, err := sql.Open(
 		"sqlite",
-		"file:"+path+"?_pragma=foreign_keys(1)",
+		"file:"+path+"?_pragma=foreign_keys(1)&"+testDBPragmas,
 	)
 	require.NoError(t, err)
 	runner := &Runner{
@@ -706,7 +717,7 @@ func openTestDBFromBaseline(t *testing.T, baseline []byte) *sql.DB {
 	require.NoError(t, os.WriteFile(path, baseline, 0o600))
 	db, err := sql.Open(
 		"sqlite",
-		"file:"+path+"?_pragma=foreign_keys(1)",
+		"file:"+path+"?_pragma=foreign_keys(1)&"+testDBPragmas,
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {

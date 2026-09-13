@@ -50,6 +50,7 @@ func newTestShelleyGenesisCfgWithK(
 		"activeSlotsCoeff": 0.05,
 		"securityParam": %d,
 		"slotsPerKESPeriod": 129600,
+		"maxKESEvolutions": 62,
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`, k)
 	cfg := &cardano.CardanoNodeConfig{}

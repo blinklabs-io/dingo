@@ -291,6 +291,7 @@ type SyncConfig struct {
 	RunMode                string
 	BackfillBatchSize      int
 	DatabaseWorkers        int
+	Tracing                bool             // OpenTelemetry tracing enabled; forwarded to the metadata pool
 	Logger                 *slog.Logger     // optional; defaults to slog.Default()
 	OnProgress             SyncProgressFunc // optional
 }
@@ -1410,7 +1411,7 @@ func openDatabase(
 		internalplugins.StorageDependencies{
 			DataDir: cfg.DataDir, RunMode: cfg.RunMode,
 			StorageMode: cfg.StorageMode, MaxConnections: maxConnections,
-			Logger: logger,
+			Logger: logger, TracingEnabled: cfg.Tracing,
 		},
 	)
 }

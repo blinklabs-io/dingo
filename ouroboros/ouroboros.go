@@ -92,6 +92,9 @@ type Ouroboros struct {
 	eventBus       *event.EventBus
 	mempool        mempool.Service
 	ledgerState    *ledger.LedgerState
+	// lastOriginOnlyIntersectWarn throttles warnOriginOnlyIntersectRescued.
+	// Unix nanoseconds; 0 means "never warned".
+	lastOriginOnlyIntersectWarn atomic.Int64
 	// leiosAnnouncementLedger is the narrow synchronous ledger view used by
 	// LeiosNotify. It returns validation facts only; this package owns peer,
 	// publication, and relay semantics.
@@ -165,6 +168,19 @@ type Ouroboros struct {
 	// package to Leios prototype protocols.
 	leiosEndorserBlocks map[string]*leiosEndorserBlockData
 	leiosMu             sync.RWMutex
+	// leiosMaxVerifiedEbSlot is the highest slot for which an endorser block
+	// has been corroborated -- see publishLeiosEndorserBlock. It is proof that
+	// a ranking block exists at that slot, which the forge gate uses as a
+	// lower bound on the header frontier.
+	//
+	// VERIFIED occurrences only. A peer-offered manifest carries that
+	// connection's unverified claim about which slot it belongs to, and this
+	// value can only ever make the node REFUSE to forge, so trusting an
+	// unverified claim would let one peer suppress block production by
+	// offering a manifest bound to a slot near the current one. Corroboration
+	// comes from a validated ranking-block announcement or the ledger's own
+	// chain-derived reference, neither of which a peer controls.
+	leiosMaxVerifiedEbSlot atomic.Uint64
 	// leiosEndorserBlockSeq is a monotonic counter assigned to a cache entry
 	// while leiosMu is held, so eviction order reflects actual insertion order
 	// even when a delayed goroutine captured an earlier wall-clock insertedAt
@@ -521,6 +537,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		o.initDecodeCacheMetrics()
 	}
 	o.subscribeLeiosAnnouncementRetries()
+	o.restoreLeiosVerifiedEbSlot()
 	return o
 }
 
@@ -908,13 +925,40 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 			true, // startedAsOutbound
 		)
 		if shouldStartChainsync {
+			// Capture the connection we are about to start chainsync on.
+			// The failure path below must close *this* connection, not
+			// whatever holds the id by the time the start returns: a
+			// reconnect can reuse the same local/remote address pair, and
+			// ConnectionId is exactly that pair, so a replacement can take
+			// over the id while the start is in flight.
+			startedConn := o.connManager.GetConnectionById(connId)
 			if err := o.chainsyncClientStart(connId); err != nil {
 				// Roll back the registration on failure
 				o.chainsyncState.RemoveClientConnId(connId)
 				o.config.Logger.Error(
-					"failed to start chainsync client",
-					"error",
-					err,
+					"failed to start chainsync client, closing outbound connection",
+					"component", "network",
+					"connection_id", connId.String(),
+					"error", err,
+				)
+				// Close the connection so peer governance observes the
+				// failure and applies its reconnect backoff.
+				//
+				// Returning while the connection is still open strands the
+				// peer half-connected: TCP is up and peergov still counts it
+				// as connected, but no chainsync client is tracked and this
+				// function returns before txsubmission starts, so nothing
+				// retries and the peer is never replaced. Any transient
+				// failure -- an intersect-point or rollback-anchor lookup
+				// hitting a storage fault, not just a negotiation failure --
+				// would silently cost us the peer for the lifetime of the
+				// connection.
+				//
+				// The inbound handler already closes on this same failure;
+				// this makes the outbound path consistent with it.
+				o.closeOutboundConnAfterChainsyncFailure(
+					connId,
+					startedConn,
 				)
 				return
 			}
@@ -964,6 +1008,42 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 				return
 			}
 		}
+	}
+}
+
+// closeOutboundConnAfterChainsyncFailure closes the connection that chainsync
+// failed to start on, so peer governance observes the failure and applies its
+// reconnect backoff.
+//
+// It closes startedConn only if that is still the connection manager's current
+// connection for this id. ConnectionId is a (local addr, remote addr) pair, so
+// a reconnect to the same peer can legitimately produce the same id: looking
+// the connection up again after the start returned could hand back a healthy
+// replacement, and closing that would tear down a good peer for a failure that
+// belonged to its predecessor.
+func (o *Ouroboros) closeOutboundConnAfterChainsyncFailure(
+	connId ouroboros.ConnectionId,
+	startedConn *ouroboros.Connection,
+) {
+	if startedConn == nil {
+		return
+	}
+	if current := o.connManager.GetConnectionById(connId); current != startedConn {
+		o.config.Logger.Debug(
+			"outbound connection no longer current after chainsync start failure, not closing",
+			"component", "network",
+			"connection_id", connId.String(),
+			"replaced", current != nil,
+		)
+		return
+	}
+	if closeErr := startedConn.Close(); closeErr != nil {
+		o.config.Logger.Debug(
+			"failed to close outbound connection after chainsync start failure",
+			"component", "network",
+			"connection_id", connId.String(),
+			"error", closeErr,
+		)
 	}
 }
 
