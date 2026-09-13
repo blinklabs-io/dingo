@@ -54,6 +54,11 @@ var preprodSerialiseDataFundingTxIds = []string{
 	"100b74c93a22172ed2fa7ad8a4a4b6d72b2538f14a19414f8684c941cea75b6f",
 }
 
+func readPreprodFixture(t *testing.T, name string) []byte {
+	t.Helper()
+	return readErasFixture(t, name)
+}
+
 // TestEvaluateTxConwayPreprodSerialiseData replays preprod transaction
 // 2c528f4e... (slot 133016611, epoch 311, protocol version 11), whose minting
 // policy names its asset after blake2b_256(serialiseData(seed TxOutRef)).

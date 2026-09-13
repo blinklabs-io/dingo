@@ -88,6 +88,7 @@ type testByronTx struct {
 	byron.ByronTransaction
 	inputs  []lcommon.TransactionInput
 	outputs []lcommon.TransactionOutput
+	cbor    []byte
 }
 
 func (t *testByronTx) Inputs() []lcommon.TransactionInput {
@@ -96,6 +97,10 @@ func (t *testByronTx) Inputs() []lcommon.TransactionInput {
 
 func (t *testByronTx) Outputs() []lcommon.TransactionOutput {
 	return t.outputs
+}
+
+func (t *testByronTx) Cbor() []byte {
+	return t.cbor
 }
 
 func TestValidateTxByron_ValidTransaction(t *testing.T) {
@@ -360,6 +365,8 @@ type mockLedgerState struct {
 	utxos                map[string]lcommon.Utxo
 	networkId            uint
 	protocolMagic        uint32
+	byronFeeSummand      int64
+	byronFeeMultiplier   int64
 	skipPhase2Validation bool
 	utxoLookups          int
 	// slotToTime, when set, replaces the zero-time default so a test can
@@ -411,6 +418,10 @@ func (m *mockLedgerState) NetworkId() uint { return m.networkId }
 
 func (m *mockLedgerState) ByronProtocolMagic() (uint32, error) {
 	return m.protocolMagic, nil
+}
+
+func (m *mockLedgerState) ByronFeePolicy() (int64, int64, error) {
+	return m.byronFeeSummand, m.byronFeeMultiplier, nil
 }
 
 func (m *mockLedgerState) SkipPhase2Validation() bool {
@@ -706,6 +717,55 @@ func TestByronValidateValueConserved_SkipsMissingInputs(
 	// Only input1 counted: 2M consumed vs 1M produced -> ok
 	err := byronValidateValueConserved(tx, 0, ls, nil)
 	assert.NoError(t, err)
+}
+
+func TestValidateTxByron_MinimumFee(t *testing.T) {
+	t.Parallel()
+
+	const txSize = 10
+	input := newTestInput(0x01, 0)
+	ls := newMockLedgerState()
+	ls.byronFeeSummand = 1_000_000_001
+	ls.byronFeeMultiplier = 1_000_000_000
+	ls.addUtxo(input, newTestOutput(1_000))
+
+	tests := []struct {
+		name      string
+		output    uint64
+		wantError bool
+	}{
+		{
+			name:   "fee equals minimum",
+			output: 988,
+		},
+		{
+			name:      "fee is one lovelace below minimum",
+			output:    989,
+			wantError: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			tx := &testByronTx{
+				inputs:  []lcommon.TransactionInput{input},
+				outputs: []lcommon.TransactionOutput{newTestOutput(test.output)},
+				cbor:    make([]byte, txSize),
+			}
+
+			err := ValidateTxByron(tx, 0, ls, nil)
+			if test.wantError {
+				require.Error(t, err)
+				var feeErr FeeTooLowByronError
+				require.ErrorAs(t, err, &feeErr)
+				assert.Equal(t, big.NewInt(11), feeErr.Actual)
+				assert.Equal(t, big.NewInt(12), feeErr.Required)
+				assert.Equal(t, uint64(txSize), feeErr.Size)
+				return
+			}
+			assert.NoError(t, err)
+		})
+	}
 }
 
 func TestValidateTxByron_WithLedgerState_Valid(
