@@ -2597,6 +2597,8 @@ func TestResolveReplayRecoveryProducerReportsPresentInput(t *testing.T) {
 // its own subtest so that dropping one from the classification switch fails
 // here instead of passing quietly.
 func TestReplayRecoveryRejectsDeterministicMissingRedeemer(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range []struct {
 		name string
 		tag  lcommon.RedeemerTag
@@ -2610,6 +2612,7 @@ func TestReplayRecoveryRejectsDeterministicMissingRedeemer(t *testing.T) {
 		{name: "guarding purpose", tag: lcommon.RedeemerTagGuarding},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			requireMissingRedeemerRecovery(t, tc.tag, true)
 		})
 	}
@@ -2622,6 +2625,8 @@ func TestReplayRecoveryRejectsDeterministicMissingRedeemer(t *testing.T) {
 // runs every rule and joins the failures rather than stopping at the first, so
 // a spend-tagged missing redeemer can arrive alongside a withdrawal mismatch.
 func TestIsDeterministicMissingRedeemerAcrossJoinedErrors(t *testing.T) {
+	t.Parallel()
+
 	missingSpend := lcommon.MissingRedeemerForScriptError{
 		ScriptHash: lcommon.Blake2b224Hash([]byte("joined-script")),
 		Tag:        lcommon.RedeemerTagSpend,
@@ -2740,6 +2745,8 @@ func requireMissingRedeemerRecovery(
 // widening isDeterministicTxValidationError past what a transaction alone
 // decides -- fails here rather than passing quietly.
 func TestReplayRecoveryKeepsBadInputsOnTheRewindPath(t *testing.T) {
+	t.Parallel()
+
 	ls := newReplayRecoveryAuditLedger(t, true)
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Close)
