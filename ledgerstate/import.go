@@ -2845,7 +2845,6 @@ func validateImportedRewardPParams(
 			currentEpoch,
 		)
 	}
-
 	store := cfg.Database.Metadata()
 	currentAvailable, err := importedPParamsAvailable(
 		store,
@@ -3150,12 +3149,48 @@ func importGovState(
 	if govState == nil {
 		return nil
 	}
+	if govState.CommitteeParseError != nil {
+		return fmt.Errorf(
+			"parsing imported committee: %w",
+			govState.CommitteeParseError,
+		)
+	}
+	if govState.PulsingStateParseError != nil {
+		return fmt.Errorf(
+			"parsing imported governance pulsing state: %w",
+			govState.PulsingStateParseError,
+		)
+	}
 	if err != nil {
 		// Non-fatal warnings from committee/proposals parsing
 		cfg.Logger.Warn(
 			"governance state parsed with warnings",
 			"component", "ledgerstate",
 			"error", err,
+		)
+	}
+	// cgsCommittee is the committee in force at the snapshot.
+	// RatifyState.rsEnactState is not a second copy of it: RATIFY folds
+	// every accepted action into rsEnactState via ENACT
+	// (cardano-ledger Conway/Rules/Ratify.hs, ratifyTransition), and
+	// ConwayEPOCH copies the result into cgsCommittee at the *next*
+	// boundary (Conway/Rules/Epoch.hs, "cgsCommitteeL .~ ensCommittee").
+	// Only NoConfidence and UpdateCommittee rewrite ensCommittee
+	// (Conway/Rules/Enact.hs), so the two views corroborate each other
+	// exactly when rsEnacted carries neither. A snapshot from an epoch
+	// that ratified a committee action is expected to disagree, and the
+	// importer records those actions as ratified below so the next
+	// boundary enacts them.
+	if govState.EnactCommitteeSet &&
+		!govState.EnactedCommitteeChange &&
+		!govState.EnactedActionTypesUnknown &&
+		!committeeStatesEqual(
+			govState.Committee, govState.CommitteeQuorum,
+			govState.EnactCommittee, govState.EnactCommitteeQuorum,
+		) {
+		return errors.New(
+			"governance committee disagrees between cgsCommittee " +
+				"and rsEnactState with no committee action in rsEnacted",
 		)
 	}
 
@@ -3431,6 +3466,63 @@ func importGovState(
 	return nil
 }
 
+// committeeStatesEqual compares two decoded views of the same
+// StrictMaybe (Committee era). The quorum carries the SNothing/SJust
+// distinction: parseCommittee returns a nil quorum only for SNothing, so
+// an absent committee and a seated committee with an empty member map do
+// not compare equal.
+func committeeStatesEqual(
+	left []ParsedCommitteeMember,
+	leftQuorum *cbor.Rat,
+	right []ParsedCommitteeMember,
+	rightQuorum *cbor.Rat,
+) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	leftKeys := committeeMemberKeys(left)
+	rightKeys := committeeMemberKeys(right)
+	for i := range leftKeys {
+		if leftKeys[i] != rightKeys[i] {
+			return false
+		}
+	}
+	if (leftQuorum == nil) != (rightQuorum == nil) {
+		return false
+	}
+	if leftQuorum == nil {
+		return true
+	}
+	if (leftQuorum.Rat == nil) != (rightQuorum.Rat == nil) {
+		return false
+	}
+	if leftQuorum.Rat == nil {
+		return true
+	}
+	return leftQuorum.Cmp(rightQuorum.Rat) == 0
+}
+
+// committeeMemberKeys renders each member as a sortable key and returns
+// them ordered, so the comparison does not depend on the order the CBOR
+// member map was decoded in.
+func committeeMemberKeys(members []ParsedCommitteeMember) []string {
+	keys := make([]string, 0, len(members))
+	for _, member := range members {
+		keys = append(keys, committeeMemberKey(member))
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func committeeMemberKey(member ParsedCommitteeMember) string {
+	return fmt.Sprintf(
+		"%d:%x:%d",
+		member.ColdCredential.Type,
+		member.ColdCredential.Hash,
+		member.ExpiresEpoch,
+	)
+}
+
 func persistImportedCommitteeCertificates(
 	db *database.Database,
 	certState *ParsedCertState,
@@ -3698,11 +3790,12 @@ func committeeRootActionType(noConfidence bool) uint8 {
 // need to depend on the gouroboros lcommon package — these match the
 // CIP-1694 GovActionType wire values.
 const (
-	govActionTypeParameterChange    uint8 = 0
-	govActionTypeHardForkInitiation uint8 = 1
-	govActionTypeNoConfidence       uint8 = 3
-	govActionTypeUpdateCommittee    uint8 = 4
-	govActionTypeNewConstitution    uint8 = 5
+	govActionTypeParameterChange     uint8 = 0
+	govActionTypeHardForkInitiation  uint8 = 1
+	govActionTypeTreasuryWithdrawals uint8 = 2
+	govActionTypeNoConfidence        uint8 = 3
+	govActionTypeUpdateCommittee     uint8 = 4
+	govActionTypeNewConstitution     uint8 = 5
 )
 
 func snapshotEpochAnchorSlot(
