@@ -30,7 +30,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 )
 
 // syncSafeBuffer is a mutex-guarded log sink. The blockfetch continuation runs
@@ -112,6 +114,38 @@ func newBlockfetchRollbackFixture(t *testing.T) *blockfetchRollbackFixture {
 			Level: slog.LevelDebug,
 		}),
 	)
+	// Header crypto runs for every slot a Mithril certificate does not cover
+	// (issue #3528), and these synthetic blocks carry no VRF/KES material. An
+	// epoch the cache covers but whose nonce is not published yet is the
+	// state a catching-up node is actually in when #3771's wedge appears:
+	// headerVerificationEpoch reports errEpochNonceUnavailable, which
+	// IsHeaderVerificationDeferred accepts, so the body is admitted and
+	// buffered with its stateful verification deferred instead of being
+	// rejected as a peer fault. Mithril coverage cannot be used instead --
+	// it would have to reach above the fork bodies, and
+	// rollbackChainAndStateDeferred refuses a rollback below that boundary.
+	fixtureEpoch := models.Epoch{
+		EpochId:       0,
+		StartSlot:     0,
+		LengthInSlots: 1000,
+		SlotLength:    1,
+		EraId:         eras.BabbageEraDesc.Id,
+	}
+	base.ls.epochCache = []models.Epoch{fixtureEpoch}
+	base.ls.publishSnapshotsLocked()
+	// Persisted as well as cached: a rollback reloads the epoch cache from
+	// the database, and an in-memory-only entry would vanish at the first
+	// fork, putting the tests that deliver a body after the rollback back on
+	// the empty-cache rejection.
+	require.NoError(t, base.ls.db.SetEpoch(
+		fixtureEpoch.StartSlot,
+		fixtureEpoch.EpochId,
+		nil, nil, nil, nil,
+		fixtureEpoch.EraId,
+		fixtureEpoch.SlotLength,
+		fixtureEpoch.LengthInSlots,
+		nil,
+	))
 	base.ls.config.BlockfetchRequestRangeFunc = func(
 		connId ouroboros.ConnectionId,
 		start ocommon.Point,
