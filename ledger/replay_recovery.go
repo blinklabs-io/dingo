@@ -390,19 +390,39 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 // (preview slot 1462320; blinklabs-io/gouroboros#1989). Recovery must stay
 // non-terminal for that duplicate verdict for exactly that reason.
 //
-// A missing redeemer is deterministic for transaction-owned script purposes,
-// but not for spending inputs. Rebuilding the local UTxO window can change
-// whether a spending input resolves to a script output and therefore whether
-// the spend redeemer rule applies. Keep spend errors on the state-dependent
-// rewind path; the other purposes do not depend on local UTxO state.
+// A missing redeemer is deterministic for every script purpose, spending
+// included. Three rules report it, all as the one common type; the conway and
+// babbage names are aliases of lcommon.MissingRedeemerForScriptError rather
+// than distinct types, so matching the common type covers all of them. None of
+// the three can reach its redeemer check on an input it failed to resolve:
 //
-// Three paths report it, all as the one common type:
-// script.ValidateRequiredRedeemers behind babbage/conway/dijkstra
-// UtxoValidateRequiredRedeemers, common.ValidateScriptWitnesses behind
-// UtxoValidateScriptWitnesses, and Dingo's own
-// validateConwayRequiredPlutusRedeemers in ledger/eras. The conway and babbage
-// names are aliases of lcommon.MissingRedeemerForScriptError rather than
-// distinct types, so matching the common type covers all of them.
+//   - script.ValidateRequiredRedeemers, behind babbage/conway/dijkstra
+//     UtxoValidateRequiredRedeemers, builds a script.TxScriptView first, and
+//     ResolveTxInputs stops at the first unresolved input, so the rule returns
+//     InputResolutionError or ReferenceInputResolutionError instead of a
+//     verdict. It reports RedeemerTagSpend and no other tag.
+//   - common.ValidateScriptWitnesses, behind UtxoValidateScriptWitnesses,
+//     skips an unresolved regular input rather than failing, so an incomplete
+//     UTxO window can only withhold a spend requirement, never invent one; an
+//     unresolved reference input is ReferenceInputResolutionError.
+//   - Dingo's own validateConwayRequiredPlutusRedeemers reads
+//     resolveConwayScriptInputs, which fails with InputResolutionError on the
+//     first unresolved regular input and ReferenceInputResolutionError on the
+//     first unresolved reference input.
+//
+// A resolved input is addressed by producing transaction hash and output
+// index, so it yields exactly the output its producer wrote, script bit and
+// reference script included. Replaying a different local UTxO history can
+// therefore only add resolutions, and all three rules index redeemers by
+// position in the transaction's own sorted input list rather than by position
+// among the resolved subset. The verdict is monotone under resolution: no
+// local history removes a missing-redeemer rejection, so no replay repairs
+// one.
+//
+// The genuinely state-dependent cases carry their own types --
+// InputResolutionError, ReferenceInputResolutionError, and
+// shelley.BadInputsUtxoError -- which this function does not classify, so they
+// keep taking the producer-resolution rewind.
 func isDeterministicTxValidationError(err error) bool {
 	if _, ok := errors.AsType[shelley.DuplicateInputError](err); ok {
 		return true
@@ -411,11 +431,12 @@ func isDeterministicTxValidationError(err error) bool {
 		return true
 	}
 	if missing, ok := errors.AsType[lcommon.MissingRedeemerForScriptError](err); ok {
+		// Enumerated rather than matched on the type alone so that a redeemer
+		// tag added upstream trips the exhaustive linter here and gets its own
+		// classification decision instead of inheriting this one.
 		switch missing.Tag {
-		case lcommon.RedeemerTagSpend:
-			// Spending errors can be combined with state-dependent withdrawal
-			// mismatches, so continue to the shared mismatch classification.
-		case lcommon.RedeemerTagMint,
+		case lcommon.RedeemerTagSpend,
+			lcommon.RedeemerTagMint,
 			lcommon.RedeemerTagCert,
 			lcommon.RedeemerTagReward,
 			lcommon.RedeemerTagVoting,

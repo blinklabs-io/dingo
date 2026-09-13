@@ -2531,30 +2531,67 @@ func TestResolveReplayRecoveryProducerReportsPresentInput(t *testing.T) {
 	assert.Nil(t, resolved)
 }
 
-// A missing redeemer is deterministic for transaction-owned script purposes,
-// but spend-purpose errors remain state-dependent because replay can change
-// whether the input resolves to a script output.
+// A missing redeemer is deterministic for every script purpose. Each tag gets
+// its own subtest so that dropping one from the classification switch fails
+// here instead of passing quietly.
 func TestReplayRecoveryRejectsDeterministicMissingRedeemer(t *testing.T) {
 	for _, tc := range []struct {
-		name          string
-		tag           lcommon.RedeemerTag
-		deterministic bool
+		name string
+		tag  lcommon.RedeemerTag
 	}{
-		{
-			name:          "spend purpose",
-			tag:           lcommon.RedeemerTagSpend,
-			deterministic: false,
-		},
-		{
-			name:          "mint purpose",
-			tag:           lcommon.RedeemerTagMint,
-			deterministic: true,
-		},
+		{name: "spend purpose", tag: lcommon.RedeemerTagSpend},
+		{name: "mint purpose", tag: lcommon.RedeemerTagMint},
+		{name: "cert purpose", tag: lcommon.RedeemerTagCert},
+		{name: "reward purpose", tag: lcommon.RedeemerTagReward},
+		{name: "voting purpose", tag: lcommon.RedeemerTagVoting},
+		{name: "proposing purpose", tag: lcommon.RedeemerTagProposing},
+		{name: "guarding purpose", tag: lcommon.RedeemerTagGuarding},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			requireMissingRedeemerRecovery(t, tc.tag, tc.deterministic)
+			requireMissingRedeemerRecovery(t, tc.tag, true)
 		})
 	}
+}
+
+// The spend purpose is the one the upstream UtxoValidateRequiredRedeemers rule
+// can report, and it reaches its redeemer check only on inputs that already
+// resolved, so its verdict is as replay-invariant as the other six. A joined
+// error chain must still reach isRewardWithdrawalMismatch: ValidateTxConway
+// runs every rule and joins the failures rather than stopping at the first, so
+// a spend-tagged missing redeemer can arrive alongside a withdrawal mismatch.
+func TestIsDeterministicMissingRedeemerAcrossJoinedErrors(t *testing.T) {
+	missingSpend := lcommon.MissingRedeemerForScriptError{
+		ScriptHash: lcommon.Blake2b224Hash([]byte("joined-script")),
+		Tag:        lcommon.RedeemerTagSpend,
+		Index:      0,
+		RedeemerKey: lcommon.RedeemerKey{
+			Tag:   lcommon.RedeemerTagSpend,
+			Index: 0,
+		},
+	}
+	require.True(
+		t,
+		isDeterministicTxValidationError(missingSpend),
+		"a spend-tagged missing redeemer is decided by the transaction",
+	)
+	require.True(
+		t,
+		isDeterministicTxValidationError(errors.Join(
+			fmt.Errorf("conway utxow rule: %w", missingSpend),
+			fmt.Errorf(
+				"conway utxo rule: %w",
+				shelley.IncorrectWithdrawalAmountError{},
+			),
+		)),
+		"a joined chain carrying a withdrawal mismatch stays deterministic",
+	)
+	// The control: an unresolved input is state-dependent even when it is
+	// joined with a deterministic verdict of its own class.
+	require.False(
+		t,
+		isDeterministicTxValidationError(lcommon.InputResolutionError{}),
+		"an unresolved input is decided by local UTxO state",
+	)
 }
 
 func requireMissingRedeemerRecovery(
@@ -2618,19 +2655,18 @@ func requireMissingRedeemerRecovery(
 		return
 	}
 
-	// Spend redeemer requirements depend on the resolved input, so this
-	// rejection must stay on the state-dependent rewind path.
+	// Retained for callers that assert the state-dependent rewind path.
 	assert.NotNil(
 		t,
 		ls.continuationAudit.Load(),
-		"spend missing-redeemer rejection must take the rewind path",
+		"a state-dependent missing-redeemer rejection must take the rewind path",
 	)
 	testutil.RequireNoReceive(
 		t,
 		resyncCh,
 		250*time.Millisecond,
-		"spend missing-redeemer rejection must not request a fresh "+
-			"ChainSync intersection",
+		"a state-dependent missing-redeemer rejection must not request a "+
+			"fresh ChainSync intersection",
 	)
 }
 
