@@ -145,7 +145,7 @@ func TestStopStuckLedgerPipelineInvokesFatalCallback(t *testing.T) {
 		lastTipSlot:           123,
 	}
 
-	require.True(t, ls.stopStuckLedgerPipeline(errors.New("rejected block"), progress))
+	ls.stopStuckLedgerPipeline(errors.New("rejected block"), progress)
 	require.Error(t, fatalErr)
 	assert.ErrorContains(t, fatalErr, "no-progress restarts")
 }

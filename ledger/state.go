@@ -5792,9 +5792,9 @@ func ledgerPipelineRetryDelay(
 func (ls *LedgerState) stopStuckLedgerPipeline(
 	err error,
 	progress pipelineProgress,
-) bool {
+) {
 	if !progress.stuck() {
-		return false
+		return
 	}
 	if ls.config.Logger != nil {
 		ls.config.Logger.Error(
@@ -5812,7 +5812,6 @@ func (ls *LedgerState) stopStuckLedgerPipeline(
 			err,
 		))
 	}
-	return true
 }
 
 // certifiedEndorserBlockPipelineRetryDelay returns how long the pipeline waits
