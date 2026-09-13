@@ -37,8 +37,8 @@ type parityMetrics struct {
 	// cycles are counted separately by checksSkippedTotal rather than
 	// folded in here as a false "matched".
 	checksTotal prometheus.Counter
-	// checksSkippedTotal's "reason" is closed to the two sandwichOK failure
-	// modes: nodeparity.SkipTipMismatch and nodeparity.SkipTipAdvanced.
+	// checksSkippedTotal's "reason" is closed to tipsAgree's failure mode:
+	// nodeparity.SkipTipMismatch.
 	checksSkippedTotal *prometheus.CounterVec
 	// divergenceTotal's "field" is closed to the three fields
 	// nodeparity.Diff reports: protocol_params, stake_distribution, utxo.
@@ -53,6 +53,20 @@ type parityMetrics struct {
 	// indistinguishable from the tool itself being stuck unless something
 	// else confirms it is actually attempting and failing.
 	checkErrorsTotal prometheus.Counter
+
+	// incrementalBlocksTotal counts blocks validated by --mode=incremental's
+	// per-block delta check (matched or diverged); incrementalMismatchTotal
+	// is the subset that diverged. Separate from checksTotal/divergenceTotal
+	// above, which count whole-ledger-state (full-mode or checkpoint)
+	// cycles -- folding the two together would make a dashboard built for
+	// one mode's cadence misread the other's.
+	incrementalBlocksTotal   prometheus.Counter
+	incrementalMismatchTotal prometheus.Counter
+	// fullCheckTriggersTotal's "reason" is closed to nodeparity's
+	// FullCheckReason constants (startup, interval, epoch_transition,
+	// rollback, mismatch) -- always incremental mode's own full checkpoints,
+	// never full mode's per-block-triggered checks (those are checksTotal).
+	fullCheckTriggersTotal *prometheus.CounterVec
 }
 
 // newParityMetrics registers this process's counters under a registry
@@ -99,11 +113,24 @@ func newParityMetricsIn(
 	// dashboard consistency, every divergence field) at construction time
 	// gives them a real 0 sample from process start, the same way the bare
 	// checksTotal Counter already behaves.
-	for _, reason := range []string{nodeparity.SkipTipMismatch, nodeparity.SkipTipAdvanced} {
+	for _, reason := range []string{nodeparity.SkipTipMismatch} {
 		checksSkippedTotal.WithLabelValues(reason)
 	}
 	for _, field := range []string{"protocol_params", "stake_distribution", "utxo"} {
 		divergenceTotal.WithLabelValues(field)
+	}
+	fullCheckTriggersTotal := factory.NewCounterVec(prometheus.CounterOpts{
+		Name: "node_parity_full_check_triggers_total",
+		Help: "Incremental mode's full checkpoint comparisons, by trigger reason.",
+	}, []string{"reason"})
+	for _, reason := range []nodeparity.FullCheckReason{
+		nodeparity.FullCheckStartup,
+		nodeparity.FullCheckInterval,
+		nodeparity.FullCheckEpochTransition,
+		nodeparity.FullCheckRollback,
+		nodeparity.FullCheckMismatch,
+	} {
+		fullCheckTriggersTotal.WithLabelValues(string(reason))
 	}
 	return &parityMetrics{
 		checksTotal: factory.NewCounter(prometheus.CounterOpts{
@@ -116,6 +143,15 @@ func newParityMetricsIn(
 			Name: "node_parity_check_errors_total",
 			Help: "Check calls that failed outright (a dial or query error), as opposed to a completed or skipped cycle.",
 		}),
+		incrementalBlocksTotal: factory.NewCounter(prometheus.CounterOpts{
+			Name: "node_parity_incremental_blocks_total",
+			Help: "Blocks validated by incremental mode's per-block UTxO delta check (matched or diverged).",
+		}),
+		incrementalMismatchTotal: factory.NewCounter(prometheus.CounterOpts{
+			Name: "node_parity_incremental_mismatch_total",
+			Help: "Incremental mode blocks whose per-block delta check found a divergence.",
+		}),
+		fullCheckTriggersTotal: fullCheckTriggersTotal,
 	}
 }
 
@@ -134,6 +170,34 @@ func (m *parityMetrics) recordCheckError() {
 // found a divergence in, divergenceTotal.
 func (m *parityMetrics) recordCheck(diff nodeparity.Diff) {
 	m.checksTotal.Inc()
+	if diff.ProtocolParamsDiff != "" {
+		m.divergenceTotal.WithLabelValues("protocol_params").Inc()
+	}
+	if len(diff.StakeDistribution) > 0 {
+		m.divergenceTotal.WithLabelValues("stake_distribution").Inc()
+	}
+	if len(diff.UTxO) > 0 {
+		m.divergenceTotal.WithLabelValues("utxo").Inc()
+	}
+}
+
+// recordFullCheckTrigger increments fullCheckTriggersTotal for the reason
+// incremental mode ran one of its full checkpoint comparisons.
+func (m *parityMetrics) recordFullCheckTrigger(reason string) {
+	m.fullCheckTriggersTotal.WithLabelValues(reason).Inc()
+}
+
+// recordIncrementalBlock increments incrementalBlocksTotal and, if diff
+// found a divergence, incrementalMismatchTotal and the same
+// divergenceTotal{field} series full-mode checks use -- a mismatch is a
+// mismatch regardless of which mode found it, so a dashboard built around
+// divergenceTotal alone still sees it.
+func (m *parityMetrics) recordIncrementalBlock(diff nodeparity.Diff) {
+	m.incrementalBlocksTotal.Inc()
+	if diff.Empty() {
+		return
+	}
+	m.incrementalMismatchTotal.Inc()
 	if diff.ProtocolParamsDiff != "" {
 		m.divergenceTotal.WithLabelValues("protocol_params").Inc()
 	}

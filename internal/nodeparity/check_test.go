@@ -18,33 +18,32 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-// TestSandwichOK_TipsMatchAndHold covers the clean case: both nodes agree
-// on a tip before the query and neither moves during it. sandwichOK must
-// report this as trustworthy (ok=true) with no skip reason or detail, so a
-// real comparison can proceed.
-func TestSandwichOK_TipsMatchAndHold(t *testing.T) {
+// TestTipsAgree_Match covers the clean case: both nodes agree on a tip.
+// tipsAgree must report this as trustworthy (ok=true) with no skip reason
+// or detail, so a real comparison can proceed.
+func TestTipsAgree_Match(t *testing.T) {
 	t.Parallel()
 
 	tip := Tip{Slot: 100, Hash: "aa", BlockNumber: 10}
-	ok, reason, detail := sandwichOK(tip, tip, tip, tip)
+	ok, reason, detail := tipsAgree(tip, tip)
 	assert.True(t, ok)
 	assert.Empty(t, reason)
 	assert.Empty(t, detail)
 }
 
-// TestSandwichOK_TipsNeverMatched covers the case where dingo and
-// cardano-node were already on different tips before any query even ran.
-// sandwichOK must refuse to proceed (a comparison built on two different
-// starting points is meaningless) and report it with the SkipTipMismatch
-// reason code, distinct from a mid-query advance.
-func TestSandwichOK_TipsNeverMatched(t *testing.T) {
+// TestTipsAgree_Mismatch covers the case where dingo and cardano-node are
+// on different tips. tipsAgree must refuse to proceed (there is no single
+// point left to acquire on both connections) and report it with the
+// SkipTipMismatch reason code.
+func TestTipsAgree_Mismatch(t *testing.T) {
 	t.Parallel()
 
 	dingo := Tip{Slot: 100, Hash: "aa"}
 	cardano := Tip{Slot: 105, Hash: "bb"}
-	ok, reason, detail := sandwichOK(dingo, cardano, dingo, cardano)
+	ok, reason, detail := tipsAgree(dingo, cardano)
 	assert.False(
 		t,
 		ok,
@@ -54,51 +53,11 @@ func TestSandwichOK_TipsNeverMatched(t *testing.T) {
 	assert.Contains(t, detail, "tips did not match")
 }
 
-// TestSandwichOK_DingoAdvancedDuringQuery covers the case where the two
-// nodes agreed on a starting tip, but dingo's tip moved by the time of the
-// re-check -- i.e. dingo produced or received a new block while its state
-// was being queried. sandwichOK must discard the cycle (SkipTipAdvanced)
-// rather than compare a dingo snapshot against a cardano-node snapshot
-// that may no longer describe the same block.
-func TestSandwichOK_DingoAdvancedDuringQuery(t *testing.T) {
-	t.Parallel()
-
-	before := Tip{Slot: 100, Hash: "aa"}
-	after := Tip{Slot: 101, Hash: "cc"}
-	ok, reason, detail := sandwichOK(before, before, after, before)
-	assert.False(
-		t,
-		ok,
-		"must discard the cycle when dingo's tip moved mid-query",
-	)
-	assert.Equal(t, SkipTipAdvanced, reason)
-	assert.Contains(t, detail, "advanced")
-}
-
-// TestSandwichOK_CardanoAdvancedDuringQuery is the mirror of
-// TestSandwichOK_DingoAdvancedDuringQuery with cardano-node as the side
-// that moved mid-query, confirming the discard applies symmetrically to
-// either node, not just dingo.
-func TestSandwichOK_CardanoAdvancedDuringQuery(t *testing.T) {
-	t.Parallel()
-
-	before := Tip{Slot: 100, Hash: "aa"}
-	after := Tip{Slot: 101, Hash: "cc"}
-	ok, reason, detail := sandwichOK(before, before, before, after)
-	assert.False(
-		t,
-		ok,
-		"must discard the cycle when cardano-node's tip moved mid-query",
-	)
-	assert.Equal(t, SkipTipAdvanced, reason)
-	assert.Contains(t, detail, "advanced")
-}
-
-// TestSandwichOK_SameHashDifferentSlotIsNotEqual guards Tip.Equal's
+// TestTip_SameHashDifferentSlotIsNotEqual guards Tip.Equal's
 // definition of "same point on chain": slot and hash must both agree. A
 // coincidental hash match at a different slot is not realistic on a real
 // chain, but Tip.Equal must not treat it as equal regardless.
-func TestSandwichOK_SameHashDifferentSlotIsNotEqual(t *testing.T) {
+func TestTip_SameHashDifferentSlotIsNotEqual(t *testing.T) {
 	t.Parallel()
 
 	a := Tip{Slot: 100, Hash: "aa"}
@@ -123,4 +82,30 @@ func TestTip_Equal(t *testing.T) {
 
 	c := Tip{Slot: 100, Hash: "bb"}
 	assert.False(t, a.Equal(c))
+}
+
+// TestTip_Point covers the conversion Check relies on to build the
+// AcquireSpecificPoint argument from an agreed Tip: Slot passes through
+// unchanged and Hash round-trips through hex decoding back to the same raw
+// bytes.
+func TestTip_Point(t *testing.T) {
+	t.Parallel()
+
+	tip := Tip{Slot: 12345, Hash: "aabbcc", BlockNumber: 7}
+	point, err := tip.point()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(12345), point.Slot)
+	assert.Equal(t, []byte{0xaa, 0xbb, 0xcc}, point.Hash)
+}
+
+// TestTip_Point_InvalidHashErrors covers a malformed (non-hex) Hash: point
+// must surface a decode error rather than silently producing a wrong or
+// truncated byte slice that would then be sent to a real node as part of an
+// AcquireSpecificPoint.
+func TestTip_Point_InvalidHashErrors(t *testing.T) {
+	t.Parallel()
+
+	tip := Tip{Slot: 1, Hash: "not-hex"}
+	_, err := tip.point()
+	require.Error(t, err)
 }

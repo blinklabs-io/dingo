@@ -95,9 +95,15 @@ func TestDiffSnapshots_StakeDistribution(t *testing.T) {
 	b := emptySnapshot()
 
 	poolA, poolB, poolC := poolID(0x11), poolID(0x22), poolID(0x33)
-	a.StakeDistribution[poolA] = StakeDistributionEntry{StakeFraction: big.NewRat(1, 2)}
-	a.StakeDistribution[poolB] = StakeDistributionEntry{StakeFraction: big.NewRat(1, 2)}
-	b.StakeDistribution[poolA] = StakeDistributionEntry{StakeFraction: big.NewRat(1, 3)} // differs
+	a.StakeDistribution[poolA] = StakeDistributionEntry{
+		StakeFraction: big.NewRat(1, 2),
+	}
+	a.StakeDistribution[poolB] = StakeDistributionEntry{
+		StakeFraction: big.NewRat(1, 2),
+	}
+	b.StakeDistribution[poolA] = StakeDistributionEntry{
+		StakeFraction: big.NewRat(1, 3),
+	} // differs
 	b.StakeDistribution[poolC] = StakeDistributionEntry{
 		StakeFraction: big.NewRat(2, 3),
 	} // only in b; poolB only in a
@@ -237,7 +243,9 @@ func TestDiffSnapshots_OrderIsDeterministic(t *testing.T) {
 
 	for i := range 30 {
 		pool := poolID(byte(i))
-		a.StakeDistribution[pool] = StakeDistributionEntry{StakeFraction: big.NewRat(1, 2)}
+		a.StakeDistribution[pool] = StakeDistributionEntry{
+			StakeFraction: big.NewRat(1, 2),
+		}
 		b.StakeDistribution[pool] = StakeDistributionEntry{
 			StakeFraction: big.NewRat(1, 3),
 		} // every pool differs

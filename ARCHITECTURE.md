@@ -8103,14 +8103,16 @@ internal/nodeparity/       # shared library, untagged and importable
   dial.go                  # Dial: NtC connection by address (leading "/" = Unix socket, else TCP)
   tip.go                   # Tip, ReadTip: one-shot ChainSync GetCurrentTip, not a subscription
   snapshot.go               # Snapshot, QuerySnapshot, SnapshotAtTip: one LocalStateQuery session's worth of state
-  diff.go                   # Diff, DiffSnapshots: per-field comparison result
-  check.go                  # CheckResult, Check, sandwichOK: the tip-sandwich orchestration
-  watch.go                  # Watcher, WatchBlocks: persistent per-node ChainSync subscription with reconnect
+  diff.go                   # Diff, DiffSnapshots, diffProtocolParamsAndStake: per-field comparison result
+  check.go                  # CheckResult, Check, tipsAgree: the point-pinning orchestration (full mode)
+  watch.go                  # Watcher, WatchBlocks: persistent per-node ChainSync subscription with reconnect (full mode)
+  incremental.go            # IncrementalCursor, RunIncremental: sequential per-block UTxO-delta orchestration (incremental mode)
 
 cmd/node-parity/           # thin Cobra CLI wrapper: only 'check' and 'watch' are subcommands
   main.go                  # root command (default action: one check, same as 'check')
-  check.go                  # one-shot subcommand
-  watch.go                  # block-triggered subcommand, --fallback-interval as a backstop
+  check.go                  # one-shot subcommand (full mode only)
+  watch.go                  # --mode=full (block-triggered, --fallback-interval backstop) or
+                             # --mode=incremental (sequential per-block, --full-check-interval/--cursor-file)
   metrics.go                # not a subcommand -- Prometheus counters plus the /metrics HTTP
                              # server 'watch' starts when --metrics-addr is set; 'check' never
                              # serves metrics, since a one-shot invocation has nothing ongoing
@@ -8118,7 +8120,9 @@ cmd/node-parity/           # thin Cobra CLI wrapper: only 'check' and 'watch' ar
 ```
 
 **Usage:** neither node is started or managed by this tool -- point it at
-two already-running, already-synced NtC listeners.
+two already-running, already-synced NtC listeners. `watch`'s `--mode`
+defaults to `incremental`; pass `--mode full` explicitly for the
+whole-ledger-state comparison instead.
 
 ```shell
 # One-shot: run a single comparison cycle and exit non-zero on divergence
@@ -8128,16 +8132,43 @@ node-parity check \
   --dingo-addr localhost:3002 \
   --cardano-addr /path/to/cardano-node.socket
 
-# Continuous: react to each node's tip changes, with a periodic backstop
-# check (--fallback-interval, normally 2m) in case a watcher's subscription
-# silently stalls. Serves Prometheus metrics on --metrics-addr (commonly
-# :9464).
+# Continuous, incremental mode: validate one block at a time in strict
+# chain order, with periodic full checkpoints (--full-check-interval
+# blocks) and a persisted cursor (--cursor-file, required) so a restart
+# resumes rather than re-baselining.
 node-parity watch \
   --network preprod \
   --dingo-addr localhost:3002 \
   --cardano-addr /path/to/cardano-node.socket \
-  --fallback-interval 2m \
+  --full-check-interval 1000 \
+  --cursor-file /var/lib/node-parity/preprod-cursor.json \
   --metrics-addr :9464
+
+# Continuous, full mode: react to each node's tip changes with a whole-
+# ledger-state comparison every time, with a periodic backstop check
+# (--fallback-interval) in case a watcher's subscription silently stalls,
+# and --check-timeout bounding how long any one cycle (fallback-triggered
+# or block-triggered) may take -- both flags' own out-of-the-box values
+# (2m/20m) rarely need overriding; raise --check-timeout only if a target
+# network's UTxO-set scale exceeds the measured 7-9 minute walk that value
+# already covers with headroom. Serves Prometheus metrics on
+# --metrics-addr (commonly :9464).
+node-parity watch \
+  --network preprod \
+  --dingo-addr localhost:3002 \
+  --cardano-addr /path/to/cardano-node.socket \
+  --mode full \
+  --metrics-addr :9464
+
+# Explicit historical mode (check only): compare an exact past block
+# instead of the live tip, regardless of where either node's live tip
+# currently is. Requires both flags together (blinklabs-io/dingo#382).
+node-parity check \
+  --network preview \
+  --dingo-addr localhost:3002 \
+  --cardano-addr /path/to/cardano-node.socket \
+  --at-slot 122256283 \
+  --at-hash 4c160b6b0f131bbba0845924b0db3f94ded5e3f806c8adac11482e41a0162a54
 ```
 
 `--dingo-addr`/`--cardano-addr` accept either a `host:port` TCP address or a
@@ -8147,56 +8178,496 @@ normally a socket). `--network` is `preview` or `preprod` only. Running
 `docs/dashboards/prometheus.yaml`/`alerts.yaml` for the accompanying scrape
 config and alert rules.
 
-**Design: on-demand `check`, plus block-triggered `watch`.** `check` runs one
-comparison cycle and exits non-zero on divergence or a discarded cycle. `watch`
-originally polled on a fixed `--interval` matching `cmd/koios-parity`'s own
-shape, but that meant a 15-minute gap left roughly 45 blocks (at ~20s each)
-completely unchecked between cycles — acceptable for koios-parity, whose
-epoch-closed reward data only changes once an epoch, but not for block-level
-ledger state, which changes every block. `watch` now follows both nodes' live
-chains instead (`nodeparity.Watcher`, one persistent ChainSync session per
-node) and runs a `Check` the moment either one's tip changes, so it reacts
-within a fraction of a second of a new block landing rather than missing
-everything produced between clock ticks. `--fallback-interval` (default 2m)
-still runs a check on a fixed schedule regardless, purely as a backstop in
-case a watcher's subscription silently stalls without erroring. Comparing the
-full UTxO set on every block is tractable on preview/preprod's much smaller
-UTxO set than mainnet's (see `ledger/queries_utxowhole.go`'s own doc comment
-on `GetUTxOWhole`'s cost, which is specifically about mainnet scale); this has
-not been measured against a real live node in development, only reasoned from
-that scale difference.
+**The UTxO comparison is intentionally one-directional, a deliberate,
+accepted gap, not an oversight (blinklabs-io/dingo#4183 review).**
+`Check` queries the reference cardano-node's UTxO set only for the exact
+refs Dingo's own `querySnapshot` walk reported (`QueryReferenceUTxOSnapshot`,
+via batched `GetUTxOByTxIn` calls), rather than asking cardano-node for its
+own whole UTxO set independently. This means the comparison can only catch
+Dingo computing wrong or stale state for a UTxO it *does* have; it cannot
+discover a UTxO that exists only on the reference cardano-node and that
+Dingo's walk never named at all. This is not a cheaper alternative left
+unimplemented: a real cardano-node's own `GetUTxOWhole` was found, live
+against Preview, to silently close the connection partway through
+assembling a reply at the network's current UTxO-set scale (~3.17M
+entries) -- confirmed to fail consistently after roughly 11 seconds,
+independent of any bridge/proxy in the connection path and independent of
+gouroboros's own mux read timeout, so there is no cheap, reliable way left
+to ask a real cardano-node for its total UTxO set at this scale to compare
+against. See `QueryReferenceUTxOSnapshot`'s doc comment
+(`internal/nodeparity/snapshot.go`) for the full account.
 
-Block-triggering narrows, but does not eliminate, the tip-sandwich's race: a
-check still has to finish before the *next* block lands, it just now starts
-immediately after the previous one instead of at a random point up to an
-interval later. A `Watcher` reconnects on its own (bounded exponential
-backoff, matching `internal/test/devnet/observer.go`'s pattern) if its
-session drops, so a node restart does not require the operator to do
-anything. The only way to remove the race entirely — guaranteeing every
-block gets compared, not just attempted — would be embedding this logic
-inside Dingo itself (reading its own ledger state synchronously as each
-block applies, no network round trip to race) paired with cardano-node's own
-working `Acquire(point)`; that is a materially different architecture (see
-below) and is not what this tool does.
+`--at-slot`/`--at-hash` (both-or-neither, validated by `requireAtPoint`)
+switch `check` into explicit historical mode: `nodeparity.Check` skips the
+live-tip-agreement step entirely and acquires the named point directly on
+both connections, rather than requiring the two nodes to currently share a
+tip. This is what lets an operator fall behind the live chain and still
+walk through specific past blocks (N, N+1, N+2, ...) one at a time via
+repeated `check` invocations -- `watch` is unchanged and still only ever
+follows the live tip. A point neither node can reconstruct (too old, ahead
+of a node's own tip, or off that node's chain) surfaces as a command error
+rather than a discarded cycle, since there is no live-tip race left to
+discard a cycle over once a point is explicitly named.
 
-**The tip-sandwich, and why:** Dingo's LocalStateQuery `Acquire`
-(`ouroboros/localstatequery.go`) always answers at its live tip regardless
-of the requested point (blinklabs-io/dingo#382 is still open), so there is
-no way to pin "ledger state as of exactly block N" on the Dingo side today.
-Each `Check` cycle instead reads both nodes' tips (`ReadTip`, a one-shot
-ChainSync `GetCurrentTip`), runs the LocalStateQuery session against both
-only if they agree, and re-reads both tips afterward — discarding
-(`CheckResult.Skipped`, not failing) the cycle if either moved during the
-round trip, since the two halves of a comparison spanning a tip change would
-not describe the same block. `sandwichOK` is this decision as a pure
-function, unit-tested without a live node; `Check` is the I/O around it,
-using one already-dialed connection per node for the whole cycle so the
-ChainSync and LocalStateQuery reads share a single session per node. This
-only catches a tip that moved and stayed moved: a tip that advances to a
-fork and rolls back to the exact same (slot, hash) within the round trip
-passes `sandwichOK` unchanged, even though the query may have executed
-against the discarded fork's transient state -- a known, documented
-residual gap (see `sandwichOK`'s doc comment), not attempted here.
+**Design: on-demand `check`, plus `watch` in one of two modes.** `check` runs
+one full comparison cycle and exits non-zero on divergence or a discarded
+cycle. `watch` originally polled on a fixed `--interval` matching
+`cmd/koios-parity`'s own shape, but that meant a 15-minute gap left roughly 45
+blocks (at ~20s each) completely unchecked between cycles — acceptable for
+koios-parity, whose epoch-closed reward data only changes once an epoch, but
+not for block-level ledger state, which changes every block. `watch`'s
+`--mode=full` now follows both nodes' live chains instead (`nodeparity.Watcher`,
+one persistent ChainSync session per node) and runs a full `Check` the moment
+either one's tip changes, so it reacts within a fraction of a second of a new
+block landing rather than missing everything produced between clock ticks.
+`--fallback-interval` (default 2m) still runs a
+check on a fixed schedule regardless, purely as a backstop in case a
+watcher's subscription silently stalls without erroring.
+
+**Measured, not just reasoned about:** a full cycle's whole-UTxO walk
+against Dingo's disk-backed store took roughly 5 minutes against a
+Mithril-bootstrapped Preview node with a real ~3.17M-entry UTxO set (this
+architecture doc previously stated the cost was untested and only reasoned
+from `ledger/queries_utxowhole.go`'s mainnet-scale warning; it has since been
+measured directly). Four consecutive full-mode cycles run this way, roughly
+20 minutes and 83 blocks apart in wall-clock/chain terms, found the same 140
+divergences essentially unchanged each time -- confirming the divergences
+this tool finds are persistent ledger-state bugs, not comparison artifacts,
+but also confirming full mode's real per-cycle cost: at this scale it leaves
+on the order of 13-15 blocks (5 minutes ÷ ~20s/block) completely uncompared
+between every two cycles, every cycle, in steady state. A later measurement
+against a different Preview-scale node found the whole-UTxO walk taking
+7-9+ minutes end to end.
+
+**`--check-timeout` bounds one check cycle, separately from
+`--fallback-interval`.** These two used to be the same value --
+`runWatchCycle` bounded each `Check` by `--fallback-interval` itself --
+which made full mode fail by default out of the box: `--fallback-interval`'s
+2m default is far shorter than the measured 7-9+ minute whole-UTxO walk, so
+every cycle self-cancelled via its own context deadline before a comparison
+could ever complete, indistinguishable in the logs from the unrelated
+node-side "protocol is shutting down" failure this tool was originally built
+to route around (blinklabs-io/dingo#1900 incremental-mode audit finding).
+`--check-timeout` (default 20m, comfortably above the measured cost) now
+bounds `runWatchCycle` instead; `--fallback-interval` keeps its own, much
+smaller, "also trigger a check on this schedule regardless of block
+activity" meaning and no longer needs to grow to match the real per-cycle
+cost. One related operational note: `docs/dashboards/alerts.yaml`'s
+`NodeParityNotChecking` rule's fixed 10m window assumes one cycle finishes
+well within it -- a cycle reports nothing to any of its three counters
+until it completes or times out, so a genuinely slow (not stuck) cycle
+taking longer than 10m (a larger UTxO-set scale than Preview, or
+`--check-timeout` raised well above its default) can misfire that alert
+during an otherwise healthy run; widen the rule's window to match if so.
+
+A `Watcher` reconnects on its own (bounded exponential backoff, matching
+`internal/test/devnet/observer.go`'s pattern) if its session drops, so a
+node restart does not require the operator to do anything.
+
+**`--mode=incremental`, the default (finalized after the mode's own
+introduction below, once full mode's per-cycle cost against a real
+Preview-scale UTxO set was measured — see "Measured, not just reasoned
+about" above):** validates one block at a time, in strict chain
+order (`internal/nodeparity/incremental.go`, `RunIncremental`), trading full
+independent re-derivation of the whole ledger state for a cost bounded by
+what one block actually touches rather than the whole UTxO set. Its own
+persistent ChainSync session (against `--cardano-addr`, chosen as the block
+content source since either node's copy of a canonical block decodes
+identically -- this choice is about which node a decode bug should never be
+attributed to, not about whose bytes are "real") decodes each block via
+`lcommon.Block.Transactions()`, and each transaction's already
+validity-aware `Consumed()`/`Produced()` (accounting for phase-2 script
+failure -- only collateral moves for a failed transaction, not its declared
+inputs/outputs) gives that block's real UTxO delta. Both nodes are then
+`Acquire`d to that exact block's point and queried for exactly those refs via
+one batched `GetUTxOByTxIn` call each (`queryIncrementalHalf`). This per-block
+walk is exactly what surfaced blinklabs-io/dingo#1900's UTxO point-pinning gap:
+Dingo's `GetUTxOByTxIn` handler used to ignore the acquired point entirely and
+always answer from live state, so a UTxO consumed and recreated at the same
+reference between one per-block check's point and Dingo's live tip could read
+back as a false divergence purely because Dingo answered with newer state than
+what was acquired -- now fixed (see `queryShelleyUtxoByTxIn`'s point-pinning
+coverage above), so this per-block comparison is answered from each node's
+actual state at the acquired point on both sides. Every consumed
+ref must be absent from both answers (a lingering entry means that node
+failed to mark it spent), and every produced ref must be present in both with
+identical canonical content (`diffBlockUtxoDelta`) -- except a produced ref
+that is also present in the same block's own consumed list: that ref was
+created and spent within one block, so its correct, expected absence from
+both nodes' live answers is not reported as a divergence (a bug fixed as
+part of blinklabs-io/dingo#1900's incremental-mode audit; previously any
+produced-but-absent ref was flagged regardless). Protocol parameters are
+compared the same point-pinned way `Check` does, but stake distribution is
+deliberately NOT part of this per-block cycle (`diffProtocolParams`, not
+`diffProtocolParamsAndStake`): Dingo's `GetStakeDistribution` handler
+(`ledger/queries_stakedistribution.go`) only answers when the pinned point
+equals its own live tip, never true for a per-block walk that is behind tip
+by design, so querying it here reliably stalled every incremental session
+against a real Dingo node (the cursor never advancing, since the very next
+block's query fails the identical way -- reproduced live as 4339 identical
+failures in a row). Fixed since: `GetStakeDistribution` now answers a pin
+behind live tip too, reading the historical circulating-supply denominator
+via `GetNetworkStateAsOfSlot` instead of always the latest row
+(blinklabs-io/dingo#382). Stake-distribution divergence is still left to this
+mode's periodic full checkpoints rather than added back to the per-block
+cycle, though -- its value only changes at epoch boundaries, so checking it
+on every block would be pure repeated work for the same answer, not
+additional coverage.
+
+**Per-block queries reuse two session-lifetime connections, not a fresh dial
+per block.** `incrementalSession` dials dingo once (`dingoConn`) and reuses
+its own ChainSync connection to cardano-node for LocalStateQuery too
+(`cardanoConn` -- Ouroboros multiplexes both mini-protocols over one
+connection by design, so this needs no second dial to cardano-node at all);
+every block just re-`Acquire`s on these same two connections instead of
+dialing new ones. This replaced an earlier version that dialed two brand-new
+NtC connections per block, found live to correlate with dingo dropping the
+connection ("protocol is shutting down" mid-query): roughly 1 in 8 blocks
+against a freshly-bootstrapped node, escalating to roughly 1 in 1 against the
+same node after hours of sustained connection churn from repeated testing --
+strong evidence the churn itself, not just an unrelated flaky failure, was
+contributing. Reusing session-lifetime connections does not claim to
+eliminate every possible "protocol is shutting down" (see
+`QueryReferenceUTxOSnapshot`'s doc comment for the unrelated, independent
+case at full-UTxO-set scale), only the several-thousand-per-hour handshake
+churn this specific pattern was adding on top of it. Since
+`queryIncrementalHalf`'s Acquire/query calls have no per-call timeout of
+their own, `checkBlockDelta` closes both connections if its caller's
+`blockCheckTimeout`-bounded context expires first (`context.AfterFunc`,
+the same pattern `Dial` and `watchSession` already use to bound a
+synchronous call against an unresponsive peer) -- a fresh dial's own
+implicit per-call bound doesn't exist anymore once the connection is
+long-lived, so this reinstates it explicitly. Closing both connections
+rather than only the slow one is deliberate: a stuck query already ends the
+whole incremental session (`handleIncrementalBlock` treats any
+`checkBlockDelta` error that way), so both need redialing on the next
+reconnect regardless of which one was actually slow.
+
+**Measured after shipping: the redesign above did not reduce the reconnect
+rate.** A live comparison against the same class of node before and after
+this change (51 blocks / 13 reconnects on a freshly-bootstrapped instance,
+persistent connections, vs. 42 blocks / 5 reconnects pre-redesign) found no
+improvement -- if anything, a higher rate. Correlating reconnect timestamps
+against dingo's own logs found the real cause: 11 of 13 reconnects landed
+within 50-170ms of dingo's own "chain extended, new tip" log line, a real
+race between LocalStateQuery serving and concurrent block application,
+independent of connection churn (filed as blinklabs-io/dingo#4156, with the
+timing data and the lock/timeout paths checked and ruled out -- dingo's own
+`ledger/queries.go` already reads from lock-free atomic snapshots
+specifically to avoid this class of contention, so the mechanism is not yet
+identified). The connection-reuse redesign above is still worth keeping
+(fewer handshakes, no measured leak, cleaner resource use), just not for the
+reason it was originally built.
+
+**A related, separate bug found and fixed while building this section's own
+test coverage:** `internal/nodeparity/incremental_harness_test.go`'s fake
+LocalStateQuery server, answering with no artificial network latency,
+reliably tripped a genuine data race in gouroboros itself
+(`protocol/localstatequery/client.go`'s `handleAcquired`, which signaled
+`Acquire`'s completion channel *before* writing `currentEra = -1` rather
+than after -- a caller unblocked by that signal could read `currentEra` via
+`GetCurrentProtocolParams`/`GetEpochNo` with no happens-before relationship
+to the write). This affects every caller of `Acquire` followed immediately
+by an era-dependent query, including `Check`'s own existing full-mode path,
+not just incremental mode -- it was invisible until now only because real
+network latency between the two normally gives the write time to land.
+Fixed upstream in gouroboros, not routed around locally -- this fix and
+the segment-read-timeout fix below (blinklabs-io/gouroboros#2291) are both
+merged and released as of gouroboros v0.204.3, which this module's `go.mod`
+now depends on directly; no local `replace` directive is needed for either.
+
+**The segment-read-timeout fix isn't only a node-parity client-side change
+-- it also relaxes Dingo's own NtC server**, and that relaxation is
+trust-scoped, not universal. `ouroboros/ouroboros.go`'s `ConfigureListeners`
+disables gouroboros' 120s mux segment-read timeout and (via
+`localstatequeryServerConnOpts`) LocalStateQuery's own 180s query timeout
+and 16MB reassembly cap, raising the latter to 2GiB, for exactly the same
+reason node-parity's own client connections need it: a whole-UTxO-set query
+against a Preview-scale (or larger) node can legitimately take minutes, and
+gouroboros' defaults exist as anti-DoS guards against an untrusted remote
+peer, not a description of every real caller.
+
+That relaxation is unsafe to grant unconditionally, though: `internal/node/node.go`
+builds two separate `UseNtC` listeners from ordinary operator config -- a
+Unix socket (`cfg.SocketPath`) and a TCP listener
+(`cfg.PrivateBindAddr:cfg.PrivatePort`, defaulting to `127.0.0.1:3002` but
+not code-enforced to stay there) -- and there is no authentication or
+identity check between `accept()` and these options being applied;
+`connmanager` only enforces a connection-count limit
+(`MaxNtCConns`/`MaxNtCConnectionsPerIP`), not who is connecting. Granting an
+unbounded mux/query timeout and a 2GiB-per-connection reassembly buffer to
+*any* client that completes an NtC handshake -- not just a trusted local
+tool -- would widen the DoS surface for the whole NtC server the moment an
+operator points `PrivatePort` at a non-loopback address (blinklabs-io/dingo#4183
+review). `isTrustedNtCListener` (`ouroboros/ouroboros.go`) makes the actual
+trust decision explicit instead of assuming every `UseNtC` listener
+qualifies: a Unix-domain listener is trusted unconditionally (reaching it at
+all already requires filesystem access to this machine), and a TCP listener
+is trusted only when `net.ResolveTCPAddr` resolves every address it could
+be reached at to a loopback IP -- covering `127.0.0.1`, `::1`, and
+`localhost` alike, not just a literal string match. A listener that doesn't
+qualify (including a wildcard bind like `0.0.0.0`, which resolves to the
+unspecified address, not a loopback one) gets gouroboros' own defaults
+instead, the same as it would for any other NtC server reachable beyond
+this machine.
+
+It always starts with one full `Check` pinned at the live tip
+(`establishBaseline`) before validating anything incrementally -- the
+trust-reestablishing check a process start needs regardless of whether a
+prior cursor exists (the two nodes might have been restarted, resynced, or
+diverged during any downtime), and still the only point at which Dingo can
+answer a full whole-ledger-state comparison including the whole UTxO set,
+which honors a pin only at the live tip (`GetStakeDistribution` and
+`GetCurrentProtocolParams` no longer share that restriction -- see below).
+That fresh baseline result is always reported via `OnFullCheck`,
+but what the returned `IncrementalCursor` (last confirmed point, current
+epoch, blocks since the last full checkpoint) actually resumes from is
+decided separately (`buildStartupCursor`): when a prior cursor exists and
+both nodes can still `Acquire` its own point (`pointReachable`, a cheap
+`GetEpochNo` probe against both) *and* its recorded epoch still matches the
+live tip's, `RunIncremental` resumes sequential validation from there instead
+of the fresh baseline's own point -- so blocks that arrived during any
+downtime are individually compared rather than silently skipped, the fix for
+a bug where a restart always discarded the saved cursor's point for the
+fresh baseline's (blinklabs-io/dingo#1900 incremental-mode audit finding).
+The epoch check exists because resuming replays every intervening block
+through the per-block delta check, which queries protocol parameters pinned
+at each block's own point -- safe only within the live tip's current epoch
+(`queryShelleyCurrentProtocolParams`) -- so a resume spanning an epoch
+boundary would make every replayed block's query fail identically instead of
+making progress; this bounds how much downtime resuming actually covers to
+within one Cardano epoch (~5 days), comfortably covering routine restarts
+and brief outages. Whenever there is no prior cursor, its point is no longer
+reachable (pruned, or a fork), or its epoch cannot be confirmed to match,
+the cursor falls back to the fresh baseline's own point, logged distinctly
+so an operator can tell the cases apart. Either way `BlocksSinceFullCheck`
+is always seeded from any prior cursor file, so a restart mid-interval does
+not reset the checkpoint countdown. When the fresh baseline `Check` itself finds a real
+divergence (not just `Skipped`), `establishBaseline` also logs a distinct
+warning naming the cursor's starting point "disputed" rather than
+confirmed-agreed, so this is visible without cross-referencing the same
+routine per-cycle diff report every other full check produces. Persisted to
+`--cursor-file` after every block, so a restart resumes from there rather
+than re-baselining from genesis-of-this-run every time. Beyond
+the mandatory startup baseline, a fresh full `Check` also runs on
+`--full-check-interval` blocks (default 1000, a periodic checkpoint against
+whatever a single block's delta cannot reveal on its own), on a rollback
+(`chainsync.WithRollBackwardFunc`'s reported point becomes the new cursor;
+the ChainSync protocol itself resumes sending `RollForward` from the new fork
+afterward, so nothing else is needed to "replay forward" -- except when the
+reported point is exactly the cursor's own current one, which the ChainSync
+protocol reports as the first message after every `Sync`/`FindIntersect`,
+including on every reconnect, to confirm the negotiated reading position
+rather than to report an actual reorg; `handleIncrementalRollback` treats
+that specific case as a no-op rather than a real rollback), on an epoch
+transition (detected via the point-aware `GetEpochNo`, which -- unlike
+protocol parameters -- has no retention window), and immediately after any
+incremental block's own mismatch (for full context on what else might have
+diverged around it). None of these ever halt the loop: a mismatch is logged,
+counted, and the cursor still advances, matching full mode's own
+"report, don't stop" philosophy -- transient cross-node disagreement is
+expected operating conditions, not a reason to stop watching.
+
+**Full checks run in a decoupled background worker, not inline in the
+ChainSync callback that detected the need for one.** This was not the first
+design tried: running a triggered full check synchronously, inline in
+`chainsync.WithRollForwardFunc`'s callback, was tested live against a real
+dingo and cardano-node and found to be actively harmful rather than merely
+slow. Blocking that callback for a full check's multi-minute duration leaves
+its own ChainSync connection idle (no traffic in either direction, since the
+client does not send the next `MsgRequestNext` until the callback returns)
+long enough to trip gouroboros's mux read timeout, tearing the session down
+out from under the still-running callback. `RunIncremental`'s reconnect loop
+then starts a *new* session on a fresh connection while the *old* callback
+goroutine is still running the full check it was partway through -- two
+goroutines now mutating the same `IncrementalCursor` concurrently (a real
+data race, confirmed absent under `-race` only after this fix), with the
+added risk that the old, abandoned goroutine's eventual write could silently
+roll the persisted cursor backward after the new session had already
+advanced it.
+
+The fix: `cursorState` (a mutex-guarded wrapper around `IncrementalCursor`,
+persisting under the same lock it mutates -- `advance` for a validated
+block, `setRollback` for a real rollback, `resetFullCheckCounter` once a full
+check *actually completes* -- see below) is safe to read and write from
+multiple goroutines, and
+`fullCheckWorker` runs full checks one at a time in its own goroutine,
+decoupled entirely from whichever ChainSync callback asked for one --
+dispatched via `request`, a non-blocking send to a buffered channel of size
+1 that coalesces a burst of requests (a fast-moving chain can trigger several
+before the first finishes) into at most one pending, dropping the rest
+rather than queueing them: the condition that asked for a check will simply
+re-evaluate once the in-flight one finishes. This keeps the ChainSync
+callback itself fast (advance the cursor, decide whether a checkpoint is
+due, dispatch if so, return immediately), so the connection driving the
+block stream never goes idle long enough to matter.
+
+`resetFullCheckCounter` only runs once a full check actually completes
+trustworthily (`fullCheckSucceeded`: no error, and not `Skipped`) -- a
+failed (dial/query error) or discarded (skipped) attempt no longer resets
+`BlocksSinceFullCheck`. Resetting it on every attempt regardless of outcome
+was the original behavior, but it silently delayed the next legitimate
+interval checkpoint by up to a full `--full-check-interval`'s worth of
+blocks even though nothing had actually been confirmed
+(blinklabs-io/dingo#1900 incremental-mode audit finding); a failed attempt
+instead leaves the countdown exactly where it was, so `decideFullCheckReason`
+re-requests a full check on the very next block for as long as the trigger
+stays due, with `request`'s own coalescing (above) still preventing that
+from piling up redundant requests.
+
+**Incremental mode's testing status, precisely.** Confirmed live against a
+real dingo and cardano-node: the startup baseline, same-point-rollback
+suppression (at startup and across reconnects), the per-block delta check
+correctly and repeatedly detecting a real divergence, the mismatch-triggered
+full check running in the background without disrupting the block stream,
+reconnect/resume after a dropped session (observed repeatedly, cursor
+resumed correctly every time with no data loss), and a process restart
+resuming from a warm, previously-persisted cursor file (`BlocksSinceFullCheck`
+seeded from the prior run's cursor rather than reset, verified across a real
+`SIGKILL`). Two live gaps remain direct, specific consequences of
+blinklabs-io/dingo#3854 being open: on the real network, the mismatch
+trigger fires on effectively every block, which has so far preempted ever
+observing `--full-check-interval`'s own countdown fire on its own, or the
+pipeline reporting a fully clean match end-to-end.
+
+Those two, plus the epoch-transition trigger and a genuine rollback (both
+needing an event no live testing window has produced -- a real epoch
+boundary, or a real reorg), are covered instead by
+`internal/nodeparity/incremental_harness_test.go`: a real gouroboros
+ChainSync + LocalStateQuery server (not a new local protocol mock -- the
+same "stand up a real server, script its replies" approach
+`watch_chainsync_test.go` already uses, extended to also answer
+`GetCurrentProtocolParams`/`GetStakeDistribution`/`GetUTxOByTxIn`/`GetEpochNo`
+in the exact wire shapes dingo's own real handlers produce) drives
+`RunIncremental` end to end against synthetic, test-controlled state. A
+step-gate (`fakeCardanoServer.step`) lets a test land a state change
+(`setEpoch`, `setMinFeeA`) at a precise point in the block sequence rather
+than racing an ungated fake server, which -- with no artificial per-block
+delay -- can otherwise drain its whole synthetic chain before the test
+goroutine is next scheduled. This is deliberately real coverage of the same
+production code path (`RunIncremental` itself, unmodified), not a
+lower-level unit test standing in for it.
+
+What is still genuinely untested: this against preprod (only tried on
+preview), and a run longer than the roughly hour of cumulative live testing
+across this package's development -- long enough to have found the
+connection-instability pattern below, but not to rule out a slower-building
+issue over many hours.
+
+**Point pinning, and why:** in live-tip mode (`at` nil, the mode `Check`
+runs in absent `--at-slot`/`--at-hash`), the cycle reads both nodes' tips
+once (`ReadTip`, a one-shot ChainSync
+`GetCurrentTip`); if they agree (`tipsAgree`, a pure function,
+unit-tested without a live node — the only remaining `Skip*` reason,
+`SkipTipMismatch`), that agreed tip becomes the point acquired
+(`Tip.point`, `localstatequery.Client.Acquire`) on both connections
+before running the LocalStateQuery session against either, rather than
+letting each individual query answer whatever's live when it happens to
+run. An explicit historical check (`at` non-nil) skips reading either
+tip at all: the caller-supplied point is acquired directly, so the same
+point is compared regardless of where either node's live tip currently
+is.
+Neither mode re-reads either tip after the point is acquired, and there
+is no "sandwich" (before/after tip comparison) discarding a cycle if the
+tip moved during the walk -- an earlier design had one; the current code
+does not. In live-tip mode this means the whole-UTxO walk (see
+`QuerySnapshot`), which can take on the order of a couple of minutes
+against Dingo's disk-backed store, runs against whatever `GetUTxOWhole`
+actually returns once acquired: `GetUTxOWhole` takes no point argument
+and always answers at Dingo's live tip regardless of what was acquired
+(see below), so a live tip advancing during a long walk can only make
+Dingo's own UTxO answer drift ahead of the point cardano-node was
+pinned to, not be caught and discarded -- a comparison run this way
+should be read as approximate for the UTxO field specifically. The
+stake-distribution and protocol-parameter halves of the same session
+*are* answered at the acquired point on both sides, so those two fields
+stay exactly consistent with each other regardless of how long the walk
+takes. `Check` uses one already-dialed connection per node for the
+whole cycle, so the ChainSync and LocalStateQuery reads share a single
+session per node.
+
+Point pinning against a real cardano-node's `Acquire(point)` genuinely
+pins its whole reply for the rest of the session, no matter how long the
+session runs or how far the node's own tip advances meanwhile. Dingo's
+server-side `Acquire` (`ouroboros/localstatequery.go`, blinklabs-io/dingo#382)
+is not that general yet, but covers more than only the UTxO walk: it
+records the requested point (slot *and* hash — see below) per connection,
+and `ledger.LedgerState.Query` verifies that point against this node's
+current chain (`verifyPointOnChain`, returning `ledger.ErrPointNotOnChain`
+on a mismatch) before dispatching to any handler, so every point-sensitive
+query shares one fork-safety check rather than repeating it.
+`queryShelleyLeaf`'s doc comment carries a full audit of every one of its
+cases, classified as honoring the point today / intentionally live-only /
+not point-aware yet (and why) -- summarized here for the ones that matter
+to this comparison:
+`queryShelleyStakeDistribution`/`queryShelleyPoolDistr2` (via
+`ledger.LedgerState.PoolStakeDistribution`, which resolves the pinned slot
+to the epoch that governed it and reads that epoch's already-persisted mark
+snapshot instead of the live one — a real historical reconstruction, not an
+approximation, rejecting a point outside the mark-snapshot retention window
+with `ledger.ErrHistoricalStateUnavailable`) both fully honor the point.
+`GetCurrentProtocolParams` (`queryShelleyCurrentProtocolParams`) answers a
+pin in the live tip's current epoch straight from the live in-memory
+snapshot (protocol parameters only change at epoch boundaries, so "as of"
+and "live right now" are the same value within one epoch); a pin in any
+other epoch instead falls back to that epoch's persisted `pparams` row
+(`database.Database.GetPParams`/`loadPersistedProtocolParameters`, the same
+row `SetPParams` already writes on every era transition and
+governance-enacted update, and the same one Blockfrost's epoch-parameters
+endpoint and koios-parity's reward comparison already read historically).
+An epoch with no persisted row -- never had a parameter change recorded, or
+one pruned by `DeletePParamsAfterSlot` after a rollback -- still returns
+`ErrHistoricalStateUnavailable` rather than silently answering with the
+live value (blinklabs-io/dingo#382).
+`queryShelleyEpochNo` also honors the point (no retention window applies —
+epoch records are never pruned); both it and the protocol-parameters
+handler resolve their epoch through the same shared helper,
+`ledger.LedgerState.resolveAsOfEpoch`, rather than each re-deriving it.
+`GetUTxOByTxIn` (`queryShelleyUtxoByTxIn`) also fully honors the point: the
+utxo table already tracks each row's creation and spend slot
+(`AddedSlot`/`DeletedSlot`), so a ref is answered live-at-the-pin when it
+was created at-or-before the pinned slot and either never spent or spent
+strictly after it (`database.UtxosByRefsAsOf`) -- a real historical
+reconstruction, not an approximation. This closed a real gap
+(blinklabs-io/dingo#1900): before it, this handler ignored the pinned point
+entirely and always answered from live state, proven live by acquiring an
+older point and then observing a still-acquired session return a later
+block's output through it. The one limit is retention, not reconstruction:
+a spent row can be hard-deleted by the periodic stability-window cleanup
+(`ledger.LedgerState.cleanupConsumedUtxos`) once its `DeletedSlot` falls
+far enough behind the live tip, so a pin older than that same floor is
+rejected with `ErrHistoricalStateUnavailable`
+(`ledger.checkUtxoRetentionWindow`) rather than risk answering "absent" for
+a ref whose spend record is already gone -- except in API storage mode,
+which never prunes spent rows and so has no such floor. `GetUTxOWhole`
+(`queryShelleyUtxoWhole`) honors the point only when it names the live tip
+exactly, for the reason above: unlike a per-ref lookup, answering the
+whole live set as of an arbitrary historical slot has no indexed shortcut
+in this schema -- it would need a full-table scan applying the same
+per-row predicate to every UTxO ever created, which is both far slower
+than the live path (already the subject of most of this file's
+`queryShelleyUtxoWhole` coverage) and still exposed to the identical
+retention gap for a slot at or past the same cleanup floor. Any other
+pinned point is rejected with `ErrHistoricalStateUnavailable` instead of
+silently answered from live state, the same as it was before; a paginated,
+retention-aware historical form remains a possible future extension,
+tracked separately as blinklabs-io/dingo#4082. Every other query type
+still ignores the acquired point and answers from live state --
+`ShelleyUtxoByAddressQuery` shares the same utxo table and columns as
+`GetUTxOByTxIn` and could extend the same way, but no current caller needs
+it; `queryShelleyStakeSnapshots` in particular looks like a cheap addition
+(the same epoch-snapshot shape as stake distribution) but its
+zero-pool-omission rule depends on the *live* protocol version, so pinning
+it would need the same not-yet-built historical-pparams machinery.
+
+Identifying a pinned point by slot alone is ambiguous across a rollback: a
+fork switch can leave a different block at the same slot than the one the
+caller acquired, and a slot-only reconstruction would then silently answer
+against the new fork's data. `ledger.QueryPoint` (the parameter type
+`ledger.LedgerState.Query` now takes instead of a bare `asOfSlot uint64`)
+carries both `Slot` and `Hash` for exactly this reason, and
+`verifyPointOnChain` checks the hash, not just the slot, against
+`database.BlockBySlot`.
 
 `Check` takes a `context.Context` and threads it into `Dial`, which closes
 its connection the instant the context is cancelled (SIGINT/SIGTERM via
@@ -8209,15 +8680,36 @@ indefinitely. `internal/nodeparity/watch.go`'s `watchSession` applies the
 same pattern independently for its own persistent ChainSync connections.
 
 **Metrics:** `node_parity_checks_total`, `node_parity_checks_skipped_total{reason}`
-(`reason`: `tip_mismatch`/`tip_advanced`),
+(`reason`: `tip_mismatch`),
 `node_parity_divergence_total{field}` (`field`: `protocol_params`/
 `stake_distribution`/`utxo`), and `node_parity_check_errors_total` (a Check
 call that failed outright -- a dial or query error -- as opposed to a
 completed or skipped cycle; counted separately so a persistently
 misconfigured address, which never increments the other two counters
 either, is distinguishable from the tool itself being stuck --
-`NodeParityCheckErrors` alerts on it directly), registered under a registry
-wrapped with a
+`NodeParityCheckErrors` alerts on it directly). `--mode=incremental` also
+increments `node_parity_check_errors_total` whenever `incrementalSession`
+ends in error (a per-block query failure, a dial failure, or any other
+session-ending error) via `IncrementalConfig.OnBlockCheckError` -- a
+callback distinct from `OnBlockCheck` (only ever called for a block that
+was actually decoded and queried) and `OnFullCheck` (only this mode's own
+full checkpoints), added because neither one previously let this failure
+class reach any metric at all, so `NodeParityCheckErrors` could not see it
+(blinklabs-io/dingo#1900 incremental-mode audit finding: the
+per-block-behind-tip stake-distribution stall above would never have paged
+anyone before this fix). `--mode=incremental` adds
+`node_parity_incremental_blocks_total`/`node_parity_incremental_mismatch_total`
+(per-block cycles, matched or diverged -- kept separate from
+`checks_total`/`divergence_total` above, which cover full-ledger-state
+cycles at a different cadence, so a dashboard built around one mode's rate
+does not misread the other's) and
+`node_parity_full_check_triggers_total{reason}` (`reason`: `startup`/
+`interval`/`epoch_transition`/`rollback`/`mismatch` -- incremental mode's own
+full checkpoints; a full-mode per-block-triggered check is never counted
+here, only in `checks_total`). An incremental mismatch still also increments
+the shared `divergence_total{field}` series, so a dashboard built around
+that alone sees it regardless of which mode found it. All of the above are
+registered under a registry wrapped with a
 `network` const label the same way the real node's own
 `configWrapPromRegistry` (root `config.go`) labels `cardano_node_metrics_*` —
 see `docs/dashboards/prometheus.yaml`'s `node-parity`/`cardano-node-reference`
@@ -8227,7 +8719,8 @@ surface for this tool, matching the rest of this repo's operator tooling.
 Unlike `internal/koiosparity`'s `FatalFunc`/`strict` precedent, there is no
 mode that kills a node on mismatch: live cross-node disagreement is often
 transient (propagation delay, short forks) rather than a confirmed bug, so
-the standalone tool only ever reports and retries on the next cycle.
+the standalone tool only ever reports and retries on the next cycle -- true
+of both `--mode=full` and `--mode=incremental`.
 
 ### Bark (`bark/`)
 
