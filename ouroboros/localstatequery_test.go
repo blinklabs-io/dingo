@@ -17,7 +17,9 @@ package ouroboros
 import (
 	"bytes"
 	"errors"
+	"net"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -146,4 +148,111 @@ func TestLocalstatequeryServerAcquire_VolatileTip_ClearsPoint(t *testing.T) {
 	_, recorded := o.localstatequeryAcquiredPoints[connID]
 	o.localstatequeryAcquireMutex.Unlock()
 	require.False(t, recorded)
+}
+
+// TestLocalstatequeryProtocol_PointAheadOfTip_ConnectionSurvivesAndStaysUsable
+// is the blinklabs-io/dingo#4156 regression at the actual protocol level a
+// bot reviewer asked for: the three tests above drive
+// localstatequeryServerAcquire's callback directly, which proves the
+// callback's return value is right, but not that gouroboros' server
+// actually turns that into a graceful wire reply rather than tearing the
+// connection down -- that translation lives entirely in gouroboros'
+// server.go, outside this callback. This test wires a real dingo
+// *Ouroboros server (the same localstatequeryServerConnOpts production
+// code every real NtC connection uses) to a real gouroboros client over an
+// actual connection (net.Pipe -- an in-memory net.Conn pair, no sockets
+// needed), the same way connmanager/listener.go wires a live NtC listener.
+//
+// It Acquires a point ahead of this node's tip (reproducing the exact race
+// blinklabs-io/dingo#4156 was filed for) and asserts two things a direct
+// callback test cannot: the client's Acquire call itself returns
+// ErrAcquireFailurePointNotOnChain (not a connection-closed/EOF error), and
+// -- the part that actually matters, since #4156's bug was the whole
+// connection dying -- a second, valid Acquire on the very same connection
+// immediately afterward still succeeds.
+func TestLocalstatequeryProtocol_PointAheadOfTip_ConnectionSurvivesAndStaysUsable(
+	t *testing.T,
+) {
+	o := &Ouroboros{
+		localstatequeryAcquiredPoints: make(
+			map[ouroboros.ConnectionId]ledger.QueryPoint,
+		),
+	}
+	ls, db := newTestLedgerStateWithChain(t, 2)
+	o.ledgerState = ls
+
+	tipHash := bytes.Repeat([]byte{1}, 32)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(1, tipHash),
+	}, nil))
+
+	rawServer, rawClient := net.Pipe()
+
+	type serverResult struct {
+		conn *ouroboros.Connection
+		err  error
+	}
+	serverDone := make(chan serverResult, 1)
+	go func() {
+		conn, err := ouroboros.New(
+			ouroboros.WithConnection(rawServer),
+			ouroboros.WithNetworkMagic(42),
+			ouroboros.WithNodeToNode(false),
+			ouroboros.WithServer(true),
+			ouroboros.WithLocalStateQueryConfig(
+				olocalstatequery.NewConfig(
+					o.localstatequeryServerConnOpts()...,
+				),
+			),
+		)
+		serverDone <- serverResult{conn: conn, err: err}
+	}()
+
+	cliConn, err := ouroboros.New(
+		ouroboros.WithConnection(rawClient),
+		ouroboros.WithNetworkMagic(42),
+		ouroboros.WithNodeToNode(false),
+	)
+	require.NoError(t, err)
+	defer cliConn.Close() //nolint:errcheck
+
+	var srvRes serverResult
+	select {
+	case srvRes = <-serverDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("server side of ouroboros.New never completed the handshake")
+	}
+	require.NoError(t, srvRes.err)
+	defer srvRes.conn.Close() //nolint:errcheck
+
+	client := cliConn.LocalStateQuery().Client
+	require.NotNil(t, client)
+
+	aheadHash := bytes.Repeat([]byte{2}, 32)
+	aheadPoint := ocommon.NewPoint(2, aheadHash)
+	acquireErr := client.Acquire(&aheadPoint)
+	require.Error(
+		t,
+		acquireErr,
+		"an ahead-of-tip Acquire must fail",
+	)
+	require.True(
+		t,
+		errors.Is(acquireErr, olocalstatequery.ErrAcquireFailurePointNotOnChain),
+		"expected a graceful AcquireFailurePointNotOnChain reply over the "+
+			"wire, got: %v",
+		acquireErr,
+	)
+
+	// The actual #4156 bug: before the fix, the ahead-of-tip Acquire above
+	// didn't just fail -- it took the whole connection down with it, so any
+	// subsequent call would see a connection-closed error instead of a
+	// normal protocol response. Prove the connection is still alive and
+	// usable by Acquiring a genuinely valid point right after.
+	require.NoError(
+		t,
+		client.AcquireVolatileTip(),
+		"the connection must remain usable after a graceful AcquireFailure",
+	)
+	require.NoError(t, client.Release())
 }
