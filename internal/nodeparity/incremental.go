@@ -375,11 +375,14 @@ type IncrementalConfig struct {
 	// FullCheckTimeout bounds every full Check this package triggers
 	// (startup baseline, interval/rollback/epoch-transition/mismatch
 	// checkpoints) -- distinct from, and far longer than, blockCheckTimeout,
-	// which only ever bounds the lightweight per-block delta query. A full
-	// Check's paginated whole-UTxO walk measured roughly 5 minutes against a
-	// real Preview-scale node (see ARCHITECTURE.md); a timeout sized for the
-	// per-block query would self-cancel every triggered full check via its
-	// own context deadline. Defaults to DefaultFullCheckTimeout when zero.
+	// which only ever bounds the lightweight per-block delta query. It
+	// bounds Dingo's paginated whole-UTxO walk *and* the follow-up
+	// cardano-node reference-batch query together, not either phase alone
+	// -- see DefaultFullCheckTimeout's own doc comment for why this must
+	// stay sized for both combined and not just the walk on its own. A
+	// timeout sized for the per-block query would self-cancel every
+	// triggered full check via its own context deadline. Defaults to
+	// DefaultFullCheckTimeout when zero.
 	FullCheckTimeout time.Duration
 	Logger           *slog.Logger
 	// OnFullCheck is called with each full Check's outcome, including the
@@ -411,10 +414,22 @@ type IncrementalConfig struct {
 // quickly indicates a stuck peer, not genuine work in progress.
 const blockCheckTimeout = 30 * time.Second
 
-// DefaultFullCheckTimeout is IncrementalConfig.FullCheckTimeout's default,
-// comfortably above the ~5 minute full-check walk time measured against a
-// real Preview-scale node (see ARCHITECTURE.md).
-const DefaultFullCheckTimeout = 10 * time.Minute
+// DefaultFullCheckTimeout is IncrementalConfig.FullCheckTimeout's default.
+// This bounds one entire full Check -- Dingo's whole-UTxO walk *and* the
+// follow-up cardano-node reference-batch query together, not either phase
+// on its own -- the same combined cost cmd/node-parity/watch.go's full-mode
+// defaultCheckTimeout (20m) bounds. 10 minutes was sized for an earlier
+// measurement of Dingo's own walk alone (~5 minutes, see ARCHITECTURE.md);
+// live validation later the same day this was raised found Preview's
+// continued growth had pushed that same walk to 9.6-10 minutes by itself,
+// so a periodic full checkpoint's context deadline fired on the
+// cardano-node phase after only 8-45% of its batches, every time, not
+// occasionally -- indistinguishable in the logs from a genuinely stuck
+// peer. Matched to defaultCheckTimeout's own value for the same reason:
+// both bound the identical combined-phase work, just triggered on
+// different cadences (block-triggered for full mode, periodic/event
+// checkpoints for incremental mode).
+const DefaultFullCheckTimeout = 20 * time.Minute
 
 // RunIncremental runs sequential, per-block ledger-state validation: unlike
 // Check (which pins to whatever point is current and compares the whole
