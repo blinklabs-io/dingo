@@ -487,3 +487,68 @@ func TestDiscardedBodyDoesNotCountAsRangeProgress(t *testing.T) {
 		"a discarded body must leave the range's failure record intact",
 	)
 }
+
+// TestRefusedRollbackKeepsInFlightBatch pins the cost of publishing the
+// rollback generation before the chain is touched. Publishing early is what
+// makes a real rollback observable to a flush that never took the mutex, but
+// a rollback validation refuses -- over-K, a point not on the chain, or a
+// block the store does not hold -- never moves the chain, and
+// handleEventChainsyncRollback treats all three as recoverable. Counting one
+// would discard the in-flight batch, leave batchBlocksApplied at zero, and
+// feed handleEventBlockfetchBatchDone's same-range failure streak for a range
+// the peer is serving correctly.
+func TestRefusedRollbackKeepsInFlightBatch(t *testing.T) {
+	t.Parallel()
+
+	f := newBlockfetchRollbackFixture(t)
+	f.queueForkAHeaderAndStartBatch(t)
+	f.deliverForkABody(t)
+
+	tipBefore := f.ls.chain.Tip().Point
+	// A point the chain does not hold is refused by
+	// validateAndEmitRollbackUndo before chain.RollbackDeferred runs.
+	missing := ocommon.NewPoint(
+		f.currentTip.Point.Slot-1,
+		testHashBytes("rollback-point-not-on-chain"),
+	)
+
+	var pending pendingPublishes
+	f.ls.chainsyncMutex.Lock()
+	err := f.ls.rollbackChainAndStateDeferred(missing, &pending)
+	f.ls.chainsyncMutex.Unlock()
+	pending.flush()
+	require.Error(
+		t,
+		err,
+		"the fixture must reach the refused-rollback branch",
+	)
+	require.Equal(
+		t,
+		tipBefore,
+		f.ls.chain.Tip().Point,
+		"a refused rollback must not move the chain",
+	)
+
+	f.ls.chainsyncBlockfetchMutex.Lock()
+	superseded := f.ls.blockfetchBatchSuperseded()
+	f.ls.chainsyncBlockfetchMutex.Unlock()
+	require.False(
+		t,
+		superseded,
+		"a rollback the chain never applied must not supersede the batch",
+	)
+
+	// The observable consequence: the buffered body still reaches chain
+	// insertion, so the batch is not later reported as an unobtained range.
+	f.ls.chainsyncBlockfetchMutex.Lock()
+	flushErr := f.ls.flushPendingBlockfetchBlocksDeferred(nil)
+	applied := f.ls.batchBlocksApplied
+	f.ls.chainsyncBlockfetchMutex.Unlock()
+	require.NoError(t, flushErr)
+	assert.Equal(
+		t,
+		1,
+		applied,
+		"the body fetched for the unchanged chain must still be applied",
+	)
+}

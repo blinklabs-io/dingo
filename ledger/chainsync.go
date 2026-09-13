@@ -4863,7 +4863,9 @@ func (ls *LedgerState) startQueuedBlockfetchFromEventLocked(
 // rollback cannot interleave with a flush that holds it, and they publish the
 // new generation before they change the chain. A reader that has observed a
 // chain change caused by a rollback therefore always observes the new
-// generation here, whether it read under that mutex or not.
+// generation here, whether it read under that mutex or not. A rollback that
+// validation refuses restores the generation under the same mutex, so a
+// refused attempt never reads as superseded.
 func (ls *LedgerState) blockfetchBatchSuperseded() bool {
 	return ls.blockfetchBatchChainGeneration !=
 		ls.chainRollbackGeneration.Load()

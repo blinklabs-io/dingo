@@ -3844,10 +3844,24 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 	err := func() error {
 		ls.chainsyncBlockfetchMutex.Lock()
 		defer ls.chainsyncBlockfetchMutex.Unlock()
+		priorGeneration := ls.chainRollbackGeneration.Load()
 		ls.chainRollbackGeneration.Add(1)
 		ls.transactionEventMutex.Lock()
 		defer ls.transactionEventMutex.Unlock()
 		if err := ls.validateAndEmitRollbackUndo(point); err != nil {
+			// Validation refused the point before the chain was touched --
+			// over-K, ErrRollbackPointNotOnChain, or models.ErrBlockNotFound,
+			// all of which handleEventChainsyncRollback treats as
+			// recoverable. Restore the generation so an in-flight batch is
+			// not discarded for a rollback that never happened: a discard
+			// leaves batchBlocksApplied at zero, and
+			// handleEventBlockfetchBatchDone feeds that into the same-range
+			// failure streak, so blockfetchMaxSameRangeFailures refusals
+			// would drop a perfectly good header range. Both the bump and
+			// this restore run under chainsyncBlockfetchMutex, which every
+			// blockfetchBatchSuperseded reader also holds, so no reader can
+			// observe the intermediate value.
+			ls.chainRollbackGeneration.Store(priorGeneration)
 			return err
 		}
 		if _, rbErr := ls.chain.RollbackDeferred(point); rbErr != nil {

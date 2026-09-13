@@ -896,9 +896,16 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 		// re-reading the tip is what clears it. The retry is only taken
 		// while nothing has been emitted, so a ledger.tx consumer is never
 		// told to undo the same block twice.
+		priorGeneration := ls.chainRollbackGeneration.Load()
 		ls.chainRollbackGeneration.Add(1)
 		emitted, err := ls.validateAndEmitRollbackUndoEmitted(next)
 		if err != nil {
+			// Validation refused this window before chain.RollbackDeferred
+			// ran, so the chain did not move. Restore the generation, or an
+			// over-K retry would supersede the in-flight blockfetch batch
+			// once per attempt for a rollback that never happened; each such
+			// discard also counts against the same-range failure streak.
+			ls.chainRollbackGeneration.Store(priorGeneration)
 			if errors.Is(err, chain.ErrRollbackExceedsSecurityParam) &&
 				overKRetries < maxWindowedRewindRetries {
 				overKRetries++
