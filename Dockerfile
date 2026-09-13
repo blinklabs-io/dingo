@@ -111,8 +111,16 @@ EXPOSE 3001 3002 9090 12798 12799
 #
 # The liveness body still carries the readiness verdict and the observed tip
 # gap, so `docker inspect` shows why a live node is not yet serving.
+#
+# The port follows DINGO_HEALTH_PORT, which is the only one of the three
+# healthPort sources (flag, YAML, environment) a HEALTHCHECK can read. An
+# explicit 0 disables the listener, so the check reports healthy rather than
+# probing a port nothing is bound to and driving the container into a
+# replacement loop.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-  CMD wget -qO/dev/null http://127.0.0.1:12799/health || exit 1
+  CMD health_port="${DINGO_HEALTH_PORT:-12799}"; \
+  [ "$health_port" = "0" ] && exit 0; \
+  wget -qO/dev/null "http://127.0.0.1:$health_port/health" || exit 1
 # UID/GID are pinned (not left to adduser's dynamic system-UID allocation)
 # so they're stable and documentable across image rebuilds: this container
 # never runs as root, so a custom --db-snapshot-dir (or any other data path)

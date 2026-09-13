@@ -283,7 +283,8 @@ Kubernetes restarts a container whose `livenessProbe` fails; a node doing an
 initial sync is legitimately not useful for hours or days, and none of the
 conditions that freeze a tip are repaired by a restart loop. So liveness
 stays independent of sync state and is what the image's `HEALTHCHECK`
-probes. Readiness is the signal that catches a frozen tip, and failing it
+probes; that check follows `DINGO_HEALTH_PORT` and reports healthy without
+probing when it is `0`. Readiness is the signal that catches a frozen tip, and failing it
 removes a pod from a Service or a target from a load balancer without
 killing the node.
 
