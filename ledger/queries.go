@@ -181,6 +181,37 @@ func (ls *LedgerState) verifyPointOnChain(
 	return nil
 }
 
+// VerifyPointOnChain validates at against this node's current chain, the
+// same way Query does for a pinned point, but callable at Acquire time
+// (blinklabs-io/dingo#4156) rather than deferred to the first Query. An
+// unpinned at (the live/no-pin zero value) always succeeds -- there is
+// nothing to validate.
+//
+// Ordinary LocalStateQuery clients (a real cardano-node included) validate
+// a specific-point Acquire synchronously, replying with a graceful
+// AcquireFailure over the wire when the point is not (yet, or no longer) on
+// the chain. Deferring this check to the first Query instead, as this
+// node's Acquire handling used to, hits a real gap in that later stage:
+// there is no equivalent graceful-failure path once Acquire has already
+// signaled success, so a query-time rejection propagates as a fatal
+// protocol error and the whole LocalStateQuery connection is torn down --
+// observed live at close to 100% of the time for any client whose Acquire
+// races dingo's own block application (extremely common at real block
+// cadence, since dingo and the client's own reference node sync
+// independently and rarely advance in lockstep). Callers should map the
+// returned error's sentinel (ErrPointNotOnChain / ErrHistoricalStateUnavailable)
+// to gouroboros's own olocalstatequery.ErrAcquireFailurePointNotOnChain /
+// ErrAcquireFailurePointTooOld so the server replies gracefully instead of
+// closing the connection.
+func (ls *LedgerState) VerifyPointOnChain(at QueryPoint) error {
+	if !at.pinned() {
+		return nil
+	}
+	txn := ls.db.Transaction(false)
+	defer txn.Release()
+	return ls.verifyPointOnChain(txn, at)
+}
+
 // resolveAsOfEpoch resolves at to the epoch that governed it -- unpinned
 // (at.pinned() false) means live, resolving the live tip's own epoch
 // instead. Shared by every query handler that reconstructs epoch-keyed

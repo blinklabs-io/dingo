@@ -15,6 +15,8 @@
 package ouroboros
 
 import (
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/blinklabs-io/dingo/ledger"
@@ -96,16 +98,46 @@ func (o *Ouroboros) localstatequeryServerAcquire(
 	acquireTarget olocalstatequery.AcquireTarget,
 	reAcquire bool,
 ) error {
-	o.localstatequeryAcquireMutex.Lock()
-	defer o.localstatequeryAcquireMutex.Unlock()
 	if specific, ok := acquireTarget.(olocalstatequery.AcquireSpecificPoint); ok {
-		o.localstatequeryAcquiredPoints[ctx.ConnectionId] = ledger.QueryPoint{
+		point := ledger.QueryPoint{
 			Slot: specific.Point.Slot,
 			Hash: specific.Point.Hash,
 		}
-	} else {
-		delete(o.localstatequeryAcquiredPoints, ctx.ConnectionId)
+		// Validate synchronously, at Acquire time, rather than deferring to
+		// the first Query: a rejection here has a graceful wire-level
+		// AcquireFailure reply (gouroboros' handleAcquire/handleReAcquire
+		// both translate ErrAcquireFailurePointNotOnChain into one), but a
+		// rejection surfacing later, from the Query callback, has no such
+		// path and tears down the whole connection instead
+		// (blinklabs-io/dingo#4156). This point is deliberately not yet
+		// recorded in localstatequiredPoints when validation fails, so a
+		// client that ignores the failure and queries anyway keeps
+		// whatever point (or lack of one) it had before this call.
+		if err := o.ledgerState.VerifyPointOnChain(point); err != nil {
+			if errors.Is(err, ledger.ErrPointNotOnChain) {
+				return fmt.Errorf(
+					"%w: %w",
+					olocalstatequery.ErrAcquireFailurePointNotOnChain,
+					err,
+				)
+			}
+			if errors.Is(err, ledger.ErrHistoricalStateUnavailable) {
+				return fmt.Errorf(
+					"%w: %w",
+					olocalstatequery.ErrAcquireFailurePointTooOld,
+					err,
+				)
+			}
+			return err
+		}
+		o.localstatequeryAcquireMutex.Lock()
+		o.localstatequeryAcquiredPoints[ctx.ConnectionId] = point
+		o.localstatequeryAcquireMutex.Unlock()
+		return nil
 	}
+	o.localstatequeryAcquireMutex.Lock()
+	delete(o.localstatequeryAcquiredPoints, ctx.ConnectionId)
+	o.localstatequeryAcquireMutex.Unlock()
 	return nil
 }
 
