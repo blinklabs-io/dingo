@@ -41,6 +41,8 @@ import (
 // Rejecting the block is correct and stays correct -- the point of the type
 // is to reject the *chain* rather than to spin on it.
 func TestHeaderValidationErrorIsIdentifiable(t *testing.T) {
+	t.Parallel()
+
 	point := ocommon.Point{Slot: 119799023, Hash: []byte{0xab, 0xcd}}
 	cause := errors.New("VRF leader value exceeds stake-derived threshold")
 	err := &headerValidationError{BlockPoint: point, Cause: cause}
@@ -64,6 +66,8 @@ func TestHeaderValidationErrorIsIdentifiable(t *testing.T) {
 // Recovery must not fire for unrelated failures, or an ordinary transient
 // error would start rewinding the chain.
 func TestHeaderValidationRecoveryIgnoresOtherErrors(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	for _, err := range []error{
 		errors.New("some unrelated failure"),
@@ -81,6 +85,8 @@ func TestHeaderValidationRecoveryIgnoresOtherErrors(t *testing.T) {
 // rather than reporting a rewind it did not perform -- a false "recovered"
 // would send the pipeline straight back into the same block.
 func TestHeaderValidationRecoveryDeclinesWithoutChainManager(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	err := &headerValidationError{
 		BlockPoint: ocommon.Point{Slot: 42},
@@ -96,6 +102,8 @@ func TestHeaderValidationRecoveryDeclinesWithoutChainManager(t *testing.T) {
 // from the primary chain, the ledger is rolled back with it, a resync is
 // published, and the pipeline is told it may restart.
 func TestHeaderValidationRecoveryRewindsPastRejectedBlock(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
@@ -179,6 +187,8 @@ func TestHeaderValidationRecoveryRewindsPastRejectedBlock(t *testing.T) {
 }
 
 func TestLedgerProcessBlocksRecoversReadChainValidationFailure(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
@@ -244,6 +254,8 @@ func TestLedgerProcessBlocksRecoversReadChainValidationFailure(t *testing.T) {
 // into the same block, and because every restart looks like a successful
 // recovery the stuck-pipeline signal never fires either.
 func TestHeaderValidationRecoveryDeclinesAtOrBehindLedgerTip(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
@@ -330,6 +342,8 @@ func TestHeaderValidationRecoveryDeclinesAtOrBehindLedgerTip(t *testing.T) {
 // own rollback already, and pointing chainsync back at a dead branch would
 // undo that.
 func TestHeaderValidationRecoveryYieldsWhenChainSelectionMovedOn(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
@@ -423,6 +437,8 @@ func TestHeaderValidationRecoveryYieldsWhenChainSelectionMovedOn(t *testing.T) {
 // between two adjacent calls. What is testable is that the classification is
 // the same wherever the error comes from, and that it stays narrow.
 func TestYieldedToChainSelectionClassifiesOnlyNotOnChain(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),

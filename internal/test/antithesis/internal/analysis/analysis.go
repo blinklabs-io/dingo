@@ -399,6 +399,18 @@ func (a *Analyzer) reportSafetyAssertions(snap *MetricsSnapshot) {
 		len(snap.ChainTipByNode) >= 2 {
 		if minTip, maxTip, ok := chainTipRange(snap.ChainTipByNode); ok {
 			lag := maxTip - minTip
+			Sometimes(lag <= uint64(a.cfg.MaxForkDepth), "chain-tip-lag", map[string]interface{}{ //nolint:gosec // LoadConfig validates MaxForkDepth as positive.
+				"min_tip":        minTip,
+				"max_tip":        maxTip,
+				"lag":            lag,
+				"max_fork_depth": a.cfg.MaxForkDepth,
+			})
+			Sometimes(lag <= 2*a.cfg.EpochLength, "chain-convergence", map[string]interface{}{
+				"min_tip":                 minTip,
+				"max_tip":                 maxTip,
+				"lag":                     lag,
+				"convergence_bound_slots": 2 * a.cfg.EpochLength,
+			})
 			a.logger.Info("sync-lag",
 				"min_tip", minTip,
 				"max_tip", maxTip,
@@ -406,6 +418,24 @@ func (a *Analyzer) reportSafetyAssertions(snap *MetricsSnapshot) {
 				"max_fork_depth", a.cfg.MaxForkDepth,
 			)
 		}
+	}
+
+	// A successful txpump submission must not be emitted more than once. This
+	// catches wallet reconciliation bugs that can double-spend an input after
+	// a restart or rollback.
+	Always(snap.DuplicateSubmissions == 0, "utxo-submission-uniqueness", map[string]interface{}{
+		"duplicate_submissions":  snap.DuplicateSubmissions,
+		"submitted_transactions": len(snap.SubmittedTxIDs),
+	})
+
+	// Confirmed removals are emitted by the node only after block inclusion.
+	// Keep this as progress because node and txpump logs are ingested
+	// independently and can arrive in either order.
+	if len(snap.SubmittedTxIDs) > 0 {
+		Sometimes(snap.ConfirmedSubmittedTxCount > 0, "mempool-recovery", map[string]interface{}{
+			"submitted_transactions":           len(snap.SubmittedTxIDs),
+			"confirmed_submitted_transactions": snap.ConfirmedSubmittedTxCount,
+		})
 	}
 
 	// Safety 4: Chain quality — once we have enough blocks, no single node

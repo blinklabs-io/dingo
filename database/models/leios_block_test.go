@@ -34,57 +34,6 @@ func buildStandardConwayBlock(t *testing.T) []byte {
 	return testutil.BuildDecodableConwayBlockBytes(t, 42, 7)
 }
 
-// extendConwayHeaderWithLeios rewrites a standard Conway block so its header
-// body carries the two trailing Musashi/Leios fields (leios_certified = false,
-// leios_announcement = nil), producing a 12-field header body. The transaction
-// components (and therefore the block body hash) are left untouched.
-func extendConwayHeaderWithLeios(t *testing.T, standardRaw []byte) []byte {
-	t.Helper()
-	return extendConwayHeaderBody(
-		t,
-		standardRaw,
-		cbor.RawMessage{0xf4},
-		cbor.RawMessage{0xf6},
-	)
-}
-
-func extendConwayHeaderBody(
-	t *testing.T,
-	standardRaw []byte,
-	extraFields ...cbor.RawMessage,
-) []byte {
-	t.Helper()
-	var comps []cbor.RawMessage
-	_, err := cbor.Decode(standardRaw, &comps)
-	require.NoError(t, err)
-	require.Len(t, comps, 5)
-	var headerParts []cbor.RawMessage
-	_, err = cbor.Decode(comps[0], &headerParts)
-	require.NoError(t, err)
-	require.Len(t, headerParts, 2)
-	var bodyElems []cbor.RawMessage
-	_, err = cbor.Decode(headerParts[0], &bodyElems)
-	require.NoError(t, err)
-	require.Len(t, bodyElems, 10)
-	extendedElems := append(bodyElems, extraFields...)
-	extendedBody, err := cbor.Encode(extendedElems)
-	require.NoError(t, err)
-	extendedHeader, err := cbor.Encode([]any{
-		cbor.RawMessage(extendedBody),
-		headerParts[1],
-	})
-	require.NoError(t, err)
-	extendedRaw, err := cbor.Encode([]any{
-		cbor.RawMessage(extendedHeader),
-		comps[1],
-		comps[2],
-		comps[3],
-		comps[4],
-	})
-	require.NoError(t, err)
-	return extendedRaw
-}
-
 func TestDecodeConwayBlockStandard(t *testing.T) {
 	standardRaw := buildStandardConwayBlock(t)
 	// Sanity: the fixture is a valid standard Conway block.
@@ -105,7 +54,7 @@ func TestDecodeConwayBlockStandard(t *testing.T) {
 
 func TestDecodeConwayBlockLeiosExtendedHeader(t *testing.T) {
 	standardRaw := buildStandardConwayBlock(t)
-	extendedRaw := extendConwayHeaderWithLeios(t, standardRaw)
+	extendedRaw := testutil.ExtendConwayHeaderWithLeios(t, standardRaw)
 
 	// gouroboros' strict Conway decoder must reject the 12-field header.
 	_, err := gledger.NewBlockFromCbor(gledger.BlockTypeConway, extendedRaw)
@@ -179,7 +128,7 @@ func TestDecodeConwayBlockRejectsMalformedLeiosHeaderExtension(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			raw := extendConwayHeaderBody(t, standardRaw, tc.extraFields...)
+			raw := testutil.ExtendConwayHeaderBody(t, standardRaw, tc.extraFields...)
 			_, err := DecodeConwayBlock(raw)
 			require.Error(t, err)
 		})

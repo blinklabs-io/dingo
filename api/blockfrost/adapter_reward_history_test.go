@@ -40,6 +40,8 @@ func newRewardHistoryStakeAddress(
 }
 
 func TestAccountRewardHistoryExcludesNonSpendableReward(t *testing.T) {
+	t.Parallel()
+
 	adapter, _, db := newDBBackedAdapter(t)
 	stakingKey := bytes.Repeat([]byte{0x07}, 28)
 	poolKey := bytes.Repeat([]byte{0xff}, 28)
@@ -83,6 +85,8 @@ func TestAccountRewardHistoryExcludesNonSpendableReward(t *testing.T) {
 }
 
 func TestAccountRewardHistoryExcludesGuardedReward(t *testing.T) {
+	t.Parallel()
+
 	adapter, _, db := newDBBackedAdapter(t)
 	stakingKey := bytes.Repeat([]byte{0x08}, 28)
 	poolKey := bytes.Repeat([]byte{0xfe}, 28)

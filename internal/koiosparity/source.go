@@ -102,6 +102,16 @@ type RewardParitySource interface {
 		epoch uint64,
 		boundarySlot uint64,
 	) (map[string]struct{}, error)
+	// GetProtocolParams returns the protocol parameters in force for epoch,
+	// resolved from the `pparams` row that actually applies to it and
+	// decoded as the era the `epoch` table records for that epoch — see
+	// DingoDB.GetProtocolParams for why neither the epoch nor the era can be
+	// matched naively. Returns nil, nil when no row resolves, which the
+	// comparison reports rather than treating as nothing to compare.
+	GetProtocolParams(
+		ctx context.Context,
+		epoch uint64,
+	) (*DingoProtocolParams, error)
 	// GetRewardAccountOutputs returns every per-account reward calculation
 	// output row Dingo committed for epoch. Not yet consumed by any
 	// comparison (that is #3097's scope); exposed now so the source
@@ -110,6 +120,31 @@ type RewardParitySource interface {
 		ctx context.Context,
 		epoch uint64,
 	) ([]*models.RewardAccountOutput, error)
+	// GetEarliestAvailableEpoch returns the earliest Koios reporting epoch
+	// this node could plausibly have genuine, locally computed
+	// reward-calculation state for, derived from its own Mithril bootstrap
+	// boundary (dingo #4172). A Mithril-bootstrapped node has no ledger
+	// history before that boundary by construction — epochs 0-1 are not the
+	// only ones that can never have local data; every epoch through the
+	// bootstrap boundary itself is in the same position, regardless of
+	// whether Koios (which has full protocol history) has real reference
+	// data for them.
+	//
+	// ok is false when no Mithril boundary is recorded at all (a
+	// non-Mithril, genesis-synced node), and when a recorded boundary slot
+	// falls inside no epoch the node's own epoch table describes, which
+	// names no epoch to bound against — callers must then apply no lower
+	// bound beyond the existing preStakingThroughEpoch floor, leaving
+	// behavior exactly as it was before this method existed. A boundary
+	// that is recorded but unreadable, empty, or otherwise malformed is an
+	// error, not ok = false. When ok is true, epoch is the
+	// first Koios reporting epoch a caller should ever attempt to compare;
+	// every epoch below it should be treated the same way a pre-staking
+	// epoch is treated today (a recorded PASS with nothing compared, not a
+	// hard mismatch).
+	GetEarliestAvailableEpoch(
+		ctx context.Context,
+	) (epoch uint64, ok bool, err error)
 }
 
 var (
@@ -126,22 +161,24 @@ var (
 // populate at every epoch boundary. It opens no second database connection,
 // requires no export step, and adds no new table.
 //
-// Core-mode pruning: ledger/snapshot/rotation.go's cleanupOldSnapshots keeps
-// reward_pool_input/reward_pool_output/reward_account_output for the current
-// epoch and the three that precede it (a rolling 4-epoch window; API storage
-// mode retains reward_account_output without bound instead). DatabaseSource
+// Retention: ledger/snapshot/rotation.go's cleanupOldSnapshots prunes
+// reward_account_output to the current epoch and the three that precede it
+// (a rolling 4-epoch window) only in core storage mode with the in-process
+// observer disabled. It is retained without bound in API storage mode
+// (dingo #1875) and whenever the observer is enabled (dingo #4188), because
+// the observer validates a closed epoch only after fetching and comparing
+// against Koios over the network and can fall arbitrarily far behind chain
+// progression during a from-genesis or catch-up sync — process-level timing
+// alone does not keep its reads inside the window. reward_pool_input,
+// reward_pool_output, epoch_summary and reward_ada_pots are retained for the
+// life of the database in every mode; pool_stake_snapshot and
+// reward_stake_input are pruned to the window in every mode. DatabaseSource
 // does not race that pruning in any special way — it just reads whatever is
 // currently committed, the same as DingoDB would against a separately synced
-// copy. What actually satisfies "available before cleanup runs" is
-// process-level timing: the in-process observer (observer.go) processes a
-// newly closed epoch promptly after its own event.EpochTransitionEvent
-// fires, which is many epochs (hours to days on preview/preprod) before that
-// epoch's rows would fall out of the retention window. A GetEpochData or
-// GetPoolEpochDataMap call made long after an epoch's data has aged out of
-// that window reads back as absent (nil / *Present == false) — the same
-// signal DingoDB already reports for "not yet computed" — not as an error;
-// it is the caller's responsibility (the observer, or an operator invoking
-// this source directly) to read promptly.
+// copy. A GetEpochData or GetPoolEpochDataMap call made after an epoch's data
+// has aged out of the window reads back as absent (nil / *Present == false) —
+// the same signal DingoDB already reports for "not yet computed" — not as an
+// error.
 type DatabaseSource struct {
 	db *database.Database
 }
@@ -182,6 +219,51 @@ func (s *DatabaseSource) GetLatestEpoch(ctx context.Context) (uint64, error) {
 		return 0, errors.New("koiosparity: no epoch_summary rows found")
 	}
 	return summary.Epoch, nil
+}
+
+// GetEarliestAvailableEpoch implements RewardParitySource by resolving this
+// node's own Mithril bootstrap boundary (the mithril_ledger_slot sync-state
+// key mithril/sync_import.go writes at import time, surfaced at the
+// database-package level as MithrilTrustBoundarySlotStrict/GetEpochBySlot —
+// see dingo #4172) into the first Koios reporting epoch this node could
+// plausibly have genuinely computed local reward state for: one past the
+// epoch that slot falls in, since the epoch containing (and every epoch
+// before) the boundary slot was inherited from the Mithril snapshot rather
+// than computed by this node's own epoch-transition reward calculation.
+//
+// MithrilTrustBoundarySlotStrict, not MithrilTrustBoundarySlot: a boundary
+// that exists but cannot be read or parsed — including one recorded with an
+// empty value — must surface as an error here rather than as ok = false,
+// which callers apply no bound for. Reading a malformed boundary as an
+// absent one would restore the unbounded pre-#4172 behavior on exactly the
+// node whose boundary could not be confirmed.
+func (s *DatabaseSource) GetEarliestAvailableEpoch(
+	ctx context.Context,
+) (uint64, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, false, err
+	}
+	txn := s.db.Transaction(false)
+	defer txn.Release()
+	slot, err := s.db.MithrilTrustBoundarySlotStrict(txn)
+	if err != nil {
+		return 0, false, fmt.Errorf("mithril trust boundary: %w", err)
+	}
+	if slot == 0 {
+		return 0, false, nil
+	}
+	boundaryEpoch, err := s.db.GetEpochBySlot(slot, txn)
+	if err != nil {
+		return 0, false, fmt.Errorf(
+			"epoch for mithril boundary slot %d: %w",
+			slot,
+			err,
+		)
+	}
+	if boundaryEpoch == nil {
+		return 0, false, nil
+	}
+	return boundaryEpoch.EpochId + 1, true, nil
 }
 
 // GetEpochData returns epoch-level aggregates for the given epoch, or nil,
@@ -325,6 +407,32 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 	defer txn.Release()
 	meta := s.db.Metadata()
 
+	var tipSlot uint64
+	tipKnown := false
+	tip, tipErr := s.db.GetTip(txn)
+	if tipErr != nil {
+		return nil, fmt.Errorf("tip lookup: %w", tipErr)
+	}
+	if len(tip.Point.Hash) > 0 && tip.Point.Slot > 0 {
+		tipSlot = tip.Point.Slot
+		tipKnown = true
+	}
+
+	epochRewardsPending := false
+	if tipKnown {
+		applyEpoch, err := meta.GetEpoch(stakeEpoch+3, txn.Metadata())
+		if err != nil {
+			return nil, fmt.Errorf(
+				"epoch lookup %d: %w", stakeEpoch+3, err,
+			)
+		}
+		if applyEpoch == nil {
+			epochRewardsPending = true
+		} else {
+			epochRewardsPending = tipSlot < applyEpoch.StartSlot
+		}
+	}
+
 	stakeInputs, err := meta.GetRewardPoolInputs(stakeEpoch, txn.Metadata())
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -389,6 +497,7 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 			10,
 		)
 		data.PoolUnspendable = uint64(out.Unspendable)
+		data.RewardsPending = tipKnown && tipSlot < out.BoundarySlot
 	}
 
 	// The comparable member-reward quantity, formed the same way DingoDB
@@ -435,7 +544,79 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 			}
 		}
 	}
+	if epochRewardsPending {
+		for _, data := range m {
+			if !data.MemberRewardPresent {
+				data.RewardsPending = true
+			}
+		}
+	}
 	return m, nil
+}
+
+// GetProtocolParams implements RewardParitySource against the live,
+// in-process metadata store. It mirrors DingoDB.GetProtocolParams exactly:
+// resolve the epoch's era from the `epoch` row first, then let
+// MetadataStore.GetPParams pick the latest parameter row at or before the
+// epoch within that era (its query is already `epoch <= ? AND era_id = ?`
+// ordered newest-first), then decode with that era's decoder. Both reads run
+// under one read transaction so a rollover committing between them cannot
+// hand back a row whose era disagrees with the era that selected it.
+func (s *DatabaseSource) GetProtocolParams(
+	ctx context.Context,
+	epoch uint64,
+) (*DingoProtocolParams, error) {
+	// See GetLatestEpoch's comment: no context-aware transaction/accessor
+	// exists to thread ctx into further, so this only guards against
+	// starting new work after ctx is already done.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	txn := s.db.Transaction(false)
+	defer txn.Release()
+	meta := s.db.Metadata()
+
+	epochRow, err := meta.GetEpoch(epoch, txn.Metadata())
+	if err != nil {
+		return nil, fmt.Errorf("epoch %d: %w", epoch, err)
+	}
+	if epochRow == nil {
+		return nil, nil
+	}
+	rows, err := meta.GetPParams(epoch, epochRow.EraId, txn.Metadata())
+	if err != nil {
+		return nil, fmt.Errorf("pparams epoch %d: %w", epoch, err)
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	out, err := decodeProtocolParams(
+		rows[0].Cbor,
+		epochRow.EraId,
+		rows[0].Epoch,
+	)
+	if err != nil {
+		return nil, err
+	}
+	// See isSyntheticV2CostModel's doc comment (dingo #4127, following
+	// #3825's design): the durable cleared-epoch marker is the same one
+	// ledger.queryShelleyCurrentProtocolParams reads for its own historical
+	// path, read here directly via the database package rather than
+	// DingoDB's duplicated raw-SQL copy since this source already holds a
+	// live *database.Database.
+	clearedEpoch, cleared, err := database.SyntheticV2CostModelClearedEpoch(
+		s.db, txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"synthetic v2 cost model cleared epoch: %w", err,
+		)
+	}
+	v2, hasV2 := out.CostModels["PlutusV2"]
+	out.SyntheticV2CostModel = isSyntheticV2CostModel(
+		v2, hasV2, epoch, clearedEpoch, cleared,
+	)
+	return out, nil
 }
 
 // GetRewardAccountOutputs returns every per-account reward calculation

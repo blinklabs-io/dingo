@@ -43,12 +43,15 @@ type ValidatedConwayBlock struct {
 	SlotsPerKesPeriod uint64
 }
 
-// conwayEmptyBodyHash returns the block body hash for a Conway block with
+// ConwayEmptyBodyHash returns the block body hash for a Conway block with
 // empty transaction components (bodies, witness sets, metadata set, invalid
 // transactions), which is independent of the header. Computed once via the
 // same technique as BuildDecodableConwayBlockBytes (blake2b256 over the
-// concatenation of the per-component blake2b256 hashes).
-func conwayEmptyBodyHash(t testing.TB) lcommon.Blake2b256 {
+// concatenation of the per-component blake2b256 hashes). Exported so callers
+// building their own Conway headers with genuine crypto (e.g. a
+// package-local competing-fork generator) share this computation instead of
+// duplicating it, which would let the two drift apart.
+func ConwayEmptyBodyHash(t testing.TB) lcommon.Blake2b256 {
 	t.Helper()
 	block := &conway.ConwayBlock{
 		BlockHeader: &conway.ConwayBlockHeader{},
@@ -149,7 +152,7 @@ func buildValidatedConwayBlockBytes(
 		epochNonce[i] = nonceSeed + byte(i) //nolint:gosec
 	}
 
-	const opCertSeqNum = uint32(0)
+	const opCertSeqNum = 0
 	// opCertKesPeriod is the absolute Cardano KES period at which this
 	// synthetic operational certificate claims to have been issued -- i.e.
 	// the absolute period at which the KES key was fresh (its own internal
@@ -159,7 +162,7 @@ func buildValidatedConwayBlockBytes(
 	// validateKESSignature), not from OpCert.KesPeriod directly, so this
 	// only needs to stay within maxKESEvolutions of whatever slot ends up
 	// chosen, which a 200-slot search window comfortably satisfies.
-	const opCertKesPeriod = uint32(0)
+	const opCertKesPeriod = 0
 	var opCertBody [48]byte
 	copy(opCertBody[:32], kesPk)
 	binary.BigEndian.PutUint64(opCertBody[32:40], uint64(opCertSeqNum))
@@ -172,7 +175,7 @@ func buildValidatedConwayBlockBytes(
 		opCertSig = ed25519.Sign(unrelatedColdKey, opCertBody[:])
 	}
 
-	bodyHash := conwayEmptyBodyHash(t)
+	bodyHash := ConwayEmptyBodyHash(t)
 	activeSlotCoeff := big.NewRat(99, 100)
 
 	// currentKesSk/currentKesPeriod track the KES key actually used to

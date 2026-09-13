@@ -138,20 +138,28 @@ func isRoutableAddr(address string) bool {
 // in tests and documentation. They are rejected here rather than consuming a
 // peer-list slot and causing a failed dial.
 var unreachablePrefixes = []netip.Prefix{
-	netip.MustParsePrefix("0.0.0.0/8"),       // RFC 1122 "this network"
-	netip.MustParsePrefix("100.64.0.0/10"),   // RFC 6598 shared address space
-	netip.MustParsePrefix("192.0.0.0/24"),    // RFC 6890 IETF protocol assignments
 	netip.MustParsePrefix("192.0.2.0/24"),    // RFC 5737 TEST-NET-1
 	netip.MustParsePrefix("198.51.100.0/24"), // RFC 5737 TEST-NET-2
 	netip.MustParsePrefix("203.0.113.0/24"),  // RFC 5737 TEST-NET-3
+	netip.MustParsePrefix("0.0.0.0/8"),       // RFC 1122 "this network"
+	netip.MustParsePrefix("100.64.0.0/10"),   // RFC 6598 shared address space
+	netip.MustParsePrefix("192.0.0.0/24"),    // RFC 6890 IETF protocol assignments
 	netip.MustParsePrefix("192.88.99.0/24"),  // RFC 7526 deprecated 6to4 anycast
 	netip.MustParsePrefix("198.18.0.0/15"),   // RFC 2544 benchmarking
 	netip.MustParsePrefix("240.0.0.0/4"),     // RFC 1112 reserved, incl. broadcast
 	netip.MustParsePrefix("64:ff9b:1::/48"),  // RFC 8215 local-use translation
 	netip.MustParsePrefix("100::/64"),        // RFC 6666 discard-only
 	netip.MustParsePrefix("2001:2::/48"),     // RFC 5180 benchmarking
-	netip.MustParsePrefix("2001:10::/28"),    // RFC 4843 ORCHID, deprecated
-	netip.MustParsePrefix("2001:db8::/32"),   // RFC 3849 documentation
+	// The two ORCHID blocks abut and are excluded for different reasons, so
+	// neither prefix may be widened to cover the other. 2001:10::/28 is the
+	// deprecated ORCHID allocation, terminated 2014-03. 2001:20::/28 is listed
+	// Globally Reachable in the IANA IPv6 Special-Purpose Address Registry, but
+	// RFC 7343 states an ORCHID "should not appear in actual IPv6 headers" and
+	// is routable only at an overlay level, so it is an endpoint identifier
+	// rather than a locator and can never be dialled as a peer.
+	netip.MustParsePrefix("2001:10::/28"),  // RFC 4843 ORCHID, deprecated
+	netip.MustParsePrefix("2001:20::/28"),  // RFC 7343 ORCHIDv2
+	netip.MustParsePrefix("2001:db8::/32"), // RFC 3849 documentation
 }
 
 // IsRoutableIP reports whether an IP address is usable as a peer candidate

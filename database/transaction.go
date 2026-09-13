@@ -20,9 +20,11 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"slices"
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -89,7 +91,13 @@ func (tx metadataOnlyTransaction) Produced() []lcommon.Utxo {
 // let a truncate proceed past a boundary that could not actually be
 // verified, rather than merely under-informing a heuristic.
 func (d *Database) MithrilTrustBoundarySlot(txn *Txn) uint64 {
-	slot, err := d.MithrilTrustBoundarySlotStrict(txn)
+	// Deliberately not MithrilTrustBoundarySlotStrict: this runs once per
+	// transaction that consumes inputs, and the strict variant pays an extra
+	// sync_state enumeration on the empty-value path — which is the common
+	// path here, since a genesis-synced node has no boundary row at all.
+	// This caller discards every failure as 0 regardless, so the distinction
+	// that enumeration buys is worth nothing to it.
+	slot, err := d.mithrilTrustBoundarySlot(txn)
 	if err != nil {
 		d.logger.Warn(
 			"failed to read Mithril trust boundary from sync state; "+
@@ -110,7 +118,38 @@ func (d *Database) MithrilTrustBoundarySlot(txn *Txn) uint64 {
 // persisted boundary must not be indistinguishable from "no snapshot was
 // ever imported" for a caller enforcing a safety check, or the check is
 // defeated exactly when it matters most.
+//
+// That includes a recorded empty value. GetSyncState reports an absent key
+// as the empty string, so an empty return alone cannot tell "no snapshot was
+// ever imported" from "a boundary row exists and holds nothing"; only the
+// second is malformed, and the two are separated here by asking the
+// sync_state keyspace whether the row exists at all. The extra query runs
+// only on that path.
 func (d *Database) MithrilTrustBoundarySlotStrict(txn *Txn) (uint64, error) {
+	val, err := d.GetSyncState(mithrilLedgerSlotSyncKey, txn)
+	if err != nil {
+		return 0, fmt.Errorf("read Mithril trust boundary: %w", err)
+	}
+	if val == "" {
+		recorded, err := d.mithrilTrustBoundaryRecorded(txn)
+		if err != nil {
+			return 0, err
+		}
+		if recorded {
+			return 0, errors.New(
+				"parse Mithril trust boundary: empty value",
+			)
+		}
+		return 0, nil
+	}
+	return parseMithrilTrustBoundary(val)
+}
+
+// mithrilTrustBoundarySlot is MithrilTrustBoundarySlotStrict without the
+// absent-versus-empty distinction, for the fail-open accessor that discards
+// it anyway. An absent key and a key recorded with an empty value both come
+// back as 0 with no error.
+func (d *Database) mithrilTrustBoundarySlot(txn *Txn) (uint64, error) {
 	val, err := d.GetSyncState(mithrilLedgerSlotSyncKey, txn)
 	if err != nil {
 		return 0, fmt.Errorf("read Mithril trust boundary: %w", err)
@@ -118,6 +157,10 @@ func (d *Database) MithrilTrustBoundarySlotStrict(txn *Txn) (uint64, error) {
 	if val == "" {
 		return 0, nil
 	}
+	return parseMithrilTrustBoundary(val)
+}
+
+func parseMithrilTrustBoundary(val string) (uint64, error) {
 	slot, err := strconv.ParseUint(val, 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf(
@@ -127,6 +170,23 @@ func (d *Database) MithrilTrustBoundarySlotStrict(txn *Txn) (uint64, error) {
 		)
 	}
 	return slot, nil
+}
+
+// mithrilTrustBoundaryRecorded reports whether a mithril_ledger_slot
+// sync_state row exists, which GetSyncState's empty-string return cannot
+// express on its own (the metadata store maps the driver's no-rows error to
+// ""). ListSyncStateKeysByPrefix enumerates the small sync_state keyspace and
+// matches the byte prefix in Go, so the exact key is checked here rather than
+// trusting the prefix match alone.
+func (d *Database) mithrilTrustBoundaryRecorded(txn *Txn) (bool, error) {
+	keys, err := d.ListSyncStateKeysByPrefix(mithrilLedgerSlotSyncKey, txn)
+	if err != nil {
+		return false, fmt.Errorf(
+			"read Mithril trust boundary: %w",
+			err,
+		)
+	}
+	return slices.Contains(keys, mithrilLedgerSlotSyncKey), nil
 }
 
 func ledgerHashBytes(hash lcommon.Blake2b256) []byte {
@@ -200,7 +260,7 @@ func (d *Database) SetTransactionWithOpts(
 		defer txn.Rollback() //nolint:errcheck
 	}
 
-	blob := txn.DB().Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
@@ -414,6 +474,7 @@ func (d *Database) SetGapBlockTransaction(
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	idx uint32,
+	certDeposits map[int]uint64,
 	offsets *BlockIngestionResult,
 	txn *Txn,
 ) error {
@@ -424,7 +485,7 @@ func (d *Database) SetGapBlockTransaction(
 		defer txn.Rollback() //nolint:errcheck
 	}
 
-	blob := txn.DB().Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
@@ -485,7 +546,7 @@ func (d *Database) SetGapBlockTransaction(
 	}
 
 	if err := d.transactionStore().SetGapBlockTransaction(
-		tx, point, idx, txn.Metadata(),
+		tx, point, idx, certDeposits, txn.Metadata(),
 	); err != nil {
 		return fmt.Errorf(
 			"set gap block transaction metadata: %w", err,
@@ -864,7 +925,7 @@ func (d *Database) recoverConsumedUtxo(
 	txn *Txn,
 	enforcePrimaryChain bool,
 ) (*models.Utxo, error) {
-	blob := txn.DB().Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return nil, types.ErrBlobStoreUnavailable
 	}
@@ -1081,7 +1142,7 @@ func (d *Database) SetGenesisTransaction(
 		defer txn.Rollback() //nolint:errcheck
 	}
 
-	blob := txn.DB().Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
@@ -1146,8 +1207,8 @@ func (d *Database) SetGenesisTransaction(
 	); err != nil {
 		return fmt.Errorf(
 			"SetGenesisTransaction failed for tx %x block %x: %w",
-			txHash[:8],
-			blockHash[:8],
+			bytePrefix(txHash),
+			bytePrefix(blockHash),
 			err,
 		)
 	}
@@ -1788,16 +1849,22 @@ func (d *Database) DeleteTransactionMetadataLabelsAfterSlot(
 // reason given on deleteUtxoBlobs.
 func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
 	const batchSize = 500
-	blob := d.Blob()
-	if blob == nil {
+	// Report an absent blob store up front, so an empty txHashes slice
+	// reports it the same way a populated one does rather than silently
+	// succeeding because the batch loop never ran.
+	if d.Blob() == nil {
 		return types.ErrBlobStoreUnavailable
 	}
 
 	var deleteErrors int
-	deleteBatch := func(blobTxn types.Txn, batch [][]byte) int {
+	deleteBatch := func(
+		store blob.BlobStore,
+		blobTxn types.Txn,
+		batch [][]byte,
+	) int {
 		var batchDeleteErrors int
 		for _, txHash := range batch {
-			if err := blob.DeleteTx(blobTxn, txHash); err != nil {
+			if err := store.DeleteTx(blobTxn, txHash); err != nil {
 				deleteErrors++
 				batchDeleteErrors++
 				d.logger.Warn(
@@ -1810,18 +1877,31 @@ func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
 		return batchDeleteErrors
 	}
 
+	// The store used for each delete comes from whichever transaction owns
+	// the handle that delete runs through, so a concurrent SetBlobStore
+	// cannot leave a handle from one store being deleted through another.
 	if txn != nil && txn.Blob() != nil {
-		deleteBatch(txn.Blob(), txHashes)
+		blob := txn.BlobStore()
+		if blob == nil {
+			return types.ErrBlobStoreUnavailable
+		}
+		deleteBatch(blob, txn.Blob(), txHashes)
 	} else {
 		for start := 0; start < len(txHashes); start += batchSize {
 			end := min(start+batchSize, len(txHashes))
 			batch := txHashes[start:end]
 			batchTxn := NewBlobOnlyTxn(d, true)
+			blob := batchTxn.BlobStore()
+			if blob == nil {
+				batchTxn.Release()
+				return types.ErrBlobStoreUnavailable
+			}
 			batchBlobTxn := batchTxn.Blob()
 			if batchBlobTxn == nil {
+				batchTxn.Release()
 				return types.ErrNilTxn
 			}
-			batchDeleteErrors := deleteBatch(batchBlobTxn, batch)
+			batchDeleteErrors := deleteBatch(blob, batchBlobTxn, batch)
 			if err := batchTxn.Commit(); err != nil {
 				deleteErrors += len(batch) - batchDeleteErrors
 				_ = batchTxn.Rollback()

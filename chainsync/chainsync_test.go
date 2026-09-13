@@ -1645,6 +1645,9 @@ func TestObservedHeaderLimitFollowsSelectionState(t *testing.T) {
 	}
 	s := newTestState(t, newTestEventBus(t), cfg)
 	conn := newTestConnId(43)
+	// Observed headers are recorded only for a tracked client, as production
+	// does; an untracked connection is the post-disconnect case.
+	require.True(t, s.AddClientConnId(conn))
 
 	var (
 		prevHash  []byte
@@ -1863,4 +1866,52 @@ func gaugeValueForLabels(
 		}
 	}
 	return 0, false
+}
+
+// A raw header callback still in flight when the connection is removed must
+// not recreate the observed-header history. RemoveClientConnId is the only
+// thing that clears it, so an entry created after that runs is never removed
+// again and leaks one per disconnect.
+func TestObservedHeader_LateCallbackDoesNotResurrectHistory(t *testing.T) {
+	bus := newTestEventBus(t)
+	s := newTestState(t, bus, chainsync.DefaultConfig())
+
+	conn := newTestConnId(7)
+	require.True(t, s.AddClientConnId(conn))
+
+	hash := []byte("late-hash")
+	prev := []byte("late-prev")
+	point := ocommon.NewPoint(300, hash)
+	observed := chainsync.ObservedHeader{
+		ConnectionId: conn,
+		BlockHeader: testBlockHeader{
+			hash:        lcommon.NewBlake2b256(hash),
+			prevHash:    lcommon.NewBlake2b256(prev),
+			blockNumber: 9,
+			slot:        300,
+		},
+		Point:       point,
+		Tip:         ochainsync.Tip{Point: point, BlockNumber: 9},
+		ArrivalTime: time.Now(),
+		BlockNumber: 9,
+		Type:        1,
+	}
+
+	// Recording while tracked is the control.
+	s.RecordObservedHeader(observed)
+	_, _, ok := s.LookupObservedHeader(conn, hash)
+	require.True(t, ok, "a tracked connection must record its headers")
+
+	s.RemoveClientConnId(conn)
+	_, _, ok = s.LookupObservedHeader(conn, hash)
+	require.False(t, ok, "disconnect must clear the observed history")
+
+	// The in-flight callback lands after cleanup.
+	s.RecordObservedHeader(observed)
+	_, _, ok = s.LookupObservedHeader(conn, hash)
+	require.False(
+		t,
+		ok,
+		"a late callback must not recreate observed history after disconnect",
+	)
 }

@@ -91,6 +91,8 @@ func seedStakeCredentialUtxos(
 // ascending and a descending page, and an out-of-range page landing past
 // the end.
 func TestNodeAdapterAccountUTXOsLargeResultSetPagination(t *testing.T) {
+	t.Parallel()
+
 	adapter, raw, db := newDBBackedAdapter(t)
 	const total = 250
 	stakeAddr, _ := seedStakeCredentialUtxos(t, adapter, raw, db, total)
@@ -159,6 +161,8 @@ func TestNodeAdapterAccountUTXOsLargeResultSetPagination(t *testing.T) {
 // TestNodeAdapterAccountUTXOsEmpty proves a registered stake credential with
 // no live UTxOs returns an empty page and a zero total rather than an error.
 func TestNodeAdapterAccountUTXOsEmpty(t *testing.T) {
+	t.Parallel()
+
 	adapter, raw, db := newDBBackedAdapter(t)
 	stakeAddr, _ := seedStakeCredentialUtxos(t, adapter, raw, db, 0)
 

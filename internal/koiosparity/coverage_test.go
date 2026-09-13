@@ -26,6 +26,8 @@ import (
 // until the new field is assigned an explicit coverage class. This prevents a
 // report from continuing to say PASS while silently omitting a new field.
 func TestKoiosCoverageMatrixIsComplete(t *testing.T) {
+	t.Parallel()
+
 	matrix := KoiosCoverageMatrix()
 	byKey := make(map[string]KoiosFieldCoverage, len(matrix))
 	validClasses := map[CoverageClass]bool{
@@ -74,6 +76,17 @@ func TestKoiosCoverageMatrixIsComplete(t *testing.T) {
 		"/account_reward_history",
 		KoiosAccountRewardHistoryItem{},
 	)
+	// dingo #3931: /epoch_params. The response struct models the scalar
+	// parameters this checker fetches; the documented fields it deliberately
+	// does not model (cost_models, nonce/block_hash/extra_entropy, and the
+	// Conway governance block) are pinned explicitly below so they cannot be
+	// dropped from the contract without a test failing.
+	requireResponseFieldsCovered(
+		t,
+		byKey,
+		"/epoch_params",
+		KoiosEpochParamsResp{},
+	)
 
 	// Fields selected by the pool-discovery helpers use function-local response
 	// structs, and documented fields omitted from preview/preprod responses are
@@ -85,6 +98,31 @@ func TestKoiosCoverageMatrixIsComplete(t *testing.T) {
 		"/pool_history.pool_id_bech32",
 		"/epoch_info.pool_cnt",
 		"/epoch_info.delegator_cnt",
+		"/epoch_params.nonce",
+		"/epoch_params.block_hash",
+		"/epoch_params.extra_entropy",
+		"/epoch_params.pvt_motion_no_confidence",
+		"/epoch_params.pvt_committee_normal",
+		"/epoch_params.pvt_committee_no_confidence",
+		"/epoch_params.pvt_hard_fork_initiation",
+		"/epoch_params.pvtpp_security_group",
+		"/epoch_params.dvt_motion_no_confidence",
+		"/epoch_params.dvt_committee_normal",
+		"/epoch_params.dvt_committee_no_confidence",
+		"/epoch_params.dvt_update_to_constitution",
+		"/epoch_params.dvt_hard_fork_initiation",
+		"/epoch_params.dvt_p_p_network_group",
+		"/epoch_params.dvt_p_p_economic_group",
+		"/epoch_params.dvt_p_p_technical_group",
+		"/epoch_params.dvt_p_p_gov_group",
+		"/epoch_params.dvt_treasury_withdrawal",
+		"/epoch_params.committee_min_size",
+		"/epoch_params.committee_max_term_length",
+		"/epoch_params.gov_action_lifetime",
+		"/epoch_params.gov_action_deposit",
+		"/epoch_params.drep_deposit",
+		"/epoch_params.drep_activity",
+		"/epoch_params.min_fee_ref_script_cost_per_byte",
 	} {
 		require.Contains(t, byKey, key)
 	}
@@ -105,6 +143,8 @@ func requireResponseFieldsCovered(
 }
 
 func TestKoiosCoverageMatrixReturnsCopy(t *testing.T) {
+	t.Parallel()
+
 	first := KoiosCoverageMatrix()
 	require.NotEmpty(t, first)
 	first[0].Field = "mutated"

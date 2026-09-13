@@ -1822,15 +1822,21 @@ func TestCalculateRejectsDuplicatePoolSnapshotRows(t *testing.T) {
 	require.ErrorContains(t, err, "duplicate pool")
 }
 
-func TestCalculateRejectsActiveStakeMismatch(t *testing.T) {
+// TestCalculateRejectsPoolStakeAboveActiveStake pins the upper half of the
+// bound. Pools may sum to less than TotalActiveStake (a pool excluded for
+// degraded registration data keeps its delegators' stake in the sigma_a
+// denominator; see TestCalculateAcceptsActiveStakeAboveThePoolSet), but never
+// to more: that means the pool set and the declared active stake describe
+// different boundaries.
+func TestCalculateRejectsPoolStakeAboveActiveStake(t *testing.T) {
 	_, err := Calculate(
 		Pots{},
 		Snapshot{
-			TotalActiveStake: 2,
+			TotalActiveStake: 1,
 			Pools: []Pool{
 				{
 					ID:             testPoolID(1),
-					DelegatedStake: 1,
+					DelegatedStake: 2,
 				},
 			},
 		},
@@ -1840,7 +1846,7 @@ func TestCalculateRejectsActiveStakeMismatch(t *testing.T) {
 	require.ErrorContains(
 		t,
 		err,
-		"total delegated stake 1 does not match active stake 2",
+		"total delegated stake 2 exceeds active stake 1",
 	)
 }
 

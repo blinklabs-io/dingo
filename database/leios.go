@@ -32,12 +32,12 @@ func (d *Database) SetLeiosEBManifest(
 	hash []byte,
 	manifestRaw []byte,
 ) error {
-	blob := d.Blob()
+	txn := d.BlobTxn(true)
+	defer txn.Rollback() //nolint:errcheck
+	blob := txn.BlobStore()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
-	txn := d.BlobTxn(true)
-	defer txn.Rollback() //nolint:errcheck
 	blobTxn := txn.Blob()
 	if blobTxn == nil {
 		return types.ErrNilTxn
@@ -67,12 +67,12 @@ func (d *Database) GetLeiosEBManifest(
 	hash []byte,
 	slot uint64,
 ) (manifestRaw []byte, err error) {
-	blob := d.Blob()
+	txn := d.BlobTxn(false)
+	defer txn.Rollback() //nolint:errcheck
+	blob := txn.BlobStore()
 	if blob == nil {
 		return nil, types.ErrBlobStoreUnavailable
 	}
-	txn := d.BlobTxn(false)
-	defer txn.Rollback() //nolint:errcheck
 	blobTxn := txn.Blob()
 	if blobTxn == nil {
 		return nil, types.ErrNilTxn
@@ -104,6 +104,71 @@ func (d *Database) GetLeiosEBManifest(
 	return legacyVal[8:], nil
 }
 
+// MaxLeiosEBSlot returns the highest slot represented by a persisted Leios
+// endorser-block manifest. Current records encode the slot in the key; legacy
+// records (pre-issue-#3513, "em"+hash with no slot) encode it in the first
+// eight bytes of the value.
+//
+// COST. The full prefix scan is inherent, not an oversight: the current key
+// layout is "em"+hash+slot, so keys sort by hash and no bounded reverse seek
+// can find the maximum slot. The scan runs synchronously from newOuroboros at
+// startup. On badger it is key-only -- the iterator options leave
+// PrefetchValues false and only the legacy branch copies a value -- while on
+// the S3 and GCS blob plugins the same call is a paginated object listing
+// over the whole prefix, with no deadline on the startup path. Ordering the
+// keys by slot, or maintaining the maximum as its own record, is what would
+// make it bounded.
+func (d *Database) MaxLeiosEBSlot() (uint64, error) {
+	txn := d.BlobTxn(false)
+	defer txn.Rollback() //nolint:errcheck
+	blob := txn.BlobStore()
+	if blob == nil {
+		return 0, types.ErrBlobStoreUnavailable
+	}
+	blobTxn := txn.Blob()
+	if blobTxn == nil {
+		return 0, types.ErrNilTxn
+	}
+
+	prefix := []byte(types.LeiosEBManifestKeyPrefix)
+	it := blob.NewIterator(blobTxn, types.BlobIteratorOptions{Prefix: prefix})
+	if it == nil {
+		return 0, types.ErrBlobStoreUnavailable
+	}
+	defer it.Close()
+
+	var maxSlot uint64
+	for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+		item := it.Item()
+		if item == nil {
+			continue
+		}
+		key := item.Key()
+		switch len(key) {
+		case len(types.LeiosEBManifestKeyPrefix) + 32 + 8:
+			slot := binary.BigEndian.Uint64(key[len(key)-8:])
+			if slot > maxSlot {
+				maxSlot = slot
+			}
+		case len(types.LeiosEBManifestKeyPrefix) + 32:
+			value, err := item.ValueCopy(nil)
+			if err != nil {
+				return 0, err
+			}
+			if len(value) >= 8 {
+				slot := binary.BigEndian.Uint64(value[:8])
+				if slot > maxSlot {
+					maxSlot = slot
+				}
+			}
+		}
+	}
+	if err := it.Err(); err != nil {
+		return 0, err
+	}
+	return maxSlot, nil
+}
+
 // SetLeiosEBTxs persists the complete raw transaction bodies of a Leios
 // endorser block to the blob store, keyed by the exact (slot, hash)
 // occurrence. txsRaw is the CBOR-in-CBOR wrapped tx list from leios-fetch
@@ -118,12 +183,12 @@ func (d *Database) SetLeiosEBTxs(
 	if txsRaw == nil {
 		txsRaw = []cbor.RawMessage{}
 	}
-	blob := d.Blob()
+	txn := d.BlobTxn(true)
+	defer txn.Rollback() //nolint:errcheck
+	blob := txn.BlobStore()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
-	txn := d.BlobTxn(true)
-	defer txn.Rollback() //nolint:errcheck
 	blobTxn := txn.Blob()
 	if blobTxn == nil {
 		return types.ErrNilTxn
@@ -156,12 +221,12 @@ func (d *Database) GetLeiosEBTxs(
 	hash []byte,
 	slot uint64,
 ) ([]cbor.RawMessage, error) {
-	blob := d.Blob()
+	txn := d.BlobTxn(false)
+	defer txn.Rollback() //nolint:errcheck
+	blob := txn.BlobStore()
 	if blob == nil {
 		return nil, types.ErrBlobStoreUnavailable
 	}
-	txn := d.BlobTxn(false)
-	defer txn.Rollback() //nolint:errcheck
 	blobTxn := txn.Blob()
 	if blobTxn == nil {
 		return nil, types.ErrNilTxn
@@ -219,12 +284,12 @@ func (d *Database) SetLeiosEB(
 	manifestRaw []byte,
 	txsRaw []cbor.RawMessage,
 ) error {
-	blob := d.Blob()
+	txn := d.BlobTxn(true)
+	defer txn.Rollback() //nolint:errcheck
+	blob := txn.BlobStore()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
-	txn := d.BlobTxn(true)
-	defer txn.Rollback() //nolint:errcheck
 	blobTxn := txn.Blob()
 	if blobTxn == nil {
 		return types.ErrNilTxn

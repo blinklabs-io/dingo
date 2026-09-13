@@ -6,6 +6,8 @@ import (
 )
 
 func TestAsyncWorkerDropsQueuedEventAfterStop(t *testing.T) {
+	t.Parallel()
+
 	const attempts = 128
 	const testEvtType EventType = "test.async.stop"
 

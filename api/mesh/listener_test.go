@@ -36,6 +36,8 @@ import (
 // handlers dereference is validated up front, so a misconfigured node
 // fails at startup rather than on the first request.
 func TestNewServerRequiresDependencies(t *testing.T) {
+	t.Parallel()
+
 	tests := map[string]func(*ServerConfig){
 		"missing chain": func(c *ServerConfig) {
 			c.Chain = nil
@@ -93,6 +95,8 @@ func TestNewServerRequiresDependencies(t *testing.T) {
 // TestNewServerDefaults covers the optional configuration: a nil logger
 // and an empty listen address must not leave the server unusable.
 func TestNewServerDefaults(t *testing.T) {
+	t.Parallel()
+
 	deps := newTestDeps()
 	srv, err := NewServer(ServerConfig{
 		LedgerState:         deps.ledger,
@@ -112,6 +116,8 @@ func TestNewServerDefaults(t *testing.T) {
 // TestNewServerAddressNetworkFollowsMagic asserts the address network
 // used for every derived address is chosen from the network magic.
 func TestNewServerAddressNetworkFollowsMagic(t *testing.T) {
+	t.Parallel()
+
 	deps := newTestDeps()
 
 	testnet := newTestServer(t, deps)
@@ -194,6 +200,8 @@ func startTestServer(
 }
 
 func TestServerServesRequests(t *testing.T) {
+	t.Parallel()
+
 	deps := newTestDeps()
 	_, baseURL := startTestServer(t, deps)
 
@@ -220,6 +228,8 @@ func TestServerServesRequests(t *testing.T) {
 // must report the failure instead of silently running without a
 // listener.
 func TestServerBindFailure(t *testing.T) {
+	t.Parallel()
+
 	occupied, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = occupied.Close() })
@@ -248,6 +258,8 @@ func TestServerBindFailure(t *testing.T) {
 // TestServerDoubleStart asserts a second Start is refused rather than
 // leaking the first listener.
 func TestServerDoubleStart(t *testing.T) {
+	t.Parallel()
+
 	srv, _ := startTestServer(t, newTestDeps())
 
 	err := srv.Start(t.Context())
@@ -258,6 +270,8 @@ func TestServerDoubleStart(t *testing.T) {
 // TestServerStopIsIdempotent asserts Stop on a server that was never
 // started, or stopped twice, is a no-op rather than an error.
 func TestServerStopIsIdempotent(t *testing.T) {
+	t.Parallel()
+
 	srv := newTestServer(t, newTestDeps())
 
 	require.NoError(t, srv.Stop(t.Context()))
@@ -267,6 +281,8 @@ func TestServerStopIsIdempotent(t *testing.T) {
 // TestServerGracefulShutdown asserts Stop releases the listener before it
 // returns by immediately starting a replacement on the same address.
 func TestServerGracefulShutdown(t *testing.T) {
+	t.Parallel()
+
 	srv, addr := startOnFreePort(
 		t, t.Context(), newTestDeps(),
 	)
@@ -300,6 +316,8 @@ func TestServerGracefulShutdown(t *testing.T) {
 // with the protocol, in internal/apilistener. Do not read a pass here as
 // covering them.
 func TestConcurrentStartStopNeverLeavesThePortBound(t *testing.T) {
+	t.Parallel()
+
 	addr := testutil.FreePort(t)
 
 	for i := range 60 {
@@ -367,6 +385,8 @@ func TestConcurrentStartStopNeverLeavesThePortBound(t *testing.T) {
 // passed to Start shuts the listener down, which is how the node stops
 // the API during its own shutdown.
 func TestServerShutdownOnContextCancel(t *testing.T) {
+	t.Parallel()
+
 	ctx, cancel := context.WithCancel(t.Context())
 	_, addr := startOnFreePort(t, ctx, newTestDeps())
 
@@ -395,6 +415,8 @@ func portAccepts(addr string) bool {
 // TestServerCORSPreflight covers browser access: a preflight from an
 // allowed origin succeeds, and one from any other origin is refused.
 func TestServerCORSPreflight(t *testing.T) {
+	t.Parallel()
+
 	const allowed = "https://wallet.example"
 	_, baseURL := startTestServer(
 		t,
@@ -432,6 +454,8 @@ func TestServerCORSPreflight(t *testing.T) {
 // when no origins are configured, so a browser cannot read responses
 // from an unconfigured deployment.
 func TestServerCORSDisabledByDefault(t *testing.T) {
+	t.Parallel()
+
 	_, baseURL := startTestServer(t, newTestDeps())
 
 	resp := preflight(t, baseURL, "https://wallet.example")
@@ -469,6 +493,8 @@ func preflight(
 // TestRequestBodyLimit covers the 1 MiB request cap: an oversized body
 // is rejected as an invalid request rather than being buffered whole.
 func TestRequestBodyLimit(t *testing.T) {
+	t.Parallel()
+
 	h := newTestHandler(t, newTestDeps())
 	oversized := `{"network_identifier":{"blockchain":"cardano",` +
 		`"network":"preview"},"metadata":{"pad":"` +
@@ -486,6 +512,8 @@ func TestRequestBodyLimit(t *testing.T) {
 // still be served, so a regression that tightens the limit is caught
 // rather than hidden behind a comfortably small request.
 func TestRequestBodyAtLimitIsAccepted(t *testing.T) {
+	t.Parallel()
+
 	h := newTestHandler(t, newTestDeps())
 	const prefix = `{"network_identifier":{"blockchain":"cardano",` +
 		`"network":"preview"},"metadata":{"pad":"`
@@ -502,7 +530,11 @@ func TestRequestBodyAtLimitIsAccepted(t *testing.T) {
 
 // TestServerTimeoutsAreConfigured pins the listener timeouts, which
 // bound how long a slow or idle client can hold a connection.
+// ReadTimeout is the backstop for a request whose body no handler
+// reads, which the per-request deadline in decodeRequest never sees.
 func TestServerTimeoutsAreConfigured(t *testing.T) {
+	t.Parallel()
+
 	srv, _ := startTestServer(t, newTestDeps())
 
 	httpServer := srv.listener.Server()
@@ -511,8 +543,25 @@ func TestServerTimeoutsAreConfigured(t *testing.T) {
 	require.Equal(
 		t, 60*time.Second, httpServer.ReadHeaderTimeout,
 	)
+	require.Equal(
+		t, listenerReadTimeout, httpServer.ReadTimeout,
+	)
+	require.Positive(t, httpServer.ReadTimeout)
 	require.Equal(t, 30*time.Second, httpServer.WriteTimeout)
 	require.Equal(t, 120*time.Second, httpServer.IdleTimeout)
+}
+
+// TestDefaultRequestBodyTimeoutIsApplied asserts a server built
+// without an explicit body deadline still gets one, so the bound
+// cannot be lost by composition code that never sets it.
+func TestDefaultRequestBodyTimeoutIsApplied(t *testing.T) {
+	t.Parallel()
+
+	srv := newTestServer(t, newTestDeps())
+
+	require.Equal(
+		t, defaultRequestBodyTimeout, srv.config.requestBodyTimeout,
+	)
 }
 
 // --- routing ------------------------------------------------------------
@@ -520,6 +569,8 @@ func TestServerTimeoutsAreConfigured(t *testing.T) {
 // TestUnknownRouteIsNotFound asserts an unregistered path does not fall
 // through to a handler.
 func TestUnknownRouteIsNotFound(t *testing.T) {
+	t.Parallel()
+
 	h := newTestHandler(t, newTestDeps())
 
 	rec := postRaw(t, h, "/does/not/exist", "{}")
@@ -530,6 +581,8 @@ func TestUnknownRouteIsNotFound(t *testing.T) {
 // TestRoutesRejectNonPost asserts every Mesh endpoint is POST-only, as
 // the Rosetta specification requires.
 func TestRoutesRejectNonPost(t *testing.T) {
+	t.Parallel()
+
 	h := newTestHandler(t, newTestDeps())
 	paths := append(
 		[]string{"/network/list"}, networkValidatedRoutes()...,

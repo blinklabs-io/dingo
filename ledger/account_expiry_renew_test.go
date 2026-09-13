@@ -373,6 +373,8 @@ func stakeDelegationTx(cred []byte) lcommon.Transaction {
 // applying a block containing a stake delegation for a registered credential in
 // epoch E sets the account's ExpirationEpoch to E + DelegatorInactivity.
 func TestRenewWitnessedAccountExpirationsGateOn(t *testing.T) {
+	t.Parallel()
+
 	const (
 		epoch      = uint64(42)
 		inactivity = uint64(90)
@@ -396,6 +398,8 @@ func TestRenewWitnessedAccountExpirationsGateOn(t *testing.T) {
 // TestRenewWitnessedAccountExpirationsGateOff verifies that, with the gate off,
 // witnessing the same credential leaves ExpirationEpoch at its unset value (0).
 func TestRenewWitnessedAccountExpirationsGateOff(t *testing.T) {
+	t.Parallel()
+
 	const epoch = uint64(42)
 	ls, db := newRenewTestLedger(t, false, 90)
 
@@ -416,6 +420,8 @@ func TestRenewWitnessedAccountExpirationsGateOff(t *testing.T) {
 // TestRenewWitnessedAccountExpirationsWithdrawal verifies that a reward
 // withdrawal renews the withdrawn account's expiration (gate on).
 func TestRenewWitnessedAccountExpirationsWithdrawal(t *testing.T) {
+	t.Parallel()
+
 	const (
 		epoch      = uint64(10)
 		inactivity = uint64(90)
@@ -446,6 +452,8 @@ func TestRenewWitnessedAccountExpirationsWithdrawal(t *testing.T) {
 // witnessing a credential with no account row is a no-op: no error and no row
 // is created (RenewAccountExpirations only touches existing rows).
 func TestRenewWitnessedAccountExpirationsMissingRowIgnored(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newRenewTestLedger(t, true, 90)
 
 	cred := renewTestCred(0x07)
@@ -459,6 +467,8 @@ func TestRenewWitnessedAccountExpirationsMissingRowIgnored(t *testing.T) {
 // phase-2-invalid transaction witnesses nothing (its certificates and
 // withdrawals are not applied by the ledger), so it does not renew.
 func TestRenewWitnessedAccountExpirationsSkipsInvalidTx(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newRenewTestLedger(t, true, 90)
 
 	cred := renewTestCred(0x01)

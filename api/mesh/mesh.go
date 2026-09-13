@@ -25,7 +25,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/blinklabs-io/dingo/internal/apiauth"
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/blinklabs-io/dingo/internal/apilistener"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
@@ -43,6 +42,21 @@ const (
 	blockchain        = "cardano"
 	defaultListenAddr = ":8080"
 	maxRequestBody    = 1 << 20 // 1 MB
+
+	// defaultRequestBodyTimeout bounds how long a single request may
+	// take to deliver its body. maxRequestBody caps how many bytes a
+	// client may send, but nothing caps how slowly it may send them, so
+	// without this a client that stops partway through a declared body
+	// holds its handler goroutine for as long as it keeps the
+	// connection open.
+	defaultRequestBodyTimeout = 30 * time.Second
+
+	// listenerReadTimeout bounds the whole request read at the
+	// connection, covering the requests whose body no handler reads --
+	// such as an unknown route -- which the per-request deadline above
+	// never sees.
+	// api/utxorpc's listener carries the same bound.
+	listenerReadTimeout = 60 * time.Second
 
 	// mainnetMagic is the network magic for Cardano
 	// mainnet, used to determine the address network.
@@ -68,11 +82,13 @@ type ServerConfig struct {
 	// CORSAllowedOrigins configures Access-Control-Allow-Origin.
 	// Empty disables CORS.
 	CORSAllowedOrigins []string
-	// TLS and Auth are the resolved (merged, validated) TLS/authentication
-	// policy for this listener -- see ProviderConfig's doc comment and
-	// ARCHITECTURE.md's "API security" section.
-	TLS  apiconfig.EffectiveTLS
-	Auth apiconfig.EffectiveAuth
+	TLS                apiconfig.EffectiveTLS
+	// requestBodyTimeout bounds a single request's body read. It is
+	// unexported deliberately: operators get the constant above, not a
+	// knob whose only supported values are "the default" and "short
+	// enough for a test". NewServer substitutes
+	// defaultRequestBodyTimeout when it is not positive.
+	requestBodyTimeout time.Duration
 }
 
 // Server is the Mesh-compatible REST API server.
@@ -87,7 +103,6 @@ type Server struct {
 	// listening socket as part of what Stop waits for -- see
 	// internal/apilistener.
 	listener *apilistener.Listener
-	verifier *apiauth.Verifier
 }
 
 // NewServer creates a new Mesh API server instance.
@@ -146,6 +161,9 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if cfg.ListenAddress == "" {
 		cfg.ListenAddress = defaultListenAddr
 	}
+	if cfg.requestBodyTimeout <= 0 {
+		cfg.requestBodyTimeout = defaultRequestBodyTimeout
+	}
 
 	var addrNetID uint8 = lcommon.AddressNetworkTestnet
 	if cfg.NetworkMagic == mainnetMagic {
@@ -175,38 +193,19 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 
 // Start starts the HTTP server in a background goroutine.
 func (s *Server) Start(ctx context.Context) error {
-	// Built before the handler chain so it can install the shared
-	// credential-verification middleware (internal/apiauth).
-	verifier, err := apiauth.NewVerifier(s.config.Auth)
-	if err != nil {
-		return fmt.Errorf("mesh: %w", err)
-	}
-	// The verifier is installed inside the build callback so it is published
-	// with the server it belongs to: a second Start is rejected before the
-	// callback runs, and so cannot replace a running server's verifier.
 	server, bindDone, err := s.listener.Publish(func() *http.Server {
-		s.verifier = verifier
 		mux := http.NewServeMux()
 		s.registerRoutes(mux)
-
-		// CORS must wrap authentication, not the reverse: httpcors.Handler
-		// fully answers an OPTIONS preflight itself and never calls the
-		// handler it wraps for one, so browsers -- which never attach
-		// Authorization to a preflight request -- never need a credential to
-		// pass CORS negotiation. Every other request, including a
-		// non-preflight OPTIONS, still reaches the mux normally. See
-		// internal/apiauth's Middleware doc comment for the general statement
-		// of this ordering rule.
-		authenticated := apiauth.Middleware(s.verifier)(mux)
 		return &http.Server{
 			Addr: s.config.ListenAddress,
 			Handler: httpcors.Handler(
-				authenticated,
+				mux,
 				httpcors.Config{
 					AllowedOrigins: s.config.CORSAllowedOrigins,
 				},
 			),
 			ReadHeaderTimeout: 60 * time.Second,
+			ReadTimeout:       listenerReadTimeout,
 			WriteTimeout:      30 * time.Second,
 			IdleTimeout:       120 * time.Second,
 		}
@@ -369,7 +368,7 @@ func (s *Server) decodeAndValidate(
 	r *http.Request,
 	dst networkRequest,
 ) *Error {
-	if err := decodeRequest(w, r, dst); err != nil {
+	if err := s.decodeRequest(w, r, dst); err != nil {
 		return wrapErr(ErrInvalidRequest, err)
 	}
 	id := dst.networkID()
@@ -449,14 +448,59 @@ func writeError(w http.ResponseWriter, meshErr *Error) {
 	writeJSON(w, status, meshErr)
 }
 
-// decodeRequest decodes a JSON request body into dst.
-func decodeRequest(
+// decodeRequest decodes a JSON request body into dst under both
+// request bounds: maxRequestBody caps how many bytes a client may send,
+// and requestBodyTimeout caps how long it may take to send them. A
+// client that stalls partway through a declared body fails the read,
+// and its caller reports the same invalid-request error a malformed
+// body already produces.
+func (s *Server) decodeRequest(
 	w http.ResponseWriter,
 	r *http.Request,
 	dst any,
 ) error {
+	rc := http.NewResponseController(w)
+	s.setBodyReadDeadline(
+		rc, time.Now().Add(s.config.requestBodyTimeout),
+	)
+	// Clear it on the way out: the deadline covers the body read only,
+	// and must not outlive it into the response write, the drain
+	// net/http performs to reuse the connection, or the next request
+	// on a kept-alive one.
+	defer s.setBodyReadDeadline(rc, time.Time{})
+
 	body := http.MaxBytesReader(w, r.Body, maxRequestBody)
 	defer body.Close()
 	decoder := json.NewDecoder(body)
-	return decoder.Decode(dst)
+	if err := decoder.Decode(dst); err != nil {
+		return err
+	}
+	// Decode again to require complete consumption, including any trailing
+	// whitespace, under the same byte and time limits.
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err != nil {
+			return err
+		}
+		return errors.New("request body must contain only one JSON value")
+	}
+	return nil
+}
+
+// setBodyReadDeadline applies a read deadline to the connection behind
+// a response writer. An httptest recorder, which the handler-level
+// tests use, does not carry one; the served path always does, and the
+// listenerReadTimeout still bounds a request there either way,
+// so a missing deadline is reported rather than raised.
+func (s *Server) setBodyReadDeadline(
+	rc *http.ResponseController,
+	deadline time.Time,
+) {
+	if err := rc.SetReadDeadline(deadline); err != nil &&
+		!errors.Is(err, http.ErrNotSupported) {
+		s.logger.Debug(
+			"could not bound request body read",
+			"error", err,
+		)
+	}
 }

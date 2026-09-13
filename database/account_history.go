@@ -295,7 +295,7 @@ func (d *Database) GetAccountSumsByCredential(
 		txn.Metadata(),
 	)
 	if err != nil {
-		return models.AccountSums{}, fmt.Errorf(
+		return models.NewAccountSums(), fmt.Errorf(
 			"get account sums: %w",
 			err,
 		)

@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -33,6 +34,8 @@ import (
 // item count is accepted and that the first over-limit size returns both the
 // stable sentinel error and the structured request details.
 func TestLocalStateQueryItemLimitBoundary(t *testing.T) {
+	t.Parallel()
+
 	require.NoError(t, checkLocalStateQueryItemLimit(
 		"boundary",
 		MaxLocalStateQueryItems,
@@ -46,15 +49,107 @@ func TestLocalStateQueryItemLimitBoundary(t *testing.T) {
 
 	var limitErr *LocalStateQueryLimitError
 	require.ErrorAs(t, err, &limitErr)
+	// require.ErrorAs above fails the test unless it assigned limitErr,
+	// which nilaway does not model.
+	//nolint:nilaway // assigned by the require.ErrorAs above
 	require.Equal(t, "boundary", limitErr.QueryName)
+	//nolint:nilaway // assigned by the require.ErrorAs above
 	require.Equal(t, MaxLocalStateQueryItems+1, limitErr.SubmittedItemCount)
+	//nolint:nilaway // assigned by the require.ErrorAs above
 	require.Equal(t, MaxLocalStateQueryItems, limitErr.MaximumAllowedItemCount)
+}
+
+func TestLocalStateQueryFilteredAccountLimitBoundary(t *testing.T) {
+	db := newTestDB(t)
+	state := &LedgerState{db: db}
+	credentials := make([]lcommon.Credential, MaxLocalStateQueryItems+1)
+	stakeCredentials := make(
+		[]olocalstatequery.StakeCredential,
+		len(credentials),
+	)
+	poolKey := bytes.Repeat([]byte{0xAB}, 28)
+	drepKey := bytes.Repeat([]byte{0xCD}, 28)
+	transaction := db.MetadataTxn(true)
+	t.Cleanup(func() { _ = transaction.Rollback() })
+	for index := range credentials {
+		binary.BigEndian.PutUint64(
+			credentials[index].Credential[20:],
+			uint64(index),
+		)
+		credentials[index].CredType = uint(index % 2)
+		stakeCredentials[index] = olocalstatequery.StakeCredential{
+			Tag:   uint64(credentials[index].CredType),
+			Bytes: credentials[index].Credential,
+		}
+		require.NoError(t, db.CreateAccount(transaction, &models.Account{
+			StakingKey:    credentials[index].Credential[:],
+			CredentialTag: uint8(credentials[index].CredType),
+			Pool:          poolKey,
+			Reward:        types.Uint64(index + 1),
+			Drep:          drepKey,
+			DrepType:      models.DrepTypeAddrKeyHash,
+			Active:        true,
+		}))
+	}
+	require.NoError(t, transaction.Commit())
+	for _, count := range []int{0, MaxLocalStateQueryItems - 1, MaxLocalStateQueryItems, MaxLocalStateQueryItems + 1} {
+		for _, queryName := range []string{"GetFilteredDelegationsAndRewardAccounts", "GetFilteredVoteDelegatees"} {
+			t.Run(fmt.Sprintf("%s/%d", queryName, count), func(t *testing.T) {
+				var result any
+				var err error
+				if queryName == "GetFilteredVoteDelegatees" {
+					result, err = state.queryShelleyFilteredVoteDelegatees(
+						credentials[:count],
+					)
+				} else {
+					result, err = state.queryShelleyFilteredDelegationAndRewardAccounts(stakeCredentials[:count])
+				}
+				if count > MaxLocalStateQueryItems {
+					require.ErrorIs(t, err, ErrLocalStateQueryLimitExceeded)
+					require.Nil(t, result)
+					var limitErr *LocalStateQueryLimitError
+					require.True(t, errors.As(err, &limitErr))
+					require.Equal(t, &LocalStateQueryLimitError{
+						QueryName:               queryName,
+						SubmittedItemCount:      count,
+						MaximumAllowedItemCount: MaxLocalStateQueryItems,
+					}, limitErr)
+					return
+				}
+				require.NoError(t, err)
+				encoded, err := cbor.Encode(result)
+				require.NoError(t, err)
+				if queryName == "GetFilteredVoteDelegatees" {
+					var delegatees olocalstatequery.FilteredVoteDelegateesResult
+					_, err = cbor.Decode(encoded, &delegatees)
+					require.NoError(t, err)
+					require.Len(t, delegatees, count)
+					for _, credential := range stakeCredentials[:count] {
+						require.Equal(t, lcommon.Drep{
+							Type:       lcommon.DrepTypeAddrKeyHash,
+							Credential: drepKey,
+						}, delegatees[credential])
+					}
+				} else {
+					delegations, rewards := unwrapFilteredDelegationResult(t, result)
+					require.Len(t, delegations, count)
+					require.Len(t, rewards, count)
+					for index, credential := range stakeCredentials[:count] {
+						require.Equal(t, gledger.NewBlake2b224(poolKey), delegations[credential])
+						require.Equal(t, uint64(index+1), rewards[credential])
+					}
+				}
+			})
+		}
+	}
 }
 
 // TestLocalStateQueryPerItemHandlersRejectOverLimitBeforeWork verifies that
 // every query handler with per-item database work rejects oversized input
 // before accessing database or consensus state.
 func TestLocalStateQueryPerItemHandlersRejectOverLimitBeforeWork(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	itemCount := MaxLocalStateQueryItems + 1
 
@@ -68,6 +163,22 @@ func TestLocalStateQueryPerItemHandlersRejectOverLimitBeforeWork(t *testing.T) {
 		query string
 		run   func() (any, error)
 	}{
+		{
+			name:  "filtered delegations and rewards",
+			query: "GetFilteredDelegationsAndRewardAccounts",
+			run: func() (any, error) {
+				return ls.queryShelleyFilteredDelegationAndRewardAccounts(
+					stakeCredentials,
+				)
+			},
+		},
+		{
+			name:  "filtered vote delegatees",
+			query: "GetFilteredVoteDelegatees",
+			run: func() (any, error) {
+				return ls.queryShelleyFilteredVoteDelegatees(credentials)
+			},
+		},
 		{
 			name:  "DRep state",
 			query: "GetDRepState",
@@ -107,6 +218,8 @@ func TestLocalStateQueryPerItemHandlersRejectOverLimitBeforeWork(t *testing.T) {
 // empty-filter form can return more DReps than the caller-list limit because
 // its delegators are loaded in batches instead of with one read per DRep.
 func TestLocalStateQueryEmptyDRepStateRemainsUnrestricted(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	txn := db.MetadataTxn(true)
 	t.Cleanup(func() { txn.Rollback() }) //nolint:errcheck
@@ -142,6 +255,8 @@ func TestLocalStateQueryEmptyDRepStateRemainsUnrestricted(t *testing.T) {
 // never had to: an assertion built from a single DRep or delegator can't tell
 // a correct group-by from one that drops or misattributes a row.
 func TestLocalStateQueryEmptyDRepStateMatchesPerDRepDelegators(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	txn := db.MetadataTxn(true)
 	t.Cleanup(func() { txn.Rollback() }) //nolint:errcheck
@@ -214,6 +329,8 @@ func TestLocalStateQueryEmptyDRepStateMatchesPerDRepDelegators(t *testing.T) {
 // allDRepDelegatorsBatchSize hydration batch, so the batch loop can't
 // silently drop or double-count a delegator at the boundary between batches.
 func TestAllDRepDelegatorsCrossesBatchBoundary(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	txn := db.MetadataTxn(true)
 
@@ -261,24 +378,26 @@ func TestAllDRepDelegatorsCrossesBatchBoundary(t *testing.T) {
 }
 
 // TestLocalStateQueryLargeBatchHandlers verifies that handlers backed by batch
-// database primitives accept collections larger than the per-item work limit,
+// database primitives accept collections up to their respective limits,
 // and that the batched reads return the right value for every requested item
 // rather than merely succeeding. Delegated/seeded indices straddle the
 // chunk boundaries GetAccountsByCredential and GetPoolStakeSnapshotsForPools
 // use internally, so a chunk that drops, duplicates, or cross-contaminates
 // results would fail these assertions.
 func TestLocalStateQueryLargeBatchHandlers(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	itemCount := MaxLocalStateQueryItems + 1
 
-	credentials := make([]lcommon.Credential, itemCount)
+	credentials := make([]lcommon.Credential, MaxLocalStateQueryItems)
 	for i := range credentials {
 		binary.BigEndian.PutUint64(
 			credentials[i].Credential[20:],
 			uint64(i),
 		)
 	}
-	delegatedIdx := []int{0, 997, 998, 999, itemCount - 1}
+	delegatedIdx := []int{0, 996, 997, 998, len(credentials) - 1}
 	drepCredential := bytes.Repeat([]byte{0xAB}, 28)
 	for _, idx := range delegatedIdx {
 		require.NoError(t, db.CreateAccount(nil, &models.Account{
@@ -365,6 +484,8 @@ func TestLocalStateQueryLargeBatchHandlers(t *testing.T) {
 // repeated oversized requests are rejected consistently and do not prevent a
 // subsequent normal-sized request from being accepted.
 func TestLocalStateQueryRepeatedOverLimitRequestsRemainBounded(t *testing.T) {
+	t.Parallel()
+
 	for range 100 {
 		err := checkLocalStateQueryItemLimit(
 			"repeated",

@@ -332,6 +332,28 @@ func cloneObservedPoints(points []ocommon.Point) []ocommon.Point {
 	return out
 }
 
+// observedHistoryConflictsAt reports whether this peer's recorded delivered
+// header history contains a DIFFERENT block at point's slot.
+//
+// It is deliberately one-sided. A false result means "no contradiction found",
+// which includes the common case where the slot is outside the retained
+// history window (k+1 delivered tips) and therefore cannot be checked at all.
+// Only a true result is evidence, and it is evidence of divergence: the two
+// peers delivered conflicting blocks at the same slot, so they are not serving
+// the same chain regardless of what they advertise.
+func (p *PeerChainTip) observedHistoryConflictsAt(point ocommon.Point) bool {
+	if p == nil || len(point.Hash) == 0 {
+		return false
+	}
+	for _, historyTip := range p.observedTipHistory {
+		if historyTip.Point.Slot != point.Slot {
+			continue
+		}
+		return !bytes.Equal(historyTip.Point.Hash, point.Hash)
+	}
+	return false
+}
+
 // confirmsRecentChain reports whether witness confirms this peer's (candidate's)
 // chain across the window range they overlap. It is true when, for every block
 // the witness observed within the candidate's frontier slot range, the candidate

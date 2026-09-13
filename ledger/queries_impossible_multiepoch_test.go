@@ -43,6 +43,8 @@ import (
 func TestQueryHardForkEraHistory_TransitionImpossible_MultiEpochEra(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const (
 		slotLenMs = uint(1_000)
 		epochLen  = uint(432_000)

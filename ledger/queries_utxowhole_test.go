@@ -76,6 +76,8 @@ func seedBabbageUtxo(
 // small set of live UTxOs, proving the query decodes every row's address
 // and amount correctly and keys the result by (tx hash, output index).
 func TestQueryShelleyUtxoWhole_ReturnsLiveUtxos(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	addrA, err := lcommon.NewAddressFromParts(
@@ -98,7 +100,7 @@ func TestQueryShelleyUtxoWhole_ReturnsLiveUtxos(t *testing.T) {
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.Query(utxoWholeQuery())
+	result, err := ls.Query(utxoWholeQuery(), QueryPoint{})
 	require.NoError(t, err)
 	arr, ok := result.([]any)
 	require.True(t, ok, "expected the []any result wrapper")
@@ -128,6 +130,8 @@ func TestQueryShelleyUtxoWhole_ReturnsLiveUtxos(t *testing.T) {
 // TestQueryShelleyUtxoWhole_EmptyLedger covers a chain with no UTxOs at
 // all: the query must return an empty, non-nil map rather than failing.
 func TestQueryShelleyUtxoWhole_EmptyLedger(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	ls := newPoolDistr2Ledger(t, db)
 
@@ -157,6 +161,8 @@ func TestQueryShelleyUtxoWhole_EmptyLedger(t *testing.T) {
 // requires a TxId slice whose capacity is provably exactly its length,
 // which only a directly constructed value guarantees.
 func TestDecodeUtxoWholeRowMalformedTxIdDoesNotPanic(t *testing.T) {
+	t.Parallel()
+
 	shortTxId := make([]byte, 2, 2)
 	shortTxId[0], shortTxId[1] = 0x01, 0x02
 	u := &models.Utxo{

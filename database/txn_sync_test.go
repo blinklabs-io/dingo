@@ -49,7 +49,7 @@ func newSyncBarrierTestDB(
 	require.NoError(t, err)
 	require.NoError(t, sqliteStore.Start(context.Background()))
 	db := &Database{
-		blob:     store,
+		blobRef:  newBlobStoreRef(store),
 		metadata: sqliteStore,
 		logger:   logger,
 		config:   &Config{Logger: logger},
@@ -79,6 +79,8 @@ func syncBarrierTestTip() ochainsync.Tip {
 // is ahead but cannot rebuild blocks missing beneath the ledger tip, so the
 // barrier must run on every combined commit, after the blob commit.
 func TestCommitSyncsBlobAfterBlobCommit(t *testing.T) {
+	t.Parallel()
+
 	store := &mockBlobStore{}
 	db := newSyncBarrierTestDB(t, store)
 
@@ -109,6 +111,8 @@ func TestCommitSyncsBlobAfterBlobCommit(t *testing.T) {
 // write whose durability the metadata commit could outrun, so paying an fsync
 // for it would be pure cost.
 func TestCommitDoesNotSyncMetadataOnlyTransaction(t *testing.T) {
+	t.Parallel()
+
 	store := &mockBlobStore{}
 	db := newSyncBarrierTestDB(t, store)
 
@@ -130,6 +134,8 @@ func TestCommitDoesNotSyncMetadataOnlyTransaction(t *testing.T) {
 // same inconsistency a failed metadata commit leaves, so it is reported as a
 // partial commit to drive the existing blob-trimming recovery.
 func TestCommitFailedBlobSyncDoesNotCommitMetadata(t *testing.T) {
+	t.Parallel()
+
 	syncErr := errors.New("fsync failed")
 	store := &mockBlobStore{syncErr: syncErr}
 	db := newSyncBarrierTestDB(t, store)

@@ -55,6 +55,8 @@ func networkState(
 // to the treasury at the boundary slot, leaving reserves untouched, and that
 // only the ended epoch's donations are moved.
 func TestApplyEpochDonations(t *testing.T) {
+	t.Parallel()
+
 	db := newDonationTestDB(t)
 	ls := &LedgerState{db: db}
 
@@ -83,6 +85,8 @@ func TestApplyEpochDonations(t *testing.T) {
 
 // TestApplyEpochDonations_NoDonations is a no-op when the ended epoch had none.
 func TestApplyEpochDonations_NoDonations(t *testing.T) {
+	t.Parallel()
+
 	db := newDonationTestDB(t)
 	ls := &LedgerState{db: db}
 	require.NoError(t, db.Metadata().SetNetworkState(1_000, 5_000, 50, nil))
@@ -108,6 +112,8 @@ func TestApplyEpochDonations_NoDonations(t *testing.T) {
 // at the boundary, then a rollback past the boundary that restores the prior
 // treasury and drops the donation rows so re-application is deterministic.
 func TestEpochDonationWithdrawalRollback(t *testing.T) {
+	t.Parallel()
+
 	db := newDonationTestDB(t)
 	ls := &LedgerState{db: db}
 
@@ -189,6 +195,8 @@ func donationTestConwayPParams(major uint) *conway.ConwayProtocolParameters {
 // pre-donation treasury (the value the ledger uses at the boundary) and the
 // donation is added afterwards.
 func TestEpochProcessWithdrawalThenDonation(t *testing.T) {
+	t.Parallel()
+
 	db := newDonationTestDB(t)
 	ls := &LedgerState{db: db}
 
@@ -334,6 +342,8 @@ func TestEpochProcessWithdrawalThenDonation(t *testing.T) {
 // boundary: maxUint64-1 plus 1 is the largest sum that fits, plus 2
 // overflows.
 func TestAddUint64Overflow(t *testing.T) {
+	t.Parallel()
+
 	maxUint64 := ^uint64(0)
 
 	sum, err := addUint64(maxUint64-1, 1)
@@ -348,6 +358,8 @@ func TestAddUint64Overflow(t *testing.T) {
 // TestLedgerDeltaDonateOverflow exercises LedgerDelta.donate at the exact
 // uint64 max boundary for d.donation.
 func TestLedgerDeltaDonateOverflow(t *testing.T) {
+	t.Parallel()
+
 	maxUint64 := ^uint64(0)
 
 	d := &LedgerDelta{donation: maxUint64 - 1}
@@ -377,6 +389,8 @@ func conwayDonationTx(donation uint64) *conway.ConwayTransaction {
 // donation summation in accumulateNetworkDonations to the exact uint64 max
 // boundary using two real Conway transactions.
 func TestLedgerDeltaAccumulateNetworkDonationsOverflow(t *testing.T) {
+	t.Parallel()
+
 	maxUint64 := ^uint64(0)
 
 	newDelta := func(donationB uint64) *LedgerDelta {
@@ -406,6 +420,8 @@ func TestLedgerDeltaAccumulateNetworkDonationsOverflow(t *testing.T) {
 // a donation-sum overflow aborts before any database write: no
 // network_donation row is recorded and the network state is untouched.
 func TestLedgerDeltaRecordNetworkDonationsOverflowPreservesState(t *testing.T) {
+	t.Parallel()
+
 	db := newDonationTestDB(t)
 	ls := &LedgerState{db: db}
 	maxUint64 := ^uint64(0)

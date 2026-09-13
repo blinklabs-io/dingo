@@ -67,6 +67,8 @@ func writeLegacyLeiosEB(
 // still be able to read manifests it persisted under the old hash-only key,
 // rather than that data becoming silently unreachable.
 func TestGetLeiosEBManifestFallsBackToLegacyKey(t *testing.T) {
+	t.Parallel()
+
 	d := newTestDB(t)
 	hash := []byte("0123456789abcdef0123456789abcdef")[:32]
 	slot := uint64(12345)
@@ -90,6 +92,8 @@ func TestGetLeiosEBManifestFallsBackToLegacyKey(t *testing.T) {
 // still be readable after upgrading, gated on the legacy manifest's own
 // embedded slot matching the request.
 func TestGetLeiosEBTxsFallsBackToLegacyKey(t *testing.T) {
+	t.Parallel()
+
 	d := newTestDB(t)
 	hash := []byte("fedcba9876543210fedcba9876543210")[:32]
 	slot := uint64(54321)
@@ -113,16 +117,18 @@ func TestGetLeiosEBTxsFallsBackToLegacyKey(t *testing.T) {
 // ordinary ErrBlobKeyNotFound and look like the manifest was simply never
 // persisted.
 func TestGetLeiosEBManifestPropagatesRealLegacyReadError(t *testing.T) {
+	t.Parallel()
+
 	d := newTestDB(t)
 	hash := []byte("0123456789abcdef0123456789abcdef")[:32]
 	slot := uint64(111)
 	readErr := errors.New("legacy read: storage unavailable")
 
-	d.blob = &mockBlobStore{
+	d.SetBlobStore(&mockBlobStore{
 		getErrs: map[string]error{
 			string(types.LegacyLeiosEBManifestKey(hash)): readErr,
 		},
-	}
+	})
 
 	_, err := d.GetLeiosEBManifest(hash, slot)
 	require.ErrorIs(t, err, readErr)
@@ -132,16 +138,18 @@ func TestGetLeiosEBManifestPropagatesRealLegacyReadError(t *testing.T) {
 // TestGetLeiosEBTxsPropagatesRealLegacyReadError is the transaction-body
 // half of the same regression.
 func TestGetLeiosEBTxsPropagatesRealLegacyReadError(t *testing.T) {
+	t.Parallel()
+
 	d := newTestDB(t)
 	hash := []byte("fedcba9876543210fedcba9876543210")[:32]
 	slot := uint64(222)
 	readErr := errors.New("legacy read: storage unavailable")
 
-	d.blob = &mockBlobStore{
+	d.SetBlobStore(&mockBlobStore{
 		getErrs: map[string]error{
 			string(types.LegacyLeiosEBManifestKey(hash)): readErr,
 		},
-	}
+	})
 
 	_, err := d.GetLeiosEBTxs(hash, slot)
 	require.ErrorIs(t, err, readErr)
@@ -153,4 +161,50 @@ func mustCborForLeiosTest(t *testing.T, value any) cbor.RawMessage {
 	data, err := cbor.Encode(value)
 	require.NoError(t, err)
 	return cbor.RawMessage(data)
+}
+
+// TestMaxLeiosEBSlotReadsCurrentAndLegacyRecords covers both branches of the
+// prefix scan, in particular the legacy one: SetLeiosEB only ever writes
+// current-format "em"+hash+slot keys, so the branch that reads the slot out
+// of the first eight value bytes -- the path that exists solely for nodes
+// upgrading across the issue #3513 key change -- was otherwise unexercised
+// (chrisguiney review).
+func TestMaxLeiosEBSlotReadsCurrentAndLegacyRecords(t *testing.T) {
+	t.Parallel()
+
+	d := newTestDB(t)
+	manifestRaw := []byte("manifest bytes")
+
+	// No manifests persisted at all: no evidence, not an error.
+	got, err := d.MaxLeiosEBSlot()
+	require.NoError(t, err)
+	require.Equal(t, uint64(0), got)
+
+	// Current format: the slot is the last eight bytes of the key.
+	require.NoError(
+		t,
+		d.SetLeiosEBManifest(700, randomHash(t), manifestRaw),
+	)
+	got, err = d.MaxLeiosEBSlot()
+	require.NoError(t, err)
+	require.Equal(t, uint64(700), got)
+
+	// Legacy format: the key carries no slot, so the maximum can only be
+	// found by reading it out of the value. Dropping the legacy branch of
+	// the switch leaves this at 700.
+	writeLegacyLeiosEB(t, d, 900, randomHash(t), manifestRaw, nil)
+	got, err = d.MaxLeiosEBSlot()
+	require.NoError(t, err)
+	require.Equal(t, uint64(900), got)
+
+	// The scan takes a maximum, not a last-seen: neither format may lower
+	// an already-higher slot, whichever order the keys sort in.
+	writeLegacyLeiosEB(t, d, 100, randomHash(t), manifestRaw, nil)
+	require.NoError(
+		t,
+		d.SetLeiosEBManifest(200, randomHash(t), manifestRaw),
+	)
+	got, err = d.MaxLeiosEBSlot()
+	require.NoError(t, err)
+	require.Equal(t, uint64(900), got)
 }

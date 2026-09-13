@@ -540,6 +540,19 @@ func parseCurrentEra(
 		return nil, fmt.Errorf("decoding epoch: %w", err)
 	}
 
+	// nesBprev and nesBcur. Both are mandatory strict fields of
+	// NewEpochState, so the length check above already guarantees they are
+	// present, and a map that will not decode means this is not a
+	// NewEpochState rather than a snapshot that omits them.
+	blocksPrev, err := parseBlocksMade(nes[1])
+	if err != nil {
+		return nil, fmt.Errorf("decoding blocks made in previous epoch: %w", err)
+	}
+	blocksCur, err := parseBlocksMade(nes[2])
+	if err != nil {
+		return nil, fmt.Errorf("decoding blocks made in current epoch: %w", err)
+	}
+
 	// EpochState = [AccountState, LedgerState, SnapShots, NonMyopic]
 	es, err := decodeRawArray(nes[3])
 	if err != nil {
@@ -628,6 +641,8 @@ func parseCurrentEra(
 		UTxOData:      utxoState[0], // The UTxO map
 		CertStateData: ls[0],        // [VState, PState, DState]
 		SnapShotsData: es[2],        // mark/set/go
+		BlocksPrev:    blocksPrev,
+		BlocksCur:     blocksCur,
 	}
 	if len(nes) > 5 {
 		result.PoolDistrData = nes[5]
@@ -1550,6 +1565,52 @@ func parseStakeWithPoolMap(
 // parseDelegationMap decodes a credential -> pool key hash map.
 // Handles both definite and indefinite-length maps. Returns a
 // warning if any entries were skipped due to decode errors.
+// parseBlocksMade decodes a NewEpochState BlocksMade field: a CBOR map from a
+// 28-byte pool cold-key hash to the number of blocks that pool minted in the
+// epoch the field describes.
+//
+// Unlike the stake and delegation maps, a malformed entry is an error rather
+// than a skipped one. Those maps drop an entry the node then simply does not
+// pay; dropping a block count instead lowers one pool's beta and the epoch
+// total that every other pool's beta divides by, so a silently partial map
+// yields a complete-looking reward distribution at the wrong amounts for every
+// pool at once. An absent map is not representable in the reference either:
+// nesBprev and nesBcur are strict, non-optional fields.
+func parseBlocksMade(data cbor.RawMessage) (map[string]uint64, error) {
+	entries, err := decodeMapEntries(data)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]uint64, len(entries))
+	for i, entry := range entries {
+		var poolKeyHash []byte
+		if _, err := cbor.Decode(entry.KeyRaw, &poolKeyHash); err != nil {
+			return nil, fmt.Errorf("entry %d: decoding pool key hash: %w", i, err)
+		}
+		if len(poolKeyHash) != credentialHashSize {
+			return nil, fmt.Errorf(
+				"entry %d: pool key hash is %d bytes, expected %d",
+				i, len(poolKeyHash), credentialHashSize,
+			)
+		}
+		var blocks uint64
+		if _, err := cbor.Decode(entry.ValueRaw, &blocks); err != nil {
+			return nil, fmt.Errorf(
+				"entry %d: decoding block count for pool %x: %w",
+				i, poolKeyHash, err,
+			)
+		}
+		key := string(poolKeyHash)
+		if _, dup := result[key]; dup {
+			return nil, fmt.Errorf(
+				"entry %d: duplicate pool key hash %x", i, poolKeyHash,
+			)
+		}
+		result[key] = blocks
+	}
+	return result, nil
+}
+
 func parseDelegationMap(
 	data cbor.RawMessage,
 ) (map[string][]byte, error) {

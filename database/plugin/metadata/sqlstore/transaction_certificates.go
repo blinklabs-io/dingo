@@ -57,6 +57,23 @@ type certificateAccountState struct {
 	drepType uint64
 }
 
+// depositPolicy decides what applyTransactionCertificates does with a
+// deposit-bearing certificate when the caller supplied no deposit map at all.
+// It is a distinct non-boolean type so a call site cannot pass the polarity as
+// an unnamed literal and cannot get it backwards.
+type depositPolicy uint8
+
+const (
+	// requireKnownDeposits rejects the certificate. The live block-apply
+	// path uses it: the deposits there are computed from the same block, so
+	// a nil map is a programming error rather than chain data.
+	requireKnownDeposits depositPolicy = iota
+	// allowUnknownDeposits records NULL for the certificate's deposit. A
+	// Mithril gap block may legitimately arrive with no deposit map, and
+	// NULL stays distinguishable from a recorded zero.
+	allowUnknownDeposits
+)
+
 func (s *Store) applyTransactionCertificates(
 	ctx context.Context,
 	db queryer,
@@ -65,6 +82,7 @@ func (s *Store) applyTransactionCertificates(
 	point ocommon.Point,
 	blockIndex uint32,
 	deposits map[int]uint64,
+	policy depositPolicy,
 ) ([]models.StakeCredentialRef, error) {
 	if len(certificates) == 0 {
 		return nil, nil
@@ -115,7 +133,11 @@ RETURNING id`,
 		if value, found := deposits[certIndex]; found {
 			deposit = &value
 		}
-		if certificateRequiresDeposit(certificate) && deposits == nil {
+		// A gap block may legitimately arrive with no deposit map at all;
+		// SetGapBlockTransaction says so. Unknown then stays unknown (NULL)
+		// rather than being rejected, while the live path keeps the guard.
+		if certificateRequiresDeposit(certificate) && deposits == nil &&
+			policy != allowUnknownDeposits {
 			return nil, fmt.Errorf(
 				"missing certDeposits for deposit-bearing certificate at index %d",
 				certIndex,
@@ -297,7 +319,11 @@ func (s *Store) applySpecializedCertificate(
 			db,
 			cert,
 			certificateID,
-			slot,
+			poolCertPosition{
+				slot:       slot,
+				blockIndex: uint64(blockIndex),
+				certIndex:  uint64(certIndex),
+			},
 			deposit,
 		)
 		return id, nil, err
@@ -338,7 +364,9 @@ RETURNING id`,
 		return id, nil, err
 	case *lcommon.DeregistrationDrepCertificate:
 		// A DRep deregistration carries its refund in the certificate
-		// itself, so this amount is always known and never NULL.
+		// itself, so this amount is always known. The pointer below is
+		// never nil, so this deposit never takes nullableDecimalUint64's
+		// NULL path, which exists for a deposit the ingest never knew.
 		amount := uint64(cert.Amount)
 		id, err := applyDrepDeregistrationCertificate(
 			ctx,
@@ -387,7 +415,23 @@ RETURNING id`,
 			certificateID,
 			slot,
 		)
-		return id, nil, err
+		if err != nil {
+			return id, nil, err
+		}
+		// This row supersedes the credential's older authorizations. Drop a
+		// batch of the ones now outside the rollback window so the table
+		// tracks the committee instead of the whole certificate history; see
+		// committee_prune.go for the retention rule.
+		if _, err := s.pruneCommitteeHotAuthorizations(
+			ctx,
+			db,
+			coldTag,
+			cert.ColdCredential.Credential[:],
+			slot,
+		); err != nil {
+			return id, nil, err
+		}
+		return id, nil, nil
 	case *lcommon.ResignCommitteeColdCertificate:
 		var anchorURL string
 		var anchorHash []byte
@@ -684,9 +728,10 @@ func applyPoolRegistrationCertificate(
 	db queryer,
 	cert *lcommon.PoolRegistrationCertificate,
 	certificateID uint,
-	slot uint64,
+	at poolCertPosition,
 	deposit *uint64,
 ) (uint, error) {
+	slot := at.slot
 	rewardTag, rewardAccount, err := certutil.PoolRewardAccount(cert)
 	if err != nil {
 		return 0, err
@@ -741,6 +786,14 @@ RETURNING id`,
 		metadataURL = cert.PoolMetadata.Url
 		metadataHash = cert.PoolMetadata.Hash[:]
 	}
+	// The pool row above is upserted before this, but it carries no deposit
+	// and no history, so the held amount is derived from the registration and
+	// retirement rows strictly before this certificate's position rather than
+	// from live pool state.
+	held, err := poolRegistrationDepositHeld(ctx, db, poolID, at, deposit)
+	if err != nil {
+		return 0, err
+	}
 	registrationID, err := insertPoolRegistration(ctx, db, []any{
 		margin,
 		metadataURL,
@@ -755,6 +808,7 @@ RETURNING id`,
 		poolID,
 		slot,
 		nullableDecimalUint64(deposit),
+		nullableDecimalUint64(held),
 		nullBytes(leiosKeyPublic),
 		nullBytes(leiosKeyPoP),
 	}, poolID, slot)
@@ -1059,10 +1113,25 @@ RETURNING id`,
 	if err != nil {
 		return 0, err
 	}
-	for credential, amount := range cert.Reward.Rewards {
+	// A MIR reward is delta_coin, so the amount column carries its own sign
+	// and the delta is persisted as written. Whether a negative delta is
+	// permitted, and whether the deltas for one credential net to a
+	// creditable amount, are decided by the DELEG and INSTANT rules, not
+	// here. RewardsAmount projects the reward map to *big.Int on every
+	// gouroboros release, so the sign survives regardless of the width of
+	// the underlying field.
+	for credential, amount := range cert.Reward.RewardsAmount() {
 		tag, err := models.CredentialTagFromUint(credential.CredType)
 		if err != nil {
 			return 0, err
+		}
+		delta, err := signedDecimal("MIR reward delta", amount)
+		if err != nil {
+			return 0, fmt.Errorf(
+				"%w for credential %x",
+				err,
+				credential.Credential[:],
+			)
 		}
 		if _, err := db.ExecContext(ctx, `
 INSERT INTO move_instantaneous_rewards_reward (
@@ -1070,7 +1139,7 @@ INSERT INTO move_instantaneous_rewards_reward (
 ) VALUES (?, ?, ?, ?)`,
 			credential.Credential[:],
 			tag,
-			decimalUint64(types.Uint64(amount)),
+			delta,
 			id,
 		); err != nil {
 			return 0, err

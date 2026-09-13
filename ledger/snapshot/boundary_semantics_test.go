@@ -39,6 +39,8 @@ import (
 // phases, standing in for exactly those credits; the persisted snapshot must
 // still show the SNAP-point value.
 func TestCaptureEpochBoundaryUsesSnapPointStake(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	seedEpochs(t, db, []models.Epoch{
 		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
@@ -120,6 +122,8 @@ func TestCaptureEpochBoundaryUsesSnapPointStake(t *testing.T) {
 // tip is still at/before the snapshot slot. A missing SNAP hook is exactly the
 // failure mode where the fallback runs after a post-SNAP boundary credit.
 func TestCaptureEpochBoundaryMissingSnapHookUsesHistoricalStake(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	seedEpochs(t, db, []models.Epoch{
 		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
@@ -179,6 +183,8 @@ func TestCaptureEpochBoundaryMissingSnapHookUsesHistoricalStake(t *testing.T) {
 // same boundary identity, and the capture reconstructs the historical SNAP
 // value rather than attaching the stale live aggregate.
 func TestCaptureEpochBoundaryIgnoresStaleSnapPointStake(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	seedEpochs(t, db, []models.Epoch{
 		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
@@ -253,6 +259,8 @@ func TestCaptureEpochBoundaryIgnoresStaleSnapPointStake(t *testing.T) {
 // so PoolStakes, TotalStake, DelegatorCount — and from them PoolStakeSnapshot and
 // EpochSummary — still double-counted the credential.
 func TestCalculateStakeDistributionDedupesCredentialAcrossPools(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	seedEpochs(t, db, []models.Epoch{
 		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
@@ -291,7 +299,7 @@ func TestCalculateStakeDistributionDedupesCredentialAcrossPools(t *testing.T) {
 	txn := db.Transaction(false)
 	defer func() { _ = txn.Commit() }()
 	dist, err := calc.calculateStakeDistributionInTxn(
-		context.Background(), txn, 100, 0,
+		context.Background(), txn, 100, 0, 0,
 	)
 	require.NoError(t, err)
 
@@ -320,6 +328,8 @@ func TestCalculateStakeDistributionDedupesCredentialAcrossPools(t *testing.T) {
 // carries a boundary-accurate pool total against post-boundary per-credential
 // stake, and nothing compares the two.
 func TestCalculateEpochBoundaryFallbackHalvesAgree(t *testing.T) {
+	t.Parallel()
+
 	for _, test := range []struct {
 		name             string
 		expiryEpoch      uint64

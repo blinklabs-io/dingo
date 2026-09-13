@@ -107,6 +107,8 @@ func newLeiosRecoveryLedgerState(
 func TestEnsureReferencedEndorserBlocksRetriesUntilCertifiedEbArrives(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	parent, certifier, _ := leiosTestCertifiedBlockPair(t)
 	probe := &leiosRecoveryProbe{
 		availableOnAttempt: 3,
@@ -134,6 +136,8 @@ func TestEnsureReferencedEndorserBlocksRetriesUntilCertifiedEbArrives(
 // failed -- instead of retrying inside one pass forever. The pipeline's own
 // escalating restart is what retries afterwards; the chunk itself gives up.
 func TestEnsureReferencedEndorserBlocksBoundsCertifiedRetry(t *testing.T) {
+	t.Parallel()
+
 	parent, certifier, ebHash := leiosTestCertifiedBlockPair(t)
 	probe := &leiosRecoveryProbe{
 		err: errors.New(
@@ -170,6 +174,8 @@ func TestEnsureReferencedEndorserBlocksBoundsCertifiedRetry(t *testing.T) {
 func TestEnsureReferencedEndorserBlocksCertifiedRetryHonoursContext(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	parent, certifier, _ := leiosTestCertifiedBlockPair(t)
 	probe := &leiosRecoveryProbe{err: errors.New("no peers")}
 	ls := newLeiosRecoveryLedgerState(probe)
@@ -194,6 +200,8 @@ func TestEnsureReferencedEndorserBlocksCertifiedRetryHonoursContext(
 // case: a certified endorser block that is already available must not cost a
 // single by-point fetch.
 func TestEnsureReferencedEndorserBlocksAvailableEbIsNotFetched(t *testing.T) {
+	t.Parallel()
+
 	parent, certifier, _ := leiosTestCertifiedBlockPair(t)
 	probe := &leiosRecoveryProbe{available: true}
 	ls := newLeiosRecoveryLedgerState(probe)
@@ -213,6 +221,8 @@ func TestEnsureReferencedEndorserBlocksAvailableEbIsNotFetched(t *testing.T) {
 // waits for a fetch another caller already has in flight for the same endorser
 // block rather than starting a second one against the same connections.
 func TestLeiosBackfillFetchRequiredDedupsWithInFlightFetch(t *testing.T) {
+	t.Parallel()
+
 	probe := &leiosRecoveryProbe{}
 	ls := newLeiosRecoveryLedgerState(probe)
 	r := leiosEbRef{
