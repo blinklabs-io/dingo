@@ -8353,12 +8353,44 @@ by an era-dependent query, including `Check`'s own existing full-mode path,
 not just incremental mode -- it was invisible until now only because real
 network latency between the two normally gives the write time to land.
 Fixed upstream in gouroboros, not routed around locally -- this fix and
-the segment-read-timeout fix below both live on the same local gouroboros
-branch this module's `go.mod` currently points at via a `replace`
-directive, since the branch that originally hosted both (alongside the
-paginated `GetUTxOWhole` vendor extension) was closed as a PR rather than
-merged; a fresh, focused upstream PR carrying just these two fixes is a
-pending follow-up, not yet raised.
+the segment-read-timeout fix below (blinklabs-io/gouroboros#2291) are both
+merged and released as of gouroboros v0.204.3, which this module's `go.mod`
+now depends on directly; no local `replace` directive is needed for either.
+
+**The segment-read-timeout fix isn't only a node-parity client-side change
+-- it also relaxes Dingo's own NtC server**, and that relaxation is
+trust-scoped, not universal. `ouroboros/ouroboros.go`'s `ConfigureListeners`
+disables gouroboros' 120s mux segment-read timeout and (via
+`localstatequeryServerConnOpts`) LocalStateQuery's own 180s query timeout
+and 16MB reassembly cap, raising the latter to 2GiB, for exactly the same
+reason node-parity's own client connections need it: a whole-UTxO-set query
+against a Preview-scale (or larger) node can legitimately take minutes, and
+gouroboros' defaults exist as anti-DoS guards against an untrusted remote
+peer, not a description of every real caller.
+
+That relaxation is unsafe to grant unconditionally, though: `internal/node/node.go`
+builds two separate `UseNtC` listeners from ordinary operator config -- a
+Unix socket (`cfg.SocketPath`) and a TCP listener
+(`cfg.PrivateBindAddr:cfg.PrivatePort`, defaulting to `127.0.0.1:3002` but
+not code-enforced to stay there) -- and there is no authentication or
+identity check between `accept()` and these options being applied;
+`connmanager` only enforces a connection-count limit
+(`MaxNtCConns`/`MaxNtCConnectionsPerIP`), not who is connecting. Granting an
+unbounded mux/query timeout and a 2GiB-per-connection reassembly buffer to
+*any* client that completes an NtC handshake -- not just a trusted local
+tool -- would widen the DoS surface for the whole NtC server the moment an
+operator points `PrivatePort` at a non-loopback address (blinklabs-io/dingo#4183
+review). `isTrustedNtCListener` (`ouroboros/ouroboros.go`) makes the actual
+trust decision explicit instead of assuming every `UseNtC` listener
+qualifies: a Unix-domain listener is trusted unconditionally (reaching it at
+all already requires filesystem access to this machine), and a TCP listener
+is trusted only when `net.ResolveTCPAddr` resolves every address it could
+be reached at to a loopback IP -- covering `127.0.0.1`, `::1`, and
+`localhost` alike, not just a literal string match. A listener that doesn't
+qualify (including a wildcard bind like `0.0.0.0`, which resolves to the
+unspecified address, not a loopback one) gets gouroboros' own defaults
+instead, the same as it would for any other NtC server reachable beyond
+this machine.
 
 It always starts with one full `Check` pinned at the live tip
 (`establishBaseline`) before validating anything incrementally -- the

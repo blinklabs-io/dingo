@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -582,30 +583,59 @@ func (o *Ouroboros) initBlockfetchMetrics() {
 	)
 }
 
+// isTrustedNtCListener reports whether l is verified reachable only from
+// this machine, the actual property the relaxed mux/query timeouts and
+// reassembly buffer in ConfigureListeners/localstatequeryServerConnOpts
+// depend on for safety (blinklabs-io/dingo#4183 review) -- "NtC" alone does
+// not imply this: internal/node/node.go builds a UseNtC listener for both
+// cfg.SocketPath (a Unix socket, always local-only by construction) and
+// cfg.PrivateBindAddr:cfg.PrivatePort (an operator-configurable TCP
+// address, defaulting to loopback but not code-enforced to stay there).
+//
+// A Unix-domain listener is trusted unconditionally: reaching it at all
+// already requires filesystem access to this machine, the same trust
+// boundary a TCP loopback bind provides. A TCP listener is trusted only
+// when every address it could actually be reached at resolves to a
+// loopback IP -- net.ResolveTCPAddr is used (not a string compare against
+// "127.0.0.1"/"localhost") so a hostname, IPv6 "::1", or "localhost" are
+// all recognised the same way a client connecting to this listener would
+// resolve them. Anything else (including a wildcard bind like "0.0.0.0",
+// which resolves to the unspecified address, not a loopback one) is
+// untrusted, and gets gouroboros' own anti-DoS defaults instead.
+func isTrustedNtCListener(l connmanager.ListenerConfig) bool {
+	if l.ListenNetwork == "unix" {
+		return true
+	}
+	if l.ListenNetwork != "tcp" {
+		return false
+	}
+	addr, err := net.ResolveTCPAddr("tcp", l.ListenAddress)
+	if err != nil || addr.IP == nil {
+		return false
+	}
+	return addr.IP.IsLoopback()
+}
+
 func (o *Ouroboros) ConfigureListeners(
 	listeners []connmanager.ListenerConfig,
 ) []connmanager.ListenerConfig {
 	tmpListeners := make([]connmanager.ListenerConfig, len(listeners))
 	for idx, l := range listeners {
 		if l.UseNtC {
-			// Node-to-client
-			l.ConnectionOpts = append(
-				l.ConnectionOpts,
+			// Node-to-client. trusted gates the relaxed mux/query timeouts
+			// and reassembly buffer to a listener verified local-only (a
+			// Unix socket, or TCP actually bound to loopback) -- see
+			// isTrustedNtCListener's doc comment. Those exist to let a
+			// large, legitimate query (a whole-UTxO-set walk) run past
+			// gouroboros' anti-DoS defaults, which is only safe to grant
+			// unconditionally to a listener no non-local caller can reach
+			// (blinklabs-io/dingo#4183 review): a PrivateBindAddr an
+			// operator has pointed at a non-loopback address gets
+			// gouroboros' own defaults instead, same as any other NtC
+			// server would for an address reachable beyond this machine.
+			trusted := isTrustedNtCListener(l)
+			ntcOpts := []ouroboros.ConnectionOptionFunc{
 				ouroboros.WithNetworkMagic(o.config.NetworkMagic),
-				// NtC is a trusted local (or operator-bridged) channel, and
-				// LocalStateQuery has no protocol-level timeout at all
-				// (Ouroboros Network Specification section 3.13.4: "No
-				// timeouts") -- a large query, like a whole-UTxO-set walk
-				// against this node's disk-backed store, can legitimately
-				// take minutes. gouroboros' mux applies a fixed 120s
-				// segment-read timeout by default as an anti-DoS guard
-				// against an untrusted remote peer, which does not describe
-				// an NtC client; disabling it here is what stops a
-				// slow-but-legitimate reply from getting the connection
-				// killed mid-flight (blinklabs-io/dingo#4082). Real
-				// cardano-node's own mux applies no equivalent timeout on
-				// local NtC connections either.
-				ouroboros.WithMuxerSegmentReadTimeout(0),
 				ouroboros.WithChainSyncConfig(
 					ochainsync.NewConfig(
 						o.chainsyncServerConnOpts()...,
@@ -613,7 +643,7 @@ func (o *Ouroboros) ConfigureListeners(
 				),
 				ouroboros.WithLocalStateQueryConfig(
 					olocalstatequery.NewConfig(
-						o.localstatequeryServerConnOpts()...,
+						o.localstatequeryServerConnOpts(trusted)...,
 					),
 				),
 				ouroboros.WithLocalTxMonitorConfig(
@@ -626,7 +656,23 @@ func (o *Ouroboros) ConfigureListeners(
 						o.localtxsubmissionServerConnOpts()...,
 					),
 				),
-			)
+			}
+			if trusted {
+				// LocalStateQuery has no protocol-level timeout at all
+				// (Ouroboros Network Specification section 3.13.4: "No
+				// timeouts") -- a large query, like a whole-UTxO-set walk
+				// against this node's disk-backed store, can legitimately
+				// take minutes. gouroboros' mux applies a fixed 120s
+				// segment-read timeout by default as an anti-DoS guard
+				// against an untrusted remote peer, which does not describe
+				// a verified-local-only NtC client; disabling it here is
+				// what stops a slow-but-legitimate reply from getting the
+				// connection killed mid-flight (blinklabs-io/dingo#4082).
+				// Real cardano-node's own mux applies no equivalent timeout
+				// on local NtC connections either.
+				ntcOpts = append(ntcOpts, ouroboros.WithMuxerSegmentReadTimeout(0))
+			}
+			l.ConnectionOpts = append(l.ConnectionOpts, ntcOpts...)
 		} else {
 			// Node-to-node config: full duplex with both client and
 			// server handlers, matching cardano-node behavior. This
