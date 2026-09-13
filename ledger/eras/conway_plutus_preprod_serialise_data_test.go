@@ -134,8 +134,21 @@ func TestEvaluateTxConwayPreprodSerialiseData(t *testing.T) {
 	require.Len(t, redeemerExUnits, 1)
 	for key, used := range redeemerExUnits {
 		budget, ok := declared[key]
-		require.True(t, ok, "evaluated a redeemer the transaction does not declare")
+		require.True(
+			t,
+			ok,
+			"evaluated a redeemer the transaction does not declare",
+		)
 		require.LessOrEqual(t, used.Steps, budget.Steps)
 		require.LessOrEqual(t, used.Memory, budget.Memory)
 	}
+
+	// Block validation constructs its own redeemer rather than using the
+	// evaluator's TxInfo. Exercise that entry point with the same wire data.
+	require.NoError(t, ValidateTxPlutusConway(
+		tx,
+		133016611,
+		ls,
+		preprodFixtureProtocolParams(t),
+	))
 }
