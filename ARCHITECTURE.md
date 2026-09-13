@@ -11409,27 +11409,16 @@ believes the block is invalid and the same one the reference node reaches;
 the difference is that it surfaces through the stuck-pipeline signal below
 rather than an unbounded retry loop.
 
-A 2s cap still means retrying forever at that rate, which is what a
-*deterministic* failure produces when no rewind resolves it: a canonical
-block this node rejects will be rejected identically on every replay, so
-the pipeline neither recovers nor stops. After `noProgressStuckThreshold`
-consecutive no-progress
-restarts the loop treats the failure as deterministic rather than
-transient, escalating the wait beyond the transient ceiling (bounded by
-`noProgressStuckBackoffMax`), announcing the condition at ERROR, and
-exporting `dingo_ledger_pipeline_stuck` alongside
-`dingo_ledger_pipeline_no_progress_restarts` so a node that has silently
-stopped following the chain is visible to monitoring instead of only to
-whoever reads a repeating WARN. Both reset as soon as the tip advances.
-The announcement is not once-only: `pipelineStuckShouldAnnounce` repeats it
-every `noProgressStuckReannounceInterval` further no-progress restarts, roughly
-every ten minutes at the stuck backoff ceiling. Announcing the transition alone
-and then dropping to WARN left log-level alerting seeing a wedged node as
-healthy — one ERROR line covered eighteen hours in the field, buried among
-unrelated warnings (issue #3261).
-This still changes only the retry rate and the operator signal, never
-whether a block is accepted — a node wedged on a rejected block is equally
-wedged either way, but it now keeps saying so, loudly, and stops spinning.
+A deterministic failure can still recur after rewind: a canonical block this
+node rejects will be rejected identically on every replay. After
+`noProgressStuckThreshold` consecutive no-progress restarts the loop treats
+the failure as deterministic rather than transient, announces the condition
+at ERROR, exports `dingo_ledger_pipeline_stuck` alongside
+`dingo_ledger_pipeline_no_progress_restarts`, invokes the configured fatal
+error callback, and stops retrying. This prevents a node that cannot resolve
+the same canonical rejection from silently replaying forever. The backoff
+helpers retain bounded escalation for diagnostics, but the main retry loop
+does not sleep and retry after the terminal threshold (issue #3975).
 
 ### CIP-0163 Bookkeeping Shared Between Ledger Rollback and Lifecycle Truncate
 
