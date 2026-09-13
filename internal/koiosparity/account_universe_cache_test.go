@@ -75,7 +75,9 @@ func newUniverseTestClient(srv *httptest.Server) *KoiosClient {
 // paying it once per epoch is why the in-process observer could not keep pace
 // with a syncing node (dingo #3796). A second epoch whose end time the cached
 // crawl already covers must not touch Koios again.
-func TestResolveKoiosAccountUniverseCachedReusesCrawlAcrossEpochs(t *testing.T) {
+func TestResolveKoiosAccountUniverseCachedReusesCrawlAcrossEpochs(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	var calls atomic.Int32

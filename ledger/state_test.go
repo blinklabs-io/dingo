@@ -5307,7 +5307,11 @@ func TestCloseReplayReturnsWhenPreviousCloseIsStillRunning(t *testing.T) {
 	ls := &LedgerState{closeDone: make(chan struct{})}
 	err := ls.Close()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "previous ledger state close still in progress")
+	assert.Contains(
+		t,
+		err.Error(),
+		"previous ledger state close still in progress",
+	)
 }
 
 // TestCloseStopsDecodePipelineBeforeWaitingForBlockProcessing covers the

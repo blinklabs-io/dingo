@@ -68,7 +68,10 @@ func TestValencyOneUpstreamBehindStaysSelectable(t *testing.T) {
 	assert.Equal(t, connId, *best)
 
 	// The peer catches up and overtakes us; it must be selected.
-	require.True(t, cs.UpdatePeerTip(connId, behindPeerTipAt(localBlock+5), nil))
+	require.True(
+		t,
+		cs.UpdatePeerTip(connId, behindPeerTipAt(localBlock+5), nil),
+	)
 	cs.SetLocalTip(behindPeerTipAt(localBlock))
 	best = cs.SelectBestChain()
 	require.NotNil(t, best)

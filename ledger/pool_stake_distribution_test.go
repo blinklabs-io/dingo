@@ -243,7 +243,11 @@ func TestPoolStakeDistribution_FilterReportsOnlyRequestedPools(t *testing.T) {
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	dist, err := ls.PoolStakeDistribution([]lcommon.PoolKeyHash{pkhA}, QueryPoint{}, nil)
+	dist, err := ls.PoolStakeDistribution(
+		[]lcommon.PoolKeyHash{pkhA},
+		QueryPoint{},
+		nil,
+	)
 	require.NoError(t, err)
 	require.Len(t, dist.Pools, 1)
 	assert.Equal(t, pkhA, dist.Pools[0].PoolKeyHash)

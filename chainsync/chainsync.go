@@ -839,7 +839,10 @@ func (s *State) RecordHeaderForDedup(
 
 // RecordHeader records a header in the cross-peer deduplication cache after
 // the caller has completed any synchronous eligibility checks.
-func (s *State) RecordHeader(connId ouroboros.ConnectionId, point ocommon.Point) bool {
+func (s *State) RecordHeader(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+) bool {
 	isNew := s.processHeader(connId, point)
 	s.maybePruneSeenHeaders()
 	return isNew

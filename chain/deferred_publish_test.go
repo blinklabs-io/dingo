@@ -88,7 +88,11 @@ func TestDeferredAddAndRollbackDoNotPublish(t *testing.T) {
 		}
 		done := make(chan result, 1)
 		go func() {
-			evt, addErr := c.AddBlockWithPointDeferred(blocks[i], pointOf(i), nil)
+			evt, addErr := c.AddBlockWithPointDeferred(
+				blocks[i],
+				pointOf(i),
+				nil,
+			)
 			done <- result{evt: evt, err: addErr}
 		}()
 		select {

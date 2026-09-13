@@ -292,7 +292,10 @@ func TestRollbackAheadOfLedgerDoesNotArmContinuationAudit(t *testing.T) {
 	ls.Unlock()
 	require.NoError(t, ls.db.SetTip(fixture.ancestorTip, nil))
 
-	require.NoError(t, ls.rollbackChainAndStateDeferred(fixture.currentTip.Point, nil))
+	require.NoError(
+		t,
+		ls.rollbackChainAndStateDeferred(fixture.currentTip.Point, nil),
+	)
 
 	assert.Nil(
 		t,

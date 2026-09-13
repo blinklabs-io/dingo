@@ -41,14 +41,19 @@ type headerStreamHeader struct {
 	slot        uint64
 }
 
-func (h headerStreamHeader) Hash() lcommon.Blake2b256          { return h.hash }
-func (h headerStreamHeader) PrevHash() lcommon.Blake2b256      { return h.prevHash }
-func (h headerStreamHeader) BlockNumber() uint64               { return h.blockNumber }
-func (h headerStreamHeader) SlotNumber() uint64                { return h.slot }
-func (h headerStreamHeader) IssuerVkey() lcommon.IssuerVkey    { return lcommon.IssuerVkey{} }
-func (h headerStreamHeader) BlockBodySize() uint64             { return 0 }
-func (h headerStreamHeader) Era() lcommon.Era                  { return conway.EraConway }
-func (h headerStreamHeader) Cbor() []byte                      { return nil }
+func (h headerStreamHeader) Hash() lcommon.Blake2b256 { return h.hash }
+
+func (h headerStreamHeader) PrevHash() lcommon.Blake2b256 { return h.prevHash }
+
+func (h headerStreamHeader) BlockNumber() uint64 { return h.blockNumber }
+func (h headerStreamHeader) SlotNumber() uint64  { return h.slot }
+
+func (h headerStreamHeader) IssuerVkey() lcommon.IssuerVkey { return lcommon.IssuerVkey{} }
+func (h headerStreamHeader) BlockBodySize() uint64          { return 0 }
+
+func (h headerStreamHeader) Era() lcommon.Era { return conway.EraConway }
+func (h headerStreamHeader) Cbor() []byte     { return nil }
+
 func (h headerStreamHeader) BlockBodyHash() lcommon.Blake2b256 { return lcommon.Blake2b256{} }
 
 type announcingStreamHeader struct {
@@ -675,39 +680,42 @@ func TestAddLocalBlockNonAnnouncingPublishesNoAnnouncement(t *testing.T) {
 		)
 	})
 
-	t.Run("discarding headers publishes only the invalidation", func(t *testing.T) {
-		c, ch, blocks := newFixture(t)
-		peerHeader := announcingStreamHeader{
-			headerStreamHeader: headerStreamHeader{
-				hash:        lcommon.NewBlake2b256([]byte("peer-hdr")),
-				prevHash:    blocks[0].Hash(),
-				blockNumber: blocks[0].BlockNumber() + 1,
-				slot:        blocks[0].SlotNumber() + 1,
-			},
-			ebHash:    lcommon.NewBlake2b256([]byte("peer-eb")),
-			ebSize:    4096,
-			announces: true,
-		}
-		require.NoError(t, c.AddVerifiedBlockHeader(peerHeader))
-		c.PublishPendingChainUpdates()
-		testutil.RequireReceive(
-			t, ch, 2*time.Second, "peer announcement",
-		)
+	t.Run(
+		"discarding headers publishes only the invalidation",
+		func(t *testing.T) {
+			c, ch, blocks := newFixture(t)
+			peerHeader := announcingStreamHeader{
+				headerStreamHeader: headerStreamHeader{
+					hash:        lcommon.NewBlake2b256([]byte("peer-hdr")),
+					prevHash:    blocks[0].Hash(),
+					blockNumber: blocks[0].BlockNumber() + 1,
+					slot:        blocks[0].SlotNumber() + 1,
+				},
+				ebHash:    lcommon.NewBlake2b256([]byte("peer-eb")),
+				ebSize:    4096,
+				announces: true,
+			}
+			require.NoError(t, c.AddVerifiedBlockHeader(peerHeader))
+			c.PublishPendingChainUpdates()
+			testutil.RequireReceive(
+				t, ch, 2*time.Second, "peer announcement",
+			)
 
-		require.NoError(t, c.AddLocalBlock(nonAnnouncingBlock(blocks[0])))
-		evt := testutil.RequireReceive(
-			t, ch, 2*time.Second, "invalidation for the discarded header",
-		)
-		invalid, ok := evt.Data.(chain.ChainHeaderInvalidationEvent)
-		require.True(t, ok, "got %T", evt.Data)
-		assert.Contains(t, invalid.RbHashes, peerHeader.hash)
-		testutil.RequireNoReceive(
-			t,
-			ch,
-			300*time.Millisecond,
-			"a forged block that announces nothing adds no announcement",
-		)
-	})
+			require.NoError(t, c.AddLocalBlock(nonAnnouncingBlock(blocks[0])))
+			evt := testutil.RequireReceive(
+				t, ch, 2*time.Second, "invalidation for the discarded header",
+			)
+			invalid, ok := evt.Data.(chain.ChainHeaderInvalidationEvent)
+			require.True(t, ok, "got %T", evt.Data)
+			assert.Contains(t, invalid.RbHashes, peerHeader.hash)
+			testutil.RequireNoReceive(
+				t,
+				ch,
+				300*time.Millisecond,
+				"a forged block that announces nothing adds no announcement",
+			)
+		},
+	)
 }
 
 // TestAddLocalBlockAnnouncesItselfAfterInvalidation pins the ordering that
@@ -773,7 +781,12 @@ func TestAddLocalBlockAnnouncesItselfAfterInvalidation(t *testing.T) {
 		t, ch, 2*time.Second, "invalidation for the discarded peer header",
 	)
 	invalid, ok := invalidation.Data.(chain.ChainHeaderInvalidationEvent)
-	require.True(t, ok, "the invalidation must come first, got %T", invalidation.Data)
+	require.True(
+		t,
+		ok,
+		"the invalidation must come first, got %T",
+		invalidation.Data,
+	)
 	assert.Contains(t, invalid.RbHashes, peerHeader.hash)
 
 	announcement := testutil.RequireReceive(

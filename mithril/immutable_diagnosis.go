@@ -64,8 +64,7 @@ type ImmutableArchiveAttempt struct {
 // Mismatch returns the digest mismatch this attempt was rejected for, or nil
 // when it failed for another reason (a download or extraction failure).
 func (a ImmutableArchiveAttempt) Mismatch() *DigestMismatchError {
-	var mismatch *DigestMismatchError
-	if errors.As(a.Err, &mismatch) {
+	if mismatch, ok := errors.AsType[*DigestMismatchError](a.Err); ok {
 		return mismatch
 	}
 	return nil

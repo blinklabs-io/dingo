@@ -208,7 +208,7 @@ func TestPruneAccountCoverageBoundsCheckpointRows(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	const firstEpoch = uint64(100)
 	const epochs = accountCheckpointRetentionEpochs + 3
-	for i := uint64(0); i < epochs; i++ {
+	for i := range uint64(epochs) {
 		epoch := firstEpoch + i
 		require.NoError(t, cache.SaveAccountFetchChunkProgress(
 			"preview", epoch, fmt.Sprintf("chunk-%d", epoch),
@@ -226,7 +226,10 @@ func TestPruneAccountCoverageBoundsCheckpointRows(t *testing.T) {
 			}}, 3, true, now,
 		))
 	}
-	require.NoError(t, cache.PruneAccountCoverage("preview", firstEpoch+epochs-1))
+	require.NoError(
+		t,
+		cache.PruneAccountCoverage("preview", firstEpoch+epochs-1),
+	)
 
 	var checked, staged int
 	require.NoError(t, cache.db.QueryRow(
@@ -248,9 +251,16 @@ func TestPruneAccountCoverageBoundsCheckpointRows(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, oldRows, 1)
 	require.Empty(t, CompareAccountEpoch(
-		"preview", oldEpoch, oldRows,
-		[]DingoAccountReward{{StakeAddress: "stake1reward", RewardType: "member", Amount: "42"}},
-		now, 0, time.Time{}, false,
+		"preview",
+		oldEpoch,
+		oldRows,
+		[]DingoAccountReward{
+			{StakeAddress: "stake1reward", RewardType: "member", Amount: "42"},
+		},
+		now,
+		0,
+		time.Time{},
+		false,
 	))
 }
 

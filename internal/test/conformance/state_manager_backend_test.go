@@ -429,9 +429,11 @@ func TestCommitteeHotCredentialSelectionUsesActiveMember(t *testing.T) {
 
 			hot := testHash28(0x73)
 			state := &conformance.ParsedInitialState{
-				CurrentEpoch:         5,
-				CommitteeMembers:     make(map[common.Blake2b224]uint64),
-				HotKeyAuthorizations: make(map[common.Blake2b224]common.Blake2b224),
+				CurrentEpoch:     5,
+				CommitteeMembers: make(map[common.Blake2b224]uint64),
+				HotKeyAuthorizations: make(
+					map[common.Blake2b224]common.Blake2b224,
+				),
 			}
 			for i, expiry := range test.expiries {
 				cold := testHash28(byte(0x74 + i))
@@ -443,7 +445,9 @@ func TestCommitteeHotCredentialSelectionUsesActiveMember(t *testing.T) {
 				&conway.ConwayProtocolParameters{},
 			))
 
-			member, err := NewDingoStateProvider(m).CommitteeHotCredentialMember(
+			member, err := NewDingoStateProvider(
+				m,
+			).CommitteeHotCredentialMember(
 				common.Credential{
 					CredType:   common.CredentialTypeAddrKeyHash,
 					Credential: hot,

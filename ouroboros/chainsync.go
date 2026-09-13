@@ -429,11 +429,16 @@ func (o *Ouroboros) warnOriginOnlyIntersectRescued(
 	}
 	o.config.Logger.Warn(
 		"chainsync intersect points collapsed to origin on a non-origin chain, using rollback anchor instead",
-		"component", "ouroboros",
-		"connection_id", connId.String(),
-		"anchor_slot", rollbackAnchor.Slot,
-		"anchor_hash", hex.EncodeToString(rollbackAnchor.Hash),
-		"reason", "ledger returned no intersect points (rollback truncation in flight)",
+		"component",
+		"ouroboros",
+		"connection_id",
+		connId.String(),
+		"anchor_slot",
+		rollbackAnchor.Slot,
+		"anchor_hash",
+		hex.EncodeToString(rollbackAnchor.Hash),
+		"reason",
+		"ledger returned no intersect points (rollback truncation in flight)",
 	)
 }
 

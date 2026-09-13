@@ -269,9 +269,12 @@ func TestRecordKoiosSourceCoversEveryKoiosTable(t *testing.T) {
 		}
 		seen++
 		_, ok := listed[name]
-		assert.True(t, ok,
+		assert.True(
+			t,
+			ok,
 			"%s holds Koios-sourced rows but is not invalidated on a source change",
-			name)
+			name,
+		)
 	}
 	require.NoError(t, rows.Err())
 	// Without this the test passes vacuously if the query ever stops
@@ -287,9 +290,13 @@ func TestRecordKoiosSourceCoversEveryKoiosTable(t *testing.T) {
 func TestKoiosSourcedTablesAreBareIdentifiers(t *testing.T) {
 	identifier := regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 	for _, table := range koiosSourcedTables {
-		assert.Regexp(t, identifier, table,
+		assert.Regexp(
+			t,
+			identifier,
+			table,
 			"%q is not a bare identifier, so it must not be concatenated into SQL",
-			table)
+			table,
+		)
 	}
 }
 
@@ -305,9 +312,12 @@ func TestSeedOracleRowsTouchesEveryInvalidatedTable(t *testing.T) {
 		require.NoError(t, cache.db.QueryRow(
 			"SELECT COUNT(*) FROM "+table+" WHERE network = ?", "preview",
 		).Scan(&n))
-		assert.Positive(t, n,
+		assert.Positive(
+			t,
+			n,
 			"%s is invalidated on a source change but never seeded, so the discard is untested there",
-			table)
+			table,
+		)
 	}
 }
 
@@ -356,7 +366,10 @@ func TestPendingKoiosSourceChangeMatchesRecord(t *testing.T) {
 				)
 				require.NoError(t, err)
 			}
-			pending, _, err := cache.PendingKoiosSourceChange("preview", tc.next)
+			pending, _, err := cache.PendingKoiosSourceChange(
+				"preview",
+				tc.next,
+			)
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, pending)
 
@@ -365,8 +378,12 @@ func TestPendingKoiosSourceChangeMatchesRecord(t *testing.T) {
 				"preview", tc.next, time.Now().UTC(),
 			)
 			require.NoError(t, err)
-			assert.Equal(t, pending, change.Changed,
-				"PendingKoiosSourceChange must predict what RecordKoiosSource does")
+			assert.Equal(
+				t,
+				pending,
+				change.Changed,
+				"PendingKoiosSourceChange must predict what RecordKoiosSource does",
+			)
 		})
 	}
 }
@@ -677,8 +694,11 @@ func TestPinnedUnstampedCacheWritesUntilItIsStamped(t *testing.T) {
 		"preview", koiosBaseURLs["preview"], time.Now().UTC(),
 	)
 	require.NoError(t, err)
-	assert.NoError(t, checker.UpsertCheckEpochStatus(status),
-		"recording the root the cache was already attributed to changes nothing")
+	assert.NoError(
+		t,
+		checker.UpsertCheckEpochStatus(status),
+		"recording the root the cache was already attributed to changes nothing",
+	)
 
 	// Switching it to a custom host does end the run.
 	_, err = stamper.RecordKoiosSource(
@@ -703,7 +723,9 @@ func TestPinnedUnstampedCacheWritesUntilItIsStamped(t *testing.T) {
 //
 // The assertion is on the rows, not on the call: the first host's parameters
 // must not be readable from the cache afterwards.
-func TestClaimedSourceRefusesEpochParamsAfterAnotherWriterRepoints(t *testing.T) {
+func TestClaimedSourceRefusesEpochParamsAfterAnotherWriterRepoints(
+	t *testing.T,
+) {
 	const network = "preview"
 	path := filepath.Join(t.TempDir(), "cache.db")
 
@@ -750,8 +772,12 @@ func TestClaimedSourceRefusesEpochParamsAfterAnotherWriterRepoints(t *testing.T)
 	// The rows are what matter: the first host's parameters must not be
 	// readable from a cache now attributed to the second host.
 	_, err = second.GetEpochParams(network, 7)
-	assert.ErrorIs(t, err, sql.ErrNoRows,
-		"the first host's parameters reappeared in a cache re-pointed at another host")
+	assert.ErrorIs(
+		t,
+		err,
+		sql.ErrNoRows,
+		"the first host's parameters reappeared in a cache re-pointed at another host",
+	)
 }
 
 // TestUnclaimedCacheStillWritesEpochParams keeps the new gate off the

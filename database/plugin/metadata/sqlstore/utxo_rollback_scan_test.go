@@ -407,7 +407,11 @@ func TestRollbackSweepStillTruncatesUtxos(t *testing.T) {
 	require.NoError(t, store.writeDB.QueryRow(
 		"SELECT COUNT(*) FROM utxo WHERE added_slot > ?", rolledBackFrom,
 	).Scan(&above))
-	require.Zero(t, above, "rollback must delete every utxo added after the slot")
+	require.Zero(
+		t,
+		above,
+		"rollback must delete every utxo added after the slot",
+	)
 
 	var total int
 	require.NoError(t, store.writeDB.QueryRow(

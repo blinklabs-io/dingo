@@ -107,7 +107,12 @@ func TestReverseKeyFileRejectsMalformedRecords(t *testing.T) {
 			f := &reverseKeyFile{file: file}
 			key, valid, err := f.nextReverse()
 			if err == nil || valid || key != "" {
-				t.Fatalf("malformed spool yielded key %q, valid=%v, err=%v", key, valid, err)
+				t.Fatalf(
+					"malformed spool yielded key %q, valid=%v, err=%v",
+					key,
+					valid,
+					err,
+				)
 			}
 		})
 	}
@@ -119,7 +124,11 @@ func TestReverseKeyFileEmptyAndBinaryKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer file.Close()
-	keys := []string{"", string(binary.BigEndian.AppendUint32(nil, 0xffffffff)), "last"}
+	keys := []string{
+		"",
+		string(binary.BigEndian.AppendUint32(nil, 0xffffffff)),
+		"last",
+	}
 	for _, key := range keys {
 		if err := writeReverseKey(file, key); err != nil {
 			t.Fatal(err)
@@ -129,7 +138,13 @@ func TestReverseKeyFileEmptyAndBinaryKeys(t *testing.T) {
 	for i := len(keys) - 1; i >= 0; i-- {
 		key, valid, err := f.nextReverse()
 		if err != nil || !valid || key != keys[i] {
-			t.Fatalf("reverse key = %q, valid=%v, err=%v; want %q", key, valid, err, keys[i])
+			t.Fatalf(
+				"reverse key = %q, valid=%v, err=%v; want %q",
+				key,
+				valid,
+				err,
+				keys[i],
+			)
 		}
 	}
 	if _, valid, err := f.nextReverse(); err != nil || valid {
@@ -153,6 +168,10 @@ func TestReverseIteratorPropagatesSpoolCorruption(t *testing.T) {
 	it := &gcsReverseIterator{keys: &reverseKeyFile{file: file}}
 	it.Rewind()
 	if it.Err() == nil || it.Valid() || it.Item() != nil {
-		t.Fatalf("corrupted spool iterator: valid=%v err=%v", it.Valid(), it.Err())
+		t.Fatalf(
+			"corrupted spool iterator: valid=%v err=%v",
+			it.Valid(),
+			it.Err(),
+		)
 	}
 }

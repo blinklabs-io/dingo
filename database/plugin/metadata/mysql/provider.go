@@ -334,7 +334,12 @@ func ensureDatabaseExists(
 		}
 	}
 	driverConfig.DBName = ""
-	admin, err := sqlstore.OpenDB("mysql", driverConfig.FormatDSN(), "mysql", false)
+	admin, err := sqlstore.OpenDB(
+		"mysql",
+		driverConfig.FormatDSN(),
+		"mysql",
+		false,
+	)
 	if err != nil {
 		return fmt.Errorf("open MySQL admin connection: %w", err)
 	}

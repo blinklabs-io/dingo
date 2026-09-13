@@ -181,8 +181,14 @@ func TestAddBlocksRestoresMemoryAfterBatchFailure(t *testing.T) {
 	if tip.Point.Slot != 0 || len(tip.Point.Hash) != 0 || tip.BlockNumber != 0 {
 		t.Fatalf("failed batch advanced in-memory tip: %+v", tip)
 	}
-	if _, err := db.BlockByIndex(3, nil); !errors.Is(err, models.ErrBlockNotFound) {
-		t.Fatalf("expected failed batch block to be absent from storage, got %v", err)
+	if _, err := db.BlockByIndex(3, nil); !errors.Is(
+		err,
+		models.ErrBlockNotFound,
+	) {
+		t.Fatalf(
+			"expected failed batch block to be absent from storage, got %v",
+			err,
+		)
 	}
 	if err := pc.Rollback(ocommon.Point{}); err != nil {
 		t.Fatalf("rollback after failed batch: %v", err)

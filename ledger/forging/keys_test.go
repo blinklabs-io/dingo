@@ -289,7 +289,11 @@ func TestPoolCredentialsInvalidOpCertCannotPublishKESPolicy(t *testing.T) {
 		writeTestOpCert(t, corrupted),
 	))
 
-	require.ErrorContains(t, pc.ValidateOpCert(), "signature verification failed")
+	require.ErrorContains(
+		t,
+		pc.ValidateOpCert(),
+		"signature verification failed",
+	)
 	require.ErrorContains(
 		t,
 		pc.ValidateKESPeriod(
@@ -949,7 +953,11 @@ func TestValidateOpCertPreservesValidatedKESLifetime(t *testing.T) {
 	pc.mu.Lock()
 	pc.opCert.Signature[0] ^= 0xff
 	pc.mu.Unlock()
-	require.ErrorContains(t, pc.ValidateOpCert(), "signature verification failed")
+	require.ErrorContains(
+		t,
+		pc.ValidateOpCert(),
+		"signature verification failed",
+	)
 	require.Zero(t, pc.OpCertExpiryPeriod())
 
 	invalidGeneration := pc.acquireCredentialGeneration()

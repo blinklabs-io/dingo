@@ -185,12 +185,18 @@ func poolDepositPositionBeforeOrEqual(a, b poolDepositPosition) bool {
 // starts a new deposit cycle; all other registrations carry the preceding
 // cycle's held amount. The pool ID cursor makes each batch independently
 // resumable, and the NULL predicate makes replay non-destructive.
-func poolDepositHeldBackfill(ctx context.Context, batch Batch) (BatchResult, error) {
+func poolDepositHeldBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
 	lastID := int64(0)
 	if batch.Cursor != "" {
 		parsed, err := strconv.ParseInt(batch.Cursor, 10, 64)
 		if err != nil {
-			return BatchResult{}, fmt.Errorf("parse pool deposit backfill cursor: %w", err)
+			return BatchResult{}, fmt.Errorf(
+				"parse pool deposit backfill cursor: %w",
+				err,
+			)
 		}
 		lastID = parsed
 	}
@@ -226,7 +232,11 @@ func poolDepositHeldBackfill(ctx context.Context, batch Batch) (BatchResult, err
 	}, nil
 }
 
-func backfillPoolDeposits(ctx context.Context, batch Batch, poolID int64) error {
+func backfillPoolDeposits(
+	ctx context.Context,
+	batch Batch,
+	poolID int64,
+) error {
 	regs, err := poolDepositRegistrations(ctx, batch, poolID)
 	if err != nil {
 		return err
@@ -240,7 +250,12 @@ func backfillPoolDeposits(ctx context.Context, batch Batch, poolID int64) error 
 	for _, reg := range regs {
 		if reg.held.Valid {
 			if _, err := parsePoolDeposit(reg.held.String); err != nil {
-				return fmt.Errorf("pool %d registration %d: %w", poolID, reg.id, err)
+				return fmt.Errorf(
+					"pool %d registration %d: %w",
+					poolID,
+					reg.id,
+					err,
+				)
 			}
 			previous = reg
 			havePrevious = true
@@ -255,12 +270,25 @@ func backfillPoolDeposits(ctx context.Context, batch Batch, poolID int64) error 
 			held, err = previousHeld(previous)
 		}
 		if err != nil {
-			return fmt.Errorf("pool %d registration %d: %w", poolID, reg.id, err)
+			return fmt.Errorf(
+				"pool %d registration %d: %w",
+				poolID,
+				reg.id,
+				err,
+			)
 		}
 		if havePrevious {
 			retirement, found := latestPoolRetirement(rets, reg.position)
-			if found && poolDepositPositionBeforeOrEqual(previous.position, retirement.position) {
-				epoch, resolved, epochErr := poolDepositEpochAtSlot(ctx, batch, reg.position.slot)
+			if found &&
+				poolDepositPositionBeforeOrEqual(
+					previous.position,
+					retirement.position,
+				) {
+				epoch, resolved, epochErr := poolDepositEpochAtSlot(
+					ctx,
+					batch,
+					reg.position.slot,
+				)
 				if epochErr != nil {
 					return epochErr
 				}
@@ -280,7 +308,12 @@ func backfillPoolDeposits(ctx context.Context, batch Batch, poolID int64) error 
 			}
 		}
 		if err != nil {
-			return fmt.Errorf("pool %d registration %d: %w", poolID, reg.id, err)
+			return fmt.Errorf(
+				"pool %d registration %d: %w",
+				poolID,
+				reg.id,
+				err,
+			)
 		}
 		if held == nil {
 			previous = reg
@@ -290,10 +323,18 @@ func backfillPoolDeposits(ctx context.Context, batch Batch, poolID int64) error 
 		if _, err := batch.Tx.ExecContext(ctx, batch.Rebind(
 			"UPDATE pool_registration SET deposit_held = ? WHERE id = ? AND deposit_held IS NULL",
 		), strconv.FormatUint(*held, 10), reg.id); err != nil {
-			return fmt.Errorf("pool %d registration %d: write held deposit: %w", poolID, reg.id, err)
+			return fmt.Errorf(
+				"pool %d registration %d: write held deposit: %w",
+				poolID,
+				reg.id,
+				err,
+			)
 		}
 		if !unknownPrevious {
-			reg.held = sql.NullString{String: strconv.FormatUint(*held, 10), Valid: true}
+			reg.held = sql.NullString{
+				String: strconv.FormatUint(*held, 10),
+				Valid:  true,
+			}
 		}
 		previous = reg
 		havePrevious = true
@@ -301,7 +342,11 @@ func backfillPoolDeposits(ctx context.Context, batch Batch, poolID int64) error 
 	return nil
 }
 
-func poolDepositRegistrations(ctx context.Context, batch Batch, poolID int64) ([]poolDepositRegistration, error) {
+func poolDepositRegistrations(
+	ctx context.Context,
+	batch Batch,
+	poolID int64,
+) ([]poolDepositRegistration, error) {
 	rows, err := batch.Tx.QueryContext(ctx, batch.Rebind(`
 SELECT pr.id, pr.added_slot, COALESCE(t.block_index, 0),
        COALESCE(c.cert_index, 0),
@@ -345,7 +390,11 @@ ORDER BY pr.added_slot,
 	return ret, rows.Err()
 }
 
-func poolDepositRetirements(ctx context.Context, batch Batch, poolID int64) ([]poolDepositRetirement, error) {
+func poolDepositRetirements(
+	ctx context.Context,
+	batch Batch,
+	poolID int64,
+) ([]poolDepositRetirement, error) {
 	rows, err := batch.Tx.QueryContext(ctx, batch.Rebind(`
 SELECT rt.added_slot, COALESCE(t.block_index, 0), COALESCE(c.cert_index, 0),
        CASE WHEN rt.certificate_id IS NULL OR rt.certificate_id = 0
@@ -386,7 +435,10 @@ WHERE rt.pool_id = ?
 	return ret, rows.Err()
 }
 
-func latestPoolRetirement(retirements []poolDepositRetirement, at poolDepositPosition) (poolDepositRetirement, bool) {
+func latestPoolRetirement(
+	retirements []poolDepositRetirement,
+	at poolDepositPosition,
+) (poolDepositRetirement, bool) {
 	var latest poolDepositRetirement
 	found := false
 	for _, retirement := range retirements {
@@ -397,7 +449,11 @@ func latestPoolRetirement(retirements []poolDepositRetirement, at poolDepositPos
 	return latest, found
 }
 
-func poolDepositEpochAtSlot(ctx context.Context, batch Batch, slot int64) (int64, bool, error) {
+func poolDepositEpochAtSlot(
+	ctx context.Context,
+	batch Batch,
+	slot int64,
+) (int64, bool, error) {
 	var epoch, start, length sql.NullInt64
 	err := batch.Tx.QueryRowContext(ctx, batch.Rebind(`
 SELECT epoch_id, start_slot, length_in_slots FROM epoch
@@ -406,9 +462,14 @@ WHERE start_slot <= ? ORDER BY start_slot DESC LIMIT 1`), slot).Scan(&epoch, &st
 		return 0, false, nil
 	}
 	if err != nil {
-		return 0, false, fmt.Errorf("resolve epoch for pool deposit backfill at slot %d: %w", slot, err)
+		return 0, false, fmt.Errorf(
+			"resolve epoch for pool deposit backfill at slot %d: %w",
+			slot,
+			err,
+		)
 	}
-	if !epoch.Valid || !start.Valid || !length.Valid || slot >= start.Int64+length.Int64 {
+	if !epoch.Valid || !start.Valid || !length.Valid ||
+		slot >= start.Int64+length.Int64 {
 		return 0, false, nil
 	}
 	return epoch.Int64, true, nil

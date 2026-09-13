@@ -21,7 +21,10 @@ func ResolveCommitteeProposal(
 	var selected *models.GovernanceProposal
 	var selectedAction *lcommon.UpdateCommitteeGovAction
 	for _, proposal := range proposals {
-		if proposal == nil || lcommon.GovActionType(proposal.ActionType) != lcommon.GovActionTypeUpdateCommittee ||
+		if proposal == nil ||
+			lcommon.GovActionType(
+				proposal.ActionType,
+			) != lcommon.GovActionTypeUpdateCommittee ||
 			!committeeProposalInLineage(proposals, proposal, root, nil) {
 			continue
 		}
@@ -50,7 +53,10 @@ func ResolveCommitteeProposal(
 		// With a root present, a proposal outside its lineage cannot enact, so
 		// the fallback must not reach for one.
 		for _, proposal := range proposals {
-			if proposal == nil || lcommon.GovActionType(proposal.ActionType) != lcommon.GovActionTypeUpdateCommittee {
+			if proposal == nil ||
+				lcommon.GovActionType(
+					proposal.ActionType,
+				) != lcommon.GovActionTypeUpdateCommittee {
 				continue
 			}
 			action, err := DecodeGovActionForPParams(
@@ -61,7 +67,10 @@ func ResolveCommitteeProposal(
 			}
 			update, ok := action.(*lcommon.UpdateCommitteeGovAction)
 			if !ok {
-				return nil, 0, fmt.Errorf("unexpected committee action %T", action)
+				return nil, 0, fmt.Errorf(
+					"unexpected committee action %T",
+					action,
+				)
 			}
 			if !committeeActionMentionsCredential(update, coldCredential) {
 				continue
@@ -88,7 +97,8 @@ func ResolveCommitteeProposal(
 		}
 	}
 	for credential, expiry := range selectedAction.CredEpochs {
-		if credential != nil && credential.CredType == coldCredential.CredType &&
+		if credential != nil &&
+			credential.CredType == coldCredential.CredType &&
 			credential.Credential == coldCredential.Credential {
 			return &lcommon.CommitteeMember{
 				ColdKey: coldCredential.Credential, ExpiryEpoch: uint64(expiry),
@@ -112,7 +122,8 @@ func committeeActionMentionsCredential(
 		}
 	}
 	for credential := range action.CredEpochs {
-		if credential != nil && credential.CredType == coldCredential.CredType &&
+		if credential != nil &&
+			credential.CredType == coldCredential.CredType &&
 			credential.Credential == coldCredential.Credential {
 			return true
 		}

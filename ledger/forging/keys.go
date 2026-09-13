@@ -37,8 +37,10 @@ import (
 )
 
 var (
-	ErrVRFKeyHashMismatch          = errors.New("VRF key hash mismatch")
-	errOpCertExpired               = errors.New("operational certificate expired")
+	ErrVRFKeyHashMismatch = errors.New("VRF key hash mismatch")
+	errOpCertExpired      = errors.New(
+		"operational certificate expired",
+	)
 	errCredentialGenerationChanged = errors.New(
 		"credential generation changed during block production",
 	)

@@ -117,13 +117,20 @@ func TestComparePoolEpochMissingRewardsBeforeApplication(t *testing.T) {
 		return CheckMismatch{}
 	}
 
-	t.Run("not computed yet is a lag even long after the epoch closed", func(t *testing.T) {
-		m := find(t, ComparePoolEpoch(
-			"preview", 44, koios, missing(true), now, 24, longClosed, false,
-		))
-		assert.Equal(t, CategoryReferenceLag, m.Category,
-			"the wall-clock window cannot fire in a replay; chain position must")
-	})
+	t.Run(
+		"not computed yet is a lag even long after the epoch closed",
+		func(t *testing.T) {
+			m := find(t, ComparePoolEpoch(
+				"preview", 44, koios, missing(true), now, 24, longClosed, false,
+			))
+			assert.Equal(
+				t,
+				CategoryReferenceLag,
+				m.Category,
+				"the wall-clock window cannot fire in a replay; chain position must",
+			)
+		},
+	)
 
 	t.Run("past the boundary a missing row is a real gap", func(t *testing.T) {
 		m := find(t, ComparePoolEpoch(
@@ -191,7 +198,11 @@ func TestCompareAccountEpochPendingRewardsAreALag(t *testing.T) {
 
 	t.Run("a differing amount while pending is also a lag", func(t *testing.T) {
 		dingoRows := []DingoAccountReward{
-			{StakeAddress: "stake_test1a", RewardType: "member", Amount: "999999"},
+			{
+				StakeAddress: "stake_test1a",
+				RewardType:   "member",
+				Amount:       "999999",
+			},
 		}
 		ms := CompareAccountEpoch(
 			"preview", 100, koios[:1], dingoRows, now, 24, longClosed, true,
@@ -212,7 +223,11 @@ func TestCompareAccountEpochPendingRewardsAreALag(t *testing.T) {
 
 	t.Run("a differing amount once applied is a mismatch", func(t *testing.T) {
 		dingoRows := []DingoAccountReward{
-			{StakeAddress: "stake_test1a", RewardType: "member", Amount: "999999"},
+			{
+				StakeAddress: "stake_test1a",
+				RewardType:   "member",
+				Amount:       "999999",
+			},
 		}
 		ms := CompareAccountEpoch(
 			"preview", 100, koios[:1], dingoRows, now, 24, longClosed, false,
@@ -229,7 +244,11 @@ func TestCompareAccountEpochPendingRewardsAreALag(t *testing.T) {
 
 	t.Run("a Dingo-only row while pending is a lag", func(t *testing.T) {
 		dingoRows := []DingoAccountReward{
-			{StakeAddress: "stake_test1c", RewardType: "member", Amount: "1857"},
+			{
+				StakeAddress: "stake_test1c",
+				RewardType:   "member",
+				Amount:       "1857",
+			},
 		}
 		ms := CompareAccountEpoch(
 			"preview", 100, nil, dingoRows, now, 24, longClosed, true,
@@ -241,18 +260,25 @@ func TestCompareAccountEpochPendingRewardsAreALag(t *testing.T) {
 			"a reward whose spendable flag is still provisional is timing")
 	})
 
-	t.Run("a Dingo-only row once applied is a real finding", func(t *testing.T) {
-		dingoRows := []DingoAccountReward{
-			{StakeAddress: "stake_test1c", RewardType: "member", Amount: "1857"},
-		}
-		ms := CompareAccountEpoch(
-			"preview", 100, nil, dingoRows, now, 24, longClosed, false,
-		)
-		got := categories(ms)
-		require.Len(t, got, 1)
-		assert.Equal(t, CategoryAcctOnlyDingo, got[0],
-			"once applied, a row Koios never credited is worth reporting")
-	})
+	t.Run(
+		"a Dingo-only row once applied is a real finding",
+		func(t *testing.T) {
+			dingoRows := []DingoAccountReward{
+				{
+					StakeAddress: "stake_test1c",
+					RewardType:   "member",
+					Amount:       "1857",
+				},
+			}
+			ms := CompareAccountEpoch(
+				"preview", 100, nil, dingoRows, now, 24, longClosed, false,
+			)
+			got := categories(ms)
+			require.Len(t, got, 1)
+			assert.Equal(t, CategoryAcctOnlyDingo, got[0],
+				"once applied, a row Koios never credited is worth reporting")
+		},
+	)
 
 	t.Run("computed and still absent is a real finding", func(t *testing.T) {
 		ms := CompareAccountEpoch(

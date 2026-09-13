@@ -447,8 +447,7 @@ func validateKoiosBaseURL(rawURL string, allowInsecureHTTP bool) error {
 // carry credentials into a log. url.Parse wraps the offending string in the
 // error it returns, which is exactly the value being kept out of logs.
 func redactURLError(err error) error {
-	var urlErr *url.Error
-	if errors.As(err, &urlErr) {
+	if urlErr, ok := errors.AsType[*url.Error](err); ok {
 		return fmt.Errorf("%s: %w", urlErr.Op, urlErr.Err)
 	}
 	return errors.New("invalid URL")

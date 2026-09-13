@@ -126,42 +126,48 @@ func TestRequiredCostModelWiringMissingEntryFailsClosed(t *testing.T) {
 			plutusV1Scripts: []lcommon.PlutusV1Script{v1Script},
 		}
 
-		t.Run("ValidateTxAlonzo missing PlutusV1 cost model", func(t *testing.T) {
-			// Clear the phase-1 rule set so the missing-cost-model failure
-			// is what's under test, not a fee or metadata check the mock
-			// transaction can't support (mirrors
-			// TestPlutusBudgetComparisonIncludesFinalSlippageBatch).
-			origRules := alonzoUtxoValidationRules
-			t.Cleanup(func() { alonzoUtxoValidationRules = origRules })
-			alonzoUtxoValidationRules = nil
+		t.Run(
+			"ValidateTxAlonzo missing PlutusV1 cost model",
+			func(t *testing.T) {
+				// Clear the phase-1 rule set so the missing-cost-model failure
+				// is what's under test, not a fee or metadata check the mock
+				// transaction can't support (mirrors
+				// TestPlutusBudgetComparisonIncludesFinalSlippageBatch).
+				origRules := alonzoUtxoValidationRules
+				t.Cleanup(func() { alonzoUtxoValidationRules = origRules })
+				alonzoUtxoValidationRules = nil
 
-			tx, ls := newSpendFixture(v1Script, witnesses)
-			err := ValidateTxAlonzo(
-				tx,
-				0,
-				ls,
-				&alonzo.AlonzoProtocolParameters{
-					ProtocolMajor: 5,
-					MaxTxExUnits:  maxTxExUnits,
-				},
-			)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "missing PlutusV1 cost model")
-		})
+				tx, ls := newSpendFixture(v1Script, witnesses)
+				err := ValidateTxAlonzo(
+					tx,
+					0,
+					ls,
+					&alonzo.AlonzoProtocolParameters{
+						ProtocolMajor: 5,
+						MaxTxExUnits:  maxTxExUnits,
+					},
+				)
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "missing PlutusV1 cost model")
+			},
+		)
 
-		t.Run("EvaluateTxAlonzo missing PlutusV1 cost model", func(t *testing.T) {
-			tx, ls := newSpendFixture(v1Script, witnesses)
-			_, _, _, err := EvaluateTxAlonzo(
-				tx,
-				ls,
-				&alonzo.AlonzoProtocolParameters{
-					ProtocolMajor: 5,
-					MaxTxExUnits:  maxTxExUnits,
-				},
-			)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "missing PlutusV1 cost model")
-		})
+		t.Run(
+			"EvaluateTxAlonzo missing PlutusV1 cost model",
+			func(t *testing.T) {
+				tx, ls := newSpendFixture(v1Script, witnesses)
+				_, _, _, err := EvaluateTxAlonzo(
+					tx,
+					ls,
+					&alonzo.AlonzoProtocolParameters{
+						ProtocolMajor: 5,
+						MaxTxExUnits:  maxTxExUnits,
+					},
+				)
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "missing PlutusV1 cost model")
+			},
+		)
 	})
 
 	t.Run("babbage", func(t *testing.T) {
@@ -176,71 +182,83 @@ func TestRequiredCostModelWiringMissingEntryFailsClosed(t *testing.T) {
 			plutusV2Scripts: []lcommon.PlutusV2Script{v2Script},
 		}
 
-		t.Run("ValidateTxBabbage missing PlutusV1 cost model", func(t *testing.T) {
-			origRules := babbageUtxoValidationRules
-			t.Cleanup(func() { babbageUtxoValidationRules = origRules })
-			babbageUtxoValidationRules = nil
+		t.Run(
+			"ValidateTxBabbage missing PlutusV1 cost model",
+			func(t *testing.T) {
+				origRules := babbageUtxoValidationRules
+				t.Cleanup(func() { babbageUtxoValidationRules = origRules })
+				babbageUtxoValidationRules = nil
 
-			tx, ls := newSpendFixture(v1Script, v1Witnesses)
-			err := ValidateTxBabbage(
-				tx,
-				0,
-				ls,
-				&babbage.BabbageProtocolParameters{
-					ProtocolMajor: 7,
-					MaxTxExUnits:  maxTxExUnits,
-				},
-			)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "missing PlutusV1 cost model")
-		})
+				tx, ls := newSpendFixture(v1Script, v1Witnesses)
+				err := ValidateTxBabbage(
+					tx,
+					0,
+					ls,
+					&babbage.BabbageProtocolParameters{
+						ProtocolMajor: 7,
+						MaxTxExUnits:  maxTxExUnits,
+					},
+				)
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "missing PlutusV1 cost model")
+			},
+		)
 
-		t.Run("ValidateTxBabbage missing PlutusV2 cost model", func(t *testing.T) {
-			origRules := babbageUtxoValidationRules
-			t.Cleanup(func() { babbageUtxoValidationRules = origRules })
-			babbageUtxoValidationRules = nil
+		t.Run(
+			"ValidateTxBabbage missing PlutusV2 cost model",
+			func(t *testing.T) {
+				origRules := babbageUtxoValidationRules
+				t.Cleanup(func() { babbageUtxoValidationRules = origRules })
+				babbageUtxoValidationRules = nil
 
-			tx, ls := newSpendFixture(v2Script, v2Witnesses)
-			err := ValidateTxBabbage(
-				tx,
-				0,
-				ls,
-				&babbage.BabbageProtocolParameters{
-					ProtocolMajor: 7,
-					MaxTxExUnits:  maxTxExUnits,
-				},
-			)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "missing PlutusV2 cost model")
-		})
+				tx, ls := newSpendFixture(v2Script, v2Witnesses)
+				err := ValidateTxBabbage(
+					tx,
+					0,
+					ls,
+					&babbage.BabbageProtocolParameters{
+						ProtocolMajor: 7,
+						MaxTxExUnits:  maxTxExUnits,
+					},
+				)
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "missing PlutusV2 cost model")
+			},
+		)
 
-		t.Run("EvaluateTxBabbage missing PlutusV1 cost model", func(t *testing.T) {
-			tx, ls := newSpendFixture(v1Script, v1Witnesses)
-			_, _, _, err := EvaluateTxBabbage(
-				tx,
-				ls,
-				&babbage.BabbageProtocolParameters{
-					ProtocolMajor: 7,
-					MaxTxExUnits:  maxTxExUnits,
-				},
-			)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "missing PlutusV1 cost model")
-		})
+		t.Run(
+			"EvaluateTxBabbage missing PlutusV1 cost model",
+			func(t *testing.T) {
+				tx, ls := newSpendFixture(v1Script, v1Witnesses)
+				_, _, _, err := EvaluateTxBabbage(
+					tx,
+					ls,
+					&babbage.BabbageProtocolParameters{
+						ProtocolMajor: 7,
+						MaxTxExUnits:  maxTxExUnits,
+					},
+				)
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "missing PlutusV1 cost model")
+			},
+		)
 
-		t.Run("EvaluateTxBabbage missing PlutusV2 cost model", func(t *testing.T) {
-			tx, ls := newSpendFixture(v2Script, v2Witnesses)
-			_, _, _, err := EvaluateTxBabbage(
-				tx,
-				ls,
-				&babbage.BabbageProtocolParameters{
-					ProtocolMajor: 7,
-					MaxTxExUnits:  maxTxExUnits,
-				},
-			)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "missing PlutusV2 cost model")
-		})
+		t.Run(
+			"EvaluateTxBabbage missing PlutusV2 cost model",
+			func(t *testing.T) {
+				tx, ls := newSpendFixture(v2Script, v2Witnesses)
+				_, _, _, err := EvaluateTxBabbage(
+					tx,
+					ls,
+					&babbage.BabbageProtocolParameters{
+						ProtocolMajor: 7,
+						MaxTxExUnits:  maxTxExUnits,
+					},
+				)
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "missing PlutusV2 cost model")
+			},
+		)
 	})
 
 	// Conway's V1 branch of evaluateConwayPlutusScript already has this

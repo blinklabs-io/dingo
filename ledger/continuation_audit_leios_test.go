@@ -367,7 +367,11 @@ func TestContinuationAuditStillReportsMissingProducerOnLeios(t *testing.T) {
 		Point:        f.certPoint,
 	}, true)
 
-	missing := mustSpliceAuditInput(t, testHashBytes("leios-absent-producer"), 0)
+	missing := mustSpliceAuditInput(
+		t,
+		testHashBytes("leios-absent-producer"),
+		0,
+	)
 	body := &spliceAuditBlock{
 		slot: 50,
 		hash: lcommon.NewBlake2b256(testHashBytes("leios-audit-splice")),

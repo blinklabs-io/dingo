@@ -143,8 +143,10 @@ func TestProtocolParamsForSlot_UsesMultiEraEpochs(t *testing.T) {
 		shelleyEpoch      = uint64(207)
 		shelleyEpochLen   = uint(432)
 		byronEndSlot      = uint64(byronEpochs) * uint64(byronEpochLength)
-		currentEpochStart = byronEndSlot + (shelleyEpoch-2)*uint64(shelleyEpochLen)
-		boundarySlot      = currentEpochStart + uint64(shelleyEpochLen)
+		currentEpochStart = byronEndSlot + (shelleyEpoch-2)*uint64(
+			shelleyEpochLen,
+		)
+		boundarySlot = currentEpochStart + uint64(shelleyEpochLen)
 	)
 
 	cfg := newMultiEraForecastCfg(t, shelleyEpoch+1)
@@ -188,8 +190,12 @@ func TestProtocolParamsForSlot_UsesMultiEraEpochs(t *testing.T) {
 	got := ls.ProtocolParamsForSlot(boundarySlot)
 	gotShelley, ok := got.(*shelley.ShelleyProtocolParameters)
 	require.True(t, ok)
-	require.Equal(t, uint(3), gotShelley.ProtocolMajor,
-		"the first Shelley slot after a Byron prefix must forecast the scheduled fork")
+	require.Equal(
+		t,
+		uint(3),
+		gotShelley.ProtocolMajor,
+		"the first Shelley slot after a Byron prefix must forecast the scheduled fork",
+	)
 }
 
 // TestProtocolParamsForSlot_FallbackProjectsFromCurrentEpoch verifies the
@@ -214,11 +220,17 @@ func TestProtocolParamsForSlot_FallbackProjectsFromCurrentEpoch(t *testing.T) {
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
 			{EpochId: 0, StartSlot: 0, SlotLength: 20_000,
-				LengthInSlots: uint(byronEpochLength), EraId: eras.ByronEraDesc.Id},
+				LengthInSlots: uint(
+					byronEpochLength,
+				), EraId: eras.ByronEraDesc.Id},
 			{EpochId: 1, StartSlot: byronEpochLength, SlotLength: 20_000,
-				LengthInSlots: uint(byronEpochLength), EraId: eras.ByronEraDesc.Id},
+				LengthInSlots: uint(
+					byronEpochLength,
+				), EraId: eras.ByronEraDesc.Id},
 			{EpochId: currentEpoch, StartSlot: currentStart, SlotLength: 1_000,
-				LengthInSlots: uint(shelleyEpochLen), EraId: eras.ShelleyEraDesc.Id},
+				LengthInSlots: uint(
+					shelleyEpochLen,
+				), EraId: eras.ShelleyEraDesc.Id},
 		},
 		currentEra: eras.ShelleyEraDesc,
 		currentEpoch: models.Epoch{
@@ -246,7 +258,10 @@ func TestProtocolParamsForSlot_FallbackProjectsFromCurrentEpoch(t *testing.T) {
 		"fallback epoch projection must preserve the Byron epoch offset")
 }
 
-func newMultiEraForecastCfg(t *testing.T, forkEpoch uint64) *cardano.CardanoNodeConfig {
+func newMultiEraForecastCfg(
+	t *testing.T,
+	forkEpoch uint64,
+) *cardano.CardanoNodeConfig {
 	t.Helper()
 	cfg := &cardano.CardanoNodeConfig{}
 	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(`{

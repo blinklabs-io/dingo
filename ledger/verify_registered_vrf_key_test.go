@@ -178,7 +178,10 @@ func TestVerifyRegisteredVrfKey_AcceptsMatchingKeyRejectsMismatch(
 
 	require.NoError(
 		t,
-		ls.verifyRegisteredVrfKey(tbMatch.block, blockEpochId(t, ls, tbMatch.block)),
+		ls.verifyRegisteredVrfKey(
+			tbMatch.block,
+			blockEpochId(t, ls, tbMatch.block),
+		),
 		"block whose header VRF key hashes to the pool's registered "+
 			"VRF key hash must be accepted",
 	)
@@ -205,7 +208,10 @@ func TestVerifyRegisteredVrfKey_AcceptsMatchingKeyRejectsMismatch(
 	mismatchPoolKeyHash := tbMismatch.block.IssuerVkey().Hash()
 	seedPoolRegistration(t, db, mismatchPoolKeyHash[:], wrongVrfKeyHash)
 
-	err = ls.verifyRegisteredVrfKey(tbMismatch.block, blockEpochId(t, ls, tbMismatch.block))
+	err = ls.verifyRegisteredVrfKey(
+		tbMismatch.block,
+		blockEpochId(t, ls, tbMismatch.block),
+	)
 	require.Error(
 		t,
 		err,

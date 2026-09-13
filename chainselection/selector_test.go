@@ -2746,7 +2746,9 @@ func TestChainSelectorEvaluationPanicSurfacedAndLoopContinues(t *testing.T) {
 // nothing left to catch it, over what should have been one dropped
 // transition. This drives a real evaluation panic with a Logger that panics
 // on every Handle call and verifies the panic is fully contained.
-func TestChainSelectorRecoverEvaluationPanicToleratesPanickingLogger(t *testing.T) {
+func TestChainSelectorRecoverEvaluationPanicToleratesPanickingLogger(
+	t *testing.T,
+) {
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 

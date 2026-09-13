@@ -41,7 +41,9 @@ const mithrilTrustBoundarySyncKey = "mithril_ledger_slot"
 // blocks_minted all count these rows as minted blocks, so a bootstrapped node
 // credits every pool holding a certified counter with a block it never made
 // and inflates the epoch denominator by the size of the pool set.
-func TestCountPoolBlocksInSlotRangeExcludesMithrilImportedCounters(t *testing.T) {
+func TestCountPoolBlocksInSlotRangeExcludesMithrilImportedCounters(
+	t *testing.T,
+) {
 	t.Parallel()
 	store, _ := newSharedSQLStore(t)
 
@@ -62,9 +64,18 @@ func TestCountPoolBlocksInSlotRangeExcludesMithrilImportedCounters(t *testing.T)
 
 	// The certified counter map imported at the anchor: three pools, no
 	// blocks applied for any of them.
-	require.NoError(t, store.UpdatePoolOpCertSequence(pkhA, 5, boundarySlot, nil))
-	require.NoError(t, store.UpdatePoolOpCertSequence(pkhB, 7, boundarySlot, nil))
-	require.NoError(t, store.UpdatePoolOpCertSequence(pkhC, 2, boundarySlot, nil))
+	require.NoError(
+		t,
+		store.UpdatePoolOpCertSequence(pkhA, 5, boundarySlot, nil),
+	)
+	require.NoError(
+		t,
+		store.UpdatePoolOpCertSequence(pkhB, 7, boundarySlot, nil),
+	)
+	require.NoError(
+		t,
+		store.UpdatePoolOpCertSequence(pkhC, 2, boundarySlot, nil),
+	)
 
 	// One block the node actually applied after the boundary.
 	require.NoError(t, store.UpdatePoolOpCertSequence(pkhA, 5, 1200, nil))
@@ -88,7 +99,9 @@ func TestCountPoolBlocksInSlotRangeExcludesMithrilImportedCounters(t *testing.T)
 // ordered-row path the decentralization-aware reward count uses
 // (ledger.rewardBlockCountsExcludingOverlaySlots), which reads the same table
 // directly and so needs the same discrimination.
-func TestGetPoolBlockIssuersInSlotRangeExcludesMithrilImportedCounters(t *testing.T) {
+func TestGetPoolBlockIssuersInSlotRangeExcludesMithrilImportedCounters(
+	t *testing.T,
+) {
 	t.Parallel()
 	store, _ := newSharedSQLStore(t)
 
@@ -104,8 +117,14 @@ func TestGetPoolBlockIssuersInSlotRangeExcludesMithrilImportedCounters(t *testin
 		lcommon.NewBlake2b224(bytes.Repeat([]byte{0xB2}, 28)),
 	)
 
-	require.NoError(t, store.UpdatePoolOpCertSequence(pkhA, 5, boundarySlot, nil))
-	require.NoError(t, store.UpdatePoolOpCertSequence(pkhB, 7, boundarySlot, nil))
+	require.NoError(
+		t,
+		store.UpdatePoolOpCertSequence(pkhA, 5, boundarySlot, nil),
+	)
+	require.NoError(
+		t,
+		store.UpdatePoolOpCertSequence(pkhB, 7, boundarySlot, nil),
+	)
 	require.NoError(t, store.UpdatePoolOpCertSequence(pkhB, 7, 1100, nil))
 
 	rows, err := store.GetPoolBlockIssuersInSlotRange(900, 1300, nil)
@@ -164,10 +183,20 @@ func TestPoolBlockCountsRejectMalformedMithrilBoundary(t *testing.T) {
 		_, _, err := store.CountPoolBlocksInSlotRange(
 			[]lcommon.PoolKeyHash{pkh}, 0, 2000, nil,
 		)
-		require.Error(t, err, "boundary %q must not be treated as absent", value)
+		require.Error(
+			t,
+			err,
+			"boundary %q must not be treated as absent",
+			value,
+		)
 		assert.Contains(t, err.Error(), "Mithril trust boundary")
 
 		_, err = store.GetPoolBlockIssuersInSlotRange(0, 2000, nil)
-		require.Error(t, err, "boundary %q must not be treated as absent", value)
+		require.Error(
+			t,
+			err,
+			"boundary %q must not be treated as absent",
+			value,
+		)
 	}
 }

@@ -50,7 +50,13 @@ func TestUpdateDRepActivityExpiryBounds(t *testing.T) {
 				CredentialTag: 1, Credential: credential, Active: true,
 				LastActivityEpoch: 10, ExpiryEpoch: 20,
 			}))
-			err := db.UpdateDRepActivity(1, credential, tc.activity, tc.inactivity, nil)
+			err := db.UpdateDRepActivity(
+				1,
+				credential,
+				tc.activity,
+				tc.inactivity,
+				nil,
+			)
 			if tc.valid {
 				require.NoError(t, err)
 			} else {

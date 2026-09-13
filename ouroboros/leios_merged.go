@@ -691,7 +691,8 @@ func (o *Ouroboros) MaxVerifiedEndorserBlockSlot() uint64 {
 func (o *Ouroboros) advanceLeiosVerifiedEbSlot(slot uint64) {
 	for {
 		previous := o.leiosMaxVerifiedEbSlot.Load()
-		if slot <= previous || o.leiosMaxVerifiedEbSlot.CompareAndSwap(previous, slot) {
+		if slot <= previous ||
+			o.leiosMaxVerifiedEbSlot.CompareAndSwap(previous, slot) {
 			return
 		}
 	}

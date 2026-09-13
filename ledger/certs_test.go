@@ -30,7 +30,7 @@ func TestCalculateCertificateDepositUsesPublishedPParams(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		<-start
-		for i := 0; i < 10_000; i++ {
+		for range 10_000 {
 			deposit, err := ls.calculateCertificateDeposit(
 				cert,
 				shelley.EraIdShelley,
@@ -57,7 +57,7 @@ func TestCalculateCertificateDepositUsesPublishedPParams(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		<-start
-		for i := 0; i < 10_000; i++ {
+		for i := range 10_000 {
 			ls.Lock()
 			if i%2 == 0 {
 				ls.currentPParams = second

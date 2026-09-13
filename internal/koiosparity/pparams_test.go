@@ -248,7 +248,9 @@ func TestCompareEpochProtocolParamsReportsEraMismatch(t *testing.T) {
 // Koios reports but Dingo's era-decoded row does not define (or vice versa)
 // is a disagreement about the shape of the ledger state, not something to
 // skip quietly. Skipping it is what would let an era-gating bug read as PASS.
-func TestCompareEpochProtocolParamsPresenceDisagreementIsAMismatch(t *testing.T) {
+func TestCompareEpochProtocolParamsPresenceDisagreementIsAMismatch(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	now := time.Now()
@@ -256,7 +258,14 @@ func TestCompareEpochProtocolParamsPresenceDisagreementIsAMismatch(t *testing.T)
 	dingoAbsent := dingoPParamsPreview380()
 	dingoAbsent.PriceStep = "" // era decoded without execution pricing
 	got := CompareEpochProtocolParams(
-		"preview", 380, koiosPParamsPreview380(), dingoAbsent, nil, now, 0, time.Time{},
+		"preview",
+		380,
+		koiosPParamsPreview380(),
+		dingoAbsent,
+		nil,
+		now,
+		0,
+		time.Time{},
 	)
 	require.Len(t, got, 1)
 	require.Equal(t, "pparams_price_step", got[0].Field)
@@ -267,7 +276,14 @@ func TestCompareEpochProtocolParamsPresenceDisagreementIsAMismatch(t *testing.T)
 	koiosAbsent := koiosPParamsPreview380()
 	koiosAbsent.MaxCollateralInputs = "" // Koios published null
 	got = CompareEpochProtocolParams(
-		"preview", 380, koiosAbsent, dingoPParamsPreview380(), nil, now, 0, time.Time{},
+		"preview",
+		380,
+		koiosAbsent,
+		dingoPParamsPreview380(),
+		nil,
+		now,
+		0,
+		time.Time{},
 	)
 	require.Len(t, got, 1)
 	require.Equal(t, "pparams_max_collateral_inputs", got[0].Field)
@@ -408,7 +424,11 @@ func TestDingoDBGetProtocolParamsResolvesEffectiveRow(t *testing.T) {
 
 	got, err := dingo.GetProtocolParams(context.Background(), 200)
 	require.NoError(t, err)
-	require.NotNil(t, got, "epoch 200 has no pparams row of its own; the effective row must still resolve")
+	require.NotNil(
+		t,
+		got,
+		"epoch 200 has no pparams row of its own; the effective row must still resolve",
+	)
 	require.Equal(t, uint64(107), got.SourceEpoch)
 	require.Equal(t, "Babbage", got.EraName)
 	require.Equal(t, "20000000000", got.MaxBlockExSteps)
@@ -484,14 +504,22 @@ func TestDingoDBGetProtocolParamsAbsent(t *testing.T) {
 	seedEpochEra(t, gdb, 200, 5)
 	got, err = dingo.GetProtocolParams(context.Background(), 200)
 	require.NoError(t, err)
-	require.Nil(t, got, "an epoch row with no pparams row for its era resolves to nil")
+	require.Nil(
+		t,
+		got,
+		"an epoch row with no pparams row for its era resolves to nil",
+	)
 }
 
 func seedEpochEra(t *testing.T, gdb *testDB, epoch uint64, eraID uint) {
 	t.Helper()
 	require.NoError(t, gdb.Exec(
 		`INSERT INTO epoch (epoch_id, start_slot, era_id, slot_length, length_in_slots) VALUES (?,?,?,?,?)`,
-		epoch, 0, eraID, 1000, 86400,
+		epoch,
+		0,
+		eraID,
+		1000,
+		86400,
 	).Error)
 }
 
@@ -506,7 +534,11 @@ func seedPParams(
 	t.Helper()
 	require.NoError(t, gdb.Exec(
 		`INSERT INTO pparams (id, cbor, added_slot, epoch, era_id) VALUES (?,?,?,?,?)`,
-		id, cborBytes, addedSlot, epoch, eraID,
+		id,
+		cborBytes,
+		addedSlot,
+		epoch,
+		eraID,
 	).Error)
 }
 
@@ -569,7 +601,11 @@ func seedKoiosBabbageProtocolParams(
 	for _, epoch := range epochs {
 		var resp []KoiosEpochParamsResp
 		require.NoError(t, json.Unmarshal(
-			fmt.Appendf(nil, previewBabbageEpochParamsTmpl, strconv.FormatUint(epoch, 10)),
+			fmt.Appendf(
+				nil,
+				previewBabbageEpochParamsTmpl,
+				strconv.FormatUint(epoch, 10),
+			),
 			&resp,
 		))
 		require.Len(t, resp, 1)
@@ -603,7 +639,14 @@ func TestSeededProtocolParamsFixturesAgree(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Empty(t, CompareEpochProtocolParams(
-		"preview", 10, koiosParams, dingoParams, nil, time.Now(), 0, time.Time{},
+		"preview",
+		10,
+		koiosParams,
+		dingoParams,
+		nil,
+		time.Now(),
+		0,
+		time.Time{},
 	))
 }
 
@@ -648,7 +691,9 @@ func TestDatabaseSourceGetProtocolParams(t *testing.T) {
 // (dingo #4127): both RewardParitySource implementations must classify the
 // same fabricated-default row the same way, since checkEpoch's comparison
 // logic is shared between them.
-func TestDatabaseSourceGetProtocolParamsMarksSyntheticV2CostModel(t *testing.T) {
+func TestDatabaseSourceGetProtocolParamsMarksSyntheticV2CostModel(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	db := newTestDatabaseSourceDB(t)
@@ -680,8 +725,11 @@ func TestDatabaseSourceGetProtocolParamsMarksSyntheticV2CostModel(t *testing.T) 
 	got, err = source.GetProtocolParams(context.Background(), 9)
 	require.NoError(t, err)
 	require.NotNil(t, got)
-	require.False(t, got.SyntheticV2CostModel,
-		"epoch 9 is at the confirming epoch and must no longer read as synthetic")
+	require.False(
+		t,
+		got.SyntheticV2CostModel,
+		"epoch 9 is at the confirming epoch and must no longer read as synthetic",
+	)
 }
 
 // seedProtocolParamsCheckFixture builds the smallest Dingo+cache pair that
@@ -1056,7 +1104,9 @@ func TestCompareEpochProtocolParamsCostModelsAbsentBothSides(t *testing.T) {
 // TestCompareEpochProtocolParamsRejectsMalformedKoiosCostModels: cached cost
 // models that will not parse must surface, never silently drop the whole
 // cost-model comparison and let the epoch read as PASS.
-func TestCompareEpochProtocolParamsRejectsMalformedKoiosCostModels(t *testing.T) {
+func TestCompareEpochProtocolParamsRejectsMalformedKoiosCostModels(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	models := costModelFixture(t)
@@ -1196,7 +1246,9 @@ func TestIsSyntheticV2CostModel(t *testing.T) {
 //
 // Discriminates: with SyntheticV2CostModel left false (or the classification
 // removed), this reports CategoryValueMismatch and DetermineStatus is FAIL.
-func TestCompareEpochProtocolParamsSyntheticV2CostModelIsInformational(t *testing.T) {
+func TestCompareEpochProtocolParamsSyntheticV2CostModelIsInformational(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	models := costModelFixture(t)
@@ -1226,7 +1278,9 @@ func TestCompareEpochProtocolParamsSyntheticV2CostModelIsInformational(t *testin
 // synthetic, a Koios-side absence stays a real, wedge-class divergence
 // (FAIL) exactly as before. SyntheticV2CostModel is the only thing that may
 // downgrade this classification.
-func TestCompareEpochProtocolParamsRealV2CostModelAheadOfKoiosStillFails(t *testing.T) {
+func TestCompareEpochProtocolParamsRealV2CostModelAheadOfKoiosStillFails(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	models := costModelFixture(t)

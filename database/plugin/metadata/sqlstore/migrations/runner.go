@@ -649,7 +649,9 @@ func execDDL(
 // ALTER TABLE <table> ADD COLUMN <column> ... statement. Identifier quoting
 // differs per dialect, so every supported quote character is trimmed.
 func parseAddColumnStatement(statement string) (string, string, string, bool) {
-	fields := strings.Fields(strings.TrimSuffix(strings.TrimSpace(statement), ";"))
+	fields := strings.Fields(
+		strings.TrimSuffix(strings.TrimSpace(statement), ";"),
+	)
 	if len(fields) < 6 ||
 		!strings.EqualFold(fields[0], "ALTER") ||
 		!strings.EqualFold(fields[1], "TABLE") ||
@@ -693,7 +695,10 @@ func declaredColumnType(definition string) string {
 }
 
 func normalizeColumnType(value string) string {
-	normalized := columnTypeArgsPattern.ReplaceAllString(strings.ToLower(value), "")
+	normalized := columnTypeArgsPattern.ReplaceAllString(
+		strings.ToLower(value),
+		"",
+	)
 	normalized = strings.Join(strings.Fields(normalized), " ")
 	if alias, ok := columnTypeAliases[normalized]; ok {
 		return alias
@@ -770,7 +775,10 @@ func isSQLiteDDLAlreadyAppliedOnConn(
 	statement string,
 	err error,
 ) bool {
-	if !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+	if !strings.Contains(
+		strings.ToLower(err.Error()),
+		"duplicate column name",
+	) {
 		return false
 	}
 	table, column, definition, ok := parseAddColumnStatement(statement)

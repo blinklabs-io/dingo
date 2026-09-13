@@ -354,7 +354,9 @@ func (d *DingoDB) GetEarliestAvailableEpoch(
 	if !epochID.Valid {
 		return 0, false, nil
 	}
-	return uint64(epochID.Int64) + 1, true, nil //nolint:gosec // epoch values are non-negative
+	return uint64(
+		epochID.Int64,
+	) + 1, true, nil //nolint:gosec // epoch values are non-negative
 }
 
 // GetEpochData returns epoch-level aggregates for the given epoch.

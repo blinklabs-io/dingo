@@ -122,8 +122,11 @@ func TestSeedImportedRewardInputsResolvesParamsPerEpoch(t *testing.T) {
 		}
 		failure, err := db.Metadata().GetRewardSeedFailure(epoch, "mark", nil)
 		require.NoError(t, err)
-		require.Empty(t, failure,
-			"a successfully seeded imported basis must not retain a failure marker")
+		require.Empty(
+			t,
+			failure,
+			"a successfully seeded imported basis must not retain a failure marker",
+		)
 	}
 }
 
@@ -408,8 +411,12 @@ func TestSeedImportedRewardInputsSkipsEpochsWithNoParamsWindow(t *testing.T) {
 			"rather than seeded from a guess")
 	failure, err := db.Metadata().GetRewardSeedFailure(unplaceable, "mark", nil)
 	require.NoError(t, err)
-	require.Contains(t, failure, "has no reward account",
-		"an underivable imported basis must leave durable provenance for the later reward skip")
+	require.Contains(
+		t,
+		failure,
+		"has no reward account",
+		"an underivable imported basis must leave durable provenance for the later reward skip",
+	)
 
 	// One underivable epoch must not cost the others their rounds.
 	for _, epoch := range []uint64{state.Epoch, state.Epoch - 1} {
@@ -426,12 +433,13 @@ func TestEmptyRewardSeedFailureReasonReportsMissingParameters(t *testing.T) {
 	pools := ParsedSnapShot{
 		Stake: map[string]uint64{"credential": 1},
 		Delegations: map[string][]byte{
-			"credential": []byte{0x01, 0x02},
+			"credential": {0x01, 0x02},
 		},
 	}
 
 	reason := emptyRewardSeedFailureReason(&pools)
-	require.Equal(t,
+	require.Equal(
+		t,
 		"derived reward basis contains no pool inputs: pool 0102 has no parameters",
 		reason,
 	)

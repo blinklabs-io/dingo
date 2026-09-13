@@ -24,7 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
-	"github.com/blinklabs-io/gouroboros"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -442,7 +442,11 @@ func newChainsyncRollbackFixtureWithBus(
 	ancestorNonce := []byte("nonce-ancestor")
 	currentNonce := []byte("nonce-current")
 	require.NoError(t, db.SetBlockNonce(
-		ancestorTip.Point.Hash, ancestorTip.Point.Slot, ancestorNonce, true, nil,
+		ancestorTip.Point.Hash,
+		ancestorTip.Point.Slot,
+		ancestorNonce,
+		true,
+		nil,
 	))
 	require.NoError(t, db.SetBlockNonce(
 		currentTip.Point.Hash, currentTip.Point.Slot, currentNonce, false, nil,

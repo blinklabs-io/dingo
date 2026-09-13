@@ -21,7 +21,11 @@ func TestDingoDBPropagatesApplyingEpochLookupError(t *testing.T) {
 	pool := testPoolKeyHash(t, 0x41)
 	require.NoError(t, gdb.Exec(
 		`INSERT INTO reward_pool_input (pool_key_hash, epoch, delegated_stake, delegator_count)
-		 VALUES (?, ?, ?, ?)`, pool, 9, "1000", 1,
+		 VALUES (?, ?, ?, ?)`,
+		pool,
+		9,
+		"1000",
+		1,
 	).Error)
 	require.NoError(t, gdb.Exec(
 		`INSERT INTO tip (hash, slot, block_number) VALUES (?, ?, ?)`,
@@ -68,7 +72,11 @@ func TestMissingApplyingEpochIsThePendingCase(t *testing.T) {
 		pool := testPoolKeyHash(t, 0x43)
 		require.NoError(t, gdb.Exec(
 			`INSERT INTO reward_pool_input (pool_key_hash, epoch, delegated_stake, delegator_count)
-			 VALUES (?, ?, ?, ?)`, pool, 9, "1000", 1,
+			 VALUES (?, ?, ?, ?)`,
+			pool,
+			9,
+			"1000",
+			1,
 		).Error)
 		require.NoError(t, gdb.Exec(
 			`INSERT INTO tip (hash, slot, block_number) VALUES (?, ?, ?)`,
@@ -115,7 +123,11 @@ func TestPositiveSlotWithoutTipHashIsNotPending(t *testing.T) {
 		pool := testPoolKeyHash(t, 0x45)
 		require.NoError(t, gdb.Exec(
 			`INSERT INTO reward_pool_input (pool_key_hash, epoch, delegated_stake, delegator_count)
-			 VALUES (?, ?, ?, ?)`, pool, 9, "1000", 1,
+			 VALUES (?, ?, ?, ?)`,
+			pool,
+			9,
+			"1000",
+			1,
 		).Error)
 		require.NoError(t, gdb.Exec(
 			`INSERT INTO tip (hash, slot, block_number) VALUES (?, ?, ?)`,
@@ -155,7 +167,11 @@ func TestZeroSlotWithTipHashIsNotPending(t *testing.T) {
 		pool := testPoolKeyHash(t, 0x47)
 		require.NoError(t, gdb.Exec(
 			`INSERT INTO reward_pool_input (pool_key_hash, epoch, delegated_stake, delegator_count)
-			 VALUES (?, ?, ?, ?)`, pool, 9, "1000", 1,
+			 VALUES (?, ?, ?, ?)`,
+			pool,
+			9,
+			"1000",
+			1,
 		).Error)
 		require.NoError(t, gdb.Exec(
 			`INSERT INTO tip (hash, slot, block_number) VALUES (?, ?, ?)`,
@@ -209,11 +225,19 @@ func TestComparePoolEpochUsesRewardsPending(t *testing.T) {
 	mismatches := ComparePoolEpoch(
 		"preview", 96, koios, dingo, time.Now(), 0, time.Time{}, false,
 	)
-	require.Equal(t, CategoryReferenceLag, memberRewardMismatch(mismatches).Category)
+	require.Equal(
+		t,
+		CategoryReferenceLag,
+		memberRewardMismatch(mismatches).Category,
+	)
 
 	dingo.RewardsPending = false
 	mismatches = ComparePoolEpoch(
 		"preview", 96, koios, dingo, time.Now(), 0, time.Time{}, false,
 	)
-	require.Equal(t, CategoryValueMismatch, memberRewardMismatch(mismatches).Category)
+	require.Equal(
+		t,
+		CategoryValueMismatch,
+		memberRewardMismatch(mismatches).Category,
+	)
 }

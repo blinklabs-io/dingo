@@ -15,6 +15,7 @@
 package docsparity_test
 
 import (
+	"maps"
 	"strings"
 	"testing"
 
@@ -53,15 +54,9 @@ func releaseStepEnv(
 	step releaseWorkflowStep,
 ) map[string]string {
 	env := make(map[string]string)
-	for key, value := range workflow.Env {
-		env[key] = value
-	}
-	for key, value := range job.Env {
-		env[key] = value
-	}
-	for key, value := range step.Env {
-		env[key] = value
-	}
+	maps.Copy(env, workflow.Env)
+	maps.Copy(env, job.Env)
+	maps.Copy(env, step.Env)
 	return env
 }
 

@@ -1448,13 +1448,35 @@ func TestProcessEpochOrphanedSiblingMissingReturnAccountGoesToTreasury(
 	childHash := testBytes(32, 56)
 
 	require.NoError(t, db.SetGovernanceProposal(
-		buildNoConfidenceProposal(t, parentHash, 0, 10, 30, parentReturnAddr, 100,
-			nil, nil, &ratifiedEpoch, &ratifiedSlot),
+		buildNoConfidenceProposal(
+			t,
+			parentHash,
+			0,
+			10,
+			30,
+			parentReturnAddr,
+			100,
+			nil,
+			nil,
+			&ratifiedEpoch,
+			&ratifiedSlot,
+		),
 		nil,
 	))
 	require.NoError(t, db.SetGovernanceProposal(
-		buildNoConfidenceProposal(t, childHash, 0, 12, 25, missingReturnAddr, 101,
-			nil, nil, nil, nil),
+		buildNoConfidenceProposal(
+			t,
+			childHash,
+			0,
+			12,
+			25,
+			missingReturnAddr,
+			101,
+			nil,
+			nil,
+			nil,
+			nil,
+		),
 		nil,
 	))
 

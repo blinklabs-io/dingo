@@ -660,7 +660,9 @@ func (n *Node) configValidate() error {
 					byronProtocolMagic,
 				)
 			}
-			if n.config.cfg.NetworkMagic != uint32(byronProtocolMagic) { // #nosec G115 -- range-checked above
+			if n.config.cfg.NetworkMagic != uint32(
+				byronProtocolMagic,
+			) { // #nosec G115 -- range-checked above
 				return fmt.Errorf(
 					"network magic (%d) doesn't match value from Byron genesis (%d)",
 					n.config.cfg.NetworkMagic,

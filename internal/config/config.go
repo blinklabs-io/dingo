@@ -519,15 +519,15 @@ type MidnightConfig struct {
 	// Enabled opts into running the Midnight indexer. Default false: an
 	// api-mode deployment that wants Midnight indexing must set this
 	// explicitly.
-	Enabled bool `yaml:"enabled"             envconfig:"DINGO_MIDNIGHT_ENABLED"`
+	Enabled bool `yaml:"enabled"           envconfig:"DINGO_MIDNIGHT_ENABLED"`
 	// ServerEnabled independently opts into the Midnight gRPC listener.
 	// Indexing and serving persisted Midnight rows are separate operations.
-	ServerEnabled bool `yaml:"serverEnabled"       envconfig:"DINGO_MIDNIGHT_SERVER_ENABLED"`
+	ServerEnabled bool `yaml:"serverEnabled"     envconfig:"DINGO_MIDNIGHT_SERVER_ENABLED"`
 	// ReflectionEnabled exposes gRPC service discovery when the server is
 	// enabled. It defaults off because reflection broadens the public surface.
-	ReflectionEnabled bool   `yaml:"reflectionEnabled"   envconfig:"DINGO_MIDNIGHT_REFLECTION_ENABLED"`
-	Port              uint   `yaml:"port"                envconfig:"DINGO_MIDNIGHT_PORT"`
-	Host              string `yaml:"host"                envconfig:"DINGO_MIDNIGHT_HOST"`
+	ReflectionEnabled bool   `yaml:"reflectionEnabled" envconfig:"DINGO_MIDNIGHT_REFLECTION_ENABLED"`
+	Port              uint   `yaml:"port"              envconfig:"DINGO_MIDNIGHT_PORT"`
+	Host              string `yaml:"host"              envconfig:"DINGO_MIDNIGHT_HOST"`
 
 	CNightPolicyID              string `yaml:"cnightPolicyId"`
 	CNightAssetName             string `yaml:"cnightAssetName"`
@@ -708,12 +708,12 @@ type Config struct {
 	// Block production configuration (SPO mode)
 	// Environment variables match cardano-node naming convention for compatibility
 	// Note: envconfig.Process("cardano", ...) adds "CARDANO_" prefix automatically
-	BlockProducer                 bool   `yaml:"blockProducer"                 envconfig:"BLOCK_PRODUCER"`
-	ShelleyVRFKey                 string `yaml:"shelleyVrfKey"                 envconfig:"SHELLEY_VRF_KEY"`
-	ShelleyKESKey                 string `yaml:"shelleyKesKey"                 envconfig:"SHELLEY_KES_KEY"`
-	ShelleyOperationalCertificate string `yaml:"shelleyOperationalCertificate" envconfig:"SHELLEY_OPERATIONAL_CERTIFICATE"`
-	ForgeSyncToleranceSlots       uint64 `yaml:"forgeSyncToleranceSlots"       envconfig:"DINGO_FORGE_SYNC_TOLERANCE_SLOTS"`
-	ForgeStaleGapThresholdSlots   uint64 `yaml:"forgeStaleGapThresholdSlots"   envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
+	BlockProducer                 bool   `yaml:"blockProducer"                      envconfig:"BLOCK_PRODUCER"`
+	ShelleyVRFKey                 string `yaml:"shelleyVrfKey"                      envconfig:"SHELLEY_VRF_KEY"`
+	ShelleyKESKey                 string `yaml:"shelleyKesKey"                      envconfig:"SHELLEY_KES_KEY"`
+	ShelleyOperationalCertificate string `yaml:"shelleyOperationalCertificate"      envconfig:"SHELLEY_OPERATIONAL_CERTIFICATE"`
+	ForgeSyncToleranceSlots       uint64 `yaml:"forgeSyncToleranceSlots"            envconfig:"DINGO_FORGE_SYNC_TOLERANCE_SLOTS"`
+	ForgeStaleGapThresholdSlots   uint64 `yaml:"forgeStaleGapThresholdSlots"        envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
 	// ForgePrimaryChainTipToleranceSlots bounds how far the ledger-applied tip
 	// may trail this node's own primary chain tip before forging is skipped.
 	// Raise it only if the ledger pipeline is legitimately slow on this
@@ -728,13 +728,13 @@ type Config struct {
 	// this node holds is a BLOCK, while the upstream target is published when
 	// a HEADER is admitted, so the two differ by the inter-block gap during
 	// ordinary operation. Set it well above the expected gap for the network.
-	ForgeUpstreamStalenessSlots uint64 `yaml:"forgeUpstreamStalenessSlots" envconfig:"DINGO_FORGE_UPSTREAM_STALENESS_SLOTS"`
+	ForgeUpstreamStalenessSlots uint64 `yaml:"forgeUpstreamStalenessSlots"        envconfig:"DINGO_FORGE_UPSTREAM_STALENESS_SLOTS"`
 	// ForgeAppliedTipStalenessSlots bounds how many slots older than the
 	// current slot the newest block this node holds may be before forging is
 	// skipped. 0 (the default) disables this wall-clock backstop; it is
 	// off by default because on a low-throughput chain a fixed bound refuses
 	// constantly. Set it only where the block interval is known and bounded.
-	ForgeAppliedTipStalenessSlots uint64 `yaml:"forgeAppliedTipStalenessSlots" envconfig:"DINGO_FORGE_APPLIED_TIP_STALENESS_SLOTS"`
+	ForgeAppliedTipStalenessSlots uint64 `yaml:"forgeAppliedTipStalenessSlots"      envconfig:"DINGO_FORGE_APPLIED_TIP_STALENESS_SLOTS"`
 	// ForgeEndorserBlockStalenessSlots bounds how far a corroborated Leios
 	// endorser block may lead the ledger-applied tip before forging is
 	// skipped. 0 (the default) disables it.
@@ -745,11 +745,11 @@ type Config struct {
 	// that watermark is monotonic and never lowered, so an always-on bound
 	// sharing the local tolerance would tie two unrelated risk budgets to one
 	// number and could withhold leader slots indefinitely.
-	ForgeEndorserBlockStalenessSlots uint64 `yaml:"forgeEndorserBlockStalenessSlots" envconfig:"DINGO_FORGE_ENDORSER_BLOCK_STALENESS_SLOTS"`
+	ForgeEndorserBlockStalenessSlots uint64 `yaml:"forgeEndorserBlockStalenessSlots"   envconfig:"DINGO_FORGE_ENDORSER_BLOCK_STALENESS_SLOTS"`
 	// ValidateForgedBlock self-validates locally-forged blocks before
 	// adoption and diffusion. Defaults to true (fail closed); set to false
 	// only to explicitly opt out.
-	ValidateForgedBlock bool `yaml:"validateForgedBlock"           envconfig:"DINGO_VALIDATE_FORGED_BLOCK"`
+	ValidateForgedBlock bool `yaml:"validateForgedBlock"                envconfig:"DINGO_VALIDATE_FORGED_BLOCK"`
 
 	// MinPoolMargin is the CIP-23 minimum pool margin (minimum variable fee) in
 	// basis points, [0, 10000] (150 = 1.5%); 0 disables it. Consensus-affecting

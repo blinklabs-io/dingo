@@ -148,7 +148,11 @@ func (n *Node) shutdown() error {
 	// failed startup; waiting here keeps the phase-ordered shutdown from
 	// concurrently closing a component the startup stack is stopping.
 	if err := lockMutexContext(ctx, &n.startupLifecycleMu); err != nil {
-		return fmt.Errorf("shutdown startup lifecycle lock: %w: %w", errShutdownLifecycleGate, err)
+		return fmt.Errorf(
+			"shutdown startup lifecycle lock: %w: %w",
+			errShutdownLifecycleGate,
+			err,
+		)
 	}
 	defer n.startupLifecycleMu.Unlock()
 	// Restore and Truncate hold these gates while quiescing, closing, and
@@ -157,11 +161,19 @@ func (n *Node) shutdown() error {
 	// their storage; otherwise a concurrent live operation can use a resource
 	// while shutdown tears it down.
 	if err := lockMutexContext(ctx, &n.liveLifecycleMu); err != nil {
-		return fmt.Errorf("shutdown live lifecycle lock: %w: %w", errShutdownLifecycleGate, err)
+		return fmt.Errorf(
+			"shutdown live lifecycle lock: %w: %w",
+			errShutdownLifecycleGate,
+			err,
+		)
 	}
 	defer n.liveLifecycleMu.Unlock()
 	if err := lockMutexContext(ctx, &n.snapshotMu); err != nil {
-		return fmt.Errorf("shutdown snapshot lock: %w: %w", errShutdownLifecycleGate, err)
+		return fmt.Errorf(
+			"shutdown snapshot lock: %w: %w",
+			errShutdownLifecycleGate,
+			err,
+		)
 	}
 	defer n.snapshotMu.Unlock()
 

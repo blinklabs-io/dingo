@@ -165,7 +165,9 @@ func newRemoteRestoreHost(
 				badger.WithDataDir(blobDir),
 				badger.WithDeferOpen(),
 				badger.WithGc(false),
-				badger.WithValueLogFileSize(testutil.TestBadgerValueLogFileSize),
+				badger.WithValueLogFileSize(
+					testutil.TestBadgerValueLogFileSize,
+				),
 				badger.WithMemTableSize(testutil.TestBadgerMemTableSize),
 			)
 			if err != nil {

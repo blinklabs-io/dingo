@@ -46,24 +46,56 @@ func TestHeaderAlternativeBound(t *testing.T) {
 		require.True(t, s.RecordHeader(conn, point(n)))
 		require.False(t, s.RecordHeader(conn, point(n)))
 		if n > 0 {
-			testutil.RequireReceive(t, events, time.Second, "fork event below capacity")
+			testutil.RequireReceive(
+				t,
+				events,
+				time.Second,
+				"fork event below capacity",
+			)
 		}
 	}
 	require.Equal(t, bound, len(s.seenHeaders[100]))
 	for n := uint64(bound); n < 1024; n++ {
-		require.True(t, s.RecordHeader(conn, point(n)), "capacity must not suppress an unseen eligible header")
-		require.False(t, s.RecordHeader(conn, point(n)), "latest overflow header remains deduplicated")
+		require.True(
+			t,
+			s.RecordHeader(conn, point(n)),
+			"capacity must not suppress an unseen eligible header",
+		)
+		require.False(
+			t,
+			s.RecordHeader(conn, point(n)),
+			"latest overflow header remains deduplicated",
+		)
 	}
-	require.Equal(t, bound, len(s.seenHeaders[100]), "same-slot header retention must remain bounded")
-	testutil.RequireNoReceive(t, events, 50*time.Millisecond, "saturated slot must not emit more fork events")
+	require.Equal(
+		t,
+		bound,
+		len(s.seenHeaders[100]),
+		"same-slot header retention must remain bounded",
+	)
+	testutil.RequireNoReceive(
+		t,
+		events,
+		50*time.Millisecond,
+		"saturated slot must not emit more fork events",
+	)
 	// Alternating overflow identities may miss the bounded cache, but cannot
 	// grow retention or reset the fork-event budget.
 	for n := range 100 {
 		s.RecordHeader(conn, point(2000+uint64(n%2)))
 	}
 	require.Equal(t, bound, len(s.seenHeaders[100]))
-	testutil.RequireNoReceive(t, events, 50*time.Millisecond, "overflow replacement must not replenish event budget")
-	require.False(t, s.RecordHeader(conn, point(0)), "first observation remains deduplicated")
+	testutil.RequireNoReceive(
+		t,
+		events,
+		50*time.Millisecond,
+		"overflow replacement must not replenish event budget",
+	)
+	require.False(
+		t,
+		s.RecordHeader(conn, point(0)),
+		"first observation remains deduplicated",
+	)
 	for _, clear := range []struct {
 		name string
 		fn   func()
@@ -77,7 +109,12 @@ func TestHeaderAlternativeBound(t *testing.T) {
 			require.Empty(t, s.seenHeaders)
 			require.True(t, s.RecordHeader(conn, point(0)))
 			require.True(t, s.RecordHeader(conn, point(1)))
-			testutil.RequireReceive(t, events, time.Second, "cleared slot regains fork detection")
+			testutil.RequireReceive(
+				t,
+				events,
+				time.Second,
+				"cleared slot regains fork detection",
+			)
 		})
 	}
 }

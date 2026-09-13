@@ -36,9 +36,25 @@ func TestCreditedAccountRewardsSkipsUncredited(t *testing.T) {
 	)
 
 	rows, errs := creditedAccountRewards([]*models.RewardAccountOutput{
-		{StakingKey: unspendable, RewardType: "member", Amount: 69019, Spendable: false},
-		{StakingKey: guarded, RewardType: "member", Amount: 1409915, Spendable: true, Guarded: true},
-		{StakingKey: credited, RewardType: "member", Amount: 500, Spendable: true},
+		{
+			StakingKey: unspendable,
+			RewardType: "member",
+			Amount:     69019,
+			Spendable:  false,
+		},
+		{
+			StakingKey: guarded,
+			RewardType: "member",
+			Amount:     1409915,
+			Spendable:  true,
+			Guarded:    true,
+		},
+		{
+			StakingKey: credited,
+			RewardType: "member",
+			Amount:     500,
+			Spendable:  true,
+		},
 	})
 	require.Empty(t, errs)
 	require.Len(t, rows, 1,
@@ -59,7 +75,12 @@ func TestCreditedAccountRewardsKeepsLeaderRewards(t *testing.T) {
 		"F8ADA2B9A94FDD95D35D482BDDDF5A66FFA5B330B539B4613255C1DC",
 	)
 	rows, errs := creditedAccountRewards([]*models.RewardAccountOutput{
-		{StakingKey: key, RewardType: "leader", Amount: 1515378117, Spendable: true},
+		{
+			StakingKey: key,
+			RewardType: "leader",
+			Amount:     1515378117,
+			Spendable:  true,
+		},
 	})
 	require.Empty(t, errs)
 	require.Len(t, rows, 1)
@@ -73,7 +94,12 @@ func TestCreditedAccountRewardsReportsDecodeFailure(t *testing.T) {
 	t.Parallel()
 
 	rows, errs := creditedAccountRewards([]*models.RewardAccountOutput{
-		{StakingKey: []byte{0x01, 0x02}, RewardType: "member", Amount: 1, Spendable: true},
+		{
+			StakingKey: []byte{0x01, 0x02},
+			RewardType: "member",
+			Amount:     1,
+			Spendable:  true,
+		},
 	})
 	assert.Empty(t, rows)
 	require.Len(t, errs, 1)
@@ -95,7 +121,12 @@ func TestCreditedAccountRewardsReportsUncreditedDecodeFailure(t *testing.T) {
 	t.Parallel()
 
 	rows, errs := creditedAccountRewards([]*models.RewardAccountOutput{
-		{StakingKey: []byte{0x01, 0x02}, RewardType: "member", Amount: 1, Spendable: false},
+		{
+			StakingKey: []byte{0x01, 0x02},
+			RewardType: "member",
+			Amount:     1,
+			Spendable:  false,
+		},
 	})
 	assert.Empty(t, rows, "an uncredited row still never enters the comparison")
 	require.Len(t, errs, 1, "but its corrupt credential is still reported")

@@ -197,7 +197,9 @@ func TestCaptureEpochBoundaryAgreesOnPointerStake(t *testing.T) {
 // reward_live_stake was populated -- a full RebuildRewardLiveStake pass or the
 // normal incremental per-write refresh -- or a node that rebuilds would
 // silently start disagreeing with one that never has.
-func TestRewardLiveStakeRebuildAgreesWithIncrementalOnPointerAddresses(t *testing.T) {
+func TestRewardLiveStakeRebuildAgreesWithIncrementalOnPointerAddresses(
+	t *testing.T,
+) {
 	db := setupTestDB(t)
 	seedEpochs(t, db, []models.Epoch{
 		{EpochId: 0, StartSlot: 0, LengthInSlots: 432_000},
@@ -293,7 +295,9 @@ func seedEpochRow(
 // the epoch table sees only the outgoing epoch's row on the authoritative route
 // and both rows on the persist-time route. Both must still report the incoming
 // era's answer.
-func TestCaptureEpochBoundaryAgreesOnPointerStakeAcrossTheEraCutover(t *testing.T) {
+func TestCaptureEpochBoundaryAgreesOnPointerStakeAcrossTheEraCutover(
+	t *testing.T,
+) {
 	for _, tc := range []struct {
 		name        string
 		computeSnap bool

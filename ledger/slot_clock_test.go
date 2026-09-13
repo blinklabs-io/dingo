@@ -388,7 +388,9 @@ func TestSlotClockStartOverlappingStopWaitsOnlyForStoppedGeneration(
 		time.Second,
 		"stopped generation should release its lifecycle state",
 	)
-	replacementCtx, cancelReplacement := context.WithCancel(context.Background())
+	replacementCtx, cancelReplacement := context.WithCancel(
+		context.Background(),
+	)
 	defer cancelReplacement()
 	clock.Start(replacementCtx)
 	releaseOld()
@@ -406,7 +408,11 @@ func TestSlotClockStartOverlappingStopWaitsOnlyForStoppedGeneration(
 	clock.mu.RLock()
 	replacementRunning := clock.running
 	clock.mu.RUnlock()
-	require.True(t, replacementRunning, "overlapping Start should remain running")
+	require.True(
+		t,
+		replacementRunning,
+		"overlapping Start should remain running",
+	)
 
 	cancelReplacement()
 	clock.Stop()
@@ -637,7 +643,11 @@ func TestSlotClockSubscriptionAfterStopIsClosed(t *testing.T) {
 			clock.Stop()
 
 			_, ok := <-clock.Subscribe()
-			assert.False(t, ok, "subscriptions registered after Stop must be closed")
+			assert.False(
+				t,
+				ok,
+				"subscriptions registered after Stop must be closed",
+			)
 		})
 	}
 }

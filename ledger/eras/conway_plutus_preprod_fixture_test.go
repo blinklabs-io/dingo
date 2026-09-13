@@ -125,7 +125,9 @@ func readPreprodFixture(t *testing.T, name string) []byte {
 	return raw
 }
 
-func preprodFixtureProtocolParams(t *testing.T) *conway.ConwayProtocolParameters {
+func preprodFixtureProtocolParams(
+	t *testing.T,
+) *conway.ConwayProtocolParameters {
 	t.Helper()
 	var costModels struct {
 		PlutusV3 []int64 `json:"PlutusV3"`

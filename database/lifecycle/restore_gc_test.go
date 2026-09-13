@@ -78,7 +78,9 @@ func TestRestoreResolvesBlobStoreWithLoadRunMode(t *testing.T) {
 				badger.WithDataDir(deps.DataDir),
 				badger.WithGc(deps.RunMode != "load"),
 				badger.WithDeferOpen(),
-				badger.WithValueLogFileSize(testutil.TestBadgerValueLogFileSize),
+				badger.WithValueLogFileSize(
+					testutil.TestBadgerValueLogFileSize,
+				),
 				badger.WithMemTableSize(testutil.TestBadgerMemTableSize),
 			)
 			if err != nil {

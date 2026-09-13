@@ -353,20 +353,29 @@ func TestVoteManagerNonSeatedOutsideWindowUsesNotSeatedReason(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	logBuf := &syncBuffer{}
 	slots := &fakeSlotProvider{slot: 1000}
-	fixture := newManagerFixture(t, func(_ *managerFixture, cfg *VoteManagerConfig) {
-		cfg.SlotProvider = slots
-		cfg.VoteWindowSlots = headerArmingVoteWindow
-		cfg.PromRegistry = reg
-		cfg.Logger = slog.New(slog.NewJSONHandler(
-			logBuf,
-			&slog.HandlerOptions{Level: slog.LevelWarn},
-		))
-	})
+	fixture := newManagerFixture(
+		t,
+		func(_ *managerFixture, cfg *VoteManagerConfig) {
+			cfg.SlotProvider = slots
+			cfg.VoteWindowSlots = headerArmingVoteWindow
+			cfg.PromRegistry = reg
+			cfg.Logger = slog.New(slog.NewJSONHandler(
+				logBuf,
+				&slog.HandlerOptions{Level: slog.LevelWarn},
+			))
+		},
+	)
 	var poolHash lcommon.PoolKeyHash
 	decoded, err := hex.DecodeString(testPoolHash(99))
 	require.NoError(t, err)
 	copy(poolHash[:], decoded)
-	require.NoError(t, fixture.mgr.EnableVoting(poolHash, fixture.keys[headerArmingSeatedVoterId]))
+	require.NoError(
+		t,
+		fixture.mgr.EnableVoting(
+			poolHash,
+			fixture.keys[headerArmingSeatedVoterId],
+		),
+	)
 
 	ebHash := lcommon.NewBlake2b256([]byte("unseated-eb"))
 	rbHash := lcommon.NewBlake2b256([]byte("unseated-rb"))
@@ -375,10 +384,14 @@ func TestVoteManagerNonSeatedOutsideWindowUsesNotSeatedReason(t *testing.T) {
 	fixture.mgr.ObserveAnnouncement(staleSlot, rbHash, ebHash)
 
 	assert.Equal(t, float64(1), promtestutil.ToFloat64(
-		fixture.mgr.metrics.votesNotEmittedTotal.WithLabelValues(voteNotEmittedNotSeated),
+		fixture.mgr.metrics.votesNotEmittedTotal.WithLabelValues(
+			voteNotEmittedNotSeated,
+		),
 	))
 	assert.Equal(t, float64(0), promtestutil.ToFloat64(
-		fixture.mgr.metrics.votesNotEmittedTotal.WithLabelValues(voteNotEmittedSlotWindow),
+		fixture.mgr.metrics.votesNotEmittedTotal.WithLabelValues(
+			voteNotEmittedSlotWindow,
+		),
 	))
 	assert.NotContains(
 		t,

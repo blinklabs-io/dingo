@@ -1454,7 +1454,10 @@ func EvaluateTxConway(
 		}
 		retTotalExUnits, err = SafeAddExUnits(retTotalExUnits, usedBudget)
 		if err != nil {
-			return 0, lcommon.ExUnits{}, nil, fmt.Errorf("aggregate execution units: %w", err)
+			return 0, lcommon.ExUnits{}, nil, fmt.Errorf(
+				"aggregate execution units: %w",
+				err,
+			)
 		}
 		retRedeemerExUnits[lcommon.RedeemerKey{
 			Tag:   redeemer.Tag,

@@ -1604,7 +1604,10 @@ func parseCommitteeVState(
 			if coldErr != nil || hotErr != nil {
 				continue
 			}
-			hotKeys = append(hotKeys, ParsedCommitteeHotKey{Cold: cold, Hot: hot})
+			hotKeys = append(
+				hotKeys,
+				ParsedCommitteeHotKey{Cold: cold, Hot: hot},
+			)
 		}
 	}
 	if len(committeeFields) < 2 {
