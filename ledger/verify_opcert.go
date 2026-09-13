@@ -281,19 +281,26 @@ func verifyOpCertHeaderCrypto(
 	if err := verifyOpCertColdSignature(opCert, coldVkey[:]); err != nil {
 		return fmt.Errorf("opcert cold-key signature invalid: %w", err)
 	}
-	// KES expiry needs both genesis parameters. ValidateKesPeriod errors when
-	// either is zero, so when they're unavailable we fall back to the lighter
-	// future-cert KES guard that VerifyKesComponents already performed inside
-	// VerifyBlock rather than failing the block.
-	if slotsPerKesPeriod > 0 && maxKesEvolutions > 0 {
-		if _, err := ledger.ValidateKesPeriod(
-			opCert.KesPeriod,
-			slot,
+	// KES expiry needs both genesis parameters. Unlike an absent opcert
+	// (handled above), a missing or zero genesis parameter here is a
+	// configuration failure, not a case to validate around: fail closed
+	// rather than falling back to the lighter future-cert-only KES guard
+	// VerifyKesComponents already ran inside VerifyBlock, which never
+	// rejects an expired opcert.
+	if slotsPerKesPeriod == 0 || maxKesEvolutions == 0 {
+		return fmt.Errorf(
+			"opcert KES period validation requires slotsPerKesPeriod and maxKesEvolutions from Shelley genesis, got %d and %d",
 			slotsPerKesPeriod,
 			maxKesEvolutions,
-		); err != nil {
-			return fmt.Errorf("opcert KES period invalid: %w", err)
-		}
+		)
+	}
+	if _, err := ledger.ValidateKesPeriod(
+		opCert.KesPeriod,
+		slot,
+		slotsPerKesPeriod,
+		maxKesEvolutions,
+	); err != nil {
+		return fmt.Errorf("opcert KES period invalid: %w", err)
 	}
 	return nil
 }

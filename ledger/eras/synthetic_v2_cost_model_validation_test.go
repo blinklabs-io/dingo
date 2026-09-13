@@ -117,6 +117,14 @@ func TestValidateTxBabbageAllowsPlutusV2WhenNotSynthetic(t *testing.T) {
 				Steps:  10_000_000,
 				Memory: 10_000_000,
 			},
+			// A real (non-synthetic) PlutusV2 cost model, same as production
+			// carries once an on-chain update lands. requiredCostModel
+			// (issue #3528) fails closed on a missing entry, so this must be
+			// populated for the "not synthetic" case to actually reach
+			// evaluation instead of being rejected before it ever does.
+			CostModels: map[uint][]int64{
+				1: defaultMachineCostModel(t, lang.LanguageVersionV2),
+			},
 		},
 	)
 
@@ -151,6 +159,9 @@ func TestValidateTxBabbageAllowsPlutusV2WhenLedgerStateReportsNothing(
 			MaxTxExUnits: lcommon.ExUnits{
 				Steps:  10_000_000,
 				Memory: 10_000_000,
+			},
+			CostModels: map[uint][]int64{
+				1: defaultMachineCostModel(t, lang.LanguageVersionV2),
 			},
 		},
 	)
@@ -220,6 +231,9 @@ func TestEvaluateTxBabbageAllowsPlutusV2WhenNotSynthetic(t *testing.T) {
 				Steps:  10_000_000,
 				Memory: 10_000_000,
 			},
+			CostModels: map[uint][]int64{
+				1: defaultMachineCostModel(t, lang.LanguageVersionV2),
+			},
 		},
 	)
 
@@ -288,6 +302,9 @@ func TestValidateTxConwayAllowsPlutusV2WhenNotSynthetic(t *testing.T) {
 			MaxTxExUnits: lcommon.ExUnits{
 				Steps:  10_000_000,
 				Memory: 10_000_000,
+			},
+			CostModels: map[uint][]int64{
+				1: defaultMachineCostModel(t, lang.LanguageVersionV2),
 			},
 		},
 	)
@@ -390,6 +407,9 @@ func TestEvaluateTxConwayAllowsPlutusV2WhenNotSynthetic(t *testing.T) {
 			MaxTxExUnits: lcommon.ExUnits{
 				Steps:  10_000_000,
 				Memory: 10_000_000,
+			},
+			CostModels: map[uint][]int64{
+				1: defaultMachineCostModel(t, lang.LanguageVersionV2),
 			},
 		},
 	)

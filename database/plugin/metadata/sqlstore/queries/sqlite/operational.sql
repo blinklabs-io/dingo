@@ -17,6 +17,13 @@ FROM network_state
 ORDER BY slot DESC
 LIMIT 1;
 
+-- name: GetNetworkStateAsOfSlot :one
+SELECT id, treasury, reserves, slot
+FROM network_state
+WHERE slot <= ?
+ORDER BY slot DESC
+LIMIT 1;
+
 -- name: SetNetworkState :exec
 INSERT INTO network_state (treasury, reserves, slot)
 VALUES (?, ?, ?)

@@ -475,7 +475,7 @@ func applyRootPeerTargetFallback(cfg *config.Config, target int) {
 // values Run derives from it (the resolved cardano-node config, listeners,
 // peer-sharing decision, storage mode, and parsed durations/strategy), into
 // a dingo.Config. It is split out from Run so that the full field mapping
-// -- including cfg.API, the shared api.tls/api.auth policy defaults -- can
+// -- including cfg.API, the shared api.tls policy defaults -- can
 // be asserted directly in tests without needing to start the node.
 func buildDingoConfig(
 	cfg *config.Config,
@@ -590,7 +590,6 @@ func buildDingoConfig(
 			Enabled:                     cfg.Midnight.Enabled,
 			ServerEnabled:               cfg.Midnight.ServerEnabled,
 			ReflectionEnabled:           cfg.Midnight.ReflectionEnabled,
-			AllowInsecureRemote:         cfg.Midnight.AllowInsecureRemote,
 			Port:                        cfg.Midnight.Port,
 			Host:                        cfg.Midnight.Host,
 			CNightPolicyID:              cfg.Midnight.CNightPolicyID,
@@ -694,6 +693,18 @@ func buildDingoConfig(
 		),
 		dingo.WithForgeStaleGapThresholdSlots(
 			cfg.ForgeStaleGapThresholdSlots,
+		),
+		dingo.WithForgePrimaryChainTipToleranceSlots(
+			cfg.ForgePrimaryChainTipToleranceSlots,
+		),
+		dingo.WithForgeUpstreamStalenessSlots(
+			cfg.ForgeUpstreamStalenessSlots,
+		),
+		dingo.WithForgeAppliedTipStalenessSlots(
+			cfg.ForgeAppliedTipStalenessSlots,
+		),
+		dingo.WithForgeEndorserBlockStalenessSlots(
+			cfg.ForgeEndorserBlockStalenessSlots,
 		),
 		dingo.WithValidateForgedBlock(cfg.ValidateForgedBlock),
 		// CIP-0163 reward-account inactivity expiry (consensus-affecting)

@@ -43,7 +43,7 @@ import (
 func TestServerRebindsAfterStop(t *testing.T) {
 	u, addr := startOnFreePort(
 		t, t.Context(),
-		apiconfig.EffectiveTLS{}, apiconfig.EffectiveAuth{},
+		apiconfig.EffectiveTLS{},
 	)
 	stopUtxorpc(t, u)
 

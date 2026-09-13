@@ -84,7 +84,6 @@ func FromContext(ctx context.Context) *Config {
 }
 
 const (
-	DefaultAPIBindAddr                 = "127.0.0.1"
 	DefaultBlobPlugin                  = "badger"
 	DefaultDebugBindAddr               = "127.0.0.1"
 	DefaultMetadataPlugin              = "sqlite"
@@ -92,10 +91,38 @@ const (
 	DefaultRejectionWatermark          = 1.0
 	DefaultForgeSyncToleranceSlots     = 100
 	DefaultForgeStaleGapThresholdSlots = 1000
-	DefaultMempoolCapacityPraos        = 1048576  // 1 MiB
-	DefaultMempoolCapacityLeios        = 26214400 // 25 MiB
-	DefaultMempoolRevalidationDeltaCap = 64
-	DefaultMempoolImplementation       = "fifo"
+	// DefaultForgePrimaryChainTipToleranceSlots bounds how far the
+	// ledger-applied tip may trail this node's own primary chain tip before
+	// forging is skipped. Small by design: both tips are local and are meant
+	// to describe the same chain position, unlike ForgeSyncToleranceSlots
+	// which tolerates trailing the network while catching up.
+	DefaultForgePrimaryChainTipToleranceSlots = 5
+	// DefaultForgeUpstreamStalenessSlots is 0, which disables the upstream
+	// staleness bound. It is opt-in because the newest block this node holds
+	// is a BLOCK while the upstream target is published at HEADER admission,
+	// so the two legitimately differ by the inter-block gap and a small
+	// always-on bound refuses leader slots during ordinary operation.
+	DefaultForgeUpstreamStalenessSlots = 0
+	// DefaultForgeAppliedTipStalenessSlots is 0, which disables the wall-clock
+	// staleness backstop. It is off by default because "how old is my newest
+	// block" tracks the block interval, so any fixed bound refuses constantly
+	// on a low-throughput chain; set it only where the block interval is known
+	// and bounded.
+	DefaultForgeAppliedTipStalenessSlots = 0
+	// DefaultForgeEndorserBlockStalenessSlots is 0, which disables the
+	// endorser-block staleness bound. It is opt-in for the same reason the
+	// other two are: the corroborated endorser-block slot is a network-stage
+	// watermark published at leios-notify announcement time, while the applied
+	// tip is a locally applied BLOCK, so the two legitimately differ during
+	// ordinary operation. The watermark is also monotonic and never lowered on
+	// a fork, so an always-on bound can withhold leader slots for as long as
+	// the local chain sits below a slot corroborated for a chain this node
+	// does not adopt.
+	DefaultForgeEndorserBlockStalenessSlots = 0
+	DefaultMempoolCapacityPraos             = 1048576  // 1 MiB
+	DefaultMempoolCapacityLeios             = 26214400 // 25 MiB
+	DefaultMempoolRevalidationDeltaCap      = 64
+	DefaultMempoolImplementation            = "fifo"
 )
 
 // RunMode represents the operational mode of the dingo node
@@ -498,13 +525,9 @@ type MidnightConfig struct {
 	ServerEnabled bool `yaml:"serverEnabled"       envconfig:"DINGO_MIDNIGHT_SERVER_ENABLED"`
 	// ReflectionEnabled exposes gRPC service discovery when the server is
 	// enabled. It defaults off because reflection broadens the public surface.
-	ReflectionEnabled bool `yaml:"reflectionEnabled"   envconfig:"DINGO_MIDNIGHT_REFLECTION_ENABLED"`
-	// AllowInsecureRemote permits a plaintext listener on a non-loopback
-	// address. It is an explicit escape hatch for deployments that provide
-	// transport security outside Dingo.
-	AllowInsecureRemote bool   `yaml:"allowInsecureRemote" envconfig:"DINGO_MIDNIGHT_ALLOW_INSECURE_REMOTE"`
-	Port                uint   `yaml:"port"                envconfig:"DINGO_MIDNIGHT_PORT"`
-	Host                string `yaml:"host"                envconfig:"DINGO_MIDNIGHT_HOST"`
+	ReflectionEnabled bool   `yaml:"reflectionEnabled"   envconfig:"DINGO_MIDNIGHT_REFLECTION_ENABLED"`
+	Port              uint   `yaml:"port"                envconfig:"DINGO_MIDNIGHT_PORT"`
+	Host              string `yaml:"host"                envconfig:"DINGO_MIDNIGHT_HOST"`
 
 	CNightPolicyID              string `yaml:"cnightPolicyId"`
 	CNightAssetName             string `yaml:"cnightAssetName"`
@@ -529,30 +552,26 @@ func DefaultMidnightConfig() MidnightConfig {
 
 type Config struct {
 	Plugins PluginsConfig `yaml:"plugins"`
-	// API holds shared TLS/auth policy defaults for every selected
+	// API holds shared TLS policy defaults for every selected
 	// plugins.api.* provider. See APIConfig's own doc comment.
-	API             APIConfig `yaml:"api"`
-	TlsKeyFilePath  string    `yaml:"tlsKeyFilePath"                      envconfig:"TLS_KEY_FILE_PATH"`
-	Topology        string    `yaml:"topology"`
-	CardanoConfig   string    `yaml:"cardanoConfig"                       envconfig:"config"`
-	DatabasePath    string    `yaml:"databasePath"                                                                                 split_words:"true"`
-	SocketPath      string    `yaml:"socketPath"                                                                                   split_words:"true"`
-	TlsCertFilePath string    `yaml:"tlsCertFilePath"                     envconfig:"TLS_CERT_FILE_PATH"`
-	BindAddr        string    `yaml:"bindAddr"                                                                                     split_words:"true"`
-	// APIBindAddr is the interface used by the Blockfrost, Mesh, and UTxO
-	// RPC listeners. It is separate from BindAddr because the latter also
-	// serves the relay and metrics listeners.
-	APIBindAddr            string   `yaml:"apiBindAddr"                       envconfig:"DINGO_API_BIND_ADDR"`
-	PrivateBindAddr        string   `yaml:"privateBindAddr"                                                                              split_words:"true"`
-	ShutdownTimeout        string   `yaml:"shutdownTimeout"                                                                              split_words:"true"`
-	LedgerCatchupTimeout   string   `yaml:"ledgerCatchupTimeout"                envconfig:"DINGO_LEDGER_CATCHUP_TIMEOUT"`
-	Network                string   `yaml:"network"`
-	NetworkMagic           uint32   `yaml:"networkMagic"                                                                                 split_words:"true"`
-	PrivatePort            uint     `yaml:"privatePort"                                                                                  split_words:"true"`
-	RelayPort              uint     `yaml:"relayPort"                           envconfig:"port"`
-	BarkBaseUrl            string   `yaml:"barkBaseUrl"                         envconfig:"DINGO_BARK_BASE_URL"`
-	BarkBlockDownloadHosts []string `yaml:"barkBlockDownloadHosts"              envconfig:"DINGO_BARK_BLOCK_DOWNLOAD_HOSTS"`
-	BarkPort               uint     `yaml:"barkPort"                            envconfig:"DINGO_BARK_PORT"`
+	API                    APIConfig `yaml:"api"`
+	TlsKeyFilePath         string    `yaml:"tlsKeyFilePath"                      envconfig:"TLS_KEY_FILE_PATH"`
+	Topology               string    `yaml:"topology"`
+	CardanoConfig          string    `yaml:"cardanoConfig"                       envconfig:"config"`
+	DatabasePath           string    `yaml:"databasePath"                                                                                 split_words:"true"`
+	SocketPath             string    `yaml:"socketPath"                                                                                   split_words:"true"`
+	TlsCertFilePath        string    `yaml:"tlsCertFilePath"                     envconfig:"TLS_CERT_FILE_PATH"`
+	BindAddr               string    `yaml:"bindAddr"                                                                                     split_words:"true"`
+	PrivateBindAddr        string    `yaml:"privateBindAddr"                                                                              split_words:"true"`
+	ShutdownTimeout        string    `yaml:"shutdownTimeout"                                                                              split_words:"true"`
+	LedgerCatchupTimeout   string    `yaml:"ledgerCatchupTimeout"                envconfig:"DINGO_LEDGER_CATCHUP_TIMEOUT"`
+	Network                string    `yaml:"network"`
+	NetworkMagic           uint32    `yaml:"networkMagic"                                                                                 split_words:"true"`
+	PrivatePort            uint      `yaml:"privatePort"                                                                                  split_words:"true"`
+	RelayPort              uint      `yaml:"relayPort"                           envconfig:"port"`
+	BarkBaseUrl            string    `yaml:"barkBaseUrl"                         envconfig:"DINGO_BARK_BASE_URL"`
+	BarkBlockDownloadHosts []string  `yaml:"barkBlockDownloadHosts"              envconfig:"DINGO_BARK_BLOCK_DOWNLOAD_HOSTS"`
+	BarkPort               uint      `yaml:"barkPort"                            envconfig:"DINGO_BARK_PORT"`
 	// BarkHost is the interface Bark binds to. Left empty, node.go defaults
 	// it to loopback-only (127.0.0.1) whenever the database lifecycle
 	// service (Restore/Truncate and friends — gated on BarkClientCAFilePath,
@@ -695,7 +714,42 @@ type Config struct {
 	ShelleyOperationalCertificate string `yaml:"shelleyOperationalCertificate" envconfig:"SHELLEY_OPERATIONAL_CERTIFICATE"`
 	ForgeSyncToleranceSlots       uint64 `yaml:"forgeSyncToleranceSlots"       envconfig:"DINGO_FORGE_SYNC_TOLERANCE_SLOTS"`
 	ForgeStaleGapThresholdSlots   uint64 `yaml:"forgeStaleGapThresholdSlots"   envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
-	ValidateForgedBlock           bool   `yaml:"validateForgedBlock"           envconfig:"DINGO_VALIDATE_FORGED_BLOCK"`
+	// ForgePrimaryChainTipToleranceSlots bounds how far the ledger-applied tip
+	// may trail this node's own primary chain tip before forging is skipped.
+	// Raise it only if the ledger pipeline is legitimately slow on this
+	// deployment; raising it lets the node forge blocks whose contents were
+	// chosen against an older chain position than their parent.
+	ForgePrimaryChainTipToleranceSlots uint64 `yaml:"forgePrimaryChainTipToleranceSlots" envconfig:"DINGO_FORGE_PRIMARY_CHAIN_TIP_TOLERANCE_SLOTS"`
+	// ForgeUpstreamStalenessSlots bounds how far the newest block this node
+	// holds may trail the corroborated upstream sync target before forging is
+	// skipped. 0 (the default) disables it.
+	//
+	// Opt-in because the comparison is not like-for-like: the newest block
+	// this node holds is a BLOCK, while the upstream target is published when
+	// a HEADER is admitted, so the two differ by the inter-block gap during
+	// ordinary operation. Set it well above the expected gap for the network.
+	ForgeUpstreamStalenessSlots uint64 `yaml:"forgeUpstreamStalenessSlots" envconfig:"DINGO_FORGE_UPSTREAM_STALENESS_SLOTS"`
+	// ForgeAppliedTipStalenessSlots bounds how many slots older than the
+	// current slot the newest block this node holds may be before forging is
+	// skipped. 0 (the default) disables this wall-clock backstop; it is
+	// off by default because on a low-throughput chain a fixed bound refuses
+	// constantly. Set it only where the block interval is known and bounded.
+	ForgeAppliedTipStalenessSlots uint64 `yaml:"forgeAppliedTipStalenessSlots" envconfig:"DINGO_FORGE_APPLIED_TIP_STALENESS_SLOTS"`
+	// ForgeEndorserBlockStalenessSlots bounds how far a corroborated Leios
+	// endorser block may lead the ledger-applied tip before forging is
+	// skipped. 0 (the default) disables it.
+	//
+	// Opt-in and separate from ForgePrimaryChainTipToleranceSlots, which
+	// bounds a purely local block-against-block comparison. This one compares
+	// a network-stage announcement watermark against a local applied tip, and
+	// that watermark is monotonic and never lowered, so an always-on bound
+	// sharing the local tolerance would tie two unrelated risk budgets to one
+	// number and could withhold leader slots indefinitely.
+	ForgeEndorserBlockStalenessSlots uint64 `yaml:"forgeEndorserBlockStalenessSlots" envconfig:"DINGO_FORGE_ENDORSER_BLOCK_STALENESS_SLOTS"`
+	// ValidateForgedBlock self-validates locally-forged blocks before
+	// adoption and diffusion. Defaults to true (fail closed); set to false
+	// only to explicitly opt out.
+	ValidateForgedBlock bool `yaml:"validateForgedBlock"           envconfig:"DINGO_VALIDATE_FORGED_BLOCK"`
 
 	// MinPoolMargin is the CIP-23 minimum pool margin (minimum variable fee) in
 	// basis points, [0, 10000] (150 = 1.5%); 0 disables it. Consensus-affecting
@@ -782,25 +836,23 @@ type APIPluginsConfig struct {
 	Utxorpc    hostplugin.Selection `yaml:"utxorpc"`
 }
 
-// APIConfig holds the shared TLS and authentication policy defaults
+// APIConfig holds the shared TLS policy defaults
 // applied to every selected plugins.api.* provider (Blockfrost, Mesh,
-// UTxORPC) unless that provider's own plugins.api.<name>.config.tls/auth
+// UTxORPC) unless that provider's own plugins.api.<name>.config.tls
 // overrides a field. See ARCHITECTURE.md's "API security" section and
 // internal/apiconfig for the merge/validation rules; composition (node.go)
 // performs the actual per-provider merge, not this package.
 //
-// bindAddr, apiBindAddr, debugBindAddr, and corsAllowedOrigins deliberately
+// bindAddr, debugBindAddr, and corsAllowedOrigins deliberately
 // stay at the Config root rather than moving under this section: bindAddr is
 // not API-specific (the relay/NtN and metrics listeners use it too),
-// apiBindAddr is the separate safe bind for the API listeners,
 // debugBindAddr controls the separate pprof listener, and corsAllowedOrigins
 // already applies uniformly to all three API providers
 // today with no override need identified by dingo#2996/#2998, so
 // duplicating any of them here would only add a second source of truth for no
 // behavioral gain.
 type APIConfig struct {
-	TLS  apiconfig.TLSPolicy  `yaml:"tls"`
-	Auth apiconfig.AuthPolicy `yaml:"auth"`
+	TLS apiconfig.TLSPolicy `yaml:"tls"`
 }
 
 func defaultPluginsConfig() PluginsConfig {
@@ -1067,79 +1119,101 @@ type DatabaseLifecycleConfig struct {
 
 var configMu sync.RWMutex
 
-var globalConfig = &Config{
-	Plugins:                             defaultPluginsConfig(),
-	BindAddr:                            "0.0.0.0",
-	APIBindAddr:                         DefaultAPIBindAddr,
-	CardanoConfig:                       "", // Will be set dynamically based on network
-	DatabasePath:                        ".dingo",
-	SocketPath:                          "dingo.socket",
-	IntersectTip:                        false,
-	ValidateHistorical:                  true,
-	StrictUtxoValidation:                true,
-	Tracing:                             false,
-	TracingStdout:                       false,
-	Network:                             "preview",
-	NetworkMagic:                        0,
-	MetricsPort:                         12798,
-	DebugBindAddr:                       DefaultDebugBindAddr,
-	DebugPort:                           0,
-	PrivateBindAddr:                     "127.0.0.1",
-	PrivatePort:                         3002,
-	RelayPort:                           3001,
-	BarkBaseUrl:                         "",
-	BarkPort:                            0,
-	BarkHost:                            "",
-	BarkClientCAFilePath:                "",
-	BarkOperatorCertificateFingerprints: nil,
-	CORSAllowedOrigins:                  []string{"*"},
-	Topology:                            "",
-	TlsCertFilePath:                     "",
-	TlsKeyFilePath:                      "",
-	StorageMode:                         "core",
-	RunMode:                             RunModeServe,
-	StartEra:                            StartEraDefault,
-	ImmutableDbPath:                     "",
-	ShutdownTimeout:                     DefaultShutdownTimeout,
-	LedgerCatchupTimeout:                DefaultLedgerCatchupTimeout,
-	// Defaults for database worker pool and API backfill tuning
-	DatabaseWorkers:   5,
-	DatabaseQueueSize: 50,
-	BackfillBatchSize: 100,
-	// CIP-50 default L (feature disabled by default via PledgeLeverageEnabled)
-	PledgeLeverage: 100,
-	// Cache configuration defaults
-	Cache: DefaultCacheConfig(),
-	// Chainsync configuration defaults
-	Chainsync: DefaultChainsyncConfig(),
-	// Genesis bootstrap defaults
-	GenesisBootstrap: DefaultGenesisBootstrapConfig(),
-	// History expiry defaults
-	HistoryExpiry: DefaultHistoryExpiryConfig(),
-	// Koios parity observer defaults (disabled)
-	KoiosParity: DefaultKoiosParityConfig(),
-	// Logging defaults (text output at info level)
-	Logging: DefaultLoggingConfig(),
-	// Midnight defaults
-	Midnight: DefaultMidnightConfig(),
-	// KES configuration defaults (mainnet values)
-	SlotsPerKESPeriod: 129600, // 1.5 days at 1 second per slot
-	MaxKESEvolutions:  62,     // 2^6 - 2 for KES depth 6
-	// Mithril defaults
-	Mithril: MithrilConfig{
-		Enabled:            true,
-		Backend:            "v2",
-		CleanupAfterLoad:   true,
-		VerifyCertificates: true,
-	},
-	// Database lifecycle defaults
-	DatabaseLifecycle: DatabaseLifecycleConfig{
-		SnapshotEveryNEpochs: 1,
-	},
-	// Forging defaults
-	ForgeSyncToleranceSlots:     DefaultForgeSyncToleranceSlots,
-	ForgeStaleGapThresholdSlots: DefaultForgeStaleGapThresholdSlots,
+// newDefaultConfig returns a fresh Config carrying every built-in default.
+// This is the single source of truth for those defaults: globalConfig
+// (mutated over the process lifetime by LoadConfig/ApplyFlags) is seeded
+// from it. A test that needs to pin one of these defaults directly --
+// rather than through resetGlobalConfig's own, deliberately narrower test
+// literal (config_test.go), which leaves several fields at their zero
+// value on purpose so other tests can exercise fill-in-if-empty
+// defaulting logic in isolation -- should call this instead of adding a
+// third hand-maintained copy. TestValidateForgedBlockDefaultsToTrue
+// (flags_test.go) is a regression test for exactly this: this literal
+// gained ValidateForgedBlock: true for issue #3528, but
+// resetGlobalConfig's copy did not, and no test noticed.
+func newDefaultConfig() *Config {
+	return &Config{
+		Plugins:                             defaultPluginsConfig(),
+		BindAddr:                            "0.0.0.0",
+		CardanoConfig:                       "", // Will be set dynamically based on network
+		DatabasePath:                        ".dingo",
+		SocketPath:                          "dingo.socket",
+		IntersectTip:                        false,
+		ValidateHistorical:                  true,
+		StrictUtxoValidation:                true,
+		Tracing:                             false,
+		TracingStdout:                       false,
+		Network:                             "preview",
+		NetworkMagic:                        0,
+		MetricsPort:                         12798,
+		DebugBindAddr:                       DefaultDebugBindAddr,
+		DebugPort:                           0,
+		PrivateBindAddr:                     "127.0.0.1",
+		PrivatePort:                         3002,
+		RelayPort:                           3001,
+		BarkBaseUrl:                         "",
+		BarkPort:                            0,
+		BarkHost:                            "",
+		BarkClientCAFilePath:                "",
+		BarkOperatorCertificateFingerprints: nil,
+		CORSAllowedOrigins:                  []string{"*"},
+		Topology:                            "",
+		TlsCertFilePath:                     "",
+		TlsKeyFilePath:                      "",
+		StorageMode:                         "core",
+		RunMode:                             RunModeServe,
+		StartEra:                            StartEraDefault,
+		ImmutableDbPath:                     "",
+		ShutdownTimeout:                     DefaultShutdownTimeout,
+		LedgerCatchupTimeout:                DefaultLedgerCatchupTimeout,
+		// Defaults for database worker pool and API backfill tuning
+		DatabaseWorkers:   5,
+		DatabaseQueueSize: 50,
+		BackfillBatchSize: 100,
+		// CIP-50 default L (feature disabled by default via PledgeLeverageEnabled)
+		PledgeLeverage: 100,
+		// Cache configuration defaults
+		Cache: DefaultCacheConfig(),
+		// Chainsync configuration defaults
+		Chainsync: DefaultChainsyncConfig(),
+		// Genesis bootstrap defaults
+		GenesisBootstrap: DefaultGenesisBootstrapConfig(),
+		// History expiry defaults
+		HistoryExpiry: DefaultHistoryExpiryConfig(),
+		// Koios parity observer defaults (disabled)
+		KoiosParity: DefaultKoiosParityConfig(),
+		// Logging defaults (text output at info level)
+		Logging: DefaultLoggingConfig(),
+		// Midnight defaults
+		Midnight: DefaultMidnightConfig(),
+		// KES configuration defaults (mainnet values)
+		SlotsPerKESPeriod: 129600, // 1.5 days at 1 second per slot
+		MaxKESEvolutions:  62,     // 2^6 - 2 for KES depth 6
+		// Mithril defaults
+		Mithril: MithrilConfig{
+			Enabled:            true,
+			Backend:            "v2",
+			CleanupAfterLoad:   true,
+			VerifyCertificates: true,
+		},
+		// Database lifecycle defaults
+		DatabaseLifecycle: DatabaseLifecycleConfig{
+			SnapshotEveryNEpochs: 1,
+		},
+		// Forging defaults
+		ForgeSyncToleranceSlots:            DefaultForgeSyncToleranceSlots,
+		ForgeStaleGapThresholdSlots:        DefaultForgeStaleGapThresholdSlots,
+		ForgePrimaryChainTipToleranceSlots: DefaultForgePrimaryChainTipToleranceSlots,
+		ForgeUpstreamStalenessSlots:        DefaultForgeUpstreamStalenessSlots,
+		ForgeAppliedTipStalenessSlots:      DefaultForgeAppliedTipStalenessSlots,
+		ForgeEndorserBlockStalenessSlots:   DefaultForgeEndorserBlockStalenessSlots,
+		// Fail closed: self-validate locally-forged blocks before adoption and
+		// diffusion unless an operator explicitly opts out.
+		ValidateForgedBlock: true,
+	}
 }
+
+var globalConfig = newDefaultConfig()
 
 // deepCopyPluginValue duplicates the reference-typed values a YAML plugin
 // config can hold. A nested `plugins.*.config` mapping or sequence decodes into
@@ -1194,7 +1268,7 @@ func cloneStringPtr(p *string) *string {
 	return &v
 }
 
-// cloneTLSPolicy and cloneAuthPolicy deep-copy every pointer field so a
+// cloneTLSPolicy deep-copies every pointer field so a
 // clone never shares a *string with the Config it was cloned from --
 // matching PeerSharing's own defensive-copy discipline just above, even
 // though every pointer in practice is replaced wholesale (never mutated
@@ -1204,14 +1278,6 @@ func cloneTLSPolicy(p apiconfig.TLSPolicy) apiconfig.TLSPolicy {
 		Mode:         cloneStringPtr(p.Mode),
 		CertFilePath: cloneStringPtr(p.CertFilePath),
 		KeyFilePath:  cloneStringPtr(p.KeyFilePath),
-	}
-}
-
-func cloneAuthPolicy(p apiconfig.AuthPolicy) apiconfig.AuthPolicy {
-	return apiconfig.AuthPolicy{
-		Mode:          cloneStringPtr(p.Mode),
-		Token:         cloneStringPtr(p.Token),
-		TokenFilePath: cloneStringPtr(p.TokenFilePath),
 	}
 }
 
@@ -1234,7 +1300,6 @@ func cloneConfig(cfg *Config) *Config {
 		clone.PeerSharing = &peerSharing
 	}
 	clone.API.TLS = cloneTLSPolicy(cfg.API.TLS)
-	clone.API.Auth = cloneAuthPolicy(cfg.API.Auth)
 	clone.Plugins.Storage.Blob = clonePluginSelection(
 		cfg.Plugins.Storage.Blob,
 	)
@@ -1464,12 +1529,8 @@ func (c *Config) ApplyDefaults() {
 	if c.DebugBindAddr == "" {
 		c.DebugBindAddr = DefaultDebugBindAddr
 	}
-	if c.APIBindAddr == "" {
-		c.APIBindAddr = DefaultAPIBindAddr
-	}
-	// Match the Midnight server's safe default before validation so an
-	// explicitly empty YAML or environment value does not look like a remote
-	// plaintext listener and require the insecure-remote escape hatch.
+	// Match the Midnight server's default for explicitly empty YAML or
+	// environment values.
 	if c.Midnight.Host == "" {
 		c.Midnight.Host = DefaultMidnightConfig().Host
 	}
@@ -1506,6 +1567,12 @@ func (c *Config) ApplyDefaults() {
 	if c.ForgeStaleGapThresholdSlots == 0 {
 		c.ForgeStaleGapThresholdSlots = DefaultForgeStaleGapThresholdSlots
 	}
+	if c.ForgePrimaryChainTipToleranceSlots == 0 {
+		c.ForgePrimaryChainTipToleranceSlots = DefaultForgePrimaryChainTipToleranceSlots
+	}
+	// Neither staleness bound is defaulted here: for both, 0 is the "disabled"
+	// value rather than "unset", so filling one with a default would turn on a
+	// forge refusal an operator never asked for.
 	// Only an unset (zero) frequency takes the default; an explicitly
 	// negative value is preserved so Validate can reject it instead of
 	// the node silently starting the expiry worker on the default cadence

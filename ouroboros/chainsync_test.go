@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"maps"
 	"net"
 	"strings"
 	"sync"
@@ -325,12 +324,6 @@ func snapshotChainsyncNtNTimeouts() map[string]struct {
 
 func TestNewOuroborosDoesNotMutateChainsyncNtNTimeouts(t *testing.T) {
 	t.Parallel()
-
-	originalStateMap := ochainsync.StateMapNtN.Copy()
-	t.Cleanup(func() {
-		clear(ochainsync.StateMapNtN)
-		maps.Copy(ochainsync.StateMapNtN, originalStateMap)
-	})
 
 	before := snapshotChainsyncNtNTimeouts()
 
@@ -2319,9 +2312,12 @@ func newFindIntersectTestOuroboros(t *testing.T) *Ouroboros {
 func makeFindIntersectPoints(n int) []ocommon.Point {
 	points := make([]ocommon.Point, n)
 	for i := range points {
+		hash := make([]byte, 32)
+		hash[0] = byte(i)
+		hash[1] = byte(i >> 8)
 		points[i] = ocommon.NewPoint(
 			uint64(i+1),
-			[]byte{byte(i), byte(i >> 8)},
+			hash,
 		)
 	}
 	return points
