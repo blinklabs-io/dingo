@@ -6374,8 +6374,8 @@ listeners `Serve` registered, which is exactly the set that may be missing ours.
 
 Two consequences worth noting. `Publish` takes a build callback that runs under
 the listener's lock once the already-started check has passed, so each server
-installs its credential verifier atomically with the server it belongs to and a
-rejected second `Start` cannot replace a running server's. `Bind` reports
+constructs its handler chain atomically with publication and a rejected second
+`Start` cannot replace a running server's handlers. `Bind` reports
 whether it handed the socket to `Serve` rather than closing it, so a `Start`
 whose server was detached mid-bind returns without logging that a listener
 came up when none did. One window stays open by construction: a `Stop` landing
@@ -6405,9 +6405,8 @@ truncated bodies retain the existing HTTP 400 response. The HTTP listener also
 sets a 60-second read timeout as a backstop, independently of its header,
 write, and idle timeouts.
 
-TLS and token authentication (including the `project_id` header alias) are
-configured through `plugins.api.blockfrost.config.tls`/`config.auth`; see
-"API security" above.
+Optional TLS is configured through `plugins.api.blockfrost.config.tls`;
+requests do not require credentials. See "API security" above.
 
 A Blockfrost-compatible REST API that provides read access to chain data,
 transaction evaluation, and transaction submission. Transaction evaluation is
