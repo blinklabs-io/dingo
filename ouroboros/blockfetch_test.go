@@ -477,7 +477,7 @@ func TestBlockfetchServerSendBatch_RejectsEndHashMismatch(t *testing.T) {
 		testConnId().String(), start, end, iter, server, conn,
 	)
 
-	assert.Error(t, err)
+	require.Error(t, err)
 	assert.Contains(t, err.Error(), "end hash mismatch")
 	assert.Equal(t, 0, server.blockCalls)
 	assert.Equal(t, 0, server.batchDoneCalls)
@@ -562,7 +562,7 @@ func TestBlockfetchServerSendBatch_ClosesConnectionWhenSendDrainStalls(
 		conn,
 	)
 
-	assert.Error(t, err)
+	require.Error(t, err)
 	assert.Contains(t, err.Error(), "send queue did not drain after Block")
 	assert.Equal(t, 1, server.startBatchCalls)
 	assert.Equal(t, 1, server.blockCalls)
