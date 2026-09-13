@@ -118,6 +118,8 @@ func observeProcessEpochRolloverCallOrder(
 // Markers are matched by suffix on the call's selector expression so that
 // receiver renames (`ls.db` → `ls.metadata`) don't churn the test.
 func TestProcessEpochRollover_OrderingInvariant(t *testing.T) {
+	t.Parallel()
+
 	const targetFunc = "processEpochRollover"
 
 	// In source order, the calls that must appear inside processEpochRollover.
@@ -177,6 +179,8 @@ func TestProcessEpochRollover_OrderingInvariant(t *testing.T) {
 // AST approach as TestProcessEpochRollover_OrderingInvariant so a reorder
 // fails loudly even when unit tests pass.
 func TestProcessEpochRollover_RewardOrdering(t *testing.T) {
+	t.Parallel()
+
 	const targetFunc = "processEpochRollover"
 
 	// In source order: reward application first, then the governance/pparam

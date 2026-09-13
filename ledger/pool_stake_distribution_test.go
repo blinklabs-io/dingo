@@ -73,6 +73,8 @@ func seedUnregisteredPoolStake(
 // Sorting by pool key hash is what makes the reply a function of the state
 // alone.
 func TestPoolStakeDistribution_OrdersPoolsByKeyHash(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	const snapshotEpoch = 0
@@ -96,7 +98,7 @@ func TestPoolStakeDistribution_OrdersPoolsByKeyHash(t *testing.T) {
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	dist, err := ls.PoolStakeDistribution(nil)
+	dist, err := ls.PoolStakeDistribution(nil, QueryPoint{}, nil)
 	require.NoError(t, err)
 	require.NotNil(t, dist)
 	require.Len(t, dist.Pools, 3)
@@ -113,7 +115,7 @@ func TestPoolStakeDistribution_OrdersPoolsByKeyHash(t *testing.T) {
 
 	// Repeating the read must produce the same order. A single call cannot
 	// distinguish a real sort from a map that happened to range in order.
-	again, err := ls.PoolStakeDistribution(nil)
+	again, err := ls.PoolStakeDistribution(nil, QueryPoint{}, nil)
 	require.NoError(t, err)
 	require.Equal(t, dist.Pools, again.Pools)
 }
@@ -123,6 +125,8 @@ func TestPoolStakeDistribution_OrdersPoolsByKeyHash(t *testing.T) {
 // VRF key hash is the one block validation will hold the pool to, both
 // inherited from queryShelleyPoolDistr2 rather than recomputed here.
 func TestPoolStakeDistribution_ReportsStakeFractionAndVrf(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	vrfA := repeatedBytes(32, 0xAA)
@@ -138,7 +142,7 @@ func TestPoolStakeDistribution_ReportsStakeFractionAndVrf(t *testing.T) {
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	dist, err := ls.PoolStakeDistribution(nil)
+	dist, err := ls.PoolStakeDistribution(nil, QueryPoint{}, nil)
 	require.NoError(t, err)
 	require.Len(t, dist.Pools, 2)
 
@@ -177,6 +181,8 @@ func TestPoolStakeDistribution_ReportsStakeFractionAndVrf(t *testing.T) {
 // layer, where TestReadState_LedgerTipComesFromTheDistributionRead checks the
 // handler renders this point and never samples the live tip.
 func TestPoolStakeDistribution_CarriesTheTipItWasReadAt(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	seedPoolDistr2Fixture(
 		t, db,
@@ -191,7 +197,7 @@ func TestPoolStakeDistribution_CarriesTheTipItWasReadAt(t *testing.T) {
 	}
 	require.NoError(t, db.SetTip(first, nil))
 
-	dist, err := ls.PoolStakeDistribution(nil)
+	dist, err := ls.PoolStakeDistribution(nil, QueryPoint{}, nil)
 	require.NoError(t, err)
 	require.NotNil(t, dist)
 	assert.Equal(t, first.Point.Slot, dist.Tip.Point.Slot)
@@ -204,7 +210,7 @@ func TestPoolStakeDistribution_CarriesTheTipItWasReadAt(t *testing.T) {
 	}
 	require.NoError(t, db.SetTip(second, nil))
 
-	again, err := ls.PoolStakeDistribution(nil)
+	again, err := ls.PoolStakeDistribution(nil, QueryPoint{}, nil)
 	require.NoError(t, err)
 	require.NotNil(t, again)
 	assert.Equal(t, second.Point.Slot, again.Tip.Point.Slot)
@@ -219,6 +225,8 @@ func TestPoolStakeDistribution_CarriesTheTipItWasReadAt(t *testing.T) {
 // read. The filter selects which pools are reported; it does not change what
 // they are a share of, so a filtered reply's fractions sum to less than one.
 func TestPoolStakeDistribution_FilterReportsOnlyRequestedPools(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	const snapshotEpoch = 0
@@ -235,7 +243,7 @@ func TestPoolStakeDistribution_FilterReportsOnlyRequestedPools(t *testing.T) {
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	dist, err := ls.PoolStakeDistribution([]lcommon.PoolKeyHash{pkhA})
+	dist, err := ls.PoolStakeDistribution([]lcommon.PoolKeyHash{pkhA}, QueryPoint{}, nil)
 	require.NoError(t, err)
 	require.Len(t, dist.Pools, 1)
 	assert.Equal(t, pkhA, dist.Pools[0].PoolKeyHash)
@@ -249,6 +257,8 @@ func TestPoolStakeDistribution_FilterReportsOnlyRequestedPools(t *testing.T) {
 // no registration on record: it cannot be given a VRF key hash, so it is left
 // out and the rest of the distribution is still served.
 func TestPoolStakeDistribution_OmitsPoolWithoutRegistration(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	const snapshotEpoch = 0
@@ -267,7 +277,7 @@ func TestPoolStakeDistribution_OmitsPoolWithoutRegistration(t *testing.T) {
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	dist, err := ls.PoolStakeDistribution(nil)
+	dist, err := ls.PoolStakeDistribution(nil, QueryPoint{}, nil)
 	require.NoError(t, err)
 	require.Len(t, dist.Pools, 1, "the unregistered pool is omitted")
 	assert.Equal(t, pkhA, dist.Pools[0].PoolKeyHash)
@@ -279,10 +289,12 @@ func TestPoolStakeDistribution_OmitsPoolWithoutRegistration(t *testing.T) {
 // snapshot holds no stake at all, the state a fresh chain is in before its
 // first snapshot is taken. Dividing by the total would panic.
 func TestPoolStakeDistribution_EmptySnapshotDoesNotDivide(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	ls := newPoolDistr2Ledger(t, db)
 
-	dist, err := ls.PoolStakeDistribution(nil)
+	dist, err := ls.PoolStakeDistribution(nil, QueryPoint{}, nil)
 	require.NoError(t, err)
 	require.NotNil(t, dist)
 	assert.Empty(t, dist.Pools)

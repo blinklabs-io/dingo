@@ -211,10 +211,10 @@ var flagSpecs = []flagSpec{
 		"CORS allowed origins for API servers",
 	),
 
-	// API security (shared TLS/auth defaults for every selected
+	// API security (shared TLS defaults for every selected
 	// plugins.api.* provider; see internal/apiconfig and
 	// ARCHITECTURE.md's "API security" section). Explicit
-	// plugins.api.<name>.config.tls/auth fields override these per
+	// plugins.api.<name>.config.tls fields override these per
 	// provider.
 	stringPtrFlag(
 		"API.TLS.Mode",
@@ -230,16 +230,6 @@ var flagSpecs = []flagSpec{
 		"API.TLS.KeyFilePath",
 		"api-tls-key-file-path",
 		"shared API TLS private key file path",
-	),
-	stringPtrFlag(
-		"API.Auth.Mode",
-		"api-auth-mode",
-		`shared API auth mode: "disabled" or "token" (unset: inherit provider setting, else disabled)`,
-	),
-	stringPtrFlag(
-		"API.Auth.TokenFilePath",
-		"api-auth-token-file-path",
-		"shared API auth bearer token file path",
 	),
 	durationFlag(
 		"OffchainMetadata.Interval",
@@ -340,11 +330,6 @@ var flagSpecs = []flagSpec{
 		"midnight-reflection-enabled",
 		"enable Midnight gRPC reflection",
 	),
-	boolFlag(
-		"Midnight.AllowInsecureRemote",
-		"midnight-allow-insecure-remote",
-		"allow plaintext Midnight gRPC on a non-loopback address",
-	),
 	uintFlag(
 		"Midnight.Port",
 		"midnight-port",
@@ -419,6 +404,17 @@ var flagSpecs = []flagSpec{
 		"koios-parity-api-key",
 		"",
 		"Koios Bearer token for rate-limited access",
+	),
+	stringFlag(
+		"KoiosParity.BaseURL",
+		"koios-parity-base-url",
+		"",
+		"Koios v1 API root override for a self-hosted instance (default: the public host for --koios-parity-network)",
+	),
+	boolFlag(
+		"KoiosParity.AllowInsecureHTTP",
+		"koios-parity-allow-insecure-http",
+		"allow a plain-HTTP --koios-parity-base-url (local dev/test only; the API key is sent as a Bearer token)",
 	),
 	boolFlag(
 		"KoiosParity.Strict",
@@ -684,6 +680,26 @@ var flagSpecs = []flagSpec{
 		"ForgeStaleGapThresholdSlots",
 		"forge-stale-gap-threshold-slots",
 		"slot gap threshold for stale slot clock alerts",
+	),
+	uint64Flag(
+		"ForgePrimaryChainTipToleranceSlots",
+		"forge-primary-chain-tip-tolerance-slots",
+		"max slots the ledger-applied tip may trail this node's own primary chain tip (chain.Tip()) before skipping block forging",
+	),
+	uint64Flag(
+		"ForgeUpstreamStalenessSlots",
+		"forge-upstream-staleness-slots",
+		"max slots the newest block this node holds may trail the corroborated upstream target before skipping block forging",
+	),
+	uint64Flag(
+		"ForgeAppliedTipStalenessSlots",
+		"forge-applied-tip-staleness-slots",
+		"max slots the newest block this node holds may be older than the current slot before skipping block forging (0 disables)",
+	),
+	uint64Flag(
+		"ForgeEndorserBlockStalenessSlots",
+		"forge-endorser-block-staleness-slots",
+		"max slots a corroborated Leios endorser block may lead the ledger-applied tip before skipping block forging (0 disables)",
 	),
 	boolFlag(
 		"ValidateForgedBlock",
@@ -1031,7 +1047,7 @@ func boolPtrFlag(field, name, help string) flagSpec {
 // stringPtrFlag binds a CLI flag to a *string field. The pointer
 // distinguishes "operator did not set this" (nil, inherit from a broader
 // scope or fall back to a disabled default) from an explicit value --
-// needed for the api.tls/api.auth policy fields (internal/apiconfig),
+// needed for the api.tls policy fields (internal/apiconfig),
 // where an explicit "disabled" is meaningfully different from never
 // setting a mode at all. We only write to the field when the flag was
 // explicitly passed, matching boolPtrFlag's own contract.

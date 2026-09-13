@@ -103,6 +103,24 @@
 // reported by the event_delivery_blocked_total metric and an "event
 // delivery stalled" warning.
 //
+// That warning comes from a parked publisher, so it cannot fire before
+// the subscriber's buffer is full: how soon it appears depends on the
+// buffer size and event rate rather than on the fault. A SubscribeFunc
+// handler that has stopped returning is reported directly, by a
+// bus-wide watchdog, as an "event subscriber handler not making
+// progress" warning and the event_subscriber_handler_stalled_total
+// metric. The watchdog samples twice per
+// handlerProgressWarnInterval, so the first report lands within one
+// and a half of those (45s at the 30s default) of the handler ceasing
+// to return, and repeats at most once per interval after that.
+//
+// Registering the first SubscribeFunc subscription for an event type
+// materializes that counter's series for the type at zero, so
+// "nothing has stalled" is distinguishable from "no handler was ever
+// registered for this type". The granularity is the event type,
+// not the subscription, and the series outlives an unsubscribe. See
+// handler_progress.go.
+//
 // # Subscribing
 //
 //	eventBus.SubscribeFunc(chain.ChainForkEventType, func(evt event.Event) {

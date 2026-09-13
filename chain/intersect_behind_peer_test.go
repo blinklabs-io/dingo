@@ -84,6 +84,8 @@ func behindPeerDepth(headers []*MockBlock, point ocommon.Point) uint64 {
 // The ladder must offer a rung at K itself so that any peer within K of our
 // tip resolves to a point at most K back.
 func TestIntersectPointsKeepPeerWithinSecurityParamCrossable(t *testing.T) {
+	t.Parallel()
+
 	c, headers := newBehindPeerChain(t)
 
 	// The peer is 35 blocks behind: comfortably inside K=40.
@@ -122,6 +124,8 @@ func TestIntersectPointsKeepPeerWithinSecurityParamCrossable(t *testing.T) {
 // chain-layer half of the contract so the ladder change above is not mistaken
 // for a full fix.
 func TestIntersectPointsStillExceedKForPeerBehindBeyondK(t *testing.T) {
+	t.Parallel()
+
 	c, headers := newBehindPeerChain(t)
 
 	// The peer is 45 blocks behind, past K=40.
@@ -150,6 +154,8 @@ func TestIntersectPointsStillExceedKForPeerBehindBeyondK(t *testing.T) {
 // chains shorter than the next doubling rung, where the loop that emits the
 // sparse rungs stops early.
 func TestIntersectPointsStayDescendingWithSecurityRung(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range []struct {
 		name        string
 		chainLength int

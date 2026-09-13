@@ -35,6 +35,8 @@ import (
 // verification of a single immutable archive. Bandwidth use is kept
 // small (one immutable archive plus the digest list).
 func TestLiveMithrilV2Verification(t *testing.T) {
+	t.Parallel()
+
 	if os.Getenv("DINGO_LIVE_MITHRIL") == "" {
 		t.Skip("set DINGO_LIVE_MITHRIL=1 to run live Mithril v2 verification")
 	}

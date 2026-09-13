@@ -15,8 +15,12 @@
 package database
 
 import (
+	"context"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -24,6 +28,33 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// isolateBlockByHashMetrics runs exact-total assertions in their own process.
+// Any parallel database test can increment these process-wide metrics, even
+// without reading or resetting them. A mutex around the metric tests alone
+// therefore cannot isolate them. Each child runs just the selected test using
+// the same test binary, including its race instrumentation when enabled.
+func isolateBlockByHashMetrics(t *testing.T) bool {
+	t.Helper()
+	const marker = "DINGO_BLOCK_BY_HASH_METRIC_TEST"
+	if os.Getenv(marker) == t.Name() {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(
+		ctx,
+		os.Args[0],
+		"-test.run=^"+t.Name()+"$",
+		"-test.v",
+	)
+	cmd.Env = append(os.Environ(), marker+"="+t.Name())
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("isolated metric test failed: %v\n%s", err, output)
+	}
+	return true
+}
 
 // resetBlockByHashStats zeros the hit/miss counters between tests.
 func resetBlockByHashStats() {
@@ -36,6 +67,11 @@ func resetBlockByHashStats() {
 // index miss rate from #2105) and returns ErrBlockNotFound directly on
 // the index miss, without any fallback scan.
 func TestBlockByHashTxn_UnknownHashRecordsMissAndNotFound(t *testing.T) {
+	t.Parallel()
+	if isolateBlockByHashMetrics(t) {
+		return
+	}
+
 	db := newTestDB(t)
 	resetBlockByHashStats()
 
@@ -72,6 +108,11 @@ func TestBlockByHashTxn_UnknownHashRecordsMissAndNotFound(t *testing.T) {
 // block written via BlockCreate gets a hash-index entry (#1915), and a
 // lookup must hit it in O(1) and return the block.
 func TestBlockByHashTxn_KnownHashStillResolves(t *testing.T) {
+	t.Parallel()
+	if isolateBlockByHashMetrics(t) {
+		return
+	}
+
 	db := newTestDB(t)
 	resetBlockByHashStats()
 
@@ -94,6 +135,11 @@ func TestBlockByHashTxn_KnownHashStillResolves(t *testing.T) {
 // means the index was written but the pointer is invalid: a local DB
 // problem the operator needs to see, not a fork-resolution miss.
 func TestBlockByHashTxn_EmptyIndexEntryIsCorruption(t *testing.T) {
+	t.Parallel()
+	if isolateBlockByHashMetrics(t) {
+		return
+	}
+
 	db := newTestDB(t)
 	resetBlockByHashStats()
 
@@ -121,6 +167,11 @@ func TestBlockByHashTxn_EmptyIndexEntryIsCorruption(t *testing.T) {
 // passed to RegisterBlockByHashMetrics exposes the hash-index counters, not
 // just the first one in the process, and that reusing a registry is a no-op.
 func TestRegisterBlockByHashMetrics_PerRegistry(t *testing.T) {
+	t.Parallel()
+	if isolateBlockByHashMetrics(t) {
+		return
+	}
+
 	resetBlockByHashStats()
 	blockByHashIndexMisses.Add(3)
 

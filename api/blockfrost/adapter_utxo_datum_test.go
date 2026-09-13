@@ -63,6 +63,8 @@ func decodeBabbageOutput(
 }
 
 func TestUtxoDatumAndScriptRefInlineAndScript(t *testing.T) {
+	t.Parallel()
+
 	// Inline datum option is [1, 24(<datum cbor>)] per CIP-0032.
 	datum := lcommon.Datum{Data: data.NewInteger(big.NewInt(42))}
 	datumCbor, err := cbor.Encode(&datum)
@@ -92,6 +94,8 @@ func TestUtxoDatumAndScriptRefInlineAndScript(t *testing.T) {
 }
 
 func TestUtxoDatumAndScriptRefDatumHashOnly(t *testing.T) {
+	t.Parallel()
+
 	// A datum-hash-only output (option [0, <hash>]) carries no inline datum and
 	// no reference script, so both Blockfrost fields must be nil (data_hash is
 	// populated elsewhere from the persisted column).
@@ -106,6 +110,8 @@ func TestUtxoDatumAndScriptRefDatumHashOnly(t *testing.T) {
 }
 
 func TestUtxoDatumAndScriptRefNone(t *testing.T) {
+	t.Parallel()
+
 	output := decodeBabbageOutput(t, nil, nil)
 	inlineDatum, referenceScriptHash := utxoDatumAndScriptRef(output)
 	assert.Nil(t, inlineDatum)

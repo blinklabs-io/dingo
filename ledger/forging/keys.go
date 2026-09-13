@@ -1146,12 +1146,14 @@ func (pc *PoolCredentials) ValidateAgainstLedger(
 // validateOpCertSequence enforces the same operational-certificate counter
 // rule block application applies (ledger/verify_opcert.go
 // validateOpCertCounter), so the forge loop can decline a leader slot for a
-// key state ledgerProcessBlock would reject, before spending the slot on
-// VRF/KES/Leios work or committing the duplicate-slot fence. The two must
-// stay in agreement: a candidate this accepts and block application rejects
-// wastes a leader slot; the reverse blocks a slot the chain would have
-// adopted. The rule itself lives in ledger/eras.ValidateOpCertCounter, the
-// single source both call sites share, so it cannot drift between them.
+// key state ledgerProcessBlock would reject. It runs right after leader
+// selection (a Praos leader-VRF check that, together with the KES-lifetime
+// gate, already precedes it), but still before Leios work and the
+// forge-slot fence. The two must stay in agreement: a candidate this
+// accepts and block application rejects wastes a leader slot; the reverse
+// blocks a slot the chain would have adopted. The rule itself lives in
+// ledger/eras.ValidateOpCertCounter, the single source both call sites
+// share, so it cannot drift between them.
 //
 // The persistable-counter bound is applied alongside it. A candidate above it
 // is a counter the chain accepts and this node cannot record, so declining the

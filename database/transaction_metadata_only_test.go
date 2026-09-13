@@ -53,6 +53,8 @@ func testPoolRegistrationCertificate(
 func TestSetTransactionMetadataOnlyRecordsCertificatesWithoutUtxos(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := openTestDB(t)
 
 	output, err := mockledger.NewTransactionOutputBuilder().

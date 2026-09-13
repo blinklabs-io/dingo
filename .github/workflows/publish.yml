@@ -63,25 +63,14 @@ jobs:
         ports:
           - 9000:9000
           - 9001:9001
-    env:
-      POSTGRES_HOST: localhost
-      POSTGRES_PORT: '5432'
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DATABASE: dingo_test
-      MYSQL_HOST: localhost
-      MYSQL_PORT: '3306'
-      MYSQL_USER: mysql
-      MYSQL_PASSWORD: mysql
-      MYSQL_DATABASE: dingo_test
-      MYSQL_ROOT_PASSWORD: mysql
-      AWS_ACCESS_KEY_ID: minioadmin
-      AWS_SECRET_ACCESS_KEY: minioadmin
-      AWS_ENDPOINT: "http://127.0.0.1:9000/"
-      AWS_REGION: us-east-1
-      DINGO_TEST_S3_BUCKET: dingo-test
     steps:
       - name: setup-s3-bucket
+        env:
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin
+          AWS_ENDPOINT: "http://127.0.0.1:9000/"
+          AWS_REGION: us-east-1
+          DINGO_TEST_S3_BUCKET: dingo-test
         run: |
           curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
           unzip -q awscliv2.zip
@@ -95,10 +84,34 @@ jobs:
         run: go build -tags dingo_extra_plugins ./cmd/dingo
       - name: go-build-minimal
         run: go build ./cmd/dingo
-      - name: go-test
-        # The ledger package legitimately approaches 20 minutes under the race
-        # detector on hosted runners. Keep a finite package-level hang guard
-        # while leaving enough headroom for the complete release suite.
+      - name: go-test-services
+        # Keep the real PostgreSQL, MySQL, and S3 coverage from the Linux
+        # pull-request gate. The conformance package alone approaches the 30m
+        # package timeout when PostgreSQL and MySQL run alongside SQLite under
+        # -race, so service-backed coverage and race coverage are separate
+        # release gates just as they are in go-test.yml.
+        env:
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: '5432'
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DATABASE: dingo_test
+          MYSQL_HOST: localhost
+          MYSQL_PORT: '3306'
+          MYSQL_USER: mysql
+          MYSQL_PASSWORD: mysql
+          MYSQL_DATABASE: dingo_test
+          MYSQL_ROOT_PASSWORD: mysql
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin
+          AWS_ENDPOINT: "http://127.0.0.1:9000/"
+          AWS_REGION: us-east-1
+          DINGO_TEST_S3_BUCKET: dingo-test
+        run: go test -tags dingo_extra_plugins -ldflags="-s -w" -timeout 30m ./...
+      - name: go-test-race
+        # Optional service backends are deliberately unconfigured here. This
+        # matches go-test.yml's race job while retaining a finite package-level
+        # hang guard for the complete SQLite-backed race suite.
         run: go test -tags dingo_extra_plugins -ldflags="-s -w" -race -timeout 30m ./...
       - name: govulncheck
         run: make govulncheck

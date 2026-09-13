@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -88,6 +89,8 @@ func setupLifecycleTestChain(
 // TestDatabaseLifecycleSnapshotRestoreRoundTrip verifies that a snapshot
 // of a real multi-block chain restores byte-for-byte, tip included.
 func TestDatabaseLifecycleSnapshotRestoreRoundTrip(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 60
 	db, points := setupLifecycleTestChain(t, t.TempDir(), numBlocks)
 	defer db.Close()
@@ -108,7 +111,7 @@ func TestDatabaseLifecycleSnapshotRestoreRoundTrip(t *testing.T) {
 	restoredDir := filepath.Join(t.TempDir(), "restored")
 	restoredManifest, err := lifecycle.Restore(
 		context.Background(), newTestStorageHost(t), nil, snapDir, restoredDir,
-		lifecycle.RestoreStorageConfig{},
+		lifecycle.RestoreStorageConfig{Blob: testutil.BadgerBlobConfig()},
 	)
 	require.NoError(t, err)
 	require.Equal(t, manifest.CommitTimestamp, restoredManifest.CommitTimestamp)
@@ -145,6 +148,8 @@ func TestDatabaseLifecycleSnapshotRestoreRoundTrip(t *testing.T) {
 // from this package's lighter chain-manager-only harness is out of scope
 // here).
 func TestDatabaseLifecycleTruncateRealChain(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 60
 	db, points := setupLifecycleTestChain(t, t.TempDir(), numBlocks)
 	defer db.Close()
@@ -193,6 +198,8 @@ func TestDatabaseLifecycleTruncateRealChain(t *testing.T) {
 // TestDatabaseLifecycleTruncateRejectsBeyondMithrilBoundary verifies that
 // a truncate target before the recorded Mithril trust boundary is rejected.
 func TestDatabaseLifecycleTruncateRejectsBeyondMithrilBoundary(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 60
 	db, points := setupLifecycleTestChain(t, t.TempDir(), numBlocks)
 	defer db.Close()

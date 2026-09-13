@@ -34,6 +34,8 @@ import (
 // fields the ledger keeps for exactly this calculation. Discarding them at
 // import is what leaves the first reward round with nothing to compute from.
 func TestSnapshotCarriesBlocksMadeForBothEpochs(t *testing.T) {
+	t.Parallel()
+
 	state, err := ParseSnapshot(testdataLedgerSnapshot)
 	require.NoError(t, err)
 	require.Equal(t, uint64(4), state.Epoch)
@@ -83,6 +85,8 @@ func decodeSnapshotPoolKey(t *testing.T, hexKey string) string {
 // complete-looking distribution at the wrong amount for every pool at once.
 // The stake and delegation maps can afford to skip an entry; this one cannot.
 func TestParseBlocksMadeRejectsMalformedEntries(t *testing.T) {
+	t.Parallel()
+
 	poolKey := make([]byte, credentialHashSize)
 	for i := range poolKey {
 		poolKey[i] = byte(i)
@@ -145,6 +149,8 @@ func TestParseBlocksMadeRejectsMalformedEntries(t *testing.T) {
 // bootstrapped node can never count: the performance epoch of the first reward
 // round it crosses, and the pre-anchor half of the second one's.
 func TestImportBlocksMadePersistsBothEpochs(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 
@@ -202,6 +208,8 @@ func TestImportBlocksMadePersistsBothEpochs(t *testing.T) {
 // and reading it as "not imported" would decline a reward round the reference
 // runs.
 func TestImportBlocksMadeRecordsAnEmptyMapAsACertifiedZero(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	store := db.Metadata()
@@ -231,6 +239,8 @@ func TestImportBlocksMadeRecordsAnEmptyMapAsACertifiedZero(t *testing.T) {
 // a smaller but self-consistent epoch, raising every surviving pool's share of
 // the blocks and over-crediting its rewards.
 func TestImportedBlockCountsRejectATotalThatDisagreesWithTheRows(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	store := db.Metadata()
@@ -258,6 +268,8 @@ func TestImportedBlockCountsRejectATotalThatDisagreesWithTheRows(t *testing.T) {
 // new map into the old rows would leave one epoch holding counts taken at two
 // different anchors, so the epoch is replaced rather than added to.
 func TestImportBlocksMadeReplacesAnEpochRatherThanMerging(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	store := db.Metadata()

@@ -50,6 +50,8 @@ func unreachableAddr(t *testing.T) string {
 // all): each failure must double the previous delay, and the delay must
 // never exceed watcherMaxBackoff no matter how many failures accumulate.
 func TestNextBackoff_DoublesUntilCap(t *testing.T) {
+	t.Parallel()
+
 	backoff := watcherMinBackoff
 	seen := []time.Duration{backoff}
 	for range 10 {
@@ -75,6 +77,8 @@ func TestNextBackoff_DoublesUntilCap(t *testing.T) {
 // node restart, not a node that refuses to talk to us, so it should be
 // retried quickly.
 func TestNextBackoff_ResetsOnEstablished(t *testing.T) {
+	t.Parallel()
+
 	grown := nextBackoff(
 		nextBackoff(nextBackoff(watcherMinBackoff, false), false),
 		false,
@@ -96,6 +100,8 @@ func TestNextBackoff_ResetsOnEstablished(t *testing.T) {
 // event -- not block, not panic, and not queue up a backlog that would
 // make a slow consumer process stale bursts one at a time.
 func TestBlockEventSignal_CoalescesBursts(t *testing.T) {
+	t.Parallel()
+
 	events, notify := newBlockEventSignal()
 	for range 5 {
 		notify()
@@ -113,6 +119,8 @@ func TestBlockEventSignal_CoalescesBursts(t *testing.T) {
 // dropping events. Once a caller drains the pending event, the next
 // notify must deliver a fresh one.
 func TestBlockEventSignal_DeliversAgainAfterDrain(t *testing.T) {
+	t.Parallel()
+
 	events, notify := newBlockEventSignal()
 	notify()
 	<-events // drain
@@ -128,6 +136,8 @@ func TestBlockEventSignal_DeliversAgainAfterDrain(t *testing.T) {
 // A ChainSync callback that blocked here would stall the whole protocol
 // session, not just this watcher.
 func TestBlockEventSignal_NotifyNeverBlocks(t *testing.T) {
+	t.Parallel()
+
 	_, notify := newBlockEventSignal()
 	done := make(chan struct{})
 	go func() {
@@ -150,6 +160,8 @@ func TestBlockEventSignal_NotifyNeverBlocks(t *testing.T) {
 // still running (which would leak the goroutine) or hanging forever
 // waiting on a connection that will never succeed.
 func TestWatchBlocks_CloseStopsPromptly(t *testing.T) {
+	t.Parallel()
+
 	addr := unreachableAddr(t)
 	w := WatchBlocks(context.Background(), addr, 2, nil)
 
@@ -186,6 +198,8 @@ func TestWatchBlocks_CloseStopsPromptly(t *testing.T) {
 // this one -- a regression that removed this later closer would still
 // pass such a test.
 func TestWatchBlocks_CloseStopsPromptlyAgainstUnresponsivePeer(t *testing.T) {
+	t.Parallel()
+
 	const magic = 42
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -261,6 +275,8 @@ func TestWatchBlocks_CloseStopsPromptlyAgainstUnresponsivePeer(t *testing.T) {
 // must keep attempting to reconnect on its own, logging each attempt,
 // rather than giving up after the first failure.
 func TestWatchBlocks_RetriesOnUnreachableAddr(t *testing.T) {
+	t.Parallel()
+
 	addr := unreachableAddr(t)
 
 	var mu sync.Mutex
@@ -291,6 +307,8 @@ func TestWatchBlocks_RetriesOnUnreachableAddr(t *testing.T) {
 // long-lived watcher ctx instead, leaving a stalled handshake unbounded
 // except by the watcher's own eventual shutdown.
 func TestWatchBlocks_StalledHandshakeTriggersReconnectWithinDialTimeout(t *testing.T) {
+	t.Parallel()
+
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = listener.Close() })

@@ -26,10 +26,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// conway.UtxoValidateInlineDatumsWithPlutusV1 is upstream Conway UTXO rule 18.
-// Dingo installs it unmodified, so nothing else in this repository pins its
-// behavior. The cases below cover the three properties the rule has to get
-// right, none of which internal/test/conformance reaches:
+// conway.UtxoValidateInlineDatumsWithPlutusV1 is the upstream Conway
+// inline-datums-with-plutus-v1 UTXO rule. Dingo installs it unmodified, so
+// nothing else in this repository pins its behavior. The cases below cover
+// the three properties the rule has to get right, none of which
+// internal/test/conformance reaches:
 //
 //   - an inline datum is disqualifying on a consumed input, on a reference
 //     input, and on a produced output, whenever a PlutusV1 script is needed;

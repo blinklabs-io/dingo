@@ -31,6 +31,8 @@ import (
 )
 
 func TestPluginSystemIntegration(t *testing.T) {
+	t.Parallel()
+
 	host, err := internalplugins.NewHost()
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, host.Stop(context.Background())) })
@@ -68,6 +70,8 @@ func TestPluginSystemIntegration(t *testing.T) {
 }
 
 func TestNodeShutdownIntegration(t *testing.T) {
+	t.Parallel()
+
 	cfg := dingo.NewConfig(
 		dingo.WithDatabasePath(t.TempDir()),
 		dingo.WithLogger(slog.New(slog.NewJSONHandler(io.Discard, nil))),
@@ -85,6 +89,8 @@ func TestNodeShutdownIntegration(t *testing.T) {
 }
 
 func TestStorageBackends(t *testing.T) {
+	t.Parallel()
+
 	for _, dataDir := range []string{"", t.TempDir()} {
 		t.Run(fmt.Sprintf("dir-%t", dataDir != ""), func(t *testing.T) {
 			runtime, err := internalplugins.OpenDatabase(

@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"math"
 	"math/big"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -45,6 +46,29 @@ var ErrUtxoAlreadyConsumed = errors.New("UTxO already consumed")
 // ErrNotImplemented marks LedgerView stubs that are not implemented yet.
 var ErrNotImplemented = errors.New("not implemented")
 
+// ErrLedgerViewStorageFault marks an error recorded by a boolean
+// LedgerState predicate (IsStakeCredentialRegistered, IsPoolRegistered,
+// IsRewardAccountRegistered, GovActionExists) when its underlying storage
+// lookup fails for a reason other than "not found". gouroboros's
+// common.LedgerState interface returns only a bool from these predicates, so
+// a genuine storage fault (a timeout, a lost connection) cannot propagate
+// through the interface and would otherwise silently become a false
+// (unregistered/does-not-exist) verdict that the calling ledger rule cannot
+// distinguish from the real thing (blinklabs-io/dingo#1649). Every
+// ValidateTxFunc/EvaluateTxFunc call site that builds a LedgerView must check
+// storageFaultOrErr after the rule returns, and prefer this fault over
+// whatever verdict the rule produced from the false negative.
+var ErrLedgerViewStorageFault = errors.New("ledger view storage fault")
+
+// utxoMemoKey identifies a resolved UTxO by its fixed-size components
+// (transaction hash + output index) for LedgerView.utxoMemo. Using the raw
+// hash avoids both the fmt.Sprintf allocation and the hex-encoding
+// UtxoById's consumedUtxos/intraBlockUtxos overlay key already pays for.
+type utxoMemoKey struct {
+	txId  lcommon.Blake2b256
+	index uint32
+}
+
 type LedgerView struct {
 	ls  *LedgerState
 	txn *database.Txn
@@ -59,8 +83,35 @@ type LedgerView struct {
 	// consumedUtxos tracks inputs consumed by pending mempool transactions.
 	// Key format: hex(txId) + ":" + outputIdx
 	consumedUtxos map[string]struct{}
+	// utxoMemoMu guards utxoMemo. Production views are built per transaction
+	// or query and used from one goroutine; the lock keeps a future shared
+	// view safe at negligible cost next to the database read it saves.
+	utxoMemoMu sync.Mutex
+	// utxoMemo caches successful UtxoById database resolutions for the
+	// lifetime of this view. Era rules resolve the same input from several
+	// independent call sites while validating one transaction (60 reads for
+	// 4 distinct refs on a Preprod fixture, issue #4226). Misses, decode
+	// errors and ErrNilDecodedOutput are never cached, and the memo is
+	// consulted only after consumedUtxos and intraBlockUtxos, so an overlay
+	// entry added between calls still takes precedence. Every caller shares
+	// the cached Output and must not mutate it. Lazily allocated; never
+	// shared across views.
+	utxoMemo map[utxoMemoKey]lcommon.Utxo
 	// skipPhase2Validation is set for accepted block replay, where
 	// the producer's isValid flag is authoritative for Phase-2 results.
+	// Currently unreachable from production: ledgerProcessBlock's sole
+	// caller (ledger/state.go) hardcodes skipPhase2Validation=false,
+	// because issue #3528 made Phase 2 always evaluate whenever per-tx
+	// validation runs at all. Retained rather than deleted because it is
+	// a narrower, more targeted mechanism than the coarse
+	// shouldValidateBlock=false gate TrustedReplay currently uses to skip
+	// per-tx validation (phase 1 and phase 2 together): a future
+	// TrustedReplay caller that wants phase-1 UTXO checks re-run while
+	// still trusting the producer's isValid flag for phase 2 has this
+	// already built, wired through every era's phase2ValidationSkipper
+	// call site, and tested (TestLedgerViewSkipPhase2Validation and the
+	// per-era skip tests) -- only the production call site's hardcoded
+	// false needs to change to use it.
 	skipPhase2Validation bool
 	// horizonAnchorSlot is the slot the era forecast horizon is measured
 	// from when this view converts slots to time. Block application sets it
@@ -70,6 +121,68 @@ type LedgerView struct {
 	// in charge, which is correct for every caller with no applied block in
 	// hand (mempool validation, standalone evaluation).
 	horizonAnchorSlot uint64
+	// syntheticV2CostModel is pinned from the same snapshot pparams (pp) was
+	// captured from -- see pinSyntheticV2CostModel and
+	// SyntheticV2CostModelInEffect. It must not be re-read live from
+	// ls.loadConsensusSnapshot() at query time: a validation operation can
+	// run long enough (evaluating scripts) that the writer publishes a
+	// newer snapshot in the meantime, which would let this disagree with pp
+	// -- the exact protocol parameters this operation is actually
+	// evaluating against. See blinklabs-io/dingo#3962's PR review.
+	syntheticV2CostModel bool
+	// storageErr is the first non-not-found storage error observed by one of
+	// this view's boolean LedgerState predicates. It is sticky: only the
+	// first recorded error is kept, matching the single LedgerView built per
+	// ValidateTxFunc/EvaluateTxFunc call. See ErrLedgerViewStorageFault.
+	storageErr error
+}
+
+// recordStorageErr records the first non-not-found error observed by a
+// boolean LedgerState predicate on this view. Later calls are no-ops: the
+// first fault is the one that could have skewed the earliest rule verdict,
+// and every call site treats presence, not identity, as the signal.
+func (lv *LedgerView) recordStorageErr(err error) {
+	if lv.storageErr == nil {
+		lv.storageErr = err
+	}
+}
+
+// StorageErr returns the first non-not-found storage error recorded by a
+// boolean LedgerState predicate on this view, or nil. A ValidateTxFunc or
+// EvaluateTxFunc call site must prefer this over the rule's own return value
+// -- see storageFaultOrErr.
+func (lv *LedgerView) StorageErr() error {
+	return lv.storageErr
+}
+
+// storageFaultOrErr returns lv's recorded storage fault, wrapped as
+// ErrLedgerViewStorageFault, when one was recorded; otherwise it returns
+// ruleErr unchanged. A LedgerView predicate that swallowed a genuine storage
+// error into a false/not-found verdict already corrupted the rule's verdict
+// by the time ValidateTxFunc/EvaluateTxFunc returns, so the fault always
+// takes precedence over ruleErr -- including replacing a nil ruleErr, the
+// case where the false negative caused the rule to wrongly accept.
+func storageFaultOrErr(lv *LedgerView, ruleErr error) error {
+	if lv == nil {
+		return ruleErr
+	}
+	if faultErr := lv.StorageErr(); faultErr != nil {
+		return fmt.Errorf("%w: %w", ErrLedgerViewStorageFault, faultErr)
+	}
+	return ruleErr
+}
+
+// pinSyntheticV2CostModel records whether the PlutusV2 cost model was still
+// synthetic in the same snapshot pp (passed to ValidateTxFunc/EvaluateTxFunc
+// alongside this view) was captured from. Every call site that pins
+// committee state alongside pp also pins this.
+func (lv *LedgerView) pinSyntheticV2CostModel(inEffect bool) *LedgerView {
+	lv.syntheticV2CostModel = inEffect
+	return lv
+}
+
+func uint64Ptr(value uint64) *uint64 {
+	return &value
 }
 
 func (lv *LedgerView) pinCommitteeState(
@@ -175,12 +288,26 @@ func (lv *LedgerView) UtxoById(
 			return utxo, nil
 		}
 	}
+	// Consult the memo only after both overlays, so an overlay entry added
+	// between calls on this view still takes precedence.
+	memoKey := utxoMemoKey{txId: utxoId.Id(), index: utxoId.Index()}
+	lv.utxoMemoMu.Lock()
+	if lv.utxoMemo != nil {
+		if utxo, ok := lv.utxoMemo[memoKey]; ok {
+			lv.utxoMemoMu.Unlock()
+			return utxo, nil
+		}
+	}
+	lv.utxoMemoMu.Unlock()
+
+	lv.ls.utxoByRefReads.Add(1)
 	utxo, err := lv.ls.db.UtxoByRef(
 		utxoId.Id().Bytes(),
 		utxoId.Index(),
 		lv.txn,
 	)
 	if err != nil {
+		// Not memoized: a ref that is missing now may resolve later.
 		return lcommon.Utxo{}, err
 	}
 	tmpOutput, err := utxo.Decode()
@@ -195,10 +322,17 @@ func (lv *LedgerView) UtxoById(
 			ErrNilDecodedOutput,
 		)
 	}
-	return lcommon.Utxo{
+	result := lcommon.Utxo{
 		Id:     utxoId,
 		Output: tmpOutput,
-	}, nil
+	}
+	lv.utxoMemoMu.Lock()
+	if lv.utxoMemo == nil {
+		lv.utxoMemo = make(map[utxoMemoKey]lcommon.Utxo, 4)
+	}
+	lv.utxoMemo[memoKey] = result
+	lv.utxoMemoMu.Unlock()
+	return result, nil
 }
 
 func (lv *LedgerView) PoolRegistration(
@@ -252,6 +386,11 @@ func (lv *LedgerView) IsStakeCredentialRegistered(
 				"credential", cred.Hash().String(),
 				"error", err,
 			)
+			lv.recordStorageErr(fmt.Errorf(
+				"get account for stake credential %s: %w",
+				cred.Hash().String(),
+				err,
+			))
 		}
 		return false
 	}
@@ -395,10 +534,8 @@ func (lv *LedgerView) PoolCurrentState(
 		}
 		if reg.MetadataUrl != "" {
 			tmp.PoolMetadata = &lcommon.PoolMetadata{
-				Url: reg.MetadataUrl,
-				Hash: lcommon.PoolMetadataHash(
-					lcommon.NewBlake2b256(reg.MetadataHash),
-				),
+				Url:  reg.MetadataUrl,
+				Hash: lcommon.PoolMetadataHash(reg.MetadataHash),
 			}
 		}
 		currentReg = &tmp
@@ -461,6 +598,19 @@ func (lv *LedgerView) EpochForSlot(slot uint64) (uint64, error) {
 func (lv *LedgerView) IsPoolRegistered(pkh lcommon.PoolKeyHash) bool {
 	reg, _, err := lv.PoolCurrentState(pkh)
 	if err != nil {
+		// PoolCurrentState already converts models.ErrPoolNotFound into a
+		// nil error, so any error reaching here is a genuine storage fault.
+		lv.ls.config.Logger.Error(
+			"failed to get pool",
+			"component", "ledger",
+			"pool_key_hash", pkh.String(),
+			"error", err,
+		)
+		lv.recordStorageErr(fmt.Errorf(
+			"get pool %s: %w",
+			pkh.String(),
+			err,
+		))
 		return false
 	}
 	return reg != nil
@@ -564,6 +714,11 @@ func (lv *LedgerView) IsRewardAccountRegistered(
 				"credential", cred.Hash().String(),
 				"error", err,
 			)
+			lv.recordStorageErr(fmt.Errorf(
+				"get account for reward account %s: %w",
+				cred.Hash().String(),
+				err,
+			))
 		}
 		return false
 	}
@@ -618,6 +773,24 @@ func (lv *LedgerView) CostModels() map[lcommon.PlutusLanguage]lcommon.CostModel 
 		return map[lcommon.PlutusLanguage]lcommon.CostModel{}
 	}
 	return extractCostModelsFromPParams(pp)
+}
+
+// SyntheticV2CostModelInEffect reports whether the PlutusV2 cost model
+// currently in force is still HardForkBabbage's fabricated default rather
+// than real governance/protocol-update data -- see
+// LedgerState.syntheticV2CostModel (blinklabs-io/dingo#3825,
+// blinklabs-io/dingo#3962). ledger/eras validation code (which cannot import
+// this package) type-asserts its lcommon.LedgerState parameter against a
+// locally declared interface with this exact method signature to reach it
+// without a package cycle.
+//
+// Returns the value pinSyntheticV2CostModel recorded, not a live read of
+// ls.loadConsensusSnapshot() -- see syntheticV2CostModel's field doc
+// comment for why a live read would be unsound here. A *LedgerView this
+// wasn't called on (e.g. a test constructing one directly) reports false,
+// matching the field's zero value.
+func (lv *LedgerView) SyntheticV2CostModelInEffect() bool {
+	return lv.syntheticV2CostModel
 }
 
 // costModelsProvider is an optional interface implemented by
@@ -1241,8 +1414,17 @@ func (lv *LedgerView) DRepRegistration(
 		}
 		return nil, fmt.Errorf("get drep: %w", err)
 	}
+	deposit, err := lv.ls.db.GetDrepLastRegistrationDeposit(
+		drep.CredentialTag,
+		credential[:],
+		lv.txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get drep last registration deposit: %w", err)
+	}
 	reg := &lcommon.DRepRegistration{
 		Credential: credential,
+		Deposit:    deposit,
 	}
 	if drep.AnchorURL != "" || len(drep.AnchorHash) > 0 {
 		if len(drep.AnchorHash) != 32 {
@@ -1267,10 +1449,36 @@ func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
 	if err != nil {
 		return nil, fmt.Errorf("get active dreps: %w", err)
 	}
+	// One batched read rather than a deposit query per DRep, because
+	// mainnet has thousands of active DReps, and scoped to the same active
+	// credential set fetched above so registration history left behind by
+	// DReps that have since deregistered cannot grow this. A credential
+	// with no registration row is absent from the map and reads back as
+	// the zero value, matching the singular form above.
+	//
+	// This method is not itself on the validation path: gouroboros
+	// declares it on common.DRepState but the Conway rules reach DRep
+	// state only through the singular DRepRegistration, and nothing in
+	// either tree calls the plural form outside gouroboros's own test
+	// mocks. The batching bounds the cost of a caller that does appear
+	// rather than one that exists today.
+	deposits, err := lv.ls.db.GetDrepLastRegistrationDeposits(lv.txn)
+	if err != nil {
+		return nil, fmt.Errorf("get drep last registration deposits: %w", err)
+	}
 	registrations := make([]lcommon.DRepRegistration, 0, len(dreps))
 	for _, drep := range dreps {
+		deposit, ok := deposits[models.DrepDepositKey(
+			drep.CredentialTag,
+			drep.Credential,
+		)]
+		var depositPtr *uint64
+		if ok {
+			depositPtr = uint64Ptr(deposit)
+		}
 		reg := lcommon.DRepRegistration{
 			Credential: lcommon.NewBlake2b224(drep.Credential),
+			Deposit:    depositPtr,
 		}
 		if drep.AnchorURL != "" || len(drep.AnchorHash) > 0 {
 			if len(drep.AnchorHash) != 32 {
@@ -1621,6 +1829,24 @@ func (lv *LedgerView) GovActionExists(id lcommon.GovActionId) bool {
 		lv.txn,
 	)
 	if err != nil {
+		if !errors.Is(err, models.ErrGovernanceProposalNotFound) {
+			govActionID := fmt.Sprintf(
+				"%s#%d",
+				hex.EncodeToString(id.TransactionId[:]),
+				id.GovActionIdx,
+			)
+			lv.ls.config.Logger.Error(
+				"failed to get governance proposal",
+				"component", "ledger",
+				"gov_action_id", govActionID,
+				"error", err,
+			)
+			lv.recordStorageErr(fmt.Errorf(
+				"get governance proposal %s: %w",
+				govActionID,
+				err,
+			))
+		}
 		return false
 	}
 	// Voting procedures may target only pending actions. GovActionById also

@@ -12,7 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build dingo_extra_plugins
+// No build tag: backendResetter and its helpers are dialect-agnostic
+// database/sql code with no plugin dependency. The tag this file used to
+// carry came from its callers -- when only the dingo_extra_plugins-gated
+// Postgres and MySQL managers used it -- and keeping it would have forced the
+// SQLite reset path (state_manager_sqlite.go), which every build has, to exist
+// only in the tagged configuration. Letting the two configurations diverge
+// there is exactly what this package avoids elsewhere; see
+// process_cleanup_test.go.
 
 package conformance
 

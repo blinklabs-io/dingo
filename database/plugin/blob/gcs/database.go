@@ -35,6 +35,7 @@ import (
 	"cloud.google.com/go/storage"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/compensate"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/blockverify"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
@@ -736,6 +737,30 @@ func (d *BlobStoreGCS) GetBlock(
 		return nil, tmpMetadata,
 			&types.HistoryExpiredError{Slot: slot, Hash: hash}
 	}
+	// GCS offers no content-addressing guarantee: re-derive the block's
+	// identity from its bytes rather than trusting the (slot, hash) key
+	// used to fetch it. (ID, Type) == (0, 0) marks a synthetic, non-block
+	// entry sharing this same bp/bp..._metadata key layout
+	// (SetGenesisCbor: genesis UTxO CBOR or a Leios endorser-block
+	// manifest, neither of which is a decodable ledger block); a real
+	// chain block never has both zero -- BlockCreate always assigns
+	// ID >= 1 regardless of type. Checking both, not ID alone, keeps a
+	// real block that somehow ended up with ID == 0 from silently
+	// skipping verification instead of failing it.
+	if tmpMetadata.ID != 0 || tmpMetadata.Type != 0 {
+		if _, err := blockverify.Hash(
+			tmpMetadata.Type,
+			slot,
+			cborData,
+			hash,
+		); err != nil {
+			return nil, types.BlockMetadata{}, fmt.Errorf(
+				"get block: slot %d: %w",
+				slot,
+				err,
+			)
+		}
+	}
 	return cborData, tmpMetadata, nil
 }
 
@@ -1223,12 +1248,27 @@ func (f *reverseKeyFile) nextReverse() (string, bool, error) {
 	if f.pos == 0 {
 		return "", false, nil
 	}
+	// Every record has a four-byte prefix and matching trailer. Validate
+	// the frame before trusting its declared allocation size.
+	if f.pos < 8 {
+		return "", false, errors.New("truncated reverse key record")
+	}
 	trailer := make([]byte, 4)
 	if _, err := f.file.ReadAt(trailer, f.pos-4); err != nil {
 		return "", false, err
 	}
 	length := int64(binary.BigEndian.Uint32(trailer))
-	start := f.pos - 4 - length - 4
+	if length > f.pos-8 || length > math.MaxInt {
+		return "", false, errors.New("invalid reverse key record length")
+	}
+	start := f.pos - 8 - length
+	prefix := make([]byte, 4)
+	if _, err := f.file.ReadAt(prefix, start); err != nil {
+		return "", false, err
+	}
+	if int64(binary.BigEndian.Uint32(prefix)) != length {
+		return "", false, errors.New("reverse key record lengths do not match")
+	}
 	key := make([]byte, length)
 	if _, err := f.file.ReadAt(key, start+4); err != nil {
 		return "", false, err

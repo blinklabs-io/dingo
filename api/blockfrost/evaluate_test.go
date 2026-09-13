@@ -68,6 +68,8 @@ func requireEvaluationEnvelope(
 // TestHandleTransactionEvaluateReturnsOgmiosEnvelope pins the response shape
 // off-chain SDKs parse: they read result.EvaluationResult, not a bare map.
 func TestHandleTransactionEvaluateReturnsOgmiosEnvelope(t *testing.T) {
+	t.Parallel()
+
 	node := evaluateTestNode()
 	w := postEvaluate(
 		t,
@@ -93,6 +95,8 @@ func TestHandleTransactionEvaluateReturnsOgmiosEnvelope(t *testing.T) {
 // CBOR bytes Dingo accepted first. Each must reach the ledger as the same
 // transaction.
 func TestHandleTransactionEvaluateAcceptsEncodedPayloads(t *testing.T) {
+	t.Parallel()
+
 	for name, body := range map[string]string{
 		"base16": hex.EncodeToString(rawEvaluateTxCbor),
 		"base16 upper": strings.ToUpper(
@@ -121,6 +125,8 @@ func TestHandleTransactionEvaluateAcceptsEncodedPayloads(t *testing.T) {
 }
 
 func TestHandleTransactionEvaluateRejectsInvalidTransaction(t *testing.T) {
+	t.Parallel()
+
 	node := &mockNode{transactionEvaluationErr: ErrInvalidTransaction}
 	w := postEvaluate(
 		t,
@@ -137,6 +143,8 @@ func TestHandleTransactionEvaluateRejectsInvalidTransaction(t *testing.T) {
 }
 
 func TestHandleTransactionEvaluateRequiresCBOR(t *testing.T) {
+	t.Parallel()
+
 	w := postEvaluate(
 		t,
 		&mockNode{},
@@ -149,6 +157,8 @@ func TestHandleTransactionEvaluateRequiresCBOR(t *testing.T) {
 }
 
 func TestHandleTransactionEvaluateRejectsEmptyBody(t *testing.T) {
+	t.Parallel()
+
 	w := postEvaluate(
 		t,
 		&mockNode{},
@@ -163,6 +173,8 @@ func TestHandleTransactionEvaluateRejectsEmptyBody(t *testing.T) {
 // TestHandleTransactionEvaluateRejectsOtherOgmiosVersion keeps the endpoint
 // from answering a caller that asked for a response format it does not serve.
 func TestHandleTransactionEvaluateRejectsOtherOgmiosVersion(t *testing.T) {
+	t.Parallel()
+
 	node := evaluateTestNode()
 	w := postEvaluate(
 		t,
@@ -177,6 +189,8 @@ func TestHandleTransactionEvaluateRejectsOtherOgmiosVersion(t *testing.T) {
 }
 
 func TestHandleTransactionEvaluateAcceptsDefaultOgmiosVersion(t *testing.T) {
+	t.Parallel()
+
 	w := postEvaluate(
 		t,
 		evaluateTestNode(),
@@ -191,6 +205,8 @@ func TestHandleTransactionEvaluateAcceptsDefaultOgmiosVersion(t *testing.T) {
 // TestHandleTransactionEvaluateUtxos covers the JSON form of the endpoint,
 // which is the one MeshJS's Blockfrost provider calls.
 func TestHandleTransactionEvaluateUtxos(t *testing.T) {
+	t.Parallel()
+
 	node := evaluateTestNode()
 	body, err := json.Marshal(map[string]any{
 		"cbor":              hex.EncodeToString(rawEvaluateTxCbor),
@@ -218,6 +234,8 @@ func TestHandleTransactionEvaluateUtxos(t *testing.T) {
 // ledger evaluator cannot honor, rather than returning execution units
 // computed without it.
 func TestHandleTransactionEvaluateUtxosRejectsAdditionalUtxoSet(t *testing.T) {
+	t.Parallel()
+
 	node := evaluateTestNode()
 	body, err := json.Marshal(map[string]any{
 		"cbor": hex.EncodeToString(rawEvaluateTxCbor),
@@ -248,6 +266,8 @@ func TestHandleTransactionEvaluateUtxosRejectsAdditionalUtxoSet(t *testing.T) {
 }
 
 func TestHandleTransactionEvaluateUtxosRequiresJSON(t *testing.T) {
+	t.Parallel()
+
 	w := postEvaluate(
 		t,
 		&mockNode{},
@@ -260,6 +280,8 @@ func TestHandleTransactionEvaluateUtxosRequiresJSON(t *testing.T) {
 }
 
 func TestHandleTransactionEvaluateUtxosRejectsInvalidBody(t *testing.T) {
+	t.Parallel()
+
 	w := postEvaluate(
 		t,
 		&mockNode{},
@@ -272,6 +294,8 @@ func TestHandleTransactionEvaluateUtxosRejectsInvalidBody(t *testing.T) {
 }
 
 func TestHandleTransactionEvaluateUtxosRejectsEmptyCbor(t *testing.T) {
+	t.Parallel()
+
 	node := evaluateTestNode()
 	w := postEvaluate(
 		t,
@@ -286,6 +310,8 @@ func TestHandleTransactionEvaluateUtxosRejectsEmptyCbor(t *testing.T) {
 }
 
 func TestDecodeTransactionPayload(t *testing.T) {
+	t.Parallel()
+
 	for name, tc := range map[string]struct {
 		payload []byte
 		want    []byte
@@ -336,6 +362,8 @@ func TestDecodeTransactionPayload(t *testing.T) {
 // inspect their serialization instead of the rejection, which is the one thing
 // the response could have told them.
 func TestHandleTransactionSubmitRejectedIsNotReportedAsMalformed(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{
 		transactionSubmitErr: fmt.Errorf(
 			"%w: validate transaction: script data hash mismatch",
@@ -372,6 +400,8 @@ func TestHandleTransactionSubmitRejectedIsNotReportedAsMalformed(t *testing.T) {
 // TestHandleTransactionSubmitStillReportsMalformedCbor pins the other side of
 // that split: a body that genuinely cannot be decoded keeps its message.
 func TestHandleTransactionSubmitStillReportsMalformedCbor(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{
 		transactionSubmitErr: fmt.Errorf(
 			"%w: determine transaction type",
@@ -397,6 +427,8 @@ func TestHandleTransactionSubmitStillReportsMalformedCbor(t *testing.T) {
 // split on the evaluation endpoints: a transaction that decoded but could not
 // be evaluated is not malformed CBOR.
 func TestHandleTransactionEvaluateFailureIsNotReportedAsMalformed(t *testing.T) {
+	t.Parallel()
+
 	node := evaluateTestNode()
 	node.transactionEvaluationErr = fmt.Errorf(
 		"%w: resolve inputs",
@@ -444,6 +476,8 @@ func (s *stubEvaluator) EvaluateTx(tx lcommon.Transaction) (
 func TestTransactionEvaluateStorageFailureIsNotAnEvaluationFailure(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	for name, cause := range map[string]error{
 		"blob store unavailable": dbtypes.ErrBlobStoreUnavailable,
 		"utxo cbor unavailable":  database.ErrUtxoCborUnavailable,
@@ -480,6 +514,8 @@ func TestTransactionEvaluateStorageFailureIsNotAnEvaluationFailure(
 func TestTransactionEvaluateScriptFailureStaysAnEvaluationFailure(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	evalErr := errors.New(
 		"TX abcd failed evaluation: the machine terminated part way " +
 			"through evaluation due to overspending the budget",
@@ -499,6 +535,8 @@ func TestTransactionEvaluateScriptFailureStaysAnEvaluationFailure(
 // does not swallow the success path, and that the evaluator seam is the one
 // the execution units come from.
 func TestTransactionEvaluateReturnsExecutionUnits(t *testing.T) {
+	t.Parallel()
+
 	evaluator := &stubEvaluator{
 		exUnits: map[lcommon.RedeemerKey]lcommon.ExUnits{
 			{Tag: lcommon.RedeemerTagSpend, Index: 0}: {
@@ -521,6 +559,8 @@ func TestTransactionEvaluateReturnsExecutionUnits(t *testing.T) {
 // TestTransactionEvaluateWithoutEvaluatorIsUnavailable covers the adapter
 // built without a ledger, the evaluation counterpart of the nil submitter.
 func TestTransactionEvaluateWithoutEvaluatorIsUnavailable(t *testing.T) {
+	t.Parallel()
+
 	adapter := &NodeAdapter{}
 
 	_, err := adapter.TransactionEvaluate(submitTestTxCbor(t))
@@ -531,6 +571,8 @@ func TestTransactionEvaluateWithoutEvaluatorIsUnavailable(t *testing.T) {
 // TestNewNodeAdapterWiresEvaluator pins that the production constructor fills
 // the seam, so the branch above is not reachable from a real node.
 func TestNewNodeAdapterWiresEvaluator(t *testing.T) {
+	t.Parallel()
+
 	adapter, _, _ := newDBBackedAdapter(t)
 
 	assert.NotNil(t, adapter.evaluator)
@@ -539,6 +581,8 @@ func TestNewNodeAdapterWiresEvaluator(t *testing.T) {
 // TestHandleTransactionEvaluateStorageFailureReturns503 carries the
 // classification through the HTTP layer.
 func TestHandleTransactionEvaluateStorageFailureReturns503(t *testing.T) {
+	t.Parallel()
+
 	node := evaluateTestNode()
 	node.transactionEvaluationErr = fmt.Errorf(
 		"%w: %w",

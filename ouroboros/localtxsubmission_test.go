@@ -32,6 +32,8 @@ import (
 func TestLocalTxSubmissionServerSubmitTx_NonByteContentReturnsError(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	o := &Ouroboros{
 		config: OuroborosConfig{
 			Logger: slog.New(slog.DiscardHandler),
@@ -60,6 +62,8 @@ func TestLocalTxSubmissionServerSubmitTx_NonByteContentReturnsError(
 func TestLocalTxSubmissionRejectReason_FallbackIsHardForkApplyTxErr(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	for _, era := range []uint16{
 		gledger.EraIdShelley,
 		gledger.EraIdAllegra,
@@ -90,6 +94,8 @@ func TestLocalTxSubmissionRejectReason_FallbackIsHardForkApplyTxErr(
 }
 
 func TestLocalTxSubmissionRejectReason_PreservesTypedReason(t *testing.T) {
+	t.Parallel()
+
 	typed := &gledger.EraMismatch{
 		OtherEra: gledger.EraInfo{
 			Index: gledger.EraIdShelley,
@@ -120,4 +126,35 @@ func TestLocalTxSubmissionRejectReason_PreservesTypedReason(t *testing.T) {
 	require.NotNil(t, eraMismatch)
 	assert.Equal(t, typed.OtherEra, eraMismatch.OtherEra)
 	assert.Equal(t, typed.LedgerEra, eraMismatch.LedgerEra)
+}
+
+// Exercise the protocol callback and real mempool decode rejection so the
+// response preserves the original wire era, including unsupported values.
+func TestLocalTxSubmissionServerSubmitTx_PreservesRejectEra(t *testing.T) {
+	for _, era := range []uint16{255, 256, 257, 65535} {
+		t.Run(fmt.Sprint(era), func(t *testing.T) {
+			o, connID := newTxSubmissionTestOuroboros(t)
+			err := o.localtxsubmissionServerSubmitTx(
+				olocaltxsubmission.CallbackContext{ConnectionId: connID},
+				olocaltxsubmission.NewMsgSubmitTx(era, []byte{0x80}).Transaction,
+			)
+			require.ErrorContains(t, err, "decode transaction")
+			var reason cborRejectReason
+			require.ErrorAs(t, err, &reason)
+			encoded, err := reason.MarshalCBOR()
+			require.NoError(t, err)
+			var envelope []cbor.RawMessage
+			_, err = cbor.Decode(encoded, &envelope)
+			require.NoError(t, err)
+			require.Len(t, envelope, 1)
+			var failure []cbor.RawMessage
+			_, err = cbor.Decode(envelope[0], &failure)
+			require.NoError(t, err)
+			require.Len(t, failure, 2)
+			var rejectedEra uint16
+			_, err = cbor.Decode(failure[0], &rejectedEra)
+			require.NoError(t, err)
+			assert.Equal(t, era, rejectedEra, "reject envelope must preserve submitted era")
+		})
+	}
 }

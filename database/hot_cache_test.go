@@ -52,6 +52,8 @@ func snapshotHotCache(cache *HotCache) *hotCacheSnapshot {
 }
 
 func TestHotCacheGetPut(t *testing.T) {
+	t.Parallel()
+
 	cache := NewHotCache(100, 0)
 
 	// Test Put and Get
@@ -94,6 +96,8 @@ func TestHotCacheGetPut(t *testing.T) {
 }
 
 func TestHotCacheMutationIsolation(t *testing.T) {
+	t.Parallel()
+
 	cache := NewHotCache(10, 0)
 	key := []byte("key")
 	value := []byte("original")
@@ -112,6 +116,8 @@ func TestHotCacheMutationIsolation(t *testing.T) {
 }
 
 func TestHotCacheConcurrent(t *testing.T) {
+	t.Parallel()
+
 	cache := NewHotCache(1000, 0)
 
 	const numGoroutines = 100
@@ -157,6 +163,8 @@ func TestHotCacheConcurrent(t *testing.T) {
 }
 
 func TestHotCacheEviction(t *testing.T) {
+	t.Parallel()
+
 	maxSize := 10
 	cache := NewHotCache(maxSize, 0)
 
@@ -208,6 +216,8 @@ func TestHotCacheEviction(t *testing.T) {
 }
 
 func TestHotCacheMemoryLimit(t *testing.T) {
+	t.Parallel()
+
 	maxBytes := int64(1000)
 	cache := NewHotCache(1000, maxBytes)
 
@@ -241,6 +251,8 @@ func TestHotCacheMemoryLimit(t *testing.T) {
 }
 
 func TestHotCacheLFUEviction(t *testing.T) {
+	t.Parallel()
+
 	maxSize := 5
 	cache := NewHotCache(maxSize, 0)
 
@@ -283,6 +295,8 @@ func TestHotCacheLFUEviction(t *testing.T) {
 // cardinality leaking into replacement, unique-admission, and sampled-access
 // paths. Each operation may allocate for its key/value and fixed eviction
 // sample, but never for a copy of every retained entry.
+// Not t.Parallel: testing.AllocsPerRun panics when called from a parallel
+// test, and the allocation counts it reports are process-wide.
 func TestHotCacheOperationsHaveBoundedAllocations(t *testing.T) {
 	const cardinality = 1000
 	cache := NewHotCache(cardinality, 0)
@@ -330,6 +344,9 @@ func TestHotCacheOperationsHaveBoundedAllocations(t *testing.T) {
 	)
 }
 
+// Not t.Parallel: this runs testing.Benchmark, whose timing and
+// allocation measurements are process-wide and are perturbed by
+// concurrent tests.
 func TestHotCacheOperationBytesDoNotScaleWithCardinality(t *testing.T) {
 	const (
 		smallCardinality = 128
@@ -397,6 +414,8 @@ func benchmarkHotCachePutBytes(cardinality int, churn bool) int64 {
 // acceptance criteria that cache insertion cannot spin indefinitely under
 // high contention, using the default retry budget.
 func TestHotCacheConcurrentPutsCompleteUnderHighContention(t *testing.T) {
+	t.Parallel()
+
 	cache := NewHotCache(50, 0)
 
 	const numGoroutines = 200
@@ -455,6 +474,8 @@ func TestHotCacheConcurrentPutsCompleteUnderHighContention(t *testing.T) {
 // while a one-attempt Put runs, then asserts the cache degrades gracefully
 // and remains usable after dropping the best-effort update.
 func TestHotCacheRetryBudgetFallback(t *testing.T) {
+	t.Parallel()
+
 	cache := NewHotCache(50, 0)
 	cache.maxCASAttempts = 1
 
@@ -498,6 +519,8 @@ func TestHotCacheRetryBudgetFallback(t *testing.T) {
 // the update loop body never runs) and asserts a configured logger reports it,
 // with no reliance on real contention or goroutine timing.
 func TestHotCacheLogsWriterAbortedOnBudgetExhaustion(t *testing.T) {
+	t.Parallel()
+
 	cache := NewHotCache(10, 0)
 	cache.maxCASAttempts = 0
 
@@ -523,6 +546,8 @@ func TestHotCacheLogsWriterAbortedOnBudgetExhaustion(t *testing.T) {
 // WritersAbortedAfterBudget counter still reflects every single abort. This
 // guards against sustained contention turning CPU churn into log/IO churn.
 func TestHotCacheLogWriterAbortedIsRateLimited(t *testing.T) {
+	t.Parallel()
+
 	cache := NewHotCache(10, 0)
 	cache.maxCASAttempts = 0
 
@@ -559,6 +584,8 @@ func TestHotCacheLogWriterAbortedIsRateLimited(t *testing.T) {
 // configured (the default) silently drops the writer-aborted event instead
 // of panicking on a nil logger dereference.
 func TestHotCacheNilLoggerDoesNotPanic(t *testing.T) {
+	t.Parallel()
+
 	cache := NewHotCache(10, 0)
 	cache.maxCASAttempts = 0
 
@@ -572,6 +599,8 @@ func TestHotCacheNilLoggerDoesNotPanic(t *testing.T) {
 // expose live update contention on a Prometheus registry, reflect this
 // cache's actual state, and safely tolerate duplicate registration.
 func TestHotCacheRegisterCASMetrics(t *testing.T) {
+	t.Parallel()
+
 	cache := NewHotCache(10, 0)
 	registry := prometheus.NewRegistry()
 
@@ -613,6 +642,8 @@ func TestHotCacheRegisterCASMetrics(t *testing.T) {
 }
 
 func TestHotCacheEmptyCache(t *testing.T) {
+	t.Parallel()
+
 	cache := NewHotCache(10, 0)
 
 	// Get from empty cache
@@ -622,6 +653,8 @@ func TestHotCacheEmptyCache(t *testing.T) {
 }
 
 func TestHotCacheNilKey(t *testing.T) {
+	t.Parallel()
+
 	cache := NewHotCache(10, 0)
 
 	// Put with nil key
@@ -634,6 +667,8 @@ func TestHotCacheNilKey(t *testing.T) {
 }
 
 func TestHotCacheZeroMaxSize(t *testing.T) {
+	t.Parallel()
+
 	// Zero maxSize means unlimited by count
 	cache := NewHotCache(0, 1000)
 
@@ -653,6 +688,8 @@ func TestHotCacheZeroMaxSize(t *testing.T) {
 }
 
 func TestHotCacheSmallMaxSize(t *testing.T) {
+	t.Parallel()
+
 	// Test that maxSize=1 works correctly (edge case for eviction)
 	cache := NewHotCache(1, 0)
 
@@ -686,6 +723,8 @@ func TestHotCacheSmallMaxSize(t *testing.T) {
 func TestHotCachePutNeverPermanentlyExceedsMaxSizeUnderGetContention(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const maxSize = 10
 	const rounds = 50
 	const numReaders = 50
@@ -737,6 +776,8 @@ func TestHotCachePutNeverPermanentlyExceedsMaxSizeUnderGetContention(
 }
 
 func TestHotCacheCombinedLimitsUnderChurn(t *testing.T) {
+	t.Parallel()
+
 	testCases := []struct {
 		name      string
 		maxSize   int
@@ -780,6 +821,8 @@ func TestHotCacheCombinedLimitsUnderChurn(t *testing.T) {
 }
 
 func TestHotCacheBoundedAdmissionDropPreservesExistingEntries(t *testing.T) {
+	t.Parallel()
+
 	const maxBytes = int64(1000)
 	cache := NewHotCache(0, maxBytes)
 	for i := range hotCacheEvictionSampleSize {
@@ -824,6 +867,8 @@ func TestHotCacheBoundedAdmissionDropPreservesExistingEntries(t *testing.T) {
 // separately committed entries snapshot and byte counter to desynchronize.
 // This test verifies the invariant directly after repeated evictions.
 func TestHotCacheTotalBytesStaysAccurateAcrossEvictions(t *testing.T) {
+	t.Parallel()
+
 	const maxBytes = 1000             // per-entry cutoff = maxBytes/10 = 100
 	cache := NewHotCache(0, maxBytes) // maxSize unlimited: purely byte-driven
 
@@ -866,6 +911,8 @@ func TestHotCacheTotalBytesStaysAccurateAcrossEvictions(t *testing.T) {
 func TestHotCachePutNeverPermanentlyExceedsMaxBytesUnderPutContention(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const maxBytes = 2000 // per-entry cutoff = maxBytes/10 = 200
 	const rounds = 20
 	const numWriters = 200

@@ -66,6 +66,8 @@ func newEpochCacheForecastLedger(
 }
 
 func TestAdvanceEpochCacheRejectsHardForkBoundary(t *testing.T) {
+	t.Parallel()
+
 	require.NotEqual(t, forecastByronEpochLength, forecastShelleyEpochLength,
 		"fixture must expose the previous-era length overlap")
 	lastByronEpoch := models.Epoch{
@@ -112,6 +114,8 @@ func TestAdvanceEpochCacheRejectsHardForkBoundary(t *testing.T) {
 }
 
 func TestAdvanceEpochCachePreservesWithinEraForecast(t *testing.T) {
+	t.Parallel()
+
 	lastByronEpoch := models.Epoch{
 		EpochId:       forecastBoundaryEpoch - 2,
 		StartSlot:     forecastWithinEraStartSlot,
@@ -140,6 +144,8 @@ func TestAdvanceEpochCachePreservesWithinEraForecast(t *testing.T) {
 }
 
 func TestHeaderVerificationEpochDefersAtHardForkBoundary(t *testing.T) {
+	t.Parallel()
+
 	lastByronEpoch := models.Epoch{
 		EpochId:       forecastBoundaryEpoch - 1,
 		StartSlot:     forecastBoundaryStartSlot,

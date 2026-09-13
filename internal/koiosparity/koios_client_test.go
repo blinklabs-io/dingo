@@ -35,6 +35,8 @@ import (
 // won't get smaller on retry) and never automatically retried on a future
 // fetch run either.
 func TestPostRejectsOversizedResponseAsPermanentNeverRetried(t *testing.T) {
+	t.Parallel()
+
 	var requestCount atomic.Int32
 	srv := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -83,6 +85,8 @@ func newTestKoiosClient(baseURL string) *KoiosClient {
 }
 
 func TestGetRetriesOn503ThenSucceeds(t *testing.T) {
+	t.Parallel()
+
 	var attempts atomic.Int32
 	srv := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -105,6 +109,8 @@ func TestGetRetriesOn503ThenSucceeds(t *testing.T) {
 }
 
 func TestGetRetriesOnBodyReadFailure(t *testing.T) {
+	t.Parallel()
+
 	var attempts atomic.Int32
 	srv := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -134,6 +140,8 @@ func TestGetRetriesOnBodyReadFailure(t *testing.T) {
 }
 
 func TestGetFailsAfterExhausting503Retries(t *testing.T) {
+	t.Parallel()
+
 	var attempts atomic.Int32
 	srv := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -152,6 +160,8 @@ func TestGetFailsAfterExhausting503Retries(t *testing.T) {
 }
 
 func TestGetDoesNotRetryOnDailyQuotaExceeded(t *testing.T) {
+	t.Parallel()
+
 	var attempts atomic.Int32
 	srv := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -181,6 +191,8 @@ func TestGetDoesNotRetryOnDailyQuotaExceeded(t *testing.T) {
 // on the very first attempt and must be marked permanent so Fetch aborts the
 // whole run instead of recording a misleading, isolated per-epoch failure.
 func TestGetDoesNotRetryOnAuthFailure(t *testing.T) {
+	t.Parallel()
+
 	var attempts atomic.Int32
 	srv := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -202,6 +214,8 @@ func TestGetDoesNotRetryOnAuthFailure(t *testing.T) {
 // transient failure that exhausts its retries (e.g. sustained 503s) must
 // remain an isolated, resumable per-epoch failure, not a hard abort.
 func TestGetExhausted503IsNotPermanent(t *testing.T) {
+	t.Parallel()
+
 	srv := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusServiceUnavailable)
@@ -221,6 +235,8 @@ func TestGetExhausted503IsNotPermanent(t *testing.T) {
 }
 
 func TestGetRetriesBurst429HonoringRetryAfter(t *testing.T) {
+	t.Parallel()
+
 	var attempts atomic.Int32
 	srv := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -248,6 +264,8 @@ func TestGetRetriesBurst429HonoringRetryAfter(t *testing.T) {
 }
 
 func TestRetryAfterDelayFallsBackToBurstCooldown(t *testing.T) {
+	t.Parallel()
+
 	require.Equal(t, koiosBurstCooldown, retryAfterDelay(nil))
 	resp := &http.Response{Header: make(http.Header)}
 	require.Equal(t, koiosBurstCooldown, retryAfterDelay(resp))
@@ -256,6 +274,8 @@ func TestRetryAfterDelayFallsBackToBurstCooldown(t *testing.T) {
 }
 
 func TestIsDailyQuotaExceeded(t *testing.T) {
+	t.Parallel()
+
 	require.True(t, isDailyQuotaExceeded("Exceeded Tier Limit"))
 	require.True(t, isDailyQuotaExceeded("error: Exceeded Tier Limit\n"))
 	require.False(t, isDailyQuotaExceeded("Too many requests"))
@@ -263,6 +283,8 @@ func TestIsDailyQuotaExceeded(t *testing.T) {
 }
 
 func TestGetPoolFirstActiveEpochsTakesMinAcrossUpdates(t *testing.T) {
+	t.Parallel()
+
 	srv := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
@@ -290,6 +312,8 @@ func TestGetPoolFirstActiveEpochsTakesMinAcrossUpdates(t *testing.T) {
 }
 
 func TestFilteredKoiosResponsesRequireRequestedEpoch(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name string
 		path string
@@ -343,6 +367,8 @@ func TestFilteredKoiosResponsesRequireRequestedEpoch(t *testing.T) {
 }
 
 func TestFilteredKoiosResponsesRejectMultipleRows(t *testing.T) {
+	t.Parallel()
+
 	srv := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusOK)
@@ -356,6 +382,8 @@ func TestFilteredKoiosResponsesRejectMultipleRows(t *testing.T) {
 }
 
 func TestRationalsEqual(t *testing.T) {
+	t.Parallel()
+
 	require.True(t, rationalsEqual("0.1", "1/10"))
 	require.True(t, rationalsEqual("1/20", "0.05"))
 	require.False(t, rationalsEqual("0.1", "0.2"))
@@ -366,6 +394,8 @@ func TestRationalsEqual(t *testing.T) {
 // for post(), proving the POST path shares the same transient-retry
 // classification as get() despite needing to rebuild its body each attempt.
 func TestPostRetriesOn503ThenSucceeds(t *testing.T) {
+	t.Parallel()
+
 	var attempts atomic.Int32
 	srv := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -396,6 +426,8 @@ func TestPostRetriesOn503ThenSucceeds(t *testing.T) {
 }
 
 func TestPostDoesNotRetryOnAuthFailure(t *testing.T) {
+	t.Parallel()
+
 	var attempts atomic.Int32
 	srv := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -418,6 +450,8 @@ func TestPostDoesNotRetryOnAuthFailure(t *testing.T) {
 }
 
 func TestPostDoesNotRetryOnDailyQuotaExceeded(t *testing.T) {
+	t.Parallel()
+
 	var attempts atomic.Int32
 	srv := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -440,6 +474,8 @@ func TestPostDoesNotRetryOnDailyQuotaExceeded(t *testing.T) {
 }
 
 func TestGetAllAccountAddressesPaginates(t *testing.T) {
+	t.Parallel()
+
 	var reqs []string
 	srv := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -472,6 +508,8 @@ func TestGetAllAccountAddressesPaginates(t *testing.T) {
 }
 
 func TestGetAccountRewardHistoryDecodesResponse(t *testing.T) {
+	t.Parallel()
+
 	srv := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			require.Equal(t, http.MethodPost, r.Method)
@@ -501,6 +539,8 @@ func TestGetAccountRewardHistoryDecodesResponse(t *testing.T) {
 }
 
 func TestGetAccountRewardHistoryEmptyAddressesNoRequest(t *testing.T) {
+	t.Parallel()
+
 	called := false
 	srv := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

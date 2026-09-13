@@ -23,6 +23,8 @@ import (
 )
 
 func TestBlockLRUShardCount(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		maxEntries int
 		want       int
@@ -63,6 +65,8 @@ func TestBlockLRUShardCount(t *testing.T) {
 }
 
 func TestBlockLRUShardCapacities(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		maxEntries int
 		shardCount int
@@ -120,6 +124,8 @@ func (c *BlockLRUCache) totalEntries() int {
 }
 
 func TestBlockLRUCacheShardsScaleWithCapacity(t *testing.T) {
+	t.Parallel()
+
 	// Small caches stay single-shard (exact global LRU, no overhead).
 	assert.Len(t, NewBlockLRUCache(3).shards, 1)
 	// The production default capacity shards.
@@ -127,6 +133,8 @@ func TestBlockLRUCacheShardsScaleWithCapacity(t *testing.T) {
 }
 
 func TestBlockLRUCacheTotalCapacityBounded(t *testing.T) {
+	t.Parallel()
+
 	const maxEntries = 500
 	cache := NewBlockLRUCache(maxEntries)
 
