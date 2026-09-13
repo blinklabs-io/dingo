@@ -1137,8 +1137,18 @@ func CompareAccountEpoch(
 	epochEndTime time.Time,
 	rewardsPending bool,
 ) []CheckMismatch {
-	koiosByKey, koiosMismatches := aggregateKoiosAccountRewards(network, epoch, koiosRows, now)
-	dingoByKey, dingoMismatches := aggregateDingoAccountRewards(network, epoch, dingoRows, now)
+	koiosByKey, koiosMismatches := aggregateKoiosAccountRewards(
+		network,
+		epoch,
+		koiosRows,
+		now,
+	)
+	dingoByKey, dingoMismatches := aggregateDingoAccountRewards(
+		network,
+		epoch,
+		dingoRows,
+		now,
+	)
 	out := append(koiosMismatches, dingoMismatches...)
 
 	allKeys := make([]accountRewardKey, 0, len(koiosByKey)+len(dingoByKey))

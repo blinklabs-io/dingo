@@ -848,6 +848,39 @@ func TestCompareAccountEpochRejectsMalformedPoolID(t *testing.T) {
 	require.Equal(t, StatusError, DetermineStatus(ms))
 }
 
+// TestCompareAccountEpochRejectsMalformedDingoPoolID mirrors
+// TestCompareAccountEpochRejectsMalformedPoolID on the Dingo side, and pins
+// the attribution rather than only the category: a pool identifier Dingo
+// could not decode must be recorded in DingoValue, never in KoiosValue.
+// Reporting it as Koios's value would send an investigation to the reference
+// data for a defect in Dingo's own storage.
+func TestCompareAccountEpochRejectsMalformedDingoPoolID(t *testing.T) {
+	t.Parallel()
+
+	ms := CompareAccountEpoch(
+		"preview",
+		100,
+		nil,
+		[]DingoAccountReward{{
+			StakeAddress: "stake1shared",
+			RewardType:   "member",
+			Amount:       "100",
+			PoolIDBech32: "not-a-pool-id",
+		}},
+		time.Now(),
+		0,
+		time.Time{},
+		false,
+	)
+	require.Len(t, ms, 1)
+	require.Equal(t, CategoryDBError, ms[0].Category)
+	require.Equal(t, "account_reward_pool_decode", ms[0].Field)
+	require.Equal(t, "not-a-pool-id", ms[0].DingoValue)
+	require.Empty(t, ms[0].KoiosValue,
+		"a Dingo-side decode failure is not Koios's value")
+	require.Equal(t, StatusError, DetermineStatus(ms))
+}
+
 func TestCompareAccountEpochZeroRewardBothSidesPasses(t *testing.T) {
 	t.Parallel()
 
