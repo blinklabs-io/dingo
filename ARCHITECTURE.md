@@ -1143,6 +1143,16 @@ When `Node.Run()` is called, components are initialized in this order:
     Fresh genesis initialization persists both genesis UTxOs and the effective
     Shelley staking declarations, including network-specific `extraConfig`
     pools and delegations, before snapshot capture.
+    A Mithril-bootstrapped node instead reaches `createGenesisBlock` with its
+    tip already past slot 0 and no genesis CBOR yet stored (the bootstrap
+    imports ledger state and ImmutableDB blocks but never runs this
+    function). It still stores the synthetic genesis block CBOR
+    unconditionally — other code depends on it existing structurally — but
+    skips (re-)inserting genesis UTxOs, pools, delegations, and DReps as live
+    rows: the imported ledger snapshot (`ledgerstate/import.go`) already
+    reflects their correct current state as of the bootstrap point, and this
+    function has no way to tell a still-live genesis declaration from one
+    already spent/retired/changed since (blinklabs-io/dingo#4151).
     For networks with a real Byron genesis, an empty database retains a Byron
     epoch cache until the on-chain Shelley boundary is observed. A configured
     experimental Shelley hard-fork epoch is the explicit exception used by

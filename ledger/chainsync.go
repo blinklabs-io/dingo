@@ -4993,7 +4993,16 @@ func (ls *LedgerState) createGenesisBlock() error {
 		return fmt.Errorf("get genesis block hash: %w", err)
 	}
 
-	if ls.currentTip.Point.Slot > 0 {
+	// bootstrappedFromMithril is true only on the fall-through path below:
+	// a chain already past slot 0 whose genesis CBOR was never created,
+	// which happens specifically when a Mithril bootstrap imported ledger
+	// state and ImmutableDB blocks without going through this function
+	// first. Captured once, here, rather than re-read inline further
+	// down: this function's only caller runs it once at startup before
+	// any concurrent chain-extension could move currentTip, so a single
+	// snapshot is representative for the whole call.
+	bootstrappedFromMithril := ls.currentTip.Point.Slot > 0
+	if bootstrappedFromMithril {
 		// Validate existing chain data matches the current genesis config.
 		// If genesis CBOR exists in the blob store with the expected hash,
 		// the database was created with a matching genesis. Older databases
@@ -5142,20 +5151,39 @@ func (ls *LedgerState) createGenesisBlock() error {
 			return fmt.Errorf("store genesis cbor: %w", err)
 		}
 
-		// Store each genesis transaction with its UTxOs
-		for txHashArray, utxos := range txUtxos {
-			if err := ls.db.SetGenesisTransaction(
-				txHashArray[:],
-				genesisHash[:],
-				utxos,
-				utxoOffsets,
-				txn,
-			); err != nil {
-				return fmt.Errorf(
-					"set genesis transaction %x: %w",
-					txHashArray[:8],
-					err,
-				)
+		// Store each genesis transaction with its UTxOs -- but only for a
+		// from-genesis sync. A Mithril-bootstrapped node's imported ledger
+		// snapshot already reflects the *current*, correct live/spent
+		// status of every genesis output as of the bootstrap point: a
+		// genesis UTxO still unspent there is already present in that
+		// import, and one spent at any point before it is correctly
+		// absent. This function has no way to tell those two cases apart
+		// from genesis data alone (it never replayed the history between
+		// slot 0 and the bootstrap point), so inserting these rows here
+		// would either duplicate an already-imported live UTxO or
+		// resurrect one genuinely spent long ago as live again --
+		// exactly the divergence blinklabs-io/dingo#4151 found via
+		// cmd/node-parity against a real cardano-node. The synthetic
+		// genesis block CBOR above is still stored unconditionally: other
+		// code depends on it existing structurally (e.g. this function's
+		// own HasGenesisCbor short-circuit above, and the Shelley genesis
+		// hash used elsewhere), independent of whether its per-output
+		// UTxOs are (re-)inserted into the live UTxO store.
+		if !bootstrappedFromMithril {
+			for txHashArray, utxos := range txUtxos {
+				if err := ls.db.SetGenesisTransaction(
+					txHashArray[:],
+					genesisHash[:],
+					utxos,
+					utxoOffsets,
+					txn,
+				); err != nil {
+					return fmt.Errorf(
+						"set genesis transaction %x: %w",
+						txHashArray[:8],
+						err,
+					)
+				}
 			}
 		}
 
@@ -5184,17 +5212,40 @@ func (ls *LedgerState) createGenesisBlock() error {
 			return err
 		}
 
-		ls.config.Logger.Info(
-			fmt.Sprintf("stored %d genesis transactions with %d total UTxOs",
-				len(txUtxos),
-				len(genesisUtxos),
-			),
-			"component", "ledger",
-			"treasury", 0,
-			"reserves", genesisReserves,
-		)
+		if bootstrappedFromMithril {
+			ls.config.Logger.Info(
+				"stored synthetic genesis block CBOR; skipped inserting "+
+					"genesis UTxOs (already reflected by the Mithril-"+
+					"imported ledger snapshot)",
+				"component", "ledger",
+				"genesis_transactions", len(txUtxos),
+				"genesis_utxos", len(genesisUtxos),
+				"treasury", 0,
+				"reserves", genesisReserves,
+			)
+		} else {
+			ls.config.Logger.Info(
+				fmt.Sprintf("stored %d genesis transactions with %d total UTxOs",
+					len(txUtxos),
+					len(genesisUtxos),
+				),
+				"component", "ledger",
+				"treasury", 0,
+				"reserves", genesisReserves,
+			)
+		}
 
-		// Load genesis staking data (pool registrations + delegations)
+		// Load genesis staking data (pool registrations + delegations) --
+		// but only for a from-genesis sync, for the same reason genesis
+		// UTxO insertion is skipped above (blinklabs-io/dingo#4151).
+		// SetGenesisStaking upserts current-state pool/delegation rows
+		// (ON CONFLICT ... DO UPDATE), and a Mithril-bootstrapped node's
+		// imported ledger snapshot (ledgerstate/import.go's
+		// importCertState) already reflects the correct *current*
+		// pool/delegation state as of the bootstrap point -- reapplying
+		// stale genesis-config values here would resurrect a pool or
+		// delegation genuinely retired/changed long before the bootstrap
+		// point, the same resurrection bug #4151 found for UTxOs.
 		genesisPools, poolDelegators, err := shelleyGenesis.InitialPools()
 		if err != nil {
 			return fmt.Errorf("parse genesis staking: %w", err)
@@ -5203,8 +5254,8 @@ func (ls *LedgerState) createGenesisBlock() error {
 		if err != nil {
 			return fmt.Errorf("parse genesis stake delegations: %w", err)
 		}
-		if len(genesisPools) > 0 ||
-			len(genesisStake) > 0 {
+		if !bootstrappedFromMithril &&
+			(len(genesisPools) > 0 || len(genesisStake) > 0) {
 			ls.config.Logger.Info(
 				fmt.Sprintf(
 					"loading genesis staking: %d pools, %d delegations",
@@ -5227,9 +5278,12 @@ func (ls *LedgerState) createGenesisBlock() error {
 		// Load Conway genesis bootstrap data (initial DReps and
 		// stake/vote delegations). The conway-genesis.json may declare
 		// pre-existing DReps and delegations for test networks; mainnet
-		// has none.
+		// has none. Same bootstrappedFromMithril guard as genesis
+		// staking above, for the same reason: SetGenesisGovernance
+		// upserts current-state DRep/delegation rows that a Mithril
+		// import has already populated correctly.
 		conwayGenesis := ls.config.CardanoNodeConfig.ConwayGenesis()
-		if conwayGenesis != nil &&
+		if !bootstrappedFromMithril && conwayGenesis != nil &&
 			(len(conwayGenesis.InitialDReps) > 0 ||
 				len(conwayGenesis.Delegs) > 0) {
 			ls.config.Logger.Info(
@@ -5340,7 +5394,11 @@ func (ls *LedgerState) ensureGenesisCommittee(txn *database.Txn) error {
 			Credential:    member.ColdCredHash,
 		}).Key()] = struct{}{}
 	}
-	newMembers := make([]*models.CommitteeMember, 0, len(conwayGenesis.Committee.Members))
+	newMembers := make(
+		[]*models.CommitteeMember,
+		0,
+		len(conwayGenesis.Committee.Members),
+	)
 	for raw, expiry := range conwayGenesis.Committee.Members {
 		tag, hash, err := parseGenesisCommitteeCredential(raw)
 		if err != nil {
