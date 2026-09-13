@@ -21,6 +21,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -180,9 +181,7 @@ func newDatabaseWithOptions(
 		// sizes decodes back to the 2GiB reservation. Caller keys win, so
 		// a test that needs production sizing still asks for it.
 		merged := testutil.BadgerBlobConfig()
-		for k, v := range blobConfig {
-			merged[k] = v
-		}
+		maps.Copy(merged, blobConfig)
 		blobConfig = merged
 	}
 	metadataName := opts.Metadata.Name

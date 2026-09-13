@@ -14,12 +14,7 @@
 
 package ouroboros
 
-import (
-	"sync"
-	"time"
-
-	ouroboros "github.com/blinklabs-io/gouroboros"
-)
+import "time"
 
 // chainsyncFindIntersectRateLimiter bounds the database lookup work a single
 // ChainSync peer connection can trigger via repeated FindIntersect requests.
@@ -31,11 +26,9 @@ import (
 // so resending duplicate points cannot inflate the charge.
 //
 // Reuses the tokenBucket implementation from txsubmission_rate_limiter.go
-// and the sync.Map-per-peer shape for lock-free reads on the hot path.
+// and one token bucket owned by the ChainSync protocol instance.
 type chainsyncFindIntersectRateLimiter struct {
-	peers   sync.Map // map[string]*tokenBucket keyed by connIdKey
-	rate    float64  // points per second per peer
-	burst   float64  // max burst per peer
+	bucket  *tokenBucket
 	nowFunc func() time.Time
 }
 
@@ -46,32 +39,19 @@ func newChainsyncFindIntersectRateLimiter(
 	rate float64,
 	burst float64,
 ) *chainsyncFindIntersectRateLimiter {
-	return &chainsyncFindIntersectRateLimiter{
-		rate:    rate,
-		burst:   burst,
+	rl := &chainsyncFindIntersectRateLimiter{
 		nowFunc: time.Now,
 	}
+	// Start with a zero timestamp so the first Allow call initializes the
+	// bucket clock from nowFunc. This keeps the clock injectable for tests.
+	rl.bucket = newTokenBucket(rate, burst, time.Time{})
+	return rl
 }
 
 // Allow reports whether n points of FindIntersect lookup work from the given
 // peer are within budget, consuming that budget if so.
 func (rl *chainsyncFindIntersectRateLimiter) Allow(
-	connId ouroboros.ConnectionId,
 	n int,
 ) bool {
-	key := connIdKey(connId)
-	val, ok := rl.peers.Load(key)
-	if !ok {
-		bucket := newTokenBucket(rl.rate, rl.burst, rl.nowFunc())
-		val, _ = rl.peers.LoadOrStore(key, bucket)
-	}
-	return val.(*tokenBucket).allow(float64(n), rl.nowFunc())
-}
-
-// RemovePeer removes rate limiting state for the given connection. This
-// should be called when a connection is closed.
-func (rl *chainsyncFindIntersectRateLimiter) RemovePeer(
-	connId ouroboros.ConnectionId,
-) {
-	rl.peers.Delete(connIdKey(connId))
+	return rl.bucket.allow(float64(n), rl.nowFunc())
 }

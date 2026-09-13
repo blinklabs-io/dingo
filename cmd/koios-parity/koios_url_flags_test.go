@@ -37,12 +37,18 @@ func TestKoiosAllowInsecureHTTPFlagBeatsEnv(t *testing.T) {
 	t.Setenv("KOIOS_ALLOW_INSECURE_HTTP", "true")
 
 	cmd := newKoiosURLFlagCmd()
-	require.NoError(t, cmd.ParseFlags([]string{"--koios-allow-insecure-http=false"}))
+	require.NoError(
+		t,
+		cmd.ParseFlags([]string{"--koios-allow-insecure-http=false"}),
+	)
 	assert.False(t, koiosAllowInsecureHTTP(cmd),
 		"an explicit false must win over the environment")
 
 	cmd = newKoiosURLFlagCmd()
-	require.NoError(t, cmd.ParseFlags([]string{"--koios-allow-insecure-http=true"}))
+	require.NoError(
+		t,
+		cmd.ParseFlags([]string{"--koios-allow-insecure-http=true"}),
+	)
 	assert.True(t, koiosAllowInsecureHTTP(cmd))
 
 	// Unset flag falls back to the environment.
@@ -62,7 +68,10 @@ func TestKoiosBaseURLFlagBeatsEnv(t *testing.T) {
 	t.Setenv("KOIOS_URL", "https://env.example/api/v1")
 
 	cmd := newKoiosURLFlagCmd()
-	require.NoError(t, cmd.ParseFlags([]string{"--koios-url=https://flag.example/api/v1"}))
+	require.NoError(
+		t,
+		cmd.ParseFlags([]string{"--koios-url=https://flag.example/api/v1"}),
+	)
 	assert.Equal(t, "https://flag.example/api/v1", koiosBaseURL(cmd))
 
 	cmd = newKoiosURLFlagCmd()

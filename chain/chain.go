@@ -362,7 +362,7 @@ func headerInvalidationEvent(
 // c.mutex.
 func (c *Chain) queuedHeaderHashes() []lcommon.Blake2b256 {
 	if len(c.headers) == 0 {
-		return nil
+		return []lcommon.Blake2b256{}
 	}
 	hashes := make([]lcommon.Blake2b256, 0, len(c.headers))
 	for _, queued := range c.headers {

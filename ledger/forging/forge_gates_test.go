@@ -286,16 +286,16 @@ func TestForgeTakesLeaderSlotWhenUpstreamTargetUnknownAtTip(
 	}
 }
 
-// TestForgeStillWaitsForUnknownUpstreamTargetWhileTipIsStale keeps the
-// protection the gate exists for. An unknown target is not evidence that this
-// node is behind, but a tip that lags the wall clock by more than the
-// tolerance is, and a node in that state must not forge on a stale view just
-// because the peer it selected has not spoken yet.
-func TestForgeStillWaitsForUnknownUpstreamTargetWhileTipIsStale(
+// TestForgeAllowsUnknownUpstreamTargetWhileWallClockIsStale verifies that a
+// quiet network is not mistaken for an upstream peer being ahead. The target
+// is unknown, so the forge gate has no peer-relative evidence that this node
+// is behind (issue #4201).
+func TestForgeAllowsUnknownUpstreamTargetWhileWallClockIsStale(
 	t *testing.T,
 ) {
 	leader := &forgerCountingLeader{}
-	builder := &forgerTestBuilder{}
+	block := newForgerTestBlock(1000, 9)
+	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
 	broadcaster := &forgerTestBroadcaster{}
 	forger, err := NewBlockForger(ForgerConfig{
 		Mode:             ModeProduction,
@@ -320,12 +320,12 @@ func TestForgeStillWaitsForUnknownUpstreamTargetWhileTipIsStale(
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
 
-	assert.Zero(t, leader.callCount())
-	assert.Zero(t, builder.calls)
-	assert.Zero(t, broadcaster.calls)
+	assert.Equal(t, 1, leader.callCount())
+	assert.Equal(t, 1, builder.calls)
+	assert.Equal(t, 1, broadcaster.calls)
 	assert.Equal(
 		t,
-		float64(1),
+		float64(0),
 		testutil.ToFloat64(forger.metrics.forgeSyncSkip),
 	)
 	// #4013 asserted 991 here, the local tip's lag behind the wall clock,
@@ -340,10 +340,9 @@ func TestForgeStillWaitsForUnknownUpstreamTargetWhileTipIsStale(
 	// dingo_tip_gap_slots ("slots between wall-clock slot and chain tip",
 	// ledger/state.go), on every slot tick rather than only on a leader-slot
 	// skip, and the gate's own log line carries current_slot and tip_slot.
-	// What this test pins is unchanged -- a stale tip still stops the forge
-	// when the upstream target is unknown; see
-	// TestForgeTakesLeaderSlotWhenUpstreamTargetUnknownAtTip for the at-tip
-	// half of that pair.
+	// The lag itself is not a forge-sync signal when the upstream target is
+	// unknown; see TestForgeTakesLeaderSlotWhenUpstreamTargetUnknownAtTip for
+	// the at-tip case as well.
 	assert.Equal(
 		t,
 		float64(0),

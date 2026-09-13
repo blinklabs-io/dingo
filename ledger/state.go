@@ -920,13 +920,17 @@ type LedgerState struct {
 	// LocalStateQuery caller asking "what are the current protocol
 	// parameters" should see only what the chain has actually committed to,
 	// matching what a real cardano-node reports during the same window.
-	syntheticV2CostModel        bool
-	transitionInfo              hardfork.TransitionInfo // upcoming era boundary state (mirrors Haskell HFC TransitionInfo)
-	hfiEvalDoneEpoch            uint64                  // currentEpoch.EpochId for which the HFI tally has been kicked off (held under ls.RWMutex)
-	hfiEvalGeneration           atomic.Uint64           // bumped on rollback to invalidate any in-flight HFI tally
-	hfiStabilityEvalInFlight    atomic.Bool             // guard against overlapping async HFI tallies
-	rewardInputGeneration       atomic.Uint64           // bracketed around rollback to invalidate in-flight reward calculations
-	rewardInputRollbackActive   atomic.Int64            // non-zero while rollback can mutate reward calculation inputs
+	syntheticV2CostModel      bool
+	transitionInfo            hardfork.TransitionInfo // upcoming era boundary state (mirrors Haskell HFC TransitionInfo)
+	hfiEvalDoneEpoch          uint64                  // currentEpoch.EpochId for which the HFI tally has been kicked off (held under ls.RWMutex)
+	hfiEvalGeneration         atomic.Uint64           // bumped on rollback to invalidate any in-flight HFI tally
+	hfiStabilityEvalInFlight  atomic.Bool             // guard against overlapping async HFI tallies
+	rewardInputGeneration     atomic.Uint64           // bracketed around rollback to invalidate in-flight reward calculations
+	rewardInputRollbackActive atomic.Int64            // non-zero while rollback can mutate reward calculation inputs
+	// utxoByRefReads counts database.UtxoByRef reads made by
+	// LedgerView.UtxoById across every view of this LedgerState. Tests use
+	// it to assert the per-view UTxO memo; production code does not read it.
+	utxoByRefReads              atomic.Uint64
 	mempool                     MempoolProvider
 	timerCleanupConsumedUtxos   *time.Timer
 	cleanupConsumedUtxosRunning atomic.Bool
@@ -3279,12 +3283,18 @@ func (ls *LedgerState) rollbackWithResync(
 		}
 		ls.config.Logger.Warn(
 			"rollback target shares the applied tip's slot with a different hash, redirecting below the contested slot",
-			"component", "ledger",
-			"contested_slot", point.Slot,
-			"rollback_hash", hex.EncodeToString(point.Hash),
-			"ledger_tip_hash", hex.EncodeToString(currentTip.Point.Hash),
-			"ancestor_slot", ancestor.Slot,
-			"ancestor_hash", hex.EncodeToString(ancestor.Hash),
+			"component",
+			"ledger",
+			"contested_slot",
+			point.Slot,
+			"rollback_hash",
+			hex.EncodeToString(point.Hash),
+			"ledger_tip_hash",
+			hex.EncodeToString(currentTip.Point.Hash),
+			"ancestor_slot",
+			ancestor.Slot,
+			"ancestor_hash",
+			hex.EncodeToString(ancestor.Hash),
 		)
 		point = ancestor
 	}
@@ -4948,7 +4958,13 @@ func (ls *LedgerState) ledgerReadChain(
 					"error", err,
 					"start_slot", startPoint.Slot,
 				)
-				reportErr(fmt.Errorf("create chain iterator from %v: %w", startPoint, err))
+				reportErr(
+					fmt.Errorf(
+						"create chain iterator from %v: %w",
+						startPoint,
+						err,
+					),
+				)
 				return
 			}
 			if reconcileRetries >= maxReconcileRetries {
@@ -4965,7 +4981,13 @@ func (ls *LedgerState) ledgerReadChain(
 					"max_retries",
 					maxReconcileRetries,
 				)
-				reportErr(fmt.Errorf("exhausted ledger rollback retries from %v: %w", startPoint, err))
+				reportErr(
+					fmt.Errorf(
+						"exhausted ledger rollback retries from %v: %w",
+						startPoint,
+						err,
+					),
+				)
 				return
 			}
 			ls.config.Logger.Warn(
@@ -4978,7 +5000,10 @@ func (ls *LedgerState) ledgerReadChain(
 				hex.EncodeToString(startPoint.Hash),
 			)
 			if reconcileErr := ls.reconcilePrimaryChainTipWithLedgerTip(); reconcileErr != nil {
-				if errors.Is(reconcileErr, chain.ErrRollbackExceedsSecurityParam) {
+				if errors.Is(
+					reconcileErr,
+					chain.ErrRollbackExceedsSecurityParam,
+				) {
 					// The common ancestor sits more than K blocks
 					// behind the primary chain tip: this reader cannot
 					// safely reconcile locally, the same over-K
@@ -5103,7 +5128,12 @@ func (ls *LedgerState) ledgerReadChain(
 					"start_slot", startPoint.Slot,
 					"start_hash", hex.EncodeToString(startPoint.Hash),
 				)
-				reportErr(fmt.Errorf("recover missing chain iterator start point: %w", reconcileErr))
+				reportErr(
+					fmt.Errorf(
+						"recover missing chain iterator start point: %w",
+						reconcileErr,
+					),
+				)
 				return
 			}
 			reconcileRetries++
@@ -5119,7 +5149,12 @@ func (ls *LedgerState) ledgerReadChain(
 					"start_hash",
 					hex.EncodeToString(startPoint.Hash),
 				)
-				reportErr(fmt.Errorf("ledger rollback did not change missing chain iterator start point: %v", startPoint))
+				reportErr(
+					fmt.Errorf(
+						"ledger rollback did not change missing chain iterator start point: %v",
+						startPoint,
+					),
+				)
 				return
 			}
 			continue
@@ -5653,34 +5688,10 @@ const (
 	// retry at noProgressBackoffMax means hammering it at that rate for as
 	// long as the process runs.
 	noProgressStuckThreshold = 50
-	// noProgressStuckBackoffMax bounds the wait once stuck. The pipeline
-	// keeps retrying, because the condition can still be cleared from
-	// outside (a peer serving a different chain, an operator repairing
-	// state), but at a rate that neither burns CPU nor buries the logs.
+	// noProgressStuckBackoffMax is retained for the backoff calculation and
+	// metric tests; the retry loop stops when the threshold is reached.
 	noProgressStuckBackoffMax = 30 * time.Second
-	// noProgressStuckReannounceInterval is how many further no-progress
-	// restarts pass between ERROR announcements once the pipeline is stuck.
-	// Announcing the transition once and then dropping to WARN every 100
-	// restarts made a node that had stopped following the chain look quiet
-	// to log-level alerting: one ERROR line covered 18 hours, mixed into
-	// 129k WARN lines from everything else (issue #3261). At the stuck
-	// backoff ceiling this re-announces roughly every ten minutes, which is
-	// often enough to alert on and rare enough not to become the noise it
-	// replaces.
-	noProgressStuckReannounceInterval = 20
 )
-
-// pipelineStuckShouldAnnounce reports whether a stuck no-progress restart
-// warrants an ERROR announcement. True on the transition into stuck and every
-// noProgressStuckReannounceInterval restarts after it, so the condition stays
-// visible for as long as it lasts rather than only when it began.
-func pipelineStuckShouldAnnounce(consecutiveNoProgress int) bool {
-	if consecutiveNoProgress < noProgressStuckThreshold {
-		return false
-	}
-	return (consecutiveNoProgress-noProgressStuckThreshold)%
-		noProgressStuckReannounceInterval == 0
-}
 
 // runLedgerReadChainAttempt runs one read+process attempt: it launches
 // readChain on a fresh child context of ctx, hands the result channel to
@@ -5772,6 +5783,28 @@ func ledgerPipelineRetryDelay(
 ) (time.Duration, bool) {
 	backoff, stuck := ledgerPipelineBackoff(consecutiveNoProgress)
 	return max(backoff, minimum), stuck
+}
+
+// stopStuckLedgerPipeline reports the terminal form of a pipeline failure
+// that has replayed the same applied tip too many times. A bare restart cannot
+// change a deterministic verdict, so continuing would leave the node silently
+// following neither the stored chain nor its peers (issue #3975).
+func (ls *LedgerState) stopStuckLedgerPipeline(
+	err error,
+	progress pipelineProgress,
+) {
+	if !progress.stuck() {
+		return
+	}
+	if ls.config.Logger != nil {
+		ls.config.Logger.Error(
+			"ledger pipeline stopped after repeated no-progress restarts; operator intervention is required",
+			"component", "ledger",
+			"consecutive_no_progress", progress.consecutiveNoProgress,
+			"tip_slot", progress.lastTipSlot,
+			"error", err,
+		)
+	}
 }
 
 // certifiedEndorserBlockPipelineRetryDelay returns how long the pipeline waits
@@ -5931,21 +5964,11 @@ func (ls *LedgerState) ledgerProcessBlocksWithAttempt(
 				progress.consecutiveNoProgress,
 				endorserStuck,
 			)
-			if endorserStuck &&
-				pipelineStuckShouldAnnounce(
-					progress.consecutiveNoProgress,
-				) {
-				ls.config.Logger.Error(
-					"ledger pipeline stuck: a certified endorser block has stayed unavailable across repeated restarts without advancing the tip; the node is no longer following the chain",
-					"component",
-					"ledger",
-					"consecutive_no_progress",
-					progress.consecutiveNoProgress,
-					"tip_slot",
-					progress.lastTipSlot,
-					"error",
-					err,
-				)
+			if endorserStuck {
+				halted = true
+				ls.metrics.setPipelineHalted()
+				ls.stopStuckLedgerPipeline(err, progress)
+				return
 			}
 			timer := time.NewTimer(
 				certifiedEndorserBlockPipelineRetryDelay(
@@ -5971,31 +5994,13 @@ func (ls *LedgerState) ledgerProcessBlocksWithAttempt(
 			progress.consecutiveNoProgress,
 			stuck,
 		)
+		if stuck {
+			halted = true
+			ls.metrics.setPipelineHalted()
+			ls.stopStuckLedgerPipeline(err, progress)
+			return
+		}
 		if progress.consecutiveNoProgress > 0 {
-			// Announce the stuck condition at ERROR on the transition and
-			// periodically for as long as it lasts: a deterministic failure
-			// is not going to clear on its own, and a node that has stopped
-			// following the chain must not fall silent at ERROR after one
-			// line while the WARN below is buried among unrelated warnings
-			// (issue #3261).
-			if stuck &&
-				pipelineStuckShouldAnnounce(
-					progress.consecutiveNoProgress,
-				) {
-				ls.config.Logger.Error(
-					"ledger pipeline stuck: repeated restarts are not advancing the tip, so the failure is deterministic and will not clear on its own; the node is no longer following the chain",
-					"component",
-					"ledger",
-					"consecutive_no_progress",
-					progress.consecutiveNoProgress,
-					"tip_slot",
-					tipSlot,
-					"backoff",
-					backoff,
-					"error",
-					err,
-				)
-			}
 			if progress.consecutiveNoProgress == 10 ||
 				progress.consecutiveNoProgress%100 == 0 {
 				ls.config.Logger.Warn(
@@ -9872,11 +9877,16 @@ func (ls *LedgerState) warnIntersectAnchorFallback(
 	}
 	ls.config.Logger.Warn(
 		"ledger tip block missing, anchoring intersect points on primary chain tip",
-		"component", "ledger",
-		"ledger_tip_slot", currentTip.Point.Slot,
-		"ledger_tip_hash", hex.EncodeToString(currentTip.Point.Hash),
-		"chain_tip_slot", fallbackBlock.Slot,
-		"chain_tip_hash", hex.EncodeToString(fallbackBlock.Hash),
+		"component",
+		"ledger",
+		"ledger_tip_slot",
+		currentTip.Point.Slot,
+		"ledger_tip_hash",
+		hex.EncodeToString(currentTip.Point.Hash),
+		"chain_tip_slot",
+		fallbackBlock.Slot,
+		"chain_tip_hash",
+		hex.EncodeToString(fallbackBlock.Hash),
 	)
 }
 
@@ -11555,7 +11565,9 @@ func (ls *LedgerState) EvaluateTx(
 			isCurrentEraPParams = false
 		}
 		synthetic := syntheticV2CostModelForValidation(
-			pp, isCurrentEraPParams, consensusState.syntheticV2CostModelInEffect,
+			pp,
+			isCurrentEraPParams,
+			consensusState.syntheticV2CostModelInEffect,
 		)
 		txn := ls.db.Transaction(false)
 		var lv *LedgerView

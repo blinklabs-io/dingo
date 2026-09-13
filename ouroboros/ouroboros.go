@@ -161,8 +161,6 @@ type Ouroboros struct {
 	restartMu sync.Map // ouroboros.ConnectionId → *sync.Mutex
 	// Per-peer rate limiter for TxSubmission server
 	txSubmissionRateLimiter *txSubmissionRateLimiter
-	// Per-peer work-budget limiter for ChainSync FindIntersect
-	chainsyncFindIntersectLimiter *chainsyncFindIntersectRateLimiter
 	// Cached Leios EB material fetched from peers. This lets NtC
 	// ChainSync serve merged RB+EB blocks without coupling the chain
 	// package to Leios prototype protocols.
@@ -197,8 +195,9 @@ type Ouroboros struct {
 	// runs, so Protocol.DoneChan() cannot close underneath it; the release
 	// signal has to come from connmanager's per-connection ErrorChan watcher
 	// instead (see ReleaseLeiosServeWaiters).
-	leiosServeWaiters   map[ouroboros.ConnectionId][]chan struct{}
-	leiosServeWaitersMu sync.Mutex
+	leiosServeWaiters         map[ouroboros.ConnectionId][]chan struct{}
+	leiosServeWaitersReleased map[ouroboros.ConnectionId]time.Time
+	leiosServeWaitersMu       sync.Mutex
 	// NtC CertRB closure-resolution metrics.
 	leiosMetrics *leiosMetrics
 
@@ -466,16 +465,17 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		context.Background(),
 	)
 	o := &Ouroboros{
-		config:                  cfg,
-		registerer:              newTrackingRegisterer(cfg.PromRegistry),
-		eventBus:                cfg.EventBus,
-		connManager:             cfg.ConnManager,
-		ledgerState:             cfg.LedgerState,
-		leiosAnnouncementLedger: cfg.LeiosAnnouncementLedger,
-		mempool:                 cfg.Mempool,
-		chainsyncState:          cfg.ChainsyncState,
-		peerGov:                 cfg.PeerGov,
-		blockFetchStarts:        make(map[ouroboros.ConnectionId]time.Time),
+		config:                    cfg,
+		registerer:                newTrackingRegisterer(cfg.PromRegistry),
+		eventBus:                  cfg.EventBus,
+		connManager:               cfg.ConnManager,
+		ledgerState:               cfg.LedgerState,
+		leiosAnnouncementLedger:   cfg.LeiosAnnouncementLedger,
+		mempool:                   cfg.Mempool,
+		chainsyncState:            cfg.ChainsyncState,
+		peerGov:                   cfg.PeerGov,
+		blockFetchStarts:          make(map[ouroboros.ConnectionId]time.Time),
+		leiosServeWaitersReleased: make(map[ouroboros.ConnectionId]time.Time),
 		localstatequeryAcquiredPoints: make(
 			map[ouroboros.ConnectionId]ledger.QueryPoint,
 		),
@@ -522,14 +522,6 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 			burst,
 		)
 	}
-	// Initialize per-peer ChainSync FindIntersect work-budget limiter.
-	// Unlike TxSubmission, FindIntersect is driven entirely by the peer
-	// rather than paced by us, so this always runs; see the constants'
-	// doc comments in chainsync.go for the sizing rationale.
-	o.chainsyncFindIntersectLimiter = newChainsyncFindIntersectRateLimiter(
-		chainsyncFindIntersectBudgetRate,
-		chainsyncFindIntersectBudgetBurst,
-	)
 	if cfg.PromRegistry != nil {
 		o.initBlockfetchMetrics()
 		o.initProtocolMetrics()
@@ -592,11 +584,7 @@ func (o *Ouroboros) ConfigureListeners(
 			l.ConnectionOpts = append(
 				l.ConnectionOpts,
 				ouroboros.WithNetworkMagic(o.config.NetworkMagic),
-				ouroboros.WithChainSyncConfig(
-					ochainsync.NewConfig(
-						o.chainsyncServerConnOpts()...,
-					),
-				),
+				o.chainsyncConnectionConfigOption(false),
 				ouroboros.WithLocalStateQueryConfig(
 					olocalstatequery.NewConfig(
 						o.localstatequeryServerConnOpts()...,
@@ -638,14 +626,7 @@ func (o *Ouroboros) ConfigureListeners(
 						)...,
 					),
 				),
-				ouroboros.WithChainSyncConfig(
-					ochainsync.NewConfig(
-						slices.Concat(
-							o.chainsyncClientConnOpts(),
-							o.chainsyncServerConnOpts(),
-						)...,
-					),
-				),
+				o.chainsyncConnectionConfigOption(true),
 				ouroboros.WithBlockFetchConfig(
 					blockfetchConfig(
 						slices.Concat(
@@ -711,14 +692,7 @@ func (o *Ouroboros) OutboundConnOpts() []ouroboros.ConnectionOptionFunc {
 				)...,
 			),
 		),
-		ouroboros.WithChainSyncConfig(
-			ochainsync.NewConfig(
-				slices.Concat(
-					o.chainsyncClientConnOpts(),
-					o.chainsyncServerConnOpts(),
-				)...,
-			),
-		),
+		o.chainsyncConnectionConfigOption(true),
 		ouroboros.WithBlockFetchConfig(
 			blockfetchConfig(
 				slices.Concat(
@@ -808,10 +782,6 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	// Clean up TxSubmission rate limiter state
 	if o.txSubmissionRateLimiter != nil {
 		o.txSubmissionRateLimiter.RemovePeer(connId)
-	}
-	// Clean up ChainSync FindIntersect work-budget limiter state
-	if o.chainsyncFindIntersectLimiter != nil {
-		o.chainsyncFindIntersectLimiter.RemovePeer(connId)
 	}
 	// Clean up Leios vote serving state
 	if o.leiosVotes != nil {
@@ -937,9 +907,12 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 				o.chainsyncState.RemoveClientConnId(connId)
 				o.config.Logger.Error(
 					"failed to start chainsync client, closing outbound connection",
-					"component", "network",
-					"connection_id", connId.String(),
-					"error", err,
+					"component",
+					"network",
+					"connection_id",
+					connId.String(),
+					"error",
+					err,
 				)
 				// Close the connection so peer governance observes the
 				// failure and applies its reconnect backoff.
@@ -1031,9 +1004,12 @@ func (o *Ouroboros) closeOutboundConnAfterChainsyncFailure(
 	if current := o.connManager.GetConnectionById(connId); current != startedConn {
 		o.config.Logger.Debug(
 			"outbound connection no longer current after chainsync start failure, not closing",
-			"component", "network",
-			"connection_id", connId.String(),
-			"replaced", current != nil,
+			"component",
+			"network",
+			"connection_id",
+			connId.String(),
+			"replaced",
+			current != nil,
 		)
 		return
 	}

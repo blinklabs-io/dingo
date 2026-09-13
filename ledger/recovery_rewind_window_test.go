@@ -539,7 +539,11 @@ func TestWindowedRewindRefusesRecoveryTargetTheChainDoesNotHold(t *testing.T) {
 	require.NoError(t, db.BlockCreate(orphan, nil))
 	target := ocommon.NewPoint(orphan.Slot, orphan.Hash)
 	_, err = database.BlockByPoint(db, target)
-	require.NoError(t, err, "the store must hold the target for this to test anything")
+	require.NoError(
+		t,
+		err,
+		"the store must hold the target for this to test anything",
+	)
 
 	tipBefore := pc.Tip()
 	committed, err := ls.rollbackPrimaryChainInSecurityParamWindows(target)

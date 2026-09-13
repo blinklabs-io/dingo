@@ -60,8 +60,8 @@ func TestLeiosFetchBlockRangeRequestIsDeclined(t *testing.T) {
 	peer := newLeiosFetchServerPeer(t, o)
 
 	peer.send(t, oleiosfetch.ProtocolId, oleiosfetch.NewMsgBlockRangeRequest(
-		ocommon.NewPoint(3623, []byte{0x01, 0x02}),
-		ocommon.NewPoint(3700, []byte{0x03, 0x04}),
+		ocommon.NewPoint(3623, make([]byte, lcommon.Blake2b256Size)),
+		ocommon.NewPoint(3700, make([]byte, lcommon.Blake2b256Size)),
 	))
 
 	select {
