@@ -737,6 +737,15 @@ graph TB
 
 The block production pipeline from leader election through broadcast.
 
+The producer validates its credentials before starting and only advertises
+blocks it has durably adopted:
+
+- **Validate the producer counter for the active era.** Before the node starts
+  block production, \`node_forging.go\` resolves protocol parameters for the
+  current slot and checks the loaded OpCert issue number against the observed
+  on-chain counter. TPraos permits forward counter movement; Praos-era startup
+  rejects gapped counters before the producer is enabled.
+
 For Shelley through Conway, transaction selection accounts incrementally for
 the exact encoded body components: raw bodies and witnesses, array headers,
 auxiliary data with its transaction-index keys and map header, and the era's

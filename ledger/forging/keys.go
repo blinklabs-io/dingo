@@ -24,6 +24,7 @@ import (
 	"io"
 	"math"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sync"
 
@@ -1057,19 +1058,9 @@ type LedgerView interface {
 // registration is not fatal because operators commonly stage their keys
 // before submitting the registration certificate.
 //
-// The opcert counter check here is staleness-only (candidate below the
-// last observed value), not the full era-scoped no-gap rule the forge
-// loop's checkOpCertSequence and block application enforce. Startup
-// cannot apply that rule safely: the era for "now" would have to come
-// from a wall-clock slot, while the observed baseline
-// (LatestOpCertSequence) only reflects the applied chain, and those two
-// can disagree on a node whose applied tip is behind wall-clock time (an
-// interrupted sync, a resume after downtime, a restore to an older
-// snapshot) -- a pool several rotations into its life would look gapped
-// against a baseline that just hasn't caught up yet, and refusing
-// startup for it would prevent the node from ever syncing to the point
-// that makes the baseline correct. The forge loop's own gate does not
-// have this problem, since it runs near the chain tip.
+// ValidateAgainstLedger applies the staleness-only rule for callers that do
+// not have protocol parameters. Node startup uses ValidateAgainstLedgerAtSlot
+// so it can apply the era-specific rule before enabling production.
 //
 // Three return values describe the outcome:
 //   - registered: true if the pool registration was found on chain.
@@ -1082,6 +1073,54 @@ type LedgerView interface {
 //     devnet callers may choose to warn on ErrVRFKeyHashMismatch.
 func (pc *PoolCredentials) ValidateAgainstLedger(
 	view LedgerView,
+) (registered, vrfMatched bool, err error) {
+	return pc.validateAgainstLedger(view, false)
+}
+
+// ValidateAgainstLedgerAtSlot applies the era-specific operational-certificate
+// counter rule for a block at slot. Startup callers use this after the ledger
+// has provided the current protocol parameters; callers without era context
+// retain the staleness-only behavior of ValidateAgainstLedger.
+func (pc *PoolCredentials) ValidateAgainstLedgerAtSlot(
+	view LedgerView,
+	params ProtocolParamsProvider,
+	slot uint64,
+) (registered, vrfMatched bool, err error) {
+	if params == nil || isNilProtocolParamsProvider(params) {
+		return false, false, errors.New("protocol parameters provider is nil")
+	}
+	providerValue := reflect.ValueOf(params)
+	if providerValue.Kind() == reflect.Pointer && providerValue.IsNil() {
+		return false, false, errors.New("protocol parameters provider is nil")
+	}
+	pparams := params.ProtocolParamsForSlot(slot)
+	if pparams == nil {
+		return false, false, fmt.Errorf(
+			"protocol parameters unavailable for slot %d",
+			slot,
+		)
+	}
+	limits, err := extractPParamsLimits(pparams)
+	if err != nil {
+		return false, false, fmt.Errorf("resolve era for opcert counter rule: %w", err)
+	}
+	return pc.validateAgainstLedger(view, !limits.era.isTPraos())
+}
+
+func isNilProtocolParamsProvider(provider ProtocolParamsProvider) bool {
+	value := reflect.ValueOf(provider)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map,
+		reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
+func (pc *PoolCredentials) validateAgainstLedger(
+	view LedgerView,
+	enforceNoGap bool,
 ) (registered, vrfMatched bool, err error) {
 	pc.mu.RLock()
 	defer pc.mu.RUnlock()
@@ -1123,16 +1162,11 @@ func (pc *PoolCredentials) ValidateAgainstLedger(
 	if err != nil {
 		return true, vrfMatched, fmt.Errorf("opcert sequence lookup: %w", err)
 	}
-	// enforceNoGap is always false here; see the doc comment above for why
-	// startup cannot safely apply the era-scoped no-gap half of this rule.
-	// validateOpCertSequence rather than eras.ValidateOpCertCounter so this
-	// check and the forge loop's share the persistable-counter bound as well
-	// as the era rule.
 	if seqErr := validateOpCertSequence(
 		latestSeq,
 		seqFound,
 		pc.opCert.IssueNumber,
-		false,
+		enforceNoGap,
 	); seqErr != nil {
 		return true, vrfMatched, fmt.Errorf(
 			"opcert sequence %d invalid: %w",
