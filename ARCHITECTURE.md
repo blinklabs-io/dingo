@@ -6397,16 +6397,26 @@ validation rejection loop) are repaired by a restart, so folding sync state
 into liveness would produce a restart loop that destroys the state an
 operator needs to diagnose. The image's `HEALTHCHECK` therefore probes
 liveness; readiness is documented for `readinessProbe` and load-balancer
-target checks.
+target checks. It reads the port from `DINGO_HEALTH_PORT` (default `12799`),
+the only one of the three `healthPort` sources a `HEALTHCHECK` can see, and
+reports healthy without probing when that is `0`, so disabling the listener
+does not put the container into a replacement loop.
 
 Readiness reads its tip gap from `(*dingo.Node).TipGapSlots`
 (`node_health.go`), which is fed by `ledger.LedgerStateConfig.ReportTipGapFunc`
 from the ledger's slot-tick loop — the same value published as the
 `dingo_tip_gap_slots` gauge, read directly so readiness does not depend on
-the Prometheus listener. The backing atomics live in a `nodeHealth` value on
-`Node` rather than behind `n.ledgerState`, which a live database
+the Prometheus listener. The reading lives in a mutex-guarded `nodeHealth`
+value on `Node` rather than behind `n.ledgerState`, which a live database
 Restore/Truncate replaces; `ledgerStateConfig` closes over the node, so a
-rebuilt ledger keeps reporting into the same state. The gap is reported as
+rebuilt ledger keeps reporting into the same state. That state carries a
+generation: `ledgerStateConfig` captures it when it builds a ledger's
+callbacks, `forgetTipGap` advances it at both rebuild entry points
+(`closeStorageForLiveLifecycleOp`, and `reinitializeCoreStorage` for the
+quiesce-failure path that skips it), and `recordTipGap` compares and stores
+under the same lock. A tick the outgoing ledger had already dequeued
+therefore cannot restore a pre-rebuild reading, whichever side of the clear
+it lands on. The gap is reported as
 *unknown*, not zero, until the first slot tick, so a node that has opened
 its database but has not begun following the chain reports not-ready rather
 than reading as perfectly caught up.
