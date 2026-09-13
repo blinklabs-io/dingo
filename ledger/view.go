@@ -45,6 +45,20 @@ var ErrUtxoAlreadyConsumed = errors.New("UTxO already consumed")
 // ErrNotImplemented marks LedgerView stubs that are not implemented yet.
 var ErrNotImplemented = errors.New("not implemented")
 
+// ErrLedgerViewStorageFault marks an error recorded by a boolean
+// LedgerState predicate (IsStakeCredentialRegistered, IsPoolRegistered,
+// IsRewardAccountRegistered, GovActionExists) when its underlying storage
+// lookup fails for a reason other than "not found". gouroboros's
+// common.LedgerState interface returns only a bool from these predicates, so
+// a genuine storage fault (a timeout, a lost connection) cannot propagate
+// through the interface and would otherwise silently become a false
+// (unregistered/does-not-exist) verdict that the calling ledger rule cannot
+// distinguish from the real thing (blinklabs-io/dingo#1649). Every
+// ValidateTxFunc/EvaluateTxFunc call site that builds a LedgerView must check
+// storageFaultOrErr after the rule returns, and prefer this fault over
+// whatever verdict the rule produced from the false negative.
+var ErrLedgerViewStorageFault = errors.New("ledger view storage fault")
+
 type LedgerView struct {
 	ls  *LedgerState
 	txn *database.Txn
@@ -92,6 +106,46 @@ type LedgerView struct {
 	// -- the exact protocol parameters this operation is actually
 	// evaluating against. See blinklabs-io/dingo#3962's PR review.
 	syntheticV2CostModel bool
+	// storageErr is the first non-not-found storage error observed by one of
+	// this view's boolean LedgerState predicates. It is sticky: only the
+	// first recorded error is kept, matching the single LedgerView built per
+	// ValidateTxFunc/EvaluateTxFunc call. See ErrLedgerViewStorageFault.
+	storageErr error
+}
+
+// recordStorageErr records the first non-not-found error observed by a
+// boolean LedgerState predicate on this view. Later calls are no-ops: the
+// first fault is the one that could have skewed the earliest rule verdict,
+// and every call site treats presence, not identity, as the signal.
+func (lv *LedgerView) recordStorageErr(err error) {
+	if lv.storageErr == nil {
+		lv.storageErr = err
+	}
+}
+
+// StorageErr returns the first non-not-found storage error recorded by a
+// boolean LedgerState predicate on this view, or nil. A ValidateTxFunc or
+// EvaluateTxFunc call site must prefer this over the rule's own return value
+// -- see storageFaultOrErr.
+func (lv *LedgerView) StorageErr() error {
+	return lv.storageErr
+}
+
+// storageFaultOrErr returns lv's recorded storage fault, wrapped as
+// ErrLedgerViewStorageFault, when one was recorded; otherwise it returns
+// ruleErr unchanged. A LedgerView predicate that swallowed a genuine storage
+// error into a false/not-found verdict already corrupted the rule's verdict
+// by the time ValidateTxFunc/EvaluateTxFunc returns, so the fault always
+// takes precedence over ruleErr -- including replacing a nil ruleErr, the
+// case where the false negative caused the rule to wrongly accept.
+func storageFaultOrErr(lv *LedgerView, ruleErr error) error {
+	if lv == nil {
+		return ruleErr
+	}
+	if faultErr := lv.StorageErr(); faultErr != nil {
+		return fmt.Errorf("%w: %w", ErrLedgerViewStorageFault, faultErr)
+	}
+	return ruleErr
 }
 
 // pinSyntheticV2CostModel records whether the PlutusV2 cost model was still
@@ -287,6 +341,11 @@ func (lv *LedgerView) IsStakeCredentialRegistered(
 				"credential", cred.Hash().String(),
 				"error", err,
 			)
+			lv.recordStorageErr(fmt.Errorf(
+				"get account for stake credential %s: %w",
+				cred.Hash().String(),
+				err,
+			))
 		}
 		return false
 	}
@@ -430,10 +489,8 @@ func (lv *LedgerView) PoolCurrentState(
 		}
 		if reg.MetadataUrl != "" {
 			tmp.PoolMetadata = &lcommon.PoolMetadata{
-				Url: reg.MetadataUrl,
-				Hash: lcommon.PoolMetadataHash(
-					lcommon.NewBlake2b256(reg.MetadataHash),
-				),
+				Url:  reg.MetadataUrl,
+				Hash: lcommon.PoolMetadataHash(reg.MetadataHash),
 			}
 		}
 		currentReg = &tmp
@@ -496,6 +553,19 @@ func (lv *LedgerView) EpochForSlot(slot uint64) (uint64, error) {
 func (lv *LedgerView) IsPoolRegistered(pkh lcommon.PoolKeyHash) bool {
 	reg, _, err := lv.PoolCurrentState(pkh)
 	if err != nil {
+		// PoolCurrentState already converts models.ErrPoolNotFound into a
+		// nil error, so any error reaching here is a genuine storage fault.
+		lv.ls.config.Logger.Error(
+			"failed to get pool",
+			"component", "ledger",
+			"pool_key_hash", pkh.String(),
+			"error", err,
+		)
+		lv.recordStorageErr(fmt.Errorf(
+			"get pool %s: %w",
+			pkh.String(),
+			err,
+		))
 		return false
 	}
 	return reg != nil
@@ -599,6 +669,11 @@ func (lv *LedgerView) IsRewardAccountRegistered(
 				"credential", cred.Hash().String(),
 				"error", err,
 			)
+			lv.recordStorageErr(fmt.Errorf(
+				"get account for reward account %s: %w",
+				cred.Hash().String(),
+				err,
+			))
 		}
 		return false
 	}
@@ -1709,6 +1784,24 @@ func (lv *LedgerView) GovActionExists(id lcommon.GovActionId) bool {
 		lv.txn,
 	)
 	if err != nil {
+		if !errors.Is(err, models.ErrGovernanceProposalNotFound) {
+			govActionID := fmt.Sprintf(
+				"%s#%d",
+				hex.EncodeToString(id.TransactionId[:]),
+				id.GovActionIdx,
+			)
+			lv.ls.config.Logger.Error(
+				"failed to get governance proposal",
+				"component", "ledger",
+				"gov_action_id", govActionID,
+				"error", err,
+			)
+			lv.recordStorageErr(fmt.Errorf(
+				"get governance proposal %s: %w",
+				govActionID,
+				err,
+			))
+		}
 		return false
 	}
 	// Voting procedures may target only pending actions. GovActionById also
