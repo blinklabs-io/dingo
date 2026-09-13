@@ -677,7 +677,10 @@ func (r *RestoreRecovery) Rollback(ctx context.Context) error {
 // the race for the lock. Detaching cancellation here does not change
 // whether the restore itself is cancelable: only this cleanup step, which
 // must run to completion regardless of why it is running, is affected.
-func stopBlobCapabilityUncancelable(ctx context.Context, host *plugin.Host) error {
+func stopBlobCapabilityUncancelable(
+	ctx context.Context,
+	host *plugin.Host,
+) error {
 	return host.StopCapability(
 		context.WithoutCancel(ctx), plugin.CapabilityStorageBlob,
 	)

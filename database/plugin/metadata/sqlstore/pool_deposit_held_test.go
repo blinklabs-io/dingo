@@ -134,7 +134,14 @@ func writeDepositHeldCert(
 	cert lcommon.Certificate,
 	deposit uint64,
 ) {
-	writeDepositHeldCertWithDeposits(t, store, slot, blockIndex, cert, map[int]uint64{0: deposit})
+	writeDepositHeldCertWithDeposits(
+		t,
+		store,
+		slot,
+		blockIndex,
+		cert,
+		map[int]uint64{0: deposit},
+	)
 }
 
 func writeDepositHeldCertUnknown(
@@ -144,7 +151,14 @@ func writeDepositHeldCertUnknown(
 	blockIndex uint32,
 	cert lcommon.Certificate,
 ) {
-	writeDepositHeldCertWithDeposits(t, store, slot, blockIndex, cert, map[int]uint64{})
+	writeDepositHeldCertWithDeposits(
+		t,
+		store,
+		slot,
+		blockIndex,
+		cert,
+		map[int]uint64{},
+	)
 }
 
 func writeDepositHeldCertWithDeposits(

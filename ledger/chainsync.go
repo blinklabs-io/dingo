@@ -5340,7 +5340,11 @@ func (ls *LedgerState) ensureGenesisCommittee(txn *database.Txn) error {
 			Credential:    member.ColdCredHash,
 		}).Key()] = struct{}{}
 	}
-	newMembers := make([]*models.CommitteeMember, 0, len(conwayGenesis.Committee.Members))
+	newMembers := make(
+		[]*models.CommitteeMember,
+		0,
+		len(conwayGenesis.Committee.Members),
+	)
 	for raw, expiry := range conwayGenesis.Committee.Members {
 		tag, hash, err := parseGenesisCommitteeCredential(raw)
 		if err != nil {

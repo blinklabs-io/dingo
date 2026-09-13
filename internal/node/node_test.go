@@ -372,11 +372,11 @@ func TestRootPeerTargetComposition(t *testing.T) {
 // which for BaseURL meant a run aimed at a self-hosted host silently querying
 // the public one.
 func TestKoiosParityConfigForwardsEveryField(t *testing.T) {
-	src := reflect.TypeOf(config.KoiosParityConfig{})
-	dst := reflect.TypeOf(dingo.KoiosParityConfig{})
+	src := reflect.TypeFor[config.KoiosParityConfig]()
+	dst := reflect.TypeFor[dingo.KoiosParityConfig]()
 
-	for i := range src.NumField() {
-		name := src.Field(i).Name
+	for field := range src.Fields() {
+		name := field.Name
 		if _, ok := dst.FieldByName(name); !ok {
 			continue // not part of the node-facing config
 		}

@@ -546,7 +546,10 @@ func parseCurrentEra(
 	// NewEpochState rather than a snapshot that omits them.
 	blocksPrev, err := parseBlocksMade(nes[1])
 	if err != nil {
-		return nil, fmt.Errorf("decoding blocks made in previous epoch: %w", err)
+		return nil, fmt.Errorf(
+			"decoding blocks made in previous epoch: %w",
+			err,
+		)
 	}
 	blocksCur, err := parseBlocksMade(nes[2])
 	if err != nil {
@@ -1585,7 +1588,11 @@ func parseBlocksMade(data cbor.RawMessage) (map[string]uint64, error) {
 	for i, entry := range entries {
 		var poolKeyHash []byte
 		if _, err := cbor.Decode(entry.KeyRaw, &poolKeyHash); err != nil {
-			return nil, fmt.Errorf("entry %d: decoding pool key hash: %w", i, err)
+			return nil, fmt.Errorf(
+				"entry %d: decoding pool key hash: %w",
+				i,
+				err,
+			)
 		}
 		if len(poolKeyHash) != credentialHashSize {
 			return nil, fmt.Errorf(
