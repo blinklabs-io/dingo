@@ -117,7 +117,7 @@ func TestValidateBlockProducerStartup_KESAgentServeKeyMode(t *testing.T) {
 	require.NoError(t, err)
 	opCertCBOR := devnetOpCertCBOR(t)
 
-	sockPath := filepath.Join(t.TempDir(), "kes-agent.sock")
+	sockPath := testutil.UnixSocketPath(t)
 	ln, err := net.Listen("unix", sockPath)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })
@@ -175,7 +175,7 @@ func TestValidateBlockProducerStartup_KESAgentSignMode(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	sockPath := filepath.Join(t.TempDir(), "kes-agent.sock")
+	sockPath := testutil.UnixSocketPath(t)
 	ln, err := net.Listen("unix", sockPath)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })
@@ -272,7 +272,7 @@ func TestValidateBlockProducerStartup_KESAgentServeKeyRotationStaysValidated(
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), evolved.Period)
 
-	sockPath := filepath.Join(t.TempDir(), "kes-agent.sock")
+	sockPath := testutil.UnixSocketPath(t)
 	ln, err := net.Listen("unix", sockPath)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })

@@ -5494,6 +5494,16 @@ socket is attacker-reachable whenever its filesystem path is:
   (`kes.VerifySignedKES`) — this subsumes checking "type or period" by
   proving the signature is actually valid for the requested inputs.
 
+The transport is a Unix-domain socket, which Go supports on Linux, macOS, and
+Windows (10 1803 / Server 2019 and later, where `AF_UNIX` is available), so
+the agent is usable on all three. The one platform-specific constraint is on
+the path itself, and it belongs to the operator rather than to the node: a
+socket address is a fixed-size struct, so the path must fit `sun_path` --- 104
+bytes on macOS, 108 on Linux and Windows --- and a longer one is refused at
+`bind`/`connect` time with `EINVAL`, which Go reports as
+`invalid argument` rather than as a length error. Dingo never constructs this
+path; it connects to exactly what `--shelley-kes-agent-socket` names.
+
 `internal/config.ValidateKESKeySources` rejects a block producer that sets
 both `shelleyKesKey` and `shelleyKesAgentSocket`, so an operator's explicit
 choice of key source is never silently overridden. `Config.Validate` no

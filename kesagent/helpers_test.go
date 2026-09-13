@@ -17,10 +17,10 @@ package kesagent
 import (
 	"encoding/hex"
 	"net"
-	"path/filepath"
 	"testing"
 
 	"github.com/blinklabs-io/bursa"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/kes"
 	"github.com/stretchr/testify/require"
 )
@@ -61,9 +61,15 @@ func testKESMaterial(t testing.TB) (skeyData, vkey []byte, opCertCBOR []byte) {
 }
 
 // listenUnix opens a Unix-domain listener at a fresh path under t.TempDir().
+// listenUnix binds a Unix-domain socket for a fake agent. The path comes from
+// testutil.UnixSocketPath rather than t.TempDir(): a t.TempDir() path embeds
+// the test's own name, which pushed these sockets past sun_path on Darwin
+// (104 bytes) and Windows (108) while still fitting under Linux's /tmp, so
+// every socket test here failed on those two platforms with
+// "bind: invalid argument" and passed on Linux.
 func listenUnix(t testing.TB) (net.Listener, string) {
 	t.Helper()
-	sockPath := filepath.Join(t.TempDir(), "kes-agent.sock")
+	sockPath := testutil.UnixSocketPath(t)
 	ln, err := net.Listen("unix", sockPath)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })
