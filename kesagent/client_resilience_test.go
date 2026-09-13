@@ -72,7 +72,9 @@ func TestClient_CloseInterruptsBlockedAwaitPushedKey(t *testing.T) {
 	select {
 	case <-closeDone:
 	case <-time.After(5 * time.Second):
-		t.Fatal("Close did not return: it deadlocked behind AwaitPushedKey's blocked read")
+		t.Fatal(
+			"Close did not return: it deadlocked behind AwaitPushedKey's blocked read",
+		)
 	}
 
 	select {
@@ -144,7 +146,9 @@ func TestClient_RunRecoversAfterTransientFailures(t *testing.T) {
 	case pk := <-installed:
 		require.Equal(t, skeyData, pk.KESSKeyData)
 	case <-time.After(10 * time.Second):
-		t.Fatal("Run did not recover and install a key after transient failures")
+		t.Fatal(
+			"Run did not recover and install a key after transient failures",
+		)
 	}
 	cancel()
 	<-runErr
@@ -178,7 +182,10 @@ func TestClient_ConnectBackoffBoundsDialAttempts(t *testing.T) {
 	require.NoError(t, err)
 	defer c.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		1200*time.Millisecond,
+	)
 	defer cancel()
 	_ = c.Run(ctx, func(PushedKey) error { return nil })
 

@@ -82,7 +82,9 @@ func TestCredentialGenerationKesSignRejectsExpiredPeriod(t *testing.T) {
 // proof for the agent-backed ("sign" mode) signing path: the gate must apply
 // identically whether or not a remote signer is installed, and the agent must
 // never even be asked to sign a period the opcert has not authorized.
-func TestCredentialGenerationKesSignAgentPathRejectsExpiredPeriod(t *testing.T) {
+func TestCredentialGenerationKesSignAgentPathRejectsExpiredPeriod(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	vrfPath, _, opCertPath := createTestKeys(t)
@@ -114,7 +116,9 @@ func TestCredentialGenerationKesSignAgentPathRejectsExpiredPeriod(t *testing.T) 
 // authorize reaches the remote signer, carrying the caller's ABSOLUTE period
 // unchanged (matching the bursa KES agent sign-mode wire protocol, which also
 // takes an absolute period and translates internally).
-func TestCredentialGenerationKesSignAgentPathDelegatesWithinLifetime(t *testing.T) {
+func TestCredentialGenerationKesSignAgentPathDelegatesWithinLifetime(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	vrfPath, _, opCertPath := createTestKeys(t)
@@ -144,7 +148,9 @@ func TestCredentialGenerationKesSignAgentPathDelegatesWithinLifetime(t *testing.
 // TestCredentialGenerationUpdateKESPeriodAgentPathRejectsBackward proves the
 // agent-backed path enforces the same never-evolve-backward invariant the
 // local-key path enforces in updateKESPeriodUnsafe/credentialGeneration.
-func TestCredentialGenerationUpdateKESPeriodAgentPathRejectsBackward(t *testing.T) {
+func TestCredentialGenerationUpdateKESPeriodAgentPathRejectsBackward(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	vrfPath, _, opCertPath := createTestKeys(t)
@@ -210,7 +216,10 @@ func TestPoolCredentialsLoadFromAgentServeKeyMatchesLocalPath(t *testing.T) {
 	require.NoError(t, generation.updateKESPeriod(0))
 	sig, err := generation.kesSign(0, []byte("header"))
 	require.NoError(t, err)
-	require.True(t, kes.VerifySignedKES(opCertKey.VKey, 0, []byte("header"), sig))
+	require.True(
+		t,
+		kes.VerifySignedKES(opCertKey.VKey, 0, []byte("header"), sig),
+	)
 }
 
 // TestPoolCredentialsLoadFromAgentServeKeyRejectsVKeyMismatch proves a pushed

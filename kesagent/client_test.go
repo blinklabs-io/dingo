@@ -97,7 +97,11 @@ func TestClient_ServeKeyRejectsCorruptedPush(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_, err = c.AwaitPushedKey(ctx)
-	require.ErrorContains(t, err, "does not match its own pushed verification key")
+	require.ErrorContains(
+		t,
+		err,
+		"does not match its own pushed verification key",
+	)
 }
 
 func TestClient_RejectsWrongProtocol(t *testing.T) {
@@ -110,7 +114,11 @@ func TestClient_RejectsWrongProtocol(t *testing.T) {
 			return
 		}
 		defer conn.Close()
-		_ = writeFrame(conn, MaxHelloFrameLen, Hello{Protocol: "not-bursa/1", Mode: ModeServeKey})
+		_ = writeFrame(
+			conn,
+			MaxHelloFrameLen,
+			Hello{Protocol: "not-bursa/1", Mode: ModeServeKey},
+		)
 	}()
 
 	c, err := NewClient(Config{SocketPath: sockPath, Mode: ModeServeKey})
@@ -133,7 +141,11 @@ func TestClient_RejectsWrongMode(t *testing.T) {
 			return
 		}
 		defer conn.Close()
-		sendHello(t, conn, ModeSign) // server reports sign, client wants serve-key
+		sendHello(
+			t,
+			conn,
+			ModeSign,
+		) // server reports sign, client wants serve-key
 	}()
 
 	c, err := NewClient(Config{SocketPath: sockPath, Mode: ModeServeKey})
@@ -260,7 +272,9 @@ func TestClient_SignRejectsMismatchedResponsePeriod(t *testing.T) {
 		})
 	}()
 
-	c, err := NewClient(Config{SocketPath: sockPath, Mode: ModeSign, KESVKey: vkey})
+	c, err := NewClient(
+		Config{SocketPath: sockPath, Mode: ModeSign, KESVKey: vkey},
+	)
 	require.NoError(t, err)
 	defer c.Close()
 
@@ -294,7 +308,9 @@ func TestClient_SignRejectsInvalidSignature(t *testing.T) {
 		})
 	}()
 
-	c, err := NewClient(Config{SocketPath: sockPath, Mode: ModeSign, KESVKey: vkey})
+	c, err := NewClient(
+		Config{SocketPath: sockPath, Mode: ModeSign, KESVKey: vkey},
+	)
 	require.NoError(t, err)
 	defer c.Close()
 

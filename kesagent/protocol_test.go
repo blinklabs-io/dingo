@@ -48,7 +48,11 @@ func TestWriteFrameRejectsOversizedPayload(t *testing.T) {
 	}
 	err := writeFrame(&buf, 16, huge)
 	require.ErrorIs(t, err, errFrameTooLarge)
-	require.Zero(t, buf.Len(), "no bytes should reach the writer for a rejected frame")
+	require.Zero(
+		t,
+		buf.Len(),
+		"no bytes should reach the writer for a rejected frame",
+	)
 }
 
 // TestReadFrameRejectsOversizedDeclaredLength proves a client never attempts
@@ -63,7 +67,10 @@ func TestReadFrameRejectsOversizedDeclaredLength(t *testing.T) {
 
 	var buf bytes.Buffer
 	var hdr [4]byte
-	binary.BigEndian.PutUint32(hdr[:], 1<<30) // declares 1 GiB, sends none of it
+	binary.BigEndian.PutUint32(
+		hdr[:],
+		1<<30,
+	) // declares 1 GiB, sends none of it
 	buf.Write(hdr[:])
 
 	var hello Hello

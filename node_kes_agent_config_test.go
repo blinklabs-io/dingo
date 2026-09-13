@@ -26,6 +26,7 @@ import (
 
 	"github.com/blinklabs-io/bursa"
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/kesagent"
 	"github.com/blinklabs-io/gouroboros/kes"
 	"github.com/stretchr/testify/require"
@@ -223,4 +224,114 @@ func TestValidateBlockProducerStartup_KESAgentSignMode(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, creds.IsLoaded())
 	require.NotNil(t, n.kesAgentClient)
+}
+
+// TestValidateBlockProducerStartup_KESAgentServeKeyRotationStaysValidated
+// covers the KES rotation the serve-key background loop exists to handle.
+//
+// Installing a push goes through the same identity/generation-bump path as
+// LoadFromFiles, and that path deliberately clears the validated KES protocol
+// lifetime (opCertValidated, maxKESEvolutions, opCertExpiryKES) so no
+// credential inherits a policy that was never checked against the material
+// now installed. Startup re-establishes it for the first push. A push
+// arriving later -- a KES evolution, an opcert rotation, or a re-push after a
+// reconnect -- is not covered by startup, so the loop re-establishes it
+// itself; without that, credentialGeneration.kesSign refuses every subsequent
+// signature with "operational certificate is not validated" and the node
+// stops forging until it is restarted.
+//
+// OpCertExpiryPeriod is the observable: it returns opCertExpiryKES, the value
+// validatedKESProtocolLifetime requires to be non-zero before kesSign will
+// sign at all. The two assertions are one WaitForCondition because a push is
+// installed and re-validated by a background goroutine, so reading them
+// separately would race the install itself.
+func TestValidateBlockProducerStartup_KESAgentServeKeyRotationStaysValidated(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	vrf, _, opcert := devnetCredPaths(t)
+	kesKeyData, err := bursa.LoadKeyFromFile(
+		filepath.Join(devnetKeysDir, "kes.skey"),
+	)
+	require.NoError(t, err)
+	opCertCBOR := devnetOpCertCBOR(t)
+	decodedOpCert, err := bursa.DecodeOpCert(opCertCBOR)
+	require.NoError(t, err)
+
+	// The second push carries the same key evolved one KES period forward,
+	// which is what a real agent pushes when the period rolls over. It has to
+	// be genuinely evolved: kesagent.Client self-sign-probes every push
+	// before installing it, so a key that does not actually sign at its
+	// declared period is rejected by the client and never reaches the node.
+	evolved, err := kes.Update(&kes.SecretKey{
+		Depth:  kes.CardanoKesDepth,
+		Period: 0,
+		Data:   append([]byte(nil), kesKeyData.SKey...),
+	})
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), evolved.Period)
+
+	sockPath := filepath.Join(t.TempDir(), "kes-agent.sock")
+	ln, err := net.Listen("unix", sockPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		writeKesAgentFrame(t, conn, kesagent.Hello{
+			Protocol: kesagent.ProtocolID,
+			Mode:     kesagent.ModeServeKey,
+		})
+		writeKesAgentFrame(t, conn, kesagent.KeyPush{
+			Type:       "key_push",
+			Period:     decodedOpCert.KESPeriod,
+			Depth:      kes.CardanoKesDepth,
+			KESSignKey: kesKeyData.SKey,
+			KESVKey:    kesKeyData.VKey,
+			OpCert:     opCertCBOR,
+		})
+		writeKesAgentFrame(t, conn, kesagent.KeyPush{
+			Type:       "key_push",
+			Period:     decodedOpCert.KESPeriod + 1,
+			Depth:      kes.CardanoKesDepth,
+			KESSignKey: evolved.Data,
+			KESVKey:    kesKeyData.VKey,
+			OpCert:     opCertCBOR,
+		})
+		buf := make([]byte, 1)
+		_, _ = conn.Read(buf)
+	}()
+
+	cardanoCfg := shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour))
+	n := newTestNodeForBPWithAgent(
+		t,
+		vrf,
+		opcert,
+		kesagent.ModeServeKey,
+		sockPath,
+		cardanoCfg,
+	)
+	t.Cleanup(n.closeKESAgentClient)
+
+	creds, err := n.validateBlockProducerStartupAtSlot(0)
+	require.NoError(t, err)
+	require.NotZero(
+		t,
+		creds.OpCertExpiryPeriod(),
+		"startup must leave a validated KES protocol lifetime",
+	)
+
+	testutil.WaitForCondition(
+		t,
+		func() bool {
+			return creds.GetKESPeriod() == 1 &&
+				creds.OpCertExpiryPeriod() != 0
+		},
+		5*time.Second,
+		"rotated KES key must be installed and still carry a validated KES protocol lifetime",
+	)
 }

@@ -75,6 +75,10 @@ func sendHello(t testing.TB, conn net.Conn, mode string) {
 	t.Helper()
 	require.NoError(
 		t,
-		writeFrame(conn, MaxHelloFrameLen, Hello{Protocol: ProtocolID, Mode: mode}),
+		writeFrame(
+			conn,
+			MaxHelloFrameLen,
+			Hello{Protocol: ProtocolID, Mode: mode},
+		),
 	)
 }

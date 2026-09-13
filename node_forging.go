@@ -69,7 +69,10 @@ func (n *Node) validateBlockProducerStartupAtSlot(
 ) (*forging.PoolCredentials, error) {
 	creds := forging.NewPoolCredentials()
 	if n.config.shelleyKESAgentSocket != "" {
-		if err := n.loadBlockProducerCredentialsFromAgent(creds); err != nil {
+		if err := n.loadBlockProducerCredentialsFromAgent(
+			creds,
+			currentSlot,
+		); err != nil {
 			return nil, fmt.Errorf(
 				"load pool credentials from KES agent: %w",
 				err,
@@ -128,6 +131,7 @@ func (n *Node) validateBlockProducerStartupAtSlot(
 // leak the prior connection or its background goroutine.
 func (n *Node) loadBlockProducerCredentialsFromAgent(
 	creds *forging.PoolCredentials,
+	currentSlot uint64,
 ) error {
 	n.closeKESAgentClient()
 
@@ -138,7 +142,7 @@ func (n *Node) loadBlockProducerCredentialsFromAgent(
 
 	switch mode {
 	case kesagent.ModeServeKey:
-		return n.startKESAgentServeKey(creds)
+		return n.startKESAgentServeKey(creds, currentSlot)
 	case kesagent.ModeSign:
 		return n.startKESAgentSign(creds)
 	default:
@@ -149,7 +153,10 @@ func (n *Node) loadBlockProducerCredentialsFromAgent(
 // startKESAgentServeKey blocks for the agent's initial key push, installs it,
 // and starts a background loop that installs every subsequent push (a KES
 // key rotation) for as long as the node runs.
-func (n *Node) startKESAgentServeKey(creds *forging.PoolCredentials) error {
+func (n *Node) startKESAgentServeKey(
+	creds *forging.PoolCredentials,
+	startupSlot uint64,
+) error {
 	client, err := kesagent.NewClient(kesagent.Config{
 		SocketPath: n.config.shelleyKESAgentSocket,
 		Mode:       kesagent.ModeServeKey,
@@ -164,6 +171,22 @@ func (n *Node) startKESAgentServeKey(creds *forging.PoolCredentials) error {
 			n.config.shelleyVRFKey,
 			agentMaterialFromPushedKey(pk),
 		)
+	}
+	// Installing a push clears the validated KES protocol lifetime, exactly
+	// as LoadFromFiles does, so no credential can inherit a policy that was
+	// never checked against the material now installed. The initial push is
+	// followed by validateBlockProducerStartupAtSlot's own ValidateOpCert /
+	// ValidateKESPeriod, which re-establishes it; a push arriving later --
+	// a KES evolution, an opcert rotation, or a re-push after a reconnect --
+	// is not, so the loop must re-establish it itself. Without this,
+	// credentialGeneration.kesSign refuses every signature after the first
+	// mid-run push with "operational certificate is not validated" and the
+	// node stops forging until it is restarted.
+	loopInstall := func(pk kesagent.PushedKey) error {
+		if err := install(pk); err != nil {
+			return err
+		}
+		return n.revalidateAgentServedCredentials(creds, startupSlot)
 	}
 
 	// The initial push must succeed before startup can proceed -- the same
@@ -191,7 +214,7 @@ func (n *Node) startKESAgentServeKey(creds *forging.PoolCredentials) error {
 	runCtx, runCancel := context.WithCancel(n.blockProducerContext())
 	n.kesAgentCancel = runCancel
 	go func() {
-		if err := client.Run(runCtx, install); err != nil &&
+		if err := client.Run(runCtx, loopInstall); err != nil &&
 			!errors.Is(err, context.Canceled) {
 			n.config.logger.Error(
 				"kes agent serve-key loop exited",
@@ -200,6 +223,50 @@ func (n *Node) startKESAgentServeKey(creds *forging.PoolCredentials) error {
 		}
 	}()
 	return nil
+}
+
+// revalidateAgentServedCredentials re-runs the operational-certificate and
+// KES-period validation that validateBlockProducerStartupAtSlot runs after a
+// local key load, against the node's current slot. It is what keeps an
+// agent-served credential usable across a key rotation; see the loopInstall
+// callback in startKESAgentServeKey.
+func (n *Node) revalidateAgentServedCredentials(
+	creds *forging.PoolCredentials,
+	fallbackSlot uint64,
+) error {
+	if err := creds.ValidateOpCert(); err != nil {
+		return fmt.Errorf("validate operational certificate: %w", err)
+	}
+	genesis, err := n.blockProducerShelleyGenesis()
+	if err != nil {
+		return err
+	}
+	if err := creds.ValidateKESPeriod(
+		genesis,
+		n.agentInstallSlot(fallbackSlot),
+	); err != nil {
+		return fmt.Errorf("validate KES period: %w", err)
+	}
+	return nil
+}
+
+// agentInstallSlot returns the slot an agent key install is validated
+// against: the node's current slot, or fallbackSlot when no ledger state is
+// wired or the slot clock cannot answer. Production block-producer startup
+// always has ledger state -- validateBlockProducerStartup requires it before
+// the agent path can run -- so the fallback exists for the same reason
+// blockProducerContext's does: a test driving
+// validateBlockProducerStartupAtSlot against a bare &Node{config} validates
+// against the slot it passed in.
+func (n *Node) agentInstallSlot(fallbackSlot uint64) uint64 {
+	if n.ledgerState == nil {
+		return fallbackSlot
+	}
+	currentSlot, err := n.ledgerState.CurrentSlot()
+	if err != nil {
+		return fallbackSlot
+	}
+	return currentSlot
 }
 
 // startKESAgentSign installs sign-mode credentials: VRF and the operational

@@ -355,7 +355,9 @@ func TestSkipRewardLiveStakeBackfillCheckEnvBinding(t *testing.T) {
 // t.Setenv cannot express "unset", so the previous value is saved and
 // restored by hand; t.Setenv("HOME", ...) below already bars t.Parallel, so
 // mutating the process environment directly is safe here.
-func TestSkipRewardLiveStakeBackfillCheckDefaultsToRunningTheCheck(t *testing.T) {
+func TestSkipRewardLiveStakeBackfillCheckDefaultsToRunningTheCheck(
+	t *testing.T,
+) {
 	resetGlobalConfig()
 	t.Setenv("HOME", t.TempDir())
 	const skipEnvVar = "CARDANO_SKIP_REWARD_LIVE_STAKE_BACKFILL_CHECK"

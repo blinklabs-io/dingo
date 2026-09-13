@@ -64,7 +64,9 @@ var (
 	ErrWrongProtocol = errors.New("kesagent: unrecognized agent protocol")
 	// ErrWrongMode is returned when the agent's Hello reports a mode other
 	// than the one this client was configured for.
-	ErrWrongMode = errors.New("kesagent: agent mode does not match configured client mode")
+	ErrWrongMode = errors.New(
+		"kesagent: agent mode does not match configured client mode",
+	)
 )
 
 // Config configures a Client.
@@ -572,7 +574,10 @@ func (c *Client) Sign(period uint64, message []byte) ([]byte, error) {
 	}
 	if resp.Error != "" {
 		c.cfg.Metrics.incSignFailure()
-		return nil, fmt.Errorf("kesagent: agent refused to sign: %s", resp.Error)
+		return nil, fmt.Errorf(
+			"kesagent: agent refused to sign: %s",
+			resp.Error,
+		)
 	}
 	if len(resp.Signature) != kes.CardanoKesSignatureSize {
 		_ = c.closeLocked()
@@ -593,7 +598,12 @@ func (c *Client) Sign(period uint64, message []byte) ([]byte, error) {
 		)
 	}
 	relativePeriod := period - c.cfg.OpCertStartPeriod
-	if !kes.VerifySignedKES(c.cfg.KESVKey, relativePeriod, message, resp.Signature) {
+	if !kes.VerifySignedKES(
+		c.cfg.KESVKey,
+		relativePeriod,
+		message,
+		resp.Signature,
+	) {
 		_ = c.closeLocked()
 		c.cfg.Metrics.incSignFailure()
 		return nil, errors.New(

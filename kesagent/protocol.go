@@ -125,7 +125,9 @@ type SignResponse struct {
 
 // errFrameTooLarge is wrapped into every frame-size rejection so callers can
 // distinguish it from a transport or decode error with errors.Is.
-var errFrameTooLarge = errors.New("kesagent: frame exceeds configured maximum size")
+var errFrameTooLarge = errors.New(
+	"kesagent: frame exceeds configured maximum size",
+)
 
 // writeFrame writes a single length-prefixed JSON frame, rejecting a payload
 // larger than maxSize before ever writing to w.
@@ -143,7 +145,10 @@ func writeFrame(w io.Writer, maxSize int, v any) error {
 		)
 	}
 	var hdr [4]byte
-	binary.BigEndian.PutUint32(hdr[:], uint32(len(payload))) // #nosec G115 -- bounded by maxSize above
+	binary.BigEndian.PutUint32(
+		hdr[:],
+		uint32(len(payload)),
+	) // #nosec G115 -- bounded by maxSize above
 	if _, err := w.Write(hdr[:]); err != nil {
 		return fmt.Errorf("kesagent: write frame header: %w", err)
 	}
@@ -165,7 +170,9 @@ func readFrame(r io.Reader, maxSize int, v any) error {
 	if n == 0 {
 		return errors.New("kesagent: zero-length frame")
 	}
-	if n > uint32(maxSize) { // #nosec G115 -- maxSize is always a small positive constant
+	if n > uint32(
+		maxSize,
+	) { // #nosec G115 -- maxSize is always a small positive constant
 		return fmt.Errorf(
 			"%w: declared %d bytes > %d",
 			errFrameTooLarge,
