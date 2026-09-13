@@ -1066,10 +1066,16 @@ const poolSnapshotRetentionMaxDepth uint64 = 24
 // reward-history endpoint (GET /accounts/{stake_address}/rewards, dingo #1875)
 // can serve an account's full reward history instead of only the trailing few
 // epochs — the same "silently look empty past the window" failure mode #2987
-// already identified for epoch_summary. See
-// rewardstate.DeleteStateBeforeEpoch (core, prunes both tables) and
-// rewardstate.DeleteStakeInputBeforeEpoch (API, prunes only
-// reward_stake_input) for the implementation and full rationale.
+// already identified for epoch_summary. reward_account_output is likewise
+// retained without bound whenever SetRewardAccountOutputRetentionUnbounded(true)
+// has been called (node.go wires this from the koios-parity observer's Enabled
+// config): that observer only validates a closed epoch after fetching and
+// comparing over the network, which can fall arbitrarily far behind chain
+// progression during a from-genesis or catch-up sync, so the fixed 4-epoch
+// window otherwise prunes an epoch's rows before the observer ever reads them
+// (dingo #4188). See rewardstate.DeleteStateBeforeEpoch (core, prunes both
+// tables) and rewardstate.DeleteStakeInputBeforeEpoch (API/koios-parity, prunes
+// only reward_stake_input) for the implementation and full rationale.
 //
 // epoch_summary is deliberately NOT pruned. It is a single small row per epoch
 // (aggregate stake/pool/delegator totals plus the epoch nonce and boundary
@@ -1160,8 +1166,10 @@ func (m *Manager) cleanupOldSnapshots(
 	meta := m.db.Metadata()
 	metaTxn := txn.Metadata()
 
-	if m.db.StorageMode() == types.StorageModeAPI {
-		// API storage mode: retain reward_account_output without bound (see
+	if m.db.StorageMode() == types.StorageModeAPI ||
+		m.RewardAccountOutputRetentionUnbounded() {
+		// API storage mode, or the in-process Koios parity observer enabled
+		// (dingo #4188): retain reward_account_output without bound (see
 		// doc comment above) and prune only reward_stake_input.
 		if err := meta.DeleteRewardStakeInputBeforeEpoch(
 			deleteBeforeEpoch,

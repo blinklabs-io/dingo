@@ -63,6 +63,65 @@ var errCertifiedEndorserBlockUnavailable = errors.New(
 
 const certifiedEndorserBlockRetryDelay = time.Second
 
+// decodeEndorserTxEnvelope unwraps one endorser-block transaction entry and
+// splits it into its transaction CBOR and its top-level array elements.
+//
+// leios-fetch carries each endorser transaction CBOR-in-CBOR: the tx_list entry
+// is a CBOR byte string wrapping the transaction's own CBOR
+// (LeiosTx = encodeBytes(txCbor)). A non-byte-string entry — major type != 2 —
+// is already the bare transaction. elems[0] is the transaction body, which is
+// both the transaction-offset payload and, hashed, the transaction id.
+func decodeEndorserTxEnvelope(
+	raw cbor.RawMessage,
+) (txCbor []byte, elems []cbor.RawMessage, err error) {
+	txCbor = []byte(raw)
+	if len(txCbor) > 0 && txCbor[0]>>5 == 2 {
+		var inner []byte
+		if _, err := cbor.Decode(txCbor, &inner); err != nil {
+			return nil, nil, fmt.Errorf(
+				"unwrap CBOR-in-CBOR entry: %w",
+				err,
+			)
+		}
+		txCbor = inner
+	}
+	if _, err := cbor.Decode(txCbor, &elems); err != nil {
+		return nil, nil, fmt.Errorf("decode envelope: %w", err)
+	}
+	if len(elems) < 2 {
+		return nil, nil, fmt.Errorf(
+			"envelope has %d elements, want >= 2",
+			len(elems),
+		)
+	}
+	return txCbor, elems, nil
+}
+
+// endorserBlockTxIds returns the transaction id of every transaction in an
+// endorser block, without decoding the transactions themselves.
+//
+// A Cardano transaction id is blake2b-256 over the transaction body's CBOR —
+// the definition DijkstraTransaction.Id inherits from
+// BabbageTransactionBody.Id, which hashes the body bytes it decoded, i.e.
+// exactly elems[0] here. Deriving the ids straight from the envelope keeps the
+// cross-fork continuation audit off the full per-transaction decode path: an
+// armed window can span continuationAuditBlockBudget blocks and an endorser
+// block carries thousands of transactions, and the audit runs under
+// chainsyncBlockfetchMutex, where a full decode of every endorser transaction
+// would stall the blockfetch pipeline for a diagnostic.
+func endorserBlockTxIds(rawTxs []cbor.RawMessage) ([][]byte, error) {
+	ids := make([][]byte, 0, len(rawTxs))
+	for i, raw := range rawTxs {
+		_, elems, err := decodeEndorserTxEnvelope(raw)
+		if err != nil {
+			return nil, fmt.Errorf("endorser tx %d: %w", i, err)
+		}
+		id := lcommon.Blake2b256Hash([]byte(elems[0]))
+		ids = append(ids, id.Bytes())
+	}
+	return ids, nil
+}
+
 // applyEndorserBlock decodes a Leios endorser block's standalone transactions,
 // persists them as a standalone blob, and — on the CIP-conformant path
 // (LeiosApplyEndorserBlockTxs) — applies them to the ledger ahead of the ranking
@@ -115,33 +174,9 @@ func (ls *LedgerState) applyEndorserBlock(
 	txs := make([]lcommon.Transaction, len(rawTxs))
 	bodyCbors := make([][]byte, len(rawTxs))
 	for i, raw := range rawTxs {
-		// leios-fetch carries each endorser transaction CBOR-in-CBOR: the
-		// tx_list entry is a CBOR byte string wrapping the transaction's own
-		// CBOR (LeiosTx = encodeBytes(txCbor)). Unwrap it to the inner
-		// transaction bytes before decoding. (A non-byte-string entry — major
-		// type != 2 — is already the bare transaction.)
-		txCbor := []byte(raw)
-		if len(txCbor) > 0 && txCbor[0]>>5 == 2 {
-			var inner []byte
-			if _, err := cbor.Decode(txCbor, &inner); err != nil {
-				return 0, 0, fmt.Errorf("unwrap endorser tx %d: %w", i, err)
-			}
-			txCbor = inner
-		}
-		var elems []cbor.RawMessage
-		if _, err := cbor.Decode(txCbor, &elems); err != nil {
-			return 0, 0, fmt.Errorf(
-				"decode endorser tx %d envelope: %w",
-				i,
-				err,
-			)
-		}
-		if len(elems) < 2 {
-			return 0, 0, fmt.Errorf(
-				"endorser tx %d has %d elements, want >= 2",
-				i,
-				len(elems),
-			)
+		txCbor, elems, err := decodeEndorserTxEnvelope(raw)
+		if err != nil {
+			return 0, 0, fmt.Errorf("endorser tx %d: %w", i, err)
 		}
 		// An endorser block referenced by a Dijkstra ranking block is
 		// Dijkstra-era, so decode its transactions as Dijkstra directly.
@@ -403,8 +438,13 @@ func buildEndorserBlockBlob(
 //
 //   - Near the head (within the wait window): the relay co-produces and
 //     diffuses the endorser block with its ranking block, so it is already
-//     being pushed; wait for the in-flight leios-notify/leios-fetch to cache
-//     it, with an active by-point fetch as a fallback if the window elapses.
+//     being pushed. Only the references that applying THIS batch actually
+//     reads are waited for (see leiosApplyReadsOwnAnnouncement and
+//     splitTipWaitByApplyDependency); the rest are dispatched as background
+//     prefetch and never block the pipeline. The waits that remain run
+//     concurrently under one shared window and dispatch an active by-point
+//     fetch up front, so a batch costs at most one diffusion window rather
+//     than one per missing endorser block.
 //   - Historical backlog (well below the head, e.g. during a from-scratch
 //     catch-up): the relay does not diffuse these, but it does serve any
 //     endorser block by point on demand, so actively fetch them -- in parallel
@@ -603,41 +643,49 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 				) {
 					continue
 				}
-				ls.leiosBackfill.awaitFetch(ctx, r, poll)
-			}
-		}
-	}
-	for _, r := range tipWait {
-		if endorserBlockAvailableAt(
-			ls.config.EndorserBlockProvider,
-			r.hash.Bytes(),
-			r.slot,
-		) {
-			continue
-		}
-		ls.waitForEndorserBlock(ctx, r.slot, r.hash, timeout, poll)
-		if ls.config.EndorserBlockFetcher == nil {
-			continue
-		}
-		if !endorserBlockAvailableAt(
-			ls.config.EndorserBlockProvider,
-			r.hash.Bytes(),
-			r.slot,
-		) {
-			if err := ls.config.EndorserBlockFetcher(
-				ctx,
-				r.slot,
-				r.hash.Bytes(),
-			); err != nil {
-				ls.config.Logger.Debug(
-					"endorser block tip fetch fallback failed",
-					"component", "ledger",
-					"slot", r.slot,
-					"eb_hash", r.hash.String(),
-					"error", err,
+				ls.leiosBackfill.awaitFetch(
+					ctx,
+					r,
+					poll,
+					leiosBackfillMaxWait,
 				)
 			}
 		}
+	}
+	// Near the head: split the references by whether applying THIS batch
+	// actually reads them, and block only on the ones it does. See
+	// leiosApplyReadsOwnAnnouncement for the contract.
+	blockingWait, prefetch := splitTipWaitByApplyDependency(
+		tipWait,
+		required,
+		certDrivenHistorical,
+	)
+	// Best-effort references: never block the ledger pipeline on them. The
+	// fetch is dispatched in the background (deduped and concurrency-bounded by
+	// the backfiller) so the endorser block is in cache by the time something
+	// does depend on it, and this batch is delivered to ledgerProcessBlock
+	// immediately.
+	if ls.leiosBackfill != nil {
+		for _, r := range prefetch {
+			ls.leiosBackfill.spawn(ctx, r)
+		}
+	}
+	// Blocking references: one shared diffusion window for the whole batch,
+	// with an active by-point fetch dispatched up front for each one.
+	ls.awaitEndorserBlocks(ctx, blockingWait, timeout, poll)
+	// CIP path only: application reads these references and nothing re-applies
+	// an endorser block that lands after the batch, so a fetch still in flight
+	// when the window elapsed is waited out rather than abandoned. See
+	// awaitInFlightEndorserFetches; timeout is the reporting threshold, not the
+	// bound.
+	if !certDrivenHistorical {
+		ls.awaitInFlightEndorserFetches(
+			ctx,
+			blockingWait,
+			timeout,
+			poll,
+			leiosTipFetchHardBound,
+		)
 	}
 	// Musashi path: a certified closure is mandatory, so each required endorser
 	// block still missing after the diffusion waits gets a bounded retry across
@@ -649,6 +697,285 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	// restart, or none at all when every connection was unusable (dingo #3552).
 	fetchMissingRequired(poll)
 	return ensureRequiredAvailable()
+}
+
+// leiosApplyReadsOwnAnnouncement reports whether ledger application of a
+// ranking block reads that block's OWN endorser-block announcement, as opposed
+// to only the certified closure announced by a certifying block's parent. It
+// is the apply-path contract that decides whether the pre-apply gate may block
+// on a reference, and it mirrors leiosEndorserBlockForApply exactly -- the two
+// must stay in step, since blocking on a reference application never reads buys
+// nothing, and not blocking on one it does read silently drops the endorser
+// block's transactions.
+//
+//   - CIP-conformant path (LeiosApplyEndorserBlockTxs true): true. Application
+//     resolves the block's own announcement and applies the endorser-resident
+//     transactions ahead of the ranking block whose transactions spend their
+//     outputs. Nothing re-applies them later -- the endorser-block arrival
+//     handler drives Leios voting only, not ledger application -- so an
+//     announcement skipped here is omitted from the UTxO set permanently and
+//     the ranking block's spends fall through to the interim trust path.
+//     The wait is therefore load-bearing and is kept.
+//   - Haskell-conformant (Musashi prototype) path: false. Application resolves
+//     only the certified closure: the endorser block announced by a certifying
+//     ranking block's PARENT. A block's own announcement is never read when
+//     that block is applied; it becomes relevant only later, if and when a
+//     descendant certifies it, at which point it is a mandatory reference in
+//     its own right (requiredCertifiedEndorserBlocks) and is fetched and waited
+//     for then. Blocking this batch on it buys nothing: on expiry the gate
+//     applied the block unchanged, having stalled every block queued behind it
+//     on the single ledger pipeline for the whole diffusion window.
+func leiosApplyReadsOwnAnnouncement(applyEndorserBlockTxs bool) bool {
+	return applyEndorserBlockTxs
+}
+
+// splitTipWaitByApplyDependency partitions the near-head references into the
+// ones ledger application of this batch depends on (blocking) and the ones it
+// does not (prefetch, dispatched in the background and never waited on).
+//
+// required is the set of mandatory certified closures for this batch. Those are
+// always blocking: committing a certifying ranking block without its closure
+// would permanently omit the endorser block's transaction and certificate
+// effects, and ensureRequiredAvailable fails the chunk rather than allow it.
+//
+// On the CIP path required is empty and every reference is read at apply time
+// (see leiosApplyReadsOwnAnnouncement), so everything stays blocking and the
+// only change is that the waits now share one window instead of running back to
+// back. On the Musashi path the non-required references are announcements this
+// batch never reads, so they are demoted to background prefetch.
+func splitTipWaitByApplyDependency(
+	tipWait, required []leiosEbRef,
+	certDrivenHistorical bool,
+) (blocking, prefetch []leiosEbRef) {
+	if leiosApplyReadsOwnAnnouncement(!certDrivenHistorical) {
+		return tipWait, nil
+	}
+	requiredKeys := make(map[string]struct{}, len(required))
+	for _, r := range required {
+		requiredKeys[leiosEbRefKey(r)] = struct{}{}
+	}
+	for _, r := range tipWait {
+		if _, ok := requiredKeys[leiosEbRefKey(r)]; ok {
+			blocking = append(blocking, r)
+			continue
+		}
+		prefetch = append(prefetch, r)
+	}
+	return blocking, prefetch
+}
+
+// awaitEndorserBlocks waits for every still-missing reference in refs to become
+// available, CONCURRENTLY under one shared diffusion window.
+//
+// The waits are independent -- none of them observes another's result -- so
+// running them back to back charged the ledger pipeline one full window per
+// missing endorser block (k missing references cost k windows), which is where
+// the multi-window apply stalls came from. Running them together bounds the
+// whole batch by a single window.
+//
+// Each wait also dispatches an active by-point fetch up front rather than
+// polling passively and only falling back to a fetch after the window has
+// already been spent: the reference is wanted now, so ask for it now. The
+// backfiller dedups by (slot, hash) and bounds concurrency, so a reference
+// already in flight is not fetched twice.
+func (ls *LedgerState) awaitEndorserBlocks(
+	ctx context.Context,
+	refs []leiosEbRef,
+	timeout, poll time.Duration,
+) {
+	var wg sync.WaitGroup
+	for _, r := range refs {
+		if endorserBlockAvailableAt(
+			ls.config.EndorserBlockProvider,
+			r.hash.Bytes(),
+			r.slot,
+		) {
+			continue
+		}
+		// The fetch is bound to ctx, not to the wait window, so a fetch that
+		// outlives the window is not abandoned. On its own that is not enough
+		// for the CIP path -- see awaitInFlightEndorserFetches, which is what
+		// makes a late fetch actually reach this batch's application.
+		if ls.leiosBackfill != nil {
+			ls.leiosBackfill.spawn(ctx, r)
+		}
+		wg.Add(1)
+		go func(r leiosEbRef) {
+			defer wg.Done()
+			ls.waitForEndorserBlock(ctx, r.slot, r.hash, timeout, poll)
+		}(r)
+	}
+	wg.Wait()
+}
+
+// leiosTipFetchHardBound bounds how long the CIP apply path will hold a batch
+// waiting for its own in-flight by-point fetch. It is the same backstop the
+// backfiller uses, and deliberately so: the code this replaces issued a
+// SYNCHRONOUS FetchEndorserBlockByPoint after the diffusion window, which swept
+// every peer and was bounded only by the leios-fetch timeout, so waiting for
+// the fetch to actually finish is parity rather than a new cost. In practice
+// awaitFetch returns as soon as the in-flight marker clears, so this is reached
+// only if a fetch neither caches nor completes.
+const leiosTipFetchHardBound = leiosBackfillMaxWait
+
+// awaitInFlightEndorserFetches waits for this batch's own by-point fetches to
+// FINISH, for references whose absence would otherwise be permanent.
+//
+// It exists because the diffusion window and the fetch are different clocks.
+// The window bounds how long to wait for the network to PUSH an endorser block
+// to us; it says nothing about how long our own PULL of it takes. The wait
+// dispatches that pull up front, so when the window expires the fetch is often
+// still in flight and moments from completing.
+//
+// That distinction only matters where nothing re-reads the endorser block
+// later. On the certificate-driven path a missing closure is mandatory and is
+// retried by fetchMissingRequired, and an announcement this batch does not read
+// is picked up by whichever later batch certifies it. On the CIP path neither
+// is true: application reads each ranking block's own announcement, nothing
+// re-applies an endorser block that lands afterwards, and the ranking block's
+// spends fall through to the interim trust path permanently.
+//
+// The bound is the FETCH's completion, not a second diffusion window. An
+// earlier version of this waited one further window and returned even if the
+// fetch was still running, which lost exactly the transactions it was added to
+// protect, just one window later. awaitFetch returns as soon as the endorser
+// block is cached or the in-flight marker clears, so a fetch that fails fast
+// costs nothing; hardBound (leiosTipFetchHardBound in production) is only a
+// backstop against a fetch that neither caches nor clears. softWarn is a
+// reporting threshold, not a deadline: crossing it means this batch is holding
+// the ledger pipeline on a slow fetch, which is worth a log line, and it is the
+// signal an operator needs to distinguish this from the pre-fetch stall.
+//
+// When the fetch finishes without caching -- no peer holds the endorser block
+// -- application proceeds without it. That is the long-standing behaviour of
+// this path and is NOT changed here: failing the chunk instead would turn an
+// unfetchable endorser block into an unbounded pipeline retry, which is a wedge
+// this codebase has hit before. The loss is real but it is pre-existing and
+// orthogonal to the regression this function fixes.
+//
+// The waits run concurrently, so k references cost one wait, not k.
+func (ls *LedgerState) awaitInFlightEndorserFetches(
+	ctx context.Context,
+	refs []leiosEbRef,
+	softWarn, poll, hardBound time.Duration,
+) {
+	if ls.leiosBackfill == nil {
+		return
+	}
+	var wg sync.WaitGroup
+	for _, r := range refs {
+		if endorserBlockAvailableAt(
+			ls.config.EndorserBlockProvider,
+			r.hash.Bytes(),
+			r.slot,
+		) {
+			continue
+		}
+		wg.Add(1)
+		go func(r leiosEbRef) {
+			defer wg.Done()
+			start := time.Now()
+			outcome := ls.leiosBackfill.awaitFetch(
+				ctx,
+				r,
+				poll,
+				hardBound,
+			)
+			elapsed := time.Since(start)
+			cached := outcome == leiosFetchWaitCached
+			// This grace phase is apply-path wait time too, and it is the
+			// LONGEST one the pipeline can incur (up to hardBound), so it
+			// belongs in the same histogram as the diffusion window rather
+			// than being invisible to monitoring.
+			//
+			// Classified from the wait's OWN termination cause, not from
+			// re-reading the cache and the context afterwards: by then a
+			// bound that expired just before a shutdown looks like a
+			// cancellation, and a fetch that completed without caching looks
+			// like a timeout.
+			switch outcome {
+			case leiosFetchWaitCached:
+				ls.metrics.observeLeiosEbWait(
+					elapsed,
+					leiosEbWaitOutcomeArrived,
+				)
+			case leiosFetchWaitUnavailable:
+				ls.metrics.observeLeiosEbWait(
+					elapsed,
+					leiosEbWaitOutcomeUnavailable,
+				)
+			case leiosFetchWaitCancelled:
+				ls.metrics.observeLeiosEbWait(
+					elapsed,
+					leiosEbWaitOutcomeCancelled,
+				)
+			case leiosFetchWaitDeadline:
+				ls.metrics.observeLeiosEbWait(
+					elapsed,
+					leiosEbWaitOutcomeTimeout,
+				)
+			}
+			if cached && elapsed < softWarn {
+				return
+			}
+			if cached {
+				ls.config.Logger.Warn(
+					"endorser block fetch outlived the diffusion window; held block application until it landed",
+					"component", "ledger",
+					"slot", r.slot,
+					"eb_hash", r.hash.String(),
+					"waited_seconds", elapsed.Seconds(),
+				)
+				return
+			}
+			if outcome == leiosFetchWaitCancelled {
+				// The pass was cancelled, not the fetch exhausted. Nothing
+				// was learned about whether any peer holds the endorser
+				// block, so saying it "could not be fetched" would be a
+				// false diagnosis emitted on every shutdown.
+				ls.config.Logger.Debug(
+					"endorser block fetch cancelled before it completed",
+					"component", "ledger",
+					"slot", r.slot,
+					"eb_hash", r.hash.String(),
+					"waited_seconds", elapsed.Seconds(),
+					"error", ctx.Err(),
+				)
+				return
+			}
+			// Two very different outcomes reach here, and only one is
+			// anomalous. awaitFetch returns either because the all-peers
+			// fetch CLEARED its in-flight marker without caching -- no peer
+			// holds this endorser block -- or because it neither cached nor
+			// cleared before hardBound. The first is the expected,
+			// long-standing behaviour of this path (see the function comment
+			// above); the code this replaced logged its equivalent at Debug,
+			// and on a CIP node where endorser blocks are routinely
+			// unfetchable a WARN per reference is normal operation escalated
+			// to alertable volume. The second means a fetch is wedged and the
+			// pipeline was held for the full backstop, which is worth waking
+			// someone for. The in-flight marker is what distinguishes them,
+			// so read it rather than inferring from elapsed time.
+			if outcome == leiosFetchWaitDeadline {
+				ls.config.Logger.Warn(
+					"endorser block fetch neither completed nor cached within the hard bound; applying its ranking block without the endorser-resident transactions",
+					"component", "ledger",
+					"slot", r.slot,
+					"eb_hash", r.hash.String(),
+					"waited_seconds", elapsed.Seconds(),
+				)
+				return
+			}
+			ls.config.Logger.Debug(
+				"endorser block could not be fetched; applying its ranking block without the endorser-resident transactions",
+				"component", "ledger",
+				"slot", r.slot,
+				"eb_hash", r.hash.String(),
+				"waited_seconds", elapsed.Seconds(),
+			)
+		}(r)
+	}
+	wg.Wait()
 }
 
 // leiosEbRef pairs a ranking block's slot with the hash of the endorser block
@@ -919,7 +1246,18 @@ func (ls *LedgerState) leiosEndorserBlockForApply(
 	if !present || !certified {
 		return lcommon.Blake2b256{}, 0, 0, false, nil
 	}
-	parent, perr := ls.BlockByHash(block.PrevHash().Bytes())
+	return ls.leiosCertifiedAnnouncementFromParent(block.PrevHash().Bytes())
+}
+
+// leiosCertifiedAnnouncementFromParent resolves the endorser block a certifying
+// ranking block certifies: the one its parent announced. Split out of
+// leiosEndorserBlockForApply so the cross-fork continuation audit can resolve
+// the same reference from a retained parent hash alone, without holding the
+// certifying block, and cannot drift from what apply selects.
+func (ls *LedgerState) leiosCertifiedAnnouncementFromParent(
+	prevHash []byte,
+) (hash lcommon.Blake2b256, expectedSlot, size uint64, announced bool, err error) {
+	parent, perr := ls.BlockByHash(prevHash)
 	if perr != nil {
 		return lcommon.Blake2b256{}, 0, 0, false, fmt.Errorf(
 			"resolve certifying block parent: %w",
@@ -940,6 +1278,20 @@ func (ls *LedgerState) leiosEndorserBlockForApply(
 // empty manifests when hammered, so the backfill must not flood it.
 const leiosBackfillConcurrency = 8
 
+// leiosRequiredConcurrency is a SEPARATE budget for mandatory certified
+// fetches, so a best-effort fetch can never starve one.
+//
+// spawn and fetchRequired used to share leiosBackfillConcurrency. A
+// best-effort spawn holds its slot for up to leiosBackfillMaxWait, so eight
+// slow ones could block a mandatory certified closure for two minutes and fail
+// the chunk -- and this path now dispatches near-head prefetches through spawn
+// as well, which makes that far more reachable than when only historical
+// backfill used it. Mandatory fetches are few (one certified closure per
+// certifying block) so a small dedicated budget is enough, and it is separate
+// rather than carved out of the same channel because reserving inside one
+// semaphore needs two acquisitions and can deadlock.
+const leiosRequiredConcurrency = 4
+
 // leiosBackfiller fetches historical Leios endorser blocks by point, paced one
 // block-application chunk at a time, so a from-scratch sync builds a complete
 // UTxO set. It dedups in-flight fetches by (slot, hash) -- not hash alone,
@@ -952,6 +1304,7 @@ type leiosBackfiller struct {
 	provider EndorserBlockProviderFunc
 	logger   *slog.Logger
 	sem      chan struct{}
+	reqSem   chan struct{}
 	inflight sync.Map
 }
 
@@ -971,6 +1324,7 @@ func newLeiosBackfiller(cfg LedgerStateConfig) *leiosBackfiller {
 		provider: cfg.EndorserBlockProvider,
 		logger:   logger,
 		sem:      make(chan struct{}, leiosBackfillConcurrency),
+		reqSem:   make(chan struct{}, leiosRequiredConcurrency),
 	}
 }
 
@@ -1098,6 +1452,26 @@ func (b *leiosBackfiller) fetchRequired(
 			if lastErr == nil {
 				lastErr = budgetCtx.Err()
 			}
+			// budgetCtx is a timeout child of ctx, so its Done also closes
+			// when the PARENT is cancelled -- node shutdown, or the
+			// block-processing pass being aborted. Reporting that as "the
+			// retry budget elapsed" tells an operator the peers failed to
+			// serve the endorser block when in fact nothing was asked of
+			// them, and it is loudest exactly when a node is shutting down.
+			// Same discrimination as waitForEndorserBlock: the child's error
+			// is stable once resolved, so a deadline that fires first stays
+			// DeadlineExceeded even if the parent is cancelled straight after.
+			if !errors.Is(budgetCtx.Err(), context.DeadlineExceeded) {
+				b.logger.Debug(
+					"certified leios endorser block fetch cancelled",
+					"component", "ledger",
+					"slot", r.slot,
+					"eb_hash", r.hash.String(),
+					"attempts", attempt,
+					"error", lastErr,
+				)
+				return lastErr
+			}
 			b.logger.Warn(
 				"certified leios endorser block fetch budget elapsed",
 				"component", "ledger",
@@ -1112,6 +1486,21 @@ func (b *leiosBackfiller) fetchRequired(
 	}
 	if lastErr == nil {
 		lastErr = errors.New("certified endorser block fetch made no progress")
+	}
+	// The retry loop can also fall out of its last attempt with the parent
+	// already cancelled, which never reaches the in-loop budgetCtx branch
+	// above. Report that as the cancellation it is rather than as peers
+	// failing to serve.
+	if !errors.Is(budgetCtx.Err(), context.DeadlineExceeded) &&
+		budgetCtx.Err() != nil {
+		b.logger.Debug(
+			"certified leios endorser block fetch cancelled",
+			"component", "ledger",
+			"slot", r.slot,
+			"eb_hash", r.hash.String(),
+			"error", lastErr,
+		)
+		return lastErr
 	}
 	// Warn, not Debug: this is the evidence an operator needs to tell a peer
 	// that does not hold the endorser block from one whose leios-fetch protocol
@@ -1141,16 +1530,18 @@ func (b *leiosBackfiller) fetchOnce(
 	if _, loaded := b.inflight.LoadOrStore(key, struct{}{}); loaded {
 		// Another fetch for this endorser block is in flight; wait for it
 		// rather than starting a second one on the same connections.
-		b.awaitFetch(ctx, r, poll)
+		b.awaitFetch(ctx, r, poll, leiosBackfillMaxWait)
 		return nil
 	}
 	defer b.inflight.Delete(key)
+	// Reserved budget: a mandatory certified fetch must never queue behind
+	// best-effort spawns, which can hold their slots for leiosBackfillMaxWait.
 	select {
-	case b.sem <- struct{}{}:
+	case b.reqSem <- struct{}{}:
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	defer func() { <-b.sem }()
+	defer func() { <-b.reqSem }()
 	if endorserBlockAvailableAt(b.provider, r.hash.Bytes(), r.slot) {
 		return nil
 	}
@@ -1162,12 +1553,22 @@ func (b *leiosBackfiller) fetchOnce(
 // diffusion-window timeout elapses. The concurrent leios-notify/leios-fetch
 // handlers keep making progress while this blocks, so the in-flight fetch
 // completes during the wait.
+//
+// Every wait is recorded to dingo_metrics_leios_eb_wait_seconds with its
+// outcome -- arrived, timeout, or cancelled, the last being a cancellation of
+// the block-processing context rather than a diffusion-window expiry -- and
+// expiries additionally to dingo_metrics_leios_eb_wait_timeouts_total. This wait is taken on the single
+// ledger pipeline ahead of the batch's DB transaction, so it is apply latency
+// for every block queued behind the batch as well; it previously had no metric
+// at all, only an Info log, which is why a producer could sit in it for tens of
+// seconds per block with nothing in monitoring to show for it.
 func (ls *LedgerState) waitForEndorserBlock(
 	ctx context.Context,
 	rbSlot uint64,
 	ebHash lcommon.Blake2b256,
 	timeout, poll time.Duration,
 ) {
+	start := time.Now()
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	ticker := time.NewTicker(poll)
@@ -1178,10 +1579,55 @@ func (ls *LedgerState) waitForEndorserBlock(
 			ebHash.Bytes(),
 			rbSlot,
 		) {
+			ls.metrics.observeLeiosEbWait(
+				time.Since(start),
+				leiosEbWaitOutcomeArrived,
+			)
 			return
 		}
 		select {
 		case <-waitCtx.Done():
+			// waitCtx is a timeout child of ctx, so its Done also closes when
+			// the PARENT is cancelled -- node shutdown, or the block-processing
+			// pass being aborted and restarted. That is not a diffusion-window
+			// expiry: nothing was learned about whether the endorser block is
+			// obtainable, and reporting it as one would inflate the timeout
+			// rate exactly when a node is shutting down or restarting its
+			// pipeline. waitCtx.Err() distinguishes the two and is stable once
+			// resolved -- a deadline that fires first leaves DeadlineExceeded
+			// even if the parent is cancelled immediately afterwards.
+			//
+			// The caller's behaviour is unchanged either way, and deliberately
+			// so: this function returns, and ensureReferencedEndorserBlocks
+			// then runs its mandatory-closure fetch and availability check as
+			// usual, so a cancelled pass still fails the chunk when a certified
+			// closure is missing and still proceeds when every reference was
+			// best-effort. That is what the code did before the wait was
+			// instrumented; only the classification is new.
+			if !errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
+				ls.metrics.observeLeiosEbWait(
+					time.Since(start),
+					leiosEbWaitOutcomeCancelled,
+				)
+				ls.config.Logger.Debug(
+					"endorser block wait cancelled before the diffusion window elapsed",
+					"component",
+					"ledger",
+					"slot",
+					rbSlot,
+					"eb_hash",
+					ebHash.String(),
+					"waited_seconds",
+					time.Since(start).Seconds(),
+					"error",
+					waitCtx.Err(),
+				)
+				return
+			}
+			ls.metrics.observeLeiosEbWait(
+				time.Since(start),
+				leiosEbWaitOutcomeTimeout,
+			)
 			ls.config.Logger.Info(
 				"endorser block not fetched within diffusion window; proceeding without it",
 				"component",
@@ -1190,6 +1636,8 @@ func (ls *LedgerState) waitForEndorserBlock(
 				rbSlot,
 				"eb_hash",
 				ebHash.String(),
+				"waited_seconds",
+				time.Since(start).Seconds(),
 			)
 			return
 		case <-ticker.C:
@@ -1205,6 +1653,26 @@ func (ls *LedgerState) waitForEndorserBlock(
 // because a from-scratch backfill is throughput-bound, not diffusion-bound.
 const leiosBackfillMaxWait = 2 * time.Minute
 
+// leiosFetchWaitOutcome is why awaitFetch returned. The caller cannot infer it
+// afterwards: the in-flight marker and the parent context are both racy by the
+// time it looks, so a hard bound that expired just before a shutdown would be
+// reported as a cancellation and a fetch that completed without caching would
+// be reported as a timeout. Returning the cause removes the guess.
+type leiosFetchWaitOutcome int
+
+const (
+	// leiosFetchWaitCached: the endorser block is available.
+	leiosFetchWaitCached leiosFetchWaitOutcome = iota
+	// leiosFetchWaitUnavailable: the all-peers fetch COMPLETED without
+	// caching. Nothing timed out; no peer holds the block.
+	leiosFetchWaitUnavailable
+	// leiosFetchWaitDeadline: maxWait elapsed with the fetch neither caching
+	// nor clearing its marker.
+	leiosFetchWaitDeadline
+	// leiosFetchWaitCancelled: the parent context was cancelled.
+	leiosFetchWaitCancelled
+)
+
 // awaitFetch waits for the in-flight by-point fetch of the endorser block
 // referenced by r to finish (it has already been spawned). The spawned fetch
 // (FetchEndorserBlockByPoint) tries every connected peer in turn before
@@ -1218,26 +1686,46 @@ const leiosBackfillMaxWait = 2 * time.Minute
 // leiosBackfillMaxWait is a backstop against a fetch that neither caches nor
 // clears (the fetch itself is bounded by the leios-fetch timeout, so this is
 // rarely reached).
+
 func (b *leiosBackfiller) awaitFetch(
 	ctx context.Context,
 	r leiosEbRef,
-	poll time.Duration,
-) {
-	waitCtx, cancel := context.WithTimeout(ctx, leiosBackfillMaxWait)
+	poll, maxWait time.Duration,
+) leiosFetchWaitOutcome {
+	waitCtx, cancel := context.WithTimeout(ctx, maxWait)
 	defer cancel()
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
 	key := leiosEbRefKey(r)
 	for {
 		if endorserBlockAvailableAt(b.provider, r.hash.Bytes(), r.slot) {
-			return // cached: the referencing block can apply it
+			return leiosFetchWaitCached
+		}
+		// Checked BEFORE the in-flight marker, because cancelling the pass
+		// also makes spawn clear that marker. Looking at the marker first
+		// would race, and would report a shutdown as "no peer holds it" --
+		// the false diagnosis this classification exists to avoid.
+		if waitCtx.Err() != nil {
+			if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
+				return leiosFetchWaitDeadline
+			}
+			return leiosFetchWaitCancelled
 		}
 		if _, inFlight := b.inflight.Load(key); !inFlight {
-			return // the all-peers fetch finished without caching: skip fast
+			// The all-peers fetch finished without caching: skip fast.
+			return leiosFetchWaitUnavailable
 		}
 		select {
 		case <-waitCtx.Done():
-			return
+			// waitCtx is a timeout child of ctx, so its Done also closes on a
+			// PARENT cancellation. Discriminate on the child's own error,
+			// which is stable once resolved: a deadline that fires first
+			// stays DeadlineExceeded even if the parent is cancelled straight
+			// after, so a real bound is never reported as a shutdown.
+			if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
+				return leiosFetchWaitDeadline
+			}
+			return leiosFetchWaitCancelled
 		case <-ticker.C:
 		}
 	}

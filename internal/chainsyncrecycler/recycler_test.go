@@ -354,6 +354,132 @@ func TestTickCatchUpExtendsGracePeriod(t *testing.T) {
 	)
 }
 
+func TestTickCatchUpDoesNotExtendPlateauThreshold(t *testing.T) {
+	connId := testConnId(3)
+	active := connId
+	ledger := &fakeLedger{
+		tip:                 testTip(100, 50),
+		primaryChainTipSlot: 100,
+		atTip:               false,
+	}
+	state := &fakeChainsyncState{
+		tracked:    []chainsync.TrackedClient{activeClient(connId, 100)},
+		activeConn: &active,
+	}
+	selector := plateauSelector(connId, 500)
+	pub := newFakePublisher()
+	r, _ := newTestRecycler(t, ledger, state, selector, pub, Config{})
+
+	now := time.Now()
+	st := newTestTickState(100, now.Add(-5*time.Minute))
+	st.lastPrimaryChainTipSlot = ledger.primaryChainTipSlot
+
+	r.tick(now, st, LiveComponents{
+		Ledger:         ledger,
+		ChainsyncState: state,
+		ChainSelector:  selector,
+	}, 100)
+
+	events := pub.byType(event.ChainsyncResyncEventType)
+	require.Len(t, events, 1)
+	resyncEvt, ok := events[0].evt.Data.(event.ChainsyncResyncEvent)
+	require.True(t, ok)
+	assert.Equal(t, connId, resyncEvt.ConnectionId)
+	assert.Equal(
+		t,
+		event.ChainsyncResyncReasonLocalTipPlateau,
+		resyncEvt.Reason,
+	)
+}
+
+func TestTickCatchUpDefersPlateauResyncWhilePrimaryChainAdvances(
+	t *testing.T,
+) {
+	connId := testConnId(3)
+	active := connId
+	ledger := &fakeLedger{
+		tip:                 testTip(100, 50),
+		primaryChainTipSlot: 200,
+		atTip:               false,
+	}
+	state := &fakeChainsyncState{
+		tracked:    []chainsync.TrackedClient{activeClient(connId, 100)},
+		activeConn: &active,
+	}
+	selector := plateauSelector(connId, 500)
+	pub := newFakePublisher()
+	r, _ := newTestRecycler(t, ledger, state, selector, pub, Config{})
+
+	now := time.Now()
+	plateauStarted := now.Add(-5 * time.Minute)
+	st := newTestTickState(100, plateauStarted)
+	r.tick(plateauStarted, st, LiveComponents{
+		Ledger:         ledger,
+		ChainsyncState: state,
+		ChainSelector:  selector,
+	}, 100)
+
+	ledger.setPrimaryChainTipSlot(250)
+	r.tick(now, st, LiveComponents{
+		Ledger:         ledger,
+		ChainsyncState: state,
+		ChainSelector:  selector,
+	}, 100)
+
+	assert.Empty(
+		t,
+		pub.byType(event.ChainsyncResyncEventType),
+		"an advancing primary chain must not be treated as a stalled stream",
+	)
+}
+
+func TestTickCatchUpTracksPrimaryChainChangesAfterRollback(t *testing.T) {
+	connId := testConnId(3)
+	active := connId
+	ledger := &fakeLedger{
+		tip:                 testTip(100, 50),
+		primaryChainTipSlot: 200,
+		atTip:               false,
+	}
+	state := &fakeChainsyncState{
+		tracked:    []chainsync.TrackedClient{activeClient(connId, 100)},
+		activeConn: &active,
+	}
+	selector := plateauSelector(connId, 500)
+	pub := newFakePublisher()
+	r, _ := newTestRecycler(t, ledger, state, selector, pub, Config{})
+
+	now := time.Now()
+	st := newTestTickState(100, now.Add(-5*time.Minute))
+	st.lastPrimaryChainTipSlot = 300
+	r.tick(now, st, LiveComponents{
+		Ledger:         ledger,
+		ChainsyncState: state,
+		ChainSelector:  selector,
+	}, 100)
+	assert.Empty(
+		t,
+		pub.byType(event.ChainsyncResyncEventType),
+		"a primary-chain rollback must refresh the plateau clock",
+	)
+	assert.Equal(t, now, st.lastProgressAt)
+
+	ledger.setPrimaryChainTipSlot(250)
+	advanceAt := now.Add(3 * time.Minute)
+	r.tick(advanceAt, st, LiveComponents{
+		Ledger:         ledger,
+		ChainsyncState: state,
+		ChainSelector:  selector,
+	}, 100)
+
+	assert.Empty(
+		t,
+		pub.byType(event.ChainsyncResyncEventType),
+		"progress after a primary-chain rollback must refresh the plateau clock",
+	)
+	assert.Equal(t, advanceAt, st.lastProgressAt)
+}
+
 func TestTickClearsScheduleWhenClientRecovers(t *testing.T) {
 	connId := testConnId(1)
 	ledger := &fakeLedger{tip: testTip(100, 50), atTip: true}
@@ -610,6 +736,7 @@ func TestTickSuppressesResyncOnLedgerApplicationBacklog(t *testing.T) {
 
 	now := time.Now()
 	st := newTestTickState(100, now.Add(-25*time.Minute))
+	st.lastPrimaryChainTipSlot = ledger.primaryChainTipSlot
 
 	runTickWith(r, st, LiveComponents{
 		Ledger:         ledger,
@@ -650,6 +777,7 @@ func TestTickResyncsWhenReconcileFailsDespiteBacklog(t *testing.T) {
 
 	now := time.Now()
 	st := newTestTickState(100, now.Add(-25*time.Minute))
+	st.lastPrimaryChainTipSlot = ledger.primaryChainTipSlot
 
 	runTickWith(r, st, LiveComponents{
 		Ledger:         ledger,

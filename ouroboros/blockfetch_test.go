@@ -27,6 +27,7 @@ import (
 
 	ouroboros_conn "github.com/blinklabs-io/gouroboros/connection"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
@@ -191,8 +192,8 @@ func TestBlockfetchServerRequestRange_StartAfterEnd(t *testing.T) {
 	// we never reach GetChainFromPoint and avoid a nil dereference on
 	// LedgerState.
 
-	start := ocommon.NewPoint(100, []byte{0x01})
-	end := ocommon.NewPoint(50, []byte{0x02})
+	start := ocommon.NewPoint(100, make([]byte, lcommon.Blake2b256Size))
+	end := ocommon.NewPoint(50, make([]byte, lcommon.Blake2b256Size))
 	ctx := blockfetch.CallbackContext{
 		ConnectionId: testConnId(),
 		// Server is nil, so NoBlocks() will panic after the log.
@@ -834,8 +835,8 @@ func TestBlockfetchServerRequestRange_RepeatedInvertedRangeReachesCloseThreshold
 	})
 	peer := newBlockfetchServerPeer(t, o)
 
-	start := ocommon.NewPoint(100, []byte{0x01})
-	end := ocommon.NewPoint(50, []byte{0x02})
+	start := ocommon.NewPoint(100, make([]byte, lcommon.Blake2b256Size))
+	end := ocommon.NewPoint(50, make([]byte, lcommon.Blake2b256Size))
 
 	for i := 1; i <= blockfetchMaxConsecutiveNoBlocks; i++ {
 		logBuf.Reset()
@@ -900,8 +901,8 @@ func TestBlockfetchServerRequestRange_ValidRangeNotRejected(
 		Logger:   logger,
 		EventBus: event.NewEventBus(nil, logger),
 	})
-	start := ocommon.NewPoint(100, []byte{0x01})
-	end := ocommon.NewPoint(150, []byte{0x02})
+	start := ocommon.NewPoint(100, make([]byte, lcommon.Blake2b256Size))
+	end := ocommon.NewPoint(150, make([]byte, lcommon.Blake2b256Size))
 	ctx := blockfetch.CallbackContext{ConnectionId: testConnId()}
 
 	assert.Panics(t, func() {
