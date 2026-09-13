@@ -231,6 +231,43 @@ func TestValidate(t *testing.T) {
 			},
 		},
 		{
+			// Two spellings of one IPv6 literal name one listener. A
+			// string comparison lets them past validation, and the
+			// health listener is then one of two servers racing for the
+			// same TCP endpoint.
+			name: "equivalent IPv6 spellings collide",
+			modify: func(c *Config) {
+				c.BindAddr = "::1"
+				c.PrivateBindAddr = "127.0.0.1"
+				c.DebugBindAddr = "0:0:0:0:0:0:0:1"
+				c.DebugPort = c.HealthPort
+			},
+			wantErr: "is assigned to both",
+		},
+		{
+			// The long-form IPv6 wildcard selects every interface just as
+			// "::" does, so it overlaps a specific address.
+			name: "long-form IPv6 wildcard overlaps a specific address",
+			modify: func(c *Config) {
+				c.BindAddr = "0:0:0:0:0:0:0:0"
+				c.PrivateBindAddr = "127.0.0.1"
+				c.DebugBindAddr = "127.0.0.1"
+				c.DebugPort = c.HealthPort
+			},
+			wantErr: "is assigned to both",
+		},
+		{
+			// Normalization must not invent collisions: distinct
+			// loopback addresses still legally share a port.
+			name: "distinct IPv6 addresses may share a port",
+			modify: func(c *Config) {
+				c.BindAddr = "::1"
+				c.PrivateBindAddr = "127.0.0.1"
+				c.DebugBindAddr = "::2"
+				c.DebugPort = c.HealthPort
+			},
+		},
+		{
 			name: "mesh shares bind address with metrics for collision checks",
 			modify: func(c *Config) {
 				c.StorageMode = storageModeAPI
