@@ -180,6 +180,7 @@ Dingo is a high-performance Cardano blockchain node implementation in Go. This d
 - [Peer Governance](#peer-governance)
 - [Transaction Mempool](#transaction-mempool)
 - [DMQ Message Pool](#dmq-message-pool)
+  - [DMQ Message Authentication](#dmq-message-authentication)
 - [Block Production](#block-production)
 - [Mithril Bootstrap](#mithril-bootstrap)
 - [External Interfaces](#external-interfaces)
@@ -4999,6 +5000,59 @@ lock, matching the mempool package's event-publication rule. Their payloads
 are `AddMessageEvent` and `RemoveMessageEvent`, each carrying a 32-byte
 `MessageID` field. `EventBus` is optional (nil-safe) so the package is usable
 standalone ahead of node composition.
+
+### DMQ Message Authentication
+
+`dmq.Authenticator` is phase 2 of CIP-0137's DMQ (issue #1949 of 7). Like
+`MessageMempool`, it is a standalone, unwired component: nothing in the
+codebase calls it yet, since driving it from an inbound message and then
+feeding an authenticated message to `MessageMempool.Add` is protocol-wiring
+work for a later phase (issue #1950 runs the node-to-node mini-protocol;
+issue #1953 composes the whole DMQ subsystem into `node.go`).
+
+`Verify` runs CIP-0137's full authentication chain against one message, in
+order: expiry (`msg.IsValidAt`), message-ID integrity
+(`ComputeDmqMessageID`), pool-ID derivation plus stake-distribution
+authorization, the operational certificate's cold-key signature, that the
+message's claimed KES period does not precede the certificate's own issuance
+period, the KES signature over the payload, and operational-certificate
+issue-number monotonicity (replay protection). Stake authorization is checked
+before either signature: deriving a pool ID from `ColdVerificationKey` needs
+no signature, so anyone can self-sign an internally consistent opcert/KES
+chain over freshly generated keys, and checking authorization first turns
+away a message from an unregistered identity before paying for an ed25519
+verify and the ~2ms KES verify. `Verify` returns nil only when every check
+passes; the issue-number baseline for the message's pool is not advanced
+until then, so a message that fails an earlier check cannot poison replay
+protection for a later, legitimately higher-numbered certificate from the
+same pool.
+
+Authenticator deliberately does not reuse
+`github.com/blinklabs-io/gouroboros/protocol/common`'s `MessageAuthenticator`.
+That type has two mismatches with real Cardano pool credentials: it verifies
+the operational certificate's cold signature over a CBOR encoding of
+`[KESVerificationKey, IssueNumber, KESPeriod]`, but a pool's real,
+already-issued operational certificate is signed over the raw `OCertSignable`
+byte concatenation cardano-node uses -- the same mismatch this codebase's own
+`verify_opcert.go` documents and fixed for block headers; and its injected
+KES-verifier callback receives the message's own claimed KES period standing
+in for both the certificate's issuance period and the slot used to derive it,
+which collapses the KES evolution offset to zero regardless of how many
+periods have actually elapsed since the certificate was issued. CIP-0137
+messages carry a pool's real operational certificate, so `Authenticator`
+verifies them with `gouroboros/ledger`'s conformance-tested `OpCert` and KES
+primitives directly -- the same ones this codebase's block-header
+verification uses -- rather than through that wrapper.
+
+Pool authorization is injected through the narrow `StakeAuthority` interface
+(`PoolActiveStake(poolKeyHash) (uint64, error)`), following the same
+composition pattern `node_leios.go`'s stake adapters use for Leios committee
+formation: `dmq` stays decoupled from `ledger`/`database` so it remains
+usable and unit-testable standalone, and a later composition phase adapts
+`ledger.LedgerView.GetPoolStake` to it. The opcert issue-number cache has no
+automatic eviction; `ForgetPool` lets a caller drop a pool's baseline when it
+is no longer registered or active, mirroring `MessageMempool.RemovePeer` and
+gouroboros' `RemoveKESOpCertCacheEntry`.
 
 ## Block Production
 
