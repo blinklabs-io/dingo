@@ -149,7 +149,17 @@ func (ls *LedgerState) queryShelleyStakeDistribution(
 		return bytes.Compare(a.Bytes(), b.Bytes())
 	})
 
-	vrfByPool, err := ls.poolVrfKeyHashes(keyHashes, metaTxn)
+	// A pinned caller's VRF lookup must be bounded to the same slot its
+	// stake and circulation were reconstructed at -- otherwise a pool that
+	// re-registers with a new VRF key between the pinned slot and now would
+	// have its historical stake paired with a key it did not yet hold
+	// (blinklabs-io/dingo#4237). Left nil for a live query, which keeps
+	// poolVrfKeyHashes' unbounded "latest registration" behavior.
+	var vrfAsOfSlot *uint64
+	if at.pinned() {
+		vrfAsOfSlot = &targetSlot
+	}
+	vrfByPool, err := ls.poolVrfKeyHashes(keyHashes, vrfAsOfSlot, metaTxn)
 	if err != nil {
 		return nil, err
 	}

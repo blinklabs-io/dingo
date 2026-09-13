@@ -551,6 +551,77 @@ func TestQueryShelleyStakeDistribution_PinnedBeforeAnyNetworkStateRow_Rejected(
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
 }
 
+// TestQueryShelleyStakeDistribution_PinnedVrfKeyUsesSlotNotLatestRegistration
+// covers a CodeRabbit finding on blinklabs-io/dingo#4237: a pool that
+// re-registers with a new VRF key after a pinned query's slot must still be
+// reported with the key it held at that slot, not its current one. Before
+// this fix, poolVrfKeyHashes always resolved through
+// registeredPoolVrfKeyHash's unbounded "latest registration" rule (needed for
+// live callers, since dingo validates incoming blocks against a producer's
+// current key), which a pinned historical query has no business using -- it
+// would pair pool A's slot-100 stake with the VRF key it only registered at
+// slot 150, a key dingo itself would not have accepted from that pool as of
+// slot 100.
+func TestQueryShelleyStakeDistribution_PinnedVrfKeyUsesSlotNotLatestRegistration(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	poolAHash := repeatedBytes(28, 0x11)
+	vrfOld := repeatedBytes(32, 0xAA)
+	vrfNew := repeatedBytes(32, 0xBB)
+
+	pkhA := seedLiveStakeFixture(t, db, poolAHash, vrfOld, 1_000_000, 1)
+	// Re-registers the same pool with a new VRF key at slot 150 -- after the
+	// slot-100 pin below, but before the live tip.
+	require.NoError(t, db.ImportPool(
+		nil,
+		&models.Pool{PoolKeyHash: poolAHash, VrfKeyHash: vrfNew},
+		&models.PoolRegistration{
+			PoolKeyHash: poolAHash,
+			VrfKeyHash:  vrfNew,
+			AddedSlot:   150,
+			Pledge:      dbtypes.Uint64(1),
+			Cost:        dbtypes.Uint64(1),
+		},
+	))
+
+	ls := newPoolDistr2Ledger(t, db)
+	seedEpochs(t, ls, map[uint64]uint64{0: 0, 100: 1, 200: 2})
+
+	pastHash := bytes.Repeat([]byte{0xAB}, 32)
+	tipHash := bytes.Repeat([]byte{0xCD}, 32)
+	seedBlockAtSlot(t, ls, 100, pastHash)
+	seedBlockAtSlot(t, ls, 200, tipHash)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(200, tipHash),
+	}, nil))
+	require.NoError(t, db.Metadata().SetNetworkState(0, 2_000_000, 100, nil))
+
+	result, err := ls.Query(
+		stakeDistributionQuery(),
+		QueryPoint{Slot: 100, Hash: pastHash},
+	)
+	require.NoError(t, err)
+	dist := decodeStakeDistributionResult(t, result)
+	entryA, ok := dist.Results[lcommon.PoolId(pkhA)]
+	require.True(t, ok, "pool must still be reported at the pinned slot")
+	assert.Equal(t, vrfOld, entryA.VrfHash[:],
+		"pinned slot 100 predates the slot-150 re-registration, so the "+
+			"key in force then (vrfOld) must be reported, not the pool's "+
+			"current key (vrfNew)")
+
+	// The live (unpinned) query is unaffected: it must report the pool's
+	// current key, since dingo validates incoming blocks against it.
+	liveResult, err := ls.Query(stakeDistributionQuery(), QueryPoint{})
+	require.NoError(t, err)
+	liveDist := decodeStakeDistributionResult(t, liveResult)
+	liveEntryA, ok := liveDist.Results[lcommon.PoolId(pkhA)]
+	require.True(t, ok)
+	assert.Equal(t, vrfNew, liveEntryA.VrfHash[:])
+}
+
 // TestQueryShelleyStakeDistribution_EmptySnapshot covers a chain with no
 // stake yet (and no epoch data synced at all -- a completely fresh
 // database): the query must return an empty, non-nil map rather than
