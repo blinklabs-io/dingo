@@ -1,0 +1,153 @@
+{
+  "title": "Dingo Preview Sync Progress",
+  "uid": "dingo-sync-progress",
+  "editable": true,
+  "schemaVersion": 39,
+  "timezone": "browser",
+  "refresh": "10s",
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "tags": ["dingo", "preview", "koios-parity"],
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Chain tip: slot number",
+      "description": "cardano_node_metrics_slotNum_int -- the node's current tip slot number. Climbs steadily while syncing from genesis.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "cardano_node_metrics_slotNum_int",
+          "legendFormat": "tip slot",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Chain tip: block number",
+      "description": "cardano_node_metrics_blockNum_int -- the node's current chain height.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "cardano_node_metrics_blockNum_int",
+          "legendFormat": "block height",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Block apply rate",
+      "description": "deriv(cardano_node_metrics_blockNum_int[2m]) -- blocks applied per second, derived from chain-height growth. dingo_ledger_block_pipeline_blocks_validated/_decoded are intentionally not used here: they stay at 0 unless the opt-in block-processing pipeline flags are set, which this stack does not enable.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "deriv(cardano_node_metrics_blockNum_int[2m])",
+          "legendFormat": "blocks/sec",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ops" },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Slots behind wall clock (tip gap)",
+      "description": "dingo_tip_gap_slots -- slots between the current wall-clock slot and the chain tip. Trends toward 0 as sync completes and the node reaches the chain tip.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "dingo_tip_gap_slots",
+          "legendFormat": "tip gap (slots)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Current epoch",
+      "description": "cardano_node_metrics_epoch_int",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "cardano_node_metrics_epoch_int",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Chainsync header cache size",
+      "description": "dingo_chainsync_seen_headers -- current number of slots retained in the chainsync header deduplication cache; nonzero and moving confirms active chainsync traffic.",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "dingo_chainsync_seen_headers",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Database size on disk",
+      "description": "dingo_database_size_bytes",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "dingo_database_size_bytes",
+          "legendFormat": "{{store}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "bytes" },
+        "overrides": []
+      }
+    }
+  ]
+}

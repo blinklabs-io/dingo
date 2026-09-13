@@ -58,3 +58,11 @@ Reset the shared Dingo/Postgres state:
 ```sh
 docker compose down -v
 ```
+
+## Koios-Parity Compose Stack
+
+[`koios-parity-compose/`](koios-parity-compose/README.md) is a separate,
+standalone stack (its own `docker-compose.yml`, not part of the shared stack
+above): a Preview sync with Prometheus + Grafana observability and an on/off
+toggle for the in-process koios-parity reward validator. See its README for
+usage.

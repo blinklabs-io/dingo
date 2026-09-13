@@ -1,0 +1,13 @@
+# Grafana provisioning: load the starter dashboard from a file on disk so it
+# is available on first boot without manual import.
+apiVersion: 1
+
+providers:
+  - name: dingo
+    orgId: 1
+    folder: Dingo
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
