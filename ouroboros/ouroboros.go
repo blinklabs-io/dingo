@@ -633,6 +633,26 @@ func (o *Ouroboros) ConfigureListeners(
 			// operator has pointed at a non-loopback address gets
 			// gouroboros' own defaults instead, same as any other NtC
 			// server would for an address reachable beyond this machine.
+			//
+			// A TCP address is resolved and rewritten to its numeric form
+			// here, before classification, so the address
+			// isTrustedNtCListener judges and the address startListener
+			// later binds (connmanager/listener.go) are the exact same
+			// literal string. Resolving the original hostname/"localhost"
+			// independently in each place would let two separate DNS
+			// lookups disagree -- a listener classified trusted from one
+			// answer could then bind to a different, non-loopback address
+			// DNS gives on the second lookup, handing that non-loopback
+			// listener the relaxed timeouts and 2GiB reassembly buffer
+			// meant only for a verified-local one (blinklabs-io/dingo#4183
+			// review). A resolution failure here is left for
+			// startListener's own bind to report -- isTrustedNtCListener
+			// treats it as untrusted either way.
+			if l.ListenNetwork == "tcp" {
+				if addr, err := net.ResolveTCPAddr("tcp", l.ListenAddress); err == nil {
+					l.ListenAddress = addr.String()
+				}
+			}
 			trusted := isTrustedNtCListener(l)
 			ntcOpts := []ouroboros.ConnectionOptionFunc{
 				ouroboros.WithNetworkMagic(o.config.NetworkMagic),
@@ -670,7 +690,10 @@ func (o *Ouroboros) ConfigureListeners(
 				// connection killed mid-flight (blinklabs-io/dingo#4082).
 				// Real cardano-node's own mux applies no equivalent timeout
 				// on local NtC connections either.
-				ntcOpts = append(ntcOpts, ouroboros.WithMuxerSegmentReadTimeout(0))
+				ntcOpts = append(
+					ntcOpts,
+					ouroboros.WithMuxerSegmentReadTimeout(0),
+				)
 			}
 			l.ConnectionOpts = append(l.ConnectionOpts, ntcOpts...)
 		} else {
@@ -997,9 +1020,12 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 				o.chainsyncState.RemoveClientConnId(connId)
 				o.config.Logger.Error(
 					"failed to start chainsync client, closing outbound connection",
-					"component", "network",
-					"connection_id", connId.String(),
-					"error", err,
+					"component",
+					"network",
+					"connection_id",
+					connId.String(),
+					"error",
+					err,
 				)
 				// Close the connection so peer governance observes the
 				// failure and applies its reconnect backoff.
@@ -1091,9 +1117,12 @@ func (o *Ouroboros) closeOutboundConnAfterChainsyncFailure(
 	if current := o.connManager.GetConnectionById(connId); current != startedConn {
 		o.config.Logger.Debug(
 			"outbound connection no longer current after chainsync start failure, not closing",
-			"component", "network",
-			"connection_id", connId.String(),
-			"replaced", current != nil,
+			"component",
+			"network",
+			"connection_id",
+			connId.String(),
+			"replaced",
+			current != nil,
 		)
 		return
 	}

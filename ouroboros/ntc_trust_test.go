@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"net"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/connmanager"
@@ -124,7 +125,9 @@ func TestIsTrustedNtCListener(t *testing.T) {
 // slice's effect directly, so this counts the length of ConnectionOpts a
 // trusted vs. an untrusted NtC listener receive: the untrusted listener must
 // end up with exactly one fewer option (the omitted WithMuxerSegmentReadTimeout).
-func TestConfigureListeners_UntrustedNtCListenerSkipsRelaxedTimeout(t *testing.T) {
+func TestConfigureListeners_UntrustedNtCListenerSkipsRelaxedTimeout(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	o := &Ouroboros{
@@ -154,5 +157,57 @@ func TestConfigureListeners_UntrustedNtCListenerSkipsRelaxedTimeout(t *testing.T
 		"an untrusted NtC listener must receive exactly one fewer "+
 			"ConnectionOpts entry than a trusted one -- the omitted "+
 			"WithMuxerSegmentReadTimeout(0)",
+	)
+}
+
+// TestConfigureListeners_NormalizesTCPListenAddressToNumeric is the
+// blinklabs-io/dingo#4183 review regression for a TOCTOU in
+// isTrustedNtCListener: it resolved l.ListenAddress to classify the
+// listener, but connmanager's startListener later binds the same
+// listener's ListenAddress by calling net.Listen on the original,
+// unresolved string -- a second, independent DNS lookup. If a hostname
+// (or "localhost") resolved differently between the two lookups, a
+// listener classified trusted from the first answer could bind to a
+// different, non-loopback address on the second, handing that listener
+// the relaxed timeouts and 2GiB reassembly buffer meant only for a
+// verified-local one.
+//
+// ConfigureListeners now resolves a TCP NtC listener's address once and
+// rewrites ListenAddress to the resulting numeric form before
+// classifying it, so classification and the later bind are guaranteed to
+// use the exact same literal address -- there is no second lookup left
+// to disagree with the first. This proves that rewrite actually happens:
+// a "localhost:0" input must come back as a numeric loopback address,
+// not the original hostname string.
+func TestConfigureListeners_NormalizesTCPListenAddressToNumeric(t *testing.T) {
+	t.Parallel()
+
+	o := &Ouroboros{
+		config: OuroborosConfig{},
+	}
+
+	configured := o.ConfigureListeners([]connmanager.ListenerConfig{
+		{
+			ListenNetwork: "tcp",
+			ListenAddress: "localhost:0",
+			UseNtC:        true,
+		},
+	})
+	assert.Len(t, configured, 1)
+	assert.NotEqual(
+		t,
+		"localhost:0",
+		configured[0].ListenAddress,
+		"ConfigureListeners must rewrite a hostname ListenAddress to its "+
+			"resolved numeric form, not leave it for a second, "+
+			"independent resolution at bind time",
+	)
+	host, _, err := net.SplitHostPort(configured[0].ListenAddress)
+	assert.NoError(t, err)
+	assert.NotNil(
+		t,
+		net.ParseIP(host),
+		"the rewritten ListenAddress %q must have a literal IP host",
+		configured[0].ListenAddress,
 	)
 }
