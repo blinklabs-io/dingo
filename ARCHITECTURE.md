@@ -599,9 +599,14 @@ to do real work should hand off to their own goroutine, which
 
 The BlockFetch server path mirrors the retrieval flow for downstream peers:
 when a peer requests a range, `ouroboros/blockfetch.go` validates the bounds,
-opens a chain iterator at the requested start point, sends `StartBatch`, then
-streams `Block` messages until the requested end or local tip before
-`BatchDone`. The range sender is asynchronous so the mini-protocol callback can
+checks both endpoints against the serving chain, opens a chain iterator at the
+requested start point, sends `StartBatch`, then streams `Block` messages until
+the exact requested end slot and hash before `BatchDone`. Earlier blocks at the
+same slot, including Byron epoch-boundary blocks, do not complete the range.
+Missing endpoints receive `NoBlocks` before streaming. Once a batch starts,
+iterator exhaustion, rollback, or passing the end slot without the requested
+hash closes the connection without `BatchDone`.
+The range sender is asynchronous so the mini-protocol callback can
 return promptly, but it applies backpressure between messages by waiting for
 the underlying gouroboros protocol send queue to drain. This keeps large Leios
 catch-up ranges from filling the mux pending-message queue and turning a slow
