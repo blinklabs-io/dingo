@@ -97,15 +97,17 @@ func TestValidateInboundBlockExUnitsAggregatesDeclaredBudgets(t *testing.T) {
 
 	newTx := func(memory, steps int64) lcommon.Transaction {
 		return &mockFeeTx{
-			witnesses: &mockWitnessSet{redeemers: &mockRedeemers{entries: []struct {
-				key lcommon.RedeemerKey
-				val lcommon.RedeemerValue
-			}{
-				{val: lcommon.RedeemerValue{ExUnits: lcommon.ExUnits{
-					Memory: memory,
-					Steps:  steps,
-				}}},
-			}}},
+			witnesses: &mockWitnessSet{
+				redeemers: &mockRedeemers{entries: []struct {
+					key lcommon.RedeemerKey
+					val lcommon.RedeemerValue
+				}{
+					{val: lcommon.RedeemerValue{ExUnits: lcommon.ExUnits{
+						Memory: memory,
+						Steps:  steps,
+					}}},
+				}},
+			},
 		}
 	}
 	pparams := &conway.ConwayProtocolParameters{
@@ -309,7 +311,9 @@ func TestValidateInboundBlockEnvelopeSizes(t *testing.T) {
 	}
 }
 
-func TestValidateInboundBlockEnvelopeRejectsByronBodyProofMismatch(t *testing.T) {
+func TestValidateInboundBlockEnvelopeRejectsByronBodyProofMismatch(
+	t *testing.T,
+) {
 	block := &byron.ByronMainBlock{
 		BlockHeader: &byron.ByronMainBlockHeader{},
 	}

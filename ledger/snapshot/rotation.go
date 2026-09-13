@@ -1117,10 +1117,14 @@ func (m *Manager) cleanupOldSnapshots(
 		if before < deleteBeforeEpoch {
 			m.logger.Info(
 				"retaining historical pool stake snapshots for deferred header validation",
-				"component", "snapshot",
-				"current_epoch", currentEpoch,
-				"default_before_epoch", deleteBeforeEpoch,
-				"pinned_before_epoch", before,
+				"component",
+				"snapshot",
+				"current_epoch",
+				currentEpoch,
+				"default_before_epoch",
+				deleteBeforeEpoch,
+				"pinned_before_epoch",
+				before,
 			)
 		}
 		poolTxn := m.db.Transaction(true)

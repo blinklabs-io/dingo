@@ -1930,7 +1930,8 @@ func (ls *LedgerState) epochNonceHex(epochId uint64, nonce []byte) string {
 	}
 	ls.Lock()
 	defer ls.Unlock()
-	if cachedNonce, ok := ls.epochNonceHexCache[epochId]; ok && bytes.Equal(cachedNonce.nonce, nonce) {
+	if cachedNonce, ok := ls.epochNonceHexCache[epochId]; ok &&
+		bytes.Equal(cachedNonce.nonce, nonce) {
 		return cachedNonce.hex
 	}
 	nonceHex := hex.EncodeToString(nonce)

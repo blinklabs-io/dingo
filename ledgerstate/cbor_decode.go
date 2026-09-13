@@ -281,7 +281,7 @@ func decodeMapEntriesLimit(data []byte, limit int) ([]MapEntry, error) {
 	}
 	entries := make([]MapEntry, 0, countInt)
 	pos := headerLen
-	for i := 0; i < countInt; i++ {
+	for i := range countInt {
 		// Key
 		keySize, err := cborItemSize(data[pos:])
 		if err != nil {

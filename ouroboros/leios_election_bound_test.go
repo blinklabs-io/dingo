@@ -24,9 +24,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func electionAnnouncement(t *testing.T, slot, blockNo uint64, issuer byte) []byte {
+func electionAnnouncement(
+	t *testing.T,
+	slot, blockNo uint64,
+	issuer byte,
+) []byte {
 	t.Helper()
-	raw := testDijkstraAnnouncementHeaderRawFor(t, slot, lcommon.Blake2b256{0xaa}, 1234)
+	raw := testDijkstraAnnouncementHeaderRawFor(
+		t,
+		slot,
+		lcommon.Blake2b256{0xaa},
+		1234,
+	)
 	var top, body []cbor.RawMessage
 	_, err := cbor.Decode(raw, &top)
 	require.NoError(t, err)
@@ -49,19 +58,38 @@ func electionAnnouncement(t *testing.T, slot, blockNo uint64, issuer byte) []byt
 func TestLeiosAnnouncementElectionBoundAcrossSources(t *testing.T) {
 	// Header cryptography is supplied by the existing ledger fixture; this
 	// exercises the real decode, time-window, pruning, recording and relay path.
-	ledger := &fakeLeiosAnnouncementLedger{currentSlot: 11, slotTime: time.Now().Add(-time.Minute)}
-	o := newOuroboros(OuroborosConfig{EnableLeios: true, LeiosAnnouncementLedger: ledger})
+	ledger := &fakeLeiosAnnouncementLedger{
+		currentSlot: 11,
+		slotTime:    time.Now().Add(-time.Minute),
+	}
+	o := newOuroboros(
+		OuroborosConfig{EnableLeios: true, LeiosAnnouncementLedger: ledger},
+	)
 	o.leiosEBLog.registerConn("observer")
 	first := electionAnnouncement(t, 10, 1, 1)
 	require.NoError(t, o.acceptLeiosAnnouncement(first, "connection-a"))
-	require.NoError(t, o.acceptLeiosAnnouncement(electionAnnouncement(t, 10, 2, 1), "connection-b"))
+	require.NoError(
+		t,
+		o.acceptLeiosAnnouncement(
+			electionAnnouncement(t, 10, 2, 1),
+			"connection-b",
+		),
+	)
 	// Relaying an already-known header from a new source must not consume
 	// another slot or fail after the election's two distinct headers are seen.
 	require.NoError(t, o.acceptLeiosAnnouncement(first, "connection-c"))
-	err := o.acceptLeiosAnnouncement(electionAnnouncement(t, 10, 3, 1), "connection-c")
+	err := o.acceptLeiosAnnouncement(
+		electionAnnouncement(t, 10, 3, 1),
+		"connection-c",
+	)
 	require.ErrorContains(t, err, "third distinct")
 	require.Len(t, o.leiosAnnouncements, 2)
-	require.Len(t, o.leiosEBLog.items, 2, "rejected announcement must not be relayed")
+	require.Len(
+		t,
+		o.leiosEBLog.items,
+		2,
+		"rejected announcement must not be relayed",
+	)
 
 	// Both parts of election identity matter: another issuer at the same
 	// slot and the same issuer at another slot each get their own budget.

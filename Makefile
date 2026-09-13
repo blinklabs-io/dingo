@@ -87,7 +87,9 @@ lint: import-boundaries ## Run import-boundaries, golangci-lint, nilaway, and mo
 		(cd $$dir && golangci-lint run ./...) || exit 1; \
 	done
 	GOOS=windows golangci-lint run ./...
-	nilaway $(GO_TAG_FLAGS) ./...
+	# Test fixtures establish preconditions with testify assertions that nilaway
+	# cannot track across calls; analyze production code here.
+	nilaway $(GO_TAG_FLAGS) -exclude-test-files ./...
 	modernize $(GO_TAG_FLAGS) $(MODERNIZE_PACKAGES)
 
 import-boundaries: ## Check reviewed package import boundaries

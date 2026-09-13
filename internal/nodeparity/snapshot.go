@@ -102,7 +102,10 @@ func QuerySnapshot(conn *ouroboros.Connection) (*Snapshot, error) {
 	if err != nil {
 		return nil, fmt.Errorf("stake distribution query: %w", err)
 	}
-	stakeDist := make(map[lcommon.PoolId]StakeDistributionEntry, len(sd.Results))
+	stakeDist := make(
+		map[lcommon.PoolId]StakeDistributionEntry,
+		len(sd.Results),
+	)
 	for poolID, entry := range sd.Results {
 		if entry.StakeFraction == nil {
 			continue
@@ -134,7 +137,11 @@ func QuerySnapshot(conn *ouroboros.Connection) (*Snapshot, error) {
 // connection before returning. Use this for a one-off look at a single
 // node; Check manages its own connections directly so it can interleave tip
 // reads around the query. See Dial for ctx's role.
-func SnapshotAtTip(ctx context.Context, addr string, magic uint32) (*Snapshot, error) {
+func SnapshotAtTip(
+	ctx context.Context,
+	addr string,
+	magic uint32,
+) (*Snapshot, error) {
 	conn, err := Dial(ctx, addr, magic)
 	if err != nil {
 		return nil, err

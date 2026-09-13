@@ -254,7 +254,13 @@ func TestStakeRewardRoundDeclinedWhenAnchorHidesTheBlockCounts(t *testing.T) {
 
 	txn := db.Transaction(false)
 	defer func() { _ = txn.Rollback() }()
-	app, ok, err := ls.calculateStakeRewardApplication(txn, 4, 1_200, 1_200, true)
+	app, ok, err := ls.calculateStakeRewardApplication(
+		txn,
+		4,
+		1_200,
+		1_200,
+		true,
+	)
 	require.NoError(t, err)
 	require.False(
 		t,
@@ -263,7 +269,11 @@ func TestStakeRewardRoundDeclinedWhenAnchorHidesTheBlockCounts(t *testing.T) {
 			"not distributed as zero",
 	)
 	require.Nil(t, app)
-	assert.Contains(t, logs.String(), "no block counts for the performance epoch")
+	assert.Contains(
+		t,
+		logs.String(),
+		"no block counts for the performance epoch",
+	)
 }
 
 // A recorded anchor sits at or above slot 0 and so covers epoch 0, the
@@ -398,7 +408,13 @@ func stakeRewardApplicationForTest(
 	}
 	txn := db.Transaction(false)
 	t.Cleanup(func() { _ = txn.Rollback() })
-	app, ok, err := ls.calculateStakeRewardApplication(txn, 4, 1_200, 1_200, true)
+	app, ok, err := ls.calculateStakeRewardApplication(
+		txn,
+		4,
+		1_200,
+		1_200,
+		true,
+	)
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.NotNil(t, app)

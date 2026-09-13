@@ -146,19 +146,32 @@ func TestBuildBlockEncodedBodyBudget(t *testing.T) {
 						era, metadata, count, delta,
 					), func(t *testing.T) {
 						limit := uint(int(exactSize) + delta)
-						builder := setupCredentialValidationBuilder(t, credentials)
-						builder.mempool = &mockMempool{transactions: transactions}
+						builder := setupCredentialValidationBuilder(
+							t,
+							credentials,
+						)
+						builder.mempool = &mockMempool{
+							transactions: transactions,
+						}
 						builder.pparamsProvider = &mockPParamsProvider{
 							pparams: bodyBudgetParams(era, limit),
 						}
 						block, encoded, err := builder.BuildBlock(1001, 0)
-						require.NoError(t, err, "size overflow must retain the fitting prefix")
+						require.NoError(
+							t,
+							err,
+							"size overflow must retain the fitting prefix",
+						)
 						wantCount := count
 						if delta < 0 {
 							wantCount--
 						}
-						require.Len(t, block.Transactions(), wantCount,
-							"admission must use encoded bytes, not raw transaction sizes")
+						require.Len(
+							t,
+							block.Transactions(),
+							wantCount,
+							"admission must use encoded bytes, not raw transaction sizes",
+						)
 						for index, transaction := range block.Transactions() {
 							require.Equal(t, transactions[index].Hash,
 								transaction.Hash().String())

@@ -450,7 +450,10 @@ func TestBlockApplyRejectsRolledBackCandidate(t *testing.T) {
 	rolledBackCandidate := fixture.currentTip.Point
 	require.NoError(
 		t,
-		fixture.ls.rollbackChainAndStateDeferred(fixture.ancestorTip.Point, nil),
+		fixture.ls.rollbackChainAndStateDeferred(
+			fixture.ancestorTip.Point,
+			nil,
+		),
 	)
 
 	operationCalled := false
@@ -576,7 +579,10 @@ func TestRollbackChainAndStateEmitsUndoEventsBeforeTruncating(t *testing.T) {
 	require.NotEqual(t, event.EventSubscriberId(0), errSubID)
 	t.Cleanup(func() { bus.Unsubscribe(LedgerErrorEventType, errSubID) })
 
-	require.NoError(t, ls.rollbackChainAndStateDeferred(fixture.ancestorTip.Point, nil))
+	require.NoError(
+		t,
+		ls.rollbackChainAndStateDeferred(fixture.ancestorTip.Point, nil),
+	)
 
 	// The block above the rollback point was visited by the undo emitter.
 	evt := testutil.RequireReceive(
@@ -1186,8 +1192,16 @@ func TestReconciliationUndoBlocksDetectsMissingBlockNonceRecords(t *testing.T) {
 
 	require.Len(t, blocks, 1)
 	require.Equal(t, fixture.currentTip.Point.Hash, blocks[0].Hash)
-	require.Equal(t, float64(1), promtestutil.ToFloat64(ls.metrics.reconciliationUndoMissingRecord))
-	require.Equal(t, float64(0), promtestutil.ToFloat64(ls.metrics.reconciliationUndoUnresolved))
+	require.Equal(
+		t,
+		float64(1),
+		promtestutil.ToFloat64(ls.metrics.reconciliationUndoMissingRecord),
+	)
+	require.Equal(
+		t,
+		float64(0),
+		promtestutil.ToFloat64(ls.metrics.reconciliationUndoUnresolved),
+	)
 }
 
 // TestReconcilePrimaryChainTipWithLedgerTipSucceedsBeforeSetLedger covers a
@@ -1256,7 +1270,10 @@ func TestBlocksAboveSlotServesLedgerErrorOnlySubscribers(t *testing.T) {
 	require.NotEqual(t, event.EventSubscriberId(0), errSubID)
 	t.Cleanup(func() { bus.Unsubscribe(LedgerErrorEventType, errSubID) })
 
-	require.NoError(t, ls.rollbackChainAndStateDeferred(fixture.ancestorTip.Point, nil))
+	require.NoError(
+		t,
+		ls.rollbackChainAndStateDeferred(fixture.ancestorTip.Point, nil),
+	)
 
 	evt := testutil.RequireReceive(
 		t, errCh, 2*time.Second,

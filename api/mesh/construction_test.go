@@ -1482,7 +1482,10 @@ func TestConstructionRejectsNullElements(t *testing.T) {
 			var rec *httptest.ResponseRecorder
 			// postJSON serializes nil pointers as JSON null and drives the route's
 			// actual decoder before the construction handler sees the elements.
-			require.NotPanics(t, func() { rec = postJSON(t, h, tc.path, tc.request) })
+			require.NotPanics(
+				t,
+				func() { rec = postJSON(t, h, tc.path, tc.request) },
+			)
 			requireMeshError(t, rec, tc.want, http.StatusBadRequest)
 		})
 	}
@@ -1493,11 +1496,21 @@ func TestConstructionInputIndexBounds(t *testing.T) {
 	for _, index := range []int64{-1, 0, math.MaxUint32 - 1, math.MaxUint32, math.MaxUint32 + 1} {
 		t.Run(strconv.FormatInt(index, 10), func(t *testing.T) {
 			h := newTestHandler(t, newTestDeps())
-			coin := hexString(testHash(0xb2)) + ":" + strconv.FormatInt(index, 10)
+			coin := hexString(
+				testHash(0xb2),
+			) + ":" + strconv.FormatInt(
+				index,
+				10,
+			)
 			var rec *httptest.ResponseRecorder
 			require.NotPanics(t, func() {
 				rec = postJSON(t, h, "/construction/payloads", payloadsRequest(
-					payloadOpsFor(addr, coin), map[string]any{"fee": "170000"}, nil,
+					payloadOpsFor(
+						addr,
+						coin,
+					),
+					map[string]any{"fee": "170000"},
+					nil,
 				))
 			})
 			// The library constructor takes int, so 32-bit hosts cannot represent
@@ -1507,12 +1520,20 @@ func TestConstructionInputIndexBounds(t *testing.T) {
 				maxIndex = math.MaxInt32
 			}
 			if index < 0 || index > maxIndex {
-				requireMeshError(t, rec, ErrInvalidRequest, http.StatusBadRequest)
+				requireMeshError(
+					t,
+					rec,
+					ErrInvalidRequest,
+					http.StatusBadRequest,
+				)
 				return
 			}
 			response := decodeResponse[ConstructionPayloadsResponse](t, rec)
 			var body conway.ConwayTransactionBody
-			_, err := cbor.Decode(mustDecodeHex(t, response.UnsignedTransaction), &body)
+			_, err := cbor.Decode(
+				mustDecodeHex(t, response.UnsignedTransaction),
+				&body,
+			)
 			require.NoError(t, err)
 			require.Len(t, body.Inputs(), 1)
 			require.Equal(t, uint32(index), body.Inputs()[0].Index())

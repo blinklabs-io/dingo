@@ -624,7 +624,9 @@ func (p *DingoStateProvider) legacyCommitteeMember(
 	}
 	for _, member := range members {
 		if member.ColdCredentialTag != coldTag ||
-			common.NewBlake2b224(member.ColdCredHash) != coldCredential.Credential {
+			common.NewBlake2b224(
+				member.ColdCredHash,
+			) != coldCredential.Credential {
 			continue
 		}
 		result := &common.CommitteeMember{
@@ -667,7 +669,9 @@ func (p *DingoStateProvider) realCommitteeMember(
 	found := false
 	for _, member := range members {
 		if member.ColdCredentialTag == coldTag &&
-			common.NewBlake2b224(member.ColdCredHash) == coldCredential.Credential {
+			common.NewBlake2b224(
+				member.ColdCredHash,
+			) == coldCredential.Credential {
 			if found && (member.TermStartSlot < termStartSlot ||
 				(member.TermStartSlot == termStartSlot && member.AddedSlot < addedSlot) ||
 				(member.TermStartSlot == termStartSlot && member.AddedSlot == addedSlot && member.ID < memberID)) {
@@ -836,7 +840,10 @@ func (p *DingoStateProvider) CommitteeHotCredentialMember(
 		},
 	)
 	if err != nil {
-		return nil, fmt.Errorf("lookup active committee hot credentials: %w", err)
+		return nil, fmt.Errorf(
+			"lookup active committee hot credentials: %w",
+			err,
+		)
 	}
 	for _, authorization := range authorizations {
 		if authorization.HotCredentialTag != hotTag ||

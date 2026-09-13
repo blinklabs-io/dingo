@@ -167,7 +167,9 @@ func TestLedgerProcessBlockAnchorsValidationHorizonAtParent(t *testing.T) {
 			block, ok := blocks[0].(*babbage.BabbageBlock)
 			require.True(t, ok)
 			block.TransactionBodies = []babbage.BabbageTransactionBody{{}}
-			block.TransactionWitnessSets = []babbage.BabbageTransactionWitnessSet{{}}
+			block.TransactionWitnessSets = []babbage.BabbageTransactionWitnessSet{
+				{},
+			}
 			pparams := &babbage.BabbageProtocolParameters{
 				ProtocolMajor:      8,
 				MaxBlockBodySize:   100_000,

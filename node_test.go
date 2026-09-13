@@ -1112,7 +1112,11 @@ func TestCleanupFailedStartupSkipsDatabaseCloseWhenLedgerDrainIsUnconfirmed(
 	n.startupLifecycleMu.Lock()
 	n.cleanupFailedStartup(rollback)
 
-	assert.False(t, dbClosed, "db.Close must be skipped when the ledger drain is unconfirmed")
+	assert.False(
+		t,
+		dbClosed,
+		"db.Close must be skipped when the ledger drain is unconfirmed",
+	)
 	assert.False(
 		t,
 		pluginHostStopped,

@@ -45,7 +45,11 @@ func TestTransactionBodyReadDeadline(t *testing.T) {
 					b.requestBodyTimeout = 100 * time.Millisecond
 					server := httptest.NewServer(b.handler())
 					defer server.Close()
-					conn, err := net.DialTimeout("tcp", strings.TrimPrefix(server.URL, "http://"), 5*time.Second)
+					conn, err := net.DialTimeout(
+						"tcp",
+						strings.TrimPrefix(server.URL, "http://"),
+						5*time.Second,
+					)
 					require.NoError(t, err)
 					// Close the client before server teardown, including failed assertions.
 					defer conn.Close()
@@ -53,21 +57,42 @@ func TestTransactionBodyReadDeadline(t *testing.T) {
 					if mode != "complete" {
 						length += 4096
 					}
-					_, err = fmt.Fprintf(conn,
+					_, err = fmt.Fprintf(
+						conn,
 						"POST %s HTTP/1.1\r\nHost: localhost\r\nContent-Type: %s\r\nContent-Length: %d\r\n\r\n%s",
-						route.path, route.contentType, length, route.body)
+						route.path,
+						route.contentType,
+						length,
+						route.body,
+					)
 					require.NoError(t, err)
 					if mode == "truncated" {
 						require.NoError(t, conn.(*net.TCPConn).CloseWrite())
 					}
-					require.NoError(t, conn.SetReadDeadline(time.Now().Add(3*time.Second)))
-					response, err := http.ReadResponse(bufio.NewReader(conn), nil)
-					require.NoError(t, err, "body reader did not return a response to the %s client", mode)
+					require.NoError(
+						t,
+						conn.SetReadDeadline(time.Now().Add(3*time.Second)),
+					)
+					response, err := http.ReadResponse(
+						bufio.NewReader(conn),
+						nil,
+					)
+					require.NoError(
+						t,
+						err,
+						"body reader did not return a response to the %s client",
+						mode,
+					)
 					defer response.Body.Close()
 					body, err := io.ReadAll(response.Body)
 					require.NoError(t, err)
 					if mode == "complete" {
-						require.Equal(t, http.StatusOK, response.StatusCode, string(body))
+						require.Equal(
+							t,
+							http.StatusOK,
+							response.StatusCode,
+							string(body),
+						)
 					} else {
 						require.Equal(t, http.StatusBadRequest, response.StatusCode, string(body))
 						require.Contains(t, string(body), "failed to read transaction body")

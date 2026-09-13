@@ -232,7 +232,10 @@ func sqliteUnquoteIdentifier(qualified string) string {
 // sqliteSequenceExists reports whether the sqlite_sequence table is present.
 // It takes the narrow QueryRowContext interface so the same probe serves both
 // the pooled connection and an open transaction.
-func sqliteSequenceExists(ctx context.Context, q sqliteRowQuerier) (bool, error) {
+func sqliteSequenceExists(
+	ctx context.Context,
+	q sqliteRowQuerier,
+) (bool, error) {
 	var name string
 	err := q.QueryRowContext(
 		ctx,

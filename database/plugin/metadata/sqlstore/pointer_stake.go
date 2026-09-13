@@ -90,10 +90,7 @@ func pointerStakeCounted(
 	slot uint64,
 	boundarySlot uint64,
 ) (bool, error) {
-	eraSlot := slot
-	if boundarySlot > eraSlot {
-		eraSlot = boundarySlot
-	}
+	eraSlot := max(boundarySlot, slot)
 	slotValue, err := checkedInt64(eraSlot)
 	if err != nil {
 		return false, err

@@ -306,7 +306,9 @@ func TestWatchBlocks_RetriesOnUnreachableAddr(t *testing.T) {
 // regression test for a bug where this closer was registered against the
 // long-lived watcher ctx instead, leaving a stalled handshake unbounded
 // except by the watcher's own eventual shutdown.
-func TestWatchBlocks_StalledHandshakeTriggersReconnectWithinDialTimeout(t *testing.T) {
+func TestWatchBlocks_StalledHandshakeTriggersReconnectWithinDialTimeout(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")

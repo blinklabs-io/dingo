@@ -488,9 +488,12 @@ func checkEpoch(
 		}
 		logger.Debug(
 			"koiosparity: epoch predates this node's earliest available ledger epoch, skipping comparison",
-			"network", network,
-			"epoch", epoch,
-			"earliest_available_epoch", earliestAvailable,
+			"network",
+			network,
+			"epoch",
+			epoch,
+			"earliest_available_epoch",
+			earliestAvailable,
 		)
 		return &EpochCompareResult{
 			Network: network,

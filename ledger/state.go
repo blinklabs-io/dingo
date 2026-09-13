@@ -3257,12 +3257,18 @@ func (ls *LedgerState) rollbackWithResync(
 		}
 		ls.config.Logger.Warn(
 			"rollback target shares the applied tip's slot with a different hash, redirecting below the contested slot",
-			"component", "ledger",
-			"contested_slot", point.Slot,
-			"rollback_hash", hex.EncodeToString(point.Hash),
-			"ledger_tip_hash", hex.EncodeToString(currentTip.Point.Hash),
-			"ancestor_slot", ancestor.Slot,
-			"ancestor_hash", hex.EncodeToString(ancestor.Hash),
+			"component",
+			"ledger",
+			"contested_slot",
+			point.Slot,
+			"rollback_hash",
+			hex.EncodeToString(point.Hash),
+			"ledger_tip_hash",
+			hex.EncodeToString(currentTip.Point.Hash),
+			"ancestor_slot",
+			ancestor.Slot,
+			"ancestor_hash",
+			hex.EncodeToString(ancestor.Hash),
 		)
 		point = ancestor
 	}
@@ -4926,7 +4932,13 @@ func (ls *LedgerState) ledgerReadChain(
 					"error", err,
 					"start_slot", startPoint.Slot,
 				)
-				reportErr(fmt.Errorf("create chain iterator from %v: %w", startPoint, err))
+				reportErr(
+					fmt.Errorf(
+						"create chain iterator from %v: %w",
+						startPoint,
+						err,
+					),
+				)
 				return
 			}
 			if reconcileRetries >= maxReconcileRetries {
@@ -4943,7 +4955,13 @@ func (ls *LedgerState) ledgerReadChain(
 					"max_retries",
 					maxReconcileRetries,
 				)
-				reportErr(fmt.Errorf("exhausted ledger rollback retries from %v: %w", startPoint, err))
+				reportErr(
+					fmt.Errorf(
+						"exhausted ledger rollback retries from %v: %w",
+						startPoint,
+						err,
+					),
+				)
 				return
 			}
 			ls.config.Logger.Warn(
@@ -4956,7 +4974,10 @@ func (ls *LedgerState) ledgerReadChain(
 				hex.EncodeToString(startPoint.Hash),
 			)
 			if reconcileErr := ls.reconcilePrimaryChainTipWithLedgerTip(); reconcileErr != nil {
-				if errors.Is(reconcileErr, chain.ErrRollbackExceedsSecurityParam) {
+				if errors.Is(
+					reconcileErr,
+					chain.ErrRollbackExceedsSecurityParam,
+				) {
 					// The common ancestor sits more than K blocks
 					// behind the primary chain tip: this reader cannot
 					// safely reconcile locally, the same over-K
@@ -5081,7 +5102,12 @@ func (ls *LedgerState) ledgerReadChain(
 					"start_slot", startPoint.Slot,
 					"start_hash", hex.EncodeToString(startPoint.Hash),
 				)
-				reportErr(fmt.Errorf("recover missing chain iterator start point: %w", reconcileErr))
+				reportErr(
+					fmt.Errorf(
+						"recover missing chain iterator start point: %w",
+						reconcileErr,
+					),
+				)
 				return
 			}
 			reconcileRetries++
@@ -5097,7 +5123,12 @@ func (ls *LedgerState) ledgerReadChain(
 					"start_hash",
 					hex.EncodeToString(startPoint.Hash),
 				)
-				reportErr(fmt.Errorf("ledger rollback did not change missing chain iterator start point: %v", startPoint))
+				reportErr(
+					fmt.Errorf(
+						"ledger rollback did not change missing chain iterator start point: %v",
+						startPoint,
+					),
+				)
 				return
 			}
 			continue
@@ -9836,11 +9867,16 @@ func (ls *LedgerState) warnIntersectAnchorFallback(
 	}
 	ls.config.Logger.Warn(
 		"ledger tip block missing, anchoring intersect points on primary chain tip",
-		"component", "ledger",
-		"ledger_tip_slot", currentTip.Point.Slot,
-		"ledger_tip_hash", hex.EncodeToString(currentTip.Point.Hash),
-		"chain_tip_slot", fallbackBlock.Slot,
-		"chain_tip_hash", hex.EncodeToString(fallbackBlock.Hash),
+		"component",
+		"ledger",
+		"ledger_tip_slot",
+		currentTip.Point.Slot,
+		"ledger_tip_hash",
+		hex.EncodeToString(currentTip.Point.Hash),
+		"chain_tip_slot",
+		fallbackBlock.Slot,
+		"chain_tip_hash",
+		hex.EncodeToString(fallbackBlock.Hash),
 	)
 }
 
@@ -11519,7 +11555,9 @@ func (ls *LedgerState) EvaluateTx(
 			isCurrentEraPParams = false
 		}
 		synthetic := syntheticV2CostModelForValidation(
-			pp, isCurrentEraPParams, consensusState.syntheticV2CostModelInEffect,
+			pp,
+			isCurrentEraPParams,
+			consensusState.syntheticV2CostModelInEffect,
 		)
 		txn := ls.db.Transaction(false)
 		var lv *LedgerView

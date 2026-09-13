@@ -58,17 +58,30 @@ func TestNewInvalidConfigPreservesMetricsRegistry(t *testing.T) {
 				require.ErrorContains(t, err, tc.wantError)
 				after, err := registry.Gather()
 				require.NoError(t, err)
-				require.Len(t, after, len(before), "failed construction changed caller metrics")
+				require.Len(
+					t,
+					after,
+					len(before),
+					"failed construction changed caller metrics",
+				)
 				assert.Equal(t, before[0], after[0], "caller collector changed")
 			}
 			var node *Node
-			require.NotPanics(t, func() { node, err = New(NewConfig(baseOptions...)) })
+			require.NotPanics(
+				t,
+				func() { node, err = New(NewConfig(baseOptions...)) },
+			)
 			require.NoError(t, err)
 			require.NotNil(t, node)
 			t.Cleanup(func() { require.NoError(t, node.Stop()) })
 			after, err := registry.Gather()
 			require.NoError(t, err)
-			require.Greater(t, len(after), len(before), "valid retry must register node metrics")
+			require.Greater(
+				t,
+				len(after),
+				len(before),
+				"valid retry must register node metrics",
+			)
 		})
 	}
 }

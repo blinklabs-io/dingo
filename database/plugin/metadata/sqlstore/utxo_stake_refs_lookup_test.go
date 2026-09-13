@@ -129,7 +129,11 @@ func TestQueryUtxoStakeRefsUsesTxIDIndex(t *testing.T) {
 			}
 
 			legacyQuery, legacyArgs := legacyUtxoStakeRefsQuery(ids, true)
-			legacyPlan := queryPlan(t, store.writeDB, legacyQuery, legacyArgs...)
+			legacyPlan := queryPlan(
+				t,
+				store.writeDB,
+				legacyQuery,
+				legacyArgs...)
 			t.Logf("legacy OR-predicate plan (n=%d): %s", nTerms, legacyPlan)
 
 			txIDs, _ := distinctUtxoTxIDs(ids)

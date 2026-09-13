@@ -641,7 +641,10 @@ func Sync(
 						sel.Beacon.ImmutableFileNumber != resumePin.ImmutableFileNumber ||
 						(resumePin.CertificateHash != "" &&
 							sel.CertificateHash != resumePin.CertificateHash) {
-						return fmt.Errorf("resuming pinned Mithril artifact %s: selected artifact changed", pinnedDigest)
+						return fmt.Errorf(
+							"resuming pinned Mithril artifact %s: selected artifact changed",
+							pinnedDigest,
+						)
 					}
 				}
 				return setPinnedArtifact(db, pinnedArtifact{

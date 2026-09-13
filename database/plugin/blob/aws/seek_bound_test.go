@@ -67,7 +67,9 @@ func (f *fakeS3List) handler(w http.ResponseWriter, r *http.Request) {
 
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>`)
-	b.WriteString(`<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">`)
+	b.WriteString(
+		`<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">`,
+	)
 	fmt.Fprintf(&b, "<IsTruncated>%t</IsTruncated>", truncated)
 	for _, k := range out {
 		fmt.Fprintf(&b, "<Contents><Key>%s</Key><Size>1</Size></Contents>", k)

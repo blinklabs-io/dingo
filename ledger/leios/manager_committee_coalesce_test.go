@@ -267,11 +267,15 @@ func TestVoteManagerCommitteeCoalescesConcurrentSameEpochMisses(t *testing.T) {
 		)
 	}
 	require.Equal(
-		t, 1, params.callCount(),
+		t,
+		1,
+		params.callCount(),
 		"committee parameters must be resolved once per epoch, not once per caller",
 	)
 	require.Equal(
-		t, 1, fixture.stake.callCount(),
+		t,
+		1,
+		fixture.stake.callCount(),
 		"the stake distribution must be read once per epoch, not once per caller",
 	)
 }
@@ -654,7 +658,11 @@ func TestVoteManagerCommitteeClaimNotInheritedAcrossRestart(t *testing.T) {
 	// the new lifecycle's memo. Clearing the claim stops a new caller
 	// joining it; only the generation bump stops it installing.
 	memo := committeeMemoEntry(fixture.mgr, 5)
-	require.NotNil(t, memo, "the new lifecycle's own computation must be memoized")
+	require.NotNil(
+		t,
+		memo,
+		"the new lifecycle's own computation must be memoized",
+	)
 	require.Same(
 		t,
 		nextResult.committee,

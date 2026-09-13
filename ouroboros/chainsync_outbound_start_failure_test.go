@@ -285,7 +285,9 @@ func TestCloseOutboundConnAfterChainsyncFailureSparesReplacement(t *testing.T) {
 // TestCloseOutboundConnAfterChainsyncFailureHandlesMissingConn verifies the
 // helper is a no-op when there was no connection to start with, and when the
 // connection has already gone away entirely.
-func TestCloseOutboundConnAfterChainsyncFailureHandlesMissingConn(t *testing.T) {
+func TestCloseOutboundConnAfterChainsyncFailureHandlesMissingConn(
+	t *testing.T,
+) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	bus := event.NewEventBus(nil, logger)
 	defer bus.Close()

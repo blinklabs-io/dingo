@@ -1393,7 +1393,10 @@ func (s *Store) GetPoolEarliestVrfKeyHashAtSlot(
 	}
 	slotValue, err := checkedInt64(slot)
 	if err != nil {
-		return nil, false, fmt.Errorf("GetPoolEarliestVrfKeyHashAtSlot: %w", err)
+		return nil, false, fmt.Errorf(
+			"GetPoolEarliestVrfKeyHashAtSlot: %w",
+			err,
+		)
 	}
 	var vrfKeyHash []byte
 	err = db.QueryRowContext(ctx, `
@@ -1415,7 +1418,10 @@ LIMIT 1`,
 		return nil, false, nil
 	}
 	if err != nil {
-		return nil, false, fmt.Errorf("GetPoolEarliestVrfKeyHashAtSlot: %w", err)
+		return nil, false, fmt.Errorf(
+			"GetPoolEarliestVrfKeyHashAtSlot: %w",
+			err,
+		)
 	}
 	return vrfKeyHash, true, nil
 }

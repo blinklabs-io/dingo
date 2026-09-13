@@ -1012,8 +1012,10 @@ func TestChainRollbackToSlotZeroBlockDoesNotCollapseToOrigin(t *testing.T) {
 		!bytes.Equal(tip.Point.Hash, rollbackPoint.Hash) {
 		t.Fatalf(
 			"rollback to slot-zero block collapsed to origin: got tip %d.%x, wanted %d.%x",
-			tip.Point.Slot, tip.Point.Hash,
-			rollbackPoint.Slot, rollbackPoint.Hash,
+			tip.Point.Slot,
+			tip.Point.Hash,
+			rollbackPoint.Slot,
+			rollbackPoint.Hash,
 		)
 	}
 	// The slot-zero block itself must survive the rollback: only the
@@ -1182,7 +1184,10 @@ func TestChainRollbackInvalidHeaderTargetPreservesQueue(t *testing.T) {
 		!bytes.Equal(afterEnd.Hash, beforeEnd.Hash) {
 		t.Fatalf(
 			"queued headers were mutated by a failed rollback: before=(%#v,%#v) after=(%#v,%#v)",
-			beforeStart, beforeEnd, afterStart, afterEnd,
+			beforeStart,
+			beforeEnd,
+			afterStart,
+			afterEnd,
 		)
 	}
 }
@@ -2097,7 +2102,8 @@ func TestChainRollbackPreservesQueuedHeadersOnOverKRejection(t *testing.T) {
 	if c.HeaderCount() != len(queuedHeaders) {
 		t.Fatalf(
 			"queued headers must survive a rejected rollback: got %d, wanted %d",
-			c.HeaderCount(), len(queuedHeaders),
+			c.HeaderCount(),
+			len(queuedHeaders),
 		)
 	}
 }
@@ -2534,7 +2540,7 @@ func TestRewindPrimaryChainToPointConcurrentRewinds(t *testing.T) {
 			)
 		}
 	}
-	for idx := uint64(len(testBlocks)-2); idx <= uint64(len(testBlocks)); idx++ {
+	for idx := uint64(len(testBlocks) - 2); idx <= uint64(len(testBlocks)); idx++ {
 		if _, err := db.BlockByIndex(idx, nil); !errors.Is(
 			err, models.ErrBlockNotFound,
 		) {
@@ -2596,7 +2602,9 @@ func TestChainRollbackUnboundedSkipsSecurityParamCheck(t *testing.T) {
 		t.Fatalf("unexpected error creating chain manager: %s", err)
 	}
 	if cm.SecurityParamConfigured() {
-		t.Fatal("expected security parameter to be unconfigured before SetLedger")
+		t.Fatal(
+			"expected security parameter to be unconfigured before SetLedger",
+		)
 	}
 	c := cm.PrimaryChain()
 	for _, testBlock := range testBlocks {

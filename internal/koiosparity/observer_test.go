@@ -1545,8 +1545,12 @@ func TestObserverFailureReportsSignificantMismatchCount(t *testing.T) {
 	require.NotEmpty(t, got)
 	result := got[len(got)-1]
 	require.Equal(t, StatusFail, result.Status)
-	require.Greater(t, len(result.Mismatches), CountSignificant(result.Mismatches),
-		"scenario must hold at least one informational mismatch")
+	require.Greater(
+		t,
+		len(result.Mismatches),
+		CountSignificant(result.Mismatches),
+		"scenario must hold at least one informational mismatch",
+	)
 
 	require.ErrorContains(t, err, fmt.Sprintf(
 		"parity FAIL at epoch %d (%d significant of %d mismatch(es))",
@@ -1570,7 +1574,9 @@ func TestObserverFailureReportsSignificantMismatchCount(t *testing.T) {
 // latest committed epoch at 12, so the "safely closed" floor (latest-1 = 11)
 // overlaps the earliest-available floor (boundary+1 = 11) at exactly one
 // epoch.
-func TestObserverSeedBacklogExcludesEpochsBeforeEarliestAvailableEpoch(t *testing.T) {
+func TestObserverSeedBacklogExcludesEpochsBeforeEarliestAvailableEpoch(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	db := newTestDatabaseSourceDB(t)

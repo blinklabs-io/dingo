@@ -411,7 +411,10 @@ func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 						ProtocolMajor: 5,
 						MaxTxExUnits:  maxTxExUnits,
 						CostModels: map[uint][]int64{
-							0: defaultMachineCostModel(t, lang.LanguageVersionV1),
+							0: defaultMachineCostModel(
+								t,
+								lang.LanguageVersionV1,
+							),
 						},
 					},
 				)
@@ -431,7 +434,10 @@ func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 						ProtocolMajor: 7,
 						MaxTxExUnits:  maxTxExUnits,
 						CostModels: map[uint][]int64{
-							1: defaultMachineCostModel(t, lang.LanguageVersionV2),
+							1: defaultMachineCostModel(
+								t,
+								lang.LanguageVersionV2,
+							),
 						},
 					},
 				)

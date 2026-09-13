@@ -203,7 +203,9 @@ func registerSignedURLBlobProvider(
 				badger.WithDataDir(deps.DataDir),
 				badger.WithLogger(deps.Logger),
 				badger.WithDeferOpen(),
-				badger.WithValueLogFileSize(testutil.TestBadgerValueLogFileSize),
+				badger.WithValueLogFileSize(
+					testutil.TestBadgerValueLogFileSize,
+				),
 				badger.WithMemTableSize(testutil.TestBadgerMemTableSize),
 			)
 			if err != nil {

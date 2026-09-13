@@ -24,21 +24,30 @@ import (
 func BenchmarkValueLogGC(b *testing.B) {
 	for _, ratio := range []float64{0.25, 0.5, 0.75} {
 		b.Run(strconv.FormatFloat(ratio, 'f', 2, 64), func(b *testing.B) {
-			store, err := New(WithDataDir(b.TempDir()), WithGc(false), WithValueThreshold(1), WithValueLogFileSize(1<<20), WithMemTableSize(1<<20))
+			store, err := New(
+				WithDataDir(b.TempDir()),
+				WithGc(false),
+				WithValueThreshold(1),
+				WithValueLogFileSize(1<<20),
+				WithMemTableSize(1<<20),
+			)
 			require.NoError(b, err)
 			b.Cleanup(func() { require.NoError(b, store.Close()) })
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				b.StopTimer()
-				for pass := 0; pass < 2; pass++ {
-					for batch := 0; batch < 5; batch++ {
+				for pass := range 2 {
+					for batch := range 5 {
 						txn := store.DB().NewTransaction(true)
-						for j := 0; j < 20; j++ {
+						for j := range 20 {
 							key := batch*20 + j
 							value := make([]byte, 32<<10)
 							_, err = rand.Read(value)
 							require.NoError(b, err)
-							entry := badgerdb.NewEntry([]byte("benchmark-key-"+strconv.Itoa(key)), value)
+							entry := badgerdb.NewEntry(
+								[]byte("benchmark-key-"+strconv.Itoa(key)),
+								value,
+							)
 							if pass == 0 {
 								entry.ExpiresAt = 1
 							}
@@ -47,22 +56,37 @@ func BenchmarkValueLogGC(b *testing.B) {
 						require.NoError(b, txn.Commit())
 					}
 				}
-				for batch := 0; batch < 100; batch++ {
+				for batch := range 100 {
 					txn := store.DB().NewTransaction(true)
-					for j := 0; j < 1000; j++ {
+					for j := range 1000 {
 						key := batch*1000 + j
-						require.NoError(b, txn.SetEntry(badgerdb.NewEntry([]byte("benchmark-filler-"+strconv.Itoa(key)), []byte{1})))
+						require.NoError(
+							b,
+							txn.SetEntry(
+								badgerdb.NewEntry(
+									[]byte(
+										"benchmark-filler-"+strconv.Itoa(key),
+									),
+									[]byte{1},
+								),
+							),
+						)
 					}
 					require.NoError(b, txn.Commit())
 				}
-				for batch := 0; batch < 3; batch++ {
+				for batch := range 3 {
 					txn := store.DB().NewTransaction(true)
-					for j := 0; j < 20; j++ {
+					for j := range 20 {
 						key := batch*20 + j
 						if key >= 45 {
 							continue
 						}
-						require.NoError(b, txn.Delete([]byte("benchmark-key-"+strconv.Itoa(key))))
+						require.NoError(
+							b,
+							txn.Delete(
+								[]byte("benchmark-key-"+strconv.Itoa(key)),
+							),
+						)
 					}
 					require.NoError(b, txn.Commit())
 				}
@@ -71,7 +95,7 @@ func BenchmarkValueLogGC(b *testing.B) {
 				b.StartTimer()
 				successes := 0
 				reclaimed := int64(0)
-				for attempts := 0; attempts < 32; attempts++ {
+				for range 32 {
 					passBefore, sizeErr := store.DiskSize()
 					require.NoError(b, sizeErr)
 					err = store.DB().RunValueLogGC(ratio)
@@ -82,12 +106,18 @@ func BenchmarkValueLogGC(b *testing.B) {
 					successes++
 					passAfter, sizeErr := store.DiskSize()
 					require.NoError(b, sizeErr)
-					if passBefore > passAfter && passBefore-passAfter > reclaimed {
+					if passBefore > passAfter &&
+						passBefore-passAfter > reclaimed {
 						reclaimed = passBefore - passAfter
 					}
 				}
 				b.StopTimer()
-				require.Greater(b, successes, 0, "GC did not perform a successful rewrite")
+				require.Greater(
+					b,
+					successes,
+					0,
+					"GC did not perform a successful rewrite",
+				)
 				if reclaimed > 0 {
 					b.ReportMetric(float64(reclaimed), "bytes_reclaimed")
 				}

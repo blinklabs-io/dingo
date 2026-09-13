@@ -38,15 +38,18 @@ func TestRequiredCostModelFailsClosedOnMissingEntry(t *testing.T) {
 		require.Error(t, err)
 		require.ErrorContains(t, err, "missing PlutusV3 cost model")
 	})
-	t.Run("present but empty model returns a configuration error", func(t *testing.T) {
-		_, err := requiredCostModel(
-			map[uint][]int64{1: {}},
-			1,
-			"PlutusV2",
-		)
-		require.Error(t, err)
-		require.ErrorContains(t, err, "missing PlutusV2 cost model")
-	})
+	t.Run(
+		"present but empty model returns a configuration error",
+		func(t *testing.T) {
+			_, err := requiredCostModel(
+				map[uint][]int64{1: {}},
+				1,
+				"PlutusV2",
+			)
+			require.Error(t, err)
+			require.ErrorContains(t, err, "missing PlutusV2 cost model")
+		},
+	)
 	t.Run(
 		"present, short-but-real-for-its-era model is accepted",
 		func(t *testing.T) {

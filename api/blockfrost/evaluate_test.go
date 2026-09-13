@@ -426,7 +426,9 @@ func TestHandleTransactionSubmitStillReportsMalformedCbor(t *testing.T) {
 // TestHandleTransactionEvaluateFailureIsNotReportedAsMalformed is the same
 // split on the evaluation endpoints: a transaction that decoded but could not
 // be evaluated is not malformed CBOR.
-func TestHandleTransactionEvaluateFailureIsNotReportedAsMalformed(t *testing.T) {
+func TestHandleTransactionEvaluateFailureIsNotReportedAsMalformed(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	node := evaluateTestNode()

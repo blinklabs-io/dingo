@@ -408,7 +408,9 @@ func TestFetchLeiosEbTxsBatchedRejectsResponseBitmapPastBoundary(t *testing.T) {
 // bitmap that is still entirely valid for this block. This must be accepted
 // and the fetch must complete normally, proving the new bound check does not
 // reject legitimate, exactly-sized replies.
-func TestFetchLeiosEbTxsBatchedAcceptsExactBoundaryResponseBitmap(t *testing.T) {
+func TestFetchLeiosEbTxsBatchedAcceptsExactBoundaryResponseBitmap(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	o := &Ouroboros{}

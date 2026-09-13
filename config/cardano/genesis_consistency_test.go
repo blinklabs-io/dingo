@@ -110,7 +110,9 @@ func TestValidateGenesisConsistencyMismatch(t *testing.T) {
 // so the failure only surfaced once header verification ran -- on every
 // single header, since issue #3528 made header crypto verification
 // unconditional -- with nothing naming the genesis field as the cause.
-func TestValidateGenesisConsistencyRejectsMissingMaxKESEvolutions(t *testing.T) {
+func TestValidateGenesisConsistencyRejectsMissingMaxKESEvolutions(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	t.Run("zero maxKESEvolutions is rejected", func(t *testing.T) {
@@ -190,7 +192,9 @@ func validShelleyGenesisForSecurityParamTests() *shelley.ShelleyGenesis {
 // rather than failing the way internal/node/load.go's
 // loadSecurityParamForConfig and ledger/eras/shape.go's
 // StabilityWindowForEra already do for the same inputs.
-func TestValidateGenesisConsistencyRejectsInvalidSecurityParameters(t *testing.T) {
+func TestValidateGenesisConsistencyRejectsInvalidSecurityParameters(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	t.Run("zero shelley security param is rejected", func(t *testing.T) {
@@ -251,17 +255,20 @@ func TestValidateGenesisConsistencyRejectsInvalidSecurityParameters(t *testing.T
 		require.NoError(t, c.validateGenesisConsistency())
 	})
 
-	t.Run("zero byron k is rejected even without shelley genesis", func(t *testing.T) {
-		t.Parallel()
-		c := &CardanoNodeConfig{
-			byronGenesis: &byron.ByronGenesis{
-				ProtocolConsts: byron.ByronGenesisProtocolConsts{K: 0},
-			},
-		}
-		err := c.validateGenesisConsistency()
-		require.Error(t, err)
-		require.ErrorContains(t, err, "byron genesis: security parameter")
-	})
+	t.Run(
+		"zero byron k is rejected even without shelley genesis",
+		func(t *testing.T) {
+			t.Parallel()
+			c := &CardanoNodeConfig{
+				byronGenesis: &byron.ByronGenesis{
+					ProtocolConsts: byron.ByronGenesisProtocolConsts{K: 0},
+				},
+			}
+			err := c.validateGenesisConsistency()
+			require.Error(t, err)
+			require.ErrorContains(t, err, "byron genesis: security parameter")
+		},
+	)
 
 	t.Run("negative byron k is rejected", func(t *testing.T) {
 		t.Parallel()
@@ -281,21 +288,24 @@ func TestValidateGenesisConsistencyRejectsInvalidSecurityParameters(t *testing.T
 		require.ErrorContains(t, err, "byron genesis: security parameter")
 	})
 
-	t.Run("valid byron and shelley security parameters are accepted", func(t *testing.T) {
-		t.Parallel()
-		shelleyGenesis := validShelleyGenesisForSecurityParamTests()
-		shelleyGenesis.SystemStart = time.Unix(1666656000, 0).UTC()
-		c := &CardanoNodeConfig{
-			byronGenesis: &byron.ByronGenesis{
-				StartTime: 1666656000,
-				ProtocolConsts: byron.ByronGenesisProtocolConsts{
-					K: validByronK,
+	t.Run(
+		"valid byron and shelley security parameters are accepted",
+		func(t *testing.T) {
+			t.Parallel()
+			shelleyGenesis := validShelleyGenesisForSecurityParamTests()
+			shelleyGenesis.SystemStart = time.Unix(1666656000, 0).UTC()
+			c := &CardanoNodeConfig{
+				byronGenesis: &byron.ByronGenesis{
+					StartTime: 1666656000,
+					ProtocolConsts: byron.ByronGenesisProtocolConsts{
+						K: validByronK,
+					},
 				},
-			},
-			shelleyGenesis: shelleyGenesis,
-		}
-		require.NoError(t, c.validateGenesisConsistency())
-	})
+				shelleyGenesis: shelleyGenesis,
+			}
+			require.NoError(t, c.validateGenesisConsistency())
+		},
+	)
 }
 
 // TestNewCardanoNodeConfigFromFileRejectsInvalidSecurityParam proves the

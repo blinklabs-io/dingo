@@ -2522,8 +2522,11 @@ func TestTryRecoverFromTxValidationErrorIgnoresFailureWithResolvableInputs(
 
 	recovered, err := ls.tryRecoverFromTxValidationError(validationErr)
 	require.NoError(t, err)
-	assert.False(t, recovered,
-		"a failure whose inputs all resolve is a rejected block, not a local state gap")
+	assert.False(
+		t,
+		recovered,
+		"a failure whose inputs all resolve is a rejected block, not a local state gap",
+	)
 	assert.Equal(t, currentTip, ls.currentTip,
 		"nothing was rewound")
 	assert.Equal(t, currentTip, ls.chain.Tip())
@@ -2577,7 +2580,10 @@ func TestResolveReplayRecoveryProducerReportsPresentInput(t *testing.T) {
 	// A reference with no UTxO and no producer anywhere is the genuine gap.
 	resolved, present, err = ls.resolveReplayRecoveryProducer(
 		replayRecoveryPendingInput{
-			Input:   &replayRecoveryInput{txId: testHashBytes("absent"), index: 0},
+			Input: &replayRecoveryInput{
+				txId:  testHashBytes("absent"),
+				index: 0,
+			},
 			MaxSlot: 100,
 		},
 		index,

@@ -37,7 +37,10 @@ func TestNtCAdmissionSlotReleasedBeforeCloseCallback(t *testing.T) {
 	conn := newUnstartedConnection(t)
 	release := manager.reserveNtCSlot(nil)
 	require.NotNil(t, release)
-	require.True(t, manager.addConnectionImpl(conn, true, true, "local", "", release))
+	require.True(
+		t,
+		manager.addConnectionImpl(conn, true, true, "local", "", release),
+	)
 
 	conn.ErrorChan() <- closeErr
 	select {
@@ -48,7 +51,11 @@ func TestNtCAdmissionSlotReleasedBeforeCloseCallback(t *testing.T) {
 	manager.ntcAdmissionMutex.Lock()
 	count := manager.ntcCount
 	manager.ntcAdmissionMutex.Unlock()
-	require.Zero(t, count, "NtC admission slot remained held by a blocking callback")
+	require.Zero(
+		t,
+		count,
+		"NtC admission slot remained held by a blocking callback",
+	)
 	releaseCallbackFunc()
 	waitForConnectionManagerWatchers(t, manager)
 }

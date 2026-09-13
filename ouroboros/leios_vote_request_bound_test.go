@@ -29,14 +29,23 @@ func TestLeiosFetchVoteRequestBound(t *testing.T) {
 	for _, count := range []int{0, 1, 1000, 1001} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
 			o := newOuroboros(OuroborosConfig{EnableLeios: true})
-			handler := &fakeLeiosVoteHandler{rawVotes: []cbor.RawMessage{mustCbor(t, "vote")}}
+			handler := &fakeLeiosVoteHandler{
+				rawVotes: []cbor.RawMessage{mustCbor(t, "vote")},
+			}
 			o.leiosVotes = handler
 			ids := make([]oleiosfetch.MsgVotesRequestVoteId, count)
-			msg, err := o.leiosfetchServerVotesRequest(oleiosfetch.CallbackContext{}, ids)
+			msg, err := o.leiosfetchServerVotesRequest(
+				oleiosfetch.CallbackContext{},
+				ids,
+			)
 			if count > 1000 {
 				require.ErrorContains(t, err, "vote ID request exceeds limit")
 				require.Nil(t, msg)
-				require.Empty(t, handler.requestedIds, "oversized request reached vote manager")
+				require.Empty(
+					t,
+					handler.requestedIds,
+					"oversized request reached vote manager",
+				)
 				return
 			}
 			require.NoError(t, err)
@@ -48,28 +57,47 @@ func TestLeiosFetchVoteRequestBound(t *testing.T) {
 
 func TestLeiosFetchVoteRequestBoundOnWire(t *testing.T) {
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	handler := &fakeLeiosVoteHandler{rawVotes: []cbor.RawMessage{mustCbor(t, "vote")}}
+	handler := &fakeLeiosVoteHandler{
+		rawVotes: []cbor.RawMessage{mustCbor(t, "vote")},
+	}
 	o.leiosVotes = handler
 	peer := newLeiosFetchServerPeer(t, o)
 	peer.send(
 		t,
 		oleiosfetch.ProtocolId,
-		oleiosfetch.NewMsgVotesRequest(make([]oleiosfetch.MsgVotesRequestVoteId, 1000)),
+		oleiosfetch.NewMsgVotesRequest(
+			make([]oleiosfetch.MsgVotesRequestVoteId, 1000),
+		),
 	)
 	segment := peer.readResponse(t, 5*time.Second)
-	msg, err := oleiosfetch.NewMsgFromCbor(oleiosfetch.MessageTypeVotes, segment.Payload)
+	msg, err := oleiosfetch.NewMsgFromCbor(
+		oleiosfetch.MessageTypeVotes,
+		segment.Payload,
+	)
 	require.NoError(t, err)
 	require.Len(t, msg.(*oleiosfetch.MsgVotes).VotesRaw, 1)
 	peer.send(
 		t,
 		oleiosfetch.ProtocolId,
-		oleiosfetch.NewMsgVotesRequest(make([]oleiosfetch.MsgVotesRequestVoteId, 1001)),
+		oleiosfetch.NewMsgVotesRequest(
+			make([]oleiosfetch.MsgVotesRequestVoteId, 1001),
+		),
 	)
-	err = testutil.RequireReceive(t, peer.errChan, 5*time.Second, "oversized vote request rejected")
+	err = testutil.RequireReceive(
+		t,
+		peer.errChan,
+		5*time.Second,
+		"oversized vote request rejected",
+	)
 	require.ErrorContains(t, err, "vote ID request exceeds limit")
 	handler.mu.Lock()
 	defer handler.mu.Unlock()
-	require.Len(t, handler.requestedIds, 1000, "only the accepted request reaches the manager")
+	require.Len(
+		t,
+		handler.requestedIds,
+		1000,
+		"only the accepted request reaches the manager",
+	)
 }
 
 func TestLeiosFetchLargeVoteRequestWithoutManager(t *testing.T) {
@@ -78,13 +106,23 @@ func TestLeiosFetchLargeVoteRequestWithoutManager(t *testing.T) {
 	peer.send(
 		t,
 		oleiosfetch.ProtocolId,
-		oleiosfetch.NewMsgVotesRequest(make([]oleiosfetch.MsgVotesRequestVoteId, 1001)),
+		oleiosfetch.NewMsgVotesRequest(
+			make([]oleiosfetch.MsgVotesRequestVoteId, 1001),
+		),
 	)
 	segment := peer.readResponse(t, 5*time.Second)
-	require.Equal(t, []byte{0x82, oleiosfetch.MessageTypeVotes, 0x80}, segment.Payload)
+	require.Equal(
+		t,
+		[]byte{0x82, oleiosfetch.MessageTypeVotes, 0x80},
+		segment.Payload,
+	)
 	// A second request demonstrates that the unavailable-manager response
 	// returned protocol agency instead of closing or parking the bearer.
 	peer.send(t, oleiosfetch.ProtocolId, oleiosfetch.NewMsgVotesRequest(nil))
 	segment = peer.readResponse(t, 5*time.Second)
-	require.Equal(t, []byte{0x82, oleiosfetch.MessageTypeVotes, 0x80}, segment.Payload)
+	require.Equal(
+		t,
+		[]byte{0x82, oleiosfetch.MessageTypeVotes, 0x80},
+		segment.Payload,
+	)
 }

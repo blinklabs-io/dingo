@@ -358,13 +358,20 @@ func (ls *LedgerState) auditContinuationBlock(
 				)
 				ls.config.Logger.Debug(
 					"cross-fork continuation audit inconclusive: certified endorser block not fetched yet",
-					"component", "ledger",
-					"block_slot", e.Point.Slot,
-					"block_hash", hex.EncodeToString(e.Point.Hash),
-					"tx_hash", tx.Hash().String(),
-					"input", input.String(),
-					"producer_tx_hash", input.Id().String(),
-					"blocks_since_fork", window.blocksSeen,
+					"component",
+					"ledger",
+					"block_slot",
+					e.Point.Slot,
+					"block_hash",
+					hex.EncodeToString(e.Point.Hash),
+					"tx_hash",
+					tx.Hash().String(),
+					"input",
+					input.String(),
+					"producer_tx_hash",
+					input.Id().String(),
+					"blocks_since_fork",
+					window.blocksSeen,
 				)
 				continue
 			}
@@ -460,10 +467,14 @@ func (ls *LedgerState) recordContinuationAuditProducers(
 		if len(window.producedTxs) >= continuationAuditMaxProducedTxs {
 			ls.config.Logger.Warn(
 				"disarming cross-fork continuation audit: producer set at capacity",
-				"component", "ledger",
-				"blocks_audited", window.blocksSeen,
-				"produced_txs", len(window.producedTxs),
-				"max_produced_txs", continuationAuditMaxProducedTxs,
+				"component",
+				"ledger",
+				"blocks_audited",
+				window.blocksSeen,
+				"produced_txs",
+				len(window.producedTxs),
+				"max_produced_txs",
+				continuationAuditMaxProducedTxs,
 			)
 			ls.countContinuationAuditOutcome(
 				continuationAuditResultDisarmedCap,
@@ -595,10 +606,14 @@ func (ls *LedgerState) drainContinuationAuditEndorserRefs(
 				)
 				ls.config.Logger.Debug(
 					"cross-fork continuation audit deferred endorser blocks past its per-block budget",
-					"component", "ledger",
-					"slot", auditedSlot,
-					"deferred", len(pending)-i,
-					"budget", continuationAuditMaxEndorserBlocksPerBlock,
+					"component",
+					"ledger",
+					"slot",
+					auditedSlot,
+					"deferred",
+					len(pending)-i,
+					"budget",
+					continuationAuditMaxEndorserBlocksPerBlock,
 				)
 				// The budget belongs to the audited body, not to this
 				// drain: one body triggers one drain per unresolved
@@ -636,8 +651,10 @@ func (ls *LedgerState) drainContinuationAuditEndorserRefs(
 				// and retry it on the next body.
 				ls.config.Logger.Debug(
 					"cross-fork continuation audit will retry a certifying block's parent lookup",
-					"component", "ledger",
-					"slot", ref.blockSlot,
+					"component",
+					"ledger",
+					"slot",
+					ref.blockSlot,
 				)
 				window.requeueEndorserRef(ref)
 				continue
@@ -653,9 +670,12 @@ func (ls *LedgerState) drainContinuationAuditEndorserRefs(
 					window.endorserRefErrorLogged = true
 					ls.config.Logger.Warn(
 						"cross-fork continuation audit gave up resolving a certifying block's parent",
-						"component", "ledger",
-						"slot", ref.blockSlot,
-						"error", err,
+						"component",
+						"ledger",
+						"slot",
+						ref.blockSlot,
+						"error",
+						err,
 					)
 				}
 				continue
@@ -680,10 +700,14 @@ func (ls *LedgerState) drainContinuationAuditEndorserRefs(
 		if !ok {
 			ls.config.Logger.Debug(
 				"cross-fork continuation audit: certified endorser block not fetched yet",
-				"component", "ledger",
-				"slot", ref.blockSlot,
-				"eb_slot", ref.ebSlot,
-				"eb_hash", ref.ebHash.String(),
+				"component",
+				"ledger",
+				"slot",
+				ref.blockSlot,
+				"eb_slot",
+				ref.ebSlot,
+				"eb_hash",
+				ref.ebHash.String(),
 			)
 			// Keep it queued in resolved form: the parent read is done,
 			// and the block may be fetched before the window ends.
@@ -698,11 +722,16 @@ func (ls *LedgerState) drainContinuationAuditEndorserRefs(
 			)
 			ls.config.Logger.Debug(
 				"cross-fork continuation audit could not read endorser block transaction ids",
-				"component", "ledger",
-				"slot", ref.blockSlot,
-				"eb_slot", ref.ebSlot,
-				"eb_hash", ref.ebHash.String(),
-				"error", err,
+				"component",
+				"ledger",
+				"slot",
+				ref.blockSlot,
+				"eb_slot",
+				ref.ebSlot,
+				"eb_hash",
+				ref.ebHash.String(),
+				"error",
+				err,
 			)
 			continue
 		}

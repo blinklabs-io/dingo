@@ -162,7 +162,9 @@ func recordKoiosSource(
 		if _, err := koios.GetTipEpoch(ctx); err != nil {
 			return fmt.Errorf(
 				"koios source changed from %q to %q but the new host did not answer, so the cached reference data was left intact: %w",
-				previous, resolvedBaseURL, err,
+				previous,
+				resolvedBaseURL,
+				err,
 			)
 		}
 	}
@@ -175,15 +177,20 @@ func recordKoiosSource(
 	if change.Changed {
 		logger.Warn(
 			"koiosparity: koios source changed, discarding cached reference data",
-			"network", network,
-			"previous_base_url", change.Previous,
+			"network",
+			network,
+			"previous_base_url",
+			change.Previous,
 			// A legacy cache recorded no source, so the previous host is the
 			// public root those rows must have come from rather than one this
 			// cache ever stated. Saying which keeps the log from presenting an
 			// inference as a record.
-			"previous_base_url_inferred", change.PreviousInferred,
-			"base_url", resolvedBaseURL,
-			"rows_discarded", change.RowsDiscarded,
+			"previous_base_url_inferred",
+			change.PreviousInferred,
+			"base_url",
+			resolvedBaseURL,
+			"rows_discarded",
+			change.RowsDiscarded,
 		)
 	}
 	logger.Info("koiosparity: koios source",
@@ -1045,7 +1052,11 @@ outer:
 		FetchedAt:          now,
 	}); err != nil {
 		if invalidateErr := cache.DeleteEpochParams(network, epoch); invalidateErr != nil {
-			return 0, fmt.Errorf("commit epoch: %w; invalidate params: %w", err, invalidateErr)
+			return 0, fmt.Errorf(
+				"commit epoch: %w; invalidate params: %w",
+				err,
+				invalidateErr,
+			)
 		}
 		return 0, fmt.Errorf("commit epoch: %w", err)
 	}
