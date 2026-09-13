@@ -108,9 +108,9 @@ func announcingHeader(
 // half of the crypto gate on the header stream.
 //
 // chainsyncHeaderCryptoPolicy admits a roll-forward header without verifying
-// its VRF/KES on three paths: live validation not yet enabled, a slot covered
-// by an imported Mithril snapshot, and no cached epoch nonce for the slot
-// (verification deferred to blockfetch). All three reach
+// its VRF/KES on two paths: a slot covered by an imported Mithril snapshot and
+// no cached epoch nonce for the slot (verification deferred to blockfetch).
+// Both reach
 // chain.AddBlockHeader, not AddVerifiedBlockHeader. Announcing such a header
 // would let a chainsync peer make this node sign and publish a BLS vote for a
 // ranking block it never authenticated, taking the (slot, voterId) pair the
@@ -124,16 +124,16 @@ func TestChainsyncHeaderAdmissionAnnouncesOnlyWhenCryptoVerified(
 	)
 	point := ocommon.NewPoint(header.slot, header.hash.Bytes())
 
-	// The fixture's ledger has validation not yet enabled, so the policy
-	// returns trustedWithoutVerification and the handler takes the
-	// AddBlockHeader branch -- the real end-to-end unverified admission.
+	// The fixture has no cached epoch nonce, so the policy defers verification
+	// and the handler takes the AddBlockHeader branch -- the real end-to-end
+	// unverified admission.
 	t.Run("unverified admission is queued, not announced", func(t *testing.T) {
 		fixture := newHeaderStreamLedger(t)
 		verifyNow, trusted := fixture.ls.chainsyncHeaderCryptoPolicy(
 			header.slot,
 		)
 		require.False(t, verifyNow, "fixture must exercise the unverified path")
-		require.True(t, trusted)
+		require.False(t, trusted)
 
 		require.NoError(
 			t,
