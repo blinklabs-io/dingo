@@ -1556,6 +1556,11 @@ paths, where the point is to report before the goroutine unwinds.
   `chainsyncState.RemoveClient` only when `isNtC` is true — the NtN half of
   cleanup still runs exactly once, through `Ouroboros.HandleConnClosedEvent`
   on the `connmanager.conn_closed` subscription above
+- Each ChainSync protocol instance owns its FindIntersect work-budget bucket.
+  Dingo's cached connection option builds a fresh ChainSync configuration for
+  every connection, so separate clients cannot share budget state or recreate
+  a removed bucket after close. The budget remains after point-list
+  deduplication and before the database intersection lookup.
 - Prometheus metrics for event delivery tracking and latency, including
   `event_delivery_blocked_total{type,kind}` and
   `event_async_enqueue_blocked_total{type}` for backpressure, and
