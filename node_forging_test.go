@@ -488,3 +488,107 @@ func legacyLeiosParentBlock(
 		Type:   dijkstra.BlockTypeDijkstra,
 	}
 }
+
+// expiredKESGenesisForBP builds a Shelley genesis under which the devnet
+// opcert (KESPeriod 0) is well outside its validity window: many KES periods
+// have elapsed since systemStart and maxKESEvolutions=1 makes anything past
+// period 1 expired. The strict preflight must reject it, which is what makes
+// it useful for showing the deferred path is a deferral and not a bypass.
+func expiredKESGenesisForBP(t *testing.T) *cardano.CardanoNodeConfig {
+	t.Helper()
+	cfg := &cardano.CardanoNodeConfig{}
+	systemStart := time.Now().Add(-365 * 24 * time.Hour)
+	if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+		"systemStart": "` + systemStart.UTC().Format(time.RFC3339Nano) + `",
+		"securityParam": 10,
+		"activeSlotsCoeff": 0.5,
+		"slotsPerKESPeriod": 10,
+		"maxKESEvolutions": 1,
+		"slotLength": 1
+	}`)); err != nil {
+		t.Fatalf("LoadShelleyGenesisFromReader: %v", err)
+	}
+	return cfg
+}
+
+// TestValidateBlockProducerStartupForClock_SupportedStillRejectsExpiredOpCert
+// is the property that keeps the deferral from being a relaxation of the
+// gate. When the confirmed era history does span the wall clock there is
+// nothing to defer, so an expired or future-staged certificate must still
+// fail startup exactly as it did before the deferral existed.
+func TestValidateBlockProducerStartupForClock_SupportedStillRejectsExpiredOpCert(
+	t *testing.T,
+) {
+	vrf, kes, opcert := devnetCredPaths(t)
+	n := newTestNodeForBP(t, true, vrf, kes, opcert, expiredKESGenesisForBP(t))
+	_, err := n.validateBlockProducerStartupForClock(20, true)
+	if err == nil {
+		t.Fatal(
+			"supported wall clock must still reject an expired opcert;" +
+				" the deferral would otherwise be a relaxation of the gate",
+		)
+	}
+	if !strings.Contains(err.Error(), "expired") {
+		t.Errorf("expected 'expired' in error, got: %v", err)
+	}
+}
+
+// TestValidateBlockProducerStartupForClock_DeferredArmsInsteadOfFailing pins
+// the other half, against the identical genesis and credentials that the
+// supported case above rejects. The only difference between the two calls is
+// whether the confirmed era history supports the wall-clock slot, so this
+// pair isolates the behavior change to exactly that condition.
+//
+// The armed protocol lifetime is asserted, not just the absence of an error:
+// the per-slot gate in the forger is what enforces the certificate in the
+// deferred state, and it fails closed on a zero expiry period. Returning
+// unarmed credentials here would leave the node unable to forge at all
+// rather than deferring the judgement.
+func TestValidateBlockProducerStartupForClock_DeferredArmsInsteadOfFailing(
+	t *testing.T,
+) {
+	vrf, kes, opcert := devnetCredPaths(t)
+	n := newTestNodeForBP(t, true, vrf, kes, opcert, expiredKESGenesisForBP(t))
+	creds, err := n.validateBlockProducerStartupForClock(20, false)
+	if err != nil {
+		t.Fatalf(
+			"deferred path must not fail startup on the slot-dependent"+
+				" check it is deferring: %v",
+			err,
+		)
+	}
+	if !creds.IsLoaded() {
+		t.Error("expected credentials to be loaded")
+	}
+	if creds.OpCertExpiryPeriod() == 0 {
+		t.Error(
+			"expected the KES protocol lifetime to be armed;" +
+				" the forger's per-slot gate fails closed on a zero expiry",
+		)
+	}
+}
+
+// TestValidateBlockProducerStartupForClock_DeferredStillValidatesMaterial
+// pins what the deferral does *not* cover. Only the slot-dependent
+// KES-period judgement is deferred; the credential material itself is still
+// loaded and its cold-key signature still checked, so missing or unreadable
+// key files fail startup on this path too.
+func TestValidateBlockProducerStartupForClock_DeferredStillValidatesMaterial(
+	t *testing.T,
+) {
+	tmp := t.TempDir()
+	n := newTestNodeForBP(
+		t, true,
+		filepath.Join(tmp, "missing-vrf.skey"),
+		filepath.Join(tmp, "missing-kes.skey"),
+		filepath.Join(tmp, "missing-opcert.cert"),
+		shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour)),
+	)
+	_, err := n.validateBlockProducerStartupForClock(20, false)
+	if err == nil {
+		t.Fatal("deferred path must still validate credential material")
+	}
+	if !strings.Contains(err.Error(), "load pool credentials") {
+		t.Errorf("expected 'load pool credentials' in error, got: %v", err)
+	}
+}

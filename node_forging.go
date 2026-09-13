@@ -52,19 +52,91 @@ func (n *Node) validateBlockProducerStartup() (*forging.PoolCredentials, error) 
 			"block producer mode requires ledger state for current slot",
 		)
 	}
-	currentSlot, err := n.ledgerState.CurrentSlot()
-	if err != nil {
+	if _, err := n.ledgerState.CurrentSlot(); err != nil {
 		if !errors.Is(err, ledger.ErrBeforeGenesis) {
 			return nil, fmt.Errorf("compute current slot: %w", err)
 		}
-		currentSlot = 0
+		// Clock before genesis: preserve the historical hard fail through the
+		// strict preflight (an opcert can never be "current" before genesis).
+		return n.validateBlockProducerStartupForClock(0, true)
 	}
-	return n.validateBlockProducerStartupAtSlot(currentSlot)
+	// The current wall-clock slot only reliably places an operational
+	// certificate in time when the confirmed era history spans the wall clock.
+	// A node importing from genesis or restarting far behind has confirmed
+	// history that stops at its newest applied era: CurrentSlot then
+	// extrapolates through that era's slot length — a fresh mainnet node
+	// judges the wall clock with Byron's 20s slots even though the real chain
+	// moved to one-second slots at epoch 208 — which cannot judge an opcert for
+	// the actual chain.
+	supportedSlot, supported, err := n.ledgerState.
+		WallClockSlotFromConfirmedHistory()
+	if err != nil {
+		return nil, fmt.Errorf("wall-clock slot from confirmed history: %w", err)
+	}
+	return n.validateBlockProducerStartupForClock(supportedSlot, supported)
 }
 
-func (n *Node) validateBlockProducerStartupAtSlot(
-	currentSlot uint64,
+// validateBlockProducerStartupForClock decides how to judge the operational
+// certificate given a wall-clock slot and whether the confirmed era history
+// actually supports it.
+//
+// When supported, this is the strict historical preflight: a certificate
+// staged for the future or already expired fails startup here. When not
+// supported, the KES-period plausibility check is deferred rather than
+// skipped — credential material is still validated and the protocol lifetime
+// is still armed, so the forger's per-slot gate has the data it needs to
+// reject the certificate before Praos leader selection.
+//
+// Split out from validateBlockProducerStartup so both branches are reachable
+// without a live LedgerState, the same reason
+// validateBlockProducerStartupAtSlot and validateBlockProducerLedgerWithView
+// exist separately.
+func (n *Node) validateBlockProducerStartupForClock(
+	slot uint64,
+	supported bool,
 ) (*forging.PoolCredentials, error) {
+	if supported {
+		return n.validateBlockProducerStartupAtSlot(slot)
+	}
+	creds, err := n.validateBlockProducerCredentialMaterial()
+	if err != nil {
+		return nil, err
+	}
+	genesis, err := n.blockProducerShelleyGenesis()
+	if err != nil {
+		return nil, err
+	}
+	if err := creds.ArmKesProtocolLifetime(genesis); err != nil {
+		return nil, fmt.Errorf("arm KES protocol lifetime: %w", err)
+	}
+	opCert := creds.GetOpCert()
+	if opCert == nil {
+		return nil, errors.New("block producer operational certificate is nil")
+	}
+	var tipSlot uint64
+	if n.ledgerState != nil {
+		tipSlot = n.ledgerState.ChainTipSlot()
+	}
+	n.config.logger.Warn(
+		"block producer startup: confirmed era history does not span the current wall-clock slot yet; "+
+			"deferring the operational-certificate KES-period plausibility check until the ledger catches up. "+
+			"The opcert KES lifetime is re-checked per slot and forging cannot proceed while it fails; "+
+			"sync progress additionally gates forging whenever an upstream peer is active.",
+		"component", "node",
+		"tip_slot", tipSlot,
+		"opcert_kes_period", opCert.KESPeriod,
+		"opcert_expiry_period", creds.OpCertExpiryPeriod(),
+	)
+	return creds, nil
+}
+
+// validateBlockProducerCredentialMaterial loads the pool credentials and
+// validates the operational certificate's structure and cold-key signature,
+// without judging it against any slot. The slot-dependent KES-period
+// plausibility check lives in validateBlockProducerStartupAtSlot; callers
+// needing the certificate armed but not yet placed in time combine this with
+// PoolCredentials.ArmKesProtocolLifetime.
+func (n *Node) validateBlockProducerCredentialMaterial() (*forging.PoolCredentials, error) {
 	creds := forging.NewPoolCredentials()
 	if err := creds.LoadFromFiles(
 		n.config.shelleyVRFKey,
@@ -75,6 +147,16 @@ func (n *Node) validateBlockProducerStartupAtSlot(
 	}
 	if err := creds.ValidateOpCert(); err != nil {
 		return nil, fmt.Errorf("validate operational certificate: %w", err)
+	}
+	return creds, nil
+}
+
+func (n *Node) validateBlockProducerStartupAtSlot(
+	currentSlot uint64,
+) (*forging.PoolCredentials, error) {
+	creds, err := n.validateBlockProducerCredentialMaterial()
+	if err != nil {
+		return nil, err
 	}
 	genesis, err := n.blockProducerShelleyGenesis()
 	if err != nil {

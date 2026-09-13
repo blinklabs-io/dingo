@@ -5148,7 +5148,28 @@ KES periods are computed from the era-aware absolute slot (`currentSlot / slotsP
 Successful startup validation captures Shelley genesis `MaxKESEvolutions` on
 the loaded credentials together with the opcert start and overflow-checked
 exclusive expiry. `NewBlockForger` rejects credentials without that validated
-protocol lifetime. Before leader selection at each candidate slot, the runtime
+protocol lifetime.
+
+The startup KES-period judgement itself is conditional on the confirmed era
+history spanning the wall clock. `WallClockSlotFromConfirmedHistory` resolves
+the current slot from confirmed eras only, and reports unsupported when the
+wall clock falls past that history's forecast horizon — the state a node
+importing from genesis or restarting far behind is in, where `CurrentSlot`
+would extrapolate through the newest applied era's slot length (Byron's 20s
+slots on a chain that moved to 1s at epoch 208) and so cannot place a
+certificate in time. Only that past-horizon case is a deferral; any other
+failure, including an empty epoch cache or a wall clock before genesis, is
+returned as an error and keeps startup a hard failure.
+
+In the deferred state startup still loads the credential material, checks the
+opcert's cold-key signature, and arms the same protocol lifetime — it skips
+only the slot-dependent plausibility check. Enforcement is then entirely the
+per-slot runtime gate described below, which re-derives the period and rejects
+the certificate before leader selection; extrapolation through the newest
+confirmed era skews the computed period downward, so a certificate staged for
+the future or already expired lands below `opcertStart` rather than inside the
+admitted interval. When confirmed history does span the wall clock, the strict
+startup check runs unchanged and rejects such a certificate outright. Before leader selection at each candidate slot, the runtime
 gate admits exactly the
 half-open interval `[opcertStart, opcertStart + MaxKESEvolutions)`: periods
 before the start and at or after the exclusive end both log/count a

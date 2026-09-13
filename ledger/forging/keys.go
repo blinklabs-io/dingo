@@ -1032,6 +1032,71 @@ func (pc *PoolCredentials) ValidateKESPeriod(
 	return nil
 }
 
+// ArmKesProtocolLifetime seeds the protocol-level KES lifetime from the
+// Shelley genesis without judging the operational certificate against the
+// current wall-clock slot. It exists for block producer startup when the
+// ledger's confirmed era history does not yet span the wall clock (genesis
+// re-import, long downtime): in that state the extrapolated current slot uses
+// the newest known era's slot length and cannot reliably place an opcert in
+// time (a fresh mainnet ledger extrapolates Byron's 20s slots over the whole
+// chain, so the current KES period reads far below the real one). The per-slot
+// forge gate still enforces the armed window against the reliable slot, so no
+// block leaves the node outside the operational certificate's lifetime.
+func (pc *PoolCredentials) ArmKesProtocolLifetime(
+	genesis *shelley.ShelleyGenesis,
+) error {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	pc.generation++
+	// Any failed arming leaves the credentials unusable for production
+	// forging rather than retaining stale policy data.
+	pc.maxKESEvolutions = 0
+	pc.opCertExpiryKES = 0
+	pc.opCertValidated = false
+
+	if pc.opCert == nil {
+		pc.opCertStartKES = 0
+		return errors.New("operational certificate not loaded")
+	}
+	pc.opCertStartKES = pc.opCert.KESPeriod
+	// Without signing material the certificate cannot be validated, so
+	// opCertValidated would stay false and OpCertExpiryPeriod would report 0
+	// however far the rest of this function got. Fail rather than return
+	// nil: a method named Arm that reports success and arms nothing leaves
+	// the caller believing the per-slot forge gate has data to enforce when
+	// it does not. Unreachable from the block producer startup path, where
+	// LoadFromFiles precedes this, but this is exported API on an exported
+	// type.
+	if !pc.isLoadedUnsafe() {
+		return errors.New("signing material not loaded")
+	}
+	if err := pc.validateOpCertUnsafe(); err != nil {
+		return fmt.Errorf("validate operational certificate: %w", err)
+	}
+	pc.opCertValidated = true
+	if genesis == nil {
+		return errors.New("shelley genesis is required")
+	}
+	if genesis.MaxKESEvolutions <= 0 {
+		return fmt.Errorf(
+			"genesis maxKESEvolutions must be positive, got %d",
+			genesis.MaxKESEvolutions,
+		)
+	}
+	// #nosec G115 -- guarded positive above; int fits within uint64.
+	maxEvolutions := uint64(genesis.MaxKESEvolutions)
+	expiryPeriod, err := opCertExpiryPeriod(
+		pc.opCert.KESPeriod,
+		maxEvolutions,
+	)
+	if err != nil {
+		return err
+	}
+	pc.maxKESEvolutions = maxEvolutions
+	pc.opCertExpiryKES = expiryPeriod
+	return nil
+}
+
 // LedgerView is the subset of ledger state the post-startup credential
 // cross-check needs. The forging package depends on it as a small
 // interface so the package itself stays free of a ledger dependency, and
