@@ -55,7 +55,11 @@ func TestSaveCursorLoadCursor_RoundTrips(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "cursor.json")
 	want := &IncrementalCursor{
-		Tip:                  Tip{Slot: 123, Hash: "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd", BlockNumber: 45},
+		Tip: Tip{
+			Slot:        123,
+			Hash:        "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd",
+			BlockNumber: 45,
+		},
 		Epoch:                7,
 		BlocksSinceFullCheck: 89,
 	}
@@ -362,7 +366,11 @@ func TestHandleIncrementalRollback_NoOpWhenPointMatchesCursor(t *testing.T) {
 	t.Parallel()
 	cursorFile := filepath.Join(t.TempDir(), "cursor.json")
 	cursor := newCursorState(cursorFile, IncrementalCursor{
-		Tip: Tip{Slot: 100, Hash: "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd", BlockNumber: 10}, Epoch: 5,
+		Tip: Tip{
+			Slot:        100,
+			Hash:        "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd",
+			BlockNumber: 10,
+		}, Epoch: 5,
 	})
 	cfg := IncrementalConfig{
 		DingoAddr:   "127.0.0.1:1",
@@ -375,7 +383,7 @@ func TestHandleIncrementalRollback_NoOpWhenPointMatchesCursor(t *testing.T) {
 	// not on a full check actually running -- see
 	// TestFullCheckWorker_RunsRequestsOneAtATime for that.
 	worker := &fullCheckWorker{
-		cfg: cfg, cursor: cursor, pending: make(chan fullCheckRequest, 1),
+		cfg: cfg, cursor: cursor, wake: make(chan struct{}, 1),
 	}
 	hashBytes, err := hex.DecodeString(
 		"abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd",
@@ -388,15 +396,19 @@ func TestHandleIncrementalRollback_NoOpWhenPointMatchesCursor(t *testing.T) {
 		handleIncrementalRollback(cfg, cursor, worker, samePoint),
 	)
 
-	select {
-	case <-worker.pending:
-		t.Fatal(
-			"a rollback to the cursor's own current point must not dispatch a full check",
-		)
-	default:
-	}
+	assert.Nil(
+		t,
+		worker.pendingReq,
+		"a rollback to the cursor's own current point must not dispatch a full check",
+	)
 	assert.Equal(
-		t, Tip{Slot: 100, Hash: "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd", BlockNumber: 10}, cursor.snapshot().Tip,
+		t,
+		Tip{
+			Slot:        100,
+			Hash:        "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd",
+			BlockNumber: 10,
+		},
+		cursor.snapshot().Tip,
 		"the cursor must be left unchanged by a no-op rollback",
 	)
 	_, statErr := os.Stat(cursorFile)
@@ -419,7 +431,11 @@ func TestHandleIncrementalRollback_TriggersFullCheckWhenPointDiffers(
 	t.Parallel()
 	cursorFile := filepath.Join(t.TempDir(), "cursor.json")
 	cursor := newCursorState(cursorFile, IncrementalCursor{
-		Tip: Tip{Slot: 100, Hash: "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd", BlockNumber: 10}, Epoch: 5,
+		Tip: Tip{
+			Slot:        100,
+			Hash:        "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd",
+			BlockNumber: 10,
+		}, Epoch: 5,
 	})
 	cfg := IncrementalConfig{
 		DingoAddr:        "127.0.0.1:1",
@@ -429,7 +445,7 @@ func TestHandleIncrementalRollback_TriggersFullCheckWhenPointDiffers(
 		Logger:           testDiscardLogger(),
 	}
 	worker := &fullCheckWorker{
-		cfg: cfg, cursor: cursor, pending: make(chan fullCheckRequest, 1),
+		cfg: cfg, cursor: cursor, wake: make(chan struct{}, 1),
 	}
 	olderHash, err := hex.DecodeString("ffff")
 	require.NoError(t, err)
@@ -440,15 +456,13 @@ func TestHandleIncrementalRollback_TriggersFullCheckWhenPointDiffers(
 		handleIncrementalRollback(cfg, cursor, worker, rollbackPoint),
 	)
 
-	var req fullCheckRequest
-	select {
-	case req = <-worker.pending:
-	default:
-		t.Fatal("a genuine rollback must dispatch a full check request")
-	}
-	assert.Equal(t, FullCheckRollback, req.reason)
-	assert.Equal(t, uint64(50), req.at.Slot)
-	assert.Equal(t, "ffff", req.at.Hash)
+	require.NotNil(
+		t, worker.pendingReq,
+		"a genuine rollback must dispatch a full check request",
+	)
+	assert.Equal(t, FullCheckRollback, worker.pendingReq.reason)
+	assert.Equal(t, uint64(50), worker.pendingReq.at.Slot)
+	assert.Equal(t, "ffff", worker.pendingReq.at.Hash)
 	assert.Equal(t, uint64(50), cursor.snapshot().Tip.Slot)
 
 	got, loadErr := LoadCursor(cursorFile)
@@ -457,31 +471,76 @@ func TestHandleIncrementalRollback_TriggersFullCheckWhenPointDiffers(
 	assert.Equal(t, uint64(50), got.Tip.Slot)
 }
 
-// TestFullCheckWorker_DropsRequestWhilePendingOneQueued covers the
+// TestFullCheckWorker_CoalescesByPriorityWhilePendingOneQueued covers the
 // coalescing contract that keeps a fast-moving chain from queueing up
-// redundant full checks behind a slow one: a second request while one is
-// already pending must be dropped, not queued, leaving exactly the first
-// request's reason waiting.
-func TestFullCheckWorker_DropsRequestWhilePendingOneQueued(t *testing.T) {
+// redundant full checks behind a slow one: at most one request stays
+// pending at a time, but -- unlike the drop-everything-unconditionally
+// behavior this replaced -- which one survives now depends on priority
+// (fullCheckReasonPriority), not simply which arrived first. This is the
+// blinklabs-io/dingo#4183 review fix: unconditionally dropping a second
+// request meant a one-shot Mismatch/Rollback/EpochTransition trigger could
+// be silently lost behind an already-queued, merely-due Interval
+// checkpoint, even though the interval trigger costs nothing to drop
+// instead (it is level-triggered and re-evaluates true again next block).
+func TestFullCheckWorker_CoalescesByPriorityWhilePendingOneQueued(
+	t *testing.T,
+) {
 	t.Parallel()
-	w := &fullCheckWorker{pending: make(chan fullCheckRequest, 1)}
-	w.request(FullCheckMismatch, Tip{Slot: 1})
-	w.request(FullCheckInterval, Tip{Slot: 2})
 
-	req := <-w.pending
-	assert.Equal(
-		t,
-		FullCheckMismatch,
-		req.reason,
-		"the first request must win; the second must have been dropped, not queued",
+	t.Run(
+		"higher priority replaces a lower priority pending request",
+		func(t *testing.T) {
+			t.Parallel()
+			w := &fullCheckWorker{wake: make(chan struct{}, 1)}
+			w.request(FullCheckInterval, Tip{Slot: 1})
+			w.request(FullCheckMismatch, Tip{Slot: 2})
+
+			require.NotNil(t, w.pendingReq)
+			assert.Equal(
+				t, FullCheckMismatch, w.pendingReq.reason,
+				"a higher-priority request must replace an already-pending "+
+					"lower-priority one",
+			)
+			assert.Equal(t, uint64(2), w.pendingReq.at.Slot)
+		},
 	)
-	select {
-	case <-w.pending:
-		t.Fatal(
-			"a second request while one was already pending must be dropped",
+
+	t.Run(
+		"lower priority is dropped behind a higher priority pending request",
+		func(t *testing.T) {
+			t.Parallel()
+			w := &fullCheckWorker{wake: make(chan struct{}, 1)}
+			w.request(FullCheckMismatch, Tip{Slot: 1})
+			w.request(FullCheckInterval, Tip{Slot: 2})
+
+			require.NotNil(t, w.pendingReq)
+			assert.Equal(
+				t, FullCheckMismatch, w.pendingReq.reason,
+				"a lower-priority request must not replace an already-pending "+
+					"higher-priority one",
+			)
+			assert.Equal(
+				t, uint64(1), w.pendingReq.at.Slot,
+				"the original higher-priority request's own point must be kept",
+			)
+		},
+	)
+
+	t.Run("equal priority keeps the newest point", func(t *testing.T) {
+		t.Parallel()
+		w := &fullCheckWorker{wake: make(chan struct{}, 1)}
+		w.request(FullCheckInterval, Tip{Slot: 1})
+		w.request(FullCheckInterval, Tip{Slot: 2})
+
+		require.NotNil(t, w.pendingReq)
+		assert.Equal(t, FullCheckInterval, w.pendingReq.reason)
+		assert.Equal(
+			t, uint64(2), w.pendingReq.at.Slot,
+			"a same-priority request must still replace the pending one, "+
+				"so the newest required point is what actually gets "+
+				"checked",
 		)
-	default:
-	}
+	})
 }
 
 // TestFullCheckWorker_FailedAttemptDoesNotResetCounter covers the worker's
@@ -500,7 +559,11 @@ func TestFullCheckWorker_FailedAttemptDoesNotResetCounter(t *testing.T) {
 	t.Parallel()
 	cursorFile := filepath.Join(t.TempDir(), "cursor.json")
 	cursor := newCursorState(cursorFile, IncrementalCursor{
-		Tip:                  Tip{Slot: 100, Hash: "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd", BlockNumber: 10},
+		Tip: Tip{
+			Slot:        100,
+			Hash:        "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd",
+			BlockNumber: 10,
+		},
 		Epoch:                5,
 		BlocksSinceFullCheck: 42,
 	})
@@ -526,7 +589,13 @@ func TestFullCheckWorker_FailedAttemptDoesNotResetCounter(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	worker := startFullCheckWorker(ctx, cfg, cursor)
-	worker.request(FullCheckMismatch, Tip{Slot: 200, Hash: "ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01"})
+	worker.request(
+		FullCheckMismatch,
+		Tip{
+			Slot: 200,
+			Hash: "ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01",
+		},
+	)
 
 	select {
 	case <-called:
@@ -572,7 +641,11 @@ func TestFullCheckWorker_SuccessfulCheckResetsCounter(t *testing.T) {
 
 	cursorFile := filepath.Join(t.TempDir(), "cursor.json")
 	cursor := newCursorState(cursorFile, IncrementalCursor{
-		Tip:                  Tip{Slot: 100, Hash: "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd", BlockNumber: 10},
+		Tip: Tip{
+			Slot:        100,
+			Hash:        "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd",
+			BlockNumber: 10,
+		},
 		Epoch:                5,
 		BlocksSinceFullCheck: 42,
 	})
@@ -597,7 +670,13 @@ func TestFullCheckWorker_SuccessfulCheckResetsCounter(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	worker := startFullCheckWorker(ctx, cfg, cursor)
-	worker.request(FullCheckInterval, Tip{Slot: 200, Hash: "ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01"})
+	worker.request(
+		FullCheckInterval,
+		Tip{
+			Slot: 200,
+			Hash: "ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01",
+		},
+	)
 
 	select {
 	case <-called:

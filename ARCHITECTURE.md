@@ -8493,14 +8493,21 @@ check *actually completes* -- see below) is safe to read and write from
 multiple goroutines, and
 `fullCheckWorker` runs full checks one at a time in its own goroutine,
 decoupled entirely from whichever ChainSync callback asked for one --
-dispatched via `request`, a non-blocking send to a buffered channel of size
-1 that coalesces a burst of requests (a fast-moving chain can trigger several
-before the first finishes) into at most one pending, dropping the rest
-rather than queueing them: the condition that asked for a check will simply
-re-evaluate once the in-flight one finishes. This keeps the ChainSync
-callback itself fast (advance the cursor, decide whether a checkpoint is
-due, dispatch if so, return immediately), so the connection driving the
-block stream never goes idle long enough to matter.
+dispatched via `request`, which coalesces a burst of requests (a fast-moving
+chain can trigger several before the first finishes) into at most one
+pending. A new request replaces the pending one only when it is at least as
+high priority (`fullCheckReasonPriority`: Mismatch > Rollback >
+EpochTransition > Interval), not unconditionally: Interval is the only
+level-triggered reason of the four (`blocksSinceFullCheck` stays past its
+threshold and simply re-evaluates true again next block if coalesced away),
+but Mismatch/Rollback/EpochTransition are one-shot conditions tied to the
+specific block that raised them -- dropping one of those in favor of an
+already-queued Interval request would lose the reason entirely, not just
+delay it, since the condition itself typically no longer holds by the time
+the next check runs. This keeps the ChainSync callback itself fast (advance
+the cursor, decide whether a checkpoint is due, dispatch if so, return
+immediately), so the connection driving the block stream never goes idle
+long enough to matter.
 
 `resetFullCheckCounter` only runs once a full check actually completes
 trustworthily (`fullCheckSucceeded`: no error, and not `Skipped`) -- a

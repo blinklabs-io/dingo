@@ -24,6 +24,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -85,6 +86,14 @@ type fakeLSQState struct {
 	// bounds this instead of hanging indefinitely (blinklabs-io/dingo#4183
 	// review). nil means "never stall", the default.
 	stall <-chan struct{}
+	// stallQuery is stall's counterpart for the QueryFunc step instead of
+	// Acquire: gouroboros's LocalStateQuery client has its own built-in
+	// AcquireTimeout (5s default, independent of Dial's WithQueryTimeout(0)
+	// override, which only affects the Querying state), so a stalled
+	// Acquire is already bounded regardless of ctx -- stalling here instead
+	// exercises the genuinely-unbounded case Dial's WithQueryTimeout(0)
+	// creates for a query after a successful Acquire.
+	stallQuery <-chan struct{}
 }
 
 func newFakeLSQState() *fakeLSQState {
@@ -238,6 +247,15 @@ func (s *fakeLSQState) stallAcquireUntil(done <-chan struct{}) {
 	s.stall = done
 }
 
+// stallQueryUntil makes this node's fake QueryFunc block on done instead of
+// answering, until done is closed -- see the stallQuery field's doc
+// comment.
+func (s *fakeLSQState) stallQueryUntil(done <-chan struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stallQuery = done
+}
+
 // config builds the localstatequery.Config a real gouroboros server uses to
 // answer exactly the four query types incremental mode's per-block and full
 // checks need (GetCurrentProtocolParams, GetStakeDistribution,
@@ -282,6 +300,12 @@ func (s *fakeLSQState) config() localstatequery.Config {
 				_ localstatequery.CallbackContext,
 				q localstatequery.QueryWrapper,
 			) (any, error) {
+				s.mu.Lock()
+				stallQuery := s.stallQuery
+				s.mu.Unlock()
+				if stallQuery != nil {
+					<-stallQuery
+				}
 				pp, dist, epoch := s.snapshot()
 				// The wire query nests three levels deep, matching dingo's
 				// own dispatch (ledger/queries.go Query -> queryBlock ->
@@ -1258,5 +1282,147 @@ func TestEstablishBaseline_StalledPeerTimesOutAndRetries(t *testing.T) {
 		t, attempts, 1,
 		"a stalled peer must be retried with backoff, not given up on "+
 			"after a single attempt",
+	)
+}
+
+// TestBuildStartupCursor_StalledEpochQueryIsBounded is the regression test
+// for a blinklabs-io/dingo#4183 review finding: establishBaseline's own
+// Check call is bounded by cfg.FullCheckTimeout (see
+// TestEstablishBaseline_StalledPeerTimesOutAndRetries above), but
+// buildStartupCursor's separate queryEpochAt call right after it (this
+// function's own fresh-baseline epoch lookup, or pointReachable's probes
+// for a prior cursor) still used the raw, unbounded ctx. Dial deliberately
+// disables both the mux segment-read and LocalStateQuery query timeouts
+// on this trusted NtC channel; gouroboros's own AcquireTimeout (5s
+// default) already bounds a stalled Acquire regardless, but a stall
+// *after* a successful Acquire, during the actual query, has nothing left
+// to bound it once Dial's WithQueryTimeout(0) disables the Querying
+// state's timeout too -- exactly the queryEpochAt call this covers.
+//
+// Calls buildStartupCursor directly (not through establishBaseline) with
+// a hand-built CheckResult, so this isolates its own epoch query from
+// Check's already-covered one: cardanoState's query step (not Acquire,
+// which is expected to succeed normally) is stalled from the start, and
+// no prior cursor is supplied, so the only query this exercises is
+// buildStartupCursor's fresh-baseline queryEpochAt call.
+func TestBuildStartupCursor_StalledEpochQueryIsBounded(t *testing.T) {
+	t.Parallel()
+	_, cardanoAddr, _, cardanoState := newIncrementalHarness(t, 5)
+
+	stall := make(chan struct{})
+	t.Cleanup(func() { close(stall) })
+	cardanoState.stallQueryUntil(stall)
+
+	cfg := IncrementalConfig{
+		// DingoAddr is never touched: with no prior cursor, only the
+		// fresh-baseline epoch query (cfg.CardanoAddr only) runs --
+		// pointReachable (which would touch DingoAddr too) only runs for
+		// a supplied prior cursor.
+		DingoAddr:        "127.0.0.1:1",
+		CardanoAddr:      cardanoAddr,
+		Magic:            42,
+		FullCheckTimeout: 100 * time.Millisecond,
+		CursorFile:       filepath.Join(t.TempDir(), "cursor.json"),
+		Logger:           testDiscardLogger(),
+	}
+	result := &CheckResult{
+		Tip: Tip{Slot: 1, Hash: strings.Repeat("ab", 32)},
+	}
+
+	done := make(chan struct{})
+	var cursor *IncrementalCursor
+	var err error
+	go func() {
+		cursor, err = buildStartupCursor(
+			context.Background(), cfg, result, nil, 0,
+		)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal(
+			"buildStartupCursor did not return -- its own queryEpochAt " +
+				"call must be bounded by cfg.FullCheckTimeout, not hang " +
+				"indefinitely on a stalled peer",
+		)
+	}
+	// The epoch query failing (stalled Acquire never succeeds) must
+	// degrade gracefully -- liveEpoch falls back to -1 -- not fail
+	// buildStartupCursor outright, matching its own documented behavior
+	// for any other epoch-lookup failure.
+	require.NoError(t, err)
+	require.NotNil(t, cursor)
+	assert.Equal(t, -1, cursor.Epoch)
+}
+
+// TestIncrementalSession_NoProgressWhenFirstBlockAlwaysFails is the
+// regression test for a blinklabs-io/dingo#4183 review finding:
+// incrementalSession used to report progressed=true (established) the
+// instant cs.Client.Sync was accepted, regardless of whether any block
+// that followed actually validated. A session whose very first block
+// fails every single reconnect (e.g. a persistent per-block
+// LocalStateQuery failure) never gets past that same point, so it should
+// report no progress at all -- letting RunIncremental's reconnect loop
+// back off (nextBackoff) instead of resetting to watcherMinBackoff on
+// every attempt, which would otherwise redial both nodes roughly every
+// 250ms indefinitely.
+//
+// dingoState.rejectAcquireAtSlot targets the exact slot
+// incrementalSession's first RollForward callback will be for (the block
+// right after the cursor's starting point), so handleIncrementalBlock's
+// own dingo-side query fails immediately, before blockValidated is ever
+// set.
+func TestIncrementalSession_NoProgressWhenFirstBlockAlwaysFails(t *testing.T) {
+	t.Parallel()
+	dingoAddr, cardanoAddr, dingoState, _, cardanoServer :=
+		newIncrementalHarnessWithServer(t, 10, false)
+
+	startPoint := cardanoServer.chain.Points[cardanoServer.baselineTipIndex]
+	startTip := Tip{
+		Slot:        startPoint.Slot,
+		Hash:        hex.EncodeToString(startPoint.Hash),
+		BlockNumber: uint64(cardanoServer.baselineTipIndex), //nolint:gosec
+	}
+	firstBlockPoint :=
+		cardanoServer.chain.Points[cardanoServer.baselineTipIndex+1]
+	dingoState.rejectAcquireAtSlot(firstBlockPoint.Slot)
+
+	cursorFile := filepath.Join(t.TempDir(), "cursor.json")
+	cursor := newCursorState(cursorFile, IncrementalCursor{Tip: startTip})
+	worker := &fullCheckWorker{
+		cfg: IncrementalConfig{
+			DingoAddr:        dingoAddr,
+			CardanoAddr:      cardanoAddr,
+			Magic:            42,
+			FullCheckTimeout: 10 * time.Second,
+			Logger:           testDiscardLogger(),
+			OnFullCheck:      func(FullCheckReason, *CheckResult, error) {},
+		},
+		cursor: cursor,
+		wake:   make(chan struct{}, 1),
+	}
+	cfg := IncrementalConfig{
+		DingoAddr:         dingoAddr,
+		CardanoAddr:       cardanoAddr,
+		Magic:             42,
+		FullCheckInterval: 1000,
+		Logger:            testDiscardLogger(),
+		OnBlockCheckError: func(error) {},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	progressed, err := incrementalSession(ctx, cfg, cursor, worker)
+	require.Error(
+		t, err,
+		"the first block's rejected Acquire must surface as this "+
+			"session's own error",
+	)
+	assert.False(
+		t, progressed,
+		"a session whose first block always fails must report no "+
+			"progress, not the mere fact that Sync was accepted",
 	)
 }

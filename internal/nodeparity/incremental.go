@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -179,6 +180,33 @@ type fullCheckRequest struct {
 	at     Tip
 }
 
+// fullCheckReasonPriority ranks FullCheckReason for request's
+// replace-vs-drop decision below: higher wins. Mismatch is the most
+// actionable (an operator investigating one should not have it silently
+// overwritten by a merely-due interval checkpoint), rollback the next most
+// significant (also a specific, non-recurring event), then an epoch
+// transition, then a plain interval checkpoint -- the only level-triggered
+// reason of the four, since blocksSinceFullCheck stays >= FullCheckInterval
+// and simply re-evaluates true again next block if this one is coalesced
+// away. Startup is never dispatched through request (establishBaseline
+// calls Check directly), but is included for completeness.
+func fullCheckReasonPriority(reason FullCheckReason) int {
+	switch reason {
+	case FullCheckMismatch:
+		return 5
+	case FullCheckRollback:
+		return 4
+	case FullCheckEpochTransition:
+		return 3
+	case FullCheckInterval:
+		return 2
+	case FullCheckStartup:
+		return 1
+	default:
+		return 0
+	}
+}
+
 // fullCheckWorker runs full checks one at a time, in its own goroutine,
 // decoupled from whichever ChainSync callback requested one -- a full
 // check's multi-minute duration must never block that callback.
@@ -195,18 +223,35 @@ type fullCheckRequest struct {
 // abandoned goroutine's eventual write could silently roll the persisted
 // cursor backward after the new session has already advanced it.
 //
-// Requests coalesce to at most one pending at a time (a buffered channel of
-// size 1): if a full check is already running or already queued when
-// another is requested, the new request is dropped rather than queued --
-// the condition that asked for it (a checkpoint interval, an epoch
-// transition, or a per-block mismatch) will simply re-evaluate against
-// whatever cursor state exists once the in-flight one finishes, rather than
-// piling up redundant checks behind a fast-moving chain.
+// At most one request is pending at a time: if a full check is already
+// running or already queued when another is requested, the new request
+// replaces the pending one only when it is at least as high priority
+// (fullCheckReasonPriority), otherwise it is dropped instead of the
+// existing one. A dropped Interval request costs nothing -- it is
+// level-triggered and simply re-evaluates true again next block -- but
+// Mismatch/Rollback/EpochTransition are one-shot conditions tied to the
+// specific block that raised them: coalescing one of those away in favor
+// of a lower-priority request already queued would lose the reason
+// entirely, not just delay it, since the condition itself will typically no
+// longer hold by the time the next check runs (blinklabs-io/dingo#4183
+// review).
 type fullCheckWorker struct {
-	cfg     IncrementalConfig
-	cursor  *cursorState
-	pending chan fullCheckRequest
-	done    chan struct{}
+	cfg    IncrementalConfig
+	cursor *cursorState
+	mu     sync.Mutex
+	// pendingReq is the single coalesced slot described above; nil means
+	// nothing is currently queued. Guarded by mu since request (called
+	// from a ChainSync callback goroutine) and run (the worker's own
+	// goroutine) both access it.
+	pendingReq *fullCheckRequest
+	// wake is a non-blocking, size-1 notification that pendingReq changed
+	// -- deliberately decoupled from carrying the request payload itself
+	// (unlike a plain buffered channel of requests), which is what makes
+	// replacing an already-queued lower-priority request possible: the
+	// payload lives in pendingReq, coalescing under mu, while wake only
+	// ever needs to signal "go check pendingReq again."
+	wake chan struct{}
+	done chan struct{}
 }
 
 // startFullCheckWorker starts the worker's background goroutine and returns
@@ -216,21 +261,29 @@ func startFullCheckWorker(
 	ctx context.Context, cfg IncrementalConfig, cursor *cursorState,
 ) *fullCheckWorker {
 	w := &fullCheckWorker{
-		cfg:     cfg,
-		cursor:  cursor,
-		pending: make(chan fullCheckRequest, 1),
-		done:    make(chan struct{}),
+		cfg:    cfg,
+		cursor: cursor,
+		wake:   make(chan struct{}, 1),
+		done:   make(chan struct{}),
 	}
 	go w.run(ctx)
 	return w
 }
 
 // request dispatches a full check pinned to at, for the given reason.
-// Non-blocking: see fullCheckWorker's doc comment on why a request is
-// dropped, not queued, when one is already pending or in flight.
+// Non-blocking: see fullCheckWorker's doc comment for the priority-based
+// coalescing this applies when a request is already pending or in flight.
 func (w *fullCheckWorker) request(reason FullCheckReason, at Tip) {
+	newReq := fullCheckRequest{reason: reason, at: at}
+	w.mu.Lock()
+	if w.pendingReq == nil ||
+		fullCheckReasonPriority(reason) >=
+			fullCheckReasonPriority(w.pendingReq.reason) {
+		w.pendingReq = &newReq
+	}
+	w.mu.Unlock()
 	select {
-	case w.pending <- fullCheckRequest{reason: reason, at: at}:
+	case w.wake <- struct{}{}:
 	default:
 	}
 }
@@ -259,7 +312,18 @@ func (w *fullCheckWorker) run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case req := <-w.pending:
+		case <-w.wake:
+			w.mu.Lock()
+			req := w.pendingReq
+			w.pendingReq = nil
+			w.mu.Unlock()
+			if req == nil {
+				// Defensive: not expected to be reachable given run is
+				// pendingReq's only consumer (only request, never run
+				// itself, ever sets it to nil elsewhere), but a spurious
+				// wake is cheap to no-op on rather than to assume away.
+				continue
+			}
 			fullCheckCtx, cancel := context.WithTimeout(
 				ctx,
 				w.cfg.FullCheckTimeout,
@@ -429,11 +493,11 @@ func RunIncremental(ctx context.Context, cfg IncrementalConfig) error {
 
 	backoff := watcherMinBackoff
 	for ctx.Err() == nil {
-		established, sessionErr := incrementalSession(ctx, cfg, cursor, worker)
+		progressed, sessionErr := incrementalSession(ctx, cfg, cursor, worker)
 		if ctx.Err() != nil {
 			return nil //nolint:nilerr // shutdown via ctx, not the session's own error
 		}
-		if established {
+		if progressed {
 			backoff = nextBackoff(backoff, true)
 		}
 		reportSessionEnd(cfg, sessionErr, backoff, cursor.snapshot().Tip.Slot)
@@ -598,9 +662,23 @@ func buildStartupCursor(
 		)
 	}
 
+	// Bounded the same way every other full-check-adjacent query this
+	// package makes against a potentially stalled peer is
+	// (cfg.FullCheckTimeout): Dial deliberately disables both the mux
+	// segment-read and LocalStateQuery query timeouts on this trusted NtC
+	// channel, so nothing else stops a peer that accepts the connection
+	// and then stalls mid-query on one of the queryEpochAt calls below
+	// (this function's own epoch lookup, or pointReachable's two probes).
+	// These are fast GetEpochNo queries, far short of a full whole-UTxO
+	// walk, so FullCheckTimeout gives generous headroom rather than
+	// needing to be tuned tightly for them specifically
+	// (blinklabs-io/dingo#4183 review).
+	queryCtx, cancel := context.WithTimeout(ctx, cfg.FullCheckTimeout)
+	defer cancel()
+
 	cursorTip := result.Tip
 	liveEpoch, epochErr := queryEpochAt(
-		ctx,
+		queryCtx,
 		cfg.CardanoAddr,
 		cfg.Magic,
 		cursorTip,
@@ -625,7 +703,7 @@ func buildStartupCursor(
 	switch {
 	case prior == nil:
 		// No prior cursor at all -- nothing to resume from.
-	case !pointReachable(ctx, cfg, prior.Tip):
+	case !pointReachable(queryCtx, cfg, prior.Tip):
 		cfg.Logger.Warn(
 			"nodeparity: prior cursor's point is no longer reachable (pruned, or a fork), falling back to a fresh baseline at the live tip -- blocks between the old point and the new baseline will not be individually compared",
 			"prior_slot",
@@ -736,19 +814,32 @@ func queryEpochAt(
 // canonical -- this choice is about which node a decode bug should never be
 // attributed to, not about which one has the "real" bytes.
 //
-// It reports whether the session got as far as an established sync (so the
-// caller's reconnect backoff resets the same way Watcher's does), and the
-// reason it ended.
+// It reports whether at least one block was actually, successfully
+// validated during this session (so the caller's reconnect backoff resets
+// the same way Watcher's does) -- not merely whether cs.Client.Sync was
+// accepted, which used to be enough to report progress even when every
+// single block that followed failed the same way (e.g. a persistent
+// per-block LocalStateQuery failure): that misreported progress reset
+// backoff to watcherMinBackoff on every reconnect, so the loop redialed
+// both nodes roughly every 250ms indefinitely instead of backing off, the
+// exact dial churn incrementalSession's own doc comment above identifies
+// as making "protocol is shutting down" failures worse
+// (blinklabs-io/dingo#4183 review).
 func incrementalSession(
 	ctx context.Context,
 	cfg IncrementalConfig,
 	cursor *cursorState,
 	worker *fullCheckWorker,
-) (established bool, err error) {
+) (progressed bool, err error) {
 	startPoint, err := cursor.snapshot().Tip.point()
 	if err != nil {
 		return false, fmt.Errorf("cursor point: %w", err)
 	}
+	// blockValidated is set the instant handleIncrementalBlock first
+	// succeeds, from the RollForward callback's own goroutine -- read only
+	// once, at this function's return points below, so an atomic is
+	// simpler and just as correct as a mutex here.
+	var blockValidated atomic.Bool
 
 	// One persistent connection to dingo for this whole session's per-block
 	// LocalStateQuery calls -- re-Acquired per block, never re-dialed. This
@@ -848,6 +939,7 @@ func incrementalSession(
 						reportBlockErr(err)
 						return err
 					}
+					blockValidated.Store(true)
 					return nil
 				},
 			),
@@ -889,14 +981,14 @@ func incrementalSession(
 
 	select {
 	case <-ctx.Done():
-		return true, nil
+		return blockValidated.Load(), nil
 	case err := <-blockErrChan:
-		return true, err
+		return blockValidated.Load(), err
 	case sessionErr, ok := <-cardanoConn.ErrorChan():
 		if !ok {
-			return true, errors.New("connection closed")
+			return blockValidated.Load(), errors.New("connection closed")
 		}
-		return true, sessionErr
+		return blockValidated.Load(), sessionErr
 	}
 }
 
