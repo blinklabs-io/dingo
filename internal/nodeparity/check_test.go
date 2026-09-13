@@ -15,11 +15,31 @@
 package nodeparity
 
 import (
+	"context"
+	"net"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// countingListener wraps a net.Listener to count how many connections it
+// actually accepted, so a test can verify Check's own dial behavior rather
+// than just its end result.
+type countingListener struct {
+	net.Listener
+	accepts atomic.Int64
+}
+
+func (l *countingListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err == nil {
+		l.accepts.Add(1)
+	}
+	return conn, err
+}
 
 // TestTipsAgree_Match covers the clean case: both nodes agree on a tip.
 // tipsAgree must report this as trustworthy (ok=true) with no skip reason
@@ -108,4 +128,52 @@ func TestTip_Point_InvalidHashErrors(t *testing.T) {
 	tip := Tip{Slot: 1, Hash: "not-hex"}
 	_, err := tip.point()
 	require.Error(t, err)
+}
+
+// TestCheck_ExplicitPointDialsCardanoOnlyOnce is the regression test for a
+// blinklabs-io/dingo#4183 review finding: Check used to dial a
+// cardano-node "tip" connection unconditionally, even in explicit
+// historical mode (at != nil), where it is never used at all -- tipsAgree
+// only runs in live-tip mode. Every triggered incremental full checkpoint
+// (fullCheckWorker.run always passes a non-nil at) paid for that wasted,
+// immediately-closed handshake. Check now dials that connection only
+// inside the live-tip branch, so an explicit-point call must reach
+// cardano-node exactly once: the real snapshot query QueryReferenceUTxOSnapshot
+// makes, not twice.
+func TestCheck_ExplicitPointDialsCardanoOnlyOnce(t *testing.T) {
+	t.Parallel()
+	const magic = 42
+
+	dingoState := newFakeLSQState()
+	dingoListener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = dingoListener.Close() })
+	dingoState.serveLSQOnly(t, dingoListener, magic)
+
+	cardanoState := newFakeLSQState()
+	rawCardanoListener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = rawCardanoListener.Close() })
+	cardanoListener := &countingListener{Listener: rawCardanoListener}
+	cardanoState.serveLSQOnly(t, cardanoListener, magic)
+
+	explicitPoint := Tip{Slot: 100, Hash: strings.Repeat("ab", 32)}
+
+	result, err := Check(
+		context.Background(),
+		dingoListener.Addr().String(),
+		cardanoListener.Addr().String(),
+		magic,
+		&explicitPoint,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.False(t, result.Skipped)
+
+	assert.Equal(
+		t, int64(1), cardanoListener.accepts.Load(),
+		"an explicit-point Check must dial cardano-node exactly once (the "+
+			"snapshot query) -- not twice (a wasted, immediately-closed "+
+			"tip-read connection plus the snapshot query)",
+	)
 }

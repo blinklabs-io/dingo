@@ -17,6 +17,7 @@ package nodeparity
 import (
 	"context"
 	"fmt"
+	"log/slog"
 )
 
 // Skip reason codes: stable, low-cardinality values suitable for a
@@ -92,18 +93,23 @@ func Check(
 	}
 	defer dingoConn.Close() //nolint:errcheck
 
-	// cardanoTipConn is used only to read cardano-node's tip below (when
-	// at is nil) and is closed well before cardano-node is actually
-	// queried -- see the comment above the re-dial further down for why.
-	cardanoTipConn, err := Dial(ctx, cardanoAddr, magic)
-	if err != nil {
-		return nil, fmt.Errorf("dial cardano-node %s: %w", cardanoAddr, err)
-	}
-
 	var targetTip Tip
 	if at != nil {
 		targetTip = *at
 	} else {
+		// cardanoTipConn is used only to read cardano-node's tip here, and
+		// is closed immediately afterward, well before cardano-node is
+		// actually queried -- see the comment above the re-dial further
+		// down for why. Dialed only in this branch: fullCheckWorker.run
+		// always passes a non-nil at for every triggered incremental full
+		// checkpoint (interval, rollback, mismatch, epoch transition), so
+		// dialing this connection unconditionally meant every one of
+		// those checks paid for a handshake it then immediately closed
+		// unused (blinklabs-io/dingo#4183 review).
+		cardanoTipConn, err := Dial(ctx, cardanoAddr, magic)
+		if err != nil {
+			return nil, fmt.Errorf("dial cardano-node %s: %w", cardanoAddr, err)
+		}
 		dingoTip, err := ReadTip(dingoConn)
 		if err != nil {
 			cardanoTipConn.Close() //nolint:errcheck
@@ -114,8 +120,23 @@ func Check(
 			cardanoTipConn.Close() //nolint:errcheck
 			return nil, fmt.Errorf("cardano-node tip: %w", err)
 		}
+		// Closed now, unconditionally, rather than held open into
+		// whatever runs next (the multi-minute UTxO walk below, on a
+		// tip-agreement result): a real cardano-node closes an NtC
+		// session that sits idle that long ("protocol is shutting
+		// down"), observed live against Preview, so a fresh connection is
+		// dialed again right before cardano-node is actually queried
+		// instead. A close failure here does not invalidate the tip read
+		// that already succeeded above, so it is logged rather than
+		// failing the whole check.
+		if closeErr := cardanoTipConn.Close(); closeErr != nil {
+			slog.Warn(
+				"close cardano-node tip connection",
+				"addr", cardanoAddr,
+				"error", closeErr,
+			)
+		}
 		if ok, reason, detail := tipsAgree(dingoTip, cardanoTip); !ok {
-			cardanoTipConn.Close() //nolint:errcheck
 			return &CheckResult{
 				Skipped:    true,
 				SkipReason: reason,
@@ -127,7 +148,6 @@ func Check(
 
 	point, err := targetTip.point()
 	if err != nil {
-		cardanoTipConn.Close() //nolint:errcheck
 		return nil, fmt.Errorf("target point: %w", err)
 	}
 
@@ -135,14 +155,6 @@ func Check(
 	// minutes, and its result's refs are what drive the cardano-node query
 	// below (see QueryReferenceUTxOSnapshot's doc comment for why
 	// cardano-node is no longer asked for its own whole UTxO set at all).
-	// cardanoTipConn is closed now, before Dingo's walk runs, rather than
-	// held open and reused afterward: a real cardano-node closes an NtC
-	// session that sits idle as long as Dingo's walk can take ("protocol is
-	// shutting down"), observed live against Preview, so a fresh connection
-	// is dialed right before cardano-node is actually queried instead.
-	if err := cardanoTipConn.Close(); err != nil {
-		return nil, fmt.Errorf("close cardano-node tip connection: %w", err)
-	}
 	dingoSnap, utxoRefs, err := querySnapshot(dingoConn, &point)
 	if err != nil {
 		return nil, fmt.Errorf("dingo snapshot: %w", err)
