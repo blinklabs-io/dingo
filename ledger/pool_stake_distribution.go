@@ -339,6 +339,14 @@ func (ls *LedgerState) PoolStakeDistribution(
 			// leadership-schedule for every operator rather than for the one
 			// pool concerned. The same reasoning keeps chainDepStateLabNonce
 			// serving a slightly stale value instead of aborting.
+			//
+			// Also counted on a metric (blinklabs-io/dingo#4152), not just
+			// logged: a WARN line is easy to miss in normal operation, and
+			// this specific omission is what let a real cross-node
+			// comparison against cardano-node go unnoticed until a manual
+			// diff was run. A rising or persistently nonzero value here is
+			// visible to an operator's existing alerting without one.
+			ls.metrics.incPoolStakeDistributionOmittedPool()
 			ls.config.Logger.Warn(
 				"omitting pool with snapshot stake but no registration",
 				"pool", hex.EncodeToString(pkh.Bytes()),
