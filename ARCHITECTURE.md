@@ -4581,7 +4581,83 @@ bodies that still fail reach the ordinary validation and recovery guards
 unchanged. Arming only after an aligned rollback is both the cost gate — a
 healthy node never runs the per-input probes on the steady-state blockfetch
 path — and what makes the check sound, since every later block then arrives
-through the window. Each arming inspects at most
+through the window. Fork churn can re-arm the audit before a body an earlier
+window already vetted is durably applied, since ledger apply lags blockfetch by
+design, so a rearm carries forward the producers that its own rollback left on
+the chain: those recorded from blocks at or below the new rollback point, and
+only while the prior window's fork point is still resolvable on the primary
+chain at its recorded slot. Those blocks are neither truncated nor re-fetched,
+so nothing else would record them again, and discarding them is what reported a
+spend of their outputs as a false missing-producer splice (issue #4102).
+Producers recorded above the new rollback point are dropped: that rollback
+deleted their blocks, so a body spending them is the splice the audit exists to
+report, and the blocks that do belong above the point are re-delivered and
+re-recorded. An endorser block's transactions are recorded against the slot of
+the ranking block that carries the reference, since that is the block whose
+truncation takes them off the chain, and a producer offered at two slots keeps
+the lower one.
+
+Endorser-block references travel with the producers, on the same rule and keyed
+by the same slot, because nothing re-queues a reference for a block the
+rollback left on the chain — that block is not re-fetched. The already-merged
+memo is not carried, since re-merging a closure is idempotent and a stale memo
+would suppress a merge the new window needs. The queue is carried under its own
+lock, together with whatever a drain has in flight: a drain empties the queue,
+probes what it took and rebuilds it from the blockfetch goroutine, so a rearm
+reading only the queue would carry none of the references being probed. A
+reference the audit gave up on for good is carried too, as the slot it was
+dropped at: it never becomes a queued reference and nothing re-queues it, so
+only that record keeps the next window from reporting the closure's producers
+as missing.
+
+One lock owns every transition of the window pointer and every recording of a
+producer into the window it publishes. Arming reads the outgoing window,
+recovery clears and restores it, and blockfetch records into it, from
+goroutines that share no other lock; the atomic pointer makes each access safe
+on its own but does not order the sequence. Without that ownership a rearm
+landing between the blockfetch handler's read of the pointer and its recording
+snapshots a set the block is not in yet and the recording lands in a window
+nothing reads again — the producer is lost although its block is on the chain,
+which is the report this carry-forward exists to prevent. Producers are
+therefore recorded against the window published at the moment of recording, and
+a body that reaches a window it was not audited against must prove primary-chain
+membership at its own point first. Membership is always tested against the
+primary chain rather than by block presence, since a block the node has
+abandoned can outlive its place on the chain. A membership read that fails
+establishes nothing either way, so the rearm's carry-forward, a body recorded
+below the fork point, and a body reaching a replaced window each disarm the
+window and log at `Warn` instead: a window left in service without producers
+it could not vouch for reports their spends as missing producers at `ERROR`.
+The lock is never held across a chain truncation or a blockfetch drain.
+
+A body whose window was replaced while it was being audited stops there rather
+than finishing against the window it loaded. Its producers went into the
+published window, so the window it holds no longer contains them, and a later
+transaction in the same body spending an earlier one's output would be reported
+as a cross-fork splice against the node's own block. The endorser-block
+reference a body carries is committed with its producers, on the same
+membership test and for the same reason: a cert-driven ranking block's body is
+empty, so the reference is the only thing it offers.
+
+Recovery rewinds truncate the primary chain outside this path, so they clear
+the window for the duration and settle it afterwards from the pointer as it
+then stands: a window armed while the rewind ran is kept unless the truncation
+removed the block its fork point names, and otherwise the cleared window is
+restored only when the descent reports that no step committed and the primary
+chain tip has not regressed. Several refusals precede the first truncation, and
+on those the window still describes the chain unchanged. Nothing serialises the
+rewind against blockfetch, so the tip also moves forward underneath it; an
+append deletes nothing, and reading one as a truncation discards a window the
+rewind left entirely valid. The restore is refused outright when anything else
+moved the window pointer while the rewind ran. A nil pointer reads the same
+whether the rewind still owns the clear or a rollback has disarmed since, and
+every disarm follows a committed truncation or a failed membership read,
+neither of which a restore may undo, so a generation counted on
+every transition of the pointer is what keeps a rewind from undoing another
+owner's decision. That holds only while every other truncation of the primary
+chain moves the pointer, so the divergence reconciler's rewind to a common
+ancestor disarms the window too, unless the rewind is refused before deleting
+anything. Each arming inspects at most
 `continuationAuditBlockBudget` bodies and retains at most
 `continuationAuditMaxProducedTxs` in-window producers; reaching that producer
 cap disarms the window, logs at `Warn` and counts `disarmed_cap`, so "the audit
