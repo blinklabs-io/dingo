@@ -53,6 +53,7 @@ var importBoundaryRules = []importBoundaryRule{
 			".",
 			"ledger",
 			"mempool",
+			"dmq",
 			"connmanager",
 			"peergov",
 			"ouroboros",
@@ -62,7 +63,7 @@ var importBoundaryRules = []importBoundaryRule{
 			"api",
 		},
 		reason: "database and storage plugins sit below ledger, mempool, " +
-			"networking, node composition, and API packages",
+			"dmq, networking, node composition, and API packages",
 	},
 }
 
