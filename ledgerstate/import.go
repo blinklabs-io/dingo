@@ -182,11 +182,16 @@ type ParsedUTxO struct {
 	StakingKey    []byte // 28 bytes, extracted from address
 	CredentialTag uint8  // stake credential tag: 0 key hash, 1 script hash
 	PaymentScript bool   // true when payment credential is a script hash
-	Amount        uint64 // lovelace
-	Assets        []ParsedAsset
-	DatumHash     []byte // optional
-	Datum         []byte // optional inline datum CBOR
-	ScriptRef     []byte // optional reference script CBOR
+	// Pointer is the certificate position named by a pointer address. Pointer
+	// outputs have no staking credential in their address; the stake query
+	// resolves this position against certificate history at the evaluation
+	// slot.
+	Pointer   *models.UtxoPointer
+	Amount    uint64 // lovelace
+	Assets    []ParsedAsset
+	DatumHash []byte // optional
+	Datum     []byte // optional inline datum CBOR
+	ScriptRef []byte // optional reference script CBOR
 }
 
 // ParsedAsset represents a native asset within a UTxO.
