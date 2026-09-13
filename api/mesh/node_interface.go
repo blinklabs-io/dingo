@@ -56,6 +56,14 @@ type MeshLedgerState interface {
 	) ([]models.Utxo, error)
 }
 
+// MeshSyncProgress is an optional ledger capability for network/status.
+// Progress is between 0 (unknown) and 1 (applied ledger caught up with the
+// known upstream target), matching ledger.LedgerState.SyncProgress.
+// It does not establish peer freshness or node readiness.
+type MeshSyncProgress interface {
+	SyncProgress() float64
+}
+
 // MeshMempool is the subset of mempool.Mempool needed by the Mesh server.
 type MeshMempool interface {
 	AddTransaction(txType uint, txBytes []byte) error

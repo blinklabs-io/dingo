@@ -78,6 +78,8 @@ import (
 func TestCalculateEpochNonce_TPraosToPraosUsesSourceEpochStabilityWindow(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)

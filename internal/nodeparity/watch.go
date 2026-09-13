@@ -232,7 +232,10 @@ func watchSession(
 	// so Watcher.Close, which waits for it) blocked indefinitely. Closing
 	// conn the instant ctx is cancelled unblocks whichever call is in
 	// flight immediately.
-	stopOnCancel := context.AfterFunc(ctx, func() { conn.Close() }) //nolint:errcheck
+	stopOnCancel := context.AfterFunc(
+		ctx,
+		func() { conn.Close() },
+	) //nolint:errcheck
 	defer stopOnCancel()
 
 	cs := conn.ChainSync()

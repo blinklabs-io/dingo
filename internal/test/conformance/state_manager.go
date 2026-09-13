@@ -151,6 +151,15 @@ type DingoStateManager struct {
 	// state_manager_mysql.go.
 	wipeMetadata func() error
 
+	// wipeBlob, when set, empties the local blob store in place. It pairs
+	// with wipeMetadata: database.New checks that the blob store's commit
+	// timestamp and the metadata store's agree, so a Reset that emptied one
+	// side and not the other would leave a pairing neither side caused.
+	// Only the sqlite backend sets it -- the remote backends deliberately
+	// share one process-wide blob directory across every vector (see
+	// state_manager_postgres.go's postgresProcessBlobDir).
+	wipeBlob func() error
+
 	// closeExtra, when set, releases backend-scoped resources the manager
 	// owns beyond its database -- currently the long-lived admin connection
 	// backendResetter holds so Reset does not reconnect per vector (see
@@ -205,11 +214,18 @@ func NewDingoStateManager() (*DingoStateManager, error) {
 // survives a restart (see state_manager_backend_test.go); NewDingoStateManager
 // uses it with a manager-owned temp directory.
 func newDingoStateManagerAt(dataDir string) (*DingoStateManager, error) {
-	return newDingoStateManager(realBackendOptions{
+	m, err := newDingoStateManager(realBackendOptions{
 		dataDir:          dataDir,
 		metadataName:     "sqlite",
 		registerMetadata: sqlite.RegisterProvider,
 	})
+	if err != nil {
+		return nil, err
+	}
+	if err := installSqliteResetHooks(m, dataDir); err != nil {
+		return nil, errors.Join(err, m.Close())
+	}
+	return m, nil
 }
 
 // Close releases state-manager resources: the database, its provider host,
@@ -258,18 +274,40 @@ func (m *DingoStateManager) Reset() error {
 	// database/plugin/metadata/postgres's own concurrently running
 	// tests' tables in the shared dingo_test database.
 	//
-	// wipeMetadata (postgres/mysql) truncates every table in this
-	// suite's own schema/database in place, over the live connection
-	// pool, and does not close/reopen the store: a full close-and-reopen
-	// (re-running real migrations) against a remote server is correct
-	// but, at one vector per Reset call across the whole vector suite,
-	// far too slow -- each migration statement is a real network round
-	// trip. sqlite has no wipeMetadata (its Resettable.Reset is a
-	// documented no-op and there's no live schema/database name to
-	// truncate against a shared server), so it always takes the
-	// close-and-reopen path, which is cheap for a local file store.
-	if m.wipeMetadata != nil {
-		return m.wipeMetadata()
+	// wipeMetadata truncates every dirty table in this suite's own
+	// schema/database in place, over the live connection pool, and does not
+	// close/reopen the store: a full close-and-reopen re-runs real
+	// migrations, and at one Reset per vector across the whole corpus that
+	// is far too slow. For postgres/mysql each migration statement is a real
+	// network round trip; for sqlite it is ~260 local DDL statements (80
+	// CREATE TABLE, 180 CREATE INDEX). Measured under -race before this
+	// path existed, sqlite's Reset averaged 712ms with a CPU profile
+	// attributing 76.9% to migrations.Run/execDDL; in place it averages
+	// 12ms, and the package fell from 656s to 178s.
+	//
+	// sqlite pairs wipeMetadata with wipeBlob because it owns its blob
+	// store: the two must be emptied together or database.New's
+	// blob-versus-metadata commit-timestamp check sees a pairing neither
+	// side caused. The remote backends set no wipeBlob -- they share one
+	// process-wide blob directory across every vector by design (see
+	// state_manager_postgres.go).
+	//
+	// reopenBackend remains the fallback for any future backend that sets
+	// neither hook.
+	// The two hooks are checked independently: a backend that sets only one
+	// still gets that half emptied, rather than silently skipping it because
+	// its partner is nil.
+	if m.wipeMetadata != nil || m.wipeBlob != nil {
+		var errs []error
+		if m.wipeMetadata != nil {
+			errs = append(errs, m.wipeMetadata())
+		}
+		// Runs even when wipeMetadata failed: leaving the blob store
+		// populated as well would compound a half-cleared backend.
+		if m.wipeBlob != nil {
+			errs = append(errs, m.wipeBlob())
+		}
+		return errors.Join(errs...)
 	}
 	return m.reopenBackend()
 }

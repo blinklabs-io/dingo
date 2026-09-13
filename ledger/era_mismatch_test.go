@@ -41,6 +41,8 @@ func mustHex(t *testing.T, s string) []byte {
 }
 
 func TestNewEraMismatchError_Fields(t *testing.T) {
+	t.Parallel()
+
 	got := newEraMismatchError(eras.ShelleyEraDesc.Id, eras.ByronEraDesc.Id)
 	require.NotNil(t, got)
 	assert.Equal(t, uint8(eras.ShelleyEraDesc.Id), got.OtherEra.Index)
@@ -55,6 +57,8 @@ func TestNewEraMismatchError_Fields(t *testing.T) {
 // Haskell node would emit. Compare against
 // IntersectMBO/ouroboros-consensus golden ApplyTxErr_WrongEraByron.
 func TestNewEraMismatchError_EncodesGoldenBytes(t *testing.T) {
+	t.Parallel()
+
 	got := newEraMismatchError(eras.ShelleyEraDesc.Id, eras.ByronEraDesc.Id)
 	encoded, err := cbor.Encode(got)
 	require.NoError(t, err)
@@ -68,6 +72,8 @@ func TestNewEraMismatchError_EncodesGoldenBytes(t *testing.T) {
 // encodeRejectReason uses errors.As to pick out the typed reason
 // regardless of wrapping depth.
 func TestNewEraMismatchError_AsErrorWithWrap(t *testing.T) {
+	t.Parallel()
+
 	em := newEraMismatchError(eras.ShelleyEraDesc.Id, eras.ByronEraDesc.Id)
 	var err error = em
 	var got *gledger.EraMismatch
@@ -80,6 +86,8 @@ func TestNewEraMismatchError_AsErrorWithWrap(t *testing.T) {
 // error (with a fallback name) rather than panicking. This matches the
 // behaviour of the prior fmt.Errorf path's "unknown(%d)" fallback.
 func TestNewEraMismatchError_UnknownEraIdSurvives(t *testing.T) {
+	t.Parallel()
+
 	got := newEraMismatchError(99, eras.ConwayEraDesc.Id)
 	require.NotNil(t, got)
 	assert.Equal(t, uint8(99), got.OtherEra.Index)
@@ -92,6 +100,8 @@ func TestNewEraMismatchError_UnknownEraIdSurvives(t *testing.T) {
 // name both eras for human-readable diagnostics in mempool / forging
 // logs.
 func TestNewEraMismatchError_ErrorStringMentionsBothEras(t *testing.T) {
+	t.Parallel()
+
 	got := newEraMismatchError(eras.ShelleyEraDesc.Id, eras.ByronEraDesc.Id)
 	msg := got.Error()
 	assert.Contains(t, msg, "Byron")
@@ -114,6 +124,8 @@ func TestNewEraMismatchError_ErrorStringMentionsBothEras(t *testing.T) {
 // from dingo validation to a remote peer's decoder produces structured
 // data, not the unstructured strings the chain emitted before.
 func TestEraMismatchInterop_FullChain(t *testing.T) {
+	t.Parallel()
+
 	// Step 1: dingo produces typed error
 	original := newEraMismatchError(
 		eras.ShelleyEraDesc.Id,

@@ -74,6 +74,8 @@ func twoPoolSnapshot() *ParsedSnapShot {
 // a path that returns an error rather than skipping when it does not — which
 // would fail the epoch rollover outright.
 func TestDeriveRewardInputsReconciles(t *testing.T) {
+	t.Parallel()
+
 	bundle := deriveRewardInputs(twoPoolSnapshot(), nil, 1385, 119_750_400, 0)
 	require.NotNil(t, bundle)
 	require.NoError(t, bundle.validate())
@@ -123,6 +125,8 @@ func TestDeriveRewardInputsReconciles(t *testing.T) {
 // partially populated when the seeding runs, and neither is visible in the
 // result.
 func TestDeriveRewardInputsRejectsUnattributableStake(t *testing.T) {
+	t.Parallel()
+
 	snap := twoPoolSnapshot()
 	orphan := hex28(0x31)
 	snap.Stake[orphan] = 9_000
@@ -138,6 +142,8 @@ func TestDeriveRewardInputsRejectsUnattributableStake(t *testing.T) {
 // Zero-stake credentials are rejected by the ledger's validator, so they must
 // never reach it.
 func TestDeriveRewardInputsDropsZeroStake(t *testing.T) {
+	t.Parallel()
+
 	snap := twoPoolSnapshot()
 	idle := hex28(0x41)
 	snap.Stake[idle] = 0
@@ -153,6 +159,8 @@ func TestDeriveRewardInputsDropsZeroStake(t *testing.T) {
 // the snapshot reports above 1 is the kind of thing it must catch: the ledger
 // rejects it on read, and on that path a rejection fails the rollover.
 func TestDerivedRewardInputsGateRejectsBadMargin(t *testing.T) {
+	t.Parallel()
+
 	snap := twoPoolSnapshot()
 	pool := snap.PoolParams[hex28(0xAA)]
 	if pool == nil {
@@ -168,6 +176,8 @@ func TestDerivedRewardInputsGateRejectsBadMargin(t *testing.T) {
 
 // A pool key of the wrong length is likewise refused rather than written.
 func TestDerivedRewardInputsGateRejectsBadPoolKey(t *testing.T) {
+	t.Parallel()
+
 	snap := twoPoolSnapshot()
 	pool := snap.PoolParams[hex28(0xAA)]
 	if pool == nil {
@@ -183,6 +193,8 @@ func TestDerivedRewardInputsGateRejectsBadPoolKey(t *testing.T) {
 // The gate must catch a totals mismatch, which is the failure mode a future
 // edit to the derivation is most likely to introduce.
 func TestDerivedRewardInputsGateRejectsTotalsMismatch(t *testing.T) {
+	t.Parallel()
+
 	bundle := deriveRewardInputs(twoPoolSnapshot(), nil, 1385, 1, 0)
 	require.NotNil(t, bundle)
 	require.NoError(t, bundle.validate())
@@ -201,6 +213,8 @@ func TestDerivedRewardInputsGateRejectsTotalsMismatch(t *testing.T) {
 // key-hash credentials, so a real-snapshot test cannot distinguish a preserved
 // tag from a hardcoded zero.
 func TestDeriveRewardInputsPreservesScriptCredentialType(t *testing.T) {
+	t.Parallel()
+
 	snap := twoPoolSnapshot()
 	scriptCred := hex28(0x51)
 	snap.Stake[scriptCred] = 3_000

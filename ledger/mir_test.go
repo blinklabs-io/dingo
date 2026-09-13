@@ -125,6 +125,8 @@ func applyMIRCertsErr(
 func TestApplyMIRCerts_DistributionFromReserves_RegisteredAccount(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, db, gdb := newMIRTestLedger(t)
 
 	const (
@@ -171,6 +173,8 @@ func TestApplyMIRCerts_DistributionFromReserves_RegisteredAccount(
 // folded into the single credit cardano-ledger's InstantaneousRewards map
 // produces, rather than one journal event per certificate.
 func TestApplyMIRCerts_MultipleDistributionsSameAccount(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newMIRTestLedger(t)
 
 	const (
@@ -230,6 +234,8 @@ func TestApplyMIRCerts_MultipleDistributionsSameAccount(t *testing.T) {
 // separate maps, so folding is per pot and both credits must survive the
 // journal's (tx_hash, credential, slot) idempotency key.
 func TestApplyMIRCerts_ReservesAndTreasuryStayDistinct(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newMIRTestLedger(t)
 
 	const (
@@ -315,6 +321,8 @@ ORDER BY id ASC`,
 // than the pot reaches its no-op branch; failing would wedge the node, since
 // the stored certificates are re-read and re-fail on every retry.
 func TestApplyMIRCerts_DistributionTotalBeyondEveryPotIsNoOp(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newMIRTestLedger(t)
 
 	maxUint := ^uint64(0)
@@ -360,6 +368,8 @@ func TestApplyMIRCerts_DistributionTotalBeyondEveryPotIsNoOp(t *testing.T) {
 func TestApplyMIRCerts_DistributionFromTreasury_RegisteredAccount(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, db, gdb := newMIRTestLedger(t)
 
 	const (
@@ -404,6 +414,8 @@ func TestApplyMIRCerts_DistributionFromTreasury_RegisteredAccount(
 // TestApplyMIRCerts_DistributionUnregisteredAccount verifies that an
 // unregistered credential is silently skipped — no pot debit, no error.
 func TestApplyMIRCerts_DistributionUnregisteredAccount(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newMIRTestLedger(t)
 
 	cred := mirCred28(0x33) // no Account row seeded
@@ -434,6 +446,8 @@ func TestApplyMIRCerts_DistributionUnregisteredAccount(t *testing.T) {
 // TestApplyMIRCerts_PotTransferReservesToTreasury verifies that a pot-to-pot
 // MIR with sourcePot=Reserves moves coins from reserves to treasury.
 func TestApplyMIRCerts_PotTransferReservesToTreasury(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newMIRTestLedger(t)
 
 	const transfer = uint64(2_000)
@@ -454,6 +468,8 @@ func TestApplyMIRCerts_PotTransferReservesToTreasury(t *testing.T) {
 // TestApplyMIRCerts_PotTransferTreasuryToReserves verifies sourcePot=Treasury
 // moves coins from treasury to reserves.
 func TestApplyMIRCerts_PotTransferTreasuryToReserves(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newMIRTestLedger(t)
 
 	const transfer = uint64(1_500)
@@ -472,6 +488,8 @@ func TestApplyMIRCerts_PotTransferTreasuryToReserves(t *testing.T) {
 }
 
 func TestApplyMIRCerts_PotTransferOverflow(t *testing.T) {
+	t.Parallel()
+
 	maxUint := ^uint64(0)
 
 	t.Run("reserves to treasury", func(t *testing.T) {
@@ -506,6 +524,8 @@ func TestApplyMIRCerts_PotTransferOverflow(t *testing.T) {
 // TestApplyMIRCerts_OutsideEpochRange verifies that a MIR cert submitted
 // before epochStartSlot or at/after boundarySlot is not applied.
 func TestApplyMIRCerts_OutsideEpochRange(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newMIRTestLedger(t)
 
 	cred := mirCred28(0x44)
@@ -554,6 +574,8 @@ func TestApplyMIRCerts_OutsideEpochRange(t *testing.T) {
 // reversed by deleting AccountRewardDelta and NetworkState rows after slot,
 // and re-application produces the same outcome.
 func TestApplyMIRCerts_Rollback(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newMIRTestLedger(t)
 
 	const (
@@ -616,6 +638,8 @@ func TestApplyMIRCerts_Rollback(t *testing.T) {
 // TestApplyMIRCerts_NoOp verifies that an epoch with no MIR certs leaves
 // state completely untouched.
 func TestApplyMIRCerts_NoOp(t *testing.T) {
+	t.Parallel()
+
 	ls, db, _ := newMIRTestLedger(t)
 
 	require.NoError(t, db.Metadata().SetNetworkState(2_000, 9_000, 50, nil))
@@ -637,6 +661,8 @@ func TestApplyMIRCerts_NoOp(t *testing.T) {
 // against the available pot and returns the epoch state unchanged when it does
 // not fit, so an over-budget certificate must not abort the rollover.
 func TestApplyMIRCerts_OverBudgetReservesIsNoOp(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newMIRTestLedger(t)
 
 	cred := mirCred28(0x61)
@@ -675,6 +701,8 @@ func TestApplyMIRCerts_OverBudgetReservesIsNoOp(t *testing.T) {
 // availableReserves`, so an exact-budget certificate is applied and drains the
 // pot to zero.
 func TestApplyMIRCerts_ExactBudgetApplies(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newMIRTestLedger(t)
 
 	cred := mirCred28(0x62)
@@ -718,6 +746,8 @@ func TestApplyMIRCerts_ExactBudgetApplies(t *testing.T) {
 // certificate must not be applied when a sibling pushes the epoch total over
 // the pot.
 func TestApplyMIRCerts_OverBudgetIsAggregateAcrossCerts(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newMIRTestLedger(t)
 
 	credA := mirCred28(0x63)
@@ -769,6 +799,8 @@ func TestApplyMIRCerts_OverBudgetIsAggregateAcrossCerts(t *testing.T) {
 // so credits to unregistered credentials must not make an affordable
 // distribution look over budget.
 func TestApplyMIRCerts_BudgetExcludesUnregisteredCredentials(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newMIRTestLedger(t)
 
 	registered := mirCred28(0x65)
@@ -809,6 +841,8 @@ func TestApplyMIRCerts_BudgetExcludesUnregisteredCredentials(t *testing.T) {
 func TestApplyMIRCerts_OverBudgetTreasuryBlocksReservesDistribution(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, db, gdb := newMIRTestLedger(t)
 
 	reservesCred := mirCred28(0x67)
@@ -859,6 +893,8 @@ func TestApplyMIRCerts_OverBudgetTreasuryBlocksReservesDistribution(
 // the distribution check, matching cardano-ledger's `availableReserves =
 // reserves + deltaReserves`.
 func TestApplyMIRCerts_PotTransferCountsTowardAvailablePot(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newMIRTestLedger(t)
 
 	cred := mirCred28(0x69)
@@ -898,6 +934,8 @@ func TestApplyMIRCerts_PotTransferCountsTowardAvailablePot(t *testing.T) {
 // branch returns the original ChainAccountState, so the deltas that were only
 // ever folded into `available` are not written.
 func TestApplyMIRCerts_OverBudgetDropsPotTransfer(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newMIRTestLedger(t)
 
 	cred := mirCred28(0x6a)
@@ -936,6 +974,8 @@ func TestApplyMIRCerts_OverBudgetDropsPotTransfer(t *testing.T) {
 // Coin, so a net outflow larger than the pot makes `totR <= availableReserves`
 // false and the rule takes its no-op branch.
 func TestApplyMIRCerts_PotTransferLargerThanPotIsNoOp(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newMIRTestLedger(t)
 
 	seedMIRPotTransfer(t, gdb, mirPotReserves, 5_000, 200)
@@ -959,6 +999,8 @@ func TestApplyMIRCerts_PotTransferLargerThanPotIsNoOp(t *testing.T) {
 // so a later negative delta reduces an earlier positive one and the boundary
 // credits only the fold.
 func TestApplyMIRCerts_NegativeDeltaReducesEarlierCredit(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newMIRTestLedger(t)
 
 	const (
@@ -1022,6 +1064,8 @@ func TestApplyMIRCerts_NegativeDeltaReducesEarlierCredit(t *testing.T) {
 func TestApplyMIRCerts_NegativeDeltaCancellingCreditWritesNothing(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, db, gdb := newMIRTestLedger(t)
 
 	cred := mirCred28(0x72)
@@ -1067,6 +1111,8 @@ func TestApplyMIRCerts_NegativeDeltaCancellingCreditWritesNothing(
 // magnitudes would make this boundary look over-budget and drop a distribution
 // the pot can cover.
 func TestApplyMIRCerts_NegativeDeltaExcludedFromBudget(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newMIRTestLedger(t)
 
 	cred := mirCred28(0x73)
@@ -1112,6 +1158,8 @@ func TestApplyMIRCerts_NegativeDeltaExcludedFromBudget(t *testing.T) {
 // boundary discards the whole set rather than crediting a debit the reward
 // account cannot carry, and the epoch rollover still succeeds.
 func TestApplyMIRCerts_NetNegativeDeltaDiscardsBoundary(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newMIRTestLedger(t)
 
 	negativeCred := mirCred28(0x74)

@@ -40,6 +40,8 @@ import (
 // Byron-era unavailability surfaces as a sentinel callers can branch on, not
 // as an opaque string that every caller has to treat as an internal fault.
 func TestCurrentProtocolParams_ByronEraSentinel(t *testing.T) {
+	t.Parallel()
+
 	adapter, _, _ := newDBBackedAdapter(t)
 	require.Nil(
 		t,
@@ -65,6 +67,8 @@ func TestCurrentProtocolParams_ByronEraSentinel(t *testing.T) {
 // — that reads as a node fault and trips alerting. 404 matches the
 // ErrEpochNotFound precedent already established for absent epoch data.
 func TestHandleLatestEpochParams_ByronEraNotFound(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{paramsErr: ErrProtocolParamsUnavailable}
 	b := newTestBlockfrost(mock)
 
@@ -86,6 +90,8 @@ func TestHandleLatestEpochParams_ByronEraNotFound(t *testing.T) {
 // TestHandleLatestEpochParams_OtherErrorsStillInternal keeps the Byron carve-
 // out narrow: a genuine conversion or storage failure must still be a 500.
 func TestHandleLatestEpochParams_OtherErrorsStillInternal(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{paramsErr: assert.AnError}
 	b := newTestBlockfrost(mock)
 
@@ -104,6 +110,8 @@ func TestHandleLatestEpochParams_OtherErrorsStillInternal(t *testing.T) {
 // path's fallback. With no epoch row for the slot it consults the current
 // pparams, and a Byron prefix leaves that nil.
 func TestProtocolParamsForSlot_ByronEraSentinel(t *testing.T) {
+	t.Parallel()
+
 	adapter, _, _ := newDBBackedAdapter(t)
 
 	pparams, err := adapter.protocolParamsForSlot(0)
@@ -118,6 +126,8 @@ func TestProtocolParamsForSlot_ByronEraSentinel(t *testing.T) {
 // that genuinely configured drep_activity to 0, and drepStatus then derives
 // expiry epochs from a value nobody set.
 func TestDrepInactivityPeriod_UnavailableIsNotZero(t *testing.T) {
+	t.Parallel()
+
 	adapter, _, _ := newDBBackedAdapter(t)
 
 	period, ok := adapter.drepInactivityPeriod()
@@ -137,6 +147,8 @@ func TestDrepInactivityPeriod_UnavailableIsNotZero(t *testing.T) {
 func TestDrepInactivityFromPParams_DistinguishesUnavailableFromZero(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	for _, tc := range []struct {
 		name       string
 		pparams    lcommon.ProtocolParameters
@@ -195,6 +207,8 @@ func TestDrepInactivityFromPParams_DistinguishesUnavailableFromZero(
 // defines no drep_activity, and one that set it to 0 so DReps expire the epoch
 // they last acted. Only the availability flag separates them.
 func TestDrepStatus_UsesAvailabilityNotZeroSentinel(t *testing.T) {
+	t.Parallel()
+
 	const (
 		lastActivity = uint64(10)
 		currentEpoch = uint64(12)
@@ -293,6 +307,8 @@ func TestDrepStatus_UsesAvailabilityNotZeroSentinel(t *testing.T) {
 // nil-current-pparams branch reports, so it must carry the same sentinel
 // rather than an untyped "decoded protocol parameters are nil".
 func TestProtocolParamsForSlot_ByronEpochRowSentinel(t *testing.T) {
+	t.Parallel()
+
 	adapter, store, _ := newDBBackedAdapter(t)
 
 	_, err := store.Exec(`
@@ -334,6 +350,8 @@ VALUES (?, ?, ?, ?)`,
 // Reporting "epoch not found" tells a caller something false about the node's
 // contents.
 func TestEpochProtocolParams_ByronEpochReportsParamsNotEpoch(t *testing.T) {
+	t.Parallel()
+
 	adapter, store, _ := newDBBackedAdapter(t)
 	insertByronEpoch(t, store, 0)
 
@@ -354,6 +372,8 @@ func TestEpochProtocolParams_ByronEpochReportsParamsNotEpoch(t *testing.T) {
 // meaningful in the other direction: an epoch the node genuinely does not
 // hold must still report ErrEpochNotFound.
 func TestEpochProtocolParams_MissingEpochStillNotFound(t *testing.T) {
+	t.Parallel()
+
 	adapter, _, _ := newDBBackedAdapter(t)
 
 	_, err := adapter.EpochProtocolParams(999)
@@ -369,6 +389,8 @@ func TestEpochProtocolParams_MissingEpochStillNotFound(t *testing.T) {
 // that today, which makes this a guard against a future reordering rather
 // than a live defect.
 func TestEpochProtocolParams_ByronRowDoesNotCallNilDecoder(t *testing.T) {
+	t.Parallel()
+
 	adapter, store, _ := newDBBackedAdapter(t)
 	insertByronEpoch(t, store, 0)
 	// A Byron parameter row should never exist, but if one did the decode
@@ -393,6 +415,8 @@ VALUES (?, ?, ?, ?)`,
 // with errors; this sibling handler logged every Byron-epoch query at Error
 // before reaching its not-found branch.
 func TestHandleEpochParams_ByronEpochNotFoundNotLoggedAsError(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range []struct {
 		name string
 		err  error
@@ -435,6 +459,8 @@ func TestHandleEpochParams_ByronEpochNotFoundNotLoggedAsError(t *testing.T) {
 // TestHandleEpochParams_RealFailureStillLogsError keeps that carve-out
 // narrow: a genuine failure must still be a logged 500.
 func TestHandleEpochParams_RealFailureStillLogsError(t *testing.T) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(
 		&buf,

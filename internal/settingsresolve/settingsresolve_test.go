@@ -107,6 +107,9 @@ func seedDatabase(t *testing.T, gates map[string]string) string {
 	return dir
 }
 
+// No test in this package calls t.Parallel: settingsresolve.Apply ends in
+// config.PublishConfig, which replaces internal/config's process-global
+// globalConfig, and the assertions here read it back.
 func TestApplyResumesNetworkFromDefault(t *testing.T) {
 	isolateConfigSnapshot(t)
 	dir := seedDatabase(t, map[string]string{"network": "preprod"})

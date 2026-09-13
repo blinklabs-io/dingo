@@ -38,6 +38,8 @@ import (
 )
 
 func TestLedgerViewUnimplementedMethodsReturnSentinelError(t *testing.T) {
+	t.Parallel()
+
 	lv := &LedgerView{}
 
 	rewards, err := lv.CalculateRewards(
@@ -64,6 +66,8 @@ func TestLedgerViewUnimplementedMethodsReturnSentinelError(t *testing.T) {
 }
 
 func TestLedgerViewRewardAccountBalance(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	key := bytes.Repeat([]byte{0xa1}, lcommon.AddressHashSize)
@@ -137,6 +141,8 @@ func TestLedgerViewRewardAccountBalance(t *testing.T) {
 }
 
 func TestLedgerViewStakeCredentialDeposit(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	sharedHash := bytes.Repeat([]byte{0xb1}, lcommon.AddressHashSize)
@@ -365,6 +371,8 @@ func persistViewStakeRegistration(
 // internal/test/conformance/state_provider.go, which this adapter's own
 // review caught duplicating this same defect from.
 func TestLedgerViewPoolCurrentStatePendingRetirement(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	lv := &LedgerView{
@@ -467,6 +475,8 @@ func TestLedgerViewPoolCurrentStatePendingRetirement(t *testing.T) {
 }
 
 func TestLedgerViewSkipPhase2Validation(t *testing.T) {
+	t.Parallel()
+
 	lv := &LedgerView{}
 	require.False(t, lv.SkipPhase2Validation())
 
@@ -481,6 +491,8 @@ func TestLedgerViewSkipPhase2Validation(t *testing.T) {
 // for the *LedgerView actually passed to ValidateTx*, silently disabling the
 // pool-margin-floor certificate rule.
 func TestLedgerViewMinPoolMargin(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	lv := &LedgerView{ls: ls}
 	require.Nil(t, lv.MinPoolMargin())
@@ -490,11 +502,15 @@ func TestLedgerViewMinPoolMargin(t *testing.T) {
 }
 
 func TestExtractCostModelsFromPParams_Nil(t *testing.T) {
+	t.Parallel()
+
 	result := extractCostModelsFromPParams(nil)
 	require.Empty(t, result)
 }
 
 func TestExtractCostModelsFromPParams_Alonzo(t *testing.T) {
+	t.Parallel()
+
 	pp := &alonzo.AlonzoProtocolParameters{
 		CostModels: map[uint][]int64{
 			0: {100, 200, 300},
@@ -507,6 +523,8 @@ func TestExtractCostModelsFromPParams_Alonzo(t *testing.T) {
 }
 
 func TestExtractCostModelsFromPParams_Babbage(t *testing.T) {
+	t.Parallel()
+
 	pp := &babbage.BabbageProtocolParameters{
 		CostModels: map[uint][]int64{
 			0: {100, 200, 300},
@@ -522,6 +540,8 @@ func TestExtractCostModelsFromPParams_Babbage(t *testing.T) {
 }
 
 func TestExtractCostModelsFromPParams_Conway(t *testing.T) {
+	t.Parallel()
+
 	pp := &conway.ConwayProtocolParameters{
 		CostModels: map[uint][]int64{
 			0: {100, 200, 300},
@@ -540,6 +560,8 @@ func TestExtractCostModelsFromPParams_Conway(t *testing.T) {
 }
 
 func TestExtractCostModelsFromPParams_NilCostModels(t *testing.T) {
+	t.Parallel()
+
 	pp := &babbage.BabbageProtocolParameters{
 		CostModels: nil,
 	}
@@ -550,6 +572,8 @@ func TestExtractCostModelsFromPParams_NilCostModels(t *testing.T) {
 func TestExtractCostModelsFromPParams_SkipsUnknownVersions(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pp := &conway.ConwayProtocolParameters{
 		CostModels: map[uint][]int64{
 			0: {100},
@@ -565,6 +589,8 @@ func TestExtractCostModelsFromPParams_SkipsUnknownVersions(
 }
 
 func TestCostModels_WithCurrentPParams(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		currentPParams: &conway.ConwayProtocolParameters{
 			CostModels: map[uint][]int64{
@@ -581,6 +607,8 @@ func TestCostModels_WithCurrentPParams(t *testing.T) {
 }
 
 func TestCostModels_NilPParams(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		currentPParams: nil,
 	}
@@ -593,6 +621,8 @@ func TestCostModels_NilPParams(t *testing.T) {
 }
 
 func TestIsCommitteeThresholdMet(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name                 string
 		yesVotes             int

@@ -91,6 +91,8 @@ func newHandleConnManagerClosedTestNode(t *testing.T) *Node {
 func TestHandleConnManagerClosed_NtC_ReleasesChainsyncClientState(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	n := newHandleConnManagerClosedTestNode(t)
 	connId := newNtCTestConnId(1)
 
@@ -116,6 +118,8 @@ func TestHandleConnManagerClosed_NtC_ReleasesChainsyncClientState(
 // for isNtC=false, an NtN close would race two independent RemoveClient
 // calls instead of exactly one.
 func TestHandleConnManagerClosed_NtN_LeavesStateForEventBusPath(t *testing.T) {
+	t.Parallel()
+
 	n := newHandleConnManagerClosedTestNode(t)
 	connId := newNtCTestConnId(2)
 
@@ -136,6 +140,8 @@ func TestHandleConnManagerClosed_NtN_LeavesStateForEventBusPath(t *testing.T) {
 // window (node_lifecycle.go nils n.chainsyncState while rebuilding it) so a
 // late NtC close callback cannot panic.
 func TestHandleConnManagerClosed_NilChainsyncState(t *testing.T) {
+	t.Parallel()
+
 	n := &Node{}
 	require.NotPanics(t, func() {
 		n.handleConnManagerClosed(newNtCTestConnId(3), true, nil)
@@ -155,6 +161,17 @@ func TestHandleConnManagerClosed_NilChainsyncState(t *testing.T) {
 // manager, so the waiter passes the liveness check the same way a live serve
 // does.
 func TestHandleConnManagerClosed_NtC_ReleasesLeiosServeWaiters(t *testing.T) {
+	t.Parallel()
+	testHandleConnManagerClosedReleasesLeiosServeWaiters(t, true)
+}
+
+func TestHandleConnManagerClosed_NtN_ReleasesLeiosServeWaiters(t *testing.T) {
+	t.Parallel()
+	testHandleConnManagerClosedReleasesLeiosServeWaiters(t, false)
+}
+
+func testHandleConnManagerClosedReleasesLeiosServeWaiters(t *testing.T, isNtC bool) {
+	t.Helper()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	n := newHandleConnManagerClosedTestNode(t)
 	bus := event.NewEventBus(nil, logger)
@@ -201,7 +218,7 @@ func TestHandleConnManagerClosed_NtC_ReleasesLeiosServeWaiters(t *testing.T) {
 	// already-closed liveness check.
 	conn, err := ouroboros.NewConnection()
 	require.NoError(t, err)
-	require.True(t, connManager.AddConnection(conn, true, "127.0.0.1:3002"))
+	require.True(t, connManager.AddConnection(conn, isNtC, "127.0.0.1:3002"))
 	connId := conn.Id()
 
 	done, cancel := o.RegisterLeiosServeWaiterForTesting(connId)
@@ -214,13 +231,90 @@ func TestHandleConnManagerClosed_NtC_ReleasesLeiosServeWaiters(t *testing.T) {
 		"waiter must not be released before the close",
 	)
 
-	n.handleConnManagerClosed(connId, true, nil)
+	n.handleConnManagerClosed(connId, isNtC, nil)
 
 	testutil.RequireReceive(
 		t,
 		done,
 		time.Second,
-		"NtC close must release the parked Leios endorser-closure serving wait",
+		"connection close must release the parked Leios serving wait",
+	)
+}
+
+// TestHandleConnManagerClosed_NtC_ReleasesLocalStateQueryAcquiredPoint covers
+// the NtC-close half of blinklabs-io/dingo#382's point-pinning: a client
+// that pins a point and then disconnects without a clean Release must not
+// leak its map entry, since NtC closes never reach
+// Ouroboros.HandleConnClosedEvent (the EventBus's ConnectionClosedEventType
+// is intentionally NtN-only) and localstatequeryServerRelease is therefore
+// never invoked for it. Without ReleaseLocalStateQueryAcquiredPoint wired
+// into handleConnManagerClosed, this assertion fails: the entry
+// SetLocalStateQueryAcquiredPointForTesting seeded is still present after
+// the simulated close.
+func TestHandleConnManagerClosed_NtC_ReleasesLocalStateQueryAcquiredPoint(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	n := newHandleConnManagerClosedTestNode(t)
+	bus := event.NewEventBus(nil, logger)
+	t.Cleanup(bus.Stop)
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) })
+	chainManager, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
+		Database:     db,
+		ChainManager: chainManager,
+		Logger:       logger,
+	})
+	require.NoError(t, err)
+	harnessMempool, err := mempool.NewMempool(mempool.MempoolConfig{
+		Logger:          logger,
+		PromRegistry:    prometheus.NewRegistry(),
+		Validator:       ledgerState,
+		MempoolCapacity: 1024 * 1024,
+	})
+	require.NoError(t, err)
+	connManager := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{Logger: logger},
+	)
+	o, err := ouroborosPkg.NewOuroboros(ouroborosPkg.OuroborosConfig{
+		Logger:         logger,
+		EventBus:       bus,
+		LedgerState:    ledgerState,
+		Mempool:        &mempool.FIFO{Mempool: harnessMempool},
+		ChainsyncState: chainsync.NewState(bus, ledgerState),
+		ConnManager:    connManager,
+		PeerGov: peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
+			Logger:      logger,
+			EventBus:    bus,
+			ConnManager: connManager,
+		}),
+	})
+	require.NoError(t, err)
+	n.ouroborosRef.Store(o)
+
+	connId := newNtCTestConnId(6)
+	o.SetLocalStateQueryAcquiredPointForTesting(connId, ledger.QueryPoint{
+		Slot: 100,
+		Hash: []byte{0xAB},
+	})
+	require.True(
+		t,
+		o.HasLocalStateQueryAcquiredPointForTesting(connId),
+		"precondition: pinned point recorded",
+	)
+
+	n.handleConnManagerClosed(connId, true, nil)
+
+	require.False(
+		t,
+		o.HasLocalStateQueryAcquiredPointForTesting(connId),
+		"NtC close must release the pinned LocalStateQuery point",
 	)
 }
 
@@ -228,6 +322,8 @@ func TestHandleConnManagerClosed_NtC_ReleasesLeiosServeWaiters(t *testing.T) {
 // TestHandleConnManagerClosed_NilChainsyncState for the added ouroboros
 // dereference: n.ouroboros() is nil before Run wires it.
 func TestHandleConnManagerClosed_NilOuroboros(t *testing.T) {
+	t.Parallel()
+
 	n := newHandleConnManagerClosedTestNode(t)
 	require.Nil(t, n.ouroboros())
 	require.NotPanics(t, func() {

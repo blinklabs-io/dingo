@@ -17,6 +17,7 @@ package koiosparity
 import (
 	"context"
 	"encoding/hex"
+	"fmt"
 	"math/big"
 	"testing"
 
@@ -75,6 +76,8 @@ func testPoolKeyHash(t *testing.T, b byte) []byte {
 // deliberately wrong values in every field, so the test fails loudly if
 // GetPoolEpochDataMap regresses to reading the naive same-numbered epoch.
 func TestGetPoolEpochDataMapAlignsRewardScheduleEpochs(t *testing.T) {
+	t.Parallel()
+
 	dingo, gdb := openTestDingoDB(t)
 	defer dingo.Close() //nolint:errcheck
 
@@ -192,6 +195,8 @@ func TestGetPoolEpochDataMapAlignsRewardScheduleEpochs(t *testing.T) {
 // (and wrong) value. FixedCost/Margin are stake-epoch fields and so are
 // unaffected by the param-epoch row's absence (dingo #3484).
 func TestGetPoolEpochDataMapMissingParamEpochRow(t *testing.T) {
+	t.Parallel()
+
 	dingo, gdb := openTestDingoDB(t)
 	defer dingo.Close() //nolint:errcheck
 
@@ -223,6 +228,8 @@ func TestGetPoolEpochDataMapMissingParamEpochRow(t *testing.T) {
 // freshly registered pool's param-epoch row lands before its stake-epoch row
 // does.
 func TestGetPoolEpochDataMapMissingStakeEpochRow(t *testing.T) {
+	t.Parallel()
+
 	dingo, gdb := openTestDingoDB(t)
 	defer dingo.Close() //nolint:errcheck
 
@@ -268,6 +275,8 @@ func TestGetPoolEpochDataMapMissingStakeEpochRow(t *testing.T) {
 // pool key hash round-trips correctly, guarding the low-level building block
 // koiosStakeEpoch/koiosParamEpoch and check.go's checkEpoch rely on.
 func TestGetEpochDataStakeEpochOffset(t *testing.T) {
+	t.Parallel()
+
 	dingo, gdb := openTestDingoDB(t)
 	defer dingo.Close() //nolint:errcheck
 
@@ -301,6 +310,8 @@ func TestGetEpochDataStakeEpochOffset(t *testing.T) {
 // for an epoch, since #3097's per-account parity check will read either one
 // interchangeably.
 func TestDingoDBGetRewardAccountOutputs(t *testing.T) {
+	t.Parallel()
+
 	dingo, gdb := openTestDingoDB(t)
 	defer dingo.Close() //nolint:errcheck
 	stakingKey := testPoolKeyHash(t, 0x11)
@@ -329,6 +340,8 @@ func TestDingoDBGetRewardAccountOutputs(t *testing.T) {
 // valid pool ID, used implicitly by the boundary tests above via
 // hex.EncodeToString matching GetPoolEpochDataMap's own key format.
 func TestPoolKeyHashRoundTrip(t *testing.T) {
+	t.Parallel()
+
 	h := testPoolKeyHash(t, 0x01)
 	var pid lcommon.PoolId
 	copy(pid[:], h)
@@ -351,6 +364,8 @@ func TestPoolKeyHashRoundTrip(t *testing.T) {
 // while its block count is on the epoch-14 row. Reading cost and margin from
 // the param epoch compared 412000000 against 411000000 and 1/25 against 0.05.
 func TestGetPoolEpochDataMapTracksChangingPoolParams(t *testing.T) {
+	t.Parallel()
+
 	dingo, gdb := openTestDingoDB(t)
 	defer dingo.Close() //nolint:errcheck
 
@@ -431,6 +446,8 @@ func TestGetPoolEpochDataMapTracksChangingPoolParams(t *testing.T) {
 // genuinely zero, and reporting that as a pruned epoch would turn a correct
 // zero into a dingo_db_missing ERROR.
 func TestGetPoolEpochDataMapSpendableMemberPresenceIsEpochWide(t *testing.T) {
+	t.Parallel()
+
 	const stakeEpoch, paramEpoch = uint64(9), uint64(11)
 	db, gdb := openTestDingoDB(t)
 	pool := testPoolKeyHash(t, 0x01)
@@ -507,6 +524,8 @@ func TestGetPoolEpochDataMapSpendableMemberPresenceIsEpochWide(t *testing.T) {
 // be formed and presence must stay false so ComparePoolEpoch falls back to the
 // pool total only where that is provably equal.
 func TestGetPoolEpochDataMapSpendableMemberAbsentWhenEpochPruned(t *testing.T) {
+	t.Parallel()
+
 	const stakeEpoch, paramEpoch = uint64(9), uint64(11)
 	db, gdb := openTestDingoDB(t)
 	pool := testPoolKeyHash(t, 0x01)
@@ -531,4 +550,82 @@ func TestGetPoolEpochDataMapSpendableMemberAbsentWhenEpochPruned(t *testing.T) {
 	require.NotNil(t, data)
 	assert.False(t, data.SpendableMemberRewardPresent)
 	assert.Equal(t, "500", data.MemberRewardTotal)
+}
+
+// TestDingoDBGetEarliestAvailableEpochNoBoundary covers a non-Mithril,
+// genesis-synced database: no mithril_ledger_slot row was ever written, so
+// ok must be false and callers must apply no lower bound beyond
+// preStakingThroughEpoch (dingo #4172).
+func TestDingoDBGetEarliestAvailableEpochNoBoundary(t *testing.T) {
+	t.Parallel()
+
+	db, _ := openTestDingoDB(t)
+
+	epoch, ok, err := db.GetEarliestAvailableEpoch(context.Background())
+	require.NoError(t, err)
+	require.False(t, ok)
+	require.Zero(t, epoch)
+}
+
+// TestDingoDBGetEarliestAvailableEpochResolvesBoundaryEpoch seeds a Mithril
+// bootstrap boundary at slot 1_000, inside epoch 10, and confirms
+// GetEarliestAvailableEpoch resolves it to epoch 11 — one past the boundary
+// epoch, since that epoch (and everything before it) was inherited from the
+// Mithril snapshot rather than computed locally. The row carries
+// length_in_slots because every epoch row the metadata store writes does, and
+// the resolution query is bounded by it at the upper end.
+func TestDingoDBGetEarliestAvailableEpochResolvesBoundaryEpoch(t *testing.T) {
+	t.Parallel()
+
+	db, gdb := openTestDingoDB(t)
+
+	require.NoError(t, gdb.Exec(
+		`INSERT INTO epoch (epoch_id, start_slot, length_in_slots)
+		 VALUES (?, ?, ?)`,
+		10, 1_000, 432_000,
+	).Error)
+	require.NoError(t, gdb.Exec(
+		`INSERT INTO sync_state (sync_key, value) VALUES (?, ?)`,
+		mithrilLedgerSlotSyncKey, "1000",
+	).Error)
+
+	epoch, ok, err := db.GetEarliestAvailableEpoch(context.Background())
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, uint64(11), epoch)
+}
+
+// TestDingoDBGetEarliestAvailableEpochRejectsNegativeEpoch verifies that
+// malformed epoch rows fail closed instead of wrapping their negative IDs into
+// an incorrect uint64 lower bound.
+func TestDingoDBGetEarliestAvailableEpochRejectsNegativeEpoch(t *testing.T) {
+	t.Parallel()
+
+	for _, epochID := range []int{-1, -2} {
+		t.Run(fmt.Sprintf("epoch_id_%d", epochID), func(t *testing.T) {
+			t.Parallel()
+
+			db, gdb := openTestDingoDB(t)
+
+			require.NoError(t, gdb.Exec(
+				`INSERT INTO epoch (epoch_id, start_slot, length_in_slots)
+				 VALUES (?, ?, ?)`,
+				epochID, 1_000, 432_000,
+			).Error)
+			require.NoError(t, gdb.Exec(
+				`INSERT INTO sync_state (sync_key, value) VALUES (?, ?)`,
+				mithrilLedgerSlotSyncKey, "1000",
+			).Error)
+
+			_, _, err := db.GetEarliestAvailableEpoch(context.Background())
+			require.EqualError(
+				t,
+				err,
+				fmt.Sprintf(
+					"resolve epoch for mithril boundary slot 1000: negative epoch %d",
+					epochID,
+				),
+			)
+		})
+	}
 }

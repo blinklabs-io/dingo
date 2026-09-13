@@ -1018,7 +1018,10 @@ boundary_slot = excluded.boundary_slot`
 	}
 	lookupQuery := s.dialect.Rebind(
 		`SELECT o.id, o.epoch, o.credential_tag, o.staking_key, o.pool_key_hash, o.reward_type
-FROM reward_account_output o JOIN (` + strings.Join(rowSelects, " UNION ALL ") + `) v
+FROM reward_account_output o JOIN (` + strings.Join(
+			rowSelects,
+			" UNION ALL ",
+		) + `) v
 ON o.epoch = v.epoch AND o.credential_tag = v.credential_tag AND
    o.staking_key = v.staking_key AND o.pool_key_hash = v.pool_key_hash AND
    o.reward_type = v.reward_type`,

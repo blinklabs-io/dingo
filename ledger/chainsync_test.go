@@ -38,6 +38,8 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 }
 
 func TestDesiredBlockfetchBatchHeaders(t *testing.T) {
+	t.Parallel()
+
 	testCases := []struct {
 		name       string
 		gapSlots   uint64
@@ -126,6 +128,8 @@ func TestDesiredBlockfetchBatchHeaders(t *testing.T) {
 
 // TestCalculateEpochNonce_ByronEra tests epoch nonce calculation in Byron era
 func TestCalculateEpochNonce_ByronEra(t *testing.T) {
+	t.Parallel()
+
 	byronGenesisJSON := `{
 		"protocolConsts": {
 			"k": 432,
@@ -179,6 +183,8 @@ func TestCalculateEpochNonce_ByronEra(t *testing.T) {
 
 // TestCalculateEpochNonce_InitialEpochWithoutNonce tests initial Shelley epoch
 func TestCalculateEpochNonce_InitialEpochWithoutNonce(t *testing.T) {
+	t.Parallel()
+
 	shelleyGenesisHash := "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d"
 	byronGenesisJSON := `{
 		"protocolConsts": {
@@ -252,6 +258,8 @@ func TestCalculateEpochNonce_InitialEpochWithoutNonce(t *testing.T) {
 
 // TestCalculateEpochNonce_InvalidGenesisHash tests handling of invalid genesis hash
 func TestCalculateEpochNonce_InvalidGenesisHash(t *testing.T) {
+	t.Parallel()
+
 	invalidHash := "not-a-valid-hex-string"
 	byronGenesisJSON := `{
 		"protocolConsts": {
@@ -301,6 +309,8 @@ func TestCalculateEpochNonce_InvalidGenesisHash(t *testing.T) {
 
 // TestCalculateEpochNonce_MissingShelleyGenesis tests handling of missing Shelley genesis
 func TestCalculateEpochNonce_MissingShelleyGenesis(t *testing.T) {
+	t.Parallel()
+
 	cfg := &cardano.CardanoNodeConfig{}
 
 	ls := &LedgerState{
@@ -332,6 +342,8 @@ func TestCalculateEpochNonce_MissingShelleyGenesis(t *testing.T) {
 
 // TestCalculateEpochNonce_NegativeSecurityParam tests handling of negative security parameter
 func TestCalculateEpochNonce_NegativeSecurityParam(t *testing.T) {
+	t.Parallel()
+
 	byronGenesisJSON := `{
 		"protocolConsts": {
 			"k": -1,
@@ -379,6 +391,8 @@ func TestCalculateEpochNonce_NegativeSecurityParam(t *testing.T) {
 
 // TestCalculateEpochNonce_ShelleyEraDifferentParams tests Shelley era with various parameters
 func TestCalculateEpochNonce_ShelleyEraDifferentParams(t *testing.T) {
+	t.Parallel()
+
 	testCases := []struct {
 		name             string
 		k                int
@@ -466,6 +480,8 @@ func TestCalculateEpochNonce_ShelleyEraDifferentParams(t *testing.T) {
 
 // TestCalculateEpochNonce_ZeroActiveSlots tests handling of zero active slots coefficient
 func TestCalculateEpochNonce_ZeroActiveSlots(t *testing.T) {
+	t.Parallel()
+
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0,
 		"securityParam": 432,
@@ -505,6 +521,8 @@ func TestCalculateEpochNonce_ZeroActiveSlots(t *testing.T) {
 
 // TestCalculateEpochNonce_StabilityWindowCalculation tests the stability window calculation logic
 func TestCalculateEpochNonce_StabilityWindowCalculation(t *testing.T) {
+	t.Parallel()
+
 	testCases := []struct {
 		name             string
 		era              eras.EraDesc
@@ -614,6 +632,8 @@ func TestCalculateEpochNonce_StabilityWindowCalculation(t *testing.T) {
 
 // TestCalculateEpochNonce_IntegerArithmeticPrecision tests precision of integer arithmetic
 func TestCalculateEpochNonce_IntegerArithmeticPrecision(t *testing.T) {
+	t.Parallel()
+
 	byronGenesisJSON := `{
 		"protocolConsts": {
 			"k": 1000,
@@ -667,6 +687,8 @@ func TestCalculateEpochNonce_IntegerArithmeticPrecision(t *testing.T) {
 
 // TestHandleEventChainsyncBlockHeader_StabilityWindowUsage tests the stability window usage in block header handling
 func TestHandleEventChainsyncBlockHeader_StabilityWindowUsage(t *testing.T) {
+	t.Parallel()
+
 	// This test verifies that the handleEventChainsyncBlockHeader function
 	// correctly uses calculateStabilityWindow instead of the old constant
 
@@ -715,6 +737,8 @@ func TestHandleEventChainsyncBlockHeader_StabilityWindowUsage(t *testing.T) {
 
 // TestCalculateEpochNonce_AllEras tests epoch nonce calculation across all eras
 func TestCalculateEpochNonce_AllEras(t *testing.T) {
+	t.Parallel()
+
 	byronGenesisJSON := `{
 		"protocolConsts": {
 			"k": 432,
@@ -833,6 +857,8 @@ func TestCalculateEpochNonce_AllEras(t *testing.T) {
 
 // TestCalculateEpochNonce_MissingByronGenesisInByronEra tests missing Byron genesis during Byron era
 func TestCalculateEpochNonce_MissingByronGenesisInByronEra(t *testing.T) {
+	t.Parallel()
+
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.05,
 		"securityParam": 432,

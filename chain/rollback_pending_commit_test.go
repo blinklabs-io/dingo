@@ -56,6 +56,8 @@ func pendingCommitHash(label string) []byte {
 // be a regression test rather than a lottery: without the batch-commit
 // barrier this reports a not-found index in roughly half of the rounds below.
 func TestRollbackDoesNotResolveUncommittedBlockIndex(t *testing.T) {
+	t.Parallel()
+
 	const (
 		// Larger than any chain this test builds, so a rollback to origin is
 		// never refused for exceeding K and every round exercises the
@@ -107,9 +109,7 @@ func TestRollbackDoesNotResolveUncommittedBlockIndex(t *testing.T) {
 		release := make(chan struct{})
 		var once sync.Once
 		var wg sync.WaitGroup
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			// The callback runs inside the batch transaction, under both
 			// chain locks, so it marks the point at which the in-memory
 			// chain has started moving ahead of the store.
@@ -125,14 +125,12 @@ func TestRollbackDoesNotResolveUncommittedBlockIndex(t *testing.T) {
 			); err != nil {
 				t.Errorf("round %d: AddRawBlocksWithCallback: %v", round, err)
 			}
-		}()
+		})
 		<-applying
 		var rollbackErr error
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			rollbackErr = pc.Rollback(ocommon.Point{})
-		}()
+		})
 		// Release the batch only once the rollback is queued on the lock it
 		// holds, so the rollback runs in the window between that lock being
 		// handed over and the batch's transaction committing.
@@ -157,6 +155,8 @@ func TestRollbackDoesNotResolveUncommittedBlockIndex(t *testing.T) {
 // The first three blocks fit; the fourth has a mismatched parent, so the
 // transaction rolls back after the chain has already advanced in memory.
 func TestAddBlocksRestoresMemoryAfterBatchFailure(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	if err != nil {
@@ -181,8 +181,14 @@ func TestAddBlocksRestoresMemoryAfterBatchFailure(t *testing.T) {
 	if tip.Point.Slot != 0 || len(tip.Point.Hash) != 0 || tip.BlockNumber != 0 {
 		t.Fatalf("failed batch advanced in-memory tip: %+v", tip)
 	}
-	if _, err := db.BlockByIndex(3, nil); !errors.Is(err, models.ErrBlockNotFound) {
-		t.Fatalf("expected failed batch block to be absent from storage, got %v", err)
+	if _, err := db.BlockByIndex(3, nil); !errors.Is(
+		err,
+		models.ErrBlockNotFound,
+	) {
+		t.Fatalf(
+			"expected failed batch block to be absent from storage, got %v",
+			err,
+		)
 	}
 	if err := pc.Rollback(ocommon.Point{}); err != nil {
 		t.Fatalf("rollback after failed batch: %v", err)

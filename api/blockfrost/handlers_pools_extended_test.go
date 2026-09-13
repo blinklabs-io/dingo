@@ -31,6 +31,8 @@ import (
 // and does not reference vrf_key or relays, which are not part of the
 // current OpenAPI schema.
 func TestHandlePoolsExtendedSchemaFields(t *testing.T) {
+	t.Parallel()
+
 	ticker := "ABC"
 	name := "Pool ABC"
 	description := "A pool."

@@ -23,6 +23,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/require"
 )
@@ -44,6 +45,8 @@ import (
 // Restore's flow (metadata restore, blob restore, post-restore
 // validation) runs exactly as it would in production.
 func TestRestoreResolvesBlobStoreWithLoadRunMode(t *testing.T) {
+	t.Parallel()
+
 	src := newTestDB(t)
 	require.NoError(t, src.BlockCreate(testBlock(1, 0x01), nil))
 
@@ -75,6 +78,10 @@ func TestRestoreResolvesBlobStoreWithLoadRunMode(t *testing.T) {
 				badger.WithDataDir(deps.DataDir),
 				badger.WithGc(deps.RunMode != "load"),
 				badger.WithDeferOpen(),
+				badger.WithValueLogFileSize(
+					testutil.TestBadgerValueLogFileSize,
+				),
+				badger.WithMemTableSize(testutil.TestBadgerMemTableSize),
 			)
 			if err != nil {
 				return nil, nil, err
@@ -95,7 +102,12 @@ func TestRestoreResolvesBlobStoreWithLoadRunMode(t *testing.T) {
 		testDestinationRegistry,
 		snapshotDir,
 		targetDir,
-		lifecycle.RestoreStorageConfig{},
+		// The capturing badger provider registered above takes struct{}
+		// as its config type and already hardcodes the bounded test
+		// sizes itself, so a non-empty storageConfig.Blob here would
+		// fail decodeStrict's strict decode into struct{} rather than
+		// reach the store.
+		lifecycle.RestoreStorageConfig{}, // restoreconfig:zero-value-required
 	)
 	require.NoError(t, err)
 

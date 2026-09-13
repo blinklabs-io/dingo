@@ -27,6 +27,8 @@ import (
 )
 
 func TestLiveMithrilSTMVerification(t *testing.T) {
+	t.Parallel()
+
 	if os.Getenv("DINGO_LIVE_MITHRIL") == "" {
 		t.Skip("set DINGO_LIVE_MITHRIL=1 to run live Mithril STM verification")
 	}
