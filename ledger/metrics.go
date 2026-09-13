@@ -115,6 +115,25 @@ type stateMetrics struct {
 	// durable per-block record, not merely because the content was no
 	// longer reachable. See issue #3778.
 	reconciliationUndoMissingRecord prometheus.Counter
+	// Cross-fork continuation audit outcomes. clean, missing_producer and
+	// inconclusive_eb_pending count one audited input each; disarmed_cap
+	// counts one audit window; skipped_budget counts one audited body whose
+	// endorser-block budget was exhausted; ref_unresolvable counts one
+	// endorser-block reference abandoned for good. See the
+	// continuationAuditResult* constants for the label values and
+	// countContinuationAuditOutcome for the helper that records them.
+	continuationAuditOutcomes *prometheus.CounterVec
+	// Pre-materialized children of continuationAuditOutcomes, so every
+	// verdict is exported from process start (an absent series and a zero
+	// series read very differently when the question is "is this node
+	// reporting missing producers") and so the audit pays no label lookup
+	// per input while holding chainsyncBlockfetchMutex.
+	continuationAuditClean                 prometheus.Counter
+	continuationAuditMissingProducer       prometheus.Counter
+	continuationAuditInconclusiveEbPending prometheus.Counter
+	continuationAuditDisarmedCap           prometheus.Counter
+	continuationAuditSkippedBudget         prometheus.Counter
+	continuationAuditRefUnresolvable       prometheus.Counter
 	// Observed for every Praos leader-eligibility decision on an inbound
 	// header: (threshold - leaderValue) / threshold. Positive is eligible,
 	// and the magnitude is the headroom. dingo derives its leadership stake
@@ -180,11 +199,21 @@ type stateMetrics struct {
 	// cache advances, per this section's own doc comment); the unexpected
 	// counter tracks everything else reaching errorsChan (decode errors,
 	// non-Byron validation failures, apply-stage invariant violations),
-	// which should stay at 0 in healthy operation. Unlike the *Errors gauges
-	// above (owned by the pipeline's own snapshot), these are counters
+	// which should stay at 0 in healthy operation; the apply-pending-limit
+	// counter tracks pipeline.ErrPendingLimitExceeded (the apply stage's
+	// out-of-order buffer grew past MaxPendingBlocks because one stage
+	// worker fell behind its siblings -- a load signal, not a block
+	// failure: the item stays buffered and is applied in sequence); the
+	// shutdown counter tracks context.Canceled/context.DeadlineExceeded
+	// (BlockPipeline.Stop cancels the pipeline context before draining, so
+	// a stage worker mid-item at shutdown can report the cancellation
+	// instead of its item's outcome). Unlike the *Errors gauges above
+	// (owned by the pipeline's own snapshot), these are counters
 	// incremented directly as each error is drained.
 	blockPipelineExpectedEta0Errors       prometheus.Counter
 	blockPipelineDeferredEpochCacheErrors prometheus.Counter
+	blockPipelineApplyPendingLimitErrors  prometheus.Counter
+	blockPipelineShutdownErrors           prometheus.Counter
 	blockPipelineUnexpectedErrors         prometheus.Counter
 }
 
@@ -292,6 +321,33 @@ func (m *stateMetrics) incBlockPipelineDeferredEpochCacheError() {
 		return
 	}
 	m.blockPipelineDeferredEpochCacheErrors.Inc()
+}
+
+// incBlockPipelineApplyPendingLimitError records a block-processing pipeline
+// apply-stage backpressure signal drained from errorsChan
+// (pipeline.ErrPendingLimitExceeded): more out-of-order blocks were buffered
+// waiting for an earlier sequence number than MaxPendingBlocks allows. The
+// item is still buffered and still applied in sequence, so this is a
+// throughput/scheduling signal rather than a decode, validation, or apply
+// failure.
+func (m *stateMetrics) incBlockPipelineApplyPendingLimitError() {
+	if m == nil || m.blockPipelineApplyPendingLimitErrors == nil {
+		return
+	}
+	m.blockPipelineApplyPendingLimitErrors.Inc()
+}
+
+// incBlockPipelineShutdownError records a block-processing pipeline stage
+// worker reporting its own context cancellation
+// (context.Canceled/context.DeadlineExceeded) rather than an item outcome.
+// BlockPipeline.Stop cancels the pipeline context before it drains the
+// stages, so any worker mid-item when shutdown starts can report this; it
+// says the node is stopping, not that a block failed.
+func (m *stateMetrics) incBlockPipelineShutdownError() {
+	if m == nil || m.blockPipelineShutdownErrors == nil {
+		return
+	}
+	m.blockPipelineShutdownErrors.Inc()
 }
 
 // incBlockPipelineUnexpectedError records a block-processing pipeline error
@@ -529,6 +585,51 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 			Help: "applied blocks in a reconciliation undo range with no block_nonce row at all, not merely unresolvable content -- the shape of a Byron-era applied block (issue #3778)",
 		},
 	)
+	// Cross-fork continuation audit verdicts, labelled by result:
+	//   result="clean"                   — the input resolved to a producer
+	//   result="missing_producer"        — no producer found; reported at
+	//        Error, and the splice indicator above is incremented too
+	//   result="inconclusive_eb_pending" — the window's producer set is
+	//        knowingly incomplete because a certified Leios endorser block
+	//        had not been fetched when the audit ran, so an unresolved input
+	//        cannot be distinguished from one the audit simply cannot see
+	//   result="disarmed_cap"            — one per window, when the producer
+	//        set reached continuationAuditMaxProducedTxs and the window was
+	//        disarmed rather than report from a truncated set
+	//   result="skipped_budget"          — one per audited body that had more
+	//        endorser blocks queued than continuationAuditMaxEndorserBlocksPerBlock
+	//        allows it to resolve; the rest stay queued for a later body
+	//   result="ref_unresolvable"        — an endorser-block reference given up
+	//        on for good, because resolving it failed for a reason retrying
+	//        cannot fix; that hole in the producer set never closes
+	// A node whose inconclusive count dominates is telling the operator the
+	// audit is not covering it, which is the honest reading of an
+	// endorser-block backlog.
+	m.continuationAuditOutcomes = promautoFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_continuation_audit_outcomes_total",
+			Help: "cross-fork continuation audit verdicts by result; clean/missing_producer/inconclusive_eb_pending count audited inputs, skipped_budget counts audited blocks, ref_unresolvable counts abandoned endorser-block references, disarmed_cap counts audit windows",
+		},
+		[]string{"result"},
+	)
+	m.continuationAuditClean = m.continuationAuditOutcomes.WithLabelValues(
+		continuationAuditResultClean,
+	)
+	m.continuationAuditMissingProducer = m.continuationAuditOutcomes.WithLabelValues(
+		continuationAuditResultMissingProducer,
+	)
+	m.continuationAuditInconclusiveEbPending = m.continuationAuditOutcomes.WithLabelValues(
+		continuationAuditResultInconclusiveEbPending,
+	)
+	m.continuationAuditDisarmedCap = m.continuationAuditOutcomes.WithLabelValues(
+		continuationAuditResultDisarmedCap,
+	)
+	m.continuationAuditSkippedBudget = m.continuationAuditOutcomes.WithLabelValues(
+		continuationAuditResultSkippedBudget,
+	)
+	m.continuationAuditRefUnresolvable = m.continuationAuditOutcomes.WithLabelValues(
+		continuationAuditResultRefUnresolvable,
+	)
 	m.leaderThresholdMargin = promautoFactory.NewHistogram(
 		prometheus.HistogramOpts{
 			Name: "dingo_ledger_leader_threshold_margin",
@@ -620,6 +721,18 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_block_pipeline_deferred_epoch_cache_errors_total",
 			Help: "block-processing pipeline validate-stage errors drained from errorsChan classified as a transient epoch-cache lag behind an already-committed block; expected to resolve once the epoch cache catches up",
+		},
+	)
+	m.blockPipelineApplyPendingLimitErrors = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_block_pipeline_apply_pending_limit_errors_total",
+			Help: "block-processing pipeline apply-stage backpressure signals drained from errorsChan because the out-of-order pending buffer exceeded MaxPendingBlocks; the block is still buffered and applied in sequence, so this reports stage-worker scheduling lag rather than a block failure",
+		},
+	)
+	m.blockPipelineShutdownErrors = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_block_pipeline_shutdown_errors_total",
+			Help: "block-processing pipeline stage-worker context cancellations drained from errorsChan while the pipeline was stopping; expected on any shutdown with blocks still in flight and not a block failure",
 		},
 	)
 	m.blockPipelineUnexpectedErrors = promautoFactory.NewCounter(

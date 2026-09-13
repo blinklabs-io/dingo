@@ -342,6 +342,83 @@ func TestBlockfetchHeaderVerificationFailurePublishesRecycleEvent(
 	assert.Equal(t, "block_header_verification_failure", got.Reason)
 }
 
+// TestBlockfetchHeaderVerificationRunsRegardlessOfValidationEnabled is a
+// regression test for a human-review finding: no test failed if
+// handleEventBlockfetchBlockDeferred's Mithril-slot gate were reverted to
+// the previous validationEnabled check. Issue #3528 made header crypto
+// verification unconditional -- before it, an entire
+// ValidateHistorical=false bulk-sync run skipped VRF/KES/opcert
+// verification and stake-derived leader eligibility for every block. This
+// proves the fail-closed behavior directly: with validationEnabled=false
+// on a non-Mithril slot, a block with unverifiable header crypto still
+// returns a definite (non-deferred) error instead of being silently
+// accepted.
+func TestBlockfetchHeaderVerificationRunsRegardlessOfValidationEnabled(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	connId := testRecycleConnId()
+	ls := &LedgerState{
+		validationEnabled:            false,
+		activeBlockfetchConnId:       connId,
+		chainsyncBlockfetchReadyChan: make(chan struct{}),
+		chain:                        &chain.Chain{},
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	err := ls.handleEventBlockfetchBlockDeferred(BlockfetchEvent{
+		ConnectionId: connId,
+		Block:        &mockBabbageBlock{slot: 500},
+		Point:        ocommon.Point{Slot: 500, Hash: []byte("fake-hash")},
+	}, nil)
+
+	require.Error(t, err)
+	assert.False(t, IsHeaderVerificationDeferred(err))
+	assert.Contains(t, err.Error(), "block header crypto verification failed")
+}
+
+// TestBlockfetchHeaderVerificationSkippedForMithrilCoveredSlot is the
+// companion regression test to the one above: verification must still be
+// skipped for a slot an imported Mithril snapshot already covers,
+// regardless of validationEnabled -- that is the one exemption
+// slotCoveredByMithril preserves. A block with unverifiable header crypto
+// at a Mithril-covered slot must be accepted without error.
+func TestBlockfetchHeaderVerificationSkippedForMithrilCoveredSlot(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const targetSlot = uint64(500)
+	connId := testRecycleConnId()
+	ls := &LedgerState{
+		validationEnabled:            false,
+		mithrilLedgerSlot:            targetSlot,
+		activeBlockfetchConnId:       connId,
+		chainsyncBlockfetchReadyChan: make(chan struct{}),
+		chain:                        &chain.Chain{},
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	err := ls.handleEventBlockfetchBlockDeferred(BlockfetchEvent{
+		ConnectionId: connId,
+		Block:        &mockBabbageBlock{slot: targetSlot},
+		Point: ocommon.Point{
+			Slot: targetSlot,
+			Hash: []byte("fake-hash"),
+		},
+	}, nil)
+
+	require.NoError(t, err)
+	require.Len(t, ls.pendingBlockfetchEvents, 1)
+}
+
 func TestBlockfetchStatefulHeaderVerificationDefersUntilLedgerApply(
 	t *testing.T,
 ) {
@@ -370,4 +447,50 @@ func TestBlockfetchStatefulHeaderVerificationDefersUntilLedgerApply(
 	)
 	require.NoError(t, err)
 	assert.Equal(t, deferredHeaderValidationSyncStateValue, value)
+}
+
+// TestBlockfetchHeaderVerificationEmptyEpochNonceDefersNotFails is a
+// regression test for a human-review finding: handleEventBlockfetchBlockDeferred
+// checked errors.Is(verifyErr, errHeaderVerificationDeferred) directly
+// instead of the exported IsHeaderVerificationDeferred, so a covered epoch
+// with no published nonce yet (errEpochNonceUnavailable, which
+// IsHeaderVerificationDeferred was broadened to recognize) was still
+// treated as a hard crypto failure at this call site. Unlike the chainsync
+// admission gate (chainsyncHeaderCryptoPolicy), which skips calling verify
+// entirely when the nonce isn't cached, this path only flushes pending
+// blocks once and rechecks whether the header was verified elsewhere before
+// falling through to verify regardless -- so it reaches this exact case in
+// practice, and an honest peer's block would otherwise have its connection
+// recycled over a transient local gap.
+func TestBlockfetchHeaderVerificationEmptyEpochNonceDefersNotFails(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const targetSlot = uint64(1000)
+	connId := testRecycleConnId()
+	// A nil epoch nonce (covered epoch, nonce not yet published) rather
+	// than a real one from createTestBlock: headerVerificationEpoch checks
+	// epoch/nonce availability before ever touching the VRF proof, so the
+	// block's own crypto content doesn't matter for this case.
+	ls, _ := newEligibilityTestLedger(t, nil)
+	ls.validationEnabled = true
+	ls.activeBlockfetchConnId = connId
+	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+	ls.chain = &chain.Chain{}
+
+	block := &mockBabbageBlock{slot: targetSlot}
+	point := ocommon.NewPoint(block.SlotNumber(), block.Hash().Bytes())
+	err := ls.handleEventBlockfetchBlockDeferred(BlockfetchEvent{
+		ConnectionId: connId,
+		Block:        block,
+		Point:        point,
+	}, nil)
+	require.NoError(
+		t,
+		err,
+		"an unpublished epoch nonce must defer, not hard-fail, block header verification",
+	)
+	require.Len(t, ls.pendingBlockfetchEvents, 1)
+	assert.True(t, ls.consumeDeferredHeaderValidation(point))
 }

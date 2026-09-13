@@ -351,7 +351,16 @@ func (c *advancingSlotClock) SlotsPerKESPeriod() uint64 {
 	return c.slotsPerKESPeriod
 }
 
-func (c *advancingSlotClock) ChainTipSlot() uint64 { return c.chainTipSlot }
+// ChainTip and PrimaryChainTip report the same point: this clock exists to
+// exercise the slot-boundary arithmetic, not the ledger-apply backlog, so it
+// describes a caught-up node whose primary chain tip is the applied tip.
+func (c *advancingSlotClock) ChainTip() ocommon.Point {
+	return ocommon.Point{Slot: c.chainTipSlot}
+}
+
+func (c *advancingSlotClock) PrimaryChainTip() ocommon.Point {
+	return ocommon.Point{Slot: c.chainTipSlot}
+}
 
 func (c *advancingSlotClock) NextSlotTime() (time.Time, error) {
 	return c.nextSlotEnd, nil

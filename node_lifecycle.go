@@ -747,6 +747,13 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 		return fmt.Errorf("configuring snapshot manager: %w", err)
 	}
 	n.snapshotMgr.SetPromRegistry(n.config.promRegistry)
+	// Mirror the Koios parity observer's enablement into the rebuilt snapshot
+	// manager too (see Run()'s identical call in node.go, dingo #4188), or a
+	// live restore/truncate would silently drop back to CORE mode's 4-epoch
+	// reward_account_output retention even though the observer is enabled.
+	n.snapshotMgr.SetRewardAccountOutputRetentionUnbounded(
+		n.config.koiosParity.Enabled,
+	)
 	// Prune pool snapshots through the deferred-header retention guard, so a
 	// snapshot a queued/deferred header still needs for leader validation is
 	// never pruned out from under it and misread as pool absence, and the
@@ -1316,6 +1323,7 @@ func (n *Node) storageDependencies(
 		StorageMode:    string(n.config.storageMode),
 		MaxConnections: n.config.DatabaseWorkerPoolConfig.WorkerPoolSize,
 		Logger:         n.config.logger,
+		TracingEnabled: n.config.tracing,
 	}
 }
 

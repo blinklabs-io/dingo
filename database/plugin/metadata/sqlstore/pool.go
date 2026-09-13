@@ -1393,7 +1393,10 @@ func (s *Store) GetPoolEarliestVrfKeyHashAtSlot(
 	}
 	slotValue, err := checkedInt64(slot)
 	if err != nil {
-		return nil, false, fmt.Errorf("GetPoolEarliestVrfKeyHashAtSlot: %w", err)
+		return nil, false, fmt.Errorf(
+			"GetPoolEarliestVrfKeyHashAtSlot: %w",
+			err,
+		)
 	}
 	var vrfKeyHash []byte
 	err = db.QueryRowContext(ctx, `
@@ -1415,7 +1418,10 @@ LIMIT 1`,
 		return nil, false, nil
 	}
 	if err != nil {
-		return nil, false, fmt.Errorf("GetPoolEarliestVrfKeyHashAtSlot: %w", err)
+		return nil, false, fmt.Errorf(
+			"GetPoolEarliestVrfKeyHashAtSlot: %w",
+			err,
+		)
 	}
 	return vrfKeyHash, true, nil
 }
@@ -2107,10 +2113,8 @@ ORDER BY p.id DESC`,
 		}
 		if registration.MetadataUrl != "" {
 			certificate.PoolMetadata = &lcommon.PoolMetadata{
-				Url: registration.MetadataUrl,
-				Hash: lcommon.PoolMetadataHash(
-					lcommon.NewBlake2b256(registration.MetadataHash),
-				),
+				Url:  registration.MetadataUrl,
+				Hash: lcommon.PoolMetadataHash(registration.MetadataHash),
 			}
 		}
 		ret = append(ret, certificate)

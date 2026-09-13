@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/gouroboros/ledger"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
@@ -47,7 +48,16 @@ func (c *retryTestSlotClock) SlotsPerKESPeriod() uint64 {
 	return c.slotsPerKESPeriod
 }
 
-func (c *retryTestSlotClock) ChainTipSlot() uint64 { return c.chainTipSlot }
+// ChainTip and PrimaryChainTip report the same point: these tests drive
+// re-selection from the slot clock and the mempool, not from an apply
+// backlog, so the clock describes a caught-up node.
+func (c *retryTestSlotClock) ChainTip() ocommon.Point {
+	return ocommon.Point{Slot: c.chainTipSlot}
+}
+
+func (c *retryTestSlotClock) PrimaryChainTip() ocommon.Point {
+	return ocommon.Point{Slot: c.chainTipSlot}
+}
 
 func (c *retryTestSlotClock) NextSlotTime() (time.Time, error) {
 	return c.slotEnd, nil

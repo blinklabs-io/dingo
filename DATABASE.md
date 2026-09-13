@@ -995,7 +995,7 @@ updates preserve the previous activity and expiry epochs.
 | `constitution` | `id`, `anchor_url`, `anchor_hash`, `policy_hash`, `added_slot`, `deleted_slot` | PK `id`; unique `added_slot`; index `deleted_slot` | Current or historical constitution references. |
 | `committee_member` | `id`, `cold_credential_tag`, `cold_cred_hash`, `expires_epoch`, `term_start_slot`, `term_start_slot_set`, `added_slot`, `deleted_slot` | PK `id`; unique `(cold_credential_tag, cold_cred_hash, added_slot)`; indexes `added_slot`, `deleted_slot` | Snapshot-imported and enacted committee state. Credential tag 0 is a key hash and 1 is a script hash. `term_start_slot` bounds the authorization and resignation certificates that apply to this membership term; `term_start_slot_set` preserves an explicit slot-zero start. Re-election creates a new historical row; soft deletion and rollback match the full tagged identity and mutation slot. |
 | `committee_quorum` | `id`, `quorum`, `added_slot` | PK `id`; unique `added_slot` | Enacted committee quorum threshold. `quorum` is stored through `types.Rat`. |
-| `auth_committee_hot` | `id`, `cold_credential_tag`, `cold_credential`, `hot_credential_tag`, `host_credential`, `certificate_id`, `added_slot` | PK `id`; indexes tagged cold and hot identities, `certificate_id`, `added_slot` | Committee hot-credential authorization certificate. The SQL column is `host_credential` for backward compatibility. Resolution selects the latest authorization no earlier than the active member's `term_start_slot` and suppresses it after a resignation in that term. |
+| `auth_committee_hot` | `id`, `cold_credential_tag`, `cold_credential`, `hot_credential_tag`, `host_credential`, `certificate_id`, `added_slot` | PK `id`; indexes tagged cold and hot identities, `certificate_id`, `added_slot` | Committee hot-credential authorization certificate. The SQL column is `host_credential` for backward compatibility. Resolution selects the latest authorization no earlier than the active member's `term_start_slot` and suppresses it after a resignation in that term. Superseded rows older than the rollback window are pruned on write; see Committee Hot-Key Authorization Retention. |
 | `resign_committee_cold` | `id`, `cold_credential_tag`, `cold_credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot` | PK `id`; indexes tagged cold identity, `certificate_id`, `added_slot` | Committee cold-credential resignation certificate. A resignation is authoritative even when no earlier authorization row exists and is permanent for that membership term. Removal followed by re-election starts a new term; historical rows remain available for rollback. |
 
 ### Off-chain Metadata Cache
@@ -1036,7 +1036,7 @@ process the same pointer unless the claim expires before a result is recorded.
 |---|---|---|---|
 | `pool_stake_snapshot` | `id`, `epoch`, `snapshot_type`, `pool_key_hash`, `total_stake`, `stake_denominator`, `delegator_count`, `captured_slot`, `leios_key_public`, `leios_key_possession_proof`, `calculation_version`, `reward_account_auto_vote`, `reward_account_auto_vote_resolved` | PK `id`; unique `(epoch, snapshot_type, pool_key_hash)` | Per-pool stake snapshots. Authoritative `"mark"` rows aggregate the transactionally maintained `reward_live_stake` rows at the exact rollover SNAP point; a late fallback whose tip has passed `captured_slot` uses historical delegation, UTxO liveness, and reward deltas instead. Migration `v5` adds nullable `leios_key_public` and `leios_key_possession_proof`: SNAP copies the registration effective during the ended epoch so a later key rotation cannot change that committee, while legacy rows remain NULL/keyless rather than being backfilled from current pool state. Mithril import preserves the key carried by both the Mark/Set/Go pool parameters and the `"actv"` `NewEpochState.pool-distr` entry. Values remain unverified in storage; `ledger/leios` verifies the proof before using the key. `calculation_version` identifies the stake-accounting algorithm for Mark/Set/Go rows; zero denotes pre-provenance data. Mithril-imported `"actv"` rows store the stake fraction as `total_stake / stake_denominator` for the imported epoch. Mark snapshot refreshes atomically replace all rows for the same `(epoch, snapshot_type)` before inserting the freshly captured set, so disappeared pools cannot remain in the snapshot. `GetPoolStakeSnapshotsForPools` reads a named subset for one `(epoch, snapshot_type)` via `pool_key_hash IN (...)` on the unique key, chunked over the dialect's parameter limit (999 on SQLite, 65535 on PostgreSQL/MySQL) so a long filter costs a bounded number of statements rather than one per pool; the callers include the Leios epoch-key provider and the pool filters of the node-to-client `GetPoolDistr2` query and UTxO RPC `v1beta QueryService.ReadState`. A named pool with no row is absent from the result rather than returned at zero stake. Logical joins to `epoch.epoch_id` and `pool.pool_key_hash`. |
 | `epoch_summary` | `id`, `epoch`, `total_active_stake`, `total_pool_count`, `total_delegators`, `epoch_nonce`, `boundary_slot`, `snapshot_ready` | PK `id`; unique `epoch` | Aggregate epoch snapshot state, written by the same transaction that captures the Mark snapshot. Retained for the life of the database (see the retention note below), so it is the durable record of every epoch boundary the node captured and a missing row means the boundary was never captured. Re-crossing a boundary after a rollback upserts the row, replacing the stake/pool/delegator totals, nonce, and boundary slot; `snapshot_ready` is sticky (`snapshot_ready OR excluded.snapshot_ready`) so a later partial write cannot clear it. `GetTotalActiveStake` reads `total_active_stake` from here for `"mark"` queries whenever `snapshot_ready` is set, which keeps historical epoch totals answerable after the per-pool rows are pruned. |
-| `reward_live_stake` | `id`, `credential_tag`, `staking_key`, `pool_key_hash`, `utxo_stake`, `reward_stake`, `total_stake`, `registered`, `pool_delegation_slot`, `pool_delegation_block_index`, `pool_delegation_cert_index`, `updated_slot`, `calculation_version` | PK `id`; unique `(credential_tag, staking_key)`; index `(pool_key_hash, credential_tag, staking_key)` | Live per-stake-credential aggregate maintained transactionally with UTxO, account, delegation, and reward-balance writes. `calculation_version` is set on every rebuild and incremental update. Authoritative epoch-boundary capture reads all registered, delegated rows through `GetLiveStakeInputsForPools`: zero-stake rows contribute to Mark delegator counts, while positive rows also become `reward_stake_input`. The pool/credential index supports this ordered boundary scan without retaining the legacy index on `total_stake`. Startup compares calculation version, keys, values, registration, and delegation state with canonical metadata and rebuilds on any mismatch. The `(credential_tag, staking_key)` uniqueness protects the invariant that each stake credential contributes to exactly one reward aggregate and pool input. `pool_key_hash` mirrors `account.pool`, but only when `refreshRewardLiveStakeAggregate` runs for the credential, which a POOLREAP does not trigger — so `ClearDelegationsToRetiredPool` nulls it here alongside the account row, resetting `pool_delegation_slot`/`pool_delegation_block_index`/`pool_delegation_cert_index` to zero and stamping `updated_slot` with the boundary slot. Since `GetLiveStakeInputsForPools` selects on this column, leaving it behind would keep the reaped pool's delegators in the stake distribution the boundary capture reads (issue #3794). |
+| `reward_live_stake` | `id`, `credential_tag`, `staking_key`, `pool_key_hash`, `utxo_stake`, `reward_stake`, `total_stake`, `registered`, `pool_delegation_slot`, `pool_delegation_block_index`, `pool_delegation_cert_index`, `updated_slot`, `calculation_version` | PK `id`; unique `(credential_tag, staking_key)`; index `(pool_key_hash, credential_tag, staking_key)` | Live per-stake-credential aggregate maintained transactionally with UTxO, account, delegation, and reward-balance writes. `calculation_version` is set on every rebuild and incremental update. Authoritative epoch-boundary capture reads all registered, delegated rows through `GetLiveStakeInputsForPools`: zero-stake rows contribute to Mark delegator counts, while positive rows also become `reward_stake_input`. The pool/credential index supports this ordered boundary scan without retaining the legacy index on `total_stake`. Startup compares calculation version, keys, values, registration, and delegation state with canonical metadata and rebuilds on any mismatch. That comparison (`RewardLiveStakeNeedsBackfill`) scans every live `utxo` row twice regardless of whether a rebuild turns out to be needed, so its cost is paid on every startup; `skipRewardLiveStakeBackfillCheck` suppresses the whole step for diagnostic use, leaving the aggregate unverified until the next startup that runs it. The `(credential_tag, staking_key)` uniqueness protects the invariant that each stake credential contributes to exactly one reward aggregate and pool input. `pool_key_hash` mirrors `account.pool`, but only when `refreshRewardLiveStakeAggregate` runs for the credential, which a POOLREAP does not trigger — so `ClearDelegationsToRetiredPool` nulls it here alongside the account row, resetting `pool_delegation_slot`/`pool_delegation_block_index`/`pool_delegation_cert_index` to zero and stamping `updated_slot` with the boundary slot. Since `GetLiveStakeInputsForPools` selects on this column, leaving it behind would keep the reaped pool's delegators in the stake distribution the boundary capture reads (issue #3794). |
 | `reward_ada_pots` | `id`, `epoch`, `treasury`, `reserves`, `fees`, `rewards`, `captured_slot` | PK `id`; unique `epoch`; index `captured_slot` | Reward ADA pots captured at an epoch boundary, except epoch 0's, which is seeded from the slot-0 genesis baseline because epoch 0 has no rollover. Reward application reads the row for its pots epoch and skips the epoch when it is absent. Retained for the life of the database (see the retention note below). |
 | `reward_snapshot` | `id`, `epoch`, `snapshot_type`, `total_active_stake`, `total_pool_count`, `total_delegators`, `captured_slot`, `boundary_slot`, `epoch_nonce`, `protocol_version`, `authoritative`, `calculation_version` | PK `id`; unique `(epoch, snapshot_type)`; indexes `captured_slot`, `boundary_slot` | Reward snapshot metadata recorded by the epoch rotation path. `authoritative` is `true` for a snapshot captured inside the ledger epoch-rollover write transaction at the SNAP point (`CaptureEpochBoundarySnapshot`) and `false` for the event-driven fallback (`captureMarkSnapshot`). `protocol_version` is the protocol major version the snapshot's new epoch runs at, taken from the post-enactment protocol parameters, so it matches the `EpochTransitionEvent` published for the same boundary; a boundary that crosses two eras in one block captures the snapshot after both hard-fork transitions so the recorded major is the final era's, not the source era's. Seeded and Mithril-imported rows leave it zero. `total_active_stake` is the reward calculation's sigma_a denominator and covers every delegating credential observed at the boundary, including those whose pool was excluded from `reward_pool_input` for missing or malformed registration data; `total_pool_count` and `total_delegators` describe the `reward_pool_input` rows actually written, so the rows' delegated stake sums to no more than `total_active_stake` rather than to exactly it. `calculation_version` ties authoritative Mark metadata to the stake algorithm that produced its pool rows; version 2 carries that full denominator, while a version 1 row understates it for any epoch that excluded a pool. The fallback claims the `(epoch, mark)` row atomically and skips when an authoritative row already exists, so it cannot overwrite the authoritative capture. Retained for the life of the database. Guard claim/release require the same non-nil metadata transaction. |
 | `reward_seed_failure` | `epoch`, `snapshot_type`, `failure_reason`, `captured_slot` | PK `(epoch, snapshot_type)` | Durable provenance for an imported reward basis that failed reconciliation or lacked historical protocol parameters. Ledgerstate writes or replaces it in the import transaction, the reward boundary includes the reason when the corresponding `reward_snapshot` is absent, and successful seeding clears it. Rollback removes markers above the rollback slot. |
@@ -1063,18 +1063,32 @@ leader-threshold rejection.
 Every epoch transition runs `cleanupOldSnapshots`, which prunes to the four
 epochs the Shelley rotation and delayed reward model need: current, current-1,
 current-2 for Go, and current-3 so reward calculation can be replayed after a
-rollback across the boundary where those rewards were applied. Retention is not
-operator-configurable, and it only ever deletes rows below that window (but see
-the deferred-header retention pin below, which can hold `pool_stake_snapshot`
-rows longer).
+rollback across the boundary where those rewards were applied. It only ever
+deletes rows below that window (but see the deferred-header retention pin
+below, which can hold `pool_stake_snapshot` rows longer).
+
+`reward_account_output` is the one table whose retention depends on node
+configuration: it is retained WITHOUT BOUND, instead of pruned to the window
+below, whenever the database is in API storage mode (`types.StorageModeAPI`,
+issue #1875, so the Blockfrost account reward-history endpoint can serve an
+account's full history) or the in-process Koios parity observer is enabled
+(`Manager.SetRewardAccountOutputRetentionUnbounded`, wired from
+`KoiosParityConfig.Enabled` in `node.go`/`node_lifecycle.go`, issue #4188). The
+observer validates a closed epoch only after fetching and comparing against
+Koios over the network, which can fall arbitrarily far behind chain
+progression during a from-genesis or catch-up sync — well past the fixed
+4-epoch window — so without this a checked epoch's `reward_account_output`
+rows are routinely gone before the observer ever reads them.
+`reward_stake_input` is pruned to the window in every case, including both of
+the above.
 
 Pruned at `epoch < current-3`:
 
 | Table | Scales with | Pruned by |
 |---|---|---|
 | `pool_stake_snapshot` | pools per epoch | `DeletePoolStakeSnapshotsBeforeEpoch` |
-| `reward_stake_input` | delegators per epoch | `DeleteRewardStateBeforeEpoch` |
-| `reward_account_output` | delegators per epoch | `DeleteRewardStateBeforeEpoch` |
+| `reward_stake_input` | delegators per epoch | `DeleteRewardStateBeforeEpoch` / `DeleteRewardStakeInputBeforeEpoch` |
+| `reward_account_output` | delegators per epoch | `DeleteRewardStateBeforeEpoch` (CORE mode, observer disabled only) |
 
 Retained for the life of the database: `epoch`, `epoch_summary`,
 `reward_ada_pots`, `reward_snapshot`, `reward_seed_failure`,
@@ -1202,6 +1216,54 @@ therefore re-crossed on the selected chain, where `SavePoolStakeSnapshots`
 replaces that epoch's rows and `SaveEpochSummary` upserts the summary.
 `DeleteEpochSummariesAfterEpoch` and `DeletePoolStakeSnapshotsAfterEpoch` exist
 on `metadata.MetadataStore` for that case but currently have no callers.
+
+#### Committee Hot-Key Authorization Retention
+
+`auth_committee_hot` records one row per `AuthCommitteeHot` certificate and
+never overwrites, but only the newest authorization per cold credential is ever
+read back (`GetActiveCommitteeMembers`, `GetCommitteeMember`). On preprod at
+slot ~79.48M the table held 648,758 rows for 35 distinct cold credentials. The
+certificate write path therefore prunes superseded rows for the credential it
+just wrote, in batches bounded per certificate so no single applied block turns
+into a large delete. A store-level maintenance sweep also deletes in batches no
+larger than the same bound across all credential partitions every 24 hours,
+repeating until no superseded rows remain. That second path is required for a
+credential that stops re-authorizing: its old rows must drain even though no
+later certificate will revisit that partition.
+
+Retention rule, applied per `(cold_credential_tag, cold_credential)`: keep every
+row with `added_slot` above the horizon, plus the single newest row at or below
+it, where the horizon is the applied block's slot minus the rollback window.
+The window is `sqlstore.DefaultCommitteeAuthRetentionSlots` (129600 slots = 3k/f
+for k=2160, f=0.05 — the Shelley stability window, and the same immutability
+bound `internal/historyexpiry` uses to expire block history), overridable with
+`sqlstore.Config.CommitteeAuthRetentionSlots`. Retention is per credential, not
+a global row cap, and it only ever deletes below that window.
+
+Rollback safety: `DeleteCertificatesAfterSlot` deletes `auth_committee_hot` rows
+with `added_slot` above the rollback target S, and Ouroboros bounds S at or
+above the immutable tip, so the horizon is always at or below S. If a row exists
+between the horizon and S it is retained (everything above the horizon is) and
+dominates every older row; if none does, the correct answer is the one
+pre-horizon row the rule retains. The post-rollback query result is therefore
+identical whether or not pruning ran, and a credential's last row is never
+removed, so a credential that has an authorization can never become one that has
+none.
+
+The partition is the tagged credential, so a script-hash credential never prunes
+a key-hash credential sharing its 28 bytes. `committee_member` is not pruned:
+`CommitteeStateAvailable` reads it including soft-deleted rows to tell an
+authoritatively empty committee from an unpopulated one, and pruning it would
+destroy that distinction.
+
+`resign_committee_cold`, `update_drep`, `registration_drep`, and
+`pool_registration` keep full history and are not pruned. The same rule would be
+sound for `resign_committee_cold` (its readers take `MAX(added_slot)` per
+credential), but it grows at most once per member per term rather than per
+re-authorization, so it has no observed growth problem. The DRep and pool
+tables are read by first-seen/`MIN(added_slot)` aggregates as well as latest-row
+lookups, so a latest-plus-window rule would change their answers and they need
+a different analysis.
 
 ## Blob Store Reference
 
