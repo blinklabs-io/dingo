@@ -5196,14 +5196,19 @@ returned as an error and keeps startup a hard failure.
 In the deferred state startup still loads the credential material, checks the
 opcert's cold-key signature, and arms the same protocol lifetime — it skips
 only the slot-dependent plausibility check. Enforcement is then entirely the
-per-slot runtime gate described below, which re-derives the period and rejects
-the certificate before leader selection; extrapolation through the newest
-confirmed era skews the computed period downward, so a certificate staged for
-the future or already expired lands below `opcertStart` rather than inside the
-admitted interval. When confirmed history does span the wall clock, the strict
-startup check runs unchanged and rejects such a certificate outright. Before leader selection at each candidate slot, the runtime
-gate admits exactly the
-half-open interval `[opcertStart, opcertStart + MaxKESEvolutions)`: periods
+per-slot runtime gate described below, which re-derives the period at each
+candidate slot and rejects the certificate before leader selection whenever
+that period falls outside the admitted half-open interval stated below. The
+skew from extrapolating through the newest confirmed era is not itself the
+safety argument: it moves the computed period downward, which places a
+future-staged certificate further below `opcertStart`, but a sufficiently
+mild downward skew can move an already-expired period back inside
+`[opcertStart, opcertStart + MaxKESEvolutions)`. What fails closed is the
+interval test itself, applied to every candidate slot. When confirmed
+history does span the wall clock, the strict startup check runs unchanged
+and rejects such a certificate outright. Before leader selection at each
+candidate slot, the runtime gate admits exactly the half-open interval
+`[opcertStart, opcertStart + MaxKESEvolutions)`: periods
 before the start and at or after the exclusive end both log/count a
 could-not-forge disposition before Praos, Leios, or ranking-block work.
 The start, expiry, current-period, and remaining-period gauges use that same
