@@ -641,9 +641,13 @@ func validateTxPlutusConwayWithContext(
 			}
 		}
 		redeemer := script.Redeemer{
-			Tag:     redeemerKey.Tag,
-			Index:   redeemerKey.Index,
-			Data:    redeemerValue.Data.Data,
+			Tag:   redeemerKey.Tag,
+			Index: redeemerKey.Index,
+			// Normalize: cardano-ledger rebuilds every script-visible value,
+			// so a script observes the encoding the Plutus encoder writes,
+			// not the definite/indefinite-length choice this transaction was
+			// built with. serialiseData exposes the difference.
+			Data:    data.Normalize(redeemerValue.Data.Data),
 			ExUnits: redeemerValue.ExUnits,
 		}
 		_, execErr, err := evaluateConwayPlutusScript(
