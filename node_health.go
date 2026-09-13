@@ -14,10 +14,7 @@
 
 package dingo
 
-import (
-	"sync"
-	"sync/atomic"
-)
+import "sync"
 
 // nodeHealth holds the cheap always-available signals the node's readiness
 // probe classifies. It is a value field on Node rather than a pointer, and
@@ -28,11 +25,15 @@ import (
 // deliberately does not, so the probe never has to chase a pointer another
 // goroutine is swapping. The rebuilt ledger reports into the same struct
 // because ledgerStateConfig closes over n, not over the ledger.
+// Every field is guarded by mu: recordTipGap's generation check and its
+// store have to be one critical section, or a tick a superseded ledger had
+// already dequeued could land between them and restore a stale reading.
+// That makes mu the only synchronization these fields need.
 type nodeHealth struct {
 	mu          sync.Mutex
 	generation  uint64
-	tipGapSlots atomic.Uint64
-	tipGapKnown atomic.Bool
+	tipGapSlots uint64
+	tipGapKnown bool
 }
 
 // recordTipGap stores the wall-clock-to-tip distance observed on a slot tick.
@@ -45,8 +46,8 @@ func (h *nodeHealth) recordTipGap(generation uint64, gapSlots uint64) {
 	if generation != h.generation {
 		return
 	}
-	h.tipGapSlots.Store(gapSlots)
-	h.tipGapKnown.Store(true)
+	h.tipGapSlots = gapSlots
+	h.tipGapKnown = true
 }
 
 // forgetTipGap returns the probe to its "no chain tip yet" state. Called
@@ -61,8 +62,8 @@ func (h *nodeHealth) forgetTipGap() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.generation++
-	h.tipGapKnown.Store(false)
-	h.tipGapSlots.Store(0)
+	h.tipGapKnown = false
+	h.tipGapSlots = 0
 }
 
 // currentGeneration identifies the ledger instance allowed to report health.
@@ -92,8 +93,8 @@ func (n *Node) TipGapSlots() (uint64, bool) {
 	}
 	n.health.mu.Lock()
 	defer n.health.mu.Unlock()
-	if !n.health.tipGapKnown.Load() {
+	if !n.health.tipGapKnown {
 		return 0, false
 	}
-	return n.health.tipGapSlots.Load(), true
+	return n.health.tipGapSlots, true
 }
