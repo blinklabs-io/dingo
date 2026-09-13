@@ -454,6 +454,11 @@ func (w *continuationAuditWindow) producersAtOrBelow(
 // Producers at or below the point are untouched by the truncation, stay on
 // the chain, and are never re-fetched -- so nothing else would ever put them
 // back, and dropping them is what produced the false report in issue #4102.
+//
+// A membership read that fails establishes neither, so the rearm disarms
+// instead of publishing. The prior window's producers may still be on the
+// chain, and a window published without them reports a later spend of their
+// outputs as a missing producer at ERROR on a node where nothing is wrong.
 func (ls *LedgerState) armContinuationAudit(
 	point ocommon.Point,
 	reason string,
@@ -479,7 +484,10 @@ func (ls *LedgerState) armContinuationAudit(
 	ls.continuationAuditMutex.Lock()
 	defer ls.continuationAuditMutex.Unlock()
 	if prior := ls.continuationAudit.Load(); prior != nil {
-		ls.carryForwardWindow(prior, next, point)
+		if err := ls.carryForwardWindow(prior, next, point); err != nil {
+			ls.disarmContinuationAuditUnverified(prior.forkPoint, err)
+			return
+		}
 	}
 	ls.publishContinuationAudit(next)
 }
@@ -503,6 +511,47 @@ func (ls *LedgerState) disarmContinuationAudit() {
 	ls.continuationAuditMutex.Lock()
 	defer ls.continuationAuditMutex.Unlock()
 	ls.publishContinuationAudit(nil)
+}
+
+// disarmContinuationAuditUnverified takes the window out of service because
+// the primary-chain membership read at point failed, and says so at Warn.
+//
+// Membership is what makes a block's transactions producers at all, so a read
+// that fails leaves the producer set short by an unknown amount. A window that
+// stays in service from there reports a spend of any output it is short of as
+// a missing producer at ERROR, which asserts ledger corruption on a node where
+// the only fault was the read. Every audit decision errs toward silence, and
+// that is the silent option. Publishing nil moves the pointer generation, so a
+// recovery rewind settling afterwards does not restore a window over it.
+//
+// Callers must hold ls.continuationAuditMutex.
+func (ls *LedgerState) disarmContinuationAuditUnverified(
+	point ocommon.Point,
+	err error,
+) {
+	ls.publishContinuationAudit(nil)
+	ls.config.Logger.Warn(
+		"disarming cross-fork continuation audit: primary chain membership check failed",
+		"component",
+		"ledger",
+		"error",
+		err,
+		"slot",
+		point.Slot,
+		"hash",
+		hex.EncodeToString(point.Hash),
+	)
+}
+
+// continuationAuditOnPrimaryChain is the primary-chain membership read every
+// audit decision about a producer rests on. See primaryChainContainsPoint.
+func (ls *LedgerState) continuationAuditOnPrimaryChain(
+	point ocommon.Point,
+) (bool, error) {
+	if ls.continuationAuditContainsPoint != nil {
+		return ls.continuationAuditContainsPoint(point)
+	}
+	return ls.primaryChainContainsPoint(point)
 }
 
 // carryForwardWindow moves what prior knows about blocks this rollback did not
@@ -533,14 +582,20 @@ func (ls *LedgerState) disarmContinuationAudit() {
 // endorserRefsDropped remembers that the producer set is short of it -- and a
 // hole in a block the rollback left on the chain never closes, because that
 // block is not re-fetched.
+//
+// It returns the membership read's error, having carried nothing. next is then
+// not fit to publish: see armContinuationAudit.
 func (ls *LedgerState) carryForwardWindow(
 	prior *continuationAuditWindow,
 	next *continuationAuditWindow,
 	point ocommon.Point,
-) {
-	onChain, err := ls.primaryChainContainsPoint(prior.forkPoint)
-	if err != nil || !onChain {
-		return
+) error {
+	onChain, err := ls.continuationAuditOnPrimaryChain(prior.forkPoint)
+	if err != nil {
+		return err
+	}
+	if !onChain {
+		return nil
 	}
 	next.producedTxs = prior.producersAtOrBelow(point.Slot)
 	// A permanent hole travels on the same rule. Dropping it would let the
@@ -559,6 +614,7 @@ func (ls *LedgerState) carryForwardWindow(
 		ref.lastProbedBlock = 0
 		next.queueEndorserRef(ref)
 	}
+	return nil
 }
 
 // auditContinuationBlock checks that every input a freshly fetched body spends
@@ -733,13 +789,23 @@ func (ls *LedgerState) auditContinuationBlock(
 // The body's inputs are not audited and no block budget is spent: it cannot
 // extend the chain above the fork point, which is what the audit inspects.
 //
+// A read that fails disarms whichever window is published by then. The body
+// may be on the chain, and any window armed since the one it was fetched under
+// was carried forward without it.
+//
 // Callers must hold ls.chainsyncBlockfetchMutex.
 func (ls *LedgerState) recordLateProducers(
 	window *continuationAuditWindow,
 	e BlockfetchEvent,
 ) {
-	onChain, err := ls.primaryChainContainsPoint(e.Point)
-	if err != nil || !onChain {
+	onChain, err := ls.continuationAuditOnPrimaryChain(e.Point)
+	if err != nil {
+		ls.continuationAuditMutex.Lock()
+		defer ls.continuationAuditMutex.Unlock()
+		ls.disarmContinuationAuditUnverified(e.Point, err)
+		return
+	}
+	if !onChain {
 		return
 	}
 	ls.commitContinuationAuditBody(
@@ -768,7 +834,9 @@ func (ls *LedgerState) recordLateProducers(
 // block, and primary-chain membership at the block's own point is what settles
 // it -- membership is also the whole justification for calling a block a
 // producer, and it does not depend on which window is published. When nothing
-// raced, the caller's window is the published one and no read is made.
+// raced, the caller's window is the published one and no read is made. A read
+// that fails disarms the published window rather than leaving it in service
+// without this body's producers.
 //
 // A false return means the caller must stop auditing this body. Its window is
 // no longer the one this body's producers went into, so a later transaction in
@@ -801,8 +869,11 @@ func (ls *LedgerState) commitContinuationAuditBody(
 		return false
 	}
 	if published != window {
-		onChain, err := ls.primaryChainContainsPoint(e.Point)
-		if err == nil && onChain {
+		onChain, err := ls.continuationAuditOnPrimaryChain(e.Point)
+		switch {
+		case err != nil:
+			ls.disarmContinuationAuditUnverified(e.Point, err)
+		case onChain:
 			ls.commitContinuationAuditBodyTo(published, e, ids, ref, hasRef)
 		}
 		return false

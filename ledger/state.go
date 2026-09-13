@@ -1302,6 +1302,10 @@ type LedgerState struct {
 	// cleanupWG, so a lifecycle test can hold a run in flight and assert
 	// that Close drains it.
 	cleanupConsumedUtxosRunHook func()
+	// Test hook replacing the primary-chain membership read the continuation
+	// audit makes. A healthy store never fails that read, so without it the
+	// audit's handling of a failed read cannot be driven from a test.
+	continuationAuditContainsPoint func(ocommon.Point) (bool, error)
 }
 
 // upstreamSyncState is one connection-generation snapshot. Consumers must not

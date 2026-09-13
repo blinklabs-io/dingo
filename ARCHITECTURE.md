@@ -4623,8 +4623,12 @@ therefore recorded against the window published at the moment of recording, and
 a body that reaches a window it was not audited against must prove primary-chain
 membership at its own point first. Membership is always tested against the
 primary chain rather than by block presence, since a block the node has
-abandoned can outlive its place on the chain. The lock is never held across a
-chain truncation or a blockfetch drain.
+abandoned can outlive its place on the chain. A membership read that fails
+establishes nothing either way, so the rearm's carry-forward, a body recorded
+below the fork point, and a body reaching a replaced window each disarm the
+window and log at `Warn` instead: a window left in service without producers
+it could not vouch for reports their spends as missing producers at `ERROR`.
+The lock is never held across a chain truncation or a blockfetch drain.
 
 A body whose window was replaced while it was being audited stops there rather
 than finishing against the window it loaded. Its producers went into the
@@ -4647,7 +4651,8 @@ append deletes nothing, and reading one as a truncation discards a window the
 rewind left entirely valid. The restore is refused outright when anything else
 moved the window pointer while the rewind ran. A nil pointer reads the same
 whether the rewind still owns the clear or a rollback has disarmed since, and
-every disarm follows a committed truncation, so a generation counted on
+every disarm follows a committed truncation or a failed membership read,
+neither of which a restore may undo, so a generation counted on
 every transition of the pointer is what keeps a rewind from undoing another
 owner's decision. That holds only while every other truncation of the primary
 chain moves the pointer, so the divergence reconciler's rewind to a common

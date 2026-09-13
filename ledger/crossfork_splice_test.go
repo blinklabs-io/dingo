@@ -17,6 +17,7 @@ package ledger
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"strconv"
@@ -868,6 +869,190 @@ func TestContinuationAuditRecordRejectsOffChainRacedBody(t *testing.T) {
 		string(producerTxId),
 		"a body the chain does not hold must not become a producer",
 	)
+}
+
+// continuationAuditMembershipFailedMsg is what the audit logs when it disarms
+// because a primary-chain membership read failed.
+const continuationAuditMembershipFailedMsg = "disarming cross-fork " +
+	"continuation audit: primary chain membership check failed"
+
+// failContinuationAuditMembership makes every membership read the audit makes
+// from now on fail with the returned error.
+func failContinuationAuditMembership(ls *LedgerState) error {
+	injected := errors.New("injected membership read failure")
+	ls.continuationAuditContainsPoint = func(ocommon.Point) (bool, error) {
+		return false, injected
+	}
+	return injected
+}
+
+// auditMembershipFailureSpend audits a body at slot 40, above every fork point
+// the membership-failure tests arm, that spends an output of producerTxId.
+func auditMembershipFailureSpend(
+	t *testing.T,
+	fixture *chainsyncRollbackFixture,
+	producerTxId []byte,
+) {
+	t.Helper()
+	spender := &spliceAuditBlock{
+		slot: 40,
+		hash: lcommon.NewBlake2b256(
+			testHashBytes("membership-failure-spender-block"),
+		),
+		txs: []lcommon.Transaction{
+			mustSpliceAuditTx(
+				t,
+				testHashBytes("membership-failure-spender-tx"),
+				[]lcommon.TransactionInput{
+					mustSpliceAuditInput(t, producerTxId, 0),
+				},
+			),
+		},
+	}
+	fixture.ls.auditContinuationBlock(BlockfetchEvent{
+		ConnectionId: fixture.connId,
+		Block:        spender,
+		Point:        ocommon.NewPoint(spender.slot, spender.hash.Bytes()),
+	}, true)
+}
+
+// assertAuditDisarmedByMembershipFailure checks the three things a failed
+// membership read must leave behind: no missing-producer report for the
+// producer whose membership was never established, no window in service, and
+// a Warn naming the read's error.
+func assertAuditDisarmedByMembershipFailure(
+	t *testing.T,
+	ls *LedgerState,
+	logged string,
+	injected error,
+) {
+	t.Helper()
+	assert.NotContains(
+		t,
+		logged,
+		"no producer on the local applied chain",
+		"a producer whose membership was never established must not be "+
+			"reported missing",
+	)
+	assert.Nil(
+		t,
+		ls.continuationAudit.Load(),
+		"a failed membership read must take the window out of service",
+	)
+	record := findLogRecord(t, logged, continuationAuditMembershipFailedMsg)
+	assert.Equal(t, "WARN", record["level"])
+	assert.Equal(t, injected.Error(), record["error"])
+}
+
+// TestContinuationAuditRearmDisarmsOnFailedForkPointRead pins the rearm's
+// handling of a membership read that fails. The carry-forward cannot tell
+// whether the prior window's producers are still on the chain, so publishing
+// the new window without them leaves a later spend of their outputs reported
+// as a missing producer at ERROR although nothing was established either way.
+func TestContinuationAuditRearmDisarmsOnFailedForkPointRead(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	var logBuf strings.Builder
+	ls.config.Logger = slog.New(slog.NewJSONHandler(&logBuf, nil))
+	ls.armContinuationAudit(fixture.ancestorTip.Point, "first rollback")
+	prior := ls.continuationAudit.Load()
+	require.NotNil(t, prior)
+	producerTxId := testHashBytes("membership-failure-carried-producer")
+	_, ok := prior.recordProducers([][]byte{producerTxId}, 30)
+	require.True(t, ok)
+
+	injected := failContinuationAuditMembership(ls)
+	// Slot 35 is above the producer at 30, so a read that succeeded would
+	// carry it forward.
+	ls.armContinuationAudit(
+		ocommon.NewPoint(35, testHashBytes("membership-failure-rearm")),
+		"second rollback",
+	)
+	auditMembershipFailureSpend(t, fixture, producerTxId)
+
+	assertAuditDisarmedByMembershipFailure(t, ls, logBuf.String(), injected)
+}
+
+// TestContinuationAuditLateBodyDisarmsOnFailedMembershipRead is the same rule
+// for a body that reaches the audit below the fork point of a window armed
+// after it landed on the chain. Its producers are recorded only once
+// membership at its own point is read, and a read that fails leaves the
+// window without them.
+func TestContinuationAuditLateBodyDisarmsOnFailedMembershipRead(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	var logBuf strings.Builder
+	ls.config.Logger = slog.New(slog.NewJSONHandler(&logBuf, nil))
+	ls.armContinuationAudit(fixture.ancestorTip.Point, "first rollback")
+	ls.armContinuationAudit(
+		ocommon.NewPoint(35, testHashBytes("membership-failure-late-rearm")),
+		"second rollback",
+	)
+	require.NotNil(t, ls.continuationAudit.Load())
+
+	producerTxId := testHashBytes("membership-failure-late-producer")
+	lateBody := &spliceAuditBlock{
+		slot: 30,
+		hash: lcommon.NewBlake2b256(
+			testHashBytes("membership-failure-late-block"),
+		),
+		txs: []lcommon.Transaction{
+			mustSpliceAuditTx(
+				t,
+				producerTxId,
+				[]lcommon.TransactionInput{
+					mustSpliceAuditInput(t, producerTxId, 9),
+				},
+			),
+		},
+	}
+	injected := failContinuationAuditMembership(ls)
+	ls.auditContinuationBlock(BlockfetchEvent{
+		ConnectionId: fixture.connId,
+		Block:        lateBody,
+		Point:        ocommon.NewPoint(lateBody.slot, lateBody.hash.Bytes()),
+	}, true)
+	auditMembershipFailureSpend(t, fixture, producerTxId)
+
+	assertAuditDisarmedByMembershipFailure(t, ls, logBuf.String(), injected)
+}
+
+// TestContinuationAuditRacedBodyDisarmsOnFailedMembershipRead is the same rule
+// for a body whose window was replaced while it was audited. Its producers go
+// into the published window only once membership at its own point is read.
+func TestContinuationAuditRacedBodyDisarmsOnFailedMembershipRead(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	var logBuf strings.Builder
+	ls.config.Logger = slog.New(slog.NewJSONHandler(&logBuf, nil))
+	ls.armContinuationAudit(fixture.ancestorTip.Point, "first rollback")
+	stale := ls.continuationAudit.Load()
+	ls.armContinuationAudit(fixture.currentTip.Point, "second rollback")
+	require.NotSame(t, stale, ls.continuationAudit.Load())
+
+	producerTxId := testHashBytes("membership-failure-raced-producer")
+	injected := failContinuationAuditMembership(ls)
+	require.False(
+		t,
+		ls.commitContinuationAuditBody(
+			stale,
+			BlockfetchEvent{
+				ConnectionId: fixture.connId,
+				Point:        fixture.currentTip.Point,
+			},
+			[][]byte{producerTxId},
+		),
+		"a caller whose window was replaced must stop auditing the body",
+	)
+	auditMembershipFailureSpend(t, fixture, producerTxId)
+
+	assertAuditDisarmedByMembershipFailure(t, ls, logBuf.String(), injected)
 }
 
 // TestSettleAuditAfterRewind pins what the audit window is once a recovery
