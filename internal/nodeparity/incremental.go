@@ -160,16 +160,43 @@ func (s *cursorState) setRollback(point Tip) (IncrementalCursor, error) {
 	return cur, SaveCursor(s.path, &cur)
 }
 
-// resetFullCheckCounter zeroes BlocksSinceFullCheck and persists it, once a
-// full check completes (successfully or not -- see fullCheckWorker's doc
-// comment on why even a failed attempt still resets the countdown). It
-// leaves Tip/Epoch untouched: by the time a full check finishes, the
+// resetFullCheckCounter reduces BlocksSinceFullCheck by baseline and
+// persists it, once a full check completes (successfully or not -- see
+// fullCheckWorker's doc comment on why even a failed attempt still resets
+// the countdown).
+//
+// baseline is BlocksSinceFullCheck's own value at the moment this check was
+// requested (fullCheckRequest.baselineBlocksSinceFullCheck) -- not simply
+// zeroed: the ChainSync callback goroutine keeps advancing the live counter
+// for every block that arrives while this check runs in the background
+// (fullCheckWorker's doc comment on why it must run asynchronously), and
+// those blocks were never covered by the check that just completed.
+// Zeroing outright discarded them, silently delaying the next periodic
+// checkpoint by however many blocks arrived during the check's runtime --
+// confirmed live against a real node to reach several hundred, since a
+// full check's own whole-UTxO walk plus reference-batch query commonly
+// takes multiple minutes (blinklabs-io/dingo#4183 review). Subtracting
+// baseline instead keeps exactly that residual, so the next checkpoint
+// still lands the configured FullCheckInterval blocks after the point this
+// check was actually pinned to, self-correcting regardless of how long the
+// check ran.
+//
+// It leaves Tip/Epoch untouched: by the time a full check finishes, the
 // ChainSync callback goroutine may have already advanced them well past the
 // point the check was pinned to, and this must not clobber that progress.
-func (s *cursorState) resetFullCheckCounter() error {
+func (s *cursorState) resetFullCheckCounter(baseline uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.cur.BlocksSinceFullCheck = 0
+	if s.cur.BlocksSinceFullCheck >= baseline {
+		s.cur.BlocksSinceFullCheck -= baseline
+	} else {
+		// The counter was already reset by a concurrent completion, or the
+		// chain rolled back, between this check's dispatch and its
+		// completion, making baseline no longer meaningful against the
+		// current value. 0 is the safe floor here, matching the prior
+		// unconditional-reset behavior for this (rare) case.
+		s.cur.BlocksSinceFullCheck = 0
+	}
 	cur := s.cur
 	return SaveCursor(s.path, &cur)
 }
@@ -178,6 +205,11 @@ func (s *cursorState) resetFullCheckCounter() error {
 type fullCheckRequest struct {
 	reason FullCheckReason
 	at     Tip
+	// baselineBlocksSinceFullCheck is cursor.snapshot().BlocksSinceFullCheck
+	// at the moment this request was created -- see resetFullCheckCounter's
+	// doc comment for why the completed check's reset subtracts this
+	// rather than zeroing the counter outright.
+	baselineBlocksSinceFullCheck uint64
 }
 
 // fullCheckReasonPriority ranks FullCheckReason for request's
@@ -271,10 +303,24 @@ func startFullCheckWorker(
 }
 
 // request dispatches a full check pinned to at, for the given reason.
-// Non-blocking: see fullCheckWorker's doc comment for the priority-based
-// coalescing this applies when a request is already pending or in flight.
-func (w *fullCheckWorker) request(reason FullCheckReason, at Tip) {
-	newReq := fullCheckRequest{reason: reason, at: at}
+// baseline is the cursor's own BlocksSinceFullCheck at the moment of this
+// call (the caller's own post-advance/post-rollback snapshot, e.g.
+// handleIncrementalBlock's after.BlocksSinceFullCheck) -- carried through to
+// resetFullCheckCounter once this request's check completes, so blocks that
+// arrive after this call but before completion are not silently discarded
+// from the checkpoint countdown. Non-blocking: see fullCheckWorker's doc
+// comment for the priority-based coalescing this applies when a request is
+// already pending or in flight.
+func (w *fullCheckWorker) request(
+	reason FullCheckReason,
+	at Tip,
+	baseline uint64,
+) {
+	newReq := fullCheckRequest{
+		reason:                       reason,
+		at:                           at,
+		baselineBlocksSinceFullCheck: baseline,
+	}
 	w.mu.Lock()
 	if w.pendingReq == nil ||
 		fullCheckReasonPriority(reason) >=
@@ -345,7 +391,9 @@ func (w *fullCheckWorker) run(ctx context.Context) {
 			if !fullCheckSucceeded(result, err) {
 				continue
 			}
-			if err := w.cursor.resetFullCheckCounter(); err != nil {
+			if err := w.cursor.resetFullCheckCounter(
+				req.baselineBlocksSinceFullCheck,
+			); err != nil {
 				w.cfg.Logger.Warn(
 					"nodeparity: could not persist cursor after full check",
 					"error", err,
@@ -1095,7 +1143,7 @@ func handleIncrementalBlock(
 		diff.Empty(), epoch, before.Epoch, after.BlocksSinceFullCheck,
 		cfg.FullCheckInterval,
 	); due {
-		worker.request(reason, after.Tip)
+		worker.request(reason, after.Tip, after.BlocksSinceFullCheck)
 	}
 	return nil
 }
@@ -1139,7 +1187,7 @@ func handleIncrementalRollback(
 		"nodeparity: rollback reported, resetting cursor",
 		"slot", point.Slot, "hash", hash,
 	)
-	worker.request(FullCheckRollback, after.Tip)
+	worker.request(FullCheckRollback, after.Tip, after.BlocksSinceFullCheck)
 	return nil
 }
 
