@@ -5235,7 +5235,17 @@ func (ls *LedgerState) createGenesisBlock() error {
 			)
 		}
 
-		// Load genesis staking data (pool registrations + delegations)
+		// Load genesis staking data (pool registrations + delegations) --
+		// but only for a from-genesis sync, for the same reason genesis
+		// UTxO insertion is skipped above (blinklabs-io/dingo#4151).
+		// SetGenesisStaking upserts current-state pool/delegation rows
+		// (ON CONFLICT ... DO UPDATE), and a Mithril-bootstrapped node's
+		// imported ledger snapshot (ledgerstate/import.go's
+		// importCertState) already reflects the correct *current*
+		// pool/delegation state as of the bootstrap point -- reapplying
+		// stale genesis-config values here would resurrect a pool or
+		// delegation genuinely retired/changed long before the bootstrap
+		// point, the same resurrection bug #4151 found for UTxOs.
 		genesisPools, poolDelegators, err := shelleyGenesis.InitialPools()
 		if err != nil {
 			return fmt.Errorf("parse genesis staking: %w", err)
@@ -5244,8 +5254,8 @@ func (ls *LedgerState) createGenesisBlock() error {
 		if err != nil {
 			return fmt.Errorf("parse genesis stake delegations: %w", err)
 		}
-		if len(genesisPools) > 0 ||
-			len(genesisStake) > 0 {
+		if !bootstrappedFromMithril &&
+			(len(genesisPools) > 0 || len(genesisStake) > 0) {
 			ls.config.Logger.Info(
 				fmt.Sprintf(
 					"loading genesis staking: %d pools, %d delegations",
@@ -5268,9 +5278,12 @@ func (ls *LedgerState) createGenesisBlock() error {
 		// Load Conway genesis bootstrap data (initial DReps and
 		// stake/vote delegations). The conway-genesis.json may declare
 		// pre-existing DReps and delegations for test networks; mainnet
-		// has none.
+		// has none. Same bootstrappedFromMithril guard as genesis
+		// staking above, for the same reason: SetGenesisGovernance
+		// upserts current-state DRep/delegation rows that a Mithril
+		// import has already populated correctly.
 		conwayGenesis := ls.config.CardanoNodeConfig.ConwayGenesis()
-		if conwayGenesis != nil &&
+		if !bootstrappedFromMithril && conwayGenesis != nil &&
 			(len(conwayGenesis.InitialDReps) > 0 ||
 				len(conwayGenesis.Delegs) > 0) {
 			ls.config.Logger.Info(
@@ -5381,7 +5394,11 @@ func (ls *LedgerState) ensureGenesisCommittee(txn *database.Txn) error {
 			Credential:    member.ColdCredHash,
 		}).Key()] = struct{}{}
 	}
-	newMembers := make([]*models.CommitteeMember, 0, len(conwayGenesis.Committee.Members))
+	newMembers := make(
+		[]*models.CommitteeMember,
+		0,
+		len(conwayGenesis.Committee.Members),
+	)
 	for raw, expiry := range conwayGenesis.Committee.Members {
 		tag, hash, err := parseGenesisCommitteeCredential(raw)
 		if err != nil {
