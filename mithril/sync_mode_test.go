@@ -28,6 +28,8 @@ func newSyncModeTestDB(t *testing.T) *database.Database {
 // whether a run is a fresh bootstrap, a resume of an interrupted/backfilling
 // sync, or a catch-up of an already-complete database.
 func TestDetermineSyncMode(t *testing.T) {
+	t.Parallel()
+
 	t.Run("empty database is bootstrap", func(t *testing.T) {
 		db := newSyncModeTestDB(t)
 		mode, err := determineSyncMode(db)

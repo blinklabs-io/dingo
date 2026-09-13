@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"maps"
 	"net"
 	"strings"
 	"sync"
@@ -41,6 +40,7 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gcbor "github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/protocol"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/protocol/keepalive"
@@ -57,6 +57,8 @@ type lockedBuffer struct {
 }
 
 func TestEffectiveChainsyncBlockTimeoutUsesProtocolMaxAsFloor(t *testing.T) {
+	t.Parallel()
+
 	require.Equal(
 		t,
 		ochainsync.MustReplyTimeoutMax,
@@ -75,6 +77,8 @@ func TestEffectiveChainsyncBlockTimeoutUsesProtocolMaxAsFloor(t *testing.T) {
 }
 
 func TestChainsyncByronEbbHeaderRoundTrip(t *testing.T) {
+	t.Parallel()
+
 	ebbCbor := byronEbbFixtureCbor(t)
 
 	msg, err := ochainsync.NewMsgRollForwardNtN(
@@ -97,6 +101,8 @@ func TestChainsyncByronEbbHeaderRoundTrip(t *testing.T) {
 }
 
 func TestDecodeChainsyncHeaderAcceptsFullByronEbb(t *testing.T) {
+	t.Parallel()
+
 	ebbCbor := byronEbbFixtureCbor(t)
 	expected, err := gledger.NewBlockFromCbor(
 		gledger.BlockTypeByronEbb,
@@ -318,11 +324,7 @@ func snapshotChainsyncNtNTimeouts() map[string]struct {
 }
 
 func TestNewOuroborosDoesNotMutateChainsyncNtNTimeouts(t *testing.T) {
-	originalStateMap := ochainsync.StateMapNtN.Copy()
-	t.Cleanup(func() {
-		clear(ochainsync.StateMapNtN)
-		maps.Copy(ochainsync.StateMapNtN, originalStateMap)
-	})
+	t.Parallel()
 
 	before := snapshotChainsyncNtNTimeouts()
 
@@ -338,6 +340,8 @@ func TestNewOuroborosDoesNotMutateChainsyncNtNTimeouts(t *testing.T) {
 }
 
 func TestChainsyncConnOptsUseConfiguredBlockTimeout(t *testing.T) {
+	t.Parallel()
+
 	const blockTimeout = 20 * time.Minute
 
 	o := newOuroboros(OuroborosConfig{
@@ -345,10 +349,73 @@ func TestChainsyncConnOptsUseConfiguredBlockTimeout(t *testing.T) {
 	})
 
 	clientCfg := ochainsync.NewConfig(o.chainsyncClientConnOpts()...)
-	serverCfg := ochainsync.NewConfig(o.chainsyncServerConnOpts()...)
+	serverCfg := ochainsync.NewConfig(o.chainsyncServerConnOpts(
+		newChainsyncFindIntersectRateLimiter(200, 1000),
+	)...)
 
 	require.Equal(t, blockTimeout, clientCfg.BlockTimeout)
 	require.Equal(t, blockTimeout, serverCfg.BlockTimeout)
+}
+
+// TestChainsyncConnectionConfigOptionCreatesPerConnectionBudget verifies that
+// reusing the cached production option for two connections does not share the
+// FindIntersect work budget. Each connection must be able to spend its own
+// full burst, while a second request on the same connection is refused.
+func TestChainsyncConnectionConfigOptionCreatesPerConnectionBudget(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	o := newFindIntersectTestOuroboros(t)
+	option := o.chainsyncConnectionConfigOption(false)
+	points := makeFindIntersectPoints(chainsyncMaxFindIntersectPoints)
+
+	for range 2 {
+		mockConn := ouroboros_mock.NewConnection(
+			ouroboros_mock.ProtocolRoleServer,
+			[]ouroboros_mock.ConversationEntry{
+				ouroboros_mock.ConversationEntryHandshakeRequestOutput,
+				ouroboros_mock.ConversationEntryHandshakeNtCResponseInput,
+				ouroboros_mock.ConversationEntryOutput{
+					ProtocolId: ochainsync.ProtocolIdNtC,
+					Messages:   []protocol.Message{ochainsync.NewMsgFindIntersect(points)},
+				},
+				ouroboros_mock.ConversationEntryInput{
+					ProtocolId:      ochainsync.ProtocolIdNtC,
+					IsResponse:      true,
+					MessageType:     ochainsync.MessageTypeIntersectFound,
+					MsgFromCborFunc: ochainsync.NewMsgFromCborNtC,
+				},
+				ouroboros_mock.ConversationEntryOutput{
+					ProtocolId: ochainsync.ProtocolIdNtC,
+					Messages:   []protocol.Message{ochainsync.NewMsgFindIntersect(points)},
+				},
+				ouroboros_mock.ConversationEntryInput{
+					ProtocolId:      ochainsync.ProtocolIdNtC,
+					IsResponse:      true,
+					MessageType:     ochainsync.MessageTypeIntersectNotFound,
+					MsgFromCborFunc: ochainsync.NewMsgFromCborNtC,
+				},
+				ouroboros_mock.ConversationEntryClose{},
+			},
+		)
+		t.Cleanup(func() { _ = mockConn.Close() })
+		conn, err := ouroboros.NewConnection(
+			ouroboros.WithConnection(mockConn),
+			ouroboros.WithNetworkMagic(ouroboros_mock.MockNetworkMagic),
+			ouroboros.WithServer(true),
+			option,
+		)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = conn.Close() })
+		select {
+		case err, ok := <-mockConn.(*ouroboros_mock.Connection).ErrorChan():
+			require.NoError(t, err)
+			require.False(t, ok)
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for scripted FindIntersect exchange")
+		}
+	}
 }
 
 // TestCloseChainsyncServerConnTearsDownTransport verifies that the async
@@ -358,6 +425,8 @@ func TestChainsyncConnOptsUseConfiguredBlockTimeout(t *testing.T) {
 // AwaitReply; this asserts the transport itself closes (the client end's
 // connection observes the bearer going away).
 func TestCloseChainsyncServerConnTearsDownTransport(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	serverPipe, clientPipe := net.Pipe()
 	t.Cleanup(func() {
@@ -424,6 +493,8 @@ func TestCloseChainsyncServerConnTearsDownTransport(t *testing.T) {
 func TestChainsyncServerFindIntersect_LedgerErrorPropagates(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	// Move the ledger past origin so malformed point data reaches the
 	// database-backed intersection lookup.
 	o := newFindIntersectTestOuroboros(t)
@@ -448,7 +519,9 @@ func TestChainsyncServerFindIntersect_LedgerErrorPropagates(
 
 	// Submit a malformed point hash that causes the ledger lookup to fail
 	// while resolving the candidate block.
+	limiter := newChainsyncFindIntersectRateLimiter(200, 1000)
 	_, _, err := o.chainsyncServerFindIntersect(
+		limiter,
 		ochainsync.CallbackContext{ConnectionId: connId},
 		[]ocommon.Point{ocommon.NewPoint(10, []byte{0xff})},
 	)
@@ -464,6 +537,8 @@ func TestChainsyncServerFindIntersect_LedgerErrorPropagates(
 func TestChainsyncServerFindIntersect_ClientRegistrationFailure(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	// Use a ledger that can intersect at origin, but a ChainsyncState without
 	// a chain provider so client registration must fail.
 	o := newFindIntersectTestOuroboros(t)
@@ -472,7 +547,9 @@ func TestChainsyncServerFindIntersect_ClientRegistrationFailure(
 
 	// Perform FindIntersect with origin so registration is the first failing
 	// operation after a successful intersection.
+	limiter := newChainsyncFindIntersectRateLimiter(200, 1000)
 	_, _, err := o.chainsyncServerFindIntersect(
+		limiter,
 		ochainsync.CallbackContext{ConnectionId: connId},
 		[]ocommon.Point{ocommon.NewPointOrigin()},
 	)
@@ -487,6 +564,8 @@ func TestChainsyncServerFindIntersect_ClientRegistrationFailure(
 func TestChainsyncServerRequestNext_AddClientFailure(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	// Configure RequestNext with ChainsyncState that cannot build a
 	// server-side iterator for the downstream client.
 	o := newFindIntersectTestOuroboros(t)
@@ -505,6 +584,7 @@ func TestChainsyncServerRequestNext_AddClientFailure(
 
 // TestRestartChainsyncClientAsync_TimeoutClosesConnection verifies a hung
 // restart is bounded by chainsyncRestartTimeout and recycles the connection.
+// Not t.Parallel: swaps the package-level chainsyncRestartAfter.
 func TestRestartChainsyncClientAsync_TimeoutClosesConnection(
 	t *testing.T,
 ) {
@@ -569,6 +649,8 @@ func TestRestartChainsyncClientAsync_TimeoutClosesConnection(
 func TestRestartChainsyncClientAsync_ContextCancelClosesConnection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	// Start a restart under a cancellable context and block the restart
 	// function so ctx.Done can win the select.
 	f := newChainsyncServerFixture(t, csmock.ModeNtC)
@@ -613,6 +695,8 @@ func TestRestartChainsyncClientAsync_ContextCancelClosesConnection(
 func TestRestartChainsyncClientAsync_SuccessLeavesConnectionOpen(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	// Prepare a restart function that completes normally and signals when the
 	// goroutine has run.
 	f := newChainsyncServerFixture(t, csmock.ModeNtC)
@@ -649,6 +733,8 @@ func TestRestartChainsyncClientAsync_SuccessLeavesConnectionOpen(
 func TestRestartChainsyncClientAsync_RestartFailureClosesConnection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	// Prepare a restart function that fails immediately.
 	f := newChainsyncServerFixture(t, csmock.ModeNtC)
 	expectedErr := errors.New("restart failed")
@@ -676,6 +762,8 @@ func TestRestartChainsyncClientAsync_RestartFailureClosesConnection(
 }
 
 func TestNormalizeIntersectPoints(t *testing.T) {
+	t.Parallel()
+
 	points := []ocommon.Point{
 		ocommon.NewPoint(20, []byte("b")),
 		ocommon.NewPoint(30, []byte("c")),
@@ -704,6 +792,8 @@ func TestNormalizeIntersectPoints(t *testing.T) {
 func TestChainsyncClientRollForwardApplyGateWithholdsLedgerButObservesTip(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 
@@ -784,6 +874,8 @@ func TestChainsyncClientRollForwardApplyGateWithholdsLedgerButObservesTip(
 func TestChainsyncClientRollForward_WithheldHeaderNotPermanentlyDeduped(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 
@@ -881,6 +973,8 @@ func TestChainsyncClientRollForward_WithheldHeaderNotPermanentlyDeduped(
 func TestChainsyncClientRollBackwardSyncObservationOrdersApplyGate(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 
@@ -955,6 +1049,8 @@ func TestChainsyncClientRollBackwardSyncObservationOrdersApplyGate(
 func TestChainsyncClientRollForwardSyncObservationOrdersApplyGate(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 
@@ -1059,6 +1155,8 @@ func TestChainsyncClientRollForwardSyncObservationOrdersApplyGate(
 func TestChainsyncClientRollForwardReplaysDuplicateFromSelectedPeerSeenElsewhere(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 
@@ -1119,6 +1217,8 @@ func TestChainsyncClientRollForwardReplaysDuplicateFromSelectedPeerSeenElsewhere
 func TestChainsyncClientRollForwardReplaysDuplicateFromEquivalentSelectedPeerSeenElsewhere(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 
@@ -1181,6 +1281,8 @@ func TestChainsyncClientRollForwardReplaysDuplicateFromEquivalentSelectedPeerSee
 func TestChainsyncClientRollForwardDropsDuplicateFromSameSelectedPeer(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 
@@ -1241,6 +1343,8 @@ func TestChainsyncClientRollForwardDropsDuplicateFromSameSelectedPeer(
 func TestChainsyncClientRollForward_ParallelMultiPeerNoDoubleIngress(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 
@@ -1304,6 +1408,8 @@ func TestChainsyncClientRollForward_ParallelMultiPeerNoDoubleIngress(
 // distinct header enters the ledger queue exactly once, in arrival order,
 // attributed to the peer that reported it first.
 func TestChainsyncClientRollForward_ParallelMultiPeerOrdering(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 
@@ -1386,6 +1492,8 @@ func TestChainsyncClientRollForward_ParallelMultiPeerOrdering(t *testing.T) {
 func TestChainsyncClientRollForward_IneligiblePeerDoesNotPoisonDedup(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 
@@ -1447,6 +1555,8 @@ func TestChainsyncClientRollForward_IneligiblePeerDoesNotPoisonDedup(
 func TestRegisterTrackedChainsyncClient_ObservabilityOnlyDoesNotConsumePool(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 
@@ -1479,6 +1589,8 @@ func TestRegisterTrackedChainsyncClient_ObservabilityOnlyDoesNotConsumePool(
 func TestRegisterTrackedChainsyncClient_PromotedObservedKeepsDirection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 
@@ -1509,6 +1621,8 @@ func TestRegisterTrackedChainsyncClient_PromotedObservedKeepsDirection(
 func TestHandlePeerEligibilityChangedEvent_DemotesObservedIngress(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 
@@ -1550,6 +1664,8 @@ func TestHandlePeerEligibilityChangedEvent_DemotesObservedIngress(
 func TestChainsyncClientRollForward_UntrackedPeerDoesNotPublishToLedger(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 
@@ -1589,6 +1705,8 @@ func TestChainsyncClientRollForward_UntrackedPeerDoesNotPublishToLedger(
 func TestSubscribeChainsyncResyncRewindsClientsWithoutRecycle(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 
@@ -1653,6 +1771,8 @@ func TestSubscribeChainsyncResyncRewindsClientsWithoutRecycle(
 func TestSubscribeChainsyncResyncDoesNotRecycleOnLocalRollbackWithoutPeerHistory(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 
@@ -1703,6 +1823,8 @@ func TestSubscribeChainsyncResyncDoesNotRecycleOnLocalRollbackWithoutPeerHistory
 func TestSubscribeChainsyncResyncClosesConnectionForFreshSyncReasons(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	reasons := []string{
 		event.ChainsyncResyncReasonLocalTipPlateau,
 		event.ChainsyncResyncReasonPostPlateauRealign,
@@ -1818,6 +1940,8 @@ func TestSubscribeChainsyncResyncClosesConnectionForFreshSyncReasons(
 }
 
 func TestSubscribeChainsyncResyncDeniesDivergentPeer(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	bus := event.NewEventBus(nil, logger)
 	defer bus.Close()
@@ -1864,6 +1988,8 @@ func TestSubscribeChainsyncResyncDeniesDivergentPeer(t *testing.T) {
 }
 
 func TestSubscribeChainsyncResyncDoesNotDenyRollbackLoop(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	bus := event.NewEventBus(nil, logger)
 	defer bus.Close()
@@ -1912,6 +2038,8 @@ func TestSubscribeChainsyncResyncDoesNotDenyRollbackLoop(t *testing.T) {
 func TestHeaderPreviouslySeenFromOtherConnTreatsEquivalentConnIdsAsSame(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 
@@ -1940,6 +2068,8 @@ func TestHeaderPreviouslySeenFromOtherConnTreatsEquivalentConnIdsAsSame(
 func TestChainsyncClientRollForward_InboundUpstreamPublishesWhenEligible(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 
@@ -2016,6 +2146,8 @@ func TestChainsyncClientRollForward_InboundUpstreamPublishesWhenEligible(
 func TestChainsyncClientRollForward_InboundIneligiblePeerStaysObservabilityOnly(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 
@@ -2080,6 +2212,8 @@ func TestChainsyncClientRollForward_InboundIneligiblePeerStaysObservabilityOnly(
 func TestShouldPublishChainsyncToLedger_InboundFailsClosedWithNilCallback(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 
@@ -2160,6 +2294,8 @@ func TestShouldPublishChainsyncToLedger_InboundFailsClosedWithNilCallback(
 func TestChainsyncClientRollBackward_InboundUpstreamProcessesRollback(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 
@@ -2244,9 +2380,12 @@ func newFindIntersectTestOuroboros(t *testing.T) *Ouroboros {
 func makeFindIntersectPoints(n int) []ocommon.Point {
 	points := make([]ocommon.Point, n)
 	for i := range points {
+		hash := make([]byte, 32)
+		hash[0] = byte(i)
+		hash[1] = byte(i >> 8)
 		points[i] = ocommon.NewPoint(
 			uint64(i+1),
-			[]byte{byte(i), byte(i >> 8)},
+			hash,
 		)
 	}
 	return points
@@ -2259,6 +2398,8 @@ func makeFindIntersectPoints(n int) []ocommon.Point {
 func TestChainsyncResyncMithrilReasonsDenyPeerAndRequireFreshConnection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tests := []struct {
 		reason         string
 		wantFresh      bool
@@ -2320,5 +2461,70 @@ func TestChainsyncResyncMithrilReasonsDenyPeerAndRequireFreshConnection(
 				tt.reason, got, tt.wantDeniesPeer,
 			)
 		}
+	}
+}
+
+func TestChainsyncClientRollBackwardUpdatesTrackedClient(t *testing.T) {
+	for _, origin := range []bool{false, true} {
+		t.Run(fmt.Sprint(origin), func(t *testing.T) {
+			bus := event.NewEventBus(nil, nil)
+			defer bus.Close()
+			state := dchainsync.NewState(bus, nil)
+			connID := newTestConnId("127.0.0.1:6000", "10.0.0.1:3001")
+			require.True(t, state.AddClientConnId(connID))
+			previous := ocommon.NewPoint(100, []byte("previous"))
+			state.UpdateClientTip(
+				connID,
+				previous,
+				ochainsync.Tip{Point: previous},
+			)
+			state.MarkClientSynced(connID)
+			before := state.GetTrackedClient(connID)
+			point := ocommon.NewPoint(90, []byte("rollback"))
+			if origin {
+				point = ocommon.NewPointOrigin()
+			}
+			tip := ochainsync.Tip{
+				Point:       ocommon.NewPoint(110, []byte("tip")),
+				BlockNumber: 10,
+			}
+			observed := false
+			o := newOuroboros(OuroborosConfig{
+				ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool { return true },
+				ChainsyncApplyEligible:   func(ouroboros.ConnectionId) bool { return false },
+				ChainsyncObservePeerRollback: func(chainselection.PeerRollbackEvent) bool {
+					observed = true
+					current := state.GetTrackedClient(connID)
+					require.Equal(t, point, current.Cursor)
+					require.Equal(t, tip, current.Tip)
+					require.Equal(
+						t,
+						dchainsync.ClientStatusSyncing,
+						current.Status,
+					)
+					require.False(
+						t,
+						current.LastActivity.Before(before.LastActivity),
+					)
+					require.Equal(t, before.HeadersRecv, current.HeadersRecv)
+					return true
+				},
+			})
+			o.chainsyncState = state
+			o.eventBus = bus
+			require.NoError(t, o.chainsyncClientRollBackward(
+				ochainsync.CallbackContext{ConnectionId: connID}, point, tip,
+			))
+			require.True(t, observed)
+			// Rollback points are not headers and must not enter the dedup cache.
+			require.True(t, state.RecordHeaderForDedup(connID, point))
+			state.RemoveClientConnId(connID)
+			observed = false
+			require.NoError(t, o.chainsyncClientRollBackward(
+				ochainsync.CallbackContext{ConnectionId: connID}, point, tip,
+			))
+			require.False(t, observed)
+			require.Nil(t, state.GetTrackedClient(connID))
+		})
 	}
 }

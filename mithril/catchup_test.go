@@ -59,6 +59,8 @@ func firstImmutableBlock(t *testing.T) (uint64, []byte) {
 // is an ancestor), while a local tip with a different hash at the same slot is
 // rejected so the operator is told to perform a full resync.
 func TestVerifyCatchupIntersection(t *testing.T) {
+	t.Parallel()
+
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
 	slot, hash := firstImmutableBlock(t)
 
@@ -129,6 +131,8 @@ func catchupTestBlock(
 // descended from the artifact's tip block has nothing to catch up
 // (errCatchUpLocalAhead); any other ahead chain diverges and must abort.
 func TestVerifyCatchupIntersectionLocalAhead(t *testing.T) {
+	t.Parallel()
+
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
 	artSlot, artHash := artifactTipBlock(t)
 	aheadHash := bytes.Repeat([]byte{0xcc}, 32)
@@ -203,6 +207,8 @@ func TestVerifyCatchupIntersectionLocalAhead(t *testing.T) {
 // import marker advances to the target (so later runs no-op without
 // re-downloading), and a divergent chain aborts.
 func TestVerifyCatchupBeforeImport(t *testing.T) {
+	t.Parallel()
+
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
 	artSlot, artHash := artifactTipBlock(t)
 	aheadHash := bytes.Repeat([]byte{0xcc}, 32)

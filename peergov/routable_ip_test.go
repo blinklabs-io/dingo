@@ -92,7 +92,11 @@ func TestIsRoutableIP(t *testing.T) {
 			"2001:1:ffff:ffff:ffff:ffff:ffff:ffff",
 			true,
 		},
-		{"ipv6 top of benchmarking", "2001:2:0:ffff:ffff:ffff:ffff:ffff", false},
+		{
+			"ipv6 top of benchmarking",
+			"2001:2:0:ffff:ffff:ffff:ffff:ffff",
+			false,
+		},
 		{"ipv6 above benchmarking", "2001:2:1::", true},
 		{"ipv6 above local-use translation", "64:ff9b:2::", true},
 		{
@@ -105,9 +109,17 @@ func TestIsRoutableIP(t *testing.T) {
 			"2001:1f:ffff:ffff:ffff:ffff:ffff:ffff",
 			false,
 		},
-		// ORCHIDv2 directly abuts the deprecated ORCHID block and IANA marks
-		// it globally reachable, so the /28 must not spill into it.
-		{"ipv6 orchidv2", "2001:20::1", true},
+		// ORCHIDv2 abuts the deprecated ORCHID block and is Globally Reachable
+		// in the IANA registry, but RFC 7343 keeps it out of IPv6 headers, so
+		// it is rejected as a peer candidate and the /28 boundaries are pinned
+		// on both sides.
+		{"ipv6 orchidv2", "2001:20::1", false},
+		{
+			"ipv6 orchidv2 upper bound",
+			"2001:2f:ffff:ffff:ffff:ffff:ffff:ffff",
+			false,
+		},
+		{"ipv6 above orchidv2", "2001:30::", true},
 
 		// Documentation-only ranges are not valid peer candidates.
 		{"ipv4 test-net-1", "192.0.2.1", false},
@@ -122,7 +134,11 @@ func TestIsRoutableIP(t *testing.T) {
 		{"just above test-net-2", "198.51.101.0", true},
 		{"just below test-net-3", "203.0.112.255", true},
 		{"just above test-net-3", "203.0.114.0", true},
-		{"just below documentation", "2001:db7:ffff:ffff:ffff:ffff:ffff:ffff", true},
+		{
+			"just below documentation",
+			"2001:db7:ffff:ffff:ffff:ffff:ffff:ffff",
+			true,
+		},
 		{"just above documentation", "2001:db9::1", true},
 	}
 	for _, tt := range tests {

@@ -31,14 +31,8 @@ func (b *Blockfrost) handleAccountUTXOs(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	params, err := ParsePagination(r)
-	if err != nil {
-		writeError(
-			w,
-			http.StatusBadRequest,
-			"Bad Request",
-			"Invalid pagination parameters.",
-		)
+	params, ok := parsePaginationOrWriteError(w, r)
+	if !ok {
 		return
 	}
 	items, total, err := b.node.AccountUTXOs(
@@ -74,14 +68,8 @@ func (b *Blockfrost) handleAccountWithdrawals(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	params, err := ParsePagination(r)
-	if err != nil {
-		writeError(
-			w,
-			http.StatusBadRequest,
-			"Bad Request",
-			"Invalid pagination parameters.",
-		)
+	params, ok := parsePaginationOrWriteError(w, r)
+	if !ok {
 		return
 	}
 	items, total, err := b.node.AccountWithdrawals(
@@ -110,14 +98,8 @@ func (b *Blockfrost) handleAccountTransactions(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	pagination, err := ParsePagination(r)
-	if err != nil {
-		writeError(
-			w,
-			http.StatusBadRequest,
-			"Bad Request",
-			"Invalid pagination parameters.",
-		)
+	pagination, ok := parsePaginationOrWriteError(w, r)
+	if !ok {
 		return
 	}
 	params := AccountTransactionsParams{Pagination: pagination}

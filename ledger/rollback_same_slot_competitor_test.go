@@ -249,6 +249,8 @@ func (f *sameSlotCompetitorFixture) inputInLiveSet(t *testing.T) bool {
 // and asserts live-set membership through the database.UtxoByRef lookup that
 // LedgerView.UtxoById delegates to, rather than querying deleted_slot directly.
 func TestRollbackSameSlotCompetitorRestoresConsumedUtxo(t *testing.T) {
+	t.Parallel()
+
 	fixture := newSameSlotCompetitorFixture(t)
 
 	// While the applied block at the contested slot stands, its consumed
@@ -293,6 +295,8 @@ func TestRollbackSameSlotCompetitorRestoresConsumedUtxo(t *testing.T) {
 // must fail with a persistent diagnostic instead of reporting a repair that
 // left the UTxO set diverged.
 func TestRollbackSameSlotCompetitorWithoutAncestorFailsLoudly(t *testing.T) {
+	t.Parallel()
+
 	// No ancestor nonce, so no applied block exists below the contested slot.
 	fixture := newSameSlotCompetitorFixtureOpts(t, false)
 

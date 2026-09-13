@@ -28,6 +28,8 @@ import (
 // so without syncCompatFields carrying it across, an operator's tokenRegistry
 // block would parse and then be silently ignored.
 func TestTokenRegistryConfigReachesRuntimeFromYAML(t *testing.T) {
+	t.Parallel()
+
 	cfg, err := NewConfigFromInternal(
 		&internalconfig.Config{
 			TokenRegistry: internalconfig.TokenRegistryConfig{
@@ -65,6 +67,8 @@ func TestTokenRegistryConfigReachesRuntimeFromYAML(t *testing.T) {
 // mainnet registry is a roughly 240MB download, so an upgrade must not start
 // one on its own.
 func TestTokenRegistryConfigDisabledByDefault(t *testing.T) {
+	t.Parallel()
+
 	cfg := NewConfig()
 
 	require.False(t, cfg.tokenRegistry.Enabled)
@@ -75,6 +79,8 @@ func TestTokenRegistryConfigDisabledByDefault(t *testing.T) {
 // cannot round-trip through internal config: the programmatic HTTP client is
 // runtime-only, and syncCompatFields runs after options are applied.
 func TestWithTokenRegistryConfigPreservesHTTPClient(t *testing.T) {
+	t.Parallel()
+
 	client := &http.Client{}
 
 	cfg := NewConfig(WithTokenRegistryConfig(TokenRegistryConfig{

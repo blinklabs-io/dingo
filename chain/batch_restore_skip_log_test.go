@@ -67,6 +67,8 @@ func (b *lockedBuffer) String() string {
 // own restore reaches that lock first is scheduling, so rounds repeat until
 // the add wins -- what the assertion pins is that when it does, the skip is on
 // the record.
+// Not t.Parallel: swaps slog.SetDefault, so a concurrent test's
+// slog.Default() calls would be redirected into this test's buffer.
 func TestSkippedBatchRestoreIsRecorded(t *testing.T) {
 	const (
 		securityParam = 100

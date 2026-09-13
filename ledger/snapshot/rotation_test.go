@@ -159,6 +159,8 @@ func seedRetentionRows(
 // per-epoch aggregates and a per-pool reward basis to compare against (and a
 // missing summary keeps meaning "never captured").
 func TestCleanupOldSnapshotsRetainsEpochSummaries(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
 	meta := db.Metadata()
@@ -316,6 +318,8 @@ func TestCleanupOldSnapshotsRetainsEpochSummaries(t *testing.T) {
 // TestCleanupOldSnapshotsBelowWindowKeepsEverything covers the early-sync case
 // where there is not yet enough history to prune anything.
 func TestCleanupOldSnapshotsBelowWindowKeepsEverything(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
 	meta := db.Metadata()
@@ -348,6 +352,8 @@ func TestCleanupOldSnapshotsBelowWindowKeepsEverything(t *testing.T) {
 func TestRotateSnapshotsPreservesCapturedLeiosKeyAcrossPoolRotation(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	seedEpochs(t, db, []models.Epoch{{
 		EpochId:       7,
@@ -442,6 +448,8 @@ func TestRotateSnapshotsPreservesCapturedLeiosKeyAcrossPoolRotation(
 func TestCleanupOldSnapshotsRetentionFloorRetainsDeferredHeaderEpochs(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
 	meta := db.Metadata()
@@ -515,6 +523,8 @@ func TestCleanupOldSnapshotsRetentionFloorRetainsDeferredHeaderEpochs(
 // ever widens retention: a floor at/above the default currentEpoch-3 boundary
 // changes nothing, and the default pruning still applies.
 func TestCleanupOldSnapshotsRetentionFloorAboveWindowIsNoop(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
 	meta := db.Metadata()
@@ -553,6 +563,8 @@ func TestCleanupOldSnapshotsRetentionFloorAboveWindowIsNoop(t *testing.T) {
 // current-MaxDepth is retained, so the retained span is MaxDepth+1 epochs
 // inclusive), so a stuck deferred header cannot pin them without bound.
 func TestCleanupOldSnapshotsRetentionDepthCapBounds(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
 	meta := db.Metadata()

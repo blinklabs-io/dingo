@@ -28,6 +28,8 @@ import (
 // TestListSnapshotsMissingBaseDirReturnsEmpty verifies that a
 // non-existent base directory returns an empty list, not an error.
 func TestListSnapshotsMissingBaseDirReturnsEmpty(t *testing.T) {
+	t.Parallel()
+
 	entries, err := lifecycle.ListSnapshots(
 		filepath.Join(t.TempDir(), "does-not-exist"),
 	)
@@ -38,6 +40,8 @@ func TestListSnapshotsMissingBaseDirReturnsEmpty(t *testing.T) {
 // TestListSnapshotsSkipsEntriesWithoutValidManifest verifies that a
 // partial (manifest-less) directory and a stray file are both skipped.
 func TestListSnapshotsSkipsEntriesWithoutValidManifest(t *testing.T) {
+	t.Parallel()
+
 	base := t.TempDir()
 
 	// A real, valid snapshot directory.
@@ -80,6 +84,8 @@ func TestListSnapshotsSkipsEntriesWithoutValidManifest(t *testing.T) {
 func TestListSnapshotsSurfacesCorruptedManifestWithoutHidingGoodEntries(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	base := t.TempDir()
 
 	good := testManifest()
@@ -129,6 +135,8 @@ func TestListSnapshotsSurfacesCorruptedManifestWithoutHidingGoodEntries(
 // TestListSnapshotsOrdersNewestFirst verifies that entries are sorted by
 // CreatedAt descending, newest snapshot first.
 func TestListSnapshotsOrdersNewestFirst(t *testing.T) {
+	t.Parallel()
+
 	base := t.TempDir()
 
 	older := testManifest()

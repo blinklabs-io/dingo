@@ -68,6 +68,8 @@ import (
 // slot, ProtocolParamsForSlot returns Allegra pparams; one slot earlier
 // it still returns Shelley pparams.
 func TestProtocolParamsForSlot_ForecastsBumpAtBoundarySlot(t *testing.T) {
+	t.Parallel()
+
 	cfg := newAllegraAtEpoch1Cfg(t)
 
 	// Concrete Shelley pparams as if we were mid-epoch-0 with the
@@ -133,14 +135,18 @@ func TestProtocolParamsForSlot_ForecastsBumpAtBoundarySlot(t *testing.T) {
 // current era's epoch length loses the epochs occupied by a Byron prefix and
 // can therefore miss a scheduled fork at the first future Shelley boundary.
 func TestProtocolParamsForSlot_UsesMultiEraEpochs(t *testing.T) {
+	t.Parallel()
+
 	const (
 		byronEpochs       = 2
 		byronEpochLength  = uint(100)
 		shelleyEpoch      = uint64(207)
 		shelleyEpochLen   = uint(432)
 		byronEndSlot      = uint64(byronEpochs) * uint64(byronEpochLength)
-		currentEpochStart = byronEndSlot + (shelleyEpoch-2)*uint64(shelleyEpochLen)
-		boundarySlot      = currentEpochStart + uint64(shelleyEpochLen)
+		currentEpochStart = byronEndSlot + (shelleyEpoch-2)*uint64(
+			shelleyEpochLen,
+		)
+		boundarySlot = currentEpochStart + uint64(shelleyEpochLen)
 	)
 
 	cfg := newMultiEraForecastCfg(t, shelleyEpoch+1)
@@ -184,8 +190,12 @@ func TestProtocolParamsForSlot_UsesMultiEraEpochs(t *testing.T) {
 	got := ls.ProtocolParamsForSlot(boundarySlot)
 	gotShelley, ok := got.(*shelley.ShelleyProtocolParameters)
 	require.True(t, ok)
-	require.Equal(t, uint(3), gotShelley.ProtocolMajor,
-		"the first Shelley slot after a Byron prefix must forecast the scheduled fork")
+	require.Equal(
+		t,
+		uint(3),
+		gotShelley.ProtocolMajor,
+		"the first Shelley slot after a Byron prefix must forecast the scheduled fork",
+	)
 }
 
 // TestProtocolParamsForSlot_FallbackProjectsFromCurrentEpoch verifies the
@@ -193,6 +203,8 @@ func TestProtocolParamsForSlot_UsesMultiEraEpochs(t *testing.T) {
 // an epoch estimate, and that estimate must retain the absolute epoch offset
 // introduced by earlier eras.
 func TestProtocolParamsForSlot_FallbackProjectsFromCurrentEpoch(t *testing.T) {
+	t.Parallel()
+
 	const (
 		byronEpochs      = uint64(2)
 		byronEpochLength = uint64(100)
@@ -208,11 +220,17 @@ func TestProtocolParamsForSlot_FallbackProjectsFromCurrentEpoch(t *testing.T) {
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
 			{EpochId: 0, StartSlot: 0, SlotLength: 20_000,
-				LengthInSlots: uint(byronEpochLength), EraId: eras.ByronEraDesc.Id},
+				LengthInSlots: uint(
+					byronEpochLength,
+				), EraId: eras.ByronEraDesc.Id},
 			{EpochId: 1, StartSlot: byronEpochLength, SlotLength: 20_000,
-				LengthInSlots: uint(byronEpochLength), EraId: eras.ByronEraDesc.Id},
+				LengthInSlots: uint(
+					byronEpochLength,
+				), EraId: eras.ByronEraDesc.Id},
 			{EpochId: currentEpoch, StartSlot: currentStart, SlotLength: 1_000,
-				LengthInSlots: uint(shelleyEpochLen), EraId: eras.ShelleyEraDesc.Id},
+				LengthInSlots: uint(
+					shelleyEpochLen,
+				), EraId: eras.ShelleyEraDesc.Id},
 		},
 		currentEra: eras.ShelleyEraDesc,
 		currentEpoch: models.Epoch{
@@ -240,7 +258,10 @@ func TestProtocolParamsForSlot_FallbackProjectsFromCurrentEpoch(t *testing.T) {
 		"fallback epoch projection must preserve the Byron epoch offset")
 }
 
-func newMultiEraForecastCfg(t *testing.T, forkEpoch uint64) *cardano.CardanoNodeConfig {
+func newMultiEraForecastCfg(
+	t *testing.T,
+	forkEpoch uint64,
+) *cardano.CardanoNodeConfig {
 	t.Helper()
 	cfg := &cardano.CardanoNodeConfig{}
 	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(`{
@@ -282,6 +303,8 @@ func newMultiEraForecastCfg(t *testing.T, forkEpoch uint64) *cardano.CardanoNode
 func TestProtocolParamsForSlot_ForecastsPendingPParamUpdateAtNormalBoundary(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	cfg := newShelleyUpdateQuorum1Cfg(t)
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
@@ -441,6 +464,8 @@ func newAllegraAtEpoch1Cfg(t *testing.T) *cardano.CardanoNodeConfig {
 func TestProtocolParamsForSlot_ConcurrentPostForkCallsDoNotRaceOnCostModels(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	cfg := newAlonzoBabbageAtEpoch1Cfg(t)
 
 	pparams := &alonzo.AlonzoProtocolParameters{

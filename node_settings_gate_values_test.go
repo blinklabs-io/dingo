@@ -45,6 +45,8 @@ import (
 // DevNet/integration-level test of the real Node.Run wiring), not a gap
 // this test is pretending to close.
 func TestNodeSettingsGateValuesAssemblesLedgerAndGenesisGates(t *testing.T) {
+	t.Parallel()
+
 	n := &Node{
 		config: Config{
 			validateHistorical:         false, // relaxed: taint "on"
@@ -126,6 +128,8 @@ func TestNodeSettingsGateValuesAssemblesLedgerAndGenesisGates(t *testing.T) {
 func TestNodeSettingsGateValuesOmitsGenesisHashesWithoutCardanoConfig(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	n := &Node{config: Config{}}
 	values := n.nodeSettingsGateValues()
 

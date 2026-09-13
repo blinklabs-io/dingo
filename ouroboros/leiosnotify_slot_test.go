@@ -35,6 +35,8 @@ import (
 // so must not suppress or mask -- a legitimate, independent occurrence of the
 // same content-addressed hash at a different slot (issue #3513).
 func TestLeiosBlockKeyDistinguishesSlots(t *testing.T) {
+	t.Parallel()
+
 	hash := []byte{0xaa, 0xbb}
 	a := leiosBlockKey(10, hash)
 	b := leiosBlockKey(11, hash)
@@ -52,6 +54,8 @@ func TestLeiosBlockKeyDistinguishesSlots(t *testing.T) {
 // announcement) for the new point at all. The fetch must still happen when
 // the cached entry's slot does not match the offered point.
 func TestLeiosNotifyBlockOfferFetchesSameHashAtDifferentSlot(t *testing.T) {
+	t.Parallel()
+
 	staleSlot := uint64(100)
 	offeredPoint, blockRaw := testLeiosEndorserBlockRaw(t, 200)
 
@@ -117,6 +121,8 @@ func TestLeiosNotifyBlockOfferFetchesSameHashAtDifferentSlot(t *testing.T) {
 // the dispatched closure itself, which independently treated the unrelated,
 // differently-slotted cache hit as "nothing left to fetch."
 func TestLeiosNotifyBlockTxsOfferFetchesSameHashAtDifferentSlot(t *testing.T) {
+	t.Parallel()
+
 	staleSlot := uint64(300)
 	offeredPoint, blockRaw := testLeiosEndorserBlockRaw(t, 400)
 

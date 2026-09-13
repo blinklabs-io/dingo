@@ -201,6 +201,8 @@ func committeeWaiterCount(m *VoteManager, epoch uint64) int {
 // announcement diffused to N peers started N identical computations and
 // discarded N-1 of the results.
 func TestVoteManagerCommitteeCoalescesConcurrentSameEpochMisses(t *testing.T) {
+	t.Parallel()
+
 	const callers = 8
 	params := newGatedParamsProvider()
 	fixture := newManagerFixture(
@@ -265,11 +267,15 @@ func TestVoteManagerCommitteeCoalescesConcurrentSameEpochMisses(t *testing.T) {
 		)
 	}
 	require.Equal(
-		t, 1, params.callCount(),
+		t,
+		1,
+		params.callCount(),
 		"committee parameters must be resolved once per epoch, not once per caller",
 	)
 	require.Equal(
-		t, 1, fixture.stake.callCount(),
+		t,
+		1,
+		fixture.stake.callCount(),
 		"the stake distribution must be read once per epoch, not once per caller",
 	)
 }
@@ -278,6 +284,8 @@ func TestVoteManagerCommitteeCoalescesConcurrentSameEpochMisses(t *testing.T) {
 // computation exactly once -- coalescing must not turn a lone miss into zero
 // computations (a caller that parks on a claim nobody owns) or two.
 func TestVoteManagerCommitteeSingleMissComputesOnce(t *testing.T) {
+	t.Parallel()
+
 	params := newGatedParamsProvider()
 	fixture := newManagerFixture(
 		t,
@@ -308,6 +316,8 @@ func TestVoteManagerCommitteeSingleMissComputesOnce(t *testing.T) {
 // epoch to a keyless committee, and leaving the claim held would park every
 // later caller on a computation that had already finished.
 func TestVoteManagerCommitteeFailureReleasesWaiters(t *testing.T) {
+	t.Parallel()
+
 	params := newGatedParamsProvider()
 	fixture := newManagerFixture(
 		t,
@@ -361,6 +371,8 @@ func TestVoteManagerCommitteeFailureReleasesWaiters(t *testing.T) {
 // woke on the leader's completion would hold a connection's protocol worker
 // across shutdown.
 func TestVoteManagerCommitteeWaiterReleasedOnStop(t *testing.T) {
+	t.Parallel()
+
 	params := newGatedParamsProvider()
 	fixture := newManagerFixture(
 		t,
@@ -409,6 +421,8 @@ func TestVoteManagerCommitteeWaiterReleasedOnStop(t *testing.T) {
 // panic itself still reaches the leader's caller: a fault in this node's own
 // stake handling must not be laundered into a routine per-epoch error.
 func TestVoteManagerCommitteePanicReleasesWaiters(t *testing.T) {
+	t.Parallel()
+
 	params := newGatedParamsProvider()
 	stake := &panickingStakeProvider{panics: 1}
 	fixture := newManagerFixture(
@@ -472,6 +486,8 @@ func TestVoteManagerCommitteePanicReleasesWaiters(t *testing.T) {
 // further distinct epoch is refused instead of admitted into unbounded
 // concurrent work. The refusal is not memoized.
 func TestVoteManagerCommitteeInFlightEpochsAreBounded(t *testing.T) {
+	t.Parallel()
+
 	params := newGatedParamsProvider()
 	params.blockAll = true
 	fixture := newManagerFixture(
@@ -521,6 +537,8 @@ func TestVoteManagerCommitteeInFlightEpochsAreBounded(t *testing.T) {
 func TestVoteManagerCommitteeRollbackDuringComputationIsNotMemoized(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	params := newGatedParamsProvider()
 	fixture := newManagerFixture(
 		t,
@@ -586,6 +604,8 @@ func TestVoteManagerCommitteeRollbackDuringComputationIsNotMemoized(
 // returned -- or forever, since the provider read it is blocked in carries no
 // deadline of its own.
 func TestVoteManagerCommitteeClaimNotInheritedAcrossRestart(t *testing.T) {
+	t.Parallel()
+
 	params := newGatedParamsProvider()
 	fixture := newManagerFixture(
 		t,
@@ -638,7 +658,11 @@ func TestVoteManagerCommitteeClaimNotInheritedAcrossRestart(t *testing.T) {
 	// the new lifecycle's memo. Clearing the claim stops a new caller
 	// joining it; only the generation bump stops it installing.
 	memo := committeeMemoEntry(fixture.mgr, 5)
-	require.NotNil(t, memo, "the new lifecycle's own computation must be memoized")
+	require.NotNil(
+		t,
+		memo,
+		"the new lifecycle's own computation must be memoized",
+	)
 	require.Same(
 		t,
 		nextResult.committee,

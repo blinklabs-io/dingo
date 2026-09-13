@@ -132,6 +132,8 @@ func runResyncDeferredPublishScenario(
 // the 5s guard) if requestChainsyncResync publishes inline while chainsyncMutex
 // is held, and passes when the publish is deferred through pendingPublishes.
 func TestRequestChainsyncResyncDefersPublishUnderChainsyncMutex(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	runResyncDeferredPublishScenario(t, &ls.chainsyncMutex, "chainsyncMutex")
 }
@@ -143,6 +145,8 @@ func TestRequestChainsyncResyncDefersPublishUnderChainsyncMutex(t *testing.T) {
 func TestRequestChainsyncResyncDefersPublishUnderChainsyncBlockfetchMutex(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	runResyncDeferredPublishScenario(
 		t, &ls.chainsyncBlockfetchMutex, "chainsyncBlockfetchMutex",

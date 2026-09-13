@@ -28,6 +28,8 @@ import (
 func TestLedgerViewGetLeiosKeysUsesRequestedSnapshotAfterPoolRotation(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	poolKeyHash := bytes.Repeat([]byte{0x41}, 28)
 	oldPublic := bytes.Repeat([]byte{0x51}, 96)

@@ -225,7 +225,7 @@ func ensureDB(
 		internalplugins.StorageDependencies{
 			DataDir: cfg.DatabasePath, RunMode: string(cfg.RunMode),
 			StorageMode: cfg.StorageMode, MaxConnections: cfg.DatabaseWorkers,
-			Logger: logger,
+			Logger: logger, TracingEnabled: cfg.Tracing,
 		},
 	)
 	if err != nil {

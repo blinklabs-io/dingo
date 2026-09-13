@@ -36,6 +36,8 @@ import (
 // era-specific amount policy; storage remains era-neutral and rejects only
 // overdrafts before subtracting the accepted amount.
 func TestLedgerViewRewardWithdrawalValidation(t *testing.T) {
+	t.Parallel()
+
 	const balance = uint64(100)
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)

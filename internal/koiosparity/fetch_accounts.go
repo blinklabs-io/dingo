@@ -664,17 +664,12 @@ outer:
 		)
 	}
 	// koios_account_fetch_staged_rows/koios_account_checked are deliberately
-	// NOT cleared here, even once complete=true: koios_account_checked is
-	// the durable ledger accountLifecycleMismatches (check.go) reads later
-	// to report zero-reward/newly-registered/deregistered accounts, and
-	// koios_account_fetch_staged_rows must survive so a later idempotent
-	// re-run of this same, already-complete epoch with an unchanged universe
-	// finds every chunk already done AND still has real staged rows to
-	// re-commit — clearing either table here would make that re-run commit
-	// an empty reward set over the correct one. --force-refresh instead goes
-	// through the forceRefresh path above, which unconditionally invalidates
-	// every existing chunk before dispatch so it always re-fetches from
-	// Koios rather than relying on this retained state.
+	// retained here, even once complete=true, so a later idempotent re-run of
+	// this same epoch can reuse its checkpointed chunks. Fetch and Observer
+	// evict rows outside the rolling accountCheckpointRetentionEpochs window
+	// only after their account workers have joined. The coverage row retains
+	// the exact zero-reward count/sample after those per-address rows age out,
+	// and --force-refresh still bypasses retained checkpoints as before.
 
 	logger.Info("koiosparity: epoch account rewards fetched",
 		"network", network,

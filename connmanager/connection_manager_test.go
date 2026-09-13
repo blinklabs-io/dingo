@@ -204,6 +204,9 @@ func TestConnectionManagerConnClosed(t *testing.T) {
 	}
 }
 
+// Not t.Parallel: this and the other goleak.VerifyNone tests in this
+// package assert on the whole process's goroutine set, which a pending
+// parallel test is part of.
 func TestConnectionManager_Stop(t *testing.T) {
 	defer goleak.VerifyNone(t)
 

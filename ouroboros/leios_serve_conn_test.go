@@ -57,6 +57,8 @@ func waitForLeiosServeWaiter(t *testing.T, f *chainsyncServerFixture) {
 // returns, and doneChan closes only after that, so DoneChan() cannot close
 // while the callback it would release is still running.
 func TestLeiosServeWaitReleasedByRealPeerDisconnect(t *testing.T) {
+	t.Parallel()
+
 	f := newChainsyncServerFixtureWithConfig(t, csmock.ModeNtC, OuroborosConfig{
 		EnableLeios:             true,
 		LeiosClosureWaitTimeout: time.Hour,
@@ -112,6 +114,8 @@ func TestLeiosServeWaitReleasedByRealPeerDisconnect(t *testing.T) {
 // connection that stays up must still end the wait at the configured window,
 // and report timeout rather than cancelled.
 func TestLeiosServeWaitStillBoundedByTimeout(t *testing.T) {
+	t.Parallel()
+
 	f := newChainsyncServerFixtureWithConfig(t, csmock.ModeNtC, OuroborosConfig{
 		EnableLeios:             true,
 		LeiosClosureWaitTimeout: 50 * time.Millisecond,
@@ -139,6 +143,8 @@ func TestLeiosServeWaitStillBoundedByTimeout(t *testing.T) {
 // removed from the manager must not produce a wait that nothing will ever
 // release, since its ConnClosedFunc may already have run.
 func TestLeiosServeWaiterNotRegisteredForClosedConnection(t *testing.T) {
+	t.Parallel()
+
 	f := newChainsyncServerFixtureWithConfig(t, csmock.ModeNtC, OuroborosConfig{
 		EnableLeios:             true,
 		LeiosClosureWaitTimeout: time.Hour,

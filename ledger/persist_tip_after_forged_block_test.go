@@ -34,6 +34,8 @@ import (
 // stale data, and a later Truncate can never reach (and clean up) such a
 // block, eventually surfacing as a "persistent chain index gap" error.
 func TestPersistTipAfterForgedBlockUpdatesPersistedTip(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	ls := &LedgerState{
 		db: db,

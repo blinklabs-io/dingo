@@ -19,6 +19,8 @@ import (
 // registration that needs one, and the transaction then fails value
 // conservation by exactly the deposit (issue #3908).
 func TestLedgerViewSatisfiesEpochState(t *testing.T) {
+	t.Parallel()
+
 	var lv any = &LedgerView{}
 	_, ok := lv.(lcommon.EpochState)
 	require.True(t, ok,
@@ -28,6 +30,8 @@ func TestLedgerViewSatisfiesEpochState(t *testing.T) {
 
 // TestLedgerViewEpochForSlot checks the mapping itself against a known cache.
 func TestLedgerViewEpochForSlot(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
 			{EpochId: 196, StartSlot: 16_934_400, LengthInSlots: 86_400},
@@ -54,8 +58,11 @@ func TestLedgerViewEpochForSlot(t *testing.T) {
 		})
 	}
 
-	t.Run("a slot outside the cache is an error, not a guess", func(t *testing.T) {
-		_, err := lv.EpochForSlot(99_000_000)
-		require.Error(t, err)
-	})
+	t.Run(
+		"a slot outside the cache is an error, not a guess",
+		func(t *testing.T) {
+			_, err := lv.EpochForSlot(99_000_000)
+			require.Error(t, err)
+		},
+	)
 }

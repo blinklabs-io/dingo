@@ -21,6 +21,8 @@ import (
 )
 
 func TestValidateVerificationMaterial(t *testing.T) {
+	t.Parallel()
+
 	g1Hex := testBLSG1Hex(t)
 	g2Hex := testBLSG2Hex(t)
 	err := ValidateVerificationMaterial(&VerificationMaterial{
@@ -53,6 +55,8 @@ func TestValidateVerificationMaterial(t *testing.T) {
 }
 
 func TestValidateVerificationMaterialIgnoresStakeMismatch(t *testing.T) {
+	t.Parallel()
+
 	g1Hex := testBLSG1Hex(t)
 	g2Hex := testBLSG2Hex(t)
 	err := ValidateVerificationMaterial(&VerificationMaterial{
@@ -85,6 +89,8 @@ func TestValidateVerificationMaterialIgnoresStakeMismatch(t *testing.T) {
 }
 
 func TestValidateVerificationMaterialInvalidSignerKey(t *testing.T) {
+	t.Parallel()
+
 	g1Hex := testBLSG1Hex(t)
 	g2Hex := testBLSG2Hex(t)
 	err := ValidateVerificationMaterial(&VerificationMaterial{
@@ -118,6 +124,8 @@ func TestValidateVerificationMaterialInvalidSignerKey(t *testing.T) {
 }
 
 func TestValidateVerificationMaterialCardanoDistributionMismatch(t *testing.T) {
+	t.Parallel()
+
 	g1Hex := testBLSG1Hex(t)
 	g2Hex := testBLSG2Hex(t)
 	err := ValidateVerificationMaterial(&VerificationMaterial{

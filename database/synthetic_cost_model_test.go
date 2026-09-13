@@ -47,6 +47,8 @@ func newSyntheticCostModelTestDatabase(t *testing.T) *Database {
 func TestRecomputeSyntheticV2CostModelMarkerAfterTruncate_UndoesClearWhenRollbackCrossesBack(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newSyntheticCostModelTestDatabase(t)
 
 	// Simulate real PlutusV2 cost-model data confirmed at epoch 5 (slot 500).
@@ -84,6 +86,8 @@ func TestRecomputeSyntheticV2CostModelMarkerAfterTruncate_UndoesClearWhenRollbac
 func TestRecomputeSyntheticV2CostModelMarkerAfterTruncate_KeepsClearWhenRollbackDoesNotCrossBack(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newSyntheticCostModelTestDatabase(t)
 
 	require.NoError(
@@ -117,6 +121,8 @@ func TestRecomputeSyntheticV2CostModelMarkerAfterTruncate_KeepsClearWhenRollback
 func TestRecomputeSyntheticV2CostModelMarkerAfterTruncate_NoOpWhenNeverCleared(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newSyntheticCostModelTestDatabase(t)
 
 	require.NoError(

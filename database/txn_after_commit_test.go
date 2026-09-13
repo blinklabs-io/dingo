@@ -41,6 +41,8 @@ func (*blockingAfterCommitTxn) Rollback() error {
 // TestTxnAfterCommitRunsOnCommit verifies after-commit callbacks fire, once and
 // in registration order, only after a read-write transaction commits.
 func TestTxnAfterCommitRunsOnCommit(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 
 	txn := db.Transaction(true)
@@ -60,6 +62,8 @@ func TestTxnAfterCommitRunsOnCommit(t *testing.T) {
 // fires its after-commit callbacks, so callers may register side effects that
 // must reflect committed state only.
 func TestTxnAfterCommitSkippedOnRollback(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 
 	txn := db.Transaction(true)
@@ -74,6 +78,8 @@ func TestTxnAfterCommitSkippedOnRollback(t *testing.T) {
 // transaction (which only releases resources) does not fire callbacks, since no
 // durable commit occurred.
 func TestTxnAfterCommitSkippedOnReadOnly(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 
 	txn := db.Transaction(false)
@@ -86,6 +92,8 @@ func TestTxnAfterCommitSkippedOnReadOnly(t *testing.T) {
 }
 
 func TestTxnAfterCommitConcurrentWithCommitIsNotLost(t *testing.T) {
+	t.Parallel()
+
 	backend := &blockingAfterCommitTxn{
 		commitStarted: make(chan struct{}),
 		allowCommit:   make(chan struct{}),
@@ -142,6 +150,8 @@ func TestTxnAfterCommitConcurrentWithCommitIsNotLost(t *testing.T) {
 }
 
 func TestTxnAfterCommitRegisteredAfterCommitRuns(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 	txn := db.Transaction(true)
 	require.NoError(t, txn.Commit())
@@ -153,6 +163,8 @@ func TestTxnAfterCommitRegisteredAfterCommitRuns(t *testing.T) {
 }
 
 func TestTxnAfterCommitCallbackCanRegisterCallback(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 	txn := db.Transaction(true)
 	var order []int
@@ -172,6 +184,8 @@ func TestTxnAfterCommitCallbackCanRegisterCallback(t *testing.T) {
 // every later AfterCommit registration would silently append and return without
 // ever draining.
 func TestTxnAfterCommitPanicIsContained(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 	txn := db.Transaction(true)
 

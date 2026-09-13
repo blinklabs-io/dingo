@@ -30,4 +30,8 @@
 //   - ChainUpdateEventType      — a block was added to the primary chain, or
 //     the primary chain was rolled back to a point
 //   - ChainForkEventType        — a fork was observed against the primary chain
+//   - ChainHeaderEventType      — ordered header-lifecycle stream: a
+//     ranking-block header carrying a Leios endorser-block announcement
+//     entered the header queue (header arrival, not block application), or
+//     queued headers left it again without becoming blocks
 package chain
