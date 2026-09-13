@@ -372,7 +372,9 @@ type blockProtocolLimits struct {
 // protocolBlockLimits extracts the inbound block limits for a protocol era.
 // Keeping the era mapping here ensures size and execution-unit validation use
 // the same protocol-parameter type coverage.
-func protocolBlockLimits(pparams lcommon.ProtocolParameters) (blockProtocolLimits, bool) {
+func protocolBlockLimits(
+	pparams lcommon.ProtocolParameters,
+) (blockProtocolLimits, bool) {
 	switch pp := pparams.(type) {
 	case *shelley.ShelleyProtocolParameters:
 		if pp == nil {

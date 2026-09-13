@@ -77,7 +77,10 @@ func TestBlockReferenceScriptsAcceptParameterShapes(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			require.NoError(t, validateBlockReferenceScripts(tc.block, tc.pp, nil))
+			require.NoError(
+				t,
+				validateBlockReferenceScripts(tc.block, tc.pp, nil),
+			)
 		})
 	}
 }

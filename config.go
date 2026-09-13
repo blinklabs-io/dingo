@@ -229,6 +229,7 @@ type Config struct {
 	corsAllowedOrigins                                                                  []string
 	networkMagic                                                                        uint32
 	intersectTip, peerSharing, validateHistorical, strictUtxoValidation                 bool
+	skipRewardLiveStakeBackfillCheck                                                    bool
 	runMode                                                                             string
 	startEra                                                                            internalconfig.StartEra
 	shutdownTimeout                                                                     time.Duration
@@ -660,7 +661,9 @@ func (n *Node) configValidate() error {
 					byronProtocolMagic,
 				)
 			}
-			if n.config.cfg.NetworkMagic != uint32(byronProtocolMagic) { // #nosec G115 -- range-checked above
+			if n.config.cfg.NetworkMagic != uint32(
+				byronProtocolMagic,
+			) { // #nosec G115 -- range-checked above
 				return fmt.Errorf(
 					"network magic (%d) doesn't match value from Byron genesis (%d)",
 					n.config.cfg.NetworkMagic,
@@ -763,6 +766,7 @@ func (c *Config) syncCompatFields() {
 	c.corsAllowedOrigins, c.intersectTip = c.cfg.CORSAllowedOrigins, c.cfg.IntersectTip
 	c.peerSharing = c.cfg.PeerSharing != nil && *c.cfg.PeerSharing
 	c.validateHistorical, c.strictUtxoValidation = c.cfg.ValidateHistorical, c.cfg.StrictUtxoValidation
+	c.skipRewardLiveStakeBackfillCheck = c.cfg.SkipRewardLiveStakeBackfillCheck
 	c.runMode, c.startEra, c.storageMode = string(
 		c.cfg.RunMode,
 	), c.cfg.StartEra, StorageMode(

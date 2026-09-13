@@ -921,10 +921,14 @@ func (ls *LedgerState) awaitInFlightEndorserFetches(
 			if cached {
 				ls.config.Logger.Warn(
 					"endorser block fetch outlived the diffusion window; held block application until it landed",
-					"component", "ledger",
-					"slot", r.slot,
-					"eb_hash", r.hash.String(),
-					"waited_seconds", elapsed.Seconds(),
+					"component",
+					"ledger",
+					"slot",
+					r.slot,
+					"eb_hash",
+					r.hash.String(),
+					"waited_seconds",
+					elapsed.Seconds(),
 				)
 				return
 			}
@@ -959,19 +963,27 @@ func (ls *LedgerState) awaitInFlightEndorserFetches(
 			if outcome == leiosFetchWaitDeadline {
 				ls.config.Logger.Warn(
 					"endorser block fetch neither completed nor cached within the hard bound; applying its ranking block without the endorser-resident transactions",
-					"component", "ledger",
-					"slot", r.slot,
-					"eb_hash", r.hash.String(),
-					"waited_seconds", elapsed.Seconds(),
+					"component",
+					"ledger",
+					"slot",
+					r.slot,
+					"eb_hash",
+					r.hash.String(),
+					"waited_seconds",
+					elapsed.Seconds(),
 				)
 				return
 			}
 			ls.config.Logger.Debug(
 				"endorser block could not be fetched; applying its ranking block without the endorser-resident transactions",
-				"component", "ledger",
-				"slot", r.slot,
-				"eb_hash", r.hash.String(),
-				"waited_seconds", elapsed.Seconds(),
+				"component",
+				"ledger",
+				"slot",
+				r.slot,
+				"eb_hash",
+				r.hash.String(),
+				"waited_seconds",
+				elapsed.Seconds(),
 			)
 		}(r)
 	}

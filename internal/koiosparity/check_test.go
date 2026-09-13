@@ -1757,19 +1757,29 @@ func TestCheckAccountRewardsPendingWiring(t *testing.T) {
 		return acct
 	}
 
-	t.Run("before the boundary the amount difference is a lag", func(t *testing.T) {
-		acct := run(t, boundarySlot-1)
-		require.Len(t, acct, 1)
-		assert.Equal(t, CategoryReferenceLag, acct[0].Category,
-			"checkEpoch must pass the pending answer to the account comparison")
-	})
+	t.Run(
+		"before the boundary the amount difference is a lag",
+		func(t *testing.T) {
+			acct := run(t, boundarySlot-1)
+			require.Len(t, acct, 1)
+			assert.Equal(
+				t,
+				CategoryReferenceLag,
+				acct[0].Category,
+				"checkEpoch must pass the pending answer to the account comparison",
+			)
+		},
+	)
 
-	t.Run("at the boundary the same difference is a divergence", func(t *testing.T) {
-		acct := run(t, boundarySlot)
-		require.Len(t, acct, 1)
-		assert.Equal(t, CategoryValueMismatch, acct[0].Category,
-			"once the rewards are applied the comparison must stay strict")
-	})
+	t.Run(
+		"at the boundary the same difference is a divergence",
+		func(t *testing.T) {
+			acct := run(t, boundarySlot)
+			require.Len(t, acct, 1)
+			assert.Equal(t, CategoryValueMismatch, acct[0].Category,
+				"once the rewards are applied the comparison must stay strict")
+		},
+	)
 }
 
 // TestCheckUncreditedDingoRowStillFailsAgainstKoios is the case that decides
@@ -1938,8 +1948,11 @@ func TestCheckAccountDecodeErrorReachesOutput(t *testing.T) {
 			))
 
 			result, err := Check(context.Background(), CheckConfig{
-				Network:         network,
-				DingoDB:         DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+				Network: network,
+				DingoDB: DingoDBConfig{
+					Plugin:  "sqlite",
+					DataDir: dingoDir,
+				},
 				CachePath:       cachePath,
 				AccountsEnabled: true,
 			}, slog.New(slog.DiscardHandler))

@@ -115,7 +115,10 @@ func TestGetChunkNamesFromPointReturnsContainingChunk(t *testing.T) {
 	}
 	_, err = imm.getChunkNamesFromPoint(ocommon.NewPoint(511, nil))
 	if !errors.Is(err, ErrPointBeyondLastChunk) {
-		t.Fatalf("beyond-tip lookup error = %v, want ErrPointBeyondLastChunk", err)
+		t.Fatalf(
+			"beyond-tip lookup error = %v, want ErrPointBeyondLastChunk",
+			err,
+		)
 	}
 }
 
@@ -130,8 +133,14 @@ func TestGetBlockChecksHashAfterLocatingContainingChunk(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get exact point: %s", err)
 	}
-	if got == nil || got.Slot != want.Slot || !bytes.Equal(got.Hash, want.Hash) {
-		t.Fatalf("exact point lookup = %#v, want slot %d hash %x", got, want.Slot, want.Hash)
+	if got == nil || got.Slot != want.Slot ||
+		!bytes.Equal(got.Hash, want.Hash) {
+		t.Fatalf(
+			"exact point lookup = %#v, want slot %d hash %x",
+			got,
+			want.Slot,
+			want.Hash,
+		)
 	}
 	wrongHash := pointLookupPoint(want.Slot, 0xFF)
 	got, err = imm.GetBlock(wrongHash)
@@ -155,8 +164,14 @@ func TestGetBlockFindsExactPointInSingleEntryChunk(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get exact point: %s", err)
 	}
-	if got == nil || got.Slot != want.Slot || !bytes.Equal(got.Hash, want.Hash) {
-		t.Fatalf("exact point lookup = %#v, want slot %d hash %x", got, want.Slot, want.Hash)
+	if got == nil || got.Slot != want.Slot ||
+		!bytes.Equal(got.Hash, want.Hash) {
+		t.Fatalf(
+			"exact point lookup = %#v, want slot %d hash %x",
+			got,
+			want.Slot,
+			want.Hash,
+		)
 	}
 }
 
@@ -199,12 +214,21 @@ func TestGetChunkNamesFromPointSkipsEmptyChunks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get tip through trailing empty chunk: %s", err)
 	}
-	if tip == nil || tip.Slot != second.Slot || !bytes.Equal(tip.Hash, second.Hash) {
-		t.Fatalf("tip = %#v, want slot %d hash %x", tip, second.Slot, second.Hash)
+	if tip == nil || tip.Slot != second.Slot ||
+		!bytes.Equal(tip.Hash, second.Hash) {
+		t.Fatalf(
+			"tip = %#v, want slot %d hash %x",
+			tip,
+			second.Slot,
+			second.Hash,
+		)
 	}
 	_, err = imm.getChunkNamesFromPoint(ocommon.NewPoint(401, nil))
 	if !errors.Is(err, ErrPointBeyondLastChunk) {
-		t.Fatalf("trailing-empty lookup error = %v, want beyond-last error", err)
+		t.Fatalf(
+			"trailing-empty lookup error = %v, want beyond-last error",
+			err,
+		)
 	}
 
 	emptyDir := t.TempDir()
@@ -271,7 +295,10 @@ func TestTruncateChunksFromPointRefusesMissingExactPoint(t *testing.T) {
 	missing := pointLookupPoint(points[4].Slot, 0xFF)
 	err = imm.TruncateChunksFromPoint(missing)
 	if err == nil || !strings.Contains(err.Error(), "not found") {
-		t.Fatalf("wrong-hash truncate error = %v, want point-not-found error", err)
+		t.Fatalf(
+			"wrong-hash truncate error = %v, want point-not-found error",
+			err,
+		)
 	}
 	for idx := range 5 {
 		requireChunkTrioState(t, dir, ChunkName(uint64(idx)), true)
@@ -301,7 +328,10 @@ func TestTruncateChunksFromPointReportsPartialDeletion(t *testing.T) {
 	}
 	err = imm.TruncateChunksFromPoint(points[4])
 	if err == nil || !strings.Contains(err.Error(), "truncation is partial") {
-		t.Fatalf("truncate error = %v, want explicit partial-deletion report", err)
+		t.Fatalf(
+			"truncate error = %v, want explicit partial-deletion report",
+			err,
+		)
 	}
 	if !strings.Contains(err.Error(), "after removing 7 entries") {
 		t.Fatalf("truncate error = %v, want removed-entry count", err)
@@ -312,7 +342,10 @@ func TestTruncateChunksFromPointReportsPartialDeletion(t *testing.T) {
 	for idx := 2; idx < 4; idx++ {
 		requireChunkTrioState(t, dir, ChunkName(uint64(idx)), false)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "00004"+chunkFileExtension)); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(dir, "00004"+chunkFileExtension)); !errors.Is(
+		err,
+		os.ErrNotExist,
+	) {
 		t.Fatalf("expected 00004 chunk to be removed, got %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "00004"+primaryFileExtension)); err != nil {

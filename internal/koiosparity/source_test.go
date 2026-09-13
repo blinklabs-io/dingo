@@ -896,7 +896,9 @@ func TestDatabaseSourceGetEarliestAvailableEpochNoBoundary(t *testing.T) {
 // resolves it to epoch 11 -- one past the boundary epoch, since that epoch
 // (and everything before it) was inherited from the Mithril snapshot rather
 // than computed locally.
-func TestDatabaseSourceGetEarliestAvailableEpochResolvesBoundaryEpoch(t *testing.T) {
+func TestDatabaseSourceGetEarliestAvailableEpochResolvesBoundaryEpoch(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	db := newTestDatabaseSourceDB(t)
