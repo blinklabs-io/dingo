@@ -35,9 +35,19 @@ type PeerChainTip struct {
 	// observedTipSet distinguishes a delivered origin/rollback frontier from
 	// legacy callers that did not provide ObservedTip and need Tip as fallback.
 	observedTipSet bool
-	VRFOutput      []byte // VRF output from tip block for tie-breaking
-	PraosView      PraosTiebreakerView
-	LastUpdated    time.Time
+	// awaitingFirstHeader marks an entry created from a chainsync rollback for
+	// a connection the selector was not tracking (the post-FindIntersect
+	// MsgRollBackward on a fresh or recycled connection). Such a peer has
+	// confirmed an intersection but has not delivered a header yet, so its
+	// ObservedTip carries the confirmed intersection point with block number 0.
+	// That zero means "nothing delivered yet", NOT "this peer is at block 0",
+	// and the two behind-filters in isPeerSelectableLocked would otherwise read
+	// it as a peer implausibly far behind and skip it until its next
+	// MsgRollForward. Cleared by the first delivered header.
+	awaitingFirstHeader bool
+	VRFOutput           []byte // VRF output from tip block for tie-breaking
+	PraosView           PraosTiebreakerView
+	LastUpdated         time.Time
 	// observedSlots is the recent observed slot frontier used for Genesis
 	// density. observedPoints is the same frontier with block hashes, used
 	// for Genesis corroboration (detecting whether other peers report the
@@ -67,6 +77,40 @@ func NewPeerChainTip(
 			PraosTiebreakerConfigUnknown(),
 		),
 		LastUpdated: time.Now(),
+	}
+}
+
+// newPeerChainTipFromRollback creates the tracked tip for a peer that reported
+// a chainsync rollback while the selector had no entry for its connection. The
+// canonical case is the post-FindIntersect MsgRollBackward that a server sends
+// on a fresh connection: it is the only chainsync traffic until the next block
+// is minted, so a peer whose entry was dropped by a connection recycle would
+// otherwise stay invisible to chain selection for a whole block interval.
+//
+// The entry deliberately records only what the exchange proved:
+//   - Tip is the peer's advertised tip, untrusted exactly as on roll forward.
+//   - ObservedTip is the intersection point the peer confirmed it holds, with
+//     block number 0 because no header has been delivered. It is never the
+//     advertised tip (mirroring ApplyRollback, which refuses that promotion).
+//   - No observed slot/point frontier is recorded, so the peer contributes no
+//     Genesis density and cannot corroborate another peer until it delivers
+//     headers.
+//
+// awaitingFirstHeader marks the zero block number as "unknown" rather than
+// "behind"; the first delivered header clears it and the peer is compared on
+// its real frontier from then on.
+func newPeerChainTipFromRollback(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+	tip ochainsync.Tip,
+) *PeerChainTip {
+	return &PeerChainTip{
+		ConnectionId:        connId,
+		Tip:                 tip,
+		ObservedTip:         ochainsync.Tip{Point: clonePoint(point)},
+		observedTipSet:      true,
+		awaitingFirstHeader: true,
+		LastUpdated:         time.Now(),
 	}
 }
 
@@ -109,6 +153,7 @@ func (p *PeerChainTip) UpdateTipWithObservedPraosView(
 	p.Tip = tip
 	p.ObservedTip = observedTip
 	p.observedTipSet = true
+	p.awaitingFirstHeader = false
 	p.VRFOutput = vrfOutput
 	p.PraosView = praosView
 	p.LastUpdated = time.Now()
