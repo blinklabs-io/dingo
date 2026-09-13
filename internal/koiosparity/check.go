@@ -1143,13 +1143,27 @@ func creditedAccountRewards(
 			errs = append(errs, err)
 			continue
 		}
-		poolID, err := PoolKeyHashHexToBech32(hex.EncodeToString(row.PoolKeyHash))
-		if err != nil {
-			errs = append(errs, err)
-			continue
-		}
 		if !row.Spendable || row.Guarded {
 			continue
+		}
+		// Decoded after the crediting filter, unlike the credential above:
+		// the pool identifier has no consumer outside this comparison, so an
+		// uncredited row's pool hash is not worth reporting, while an
+		// undecodable credential still is (accountLifecycleMismatches relies
+		// on it).
+		//
+		// An absent pool key hash is not a decode failure. It names the "no
+		// pool" contribution, matching Koios's null pool_id_bech32 for reward
+		// types that have none, and aggregates as its own source.
+		poolID := ""
+		if len(row.PoolKeyHash) > 0 {
+			poolID, err = PoolKeyHashHexToBech32(
+				hex.EncodeToString(row.PoolKeyHash),
+			)
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
 		}
 		rows = append(rows, DingoAccountReward{
 			StakeAddress: addr,

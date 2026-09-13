@@ -6934,9 +6934,10 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   | `/pool_history` | derived-match | `member_rewards` | Exact lovelace equality with the sum of K-1 `reward_account_output` member rows the ledger credits (`spendable`, not `guarded`), falling back to `reward_pool_output.member_reward_total` only when that row's `unspendable` is zero. |
   | `/pool_history` | intentionally-incomparable | `pool_fees`, `deleg_rewards` | Koios derives these from an approximation that omits the pledge/owner-stake bonus and rounds components. |
   | `/pool_history` | unsupported | `active_stake_pct`, `saturation_pct`, `epoch_ros` | Dingo has no matching persisted pool aggregate. |
-  | `/account_reward_history` | exact-match | `stake_address`, `earned_epoch` | Identifies the `(stake_address, type)` row `CompareAccountEpoch` matches on; response identity must equal the requested epoch. |
-  | `/account_reward_history` | exact-match | `amount`, `type` | Exact integer lovelace equality against `reward_account_output.amount`/`reward_type` for member/leader rows; treasury/reserves/refund rows are filtered out, see `koiosAccountRewardTypesOutOfScope`. |
-  | `/account_reward_history` | unsupported | `spendable_epoch`, `pool_id_bech32` | Stored for reference only; not part of the match key or currently compared against Dingo's schema. |
+  | `/account_reward_history` | exact-match | `stake_address`, `earned_epoch` | Identifies the `(stake_address, type)` aggregate `CompareAccountEpoch` matches on; response identity must equal the requested epoch. |
+  | `/account_reward_history` | exact-match | `amount`, `type` | Exact integer lovelace equality against `reward_account_output.amount`/`reward_type` for member/leader rows, compared as per-`(stake_address, type)` totals summed across pool contributions; a type that is neither in scope nor filtered by `koiosAccountRewardTypesOutOfScope` is `dingo_db_error`, not a parity failure. |
+  | `/account_reward_history` | derived-match | `pool_id_bech32` | Decoded to `reward_account_output.pool_key_hash`'s pool ID to identify each contribution to a shared reward account; distinct pools aggregate, a repeated same-pool row is `acct_duplicate`. |
+  | `/account_reward_history` | unsupported | `spendable_epoch` | Stored for reference only; not currently compared against Dingo's schema. |
   | `/epoch_params` | exact-match | `epoch_no` | The filtered response must contain exactly the requested reporting epoch K. |
   | `/epoch_params` | exact-match | `era` | Dingo's `epoch.era_id` name; the era decides which validation rules run at all. |
   | `/epoch_params` | exact-match | `min_fee_a`, `min_fee_b`, `max_block_size`, `max_tx_size`, `max_bh_size`, `key_deposit`, `pool_deposit`, `max_epoch`, `optimal_pool_count`, `protocol_major`, `protocol_minor`, `min_pool_cost` | Exact values against the effective `pparams` row for K. A wrong `max_tx_size` is the #3928 wedge class. |
@@ -7300,8 +7301,10 @@ that applies this stake epoch's rewards; see "Reward timing" below),
 at K+1, so its epoch-K block count has no row to live on), plus #3097's
 per-account categories: `acct_only_dingo`,
 `acct_only_koios`, `acct_duplicate` (a genuine duplicate (stake_address,
-reward_type) row within one side — a data-integrity problem, not a value
-disagreement), `acct_zero_reward_row` (informational: a reward row worth zero
+reward_type, pool) row within one side — a data-integrity problem, not a
+value disagreement; the same (stake_address, reward_type) from two
+different pools is a shared reward account, which aggregates instead),
+`acct_zero_reward_row` (informational: a reward row worth zero
 lovelace present on one side only — nothing was credited either way, so the
 two sides agree about every lovelace and the one-sided row is a
 representational difference, not a divergence), `acct_coverage_incomplete`
@@ -7912,16 +7915,31 @@ never the reverse.
   `(stake_address, reward_type)` — not `stake_address` alone — since a pool
   owner delegating to their own pool legitimately has both a `member` and a
   `leader` row in the same epoch, checked independently (never merged or
-  summed). Internal duplicates within either side (the same key appearing
-  twice) are reported once per duplicate occurrence as `acct_duplicate`
+  summed across reward types). A reward account can be shared by several
+  pools, so each side's rows are first folded per key by
+  `aggregateKoiosAccountRewards`/`aggregateDingoAccountRewards`: the
+  contributions of distinct pools sum into one account total, and the two
+  totals are what the union walk compares. A key with a single contribution
+  is not folded — its amount passes through verbatim, so a malformed
+  spelling still receives the presence and value verdicts below rather than
+  a different one from the fold. Where a key does have to be summed, a
+  contribution that cannot be parsed is reported as `dingo_db_error`
+  instead of silently leaving the total short, since a short total would
+  read as agreement about lovelace nobody checked. The pool identity comes
+  from Koios's `pool_id_bech32` and from `reward_account_output.pool_key_hash`
+  (`creditedAccountRewards`, decoded only for rows the ledger credited, and
+  absent on neither side for reward types that have no pool). A repeated
+  `(stake_address, reward_type, pool)` row within either side is still a
+  duplicate, reported once per duplicate occurrence as `acct_duplicate`
   before the union walk runs, so a duplicate is never mistaken for or masked
   by a value disagreement. `koios_account_rewards`'s
   `(network, epoch, stake_address, reward_type)` index
-  (`idx_kar_net_epoch_addr_type`) is deliberately non-unique: Koios can
-  itself return duplicate rows for the same key, and a unique constraint
+  (`idx_kar_net_epoch_addr_type`) is deliberately non-unique: several pool
+  contributions legitimately share that key, Koios can itself return
+  duplicate rows for one pool, and a unique constraint
   would abort `CommitAccountRewardsForEpoch`'s insert with a constraint
-  error before `CompareAccountEpoch` ever gets the chance to detect and
-  report that duplication as `acct_duplicate`. Amounts are compared via
+  error before `CompareAccountEpoch` ever gets the chance to aggregate the
+  former or report the latter as `acct_duplicate`. Amounts are compared via
   `lovelaceEqual`. Both sides of every amount comparison are parsed and
   validated as non-negative `big.Int` values before any equality check —
   including the identical-string case, so two identical malformed or
