@@ -2910,8 +2910,13 @@ optional while `eras.BuildShapeForEras` builds Byron era params for every
 config, so a Shelley-only config reaches that branch for every uncached slot.
 An unavailable configured shape or current era also makes future-slot protocol
 parameters unavailable, as do a missing scheduled successor, a failed hard fork,
-or a failed pending-parameter update. The forger and genesis-overlay validation
-reject those conditions instead of using current parameters for the future epoch.
+or a failed pending-parameter update. The forger refuses to build a block for
+such a slot instead of using current parameters for the future epoch.
+Genesis-overlay validation also declines to answer, but classifies the
+condition as deferred for the same reason an unbuildable summary is deferred:
+every source it reads is local, so a header rejection there would recycle the
+honest peer that served the header rather than re-verifying it once the
+parameters resolve.
 The in-memory summary reads the same configured era safe zone and
 `TransitionInfo` as the NtC era-history query, but the two horizons are not
 interchangeable: the NtC query answers a point in time, while the live summary

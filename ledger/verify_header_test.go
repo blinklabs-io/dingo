@@ -4799,3 +4799,70 @@ func TestDeleteDeferredMarkerUnlessReadmitted_RestoreFailurePropagates(
 		"deletePersistedDeferredMarkers must propagate the lost-pin error",
 	)
 }
+
+// TestGenesisOverlayUnresolvablePParamsDefers pins the classification of an
+// overlay decision the node cannot make from its own state. A nil pparams
+// result means the snapshot, the persisted row and the era forecast all
+// declined to answer for this slot, which is a local gap; classifying it as a
+// hard rejection routes it to ConnectionRecycleRequestedEvent and drops the
+// peer that served an honest header.
+func TestGenesisOverlayUnresolvablePParamsDefers(t *testing.T) {
+	t.Parallel()
+
+	genesisCfg := newGenesisDelegateShelleyGenesisCfgWithActiveSlots(
+		t,
+		strings.Repeat("00", lcommon.Blake2b224Size),
+		strings.Repeat("00", lcommon.Blake2b256Size),
+		"0.05",
+	)
+	// No database and no current protocol parameters: every source
+	// genesisOverlayProtocolParamsForBlock consults is unavailable, so it
+	// returns nil for a slot the epoch cache does cover.
+	ls := &LedgerState{
+		currentEpoch: models.Epoch{
+			EpochId:       1,
+			StartSlot:     86_400,
+			LengthInSlots: 86_400,
+			SlotLength:    1,
+			EraId:         eras.AlonzoEraDesc.Id,
+		},
+		currentEra: eras.AlonzoEraDesc,
+		epochCache: []models.Epoch{
+			{
+				EpochId:       1,
+				StartSlot:     86_400,
+				LengthInSlots: 86_400,
+				SlotLength:    1,
+				EraId:         eras.AlonzoEraDesc.Id,
+			},
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: genesisCfg,
+			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	block := &mockBoundaryAlonzoBlock{
+		Block: &mockBabbageBlock{slot: 172_780},
+		slot:  172_780,
+	}
+	require.Nil(
+		t,
+		ls.genesisOverlayProtocolParamsForBlock(block),
+		"fixture must reach the unresolvable-parameters branch",
+	)
+
+	_, status, err := ls.genesisOverlayDelegationForBlock(
+		block,
+		genesisCfg.ShelleyGenesis(),
+	)
+	require.Error(t, err)
+	assert.Equal(t, genesisOverlayNone, status)
+	assert.ErrorIs(t, err, errHeaderVerificationDeferred)
+	assert.True(
+		t,
+		IsHeaderVerificationDeferred(err),
+		"an unresolvable overlay parameter set must not recycle the peer",
+	)
+}

@@ -763,9 +763,20 @@ func (ls *LedgerState) genesisOverlayDelegationForBlock(
 ) (genesisDelegation, genesisOverlaySlotStatus, error) {
 	pparams := ls.genesisOverlayProtocolParamsForBlock(block)
 	if pparams == nil {
+		// Unresolvable overlay parameters are a local state gap, not a peer
+		// fault: the snapshot's current pparams, the persisted pparams row
+		// for the block's epoch, and the era forecast behind
+		// ProtocolParamsForSlot can each be unavailable while the applied
+		// ledger catches up. ouroboros/chainsync.go routes every
+		// non-deferred header error to ConnectionRecycleRequestedEvent, so
+		// rejecting here drops the honest peer that served the header.
+		// Classify it as deferred, the same way this file already classifies
+		// an unbuildable forecast and an unresolvable consensus mode, so the
+		// header is re-verified in order once the parameters resolve.
 		return genesisDelegation{}, genesisOverlayNone, fmt.Errorf(
-			"block header verification rejected at slot %d: "+
+			"%w: block header verification deferred at slot %d: "+
 				"protocol parameters unavailable for genesis overlay",
+			errHeaderVerificationDeferred,
 			block.SlotNumber(),
 		)
 	}
