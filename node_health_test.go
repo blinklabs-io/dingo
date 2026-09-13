@@ -29,6 +29,8 @@ import (
 // followed the chain reports no tip gap at all, rather than a zero gap that
 // would read as "perfectly caught up".
 func TestTipGapUnknownBeforeFirstSlotTick(t *testing.T) {
+	t.Parallel()
+
 	n := &Node{}
 
 	gap, ok := n.TipGapSlots()
@@ -42,6 +44,8 @@ func TestTipGapUnknownBeforeFirstSlotTick(t *testing.T) {
 // gap if that config actually carries ReportTipGapFunc. Dropping the field
 // leaves everything compiling and every probe permanently unready.
 func TestLedgerStateConfigReportsTipGap(t *testing.T) {
+	t.Parallel()
+
 	n := &Node{
 		config: Config{cfg: &internalconfig.Config{}},
 	}
@@ -75,6 +79,8 @@ func TestLedgerStateConfigReportsTipGap(t *testing.T) {
 // Node, so the config a live Restore/Truncate builds feeds the same probe
 // state as the one Run built at startup.
 func TestLedgerStateConfigReportsTipGapAfterRebuild(t *testing.T) {
+	t.Parallel()
+
 	n := &Node{
 		config: Config{cfg: &internalconfig.Config{}},
 	}
@@ -99,6 +105,8 @@ func TestLedgerStateConfigReportsTipGapAfterRebuild(t *testing.T) {
 // returning the pre-restore reading, and /readyz would answer 200 for the
 // whole rebuild -- the opposite of what a readiness probe is for.
 func TestLiveLifecycleTeardownForgetsTipGap(t *testing.T) {
+	t.Parallel()
+
 	n := &Node{
 		config: Config{cfg: &internalconfig.Config{}},
 	}
@@ -132,4 +140,48 @@ func TestLiveLifecycleTeardownForgetsTipGap(t *testing.T) {
 	gap, ok = n.TipGapSlots()
 	require.True(t, ok)
 	assert.Equal(t, uint64(9), gap)
+}
+
+// TestReinitializeCoreStorageForgetsTipGap covers the second way into a live
+// Restore/Truncate rebuild. The quiesce-failure branches of Restore and
+// Truncate call reinitializeAndResume directly, so
+// closeStorageForLiveLifecycleOp never ran, its clear never happened and the
+// outgoing ledger's generation was never superseded -- that ledger was not
+// even closed and keeps reporting. Without the clear at the top of
+// reinitializeCoreStorage the pre-operation reading survives the rebuild and
+// /readyz answers 200 throughout it.
+func TestReinitializeCoreStorageForgetsTipGap(t *testing.T) {
+	t.Parallel()
+
+	n := &Node{
+		config: Config{cfg: &internalconfig.Config{}},
+	}
+	outgoing := n.ledgerStateConfig()
+	outgoing.ReportTipGapFunc(5)
+	gap, ok := n.TipGapSlots()
+	require.True(t, ok)
+	require.Equal(t, uint64(5), gap)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	// The rebuild cannot complete for a Node with no resolved storage
+	// plugins. The clear is the function's first statement, so it has
+	// already run by the time that failure returns.
+	require.Error(t, n.reinitializeCoreStorage(ctx))
+
+	gap, ok = n.TipGapSlots()
+	assert.False(
+		t,
+		ok,
+		"a core-storage rebuild must leave the tip gap unknown, not stale",
+	)
+	assert.Zero(t, gap)
+
+	// The outgoing ledger was never closed on this path and keeps ticking.
+	// Its reports carry a superseded generation and must not restore the
+	// stale reading.
+	outgoing.ReportTipGapFunc(5)
+	gap, ok = n.TipGapSlots()
+	assert.False(t, ok)
+	assert.Zero(t, gap)
 }
