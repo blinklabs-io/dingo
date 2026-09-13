@@ -35,6 +35,8 @@ const (
 	txsubmissionMaxBackoff               = 5 * time.Second // Cap on exponential backoff wait
 	txsubmissionBaseBackoff              = 150 * time.Millisecond
 	txsubmissionLogEvery                 = 10 // Log every Nth rate limit hit after the 1st
+	// Match the reference TxSubmission V2 advertised-size discrepancy.
+	txsubmissionMaxSizeDiscrepancy uint64 = 32
 	// Give up on a peer only after this many consecutive rejected replies.
 	// A single bad reply drops that reply and keeps the pull loop running.
 	txsubmissionMaxConsecutiveReplyMismatches = 3
@@ -105,10 +107,12 @@ type validatedTxsubmissionBody struct {
 
 // validateTxsubmissionReply verifies the complete reply before its first
 // transaction is admitted. The advertised sizes are part of the request
-// budget, so each body must have exactly one of the two sizes the peer can
+// budget, so each body must match one of the two size metrics the peer can
 // legitimately have advertised for it: the unwrapped body size, or the
-// wrapped wire size that cardano-node advertises (see txsubmissionWireSize).
-// Anything else is a mismatch.
+// wrapped wire size that cardano-node advertises (see txsubmissionWireSize),
+// within the reference TxSubmission V2 discrepancy in either direction. The
+// aggregate predecode allowance accounts for the same bounded discrepancy
+// without removing the byte-budget guard.
 func validateTxsubmissionReply(
 	requested []txsubmission.TxIdAndSize,
 	returned []txsubmission.TxBody,
@@ -123,13 +127,24 @@ func validateTxsubmissionReply(
 	var requestedBytes uint64
 	requestedIndex := make(map[[32]byte]int, len(requested))
 	for index, requestedTx := range requested {
-		requestedBytes += uint64(requestedTx.Size)
+		requestedSize := uint64(requestedTx.Size)
+		if requestedSize > math.MaxUint64-requestedBytes {
+			return nil, fmt.Errorf("%w: advertised byte budget overflow", errTxsubmissionReplySizeMismatch)
+		}
+		requestedBytes += requestedSize
 		// Preserve the first announcement if an ID appears more than once.
 		if _, exists := requestedIndex[requestedTx.TxId.TxId]; !exists {
 			requestedIndex[requestedTx.TxId.TxId] = index
 		}
 	}
-	remainingBytes := requestedBytes
+	if uint64(len(returned)) > math.MaxUint64/txsubmissionMaxSizeDiscrepancy {
+		return nil, fmt.Errorf("%w: discrepancy budget overflow", errTxsubmissionReplySizeMismatch)
+	}
+	toleranceBytes := uint64(len(returned)) * txsubmissionMaxSizeDiscrepancy
+	if toleranceBytes > math.MaxUint64-requestedBytes {
+		return nil, fmt.Errorf("%w: reply byte budget overflow", errTxsubmissionReplySizeMismatch)
+	}
+	remainingBytes := requestedBytes + toleranceBytes
 	for index, txBody := range returned {
 		bodySize := uint64(len(txBody.TxBody))
 		if bodySize > remainingBytes {
@@ -187,12 +202,18 @@ func validateTxsubmissionReply(
 		bodySize := uint64(len(txBody.TxBody))
 		wireSize := txsubmissionWireSize(txBody.EraId, len(txBody.TxBody))
 		var wireSizeAdvertised bool
-		switch uint64(want.Size) {
-		case bodySize:
+		advertisedSize := uint64(want.Size)
+		switch {
+		case advertisedSize == wireSize:
+			wireSizeAdvertised = true
+		case advertisedSize == bodySize:
 			// Peer advertised the unwrapped body size, as Dingo's own
 			// client did before it was corrected to advertise the wire
 			// size. Still accepted so that a mixed fleet interoperates.
-		case wireSize:
+		case txsubmissionSizeMatches(advertisedSize, bodySize):
+			// Prefer the body-size classification when both fuzzy windows
+			// overlap; this keeps the metric meaningful for near-body peers.
+		case txsubmissionSizeMatches(advertisedSize, wireSize):
 			wireSizeAdvertised = true
 		default:
 			return nil, fmt.Errorf(
@@ -220,6 +241,15 @@ func validateTxsubmissionReply(
 		}
 	}
 	return ret, nil
+}
+
+// txsubmissionSizeMatches implements Ouroboros Network's inclusive +/-32
+// advertised-size discrepancy without overflowing unsigned subtraction.
+func txsubmissionSizeMatches(advertised, actual uint64) bool {
+	if actual >= advertised {
+		return actual-advertised <= txsubmissionMaxSizeDiscrepancy
+	}
+	return advertised-actual <= txsubmissionMaxSizeDiscrepancy
 }
 
 // recordTxsubmissionReplyOutcome records the size-advertisement outcome of
@@ -533,12 +563,15 @@ func (o *Ouroboros) txsubmissionServerInit(
 					len(txIds),
 				)
 				if limitAdmission {
-					// The advertised size is the wrapped wire size for a
-					// spec-conformant peer, so it is an upper bound on the
-					// body that will be admitted. Reserving against it is
-					// conservative by the few bytes of wrapper.
-					if int64(txIds[0].Size) >
-						headroom.MaxAdmissionHeadroomBytes() {
+					// The advertised size may be up to the reference
+					// discrepancy below the actual body size. Reserve the
+					// complete accepted upper bound and reject offers whose
+					// upper bound cannot fit in admission headroom.
+					maxAdmissionBytes := headroom.MaxAdmissionHeadroomBytes()
+					advertisedBytes := int64(txIds[0].Size)
+					maxDiscrepancyBytes := int64(txsubmissionMaxSizeDiscrepancy)
+					if advertisedBytes >
+						maxAdmissionBytes-maxDiscrepancyBytes {
 						consecutiveImpossibleOffers++
 						o.config.Logger.Warn(
 							"peer offered transaction larger than mempool admission capacity",
@@ -567,7 +600,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 					}
 					consecutiveImpossibleOffers = 0
 					if !headroom.WaitForAdmissionHeadroom(
-						int64(txIds[0].Size),
+						advertisedBytes+maxDiscrepancyBytes,
 						conn.ErrorChan(),
 					) {
 						return
