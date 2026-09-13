@@ -68,7 +68,7 @@ var preprodSerialiseDataFundingTxIds = []string{
 func TestEvaluateTxConwayPreprodSerialiseData(t *testing.T) {
 	t.Parallel()
 	tx, err := conway.NewConwayTransactionFromCbor(
-		readPreprodFixture(t, preprodSerialiseDataTxFile),
+		readErasFixture(t, preprodSerialiseDataTxFile),
 	)
 	require.NoError(t, err)
 	require.Equal(t, preprodSerialiseDataTxId, tx.Hash().String())
@@ -90,7 +90,7 @@ func TestEvaluateTxConwayPreprodSerialiseData(t *testing.T) {
 
 	var inputTxBytes [][]byte
 	_, err = cbor.Decode(
-		readPreprodFixture(t, preprodSerialiseDataInputsFile),
+		readErasFixture(t, preprodSerialiseDataInputsFile),
 		&inputTxBytes,
 	)
 	require.NoError(t, err)
