@@ -796,6 +796,16 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 	// ordered against block-apply AfterCommit callbacks, including between
 	// intermediate windows. Chain updates are published after both locks are
 	// released because delivery may backpressure or re-enter synchronization.
+	//
+	// Two costs come with holding chainsyncBlockfetchMutex across the whole
+	// descent rather than per window. Blockfetch is stalled for every K-sized
+	// step, each of which reads and decodes up to a security parameter's worth
+	// of blocks through blocksAboveSlot. And emitRollbackTransactionEvents
+	// publishes ledger.tx inside both locks, so a back-pressuring ledger.tx
+	// subscriber now stalls blockfetch as well as the transaction lane.
+	// blocksAboveSlot early-returns when nothing subscribes to ledger.tx or
+	// ledger.error, so a default node never pays either cost; a node with such
+	// a subscriber does.
 	var pendingChainUpdates bool
 	defer func() {
 		if pendingChainUpdates {

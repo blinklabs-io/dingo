@@ -4856,17 +4856,6 @@ func (ls *LedgerState) startQueuedBlockfetchFromEventLocked(
 	}()
 }
 
-// flushPendingBlockfetchBlocksDeferred flushes pending blockfetch events and
-// queues each committed block's chain.update onto pubs instead of letting the
-// chain publish it inline. The blockfetch drain runs under
-// chainsyncBlockfetchMutex; an inline, back-pressured chain.update publish
-// there can park the drain with the mutex held, which then blocks
-// handleEventChainsync on the same mutex and fills the ledger.chainsync buffer
-// -- the preview drain deadlock. Queueing on the caller's pendingPublishes
-// moves publication to after the mutex is released. A nil pubs publishes
-// immediately (the unlocked / test path), per pendingPublishes' nil-receiver
-// contract.
-//
 // blockfetchBatchSuperseded reports whether the primary chain has rolled back
 // since the batch that produced the buffered blocks was requested.
 //
@@ -4880,8 +4869,16 @@ func (ls *LedgerState) blockfetchBatchSuperseded() bool {
 		ls.chainRollbackGeneration.Load()
 }
 
-// flushPendingBlockfetchBlocksDeferred flushes the pending blocks into the
-// chain and queues their updates for publication after the mutex is released.
+// flushPendingBlockfetchBlocksDeferred flushes pending blockfetch events and
+// queues each committed block's chain.update onto pubs instead of letting the
+// chain publish it inline. The blockfetch drain runs under
+// chainsyncBlockfetchMutex; an inline, back-pressured chain.update publish
+// there can park the drain with the mutex held, which then blocks
+// handleEventChainsync on the same mutex and fills the ledger.chainsync buffer
+// -- the preview drain deadlock. Queueing on the caller's pendingPublishes
+// moves publication to after the mutex is released. A nil pubs publishes
+// immediately (the unlocked / test path), per pendingPublishes' nil-receiver
+// contract.
 func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 	pubs *pendingPublishes,
 ) error {
