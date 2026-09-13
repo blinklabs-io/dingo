@@ -3454,6 +3454,17 @@ protocol constraint rather than a preference. The LocalStateQuery server
 propagates a handler error as a protocol error, so returning one does not fail
 a single query — the node drops the client's connection and `cardano-cli`
 reports only a closed bearer, which is the failure mode #2997 was filed for.
+This is why `localstatequeryServerAcquire` validates an `AcquireSpecificPoint`
+target synchronously, at Acquire time, rather than leaving it to the first
+`Query` (#4156): an Acquire-time rejection has a graceful wire-level
+`AcquireFailure` reply, so a point ahead of the tip or naming the wrong fork
+is now rejected without this failure mode applying at all. A point that
+passes Acquire (on-chain at that instant) but whose historical data a later
+Query can no longer serve — e.g. a rollback or retention-floor pruning
+between Acquire and Query — still hits this same connection-teardown
+behavior; closing that residual gap needs either a gouroboros protocol
+change or cross-cutting historical-state retention, and is tracked
+separately as #4234 rather than attempted here.
 `GetPoolDistr2` therefore logs and omits a pool that holds snapshot stake but
 has no registration to supply a VRF key hash (the unfiltered form covers every
 pool on the chain, so aborting would take `leadership-schedule` down for every
