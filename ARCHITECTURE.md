@@ -6223,7 +6223,11 @@ nonce is passed through unchanged.
 In API storage mode, the shared SQL metadata providers can defer selected query
 indexes during bulk load. Deferred indexes are classified as critical or lazy in
 `database/plugin/metadata/deferred`: critical indexes cover startup API queries
-and rollback predicates, while lazy indexes cover secondary query paths. Only
+and rollback predicates -- including the child column of an `ON DELETE CASCADE`
+foreign key whose parent rows the rollback deletes, since the engine enforces
+such a cascade with an implicit per-parent-row child delete that the parent
+statement's query plan does not show -- while lazy indexes cover secondary
+query paths. Only
 indexes no import path filters on are eligible at all — an index a per-row
 import predicate needs stays resident, since dropping it turns that predicate
 into a full scan of a table the import is still growing. Those indexes are
@@ -6238,9 +6242,24 @@ manifest. The metadata plugin exposes
 `BuildDeferredIndexes` for the full manifest. Mithril sync rebuilds the
 critical subset before clearing `sync_status`, then leaves the pending
 sync-state marker set. API-mode `serve` verifies the critical subset before
-startup and runs the full lazy rebuild as background maintenance; the marker is
-cleared only after the full manifest has been rebuilt. Core-mode startup still
-repairs the full manifest synchronously before serving. On MySQL, InnoDB
+startup and runs the full lazy rebuild as background maintenance; the rebuild
+paths clear the marker only after the full manifest has been rebuilt, but they
+are not the only writer of that row. `ClearSyncState`
+(`DELETE FROM sync_state`, no `WHERE`) removes it too, and Mithril sync runs
+that clear through `updateMithrilReadyState` immediately after the critical
+rebuild. It therefore re-writes every row a completed sync still needs —
+`mithril_ledger_slot`, `mithril_ledger_hash`, and the deferred-index marker —
+back after the clear; without the last of those, every Mithril-bootstrapped
+database loses the marker moments after `BuildCritical` set it and never builds
+the lazy manifest entries at all. Core-mode startup still
+repairs the full manifest synchronously before serving. Both repair entry
+points also restore any missing critical index when no cycle is pending at all:
+the marker records that a cycle was interrupted, not which indexes exist, and a
+database bootstrapped by a binary that predates the marker being carried across
+the clear has the critical subset built, the lazy remainder dropped, and no
+record of either — it would otherwise carry that gap permanently, since the
+schema migration that created those indexes is recorded complete and never
+re-runs. On MySQL, InnoDB
 requires indexes supporting foreign-key child columns, so the dialect leaves
 those indexes in place while deferring the remaining manifest entries.
 

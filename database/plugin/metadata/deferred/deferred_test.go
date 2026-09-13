@@ -75,7 +75,10 @@ func TestCriticalManifestNotEmpty(t *testing.T) {
 	// idx_utxo_staking_deleted_amount left the manifest entirely: the
 	// API-backfill per-batch live-stake SUM needs it during bulk load,
 	// so it is never dropped and no longer needs a critical rebuild slot.
-	const wantCritical = 12
+	// idx_utxo_transaction_id joined the critical subset: the rollback's
+	// DELETE FROM "transaction" cascades through it, and a rollback can
+	// run as soon as the database is marked ready.
+	const wantCritical = 13
 	if len(critical) != wantCritical {
 		t.Errorf(
 			"CriticalManifest: got %d entries, want %d — update this constant if the classification changed intentionally",
