@@ -1686,6 +1686,10 @@ func (ls *LedgerState) findReplayRecoveryCandidate(
 		if fallbackCandidate != nil && (candidate == nil ||
 			fallbackCandidate.ProducerBlock.Slot < candidate.ProducerBlock.Slot) {
 			candidate = fallbackCandidate
+		} else if fallbackCandidate != nil {
+			// Keep the deeper known-producer anchor, but still rewind the
+			// primary chain because another input has unresolved provenance.
+			candidate.ProducerUnresolved = true
 		}
 		if candidate != nil && fallbackCandidate != nil {
 			// Keep the deeper known-producer anchor, but still rewind the
