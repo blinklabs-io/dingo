@@ -2333,6 +2333,14 @@ ORDER BY t.slot DESC, t.block_index DESC, t.id DESC
 LIMIT 100;
 ```
 
+### Transaction metadata JSON representation
+
+API-mode ingestion stores each unique metadata label with its raw CBOR value.
+If distinct ledger map keys cannot be represented uniquely as JSON object keys,
+the label remains indexed and `json_value` is NULL; this does not reject an
+otherwise valid transaction. The label-transaction JSON endpoint emits
+`json_metadata: null`, while CBOR endpoints continue to serve the raw value.
+
 ### `GetAccount`
 
 Latest delegation state for an account:
