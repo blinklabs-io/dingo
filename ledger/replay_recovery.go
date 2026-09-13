@@ -400,7 +400,8 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 //     UtxoValidateRequiredRedeemers, builds a script.TxScriptView first, and
 //     ResolveTxInputs stops at the first unresolved input, so the rule returns
 //     InputResolutionError or ReferenceInputResolutionError instead of a
-//     verdict. It reports RedeemerTagSpend and no other tag.
+//     verdict. At gouroboros v0.204.4 it derives purposes from
+//     script.ScriptPurposes and reports every tag, not spend alone.
 //   - common.ValidateScriptWitnesses, behind UtxoValidateScriptWitnesses,
 //     skips an unresolved regular input rather than failing, so an incomplete
 //     UTxO window can only withhold a spend requirement, never invent one; an
@@ -415,9 +416,9 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 // reference script included. Replaying a different local UTxO history can
 // therefore only add resolutions, and all three rules index redeemers by
 // position in the transaction's own sorted input list rather than by position
-// among the resolved subset. The verdict is monotone under resolution: no
-// local history removes a missing-redeemer rejection, so no replay repairs
-// one.
+// among the resolved subset, Dijkstra sub-transaction levels included. The
+// verdict is monotone under resolution: no local history removes a
+// missing-redeemer rejection, so no replay repairs one.
 //
 // The genuinely state-dependent cases carry their own types --
 // InputResolutionError, ReferenceInputResolutionError, and
