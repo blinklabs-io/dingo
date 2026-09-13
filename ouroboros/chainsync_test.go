@@ -2312,9 +2312,12 @@ func newFindIntersectTestOuroboros(t *testing.T) *Ouroboros {
 func makeFindIntersectPoints(n int) []ocommon.Point {
 	points := make([]ocommon.Point, n)
 	for i := range points {
+		hash := make([]byte, 32)
+		hash[0] = byte(i)
+		hash[1] = byte(i >> 8)
 		points[i] = ocommon.NewPoint(
 			uint64(i+1),
-			[]byte{byte(i), byte(i >> 8)},
+			hash,
 		)
 	}
 	return points

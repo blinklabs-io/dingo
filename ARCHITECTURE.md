@@ -505,6 +505,27 @@ block at the target is re-applied; when no such ancestor exists it fails with
 (issue #3678). `enforceDurableTipFloor` is the path that produces such a
 target.
 
+`rollbackWithResync` reloads `epochCache`, `currentEra`, `currentPParams` and
+the synthetic-PlutusV2-cost-model marker from the database *after* the
+metadata transaction that truncates it has already committed. A failure to
+reload any of them (a `GetEpochs` error, an unresolvable era ID, a
+`computePParams` error for the current or previous era's parameters, or a
+failed marker read) cannot be treated as "nothing happened": the truncation
+is already durable, so leaving these caches at their pre-rollback values
+would validate later blocks against state the database no longer has.
+`rollbackWithResync` therefore invokes `LedgerStateConfig.FatalErrorFunc`
+directly for this class of failure — not merely returning an error and
+leaving escalation to whichever caller is on the stack — and reports it as a
+`rollbackCommittedError`, the same identity `enforceDurableTipFloor`'s own
+post-commit failure already uses. The escalation still happens when that
+tip-floor check fails in the same call, since one failing database read
+usually fails both. Calling
+`FatalErrorFunc` unconditionally from inside `rollbackWithResync` is what
+makes the guarantee caller-independent: every entry point (peer-driven
+rollback, primary-chain reconciliation, tip-floor enforcement) drives the
+same supervised restart, which reloads these caches fresh from the database
+before any further block is validated.
+
 Getting this wrong is subtle, so the constraint is worth stating plainly:
 **the undo events must be emitted before the truncation, by the rollback
 path.** `handleEventChainUpdate` deliberately does *not* emit them, even
@@ -2731,9 +2752,11 @@ When a network config supplies a `CheckpointsFile` (mainnet and preview ship one
 
 `config/cardano/genesis_consistency.go` runs at config load, after each genesis file's own hash check, and asserts invariants that hold between or within genesis files but that no single file's hash captures. It fails closed, so a misconfigured network is rejected at startup rather than surfacing later as wrong slot times or frozen epoch nonces.
 
-Two invariants are checked. The Byron `startTime` must equal the Shelley `systemStart`, because every slot-to-time conversion (`ledger/hardfork_summary.go`, `ledger/slot.go`) is anchored on the Shelley `systemStart` and would compute wrong wall-clock times for Byron-era slots if the two disagreed. The Shelley `epochLength` must be strictly greater than the randomness stabilisation window `4k/f`, computed the same way as `ledger.nonceStabilityWindow`. Praos freezes the candidate nonce once a block reaches `firstSlotNextEpoch - 4k/f`; once the window reaches the epoch's own length there is no unfrozen portion left and `computeCandidateNonceAsOf` (`ledger/candidate_nonce.go`) pins the cutoff to the epoch's first slot, so epoch nonces stop tracking the chain. A genesis in that state also runs epoch rollover far more often than the security parameter assumes. The check uses the Conway `4k/f` window rather than the `3k/f` used by earlier eras, so satisfying it satisfies every era.
+Several invariants are checked. A loaded Byron genesis must carry a positive `protocolConsts.k`, and a loaded Shelley genesis must carry a positive `securityParam` and an `activeSlotsCoeff` in `(0, 1]` whose `4k/f` window fits in `uint64`. `LedgerState`'s `securityParamForEra` and `calculateStabilityWindowForEra` (`ledger/state.go`) treat any other value as unavailable and substitute `blockfetchBatchSlotThresholdDefault` (50000) as the security parameter and the stability window used for chain-selection rollback depth, the consumed-UTxO prune window, and the hard-fork safe zone; `nonceStabilityWindow` returns 0 when `4k/f` overflows, so the candidate nonce never freezes. `internal/node/load.go`'s `loadSecurityParamForConfig` and `ledger/eras/shape.go`'s `StabilityWindowForEra` return errors for the same values.
 
-A genesis missing any input to `4k/f` (zero `securityParam`, zero `epochLength`, or an absent or zero `activeSlotsCoeff`) passes rather than being rejected on a zero value.
+The Byron `startTime` must equal the Shelley `systemStart`, because every slot-to-time conversion (`ledger/hardfork_summary.go`, `ledger/slot.go`) is anchored on the Shelley `systemStart` and would compute wrong wall-clock times for Byron-era slots if the two disagreed. The Shelley `epochLength` must be strictly greater than the randomness stabilisation window `4k/f`, computed the same way as `ledger.nonceStabilityWindow`. Praos freezes the candidate nonce once a block reaches `firstSlotNextEpoch - 4k/f`; once the window reaches the epoch's own length there is no unfrozen portion left and `computeCandidateNonceAsOf` (`ledger/candidate_nonce.go`) pins the cutoff to the epoch's first slot, so epoch nonces stop tracking the chain. A genesis in that state also runs epoch rollover far more often than the security parameter assumes. The check uses the Conway `4k/f` window rather than the `3k/f` used by earlier eras, so satisfying it satisfies every era.
+
+The `4k/f` check passes rather than rejects when `epochLength` is zero or negative. A zero or absent `securityParam` or `activeSlotsCoeff` never reaches it, because the security-parameter check rejects those first.
 
 ### Block Header Validation
 
@@ -3011,7 +3034,16 @@ The `LedgerView` interface provides query access to ledger state:
 - UTXO lookups by address or output reference
 - Protocol parameter queries
 - Stake distribution queries
-- Account registration checks
+- Account registration checks. `IsStakeCredentialRegistered`,
+  `IsPoolRegistered`, `IsRewardAccountRegistered`, and `GovActionExists`
+  implement gouroboros' bool-only `common.LedgerState` predicates. A lookup
+  error other than "not found" is recorded as the view's first storage fault.
+  Every `ValidateTxFunc`/`EvaluateTxFunc` call site in `ledger/state.go`, and
+  `ValidateBlockReferenceScripts`, returns that fault as
+  `ErrLedgerViewStorageFault` in place of the rule's result, so a storage
+  fault is neither reported as a not-registered verdict nor accepted on a
+  false negative. During block application it is a plain error, not a
+  transaction validation failure (issue #1649).
 - `DRepDelegation` lookup for a full, tag-aware stake credential. The lookup
   returns the account's current DRep delegate (including the non-credential
   always-abstain and always-no-confidence DRep types), or nil when the account
@@ -5854,13 +5886,22 @@ state cannot be reconstructed. Mithril sync persists the full boundary point in
 chainsync can always offer that point during `FindIntersect`, even if recent
 ledger-tip point generation is temporarily empty or stale. Slot-only older
 databases fall back to reconstructing the boundary point from canonical local
-chain data. The boundary block is always offered as an intersect point, so the
-peer's reported tip classifies the refusal: a peer whose own tip is below the
-boundary is treated as stale (it is simply behind and matched an old rung of the
-intersect ladder), while a peer claiming a tip at or above the boundary that
-still demands a rollback below it is rejected as genuinely divergent. Both
-classifications close the connection for a fresh intersect and deny the peer for
-a cooldown via peer governance.
+chain data. `LedgerState.loadMithrilTrustBoundary` fails ledger `Start` when the
+`mithril_ledger_slot` read fails or the recorded value is empty or does not
+parse, rather than continuing as a non-Mithril database: leaving
+`mithrilLedgerSlot` at zero disables `healMithrilGapBlockNonces` and removes the
+boundary exemption from header verification, which surfaces later as a VRF/nonce
+rejection that blames peers instead of the unreadable boundary. An absent key
+still starts as a non-Mithril database. A read or parse failure on
+`mithril_ledger_hash` alone is logged and does not fail startup, since the hash
+is optional and `mithrilTrustBoundaryPoint` reconstructs it from canonical chain
+data as in the slot-only case. The boundary block is always offered as an
+intersect point, so the peer's reported tip classifies the refusal: a peer whose
+own tip is below the boundary is treated as stale (it is simply behind and
+matched an old rung of the intersect ladder), while a peer claiming a tip at or
+above the boundary that still demands a rollback below it is rejected as
+genuinely divergent. Both classifications close the connection for a fresh
+intersect and deny the peer for a cooldown via peer governance.
 
 The same `mithril_ledger_slot` boundary gates how the database layer reacts to a
 consumed UTxO it cannot find or reconstruct from the blob store. By default
@@ -6402,6 +6443,20 @@ for a later committed apply. Event delivery is ordered, so a committed apply
 already queued ahead of an undo may still produce a confirmation; the undo is
 ignored because the UTxO RPC stage stream has no reversal message and does not
 retract a confirmation already sent.
+
+`FollowTip` and `WatchTx` reject intersection lists longer than `MaxBlockRefs`
+(default 100), using the same invalid-argument error as `FetchBlock`. The cap
+applies before logging, point allocation, or ledger lookup, including duplicate
+references. Empty lists retain the current-tip fallback.
+
+`FollowTip` populates `Timestamp` on a `Reset` block reference and on every
+response's `Tip` from `LedgerState.SlotToTime`. `Timestamp` is a plain proto3
+`uint64` with the same "unknown" ambiguity `height` has (see the UTxO RPC
+server paragraph above): a zero beside a non-origin slot asserts the block
+was produced at the Unix epoch, which a client cannot tell apart from a
+`SlotToTime` failure. So a `SlotToTime` failure ends the stream with an error
+rather than reporting `Timestamp: 0`. A `Reset` to the origin point names no
+block and keeps `Timestamp: 0`.
 
 `WatchTx` retains up to 256 forward blocks in a per-stream undo history. A
 rollback within that history builds its `Undo` responses without reading

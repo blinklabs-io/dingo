@@ -77,6 +77,7 @@ func ensureWALJournalMode(ctx context.Context, databaseURI string) error {
 		"sqlite",
 		databaseURI+"?_pragma=busy_timeout(30000)",
 		"sqlite",
+		false, // one-shot startup helper; not worth tracing
 	)
 	if err != nil {
 		return fmt.Errorf("open SQLite database for WAL conversion: %w", err)
@@ -149,6 +150,11 @@ func openSQLStore(
 	config Config,
 	dependencies metadata.ProviderDependencies,
 ) (*sqlstore.Store, *sql.DB, *sql.DB, error) {
+	if config.MaxConnections < 0 {
+		return nil, nil, nil, errors.New(
+			"SQLite maxConnections must not be negative",
+		)
+	}
 	dataDir := dependencies.DataDir
 	if config.DataDir != "" {
 		dataDir = config.DataDir
@@ -181,7 +187,9 @@ func openSQLStore(
 				"&_pragma=busy_timeout(30000)&_pragma=foreign_keys(1)",
 			sharedMemoryDBSequence.Add(1),
 		)
-		writeDB, err = sqlstore.OpenDB("sqlite", dsn, "sqlite")
+		writeDB, err = sqlstore.OpenDB(
+			"sqlite", dsn, "sqlite", dependencies.TracingEnabled,
+		)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -209,6 +217,7 @@ func openSQLStore(
 				sqliteCommonPragmas,
 			),
 			"sqlite",
+			dependencies.TracingEnabled,
 		)
 		if err != nil {
 			return nil, nil, nil, err
@@ -221,6 +230,7 @@ func openSQLStore(
 				sqliteCommonPragmas,
 			),
 			"sqlite",
+			dependencies.TracingEnabled,
 		)
 		if err != nil {
 			_ = writeDB.Close()
