@@ -78,6 +78,13 @@ type fakeLSQState struct {
 	// comment) cannot otherwise simulate. nil means "accept every point",
 	// the default.
 	rejectSlot *uint64
+	// stall, when non-nil, makes this node's fake AcquireFunc block until
+	// it is closed, simulating a peer that accepts the connection and
+	// then stalls mid-query -- for exercising that establishBaseline's
+	// context.WithTimeout(ctx, cfg.FullCheckTimeout) wrapping actually
+	// bounds this instead of hanging indefinitely (blinklabs-io/dingo#4183
+	// review). nil means "never stall", the default.
+	stall <-chan struct{}
 }
 
 func newFakeLSQState() *fakeLSQState {
@@ -222,6 +229,15 @@ func (s *fakeLSQState) rejectAcquireAtSlot(slot uint64) {
 	s.rejectSlot = &slot
 }
 
+// stallAcquireUntil makes this node's fake AcquireFunc block on done
+// instead of answering, until done is closed -- see the stall field's doc
+// comment.
+func (s *fakeLSQState) stallAcquireUntil(done <-chan struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stall = done
+}
+
 // config builds the localstatequery.Config a real gouroboros server uses to
 // answer exactly the four query types incremental mode's per-block and full
 // checks need (GetCurrentProtocolParams, GetStakeDistribution,
@@ -247,7 +263,11 @@ func (s *fakeLSQState) config() localstatequery.Config {
 			) error {
 				s.mu.Lock()
 				reject := s.rejectSlot
+				stall := s.stall
 				s.mu.Unlock()
+				if stall != nil {
+					<-stall
+				}
 				if reject != nil {
 					if sp, ok := target.(localstatequery.AcquireSpecificPoint); ok &&
 						sp.Point.Slot == *reject {
@@ -1138,5 +1158,105 @@ func TestEstablishBaseline_DivergentBaselineLogsDisputed(t *testing.T) {
 		buf.String(),
 		"disputed",
 		"a startup baseline that itself diverged must be logged distinctly as a disputed cursor, not just via the routine per-cycle diff report",
+	)
+}
+
+// TestEstablishBaseline_StalledPeerTimesOutAndRetries is the regression
+// test for a blinklabs-io/dingo#4183 review finding: establishBaseline
+// called Check with the raw, long-lived ctx RunIncremental receives (which
+// only ever cancels at process shutdown), not one bounded by
+// cfg.FullCheckTimeout the way every other full Check this package
+// triggers (fullCheckWorker.run) already is. Dial deliberately disables
+// both the mux segment-read and LocalStateQuery query timeouts on this
+// trusted NtC channel (see its doc comment), so nothing else stops a peer
+// that accepts the connection and then stalls mid-query: the startup
+// retry loop would hang on that one attempt forever instead of timing out
+// and retrying with backoff like every other failure mode here already
+// does.
+//
+// dingoState.stallAcquireUntil makes the fake dingo server accept the
+// connection and then block forever on the very first LocalStateQuery
+// call (Acquire) -- Dial's own ctx-triggered close (see its doc comment)
+// is what is supposed to unstick a bounded attempt by closing the
+// connection out from under the blocked client call once checkCtx
+// expires, letting establishBaseline's retry loop observe an error and
+// try again rather than waiting on a reply that will never come.
+//
+// This test's own outer ctx (2s) is deliberately longer than
+// cfg.FullCheckTimeout (100ms) so the two are distinguishable: with the
+// fix, each attempt is bounded by the short per-attempt timeout, so
+// several retries fit inside the 2s window. Without it (verified via a
+// stash/apply round-trip against the pre-fix code), Check's single
+// attempt is bounded only by whichever ctx happens to reach it -- here,
+// coincidentally, this test's own outer ctx, which then also makes
+// establishBaseline's own ctx.Err() check stop the loop right away
+// instead of retrying, so the failure surfaces as attempts staying at 1
+// rather than as an actual hang. Against the real caller (RunIncremental,
+// whose ctx only cancels at process shutdown) the same missing bound
+// would hang the whole startup baseline indefinitely instead.
+func TestEstablishBaseline_StalledPeerTimesOutAndRetries(t *testing.T) {
+	t.Parallel()
+	dingoAddr, cardanoAddr, dingoState, _ := newIncrementalHarness(t, 5)
+
+	stall := make(chan struct{})
+	t.Cleanup(func() { close(stall) })
+	dingoState.stallAcquireUntil(stall)
+
+	var mu sync.Mutex
+	attempts := 0
+	cfg := IncrementalConfig{
+		DingoAddr:        dingoAddr,
+		CardanoAddr:      cardanoAddr,
+		Magic:            42,
+		FullCheckTimeout: 100 * time.Millisecond,
+		CursorFile:       filepath.Join(t.TempDir(), "cursor.json"),
+		Logger:           testDiscardLogger(),
+		OnFullCheck: func(_ FullCheckReason, _ *CheckResult, err error) {
+			mu.Lock()
+			attempts++
+			mu.Unlock()
+			assert.Error(
+				t, err,
+				"a stalled peer must surface as an error for this "+
+					"attempt, not be silently treated as a successful "+
+					"check",
+			)
+		},
+	}
+
+	// Bounds the whole test, independent of cfg.FullCheckTimeout: this is
+	// the process-lifetime-style context establishBaseline's real caller
+	// (RunIncremental) supplies, which only ever cancels at shutdown. If
+	// establishBaseline is not itself bounding each attempt by
+	// cfg.FullCheckTimeout, the stalled peer above blocks it forever and
+	// this outer context is the only thing that will ever end the test
+	// (after a generous margin well beyond several retry attempts).
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	done := make(chan struct{})
+	var baselineErr error
+	go func() {
+		_, baselineErr = establishBaseline(ctx, cfg)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal(
+			"establishBaseline did not return -- a stalled peer during " +
+				"the startup baseline check must be bounded by " +
+				"cfg.FullCheckTimeout, not hang indefinitely",
+		)
+	}
+	require.Error(t, baselineErr)
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Greater(
+		t, attempts, 1,
+		"a stalled peer must be retried with backoff, not given up on "+
+			"after a single attempt",
 	)
 }

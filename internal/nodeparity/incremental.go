@@ -508,13 +508,24 @@ func establishBaseline(
 		// queryProtocolParams's doc comment. Which point the returned cursor
 		// actually resumes from is decided separately, in buildStartupCursor
 		// below.
+		// Bounded by cfg.FullCheckTimeout, the same as every other full
+		// Check this package triggers (fullCheckWorker.run) -- Dial
+		// deliberately disables both the mux segment-read and
+		// LocalStateQuery query timeouts on this trusted NtC channel (see
+		// its doc comment), so nothing else stops a peer that accepts the
+		// connection and then stalls mid-query from hanging this retry
+		// loop indefinitely instead of timing out and retrying with
+		// backoff like every other failure mode here already does
+		// (blinklabs-io/dingo#4183 review).
+		checkCtx, cancel := context.WithTimeout(ctx, cfg.FullCheckTimeout)
 		result, err := Check(
-			ctx,
+			checkCtx,
 			cfg.DingoAddr,
 			cfg.CardanoAddr,
 			cfg.Magic,
 			nil,
 		)
+		cancel()
 		cfg.OnFullCheck(FullCheckStartup, result, err)
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, fmt.Errorf("startup baseline: %w", ctxErr)
