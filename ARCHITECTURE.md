@@ -8584,10 +8584,10 @@ re-requests a full check on the very next block for as long as the trigger
 stays due, with `request`'s own coalescing (above) still preventing that
 from piling up redundant requests.
 
-`resetFullCheckCounter` subtracts a `baseline` rather than zeroing the
-counter outright: `baseline` is `BlocksSinceFullCheck`'s own value at the
-moment `request` dispatched the check that just completed, carried on
-`fullCheckRequest`. A full check runs in the background precisely so the
+`resetFullCheckCounter` recomputes `BlocksSinceFullCheck` as
+`cursor.Tip.BlockNumber - at.BlockNumber` rather than zeroing the counter
+outright, where `at` is the point `fullCheckRequest` carries for the check
+that just completed. A full check runs in the background precisely so the
 ChainSync callback goroutine can keep validating and advancing the cursor
 for every block that arrives while it is in flight (above) -- a real check's
 whole-UTxO walk plus reference-batch query commonly takes several minutes,
@@ -8595,12 +8595,34 @@ long enough for hundreds of blocks to land in the meantime against a real
 node. Those blocks were never covered by the check that just completed, so
 zeroing the counter discarded them and silently delayed the next periodic
 checkpoint by that same amount (maintainer review finding on this PR).
-Subtracting `baseline` instead keeps exactly that residual, so the next
-checkpoint still lands `--full-check-interval` blocks after the point this
-one was actually pinned to. If `baseline` is no longer meaningful against
-the current counter (a concurrent reset, or a rollback, landed in between),
-the subtraction floors at 0 instead of underflowing -- the same effect as
-the old unconditional reset, for that rare case only.
+Recomputing from `at.BlockNumber` instead keeps exactly that residual, so
+the next checkpoint still lands `--full-check-interval` blocks after the
+point this one was actually pinned to.
+
+An earlier version of this fix subtracted a snapshot of the counter's own
+absolute value (captured at each request's dispatch time) instead. That
+broke under two overlapping requests (a second maintainer review finding):
+a full check can take long enough for the ChainSync callback to dispatch a
+*second* request before the first one completes, since the interval
+trigger is level-triggered and simply keeps re-firing (and re-coalescing
+into the single pending slot) on every subsequent block once due. Request
+A captures a counter snapshot of 1000; while A still runs, request B is
+later dispatched and captures 1100; A completes and reduces the live
+counter to 100; B then completes and finds the live counter (say 150,
+after 50 more blocks) below its own captured snapshot of 1100 -- triggering
+the underflow floor and zeroing the counter, discarding those 150 real
+blocks. Recomputing from `at.BlockNumber` sidesteps this entirely: neither
+request's arithmetic depends on whether some *other* request has already
+reset the counter, because it is derived fresh each time from two stable,
+monotonic quantities (the live tip and that request's own pinned point)
+rather than a shared, resettable counter's absolute value.
+
+`at.BlockNumber == 0` is reserved for a rollback-triggered request
+(`handleIncrementalRollback`'s `rollbackTip` carries no block number, since
+a rollback point has no stable one across a fork switch -- see
+`setRollback`): there is no meaningful delta to compute across that
+boundary, so this floors at 0 instead, the same effect as the old
+unconditional reset, for that case only.
 
 **Incremental mode's testing status, precisely.** Confirmed live against a
 real dingo and cardano-node: the startup baseline, same-point-rollback

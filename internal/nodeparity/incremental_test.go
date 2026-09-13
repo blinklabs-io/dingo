@@ -492,8 +492,8 @@ func TestFullCheckWorker_CoalescesByPriorityWhilePendingOneQueued(
 		func(t *testing.T) {
 			t.Parallel()
 			w := &fullCheckWorker{wake: make(chan struct{}, 1)}
-			w.request(FullCheckInterval, Tip{Slot: 1}, 0)
-			w.request(FullCheckMismatch, Tip{Slot: 2}, 0)
+			w.request(FullCheckInterval, Tip{Slot: 1})
+			w.request(FullCheckMismatch, Tip{Slot: 2})
 
 			require.NotNil(t, w.pendingReq)
 			assert.Equal(
@@ -510,8 +510,8 @@ func TestFullCheckWorker_CoalescesByPriorityWhilePendingOneQueued(
 		func(t *testing.T) {
 			t.Parallel()
 			w := &fullCheckWorker{wake: make(chan struct{}, 1)}
-			w.request(FullCheckMismatch, Tip{Slot: 1}, 0)
-			w.request(FullCheckInterval, Tip{Slot: 2}, 0)
+			w.request(FullCheckMismatch, Tip{Slot: 1})
+			w.request(FullCheckInterval, Tip{Slot: 2})
 
 			require.NotNil(t, w.pendingReq)
 			assert.Equal(
@@ -529,8 +529,8 @@ func TestFullCheckWorker_CoalescesByPriorityWhilePendingOneQueued(
 	t.Run("equal priority keeps the newest point", func(t *testing.T) {
 		t.Parallel()
 		w := &fullCheckWorker{wake: make(chan struct{}, 1)}
-		w.request(FullCheckInterval, Tip{Slot: 1}, 0)
-		w.request(FullCheckInterval, Tip{Slot: 2}, 0)
+		w.request(FullCheckInterval, Tip{Slot: 1})
+		w.request(FullCheckInterval, Tip{Slot: 2})
 
 		require.NotNil(t, w.pendingReq)
 		assert.Equal(t, FullCheckInterval, w.pendingReq.reason)
@@ -595,7 +595,6 @@ func TestFullCheckWorker_FailedAttemptDoesNotResetCounter(t *testing.T) {
 			Slot: 200,
 			Hash: "ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01",
 		},
-		cursor.snapshot().BlocksSinceFullCheck,
 	)
 
 	select {
@@ -634,13 +633,15 @@ func TestFullCheckWorker_FailedAttemptDoesNotResetCounter(t *testing.T) {
 // TestFullCheckWorker_FailedAttemptDoesNotResetCounter's fix must not have
 // broken: a full check that actually completes (against the fake harness,
 // which always accepts Acquire regardless of target -- see
-// newIncrementalHarness) must still reset BlocksSinceFullCheck by the
-// baseline captured at dispatch time, without disturbing Tip/Epoch. No
-// blocks advance the cursor between dispatch and completion here, so the
-// baseline (42, matching the counter's own value at dispatch) fully
-// accounts for it and the result is 0 -- see
-// TestCursorState_ResetFullCheckCounterPreservesAdvancesAfterBaseline for
-// the case where blocks do arrive in between.
+// newIncrementalHarness) must still reset BlocksSinceFullCheck, without
+// disturbing Tip/Epoch. The request's own at.BlockNumber is set to match
+// the cursor's current Tip.BlockNumber (10) -- no blocks advance the
+// cursor between dispatch and completion here, so the check's own point
+// and the live tip coincide and the result is 0. See
+// TestCursorState_ResetFullCheckCounterIsRelativeToAt for the case where
+// blocks do arrive in between, and
+// TestCursorState_ResetFullCheckCounterHandlesOverlappingRequests for two
+// such checks completing out of order.
 func TestFullCheckWorker_SuccessfulCheckResetsCounter(t *testing.T) {
 	t.Parallel()
 	dingoAddr, cardanoAddr, _, _ := newIncrementalHarness(t, 3)
@@ -679,10 +680,10 @@ func TestFullCheckWorker_SuccessfulCheckResetsCounter(t *testing.T) {
 	worker.request(
 		FullCheckInterval,
 		Tip{
-			Slot: 200,
-			Hash: "ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01",
+			Slot:        200,
+			Hash:        "ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01ef01",
+			BlockNumber: cursor.snapshot().Tip.BlockNumber,
 		},
-		cursor.snapshot().BlocksSinceFullCheck,
 	)
 
 	select {
@@ -772,8 +773,8 @@ func TestCursorState_AdvanceIncrementsAndPersists(t *testing.T) {
 	assert.Equal(t, got, *persisted)
 }
 
-// TestCursorState_ResetFullCheckCounterPreservesAdvancesAfterBaseline covers
-// a maintainer review finding on blinklabs-io/dingo#4183: a full check runs
+// TestCursorState_ResetFullCheckCounterIsRelativeToAt covers a maintainer
+// review finding on blinklabs-io/dingo#4183: a full check runs
 // asynchronously (fullCheckWorker's doc comment) precisely so the ChainSync
 // callback goroutine can keep validating and advancing the cursor for every
 // block that arrives while it's in flight -- a real full check commonly
@@ -786,38 +787,37 @@ func TestCursorState_AdvanceIncrementsAndPersists(t *testing.T) {
 // all the way back up from 0 instead of from where the in-flight blocks had
 // already brought it.
 //
-// This simulates exactly that interleaving without any goroutine timing:
-// baseline is captured (as request() does) before the "in-flight" advances,
-// which are then applied directly, before resetFullCheckCounter is called
-// with that captured baseline -- deterministic, and fails against the prior
-// unconditional-zero behavior (confirmed by temporarily reverting the fix
-// and re-running: this test then asserts 0 but observes 100).
-func TestCursorState_ResetFullCheckCounterPreservesAdvancesAfterBaseline(
-	t *testing.T,
-) {
+// This simulates that interleaving without any goroutine timing: at is the
+// point the check was dispatched at (matching request()'s own capture),
+// then 100 blocks are applied directly to the cursor before
+// resetFullCheckCounter runs against that same at -- deterministic, and
+// fails against the prior unconditional-zero behavior (confirmed by
+// temporarily reverting the fix and re-running: this test then asserts 0
+// but observes 100).
+func TestCursorState_ResetFullCheckCounterIsRelativeToAt(t *testing.T) {
 	t.Parallel()
 	cursorFile := filepath.Join(t.TempDir(), "cursor.json")
 	cursor := newCursorState(cursorFile, IncrementalCursor{
-		Tip:                  Tip{BlockNumber: 100},
+		Tip:                  Tip{BlockNumber: 1000},
 		BlocksSinceFullCheck: 1000,
 	})
 
-	// baseline is what request() would have captured at dispatch time --
-	// the counter's value right before the check that is about to
+	// at is the point request() would have captured at dispatch time --
+	// the cursor's own Tip right before the check that is about to
 	// "complete" was ever requested.
-	baseline := cursor.snapshot().BlocksSinceFullCheck
-	require.Equal(t, uint64(1000), baseline)
+	at := cursor.snapshot().Tip
+	require.Equal(t, uint64(1000), at.BlockNumber)
 
 	// 100 blocks arrive and are validated while that check is in flight.
 	for i := range uint64(100) {
-		_, err := cursor.advance(Tip{BlockNumber: 101 + i}, 5)
+		_, err := cursor.advance(Tip{BlockNumber: 1001 + i}, 5)
 		require.NoError(t, err)
 	}
 	require.Equal(t, uint64(1100), cursor.snapshot().BlocksSinceFullCheck)
 
-	// The check now completes and resets against the baseline captured
+	// The check now completes and resets against the point captured
 	// before those 100 advances.
-	require.NoError(t, cursor.resetFullCheckCounter(baseline))
+	require.NoError(t, cursor.resetFullCheckCounter(at))
 	assert.Equal(
 		t, uint64(100), cursor.snapshot().BlocksSinceFullCheck,
 		"the 100 blocks that arrived after this check was dispatched must "+
@@ -831,22 +831,92 @@ func TestCursorState_ResetFullCheckCounterPreservesAdvancesAfterBaseline(
 	assert.Equal(t, uint64(100), persisted.BlocksSinceFullCheck)
 }
 
+// TestCursorState_ResetFullCheckCounterHandlesOverlappingRequests covers a
+// second maintainer review finding: an earlier version of this fix
+// subtracted a snapshot of the counter's own absolute value (captured at
+// each request's dispatch time) instead of recomputing from at.BlockNumber.
+// That broke under two overlapping requests -- exactly what this test
+// reproduces. Request A is dispatched, then request B is dispatched later
+// (more blocks having landed by then, while A is still conceptually "in
+// flight"), then A completes first and resets against its own point, then
+// more blocks land during B's own "run", then B completes and resets
+// against its own point. Under the old baseline-subtraction design, B's
+// captured baseline (1100) would already exceed the counter A's completion
+// had reduced to (100), so B's completion would incorrectly floor the
+// counter to 0 -- discarding the real blocks that arrived during B's own
+// run. Recomputing from each request's own at.BlockNumber sidesteps this
+// entirely: neither completion's arithmetic depends on whether the other
+// has already reset the counter.
+func TestCursorState_ResetFullCheckCounterHandlesOverlappingRequests(
+	t *testing.T,
+) {
+	t.Parallel()
+	cursorFile := filepath.Join(t.TempDir(), "cursor.json")
+	cursor := newCursorState(cursorFile, IncrementalCursor{
+		Tip:                  Tip{BlockNumber: 1000},
+		BlocksSinceFullCheck: 1000,
+	})
+
+	// Request A dispatched at block 1000.
+	atA := cursor.snapshot().Tip
+
+	// 100 more blocks land while A is conceptually still running --
+	// including the block where request B gets dispatched, captured
+	// partway through.
+	for i := range uint64(100) {
+		_, err := cursor.advance(Tip{BlockNumber: 1001 + i}, 5)
+		require.NoError(t, err)
+	}
+	// Request B dispatched here, at block 1100 -- a real, later point,
+	// unlike the old design's baseline snapshot (which would have captured
+	// the same 1100 value, but as an absolute counter snapshot rather than
+	// a stable point).
+	atB := cursor.snapshot().Tip
+	require.Equal(t, uint64(1100), atB.BlockNumber)
+
+	// A completes first (it was dispatched first) and resets against its
+	// own point.
+	require.NoError(t, cursor.resetFullCheckCounter(atA))
+	require.Equal(
+		t, uint64(100), cursor.snapshot().BlocksSinceFullCheck,
+		"A's own completion must reduce the counter by exactly the blocks "+
+			"validated since A's own dispatch point",
+	)
+
+	// 50 more blocks land while B is now running.
+	for i := range uint64(50) {
+		_, err := cursor.advance(Tip{BlockNumber: 1101 + i}, 5)
+		require.NoError(t, err)
+	}
+	require.Equal(t, uint64(150), cursor.snapshot().BlocksSinceFullCheck)
+
+	// B completes and resets against its own point (1100) -- not the
+	// counter's current absolute value, which A's completion already
+	// shifted.
+	require.NoError(t, cursor.resetFullCheckCounter(atB))
+	assert.Equal(
+		t, uint64(50), cursor.snapshot().BlocksSinceFullCheck,
+		"B's completion must preserve the 50 blocks validated since B's "+
+			"own dispatch point, not discard them because B's point predates "+
+			"A's already-applied reset",
+	)
+}
+
 // TestCursorState_ResetFullCheckCounterFloorsAtZero covers the defensive
-// floor resetFullCheckCounter falls back to when baseline no longer makes
-// sense against the current counter -- e.g. a concurrent reset already ran,
-// or (more realistically) a rollback landed between this check's dispatch
-// and its completion, on a fork where fewer blocks have been validated so
-// far than baseline itself named. Subtracting would underflow a uint64;
-// this must floor at 0 instead, matching the prior unconditional-reset
-// behavior for this rare case.
+// floor resetFullCheckCounter falls back to for a rollback-triggered
+// request, whose Tip carries no BlockNumber (setRollback's doc comment:
+// a rollback point does not have one) -- there is no meaningful delta to
+// compute across a fork switch, so this must floor at 0 rather than
+// treating the whole live block height as the delta.
 func TestCursorState_ResetFullCheckCounterFloorsAtZero(t *testing.T) {
 	t.Parallel()
 	cursorFile := filepath.Join(t.TempDir(), "cursor.json")
 	cursor := newCursorState(cursorFile, IncrementalCursor{
+		Tip:                  Tip{BlockNumber: 500},
 		BlocksSinceFullCheck: 5,
 	})
 
-	require.NoError(t, cursor.resetFullCheckCounter(1000))
+	require.NoError(t, cursor.resetFullCheckCounter(Tip{Slot: 999}))
 	assert.Equal(t, uint64(0), cursor.snapshot().BlocksSinceFullCheck)
 }
 
