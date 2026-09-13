@@ -180,6 +180,7 @@ func applyAuthCertificate(
 		ocommon.Point{Slot: slot, Hash: credentialHash(0x99)},
 		0,
 		nil,
+		allowUnknownDeposits,
 	)
 	require.NoError(t, err)
 }
@@ -245,6 +246,7 @@ func TestAuthCommitteeHotTransactionDrainsMultipleBatches(t *testing.T) {
 		1, certificates,
 		ocommon.Point{Slot: preprodTipSlot, Hash: credentialHash(0x99)},
 		0, nil,
+		allowUnknownDeposits,
 	)
 	require.NoError(t, err)
 	// Two certificate calls remove two bounded batches and retain the newest
