@@ -170,9 +170,9 @@ func readFrame(r io.Reader, maxSize int, v any) error {
 	if n == 0 {
 		return errors.New("kesagent: zero-length frame")
 	}
-	if n > uint32(
-		maxSize,
-	) { // #nosec G115 -- maxSize is always a small positive constant
+	// Widened to int64 rather than narrowing maxSize to uint32: both sides
+	// convert losslessly, so the bound is exact for any maxSize.
+	if int64(n) > int64(maxSize) {
 		return fmt.Errorf(
 			"%w: declared %d bytes > %d",
 			errFrameTooLarge,
