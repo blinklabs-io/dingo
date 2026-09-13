@@ -91,7 +91,7 @@ func testSQLStoreIntegration(
 	driver, dsn, dialectName, lockNamespace string,
 ) {
 	t.Helper()
-	db, err := OpenDB(driver, dsn, dialectName)
+	db, err := OpenDB(driver, dsn, dialectName, false)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	var dialect Dialect
@@ -199,8 +199,16 @@ func testSQLStoreIntegration(
 		nil,
 	)
 	require.NoError(t, err)
-	require.Contains(t, batchLoaded, models.NewStakeCredentialRef(0, account.StakingKey).MapKey())
-	require.Equal(t, account.ID, batchLoaded[models.NewStakeCredentialRef(0, account.StakingKey).MapKey()].ID)
+	require.Contains(
+		t,
+		batchLoaded,
+		models.NewStakeCredentialRef(0, account.StakingKey).MapKey(),
+	)
+	require.Equal(
+		t,
+		account.ID,
+		batchLoaded[models.NewStakeCredentialRef(0, account.StakingKey).MapKey()].ID,
+	)
 	// GetDrepLastRegistrationDeposits is the other derived-table join in the
 	// shared query set, and a DRep deregistration's refund is validated
 	// against what it returns, so a dialect that resolves the grouped

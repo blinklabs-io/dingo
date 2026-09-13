@@ -728,6 +728,78 @@ func TestValidateTxsubmissionReply(t *testing.T) {
 		require.Len(t, validated, 1)
 		require.Equal(t, returned[1], validated[0].body)
 	})
+	t.Run("reference size discrepancy boundaries", func(t *testing.T) {
+		bodySize := uint64(len(returned[0].TxBody))
+		wireSize := txsubmissionWireSize(returned[0].EraId, len(returned[0].TxBody))
+		tests := []struct {
+			name       string
+			advertised uint64
+			shouldPass bool
+		}{
+			{name: "raw minus 32", advertised: bodySize - 32, shouldPass: true},
+			{name: "raw minus 33", advertised: bodySize - 33, shouldPass: false},
+			{name: "raw plus 32", advertised: bodySize + 32, shouldPass: true},
+			// The raw +33 case remains accepted through the wrapped-wire
+			// representation; its wire discrepancy is only +27 here.
+			{name: "raw plus 40", advertised: bodySize + 40, shouldPass: false},
+			{name: "wire minus 32", advertised: wireSize - 32, shouldPass: true},
+			{name: "wire minus 40", advertised: wireSize - 40, shouldPass: false},
+			{name: "wire plus 32", advertised: wireSize + 32, shouldPass: true},
+			{name: "wire plus 33", advertised: wireSize + 33, shouldPass: false},
+		}
+		for _, testCase := range tests {
+			t.Run(testCase.name, func(t *testing.T) {
+				want := []txsubmission.TxIdAndSize{{
+					TxId: fixtures[0].txId,
+					Size: uint32(testCase.advertised), // #nosec G115 -- bounded fixture
+				}}
+				validated, err := validateTxsubmissionReply(want, returned[:1])
+				if testCase.shouldPass {
+					require.NoError(t, err)
+					require.Len(t, validated, 1)
+				} else {
+					require.ErrorIs(t, err, errTxsubmissionReplySizeMismatch)
+					require.Nil(t, validated)
+				}
+			})
+		}
+	})
+	t.Run("multi-body discrepancy budget and omission", func(t *testing.T) {
+		want := make([]txsubmission.TxIdAndSize, len(fixtures))
+		for i, fixture := range fixtures {
+			want[i] = txsubmission.TxIdAndSize{
+				TxId: fixture.txId,
+				Size: uint32(len(fixture.body) - 32), // #nosec G115 -- real fixtures
+			}
+		}
+		validated, err := validateTxsubmissionReply(want, returned)
+		require.NoError(t, err)
+		require.Len(t, validated, len(returned))
+
+		validated, err = validateTxsubmissionReply(want, returned[:1])
+		require.NoError(t, err)
+		require.Len(t, validated, 1)
+	})
+	t.Run("under-advertisement uses per-body tolerance", func(t *testing.T) {
+		want := []txsubmission.TxIdAndSize{
+			// Keep the aggregate request budget within tolerance while making
+			// only the first body's under-advertisement invalid.
+			{TxId: fixtures[0].txId, Size: uint32(len(fixtures[0].body) - 60)}, // #nosec G115 -- real fixture
+			{TxId: fixtures[1].txId, Size: uint32(len(fixtures[1].body) - 4)},  // #nosec G115 -- real fixture
+		}
+		validated, err := validateTxsubmissionReply(want, returned)
+		require.ErrorIs(t, err, errTxsubmissionReplySizeMismatch)
+		require.Nil(t, validated)
+	})
+	t.Run("reordered reply preserves admission order", func(t *testing.T) {
+		got := []txsubmission.TxBody{returned[1], returned[0]}
+		validated, err := validateTxsubmissionReply(requested, got)
+		require.NoError(t, err)
+		require.Len(t, validated, 2)
+		require.Equal(t, returned[0], validated[0].body)
+		require.Equal(t, returned[1], validated[1].body)
+		require.Equal(t, returned[1], got[0], "do not mutate the reply")
+	})
 
 	tests := []struct {
 		name   string
@@ -739,11 +811,15 @@ func TestValidateTxsubmissionReply(t *testing.T) {
 			match: "count exceeds request",
 		},
 		{
-			name: "order",
+			name: "duplicate body",
 			mutate: func(_ []txsubmission.TxIdAndSize, got []txsubmission.TxBody) {
-				got[0], got[1] = got[1], got[0]
+				if len(got[0].TxBody) <= len(got[1].TxBody) {
+					got[1] = got[0]
+				} else {
+					got[0] = got[1]
+				}
 			},
-			match: "hash or order mismatch",
+			match: "duplicate transaction",
 		},
 		{
 			name: "era",
@@ -755,7 +831,7 @@ func TestValidateTxsubmissionReply(t *testing.T) {
 		{
 			name: "size",
 			mutate: func(want []txsubmission.TxIdAndSize, _ []txsubmission.TxBody) {
-				want[0].Size++
+				want[0].Size += 40
 				want[1].Size--
 			},
 			match: "size mismatch",
@@ -765,7 +841,7 @@ func TestValidateTxsubmissionReply(t *testing.T) {
 			mutate: func(want []txsubmission.TxIdAndSize, _ []txsubmission.TxBody) {
 				want[0].TxId.TxId[0] ^= 0xff
 			},
-			match: "hash or order mismatch",
+			match: "hash mismatch",
 		},
 	}
 	for _, tt := range tests {
@@ -781,6 +857,9 @@ func TestValidateTxsubmissionReply(t *testing.T) {
 			validated, err := validateTxsubmissionReply(want, got)
 			require.ErrorContains(t, err, tt.match)
 			require.Nil(t, validated)
+			if tt.name == "hash" {
+				require.Contains(t, err.Error(), "received "+fixtures[0].hash)
+			}
 		})
 	}
 }
@@ -796,19 +875,19 @@ func TestValidateTxsubmissionReplyChecksByteBudgetBeforeDecode(t *testing.T) {
 		{
 			name:      "single body exceeds budget",
 			sizes:     []uint32{1},
-			bodies:    [][]byte{{0xff, 0xff}},
+			bodies:    [][]byte{make([]byte, 34)},
 			overLimit: true,
 		},
 		{
 			name:      "later body exceeds aggregate before first decode",
 			sizes:     []uint32{1, 1},
-			bodies:    [][]byte{{0xff}, {0xff, 0xff}},
+			bodies:    [][]byte{{0xff}, make([]byte, 66)},
 			overLimit: true,
 		},
 		{
 			name:      "zero budget",
 			sizes:     []uint32{0},
-			bodies:    [][]byte{{0xff}},
+			bodies:    [][]byte{make([]byte, 33)},
 			overLimit: true,
 		},
 		{
@@ -921,6 +1000,12 @@ type txSubmissionRelayHarnessOpts struct {
 	omitOfferHash    string
 	corruptAllOffers bool
 	batchRequestsA   bool
+	// advertiseSizeDelta modifies the peer's TxId size announcements while
+	// leaving the real body and relay path untouched.
+	advertiseSizeDelta int64
+	// transformReplyB runs after the real callback consumes requested cache
+	// entries, so a wire-order change cannot alter cache lookup semantics.
+	transformReplyB func([]txsubmission.TxBody)
 	// promRegistryA installs protocol metrics on node A, whose
 	// txsubmission server runs the relay pull loop under test.
 	promRegistryA prometheus.Registerer
@@ -1009,6 +1094,56 @@ func newTxSubmissionRelayHarnessWithOpts(
 		}
 	}
 	nodeB.mempool = nodeBMempool
+	nodeBClientOpts := nodeB.txsubmissionClientConnOpts()
+	if opts.advertiseSizeDelta != 0 {
+		nodeBClientOpts = append(
+			nodeBClientOpts,
+			txsubmission.WithRequestTxIdsFunc(
+				nodeB.instrumentTxsubmissionRequestTxIds(
+					func(
+						ctx txsubmission.CallbackContext,
+						blocking bool,
+						ack, req uint16,
+					) ([]txsubmission.TxIdAndSize, error) {
+						ids, err := nodeB.txsubmissionClientRequestTxIds(
+							ctx,
+							blocking,
+							ack,
+							req,
+						)
+						if err != nil {
+							return nil, err
+						}
+						for index := range ids {
+							adjusted := int64(ids[index].Size) + opts.advertiseSizeDelta
+							if adjusted < 0 || adjusted > int64(^uint32(0)) {
+								return nil, fmt.Errorf("test advertised size out of range: %d", adjusted)
+							}
+							ids[index].Size = uint32(adjusted)
+						}
+						return ids, nil
+					},
+				),
+			),
+		)
+	}
+	if opts.transformReplyB != nil {
+		nodeBClientOpts = append(
+			nodeBClientOpts,
+			txsubmission.WithRequestTxsFunc(
+				nodeB.instrumentTxsubmissionRequestTxs(func(
+					ctx txsubmission.CallbackContext,
+					ids []txsubmission.TxId,
+				) ([]txsubmission.TxBody, error) {
+					bodies, err := nodeB.txsubmissionClientRequestTxs(ctx, ids)
+					if err == nil {
+						opts.transformReplyB(bodies)
+					}
+					return bodies, err
+				}),
+			),
+		)
+	}
 
 	serverPipe, clientPipe := net.Pipe()
 
@@ -1047,7 +1182,7 @@ func newTxSubmissionRelayHarnessWithOpts(
 		ouroboros.WithTxSubmissionConfig(
 			txsubmission.NewConfig(
 				slices.Concat(
-					nodeB.txsubmissionClientConnOpts(),
+					nodeBClientOpts,
 					nodeB.txsubmissionServerConnOpts(),
 				)...,
 			),
@@ -1139,6 +1274,67 @@ func TestTxSubmissionServerInitRelaysMempoolTransactionEndToEnd(t *testing.T) {
 	relayed := h.mA.Transactions()[0]
 	require.Equal(t, wantTx.Hash().String(), relayed.Hash)
 	require.Equal(t, txBytes, relayed.Cbor)
+}
+
+// The real TxSubmission client advertises a size 32 bytes below the wrapped
+// wire size. The body is unchanged, so this reaches the production relay
+// callback and verifies the reference V2 discrepancy is admitted end to end.
+func TestTxSubmissionServerInitAcceptsReferenceSizeDiscrepancy(t *testing.T) {
+	t.Parallel()
+
+	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
+		batchRequestsA:     true,
+		advertiseSizeDelta: -32,
+	})
+	defer h.close(t)
+	fixture := txsubmissionTestFixtures(t)[0]
+	addTxSubmissionTestFixtures(t, h.mB, fixture)
+	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
+
+	require.Eventually(
+		t,
+		func() bool { return len(h.mA.Transactions()) == 1 },
+		5*time.Second,
+		10*time.Millisecond,
+		"expected the reference-tolerated transaction to be relayed",
+	)
+}
+
+func TestTxSubmissionServerInitRejectsOutOfRangeAdvertisedSize(t *testing.T) {
+	t.Parallel()
+
+	logBuf := &lockedBuffer{}
+	logger := slog.New(
+		slog.NewJSONHandler(
+			logBuf,
+			&slog.HandlerOptions{Level: slog.LevelDebug},
+		),
+	)
+	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
+		logger:             logger,
+		advertiseSizeDelta: 40,
+	})
+	defer h.close(t)
+	fixture := txsubmissionTestFixtures(t)[0]
+	addTxSubmissionTestFixtures(t, h.mB, fixture)
+	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
+
+	require.Eventually(
+		t,
+		func() bool {
+			return strings.Contains(
+				logBuf.String(),
+				"rejected mismatched txsubmission reply",
+			)
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"expected the out-of-range size reply to be rejected",
+	)
+	logOutput := logBuf.String()
+	require.Contains(t, logOutput, "txsubmission reply size mismatch")
+	_, admitted := h.mA.GetTransaction(fixture.hash)
+	require.False(t, admitted, "out-of-range advertised body was admitted")
 }
 
 func TestTxSubmissionDAGBackpressureResumesAfterRemoval(t *testing.T) {
@@ -1528,4 +1724,50 @@ func TestTxSubmissionServerInitAcceptsOrderedSubset(t *testing.T) {
 	)
 	_, admitted := h.mA.GetTransaction(omitted.hash)
 	require.False(t, admitted)
+}
+
+// Observe the real FIFO after a peer reverses the two returned bodies.
+// These existing fixtures are not claimed to be a parent/child transaction
+// pair; the invariant is preservation of announcement order at admission.
+func TestTxSubmissionServerInitRestoresOrderForReorderedReply(t *testing.T) {
+	t.Parallel()
+	fixtures := txsubmissionTestFixtures(t)[:2]
+	replies := make(chan []txsubmission.TxBody, 1)
+	logBuf := &lockedBuffer{}
+	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
+		logger: slog.New(slog.NewJSONHandler(
+			logBuf, &slog.HandlerOptions{Level: slog.LevelDebug},
+		)),
+		batchRequestsA: true,
+		transformReplyB: func(bodies []txsubmission.TxBody) {
+			slices.Reverse(bodies)
+			if len(bodies) == 2 {
+				select {
+				case replies <- slices.Clone(bodies):
+				default:
+				}
+			}
+		},
+	})
+	defer h.close(t)
+	addTxSubmissionTestFixtures(t, h.mB, fixtures...)
+	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
+	select {
+	case reply := <-replies:
+		require.Equal(t, fixtures[1].body, reply[0].TxBody)
+		require.Equal(t, fixtures[0].body, reply[1].TxBody)
+	case <-time.After(5 * time.Second):
+		t.Fatalf("no reversed two-body reply: %s", logBuf.String())
+	}
+	require.Eventually(t, func() bool {
+		return len(h.mA.Transactions()) == 2 || strings.Contains(
+			logBuf.String(), "rejected mismatched txsubmission reply",
+		)
+	}, 5*time.Second, 10*time.Millisecond)
+	require.NotContains(t, logBuf.String(),
+		"rejected mismatched txsubmission reply")
+	admitted := h.mA.Transactions()
+	require.Len(t, admitted, 2)
+	require.Equal(t, fixtures[0].body, admitted[0].Cbor)
+	require.Equal(t, fixtures[1].body, admitted[1].Cbor)
 }

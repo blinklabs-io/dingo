@@ -267,8 +267,19 @@ func (ls *LedgerState) PoolStakeDistribution(
 	// Read inside the same transaction as everything else here so a caller
 	// combining this with per-pool Stake gets one consistent view, the same
 	// reason totalActiveStake is read from metaTxn rather than a fresh one.
+	//
+	// asOfSlot names at.Slot itself, not some epoch-boundary approximation:
+	// a pinned at already carries the exact slot the caller asked about, so
+	// reserves are read as of that precise point rather than "the start of
+	// the epoch it falls in."
+	var networkStateAsOfSlot *uint64
+	if at.pinned() {
+		slot := at.Slot
+		networkStateAsOfSlot = &slot
+	}
 	totalCirculatingSupply, err := ls.totalCirculatingSupply(
 		snapshotEpoch,
+		networkStateAsOfSlot,
 		true,
 		metaTxn,
 	)

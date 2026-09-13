@@ -251,9 +251,19 @@ func TestPipelineApplyFuncErrorDoesNotStopLaterBlocks(t *testing.T) {
 func TestPipelineApplyFuncSkipsUndecodableBlockButAppliesTheNext(t *testing.T) {
 	rec := &applyContractRecorder{}
 	p, drained := startApplyContractPipeline(t, rec, 1)
-	submitContractBlock(t, p, 0, testutil.BuildDecodableConwayBlockBytes(t, 0, 1))
+	submitContractBlock(
+		t,
+		p,
+		0,
+		testutil.BuildDecodableConwayBlockBytes(t, 0, 1),
+	)
 	submitContractBlock(t, p, 1, []byte{0xff, 0xff, 0xff, 0xff})
-	submitContractBlock(t, p, 2, testutil.BuildDecodableConwayBlockBytes(t, 2, 3))
+	submitContractBlock(
+		t,
+		p,
+		2,
+		testutil.BuildDecodableConwayBlockBytes(t, 2, 3),
+	)
 	require.NoError(t, p.Fence(t.Context()))
 
 	require.Equal(

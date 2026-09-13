@@ -150,7 +150,11 @@ func DiffSnapshots(a, b *Snapshot) Diff {
 	}
 	for _, key := range sortedStringKeys(b.UTxOEntries) {
 		if _, ok := a.UTxOEntries[key]; !ok {
-			report("utxo %s present in b, missing in a: %s", key, b.UTxOEntries[key])
+			report(
+				"utxo %s present in b, missing in a: %s",
+				key,
+				b.UTxOEntries[key],
+			)
 		}
 	}
 	if utxoDiffCount > maxUTxODiffLines {

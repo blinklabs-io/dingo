@@ -820,6 +820,7 @@ func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
 		},
 		notFitErr,
 		nil,
+		false,
 	)
 	require.NoError(t, err)
 	require.True(t, resolved)
@@ -874,7 +875,17 @@ func TestHandleEventChainsyncForkRecordsAdmittedHeaderFrontier(t *testing.T) {
 	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
 	require.Equal(t, 1, fixture.ls.chain.HeaderCount())
 	assert.Equal(t, header.slot, fixture.ls.chain.HeaderTip().Point.Slot)
-	assert.Equal(t, header.slot, fixture.ls.syncUpstreamTipSlot.Load())
+	// mockHeader carries no real VRF/KES material to verify, and this fork's
+	// rollback target (the ancestor tip) sits behind the header's own slot,
+	// so it cannot be exempted as Mithril-covered either (that would forbid
+	// the very rollback this fork resolution performs). An unverified fork
+	// header is still admitted onto the local header chain -- that's
+	// ordinary, safe chain-shape bookkeeping -- but issue #3528 requires
+	// genuine trust (real verification or a Mithril certificate) before it
+	// may advance the shared "trusted sync progress" frontier
+	// (recordAdmittedHeaderFrontier), so syncUpstreamTipSlot must stay at
+	// its zero value here.
+	assert.Zero(t, fixture.ls.syncUpstreamTipSlot.Load())
 }
 
 func TestTryResolveForkGenesisRejectsLongerSparseCandidate(t *testing.T) {
@@ -911,6 +922,7 @@ func TestTryResolveForkGenesisRejectsLongerSparseCandidate(t *testing.T) {
 		},
 		notFitErr,
 		nil,
+		false,
 	)
 
 	require.NoError(t, err)
@@ -1026,6 +1038,7 @@ func TestTryResolveForkUsesPraosAfterGenesisExit(t *testing.T) {
 		},
 		notFitErr,
 		nil,
+		false,
 	)
 
 	require.NoError(t, err)
@@ -1191,6 +1204,7 @@ func TestTryResolveForkExceedsKDeclinesReconcilingDivergedLedgerTip(
 		},
 		notFitErr,
 		nil,
+		false,
 	)
 	require.NoError(t, err)
 	// The not-fit error was handled (a resync was requested), even though
@@ -1267,6 +1281,7 @@ func TestTryResolveForkPropagatesAncestorLookupError(t *testing.T) {
 		},
 		notFitErr,
 		nil,
+		false,
 	)
 
 	require.False(t, resolved)
@@ -1404,6 +1419,7 @@ func TestTryResolveForkDoesNotAdvanceLaggingLedgerTip(t *testing.T) {
 		},
 		notFitErr,
 		nil,
+		false,
 	)
 	require.NoError(t, err)
 	require.True(t, resolved)
@@ -1483,6 +1499,7 @@ func TestTryResolveForkQueuesKnownPeerForkSegment(t *testing.T) {
 		},
 		notFitErr,
 		nil,
+		false,
 	)
 	require.NoError(t, err)
 	require.True(t, resolved)
@@ -1571,6 +1588,7 @@ func TestTryResolveForkUsesObservedPeerHistoryFallback(t *testing.T) {
 		},
 		notFitErr,
 		nil,
+		false,
 	)
 	require.NoError(t, err)
 	require.True(t, resolved)

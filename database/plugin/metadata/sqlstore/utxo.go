@@ -691,6 +691,49 @@ func currentTipSlot(ctx context.Context, db queryer) (uint64, error) {
 	return uint64(slot.Int64), nil
 }
 
+// distinctUtxoTxIDs returns the distinct tx_id hashes among ids, in
+// first-seen order, alongside a lookup from tx_id (as a string map key) to
+// the set of output indexes requested for that transaction.
+func distinctUtxoTxIDs(
+	ids []models.UtxoId,
+) ([][]byte, map[string]map[uint32]struct{}) {
+	wanted := make(map[string]map[uint32]struct{}, len(ids))
+	order := make([][]byte, 0, len(ids))
+	for _, id := range ids {
+		key := string(id.Hash)
+		outs, ok := wanted[key]
+		if !ok {
+			outs = make(map[uint32]struct{}, 1)
+			wanted[key] = outs
+			order = append(order, id.Hash)
+		}
+		outs[id.Idx] = struct{}{}
+	}
+	return order, wanted
+}
+
+// utxoStakeRefsByTxIDQuery builds the tx_id-driven lookup queryUtxoStakeRefs
+// runs per batch of n distinct transaction hashes. It deliberately carries no
+// "deleted_slot = 0" predicate -- see queryUtxoStakeRefs -- so deleted_slot
+// is filtered in Go instead.
+//
+// Filtering by tx_id alone -- rather than an OR of per-(tx_id, output_idx)
+// equalities, see utxoIDPredicate -- keeps SQLite's planner on the leading
+// column of the unique tx_id_output_idx index no matter how many terms are
+// in the batch. The OR-of-pairs form defeats that index past a handful of
+// terms and falls back to a full scan of idx_utxo_deleted_staking_amount
+// once liveOnly's "deleted_slot = 0" looks like a cheaper driving predicate --
+// measured on an 11M-row live UTxO table in issue #4067, which starves block
+// application for minutes at a time. The caller filters the extra rows this
+// query can return (other outputs of the same transaction, and, for liveOnly,
+// already-deleted ones) down to the exact requested (tx_id, output_idx)
+// pairs in Go.
+func utxoStakeRefsByTxIDQuery(n int) string {
+	return "SELECT tx_id, output_idx, deleted_slot, credential_tag, " +
+		"staking_key FROM utxo WHERE tx_id IN (" +
+		strings.TrimSuffix(strings.Repeat("?,", n), ",") + ")"
+}
+
 func queryUtxoStakeRefs(
 	ctx context.Context,
 	db queryer,
@@ -701,27 +744,64 @@ func queryUtxoStakeRefs(
 	if len(ids) == 0 {
 		return ret, nil
 	}
+	txIDs, wanted := distinctUtxoTxIDs(ids)
 	seen := make(map[string]struct{})
-	// Two bind variables per reference; 400 keeps this portable to SQLite's
-	// conservative 999-parameter configuration.
-	for start := 0; start < len(ids); start += 400 {
-		end := min(start+400, len(ids))
-		predicate, args := utxoIDPredicate(ids[start:end])
-		query := "SELECT DISTINCT credential_tag, staking_key FROM utxo WHERE (" +
-			predicate + ")"
-		if liveOnly {
-			query += " AND deleted_slot = 0"
+	// One bind variable per distinct tx_id; 400 keeps this portable to
+	// SQLite's conservative 999-parameter configuration, with headroom to
+	// spare versus the old form's two binds per reference.
+	for start := 0; start < len(txIDs); start += 400 {
+		end := min(start+400, len(txIDs))
+		batch := txIDs[start:end]
+		args := make([]any, len(batch))
+		for i, txID := range batch {
+			args[i] = txID
 		}
-		rows, err := queryStakeRefs(ctx, db, query, args...)
+		query := utxoStakeRefsByTxIDQuery(len(batch))
+		rows, err := db.QueryContext(ctx, query, args...)
 		if err != nil {
 			return nil, err
 		}
-		for _, ref := range rows {
-			if _, ok := seen[ref.MapKey()]; ok {
-				continue
+		scanErr := func() error {
+			defer rows.Close()
+			for rows.Next() {
+				var txID []byte
+				var outputIdx sql.NullInt64
+				var deletedSlot sql.NullInt64
+				var tag int64
+				var key []byte
+				if err := rows.Scan(
+					&txID,
+					&outputIdx,
+					&deletedSlot,
+					&tag,
+					&key,
+				); err != nil {
+					return err
+				}
+				if len(key) == 0 || !outputIdx.Valid {
+					continue
+				}
+				if liveOnly && deletedSlot.Int64 != 0 {
+					continue
+				}
+				outs, ok := wanted[string(txID)]
+				if !ok {
+					continue
+				}
+				if _, ok := outs[uint32(outputIdx.Int64)]; !ok {
+					continue
+				}
+				ref := models.NewStakeCredentialRef(uint8(tag), key)
+				if _, ok := seen[ref.MapKey()]; ok {
+					continue
+				}
+				seen[ref.MapKey()] = struct{}{}
+				ret = append(ret, ref)
 			}
-			seen[ref.MapKey()] = struct{}{}
-			ret = append(ret, ref)
+			return rows.Err()
+		}()
+		if scanErr != nil {
+			return nil, scanErr
 		}
 	}
 	return ret, nil
@@ -877,6 +957,45 @@ func (s *Store) GetUtxosByRefs(
 		utxos, err := s.queryUtxosWithAssets(
 			txn,
 			"deleted_slot = 0 AND ("+predicate+")",
+			args,
+			"",
+		)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, utxos...)
+	}
+	return ret, nil
+}
+
+// GetUtxosByRefsAsOf retrieves the UTxOs matching refs as they stood at
+// atSlot: created at-or-before atSlot and either still live (deleted_slot =
+// 0) or spent strictly after it (deleted_slot > atSlot). See the UtxoStore
+// interface doc comment for the retention caveat callers must enforce
+// themselves -- a row spent long enough ago can already be hard-deleted by
+// the periodic stability-window cleanup regardless of atSlot.
+func (s *Store) GetUtxosByRefsAsOf(
+	refs []models.UtxoId,
+	atSlot uint64,
+	txn types.Txn,
+) ([]models.Utxo, error) {
+	ret := []models.Utxo{}
+	refs = dedupeUtxoIDs(refs)
+	sqlSlot, err := checkedInt64(atSlot)
+	if err != nil {
+		return nil, err
+	}
+	// Two bind variables per reference, plus the two slot bounds; 400
+	// keeps this portable to SQLite's conservative 999-parameter
+	// configuration, matching GetUtxosByRefs' own chunking.
+	for start := 0; start < len(refs); start += 400 {
+		end := min(start+400, len(refs))
+		predicate, idArgs := utxoIDPredicate(refs[start:end])
+		args := append([]any{sqlSlot, sqlSlot}, idArgs...)
+		utxos, err := s.queryUtxosWithAssets(
+			txn,
+			"added_slot <= ? AND (deleted_slot = 0 OR deleted_slot > ?) AND ("+
+				predicate+")",
 			args,
 			"",
 		)

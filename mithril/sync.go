@@ -291,6 +291,7 @@ type SyncConfig struct {
 	RunMode                string
 	BackfillBatchSize      int
 	DatabaseWorkers        int
+	Tracing                bool             // OpenTelemetry tracing enabled; forwarded to the metadata pool
 	Logger                 *slog.Logger     // optional; defaults to slog.Default()
 	OnProgress             SyncProgressFunc // optional
 }
@@ -640,7 +641,10 @@ func Sync(
 						sel.Beacon.ImmutableFileNumber != resumePin.ImmutableFileNumber ||
 						(resumePin.CertificateHash != "" &&
 							sel.CertificateHash != resumePin.CertificateHash) {
-						return fmt.Errorf("resuming pinned Mithril artifact %s: selected artifact changed", pinnedDigest)
+						return fmt.Errorf(
+							"resuming pinned Mithril artifact %s: selected artifact changed",
+							pinnedDigest,
+						)
 					}
 				}
 				return setPinnedArtifact(db, pinnedArtifact{
@@ -1410,7 +1414,7 @@ func openDatabase(
 		internalplugins.StorageDependencies{
 			DataDir: cfg.DataDir, RunMode: cfg.RunMode,
 			StorageMode: cfg.StorageMode, MaxConnections: maxConnections,
-			Logger: logger,
+			Logger: logger, TracingEnabled: cfg.Tracing,
 		},
 	)
 }

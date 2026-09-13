@@ -34,7 +34,7 @@ func depositHeldBackfillDB(
 	t.Helper()
 	ctx := context.Background()
 	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
-	db, err := sql.Open("sqlite", "file:"+databasePath)
+	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
@@ -131,7 +131,9 @@ func TestDepositHeldBackfillLeavesUnknownDepositUnpopulated(t *testing.T) {
 // A re-registration does not pay a second deposit. The backfill must carry
 // forward the first registration's retained amount when the protocol deposit
 // changed before the later registration.
-func TestDepositHeldBackfillCarriesInitialDepositAcrossReregistration(t *testing.T) {
+func TestDepositHeldBackfillCarriesInitialDepositAcrossReregistration(
+	t *testing.T,
+) {
 	t.Parallel()
 	db, runTo := depositHeldBackfillDB(t)
 	keyHash := []byte("legacy-pool-key-hash-0000005")
@@ -155,7 +157,9 @@ WHERE pool_key_hash = ? ORDER BY added_slot DESC LIMIT 1`, keyHash).Scan(&held))
 	require.Equal(t, "500000000", held)
 }
 
-func TestDepositHeldBackfillLeavesUnknownReregistrationUnpopulated(t *testing.T) {
+func TestDepositHeldBackfillLeavesUnknownReregistrationUnpopulated(
+	t *testing.T,
+) {
 	t.Parallel()
 	db, runTo := depositHeldBackfillDB(t)
 	keyHash := []byte("legacy-pool-key-hash-0000006")

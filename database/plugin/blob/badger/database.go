@@ -392,7 +392,9 @@ func (d *BlobStoreBadger) blobGc(
 				gcStarted := time.Now()
 				err := d.runValueLogGC(0.5)
 				if d.gcMetrics != nil {
-					d.gcMetrics.duration.Observe(time.Since(gcStarted).Seconds())
+					d.gcMetrics.duration.Observe(
+						time.Since(gcStarted).Seconds(),
+					)
 				}
 				if err != nil {
 					if d.gcMetrics != nil {
@@ -420,7 +422,9 @@ func (d *BlobStoreBadger) blobGc(
 					beforeSize := beforeLSM + beforeVlog
 					afterSize := afterLSM + afterVlog
 					if beforeSize > afterSize {
-						d.gcMetrics.reclaimedBytes.Set(float64(beforeSize - afterSize))
+						d.gcMetrics.reclaimedBytes.Set(
+							float64(beforeSize - afterSize),
+						)
 					} else {
 						d.gcMetrics.reclaimedBytes.Set(0)
 					}
@@ -497,6 +501,18 @@ func (d *BlobStoreBadger) CloseContext(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// Closed returns a channel that is closed once CloseContext's background
+// cleanup has actually finished -- GC has drained and the underlying
+// badger.DB.Close() call, which releases the on-disk directory lock, has
+// returned. CloseContext itself may return earlier, when its context's
+// deadline expires before that cleanup completes (see its doc comment); a
+// caller that needs to know the close is actually done, for example before
+// reopening the same data directory, must wait on this channel rather than
+// on CloseContext returning.
+func (d *BlobStoreBadger) Closed() <-chan struct{} {
+	return d.closeDone
 }
 
 // DB returns the database handle

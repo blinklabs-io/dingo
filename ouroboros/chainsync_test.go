@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"maps"
 	"net"
 	"strings"
 	"sync"
@@ -325,12 +324,6 @@ func snapshotChainsyncNtNTimeouts() map[string]struct {
 
 func TestNewOuroborosDoesNotMutateChainsyncNtNTimeouts(t *testing.T) {
 	t.Parallel()
-
-	originalStateMap := ochainsync.StateMapNtN.Copy()
-	t.Cleanup(func() {
-		clear(ochainsync.StateMapNtN)
-		maps.Copy(ochainsync.StateMapNtN, originalStateMap)
-	})
 
 	before := snapshotChainsyncNtNTimeouts()
 
@@ -2319,9 +2312,12 @@ func newFindIntersectTestOuroboros(t *testing.T) *Ouroboros {
 func makeFindIntersectPoints(n int) []ocommon.Point {
 	points := make([]ocommon.Point, n)
 	for i := range points {
+		hash := make([]byte, 32)
+		hash[0] = byte(i)
+		hash[1] = byte(i >> 8)
 		points[i] = ocommon.NewPoint(
 			uint64(i+1),
-			[]byte{byte(i), byte(i >> 8)},
+			hash,
 		)
 	}
 	return points
@@ -2409,14 +2405,21 @@ func TestChainsyncClientRollBackwardUpdatesTrackedClient(t *testing.T) {
 			connID := newTestConnId("127.0.0.1:6000", "10.0.0.1:3001")
 			require.True(t, state.AddClientConnId(connID))
 			previous := ocommon.NewPoint(100, []byte("previous"))
-			state.UpdateClientTip(connID, previous, ochainsync.Tip{Point: previous})
+			state.UpdateClientTip(
+				connID,
+				previous,
+				ochainsync.Tip{Point: previous},
+			)
 			state.MarkClientSynced(connID)
 			before := state.GetTrackedClient(connID)
 			point := ocommon.NewPoint(90, []byte("rollback"))
 			if origin {
 				point = ocommon.NewPointOrigin()
 			}
-			tip := ochainsync.Tip{Point: ocommon.NewPoint(110, []byte("tip")), BlockNumber: 10}
+			tip := ochainsync.Tip{
+				Point:       ocommon.NewPoint(110, []byte("tip")),
+				BlockNumber: 10,
+			}
 			observed := false
 			o := newOuroboros(OuroborosConfig{
 				ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool { return true },
@@ -2426,8 +2429,15 @@ func TestChainsyncClientRollBackwardUpdatesTrackedClient(t *testing.T) {
 					current := state.GetTrackedClient(connID)
 					require.Equal(t, point, current.Cursor)
 					require.Equal(t, tip, current.Tip)
-					require.Equal(t, dchainsync.ClientStatusSyncing, current.Status)
-					require.False(t, current.LastActivity.Before(before.LastActivity))
+					require.Equal(
+						t,
+						dchainsync.ClientStatusSyncing,
+						current.Status,
+					)
+					require.False(
+						t,
+						current.LastActivity.Before(before.LastActivity),
+					)
 					require.Equal(t, before.HeadersRecv, current.HeadersRecv)
 					return true
 				},

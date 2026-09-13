@@ -93,6 +93,11 @@ func testSchema(includePools bool) []string {
 		`CREATE TABLE epoch (nonce BLOB, evolving_nonce BLOB, candidate_nonce BLOB, last_epoch_block_nonce BLOB, id INTEGER PRIMARY KEY AUTOINCREMENT, epoch_id INTEGER, start_slot INTEGER, era_id INTEGER, slot_length INTEGER, length_in_slots INTEGER)`,
 		`CREATE UNIQUE INDEX idx_epoch_epoch_id ON epoch(epoch_id)`,
 		`CREATE TABLE pparams (cbor BLOB, id INTEGER PRIMARY KEY AUTOINCREMENT, added_slot INTEGER, epoch INTEGER, era_id INTEGER)`,
+		// sync_state backs DingoDB.GetEarliestAvailableEpoch's read of the
+		// mithril_ledger_slot boundary (dingo #4172) -- created
+		// unconditionally like epoch/pparams above, since a check run reads
+		// it regardless of whether the test seeds a boundary row.
+		`CREATE TABLE sync_state (sync_key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
 		`CREATE TABLE reward_account_output (staking_key BLOB NOT NULL, pool_key_hash BLOB NOT NULL, reward_type TEXT NOT NULL, id INTEGER PRIMARY KEY, epoch INTEGER NOT NULL, credential_tag INTEGER NOT NULL DEFAULT 0, amount TEXT NOT NULL, spendable BOOLEAN NOT NULL, guarded BOOLEAN NOT NULL DEFAULT FALSE, captured_slot INTEGER NOT NULL, boundary_slot INTEGER NOT NULL, UNIQUE (epoch, credential_tag, staking_key, pool_key_hash, reward_type))`,
 		// The pool certificate tables back DingoDB.GetPoolsRetiredByEpoch.
 		// Created unconditionally for the same reason as
