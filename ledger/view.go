@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"math"
 	"math/big"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -59,6 +60,15 @@ var ErrNotImplemented = errors.New("not implemented")
 // whatever verdict the rule produced from the false negative.
 var ErrLedgerViewStorageFault = errors.New("ledger view storage fault")
 
+// utxoMemoKey identifies a resolved UTxO by its fixed-size components
+// (transaction hash + output index) for LedgerView.utxoMemo. Using the raw
+// hash avoids both the fmt.Sprintf allocation and the hex-encoding
+// UtxoById's consumedUtxos/intraBlockUtxos overlay key already pays for.
+type utxoMemoKey struct {
+	txId  lcommon.Blake2b256
+	index uint32
+}
+
 type LedgerView struct {
 	ls  *LedgerState
 	txn *database.Txn
@@ -73,6 +83,20 @@ type LedgerView struct {
 	// consumedUtxos tracks inputs consumed by pending mempool transactions.
 	// Key format: hex(txId) + ":" + outputIdx
 	consumedUtxos map[string]struct{}
+	// utxoMemoMu guards utxoMemo. Production views are built per transaction
+	// or query and used from one goroutine; the lock keeps a future shared
+	// view safe at negligible cost next to the database read it saves.
+	utxoMemoMu sync.Mutex
+	// utxoMemo caches successful UtxoById database resolutions for the
+	// lifetime of this view. Era rules resolve the same input from several
+	// independent call sites while validating one transaction (60 reads for
+	// 4 distinct refs on a Preprod fixture, issue #4226). Misses, decode
+	// errors and ErrNilDecodedOutput are never cached, and the memo is
+	// consulted only after consumedUtxos and intraBlockUtxos, so an overlay
+	// entry added between calls still takes precedence. Every caller shares
+	// the cached Output and must not mutate it. Lazily allocated; never
+	// shared across views.
+	utxoMemo map[utxoMemoKey]lcommon.Utxo
 	// skipPhase2Validation is set for accepted block replay, where
 	// the producer's isValid flag is authoritative for Phase-2 results.
 	// Currently unreachable from production: ledgerProcessBlock's sole
@@ -264,12 +288,26 @@ func (lv *LedgerView) UtxoById(
 			return utxo, nil
 		}
 	}
+	// Consult the memo only after both overlays, so an overlay entry added
+	// between calls on this view still takes precedence.
+	memoKey := utxoMemoKey{txId: utxoId.Id(), index: utxoId.Index()}
+	lv.utxoMemoMu.Lock()
+	if lv.utxoMemo != nil {
+		if utxo, ok := lv.utxoMemo[memoKey]; ok {
+			lv.utxoMemoMu.Unlock()
+			return utxo, nil
+		}
+	}
+	lv.utxoMemoMu.Unlock()
+
+	lv.ls.utxoByRefReads.Add(1)
 	utxo, err := lv.ls.db.UtxoByRef(
 		utxoId.Id().Bytes(),
 		utxoId.Index(),
 		lv.txn,
 	)
 	if err != nil {
+		// Not memoized: a ref that is missing now may resolve later.
 		return lcommon.Utxo{}, err
 	}
 	tmpOutput, err := utxo.Decode()
@@ -284,10 +322,17 @@ func (lv *LedgerView) UtxoById(
 			ErrNilDecodedOutput,
 		)
 	}
-	return lcommon.Utxo{
+	result := lcommon.Utxo{
 		Id:     utxoId,
 		Output: tmpOutput,
-	}, nil
+	}
+	lv.utxoMemoMu.Lock()
+	if lv.utxoMemo == nil {
+		lv.utxoMemo = make(map[utxoMemoKey]lcommon.Utxo, 4)
+	}
+	lv.utxoMemo[memoKey] = result
+	lv.utxoMemoMu.Unlock()
+	return result, nil
 }
 
 func (lv *LedgerView) PoolRegistration(

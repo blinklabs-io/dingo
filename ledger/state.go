@@ -920,13 +920,17 @@ type LedgerState struct {
 	// LocalStateQuery caller asking "what are the current protocol
 	// parameters" should see only what the chain has actually committed to,
 	// matching what a real cardano-node reports during the same window.
-	syntheticV2CostModel        bool
-	transitionInfo              hardfork.TransitionInfo // upcoming era boundary state (mirrors Haskell HFC TransitionInfo)
-	hfiEvalDoneEpoch            uint64                  // currentEpoch.EpochId for which the HFI tally has been kicked off (held under ls.RWMutex)
-	hfiEvalGeneration           atomic.Uint64           // bumped on rollback to invalidate any in-flight HFI tally
-	hfiStabilityEvalInFlight    atomic.Bool             // guard against overlapping async HFI tallies
-	rewardInputGeneration       atomic.Uint64           // bracketed around rollback to invalidate in-flight reward calculations
-	rewardInputRollbackActive   atomic.Int64            // non-zero while rollback can mutate reward calculation inputs
+	syntheticV2CostModel      bool
+	transitionInfo            hardfork.TransitionInfo // upcoming era boundary state (mirrors Haskell HFC TransitionInfo)
+	hfiEvalDoneEpoch          uint64                  // currentEpoch.EpochId for which the HFI tally has been kicked off (held under ls.RWMutex)
+	hfiEvalGeneration         atomic.Uint64           // bumped on rollback to invalidate any in-flight HFI tally
+	hfiStabilityEvalInFlight  atomic.Bool             // guard against overlapping async HFI tallies
+	rewardInputGeneration     atomic.Uint64           // bracketed around rollback to invalidate in-flight reward calculations
+	rewardInputRollbackActive atomic.Int64            // non-zero while rollback can mutate reward calculation inputs
+	// utxoByRefReads counts database.UtxoByRef reads made by
+	// LedgerView.UtxoById across every view of this LedgerState. Tests use
+	// it to assert the per-view UTxO memo; production code does not read it.
+	utxoByRefReads              atomic.Uint64
 	mempool                     MempoolProvider
 	timerCleanupConsumedUtxos   *time.Timer
 	cleanupConsumedUtxosRunning atomic.Bool
