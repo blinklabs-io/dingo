@@ -44,6 +44,9 @@ type StorageDependencies struct {
 	MaxConnections int
 	Logger         *slog.Logger
 	PromRegistry   prometheus.Registerer
+	// TracingEnabled is forwarded to metadata.ProviderDependencies; see its
+	// doc comment.
+	TracingEnabled bool
 }
 
 // ResolveStorage starts the selected storage providers in dependency order.
@@ -84,6 +87,7 @@ func ResolveStorage(
 			MaxConnections: deps.MaxConnections,
 			Logger:         deps.Logger,
 			PromRegistry:   deps.PromRegistry,
+			TracingEnabled: deps.TracingEnabled,
 		},
 	)
 	if err != nil {

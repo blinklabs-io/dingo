@@ -42,6 +42,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -211,7 +212,7 @@ func runCloudDestinationRoundTrip(t *testing.T, scheme string, bucket string) {
 		cloudCredentialsTestRegistry,
 		snapshotURI,
 		restoredDir,
-		lifecycle.RestoreStorageConfig{},
+		lifecycle.RestoreStorageConfig{Blob: testutil.BadgerBlobConfig()},
 	)
 	require.NoError(t, err, "Restore from cloud URI")
 	require.Equal(t, manifest.CommitTimestamp, restoreMan.CommitTimestamp)

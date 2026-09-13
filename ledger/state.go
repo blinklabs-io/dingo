@@ -1683,7 +1683,9 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 		ls.metrics.epochLengthSlots.Set(float64(ls.currentEpoch.LengthInSlots))
 	}
 
-	ls.loadMithrilTrustBoundary()
+	if err := ls.loadMithrilTrustBoundary(); err != nil {
+		return fmt.Errorf("failed to load Mithril trust boundary: %w", err)
+	}
 	// Repopulate the in-memory deferred-header set from the persisted markers
 	// so the snapshot retention floor covers headers still awaiting apply from
 	// before the restart (issue #3727, finding 3): without this the first
@@ -1879,37 +1881,33 @@ func (ls *LedgerState) subscribeBlockfetchEvents(
 	)
 }
 
-func (ls *LedgerState) loadMithrilTrustBoundary() {
+// loadMithrilTrustBoundary reads the persisted Mithril trust boundary. A
+// read error, or a mithril_ledger_slot row that is empty or does not parse,
+// must fail ledger start rather than silently continuing as a non-Mithril
+// database: with mithrilLedgerSlot left at its zero value, the gap-nonce heal
+// (healMithrilGapBlockNonces) no-ops and the boundary exemption in header
+// verification disappears, so header verification later fails a VRF/nonce
+// check that misattributes the cause to peers. An absent key is the
+// legitimate "not a Mithril DB" case and must continue to return nil.
+func (ls *LedgerState) loadMithrilTrustBoundary() error {
 	// Read Mithril ledger state point if present. Blocks at or below
 	// this point were verified by the Mithril certificate chain during
 	// import and must not be re-validated during chainsync replay.
-	mithrilSlotStr, err := ls.db.GetSyncState(
-		mithrilLedgerSlotSyncKey,
-		nil,
-	)
+	// The strict accessor separates an absent key from a recorded empty
+	// value, which GetSyncState alone reports identically.
+	mls, err := ls.db.MithrilTrustBoundarySlotStrict(nil)
 	if err != nil {
-		ls.config.Logger.Warn(
-			"failed to read Mithril trust boundary from database",
-			"component", "ledger",
-			"error", err,
-		)
-		return
+		return fmt.Errorf("load %s: %w", mithrilLedgerSlotSyncKey, err)
 	}
-	if mithrilSlotStr == "" {
-		return
-	}
-	mls, parseErr := strconv.ParseUint(mithrilSlotStr, 10, 64)
-	if parseErr != nil {
-		ls.config.Logger.Warn(
-			"malformed mithril_ledger_slot value, ignoring",
-			"component", "ledger",
-			"value", mithrilSlotStr,
-			"error", parseErr,
-		)
-		return
+	if mls == 0 {
+		return nil
 	}
 
 	ls.mithrilLedgerSlot = mls
+	// A hash read error or malformed hash value does not disable the trust
+	// boundary itself: the slot is already committed above, and
+	// mithrilTrustBoundaryPoint documents a fallback that derives the
+	// intersect hash from the authoritative chain when no hash is loaded.
 	hashStr, err := ls.db.GetSyncState(mithrilLedgerHashSyncKey, nil)
 	if err != nil {
 		ls.config.Logger.Warn(
@@ -1918,7 +1916,7 @@ func (ls *LedgerState) loadMithrilTrustBoundary() {
 			"mithril_ledger_slot", mls,
 			"error", err,
 		)
-		return
+		return nil
 	}
 	if hashStr != "" {
 		hash, decodeErr := hex.DecodeString(hashStr)
@@ -1947,6 +1945,7 @@ func (ls *LedgerState) loadMithrilTrustBoundary() {
 		)
 	}
 	ls.config.Logger.Info("loaded Mithril trust boundary", attrs...)
+	return nil
 }
 
 func (ls *LedgerState) RecoverCommitTimestampConflict() error {
@@ -3407,6 +3406,22 @@ func (ls *LedgerState) rollbackWithResync(
 		ppComputed  bool
 		eraResolved bool
 	)
+	// postCommitReloadErr records the first failure to reload
+	// epochCache/currentEra/currentPParams (or the synthetic-PlutusV2 marker)
+	// from the database below. The metadata transaction above has already
+	// committed the truncation by this point, so a failure here cannot
+	// un-truncate the database -- it can only leave these in-memory caches
+	// holding pre-rollback values while the database itself reflects the
+	// rolled-back chain. Continuing to serve those stale values as if the
+	// reload had succeeded is the defect this guards: every mutation below
+	// still runs (currentTip, nonce, etc. must still be updated to match the
+	// truncation that already happened), but the function reports this
+	// failure at the end instead of nil, and invokes FatalErrorFunc directly
+	// so a supervised restart reloads every one of these caches fresh from
+	// the database before any later block validates against them --
+	// regardless of which caller (chainsync rollback, primary-chain
+	// reconciliation, tip-floor enforcement) reached this function.
+	var postCommitReloadErr error
 	// Snapshot current era under read lock for fallback
 	ls.RLock()
 	newCurrentEra = ls.currentEra
@@ -3419,6 +3434,9 @@ func (ls *LedgerState) rollbackWithResync(
 			"failed to reload epochs after rollback",
 			"error", err,
 			"component", "ledger",
+		)
+		postCommitReloadErr = fmt.Errorf(
+			"reload epochs after rollback: %w", err,
 		)
 	}
 	if epochs != nil {
@@ -3446,6 +3464,12 @@ func (ls *LedgerState) rollbackWithResync(
 					newCurrentEpoch.EraId,
 					"component", "ledger",
 				)
+				if postCommitReloadErr == nil {
+					postCommitReloadErr = fmt.Errorf(
+						"unknown era ID %d after rollback",
+						newCurrentEpoch.EraId,
+					)
+				}
 			}
 		}
 	}
@@ -3472,6 +3496,11 @@ func (ls *LedgerState) rollbackWithResync(
 				"error", ppErr,
 				"component", "ledger",
 			)
+			if postCommitReloadErr == nil {
+				postCommitReloadErr = fmt.Errorf(
+					"reload protocol params after rollback: %w", ppErr,
+				)
+			}
 		} else {
 			newPParams = pp
 			newPrevPParams = prevPP
@@ -3495,6 +3524,12 @@ func (ls *LedgerState) rollbackWithResync(
 			"component",
 			"ledger",
 		)
+		if postCommitReloadErr == nil {
+			postCommitReloadErr = fmt.Errorf(
+				"reload synthetic PlutusV2 cost model marker after rollback: %w",
+				syntheticErr,
+			)
+		}
 	}
 	newSyntheticV2CostModel := resolveSyntheticV2CostModel(
 		newSyntheticV2CostModelValue, newPParams,
@@ -3607,8 +3642,31 @@ func (ls *LedgerState) rollbackWithResync(
 		"component",
 		"ledger",
 	)
-	if err := ls.enforceDurableTipFloor(); err != nil {
-		return &rollbackCommittedError{err: err}
+	floorErr := ls.enforceDurableTipFloor()
+	if postCommitReloadErr != nil {
+		// The metadata rollback already committed and ls.currentTip already
+		// reflects it, but epochCache/currentEra/currentPParams (or the
+		// synthetic-PlutusV2 marker) could not be reloaded from the
+		// now-truncated database above, so at least one of them is still
+		// holding a pre-rollback value that no longer matches the database.
+		// Call FatalErrorFunc directly, rather than relying on whichever
+		// caller happens to be on the stack to notice the returned error and
+		// escalate it, so every caller of rollback/rollbackWithoutResync
+		// gets the same guarantee: a supervised restart reloads this state
+		// fresh from the database before the next block is validated
+		// against it. This runs even when the tip-floor check failed too:
+		// a failing database read usually fails both.
+		fatalErr := postCommitReloadErr
+		if floorErr != nil {
+			fatalErr = errors.Join(postCommitReloadErr, floorErr)
+		}
+		if ls.config.FatalErrorFunc != nil {
+			ls.config.FatalErrorFunc(fatalErr)
+		}
+		return &rollbackCommittedError{err: fatalErr}
+	}
+	if floorErr != nil {
+		return &rollbackCommittedError{err: floorErr}
 	}
 	return nil
 }
@@ -7410,9 +7468,13 @@ func (ls *LedgerState) ledgerProcessBlock(
 		if uint(block.Era().Id)+1 == currentEra.Id && prevEraPParams != nil {
 			referenceParams = prevEraPParams
 		}
-		if err := validateBlockReferenceScripts(block, referenceParams, &LedgerView{
-			txn: txn, ls: ls,
-		}); err != nil {
+		refScriptsLV := &LedgerView{txn: txn, ls: ls}
+		err := validateBlockReferenceScripts(
+			block,
+			referenceParams,
+			refScriptsLV,
+		)
+		if err := storageFaultOrErr(refScriptsLV, err); err != nil {
 			return nil, err
 		}
 	}
@@ -7517,6 +7579,18 @@ func (ls *LedgerState) ledgerProcessBlock(
 					lv,
 					pp,
 				)
+				// A LedgerView predicate that swallowed a genuine storage
+				// error into a false verdict (issue #1649) can have
+				// skewed this rule's verdict either way; surface the fault
+				// instead of trusting or rejecting on its basis.
+				if faultErr := storageFaultOrErr(lv, nil); faultErr != nil {
+					delta.Release()
+					return nil, fmt.Errorf(
+						"TX %s: %w",
+						tx.Hash(),
+						faultErr,
+					)
+				}
 				// The Musashi prototype trusts remaining Dijkstra validation
 				// disagreements because its certificate-driven closure is still
 				// evolving. Standard profiles leave the error intact and reject
@@ -8284,13 +8358,18 @@ func (ls *LedgerState) computePParams(
 					nil,
 				)
 				if prevErr != nil {
-					ls.config.Logger.Warn(
-						"failed to load previous-era pparams",
-						"epoch", ep.EpochId,
-						"era", ep.EraId,
-						"error", prevErr,
+					// Era-1 transaction validation falls back to
+					// the current era's pparams when this is nil,
+					// so a failed read must not look like "no
+					// previous era".
+					return nil, nil, fmt.Errorf(
+						"computePParams: previous-era GetPParams "+
+							"epoch %d: %w",
+						ep.EpochId,
+						prevErr,
 					)
-				} else if prevPP != nil {
+				}
+				if prevPP != nil {
 					prevEraPParams = prevPP
 				}
 			}
@@ -11325,18 +11404,20 @@ func (ls *LedgerState) WithTxValidationSession(
 				isCurrentEraPParams,
 				snapshot.syntheticV2CostModelInEffect,
 			)
+			lv := (&LedgerView{
+				txn:             txn,
+				ls:              ls,
+				intraBlockUtxos: createdUtxos,
+				consumedUtxos:   consumedUtxos,
+			}).pinCommitteeState(snapshot.currentEpoch, pp).
+				pinSyntheticV2CostModel(synthetic)
 			err = validationEra.ValidateTxFunc(
 				tx,
 				snapshot.referenceSlot,
-				(&LedgerView{
-					txn:             txn,
-					ls:              ls,
-					intraBlockUtxos: createdUtxos,
-					consumedUtxos:   consumedUtxos,
-				}).pinCommitteeState(snapshot.currentEpoch, pp).
-					pinSyntheticV2CostModel(synthetic),
+				lv,
 				pp,
 			)
+			err = storageFaultOrErr(lv, err)
 			if err != nil {
 				return fmt.Errorf(
 					"TX %s failed validation: %w",
@@ -11387,8 +11468,9 @@ func (ls *LedgerState) validateTxCore(
 			snapshot.syntheticV2CostModelInEffect,
 		)
 		txn := ls.db.Transaction(false)
+		var lv *LedgerView
 		err := txn.Do(func(txn *database.Txn) error {
-			lv := buildLV(txn).pinCommitteeState(snapshot.currentEpoch, pp).
+			lv = buildLV(txn).pinCommitteeState(snapshot.currentEpoch, pp).
 				pinSyntheticV2CostModel(synthetic)
 			return validationEra.ValidateTxFunc(
 				tx,
@@ -11397,6 +11479,7 @@ func (ls *LedgerState) validateTxCore(
 				pp,
 			)
 		})
+		err = storageFaultOrErr(lv, err)
 		if err != nil {
 			return fmt.Errorf("TX %s failed validation: %w", tx.Hash(), err)
 		}
@@ -11471,8 +11554,9 @@ func (ls *LedgerState) EvaluateTx(
 			pp, isCurrentEraPParams, consensusState.syntheticV2CostModelInEffect,
 		)
 		txn := ls.db.Transaction(false)
+		var lv *LedgerView
 		err := txn.Do(func(txn *database.Txn) error {
-			lv := (&LedgerView{
+			lv = (&LedgerView{
 				txn: txn,
 				ls:  ls,
 			}).pinCommitteeState(
@@ -11487,6 +11571,7 @@ func (ls *LedgerState) EvaluateTx(
 			)
 			return err
 		})
+		err = storageFaultOrErr(lv, err)
 		if err != nil {
 			return 0, lcommon.ExUnits{}, nil, fmt.Errorf(
 				"TX %s failed evaluation: %w",
