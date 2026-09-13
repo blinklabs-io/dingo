@@ -69,6 +69,13 @@ repeatable-read snapshots. All three return `*sqlstore.Store`; metadata
 business behavior is implemented once in `sqlstore` and dialect translation is
 limited to SQL mechanics.
 
+Metadata indexing treats raw CBOR as the lossless storage and API JSON as an
+optional representation. A label whose map keys collide after JSON
+stringification keeps its label and CBOR row but has no JSON representation;
+readers handle that condition per record rather than aborting indexing or
+dropping pagination rows. Duplicate top-level labels remain rejected because
+the relational label key is unique and no deterministic row selection exists.
+
 The public compatibility interface is decomposing into narrow capabilities so
 components need not inherit the full historical metadata surface. Three are
 cross-cutting -- `LifecycleStore`, `SettingsStore`, and `TxnStore` (which
@@ -180,6 +187,7 @@ Dingo is a high-performance Cardano blockchain node implementation in Go. This d
 - [Peer Governance](#peer-governance)
 - [Transaction Mempool](#transaction-mempool)
 - [DMQ Message Pool](#dmq-message-pool)
+  - [DMQ Message Authentication](#dmq-message-authentication)
 - [Block Production](#block-production)
 - [Mithril Bootstrap](#mithril-bootstrap)
 - [External Interfaces](#external-interfaces)
@@ -1557,6 +1565,11 @@ paths, where the point is to report before the goroutine unwinds.
   `chainsyncState.RemoveClient` only when `isNtC` is true — the NtN half of
   cleanup still runs exactly once, through `Ouroboros.HandleConnClosedEvent`
   on the `connmanager.conn_closed` subscription above
+- Each ChainSync protocol instance owns its FindIntersect work-budget bucket.
+  Dingo's cached connection option builds a fresh ChainSync configuration for
+  every connection, so separate clients cannot share budget state or recreate
+  a removed bucket after close. The budget remains after point-list
+  deduplication and before the database intersection lookup.
 - Prometheus metrics for event delivery tracking and latency, including
   `event_delivery_blocked_total{type,kind}` and
   `event_async_enqueue_blocked_total{type}` for backpressure, and
@@ -4994,6 +5007,59 @@ lock, matching the mempool package's event-publication rule. Their payloads
 are `AddMessageEvent` and `RemoveMessageEvent`, each carrying a 32-byte
 `MessageID` field. `EventBus` is optional (nil-safe) so the package is usable
 standalone ahead of node composition.
+
+### DMQ Message Authentication
+
+`dmq.Authenticator` is phase 2 of CIP-0137's DMQ (issue #1949 of 7). Like
+`MessageMempool`, it is a standalone, unwired component: nothing in the
+codebase calls it yet, since driving it from an inbound message and then
+feeding an authenticated message to `MessageMempool.Add` is protocol-wiring
+work for a later phase (issue #1950 runs the node-to-node mini-protocol;
+issue #1953 composes the whole DMQ subsystem into `node.go`).
+
+`Verify` runs CIP-0137's full authentication chain against one message, in
+order: expiry (`msg.IsValidAt`), message-ID integrity
+(`ComputeDmqMessageID`), pool-ID derivation plus stake-distribution
+authorization, the operational certificate's cold-key signature, that the
+message's claimed KES period does not precede the certificate's own issuance
+period, the KES signature over the payload, and operational-certificate
+issue-number monotonicity (replay protection). Stake authorization is checked
+before either signature: deriving a pool ID from `ColdVerificationKey` needs
+no signature, so anyone can self-sign an internally consistent opcert/KES
+chain over freshly generated keys, and checking authorization first turns
+away a message from an unregistered identity before paying for an ed25519
+verify and the ~2ms KES verify. `Verify` returns nil only when every check
+passes; the issue-number baseline for the message's pool is not advanced
+until then, so a message that fails an earlier check cannot poison replay
+protection for a later, legitimately higher-numbered certificate from the
+same pool.
+
+Authenticator deliberately does not reuse
+`github.com/blinklabs-io/gouroboros/protocol/common`'s `MessageAuthenticator`.
+That type has two mismatches with real Cardano pool credentials: it verifies
+the operational certificate's cold signature over a CBOR encoding of
+`[KESVerificationKey, IssueNumber, KESPeriod]`, but a pool's real,
+already-issued operational certificate is signed over the raw `OCertSignable`
+byte concatenation cardano-node uses -- the same mismatch this codebase's own
+`verify_opcert.go` documents and fixed for block headers; and its injected
+KES-verifier callback receives the message's own claimed KES period standing
+in for both the certificate's issuance period and the slot used to derive it,
+which collapses the KES evolution offset to zero regardless of how many
+periods have actually elapsed since the certificate was issued. CIP-0137
+messages carry a pool's real operational certificate, so `Authenticator`
+verifies them with `gouroboros/ledger`'s conformance-tested `OpCert` and KES
+primitives directly -- the same ones this codebase's block-header
+verification uses -- rather than through that wrapper.
+
+Pool authorization is injected through the narrow `StakeAuthority` interface
+(`PoolActiveStake(poolKeyHash) (uint64, error)`), following the same
+composition pattern `node_leios.go`'s stake adapters use for Leios committee
+formation: `dmq` stays decoupled from `ledger`/`database` so it remains
+usable and unit-testable standalone, and a later composition phase adapts
+`ledger.LedgerView.GetPoolStake` to it. The opcert issue-number cache has no
+automatic eviction; `ForgetPool` lets a caller drop a pool's baseline when it
+is no longer registered or active, mirroring `MessageMempool.RemovePeer` and
+gouroboros' `RemoveKESOpCertCacheEntry`.
 
 ## Block Production
 
@@ -11355,27 +11421,16 @@ believes the block is invalid and the same one the reference node reaches;
 the difference is that it surfaces through the stuck-pipeline signal below
 rather than an unbounded retry loop.
 
-A 2s cap still means retrying forever at that rate, which is what a
-*deterministic* failure produces when no rewind resolves it: a canonical
-block this node rejects will be rejected identically on every replay, so
-the pipeline neither recovers nor stops. After `noProgressStuckThreshold`
-consecutive no-progress
-restarts the loop treats the failure as deterministic rather than
-transient, escalating the wait beyond the transient ceiling (bounded by
-`noProgressStuckBackoffMax`), announcing the condition at ERROR, and
-exporting `dingo_ledger_pipeline_stuck` alongside
-`dingo_ledger_pipeline_no_progress_restarts` so a node that has silently
-stopped following the chain is visible to monitoring instead of only to
-whoever reads a repeating WARN. Both reset as soon as the tip advances.
-The announcement is not once-only: `pipelineStuckShouldAnnounce` repeats it
-every `noProgressStuckReannounceInterval` further no-progress restarts, roughly
-every ten minutes at the stuck backoff ceiling. Announcing the transition alone
-and then dropping to WARN left log-level alerting seeing a wedged node as
-healthy — one ERROR line covered eighteen hours in the field, buried among
-unrelated warnings (issue #3261).
-This still changes only the retry rate and the operator signal, never
-whether a block is accepted — a node wedged on a rejected block is equally
-wedged either way, but it now keeps saying so, loudly, and stops spinning.
+A deterministic failure can still recur after rewind: a canonical block this
+node rejects will be rejected identically on every replay. After
+`noProgressStuckThreshold` consecutive no-progress restarts the loop treats
+the failure as deterministic rather than transient, announces the condition
+at ERROR, exports `dingo_ledger_pipeline_stuck` alongside
+`dingo_ledger_pipeline_no_progress_restarts`, invokes the configured fatal
+error callback, and stops retrying. This prevents a node that cannot resolve
+the same canonical rejection from silently replaying forever. The backoff
+helpers retain bounded escalation for diagnostics, but the main retry loop
+does not sleep and retry after the terminal threshold (issue #3975).
 
 ### CIP-0163 Bookkeeping Shared Between Ledger Rollback and Lifecycle Truncate
 
