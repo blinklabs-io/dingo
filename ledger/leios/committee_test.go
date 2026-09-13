@@ -34,6 +34,8 @@ func testPoolHash(id byte) string {
 }
 
 func TestComputeCommitteeOrdersByStakeDescending(t *testing.T) {
+	t.Parallel()
+
 	poolStakes := map[string]uint64{
 		testPoolHash(1): 15,
 		testPoolHash(2): 50,
@@ -63,6 +65,8 @@ func TestComputeCommitteeOrdersByStakeDescending(t *testing.T) {
 }
 
 func TestComputeCommitteeBreaksTiesByPoolKeyHashAscending(t *testing.T) {
+	t.Parallel()
+
 	poolStakes := map[string]uint64{
 		testPoolHash(7): 25,
 		testPoolHash(3): 25,
@@ -81,6 +85,8 @@ func TestComputeCommitteeBreaksTiesByPoolKeyHashAscending(t *testing.T) {
 }
 
 func TestComputeCommitteeStopsAtThresholdCrossing(t *testing.T) {
+	t.Parallel()
+
 	poolStakes := map[string]uint64{
 		testPoolHash(1): 50,
 		testPoolHash(2): 30,
@@ -114,6 +120,8 @@ func TestComputeCommitteeStopsAtThresholdCrossing(t *testing.T) {
 }
 
 func TestComputeCommitteeExcludesZeroStakePools(t *testing.T) {
+	t.Parallel()
+
 	poolStakes := map[string]uint64{
 		testPoolHash(1): 60,
 		testPoolHash(2): 0,
@@ -131,6 +139,8 @@ func TestComputeCommitteeExcludesZeroStakePools(t *testing.T) {
 }
 
 func TestComputeCommitteeFullCoverageSelectsAllPools(t *testing.T) {
+	t.Parallel()
+
 	poolStakes := make(map[string]uint64)
 	for i := range byte(50) {
 		poolStakes[testPoolHash(i+1)] = uint64(i+1) * 100
@@ -148,6 +158,8 @@ func TestComputeCommitteeFullCoverageSelectsAllPools(t *testing.T) {
 }
 
 func TestComputeCommitteeEmptyDistribution(t *testing.T) {
+	t.Parallel()
+
 	_, err := ComputeCommittee(
 		1, 0, map[string]uint64{}, 100, big.NewRat(1, 1),
 	)
@@ -171,6 +183,8 @@ func TestComputeCommitteeEmptyDistribution(t *testing.T) {
 }
 
 func TestComputeCommitteeInvalidCoverage(t *testing.T) {
+	t.Parallel()
+
 	poolStakes := map[string]uint64{testPoolHash(1): 100}
 	for _, sigmaC := range []*big.Rat{
 		nil,
@@ -187,6 +201,8 @@ func TestComputeCommitteeInvalidCoverage(t *testing.T) {
 }
 
 func TestComputeCommitteeMalformedPoolKeyHash(t *testing.T) {
+	t.Parallel()
+
 	_, err := ComputeCommittee(
 		1, 0,
 		map[string]uint64{"not-hex": 100},
@@ -196,6 +212,8 @@ func TestComputeCommitteeMalformedPoolKeyHash(t *testing.T) {
 }
 
 func TestComputeCommitteeRejectsWrongPoolKeyHashLength(t *testing.T) {
+	t.Parallel()
+
 	poolStakes := map[string]uint64{hex.EncodeToString(make([]byte, 27)): 100}
 
 	_, err := ComputeCommittee(1, 0, poolStakes, 100, big.NewRat(1, 1))
@@ -203,6 +221,8 @@ func TestComputeCommitteeRejectsWrongPoolKeyHashLength(t *testing.T) {
 }
 
 func TestComputeCommitteeLargeStakesNoOverflow(t *testing.T) {
+	t.Parallel()
+
 	// Products of stake and rational components overflow uint64; the
 	// comparison must be exact in big.Int.
 	const huge = math.MaxUint64 / 2
@@ -218,6 +238,8 @@ func TestComputeCommitteeLargeStakesNoOverflow(t *testing.T) {
 }
 
 func TestComputeCommitteeDeterministic(t *testing.T) {
+	t.Parallel()
+
 	poolStakes := make(map[string]uint64)
 	for i := range byte(100) {
 		poolStakes[testPoolHash(i+1)] = uint64((i*37)%50) + 1
@@ -240,6 +262,8 @@ func TestComputeCommitteeDeterministic(t *testing.T) {
 }
 
 func TestCommitteeMemberLookups(t *testing.T) {
+	t.Parallel()
+
 	poolStakes := map[string]uint64{
 		testPoolHash(1): 60,
 		testPoolHash(2): 40,
@@ -269,6 +293,8 @@ func TestCommitteeMemberLookups(t *testing.T) {
 }
 
 func TestCommitteeSnapshotEpoch(t *testing.T) {
+	t.Parallel()
+
 	// Mirrors praos.StakeSnapshotEpoch = E-1 (leader/committee stake is
 	// end-of-E-2 = mark[E-1]); values shifted +1 when the E-2 off-by-one was
 	// corrected.
@@ -283,6 +309,8 @@ func TestCommitteeSnapshotEpoch(t *testing.T) {
 }
 
 func TestComputeCommitteeUnreachableCoverage(t *testing.T) {
+	t.Parallel()
+
 	// Inconsistent inputs: the pools sum to less than total active
 	// stake, so the coverage target can never be reached. Returning a
 	// partial committee would break downstream stake-quorum

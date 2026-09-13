@@ -104,6 +104,8 @@ func requireGenesisConstitution(t *testing.T, lv *LedgerView) {
 // fails closed and every such proposal is rejected until a NewConstitution
 // action is enacted.
 func TestCreateGenesisBlockSeedsConstitution(t *testing.T) {
+	t.Parallel()
+
 	ls, _ := genesisConstitutionTestState(t)
 	require.NoError(t, ls.createGenesisBlock())
 
@@ -125,6 +127,8 @@ func TestCreateGenesisBlockSeedsConstitution(t *testing.T) {
 // genesis initialization over a store that already holds the genesis
 // constitution leaves a single slot-0 row rather than a duplicate.
 func TestCreateGenesisBlockConstitutionReplayIdempotent(t *testing.T) {
+	t.Parallel()
+
 	ls, db := genesisConstitutionTestState(t)
 	require.NoError(t, ls.createGenesisBlock())
 	require.NoError(t, ls.createGenesisBlock())
@@ -139,6 +143,8 @@ func TestCreateGenesisBlockConstitutionReplayIdempotent(t *testing.T) {
 // constitution. A database created before the constitution was seeded
 // reaches genesis initialization only through that path.
 func TestCreateGenesisBlockConstitutionSeededOnRestart(t *testing.T) {
+	t.Parallel()
+
 	ls, db := genesisConstitutionTestState(t)
 	require.NoError(t, ls.createGenesisBlock())
 
@@ -162,6 +168,8 @@ func TestCreateGenesisBlockConstitutionSeededOnRestart(t *testing.T) {
 // genesis initialization pass does not restore the genesis constitution over
 // it.
 func TestCreateGenesisBlockConstitutionEnactmentWins(t *testing.T) {
+	t.Parallel()
+
 	ls, db := genesisConstitutionTestState(t)
 	require.NoError(t, ls.createGenesisBlock())
 

@@ -23,6 +23,8 @@ import (
 )
 
 func TestBlockLRUCacheGetPut(t *testing.T) {
+	t.Parallel()
+
 	cache := NewBlockLRUCache(10)
 	require.NotNil(t, cache)
 
@@ -71,6 +73,8 @@ func TestBlockLRUCacheGetPut(t *testing.T) {
 }
 
 func TestBlockLRUCacheEviction(t *testing.T) {
+	t.Parallel()
+
 	cache := NewBlockLRUCache(3)
 
 	// Add 3 blocks - LRU order after: 3, 2, 1 (3 is most recent)
@@ -118,6 +122,8 @@ func TestBlockLRUCacheEviction(t *testing.T) {
 }
 
 func TestCachedBlockExtract(t *testing.T) {
+	t.Parallel()
+
 	block := &CachedBlock{
 		RawBytes: []byte("0123456789abcdef"),
 	}
@@ -152,6 +158,8 @@ func TestCachedBlockExtract(t *testing.T) {
 }
 
 func TestCachedBlockExtractReturnsCopy(t *testing.T) {
+	t.Parallel()
+
 	original := []byte("ABCDEFGHIJKLMNOP")
 	block := &CachedBlock{
 		RawBytes: make([]byte, len(original)),
@@ -184,6 +192,8 @@ func TestCachedBlockExtractReturnsCopy(t *testing.T) {
 }
 
 func TestBlockLRUCacheConcurrent(t *testing.T) {
+	t.Parallel()
+
 	cache := NewBlockLRUCache(100)
 	var wg sync.WaitGroup
 	numGoroutines := 50
@@ -224,6 +234,8 @@ func TestBlockLRUCacheConcurrent(t *testing.T) {
 }
 
 func TestBlockLRUCacheLRUOrdering(t *testing.T) {
+	t.Parallel()
+
 	cache := NewBlockLRUCache(3)
 
 	hash1 := [32]byte{1}

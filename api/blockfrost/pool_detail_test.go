@@ -28,6 +28,8 @@ import (
 )
 
 func TestHandlePoolDetail(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		poolDetail: PoolDetailInfo{
 			PoolID:         "pool1vzqtn3mtfvvuy8ghksy34gs9g97tszj5f8mr3sn7asy5vk577ec",
@@ -111,6 +113,8 @@ func TestHandlePoolDetail(t *testing.T) {
 // slices) must still encode as "[]", never JSON null, since the OpenAPI
 // schema marks them required arrays without nullable: true.
 func TestHandlePoolDetailEmptyArraysNotNull(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{poolDetail: PoolDetailInfo{PoolID: "pool1empty"}}
 	b := newTestBlockfrost(mock)
 	req := httptest.NewRequest(http.MethodGet, "/api/v0/pools/pool1empty", nil)
@@ -137,6 +141,8 @@ func TestHandlePoolDetailEmptyArraysNotNull(t *testing.T) {
 }
 
 func TestHandlePoolDetailInvalidID(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{poolDetailErr: ErrInvalidPoolID})
 	req := httptest.NewRequest(http.MethodGet, "/api/v0/pools/pool1stonks", nil)
 	req.SetPathValue("pool_id", "pool1stonks")
@@ -150,6 +156,8 @@ func TestHandlePoolDetailInvalidID(t *testing.T) {
 }
 
 func TestHandlePoolDetailNotFound(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{
 		poolDetailErr: fmt.Errorf("get pool: %w", models.ErrPoolNotFound),
 	})
@@ -172,6 +180,8 @@ func TestHandlePoolDetailNotFound(t *testing.T) {
 // (neither the invalid-ID nor not-found sentinels): it must surface as a
 // generic 500 rather than being misclassified as a 400/404.
 func TestHandlePoolDetailDatabaseFailure(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{
 		poolDetailErr: errors.New("database is closed"),
 	})
@@ -199,6 +209,8 @@ func TestHandlePoolDetailDatabaseFailure(t *testing.T) {
 // call, so it verifies Go's actual pattern-specificity resolution rather
 // than assuming it.
 func TestPoolsRouteOrderingPoolDetailDoesNotSwallowSiblings(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		poolsRetiringTotal: 1,
 		poolsRetiring: []PoolRetiringInfo{
@@ -249,6 +261,8 @@ func TestPoolsRouteOrderingPoolDetailDoesNotSwallowSiblings(t *testing.T) {
 }
 
 func TestPoolSizeSaturation(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name                                             string
 		liveStake, activeStake, totalLive, totalActive   uint64

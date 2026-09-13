@@ -29,6 +29,8 @@ import (
 )
 
 func TestIntersectPointsKeepsCurrentTipFallback(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
@@ -64,6 +66,8 @@ func TestIntersectPointsKeepsCurrentTipFallback(t *testing.T) {
 }
 
 func TestIntersectPointsSkipsMissingDenseBlockIndex(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})

@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/require"
 )
@@ -74,6 +75,8 @@ const restoreInterruptHelperEnv = "DINGO_LIFECYCLE_RESTORE_INTERRUPT_HELPER"
 // on whatever machine runs this test. Skipped on Windows, which has no
 // POSIX FIFO equivalent this test can use the same way.
 func TestRestoreInterruptedByProcessKillLeavesTargetUntouched(t *testing.T) {
+	t.Parallel()
+
 	if os.Getenv(restoreInterruptHelperEnv) != "" {
 		runRestoreInterruptHelper()
 		return
@@ -150,7 +153,7 @@ func runRestoreInterruptHelper() {
 		nil,
 		snapshotDir,
 		targetDir,
-		lifecycle.RestoreStorageConfig{},
+		lifecycle.RestoreStorageConfig{Blob: testutil.BadgerBlobConfig()},
 	)
 	// Only reached if the parent's kill lands after Restore already
 	// finished (not expected: the FIFO blocks it first); exit quietly

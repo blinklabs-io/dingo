@@ -81,6 +81,8 @@ func (m mockHeader) BlockBodyHash() lcommon.Blake2b256 { return lcommon.Blake2b2
 func TestDetectConnectionSwitchHandsOffQueuedHeadersToNewActiveConnection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	testChain := &chain.Chain{}
 	err := testChain.AddBlockHeader(mockHeader{
 		hash:        lcommon.NewBlake2b256([]byte("hdr-1")),
@@ -160,6 +162,8 @@ func TestDetectConnectionSwitchHandsOffQueuedHeadersToNewActiveConnection(
 func TestDetectConnectionSwitchRechecksLivenessBeforeReactivatingFrontier(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	previousConnId := testChainsyncConnId(6000, 3021)
 	activeConnId := testChainsyncConnId(6000, 3022)
 	callbackCalls := 0
@@ -191,6 +195,8 @@ func TestDetectConnectionSwitchRechecksLivenessBeforeReactivatingFrontier(
 func TestHandleConnectionClosedEventRetainsAdmittedUpstreamFrontier(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	closedConnId := testChainsyncConnId(6000, 3001)
 	equivalentClosedConnId := testChainsyncConnId(6000, 3001)
 	otherConnId := testChainsyncConnId(6000, 3002)
@@ -245,6 +251,8 @@ func TestHandleConnectionClosedEventRetainsAdmittedUpstreamFrontier(
 func TestUpstreamTipSlotPreservesForgingGateAcrossStalePeerReconnect(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	closedConnId := testChainsyncConnId(6000, 3001)
 	reconnectedConnId := testChainsyncConnId(6000, 3002)
 	activeConnId := &closedConnId
@@ -286,6 +294,8 @@ func TestUpstreamTipSlotPreservesForgingGateAcrossStalePeerReconnect(
 func TestAdvanceUpstreamTipSlotDoesNotPublishWithoutAdmittedTarget(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	activeConnID := testChainsyncConnId(6000, 3041)
 	ls := &LedgerState{
 		config: LedgerStateConfig{
@@ -306,6 +316,8 @@ func TestAdvanceUpstreamTipSlotDoesNotPublishWithoutAdmittedTarget(
 func TestHandleChainSwitchAfterCloseRejectsDeadTargetKeepsFrontierHidden(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	closedConnId := testChainsyncConnId(6000, 3011)
 	activeConnId := &closedConnId
 	ls := &LedgerState{
@@ -346,6 +358,8 @@ func TestHandleChainSwitchAfterCloseRejectsDeadTargetKeepsFrontierHidden(
 func TestHandleChainSwitchRetainsLiveTargetAcrossSubscriberOrdering(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	targetConnId := testChainsyncConnId(6000, 3031)
 	activeConnId := testChainsyncConnId(6000, 3032)
 	ls := &LedgerState{
@@ -379,6 +393,8 @@ func TestHandleChainSwitchRetainsLiveTargetAcrossSubscriberOrdering(
 func TestHandoffPipelineOnSwitchDropsStaleQueuedHeadersForNewBufferedPeer(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	testChain := &chain.Chain{}
 	err := testChain.AddBlockHeader(mockHeader{
 		hash:        lcommon.NewBlake2b256([]byte("hdr-1")),
@@ -436,6 +452,8 @@ func TestHandoffPipelineOnSwitchDropsStaleQueuedHeadersForNewBufferedPeer(
 }
 
 func TestHandleEventBlockfetchBlockAllowsBlocksFromActiveBatch(t *testing.T) {
+	t.Parallel()
+
 	connId1 := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -443,6 +461,12 @@ func TestHandleEventBlockfetchBlockAllowsBlocksFromActiveBatch(t *testing.T) {
 	ls := &LedgerState{
 		activeBlockfetchConnId:       connId1,
 		chainsyncBlockfetchReadyChan: make(chan struct{}),
+		// mockBabbageBlock carries no real VRF/KES material to verify. Mark
+		// its slot Mithril-covered so the header crypto gate (issue #3528:
+		// required by default, exempt only for a Mithril-certified slot)
+		// exempts it, letting this test isolate batch-ownership bookkeeping
+		// from crypto verification.
+		mithrilLedgerSlot: 2,
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			BlockfetchRequestRangeFunc: func(
@@ -469,6 +493,8 @@ func TestHandleEventBlockfetchBlockAllowsBlocksFromActiveBatch(t *testing.T) {
 }
 
 func TestHandleEventChainsyncIgnoresClosedConnection(t *testing.T) {
+	t.Parallel()
+
 	connId := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -521,6 +547,8 @@ func TestHandleEventChainsyncIgnoresClosedConnection(t *testing.T) {
 }
 
 func TestHandleEventBlockfetchBlockAllowsEquivalentConnectionId(t *testing.T) {
+	t.Parallel()
+
 	connId1 := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -534,6 +562,12 @@ func TestHandleEventBlockfetchBlockAllowsEquivalentConnectionId(t *testing.T) {
 	ls := &LedgerState{
 		activeBlockfetchConnId:       connId1,
 		chainsyncBlockfetchReadyChan: make(chan struct{}),
+		// mockBabbageBlock carries no real VRF/KES material to verify. Mark
+		// its slot Mithril-covered so the header crypto gate (issue #3528:
+		// required by default, exempt only for a Mithril-certified slot)
+		// exempts it, letting this test isolate connection-equivalence
+		// bookkeeping from crypto verification.
+		mithrilLedgerSlot: 2,
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			BlockfetchRequestRangeFunc: func(
@@ -565,6 +599,8 @@ func TestHandleEventBlockfetchBlockAllowsEquivalentConnectionId(t *testing.T) {
 func TestHandleEventBlockfetchBlockDropsBlocksFromStaleConnection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId1 := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -603,6 +639,8 @@ func TestHandleEventBlockfetchBlockDropsBlocksFromStaleConnection(
 func TestHandleEventBlockfetchBatchDoneUsesSelectedConnectionAfterSwitch(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	testChain := &chain.Chain{}
 	err := testChain.AddBlockHeader(mockHeader{
 		hash:        lcommon.NewBlake2b256([]byte("hdr-1")),
@@ -665,6 +703,8 @@ func TestHandleEventBlockfetchBatchDoneUsesSelectedConnectionAfterSwitch(
 func TestHandleEventBlockfetchBatchDoneFallsBackToCurrentConnection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	testChain := &chain.Chain{}
 	err := testChain.AddBlockHeader(mockHeader{
 		hash:        lcommon.NewBlake2b256([]byte("hdr-1")),
@@ -715,6 +755,8 @@ func TestHandleEventBlockfetchBatchDoneFallsBackToCurrentConnection(
 }
 
 func TestHandleChainSwitchEventUpdatesSelectedBlockfetchConnId(t *testing.T) {
+	t.Parallel()
+
 	connId := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -736,6 +778,8 @@ func TestHandleChainSwitchEventUpdatesSelectedBlockfetchConnId(t *testing.T) {
 func TestHandleChainSwitchEventRequestsFreshCursorWhenPeerAheadWithoutHeaders(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() { bus.Stop() })
 	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
@@ -786,6 +830,8 @@ func TestHandleChainSwitchEventRequestsFreshCursorWhenPeerAheadWithoutHeaders(
 func TestChainSwitchNeedsFreshCursorUsesObservedTip(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	chainManager, err := chain.NewManager(nil, nil)
 	require.NoError(t, err)
 	testChain := chainManager.PrimaryChain()
@@ -828,6 +874,8 @@ func TestChainSwitchNeedsFreshCursorUsesObservedTip(
 func TestChainSwitchNeedsFreshCursorIgnoresFailedTargetFrontier(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	chainManager, err := chain.NewManager(nil, nil)
 	require.NoError(t, err)
 	testChain := chainManager.PrimaryChain()
@@ -970,6 +1018,8 @@ func (f chainSwitchFallbackFixture) handleChainSwitchEvent() {
 func TestHandleChainSwitchEventFallbackResyncUsesActiveConnection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainSwitchFallbackFixture(t)
 	fixture.handleChainSwitchEvent()
 
@@ -993,6 +1043,8 @@ func TestHandleChainSwitchEventFallbackResyncUsesActiveConnection(
 func TestHandleChainSwitchEventFallbackReplaysBufferedActiveHeaders(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bufferedHeaderHash := lcommon.NewBlake2b256([]byte("active-hdr"))
 	fixture := newChainSwitchFallbackFixture(t)
 
@@ -1043,6 +1095,8 @@ func TestHandleChainSwitchEventFallbackReplaysBufferedActiveHeaders(
 func TestHandleChainSwitchEventDoesNotResyncInitialPeerSelection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() { bus.Stop() })
 	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
@@ -1080,6 +1134,8 @@ func TestHandleChainSwitchEventDoesNotResyncInitialPeerSelection(
 func TestShouldBufferHeaderEventDoesNotPreserveIdleSelectedConnection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId1 := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -1124,6 +1180,8 @@ func TestShouldBufferHeaderEventDoesNotPreserveIdleSelectedConnection(
 func TestShouldBufferHeaderEventDoesNotRaceDiscardBufferedPeerHeaders(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId1 := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -1177,6 +1235,8 @@ func TestShouldBufferHeaderEventDoesNotRaceDiscardBufferedPeerHeaders(
 func TestDiscardBufferedPeerHeadersDoesNotRaceBufferedHeaderIteration(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		chain: &chain.Chain{},
 		config: LedgerStateConfig{
@@ -1254,6 +1314,8 @@ func TestDiscardBufferedPeerHeadersDoesNotRaceBufferedHeaderIteration(
 func TestHandleChainSwitchEventReplaysBufferedHeadersForSelectedConnection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId1 := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -1317,6 +1379,8 @@ func TestHandleChainSwitchEventReplaysBufferedHeadersForSelectedConnection(
 func TestHandleEventChainsyncBlockHeaderAcceptsCompatibleNonOwnerConnection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId1 := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -1376,6 +1440,8 @@ func TestHandleEventChainsyncBlockHeaderAcceptsCompatibleNonOwnerConnection(
 }
 
 func TestHandleEventChainsyncRecordsOnlyAdmittedHeaderFrontier(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 	// Keep the test at header admission; no blockfetch worker is needed.
@@ -1398,6 +1464,12 @@ func TestHandleEventChainsyncRecordsOnlyAdmittedHeaderFrontier(t *testing.T) {
 		blockNumber: fixture.currentTip.BlockNumber + 1,
 		slot:        fixture.currentTip.Point.Slot + 1,
 	}
+	// mockHeader carries no real VRF/KES material to verify. Mark its slot
+	// Mithril-covered so the header crypto gate (issue #3528: required by
+	// default, exempt only for a Mithril-certified slot) exempts it, letting
+	// this test isolate frontier-tracking from crypto verification.
+	ls.mithrilLedgerSlot = accepted.slot
+	ls.publishSnapshotsLocked()
 	advertisedSlot := ^uint64(0)
 	require.NoError(t, ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
 		ConnectionId: connID,
@@ -1452,6 +1524,8 @@ func TestHandleEventChainsyncRecordsOnlyAdmittedHeaderFrontier(t *testing.T) {
 func TestHandleEventChainsyncBlockHeaderBuffersIncompatibleNonOwnerConnection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId1 := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -1480,6 +1554,12 @@ func TestHandleEventChainsyncBlockHeaderBuffersIncompatibleNonOwnerConnection(
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	// mockHeader carries no real VRF/KES material to verify. Mark its slot
+	// Mithril-covered so the header crypto gate (issue #3528: required by
+	// default, exempt only for a Mithril-certified slot) exempts it, letting
+	// this test isolate connection-buffering from crypto verification.
+	ls.mithrilLedgerSlot = header1.slot
+	ls.publishSnapshotsLocked()
 
 	err := ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
 		ConnectionId: connId1,
@@ -1518,6 +1598,8 @@ func TestHandleEventChainsyncBlockHeaderBuffersIncompatibleNonOwnerConnection(
 func TestHandleEventChainsyncBlockHeader_ProcessesEligibleNonActivePeer(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId1 := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -1570,6 +1652,8 @@ func TestHandleEventChainsyncBlockHeader_ProcessesEligibleNonActivePeer(
 func TestHandleEventChainsyncBlockHeaderBuffersMinimumBatchWhenBehind(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -1616,6 +1700,8 @@ func TestHandleEventChainsyncBlockHeaderBuffersMinimumBatchWhenBehind(
 }
 
 func TestHandleEventChainsyncBlockHeaderScalesBatchWhenFarBehind(t *testing.T) {
+	t.Parallel()
+
 	connId := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -1680,6 +1766,8 @@ func TestHandleEventChainsyncBlockHeaderScalesBatchWhenFarBehind(t *testing.T) {
 func TestHandleEventChainsyncBlockHeaderAcceptsEquivalentOwnerConnectionId(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId1 := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -1740,6 +1828,8 @@ func TestHandleEventChainsyncBlockHeaderAcceptsEquivalentOwnerConnectionId(
 func TestHandleEventBlockfetchBatchDoneReplaysBufferedHeadersAfterDrain(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId1 := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -1775,6 +1865,12 @@ func TestHandleEventBlockfetchBatchDoneReplaysBufferedHeadersAfterDrain(
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	// mockHeader carries no real VRF/KES material to verify. Mark its slot
+	// Mithril-covered so the header crypto gate (issue #3528: required by
+	// default, exempt only for a Mithril-certified slot) exempts it, letting
+	// this test isolate buffered-header replay from crypto verification.
+	ls.mithrilLedgerSlot = 1
+	ls.publishSnapshotsLocked()
 
 	err := handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
 		ConnectionId: connId1,
@@ -1795,6 +1891,8 @@ func TestHandleEventBlockfetchBatchDoneReplaysBufferedHeadersAfterDrain(
 }
 
 func TestHandleEventChainsyncBlockHeaderKeepsActiveBatchOwner(t *testing.T) {
+	t.Parallel()
+
 	connId1 := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -1856,6 +1954,8 @@ func TestHandleEventChainsyncBlockHeaderKeepsActiveBatchOwner(t *testing.T) {
 func TestHandleEventChainsyncBlockHeaderIgnoresIdleSelectedOwner(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId1 := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -1897,6 +1997,8 @@ func TestHandleEventChainsyncBlockHeaderIgnoresIdleSelectedOwner(
 func TestHandleEventChainsyncBlockHeaderIgnoresStaleHeaderBehindChainTip(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	fixture.ls.currentTip = fixture.ancestorTip
 	staleHash := lcommon.NewBlake2b256([]byte("stale-header"))
@@ -1933,6 +2035,8 @@ func TestHandleEventChainsyncBlockHeaderIgnoresStaleHeaderBehindChainTip(
 func TestHandleEventChainsyncBlockHeaderSkipsMithrilBoundaryHeaderVerification(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	fixture.ls.validationEnabled = true
 	fixture.ls.mithrilLedgerSlot = fixture.currentTip.Point.Slot
@@ -1971,6 +2075,8 @@ func TestHandleEventChainsyncBlockHeaderSkipsMithrilBoundaryHeaderVerification(
 func TestHandleEventChainsyncRollbackClearsBufferedHeadersForNonActivePeer(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	activeConn := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -2016,6 +2122,8 @@ func TestHandleEventChainsyncRollbackClearsBufferedHeadersForNonActivePeer(
 func TestHandleEventChainsyncBlockHeaderStartsBlockfetchForSmallBlockGap(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -2073,6 +2181,8 @@ func TestHandleEventChainsyncBlockHeaderStartsBlockfetchForSmallBlockGap(
 func TestHandleEventChainsyncBlockHeaderStartsBlockfetchForSparseBlockGap(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -2137,6 +2247,8 @@ func TestHandleEventChainsyncBlockHeaderStartsBlockfetchForSparseBlockGap(
 func TestHandleEventChainsyncAwaitReplyStartsBlockfetchForActiveConnection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -2195,6 +2307,8 @@ func TestHandleEventChainsyncAwaitReplyStartsBlockfetchForActiveConnection(
 func TestHandleEventBlockfetchBatchDoneEmptyBatchRetriesAlternateConnection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	testChain := &chain.Chain{}
 	err := testChain.AddBlockHeader(mockHeader{
 		hash:        lcommon.NewBlake2b256([]byte("hdr-1")),
@@ -2253,6 +2367,8 @@ func TestHandleEventBlockfetchBatchDoneEmptyBatchRetriesAlternateConnection(
 func TestHandleEventBlockfetchBatchDoneEmptyBatchNearTipRetries(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	testChain := &chain.Chain{}
 	err := testChain.AddBlockHeader(mockHeader{
 		hash:        lcommon.NewBlake2b256([]byte("near-tip-header")),
@@ -2302,6 +2418,8 @@ func TestHandleEventBlockfetchBatchDoneEmptyBatchNearTipRetries(
 func TestHandleBlockfetchTimeoutLocked_RetriesQueuedRangeUsingActivePeer(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId1 := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -2358,6 +2476,8 @@ func TestHandleBlockfetchTimeoutLocked_RetriesQueuedRangeUsingActivePeer(
 func TestHandleBlockfetchTimeoutLocked_RetryRetargetsSelection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId1 := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -2410,6 +2530,8 @@ func TestHandleBlockfetchTimeoutLocked_RetryRetargetsSelection(
 func TestHandleBlockfetchTimeoutLocked_ClearsActiveConnectionWithoutHeaders(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -2435,6 +2557,8 @@ func TestHandleBlockfetchTimeoutLocked_ClearsActiveConnectionWithoutHeaders(
 func TestHandleBlockfetchTimeoutLocked_RetryFailureUsesAlternateSelectedPeer(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId1 := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -2504,6 +2628,8 @@ func TestHandleBlockfetchTimeoutLocked_RetryFailureUsesAlternateSelectedPeer(
 // keys on NewObservedTipSet, which every producer in chainselection sets, so
 // only a producer that never populated the field reaches the advertised tip.
 func TestChainSwitchNewObservedTipKeysOnPresenceNotZeroValue(t *testing.T) {
+	t.Parallel()
+
 	advertised := ochainsync.Tip{
 		Point:       ocommon.Point{Slot: 9_000, Hash: []byte{0xaa}},
 		BlockNumber: 900,

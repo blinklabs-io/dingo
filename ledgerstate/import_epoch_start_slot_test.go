@@ -34,6 +34,8 @@ import (
 // GetPoolRegistrationsEffectiveForEpoch exists to avoid, reintroduced at the
 // window instead of the query.
 func TestImportedEpochStartSlotUsesTheEpochsOwnEra(t *testing.T) {
+	t.Parallel()
+
 	// Era 0 runs epochs 0..9 from slot 0 with 100-slot epochs; era 1 starts
 	// at epoch 10, slot 1000, with 500-slot epochs.
 	cfg := ImportConfig{
@@ -82,6 +84,8 @@ func TestImportedEpochStartSlotUsesTheEpochsOwnEra(t *testing.T) {
 // pre-epoch side, where the most recent wins -- but it is a fallback, not the
 // epoch's real start, so it must not be reached when bounds are available.
 func TestImportedEpochStartSlotFallsBackWithoutEraBounds(t *testing.T) {
+	t.Parallel()
+
 	cfg := ImportConfig{
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		State: &RawLedgerState{
@@ -121,6 +125,8 @@ func TestImportedEpochStartSlotFallsBackWithoutEraBounds(t *testing.T) {
 // re-registration made before the target epoch is ignored. Both seed rewards
 // from parameters that were not in force, so neither is offered.
 func TestImportedEpochStartSlotHasNoWindowBelowTheFirstEraBound(t *testing.T) {
+	t.Parallel()
+
 	cfg := ImportConfig{
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		State: &RawLedgerState{

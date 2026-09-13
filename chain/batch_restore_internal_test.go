@@ -35,6 +35,8 @@ import (
 // asked for the point a security parameter behind that tip and was told the
 // block did not exist (issue #3889).
 func TestBatchRestoreIsSafeLocked(t *testing.T) {
+	t.Parallel()
+
 	applied := ochainsync.Tip{
 		Point:       ocommon.Point{Slot: 100, Hash: []byte("applied")},
 		BlockNumber: 10,

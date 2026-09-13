@@ -15,11 +15,17 @@ import (
 // from being treated as evidence that rewards are pending. The pending flag is
 // only valid for a missing epoch row; a database failure must reach the caller.
 func TestDingoDBPropagatesApplyingEpochLookupError(t *testing.T) {
+	t.Parallel()
+
 	db, gdb := openTestDingoDB(t)
 	pool := testPoolKeyHash(t, 0x41)
 	require.NoError(t, gdb.Exec(
 		`INSERT INTO reward_pool_input (pool_key_hash, epoch, delegated_stake, delegator_count)
-		 VALUES (?, ?, ?, ?)`, pool, 9, "1000", 1,
+		 VALUES (?, ?, ?, ?)`,
+		pool,
+		9,
+		"1000",
+		1,
 	).Error)
 	require.NoError(t, gdb.Exec(
 		`INSERT INTO tip (hash, slot, block_number) VALUES (?, ?, ?)`,
@@ -35,6 +41,8 @@ func TestDingoDBPropagatesApplyingEpochLookupError(t *testing.T) {
 // contract through the in-process source. Both RewardParitySource
 // implementations must fail closed when their E+3 lookup cannot run.
 func TestDatabaseSourcePropagatesApplyingEpochLookupError(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	sqlDB := sourceSQLDB(t, db)
 	pool := testPoolKeyHash(t, 0x42)
@@ -57,12 +65,18 @@ func TestDatabaseSourcePropagatesApplyingEpochLookupError(t *testing.T) {
 }
 
 func TestMissingApplyingEpochIsThePendingCase(t *testing.T) {
+	t.Parallel()
+
 	t.Run("standalone source", func(t *testing.T) {
 		db, gdb := openTestDingoDB(t)
 		pool := testPoolKeyHash(t, 0x43)
 		require.NoError(t, gdb.Exec(
 			`INSERT INTO reward_pool_input (pool_key_hash, epoch, delegated_stake, delegator_count)
-			 VALUES (?, ?, ?, ?)`, pool, 9, "1000", 1,
+			 VALUES (?, ?, ?, ?)`,
+			pool,
+			9,
+			"1000",
+			1,
 		).Error)
 		require.NoError(t, gdb.Exec(
 			`INSERT INTO tip (hash, slot, block_number) VALUES (?, ?, ?)`,
@@ -102,12 +116,18 @@ func TestMissingApplyingEpochIsThePendingCase(t *testing.T) {
 }
 
 func TestPositiveSlotWithoutTipHashIsNotPending(t *testing.T) {
+	t.Parallel()
+
 	t.Run("standalone source", func(t *testing.T) {
 		db, gdb := openTestDingoDB(t)
 		pool := testPoolKeyHash(t, 0x45)
 		require.NoError(t, gdb.Exec(
 			`INSERT INTO reward_pool_input (pool_key_hash, epoch, delegated_stake, delegator_count)
-			 VALUES (?, ?, ?, ?)`, pool, 9, "1000", 1,
+			 VALUES (?, ?, ?, ?)`,
+			pool,
+			9,
+			"1000",
+			1,
 		).Error)
 		require.NoError(t, gdb.Exec(
 			`INSERT INTO tip (hash, slot, block_number) VALUES (?, ?, ?)`,
@@ -140,12 +160,18 @@ func TestPositiveSlotWithoutTipHashIsNotPending(t *testing.T) {
 }
 
 func TestZeroSlotWithTipHashIsNotPending(t *testing.T) {
+	t.Parallel()
+
 	t.Run("standalone source", func(t *testing.T) {
 		db, gdb := openTestDingoDB(t)
 		pool := testPoolKeyHash(t, 0x47)
 		require.NoError(t, gdb.Exec(
 			`INSERT INTO reward_pool_input (pool_key_hash, epoch, delegated_stake, delegator_count)
-			 VALUES (?, ?, ?, ?)`, pool, 9, "1000", 1,
+			 VALUES (?, ?, ?, ?)`,
+			pool,
+			9,
+			"1000",
+			1,
 		).Error)
 		require.NoError(t, gdb.Exec(
 			`INSERT INTO tip (hash, slot, block_number) VALUES (?, ?, ?)`,
@@ -176,6 +202,8 @@ func TestZeroSlotWithTipHashIsNotPending(t *testing.T) {
 }
 
 func TestComparePoolEpochUsesRewardsPending(t *testing.T) {
+	t.Parallel()
+
 	memberRewardMismatch := func(mismatches []CheckMismatch) CheckMismatch {
 		for _, mismatch := range mismatches {
 			if mismatch.Field == "member_rewards" {
@@ -197,11 +225,19 @@ func TestComparePoolEpochUsesRewardsPending(t *testing.T) {
 	mismatches := ComparePoolEpoch(
 		"preview", 96, koios, dingo, time.Now(), 0, time.Time{}, false,
 	)
-	require.Equal(t, CategoryReferenceLag, memberRewardMismatch(mismatches).Category)
+	require.Equal(
+		t,
+		CategoryReferenceLag,
+		memberRewardMismatch(mismatches).Category,
+	)
 
 	dingo.RewardsPending = false
 	mismatches = ComparePoolEpoch(
 		"preview", 96, koios, dingo, time.Now(), 0, time.Time{}, false,
 	)
-	require.Equal(t, CategoryValueMismatch, memberRewardMismatch(mismatches).Category)
+	require.Equal(
+		t,
+		CategoryValueMismatch,
+		memberRewardMismatch(mismatches).Category,
+	)
 }

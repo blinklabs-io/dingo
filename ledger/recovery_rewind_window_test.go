@@ -50,6 +50,7 @@ func newTestShelleyGenesisCfgWithK(
 		"activeSlotsCoeff": 0.05,
 		"securityParam": %d,
 		"slotsPerKESPeriod": 129600,
+		"maxKESEvolutions": 62,
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`, k)
 	cfg := &cardano.CardanoNodeConfig{}
@@ -107,6 +108,8 @@ func seedTestChain(
 // legal K-bounded rollback by construction no matter how far the chain has
 // advanced since the rewind began.
 func TestWindowedRewindConvergesWhilePrimaryChainExtends(t *testing.T) {
+	t.Parallel()
+
 	const (
 		securityParam = 8
 		blockCount    = 240
@@ -209,6 +212,8 @@ func TestWindowedRewindConvergesWhilePrimaryChainExtends(t *testing.T) {
 // stuck-pipeline watchdog correctly announcing that the failure was
 // deterministic while the node kept retrying anyway.
 func TestDeterministicTxRecoveryHaltsOnUnreachableRewind(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	require.NoError(t, err)
@@ -275,6 +280,8 @@ func TestDeterministicTxRecoveryHaltsOnUnreachableRewind(t *testing.T) {
 // different one and must start with a fresh budget rather than inherit a tally
 // that has nothing to do with it.
 func TestRecoveryRewindHaltBudgetResetsOnTipProgress(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	require.NoError(t, err)
@@ -334,6 +341,8 @@ func TestRecoveryRewindHaltBudgetResetsOnTipProgress(t *testing.T) {
 // a different step target against a larger gap, and the halt must still
 // arrive.
 func TestRecoveryRewindHaltsThoughTargetMovesAndDepthGrows(t *testing.T) {
+	t.Parallel()
+
 	const (
 		chainK        = 4
 		ledgerWindow  = 8
@@ -477,6 +486,8 @@ func TestRecoveryRewindHaltsThoughTargetMovesAndDepthGrows(t *testing.T) {
 // the chain tip, so it is present by point and absent from the chain: the
 // store lookup accepts it and the chain's own membership check does not.
 func TestWindowedRewindRefusesRecoveryTargetTheChainDoesNotHold(t *testing.T) {
+	t.Parallel()
+
 	const (
 		securityParam = 8
 		blockCount    = 60
@@ -521,7 +532,11 @@ func TestWindowedRewindRefusesRecoveryTargetTheChainDoesNotHold(t *testing.T) {
 	require.NoError(t, db.BlockCreate(orphan, nil))
 	target := ocommon.NewPoint(orphan.Slot, orphan.Hash)
 	_, err = database.BlockByPoint(db, target)
-	require.NoError(t, err, "the store must hold the target for this to test anything")
+	require.NoError(
+		t,
+		err,
+		"the store must hold the target for this to test anything",
+	)
 
 	tipBefore := pc.Tip()
 	err = ls.rollbackPrimaryChainInSecurityParamWindows(target)
@@ -534,16 +549,20 @@ func TestWindowedRewindRefusesRecoveryTargetTheChainDoesNotHold(t *testing.T) {
 	)
 }
 
-// TestWindowedRewindRefusesSlotZeroTargetTheStoreDoesNotHold covers the one
-// target shape Chain.ValidateRollback cannot speak for.
+// TestWindowedRewindRefusesSlotZeroTargetTheStoreDoesNotHold pins the entry
+// check for a slot-zero target, from this package's side of the boundary.
 //
-// ValidateRollback reads every slot-zero point as origin and skips its
-// membership check there, and Chain.Rollback does the same: it truncates to
-// index zero and sets currentTip to the point it was given. A slot-zero point
-// carrying a hash would therefore pass the entry check and take the descent
-// all the way down, leaving the chain empty and its tip naming a block the
-// store need not hold, so the entry check keeps the store lookup for it.
+// Slot 0 is a real slot, so a point carrying a hash names a block there. When
+// ValidateRollback gated its lookup on point.Slot > 0 such a target skipped
+// membership validation, passed the entry check and took the descent all the
+// way down, leaving the chain empty and its tip naming a block the store need
+// not hold; this package compensated with its own store lookup. ValidateRollback
+// now resolves any hash-bearing point, so the refusal comes from the chain's
+// membership check and the local lookup is gone -- this test is what proves
+// the coverage moved rather than disappeared.
 func TestWindowedRewindRefusesSlotZeroTargetTheStoreDoesNotHold(t *testing.T) {
+	t.Parallel()
+
 	const (
 		securityParam = 8
 		blockCount    = 30

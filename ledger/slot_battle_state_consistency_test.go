@@ -45,6 +45,8 @@ import (
 // metadata-store state after the rollback API is called as the chainsync
 // path calls it) so a regression there fails with a clear signal.
 func TestSlotBattleResolution_BlockNonceTableIsFullyCleaned(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer func() { _ = dbtest.CloseDatabase(db) }()

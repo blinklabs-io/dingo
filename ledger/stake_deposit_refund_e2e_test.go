@@ -211,6 +211,8 @@ func requireValueNotConserved(
 func TestValueConservationRefundsUnknownStakeDepositAtKeyDeposit(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	lv, db := newStakeRefundTestView(t)
 	cred := stakeRefundTestCredential(0xc1)
 	seedStakeRegistration(t, db, cred, nil, 100, 0xc1)
@@ -241,6 +243,8 @@ func TestValueConservationRefundsUnknownStakeDepositAtKeyDeposit(
 // value conservation for any fee. A genuinely unbalanced transaction over the
 // same absent-deposit registration is still rejected.
 func TestValueConservationRejectsUnbalancedUnknownStakeDeposit(t *testing.T) {
+	t.Parallel()
+
 	lv, db := newStakeRefundTestView(t)
 	cred := stakeRefundTestCredential(0xc2)
 	seedStakeRegistration(t, db, cred, nil, 100, 0xc2)
@@ -261,6 +265,8 @@ func TestValueConservationRejectsUnbalancedUnknownStakeDeposit(t *testing.T) {
 func TestValueConservationRefundsRecordedStakeDepositNotKeyDeposit(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	lv, db := newStakeRefundTestView(t)
 	cred := stakeRefundTestCredential(0xc3)
 	recordedDeposit := uint64(5_000_000)
@@ -296,6 +302,8 @@ func TestValueConservationRefundsRecordedStakeDepositNotKeyDeposit(
 // KeyDeposit there and break value conservation on the devnet, which is why
 // only the uncomputable case reports absence.
 func TestValueConservationRefundsRecordedZeroStakeDepositAsZero(t *testing.T) {
+	t.Parallel()
+
 	lv, db := newStakeRefundTestView(t)
 	cred := stakeRefundTestCredential(0xc4)
 	recordedZero := uint64(0)

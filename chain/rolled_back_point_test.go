@@ -45,6 +45,8 @@ func blockPoint(b *MockBlock) ocommon.Point {
 // peer cannot distinguish from a served range, so it re-requests the same
 // single-block range forever instead of trying another peer.
 func TestFromPointRejectsRolledBackPointPersistent(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	if err != nil {
@@ -116,6 +118,8 @@ func TestFromPointRejectsRolledBackPointPersistent(t *testing.T) {
 // non-persistent chain, where rolled-back blocks stay in the manager's LRU
 // cache instead of a database.
 func TestFromPointRejectsRolledBackPointInMemory(t *testing.T) {
+	t.Parallel()
+
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error creating chain manager: %s", err)
@@ -148,6 +152,8 @@ func TestFromPointRejectsRolledBackPointInMemory(t *testing.T) {
 // not stored in the fork's blocks slice, and an in-memory manager has no
 // database index for blockByIndex to query directly.
 func TestFromPointAcceptsCommonPointOnInMemoryFork(t *testing.T) {
+	t.Parallel()
+
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error creating chain manager: %s", err)

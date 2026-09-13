@@ -239,6 +239,14 @@ var errParentChangedDuringBuild = errors.New(
 	"selected parent changed during block assembly",
 )
 
+// errParentSlotNotBelowBlock indicates that a normal live-tip block would
+// name a parent at the same or a later slot. Such a block is invalid under
+// Praos slot ordering; equal-slot alternatives must use their explicit
+// predecessor context rather than the live tip.
+var errParentSlotNotBelowBlock = errors.New(
+	"parent slot is not below the forged slot",
+)
+
 // tipsEqual reports whether two chain tips reference the same point and
 // block number. Slot and hash are both required: a rollback can restore a
 // prior slot, and two forged blocks never share a hash.
@@ -278,6 +286,14 @@ func (b *DefaultBlockBuilder) buildBlock(
 	// genesis is BlockNo 0. When the tip is genesis (empty hash), the
 	// chain has no blocks yet so the next block number is 0.
 	isGenesis := len(currentTip.Point.Hash) == 0
+	if !isGenesis && slot <= currentTip.Point.Slot {
+		return nil, nil, fmt.Errorf(
+			"%w: parent slot %d, block slot %d",
+			errParentSlotNotBelowBlock,
+			currentTip.Point.Slot,
+			slot,
+		)
+	}
 
 	var nextBlockNumber uint64
 	if !isGenesis {
@@ -327,6 +343,7 @@ func (b *DefaultBlockBuilder) buildBlock(
 		transactionWitnessSets = []cbor.RawMessage{}
 		transactionMetadataSet = make(map[uint]cbor.RawMessage)
 		blockSize              uint64
+		encodedBodySize        segmentedBodySize
 		totalExUnits           lcommon.ExUnits
 		maxTxSize              = limits.maxTxSize
 		maxBlockSize           = limits.maxBlockSize
@@ -394,20 +411,6 @@ func (b *DefaultBlockBuilder) buildBlock(
 					"max_tx_size", maxTxSize,
 				)
 				continue
-			}
-
-			// Check MaxBlockSize limit. Dijkstra's block body is not the
-			// segmented tx-body/witness/metadata layout, so it gets an exact
-			// candidate block-body size check after tx decoding below.
-			if limits.era != eraDijkstra && blockSize+txSize > maxBlockSize {
-				b.logger.Debug(
-					"block size limit reached",
-					"component", "forging",
-					"current_size", blockSize,
-					"tx_size", txSize,
-					"max_block_size", maxBlockSize,
-				)
-				break
 			}
 
 			// Decode the transaction CBOR into a typed era-specific
@@ -598,6 +601,21 @@ func (b *DefaultBlockBuilder) buildBlock(
 					)
 					break
 				}
+			}
+			if limits.era != eraDijkstra {
+				candidateSize := encodedBodySize.withTransaction(
+					bodyBytes, witnessBytes, metadataCbor,
+				)
+				if candidateSize.size(limits.era) > maxBlockSize {
+					b.logger.Debug(
+						"block body size limit reached",
+						"component", "forging",
+						"candidate_body_size", candidateSize.size(limits.era),
+						"max_block_body_size", maxBlockSize,
+					)
+					break
+				}
+				encodedBodySize = candidateSize
 			}
 			transactionBodies = append(transactionBodies, bodyBytes)
 			transactionWitnessSets = append(

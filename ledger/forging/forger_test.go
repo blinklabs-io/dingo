@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
@@ -102,12 +103,19 @@ func (l *forgerCountingLeader) callCount() int {
 }
 
 type forgerTestSlotClock struct {
-	currentSlot       uint64
-	chainTipSlot      uint64
-	chainTipHash      []byte
-	upstreamTipSlot   uint64
-	upstreamActive    bool
-	slotsPerKESPeriod uint64
+	currentSlot  uint64
+	chainTipSlot uint64
+	chainTipHash []byte
+	// primaryTipExplicit selects whether primaryTipSlot/primaryTipHash are
+	// used verbatim. When false the primary tip mirrors the applied tip,
+	// which is the caught-up steady state and what every test that does not
+	// care about the distinction wants.
+	primaryTipExplicit bool
+	primaryTipSlot     uint64
+	primaryTipHash     []byte
+	upstreamTipSlot    uint64
+	upstreamActive     bool
+	slotsPerKESPeriod  uint64
 }
 
 func (c forgerTestSlotClock) CurrentSlot() (uint64, error) {
@@ -118,8 +126,31 @@ func (c forgerTestSlotClock) SlotsPerKESPeriod() uint64 {
 	return c.slotsPerKESPeriod
 }
 
-func (c forgerTestSlotClock) ChainTipSlot() uint64 {
-	return c.chainTipSlot
+func (c forgerTestSlotClock) ChainTip() ocommon.Point {
+	return ocommon.Point{Slot: c.chainTipSlot, Hash: c.chainTipHash}
+}
+
+// PrimaryChainTip mirrors the applied tip unless the test describes a primary
+// tip of its own. Mirroring is the caught-up steady state, so a test that sets
+// no primary chain tip field observes no backlog and no divergence.
+//
+// Setting primaryTipSlot or primaryTipHash is itself enough to opt in: a test
+// that set primaryTipSlot but forgot primaryTipExplicit would otherwise
+// silently get the mirrored applied tip, so its gap would read 0 and it would
+// pass no matter what the forger did -- which is exactly what happened to the
+// configurable tolerance test. primaryTipExplicit remains for the one case the
+// values cannot express on their own: an explicitly empty primary tip (slot 0,
+// no hash), which is an uninitialised primary chain.
+//
+// The values are used verbatim, including a primary tip BEHIND the applied
+// tip, which is a real state the forger must handle and which a clamp would
+// hide.
+func (c forgerTestSlotClock) PrimaryChainTip() ocommon.Point {
+	if !c.primaryTipExplicit && c.primaryTipSlot == 0 &&
+		c.primaryTipHash == nil {
+		return ocommon.Point{Slot: c.chainTipSlot, Hash: c.chainTipHash}
+	}
+	return ocommon.Point{Slot: c.primaryTipSlot, Hash: c.primaryTipHash}
 }
 
 func (forgerTestSlotClock) NextSlotTime() (time.Time, error) {
@@ -1037,6 +1068,7 @@ type forgerTestLeiosCerts struct {
 	txHashes       []string
 	txHashesOK     bool
 	marked         []lcommon.Blake2b256
+	markedSlots    []uint64
 	gotEbSlot      uint64
 	gotEbSlotCalls int
 }
@@ -1056,8 +1088,10 @@ func (p *forgerTestLeiosCerts) CertifiedEndorserBlockTxHashes(
 
 func (p *forgerTestLeiosCerts) MarkEndorserBlockEmbedded(
 	ebHash lcommon.Blake2b256,
+	ebSlot uint64,
 ) {
 	p.marked = append(p.marked, ebHash)
+	p.markedSlots = append(p.markedSlots, ebSlot)
 }
 
 type forgerTestLeiosParentAnnouncement struct {
@@ -1576,6 +1610,7 @@ func TestCheckAndForgeProductionCertifiesLeiosEBAfterAdoption(t *testing.T) {
 				require.Empty(t, leiosCaster.hash)
 			}
 			require.Equal(t, []lcommon.Blake2b256{ebHash}, leiosCerts.marked)
+			require.Equal(t, []uint64{9}, leiosCerts.markedSlots)
 			require.Equal(t, 1, parent.calls)
 			// CertifiedEndorserBlockTxHashes must be called with the
 			// eligible certificate's own slot (9, from eb.SlotNo above), not
@@ -1669,5 +1704,6 @@ func TestCheckAndForgeProductionCertifiesOnlyParentAnnouncedLeiosEB(
 	require.Nil(t, builder.leiosData.Announcement)
 	require.Same(t, parentCert, builder.leiosData.Certificate)
 	require.Equal(t, []lcommon.Blake2b256{parentHash}, leiosCerts.marked)
+	require.Equal(t, []uint64{9}, leiosCerts.markedSlots)
 	require.Equal(t, 1, parent.calls)
 }

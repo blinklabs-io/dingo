@@ -27,6 +27,7 @@ import (
 
 	ouroboros_conn "github.com/blinklabs-io/gouroboros/connection"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
@@ -171,6 +172,8 @@ func testBlockfetchIteratorBlock(slot uint64) *chain.ChainIteratorResult {
 }
 
 func TestBlockfetchServerRequestRange_StartAfterEnd(t *testing.T) {
+	t.Parallel()
+
 	// When start slot > end slot, blockfetchServerRequestRange should
 	// log a warning and attempt to send NoBlocks. Since we don't have a
 	// real protocol server wired up, the NoBlocks call will panic on the
@@ -189,8 +192,8 @@ func TestBlockfetchServerRequestRange_StartAfterEnd(t *testing.T) {
 	// we never reach GetChainFromPoint and avoid a nil dereference on
 	// LedgerState.
 
-	start := ocommon.NewPoint(100, []byte{0x01})
-	end := ocommon.NewPoint(50, []byte{0x02})
+	start := ocommon.NewPoint(100, make([]byte, lcommon.Blake2b256Size))
+	end := ocommon.NewPoint(50, make([]byte, lcommon.Blake2b256Size))
 	ctx := blockfetch.CallbackContext{
 		ConnectionId: testConnId(),
 		// Server is nil, so NoBlocks() will panic after the log.
@@ -211,6 +214,8 @@ func TestBlockfetchServerRequestRange_StartAfterEnd(t *testing.T) {
 }
 
 func TestBlockfetchServerRequestRange_EqualPoints(t *testing.T) {
+	t.Parallel()
+
 	// When start == end (same slot), this is a valid single-block range
 	// and should NOT trigger the "start after end" check.
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
@@ -237,6 +242,8 @@ func TestBlockfetchServerRequestRange_EqualPoints(t *testing.T) {
 }
 
 func TestBlockfetchServerRequestRange_OversizedRange(t *testing.T) {
+	t.Parallel()
+
 	// When the slot range exceeds MaxBlockFetchRange, the server should
 	// log a warning and attempt to send NoBlocks. Since Server is nil,
 	// the NoBlocks call will panic. We verify the correct warning was
@@ -282,6 +289,8 @@ func TestBlockfetchServerRequestRange_OversizedRange(t *testing.T) {
 }
 
 func TestBlockfetchServerRequestRange_RangeWithinLimit(t *testing.T) {
+	t.Parallel()
+
 	// A range within MaxBlockFetchRange should pass both validation
 	// checks and proceed to GetChainFromPoint. Since LedgerState is nil,
 	// this will panic at that call, proving the range check did not
@@ -307,6 +316,8 @@ func TestBlockfetchServerRequestRange_RangeWithinLimit(t *testing.T) {
 }
 
 func TestBlockfetchServerRequestRange_ExactlyAtLimit(t *testing.T) {
+	t.Parallel()
+
 	// A range of exactly MaxBlockFetchRange slots should be accepted
 	// (the check is > not >=). Since LedgerState is nil, this will
 	// panic at GetChainFromPoint, proving the range check passed.
@@ -333,6 +344,8 @@ func TestBlockfetchServerRequestRange_ExactlyAtLimit(t *testing.T) {
 func TestBlockfetchServerSendBatch_ClosesConnectionOnIteratorError(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	o := newOuroboros(OuroborosConfig{
 		Logger:   logger,
@@ -367,6 +380,8 @@ func TestBlockfetchServerSendBatch_ClosesConnectionOnIteratorError(
 }
 
 func TestBlockfetchServerSendBatch_BatchDoneAtChainTip(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	o := newOuroboros(OuroborosConfig{
 		Logger:   logger,
@@ -399,6 +414,8 @@ func TestBlockfetchServerSendBatch_BatchDoneAtChainTip(t *testing.T) {
 func TestBlockfetchServerSendBatch_RollbackEndsBatchWithoutServingBlock(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	o := newOuroboros(OuroborosConfig{
 		Logger:   logger,
@@ -448,6 +465,8 @@ func TestBlockfetchServerSendBatch_RollbackEndsBatchWithoutServingBlock(
 func TestBlockfetchServerSendBatch_WaitsForSendDrainBetweenMessages(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	o := newOuroboros(OuroborosConfig{
 		Logger:   logger,
@@ -490,6 +509,8 @@ func TestBlockfetchServerSendBatch_WaitsForSendDrainBetweenMessages(
 func TestBlockfetchServerSendBatch_ClosesConnectionWhenSendDrainStalls(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	o := newOuroboros(OuroborosConfig{
 		Logger:   logger,
@@ -532,6 +553,8 @@ func TestBlockfetchServerSendBatch_ClosesConnectionWhenSendDrainStalls(
 func TestReportBlockfetchServerAsyncError_ClosesConnection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	o := newOuroboros(OuroborosConfig{
 		Logger:   logger,
@@ -554,6 +577,8 @@ func TestReportBlockfetchServerAsyncError_ClosesConnection(
 func TestReportBlockfetchServerAsyncError_ReportsCloseErrorWithoutPanic(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	o := newOuroboros(OuroborosConfig{
 		Logger:   logger,
@@ -581,6 +606,8 @@ func TestReportBlockfetchServerAsyncError_ReportsCloseErrorWithoutPanic(
 // TestBlockfetchRecordNoBlocks_BelowThreshold verifies repeated NoBlocks stay
 // below the close threshold until the configured limit is reached.
 func TestBlockfetchRecordNoBlocks_BelowThreshold(t *testing.T) {
+	t.Parallel()
+
 	// Returns false for each of the first four identical NoBlocks requests.
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	o := newOuroboros(OuroborosConfig{
@@ -602,6 +629,8 @@ func TestBlockfetchRecordNoBlocks_BelowThreshold(t *testing.T) {
 // TestBlockfetchRecordNoBlocks_ReachesThreshold verifies the stuck-peer
 // detector triggers on the configured consecutive NoBlocks threshold.
 func TestBlockfetchRecordNoBlocks_ReachesThreshold(t *testing.T) {
+	t.Parallel()
+
 	// Returns true on the fifth consecutive NoBlocks for the same start point.
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	o := newOuroboros(OuroborosConfig{
@@ -624,6 +653,8 @@ func TestBlockfetchRecordNoBlocks_ReachesThreshold(t *testing.T) {
 // TestBlockfetchRecordNoBlocks_ProgressResetsCounter verifies valid progress
 // clears prior NoBlocks counts for the connection.
 func TestBlockfetchRecordNoBlocks_ProgressResetsCounter(t *testing.T) {
+	t.Parallel()
+
 	// Valid blockfetch progress clears prior NoBlocks counts for the connection.
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	o := newOuroboros(OuroborosConfig{
@@ -656,6 +687,8 @@ func TestBlockfetchRecordNoBlocks_ProgressResetsCounter(t *testing.T) {
 // TestBlockfetchRecordNoBlocks_IndependentPoints verifies changing start
 // points resets the consecutive NoBlocks count on the same connection.
 func TestBlockfetchRecordNoBlocks_IndependentPoints(t *testing.T) {
+	t.Parallel()
+
 	// Only consecutive NoBlocks for the same start point should accumulate.
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	o := newOuroboros(OuroborosConfig{
@@ -684,6 +717,8 @@ func TestBlockfetchRecordNoBlocks_IndependentPoints(t *testing.T) {
 // TestBlockfetchRecordNoBlocks_IndependentConns verifies NoBlocks counts are
 // tracked separately for each connection.
 func TestBlockfetchRecordNoBlocks_IndependentConns(t *testing.T) {
+	t.Parallel()
+
 	// Tracks counters independently per connection for the same start point.
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	o := newOuroboros(OuroborosConfig{
@@ -714,6 +749,8 @@ func TestBlockfetchRecordNoBlocks_IndependentConns(t *testing.T) {
 // TestBlockfetchRecordNoBlocks_CleanupResetsCounter verifies connection-close
 // cleanup clears stuck-peer state before a reconnect starts fresh.
 func TestBlockfetchRecordNoBlocks_CleanupResetsCounter(t *testing.T) {
+	t.Parallel()
+
 	// Resets the counter after connection close so the peer gets a fresh count on reconnect.
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	o := newOuroboros(OuroborosConfig{
@@ -784,6 +821,8 @@ func newBlockfetchServerPeer(t *testing.T, o *Ouroboros) *muxerServerPeer {
 func TestBlockfetchServerRequestRange_RepeatedInvertedRangeReachesCloseThreshold(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const closeWarnMsg = "closing stuck peer after repeated inverted range requests"
 
 	logBuf := &syncLogBuffer{}
@@ -796,8 +835,8 @@ func TestBlockfetchServerRequestRange_RepeatedInvertedRangeReachesCloseThreshold
 	})
 	peer := newBlockfetchServerPeer(t, o)
 
-	start := ocommon.NewPoint(100, []byte{0x01})
-	end := ocommon.NewPoint(50, []byte{0x02})
+	start := ocommon.NewPoint(100, make([]byte, lcommon.Blake2b256Size))
+	end := ocommon.NewPoint(50, make([]byte, lcommon.Blake2b256Size))
 
 	for i := 1; i <= blockfetchMaxConsecutiveNoBlocks; i++ {
 		logBuf.Reset()
@@ -852,6 +891,8 @@ func TestBlockfetchServerRequestRange_RepeatedInvertedRangeReachesCloseThreshold
 func TestBlockfetchServerRequestRange_ValidRangeNotRejected(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	var logBuf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
@@ -860,8 +901,8 @@ func TestBlockfetchServerRequestRange_ValidRangeNotRejected(
 		Logger:   logger,
 		EventBus: event.NewEventBus(nil, logger),
 	})
-	start := ocommon.NewPoint(100, []byte{0x01})
-	end := ocommon.NewPoint(150, []byte{0x02})
+	start := ocommon.NewPoint(100, make([]byte, lcommon.Blake2b256Size))
+	end := ocommon.NewPoint(150, make([]byte, lcommon.Blake2b256Size))
 	ctx := blockfetch.CallbackContext{ConnectionId: testConnId()}
 
 	assert.Panics(t, func() {

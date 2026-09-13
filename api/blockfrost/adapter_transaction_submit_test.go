@@ -75,6 +75,8 @@ func (s *stubSubmitter) AddTransaction(txType uint, txBytes []byte) error {
 // reports, rather than as a rejection of the caller's transaction. Both are
 // members: a mempool stopped by shutdown, and one built without a validator.
 func TestTransactionSubmitUnavailableMempoolIsNotARejection(t *testing.T) {
+	t.Parallel()
+
 	for name, submitErr := range map[string]error{
 		"stopped": mempool.ErrMempoolStopped,
 		"stopped wrapped": fmt.Errorf(
@@ -117,6 +119,8 @@ func TestTransactionSubmitUnavailableMempoolIsNotARejection(t *testing.T) {
 // split. Without it, mapping every AddTransaction error to
 // ErrMempoolUnavailable would satisfy the test above.
 func TestTransactionSubmitRejectionStaysARejection(t *testing.T) {
+	t.Parallel()
+
 	submitErr := errors.New(
 		"validate transaction: script data hash mismatch",
 	)
@@ -140,6 +144,8 @@ func TestTransactionSubmitRejectionStaysARejection(t *testing.T) {
 // TestTransactionSubmitAcceptedReturnsHash pins that the added classification
 // does not swallow the success path.
 func TestTransactionSubmitAcceptedReturnsHash(t *testing.T) {
+	t.Parallel()
+
 	submitter := &stubSubmitter{}
 	adapter := &NodeAdapter{submitter: submitter}
 
@@ -156,6 +162,8 @@ func TestTransactionSubmitAcceptedReturnsHash(t *testing.T) {
 // transaction was at fault for a node-side condition that the nil-submitter
 // path already answered 503.
 func TestHandleTransactionSubmitStoppedMempoolReturns503(t *testing.T) {
+	t.Parallel()
+
 	for name, submitErr := range map[string]error{
 		"stopped": mempool.ErrMempoolStopped,
 		"nil validator": fmt.Errorf(
@@ -193,6 +201,8 @@ func TestHandleTransactionSubmitStoppedMempoolReturns503(t *testing.T) {
 // TestHandleTransactionSubmitRejectionReturns400 keeps the other side of the
 // HTTP split pinned against the same real adapter.
 func TestHandleTransactionSubmitRejectionReturns400(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&NodeAdapter{
 		submitter: &stubSubmitter{
 			err: errors.New("validate transaction: fee too small"),
@@ -223,6 +233,8 @@ func TestHandleTransactionSubmitRejectionReturns400(t *testing.T) {
 // AddTransaction next to genuine verdicts. Reported as a rejection it becomes
 // a 400 telling the caller to fix a transaction the node never judged.
 func TestTransactionSubmitStorageFailureIsNotARejection(t *testing.T) {
+	t.Parallel()
+
 	for name, cause := range map[string]error{
 		"blob store unavailable": dbtypes.ErrBlobStoreUnavailable,
 		"utxo cbor unavailable":  database.ErrUtxoCborUnavailable,
@@ -261,6 +273,8 @@ func TestTransactionSubmitStorageFailureIsNotARejection(t *testing.T) {
 // is a node fault. A UTxO the ledger does not hold is the caller's input,
 // and it stays a rejection.
 func TestTransactionSubmitUnresolvableInputStaysARejection(t *testing.T) {
+	t.Parallel()
+
 	submitErr := fmt.Errorf(
 		"validate transaction: bad inputs: %w",
 		database.ErrUtxoNotFound,
@@ -278,6 +292,8 @@ func TestTransactionSubmitUnresolvableInputStaysARejection(t *testing.T) {
 // TestHandleTransactionSubmitStorageFailureReturns503 carries the deeper
 // classification through the HTTP layer against the real adapter.
 func TestHandleTransactionSubmitStorageFailureReturns503(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&NodeAdapter{
 		submitter: &stubSubmitter{
 			err: fmt.Errorf(
@@ -314,6 +330,8 @@ func TestHandleTransactionSubmitStorageFailureReturns503(t *testing.T) {
 // around it leaves "transaction rejected" in the message and buries the
 // reason behind the wrapper's own text.
 func TestHandleTransactionSubmitReportsWrappedRejectionCause(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{
 		transactionSubmitErr: fmt.Errorf(
 			"submit transaction to mempool: %w",
@@ -384,6 +402,8 @@ func (h *recordingHandler) levelFor(msg string) (slog.Level, bool) {
 // level ordinary traffic fills the log with alerts. A caller probing
 // submissions would otherwise raise one alert per attempt.
 func TestHandleTransactionSubmitLogsRejectionAtDebug(t *testing.T) {
+	t.Parallel()
+
 	handler := &recordingHandler{}
 	b := New(
 		BlockfrostConfig{ListenAddress: ":0"},
@@ -413,6 +433,8 @@ func TestHandleTransactionSubmitLogsRejectionAtDebug(t *testing.T) {
 // that convention: a node that cannot read its own storage is the unexpected
 // path Error level is reserved for.
 func TestHandleTransactionSubmitLogsStorageFailureAtError(t *testing.T) {
+	t.Parallel()
+
 	handler := &recordingHandler{}
 	b := New(
 		BlockfrostConfig{ListenAddress: ":0"},
@@ -447,6 +469,8 @@ func TestHandleTransactionSubmitLogsStorageFailureAtError(t *testing.T) {
 // to the evaluation endpoints, where a failing script is likewise an ordinary
 // client-facing answer.
 func TestHandleTransactionEvaluateLogsFailureAtDebug(t *testing.T) {
+	t.Parallel()
+
 	handler := &recordingHandler{}
 	b := New(
 		BlockfrostConfig{ListenAddress: ":0"},

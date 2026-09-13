@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/blinklabs-io/dingo/event"
@@ -170,6 +171,43 @@ type ChainSelector struct {
 	// held (on a best-peer → none transition) for publishing outside the lock.
 	// Guarded by mutex.
 	pendingSelectedNone *ChainSelectedNoneEvent
+
+	// genesisSelection caches the pair GenesisSelectionState returns.
+	// GenesisSelectionState is a narrow query injected as a callback into
+	// other subsystems' hot paths (chainsync.State.RecordObservedHeader,
+	// LedgerState.recordPeerHeaderHistory), which each hold their own lock
+	// while calling it. Deriving the pair from cs.mode/cs.securityParam under
+	// cs.mutex.RLock() on every call created a lock-order inversion with
+	// chainsync.State.clientConnIdMutex: see #4070. This atomic lets
+	// GenesisSelectionState answer without cs.mutex at all. It is refreshed
+	// under cs.mutex (refreshGenesisSelectionSnapshotLocked) at every point
+	// that can change cs.mode or the derived Genesis window -- construction,
+	// the one-way Genesis-to-Praos transition, and SetSecurityParam -- so a
+	// lock-free read never observes a stale pair for longer than one such
+	// update.
+	genesisSelection atomic.Pointer[genesisSelectionSnapshot]
+}
+
+// genesisSelectionSnapshot is the immutable pair GenesisSelectionState
+// returns. It is published by whole-value replacement and never mutated in
+// place, so a lock-free reader always sees an active/window pair that existed
+// together: publishing the two halves as separate atomics would let a reader
+// load the old active flag and the new window across one refresh.
+type genesisSelectionSnapshot struct {
+	active bool
+	window uint64
+}
+
+// refreshGenesisSelectionSnapshotLocked recomputes the cached
+// GenesisSelectionState pair from cs.mode and genesisWindowSlotsLocked().
+// Callers must hold cs.mutex (or run before cs is shared across goroutines,
+// as NewChainSelector does) and must call this every time cs.mode or a
+// genesisWindowSlotsLocked() input (cs.securityParam) changes.
+func (cs *ChainSelector) refreshGenesisSelectionSnapshotLocked() {
+	cs.genesisSelection.Store(&genesisSelectionSnapshot{
+		active: cs.mode == SelectionModeGenesis,
+		window: cs.genesisWindowSlotsLocked(),
+	})
 }
 
 // NewChainSelector creates a new ChainSelector with the given configuration.
@@ -214,6 +252,7 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 	if cfg.GenesisMode {
 		cs.mode = SelectionModeGenesis
 	}
+	cs.refreshGenesisSelectionSnapshotLocked()
 	if cfg.EventBus != nil && !cfg.DisableEventSubscriptions {
 		// SubscribeFuncStrict, not SubscribeFunc: HandlePeerRollbackEvent
 		// mutates chain-selection state machine state (per-peer observed
@@ -338,6 +377,7 @@ func (cs *ChainSelector) advanceSelectionModeLocked() bool {
 	bestSlot := cs.bestKnownGenesisSlotLocked()
 	window := cs.genesisWindowSlotsLocked()
 	cs.mode = SelectionModePraos
+	cs.refreshGenesisSelectionSnapshotLocked()
 	// Corroboration no longer applies in Praos; drop the per-peer hash
 	// frontier so it does not linger for the full window on every tracked peer.
 	for _, peerTip := range cs.peerTips {
@@ -854,6 +894,11 @@ func (cs *ChainSelector) SetSecurityParam(k uint64) {
 		defer cs.mutex.Unlock()
 		cs.securityParam = k
 		shouldEvaluate = cs.advanceSelectionModeLocked()
+		// advanceSelectionModeLocked already refreshes the snapshot when it
+		// transitions the mode. Refresh again unconditionally: the window it
+		// caches also depends on securityParam, which just changed here, even
+		// when the mode does not transition.
+		cs.refreshGenesisSelectionSnapshotLocked()
 	}()
 	if shouldEvaluate {
 		cs.EvaluateAndSwitch()
@@ -878,10 +923,26 @@ func (cs *ChainSelector) GenesisWindowSlots() uint64 {
 // selection is active and the density window it is using. Composition code
 // injects this narrow state query into fork resolution so the authoritative
 // local decision follows the selector's one-way Genesis-to-Praos transition.
+//
+// This deliberately does not take cs.mutex. Callers are function-valued
+// callbacks wired into other subsystems' hot paths
+// (chainsync.State.RecordObservedHeader, LedgerState.recordPeerHeaderHistory),
+// which hold their own lock (chainsync.State.clientConnIdMutex) across the
+// call. Taking cs.mutex.RLock() here previously created a lock-order
+// inversion against a separate path that holds cs.mutex (write) and calls
+// back into chainsync.State.BlockfetchLatency (clientConnIdMutex.RLock),
+// which deadlocked chain sync under real peer traffic: see #4070. The
+// snapshot below is kept current by refreshGenesisSelectionSnapshotLocked,
+// called under cs.mutex at every point that can change it.
 func (cs *ChainSelector) GenesisSelectionState() (bool, uint64) {
-	cs.mutex.RLock()
-	defer cs.mutex.RUnlock()
-	return cs.mode == SelectionModeGenesis, cs.genesisWindowSlotsLocked()
+	snapshot := cs.genesisSelection.Load()
+	if snapshot == nil {
+		// A ChainSelector that did not come from NewChainSelector has never
+		// published a snapshot. Answer as the pre-cache implementation did
+		// for that zero value: Praos, and the default window.
+		return false, defaultGenesisWindowSlots
+	}
+	return snapshot.active, snapshot.window
 }
 
 // GetBestPeer returns the connection ID of the peer with the best chain, or
@@ -1069,13 +1130,25 @@ func (cs *ChainSelector) isPeerSelectableLocked(
 	// Use securityParam (K) as the threshold — peers within K blocks
 	// of the best are acceptable (normal fork variance), but peers
 	// further behind are not useful for syncing.
+	//
+	// The gap is measured on DELIVERED frontiers, which is a transport
+	// property: it says how many headers each peer has served us so far, not
+	// what chain each peer holds. Two peers that advertise the identical
+	// canonical tip are TREATED AS the same chain unless retained delivered
+	// history contradicts them (see sameCanonicalChain), so a delivered-frontier
+	// gap between them is read as delivery speed and must not make either one
+	// ineligible.
+	// Excluding the trailing peer here also excluded the incumbent, which
+	// skipped the anti-flap pin entirely (see pinIncumbentDuringCatchUpLocked)
+	// and let the active connection flap between two canonical public roots.
 	if cs.securityParam > 0 {
 		bestBlock := cs.bestKnownBlockNumber()
 		if bestBlock > 0 &&
 			safeAddUint64(
 				selectionTip.BlockNumber,
 				cs.securityParam,
-			) < bestBlock {
+			) < bestBlock &&
+			!cs.frontierLeadIsTransportOnlyLocked(peerTip, bestBlock) {
 			if logSkip {
 				cs.config.Logger.Debug(
 					"skipping peer behind best known tip",
@@ -1162,6 +1235,91 @@ func (cs *ChainSelector) bestKnownBlockNumber() uint64 {
 		}
 	}
 	return best
+}
+
+// frontierLeadIsTransportOnlyLocked reports whether peerTip's shortfall against
+// the leading delivered frontier can be attributed to delivery speed rather
+// than chain quality: some eligible, non-stale peer holding the leading
+// frontier classifies as same-chain with peerTip under sameCanonicalChain.
+// That classification is an allowance, not proof — see its doc comment.
+//
+// Every leader is scanned rather than one representative, so the answer does
+// not depend on map iteration order when several peers share the leading
+// frontier, and one leader on a chain of its own cannot suppress the peers that
+// agree with a different leader.
+func (cs *ChainSelector) frontierLeadIsTransportOnlyLocked(
+	peerTip *PeerChainTip,
+	bestBlock uint64,
+) bool {
+	for connId, pt := range cs.peerTips {
+		if pt == peerTip ||
+			pt.SelectionTip().BlockNumber != bestBlock {
+			continue
+		}
+		if !cs.isConnectionEligible(connId) || cs.isPeerTipStale(pt) {
+			continue
+		}
+		if sameCanonicalChain(peerTip, pt) {
+			return true
+		}
+	}
+	return false
+}
+
+// sameAdvertisedTip reports whether two peers name the identical block as their
+// chain tip. The hash must be present: an all-zero advertised tip means the
+// peer has not told us where its chain ends, which is not agreement.
+func sameAdvertisedTip(a, b ochainsync.Tip) bool {
+	return len(a.Point.Hash) > 0 && sameSelectionTip(a, b)
+}
+
+// sameCanonicalChain classifies two peers as the same canonical chain, so that
+// a difference in their DELIVERED frontiers may be attributed to transport
+// delivery rather than chain quality.
+//
+// This is an ALLOWANCE, not proof of chain identity. It is granted when the
+// peers name the identical advertised tip and neither one's retained delivered
+// history contradicts the other, and withdrawn as soon as a contradiction is
+// visible. It is never positive confirmation that the two peers hold the same
+// chain: observedHistoryConflictsAt is one-sided by construction, so when the
+// other peer's frontier slot falls outside the retained k+1 history window
+// there is nothing to check and the allowance stands on the advertisement
+// alone.
+//
+// Agreement on the advertised tip is the primary signal, and it is exactly the
+// canonical-public-root case that flapped: both roots named block 4625199 at
+// slot 121697834 while their delivered frontiers differed by 742 blocks.
+//
+// The advertised tip is untrusted on its own, so it is checked against the
+// delivered evidence that is available: if either peer's retained delivered
+// history holds a different block at the other's frontier slot, they
+// demonstrably served conflicting chains and the copied advertisement buys
+// nothing. The predicate never grants the allowance over a contradiction it can
+// see, and never invents one it cannot.
+//
+// The allowance is deliberately narrow, which is what bounds a peer that copies
+// an advertisement it cannot be contradicted on. It only keeps a peer in the
+// candidate pool and only holds the incumbent's pin; it never makes a peer win
+// selection, and it cannot hold a pin across a catchUpPinStallTimeout window in
+// which the incumbent drove no local tip progress, because the progress-stall
+// escape is evaluated before the longer-chain escape. The Praos comparison
+// still ranks candidates by their delivered frontiers, the
+// implausible-frontier bound in updatePeerTipObservedPraosView still rejects
+// delivered jumps beyond k, the k-behind-the-applied-local-tip check above
+// still drops peers that cannot serve the block the node needs, and Genesis
+// corroboration still gates a fast source on independent witnesses.
+func sameCanonicalChain(a, b *PeerChainTip) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	if !sameAdvertisedTip(a.Tip, b.Tip) {
+		return false
+	}
+	if a.observedHistoryConflictsAt(b.SelectionTip().Point) ||
+		b.observedHistoryConflictsAt(a.SelectionTip().Point) {
+		return false
+	}
+	return true
 }
 
 func (cs *ChainSelector) isConnectionEligible(
@@ -1530,9 +1688,22 @@ func (cs *ChainSelector) pinIncumbentDuringCatchUpLocked(
 	// Longer-chain escape: a challenger genuinely taller than the incumbent
 	// by more than the head margin is a real longer chain, not a sibling
 	// head-fork — release so the node converges to it promptly.
+	//
+	// "Taller" is measured on delivered frontiers, so it only means a longer
+	// chain when the two peers disagree about where the chain ends. When they
+	// advertise the identical canonical tip they are treated as the same chain
+	// unless retained delivered history contradicts them (sameCanonicalChain is
+	// an allowance, not proof), and the challenger is then read as merely
+	// further along in serving that chain to us; handing the
+	// pipeline over buys no chain and costs a chainsync/blockfetch reset plus,
+	// via the ledger's fresh-cursor path, a close of the connection we just
+	// selected. The stall escape above still releases an incumbent that stops
+	// driving local tip progress, so this cannot pin to a peer that is not
+	// actually feeding us.
 	incumbentBlock := incumbentTip.SelectionTip().BlockNumber
 	challengerBlock := challengerTip.SelectionTip().BlockNumber
-	if challengerBlock > safeAddUint64(incumbentBlock, catchUpPinHeadMargin) {
+	if challengerBlock > safeAddUint64(incumbentBlock, catchUpPinHeadMargin) &&
+		!sameCanonicalChain(incumbentTip, challengerTip) {
 		return false
 	}
 	// Otherwise this is a head micro-fork / same-height sibling: pin the

@@ -142,6 +142,8 @@ func seedSigmaDenominatorSnapshot(
 func TestStakeDistributionAdapterResolvesDenominatorThroughVerifyAccessor(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ledgerState, db := newSigmaDenominatorLedger(t)
 	poolA := sigmaDenomPoolKeyHash(0x41)
 	poolB := sigmaDenomPoolKeyHash(0x42)
@@ -200,6 +202,8 @@ func TestStakeDistributionAdapterResolvesDenominatorThroughVerifyAccessor(
 // The two generations are chosen with DIFFERENT absolute values but the SAME
 // sigma, so a torn pair is detectable as a sigma matching neither.
 func TestStakeDistributionAdapterSigmaPairSurvivesRecapture(t *testing.T) {
+	t.Parallel()
+
 	ledgerState, db := newSigmaDenominatorLedger(t)
 	poolA := sigmaDenomPoolKeyHash(0x41)
 	poolB := sigmaDenomPoolKeyHash(0x42)
@@ -277,6 +281,8 @@ func TestStakeDistributionAdapterSigmaPairSurvivesRecapture(t *testing.T) {
 // without changing the interface, which this test makes a visible decision
 // rather than an accident.
 func TestStakeDistributionProviderForbidsTornSigmaRead(t *testing.T) {
+	t.Parallel()
+
 	var adapter any = &stakeDistributionAdapter{}
 
 	if _, ok := adapter.(leader.StakeDistributionProvider); !ok {
@@ -356,6 +362,8 @@ func replaceSigmaSnapshotAtomically(
 func TestStakeDistributionAdapterKeepsSigmaConsistentAcrossRecapture(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ledgerState, db := newSigmaDenominatorLedger(t)
 	poolA := sigmaDenomPoolKeyHash(0x41)
 	poolB := sigmaDenomPoolKeyHash(0x42)

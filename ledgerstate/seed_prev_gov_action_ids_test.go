@@ -161,6 +161,8 @@ func drepPulsingStateWithRatified(
 }
 
 func TestImportGovStateSeedsPrevGovActionIds(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 
@@ -300,6 +302,8 @@ func TestImportGovStateSeedsPrevGovActionIds(t *testing.T) {
 func TestImportGovStateMarksRatifiedParameterChangeFromDRepPulsingState(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
@@ -357,6 +361,8 @@ func TestImportGovStateMarksRatifiedParameterChangeFromDRepPulsingState(
 }
 
 func TestImportGovStateSeedsCommitteeUpdateWhenCommitteePresent(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 
@@ -403,6 +409,8 @@ func TestImportGovStateSeedsCommitteeUpdateWhenCommitteePresent(t *testing.T) {
 }
 
 func TestImportGovStateNoSeedingWhenAllSNothing(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 

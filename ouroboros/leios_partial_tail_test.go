@@ -73,6 +73,8 @@ func (r *diffusingBlockTxsRequester) BlockTxsRequest(
 // this, the partial prefix was dropped on the floor and the next offer
 // re-fetched the whole block from scratch (issue #2629).
 func TestFetchLeiosEbTxsRetainsPartialTailOnIncompleteFetch(t *testing.T) {
+	t.Parallel()
+
 	const txCount = 100
 	const diffused = 40
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 7, txCount)
@@ -110,6 +112,8 @@ func TestFetchLeiosEbTxsRetainsPartialTailOnIncompleteFetch(t *testing.T) {
 // transactions and complete the cached entry, rather than re-fetching the
 // transactions dingo already holds.
 func TestFetchLeiosEbTxsCompletesPartialTailOnReoffer(t *testing.T) {
+	t.Parallel()
+
 	const txCount = 100
 	const diffused = 40
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 11, txCount)
@@ -174,6 +178,8 @@ func TestFetchLeiosEbTxsCompletesPartialTailOnReoffer(t *testing.T) {
 // the next re-offer back to a from-scratch fetch. This mirrors the existing
 // no-clobber invariant for a complete transaction set.
 func TestStoreLeiosEndorserBlockManifestKeepsPartialTail(t *testing.T) {
+	t.Parallel()
+
 	const txCount = 100
 	const diffused = 40
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 13, txCount)
@@ -217,6 +223,8 @@ func TestStoreLeiosEndorserBlockManifestKeepsPartialTail(t *testing.T) {
 // retained partial is a union, so neither attempt's progress is lost and the
 // block completes once their combined coverage is whole.
 func TestRetainLeiosPartialTxsUnionsAcrossAttempts(t *testing.T) {
+	t.Parallel()
+
 	const txCount = 100
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 17, txCount)
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
@@ -266,6 +274,8 @@ func TestRetainLeiosPartialTxsUnionsAcrossAttempts(t *testing.T) {
 // must replace the old cache entry so a later fetch cannot reuse the invalid
 // body.
 func TestRetainLeiosPartialTxsPublishesSanitizedHeldEntries(t *testing.T) {
+	t.Parallel()
+
 	_, ref1 := testLeiosManifestTx(t, 1)
 	tx2, ref2 := testLeiosManifestTx(t, 2)
 	manifestRaw, err := lcommon.LeiosEndorserBlock{
@@ -310,6 +320,8 @@ func TestRetainLeiosPartialTxsPublishesSanitizedHeldEntries(t *testing.T) {
 // Retention is scoped to endorser blocks dingo is actually tracking: a partial
 // for an unknown hash is dropped rather than growing the cache.
 func TestRetainLeiosPartialTxsIgnoresUnknownBlock(t *testing.T) {
+	t.Parallel()
+
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	o.retainLeiosPartialTxs(99, []byte{0xde, 0xad}, []cbor.RawMessage{
 		mustCbor(t, "tx0"),
@@ -326,6 +338,8 @@ func TestRetainLeiosPartialTxsIgnoresUnknownBlock(t *testing.T) {
 // than just a manifest, and a steady trickle of re-offers would otherwise keep
 // refreshing it just before expiry, so it would never be pruned.
 func TestStoreLeiosEndorserBlockPartialDoesNotRefreshCacheTTL(t *testing.T) {
+	t.Parallel()
+
 	const txCount = 100
 	const diffused = 40
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 19, txCount)
