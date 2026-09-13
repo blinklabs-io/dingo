@@ -646,7 +646,9 @@ views make a live decoded block substantially larger than its wire bytes.
 
 A batch is fetched for the header queue that existed when it was requested, so
 `LedgerState` binds each batch to a chain-rollback generation, bumped before
-every primary-chain rollback. `rollbackChainAndStateDeferred` and the windowed
+every primary-chain rollback and restored when validation refuses one, so a
+rollback the chain never applied does not supersede the batch in flight.
+`rollbackChainAndStateDeferred` and the windowed
 replay-recovery rollback serialize generation publication and chain mutation
 with `chainsyncBlockfetchMutex`, so they cannot interleave with a flush, and
 publish deferred chain events only after releasing that mutex. Callers must
