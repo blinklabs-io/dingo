@@ -992,10 +992,14 @@ func TestProviderConfigSectionKeyNilValue(t *testing.T) {
 
 func TestProviderConfigTLSSectionIsWalked(t *testing.T) {
 	t.Parallel()
-	rendered := providerConfigValue(reflect.ValueOf(map[string]any{"tls": map[string]any{
-		"mode": "manual", "certFilePath": "/etc/dingo/api.crt", "token": "secret",
-	}})).String()
-	if !strings.Contains(rendered, "manual") || !strings.Contains(rendered, "/etc/dingo/api.crt") || strings.Contains(rendered, "secret") {
+	rendered := providerConfigValue(
+		reflect.ValueOf(map[string]any{"tls": map[string]any{
+			"mode": "manual", "certFilePath": "/etc/dingo/api.crt", "token": "secret",
+		}}),
+	).String()
+	if !strings.Contains(rendered, "manual") ||
+		!strings.Contains(rendered, "/etc/dingo/api.crt") ||
+		strings.Contains(rendered, "secret") {
 		t.Errorf("tls section rendered incorrectly: %s", rendered)
 	}
 }

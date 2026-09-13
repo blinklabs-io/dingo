@@ -87,15 +87,18 @@ func TestForgePrimaryChainTipToleranceSlotsIsOperatorTunable(t *testing.T) {
 		)
 	})
 
-	t.Run("an explicit value is not overwritten by defaults", func(t *testing.T) {
-		loaded := internalconfig.Config{
-			ForgePrimaryChainTipToleranceSlots: 9,
-		}
-		loaded.ApplyDefaults()
-		require.Equal(
-			t,
-			uint64(9),
-			loaded.ForgePrimaryChainTipToleranceSlots,
-		)
-	})
+	t.Run(
+		"an explicit value is not overwritten by defaults",
+		func(t *testing.T) {
+			loaded := internalconfig.Config{
+				ForgePrimaryChainTipToleranceSlots: 9,
+			}
+			loaded.ApplyDefaults()
+			require.Equal(
+				t,
+				uint64(9),
+				loaded.ForgePrimaryChainTipToleranceSlots,
+			)
+		},
+	)
 }

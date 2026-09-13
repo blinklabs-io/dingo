@@ -852,7 +852,9 @@ func TestEnsureReferencedEndorserBlocksAwaitsLateFetchOnCIPPath(t *testing.T) {
 // missing closure is already retried by the bounded fetch that follows, so
 // paying a second diffusion window here would add head-of-line blocking on the
 // pipeline for nothing -- exactly what this PR removes.
-func TestEnsureReferencedEndorserBlocksSkipsGraceOnCertDrivenPath(t *testing.T) {
+func TestEnsureReferencedEndorserBlocksSkipsGraceOnCertDrivenPath(
+	t *testing.T,
+) {
 	parent, certifier, _ := leiosTestCertifiedBlockPair(t)
 
 	var sawGracePhase atomic.Bool

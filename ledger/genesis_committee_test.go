@@ -60,9 +60,18 @@ func TestCreateGenesisBlockSeedsCommittee(t *testing.T) {
 			Credential: lcommon.NewBlake2b224(coldKey),
 		})
 		require.NoError(t, err)
-		require.NotNil(t, member, "genesis committee member %s must resolve", coldKeyHex)
+		require.NotNil(
+			t,
+			member,
+			"genesis committee member %s must resolve",
+			coldKeyHex,
+		)
 		require.False(t, member.Resigned)
-		require.Equal(t, uint64(musashiGenesisCommitteeExpiry), member.ExpiryEpoch)
+		require.Equal(
+			t,
+			uint64(musashiGenesisCommitteeExpiry),
+			member.ExpiryEpoch,
+		)
 	}
 }
 
@@ -105,7 +114,11 @@ func TestCreateGenesisBlockSeedsCommitteeOnExistingDatabase(t *testing.T) {
 			"genesis committee member %s must be backfilled on an existing database",
 			coldKeyHex,
 		)
-		require.Equal(t, uint64(musashiGenesisCommitteeExpiry), member.ExpiryEpoch)
+		require.Equal(
+			t,
+			uint64(musashiGenesisCommitteeExpiry),
+			member.ExpiryEpoch,
+		)
 	}
 }
 
@@ -120,7 +133,11 @@ func TestCreateGenesisBlockCommitteeReplayIdempotent(t *testing.T) {
 	require.NoError(t, ls.createGenesisBlock())
 	require.NoError(t, ls.createGenesisBlock())
 
-	require.Equal(t, len(musashiGenesisCommitteeColdKeys), committeeMemberRowCount(t, db))
+	require.Equal(
+		t,
+		len(musashiGenesisCommitteeColdKeys),
+		committeeMemberRowCount(t, db),
+	)
 }
 
 // TestCreateGenesisBlockCommitteeEnactmentWins proves a real UpdateCommittee
@@ -169,7 +186,11 @@ func TestCreateGenesisBlockCommitteeEnactmentWins(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.NotNil(t, other)
-		require.Equal(t, uint64(musashiGenesisCommitteeExpiry), other.ExpiryEpoch)
+		require.Equal(
+			t,
+			uint64(musashiGenesisCommitteeExpiry),
+			other.ExpiryEpoch,
+		)
 	}
 }
 

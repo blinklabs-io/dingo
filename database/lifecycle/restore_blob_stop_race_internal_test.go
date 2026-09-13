@@ -130,7 +130,9 @@ func newCancelOnRestoreTestHost(
 // StopFunc: store.CloseContext directly, unlike that test's own
 // remoteTestBlobStore, whose Stop always uses context.Background and so
 // cannot observe this race).
-func TestRestoreBlobStoreStopWaitsForProviderAfterCanceledRestore(t *testing.T) {
+func TestRestoreBlobStoreStopWaitsForProviderAfterCanceledRestore(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	backupPath := filepath.Join(t.TempDir(), "blob.backup")
@@ -183,7 +185,8 @@ func TestRestoreBlobStoreStopWaitsForProviderAfterCanceledRestore(t *testing.T) 
 		"restoreBlobStore did not return after the provider finished stopping",
 	)
 	require.True(
-		t, store.stopFinished.Load(),
+		t,
+		store.stopFinished.Load(),
 		"blob provider must be fully stopped by the time restoreBlobStore returns",
 	)
 	require.ErrorContains(t, err, "context canceled")
