@@ -41,8 +41,11 @@ type ScheduledTask struct {
 }
 
 type Scheduler struct {
-	ticker             *time.Ticker
-	quit               chan struct{}
+	ticker *time.Ticker
+	quit   chan struct{}
+	// updateIntervalChan has a capacity of one: ChangeInterval coalesces a
+	// pending interval rather than dropping the new one, since the latest
+	// call always supersedes an older undelivered value. See ChangeInterval.
 	updateIntervalChan chan time.Duration
 	tasks              []*ScheduledTask
 	interval           time.Duration
@@ -76,7 +79,7 @@ func NewSchedulerWithConfig(
 	return &Scheduler{
 		interval:           interval,
 		quit:               make(chan struct{}),
-		updateIntervalChan: make(chan time.Duration),
+		updateIntervalChan: make(chan time.Duration, 1),
 		tasks:              []*ScheduledTask{},
 		workerPoolSize:     config.WorkerPoolSize,
 		taskQueue:          make(chan func(), config.TaskQueueSize),
@@ -200,6 +203,12 @@ func (st *Scheduler) Register(
 
 // ChangeInterval updates the tick interval of the Scheduler at runtime.
 // It returns an error if newInterval is not positive.
+//
+// The new interval is applied when run() next reaches its select, including
+// when the call precedes Start or run() is servicing a tick. The call never
+// blocks on run(): updateIntervalChan holds one pending interval, and a full
+// buffer holds a value this call supersedes, so it is drained and the send
+// retried.
 func (st *Scheduler) ChangeInterval(newInterval time.Duration) error {
 	if newInterval <= 0 {
 		return fmt.Errorf(
@@ -207,11 +216,17 @@ func (st *Scheduler) ChangeInterval(newInterval time.Duration) error {
 			newInterval,
 		)
 	}
-	select {
-	case st.updateIntervalChan <- newInterval:
-	default:
+	for {
+		select {
+		case st.updateIntervalChan <- newInterval:
+			return nil
+		default:
+		}
+		select {
+		case <-st.updateIntervalChan:
+		default:
+		}
 	}
-	return nil
 }
 
 // Stop terminates the scheduler. Start and Stop share lifecycleMutex so a

@@ -335,3 +335,70 @@ func TestSeedMetadataTemplateKeepsExistingData(t *testing.T) {
 	// for the sentinel query to contradict.
 	assertMigratedSchema(t, path)
 }
+
+// TestMetadataTemplateBytesReturnsMigratedSchema pins MetadataTemplateBytes'
+// contract: a caller that forks a child test process (see
+// database/lifecycle's TestSnapshotInterruptedBeforeManifest) relies on
+// these bytes being a real, complete migrated schema it can hand to a
+// child via SeedMetadataTemplateBytes, not merely some non-empty payload.
+func TestMetadataTemplateBytesReturnsMigratedSchema(t *testing.T) {
+	raw, err := MetadataTemplateBytes()
+	if err != nil {
+		t.Fatalf("MetadataTemplateBytes: %v", err)
+	}
+	if len(raw) == 0 {
+		t.Fatal("MetadataTemplateBytes returned no bytes")
+	}
+	assertMigratedSchema(t, materializeTemplate(t, raw))
+}
+
+// TestSeedMetadataTemplateBytesCreatesDir mirrors
+// TestSeedMetadataTemplateCreatesDir for the externally supplied bytes path:
+// SeedMetadataTemplateBytes must create a missing directory and leave a
+// complete migrated schema in it.
+func TestSeedMetadataTemplateBytesCreatesDir(t *testing.T) {
+	raw, err := MetadataTemplateBytes()
+	if err != nil {
+		t.Fatalf("MetadataTemplateBytes: %v", err)
+	}
+	dir := filepath.Join(t.TempDir(), "missing", "data")
+	if err := SeedMetadataTemplateBytes(dir, raw); err != nil {
+		t.Fatalf("SeedMetadataTemplateBytes: %v", err)
+	}
+	assertMigratedSchema(t, filepath.Join(dir, metadataTemplateFile))
+}
+
+// TestSeedMetadataTemplateBytesKeepsExistingData mirrors
+// TestSeedMetadataTemplateKeepsExistingData: a second SeedMetadataTemplateBytes
+// call against a directory that already has a metadata file must leave it
+// alone. Comparing bytes would not discriminate this (raw is byte-identical
+// to itself), so this plants a sentinel row a rewrite would destroy, exactly
+// as the existing seedMetadataTemplate test does.
+func TestSeedMetadataTemplateBytesKeepsExistingData(t *testing.T) {
+	raw, err := MetadataTemplateBytes()
+	if err != nil {
+		t.Fatalf("MetadataTemplateBytes: %v", err)
+	}
+	dir := t.TempDir()
+	if err := SeedMetadataTemplateBytes(dir, raw); err != nil {
+		t.Fatalf("first SeedMetadataTemplateBytes: %v", err)
+	}
+	path := filepath.Join(dir, metadataTemplateFile)
+	writeSentinel(t, path)
+
+	if err := SeedMetadataTemplateBytes(dir, raw); err != nil {
+		t.Fatalf("second SeedMetadataTemplateBytes: %v", err)
+	}
+
+	rawDB := openMetadataFile(t, path)
+	var sentinel int
+	if err := rawDB.QueryRow(
+		`SELECT count(*) FROM dbtest_sentinel`,
+	).Scan(&sentinel); err != nil {
+		t.Fatalf("read sentinel table after reseed: %v", err)
+	}
+	if sentinel != 1 {
+		t.Errorf("sentinel rows after reseed = %d, want 1", sentinel)
+	}
+	assertMigratedSchema(t, path)
+}

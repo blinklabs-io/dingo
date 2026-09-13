@@ -28,4 +28,12 @@ type ProviderDependencies struct {
 	MaxConnections int
 	Logger         *slog.Logger
 	PromRegistry   prometheus.Registerer
+	// TracingEnabled reports whether OpenTelemetry tracing is configured for
+	// this node (the "tracing"/--tracing/DINGO_TRACING_ENABLED setting). A
+	// provider's sqlstore.OpenDB calls use it to decide whether to pay for
+	// otelsql's per-query span/attribute/metric instrumentation: with no
+	// TracerProvider registered (tracing disabled, the default), that
+	// instrumentation still runs against the no-op provider and allocates
+	// on every single query for zero observability benefit.
+	TracingEnabled bool
 }

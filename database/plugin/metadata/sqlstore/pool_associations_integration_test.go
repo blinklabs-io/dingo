@@ -102,7 +102,7 @@ func testGetPoolDoesNotCorruptConnection(
 	driver, dsn, dialectName, lockNamespace string,
 ) {
 	t.Helper()
-	db, err := OpenDB(driver, dsn, dialectName)
+	db, err := OpenDB(driver, dsn, dialectName, false)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	var dialect Dialect

@@ -1151,9 +1151,10 @@ func (ls *LedgerState) takeContinuationAuditForRewind() (
 // gen is the pointer generation the clear left behind, and it is what makes
 // the restore safe. A nil pointer does not mean "still cleared by this
 // rewind": a chainsync rollback whose ledger tip did not reach its point
-// truncates the chain and then disarms, as does a truncation whose ledger
-// rollback failed, and either can land after the post-rewind tip read and
-// before this lock is taken. truncated is then computed from a tip read that
+// truncates the chain and then disarms, as do a truncation whose ledger
+// rollback failed and the divergence reconciler's rewind to a common ancestor,
+// and any of them can land after the post-rewind tip read and before this lock
+// is taken. truncated is then computed from a tip read that
 // predates that truncation, and the restore put back a window whose fork point
 // the rollback had just deleted -- over a disarm that was deliberate. A
 // generation that has moved says some other owner has decided what the pointer
