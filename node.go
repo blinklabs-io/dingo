@@ -2101,13 +2101,39 @@ func (n *Node) nodeSettingsGateValues() nodesettings.Values {
 // stake aggregate existed. It runs after commit-timestamp recovery and before
 // ledger processing can advance the chain, so the next epoch-boundary snapshot
 // cannot observe a partially populated aggregate.
+//
+// SkipRewardLiveStakeBackfillCheck bypasses the reward_live_stake half of
+// this. The consistency check itself -- not just a genuine repair -- scans
+// the whole live UTxO table every call, so on a mainnet-scale database it
+// costs as much as a full rebuild on every single startup regardless of
+// whether one is needed. This is for advanced/diagnostic use only: skipping
+// it is safe when the database is already known to be consistent (e.g.
+// repeated restarts during investigation of an unrelated issue), but unsafe
+// to leave enabled permanently since it is what catches a stale or
+// pre-migration reward_live_stake table.
+//
+// The flag deliberately does not reach StaleConsensusStakeSnapshotsExist.
+// That is a different kind of check: a pair of indexed EXISTS probes whose
+// cost does not scale with the UTxO set, guarding against snapshots produced
+// by an older accounting version. It fails closed because such a database
+// cannot be safely reconstructed, and no cost argument justifies disabling
+// it, so it runs on every startup whether or not the scan is skipped.
 func (n *Node) backfillRewardLiveStake() error {
 	return n.db.MetadataTxn(true).Do(func(txn *database.Txn) error {
-		needed, err := n.db.Metadata().RewardLiveStakeNeedsBackfill(
-			txn.Metadata(),
-		)
-		if err != nil {
-			return fmt.Errorf("check reward live stake backfill: %w", err)
+		needed := false
+		if n.config.skipRewardLiveStakeBackfillCheck {
+			n.config.logger.Warn(
+				"skipping reward_live_stake backfill consistency check",
+				"component", "node",
+			)
+		} else {
+			var err error
+			needed, err = n.db.Metadata().RewardLiveStakeNeedsBackfill(
+				txn.Metadata(),
+			)
+			if err != nil {
+				return fmt.Errorf("check reward live stake backfill: %w", err)
+			}
 		}
 		staleSnapshots, err := n.db.Metadata().
 			StaleConsensusStakeSnapshotsExist(

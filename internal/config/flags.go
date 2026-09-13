@@ -132,6 +132,11 @@ var flagSpecs = []flagSpec{
 		"error instead of skipping when a consumed UTxO past the Mithril sync boundary cannot be found or recovered",
 	),
 	boolFlag(
+		"SkipRewardLiveStakeBackfillCheck",
+		"skip-reward-live-stake-backfill-check",
+		"skip the reward_live_stake startup consistency check (advanced/diagnostic use only, unsafe to leave enabled permanently)",
+	),
+	boolFlag(
 		"Tracing",
 		"tracing",
 		"enable OpenTelemetry tracing (configure destination with OTEL_EXPORTER_OTLP_* env vars)",

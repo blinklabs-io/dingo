@@ -9703,7 +9703,30 @@ distinguishes an upgraded database with accounts but no aggregate rows from a
 legitimately fresh empty database. Node startup performs the check and rebuild
 after database recovery and before ledger processing. Mithril ledger-state
 import also invokes the rebuild directly, at the end of import once accounts and
-UTxOs are populated. `idx_utxo_staking_deleted_amount` is deliberately kept
+UTxOs are populated.
+
+`skipRewardLiveStakeBackfillCheck` (`--skip-reward-live-stake-backfill-check`,
+`CARDANO_SKIP_REWARD_LIVE_STAKE_BACKFILL_CHECK`, default false) skips the
+`RewardLiveStakeNeedsBackfill` probe and any rebuild it would trigger, and logs
+a warning. The cost it avoids is the check itself, not just a repair: deciding
+whether a backfill is needed scans the live UTxO table, so on a mainnet-scale
+database every startup pays close to the price of a rebuild whether or not one
+is required. It is a diagnostic control, not a tuning knob — the check is what
+catches a stale or pre-migration `reward_live_stake` table, so skipping it is
+only safe against a database already known to be consistent (repeated restarts
+while investigating an unrelated problem) and is unsafe to leave enabled. It is
+deliberately not a provenance-gated field: it records no persisted
+node-settings gate state and does not change how the chain is validated, only
+whether this one startup check runs.
+
+The flag's scope stops there. The same startup step also runs
+`StaleConsensusStakeSnapshotsExist`, and that check is unconditional: it is a
+pair of indexed `EXISTS` probes against `pool_stake_snapshot` and
+`reward_snapshot` whose cost does not grow with the UTxO set, so none of the
+cost argument above applies to it. It fails closed — a database whose consensus
+stake snapshots came from an older accounting version cannot be safely
+reconstructed and must be rebootstrapped — and the flag deliberately does not
+disable it. `idx_utxo_staking_deleted_amount` is deliberately kept
 out of the deferred-index manifest: the API-mode metadata backfill refreshes
 per-credential live-stake aggregates on every flushed batch, and without the
 index each refresh degenerates into a full scan of the growing `utxo` table,

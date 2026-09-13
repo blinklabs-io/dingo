@@ -232,6 +232,7 @@ var logPlainConfigFields = []string{
 	"SocketPath",
 	"StartEra",
 	"StorageMode",
+	"SkipRewardLiveStakeBackfillCheck",
 	"StrictUtxoValidation",
 	"TargetNumberOfActivePeers",
 	"TargetNumberOfEstablishedPeers",
