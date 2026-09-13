@@ -4768,13 +4768,16 @@ required because gouroboros acknowledges every ID returned by a peer; support
 for acknowledging only the fetched prefix would permit batched requests.
 
 TxSubmission checks reply counts and aggregate body bytes against the
-outstanding request before decoding any transaction. Replies exceeding the
-advertised byte budget are classified and counted as size mismatches. Replies
-within that budget still require matching requested hashes and eras and an
-exact body or wrapped-wire size match before any mempool admission. A peer may
-omit requested bodies or return them in a different order. Duplicate returned
-bodies are rejected; validated bodies are restored to request order before
-admission so reply ordering cannot reorder the mempool's dependencies.
+outstanding request before decoding any transaction; the aggregate budget
+includes the same per-body discrepancy allowance described below. Replies
+exceeding it are classified and counted as size mismatches. Replies within
+budget still require ordered hash/era matching and a body or wrapped-wire
+size within 32 bytes of the advertised size for each transaction (matching
+ouroboros-network's TxSubmission V2 `const_MAX_TX_SIZE_DISCREPANCY`) before
+any mempool admission.
+A peer may omit requested bodies or return them in a different order. Duplicate
+returned bodies are rejected; validated bodies are restored to request order
+before admission so reply ordering cannot reorder the mempool's dependencies.
 
 The selected pool manages pending transactions:
 
