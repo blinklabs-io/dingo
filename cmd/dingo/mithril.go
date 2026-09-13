@@ -587,6 +587,7 @@ func runMithrilSync(
 		RunMode:           string(config.RunModeLoad),
 		BackfillBatchSize: cfg.BackfillBatchSize,
 		DatabaseWorkers:   cfg.DatabaseWorkers,
+		Tracing:           cfg.Tracing,
 		Logger:            logger,
 		OnProgress:        onProgress,
 	})

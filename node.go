@@ -571,6 +571,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			StorageMode:    string(n.config.storageMode),
 			MaxConnections: n.config.DatabaseWorkerPoolConfig.WorkerPoolSize,
 			Logger:         n.config.logger, PromRegistry: n.config.promRegistry,
+			TracingEnabled: n.config.tracing,
 		},
 	)
 	if err != nil {
