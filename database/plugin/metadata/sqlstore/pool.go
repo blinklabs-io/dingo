@@ -2107,10 +2107,8 @@ ORDER BY p.id DESC`,
 		}
 		if registration.MetadataUrl != "" {
 			certificate.PoolMetadata = &lcommon.PoolMetadata{
-				Url: registration.MetadataUrl,
-				Hash: lcommon.PoolMetadataHash(
-					lcommon.NewBlake2b256(registration.MetadataHash),
-				),
+				Url:  registration.MetadataUrl,
+				Hash: lcommon.PoolMetadataHash(registration.MetadataHash),
 			}
 		}
 		ret = append(ret, certificate)
