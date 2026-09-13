@@ -723,11 +723,6 @@ func TestValidateTxByron_MinimumFee(t *testing.T) {
 	t.Parallel()
 
 	const txSize = 10
-	input := newTestInput(0x01, 0)
-	ls := newMockLedgerState()
-	ls.byronFeeSummand = 1_000_000_001
-	ls.byronFeeMultiplier = 1_000_000_000
-	ls.addUtxo(input, newTestOutput(1_000))
 
 	tests := []struct {
 		name      string
@@ -747,6 +742,11 @@ func TestValidateTxByron_MinimumFee(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
+			input := newTestInput(0x01, 0)
+			ls := newMockLedgerState()
+			ls.byronFeeSummand = 1_000_000_001
+			ls.byronFeeMultiplier = 1_000_000_000
+			ls.addUtxo(input, newTestOutput(1_000))
 			tx := &testByronTx{
 				inputs:  []lcommon.TransactionInput{input},
 				outputs: []lcommon.TransactionOutput{newTestOutput(test.output)},
