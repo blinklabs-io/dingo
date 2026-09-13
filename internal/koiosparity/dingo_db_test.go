@@ -17,6 +17,7 @@ package koiosparity
 import (
 	"context"
 	"encoding/hex"
+	"fmt"
 	"math/big"
 	"testing"
 
@@ -592,4 +593,39 @@ func TestDingoDBGetEarliestAvailableEpochResolvesBoundaryEpoch(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, uint64(11), epoch)
+}
+
+// TestDingoDBGetEarliestAvailableEpochRejectsNegativeEpoch verifies that
+// malformed epoch rows fail closed instead of wrapping their negative IDs into
+// an incorrect uint64 lower bound.
+func TestDingoDBGetEarliestAvailableEpochRejectsNegativeEpoch(t *testing.T) {
+	t.Parallel()
+
+	for _, epochID := range []int{-1, -2} {
+		t.Run(fmt.Sprintf("epoch_id_%d", epochID), func(t *testing.T) {
+			t.Parallel()
+
+			db, gdb := openTestDingoDB(t)
+
+			require.NoError(t, gdb.Exec(
+				`INSERT INTO epoch (epoch_id, start_slot, length_in_slots)
+				 VALUES (?, ?, ?)`,
+				epochID, 1_000, 432_000,
+			).Error)
+			require.NoError(t, gdb.Exec(
+				`INSERT INTO sync_state (sync_key, value) VALUES (?, ?)`,
+				mithrilLedgerSlotSyncKey, "1000",
+			).Error)
+
+			_, _, err := db.GetEarliestAvailableEpoch(context.Background())
+			require.EqualError(
+				t,
+				err,
+				fmt.Sprintf(
+					"resolve epoch for mithril boundary slot 1000: negative epoch %d",
+					epochID,
+				),
+			)
+		})
+	}
 }

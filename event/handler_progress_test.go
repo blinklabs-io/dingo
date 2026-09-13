@@ -343,7 +343,11 @@ func TestHandlerProgressSamplesTwicePerInterval(t *testing.T) {
 		handlerProgressWarnInterval,
 	} {
 		tick := handlerProgressTick(interval)
-		require.Positive(t, tick, "time.NewTicker panics on a non-positive period")
+		require.Positive(
+			t,
+			tick,
+			"time.NewTicker panics on a non-positive period",
+		)
 		require.LessOrEqual(t, tick, interval/2,
 			"first report is bounded by interval+tick, so tick must not "+
 				"exceed half the interval for the documented 1.5*interval "+

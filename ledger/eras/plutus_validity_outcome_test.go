@@ -484,7 +484,10 @@ func TestValidateTxRequiresDeclaredValidityToMatchExecution(
 							Memory: 10_000_000,
 						},
 						CostModels: map[uint][]int64{
-							0: syntheticFullCostModel(t, lang.LanguageVersionV1),
+							0: syntheticFullCostModel(
+								t,
+								lang.LanguageVersionV1,
+							),
 						},
 					},
 				)
@@ -505,7 +508,10 @@ func TestValidateTxRequiresDeclaredValidityToMatchExecution(
 							Memory: 10_000_000,
 						},
 						CostModels: map[uint][]int64{
-							0: syntheticFullCostModel(t, lang.LanguageVersionV1),
+							0: syntheticFullCostModel(
+								t,
+								lang.LanguageVersionV1,
+							),
 						},
 					},
 				)
@@ -526,7 +532,10 @@ func TestValidateTxRequiresDeclaredValidityToMatchExecution(
 							Memory: 10_000_000,
 						},
 						CostModels: map[uint][]int64{
-							1: syntheticFullCostModel(t, lang.LanguageVersionV2),
+							1: syntheticFullCostModel(
+								t,
+								lang.LanguageVersionV2,
+							),
 						},
 					},
 				)
@@ -549,7 +558,10 @@ func TestValidateTxRequiresDeclaredValidityToMatchExecution(
 							Memory: 10_000_000,
 						},
 						CostModels: map[uint][]int64{
-							0: syntheticFullCostModel(t, lang.LanguageVersionV1),
+							0: syntheticFullCostModel(
+								t,
+								lang.LanguageVersionV1,
+							),
 						},
 					},
 				)
@@ -572,7 +584,10 @@ func TestValidateTxRequiresDeclaredValidityToMatchExecution(
 							Memory: 10_000_000,
 						},
 						CostModels: map[uint][]int64{
-							1: syntheticFullCostModel(t, lang.LanguageVersionV2),
+							1: syntheticFullCostModel(
+								t,
+								lang.LanguageVersionV2,
+							),
 						},
 					},
 				)

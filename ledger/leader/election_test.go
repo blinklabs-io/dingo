@@ -1324,12 +1324,23 @@ func TestElectionParentCancellationWaitsForGeneration(t *testing.T) {
 	inner := newMockStakeProvider()
 	inner.totalStake = 10000
 	inner.poolStakes[string(pool[:])] = 1000
-	blocked := &blockingStakeProvider{mockStakeProvider: inner, started: make(chan struct{}), release: make(chan struct{})}
+	blocked := &blockingStakeProvider{
+		mockStakeProvider: inner,
+		started:           make(chan struct{}),
+		release:           make(chan struct{}),
+	}
 	var release sync.Once
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Stop()
 	defer release.Do(func() { close(blocked.release) })
-	e := NewElection(pool, electionTestVRFSeed, blocked, newMockEpochProvider(), bus, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	e := NewElection(
+		pool,
+		electionTestVRFSeed,
+		blocked,
+		newMockEpochProvider(),
+		bus,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
 	parent, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	require.NoError(t, e.Start(parent))
