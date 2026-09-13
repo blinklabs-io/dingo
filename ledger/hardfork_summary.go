@@ -16,10 +16,60 @@ package ledger
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 )
+
+const (
+	maxHardForkDurationNanoseconds    = uint64(1<<63 - 1)
+	maxHardForkSlotLengthMilliseconds = maxHardForkDurationNanoseconds / uint64(time.Millisecond)
+)
+
+func hardForkCachedEraParams(
+	lengthInSlots uint,
+	slotLengthMilliseconds uint,
+) (hardfork.EraParams, error) {
+	if uint64(slotLengthMilliseconds) > maxHardForkSlotLengthMilliseconds {
+		return hardfork.EraParams{}, fmt.Errorf(
+			"slot length %dms overflows time.Duration",
+			slotLengthMilliseconds,
+		)
+	}
+	params := hardfork.EraParams{
+		EpochSize:  uint64(lengthInSlots),
+		SlotLength: time.Duration(slotLengthMilliseconds) * time.Millisecond,
+	}
+	if err := params.Validate(); err != nil {
+		return hardfork.EraParams{}, err
+	}
+	return params, nil
+}
+
+func hardForkCachedEpochDuration(
+	lengthInSlots uint,
+	slotLengthMilliseconds uint,
+) (time.Duration, error) {
+	params, err := hardForkCachedEraParams(
+		lengthInSlots,
+		slotLengthMilliseconds,
+	)
+	if err != nil {
+		return 0, err
+	}
+	slotLengthNanoseconds := uint64(params.SlotLength)
+	if uint64(lengthInSlots) >
+		maxHardForkDurationNanoseconds/slotLengthNanoseconds {
+		return 0, fmt.Errorf(
+			"epoch duration overflows time.Duration: length=%d slots, slot length=%s",
+			lengthInSlots,
+			params.SlotLength,
+		)
+	}
+	// #nosec G115 -- the checked product is bounded by MaxInt64.
+	return time.Duration(uint64(lengthInSlots) * slotLengthNanoseconds), nil
+}
 
 // HardForkSummary constructs a hardfork.Summary describing the chain's era
 // history from the LedgerState's current epoch cache, tip, current era, and
@@ -87,10 +137,20 @@ func (ls *LedgerState) hardForkSummaryAnchoredAt(
 		eraID := first.EraId
 		// Per-epoch params within an era are expected to be constant; we use
 		// the first epoch's values as the era-level params.
-		// first.SlotLength is protocol-bounded (milliseconds per slot).
-		// #nosec G115
-		slotLen := time.Duration(first.SlotLength) * time.Millisecond
-		epochSize := uint64(first.LengthInSlots)
+		eraParams, err := hardForkCachedEraParams(
+			first.LengthInSlots,
+			first.SlotLength,
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"ledger: cached epoch %d (era %d) params invalid: %w",
+				first.EpochId,
+				eraID,
+				err,
+			)
+		}
+		slotLen := eraParams.SlotLength
+		epochSize := eraParams.EpochSize
 
 		start := hardfork.Bound{
 			RelativeTime: relTime,
@@ -103,10 +163,27 @@ func (ls *LedgerState) hardForkSummaryAnchoredAt(
 		j := i
 		for j < len(cache) && cache[j].EraId == eraID {
 			ep := cache[j]
-			// LengthInSlots and SlotLength are protocol-bounded uints.
-			// #nosec G115
-			relTime += time.Duration(ep.LengthInSlots) *
-				time.Duration(ep.SlotLength) * time.Millisecond
+			epochDuration, err := hardForkCachedEpochDuration(
+				ep.LengthInSlots,
+				ep.SlotLength,
+			)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"ledger: cached epoch %d (era %d) params invalid: %w",
+					ep.EpochId,
+					eraID,
+					err,
+				)
+			}
+			if uint64(relTime) >
+				maxHardForkDurationNanoseconds-uint64(epochDuration) {
+				return nil, fmt.Errorf(
+					"ledger: cumulative cached epoch duration overflows time.Duration at epoch %d (era %d)",
+					ep.EpochId,
+					eraID,
+				)
+			}
+			relTime += epochDuration
 			j++
 		}
 
