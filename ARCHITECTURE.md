@@ -5337,6 +5337,86 @@ requires the same validated interval; `PoolCredentials.KESSign` remains the
 lower-level cryptographic primitive used by credential tooling and tests that
 may not have Shelley genesis context.
 
+### KES Agent (`kesagent/`, `ledger/forging/kes_signer.go`)
+
+`--shelley-kes-agent-socket` sources the KES signing key from an external
+[bursa](https://github.com/blinklabs-io/bursa) KES agent process over a
+Unix-domain socket, instead of a local `--shelley-kes-key` file. The VRF key
+and operational certificate are always still read from local files: the
+agent protocol carries only the KES signing key (and, in serve-key mode, the
+operational certificate alongside it). `kesagent.Client` implements the
+agent's real wire protocol (`docs/signer/kes-agent-protocol.md` in
+`blinklabs-io/bursa`: a 4-byte big-endian length prefix, then a JSON payload,
+capped per-message and bounded by an explicit handshake/sign timeout), so it
+interoperates with a real bursa agent rather than a bespoke one.
+
+Two modes, `--shelley-kes-agent-mode` (default `serve-key` once a socket is
+set):
+
+- **serve-key**: the agent pushes the evolving KES secret key, its
+  verification key, and the operational certificate; the node signs headers
+  locally exactly as it would with a local key file. Installation goes
+  through `PoolCredentials.LoadFromAgentServeKey`, which shares
+  `LoadFromFiles`'s identity/generation-bump path, so once installed,
+  agent-served material is indistinguishable from a local key file to every
+  existing credentialGeneration-gated signing path. A background
+  `Client.Run` loop keeps installing every subsequent push (a key rotation)
+  for the life of the node.
+- **sign**: the node forwards header bytes to the agent and receives
+  signatures back; the KES secret key never enters the node process.
+  `PoolCredentials.LoadFromAgentSign` installs VRF/opcert material as usual
+  but leaves the local KES secret key unset, storing a `RemoteKESSigner`
+  instead.
+
+**The non-negotiable invariant**: whichever source supplies the key, KES
+signing goes through the same `credentialGeneration.kesSign`, and that method
+itself re-validates the operational-certificate lifetime
+(`validateKESPeriod`) before signing — not just its callers
+(`BlockForger.SignBlockHeader`, `DefaultBlockBuilder.buildBlock`). A remote
+signer receives the caller's period unchanged (matching the bursa wire
+protocol, which also takes an absolute period and translates internally), so
+the same monotonic-progression check in `updateKESPeriodUnsafe` applies to it
+too, tracked via a `remoteKESPeriod` counter parallel to a local
+`*kes.SecretKey`'s own `Period` field. This defense-in-depth check is what an
+earlier, corrupted attempt at this feature (dingo#3115) skipped by calling
+straight through to the agent instead of through `kesSign`, letting a
+producer sign outside its operational certificate's lifetime on both the
+agent and local paths.
+
+Every value read off the agent socket is treated as untrusted input, since the
+socket is attacker-reachable whenever its filesystem path is:
+
+- The initial handshake (`Client` dial + `Hello` read) is bounded by
+  `HelloTimeout` (default 5s) in both size (`MaxHelloFrameLen`) and time.
+- A sign-mode round trip is bounded by `SignTimeout` (default 500ms,
+  validated to stay under one mainnet slot by
+  `internal/config.ValidateKESAgentSignTimeout` — a sign call blocks the
+  slot-aligned forging loop).
+- A pushed serve-key key is validated end to end before installation: exact
+  field sizes, its verification key matches its own pushed operational
+  certificate, and a self-sign probe proves the secret key, verification key,
+  and period are mutually consistent (rather than trusting the agent's
+  report of them).
+- A sign-mode response is validated by type, by its echoed period matching
+  the request, and by verifying the returned signature itself against the
+  local operational certificate's committed KES verification key
+  (`kes.VerifySignedKES`) — this subsumes checking "type or period" by
+  proving the signature is actually valid for the requested inputs.
+
+`internal/config.ValidateKESKeySources` rejects a block producer that sets
+both `shelleyKesKey` and `shelleyKesAgentSocket`, so an operator's explicit
+choice of key source is never silently overridden. `Config.Validate` no
+longer requires a local `shelleyKesKey` when a KES agent socket is
+configured — an agent-only configuration must be able to start.
+
+`Client.Close` never holds its mutex across a blocking network read: it only
+ever grabs and clears the current connection under the lock, then closes it
+outside the lock. That is what lets it interrupt a goroutine parked in
+`AwaitPushedKey`'s unbounded idle-between-pushes read — the state
+`Client.Run`'s background loop spends nearly all its time in — during
+shutdown; holding the lock across that read instead (the natural first
+attempt) deadlocks `Close` behind the very read only it can unblock.
+
 ### Leios Announcement Admission (`ouroboros/`)
 
 After header validation, at most two distinct ranking-block announcements are

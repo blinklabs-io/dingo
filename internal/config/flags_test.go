@@ -957,6 +957,40 @@ func loadConfigThroughPipeline(
 	return cfg, nil
 }
 
+// TestPipeline_KESAgentSignTimeoutBounds pins the CLI enforcement of the
+// slot-boundary bound on shelleyKesAgentSignTimeout end to end through
+// loadConfigThroughPipeline, rather than only through cfg.validate directly.
+//
+// Not t.Parallel: loadConfigThroughPipeline's resetGlobalConfig writes the
+// package-level globalConfig directly with no synchronization of its own,
+// like every other loadConfigThroughPipeline-based test in this file.
+func TestPipeline_KESAgentSignTimeoutBounds(t *testing.T) {
+	_, err := loadConfigThroughPipeline(
+		t,
+		"",
+		[]string{"--shelley-kes-agent-sign-timeout=1s"},
+	)
+	if err == nil ||
+		!strings.Contains(err.Error(), "shelleyKesAgentSignTimeout") {
+		t.Fatalf("CLI accepted a one-slot KES agent sign timeout: %v", err)
+	}
+
+	cfg, err := loadConfigThroughPipeline(
+		t,
+		"",
+		[]string{"--shelley-kes-agent-sign-timeout=999ms"},
+	)
+	if err != nil {
+		t.Fatalf("CLI rejected a sub-slot KES agent sign timeout: %v", err)
+	}
+	if cfg.ShelleyKESAgentSignTimeout != 999*time.Millisecond {
+		t.Fatalf(
+			"CLI sign timeout = %s, want 999ms",
+			cfg.ShelleyKESAgentSignTimeout,
+		)
+	}
+}
+
 // TestPipeline_EmptyMidnightHostUsesLoopbackDefault pins the merged-config
 // defaulting contract: an explicitly empty higher-precedence environment value
 // must resolve to the same safe loopback host that the Midnight server uses.

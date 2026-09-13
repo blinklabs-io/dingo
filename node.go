@@ -50,6 +50,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/node/ledgerpeers"
 	"github.com/blinklabs-io/dingo/internal/offchainmetadata"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
+	"github.com/blinklabs-io/dingo/kesagent"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/leader"
@@ -104,8 +105,15 @@ type Node struct {
 	// ouroborosConfig retains the settings half of the config Run built, so a
 	// live restore can reconstruct ouroboros against rebuilt dependencies
 	// without recomputing them and drifting from Run.
-	ouroborosConfig              ouroborosPkg.OuroborosConfig
-	blockForger                  *forging.BlockForger
+	ouroborosConfig ouroborosPkg.OuroborosConfig
+	blockForger     *forging.BlockForger
+	// kesAgentClient is set when shelleyKESAgentSocket is configured, in
+	// either serve-key or sign mode. validateBlockProducerStartup owns
+	// dialing/closing it (closing the prior one before replacing it, so a
+	// live-lifecycle rebuild via reinitializeBlockProducer cannot leak a
+	// connection); node_shutdown.go closes it during graceful shutdown.
+	kesAgentClient               *kesagent.Client
+	kesAgentCancel               context.CancelFunc
 	leaderElection               *leader.Election
 	rtsMetrics                   *rtsMetrics
 	shutdownFuncs                []func(context.Context) error
@@ -1701,6 +1709,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			if n.blockForger != nil {
 				n.blockForger.Stop()
 			}
+			n.closeKESAgentClient()
 			if n.leaderElection != nil {
 				logErrIfNotNil(
 					n.config.logger,

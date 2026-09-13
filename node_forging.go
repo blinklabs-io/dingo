@@ -23,10 +23,12 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/blinklabs-io/bursa"
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/leiosheader"
+	"github.com/blinklabs-io/dingo/kesagent"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
@@ -66,7 +68,14 @@ func (n *Node) validateBlockProducerStartupAtSlot(
 	currentSlot uint64,
 ) (*forging.PoolCredentials, error) {
 	creds := forging.NewPoolCredentials()
-	if err := creds.LoadFromFiles(
+	if n.config.shelleyKESAgentSocket != "" {
+		if err := n.loadBlockProducerCredentialsFromAgent(creds); err != nil {
+			return nil, fmt.Errorf(
+				"load pool credentials from KES agent: %w",
+				err,
+			)
+		}
+	} else if err := creds.LoadFromFiles(
 		n.config.shelleyVRFKey,
 		n.config.shelleyKESKey,
 		n.config.shelleyOperationalCertificate,
@@ -105,6 +114,180 @@ func (n *Node) validateBlockProducerStartupAtSlot(
 		"opcert_expiry_period", creds.OpCertExpiryPeriod(),
 	)
 	return creds, nil
+}
+
+// loadBlockProducerCredentialsFromAgent dials the configured KES agent and
+// installs its material into creds, in either serve-key or sign mode. VRF and
+// the operational certificate are always still read from local files; the
+// KES agent protocol carries only the KES signing key (and, in serve-key
+// mode, the opcert alongside it).
+//
+// It closes and replaces any previously dialed agent client first: this
+// method also runs on a live-lifecycle rebuild
+// (reinitializeBlockProducer -> validateBlockProducerStartup), and must not
+// leak the prior connection or its background goroutine.
+func (n *Node) loadBlockProducerCredentialsFromAgent(
+	creds *forging.PoolCredentials,
+) error {
+	n.closeKESAgentClient()
+
+	mode := n.config.shelleyKESAgentMode
+	if mode == "" {
+		mode = kesagent.ModeServeKey
+	}
+
+	switch mode {
+	case kesagent.ModeServeKey:
+		return n.startKESAgentServeKey(creds)
+	case kesagent.ModeSign:
+		return n.startKESAgentSign(creds)
+	default:
+		return fmt.Errorf("unknown KES agent mode %q", mode)
+	}
+}
+
+// startKESAgentServeKey blocks for the agent's initial key push, installs it,
+// and starts a background loop that installs every subsequent push (a KES
+// key rotation) for as long as the node runs.
+func (n *Node) startKESAgentServeKey(creds *forging.PoolCredentials) error {
+	client, err := kesagent.NewClient(kesagent.Config{
+		SocketPath: n.config.shelleyKESAgentSocket,
+		Mode:       kesagent.ModeServeKey,
+		Logger:     n.config.logger,
+	})
+	if err != nil {
+		return err
+	}
+
+	install := func(pk kesagent.PushedKey) error {
+		return creds.LoadFromAgentServeKey(
+			n.config.shelleyVRFKey,
+			agentMaterialFromPushedKey(pk),
+		)
+	}
+
+	// The initial push must succeed before startup can proceed -- the same
+	// contract LoadFromFiles has (a load failure fails block-producer
+	// startup outright) -- bounded so a dead agent fails startup rather than
+	// hanging it.
+	//nolint:contextcheck // n.ctx is the node's lifecycle context; startup itself is bounded here
+	ctx, cancel := context.WithTimeout(
+		n.blockProducerContext(),
+		kesagent.DefaultHelloTimeout*2,
+	)
+	defer cancel()
+	pk, err := client.AwaitPushedKey(ctx)
+	if err != nil {
+		_ = client.Close()
+		return fmt.Errorf("await initial KES agent key push: %w", err)
+	}
+	if err := install(pk); err != nil {
+		_ = client.Close()
+		return err
+	}
+
+	n.kesAgentClient = client
+	//nolint:contextcheck // background loop is bound to the node's lifecycle, not this call
+	runCtx, runCancel := context.WithCancel(n.blockProducerContext())
+	n.kesAgentCancel = runCancel
+	go func() {
+		if err := client.Run(runCtx, install); err != nil &&
+			!errors.Is(err, context.Canceled) {
+			n.config.logger.Error(
+				"kes agent serve-key loop exited",
+				"error", err,
+			)
+		}
+	}()
+	return nil
+}
+
+// startKESAgentSign installs sign-mode credentials: VRF and the operational
+// certificate from local files, KES signing delegated to the agent for the
+// lifetime of the client. There is no background loop in this mode -- the
+// agent evolves its own key internally on every Sign call.
+func (n *Node) startKESAgentSign(creds *forging.PoolCredentials) error {
+	opCertKey, err := bursa.LoadKeyFromFile(
+		n.config.shelleyOperationalCertificate,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"failed to load operational certificate for KES agent sign mode: %w",
+			err,
+		)
+	}
+	client, err := kesagent.NewClient(kesagent.Config{
+		SocketPath:        n.config.shelleyKESAgentSocket,
+		Mode:              kesagent.ModeSign,
+		SignTimeout:       n.config.shelleyKESAgentSignTimeout,
+		KESVKey:           opCertKey.VKey,
+		OpCertStartPeriod: opCertKey.OpCertKesPeriod,
+		Logger:            n.config.logger,
+	})
+	if err != nil {
+		return err
+	}
+	if err := creds.LoadFromAgentSign(
+		n.config.shelleyVRFKey,
+		n.config.shelleyOperationalCertificate,
+		client,
+	); err != nil {
+		_ = client.Close()
+		return err
+	}
+	n.kesAgentClient = client
+	return nil
+}
+
+// agentMaterialFromPushedKey adapts a validated kesagent.PushedKey to
+// ledger/forging's own AgentKESMaterial shape, keeping ledger/forging free of
+// a dependency on the kesagent package.
+func agentMaterialFromPushedKey(
+	pk kesagent.PushedKey,
+) forging.AgentKESMaterial {
+	return forging.AgentKESMaterial{
+		AbsolutePeriod: pk.AbsolutePeriod,
+		KESSKeyData:    pk.KESSKeyData,
+		KESVKey:        pk.KESVKey,
+		OpCert: forging.OpCert{
+			KESVKey:     pk.OpCert.KESVKey,
+			IssueNumber: pk.OpCert.IssueNumber,
+			KESPeriod:   pk.OpCert.KESPeriod,
+			Signature:   pk.OpCert.ColdSig,
+			ColdVKey:    pk.OpCert.ColdVKey,
+		},
+	}
+}
+
+// blockProducerContext returns n.ctx, or context.Background() when it is
+// nil. Production nodes always have n.ctx set by Run() before block-producer
+// startup runs; the fallback exists only so a test that exercises
+// validateBlockProducerStartupAtSlot directly against a bare &Node{config}
+// (the established pattern in node_forging_test.go) does not have to
+// construct a full node lifecycle just to dial a KES agent.
+func (n *Node) blockProducerContext() context.Context {
+	if n.ctx != nil {
+		return n.ctx
+	}
+	return context.Background()
+}
+
+// closeKESAgentClient stops the serve-key background loop (if any) and
+// closes the agent connection. Safe to call when neither exists.
+func (n *Node) closeKESAgentClient() {
+	if n.kesAgentCancel != nil {
+		n.kesAgentCancel()
+		n.kesAgentCancel = nil
+	}
+	if n.kesAgentClient != nil {
+		if err := n.kesAgentClient.Close(); err != nil {
+			n.config.logger.Warn(
+				"failed to close KES agent client",
+				"error", err,
+			)
+		}
+		n.kesAgentClient = nil
+	}
 }
 
 func (n *Node) blockProducerShelleyGenesis() (*shelley.ShelleyGenesis, error) {

@@ -199,6 +199,10 @@ func (n *Node) shutdown() error {
 		n.blockForger.Stop()
 	}
 
+	// Close the KES agent connection (and its serve-key background loop, if
+	// any) now that the forger can no longer call into it.
+	n.closeKESAgentClient()
+
 	// Stop leader election to clean up resources
 	if n.leaderElection != nil {
 		if stopErr := n.leaderElection.Stop(); stopErr != nil {

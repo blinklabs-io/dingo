@@ -131,6 +131,12 @@ func (n *Node) quiesceComponentStops() []namedStop {
 			stop: func() error { n.blockForger.Stop(); return nil },
 		})
 	}
+	if n.kesAgentClient != nil {
+		stops = append(stops, namedStop{
+			name: "kes agent client",
+			stop: func() error { n.closeKESAgentClient(); return nil },
+		})
+	}
 	if n.leaderElection != nil {
 		stops = append(stops, namedStop{
 			name: "leader election",
