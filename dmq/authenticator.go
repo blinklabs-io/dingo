@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
@@ -94,6 +95,17 @@ var (
 	// ErrKESSignatureInvalid is returned when the KES signature over the
 	// message payload does not verify.
 	ErrKESSignatureInvalid = errors.New("dmq: KES signature invalid")
+	// ErrKESPeriodOverflow is returned when a message's claimed KES period
+	// is so large that converting it to a slot (period * slotsPerKesPeriod)
+	// overflows uint64. Rejecting it outright, rather than letting the
+	// multiplication wrap, matters because the wrapped slot can land on a
+	// small, easy-to-produce evolution that has nothing to do with the
+	// claimed period -- silently verifying it there would let a large
+	// claimed period smuggle through a signature made at a completely
+	// different, attacker-chosen evolution.
+	ErrKESPeriodOverflow = errors.New(
+		"dmq: message KES period would overflow when converted to a slot",
+	)
 	// ErrPoolNotInStakeDistribution is returned when the issuing pool holds
 	// no stake in the current distribution.
 	ErrPoolNotInStakeDistribution = errors.New(
@@ -250,7 +262,10 @@ func (a *Authenticator) Verify(msg *ocommon.DmqMessage) error {
 // period; converting that period back into an equivalent slot
 // (period * slotsPerKesPeriod) lets it reuse
 // gouroboros/ledger.VerifyKesComponents unchanged, the same function dingo
-// uses to verify KES signatures on block headers.
+// uses to verify KES signatures on block headers. msg.Payload.KESPeriod is
+// attacker-controlled, so that conversion is checked for uint64 overflow
+// first and rejected with ErrKESPeriodOverflow rather than silently
+// wrapping to an unrelated, smaller slot.
 func (a *Authenticator) verifyKESSignature(msg *ocommon.DmqMessage) error {
 	payloadCbor, err := cbor.Encode(msg.Payload)
 	if err != nil {
@@ -261,6 +276,16 @@ func (a *Authenticator) verifyKESSignature(msg *ocommon.DmqMessage) error {
 		return fmt.Errorf("dmq: encode wrapped message payload: %w", err)
 	}
 
+	// msg.Payload.KESPeriod is attacker-controlled. Reject it outright when
+	// converting it to a slot would overflow uint64, rather than let the
+	// multiplication wrap: a wrapped slot can land on a small, easy evolution
+	// (e.g. 0) that has nothing to do with the claimed period, letting a
+	// message claim an arbitrary period while actually signing at whatever
+	// evolution its wraparound happens to land on.
+	if a.slotsPerKesPeriod != 0 &&
+		msg.Payload.KESPeriod > math.MaxUint64/a.slotsPerKesPeriod {
+		return ErrKESPeriodOverflow
+	}
 	slot := msg.Payload.KESPeriod * a.slotsPerKesPeriod
 	valid, err := gledger.VerifyKesComponents(
 		wrappedCbor,

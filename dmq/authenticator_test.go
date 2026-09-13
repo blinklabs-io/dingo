@@ -62,6 +62,14 @@ type signedMessageParams struct {
 	messageKESPeriod uint64
 	expiresAt        uint32
 	body             []byte
+	// evolutionOverride, when non-nil, is signed over instead of
+	// messageKESPeriod-certKESPeriod. It exists to construct a message
+	// whose claimed messageKESPeriod is inconsistent with the KES
+	// evolution actually used to sign it -- e.g. to prove a
+	// slot-derivation bug lets an attacker claim an arbitrary
+	// messageKESPeriod while signing at whatever small evolution that
+	// claim wraps around to.
+	evolutionOverride *uint64
 }
 
 // validMessage builds a fully and correctly signed DmqMessage: a real
@@ -97,8 +105,12 @@ func validMessage(
 	wrappedCbor, err := cbor.Encode(payloadCbor)
 	require.NoError(t, err)
 
-	require.GreaterOrEqual(t, p.messageKESPeriod, p.certKESPeriod)
 	evolution := p.messageKESPeriod - p.certKESPeriod
+	if p.evolutionOverride != nil {
+		evolution = *p.evolutionOverride
+	} else {
+		require.GreaterOrEqual(t, p.messageKESPeriod, p.certKESPeriod)
+	}
 	kesSig, err := kes.Sign(kesSk, evolution, wrappedCbor)
 	require.NoError(t, err)
 
@@ -295,6 +307,47 @@ func TestAuthenticator_Verify_RejectsKESPeriodPrecedingCert(t *testing.T) {
 
 	err = auth.Verify(&msg)
 	require.ErrorIs(t, err, ErrKESPeriodPrecedesCert)
+}
+
+// TestAuthenticator_Verify_RejectsOverflowingKESPeriod proves that a
+// message claiming an astronomically large KESPeriod cannot use uint64
+// wraparound to smuggle a valid signature at evolution 0 (or any other
+// small, easy-to-produce evolution) past verification. 1<<58 is chosen so
+// that (1<<58) * testSlotsPerKesPeriod is an exact multiple of 2^64 --
+// testSlotsPerKesPeriod factors as 2^6*2025 with 2025 odd, so 2^58 is the
+// smallest period that wraps the product to exactly 0 -- landing on
+// currentKesPeriod=0 and evolution 0 the same way a genuinely fresh,
+// unevolved KES key would.
+func TestAuthenticator_Verify_RejectsOverflowingKESPeriod(t *testing.T) {
+	t.Parallel()
+	params := defaultParams(t, 0x0D)
+	params.certKESPeriod = 0
+	params.messageKESPeriod = 1 << 58
+	evolution := uint64(0)
+	params.evolutionOverride = &evolution
+	msg, poolKeyHash := validMessage(t, params)
+
+	authority := &fakeStakeAuthority{
+		stakes: map[lcommon.PoolKeyHash]uint64{poolKeyHash: 1_000_000},
+	}
+	auth := newTestAuthenticator(t, authority)
+
+	err := auth.Verify(&msg)
+	require.Error(
+		t,
+		err,
+		"an astronomically large claimed KES period must not verify "+
+			"merely because it wraps around to a small, honestly-signed "+
+			"evolution",
+	)
+	require.NotErrorIsf(
+		t,
+		err,
+		ErrKESPeriodPrecedesCert,
+		"messageKESPeriod (1<<58) is not less than certKESPeriod (0), so "+
+			"only the overflow guard should reject this, not the "+
+			"period-ordering check",
+	)
 }
 
 func TestAuthenticator_Verify_RejectsOpCertIssueNumberRegression(t *testing.T) {
