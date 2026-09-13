@@ -23,10 +23,26 @@ import (
 )
 
 const (
-	maxHardForkDurationNanoseconds    = uint64(1<<63 - 1)
+	// maxHardForkDuration is the largest value a time.Duration can hold.
+	maxHardForkDuration = time.Duration(1<<63 - 1)
+	// maxHardForkDurationNanoseconds is maxHardForkDuration expressed as an
+	// unsigned nanosecond count, for bounds checks against unsigned cached
+	// epoch values.
+	maxHardForkDurationNanoseconds = uint64(1<<63 - 1)
+	// maxHardForkSlotLengthMilliseconds is the largest cached slot length, in
+	// milliseconds, that fits in a time.Duration.
 	maxHardForkSlotLengthMilliseconds = maxHardForkDurationNanoseconds / uint64(time.Millisecond)
 )
 
+// hardForkCachedEraParams converts one cached epoch row into hardfork.EraParams,
+// rejecting only a slot length that cannot be represented as a time.Duration.
+//
+// It deliberately does not call EraParams.Validate. A cached epoch row carries
+// a zero EpochSize/SlotLength when the epoch record has not been populated yet
+// (epochRollover treats SlotLength == 0 as exactly that sentinel), and summary
+// construction accepted such rows before durations were bounded. Where valid
+// era parameters are actually required, hardfork.BuildSummary validates the
+// current era's params and returns an error of its own.
 func hardForkCachedEraParams(
 	lengthInSlots uint,
 	slotLengthMilliseconds uint,
@@ -37,14 +53,10 @@ func hardForkCachedEraParams(
 			slotLengthMilliseconds,
 		)
 	}
-	params := hardfork.EraParams{
+	return hardfork.EraParams{
 		EpochSize:  uint64(lengthInSlots),
 		SlotLength: time.Duration(slotLengthMilliseconds) * time.Millisecond,
-	}
-	if err := params.Validate(); err != nil {
-		return hardfork.EraParams{}, err
-	}
-	return params, nil
+	}, nil
 }
 
 func hardForkCachedEpochDuration(
@@ -58,7 +70,14 @@ func hardForkCachedEpochDuration(
 	if err != nil {
 		return 0, err
 	}
-	slotLengthNanoseconds := uint64(params.SlotLength)
+	if slotLengthMilliseconds == 0 {
+		// An unpopulated epoch row contributes no wall-clock time, which is
+		// what the unbounded arithmetic this replaced also produced. Returning
+		// early also keeps the division below away from a zero divisor.
+		return 0, nil
+	}
+	slotLengthNanoseconds := uint64(slotLengthMilliseconds) *
+		uint64(time.Millisecond)
 	if uint64(lengthInSlots) >
 		maxHardForkDurationNanoseconds/slotLengthNanoseconds {
 		return 0, fmt.Errorf(
@@ -175,8 +194,7 @@ func (ls *LedgerState) hardForkSummaryAnchoredAt(
 					err,
 				)
 			}
-			if uint64(relTime) >
-				maxHardForkDurationNanoseconds-uint64(epochDuration) {
+			if epochDuration > maxHardForkDuration-relTime {
 				return nil, fmt.Errorf(
 					"ledger: cumulative cached epoch duration overflows time.Duration at epoch %d (era %d)",
 					ep.EpochId,

@@ -188,32 +188,41 @@ func TestHardForkSummary_EmptyCache(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestHardForkSummary_ValidatesCachedEraParams(t *testing.T) {
+// TestHardForkSummary_ToleratesUnpopulatedCachedEraParams pins the contract
+// that a past-era cache row with a zero EpochSize or SlotLength — the sentinel
+// an epoch record carries before it is populated — still produces a summary
+// rather than an error. Bounding durations must not turn those rows into a
+// refusal; the zero-divisor path in hardForkCachedEpochDuration is what makes
+// the zero slot length case non-trivial.
+func TestHardForkSummary_ToleratesUnpopulatedCachedEraParams(t *testing.T) {
+	t.Parallel()
 	testCases := []struct {
 		name          string
 		lengthInSlots uint
 		slotLength    uint
-		wantErr       bool
+		wantRelTime   time.Duration
 	}{
 		{
 			name:          "minimum valid parameters",
 			lengthInSlots: 1,
 			slotLength:    1,
+			wantRelTime:   time.Millisecond,
 		},
 		{
-			name:       "zero epoch size",
-			slotLength: 1_000,
-			wantErr:    true,
+			name:        "zero epoch size",
+			slotLength:  1_000,
+			wantRelTime: 0,
 		},
 		{
 			name:          "zero slot length",
 			lengthInSlots: 100,
-			wantErr:       true,
+			wantRelTime:   0,
 		},
 	}
 
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
 			ls := &LedgerState{
 				epochCache: []models.Epoch{
 					{
@@ -241,18 +250,25 @@ func TestHardForkSummary_ValidatesCachedEraParams(t *testing.T) {
 			}
 			ls.publishSnapshotsLocked()
 
-			_, err := ls.HardForkSummary()
-			if testCase.wantErr {
-				require.Error(t, err)
-				require.ErrorContains(t, err, "cached")
-			} else {
-				require.NoError(t, err)
-			}
+			summary, err := ls.HardForkSummary()
+			require.NoError(t, err)
+			require.GreaterOrEqual(t, len(summary.Eras), 2)
+			// The first era's own duration is what the degenerate row
+			// contributes, and it is where the second era starts.
+			require.Equal(
+				t,
+				testCase.wantRelTime,
+				summary.Eras[1].Start.RelativeTime,
+			)
 		})
 	}
 }
 
-func TestHardForkSummary_ValidatesEveryCachedEpoch(t *testing.T) {
+// TestHardForkSummary_SkipsUnpopulatedEpochDuration covers an unpopulated row
+// in the middle of an era: it contributes nothing to the accumulated relative
+// time, and the era still closes on its populated siblings.
+func TestHardForkSummary_SkipsUnpopulatedEpochDuration(t *testing.T) {
+	t.Parallel()
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
 			{
@@ -287,12 +303,19 @@ func TestHardForkSummary_ValidatesEveryCachedEpoch(t *testing.T) {
 	}
 	ls.publishSnapshotsLocked()
 
-	_, err := ls.HardForkSummary()
-	require.Error(t, err)
-	require.ErrorContains(t, err, "cached epoch 1")
+	summary, err := ls.HardForkSummary()
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(summary.Eras), 2)
+	// Only epoch 0 contributes: 100 slots * 1000ms.
+	require.Equal(
+		t,
+		100*1_000*time.Millisecond,
+		summary.Eras[1].Start.RelativeTime,
+	)
 }
 
 func TestHardForkSummary_RejectsEpochDurationOverflow(t *testing.T) {
+	t.Parallel()
 	const slotLengthMilliseconds = uint64(1)
 	maxDurationMilliseconds := uint64(1<<63-1) / uint64(time.Millisecond)
 	if uint64(^uint(0)) < maxDurationMilliseconds+1 {
@@ -317,6 +340,7 @@ func TestHardForkSummary_RejectsEpochDurationOverflow(t *testing.T) {
 
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
 			ls := &LedgerState{
 				epochCache: []models.Epoch{{
 					EpochId:       0,
@@ -343,6 +367,7 @@ func TestHardForkSummary_RejectsEpochDurationOverflow(t *testing.T) {
 }
 
 func TestHardForkSummary_RejectsCumulativeDurationOverflow(t *testing.T) {
+	t.Parallel()
 	maxDurationMilliseconds := uint64(1<<63-1) / uint64(time.Millisecond)
 	perEpochLength := maxDurationMilliseconds/2 + 1
 	if uint64(^uint(0)) < perEpochLength {
