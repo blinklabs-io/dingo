@@ -110,9 +110,9 @@ func (o *Ouroboros) localstatequeryServerAcquire(
 		// rejection surfacing later, from the Query callback, has no such
 		// path and tears down the whole connection instead
 		// (blinklabs-io/dingo#4156). This point is deliberately not yet
-		// recorded in localstatequiredPoints when validation fails, so a
-		// client that ignores the failure and queries anyway keeps
-		// whatever point (or lack of one) it had before this call.
+		// recorded in localstatequeryAcquiredPoints when validation
+		// fails, so a client that ignores the failure and queries anyway
+		// keeps whatever point (or lack of one) it had before this call.
 		if err := o.ledgerState.VerifyPointOnChain(point); err != nil {
 			if errors.Is(err, ledger.ErrPointNotOnChain) {
 				return fmt.Errorf(
@@ -121,6 +121,16 @@ func (o *Ouroboros) localstatequeryServerAcquire(
 					err,
 				)
 			}
+			// Not currently reachable: VerifyPointOnChain only calls the
+			// private verifyPointOnChain helper, which can only return
+			// ErrPointNotOnChain above. ErrHistoricalStateUnavailable is
+			// raised deep inside specific Query handlers instead (e.g.
+			// circulating-supply reconstruction and GetUTxOByTxIn's
+			// retention-floor check), which this Acquire-time check does
+			// not run. Kept here (rather than removed) so this mapping is
+			// already in place if VerifyPointOnChain's scope ever grows
+			// to cover pruned-but-on-chain points too
+			// (blinklabs-io/dingo#4232 review).
 			if errors.Is(err, ledger.ErrHistoricalStateUnavailable) {
 				return fmt.Errorf(
 					"%w: %w",
