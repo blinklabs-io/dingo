@@ -195,6 +195,9 @@ func BuildAccountAddressUniverse(
 		)
 	}
 	for _, row := range dingoRows {
+		if row == nil {
+			continue
+		}
 		addr, addrErr := StakeAddressFromCredential(
 			row.StakingKey,
 			row.CredentialTag,
