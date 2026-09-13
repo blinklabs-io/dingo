@@ -8178,6 +8178,25 @@ normally a socket). `--network` is `preview` or `preprod` only. Running
 `docs/dashboards/prometheus.yaml`/`alerts.yaml` for the accompanying scrape
 config and alert rules.
 
+**The UTxO comparison is intentionally one-directional, a deliberate,
+accepted gap, not an oversight (blinklabs-io/dingo#4183 review).**
+`Check` queries the reference cardano-node's UTxO set only for the exact
+refs Dingo's own `querySnapshot` walk reported (`QueryReferenceUTxOSnapshot`,
+via batched `GetUTxOByTxIn` calls), rather than asking cardano-node for its
+own whole UTxO set independently. This means the comparison can only catch
+Dingo computing wrong or stale state for a UTxO it *does* have; it cannot
+discover a UTxO that exists only on the reference cardano-node and that
+Dingo's walk never named at all. This is not a cheaper alternative left
+unimplemented: a real cardano-node's own `GetUTxOWhole` was found, live
+against Preview, to silently close the connection partway through
+assembling a reply at the network's current UTxO-set scale (~3.17M
+entries) -- confirmed to fail consistently after roughly 11 seconds,
+independent of any bridge/proxy in the connection path and independent of
+gouroboros's own mux read timeout, so there is no cheap, reliable way left
+to ask a real cardano-node for its total UTxO set at this scale to compare
+against. See `QueryReferenceUTxOSnapshot`'s doc comment
+(`internal/nodeparity/snapshot.go`) for the full account.
+
 `--at-slot`/`--at-hash` (both-or-neither, validated by `requireAtPoint`)
 switch `check` into explicit historical mode: `nodeparity.Check` skips the
 live-tip-agreement step entirely and acquires the named point directly on
@@ -8535,28 +8554,37 @@ across this package's development -- long enough to have found the
 connection-instability pattern below, but not to rule out a slower-building
 issue over many hours.
 
-**Point pinning, and why:** each `Check` cycle reads both nodes' tips
-(`ReadTip`, a one-shot ChainSync `GetCurrentTip`); if they agree
-(`tipsAgree`, a pure function, unit-tested without a live node — the only
-remaining `Skip*` reason, `SkipTipMismatch`), `Check` acquires that exact
-point (`Tip.point`, `localstatequery.Client.Acquire`) on both connections
+**Point pinning, and why:** in live-tip mode (`at` nil, the mode `Check`
+runs in absent `--at-slot`/`--at-hash`), the cycle reads both nodes' tips
+once (`ReadTip`, a one-shot ChainSync
+`GetCurrentTip`); if they agree (`tipsAgree`, a pure function,
+unit-tested without a live node — the only remaining `Skip*` reason,
+`SkipTipMismatch`), that agreed tip becomes the point acquired
+(`Tip.point`, `localstatequery.Client.Acquire`) on both connections
 before running the LocalStateQuery session against either, rather than
 letting each individual query answer whatever's live when it happens to
-run. This matters because the whole-UTxO walk (see `QuerySnapshot`) can
-take on the order of a couple of minutes against Dingo's disk-backed store
-— long enough for a live testnet's tip to advance many blocks before it
-finishes. `GetUTxOWhole` only honors the pinned point when it names the
-live tip exactly (see below), so this risk is caught mainly by the
-tip-sandwich (`sandwichOK`, discarding the cycle if either tip moved), not
-by pinning against an older point -- the common case here always pins to
-what both nodes just agreed is the live tip anyway, so the two mechanisms
-overlap for `Check`'s own default flow;
-the stake-distribution and protocol-parameter halves of the same session
-*are* pinned, so at least those two fields are guaranteed consistent with
-the sandwiched tip even if the UTxO comparison itself is only as good as
-the sandwich's before/after check. `Check` uses one already-dialed
-connection per node for the whole cycle, so the ChainSync and
-LocalStateQuery reads share a single session per node.
+run. An explicit historical check (`at` non-nil) skips reading either
+tip at all: the caller-supplied point is acquired directly, so the same
+point is compared regardless of where either node's live tip currently
+is.
+Neither mode re-reads either tip after the point is acquired, and there
+is no "sandwich" (before/after tip comparison) discarding a cycle if the
+tip moved during the walk -- an earlier design had one; the current code
+does not. In live-tip mode this means the whole-UTxO walk (see
+`QuerySnapshot`), which can take on the order of a couple of minutes
+against Dingo's disk-backed store, runs against whatever `GetUTxOWhole`
+actually returns once acquired: `GetUTxOWhole` takes no point argument
+and always answers at Dingo's live tip regardless of what was acquired
+(see below), so a live tip advancing during a long walk can only make
+Dingo's own UTxO answer drift ahead of the point cardano-node was
+pinned to, not be caught and discarded -- a comparison run this way
+should be read as approximate for the UTxO field specifically. The
+stake-distribution and protocol-parameter halves of the same session
+*are* answered at the acquired point on both sides, so those two fields
+stay exactly consistent with each other regardless of how long the walk
+takes. `Check` uses one already-dialed connection per node for the
+whole cycle, so the ChainSync and LocalStateQuery reads share a single
+session per node.
 
 Point pinning against a real cardano-node's `Acquire(point)` genuinely
 pins its whole reply for the rest of the session, no matter how long the

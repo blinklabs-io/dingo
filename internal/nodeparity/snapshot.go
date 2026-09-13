@@ -84,14 +84,17 @@ type StakeDistributionEntry struct {
 // blocks before it finishes. A real cardano-node's Acquire(point) genuinely
 // pins its whole reply (every query on the session), but Dingo's
 // server-side Acquire (ouroboros/localstatequery.go) only recognizes the
-// pinned point for GetStakeDistribution/GetPoolDistr2, not GetUTxOWhole --
-// GetCurrentProtocolParams and GetStakeDistribution against Dingo still
-// answer at Dingo's live tip when GetUTxOWhole is the slow half of the
-// session, an accepted MVP gap: those two are single round-trip queries
-// issued immediately after Acquire, so the window for Dingo's live tip to
-// move underneath them is negligible next to the multi-minute UTxO walk.
-// The UTxO comparison itself relies on Check's own tip-sandwich
-// (sandwichOK) rather than on point-pinning for its consistency guarantee.
+// pinned point for GetStakeDistribution/GetPoolDistr2, not GetUTxOWhole:
+// GetUTxOWhole always answers at Dingo's live tip regardless of what was
+// acquired, an accepted MVP gap tracked separately (not part of this
+// change) -- there is no tip-sandwich or other before/after check
+// discarding a result if Dingo's live tip moved during the walk, so a
+// UTxO comparison against Dingo should be read as approximate rather
+// than exactly pinned. GetCurrentProtocolParams and GetStakeDistribution
+// are single round-trip queries issued immediately after Acquire, before
+// the slow UTxO walk even starts, so the window for Dingo's live tip to
+// move underneath them is negligible in comparison, and GetStakeDistribution
+// does honor the acquired point (see ledger/queries_stakedistribution.go).
 func QuerySnapshot(
 	conn *ouroboros.Connection,
 	point *pcommon.Point,
@@ -165,8 +168,9 @@ func queryProtocolParams(
 // queryProtocolParamsAndStakeDistribution runs the two small, fast queries
 // every full Snapshot needs beyond its UTxO half -- shared by querySnapshot
 // and QueryReferenceUTxOSnapshot so both build these two fields identically.
-// Both of those pin at the live tip (directly, or via Check's tip-sandwich),
-// which is exactly the one point GetStakeDistribution answers -- see
+// Both are answered at whatever point the session's Acquire call pinned
+// (live-tip mode pins the tip both nodes just agreed on; an explicit
+// historical check pins the caller-supplied point directly) -- see
 // queryProtocolParams's doc comment for the per-block case that cannot use
 // this.
 func queryProtocolParamsAndStakeDistribution(
