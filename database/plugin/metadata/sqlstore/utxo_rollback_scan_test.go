@@ -56,6 +56,7 @@ func newMigratedSQLiteStore(tb testing.TB) *Store {
 			testStoreSequence.Add(1),
 		),
 		"sqlite",
+		false,
 	)
 	require.NoError(tb, err)
 	registry, err := migrations.SQLiteRegistry()

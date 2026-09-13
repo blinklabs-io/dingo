@@ -111,7 +111,7 @@ func openStore(
 		return nil, errors.New("PostgreSQL timeouts must not be negative")
 	}
 	dsn := assembleDSN(cfg)
-	db, err := sqlstore.OpenDB("pgx", dsn, "postgresql")
+	db, err := sqlstore.OpenDB("pgx", dsn, "postgresql", deps.TracingEnabled)
 	if err != nil {
 		return nil, err
 	}
