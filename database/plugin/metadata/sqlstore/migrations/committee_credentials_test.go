@@ -167,7 +167,9 @@ func TestCommitteeTermStartBackfillResumesAfterInterruption(t *testing.T) {
 	for slot := int64(1); slot <= 3; slot++ {
 		_, err = db.Exec(
 			"INSERT INTO committee_member (cold_cred_hash, expires_epoch, added_slot) VALUES (?, ?, ?)",
-			[]byte{byte(slot)}, 41, slot,
+			[]byte{byte(slot)},
+			41,
+			slot,
 		)
 		require.NoError(t, err)
 	}
@@ -179,11 +181,16 @@ func TestCommitteeTermStartBackfillResumesAfterInterruption(t *testing.T) {
 	interrupted.Backfill = func(ctx context.Context, batch migrations.Batch) (migrations.BatchResult, error) {
 		backfillCalls++
 		if backfillCalls == 2 {
-			return migrations.BatchResult{}, errors.New("intentional interruption")
+			return migrations.BatchResult{}, errors.New(
+				"intentional interruption",
+			)
 		}
 		return originalBackfill(ctx, batch)
 	}
-	interruptedRegistry := append(append([]migrations.Migration{}, registry[:8]...), interrupted)
+	interruptedRegistry := append(
+		append([]migrations.Migration{}, registry[:8]...),
+		interrupted,
+	)
 	require.Error(t, run(interruptedRegistry))
 	require.NoError(t, run(registry))
 

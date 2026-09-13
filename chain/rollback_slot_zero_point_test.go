@@ -150,7 +150,10 @@ func TestIteratorResumesAfterSlotZeroRollbackPoint(t *testing.T) {
 
 	genesisPoint := mockBlockPoint(testBlocks[0])
 	if genesisPoint.Slot != 0 {
-		t.Fatalf("fixture precondition: expected slot 0, got %d", genesisPoint.Slot)
+		t.Fatalf(
+			"fixture precondition: expected slot 0, got %d",
+			genesisPoint.Slot,
+		)
 	}
 	if len(genesisPoint.Hash) == 0 {
 		t.Fatal("fixture precondition: expected a non-empty hash at slot 0")

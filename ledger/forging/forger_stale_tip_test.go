@@ -113,9 +113,12 @@ func TestStaleTipSkipCountsCouldNotForge(t *testing.T) {
 	forger, builder, _ := newStaleTipTestForger(t, 200, 100, 183, &logs)
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
 	require.Zero(t, builder.calls)
-	require.Equal(t, float64(1),
+	require.Equal(
+		t,
+		float64(1),
 		testutil.ToFloat64(forger.metrics.forgeCouldNot),
-		"lost leader slot must move cardano_node_metrics_Forge_could_not_forge_int")
+		"lost leader slot must move cardano_node_metrics_Forge_could_not_forge_int",
+	)
 }
 
 // TestForgeProceedsWithinPrimaryChainTipTolerance pins the other side of the
@@ -894,7 +897,11 @@ func TestForgeSkipsWhenNewestKnownBlockTrailsUpstream(t *testing.T) {
 	require.Contains(t, logs.String(), `"applied_staleness_slots":0`)
 	// Reason-specific message: both local tips agree here, so the shared
 	// "ledger tip stale vs primary chain tip" named the wrong pair.
-	require.Contains(t, logs.String(), "forge skip: newest known block is stale")
+	require.Contains(
+		t,
+		logs.String(),
+		"forge skip: newest known block is stale",
+	)
 	require.NotContains(
 		t,
 		logs.String(),

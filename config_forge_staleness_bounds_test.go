@@ -99,16 +99,19 @@ func TestForgeStalenessBoundsAreOperatorTunable(t *testing.T) {
 		)
 	})
 
-	t.Run("explicit values are not overwritten by defaults", func(t *testing.T) {
-		loaded := internalconfig.Config{
-			ForgeUpstreamStalenessSlots:      7,
-			ForgeAppliedTipStalenessSlots:    8,
-			ForgeEndorserBlockStalenessSlots: 9,
-		}
-		loaded.ApplyDefaults()
+	t.Run(
+		"explicit values are not overwritten by defaults",
+		func(t *testing.T) {
+			loaded := internalconfig.Config{
+				ForgeUpstreamStalenessSlots:      7,
+				ForgeAppliedTipStalenessSlots:    8,
+				ForgeEndorserBlockStalenessSlots: 9,
+			}
+			loaded.ApplyDefaults()
 
-		require.Equal(t, uint64(7), loaded.ForgeUpstreamStalenessSlots)
-		require.Equal(t, uint64(8), loaded.ForgeAppliedTipStalenessSlots)
-		require.Equal(t, uint64(9), loaded.ForgeEndorserBlockStalenessSlots)
-	})
+			require.Equal(t, uint64(7), loaded.ForgeUpstreamStalenessSlots)
+			require.Equal(t, uint64(8), loaded.ForgeAppliedTipStalenessSlots)
+			require.Equal(t, uint64(9), loaded.ForgeEndorserBlockStalenessSlots)
+		},
+	)
 }

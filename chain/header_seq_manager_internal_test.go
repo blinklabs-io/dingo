@@ -82,9 +82,7 @@ func TestHeaderSeqConcurrentStampsAreUnique(t *testing.T) {
 	var wg sync.WaitGroup
 	seqs := make([][]uint64, len(chains))
 	for i, c := range chains {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			out := make([]uint64, 0, perChain)
 			for range perChain {
 				c.mutex.Lock()
@@ -92,7 +90,7 @@ func TestHeaderSeqConcurrentStampsAreUnique(t *testing.T) {
 				c.mutex.Unlock()
 			}
 			seqs[i] = out
-		}()
+		})
 	}
 	wg.Wait()
 
