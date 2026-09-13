@@ -532,6 +532,20 @@ func extractAddressKeys(addr []byte, result *ParsedUTxO) {
 		// Pointer address: 1 header + 28 payment + pointer
 		result.PaymentKey = bytes.Clone(addr[1:29])
 		result.PaymentScript = paymentIsScript
+		// Decode the pointer with the canonical address parser so the
+		// variable-length integer rules stay in one place. Preserve the
+		// existing fail-soft behavior for malformed or unrepresentable
+		// pointer payloads: the spendable UTxO remains importable, but it
+		// contributes no pointer-derived stake.
+		if parsed, err := lcommon.NewAddressFromBytes(addr); err == nil {
+			if pointer, ok := parsed.StakingPayload().(lcommon.AddressPayloadPointer); ok {
+				result.Pointer = &models.UtxoPointer{
+					Slot:      pointer.Slot,
+					TxIndex:   pointer.TxIndex,
+					CertIndex: pointer.CertIndex,
+				}
+			}
+		}
 	case (addrType == 6 || addrType == 7) && len(addr) >= 29:
 		// Enterprise address: 1 header + 28 payment
 		result.PaymentKey = bytes.Clone(addr[1:29])
@@ -881,6 +895,13 @@ func UTxOToModel(u *ParsedUTxO, slot uint64) models.Utxo {
 		DatumHash:     u.DatumHash,
 		Datum:         u.Datum,
 		ScriptRef:     u.ScriptRef,
+	}
+	if u.Pointer != nil {
+		utxo.Pointer = &models.UtxoPointer{
+			Slot:      u.Pointer.Slot,
+			TxIndex:   u.Pointer.TxIndex,
+			CertIndex: u.Pointer.CertIndex,
+		}
 	}
 
 	// Convert assets

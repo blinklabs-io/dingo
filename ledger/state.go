@@ -5666,10 +5666,8 @@ const (
 	// retry at noProgressBackoffMax means hammering it at that rate for as
 	// long as the process runs.
 	noProgressStuckThreshold = 50
-	// noProgressStuckBackoffMax bounds the wait once stuck. The pipeline
-	// keeps retrying, because the condition can still be cleared from
-	// outside (a peer serving a different chain, an operator repairing
-	// state), but at a rate that neither burns CPU nor buries the logs.
+	// noProgressStuckBackoffMax is retained for the backoff calculation and
+	// metric tests; the retry loop stops when the threshold is reached.
 	noProgressStuckBackoffMax = 30 * time.Second
 	// noProgressStuckReannounceInterval is how many further no-progress
 	// restarts pass between ERROR announcements once the pipeline is stuck.
@@ -5785,6 +5783,36 @@ func ledgerPipelineRetryDelay(
 ) (time.Duration, bool) {
 	backoff, stuck := ledgerPipelineBackoff(consecutiveNoProgress)
 	return max(backoff, minimum), stuck
+}
+
+// stopStuckLedgerPipeline reports the terminal form of a pipeline failure
+// that has replayed the same applied tip too many times. A bare restart cannot
+// change a deterministic verdict, so continuing would leave the node silently
+// following neither the stored chain nor its peers (issue #3975).
+func (ls *LedgerState) stopStuckLedgerPipeline(
+	err error,
+	progress pipelineProgress,
+) bool {
+	if !progress.stuck() {
+		return false
+	}
+	if ls.config.Logger != nil {
+		ls.config.Logger.Error(
+			"ledger pipeline stopped after repeated no-progress restarts; operator intervention is required",
+			"component", "ledger",
+			"consecutive_no_progress", progress.consecutiveNoProgress,
+			"tip_slot", progress.lastTipSlot,
+			"error", err,
+		)
+	}
+	if ls.config.FatalErrorFunc != nil {
+		ls.config.FatalErrorFunc(fmt.Errorf(
+			"ledger pipeline stopped after %d consecutive no-progress restarts: %w",
+			progress.consecutiveNoProgress,
+			err,
+		))
+	}
+	return true
 }
 
 // certifiedEndorserBlockPipelineRetryDelay returns how long the pipeline waits
@@ -5944,6 +5972,12 @@ func (ls *LedgerState) ledgerProcessBlocksWithAttempt(
 				progress.consecutiveNoProgress,
 				endorserStuck,
 			)
+			if endorserStuck {
+				halted = true
+				ls.metrics.setPipelineHalted()
+				ls.stopStuckLedgerPipeline(err, progress)
+				return
+			}
 			if endorserStuck &&
 				pipelineStuckShouldAnnounce(
 					progress.consecutiveNoProgress,
@@ -5984,6 +6018,12 @@ func (ls *LedgerState) ledgerProcessBlocksWithAttempt(
 			progress.consecutiveNoProgress,
 			stuck,
 		)
+		if stuck {
+			halted = true
+			ls.metrics.setPipelineHalted()
+			ls.stopStuckLedgerPipeline(err, progress)
+			return
+		}
 		if progress.consecutiveNoProgress > 0 {
 			// Announce the stuck condition at ERROR on the transition and
 			// periodically for as long as it lasts: a deterministic failure

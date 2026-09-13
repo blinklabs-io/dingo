@@ -132,6 +132,24 @@ func TestLedgerProcessBlocksKeepsRetryingRecoverableFailures(t *testing.T) {
 	)
 }
 
+func TestStopStuckLedgerPipelineInvokesFatalCallback(t *testing.T) {
+	t.Parallel()
+
+	ls := newPipelineLoopLedger(t)
+	var fatalErr error
+	ls.config.FatalErrorFunc = func(err error) {
+		fatalErr = err
+	}
+	progress := pipelineProgress{
+		consecutiveNoProgress: noProgressStuckThreshold,
+		lastTipSlot:           123,
+	}
+
+	require.True(t, ls.stopStuckLedgerPipeline(errors.New("rejected block"), progress))
+	require.Error(t, fatalErr)
+	assert.ErrorContains(t, fatalErr, "no-progress restarts")
+}
+
 // TestPipelineStuckAnnouncementStaysVisible covers the third ask of issue
 // #3261. The stuck condition was announced at ERROR exactly once and then only
 // at WARN, so a node that had stopped following the chain looked quiet to
