@@ -1994,6 +1994,102 @@ func TestReplayRecoveryRejectsDeterministicPlutusFailure(t *testing.T) {
 	assert.Equal(t, ls.Tip().Point, resync.Point)
 }
 
+// A malformed reference script is a structural verdict about the failing
+// transaction's own bytes: common.ValidatePlutusScriptsWellFormed decodes
+// only tx.Outputs() (plus CollateralReturn and any sub-transaction outputs)
+// and never consults LedgerState/LedgerView, so no local replay of a
+// different UTxO history can change it. Before this test, it fell through
+// isDeterministicTxValidationError's switch unclassified, so
+// tryRecoverFromTxValidationError only reached the state-dependent
+// findReplayRecoveryCandidate path, found no missing-input candidate for it,
+// and returned (false, nil): the caller then restarted the pipeline with the
+// same ledger tip and the identical block was retried forever (issue
+// reproduced live on preview: 138 identical "block processing failed,
+// restarting pipeline" warnings for one tx over 46+ minutes with no rewind,
+// no peer rotation, and no halt).
+func TestReplayRecoveryRejectsDeterministicMalformedReferenceScripts(t *testing.T) {
+	t.Parallel()
+
+	ls := newReplayRecoveryAuditLedger(t, true)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	resyncCh := deterministicResyncChannel(t, ls, bus)
+
+	recovered, err := ls.tryRecoverFromTxValidationError(&txValidationError{
+		BlockPoint: ocommon.NewPoint(
+			160,
+			testHashBytes("malformed-refscript-block"),
+		),
+		TxHash: testHashBytes("malformed-refscript-tx"),
+		Cause: lcommon.MalformedReferenceScriptsError{
+			ScriptHashes: []lcommon.ScriptHash{
+				lcommon.Blake2b224Hash([]byte("malformed-refscript")),
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.True(
+		t,
+		recovered,
+		"a malformed reference script must rewind past the block rather than restart the pipeline unrecovered",
+	)
+	assert.Equal(t, uint64(140), ls.Tip().Point.Slot)
+	assert.Equal(t, ls.Tip().Point, ls.chain.Tip().Point)
+	assert.Nil(t, ls.lastAtTipRecovery)
+
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		2*time.Second,
+		"a malformed reference scripts rejection must request a fresh ChainSync intersection",
+	)
+	assert.Equal(t, ls.Tip().Point, resync.Point)
+}
+
+// A malformed script witness is the same kind of tx-bytes-only structural
+// verdict as a malformed reference script (both are raised by
+// common.ValidatePlutusScriptsWellFormed) and must be classified the same
+// way.
+func TestReplayRecoveryRejectsDeterministicMalformedScriptWitnesses(t *testing.T) {
+	t.Parallel()
+
+	ls := newReplayRecoveryAuditLedger(t, true)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	resyncCh := deterministicResyncChannel(t, ls, bus)
+
+	recovered, err := ls.tryRecoverFromTxValidationError(&txValidationError{
+		BlockPoint: ocommon.NewPoint(
+			160,
+			testHashBytes("malformed-witness-block"),
+		),
+		TxHash: testHashBytes("malformed-witness-tx"),
+		Cause: lcommon.MalformedScriptWitnessesError{
+			ScriptHashes: []lcommon.ScriptHash{
+				lcommon.Blake2b224Hash([]byte("malformed-witness")),
+			},
+			Cause: errors.New("decode Plutus program: unsupported term type"),
+		},
+	})
+	require.NoError(t, err)
+	require.True(
+		t,
+		recovered,
+		"a malformed script witness must rewind past the block rather than restart the pipeline unrecovered",
+	)
+	assert.Equal(t, uint64(140), ls.Tip().Point.Slot)
+	assert.Equal(t, ls.Tip().Point, ls.chain.Tip().Point)
+	assert.Nil(t, ls.lastAtTipRecovery)
+
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		2*time.Second,
+		"a malformed script witnesses rejection must request a fresh ChainSync intersection",
+	)
+	assert.Equal(t, ls.Tip().Point, resync.Point)
+}
+
 // A duplicate-input failure reaching the deterministic branch while the node
 // is at tip takes that branch rather than recoverAtTipFromTxValidationError's
 // escalating-depth schedule. Deepening the rewind cannot change a verdict that
