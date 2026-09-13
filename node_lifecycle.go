@@ -1325,6 +1325,7 @@ func (n *Node) storageDependencies(
 		StorageMode:    string(n.config.storageMode),
 		MaxConnections: n.config.DatabaseWorkerPoolConfig.WorkerPoolSize,
 		Logger:         n.config.logger,
+		TracingEnabled: n.config.tracing,
 	}
 }
 
