@@ -53,11 +53,12 @@ func TestStartupOpCertCounterAtEraBoundary(t *testing.T) {
 					pparams: &alonzo.AlonzoProtocolParameters{},
 				},
 			}
-			registered, matched, err := credentials.ValidateAgainstLedgerAtSlot(
+			result, err := credentials.ValidateAgainstLedgerAtSlot(
 				view, params, testCase.slot,
 			)
-			require.True(t, registered)
-			require.True(t, matched)
+			require.True(t, result.Registered)
+			require.True(t, result.VRFMatched)
+			require.NoError(t, result.EraUnevaluable)
 			if testCase.wantError == "" {
 				require.NoError(t, err)
 			} else {
@@ -83,24 +84,29 @@ func (provider funcParamsProvider) ProtocolParamsForSlot(
 	return provider(slot)
 }
 
-func TestStartupOpCertCounterRequiresEraParameters(t *testing.T) {
+// TestStartupOpCertCounterUnresolvedEraDoesNotRefuse covers the era contexts a
+// startup check can fail to resolve. None of them is a counter violation, so
+// none may refuse: the staleness rule stays in force, the no-gap rule is
+// reported as unevaluated, and the forge loop applies it per leader slot once
+// the node is near the tip.
+func TestStartupOpCertCounterUnresolvedEraDoesNotRefuse(t *testing.T) {
 	var typedNilProvider *mockPParamsProvider
 	for _, testCase := range []struct {
-		name      string
-		provider  ProtocolParamsProvider
-		wantError string
+		name       string
+		provider   ProtocolParamsProvider
+		wantReason string
 	}{
-		{"missing provider", nil, "provider is nil"},
-		{"typed nil provider", typedNilProvider, "provider is nil"},
+		{"missing provider", nil, "no protocol parameters provider"},
+		{"typed nil provider", typedNilProvider, "no protocol parameters provider"},
 		{
 			"typed nil func provider",
 			funcParamsProvider(nil),
-			"provider is nil",
+			"no protocol parameters provider",
 		},
 		{
 			"missing parameters",
 			&mockPParamsProvider{},
-			"parameters unavailable",
+			"parameters unavailable for slot 100",
 		},
 		{
 			"typed nil parameters",
@@ -111,16 +117,48 @@ func TestStartupOpCertCounterRequiresEraParameters(t *testing.T) {
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
 			credentials := newCredsForLedger(t)
+			// Seven against an observed five is a gap Praos refuses. The
+			// era here is unknown, so the gap rule is not evaluable and
+			// startup must proceed anyway.
+			credentials.opCert.IssueNumber = 7
 			view := &fakeLedgerView{
 				registered: true,
 				regVRFHash: lcommon.Blake2b256Hash(credentials.vrfVKey),
 				seqFound:   true,
+				latestSeq:  5,
 			}
-			_, _, err := credentials.ValidateAgainstLedgerAtSlot(
+			result, err := credentials.ValidateAgainstLedgerAtSlot(
 				view, testCase.provider, 100,
 			)
-			require.ErrorContains(t, err, testCase.wantError)
+			require.NoError(t, err)
+			require.True(t, result.Registered)
+			require.ErrorIs(t, result.EraUnevaluable, ErrOpCertEraUnevaluable)
+			require.ErrorContains(
+				t,
+				result.EraUnevaluable,
+				testCase.wantReason,
+			)
 		})
 	}
+}
+
+// TestStartupOpCertCounterUnresolvedEraStillRejectsStaleCounter pins the half
+// of the rule an unresolved era does not excuse. A counter below the observed
+// on-chain value is a stale or stolen hot key whatever the era, so it must
+// still refuse startup.
+func TestStartupOpCertCounterUnresolvedEraStillRejectsStaleCounter(t *testing.T) {
+	t.Parallel()
+	credentials := newCredsForLedger(t)
+	credentials.opCert.IssueNumber = 4
+	view := &fakeLedgerView{
+		registered: true,
+		regVRFHash: lcommon.Blake2b256Hash(credentials.vrfVKey),
+		seqFound:   true,
+		latestSeq:  5,
+	}
+	result, err := credentials.ValidateAgainstLedgerAtSlot(view, nil, 100)
+	require.ErrorContains(t, err, "below last seen")
+	require.ErrorIs(t, result.EraUnevaluable, ErrOpCertEraUnevaluable)
 }

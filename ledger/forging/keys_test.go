@@ -1328,7 +1328,13 @@ func TestValidateAgainstLedgerAtSlotAppliesEraCounterRule(t *testing.T) {
 				latestSeq:  5,
 			}
 			params := &mockPParamsProvider{pparams: tc.params}
-			_, _, err := pc.ValidateAgainstLedgerAtSlot(view, params, 0)
+			result, err := pc.ValidateAgainstLedgerAtSlot(view, params, 0)
+			if result.EraUnevaluable != nil {
+				t.Fatalf(
+					"era resolved from real parameters, got: %v",
+					result.EraUnevaluable,
+				)
+			}
 			if tc.wantError {
 				if err == nil {
 					t.Fatal("expected gapped Praos counter to be rejected")
