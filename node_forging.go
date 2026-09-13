@@ -168,13 +168,6 @@ func (n *Node) validateBlockProducerLedger(
 	)
 }
 
-func (n *Node) validateBlockProducerLedgerWithView(
-	creds *forging.PoolCredentials,
-	view forging.LedgerView,
-) error {
-	return n.validateBlockProducerLedgerWithViewAtSlot(creds, view, nil, 0)
-}
-
 func (n *Node) validateBlockProducerLedgerWithViewAtSlot(
 	creds *forging.PoolCredentials,
 	view forging.LedgerView,
