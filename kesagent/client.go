@@ -130,6 +130,13 @@ func NewClient(cfg Config) (*Client, error) {
 	if cfg.SocketPath == "" {
 		return nil, errors.New("kesagent: socket path is required")
 	}
+	// Checked here rather than left to the first dial: an over-long path
+	// fails with a bare "invalid argument" that names neither the length nor
+	// the limit, and block-producer startup is where an operator can still
+	// act on it.
+	if err := validateSocketPath(cfg.SocketPath); err != nil {
+		return nil, err
+	}
 	switch cfg.Mode {
 	case "":
 		cfg.Mode = ModeServeKey

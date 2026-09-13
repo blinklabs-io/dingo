@@ -117,6 +117,7 @@ func TestValidateBlockProducerStartup_KESAgentServeKeyMode(t *testing.T) {
 	require.NoError(t, err)
 	opCertCBOR := devnetOpCertCBOR(t)
 
+	testutil.SkipIfBlockProducerUnsupported(t)
 	sockPath := testutil.UnixSocketPath(t)
 	ln, err := net.Listen("unix", sockPath)
 	require.NoError(t, err)
@@ -175,6 +176,7 @@ func TestValidateBlockProducerStartup_KESAgentSignMode(t *testing.T) {
 	)
 	require.NoError(t, err)
 
+	testutil.SkipIfBlockProducerUnsupported(t)
 	sockPath := testutil.UnixSocketPath(t)
 	ln, err := net.Listen("unix", sockPath)
 	require.NoError(t, err)
@@ -272,6 +274,7 @@ func TestValidateBlockProducerStartup_KESAgentServeKeyRotationStaysValidated(
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), evolved.Period)
 
+	testutil.SkipIfBlockProducerUnsupported(t)
 	sockPath := testutil.UnixSocketPath(t)
 	ln, err := net.Listen("unix", sockPath)
 	require.NoError(t, err)

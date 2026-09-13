@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -74,4 +75,32 @@ func UnixSocketPath(t testing.TB) string {
 	path := filepath.Join(dir, "s")
 	require.NoError(t, CheckUnixSocketPathLen(path))
 	return path
+}
+
+// SkipIfBlockProducerUnsupported skips a test that exercises the block
+// production path on a platform where Blink Labs does not support running a
+// block producer.
+//
+// This is a product boundary, not a technical one: Windows can open the
+// AF_UNIX sockets the KES agent uses, and Go supports them there. Block
+// production is simply not a supported configuration on Windows, and the KES
+// agent exists only to serve a block producer, so none of it applies. Anyone
+// changing this should change the product decision first, not the skip.
+func SkipIfBlockProducerUnsupported(t testing.TB) {
+	t.Helper()
+	if reason := blockProducerUnsupportedReason(runtime.GOOS); reason != "" {
+		t.Skip(reason)
+	}
+}
+
+// blockProducerUnsupportedReason returns why block production is unsupported
+// on goos, or "" where it is supported. Taking goos as an argument rather than
+// reading runtime.GOOS keeps the decision itself testable from any platform,
+// which matters because the platform it excludes is the one no developer here
+// runs.
+func blockProducerUnsupportedReason(goos string) string {
+	if goos == "windows" {
+		return "block production is not a supported configuration on Windows, so the KES agent path does not apply there"
+	}
+	return ""
 }

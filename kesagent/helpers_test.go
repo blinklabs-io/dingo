@@ -69,6 +69,9 @@ func testKESMaterial(t testing.TB) (skeyData, vkey []byte, opCertCBOR []byte) {
 // "bind: invalid argument" and passed on Linux.
 func listenUnix(t testing.TB) (net.Listener, string) {
 	t.Helper()
+	// Every test that binds a fake agent socket is exercising the block
+	// producer's KES path, which is not a supported configuration on Windows.
+	testutil.SkipIfBlockProducerUnsupported(t)
 	sockPath := testutil.UnixSocketPath(t)
 	ln, err := net.Listen("unix", sockPath)
 	require.NoError(t, err)

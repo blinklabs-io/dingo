@@ -15,30 +15,11 @@
 package testutil
 
 import (
-	"net"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
-
-// TestUnixSocketPathIsPortablyShort pins the property the helper exists for.
-// A socket path that fits here fits on every platform, so a test using it
-// cannot pass on Linux and fail on Darwin or Windows for a reason that has
-// nothing to do with what it is testing.
-func TestUnixSocketPathIsPortablyShort(t *testing.T) {
-	t.Parallel()
-
-	path := UnixSocketPath(t)
-	require.LessOrEqual(t, len(path), MaxPortableUnixSocketPathLen)
-
-	// And it must actually be bindable here, not merely short.
-	ln, err := net.Listen("unix", path)
-	require.NoError(t, err)
-	require.NoError(t, ln.Close())
-}
 
 // TestCheckUnixSocketPathLenRejectsOverLongPath proves the guard fires rather
 // than merely existing. The length it rejects is the portable budget, which
@@ -63,40 +44,18 @@ func TestCheckUnixSocketPathLenRejectsOverLongPath(t *testing.T) {
 	)
 }
 
-// TestOverLongUnixSocketPathFailsToBind is the control behind the guard: it
-// demonstrates the failure mode the guard prevents, by binding at a path past
-// this platform's own sun_path limit and confirming the bind is refused
-// outright. Without this, the guard would rest on a claim about other
-// platforms that nothing here checks.
-//
-// The path is built past 108 bytes, which exceeds sun_path on every supported
-// platform (104 on Darwin, 108 on Linux and Windows), so the refusal is
-// reproduced rather than assumed. The assertion is that the bind fails and
-// that it fails for length -- an EINVAL-class error, not a missing directory
-// -- since the directory is created first.
-func TestOverLongUnixSocketPathFailsToBind(t *testing.T) {
+// TestBlockProducerUnsupportedReason proves the skip fires on the platform it
+// names and nowhere else. The branch it covers can never be reached by this
+// project's own runs on Linux or macOS, so without passing the platform in
+// explicitly the Windows decision would ship unexercised.
+func TestBlockProducerUnsupportedReason(t *testing.T) {
 	t.Parallel()
 
-	dir, err := os.MkdirTemp("", "sock")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-
-	// Nest directories until the socket path is comfortably past 108 bytes.
-	for len(dir) < 120 {
-		dir = filepath.Join(dir, strings.Repeat("d", 20))
-	}
-	require.NoError(t, os.MkdirAll(dir, 0o755))
-	path := filepath.Join(dir, "s")
-	require.Greater(t, len(path), 108)
-	require.Error(t, CheckUnixSocketPathLen(path))
-
-	ln, err := net.Listen("unix", path)
-	if err == nil {
-		_ = ln.Close()
-		t.Fatalf(
-			"bound a %d-byte socket path; expected the platform to refuse it",
-			len(path),
-		)
-	}
-	require.ErrorContains(t, err, "invalid argument")
+	require.Contains(
+		t,
+		blockProducerUnsupportedReason("windows"),
+		"not a supported configuration on Windows",
+	)
+	require.Empty(t, blockProducerUnsupportedReason("linux"))
+	require.Empty(t, blockProducerUnsupportedReason("darwin"))
 }

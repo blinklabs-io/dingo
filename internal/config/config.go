@@ -731,11 +731,12 @@ type Config struct {
 	// certificate flags still apply. Mirrors cardano-node's
 	// --shelley-kes-agent-socket.
 	//
-	// Supported on Linux, macOS, and Windows (10 1803 / Server 2019 and
-	// later). The path must fit the platform's sun_path field -- 104 bytes on
-	// macOS, 108 on Linux and Windows -- because a socket address is a
-	// fixed-size struct; a longer path is rejected when connecting with an
-	// opaque "invalid argument" rather than a length error.
+	// Block production is supported on Linux and macOS only, so this flag
+	// does not apply on Windows. The path must fit the platform's sun_path
+	// field -- 104 bytes on macOS, 108 on Linux -- because a socket address
+	// is a fixed-size struct. kesagent.NewClient rejects an over-long path at
+	// startup rather than leaving it to surface as a bare "invalid argument"
+	// from connect().
 	ShelleyKESAgentSocket string `yaml:"shelleyKesAgentSocket"              envconfig:"SHELLEY_KES_AGENT_SOCKET"`
 	// ShelleyKESAgentMode selects the agent service mode: "serve-key" (the
 	// agent pushes the evolving KES sign key and the node signs headers

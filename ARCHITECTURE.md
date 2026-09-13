@@ -5494,15 +5494,22 @@ socket is attacker-reachable whenever its filesystem path is:
   (`kes.VerifySignedKES`) — this subsumes checking "type or period" by
   proving the signature is actually valid for the requested inputs.
 
-The transport is a Unix-domain socket, which Go supports on Linux, macOS, and
-Windows (10 1803 / Server 2019 and later, where `AF_UNIX` is available), so
-the agent is usable on all three. The one platform-specific constraint is on
-the path itself, and it belongs to the operator rather than to the node: a
-socket address is a fixed-size struct, so the path must fit `sun_path` --- 104
-bytes on macOS, 108 on Linux and Windows --- and a longer one is refused at
-`bind`/`connect` time with `EINVAL`, which Go reports as
-`invalid argument` rather than as a length error. Dingo never constructs this
-path; it connects to exactly what `--shelley-kes-agent-socket` names.
+**Supported platforms.** The KES agent is part of the block-producer path, and
+block production is supported on Linux and macOS only. It is not a supported
+configuration on Windows, so the agent does not apply there and its tests are
+skipped on that platform. That is a product decision rather than a technical
+limit: Windows does support the `AF_UNIX` sockets this uses.
+
+The path itself carries a platform constraint worth knowing, because the
+operator supplies it. A Unix-domain socket address stores the path in a
+fixed-size `sun_path` field --- 104 bytes on macOS, 108 on Linux --- so a
+longer path is refused with `EINVAL`, which Go reports as a bare
+`invalid argument` naming neither the length nor the limit. macOS is four
+bytes tighter than Linux, so a path that works on a Linux node can fail on a
+developer's Mac. Dingo never constructs this path; it connects to exactly what
+`--shelley-kes-agent-socket` names, and `kesagent.NewClient` rejects an
+over-long one at block-producer startup with an error that states the length
+and the limit.
 
 `internal/config.ValidateKESKeySources` rejects a block producer that sets
 both `shelleyKesKey` and `shelleyKesAgentSocket`, so an operator's explicit
