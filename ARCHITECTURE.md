@@ -69,6 +69,13 @@ repeatable-read snapshots. All three return `*sqlstore.Store`; metadata
 business behavior is implemented once in `sqlstore` and dialect translation is
 limited to SQL mechanics.
 
+Metadata indexing treats raw CBOR as the lossless storage and API JSON as an
+optional representation. A label whose map keys collide after JSON
+stringification keeps its label and CBOR row but has no JSON representation;
+readers handle that condition per record rather than aborting indexing or
+dropping pagination rows. Duplicate top-level labels remain rejected because
+the relational label key is unique and no deterministic row selection exists.
+
 The public compatibility interface is decomposing into narrow capabilities so
 components need not inherit the full historical metadata surface. Three are
 cross-cutting -- `LifecycleStore`, `SettingsStore`, and `TxnStore` (which

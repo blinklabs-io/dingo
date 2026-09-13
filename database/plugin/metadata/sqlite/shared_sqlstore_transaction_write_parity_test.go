@@ -11,11 +11,13 @@ package sqlite
 import (
 	"bytes"
 	"database/sql"
+	"encoding/hex"
 	"math/big"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
 	"github.com/blinklabs-io/dingo/database/types"
 	gcbor "github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -103,6 +105,41 @@ func TestSharedSQLStoreTransactionWriteParity(t *testing.T) {
 		return deltas, witnesses
 	}
 	_ = exerciseTransactionWriteStore(t, store, false, counts)
+}
+
+func TestSharedSQLStoreTransactionMetadataCollisionIsNullable(t *testing.T) {
+	t.Parallel()
+	store, raw := func() (*sqlstore.Store, *sql.DB) {
+		store, writeDB, _, err := openSQLStore(
+			Config{DataDir: t.TempDir()},
+			metadata.ProviderDependencies{StorageMode: types.StorageModeAPI},
+		)
+		require.NoError(t, err)
+		require.NoError(t, store.Start(t.Context()))
+		t.Cleanup(func() { require.NoError(t, store.Close()) })
+		return store, writeDB
+	}()
+	txHash := lcommon.Blake2b256{0xe7}
+	metadataValue := lcommon.MetaMap{Pairs: []lcommon.MetaPair{{
+		Key: lcommon.MetaInt{Value: big.NewInt(721)},
+		Value: lcommon.MetaMap{Pairs: []lcommon.MetaPair{
+			{Key: lcommon.MetaInt{Value: big.NewInt(1)}, Value: lcommon.MetaText{Value: "integer"}},
+			{Key: lcommon.MetaText{Value: "1"}, Value: lcommon.MetaText{Value: "text"}},
+		}},
+	}}}
+	require.NoError(t, store.SetTransaction(
+		&mockTransaction{hash: txHash, metadata: metadataValue},
+		ocommon.Point{Slot: 7, Hash: bytes.Repeat([]byte{0xe8}, 32)}, 0, nil, false, nil,
+	))
+	var jsonValue sql.NullString
+	var cborValue []byte
+	require.NoError(t, raw.QueryRow(`
+SELECT l.json_value, l.cbor_value
+FROM transaction_metadata_label AS l
+JOIN "transaction" AS tx ON tx.id = l.transaction_id
+WHERE tx.hash = ? AND l.label = ?`, txHash.Bytes(), "721").Scan(&jsonValue, &cborValue))
+	require.False(t, jsonValue.Valid)
+	require.Equal(t, "a20167696e746567657261316474657874", hex.EncodeToString(cborValue))
 }
 
 // TestSharedSQLStoreWithdrawalWitnessGate covers issue #2919: the

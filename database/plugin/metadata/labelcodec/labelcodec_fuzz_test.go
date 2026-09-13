@@ -16,6 +16,7 @@ package labelcodec
 
 import (
 	"bytes"
+	"errors"
 	"math"
 	"math/big"
 	"testing"
@@ -77,7 +78,7 @@ func FuzzExtractFromCborRawValues(f *testing.F) {
 			}
 
 			jsonValue, cborValue, err := RawValues(metadataCbor, entry.Label)
-			if err != nil {
+			if err != nil && !errors.Is(err, ErrJSONUnavailable) {
 				t.Fatalf("RawValues(label=%d): %v", entry.Label, err)
 			}
 			if string(jsonValue) != entry.JsonValue {
