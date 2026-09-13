@@ -3128,42 +3128,16 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 }
 
 func (ls *LedgerState) rollback(point ocommon.Point) error {
-	return ls.rollbackWithResync(point, true)
+	return ls.rollbackWithOptions(point, false, true)
 }
 
-// rollbackCommittedError reports an error found after the metadata rollback
-// transaction and in-memory tip update have committed. Callers that publish
-// side effects separately must not treat this as an all-or-nothing failure.
-type rollbackCommittedError struct {
-	err error
-}
-
-func (e *rollbackCommittedError) Error() string { return e.err.Error() }
-
-func (e *rollbackCommittedError) Unwrap() error { return e.err }
-
-func (ls *LedgerState) rollbackWithoutResync(point ocommon.Point) error {
-	return ls.rollbackWithResync(point, false)
-}
-
-func (ls *LedgerState) publishLocalLedgerRollback(point ocommon.Point) {
-	if ls.config.EventBus == nil {
-		return
-	}
-	ls.config.EventBus.Publish(
-		event.ChainsyncResyncEventType,
-		event.NewEvent(
-			event.ChainsyncResyncEventType,
-			event.ChainsyncResyncEvent{
-				Reason: event.ChainsyncResyncReasonLocalLedgerRollback,
-				Point:  point,
-			},
-		),
-	)
-}
-
-func (ls *LedgerState) rollbackWithResync(
+// rollbackWithOptions restores metadata even when point is already the
+// in-memory ledger tip when repairSameTip is set. At-tip validation recovery
+// can leave consumed UTxOs above the durable tip (for example after Mithril
+// gap replay), so the usual same-point no-op must not skip UTxO restoration.
+func (ls *LedgerState) rollbackWithOptions(
 	point ocommon.Point,
+	repairSameTip bool,
 	publishResync bool,
 ) error {
 	// Rolling back to the point we already sit at is a no-op. Skip
@@ -3178,8 +3152,9 @@ func (ls *LedgerState) rollbackWithResync(
 	currentTip := ls.currentTip
 	mithrilLedgerSlot := ls.mithrilLedgerSlot
 	ls.RUnlock()
-	if currentTip.Point.Slot == point.Slot &&
-		bytes.Equal(currentTip.Point.Hash, point.Hash) {
+	sameTip := currentTip.Point.Slot == point.Slot &&
+		bytes.Equal(currentTip.Point.Hash, point.Hash)
+	if sameTip && !repairSameTip {
 		return ls.enforceDurableTipFloor()
 	}
 	if point.Slot > currentTip.Point.Slot {
@@ -3571,7 +3546,7 @@ func (ls *LedgerState) rollbackWithResync(
 	ls.updateTipMetrics(newTipDensity)
 	ls.publishSnapshotsLocked()
 	ls.Unlock()
-	if publishResync {
+	if publishResync && !sameTip {
 		ls.publishLocalLedgerRollback(point)
 	}
 	var hash string
@@ -3593,6 +3568,37 @@ func (ls *LedgerState) rollbackWithResync(
 		return &rollbackCommittedError{err: err}
 	}
 	return nil
+}
+
+// rollbackCommittedError reports an error found after the metadata rollback
+// transaction and in-memory tip update have committed. Callers that publish
+// side effects separately must not treat this as an all-or-nothing failure.
+type rollbackCommittedError struct {
+	err error
+}
+
+func (e *rollbackCommittedError) Error() string { return e.err.Error() }
+
+func (e *rollbackCommittedError) Unwrap() error { return e.err }
+
+func (ls *LedgerState) rollbackWithoutResync(point ocommon.Point) error {
+	return ls.rollbackWithOptions(point, false, false)
+}
+
+func (ls *LedgerState) publishLocalLedgerRollback(point ocommon.Point) {
+	if ls.config.EventBus == nil {
+		return
+	}
+	ls.config.EventBus.Publish(
+		event.ChainsyncResyncEventType,
+		event.NewEvent(
+			event.ChainsyncResyncEventType,
+			event.ChainsyncResyncEvent{
+				Reason: event.ChainsyncResyncReasonLocalLedgerRollback,
+				Point:  point,
+			},
+		),
+	)
 }
 
 // drainBlockPipelineBeforeRollback waits, up to
