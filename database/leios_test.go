@@ -162,3 +162,49 @@ func mustCborForLeiosTest(t *testing.T, value any) cbor.RawMessage {
 	require.NoError(t, err)
 	return cbor.RawMessage(data)
 }
+
+// TestMaxLeiosEBSlotReadsCurrentAndLegacyRecords covers both branches of the
+// prefix scan, in particular the legacy one: SetLeiosEB only ever writes
+// current-format "em"+hash+slot keys, so the branch that reads the slot out
+// of the first eight value bytes -- the path that exists solely for nodes
+// upgrading across the issue #3513 key change -- was otherwise unexercised
+// (chrisguiney review).
+func TestMaxLeiosEBSlotReadsCurrentAndLegacyRecords(t *testing.T) {
+	t.Parallel()
+
+	d := newTestDB(t)
+	manifestRaw := []byte("manifest bytes")
+
+	// No manifests persisted at all: no evidence, not an error.
+	got, err := d.MaxLeiosEBSlot()
+	require.NoError(t, err)
+	require.Equal(t, uint64(0), got)
+
+	// Current format: the slot is the last eight bytes of the key.
+	require.NoError(
+		t,
+		d.SetLeiosEBManifest(700, randomHash(t), manifestRaw),
+	)
+	got, err = d.MaxLeiosEBSlot()
+	require.NoError(t, err)
+	require.Equal(t, uint64(700), got)
+
+	// Legacy format: the key carries no slot, so the maximum can only be
+	// found by reading it out of the value. Dropping the legacy branch of
+	// the switch leaves this at 700.
+	writeLegacyLeiosEB(t, d, 900, randomHash(t), manifestRaw, nil)
+	got, err = d.MaxLeiosEBSlot()
+	require.NoError(t, err)
+	require.Equal(t, uint64(900), got)
+
+	// The scan takes a maximum, not a last-seen: neither format may lower
+	// an already-higher slot, whichever order the keys sort in.
+	writeLegacyLeiosEB(t, d, 100, randomHash(t), manifestRaw, nil)
+	require.NoError(
+		t,
+		d.SetLeiosEBManifest(200, randomHash(t), manifestRaw),
+	)
+	got, err = d.MaxLeiosEBSlot()
+	require.NoError(t, err)
+	require.Equal(t, uint64(900), got)
+}

@@ -251,6 +251,9 @@ type Config struct {
 	blockProducer                                                                       bool
 	shelleyVRFKey, shelleyKESKey, shelleyOperationalCertificate                         string
 	forgeSyncToleranceSlots, forgeStaleGapThresholdSlots                                uint64
+	forgePrimaryChainTipToleranceSlots                                                  uint64
+	forgeUpstreamStalenessSlots, forgeAppliedTipStalenessSlots                          uint64
+	forgeEndorserBlockStalenessSlots                                                    uint64
 	validateForgedBlock                                                                 bool
 	blockPipelineEnabled                                                                bool
 	blockPipelineValidateEnabled                                                        bool
@@ -649,6 +652,22 @@ func (n *Node) configValidate() error {
 				shelleyGenesis.NetworkMagic,
 			)
 		}
+		if byronGenesis := n.config.CardanoNodeConfig().ByronGenesis(); byronGenesis != nil {
+			byronProtocolMagic := byronGenesis.ProtocolConsts.ProtocolMagic
+			if byronProtocolMagic < 0 || byronProtocolMagic > math.MaxUint32 {
+				return fmt.Errorf(
+					"byron genesis protocol magic %d is out of uint32 range",
+					byronProtocolMagic,
+				)
+			}
+			if n.config.cfg.NetworkMagic != uint32(byronProtocolMagic) { // #nosec G115 -- range-checked above
+				return fmt.Errorf(
+					"network magic (%d) doesn't match value from Byron genesis (%d)",
+					n.config.cfg.NetworkMagic,
+					byronProtocolMagic,
+				)
+			}
+		}
 	}
 	return nil
 }
@@ -662,17 +681,24 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 	// Start with a default internal config
 	c := Config{
 		cfg: &internalconfig.Config{
-			BindAddr:           "0.0.0.0",
-			StorageMode:        string(StorageModeCore),
-			RunMode:            internalconfig.RunModeServe,
-			Cache:              internalconfig.DefaultCacheConfig(),
-			Chainsync:          internalconfig.DefaultChainsyncConfig(),
-			GenesisBootstrap:   internalconfig.DefaultGenesisBootstrapConfig(),
-			HistoryExpiry:      internalconfig.DefaultHistoryExpiryConfig(),
-			KoiosParity:        internalconfig.DefaultKoiosParityConfig(),
-			Logging:            internalconfig.DefaultLoggingConfig(),
-			Midnight:           internalconfig.DefaultMidnightConfig(),
-			CORSAllowedOrigins: []string{"*"},
+			BindAddr:    "0.0.0.0",
+			StorageMode: string(StorageModeCore),
+			RunMode:     internalconfig.RunModeServe,
+			// Fail closed: self-validate locally-forged blocks before
+			// adoption and diffusion unless an operator explicitly opts
+			// out. Mirrors internalconfig's own package-level default
+			// (globalConfig, built by its unexported newDefaultConfig)
+			// -- this literal is a separate default source, not backfilled
+			// from that one, so it must be set here too.
+			ValidateForgedBlock: true,
+			Cache:               internalconfig.DefaultCacheConfig(),
+			Chainsync:           internalconfig.DefaultChainsyncConfig(),
+			GenesisBootstrap:    internalconfig.DefaultGenesisBootstrapConfig(),
+			HistoryExpiry:       internalconfig.DefaultHistoryExpiryConfig(),
+			KoiosParity:         internalconfig.DefaultKoiosParityConfig(),
+			Logging:             internalconfig.DefaultLoggingConfig(),
+			Midnight:            internalconfig.DefaultMidnightConfig(),
+			CORSAllowedOrigins:  []string{"*"},
 			Plugins: internalconfig.PluginsConfig{
 				Storage: internalconfig.StoragePluginsConfig{
 					Blob: hostplugin.Selection{
@@ -828,6 +854,9 @@ func (c *Config) syncCompatFields() {
 	c.genesisBootstrap, c.genesisWindowSlots, c.genesisCorroborationPeers = c.cfg.GenesisBootstrap.Enabled, c.cfg.GenesisBootstrap.WindowSlots, c.cfg.GenesisBootstrap.CorroborationPeers
 	c.blockProducer, c.shelleyVRFKey, c.shelleyKESKey, c.shelleyOperationalCertificate = c.cfg.BlockProducer, c.cfg.ShelleyVRFKey, c.cfg.ShelleyKESKey, c.cfg.ShelleyOperationalCertificate
 	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
+	c.forgePrimaryChainTipToleranceSlots = c.cfg.ForgePrimaryChainTipToleranceSlots
+	c.forgeUpstreamStalenessSlots, c.forgeAppliedTipStalenessSlots = c.cfg.ForgeUpstreamStalenessSlots, c.cfg.ForgeAppliedTipStalenessSlots
+	c.forgeEndorserBlockStalenessSlots = c.cfg.ForgeEndorserBlockStalenessSlots
 	c.blockPipelineEnabled = c.cfg.BlockPipelineEnabled
 	c.blockPipelineValidateEnabled = c.cfg.BlockPipelineValidateEnabled
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
@@ -1453,6 +1482,50 @@ func WithForgeSyncToleranceSlots(slots uint64) ConfigOptionFunc {
 	}
 }
 
+// WithForgePrimaryChainTipToleranceSlots sets how far the ledger-applied tip may
+// trail this node's own primary chain tip before forging is skipped.
+// Use 0 to fall back to the built-in default.
+func WithForgePrimaryChainTipToleranceSlots(slots uint64) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ForgePrimaryChainTipToleranceSlots = slots
+	}
+}
+
+// WithForgeUpstreamStalenessSlots sets how far the newest block this node holds
+// may trail the corroborated upstream sync target before forging is skipped.
+// 0 (the default) DISABLES the bound -- it is not "fall back to a built-in
+// default", and nothing fills it in: see
+// internal/config.DefaultForgeUpstreamStalenessSlots, which is itself 0.
+func WithForgeUpstreamStalenessSlots(slots uint64) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ForgeUpstreamStalenessSlots = slots
+	}
+}
+
+// WithForgeAppliedTipStalenessSlots sets how many slots older than the current
+// slot the newest block this node holds may be before forging is skipped. 0
+// disables this wall-clock backstop.
+func WithForgeAppliedTipStalenessSlots(slots uint64) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ForgeAppliedTipStalenessSlots = slots
+	}
+}
+
+// WithForgeEndorserBlockStalenessSlots sets how far a corroborated Leios
+// endorser block may lead the ledger-applied tip before forging is skipped.
+// 0 (the default) DISABLES the bound -- it is not "fall back to a built-in
+// default", and nothing fills it in: see
+// internal/config.DefaultForgeEndorserBlockStalenessSlots, which is itself 0.
+//
+// Deliberately separate from WithForgePrimaryChainTipToleranceSlots: that one
+// bounds a local block-against-block comparison, this one bounds a
+// network-stage announcement watermark against the local applied tip.
+func WithForgeEndorserBlockStalenessSlots(slots uint64) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ForgeEndorserBlockStalenessSlots = slots
+	}
+}
+
 // WithForgeStaleGapThresholdSlots sets the slot gap threshold for stale database warnings.
 // Use 0 to fall back to the built-in default.
 func WithForgeStaleGapThresholdSlots(slots uint64) ConfigOptionFunc {
@@ -1461,11 +1534,12 @@ func WithForgeStaleGapThresholdSlots(slots uint64) ConfigOptionFunc {
 	}
 }
 
-// WithValidateForgedBlock enables self-validation of locally-forged blocks
+// WithValidateForgedBlock controls self-validation of locally-forged blocks
 // before they are adopted onto the chain and diffused to peers. When enabled,
 // the forger runs VRF/KES header crypto, body-hash consistency, and per-tx
 // ledger validation on each forged block. A failing block is dropped without
-// being adopted or diffused. Disabled by default.
+// being adopted or diffused. Enabled by default; pass false only to
+// explicitly opt out.
 func WithValidateForgedBlock(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.ValidateForgedBlock = enabled
@@ -2189,6 +2263,32 @@ func (c *Config) ShelleyOperationalCertificate() string {
 // ForgeSyncToleranceSlots returns the sync tolerance for block forging.
 func (c *Config) ForgeSyncToleranceSlots() uint64 {
 	return c.cfg.ForgeSyncToleranceSlots
+}
+
+// ForgePrimaryChainTipToleranceSlots returns how far the ledger-applied tip may
+// trail this node's own primary chain tip before forging is skipped.
+func (c *Config) ForgePrimaryChainTipToleranceSlots() uint64 {
+	return c.cfg.ForgePrimaryChainTipToleranceSlots
+}
+
+// ForgeUpstreamStalenessSlots returns how far the newest block this node holds
+// may trail the corroborated upstream sync target before forging is skipped.
+func (c *Config) ForgeUpstreamStalenessSlots() uint64 {
+	return c.cfg.ForgeUpstreamStalenessSlots
+}
+
+// ForgeAppliedTipStalenessSlots returns how many slots older than the current
+// slot the newest block this node holds may be before forging is skipped.
+// 0 disables the wall-clock backstop.
+func (c *Config) ForgeAppliedTipStalenessSlots() uint64 {
+	return c.cfg.ForgeAppliedTipStalenessSlots
+}
+
+// ForgeEndorserBlockStalenessSlots returns how far a corroborated Leios
+// endorser block may lead the ledger-applied tip before forging is skipped.
+// 0 disables the bound.
+func (c *Config) ForgeEndorserBlockStalenessSlots() uint64 {
+	return c.cfg.ForgeEndorserBlockStalenessSlots
 }
 
 // ForgeStaleGapThresholdSlots returns the stale gap threshold for warnings.

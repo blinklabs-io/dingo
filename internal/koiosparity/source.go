@@ -161,22 +161,24 @@ var (
 // populate at every epoch boundary. It opens no second database connection,
 // requires no export step, and adds no new table.
 //
-// Core-mode pruning: ledger/snapshot/rotation.go's cleanupOldSnapshots keeps
-// reward_pool_input/reward_pool_output/reward_account_output for the current
-// epoch and the three that precede it (a rolling 4-epoch window; API storage
-// mode retains reward_account_output without bound instead). DatabaseSource
+// Retention: ledger/snapshot/rotation.go's cleanupOldSnapshots prunes
+// reward_account_output to the current epoch and the three that precede it
+// (a rolling 4-epoch window) only in core storage mode with the in-process
+// observer disabled. It is retained without bound in API storage mode
+// (dingo #1875) and whenever the observer is enabled (dingo #4188), because
+// the observer validates a closed epoch only after fetching and comparing
+// against Koios over the network and can fall arbitrarily far behind chain
+// progression during a from-genesis or catch-up sync — process-level timing
+// alone does not keep its reads inside the window. reward_pool_input,
+// reward_pool_output, epoch_summary and reward_ada_pots are retained for the
+// life of the database in every mode; pool_stake_snapshot and
+// reward_stake_input are pruned to the window in every mode. DatabaseSource
 // does not race that pruning in any special way — it just reads whatever is
 // currently committed, the same as DingoDB would against a separately synced
-// copy. What actually satisfies "available before cleanup runs" is
-// process-level timing: the in-process observer (observer.go) processes a
-// newly closed epoch promptly after its own event.EpochTransitionEvent
-// fires, which is many epochs (hours to days on preview/preprod) before that
-// epoch's rows would fall out of the retention window. A GetEpochData or
-// GetPoolEpochDataMap call made long after an epoch's data has aged out of
-// that window reads back as absent (nil / *Present == false) — the same
-// signal DingoDB already reports for "not yet computed" — not as an error;
-// it is the caller's responsibility (the observer, or an operator invoking
-// this source directly) to read promptly.
+// copy. A GetEpochData or GetPoolEpochDataMap call made after an epoch's data
+// has aged out of the window reads back as absent (nil / *Present == false) —
+// the same signal DingoDB already reports for "not yet computed" — not as an
+// error.
 type DatabaseSource struct {
 	db *database.Database
 }
@@ -588,11 +590,33 @@ func (s *DatabaseSource) GetProtocolParams(
 	if len(rows) == 0 {
 		return nil, nil
 	}
-	return decodeProtocolParams(
+	out, err := decodeProtocolParams(
 		rows[0].Cbor,
 		epochRow.EraId,
 		rows[0].Epoch,
 	)
+	if err != nil {
+		return nil, err
+	}
+	// See isSyntheticV2CostModel's doc comment (dingo #4127, following
+	// #3825's design): the durable cleared-epoch marker is the same one
+	// ledger.queryShelleyCurrentProtocolParams reads for its own historical
+	// path, read here directly via the database package rather than
+	// DingoDB's duplicated raw-SQL copy since this source already holds a
+	// live *database.Database.
+	clearedEpoch, cleared, err := database.SyntheticV2CostModelClearedEpoch(
+		s.db, txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"synthetic v2 cost model cleared epoch: %w", err,
+		)
+	}
+	v2, hasV2 := out.CostModels["PlutusV2"]
+	out.SyntheticV2CostModel = isSyntheticV2CostModel(
+		v2, hasV2, epoch, clearedEpoch, cleared,
+	)
+	return out, nil
 }
 
 // GetRewardAccountOutputs returns every per-account reward calculation

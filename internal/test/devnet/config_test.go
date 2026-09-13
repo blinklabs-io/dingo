@@ -73,6 +73,112 @@ func TestAcceleratedSpecsMeetTheRunnerBudget(t *testing.T) {
 	}
 }
 
+// The configured quarantine must expire before the accelerated run does;
+// otherwise submitted outputs cannot fund a later round in that scenario.
+func TestAcceleratedTxPumpQuarantineFitsRunnerBudget(t *testing.T) {
+	t.Parallel()
+	environments := loadComposeTxPumpEnvironments(t)
+	for _, profile := range []struct {
+		service string
+		spec    string
+	}{
+		{"txpump", "testnet-accelerated.yaml"},
+		{"txpump-dingo", "testnet-dingo-accelerated.yaml"},
+	} {
+		for _, script := range []string{"run-tests.sh", "start.sh"} {
+			t.Run(profile.service+"/"+script, func(t *testing.T) {
+				cfg, err := LoadDevNetConfigFrom(profile.spec)
+				require.NoError(t, err)
+				plan, err := NewScenarioPlan(cfg)
+				require.NoError(t, err)
+				args := []string{"--accelerated"}
+				if profile.service == "txpump" {
+					args = append(args, "--conformance")
+				}
+				slots := launchedTxPumpWindow(t, script, args...)
+				require.Positive(
+					t,
+					slots,
+					"accelerated runs must retain output quarantine",
+				)
+				require.Equal(t, "${DEVNET_TXPUMP_CONFIRMATION_SLOTS:-600}",
+					environments[profile.service]["TXPUMP_CONFIRMATION_SLOTS"],
+					"Compose must consume the launcher's selected window")
+				quarantine := SlotsDuration(slots, cfg.SlotDuration())
+				t.Logf(
+					"profile=%s slots=%d slotLength=%s quarantine=%s hardTimeout=%s",
+					profile.spec,
+					slots,
+					cfg.SlotDuration(),
+					quarantine,
+					plan.HardTimeout,
+				)
+				require.Less(
+					t,
+					quarantine,
+					plan.HardTimeout,
+					"configured output quarantine must expire before the accelerated scenario ends",
+				)
+				propagation, ok := plan.Phase(PhasePropagation)
+				require.True(t, ok)
+				cooldown, err := strconv.Atoi(
+					environments[profile.service]["TXPUMP_COOLDOWN_MAX"],
+				)
+				require.NoError(t, err)
+				require.Less(
+					t,
+					quarantine+time.Duration(cooldown)*time.Millisecond,
+					propagation.Deadline,
+					"quarantine and a cooldown must fit before propagation ends",
+				)
+			})
+		}
+	}
+}
+
+func launchedTxPumpWindow(t *testing.T, script string, args ...string) uint64 {
+	t.Helper()
+	result := runFakeDevnetScript(t, script, 0, false, map[string]string{
+		"DEVNET_TXPUMP_CONFIRMATION_SLOTS": "999999",
+	}, args...)
+	require.Equal(t, 0, result.exitCode, result.output)
+	matches := regexp.MustCompile(`(?m)^TXPUMP_WINDOW=(\d+)$`).
+		FindAllStringSubmatch(result.dockerLog, -1)
+	require.NotEmpty(t, matches, "launcher never invoked Compose with a window")
+	var slots uint64
+	for i, match := range matches {
+		got, err := strconv.ParseUint(match[1], 10, 64)
+		require.NoError(t, err)
+		if i == 0 {
+			slots = got
+		}
+		require.Equal(
+			t,
+			slots,
+			got,
+			"Compose invocations must agree on the window",
+		)
+	}
+	return slots
+}
+
+func TestCanonicalTxPumpWindowIsUnchanged(t *testing.T) {
+	t.Parallel()
+	for _, script := range []string{"run-tests.sh", "start.sh"} {
+		for _, conformance := range []bool{false, true} {
+			args := []string{}
+			if conformance {
+				args = append(args, "--conformance")
+			}
+			require.Equal(
+				t,
+				uint64(600),
+				launchedTxPumpWindow(t, script, args...),
+			)
+		}
+	}
+}
+
 // The canonical specs must stay on canonical timing: they are what the
 // soak and canary runs use, and quietly accelerating them would remove
 // the long-wall-clock coverage the fast scenario deliberately does not
@@ -233,9 +339,9 @@ func TestComposeTxPumpSubmitsOneTransactionPerBatch(t *testing.T) {
 					"DevNet txpump batches must not create unconfirmed dependency chains",
 				)
 			}
-			requireComposeEnvInt(t, service, environment,
-				"TXPUMP_CONFIRMATION_SLOTS", 600,
-				"submitted outputs must remain quarantined across early forks")
+			require.Equal(t, "${DEVNET_TXPUMP_CONFIRMATION_SLOTS:-600}",
+				environment["TXPUMP_CONFIRMATION_SLOTS"],
+				"direct Compose use must retain the canonical default")
 		})
 	}
 }
