@@ -162,7 +162,16 @@ func TestHandleConnManagerClosed_NilChainsyncState(t *testing.T) {
 // does.
 func TestHandleConnManagerClosed_NtC_ReleasesLeiosServeWaiters(t *testing.T) {
 	t.Parallel()
+	testHandleConnManagerClosedReleasesLeiosServeWaiters(t, true)
+}
 
+func TestHandleConnManagerClosed_NtN_ReleasesLeiosServeWaiters(t *testing.T) {
+	t.Parallel()
+	testHandleConnManagerClosedReleasesLeiosServeWaiters(t, false)
+}
+
+func testHandleConnManagerClosedReleasesLeiosServeWaiters(t *testing.T, isNtC bool) {
+	t.Helper()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	n := newHandleConnManagerClosedTestNode(t)
 	bus := event.NewEventBus(nil, logger)
@@ -209,7 +218,7 @@ func TestHandleConnManagerClosed_NtC_ReleasesLeiosServeWaiters(t *testing.T) {
 	// already-closed liveness check.
 	conn, err := ouroboros.NewConnection()
 	require.NoError(t, err)
-	require.True(t, connManager.AddConnection(conn, true, "127.0.0.1:3002"))
+	require.True(t, connManager.AddConnection(conn, isNtC, "127.0.0.1:3002"))
 	connId := conn.Id()
 
 	done, cancel := o.RegisterLeiosServeWaiterForTesting(connId)
@@ -222,13 +231,13 @@ func TestHandleConnManagerClosed_NtC_ReleasesLeiosServeWaiters(t *testing.T) {
 		"waiter must not be released before the close",
 	)
 
-	n.handleConnManagerClosed(connId, true, nil)
+	n.handleConnManagerClosed(connId, isNtC, nil)
 
 	testutil.RequireReceive(
 		t,
 		done,
 		time.Second,
-		"NtC close must release the parked Leios endorser-closure serving wait",
+		"connection close must release the parked Leios serving wait",
 	)
 }
 

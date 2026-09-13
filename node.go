@@ -1815,14 +1815,19 @@ func taintValue(relaxed bool) string {
 // subscriber does node-to-node work and a local client reconnecting in a
 // tight loop would otherwise wedge the EventBus. This callback is the NtC
 // counterpart to HandleConnClosedEvent, which already performs the
-// equivalent RemoveClient cleanup for NtN closes via that event. Guarding on
-// isNtC here keeps the release exactly-once: an NtN close still cleans up
-// only through HandleConnClosedEvent.
+// equivalent RemoveClient cleanup for NtN closes via that event. Guarding
+// chainsync cleanup on isNtC keeps RemoveClient exactly-once; serving waits
+// are released directly for both connection modes.
 func (n *Node) handleConnManagerClosed(
 	connId ouroboros.ConnectionId,
 	isNtC bool,
 	_ error,
 ) {
+	// Release both NtC closure waits and NtN notification waits independently
+	// of the protocol receive loop that is running the serving callback.
+	if o := n.ouroboros(); o != nil {
+		o.ReleaseLeiosServeWaiters(connId)
+	}
 	if !isNtC {
 		return
 	}
@@ -1830,11 +1835,6 @@ func (n *Node) handleConnManagerClosed(
 		n.chainsyncState.RemoveClient(connId)
 	}
 	if o := n.ouroboros(); o != nil {
-		// Wake any NtC chainsync server callback parked waiting for this
-		// connection's certified endorser closure. connmanager drives this
-		// callback from its own per-connection goroutine, so it runs even
-		// while that server callback still owns gouroboros's receive loop.
-		o.ReleaseLeiosServeWaiters(connId)
 		// Clear any LocalStateQuery pinned point this connection acquired:
 		// a client that disconnects without a clean Release must not leak
 		// its map entry (blinklabs-io/dingo#382).
