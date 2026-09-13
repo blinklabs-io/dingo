@@ -150,6 +150,11 @@ func openSQLStore(
 	config Config,
 	dependencies metadata.ProviderDependencies,
 ) (*sqlstore.Store, *sql.DB, *sql.DB, error) {
+	if config.MaxConnections < 0 {
+		return nil, nil, nil, errors.New(
+			"SQLite maxConnections must not be negative",
+		)
+	}
 	dataDir := dependencies.DataDir
 	if config.DataDir != "" {
 		dataDir = config.DataDir
