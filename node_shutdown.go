@@ -386,18 +386,35 @@ func (n *Node) shutdown() error {
 	ledgerStateDrainConfirmed := phase1DrainConfirmed
 
 	if n.ledgerState != nil {
-		n.config.logger.Info("closing ledger state")
-		if closeErr := n.closeWithShutdownTimeout(
-			ctx,
-			"ledgerState",
-			shutdownTimeout,
-			n.ledgerState.Close,
-		); closeErr != nil {
-			ledgerStateDrainConfirmed = false
+		if !phase1DrainConfirmed {
+			// The block forger, leader election, and both Leios managers call
+			// into n.ledgerState from their own goroutines, so a phase-1 stop
+			// that outlived the deadline may still be using it. Leave it open,
+			// as Restore/Truncate skip closeStorageForLiveLifecycleOp when
+			// quiesce reports errStorageDrainUnconfirmed.
+			n.config.logger.Error(
+				"skipping ledger state close because phase 1 drain was not confirmed",
+			)
 			err = errors.Join(
 				err,
-				fmt.Errorf("ledger state close: %w", closeErr),
+				errors.New(
+					"ledger state close skipped: phase 1 drain unconfirmed",
+				),
 			)
+		} else {
+			n.config.logger.Info("closing ledger state")
+			if closeErr := n.closeWithShutdownTimeout(
+				ctx,
+				"ledgerState",
+				shutdownTimeout,
+				n.ledgerState.Close,
+			); closeErr != nil {
+				ledgerStateDrainConfirmed = false
+				err = errors.Join(
+					err,
+					fmt.Errorf("ledger state close: %w", closeErr),
+				)
+			}
 		}
 	}
 

@@ -15,14 +15,19 @@
 package dingo
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/leader"
 	"github.com/blinklabs-io/dingo/ledger/leios"
@@ -186,6 +191,187 @@ func TestNodeStopSkipsDatabaseCloseWhenPhase1DrainUnconfirmed(t *testing.T) {
 	// mutually exclusive with calling n.db.Close: its presence is direct
 	// proof the close branch did not run.
 	assert.ErrorContains(t, stopErr, "database close skipped")
+}
+
+// shutdownTestResourceLogHandler counts closeWithShutdownTimeout's log records
+// for one resource. closeWithShutdownTimeout logs exactly one record carrying
+// the resource name on every path before it returns -- closed, failed, or
+// timed out -- so a zero count once Node.Stop has returned is synchronous
+// proof shutdown never began closing that resource.
+type shutdownTestResourceLogHandler struct {
+	resource string
+	count    *atomic.Int32
+}
+
+func (h shutdownTestResourceLogHandler) Enabled(
+	context.Context,
+	slog.Level,
+) bool {
+	return true
+}
+
+func (h shutdownTestResourceLogHandler) Handle(
+	_ context.Context,
+	record slog.Record,
+) error {
+	record.Attrs(func(a slog.Attr) bool {
+		if a.Key == "resource" && a.Value.String() == h.resource {
+			h.count.Add(1)
+			return false
+		}
+		return true
+	})
+	return nil
+}
+
+func (h shutdownTestResourceLogHandler) WithAttrs([]slog.Attr) slog.Handler {
+	return h
+}
+
+func (h shutdownTestResourceLogHandler) WithGroup(string) slog.Handler {
+	return h
+}
+
+// TestNodeStopSkipsLedgerStateCloseWhenPhase1DrainUnconfirmed pins that an
+// unfinished phase-1 wait suppresses the phase-3 LedgerState.Close, not only
+// the database close after it. The block forger, leader election, and both
+// Leios managers call into n.ledgerState from their own goroutines, so a
+// component whose Stop outlived the shutdown deadline may still be using it.
+// Restore and Truncate skip closeStorageForLiveLifecycleOp, and with it
+// LedgerState.Close, on the same errStorageDrainUnconfirmed from quiesce.
+//
+// The stop is wedged past the deadline, so phase 3 runs with the shutdown
+// context already expired and closeWithShutdownTimeout returns without
+// waiting for a Close it starts. Two observations cover that: the node's
+// close log for "ledgerState" (synchronous, see
+// shutdownTestResourceLogHandler), and the ledger state's own Close log, which
+// a Close started in the background emits shortly after Node.Stop returns.
+// Not t.Parallel: swaps the package-level componentStopsForShutdownPhase1
+// seam.
+func TestNodeStopSkipsLedgerStateCloseWhenPhase1DrainUnconfirmed(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	chainManager, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	ledgerCloseStarted := make(chan struct{}, 1)
+	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
+		Database:     db,
+		ChainManager: chainManager,
+		Logger: slog.New(nodeTestLogSignalHandler{
+			message: "waiting for in-flight header replay goroutines",
+			seen:    ledgerCloseStarted,
+		}),
+	})
+	require.NoError(t, err)
+	// Runs after release below and before the database cleanup dbtest
+	// registered: the fixed shutdown deliberately leaves both open.
+	t.Cleanup(func() { _ = ledgerState.Close() })
+
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+
+	previous := componentStopsForShutdownPhase1
+	t.Cleanup(func() { componentStopsForShutdownPhase1 = previous })
+	componentStopsForShutdownPhase1 = func(*Node) []namedStop {
+		return []namedStop{{
+			name: "wedged component",
+			stop: func() error {
+				<-release
+				return nil
+			},
+		}}
+	}
+
+	var ledgerCloseLogs atomic.Int32
+	n := &Node{db: db, ledgerState: ledgerState}
+	n.config = NewConfig(WithShutdownTimeout(20 * time.Millisecond))
+	n.config.logger = slog.New(shutdownTestResourceLogHandler{
+		resource: "ledgerState",
+		count:    &ledgerCloseLogs,
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- n.Stop() }()
+
+	var stopErr error
+	select {
+	case stopErr = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal(
+			"Node.Stop did not return; its phase 1 component stops " +
+				"are not bounded",
+		)
+	}
+	require.ErrorIs(t, stopErr, errStorageDrainUnconfirmed)
+	assert.ErrorContains(t, stopErr, "ledger state close skipped")
+	assert.Zero(t, ledgerCloseLogs.Load(),
+		"shutdown began closing ledger state although a phase 1 component "+
+			"never confirmed stopping")
+
+	select {
+	case <-ledgerCloseStarted:
+		t.Fatal(
+			"LedgerState.Close ran although a phase 1 component never " +
+				"confirmed stopping",
+		)
+	case <-time.After(250 * time.Millisecond):
+	}
+}
+
+// TestNodeStopClosesLedgerStateWhenPhase1DrainConfirmed is the control for
+// TestNodeStopSkipsLedgerStateCloseWhenPhase1DrainUnconfirmed: when every
+// phase-1 stop returns within the deadline, phase 3 still closes the ledger
+// state. Without it, a guard that skipped the close unconditionally would pass
+// the unconfirmed-path test.
+//
+// Deterministic without a wait: the shutdown context has not expired, so
+// closeWithShutdownTimeout returns only after LedgerState.Close has, and Close
+// emits its header-replay log before returning.
+// Not t.Parallel: swaps the package-level componentStopsForShutdownPhase1
+// seam.
+func TestNodeStopClosesLedgerStateWhenPhase1DrainConfirmed(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	chainManager, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	ledgerCloseStarted := make(chan struct{}, 1)
+	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
+		Database:     db,
+		ChainManager: chainManager,
+		Logger: slog.New(nodeTestLogSignalHandler{
+			message: "waiting for in-flight header replay goroutines",
+			seen:    ledgerCloseStarted,
+		}),
+	})
+	require.NoError(t, err)
+
+	previous := componentStopsForShutdownPhase1
+	t.Cleanup(func() { componentStopsForShutdownPhase1 = previous })
+	componentStopsForShutdownPhase1 = func(*Node) []namedStop {
+		return []namedStop{{
+			name: "stopped component",
+			stop: func() error { return nil },
+		}}
+	}
+
+	var ledgerCloseLogs atomic.Int32
+	// n.db is left unset: dbtest's cleanup owns the database close, and this
+	// test is about the ledger state close alone.
+	n := &Node{ledgerState: ledgerState}
+	n.config = NewConfig(WithShutdownTimeout(5 * time.Second))
+	n.config.logger = slog.New(shutdownTestResourceLogHandler{
+		resource: "ledgerState",
+		count:    &ledgerCloseLogs,
+	})
+
+	assert.NoError(t, n.Stop())
+	assert.Equal(t, int32(1), ledgerCloseLogs.Load(),
+		"shutdown must close ledger state once phase 1 confirmed stopping")
+	select {
+	case <-ledgerCloseStarted:
+	default:
+		t.Fatal("LedgerState.Close did not run after a confirmed phase 1 drain")
+	}
 }
 
 // TestShutdownPhase1ComponentStopsCoverQuiesceComponentStops pins that every

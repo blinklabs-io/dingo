@@ -1299,9 +1299,13 @@ no observable error (dingo#1649). The two workers touch node components only
 under `liveLifecycleMu`, which shutdown already holds, so bounding their wait
 cannot race teardown. An unfinished wait escalates to
 `errStorageDrainUnconfirmed` rather than being reported as an ordinary stop
-failure, and — like an unconfirmed `LedgerState.Close` in phase 3 — makes
-phase 3 skip the database close and plugin host shutdown, since the stuck
-goroutine may still be reading or writing `n.db`. `n.chainSelector.Stop` and
+failure, and makes phase 3 skip the `LedgerState.Close`, database close, and
+plugin host shutdown, since the stuck goroutine may still be using
+`n.ledgerState` or `n.db`. An unconfirmed `LedgerState.Close` skips the last
+two for the same reason. The resources phases 1 and 2 release after this list
+(peer governor, API servers, mempool, EventBus, ConnectionManager) are not
+held by these components or end in a lock-guarded terminal state that rejects
+late callers, so they are not gated. `n.chainSelector.Stop` and
 `peerGov.Stop` are not part of this list: the former only cancels and does
 not wait, and the latter already takes and honors the shutdown context.
 
