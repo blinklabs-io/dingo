@@ -1089,10 +1089,6 @@ func (pc *PoolCredentials) ValidateAgainstLedgerAtSlot(
 	if params == nil || isNilProtocolParamsProvider(params) {
 		return false, false, errors.New("protocol parameters provider is nil")
 	}
-	providerValue := reflect.ValueOf(params)
-	if providerValue.Kind() == reflect.Pointer && providerValue.IsNil() {
-		return false, false, errors.New("protocol parameters provider is nil")
-	}
 	pparams := params.ProtocolParamsForSlot(slot)
 	if pparams == nil {
 		return false, false, fmt.Errorf(
@@ -1107,15 +1103,24 @@ func (pc *PoolCredentials) ValidateAgainstLedgerAtSlot(
 	return pc.validateAgainstLedger(view, !limits.era.isTPraos())
 }
 
+// isNilProtocolParamsProvider reports whether provider wraps a typed nil.
+// An interface holding a nil-able typed value is not equal to nil, so a
+// caller passing a nil *LedgerState would otherwise reach
+// ProtocolParamsForSlot on a nil receiver. Mirrors plugin.isNilInstance.
 func isNilProtocolParamsProvider(provider ProtocolParamsProvider) bool {
 	value := reflect.ValueOf(provider)
 	switch value.Kind() {
 	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map,
-		reflect.Pointer, reflect.Slice:
+		reflect.Pointer, reflect.Slice, reflect.UnsafePointer:
 		return value.IsNil()
-	default:
+	case reflect.Invalid, reflect.Bool, reflect.Int, reflect.Int8,
+		reflect.Int16, reflect.Int32, reflect.Int64, reflect.Uint,
+		reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Uintptr, reflect.Float32, reflect.Float64, reflect.Complex64,
+		reflect.Complex128, reflect.Array, reflect.String, reflect.Struct:
 		return false
 	}
+	return false
 }
 
 func (pc *PoolCredentials) validateAgainstLedger(

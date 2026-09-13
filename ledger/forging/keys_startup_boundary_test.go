@@ -67,6 +67,22 @@ func TestStartupOpCertCounterAtEraBoundary(t *testing.T) {
 	}
 }
 
+// funcParamsProvider is a nil-able non-pointer kind implementing
+// ProtocolParamsProvider, so the typed-nil guard is exercised beyond
+// reflect.Pointer. Calling it while nil panics, which is what the guard
+// prevents.
+type funcParamsProvider func(slot uint64) lcommon.ProtocolParameters
+
+func (provider funcParamsProvider) GetCurrentPParams() lcommon.ProtocolParameters {
+	return provider(0)
+}
+
+func (provider funcParamsProvider) ProtocolParamsForSlot(
+	slot uint64,
+) lcommon.ProtocolParameters {
+	return provider(slot)
+}
+
 func TestStartupOpCertCounterRequiresEraParameters(t *testing.T) {
 	var typedNilProvider *mockPParamsProvider
 	for _, testCase := range []struct {
@@ -77,8 +93,8 @@ func TestStartupOpCertCounterRequiresEraParameters(t *testing.T) {
 		{"missing provider", nil, "provider is nil"},
 		{"typed nil provider", typedNilProvider, "provider is nil"},
 		{
-			"typed nil provider",
-			(*mockPParamsProvider)(nil),
+			"typed nil func provider",
+			funcParamsProvider(nil),
 			"provider is nil",
 		},
 		{
