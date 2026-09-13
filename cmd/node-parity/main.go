@@ -178,8 +178,15 @@ func requireAtPoint() (*nodeparity.Tip, error) {
 			"--at-slot and --at-hash must both be set, or neither",
 		)
 	}
-	if _, err := hex.DecodeString(globalFlags.atHash); err != nil {
+	decoded, err := hex.DecodeString(globalFlags.atHash)
+	if err != nil {
 		return nil, fmt.Errorf("--at-hash: %w", err)
+	}
+	if len(decoded) != 32 {
+		return nil, fmt.Errorf(
+			"--at-hash: must decode to 32 bytes, got %d",
+			len(decoded),
+		)
 	}
 	return &nodeparity.Tip{
 		Slot: globalFlags.atSlot,
