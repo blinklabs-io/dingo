@@ -8709,6 +8709,17 @@ after database recovery and before ledger processing. Mithril ledger-state
 import also invokes the rebuild directly, at the end of import once accounts and
 UTxOs are populated.
 
+Both startup probes — `RewardLiveStakeNeedsBackfill` and
+`StaleConsensusStakeSnapshotsExist` — are read-only and run inside a read-only
+metadata transaction, so they resolve against the read connection pool. The
+write pool is engaged only when a probe has already determined a rebuild is
+required, in a second transaction opened for that rebuild alone. Holding the
+single writer connection open merely to ask the questions would contend with
+block processing on SQLite, and in the skipped case would spend the writer on
+work the flag exists to avoid. Splitting the two is safe because both call
+sites run before ledger processing can advance the chain, so nothing can
+write `reward_live_stake` between the probe and the rebuild.
+
 `skipRewardLiveStakeBackfillCheck` (`--skip-reward-live-stake-backfill-check`,
 `CARDANO_SKIP_REWARD_LIVE_STAKE_BACKFILL_CHECK`, default false) skips the
 `RewardLiveStakeNeedsBackfill` probe and any rebuild it would trigger, and logs
