@@ -4433,6 +4433,18 @@ and rolls both stores back to the last applied ledger tip, then publishes a
 ChainSync obtains a fresh intersection. Other transaction-validation errors
 continue through producer resolution and the unresolved-producer fallback.
 
+`lcommon.MalformedReferenceScriptsError` and
+`lcommon.MalformedScriptWitnessesError` are classified the same way.
+`common.ValidatePlutusScriptsWellFormed` raises both by decoding only the
+failing transaction's own witness scripts and output/collateral-return script
+references against the era's protocol-major version; it never resolves a UTxO
+through `LedgerState`/`LedgerView`, so no local replay of a different UTxO
+history changes either verdict. Left unclassified, such a rejection fell
+through both the at-tip and behind-tip branches, returned `(false, nil)` from
+`tryRecoverFromTxValidationError`, and reached the generic pipeline-restart
+path with the ledger tip unchanged, so the pipeline re-read and re-failed the
+identical block forever (issue #4243).
+
 The rejection itself is never terminal -- what can become terminal is the
 rewind that carries it out, when the chain refuses that rewind for exceeding
 `k` and the applied tip stops moving (above). A redelivery of the same failing
