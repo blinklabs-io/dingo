@@ -907,6 +907,8 @@ func WithPluginSelection(
 			c.cfg.Plugins.API.Mesh = selection
 		case hostplugin.CapabilityAPIUtxorpc:
 			c.cfg.Plugins.API.Utxorpc = selection
+		default:
+			return
 		}
 	}
 }

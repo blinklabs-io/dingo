@@ -767,6 +767,24 @@ graph TB
 
 The block production pipeline from leader election through broadcast.
 
+The producer validates its credentials before starting and only advertises
+blocks it has durably adopted:
+
+- **Validate the producer counter for the active era.** Before the node starts
+  block production, `node_forging.go` checks the loaded OpCert issue number
+  against the observed on-chain counter. A counter below the observed value is
+  refused in every era. The no-gap rule is era-scoped, so it is applied only
+  when the era can be resolved, and the slot it is resolved from is the applied
+  chain tip — the same pipeline stage that produces the observed counter, never
+  the wall clock. TPraos permits forward counter movement; Praos refuses a
+  gapped one. When the era cannot be resolved (no protocol parameters for the
+  tip slot, an unrecognized parameters type, no provider), the rule is
+  unevaluated rather than violated: startup logs a warning and continues.
+  `BlockForger.checkOpCertSequence` re-applies the full era-scoped rule for
+  every won leader slot from near-tip state and fails closed per slot, so a
+  gapped counter cannot produce a block even when startup could not judge
+  it.
+
 For Shelley through Conway, transaction selection accounts incrementally for
 the exact encoded body components: raw bodies and witnesses, array headers,
 auxiliary data with its transaction-index keys and map header, and the era's
