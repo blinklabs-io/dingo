@@ -1126,6 +1126,20 @@ func TestSettleAuditAfterRewind(t *testing.T) {
 		assert.Nil(t, ls.continuationAudit.Load())
 	})
 
+	t.Run("drops a same-slot window on a competing hash", func(t *testing.T) {
+		t.Parallel()
+		fixture := newChainsyncRollbackFixture(t)
+		ls := fixture.ls
+		ls.armContinuationAudit(
+			ocommon.NewPoint(target.Slot, testHashBytes("competing-hash")),
+			"concurrent",
+		)
+
+		ls.settleAuditAfterRewind(nil, ls.continuationAuditGen, true, target)
+
+		assert.Nil(t, ls.continuationAudit.Load())
+	})
+
 	t.Run("does not restore after a committed truncation", func(t *testing.T) {
 		t.Parallel()
 		fixture := newChainsyncRollbackFixture(t)
