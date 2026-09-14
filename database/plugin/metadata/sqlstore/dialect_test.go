@@ -15,11 +15,38 @@
 package sqlstore
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 	"testing"
 
+	_ "modernc.org/sqlite"
+
 	"github.com/stretchr/testify/require"
 )
+
+// TestSQLiteRestoreModeKeepsRaisedWALAutocheckpoint guards against
+// RestoreNormalMode silently undoing the checkpoint-threshold fix in
+// database/plugin/metadata/sqlite/shared_sqlstore.go's sqliteCommonPragmas:
+// a bulk load (SetBulkMode) must leave a connection at the same
+// wal_autocheckpoint every ordinary connection already runs with, not
+// SQLite's much smaller compiled-in default, once RestoreNormalMode runs
+// after it.
+func TestSQLiteRestoreModeKeepsRaisedWALAutocheckpoint(t *testing.T) {
+	t.Parallel()
+	db, err := sql.Open("sqlite", "file::memory:?cache=shared")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	dialect := SQLiteDialect()
+	ctx := context.Background()
+	require.NoError(t, dialect.SetBulkMode(ctx, db))
+	require.NoError(t, dialect.RestoreNormalMode(ctx, db))
+
+	var pages int
+	require.NoError(t, db.QueryRow("PRAGMA wal_autocheckpoint").Scan(&pages))
+	require.Equal(t, 10000, pages)
+}
 
 func TestPostgresRebind(t *testing.T) {
 	t.Parallel()

@@ -256,7 +256,7 @@ func (s *Store) HasDeferredIndexesPending() (bool, error) {
 		return false, err
 	}
 	var value string
-	err := newDialectQueryer(s.readDB, s.dialect.Name()).QueryRowContext(
+	err := s.instrumentedQueryer(s.readDB).QueryRowContext(
 		context.Background(),
 		"SELECT value FROM sync_state WHERE sync_key = ?",
 		deferred.SyncStateKey,

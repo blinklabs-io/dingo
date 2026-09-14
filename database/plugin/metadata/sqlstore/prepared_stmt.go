@@ -84,7 +84,11 @@ var hotStatements = []string{
 // registry before this point, so this only degrades a deliberately
 // schema-less test harness, never a real deployment.
 func (s *Store) prepareHotStatements(ctx context.Context) {
-	dialectDB := newDialectQueryer(s.writeDB, s.dialect.Name())
+	// instrumentedQueryer, not newDialectQueryer directly: PrepareContext is
+	// not counted by countingQueryer (see metrics.go), so this only gains
+	// dialect translation here, same as before -- routed through the shared
+	// helper purely for consistency with every other call site.
+	dialectDB := s.instrumentedQueryer(s.writeDB)
 	for _, query := range hotStatements {
 		stmt, err := dialectDB.PrepareContext(ctx, query)
 		if err != nil {
@@ -158,6 +162,21 @@ func (s *Store) closePreparedStatements() {
 //     PrepareContext used here), so calling through the unwrapped handle is
 //     correct and avoids re-translating text that is already
 //     dialect-correct.
+//   - countingQueryer: unwrap and recurse for the same reason as
+//     dialectQueryer. This case is not optional: every db a real caller
+//     passes in is wrapped in countingQueryer whenever Config.PromRegistry
+//     is set (Store.instrumentedQueryer applies it around every queryer,
+//     including the *sql.Tx a write transaction hands out), so without this
+//     case the *sql.Tx below it would never match on a real, metrics-
+//     enabled Store -- every hot-statement call inside a write transaction
+//     would silently fall through to the default branch and call cached
+//     directly against the pool it was originally prepared on, instead of
+//     the transaction-scoped statement (*sql.Tx).StmtContext returns. With
+//     writeDB's SetMaxOpenConns(1), that pool has no connection to hand out
+//     while the transaction holds its only one, so a real call would block
+//     forever -- exactly the deadlock prepareHotStatements' own comment
+//     warns eager (not lazy) preparation exists to avoid, reintroduced here
+//     by a different path.
 //   - anything else (a bare *sql.DB, or any future queryer implementation):
 //     cached was prepared directly against s.writeDB, so it is already the
 //     right handle to call with no further translation needed.
@@ -170,6 +189,8 @@ func stmtForQueryer(
 	case *sql.Tx:
 		return v.StmtContext(ctx, cached)
 	case dialectQueryer:
+		return stmtForQueryer(ctx, v.queryer, cached)
+	case countingQueryer:
 		return stmtForQueryer(ctx, v.queryer, cached)
 	default:
 		return cached
@@ -191,6 +212,14 @@ func (s *Store) queryRowCached(
 	args ...any,
 ) *sql.Row {
 	if cached, ok := s.lookupCachedStmt(query); ok {
+		// Counted here, not by countingQueryer: stmtForQueryer resolves
+		// straight to a *sql.Stmt, bypassing db (and any countingQueryer
+		// wrapping it) entirely -- see metrics.go's doc comment on
+		// countingQueryer's PrepareContext for why that makes this the
+		// right place to count a cache hit.
+		if s.sqlOperations != nil {
+			s.sqlOperations.WithLabelValues(classifySQLOp(query)).Inc()
+		}
 		return stmtForQueryer(ctx, db, cached).QueryRowContext(ctx, args...)
 	}
 	return db.QueryRowContext(ctx, query, args...)
@@ -203,6 +232,9 @@ func (s *Store) execCached(
 	args ...any,
 ) (sql.Result, error) {
 	if cached, ok := s.lookupCachedStmt(query); ok {
+		if s.sqlOperations != nil {
+			s.sqlOperations.WithLabelValues(classifySQLOp(query)).Inc()
+		}
 		return stmtForQueryer(ctx, db, cached).ExecContext(ctx, args...)
 	}
 	return db.ExecContext(ctx, query, args...)
