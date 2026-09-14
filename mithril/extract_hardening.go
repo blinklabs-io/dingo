@@ -49,8 +49,10 @@ var (
 
 // extractConfig holds the resolved destination policy for one extraction.
 type extractConfig struct {
-	merge   bool
-	replace bool
+	merge             bool
+	replace           bool
+	maxZstdWindowSize uint64
+	maxZstdMemory     uint64
 }
 
 // ExtractOption configures how ExtractArchive treats its destination.
@@ -81,8 +83,24 @@ func WithReplaceDestination() ExtractOption {
 	return func(c *extractConfig) { c.replace = true }
 }
 
+// WithZstdLimits overrides the decoder resource limits for an extraction.
+// Both values must be positive; zero keeps the safe defaults.
+func WithZstdLimits(maxWindow, maxMemory uint64) ExtractOption {
+	return func(c *extractConfig) {
+		if maxWindow > 0 {
+			c.maxZstdWindowSize = maxWindow
+		}
+		if maxMemory > 0 {
+			c.maxZstdMemory = maxMemory
+		}
+	}
+}
+
 func newExtractConfig(opts []ExtractOption) extractConfig {
-	var cfg extractConfig
+	cfg := extractConfig{
+		maxZstdWindowSize: maxZstdWindowSize,
+		maxZstdMemory:     maxZstdDecoderMemory,
+	}
 	for _, opt := range opts {
 		opt(&cfg)
 	}

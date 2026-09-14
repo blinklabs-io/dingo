@@ -145,7 +145,7 @@ func TestVoteManagerVotesFromHeaderArrivalBeforeRankingBlockApplies(
 	emittedEvent := testutil.RequireReceive(
 		t,
 		emittedCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"vote emitted while the vote window is still open",
 	)
 	emitted, ok := emittedEvent.Data.(VoteEmittedEvent)
@@ -201,7 +201,7 @@ func TestVoteManagerHeaderAndApplyArmingDoNotDoubleVote(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		emittedCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"vote emitted from the header path",
 	)
 
@@ -265,7 +265,7 @@ func TestVoteManagerRolledBackHeaderAnnouncementDoesNotVote(t *testing.T) {
 		return len(fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{
 			SlotNo: headerArmingRbSlot, VoterId: 1,
 		}})) == 0
-	}, 2*time.Second, "rollback pruned state above the rollback point")
+	}, testutil.AsyncWait, "rollback pruned state above the rollback point")
 
 	// The endorser block arrives after the rollback. The announcement it
 	// would have satisfied is gone, so nothing is emitted.
@@ -496,7 +496,7 @@ func TestVoteManagerInvalidatedHeaderAnnouncementDoesNotVote(t *testing.T) {
 		fixture.mgr.mu.Lock()
 		defer fixture.mgr.mu.Unlock()
 		return fixture.mgr.lastHeaderStreamSeq >= 2
-	}, 2*time.Second, "invalidation applied")
+	}, testutil.AsyncWait, "invalidation applied")
 
 	fixture.mgr.HandleEndorserBlock(headerArmingRbSlot, ebHash)
 	testutil.RequireNoReceive(
@@ -548,7 +548,7 @@ func TestVoteManagerLateRollbackDoesNotDropRearmedAnnouncement(t *testing.T) {
 	emitted := testutil.RequireReceive(
 		t,
 		emittedCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"vote for the replacement chain's announcement",
 	)
 	vote, ok := emitted.Data.(VoteEmittedEvent)
@@ -617,7 +617,7 @@ func TestVoteManagerHeaderStreamRecoversFromClosedChannel(t *testing.T) {
 		return promtestutil.ToFloat64(
 			fixture.mgr.metrics.headerStreamResubscribeTotal,
 		) == 1
-	}, 2*time.Second, "header stream resubscribed")
+	}, testutil.AsyncWait, "header stream resubscribed")
 
 	// The replacement subscription arms announcements again.
 	ebHash := lcommon.NewBlake2b256([]byte("announced-eb"))
@@ -627,7 +627,7 @@ func TestVoteManagerHeaderStreamRecoversFromClosedChannel(t *testing.T) {
 	emitted := testutil.RequireReceive(
 		t,
 		emittedCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"vote emitted after the header stream was recovered",
 	)
 	vote, ok := emitted.Data.(VoteEmittedEvent)
@@ -680,7 +680,7 @@ func waitForAnnouncement(
 		defer fixture.mgr.mu.Unlock()
 		_, ok := fixture.mgr.announcements[rbHash]
 		return ok
-	}, 2*time.Second, "announcement record present")
+	}, testutil.AsyncWait, "announcement record present")
 }
 
 // armAndVote drives one announcement from header arrival to an emitted local
@@ -699,7 +699,7 @@ func armAndVote(
 	waitForAnnouncement(t, fixture, rbHash)
 	fixture.mgr.HandleEndorserBlock(slot, ebHash)
 	emitted := testutil.RequireReceive(
-		t, emittedCh, 2*time.Second, "local vote emitted",
+		t, emittedCh, testutil.AsyncWait, "local vote emitted",
 	)
 	vote, ok := emitted.Data.(VoteEmittedEvent)
 	require.True(t, ok)
@@ -848,7 +848,7 @@ func TestVoteManagerInvalidationDropsDerivedVoteAndAllowsRevote(t *testing.T) {
 		return len(
 			fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{voteId}),
 		) == 0
-	}, 2*time.Second, "the vote derived from the cleared header is dropped")
+	}, testutil.AsyncWait, "the vote derived from the cleared header is dropped")
 
 	fixture.mgr.mu.Lock()
 	assert.NotContains(t, fixture.mgr.announcements, orphanRb)
@@ -921,7 +921,7 @@ func TestVoteManagerInvalidationKeepsUnrelatedAnnouncementState(t *testing.T) {
 		return len(fixture.mgr.VotesByIds(
 			[]lcommon.LeiosVoteId{orphanVoteId},
 		)) == 0
-	}, 2*time.Second, "the invalidated announcement's vote is dropped")
+	}, testutil.AsyncWait, "the invalidated announcement's vote is dropped")
 
 	assert.Len(
 		t,
@@ -990,7 +990,7 @@ func TestVoteManagerRollbackDeliveredBeforeHeaderStreamIsSafe(t *testing.T) {
 		fixture.mgr.mu.Lock()
 		defer fixture.mgr.mu.Unlock()
 		return fixture.mgr.lastHeaderStreamSeq >= 4
-	}, 2*time.Second, "header stream drained")
+	}, testutil.AsyncWait, "header stream drained")
 
 	fixture.mgr.HandleEndorserBlock(headerArmingRbSlot, ebHash)
 	testutil.RequireNoReceive(
@@ -1041,7 +1041,7 @@ func TestVoteManagerLocalBlockInvalidationDropsNamedAnnouncement(t *testing.T) {
 		return len(
 			fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{voteId}),
 		) == 0
-	}, 2*time.Second, "the discarded header's vote is dropped")
+	}, testutil.AsyncWait, "the discarded header's vote is dropped")
 
 	fixture.mgr.mu.Lock()
 	assert.NotContains(t, fixture.mgr.announcements, peerRb)
@@ -1102,7 +1102,7 @@ func TestVoteManagerLocalBlockInvalidationKeepsUnnamedAnnouncements(
 		defer fixture.mgr.mu.Unlock()
 		_, still := fixture.mgr.announcements[discardedRb]
 		return !still
-	}, 2*time.Second, "named announcement dropped")
+	}, testutil.AsyncWait, "named announcement dropped")
 
 	assert.Len(
 		t,
@@ -1180,7 +1180,7 @@ func TestVoteManagerSameSlotLocalForgeStillVotes(t *testing.T) {
 	emitted := testutil.RequireReceive(
 		t,
 		emittedCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"the forged block's own vote is emitted once the id is freed",
 	)
 	local, ok := emitted.Data.(VoteEmittedEvent)

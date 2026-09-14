@@ -21,7 +21,6 @@ import (
 	"log/slog"
 	"net"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
@@ -189,7 +188,7 @@ func (f *trustWindowLedger) requireResyncs(t *testing.T, n int) {
 		testutil.RequireReceive(
 			t,
 			f.resyncs,
-			2*time.Second,
+			testutil.AsyncWait,
 			fmt.Sprintf("pre-halt resync %d of %d", i+1, n),
 		)
 	}
