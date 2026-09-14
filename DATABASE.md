@@ -1,5 +1,23 @@
 # Dingo Database
 
+## Snapshot manifest limits
+
+Snapshot manifest I/O defaults to a 1 MiB encoded size limit before JSON
+decoding. Library callers can pass `lifecycle.WithManifestMaxBytes(n)` to
+manifest read/write/parse, label, catalog, snapshot, and restore operations.
+Use the same option for creation and consumption; zero selects 1 MiB and
+negative values fail before I/O. Cloud callers pass the option when
+registering S3/GCS destinations to set their catalog and fetch defaults.
+`PeekManifest` and `FetchCloudManifest` also accept per-call options; a custom
+destination must implement `ConfigurableCloudManifestFetcher` to honor
+those options, otherwise an explicit error is returned. The optional
+arguments change exported Go function types; direct existing calls retain
+their default behavior. Manifest encoding and checksums are unchanged.
+These limits bound manifest I/O, not bulk cloud snapshot downloads.
+Limit violations wrap `lifecycle.ErrManifestTooLarge`. Bark snapshot verify
+and restore report this as `ResourceExhausted` for local and cloud manifests,
+distinct from missing snapshots, checksum corruption, or cloud transport errors.
+
 ## Storage provider ownership
 
 Blob and metadata stores are constructed by the application plugin host and
@@ -787,6 +805,20 @@ rebuild path creates any of them that is absent before touching the manifest.
 That includes the critical rebuild: it is the last step before `serve` clears
 `sync_status` and the node accepts API writes, while the full rebuild that
 clears the pending marker can run as background maintenance long afterwards.
+
+The child column of an `ON DELETE CASCADE` foreign key whose parent rows the
+rollback path deletes is classified critical rather than lazy, which is the
+same rule at a different point in the cycle. The rollback sweep's
+`DELETE FROM "transaction" WHERE slot > ?` cascades into `utxo`, and SQLite
+enforces that cascade with an implicit
+`DELETE FROM utxo WHERE transaction_id = ?` per deleted parent row, so
+`idx_utxo_transaction_id` has to be resident from the moment the database is
+marked ready: a rollback can run as soon as live sync resumes, and without the
+index each deleted transaction scans the whole `utxo` table.
+`EXPLAIN QUERY PLAN` of the parent statement does not show this — it reports
+only the indexed search over `transaction`. InnoDB requires an index on every
+foreign-key child column and refuses to drop it, so only the SQLite (and
+PostgreSQL) dialects can reach the state where it is missing.
 
 Excluding an index from the manifest does not restore it on databases already
 on disk: a binary whose manifest still carried it dropped it at the start of a

@@ -24,6 +24,30 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// AsyncWait is the deadline a test should give a wait on asynchronous
+// progress -- a goroutine the code under test started, a background
+// manager reacting to an event, a commit draining its after-commit
+// callbacks -- when the test has no way to observe that work other than
+// polling for its result.
+//
+// It is a failure deadline, not a delay. WaitForCondition and
+// RequireReceive return the moment the condition holds, so a larger value
+// costs a passing run nothing; it only changes how long a genuinely stuck
+// test takes to report, and the per-package -timeout still backstops that.
+//
+// The value is deliberately far above the time the work takes on an idle
+// machine, because that time is not what the deadline has to cover. `go
+// test` defaults -parallel to GOMAXPROCS, so on a large host dozens of
+// race-instrumented tests run at once, each with its own SQLite database,
+// and a wait that completes in milliseconds standalone takes tens of
+// seconds under that load. Slow single-core runners produce the same
+// effect for the opposite reason.
+//
+// Use one value rather than a per-site guess: a spread of 1s/2s/5s
+// deadlines across a package encodes no information about the work being
+// waited on, and the short end of the spread is where the flakes are.
+const AsyncWait = 2 * time.Minute
+
 // WaitForCondition polls the given condition function until it returns true
 // or the timeout expires. This replaces the common pattern of
 // time.Sleep followed by an assertion check.
