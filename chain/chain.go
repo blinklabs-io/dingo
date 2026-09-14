@@ -47,14 +47,27 @@ const (
 )
 
 type Chain struct {
-	eventBus             *event.EventBus
-	manager              *ChainManager
-	waitingChan          chan struct{}
-	headers              []queuedHeader
-	blocks               []ocommon.Point
-	iterators            []*ChainIterator
-	currentTip           ochainsync.Tip
-	tipBlockIndex        uint64
+	eventBus      *event.EventBus
+	manager       *ChainManager
+	waitingChan   chan struct{}
+	headers       []queuedHeader
+	blocks        []ocommon.Point
+	iterators     []*ChainIterator
+	currentTip    ochainsync.Tip
+	tipBlockIndex uint64
+	// mutationGeneration counts every mutation of the in-memory chain state
+	// that the two restore paths snapshot: currentTip, tipBlockIndex, the
+	// queued-header list, and the ephemeral block buffer. Both
+	// batchRestoreIsSafeLocked and finishCallerTxnAdd write a snapshot back
+	// only while the counter still shows the chain is exactly where that
+	// mutation left it, so a mutation that does not bump it is invisible to
+	// them and gets silently overwritten.
+	//
+	// A mutation is one bump, not one per field. addBlockLocked deletes the
+	// matched header and advances the tip under a single increment; the
+	// header-only mutations -- addBlockHeader, ClearHeaders, and
+	// rollbackLocked's two queued-header paths -- bump it themselves because
+	// nothing else does it for them. Guarded by c.mutex.
 	mutationGeneration   uint64
 	lastCommonBlockIndex uint64
 	id                   ChainId
@@ -271,6 +284,14 @@ func (c *Chain) addBlockHeader(
 	}
 	// Add header
 	c.headers = append(c.headers, queued)
+	// The queued-header list is part of the state both in-memory restore
+	// paths snapshot (Chain.addRawBlocks/AddBlocks through
+	// batchRestoreIsSafeLocked, and a caller-supplied transaction through
+	// finishCallerTxnAdd), so queueing a header is a chain mutation and has
+	// to be counted as one. A restore that wrote its snapshot back over this
+	// append would drop a header the chain accepted, with no invalidation
+	// published for it. See the mutationGeneration field.
+	c.mutationGeneration++
 	// Surface a Leios endorser-block announcement the moment its ranking
 	// block's header enters the queue. The apply-driven ChainUpdateEventType
 	// cannot serve this: applying an EB-announcing ranking block waits on
@@ -1517,8 +1538,19 @@ func (c *Chain) rollbackLocked(
 	// must not wait for unrelated caller transactions. Check that case before
 	// waiting; the full check is repeated below after the wait because headers
 	// can change while a caller transaction concludes.
+	//
+	// Removing no persistent block is not the same as mutating nothing: this
+	// path trims the queued-header list, which is exactly the state
+	// finishCallerTxnAdd restores when a caller-supplied transaction rolls
+	// back. Taking it underneath an outstanding caller add would let that
+	// restore write the pre-add queue back over the trim, resurrecting
+	// headers this path has already published a HeaderInvalidationRollback
+	// for. So it is taken only while no such add is in flight; otherwise the
+	// rollback falls through to awaitPendingCallerAdds and re-checks the
+	// header queue afterwards. Every in-tree add passes a nil transaction and
+	// records no hold, so the fast path is taken exactly as often as before.
 	c.mutex.Lock()
-	if len(c.headers) > 0 {
+	if len(c.headers) > 0 && c.pendingAdds.heldCount() == 0 {
 		idx, err := c.findQueuedHeader(point)
 		if err != nil {
 			c.mutex.Unlock()
@@ -1534,6 +1566,9 @@ func (c *Chain) rollbackLocked(
 			dropped := len(discarded)
 			c.headers = slices.Delete(c.headers, idx+1, len(c.headers))
 			if dropped > 0 {
+				// Trimming the queue is a chain mutation; see the
+				// mutationGeneration field.
+				c.mutationGeneration++
 				c.queueDeferredEventLocked(headerInvalidationEvent(
 					point,
 					HeaderInvalidationRollback,
@@ -1585,6 +1620,9 @@ func (c *Chain) rollbackLocked(
 			// the announcements would stay armed with nothing left to
 			// void them.
 			if dropped > 0 {
+				// Trimming the queue is a chain mutation; see the
+				// mutationGeneration field.
+				c.mutationGeneration++
 				c.queueDeferredEventLocked(headerInvalidationEvent(
 					point,
 					HeaderInvalidationRollback,
@@ -1822,6 +1860,9 @@ func (c *Chain) ClearHeaders() {
 	// block was ever added. Everything at or below the block tip survives;
 	// the queue held only what was above it.
 	if hadHeaders {
+		// Clearing the queue is a chain mutation; see the
+		// mutationGeneration field.
+		c.mutationGeneration++
 		c.queueDeferredEventLocked(headerInvalidationEvent(
 			c.currentTip.Point,
 			HeaderInvalidationQueueCleared,

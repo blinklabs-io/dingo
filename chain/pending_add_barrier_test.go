@@ -149,3 +149,55 @@ func TestAwaitPendingCallerAddsIsBounded(t *testing.T) {
 		)
 	}
 }
+
+// TestExpiredHoldIsChargedOnce pins that the drain bound is paid once per
+// abandoned transaction rather than once per removal path. A hold is never
+// evicted -- the restoration snapshots it carries are owed to that transaction
+// whenever it concludes -- so without marking it, a caller that leaks one
+// transaction would make every later rollback and RewindPrimaryChainToPoint
+// wait the full pendingAddDrainTimeout for the life of the process.
+func TestExpiredHoldIsChargedOnce(t *testing.T) {
+	t.Parallel()
+
+	db := newBarrierTestDB(t)
+	c := &Chain{persistent: true}
+	txn := db.BlobTxn(true)
+	defer txn.Release()
+	c.beginCallerTxnAdd(txn)()
+
+	// The first removal path pays the bound and is exposed to the window.
+	if _, drained := c.pendingAdds.awaitDrained(50 * time.Millisecond); drained {
+		t.Fatal("wait reported a drain while a transaction was still open")
+	}
+
+	// Every later one fails immediately instead of paying it again.
+	start := time.Now()
+	outstanding, drained := c.pendingAdds.awaitDrained(pendingAddDrainTimeout)
+	elapsed := time.Since(start)
+	if drained {
+		t.Fatal("wait reported a drain while a transaction was still open")
+	}
+	if outstanding != 1 {
+		t.Fatalf("reported %d outstanding transactions, want 1", outstanding)
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf(
+			"a wait after an expired hold paid the bound again: %s",
+			elapsed,
+		)
+	}
+
+	// Concluding the transaction clears the mark with the hold, so the
+	// barrier stops failing waits.
+	if err := txn.Rollback(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	if outstanding, drained := c.pendingAdds.awaitDrained(
+		time.Second,
+	); !drained {
+		t.Fatalf(
+			"barrier did not recover after the transaction concluded: %d outstanding",
+			outstanding,
+		)
+	}
+}

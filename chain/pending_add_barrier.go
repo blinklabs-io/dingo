@@ -37,6 +37,14 @@ import (
 // is writer-preferring, every chain mutation queued behind it -- for the life of
 // the process. On expiry the wait returns an error so the rollback can abort
 // before it reaches the removal loop.
+//
+// The bound is charged once per abandoned transaction, not once per removal
+// path. A hold is never evicted -- the restoration snapshots it carries are
+// owed to that transaction whenever it concludes -- so without that rule an
+// abandoned transaction would tax every later rollback and
+// RewindPrimaryChainToPoint the full timeout for the life of the process
+// rather than exposing the one removal that met it. awaitDrained marks a hold
+// that outlives a wait and fails later waits immediately.
 const pendingAddDrainTimeout = 30 * time.Second
 
 // pendingAddBarrier keeps the rollback paths that delete blocks by index from
@@ -73,9 +81,14 @@ type pendingAddBarrier struct {
 	// transaction may carry any number of adds, and its single OnFinish
 	// callback releases all of them at once. drained is closed when pending
 	// empties, and is nil whenever pending is empty.
+	//
+	// expired holds the subset of pending that outlived a removal path's
+	// wait. It exists so that wait is paid once rather than once per
+	// removal; see awaitDrained.
 	mu      sync.Mutex
 	pending map[*database.Txn][]callerTxnAdd
 	drained chan struct{}
+	expired map[*database.Txn]struct{}
 }
 
 // callerTxnAdd records the chain state immediately before one block was added
@@ -127,11 +140,24 @@ func (b *pendingAddBarrier) record(txn *database.Txn, add callerTxnAdd) {
 	}
 }
 
+// discardLast drops the snapshot recorded for an add that then failed.
+//
+// A transaction carries a hold for exactly as long as it carries at least one
+// in-flight add, so discarding the last snapshot drops the hold with it. An
+// add that fails before addBlockLocked mutated anything leaves its transaction
+// carrying nothing, and a hold for such a transaction is a removal path
+// waiting for a chain add that does not exist: it would pay
+// pendingAddDrainTimeout and then abort the rollback. A later add on the same
+// transaction takes a fresh hold.
 func (b *pendingAddBarrier) discardLast(txn *database.Txn) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	adds, ok := b.pending[txn]
 	if !ok || len(adds) == 0 {
+		return
+	}
+	if len(adds) == 1 {
+		b.releaseLocked(txn)
 		return
 	}
 	b.pending[txn] = adds[:len(adds)-1]
@@ -151,10 +177,19 @@ func (b *pendingAddBarrier) adds(txn *database.Txn) []callerTxnAdd {
 func (b *pendingAddBarrier) release(txn *database.Txn) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.releaseLocked(txn)
+}
+
+// releaseLocked drops txn's hold and any expiry mark it carried. Callers must
+// hold b.mu. Dropping the mark with the hold is what lets the barrier recover:
+// a transaction that outlived a wait and then concluded stops failing later
+// waits.
+func (b *pendingAddBarrier) releaseLocked(txn *database.Txn) {
 	if _, ok := b.pending[txn]; !ok {
 		return
 	}
 	delete(b.pending, txn)
+	delete(b.expired, txn)
 	if len(b.pending) == 0 && b.drained != nil {
 		close(b.drained)
 		b.drained = nil
@@ -171,8 +206,23 @@ func (b *pendingAddBarrier) heldCount() int {
 // awaitDrained waits for every recorded hold to be released, or for timeout to
 // expire. It returns the number of holds still outstanding and whether the set
 // drained. See pendingAddDrainTimeout for why the wait is bounded.
+//
+// A hold that outlives one wait is marked expired, and every later wait fails
+// immediately while it is still held. The barrier cannot evict the hold to
+// achieve that: the restoration snapshots it carries are still owed to that
+// transaction if it ever concludes, and dropping them would leave the
+// in-memory chain naming a block the store never received. Marking it instead
+// charges pendingAddDrainTimeout to the first removal path that meets an
+// abandoned transaction rather than to every one of them for the life of the
+// process. The mark is dropped with the hold, so a transaction that concludes
+// late returns the barrier to normal.
 func (b *pendingAddBarrier) awaitDrained(timeout time.Duration) (int, bool) {
 	b.mu.Lock()
+	if len(b.expired) > 0 {
+		outstanding := len(b.pending)
+		b.mu.Unlock()
+		return outstanding, false
+	}
 	ch := b.drained
 	b.mu.Unlock()
 	if ch == nil {
@@ -184,8 +234,28 @@ func (b *pendingAddBarrier) awaitDrained(timeout time.Duration) (int, bool) {
 	case <-ch:
 		return 0, true
 	case <-timer.C:
-		return b.heldCount(), false
+		outstanding := b.markExpired()
+		return outstanding, outstanding == 0
 	}
+}
+
+// markExpired records every hold still outstanding as having outlived a
+// removal path's wait, and reports how many there were. A set that drained
+// between the timer firing and this lock marks nothing and reports zero, which
+// awaitDrained reads as the drain it was.
+func (b *pendingAddBarrier) markExpired() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.pending) == 0 {
+		return 0
+	}
+	if b.expired == nil {
+		b.expired = make(map[*database.Txn]struct{}, len(b.pending))
+	}
+	for txn := range b.pending {
+		b.expired[txn] = struct{}{}
+	}
+	return len(b.pending)
 }
 
 // beginCallerTxnAdd records txn as carrying an in-flight add and returns the
