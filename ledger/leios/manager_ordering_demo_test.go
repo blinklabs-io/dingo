@@ -104,7 +104,7 @@ func requireVoteFor(
 	msg string,
 ) {
 	t.Helper()
-	data := testutil.RequireReceive(t, votes, 2*time.Second, msg)
+	data := testutil.RequireReceive(t, votes, testutil.AsyncWait, msg)
 	emitted, ok := data.(VoteEmittedEvent)
 	require.True(t, ok, "got %T", data)
 	assert.Equal(t, rbHash, emitted.Vote.AnnouncingRbHash, msg)
@@ -130,7 +130,7 @@ func TestOrderingDemoAnnouncementThenRollback(t *testing.T) {
 		fixture.mgr.mu.Lock()
 		defer fixture.mgr.mu.Unlock()
 		return fixture.mgr.lastHeaderStreamSeq >= 2
-	}, 2*time.Second, "both header events applied, in order")
+	}, testutil.AsyncWait, "both header events applied, in order")
 
 	// The endorser block finally arrives. There is nothing left to vote for.
 	fixture.mgr.HandleEndorserBlock(demoSlot, eb)
@@ -261,7 +261,7 @@ func TestOrderingDemoHeaderQueueDiscardedOnStall(t *testing.T) {
 		return len(fixture.mgr.VotesByIds(
 			[]lcommon.LeiosVoteId{demoVoteId()},
 		)) == 0
-	}, 2*time.Second, "the discarded header's vote is dropped")
+	}, testutil.AsyncWait, "the discarded header's vote is dropped")
 
 	fixture.mgr.mu.Lock()
 	assert.NotContains(t, fixture.mgr.announcements, stalledRb)

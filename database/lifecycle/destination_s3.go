@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/url"
 	"os"
 	"path"
@@ -38,8 +37,14 @@ import (
 // Composition code (node/CLI startup) calls this explicitly when S3 cloud
 // destination support should be available, rather than this package
 // registering itself process-globally via init().
-func RegisterS3(registry *DestinationRegistry) {
-	registry.Register("s3", newS3Destination)
+func RegisterS3(registry *DestinationRegistry, opts ...ManifestOption) {
+	limit, err := manifestByteLimit(opts)
+	registry.Register("s3", func(uri *url.URL) (CloudDestination, error) {
+		if err != nil {
+			return nil, err
+		}
+		return newS3Destination(uri, WithManifestMaxBytes(limit))
+	})
 }
 
 // s3Destination uploads/downloads a snapshot directory's files as flat S3
@@ -47,12 +52,17 @@ func RegisterS3(registry *DestinationRegistry) {
 // default credential chain (config.LoadDefaultConfig) — same convention as
 // database/plugin/blob/aws, no explicit access-key/secret config here.
 type s3Destination struct {
-	bucket string
-	prefix string
-	client *s3.Client
+	bucket           string
+	prefix           string
+	client           *s3.Client
+	maxManifestBytes int64
 }
 
-func newS3Destination(uri *url.URL) (CloudDestination, error) {
+func newS3Destination(uri *url.URL, opts ...ManifestOption) (CloudDestination, error) {
+	limit, err := manifestByteLimit(opts)
+	if err != nil {
+		return nil, err
+	}
 	bucket := uri.Host
 	if bucket == "" {
 		return nil, fmt.Errorf(
@@ -92,9 +102,10 @@ func newS3Destination(uri *url.URL) (CloudDestination, error) {
 	})
 
 	return &s3Destination{
-		bucket: bucket,
-		prefix: prefix,
-		client: client,
+		bucket:           bucket,
+		prefix:           prefix,
+		client:           client,
+		maxManifestBytes: limit,
 	}, nil
 }
 
@@ -334,11 +345,12 @@ func (d *s3Destination) fetchManifest(
 		return Manifest{}, fmt.Errorf("get s3://%s/%s: %w", d.bucket, key, err)
 	}
 	defer out.Body.Close()
-	data, err := io.ReadAll(out.Body)
+	opts := []ManifestOption{WithManifestMaxBytes(d.maxManifestBytes)}
+	data, err := readManifestData(out.Body, opts)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("read s3://%s/%s: %w", d.bucket, key, err)
 	}
-	return ParseManifest(data)
+	return ParseManifest(data, opts...)
 }
 
 // FetchManifest implements CloudManifestFetcher: it fetches and parses
@@ -348,6 +360,16 @@ func (d *s3Destination) fetchManifest(
 // of it.
 func (d *s3Destination) FetchManifest(ctx context.Context) (Manifest, error) {
 	return d.fetchManifest(ctx, "")
+}
+
+func (d *s3Destination) FetchManifestWithOptions(ctx context.Context, opts ...ManifestOption) (Manifest, error) {
+	limit, err := manifestByteLimit(opts)
+	if err != nil {
+		return Manifest{}, err
+	}
+	configured := *d
+	configured.maxManifestBytes = limit
+	return configured.FetchManifest(ctx)
 }
 
 // Delete implements CloudDeleter: it removes every object under this

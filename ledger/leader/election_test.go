@@ -32,6 +32,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ledgerpkg "github.com/blinklabs-io/dingo/ledger"
 )
 
@@ -404,7 +405,7 @@ func TestElectionStopDoesNotDeadlockOnMonitorSelectRace(t *testing.T) {
 
 		select {
 		case <-stopDone:
-		case <-time.After(2 * time.Second):
+		case <-time.After(testutil.AsyncWait):
 			t.Fatalf("Stop() deadlocked on iteration %d", i)
 		}
 		eventBus.Stop()
@@ -475,7 +476,7 @@ func TestElectionStopWaitsForInFlightScheduleComputation(t *testing.T) {
 	// almost immediately.
 	select {
 	case <-blocking.started:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("schedule computation never started")
 	}
 
@@ -495,7 +496,7 @@ func TestElectionStopWaitsForInFlightScheduleComputation(t *testing.T) {
 	select {
 	case err := <-stopDone:
 		require.NoError(t, err)
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("Stop did not return after the in-flight computation finished")
 	}
 }
@@ -678,7 +679,7 @@ func TestElectionIgnoresStalePersistedSchedule(t *testing.T) {
 		require.NoError(t, err)
 		return persistedAfterLoad != nil &&
 			bytes.Equal(makeElectionNonce(0x55), persistedAfterLoad.EpochNonce)
-	}, 2*time.Second, 50*time.Millisecond)
+	}, testutil.AsyncWait, 50*time.Millisecond)
 }
 
 func TestElectionPersistsComputedSchedule(t *testing.T) {
@@ -715,7 +716,7 @@ func TestElectionPersistsComputedSchedule(t *testing.T) {
 		persisted, err = store.LoadSchedule(schedule.Epoch, poolId)
 		require.NoError(t, err)
 		return persisted != nil
-	}, 2*time.Second, 50*time.Millisecond)
+	}, testutil.AsyncWait, 50*time.Millisecond)
 	require.NotNil(t, persisted)
 	assert.Equal(
 		t,
@@ -760,7 +761,7 @@ func TestElectionPrecomputesNextEpochAtStartupWhenNonceReady(t *testing.T) {
 		schedule := election.ScheduleForEpoch(11)
 		return schedule != nil &&
 			bytes.Equal(electionTestNonce11, schedule.EpochNonce)
-	}, 30*time.Second, 100*time.Millisecond,
+	}, testutil.AsyncWait, 100*time.Millisecond,
 		"next epoch schedule should be precomputed at startup")
 
 	require.Eventually(t, func() bool {
@@ -768,7 +769,7 @@ func TestElectionPrecomputesNextEpochAtStartupWhenNonceReady(t *testing.T) {
 		require.NoError(t, err)
 		return schedule != nil &&
 			bytes.Equal(electionTestNonce11, schedule.EpochNonce)
-	}, 2*time.Second, 50*time.Millisecond,
+	}, testutil.AsyncWait, 50*time.Millisecond,
 		"next epoch schedule should be persisted at startup")
 }
 
@@ -1091,7 +1092,7 @@ func TestElectionEpochTransition(t *testing.T) {
 			)
 		}
 		return ready
-	}, 30*time.Second, 100*time.Millisecond, "schedule should update to epoch 11")
+	}, testutil.AsyncWait, 100*time.Millisecond, "schedule should update to epoch 11")
 
 	// Schedule should be updated to new epoch
 	schedule = election.CurrentSchedule()
@@ -1147,7 +1148,7 @@ func TestElectionPrecomputesNextEpochOnNonceReady(t *testing.T) {
 		schedule := election.ScheduleForEpoch(11)
 		return schedule != nil &&
 			bytes.Equal(electionTestNonce11, schedule.EpochNonce)
-	}, 30*time.Second, 100*time.Millisecond,
+	}, testutil.AsyncWait, 100*time.Millisecond,
 		"next epoch schedule should be precomputed after nonce-ready event")
 
 	require.Eventually(t, func() bool {
@@ -1155,7 +1156,7 @@ func TestElectionPrecomputesNextEpochOnNonceReady(t *testing.T) {
 		require.NoError(t, err)
 		return schedule != nil &&
 			bytes.Equal(electionTestNonce11, schedule.EpochNonce)
-	}, 2*time.Second, 50*time.Millisecond,
+	}, testutil.AsyncWait, 50*time.Millisecond,
 		"next epoch schedule should be persisted")
 }
 
@@ -1206,7 +1207,7 @@ func TestElectionRollbackKeepsCurrentSchedule(t *testing.T) {
 		return bytes.Equal(schedule.EpochNonce, current.EpochNonce) &&
 			assert.ObjectsAreEqual(leaderSlots, currentLeaderSlots) &&
 			election.ShouldProduceBlock(leaderSlot)
-	}, time.Second, 20*time.Millisecond,
+	}, testutil.AsyncWait, 20*time.Millisecond,
 		"rollback should not invalidate a stable current-epoch schedule")
 }
 
@@ -1243,7 +1244,7 @@ func TestElectionRollbackKeepsPrecomputedNextSchedule(t *testing.T) {
 	require.Eventually(t, func() bool {
 		nextBefore = election.ScheduleForEpoch(11)
 		return nextBefore != nil
-	}, 30*time.Second, 100*time.Millisecond)
+	}, testutil.AsyncWait, 100*time.Millisecond)
 	require.NotNil(t, nextBefore)
 	expectedSlots := nextBefore.LeaderSlotsSnapshot()
 	expectedNonce := append([]byte(nil), nextBefore.EpochNonce...)
@@ -1264,7 +1265,7 @@ func TestElectionRollbackKeepsPrecomputedNextSchedule(t *testing.T) {
 				expectedSlots,
 				schedule.LeaderSlotsSnapshot(),
 			)
-	}, time.Second, 20*time.Millisecond,
+	}, testutil.AsyncWait, 20*time.Millisecond,
 		"rollback should not invalidate a precomputed next-epoch schedule")
 }
 
@@ -1297,7 +1298,7 @@ func TestElectionConcurrentAccess(t *testing.T) {
 	// both cache-hit and cache-miss paths.
 	require.Eventually(t, func() bool {
 		return election.CurrentSchedule() != nil
-	}, 30*time.Second, 50*time.Millisecond,
+	}, testutil.AsyncWait, 50*time.Millisecond,
 		"initial schedule should be computed before concurrent access")
 
 	// Concurrent reads and operations
@@ -1346,7 +1347,7 @@ func TestElectionParentCancellationWaitsForGeneration(t *testing.T) {
 	require.NoError(t, e.Start(parent))
 	select {
 	case <-blocked.started:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("worker did not reach provider")
 	}
 	cancel()
@@ -1363,7 +1364,7 @@ func TestElectionParentCancellationWaitsForGeneration(t *testing.T) {
 		e.mu.RLock()
 		defer e.mu.RUnlock()
 		return !e.running
-	}, time.Second, time.Millisecond)
+	}, testutil.AsyncWait, time.Millisecond)
 	canceled, cancelWait := context.WithCancel(t.Context())
 	cancelWait()
 	require.ErrorIs(t, e.Start(canceled), context.Canceled)
@@ -1381,14 +1382,14 @@ func TestElectionParentCancellationWaitsForGeneration(t *testing.T) {
 		select {
 		case err := <-stopped:
 			require.NoError(t, err)
-		case <-time.After(5 * time.Second):
+		case <-time.After(testutil.AsyncWait):
 			t.Fatal("Stop did not complete after canceled worker drained")
 		}
 	}
 	select {
 	case err := <-restarted:
 		require.NoError(t, err)
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("restart did not complete after canceled worker drained")
 	}
 	e.mu.RLock()
@@ -1399,7 +1400,7 @@ func TestElectionParentCancellationWaitsForGeneration(t *testing.T) {
 	select {
 	case err := <-stopped:
 		require.NoError(t, err)
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("restarted generation did not stop")
 	}
 }
@@ -1438,14 +1439,14 @@ func TestElectionCanceledWaiterAfterReplacement(t *testing.T) {
 	go func() { result <- e.start(ctx, afterWait) }()
 	select {
 	case <-ctx.entered:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("Start did not wait for generation completion")
 	}
 	close(oldDone)
 	select {
 	case err := <-result:
 		require.ErrorIs(t, err, context.Canceled)
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("Start did not return after generation completion")
 	}
 }
