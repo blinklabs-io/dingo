@@ -629,17 +629,15 @@ to do real work should hand off to their own goroutine, which
 
 The BlockFetch server path mirrors the retrieval flow for downstream peers:
 when a peer requests a range, `ouroboros/blockfetch.go` validates the bounds,
-opens a chain iterator at the requested start point, sends `StartBatch`, then
-checks both endpoints against the serving chain: the start point through the
-iterator constructor and the end point through `Chain.HoldsPoint`, which
-applies the same resolve-and-membership check without allocating an iterator.
-Checking only the end slot let a peer name an end point the server does not
-hold and receive a slot-bounded prefix of the server's own chain in its place;
-an end point that does not resolve now takes the same `NoBlocks` and
-stuck-peer accounting as the other invalid-range rejections. Once a batch
-starts, blocks are streamed through the exact requested end slot and hash;
-earlier blocks at the same slot, including Byron epoch-boundary blocks, do not
-complete the range. Iterator exhaustion, rollback, or passing the end slot
+opens chain iterators at the requested start and end points to validate both
+endpoints against the serving chain, then sends `StartBatch`. Checking only
+the end slot let a peer name an end point the server does not hold and receive
+a slot-bounded prefix of the server's own chain in its place. An end point
+that does not resolve takes the same
+`NoBlocks` and stuck-peer accounting as the other invalid-range rejections.
+Once a batch starts, blocks are streamed through the exact requested end slot
+and hash; earlier blocks at the same slot, including Byron epoch-boundary
+blocks, do not complete the range. Iterator exhaustion, rollback, or passing the end slot
 without the requested hash closes the connection without `BatchDone`. The
 range sender is asynchronous so the mini-protocol callback can
 return promptly, but it applies backpressure between messages by waiting for

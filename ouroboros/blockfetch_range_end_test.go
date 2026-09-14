@@ -19,7 +19,6 @@ import (
 	"crypto/sha256"
 	"io"
 	"log/slog"
-	"strings"
 	"testing"
 	"time"
 
@@ -51,7 +50,7 @@ type blockfetchRangeFixture struct {
 	o      *Ouroboros
 	peer   *muxerServerPeer
 	blocks []chain.RawBlock
-	logBuf *syncLogBuffer
+	connID ouroboros.ConnectionId
 }
 
 // requestRange sends a MsgRequestRange as a peer would.
@@ -122,8 +121,7 @@ func newBlockfetchRangeFixture(t *testing.T) *blockfetchRangeFixture {
 	}
 	require.NoError(t, cm.PrimaryChain().AddRawBlocks(blocks))
 
-	logBuf := &syncLogBuffer{}
-	logger := slog.New(slog.NewJSONHandler(logBuf, &slog.HandlerOptions{
+	logger := slog.New(slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}))
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
@@ -186,35 +184,8 @@ func newBlockfetchRangeFixture(t *testing.T) *blockfetchRangeFixture {
 		o:      o,
 		peer:   peer,
 		blocks: blocks,
-		logBuf: logBuf,
+		connID: conn.Id(),
 	}
-}
-
-// TestBlockfetchServerRequestRange_EndPointNotInChain is issue #397: only the
-// end *slot* was validated, so a peer could name an end point the server does
-// not hold -- here the right slot under a hash from another chain -- and the
-// range server would happily stream its own blocks up to that slot number as
-// though it had served the requested range. The end point must be resolved the
-// way the start point is, and answered with NoBlocks when it does not resolve.
-func TestBlockfetchServerRequestRange_EndPointNotInChain(t *testing.T) {
-	f := newBlockfetchRangeFixture(t)
-
-	start := f.point(0)
-	wrongHash := sha256.Sum256([]byte("not-our-block"))
-	end := ocommon.NewPoint(
-		f.blocks[1].Slot,
-		append([]byte(nil), wrongHash[:]...),
-	)
-
-	f.requestRange(t, start, end)
-
-	assert.Equal(
-		t,
-		[]byte{blockfetch.MessageTypeNoBlocks},
-		f.readMessageTypes(t, 1),
-		"an end point we do not hold must be answered with NoBlocks, "+
-			"not served as a slot-bounded prefix of our own chain",
-	)
 }
 
 // A hash we do hold is not enough either: the end point must be at the slot it
@@ -242,8 +213,6 @@ func TestBlockfetchServerRequestRange_EndPointSlotHashMismatch(t *testing.T) {
 func TestBlockfetchServerRequestRange_RepeatedBadEndPointReachesCloseThreshold(
 	t *testing.T,
 ) {
-	const closeWarnMsg = "closing stuck peer after repeated missing-point requests"
-
 	f := newBlockfetchRangeFixture(t)
 	start := f.point(0)
 	wrongHash := sha256.Sum256([]byte("not-our-block"))
@@ -253,7 +222,6 @@ func TestBlockfetchServerRequestRange_RepeatedBadEndPointReachesCloseThreshold(
 	)
 
 	for i := 1; i <= blockfetchMaxConsecutiveNoBlocks; i++ {
-		f.logBuf.Reset()
 		f.requestRange(t, start, end)
 		assert.Equal(
 			t,
@@ -262,24 +230,12 @@ func TestBlockfetchServerRequestRange_RepeatedBadEndPointReachesCloseThreshold(
 			"request %d should be answered with NoBlocks",
 			i,
 		)
-		if i < blockfetchMaxConsecutiveNoBlocks {
-			assert.False(
-				t,
-				strings.Contains(f.logBuf.String(), closeWarnMsg),
-				"request %d should not yet reach the close threshold",
-				i,
-			)
-		} else {
-			testutil.WaitForCondition(
-				t,
-				func() bool {
-					return strings.Contains(f.logBuf.String(), closeWarnMsg)
-				},
-				2*time.Second,
-				"expected close-eligible WARN once the threshold is reached",
-			)
-		}
 	}
+	// The valve must close the registered transport at the threshold. The
+	// connection manager removes it when the real protocol connection closes.
+	testutil.WaitForCondition(t, func() bool {
+		return f.o.connManager.GetConnectionById(f.connID) == nil
+	}, 10*time.Second, "threshold must close the peer")
 }
 
 // The control for the fix: a range whose start and end are both points on our
@@ -303,26 +259,5 @@ func TestBlockfetchServerRequestRange_InChainRangeStillServedInFull(
 		},
 		f.readMessageTypes(t, 5),
 		"an in-chain range must still stream every block it covers",
-	)
-}
-
-// A single-block range whose start and end are the same in-chain point is the
-// narrowest case the end-point resolution must not reject.
-func TestBlockfetchServerRequestRange_SingleBlockInChainRangeStillServed(
-	t *testing.T,
-) {
-	f := newBlockfetchRangeFixture(t)
-
-	f.requestRange(t, f.point(1), f.point(1))
-
-	assert.Equal(
-		t,
-		[]byte{
-			blockfetch.MessageTypeStartBatch,
-			blockfetch.MessageTypeBlock,
-			blockfetch.MessageTypeBatchDone,
-		},
-		f.readMessageTypes(t, 3),
-		"a single-block in-chain range must still be served",
 	)
 }

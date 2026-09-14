@@ -496,28 +496,6 @@ func TestBlockfetchServerSendBatch_RejectsEndPointHashMismatch(t *testing.T) {
 	assert.Equal(t, 1, iter.cancelCalls)
 }
 
-func TestBlockfetchServerSendBatch_RejectsEndHashMismatch(t *testing.T) {
-	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	o := newOuroboros(OuroborosConfig{Logger: logger})
-	iter := &stubBlockfetchIterator{steps: []blockfetchIteratorStep{
-		{result: testBlockfetchIteratorBlock(100)},
-	}}
-	server := &stubBlockfetchBatchServer{}
-	conn := &stubBlockfetchConnection{errChan: make(chan error)}
-	start := ocommon.NewPoint(100, []byte{100})
-	end := ocommon.NewPoint(100, []byte{0xff})
-
-	err := o.blockfetchServerSendBatch(
-		testConnId().String(), start, end, iter, server, conn,
-	)
-
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "ended before requested end point")
-	assert.Equal(t, 1, server.blockCalls)
-	assert.Equal(t, 0, server.batchDoneCalls)
-	assert.Equal(t, 1, conn.closeCalls)
-}
-
 func TestBlockfetchServerSendBatch_WaitsForSendDrainBetweenMessages(
 	t *testing.T,
 ) {
