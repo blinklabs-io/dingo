@@ -1446,11 +1446,18 @@ func (c *Chain) rollbackLocked(
 				continue
 			}
 			// The iterator cannot deliver blocks while a rollback marker is
-			// pending, so blocks removed by a later coalesced rollback were
-			// never part of its delivered history. Keep only the payload from
-			// the first marker, which describes the delivered old fork.
+			// pending. A later rollback may remove regrown blocks above the
+			// first marker that were never delivered, but it can also remove
+			// blocks below that marker that were delivered before it. Retain
+			// the former payload and append only the latter.
 			if !iter.needsRollback {
 				iter.rollbackBlocks = slices.Clone(rolledBackBlocks)
+			} else if point.Slot < iter.rollbackPoint.Slot {
+				for _, block := range rolledBackBlocks {
+					if block.Slot <= iter.rollbackPoint.Slot {
+						iter.rollbackBlocks = append(iter.rollbackBlocks, block)
+					}
+				}
 			}
 			iter.rollbackPoint = point
 			iter.needsRollback = true
