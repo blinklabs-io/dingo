@@ -22,11 +22,13 @@ package nodeparity
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"strings"
 	"time"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
 // dialTimeout bounds how long Dial waits for the initial connection and
@@ -75,6 +77,55 @@ func Dial(
 		ouroboros.WithConnection(rawConn),
 		ouroboros.WithNetworkMagic(magic),
 		ouroboros.WithNodeToNode(false),
+		// This is a trusted NtC channel (a local socket, or a bridge this
+		// tool's own operator controls), and LocalStateQuery has no
+		// protocol-level timeout at all (Ouroboros Network Specification
+		// section 3.13.4: "No timeouts") -- a large query, like a
+		// whole-UTxO-set walk against Dingo's disk-backed store, can
+		// legitimately take minutes. gouroboros' mux applies a fixed 120s
+		// segment-read timeout by default as an anti-DoS guard against an
+		// untrusted remote peer, which does not describe this connection;
+		// disabling it here is what stops a slow-but-legitimate reply from
+		// getting the connection killed mid-flight (blinklabs-io/dingo#4082).
+		ouroboros.WithMuxerSegmentReadTimeout(0),
+		// The mux fix above only removes the transport-level cap; gouroboros'
+		// LocalStateQuery client has its own, separate 180s state-transition
+		// timer (protocol/localstatequery.Config.QueryTimeout) that fires the
+		// same way once a query outlives it -- previously masked because the
+		// mux's 120s always fired first. Disabled for the same reason as the
+		// mux timeout: LocalStateQuery has no protocol-level timeout at all
+		// (spec section 3.13.4), and this is a trusted NtC channel where a
+		// slow-but-legitimate whole-UTxO-set reply must not be killed either
+		// (blinklabs-io/dingo#4082).
+		// A whole-UTxO-set reply is bounded only by how much live state the
+		// chain has, not by anything under this tool's control: confirmed
+		// live against Preview's ~3.17M UTxOs that the CBOR reply exceeds
+		// gouroboros' generic 16MB multi-segment reassembly cap (a limit
+		// meant to bound an untrusted peer's message size, not a real
+		// reply on this trusted channel) well before GetUTxOWhole finishes
+		// sending it -- confirmed by the "read buffer exceeded maximum
+		// size" connection error this produced. An initial 512MiB guess
+		// was itself confirmed live to be too small: the real reply
+		// exceeded 537,583,605 bytes (~512.7MiB) before finishing. 2GiB
+		// gives real headroom above that observed size for further chain
+		// growth without removing the cap outright (unlike the two
+		// timeouts above, an unbounded buffer here is a real unbounded
+		// memory-growth risk, not just an unnecessary wait).
+		ouroboros.WithLocalStateQueryConfig(
+			olocalstatequery.NewConfig(
+				olocalstatequery.WithQueryTimeout(0),
+				olocalstatequery.WithMaxReadBufferSize(2*1024*1024*1024),
+			),
+		),
+		// Without an explicit logger, gouroboros' Protocol.Logger() falls
+		// back to a discard handler, so every internal diagnostic (mux read
+		// errors, protocol state-transition timeouts, etc.) is silently
+		// thrown away -- the only signal a caller sees is the generic
+		// ErrProtocolShuttingDown sentinel a query returns once the
+		// connection is already gone, with no way to tell which of several
+		// possible causes produced it. Wiring the default logger surfaces
+		// gouroboros' own log lines instead of leaving that diagnosis blind.
+		ouroboros.WithLogger(slog.Default()),
 	)
 	stopDialCancel()
 	if err != nil {
@@ -93,7 +144,17 @@ func Dial(
 	// past cycle for the life of the process.
 	stop := context.AfterFunc(ctx, func() { conn.Close() }) //nolint:errcheck
 	go func() {
-		<-conn.ErrorChan() // closed when the connection shuts down
+		// The error received here (if any -- ErrorChan is also closed on a
+		// clean shutdown with no value) is the actual reason this connection
+		// is going away; logging it is what makes a query's later generic
+		// ErrProtocolShuttingDown diagnosable instead of a dead end.
+		if connErr, ok := <-conn.ErrorChan(); ok && connErr != nil {
+			slog.Error(
+				"ouroboros connection error",
+				"addr", addr,
+				"error", connErr,
+			)
+		}
 		stop()
 	}()
 

@@ -434,7 +434,7 @@ func TestDefaultBuilderRejectsReentrantProviderReload(t *testing.T) {
 	result := dingotestutil.RequireReceive(
 		t,
 		resultCh,
-		time.Second,
+		dingotestutil.AsyncWait,
 		"reentrant default-builder provider reload completion",
 	)
 	require.ErrorContains(t, result.err, "credential generation changed")

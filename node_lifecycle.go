@@ -116,7 +116,9 @@ type namedStop struct {
 // quiesceComponentStops is every component quiesceForLiveLifecycleOp stops
 // whose own Stop cancels a context and then waits on a sync.WaitGroup with no
 // deadline of its own. Each is therefore bounded by stopWithDeadline rather
-// than called directly.
+// than called directly. shutdown() stops the same set in its phase 1 (see
+// shutdownPhase1ComponentStops), so a component added here is bounded there
+// too.
 //
 // Ordering is preserved from the inline calls it replaced: the Leios pipeline
 // manager stops before the vote manager because it consumes that manager's

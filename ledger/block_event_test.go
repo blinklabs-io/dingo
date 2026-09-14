@@ -19,7 +19,6 @@ import (
 	"io"
 	"log/slog"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
@@ -72,7 +71,7 @@ func TestEmitTransactionRollbackEvents_decodeFailureEmitsLedgerErrorPerBlock(
 		evt := testutil.RequireReceive(
 			t,
 			errCh,
-			2*time.Second,
+			testutil.AsyncWait,
 			fmt.Sprintf("ledger error event %d (want slot %d)", i, wantSlot),
 		)
 		le, ok := evt.Data.(LedgerErrorEvent)

@@ -22,7 +22,6 @@ import (
 	"log/slog"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -71,7 +70,7 @@ func TestLedgerProcessBlocksStopsRetryingOnUnrepairableFailure(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		done,
-		5*time.Second,
+		testutil.AsyncWait,
 		"an unrepairable validation failure must stop the ledger pipeline",
 	)
 
@@ -114,7 +113,7 @@ func TestLedgerProcessBlocksKeepsRetryingRecoverableFailures(t *testing.T) {
 	testutil.WaitForCondition(
 		t,
 		func() bool { return attempts.Load() >= 3 },
-		5*time.Second,
+		testutil.AsyncWait,
 		"a recoverable failure must keep restarting the pipeline",
 	)
 	assert.Zero(
@@ -127,7 +126,7 @@ func TestLedgerProcessBlocksKeepsRetryingRecoverableFailures(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		done,
-		5*time.Second,
+		testutil.AsyncWait,
 		"the pipeline loop must exit when its context is cancelled",
 	)
 }

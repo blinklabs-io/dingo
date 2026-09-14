@@ -21,8 +21,8 @@ import (
 	"strings"
 	"testing"
 
-	_ "github.com/glebarez/go-sqlite"
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
 )
 
 // The committee term-start backfill is data driven, so its SQL never passes
