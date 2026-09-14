@@ -631,12 +631,20 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		// txs-offer below. Failures are best-effort: a transient manifest fetch
 		// error must not tear down the shared connection.
 		manifestKey := leiosBlockKey(point.Slot, point.Hash)
+		guard, admitted := o.reserveLeiosFetch(ctx.ConnectionId)
+		if !admitted {
+			return nil
+		}
 		if _, loaded := o.leiosManifestFetchInProgress.LoadOrStore(
 			manifestKey, struct{}{},
 		); loaded {
+			guard.inflight.Add(-1)
 			return nil
 		}
-		if !o.dispatchLeiosFetch(ctx.ConnectionId, func() {
+		if o.leiosFetchClaimPublished != nil {
+			o.leiosFetchClaimPublished()
+		}
+		o.dispatchLeiosFetchReserved(guard, func() {
 			defer o.leiosManifestFetchInProgress.Delete(manifestKey)
 			// A transaction offer or historical backfill may have populated
 			// this occurrence while this work waited for its connection guard.
@@ -694,9 +702,7 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 				"role", "client",
 				"connection_id", connId,
 			)
-		}) {
-			o.leiosManifestFetchInProgress.Delete(manifestKey)
-		}
+		})
 	case *oleiosnotify.MsgBlockTxsOffer:
 		// The peer is offering the transactions for this endorser block. Fetch
 		// them over leios-fetch (off the handler, serialized per connection, and
@@ -729,16 +735,25 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		// fetched once. The claim is keyed by slot and hash, not hash alone, so
 		// an in-flight fetch for one occurrence of a hash does not suppress a
 		// legitimate offer of the same content-addressed hash recurring at a
-		// different slot. The claim is released when the fetch finishes (or
-		// below if the per-connection bound is reached).
+		// different slot. Reserve the local fetch slot before publishing the
+		// cross-connection claim, so a full connection cannot transiently hide
+		// this occurrence from a healthy peer.
 		hashKey := leiosBlockKey(point.Slot, point.Hash)
+		guard, admitted := o.reserveLeiosFetch(ctx.ConnectionId)
+		if !admitted {
+			return nil
+		}
 		if _, loaded := o.leiosFetchInProgress.LoadOrStore(
 			hashKey,
 			struct{}{},
 		); loaded {
+			guard.inflight.Add(-1)
 			return nil
 		}
-		if !o.dispatchLeiosFetch(ctx.ConnectionId, func() {
+		if o.leiosFetchClaimPublished != nil {
+			o.leiosFetchClaimPublished()
+		}
+		o.dispatchLeiosFetchReserved(guard, func() {
 			defer o.leiosFetchInProgress.Delete(hashKey)
 			data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 			if !ok {
@@ -847,11 +862,7 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 				"role", "client",
 				"connection_id", connId,
 			)
-		}) {
-			// Per-connection bound reached: release the claim so a later offer
-			// (on this or another connection) can retry.
-			o.leiosFetchInProgress.Delete(hashKey)
-		}
+		})
 	case *oleiosnotify.MsgVotesOffer:
 		// The Leios prototype diffuses full votes inline over leios-notify
 		// (rather than the standalone leios-votes protocol). Feed them to the
@@ -1119,34 +1130,33 @@ func (o *Ouroboros) leiosFetchGuardFor(
 	return g.(*leiosFetchGuard)
 }
 
-// dispatchLeiosFetch runs fn (a leios-fetch client operation) asynchronously,
-// serialized against other fetches on the same connection so the strict
-// request/response client is never used concurrently, and bounded per
-// connection. It returns immediately so the leios-notify handler is never
-// blocked on a multi-second fetch (which otherwise head-of-line blocks every
-// later offer on the connection). Returns false if the per-connection bound is
-// reached and the work was dropped.
-func (o *Ouroboros) dispatchLeiosFetch(
+// reserveLeiosFetch reserves one per-connection fetch slot without publishing
+// any cross-connection work claim. Callers that publish such a claim must
+// reserve first, then release the slot if another caller already owns it.
+func (o *Ouroboros) reserveLeiosFetch(
 	connId ouroboros.ConnectionId,
-	fn func(),
-) bool {
+) (*leiosFetchGuard, bool) {
 	g := o.leiosFetchGuardFor(connId)
 	for {
 		current := g.inflight.Load()
 		if current >= leiosFetchMaxInflightPerConn {
-			return false
+			return g, false
 		}
 		if g.inflight.CompareAndSwap(current, current+1) {
-			break
+			return g, true
 		}
 	}
+}
+
+// dispatchLeiosFetchReserved starts work for a slot already reserved by
+// reserveLeiosFetch. It never performs a second admission check.
+func (o *Ouroboros) dispatchLeiosFetchReserved(g *leiosFetchGuard, fn func()) {
 	go func() {
 		defer g.inflight.Add(-1)
 		g.mu.Lock()
 		defer g.mu.Unlock()
 		fn()
 	}()
-	return true
 }
 
 // leiosTxFetchMaxRoundsPerWindow bounds how many BlockTxsRequest rounds are

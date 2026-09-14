@@ -219,6 +219,9 @@ type Ouroboros struct {
 	// Manifest offers have their own claim: a pending manifest fetch must not
 	// suppress a transaction offer needed to complete the same occurrence.
 	leiosManifestFetchInProgress sync.Map // leiosBlockKey(point.Slot, point.Hash) → struct{}
+	// leiosFetchClaimPublished is an instance-local test seam used to hold a
+	// claimed offer before dispatch and expose admission ordering deterministically.
+	leiosFetchClaimPublished func()
 
 	// Locally-forged EB broadcast log (cursors are owned by the log).
 	leiosEBLog *leiosForgedEBLog

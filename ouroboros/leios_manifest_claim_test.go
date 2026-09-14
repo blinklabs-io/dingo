@@ -32,6 +32,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// dispatchLeiosFetch composes the production admission and worker helpers for
+// tests that need queued work without a notification claim.
+func (o *Ouroboros) dispatchLeiosFetch(
+	connId gouroboros.ConnectionId,
+	fn func(),
+) bool {
+	guard, admitted := o.reserveLeiosFetch(connId)
+	if !admitted {
+		return false
+	}
+	o.dispatchLeiosFetchReserved(guard, fn)
+	return true
+}
+
 func newHeldManifestOfferPeers(
 	t *testing.T,
 ) (*Ouroboros, *gouroboros.Connection, *gouroboros.Connection) {
@@ -151,6 +165,176 @@ func TestLeiosManifestOfferReleasesClaimWhenDispatchIsFull(t *testing.T) {
 		o.leiosFetchGuardFor(second.Id()).inflight.Load(),
 		"dispatch rejection must release the claim so another connection can retry",
 	)
+}
+
+func TestLeiosManifestOfferDoesNotClaimBeforeAdmission(t *testing.T) {
+	t.Parallel()
+	o, first, second := newHeldManifestOfferPeers(t)
+	for range leiosFetchMaxInflightPerConn {
+		require.True(t, o.dispatchLeiosFetch(first.Id(), func() {}))
+	}
+	point, raw := testLeiosEndorserBlockRaw(t, 200)
+	offer := oleiosnotify.NewMsgBlockOffer(point, uint64(len(raw)))
+	claimReached := make(chan struct{})
+	releaseClaim := make(chan struct{})
+	var claimOnce sync.Once
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseClaim) }) }
+	t.Cleanup(release)
+	o.leiosFetchClaimPublished = func() {
+		claimOnce.Do(func() { close(claimReached) })
+		<-releaseClaim
+	}
+	firstDone := make(chan struct{})
+	firstErr := make(chan error, 1)
+	go func() {
+		defer close(firstDone)
+		firstErr <- o.leiosnotifyClientNotification(
+			oleiosnotify.CallbackContext{ConnectionId: first.Id()}, offer,
+		)
+	}()
+	select {
+	case <-claimReached:
+		// This is the pre-fix ordering: the full peer published the shared
+		// claim before dispatch could reject its offer. A healthy peer must
+		// still be admitted while that claim is held.
+	case <-firstDone:
+		// Fixed ordering: the full peer is rejected before it can publish a
+		// claim, so its handler returns without reaching the seam.
+	case <-time.After(5 * time.Second):
+		t.Fatal("manifest offer admission did not complete")
+	}
+	secondDone := make(chan struct{})
+	secondErr := make(chan error, 1)
+	go func() {
+		defer close(secondDone)
+		secondErr <- o.leiosnotifyClientNotification(
+			oleiosnotify.CallbackContext{ConnectionId: second.Id()}, offer,
+		)
+	}()
+	testutil.WaitForCondition(t, func() bool {
+		return o.leiosFetchGuardFor(second.Id()).inflight.Load() == 1
+	}, 5*time.Second, "healthy peer offer was not admitted")
+	require.Equal(
+		t,
+		int32(1),
+		o.leiosFetchGuardFor(second.Id()).inflight.Load(),
+		"a full peer's transient claim must not suppress a healthy peer",
+	)
+	release()
+	select {
+	case <-firstDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("full-peer manifest offer did not finish")
+	}
+	require.NoError(t, <-firstErr)
+	select {
+	case <-secondDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("healthy-peer manifest offer did not finish")
+	}
+	require.NoError(t, <-secondErr)
+}
+
+func TestLeiosTxsOfferDoesNotClaimBeforeAdmission(t *testing.T) {
+	t.Parallel()
+	o, first, second := newHeldManifestOfferPeers(t)
+	for range leiosFetchMaxInflightPerConn {
+		require.True(t, o.dispatchLeiosFetch(first.Id(), func() {}))
+	}
+	point, _ := testLeiosEndorserBlockRaw(t, 200)
+	offer := oleiosnotify.NewMsgBlockTxsOffer(point)
+	claimReached := make(chan struct{})
+	releaseClaim := make(chan struct{})
+	var claimOnce sync.Once
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseClaim) }) }
+	t.Cleanup(release)
+	o.leiosFetchClaimPublished = func() {
+		claimOnce.Do(func() { close(claimReached) })
+		<-releaseClaim
+	}
+	firstDone := make(chan struct{})
+	firstErr := make(chan error, 1)
+	go func() {
+		defer close(firstDone)
+		firstErr <- o.leiosnotifyClientNotification(
+			oleiosnotify.CallbackContext{ConnectionId: first.Id()}, offer,
+		)
+	}()
+	select {
+	case <-claimReached:
+	case <-firstDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("transaction offer admission did not complete")
+	}
+	secondDone := make(chan struct{})
+	secondErr := make(chan error, 1)
+	go func() {
+		defer close(secondDone)
+		secondErr <- o.leiosnotifyClientNotification(
+			oleiosnotify.CallbackContext{ConnectionId: second.Id()}, offer,
+		)
+	}()
+	testutil.WaitForCondition(t, func() bool {
+		return o.leiosFetchGuardFor(second.Id()).inflight.Load() == 1
+	}, 5*time.Second, "healthy peer transaction offer was not admitted")
+	require.Equal(
+		t,
+		int32(1),
+		o.leiosFetchGuardFor(second.Id()).inflight.Load(),
+		"a full peer's transient transaction claim must not suppress a healthy peer",
+	)
+	release()
+	select {
+	case <-firstDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("full-peer transaction offer did not finish")
+	}
+	require.NoError(t, <-firstErr)
+	select {
+	case <-secondDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("healthy-peer transaction offer did not finish")
+	}
+	require.NoError(t, <-secondErr)
+}
+
+func TestLeiosOfferClaimContentionReleasesAdmission(t *testing.T) {
+	t.Parallel()
+	for _, transactions := range []bool{false, true} {
+		name := "manifest"
+		if transactions {
+			name = "transactions"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			o, first, _ := newHeldManifestOfferPeers(t)
+			point, raw := testLeiosEndorserBlockRaw(t, 200)
+			var offer protocol.Message = oleiosnotify.NewMsgBlockOffer(
+				point, uint64(len(raw)),
+			)
+			claims := &o.leiosManifestFetchInProgress
+			if transactions {
+				offer = oleiosnotify.NewMsgBlockTxsOffer(point)
+				claims = &o.leiosFetchInProgress
+			}
+			key := leiosBlockKey(point.Slot, point.Hash)
+			claims.Store(key, struct{}{})
+			t.Cleanup(func() { claims.Delete(key) })
+			require.NoError(t, o.leiosnotifyClientNotification(
+				oleiosnotify.CallbackContext{ConnectionId: first.Id()}, offer,
+			))
+			require.Zero(t, o.leiosFetchGuardFor(first.Id()).inflight.Load(),
+				"losing a shared claim must return its admission slot")
+			_, present := claims.Load(key)
+			require.True(t, present, "the other worker's claim must survive")
+			for range leiosFetchMaxInflightPerConn {
+				require.True(t, o.dispatchLeiosFetch(first.Id(), func() {}))
+			}
+			require.False(t, o.dispatchLeiosFetch(first.Id(), func() {}))
+		})
+	}
 }
 
 func TestLeiosManifestOfferRechecksCacheAfterDispatch(t *testing.T) {
