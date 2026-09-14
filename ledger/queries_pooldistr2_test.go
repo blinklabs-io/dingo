@@ -157,7 +157,7 @@ func TestQueryShelleyPoolDistr2_ReportsStakeFractionAndVrf(t *testing.T) {
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.Query(poolDistr2Query())
+	result, err := ls.Query(poolDistr2Query(), QueryPoint{})
 	require.NoError(t, err)
 	distr := decodePoolDistr2Result(t, result)
 
@@ -244,7 +244,7 @@ func TestQueryShelleyPoolDistr2_FilterReportsOnlyRequestedPools(t *testing.T) {
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.Query(poolDistr2QueryFor(pkhA))
+	result, err := ls.Query(poolDistr2QueryFor(pkhA), QueryPoint{})
 	require.NoError(t, err)
 	distr := decodePoolDistr2Result(t, result)
 
@@ -301,7 +301,7 @@ func TestQueryShelleyPoolDistr2_FilterOmitsPoolAbsentFromSnapshot(
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.Query(poolDistr2QueryFor(pkhA, unknownPkh))
+	result, err := ls.Query(poolDistr2QueryFor(pkhA, unknownPkh), QueryPoint{})
 	require.NoError(t, err,
 		"a pool the snapshot does not hold is omitted, not an error")
 	distr := decodePoolDistr2Result(t, result)
@@ -322,7 +322,7 @@ func TestQueryShelleyPoolDistr2_ZeroTotalStakeDoesNotDivide(t *testing.T) {
 	db := newTestDB(t)
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.Query(poolDistr2Query())
+	result, err := ls.Query(poolDistr2Query(), QueryPoint{})
 	require.NoError(t, err,
 		"an empty snapshot reports an empty distribution, not an error")
 	distr := decodePoolDistr2Result(t, result)
@@ -387,7 +387,7 @@ func TestQueryShelleyPoolDistr2_OmitsPoolWithoutRegistrationRatherThanAborting(
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.Query(poolDistr2Query())
+	result, err := ls.Query(poolDistr2Query(), QueryPoint{})
 	require.NoError(t, err,
 		"an unregistered pool must not abort the protocol and drop the "+
 			"client's connection")
@@ -466,7 +466,7 @@ func TestQueryShelleyPoolDistr2_PrefersRegistrationVrfKey(t *testing.T) {
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.Query(poolDistr2Query())
+	result, err := ls.Query(poolDistr2Query(), QueryPoint{})
 	require.NoError(t, err)
 	distr := decodePoolDistr2Result(t, result)
 
@@ -542,8 +542,11 @@ func TestQueryShelleyPoolDistr2_VrfKeyMatchesHeaderValidation(t *testing.T) {
 
 	// The premise: this block passes the validator. Whatever key that took is
 	// the key an operator's schedule has to be computed against.
-	require.NoError(t, ls.verifyRegisteredVrfKey(tb.block, blockEpochId(t, ls, tb.block)),
-		"fixture must be a block the validator accepts")
+	require.NoError(
+		t,
+		ls.verifyRegisteredVrfKey(tb.block, blockEpochId(t, ls, tb.block)),
+		"fixture must be a block the validator accepts",
+	)
 
 	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
 		&models.PoolStakeSnapshot{
@@ -556,7 +559,7 @@ func TestQueryShelleyPoolDistr2_VrfKeyMatchesHeaderValidation(t *testing.T) {
 		nil,
 	))
 
-	result, err := ls.Query(poolDistr2Query())
+	result, err := ls.Query(poolDistr2Query(), QueryPoint{})
 	require.NoError(t, err)
 	distr := decodePoolDistr2Result(t, result)
 	entry, ok := distr.Pools[lcommon.PoolId(pkh)]
@@ -654,7 +657,7 @@ func TestQueryShelleyPoolDistr2_EpochComesFromTheTransactionNotTheSnapshot(
 	ls.currentEpoch = models.Epoch{EpochId: staleEpoch}
 	ls.publishSnapshotsLocked()
 
-	result, err := ls.Query(poolDistr2Query())
+	result, err := ls.Query(poolDistr2Query(), QueryPoint{})
 	require.NoError(t, err)
 	distr := decodePoolDistr2Result(t, result)
 
@@ -736,7 +739,7 @@ func TestQueryShelleyPoolDistr2_TotalMatchesRowsWhenSummaryIsReady(
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.Query(poolDistr2Query())
+	result, err := ls.Query(poolDistr2Query(), QueryPoint{})
 	require.NoError(t, err)
 	distr := decodePoolDistr2Result(t, result)
 
@@ -803,7 +806,7 @@ func TestQueryShelleyPoolDistr2_ViaGetCBOR(t *testing.T) {
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.Query(poolDistr2CborQuery())
+	result, err := ls.Query(poolDistr2CborQuery(), QueryPoint{})
 	require.NoError(t, err, "GetCBOR-wrapped GetPoolDistr2 must not error")
 
 	arr, ok := result.([]any)
@@ -814,7 +817,12 @@ func TestQueryShelleyPoolDistr2_ViaGetCBOR(t *testing.T) {
 	assert.EqualValues(t, cbor.CborTagCbor, tag.Number)
 
 	content, ok := tag.Content.([]byte)
-	require.True(t, ok, "tag content must be raw CBOR bytes, got %T", tag.Content)
+	require.True(
+		t,
+		ok,
+		"tag content must be raw CBOR bytes, got %T",
+		tag.Content,
+	)
 
 	// The tag-24 content must decode via the same real client-side type a
 	// direct (non-GetCBOR) GetPoolDistr2 reply does: proof that GetCBOR

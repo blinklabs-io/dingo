@@ -123,9 +123,8 @@ func (c leiosConnDoneContext) Value(any) any {
 }
 
 // registerLeiosServeWaiter returns a channel closed when connId's connection
-// goes away, so an NtC serving wait on that connection is released as soon as
-// the client disconnects. The returned cancel function deregisters the waiter
-// and must always be called.
+// goes away, so a serving wait is released as soon as the peer disconnects.
+// The returned cancel function deregisters the waiter and must always be called.
 //
 // The liveness re-check after registration closes the race with a connection
 // that is already going away: connmanager removes the connection from its map
@@ -135,6 +134,7 @@ func (c leiosConnDoneContext) Value(any) any {
 // before it is returned.
 func (o *Ouroboros) registerLeiosServeWaiter(
 	connId ouroboros.ConnectionId,
+	checkLiveness ...bool,
 ) (done <-chan struct{}, cancel func()) {
 	ch := make(chan struct{})
 	o.leiosServeWaitersMu.Lock()
@@ -142,6 +142,11 @@ func (o *Ouroboros) registerLeiosServeWaiter(
 		o.leiosServeWaiters = make(
 			map[ouroboros.ConnectionId][]chan struct{},
 		)
+	}
+	if (len(checkLiveness) == 0 || checkLiveness[0]) &&
+		o.connManager != nil &&
+		o.connManager.GetConnectionById(connId) != nil {
+		delete(o.leiosServeWaitersReleased, connId)
 	}
 	o.leiosServeWaiters[connId] = append(o.leiosServeWaiters[connId], ch)
 	o.leiosServeWaitersMu.Unlock()
@@ -162,13 +167,67 @@ func (o *Ouroboros) registerLeiosServeWaiter(
 	}
 
 	// The connection manager is absent in unit tests that exercise the
-	// serving decision directly; there is no liveness to check, so the
-	// timeout remains the only bound.
-	if o.connManager != nil &&
+	// serving decision directly; there is no liveness to check. Such callers
+	// must arrange explicit release or their own timeout.
+	if (len(checkLiveness) == 0 || checkLiveness[0]) && o.connManager != nil &&
 		o.connManager.GetConnectionById(connId) == nil {
 		o.releaseLeiosServeWaiter(connId, ch)
 	}
 	return ch, cancel
+}
+
+// registerLeiosNotifyServeWaiter registers a close waiter even during the
+// short interval before connmanager publishes a newly accepted connection.
+// A prior release marker distinguishes that live publication window from a
+// connection already removed during teardown.
+func (o *Ouroboros) registerLeiosNotifyServeWaiter(
+	connId ouroboros.ConnectionId,
+) (done <-chan struct{}, cancel func()) {
+	if o.connManager != nil && o.connManager.GetConnectionById(connId) == nil {
+		o.leiosServeWaitersMu.Lock()
+		releasedAt, alreadyReleased := o.leiosServeWaitersReleased[connId]
+		if alreadyReleased && time.Since(releasedAt) >= time.Minute {
+			delete(o.leiosServeWaitersReleased, connId)
+			alreadyReleased = false
+		}
+		if alreadyReleased {
+			o.leiosServeWaitersMu.Unlock()
+			done := make(chan struct{})
+			close(done)
+			return done, func() {}
+		}
+		// Keep the marker check and waiter insertion under one lock. A close
+		// callback can otherwise record the release between those operations.
+		ch := make(chan struct{})
+		if o.leiosServeWaiters == nil {
+			o.leiosServeWaiters = make(map[ouroboros.ConnectionId][]chan struct{})
+		}
+		o.leiosServeWaiters[connId] = append(o.leiosServeWaiters[connId], ch)
+		o.leiosServeWaitersMu.Unlock()
+		return ch, func() {
+			o.leiosServeWaitersMu.Lock()
+			defer o.leiosServeWaitersMu.Unlock()
+			waiters := o.leiosServeWaiters[connId]
+			for i, waiter := range waiters {
+				if waiter == ch {
+					o.leiosServeWaiters[connId] = slices.Delete(waiters, i, i+1)
+					break
+				}
+			}
+			if len(o.leiosServeWaiters[connId]) == 0 {
+				delete(o.leiosServeWaiters, connId)
+			}
+		}
+	} else {
+		done, cancel = o.registerLeiosServeWaiter(connId)
+	}
+	select {
+	case <-done:
+		cancel()
+		return done, func() {}
+	default:
+		return done, cancel
+	}
 }
 
 // releaseLeiosServeWaiter deregisters one waiter channel and closes it, both
@@ -194,22 +253,38 @@ func (o *Ouroboros) releaseLeiosServeWaiter(
 	}
 }
 
-// ReleaseLeiosServeWaiters wakes every NtC serving wait pending on connId and
+// ReleaseLeiosServeWaiters wakes every serving wait pending on connId and
 // clears them. It is called from the node's connection-closed callback, which
 // connmanager drives from a per-connection goroutine blocked on the
 // connection's ErrorChan. That goroutine is independent of the chainsync
-// server callback, so it still runs while the callback is parked waiting for
-// an endorser closure -- which is precisely why the release cannot come from
+// or LeiosNotify server callback, so it still runs while a callback is parked
+// -- which is precisely why the release cannot come from
 // the protocol's own done channel.
 func (o *Ouroboros) ReleaseLeiosServeWaiters(
 	connId ouroboros.ConnectionId,
 ) {
 	o.leiosServeWaitersMu.Lock()
+	if o.leiosServeWaitersReleased == nil {
+		o.leiosServeWaitersReleased = make(map[ouroboros.ConnectionId]time.Time)
+	}
+	now := time.Now()
+	for id, releasedAt := range o.leiosServeWaitersReleased {
+		if now.Sub(releasedAt) >= time.Minute {
+			delete(o.leiosServeWaitersReleased, id)
+		}
+	}
+	o.leiosServeWaitersReleased[connId] = now
 	waiters := o.leiosServeWaiters[connId]
 	delete(o.leiosServeWaiters, connId)
 	o.leiosServeWaitersMu.Unlock()
 	for _, ch := range waiters {
 		close(ch)
+	}
+	// Cancel before removing the cursor: a racing notification request checks
+	// its cancellation channel under the same log lock before registering.
+	// This also covers a request returning an offer during disconnection.
+	if o.leiosEBLog != nil {
+		o.leiosEBLog.removeConn(leiosConnectionIdString(connId))
 	}
 }
 
@@ -618,6 +693,12 @@ func (o *Ouroboros) publishLeiosEndorserBlock(
 	blockHash lcommon.Blake2b256,
 	data *leiosEndorserBlockData,
 ) {
+	// Record the corroborated slot as a lower bound on how far the chain has
+	// advanced. An endorser block shares the slot of the ranking block that
+	// announces it, so a verified occurrence at slot S is proof a ranking
+	// block exists at S -- knowledge the block producer may hold before the
+	// header itself arrives. See MaxVerifiedEndorserBlockSlot.
+	o.advanceLeiosVerifiedEbSlot(point.Slot)
 	// Queue manifest and (when complete) txs for asynchronous persistence to
 	// the blob store so they can be served to downstream peers after the
 	// in-memory cache expires. Best-effort and off the hot path: the write
@@ -634,6 +715,84 @@ func (o *Ouroboros) publishLeiosEndorserBlock(
 	if o.leiosPipeline != nil {
 		o.leiosPipeline.ObserveEndorserBlock(point.Slot, blockHash)
 	}
+}
+
+// MaxVerifiedEndorserBlockSlot returns the highest slot for which this node
+// has corroborated an endorser block, or 0 if none. Because an endorser block
+// shares its announcing ranking block's slot, this is proof that a ranking
+// block exists at that slot.
+//
+// It is a monotonic lower bound on chain progress, never a tip: it is not
+// rolled back on a fork, because the question it answers -- "is there a block
+// out there at least this recent?" -- stays true regardless of which fork
+// wins. Callers must treat it as advisory and must not use it as a parent.
+//
+// LIFECYCLE. The watermark has no lifecycle beyond that monotonic advance, and
+// the two ends fail in opposite directions, so a consumer must handle both:
+//
+//   - It is raised at startup, to the maximum slot over authoritative
+//     persisted manifests (restoreLeiosVerifiedEbSlot, from newOuroboros). If
+//     that read fails the watermark stays cold, which fails OPEN: it
+//     under-reports chain progress, so a consumer that uses it as evidence
+//     simply sees no evidence. Reloading an evicted manifest from the blob
+//     store does not raise it, and cannot need to: the startup restore
+//     already takes the maximum over every persisted manifest, and every
+//     manifest persisted after that went through publishLeiosEndorserBlock,
+//     which advances the watermark first -- so within a process the watermark
+//     is always at least the maximum persisted slot.
+//
+//   - It is NEVER lowered. An endorser block corroborated for a chain this
+//     node does not adopt leaves the watermark above the local tip
+//     permanently. Consumed as a hard comparison against a local tip, that
+//     fails CLOSED and stays closed for as long as the local chain sits below
+//     that slot -- while every local indicator reads healthy.
+//
+// Consequently a consumer must either treat the value as purely advisory
+// (logging, metrics, hints) or bound it with its own explicitly configured
+// tolerance. It must not be turned into an unconditional gate.
+//
+// The one gating consumer, the forge staleness check in ledger/forging, does
+// the latter: it is opt-in behind ForgeEndorserBlockStalenessSlots, which
+// defaults to 0 (disabled), so the refusal path does not exist unless an
+// operator sets a bound, and the bound is its own knob rather than the local
+// primary-chain-tip tolerance.
+func (o *Ouroboros) MaxVerifiedEndorserBlockSlot() uint64 {
+	if o == nil {
+		return 0
+	}
+	return o.leiosMaxVerifiedEbSlot.Load()
+}
+
+func (o *Ouroboros) advanceLeiosVerifiedEbSlot(slot uint64) {
+	for {
+		previous := o.leiosMaxVerifiedEbSlot.Load()
+		if slot <= previous ||
+			o.leiosMaxVerifiedEbSlot.CompareAndSwap(previous, slot) {
+			return
+		}
+	}
+}
+
+// restoreLeiosVerifiedEbSlot restores the monotonic Leios evidence watermark
+// from authoritative persisted manifests during startup, so the optional
+// forge staleness gate is still effective after a restart rather than reading
+// 0 until the next verification. It is the only path that raises the
+// watermark from persisted state; a cache eviction needs none, because the
+// watermark within a process is always at least the maximum persisted slot
+// (see MaxVerifiedEndorserBlockSlot).
+func (o *Ouroboros) restoreLeiosVerifiedEbSlot() {
+	if !o.config.EnableLeios || o.ledgerState == nil {
+		return
+	}
+	slot, err := o.ledgerState.Database().MaxLeiosEBSlot()
+	if err != nil {
+		o.config.Logger.Warn(
+			"failed to restore persisted leios EB watermark",
+			"error", err,
+		)
+		return
+	}
+	o.advanceLeiosVerifiedEbSlot(slot)
 }
 
 // bindLeiosEndorserBlockSlot reconciles a cached (slot, hash) occurrence

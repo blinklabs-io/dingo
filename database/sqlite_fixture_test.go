@@ -19,8 +19,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	_ "github.com/glebarez/go-sqlite"
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
 )
 
 // rawSQLiteMetadataFixture is intentionally test-only. Production callers use

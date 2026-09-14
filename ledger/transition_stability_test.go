@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -52,7 +53,7 @@ func awaitTransitionInfo(
 		ls.RLock()
 		defer ls.RUnlock()
 		return ls.transitionInfo.State == want
-	}, 2*time.Second, 5*time.Millisecond,
+	}, testutil.AsyncWait, 5*time.Millisecond,
 		"transitionInfo.State did not reach %v", want)
 	ls.RLock()
 	defer ls.RUnlock()
@@ -63,7 +64,7 @@ func awaitHFIEvalIdle(t *testing.T, ls *LedgerState) {
 	t.Helper()
 	require.Eventually(t, func() bool {
 		return !ls.hfiStabilityEvalInFlight.Load()
-	}, 2*time.Second, 5*time.Millisecond,
+	}, testutil.AsyncWait, 5*time.Millisecond,
 		"HFI stability evaluation did not become idle")
 }
 

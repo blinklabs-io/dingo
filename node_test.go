@@ -1112,7 +1112,11 @@ func TestCleanupFailedStartupSkipsDatabaseCloseWhenLedgerDrainIsUnconfirmed(
 	n.startupLifecycleMu.Lock()
 	n.cleanupFailedStartup(rollback)
 
-	assert.False(t, dbClosed, "db.Close must be skipped when the ledger drain is unconfirmed")
+	assert.False(
+		t,
+		dbClosed,
+		"db.Close must be skipped when the ledger drain is unconfirmed",
+	)
 	assert.False(
 		t,
 		pluginHostStopped,
@@ -1277,4 +1281,109 @@ func TestLogErrIfNotNilStaysQuietOnNil(t *testing.T) {
 			buf.String(),
 		)
 	}
+}
+
+// seedIncompleteRewardLiveStake reproduces a post-upgrade database whose
+// reward_live_stake aggregate covers only one of two registered credentials,
+// which is the state RewardLiveStakeNeedsBackfill is meant to detect.
+func seedIncompleteRewardLiveStake(
+	t *testing.T,
+	db *database.Database,
+) {
+	t.Helper()
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	stakeKey := make([]byte, 28)
+	stakeKey[0] = 0x51
+	missingStakeKey := make([]byte, 28)
+	missingStakeKey[0] = 0x52
+	_, err = raw.Exec(`
+INSERT INTO account (staking_key, pool, added_slot, active)
+VALUES (?, ?, 50, TRUE), (?, ?, 60, TRUE)`,
+		stakeKey, make([]byte, 28),
+		missingStakeKey, make([]byte, 28),
+	)
+	require.NoError(t, err)
+	_, err = raw.Exec(`
+INSERT INTO reward_live_stake
+    (staking_key, credential_tag, utxo_stake, reward_stake, total_stake,
+     registered, updated_slot)
+VALUES (?, 0, '0', '0', '0', TRUE, 75)`,
+		stakeKey,
+	)
+	require.NoError(t, err)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(100, make([]byte, 32)),
+	}, nil))
+}
+
+// TestBackfillRewardLiveStakeSkipsScanWhenConfigured pins the opt-out: with
+// the flag set the whole-UTxO consistency scan must not run, so a database
+// that genuinely needs a backfill is left untouched rather than rebuilt.
+// Without the flag the sibling test above rebuilds the same fixture, so this
+// fails if the flag ever stops being honored.
+func TestBackfillRewardLiveStakeSkipsScanWhenConfigured(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	seedIncompleteRewardLiveStake(t, db)
+
+	needed, err := db.Metadata().RewardLiveStakeNeedsBackfill(nil)
+	require.NoError(t, err)
+	require.True(t, needed)
+
+	n := &Node{
+		db: db,
+		config: Config{
+			logger: slog.New(
+				slog.NewTextHandler(io.Discard, nil),
+			),
+			skipRewardLiveStakeBackfillCheck: true,
+		},
+	}
+	require.NoError(t, n.backfillRewardLiveStake())
+
+	// Still needed: the scan was skipped, so no rebuild happened.
+	needed, err = db.Metadata().RewardLiveStakeNeedsBackfill(nil)
+	require.NoError(t, err)
+	require.True(t, needed)
+}
+
+// TestBackfillRewardLiveStakeChecksProvenanceWhenSkipping pins the boundary
+// of the opt-out: the flag suppresses only the reward_live_stake scan, never
+// the stake-snapshot provenance probe, which fails closed because such a
+// database cannot be safely reconstructed.
+func TestBackfillRewardLiveStakeChecksProvenanceWhenSkipping(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	_, err = raw.Exec(`
+INSERT INTO pool_stake_snapshot
+    (epoch, snapshot_type, pool_key_hash, total_stake, stake_denominator,
+     delegator_count, captured_slot, calculation_version)
+VALUES (?, 'mark', ?, '0', '0', 0, 100, ?)`,
+		650, make([]byte, 28), models.RewardStakeCalculationVersion-1,
+	)
+	require.NoError(t, err)
+
+	n := &Node{
+		db: db,
+		config: Config{
+			logger: slog.New(
+				slog.NewTextHandler(io.Discard, nil),
+			),
+			skipRewardLiveStakeBackfillCheck: true,
+		},
+	}
+	err = n.backfillRewardLiveStake()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "older accounting")
 }

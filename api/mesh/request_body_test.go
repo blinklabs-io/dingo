@@ -215,3 +215,14 @@ func TestRequestBodyNormalRequestUnaffected(t *testing.T) {
 	)
 	require.Len(t, decoded.NetworkIdentifiers, 1)
 }
+
+// A complete first value does not complete the declared HTTP body.
+func TestRequestBodyStalledAfterJSONIsRejected(t *testing.T) {
+	_, baseURL := startTestServer(
+		t, newTestDeps(), withRequestBodyTimeout(testBodyTimeout),
+	)
+	conn := dialTestServer(t, baseURL)
+	writePartialRequest(t, conn, "/network/list", 4096, "{}")
+	resp, body := readMeshResponse(t, conn, respondWithin)
+	requireInvalidRequest(t, resp, body)
+}

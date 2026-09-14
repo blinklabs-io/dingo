@@ -17,6 +17,7 @@ package ledger
 import (
 	"math/big"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
@@ -49,8 +50,29 @@ type stakeDistributionEntry = struct {
 // denominator instead, confirmed against real cardano-node's raw wire bytes
 // -- see totalCirculatingSupply's doc comment (blinklabs-io/dingo#3824) for
 // the full story and why GetPoolDistr2 must not make the same change.
-func (ls *LedgerState) queryShelleyStakeDistribution() (any, error) {
-	dist, err := ls.PoolStakeDistribution(nil)
+//
+// at is Query's pinned point (unpinned = live). Unlike GetPoolDistr2 (which
+// uses TotalActiveStake, itself a historical, per-epoch snapshot total),
+// this query's denominator is TotalCirculatingSupply, computed from the
+// network_state table's reserves row -- one row per slot its reserves or
+// treasury actually changed, not just a single always-current value. A
+// pinned at is answered by reading the reserves row that was in effect as
+// of at.Slot itself (GetNetworkStateAsOfSlot, via totalCirculatingSupply's
+// asOfSlot parameter) rather than always the latest one, so a correct
+// historical numerator (the pinned epoch's pool stakes, from
+// PoolStakeDistribution below) is paired with the reserves that were
+// genuinely true at that same point instead of whatever reserves happen to
+// be live now (MIR, treasury donations, and monetary expansion all move
+// reserves between an old pinned point and the live tip). All of the
+// retention-window and future-slot rejection this used to duplicate here
+// lives in PoolStakeDistribution itself (checkAsOfEpochRecency and its
+// at.Slot > tip.Point.Slot check), which every pinned caller already goes
+// through (blinklabs-io/dingo#382).
+func (ls *LedgerState) queryShelleyStakeDistribution(
+	at QueryPoint,
+	txn *database.Txn,
+) (any, error) {
+	dist, err := ls.PoolStakeDistribution(nil, at, txn)
 	if err != nil {
 		return nil, err
 	}

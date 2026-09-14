@@ -365,6 +365,17 @@ type mockLedgerState struct {
 	// slotToTime, when set, replaces the zero-time default so a test can
 	// supply a real network's slot-to-time mapping.
 	slotToTime func(uint64) (time.Time, error)
+	// syntheticV2CostModel backs SyntheticV2CostModelInEffect, so a test can
+	// exercise ValidateTxBabbage/EvaluateTxBabbage's ErrNoCostModelForPlutusV2
+	// check (blinklabs-io/dingo#3962) without a real *ledger.LedgerView.
+	syntheticV2CostModel bool
+}
+
+// SyntheticV2CostModelInEffect implements the eras package's local
+// syntheticV2CostModelReporter interface (see eras.go), the same way
+// *ledger.LedgerView does in production.
+func (m *mockLedgerState) SyntheticV2CostModelInEffect() bool {
+	return m.syntheticV2CostModel
 }
 
 func newMockLedgerState() *mockLedgerState {

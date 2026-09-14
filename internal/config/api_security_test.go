@@ -25,12 +25,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestLoad_APITLSAuthYAMLDefaults covers the top-level api.tls/api.auth
-// section: a YAML-only configuration populates it, with the per-provider
+// TestLoad_APITLSYAMLDefaults covers the top-level api.tls section: a
+// YAML-only configuration populates it, with the per-provider
 // plugins.api.* selections left untouched (the merge into each provider's
 // own config happens at node composition, not here -- see node.go's
 // apiProviderConfig).
-func TestLoad_APITLSAuthYAMLDefaults(t *testing.T) {
+func TestLoad_APITLSYAMLDefaults(t *testing.T) {
 	resetGlobalConfig()
 	t.Setenv("HOME", t.TempDir())
 
@@ -40,10 +40,7 @@ func TestLoad_APITLSAuthYAMLDefaults(t *testing.T) {
 			"  tls:\n"+
 			"    mode: server\n"+
 			"    certFilePath: /run/secrets/api.crt\n"+
-			"    keyFilePath: /run/secrets/api.key\n"+
-			"  auth:\n"+
-			"    mode: token\n"+
-			"    tokenFilePath: /run/secrets/api-token\n",
+			"    keyFilePath: /run/secrets/api.key\n",
 	), 0o600))
 
 	cfg, err := LoadConfig(configFile)
@@ -55,12 +52,6 @@ func TestLoad_APITLSAuthYAMLDefaults(t *testing.T) {
 	assert.Equal(t, "/run/secrets/api.crt", *cfg.API.TLS.CertFilePath)
 	require.NotNil(t, cfg.API.TLS.KeyFilePath)
 	assert.Equal(t, "/run/secrets/api.key", *cfg.API.TLS.KeyFilePath)
-	require.NotNil(t, cfg.API.Auth.Mode)
-	assert.Equal(t, "token", *cfg.API.Auth.Mode)
-	require.NotNil(t, cfg.API.Auth.TokenFilePath)
-	assert.Equal(
-		t, "/run/secrets/api-token", *cfg.API.Auth.TokenFilePath,
-	)
 }
 
 // TestLoad_APITLSEnvironmentOverridesYAML covers source precedence
@@ -92,27 +83,6 @@ func TestLoad_APITLSEnvironmentOverridesYAML(t *testing.T) {
 	assert.Equal(t, "/env/cert.pem", *cfg.API.TLS.CertFilePath)
 }
 
-// TestLoad_APIAuthTokenHasNoEnvironmentBinding pins
-// apiconfig.AuthPolicy.Token's documented security property: an inline
-// secret is settable only via YAML, never via an environment variable
-// (unlike every other api.auth/api.tls field). Without the `ignored:"true"`
-// struct tag, envconfig.Process would still auto-derive and honor
-// CARDANO_API_AUTH_TOKEN even with no explicit `envconfig` tag present --
-// omitting the tag alone does not suppress the binding.
-func TestLoad_APIAuthTokenHasNoEnvironmentBinding(t *testing.T) {
-	resetGlobalConfig()
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("CARDANO_API_AUTH_TOKEN", "leaked-secret")
-
-	cfg, err := LoadConfig("")
-	require.NoError(t, err)
-
-	assert.Nil(
-		t, cfg.API.Auth.Token,
-		"api.auth.token must never be settable via environment variable",
-	)
-}
-
 // TestApplyFlags_APITLSCLIOverridesEnvironment covers the top of the
 // source precedence chain: a CLI flag beats both environment and YAML.
 func TestApplyFlags_APITLSCLIOverridesEnvironment(t *testing.T) {
@@ -136,34 +106,6 @@ func TestApplyFlags_APITLSCLIOverridesEnvironment(t *testing.T) {
 
 	require.NotNil(t, cfg.API.TLS.Mode)
 	assert.Equal(t, "server", *cfg.API.TLS.Mode, "CLI overrides environment")
-}
-
-// TestLoad_APIAuthCLIExplicitDisable covers representing an explicit
-// "disabled" as distinct from "unset": a CLI flag can turn off an
-// environment/YAML-inherited auth mode rather than merely leaving it at
-// its default.
-func TestLoad_APIAuthCLIExplicitDisable(t *testing.T) {
-	resetGlobalConfig()
-	t.Setenv("HOME", t.TempDir())
-
-	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
-	require.NoError(t, os.WriteFile(configFile, []byte(
-		"api:\n  auth:\n    mode: token\n    tokenFilePath: /run/secrets/api-token\n",
-	), 0o600))
-	cfg, err := LoadConfig(configFile)
-	require.NoError(t, err)
-
-	cmd := &cobra.Command{Use: "dingo"}
-	RegisterFlags(cmd)
-	require.NoError(t, cmd.ParseFlags([]string{"--api-auth-mode=disabled"}))
-	require.NoError(t, ApplyFlags(cmd, cfg))
-
-	require.NotNil(t, cfg.API.Auth.Mode)
-	assert.Equal(t, "disabled", *cfg.API.Auth.Mode)
-	// The inherited tokenFilePath is untouched -- disabling mode does not
-	// require also clearing the (now irrelevant) credential fields.
-	require.NotNil(t, cfg.API.Auth.TokenFilePath)
-	assert.Equal(t, "/run/secrets/api-token", *cfg.API.Auth.TokenFilePath)
 }
 
 // TestLoad_APIProviderConfigPerFieldOverride is the end-to-end shape from
@@ -201,7 +143,6 @@ func TestLoad_APIProviderConfigPerFieldOverride(t *testing.T) {
 		cfg.Plugins.API.Blockfrost.Config,
 		apiconfig.TLSPolicy{},
 		cfg.API.TLS,
-		cfg.API.Auth,
 	)
 	require.NoError(t, err)
 	tlsPolicy, err := apiconfig.DecodeTLSPolicy(merged)
@@ -216,46 +157,6 @@ func TestLoad_APIProviderConfigPerFieldOverride(t *testing.T) {
 	// default -- overriding one nested field must not blow away the
 	// other.
 	assert.Equal(t, "/shared/key.pem", effective.KeyFilePath)
-}
-
-// TestLoad_APIProviderConfigExplicitDisable covers a provider explicitly
-// opting out of an inherited top-level policy.
-func TestLoad_APIProviderConfigExplicitDisable(t *testing.T) {
-	resetGlobalConfig()
-	t.Setenv("HOME", t.TempDir())
-
-	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
-	require.NoError(t, os.WriteFile(configFile, []byte(
-		"api:\n"+
-			"  auth:\n"+
-			"    mode: token\n"+
-			"    token: shared-secret\n"+
-			"plugins:\n"+
-			"  api:\n"+
-			"    mesh:\n"+
-			"      provider: builtin\n"+
-			"      config:\n"+
-			"        port: 8080\n"+
-			"        auth:\n"+
-			"          mode: disabled\n",
-	), 0o600))
-
-	cfg, err := LoadConfig(configFile)
-	require.NoError(t, err)
-
-	merged, err := apiconfig.MergeProviderConfig(
-		cfg.Plugins.API.Mesh.Config,
-		apiconfig.TLSPolicy{},
-		cfg.API.TLS,
-		cfg.API.Auth,
-	)
-	require.NoError(t, err)
-	authPolicy, err := apiconfig.DecodeAuthPolicy(merged)
-	require.NoError(t, err)
-	effective, err := authPolicy.Resolve("test")
-	require.NoError(t, err)
-
-	assert.False(t, effective.Enabled)
 }
 
 // TestLoad_APIProviderConfigInvalidMergedTLSPair covers the "invalid
@@ -289,7 +190,6 @@ func TestLoad_APIProviderConfigInvalidMergedTLSPair(t *testing.T) {
 		cfg.Plugins.API.Utxorpc.Config,
 		apiconfig.TLSPolicy{},
 		cfg.API.TLS,
-		cfg.API.Auth,
 	)
 	require.NoError(t, err)
 	tlsPolicy, err := apiconfig.DecodeTLSPolicy(merged)
@@ -318,24 +218,8 @@ func TestValidate_InvalidAPITLSMode(t *testing.T) {
 	assert.Contains(t, err.Error(), "invalid mode")
 }
 
-// TestValidate_InvalidAPIAuthMode is TestValidate_InvalidAPITLSMode's
-// auth counterpart.
-func TestValidate_InvalidAPIAuthMode(t *testing.T) {
-	resetGlobalConfig()
-	cfg := GetConfig()
-	cfg.ApplyDefaults()
-	bogus := "bogus"
-	cfg.API.Auth.Mode = &bogus
-
-	err := cfg.Validate(RunModeLoad)
-
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "api.auth.mode")
-	assert.Contains(t, err.Error(), "invalid mode")
-}
-
 // TestGetConfigSnapshotDoesNotShareAPIPolicy asserts GetConfig's snapshot
-// deep-copies api.tls/api.auth pointer fields, matching the existing
+// deep-copies api.tls pointer fields, matching the existing
 // nested-plugin-config isolation guarantee: mutating one snapshot's
 // policy must not be visible through another.
 func TestGetConfigSnapshotDoesNotShareAPIPolicy(t *testing.T) {

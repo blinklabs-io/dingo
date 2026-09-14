@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/require"
 )
@@ -128,7 +129,7 @@ func TestRestoreValidatedFailsClosedWhenStagingSyncFails(t *testing.T) {
 		nil,
 		snapshotDir,
 		targetDir,
-		RestoreStorageConfig{},
+		RestoreStorageConfig{Blob: testutil.BadgerBlobConfig()},
 	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, injectedErr)
@@ -180,7 +181,7 @@ func TestRestoreValidatedSurfacesPostRenameSyncFailure(t *testing.T) {
 		nil,
 		snapshotDir,
 		targetDir,
-		RestoreStorageConfig{},
+		RestoreStorageConfig{Blob: testutil.BadgerBlobConfig()},
 	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, injectedErr)

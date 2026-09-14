@@ -30,7 +30,6 @@ import (
 	"connectrpc.com/connect"
 	"connectrpc.com/grpchealth"
 	"connectrpc.com/grpcreflect"
-	"github.com/blinklabs-io/dingo/internal/apiauth"
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/blinklabs-io/dingo/internal/apilistener"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
@@ -52,8 +51,8 @@ const (
 	DefaultMaxUtxoKeys     = 1000
 	DefaultMaxHistoryItems = 10000
 	DefaultMaxDataKeys     = 1000
-	// DefaultMaxRequestBody bounds each Connect message before it is decoded
-	// or authenticated. Connect applies the same limit to the compressed wire
+	// DefaultMaxRequestBody bounds each Connect message before it is decoded.
+	// Connect applies the same limit to the compressed wire
 	// message and to its decompressed form, preventing a small compressed body
 	// from expanding without bound during unary request decoding.
 	DefaultMaxRequestBody = 1 << 20 // 1 MiB
@@ -75,7 +74,6 @@ type Utxorpc struct {
 	// internal/apilistener.
 	listener *apilistener.Listener
 	config   UtxorpcConfig
-	verifier *apiauth.Verifier
 }
 
 type UtxorpcConfig struct {
@@ -83,14 +81,9 @@ type UtxorpcConfig struct {
 	EventBus    UtxorpcEventBus
 	LedgerState UtxorpcLedgerState
 	Mempool     UtxorpcMempool
-	// TLS and Auth are the resolved (merged, validated) equivalents of
-	// what was previously TlsCertFilePath/TlsKeyFilePath fields here --
-	// see ProviderConfig's doc comment and ARCHITECTURE.md's "API
-	// security" section.
-	TLS  apiconfig.EffectiveTLS
-	Auth apiconfig.EffectiveAuth
-	Host string
-	Port uint
+	TLS         apiconfig.EffectiveTLS
+	Host        string
+	Port        uint
 
 	// Request size limits (0 = use default)
 	MaxBlockRefs int
@@ -184,18 +177,7 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 	if u.config.Mempool != nil && isNilInterface(u.config.Mempool) {
 		return errors.New("utxorpc: Mempool must not be a typed nil")
 	}
-	// Built before the mux so newServeMux can install the shared
-	// credential-verification interceptor (internal/apiauth) on every
-	// Connect/gRPC handler it registers, including health and reflection.
-	verifier, err := apiauth.NewVerifier(u.config.Auth)
-	if err != nil {
-		return fmt.Errorf("utxorpc: %w", err)
-	}
-	// The verifier is installed inside the build callback so it is published
-	// with the server it belongs to: a second Start is rejected before the
-	// callback runs, and so cannot replace a running server's verifier.
 	server, bindDone, err := u.listener.Publish(func() *http.Server {
-		u.verifier = verifier
 		return u.buildServer()
 	})
 	if err != nil {
@@ -253,15 +235,6 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 // the plaintext listener has to opt into unencrypted HTTP/2 explicitly, which
 // gRPC clients require.
 func (u *Utxorpc) buildServer() *http.Server {
-	// CORS must wrap authentication, not the reverse: httpcors.Handler
-	// fully answers an OPTIONS preflight itself and never calls the
-	// handler it wraps for one, so browsers -- which never attach
-	// Authorization to a preflight request -- never need a credential to
-	// pass CORS negotiation. Every other request, including a
-	// non-preflight OPTIONS, still reaches the mux (and so the
-	// per-procedure auth interceptor) normally. See internal/apiauth's
-	// Middleware doc comment for the HTTP-side statement of the same
-	// ordering rule.
 	handler := httpcors.Handler(
 		u.newServeMux(),
 		httpcors.Config{
@@ -324,16 +297,6 @@ func (u *Utxorpc) newServeMux() *http.ServeMux {
 		connect.WithCompressMinBytes(1024),
 		connect.WithReadMaxBytes(DefaultMaxRequestBody),
 	)
-	// When authentication is enabled, every Connect/gRPC handler this mux
-	// registers -- including health and reflection -- requires a valid
-	// credential; there is no separate unauthenticated allowlist for
-	// those two, unlike CORS preflight (see Start's doc comment).
-	if u.verifier != nil {
-		compress1KB = connect.WithOptions(
-			compress1KB,
-			connect.WithInterceptors(apiauth.Interceptor(u.verifier)),
-		)
-	}
 	queryPath, queryHandler := queryconnect.NewQueryServiceHandler(
 		&queryServiceServer{utxorpc: u},
 		compress1KB,

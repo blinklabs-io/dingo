@@ -1757,19 +1757,29 @@ func TestCheckAccountRewardsPendingWiring(t *testing.T) {
 		return acct
 	}
 
-	t.Run("before the boundary the amount difference is a lag", func(t *testing.T) {
-		acct := run(t, boundarySlot-1)
-		require.Len(t, acct, 1)
-		assert.Equal(t, CategoryReferenceLag, acct[0].Category,
-			"checkEpoch must pass the pending answer to the account comparison")
-	})
+	t.Run(
+		"before the boundary the amount difference is a lag",
+		func(t *testing.T) {
+			acct := run(t, boundarySlot-1)
+			require.Len(t, acct, 1)
+			assert.Equal(
+				t,
+				CategoryReferenceLag,
+				acct[0].Category,
+				"checkEpoch must pass the pending answer to the account comparison",
+			)
+		},
+	)
 
-	t.Run("at the boundary the same difference is a divergence", func(t *testing.T) {
-		acct := run(t, boundarySlot)
-		require.Len(t, acct, 1)
-		assert.Equal(t, CategoryValueMismatch, acct[0].Category,
-			"once the rewards are applied the comparison must stay strict")
-	})
+	t.Run(
+		"at the boundary the same difference is a divergence",
+		func(t *testing.T) {
+			acct := run(t, boundarySlot)
+			require.Len(t, acct, 1)
+			assert.Equal(t, CategoryValueMismatch, acct[0].Category,
+				"once the rewards are applied the comparison must stay strict")
+		},
+	)
 }
 
 // TestCheckUncreditedDingoRowStillFailsAgainstKoios is the case that decides
@@ -1938,8 +1948,11 @@ func TestCheckAccountDecodeErrorReachesOutput(t *testing.T) {
 			))
 
 			result, err := Check(context.Background(), CheckConfig{
-				Network:         network,
-				DingoDB:         DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+				Network: network,
+				DingoDB: DingoDBConfig{
+					Plugin:  "sqlite",
+					DataDir: dingoDir,
+				},
 				CachePath:       cachePath,
 				AccountsEnabled: true,
 			}, slog.New(slog.DiscardHandler))
@@ -2158,4 +2171,95 @@ func TestCheckReregisteredPoolStillErrors(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, mismatches, 1)
 	require.Equal(t, CategoryDBMissing, mismatches[0].Category)
+}
+
+// earliestAvailableEpochStub wraps a RewardParitySource and overrides
+// GetEarliestAvailableEpoch with a fixed value, so a test can exercise
+// checkEpoch/CheckEpoch's earliest-available-epoch short-circuit (dingo
+// #4172) without simulating real Mithril boundary sync_state/epoch rows for
+// every scenario.
+type earliestAvailableEpochStub struct {
+	RewardParitySource
+	epoch uint64
+	ok    bool
+}
+
+func (s *earliestAvailableEpochStub) GetEarliestAvailableEpoch(
+	context.Context,
+) (uint64, bool, error) {
+	return s.epoch, s.ok, nil
+}
+
+// TestCheckEpochSkipsEpochBeforeEarliestAvailableEpoch guards against dingo
+// #4172: a Mithril-bootstrapped node has zero local reward-calculation state
+// for any epoch before its own bootstrap boundary, even for a koios epoch
+// well above preStakingThroughEpoch, where Koios itself (full protocol
+// history) has real reference data. Before the fix, checkEpoch read Dingo's
+// total local absence as every field mismatching and returned FAIL; the fix
+// must instead record the same PASS-with-nothing-compared verdict checkEpoch
+// already gives a pre-staking epoch.
+func TestCheckEpochSkipsEpochBeforeEarliestAvailableEpoch(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	const koiosEpoch = uint64(3) // above preStakingThroughEpoch (1)
+
+	db := newTestDatabaseSourceDB(t)
+	base, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+	// This node's own earliest available ledger epoch (5) is above the
+	// koios epoch under test (3), simulating a Mithril bootstrap boundary
+	// past it.
+	source := &earliestAvailableEpochStub{
+		RewardParitySource: base,
+		epoch:              5,
+		ok:                 true,
+	}
+
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	cache, err := OpenCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	// Koios genuinely has real, non-pre-staking data for this epoch --
+	// closed long ago, well outside any grace window.
+	closedLongAgo := time.Now().Add(-24 * time.Hour * 400).UTC()
+	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
+		Network:      network,
+		Epoch:        koiosEpoch,
+		ActiveStake:  "123456789",
+		EpochEndTime: closedLongAgo,
+		FetchedAt:    closedLongAgo,
+	}, nil, nil))
+
+	result, err := CheckEpoch(
+		context.Background(),
+		cache,
+		source,
+		network,
+		koiosEpoch,
+		0,
+		false,
+		slog.New(slog.DiscardHandler),
+	)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		StatusPass,
+		result.Status,
+		"epoch predating this node's earliest available ledger epoch must "+
+			"pass without comparison, not fail as if every field mismatched",
+	)
+	require.Empty(t, result.Mismatches)
+
+	statuses, err := cache.GetStatusSummary(network)
+	require.NoError(t, err)
+	found := false
+	for _, s := range statuses {
+		if s.Epoch == koiosEpoch {
+			found = true
+			require.Equal(t, StatusPass, s.Status)
+		}
+	}
+	require.True(t, found, "epoch should have a persisted check status")
 }
