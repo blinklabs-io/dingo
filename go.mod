@@ -48,7 +48,7 @@ require (
 	go.uber.org/goleak v1.3.0
 	golang.org/x/crypto v0.56.0
 	golang.org/x/net v0.58.0
-	golang.org/x/sync v0.22.0
+	golang.org/x/sync v0.23.0
 	golang.org/x/sys v0.47.0
 	google.golang.org/api v0.294.0
 	google.golang.org/grpc v1.83.2
