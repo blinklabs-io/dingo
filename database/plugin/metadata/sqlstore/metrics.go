@@ -72,12 +72,12 @@ func newSQLQueryDurationHistogram(
 	histogram := prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name: sqlMetricNamePrefix + "query_duration_seconds",
 		Help: "Wall-clock duration of each SQL statement issued against " +
-			"the metadata store, labeled by classifySQLOp's op " +
+			"the metadata store, labeled by classifySQLStatement's op " +
 			"classification and, when known, the sqlc-generated query " +
-			"name (see classifySQLStatement). Counted at the same " +
-			"chokepoint as dingo_database_sql_operations_total, including " +
-			"the hot-statement cache's cached calls " +
-			"(queryRowCached/execCached in prepared_stmt.go).",
+			"name. Counted at the same chokepoint as " +
+			"dingo_database_sql_operations_total, including the " +
+			"hot-statement cache's cached calls (queryRowCached/execCached " +
+			"in prepared_stmt.go).",
 		// 100us to ~1.6s: SQL statements against this store range from a
 		// sub-millisecond point lookup to a multi-block delta-batch write
 		// during from-genesis sync; the default Prometheus buckets (5ms to
@@ -98,31 +98,20 @@ func newSQLQueryDurationHistogram(
 	return histogram
 }
 
-// classifySQLOp returns the metadata store's best-effort operation label for
-// a query. Every sqlc-generated query embeds a leading "-- name: X :verb"
-// comment (see internal/query/{sqlite,postgres,mysql}/*.sql.go, generated
-// from the "-- name:" annotation sqlc requires on every query in
+// classifySQLStatement returns the metadata store's best-effort operation
+// label for a query and, when the query carries one, the sqlc-generated
+// query name embedded in its leading "-- name: X :verb" comment. Every
+// sqlc-generated query embeds that comment (see
+// internal/query/{sqlite,postgres,mysql}/*.sql.go, generated from the
+// "-- name:" annotation sqlc requires on every query in
 // internal/query/*.sql); this walks past that comment (and any further
 // leading comment lines) before checking the real statement's leading
-// keyword. A CTE (WITH ...), PRAGMA, or DDL statement is reported as
-// "other" rather than guessed at -- a wrong label would be worse than an
-// honest catch-all, and none of dingo's own hot paths are CTEs today.
-//
-// This is a thin wrapper around classifySQLStatement, kept so every
-// existing caller (and classifySQLOp's own long-standing test table) is
-// unaffected by the query-name extraction classifySQLStatement added
-// alongside it for the query-duration histogram below.
-func classifySQLOp(query string) string {
-	op, _ := classifySQLStatement(query)
-	return op
-}
-
-// classifySQLStatement returns both classifySQLOp's operation label and,
-// when the query carries one, the sqlc-generated query name embedded in its
-// leading "-- name: X :verb" comment (see classifySQLOp's doc comment for
-// where that annotation comes from). name is "unknown" when no such comment
-// is present -- a hand-written query (a PRAGMA, a schema-inspection SELECT
-// in a test) rather than a sqlc-generated one.
+// keyword. A CTE (WITH ...), PRAGMA, or DDL statement is classified "other"
+// rather than guessed at -- a wrong label would be worse than an honest
+// catch-all, and none of dingo's own hot paths are CTEs today. name is
+// "unknown" when no "-- name:" comment is present -- a hand-written query
+// (a PRAGMA, a schema-inspection SELECT in a test) rather than a
+// sqlc-generated one.
 //
 // name is safe to use as a Prometheus label despite being derived from
 // query text: sqlc query names are not user input or raw SQL text, they are

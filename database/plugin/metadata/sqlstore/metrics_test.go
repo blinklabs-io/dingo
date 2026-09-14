@@ -26,81 +26,10 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-func TestClassifySQLOp(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name  string
-		query string
-		want  string
-	}{
-		{
-			name:  "sqlc insert with name comment",
-			query: "-- name: InsertNodeSettings :execrows\nINSERT INTO node_settings (id) VALUES (?)",
-			want:  "insert",
-		},
-		{
-			name:  "sqlc select with name comment",
-			query: "-- name: GetTip :one\nSELECT * FROM sync_state WHERE sync_key = ?",
-			want:  "select",
-		},
-		{
-			name:  "sqlc update, lowercase keyword",
-			query: "-- name: TouchThing :exec\nupdate utxo set deleted_slot = ? where id = ?",
-			want:  "update",
-		},
-		{
-			name:  "sqlc delete",
-			query: "-- name: PruneThing :execrows\nDELETE FROM auth_committee_hot WHERE id IN (?)",
-			want:  "delete",
-		},
-		{
-			name:  "no leading comment",
-			query: "SELECT 1",
-			want:  "select",
-		},
-		{
-			name:  "multiple leading comment lines",
-			query: "-- name: Foo :one\n-- a second comment line\nSELECT 1",
-			want:  "select",
-		},
-		{
-			name:  "leading whitespace before comment",
-			query: "  \n-- name: Foo :one\nSELECT 1",
-			want:  "select",
-		},
-		{
-			name:  "CTE reported as other, not guessed at",
-			query: "-- name: Foo :many\nWITH x AS (SELECT 1) SELECT * FROM x",
-			want:  "other",
-		},
-		{
-			name:  "PRAGMA reported as other",
-			query: "PRAGMA journal_mode=WAL",
-			want:  "other",
-		},
-		{
-			name:  "comment with no trailing newline has nothing left to classify",
-			query: "-- name: Foo :one",
-			want:  "other",
-		},
-		{
-			name:  "empty query",
-			query: "",
-			want:  "other",
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			require.Equal(t, tc.want, classifySQLOp(tc.query))
-		})
-	}
-}
-
-// TestClassifySQLStatementName is the table-driven test for the query-name
-// half of classifySQLStatement, the parsing classifySQLOp itself does not
-// need but the query-duration histogram does (to identify a specific slow
-// query rather than only "select is slow in aggregate").
+// TestClassifySQLStatementName is the table-driven test for
+// classifySQLStatement, covering both its operation classification (op) and
+// the query-name extraction the query-duration histogram needs (to identify
+// a specific slow query rather than only "select is slow in aggregate").
 func TestClassifySQLStatementName(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -120,6 +49,18 @@ func TestClassifySQLStatementName(t *testing.T) {
 			query:    "-- name: GetTip :one\nSELECT * FROM sync_state WHERE sync_key = ?",
 			wantOp:   "select",
 			wantName: "GetTip",
+		},
+		{
+			name:     "sqlc update, lowercase keyword",
+			query:    "-- name: TouchThing :exec\nupdate utxo set deleted_slot = ? where id = ?",
+			wantOp:   "update",
+			wantName: "TouchThing",
+		},
+		{
+			name:     "sqlc delete",
+			query:    "-- name: PruneThing :execrows\nDELETE FROM auth_committee_hot WHERE id IN (?)",
+			wantOp:   "delete",
+			wantName: "PruneThing",
 		},
 		{
 			name:     "multiple leading comment lines, name on the first",
@@ -147,6 +88,12 @@ func TestClassifySQLStatementName(t *testing.T) {
 			query:    "\nSELECT SUM(amount) FROM utxo WHERE credential_tag = ?",
 			wantOp:   "select",
 			wantName: "unknown",
+		},
+		{
+			name:     "CTE reported as other, not guessed at, but name is still parsed",
+			query:    "-- name: Foo :many\nWITH x AS (SELECT 1) SELECT * FROM x",
+			wantOp:   "other",
+			wantName: "Foo",
 		},
 		{
 			name:     "PRAGMA reported as other, name unknown",

@@ -97,7 +97,7 @@ type Config struct {
 	// dingo_database_sql_operations_total, a counter of every statement
 	// issued through Store's shared query chokepoint (instrumentedQueryer),
 	// labeled by its best-effort operation classification (see
-	// classifySQLOp in metrics.go), and
+	// classifySQLStatement in metrics.go), and
 	// dingo_database_sql_query_duration_seconds, a histogram of each such
 	// statement's wall-clock duration labeled by that same op
 	// classification plus, when known, the sqlc-generated query name (see
