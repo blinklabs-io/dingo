@@ -1315,14 +1315,34 @@ it. `dingo_database_sql_operations_total{op}` (counter,
 statement at Store's single query chokepoint (`instrumentedQueryer`),
 classified by leading keyword (insert/update/delete/select/other) parsed past
 each query's sqlc-generated `-- name: X :verb` comment; it is a no-op unless
-`Config.PromRegistry` is set. `dingo_database_sql_wal_bytes` and
-`dingo_database_sql_disk_bytes` (`database/plugin/metadata/sqlite/metrics.go`)
+`Config.PromRegistry` is set. `dingo_database_sql_query_duration_seconds{op,
+query}` (histogram, same file and chokepoint, added alongside this section)
+observes each statement's wall-clock duration at the same point, labeled by
+that op classification plus, when known, the sqlc-generated query name itself
+(`classifySQLStatement`; `"unknown"` for a hand-written query with no `--
+name:` annotation, such as the cached `sumCredentialUtxoStake` query). The
+query name is safe as a label because it is one of a small, fixed, code-
+controlled set of sqlc annotations, not user input or raw SQL text. Both the
+counter and the histogram cover every call site through `instrumentedQueryer`
+— domain queries, committee pruning, deferred-index maintenance — including
+the hot-statement cache's cached calls, which bypass `instrumentedQueryer`'s
+wrapper entirely and are counted/timed explicitly instead in
+`queryRowCached`/`execCached` (`prepared_stmt.go`). `dingo_database_sql_wal_bytes`
+and `dingo_database_sql_disk_bytes` (`database/plugin/metadata/sqlite/metrics.go`)
 are pull-based gauges sampled at scrape time — a plain `os.Stat` of
 `metadata.sqlite-wal` and `Store.DiskSize()` respectively — the same pattern
 Badger's own cache gauges already use rather than a background ticker. All
-three are wired into the `examples/koios-parity-compose` Grafana stack: the
+of these are wired into the `examples/koios-parity-compose` Grafana stack: the
 new `dingo-badger-storage` dashboard for Badger's existing metrics, and the
-SQL counters/gauges alongside the existing dashboards there.
+SQL counters/gauges/histogram alongside the existing dashboards there,
+including a "SQL operations per block synced, by type" panel that divides
+`dingo_database_sql_operations_total`'s per-op rate by the rate of change of
+`cardano_node_metrics_blockNum_int` (the existing applied-block-number gauge)
+rather than adding a new blocks-applied counter — see that panel's
+description for why this ratio is only meaningful over a window spanning
+several block-apply batches (each batch commits up to `batchSize` (50)
+blocks' worth of statements at once, so the two metrics update at comparable
+cadence only across several batches, not within one).
 
 A failed `Sync` is reported as `PartialCommitError`, because at that point the
 blob transaction is committed and carries the new commit timestamp while metadata

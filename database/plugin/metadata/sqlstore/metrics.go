@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -58,6 +59,45 @@ func newSQLOperationsCounter(
 	return counter
 }
 
+// newSQLQueryDurationHistogram registers dingo_database_sql_query_duration_seconds
+// against reg, or returns nil (the same documented no-op sentinel
+// newSQLOperationsCounter uses) when reg is nil. See that function's doc
+// comment for the duplicate-registration accommodation this mirrors.
+func newSQLQueryDurationHistogram(
+	reg prometheus.Registerer,
+) *prometheus.HistogramVec {
+	if reg == nil {
+		return nil
+	}
+	histogram := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name: sqlMetricNamePrefix + "query_duration_seconds",
+		Help: "Wall-clock duration of each SQL statement issued against " +
+			"the metadata store, labeled by classifySQLOp's op " +
+			"classification and, when known, the sqlc-generated query " +
+			"name (see classifySQLStatement). Counted at the same " +
+			"chokepoint as dingo_database_sql_operations_total, including " +
+			"the hot-statement cache's cached calls " +
+			"(queryRowCached/execCached in prepared_stmt.go).",
+		// 100us to ~1.6s: SQL statements against this store range from a
+		// sub-millisecond point lookup to a multi-block delta-batch write
+		// during from-genesis sync; the default Prometheus buckets (5ms to
+		// 10s) are both too coarse below 5ms -- where most single-statement
+		// point queries land -- and reach far past any single statement
+		// this store issues without benefiting from the extra range.
+		Buckets: prometheus.ExponentialBuckets(0.0001, 2, 15),
+	}, []string{"op", "query"})
+	if err := reg.Register(histogram); err != nil {
+		var already prometheus.AlreadyRegisteredError
+		if errors.As(err, &already) {
+			if existing, ok := already.ExistingCollector.(*prometheus.HistogramVec); ok {
+				return existing
+			}
+		}
+		panic(err)
+	}
+	return histogram
+}
+
 // classifySQLOp returns the metadata store's best-effort operation label for
 // a query. Every sqlc-generated query embeds a leading "-- name: X :verb"
 // comment (see internal/query/{sqlite,postgres,mysql}/*.sql.go, generated
@@ -67,7 +107,31 @@ func newSQLOperationsCounter(
 // keyword. A CTE (WITH ...), PRAGMA, or DDL statement is reported as
 // "other" rather than guessed at -- a wrong label would be worse than an
 // honest catch-all, and none of dingo's own hot paths are CTEs today.
+//
+// This is a thin wrapper around classifySQLStatement, kept so every
+// existing caller (and classifySQLOp's own long-standing test table) is
+// unaffected by the query-name extraction classifySQLStatement added
+// alongside it for the query-duration histogram below.
 func classifySQLOp(query string) string {
+	op, _ := classifySQLStatement(query)
+	return op
+}
+
+// classifySQLStatement returns both classifySQLOp's operation label and,
+// when the query carries one, the sqlc-generated query name embedded in its
+// leading "-- name: X :verb" comment (see classifySQLOp's doc comment for
+// where that annotation comes from). name is "unknown" when no such comment
+// is present -- a hand-written query (a PRAGMA, a schema-inspection SELECT
+// in a test) rather than a sqlc-generated one.
+//
+// name is safe to use as a Prometheus label despite being derived from
+// query text: sqlc query names are not user input or raw SQL text, they are
+// a small, fixed set fully determined by the "-- name:" annotations checked
+// into internal/query/*.sql at build time (dozens of entries, one per
+// generated query function), so this label's cardinality is bounded by the
+// codebase, not by anything a caller or attacker controls.
+func classifySQLStatement(query string) (op, name string) {
+	name = "unknown"
 	q := query
 	for {
 		q = strings.TrimSpace(q)
@@ -79,29 +143,59 @@ func classifySQLOp(query string) string {
 		if idx < 0 {
 			// A comment with no trailing newline is the entire remaining
 			// text: there is no statement left to classify.
-			return "other"
+			return "other", name
+		}
+		if name == "unknown" {
+			if parsed, ok := parseSQLCQueryName(rest[:idx]); ok {
+				name = parsed
+			}
 		}
 		q = rest[idx+1:]
 	}
 	for _, op := range [...]string{"INSERT", "UPDATE", "DELETE", "SELECT"} {
 		if len(q) >= len(op) && strings.EqualFold(q[:len(op)], op) {
-			return strings.ToLower(op)
+			return strings.ToLower(op), name
 		}
 	}
-	return "other"
+	return "other", name
 }
 
-// countingQueryer increments counter, labeled by classifySQLOp, for every
-// statement it executes, then delegates to the wrapped queryer unchanged.
-// It is applied only by Store.instrumentedQueryer, which is the single
-// place every call site obtains a queryer from -- see that method's doc
-// comment for why that matters for coverage, and stmtForQueryer's and
+// parseSQLCQueryName extracts X from a sqlc "name: X :verb" comment line
+// (the leading "--" already stripped by classifySQLStatement's caller), or
+// reports ok=false when line is not that annotation -- for example a plain
+// leading comment with no sqlc annotation at all.
+func parseSQLCQueryName(line string) (name string, ok bool) {
+	rest, ok := strings.CutPrefix(strings.TrimSpace(line), "name:")
+	if !ok {
+		return "", false
+	}
+	fields := strings.Fields(rest)
+	if len(fields) == 0 {
+		return "", false
+	}
+	return fields[0], true
+}
+
+// countingQueryer increments counter and observes duration (labeled by
+// classifySQLStatement's op/name classification) for every statement it
+// executes, then delegates to the wrapped queryer unchanged. It is applied
+// only by Store.instrumentedQueryer, which is the single place every call
+// site obtains a queryer from -- see that method's doc comment for why
+// that matters for coverage, and stmtForQueryer's and
 // requireAccountBaselineTransaction's doc comments (prepared_stmt.go,
 // account.go) for two places that must unwrap this type explicitly to keep
 // working once it sits between them and the *sql.Tx they check for.
+//
+// counter and duration are both nil or both non-nil in practice -- Store
+// derives them from the same Config.PromRegistry and instrumentedQueryer
+// only constructs a countingQueryer when at least one is set -- but each
+// method checks its own field before use rather than assuming that
+// coupling, so a future caller that wires only one of the two cannot panic
+// on the other's nil pointer.
 type countingQueryer struct {
 	queryer
-	counter *prometheus.CounterVec
+	counter  *prometheus.CounterVec
+	duration *prometheus.HistogramVec
 }
 
 func (q countingQueryer) ExecContext(
@@ -109,8 +203,17 @@ func (q countingQueryer) ExecContext(
 	query string,
 	args ...any,
 ) (sql.Result, error) {
-	q.counter.WithLabelValues(classifySQLOp(query)).Inc()
-	return q.queryer.ExecContext(ctx, query, args...)
+	op, name := classifySQLStatement(query)
+	if q.counter != nil {
+		q.counter.WithLabelValues(op).Inc()
+	}
+	if q.duration == nil {
+		return q.queryer.ExecContext(ctx, query, args...)
+	}
+	start := time.Now()
+	result, err := q.queryer.ExecContext(ctx, query, args...)
+	q.duration.WithLabelValues(op, name).Observe(time.Since(start).Seconds())
+	return result, err
 }
 
 func (q countingQueryer) QueryContext(
@@ -118,8 +221,17 @@ func (q countingQueryer) QueryContext(
 	query string,
 	args ...any,
 ) (*sql.Rows, error) {
-	q.counter.WithLabelValues(classifySQLOp(query)).Inc()
-	return q.queryer.QueryContext(ctx, query, args...)
+	op, name := classifySQLStatement(query)
+	if q.counter != nil {
+		q.counter.WithLabelValues(op).Inc()
+	}
+	if q.duration == nil {
+		return q.queryer.QueryContext(ctx, query, args...)
+	}
+	start := time.Now()
+	rows, err := q.queryer.QueryContext(ctx, query, args...)
+	q.duration.WithLabelValues(op, name).Observe(time.Since(start).Seconds())
+	return rows, err
 }
 
 func (q countingQueryer) QueryRowContext(
@@ -127,21 +239,30 @@ func (q countingQueryer) QueryRowContext(
 	query string,
 	args ...any,
 ) *sql.Row {
-	q.counter.WithLabelValues(classifySQLOp(query)).Inc()
-	return q.queryer.QueryRowContext(ctx, query, args...)
+	op, name := classifySQLStatement(query)
+	if q.counter != nil {
+		q.counter.WithLabelValues(op).Inc()
+	}
+	if q.duration == nil {
+		return q.queryer.QueryRowContext(ctx, query, args...)
+	}
+	start := time.Now()
+	row := q.queryer.QueryRowContext(ctx, query, args...)
+	q.duration.WithLabelValues(op, name).Observe(time.Since(start).Seconds())
+	return row
 }
 
-// PrepareContext is deliberately not counted (and not overridden here): it
-// compiles a statement without executing it, and its only caller
+// PrepareContext is deliberately not counted or timed (and not overridden
+// here): it compiles a statement without executing it, and its only caller
 // (prepareHotStatements) prepares the same fixed, small statement list once
-// at Start. Counting there would misrepresent one-time preparation cost as
-// query volume.
+// at Start. Counting or timing it there would misrepresent one-time
+// preparation cost as query volume or query latency.
 //
 // A call served by the hot-statement cache never reaches this type at all:
 // queryRowCached/execCached (prepared_stmt.go) resolve straight to a
 // *sql.Stmt via stmtForQueryer -- which unwraps past countingQueryer
 // entirely, by design, to reach the real *sql.Tx/*sql.DB -- and call
 // QueryRowContext/ExecContext on that *sql.Stmt directly, never on this
-// wrapper. queryRowCached and execCached count those calls explicitly
-// instead, so a hot statement is still counted exactly once, just not by
-// this type.
+// wrapper. queryRowCached and execCached count and time those calls
+// explicitly instead, so a hot statement is still counted and timed exactly
+// once, just not by this type.

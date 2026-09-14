@@ -17,6 +17,7 @@ package sqlstore
 import (
 	"context"
 	"database/sql"
+	"time"
 )
 
 // hotStatements is the fixed, exhaustive list of query texts Start prepares
@@ -212,15 +213,24 @@ func (s *Store) queryRowCached(
 	args ...any,
 ) *sql.Row {
 	if cached, ok := s.lookupCachedStmt(query); ok {
-		// Counted here, not by countingQueryer: stmtForQueryer resolves
-		// straight to a *sql.Stmt, bypassing db (and any countingQueryer
-		// wrapping it) entirely -- see metrics.go's doc comment on
-		// countingQueryer's PrepareContext for why that makes this the
-		// right place to count a cache hit.
+		// Counted and timed here, not by countingQueryer: stmtForQueryer
+		// resolves straight to a *sql.Stmt, bypassing db (and any
+		// countingQueryer wrapping it) entirely -- see metrics.go's doc
+		// comment on countingQueryer's PrepareContext for why that makes
+		// this the right place to count and time a cache hit.
+		op, name := classifySQLStatement(query)
 		if s.sqlOperations != nil {
-			s.sqlOperations.WithLabelValues(classifySQLOp(query)).Inc()
+			s.sqlOperations.WithLabelValues(op).Inc()
 		}
-		return stmtForQueryer(ctx, db, cached).QueryRowContext(ctx, args...)
+		stmt := stmtForQueryer(ctx, db, cached)
+		if s.sqlQueryDuration == nil {
+			return stmt.QueryRowContext(ctx, args...)
+		}
+		start := time.Now()
+		row := stmt.QueryRowContext(ctx, args...)
+		s.sqlQueryDuration.WithLabelValues(op, name).
+			Observe(time.Since(start).Seconds())
+		return row
 	}
 	return db.QueryRowContext(ctx, query, args...)
 }
@@ -232,10 +242,19 @@ func (s *Store) execCached(
 	args ...any,
 ) (sql.Result, error) {
 	if cached, ok := s.lookupCachedStmt(query); ok {
+		op, name := classifySQLStatement(query)
 		if s.sqlOperations != nil {
-			s.sqlOperations.WithLabelValues(classifySQLOp(query)).Inc()
+			s.sqlOperations.WithLabelValues(op).Inc()
 		}
-		return stmtForQueryer(ctx, db, cached).ExecContext(ctx, args...)
+		stmt := stmtForQueryer(ctx, db, cached)
+		if s.sqlQueryDuration == nil {
+			return stmt.ExecContext(ctx, args...)
+		}
+		start := time.Now()
+		result, err := stmt.ExecContext(ctx, args...)
+		s.sqlQueryDuration.WithLabelValues(op, name).
+			Observe(time.Since(start).Seconds())
+		return result, err
 	}
 	return db.ExecContext(ctx, query, args...)
 }

@@ -97,6 +97,86 @@ func TestClassifySQLOp(t *testing.T) {
 	}
 }
 
+// TestClassifySQLStatementName is the table-driven test for the query-name
+// half of classifySQLStatement, the parsing classifySQLOp itself does not
+// need but the query-duration histogram does (to identify a specific slow
+// query rather than only "select is slow in aggregate").
+func TestClassifySQLStatementName(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		query    string
+		wantOp   string
+		wantName string
+	}{
+		{
+			name:     "sqlc insert with name comment",
+			query:    "-- name: InsertNodeSettings :execrows\nINSERT INTO node_settings (id) VALUES (?)",
+			wantOp:   "insert",
+			wantName: "InsertNodeSettings",
+		},
+		{
+			name:     "sqlc select with name comment",
+			query:    "-- name: GetTip :one\nSELECT * FROM sync_state WHERE sync_key = ?",
+			wantOp:   "select",
+			wantName: "GetTip",
+		},
+		{
+			name:     "multiple leading comment lines, name on the first",
+			query:    "-- name: Foo :one\n-- a second comment line\nSELECT 1",
+			wantOp:   "select",
+			wantName: "Foo",
+		},
+		{
+			name:     "leading whitespace before the name comment",
+			query:    "  \n-- name: Foo :one\nSELECT 1",
+			wantOp:   "select",
+			wantName: "Foo",
+		},
+		{
+			name:     "no leading comment at all is unknown, not a guess",
+			query:    "SELECT 1",
+			wantOp:   "select",
+			wantName: "unknown",
+		},
+		{
+			name: "hand-written query with no sqlc annotation is unknown",
+			// Mirrors sumCredentialUtxoStakeQuery (live_stake.go), a
+			// hand-written hot query cached by prepared_stmt.go that has
+			// never carried a "-- name:" comment.
+			query:    "\nSELECT SUM(amount) FROM utxo WHERE credential_tag = ?",
+			wantOp:   "select",
+			wantName: "unknown",
+		},
+		{
+			name:     "PRAGMA reported as other, name unknown",
+			query:    "PRAGMA journal_mode=WAL",
+			wantOp:   "other",
+			wantName: "unknown",
+		},
+		{
+			name:     "comment with no trailing newline has nothing left to classify",
+			query:    "-- name: Foo :one",
+			wantOp:   "other",
+			wantName: "unknown",
+		},
+		{
+			name:     "empty query",
+			query:    "",
+			wantOp:   "other",
+			wantName: "unknown",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			op, name := classifySQLStatement(tc.query)
+			require.Equal(t, tc.wantOp, op)
+			require.Equal(t, tc.wantName, name)
+		})
+	}
+}
+
 // newMigratedSQLiteStoreWithRegistry is newMigratedSQLiteStore plus a real
 // prometheus.Registry wired through Config.PromRegistry, so
 // Store.instrumentedQueryer actually wraps every queryer it hands out in
@@ -266,14 +346,16 @@ func TestImportAccountWithMetricsEnabledStillWritesBaseline(t *testing.T) {
 }
 
 // TestSQLOperationsCounterNilWhenNoRegistry proves instrumentation is a
-// true no-op with no PromRegistry configured: Store.sqlOperations is nil,
-// and instrumentedQueryer must return the plain dialect-translated queryer
-// rather than a countingQueryer wrapping a nil counter (which would panic
-// on the first WithLabelValues call).
+// true no-op with no PromRegistry configured: Store.sqlOperations and
+// Store.sqlQueryDuration are both nil, and instrumentedQueryer must return
+// the plain dialect-translated queryer rather than a countingQueryer
+// wrapping a nil counter or histogram (either of which would panic on the
+// first WithLabelValues call).
 func TestSQLOperationsCounterNilWhenNoRegistry(t *testing.T) {
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	require.Nil(t, store.sqlOperations)
+	require.Nil(t, store.sqlQueryDuration)
 
 	ref := models.NewStakeCredentialRef(0, credentialKeyForIndex(0))
 	err := store.withWriteTransaction(
@@ -284,4 +366,91 @@ func TestSQLOperationsCounterNilWhenNoRegistry(t *testing.T) {
 		},
 	)
 	require.NoError(t, err)
+}
+
+// histogramSampleCount returns the observation count recorded for
+// dingo_database_sql_query_duration_seconds under the given op/query label
+// pair, or 0 if no such series has been observed yet.
+func histogramSampleCount(
+	t *testing.T,
+	reg *prometheus.Registry,
+	op, query string,
+) uint64 {
+	t.Helper()
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	for _, family := range families {
+		if family.GetName() != "dingo_database_sql_query_duration_seconds" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			var gotOp, gotQuery string
+			for _, label := range metric.GetLabel() {
+				switch label.GetName() {
+				case "op":
+					gotOp = label.GetValue()
+				case "query":
+					gotQuery = label.GetValue()
+				}
+			}
+			if gotOp == op && gotQuery == query {
+				return metric.GetHistogram().GetSampleCount()
+			}
+		}
+	}
+	return 0
+}
+
+// TestSQLQueryDurationHistogramObservesCachedAndUncachedQueries is the
+// duration-histogram analog of
+// TestSQLOperationsCounterCountsCachedAndUncachedQueries: it proves
+// dingo_database_sql_query_duration_seconds observes exactly once per
+// statement through both the cached-statement path (queryRowCached, from
+// inside a write transaction wrapped in countingQueryer, exercising the
+// same stmtForQueryer unwrap the counter regression test covers) and the
+// plain instrumentedQueryer path (an uncached INSERT). It also checks the
+// "query" label: sumCredentialUtxoStakeQuery carries no sqlc "-- name:"
+// annotation (it predates the sqlc-generated query set -- see its
+// definition in live_stake.go), so its observations must land under
+// query="unknown", not under some guessed name.
+func TestSQLQueryDurationHistogramObservesCachedAndUncachedQueries(t *testing.T) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	store := newMigratedSQLiteStoreWithRegistry(t, reg)
+	ref := models.NewStakeCredentialRef(0, credentialKeyForIndex(0))
+
+	before := histogramSampleCount(t, reg, "select", "unknown")
+	err := store.withWriteTransaction(
+		nil,
+		func(db queryer, ctx context.Context) error {
+			_, err := store.sumCredentialUtxoStake(ctx, db, ref)
+			return err
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		before+1,
+		histogramSampleCount(t, reg, "select", "unknown"),
+		"expected the cached-statement call to be observed exactly once",
+	)
+
+	beforeInsert := histogramSampleCount(t, reg, "insert", "unknown")
+	require.NoError(t, store.withWriteTransaction(
+		nil,
+		func(db queryer, ctx context.Context) error {
+			_, err := db.ExecContext(
+				ctx,
+				"INSERT INTO sync_state (sync_key, value) VALUES (?, ?)",
+				"metrics_duration_test_key", "1",
+			)
+			return err
+		},
+	))
+	require.Equal(
+		t,
+		beforeInsert+1,
+		histogramSampleCount(t, reg, "insert", "unknown"),
+		"expected the uncached ExecContext call to be observed exactly once",
+	)
 }

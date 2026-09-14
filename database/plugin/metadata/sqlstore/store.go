@@ -87,8 +87,12 @@ type Config struct {
 	// dingo_database_sql_operations_total, a counter of every statement
 	// issued through Store's shared query chokepoint (instrumentedQueryer),
 	// labeled by its best-effort operation classification (see
-	// classifySQLOp in metrics.go). Left nil, instrumentation is a no-op --
-	// the same convention database/plugin/blob/badger uses for its own
+	// classifySQLOp in metrics.go), and
+	// dingo_database_sql_query_duration_seconds, a histogram of each such
+	// statement's wall-clock duration labeled by that same op
+	// classification plus, when known, the sqlc-generated query name (see
+	// classifySQLStatement). Left nil, instrumentation is a no-op -- the
+	// same convention database/plugin/blob/badger uses for its own
 	// promRegistry.
 	PromRegistry prometheus.Registerer
 }
@@ -135,9 +139,10 @@ type Store struct {
 	stmtMu sync.Mutex
 	stmts  map[string]*sql.Stmt
 
-	// sqlOperations is nil when Config.PromRegistry was nil; see
-	// instrumentedQueryer and metrics.go.
-	sqlOperations *prometheus.CounterVec
+	// sqlOperations and sqlQueryDuration are nil when Config.PromRegistry
+	// was nil; see instrumentedQueryer and metrics.go.
+	sqlOperations    *prometheus.CounterVec
+	sqlQueryDuration *prometheus.HistogramVec
 }
 
 // New constructs a shared store around already-opened connection pools.
@@ -199,6 +204,7 @@ func New(config Config) (*Store, error) {
 		reset:                       config.Reset,
 		validateBackup:              config.ValidateBackup,
 		sqlOperations:               newSQLOperationsCounter(config.PromRegistry),
+		sqlQueryDuration:            newSQLQueryDurationHistogram(config.PromRegistry),
 	}, nil
 }
 
@@ -659,19 +665,25 @@ type queryer interface {
 }
 
 // instrumentedQueryer applies dialect translation (newDialectQueryer) and,
-// when Config.PromRegistry was set, statement-count instrumentation
-// (countingQueryer) around db. Every call site that used to call
-// newDialectQueryer directly calls this instead, so
-// dingo_database_sql_operations_total's totals reflect Store's entire SQL
-// surface -- domain queries, committee pruning, deferred-index maintenance,
-// and the hot-statement cache -- from one place, rather than requiring every
-// call site to remember to instrument itself.
+// when Config.PromRegistry was set, statement-count and duration
+// instrumentation (countingQueryer) around db. Every call site that used to
+// call newDialectQueryer directly calls this instead, so
+// dingo_database_sql_operations_total's totals and
+// dingo_database_sql_query_duration_seconds's observations both reflect
+// Store's entire SQL surface -- domain queries, committee pruning,
+// deferred-index maintenance, and the hot-statement cache -- from one
+// place, rather than requiring every call site to remember to instrument
+// itself.
 func (s *Store) instrumentedQueryer(db queryer) queryer {
 	dq := newDialectQueryer(db, s.dialect.Name())
-	if s.sqlOperations == nil {
+	if s.sqlOperations == nil && s.sqlQueryDuration == nil {
 		return dq
 	}
-	return countingQueryer{queryer: dq, counter: s.sqlOperations}
+	return countingQueryer{
+		queryer:  dq,
+		counter:  s.sqlOperations,
+		duration: s.sqlQueryDuration,
+	}
 }
 
 type sqlTxn struct {
