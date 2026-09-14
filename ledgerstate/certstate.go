@@ -1737,17 +1737,47 @@ const (
 	committeeAuthResigned      uint64 = 1
 )
 
-// isResignationPayload reports whether data is a plausible StrictMaybe Anchor:
-// CBOR null, or an array (empty for absent, otherwise the anchor itself).
+// isValidAnchor reports whether data is an anchor: [url, 32-byte hash]. The
+// shape and the hash length match parseConstitution's anchor handling.
+func isValidAnchor(data []byte) bool {
+	anchor, err := decodeRawArray(data)
+	if err != nil || len(anchor) != 2 {
+		return false
+	}
+	var url string
+	if _, err := cbor.Decode(anchor[0], &url); err != nil {
+		return false
+	}
+	var hash []byte
+	if _, err := cbor.Decode(anchor[1], &hash); err != nil {
+		return false
+	}
+	return len(hash) == 32
+}
+
+// isResignationPayload reports whether data is a StrictMaybe Anchor. The
+// accepted forms are CBOR null or an empty array for an absent anchor, a
+// one-element array wrapping an anchor, and the anchor itself. Every other
+// shape is rejected, so a malformed entry such as [1, [1]] reaches the
+// undecodable-entry error path instead of importing as a resignation.
 func isResignationPayload(data []byte) bool {
 	if len(data) == 0 {
 		return false
 	}
-	if data[0] == 0xf6 { // null
+	if data[0] == 0xf6 { // null: absent anchor
 		return true
 	}
-	if _, err := decodeRawArray(data); err == nil {
+	items, err := decodeRawArray(data)
+	if err != nil {
+		return false
+	}
+	switch len(items) {
+	case 0: // empty array: absent anchor
 		return true
+	case 1: // [anchor]
+		return isValidAnchor(items[0])
+	case 2: // the anchor itself
+		return isValidAnchor(data)
 	}
 	return false
 }
