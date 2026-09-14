@@ -19,7 +19,6 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -322,13 +321,13 @@ func TestQueryShelleyUtxoWhole_AbortsEarlyOnFirstFailure(t *testing.T) {
 	// loop can receive (every other row is still parked on <-release),
 	// so this always fires -- deterministically, not racing a clock.
 	testutil.RequireReceive(
-		t, abortObserved, 5*time.Second,
+		t, abortObserved, testutil.AsyncWait,
 		"queryShelleyUtxoWhole must observe the abort",
 	)
 	close(release)
 
 	err = testutil.RequireReceive(
-		t, errCh, 5*time.Second, "queryShelleyUtxoWhole must return",
+		t, errCh, testutil.AsyncWait, "queryShelleyUtxoWhole must return",
 	)
 	require.Error(t, err)
 	// A bound near utxoWholeResolveWorkers, not just under rowCount: only
