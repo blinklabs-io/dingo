@@ -413,6 +413,8 @@ func TestNewReadSnapshotContextDoesNotStraddleDestructiveCommit(t *testing.T) {
 func TestNewReadSnapshotContextWaitsForLogicalDestructiveTransition(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	destructiveCommitDone := make(chan struct{})
 	close(destructiveCommitDone)
 	state := &destructiveReadSnapshotState{

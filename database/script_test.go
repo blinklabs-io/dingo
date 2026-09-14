@@ -23,6 +23,8 @@ import (
 )
 
 func TestGetScript(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 	raw := rawSQLiteMetadataFixture(t, db)
 	hash := lcommon.NewBlake2b224(bytes.Repeat([]byte{0x45}, 28))

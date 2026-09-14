@@ -339,6 +339,8 @@ func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 func TestUtxosWithHistoryLoadsCborAndPreservesExactAddressIdentity(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := openTestDB(t)
 	raw := rawSQLiteMetadataFixture(t, db)
 
@@ -400,6 +402,8 @@ UPDATE utxo SET spent_at_tx_id = ?, deleted_slot = 30 WHERE tx_id = ?`,
 // exact page, then preserve the caller's keyset order when retrieving the
 // remaining exact match.
 func TestUtxosWithHistoryExactAddressLimitFillsPage(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name        string
 		descending  bool
@@ -486,6 +490,8 @@ func TestUtxosWithHistoryExactAddressLimitFillsPage(t *testing.T) {
 // scan returned errExactAddressCandidateScanLimit before reaching targetSlot;
 // fixed-size keyset batches bound per-query work without hiding that match.
 func TestUtxosWithHistoryExactAddressHasNoTotalCandidateCap(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 	raw := rawSQLiteMetadataFixture(t, db)
 
