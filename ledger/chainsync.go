@@ -4190,6 +4190,7 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferred(
 				e.Point,
 			)
 		}
+		headerVerifyStart := time.Now()
 		if !headerAlreadyVerified {
 			verifyErr = ls.verifyBlockHeaderCryptoBeforeApply(e.Block)
 		} else {
@@ -4199,6 +4200,10 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferred(
 				true,
 			)
 		}
+		ls.metrics.observeBlockStage(
+			blockStageHeaderVerify,
+			time.Since(headerVerifyStart),
+		)
 		if verifyErr != nil {
 			if IsHeaderVerificationDeferred(verifyErr) {
 				ls.markDeferredHeaderValidation(e.Point)
