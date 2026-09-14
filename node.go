@@ -1166,7 +1166,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			PromRegistry:        n.config.promRegistry,
 			MaxConnectionsPerIP: n.config.maxConnectionsPerIP,
 			MaxInboundConns:     n.config.maxInboundConns,
-			ConnClosedFunc:      n.handleConnManagerClosed,
+			ConnClosedOwnerFunc: n.handleConnManagerClosedOwner,
 		},
 	)
 	// Wire connection-manager and inbound/outbound connection events.
@@ -1824,8 +1824,7 @@ func (n *Node) handleConnManagerClosed(
 	isNtC bool,
 	_ error,
 ) {
-	// Release both NtC closure waits and NtN notification waits independently
-	// of the protocol receive loop that is running the serving callback.
+	// Release NtC closure waits independently of the protocol receive loop.
 	if o := n.ouroboros(); o != nil {
 		o.ReleaseLeiosServeWaiters(connId)
 	}
@@ -1840,6 +1839,20 @@ func (n *Node) handleConnManagerClosed(
 		// a client that disconnects without a clean Release must not leak
 		// its map entry (blinklabs-io/dingo#382).
 		o.ReleaseLocalStateQueryAcquiredPoint(connId)
+	}
+}
+
+func (n *Node) handleConnManagerClosedOwner(
+	conn *ouroboros.Connection,
+	isNtC bool,
+	err error,
+) {
+	if conn == nil {
+		return
+	}
+	n.handleConnManagerClosed(conn.Id(), isNtC, err)
+	if o := n.ouroboros(); o != nil && conn.LeiosNotify() != nil {
+		o.RemoveLeiosNotifyConnectionOwner(conn.Id(), conn.LeiosNotify().Server)
 	}
 }
 

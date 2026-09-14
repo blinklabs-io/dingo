@@ -195,9 +195,8 @@ type Ouroboros struct {
 	// runs, so Protocol.DoneChan() cannot close underneath it; the release
 	// signal has to come from connmanager's per-connection ErrorChan watcher
 	// instead (see ReleaseLeiosServeWaiters).
-	leiosServeWaiters         map[ouroboros.ConnectionId][]chan struct{}
-	leiosServeWaitersReleased map[ouroboros.ConnectionId]time.Time
-	leiosServeWaitersMu       sync.Mutex
+	leiosServeWaiters   map[ouroboros.ConnectionId][]chan struct{}
+	leiosServeWaitersMu sync.Mutex
 	// NtC CertRB closure-resolution metrics.
 	leiosMetrics *leiosMetrics
 
@@ -465,17 +464,16 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		context.Background(),
 	)
 	o := &Ouroboros{
-		config:                    cfg,
-		registerer:                newTrackingRegisterer(cfg.PromRegistry),
-		eventBus:                  cfg.EventBus,
-		connManager:               cfg.ConnManager,
-		ledgerState:               cfg.LedgerState,
-		leiosAnnouncementLedger:   cfg.LeiosAnnouncementLedger,
-		mempool:                   cfg.Mempool,
-		chainsyncState:            cfg.ChainsyncState,
-		peerGov:                   cfg.PeerGov,
-		blockFetchStarts:          make(map[ouroboros.ConnectionId]time.Time),
-		leiosServeWaitersReleased: make(map[ouroboros.ConnectionId]time.Time),
+		config:                  cfg,
+		registerer:              newTrackingRegisterer(cfg.PromRegistry),
+		eventBus:                cfg.EventBus,
+		connManager:             cfg.ConnManager,
+		ledgerState:             cfg.LedgerState,
+		leiosAnnouncementLedger: cfg.LeiosAnnouncementLedger,
+		mempool:                 cfg.Mempool,
+		chainsyncState:          cfg.ChainsyncState,
+		peerGov:                 cfg.PeerGov,
+		blockFetchStarts:        make(map[ouroboros.ConnectionId]time.Time),
 		localstatequeryAcquiredPoints: make(
 			map[ouroboros.ConnectionId]ledger.QueryPoint,
 		),
@@ -787,9 +785,6 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	if o.leiosVotes != nil {
 		o.leiosVotes.RemoveConnection(leiosConnectionIdString(connId))
 	}
-	// Release the EB log cursor for this connection; frees any log
-	// entries that were only being held for this connection.
-	o.leiosEBLog.removeConn(leiosConnectionIdString(connId))
 	// Drop the per-connection leios-fetch guard. In-flight fetch goroutines
 	// hold their own reference, so they finish safely after this.
 	o.leiosFetchGuards.Delete(connId)
