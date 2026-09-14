@@ -1320,12 +1320,14 @@ Graceful shutdown proceeds in phases:
 
 ```
 Phase 1: Stop accepting new work
-  Chainsync stall recycler (`Recycler.Stop`; shutdown blocks until
-  the recycler goroutine exits, so it cannot still be running once
-  ledger/database teardown begins),
+  Chainsync stall recycler and chain-selected-to-none worker (both
+  context-owned by `n.cancel()`; the latter must finish before the
+  chain selector is stopped, since it reads the selector's state),
+  block forger, leader election, Leios pipeline and vote managers,
+  snapshot manager, database lifecycle manager
+  (`shutdownPhase1ComponentStops`, `node_shutdown.go`),
   Midnight indexer (unsubscribes from BlockEventType),
-  Block forger, leader election, chain selector,
-  peer governor, snapshot manager, database lifecycle manager, UTxO RPC,
+  chain selector, peer governor, UTxO RPC,
   Bark C2/archive server, Midnight gRPC server,
   Blockfrost API, Mesh API, off-chain metadata fetcher,
   CIP-26 token registry sync
@@ -1340,6 +1342,28 @@ Phase 3: Flush state and close database
 Phase 4: Cleanup resources
   Registered shutdown functions
 ```
+
+The phase-1 components enumerated by `shutdownPhase1ComponentStops` each
+wait for a goroutine to exit with no deadline of their own. That list is the
+two context-owned workers followed by `quiesceComponentStops`, the set
+`quiesceForLiveLifecycleOp` stops before live restore/truncate closes storage,
+so both paths stop the same storage-facing components. Each wait is routed
+through `stopWithDeadline` with whatever remains of the one shutdown deadline,
+not a fresh timeout per component, so a goroutine that never observes
+`n.cancel()` cannot hold `Node.Stop` past the configured shutdown timeout with
+no observable error (dingo#1649). The two workers touch node components only
+under `liveLifecycleMu`, which shutdown already holds, so bounding their wait
+cannot race teardown. An unfinished wait escalates to
+`errStorageDrainUnconfirmed` rather than being reported as an ordinary stop
+failure, and makes phase 3 skip the `LedgerState.Close`, database close, and
+plugin host shutdown, since the stuck goroutine may still be using
+`n.ledgerState` or `n.db`. An unconfirmed `LedgerState.Close` skips the last
+two for the same reason. The resources phases 1 and 2 release after this list
+(peer governor, API servers, mempool, EventBus, ConnectionManager) are not
+held by these components or end in a lock-guarded terminal state that rejects
+late callers, so they are not gated. `n.chainSelector.Stop` and
+`peerGov.Stop` are not part of this list: the former only cancels and does
+not wait, and the latter already takes and honors the shutdown context.
 
 `Node.Run` holds a startup lifecycle gate from entry until startup either
 completes or has unwound its LIFO rollback stack. Normal shutdown takes the
@@ -4507,6 +4531,18 @@ and rolls both stores back to the last applied ledger tip, then publishes a
 `chainsync.resync` event with reason `deterministic tx validation recovery` so
 ChainSync obtains a fresh intersection. Other transaction-validation errors
 continue through producer resolution and the unresolved-producer fallback.
+
+`lcommon.MalformedReferenceScriptsError` and
+`lcommon.MalformedScriptWitnessesError` are classified the same way.
+`common.ValidatePlutusScriptsWellFormed` raises both by decoding only the
+failing transaction's own witness scripts and output/collateral-return script
+references against the era's protocol-major version; it never resolves a UTxO
+through `LedgerState`/`LedgerView`, so no local replay of a different UTxO
+history changes either verdict. Left unclassified, such a rejection fell
+through both the at-tip and behind-tip branches, returned `(false, nil)` from
+`tryRecoverFromTxValidationError`, and reached the generic pipeline-restart
+path with the ledger tip unchanged, so the pipeline re-read and re-failed the
+identical block forever (issue #4243).
 
 The rejection itself is never terminal -- what can become terminal is the
 rewind that carries it out, when the chain refuses that rewind for exceeding

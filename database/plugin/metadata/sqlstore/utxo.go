@@ -939,6 +939,47 @@ func (s *Store) getUtxo(
 	return ret, nil
 }
 
+// utxoRefsByTxID looks up every utxo row for the distinct tx_id hashes in
+// refs -- the same tx_id-driven, index-friendly shape queryUtxoStakeRefs
+// uses (see its doc comment and issue #4067) -- and returns them alongside
+// the (tx_id, output_idx) index refs asked for, so the caller can filter the
+// extra rows (other outputs of the same transaction) down to exactly the
+// requested references in Go.
+func (s *Store) utxoRefsByTxID(
+	txn types.Txn,
+	refs []models.UtxoId,
+) ([]models.Utxo, map[string]map[uint32]struct{}, error) {
+	refs = dedupeUtxoIDs(refs)
+	if len(refs) == 0 {
+		return []models.Utxo{}, nil, nil
+	}
+	txIDs, wanted := distinctUtxoTxIDs(refs)
+	ret := []models.Utxo{}
+	// One bind variable per distinct tx_id; 400 keeps this portable to
+	// SQLite's conservative 999-parameter configuration, with headroom to
+	// spare versus the old OR-predicate form's two binds per reference.
+	for start := 0; start < len(txIDs); start += 400 {
+		end := min(start+400, len(txIDs))
+		batch := txIDs[start:end]
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(batch)), ",")
+		args := make([]any, len(batch))
+		for i, txID := range batch {
+			args[i] = txID
+		}
+		utxos, err := s.queryUtxosWithAssets(
+			txn,
+			"tx_id IN ("+placeholders+")",
+			args,
+			"",
+		)
+		if err != nil {
+			return nil, nil, err
+		}
+		ret = append(ret, utxos...)
+	}
+	return ret, wanted, nil
+}
+
 // GetUtxosByRefs retrieves multiple live UTxOs by their (tx_id, output_idx)
 // references in a single batch. Refs with no matching live UTxO are simply
 // absent from the result. A ref repeated in the input yields at most one
@@ -947,23 +988,23 @@ func (s *Store) GetUtxosByRefs(
 	refs []models.UtxoId,
 	txn types.Txn,
 ) ([]models.Utxo, error) {
-	ret := []models.Utxo{}
-	refs = dedupeUtxoIDs(refs)
-	// Two bind variables per reference; 400 keeps this portable to
-	// SQLite's conservative 999-parameter configuration.
-	for start := 0; start < len(refs); start += 400 {
-		end := min(start+400, len(refs))
-		predicate, args := utxoIDPredicate(refs[start:end])
-		utxos, err := s.queryUtxosWithAssets(
-			txn,
-			"deleted_slot = 0 AND ("+predicate+")",
-			args,
-			"",
-		)
-		if err != nil {
-			return nil, err
+	utxos, wanted, err := s.utxoRefsByTxID(txn, refs)
+	if err != nil {
+		return nil, err
+	}
+	ret := make([]models.Utxo, 0, len(utxos))
+	for _, u := range utxos {
+		outs, ok := wanted[string(u.TxId)]
+		if !ok {
+			continue
 		}
-		ret = append(ret, utxos...)
+		if _, ok := outs[u.OutputIdx]; !ok {
+			continue
+		}
+		if u.DeletedSlot != 0 {
+			continue
+		}
+		ret = append(ret, u)
 	}
 	return ret, nil
 }
@@ -979,30 +1020,32 @@ func (s *Store) GetUtxosByRefsAsOf(
 	atSlot uint64,
 	txn types.Txn,
 ) ([]models.Utxo, error) {
-	ret := []models.Utxo{}
-	refs = dedupeUtxoIDs(refs)
-	sqlSlot, err := checkedInt64(atSlot)
+	// Slots are stored as signed SQLite INTEGERs. atSlot is compared in Go
+	// below rather than bound to SQL, so reject an out-of-domain value here
+	// instead of silently matching every live row against it.
+	if _, err := checkedInt64(atSlot); err != nil {
+		return nil, err
+	}
+	utxos, wanted, err := s.utxoRefsByTxID(txn, refs)
 	if err != nil {
 		return nil, err
 	}
-	// Two bind variables per reference, plus the two slot bounds; 400
-	// keeps this portable to SQLite's conservative 999-parameter
-	// configuration, matching GetUtxosByRefs' own chunking.
-	for start := 0; start < len(refs); start += 400 {
-		end := min(start+400, len(refs))
-		predicate, idArgs := utxoIDPredicate(refs[start:end])
-		args := append([]any{sqlSlot, sqlSlot}, idArgs...)
-		utxos, err := s.queryUtxosWithAssets(
-			txn,
-			"added_slot <= ? AND (deleted_slot = 0 OR deleted_slot > ?) AND ("+
-				predicate+")",
-			args,
-			"",
-		)
-		if err != nil {
-			return nil, err
+	ret := make([]models.Utxo, 0, len(utxos))
+	for _, u := range utxos {
+		outs, ok := wanted[string(u.TxId)]
+		if !ok {
+			continue
 		}
-		ret = append(ret, utxos...)
+		if _, ok := outs[u.OutputIdx]; !ok {
+			continue
+		}
+		if u.AddedSlot > atSlot {
+			continue
+		}
+		if u.DeletedSlot != 0 && u.DeletedSlot <= atSlot {
+			continue
+		}
+		ret = append(ret, u)
 	}
 	return ret, nil
 }
