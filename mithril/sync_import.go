@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 	"github.com/blinklabs-io/dingo/internal/node"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledgerstate"
@@ -129,8 +130,38 @@ func updateMithrilReadyState(
 	txn := db.MetadataTxn(true)
 	if err := txn.Do(func(txn *database.Txn) error {
 		if clearSyncState {
+			// ClearSyncState is an unqualified DELETE FROM sync_state, so
+			// every row a completed sync still needs has to be carried
+			// across it explicitly — mithril_ledger_slot and
+			// mithril_ledger_hash below, and the deferred-index marker
+			// here. Mithril sync rebuilds only the critical subset
+			// (BuildCritical, sync.go) and deliberately leaves
+			// deferred.SyncStateKey set so the first serve's maintenance
+			// pass finishes the lazy manifest. Dropping it here erases
+			// that instruction moments after it was written, and the lazy
+			// entries are then never built on a Mithril-bootstrapped
+			// database.
+			deferredIndexesPending, err := db.GetSyncState(
+				deferred.SyncStateKey, txn,
+			)
+			if err != nil {
+				return fmt.Errorf(
+					"reading deferred-index marker: %w", err,
+				)
+			}
 			if err := db.ClearSyncState(txn); err != nil {
 				return fmt.Errorf("cleaning up sync state: %w", err)
+			}
+			if deferredIndexesPending != "" {
+				if err := db.SetSyncState(
+					deferred.SyncStateKey,
+					deferredIndexesPending,
+					txn,
+				); err != nil {
+					return fmt.Errorf(
+						"restoring deferred-index marker: %w", err,
+					)
+				}
 			}
 		} else if syncStatus != "" {
 			if err := db.SetSyncState(
