@@ -1419,7 +1419,7 @@ func TestResetNextEpochNonceReadyAllowsReEmit(t *testing.T) {
 		require.True(t, ok)
 		assert.Equal(t, uint64(10), readyEvent.CurrentEpoch)
 		assert.Equal(t, uint64(11), readyEvent.ReadyEpoch)
-	case <-time.After(time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("expected nonce-ready event after rollback reset")
 	}
 }
@@ -1498,7 +1498,7 @@ func TestDatabaseWorkerPoolBasic(t *testing.T) {
 	case result := <-resultChan:
 		assert.NoError(t, result.Error)
 		assert.Equal(t, int32(1), executedCount.Load())
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("timeout waiting for operation result")
 	}
 
@@ -1532,7 +1532,7 @@ func TestDatabaseWorkerPoolOpFuncPanicReturnsWrappedError(t *testing.T) {
 	case result := <-resultChan:
 		require.ErrorIs(t, result.Error, database.ErrTxnPanic)
 		require.ErrorContains(t, result.Error, "opfunc boom")
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("timeout waiting for operation result")
 	}
 
@@ -1551,7 +1551,7 @@ func TestDatabaseWorkerPoolOpFuncPanicReturnsWrappedError(t *testing.T) {
 	case result := <-okResultChan:
 		require.NoError(t, result.Error)
 		require.Equal(t, int32(1), executedCount.Load())
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("timeout waiting for post-panic operation result")
 	}
 
@@ -1599,7 +1599,7 @@ func TestDatabaseWorkerPoolInFlightOperations(t *testing.T) {
 	// Wait for at least one operation to start processing
 	require.Eventually(t, func() bool {
 		return completedCount.Load() > 0
-	}, 5*time.Second, 5*time.Millisecond, "at least one operation should start")
+	}, testutil.AsyncWait, 5*time.Millisecond, "at least one operation should start")
 
 	// Shutdown the pool - this should wait for all operations to complete
 	pool.Shutdown(5 * time.Second)
@@ -1723,7 +1723,7 @@ func TestDatabaseWorkerPoolSubmitAfterShutdown(t *testing.T) {
 	case result := <-resultChan:
 		assert.Error(t, result.Error)
 		assert.Contains(t, result.Error.Error(), "shut down")
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("timeout waiting for error result")
 	}
 }
@@ -1765,7 +1765,7 @@ func TestDatabaseWorkerPoolShutdownDoesNotPanicWithInFlightOperations(
 	testutil.WaitForCondition(
 		t,
 		func() bool { return inFlight.Load() > 0 },
-		2*time.Second,
+		testutil.AsyncWait,
 		"at least one operation should be running",
 	)
 
@@ -1779,7 +1779,7 @@ func TestDatabaseWorkerPoolShutdownDoesNotPanicWithInFlightOperations(
 
 	select {
 	case <-shutdownDone:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("timeout waiting for Shutdown")
 	}
 }
@@ -1877,7 +1877,7 @@ func TestDatabaseWorkerPoolShutdownTimesOutOnSlowOperation(t *testing.T) {
 
 	select {
 	case <-started:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("timeout waiting for operation to start")
 	}
 
@@ -1901,7 +1901,7 @@ func TestDatabaseWorkerPoolShutdownTimesOutOnSlowOperation(t *testing.T) {
 	close(blockUntil)
 	select {
 	case <-resultChan:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("timeout waiting for stuck operation to finally complete")
 	}
 }
@@ -1941,7 +1941,7 @@ func TestDatabaseWorkerPoolShutdownTimeoutSpawnsNoWaiterGoroutine(
 
 	select {
 	case <-started:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("timeout waiting for operation to start")
 	}
 
@@ -1982,7 +1982,7 @@ func TestDatabaseWorkerPoolShutdownTimeoutSpawnsNoWaiterGoroutine(
 	close(blockUntil)
 	select {
 	case <-resultChan:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("timeout waiting for stuck operation to finally complete")
 	}
 }
@@ -2563,7 +2563,7 @@ func TestEpochRollover_NoDeadlockDuringTransaction(t *testing.T) {
 			require.NoError(t, err)
 		default:
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("deadlock detected - epoch rollover did not complete in time")
 	}
 }
@@ -2732,7 +2732,7 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 			int32(0),
 			"readers should have been able to read during transaction",
 		)
-	case <-time.After(10 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("timeout - possible deadlock with concurrent readers")
 	}
 }
@@ -2972,10 +2972,142 @@ func TestLoadMithrilTrustBoundaryLoadsPersistedHash(t *testing.T) {
 		},
 	}
 
-	ls.loadMithrilTrustBoundary()
+	err := ls.loadMithrilTrustBoundary()
 
+	require.NoError(t, err)
 	require.Equal(t, uint64(42), ls.mithrilLedgerSlot)
 	require.Equal(t, boundaryHash, ls.mithrilLedgerHash)
+}
+
+// TestLoadMithrilTrustBoundaryAbsentKeyStartsNotMithril proves that an
+// absent mithril_ledger_slot sync-state key (a non-Mithril-bootstrapped DB)
+// starts cleanly with no error.
+func TestLoadMithrilTrustBoundaryAbsentKeyStartsNotMithril(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	err := ls.loadMithrilTrustBoundary()
+
+	require.NoError(t, err)
+	require.Equal(t, uint64(0), ls.mithrilLedgerSlot)
+}
+
+// TestLoadMithrilTrustBoundaryMalformedSlotReturnsError: a malformed
+// mithril_ledger_slot value must fail ledger start rather than being
+// silently ignored as "not a Mithril DB". Before the fix,
+// this only logged a Warn and left mithrilLedgerSlot at its zero value,
+// which disables the gap-nonce heal (heal_mithril_gap_nonce.go) and removes
+// the Mithril boundary exemption, so header verification later fails a
+// VRF/nonce check that blames peers instead of surfacing the real cause.
+func TestLoadMithrilTrustBoundaryMalformedSlotReturnsError(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	require.NoError(t, db.SetSyncState(
+		mithrilLedgerSlotSyncKey,
+		"x",
+		nil,
+	))
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	err := ls.loadMithrilTrustBoundary()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mithril_ledger_slot")
+	assert.Equal(t, uint64(0), ls.mithrilLedgerSlot)
+}
+
+// TestLoadMithrilTrustBoundaryReadErrorReturnsError: a sync_state database
+// read error must fail ledger start rather than being silently ignored as
+// "not a Mithril DB".
+func TestLoadMithrilTrustBoundaryReadErrorReturnsError(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	require.NoError(t, db.SetSyncState(
+		mithrilLedgerSlotSyncKey,
+		"42",
+		nil,
+	))
+	// Close the metadata store so the subsequent GetSyncState read fails
+	// deterministically, mirroring the pattern used in
+	// TestDeleteDeferredMarkerUnlessReadmitted_RestoreFailurePropagates.
+	require.NoError(t, db.Metadata().Close())
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	err := ls.loadMithrilTrustBoundary()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Mithril trust boundary")
+	assert.Equal(t, uint64(0), ls.mithrilLedgerSlot)
+}
+
+// TestLoadMithrilTrustBoundaryEmptyRecordedSlotReturnsError: GetSyncState
+// reports an absent key as "", so a mithril_ledger_slot row that exists and
+// holds nothing must not be read as "not a Mithril DB". Every other
+// fail-closed reader of the key (Database.MithrilTrustBoundarySlotStrict,
+// the sqlstore minted-block floor, koiosparity) already rejects it.
+func TestLoadMithrilTrustBoundaryEmptyRecordedSlotReturnsError(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	require.NoError(t, db.SetSyncState(mithrilLedgerSlotSyncKey, "", nil))
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	err := ls.loadMithrilTrustBoundary()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mithril_ledger_slot")
+	assert.Equal(t, uint64(0), ls.mithrilLedgerSlot)
+}
+
+// TestLedgerStateStartFailsOnMalformedMithrilTrustBoundary pins the
+// propagation out of Start: a loader error must abort ledger startup, not
+// be discarded at the call site.
+func TestLedgerStateStartFailsOnMalformedMithrilTrustBoundary(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	require.NoError(t, db.SetSyncState(mithrilLedgerSlotSyncKey, "x", nil))
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+		PromRegistry:      prometheus.NewRegistry(),
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	t.Cleanup(ls.publishCancel)
+
+	err = ls.Start(t.Context())
+
+	require.ErrorContains(t, err, "Mithril trust boundary")
+	require.ErrorContains(t, err, "mithril_ledger_slot")
+	assert.Equal(t, uint64(0), ls.mithrilLedgerSlot)
 }
 
 func TestIntersectPointsIncludesPersistedMithrilBoundaryWhenRecentPointsEmpty(
@@ -5096,7 +5228,7 @@ func TestCloseDoesNotHoldBlockfetchContinuationMutexWhileWaiting(t *testing.T) {
 	require.Eventually(
 		t,
 		ls.closed.Load,
-		time.Second,
+		testutil.AsyncWait,
 		time.Millisecond,
 		"Close did not begin before releasing the continuation mutex",
 	)
@@ -5107,7 +5239,7 @@ func TestCloseDoesNotHoldBlockfetchContinuationMutexWhileWaiting(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		schedulingDone,
-		time.Second,
+		testutil.AsyncWait,
 		"Close did not release blockfetchContinuationMu before waiting",
 	)
 	require.True(
@@ -5123,7 +5255,7 @@ func TestCloseDoesNotHoldBlockfetchContinuationMutexWhileWaiting(t *testing.T) {
 	err := testutil.RequireReceive(
 		t,
 		closeDone,
-		5*time.Second,
+		testutil.AsyncWait,
 		"Close did not finish after the continuation worker drained",
 	)
 	require.NoError(t, err)
@@ -5175,7 +5307,11 @@ func TestCloseReplayReturnsWhenPreviousCloseIsStillRunning(t *testing.T) {
 	ls := &LedgerState{closeDone: make(chan struct{})}
 	err := ls.Close()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "previous ledger state close still in progress")
+	assert.Contains(
+		t,
+		err.Error(),
+		"previous ledger state close still in progress",
+	)
 }
 
 // TestCloseStopsDecodePipelineBeforeWaitingForBlockProcessing covers the

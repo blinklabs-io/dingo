@@ -25,8 +25,8 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
-	_ "github.com/glebarez/go-sqlite"
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
 )
 
 // preprod tip and shape from issue #2756: 648,758 auth_committee_hot rows for
@@ -180,7 +180,7 @@ func applyAuthCertificate(
 		ocommon.Point{Slot: slot, Hash: credentialHash(0x99)},
 		0,
 		nil,
-		allowUnknownDeposits,
+		requireKnownDeposits,
 	)
 	require.NoError(t, err)
 }
@@ -222,21 +222,29 @@ func TestAuthCommitteeHotTransactionDrainsMultipleBatches(t *testing.T) {
 		&lcommon.AuthCommitteeHotCertificate{
 			CertType: uint(lcommon.CertificateTypeAuthCommitteeHot),
 			ColdCredential: lcommon.Credential{
-				CredType: uint(coldTag), Credential: lcommon.NewBlake2b224(cold),
+				CredType: uint(
+					coldTag,
+				), Credential: lcommon.NewBlake2b224(cold),
 			},
 			HotCredential: lcommon.Credential{
-				CredType:   lcommon.CredentialTypeAddrKeyHash,
-				Credential: lcommon.NewBlake2b224(hotHash(0x73, 2*committeeAuthPruneBatch+1)),
+				CredType: lcommon.CredentialTypeAddrKeyHash,
+				Credential: lcommon.NewBlake2b224(
+					hotHash(0x73, 2*committeeAuthPruneBatch+1),
+				),
 			},
 		},
 		&lcommon.AuthCommitteeHotCertificate{
 			CertType: uint(lcommon.CertificateTypeAuthCommitteeHot),
 			ColdCredential: lcommon.Credential{
-				CredType: uint(coldTag), Credential: lcommon.NewBlake2b224(cold),
+				CredType: uint(
+					coldTag,
+				), Credential: lcommon.NewBlake2b224(cold),
 			},
 			HotCredential: lcommon.Credential{
-				CredType:   lcommon.CredentialTypeAddrKeyHash,
-				Credential: lcommon.NewBlake2b224(hotHash(0x73, 2*committeeAuthPruneBatch+2)),
+				CredType: lcommon.CredentialTypeAddrKeyHash,
+				Credential: lcommon.NewBlake2b224(
+					hotHash(0x73, 2*committeeAuthPruneBatch+2),
+				),
 			},
 		},
 	}
@@ -245,7 +253,7 @@ func TestAuthCommitteeHotTransactionDrainsMultipleBatches(t *testing.T) {
 		newDialectQueryer(store.writeDB, store.dialect.Name()),
 		1, certificates,
 		ocommon.Point{Slot: preprodTipSlot, Hash: credentialHash(0x99)},
-		0, nil, allowUnknownDeposits,
+		0, nil, requireKnownDeposits,
 	)
 	require.NoError(t, err)
 	// Two certificate calls remove two bounded batches and retain the newest
@@ -349,7 +357,11 @@ func TestCommitteeHotPruningBoundsEachDeleteCall(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, int64(committeeAuthPruneBatch), pruned)
-	require.Equal(t, committeeAuthPruneBatch, authRowCountFor(t, store, coldTag, cold))
+	require.Equal(
+		t,
+		committeeAuthPruneBatch,
+		authRowCountFor(t, store, coldTag, cold),
+	)
 }
 
 // TestAuthCommitteeHotPruningKeepsTallyIdenticalAtPreprodScale builds the
@@ -357,7 +369,9 @@ func TestCommitteeHotPruningBoundsEachDeleteCall(t *testing.T) {
 // of authorizations -- and proves GetActiveCommitteeMembers returns exactly
 // the same tally after pruning as before it. See preprodAuthsPerMember for
 // the full-size measurement.
-func TestAuthCommitteeHotPruningKeepsTallyIdenticalAtPreprodScale(t *testing.T) {
+func TestAuthCommitteeHotPruningKeepsTallyIdenticalAtPreprodScale(
+	t *testing.T,
+) {
 	t.Parallel()
 	store := newManagementTestStore(t)
 	const coldTag = uint8(lcommon.CredentialTypeAddrKeyHash)
@@ -448,7 +462,9 @@ INSERT INTO auth_committee_hot (
 	after := authRowCount(t, store)
 	t.Logf(
 		"auth_committee_hot rows after pruning: %d (deleted %d, %.2f%% removed)",
-		after, total, 100*float64(before-after)/float64(before),
+		after,
+		total,
+		100*float64(before-after)/float64(before),
 	)
 	require.Less(t, after, before/100, "pruning must bound the table")
 
@@ -528,7 +544,9 @@ func TestAuthCommitteeHotPruningKeepsResignationSuppression(t *testing.T) {
 // reason the retention rule is not simply "keep the latest row". A rollback
 // undoes the authorization that superseded the older ones, and the row that
 // becomes current again must still be there.
-func TestAuthCommitteeHotPruningSurvivesRollbackAcrossPrunedBoundary(t *testing.T) {
+func TestAuthCommitteeHotPruningSurvivesRollbackAcrossPrunedBoundary(
+	t *testing.T,
+) {
 	t.Parallel()
 	const coldTag = uint8(lcommon.CredentialTypeAddrKeyHash)
 	cold := credentialHash(0xc2)

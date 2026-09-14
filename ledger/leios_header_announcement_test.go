@@ -24,7 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
-	"github.com/blinklabs-io/gouroboros"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -108,9 +108,9 @@ func announcingHeader(
 // half of the crypto gate on the header stream.
 //
 // chainsyncHeaderCryptoPolicy admits a roll-forward header without verifying
-// its VRF/KES on three paths: live validation not yet enabled, a slot covered
-// by an imported Mithril snapshot, and no cached epoch nonce for the slot
-// (verification deferred to blockfetch). All three reach
+// its VRF/KES on two paths: a slot covered by an imported Mithril snapshot and
+// no cached epoch nonce for the slot (verification deferred to blockfetch).
+// Both reach
 // chain.AddBlockHeader, not AddVerifiedBlockHeader. Announcing such a header
 // would let a chainsync peer make this node sign and publish a BLS vote for a
 // ranking block it never authenticated, taking the (slot, voterId) pair the
@@ -130,14 +130,11 @@ func TestChainsyncHeaderAdmissionAnnouncesOnlyWhenCryptoVerified(
 	// bypassed merely because live validation is disabled.
 	t.Run("unverified admission is queued, not announced", func(t *testing.T) {
 		fixture := newHeaderStreamLedger(t)
-		fixture.ls.Lock()
-		fixture.ls.mithrilLedgerSlot = header.slot
-		fixture.ls.Unlock()
 		verifyNow, trusted := fixture.ls.chainsyncHeaderCryptoPolicy(
 			header.slot,
 		)
 		require.False(t, verifyNow, "fixture must exercise the unverified path")
-		require.True(t, trusted)
+		require.False(t, trusted)
 
 		require.NoError(
 			t,
@@ -178,7 +175,7 @@ func TestChainsyncHeaderAdmissionAnnouncesOnlyWhenCryptoVerified(
 		evt := testutil.RequireReceive(
 			t,
 			fixture.ch,
-			2*time.Second,
+			testutil.AsyncWait,
 			"announcement published from verified header admission",
 		)
 		data, ok := evt.Data.(chain.ChainHeaderAnnouncementEvent)
@@ -237,14 +234,14 @@ func TestChainsyncHeaderQueueClearedInvalidatesAnnouncement(t *testing.T) {
 	)
 
 	announcement := testutil.RequireReceive(
-		t, fixture.ch, 2*time.Second, "announcement",
+		t, fixture.ch, testutil.AsyncWait, "announcement",
 	)
 	announced, ok := announcement.Data.(chain.ChainHeaderAnnouncementEvent)
 	require.True(t, ok, "got %T", announcement.Data)
 	assert.Equal(t, announcing.hash, announced.RbHash)
 
 	invalidation := testutil.RequireReceive(
-		t, fixture.ch, 2*time.Second, "invalidation for the discarded header",
+		t, fixture.ch, testutil.AsyncWait, "invalidation for the discarded header",
 	)
 	invalid, ok := invalidation.Data.(chain.ChainHeaderInvalidationEvent)
 	require.True(t, ok, "got %T", invalidation.Data)
@@ -340,7 +337,7 @@ func TestForkResolutionAnnouncesOnlyTheVerifiedIncomingHeader(t *testing.T) {
 			// The rollback's invalidation precedes anything the fork
 			// resolution queued after it.
 			invalidation := testutil.RequireReceive(
-				t, ch, 2*time.Second, "rollback invalidation",
+				t, ch, testutil.AsyncWait, "rollback invalidation",
 			)
 			invalid, ok := invalidation.Data.(chain.ChainHeaderInvalidationEvent)
 			require.True(t, ok, "got %T", invalidation.Data)
@@ -357,7 +354,7 @@ func TestForkResolutionAnnouncesOnlyTheVerifiedIncomingHeader(t *testing.T) {
 			}
 
 			announcement := testutil.RequireReceive(
-				t, ch, 2*time.Second, "announcement from fork resolution",
+				t, ch, testutil.AsyncWait, "announcement from fork resolution",
 			)
 			announced, ok := announcement.Data.(chain.ChainHeaderAnnouncementEvent)
 			require.True(t, ok, "got %T", announcement.Data)
@@ -446,7 +443,11 @@ func newChainsyncRollbackFixtureWithBus(
 	ancestorNonce := []byte("nonce-ancestor")
 	currentNonce := []byte("nonce-current")
 	require.NoError(t, db.SetBlockNonce(
-		ancestorTip.Point.Hash, ancestorTip.Point.Slot, ancestorNonce, true, nil,
+		ancestorTip.Point.Hash,
+		ancestorTip.Point.Slot,
+		ancestorNonce,
+		true,
+		nil,
 	))
 	require.NoError(t, db.SetBlockNonce(
 		currentTip.Point.Hash, currentTip.Point.Slot, currentNonce, false, nil,
@@ -496,7 +497,7 @@ func TestConnectionClosedPublishesHeaderInvalidation(t *testing.T) {
 	assert.Zero(t, fixture.ls.chain.HeaderCount())
 
 	announcement := testutil.RequireReceive(
-		t, fixture.ch, 2*time.Second, "announcement",
+		t, fixture.ch, testutil.AsyncWait, "announcement",
 	)
 	announced, ok := announcement.Data.(chain.ChainHeaderAnnouncementEvent)
 	require.True(t, ok, "got %T", announcement.Data)
@@ -505,7 +506,7 @@ func TestConnectionClosedPublishesHeaderInvalidation(t *testing.T) {
 	invalidation := testutil.RequireReceive(
 		t,
 		fixture.ch,
-		2*time.Second,
+		testutil.AsyncWait,
 		"invalidation published without any later event",
 	)
 	invalid, ok := invalidation.Data.(chain.ChainHeaderInvalidationEvent)
@@ -538,7 +539,7 @@ func TestBlockfetchTimeoutDrainsHeaderSequencer(t *testing.T) {
 	evt := testutil.RequireReceive(
 		t,
 		fixture.ch,
-		2*time.Second,
+		testutil.AsyncWait,
 		"header events published without any later event",
 	)
 	announced, ok := evt.Data.(chain.ChainHeaderAnnouncementEvent)

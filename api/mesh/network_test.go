@@ -307,7 +307,12 @@ func TestRequestRequiresSingleJSONValue(t *testing.T) {
 					h := newTestHandler(t, newTestDeps())
 					rec := postRaw(t, h, route.path, route.body+tc.suffix)
 					if tc.valid {
-						require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+						require.Equal(
+							t,
+							http.StatusOK,
+							rec.Code,
+							rec.Body.String(),
+						)
 					} else {
 						requireMeshError(t, rec, ErrInvalidRequest, http.StatusBadRequest)
 					}

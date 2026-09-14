@@ -165,7 +165,9 @@ func newRemoteRestoreHost(
 				badger.WithDataDir(blobDir),
 				badger.WithDeferOpen(),
 				badger.WithGc(false),
-				badger.WithValueLogFileSize(testutil.TestBadgerValueLogFileSize),
+				badger.WithValueLogFileSize(
+					testutil.TestBadgerValueLogFileSize,
+				),
 				badger.WithMemTableSize(testutil.TestBadgerMemTableSize),
 			)
 			if err != nil {
@@ -303,7 +305,11 @@ func runRemoteRestoreFailureRollback(
 		snapshotDir,
 		filepath.Join(t.TempDir(), "local-staging-target"),
 		nil,
-		lifecycle.RestoreStorageConfig{},
+		// newRemoteRestoreHost's blob provider takes struct{} as its
+		// config type and hardcodes the bounded test sizes itself, so a
+		// non-empty storageConfig.Blob here would fail strict decoding
+		// into struct{} rather than reach the store.
+		lifecycle.RestoreStorageConfig{}, // restoreconfig:zero-value-required
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), wantError)
@@ -376,7 +382,11 @@ func TestRestoreRecoverableRetainsHandleWhenAutomaticRollbackFails(
 		snapshotDir,
 		filepath.Join(t.TempDir(), "local-staging-target"),
 		nil,
-		lifecycle.RestoreStorageConfig{},
+		// newRemoteRestoreHost's blob provider takes struct{} as its
+		// config type and hardcodes the bounded test sizes itself, so a
+		// non-empty storageConfig.Blob here would fail strict decoding
+		// into struct{} rather than reach the store.
+		lifecycle.RestoreStorageConfig{}, // restoreconfig:zero-value-required
 	)
 	require.ErrorIs(t, err, lifecycle.ErrRestoreRollbackPending)
 	require.NotNil(t, recovery)
@@ -478,7 +488,11 @@ func TestRestoreSuccessfulRemoteReplacementRemainsRecoverableUntilCommit(
 		snapshotDir,
 		filepath.Join(t.TempDir(), "local-staging-target"),
 		nil,
-		lifecycle.RestoreStorageConfig{},
+		// newRemoteRestoreHost's blob provider takes struct{} as its
+		// config type and hardcodes the bounded test sizes itself, so a
+		// non-empty storageConfig.Blob here would fail strict decoding
+		// into struct{} rather than reach the store.
+		lifecycle.RestoreStorageConfig{}, // restoreconfig:zero-value-required
 	)
 	require.NoError(t, err)
 

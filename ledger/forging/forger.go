@@ -2148,18 +2148,14 @@ func (f *BlockForger) checkOpCertSequence(
 // lower of the two, so a node whose pipeline is behind is measured as behind
 // rather than credited with headers it has admitted but not applied.
 func (f *BlockForger) upstreamSyncSkipsForge(
-	currentSlot, tipSlot, upstreamTip uint64,
+	_, tipSlot, upstreamTip uint64,
 ) bool {
 	if upstreamTip == 0 {
-		// The tip-ahead gate above returns for currentSlot < parentSlot,
-		// and parentSlot is max(tipSlot, primaryTip.Slot) >= tipSlot, so
-		// currentSlot >= tipSlot here; the equal case is contested and
-		// handled before this point. Guard the subtraction anyway so a
-		// future reordering of the gates cannot turn this into a wrap.
-		if currentSlot <= tipSlot {
-			return false
-		}
-		return currentSlot-tipSlot > f.forgeSyncToleranceSlots
+		// An unpublished target is not evidence that a peer is ahead. The
+		// wall-clock slot can be arbitrarily far past our tip during an
+		// ordinary network gap, so comparing it with tipSlot would reject
+		// valid leader slots on an otherwise current node (issue #4201).
+		return false
 	}
 	return upstreamTip > tipSlot &&
 		upstreamTip-tipSlot > f.forgeSyncToleranceSlots
