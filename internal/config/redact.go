@@ -293,7 +293,7 @@ var providerConfigPlainKeys = []string{
 	// mempool
 	"capacity", "evictionwatermark", "rejectionwatermark",
 	"revalidationdeltacap",
-	// api/{blockfrost,mesh,utxorpc} TLS policy keys
+	// api/{blockfrost,kupo,mesh,utxorpc} TLS policy keys
 	"mode", "certfilepath", "keyfilepath",
 }
 

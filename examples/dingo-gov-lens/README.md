@@ -1,8 +1,8 @@
 # Dingo Gov Lens
 
 Dingo Gov Lens is a standalone Preview governance dashboard backed by Dingo's
-Postgres metadata store. It does not call Dingo's Blockfrost, Mesh, or UTxO RPC
-APIs. The app reads governance rows directly from Postgres through a small
+Postgres metadata store. It does not call Dingo's Blockfrost, Kupo, Mesh, or UTxO
+RPC APIs. The app reads governance rows directly from Postgres through a small
 read-only Go web server.
 
 The example is intentionally isolated from the root Dingo module. Its

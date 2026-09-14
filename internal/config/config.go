@@ -851,8 +851,8 @@ type APIPluginsConfig struct {
 }
 
 // APIConfig holds the shared TLS policy defaults
-// applied to every selected plugins.api.* provider (Blockfrost, Mesh,
-// UTxORPC) unless that provider's own plugins.api.<name>.config.tls
+// applied to every selected plugins.api.* provider (Blockfrost, Kupo,
+// Mesh, UTxORPC) unless that provider's own plugins.api.<name>.config.tls
 // overrides a field. See ARCHITECTURE.md's "API security" section and
 // internal/apiconfig for the merge/validation rules; composition (node.go)
 // performs the actual per-provider merge, not this package.

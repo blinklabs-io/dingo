@@ -388,7 +388,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 
 	// The shared api.tls mode enum is checked here so a typo is
 	// caught once, with a single clear message, rather than surfacing
-	// identically from every one of the three API providers that inherit
+	// identically from every one of the four API providers that inherit
 	// it. Certificate/key presence is deliberately NOT
 	// checked here: a provider legitimately may supply only its own
 	// certFilePath/keyFilePath while inheriting just `mode: server` from

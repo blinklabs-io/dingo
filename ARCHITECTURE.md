@@ -1222,10 +1222,10 @@ When `Node.Run()` is called, components are initialized in this order:
 22. Blockfrost API (if API storage mode and port configured)
 23. Kupo API (if API storage mode and port configured)
 24. Mesh API (if API storage mode and port configured)
-24. Off-chain metadata fetcher (if API storage mode)
-25. CIP-26 token registry sync (if API storage mode and tokenRegistry.enabled)
-26. Block forger + leader election (if block producer mode)
-27. Wait for shutdown signal
+25. Off-chain metadata fetcher (if API storage mode)
+26. CIP-26 token registry sync (if API storage mode and tokenRegistry.enabled)
+27. Block forger + leader election (if block producer mode)
+28. Wait for shutdown signal
 ```
 
 Mempool revalidation uses a private candidate overlay while admissions and
@@ -6678,6 +6678,16 @@ route returns an exact point or its nearest canonical ancestor, which lets
 Kupo clients validate cursor bounds without Dingo maintaining a second
 checkpoint lifecycle.
 
+**Metadata answers the block at or after the slot.** Kupo resolves
+`/metadata/{slot_no}` by taking the latest checkpoint strictly below `slot_no`
+and fetching the block that immediately follows that point, and it records one
+checkpoint per block. Where `slot_no` holds a block that is the block itself;
+where it does not, it is the next block on chain. `NodeAdapter.Metadata`
+therefore selects the first canonical block whose slot is at least `slot_no`,
+so an empty slot returns the same metadata and `X-Block-Header-Hash` a Kupo
+client would receive. A slot past the newest indexed block has no answer and
+returns `400`, matching Kupo error status for an unresolvable point.
+
 **Reads are snapshot-coordinated.** Every data route opens a coordinated read
 snapshot through `database.NewReadSnapshotContext`, so a response body and the
 tip reported in its `X-Most-Recent-Checkpoint`/`ETag` headers come from one
@@ -6694,13 +6704,19 @@ unbounded work:
   details only for the page in hand, checks `ctx.Err()` between rows, and the
   handler flushes every 128 encoded matches, so a `*`-pattern query over a full
   chain streams in bounded memory instead of materializing a result set.
-- `/metadata/{slot_no}` walks back to the newest canonical ancestor whose CBOR
-  is still retained, because the point index survives history expiry while the
-  block CBOR does not. History expiry is contiguous, so a slot below the
-  retention floor has no readable ancestor and an unbounded walk would step to
-  genesis doing a point lookup and a block read per block. The walk is bounded
-  by `maxMetadataAncestorWalk` and honors cancellation, answering such a
-  request as "no indexed ancestor" for a bounded cost.
+- Slot lookups avoid reverse blob iteration. `/metadata/{slot_no}` resolves its
+  block with a forward seek (`database.BlockPointAtOrAfterSlotTxn`), and the
+  non-strict `/checkpoints/{slot_no}` binary-searches the ordered block index
+  bounded by the snapshot tip block
+  (`database.BlockPointAtOrBeforeSlotBoundedTxn`). Neither opens a reverse blob
+  iterator, which the `s3` and `gcs` plugins implement by listing every key
+  under the prefix into a temporary file before the seek runs: on those stores
+  a single reverse at-or-before lookup costs one full listing of the block
+  keyspace, so step counting alone would not bound the work. The metadata path
+  also reports an expired target as unavailable instead of walking to a
+  retained neighbour, since history expiry is contiguous from genesis and any
+  other block carries different metadata under a different
+  `X-Block-Header-Hash`.
 
 ### Blockfrost API (`api/blockfrost/`)
 
@@ -10008,7 +10024,7 @@ Key configuration areas:
 - Off-chain metadata fetcher interval, request timeout, IPFS gateway, batch
   size, response cap, and private-address policy
 - Block producer credentials (VRF key, KES key, operational certificate)
-- External interface ports (Blockfrost, Mesh, UTxO RPC, Bark)
+- External interface ports (Blockfrost, Kupo, Mesh, UTxO RPC, Bark)
 
 ### Node Settings Gate Enforcement
 

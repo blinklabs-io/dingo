@@ -1045,7 +1045,7 @@ func WithCardanoNodeConfig(
 }
 
 // WithBindAddr specifies the IP address used by relay, metrics, and public
-// Blockfrost, Mesh, and UTxO RPC listeners. The default is 0.0.0.0.
+// Blockfrost, Kupo, Mesh, and UTxO RPC listeners. The default is 0.0.0.0.
 func WithBindAddr(addr string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BindAddr = addr
@@ -1144,8 +1144,8 @@ func WithUtxorpcPort(port uint) ConfigOptionFunc {
 }
 
 // WithAPIConfig sets the shared api.tls policy applied to every
-// selected plugins.api.* provider (Blockfrost, Mesh, UTxORPC) unless that
-// provider's own plugins.api.<name>.config.tls overrides a field.
+// selected plugins.api.* provider (Blockfrost, Kupo, Mesh, UTxORPC) unless
+// that provider's own plugins.api.<name>.config.tls overrides a field.
 // See internal/apiconfig and ARCHITECTURE.md's "API security" section.
 func WithAPIConfig(cfg internalconfig.APIConfig) ConfigOptionFunc {
 	return func(c *Config) {
