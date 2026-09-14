@@ -788,6 +788,20 @@ That includes the critical rebuild: it is the last step before `serve` clears
 `sync_status` and the node accepts API writes, while the full rebuild that
 clears the pending marker can run as background maintenance long afterwards.
 
+The child column of an `ON DELETE CASCADE` foreign key whose parent rows the
+rollback path deletes is classified critical rather than lazy, which is the
+same rule at a different point in the cycle. The rollback sweep's
+`DELETE FROM "transaction" WHERE slot > ?` cascades into `utxo`, and SQLite
+enforces that cascade with an implicit
+`DELETE FROM utxo WHERE transaction_id = ?` per deleted parent row, so
+`idx_utxo_transaction_id` has to be resident from the moment the database is
+marked ready: a rollback can run as soon as live sync resumes, and without the
+index each deleted transaction scans the whole `utxo` table.
+`EXPLAIN QUERY PLAN` of the parent statement does not show this — it reports
+only the indexed search over `transaction`. InnoDB requires an index on every
+foreign-key child column and refuses to drop it, so only the SQLite (and
+PostgreSQL) dialects can reach the state where it is missing.
+
 Excluding an index from the manifest does not restore it on databases already
 on disk: a binary whose manifest still carried it dropped it at the start of a
 bulk-load cycle and recreates it only in the full rebuild, and the
