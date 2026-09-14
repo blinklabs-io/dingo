@@ -66,8 +66,19 @@ func (n *Node) validateBlockProducerStartup() (*forging.PoolCredentials, error) 
 
 func (n *Node) validateBlockProducerStartupAtSlot(
 	currentSlot uint64,
-) (*forging.PoolCredentials, error) {
-	creds := forging.NewPoolCredentials()
+) (creds *forging.PoolCredentials, retErr error) {
+	creds = forging.NewPoolCredentials()
+	agentBacked := n.config.shelleyKESAgentSocket != ""
+	if agentBacked {
+		// Agent startup installs the client before the remaining credential
+		// validation below. Do not leave that client and its serve-key loop
+		// running when a later validation step rejects the credentials.
+		defer func() {
+			if retErr != nil {
+				n.closeKESAgentClient()
+			}
+		}()
+	}
 	if n.config.shelleyKESAgentSocket != "" {
 		if err := n.loadBlockProducerCredentialsFromAgent(
 			creds,
