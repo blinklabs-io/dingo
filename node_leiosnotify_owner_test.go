@@ -177,6 +177,19 @@ func TestHandleConnManagerClosedOwnerKeepsReplacementLeiosNotifyDelivery(t *test
 		}()
 		localResult := testutil.RequireReceive(t, localCh, 10*time.Second, "local Ouroboros handshake")
 		peerResult := testutil.RequireReceive(t, peerCh, 10*time.Second, "peer Ouroboros handshake")
+		// Supplied error channels remain caller-owned. Close waits for the
+		// connection's senders before the fixture can close those channels and
+		// release the connection manager's error watchers.
+		t.Cleanup(func() {
+			if localResult.conn != nil {
+				_ = localResult.conn.Close()
+				close(localErrors)
+			}
+			if peerResult.conn != nil {
+				_ = peerResult.conn.Close()
+				close(peerErrors)
+			}
+		})
 		assert.NoError(t, localResult.err, "local Ouroboros connection")
 		assert.NoError(t, peerResult.err, "peer Ouroboros connection")
 		for name, errors := range map[string]chan error{
