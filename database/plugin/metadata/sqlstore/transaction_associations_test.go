@@ -64,6 +64,17 @@ func collateralProductionFlow(t *testing.T, store *Store, db *sql.DB) {
 		require.NotNil(t, got)
 		require.Len(t, got.Collateral, 1)
 	}
+	// Both transactions are valid, so the collateral they name is recorded but
+	// never consumed: only a phase-2 script failure spends collateral, and that
+	// is the ledger's decision rather than the indexer's.
+	var spentAt []byte
+	var deletedSlot sql.NullInt64
+	require.NoError(t, db.QueryRow(store.dialect.Rebind(
+		"SELECT spent_at_tx_id, deleted_slot FROM utxo WHERE tx_id = ?",
+	), input.Id().Bytes()).Scan(&spentAt, &deletedSlot))
+	require.Nil(t, spentAt)
+	require.Zero(t, deletedSlot.Int64)
+
 	require.NoError(t, store.DeleteTransactionsAfterSlot(10, nil))
 	var associationCount int
 	require.NoError(t, db.QueryRow(store.dialect.Rebind("SELECT COUNT(*) FROM utxo_collateral_input WHERE transaction_hash = ?"), txA.Hash().Bytes()).Scan(&associationCount))

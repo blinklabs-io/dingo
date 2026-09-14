@@ -37,8 +37,8 @@ func TestCollateralInputMigrationBackfillsLegacyMarker(t *testing.T) {
 		runner := migrations.Runner{DB: db, Dialect: "sqlite", Registry: registry, Locker: migrations.NewProcessLocker()}
 		require.NoError(t, runner.Run(context.Background()))
 	}
-	// Build a real v12 database, as an older installation would have existed.
-	run(registry[:12])
+	// Build a real v13 database, as an older installation would have existed.
+	run(registry[:13])
 	_, err = db.Exec(`INSERT INTO utxo (tx_id, output_idx, credential_tag, amount,
 collateral_by_tx_id) VALUES (X'01', 0, 0, '1', X'02')`)
 	require.NoError(t, err)
@@ -50,9 +50,9 @@ collateral_by_tx_id) VALUES (X'01', 0, 0, '1', X'02')`)
 	require.NoError(t, db.Close())
 	db, err = sql.Open("sqlite", "file:"+dbPath)
 	require.NoError(t, err)
-	// Force v13 back to pending while retaining its schema/data so the runner
+	// Force v14 back to pending while retaining its schema/data so the runner
 	// re-executes the backfill on restart.
-	_, err = db.Exec("DELETE FROM schema_migrations WHERE version = 13")
+	_, err = db.Exec("DELETE FROM schema_migrations WHERE version = 14")
 	require.NoError(t, err)
 	run(registry)
 	var count int

@@ -45,6 +45,7 @@ const (
 	importedPoolBlockCountSchemaRelease        = "imported-pool-block-count"
 	poolDepositHeldSchemaRelease               = "pool-registration-deposit-held"
 	pointerAddressStakeSchemaRelease           = "pointer-address-stake"
+	collateralAssociationSchemaRelease         = "collateral-transaction-associations"
 )
 
 // schemaVersions names every migration in ascending version order.
@@ -74,6 +75,7 @@ var schemaVersions = []struct {
 	{Version: 11, Name: importedPoolBlockCountSchemaRelease, Dir: "v11"},
 	{Version: 12, Name: poolDepositHeldSchemaRelease, Dir: "v12"},
 	{Version: 13, Name: pointerAddressStakeSchemaRelease, Dir: "v13"},
+	{Version: 14, Name: collateralAssociationSchemaRelease, Dir: "v14"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
