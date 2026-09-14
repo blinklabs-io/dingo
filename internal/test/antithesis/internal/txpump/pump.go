@@ -422,8 +422,8 @@ func (p *Pump) submitPayment(client *NodeClient, batchSize int) bool {
 			"tx_id", txID,
 			"err", submitErr,
 		)
-		// Do not retry rejected inputs. A repeated retry loop can turn one
-		// stale input into thousands of identical validation failures.
+		// Do not retry the rejected transaction. Reconciliation may restore
+		// still-unspent inputs for a later, independently constructed payment.
 	} else {
 		entry.Status = "submitted"
 		p.logger.Info(

@@ -114,6 +114,7 @@ func TestWalletRollbackRestoresFundingForNextPayment(t *testing.T) {
 	require.NoError(t, err)
 	w.Reserve("tx", inputs, []UTxO{makeUTxO("tx", 0, 4_000_000)}, 0)
 	w.ReconcileSnapshot([]UTxO{source}, map[string]bool{"tx": false})
+	require.Empty(t, w.PendingIDs(), "confirmed or rejected records must be retired")
 	selected, _, err := w.SelectCoins(1_000_000)
 	require.NoError(t, err)
 	require.Equal(t, source.TxHash, selected[0].TxHash)
