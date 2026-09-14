@@ -39,6 +39,7 @@ type Pump struct {
 	dialPrimaryFn func() (*NodeClient, error)
 	runBatchFn    func(context.Context, *NodeClient, int) int
 	cooldownFn    func(context.Context) bool
+	intRangeFn    func(int, int) int
 }
 
 // NewPump creates a new Pump from the provided Config.
@@ -488,7 +489,7 @@ func (p *Pump) submitDelegation(client *NodeClient, batchSize int) bool {
 		return false
 	}
 
-	changeAddr := deterministicAddr(inputs[0].TxHash)
+	changeAddr := controlledChangeAddr(inputs)
 
 	txBytes, err := BuildDelegationTx(
 		inputs,
@@ -567,7 +568,7 @@ func (p *Pump) submitGovernance(client *NodeClient, batchSize int) bool {
 	raw, _ := hex.DecodeString(inputs[0].TxHash)
 	drepKeyHash := make([]byte, 28)
 	copy(drepKeyHash, raw)
-	changeAddr := deterministicAddr(inputs[0].TxHash)
+	changeAddr := controlledChangeAddr(inputs)
 
 	var txBytes []byte
 	var buildErr error
@@ -637,7 +638,11 @@ func (p *Pump) submitGovernance(client *NodeClient, batchSize int) bool {
 func (p *Pump) submitPlutus(client *NodeClient, batchSize int) bool {
 	txKind := "plutus_lock"
 	var lockedInput UTxO
-	if len(p.plutusLocked) > 0 && IntRange(0, 1) == 1 {
+	choose := IntRange
+	if p.intRangeFn != nil {
+		choose = p.intRangeFn
+	}
+	if len(p.plutusLocked) > 0 && choose(0, 1) == 1 {
 		txKind = "plutus_unlock"
 		var ok bool
 		lockedInput, ok = p.takeLockedPlutusUTxO()
@@ -682,7 +687,7 @@ func (p *Pump) submitPlutus(client *NodeClient, batchSize int) bool {
 	script := alwaysSucceedsScript()
 	h := sha256.Sum256(script)
 	scriptHash := h[:28]
-	changeAddr := deterministicAddr(inputs[0].TxHash)
+	changeAddr := controlledChangeAddr(inputs)
 
 	var txBytes []byte
 	var buildErr error
@@ -744,6 +749,9 @@ func (p *Pump) submitPlutus(client *NodeClient, batchSize int) bool {
 				TxHash: txID,
 				Index:  0,
 				Amount: minSendAmount,
+				// Keep the wallet-controlled address with the script output so
+				// an unsigned unlock can return its change to the same wallet.
+				address: append([]byte(nil), changeAddr...),
 			})
 		}
 		// Return the change output to the wallet so future transactions can
@@ -820,6 +828,24 @@ func deterministicAddr(txHash string) []byte {
 	addr[0] = 0x60 // enterprise address discriminant (devnet)
 	copy(addr[1:], raw)
 	return addr
+}
+
+// controlledChangeAddr returns an address controlled by the selected inputs.
+// Unsigned harness inputs may not carry a key; their historical deterministic
+// fallback keeps those workloads structurally valid.
+func controlledChangeAddr(inputs []UTxO) []byte {
+	for _, input := range inputs {
+		if input.SigningKey != nil && len(input.SigningKey.Address) > 0 {
+			return append([]byte(nil), input.SigningKey.Address...)
+		}
+		if len(input.address) > 0 {
+			return append([]byte(nil), input.address...)
+		}
+	}
+	if len(inputs) == 0 {
+		return nil
+	}
+	return deterministicAddr(inputs[0].TxHash)
 }
 
 // deriveTestTxID returns the Cardano transaction identifier: the Blake2b-256

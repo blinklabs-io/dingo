@@ -142,6 +142,53 @@ func (c *NodeClient) ReconcileWallet(
 		}
 		addrs = append(addrs, addr)
 	}
+	presence = make(map[string]bool, len(txIDs))
+	monitor := c.conn.LocalTxMonitor()
+	if monitor == nil || monitor.Client == nil {
+		return nil, nil, fmt.Errorf(
+			"node %s: LocalTxMonitor protocol not available",
+			c.addr,
+		)
+	}
+	if err := monitor.Client.Acquire(); err != nil {
+		return nil, nil, fmt.Errorf(
+			"node %s: acquire tx monitor: %w",
+			c.addr,
+			err,
+		)
+	}
+	defer func() {
+		if err := monitor.Client.Release(); err != nil && retErr == nil {
+			snapshot = nil
+			presence = nil
+			retErr = fmt.Errorf("node %s: release tx monitor: %w", c.addr, err)
+		}
+	}()
+	for _, txID := range txIDs {
+		rawID, err := hex.DecodeString(txID)
+		if err != nil {
+			return nil, nil, fmt.Errorf(
+				"node %s: decode pending tx %s: %w",
+				c.addr,
+				txID,
+				err,
+			)
+		}
+		present, err := monitor.Client.HasTx(rawID)
+		if err != nil {
+			return nil, nil, fmt.Errorf(
+				"node %s: check pending tx %s: %w",
+				c.addr,
+				txID,
+				err,
+			)
+		}
+		presence[txID] = present
+	}
+	// Observe transaction presence before acquiring the authoritative UTxO
+	// snapshot. A transaction can confirm between the two observations; the
+	// monitor result must describe the state at or before the LSQ snapshot so a
+	// confirmed spend cannot resurrect its source input.
 	if err := lsq.Client.AcquireVolatileTip(); err != nil {
 		return nil, nil, fmt.Errorf(
 			"node %s: acquire volatile tip: %w",
@@ -189,49 +236,6 @@ func (c *NodeClient) ReconcileWallet(
 				address: raw,
 			},
 		)
-	}
-	presence = make(map[string]bool, len(txIDs))
-	monitor := c.conn.LocalTxMonitor()
-	if monitor == nil || monitor.Client == nil {
-		return nil, nil, fmt.Errorf(
-			"node %s: LocalTxMonitor protocol not available",
-			c.addr,
-		)
-	}
-	if err := monitor.Client.Acquire(); err != nil {
-		return nil, nil, fmt.Errorf(
-			"node %s: acquire tx monitor: %w",
-			c.addr,
-			err,
-		)
-	}
-	defer func() {
-		if err := monitor.Client.Release(); err != nil && retErr == nil {
-			snapshot = nil
-			presence = nil
-			retErr = fmt.Errorf("node %s: release tx monitor: %w", c.addr, err)
-		}
-	}()
-	for _, txID := range txIDs {
-		rawID, err := hex.DecodeString(txID)
-		if err != nil {
-			return nil, nil, fmt.Errorf(
-				"node %s: decode pending tx %s: %w",
-				c.addr,
-				txID,
-				err,
-			)
-		}
-		present, err := monitor.Client.HasTx(rawID)
-		if err != nil {
-			return nil, nil, fmt.Errorf(
-				"node %s: check pending tx %s: %w",
-				c.addr,
-				txID,
-				err,
-			)
-		}
-		presence[txID] = present
 	}
 	return snapshot, presence, nil
 }
