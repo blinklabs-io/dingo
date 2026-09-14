@@ -199,6 +199,15 @@ func watchSession(
 		ouroboros.WithConnection(rawConn),
 		ouroboros.WithNetworkMagic(magic),
 		ouroboros.WithNodeToNode(false),
+		// This connection is held open indefinitely, waiting for the next
+		// block: ordinary Cardano slot-leader scheduling can leave far more
+		// than gouroboros' default 120s segment-read timeout between two
+		// consecutive blocks even with no problem on either side, which
+		// otherwise tears this subscription down and forces a reconnect
+		// (confirmed live: a real ~5 minute idle gap on Preview triggered
+		// exactly this before the fix). Same trusted-channel rationale as
+		// dial.go's identical option.
+		ouroboros.WithMuxerSegmentReadTimeout(0),
 		ouroboros.WithChainSyncConfig(chainsync.NewConfig(
 			chainsync.WithRollForwardFunc(
 				func(
@@ -232,7 +241,10 @@ func watchSession(
 	// so Watcher.Close, which waits for it) blocked indefinitely. Closing
 	// conn the instant ctx is cancelled unblocks whichever call is in
 	// flight immediately.
-	stopOnCancel := context.AfterFunc(ctx, func() { conn.Close() }) //nolint:errcheck
+	stopOnCancel := context.AfterFunc(
+		ctx,
+		func() { conn.Close() },
+	) //nolint:errcheck
 	defer stopOnCancel()
 
 	cs := conn.ChainSync()

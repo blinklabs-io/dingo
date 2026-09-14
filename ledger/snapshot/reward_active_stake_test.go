@@ -44,6 +44,8 @@ import (
 // leader reward the node reconstructs. TotalPoolCount and TotalDelegators
 // describe the reward_pool_input rows actually written and stay reduced.
 func TestRewardSnapshotActiveStakeKeepsDegradedPoolStake(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	seedEpochs(t, db, []models.Epoch{
 		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},

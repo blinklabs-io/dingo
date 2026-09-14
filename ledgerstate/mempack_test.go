@@ -25,6 +25,8 @@ import (
 // TestDecodeMempackTxOutTag4 tests decoding a real MemPack TxOut
 // with tag 4 (TxOutCompactDatum) from a preview network snapshot.
 func TestDecodeMempackTxOutTag4(t *testing.T) {
+	t.Parallel()
+
 	// Real TxOut from preview snapshot at offset 0x28 in tvar file.
 	// Tag 4 = TxOutCompactDatum: CompactAddr + Value + BinaryData
 	// Note: the original hex extracted from the tvar file had an
@@ -69,6 +71,8 @@ func TestDecodeMempackTxOutTag4(t *testing.T) {
 // TestDecodeMempackTxOutTag4MultiAsset tests decoding entry 1 from
 // the tvar file which has tag 4 with a multi-asset value.
 func TestDecodeMempackTxOutTag4MultiAsset(t *testing.T) {
+	t.Parallel()
+
 	// Entry 1 from tvar: tag 4, 1 native asset
 	txOutHex := "041d704ab17afc9a19a4f06b6fe229f9501e727d3968bff0" +
 		"3acb1a8f86acf501f5cb2a012c5904852e00000000" +
@@ -122,6 +126,8 @@ func TestDecodeMempackTxOutTag4MultiAsset(t *testing.T) {
 // TestDecodeMempackTxOutTag2 tests decoding entry 2 from the tvar
 // file which uses tag 2 (AddrHash28 ADA-only).
 func TestDecodeMempackTxOutTag2(t *testing.T) {
+	t.Parallel()
+
 	// Entry 2 from tvar: tag 2 = TxOut_AddrHash28_AdaOnly
 	txOutHex := "02015691d68ad87582fc89b9ac43fd0227cfa4108efb79" +
 		"1b9987b290a9ba85b06c5a4edd9c1b857a1b55106ee4" +
@@ -155,6 +161,8 @@ func TestDecodeMempackTxOutTag2(t *testing.T) {
 }
 
 func TestVarLenDecoding(t *testing.T) {
+	t.Parallel()
+
 	// MemPack VarLen is big-endian 7-bit continuation:
 	// MSB=1 means more bytes, MSB=0 means last byte.
 	// acc = (acc << 7) | (byte & 0x7f) for each byte.
@@ -191,6 +199,8 @@ func TestVarLenDecoding(t *testing.T) {
 }
 
 func TestIsMempackFormat(t *testing.T) {
+	t.Parallel()
+
 	require.True(t, isMempackFormat([]byte{0x00, 0x01}))
 	require.True(t, isMempackFormat([]byte{0x04, 0x1d}))
 	require.True(t, isMempackFormat([]byte{0x05, 0x1d}))
@@ -203,6 +213,8 @@ func TestIsMempackFormat(t *testing.T) {
 // TestParseTvarFileIfAvailable tests parsing a real tvar file from a
 // Mithril snapshot, if one is available at the expected path.
 func TestParseTvarFileIfAvailable(t *testing.T) {
+	t.Parallel()
+
 	tvarPath := os.Getenv("DINGO_TVAR_PATH")
 	if tvarPath == "" {
 		t.Skip(

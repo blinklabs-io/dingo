@@ -199,6 +199,8 @@ var knownNilQueuePublishersUnderLock []string
 // violations treats a call to any member as a publish, so source order still
 // decides whether the lock is actually held at the call site.
 func TestNoEventBusPublishWhileHoldingChainsyncMutex(t *testing.T) {
+	t.Parallel()
+
 	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatalf("read package dir: %v", err)
@@ -502,6 +504,8 @@ var knownResyncPublishPathsUnderLock []string
 // disappears should be removed, so the list cannot rot into overstating
 // the problem.
 func TestChainsyncResyncPublishPathsUnderLock(t *testing.T) {
+	t.Parallel()
+
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(
 		fset, filepath.Join(".", "chainsync.go"), nil, parser.ParseComments,

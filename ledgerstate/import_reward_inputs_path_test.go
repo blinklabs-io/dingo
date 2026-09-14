@@ -41,6 +41,8 @@ import (
 // two -- ordering, transaction plumbing, a parameter source that turns out to
 // be empty -- shows up here rather than on an operator's first bootstrap.
 func TestImportSnapShotsSeedsRewardInputs(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 

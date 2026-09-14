@@ -34,7 +34,9 @@ import (
 	"github.com/blinklabs-io/dingo/keystore"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/kes"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/blinklabs-io/gouroboros/vrf"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -289,7 +291,11 @@ func TestPoolCredentialsInvalidOpCertCannotPublishKESPolicy(t *testing.T) {
 		writeTestOpCert(t, corrupted),
 	))
 
-	require.ErrorContains(t, pc.ValidateOpCert(), "signature verification failed")
+	require.ErrorContains(
+		t,
+		pc.ValidateOpCert(),
+		"signature verification failed",
+	)
 	require.ErrorContains(
 		t,
 		pc.ValidateKESPeriod(
@@ -949,7 +955,11 @@ func TestValidateOpCertPreservesValidatedKESLifetime(t *testing.T) {
 	pc.mu.Lock()
 	pc.opCert.Signature[0] ^= 0xff
 	pc.mu.Unlock()
-	require.ErrorContains(t, pc.ValidateOpCert(), "signature verification failed")
+	require.ErrorContains(
+		t,
+		pc.ValidateOpCert(),
+		"signature verification failed",
+	)
 	require.Zero(t, pc.OpCertExpiryPeriod())
 
 	invalidGeneration := pc.acquireCredentialGeneration()
@@ -1294,6 +1304,53 @@ func TestValidateAgainstLedger_OpCertEqualOrAhead(t *testing.T) {
 			}
 			if _, _, err := pc.ValidateAgainstLedger(view); err != nil {
 				t.Errorf("ValidateAgainstLedger: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateAgainstLedgerAtSlotAppliesEraCounterRule(t *testing.T) {
+	cases := []struct {
+		name      string
+		params    lcommon.ProtocolParameters
+		wantError bool
+	}{
+		{
+			name:   "tpraos permits forward counter",
+			params: &shelley.ShelleyProtocolParameters{ProtocolMajor: 2},
+		},
+		{
+			name:      "praos rejects gapped counter",
+			params:    &babbage.BabbageProtocolParameters{},
+			wantError: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pc := newCredsForLedger(t)
+			pc.opCert.IssueNumber = 7
+			view := &fakeLedgerView{
+				registered: true,
+				regVRFHash: lcommon.Blake2b256Hash(pc.vrfVKey),
+				seqFound:   true,
+				latestSeq:  5,
+			}
+			params := &mockPParamsProvider{pparams: tc.params}
+			result, err := pc.ValidateAgainstLedgerAtSlot(view, params, 0)
+			if result.EraUnevaluable != nil {
+				t.Fatalf(
+					"era resolved from real parameters, got: %v",
+					result.EraUnevaluable,
+				)
+			}
+			if tc.wantError {
+				if err == nil {
+					t.Fatal("expected gapped Praos counter to be rejected")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ValidateAgainstLedgerAtSlot: %v", err)
 			}
 		})
 	}

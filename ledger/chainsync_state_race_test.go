@@ -20,6 +20,8 @@ import (
 )
 
 func TestChainsyncValidationStateConcurrentAccess(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		chainsyncState:    SyncingChainsyncState,
 		validationEnabled: true,

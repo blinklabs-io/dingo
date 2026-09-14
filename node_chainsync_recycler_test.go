@@ -53,6 +53,8 @@ func newRecyclerComponentsTestNode(t *testing.T) *Node {
 }
 
 func TestRecyclerComponentsProvidesLiveComponents(t *testing.T) {
+	t.Parallel()
+
 	n := newRecyclerComponentsTestNode(t)
 	n.chainSelector = chainselection.NewChainSelector(
 		chainselection.ChainSelectorConfig{},
@@ -86,6 +88,8 @@ func TestRecyclerComponentsProvidesLiveComponents(t *testing.T) {
 }
 
 func TestRecyclerComponentsLeavesChainSelectorNilWhenUnset(t *testing.T) {
+	t.Parallel()
+
 	n := newRecyclerComponentsTestNode(t)
 	provider := n.recyclerComponents()
 
@@ -100,6 +104,8 @@ func TestRecyclerComponentsLeavesChainSelectorNilWhenUnset(t *testing.T) {
 }
 
 func TestRecyclerComponentsSkipsWhenLifecycleOpHoldsLock(t *testing.T) {
+	t.Parallel()
+
 	n := newRecyclerComponentsTestNode(t)
 	provider := n.recyclerComponents()
 
@@ -115,6 +121,8 @@ func TestRecyclerComponentsSkipsWhenLifecycleOpHoldsLock(t *testing.T) {
 }
 
 func TestRecyclerComponentsSkipsWhenStorageIsMidReinitialization(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name    string
 		prepare func(n *Node)
@@ -151,6 +159,8 @@ func TestRecyclerComponentsSkipsWhenStorageIsMidReinitialization(t *testing.T) {
 }
 
 func TestRecyclerComponentsReleasesLockOnPanic(t *testing.T) {
+	t.Parallel()
+
 	n := newRecyclerComponentsTestNode(t)
 	provider := n.recyclerComponents()
 
@@ -171,6 +181,8 @@ func TestRecyclerComponentsReleasesLockOnPanic(t *testing.T) {
 // node locks: Snapshot no longer holds liveLifecycleMu, so a snapshot in
 // progress must not stop the recycler from ticking.
 func TestRecyclerComponentsIgnoresSnapshotMu(t *testing.T) {
+	t.Parallel()
+
 	n := newRecyclerComponentsTestNode(t)
 	provider := n.recyclerComponents()
 
@@ -204,6 +216,8 @@ func (b *blockingComponents) WithLiveComponents(
 }
 
 func TestStopWaitsForChainsyncStallRecycler(t *testing.T) {
+	t.Parallel()
+
 	phaseStarted := make(chan struct{}, 1)
 	blocking := &blockingComponents{
 		entered: make(chan struct{}, 1),
@@ -264,6 +278,8 @@ func TestStopWaitsForChainsyncStallRecycler(t *testing.T) {
 }
 
 func TestWaitChainsyncStallRecyclerIsSafeWithoutRecycler(t *testing.T) {
+	t.Parallel()
+
 	n := &Node{
 		config: Config{
 			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),

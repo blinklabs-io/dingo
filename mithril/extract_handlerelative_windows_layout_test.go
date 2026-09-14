@@ -37,6 +37,8 @@ import (
 // 64-bit target, RootDirectory (pointer-sized), FileNameLength (4 bytes,
 // little-endian), then FileName immediately after with no further padding.
 func TestBuildRenameInformationLayout(t *testing.T) {
+	t.Parallel()
+
 	const destDir = windows.Handle(0x1234)
 	buf, err := buildRenameInformation(destDir, "dest.tmp", true)
 	require.NoError(t, err)
@@ -75,12 +77,16 @@ func TestBuildRenameInformationLayout(t *testing.T) {
 }
 
 func TestBuildRenameInformationReplaceIfExistsFalse(t *testing.T) {
+	t.Parallel()
+
 	buf, err := buildRenameInformation(windows.Handle(1), "x", false)
 	require.NoError(t, err)
 	assert.Equal(t, byte(0), buf[0], "ReplaceIfExists must be FALSE")
 }
 
 func TestBuildRenameInformationEmptyName(t *testing.T) {
+	t.Parallel()
+
 	handleSize := int(unsafe.Sizeof(windows.Handle(0)))
 	rootDirOffset := handleSize
 	nameOffset := rootDirOffset + handleSize + 4

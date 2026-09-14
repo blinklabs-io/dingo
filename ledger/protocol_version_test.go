@@ -31,6 +31,8 @@ import (
 )
 
 func TestGetProtocolVersion_Shelley(t *testing.T) {
+	t.Parallel()
+
 	pp := &shelley.ShelleyProtocolParameters{
 		ProtocolMajor: 2,
 		ProtocolMinor: 0,
@@ -42,6 +44,8 @@ func TestGetProtocolVersion_Shelley(t *testing.T) {
 }
 
 func TestGetProtocolVersion_Allegra(t *testing.T) {
+	t.Parallel()
+
 	// allegra.AllegraProtocolParameters is a type alias for
 	// shelley.ShelleyProtocolParameters, so Allegra pparams
 	// are handled by the Shelley case in the type switch.
@@ -56,6 +60,8 @@ func TestGetProtocolVersion_Allegra(t *testing.T) {
 }
 
 func TestGetProtocolVersion_Mary(t *testing.T) {
+	t.Parallel()
+
 	pp := &mary.MaryProtocolParameters{
 		ProtocolMajor: 4,
 		ProtocolMinor: 0,
@@ -67,6 +73,8 @@ func TestGetProtocolVersion_Mary(t *testing.T) {
 }
 
 func TestGetProtocolVersion_Alonzo(t *testing.T) {
+	t.Parallel()
+
 	pp := &alonzo.AlonzoProtocolParameters{
 		ProtocolMajor: 6,
 		ProtocolMinor: 0,
@@ -78,6 +86,8 @@ func TestGetProtocolVersion_Alonzo(t *testing.T) {
 }
 
 func TestGetProtocolVersion_Babbage(t *testing.T) {
+	t.Parallel()
+
 	pp := &babbage.BabbageProtocolParameters{
 		ProtocolMajor: 8,
 		ProtocolMinor: 0,
@@ -89,6 +99,8 @@ func TestGetProtocolVersion_Babbage(t *testing.T) {
 }
 
 func TestGetProtocolVersion_Conway(t *testing.T) {
+	t.Parallel()
+
 	pp := &conway.ConwayProtocolParameters{
 		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
 			Major: 9,
@@ -102,6 +114,8 @@ func TestGetProtocolVersion_Conway(t *testing.T) {
 }
 
 func TestGetProtocolVersion_Dijkstra(t *testing.T) {
+	t.Parallel()
+
 	pp := &dijkstra.DijkstraProtocolParameters{
 		ConwayProtocolParameters: conway.ConwayProtocolParameters{
 			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
@@ -117,6 +131,8 @@ func TestGetProtocolVersion_Dijkstra(t *testing.T) {
 }
 
 func TestGetProtocolVersion_Nil(t *testing.T) {
+	t.Parallel()
+
 	_, err := GetProtocolVersion(nil)
 	require.Error(t, err)
 	assert.Contains(
@@ -127,6 +143,8 @@ func TestGetProtocolVersion_Nil(t *testing.T) {
 }
 
 func TestEraForVersion(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name          string
 		eraList       []eras.EraDesc
@@ -239,6 +257,8 @@ func TestEraForVersion(t *testing.T) {
 }
 
 func TestIsHardForkTransition(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		eraList  []eras.EraDesc

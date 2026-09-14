@@ -567,6 +567,7 @@ func validateTxPlutusConwayWithContext(
 		tx,
 		plutusCtx.scriptInputs.resolvedAllInputs,
 	)
+	synthetic := syntheticV2CostModelInEffect(ls)
 	for redeemerKey, redeemerValue := range plutusCtx.redeemers.Iter() {
 		purpose, ok := buildConwayScriptPurpose(
 			redeemerKey,
@@ -640,9 +641,13 @@ func validateTxPlutusConwayWithContext(
 			}
 		}
 		redeemer := script.Redeemer{
-			Tag:     redeemerKey.Tag,
-			Index:   redeemerKey.Index,
-			Data:    redeemerValue.Data.Data,
+			Tag:   redeemerKey.Tag,
+			Index: redeemerKey.Index,
+			// Normalize: cardano-ledger rebuilds every script-visible value,
+			// so a script observes the encoding the Plutus encoder writes,
+			// not the definite/indefinite-length choice this transaction was
+			// built with. serialiseData exposes the difference.
+			Data:    data.Normalize(redeemerValue.Data.Data),
 			ExUnits: redeemerValue.ExUnits,
 		}
 		_, execErr, err := evaluateConwayPlutusScript(
@@ -654,6 +659,7 @@ func validateTxPlutusConwayWithContext(
 			pp,
 			txInfos,
 			true,
+			synthetic,
 		)
 		if err != nil {
 			return err
@@ -1149,6 +1155,7 @@ func evaluateConwayPlutusScript(
 	pp *conway.ConwayProtocolParameters,
 	txInfos *conwayTxInfoCache,
 	restrictive bool,
+	syntheticV2CostModel bool,
 ) (lcommon.ExUnits, error, error) {
 	// In restrictive mode, use the protocol transaction budget as the machine
 	// limit so intermediate slippage-batch flushes do not reject a script just
@@ -1172,13 +1179,17 @@ func evaluateConwayPlutusScript(
 			return lcommon.ExUnits{}, nil, err
 		}
 		ctx := script.NewScriptContextV3(txInfoV3, redeemer, purpose)
+		costModel, err := requiredCostModel(pp.CostModels, 2, "PlutusV3")
+		if err != nil {
+			return lcommon.ExUnits{}, nil, err
+		}
 		evalContext, err := cek.NewEvalContext(
 			lang.LanguageVersionV3,
 			cek.ProtoVersion{
 				Major: pp.ProtocolVersion.Major,
 				Minor: pp.ProtocolVersion.Minor,
 			},
-			pp.CostModels[2],
+			costModel,
 		)
 		if err != nil {
 			return lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
@@ -1199,18 +1210,32 @@ func evaluateConwayPlutusScript(
 		}
 		return usedBudget, nil, nil
 	case lcommon.PlutusV2Script:
+		// Real cardano-ledger rejects this transaction outright at the
+		// UTXOW level, before any script runs, when PlutusV2 has no real
+		// cost model yet -- see ErrNoCostModelForPlutusV2.
+		if syntheticV2CostModel {
+			return lcommon.ExUnits{}, nil, fmt.Errorf(
+				"script %s: %w",
+				s.Hash(),
+				ErrNoCostModelForPlutusV2,
+			)
+		}
 		txInfoV2, err := txInfos.v2()
 		if err != nil {
 			return lcommon.ExUnits{}, nil, err
 		}
 		ctx := script.NewScriptContextV1V2(txInfoV2, purpose)
+		costModel, err := requiredCostModel(pp.CostModels, 1, "PlutusV2")
+		if err != nil {
+			return lcommon.ExUnits{}, nil, err
+		}
 		evalContext, err := cek.NewEvalContext(
 			lang.LanguageVersionV2,
 			cek.ProtoVersion{
 				Major: pp.ProtocolVersion.Major,
 				Minor: pp.ProtocolVersion.Minor,
 			},
-			pp.CostModels[1],
+			costModel,
 		)
 		if err != nil {
 			return lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
@@ -1238,13 +1263,17 @@ func evaluateConwayPlutusScript(
 			return lcommon.ExUnits{}, nil, err
 		}
 		ctx := script.NewScriptContextV1V2(txInfoV1, purpose)
+		costModel, err := requiredCostModel(pp.CostModels, 0, "PlutusV1")
+		if err != nil {
+			return lcommon.ExUnits{}, nil, err
+		}
 		evalContext, err := cek.NewEvalContext(
 			lang.LanguageVersionV1,
 			cek.ProtoVersion{
 				Major: pp.ProtocolVersion.Major,
 				Minor: pp.ProtocolVersion.Minor,
 			},
-			pp.CostModels[0],
+			costModel,
 		)
 		if err != nil {
 			return lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
@@ -1383,6 +1412,7 @@ func EvaluateTxConway(
 		tx,
 		scriptInputs.resolvedAllInputs,
 	)
+	synthetic := syntheticV2CostModelInEffect(ls)
 	var txInfoV3 script.TxInfoV3
 	if txHasRedeemers(tx) {
 		txInfoV3, err = txInfos.v3()
@@ -1418,6 +1448,7 @@ func EvaluateTxConway(
 			tmpPparams,
 			txInfos,
 			false,
+			synthetic,
 		)
 		if err != nil {
 			return 0, lcommon.ExUnits{}, nil, err
@@ -1427,7 +1458,10 @@ func EvaluateTxConway(
 		}
 		retTotalExUnits, err = SafeAddExUnits(retTotalExUnits, usedBudget)
 		if err != nil {
-			return 0, lcommon.ExUnits{}, nil, fmt.Errorf("aggregate execution units: %w", err)
+			return 0, lcommon.ExUnits{}, nil, fmt.Errorf(
+				"aggregate execution units: %w",
+				err,
+			)
 		}
 		retRedeemerExUnits[lcommon.RedeemerKey{
 			Tag:   redeemer.Tag,

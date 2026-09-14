@@ -31,11 +31,15 @@ import (
 )
 
 func TestComputeMMRRootEmpty(t *testing.T) {
+	t.Parallel()
+
 	_, err := computeMMRRoot(nil)
 	require.Error(t, err)
 }
 
 func TestComputeMMRRootSingleLeaf(t *testing.T) {
+	t.Parallel()
+
 	leaf := []byte("aabbcc")
 	root, err := computeMMRRoot([][]byte{leaf})
 	require.NoError(t, err)
@@ -44,6 +48,8 @@ func TestComputeMMRRootSingleLeaf(t *testing.T) {
 }
 
 func TestComputeMMRRootTwoLeaves(t *testing.T) {
+	t.Parallel()
+
 	l0 := []byte("leaf-zero")
 	l1 := []byte("leaf-one")
 	root, err := computeMMRRoot([][]byte{l0, l1})
@@ -53,6 +59,8 @@ func TestComputeMMRRootTwoLeaves(t *testing.T) {
 }
 
 func TestComputeMMRRootThreeLeaves(t *testing.T) {
+	t.Parallel()
+
 	l0 := []byte("leaf-zero")
 	l1 := []byte("leaf-one")
 	l2 := []byte("leaf-two")
@@ -108,6 +116,8 @@ func loadV2DetailFixture(t *testing.T) *CardanoDatabaseSnapshot {
 // the real preprod aggregator for artifact 408eeb46... (epoch 294,
 // immutable 5810) from its published digest list.
 func TestComputeMMRRootKnownVector(t *testing.T) {
+	t.Parallel()
+
 	snapshot := loadV2DetailFixture(t)
 	entries := loadV2DigestEntries(t)
 	require.NotEmpty(t, entries)
@@ -124,6 +134,8 @@ func TestComputeMMRRootKnownVector(t *testing.T) {
 }
 
 func TestImmutableFileNumberFromName(t *testing.T) {
+	t.Parallel()
+
 	for _, tt := range []struct {
 		name string
 		num  uint64

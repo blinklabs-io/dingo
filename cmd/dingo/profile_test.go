@@ -29,6 +29,8 @@ import (
 // second Close() is forced to fail by closing f once already, ahead of the
 // call under test, which deterministically exhausts the file descriptor.
 func TestCloseProfileFileReportsCloseError(t *testing.T) {
+	t.Parallel()
+
 	f, err := os.CreateTemp(t.TempDir(), "profile-*")
 	if err != nil {
 		t.Fatalf("failed to create temp file: %v", err)
@@ -50,6 +52,8 @@ func TestCloseProfileFileReportsCloseError(t *testing.T) {
 // successful profile write would bury the genuine failures this exists to
 // surface.
 func TestCloseProfileFileStaysQuietOnSuccess(t *testing.T) {
+	t.Parallel()
+
 	f, err := os.CreateTemp(t.TempDir(), "profile-*")
 	if err != nil {
 		t.Fatalf("failed to create temp file: %v", err)
@@ -67,6 +71,8 @@ func TestCloseProfileFileStaysQuietOnSuccess(t *testing.T) {
 }
 
 func TestMithrilPprofServerUsesDedicatedBindAddress(t *testing.T) {
+	t.Parallel()
+
 	cfg := &config.Config{
 		BindAddr:      "0.0.0.0",
 		DebugBindAddr: "127.0.0.1",

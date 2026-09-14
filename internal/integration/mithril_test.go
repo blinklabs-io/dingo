@@ -33,6 +33,8 @@ import (
 // into a temporary SQLite database. This is an integration test
 // that requires network access and takes several minutes.
 func TestImportLedgerStateFromMithril(t *testing.T) {
+	t.Parallel()
+
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}

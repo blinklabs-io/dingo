@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -379,26 +378,20 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
-	// The shared api.tls/api.auth mode enums are checked here so a typo is
+	// The shared api.tls mode enum is checked here so a typo is
 	// caught once, with a single clear message, rather than surfacing
 	// identically from every one of the three API providers that inherit
-	// it. Certificate/key (and token) presence is deliberately NOT
+	// it. Certificate/key presence is deliberately NOT
 	// checked here: a provider legitimately may supply only its own
 	// certFilePath/keyFilePath while inheriting just `mode: server` from
 	// this shared default (see internal/apiconfig.MergeTLS), so
 	// completeness can only be judged after node.go merges this default
-	// into each provider's own plugins.api.<name>.config.tls/auth --
+	// into each provider's own plugins.api.<name>.config.tls --
 	// which is where the full pair-completeness check runs, before that
 	// provider's listener starts.
 	if err := validateAPIMode(
 		"api.tls.mode", c.API.TLS.Mode,
 		string(apiconfig.TLSModeDisabled), string(apiconfig.TLSModeServer),
-	); err != nil {
-		errs = append(errs, err)
-	}
-	if err := validateAPIMode(
-		"api.auth.mode", c.API.Auth.Mode,
-		string(apiconfig.AuthModeDisabled), string(apiconfig.AuthModeToken),
 	); err != nil {
 		errs = append(errs, err)
 	}
@@ -696,21 +689,6 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			"midnight.reflectionEnabled requires midnight.serverEnabled",
 		))
 	}
-	// Plaintext is safe by default only on loopback. Wildcard, unspecified,
-	// hostname, and concrete remote addresses require either the configured
-	// TLS keypair or an explicit escape hatch acknowledging that transport
-	// security is supplied outside Dingo.
-	useMidnightTLS := c.TlsCertFilePath != "" && c.TlsKeyFilePath != ""
-	if midnightServer && !useMidnightTLS &&
-		!c.Midnight.AllowInsecureRemote &&
-		!isLoopbackAddr(c.Midnight.Host) {
-		errs = append(errs, fmt.Errorf(
-			"midnight.host %q is not loopback: configure TLS or set "+
-				"midnight.allowInsecureRemote to acknowledge plaintext exposure",
-			c.Midnight.Host,
-		))
-	}
-
 	if c.DatabaseLifecycle.SnapshotEnabled &&
 		c.DatabaseLifecycle.SnapshotDir == "" {
 		errs = append(errs, errors.New(
@@ -880,18 +858,6 @@ func isWildcardAddr(addr string) bool {
 	default:
 		return false
 	}
-}
-
-// isLoopbackAddr recognizes only explicit loopback literals and localhost.
-// It deliberately performs no DNS lookup: accepting an arbitrary hostname
-// based on a mutable resolution would turn startup validation into a TOCTOU
-// exposure check. Empty and wildcard addresses are therefore remote.
-func isLoopbackAddr(addr string) bool {
-	if strings.EqualFold(addr, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(strings.Trim(addr, "[]"))
-	return ip != nil && ip.IsLoopback()
 }
 
 // checkDirWritable ensures dir exists (creating it if needed) and that this

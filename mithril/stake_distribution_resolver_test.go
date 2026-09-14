@@ -24,6 +24,8 @@ import (
 )
 
 func TestResolveStakeDistributionForCertificateMithril(t *testing.T) {
+	t.Parallel()
+
 	server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/artifact/mithril-stake-distributions":
@@ -63,6 +65,8 @@ func TestResolveStakeDistributionForCertificateMithril(t *testing.T) {
 }
 
 func TestResolveStakeDistributionForCertificateCardano(t *testing.T) {
+	t.Parallel()
+
 	server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/artifact/cardano-stake-distributions":
@@ -108,6 +112,8 @@ func TestResolveStakeDistributionForCertificateCardano(t *testing.T) {
 func TestResolveStakeDistributionEpochMatchDoesNotOverrideCertHash(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/artifact/mithril-stake-distributions":
@@ -175,6 +181,8 @@ func TestResolveStakeDistributionEpochMatchDoesNotOverrideCertHash(
 // where the leaf certificate is NOT a stake distribution entity but a
 // supporting certificate in the chain IS.
 func TestResolveStakeDistributionFallbackMithril(t *testing.T) {
+	t.Parallel()
+
 	server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/artifact/mithril-stake-distributions":
@@ -229,6 +237,8 @@ func TestResolveStakeDistributionFallbackMithril(t *testing.T) {
 // TestResolveStakeDistributionFallbackCardano exercises the fallback path
 // for Cardano stake distributions.
 func TestResolveStakeDistributionFallbackCardano(t *testing.T) {
+	t.Parallel()
+
 	server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/artifact/mithril-stake-distributions":

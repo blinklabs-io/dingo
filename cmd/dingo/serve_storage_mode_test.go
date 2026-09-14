@@ -30,6 +30,8 @@ import (
 // storage" upgrade never disagree about which mode a dev-mode config
 // actually runs with.
 func TestEffectiveStorageMode(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name    string
 		runMode config.RunMode
@@ -106,6 +108,8 @@ func TestEffectiveStorageMode(t *testing.T) {
 // what every later open (including the one this test performs directly,
 // standing in for node.Run's) needs.
 func TestCheckSyncStateDevModeAgreesWithLaterAPIModeOpen(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	dir := t.TempDir()
 	cfg := &config.Config{

@@ -24,6 +24,8 @@ import (
 )
 
 func TestCloseIsIdempotentWithSizeMetrics(t *testing.T) {
+	t.Parallel()
+
 	db, err := newTestDatabase(t, &Config{
 		DataDir:      t.TempDir(),
 		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),

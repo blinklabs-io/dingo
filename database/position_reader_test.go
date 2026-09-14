@@ -25,6 +25,8 @@ import (
 )
 
 func TestPositionReaderBasic(t *testing.T) {
+	t.Parallel()
+
 	data := []byte("hello world")
 	r := NewPositionReader(bytes.NewReader(data))
 
@@ -43,6 +45,8 @@ func TestPositionReaderBasic(t *testing.T) {
 }
 
 func TestPositionReaderMultipleReads(t *testing.T) {
+	t.Parallel()
+
 	data := []byte("hello world, this is a test")
 	r := NewPositionReader(bytes.NewReader(data))
 
@@ -87,6 +91,8 @@ func TestPositionReaderMultipleReads(t *testing.T) {
 }
 
 func TestPositionReaderEOF(t *testing.T) {
+	t.Parallel()
+
 	data := []byte("short")
 	r := NewPositionReader(bytes.NewReader(data))
 
@@ -110,6 +116,8 @@ func TestPositionReaderEOF(t *testing.T) {
 }
 
 func TestPositionReaderPartialRead(t *testing.T) {
+	t.Parallel()
+
 	// Use a reader that returns partial reads
 	// strings.Reader doesn't do partial reads, but we can simulate
 	// by using a custom reader or small buffer reads
@@ -150,6 +158,8 @@ func (p *partialReader) Read(buf []byte) (int, error) {
 }
 
 func TestPositionReaderWithPartialReader(t *testing.T) {
+	t.Parallel()
+
 	data := []byte("0123456789abcdef")
 	// Create a reader that only returns 3 bytes at a time
 	partial := &partialReader{

@@ -39,8 +39,9 @@ type spoNonVoterRatificationCase struct {
 	silentVote           *uint8
 }
 
+//go:fix inline
 func votePointer(vote uint8) *uint8 {
-	return &vote
+	return new(vote)
 }
 
 // TestProcessEpochSPONonVoterDenominators matches the same 60/40 stake
@@ -49,6 +50,8 @@ func votePointer(vote uint8) *uint8 {
 // not 61%. A silent pool on a bootstrap ParameterChange is Abstain, so the same
 // explicit Yes stake passes both thresholds.
 func TestProcessEpochSPONonVoterDenominators(t *testing.T) {
+	t.Parallel()
+
 	testCases := []struct {
 		name        string
 		actionType  lcommon.GovActionType
@@ -113,6 +116,8 @@ func TestProcessEpochSPONonVoterDenominators(t *testing.T) {
 // does. Bootstrap makes a silent pool Abstain before reward defaults, while an
 // explicit No still remains No.
 func TestProcessEpochSPONonVoterRatification(t *testing.T) {
+	t.Parallel()
+
 	testCases := []struct {
 		name        string
 		actionType  lcommon.GovActionType
