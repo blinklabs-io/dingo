@@ -42,7 +42,7 @@ func TestScheduler_RegistersAndRunsTask(t *testing.T) {
 	// Wait for task to run at least 2 times (polls instead of fixed sleep)
 	require.Eventually(t, func() bool {
 		return counter.Load() >= 2
-	}, 2*time.Second, 10*time.Millisecond,
+	}, testutil.AsyncWait, 10*time.Millisecond,
 		"expected task to run at least 2 times",
 	)
 }
@@ -67,7 +67,7 @@ func TestScheduler_ChangeInterval(t *testing.T) {
 	// Wait for at least 2 executions before changing interval
 	require.Eventually(t, func() bool {
 		return counter.Load() >= 2
-	}, 2*time.Second, 5*time.Millisecond,
+	}, testutil.AsyncWait, 5*time.Millisecond,
 		"expected at least 2 executions before interval change",
 	)
 	// ChangeInterval queues the interval in updateIntervalChan's one-slot
@@ -89,7 +89,7 @@ func TestScheduler_ChangeInterval(t *testing.T) {
 		applied := timer.interval == slowInterval
 		timer.mutex.Unlock()
 		return applied
-	}, 5*time.Second, 5*time.Millisecond,
+	}, testutil.AsyncWait, 5*time.Millisecond,
 		"expected interval change to be applied",
 	)
 	afterChangeReq := counter.Load()
@@ -130,7 +130,7 @@ func TestScheduler_ChangeInterval(t *testing.T) {
 	}, nil)
 	require.Eventually(t, func() bool {
 		return postChange.Load() > 0
-	}, 10*time.Second, 10*time.Millisecond,
+	}, testutil.AsyncWait, 10*time.Millisecond,
 		"expected ticking to continue after interval change",
 	)
 }
@@ -162,7 +162,7 @@ func TestScheduler_ChangeIntervalDeliveredWhenNotParked(t *testing.T) {
 		timer.mutex.Lock()
 		defer timer.mutex.Unlock()
 		return timer.interval == newInterval
-	}, 2*time.Second, 5*time.Millisecond,
+	}, testutil.AsyncWait, 5*time.Millisecond,
 		"interval change before Start must be delivered, not silently dropped",
 	)
 }
@@ -197,7 +197,7 @@ func TestScheduler_ChangeIntervalDeliveredDuringTick(t *testing.T) {
 	defer release()
 
 	testutil.RequireReceive(
-		t, inTick, 2*time.Second, "run() never blocked inside tick()",
+		t, inTick, testutil.AsyncWait, "run() never blocked inside tick()",
 	)
 	require.NoError(t, timer.ChangeInterval(newInterval))
 	release()
@@ -206,7 +206,7 @@ func TestScheduler_ChangeIntervalDeliveredDuringTick(t *testing.T) {
 		timer.mutex.Lock()
 		defer timer.mutex.Unlock()
 		return timer.interval == newInterval
-	}, 2*time.Second, 5*time.Millisecond,
+	}, testutil.AsyncWait, 5*time.Millisecond,
 		"interval change during a tick must be delivered, not silently dropped",
 	)
 }
@@ -233,7 +233,7 @@ func TestScheduler_ChangeIntervalLatestWins(t *testing.T) {
 		timer.mutex.Lock()
 		defer timer.mutex.Unlock()
 		return timer.interval == newInterval
-	}, 2*time.Second, 5*time.Millisecond,
+	}, testutil.AsyncWait, 5*time.Millisecond,
 		"the latest interval must replace a pending one, not be dropped",
 	)
 }
@@ -267,7 +267,7 @@ func TestSchedulerRunFailFunc(t *testing.T) {
 	// Wait for the fail function to be called at least 3 times
 	require.Eventually(t, func() bool {
 		return failCounter.Load() >= 3
-	}, 10*time.Second, 50*time.Millisecond,
+	}, testutil.AsyncWait, 50*time.Millisecond,
 		"expected failure to run task at least 3 times",
 	)
 }
@@ -491,7 +491,7 @@ func TestScheduler_ConcurrentStartStopLeavesNoWorkers(t *testing.T) {
 		}()
 		select {
 		case <-done:
-		case <-time.After(2 * time.Second):
+		case <-time.After(testutil.AsyncWait):
 			t.Fatal("scheduler workers remained after concurrent Start/Stop")
 		}
 	}

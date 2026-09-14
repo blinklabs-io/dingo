@@ -393,7 +393,7 @@ func TestTryRecoverFromTxValidationErrorRejectsReplayBelowMithrilBoundary(
 	resync := testutil.RequireReceive(
 		t,
 		resyncCh,
-		time.Second,
+		testutil.AsyncWait,
 		"expected Mithril boundary resync after replay recovery rejection",
 	)
 	assert.Equal(
@@ -862,7 +862,7 @@ func TestTryRecoverFromTxValidationErrorAtTipRejectsRewindBelowMithrilBoundary(
 	resync := testutil.RequireReceive(
 		t,
 		resyncCh,
-		time.Second,
+		testutil.AsyncWait,
 		"expected Mithril boundary resync after at-tip recovery rejection",
 	)
 	assert.Equal(
@@ -1411,7 +1411,7 @@ func TestTryRecoverFromTxValidationErrorFallsBackToSecurityParamWindow(
 	resync := testutil.RequireReceive(
 		t,
 		resyncCh,
-		5*time.Second,
+		testutil.AsyncWait,
 		"expected chainsync resync after unresolved replay recovery",
 	)
 	assert.Equal(
@@ -1427,7 +1427,7 @@ func TestTryRecoverFromTxValidationErrorFallsBackToSecurityParamWindow(
 		rollback := testutil.RequireReceive(
 			t,
 			rollbackCh,
-			5*time.Second,
+			testutil.AsyncWait,
 			"expected chain rollback event after unresolved replay recovery",
 		)
 		assert.LessOrEqual(
@@ -1631,7 +1631,7 @@ func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
 	freshResync := testutil.RequireReceive(
 		t,
 		freshResyncCh,
-		5*time.Second,
+		testutil.AsyncWait,
 		"expected a fresh ChainSync intersection after replay recovery stopped converging",
 	)
 	assert.Equal(t, activeConnId.String(), freshResync.ConnectionId.String())
@@ -1796,7 +1796,7 @@ func TestReplayRecoveryRejectsDeterministicDuplicateInput(t *testing.T) {
 	resync := testutil.RequireReceive(
 		t,
 		resyncCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"deterministic transaction recovery must request a fresh ChainSync intersection",
 	)
 	assert.Equal(t, ls.Tip().Point, resync.Point)
@@ -1918,7 +1918,7 @@ func TestReplayRecoveryRejectsRepeatedIncorrectWithdrawalAmount(t *testing.T) {
 	resync := testutil.RequireReceive(
 		t,
 		resyncCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"the first rejection must request a fresh ChainSync intersection",
 	)
 	assert.Equal(t, ls.Tip().Point, resync.Point)
@@ -1988,7 +1988,7 @@ func TestReplayRecoveryRejectsDeterministicPlutusFailure(t *testing.T) {
 	resync := testutil.RequireReceive(
 		t,
 		resyncCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"deterministic Plutus rejection must request a fresh ChainSync intersection",
 	)
 	assert.Equal(t, ls.Tip().Point, resync.Point)
@@ -2036,7 +2036,7 @@ func TestReplayRecoveryDeterministicDuplicateAtTipSkipsDescentSchedule(
 	resync := testutil.RequireReceive(
 		t,
 		resyncCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"an at-tip deterministic rejection must request a fresh ChainSync intersection",
 	)
 	assert.Equal(t, ls.Tip().Point, resync.Point)
@@ -2084,7 +2084,7 @@ func TestReplayRecoveryDeterministicLatchIsPerFailingBlock(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		resyncCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"the first failing block must request a fresh ChainSync intersection",
 	)
 
@@ -2099,7 +2099,7 @@ func TestReplayRecoveryDeterministicLatchIsPerFailingBlock(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		resyncCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"a different rejected block must get its own fresh intersection",
 	)
 }
@@ -2222,7 +2222,7 @@ func TestReplayRecoveryRejectsDeterministicByronDuplicateInput(t *testing.T) {
 	resync := testutil.RequireReceive(
 		t,
 		resyncCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"Byron deterministic recovery must request a fresh ChainSync intersection",
 	)
 	assert.Equal(t, ls.Tip().Point, resync.Point)

@@ -150,7 +150,7 @@ func TestHandleEventChainsyncRollbackRejectsBelowMithrilBoundary(
 	e := testutil.RequireReceive(
 		t,
 		resyncCh,
-		time.Second,
+		testutil.AsyncWait,
 		"expected Mithril rollback-boundary resync event",
 	)
 	assert.Equal(
@@ -443,7 +443,7 @@ func TestHandleEventChainsyncRollbackExceedsKDeclinesReconcilingDivergedLedgerTi
 	e := testutil.RequireReceive(
 		t,
 		resyncCh,
-		time.Second,
+		testutil.AsyncWait,
 		"expected over-K resync event",
 	)
 	assert.Equal(t, event.ChainsyncResyncReasonRollbackExceedsK, e.Reason)
@@ -545,7 +545,7 @@ func TestHandleEventChainsyncRollbackReconcileFindsMithrilBoundaryAncestor(
 	e := testutil.RequireReceive(
 		t,
 		resyncCh,
-		time.Second,
+		testutil.AsyncWait,
 		"expected a Mithril-boundary resync event, not a generic "+
 			"reconciliation-error propagation",
 	)
@@ -598,13 +598,13 @@ func TestLedgerReadChainRequestsResyncOnOverKReconcile(t *testing.T) {
 	}()
 
 	testutil.RequireReceive(
-		t, done, 2*time.Second,
+		t, done, testutil.AsyncWait,
 		"ledgerReadChain should give up and return, not hang, on an "+
 			"unreconcilable over-K divergence",
 	)
 
 	e := testutil.RequireReceive(
-		t, resyncCh, time.Second,
+		t, resyncCh, testutil.AsyncWait,
 		"expected an over-K resync event from ledgerReadChain",
 	)
 	assert.Equal(t, event.ChainsyncResyncReasonRollbackExceedsK, e.Reason)
@@ -668,13 +668,13 @@ func TestLedgerReadChainRequestsResyncOnMithrilBoundaryReconcile(
 	}()
 
 	testutil.RequireReceive(
-		t, done, 2*time.Second,
+		t, done, testutil.AsyncWait,
 		"ledgerReadChain should give up and return, not hang, on an "+
 			"unreconcilable Mithril-boundary divergence",
 	)
 
 	e := testutil.RequireReceive(
-		t, resyncCh, time.Second,
+		t, resyncCh, testutil.AsyncWait,
 		"expected a Mithril-boundary resync event from ledgerReadChain",
 	)
 	assert.Equal(
@@ -741,14 +741,14 @@ func TestLedgerProcessBlocksRetriesInsteadOfHaltingOnOverKReconcile(
 	t.Cleanup(func() {
 		cancel()
 		testutil.RequireReceive(
-			t, done, 5*time.Second,
+			t, done, testutil.AsyncWait,
 			"ledgerProcessBlocksWithAttempt must exit once its context "+
 				"is canceled",
 		)
 	})
 
 	first := testutil.RequireReceive(
-		t, resyncCh, 2*time.Second,
+		t, resyncCh, testutil.AsyncWait,
 		"expected the first over-K resync event",
 	)
 	assert.Equal(t, event.ChainsyncResyncReasonRollbackExceedsK, first.Reason)
@@ -758,7 +758,7 @@ func TestLedgerProcessBlocksRetriesInsteadOfHaltingOnOverKReconcile(
 	// restarted a fresh ledgerReadChain attempt rather than exiting for
 	// good after the first one returned.
 	second := testutil.RequireReceive(
-		t, resyncCh, 2*time.Second,
+		t, resyncCh, testutil.AsyncWait,
 		"the pipeline must retry and reach the over-K branch again "+
 			"instead of halting after the first rejection",
 	)
@@ -1230,7 +1230,7 @@ func TestTryResolveForkExceedsKDeclinesReconcilingDivergedLedgerTip(
 	e := testutil.RequireReceive(
 		t,
 		resyncCh,
-		time.Second,
+		testutil.AsyncWait,
 		"expected over-K fork-resolution resync event",
 	)
 	assert.Equal(
@@ -1678,7 +1678,7 @@ func TestHandleEventChainsyncBlockHeaderMissingAncestorRequestsResync(
 	resync := testutil.RequireReceive(
 		t,
 		resyncCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"expected chainsync resync event",
 	)
 	assert.Equal(t, fixture.connId, resync.ConnectionId)
@@ -1724,7 +1724,7 @@ func TestRollbackPublishesChainsyncResyncAtRollbackPoint(t *testing.T) {
 	resync := testutil.RequireReceive(
 		t,
 		resyncCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"expected chainsync resync event",
 	)
 	assert.Equal(
@@ -2497,7 +2497,7 @@ func TestReconcileLivePrimaryChainLedgerDivergenceRequestsMithrilResync(
 	e := testutil.RequireReceive(
 		t,
 		resyncCh,
-		time.Second,
+		testutil.AsyncWait,
 		"expected live Mithril-boundary resync event",
 	)
 	require.Equal(
@@ -3171,7 +3171,7 @@ func TestHandleEventChainsyncRollbackClassifiesStalePeerBelowMithrilBoundary(
 	e := testutil.RequireReceive(
 		t,
 		resyncCh,
-		time.Second,
+		testutil.AsyncWait,
 		"expected stale-peer resync event",
 	)
 	assert.Equal(
@@ -3239,7 +3239,7 @@ func TestHandleEventChainsyncRollbackRejectsDivergentPeerTipAboveMithrilBoundary
 	e := testutil.RequireReceive(
 		t,
 		resyncCh,
-		time.Second,
+		testutil.AsyncWait,
 		"expected divergent-peer resync event",
 	)
 	assert.Equal(
