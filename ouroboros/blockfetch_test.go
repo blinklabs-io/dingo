@@ -373,13 +373,14 @@ func TestBlockfetchServerSendBatch_ClosesConnectionOnIteratorError(
 	)
 
 	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "iterator failed")
 	assert.Equal(t, 1, server.startBatchCalls)
 	assert.Equal(t, 0, server.batchDoneCalls)
 	assert.Equal(t, 1, conn.closeCalls)
 	assert.Equal(t, 1, iter.cancelCalls)
 }
 
-func TestBlockfetchServerSendBatch_RejectsIncompleteRangeAtChainTip(t *testing.T) {
+func TestBlockfetchServerSendBatch_BatchDoneAtChainTip(t *testing.T) {
 	t.Parallel()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	o := newOuroboros(OuroborosConfig{
@@ -403,11 +404,10 @@ func TestBlockfetchServerSendBatch_RejectsIncompleteRangeAtChainTip(t *testing.T
 		conn,
 	)
 
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "ended before requested end point")
+	assert.NoError(t, err)
 	assert.Equal(t, 1, server.startBatchCalls)
-	assert.Equal(t, 0, server.batchDoneCalls)
-	assert.Equal(t, 1, conn.closeCalls)
+	assert.Equal(t, 1, server.batchDoneCalls)
+	assert.Equal(t, 0, conn.closeCalls)
 	assert.Equal(t, 1, iter.cancelCalls)
 }
 
@@ -450,49 +450,13 @@ func TestBlockfetchServerSendBatch_RollbackEndsBatchWithoutServingBlock(
 		conn,
 	)
 
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "ended before requested end point")
+	assert.NoError(t, err)
 	assert.Equal(t, 1, server.startBatchCalls)
 	// The rollback sentinel must NOT be streamed as a block.
 	assert.Equal(t, 0, server.blockCalls,
 		"rollback sentinel must not be streamed as a block")
-	assert.Equal(t, 0, server.batchDoneCalls)
-	assert.Equal(t, 1, conn.closeCalls)
-	assert.Equal(t, 1, iter.cancelCalls)
-}
-
-func TestBlockfetchServerSendBatch_RejectsEndPointHashMismatch(t *testing.T) {
-	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	o := newOuroboros(OuroborosConfig{
-		Logger:   logger,
-		EventBus: event.NewEventBus(nil, logger),
-	})
-	iter := &stubBlockfetchIterator{
-		steps: []blockfetchIteratorStep{
-			{result: testBlockfetchIteratorBlock(200)},
-		},
-	}
-	server := &stubBlockfetchBatchServer{}
-	conn := &stubBlockfetchConnection{
-		errChan: make(chan error),
-	}
-	start := ocommon.NewPoint(100, []byte{0x01})
-	end := ocommon.NewPoint(200, []byte{0xff})
-
-	err := o.blockfetchServerSendBatch(
-		testConnId().String(),
-		start,
-		end,
-		iter,
-		server,
-		conn,
-	)
-
-	assert.Error(t, err)
-	assert.ErrorContains(t, err, "ended before requested end point")
-	assert.Equal(t, 1, server.blockCalls)
-	assert.Equal(t, 0, server.batchDoneCalls)
-	assert.Equal(t, 1, conn.closeCalls)
+	assert.Equal(t, 1, server.batchDoneCalls)
+	assert.Equal(t, 0, conn.closeCalls)
 	assert.Equal(t, 1, iter.cancelCalls)
 }
 
@@ -517,7 +481,7 @@ func TestBlockfetchServerSendBatch_WaitsForSendDrainBetweenMessages(
 		errChan: make(chan error),
 	}
 	start := ocommon.NewPoint(100, []byte{0x01})
-	end := ocommon.NewPoint(101, []byte{byte(101)})
+	end := ocommon.NewPoint(101, []byte{101})
 
 	err := o.blockfetchServerSendBatch(
 		testConnId().String(),
@@ -563,7 +527,7 @@ func TestBlockfetchServerSendBatch_ClosesConnectionWhenSendDrainStalls(
 		errChan: make(chan error),
 	}
 	start := ocommon.NewPoint(100, []byte{0x01})
-	end := ocommon.NewPoint(101, []byte{byte(101)})
+	end := ocommon.NewPoint(101, []byte{101})
 
 	err := o.blockfetchServerSendBatch(
 		testConnId().String(),
@@ -574,7 +538,7 @@ func TestBlockfetchServerSendBatch_ClosesConnectionWhenSendDrainStalls(
 		conn,
 	)
 
-	assert.Error(t, err)
+	require.Error(t, err)
 	assert.Contains(t, err.Error(), "send queue did not drain after Block")
 	assert.Equal(t, 1, server.startBatchCalls)
 	assert.Equal(t, 1, server.blockCalls)

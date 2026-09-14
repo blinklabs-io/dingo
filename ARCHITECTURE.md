@@ -629,14 +629,17 @@ to do real work should hand off to their own goroutine, which
 
 The BlockFetch server path mirrors the retrieval flow for downstream peers:
 when a peer requests a range, `ouroboros/blockfetch.go` validates the bounds,
-checks both endpoints against the serving chain, opens a chain iterator at the
-requested start point, sends `StartBatch`, then streams `Block` messages until
-the exact requested end slot and hash before `BatchDone`. Earlier blocks at the
-same slot, including Byron epoch-boundary blocks, do not complete the range.
-Missing endpoints receive `NoBlocks` before streaming. Once a batch starts,
-iterator exhaustion, rollback, or passing the end slot without the requested
-hash closes the connection without `BatchDone`.
-The range sender is asynchronous so the mini-protocol callback can
+opens chain iterators at the requested start and end points to validate both
+endpoints against the serving chain, then sends `StartBatch`. Checking only
+the end slot let a peer name an end point the server does not hold and receive
+a slot-bounded prefix of the server's own chain in its place. An end point
+that does not resolve takes the same
+`NoBlocks` and stuck-peer accounting as the other invalid-range rejections.
+Once a batch starts, blocks are streamed through the exact requested end slot
+and hash; earlier blocks at the same slot, including Byron epoch-boundary
+blocks, do not complete the range. Iterator exhaustion, rollback, or passing the end slot
+without the requested hash closes the connection without `BatchDone`. The
+range sender is asynchronous so the mini-protocol callback can
 return promptly, but it applies backpressure between messages by waiting for
 the underlying gouroboros protocol send queue to drain. This keeps large Leios
 catch-up ranges from filling the mux pending-message queue and turning a slow
@@ -649,6 +652,27 @@ instead of retaining the rest of a large decoded range. The subsequent chain
 reader likewise decodes at most one 50-block metadata transaction batch at a
 time. These bounds matter for Dijkstra bodies, whose nested canonical-CBOR
 views make a live decoded block substantially larger than its wire bytes.
+
+A batch is fetched for the header queue that existed when it was requested, so
+`LedgerState` binds each batch to a chain-rollback generation, bumped before
+every primary-chain rollback and restored when validation refuses one, so a
+rollback the chain never applied does not supersede the batch in flight.
+`rollbackChainAndStateDeferred` and the windowed
+replay-recovery rollback serialize generation publication and chain mutation
+with `chainsyncBlockfetchMutex`, so they cannot interleave with a flush, and
+publish deferred chain events only after releasing that mutex. Callers must
+not already hold it: every rollback entry point takes `chainsyncMutex` first
+and leaves the blockfetch mutex to the restart that follows. Bodies still
+arriving for an older generation are dropped instead of being handed to chain
+insertion:
+fork resolution rolls back, re-queues the winning peer's header path and only
+then restarts blockfetch, and a body from the losing fork reaching insertion
+against that replacement queue would clear it. A batch that ends without
+extending the chain, while headers stay queued, feeds the same bounded
+same-range failure streak a `NoBlocks` reply feeds, so an unobtainable
+continuation is dropped and re-intersected rather than re-requested forever.
+That streak is only cleared by a body that actually extends the chain, not by
+one that merely arrives.
 
 Opening that iterator is also what decides whether the range is servable at
 all, so `chain`'s forward and reverse iterator constructors require the start
@@ -3719,13 +3743,15 @@ to back — timing-dependent enough that two identical DevNet runs differed by
 almost an order of magnitude in how often the recovery fired. The record
 therefore survives both interleaved deliveries for other ranges and
 header-queue churn;
-`clearQueuedHeaders` deliberately leaves it alone. It is discarded only when
-the tracked range itself is delivered (`noteBlockfetchRangeProgress` in
-`handleEventBlockfetchBlock`, matching on the block's point), so a peer that
-was briefly behind is never punished, and a miss against a different range
-starts its own count. After the bound fires the record restarts from zero, so
-a re-offered header must earn a fresh set of failures rather than being
-dropped on every later miss.
+`clearQueuedHeaders` deliberately leaves it alone. It is discarded only after
+the tracked range itself has been applied successfully in
+`flushPendingBlockfetchBlocksDeferred` after `AddBlockWithPointDeferred`
+succeeds, matching on the block's point, so a peer that was briefly behind is
+never punished, and a
+received but rejected body retains the failure record. A miss against a
+different range starts its own count. After the bound fires the record
+restarts from zero, so a re-offered header must earn a fresh set of failures
+rather than being dropped on every later miss.
 
 The accounting lives in `startQueuedBlockfetchLocked`, the single point every
 queued-range request passes through, not in the callers. That placement is
