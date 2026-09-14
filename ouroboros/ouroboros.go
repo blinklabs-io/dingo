@@ -195,7 +195,7 @@ type Ouroboros struct {
 	// runs, so Protocol.DoneChan() cannot close underneath it; the release
 	// signal has to come from connmanager's per-connection ErrorChan watcher
 	// instead (see ReleaseLeiosServeWaiters).
-	leiosServeWaiters   map[ouroboros.ConnectionId][]chan struct{}
+	leiosServeWaiters   map[ouroboros.ConnectionId][]leiosServeWaiter
 	leiosServeWaitersMu sync.Mutex
 	// NtC CertRB closure-resolution metrics.
 	leiosMetrics *leiosMetrics
@@ -495,7 +495,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		leiosEndorserBlocks:      make(map[string]*leiosEndorserBlockData),
 		leiosClosureWaiters:      make(map[string][]chan struct{}),
 		leiosServeWaiters: make(
-			map[ouroboros.ConnectionId][]chan struct{},
+			map[ouroboros.ConnectionId][]leiosServeWaiter,
 		),
 		leiosEBLog:                 newLeiosForgedEBLog(),
 		leiosAnnouncements:         make(map[string]leiosAnnouncement),

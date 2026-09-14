@@ -1806,51 +1806,25 @@ func taintValue(relaxed bool) string {
 	return nodesettings.LatchOff
 }
 
-// handleConnManagerClosed releases the chainsync server-side (N2C) client
-// state -- including its live chain iterator -- and any pending Leios
-// endorser-closure serving wait, for a node-to-client connection that just
-// closed.
-//
-// NtC closes are deliberately excluded from the ConnectionClosedEventType
-// fan-out (see the connection manager's publish site) because every current
-// subscriber does node-to-node work and a local client reconnecting in a
-// tight loop would otherwise wedge the EventBus. This callback is the NtC
-// counterpart to HandleConnClosedEvent, which already performs the
-// equivalent RemoveClient cleanup for NtN closes via that event. Guarding
-// chainsync cleanup on isNtC keeps RemoveClient exactly-once; serving waits
-// are released directly for both connection modes.
-func (n *Node) handleConnManagerClosed(
-	connId ouroboros.ConnectionId,
-	isNtC bool,
-	_ error,
-) {
-	// Release NtC closure waits independently of the protocol receive loop.
-	if o := n.ouroboros(); o != nil {
-		o.ReleaseLeiosServeWaiters(connId)
-	}
-	if !isNtC {
-		return
-	}
-	if n.chainsyncState != nil {
-		n.chainsyncState.RemoveClient(connId)
-	}
-	if o := n.ouroboros(); o != nil {
-		// Clear any LocalStateQuery pinned point this connection acquired:
-		// a client that disconnects without a clean Release must not leak
-		// its map entry (blinklabs-io/dingo#382).
-		o.ReleaseLocalStateQueryAcquiredPoint(connId)
-	}
-}
-
 func (n *Node) handleConnManagerClosedOwner(
 	conn *ouroboros.Connection,
 	isNtC bool,
-	err error,
+	_ error,
 ) {
 	if conn == nil {
 		return
 	}
-	n.handleConnManagerClosed(conn.Id(), isNtC, err)
+	if o := n.ouroboros(); o != nil && conn.ChainSync() != nil {
+		o.ReleaseLeiosServeWaitersOwner(conn.Id(), conn.ChainSync().Server)
+	}
+	if isNtC {
+		if n.chainsyncState != nil {
+			n.chainsyncState.RemoveClient(conn.Id())
+		}
+		if o := n.ouroboros(); o != nil {
+			o.ReleaseLocalStateQueryAcquiredPoint(conn.Id())
+		}
+	}
 	if o := n.ouroboros(); o != nil && conn.LeiosNotify() != nil {
 		o.RemoveLeiosNotifyConnectionOwner(conn.Id(), conn.LeiosNotify().Server)
 	}

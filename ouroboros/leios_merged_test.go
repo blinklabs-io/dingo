@@ -1431,7 +1431,7 @@ func TestServeLeiosRankingBlockCborDisconnectsOnUnresolvedCertifiedBlock(
 	certRB := testDijkstraCertRBRaw(t, 5, make([]byte, lcommon.Blake2b256Size))
 	block := models.Block{Cbor: certRB, Slot: 5, Hash: []byte{0x05}}
 
-	got, err := o.serveLeiosRankingBlockCbor(block, gouroboros.ConnectionId{})
+	got, err := o.serveLeiosRankingBlockCbor(block, gouroboros.ConnectionId{}, nil)
 	require.Error(t, err)
 	require.ErrorIs(t, err, errLeiosClosureUnresolved)
 	require.Nil(t, got)
@@ -1447,7 +1447,7 @@ func TestServeLeiosRankingBlockCborServesRawForNonCertifiedBlock(t *testing.T) {
 	_, blockRaw := testDijkstraBlockRaw(t, 6)
 	block := models.Block{Cbor: blockRaw, Slot: 6, Hash: []byte{0x06}}
 
-	got, err := o.serveLeiosRankingBlockCbor(block, gouroboros.ConnectionId{})
+	got, err := o.serveLeiosRankingBlockCbor(block, gouroboros.ConnectionId{}, nil)
 	require.NoError(t, err)
 	require.Equal(t, []byte(blockRaw), got)
 }
@@ -1644,6 +1644,7 @@ func TestServeLeiosCertRbWithWaitErrorsOnTimeout(t *testing.T) {
 		ebHash,
 		77,
 		gouroboros.ConnectionId{},
+		nil,
 	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, errLeiosClosureUnresolved)
