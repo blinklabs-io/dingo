@@ -2620,6 +2620,18 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 			return ls.handleMithrilBoundaryRollback(e, pending)
 		}
 		if errors.Is(err, ErrRollbackBelowUtxoPruneFloor) {
+			// A peer whose tip is a strict ancestor of our primary chain is
+			// merely behind. Keep it attached and unselected rather than
+			// forcing a fresh intersection for a rollback we cannot cross.
+			if depth, behind := ls.chainsyncPeerBehindOnOurChain(e); behind {
+				ls.noteChainsyncPeerBehind(
+					e,
+					depth,
+					"rollback below consumed UTxO prune floor",
+				)
+				ls.setChainsyncState(SyncingChainsyncState)
+				return nil
+			}
 			// The consumed-UTxO sweep hard-deleted the rows this rewind would
 			// have to restore, so the target is not crossable. That is a peer
 			// divergence this node cannot follow, not a local fault: refuse it

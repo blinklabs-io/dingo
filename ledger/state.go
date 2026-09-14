@@ -3050,6 +3050,11 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 		return
 	}
 	defer ls.cleanupConsumedUtxosRunning.Store(false)
+	// Serialize pruning with chainsync rollback. The rollback path resolves and
+	// validates its target before truncating the primary chain, so the floor
+	// cannot advance between that validation and the ledger mutation.
+	ls.chainsyncMutex.Lock()
+	defer ls.chainsyncMutex.Unlock()
 	if ls.ctx != nil {
 		select {
 		case <-ls.ctx.Done():
@@ -3716,7 +3721,7 @@ func (ls *LedgerState) rollbackWithResync(
 		"component",
 		"ledger",
 	)
-	floorErr := ls.enforceDurableTipFloor()
+	floorErr = ls.enforceDurableTipFloor()
 	if postCommitReloadErr != nil {
 		// The metadata rollback already committed and ls.currentTip already
 		// reflects it, but epochCache/currentEra/currentPParams (or the

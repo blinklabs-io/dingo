@@ -3437,5 +3437,6 @@ balance-sufficiency check; normal ledger ingestion retains that validation.
 `UtxosDeleteConsumed` permanently removed spent UTxO rows. It is written in
 the same transaction as the deletion, only moves forward, and is read
 fail-closed so rollback cannot reconstruct a live set below the recorded
-floor. `TruncateAfterSlot` restores spent UTxOs with an update and clears the
-floor when the truncate crosses it.
+floor. `TruncateAfterSlot` restores spent UTxOs with an update. The
+`database/lifecycle.Truncate` operation clears the floor after
+`TruncateAfterSlot` completes when the truncate crosses it.
