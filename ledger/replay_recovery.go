@@ -1168,7 +1168,10 @@ func (ls *LedgerState) settleAuditAfterRewind(
 	ls.continuationAuditMutex.Lock()
 	defer ls.continuationAuditMutex.Unlock()
 	if armed := ls.continuationAudit.Load(); armed != nil {
-		if truncated && armed.forkPoint.Slot > target.Slot {
+		if truncated &&
+			(armed.forkPoint.Slot > target.Slot ||
+				(armed.forkPoint.Slot == target.Slot &&
+					!bytes.Equal(armed.forkPoint.Hash, target.Hash))) {
 			ls.publishContinuationAudit(nil)
 		}
 		return
