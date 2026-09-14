@@ -27,6 +27,8 @@ import (
 // reuse under this Store's single write connection.
 var hotStatements = []string{
 	sumCredentialUtxoStakeQuery,
+	rewardLiveStakeAccountQuery,
+	rewardLiveStakeUpsertQuery,
 }
 
 // prepareHotStatements prepares every entry in hotStatements once against
@@ -172,4 +174,36 @@ func stmtForQueryer(
 	default:
 		return cached
 	}
+}
+
+// queryRowCached and execCached are the shared cache-or-fallback dance
+// sumCredentialUtxoStake originally inlined by hand: use the hot-statement
+// cache when query has an entry, and fall back to a plain one-shot call
+// against db (which needs no extra connection, see prepareHotStatements) when
+// it does not. Every hotStatements entry should route through one of these
+// two rather than repeating the branch, so the deadlock and
+// Reset/RestoreFrom-invalidation reasoning documented above stays in one
+// place as the cache gains more entries.
+func (s *Store) queryRowCached(
+	ctx context.Context,
+	db queryer,
+	query string,
+	args ...any,
+) *sql.Row {
+	if cached, ok := s.lookupCachedStmt(query); ok {
+		return stmtForQueryer(ctx, db, cached).QueryRowContext(ctx, args...)
+	}
+	return db.QueryRowContext(ctx, query, args...)
+}
+
+func (s *Store) execCached(
+	ctx context.Context,
+	db queryer,
+	query string,
+	args ...any,
+) (sql.Result, error) {
+	if cached, ok := s.lookupCachedStmt(query); ok {
+		return stmtForQueryer(ctx, db, cached).ExecContext(ctx, args...)
+	}
+	return db.ExecContext(ctx, query, args...)
 }
