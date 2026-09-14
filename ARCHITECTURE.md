@@ -5040,17 +5040,31 @@ and it still carries the slot's Leios payload. The fallback needs a
 that does not simply loses the slot as before.
 
 Every build attempt for a slot -- the first, each retry, and the fallback --
-re-applies the same chain-tip ordering the pre-selection gates applied at
-entry, against a freshly read tip. Those gates decide the slot from a tip read
-before leader selection, and Leios endorser-block production, the KES step and
-each selection pass all run after it, so by the time a retry or the fallback is
-decided that reading may be stale -- and it is stale precisely in the case that
-reaches them, a peer block landing mid-selection. A tip past the slot declines
-it without building; a tip at the slot is the same slot battle the entry gate
-declines, and is counted in `dingo_metrics_slotBattlesTotal_int` wherever it is
-detected. Without the re-check the forger would compute a VRF proof and
-KES-sign a block whose parent slot is not below its own, leaving
-`ledger.validateBlockOrder` inside `AddBlock` as the only thing that rejects it.
+re-reads both tips and decides the slot again with the same function the
+pre-selection gates used at entry (`evaluateTipGates`, applied through
+`tipGatesRefuseSlot`), so the two decisions cannot drift apart. The entry gates
+decide the slot from evidence read before leader selection, and Leios
+endorser-block production, the KES step and each selection pass all run after
+it; a retry or the fallback runs precisely because the primary chain tip moved
+during selection, so that is the one window in which the ledger-applied tip and
+the primary chain tip are guaranteed to have moved apart, and the applied tip
+alone says nothing about it. The re-check therefore applies every gate
+described below against fresh readings of both tips: a parent slot (the
+greater of the two tips) past the forged slot declines it without building; an
+applied tip at the slot is the same slot battle the entry gate declines, and is
+counted in `dingo_metrics_slotBattlesTotal_int` wherever it is detected; a
+primary chain tip already holding an unapplied block at the slot is counted as
+`unapplied_rival_at_leader_slot`; and `primary_tip_behind_applied`,
+`primary_tip_hash_diverged`, `slot_gap` and the opt-in staleness bounds refuse
+as they do at entry, counted on `dingo_forge_stale_tip_skip_total`. The two
+inputs that are not re-read are the corroborated endorser-block slot and the
+upstream sync reading, which are network evidence taken once per forge cycle
+and carried to each attempt. Without the re-check the forger would compute a
+VRF proof and KES-sign a block whose parent slot is not below its own, and
+nothing local rejects that before diffusion: `Chain.AddLocalBlock` checks only
+prev-hash and block-number contiguity, so the block is admitted and broadcast
+to peers, and the slot-order check (`ledger.validateBlockOrder`) runs only
+later, from `ledgerProcessBlock`, when the ledger applies the block.
 
 `dingo_forge_selection_fallback_total` reports how slots whose selection was
 aborted ended, by `result`: `retried` when a later attempt in the same slot
