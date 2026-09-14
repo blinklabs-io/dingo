@@ -292,6 +292,33 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 		)
 		return nil
 	}
+	// Validate the requested end point against the same canonical chain. The
+	// iterator must not be allowed to turn a missing or forked end point into a
+	// successful short batch.
+	endIter, err := o.ledgerState.GetChainFromPoint(end, true)
+	if err != nil {
+		o.config.Logger.Debug(
+			"blockfetch: end point not found in chain, sending NoBlocks",
+			"connection_id", ctx.ConnectionId.String(),
+			"end_slot", end.Slot,
+			"error", err,
+		)
+		chainIter.Cancel()
+		if err := ctx.Server.NoBlocks(); err != nil {
+			return fmt.Errorf(
+				"blockfetch NoBlocks after end point not found: %w",
+				err,
+			)
+		}
+		o.blockfetchRecordNoBlocksAndMaybeClose(
+			ctx.ConnectionId,
+			start,
+			"blockfetch: closing stuck peer after repeated missing end-point requests",
+			"blockfetch: peer stuck on missing end point",
+		)
+		return nil
+	}
+	endIter.Cancel()
 	o.blockfetchResetNoBlocks(ctx.ConnectionId)
 	// Start async process to send requested block range
 	go func() {
@@ -378,14 +405,6 @@ Loop:
 				break Loop
 			}
 			if next.Rollback {
-				// A rollback raced this in-flight batch: the iterator
-				// surfaced a rollback sentinel with a zero-value Block.
-				// Serving it would stream a [0, null] block that a fetching
-				// peer decodes as a nil-header Byron EBB and crashes
-				// dereferencing it in SlotNumber(). Blockfetch has no
-				// rollback message, so end the batch cleanly; the client
-				// re-requests against its updated chain. Mirrors the
-				// next.Rollback handling in chainsync.
 				break Loop
 			}
 			if next.Block.Slot > end.Slot {
@@ -451,6 +470,17 @@ Loop:
 				break Loop
 			}
 		}
+	}
+	if !reachedEnd {
+		o.closeBlockfetchConnection(
+			conn,
+			connectionID,
+			"blockfetch iterator ended before requested end point",
+		)
+		return fmt.Errorf(
+			"blockfetch iterator ended before requested end point at slot %d",
+			end.Slot,
+		)
 	}
 	// Signal batch completion
 	if err := server.BatchDone(); err != nil {

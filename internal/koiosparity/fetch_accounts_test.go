@@ -419,7 +419,7 @@ func TestFetchEpochAccountsWithAddrsLooksUpEpochEndTimeFromCache(t *testing.T) {
 // TestBuildAccountAddressUniverseUnionsKoiosAndDingo proves the address
 // universe is the union of Koios's list and Dingo's own committed
 // reward_account_output addresses, not either alone — using a real DingoDB
-// (RewardParitySource) against the same glebarez/sqlite fixture schema
+// (RewardParitySource) against the same sqlite fixture schema
 // dingo_db_test.go/check_test.go use, per this tool's "no local mocks"
 // testing convention.
 func TestBuildAccountAddressUniverseUnionsKoiosAndDingo(t *testing.T) {
