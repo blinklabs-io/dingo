@@ -3707,6 +3707,32 @@ variant of this recovery (gated on a `blockfetchMinBatchGapSlots` tip gap,
 which never applied at tip) still runs for its own case before the bound is
 reached.
 
+A peer that keeps serving blocks which do not extend the current chain tip
+(`Chain.AddBlockWithPointDeferred` returning `BlockNotFitChainTipError`) is
+tracked the same way: `flushPendingBlockfetchBlocksDeferred` logs and ignores
+each one ("ignoring blockfetch block ... does not fit on current chain tip"),
+so unlike a hard processing error this never reaches
+`handleEventBlockfetch`'s own recycle-on-error check, and the peer previously
+stayed selected as best peer indefinitely (issue #4272). A per-connection
+count (`LedgerState.nonExtendingBlockRejections`, keyed by `connIdKey`) bounds
+this the same way `blockfetchRangeFailure` bounds an unfetchable range, but
+windowed rather than kept as an unbounded consecutive streak: a rejection more
+than `nonExtendingBlockRejectionWindow` (30s) after the count's window started
+restarts it at 1 instead of accumulating, so rejections spread thinly over a
+long connection lifetime never combine into a false positive. Reaching
+`nonExtendingBlockRejectionThreshold` (20) inside the window publishes
+`ledger.ConnectionRecycleRequestedEventType` with reason
+`"non_extending_block_flood"` — the same recycle mechanism header/crypto
+verification failures use — so peer governance's normal connection-closed
+handling (short-lived-connection backoff, cold-state demotion, reconnect) takes
+over from there; nothing here bans or scores the peer directly. The count for
+a connection is cleared entirely (`noteBlockAcceptedFromConn`) the moment that
+same connection delivers a block that DOES extend the chain, so a peer racing
+a brief, legitimate rollback/reorg — which can genuinely serve a handful of
+now-stale blocks before converging — is never punished for it, while hundreds
+of rejections per second from a peer that never converges crosses the bound
+almost immediately.
+
 Bootstrap topology peers remain chain-selection eligible after bootstrap exit
 as a fallback ingress source, but peer governance lowers their priority to zero.
 This lets non-bootstrap peers win same-tip transport selection without

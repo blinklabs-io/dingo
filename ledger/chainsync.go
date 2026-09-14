@@ -92,6 +92,30 @@ const (
 	// discards its record entirely.
 	blockfetchMaxSameRangeFailures = 3
 
+	// nonExtendingBlockRejectionThreshold is how many blocks fetched from the
+	// same peer connection may fail chain.AddBlockWithPointDeferred with
+	// BlockNotFitChainTipError inside nonExtendingBlockRejectionWindow before
+	// that connection is recycled (issue #4272).
+	//
+	// A peer racing a legitimate rollback/reorg can serve a handful of
+	// blocks that briefly no longer fit while its own view of the fork
+	// catches up to ours (or ours to its); that settles in at most a few
+	// exchanges bounded by normal chain-selection convergence, not dozens.
+	// A peer that keeps this up well past any plausible race -- hundreds of
+	// rejections at multiple per second, as observed live -- crosses this
+	// bound almost immediately, while a transient race spread over the
+	// window does not come close. noteBlockAcceptedFromConn forgives the
+	// count entirely the moment the same connection actually extends the
+	// chain, so a peer that only briefly raced is never punished for it.
+	nonExtendingBlockRejectionThreshold = 20
+
+	// nonExtendingBlockRejectionWindow bounds how far apart two
+	// non-extending-block rejections from the same connection can be and
+	// still count toward the same flood. A gap longer than this restarts
+	// the count, so sparse, unrelated rejections spread across a long
+	// connection lifetime never accumulate into a false recycle.
+	nonExtendingBlockRejectionWindow = 30 * time.Second
+
 	// Warn after this many consecutive watchdog expirations while the same
 	// protocol request is still blocked outside the ledger mutex. The request
 	// remains protected from duplicate retries, but a permanently wedged peer
@@ -4475,6 +4499,116 @@ func (ls *LedgerState) noteBlockfetchRangeUnavailable(
 	return true
 }
 
+// nonExtendingBlockRejectionState counts recent "block does not fit chain
+// tip" rejections (chain.BlockNotFitChainTipError) from one connection,
+// bounded to nonExtendingBlockRejectionWindow. See
+// nonExtendingBlockRejectionThreshold for why this is windowed rather than a
+// simple consecutive streak.
+type nonExtendingBlockRejectionState struct {
+	windowStart time.Time
+	count       int
+}
+
+// evaluateNonExtendingBlockRejection folds one more non-extending-block
+// rejection into state at time now and reports whether the connection has
+// now crossed nonExtendingBlockRejectionThreshold rejections inside
+// nonExtendingBlockRejectionWindow. A gap since the window started that
+// exceeds the window restarts the count at 1 instead of accumulating, so
+// rejections spread thinly over a long connection lifetime never combine
+// into a false flood. Pure and deterministic so it can be tested directly
+// against synthetic timestamps, matching
+// chainsyncrecycler.shouldRecycleLocalTipPlateau.
+func evaluateNonExtendingBlockRejection(
+	state nonExtendingBlockRejectionState,
+	now time.Time,
+) (nonExtendingBlockRejectionState, bool) {
+	if state.count == 0 ||
+		now.Sub(state.windowStart) > nonExtendingBlockRejectionWindow {
+		state = nonExtendingBlockRejectionState{windowStart: now, count: 1}
+	} else {
+		state.count++
+	}
+	if state.count >= nonExtendingBlockRejectionThreshold {
+		return nonExtendingBlockRejectionState{}, true
+	}
+	return state, false
+}
+
+// noteNonExtendingBlockRejection records one non-extending-block rejection
+// from connId and, once evaluateNonExtendingBlockRejection reports the
+// connection has crossed the bounded flood threshold, logs and queues a
+// ConnectionRecycleRequestedEvent for it -- the same recycle mechanism
+// header/crypto verification failures already use just above, applied to a
+// peer that keeps serving blocks that do not extend the chain (issue #4272)
+// instead of the "ignore and keep retrying it as best peer" behavior that
+// let one peer flood ~300k rejected blocks across four reconnects live.
+//
+// The caller must hold ls.chainsyncBlockfetchMutex, which guards
+// ls.nonExtendingBlockRejections along with the rest of the blockfetch drain
+// state.
+func (ls *LedgerState) noteNonExtendingBlockRejection(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+	pending *pendingPublishes,
+) {
+	key := connIdKey(connId)
+	if key == "" {
+		return
+	}
+	if ls.nonExtendingBlockRejections == nil {
+		ls.nonExtendingBlockRejections = make(
+			map[string]nonExtendingBlockRejectionState,
+		)
+	}
+	next, shouldRecycle := evaluateNonExtendingBlockRejection(
+		ls.nonExtendingBlockRejections[key],
+		time.Now(),
+	)
+	if !shouldRecycle {
+		ls.nonExtendingBlockRejections[key] = next
+		return
+	}
+	delete(ls.nonExtendingBlockRejections, key)
+	ls.config.Logger.Warn(
+		"recycling connection after repeated non-extending block rejections",
+		"component", "ledger",
+		"connection_id", connId.String(),
+		"slot", point.Slot,
+		"hash", hex.EncodeToString(point.Hash),
+		"threshold", nonExtendingBlockRejectionThreshold,
+		"window", nonExtendingBlockRejectionWindow.String(),
+	)
+	if ls.config.EventBus == nil {
+		return
+	}
+	pending.add(
+		ls.config.EventBus,
+		ConnectionRecycleRequestedEventType,
+		event.NewEvent(
+			ConnectionRecycleRequestedEventType,
+			ConnectionRecycleRequestedEvent{
+				ConnectionId: connId,
+				Reason:       "non_extending_block_flood",
+			},
+		),
+	)
+}
+
+// noteBlockAcceptedFromConn clears any non-extending-block rejection count
+// tracked for connId. A connection that just extended the chain has proven
+// it is not stuck replaying an abandoned fork, so rejections from before
+// that success (a brief rollback race, a stale queued header) must not
+// accumulate toward a later, unrelated flood.
+func (ls *LedgerState) noteBlockAcceptedFromConn(
+	connId ouroboros.ConnectionId,
+) {
+	key := connIdKey(connId)
+	if key == "" {
+		return
+	}
+	delete(ls.nonExtendingBlockRejections, key)
+}
+
 // startQueuedBlockfetchOnLocked starts the queued range on connId and, if that
 // succeeds, retargets the blockfetch selection to it.
 //
@@ -4891,6 +5025,11 @@ func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 			validationEnabled, _ := ls.validationStateSnapshot()
 			ls.auditContinuationBlock(pendingEvent, validationEnabled)
 			ls.checkSlotBattle(pendingEvent, nil)
+			// This connection just extended the chain, so it is not stuck
+			// replaying an abandoned fork; forgive any earlier non-extending
+			// rejections instead of letting them combine with a later,
+			// unrelated flood.
+			ls.noteBlockAcceptedFromConn(pendingEvent.ConnectionId)
 			continue
 		}
 		ls.clearDeferredHeaderValidation(pendingEvent.Point)
@@ -4918,6 +5057,18 @@ func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 		)
 		if errors.As(addBlockErr, &notMatchErr) {
 			ls.clearQueuedHeaders()
+		}
+		if errors.As(addBlockErr, &notFitErr) {
+			// A peer that keeps serving blocks that do not extend the chain
+			// is never otherwise demoted: this error is deliberately
+			// swallowed as "ignored" above rather than returned, so it never
+			// reaches handleEventBlockfetch's recycle-on-error check. Track
+			// it here instead (issue #4272).
+			ls.noteNonExtendingBlockRejection(
+				pendingEvent.ConnectionId,
+				pendingEvent.Point,
+				pubs,
+			)
 		}
 		ls.checkSlotBattle(pendingEvent, addBlockErr)
 	}

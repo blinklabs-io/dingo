@@ -1016,6 +1016,13 @@ type LedgerState struct {
 	// deliveries for other ranges and header-queue churn; discarded when
 	// the tracked range itself is delivered.
 	blockfetchRangeFailure blockfetchRangeFailureState
+	// nonExtendingBlockRejections counts, per connection (keyed by
+	// connIdKey), recent "block does not fit chain tip" rejections inside
+	// nonExtendingBlockRejectionWindow. Guarded by chainsyncBlockfetchMutex,
+	// like the rest of the blockfetch drain state above. See
+	// noteNonExtendingBlockRejection and noteBlockAcceptedFromConn
+	// (issue #4272).
+	nonExtendingBlockRejections map[string]nonExtendingBlockRejectionState
 	// deferredHeaderValidation holds block points whose stateful header checks
 	// wait for ledger apply. It is guarded by its own deferredHeaderValidationMu
 	// (NOT the main RWMutex) so the snapshot retention guard
