@@ -181,7 +181,7 @@ func requireTransactionEvent(
 	evt := testutil.RequireReceive(
 		t,
 		events,
-		2*time.Second,
+		testutil.AsyncWait,
 		"post-commit transaction event",
 	)
 	txEvt, ok := evt.Data.(TransactionEvent)

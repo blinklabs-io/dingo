@@ -202,7 +202,7 @@ func TestStartQueuedBlockfetchCancelsPriorRequestWaitDuringShutdown(
 	testutil.RequireReceive(
 		t,
 		waitStarted,
-		time.Second,
+		testutil.AsyncWait,
 		"blockfetch request drain did not start",
 	)
 	cancel()
@@ -210,7 +210,7 @@ func TestStartQueuedBlockfetchCancelsPriorRequestWaitDuringShutdown(
 	select {
 	case err := <-startDone:
 		require.ErrorIs(t, err, context.Canceled)
-	case <-time.After(time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("blockfetch request drain ignored shutdown cancellation")
 	}
 }
@@ -282,7 +282,7 @@ func TestStartQueuedBlockfetchDrainsPriorRequestBeforeConnectionReuse(
 	testutil.RequireReceive(
 		t,
 		requestStarted,
-		time.Second,
+		testutil.AsyncWait,
 		"blockfetch request did not start after prior request drained",
 	)
 	require.NoError(t, <-startDone)
@@ -348,13 +348,13 @@ func TestBlockfetchBatchDoneDoesNotBlockSubscriberOnContinuation(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		handlerDone,
-		time.Second,
+		testutil.AsyncWait,
 		"blockfetch subscriber remained blocked in continuation request",
 	)
 	testutil.RequireReceive(
 		t,
 		requestStarted,
-		time.Second,
+		testutil.AsyncWait,
 		"continuation request did not start",
 	)
 
@@ -634,7 +634,7 @@ func TestStartQueuedBlockfetchDropsHeadersAfterRepeatedNoBlocks(t *testing.T) {
 	resync := testutil.RequireReceive(
 		t,
 		resyncChan,
-		2*time.Second,
+		testutil.AsyncWait,
 		"chainsync resync after repeated NoBlocks responses",
 	)
 	assert.Equal(t, connId, resync.ConnectionId)
@@ -754,7 +754,7 @@ func TestRestartQueuedBlockfetchAfterForkDropsHeadersOnRepeatedNoBlocks(
 	testutil.RequireReceive(
 		t,
 		resyncChan,
-		2*time.Second,
+		testutil.AsyncWait,
 		"chainsync resync after repeated fork-restart NoBlocks responses",
 	)
 }
@@ -853,7 +853,7 @@ func TestBlockfetchRangeFailuresAccumulatePerRangeDespiteInterleavedActivity(
 	testutil.RequireReceive(
 		t,
 		resyncChan,
-		2*time.Second,
+		testutil.AsyncWait,
 		"chainsync resync after repeated same-range failures",
 	)
 }
@@ -996,7 +996,7 @@ func TestHandleEventBlockfetchBatchDoneStopsRepeatingEmptyBatches(
 	resync := testutil.RequireReceive(
 		t,
 		resyncChan,
-		2*time.Second,
+		testutil.AsyncWait,
 		"chainsync resync after repeated empty blockfetch batches",
 	)
 	assert.Equal(t, connId, resync.ConnectionId)
