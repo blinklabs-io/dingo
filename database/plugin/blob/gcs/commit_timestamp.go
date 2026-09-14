@@ -22,6 +22,7 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/committimestamp"
 	dingosops "github.com/blinklabs-io/dingo/database/sops"
 	"github.com/blinklabs-io/dingo/database/types"
 )
@@ -47,16 +48,17 @@ func (b *BlobStoreGCS) GetCommitTimestamp() (int64, error) {
 
 	// If SOPS is not enabled, read plaintext directly
 	if !dingosops.IsEnabled() {
-		return new(big.Int).SetBytes(r).Int64(), nil
+		return committimestamp.DecodeLegacy(r)
 	}
 
 	plaintext, err := dingosops.Decrypt(r)
 	if err != nil {
 		if !json.Valid(r) && len(r) <= 8 {
-			ts := new(big.Int).SetBytes(r).Int64()
+			ts, decodeErr := committimestamp.DecodeLegacy(r)
 			// Validate timestamp is reasonable (post-2000, not in future)
 			now := time.Now().UnixMilli()
-			if ts > 946684800000 && ts <= now { // post-2000, not in future
+			if decodeErr == nil && ts > 946684800000 &&
+				ts <= now { // post-2000, not in future
 				b.logger.Warningf(
 					"commit timestamp stored plaintext in GCS, migrating to SOPS encryption: %v",
 					err,
@@ -85,7 +87,7 @@ func (b *BlobStoreGCS) GetCommitTimestamp() (int64, error) {
 		return 0, err
 	}
 
-	return new(big.Int).SetBytes(plaintext).Int64(), nil
+	return committimestamp.DecodeLegacy(plaintext)
 }
 
 func (b *BlobStoreGCS) SetCommitTimestamp(

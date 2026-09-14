@@ -31,6 +31,8 @@ import (
 // returned an empty common.Constitution, so every one of these assertions
 // read a zero value.
 func TestConstitutionFromModelMapsAnchorAndPolicyHash(t *testing.T) {
+	t.Parallel()
+
 	anchorHash := bytes.Repeat([]byte{0x11}, lcommon.Blake2b256Size)
 	policyHash := bytes.Repeat([]byte{0x22}, lcommon.Blake2b224Size)
 
@@ -53,6 +55,8 @@ func TestConstitutionFromModelMapsAnchorAndPolicyHash(t *testing.T) {
 // by value, so an empty-but-non-nil slice would be read as "a guardrails
 // script is required" and reject every proposal.
 func TestConstitutionFromModelWithoutPolicyHash(t *testing.T) {
+	t.Parallel()
+
 	anchorHash := bytes.Repeat([]byte{0x33}, lcommon.Blake2b256Size)
 	for name, stored := range map[string][]byte{
 		"nil":   nil,
@@ -76,6 +80,8 @@ func TestConstitutionFromModelWithoutPolicyHash(t *testing.T) {
 // ScriptHash does not share backing memory with the stored row, so a caller
 // mutating the returned value cannot corrupt the store's buffer.
 func TestConstitutionFromModelDoesNotAliasStoredPolicyHash(t *testing.T) {
+	t.Parallel()
+
 	policyHash := bytes.Repeat([]byte{0x44}, lcommon.Blake2b224Size)
 	stored := &models.Constitution{
 		AnchorHash: bytes.Repeat([]byte{0x45}, lcommon.Blake2b256Size),
@@ -94,6 +100,8 @@ func TestConstitutionFromModelDoesNotAliasStoredPolicyHash(t *testing.T) {
 // accept a parameter-change or treasury-withdrawal proposal carrying no
 // policy hash on a chain whose constitution requires one.
 func TestConstitutionFromModelMissingFailsClosed(t *testing.T) {
+	t.Parallel()
+
 	got, err := ConstitutionFromModel(nil)
 	require.ErrorIs(t, err, ErrConstitutionUnavailable)
 	require.Nil(t, got)
@@ -103,6 +111,8 @@ func TestConstitutionFromModelMissingFailsClosed(t *testing.T) {
 // whose anchor hash is not a full blake2b-256 digest fails closed instead of
 // being zero-padded or truncated into the contract's fixed-size array.
 func TestConstitutionFromModelMalformedAnchorFailsClosed(t *testing.T) {
+	t.Parallel()
+
 	for name, anchorHash := range map[string][]byte{
 		"absent": nil,
 		"short":  bytes.Repeat([]byte{0x55}, lcommon.Blake2b256Size-1),
@@ -128,6 +138,8 @@ func TestConstitutionFromModelMalformedAnchorFailsClosed(t *testing.T) {
 // what makes the genesis constitution the enacted one on a chain that has
 // never enacted a NewConstitution action.
 func TestConstitutionFromGenesisMapsAnchorAndScript(t *testing.T) {
+	t.Parallel()
+
 	anchorHash := hex.EncodeToString(
 		bytes.Repeat([]byte{0x66}, lcommon.Blake2b256Size),
 	)
@@ -156,6 +168,8 @@ func TestConstitutionFromGenesisMapsAnchorAndScript(t *testing.T) {
 // ConstitutionFromModel then reports as "no guardrails script required"
 // rather than as an empty-but-present hash.
 func TestConstitutionFromGenesisWithoutScript(t *testing.T) {
+	t.Parallel()
+
 	got, err := ConstitutionFromGenesis(&conway.ConwayGenesis{
 		Constitution: conway.ConwayGenesisConstitution{
 			Anchor: conway.ConwayGenesisConstitutionAnchor{
@@ -179,6 +193,8 @@ func TestConstitutionFromGenesisWithoutScript(t *testing.T) {
 // that declares no constitution at all, both map to no row and no error, so
 // genesis initialization seeds nothing instead of failing.
 func TestConstitutionFromGenesisAbsent(t *testing.T) {
+	t.Parallel()
+
 	got, err := ConstitutionFromGenesis(nil)
 	require.NoError(t, err)
 	require.Nil(t, got)
@@ -193,6 +209,8 @@ func TestConstitutionFromGenesisAbsent(t *testing.T) {
 // rejected rather than seeded. A wrong guardrails hash would reject every
 // parameter-change and treasury-withdrawal proposal on the chain.
 func TestConstitutionFromGenesisMalformed(t *testing.T) {
+	t.Parallel()
+
 	validAnchor := hex.EncodeToString(
 		bytes.Repeat([]byte{0x69}, lcommon.Blake2b256Size),
 	)

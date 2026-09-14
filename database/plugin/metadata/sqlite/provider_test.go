@@ -68,6 +68,26 @@ func TestProviderMaxConnectionsPrecedence(t *testing.T) {
 	}
 }
 
+func TestProviderMaxConnectionsRejectsNegative(t *testing.T) {
+	t.Parallel()
+	host := plugin.NewHost()
+	require.NoError(t, RegisterProvider(host))
+	t.Cleanup(func() {
+		require.NoError(t, host.Stop(context.Background()))
+	})
+
+	_, err := plugin.Resolve[*sqlstore.Store](
+		context.Background(),
+		host,
+		plugin.CapabilityStorageMetadata,
+		"sqlite",
+		map[string]any{"maxConnections": -1},
+		metadata.ProviderDependencies{},
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "must not be negative")
+}
+
 func TestProviderDataDirPrecedence(t *testing.T) {
 	tests := []struct {
 		name     string

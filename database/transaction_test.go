@@ -239,6 +239,8 @@ func (m *mockBlobTxn) Rollback() error {
 // variant must instead propagate the read error so a caller enforcing a
 // safety check can fail closed.
 func TestMithrilTrustBoundarySlotStrictPropagatesReadError(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 	require.NoError(t, closeTestDatabase(db))
 
@@ -251,6 +253,8 @@ func TestMithrilTrustBoundarySlotStrictPropagatesReadError(t *testing.T) {
 // its other caller (the consumed-UTxO recovery heuristic in this same
 // file): a failed read still returns 0, not an error.
 func TestMithrilTrustBoundarySlotSwallowsReadError(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 	require.NoError(t, closeTestDatabase(db))
 
@@ -265,6 +269,8 @@ func TestMithrilTrustBoundarySlotSwallowsReadError(t *testing.T) {
 // than (0, nil), or a truncate could proceed past a boundary that is
 // actually corrupt/unreadable.
 func TestMithrilTrustBoundarySlotStrictPropagatesParseError(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 	require.NoError(
 		t,
@@ -282,11 +288,62 @@ func TestMithrilTrustBoundarySlotStrictPropagatesParseError(t *testing.T) {
 // via its logged fail-open path now that the strict variant propagates the
 // parse error.
 func TestMithrilTrustBoundarySlotSwallowsParseError(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 	require.NoError(
 		t,
 		db.SetSyncState(mithrilLedgerSlotSyncKey, "not-a-slot", nil),
 	)
+
+	require.Zero(t, db.MithrilTrustBoundarySlot(nil))
+}
+
+// TestMithrilTrustBoundarySlotStrictRejectsEmptyRecordedValue covers the gap
+// an unparseable value does not: GetSyncState reports an absent key as the
+// empty string, so a sync_state row that exists and holds nothing was
+// indistinguishable from "no snapshot was ever imported" and returned
+// (0, nil). That defeats every fail-closed caller — lifecycle.Truncate would
+// enforce no floor, and koiosparity's bootstrap bound would switch itself off
+// — at exactly the moment the boundary could not be confirmed. A recorded
+// empty value is a malformed boundary, not the absence of one.
+func TestMithrilTrustBoundarySlotStrictRejectsEmptyRecordedValue(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	require.NoError(t, db.SetSyncState(mithrilLedgerSlotSyncKey, "", nil))
+
+	slot, err := db.MithrilTrustBoundarySlotStrict(nil)
+	require.ErrorContains(t, err, "empty value")
+	require.Zero(t, slot)
+}
+
+// TestMithrilTrustBoundarySlotStrictTreatsAbsentKeyAsNoBoundary is the
+// control for the test above: with no sync_state row at all — a genesis-
+// synced node — the strict accessor must still report "no boundary
+// recorded" rather than erroring, or every such node fails the checks that
+// consume it.
+func TestMithrilTrustBoundarySlotStrictTreatsAbsentKeyAsNoBoundary(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := openTestDB(t)
+
+	slot, err := db.MithrilTrustBoundarySlotStrict(nil)
+	require.NoError(t, err)
+	require.Zero(t, slot)
+}
+
+// TestMithrilTrustBoundarySlotSwallowsEmptyRecordedValue confirms
+// MithrilTrustBoundarySlot's fail-open contract is unchanged for a recorded
+// empty value now that the strict variant rejects it: the consumed-UTxO
+// recovery heuristic must still read 0, not propagate an error.
+func TestMithrilTrustBoundarySlotSwallowsEmptyRecordedValue(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	require.NoError(t, db.SetSyncState(mithrilLedgerSlotSyncKey, "", nil))
 
 	require.Zero(t, db.MithrilTrustBoundarySlot(nil))
 }
@@ -377,6 +434,8 @@ func TestDeleteUtxoBlobsCountsFailedBatchCommit(t *testing.T) {
 func TestTransactionsDeleteRolledbackLogsBlobFailureAndDeletesMetadata(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	var logs bytes.Buffer
 	logger := slog.New(
 		slog.NewJSONHandler(
@@ -435,6 +494,8 @@ func TestTransactionsDeleteRolledbackLogsBlobFailureAndDeletesMetadata(
 // TestUtxosDeleteRolledbackLogsBlobFailureAndDeletesMetadata injects a UTxO blob deletion failure.
 // It verifies the failure is logged while rollback metadata cleanup still succeeds.
 func TestUtxosDeleteRolledbackLogsBlobFailureAndDeletesMetadata(t *testing.T) {
+	t.Parallel()
+
 	var logs bytes.Buffer
 	logger := slog.New(
 		slog.NewJSONHandler(
@@ -498,6 +559,8 @@ SELECT COUNT(*) FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 func TestRecoverConsumedUtxoLegacyRawCborWithoutProducerBlockFails(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	defer func() {
@@ -539,6 +602,8 @@ func TestRecoverConsumedUtxoLegacyRawCborWithoutProducerBlockFails(
 // must be reported off-chain, so recoverConsumedUtxo refuses to resurrect it
 // for a validated block past the Mithril boundary.
 func TestRecoveredProducerOnPrimaryChain(t *testing.T) {
+	t.Parallel()
+
 	db, err := newTestDatabase(t, &Config{
 		DataDir:              t.TempDir(),
 		Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -607,6 +672,8 @@ func TestRecoveredProducerOnPrimaryChain(t *testing.T) {
 // row during a rollback, but joins on utxo.transaction_id would silently drop
 // it from producer-transaction output lookups.
 func TestSetTransactionRecoveryPopulatesProducerFK(t *testing.T) {
+	t.Parallel()
+
 	db, err := newTestDatabase(t, &Config{
 		DataDir: t.TempDir(),
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -634,6 +701,7 @@ func TestSetTransactionRecoveryPopulatesProducerFK(t *testing.T) {
 					producer.tx,
 					producer.point,
 					0,
+					nil,
 					txn.Metadata(),
 				)
 			}),
@@ -806,6 +874,8 @@ func TestSetTransactionRecoveryPopulatesProducerFK(t *testing.T) {
 func TestEnsureTransactionConsumedUtxosStrictAppliedInputConservation(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	candidate := findGapConsumeCandidateWithoutCertificates(t)
 
 	// newRecoverableDB stages the fixture in a recovery-ready state: producer
@@ -834,6 +904,7 @@ func TestEnsureTransactionConsumedUtxosStrictAppliedInputConservation(
 					producer.tx,
 					producer.point,
 					0,
+					nil,
 					txn.Metadata(),
 				)
 			}))
@@ -936,6 +1007,7 @@ func TestEnsureTransactionConsumedUtxosStrictAppliedInputConservation(
 					producer.tx,
 					producer.point,
 					0,
+					nil,
 					txn.Metadata(),
 				)
 			}))
@@ -967,6 +1039,8 @@ func TestEnsureTransactionConsumedUtxosStrictAppliedInputConservation(
 // trust boundary (blocks past the boundary should have complete producer
 // history; blocks at or below it legitimately may not).
 func TestEnsureTransactionConsumedUtxosStrictValidation(t *testing.T) {
+	t.Parallel()
+
 	candidate := findGapConsumeCandidateWithoutCertificates(t)
 
 	newTestDB := func(t *testing.T, strict bool) *Database {
@@ -1047,6 +1121,8 @@ func TestEnsureTransactionConsumedUtxosStrictValidation(t *testing.T) {
 // observed as the later, unrelated output-decode failure, so the test needs no
 // fabricated ledger CBOR.
 func TestRecoverConsumedUtxoRefusesOffPrimaryChainProducer(t *testing.T) {
+	t.Parallel()
+
 	db, err := newTestDatabase(t, &Config{
 		DataDir:              t.TempDir(),
 		Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -1137,4 +1213,50 @@ func TestRecoverConsumedUtxoRefusesOffPrimaryChainProducer(t *testing.T) {
 	require.NotErrorIs(t, err, ErrUtxoNotFound,
 		"the gate must be the only thing refusing this producer")
 	require.ErrorContains(t, err, "decode transaction output")
+}
+
+// TestDeleteUtxoBlobsUsesCallerBlobTxn pins that UTxO blob deletes are staged
+// in the caller's transaction rather than committed on their own.
+//
+// UtxosDeleteRolledback and UtxosDeleteConsumed delete blobs before the
+// metadata delete they accompany. Committing the blob deletes separately let a
+// successful delete survive the caller's rollback, leaving metadata that points
+// at blob data which is already gone.
+func TestDeleteUtxoBlobsUsesCallerBlobTxn(t *testing.T) {
+	t.Parallel()
+
+	store := &mockBlobStore{}
+	db := &Database{
+		blobRef: newBlobStoreRef(store),
+		logger: slog.New(
+			slog.NewJSONHandler(
+				io.Discard,
+				&slog.HandlerOptions{Level: slog.LevelDebug},
+			),
+		),
+	}
+	txn := db.Transaction(true)
+
+	utxos := []models.Utxo{
+		{TxId: []byte{0x01}, OutputIdx: 0},
+		{TxId: []byte{0x02}, OutputIdx: 1},
+		{TxId: []byte{0x03}, OutputIdx: 2},
+	}
+	require.NoError(t, deleteUtxoBlobs(db, utxos, txn))
+	require.Len(
+		t,
+		store.txns,
+		1,
+		"the deletes must not open a transaction of their own",
+	)
+	require.Equal(t, []int{1, 1, 1}, store.deleteUtxoTxnIDs,
+		"every delete must run through the caller's transaction")
+	require.Zero(t, store.txns[0].commitCount,
+		"a staged delete must not be committed before the caller commits")
+	require.Zero(t, store.txns[0].rollbackCount)
+
+	// The caller rolls back, so the staged deletes must go with it.
+	require.NoError(t, txn.Rollback())
+	require.Equal(t, 1, store.txns[0].rollbackCount,
+		"the caller's rollback must discard the staged blob deletes")
 }

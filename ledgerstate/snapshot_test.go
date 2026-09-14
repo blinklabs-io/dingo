@@ -32,6 +32,8 @@ import (
 )
 
 func TestFindLedgerStateFileLegacy(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	ledgerDir := filepath.Join(dir, "ledger")
 	err := os.MkdirAll(ledgerDir, 0o750)
@@ -48,6 +50,8 @@ func TestFindLedgerStateFileLegacy(t *testing.T) {
 }
 
 func TestFindLedgerStateFileUTxOHD(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	slotDir := filepath.Join(dir, "ledger", "67890")
 	err := os.MkdirAll(slotDir, 0o750)
@@ -63,6 +67,8 @@ func TestFindLedgerStateFileUTxOHD(t *testing.T) {
 }
 
 func TestFindLedgerStateFilePreferUTxOHD(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	ledgerDir := filepath.Join(dir, "ledger")
 	err := os.MkdirAll(ledgerDir, 0o750)
@@ -88,6 +94,8 @@ func TestFindLedgerStateFilePreferUTxOHD(t *testing.T) {
 }
 
 func TestFindLedgerStateFileDBSubdir(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	ledgerDir := filepath.Join(dir, "db", "ledger")
 	err := os.MkdirAll(ledgerDir, 0o750)
@@ -103,6 +111,8 @@ func TestFindLedgerStateFileDBSubdir(t *testing.T) {
 }
 
 func TestFindLedgerStateFileUTxOHDHighestSlot(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 
 	// Create two UTxO-HD slot subdirectories with state files
@@ -125,6 +135,8 @@ func TestFindLedgerStateFileUTxOHDHighestSlot(t *testing.T) {
 }
 
 func TestFindLedgerStateFileAtOrBefore(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 
 	for _, slot := range []string{"100", "200", "300"} {
@@ -150,6 +162,8 @@ func TestFindLedgerStateFileAtOrBefore(t *testing.T) {
 }
 
 func TestFindLedgerStateFileAtOrBeforeRejectsVolatileOnlyState(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	slotDir := filepath.Join(dir, "ledger", "300")
 	require.NoError(t, os.MkdirAll(slotDir, 0o750))
@@ -167,12 +181,16 @@ func TestFindLedgerStateFileAtOrBeforeRejectsVolatileOnlyState(t *testing.T) {
 }
 
 func TestFindLedgerStateFileNotFound(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	_, err := FindLedgerStateFile(dir)
 	require.ErrorIs(t, err, ErrLedgerDirNotFound)
 }
 
 func TestFindUTxOTableFile(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	tablesDir := filepath.Join(dir, "ledger", "99999", "tables")
 	err := os.MkdirAll(tablesDir, 0o750)
@@ -187,6 +205,8 @@ func TestFindUTxOTableFile(t *testing.T) {
 }
 
 func TestFindUTxOTableFileForState(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	slotDir := filepath.Join(dir, "ledger", "99999")
 	require.NoError(t, os.MkdirAll(slotDir, 0o750))
@@ -205,6 +225,8 @@ func TestFindUTxOTableFileForState(t *testing.T) {
 }
 
 func TestFindUTxOTableFileCurrentTablesFile(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	slotDir := filepath.Join(dir, "ledger", "99999")
 	err := os.MkdirAll(slotDir, 0o750)
@@ -219,6 +241,8 @@ func TestFindUTxOTableFileCurrentTablesFile(t *testing.T) {
 }
 
 func TestFindUTxOTableFileNotFound(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	ledgerDir := filepath.Join(dir, "ledger")
 	err := os.MkdirAll(ledgerDir, 0o750)
@@ -229,6 +253,8 @@ func TestFindUTxOTableFileNotFound(t *testing.T) {
 }
 
 func TestIsLedgerStateFile(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		filename string
@@ -254,6 +280,8 @@ func TestIsLedgerStateFile(t *testing.T) {
 }
 
 func TestEraName(t *testing.T) {
+	t.Parallel()
+
 	require.Equal(t, "Byron", EraName(EraByron))
 	require.Equal(t, "Shelley", EraName(EraShelley))
 	require.Equal(t, "Allegra", EraName(EraAllegra))
@@ -265,6 +293,8 @@ func TestEraName(t *testing.T) {
 }
 
 func TestParseSnapShotsAcceptsTwoElementSnapshots(t *testing.T) {
+	t.Parallel()
+
 	emptyMap, err := cbor.Encode(map[uint64]uint64{})
 	require.NoError(t, err)
 
@@ -290,6 +320,8 @@ func TestParseSnapShotsAcceptsTwoElementSnapshots(t *testing.T) {
 }
 
 func TestParseSnapShotsAcceptsUTxOHDStakeWithPool(t *testing.T) {
+	t.Parallel()
+
 	credHash := toFixed28([]byte("credential hash for snapshot"))
 	poolHash := toFixed28([]byte("pool hash for snapshot"))
 	stakeMap := encodeCredentialMapEntry(
@@ -327,6 +359,8 @@ func TestParseSnapShotsAcceptsUTxOHDStakeWithPool(t *testing.T) {
 }
 
 func TestParsePoolParamsMapAcceptsPoolDistrEntry(t *testing.T) {
+	t.Parallel()
+
 	poolHash := toFixed28([]byte("pool hash for distribution"))
 	vrfHash := [32]byte{}
 	copy(vrfHash[:], []byte("vrf hash for distribution entry"))
@@ -360,6 +394,8 @@ func TestParsePoolParamsMapAcceptsPoolDistrEntry(t *testing.T) {
 func TestParseW32SnapshotPoolParamsCarriesLeiosKeyIntoStakeRows(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	poolHash := toFixed28([]byte("w32 snapshot pool key hash"))
 	credentialHash := toFixed28([]byte("w32 snapshot credential"))
 	rewardHash := toFixed28([]byte("w32 snapshot reward account"))
@@ -412,6 +448,8 @@ func TestParseW32SnapshotPoolParamsCarriesLeiosKeyIntoStakeRows(
 }
 
 func TestParseW32SnapshotPoolParamsRejectsMalformedLeiosKey(t *testing.T) {
+	t.Parallel()
+
 	poolHash := toFixed28([]byte("malformed snapshot pool key"))
 	vrfHash := make([]byte, 32)
 	rewardHash := toFixed28([]byte("malformed snapshot reward"))
@@ -436,6 +474,8 @@ func TestParseW32SnapshotPoolParamsRejectsMalformedLeiosKey(t *testing.T) {
 }
 
 func TestParseActivePoolDistribution(t *testing.T) {
+	t.Parallel()
+
 	poolHash := toFixed28([]byte("active pool distribution"))
 	vrfHash := [32]byte{}
 	copy(vrfHash[:], []byte("active vrf key hash"))
@@ -459,6 +499,8 @@ func TestParseActivePoolDistribution(t *testing.T) {
 }
 
 func TestParseActivePoolDistributionContainer(t *testing.T) {
+	t.Parallel()
+
 	poolHash := toFixed28([]byte("active pool distribution"))
 	vrfHash := [32]byte{}
 	copy(vrfHash[:], []byte("active vrf key hash"))
@@ -487,6 +529,8 @@ func TestParseActivePoolDistributionContainer(t *testing.T) {
 }
 
 func TestParseW32ActivePoolDistributionCarriesLeiosKey(t *testing.T) {
+	t.Parallel()
+
 	poolHash := toFixed28([]byte("w32 active pool distribution"))
 	vrfHash := make([]byte, 32)
 	copy(vrfHash, []byte("w32 active vrf key hash"))
@@ -524,6 +568,8 @@ func TestParseW32ActivePoolDistributionCarriesLeiosKey(t *testing.T) {
 func TestParseActivePoolDistributionContainerRejectsStakeMismatch(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	poolHash := toFixed28([]byte("active pool distribution"))
 	vrfHash := [32]byte{}
 	copy(vrfHash[:], []byte("active vrf key hash"))
@@ -549,6 +595,8 @@ func TestParseActivePoolDistributionContainerRejectsStakeMismatch(
 func TestParseActivePoolDistributionContainerAllowsZeroStake(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	poolHash := toFixed28([]byte("active pool distribution"))
 	vrfHash := [32]byte{}
 	copy(vrfHash[:], []byte("active vrf key hash"))
@@ -575,6 +623,8 @@ func TestParseActivePoolDistributionContainerAllowsZeroStake(
 }
 
 func TestParseActivePoolDistributionRejectsMalformedEntry(t *testing.T) {
+	t.Parallel()
+
 	poolHash := toFixed28([]byte("active pool distribution"))
 	data := encodeCredentialMapEntry(
 		t,
@@ -587,6 +637,8 @@ func TestParseActivePoolDistributionRejectsMalformedEntry(t *testing.T) {
 }
 
 func TestVerifySnapshotDigest(t *testing.T) {
+	t.Parallel()
+
 	content := []byte("test snapshot content for hashing")
 	h := sha256.Sum256(content)
 	expectedDigest := hex.EncodeToString(h[:])
@@ -601,6 +653,8 @@ func TestVerifySnapshotDigest(t *testing.T) {
 }
 
 func TestVerifySnapshotDigestMismatch(t *testing.T) {
+	t.Parallel()
+
 	content := []byte("test snapshot content")
 
 	tmpDir := t.TempDir()
@@ -617,6 +671,8 @@ func TestVerifySnapshotDigestMismatch(t *testing.T) {
 }
 
 func TestVerifyChecksumFileNoChecksum(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	lstatePath := filepath.Join(tmpDir, "12345.lstate")
 	err := os.WriteFile(lstatePath, []byte("data"), 0o640)
@@ -628,6 +684,8 @@ func TestVerifyChecksumFileNoChecksum(t *testing.T) {
 }
 
 func TestVerifyChecksumFileEmptyChecksum(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	lstatePath := filepath.Join(tmpDir, "12345.lstate")
 	err := os.WriteFile(lstatePath, []byte("data"), 0o640)
@@ -643,6 +701,8 @@ func TestVerifyChecksumFileEmptyChecksum(t *testing.T) {
 }
 
 func TestVerifyChecksumFileMismatch(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	lstatePath := filepath.Join(tmpDir, "12345.lstate")
 	err := os.WriteFile(lstatePath, []byte("data"), 0o640)
@@ -661,6 +721,8 @@ func TestVerifyChecksumFileMismatch(t *testing.T) {
 }
 
 func TestExtractPParamsDataBabbageGovState(t *testing.T) {
+	t.Parallel()
+
 	pparams := testBabbagePParams()
 	pparamsData, err := cbor.Encode(pparams)
 	require.NoError(t, err)
@@ -684,6 +746,8 @@ func TestExtractPParamsDataBabbageGovState(t *testing.T) {
 }
 
 func TestExtractPParamsDataConwayGovStateMap(t *testing.T) {
+	t.Parallel()
+
 	pparams := testConwayPParams()
 	pparamsData, err := cbor.Encode(pparams)
 	require.NoError(t, err)
@@ -708,6 +772,8 @@ func TestExtractPParamsDataConwayGovStateMap(t *testing.T) {
 }
 
 func TestExtractPParamsDataDetectsEraSpecificType(t *testing.T) {
+	t.Parallel()
+
 	alonzoData, err := cbor.Encode(testBabbagePParams())
 	require.NoError(t, err)
 	conwayData, err := cbor.Encode(testConwayPParams())
@@ -831,6 +897,8 @@ func testConwayPParams() *lconway.ConwayProtocolParameters {
 }
 
 func TestVerifyChecksumFileWrongLength(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	lstatePath := filepath.Join(tmpDir, "12345.lstate")
 	err := os.WriteFile(lstatePath, []byte("data"), 0o640)
@@ -851,6 +919,8 @@ func TestVerifyChecksumFileWrongLength(t *testing.T) {
 }
 
 func TestVerifyChecksumFileInvalidHex(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	lstatePath := filepath.Join(tmpDir, "12345.lstate")
 	err := os.WriteFile(lstatePath, []byte("data"), 0o640)
@@ -870,6 +940,8 @@ func TestVerifyChecksumFileInvalidHex(t *testing.T) {
 }
 
 func TestVerifyChecksumFileValid(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	lstatePath := filepath.Join(tmpDir, "12345.lstate")
 	content := []byte("test data for crc32")

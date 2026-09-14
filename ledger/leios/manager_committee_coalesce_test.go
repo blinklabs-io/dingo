@@ -201,6 +201,8 @@ func committeeWaiterCount(m *VoteManager, epoch uint64) int {
 // announcement diffused to N peers started N identical computations and
 // discarded N-1 of the results.
 func TestVoteManagerCommitteeCoalescesConcurrentSameEpochMisses(t *testing.T) {
+	t.Parallel()
+
 	const callers = 8
 	params := newGatedParamsProvider()
 	fixture := newManagerFixture(
@@ -216,7 +218,7 @@ func TestVoteManagerCommitteeCoalescesConcurrentSameEpochMisses(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		params.firstCall,
-		5*time.Second,
+		testutil.AsyncWait,
 		"leader did not reach the committee params provider",
 	)
 
@@ -234,7 +236,7 @@ func TestVoteManagerCommitteeCoalescesConcurrentSameEpochMisses(t *testing.T) {
 		func() bool {
 			return committeeWaiterCount(fixture.mgr, 5) == callers-1
 		},
-		5*time.Second,
+		testutil.AsyncWait,
 		"followers did not join the leader's committee computation",
 	)
 
@@ -250,13 +252,13 @@ func TestVoteManagerCommitteeCoalescesConcurrentSameEpochMisses(t *testing.T) {
 	params.releaseAll()
 
 	leaderResult := testutil.RequireReceive(
-		t, leader, 5*time.Second, "leader did not return",
+		t, leader, testutil.AsyncWait, "leader did not return",
 	)
 	require.NoError(t, leaderResult.err)
 	require.NotNil(t, leaderResult.committee)
 	for i, follower := range followers {
 		got := testutil.RequireReceive(
-			t, follower, 5*time.Second, "follower did not return",
+			t, follower, testutil.AsyncWait, "follower did not return",
 		)
 		require.NoErrorf(t, got.err, "follower %d", i)
 		require.Samef(
@@ -265,11 +267,15 @@ func TestVoteManagerCommitteeCoalescesConcurrentSameEpochMisses(t *testing.T) {
 		)
 	}
 	require.Equal(
-		t, 1, params.callCount(),
+		t,
+		1,
+		params.callCount(),
 		"committee parameters must be resolved once per epoch, not once per caller",
 	)
 	require.Equal(
-		t, 1, fixture.stake.callCount(),
+		t,
+		1,
+		fixture.stake.callCount(),
 		"the stake distribution must be read once per epoch, not once per caller",
 	)
 }
@@ -278,6 +284,8 @@ func TestVoteManagerCommitteeCoalescesConcurrentSameEpochMisses(t *testing.T) {
 // computation exactly once -- coalescing must not turn a lone miss into zero
 // computations (a caller that parks on a claim nobody owns) or two.
 func TestVoteManagerCommitteeSingleMissComputesOnce(t *testing.T) {
+	t.Parallel()
+
 	params := newGatedParamsProvider()
 	fixture := newManagerFixture(
 		t,
@@ -308,6 +316,8 @@ func TestVoteManagerCommitteeSingleMissComputesOnce(t *testing.T) {
 // epoch to a keyless committee, and leaving the claim held would park every
 // later caller on a computation that had already finished.
 func TestVoteManagerCommitteeFailureReleasesWaiters(t *testing.T) {
+	t.Parallel()
+
 	params := newGatedParamsProvider()
 	fixture := newManagerFixture(
 		t,
@@ -322,7 +332,7 @@ func TestVoteManagerCommitteeFailureReleasesWaiters(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		params.firstCall,
-		5*time.Second,
+		testutil.AsyncWait,
 		"leader did not reach the committee params provider",
 	)
 	waiter := startCommitteeCall(fixture.mgr, 5)
@@ -336,11 +346,11 @@ func TestVoteManagerCommitteeFailureReleasesWaiters(t *testing.T) {
 	params.releaseAll()
 
 	leaderResult := testutil.RequireReceive(
-		t, leader, 5*time.Second, "leader did not return",
+		t, leader, testutil.AsyncWait, "leader did not return",
 	)
 	require.ErrorIs(t, leaderResult.err, snapshotErr)
 	waiterResult := testutil.RequireReceive(
-		t, waiter, 5*time.Second, "waiter was not released by the failure",
+		t, waiter, testutil.AsyncWait, "waiter was not released by the failure",
 	)
 	require.ErrorIs(
 		t, waiterResult.err, snapshotErr,
@@ -361,6 +371,8 @@ func TestVoteManagerCommitteeFailureReleasesWaiters(t *testing.T) {
 // woke on the leader's completion would hold a connection's protocol worker
 // across shutdown.
 func TestVoteManagerCommitteeWaiterReleasedOnStop(t *testing.T) {
+	t.Parallel()
+
 	params := newGatedParamsProvider()
 	fixture := newManagerFixture(
 		t,
@@ -374,7 +386,7 @@ func TestVoteManagerCommitteeWaiterReleasedOnStop(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		params.firstCall,
-		5*time.Second,
+		testutil.AsyncWait,
 		"leader did not reach the committee params provider",
 	)
 	waiter := startCommitteeCall(fixture.mgr, 5)
@@ -389,7 +401,7 @@ func TestVoteManagerCommitteeWaiterReleasedOnStop(t *testing.T) {
 	require.NoError(t, fixture.mgr.Stop())
 
 	waiterResult := testutil.RequireReceive(
-		t, waiter, 5*time.Second, "waiter was not released at shutdown",
+		t, waiter, testutil.AsyncWait, "waiter was not released at shutdown",
 	)
 	require.ErrorIs(t, waiterResult.err, ErrVoteManagerStopped)
 	require.Nil(t, waiterResult.committee)
@@ -398,7 +410,7 @@ func TestVoteManagerCommitteeWaiterReleasedOnStop(t *testing.T) {
 	// wanted by anyone.
 	params.releaseAll()
 	leaderResult := testutil.RequireReceive(
-		t, leader, 5*time.Second, "leader did not return after the stop",
+		t, leader, testutil.AsyncWait, "leader did not return after the stop",
 	)
 	require.NoError(t, leaderResult.err)
 }
@@ -409,6 +421,8 @@ func TestVoteManagerCommitteeWaiterReleasedOnStop(t *testing.T) {
 // panic itself still reaches the leader's caller: a fault in this node's own
 // stake handling must not be laundered into a routine per-epoch error.
 func TestVoteManagerCommitteePanicReleasesWaiters(t *testing.T) {
+	t.Parallel()
+
 	params := newGatedParamsProvider()
 	stake := &panickingStakeProvider{panics: 1}
 	fixture := newManagerFixture(
@@ -434,7 +448,7 @@ func TestVoteManagerCommitteePanicReleasesWaiters(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		params.firstCall,
-		5*time.Second,
+		testutil.AsyncWait,
 		"leader did not reach the committee params provider",
 	)
 	waiter := startCommitteeCall(fixture.mgr, 5)
@@ -448,14 +462,14 @@ func TestVoteManagerCommitteePanicReleasesWaiters(t *testing.T) {
 	params.releaseAll()
 
 	got := testutil.RequireReceive(
-		t, leaderPanic, 5*time.Second, "leader goroutine did not finish",
+		t, leaderPanic, testutil.AsyncWait, "leader goroutine did not finish",
 	)
 	require.NotNil(
 		t, got.recovered,
 		"the panic must keep unwinding to the leader's caller",
 	)
 	waiterResult := testutil.RequireReceive(
-		t, waiter, 5*time.Second, "waiter was not released by the panic",
+		t, waiter, testutil.AsyncWait, "waiter was not released by the panic",
 	)
 	require.ErrorIs(t, waiterResult.err, ErrCommitteeComputationAborted)
 	require.Nil(t, waiterResult.committee)
@@ -472,6 +486,8 @@ func TestVoteManagerCommitteePanicReleasesWaiters(t *testing.T) {
 // further distinct epoch is refused instead of admitted into unbounded
 // concurrent work. The refusal is not memoized.
 func TestVoteManagerCommitteeInFlightEpochsAreBounded(t *testing.T) {
+	t.Parallel()
+
 	params := newGatedParamsProvider()
 	params.blockAll = true
 	fixture := newManagerFixture(
@@ -491,7 +507,7 @@ func TestVoteManagerCommitteeInFlightEpochsAreBounded(t *testing.T) {
 		func() bool {
 			return params.callCount() == committeeInFlightMaxEpochs
 		},
-		5*time.Second,
+		testutil.AsyncWait,
 		"not every epoch reached the committee params provider",
 	)
 
@@ -501,7 +517,7 @@ func TestVoteManagerCommitteeInFlightEpochsAreBounded(t *testing.T) {
 	params.releaseAll()
 	for i, leader := range leaders {
 		got := testutil.RequireReceive(
-			t, leader, 5*time.Second, "in-flight leader did not return",
+			t, leader, testutil.AsyncWait, "in-flight leader did not return",
 		)
 		require.NoErrorf(t, got.err, "leader %d", i)
 	}
@@ -521,6 +537,8 @@ func TestVoteManagerCommitteeInFlightEpochsAreBounded(t *testing.T) {
 func TestVoteManagerCommitteeRollbackDuringComputationIsNotMemoized(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	params := newGatedParamsProvider()
 	fixture := newManagerFixture(
 		t,
@@ -533,7 +551,7 @@ func TestVoteManagerCommitteeRollbackDuringComputationIsNotMemoized(
 	testutil.RequireReceive(
 		t,
 		params.firstCall,
-		5*time.Second,
+		testutil.AsyncWait,
 		"leader did not reach the committee params provider",
 	)
 	waiter := startCommitteeCall(fixture.mgr, 5)
@@ -553,12 +571,12 @@ func TestVoteManagerCommitteeRollbackDuringComputationIsNotMemoized(
 	params.releaseAll()
 
 	leaderResult := testutil.RequireReceive(
-		t, leader, 5*time.Second, "leader did not return",
+		t, leader, testutil.AsyncWait, "leader did not return",
 	)
 	require.NoError(t, leaderResult.err)
 	require.NotNil(t, leaderResult.committee)
 	waiterResult := testutil.RequireReceive(
-		t, waiter, 5*time.Second, "waiter was not released",
+		t, waiter, testutil.AsyncWait, "waiter was not released",
 	)
 	require.NoError(t, waiterResult.err)
 	require.Same(t, leaderResult.committee, waiterResult.committee)
@@ -586,6 +604,8 @@ func TestVoteManagerCommitteeRollbackDuringComputationIsNotMemoized(
 // returned -- or forever, since the provider read it is blocked in carries no
 // deadline of its own.
 func TestVoteManagerCommitteeClaimNotInheritedAcrossRestart(t *testing.T) {
+	t.Parallel()
+
 	params := newGatedParamsProvider()
 	fixture := newManagerFixture(
 		t,
@@ -599,7 +619,7 @@ func TestVoteManagerCommitteeClaimNotInheritedAcrossRestart(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		params.firstCall,
-		5*time.Second,
+		testutil.AsyncWait,
 		"leader did not reach the committee params provider",
 	)
 
@@ -620,17 +640,17 @@ func TestVoteManagerCommitteeClaimNotInheritedAcrossRestart(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		params.extraCall,
-		5*time.Second,
+		testutil.AsyncWait,
 		"the new lifecycle's caller joined the stopped lifecycle's computation instead of computing",
 	)
 
 	params.releaseAll()
 	nextResult := testutil.RequireReceive(
-		t, next, 5*time.Second, "the new lifecycle's caller did not return",
+		t, next, testutil.AsyncWait, "the new lifecycle's caller did not return",
 	)
 	require.NoError(t, nextResult.err)
 	leaderResult := testutil.RequireReceive(
-		t, leader, 5*time.Second, "leader did not return after the stop",
+		t, leader, testutil.AsyncWait, "leader did not return after the stop",
 	)
 	require.NoError(t, leaderResult.err)
 
@@ -638,7 +658,11 @@ func TestVoteManagerCommitteeClaimNotInheritedAcrossRestart(t *testing.T) {
 	// the new lifecycle's memo. Clearing the claim stops a new caller
 	// joining it; only the generation bump stops it installing.
 	memo := committeeMemoEntry(fixture.mgr, 5)
-	require.NotNil(t, memo, "the new lifecycle's own computation must be memoized")
+	require.NotNil(
+		t,
+		memo,
+		"the new lifecycle's own computation must be memoized",
+	)
 	require.Same(
 		t,
 		nextResult.committee,

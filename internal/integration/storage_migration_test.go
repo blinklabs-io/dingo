@@ -64,15 +64,23 @@ func seedBlobMigrationDataset(
 	store blob.BlobStore,
 ) blobMigrationDataset {
 	t.Helper()
-	blocks, err := loadBlockData(1)
+	// A real block, with its own genuinely matching hash/type/slot, not
+	// arbitrary placeholders: S3 and GCS independently re-derive both from
+	// the CBOR before returning it (blockverify.Hash), so a migrated block
+	// whose stored key doesn't actually match its bytes would fail that
+	// check on read-back instead of exercising the migration path this
+	// test is for.
+	blocks, err := loadImmutableBlocks(1)
 	require.NoError(t, err)
+	require.Len(t, blocks, 1)
+	block := blocks[0]
 
 	dataset := blobMigrationDataset{
-		blockSlot:     4200,
-		blockHash:     []byte("storagetest-migration-block-hash"),
-		blockCbor:     blocks[0],
+		blockSlot:     block.Slot,
+		blockHash:     block.Hash,
+		blockCbor:     block.Cbor,
 		blockID:       99,
-		blockType:     6,
+		blockType:     block.Type,
 		blockHeight:   4_200_000,
 		blockPrevHash: []byte("storagetest-migration-prev-hash"),
 		txID:          []byte("storagetest-migration-tx-id"),
@@ -200,6 +208,8 @@ func cleanupBlobMigrationDataset(
 // (MinIO in CI) nor GCS (real bucket + ADC only, no local emulator exists)
 // is configured.
 func TestBlobStoreMigration(t *testing.T) {
+	t.Parallel()
+
 	destinations := cloudStorageBenchmarkBackends(t.TempDir(), t.Name())
 	if len(destinations) == 0 {
 		t.Skip(
@@ -327,6 +337,8 @@ func requireMetadataDatasetMatches(
 // database/plugin/metadata/postgres/conformance_test.go and
 // internal/test/conformance use, so this runs automatically in CI.
 func TestMetadataStoreMigrationSQLiteToPostgres(t *testing.T) {
+	t.Parallel()
+
 	if os.Getenv("POSTGRES_PASSWORD") == "" && os.Getenv("POSTGRES_DSN") == "" {
 		t.Skip(
 			"Skipping postgres migration test: postgres not configured " +
@@ -414,6 +426,8 @@ func postgresMigrationDSN() string {
 // database/plugin/metadata/mysql/conformance_test.go and
 // internal/test/conformance use, so this runs automatically in CI.
 func TestMetadataStoreMigrationSQLiteToMySQL(t *testing.T) {
+	t.Parallel()
+
 	if os.Getenv("MYSQL_ROOT_PASSWORD") == "" && os.Getenv("MYSQL_DSN") == "" {
 		t.Skip(
 			"Skipping mysql migration test: mysql not configured " +

@@ -50,6 +50,8 @@ func waitForConnectionManagerWatchers(
 }
 
 func TestAddConnectionRejectsInboundCollisionWithOutbound(t *testing.T) {
+	t.Parallel()
+
 	cm := NewConnectionManager(ConnectionManagerConfig{})
 	outbound := newUnstartedConnection(t)
 	inbound := newUnstartedConnection(t)
@@ -64,6 +66,8 @@ func TestAddConnectionRejectsInboundCollisionWithOutbound(t *testing.T) {
 }
 
 func TestReplacedConnectionCloseDoesNotPublishStaleEvent(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 	_, closeEvents := bus.Subscribe(ConnectionClosedEventType)
@@ -119,6 +123,8 @@ func TestReplacedConnectionCloseDoesNotPublishStaleEvent(t *testing.T) {
 // server-side client state (and its live chain iterator) would never be
 // released.
 func TestSameDirectionCollisionNotifiesEvictedConnection(t *testing.T) {
+	t.Parallel()
+
 	type call struct {
 		isNtC bool
 		err   error
@@ -134,11 +140,11 @@ func TestSameDirectionCollisionNotifiesEvictedConnection(t *testing.T) {
 
 	require.True(
 		t,
-		cm.addNtCConnectionWithIPKey(first, true, "127.0.0.1:3002", ""),
+		cm.addConnectionImpl(first, true, true, "127.0.0.1:3002", "", nil),
 	)
 	require.True(
 		t,
-		cm.addNtCConnectionWithIPKey(second, true, "127.0.0.1:3002", ""),
+		cm.addConnectionImpl(second, true, true, "127.0.0.1:3002", "", nil),
 	)
 	require.Same(t, second, cm.GetConnectionById(second.Id()))
 

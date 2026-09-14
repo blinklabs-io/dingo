@@ -17,6 +17,8 @@ package dingo
 import "testing"
 
 func TestMidnightServerActiveRequiresExplicitEnablement(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name        string
 		storageMode StorageMode

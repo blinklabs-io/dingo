@@ -820,7 +820,7 @@ func (m *Mempool) Stop(ctx context.Context) error {
 		select {
 		case <-workersDone:
 		case <-ctx.Done():
-			m.logger.Debug(
+			m.logger.Info(
 				"mempool stop cancelled before workers drained; "+
 					"skipping teardown",
 				"error", ctx.Err(),
@@ -1427,7 +1427,7 @@ func (m *Mempool) removeExpiredTransactions() {
 	expiredHashes := make(map[string]struct{})
 	for _, tx := range m.transactions {
 		if now.Sub(tx.LastSeen) > m.transactionTTL {
-			m.logger.Debug(
+			m.logger.Info(
 				"removing expired transaction",
 				"component", "mempool",
 				"tx_hash", tx.Hash,
@@ -1915,6 +1915,13 @@ func (m *Mempool) RemoveTxsByHash(hashes []string) {
 	}
 	if len(removedHashes) > 0 {
 		m.recordMutationLocked(mempoolMutation{removed: removedHashes})
+		for hash := range removedHashes {
+			m.logger.Info(
+				"confirmed transaction",
+				"component", "mempool",
+				"tx_hash", hash,
+			)
+		}
 	}
 	m.consumersMutex.Unlock()
 	m.Unlock()

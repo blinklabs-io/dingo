@@ -22,7 +22,6 @@ import (
 	"log/slog"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -49,6 +48,8 @@ func newPipelineLoopLedger(t *testing.T) *LedgerState {
 // loop must then stop rather than restart into the same block forever, and must
 // leave a terminal signal behind for an operator.
 func TestLedgerProcessBlocksStopsRetryingOnUnrepairableFailure(t *testing.T) {
+	t.Parallel()
+
 	ls := newPipelineLoopLedger(t)
 
 	var attempts atomic.Int64
@@ -69,7 +70,7 @@ func TestLedgerProcessBlocksStopsRetryingOnUnrepairableFailure(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		done,
-		5*time.Second,
+		testutil.AsyncWait,
 		"an unrepairable validation failure must stop the ledger pipeline",
 	)
 
@@ -91,6 +92,8 @@ func TestLedgerProcessBlocksStopsRetryingOnUnrepairableFailure(t *testing.T) {
 // an ordinary failure must keep restarting the pipeline. Treating every failure
 // as terminal would turn a transient database or peer problem into an outage.
 func TestLedgerProcessBlocksKeepsRetryingRecoverableFailures(t *testing.T) {
+	t.Parallel()
+
 	ls := newPipelineLoopLedger(t)
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -110,7 +113,7 @@ func TestLedgerProcessBlocksKeepsRetryingRecoverableFailures(t *testing.T) {
 	testutil.WaitForCondition(
 		t,
 		func() bool { return attempts.Load() >= 3 },
-		5*time.Second,
+		testutil.AsyncWait,
 		"a recoverable failure must keep restarting the pipeline",
 	)
 	assert.Zero(
@@ -123,43 +126,26 @@ func TestLedgerProcessBlocksKeepsRetryingRecoverableFailures(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		done,
-		5*time.Second,
+		testutil.AsyncWait,
 		"the pipeline loop must exit when its context is cancelled",
 	)
 }
 
-// TestPipelineStuckAnnouncementStaysVisible covers the third ask of issue
-// #3261. The stuck condition was announced at ERROR exactly once and then only
-// at WARN, so a node that had stopped following the chain looked quiet to
-// log-level alerting for as long as it stayed wedged.
-func TestPipelineStuckAnnouncementStaysVisible(t *testing.T) {
-	for consecutive := range noProgressStuckThreshold {
-		assert.False(
-			t,
-			pipelineStuckShouldAnnounce(consecutive),
-			"restart %d is not stuck yet and must not announce",
-			consecutive,
-		)
-	}
-	assert.True(
-		t,
-		pipelineStuckShouldAnnounce(noProgressStuckThreshold),
-		"the transition into stuck must be announced",
-	)
+func TestStopStuckLedgerPipelineDoesNotInvokeFatalCallback(t *testing.T) {
+	t.Parallel()
 
-	announcements := 0
-	for consecutive := noProgressStuckThreshold; consecutive <= noProgressStuckThreshold+
-		4*noProgressStuckReannounceInterval; consecutive++ {
-		if pipelineStuckShouldAnnounce(consecutive) {
-			announcements++
-		}
+	ls := newPipelineLoopLedger(t)
+	var fatalErr error
+	ls.config.FatalErrorFunc = func(err error) {
+		fatalErr = err
 	}
-	assert.Equal(
-		t,
-		5,
-		announcements,
-		"a persistently stuck pipeline must keep announcing itself at a fixed cadence",
-	)
+	progress := pipelineProgress{
+		consecutiveNoProgress: noProgressStuckThreshold,
+		lastTipSlot:           123,
+	}
+
+	ls.stopStuckLedgerPipeline(errors.New("rejected block"), progress)
+	assert.NoError(t, fatalErr)
 }
 
 // TestResetMithrilBoundaryRejectionsRequiresAppliedTipProgress verifies that
@@ -169,6 +155,8 @@ func TestPipelineStuckAnnouncementStaysVisible(t *testing.T) {
 func TestResetMithrilBoundaryRejectionsRequiresAppliedTipProgress(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 
 	rejections, exhausted := ls.observeMithrilBoundaryRejection(500)
@@ -210,6 +198,8 @@ func TestResetMithrilBoundaryRejectionsRequiresAppliedTipProgress(
 func TestResetAtTipRecoveryDescentClearsSameFailureOnProgress(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	failure := &txValidationError{
 		BlockPoint: ocommon.NewPoint(510, []byte("failure-block")),
 		TxHash:     []byte("failure-tx"),

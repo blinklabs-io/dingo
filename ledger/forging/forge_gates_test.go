@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
@@ -190,48 +191,46 @@ func TestCheckAndForgeProductionEqualSlotDoesNotReForgeOurOwnSlot(
 	)
 }
 
-// TestForgeSkipsLeaderSlotWhenUpstreamTargetUnknownEvenAtTip documents
-// the cost of the upstream-sync gate's `upstreamTip == 0` disjunct on a
-// node that is NOT behind.
+// TestForgeTakesLeaderSlotWhenUpstreamTargetUnknownAtTip pins the
+// unknown-upstream-target branch of the sync gate for a node that is NOT
+// behind.
 //
-// LedgerState.UpstreamSyncStatus returns (0, true) for the whole window
-// between an active-connection switch and the new peer's first
-// authenticated, admitted, trusted header: publishActiveUpstream stores
-// the new connection key with targetSlot zero, and only
-// publishAdmittedUpstreamTarget makes it non-zero. A best-peer switch
-// therefore disables forging outright, independent of how fresh the
-// local tip is and independent of forgeSyncToleranceSlots.
+// This test replaces TestForgeSkipsLeaderSlotWhenUpstreamTargetUnknownEvenAtTip
+// and reverses its assertion. That test asserted the behaviour #3955
+// deliberately left in place -- a best-peer switch disabled forging outright,
+// independent of local tip freshness and of forgeSyncToleranceSlots -- and
+// said in as many words that keying the gate on local tip freshness instead
+// would fail it and name the decision being revisited. This is that decision,
+// taken because the old behaviour is self-sealing: LedgerState publishes the
+// zero target for the window before the new peer's first admitted trusted
+// header, and on a network where forging is the only source of headers no node
+// forges, so none is admitted, so nothing lifts the target and the window never
+// closes (issue #4010).
 //
-// The clock below is a healthy steady-state producer: the chain tip is
-// the previous slot's block, i.e. the node is at tip. It is scheduled to
-// lead the current slot. It forges nothing, and the only counter that
-// moves is dingo_forge_sync_skip_total, which is shared with the
-// genuinely-behind case, so the lost leader slot is not recoverable from
-// /metrics.
+// The clock below is a healthy steady-state producer: the tip is the previous
+// slot's block, so the node is at tip and has no evidence it is behind. It is
+// scheduled to lead the current slot, and it must now take it -- the header it
+// produces is what ends the unknown-target window.
 //
-// This test asserts the CURRENT behaviour, which is deliberate and is
-// already pinned by
-// TestCheckAndForgeProductionWaitsForUnknownActiveUpstreamTarget. It is
-// written to make the trade-off concrete and reviewable rather than to
-// change it; the fix is a separate discussion (see the linked issue).
-// If the gate is later keyed on local tip freshness instead of on the
-// upstream target being known, this test fails and names the decision
-// that was revisited.
-func TestForgeSkipsLeaderSlotWhenUpstreamTargetUnknownEvenAtTip(
+// The tolerance cases pin that the branch is compared against the tolerance at
+// all, which the `upstreamTip == 0` disjunct never was.
+func TestForgeTakesLeaderSlotWhenUpstreamTargetUnknownAtTip(
 	t *testing.T,
 ) {
 	for _, tc := range []struct {
 		name      string
 		tolerance uint64
 	}{
-		// The tolerance is irrelevant to this branch of the gate: the
-		// `upstreamTip == 0` disjunct is not compared against it.
 		{name: "default tolerance", tolerance: 0},
 		{name: "tolerance far wider than the lag", tolerance: 100000},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			leader := &forgerCountingLeader{}
-			builder := &forgerTestBuilder{}
+			block := newForgerTestBlock(10, 2)
+			builder := &forgerTestBuilder{
+				block: block,
+				cbor:  block.cbor,
+			}
 			broadcaster := &forgerTestBroadcaster{}
 			forger, err := NewBlockForger(ForgerConfig{
 				Mode: ModeProduction,
@@ -262,47 +261,95 @@ func TestForgeSkipsLeaderSlotWhenUpstreamTargetUnknownEvenAtTip(
 				forger.checkAndForgeProduction(context.Background()),
 			)
 
-			assert.Zero(
+			assert.Equal(
 				t,
+				1,
 				leader.callCount(),
-				"leader selection is never reached, so the node cannot "+
-					"know it just lost a leader slot",
+				"an unknown upstream target is not evidence that this "+
+					"node is behind, so the slot must reach leader "+
+					"selection",
 			)
-			assert.Zero(t, builder.calls)
-			assert.Zero(t, broadcaster.calls)
-
-			// The loss is invisible in every cardano-node-compatible
-			// counter: about_to_lead moves, nothing else does.
+			assert.Equal(t, 1, builder.calls)
+			assert.Equal(t, 1, broadcaster.calls)
 			assert.Equal(
 				t,
 				float64(1),
-				testutil.ToFloat64(forger.metrics.forgeAboutToLead),
-			)
-			assert.Equal(
-				t,
-				float64(0),
-				testutil.ToFloat64(forger.metrics.forgeNotLeader),
-			)
-			assert.Equal(
-				t,
-				float64(0),
 				testutil.ToFloat64(forger.metrics.forgeNodeIsLeader),
 			)
 			assert.Equal(
 				t,
 				float64(0),
-				testutil.ToFloat64(forger.metrics.forgeCouldNot),
-			)
-			// The one series that does move cannot distinguish "upstream
-			// is ahead of us" from "we have not heard from the peer we
-			// selected a moment ago".
-			assert.Equal(
-				t,
-				float64(1),
 				testutil.ToFloat64(forger.metrics.forgeSyncSkip),
+				"the sync gate must not claim this slot",
 			)
 		})
 	}
+}
+
+// TestForgeAllowsUnknownUpstreamTargetWhileWallClockIsStale verifies that a
+// quiet network is not mistaken for an upstream peer being ahead. The target
+// is unknown, so the forge gate has no peer-relative evidence that this node
+// is behind (issue #4201).
+func TestForgeAllowsUnknownUpstreamTargetWhileWallClockIsStale(
+	t *testing.T,
+) {
+	leader := &forgerCountingLeader{}
+	block := newForgerTestBlock(1000, 9)
+	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
+	broadcaster := &forgerTestBroadcaster{}
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      setupTestCredentials(t),
+		LeaderChecker:    leader,
+		BlockBuilder:     builder,
+		BlockBroadcaster: broadcaster,
+		SlotClock: forgerTestSlotClock{
+			// The tip lags the current slot by more than the tolerance,
+			// which is direct evidence this node is behind.
+			currentSlot:       1000,
+			chainTipSlot:      9,
+			upstreamTipSlot:   0,
+			upstreamActive:    true,
+			slotsPerKESPeriod: 100000,
+		},
+		ForgeSyncToleranceSlots: 100,
+		PromRegistry:            prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+
+	assert.Equal(t, 1, leader.callCount())
+	assert.Equal(t, 1, builder.calls)
+	assert.Equal(t, 1, broadcaster.calls)
+	assert.Equal(
+		t,
+		float64(0),
+		testutil.ToFloat64(forger.metrics.forgeSyncSkip),
+	)
+	// #4013 asserted 991 here, the local tip's lag behind the wall clock,
+	// because the sync-skip path was then the only writer that could make
+	// dingo_forge_tip_gap_slots non-zero on this branch. This PR gives that
+	// gauge a single meaning -- the ledger-apply backlog, primary chain tip
+	// minus applied tip -- and sets it once per leader check instead, so the
+	// skip paths no longer overwrite it. The primary tip mirrors the applied tip
+	// on this fixture, so the backlog is 0 and the gauge says so.
+	//
+	// The lag itself is not lost: ledger exports it continuously as
+	// dingo_tip_gap_slots ("slots between wall-clock slot and chain tip",
+	// ledger/state.go), on every slot tick rather than only on a leader-slot
+	// skip, and the gate's own log line carries current_slot and tip_slot.
+	// The lag itself is not a forge-sync signal when the upstream target is
+	// unknown; see TestForgeTakesLeaderSlotWhenUpstreamTargetUnknownAtTip for
+	// the at-tip case as well.
+	assert.Equal(
+		t,
+		float64(0),
+		testutil.ToFloat64(forger.metrics.tipGapSlots),
+		"dingo_forge_tip_gap_slots reports the ledger-apply backlog, "+
+			"not the wall-clock lag",
+	)
 }
 
 // forgerScheduleAwareLeader reports a fixed set of scheduled leader
@@ -390,14 +437,16 @@ func TestForgeGateSkipWarnsOnlyForScheduledLeaderSlots(t *testing.T) {
 			msg: "forge skip: chain tip is ahead of the current slot",
 		},
 		{
-			// The corroborated upstream target is unknown, so the
-			// node is treated as still syncing even though it is at
-			// its own tip.
+			// The corroborated upstream target leads our tip by more
+			// than the tolerance, so the node really is behind.
+			// A target of zero no longer reaches this gate on a node
+			// at tip; see
+			// TestForgeTakesLeaderSlotWhenUpstreamTargetUnknownAtTip.
 			name: "upstream syncing",
 			clock: forgerTestSlotClock{
 				currentSlot:       leaderSlot,
 				chainTipSlot:      leaderSlot - 1,
-				upstreamTipSlot:   0,
+				upstreamTipSlot:   leaderSlot + 500,
 				upstreamActive:    true,
 				slotsPerKESPeriod: 100,
 			},
@@ -722,10 +771,15 @@ func TestEqualSlotOwnBlockIsIdentifiedByHashNotByFence(t *testing.T) {
 }
 
 // forgerMovingTipSlotClock is a slot clock whose chain tip moves between
-// the read at the top of a forge cycle and the read taken next to the
-// tip hash. The first ChainTipSlot call answers chainTipSlot, every
-// later one answers movedTipSlot, which is what a rival block landing
-// mid-cycle looks like to the forger.
+// the read at the top of a forge cycle and the re-read tipBlockOwnership
+// takes. The first ChainTip call answers a point at chainTipSlot, every
+// later one a point at movedTipSlot, which is what a rival block landing
+// mid-cycle looks like to the forger. Both points carry chainTipHash: the
+// slot is what moves.
+//
+// hashReads counts calls to the optional ChainTipHashProvider, which
+// tipBlockOwnership no longer consults -- it takes slot and hash from the
+// one ChainTip snapshot. The counter is kept so the test can pin that.
 type forgerMovingTipSlotClock struct {
 	currentSlot       uint64
 	chainTipSlot      uint64
@@ -746,14 +800,31 @@ func (c *forgerMovingTipSlotClock) SlotsPerKESPeriod() uint64 {
 	return c.slotsPerKESPeriod
 }
 
-func (c *forgerMovingTipSlotClock) ChainTipSlot() uint64 {
+// ChainTip models a tip that moves between reads: the first read sees the
+// original slot and every later one sees the moved slot. Each read returns a
+// self-consistent point, as the SlotClockProvider contract requires, so the
+// staleness this double injects is between successive reads -- exactly the
+// case tipBlockOwnership's re-read exists to catch.
+func (c *forgerMovingTipSlotClock) ChainTip() ocommon.Point {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.tipReads++
+	slot := c.movedTipSlot
 	if c.tipReads == 1 {
-		return c.chainTipSlot
+		slot = c.chainTipSlot
 	}
-	return c.movedTipSlot
+	return ocommon.Point{Slot: slot, Hash: c.chainTipHash}
+}
+
+// PrimaryChainTip is pinned to the ORIGINAL tip and never moves. This double
+// exists to model the applied tip shifting between the two reads
+// tipBlockOwnership makes; letting the primary tip follow it would put the
+// primary tip ahead of the current slot and trip the past-slot guard before
+// the contested-slot branch this test is about.
+func (c *forgerMovingTipSlotClock) PrimaryChainTip() ocommon.Point {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return ocommon.Point{Slot: c.chainTipSlot, Hash: c.chainTipHash}
 }
 
 func (c *forgerMovingTipSlotClock) ChainTipHash() []byte {
@@ -896,16 +967,17 @@ func TestEqualSlotLostBattleUnderTheFenceIsNotSilent(t *testing.T) {
 // re-read inside the ownership check.
 //
 // tipSlot is sampled once at the top of checkAndForgeProduction, and the
-// chain can move before ChainTipHash is read. Comparing a hash from one
-// tip against a slot from another decides ownership from two different
-// blocks: here it would read a rival's hash and conclude we lost a
-// battle at slot 10 when the tip has in fact already moved past it.
+// chain can move before ownership is decided. Reusing that stale slot would
+// decide ownership from two different blocks: here it would judge a rival's
+// hash against a slot the tip has already moved past and report a lost
+// battle at slot 10.
 //
-// Re-reading the tip slot next to the hash makes that disagreement
-// inconclusive instead, and the decision falls back to the fence, which
-// is the conservative answer. The reads are still not atomic, so this
-// narrows the window rather than closing it; what it guarantees is that
-// a moved tip cannot manufacture a slot-battle report.
+// Re-reading the tip inside tipBlockOwnership makes that disagreement
+// inconclusive instead, and the decision falls back to the fence, which is
+// the conservative answer. Slot and hash now come from ONE ChainTip
+// snapshot, so the pair can no longer straddle two tips; what this pins is
+// that a tip which moved between the cycle's read and the ownership check
+// cannot manufacture a slot-battle report.
 func TestEqualSlotOwnershipIsInconclusiveWhenTheTipMoves(t *testing.T) {
 	const slot = uint64(10)
 	ourHash := bytes.Repeat([]byte{0xa1}, 32)
@@ -944,7 +1016,13 @@ func TestEqualSlotOwnershipIsInconclusiveWhenTheTipMoves(t *testing.T) {
 		"the tip slot must be re-read next to the hash, not reused "+
 			"from the top of the cycle",
 	)
-	assert.Equal(t, 1, hashReads)
+	assert.Equal(
+		t,
+		0,
+		hashReads,
+		"the hash must come from the same ChainTip snapshot as the slot, "+
+			"not from a second read through ChainTipHashProvider",
+	)
 
 	assert.Zero(t, builder.calls)
 	assert.Zero(t, broadcaster.calls)

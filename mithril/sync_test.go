@@ -32,6 +32,8 @@ func testStoragePlugins() StoragePlugins {
 // that is closed before the next NeedsSync call, leaving the database lock
 // free for NeedsSync to re-open it.
 func TestNeedsSyncReflectsSyncStatus(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	dataDir := t.TempDir()
 	cfg := SyncConfig{

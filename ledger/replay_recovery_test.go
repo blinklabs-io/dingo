@@ -102,6 +102,8 @@ func (m *replayRecoveryInput) ToPlutusData() pdata.PlutusData {
 func TestTryRecoverFromTxValidationErrorRollsBackToEarliestProducerParent(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
@@ -232,6 +234,8 @@ func TestTryRecoverFromTxValidationErrorRollsBackToEarliestProducerParent(
 func TestTryRecoverFromTxValidationErrorRejectsReplayBelowMithrilBoundary(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
@@ -389,7 +393,7 @@ func TestTryRecoverFromTxValidationErrorRejectsReplayBelowMithrilBoundary(
 	resync := testutil.RequireReceive(
 		t,
 		resyncCh,
-		time.Second,
+		testutil.AsyncWait,
 		"expected Mithril boundary resync after replay recovery rejection",
 	)
 	assert.Equal(
@@ -412,6 +416,8 @@ func TestTryRecoverFromTxValidationErrorRejectsReplayBelowMithrilBoundary(
 func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
@@ -626,6 +632,8 @@ func atTipDescentFailure(slot uint64, tag string) *txValidationError {
 func TestTryRecoverFromTxValidationErrorAtTipStopsDescendingRewindLoop(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, ledgerTip := newAtTipDescentLedger(t)
 
 	// Feed a descending series of DISTINCT failures. Each first appears
@@ -666,6 +674,8 @@ func TestTryRecoverFromTxValidationErrorAtTipStopsDescendingRewindLoop(
 func TestTryRecoverFromTxValidationErrorAtTipDoesNotHoldOnSameBlockEscalation(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, _ := newAtTipDescentLedger(t)
 
 	ferr := atTipDescentFailure(500, "stable")
@@ -696,6 +706,8 @@ func TestTryRecoverFromTxValidationErrorAtTipDoesNotHoldOnSameBlockEscalation(
 func TestTryRecoverFromTxValidationErrorAtTipResetsDescentOnForwardProgress(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, _ := newAtTipDescentLedger(t)
 
 	// Enough descending distinct failures to enter the hold state.
@@ -725,6 +737,8 @@ func TestTryRecoverFromTxValidationErrorAtTipResetsDescentOnForwardProgress(
 func TestTryRecoverFromTxValidationErrorAtTipRejectsRewindBelowMithrilBoundary(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
@@ -848,7 +862,7 @@ func TestTryRecoverFromTxValidationErrorAtTipRejectsRewindBelowMithrilBoundary(
 	resync := testutil.RequireReceive(
 		t,
 		resyncCh,
-		time.Second,
+		testutil.AsyncWait,
 		"expected Mithril boundary resync after at-tip recovery rejection",
 	)
 	assert.Equal(
@@ -865,6 +879,8 @@ func TestTryRecoverFromTxValidationErrorAtTipRejectsRewindBelowMithrilBoundary(
 func TestTryRecoverFromTxValidationErrorFallsBackToTxBlobOffsets(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
@@ -972,6 +988,8 @@ func TestTryRecoverFromTxValidationErrorFallsBackToTxBlobOffsets(
 }
 
 func TestTryRecoverFromTxValidationErrorFallsBackToChainScan(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
@@ -1109,6 +1127,8 @@ func TestTryRecoverFromTxValidationErrorFallsBackToChainScan(t *testing.T) {
 func TestTryRecoverFromTxValidationErrorRecoversDependencyClosure(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
@@ -1260,6 +1280,8 @@ func TestTryRecoverFromTxValidationErrorRecoversDependencyClosure(
 func TestTryRecoverFromTxValidationErrorFallsBackToSecurityParamWindow(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
@@ -1389,7 +1411,7 @@ func TestTryRecoverFromTxValidationErrorFallsBackToSecurityParamWindow(
 	resync := testutil.RequireReceive(
 		t,
 		resyncCh,
-		5*time.Second,
+		testutil.AsyncWait,
 		"expected chainsync resync after unresolved replay recovery",
 	)
 	assert.Equal(
@@ -1405,7 +1427,7 @@ func TestTryRecoverFromTxValidationErrorFallsBackToSecurityParamWindow(
 		rollback := testutil.RequireReceive(
 			t,
 			rollbackCh,
-			5*time.Second,
+			testutil.AsyncWait,
 			"expected chain rollback event after unresolved replay recovery",
 		)
 		assert.LessOrEqual(
@@ -1433,6 +1455,8 @@ func TestTryRecoverFromTxValidationErrorFallsBackToSecurityParamWindow(
 func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
@@ -1607,7 +1631,7 @@ func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
 	freshResync := testutil.RequireReceive(
 		t,
 		freshResyncCh,
-		5*time.Second,
+		testutil.AsyncWait,
 		"expected a fresh ChainSync intersection after replay recovery stopped converging",
 	)
 	assert.Equal(t, activeConnId.String(), freshResync.ConnectionId.String())
@@ -1693,6 +1717,8 @@ func newReplayRecoveryAuditLedger(
 }
 
 func TestReplayRecoveryArmsAuditAfterPrimaryAndLedgerRewind(t *testing.T) {
+	t.Parallel()
+
 	ls := newReplayRecoveryAuditLedger(t, true)
 
 	recovered, err := ls.tryRecoverFromTxValidationError(&txValidationError{
@@ -1712,6 +1738,8 @@ func TestReplayRecoveryArmsAuditAfterPrimaryAndLedgerRewind(t *testing.T) {
 }
 
 func TestReplayRecoveryRejectsDeterministicDuplicateInput(t *testing.T) {
+	t.Parallel()
+
 	ls := newReplayRecoveryAuditLedger(t, true)
 	activeConnId := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5000},
@@ -1768,7 +1796,7 @@ func TestReplayRecoveryRejectsDeterministicDuplicateInput(t *testing.T) {
 	resync := testutil.RequireReceive(
 		t,
 		resyncCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"deterministic transaction recovery must request a fresh ChainSync intersection",
 	)
 	assert.Equal(t, ls.Tip().Point, resync.Point)
@@ -1815,6 +1843,8 @@ func TestReplayRecoveryRejectsDeterministicDuplicateInput(t *testing.T) {
 // terminal on redelivery, which is what keeps a narrowing of the
 // validation-rule sibling from removing the halt altogether.
 func TestReplayRecoveryHaltsRepeatedRewardWithdrawalMismatch(t *testing.T) {
+	t.Parallel()
+
 	ls := newReplayRecoveryAuditLedger(t, true)
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Close)
@@ -1856,6 +1886,8 @@ func TestReplayRecoveryHaltsRepeatedRewardWithdrawalMismatch(t *testing.T) {
 // many times it repeats, and never reaches errHaltLedgerPipeline, which no
 // retry clears.
 func TestReplayRecoveryRejectsRepeatedIncorrectWithdrawalAmount(t *testing.T) {
+	t.Parallel()
+
 	ls := newReplayRecoveryAuditLedger(t, true)
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Close)
@@ -1886,7 +1918,7 @@ func TestReplayRecoveryRejectsRepeatedIncorrectWithdrawalAmount(t *testing.T) {
 	resync := testutil.RequireReceive(
 		t,
 		resyncCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"the first rejection must request a fresh ChainSync intersection",
 	)
 	assert.Equal(t, ls.Tip().Point, resync.Point)
@@ -1925,6 +1957,8 @@ func TestReplayRecoveryRejectsRepeatedIncorrectWithdrawalAmount(t *testing.T) {
 }
 
 func TestReplayRecoveryRejectsDeterministicPlutusFailure(t *testing.T) {
+	t.Parallel()
+
 	ls := newReplayRecoveryAuditLedger(t, true)
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Close)
@@ -1954,8 +1988,104 @@ func TestReplayRecoveryRejectsDeterministicPlutusFailure(t *testing.T) {
 	resync := testutil.RequireReceive(
 		t,
 		resyncCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"deterministic Plutus rejection must request a fresh ChainSync intersection",
+	)
+	assert.Equal(t, ls.Tip().Point, resync.Point)
+}
+
+// A malformed reference script is a structural verdict about the failing
+// transaction's own bytes: common.ValidatePlutusScriptsWellFormed decodes
+// only tx.Outputs() (plus CollateralReturn and any sub-transaction outputs)
+// and never consults LedgerState/LedgerView, so no local replay of a
+// different UTxO history can change it. Before this test, it fell through
+// isDeterministicTxValidationError's switch unclassified, so
+// tryRecoverFromTxValidationError only reached the state-dependent
+// findReplayRecoveryCandidate path, found no missing-input candidate for it,
+// and returned (false, nil): the caller then restarted the pipeline with the
+// same ledger tip and the identical block was retried forever (issue
+// reproduced live on preview: 138 identical "block processing failed,
+// restarting pipeline" warnings for one tx over 46+ minutes with no rewind,
+// no peer rotation, and no halt).
+func TestReplayRecoveryRejectsDeterministicMalformedReferenceScripts(t *testing.T) {
+	t.Parallel()
+
+	ls := newReplayRecoveryAuditLedger(t, true)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	resyncCh := deterministicResyncChannel(t, ls, bus)
+
+	recovered, err := ls.tryRecoverFromTxValidationError(&txValidationError{
+		BlockPoint: ocommon.NewPoint(
+			160,
+			testHashBytes("malformed-refscript-block"),
+		),
+		TxHash: testHashBytes("malformed-refscript-tx"),
+		Cause: lcommon.MalformedReferenceScriptsError{
+			ScriptHashes: []lcommon.ScriptHash{
+				lcommon.Blake2b224Hash([]byte("malformed-refscript")),
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.True(
+		t,
+		recovered,
+		"a malformed reference script must rewind past the block rather than restart the pipeline unrecovered",
+	)
+	assert.Equal(t, uint64(140), ls.Tip().Point.Slot)
+	assert.Equal(t, ls.Tip().Point, ls.chain.Tip().Point)
+	assert.Nil(t, ls.lastAtTipRecovery)
+
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		2*time.Second,
+		"a malformed reference scripts rejection must request a fresh ChainSync intersection",
+	)
+	assert.Equal(t, ls.Tip().Point, resync.Point)
+}
+
+// A malformed script witness is the same kind of tx-bytes-only structural
+// verdict as a malformed reference script (both are raised by
+// common.ValidatePlutusScriptsWellFormed) and must be classified the same
+// way.
+func TestReplayRecoveryRejectsDeterministicMalformedScriptWitnesses(t *testing.T) {
+	t.Parallel()
+
+	ls := newReplayRecoveryAuditLedger(t, true)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	resyncCh := deterministicResyncChannel(t, ls, bus)
+
+	recovered, err := ls.tryRecoverFromTxValidationError(&txValidationError{
+		BlockPoint: ocommon.NewPoint(
+			160,
+			testHashBytes("malformed-witness-block"),
+		),
+		TxHash: testHashBytes("malformed-witness-tx"),
+		Cause: lcommon.MalformedScriptWitnessesError{
+			ScriptHashes: []lcommon.ScriptHash{
+				lcommon.Blake2b224Hash([]byte("malformed-witness")),
+			},
+			Cause: errors.New("decode Plutus program: unsupported term type"),
+		},
+	})
+	require.NoError(t, err)
+	require.True(
+		t,
+		recovered,
+		"a malformed script witness must rewind past the block rather than restart the pipeline unrecovered",
+	)
+	assert.Equal(t, uint64(140), ls.Tip().Point.Slot)
+	assert.Equal(t, ls.Tip().Point, ls.chain.Tip().Point)
+	assert.Nil(t, ls.lastAtTipRecovery)
+
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		2*time.Second,
+		"a malformed script witnesses rejection must request a fresh ChainSync intersection",
 	)
 	assert.Equal(t, ls.Tip().Point, resync.Point)
 }
@@ -1969,6 +2099,8 @@ func TestReplayRecoveryRejectsDeterministicPlutusFailure(t *testing.T) {
 func TestReplayRecoveryDeterministicDuplicateAtTipSkipsDescentSchedule(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls := newReplayRecoveryAuditLedger(t, true)
 	ls.reachedTip.Store(true)
 	require.True(t, ls.IsAtTip())
@@ -2000,7 +2132,7 @@ func TestReplayRecoveryDeterministicDuplicateAtTipSkipsDescentSchedule(
 	resync := testutil.RequireReceive(
 		t,
 		resyncCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"an at-tip deterministic rejection must request a fresh ChainSync intersection",
 	)
 	assert.Equal(t, ls.Tip().Point, resync.Point)
@@ -2024,6 +2156,8 @@ func TestReplayRecoveryDeterministicDuplicateAtTipSkipsDescentSchedule(
 // rejected; keying the latch on the tip alone denied that block the fresh
 // intersection it had never had.
 func TestReplayRecoveryDeterministicLatchIsPerFailingBlock(t *testing.T) {
+	t.Parallel()
+
 	ls := newReplayRecoveryAuditLedger(t, true)
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Close)
@@ -2046,7 +2180,7 @@ func TestReplayRecoveryDeterministicLatchIsPerFailingBlock(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		resyncCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"the first failing block must request a fresh ChainSync intersection",
 	)
 
@@ -2061,7 +2195,7 @@ func TestReplayRecoveryDeterministicLatchIsPerFailingBlock(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		resyncCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"a different rejected block must get its own fresh intersection",
 	)
 }
@@ -2070,6 +2204,8 @@ func TestReplayRecoveryDeterministicLatchIsPerFailingBlock(t *testing.T) {
 // critical section, so it is written under the same lock rather than relying
 // on both callers staying on the pipeline goroutine. Run under -race.
 func TestReplayRecoveryDeterministicLatchConcurrentAccess(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	failing := &txValidationError{
 		BlockPoint: ocommon.NewPoint(160, testHashBytes("latch-failing")),
@@ -2135,6 +2271,8 @@ func deterministicResyncChannel(
 // duplicate must take the deterministic branch instead of the state-dependent
 // unresolved-producer fallback that repeatedly rediscovers the same block.
 func TestReplayRecoveryRejectsDeterministicByronDuplicateInput(t *testing.T) {
+	t.Parallel()
+
 	ls := newReplayRecoveryAuditLedger(t, true)
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Close)
@@ -2180,13 +2318,15 @@ func TestReplayRecoveryRejectsDeterministicByronDuplicateInput(t *testing.T) {
 	resync := testutil.RequireReceive(
 		t,
 		resyncCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"Byron deterministic recovery must request a fresh ChainSync intersection",
 	)
 	assert.Equal(t, ls.Tip().Point, resync.Point)
 }
 
 func TestReplayRecoveryDoesNotArmAuditWhenPrimaryAlreadyHeld(t *testing.T) {
+	t.Parallel()
+
 	ls := newReplayRecoveryAuditLedger(t, false)
 
 	recovered, err := ls.tryRecoverFromTxValidationError(&txValidationError{
@@ -2211,6 +2351,8 @@ func TestReplayRecoveryDoesNotArmAuditWhenPrimaryAlreadyHeld(t *testing.T) {
 }
 
 func TestResetReplayRecoveryNonProgressRequiresNewHighWater(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	require.False(t, ls.observeReplayRecoveryTip(140))
 	require.False(t, ls.observeReplayRecoveryTip(140))
@@ -2229,6 +2371,8 @@ func TestResetReplayRecoveryNonProgressRequiresNewHighWater(t *testing.T) {
 }
 
 func TestTryRecoverFromTxValidationErrorSkipsUnknownProducer(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
@@ -2281,6 +2425,8 @@ func testRawBlock(
 // pipeline in a loop -- observed on DevNet as a producer pinned at its own
 // block 0 (slot 4) for minutes while the rest of the network advanced.
 func TestReplayRecoveryParentPointGenesisPredecessor(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
@@ -2327,6 +2473,8 @@ func TestReplayRecoveryParentPointGenesisPredecessor(t *testing.T) {
 // of any other length is malformed, and treating it as the genesis predecessor
 // would swallow the corruption instead of surfacing it as a failed lookup.
 func TestIsGenesisPrevHashRejectsMalformedHashes(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range []struct {
 		name     string
 		prevHash []byte
@@ -2387,6 +2535,8 @@ func TestIsGenesisPrevHashRejectsMalformedHashes(t *testing.T) {
 func TestTryRecoverFromTxValidationErrorIgnoresFailureWithResolvableInputs(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
@@ -2468,8 +2618,11 @@ func TestTryRecoverFromTxValidationErrorIgnoresFailureWithResolvableInputs(
 
 	recovered, err := ls.tryRecoverFromTxValidationError(validationErr)
 	require.NoError(t, err)
-	assert.False(t, recovered,
-		"a failure whose inputs all resolve is a rejected block, not a local state gap")
+	assert.False(
+		t,
+		recovered,
+		"a failure whose inputs all resolve is a rejected block, not a local state gap",
+	)
 	assert.Equal(t, currentTip, ls.currentTip,
 		"nothing was rewound")
 	assert.Equal(t, currentTip, ls.chain.Tip())
@@ -2482,6 +2635,8 @@ func TestTryRecoverFromTxValidationErrorIgnoresFailureWithResolvableInputs(
 // located — and folding both into unresolvedInputs is what let a failure with
 // nothing missing drive a rewind (dingo #3805).
 func TestResolveReplayRecoveryProducerReportsPresentInput(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	cm, err := chain.NewManager(db, nil)
@@ -2521,7 +2676,10 @@ func TestResolveReplayRecoveryProducerReportsPresentInput(t *testing.T) {
 	// A reference with no UTxO and no producer anywhere is the genuine gap.
 	resolved, present, err = ls.resolveReplayRecoveryProducer(
 		replayRecoveryPendingInput{
-			Input:   &replayRecoveryInput{txId: testHashBytes("absent"), index: 0},
+			Input: &replayRecoveryInput{
+				txId:  testHashBytes("absent"),
+				index: 0,
+			},
 			MaxSlot: 100,
 		},
 		index,

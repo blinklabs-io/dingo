@@ -2361,13 +2361,23 @@ func (a *NodeAdapter) Account(
 		ControlledAmount:   strconv.FormatUint(controlledAmount, 10),
 		RewardsSum:         reward,
 		WithdrawalsSum:     strconv.FormatUint(sums.WithdrawalsSum, 10),
-		ReservesSum:        strconv.FormatUint(sums.ReservesSum, 10),
-		TreasurySum:        strconv.FormatUint(sums.TreasurySum, 10),
+		ReservesSum:        signedSumText(sums.ReservesSum),
+		TreasurySum:        signedSumText(sums.TreasurySum),
 		WithdrawableAmount: reward,
 		PoolID:             poolID,
 		DrepID:             accountDrepID(account.Drep, account.DrepType),
 		Registered:         account.Active,
 	}, nil
+}
+
+// signedSumText renders a signed MIR pot total. The aggregate is summed over
+// delta_coin rows, so it carries a sign; a nil total is rendered as zero so a
+// stake account with no MIR history reports "0" rather than an empty field.
+func signedSumText(value *big.Int) string {
+	if value == nil {
+		return "0"
+	}
+	return value.String()
 }
 
 // accountDrepID renders the Bech32 DRep ID a stake account is delegated to,
@@ -3644,13 +3654,16 @@ func (a *NodeAdapter) MetadataTransactions(
 	ret := make([]MetadataTransactionJSONInfo, 0, len(txs))
 	for _, tx := range txs {
 		jsonValue, _, err := labelcodec.RawValues(tx.Metadata, label)
-		if err != nil {
+		if err != nil && !errors.Is(err, labelcodec.ErrJSONUnavailable) {
 			return nil, 0, fmt.Errorf(
 				"extract json metadata label %d from tx %x: %w",
 				label,
 				tx.Hash,
 				err,
 			)
+		}
+		if errors.Is(err, labelcodec.ErrJSONUnavailable) {
+			jsonValue = nil
 		}
 		ret = append(ret, MetadataTransactionJSONInfo{
 			TxHash:       hex.EncodeToString(tx.Hash),
@@ -3694,7 +3707,7 @@ func (a *NodeAdapter) MetadataTransactionsCBOR(
 
 	ret := make([]MetadataTransactionCBORInfo, 0, len(txs))
 	for _, tx := range txs {
-		_, cborValue, err := labelcodec.RawValues(tx.Metadata, label)
+		cborValue, err := labelcodec.RawValue(tx.Metadata, label)
 		if err != nil {
 			return nil, 0, fmt.Errorf(
 				"extract cbor metadata label %d from tx %x: %w",
@@ -3986,9 +3999,13 @@ func (a *NodeAdapter) TransactionMetadata(
 	}
 	ret := make([]TransactionMetadataInfo, 0, len(entries))
 	for _, entry := range entries {
+		var jsonMetadata json.RawMessage
+		if entry.JSONError == nil {
+			jsonMetadata = json.RawMessage(entry.JsonValue)
+		}
 		ret = append(ret, TransactionMetadataInfo{
 			Label:        strconv.FormatUint(entry.Label, 10),
-			JSONMetadata: json.RawMessage(entry.JsonValue),
+			JSONMetadata: jsonMetadata,
 		})
 	}
 	return ret, nil
@@ -4381,7 +4398,7 @@ func (a *NodeAdapter) TransactionMIRs(
 		case uint(lcommon.MirSourceTreasury):
 			pot = "treasury"
 		}
-		for credential, amount := range c.Reward.Rewards {
+		for credential, amount := range c.Reward.RewardsAmount() {
 			address, err := stakeAddressFromCredential(*credential, networkID)
 			if err != nil {
 				return nil, fmt.Errorf(
@@ -4391,9 +4408,19 @@ func (a *NodeAdapter) TransactionMIRs(
 					err,
 				)
 			}
+			if amount == nil {
+				return nil, fmt.Errorf(
+					"MIR delta missing for transaction %x cert %d",
+					hash,
+					cert.Index,
+				)
+			}
 			ret = append(ret, TransactionMIRInfo{
-				Address:   address,
-				Amount:    strconv.FormatUint(amount, 10),
+				Address: address,
+				// delta_coin is signed, so the rendered amount
+				// keeps the sign rather than being formatted as
+				// an unsigned coin.
+				Amount:    amount.String(),
 				CertIndex: cert.Index,
 				Pot:       pot,
 			})

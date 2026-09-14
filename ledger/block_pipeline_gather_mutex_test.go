@@ -82,6 +82,8 @@ func (p *pausingLedgerReadIterator) Next(
 // takes) must fail. Once the reader delivers its batch and the mutex is no
 // longer needed, TryLock must succeed.
 func TestLedgerReadChainIteratorHoldsGatherMutexAcrossGather(t *testing.T) {
+	t.Parallel()
+
 	block1, point1 := buildDecodableTestBlock(t, 10, 1)
 	block2, point2 := buildDecodableTestBlock(t, 20, 2)
 
@@ -112,7 +114,7 @@ func TestLedgerReadChainIteratorHoldsGatherMutexAcrossGather(t *testing.T) {
 	}()
 
 	testutil.RequireReceive(
-		t, iter.paused, 2*time.Second,
+		t, iter.paused, testutil.AsyncWait,
 		"reader never reached the paused mid-gather point",
 	)
 
@@ -130,7 +132,7 @@ func TestLedgerReadChainIteratorHoldsGatherMutexAcrossGather(t *testing.T) {
 	close(iter.resume)
 
 	result := testutil.RequireReceive(
-		t, resultCh, 2*time.Second,
+		t, resultCh, testutil.AsyncWait,
 		"reader never delivered its gathered batch",
 	)
 	require.False(t, result.rollback)
@@ -144,19 +146,19 @@ func TestLedgerReadChainIteratorHoldsGatherMutexAcrossGather(t *testing.T) {
 			return true
 		}
 		return false
-	}, 2*time.Second, 5*time.Millisecond,
+	}, testutil.AsyncWait, 5*time.Millisecond,
 		"blockPipelineGatherMutex remained held after the batch was "+
 			"delivered",
 	)
 
 	close(result.done)
 	testutil.RequireReceive(
-		t, iter.blockingNextStarted, 2*time.Second,
+		t, iter.blockingNextStarted, testutil.AsyncWait,
 		"reader never entered the blocking iterator call",
 	)
 	cancel()
 	testutil.RequireReceive(
-		t, readerDone, time.Second,
+		t, readerDone, testutil.AsyncWait,
 		"ledgerReadChainIterator did not exit after cancellation",
 	)
 }

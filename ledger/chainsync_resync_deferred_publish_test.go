@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
 // These two tests close the gap the converted rollback tests left open: they
@@ -116,7 +117,7 @@ func runResyncDeferredPublishScenario(
 	case <-done:
 		// Deferred: the queued event was published after the unlock, the
 		// handler took the mutex, and everything drained.
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatalf(
 			"requestChainsyncResync published ChainsyncResyncEventType inline"+
 				" while holding %s: the publish parked on a full subscriber"+
@@ -132,6 +133,8 @@ func runResyncDeferredPublishScenario(
 // the 5s guard) if requestChainsyncResync publishes inline while chainsyncMutex
 // is held, and passes when the publish is deferred through pendingPublishes.
 func TestRequestChainsyncResyncDefersPublishUnderChainsyncMutex(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	runResyncDeferredPublishScenario(t, &ls.chainsyncMutex, "chainsyncMutex")
 }
@@ -143,6 +146,8 @@ func TestRequestChainsyncResyncDefersPublishUnderChainsyncMutex(t *testing.T) {
 func TestRequestChainsyncResyncDefersPublishUnderChainsyncBlockfetchMutex(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	runResyncDeferredPublishScenario(
 		t, &ls.chainsyncBlockfetchMutex, "chainsyncBlockfetchMutex",

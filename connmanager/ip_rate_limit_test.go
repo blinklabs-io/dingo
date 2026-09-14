@@ -31,6 +31,8 @@ import (
 )
 
 func TestIPKeyFromAddr(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		addr     net.Addr
@@ -124,6 +126,8 @@ func TestIPKeyFromAddr(t *testing.T) {
 }
 
 func TestIPKeyFromAddr_SameSubnet(t *testing.T) {
+	t.Parallel()
+
 	// Verify that two IPv6 addresses in the same /64 produce the same key
 	addr1 := &net.TCPAddr{
 		IP:   net.ParseIP("2001:db8:1234:5678::1"),
@@ -152,6 +156,8 @@ func TestIPKeyFromAddr_SameSubnet(t *testing.T) {
 }
 
 func TestAcquireReleaseIPSlot(t *testing.T) {
+	t.Parallel()
+
 	cm := NewConnectionManager(ConnectionManagerConfig{
 		MaxConnectionsPerIP: 3,
 	})
@@ -187,6 +193,8 @@ func TestAcquireReleaseIPSlot(t *testing.T) {
 }
 
 func TestAcquireIPSlot_EmptyKeyExempt(t *testing.T) {
+	t.Parallel()
+
 	cm := NewConnectionManager(ConnectionManagerConfig{
 		MaxConnectionsPerIP: 1,
 	})
@@ -198,6 +206,8 @@ func TestAcquireIPSlot_EmptyKeyExempt(t *testing.T) {
 }
 
 func TestAcquireIPSlot_IndependentIPs(t *testing.T) {
+	t.Parallel()
+
 	cm := NewConnectionManager(ConnectionManagerConfig{
 		MaxConnectionsPerIP: 2,
 	})
@@ -222,6 +232,8 @@ func TestAcquireIPSlot_IndependentIPs(t *testing.T) {
 }
 
 func TestDefaultMaxConnectionsPerIP(t *testing.T) {
+	t.Parallel()
+
 	cm := NewConnectionManager(ConnectionManagerConfig{})
 	assert.Equal(
 		t,
@@ -231,6 +243,8 @@ func TestDefaultMaxConnectionsPerIP(t *testing.T) {
 }
 
 func TestCustomMaxConnectionsPerIP(t *testing.T) {
+	t.Parallel()
+
 	cm := NewConnectionManager(ConnectionManagerConfig{
 		MaxConnectionsPerIP: 10,
 	})
@@ -435,6 +449,8 @@ func TestIPRateLimitRejectsWhenSlotsPreFilled(t *testing.T) {
 // TestIPRateLimitCounterDecrementsOnConnectionClose verifies that the
 // per-IP counter is properly decremented when a connection is removed.
 func TestIPRateLimitCounterDecrementsOnConnectionClose(t *testing.T) {
+	t.Parallel()
+
 	cm := NewConnectionManager(ConnectionManagerConfig{
 		MaxConnectionsPerIP: 3,
 	})
@@ -458,6 +474,8 @@ func TestIPRateLimitCounterDecrementsOnConnectionClose(t *testing.T) {
 // TestIPRateLimitIPv6SubnetGrouping verifies that IPv6 addresses in the
 // same /64 are grouped together for rate limiting.
 func TestIPRateLimitIPv6SubnetGrouping(t *testing.T) {
+	t.Parallel()
+
 	cm := NewConnectionManager(ConnectionManagerConfig{
 		MaxConnectionsPerIP: 2,
 	})
@@ -495,6 +513,8 @@ func TestIPRateLimitIPv6SubnetGrouping(t *testing.T) {
 // TestIPRateLimitConcurrentAccess tests thread safety of the IP
 // rate-limiting under concurrent access.
 func TestIPRateLimitConcurrentAccess(t *testing.T) {
+	t.Parallel()
+
 	const maxPerIP = 5
 	cm := NewConnectionManager(ConnectionManagerConfig{
 		MaxConnectionsPerIP: maxPerIP,
@@ -654,6 +674,8 @@ func TestIPRateLimitRejectLogMessage(t *testing.T) {
 // remain fair under repeated acquire/release churn: saturation on one IP must
 // not block another IP from making progress.
 func TestIPRateLimitFairnessUnderConnectionChurn(t *testing.T) {
+	t.Parallel()
+
 	const maxPerIP = 2
 	cm := NewConnectionManager(ConnectionManagerConfig{
 		MaxConnectionsPerIP: maxPerIP,

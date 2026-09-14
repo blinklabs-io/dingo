@@ -26,6 +26,8 @@ import (
 // Items completed out of order must be processed in strict contiguous
 // index order starting at 0, exactly once each.
 func TestSequencerProcessesInContiguousOrder(t *testing.T) {
+	t.Parallel()
+
 	var mu sync.Mutex
 	var order []uint64
 	seq := newInOrderSequencer(5, func(num uint64) error {
@@ -44,6 +46,8 @@ func TestSequencerProcessesInContiguousOrder(t *testing.T) {
 // Concurrent completions from many goroutines must still process in
 // strict 0..N-1 order.
 func TestSequencerConcurrentCompletions(t *testing.T) {
+	t.Parallel()
+
 	const n = uint64(200)
 	var mu sync.Mutex
 	var order []uint64
@@ -73,6 +77,8 @@ func TestSequencerConcurrentCompletions(t *testing.T) {
 // A processing error stops the sequencer and is returned from Wait;
 // later indices are not processed.
 func TestSequencerStopsOnProcessError(t *testing.T) {
+	t.Parallel()
+
 	boom := errors.New("boom")
 	var mu sync.Mutex
 	var processed []uint64
@@ -95,6 +101,8 @@ func TestSequencerStopsOnProcessError(t *testing.T) {
 // Cancel unblocks Wait even when not all indices have completed (e.g. a
 // fetch worker failed and the contiguous prefix can never advance).
 func TestSequencerCancelUnblocksWait(t *testing.T) {
+	t.Parallel()
+
 	cancelled := errors.New("cancelled")
 	seq := newInOrderSequencer(5, func(uint64) error { return nil })
 	seq.Complete(0)

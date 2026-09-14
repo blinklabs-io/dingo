@@ -21,6 +21,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -30,8 +31,9 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
-	_ "github.com/glebarez/go-sqlite"
+	_ "modernc.org/sqlite"
 )
 
 var databaseHosts sync.Map
@@ -130,6 +132,34 @@ func NewDatabaseWithOptions(
 	opts Options,
 ) (*database.Database, error) {
 	tb.Helper()
+	return newDatabaseWithOptions(tb, opts, nil)
+}
+
+// NewDatabaseWithMetadataWrapper is NewDatabaseWithOptions, but passes the
+// resolved metadata store through wrap before it is injected into the
+// database. It exists for tests that must force a metadata-store method to
+// return an error its backing implementation would not organically produce --
+// the same rationale RawSQLiteMetadata serves for a deliberately impossible
+// row, applied instead to a synthetic storage fault (a timeout, a lost
+// connection) from a specific lookup.
+func NewDatabaseWithMetadataWrapper(
+	tb testing.TB,
+	opts Options,
+	wrap func(metadata.MetadataStore) metadata.MetadataStore,
+) (*database.Database, error) {
+	tb.Helper()
+	if wrap == nil {
+		return nil, errors.New("wrap function is required")
+	}
+	return newDatabaseWithOptions(tb, opts, wrap)
+}
+
+func newDatabaseWithOptions(
+	tb testing.TB,
+	opts Options,
+	wrap func(metadata.MetadataStore) metadata.MetadataStore,
+) (*database.Database, error) {
+	tb.Helper()
 	config := opts.Config
 	if config == nil {
 		config = database.DefaultConfig
@@ -141,6 +171,18 @@ func NewDatabaseWithOptions(
 	blobRegister := opts.Blob.Register
 	if blobRegister == nil {
 		blobRegister = badger.RegisterProvider
+	}
+	blobConfig := opts.Blob.Config
+	if blobName == "badger" {
+		// Apply the bounded sizes as defaults rather than only when the
+		// caller supplied no config at all. The badger provider decodes
+		// its config from the production defaults (provider.go:44), so a
+		// caller config that sets some other knob and says nothing about
+		// sizes decodes back to the 2GiB reservation. Caller keys win, so
+		// a test that needs production sizing still asks for it.
+		merged := testutil.BadgerBlobConfig()
+		maps.Copy(merged, blobConfig)
+		blobConfig = merged
 	}
 	metadataName := opts.Metadata.Name
 	if metadataName == "" {
@@ -159,7 +201,7 @@ func NewDatabaseWithOptions(
 	}
 	blobStore, err := plugin.Resolve[blob.BlobStore](
 		context.Background(), host,
-		plugin.CapabilityStorageBlob, blobName, opts.Blob.Config,
+		plugin.CapabilityStorageBlob, blobName, blobConfig,
 		blob.ProviderDependencies{
 			DataDir: config.DataDir, RunMode: opts.RunMode,
 			StorageMode: config.StorageMode,
@@ -215,6 +257,9 @@ func NewDatabaseWithOptions(
 	if err != nil {
 		_ = host.Stop(context.Background())
 		return nil, err
+	}
+	if wrap != nil {
+		metadataStore = wrap(metadataStore)
 	}
 	db, err := database.New(
 		config,

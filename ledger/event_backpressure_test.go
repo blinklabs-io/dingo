@@ -31,6 +31,8 @@ import (
 func TestBlockfetchSubscriptionRemainsLosslessPastDeliveryTimeout(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Stop()
 
@@ -58,7 +60,7 @@ func TestBlockfetchSubscriptionRemainsLosslessPastDeliveryTimeout(
 	testutil.RequireReceive(
 		t,
 		started,
-		time.Second,
+		testutil.AsyncWait,
 		"blockfetch handler did not begin",
 	)
 
@@ -87,13 +89,13 @@ func TestBlockfetchSubscriptionRemainsLosslessPastDeliveryTimeout(
 	testutil.RequireReceive(
 		t,
 		published,
-		5*time.Second,
+		testutil.AsyncWait,
 		"blockfetch publisher did not resume after the handler drained",
 	)
 	testutil.RequireReceive(
 		t,
 		allHandled,
-		5*time.Second,
+		testutil.AsyncWait,
 		"blockfetch handler did not receive every retained event",
 	)
 }

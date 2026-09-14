@@ -45,7 +45,7 @@ func waitUntilParkedIn(t *testing.T, symbol string) {
 		t,
 		func() bool {
 			dump := string(buf[:runtime.Stack(buf, true)])
-			for _, g := range strings.Split(dump, "\n\ngoroutine ") {
+			for g := range strings.SplitSeq(dump, "\n\ngoroutine ") {
 				if strings.Contains(g, semaphoreFrame) &&
 					strings.Contains(g, symbol) {
 					return true

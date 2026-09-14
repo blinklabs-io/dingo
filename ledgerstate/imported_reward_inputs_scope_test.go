@@ -37,6 +37,8 @@ import (
 // made mark and go fail validation while set passed because its own complete
 // parameters replaced the synthetic entry.
 func TestSeedImportedRewardInputsScopesFallbackToTargetSnapshot(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 
@@ -161,6 +163,8 @@ func TestSeedImportedRewardInputsScopesFallbackToTargetSnapshot(t *testing.T) {
 // parameters, validation must still reject the whole epoch rather than seed
 // a partial basis that understates every other pool's reward share.
 func TestEffectiveRewardPoolParamsKeepsIncompleteReferencedPool(t *testing.T) {
+	t.Parallel()
+
 	pool := scopedRewardTestPool(0xC3, 0x41)
 	compact := &ParsedPool{
 		PoolKeyHash: pool.PoolKeyHash,
@@ -185,6 +189,8 @@ func TestEffectiveRewardPoolParamsKeepsIncompleteReferencedPool(t *testing.T) {
 // such pool and its delegated stake, though, so operators can see the whole
 // blast radius instead of whichever map entry validation visited first.
 func TestDerivedRewardInputsReportsAllIncompleteReferencedPools(t *testing.T) {
+	t.Parallel()
+
 	poolA := scopedRewardTestPoolFromKey(
 		t,
 		"102e9ff50bee440b1ef337f58d1760a5475f3ce716f2aab60e6ef424",
@@ -230,13 +236,15 @@ func TestDerivedRewardInputsReportsAllIncompleteReferencedPools(t *testing.T) {
 }
 
 func TestDerivedRewardInputsBoundsIncompletePoolDiagnostic(t *testing.T) {
+	t.Parallel()
+
 	const poolCount = maxRewardSeedFailurePools + 8
 	snapshot := &ParsedSnapShot{
 		Stake:       make(map[string]uint64, poolCount),
 		Delegations: make(map[string][]byte, poolCount),
 	}
 	params := make(map[string]*ParsedPool, poolCount)
-	for i := 0; i < poolCount; i++ {
+	for i := range poolCount {
 		credential := hash28(byte(i + 1))
 		poolKey := hash28(byte(i + 100))
 		credentialHex := hex.EncodeToString(credential)

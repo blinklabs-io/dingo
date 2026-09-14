@@ -95,6 +95,11 @@ func TestPrunerExpiresBlocksOlderThanStabilityWindow(t *testing.T) {
 
 	txn := db.BlobTxn(false)
 	defer txn.Release()
+	// db.Blob() is non-nil: database.New rejects a nil or typed-nil blob
+	// store (database/database.go), so the nil-receiver branch of
+	// blobStoreRef.blobStore that nilaway traces is unreachable for any
+	// constructed database.
+	//nolint:nilaway // database.New requires a non-nil blob store
 	_, _, err := db.Blob().GetBlock(txn.Blob(), 9, oldHash)
 	assert.ErrorIs(t, err, types.ErrHistoryExpired)
 	_, _, err = db.Blob().GetBlock(txn.Blob(), 10, boundaryHash)

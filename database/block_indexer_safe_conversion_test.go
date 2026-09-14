@@ -41,6 +41,8 @@ type safeIntToUint32TestCase struct {
 // runtime int64->int conversion, guarded by strconv.IntSize, rather than
 // as int constants, so the test package still compiles on 32-bit.
 func TestSafeIntToUint32(t *testing.T) {
+	t.Parallel()
+
 	tests := []safeIntToUint32TestCase{
 		{name: "negative clamps to zero", n: -1, want: 0},
 		{name: "zero", n: 0, want: 0},

@@ -15,6 +15,7 @@
 package utxorpc
 
 import (
+	"encoding/hex"
 	"math/big"
 	"testing"
 
@@ -311,4 +312,66 @@ func TestRedeemerPlutusDataByKey_DecodedWitness(t *testing.T) {
 	pay, ok := proto.GetPlutusData().(*cardano.PlutusData_BoundedBytes)
 	require.True(t, ok)
 	require.Equal(t, []byte{0x01, 0x02, 0x03}, pay.BoundedBytes)
+}
+
+func TestPlutusDataToCardano_IntegerBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		value     string
+		kind      string
+		magnitude string
+	}{
+		{"negative_int64_min", "-9223372036854775808", "int", ""},
+		{"negative_below_int64", "-9223372036854775809", "negative", "8000000000000000"},
+		{"negative_uint64_edge", "-18446744073709551616", "negative", "ffffffffffffffff"},
+		{"negative_beyond_uint64", "-18446744073709551617", "negative", "010000000000000000"},
+		{"negative_large", "-1180591620717411303424", "negative", "3fffffffffffffffff"},
+		{"zero", "0", "int", ""},
+		{"positive_int64_max", "9223372036854775807", "int", ""},
+		{"positive_above_int64", "9223372036854775808", "positive", "8000000000000000"},
+		{"positive_large", "1180591620717411303424", "positive", "400000000000000000"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			value, ok := new(big.Int).SetString(tc.value, 10)
+			require.True(t, ok)
+			pd := &pdata.Integer{Inner: value}
+			projected, err := plutusDataToCardano(pd)
+			require.NoError(t, err)
+			require.NotNil(t, projected)
+			integer := projected.GetBigInt()
+			require.NotNil(t, integer)
+			require.Equal(
+				t,
+				tc.value,
+				value.String(),
+				"projection must not mutate its input",
+			)
+			if tc.kind == "int" {
+				native, ok := integer.BigInt.(*cardano.BigInt_Int)
+				require.True(t, ok)
+				require.Equal(t, value.Int64(), native.Int)
+				return
+			}
+			want, err := hex.DecodeString(tc.magnitude)
+			require.NoError(t, err)
+			if tc.kind == "negative" {
+				negative, ok := integer.BigInt.(*cardano.BigInt_BigNInt)
+				require.True(t, ok)
+				require.Equal(
+					t,
+					want,
+					negative.BigNInt,
+					"negative Plutus integers must retain CBOR tag-3 magnitude",
+				)
+			} else {
+				positive, ok := integer.BigInt.(*cardano.BigInt_BigUInt)
+				require.True(t, ok)
+				require.Equal(t, want, positive.BigUInt)
+			}
+		})
+	}
+}
+
+func TestBigIntToCardanoNil(t *testing.T) {
+	require.Nil(t, bigIntToCardano(nil))
 }

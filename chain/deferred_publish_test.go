@@ -43,6 +43,8 @@ import (
 // block on the stalled subscriber and fail the timeout, or would leak an event
 // onto the subscriber channel and fail the "published nothing" check.
 func TestDeferredAddAndRollbackDoNotPublish(t *testing.T) {
+	t.Parallel()
+
 	eventBus := event.NewEventBus(nil, nil)
 	t.Cleanup(eventBus.Stop)
 
@@ -86,7 +88,11 @@ func TestDeferredAddAndRollbackDoNotPublish(t *testing.T) {
 		}
 		done := make(chan result, 1)
 		go func() {
-			evt, addErr := c.AddBlockWithPointDeferred(blocks[i], pointOf(i), nil)
+			evt, addErr := c.AddBlockWithPointDeferred(
+				blocks[i],
+				pointOf(i),
+				nil,
+			)
 			done <- result{evt: evt, err: addErr}
 		}()
 		select {

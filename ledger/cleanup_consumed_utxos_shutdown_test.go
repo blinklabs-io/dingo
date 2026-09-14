@@ -72,6 +72,9 @@ func drainCleanupTimerFires(fires <-chan struct{}) {
 // self-perpetuating timer running against a database its owner closes
 // immediately after Close returns (LedgerState does not own the database --
 // see the note at the end of Close).
+// Not t.Parallel: shrinkCleanupConsumedUtxosInterval swaps the package-level
+// cleanupConsumedUtxosInterval, which every concurrent LedgerState in this
+// package would observe.
 func TestCleanupConsumedUtxos_TimerStopsOnClose(t *testing.T) {
 	shrinkCleanupConsumedUtxosInterval(t, 5*time.Millisecond)
 	db := newTestDBForCleanup(t, types.StorageModeCore)
@@ -85,11 +88,11 @@ func TestCleanupConsumedUtxos_TimerStopsOnClose(t *testing.T) {
 	// absence check below is measuring a stopped timer rather than one that
 	// simply never started.
 	testutil.RequireReceive(
-		t, fires, 5*time.Second,
+		t, fires, testutil.AsyncWait,
 		"cleanup timer must fire while the ledger state is open",
 	)
 	testutil.RequireReceive(
-		t, fires, 5*time.Second,
+		t, fires, testutil.AsyncWait,
 		"cleanup timer must re-arm itself while the ledger state is open",
 	)
 
@@ -131,7 +134,7 @@ func TestCleanupConsumedUtxos_CloseWaitsForActiveCallback(t *testing.T) {
 
 	ls.scheduleCleanupConsumedUtxos()
 	testutil.RequireReceive(
-		t, entered, 5*time.Second,
+		t, entered, testutil.AsyncWait,
 		"cleanup timer callback must start before Close is called",
 	)
 
@@ -145,7 +148,7 @@ func TestCleanupConsumedUtxos_CloseWaitsForActiveCallback(t *testing.T) {
 
 	close(release)
 	err := testutil.RequireReceive(
-		t, closeReturned, 10*time.Second,
+		t, closeReturned, testutil.AsyncWait,
 		"Close must return once the in-flight cleanup callback finishes",
 	)
 	require.NoError(t, err)
@@ -161,6 +164,8 @@ func TestCleanupConsumedUtxos_CloseWaitsForActiveCallback(t *testing.T) {
 // seeded row and tip are deleted by the same call on an open ledger state, so
 // a passing result here cannot come from cleanup being inert.
 func TestCleanupConsumedUtxos_NoDatabaseWorkAfterClose(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDBForCleanup(t, types.StorageModeCore)
 	txId := bytes.Repeat([]byte{0xC5}, 32)
 	const (
@@ -197,7 +202,7 @@ func TestCleanupConsumedUtxos_RepeatedCloseIsSafe(t *testing.T) {
 
 	ls.scheduleCleanupConsumedUtxos()
 	testutil.RequireReceive(
-		t, fires, 5*time.Second,
+		t, fires, testutil.AsyncWait,
 		"cleanup timer must fire while the ledger state is open",
 	)
 

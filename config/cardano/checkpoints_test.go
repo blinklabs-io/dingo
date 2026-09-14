@@ -22,6 +22,8 @@ import (
 )
 
 func TestCardanoNodeConfigLoadsCheckpoints(t *testing.T) {
+	t.Parallel()
+
 	cfg, err := NewCardanoNodeConfigFromFile(
 		filepath.Join(testDataDir, "config.json"),
 	)
@@ -38,6 +40,8 @@ func TestCardanoNodeConfigLoadsCheckpoints(t *testing.T) {
 }
 
 func TestParseCheckpointsNormalizesHashCase(t *testing.T) {
+	t.Parallel()
+
 	data := []byte(
 		`{"checkpoints":[{"blockNo":1,"hash":"AABB"},{"blockNo":2,"hash":"ccdd"}]}`,
 	)
@@ -48,6 +52,8 @@ func TestParseCheckpointsNormalizesHashCase(t *testing.T) {
 }
 
 func TestParseCheckpointsRejectsInvalidHash(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name        string
 		hash        string
@@ -76,6 +82,8 @@ func TestParseCheckpointsRejectsInvalidHash(t *testing.T) {
 }
 
 func TestParseCheckpointsRejectsWrongHash(t *testing.T) {
+	t.Parallel()
+
 	data := []byte(`{"checkpoints":[{"blockNo":1,"hash":"aa"}]}`)
 	_, err := parseCheckpoints(data, "deadbeef")
 	require.EqualError(
@@ -88,6 +96,8 @@ func TestParseCheckpointsRejectsWrongHash(t *testing.T) {
 }
 
 func TestParseCheckpointsAcceptsCorrectHash(t *testing.T) {
+	t.Parallel()
+
 	data := []byte(`{"checkpoints":[{"blockNo":1,"hash":"aa"}]}`)
 	// blake2b256 of the exact bytes above.
 	correct := blake2b256Hex(data)
@@ -97,6 +107,8 @@ func TestParseCheckpointsAcceptsCorrectHash(t *testing.T) {
 }
 
 func TestParseCheckpointsRejectsConflictingDuplicate(t *testing.T) {
+	t.Parallel()
+
 	data := []byte(
 		`{"checkpoints":[{"blockNo":1,"hash":"aa"},{"blockNo":1,"hash":"bb"}]}`,
 	)

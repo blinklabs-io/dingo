@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
@@ -100,6 +99,8 @@ func buildOverflowForkPath(
 }
 
 func TestRecordPeerHeaderHistoryBoundsRetainedBytes(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	fixture.ls.config.GenesisSelectionStateFunc = func() (bool, uint64) {
 		return true, ^uint64(0)
@@ -167,6 +168,8 @@ func TestRecordPeerHeaderHistoryBoundsRetainedBytes(t *testing.T) {
 }
 
 func TestPeerHeaderHistoryRehydratesWireHeader(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	connId := testChainsyncConnId(6202, 3002)
 	const slot = 500
@@ -219,6 +222,8 @@ func TestPeerHeaderHistoryRehydratesWireHeader(t *testing.T) {
 func TestTryResolveForkExtensionRestartsBlockfetchAfterQueueOverflow(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	maxHeaders := fixture.ls.chain.MaxQueuedHeaders()
 	connId := testChainsyncConnId(6201, 3001)
@@ -263,7 +268,7 @@ func TestTryResolveForkExtensionRestartsBlockfetchAfterQueueOverflow(
 		},
 	}
 
-	resolved, err := fixture.ls.tryResolveFork(evt, notFitErr, nil)
+	resolved, err := fixture.ls.tryResolveFork(evt, notFitErr, nil, false)
 	require.NoError(t, err)
 	require.False(
 		t,
@@ -309,6 +314,8 @@ func TestTryResolveForkExtensionRestartsBlockfetchAfterQueueOverflow(
 func TestEnsureBlockfetchDrainingAfterForkQueueFailureRecoversWhenStartFails(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	maxHeaders := fixture.ls.chain.MaxQueuedHeaders()
 	connId := testChainsyncConnId(6203, 3001)
@@ -359,7 +366,7 @@ func TestEnsureBlockfetchDrainingAfterForkQueueFailureRecoversWhenStartFails(
 	// nil pending: pendingPublishes.add publishes immediately on a nil
 	// receiver, which is what lets the subscription above observe the
 	// resync request synchronously.
-	resolved, err := fixture.ls.tryResolveFork(evt, notFitErr, nil)
+	resolved, err := fixture.ls.tryResolveFork(evt, notFitErr, nil, false)
 	require.NoError(t, err)
 	require.False(t, resolved)
 
@@ -373,7 +380,7 @@ func TestEnsureBlockfetchDrainingAfterForkQueueFailureRecoversWhenStartFails(
 	)
 
 	resyncEvt := testutil.RequireReceive(
-		t, resyncCh, 2*time.Second,
+		t, resyncCh, testutil.AsyncWait,
 		"a chainsync re-sync must be requested when the recovery "+
 			"restart itself fails",
 	)
@@ -396,6 +403,8 @@ func TestEnsureBlockfetchDrainingAfterForkQueueFailureRecoversWhenStartFails(
 func TestTryResolveForkExtensionDoesNotThrashAlreadyRunningBlockfetch(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	// Positive control: prove this test reaches the recovery body when no
 	// batch is active. Without this control, replacing the whole body of
 	// ensureBlockfetchDrainingAfterForkQueueFailure with `return` would make
@@ -476,7 +485,7 @@ func TestTryResolveForkExtensionDoesNotThrashAlreadyRunningBlockfetch(
 		},
 	}
 
-	resolved, err := fixture.ls.tryResolveFork(evt, notFitErr, nil)
+	resolved, err := fixture.ls.tryResolveFork(evt, notFitErr, nil, false)
 	require.NoError(t, err)
 	require.False(t, resolved)
 

@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
 )
 
@@ -35,6 +36,20 @@ func newTestDatabase(
 ) (*Database, error) {
 	tb.Helper()
 	return newTestDatabaseWithHost(tb, config, false)
+}
+
+// newTestDatabaseWithRunMode builds a test database whose blob store is
+// resolved with the given run mode. It exists because the badger plugin
+// switches block metadata to a compact binary encoding for run mode
+// "serve" or "leios" with storage mode "core", and nothing else in these
+// tests reaches that encoding.
+func newTestDatabaseWithRunMode(
+	tb testing.TB,
+	config *Config,
+	runMode string,
+) (*Database, error) {
+	tb.Helper()
+	return newTestDatabaseWithHostRunMode(tb, config, false, runMode)
 }
 
 // newTestDatabaseWithHost is the shared body behind newTestDatabase and
@@ -54,6 +69,16 @@ func newTestDatabaseWithHost(
 	keepOnError bool,
 ) (*Database, error) {
 	tb.Helper()
+	return newTestDatabaseWithHostRunMode(tb, config, keepOnError, "")
+}
+
+func newTestDatabaseWithHostRunMode(
+	tb testing.TB,
+	config *Config,
+	keepOnError bool,
+	runMode string,
+) (*Database, error) {
+	tb.Helper()
 	if config == nil {
 		config = DefaultConfig
 	}
@@ -66,10 +91,11 @@ func newTestDatabaseWithHost(
 	}
 	blobStore, err := plugin.Resolve[blob.BlobStore](
 		context.Background(), host,
-		plugin.CapabilityStorageBlob, "badger", nil,
+		plugin.CapabilityStorageBlob, "badger", testutil.BadgerBlobConfig(),
 		blob.ProviderDependencies{
 			DataDir: config.DataDir, StorageMode: config.StorageMode,
-			Logger: config.Logger, PromRegistry: config.PromRegistry,
+			RunMode: runMode,
+			Logger:  config.Logger, PromRegistry: config.PromRegistry,
 		},
 	)
 	if err != nil {

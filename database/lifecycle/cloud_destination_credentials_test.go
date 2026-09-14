@@ -42,6 +42,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -98,6 +99,8 @@ func hasGCSCredentials() bool {
 // SnapshotLister/CloudManifestFetcher/CloudDeleter method this package
 // actually calls in production.
 func TestCloudDestinationS3RoundTrip(t *testing.T) {
+	t.Parallel()
+
 	if !hasS3Credentials() {
 		t.Skip("S3 credentials not found, skipping test")
 	}
@@ -111,6 +114,8 @@ func TestCloudDestinationS3RoundTrip(t *testing.T) {
 // TestCloudDestinationGCSRoundTrip is TestCloudDestinationS3RoundTrip's
 // GCS counterpart, against gcsDestination.
 func TestCloudDestinationGCSRoundTrip(t *testing.T) {
+	t.Parallel()
+
 	if !hasGCSCredentials() {
 		t.Skip("GCS credentials not found, skipping test")
 	}
@@ -207,7 +212,7 @@ func runCloudDestinationRoundTrip(t *testing.T, scheme string, bucket string) {
 		cloudCredentialsTestRegistry,
 		snapshotURI,
 		restoredDir,
-		lifecycle.RestoreStorageConfig{},
+		lifecycle.RestoreStorageConfig{Blob: testutil.BadgerBlobConfig()},
 	)
 	require.NoError(t, err, "Restore from cloud URI")
 	require.Equal(t, manifest.CommitTimestamp, restoreMan.CommitTimestamp)

@@ -15,6 +15,8 @@
 package ledger
 
 import (
+	"slices"
+
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
 )
@@ -119,10 +121,8 @@ func (p *pendingPublishes) drainChain(c *chain.Chain) {
 		c.PublishPendingChainUpdates()
 		return
 	}
-	for _, existing := range p.chainDrains {
-		if existing == c {
-			return
-		}
+	if slices.Contains(p.chainDrains, c) {
+		return
 	}
 	p.chainDrains = append(p.chainDrains, c)
 }

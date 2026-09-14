@@ -19,6 +19,8 @@ import (
 )
 
 func TestNewCardanoNodeConfigFromEmbedFS(t *testing.T) {
+	t.Parallel()
+
 	// Test loading config from embedded filesystem
 	cfg, err := NewCardanoNodeConfigFromEmbedFS(
 		EmbeddedConfigFS,
@@ -52,6 +54,8 @@ func TestNewCardanoNodeConfigFromEmbedFS(t *testing.T) {
 }
 
 func TestNewCardanoNodeConfigFromEmbedFS_InvalidPath(t *testing.T) {
+	t.Parallel()
+
 	// Test loading config from embedded filesystem with invalid path
 	_, err := NewCardanoNodeConfigFromEmbedFS(
 		EmbeddedConfigFS,
@@ -63,6 +67,8 @@ func TestNewCardanoNodeConfigFromEmbedFS_InvalidPath(t *testing.T) {
 }
 
 func TestLoadCardanoNodeConfigWithFallbackNormalizesEmbedPath(t *testing.T) {
+	t.Parallel()
+
 	cfg, err := LoadCardanoNodeConfigWithFallback(
 		`preview\config.json`,
 		"preview",
@@ -77,6 +83,8 @@ func TestLoadCardanoNodeConfigWithFallbackNormalizesEmbedPath(t *testing.T) {
 }
 
 func TestEmbedFS_ListFiles(t *testing.T) {
+	t.Parallel()
+
 	// Test that embedded FS contains expected files in preview directory
 	previewEntries, err := EmbeddedConfigFS.ReadDir("preview")
 	if err != nil {
@@ -108,6 +116,8 @@ func TestEmbedFS_ListFiles(t *testing.T) {
 }
 
 func TestEmbedFS_AllNetworks(t *testing.T) {
+	t.Parallel()
+
 	networks := []string{"preview", "preprod", "mainnet", "devnet"}
 	expectedFiles := []string{
 		"config.json",

@@ -21,7 +21,6 @@ import (
 	"log/slog"
 	"net"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
@@ -189,7 +188,7 @@ func (f *trustWindowLedger) requireResyncs(t *testing.T, n int) {
 		testutil.RequireReceive(
 			t,
 			f.resyncs,
-			2*time.Second,
+			testutil.AsyncWait,
 			fmt.Sprintf("pre-halt resync %d of %d", i+1, n),
 		)
 	}
@@ -205,6 +204,8 @@ func (f *trustWindowLedger) requireResyncs(t *testing.T, n int) {
 func TestAtTipRecoveryInsideMithrilTrustWindowReachesTerminalState(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	// Anchor exactly at the applied tip: rewinding to the tip is legal,
 	// everything deeper is not.
 	fixture := newTrustWindowLedger(t, 200000)
@@ -274,6 +275,8 @@ func TestAtTipRecoveryInsideMithrilTrustWindowReachesTerminalState(
 // existing recovery path however often it repeats. Short-circuiting it into a
 // halt would turn an ordinary fork-selection problem into an outage.
 func TestAtTipRecoveryAboveMithrilTrustWindowKeepsRecovering(t *testing.T) {
+	t.Parallel()
+
 	// Anchor far below the earliest block, so no rewind target the schedule
 	// produces is ever refused by the trust boundary guard.
 	fixture := newTrustWindowLedger(t, 50)
@@ -301,6 +304,8 @@ func TestAtTipRecoveryAboveMithrilTrustWindowKeepsRecovering(t *testing.T) {
 func TestReplayRecoveryBelowMithrilTrustBoundaryReachesTerminalState(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newTrustWindowLedger(t, 200000)
 	fixture.ls.reachedTip.Store(false)
 
@@ -347,6 +352,8 @@ func TestReplayRecoveryBelowMithrilTrustBoundaryReachesTerminalState(
 func TestMithrilBoundaryRollbackFailureDoesNotConsumeRecoveryBudget(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newTrustWindowLedger(t, 200000)
 
 	// Establish one successful boundary recovery, which removes the failing
