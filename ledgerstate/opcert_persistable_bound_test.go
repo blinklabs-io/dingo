@@ -25,13 +25,13 @@ import (
 )
 
 // TestPersistableOpCertBoundMatchesStore ties eras.MaxPersistableOpCertCounter
-// to the check that enforces it. The constant exists to name the limit
+// to the check that enforces it. The constant names the limit
 // sqlstore.checkedInt64 imposes on pool_opcert_sequence.sequence and
-// pool.latest_op_cert_sequence before a caller reaches it, so an assertion
-// comparing the constant against its own definition proves nothing: it stays
-// green if either side moves. This one drives the value through the real
-// store write in both directions, so a change to the constant or to the
-// store's accepted range fails it.
+// pool.latest_op_cert_sequence before a caller reaches it. The former
+// ledger/eras test also checked the constant against the math.MaxInt64
+// literal, but could not detect drift in the store's accepted range. This
+// test drives the value through the real store write in both directions, so a
+// change to the constant or to that range fails it.
 //
 // It is not next to checkedInt64 because checkedInt64 is unexported and the
 // reviewed import direction in internal/architecture/import_boundary_test.go
