@@ -4569,6 +4569,11 @@ func (ls *LedgerState) noteNonExtendingBlockRejection(
 		return
 	}
 	delete(ls.nonExtendingBlockRejections, key)
+	// Tests construct LedgerState without metrics; guard against a nil
+	// Counter so the production codepath stays simple.
+	if ls.metrics.nonExtendingBlockFloodRecycles != nil {
+		ls.metrics.nonExtendingBlockFloodRecycles.Inc()
+	}
 	ls.config.Logger.Warn(
 		"recycling connection after repeated non-extending block rejections",
 		"component", "ledger",
@@ -5064,6 +5069,11 @@ func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 			// swallowed as "ignored" above rather than returned, so it never
 			// reaches handleEventBlockfetch's recycle-on-error check. Track
 			// it here instead (issue #4272).
+			// Tests construct LedgerState without metrics; guard against a
+			// nil Counter so the production codepath stays simple.
+			if ls.metrics.nonExtendingBlockRejections != nil {
+				ls.metrics.nonExtendingBlockRejections.Inc()
+			}
 			ls.noteNonExtendingBlockRejection(
 				pendingEvent.ConnectionId,
 				pendingEvent.Point,

@@ -30,6 +30,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	utxorpc "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
@@ -847,6 +848,18 @@ func TestFlushPendingBlockfetchNonExtendingFloodRecyclesConnection(
 		ls.chain.Tip().Point.Hash,
 		"the real chain tip must be completely unaffected by the flood",
 	)
+	assert.Equal(
+		t,
+		float64(nonExtendingBlockRejectionThreshold),
+		promtestutil.ToFloat64(ls.metrics.nonExtendingBlockRejections),
+		"every rejected block in the flood must be counted, not only the ones before threshold",
+	)
+	assert.Equal(
+		t,
+		float64(1),
+		promtestutil.ToFloat64(ls.metrics.nonExtendingBlockFloodRecycles),
+		"exactly one recycle event fired for this flood",
+	)
 }
 
 // TestFlushPendingBlockfetchNonExtendingHandfulNotRecycled is the "should
@@ -904,5 +917,17 @@ func TestFlushPendingBlockfetchNonExtendingHandfulNotRecycled(t *testing.T) {
 		handful,
 		ls.nonExtendingBlockRejections[connIdKey(fixture.connId)].count,
 		"the rejections must still be tracked, just below threshold",
+	)
+	assert.Equal(
+		t,
+		float64(handful),
+		promtestutil.ToFloat64(ls.metrics.nonExtendingBlockRejections),
+		"individual rejections are still counted even when no flood is detected",
+	)
+	assert.Equal(
+		t,
+		float64(0),
+		promtestutil.ToFloat64(ls.metrics.nonExtendingBlockFloodRecycles),
+		"a brief rollback race must not increment the recycle counter",
 	)
 }
