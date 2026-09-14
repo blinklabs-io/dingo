@@ -218,7 +218,7 @@ func TestVoteManagerCommitteeCoalescesConcurrentSameEpochMisses(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		params.firstCall,
-		5*time.Second,
+		testutil.AsyncWait,
 		"leader did not reach the committee params provider",
 	)
 
@@ -236,7 +236,7 @@ func TestVoteManagerCommitteeCoalescesConcurrentSameEpochMisses(t *testing.T) {
 		func() bool {
 			return committeeWaiterCount(fixture.mgr, 5) == callers-1
 		},
-		5*time.Second,
+		testutil.AsyncWait,
 		"followers did not join the leader's committee computation",
 	)
 
@@ -252,13 +252,13 @@ func TestVoteManagerCommitteeCoalescesConcurrentSameEpochMisses(t *testing.T) {
 	params.releaseAll()
 
 	leaderResult := testutil.RequireReceive(
-		t, leader, 5*time.Second, "leader did not return",
+		t, leader, testutil.AsyncWait, "leader did not return",
 	)
 	require.NoError(t, leaderResult.err)
 	require.NotNil(t, leaderResult.committee)
 	for i, follower := range followers {
 		got := testutil.RequireReceive(
-			t, follower, 5*time.Second, "follower did not return",
+			t, follower, testutil.AsyncWait, "follower did not return",
 		)
 		require.NoErrorf(t, got.err, "follower %d", i)
 		require.Samef(
@@ -332,7 +332,7 @@ func TestVoteManagerCommitteeFailureReleasesWaiters(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		params.firstCall,
-		5*time.Second,
+		testutil.AsyncWait,
 		"leader did not reach the committee params provider",
 	)
 	waiter := startCommitteeCall(fixture.mgr, 5)
@@ -346,11 +346,11 @@ func TestVoteManagerCommitteeFailureReleasesWaiters(t *testing.T) {
 	params.releaseAll()
 
 	leaderResult := testutil.RequireReceive(
-		t, leader, 5*time.Second, "leader did not return",
+		t, leader, testutil.AsyncWait, "leader did not return",
 	)
 	require.ErrorIs(t, leaderResult.err, snapshotErr)
 	waiterResult := testutil.RequireReceive(
-		t, waiter, 5*time.Second, "waiter was not released by the failure",
+		t, waiter, testutil.AsyncWait, "waiter was not released by the failure",
 	)
 	require.ErrorIs(
 		t, waiterResult.err, snapshotErr,
@@ -386,7 +386,7 @@ func TestVoteManagerCommitteeWaiterReleasedOnStop(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		params.firstCall,
-		5*time.Second,
+		testutil.AsyncWait,
 		"leader did not reach the committee params provider",
 	)
 	waiter := startCommitteeCall(fixture.mgr, 5)
@@ -401,7 +401,7 @@ func TestVoteManagerCommitteeWaiterReleasedOnStop(t *testing.T) {
 	require.NoError(t, fixture.mgr.Stop())
 
 	waiterResult := testutil.RequireReceive(
-		t, waiter, 5*time.Second, "waiter was not released at shutdown",
+		t, waiter, testutil.AsyncWait, "waiter was not released at shutdown",
 	)
 	require.ErrorIs(t, waiterResult.err, ErrVoteManagerStopped)
 	require.Nil(t, waiterResult.committee)
@@ -410,7 +410,7 @@ func TestVoteManagerCommitteeWaiterReleasedOnStop(t *testing.T) {
 	// wanted by anyone.
 	params.releaseAll()
 	leaderResult := testutil.RequireReceive(
-		t, leader, 5*time.Second, "leader did not return after the stop",
+		t, leader, testutil.AsyncWait, "leader did not return after the stop",
 	)
 	require.NoError(t, leaderResult.err)
 }
@@ -448,7 +448,7 @@ func TestVoteManagerCommitteePanicReleasesWaiters(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		params.firstCall,
-		5*time.Second,
+		testutil.AsyncWait,
 		"leader did not reach the committee params provider",
 	)
 	waiter := startCommitteeCall(fixture.mgr, 5)
@@ -462,14 +462,14 @@ func TestVoteManagerCommitteePanicReleasesWaiters(t *testing.T) {
 	params.releaseAll()
 
 	got := testutil.RequireReceive(
-		t, leaderPanic, 5*time.Second, "leader goroutine did not finish",
+		t, leaderPanic, testutil.AsyncWait, "leader goroutine did not finish",
 	)
 	require.NotNil(
 		t, got.recovered,
 		"the panic must keep unwinding to the leader's caller",
 	)
 	waiterResult := testutil.RequireReceive(
-		t, waiter, 5*time.Second, "waiter was not released by the panic",
+		t, waiter, testutil.AsyncWait, "waiter was not released by the panic",
 	)
 	require.ErrorIs(t, waiterResult.err, ErrCommitteeComputationAborted)
 	require.Nil(t, waiterResult.committee)
@@ -507,7 +507,7 @@ func TestVoteManagerCommitteeInFlightEpochsAreBounded(t *testing.T) {
 		func() bool {
 			return params.callCount() == committeeInFlightMaxEpochs
 		},
-		5*time.Second,
+		testutil.AsyncWait,
 		"not every epoch reached the committee params provider",
 	)
 
@@ -517,7 +517,7 @@ func TestVoteManagerCommitteeInFlightEpochsAreBounded(t *testing.T) {
 	params.releaseAll()
 	for i, leader := range leaders {
 		got := testutil.RequireReceive(
-			t, leader, 5*time.Second, "in-flight leader did not return",
+			t, leader, testutil.AsyncWait, "in-flight leader did not return",
 		)
 		require.NoErrorf(t, got.err, "leader %d", i)
 	}
@@ -551,7 +551,7 @@ func TestVoteManagerCommitteeRollbackDuringComputationIsNotMemoized(
 	testutil.RequireReceive(
 		t,
 		params.firstCall,
-		5*time.Second,
+		testutil.AsyncWait,
 		"leader did not reach the committee params provider",
 	)
 	waiter := startCommitteeCall(fixture.mgr, 5)
@@ -571,12 +571,12 @@ func TestVoteManagerCommitteeRollbackDuringComputationIsNotMemoized(
 	params.releaseAll()
 
 	leaderResult := testutil.RequireReceive(
-		t, leader, 5*time.Second, "leader did not return",
+		t, leader, testutil.AsyncWait, "leader did not return",
 	)
 	require.NoError(t, leaderResult.err)
 	require.NotNil(t, leaderResult.committee)
 	waiterResult := testutil.RequireReceive(
-		t, waiter, 5*time.Second, "waiter was not released",
+		t, waiter, testutil.AsyncWait, "waiter was not released",
 	)
 	require.NoError(t, waiterResult.err)
 	require.Same(t, leaderResult.committee, waiterResult.committee)
@@ -619,7 +619,7 @@ func TestVoteManagerCommitteeClaimNotInheritedAcrossRestart(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		params.firstCall,
-		5*time.Second,
+		testutil.AsyncWait,
 		"leader did not reach the committee params provider",
 	)
 
@@ -640,17 +640,17 @@ func TestVoteManagerCommitteeClaimNotInheritedAcrossRestart(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		params.extraCall,
-		5*time.Second,
+		testutil.AsyncWait,
 		"the new lifecycle's caller joined the stopped lifecycle's computation instead of computing",
 	)
 
 	params.releaseAll()
 	nextResult := testutil.RequireReceive(
-		t, next, 5*time.Second, "the new lifecycle's caller did not return",
+		t, next, testutil.AsyncWait, "the new lifecycle's caller did not return",
 	)
 	require.NoError(t, nextResult.err)
 	leaderResult := testutil.RequireReceive(
-		t, leader, 5*time.Second, "leader did not return after the stop",
+		t, leader, testutil.AsyncWait, "leader did not return after the stop",
 	)
 	require.NoError(t, leaderResult.err)
 

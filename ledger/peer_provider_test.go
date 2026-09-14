@@ -22,6 +22,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -152,7 +153,7 @@ func TestPoolRelayProviderCacheTTLExpiry(t *testing.T) {
 		expired := time.Since(adapter.cacheTime) >= adapter.cacheTTL
 		adapter.cacheMu.RUnlock()
 		return expired
-	}, 2*time.Second, 5*time.Millisecond, "cache TTL should expire")
+	}, testutil.AsyncWait, 5*time.Millisecond, "cache TTL should expire")
 
 	// After TTL expires, GetPoolRelays should re-fetch from DB.
 	// The in-memory DB has no pool registrations, so it returns empty.
@@ -230,7 +231,7 @@ func TestPoolRelayProviderEventDrivenInvalidation(t *testing.T) {
 		adapter.cacheMu.RLock()
 		defer adapter.cacheMu.RUnlock()
 		return adapter.cachedRelays == nil
-	}, 2*time.Second, 5*time.Millisecond,
+	}, testutil.AsyncWait, 5*time.Millisecond,
 		"cache should be invalidated after PoolStateRestoredEvent",
 	)
 
