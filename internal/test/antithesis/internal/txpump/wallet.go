@@ -63,6 +63,7 @@ func utxoKey(
 ) string {
 	return u.TxHash + ":" + strconv.FormatUint(uint64(u.Index), 10)
 }
+
 func (w *Wallet) currentTime() time.Time {
 	if w.now != nil {
 		return w.now()

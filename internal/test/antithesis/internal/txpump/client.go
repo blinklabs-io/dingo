@@ -183,9 +183,8 @@ func (c *NodeClient) ReconcileWallet(
 			snapshot,
 			UTxO{
 				TxHash: id.Hash.String(),
-				Index: uint32(
-					id.Idx,
-				), //nolint:gosec // ledger index is bounded by protocol
+				//nolint:gosec // ledger index is bounded by protocol
+				Index:   uint32(id.Idx),
 				Amount:  amount.Uint64(),
 				address: raw,
 			},
