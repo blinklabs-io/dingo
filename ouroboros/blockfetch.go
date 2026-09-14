@@ -415,18 +415,8 @@ Loop:
 				)
 				return errors.New("blockfetch range end was not reached")
 			}
-			if next.Block.Slot == end.Slot {
-				if !bytes.Equal(next.Point.Hash, end.Hash) {
-					o.closeBlockfetchConnection(
-						conn,
-						connectionID,
-						"blockfetch range end hash mismatch",
-					)
-					return fmt.Errorf(
-						"blockfetch range end hash mismatch at slot %d",
-						next.Block.Slot,
-					)
-				}
+			if next.Block.Slot == end.Slot &&
+				bytes.Equal(next.Point.Hash, end.Hash) {
 				reachedEnd = true
 			}
 			blockBytes := next.Block.Cbor

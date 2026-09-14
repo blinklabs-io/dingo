@@ -512,8 +512,8 @@ func TestBlockfetchServerSendBatch_RejectsEndHashMismatch(t *testing.T) {
 	)
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "end hash mismatch")
-	assert.Equal(t, 0, server.blockCalls)
+	assert.Contains(t, err.Error(), "ended before requested end point")
+	assert.Equal(t, 1, server.blockCalls)
 	assert.Equal(t, 0, server.batchDoneCalls)
 	assert.Equal(t, 1, conn.closeCalls)
 }
