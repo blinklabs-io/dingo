@@ -91,7 +91,12 @@ func (s *Store) prepareHotStatements(ctx context.Context) {
 	// helper purely for consistency with every other call site.
 	dialectDB := s.instrumentedQueryer(s.writeDB)
 	for _, query := range hotStatements {
-		stmt, err := dialectDB.PrepareContext(ctx, query)
+		// Cached for reuse: stmt is stored in s.stmts below and lives for
+		// the Store's lifetime, closed by closePreparedStatements on
+		// Reset, RestoreFrom, and CloseContext (see that function's doc
+		// comment). It is not a one-shot resource, so closing it here
+		// would defeat the caching this function exists to provide.
+		stmt, err := dialectDB.PrepareContext(ctx, query) //nolint:sqlclosecheck
 		if err != nil {
 			s.logger.Warn(
 				"sqlstore: skipping prepared-statement cache entry",
@@ -222,7 +227,16 @@ func (s *Store) queryRowCached(
 		if s.sqlOperations != nil {
 			s.sqlOperations.WithLabelValues(op).Inc()
 		}
-		stmt := stmtForQueryer(ctx, db, cached)
+		// stmtForQueryer returns either the shared, Store-lifetime cached
+		// statement itself (must not be closed here, see
+		// prepareHotStatements) or a *sql.Tx-scoped statement from
+		// (*sql.Tx).StmtContext, which database/sql documents as being
+		// closed automatically when the transaction commits or rolls
+		// back. Either way this call site owns no resource of its own to
+		// close, and closing eagerly would be wrong besides: the *sql.Row
+		// returned below defers running Scan against it until the caller
+		// invokes Scan.
+		stmt := stmtForQueryer(ctx, db, cached) //nolint:sqlclosecheck
 		if s.sqlQueryDuration == nil {
 			return stmt.QueryRowContext(ctx, args...)
 		}
@@ -246,7 +260,12 @@ func (s *Store) execCached(
 		if s.sqlOperations != nil {
 			s.sqlOperations.WithLabelValues(op).Inc()
 		}
-		stmt := stmtForQueryer(ctx, db, cached)
+		// Same reasoning as queryRowCached above: the statement here is
+		// either the shared cache entry (never closed by a call site) or
+		// a Tx-scoped derivative that database/sql closes on its own when
+		// the transaction ends, so there is nothing for this function to
+		// close.
+		stmt := stmtForQueryer(ctx, db, cached) //nolint:sqlclosecheck
 		if s.sqlQueryDuration == nil {
 			return stmt.ExecContext(ctx, args...)
 		}
