@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
 	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
@@ -76,9 +77,9 @@ func TestBlockfetchDrainDefersChainUpdatePastLedgerMutex(t *testing.T) {
 		}()
 		select {
 		case <-stopped:
-		case <-time.After(10 * time.Second):
+		case <-time.After(testutil.AsyncWait):
 			t.Error(
-				"eventBus.Stop did not return within 10s: it failed to " +
+				"eventBus.Stop did not return: it failed to " +
 					"release the publishers parked on the stalled subscriber / " +
 					"full ordered lane (shutdown backpressure-release regressed)",
 			)
@@ -139,7 +140,7 @@ func TestBlockfetchDrainDefersChainUpdatePastLedgerMutex(t *testing.T) {
 			chain.ChainUpdateEventType,
 			newChainUpdateEvent(),
 		)
-	}, 10*time.Second, 20*time.Millisecond,
+	}, testutil.AsyncWait, 20*time.Millisecond,
 		"ordered chain.update lane never reached capacity",
 	)
 
@@ -183,7 +184,7 @@ func TestBlockfetchDrainDefersChainUpdatePastLedgerMutex(t *testing.T) {
 	select {
 	case drainErr := <-drained:
 		require.NoError(t, drainErr)
-	case <-time.After(10 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal(
 			"flushPendingBlockfetchBlocks blocked under a saturated " +
 				"chain.update lane: the block's chain.update must be deferred " +

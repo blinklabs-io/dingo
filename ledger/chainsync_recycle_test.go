@@ -87,7 +87,7 @@ func TestChainsyncHeaderVerificationFailurePublishesRecycleEvent(t *testing.T) {
 	got := testutil.RequireReceive(
 		t,
 		recycled,
-		2*time.Second,
+		testutil.AsyncWait,
 		"recycle event not published",
 	)
 	assert.Equal(t, connId, got.ConnectionId)
@@ -239,7 +239,7 @@ func TestChainsyncHeaderVerificationEmptyEpochNonceDefersToBlockfetch(
 	gotStart := testutil.RequireReceive(
 		t,
 		requested,
-		2*time.Second,
+		testutil.AsyncWait,
 		"empty nonce should start blockfetch for deferred verification",
 	)
 	assert.Equal(t, point, gotStart)
@@ -335,7 +335,7 @@ func TestBlockfetchHeaderVerificationFailurePublishesRecycleEvent(
 	got := testutil.RequireReceive(
 		t,
 		recycled,
-		2*time.Second,
+		testutil.AsyncWait,
 		"recycle event not published",
 	)
 	assert.Equal(t, connId, got.ConnectionId)
