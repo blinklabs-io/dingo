@@ -168,7 +168,7 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 	if isNilInterface(u.config.EventBus) {
 		return errors.New("utxorpc: EventBus is required")
 	}
-	// Typed-nil guard for optional deps — untyped nil is allowed at startup
+	// Typed-nil guard for optional deps - untyped nil is allowed at startup
 	// (handlers check per-request), but a typed nil (*T)(nil) stored in the
 	// interface field would bypass handler nil-checks and cause a panic.
 	if u.config.LedgerState != nil && isNilInterface(u.config.LedgerState) {
@@ -177,6 +177,12 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 	if u.config.Mempool != nil && isNilInterface(u.config.Mempool) {
 		return errors.New("utxorpc: Mempool must not be a typed nil")
 	}
+	startDone, err := u.listener.BeginStart()
+	if err != nil {
+		return err
+	}
+	defer u.listener.EndStart(startDone)
+
 	server, bindDone, err := u.listener.Publish(func() *http.Server {
 		return u.buildServer()
 	})
@@ -184,41 +190,15 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 		return err
 	}
 
-	// Launched before the bind so a context cancelled mid-bind still tears the
-	// server down: Take is what makes an in-flight bind close its own socket.
+	// Watched before the bind so a context cancelled mid-bind still tears the
+	// server down: the detach is what makes an in-flight bind close its own
+	// socket.
 	//
-	// The detach also means this no longer holds a lock across the shutdown it
-	// runs, so a concurrent Stop is answered by the teardown wait rather than
-	// blocking on the mutex for as long as a stuck stream keeps Shutdown busy.
-	go func() { //nolint:gosec // G118: goroutine intentionally outlives ctx to perform graceful shutdown
-		<-ctx.Done()
-		job, _ := u.listener.TakeIf(server)
-		// Nil when a concurrent Stop won the detach -- it owns the teardown
-		// and its caller is already waiting on it -- or when this server was
-		// already stopped and a restart published another one, which is not
-		// this monitor's to touch. Either way there is nothing to do here.
-		if job != nil {
-			u.config.Logger.Debug(
-				"context cancelled, shutting down utxorpc gRPC server",
-			)
-			//nolint:contextcheck // shutdownCtx is intentionally created from background to allow shutdown to complete even if ctx is cancelled
-			shutdownCtx, cancel := context.WithTimeout(
-				context.Background(),
-				30*time.Second,
-			)
-			defer cancel()
-			//nolint:contextcheck // see above
-			if err := u.listener.Shutdown(
-				shutdownCtx, job, u.gracefulShutdown,
-			); err != nil {
-				u.config.Logger.Error(
-					"failed to shutdown utxorpc gRPC server on context cancellation",
-					"error",
-					err,
-				)
-			}
-		}
-	}()
+	// The detach also means the monitor no longer holds a lock across the
+	// shutdown it runs, so a concurrent Stop is answered by the teardown wait
+	// rather than blocking on the mutex for as long as a stuck stream keeps
+	// Shutdown busy.
+	u.listener.Watch(ctx, server, u.gracefulShutdown)
 
 	if _, err := u.listener.Bind(
 		server, bindDone, u.config.TLS,
@@ -465,12 +445,7 @@ func unencryptedHTTP2Protocols() *http.Protocols {
 // has been released, so a capability restart on the same port can rebind --
 // see internal/apilistener.
 func (u *Utxorpc) Stop(ctx context.Context) error {
-	job, inFlight := u.listener.Take()
-	if job == nil {
-		return u.listener.AwaitTeardown(ctx, inFlight)
-	}
-	u.config.Logger.Debug("shutting down utxorpc gRPC server")
-	return u.listener.Shutdown(ctx, job, u.gracefulShutdown)
+	return u.listener.Stop(ctx, u.gracefulShutdown)
 }
 
 // gracefulShutdown drains server, escalating to a hard Close if it does not
