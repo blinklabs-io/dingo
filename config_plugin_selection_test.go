@@ -15,6 +15,7 @@
 package dingo
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/plugin"
@@ -22,34 +23,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// allCapabilities is every capability plugin.Capability.Valid accepts. A new
-// capability added to that switch without a WithPluginSelection case and a
-// syncCompatFields map entry is unreachable from configuration, so this list
-// is the class the two tests below audit rather than a sample of it.
-var allCapabilities = []plugin.Capability{
-	plugin.CapabilityStorageBlob,
-	plugin.CapabilityStorageMetadata,
-	plugin.CapabilityMempool,
-	plugin.CapabilityAPIBlockfrost,
-	plugin.CapabilityAPIKupo,
-	plugin.CapabilityAPIMesh,
-	plugin.CapabilityAPIUtxorpc,
-}
-
-// TestAllCapabilitiesAreValid keeps allCapabilities in step with
-// Capability.Valid, so a capability added to the platform cannot silently drop
-// out of the coverage the other tests in this file provide.
-func TestAllCapabilitiesAreValid(t *testing.T) {
-	t.Parallel()
-
-	for _, capability := range allCapabilities {
-		assert.Truef(
-			t,
-			capability.Valid(),
-			"%s is listed here but rejected by Capability.Valid",
-			capability,
-		)
+// apiCapabilities is every API capability the platform supports, derived from
+// plugin.AllCapabilities rather than listed here. A capability added to the
+// platform without a WithPluginSelection case and a syncCompatFields map entry
+// is unreachable from configuration; deriving the list is what makes the tests
+// below audit that class rather than a hand-maintained sample of it.
+func apiCapabilities() []plugin.Capability {
+	var ret []plugin.Capability
+	for _, capability := range plugin.AllCapabilities() {
+		if strings.HasPrefix(string(capability), "api.") {
+			ret = append(ret, capability)
+		}
 	}
+	return ret
 }
 
 // TestWithPluginSelectionAppliesEveryCapability pins that
@@ -61,7 +47,7 @@ func TestAllCapabilitiesAreValid(t *testing.T) {
 func TestWithPluginSelectionAppliesEveryCapability(t *testing.T) {
 	t.Parallel()
 
-	for _, capability := range allCapabilities {
+	for _, capability := range plugin.AllCapabilities() {
 		t.Run(string(capability), func(t *testing.T) {
 			t.Parallel()
 
@@ -97,13 +83,7 @@ func TestWithPluginSelectionAppliesEveryCapability(t *testing.T) {
 func TestAPIPluginSelectionResolvesEveryAPICapability(t *testing.T) {
 	t.Parallel()
 
-	apiCapabilities := []plugin.Capability{
-		plugin.CapabilityAPIBlockfrost,
-		plugin.CapabilityAPIKupo,
-		plugin.CapabilityAPIMesh,
-		plugin.CapabilityAPIUtxorpc,
-	}
-	for _, capability := range apiCapabilities {
+	for _, capability := range apiCapabilities() {
 		t.Run(string(capability), func(t *testing.T) {
 			t.Parallel()
 
@@ -135,14 +115,8 @@ func TestAPIPluginSelectionResolvesEveryAPICapability(t *testing.T) {
 func TestNewConfigDefaultsResolveEveryAPICapability(t *testing.T) {
 	t.Parallel()
 
-	apiCapabilities := []plugin.Capability{
-		plugin.CapabilityAPIBlockfrost,
-		plugin.CapabilityAPIKupo,
-		plugin.CapabilityAPIMesh,
-		plugin.CapabilityAPIUtxorpc,
-	}
 	n := &Node{config: NewConfig()}
-	for _, capability := range apiCapabilities {
+	for _, capability := range apiCapabilities() {
 		t.Run(string(capability), func(t *testing.T) {
 			t.Parallel()
 
