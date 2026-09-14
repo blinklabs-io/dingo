@@ -1752,17 +1752,6 @@ func isResignationPayload(data []byte) bool {
 	return false
 }
 
-func parseCommitteeHotCredential(data []byte) (Credential, error) {
-	credential, resigned, err := parseCommitteeAuthorization(data)
-	if err != nil {
-		return Credential{}, err
-	}
-	if resigned {
-		return Credential{}, errors.New("committee member resigned")
-	}
-	return credential, nil
-}
-
 // parseDRepMap decodes a DRep credential -> DRepState map.
 // Handles both definite and indefinite-length maps via
 // decodeMapEntries.
