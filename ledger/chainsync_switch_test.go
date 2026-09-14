@@ -461,6 +461,12 @@ func TestHandleEventBlockfetchBlockAllowsBlocksFromActiveBatch(t *testing.T) {
 	ls := &LedgerState{
 		activeBlockfetchConnId:       connId1,
 		chainsyncBlockfetchReadyChan: make(chan struct{}),
+		// mockBabbageBlock carries no real VRF/KES material to verify. Mark
+		// its slot Mithril-covered so the header crypto gate (issue #3528:
+		// required by default, exempt only for a Mithril-certified slot)
+		// exempts it, letting this test isolate batch-ownership bookkeeping
+		// from crypto verification.
+		mithrilLedgerSlot: 2,
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			BlockfetchRequestRangeFunc: func(
@@ -556,6 +562,12 @@ func TestHandleEventBlockfetchBlockAllowsEquivalentConnectionId(t *testing.T) {
 	ls := &LedgerState{
 		activeBlockfetchConnId:       connId1,
 		chainsyncBlockfetchReadyChan: make(chan struct{}),
+		// mockBabbageBlock carries no real VRF/KES material to verify. Mark
+		// its slot Mithril-covered so the header crypto gate (issue #3528:
+		// required by default, exempt only for a Mithril-certified slot)
+		// exempts it, letting this test isolate connection-equivalence
+		// bookkeeping from crypto verification.
+		mithrilLedgerSlot: 2,
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			BlockfetchRequestRangeFunc: func(
@@ -802,7 +814,7 @@ func TestHandleChainSwitchEventRequestsFreshCursorWhenPeerAheadWithoutHeaders(
 	evt := testutil.RequireReceive(
 		t,
 		resyncCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"expected chain-switch cursor resync event",
 	)
 	resync, ok := evt.Data.(event.ChainsyncResyncEvent)
@@ -1014,7 +1026,7 @@ func TestHandleChainSwitchEventFallbackResyncUsesActiveConnection(
 	evt := testutil.RequireReceive(
 		t,
 		fixture.resyncCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"expected fallback chain-switch cursor resync event",
 	)
 	resync, ok := evt.Data.(event.ChainsyncResyncEvent)
@@ -1069,7 +1081,7 @@ func TestHandleChainSwitchEventFallbackReplaysBufferedActiveHeaders(
 					fixture.ls.bufferedHeaderEvents[connIdKey(fixture.activeConnId)],
 				) == 0
 		},
-		2*time.Second,
+		testutil.AsyncWait,
 		"expected buffered active headers to replay after fallback handoff",
 	)
 	testutil.RequireNoReceive(
@@ -1361,7 +1373,7 @@ func TestHandleChainSwitchEventReplaysBufferedHeadersForSelectedConnection(
 		return sameConnectionId(ls.headerPipelineConnId, connId2) &&
 			ls.chain.HeaderCount() == 1 &&
 			len(ls.bufferedHeaderEvents[connIdKey(connId2)]) == 0
-	}, 2*time.Second, 10*time.Millisecond)
+	}, testutil.AsyncWait, 10*time.Millisecond)
 }
 
 func TestHandleEventChainsyncBlockHeaderAcceptsCompatibleNonOwnerConnection(
@@ -1452,6 +1464,12 @@ func TestHandleEventChainsyncRecordsOnlyAdmittedHeaderFrontier(t *testing.T) {
 		blockNumber: fixture.currentTip.BlockNumber + 1,
 		slot:        fixture.currentTip.Point.Slot + 1,
 	}
+	// mockHeader carries no real VRF/KES material to verify. Mark its slot
+	// Mithril-covered so the header crypto gate (issue #3528: required by
+	// default, exempt only for a Mithril-certified slot) exempts it, letting
+	// this test isolate frontier-tracking from crypto verification.
+	ls.mithrilLedgerSlot = accepted.slot
+	ls.publishSnapshotsLocked()
 	advertisedSlot := ^uint64(0)
 	require.NoError(t, ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
 		ConnectionId: connID,
@@ -1536,6 +1554,12 @@ func TestHandleEventChainsyncBlockHeaderBuffersIncompatibleNonOwnerConnection(
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	// mockHeader carries no real VRF/KES material to verify. Mark its slot
+	// Mithril-covered so the header crypto gate (issue #3528: required by
+	// default, exempt only for a Mithril-certified slot) exempts it, letting
+	// this test isolate connection-buffering from crypto verification.
+	ls.mithrilLedgerSlot = header1.slot
+	ls.publishSnapshotsLocked()
 
 	err := ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
 		ConnectionId: connId1,
@@ -1841,6 +1865,12 @@ func TestHandleEventBlockfetchBatchDoneReplaysBufferedHeadersAfterDrain(
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	// mockHeader carries no real VRF/KES material to verify. Mark its slot
+	// Mithril-covered so the header crypto gate (issue #3528: required by
+	// default, exempt only for a Mithril-certified slot) exempts it, letting
+	// this test isolate buffered-header replay from crypto verification.
+	ls.mithrilLedgerSlot = 1
+	ls.publishSnapshotsLocked()
 
 	err := handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
 		ConnectionId: connId1,
@@ -1854,7 +1884,7 @@ func TestHandleEventBlockfetchBatchDoneReplaysBufferedHeadersAfterDrain(
 			len(ls.bufferedHeaderEvents[connIdKey(connId2)]) == 0 &&
 			ls.chain.HeaderCount() == 1 &&
 			ls.syncUpstreamTipSlot.Load() == 1
-	}, 2*time.Second, 10*time.Millisecond)
+	}, testutil.AsyncWait, 10*time.Millisecond)
 	assert.True(t, sameConnectionId(ls.headerPipelineConnId, connId2))
 	assert.Equal(t, 1, ls.chain.HeaderCount())
 	assert.Equal(t, uint64(1), ls.syncUpstreamTipSlot.Load())

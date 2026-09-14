@@ -64,7 +64,10 @@ func peerIntersectAnswer(
 			return point
 		}
 	}
-	t.Fatalf("peer holding slot %d matched none of our intersect points", peerTipSlot)
+	t.Fatalf(
+		"peer holding slot %d matched none of our intersect points",
+		peerTipSlot,
+	)
 	return ocommon.Point{}
 }
 

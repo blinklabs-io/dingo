@@ -58,8 +58,11 @@ func TestLedgerViewEpochForSlot(t *testing.T) {
 		})
 	}
 
-	t.Run("a slot outside the cache is an error, not a guess", func(t *testing.T) {
-		_, err := lv.EpochForSlot(99_000_000)
-		require.Error(t, err)
-	})
+	t.Run(
+		"a slot outside the cache is an error, not a guess",
+		func(t *testing.T) {
+			_, err := lv.EpochForSlot(99_000_000)
+			require.Error(t, err)
+		},
+	)
 }

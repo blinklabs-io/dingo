@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"mime"
 	"net/http"
@@ -1208,6 +1207,7 @@ func (b *Blockfrost) handleTransactionSubmit(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
+	b.setRequestBodyDeadline(w)
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/cbor" {
 		writeError(
@@ -1219,8 +1219,7 @@ func (b *Blockfrost) handleTransactionSubmit(
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, maxTxBodySize)
-	txCbor, err := io.ReadAll(r.Body)
+	txCbor, err := b.readRequestBody(w, r, maxTxBodySize)
 	if err != nil {
 		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			writeError(

@@ -17,21 +17,62 @@ package ouroboros
 import (
 	"time"
 
+	"github.com/blinklabs-io/dingo/ledger"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
-func (o *Ouroboros) localstatequeryServerConnOpts() []olocalstatequery.LocalStateQueryOptionFunc {
-	return []olocalstatequery.LocalStateQueryOptionFunc{
-		olocalstatequery.WithAcquireFunc(
-			o.instrumentLocalstatequeryAcquire(o.localstatequeryServerAcquire),
-		),
-		olocalstatequery.WithQueryFunc(
-			o.instrumentLocalstatequeryQuery(o.localstatequeryServerQuery),
-		),
-		olocalstatequery.WithReleaseFunc(
-			o.instrumentLocalstatequeryRelease(o.localstatequeryServerRelease),
-		),
+// localstatequeryServerConnOpts returns this listener's LocalStateQuery
+// server options. trusted gates the relaxed timeout/buffer options below it
+// to a listener ConfigureListeners has actually verified is local-only (a
+// Unix socket, or TCP bound to loopback) -- see isTrustedNtCListener. A
+// listener an operator has bound to a non-loopback address gets gouroboros'
+// own defaults (120s mux segment-read timeout, 180s query timeout, 16MB
+// reassembly cap) instead: those exist specifically as anti-DoS guards
+// against an untrusted remote peer, and relaxing them for every NtC
+// connection regardless of reachability would let any client that can reach
+// that address hold a connection open indefinitely and grow its reassembly
+// buffer to MaxReadBufferSize (blinklabs-io/dingo#4183 review).
+func (o *Ouroboros) localstatequeryServerConnOpts(
+	trusted bool,
+) []olocalstatequery.LocalStateQueryOptionFunc {
+	opts := make([]olocalstatequery.LocalStateQueryOptionFunc, 3, 5)
+	opts[0] = olocalstatequery.WithAcquireFunc(
+		o.instrumentLocalstatequeryAcquire(o.localstatequeryServerAcquire),
+	)
+	opts[1] = olocalstatequery.WithQueryFunc(
+		o.instrumentLocalstatequeryQuery(o.localstatequeryServerQuery),
+	)
+	opts[2] = olocalstatequery.WithReleaseFunc(
+		o.instrumentLocalstatequeryRelease(o.localstatequeryServerRelease),
+	)
+	if !trusted {
+		return opts
 	}
+	return append(opts,
+		// WithMuxerSegmentReadTimeout(0) (ConfigureListeners) only removes
+		// the transport-level cap; LocalStateQuery's client-side protocol
+		// also carries its own, separate 180s per-query state-transition
+		// timer (QueryTimeout) that fires the same way once a query
+		// outlives it -- confirmed live against a real Preview node's
+		// whole-UTxO query, which the mux fix alone still let get torn
+		// down (ErrProtocolShuttingDown) at almost exactly 180s. Disabled
+		// for the same reason as the mux timeout: LocalStateQuery has no
+		// protocol-level timeout at all (Ouroboros Network Specification
+		// section 3.13.4), and a verified-local-only NtC channel is one
+		// where a slow-but-legitimate reply must not be killed either
+		// (blinklabs-io/dingo#4082).
+		//
+		// MaxReadBufferSize likewise overrides gouroboros' default 16MB
+		// cap on a reassembled multi-segment reply: confirmed live that a
+		// real Preview-scale whole-UTxO-set reply exceeds 512MiB. 2GiB
+		// gives headroom for further chain growth without removing the
+		// cap outright -- unlike the two timeouts above, an unbounded
+		// buffer here is a real unbounded memory-growth risk, not just an
+		// unnecessary wait.
+		olocalstatequery.WithQueryTimeout(0),
+		olocalstatequery.WithMaxReadBufferSize(2<<30),
+	)
 }
 
 func (o *Ouroboros) instrumentLocalstatequeryAcquire(
@@ -74,12 +115,36 @@ func (o *Ouroboros) instrumentLocalstatequeryRelease(
 	}
 }
 
+// localstatequeryServerAcquire records the point the client asked to pin
+// this connection's LocalStateQuery session to (blinklabs-io/dingo#382).
+// AcquireSpecificPoint's slot AND hash are both recorded -- hash matters
+// because identifying a point by slot alone is ambiguous across a rollback
+// (a fork switch can leave a different block at the same slot than the one
+// the caller acquired); LedgerState.Query.verifyPointOnChain checks the
+// recorded hash against this node's current chain before answering any
+// pinned query. AcquireVolatileTip and AcquireImmutableTip both clear any
+// previous pin, since only a specific point makes sense to hold stable
+// across a slow query -- both tip kinds are, by construction, "whatever is
+// live/immutable right now", the same thing querying with no pin at all
+// (a zero-value ledger.QueryPoint) already means.
+//
+// Not every query type honors the recorded point yet -- see
+// ledger.LedgerState.Query's doc comment for which ones do.
 func (o *Ouroboros) localstatequeryServerAcquire(
 	ctx olocalstatequery.CallbackContext,
 	acquireTarget olocalstatequery.AcquireTarget,
 	reAcquire bool,
 ) error {
-	// TODO: create "view" from ledger state (#382)
+	o.localstatequeryAcquireMutex.Lock()
+	defer o.localstatequeryAcquireMutex.Unlock()
+	if specific, ok := acquireTarget.(olocalstatequery.AcquireSpecificPoint); ok {
+		o.localstatequeryAcquiredPoints[ctx.ConnectionId] = ledger.QueryPoint{
+			Slot: specific.Point.Slot,
+			Hash: specific.Point.Hash,
+		}
+	} else {
+		delete(o.localstatequeryAcquiredPoints, ctx.ConnectionId)
+	}
 	return nil
 }
 
@@ -87,12 +152,59 @@ func (o *Ouroboros) localstatequeryServerQuery(
 	ctx olocalstatequery.CallbackContext,
 	query olocalstatequery.QueryWrapper,
 ) (any, error) {
-	return o.ledgerState.Query(query.Query)
+	o.localstatequeryAcquireMutex.Lock()
+	at := o.localstatequeryAcquiredPoints[ctx.ConnectionId]
+	o.localstatequeryAcquireMutex.Unlock()
+	return o.ledgerState.Query(query.Query, at)
 }
 
 func (o *Ouroboros) localstatequeryServerRelease(
 	ctx olocalstatequery.CallbackContext,
 ) error {
-	// TODO: release "view" from ledger state (#382)
+	o.localstatequeryAcquireMutex.Lock()
+	delete(o.localstatequeryAcquiredPoints, ctx.ConnectionId)
+	o.localstatequeryAcquireMutex.Unlock()
 	return nil
+}
+
+// ReleaseLocalStateQueryAcquiredPoint clears connId's pinned point, the same
+// cleanup localstatequeryServerRelease performs for a clean client Release.
+// A NtC client that disconnects without ever calling Release skips that
+// callback entirely, so without this the map entry would otherwise persist
+// until this Ouroboros instance itself is discarded -- a one-entry-per-
+// pinned-client leak. Called from the node's NtC connection-closed callback
+// (handleConnManagerClosed), the NtC counterpart to HandleConnClosedEvent's
+// equivalent cleanup for NtN closes.
+func (o *Ouroboros) ReleaseLocalStateQueryAcquiredPoint(
+	connId ouroboros.ConnectionId,
+) {
+	o.localstatequeryAcquireMutex.Lock()
+	delete(o.localstatequeryAcquiredPoints, connId)
+	o.localstatequeryAcquireMutex.Unlock()
+}
+
+// SetLocalStateQueryAcquiredPointForTesting seeds connId's pinned point
+// directly, bypassing a real Acquire callback, so the root package can prove
+// its NtC connection-closed callback actually clears this map -- the same
+// two-package split RegisterLeiosServeWaiterForTesting exists for.
+func (o *Ouroboros) SetLocalStateQueryAcquiredPointForTesting(
+	connId ouroboros.ConnectionId,
+	point ledger.QueryPoint,
+) {
+	o.localstatequeryAcquireMutex.Lock()
+	o.localstatequeryAcquiredPoints[connId] = point
+	o.localstatequeryAcquireMutex.Unlock()
+}
+
+// HasLocalStateQueryAcquiredPointForTesting reports whether connId currently
+// has a map entry, regardless of whether the recorded point is the pinned
+// or the live/cleared zero value -- the presence of the entry itself is
+// what a leak looks like, so this checks membership, not QueryPoint.pinned().
+func (o *Ouroboros) HasLocalStateQueryAcquiredPointForTesting(
+	connId ouroboros.ConnectionId,
+) bool {
+	o.localstatequeryAcquireMutex.Lock()
+	defer o.localstatequeryAcquireMutex.Unlock()
+	_, ok := o.localstatequeryAcquiredPoints[connId]
+	return ok
 }

@@ -79,7 +79,7 @@ func resolveOnFreePort(
 }
 
 // resolveOnFreePortWithConfig is resolveOnFreePort with additional
-// provider config fields (e.g. "tls"/"auth") merged alongside "port".
+// provider config fields (e.g. "tls") merged alongside "port".
 func resolveOnFreePortWithConfig(
 	t *testing.T,
 	host *plugin.Host,
@@ -281,35 +281,8 @@ func TestProviderRejectsPartialTLSPair(t *testing.T) {
 	require.ErrorContains(t, err, "must both be set")
 }
 
-// TestProviderRejectsInvalidAuthMode asserts an unrecognized auth.mode is
-// rejected at resolution, with an error naming the full provider config
-// path.
-func TestProviderRejectsInvalidAuthMode(t *testing.T) {
-	t.Parallel()
-
-	host := newProviderHost(t)
-
-	_, err := plugin.Resolve[*Server](
-		t.Context(),
-		host,
-		plugin.CapabilityAPIMesh,
-		"builtin",
-		map[string]any{
-			"port": freeLoopbackPort(t),
-			"auth": map[string]any{"mode": "bogus"},
-		},
-		providerDeps(newTestDeps()),
-	)
-
-	require.Error(t, err)
-	require.ErrorContains(t, err, "plugins.api.mesh.config.auth")
-	require.ErrorContains(t, err, "invalid mode")
-}
-
-// TestProviderPropagatesTLSAndAuth asserts a valid provider tls/auth
-// config reaches the server's resolved (EffectiveTLS/EffectiveAuth)
-// settings.
-func TestProviderPropagatesTLSAndAuth(t *testing.T) {
+// TestProviderPropagatesTLS asserts a valid provider TLS config reaches the server.
+func TestProviderPropagatesTLS(t *testing.T) {
 	t.Parallel()
 
 	host := newProviderHost(t)
@@ -323,16 +296,10 @@ func TestProviderPropagatesTLSAndAuth(t *testing.T) {
 				"certFilePath": certPath,
 				"keyFilePath":  keyPath,
 			},
-			"auth": map[string]any{
-				"mode":  "token",
-				"token": "shared-secret",
-			},
 		},
 	)
 
 	require.True(t, srv.config.TLS.Enabled)
 	require.Equal(t, certPath, srv.config.TLS.CertFilePath)
 	require.Equal(t, keyPath, srv.config.TLS.KeyFilePath)
-	require.True(t, srv.config.Auth.Enabled)
-	require.Equal(t, "shared-secret", srv.config.Auth.Token)
 }

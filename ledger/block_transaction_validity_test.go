@@ -257,6 +257,7 @@ func TestLedgerProcessBlockDijkstraValidityOutcomeStateTransitions(
 						pparams,
 						nil,
 						0,
+						false,
 					)
 					return err
 				})
@@ -306,25 +307,25 @@ func TestLedgerProcessBlockDijkstraValidityOutcomeStateTransitions(
 }
 
 // TestLedgerProcessBlockHistoricalValidationRunsPhase2 verifies the
-// configuration decision at the real block-application boundary.  A
-// historical-validation replay must pass a LedgerView with phase-two
-// validation enabled; the trusted-replay control retains the skip shortcut.
+// configuration decision at the real block-application boundary. Issue
+// #3528: a historical-sync/TrustedReplay phase-2 skip shortcut used to live
+// at this call site, but historicalBlockValidationDecision forces
+// shouldValidateBlock (and so all per-tx validation, phase 1 and phase 2)
+// to false whenever TrustedReplay is set, making a "skip phase 2 only"
+// shortcut unreachable by construction; it was removed rather than
+// reworked. Phase 2 now always evaluates whenever ledgerProcessBlock is
+// asked to validate a block at all, regardless of ValidateHistorical or
+// TrustedReplay.
 func TestLedgerProcessBlockHistoricalValidationRunsPhase2(t *testing.T) {
 	t.Parallel()
 
 	for _, tt := range []struct {
 		name              string
-		validationEnabled bool
 		wantValidationErr bool
 	}{
 		{
-			name:              "historical validation evaluates phase two",
-			validationEnabled: true,
+			name:              "phase two always evaluates when validating a block",
 			wantValidationErr: true,
-		},
-		{
-			name:              "trusted replay keeps phase two skipped",
-			validationEnabled: false,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -396,11 +397,6 @@ func TestLedgerProcessBlockHistoricalValidationRunsPhase2(t *testing.T) {
 				txs: []lcommon.Transaction{tx},
 				era: gdijkstra.EraDijkstra,
 			}
-			skipPhase2 := shouldSkipConfiguredPhase2Validation(
-				tt.validationEnabled,
-				true,
-				true,
-			)
 			processErr := db.Transaction(true).
 				Do(func(txn *database.Txn) error {
 					_, err := ls.ledgerProcessBlock(
@@ -409,7 +405,7 @@ func TestLedgerProcessBlockHistoricalValidationRunsPhase2(t *testing.T) {
 						block,
 						true,
 						false,
-						skipPhase2,
+						false,
 						nil,
 						envelopeParent{origin: true},
 						offsets,
@@ -417,6 +413,7 @@ func TestLedgerProcessBlockHistoricalValidationRunsPhase2(t *testing.T) {
 						pparams,
 						nil,
 						0,
+						false,
 					)
 					return err
 				})
@@ -510,6 +507,7 @@ func TestLedgerProcessBlockEnforcesTransactionValidationOutcomes(
 					nil,
 					nil,
 					0,
+					false,
 				)
 				return err
 			})
