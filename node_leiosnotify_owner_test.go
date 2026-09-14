@@ -126,6 +126,7 @@ func TestHandleConnManagerClosedOwnerKeepsReplacementLeiosNotifyDelivery(t *test
 		NetworkMagic: ouroboros_mock.MockNetworkMagic,
 	})
 	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, o.Close()) })
 	n.ouroborosRef.Store(o)
 
 	listener := o.ConfigureListeners([]connmanager.ListenerConfig{{}})[0]
