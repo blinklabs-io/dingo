@@ -40,6 +40,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/protocol/leiosnotify"
 	ouroboros_mock "github.com/blinklabs-io/ouroboros-mock"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -158,27 +159,54 @@ func TestHandleConnManagerClosedOwnerKeepsReplacementLeiosNotifyDelivery(t *test
 			err  error
 		}
 		localCh, peerCh := make(chan result, 1), make(chan result, 1)
+		localErrors := make(chan error, 16)
+		peerErrors := make(chan error, 16)
 		go func() {
 			conn, err := gouroboros.NewConnection(append([]gouroboros.ConnectionOptionFunc{
 				gouroboros.WithConnection(local), gouroboros.WithNodeToNode(true),
+				gouroboros.WithErrorChan(localErrors),
 			}, listener.ConnectionOpts...)...)
 			localCh <- result{conn, err}
 		}()
 		go func() {
 			conn, err := gouroboros.NewConnection(append([]gouroboros.ConnectionOptionFunc{
 				gouroboros.WithConnection(peer), gouroboros.WithServer(true), gouroboros.WithNodeToNode(true),
+				gouroboros.WithErrorChan(peerErrors),
 			}, peerOpts...)...)
 			peerCh <- result{conn, err}
 		}()
 		localResult := testutil.RequireReceive(t, localCh, 10*time.Second, "local Ouroboros handshake")
 		peerResult := testutil.RequireReceive(t, peerCh, 10*time.Second, "peer Ouroboros handshake")
-		require.NoError(t, localResult.err)
-		require.NoError(t, peerResult.err)
+		assert.NoError(t, localResult.err, "local Ouroboros connection")
+		assert.NoError(t, peerResult.err, "peer Ouroboros connection")
+		for name, errors := range map[string]chan error{
+			"local": localErrors,
+			"peer":  peerErrors,
+		} {
+			for {
+				select {
+				case err, ok := <-errors:
+					if !ok {
+						goto nextErrorSource
+					}
+					t.Logf("%s connection error: %v", name, err)
+				default:
+					goto nextErrorSource
+				}
+			}
+		nextErrorSource:
+		}
+		if localResult.err != nil || peerResult.err != nil {
+			return nil, nil
+		}
 		localConn, peerConn := localResult.conn, peerResult.conn
 		return localConn, peerConn
 	}
 
 	oldConn, oldPeer := makeConn()
+	if oldConn == nil || oldPeer == nil {
+		return
+	}
 	require.True(t, cm.AddConnection(oldConn, true, "127.0.0.1:3002"))
 	require.Same(t, oldConn, cm.GetConnectionById(oldConn.Id()))
 	o.HandleInboundConnEvent(event.NewEvent(connmanager.InboundConnectionEventType,
@@ -187,6 +215,9 @@ func TestHandleConnManagerClosedOwnerKeepsReplacementLeiosNotifyDelivery(t *test
 	_ = oldPeer
 
 	newConn, newPeer := makeConn()
+	if newConn == nil || newPeer == nil {
+		return
+	}
 	_ = newPeer
 	require.True(t, oldConn.Id().LocalAddr == newConn.Id().LocalAddr)
 	require.True(t, oldConn.Id().RemoteAddr == newConn.Id().RemoteAddr)
