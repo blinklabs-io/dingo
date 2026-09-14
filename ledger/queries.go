@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -366,7 +367,7 @@ func (ls *LedgerState) queryBlock(
 ) (any, error) {
 	switch q := query.Query.(type) {
 	case *olocalstatequery.HardForkQuery:
-		return ls.queryHardFork(q)
+		return ls.queryHardFork(q, at, txn)
 	case *olocalstatequery.ShelleyQuery:
 		return ls.queryShelley(q, at, txn, protocolVersion)
 	default:
@@ -418,12 +419,74 @@ func (ls *LedgerState) queryChainPoint() (any, error) {
 	return cloneTip(ls.loadTipSnapshot().currentTip).Point, nil
 }
 
+// queryHardFork answers HardFork queries. at is Query's pinned point
+// (unpinned = live); only HardForkCurrentEraQuery honors it --
+// HardForkEraHistoryQuery answers the whole era-boundary table as known up
+// to the live tip, which is not itself a point-relative value the way a
+// single era ID is.
+//
+// HardForkCurrentEraQuery previously always answered with dingo's live era
+// regardless of at, a real point-pinning gap left open by #382's original
+// scope decision (queryShelleyCurrentProtocolParams and friends, not this
+// HardFork-mini-protocol query type). This mattered more than its own
+// query type suggests: gouroboros's client-side GetCurrentProtocolParams
+// (and several other era-dispatching client calls) queries
+// HardForkCurrentEraQuery first specifically to decide which era-shaped
+// struct to decode the *next* query's reply into. Even though
+// queryShelleyCurrentProtocolParams itself correctly resolves and encodes
+// the pinned point's own era-shaped parameters, a client told the wrong
+// era by this handler picks the wrong decode target for that correct
+// reply -- "cbor: cannot unmarshal array into Go value of type
+// babbage.BabbageProtocolParameters (cannot decode CBOR array to struct
+// with different number of elements)" when the pinned point's real era
+// differs from dingo's live one, confirmed live pinning at genesis (slot
+// 0) against a dingo instance already many eras past it
+// (blinklabs-io/dingo#1900 node-parity --from-genesis validation).
 func (ls *LedgerState) queryHardFork(
 	query *olocalstatequery.HardForkQuery,
+	at QueryPoint,
+	txn *database.Txn,
 ) (any, error) {
 	switch q := query.Query.(type) {
 	case *olocalstatequery.HardForkCurrentEraQuery:
-		return ls.loadConsensusSnapshot().currentEra.Id, nil
+		if !at.pinned() {
+			return ls.loadConsensusSnapshot().currentEra.Id, nil
+		}
+		if txn == nil {
+			txn = ls.db.Transaction(false)
+			defer txn.Release()
+		}
+		targetEpoch, err := ls.resolveAsOfEpoch(txn, at)
+		if err != nil {
+			return nil, err
+		}
+		epochRow, err := ls.db.GetEpoch(targetEpoch, txn)
+		if err != nil {
+			return nil, err
+		}
+		if epochRow == nil {
+			return nil, fmt.Errorf(
+				"%w: current era at slot %d (epoch %d) cannot be "+
+					"resolved -- no epoch record exists for epoch %d",
+				ErrHistoricalStateUnavailable,
+				at.Slot,
+				targetEpoch,
+				targetEpoch,
+			)
+		}
+		era := eras.GetEraById(epochRow.EraId)
+		if era == nil {
+			return nil, fmt.Errorf(
+				"%w: current era at slot %d (epoch %d) cannot be "+
+					"resolved -- epoch %d names unknown era %d",
+				ErrHistoricalStateUnavailable,
+				at.Slot,
+				targetEpoch,
+				targetEpoch,
+				epochRow.EraId,
+			)
+		}
+		return era.Id, nil
 	case *olocalstatequery.HardForkEraHistoryQuery:
 		return ls.queryHardForkEraHistory()
 	default:
