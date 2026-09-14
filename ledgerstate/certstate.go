@@ -222,7 +222,19 @@ func parseCertStateConway(
 		if len(elem) == 0 || i == pIdx || i == dIdx || i == drepIdx {
 			continue
 		}
-		hotKeys, resignations := parseCommitteeVState(certState[i:])
+		hotKeys, resignations, committeeErr := parseCommitteeVState(
+			certState[i:],
+		)
+		if committeeErr != nil {
+			// An element that decodes as a committee map but whose
+			// entries cannot be read is a real decode failure, not a
+			// wrong-candidate miss. Surface it rather than moving on
+			// and silently importing an empty committee.
+			return nil, fmt.Errorf(
+				"parsing committee state: %w",
+				committeeErr,
+			)
+		}
 		if len(hotKeys) == 0 && len(resignations) == 0 {
 			continue
 		}
@@ -1544,7 +1556,13 @@ func parseVState(data []byte) (
 	// hot-key authorizations and resignations alongside the DRep map; retain
 	// the credential tags so imported state cannot alias key and script hashes.
 	dreps, warning := parseDRepMap(vs[0])
-	hotKeys, resignations := parseCommitteeVState(vs[1:])
+	hotKeys, resignations, committeeErr := parseCommitteeVState(vs[1:])
+	if committeeErr != nil {
+		return nil, nil, nil, fmt.Errorf(
+			"parsing committee state: %w",
+			committeeErr,
+		)
+	}
 	return dreps, hotKeys, resignations, warning
 }
 
@@ -1564,7 +1582,8 @@ func looksLikeCommitteeCredentialMap(data []byte) bool {
 	if _, err := parseCredential(entry.KeyRaw); err != nil {
 		return false
 	}
-	_, err := parseCommitteeHotCredential(entry.ValueRaw)
+	// A resignation is still a committee map entry, so accept it here.
+	_, _, err := parseCommitteeAuthorization(entry.ValueRaw)
 	return err == nil
 }
 
@@ -1578,11 +1597,11 @@ func isCborArray(data []byte) bool {
 
 func parseCommitteeVState(
 	fields [][]byte,
-) ([]ParsedCommitteeHotKey, []Credential) {
+) ([]ParsedCommitteeHotKey, []Credential, error) {
 	var hotKeys []ParsedCommitteeHotKey
 	var resignations []Credential
 	if len(fields) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	// The canonical shape is [ccHotKeys, ccRes]. Some historical encoders wrap
 	// those two fields in one committee-state array, which may itself be
@@ -1600,8 +1619,14 @@ func parseCommitteeVState(
 	if err == nil {
 		for _, entry := range entries {
 			cold, coldErr := parseCredential(entry.KeyRaw)
-			hot, hotErr := parseCommitteeHotCredential(entry.ValueRaw)
+			hot, resigned, hotErr := parseCommitteeAuthorization(
+				entry.ValueRaw,
+			)
 			if coldErr != nil || hotErr != nil {
+				continue
+			}
+			if resigned {
+				resignations = append(resignations, cold)
 				continue
 			}
 			hotKeys = append(
@@ -1609,9 +1634,24 @@ func parseCommitteeVState(
 				ParsedCommitteeHotKey{Cold: cold, Hot: hot},
 			)
 		}
+		// A committee map with entries that yields nothing means the
+		// encoding was not understood. Returning an empty set here is
+		// indistinguishable from a genuinely unauthorized committee, and
+		// downstream that makes every committee vote fail the Conway
+		// unknown-voter rule on a node that has no way to notice. Fail the
+		// import instead.
+		if len(entries) > 0 &&
+			len(hotKeys) == 0 &&
+			len(resignations) == 0 {
+			return nil, nil, fmt.Errorf(
+				"committee state has %d entries but none could be "+
+					"decoded; refusing to import an empty committee",
+				len(entries),
+			)
+		}
 	}
 	if len(committeeFields) < 2 {
-		return hotKeys, nil
+		return hotKeys, resignations, nil
 	}
 	resignationEntries, resignationErr := decodeMapEntries(committeeFields[1])
 	if resignationErr == nil {
@@ -1621,7 +1661,7 @@ func parseCommitteeVState(
 				resignations = append(resignations, cold)
 			}
 		}
-		return hotKeys, resignations
+		return hotKeys, resignations, nil
 	}
 	if values, arrayErr := decodeRawArray(committeeFields[1]); arrayErr == nil {
 		for _, value := range values {
@@ -1631,18 +1671,70 @@ func parseCommitteeVState(
 			}
 		}
 	}
-	return hotKeys, resignations
+	return hotKeys, resignations, nil
 }
 
-func parseCommitteeHotCredential(data []byte) (Credential, error) {
+// parseCommitteeAuthorization decodes one value of the committee map. The
+// ledger encodes it as the CommitteeAuthorization sum type:
+//
+//	[0, hot_credential]  CommitteeHotCredential -- the member authorized a hot key
+//	[1, maybe_anchor]    CommitteeMemberResigned
+//
+// Older encoders emitted a bare credential or a single-element wrapper, so both
+// are still accepted. Returning the resigned flag separately keeps a resignation
+// from being mistaken for an authorization, and keeps an unrecognized shape an
+// error rather than a silently dropped entry.
+func parseCommitteeAuthorization(
+	data []byte,
+) (Credential, bool, error) {
 	if credential, err := parseCredential(data); err == nil {
-		return credential, nil
+		return credential, false, nil
 	}
 	wrapped, err := decodeRawArray(data)
-	if err != nil || len(wrapped) != 1 {
-		return Credential{}, errors.New("decoding committee hot credential")
+	if err != nil {
+		return Credential{}, false, errors.New(
+			"decoding committee authorization",
+		)
 	}
-	return parseCredential(wrapped[0])
+	switch len(wrapped) {
+	case 1:
+		credential, credErr := parseCredential(wrapped[0])
+		return credential, false, credErr
+	case 2:
+		var tag uint64
+		if _, tagErr := cbor.Decode(wrapped[0], &tag); tagErr != nil {
+			return Credential{}, false, errors.New(
+				"decoding committee authorization tag",
+			)
+		}
+		switch tag {
+		case committeeAuthHotCredential:
+			credential, credErr := parseCredential(wrapped[1])
+			return credential, false, credErr
+		case committeeAuthResigned:
+			return Credential{}, true, nil
+		}
+	}
+	return Credential{}, false, errors.New(
+		"decoding committee authorization",
+	)
+}
+
+// CommitteeAuthorization constructor tags.
+const (
+	committeeAuthHotCredential uint64 = 0
+	committeeAuthResigned      uint64 = 1
+)
+
+func parseCommitteeHotCredential(data []byte) (Credential, error) {
+	credential, resigned, err := parseCommitteeAuthorization(data)
+	if err != nil {
+		return Credential{}, err
+	}
+	if resigned {
+		return Credential{}, errors.New("committee member resigned")
+	}
+	return credential, nil
 }
 
 // parseDRepMap decodes a DRep credential -> DRepState map.

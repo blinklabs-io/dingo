@@ -507,9 +507,12 @@ func TestParseCommitteeVStatePreservesTaggedAuthorizations(t *testing.T) {
 	hotMap = append(hotMap, hotCredential...)
 	resignMap := append([]byte{0xa1}, scriptCredential...)
 	resignMap = append(resignMap, 0xf5)
-	hotKeys, resignations := parseCommitteeVState(
+	hotKeys, resignations, err := parseCommitteeVState(
 		[][]byte{hotMap, resignMap},
 	)
+	if err != nil {
+		t.Fatalf("parseCommitteeVState returned an error: %v", err)
+	}
 	if len(hotKeys) != 1 || len(resignations) != 1 {
 		t.Fatalf(
 			"unexpected committee state: %d authorizations, %d resignations",
@@ -572,10 +575,13 @@ func TestParseCommitteeVStateUnwrapsNestedStateWithTrailingFields(
 	nested := append([]byte{0x82}, hotMap...)
 	nested = append(nested, resignMap...)
 
-	hotKeys, resignations := parseCommitteeVState(
+	hotKeys, resignations, err := parseCommitteeVState(
 		// [committeeState, dormantEpoch]
 		[][]byte{nested, {0x00}},
 	)
+	if err != nil {
+		t.Fatalf("parseCommitteeVState returned an error: %v", err)
+	}
 	if len(hotKeys) != 1 || len(resignations) != 1 {
 		t.Fatalf(
 			"nested committee state was dropped: %d authorizations, %d resignations",
@@ -724,5 +730,102 @@ func TestParseCertStateConwayCommitteeSurvivesSmallDState(t *testing.T) {
 				)
 			}
 		})
+	}
+}
+
+// TestParseCommitteeVStateAuthorizationSumType covers the encoding mainnet
+// actually uses. The committee map's values are the CommitteeAuthorization sum
+// type, [0, hot_credential] for an authorization and [1, maybe_anchor] for a
+// resignation. Before the fix, parseCommitteeHotCredential accepted only a bare
+// credential or a one-element wrapper, so every real entry was skipped and
+// auth_committee_hot was imported empty -- which made every constitutional
+// committee vote fail the Conway unknown-voter rule.
+func TestParseCommitteeVStateAuthorizationSumType(t *testing.T) {
+	coldHash := toFixed28(bytes.Repeat([]byte{0x11}, 28))
+	hotHash := toFixed28(bytes.Repeat([]byte{0x22}, 28))
+	resignedCold := toFixed28(bytes.Repeat([]byte{0x33}, 28))
+
+	coldCred, err := cbor.Encode([]any{uint64(1), coldHash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resignedCred, err := cbor.Encode([]any{uint64(0), resignedCold})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// value = [0, [1, hotHash]]  -- CommitteeHotCredential
+	authValue, err := cbor.Encode(
+		[]any{uint64(0), []any{uint64(1), hotHash}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// value = [1, null]  -- CommitteeMemberResigned
+	resignValue, err := cbor.Encode([]any{uint64(1), nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	committeeMap := []byte{0xa2}
+	committeeMap = append(committeeMap, coldCred...)
+	committeeMap = append(committeeMap, authValue...)
+	committeeMap = append(committeeMap, resignedCred...)
+	committeeMap = append(committeeMap, resignValue...)
+
+	hotKeys, resignations, err := parseCommitteeVState(
+		[][]byte{committeeMap, {0x00}},
+	)
+	if err != nil {
+		t.Fatalf("parseCommitteeVState returned an error: %v", err)
+	}
+	if len(hotKeys) != 1 {
+		t.Fatalf("expected 1 authorization, got %d", len(hotKeys))
+	}
+	if len(resignations) != 1 {
+		t.Fatalf("expected 1 resignation, got %d", len(resignations))
+	}
+	if hotKeys[0].Cold.Type != CredentialTypeScript {
+		t.Fatalf("cold credential tag lost: %#v", hotKeys[0].Cold)
+	}
+	if hotKeys[0].Hot.Type != CredentialTypeScript {
+		t.Fatalf("hot credential tag lost: %#v", hotKeys[0].Hot)
+	}
+	if !bytes.Equal(hotKeys[0].Hot.Hash, hotHash[:]) {
+		t.Fatalf("hot credential hash mismatch: %x", hotKeys[0].Hot.Hash)
+	}
+	if resignations[0].Type != CredentialTypeKey {
+		t.Fatalf("resignation tag lost: %#v", resignations[0])
+	}
+}
+
+// TestParseCommitteeVStateFailsLoudOnUndecodableEntries asserts that a
+// committee map with entries none of which can be decoded is an error rather
+// than a silently empty result. Returning empty here is indistinguishable from
+// a genuinely unauthorized committee, which is how the mainnet halt went
+// unnoticed through an entire bootstrap.
+func TestParseCommitteeVStateFailsLoudOnUndecodableEntries(t *testing.T) {
+	coldHash := toFixed28(bytes.Repeat([]byte{0x44}, 28))
+	coldCred, err := cbor.Encode([]any{uint64(1), coldHash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A value shape the parser does not recognise: a 3-element array.
+	badValue, err := cbor.Encode([]any{uint64(9), uint64(9), uint64(9)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	committeeMap := []byte{0xa1}
+	committeeMap = append(committeeMap, coldCred...)
+	committeeMap = append(committeeMap, badValue...)
+
+	hotKeys, resignations, err := parseCommitteeVState(
+		[][]byte{committeeMap, {0x00}},
+	)
+	if err == nil {
+		t.Fatalf(
+			"expected an error, got %d hot keys and %d resignations",
+			len(hotKeys),
+			len(resignations),
+		)
 	}
 }
