@@ -1525,7 +1525,22 @@ func (c *Chain) rollbackLocked(
 			return nil, err
 		}
 		if idx >= 0 {
+			// Same invalidation the post-wait header path publishes
+			// below. Those headers never become blocks, and this path
+			// returns no chain.update event, so without it any
+			// announcement they carried stays armed with nothing left
+			// to void it.
+			discarded := c.queuedHeaderHashes()[idx+1:]
+			dropped := len(discarded)
 			c.headers = slices.Delete(c.headers, idx+1, len(c.headers))
+			if dropped > 0 {
+				c.queueDeferredEventLocked(headerInvalidationEvent(
+					point,
+					HeaderInvalidationRollback,
+					c.nextHeaderSeqLocked(),
+					discarded,
+				))
+			}
 			c.mutex.Unlock()
 			return nil, nil
 		}
