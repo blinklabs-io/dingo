@@ -805,11 +805,9 @@ func TestWatchExitsWhenItsServerIsStopped(t *testing.T) {
 	srv, err := publishBound(l, "127.0.0.1:0")
 	require.NoError(t, err)
 
-	// Deliberately not cancelled until after the assertion: the context is
-	// what a monitor must NOT be relying on to be released.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	exited := l.Watch(ctx, srv, Graceful)
+	// Never cancelled inside the test: the context is precisely what a
+	// monitor must NOT be relying on to be released.
+	exited := l.Watch(t.Context(), srv, Graceful)
 
 	require.NoError(t, stopNow(t, l))
 
@@ -828,9 +826,7 @@ func TestWatchExitsWhenAFailedStartUnpublishes(t *testing.T) {
 	srv, _, err := publish(l, "127.0.0.1:0")
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	exited := l.Watch(ctx, srv, Graceful)
+	exited := l.Watch(t.Context(), srv, Graceful)
 
 	l.Unpublish(srv)
 
@@ -869,9 +865,7 @@ func TestWatchOnAReplacedServerExitsImmediately(t *testing.T) {
 	l := newListener()
 	stale := &http.Server{Addr: "127.0.0.1:0"} //nolint:gosec // test server
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	exited := l.Watch(ctx, stale, Graceful)
+	exited := l.Watch(t.Context(), stale, Graceful)
 
 	testutil.RequireReceive(
 		t, exited, 5*time.Second,
