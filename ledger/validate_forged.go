@@ -178,10 +178,8 @@ func (ls *LedgerState) ValidateBlockReferenceScripts(block ledger.Block) error {
 		pp = snapshot.prevEraPParams
 	}
 	return ls.db.Transaction(false).Do(func(txn *database.Txn) error {
-		return validateBlockReferenceScripts(
-			block,
-			pp,
-			&LedgerView{txn: txn, ls: ls},
-		)
+		lv := &LedgerView{txn: txn, ls: ls}
+		err := validateBlockReferenceScripts(block, pp, lv)
+		return storageFaultOrErr(lv, err)
 	})
 }

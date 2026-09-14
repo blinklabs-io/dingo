@@ -245,7 +245,12 @@ func TestProviderStopDeadlineDuringValueLogGC(t *testing.T) {
 		t, stopDone, 5*time.Second,
 		"provider stop exceeded its context",
 	)
-	require.Less(t, stopResult.elapsed, 2*time.Second, "provider stop did not honor its deadline promptly")
+	require.Less(
+		t,
+		stopResult.elapsed,
+		2*time.Second,
+		"provider stop did not honor its deadline promptly",
+	)
 
 	release()
 	require.Eventually(

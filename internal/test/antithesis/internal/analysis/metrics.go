@@ -228,10 +228,16 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 	defer m.mu.Unlock()
 
 	snap := MetricsSnapshot{
-		TotalBlocksForged:         m.TotalBlocksForged,
-		BlocksByNode:              make(map[string]int, len(m.BlocksByNode)),
-		MaxSlotByNode:             make(map[string]uint64, len(m.MaxSlotByNode)),
-		ChainTipByNode:            make(map[string]uint64, len(m.ChainTipByNode)),
+		TotalBlocksForged: m.TotalBlocksForged,
+		BlocksByNode:      make(map[string]int, len(m.BlocksByNode)),
+		MaxSlotByNode: make(
+			map[string]uint64,
+			len(m.MaxSlotByNode),
+		),
+		ChainTipByNode: make(
+			map[string]uint64,
+			len(m.ChainTipByNode),
+		),
 		MempoolTxCount:            m.MempoolTxCount,
 		DelegationsProcessed:      m.delegationsProcessed,
 		GovernanceProcessed:       m.governanceProcessed,

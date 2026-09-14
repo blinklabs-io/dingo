@@ -83,13 +83,7 @@ func (s *Store) hydrateTransactionSlice(
 	if err != nil {
 		return err
 	}
-	collateral, err := s.transactionUtxosBatch(
-		ctx,
-		db,
-		"collateral_by_tx_id",
-		hashes,
-		func(u *models.Utxo) string { return string(u.CollateralByTxId) },
-	)
+	collateral, err := s.collateralInputsBatch(ctx, db, hashes)
 	if err != nil {
 		return err
 	}
@@ -163,6 +157,52 @@ func (s *Store) hydrateTransactionSlice(
 		}
 	}
 	return nil
+}
+
+// collateralInputsBatch reads durable many-to-many collateral edges. The
+// legacy UTxO column is retained for old readers and migration compatibility,
+// but cannot represent collateral reused by more than one transaction.
+func (s *Store) collateralInputsBatch(
+	ctx context.Context,
+	db queryer,
+	hashes []any,
+) (map[string][]models.Utxo, error) {
+	result := make(map[string][]models.Utxo)
+	if len(hashes) == 0 {
+		return result, nil
+	}
+	for start := 0; start < len(hashes); start += s.dialect.ParameterLimit() {
+		end := min(start+s.dialect.ParameterLimit(), len(hashes))
+		query := `SELECT ` + qualifiedSQLiteUtxoColumns + `, c.transaction_hash
+FROM utxo AS utxo
+JOIN utxo_collateral_input AS c ON c.utxo_id = utxo.id
+WHERE c.transaction_hash IN (` + bindPlaceholders(end-start) + `) ORDER BY utxo.id`
+		rows, err := db.QueryContext(ctx, s.dialect.Rebind(query), hashes[start:end]...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			row, err := scanSQLiteUtxoWithReference(rows)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			item, err := utxoFromSQLite(row.utxo)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			result[string(row.reference)] = append(result[string(row.reference)], *item)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
 }
 
 // referenceInputsBatch reads the durable many-to-many reference-input edges.

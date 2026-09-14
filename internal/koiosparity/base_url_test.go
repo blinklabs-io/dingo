@@ -59,11 +59,21 @@ func TestNewKoiosClientBaseURLOverride(t *testing.T) {
 // TestNewKoiosClientBaseURLTrimsTrailingSlash pins the ergonomics: an operator
 // pasting a root with a trailing slash must not produce doubled separators.
 func TestNewKoiosClientBaseURLTrimsTrailingSlash(t *testing.T) {
-	client, err := NewKoiosClient("preview", "", "https://host.example/api/v1/", false)
+	client, err := NewKoiosClient(
+		"preview",
+		"",
+		"https://host.example/api/v1/",
+		false,
+	)
 	require.NoError(t, err)
 	assert.Equal(t, "https://host.example/api/v1", client.baseURL)
 
-	spaced, err := NewKoiosClient("preview", "", "  https://host.example/api/v1  ", false)
+	spaced, err := NewKoiosClient(
+		"preview",
+		"",
+		"  https://host.example/api/v1  ",
+		false,
+	)
 	require.NoError(t, err)
 	assert.Equal(t, "https://host.example/api/v1", spaced.baseURL)
 }
@@ -84,7 +94,12 @@ func TestNewKoiosClientDefaultsToPublicHost(t *testing.T) {
 // says nothing about another deployment, so throttling a self-hosted instance
 // against it would enforce a limit that does not exist.
 func TestNewKoiosClientCustomHostDropsBurstCap(t *testing.T) {
-	client, err := NewKoiosClient("preview", "", "https://host.example/api/v1", false)
+	client, err := NewKoiosClient(
+		"preview",
+		"",
+		"https://host.example/api/v1",
+		false,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, client.limiter)
 	assert.LessOrEqual(t, client.limiter.limit, 0,
@@ -101,7 +116,12 @@ func TestNewKoiosClientCustomHostDropsBurstCap(t *testing.T) {
 // the testnet address network ID, so an unvalidated "mainnet" would silently
 // generate wrong-network stake addresses.
 func TestNewKoiosClientRejectsUnsupportedNetworkWithOverride(t *testing.T) {
-	_, err := NewKoiosClient("mainnet", "", "https://host.example/api/v1", false)
+	_, err := NewKoiosClient(
+		"mainnet",
+		"",
+		"https://host.example/api/v1",
+		false,
+	)
 	require.Error(t, err)
 }
 
@@ -233,7 +253,12 @@ func TestNewKoiosClientPublicHostSpellings(t *testing.T) {
 // Fragment — but get and post would still append the endpoint path after the
 // delimiter and reach the base path instead.
 func TestNewKoiosClientRejectsBareFragment(t *testing.T) {
-	_, err := NewKoiosClient("preview", "", "https://host.example/api/v1#", false)
+	_, err := NewKoiosClient(
+		"preview",
+		"",
+		"https://host.example/api/v1#",
+		false,
+	)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "fragment")
 }

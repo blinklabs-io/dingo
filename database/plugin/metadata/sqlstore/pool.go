@@ -687,15 +687,24 @@ func (s *Store) LatestPoolOpCertSequence(
 	if err != nil {
 		return 0, false, err
 	}
-	var sequence int64
-	var count int64
+	// A lone MAX(sequence), with no other aggregate and no other predicate
+	// in the same query, lets SQLite apply its min/max index optimization:
+	// a single descent of idx_pool_opcert_sequence_pool_sequence to the
+	// largest matching row instead of a scan of every row for this pool.
+	// Pairing it with COUNT(*) (as this query used to) disables that
+	// optimization, since COUNT(*) forces SQLite to visit every qualifying
+	// row regardless of MAX. UpdatePoolOpCertSequence is the only writer of
+	// this table and always inserts a concrete sequence value, so a NULL
+	// result unambiguously means "no row for this pool" -- the same case
+	// the old COUNT(*) == 0 check reported.
+	var sequence sql.NullInt64
 	err = db.QueryRowContext(ctx, `
-SELECT COALESCE(MAX(sequence), 0), COUNT(*)
+SELECT MAX(sequence)
 FROM pool_opcert_sequence
 WHERE pool_key_hash = ?`,
 		poolKeyHash.Bytes(),
-	).Scan(&sequence, &count)
-	return uint64(sequence), count > 0, err
+	).Scan(&sequence)
+	return uint64(sequence.Int64), sequence.Valid, err
 }
 
 // LatestPoolOpCertSequenceAfter returns the highest sequence recorded for a
@@ -1393,7 +1402,10 @@ func (s *Store) GetPoolEarliestVrfKeyHashAtSlot(
 	}
 	slotValue, err := checkedInt64(slot)
 	if err != nil {
-		return nil, false, fmt.Errorf("GetPoolEarliestVrfKeyHashAtSlot: %w", err)
+		return nil, false, fmt.Errorf(
+			"GetPoolEarliestVrfKeyHashAtSlot: %w",
+			err,
+		)
 	}
 	var vrfKeyHash []byte
 	err = db.QueryRowContext(ctx, `
@@ -1415,7 +1427,10 @@ LIMIT 1`,
 		return nil, false, nil
 	}
 	if err != nil {
-		return nil, false, fmt.Errorf("GetPoolEarliestVrfKeyHashAtSlot: %w", err)
+		return nil, false, fmt.Errorf(
+			"GetPoolEarliestVrfKeyHashAtSlot: %w",
+			err,
+		)
 	}
 	return vrfKeyHash, true, nil
 }
@@ -2107,10 +2122,8 @@ ORDER BY p.id DESC`,
 		}
 		if registration.MetadataUrl != "" {
 			certificate.PoolMetadata = &lcommon.PoolMetadata{
-				Url: registration.MetadataUrl,
-				Hash: lcommon.PoolMetadataHash(
-					lcommon.NewBlake2b256(registration.MetadataHash),
-				),
+				Url:  registration.MetadataUrl,
+				Hash: lcommon.PoolMetadataHash(registration.MetadataHash),
 			}
 		}
 		ret = append(ret, certificate)

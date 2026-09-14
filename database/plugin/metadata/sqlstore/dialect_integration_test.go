@@ -91,7 +91,7 @@ func testSQLStoreIntegration(
 	driver, dsn, dialectName, lockNamespace string,
 ) {
 	t.Helper()
-	db, err := OpenDB(driver, dsn, dialectName)
+	db, err := OpenDB(driver, dsn, dialectName, false)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	var dialect Dialect
@@ -111,6 +111,7 @@ func testSQLStoreIntegration(
 	store, err := New(Config{
 		WriteDB:         db,
 		Dialect:         dialect,
+		StorageMode:     types.StorageModeAPI,
 		Migrations:      registry,
 		MigrationLocker: locker,
 	})
@@ -199,8 +200,16 @@ func testSQLStoreIntegration(
 		nil,
 	)
 	require.NoError(t, err)
-	require.Contains(t, batchLoaded, models.NewStakeCredentialRef(0, account.StakingKey).MapKey())
-	require.Equal(t, account.ID, batchLoaded[models.NewStakeCredentialRef(0, account.StakingKey).MapKey()].ID)
+	require.Contains(
+		t,
+		batchLoaded,
+		models.NewStakeCredentialRef(0, account.StakingKey).MapKey(),
+	)
+	require.Equal(
+		t,
+		account.ID,
+		batchLoaded[models.NewStakeCredentialRef(0, account.StakingKey).MapKey()].ID,
+	)
 	// GetDrepLastRegistrationDeposits is the other derived-table join in the
 	// shared query set, and a DRep deregistration's refund is validated
 	// against what it returns, so a dialect that resolves the grouped
@@ -435,4 +444,7 @@ INSERT INTO redeemer (
 	pending, err = store.HasDeferredIndexesPending()
 	require.NoError(t, err)
 	require.False(t, pending)
+
+	// Exercise the many-to-many collateral contract on this dialect.
+	collateralProductionFlow(t, store, db)
 }

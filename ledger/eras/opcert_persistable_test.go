@@ -94,6 +94,11 @@ func TestValidateOpCertCounterMaxUint64DoesNotWrap(t *testing.T) {
 	)
 	require.Error(
 		t,
-		eras.ValidateOpCertCounter(math.MaxUint64, true, math.MaxUint64-1, true),
+		eras.ValidateOpCertCounter(
+			math.MaxUint64,
+			true,
+			math.MaxUint64-1,
+			true,
+		),
 	)
 }

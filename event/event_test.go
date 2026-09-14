@@ -624,9 +624,13 @@ func TestSubscribeFuncStrictOnPanicHookPanicIsContained(t *testing.T) {
 	}, 10*time.Second, 10*time.Millisecond,
 		"onPanic must have been invoked",
 	)
-	require.Eventually(t, func() bool {
-		return !eb.HasSubscribers(testEvtType)
-	}, 10*time.Second, 10*time.Millisecond,
+	require.Eventually(
+		t,
+		func() bool {
+			return !eb.HasSubscribers(testEvtType)
+		},
+		10*time.Second,
+		10*time.Millisecond,
 		"the subscription must still be torn down even when onPanic itself panics",
 	)
 

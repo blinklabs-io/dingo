@@ -67,8 +67,9 @@ import (
 // chainsyncServerFixture pairs a Dingo Ouroboros instance with a shared
 // ouroboros-mock ChainSync harness driving its server callbacks.
 type chainsyncServerFixture struct {
-	o *Ouroboros
-	h *csmock.Harness
+	o       *Ouroboros
+	h       *csmock.Harness
+	limiter *chainsyncFindIntersectRateLimiter
 
 	// conn is the harness's server-under-test connection, registered with
 	// Dingo's ConnManager so callbacks that resolve their peer through it
@@ -203,12 +204,16 @@ func newChainsyncServerFixtureWithConfig(
 		tweak(o)
 	}
 
-	f := &chainsyncServerFixture{o: o}
+	limiter := newChainsyncFindIntersectRateLimiter(
+		chainsyncFindIntersectBudgetRate,
+		chainsyncFindIntersectBudgetBurst,
+	)
+	f := &chainsyncServerFixture{o: o, limiter: limiter}
 
 	// The harness assigns the connection ID, so observe it as the production
 	// callbacks run. These shims only record the ID and delegate; the real
 	// callbacks (and their instrumentation wrappers) still do all the work.
-	serverCfg := ochainsync.NewConfig(o.chainsyncServerConnOpts()...)
+	serverCfg := ochainsync.NewConfig(o.chainsyncServerConnOpts(limiter)...)
 	findIntersect := serverCfg.FindIntersectFunc
 	serverCfg.FindIntersectFunc = func(
 		ctx ochainsync.CallbackContext,
@@ -584,9 +589,8 @@ func TestChainsyncServerFindIntersectRateLimitsRepeatedRequests(
 	t.Parallel()
 
 	f := newChainsyncServerFixture(t, csmock.ModeNtC)
-	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	f.o.chainsyncFindIntersectLimiter.nowFunc = func() time.Time {
-		return now
+	f.limiter.nowFunc = func() time.Time {
+		return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	}
 
 	points := makeFindIntersectPoints(chainsyncMaxFindIntersectPoints)

@@ -76,6 +76,7 @@ fi
 # a full scenario fits the reference-runner budget; the canonical spec is
 # what soak and canary runs use.
 if [[ "${ACCELERATED}" == "true" ]]; then
+  export DEVNET_TXPUMP_CONFIRMATION_SLOTS=100
   if [[ "${MODE}" == "conformance" ]]; then
     export DEVNET_CONFORMANCE_SPEC="./testnet-accelerated.yaml"
     ACTIVE_SPEC="${DEVNET_CONFORMANCE_SPEC}"
@@ -106,6 +107,8 @@ if [[ "${ACCELERATED}" == "true" ]]; then
   fi
   echo "  go test -tags devnet -run TestAcceleratedScenarioTimeline \\"
   echo "    -timeout 8m ./internal/test/devnet/scenarios/"
+else
+  export DEVNET_TXPUMP_CONFIRMATION_SLOTS=600
 fi
 
 echo "Starting DevNet containers (mode: ${MODE}, project: ${COMPOSE_PROJECT_NAME}, net: ${DEVNET_NET_BASE}.0/24)..."

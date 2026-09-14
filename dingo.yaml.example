@@ -444,6 +444,18 @@ intersectTip: false
 forgeSyncToleranceSlots: 0
 forgeStaleGapThresholdSlots: 0
 
+# validateForgedBlock re-validates a locally-forged block (header crypto,
+# body hash, per-tx ledger rules including Plutus phase-2 evaluation)
+# before it is adopted and diffused, catching a bug that would otherwise
+# forge and diffuse an invalid block. Enabled by default (fail closed).
+# This re-validation runs synchronously inside the forging deadline with
+# no separate time budget, so on a block producer with heavy Plutus
+# traffic it adds real latency to every forged block; set to false only
+# if that cost is unacceptable and the risk of forging an invalid block
+# is understood and accepted.
+# CLI: --validate-forged-block  Env: DINGO_VALIDATE_FORGED_BLOCK
+# validateForgedBlock: true
+
 # Application-wide operational mode for a bare dingo invocation:
 # "serve" (default), "load", "dev", or "leios"
 # - serve: Full node with network connectivity (default)
@@ -524,6 +536,28 @@ blockPipelineValidateEnabled: false
 # Can be overridden with the CARDANO_STRICT_UTXO_VALIDATION environment variable
 # CLI: --strict-utxo-validation
 strictUtxoValidation: true
+
+# Skip the startup consistency check between reward_live_stake and the live
+# UTxO/account set (default: false, i.e. the check runs).
+#
+# The check scans the entire live UTxO table on every startup, whether or not
+# anything actually needs repairing, so on a mainnet-scale database it costs
+# as much as a full rebuild each time the node starts. Advanced/diagnostic use
+# only: skipping is safe when the database is already known to be consistent,
+# such as repeated restarts while investigating an unrelated issue. It is
+# unsafe to leave enabled permanently, because this check is what catches a
+# stale or pre-migration reward_live_stake table.
+#
+# This does not disable the stake-snapshot provenance check that runs in the
+# same startup step. That one is a pair of indexed existence probes whose cost
+# does not scale with the UTxO set, and it fails closed on a database whose
+# consensus stake snapshots came from an older accounting version, so it
+# always runs.
+#
+# Can be overridden with the CARDANO_SKIP_REWARD_LIVE_STAKE_BACKFILL_CHECK
+# environment variable
+# CLI: --skip-reward-live-stake-backfill-check
+skipRewardLiveStakeBackfillCheck: false
 
 # Peer targets - target number of peers in each state
 # Known, established, and active peer targets are goals, not hard limits.

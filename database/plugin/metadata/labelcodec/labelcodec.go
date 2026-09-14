@@ -30,7 +30,13 @@ type Entry struct {
 	Label     uint64
 	CborValue []byte
 	JsonValue string
+	JSONError error
 }
+
+// ErrJSONUnavailable indicates that a metadata value cannot be represented in
+// the Blockfrost JSON shape without losing information. Its raw CBOR remains
+// available to callers.
+var ErrJSONUnavailable = errors.New("metadata JSON representation unavailable")
 
 // Returns full metadata CBOR and per-label entries
 func EncodeAndExtract(
@@ -76,7 +82,7 @@ func RawValues(
 	}
 
 	jsonValue, err := metadatumRawToJSON(rawValue)
-	if err != nil {
+	if err != nil && !errors.Is(err, ErrJSONUnavailable) {
 		return nil, nil, fmt.Errorf(
 			"decode metadata label %d JSON: %w",
 			label,
@@ -84,7 +90,23 @@ func RawValues(
 		)
 	}
 
-	return json.RawMessage(jsonValue), append([]byte(nil), rawValue...), nil
+	return json.RawMessage(jsonValue), append([]byte(nil), rawValue...), err
+}
+
+// RawValue returns one label's CBOR without requiring JSON conversion.
+func RawValue(metadataCbor []byte, label uint64) ([]byte, error) {
+	if len(metadataCbor) == 0 {
+		return nil, errors.New("transaction has no metadata")
+	}
+	rawByLabel, err := decodeMetadataLabelMap(metadataCbor)
+	if err != nil {
+		return nil, err
+	}
+	rawValue, ok := rawByLabel[label]
+	if !ok {
+		return nil, fmt.Errorf("metadata label %d not found", label)
+	}
+	return append([]byte(nil), rawValue...), nil
 }
 
 // EntriesFromCBOR returns all metadata labels from encoded transaction
@@ -115,18 +137,22 @@ func extractFromCbor(
 	for _, label := range labels {
 		rawValue := rawByLabel[label]
 		jsonValue, err := metadatumRawToJSON(rawValue)
-		if err != nil {
+		if err != nil && !errors.Is(err, ErrJSONUnavailable) {
 			return nil, fmt.Errorf(
 				"decode metadata label %d JSON: %w",
 				label,
 				err,
 			)
 		}
-		ret = append(ret, Entry{
+		entry := Entry{
 			Label:     label,
 			CborValue: append([]byte(nil), rawValue...),
 			JsonValue: jsonValue,
-		})
+		}
+		if err != nil {
+			entry.JSONError = err
+		}
+		ret = append(ret, entry)
 	}
 	return ret, nil
 }
@@ -138,6 +164,8 @@ func decodeMetadataLabelMap(
 	var asUint64 map[uint64]cbor.RawMessage
 	if _, err := cbor.Decode(metadataCbor, &asUint64); err == nil {
 		return asUint64, nil
+	} else if cbor.IsDuplicateMapKeyError(err) {
+		return nil, fmt.Errorf("duplicate metadata label: %w", err)
 	}
 	var asInt64 map[int64]cbor.RawMessage
 	if _, err := cbor.Decode(metadataCbor, &asInt64); err == nil {
@@ -149,6 +177,8 @@ func decodeMetadataLabelMap(
 			ret[uint64(k)] = v
 		}
 		return ret, nil
+	} else if cbor.IsDuplicateMapKeyError(err) {
+		return nil, fmt.Errorf("duplicate metadata label: %w", err)
 	}
 	return nil, errors.New("metadata is not an integer-keyed map")
 }
@@ -188,6 +218,7 @@ func extractFromMetadatum(
 		return nil, errors.New("metadata is not an integer-keyed map")
 	}
 	ret := make([]Entry, 0, len(tmpMap.Pairs))
+	seenLabels := make(map[uint64]struct{}, len(tmpMap.Pairs))
 	for _, pair := range tmpMap.Pairs {
 		keyInt, ok := pair.Key.(lcommon.MetaInt)
 		if !ok {
@@ -202,6 +233,11 @@ func extractFromMetadatum(
 				keyInt.Value.String(),
 			)
 		}
+		label := keyInt.Value.Uint64()
+		if _, exists := seenLabels[label]; exists {
+			return nil, fmt.Errorf("duplicate metadata label: %d", label)
+		}
+		seenLabels[label] = struct{}{}
 		cborValue, err := metadatumCbor(pair.Value)
 		if err != nil {
 			return nil, fmt.Errorf(
@@ -211,26 +247,30 @@ func extractFromMetadatum(
 			)
 		}
 		jsonValueAny, err := metadatumToJSONValue(pair.Value)
-		if err != nil {
+		if err != nil && !errors.Is(err, ErrJSONUnavailable) {
 			return nil, fmt.Errorf(
 				"decode metadata label %s JSON: %w",
 				keyInt.Value.String(),
 				err,
 			)
 		}
-		jsonBytes, err := json.Marshal(jsonValueAny)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"encode metadata label %s JSON: %w",
-				keyInt.Value.String(),
-				err,
-			)
+		jsonValue := ""
+		if err == nil {
+			jsonBytes, marshalErr := json.Marshal(jsonValueAny)
+			if marshalErr != nil {
+				return nil, fmt.Errorf("encode metadata label %s JSON: %w", keyInt.Value.String(), marshalErr)
+			}
+			jsonValue = string(jsonBytes)
 		}
-		ret = append(ret, Entry{
-			Label:     keyInt.Value.Uint64(),
+		entry := Entry{
+			Label:     label,
 			CborValue: cborValue,
-			JsonValue: string(jsonBytes),
-		})
+			JsonValue: jsonValue,
+		}
+		if err != nil {
+			entry.JSONError = err
+		}
+		ret = append(ret, entry)
 	}
 	sort.Slice(ret, func(i, j int) bool { return ret[i].Label < ret[j].Label })
 	return ret, nil
@@ -267,6 +307,13 @@ func metadatumToJSONValue(md lcommon.TransactionMetadatum) (any, error) {
 			key, err := metadatumMapKeyToString(pair.Key)
 			if err != nil {
 				return nil, err
+			}
+			if _, exists := ret[key]; exists {
+				return nil, fmt.Errorf(
+					"%w: metadata map keys %q collide",
+					ErrJSONUnavailable,
+					key,
+				)
 			}
 			tmp, err := metadatumToJSONValue(pair.Value)
 			if err != nil {
