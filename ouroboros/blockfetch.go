@@ -371,6 +371,8 @@ Loop:
 				break Loop
 			}
 			if next.Rollback {
+				// Blockfetch has no rollback message, so end the batch cleanly;
+				// the client re-requests against its updated chain.
 				break Loop
 			}
 			if next.Block.Slot > end.Slot {
@@ -426,17 +428,6 @@ Loop:
 				break Loop
 			}
 		}
-	}
-	if !reachedEnd {
-		o.closeBlockfetchConnection(
-			conn,
-			connectionID,
-			"blockfetch iterator ended before requested end point",
-		)
-		return fmt.Errorf(
-			"blockfetch iterator ended before requested end point at slot %d",
-			end.Slot,
-		)
 	}
 	// Signal batch completion
 	if err := server.BatchDone(); err != nil {
