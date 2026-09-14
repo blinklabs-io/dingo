@@ -23,8 +23,8 @@ import (
 	"testing"
 	"time"
 
-	sqlite "github.com/glebarez/go-sqlite"
 	"github.com/stretchr/testify/require"
+	sqlite "modernc.org/sqlite"
 )
 
 // busyTimeoutMargin exceeds OpenCache's hardcoded 5s busy_timeout pragma,
