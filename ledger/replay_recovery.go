@@ -334,11 +334,18 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 		// cannot suppress the fresh ChainSync intersection.
 		ls.publishReplayRecoveryNonConvergingResync(rewindPoint)
 	}
+	if err := ls.checkReplayRecoveryRollbackFloor(rewindPoint); err != nil {
+		if errors.Is(err, ErrRollbackBelowUtxoPruneFloor) {
+			// The peer's block requires state older than the retained UTxO
+			// history. Rotate the ChainSync intersection instead of returning
+			// an error that would retry the same peer and target.
+			ls.publishReplayRecoveryPruneFloorResync(rewindPoint)
+			return true, nil
+		}
+		return false, err
+	}
 	primaryChainRewound := false
 	if rewindPrimaryChain && !primaryChainAlreadyHeld {
-		if err := ls.checkReplayRecoveryRollbackFloor(rewindPoint); err != nil {
-			return false, err
-		}
 		if err := ls.rewindPrimaryChainForRecovery(
 			rewindPoint,
 		); err != nil {
@@ -378,8 +385,15 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 func (ls *LedgerState) checkReplayRecoveryRollbackFloor(
 	point ocommon.Point,
 ) error {
+	ls.RLock()
+	currentTip := ls.currentTip
+	ls.RUnlock()
+	resolved, err := ls.resolveRollbackTarget(point, currentTip)
+	if err != nil {
+		return fmt.Errorf("resolve replay recovery rollback target: %w", err)
+	}
 	belowPruneFloor, pruneFloor, err := ls.rollbackBelowConsumedUtxoPruneFloor(
-		point,
+		resolved,
 	)
 	if err != nil {
 		return fmt.Errorf(
@@ -390,7 +404,7 @@ func (ls *LedgerState) checkReplayRecoveryRollbackFloor(
 	if belowPruneFloor {
 		return fmt.Errorf(
 			"replay recovery rollback target slot %d is below consumed UTxO prune floor %d: %w",
-			point.Slot,
+			resolved.Slot,
 			pruneFloor,
 			ErrRollbackBelowUtxoPruneFloor,
 		)
@@ -779,6 +793,25 @@ func (ls *LedgerState) resetReplayRecoveryNonProgress(newTipSlot uint64) {
 func (ls *LedgerState) publishReplayRecoveryNonConvergingResync(
 	point ocommon.Point,
 ) {
+	ls.publishReplayRecoveryResync(
+		point,
+		event.ChainsyncResyncReasonReplayRecoveryNonConverging,
+	)
+}
+
+func (ls *LedgerState) publishReplayRecoveryPruneFloorResync(
+	point ocommon.Point,
+) {
+	ls.publishReplayRecoveryResync(
+		point,
+		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+	)
+}
+
+func (ls *LedgerState) publishReplayRecoveryResync(
+	point ocommon.Point,
+	reason string,
+) {
 	if ls.config.EventBus == nil {
 		return
 	}
@@ -794,9 +827,8 @@ func (ls *LedgerState) publishReplayRecoveryNonConvergingResync(
 			event.ChainsyncResyncEventType,
 			event.ChainsyncResyncEvent{
 				ConnectionId: activeConnId,
-				Reason: event.
-					ChainsyncResyncReasonReplayRecoveryNonConverging,
-				Point: point,
+				Reason:       reason,
+				Point:        point,
 			},
 		),
 	)
