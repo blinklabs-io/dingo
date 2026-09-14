@@ -19,9 +19,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"runtime"
 	"slices"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -394,21 +392,35 @@ func TestRollbackWaitsForDestructiveTransitionBarrier(t *testing.T) {
 		)
 	}()
 
+	// Both bounds here are deliberately generous rather than tuned. What this
+	// test asserts is ordering -- parked before release, complete after -- and
+	// every operation it waits on takes milliseconds when it works at all. A
+	// tight bound adds only a timing failure mode under a race-instrumented
+	// full-package run, where these tests share a machine and the package
+	// takes minutes.
+	const barrierWait = 30 * time.Second
+
 	testutil.WaitForCondition(t, func() bool {
-		buf := make([]byte, 128<<10)
-		n := runtime.Stack(buf, true)
-		return strings.Contains(
-			string(buf[:n]),
+		return testutil.GoroutineParkedIn(
 			"github.com/blinklabs-io/dingo/database.(*cancellableBarrier).lockContext",
+			"github.com/blinklabs-io/dingo/ledger.(*LedgerState).rollbackChainAndStateDeferred",
 		)
-	}, 2*time.Second, "rollback must be parked on the destructive transition barrier")
+	}, barrierWait, "rollback must be parked on the destructive transition barrier")
+	// The barrier, not scheduling luck, is what is holding the rollback: it
+	// has entered rollbackChainAndStateDeferred and has not returned.
+	testutil.RequireNoReceive(
+		t,
+		rollbackDone,
+		100*time.Millisecond,
+		"rollback completing before the destructive transition finished",
+	)
 	require.Equal(t, fixture.currentTip, fixture.ls.chain.Tip())
 
 	release()
 	require.NoError(t, testutil.RequireReceive(
 		t,
 		rollbackDone,
-		2*time.Second,
+		barrierWait,
 		"rollback after destructive transition",
 	))
 }
