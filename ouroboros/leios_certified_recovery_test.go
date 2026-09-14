@@ -247,7 +247,11 @@ func TestFetchEndorserBlockByPointRecyclesDeadConnectionAndFailsOver(
 ) {
 	t.Parallel()
 
-	tx, manifestRaw, point, bitmap := leiosCertifiedRecoveryFixture(t, 0x52, 376038)
+	tx, manifestRaw, point, bitmap := leiosCertifiedRecoveryFixture(
+		t,
+		0x52,
+		376038,
+	)
 	// A second, still-incomplete endorser block, so the duplicate-recycle
 	// assertion below drives a real second fetch after the dead connection is
 	// removed. A re-fetch of the first block would return from the complete-cache
@@ -329,8 +333,24 @@ func TestFetchEndorserBlockByPointRecyclesDeadConnectionAndFailsOver(
 		EventBus:    bus,
 		EnableLeios: true,
 	})
-	require.NoError(t, o.storeLeiosEndorserBlock(point, manifestRaw, nil, leiosStoreAuthoritative))
-	require.NoError(t, o.storeLeiosEndorserBlock(point2, manifestRaw2, nil, leiosStoreAuthoritative))
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point,
+			manifestRaw,
+			nil,
+			leiosStoreAuthoritative,
+		),
+	)
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point2,
+			manifestRaw2,
+			nil,
+			leiosStoreAuthoritative,
+		),
+	)
 	poisonLeiosFetchBlockTxsSlot(t, deadConn, point, bitmap)
 	// Synchronize with the mock accepting the unanswered request. The slot is
 	// now abandoned, but the connection remains live until the production fetch
@@ -614,7 +634,9 @@ func TestFetchEndorserBlockByPointDeadlineDoesNotCoolDownPeer(t *testing.T) {
 			},
 		),
 	)
-	cm := connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{})
+	cm := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{},
+	)
 	require.True(t, cm.AddConnection(stalledConn, false, "stalled"))
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -642,7 +664,12 @@ func TestFetchEndorserBlockByPointDeadlineDoesNotCoolDownPeer(t *testing.T) {
 		2*time.Second,
 		"by-point fetch never reached the stalled transaction request",
 	)
-	testutil.RequireReceive(t, ctx.Done(), 3*time.Second, "caller deadline did not expire")
+	testutil.RequireReceive(
+		t,
+		ctx.Done(),
+		3*time.Second,
+		"caller deadline did not expire",
+	)
 
 	err := testutil.RequireReceive(
 		t,
@@ -898,7 +925,15 @@ func TestFetchEndorserBlockByPointTxsUnavailableIsNotAnAllPeerDecline(
 		ConnManager: cm,
 		EnableLeios: true,
 	})
-	require.NoError(t, o.storeLeiosEndorserBlock(point, manifestRaw, nil, leiosStoreAuthoritative))
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point,
+			manifestRaw,
+			nil,
+			leiosStoreAuthoritative,
+		),
+	)
 
 	err := o.FetchEndorserBlockByPoint(
 		context.Background(),

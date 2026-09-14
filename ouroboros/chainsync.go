@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sync"
 	"time"
 
@@ -260,10 +261,41 @@ func effectiveChainsyncBlockTimeout(timeout time.Duration) time.Duration {
 	return timeout
 }
 
-func (o *Ouroboros) chainsyncServerConnOpts() []ochainsync.ChainSyncOptionFunc {
+func (o *Ouroboros) chainsyncConnectionConfigOption(
+	includeClient bool,
+) ouroboros.ConnectionOptionFunc {
+	return func(c *ouroboros.Connection) {
+		limiter := newChainsyncFindIntersectRateLimiter(
+			chainsyncFindIntersectBudgetRate,
+			chainsyncFindIntersectBudgetBurst,
+		)
+		opts := o.chainsyncServerConnOpts(limiter)
+		if includeClient {
+			opts = slices.Concat(o.chainsyncClientConnOpts(), opts)
+		}
+		ouroboros.WithChainSyncConfig(
+			ochainsync.NewConfig(opts...),
+		)(c)
+	}
+}
+
+func (o *Ouroboros) chainsyncServerConnOpts(
+	limiter *chainsyncFindIntersectRateLimiter,
+) []ochainsync.ChainSyncOptionFunc {
 	return []ochainsync.ChainSyncOptionFunc{
 		ochainsync.WithFindIntersectFunc(
-			o.instrumentChainsyncFindIntersect(o.chainsyncServerFindIntersect),
+			o.instrumentChainsyncFindIntersect(
+				func(
+					ctx ochainsync.CallbackContext,
+					points []ocommon.Point,
+				) (ocommon.Point, ochainsync.Tip, error) {
+					return o.chainsyncServerFindIntersect(
+						limiter,
+						ctx,
+						points,
+					)
+				},
+			),
 		),
 		ochainsync.WithRequestNextFunc(
 			o.instrumentChainsyncRequestNext(o.chainsyncServerRequestNext),
@@ -429,11 +461,16 @@ func (o *Ouroboros) warnOriginOnlyIntersectRescued(
 	}
 	o.config.Logger.Warn(
 		"chainsync intersect points collapsed to origin on a non-origin chain, using rollback anchor instead",
-		"component", "ouroboros",
-		"connection_id", connId.String(),
-		"anchor_slot", rollbackAnchor.Slot,
-		"anchor_hash", hex.EncodeToString(rollbackAnchor.Hash),
-		"reason", "ledger returned no intersect points (rollback truncation in flight)",
+		"component",
+		"ouroboros",
+		"connection_id",
+		connId.String(),
+		"anchor_slot",
+		rollbackAnchor.Slot,
+		"anchor_hash",
+		hex.EncodeToString(rollbackAnchor.Hash),
+		"reason",
+		"ledger returned no intersect points (rollback truncation in flight)",
 	)
 }
 
@@ -710,6 +747,7 @@ func (o *Ouroboros) chainsyncClientStart(connId ouroboros.ConnectionId) error {
 }
 
 func (o *Ouroboros) chainsyncServerFindIntersect(
+	limiter *chainsyncFindIntersectRateLimiter,
 	ctx ochainsync.CallbackContext,
 	points []ocommon.Point,
 ) (ocommon.Point, ochainsync.Tip, error) {
@@ -750,8 +788,7 @@ func (o *Ouroboros) chainsyncServerFindIntersect(
 	// The intersection result is independent of point order (the highest
 	// matching slot always wins), so deduplicating here changes no outcome.
 	points = normalizeIntersectPoints(points)
-	if o.chainsyncFindIntersectLimiter != nil &&
-		!o.chainsyncFindIntersectLimiter.Allow(ctx.ConnectionId, len(points)) {
+	if !limiter.Allow(len(points)) {
 		o.config.Logger.Warn(
 			"chainsync server: rejecting FindIntersect over per-connection work budget",
 			"component",

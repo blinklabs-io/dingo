@@ -511,13 +511,21 @@ func TestParseCommitteeVStatePreservesTaggedAuthorizations(t *testing.T) {
 		[][]byte{hotMap, resignMap},
 	)
 	if len(hotKeys) != 1 || len(resignations) != 1 {
-		t.Fatalf("unexpected committee state: %d authorizations, %d resignations", len(hotKeys), len(resignations))
+		t.Fatalf(
+			"unexpected committee state: %d authorizations, %d resignations",
+			len(hotKeys),
+			len(resignations),
+		)
 	}
-	if hotKeys[0].Cold.Type != CredentialTypeKey || hotKeys[0].Hot.Type != CredentialTypeScript {
+	if hotKeys[0].Cold.Type != CredentialTypeKey ||
+		hotKeys[0].Hot.Type != CredentialTypeScript {
 		t.Fatalf("credential tags were not preserved: %#v", hotKeys[0])
 	}
 	if resignations[0].Type != CredentialTypeScript {
-		t.Fatalf("resignation credential tag was not preserved: %#v", resignations[0])
+		t.Fatalf(
+			"resignation credential tag was not preserved: %#v",
+			resignations[0],
+		)
 	}
 }
 
@@ -555,7 +563,9 @@ func committeeVStateFixture(t *testing.T) (hotMap, resignMap []byte) {
 
 // A nested committee state followed by a dormant-epoch field must still be
 // unwrapped; the field count cannot be the signal.
-func TestParseCommitteeVStateUnwrapsNestedStateWithTrailingFields(t *testing.T) {
+func TestParseCommitteeVStateUnwrapsNestedStateWithTrailingFields(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	hotMap, resignMap := committeeVStateFixture(t)

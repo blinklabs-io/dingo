@@ -244,7 +244,7 @@ func goroutineBlockedAddingTrackedClient() bool {
 		}
 		buf = make([]byte, 2*len(buf))
 	}
-	for _, stack := range strings.Split(string(buf), "\n\n") {
+	for stack := range strings.SplitSeq(string(buf), "\n\n") {
 		if strings.Contains(stack, "sync.(*RWMutex).Lock(") &&
 			strings.Contains(stack, "AddClientConnId") {
 			return true
