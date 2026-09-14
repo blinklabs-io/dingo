@@ -23,12 +23,15 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	"github.com/stretchr/testify/require"
 )
@@ -139,7 +142,7 @@ func TestQueryShelleyUtxoWhole_EmptyLedger(t *testing.T) {
 	db := newTestDB(t)
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.queryShelleyUtxoWhole()
+	result, err := ls.queryShelleyUtxoWhole(QueryPoint{}, nil)
 	require.NoError(t, err)
 	arr, ok := result.([]any)
 	require.True(t, ok)
@@ -187,7 +190,7 @@ func TestQueryShelleyUtxoWhole_UnrecoverableRowFailsQuery(t *testing.T) {
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	_, err = ls.queryShelleyUtxoWhole()
+	_, err = ls.queryShelleyUtxoWhole(QueryPoint{}, nil)
 	require.Error(t, err)
 }
 
@@ -227,7 +230,7 @@ func TestQueryShelleyUtxoWhole_WorkerPanicDoesNotCrashProcess(t *testing.T) {
 
 	var queryErr error
 	require.NotPanics(t, func() {
-		_, queryErr = ls.queryShelleyUtxoWhole()
+		_, queryErr = ls.queryShelleyUtxoWhole(QueryPoint{}, nil)
 	}, "a worker panic must not escape and crash the process")
 	require.Error(t, queryErr)
 	require.Contains(t, queryErr.Error(), "panicked")
@@ -313,7 +316,7 @@ func TestQueryShelleyUtxoWhole_AbortsEarlyOnFirstFailure(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := ls.queryShelleyUtxoWhole()
+		_, err := ls.queryShelleyUtxoWhole(QueryPoint{}, nil)
 		errCh <- err
 	}()
 
@@ -341,6 +344,168 @@ func TestQueryShelleyUtxoWhole_AbortsEarlyOnFirstFailure(t *testing.T) {
 		t, decodedCount.Load(), int64(rowCount/2),
 		"early abort must stop the feeder well before every row is decoded",
 	)
+}
+
+// TestQueryShelleyUtxoWhole_PinnedPointExcludesUtxoCreatedAfterIt covers
+// the core blinklabs-io/dingo#382 fix: a pin must not report a UTxO
+// created after the pinned slot. Before this fix, queryShelleyUtxoWhole
+// took no point argument at all and always answered from live state --
+// confirmed live against a real Preview cardano-node during node-parity's
+// periodic full checks: every UTxO a diverged check flagged as "present in
+// Dingo, missing in cardano-node" had its own AddedSlot strictly after the
+// check's pinned slot, because Dingo silently answered with newer data
+// than what the pin claimed to represent.
+func TestQueryShelleyUtxoWhole_PinnedPointExcludesUtxoCreatedAfterIt(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(1_000, repeatedBytes(32, 0x0B)),
+	}, nil))
+
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0xAA}, lcommon.AddressHashSize),
+		nil,
+	)
+	require.NoError(t, err)
+	// seedBabbageUtxo always creates its row at AddedSlot 100.
+	txIdOld := seedBabbageUtxo(t, db, 0xA1, 0, addr, 1_000_000)
+
+	txn := db.Transaction(true)
+	txIdNew := bytes.Repeat([]byte{0xB2}, 32)
+	require.NoError(t, db.CreateUtxo(txn, &models.Utxo{
+		TxId:      txIdNew,
+		OutputIdx: 0,
+		AddedSlot: 500,
+	}))
+	require.NoError(t, txn.Commit())
+
+	ls := newPoolDistr2Ledger(t, db)
+
+	result, err := ls.queryShelleyUtxoWhole(QueryPoint{Slot: 300}, nil)
+	require.NoError(t, err)
+	arr, ok := result.([]any)
+	require.True(t, ok)
+	utxos, ok := arr[0].(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
+	require.True(t, ok)
+
+	_, hasOld := utxos[olocalstatequery.UtxoId{
+		Hash: ledger.NewBlake2b256(txIdOld), Idx: 0,
+	}]
+	require.True(t, hasOld, "a UTxO created before the pin must be reported")
+	_, hasNew := utxos[olocalstatequery.UtxoId{
+		Hash: ledger.NewBlake2b256(txIdNew), Idx: 0,
+	}]
+	require.False(
+		t, hasNew,
+		"a UTxO created after the pinned slot must not be reported -- "+
+			"it did not exist yet as of that point",
+	)
+}
+
+// TestQueryShelleyUtxoWhole_PinnedPointIncludesUtxoSpentAfterIt covers the
+// other half of the same fix: a UTxO live at the pinned slot but spent
+// later must still be reported, proving this answers "live as of the pin"
+// rather than merely "created before the pin."
+func TestQueryShelleyUtxoWhole_PinnedPointIncludesUtxoSpentAfterIt(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(1_000, repeatedBytes(32, 0x0B)),
+	}, nil))
+
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0xAA}, lcommon.AddressHashSize),
+		nil,
+	)
+	require.NoError(t, err)
+	// seedBabbageUtxo always creates its row at AddedSlot 100.
+	txId := seedBabbageUtxo(t, db, 0xC1, 0, addr, 5_000_000)
+	require.NoError(t, db.MarkUtxosDeletedAtSlot(
+		nil,
+		[]dbtypes.UtxoKey{{TxId: txId, OutputIdx: 0}},
+		500,
+	))
+
+	ls := newPoolDistr2Ledger(t, db)
+
+	pinned, err := ls.queryShelleyUtxoWhole(QueryPoint{Slot: 300}, nil)
+	require.NoError(t, err)
+	pinnedArr, _ := pinned.([]any)
+	pinnedUtxos, _ := pinnedArr[0].(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
+	_, stillLiveAtPin := pinnedUtxos[olocalstatequery.UtxoId{
+		Hash: ledger.NewBlake2b256(txId), Idx: 0,
+	}]
+	require.True(
+		t, stillLiveAtPin,
+		"a UTxO spent after the pinned slot (500) was still live as of "+
+			"the pin (300) and must be reported",
+	)
+
+	live, err := ls.queryShelleyUtxoWhole(QueryPoint{}, nil)
+	require.NoError(t, err)
+	liveArr, _ := live.([]any)
+	liveUtxos, _ := liveArr[0].(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
+	_, stillLiveNow := liveUtxos[olocalstatequery.UtxoId{
+		Hash: ledger.NewBlake2b256(txId), Idx: 0,
+	}]
+	require.False(
+		t, stillLiveNow,
+		"the unpinned (live) query must correctly report it as spent now",
+	)
+}
+
+// TestQueryShelleyUtxoWhole_RetentionWindow_TooOldRejected covers the same
+// retention floor queryShelleyUtxoByTxIn already enforces
+// (checkUtxoRetentionWindow): a pin older than what this node's spent-UTxO
+// cleanup sweep has already pruned cannot be answered correctly, so it
+// must be rejected with ErrHistoricalStateUnavailable rather than risk a
+// silently wrong (incomplete) historical set.
+func TestQueryShelleyUtxoWhole_RetentionWindow_TooOldRejected(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	// newPoolDistr2Ledger leaves CardanoNodeConfig nil, so
+	// calculateStabilityWindow returns the default (50_000) regardless of
+	// era -- matching TestQueryShelleyUtxoByTxIn_RetentionWindow_TooOldRejected's
+	// identical setup.
+	const tipSlot = 200_000
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(tipSlot, repeatedBytes(32, 0x0B)),
+	}, nil))
+
+	// floor = 200_000 - 50_000 = 150_000; one slot behind it must reject.
+	_, err := ls.queryShelleyUtxoWhole(QueryPoint{Slot: 149_999}, nil)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
+}
+
+// TestQueryShelleyUtxoWhole_RetentionWindow_AtFloor_Succeeds covers the
+// exact floor slot itself, mirroring
+// TestQueryShelleyUtxoByTxIn_RetentionWindow_AtFloor_Succeeds: a pin naming
+// the floor slot exactly must be accepted, not rejected.
+func TestQueryShelleyUtxoWhole_RetentionWindow_AtFloor_Succeeds(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	const tipSlot = 200_000
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(tipSlot, repeatedBytes(32, 0x0B)),
+	}, nil))
+
+	_, err := ls.queryShelleyUtxoWhole(QueryPoint{Slot: 150_000}, nil)
+	require.NoError(t, err)
 }
 
 // TestDecodeUtxoWholeCborMalformedCborSurfacesError covers a row whose

@@ -1692,6 +1692,53 @@ func (s *Store) IterateLiveUtxos(
 	return rows.Err()
 }
 
+// IterateUtxosAsOf invokes fn once for each UTxO row live as of atSlot --
+// added at or before atSlot, and either never spent or spent strictly
+// after atSlot -- matching UtxosByRefsAsOf's identical predicate for a
+// bounded ref list, here applied to the whole table. See the
+// MetadataStore interface doc comment for why this has no indexed
+// shortcut, unlike IterateLiveUtxos' deleted_slot = 0 filter.
+func (s *Store) IterateUtxosAsOf(
+	atSlot uint64,
+	txn types.Txn,
+	fn func(*models.Utxo) error,
+) error {
+	if fn == nil {
+		return errors.New("iterate UTxOs as of slot: callback is nil")
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	sqlSlot, err := checkedInt64(atSlot)
+	if err != nil {
+		return err
+	}
+	query := s.dialect.Rebind(
+		"SELECT " + sqliteUtxoColumns + ` FROM utxo
+WHERE added_slot <= ? AND (deleted_slot = 0 OR deleted_slot > ?)`,
+	)
+	rows, err := db.QueryContext(ctx, query, sqlSlot, sqlSlot)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		row, err := scanSQLiteUtxo(rows)
+		if err != nil {
+			return err
+		}
+		model, err := utxoFromSQLite(row)
+		if err != nil {
+			return err
+		}
+		if err := fn(model); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
 // queryUtxos runs predicate/args against the utxo table and returns the
 // matching rows without loading assets -- callers that need to deduplicate
 // candidates across multiple queries (e.g. chunked GetUtxosByAddress) should
