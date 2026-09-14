@@ -774,7 +774,12 @@ func loadSQL(path string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read embedded migration %s: %w", path, err)
 	}
-	statements, err := splitSQL(string(content))
+	// The embedded resources carry whatever bytes the working tree held at
+	// build time, so a CRLF checkout would otherwise change the checksum
+	// recorded in schema_migrations and make a database written by one build
+	// report drift against another.
+	normalized := strings.ReplaceAll(string(content), "\r\n", "\n")
+	statements, err := splitSQL(normalized)
 	if err != nil {
 		return nil, fmt.Errorf("parse embedded migration %s: %w", path, err)
 	}
