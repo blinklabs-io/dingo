@@ -223,15 +223,15 @@ RAM, and disk headroom until a complete bootstrap measurement is available.
 
 ### API-mode bootstrap measurements
 
-The following complete Mithril API-mode runs were measured on September 13,
-2026. The Preprod backfill was followed by a deferred critical-index rebuild;
-the overall duration includes both phases. Completion timestamps are in EDT.
-These are environment-specific planning baselines, not capacity guarantees.
+The following complete Mithril API-mode runs used Dingo `origin/main` at
+commit `034c12e6`. The Preprod backfill was followed by a deferred
+critical-index rebuild; the overall duration includes both phases. These are
+environment-specific planning baselines, not capacity guarantees.
 
-| Network | Backfill | Deferred index rebuild | Overall | Completion | Blocks / transactions |
-| --- | ---: | ---: | ---: | --- | ---: |
-| Preprod, `api` | 6h09m06s | 12m30.607s | ~6h21m37.7s | 16:07:40 | 5,169,107 / 6,795,854 |
-| Preview, `api` | 7h38m34s | not separately recorded | 7h38m34s | 17:28:28 | 4,658,378 / 6,890,796 |
+| Network | Dingo ref | Storage mode | Backfill | Deferred index rebuild | Overall | Blocks / transactions |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| Preprod | `origin/main` (`034c12e6`) | `api` | 6h09m06s | 12m30.607s | ~6h21m37.7s | 5,169,107 / 6,795,854 |
+| Preview | `origin/main` (`034c12e6`) | `api` | 7h38m34s | not separately recorded | 7h38m34s | 4,658,378 / 6,890,796 |
 
 The API-mode runs reached approximately 8.1 GiB RSS on Preprod and 9.6 GiB
 RSS on Preview at their highest observed checkpoints. Peak CPU was about 1.29
