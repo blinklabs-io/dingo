@@ -41,60 +41,25 @@ func isMetadataBlockUnavailable(err error) bool {
 		errors.Is(err, types.ErrHistoryExpired)
 }
 
-// maxMetadataAncestorwalk bounds how many canonical ancestors a single
-// /metadata request may step back over while looking for one whose CBOR is
-// still retained.
+// metadataBlockAtOrAfterSlot resolves the block a Kupo metadata request
+// answers with: the first canonical block whose slot is at least slot.
 //
-// The walk only advances on types.ErrHistoryExpired, and history expiry is
-// contiguous: everything below the retention floor is tombstoned. A request
-// for a slot under that floor therefore has no readable ancestor at all, and
-// an unbounded walk would step one canonical block at a time to genesis --
-// a point lookup and a block read each -- turning one HTTP request into
-// millions of database operations while holding its read snapshot open.
-//
-// Stopping after a fixed number of steps answers that request as
-// "no indexed ancestor" for a bounded cost. The bound is generous relative to
-// the only legitimate use, which is stepping over the handful of expired
-// blocks that can sit at the boundary itself.
-const maxMetadataAncestorWalk = 128
-
-// metadataBlockBeforeSlot finds the newest readable canonical block before
-// slot. Point and block lookups are separate because the point index survives
-// history expiry while the block CBOR does not.
-//
-// It returns models.ErrBlockNotFound once it reaches genesis or exhausts
-// maxMetadataAncestorWalk steps, and ctx.Err() if the caller goes away
-// mid-walk.
-func metadataBlockBeforeSlot(
+// Point and block lookups are separate because the point index survives local
+// history expiry while the block CBOR does not. An expired target is reported
+// as unavailable rather than answered from a neighbouring block: history
+// expiry is contiguous from genesis, so the block Kupo would return is not
+// retained here at any depth, and any other block carries different metadata
+// and a different header hash.
+func metadataBlockAtOrAfterSlot(
 	ctx context.Context,
+	txn *database.Txn,
 	slot uint64,
-	pointAtOrBefore func(uint64) (ocommon.Point, error),
-	blockAtPoint func(ocommon.Point) (models.Block, error),
 ) (models.Block, error) {
-	if slot == 0 {
-		return models.Block{}, models.ErrBlockNotFound
+	point, err := database.BlockPointAtOrAfterSlotTxn(ctx, txn, slot)
+	if err != nil {
+		return models.Block{}, err
 	}
-	for steps := 0; slot > 0 && steps < maxMetadataAncestorWalk; steps++ {
-		if err := ctx.Err(); err != nil {
-			return models.Block{}, err
-		}
-		point, err := pointAtOrBefore(slot - 1)
-		if err != nil {
-			return models.Block{}, err
-		}
-		block, err := blockAtPoint(point)
-		if err == nil {
-			return block, nil
-		}
-		if !errors.Is(err, types.ErrHistoryExpired) {
-			return models.Block{}, err
-		}
-		if point.Slot == 0 {
-			break
-		}
-		slot = point.Slot
-	}
-	return models.Block{}, models.ErrBlockNotFound
+	return database.BlockByPointTxn(txn, point)
 }
 
 // NodeAdapter translates Kupo's package-local API contract into narrow
@@ -700,7 +665,25 @@ func (a *NodeAdapter) Checkpoint(
 	if strict {
 		point, queryErr = database.BlockPointBySlotTxn(txn, slot)
 	} else {
-		point, queryErr = database.BlockPointAtOrBeforeSlotTxn(txn, slot)
+		// The at-or-before lookup is bounded by the snapshot tip block
+		// rather than scanning the block keyspace backwards: a reverse blob
+		// iterator lists every key under its prefix before the seek runs on
+		// the s3 and gcs plugins, so one anonymous GET /checkpoints/{slot_no}
+		// would cost a full listing of the block keyspace there. The tip ID
+		// is a single key read and bounds a binary search over the ordered
+		// block index instead.
+		if len(tip.Point.Hash) == 0 {
+			return nil, snapshotTip, nil
+		}
+		var tipID uint64
+		tipID, queryErr = database.BlockIDByPointLocalTxn(txn, tip.Point)
+		if queryErr == nil {
+			point, queryErr = database.BlockPointAtOrBeforeSlotBoundedTxn(
+				txn,
+				slot,
+				tipID,
+			)
+		}
 	}
 	if errors.Is(queryErr, models.ErrBlockNotFound) {
 		return nil, snapshotTip, nil
@@ -730,23 +713,19 @@ func (a *NodeAdapter) Metadata(
 	if slot == 0 {
 		return []Metadata{}, "", snapshotTip, nil
 	}
-	block, err := database.BlockBySlotTxn(txn, slot)
-	if isMetadataBlockUnavailable(err) {
-		block, err = metadataBlockBeforeSlot(
-			ctx,
-			slot,
-			func(before uint64) (ocommon.Point, error) {
-				return database.BlockPointAtOrBeforeSlotTxn(txn, before)
-			},
-			func(point ocommon.Point) (models.Block, error) {
-				return database.BlockByPointTxn(txn, point)
-			},
-		)
-	}
+	// Kupo answers /metadata/{slot_no} with the block that follows the last
+	// checkpoint strictly before slot_no: handleGetMetadata passes
+	// listAncestorsDesc(slot_no, 1) to a FetchBlockClient documented as
+	// fetching the block immediately following the given point, and Kupo
+	// records one checkpoint per block. Where slot_no holds a block that is
+	// the block itself; where it does not, it is the next block on chain,
+	// not the previous one. Selecting the first canonical block at or after
+	// slot_no reproduces both cases.
+	block, err := metadataBlockAtOrAfterSlot(ctx, txn, slot)
 	if err != nil {
 		if isMetadataBlockUnavailable(err) {
 			return nil, "", Point{}, fmt.Errorf(
-				"%w: no indexed ancestor for slot %d",
+				"%w: no readable block at or after slot %d",
 				ErrInvalidRequest,
 				slot,
 			)

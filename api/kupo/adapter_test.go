@@ -15,7 +15,6 @@
 package kupo
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -23,7 +22,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 func TestIsMetadataBlockUnavailable(t *testing.T) {
@@ -45,118 +43,6 @@ func TestIsMetadataBlockUnavailable(t *testing.T) {
 
 	if isMetadataBlockUnavailable(errors.New("database unavailable")) {
 		t.Fatal("unrelated database errors must remain internal errors")
-	}
-}
-
-func TestMetadataBlockBeforeSlotSkipsExpiredAncestors(t *testing.T) {
-	t.Parallel()
-
-	points := []ocommon.Point{
-		{Slot: 30, Hash: []byte{30}},
-		{Slot: 20, Hash: []byte{20}},
-		{Slot: 10, Hash: []byte{10}},
-	}
-	blocks := map[uint64]struct {
-		block models.Block
-		err   error
-	}{
-		30: {err: types.ErrHistoryExpired},
-		20: {err: types.ErrHistoryExpired},
-		10: {block: models.Block{Slot: 10, Hash: []byte{10}}},
-	}
-	var requested []uint64
-	block, err := metadataBlockBeforeSlot(
-		t.Context(),
-		40,
-		func(slot uint64) (ocommon.Point, error) {
-			requested = append(requested, slot)
-			for _, point := range points {
-				if point.Slot <= slot {
-					return point, nil
-				}
-			}
-			return ocommon.Point{}, models.ErrBlockNotFound
-		},
-		func(point ocommon.Point) (models.Block, error) {
-			entry := blocks[point.Slot]
-			return entry.block, entry.err
-		},
-	)
-	if err != nil {
-		t.Fatalf("metadataBlockBeforeSlot returned error: %v", err)
-	}
-	if block.Slot != 10 {
-		t.Fatalf("readable ancestor slot = %d, want 10", block.Slot)
-	}
-	wantRequested := []uint64{39, 29, 19}
-	if fmt.Sprint(requested) != fmt.Sprint(wantRequested) {
-		t.Fatalf("point lookup slots = %v, want %v", requested, wantRequested)
-	}
-}
-
-// TestMetadataBlockBeforeSlotBoundsExpiredWalk pins the denial-of-service
-// bound on GET /metadata/{slot_no}. Below the history-expiry retention floor
-// every canonical ancestor is tombstoned, so without a bound one request walks
-// to genesis doing a point lookup and a block read per canonical block.
-func TestMetadataBlockBeforeSlotBoundsExpiredWalk(t *testing.T) {
-	t.Parallel()
-
-	// Every ancestor is expired, which is what a slot below the retention
-	// floor looks like, and the chain is far deeper than the bound.
-	lookups := 0
-	block, err := metadataBlockBeforeSlot(
-		t.Context(),
-		10_000_000,
-		func(slot uint64) (ocommon.Point, error) {
-			lookups++
-			return ocommon.Point{Slot: slot, Hash: []byte{1}}, nil
-		},
-		func(ocommon.Point) (models.Block, error) {
-			return models.Block{}, types.ErrHistoryExpired
-		},
-	)
-	if !errors.Is(err, models.ErrBlockNotFound) {
-		t.Fatalf("error = %v, want %v", err, models.ErrBlockNotFound)
-	}
-	if block.Slot != 0 {
-		t.Fatalf("block slot = %d, want the zero block", block.Slot)
-	}
-	if lookups != maxMetadataAncestorWalk {
-		t.Fatalf(
-			"point lookups = %d, want the walk bounded at %d",
-			lookups,
-			maxMetadataAncestorWalk,
-		)
-	}
-}
-
-// TestMetadataBlockBeforeSlotHonorsCancellation pins that a client
-// disconnecting stops the walk rather than letting it run the request out
-// against the held read snapshot.
-func TestMetadataBlockBeforeSlotHonorsCancellation(t *testing.T) {
-	t.Parallel()
-
-	ctx, cancel := context.WithCancel(t.Context())
-	lookups := 0
-	_, err := metadataBlockBeforeSlot(
-		ctx,
-		10_000_000,
-		func(slot uint64) (ocommon.Point, error) {
-			lookups++
-			if lookups == 3 {
-				cancel()
-			}
-			return ocommon.Point{Slot: slot, Hash: []byte{1}}, nil
-		},
-		func(ocommon.Point) (models.Block, error) {
-			return models.Block{}, types.ErrHistoryExpired
-		},
-	)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("error = %v, want context.Canceled", err)
-	}
-	if lookups != 3 {
-		t.Fatalf("point lookups = %d, want the walk to stop at 3", lookups)
 	}
 }
 
