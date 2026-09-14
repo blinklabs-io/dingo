@@ -32,7 +32,7 @@ require (
 	github.com/go-sql-driver/mysql v1.10.1
 	github.com/google/uuid v1.6.0
 	github.com/ipfs/go-cid v0.6.2
-	github.com/jackc/pgx/v5 v5.10.0
+	github.com/jackc/pgx/v5 v5.11.0
 	github.com/kelseyhightower/envconfig v1.4.0
 	github.com/klauspost/compress v1.19.2
 	github.com/prometheus/client_golang v1.24.1
