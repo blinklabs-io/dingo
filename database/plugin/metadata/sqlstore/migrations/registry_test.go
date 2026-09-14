@@ -18,8 +18,8 @@ import (
 	"strings"
 	"testing"
 
-	_ "github.com/glebarez/go-sqlite"
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
 )
 
 func TestSQLiteRegistry(t *testing.T) {

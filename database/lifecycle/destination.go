@@ -111,6 +111,13 @@ type CloudManifestFetcher interface {
 	FetchManifest(ctx context.Context) (Manifest, error)
 }
 
+// ConfigurableCloudManifestFetcher supports a caller's manifest limit in
+// place of the destination's configured default. Implementations must bound
+// the encoded input before reading or decoding it.
+type ConfigurableCloudManifestFetcher interface {
+	FetchManifestWithOptions(context.Context, ...ManifestOption) (Manifest, error)
+}
+
 // CloudDeleter is optionally implemented by a CloudDestination to delete
 // everything at its own configured location — used by DeleteSnapshot to
 // remove a snapshot's cloud copy. Like CloudManifestFetcher, meaningful on
@@ -393,12 +400,24 @@ func FetchCloudManifest(
 	ctx context.Context,
 	registry *DestinationRegistry,
 	snapshotURI string,
+	opts ...ManifestOption,
 ) (m Manifest, ok bool, err error) {
+	if _, err := manifestByteLimit(opts); err != nil {
+		return Manifest{}, false, err
+	}
 	dest, err := ParseCloudDestination(registry, snapshotURI)
 	if err != nil {
 		return Manifest{}, false, err
 	}
 	defer closeCloudDestination(dest)
+	if len(opts) > 0 {
+		fetcher, supportsOptions := dest.(ConfigurableCloudManifestFetcher)
+		if !supportsOptions {
+			return Manifest{}, true, errors.New("cloud destination does not support manifest options")
+		}
+		m, err = fetcher.FetchManifestWithOptions(ctx, opts...)
+		return m, true, err
+	}
 	fetcher, ok := dest.(CloudManifestFetcher)
 	if !ok {
 		return Manifest{}, false, nil
