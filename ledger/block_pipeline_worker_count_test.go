@@ -55,7 +55,10 @@ func TestBlockPipelineWorkerCount(t *testing.T) {
 		{gomaxprocs: 4, want: 4},
 		{gomaxprocs: blockPipelineMaxWorkers, want: blockPipelineMaxWorkers},
 		// Above the cap: bounded rather than left to scale unboundedly.
-		{gomaxprocs: blockPipelineMaxWorkers + 1, want: blockPipelineMaxWorkers},
+		{
+			gomaxprocs: blockPipelineMaxWorkers + 1,
+			want:       blockPipelineMaxWorkers,
+		},
 		{gomaxprocs: 128, want: blockPipelineMaxWorkers},
 	}
 	for _, tc := range cases {
@@ -167,13 +170,16 @@ func runPipelineThroughput(
 // where that assertion belongs.
 func TestBlockPipelineWorkerCountThroughput(t *testing.T) {
 	if testing.Short() {
-		t.Skip("throughput measurement, not a correctness check; skipped in -short")
+		t.Skip(
+			"throughput measurement, not a correctness check; skipped in -short",
+		)
 	}
 
 	const blockCount = 128
 	const repetitions = 5
 	blocks, epochNonceHex, slotsPerKesPeriod := buildValidatedPipelineThroughputBlocks(
-		t, blockCount,
+		t,
+		blockCount,
 	)
 
 	oldWorkers := blockPipelineMinWorkers
@@ -194,8 +200,10 @@ func TestBlockPipelineWorkerCountThroughput(t *testing.T) {
 	t.Logf(
 		"pipeline throughput on GOMAXPROCS(0)=%d: workers=%d avg=%.0f blocks/sec, workers=%d avg=%.0f blocks/sec, ratio=%.2fx",
 		runtime.GOMAXPROCS(0),
-		oldWorkers, oldAvg,
-		newWorkers, newAvg,
+		oldWorkers,
+		oldAvg,
+		newWorkers,
+		newAvg,
 		newAvg/oldAvg,
 	)
 }
