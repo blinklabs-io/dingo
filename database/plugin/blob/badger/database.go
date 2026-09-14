@@ -392,7 +392,9 @@ func (d *BlobStoreBadger) blobGc(
 				gcStarted := time.Now()
 				err := d.runValueLogGC(0.5)
 				if d.gcMetrics != nil {
-					d.gcMetrics.duration.Observe(time.Since(gcStarted).Seconds())
+					d.gcMetrics.duration.Observe(
+						time.Since(gcStarted).Seconds(),
+					)
 				}
 				if err != nil {
 					if d.gcMetrics != nil {
@@ -420,7 +422,9 @@ func (d *BlobStoreBadger) blobGc(
 					beforeSize := beforeLSM + beforeVlog
 					afterSize := afterLSM + afterVlog
 					if beforeSize > afterSize {
-						d.gcMetrics.reclaimedBytes.Set(float64(beforeSize - afterSize))
+						d.gcMetrics.reclaimedBytes.Set(
+							float64(beforeSize - afterSize),
+						)
 					} else {
 						d.gcMetrics.reclaimedBytes.Set(0)
 					}

@@ -946,7 +946,8 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			ledgerStateDrainConfirmed = false
 			n.config.logger.Error(
 				"ledger state did not fully shut down; skipping database close because a background goroutine may still be using it",
-				"error", err,
+				"error",
+				err,
 			)
 		}
 	})
@@ -1815,14 +1816,19 @@ func taintValue(relaxed bool) string {
 // subscriber does node-to-node work and a local client reconnecting in a
 // tight loop would otherwise wedge the EventBus. This callback is the NtC
 // counterpart to HandleConnClosedEvent, which already performs the
-// equivalent RemoveClient cleanup for NtN closes via that event. Guarding on
-// isNtC here keeps the release exactly-once: an NtN close still cleans up
-// only through HandleConnClosedEvent.
+// equivalent RemoveClient cleanup for NtN closes via that event. Guarding
+// chainsync cleanup on isNtC keeps RemoveClient exactly-once; serving waits
+// are released directly for both connection modes.
 func (n *Node) handleConnManagerClosed(
 	connId ouroboros.ConnectionId,
 	isNtC bool,
 	_ error,
 ) {
+	// Release both NtC closure waits and NtN notification waits independently
+	// of the protocol receive loop that is running the serving callback.
+	if o := n.ouroboros(); o != nil {
+		o.ReleaseLeiosServeWaiters(connId)
+	}
 	if !isNtC {
 		return
 	}
@@ -1830,11 +1836,6 @@ func (n *Node) handleConnManagerClosed(
 		n.chainsyncState.RemoveClient(connId)
 	}
 	if o := n.ouroboros(); o != nil {
-		// Wake any NtC chainsync server callback parked waiting for this
-		// connection's certified endorser closure. connmanager drives this
-		// callback from its own per-connection goroutine, so it runs even
-		// while that server callback still owns gouroboros's receive loop.
-		o.ReleaseLeiosServeWaiters(connId)
 		// Clear any LocalStateQuery pinned point this connection acquired:
 		// a client that disconnects without a clean Release must not leak
 		// its map entry (blinklabs-io/dingo#382).
@@ -2102,22 +2103,68 @@ func (n *Node) nodeSettingsGateValues() nodesettings.Values {
 // stake aggregate existed. It runs after commit-timestamp recovery and before
 // ledger processing can advance the chain, so the next epoch-boundary snapshot
 // cannot observe a partially populated aggregate.
+//
+// SkipRewardLiveStakeBackfillCheck bypasses the reward_live_stake half of
+// this. The consistency check itself -- not just a genuine repair -- scans
+// the whole live UTxO table every call, so on a mainnet-scale database it
+// costs as much as a full rebuild on every single startup regardless of
+// whether one is needed. This is for advanced/diagnostic use only: skipping
+// it is safe when the database is already known to be consistent (e.g.
+// repeated restarts during investigation of an unrelated issue), but unsafe
+// to leave enabled permanently since it is what catches a stale or
+// pre-migration reward_live_stake table.
+//
+// Both probes are read-only and run on the read-only metadata connection; the
+// writer is opened only for an actual rebuild. See ARCHITECTURE.md.
+//
+// The flag deliberately does not reach StaleConsensusStakeSnapshotsExist.
+// That is a different kind of check: a pair of indexed EXISTS probes whose
+// cost does not scale with the UTxO set, guarding against snapshots produced
+// by an older accounting version. It fails closed because such a database
+// cannot be safely reconstructed, and no cost argument justifies disabling
+// it, so it runs on every startup whether or not the scan is skipped.
 func (n *Node) backfillRewardLiveStake() error {
-	return n.db.MetadataTxn(true).Do(func(txn *database.Txn) error {
-		needed, err := n.db.Metadata().RewardLiveStakeNeedsBackfill(
-			txn.Metadata(),
-		)
-		if err != nil {
-			return fmt.Errorf("check reward live stake backfill: %w", err)
+	// Both probes are read-only, so they run on the read-only metadata
+	// connection and the writer stays idle. Only a genuine rebuild needs the
+	// writer, which is opened separately below. Holding the writer open across
+	// the probes would contend with block processing on SQLite and, when the
+	// scan is skipped, would defeat the startup-cost purpose of the flag.
+	var (
+		needed         bool
+		staleSnapshots bool
+	)
+	if err := n.db.MetadataTxn(false).Do(func(txn *database.Txn) error {
+		if n.config.skipRewardLiveStakeBackfillCheck {
+			n.config.logger.Warn(
+				"skipping reward_live_stake backfill consistency check",
+				"component", "node",
+			)
+		} else {
+			var err error
+			needed, err = n.db.Metadata().RewardLiveStakeNeedsBackfill(
+				txn.Metadata(),
+			)
+			if err != nil {
+				return fmt.Errorf("check reward live stake backfill: %w", err)
+			}
 		}
-		staleSnapshots, err := n.db.Metadata().
+		var err error
+		staleSnapshots, err = n.db.Metadata().
 			StaleConsensusStakeSnapshotsExist(
 				txn.Metadata(),
 			)
 		if err != nil {
 			return fmt.Errorf("check stake snapshot provenance: %w", err)
 		}
-		if needed {
+		return nil
+	}); err != nil {
+		return err
+	}
+	// Both call sites run before ledger processing can advance the chain, so
+	// nothing can write reward_live_stake between the probe above and the
+	// rebuild below.
+	if needed {
+		if err := n.db.MetadataTxn(true).Do(func(txn *database.Txn) error {
 			tip, err := n.db.GetTip(txn)
 			if err != nil {
 				return fmt.Errorf(
@@ -2132,16 +2179,19 @@ func (n *Node) backfillRewardLiveStake() error {
 			if err := n.db.RebuildRewardLiveStake(tip.Point.Slot, txn); err != nil {
 				return fmt.Errorf("backfill reward live stake: %w", err)
 			}
+			return nil
+		}); err != nil {
+			return err
 		}
-		if staleSnapshots {
-			return errors.New(
-				"consensus stake snapshots were produced by an older accounting " +
-					"version and cannot be safely reconstructed from this database; " +
-					"rebootstrap from immutable blocks or a trusted snapshot",
-			)
-		}
-		return nil
-	})
+	}
+	if staleSnapshots {
+		return errors.New(
+			"consensus stake snapshots were produced by an older accounting " +
+				"version and cannot be safely reconstructed from this database; " +
+				"rebootstrap from immutable blocks or a trusted snapshot",
+		)
+	}
+	return nil
 }
 
 // startDeferredIndexMaintenance finishes lazy deferred-index rebuilds

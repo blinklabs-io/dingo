@@ -199,8 +199,16 @@ func testSQLStoreIntegration(
 		nil,
 	)
 	require.NoError(t, err)
-	require.Contains(t, batchLoaded, models.NewStakeCredentialRef(0, account.StakingKey).MapKey())
-	require.Equal(t, account.ID, batchLoaded[models.NewStakeCredentialRef(0, account.StakingKey).MapKey()].ID)
+	require.Contains(
+		t,
+		batchLoaded,
+		models.NewStakeCredentialRef(0, account.StakingKey).MapKey(),
+	)
+	require.Equal(
+		t,
+		account.ID,
+		batchLoaded[models.NewStakeCredentialRef(0, account.StakingKey).MapKey()].ID,
+	)
 	// GetDrepLastRegistrationDeposits is the other derived-table join in the
 	// shared query set, and a DRep deregistration's refund is validated
 	// against what it returns, so a dialect that resolves the grouped
