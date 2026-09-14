@@ -134,7 +134,7 @@ func (o *Ouroboros) localstatequeryServerRelease(
 // callback entirely, so without this the map entry would otherwise persist
 // until this Ouroboros instance itself is discarded -- a one-entry-per-
 // pinned-client leak. Called from the node's NtC connection-closed callback
-// (handleConnManagerClosed), the NtC counterpart to HandleConnClosedEvent's
+// (handleConnManagerClosedOwner), the NtC counterpart to HandleConnClosedEvent's
 // equivalent cleanup for NtN closes.
 func (o *Ouroboros) ReleaseLocalStateQueryAcquiredPoint(
 	connId ouroboros.ConnectionId,

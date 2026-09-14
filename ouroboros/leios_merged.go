@@ -101,6 +101,11 @@ type leiosConnDoneContext struct {
 	done <-chan struct{}
 }
 
+type leiosServeWaiter struct {
+	owner *ochainsync.Server
+	ch    chan struct{}
+}
+
 func (c leiosConnDoneContext) Deadline() (time.Time, bool) {
 	return time.Time{}, false
 }
@@ -128,22 +133,26 @@ func (c leiosConnDoneContext) Value(any) any {
 //
 // The liveness re-check after registration closes the race with a connection
 // that is already going away: connmanager removes the connection from its map
-// before invoking ConnClosedFunc, so a nil lookup here means either the
+// before invoking its close callback, so a missing or replaced owner means either the
 // release has already run (and would have closed a registered channel) or it
 // is about to. Either way the caller must not wait, so the channel is closed
 // before it is returned.
 func (o *Ouroboros) registerLeiosServeWaiter(
 	connId ouroboros.ConnectionId,
+	owner *ochainsync.Server,
 	checkLiveness ...bool,
 ) (done <-chan struct{}, cancel func()) {
 	ch := make(chan struct{})
 	o.leiosServeWaitersMu.Lock()
 	if o.leiosServeWaiters == nil {
 		o.leiosServeWaiters = make(
-			map[ouroboros.ConnectionId][]chan struct{},
+			map[ouroboros.ConnectionId][]leiosServeWaiter,
 		)
 	}
-	o.leiosServeWaiters[connId] = append(o.leiosServeWaiters[connId], ch)
+	o.leiosServeWaiters[connId] = append(
+		o.leiosServeWaiters[connId],
+		leiosServeWaiter{owner: owner, ch: ch},
+	)
 	o.leiosServeWaitersMu.Unlock()
 
 	cancel = func() {
@@ -151,7 +160,7 @@ func (o *Ouroboros) registerLeiosServeWaiter(
 		defer o.leiosServeWaitersMu.Unlock()
 		waiters := o.leiosServeWaiters[connId]
 		for i, w := range waiters {
-			if w == ch {
+			if w.ch == ch {
 				o.leiosServeWaiters[connId] = slices.Delete(waiters, i, i+1)
 				break
 			}
@@ -164,9 +173,12 @@ func (o *Ouroboros) registerLeiosServeWaiter(
 	// The connection manager is absent in unit tests that exercise the
 	// serving decision directly; there is no liveness to check. Such callers
 	// must arrange explicit release or their own timeout.
-	if (len(checkLiveness) == 0 || checkLiveness[0]) && o.connManager != nil &&
-		o.connManager.GetConnectionById(connId) == nil {
-		o.releaseLeiosServeWaiter(connId, ch)
+	if (len(checkLiveness) == 0 || checkLiveness[0]) && o.connManager != nil {
+		conn := o.connManager.GetConnectionById(connId)
+		if conn == nil || (owner != nil &&
+			(conn.ChainSync() == nil || conn.ChainSync().Server != owner)) {
+			o.releaseLeiosServeWaiter(connId, ch)
+		}
 	}
 	return ch, cancel
 }
@@ -183,7 +195,7 @@ func (o *Ouroboros) releaseLeiosServeWaiter(
 	defer o.leiosServeWaitersMu.Unlock()
 	waiters := o.leiosServeWaiters[connId]
 	for i, w := range waiters {
-		if w == ch {
+		if w.ch == ch {
 			o.leiosServeWaiters[connId] = slices.Delete(waiters, i, i+1)
 			if len(o.leiosServeWaiters[connId]) == 0 {
 				delete(o.leiosServeWaiters, connId)
@@ -208,11 +220,41 @@ func (o *Ouroboros) ReleaseLeiosServeWaiters(
 	waiters := o.leiosServeWaiters[connId]
 	delete(o.leiosServeWaiters, connId)
 	o.leiosServeWaitersMu.Unlock()
-	for _, ch := range waiters {
-		close(ch)
+	for _, waiter := range waiters {
+		close(waiter.ch)
 	}
 	// Wake the NtC closure waiters. LeiosNotify cursor cleanup is owner-specific
 	// and is handled by the connection-owned callback.
+}
+
+// ReleaseLeiosServeWaitersOwner wakes only waits owned by one chainsync
+// server instance, so a delayed close callback cannot cancel a replacement.
+func (o *Ouroboros) ReleaseLeiosServeWaitersOwner(
+	connId ouroboros.ConnectionId,
+	owner *ochainsync.Server,
+) {
+	if owner == nil {
+		return
+	}
+	o.leiosServeWaitersMu.Lock()
+	waiters := o.leiosServeWaiters[connId]
+	remaining := waiters[:0]
+	for _, waiter := range waiters {
+		if waiter.owner == owner {
+			close(waiter.ch)
+		} else {
+			remaining = append(remaining, waiter)
+		}
+	}
+	if len(remaining) < len(waiters) {
+		clear(waiters[len(remaining):])
+	}
+	if len(remaining) == 0 {
+		delete(o.leiosServeWaiters, connId)
+	} else {
+		o.leiosServeWaiters[connId] = remaining
+	}
+	o.leiosServeWaitersMu.Unlock()
 }
 
 // RegisterLeiosServeWaiterForTesting exposes registerLeiosServeWaiter so the
@@ -222,7 +264,14 @@ func (o *Ouroboros) ReleaseLeiosServeWaiters(
 func (o *Ouroboros) RegisterLeiosServeWaiterForTesting(
 	connId ouroboros.ConnectionId,
 ) (done <-chan struct{}, cancel func()) {
-	return o.registerLeiosServeWaiter(connId)
+	var owner *ochainsync.Server
+	if o.connManager != nil {
+		if conn := o.connManager.GetConnectionById(connId); conn != nil &&
+			conn.ChainSync() != nil {
+			owner = conn.ChainSync().Server
+		}
+	}
+	return o.registerLeiosServeWaiter(connId, owner)
 }
 
 // leiosClosureWaitTimeout returns how long the NtC serving path waits for a
@@ -1650,7 +1699,7 @@ func (o *Ouroboros) chainsyncServerBlockCbor(
 	// gouroboros's recvLoop, which cannot finish (and so cannot close
 	// DoneChan) until the callback returns. A pending closure wait is
 	// released through connmanager's per-connection watcher instead.
-	return o.serveLeiosRankingBlockCbor(block, ctx.ConnectionId)
+	return o.serveLeiosRankingBlockCbor(block, ctx.ConnectionId, ctx.Server)
 }
 
 // serveLeiosRankingBlockCbor resolves the NtC representation of a Dijkstra
@@ -1665,6 +1714,7 @@ func (o *Ouroboros) chainsyncServerBlockCbor(
 func (o *Ouroboros) serveLeiosRankingBlockCbor(
 	block models.Block,
 	connId ouroboros.ConnectionId,
+	owner *ochainsync.Server,
 ) ([]byte, error) {
 	merged, ok, err := o.mergedLeiosRankingBlockCbor(block.Cbor)
 	if err != nil {
@@ -1715,7 +1765,7 @@ func (o *Ouroboros) serveLeiosRankingBlockCbor(
 		)
 	}
 	// Certified and resolved: wait a bounded window for the endorser closure.
-	return o.serveLeiosCertRbWithWait(block, ebHash, ebSlot, connId)
+	return o.serveLeiosCertRbWithWait(block, ebHash, ebSlot, connId, owner)
 }
 
 // serveLeiosCertRbWithWait waits a bounded window for a certifying ranking
@@ -1734,8 +1784,9 @@ func (o *Ouroboros) serveLeiosCertRbWithWait(
 	ebHash lcommon.Blake2b256,
 	ebSlot uint64,
 	connId ouroboros.ConnectionId,
+	owner *ochainsync.Server,
 ) ([]byte, error) {
-	connDone, cancelWaiter := o.registerLeiosServeWaiter(connId)
+	connDone, cancelWaiter := o.registerLeiosServeWaiter(connId, owner)
 	defer cancelWaiter()
 	ctx, cancel := context.WithTimeout(
 		leiosConnDoneContext{done: connDone},

@@ -21,6 +21,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	csmock "github.com/blinklabs-io/ouroboros-mock/chainsync"
 	"github.com/stretchr/testify/require"
 )
@@ -81,6 +82,7 @@ func TestLeiosServeWaitReleasedByRealPeerDisconnect(t *testing.T) {
 			ebHash,
 			block.Slot,
 			f.conn.Id(),
+			nil,
 		)
 		results <- result{cbor: cbor, err: err}
 	}()
@@ -110,6 +112,66 @@ func TestLeiosServeWaitReleasedByRealPeerDisconnect(t *testing.T) {
 	require.Zero(t, remaining)
 }
 
+func TestLeiosServeWaitReleaseKeepsReplacementOwner(t *testing.T) {
+	t.Parallel()
+	f := newChainsyncServerFixtureWithConfig(t, csmock.ModeNtC, OuroborosConfig{
+		EnableLeios: true, LeiosClosureWaitTimeout: time.Hour,
+	})
+	certRB := testDijkstraCertRBRaw(t, 81, make([]byte, lcommon.Blake2b256Size))
+	var ebHash lcommon.Blake2b256
+	ebHash[0] = 0xa2
+	block := models.Block{Cbor: certRB, Slot: 81, Hash: []byte{0x81}}
+	result := make(chan error, 1)
+	t.Cleanup(func() { f.o.ReleaseLeiosServeWaiters(f.conn.Id()) })
+	go func() {
+		_, err := f.o.serveLeiosCertRbWithWait(
+			block, ebHash, block.Slot, f.conn.Id(), f.conn.ChainSync().Server,
+		)
+		result <- err
+	}()
+	waitForLeiosServeWaiter(t, f)
+	replacement := f.conn.ChainSync().Server
+	replacementWait, cancelReplacement := f.o.registerLeiosServeWaiter(
+		f.conn.Id(), replacement,
+	)
+	t.Cleanup(cancelReplacement)
+	f.o.ReleaseLeiosServeWaitersOwner(f.conn.Id(), new(ochainsync.Server))
+	select {
+	case <-replacementWait:
+		t.Fatal("old serving owner released replacement waiter")
+	default:
+	}
+	f.o.ReleaseLeiosServeWaitersOwner(f.conn.Id(), replacement)
+	err := testutil.RequireReceive(t, result, 5*time.Second, "replacement serving owner released")
+	require.ErrorIs(t, err, errLeiosClosureUnresolved)
+	select {
+	case <-replacementWait:
+	default:
+		t.Fatal("replacement owner did not release its waiter")
+	}
+}
+
+func TestLeiosServeWaiterRejectsReplacedOwner(t *testing.T) {
+	t.Parallel()
+	f := newChainsyncServerFixtureWithConfig(t, csmock.ModeNtC, OuroborosConfig{
+		EnableLeios: true,
+	})
+	live, cancelLive := f.o.registerLeiosServeWaiter(f.conn.Id(), f.conn.ChainSync().Server)
+	t.Cleanup(cancelLive)
+	stale, cancelStale := f.o.registerLeiosServeWaiter(f.conn.Id(), new(ochainsync.Server))
+	t.Cleanup(cancelStale)
+	select {
+	case <-stale:
+	default:
+		t.Fatal("replaced serving owner registered a live waiter")
+	}
+	select {
+	case <-live:
+		t.Fatal("rejecting a stale owner released the current waiter")
+	default:
+	}
+}
+
 // TestLeiosServeWaitStillBoundedByTimeout keeps the timeout bound honest: a
 // connection that stays up must still end the wait at the configured window,
 // and report timeout rather than cancelled.
@@ -131,6 +193,7 @@ func TestLeiosServeWaitStillBoundedByTimeout(t *testing.T) {
 		ebHash,
 		block.Slot,
 		f.conn.Id(),
+		nil,
 	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, errLeiosClosureUnresolved)
@@ -178,6 +241,7 @@ func TestLeiosServeWaiterNotRegisteredForClosedConnection(t *testing.T) {
 			ebHash,
 			block.Slot,
 			connId,
+			nil,
 		)
 		results <- result{cbor: cbor, err: err}
 	}()
