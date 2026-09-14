@@ -298,13 +298,17 @@ func ValidateTxAlonzo(
 				datum = tmp.Datum
 			}
 			sc := script.NewScriptContextV1V2(txInfoV1, purpose)
+			costModel, err := requiredCostModel(tmpPparams.CostModels, 0, "PlutusV1")
+			if err != nil {
+				return err
+			}
 			evalContext, err := cek.NewEvalContext(
 				lang.LanguageVersionV1,
 				cek.ProtoVersion{
 					Major: tmpPparams.ProtocolMajor,
 					Minor: tmpPparams.ProtocolMinor,
 				},
-				tmpPparams.CostModels[0],
+				costModel,
 			)
 			if err != nil {
 				return fmt.Errorf("build evaluation context: %w", err)
@@ -451,13 +455,17 @@ func EvaluateTxAlonzo(
 				datum = tmp.Datum
 			}
 			sc := script.NewScriptContextV1V2(txInfoV1, purpose)
+			costModel, err := requiredCostModel(tmpPparams.CostModels, 0, "PlutusV1")
+			if err != nil {
+				return 0, lcommon.ExUnits{}, nil, err
+			}
 			evalContext, err := cek.NewEvalContext(
 				lang.LanguageVersionV1,
 				cek.ProtoVersion{
 					Major: tmpPparams.ProtocolMajor,
 					Minor: tmpPparams.ProtocolMinor,
 				},
-				tmpPparams.CostModels[0],
+				costModel,
 			)
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)

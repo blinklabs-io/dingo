@@ -26,6 +26,8 @@ import (
 )
 
 func TestTranslateRatifiedGovActions_ConwayToDijkstra(t *testing.T) {
+	t.Parallel()
+
 	db, _ := newTallyTestDB(t)
 
 	fee := uint(1234)

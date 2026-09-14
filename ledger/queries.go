@@ -34,9 +34,9 @@ import (
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
-// MaxLocalStateQueryItems bounds caller-controlled collections on query paths
-// that perform database work for each requested item. Explicit over-limit
-// filters are rejected before database access.
+// MaxLocalStateQueryItems bounds caller-controlled credential filters on query
+// paths that perform per-item work or build account maps from batched reads.
+// Explicit over-limit filters are rejected before database access.
 const MaxLocalStateQueryItems = 1000
 
 // ErrLocalStateQueryLimitExceeded identifies a LocalStateQuery request whose
@@ -81,10 +81,218 @@ func checkLocalStateQueryItemLimit(query string, items int) error {
 	}
 }
 
-func (ls *LedgerState) Query(query any) (any, error) {
+// QueryPoint pins a Query call to a specific historical block instead of
+// live-right-now (blinklabs-io/dingo#382). The zero value (Slot 0, no Hash)
+// means no pin -- the existing, default behavior of answering from whatever
+// is live right now -- matching the same "0 accepts the live/published
+// value" convention SlotToTimeWithHorizonFrom's horizonAnchorSlot already
+// uses elsewhere in this package.
+//
+// Hash is required whenever Slot is non-zero: identifying a historical
+// point by slot alone is ambiguous across a rollback (a fork switch can
+// leave a different block at the same slot than the one the caller
+// acquired), so Query verifies Hash against this node's current chain
+// before answering -- see verifyPointOnChain.
+type QueryPoint struct {
+	Slot uint64
+	Hash []byte
+}
+
+// pinned reports whether p names a historical point rather than "live."
+// Only the origin sentinel (Slot 0, empty Hash) is unpinned -- a slot-0
+// point with a nonempty Hash is a real chain point, not the origin, and
+// must still be validated rather than silently treated as "live."
+func (p QueryPoint) pinned() bool {
+	return p.Slot != 0 || len(p.Hash) != 0
+}
+
+// ErrHistoricalStateUnavailable indicates a caller pinned a Query to a point
+// this node cannot answer historically -- either because retained history
+// (a stake snapshot, a spent-UTxO row) has already been pruned past it, or
+// because the requested field's historical reconstruction is not
+// implemented for a point that far from the live tip
+// (blinklabs-io/dingo#382). errors.Is distinguishes this from a generic
+// query failure or ErrPointNotOnChain.
+var ErrHistoricalStateUnavailable = errors.New(
+	"historical ledger state unavailable for the requested point",
+)
+
+// ErrPointNotOnChain indicates a pinned Query's QueryPoint does not match
+// what this node's current chain has at that slot: either the block was
+// rolled back after the caller acquired it, or the point never existed on
+// this node's view of the chain. Distinguished from
+// ErrHistoricalStateUnavailable because the fix is different -- a caller
+// seeing this should re-acquire a current point, not simply pick an older
+// one.
+var ErrPointNotOnChain = errors.New(
+	"acquired point is not on the current chain",
+)
+
+// verifyPointOnChain confirms this node's current canonical chain has a
+// block at at.Slot whose hash is at.Hash, so a pinned query can't silently
+// reconstruct against a fork the caller never acquired
+// (blinklabs-io/dingo#382). Only called when at.pinned().
+//
+// txn bounds both the tip read and the block lookup to one transaction, so
+// the two describe the same moment: database.BlockBySlot on its own has no
+// notion of "applied tip" at all -- it scans the blob store's slot-keyed
+// block index directly, which can retain a block slotted ahead of what has
+// actually been applied to ledger state (e.g. a header-ahead-of-ledger
+// buffer entry). Without the tip bound, such a block could satisfy both the
+// slot and hash check here while the ledger state this query is about to
+// read from has not incorporated it at all. Rejecting at.Slot above the
+// transaction-consistent tip closes that gap.
+func (ls *LedgerState) verifyPointOnChain(
+	txn *database.Txn,
+	at QueryPoint,
+) error {
+	tip, err := ls.db.GetTip(txn)
+	if err != nil {
+		return err
+	}
+	if at.Slot > tip.Point.Slot {
+		return fmt.Errorf(
+			"%w: point at slot %d is ahead of the current tip (slot %d)",
+			ErrPointNotOnChain,
+			at.Slot,
+			tip.Point.Slot,
+		)
+	}
+	block, err := database.BlockBySlotTxn(txn, at.Slot)
+	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			return fmt.Errorf(
+				"%w: no block at slot %d on the current chain",
+				ErrPointNotOnChain,
+				at.Slot,
+			)
+		}
+		return err
+	}
+	if !bytes.Equal(block.Hash, at.Hash) {
+		return fmt.Errorf(
+			"%w: block at slot %d has hash %x, acquired point named %x",
+			ErrPointNotOnChain,
+			at.Slot,
+			block.Hash,
+			at.Hash,
+		)
+	}
+	return nil
+}
+
+// resolveAsOfEpoch resolves at to the epoch that governed it -- unpinned
+// (at.pinned() false) means live, resolving the live tip's own epoch
+// instead. Shared by every query handler that reconstructs epoch-keyed
+// historical state (blinklabs-io/dingo#382) -- PoolStakeDistribution,
+// queryShelleyCurrentProtocolParams, queryShelleyEpochNo -- so the
+// live-vs-pinned epoch lookup is written once rather than once per handler.
+// A slot with no covering epoch record (a chain that has applied no blocks
+// yet) resolves to epoch 0, matching epochAtTip's existing convention.
+//
+// Takes the whole QueryPoint, not a bare slot: a point pinned at slot 0
+// (a real, validated chain point -- see QueryPoint.pinned()'s own doc
+// comment on why slot 0 alone doesn't mean "live") must still resolve
+// against that slot rather than falling through to the live branch the
+// way comparing a bare uint64 against zero would.
+func (ls *LedgerState) resolveAsOfEpoch(
+	txn *database.Txn,
+	at QueryPoint,
+) (uint64, error) {
+	if !at.pinned() {
+		_, current, err := ls.epochAtTip(txn)
+		if err != nil {
+			return 0, err
+		}
+		if current == nil {
+			return 0, nil
+		}
+		return current.EpochId, nil
+	}
+	epoch, err := ls.db.GetEpochBySlot(at.Slot, txn)
+	if err != nil {
+		return 0, err
+	}
+	if epoch == nil {
+		return 0, nil
+	}
+	return epoch.EpochId, nil
+}
+
+// queryShelleyEpochNo answers GetEpochNo: the epoch containing at (unpinned
+// = live, using the fast in-memory consensus snapshot rather than paying
+// for a transaction on the common unpinned path). Safe to pin at any
+// retained point, unlike stake distribution or protocol parameters: epoch
+// records are never pruned and carry no other coupled state, so resolving
+// which epoch covered a historical slot has no retention window to
+// violate.
+//
+// Takes the whole QueryPoint, not a bare slot -- see resolveAsOfEpoch's
+// doc comment for why a bare uint64 would silently mistreat a real point
+// pinned at slot 0 as live.
+//
+// txn is Query's point-validation transaction, non-nil whenever at is
+// pinned -- reusing it rather than opening a fresh one keeps this read
+// inside the same snapshot verifyPointOnChain already validated at
+// against, so a rollback landing between validation and this read cannot
+// make the two disagree about which chain they're describing.
+func (ls *LedgerState) queryShelleyEpochNo(
+	at QueryPoint,
+	txn *database.Txn,
+) (any, error) {
+	if !at.pinned() {
+		return []any{ls.loadConsensusSnapshot().currentEpoch.EpochId}, nil
+	}
+	if txn == nil {
+		txn = ls.db.Transaction(false)
+		defer txn.Release()
+	}
+	epoch, err := ls.resolveAsOfEpoch(txn, at)
+	if err != nil {
+		return nil, err
+	}
+	return []any{epoch}, nil
+}
+
+// Query answers a decoded LocalStateQuery message against Dingo's live
+// ledger state, or against the historical point at named by QueryPoint.
+//
+// When at is pinned, Query first verifies at against this node's current
+// chain (verifyPointOnChain) before dispatching, so every point-sensitive
+// query type below shares one fork-safety check rather than repeating it.
+// at is threaded through only as far as the query types that actually honor
+// it today: stake distribution (queryShelleyStakeDistribution/
+// queryShelleyPoolDistr2, via PoolStakeDistribution's epoch-snapshot
+// lookup and, for circulating supply, GetNetworkStateAsOfSlot), current
+// protocol parameters (queryShelleyCurrentProtocolParams, which answers a
+// pin in the live tip's current epoch from the live snapshot and any other
+// epoch from that epoch's persisted pparams row when one exists, returning
+// ErrHistoricalStateUnavailable only when no such row was ever recorded or
+// it was pruned after a rollback), and epoch number (queryShelleyEpochNo,
+// unconditionally safe). Every other
+// query type ignores at and continues answering from live state; #382's
+// full scope (every query pinnable at any historical point) remains out of
+// scope for what cross-node validation via node-parity actually needs.
+func (ls *LedgerState) Query(query any, at QueryPoint) (any, error) {
+	// txn is nil on the live (unpinned) path -- every handler below falls
+	// back to opening its own transaction in that case, unchanged from
+	// before this point-pinning existed. When pinned, this one transaction
+	// is reused for both verifyPointOnChain and whichever handler below
+	// honors at, so the validated point and the historical read it guards
+	// come from the same consistent snapshot: a rollback committing between
+	// the two cannot make the handler answer for a point that already left
+	// the canonical chain.
+	var txn *database.Txn
+	if at.pinned() {
+		txn = ls.db.Transaction(false)
+		defer txn.Release()
+		if err := ls.verifyPointOnChain(txn, at); err != nil {
+			return nil, err
+		}
+	}
 	switch q := query.(type) {
 	case *olocalstatequery.BlockQuery:
-		return ls.queryBlock(q)
+		return ls.queryBlock(q, at, txn)
 	case *olocalstatequery.SystemStartQuery:
 		return ls.querySystemStart()
 	case *olocalstatequery.ChainBlockNoQuery:
@@ -98,12 +306,14 @@ func (ls *LedgerState) Query(query any) (any, error) {
 
 func (ls *LedgerState) queryBlock(
 	query *olocalstatequery.BlockQuery,
+	at QueryPoint,
+	txn *database.Txn,
 ) (any, error) {
 	switch q := query.Query.(type) {
 	case *olocalstatequery.HardForkQuery:
 		return ls.queryHardFork(q)
 	case *olocalstatequery.ShelleyQuery:
-		return ls.queryShelley(q)
+		return ls.queryShelley(q, at, txn)
 	default:
 		return nil, fmt.Errorf("unsupported query type: %T", q)
 	}
@@ -133,6 +343,12 @@ func (ls *LedgerState) querySystemStart() (any, error) {
 	return ret, nil
 }
 
+// dispatch switch, which is what lets that switch return each case's
+// result directly; this handler happens to never fail, unlike its
+// siblings, but a special-cased signature here would break that
+// uniformity for no real benefit.
+//
+//nolint:unparam // (any, error) matches every other case in Query's
 func (ls *LedgerState) queryChainBlockNo() (any, error) {
 	tip := ls.loadTipSnapshot().currentTip
 	// WithOrigin BlockNo: [0] at genesis, [1, blockNo] once a block exists.
@@ -142,6 +358,7 @@ func (ls *LedgerState) queryChainBlockNo() (any, error) {
 	return []any{1, tip.BlockNumber}, nil
 }
 
+//nolint:unparam // see queryChainBlockNo's identical note just above.
 func (ls *LedgerState) queryChainPoint() (any, error) {
 	return cloneTip(ls.loadTipSnapshot().currentTip).Point, nil
 }
@@ -468,28 +685,103 @@ func picosecondsToDuration(p *big.Int) time.Duration {
 
 func (ls *LedgerState) queryShelley(
 	query *olocalstatequery.ShelleyQuery,
+	at QueryPoint,
+	txn *database.Txn,
 ) (any, error) {
-	return ls.queryShelleyLeaf(query.Query)
+	return ls.queryShelleyLeaf(query.Query, at, txn)
 }
 
 // queryShelleyLeaf dispatches a decoded Shelley block-query leaf and returns
 // its result in the single-element MsgResult wire form (`[]any{value}`). It
 // is shared by queryShelley and by the GetCBOR combinator handler, which
-// re-runs the wrapped inner query through it.
-func (ls *LedgerState) queryShelleyLeaf(query any) (any, error) {
+// re-runs the wrapped inner query through it. at is Query's pinned point
+// (Slot 0 = live).
+//
+// #382 point-pinning coverage audit (every case below, classified):
+//
+// Honors at today: ShelleyStakeDistributionQuery and ShelleyPoolDistr2Query
+// (both via PoolStakeDistribution, resolving at to its epoch and reading
+// that epoch's persisted mark snapshot; StakeDistribution's circulating-
+// supply denominator additionally resolves historically via
+// GetNetworkStateAsOfSlot), ShelleyCurrentProtocolParamsQuery
+// (queryShelleyCurrentProtocolParams, answered from the live snapshot when
+// at's epoch matches the live tip's, otherwise from that epoch's persisted
+// pparams row when one was recorded -- see its doc comment),
+// ShelleyEpochNoQuery (queryShelleyEpochNo, unconditionally safe: epoch
+// records are never pruned and carry no other coupled state), and
+// ShelleyUtxoByTxinQuery
+// (queryShelleyUtxoByTxIn, resolving each requested ref's per-row
+// AddedSlot/DeletedSlot against at.Slot -- safe back to
+// checkUtxoRetentionWindow's retention floor, rejected with
+// ErrHistoricalStateUnavailable beyond it; blinklabs-io/dingo#1900's
+// node-parity incremental mode is the real caller this closes a gap for).
+//
+// Intentionally live-only, not a gap: ShelleyGenesisConfigQuery
+// (genesis is an immutable chain-wide constant with no historical variant),
+// ShelleyGetLedgerPeerSnapshotQuery (peer/networking bootstrap data, not
+// ledger state at all).
+//
+// Not point-aware, real gap, out of scope for this pass: every remaining
+// case answers unconditionally from live state regardless of at, because
+// making it historically correct needs storage or reconstruction logic
+// that does not exist yet --
+//   - ShelleyUtxoWholeQuery: a genuinely historical whole-set enumeration
+//     has no efficient indexed path in this schema (would need a
+//     full-table scan or a new temporal index); tracked separately, not
+//     part of this change.
+//   - ShelleyUtxoByAddressQuery: same underlying utxo table and
+//     AddedSlot/DeletedSlot columns as ShelleyUtxoByTxinQuery, so the same
+//     historical predicate could extend here, filtered instead of
+//     cursor-paginated -- no current caller needs it (only GetUTxOByTxIn
+//     and the whole-set query are used for cross-node comparison), so not
+//     built.
+//   - ShelleyFilteredDelegationAndRewardAccountsQuery,
+//     ShelleyStakeDelegDepositsQuery, ShelleyDRepStateQuery,
+//     ShelleyFilteredVoteDelegateesQuery, ShelleyStakePoolsQuery,
+//     ShelleyGetProposalsQuery: each reads live per-credential/per-pool/
+//     per-proposal state with no historical-by-point record; would need new
+//     historical tracking analogous to GetUtxoRefsAsOfAfter's added/deleted
+//     slot columns, not attempted.
+//   - ShelleyAccountStateQuery: chain-wide treasury/reserves totals, same
+//     class of gap as protocol parameters (no historical-by-epoch record).
+//   - ShelleyStakeSnapshotsQuery: its per-epoch mark/set/go reads are
+//     structurally identical to PoolStakeDistribution's and could resolve
+//     at the same way, but its zero-pool-omission rule
+//     (omitZeroPools, protocol-version-gated) reads
+//     GetProtocolVersion(consensus.currentPParams) -- the *live* protocol
+//     version. Pinning the snapshot epoch without also resolving the
+//     protocol version that was active at that epoch would answer with
+//     the right stake but a version-dependent inclusion rule from the
+//     wrong point, so this has the same missing-historical-storage
+//     dependency as ShelleyCurrentProtocolParamsQuery and was left alone
+//     for the same reason.
+//   - ShelleyDebugChainDepStateQuery: consensus nonce/opcert state.
+//     computeCandidateNonceAsOf already takes an arbitrary end-slot
+//     internally (a possible future entry point), but OpCertCounters
+//     reads live per-pool operational-certificate counters with no
+//     historical tracking, so the reply as a whole cannot be pinned
+//     without that piece too.
+//
+// Not applicable: ShelleyCborQuery (a combinator, not a leaf query --
+// forwards at to whatever it wraps).
+func (ls *LedgerState) queryShelleyLeaf(
+	query any,
+	at QueryPoint,
+	txn *database.Txn,
+) (any, error) {
 	switch q := query.(type) {
 	case *olocalstatequery.ShelleyCborQuery:
-		return ls.queryShelleyCbor(q)
+		return ls.queryShelleyCbor(q, at, txn)
 	case *olocalstatequery.ShelleyEpochNoQuery:
-		return []any{ls.loadConsensusSnapshot().currentEpoch.EpochId}, nil
+		return ls.queryShelleyEpochNo(at, txn)
 	case *olocalstatequery.ShelleyCurrentProtocolParamsQuery:
-		return []any{ls.GetCurrentPParamsForReporting()}, nil
+		return ls.queryShelleyCurrentProtocolParams(at, txn)
 	case *olocalstatequery.ShelleyGenesisConfigQuery:
 		return ls.queryShelleyGenesisConfig()
 	case *olocalstatequery.ShelleyUtxoByAddressQuery:
 		return ls.queryShelleyUtxoByAddress(q.Addrs)
 	case *olocalstatequery.ShelleyUtxoByTxinQuery:
-		return ls.queryShelleyUtxoByTxIn(q.TxIns)
+		return ls.queryShelleyUtxoByTxIn(q.TxIns, at, txn)
 	case *olocalstatequery.ShelleyFilteredDelegationAndRewardAccountsQuery:
 		return ls.queryShelleyFilteredDelegationAndRewardAccounts(
 			q.Creds.Items(),
@@ -513,9 +805,9 @@ func (ls *LedgerState) queryShelleyLeaf(query any) (any, error) {
 	case *olocalstatequery.ShelleyDebugChainDepStateQuery:
 		return ls.queryShelleyDebugChainDepState()
 	case *olocalstatequery.ShelleyPoolDistr2Query:
-		return ls.queryShelleyPoolDistr2(q)
+		return ls.queryShelleyPoolDistr2(q, at, txn)
 	case *olocalstatequery.ShelleyStakeDistributionQuery:
-		return ls.queryShelleyStakeDistribution()
+		return ls.queryShelleyStakeDistribution(at, txn)
 	case *olocalstatequery.ShelleyUtxoWholeQuery:
 		return ls.queryShelleyUtxoWhole()
 	// TODO (#394)
@@ -543,8 +835,10 @@ func (ls *LedgerState) queryShelleyLeaf(query any) (any, error) {
 // GetCBOR-wrapped queries flows through here. See issue #2917.
 func (ls *LedgerState) queryShelleyCbor(
 	q *olocalstatequery.ShelleyCborQuery,
+	at QueryPoint,
+	txn *database.Txn,
 ) (any, error) {
-	inner, err := ls.queryShelleyLeaf(q.Query)
+	inner, err := ls.queryShelleyLeaf(q.Query, at, txn)
 	if err != nil {
 		return nil, err
 	}
@@ -874,8 +1168,19 @@ func (ls *LedgerState) totalActiveStake(
 // config or live network state is unavailable to read circulation from --
 // only true of a LedgerState a test builds by hand rather than one backing a
 // running node, which always has both.
+//
+// asOfSlot, when non-nil, reads reserves as they stood at or before that
+// slot (GetNetworkStateAsOfSlot) instead of the always-latest row
+// (GetNetworkState) -- what a historical GetStakeDistribution answer needs
+// (blinklabs-io/dingo#382), since network_state already carries one row per
+// slot its reserves/treasury actually changed, not just the current value.
+// nil (the live case) is not the same as a zero slot: a real historical
+// caller who happens to name slot 0 still passes a non-nil pointer to it,
+// exactly the same "whole QueryPoint, not a bare uint64" caution
+// resolveAsOfEpoch's doc comment explains for other pinned-point callers.
 func (ls *LedgerState) totalCirculatingSupply(
 	epoch uint64,
+	asOfSlot *uint64,
 	exists bool,
 	txn types.Txn,
 ) (uint64, error) {
@@ -889,11 +1194,34 @@ func (ls *LedgerState) totalCirculatingSupply(
 	if genesis == nil || genesis.MaxLovelaceSupply == 0 {
 		return fallback()
 	}
-	state, err := ls.db.Metadata().GetNetworkState(txn)
+	var state *models.NetworkState
+	var err error
+	if asOfSlot != nil {
+		state, err = ls.db.Metadata().GetNetworkStateAsOfSlot(*asOfSlot, txn)
+	} else {
+		state, err = ls.db.Metadata().GetNetworkState(txn)
+	}
 	if err != nil {
 		return 0, err
 	}
 	if state == nil {
+		if asOfSlot != nil {
+			// A pinned lookup found no network_state row at or before
+			// asOfSlot: falling back to totalActiveStake here would
+			// silently answer with a different, non-equivalent total (see
+			// this function's doc comment on why the two are genuinely
+			// different numbers) rather than admit the pinned point can't
+			// be reconstructed. The live case's fallback below stays --
+			// that covers a hand-built LedgerState with no network_state
+			// history at all, not a real historical gap.
+			return 0, fmt.Errorf(
+				"%w: circulating supply as of slot %d cannot be "+
+					"reconstructed -- no network_state row exists at or "+
+					"before that slot",
+				ErrHistoricalStateUnavailable,
+				*asOfSlot,
+			)
+		}
 		return fallback()
 	}
 	reserves := uint64(state.Reserves)
@@ -1280,6 +1608,12 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 func (ls *LedgerState) queryShelleyFilteredDelegationAndRewardAccounts(
 	creds []olocalstatequery.StakeCredential,
 ) (any, error) {
+	if err := checkLocalStateQueryItemLimit(
+		"GetFilteredDelegationsAndRewardAccounts",
+		len(creds),
+	); err != nil {
+		return nil, err
+	}
 	delegations := make(map[olocalstatequery.StakeCredential]ledger.Blake2b224)
 	rewards := make(map[olocalstatequery.StakeCredential]uint64)
 	if len(creds) == 0 {
@@ -1380,6 +1714,12 @@ func (ls *LedgerState) queryShelleyStakeDelegDeposits(
 func (ls *LedgerState) queryShelleyFilteredVoteDelegatees(
 	creds []lcommon.Credential,
 ) (any, error) {
+	if err := checkLocalStateQueryItemLimit(
+		"GetFilteredVoteDelegatees",
+		len(creds),
+	); err != nil {
+		return nil, err
+	}
 	ret := make(olocalstatequery.FilteredVoteDelegateesResult)
 	refs := make([]models.StakeCredentialRef, 0, len(creds))
 	// Carried alongside creds so the second loop can reuse the tag each
@@ -1562,8 +1902,36 @@ func stakeCredentialFromVote(
 	}
 }
 
+// queryShelleyUtxoByTxIn answers GetUTxOByTxIn: the live outputs named by
+// the given transaction inputs.
+//
+// at is Query's pinned point (unpinned = live, answered exactly as before
+// via UtxosByRefs). When pinned, each requested ref is answered as of
+// at.Slot instead of live-right-now: a ref is live at at.Slot when its
+// creating transaction is at-or-before at.Slot and it is either still
+// unspent or was spent strictly after at.Slot. The utxo table already
+// tracks both slots per row (AddedSlot, DeletedSlot -- see
+// database.UtxosByRefsAsOf), so this is a real, exact historical query,
+// not an approximation (blinklabs-io/dingo#382).
+//
+// Before this existed, this handler ignored at entirely and always
+// answered from live state: node-parity's incremental mode (#1900) proved
+// this live, both via a direct probe (acquire an older point, then query a
+// ref created by a later block through the same still-acquired session --
+// Dingo returned the newer output) and via a held-acquisition repro
+// (querying again after further blocks were applied returned newly created
+// outputs through the old acquisition). In practice this produced false
+// "missing" divergences for any UTxO consumed and recreated at the same
+// reference between an incremental check's per-block point and the next.
+//
+// checkUtxoRetentionWindow rejects at.Slot when it is older than this
+// node's spent-UTxO retention floor: see its doc comment for why answering
+// past that floor risks a silently wrong "absent" result instead of an
+// honest rejection.
 func (ls *LedgerState) queryShelleyUtxoByTxIn(
 	txIns []ledger.ShelleyTransactionInput,
+	at QueryPoint,
+	txn *database.Txn,
 ) (any, error) {
 	ret := make(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
 	if len(txIns) == 0 {
@@ -1576,7 +1944,20 @@ func (ls *LedgerState) queryShelleyUtxoByTxIn(
 			Idx:  txIn.Index(),
 		}
 	}
-	utxos, err := ls.db.UtxosByRefs(refs, nil)
+	var utxos []models.Utxo
+	var err error
+	if at.pinned() {
+		if txn == nil {
+			txn = ls.db.Transaction(false)
+			defer txn.Release()
+		}
+		if err := ls.checkUtxoRetentionWindow(txn, at); err != nil {
+			return nil, err
+		}
+		utxos, err = ls.db.UtxosByRefsAsOf(refs, at.Slot, txn)
+	} else {
+		utxos, err = ls.db.UtxosByRefs(refs, txn)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1592,4 +1973,88 @@ func (ls *LedgerState) queryShelleyUtxoByTxIn(
 		ret[utxoId] = txOut
 	}
 	return []any{ret}, nil
+}
+
+// checkUtxoRetentionWindow rejects a pinned UTxO query whose point is older
+// than this node's spent-UTxO retention floor -- see
+// queryShelleyUtxoByTxIn's doc comment for the correctness risk this
+// guards against.
+//
+// The floor mirrors what the periodic consumed-UTxO cleanup
+// (cleanupConsumedUtxos/UtxosDeleteConsumed in state.go) actually prunes:
+// in every storage mode except API, a spent row becomes eligible for
+// hard-deletion once its DeletedSlot falls at-or-behind
+// tipSlot-stabilityWindow. So for any ref that was live at at.Slot and
+// later spent at some slot D > at.Slot, the row is guaranteed to survive
+// exactly when at.Slot is itself no older than that same floor (D > at.Slot
+// >= floor implies D > floor, i.e. not yet eligible for pruning). A pin
+// older than the floor cannot make that guarantee -- D could fall between
+// at.Slot and the floor, in which case the row may already be gone and an
+// absent result would be silently wrong rather than an honest rejection.
+//
+// The floor is the larger (stricter) of two independent bounds, since
+// either alone can be wrong:
+//
+//   - A fresh estimate from the CURRENT tip and era's own window
+//     (calculateStabilityWindow). This is right in steady state, but can be
+//     too lenient right after the tip moves in a way cleanup's own
+//     historical floor didn't: a rollback lowering the tip, or an era
+//     transition changing the stability-window formula (Byron's small 2k
+//     vs every Shelley+ era's much larger 3k/f) -- see
+//     persistConsumedUtxoPruneFloor's doc comment for both cases in detail.
+//   - The durably persisted floor (readConsumedUtxoPruneFloor) recording
+//     the highest slot cleanup has ever actually begun pruning up to. This
+//     is exactly right for what's already been pruned, but reads zero on a
+//     chain where cleanup has never run yet (nothing eligible existed), so
+//     it cannot stand alone either.
+//
+// A read error on the persisted floor fails the pin closed (rejected)
+// rather than silently skipping the check it exists to enforce.
+//
+// API storage mode never prunes spent rows at all (see
+// cleanupConsumedUtxos' identical check and PruneBlock's doc comment on
+// why their CBOR remains resolvable too), so no floor applies there.
+//
+// txn is used only to read the tip and the persisted floor, consistently
+// with the same point verifyPointOnChain already validated at against.
+func (ls *LedgerState) checkUtxoRetentionWindow(
+	txn *database.Txn,
+	at QueryPoint,
+) error {
+	if ls.db.StorageMode() == types.StorageModeAPI {
+		return nil
+	}
+	tip, err := ls.db.GetTip(txn)
+	if err != nil {
+		return err
+	}
+	var retentionFloor uint64
+	stabilityWindow := ls.calculateStabilityWindow()
+	if stabilityWindow != 0 && tip.Point.Slot > stabilityWindow {
+		retentionFloor = tip.Point.Slot - stabilityWindow
+	}
+	persistedFloor, err := ls.readConsumedUtxoPruneFloor(txn)
+	if err != nil {
+		return err
+	}
+	if persistedFloor > retentionFloor {
+		retentionFloor = persistedFloor
+	}
+	if retentionFloor == 0 {
+		// Neither bound found anything eligible for pruning yet.
+		return nil
+	}
+	if at.Slot < retentionFloor {
+		return fmt.Errorf(
+			"%w: GetUTxOByTxIn pinned to slot %d is older than this "+
+				"node's spent-UTxO retention floor (slot %d, tip %d) -- "+
+				"a UTxO spent and pruned before that floor cannot be "+
+				"reliably reconstructed as of the pinned point",
+			ErrHistoricalStateUnavailable,
+			at.Slot,
+			retentionFloor,
+			tip.Point.Slot,
+		)
+	}
+	return nil
 }

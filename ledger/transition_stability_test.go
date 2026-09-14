@@ -241,6 +241,8 @@ func repeatByte(length int, b byte) []byte {
 func TestEvaluateHardForkInitiationStability_PreDeadline_NoChange(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, db := stabilityFixtureLedgerState(t, 9 /* bootstrap */)
 	seedRatifiableBootstrapHardForkInitiation(
 		t, db, stabilityFixtureEpochID, 7,
@@ -266,6 +268,8 @@ func TestEvaluateHardForkInitiationStability_PreDeadline_NoChange(
 func TestEvaluateHardForkInitiationStability_PostDeadline_Ratifiable_SetsKnown(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, db := stabilityFixtureLedgerState(t, 9 /* bootstrap */)
 	seedRatifiableBootstrapHardForkInitiation(
 		t, db, stabilityFixtureEpochID, 7,
@@ -287,6 +291,8 @@ func TestEvaluateHardForkInitiationStability_PostDeadline_Ratifiable_SetsKnown(
 func TestEvaluateHardForkInitiationStability_PostDeadline_NotRatifiable_NoChange(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, _ := stabilityFixtureLedgerState(t, 9)
 	ls.currentTip = ochainsync.Tip{
 		Point: ocommon.NewPoint(
@@ -309,6 +315,8 @@ func TestEvaluateHardForkInitiationStability_PostDeadline_NotRatifiable_NoChange
 func TestEvaluateHardForkInitiationStability_PreConwayPParams_NoOp(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, db := stabilityFixtureLedgerState(t, 9)
 	// Even with a "ratifiable" proposal seeded, swapping pparams to nil
 	// (or any non-Conway type) makes the helper short-circuit before
@@ -339,6 +347,8 @@ func TestEvaluateHardForkInitiationStability_PreConwayPParams_NoOp(
 func TestEvaluateHardForkInitiationStability_AlreadyKnownForSameEpoch_Idempotent(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, db := stabilityFixtureLedgerState(t, 9)
 	seedRatifiableBootstrapHardForkInitiation(
 		t, db, stabilityFixtureEpochID, 7,
@@ -367,6 +377,8 @@ func TestEvaluateHardForkInitiationStability_AlreadyKnownForSameEpoch_Idempotent
 func TestEvaluateHardForkInitiationStability_PreservesKnownFromOtherSource(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, db := stabilityFixtureLedgerState(t, 9)
 	seedRatifiableBootstrapHardForkInitiation(
 		t, db, stabilityFixtureEpochID, 7,
@@ -406,6 +418,8 @@ func TestEvaluateHardForkInitiationStability_PreservesKnownFromOtherSource(
 func TestEvaluateHardForkInitiationStability_IntraEraHFI_DoesNotSetKnown(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, db := stabilityFixtureLedgerState(t, 9 /* Conway, bootstrap */)
 	// Target major 10 — still in Conway (Conway covers pv9-pv10).
 	// A ratifiable proposal here represents an intra-era pparams
@@ -435,6 +449,8 @@ func TestEvaluateHardForkInitiationStability_IntraEraHFI_DoesNotSetKnown(
 func TestEvaluateHardForkInitiationStability_UpgradesImpossibleToKnown(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, db := stabilityFixtureLedgerState(t, 9)
 	seedRatifiableBootstrapHardForkInitiation(
 		t, db, stabilityFixtureEpochID, 7,

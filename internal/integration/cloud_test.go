@@ -127,6 +127,8 @@ func hasS3Credentials() bool {
 }
 
 func TestCloudPluginGCS(t *testing.T) {
+	t.Parallel()
+
 	if !hasGCSCredentials() {
 		t.Skip("GCS credentials not found, skipping test")
 	}
@@ -151,6 +153,8 @@ func TestCloudPluginGCS(t *testing.T) {
 }
 
 func TestCloudPluginS3(t *testing.T) {
+	t.Parallel()
+
 	if !hasS3Credentials() {
 		t.Skip("S3 credentials not found, skipping test")
 	}

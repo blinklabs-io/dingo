@@ -43,6 +43,8 @@ func (m *mockForgedBlockChecker) WasForgedByUs(
 }
 
 func TestCheckSlotBattle_DetectsConflict(t *testing.T) {
+	t.Parallel()
+
 	eventBus := event.NewEventBus(nil, nil)
 	defer eventBus.Stop()
 
@@ -94,6 +96,8 @@ func TestCheckSlotBattle_DetectsConflict(t *testing.T) {
 }
 
 func TestCheckSlotBattle_RemoteWinsWhenAccepted(t *testing.T) {
+	t.Parallel()
+
 	eventBus := event.NewEventBus(nil, nil)
 	defer eventBus.Stop()
 
@@ -140,6 +144,8 @@ func TestCheckSlotBattle_RemoteWinsWhenAccepted(t *testing.T) {
 }
 
 func TestCheckSlotBattle_NoConflictDifferentSlot(t *testing.T) {
+	t.Parallel()
+
 	eventBus := event.NewEventBus(nil, nil)
 	defer eventBus.Stop()
 
@@ -178,6 +184,8 @@ func TestCheckSlotBattle_NoConflictDifferentSlot(t *testing.T) {
 }
 
 func TestCheckSlotBattle_SameHashIsNotBattle(t *testing.T) {
+	t.Parallel()
+
 	eventBus := event.NewEventBus(nil, nil)
 	defer eventBus.Stop()
 
@@ -217,6 +225,8 @@ func TestCheckSlotBattle_SameHashIsNotBattle(t *testing.T) {
 }
 
 func TestCheckSlotBattle_NilCheckerSkips(t *testing.T) {
+	t.Parallel()
+
 	eventBus := event.NewEventBus(nil, nil)
 	defer eventBus.Stop()
 
@@ -247,6 +257,8 @@ func TestCheckSlotBattle_NilCheckerSkips(t *testing.T) {
 }
 
 func TestCheckSlotBattle_NilEventBus(t *testing.T) {
+	t.Parallel()
+
 	localHash := []byte{0x01, 0x02, 0x03, 0x04}
 	remoteHash := []byte{0x0A, 0x0B, 0x0C, 0x0D}
 
@@ -279,6 +291,8 @@ func TestCheckSlotBattle_NilEventBus(t *testing.T) {
 // (write lock) but internally attempted ls.RLock() on the same
 // non-reentrant sync.RWMutex.
 func TestCheckSlotBattle_UnderWriteLock(t *testing.T) {
+	t.Parallel()
+
 	eventBus := event.NewEventBus(nil, nil)
 	defer eventBus.Stop()
 
@@ -338,6 +352,8 @@ func TestCheckSlotBattle_UnderWriteLock(t *testing.T) {
 }
 
 func TestSetForgedBlockChecker(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),

@@ -41,6 +41,8 @@ import (
 // anyone seeing the cause. The level is the fix: a node quietly diverging
 // from the network has to say so before it wedges, not after.
 func TestSkippedStakeRewardsIsReportedLoudly(t *testing.T) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 	ls := &LedgerState{
 		config: LedgerStateConfig{
@@ -77,6 +79,8 @@ func TestSkippedStakeRewardsIsReportedLoudly(t *testing.T) {
 // metrics, since it runs on the epoch-boundary hot path where a nil
 // dereference would take down block application.
 func TestSkippedStakeRewardsSurvivesNilDependencies(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	require.NotPanics(t, func() {
 		ls.reportSkippedStakeRewards(
@@ -89,6 +93,8 @@ func TestSkippedStakeRewardsSurvivesNilDependencies(t *testing.T) {
 }
 
 func TestMissingRewardSnapshotReportsImportedSeedFailure(t *testing.T) {
+	t.Parallel()
+
 	const (
 		newEpoch            = uint64(4)
 		rewardSnapshotEpoch = uint64(1)

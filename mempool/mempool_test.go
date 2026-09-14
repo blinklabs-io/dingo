@@ -15,6 +15,7 @@
 package mempool
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -1436,9 +1437,18 @@ func TestMempoolConsumer_CacheIsBoundedByRetainedBytes(t *testing.T) {
 	first := consumer.NextTx(false)
 	require.NotNil(t, first)
 	require.Equal(t, "small", first.Hash)
-	assert.Nil(t, consumer.NextTx(false), "7 retained bytes exceed the per-consumer limit")
+	assert.Nil(
+		t,
+		consumer.NextTx(false),
+		"7 retained bytes exceed the per-consumer limit",
+	)
 	assert.Equal(t, int64(4), retainedConsumerCacheBytes(consumer))
-	assert.Equal(t, 1, consumer.nextTxIdx, "unadvertised tx stays at the cursor")
+	assert.Equal(
+		t,
+		1,
+		consumer.nextTxIdx,
+		"unadvertised tx stays at the cursor",
+	)
 	assert.NotNil(t, consumer.GetTxFromCache("small"))
 
 	consumer.RemoveTxFromCache("small")
@@ -1509,7 +1519,9 @@ func TestMempoolConsumer_DefaultCacheBudgetHasFloor(t *testing.T) {
 	consumer := mustAddConsumer(t, m, newTestConnectionId(0))
 
 	require.Greater(
-		t, consumer.cacheLimitBytes, int64(300),
+		t,
+		consumer.cacheLimitBytes,
+		int64(300),
 		"unfloored derivation (capacity/4=250) would permanently skip this body",
 	)
 
@@ -1576,18 +1588,44 @@ func TestMempoolConsumer_CachesShareAggregateByteLimit(t *testing.T) {
 	second := mustAddConsumer(t, m, secondID)
 
 	require.NotNil(t, first.NextTx(false))
-	assert.Nil(t, second.NextTx(false), "two retained copies exceed aggregate limit")
-	assert.Equal(t, 0, second.nextTxIdx, "aggregate backpressure preserves cursor")
-	assert.Equal(t, int64(6), retainedConsumerCacheBytes(first)+retainedConsumerCacheBytes(second))
-	assert.NotNil(t, first.GetTxFromCache(tx.Hash), "advertised body is retransmittable")
+	assert.Nil(
+		t,
+		second.NextTx(false),
+		"two retained copies exceed aggregate limit",
+	)
+	assert.Equal(
+		t,
+		0,
+		second.nextTxIdx,
+		"aggregate backpressure preserves cursor",
+	)
+	assert.Equal(
+		t,
+		int64(6),
+		retainedConsumerCacheBytes(first)+retainedConsumerCacheBytes(second),
+	)
+	assert.NotNil(
+		t,
+		first.GetTxFromCache(tx.Hash),
+		"advertised body is retransmittable",
+	)
 
 	first.RemoveTxFromCache(tx.Hash)
 	require.NotNil(t, second.NextTx(false))
-	assert.Equal(t, int64(6), retainedConsumerCacheBytes(first)+retainedConsumerCacheBytes(second))
+	assert.Equal(
+		t,
+		int64(6),
+		retainedConsumerCacheBytes(first)+retainedConsumerCacheBytes(second),
+	)
 	assert.NotNil(t, second.GetTxFromCache(tx.Hash))
 
 	m.RemoveConsumer(secondID)
-	assert.Equal(t, int64(0), retainedConsumerCacheBytes(second), "consumer removal releases bytes")
+	assert.Equal(
+		t,
+		int64(0),
+		retainedConsumerCacheBytes(second),
+		"consumer removal releases bytes",
+	)
 }
 
 // TestMempoolConsumer_RemovalRejectsLaterCacheWrites directly verifies the
@@ -3587,6 +3625,31 @@ func TestMempool_RemovalsContinueDuringRevalidation(t *testing.T) {
 	}
 }
 
+func TestMempool_ConfirmedTransactionLogVisibleAtInfoLevel(t *testing.T) {
+	var buf bytes.Buffer
+	m, err := NewMempool(MempoolConfig{
+		Logger: slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{
+			Level: slog.LevelInfo,
+		})),
+		EventBus:        event.NewEventBus(nil, nil),
+		PromRegistry:    prometheus.NewRegistry(),
+		Validator:       newMockValidator(),
+		MempoolCapacity: 1024 * 1024,
+	})
+	require.NoError(t, err)
+	require.NoError(t, m.Start(context.Background()))
+	defer m.Stop(context.Background())
+
+	require.NoError(
+		t,
+		m.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t)),
+	)
+	hash := m.Transactions()[0].Hash
+	m.RemoveTxsByHash([]string{hash})
+
+	assert.Contains(t, buf.String(), "confirmed transaction")
+}
+
 func TestMempool_EvictionIsReconciledDuringRevalidation(t *testing.T) {
 	validator := newBlockingSessionValidator()
 	firstTx := getTestTxBytes(t)
@@ -4458,7 +4521,12 @@ func TestMempoolConsumer_ConcurrentRemovalReleasesRetainedBytes(t *testing.T) {
 
 	got := make(chan *MempoolTransaction, 1)
 	go func() { got <- consumer.NextTx(true) }()
-	dingotestutil.RequireNoReceive(t, got, 100*time.Millisecond, "cache is full")
+	dingotestutil.RequireNoReceive(
+		t,
+		got,
+		100*time.Millisecond,
+		"cache is full",
+	)
 
 	cacheCleared := make(chan struct{})
 	releaseClear := make(chan struct{})
@@ -4474,7 +4542,12 @@ func TestMempoolConsumer_ConcurrentRemovalReleasesRetainedBytes(t *testing.T) {
 		m.RemoveConsumer(connID)
 		close(removed)
 	}()
-	dingotestutil.RequireReceive(t, cacheCleared, 2*time.Second, "final cache clear")
+	dingotestutil.RequireReceive(
+		t,
+		cacheCleared,
+		2*time.Second,
+		"final cache clear",
+	)
 
 	assert.Nil(t, dingotestutil.RequireReceive(
 		t, got, 2*time.Second, "blocking NextTx released by removal",

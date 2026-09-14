@@ -27,6 +27,8 @@ import (
 )
 
 func TestRewardPrecomputeCoalescesEpochTransitionBurst(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	eventBus := event.NewEventBus(nil, nil)
 	defer eventBus.Stop()
@@ -128,6 +130,8 @@ func TestRewardPrecomputeCoalescesEpochTransitionBurst(t *testing.T) {
 }
 
 func TestRewardPrecomputeContinuesAfterPanic(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),

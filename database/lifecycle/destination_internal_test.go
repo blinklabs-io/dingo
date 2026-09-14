@@ -33,6 +33,8 @@ import (
 // place "manifest.json" before "metadata.sqlite", so relying on
 // directory order alone is not enough.
 func TestOrderEntriesManifestLastSortsManifestToEnd(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	for _, name := range []string{ManifestFileName, BlobBackupFileName, MetadataBackupFileName} {
 		require.NoError(
@@ -61,6 +63,8 @@ func TestOrderEntriesManifestLastSortsManifestToEnd(t *testing.T) {
 // TestOrderEntriesManifestLastNoManifestPresent verifies the function is
 // a safe no-op reordering when no manifest.json entry exists at all.
 func TestOrderEntriesManifestLastNoManifestPresent(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, BlobBackupFileName), []byte("x"), 0o644,
@@ -83,6 +87,8 @@ func TestOrderEntriesManifestLastNoManifestPresent(t *testing.T) {
 // specifically and re-serialize, keeping Query/Fragment ordered after the
 // full path.
 func TestJoinCloudURIPreservesQueryAndFragment(t *testing.T) {
+	t.Parallel()
+
 	got := JoinCloudURI("s3://bucket/prefix?region=us-east-1", "abc123")
 	require.Equal(t, "s3://bucket/prefix/abc123?region=us-east-1", got)
 
@@ -109,6 +115,8 @@ func TestJoinCloudURIPreservesQueryAndFragment(t *testing.T) {
 // destination string. ParseCloudDestination must canonicalize u.Path
 // before ever handing it to a registered factory.
 func TestParseCloudDestinationCleansNoncanonicalPath(t *testing.T) {
+	t.Parallel()
+
 	var gotPath string
 	registry := NewDestinationRegistry()
 	registry.Register(
@@ -163,6 +171,8 @@ func (*fakeInternalCloudDestination) DownloadDir(
 // a nil registry (a valid, documented configuration for "no cloud
 // destinations wanted") would panic instead of silently doing nothing.
 func TestDestinationRegistryRegisterNilReceiverIsNoOp(t *testing.T) {
+	t.Parallel()
+
 	var r *DestinationRegistry
 	require.NotPanics(t, func() {
 		r.Register("s3", func(*url.URL) (CloudDestination, error) {

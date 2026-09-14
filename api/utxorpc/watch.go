@@ -202,6 +202,16 @@ func (s *watchServiceServer) WatchTx(
 	predicate := req.Msg.GetPredicate() // Predicate
 	fieldMask := req.Msg.GetFieldMask()
 	intersect := req.Msg.GetIntersect() // []*BlockRef
+	if len(intersect) > s.utxorpc.config.MaxBlockRefs {
+		return connect.NewError(
+			connect.CodeInvalidArgument,
+			fmt.Errorf(
+				"too many block refs: %d exceeds maximum of %d",
+				len(intersect),
+				s.utxorpc.config.MaxBlockRefs,
+			),
+		)
+	}
 
 	s.utxorpc.config.Logger.Info(
 		fmt.Sprintf(

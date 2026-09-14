@@ -82,6 +82,8 @@ func buildSparseTestChain(t *testing.T, ids []uint64) *chainFixture {
 // TestResolveTargetByHash verifies that a block hash resolves to the
 // matching block.
 func TestResolveTargetByHash(t *testing.T) {
+	t.Parallel()
+
 	f := buildTestChain(t, 5)
 	target, err := lifecycle.ResolveTargetByHash(f.db, f.blocks[2].Hash)
 	require.NoError(t, err)
@@ -91,6 +93,8 @@ func TestResolveTargetByHash(t *testing.T) {
 // TestResolveTargetBySlot verifies that a slot with its own block
 // resolves to that exact block.
 func TestResolveTargetBySlot(t *testing.T) {
+	t.Parallel()
+
 	f := buildTestChain(t, 5)
 	target, err := lifecycle.ResolveTargetBySlot(f.db, f.blocks[2].Slot)
 	require.NoError(t, err)
@@ -102,6 +106,8 @@ func TestResolveTargetBySlot(t *testing.T) {
 // their own (average ~20s slot time), so a slot in between two blocks
 // must resolve to the highest-slot block at or before it, not error out.
 func TestResolveTargetBySlotResolvesToNearestAncestor(t *testing.T) {
+	t.Parallel()
+
 	f := buildTestChain(t, 5) // blocks[i].Slot == (i+1)*10
 
 	target, err := lifecycle.ResolveTargetBySlot(f.db, f.blocks[2].Slot+5)
@@ -118,6 +124,8 @@ func TestResolveTargetBySlotResolvesToNearestAncestor(t *testing.T) {
 // TestResolveTargetByNumber verifies that every block number in the
 // chain resolves back to its own block.
 func TestResolveTargetByNumber(t *testing.T) {
+	t.Parallel()
+
 	f := buildTestChain(t, 5)
 	for _, b := range f.blocks {
 		target, err := lifecycle.ResolveTargetByNumber(f.db, b.Number)
@@ -129,6 +137,8 @@ func TestResolveTargetByNumber(t *testing.T) {
 // TestResolveTargetByNumberAheadOfTipErrors verifies that a block number
 // ahead of the current tip returns an error.
 func TestResolveTargetByNumberAheadOfTipErrors(t *testing.T) {
+	t.Parallel()
+
 	f := buildTestChain(t, 5)
 	_, err := lifecycle.ResolveTargetByNumber(f.db, 100)
 	require.Error(t, err)
@@ -146,6 +156,8 @@ func TestResolveTargetByNumberAheadOfTipErrors(t *testing.T) {
 // the gap, which a naive "treat a miss as answer-must-be-lower" fallback
 // (without an actual seek-forward) would get wrong.
 func TestResolveTargetBySlotSkipsSparseIndexGap(t *testing.T) {
+	t.Parallel()
+
 	f := buildSparseTestChain(t, []uint64{1, 2, 3, 1000, 1001, 1002})
 
 	target, err := lifecycle.ResolveTargetBySlot(f.db, f.blocks[1].Slot)
@@ -160,6 +172,8 @@ func TestResolveTargetBySlotSkipsSparseIndexGap(t *testing.T) {
 // 1-3 range and never finds this target at all; only an actual
 // seek-forward (BlockAtOrAfterIndex) resolves it correctly.
 func TestResolveTargetBySlotSkipsSparseIndexGapAboveGap(t *testing.T) {
+	t.Parallel()
+
 	f := buildSparseTestChain(t, []uint64{1, 2, 3, 1000, 1001, 1002})
 
 	target, err := lifecycle.ResolveTargetBySlot(f.db, f.blocks[4].Slot)
@@ -171,6 +185,8 @@ func TestResolveTargetBySlotSkipsSparseIndexGapAboveGap(t *testing.T) {
 // TestResolveTargetBySlotSkipsSparseIndexGap's counterpart for
 // ResolveTargetByNumber, which has the identical binary-search structure.
 func TestResolveTargetByNumberSkipsSparseIndexGap(t *testing.T) {
+	t.Parallel()
+
 	f := buildSparseTestChain(t, []uint64{1, 2, 3, 1000, 1001, 1002})
 
 	target, err := lifecycle.ResolveTargetByNumber(f.db, f.blocks[1].Number)
@@ -182,6 +198,8 @@ func TestResolveTargetByNumberSkipsSparseIndexGap(t *testing.T) {
 // TestResolveTargetBySlotSkipsSparseIndexGapAboveGap's counterpart for
 // ResolveTargetByNumber.
 func TestResolveTargetByNumberSkipsSparseIndexGapAboveGap(t *testing.T) {
+	t.Parallel()
+
 	f := buildSparseTestChain(t, []uint64{1, 2, 3, 1000, 1001, 1002})
 
 	target, err := lifecycle.ResolveTargetByNumber(f.db, f.blocks[4].Number)
@@ -198,6 +216,8 @@ func TestResolveTargetByNumberSkipsSparseIndexGapAboveGap(t *testing.T) {
 // report 999 blocks removed even though only 3 (IDs 1000-1002) actually
 // exist and get deleted.
 func TestTruncateReportsActualDeletedCountForSparseIndex(t *testing.T) {
+	t.Parallel()
+
 	f := buildSparseTestChain(t, []uint64{1, 2, 3, 1000, 1001, 1002})
 	target := f.blocks[2] // ID 3
 
@@ -229,6 +249,8 @@ func TestTruncateReportsActualDeletedCountForSparseIndex(t *testing.T) {
 // TestTruncateRemovesBlocksAndIsIdempotentAtTip verifies that Truncate
 // removes everything past the target and is a zero-block no-op if repeated.
 func TestTruncateRemovesBlocksAndIsIdempotentAtTip(t *testing.T) {
+	t.Parallel()
+
 	f := buildTestChain(t, 5)
 	target := f.blocks[2] // truncate to block 3, removing 4 and 5
 
@@ -266,6 +288,8 @@ func TestTruncateRemovesBlocksAndIsIdempotentAtTip(t *testing.T) {
 // indexed blob chain still has a speculative tail; that tail must be removed
 // rather than treating the truncate as a no-op.
 func TestTruncateRemovesBlobTailAheadOfMetadataTip(t *testing.T) {
+	t.Parallel()
+
 	f := buildTestChain(t, 5)
 	target := f.blocks[2]
 	require.NoError(t, f.db.SetTip(ochainsync.Tip{
@@ -302,6 +326,8 @@ func TestTruncateRemovesBlobTailAheadOfMetadataTip(t *testing.T) {
 }
 
 func TestTruncateRejectsTargetInUnappliedBlobTail(t *testing.T) {
+	t.Parallel()
+
 	f := buildTestChain(t, 5)
 	metadataTarget := f.blocks[2]
 	require.NoError(t, f.db.SetTip(ochainsync.Tip{
@@ -331,6 +357,8 @@ func TestTruncateRejectsTargetInUnappliedBlobTail(t *testing.T) {
 // TestTruncateRejectsTargetAheadOfTip verifies that a target block ahead
 // of the current tip is rejected with an error.
 func TestTruncateRejectsTargetAheadOfTip(t *testing.T) {
+	t.Parallel()
+
 	f := buildTestChain(t, 3)
 	aheadTarget := testBlock(99, 0x63)
 	_, err := lifecycle.Truncate(
@@ -358,6 +386,8 @@ func TestTruncateRejectsTargetAheadOfTip(t *testing.T) {
 // only describe the same rollback when target is genuinely the block at
 // its own ID.
 func TestTruncateRejectsTargetWithMismatchedHash(t *testing.T) {
+	t.Parallel()
+
 	f := buildTestChain(t, 5)
 
 	target := f.blocks[2]
@@ -392,6 +422,8 @@ func TestTruncateRejectsTargetWithMismatchedHash(t *testing.T) {
 // two deletes cut at different points, silently diverging blob and
 // metadata history even though the Hash matched.
 func TestTruncateRejectsTargetWithMismatchedSlot(t *testing.T) {
+	t.Parallel()
+
 	f := buildTestChain(t, 5)
 
 	target := f.blocks[2]
@@ -423,6 +455,8 @@ func TestTruncateRejectsTargetWithMismatchedSlot(t *testing.T) {
 // slot/hash before that early return, Truncate would report success (zero
 // blocks removed) for a target that was never proven canonical.
 func TestTruncateRejectsTipIDTargetWithMismatchedHash(t *testing.T) {
+	t.Parallel()
+
 	f := buildTestChain(t, 5)
 
 	target := f.blocks[len(f.blocks)-1] // the tip's own ID
@@ -449,6 +483,8 @@ func TestTruncateRejectsTipIDTargetWithMismatchedHash(t *testing.T) {
 // TestTruncateRejectsTipIDTargetWithMismatchedHash's counterpart for a
 // forged Slot rather than a mismatched Hash, at the tip's own ID.
 func TestTruncateRejectsTipIDTargetWithMismatchedSlot(t *testing.T) {
+	t.Parallel()
+
 	f := buildTestChain(t, 5)
 
 	target := f.blocks[len(f.blocks)-1] // the tip's own ID
@@ -482,6 +518,8 @@ func TestTruncateRejectsTipIDTargetWithMismatchedSlot(t *testing.T) {
 // refuse such a target outright, before deleting anything, rather than
 // let that divergence happen.
 func TestTruncateRejectsTargetImmediatelyFollowedBySameSlotBlock(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	block1 := testBlock(1, 0x01)
@@ -531,6 +569,8 @@ func TestTruncateRejectsTargetImmediatelyFollowedBySameSlotBlock(t *testing.T) {
 // TestTruncateRejectsTargetBeforeMithrilBoundary verifies that a target
 // before the recorded Mithril floor is refused, but exactly at it is allowed.
 func TestTruncateRejectsTargetBeforeMithrilBoundary(t *testing.T) {
+	t.Parallel()
+
 	f := buildTestChain(t, 5)
 	boundarySlot := f.blocks[3].Slot
 	require.NoError(t, f.db.SetSyncState(
@@ -562,6 +602,8 @@ func TestTruncateRejectsTargetBeforeMithrilBoundary(t *testing.T) {
 // survive the failure, and a later call must finish the original operation
 // without needing to resolve the now-missing old tip first.
 func TestTruncateDetectsAndResumesInterruptedBatchedDelete(t *testing.T) {
+	t.Parallel()
+
 	f := buildTestChain(t, 5)
 	// n=3: Truncate's own pre-mutation ctx.Err() check (verifying a
 	// pre-cancelled caller never reaches setPendingTruncate) consumes the
@@ -627,6 +669,8 @@ const pendingTruncateSyncKey = "database_lifecycle_truncate_pending"
 // zero). Resuming with TargetID=0 would delete from the very first block
 // -- a full, unintended chain wipe -- instead of failing loudly.
 func TestGetPendingTruncateRejectsMarkerWithZeroTargetID(t *testing.T) {
+	t.Parallel()
+
 	f := buildTestChain(t, 5)
 	require.NoError(t, f.db.SetSyncState(
 		pendingTruncateSyncKey, `{"tipId":5}`, nil,
@@ -649,6 +693,8 @@ func TestGetPendingTruncateRejectsMarkerWithZeroTargetID(t *testing.T) {
 // MismatchedHash/Slot) -- this is that same on-lineage check, applied to
 // a resumed marker instead of a fresh target.
 func TestGetPendingTruncateRejectsMarkerNotMatchingActualBlock(t *testing.T) {
+	t.Parallel()
+
 	f := buildTestChain(t, 5)
 	target := f.blocks[1]
 	forgedHash := bytes.Repeat([]byte{0xFF}, 32)
@@ -667,6 +713,8 @@ func TestGetPendingTruncateRejectsMarkerNotMatchingActualBlock(t *testing.T) {
 // TestGetPendingTruncateRejectsMarkerWithCorruptedTipID verifies that changing
 // the deletion upper bound in an otherwise valid durable marker is detected.
 func TestGetPendingTruncateRejectsMarkerWithCorruptedTipID(t *testing.T) {
+	t.Parallel()
+
 	f := buildTestChain(t, 5)
 	ctx := &cancelAfterNErrChecks{Context: context.Background(), n: 3}
 	_, err := lifecycle.Truncate(ctx, f.db, f.blocks[1], 1, false, 0)
@@ -700,6 +748,8 @@ func TestGetPendingTruncateRejectsMarkerWithCorruptedTipID(t *testing.T) {
 // TestTruncateRejectsPendingMarkerAfterBlobTipAdvance verifies that a valid
 // marker cannot resume against blobs appended after its authenticated tip.
 func TestTruncateRejectsPendingMarkerAfterBlobTipAdvance(t *testing.T) {
+	t.Parallel()
+
 	f := buildTestChain(t, 5)
 	ctx := &cancelAfterNErrChecks{Context: context.Background(), n: 3}
 	_, err := lifecycle.Truncate(ctx, f.db, f.blocks[1], 1, false, 0)
@@ -746,6 +796,8 @@ func TestTruncateRejectsPendingMarkerAfterBlobTipAdvance(t *testing.T) {
 func TestTruncateResumesWithStaleHighestIndexAfterPartialCloudDelete(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	f := buildTestChain(t, 5)
 	target := f.blocks[1]
 	ctx := &cancelAfterNErrChecks{Context: context.Background(), n: 3}
@@ -791,6 +843,8 @@ func TestTruncateResumesWithStaleHighestIndexAfterPartialCloudDelete(
 // validation does not confuse the latest downloaded blob with the applied
 // metadata tip. BlockFetch is allowed to persist such a speculative tail.
 func TestTruncateResumesWhenBlobTipWasAheadOfMetadataTip(t *testing.T) {
+	t.Parallel()
+
 	f := buildTestChain(t, 5)
 	appliedTip := f.blocks[3]
 	require.NoError(t, f.db.SetTip(ochainsync.Tip{
@@ -829,6 +883,8 @@ func TestTruncateResumesWhenBlobTipWasAheadOfMetadataTip(t *testing.T) {
 func TestTruncateRejectsPreCancelledContextWithoutRecordingMarker(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	f := buildTestChain(t, 5)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

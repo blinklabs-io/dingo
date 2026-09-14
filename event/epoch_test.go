@@ -25,6 +25,8 @@ import (
 )
 
 func TestEpochTransitionEventType(t *testing.T) {
+	t.Parallel()
+
 	assert.Equal(
 		t,
 		event.EventType("epoch.transition"),
@@ -33,6 +35,8 @@ func TestEpochTransitionEventType(t *testing.T) {
 }
 
 func TestEpochTransitionEventPublishSubscribe(t *testing.T) {
+	t.Parallel()
+
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
 
@@ -72,6 +76,8 @@ func TestEpochTransitionEventPublishSubscribe(t *testing.T) {
 }
 
 func TestEpochTransitionEventSubscribeFunc(t *testing.T) {
+	t.Parallel()
+
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
 
@@ -111,6 +117,8 @@ func TestEpochTransitionEventSubscribeFunc(t *testing.T) {
 }
 
 func TestEpochTransitionEventMultipleSubscribers(t *testing.T) {
+	t.Parallel()
+
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
 
@@ -155,6 +163,8 @@ func TestEpochTransitionEventMultipleSubscribers(t *testing.T) {
 }
 
 func TestEpochTransitionEventZeroValues(t *testing.T) {
+	t.Parallel()
+
 	// Test that zero-value event works correctly
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()

@@ -22,18 +22,18 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
-	_ "github.com/glebarez/go-sqlite"
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
 )
 
 func TestCommitteeCredentialMigrationPreservesExistingRows(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
-	db, err := sql.Open("sqlite", "file:"+databasePath)
+	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 11)
+	require.Len(t, registry, 13)
 	runTo := func(versions []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,
@@ -145,7 +145,7 @@ func TestCommitteeCredentialMigrationPreservesExistingRows(t *testing.T) {
 
 func TestCommitteeTermStartBackfillResumesAfterInterruption(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
-	db, err := sql.Open("sqlite", "file:"+databasePath)
+	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
@@ -167,7 +167,9 @@ func TestCommitteeTermStartBackfillResumesAfterInterruption(t *testing.T) {
 	for slot := int64(1); slot <= 3; slot++ {
 		_, err = db.Exec(
 			"INSERT INTO committee_member (cold_cred_hash, expires_epoch, added_slot) VALUES (?, ?, ?)",
-			[]byte{byte(slot)}, 41, slot,
+			[]byte{byte(slot)},
+			41,
+			slot,
 		)
 		require.NoError(t, err)
 	}
@@ -179,11 +181,16 @@ func TestCommitteeTermStartBackfillResumesAfterInterruption(t *testing.T) {
 	interrupted.Backfill = func(ctx context.Context, batch migrations.Batch) (migrations.BatchResult, error) {
 		backfillCalls++
 		if backfillCalls == 2 {
-			return migrations.BatchResult{}, errors.New("intentional interruption")
+			return migrations.BatchResult{}, errors.New(
+				"intentional interruption",
+			)
 		}
 		return originalBackfill(ctx, batch)
 	}
-	interruptedRegistry := append(append([]migrations.Migration{}, registry[:8]...), interrupted)
+	interruptedRegistry := append(
+		append([]migrations.Migration{}, registry[:8]...),
+		interrupted,
+	)
 	require.Error(t, run(interruptedRegistry))
 	require.NoError(t, run(registry))
 

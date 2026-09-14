@@ -74,6 +74,8 @@ func crossEraLedger(t *testing.T) *LedgerState {
 // being traversed — whether the legacy loop or the new Summary-backed
 // delegation — must return the same absolute times.
 func TestSlotToTime_CrossEra(t *testing.T) {
+	t.Parallel()
+
 	ls := crossEraLedger(t)
 	sysStart := time.Date(2022, 10, 25, 0, 0, 0, 0, time.UTC)
 
@@ -101,6 +103,8 @@ func TestSlotToTime_CrossEra(t *testing.T) {
 
 // TestTimeToSlot_CrossEra round-trips cross-era slot→time→slot.
 func TestTimeToSlot_CrossEra(t *testing.T) {
+	t.Parallel()
+
 	ls := crossEraLedger(t)
 	for _, slot := range []uint64{0, 50, 199, 200, 250, 631, 700} {
 		t.Run((time.Duration(slot) * time.Second).String(), func(t *testing.T) {
@@ -115,6 +119,8 @@ func TestTimeToSlot_CrossEra(t *testing.T) {
 
 // TestSlotToEpoch_CrossEra verifies epoch lookup spans both eras correctly.
 func TestSlotToEpoch_CrossEra(t *testing.T) {
+	t.Parallel()
+
 	ls := crossEraLedger(t)
 	tests := []struct {
 		name      string

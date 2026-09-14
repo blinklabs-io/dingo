@@ -178,6 +178,53 @@ func (s *Store) GetNetworkState(
 	}, nil
 }
 
+// GetNetworkStateAsOfSlot resolves the most recent network-state row with
+// Slot <= the supplied slot, rather than GetNetworkState's always-latest
+// row -- see ledger's totalCirculatingSupply for why a historical
+// GetStakeDistribution answer needs this instead (blinklabs-io/dingo#382).
+// A slot older than every row ever written (e.g. before the first recorded
+// treasury/reserves change) returns (nil, nil), the same "not found" shape
+// GetNetworkState already uses.
+func (s *Store) GetNetworkStateAsOfSlot(
+	slot uint64,
+	txn types.Txn,
+) (*models.NetworkState, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, fmt.Errorf("get network state as of slot: %w", err)
+	}
+	queries := s.operationalQueries(db)
+	sqlSlot, err := checkedInt64(slot)
+	if err != nil {
+		return nil, fmt.Errorf("get network state as of slot: %w", err)
+	}
+	row, err := queries.GetNetworkStateAsOfSlot(ctx, sqlSlot)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get network state as of slot: %w", err)
+	}
+	treasury, err := strconv.ParseUint(row.Treasury, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("get network state as of slot treasury: %w", err)
+	}
+	reserves, err := strconv.ParseUint(row.Reserves, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("get network state as of slot reserves: %w", err)
+	}
+	rowSlot, err := checkedUint64(row.Slot)
+	if err != nil {
+		return nil, fmt.Errorf("get network state as of slot slot: %w", err)
+	}
+	return &models.NetworkState{
+		ID:       uint(row.ID),
+		Treasury: types.Uint64(treasury),
+		Reserves: types.Uint64(reserves),
+		Slot:     rowSlot,
+	}, nil
+}
+
 func (s *Store) GetSyncState(key string, txn types.Txn) (string, error) {
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {

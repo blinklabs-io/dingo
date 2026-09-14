@@ -46,6 +46,32 @@ import (
 // on that connection reports ErrRequestSlotAbandoned. That is why the backfill
 // classifies an abandoned slot as a dead connection rather than a cooldown
 // (see classifyLeiosFetchFailure).
+//
+// When parent already carries a deadline no later than the requested one, this
+// derives the request context with context.WithCancel(parent) instead of
+// context.WithDeadline(parent, deadline), reusing the parent's own
+// cancellation rather than arming a second, independent timer for what is, in
+// effect, the same deadline.
+//
+// This is not merely an optimization. context.WithDeadline only takes that
+// shortcut itself when the parent's deadline is *strictly earlier* than the
+// requested one; given two deadlines that are equal -- or, under clock skew or
+// scheduling delay, off by a few microseconds in either direction -- Go's own
+// check does not apply and a second, independent timer is armed alongside the
+// parent's. That second timer can then fire fractionally before the parent's
+// own does, so a caller reading the parent context's Err() immediately after
+// the request returns (as fetchEndorserBlockOnConn's cooldown classification
+// does) can observe it as not-yet-expired even though the request failed on
+// what is, in effect, the caller's own deadline -- misattributing a caller
+// timeout to the peer (dingo flake: TestFetchEndorserBlockByPointDeadlineDoesNotCoolDownPeer).
+// Reusing the parent's own cancellation instead of a second timer closes that
+// window structurally: there is then only one context object and one
+// cancellation to observe.
+//
+// A deadline genuinely earlier than the parent's still gets its own timer, as
+// before: that attempt is meant to fail over to another connection before the
+// caller's own budget elapses, and ctx.Err() being nil in that case correctly
+// means the caller has not given up.
 func leiosFetchRequestContext(
 	parent context.Context,
 	deadline time.Time,
@@ -53,13 +79,41 @@ func leiosFetchRequestContext(
 	if parent == nil {
 		parent = context.Background()
 	}
-	if !deadline.IsZero() {
-		return context.WithDeadline(parent, deadline)
+	if deadline.IsZero() {
+		return context.WithTimeout(
+			parent,
+			leiosFetchResponseTimeout,
+		)
 	}
-	return context.WithTimeout(
-		parent,
-		leiosFetchResponseTimeout,
-	)
+	parentDeadline, hasParentDeadline := parent.Deadline()
+	if leiosFetchRequestContextReusesParent(
+		parentDeadline,
+		hasParentDeadline,
+		deadline,
+	) {
+		return context.WithCancel(parent)
+	}
+	return context.WithDeadline(parent, deadline)
+}
+
+// leiosFetchRequestContextReusesParent reports whether leiosFetchRequestContext
+// should derive the request context from parent's own cancellation
+// (context.WithCancel) rather than arming an independent deadline timer
+// (context.WithDeadline) for deadline. It is a separate, directly-testable
+// predicate because the race it prevents -- two independent timers targeting
+// the same or nearly the same instant -- cannot be forced deterministically
+// through the timers themselves; asserting the decision is the reliable way
+// to pin the boundary. See leiosFetchRequestContext's doc comment for why the
+// equal-deadline case matters: context.WithDeadline only reuses parent's own
+// timer when parentDeadline is *strictly* earlier than deadline, so an equal
+// (or, under skew, marginally later) parentDeadline still gets its own timer
+// without this check.
+func leiosFetchRequestContextReusesParent(
+	parentDeadline time.Time,
+	hasParentDeadline bool,
+	deadline time.Time,
+) bool {
+	return hasParentDeadline && !parentDeadline.After(deadline)
 }
 
 // leiosBackfillConnCursor rotates the starting connection across backfill
@@ -347,8 +401,23 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 			unresolved = true
 			continue
 		}
+		// now anchors both remaining and attemptDeadline below to a single
+		// clock read, so a last/only candidate's attemptDeadline is computed
+		// as now.Add(overall.Sub(now)) -- algebraically exactly overall, with
+		// no drift from a second, later time.Now() call. A second read (as
+		// fetchEndorserBlockOnConn used to take internally) can only ever
+		// land later in wall-clock terms, which sounds harmless, but Go's
+		// context.WithDeadline only reuses the parent's own timer when the
+		// derived deadline is strictly *later* than the parent's; an
+		// attemptDeadline that drifted to exactly overall (or, under enough
+		// clock skew, slightly earlier) instead gets its own independent
+		// timer racing ctx's, so fetchEndorserBlockOnConn's ctx.Err() check
+		// can observe nil even though the request failed on what is, in
+		// effect, the caller's own deadline (see leiosFetchRequestContext).
+		now := time.Now()
+		remaining := overall.Sub(now)
 		budget := leiosBackfillAttemptBudget(
-			time.Until(overall),
+			remaining,
 			remainingCandidates+1,
 		)
 		if budget <= 0 {
@@ -359,6 +428,7 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 			unresolved = true
 			break
 		}
+		attemptDeadline := now.Add(budget)
 		// fetchEndorserBlockOnConn records the cooldown outcome
 		// (markFetchFailed/markFetchOK) itself, under the connection's fetch
 		// guard, so concurrent backfill fetches on the same connection publish
@@ -370,7 +440,7 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 			connId,
 			conn.LeiosFetch().Client,
 			point,
-			budget,
+			attemptDeadline,
 		)
 		// The recycle request is published here, with the connection's fetch
 		// guard already released, so no lock is held across an event-bus
@@ -483,14 +553,17 @@ func (o *Ouroboros) requestLeiosFetchConnRecycle(
 // (classifyLeiosFetchFailure), so a peer that merely does not hold the block is
 // not penalized like one that stalled.
 //
-// budget bounds this one connection's attempt; the caller allocates it from the
-// whole call's remaining budget.
+// deadline bounds this one connection's attempt; the caller derives it from
+// the whole call's remaining budget (see FetchEndorserBlockByPoint) and it
+// must be used as-is, not recomputed from a fresh time.Now() here -- see
+// leiosFetchRequestContext for why a second clock read is unsafe for the
+// last/only candidate, which gets the caller's entire remaining window.
 func (o *Ouroboros) fetchEndorserBlockOnConn(
 	ctx context.Context,
 	connId ouroboros.ConnectionId,
 	client *oleiosfetch.Client,
 	point ocommon.Point,
-	budget time.Duration,
+	deadline time.Time,
 ) (err error) {
 	g := o.leiosFetchGuardFor(connId)
 	// The strict leios-fetch client cannot accept a second request while a
@@ -507,8 +580,8 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 	// deadline error, this attempt is marked failed, and FetchEndorserBlockByPoint
 	// moves on to the next connection. Busy connections are skipped above, so the
 	// deadline can cover only serving time without leaving lock acquisition
-	// unbounded.
-	deadline := time.Now().Add(budget)
+	// unbounded. deadline is the caller's already-computed absolute value
+	// (see the doc comment above), not recomputed here.
 	// Runs before the deferred Unlock above (LIFO), so the cooldown state is
 	// published while the guard is still held and stays ordered with the fetch.
 	defer func() {

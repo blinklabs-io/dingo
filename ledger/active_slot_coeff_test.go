@@ -62,6 +62,8 @@ func newActiveSlotCoeffLedgerState(
 // the magnitude (~5.6e-17 relative) is far too small to account for the three
 // phantom slots per epoch reported there.
 func TestActiveSlotCoeffRatIsExactGenesisRational(t *testing.T) {
+	t.Parallel()
+
 	ls := newActiveSlotCoeffLedgerState(t, "0.05")
 
 	exact := ls.ActiveSlotCoeffRat()
@@ -80,6 +82,8 @@ func TestActiveSlotCoeffRatIsExactGenesisRational(t *testing.T) {
 // state through the returned pointer. big.Rat is mutable, and the leader
 // schedule hands this value to the consensus package.
 func TestActiveSlotCoeffRatReturnsCopy(t *testing.T) {
+	t.Parallel()
+
 	ls := newActiveSlotCoeffLedgerState(t, "0.05")
 
 	first := ls.ActiveSlotCoeffRat()
@@ -95,6 +99,8 @@ func TestActiveSlotCoeffRatReturnsCopy(t *testing.T) {
 // TestActiveSlotCoeffRatWithoutGenesis returns nil rather than a degenerate
 // zero value, so callers can fall back explicitly.
 func TestActiveSlotCoeffRatWithoutGenesis(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),

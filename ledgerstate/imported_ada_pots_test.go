@@ -33,6 +33,8 @@ import (
 // epoch's rewards for the life of the database, which is what makes such a
 // node reject canonical blocks near the eligibility threshold (#3165).
 func TestImportSeedsAdaPotsForTheImportedEpoch(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 

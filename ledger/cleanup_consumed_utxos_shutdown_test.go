@@ -72,6 +72,9 @@ func drainCleanupTimerFires(fires <-chan struct{}) {
 // self-perpetuating timer running against a database its owner closes
 // immediately after Close returns (LedgerState does not own the database --
 // see the note at the end of Close).
+// Not t.Parallel: shrinkCleanupConsumedUtxosInterval swaps the package-level
+// cleanupConsumedUtxosInterval, which every concurrent LedgerState in this
+// package would observe.
 func TestCleanupConsumedUtxos_TimerStopsOnClose(t *testing.T) {
 	shrinkCleanupConsumedUtxosInterval(t, 5*time.Millisecond)
 	db := newTestDBForCleanup(t, types.StorageModeCore)
@@ -161,6 +164,8 @@ func TestCleanupConsumedUtxos_CloseWaitsForActiveCallback(t *testing.T) {
 // seeded row and tip are deleted by the same call on an open ledger state, so
 // a passing result here cannot come from cleanup being inert.
 func TestCleanupConsumedUtxos_NoDatabaseWorkAfterClose(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDBForCleanup(t, types.StorageModeCore)
 	txId := bytes.Repeat([]byte{0xC5}, 32)
 	const (

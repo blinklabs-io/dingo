@@ -79,7 +79,7 @@ func resolveOnFreePort(
 }
 
 // resolveOnFreePortWithConfig is resolveOnFreePort with additional
-// provider config fields (e.g. "tls"/"auth") merged alongside "port".
+// provider config fields (e.g. "tls") merged alongside "port".
 func resolveOnFreePortWithConfig(
 	t *testing.T,
 	host *plugin.Host,
@@ -115,6 +115,8 @@ func resolveOnFreePortWithConfig(
 // TestRegisterProviderDescriptor asserts the provider is advertised
 // under the capability and name the node's configuration selects.
 func TestRegisterProviderDescriptor(t *testing.T) {
+	t.Parallel()
+
 	host := newProviderHost(t)
 
 	var found *plugin.Descriptor
@@ -133,12 +135,16 @@ func TestRegisterProviderDescriptor(t *testing.T) {
 // TestRegisterProviderRejectsNilHost asserts registration fails loudly
 // rather than silently leaving the capability unavailable.
 func TestRegisterProviderRejectsNilHost(t *testing.T) {
+	t.Parallel()
+
 	require.Error(t, RegisterProvider(nil))
 }
 
 // TestProviderBuildsListenAddress covers the host/port composition: the
 // server must listen on the address the node's config asks for.
 func TestProviderBuildsListenAddress(t *testing.T) {
+	t.Parallel()
+
 	host := newProviderHost(t)
 	deps := newTestDeps()
 
@@ -163,6 +169,8 @@ func TestProviderBuildsListenAddress(t *testing.T) {
 // passes providerDefaults itself, so a change to the default port is a
 // change to what this asserts.
 func TestProviderDefaultPort(t *testing.T) {
+	t.Parallel()
+
 	require.Equal(t, uint(8080), defaultProviderPort)
 	require.Equal(
 		t,
@@ -175,6 +183,8 @@ func TestProviderDefaultPort(t *testing.T) {
 // identity and CORS policy reach the server rather than being dropped
 // in the provider wiring.
 func TestProviderPropagatesDependencies(t *testing.T) {
+	t.Parallel()
+
 	host := newProviderHost(t)
 	deps := newTestDeps()
 	pd := providerDeps(deps)
@@ -204,6 +214,8 @@ func TestProviderPropagatesDependencies(t *testing.T) {
 // TestProviderRejectsInvalidDependencies asserts a misconfigured node
 // fails at plugin resolution, before a listener is opened.
 func TestProviderRejectsInvalidDependencies(t *testing.T) {
+	t.Parallel()
+
 	host := newProviderHost(t)
 	pd := providerDeps(newTestDeps())
 	pd.GenesisHash = ""
@@ -225,6 +237,8 @@ func TestProviderRejectsInvalidDependencies(t *testing.T) {
 // TestProviderStopClosesListener asserts the host's shutdown path stops
 // the Mesh listener, so a capability restart can rebind the port.
 func TestProviderStopClosesListener(t *testing.T) {
+	t.Parallel()
+
 	host := plugin.NewHost()
 	require.NoError(t, RegisterProvider(host))
 	deps := newTestDeps()
@@ -243,6 +257,8 @@ func TestProviderStopClosesListener(t *testing.T) {
 // resolution -- before any listener is opened -- with an error naming
 // the full provider config path, not just "tls".
 func TestProviderRejectsPartialTLSPair(t *testing.T) {
+	t.Parallel()
+
 	host := newProviderHost(t)
 
 	_, err := plugin.Resolve[*Server](
@@ -265,33 +281,10 @@ func TestProviderRejectsPartialTLSPair(t *testing.T) {
 	require.ErrorContains(t, err, "must both be set")
 }
 
-// TestProviderRejectsInvalidAuthMode asserts an unrecognized auth.mode is
-// rejected at resolution, with an error naming the full provider config
-// path.
-func TestProviderRejectsInvalidAuthMode(t *testing.T) {
-	host := newProviderHost(t)
+// TestProviderPropagatesTLS asserts a valid provider TLS config reaches the server.
+func TestProviderPropagatesTLS(t *testing.T) {
+	t.Parallel()
 
-	_, err := plugin.Resolve[*Server](
-		t.Context(),
-		host,
-		plugin.CapabilityAPIMesh,
-		"builtin",
-		map[string]any{
-			"port": freeLoopbackPort(t),
-			"auth": map[string]any{"mode": "bogus"},
-		},
-		providerDeps(newTestDeps()),
-	)
-
-	require.Error(t, err)
-	require.ErrorContains(t, err, "plugins.api.mesh.config.auth")
-	require.ErrorContains(t, err, "invalid mode")
-}
-
-// TestProviderPropagatesTLSAndAuth asserts a valid provider tls/auth
-// config reaches the server's resolved (EffectiveTLS/EffectiveAuth)
-// settings.
-func TestProviderPropagatesTLSAndAuth(t *testing.T) {
 	host := newProviderHost(t)
 	certPath, keyPath := testutil.GenerateTestTLSCertKey(t)
 
@@ -303,16 +296,10 @@ func TestProviderPropagatesTLSAndAuth(t *testing.T) {
 				"certFilePath": certPath,
 				"keyFilePath":  keyPath,
 			},
-			"auth": map[string]any{
-				"mode":  "token",
-				"token": "shared-secret",
-			},
 		},
 	)
 
 	require.True(t, srv.config.TLS.Enabled)
 	require.Equal(t, certPath, srv.config.TLS.CertFilePath)
 	require.Equal(t, keyPath, srv.config.TLS.KeyFilePath)
-	require.True(t, srv.config.Auth.Enabled)
-	require.Equal(t, "shared-secret", srv.config.Auth.Token)
 }

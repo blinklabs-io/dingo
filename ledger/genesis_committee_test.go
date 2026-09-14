@@ -31,9 +31,9 @@ import (
 // The Musashi Conway genesis declares three genesis committee members, all
 // key-hash cold credentials, each expiring at epoch 293.
 var musashiGenesisCommitteeColdKeys = []string{
-	"4a45ab0e4dc24e2567d282adc3928a69e6b6a8e155a9b14ae7147c21",
-	"6bb088d6ada8d97d130a8e3406360fbdf39be38b699a77778d26ae72",
-	"c3c5d6f905a91c12ea51b328953ccee359efb2cff6130d9fee8dea05",
+	"0fa32e5f69a89afa3f5e1074660b975dde8e5a89c1b8004d49501e33",
+	"518a0c96344656d332625e33aa680b6c25bbce6b5972a30adf1dce8d",
+	"8feda2412bec6f79bc5996a5055bcff28d230cb9c85fb9d5e8743a46",
 }
 
 const musashiGenesisCommitteeExpiry = 293
@@ -46,6 +46,8 @@ const musashiGenesisCommitteeExpiry = 293
 // "not a CC member" even though the real chain has recognized it since the
 // hard fork.
 func TestCreateGenesisBlockSeedsCommittee(t *testing.T) {
+	t.Parallel()
+
 	ls, _ := genesisConstitutionTestState(t)
 	require.NoError(t, ls.createGenesisBlock())
 
@@ -58,9 +60,18 @@ func TestCreateGenesisBlockSeedsCommittee(t *testing.T) {
 			Credential: lcommon.NewBlake2b224(coldKey),
 		})
 		require.NoError(t, err)
-		require.NotNil(t, member, "genesis committee member %s must resolve", coldKeyHex)
+		require.NotNil(
+			t,
+			member,
+			"genesis committee member %s must resolve",
+			coldKeyHex,
+		)
 		require.False(t, member.Resigned)
-		require.Equal(t, uint64(musashiGenesisCommitteeExpiry), member.ExpiryEpoch)
+		require.Equal(
+			t,
+			uint64(musashiGenesisCommitteeExpiry),
+			member.ExpiryEpoch,
+		)
 	}
 }
 
@@ -73,6 +84,8 @@ func TestCreateGenesisBlockSeedsCommittee(t *testing.T) {
 // genesis-creation transaction. Seeding only from that transaction would
 // therefore fix new nodes and leave every existing one broken.
 func TestCreateGenesisBlockSeedsCommitteeOnExistingDatabase(t *testing.T) {
+	t.Parallel()
+
 	ls, db := genesisConstitutionTestState(t)
 
 	// Stand in for a database written by a build with no committee seed:
@@ -101,7 +114,11 @@ func TestCreateGenesisBlockSeedsCommitteeOnExistingDatabase(t *testing.T) {
 			"genesis committee member %s must be backfilled on an existing database",
 			coldKeyHex,
 		)
-		require.Equal(t, uint64(musashiGenesisCommitteeExpiry), member.ExpiryEpoch)
+		require.Equal(
+			t,
+			uint64(musashiGenesisCommitteeExpiry),
+			member.ExpiryEpoch,
+		)
 	}
 }
 
@@ -110,11 +127,17 @@ func TestCreateGenesisBlockSeedsCommitteeOnExistingDatabase(t *testing.T) {
 // leaves a single row per member rather than a duplicate soft-delete/insert
 // pair.
 func TestCreateGenesisBlockCommitteeReplayIdempotent(t *testing.T) {
+	t.Parallel()
+
 	ls, db := genesisConstitutionTestState(t)
 	require.NoError(t, ls.createGenesisBlock())
 	require.NoError(t, ls.createGenesisBlock())
 
-	require.Equal(t, len(musashiGenesisCommitteeColdKeys), committeeMemberRowCount(t, db))
+	require.Equal(
+		t,
+		len(musashiGenesisCommitteeColdKeys),
+		committeeMemberRowCount(t, db),
+	)
 }
 
 // TestCreateGenesisBlockCommitteeEnactmentWins proves a real UpdateCommittee
@@ -123,6 +146,8 @@ func TestCreateGenesisBlockCommitteeReplayIdempotent(t *testing.T) {
 // genesis term -- the hazard a naive unconditional reseed on every startup
 // would create.
 func TestCreateGenesisBlockCommitteeEnactmentWins(t *testing.T) {
+	t.Parallel()
+
 	ls, db := genesisConstitutionTestState(t)
 	require.NoError(t, ls.createGenesisBlock())
 
@@ -161,13 +186,19 @@ func TestCreateGenesisBlockCommitteeEnactmentWins(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.NotNil(t, other)
-		require.Equal(t, uint64(musashiGenesisCommitteeExpiry), other.ExpiryEpoch)
+		require.Equal(
+			t,
+			uint64(musashiGenesisCommitteeExpiry),
+			other.ExpiryEpoch,
+		)
 	}
 }
 
 // TestParseGenesisCommitteeCredential exercises both credential prefixes and
 // the rejection paths for malformed genesis committee member keys.
 func TestParseGenesisCommitteeCredential(t *testing.T) {
+	t.Parallel()
+
 	keyHash := bytes.Repeat([]byte{0xab}, 28)
 	tag, hash, err := parseGenesisCommitteeCredential(
 		"keyHash-" + hex.EncodeToString(keyHash),
@@ -203,6 +234,8 @@ func TestParseGenesisCommitteeCredential(t *testing.T) {
 // store's unsigned epoch would wrap it to a near-maximum uint64 -- a term no
 // epoch boundary would ever expire -- so the seed must refuse it outright.
 func TestEnsureGenesisCommitteeRejectsNegativeExpiry(t *testing.T) {
+	t.Parallel()
+
 	ls, db := genesisConstitutionTestState(t)
 
 	// The embedded config is parsed fresh on every load, so mutating this
@@ -241,6 +274,8 @@ func TestEnsureGenesisCommitteeRejectsNegativeExpiry(t *testing.T) {
 func TestEnsureGenesisCommitteeRejectsNegativeExpiryWhenAlreadySeeded(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, db := genesisConstitutionTestState(t)
 	require.NoError(t, ls.createGenesisBlock())
 	seeded := committeeMemberRowCount(t, db)
@@ -266,6 +301,8 @@ func TestEnsureGenesisCommitteeRejectsNegativeExpiryWhenAlreadySeeded(
 // directly, including the most negative int, which is the value a straight
 // conversion wraps furthest.
 func TestGenesisCommitteeExpiryEpoch(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name    string
 		expiry  int

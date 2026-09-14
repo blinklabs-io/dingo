@@ -37,6 +37,8 @@ import (
 func TestVerifyRegisteredVrfKey_RejectsUnregisteredOrMismatchedKey(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{71}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 
@@ -102,6 +104,8 @@ func TestVerifyRegisteredVrfKey_RejectsUnregisteredOrMismatchedKey(
 func TestVerifyRegisteredVrfKeyAcceptsAFirstRegistrationInsideTheCapturedEpoch(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{76}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	blockSlot := tb.block.SlotNumber()
@@ -153,6 +157,8 @@ func TestVerifyRegisteredVrfKeyAcceptsAFirstRegistrationInsideTheCapturedEpoch(
 func TestVerifyRegisteredVrfKey_AcceptsMatchingKeyRejectsMismatch(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	// --- Matching registered VRF key is accepted ---
 	tbMatch := createTestBlock(t, [32]byte{72}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tbMatch.epochNonce)
@@ -172,7 +178,10 @@ func TestVerifyRegisteredVrfKey_AcceptsMatchingKeyRejectsMismatch(
 
 	require.NoError(
 		t,
-		ls.verifyRegisteredVrfKey(tbMatch.block, blockEpochId(t, ls, tbMatch.block)),
+		ls.verifyRegisteredVrfKey(
+			tbMatch.block,
+			blockEpochId(t, ls, tbMatch.block),
+		),
 		"block whose header VRF key hashes to the pool's registered "+
 			"VRF key hash must be accepted",
 	)
@@ -199,7 +208,10 @@ func TestVerifyRegisteredVrfKey_AcceptsMatchingKeyRejectsMismatch(
 	mismatchPoolKeyHash := tbMismatch.block.IssuerVkey().Hash()
 	seedPoolRegistration(t, db, mismatchPoolKeyHash[:], wrongVrfKeyHash)
 
-	err = ls.verifyRegisteredVrfKey(tbMismatch.block, blockEpochId(t, ls, tbMismatch.block))
+	err = ls.verifyRegisteredVrfKey(
+		tbMismatch.block,
+		blockEpochId(t, ls, tbMismatch.block),
+	)
 	require.Error(
 		t,
 		err,
@@ -212,6 +224,8 @@ func TestVerifyRegisteredVrfKey_AcceptsMatchingKeyRejectsMismatch(
 func TestVerifyRegisteredVrfKey_AcceptsRetiredPoolRegistration(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{74}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 
@@ -285,6 +299,8 @@ VALUES (?, ?, 2, 2)`,
 func TestVerifyRegisteredVrfKey_UsesLatestRegistrationBeforePoolRowHash(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{75}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 

@@ -45,6 +45,8 @@ func runActivate(
 // on, activating at epoch E stamps every pre-existing active account
 // to E + DelegatorInactivity and durably records the activation marker.
 func TestActivateDelegatorInactivityIfNeeded_GateOn(t *testing.T) {
+	t.Parallel()
+
 	const (
 		epoch      = uint64(200)
 		inactivity = uint64(90)
@@ -92,6 +94,8 @@ func TestActivateDelegatorInactivityIfNeeded_GateOn(t *testing.T) {
 // from re-stamping an account whose expiration has since moved on (either
 // through ordinary CIP-0163 renewal or a manual operator adjustment).
 func TestActivateDelegatorInactivityIfNeeded_RunsOnce(t *testing.T) {
+	t.Parallel()
+
 	const (
 		epoch      = uint64(200)
 		inactivity = uint64(90)
@@ -136,6 +140,8 @@ func TestActivateDelegatorInactivityIfNeeded_RunsOnce(t *testing.T) {
 // marker (so turning the gate on later still triggers a real activation on
 // the next boundary).
 func TestActivateDelegatorInactivityIfNeeded_GateOff(t *testing.T) {
+	t.Parallel()
+
 	const epoch = uint64(200)
 	ls, db := newRenewTestLedger(t, false, 90)
 

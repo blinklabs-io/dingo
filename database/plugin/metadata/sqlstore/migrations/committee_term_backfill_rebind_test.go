@@ -21,8 +21,8 @@ import (
 	"strings"
 	"testing"
 
-	_ "github.com/glebarez/go-sqlite"
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
 )
 
 // The committee term-start backfill is data driven, so its SQL never passes
@@ -30,7 +30,7 @@ import (
 // see its own placeholders, which is why Batch carries the rebinder.
 func TestCommitteeTermStartBackfillUsesDialectPlaceholders(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
-	db, err := sql.Open("sqlite", "file:"+databasePath)
+	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 
@@ -70,7 +70,7 @@ func TestCommitteeTermStartBackfillUsesDialectPlaceholders(t *testing.T) {
 // Batch.Rebind is never nil, so a backfill can call it unconditionally.
 func TestBackfillBatchRebindDefaultsToIdentity(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
-	db, err := sql.Open("sqlite", "file:"+databasePath)
+	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 
