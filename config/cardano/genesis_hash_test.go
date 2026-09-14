@@ -17,6 +17,8 @@ package cardano
 import (
 	"bytes"
 	"io"
+	"os/exec"
+	"strings"
 	"testing"
 
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -259,6 +261,12 @@ func TestEveryEmbeddedNetworkIsPinnedOrExempt(t *testing.T) {
 // Byron is covered by the same property through a different mechanism:
 // canonicalizeByronGenesisJSON re-serializes the parsed document, which
 // discards the original whitespace entirely.
+//
+// Both forms are derived here rather than read from the file as-is. The
+// embedded bytes are whatever the working tree holds, and a Windows checkout
+// converts text files to CRLF by default, so treating them as the LF form
+// would build "\r\r\n" from an already-converted file and compare against a
+// hash no platform computes.
 func TestEmbeddedGenesisHashIsLineEndingInvariant(t *testing.T) {
 	t.Parallel()
 
@@ -269,15 +277,10 @@ func TestEmbeddedGenesisHashIsLineEndingInvariant(t *testing.T) {
 			f, err := EmbeddedConfigFS.Open(network + "/shelley-genesis.json")
 			require.NoError(t, err)
 			defer f.Close()
-			lf, err := io.ReadAll(f)
+			raw, err := io.ReadAll(f)
 			require.NoError(t, err)
-			require.Zero(
-				t,
-				bytes.Count(lf, []byte("\r")),
-				"%s shelley genesis has carriage returns; the committed bytes must use LF",
-				network,
-			)
 
+			lf := replaceGenesisLineEndings(raw)
 			crlf := bytes.ReplaceAll(lf, []byte("\n"), []byte("\r\n"))
 			require.NotEqual(t, lf, crlf, "conversion produced no change")
 
@@ -303,8 +306,9 @@ func TestEmbeddedGenesisHashIsLineEndingInvariant(t *testing.T) {
 			)
 			require.NoError(t, err)
 			defer byronFile.Close()
-			byronLF, err := io.ReadAll(byronFile)
+			byronRaw, err := io.ReadAll(byronFile)
 			require.NoError(t, err)
+			byronLF := replaceGenesisLineEndings(byronRaw)
 			byronCRLF := bytes.ReplaceAll(
 				byronLF,
 				[]byte("\n"),
@@ -327,4 +331,90 @@ func TestEmbeddedGenesisHashIsLineEndingInvariant(t *testing.T) {
 			}
 		})
 	}
+}
+
+// committedRepoRoot returns the top level of the repository checkout, or skips
+// when there is none to read. A module fetched from the proxy has no .git, and
+// the property under test is about committed content, so there is nothing to
+// assert in that case.
+func committedRepoRoot(t *testing.T) string {
+	t.Helper()
+
+	out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		t.Skipf(
+			"cannot read committed bytes: git rev-parse --show-toplevel failed: %v",
+			err,
+		)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// committedBytes returns the bytes of repoPath as committed at HEAD. git
+// cat-file emits the blob itself, so the result is independent of the
+// platform's checkout conversion and of any in-place edit to the working tree.
+func committedBytes(t *testing.T, root, repoPath string) []byte {
+	t.Helper()
+
+	cmd := exec.Command("git", "-C", root, "cat-file", "blob", "HEAD:"+repoPath)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	require.NoError(
+		t,
+		err,
+		"read committed %s: %s",
+		repoPath,
+		strings.TrimSpace(stderr.String()),
+	)
+	return out
+}
+
+// TestCommittedGenesisFilesUseLF checks that no genesis or checkpoints file is
+// committed with carriage returns.
+//
+// This reads the blob out of git rather than the working tree on purpose. The
+// working tree is a per-platform artifact: git converts text files to CRLF on
+// a Windows checkout by default, so a no-carriage-return assertion over the
+// embedded bytes asserts a property that platform does not have. What the
+// repository can promise is about what is committed, and that is the same
+// everywhere.
+//
+// The hash tests cannot stand in for this. replaceGenesisLineEndings
+// normalizes before hashing, so a file committed with CRLF still produces the
+// pinned constant and leaves every other test here green. This is the only
+// check that fails on it.
+func TestCommittedGenesisFilesUseLF(t *testing.T) {
+	t.Parallel()
+
+	root := committedRepoRoot(t)
+	entries, err := EmbeddedConfigFS.ReadDir(".")
+	require.NoError(t, err)
+
+	checked := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		network := entry.Name()
+		files, err := EmbeddedConfigFS.ReadDir(network)
+		require.NoError(t, err)
+		for _, file := range files {
+			name := file.Name()
+			if !strings.HasSuffix(name, "-genesis.json") &&
+				name != "checkpoints.json" {
+				continue
+			}
+			checked++
+			// git addresses blobs with forward slashes on every platform.
+			repoPath := "config/cardano/" + network + "/" + name
+			assert.Zero(
+				t,
+				bytes.Count(committedBytes(t, root, repoPath), []byte("\r")),
+				"%s is committed with carriage returns; genesis files must be committed with LF",
+				repoPath,
+			)
+		}
+	}
+	require.NotZero(t, checked, "no genesis files found")
 }
