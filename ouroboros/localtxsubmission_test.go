@@ -172,7 +172,10 @@ func TestLocalTxSubmissionRejectReason_InputSetEmptyIsStructured(t *testing.T) {
 		gledger.EraIdMary:     "81820381820082048103",
 		gledger.EraIdAlonzo:   "818204818200820082048103",
 		gledger.EraIdBabbage:  "818205818200820282018103",
-		gledger.EraIdConway:   "81820681820082008104",
+		// Conway LEDGER uses UtxowFailure tag 1, unlike Shelley–Babbage tag 0.
+		// cardano-ledger 2c33b4f858c0e62b300d121996a479f505d8c0e5,
+		// eras/conway/impl/src/Cardano/Ledger/Conway/Rules/Ledger.hs.
+		gledger.EraIdConway:   "81820681820182008104",
 		gledger.EraIdDijkstra: "818207818201820182008104",
 	}
 	for era, fixture := range fixtures {

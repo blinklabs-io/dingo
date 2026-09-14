@@ -152,6 +152,8 @@ func (e *hardForkApplyTxError) MarshalCBOR() ([]byte, error) {
 			dijkstraMempoolLedgerFailure,
 			[]any{dijkstraLedgerUtxowFailure, e.utxowFailure()},
 		}
+	case e.inputSetEmpty && e.era == gledger.EraIdConway:
+		failure = []any{conwayLedgerUtxowFailure, e.utxowFailure()}
 	case e.inputSetEmpty:
 		failure = []any{gledger.ApplyTxErrorUtxowFailure, e.utxowFailure()}
 	case e.era == gledger.EraIdDijkstra:
@@ -184,6 +186,7 @@ func (e *unrepresentableTxSubmissionError) MarshalCBOR() ([]byte, error) {
 }
 
 const (
+	conwayLedgerUtxowFailure      = 1
 	conwayLedgerMempoolFailure    = 7
 	dijkstraMempoolFailure        = 2
 	dijkstraMempoolLedgerFailure  = 1
