@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -92,6 +93,74 @@ const sqliteCommonPragmas = "&_pragma=busy_timeout(30000)" +
 	"&_pragma=cache_size(-50000)" +
 	"&_pragma=foreign_keys(1)" +
 	"&_pragma=mmap_size(268435456)"
+
+// checkpointInterval is how often checkpointWAL forces a WAL checkpoint,
+// independent of the commit-triggered wal_autocheckpoint(10000) pragma above.
+//
+// wal_autocheckpoint only ever runs a PASSIVE checkpoint (that is what
+// SQLite's auto-checkpoint mechanism invokes internally), and PASSIVE -- like
+// FULL and RESTART -- backfills WAL frames into metadata.sqlite and lets
+// future writes reuse the reclaimed space, but never calls ftruncate on the
+// -wal file itself: only SQLITE_CHECKPOINT_TRUNCATE does that. Verified
+// directly against a copy of a live, actively-growing metadata.sqlite: with
+// zero readers blocking it (every attempt reported busy=0 with
+// checkpointed==log, i.e. a fully successful checkpoint), PASSIVE, FULL, and
+// RESTART each left a 68062432-byte -wal file at exactly 68062432 bytes,
+// while TRUNCATE alone dropped it to 0. So dingo_database_sql_wal_bytes (a
+// plain os.Stat of that file -- see metrics.go) can never show a single
+// decrease under wal_autocheckpoint alone, no matter how well passive
+// checkpointing is working underneath -- the file's on-disk footprint is a
+// high-water mark that only grows or holds steady until something truncates
+// it. checkpointWAL is that something: a periodic, independent TRUNCATE
+// checkpoint so the WAL's on-disk size actually has a ceiling instead of
+// only ever growing to whatever the largest inter-checkpoint write burst has
+// been so far.
+const checkpointInterval = 2 * time.Minute
+
+// checkpointWAL returns a Store.Checkpoint callback that forces
+// PRAGMA wal_checkpoint(TRUNCATE) against writeDB on checkpointInterval's
+// ticker (see openSQLStore).
+//
+// writeDB, not readDB, is the right pool to issue this against: writeDB is
+// capped at SetMaxOpenConns(1) (see this file's Config wiring), so
+// database/sql itself serializes the checkpoint query behind any write
+// transaction already using that single connection -- it cannot run
+// concurrently with (or interrupt) an in-flight write, only ever run between
+// one write transaction's Commit and the next one's BeginTx. SQLite tracks
+// WAL locks at the shared-memory/file level rather than per database/sql
+// pool, so issuing the pragma from writeDB still correctly waits for (or
+// reports busy against) any reader holding a snapshot open through readDB's
+// separate connections.
+//
+// TRUNCATE, not the safer-sounding RESTART, is deliberate: checkpointInterval's
+// doc comment above shows RESTART does not shrink the file at all, so it
+// cannot make dingo_database_sql_wal_bytes move. TRUNCATE additionally waits
+// (bounded by the busy_timeout(30000) pragma already on this connection) for
+// any reader still holding an old snapshot before it can truncate; if that
+// wait is exceeded, PRAGMA wal_checkpoint reports busy=1 with a partial
+// checkpointed count rather than an error or a blocked call -- logged at Warn
+// so a persistently blocked checkpoint (rather than a single slow tick) is
+// visible to an operator, and left for the next tick to retry rather than
+// retried in a loop here.
+func checkpointWAL(writeDB *sql.DB, logger *slog.Logger) func(context.Context) error {
+	return func(ctx context.Context) error {
+		var busy, walLog, checkpointed int
+		row := writeDB.QueryRowContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
+		if err := row.Scan(&busy, &walLog, &checkpointed); err != nil {
+			return fmt.Errorf("WAL checkpoint: %w", err)
+		}
+		if busy != 0 {
+			logger.Warn(
+				"WAL checkpoint(TRUNCATE) could not fully complete "+
+					"(a reader is still holding an old snapshot); "+
+					"will retry next tick",
+				"wal_frames", walLog,
+				"checkpointed_frames", checkpointed,
+			)
+		}
+		return nil
+	}
+}
 
 // walConversionTimeout bounds how long a node waits for another opener to
 // finish converting a freshly created database to WAL. It matches the
@@ -220,6 +289,7 @@ func openSQLStore(
 		prepare      func(context.Context) error
 		diskSizeFunc func() (int64, error)
 		maintenance  func(context.Context) error
+		checkpoint   func(context.Context) error
 		backupTo     func(context.Context, string) error
 		restoreFrom  func(context.Context, string) error
 		databasePath string
@@ -292,6 +362,11 @@ func openSQLStore(
 			_, err := writeDB.ExecContext(ctx, "VACUUM")
 			return err
 		}
+		checkpointLogger := dependencies.Logger
+		if checkpointLogger == nil {
+			checkpointLogger = slog.Default()
+		}
+		checkpoint = checkpointWAL(writeDB, checkpointLogger)
 		backupTo = func(ctx context.Context, dstPath string) error {
 			return backupSQLite(ctx, databasePath, dataDir, dstPath)
 		}
@@ -312,6 +387,8 @@ func openSQLStore(
 		DiskSize:            diskSizeFunc,
 		Maintenance:         maintenance,
 		MaintenanceInterval: 24 * time.Hour,
+		Checkpoint:          checkpoint,
+		CheckpointInterval:  checkpointInterval,
 		BackupTo:            backupTo,
 		RestoreFrom:         restoreFrom,
 		PromRegistry:        dependencies.PromRegistry,

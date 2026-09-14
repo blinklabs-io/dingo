@@ -54,6 +54,16 @@ type Config struct {
 	// migration readiness gate succeeds. SQLite uses it for periodic VACUUM.
 	Maintenance         func(context.Context) error
 	MaintenanceInterval time.Duration
+	// Checkpoint is an optional provider-owned hook run on its own ticker,
+	// independent of Maintenance/MaintenanceInterval: SQLite uses it to force
+	// a periodic WAL checkpoint (see sqlite.checkpointWAL) so the on-disk WAL
+	// file has a hard, bounded ceiling regardless of how long any individual
+	// read snapshot is held open, rather than relying solely on the
+	// commit-triggered wal_autocheckpoint passive checkpoint. Left unset (or
+	// CheckpointInterval <= 0), this ticker never starts -- the same
+	// convention Maintenance/MaintenanceInterval already use.
+	Checkpoint         func(context.Context) error
+	CheckpointInterval time.Duration
 	// BackupTo and RestoreFrom are optional provider-owned lifecycle hooks.
 	// SQLite supplies them for its file-backed store; other dialects may leave
 	// them unset until a native snapshot mechanism is available.
@@ -124,12 +134,21 @@ type Store struct {
 	maintenanceCancel context.CancelFunc
 	maintenanceDone   chan struct{}
 	maintenanceState  atomic.Uint32
-	ready             atomic.Bool
-	closed            atomic.Bool
-	startMu           sync.Mutex
-	bulkMu            sync.RWMutex
-	bulkConnMu        sync.Mutex
-	bulkConn          *sql.Conn
+
+	// checkpoint/checkpointEvery back an independent ticker from
+	// maintenance/maintenanceEvery -- see Config.Checkpoint's doc comment for
+	// why WAL checkpointing needs a much shorter cadence than VACUUM.
+	checkpoint       func(context.Context) error
+	checkpointEvery  time.Duration
+	checkpointCancel context.CancelFunc
+	checkpointDone   chan struct{}
+	checkpointState  atomic.Uint32
+	ready            atomic.Bool
+	closed           atomic.Bool
+	startMu          sync.Mutex
+	bulkMu           sync.RWMutex
+	bulkConnMu       sync.Mutex
+	bulkConn         *sql.Conn
 
 	closeOnce sync.Once
 	closeErr  error
@@ -198,6 +217,8 @@ func New(config Config) (*Store, error) {
 		diskSize:                    config.DiskSize,
 		maintenance:                 config.Maintenance,
 		maintenanceEvery:            config.MaintenanceInterval,
+		checkpoint:                  config.Checkpoint,
+		checkpointEvery:             config.CheckpointInterval,
 		backupTo:                    config.BackupTo,
 		restoreFrom:                 config.RestoreFrom,
 		prepare:                     config.Prepare,
@@ -349,9 +370,11 @@ func (s *Store) Start(ctx context.Context) error {
 	// failure here does not abort Start.
 	s.prepareHotStatements(ctx)
 	s.ready.Store(true)
-	// Maintenance owns its own lifetime and must not inherit the startup
-	// context, which callers commonly cancel as soon as Start returns.
-	s.startMaintenance() //nolint:contextcheck
+	// Maintenance and the checkpoint ticker both own their own lifetime and
+	// must not inherit the startup context, which callers commonly cancel as
+	// soon as Start returns.
+	s.startMaintenance()      //nolint:contextcheck
+	s.startCheckpointTicker() //nolint:contextcheck
 	return nil
 }
 
@@ -422,9 +445,10 @@ func (s *Store) Close() error {
 	return s.CloseContext(context.Background())
 }
 
-// CloseContext cancels maintenance and closes each owned pool. The lifecycle
-// context is also passed to the maintenance wait so cancellation can interrupt
-// a long-running VACUUM before the provider shutdown deadline expires.
+// CloseContext cancels maintenance and the checkpoint ticker and closes each
+// owned pool. The lifecycle context is also passed to those waits so
+// cancellation can interrupt a long-running VACUUM or in-flight checkpoint
+// before the provider shutdown deadline expires.
 func (s *Store) CloseContext(ctx context.Context) error {
 	if ctx == nil {
 		return errors.New("sqlstore: close context is nil")
@@ -433,6 +457,7 @@ func (s *Store) CloseContext(ctx context.Context) error {
 	defer s.startMu.Unlock()
 	s.closeOnce.Do(func() {
 		s.closeMaintenanceAdmission()
+		s.closeCheckpointAdmission()
 		s.closed.Store(true)
 		s.ready.Store(false)
 		// Invalidate the prepared-statement cache before the pools it was
@@ -449,10 +474,29 @@ func (s *Store) CloseContext(ctx context.Context) error {
 			// sessions where session_replication_role is connection-scoped.
 			_ = s.restoreNormalPragmas(ctx)
 		}
+		// Cancel both tickers up front, before waiting on either: each
+		// ticker's own goroutine observes its ctx.Done() and returns even if
+		// this function's ctx times out first, so unconditionally requesting
+		// both cancellations here -- rather than only reaching the second
+		// one after the first successfully waited -- guarantees neither
+		// leaks past this call regardless of which wait (if any) times out.
 		if s.maintenanceCancel != nil {
 			s.maintenanceCancel()
+		}
+		if s.checkpointCancel != nil {
+			s.checkpointCancel()
+		}
+		if s.maintenanceCancel != nil {
 			select {
 			case <-s.maintenanceDone:
+			case <-ctx.Done():
+				s.closeErr = errors.Join(ctx.Err(), s.closePools())
+				return
+			}
+		}
+		if s.checkpointCancel != nil {
+			select {
+			case <-s.checkpointDone:
 			case <-ctx.Done():
 				s.closeErr = errors.Join(ctx.Err(), s.closePools())
 				return
@@ -539,6 +583,76 @@ func (s *Store) closeMaintenanceAdmission() {
 	for {
 		state := s.maintenanceState.Load()
 		if state == 2 || s.maintenanceState.CompareAndSwap(state, 2) {
+			return
+		}
+	}
+}
+
+// startCheckpointTicker runs s.checkpoint on its own ticker, independent of
+// startMaintenance's 24-hour-scale cadence: WAL checkpointing needs to run
+// every 1-5 minutes to bound WAL growth, not once a day. Mirrors
+// startMaintenance's admission/cancellation shape (checkpointState,
+// checkpointCancel, checkpointDone) exactly, as a distinct instance rather
+// than a shared one, so a slow VACUUM can never delay or skip a checkpoint
+// tick and vice versa.
+func (s *Store) startCheckpointTicker() {
+	if s.checkpoint == nil || s.checkpointEvery <= 0 {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.checkpointCancel = cancel
+	s.checkpointDone = make(chan struct{})
+	go func() {
+		defer close(s.checkpointDone)
+		ticker := time.NewTicker(s.checkpointEvery)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				// Admission is an atomic state transition, identical in
+				// shape to closeMaintenanceAdmission: Close moves the state
+				// to closed before cancelling the callback context, so a
+				// racing tick cannot start a checkpoint against closing
+				// pools.
+				if !s.checkpointState.CompareAndSwap(0, 1) {
+					return
+				}
+				if ctx.Err() != nil || s.closed.Load() {
+					s.checkpointState.CompareAndSwap(1, 0)
+					return
+				}
+				started := time.Now()
+				err := s.checkpoint(ctx)
+				s.checkpointState.CompareAndSwap(1, 0)
+				if err != nil {
+					if ctx.Err() == nil {
+						s.logger.Error(
+							"metadata database WAL checkpoint failed",
+							"dialect", s.dialect.Name(),
+							"duration", time.Since(started),
+							"error", err,
+						)
+					} else {
+						return
+					}
+					continue
+				}
+				s.logger.Debug(
+					"metadata database WAL checkpoint complete",
+					"dialect", s.dialect.Name(),
+					"duration", time.Since(started),
+				)
+			}
+		}
+	}()
+}
+
+func (s *Store) closeCheckpointAdmission() {
+	for {
+		state := s.checkpointState.Load()
+		if state == 2 || s.checkpointState.CompareAndSwap(state, 2) {
 			return
 		}
 	}

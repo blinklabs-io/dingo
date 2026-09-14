@@ -1306,6 +1306,45 @@ it, so it rolls the ledger back to the blob tip instead. That rollback can be
 arbitrarily deep and, on a Mithril-bootstrapped node, can reach the
 `mithril_ledger_slot` trust boundary, past which no rollback is possible at all.
 
+**Periodic forced WAL checkpoint (`checkpointWAL`,
+`database/plugin/metadata/sqlite/shared_sqlstore.go`).** Raising
+`wal_autocheckpoint` (above) fixed the write-amplification problem but
+surfaced a second one: `dingo_database_sql_wal_bytes` (below) never showed a
+single decrease, on any of four live instances, one of which had no other
+change applied at all. `wal_autocheckpoint` only ever invokes a PASSIVE
+checkpoint, and PASSIVE — like FULL and RESTART — backfills WAL frames into
+`metadata.sqlite` and lets future commits reuse that reclaimed space, but
+never calls `ftruncate` on the `-wal` file itself; only
+`SQLITE_CHECKPOINT_TRUNCATE` does. Verified directly against a copy of a
+live, actively-growing `metadata.sqlite`: with zero readers blocking it
+(every attempt reported `busy=0` with `checkpointed==log`, i.e. a fully
+successful checkpoint), PASSIVE, FULL, and RESTART each left a
+68062432-byte `-wal` file at exactly 68062432 bytes, while TRUNCATE alone
+dropped it to 0. So the gauge — a plain `os.Stat` of that file — could never
+show reclaim under `wal_autocheckpoint` alone, no matter how well passive
+checkpointing was working underneath; the file's on-disk footprint is a
+high-water mark that only grows or holds steady until something truncates
+it. `checkpointWAL` is that something: a `Store.Checkpoint` callback (a new
+hook alongside `Store.Maintenance`, on its own two-minute ticker independent
+of `Maintenance`'s 24-hour VACUUM cadence — see `sqlstore.Config.Checkpoint`)
+that forces `PRAGMA wal_checkpoint(TRUNCATE)` against `writeDB` every two
+minutes, giving the WAL's on-disk size a hard ceiling regardless of how long
+any individual `readDB` snapshot happens to be held open. It is issued
+against `writeDB`, not `readDB`: `writeDB` is capped at
+`SetMaxOpenConns(1)`, so `database/sql` itself serializes the checkpoint
+query behind any write transaction already using that sole connection —
+it cannot run concurrently with, or interrupt, an in-flight write, only ever
+between one write transaction's commit and the next one's begin. SQLite
+tracks WAL locks at the shared-memory/file level rather than per
+`database/sql` pool, so issuing the pragma from `writeDB` still correctly
+waits for (or reports busy against) a snapshot held open through one of
+`readDB`'s separate connections. If that wait exceeds `busy_timeout(30000)`,
+`PRAGMA wal_checkpoint` reports `busy=1` with a partial `checkpointed` count
+rather than an error, logged at `Warn`; the next tick retries rather than
+looping here. TRUNCATE, not the safer-sounding RESTART, is deliberate: as
+shown above, RESTART does not shrink the file at all, so it cannot make the
+gauge move.
+
 **SQL-side metrics.** Badger's own write/read/cache/GC counters
 (`database_blob_*`, `database/plugin/blob/badger/metrics.go`) have existed for
 a while but were never on a dashboard; the metadata store had no equivalent
