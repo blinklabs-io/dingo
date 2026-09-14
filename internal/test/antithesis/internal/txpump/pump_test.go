@@ -21,6 +21,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -58,4 +60,102 @@ func TestWaitForGenesisHonorsStartupTimeout(t *testing.T) {
 func TestCurrentSlotBeforeGenesisIsZero(t *testing.T) {
 	pump := testPump(time.Now().Add(time.Hour), time.Second)
 	require.Zero(t, pump.currentSlot())
+}
+
+func TestRunSkipsBatchWhenKeyedWalletReconciliationFails(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	key := &UTxOKey{Address: []byte{1, 2, 3}}
+	wallet := NewWallet()
+	wallet.Add(UTxO{TxHash: "funding", Amount: 5_000_000, SigningKey: key})
+	pump := NewPump(
+		&Config{TxCountMin: 1, TxCountMax: 1},
+		wallet,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		nil,
+		time.Now().Add(-time.Second),
+	)
+	var batches int
+	pump.dialPrimaryFn = func() (*NodeClient, error) {
+		return &NodeClient{addr: "test"}, nil
+	}
+	pump.runBatchFn = func(context.Context, *NodeClient, int) int {
+		batches++
+		return 0
+	}
+	pump.cooldownFn = func(context.Context) bool {
+		cancel()
+		return false
+	}
+
+	require.ErrorIs(t, pump.Run(ctx), context.Canceled)
+	require.Zero(
+		t,
+		batches,
+		"a stale keyed wallet must not be submitted after reconciliation failure",
+	)
+	require.Equal(
+		t,
+		1,
+		wallet.Len(),
+		"reconciliation failure must retain keyed wallet state",
+	)
+}
+
+func TestRunStillBatchesUnsignedWalletAfterDisconnectedReconciliationClient(
+	t *testing.T,
+) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wallet := NewWallet()
+	wallet.Add(UTxO{TxHash: "funding", Amount: 5_000_000})
+	pump := NewPump(
+		&Config{TxCountMin: 1, TxCountMax: 1},
+		wallet,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		nil,
+		time.Now().Add(-time.Second),
+	)
+	var batches int
+	pump.dialPrimaryFn = func() (*NodeClient, error) {
+		return &NodeClient{addr: "test"}, nil
+	}
+	pump.runBatchFn = func(context.Context, *NodeClient, int) int {
+		batches++
+		return 0
+	}
+	pump.cooldownFn = func(context.Context) bool {
+		cancel()
+		return false
+	}
+
+	require.ErrorIs(t, pump.Run(ctx), context.Canceled)
+	require.Equal(
+		t,
+		1,
+		batches,
+		"unsigned wallets must retain their pacing-only batch path",
+	)
+}
+
+func TestDeriveTestTxIDUsesCardanoTransactionBodyHash(t *testing.T) {
+	txBytes, err := BuildDelegationTx(
+		[]UTxO{{
+			TxHash: "0000000000000000000000000000000000000000000000000000000000000001",
+			Amount: 2_000_000,
+		}},
+		make([]byte, 28),
+		make([]byte, 28),
+		MinFee,
+		[]byte{0x60, 1},
+	)
+	require.NoError(t, err)
+
+	var txParts []cbor.RawMessage
+	_, err = cbor.Decode(txBytes, &txParts)
+	require.NoError(t, err)
+	require.NotEmpty(t, txParts)
+
+	want := common.Blake2b256Hash(txParts[0]).String()
+	require.Equal(t, want, deriveTestTxID(txBytes))
 }

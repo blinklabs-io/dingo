@@ -15,6 +15,7 @@
 package txpump
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -22,6 +23,8 @@ import (
 	"time"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 // dialTimeout is the maximum time to wait for a connection to the node.
@@ -105,6 +108,133 @@ func (c *NodeClient) SubmitTx(eraID uint16, txBytes []byte) error {
 		return fmt.Errorf("node %s: SubmitTx eraID=%d: %w", c.addr, eraID, err)
 	}
 	return nil
+}
+
+// ReconcileWallet reads the controlled UTxO snapshot and pending transaction
+// presence at the node. Missing outputs are a successful empty result; query
+// errors are returned so callers can leave wallet state unchanged.
+// LSQ and transaction-monitor snapshots are acquired independently.
+func (c *NodeClient) ReconcileWallet(
+	addresses [][]byte,
+	txIDs []string,
+) (snapshot []UTxO, presence map[string]bool, retErr error) {
+	if c == nil || c.conn == nil {
+		return nil, nil, errors.New(
+			"ReconcileWallet called without a connection",
+		)
+	}
+	lsq := c.conn.LocalStateQuery()
+	if lsq == nil || lsq.Client == nil {
+		return nil, nil, fmt.Errorf(
+			"node %s: LocalStateQuery protocol not available",
+			c.addr,
+		)
+	}
+	addrs := make([]ledger.Address, 0, len(addresses))
+	for _, raw := range addresses {
+		addr, err := common.NewAddressFromBytes(raw)
+		if err != nil {
+			return nil, nil, fmt.Errorf(
+				"node %s: decode wallet address: %w",
+				c.addr,
+				err,
+			)
+		}
+		addrs = append(addrs, addr)
+	}
+	if err := lsq.Client.AcquireVolatileTip(); err != nil {
+		return nil, nil, fmt.Errorf(
+			"node %s: acquire volatile tip: %w",
+			c.addr,
+			err,
+		)
+	}
+	defer func() {
+		if err := lsq.Client.Release(); err != nil && retErr == nil {
+			snapshot = nil
+			presence = nil
+			retErr = fmt.Errorf(
+				"node %s: release local state query: %w",
+				c.addr,
+				err,
+			)
+		}
+	}()
+	result, err := lsq.Client.GetUTxOByAddress(addrs)
+	if err != nil {
+		return nil, nil, fmt.Errorf(
+			"node %s: query wallet UTxOs: %w",
+			c.addr,
+			err,
+		)
+	}
+	snapshot = make([]UTxO, 0, len(result.Results))
+	for id, output := range result.Results {
+		raw, err := output.Address().Bytes()
+		if err != nil {
+			return nil, nil, fmt.Errorf(
+				"node %s: encode wallet address: %w",
+				c.addr,
+				err,
+			)
+		}
+		amount := output.Amount()
+		snapshot = append(
+			snapshot,
+			UTxO{
+				TxHash: id.Hash.String(),
+				Index: uint32(
+					id.Idx,
+				), //nolint:gosec // ledger index is bounded by protocol
+				Amount:  amount.Uint64(),
+				address: raw,
+			},
+		)
+	}
+	presence = make(map[string]bool, len(txIDs))
+	monitor := c.conn.LocalTxMonitor()
+	if monitor == nil || monitor.Client == nil {
+		return nil, nil, fmt.Errorf(
+			"node %s: LocalTxMonitor protocol not available",
+			c.addr,
+		)
+	}
+	if err := monitor.Client.Acquire(); err != nil {
+		return nil, nil, fmt.Errorf(
+			"node %s: acquire tx monitor: %w",
+			c.addr,
+			err,
+		)
+	}
+	defer func() {
+		if err := monitor.Client.Release(); err != nil && retErr == nil {
+			snapshot = nil
+			presence = nil
+			retErr = fmt.Errorf("node %s: release tx monitor: %w", c.addr, err)
+		}
+	}()
+	for _, txID := range txIDs {
+		rawID, err := hex.DecodeString(txID)
+		if err != nil {
+			return nil, nil, fmt.Errorf(
+				"node %s: decode pending tx %s: %w",
+				c.addr,
+				txID,
+				err,
+			)
+		}
+		present, err := monitor.Client.HasTx(rawID)
+		if err != nil {
+			return nil, nil, fmt.Errorf(
+				"node %s: check pending tx %s: %w",
+				c.addr,
+				txID,
+				err,
+			)
+		}
+		presence[txID] = present
+	}
+	return snapshot, presence, nil
 }
 
 // Close shuts down the underlying Ouroboros connection.
