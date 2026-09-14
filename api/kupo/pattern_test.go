@@ -25,6 +25,8 @@ import (
 )
 
 func TestParsePatternFamilies(t *testing.T) {
+	t.Parallel()
+
 	key := bytesOf(32, 0x11)
 	fiveBit, err := bech32.ConvertBits(key, 8, 5, true)
 	if err != nil {
@@ -85,6 +87,8 @@ func TestParseReferencePatternUsesOutputIndexBeforeTransactionID(t *testing.T) {
 }
 
 func TestAssetPatternRequiresPolicyID(t *testing.T) {
+	t.Parallel()
+
 	for _, value := range []string{"*.01", "*.*"} {
 		if _, err := parsePattern(value); err == nil {
 			t.Fatalf("parsePattern(%q) unexpectedly succeeded", value)
@@ -93,6 +97,8 @@ func TestAssetPatternRequiresPolicyID(t *testing.T) {
 }
 
 func TestFullScriptStakeAndPointerAddressesRemainExact(t *testing.T) {
+	t.Parallel()
+
 	payment := bytesOf(lcommon.AddressHashSize, 0x41)
 	staking := bytesOf(lcommon.AddressHashSize, 0x52)
 	base, err := lcommon.NewAddressFromParts(
@@ -143,6 +149,8 @@ func mustAddressBytes(t *testing.T, addr lcommon.Address) []byte {
 }
 
 func TestMetadataPatternFiltersQuery(t *testing.T) {
+	t.Parallel()
+
 	pattern, err := parsePattern("{42}")
 	if err != nil {
 		t.Fatal(err)

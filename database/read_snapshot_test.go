@@ -96,6 +96,8 @@ func requireDestructiveTransitionBarrierFree(t *testing.T, db *Database) {
 }
 
 func TestNewReadSnapshotContextAnchorsMetadataBeforeBlob(t *testing.T) {
+	t.Parallel()
+
 	events := []string{}
 	wantTip := ochainsync.Tip{BlockNumber: 42}
 	db := &Database{
@@ -117,6 +119,8 @@ func TestNewReadSnapshotContextAnchorsMetadataBeforeBlob(t *testing.T) {
 }
 
 func TestNewReadSnapshotContextReleasesBarrierOnAnchorError(t *testing.T) {
+	t.Parallel()
+
 	anchorErr := errors.New("tip unavailable")
 	events := []string{}
 	db := &Database{
@@ -141,6 +145,8 @@ func TestNewReadSnapshotContextReleasesBarrierOnAnchorError(t *testing.T) {
 }
 
 func TestNewReadSnapshotContextJoinsAnchorAndRollbackErrors(t *testing.T) {
+	t.Parallel()
+
 	anchorErr := errors.New("tip unavailable")
 	rollbackErr := errors.New("rollback unavailable")
 	db := &Database{
@@ -313,6 +319,8 @@ func (c *observedDoneContext) Done() <-chan struct{} {
 // blob deletion can land after the metadata view is fixed and before the blob
 // view opens, leaving retained metadata that refers to missing CBOR.
 func TestNewReadSnapshotContextDoesNotStraddleDestructiveCommit(t *testing.T) {
+	t.Parallel()
+
 	destructiveCommitDone := make(chan struct{})
 	var finishCommit sync.Once
 	finishDestructiveCommit := func() {

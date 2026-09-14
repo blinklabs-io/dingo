@@ -138,6 +138,8 @@ func serve(
 }
 
 func TestImmutablePatterns(t *testing.T) {
+	t.Parallel()
+
 	node := &mockNode{
 		tip: Point{SlotNo: 42, HeaderHash: strings.Repeat("ab", 32)},
 	}
@@ -182,6 +184,8 @@ func TestImmutablePatterns(t *testing.T) {
 }
 
 func TestMatchesQueryAndQuantityEncoding(t *testing.T) {
+	t.Parallel()
+
 	datum, scriptHash := strings.Repeat("11", 32), strings.Repeat("22", 28)
 	resolvedDatum := "d87980"
 	node := &mockNode{
@@ -249,6 +253,8 @@ func TestMatchesQueryAndQuantityEncoding(t *testing.T) {
 }
 
 func TestMatchQueryValidation(t *testing.T) {
+	t.Parallel()
+
 	node := &mockNode{tip: Point{HeaderHash: strings.Repeat("aa", 32)}}
 	server := newTestServer(node)
 	invalid := []string{
@@ -283,6 +289,8 @@ func TestMatchQueryValidation(t *testing.T) {
 }
 
 func TestConditionalRequestAndMethodMismatch(t *testing.T) {
+	t.Parallel()
+
 	hash := strings.Repeat("ab", 32)
 	node := &mockNode{snapshotTip: Point{SlotNo: 42, HeaderHash: hash}}
 	server := newTestServer(node)
@@ -327,6 +335,8 @@ func TestConditionalRequestAndMethodMismatch(t *testing.T) {
 }
 
 func TestDataResponsesUseOperationSnapshotTip(t *testing.T) {
+	t.Parallel()
+
 	snapshotHash := strings.Repeat("bb", 32)
 	for _, test := range []struct {
 		name   string
@@ -389,6 +399,8 @@ func TestDataResponsesUseOperationSnapshotTip(t *testing.T) {
 }
 
 func TestV1RouteAliases(t *testing.T) {
+	t.Parallel()
+
 	node := &mockNode{
 		snapshotTip: Point{SlotNo: 42, HeaderHash: strings.Repeat("aa", 32)},
 		healthCode:  http.StatusOK,
@@ -460,6 +472,8 @@ func TestV1RouteAliases(t *testing.T) {
 }
 
 func TestDatumAndScriptNotFound(t *testing.T) {
+	t.Parallel()
+
 	tipHash := strings.Repeat("aa", 32)
 	server := newTestServer(&mockNode{
 		snapshotTip: Point{SlotNo: 42, HeaderHash: tipHash},
@@ -485,6 +499,8 @@ func TestDatumAndScriptNotFound(t *testing.T) {
 }
 
 func TestCheckpointNotFound(t *testing.T) {
+	t.Parallel()
+
 	tipHash := strings.Repeat("aa", 32)
 	server := newTestServer(&mockNode{
 		snapshotTip: Point{SlotNo: 42, HeaderHash: tipHash},
@@ -499,6 +515,8 @@ func TestCheckpointNotFound(t *testing.T) {
 }
 
 func TestInternalErrorsDoNotLeakDetails(t *testing.T) {
+	t.Parallel()
+
 	secret := errors.New("database password=secret")
 	server := newTestServer(&mockNode{err: secret})
 	response := serve(
@@ -517,6 +535,8 @@ func TestInternalErrorsDoNotLeakDetails(t *testing.T) {
 }
 
 func TestHealthAndMetricsNegotiation(t *testing.T) {
+	t.Parallel()
+
 	checkpoint, nodeTip, seconds, sync := uint64(40), uint64(50), uint64(2), 0.8
 	health := Health{
 		ConnectionStatus:       "connected",
@@ -629,6 +649,8 @@ func TestHealthAndMetricsNegotiation(t *testing.T) {
 }
 
 func TestScriptFromLedgerPlutusV4(t *testing.T) {
+	t.Parallel()
+
 	script := scriptFromLedger(lcommon.PlutusV4Script{0x4d, 0x01})
 	if script == nil || script.Language != "plutus:v4" ||
 		script.Script != "4d01" {
@@ -637,6 +659,8 @@ func TestScriptFromLedgerPlutusV4(t *testing.T) {
 }
 
 func TestStartStop(t *testing.T) {
+	t.Parallel()
+
 	server := newTestServer(&mockNode{})
 	if err := server.Start(t.Context()); err != nil {
 		t.Fatal(err)
@@ -655,6 +679,8 @@ func TestStartStop(t *testing.T) {
 }
 
 func TestStopWaitsForInProgressStart(t *testing.T) {
+	t.Parallel()
+
 	server := newTestServer(&mockNode{})
 	startDone, err := server.beginStart()
 	if err != nil {
