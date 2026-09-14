@@ -84,7 +84,12 @@ var hotStatements = []string{
 func (s *Store) prepareHotStatements(ctx context.Context) {
 	dialectDB := newDialectQueryer(s.writeDB, s.dialect.Name())
 	for _, query := range hotStatements {
-		stmt, err := dialectDB.PrepareContext(ctx, query)
+		// Cached for reuse: stmt is stored in s.stmts below and lives for
+		// the Store's lifetime, closed by closePreparedStatements on
+		// Reset, RestoreFrom, and CloseContext (see that function's doc
+		// comment). It is not a one-shot resource, so closing it here
+		// would defeat the caching this function exists to provide.
+		stmt, err := dialectDB.PrepareContext(ctx, query) //nolint:sqlclosecheck
 		if err != nil {
 			s.logger.Warn(
 				"sqlstore: skipping prepared-statement cache entry",
