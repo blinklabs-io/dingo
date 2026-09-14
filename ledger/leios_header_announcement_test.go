@@ -174,7 +174,7 @@ func TestChainsyncHeaderAdmissionAnnouncesOnlyWhenCryptoVerified(
 		evt := testutil.RequireReceive(
 			t,
 			fixture.ch,
-			2*time.Second,
+			testutil.AsyncWait,
 			"announcement published from verified header admission",
 		)
 		data, ok := evt.Data.(chain.ChainHeaderAnnouncementEvent)
@@ -233,14 +233,14 @@ func TestChainsyncHeaderQueueClearedInvalidatesAnnouncement(t *testing.T) {
 	)
 
 	announcement := testutil.RequireReceive(
-		t, fixture.ch, 2*time.Second, "announcement",
+		t, fixture.ch, testutil.AsyncWait, "announcement",
 	)
 	announced, ok := announcement.Data.(chain.ChainHeaderAnnouncementEvent)
 	require.True(t, ok, "got %T", announcement.Data)
 	assert.Equal(t, announcing.hash, announced.RbHash)
 
 	invalidation := testutil.RequireReceive(
-		t, fixture.ch, 2*time.Second, "invalidation for the discarded header",
+		t, fixture.ch, testutil.AsyncWait, "invalidation for the discarded header",
 	)
 	invalid, ok := invalidation.Data.(chain.ChainHeaderInvalidationEvent)
 	require.True(t, ok, "got %T", invalidation.Data)
@@ -336,7 +336,7 @@ func TestForkResolutionAnnouncesOnlyTheVerifiedIncomingHeader(t *testing.T) {
 			// The rollback's invalidation precedes anything the fork
 			// resolution queued after it.
 			invalidation := testutil.RequireReceive(
-				t, ch, 2*time.Second, "rollback invalidation",
+				t, ch, testutil.AsyncWait, "rollback invalidation",
 			)
 			invalid, ok := invalidation.Data.(chain.ChainHeaderInvalidationEvent)
 			require.True(t, ok, "got %T", invalidation.Data)
@@ -353,7 +353,7 @@ func TestForkResolutionAnnouncesOnlyTheVerifiedIncomingHeader(t *testing.T) {
 			}
 
 			announcement := testutil.RequireReceive(
-				t, ch, 2*time.Second, "announcement from fork resolution",
+				t, ch, testutil.AsyncWait, "announcement from fork resolution",
 			)
 			announced, ok := announcement.Data.(chain.ChainHeaderAnnouncementEvent)
 			require.True(t, ok, "got %T", announcement.Data)
@@ -496,7 +496,7 @@ func TestConnectionClosedPublishesHeaderInvalidation(t *testing.T) {
 	assert.Zero(t, fixture.ls.chain.HeaderCount())
 
 	announcement := testutil.RequireReceive(
-		t, fixture.ch, 2*time.Second, "announcement",
+		t, fixture.ch, testutil.AsyncWait, "announcement",
 	)
 	announced, ok := announcement.Data.(chain.ChainHeaderAnnouncementEvent)
 	require.True(t, ok, "got %T", announcement.Data)
@@ -505,7 +505,7 @@ func TestConnectionClosedPublishesHeaderInvalidation(t *testing.T) {
 	invalidation := testutil.RequireReceive(
 		t,
 		fixture.ch,
-		2*time.Second,
+		testutil.AsyncWait,
 		"invalidation published without any later event",
 	)
 	invalid, ok := invalidation.Data.(chain.ChainHeaderInvalidationEvent)
@@ -538,7 +538,7 @@ func TestBlockfetchTimeoutDrainsHeaderSequencer(t *testing.T) {
 	evt := testutil.RequireReceive(
 		t,
 		fixture.ch,
-		2*time.Second,
+		testutil.AsyncWait,
 		"header events published without any later event",
 	)
 	announced, ok := evt.Data.(chain.ChainHeaderAnnouncementEvent)
