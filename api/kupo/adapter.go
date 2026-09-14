@@ -41,10 +41,32 @@ func isMetadataBlockUnavailable(err error) bool {
 		errors.Is(err, types.ErrHistoryExpired)
 }
 
+// maxMetadataAncestorwalk bounds how many canonical ancestors a single
+// /metadata request may step back over while looking for one whose CBOR is
+// still retained.
+//
+// The walk only advances on types.ErrHistoryExpired, and history expiry is
+// contiguous: everything below the retention floor is tombstoned. A request
+// for a slot under that floor therefore has no readable ancestor at all, and
+// an unbounded walk would step one canonical block at a time to genesis --
+// a point lookup and a block read each -- turning one HTTP request into
+// millions of database operations while holding its read snapshot open.
+//
+// Stopping after a fixed number of steps answers that request as
+// "no indexed ancestor" for a bounded cost. The bound is generous relative to
+// the only legitimate use, which is stepping over the handful of expired
+// blocks that can sit at the boundary itself.
+const maxMetadataAncestorWalk = 128
+
 // metadataBlockBeforeSlot finds the newest readable canonical block before
 // slot. Point and block lookups are separate because the point index survives
 // history expiry while the block CBOR does not.
+//
+// It returns models.ErrBlockNotFound once it reaches genesis or exhausts
+// maxMetadataAncestorWalk steps, and ctx.Err() if the caller goes away
+// mid-walk.
 func metadataBlockBeforeSlot(
+	ctx context.Context,
 	slot uint64,
 	pointAtOrBefore func(uint64) (ocommon.Point, error),
 	blockAtPoint func(ocommon.Point) (models.Block, error),
@@ -52,7 +74,10 @@ func metadataBlockBeforeSlot(
 	if slot == 0 {
 		return models.Block{}, models.ErrBlockNotFound
 	}
-	for slot > 0 {
+	for steps := 0; slot > 0 && steps < maxMetadataAncestorWalk; steps++ {
+		if err := ctx.Err(); err != nil {
+			return models.Block{}, err
+		}
 		point, err := pointAtOrBefore(slot - 1)
 		if err != nil {
 			return models.Block{}, err
@@ -708,6 +733,7 @@ func (a *NodeAdapter) Metadata(
 	block, err := database.BlockBySlotTxn(txn, slot)
 	if isMetadataBlockUnavailable(err) {
 		block, err = metadataBlockBeforeSlot(
+			ctx,
 			slot,
 			func(before uint64) (ocommon.Point, error) {
 				return database.BlockPointAtOrBeforeSlotTxn(txn, before)

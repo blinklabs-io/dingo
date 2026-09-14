@@ -15,6 +15,7 @@
 package kupo
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -48,6 +49,8 @@ func TestIsMetadataBlockUnavailable(t *testing.T) {
 }
 
 func TestMetadataBlockBeforeSlotSkipsExpiredAncestors(t *testing.T) {
+	t.Parallel()
+
 	points := []ocommon.Point{
 		{Slot: 30, Hash: []byte{30}},
 		{Slot: 20, Hash: []byte{20}},
@@ -63,6 +66,7 @@ func TestMetadataBlockBeforeSlotSkipsExpiredAncestors(t *testing.T) {
 	}
 	var requested []uint64
 	block, err := metadataBlockBeforeSlot(
+		t.Context(),
 		40,
 		func(slot uint64) (ocommon.Point, error) {
 			requested = append(requested, slot)
@@ -90,7 +94,75 @@ func TestMetadataBlockBeforeSlotSkipsExpiredAncestors(t *testing.T) {
 	}
 }
 
+// TestMetadataBlockBeforeSlotBoundsExpiredWalk pins the denial-of-service
+// bound on GET /metadata/{slot_no}. Below the history-expiry retention floor
+// every canonical ancestor is tombstoned, so without a bound one request walks
+// to genesis doing a point lookup and a block read per canonical block.
+func TestMetadataBlockBeforeSlotBoundsExpiredWalk(t *testing.T) {
+	t.Parallel()
+
+	// Every ancestor is expired, which is what a slot below the retention
+	// floor looks like, and the chain is far deeper than the bound.
+	lookups := 0
+	block, err := metadataBlockBeforeSlot(
+		t.Context(),
+		10_000_000,
+		func(slot uint64) (ocommon.Point, error) {
+			lookups++
+			return ocommon.Point{Slot: slot, Hash: []byte{1}}, nil
+		},
+		func(ocommon.Point) (models.Block, error) {
+			return models.Block{}, types.ErrHistoryExpired
+		},
+	)
+	if !errors.Is(err, models.ErrBlockNotFound) {
+		t.Fatalf("error = %v, want %v", err, models.ErrBlockNotFound)
+	}
+	if block.Slot != 0 {
+		t.Fatalf("block slot = %d, want the zero block", block.Slot)
+	}
+	if lookups != maxMetadataAncestorWalk {
+		t.Fatalf(
+			"point lookups = %d, want the walk bounded at %d",
+			lookups,
+			maxMetadataAncestorWalk,
+		)
+	}
+}
+
+// TestMetadataBlockBeforeSlotHonorsCancellation pins that a client
+// disconnecting stops the walk rather than letting it run the request out
+// against the held read snapshot.
+func TestMetadataBlockBeforeSlotHonorsCancellation(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	lookups := 0
+	_, err := metadataBlockBeforeSlot(
+		ctx,
+		10_000_000,
+		func(slot uint64) (ocommon.Point, error) {
+			lookups++
+			if lookups == 3 {
+				cancel()
+			}
+			return ocommon.Point{Slot: slot, Hash: []byte{1}}, nil
+		},
+		func(ocommon.Point) (models.Block, error) {
+			return models.Block{}, types.ErrHistoryExpired
+		},
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	if lookups != 3 {
+		t.Fatalf("point lookups = %d, want the walk to stop at 3", lookups)
+	}
+}
+
 func TestSpendingTransactionDetailsUseCanonicalInputOrder(t *testing.T) {
+	t.Parallel()
+
 	inputA1 := models.Utxo{TxId: repeatedByte(0x11), OutputIdx: 1}
 	inputA2 := models.Utxo{TxId: repeatedByte(0x11), OutputIdx: 2}
 	inputB0 := models.Utxo{TxId: repeatedByte(0x22), OutputIdx: 0}
