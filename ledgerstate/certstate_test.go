@@ -829,3 +829,44 @@ func TestParseCommitteeVStateFailsLoudOnUndecodableEntries(t *testing.T) {
 		)
 	}
 }
+
+// TestParseCommitteeAuthorizationRejectsNonAnchorResignation is the near miss
+// that matters: [1, <uint>] is a two-element array tagged as a resignation but
+// carries no valid StrictMaybe Anchor. Accepting it would widen
+// looksLikeCommitteeCredentialMap enough for the Conway element scan to
+// misidentify an unrelated credential-keyed map as the committee map.
+func TestParseCommitteeAuthorizationRejectsNonAnchorResignation(t *testing.T) {
+	bad, err := cbor.Encode([]any{uint64(1), uint64(12345)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := parseCommitteeAuthorization(bad); err == nil {
+		t.Fatal("expected [1, uint] to be rejected as a resignation")
+	}
+
+	// A genuine absent anchor still parses.
+	good, err := cbor.Encode([]any{uint64(1), nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, resigned, err := parseCommitteeAuthorization(good)
+	if err != nil {
+		t.Fatalf("[1, null] should parse as a resignation: %v", err)
+	}
+	if !resigned {
+		t.Fatal("[1, null] should be flagged as resigned")
+	}
+
+	// And a map whose values are [1, <uint>] must not look like a committee.
+	credential, err := cbor.Encode(
+		[]any{uint64(0), toFixed28(bytes.Repeat([]byte{0x55}, 28))},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := append([]byte{0xa1}, credential...)
+	m = append(m, bad...)
+	if looksLikeCommitteeCredentialMap(m) {
+		t.Fatal("a [1, uint]-valued map must not look like a committee map")
+	}
+}

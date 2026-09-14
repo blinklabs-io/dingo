@@ -1712,6 +1712,17 @@ func parseCommitteeAuthorization(
 			credential, credErr := parseCredential(wrapped[1])
 			return credential, false, credErr
 		case committeeAuthResigned:
+			// The payload is StrictMaybe Anchor: absent (null) or an
+			// array. Anything else -- an integer, a bare byte string,
+			// a bool -- is not a resignation, and accepting it would
+			// let an unrelated credential-keyed map pass
+			// looksLikeCommitteeCredentialMap and be misread as the
+			// committee map by the Conway element scan.
+			if !isResignationPayload(wrapped[1]) {
+				return Credential{}, false, errors.New(
+					"decoding committee resignation payload",
+				)
+			}
 			return Credential{}, true, nil
 		}
 	}
@@ -1725,6 +1736,21 @@ const (
 	committeeAuthHotCredential uint64 = 0
 	committeeAuthResigned      uint64 = 1
 )
+
+// isResignationPayload reports whether data is a plausible StrictMaybe Anchor:
+// CBOR null, or an array (empty for absent, otherwise the anchor itself).
+func isResignationPayload(data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+	if data[0] == 0xf6 { // null
+		return true
+	}
+	if _, err := decodeRawArray(data); err == nil {
+		return true
+	}
+	return false
+}
 
 func parseCommitteeHotCredential(data []byte) (Credential, error) {
 	credential, resigned, err := parseCommitteeAuthorization(data)
