@@ -630,7 +630,19 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		// relay reset the connection, so tx-body fetch is driven from the
 		// txs-offer below. Failures are best-effort: a transient manifest fetch
 		// error must not tear down the shared connection.
-		o.dispatchLeiosFetch(ctx.ConnectionId, func() {
+		manifestKey := leiosBlockKey(point.Slot, point.Hash)
+		if _, loaded := o.leiosManifestFetchInProgress.LoadOrStore(
+			manifestKey, struct{}{},
+		); loaded {
+			return nil
+		}
+		if !o.dispatchLeiosFetch(ctx.ConnectionId, func() {
+			defer o.leiosManifestFetchInProgress.Delete(manifestKey)
+			// A transaction offer or historical backfill may have populated
+			// this occurrence while this work waited for its connection guard.
+			if _, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash); ok {
+				return
+			}
 			reqCtx, cancel := leiosFetchRequestContext(
 				context.Background(),
 				time.Time{},
@@ -682,7 +694,9 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 				"role", "client",
 				"connection_id", connId,
 			)
-		})
+		}) {
+			o.leiosManifestFetchInProgress.Delete(manifestKey)
+		}
 	case *oleiosnotify.MsgBlockTxsOffer:
 		// The peer is offering the transactions for this endorser block. Fetch
 		// them over leios-fetch (off the handler, serialized per connection, and
