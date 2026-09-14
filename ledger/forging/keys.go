@@ -366,7 +366,11 @@ func (pc *PoolCredentials) LoadFromAgentSign(
 	signer RemoteKESSigner,
 ) error {
 	if signer == nil {
-		return errors.New("kes agent sign mode requires a non-nil signer")
+		return pc.installLoaded(
+			nil,
+			errors.New("kes agent sign mode requires a non-nil signer"),
+			nil,
+		)
 	}
 	loaded, err := loadPoolCredentialsFromAgentSign(vrfSKeyPath, opCertPath)
 	return pc.installLoaded(loaded, err, signer)

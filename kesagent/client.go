@@ -375,6 +375,16 @@ func (c *Client) AwaitPushedKey(ctx context.Context) (PushedKey, error) {
 	conn := c.conn
 	c.mu.Unlock()
 
+	readDone := make(chan struct{})
+	defer close(readDone)
+	go func() {
+		select {
+		case <-ctx.Done():
+			c.invalidateConn(conn)
+		case <-readDone:
+		}
+	}()
+
 	// The header wait is deliberately left unbounded unless ctx bounds it:
 	// idling between pushes with nothing to read is the normal state of a
 	// serve-key subscriber, not a fault.
@@ -558,9 +568,19 @@ func (c *Client) Run(
 				"failed to install agent-pushed KES key",
 				"error", err,
 			)
+			c.invalidateCurrentConn()
 			continue
 		}
 		c.resetBackoff()
+	}
+}
+
+func (c *Client) invalidateCurrentConn() {
+	c.mu.Lock()
+	conn := c.conn
+	c.mu.Unlock()
+	if conn != nil {
+		c.invalidateConn(conn)
 	}
 }
 
