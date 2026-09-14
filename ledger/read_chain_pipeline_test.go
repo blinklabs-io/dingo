@@ -21,7 +21,6 @@ import (
 	"log/slog"
 	"runtime"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -786,7 +785,7 @@ func TestDrainBlockPipelineBeforeRollbackNilPipelineNoOp(t *testing.T) {
 		ls.drainBlockPipelineBeforeRollback(t.Context(), "test")
 	}()
 	testutil.RequireReceive(
-		t, done, time.Second,
+		t, done, testutil.AsyncWait,
 		"drainBlockPipelineBeforeRollback blocked with a nil block pipeline",
 	)
 }

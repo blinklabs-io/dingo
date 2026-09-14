@@ -77,12 +77,18 @@ func TestObserverSendsRequestsToTheConfiguredBaseURL(t *testing.T) {
 		"the observer's client must resolve to the configured BaseURL",
 	)
 	require.NotEqual(
-		t, koiosBaseURLs["preview"], o.koios.ResolvedBaseURL(),
+		t,
+		koiosBaseURLs["preview"],
+		o.koios.ResolvedBaseURL(),
 		"the observer's client resolved to the network default despite a configured BaseURL",
 	)
 
 	epoch, err := o.koios.GetTipEpoch(context.Background())
-	require.NoError(t, err, "the request must reach the override, not the default")
+	require.NoError(
+		t,
+		err,
+		"the request must reach the override, not the default",
+	)
 	require.Equal(t, uint64(42), epoch)
 
 	require.Positive(

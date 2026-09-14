@@ -510,7 +510,9 @@ func TestApplyPoolRetirements_ClearedDelegationIsRollbackSafe(t *testing.T) {
 // A rollback to before the reap is the opposite case and must restore the
 // delegation, which the certificate derivation already does; that is covered by
 // TestRestoreAccountStateRevivesDelegationRolledBackBeforeReap below.
-func TestRestoreAccountStateDoesNotRevivePoolReapedBeforeRollback(t *testing.T) {
+func TestRestoreAccountStateDoesNotRevivePoolReapedBeforeRollback(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	ls, db, gdb := newPoolreapTestLedger(t)
@@ -558,7 +560,9 @@ func TestRestoreAccountStateDoesNotRevivePoolReapedBeforeRollback(t *testing.T) 
 // TestRestoreAccountStateRevivesDelegationRolledBackBeforeReap is the other
 // direction: rolling back past the boundary undoes the reap along with every
 // other write it made, so the delegation certificate is authoritative again.
-func TestRestoreAccountStateRevivesDelegationRolledBackBeforeReap(t *testing.T) {
+func TestRestoreAccountStateRevivesDelegationRolledBackBeforeReap(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	ls, db, gdb := newPoolreapTestLedger(t)

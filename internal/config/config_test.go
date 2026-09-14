@@ -33,43 +33,56 @@ import (
 func resetGlobalConfig() {
 	midnightYAMLFields = nil
 	globalConfig = &Config{
-		Plugins:                     defaultPluginsConfig(),
-		BindAddr:                    "0.0.0.0",
-		CardanoConfig:               "", // Will be set dynamically based on network
-		DatabasePath:                ".dingo",
-		SocketPath:                  "dingo.socket",
-		IntersectTip:                false,
-		ValidateHistorical:          true,
-		StrictUtxoValidation:        true,
-		Network:                     "preview",
-		MetricsPort:                 12798,
-		DebugBindAddr:               DefaultDebugBindAddr,
-		PrivateBindAddr:             "127.0.0.1",
-		PrivatePort:                 3002,
-		RelayPort:                   3001,
-		CORSAllowedOrigins:          []string{"*"},
-		Topology:                    "",
-		TlsCertFilePath:             "",
-		TlsKeyFilePath:              "",
-		RunMode:                     RunModeServe,
-		StartEra:                    StartEraDefault,
-		ImmutableDbPath:             "",
-		ShutdownTimeout:             DefaultShutdownTimeout,
-		LedgerCatchupTimeout:        DefaultLedgerCatchupTimeout,
-		DatabaseWorkers:             5,
-		DatabaseQueueSize:           50,
-		BackfillBatchSize:           100,
-		GenesisBootstrap:            DefaultGenesisBootstrapConfig(),
-		HistoryExpiry:               DefaultHistoryExpiryConfig(),
-		KoiosParity:                 DefaultKoiosParityConfig(),
-		Midnight:                    DefaultMidnightConfig(),
-		ForgeSyncToleranceSlots:     DefaultForgeSyncToleranceSlots,
-		ForgeStaleGapThresholdSlots: DefaultForgeStaleGapThresholdSlots,
+		Plugins:                            defaultPluginsConfig(),
+		BindAddr:                           "0.0.0.0",
+		CardanoConfig:                      "", // Will be set dynamically based on network
+		DatabasePath:                       ".dingo",
+		SocketPath:                         "dingo.socket",
+		IntersectTip:                       false,
+		ValidateHistorical:                 true,
+		StrictUtxoValidation:               true,
+		Network:                            "preview",
+		MetricsPort:                        12798,
+		DebugBindAddr:                      DefaultDebugBindAddr,
+		PrivateBindAddr:                    "127.0.0.1",
+		PrivatePort:                        3002,
+		RelayPort:                          3001,
+		CORSAllowedOrigins:                 []string{"*"},
+		Topology:                           "",
+		TlsCertFilePath:                    "",
+		TlsKeyFilePath:                     "",
+		RunMode:                            RunModeServe,
+		StartEra:                           StartEraDefault,
+		ImmutableDbPath:                    "",
+		ShutdownTimeout:                    DefaultShutdownTimeout,
+		LedgerCatchupTimeout:               DefaultLedgerCatchupTimeout,
+		DatabaseWorkers:                    5,
+		DatabaseQueueSize:                  50,
+		BackfillBatchSize:                  100,
+		GenesisBootstrap:                   DefaultGenesisBootstrapConfig(),
+		HistoryExpiry:                      DefaultHistoryExpiryConfig(),
+		KoiosParity:                        DefaultKoiosParityConfig(),
+		Midnight:                           DefaultMidnightConfig(),
+		ForgeSyncToleranceSlots:            DefaultForgeSyncToleranceSlots,
+		ForgeStaleGapThresholdSlots:        DefaultForgeStaleGapThresholdSlots,
+		ForgePrimaryChainTipToleranceSlots: DefaultForgePrimaryChainTipToleranceSlots,
+		ForgeUpstreamStalenessSlots:        DefaultForgeUpstreamStalenessSlots,
+		ForgeAppliedTipStalenessSlots:      DefaultForgeAppliedTipStalenessSlots,
+		ForgeEndorserBlockStalenessSlots:   DefaultForgeEndorserBlockStalenessSlots,
 		Mithril: MithrilConfig{
 			Enabled:            true,
 			CleanupAfterLoad:   true,
 			VerifyCertificates: true,
 		},
+		// Fail closed: mirrors newDefaultConfig's own ValidateForgedBlock
+		// default (issue #3528) so this test-only reset does not silently
+		// diverge from what an operator actually gets. Unlike the several
+		// fields above left at their zero value on purpose (StorageMode,
+		// Cache, Chainsync, SlotsPerKESPeriod, ...), so tests can observe
+		// their own fill-in-if-empty defaulting logic in isolation,
+		// ValidateForgedBlock's production default is an unconditional
+		// literal with no separate fill-in step to test around.
+		ValidateForgedBlock: true,
 	}
 	globalTopologyConfig = &topology.TopologyConfig{}
 }
@@ -82,9 +95,44 @@ func unsetDebugBindAddrEnv(t *testing.T) {
 	require.NoError(t, os.Unsetenv("DINGO_DEBUG_BIND_ADDR"))
 }
 
+// unsetForgeGateEnv clears the forge-gate overrides so tests that assert the
+// built-in defaults cannot inherit a value from the caller's environment.
+// LoadConfig runs envconfig AFTER the YAML merge, so an exported
+// DINGO_FORGE_* variable silently overrides both the fixture and the default,
+// and the assertion then fails for a reason unrelated to the code under test.
+//
+// Both spellings of every forge-gate knob are cleared. LoadConfig calls
+// envconfig.Process("cardano", cfg), so the name envconfig looks up FIRST is
+// the prefixed CARDANO_DINGO_... form; the bare DINGO_... name in the
+// envconfig struct tag is only the alt name it falls back to. Guarding one
+// spelling leaves the other able to override the value under test.
+func unsetForgeGateEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{
+		"DINGO_FORGE_PRIMARY_CHAIN_TIP_TOLERANCE_SLOTS",
+		"CARDANO_DINGO_FORGE_PRIMARY_CHAIN_TIP_TOLERANCE_SLOTS",
+		"DINGO_FORGE_SYNC_TOLERANCE_SLOTS",
+		"CARDANO_DINGO_FORGE_SYNC_TOLERANCE_SLOTS",
+		"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS",
+		"CARDANO_DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS",
+		"DINGO_FORGE_UPSTREAM_STALENESS_SLOTS",
+		"CARDANO_DINGO_FORGE_UPSTREAM_STALENESS_SLOTS",
+		"DINGO_FORGE_APPLIED_TIP_STALENESS_SLOTS",
+		"CARDANO_DINGO_FORGE_APPLIED_TIP_STALENESS_SLOTS",
+		"DINGO_FORGE_ENDORSER_BLOCK_STALENESS_SLOTS",
+		"CARDANO_DINGO_FORGE_ENDORSER_BLOCK_STALENESS_SLOTS",
+	} {
+		// t.Setenv registers the restore; Unsetenv then removes it for the
+		// duration of the test, which is what envconfig must not see.
+		t.Setenv(k, "")
+		require.NoError(t, os.Unsetenv(k))
+	}
+}
+
 func TestLoad_CompareFullStruct(t *testing.T) {
 	resetGlobalConfig()
 	unsetDebugBindAddrEnv(t)
+	unsetForgeGateEnv(t)
 	yamlContent := `
 plugins:
   mempool:
@@ -211,6 +259,15 @@ mithril:
 		},
 		ForgeSyncToleranceSlots:     321,
 		ForgeStaleGapThresholdSlots: 654,
+		// These come from the globalConfig clone seeded by resetGlobalConfig,
+		// not from ApplyDefaults: this test never calls it, and LoadConfig
+		// only parses and merges. Both staleness bounds are 0 there because
+		// 0 means "disabled" for them rather than "unset".
+		ForgePrimaryChainTipToleranceSlots: DefaultForgePrimaryChainTipToleranceSlots,
+		ForgeUpstreamStalenessSlots:        DefaultForgeUpstreamStalenessSlots,
+		ForgeAppliedTipStalenessSlots:      DefaultForgeAppliedTipStalenessSlots,
+		ForgeEndorserBlockStalenessSlots:   DefaultForgeEndorserBlockStalenessSlots,
+		ValidateForgedBlock:                true,
 		Mithril: MithrilConfig{
 			Enabled:                false,
 			AggregatorURL:          "https://mithril.example.net",
@@ -264,6 +321,7 @@ func TestLoad_DAGMempoolProvider(t *testing.T) {
 func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 	resetGlobalConfig()
 	unsetDebugBindAddrEnv(t)
+	unsetForgeGateEnv(t)
 
 	// Without Config file
 	cfg, err := LoadConfig("")
@@ -315,8 +373,13 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 			m.Host = DefaultMidnightConfig().Host
 			return m
 		}(),
-		ForgeSyncToleranceSlots:     DefaultForgeSyncToleranceSlots,
-		ForgeStaleGapThresholdSlots: DefaultForgeStaleGapThresholdSlots,
+		ForgeSyncToleranceSlots:            DefaultForgeSyncToleranceSlots,
+		ForgeStaleGapThresholdSlots:        DefaultForgeStaleGapThresholdSlots,
+		ForgePrimaryChainTipToleranceSlots: DefaultForgePrimaryChainTipToleranceSlots,
+		ForgeUpstreamStalenessSlots:        DefaultForgeUpstreamStalenessSlots,
+		ForgeAppliedTipStalenessSlots:      DefaultForgeAppliedTipStalenessSlots,
+		ForgeEndorserBlockStalenessSlots:   DefaultForgeEndorserBlockStalenessSlots,
+		ValidateForgedBlock:                true,
 		Mithril: MithrilConfig{
 			Enabled:            true,
 			CleanupAfterLoad:   true,

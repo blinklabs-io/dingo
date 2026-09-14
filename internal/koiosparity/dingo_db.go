@@ -23,12 +23,13 @@ import (
 	"path/filepath"
 	"strconv"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	_ "github.com/glebarez/go-sqlite"
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	_ "modernc.org/sqlite"
 )
 
 // DingoDBConfig selects which Dingo metadata backend to open.
@@ -160,12 +161,6 @@ type DingoPoolEpochData struct {
 	// by construction.
 	PoolUnspendable uint64
 
-	// RewardsPending reports that the node has not reached the boundary at
-	// which this stake epoch's rewards are applied. The zero value is
-	// deliberately strict: incomplete boundary metadata must not hide a
-	// divergence.
-	RewardsPending bool
-
 	// SpendableMemberRewardPresent reports that reward_account_output rows
 	// exist for the stake epoch at all, which is what makes a per-pool
 	// spendable sum meaningful: a pool with no rows then genuinely earned no
@@ -191,6 +186,25 @@ type DingoPoolEpochData struct {
 	// would not be equivalent: that column accumulates unspendable leader
 	// rewards too.
 	SpendableMemberRewardTotal string
+
+	// RewardsPending reports that the node has NOT yet reached the boundary at
+	// which this stake epoch's rewards are applied, taken from the tip and
+	// reward_pool_output.boundary_slot — or, for a pool with no
+	// reward_pool_output row yet, from the start slot of the epoch the rewards
+	// are applied into.
+	//
+	// Before that boundary the per-account spendable flags are provisional: a
+	// reward computed for a credential that deregisters in the meantime is
+	// still marked spendable, and only the application flips it. Koios reports
+	// rewards that were actually distributed, so comparing earlier makes Dingo
+	// read high by the forfeitures that have not happened yet (dingo #3852). A
+	// difference before the boundary is a timing statement, not a divergence.
+	//
+	// The sense is deliberately negative so the zero value compares strictly.
+	// A source that cannot establish the boundary must not silently downgrade
+	// a real divergence to a lag; reporting a spurious mismatch is safer than
+	// hiding a true one.
+	RewardsPending bool
 }
 
 // rewardTypeMember is the reward_account_output.reward_type value Dingo writes
@@ -353,7 +367,14 @@ func (d *DingoDB) GetEarliestAvailableEpoch(
 	if !epochID.Valid {
 		return 0, false, nil
 	}
-	return uint64(epochID.Int64) + 1, true, nil //nolint:gosec // epoch values are non-negative
+	if epochID.Int64 < 0 {
+		return 0, false, fmt.Errorf(
+			"resolve epoch for mithril boundary slot %d: negative epoch %d",
+			slot,
+			epochID.Int64,
+		)
+	}
+	return uint64(epochID.Int64) + 1, true, nil
 }
 
 // GetEpochData returns epoch-level aggregates for the given epoch.
@@ -469,11 +490,58 @@ func (d *DingoDB) GetProtocolParams(
 		}
 		return nil, fmt.Errorf("pparams epoch %d: %w", epoch, err)
 	}
+
+	// See isSyntheticV2CostModel's doc comment and
+	// syntheticV2CostModelClearedEpochSyncKey for why this is read here
+	// rather than skipped: without it, a PlutusV2 model Dingo still holds
+	// only because HardForkBabbage fabricated it (dingo #3825) reads as a
+	// real value and compareCostModels has no way to tell it apart from an
+	// actual divergence (dingo #4127).
+	var clearedEpochVal sql.NullString
+	if err := queryRow(
+		`SELECT value FROM sync_state WHERE sync_key = ?`,
+		syntheticV2CostModelClearedEpochSyncKey,
+	).Scan(&clearedEpochVal); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf(
+			"synthetic v2 cost model cleared epoch: %w", err,
+		)
+	}
+	var clearedEpoch uint64
+	cleared := clearedEpochVal.Valid && clearedEpochVal.String != ""
+	if cleared {
+		clearedEpoch, err = strconv.ParseUint(clearedEpochVal.String, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"parse synthetic v2 cost model cleared epoch %q: %w",
+				clearedEpochVal.String,
+				err,
+			)
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit protocol params read: %w", err)
 	}
-	return decodeProtocolParams(cborBytes, eraID, sourceEpoch)
+	out, err := decodeProtocolParams(cborBytes, eraID, sourceEpoch)
+	if err != nil {
+		return nil, err
+	}
+	v2, hasV2 := out.CostModels["PlutusV2"]
+	out.SyntheticV2CostModel = isSyntheticV2CostModel(
+		v2, hasV2, epoch, clearedEpoch, cleared,
+	)
+	return out, nil
 }
+
+// syntheticV2CostModelClearedEpochSyncKey is the sync-state key DingoDB reads
+// over its own raw SQL connection (dingo #3825). Unlike mithrilLedgerSlotSyncKey
+// above it is bound to the owning package's constant rather than re-typed as a
+// literal: this package already depends on database (DatabaseSource reads the
+// same marker through database.SyntheticV2CostModelClearedEpoch), so a
+// duplicated literal buys no decoupling and would let the two
+// RewardParitySource implementations read different keys if the owning
+// constant ever changed.
+const syntheticV2CostModelClearedEpochSyncKey = database.SyntheticV2CostModelClearedEpochSyncKey
 
 // GetPoolEpochDataMap returns per-pool reward data assembled for Koios
 // reporting epoch K, keyed by pool-key-hash hex. Dingo's reward_pool_input/
@@ -732,9 +800,11 @@ func (d *DingoDB) GetPoolEpochDataMap(
 	}
 	_ = rows.Close() //nolint:sqlclosecheck
 
-	// The tip decides whether this stake epoch's rewards have been applied.
-	// An unreadable or empty tip leaves tipKnown false, which keeps comparison
-	// strict rather than downgrading a real divergence on incomplete metadata.
+	// The tip decides whether this stake epoch's rewards have been applied;
+	// see DingoPoolEpochData.RewardsPending. A read failure is reported rather
+	// than guessed at, and an empty tip leaves tipKnown false, which keeps the
+	// comparison strict rather than downgrading a real divergence on
+	// incomplete metadata.
 	var tipSlot uint64
 	tipKnown := false
 	if tipRow := d.queryRow(
@@ -746,6 +816,8 @@ func (d *DingoDB) GetPoolEpochDataMap(
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("tip lookup: %w", err)
 		}
+		// A hash is required as well as a slot: a row carrying a slot but no
+		// hash is incomplete metadata, not a chain tip.
 		if err == nil && slot.Valid && slot.Int64 > 0 && len(hash) > 0 {
 			tipSlot = uint64(slot.Int64)
 			tipKnown = true
@@ -846,8 +918,9 @@ func (d *DingoDB) GetPoolEpochDataMap(
 // Presence is epoch-level. A pool with no spendable member row legitimately
 // earned nothing, but only if the table holds the epoch at all —
 // cleanupOldSnapshots retains reward_account_output without bound in api
-// storage mode and prunes it in core, so an empty read must not be reported as
-// a pool-wide zero.
+// storage mode and, since dingo #4188, in core mode too when the node's
+// koios-parity observer is enabled; it prunes the table to a 4-epoch window
+// otherwise, so an empty read must not be reported as a pool-wide zero.
 func (d *DingoDB) addSpendableMemberRewards(
 	ctx context.Context,
 	m map[string]*DingoPoolEpochData,
