@@ -299,7 +299,7 @@ func TestCalculateStakeDistributionDedupesCredentialAcrossPools(t *testing.T) {
 	txn := db.Transaction(false)
 	defer func() { _ = txn.Commit() }()
 	dist, err := calc.calculateStakeDistributionInTxn(
-		context.Background(), txn, 100, 0,
+		context.Background(), txn, 100, 0, 0,
 	)
 	require.NoError(t, err)
 

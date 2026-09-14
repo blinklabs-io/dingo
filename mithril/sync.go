@@ -285,12 +285,14 @@ type SyncConfig struct {
 	DownloadDir            string                     // optional; defaults to <DataDir>/.mithril-cache
 	DownloadIdleTimeout    string                     // optional; passed to BootstrapConfig
 	DownloadMaxIdleRetries int                        // must be >= 0
+	DownloadMaxBytes       int64                      // per compressed object; zero uses DefaultMaxDownloadBytes
 	VerifyCertChain        bool
 	CleanupAfterLoad       bool
 	StoragePlugins         StoragePlugins
 	RunMode                string
 	BackfillBatchSize      int
 	DatabaseWorkers        int
+	Tracing                bool             // OpenTelemetry tracing enabled; forwarded to the metadata pool
 	Logger                 *slog.Logger     // optional; defaults to slog.Default()
 	OnProgress             SyncProgressFunc // optional
 }
@@ -419,6 +421,9 @@ func Sync(
 			"invalid Mithril download max idle retries %d: must be >= 0",
 			cfg.DownloadMaxIdleRetries,
 		)
+	}
+	if err := (DownloadConfig{MaxBytes: cfg.DownloadMaxBytes}).Validate(); err != nil {
+		return SyncResult{}, err
 	}
 
 	// Open the database before bootstrap so the immutable copy can overlap the
@@ -640,7 +645,10 @@ func Sync(
 						sel.Beacon.ImmutableFileNumber != resumePin.ImmutableFileNumber ||
 						(resumePin.CertificateHash != "" &&
 							sel.CertificateHash != resumePin.CertificateHash) {
-						return fmt.Errorf("resuming pinned Mithril artifact %s: selected artifact changed", pinnedDigest)
+						return fmt.Errorf(
+							"resuming pinned Mithril artifact %s: selected artifact changed",
+							pinnedDigest,
+						)
 					}
 				}
 				return setPinnedArtifact(db, pinnedArtifact{
@@ -669,6 +677,7 @@ func Sync(
 			Logger:                 logger,
 			DownloadIdleTimeout:    downloadIdleTimeout,
 			DownloadMaxIdleRetries: cfg.DownloadMaxIdleRetries,
+			DownloadMaxBytes:       cfg.DownloadMaxBytes,
 			OnProgress: func() func(DownloadProgress) {
 				const progressLogInterval = 10 * time.Second
 				const progressLogPercentStep = 5.0
@@ -1410,7 +1419,7 @@ func openDatabase(
 		internalplugins.StorageDependencies{
 			DataDir: cfg.DataDir, RunMode: cfg.RunMode,
 			StorageMode: cfg.StorageMode, MaxConnections: maxConnections,
-			Logger: logger,
+			Logger: logger, TracingEnabled: cfg.Tracing,
 		},
 	)
 }

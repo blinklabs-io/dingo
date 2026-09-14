@@ -81,7 +81,7 @@ func TestQueryShelleyDebugChainDepState_Dispatches(t *testing.T) {
 	db := newTestDB(t)
 	ls := newChainDepStateLedger(t, db)
 
-	result, err := ls.Query(chainDepStateQuery())
+	result, err := ls.Query(chainDepStateQuery(), QueryPoint{})
 	require.NoError(t, err,
 		"the query must be handled rather than aborting the protocol")
 	require.NotNil(t, result)
@@ -142,7 +142,7 @@ func TestQueryShelleyDebugChainDepState_DecodesAsPraosState(t *testing.T) {
 
 	ls := newChainDepStateLedger(t, db)
 
-	result, err := ls.Query(chainDepStateQuery())
+	result, err := ls.Query(chainDepStateQuery(), QueryPoint{})
 	require.NoError(t, err)
 
 	// Results travel wrapped in the single-element MsgResult array.
@@ -277,7 +277,7 @@ func TestQueryShelleyDebugChainDepState_TPraosEraUsesTPraosLayout(
 
 	ls := newChainDepStateLedger(t, db)
 
-	result, err := ls.Query(chainDepStateQuery())
+	result, err := ls.Query(chainDepStateQuery(), QueryPoint{})
 	require.NoError(t, err)
 	arr, _ := result.([]any)
 	require.Len(t, arr, 1)
@@ -352,7 +352,7 @@ func TestQueryShelleyDebugChainDepState_LayoutFollowsConsensusMode(
 
 			ls := newChainDepStateLedger(t, db)
 
-			result, err := ls.Query(chainDepStateQuery())
+			result, err := ls.Query(chainDepStateQuery(), QueryPoint{})
 			require.NoError(t, err)
 			arr, ok := result.([]any)
 			require.True(t, ok)
@@ -466,7 +466,7 @@ func TestQueryShelleyDebugChainDepState_NoncesTrackTipNotEpochCheckpoint(
 
 	ls := newChainDepStateLedger(t, db)
 
-	result, err := ls.Query(chainDepStateQuery())
+	result, err := ls.Query(chainDepStateQuery(), QueryPoint{})
 	require.NoError(t, err)
 	arr, _ := result.([]any)
 	require.Len(t, arr, 1)
@@ -596,7 +596,7 @@ func TestQueryShelleyDebugChainDepState_NoncesStopAtTipNotAtStoredBlocks(
 
 	ls := newChainDepStateLedger(t, db)
 
-	result, err := ls.Query(chainDepStateQuery())
+	result, err := ls.Query(chainDepStateQuery(), QueryPoint{})
 	require.NoError(t, err)
 	arr, _ := result.([]any)
 	require.Len(t, arr, 1)
@@ -697,7 +697,7 @@ func TestQueryShelleyDebugChainDepState_LabNonceTracksTipParent(t *testing.T) {
 
 	ls := newChainDepStateLedger(t, db)
 
-	result, err := ls.Query(chainDepStateQuery())
+	result, err := ls.Query(chainDepStateQuery(), QueryPoint{})
 	require.NoError(t, err)
 	arr, ok := result.([]any)
 	require.True(t, ok)
@@ -783,7 +783,7 @@ func TestQueryShelleyDebugChainDepState_LabNonceWithoutHashIndex(t *testing.T) {
 
 	ls := newChainDepStateLedger(t, db)
 
-	result, err := ls.Query(chainDepStateQuery())
+	result, err := ls.Query(chainDepStateQuery(), QueryPoint{})
 	require.NoError(t, err)
 	arr, _ := result.([]any)
 	require.Len(t, arr, 1)
@@ -818,7 +818,7 @@ func TestQueryShelleyDebugChainDepState_LabNonceCarriesWithoutBlocks(
 
 	ls := newChainDepStateLedger(t, db)
 
-	result, err := ls.Query(chainDepStateQuery())
+	result, err := ls.Query(chainDepStateQuery(), QueryPoint{})
 	require.NoError(t, err)
 	arr, _ := result.([]any)
 	require.Len(t, arr, 1)
@@ -863,7 +863,7 @@ func TestQueryShelleyDebugChainDepState_LabNonceTipBlockUnavailable(
 
 	ls := newChainDepStateLedger(t, db)
 
-	result, err := ls.Query(chainDepStateQuery())
+	result, err := ls.Query(chainDepStateQuery(), QueryPoint{})
 	require.NoError(t, err,
 		"an unreadable tip block must not abort the protocol")
 	arr, _ := result.([]any)
@@ -937,7 +937,7 @@ func TestQueryShelleyDebugChainDepState_ReportsPreviousEpochNonce(
 
 	ls := newChainDepStateLedger(t, db)
 
-	result, err := ls.Query(chainDepStateQuery())
+	result, err := ls.Query(chainDepStateQuery(), QueryPoint{})
 	require.NoError(t, err)
 	arr, ok := result.([]any)
 	require.True(t, ok)
@@ -1017,7 +1017,7 @@ func TestQueryShelleyDebugChainDepState_ReportsOpCertCounters(t *testing.T) {
 
 	ls := newChainDepStateLedger(t, db)
 
-	result, err := ls.Query(chainDepStateQuery())
+	result, err := ls.Query(chainDepStateQuery(), QueryPoint{})
 	require.NoError(t, err)
 	arr, ok := result.([]any)
 	require.True(t, ok)
@@ -1070,7 +1070,7 @@ func TestQueryShelleyDebugChainDepState_CountersOutliveRegistration(
 
 	ls := newChainDepStateLedger(t, db)
 
-	result, err := ls.Query(chainDepStateQuery())
+	result, err := ls.Query(chainDepStateQuery(), QueryPoint{})
 	require.NoError(t, err)
 	arr, ok := result.([]any)
 	require.True(t, ok)
@@ -1118,7 +1118,7 @@ func TestQueryShelleyDebugChainDepState_HighestCounterPerPool(t *testing.T) {
 
 	ls := newChainDepStateLedger(t, db)
 
-	result, err := ls.Query(chainDepStateQuery())
+	result, err := ls.Query(chainDepStateQuery(), QueryPoint{})
 	require.NoError(t, err)
 	arr, _ := result.([]any)
 	require.Len(t, arr, 1)

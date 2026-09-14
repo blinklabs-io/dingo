@@ -246,7 +246,7 @@ func TestQueryShelleyUtxoByTxIn_EmptySlice(t *testing.T) {
 	t.Parallel()
 
 	ls := &LedgerState{}
-	result, err := ls.queryShelleyUtxoByTxIn(nil)
+	result, err := ls.queryShelleyUtxoByTxIn(nil, QueryPoint{}, nil)
 	require.NoError(t, err)
 	// Should return []any{empty map}
 	arr, ok := result.([]any)
@@ -332,7 +332,7 @@ func TestQueryShelleyUtxoByTxIn_MultipleInputs(t *testing.T) {
 	)
 
 	ls := &LedgerState{db: db}
-	result, err := ls.queryShelleyUtxoByTxIn(txIns)
+	result, err := ls.queryShelleyUtxoByTxIn(txIns, QueryPoint{}, nil)
 	require.NoError(t, err)
 
 	arr, ok := result.([]any)

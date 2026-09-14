@@ -83,7 +83,7 @@ func TestCheckSlotBattle_DetectsConflict(t *testing.T) {
 	evt := testutil.RequireReceive(
 		t,
 		evtCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"timeout waiting for SlotBattleEvent",
 	)
 	battle, ok := evt.Data.(forging.SlotBattleEvent)
@@ -133,7 +133,7 @@ func TestCheckSlotBattle_RemoteWinsWhenAccepted(t *testing.T) {
 	evt := testutil.RequireReceive(
 		t,
 		evtCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"timeout waiting for SlotBattleEvent",
 	)
 	battle, ok := evt.Data.(forging.SlotBattleEvent)
@@ -335,14 +335,14 @@ func TestCheckSlotBattle_UnderWriteLock(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		done,
-		2*time.Second,
+		testutil.AsyncWait,
 		"checkSlotBattle deadlocked under write lock",
 	)
 
 	evt := testutil.RequireReceive(
 		t,
 		evtCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"timeout waiting for SlotBattleEvent",
 	)
 	battle, ok := evt.Data.(forging.SlotBattleEvent)

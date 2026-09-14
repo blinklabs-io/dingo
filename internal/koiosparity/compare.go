@@ -94,6 +94,20 @@ const (
 	// stake epoch's reward_account_output universe but absent from this
 	// epoch's.
 	CategoryAcctDeregistered = "acct_deregistered"
+
+	// CategoryCostModelSynthetic marks a PlutusV2-only-on-Dingo cost-model
+	// divergence where DingoProtocolParams.SyntheticV2CostModel says the
+	// only reason the two sides differ is that Dingo still carries
+	// HardForkBabbage's fabricated PlutusV2 default (dingo #3825) for an
+	// epoch before the chain enacted a real one. Koios correctly reports no
+	// PlutusV2 model over that window, so both sides in fact agree on the
+	// true state (no real model exists yet) and disagree only about whether
+	// to report a placeholder — the same shape as the account lifecycle
+	// categories above. Purely informational and must never fail the epoch
+	// (dingo #4127); once the real update lands, SyntheticV2CostModel goes
+	// false and any remaining divergence reports as a genuine
+	// value_mismatch again.
+	CategoryCostModelSynthetic = "cost_model_synthetic"
 )
 
 // AllCategories is every mismatch category above, in one place.
@@ -120,6 +134,7 @@ var AllCategories = []string{
 	CategoryAcctZeroRewardRow,
 	CategoryAcctNewlyRegistered,
 	CategoryAcctDeregistered,
+	CategoryCostModelSynthetic,
 }
 
 // Epoch check status values.
@@ -433,6 +448,7 @@ func CompareEpochProtocolParams(
 	now time.Time,
 	graceHours int,
 	epochEndTime time.Time,
+	_ ...bool,
 ) []CheckMismatch {
 	mismatch := func(field, dingoValue, koiosValue, category string) CheckMismatch {
 		return CheckMismatch{
@@ -534,6 +550,7 @@ func CompareEpochProtocolParams(
 	return append(out, compareCostModels(
 		dingoParams.CostModels,
 		koios.CostModels,
+		dingoParams.SyntheticV2CostModel,
 		mismatch,
 	)...)
 }
@@ -560,9 +577,18 @@ func CompareEpochProtocolParams(
 // Koios priced no scripts. Text that will not parse is reported rather than
 // skipped, so a corrupt cached row can never turn the whole cost-model
 // comparison into a silent pass.
+//
+// synthetic is DingoProtocolParams.SyntheticV2CostModel: when true and the
+// only divergence is that Dingo prices PlutusV2 and Koios does not, the
+// finding is CategoryCostModelSynthetic (informational) rather than
+// CategoryValueMismatch (dingo #4127) — see that category's doc comment.
+// This never suppresses any other cost-model finding: a length or entry
+// mismatch on a model both sides price, or a real value_mismatch once
+// synthetic goes false, is reported exactly as before.
 func compareCostModels(
 	dingoModels map[string][]int64,
 	koiosJSON string,
+	synthetic bool,
 	mismatch func(field, dingoValue, koiosValue, category string) CheckMismatch,
 ) []CheckMismatch {
 	var koiosModels map[string][]int64
@@ -600,12 +626,20 @@ func compareCostModels(
 		switch {
 		case !inKoios:
 			// Dingo prices a language Koios does not, or vice versa below —
-			// a disagreement about which scripts can run at all.
+			// a disagreement about which scripts can run at all. Downgraded
+			// to informational for exactly the synthetic-PlutusV2 case: see
+			// CategoryCostModelSynthetic's doc comment (dingo #4127). Any
+			// other language, or a genuinely real PlutusV2 model Koios
+			// hasn't enacted, stays a real divergence.
+			cat := CategoryValueMismatch
+			if language == "PlutusV2" && synthetic {
+				cat = CategoryCostModelSynthetic
+			}
 			out = append(out, mismatch(
 				field,
 				entryCount(dingoModel),
 				"",
-				CategoryValueMismatch,
+				cat,
 			))
 		case !inDingo:
 			out = append(out, mismatch(
@@ -973,6 +1007,10 @@ func ComparePoolEpoch(
 				dingoValue = dingoPool.MemberRewardTotal
 			}
 			if dingoValue != koiosPool.MemberRewards {
+				// Before the rewards are applied the spendable flags are
+				// provisional, so Dingo reads high by the forfeitures that
+				// have not happened yet. That is a timing statement, not a
+				// divergence, and must not be reported as one (dingo #3852).
 				cat := CategoryValueMismatch
 				if dingoPool.RewardsPending {
 					cat = CategoryReferenceLag
@@ -1086,8 +1124,9 @@ func CompareAccountEpoch(
 	now time.Time,
 	graceHours int,
 	epochEndTime time.Time,
-	rewardsPending bool,
+	rewardsPendingArg ...bool,
 ) []CheckMismatch {
+	rewardsPending := len(rewardsPendingArg) > 0 && rewardsPendingArg[0]
 	var out []CheckMismatch
 
 	koiosByKey := make(map[accountRewardKey]KoiosAccountRewards, len(koiosRows))
@@ -1385,7 +1424,8 @@ func severityOf(category string) mismatchSeverity {
 		CategoryAcctZeroRewardRow,
 		CategoryAcctNewlyRegistered,
 		CategoryAcctDeregistered,
-		CategoryPoolDeparted:
+		CategoryPoolDeparted,
+		CategoryCostModelSynthetic:
 		// Purely informational — see these categories' doc comments.
 		return severityInformational
 	default:

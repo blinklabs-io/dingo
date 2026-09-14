@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/stretchr/testify/require"
 )
@@ -157,4 +158,51 @@ func TestUTxOToModel_PropagatesPaymentScript(t *testing.T) {
 		require.Equal(t, wantScript, m.PaymentScript)
 		require.Equal(t, uint8(1), m.CredentialTag)
 	}
+}
+
+func TestExtractAddressKeys_PreservesPointerPosition(t *testing.T) {
+	t.Parallel()
+
+	addr := buildShelleyAddr(
+		4,
+		1,
+		bytes.Repeat([]byte{0x11}, 28),
+		nil,
+	)
+	// Pointer components are CBOR-style unsigned variable-length integers.
+	addr = append(addr, 100, 2, 3)
+
+	parsed := &ParsedUTxO{}
+	extractAddressKeys(addr, parsed)
+	require.Equal(t, &models.UtxoPointer{
+		Slot: 100, TxIndex: 2, CertIndex: 3,
+	}, parsed.Pointer)
+
+	model := UTxOToModel(parsed, 200)
+	require.Equal(t, parsed.Pointer, model.Pointer)
+}
+
+func TestParseCborTxOut_PreservesPointerPosition(t *testing.T) {
+	t.Parallel()
+
+	addr := buildShelleyAddr(
+		4,
+		1,
+		bytes.Repeat([]byte{0x11}, 28),
+		nil,
+	)
+	addr = append(addr, 100, 2, 3)
+	txOut, err := cbor.Encode([]any{addr, uint64(1_000_000)})
+	require.NoError(t, err)
+
+	parsed, err := parseCborTxOut(
+		bytes.Repeat([]byte{0xab}, 32),
+		0,
+		cbor.RawMessage(txOut),
+		cbor.RawMessage(txOut),
+	)
+	require.NoError(t, err)
+	require.Equal(t, &models.UtxoPointer{
+		Slot: 100, TxIndex: 2, CertIndex: 3,
+	}, parsed.Pointer)
 }

@@ -197,7 +197,9 @@ INSERT INTO resign_committee_cold (
 	require.NoError(t, err)
 }
 
-func TestLedgerViewProposedCommitteeMemberPreservesCertificateState(t *testing.T) {
+func TestLedgerViewProposedCommitteeMemberPreservesCertificateState(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	tests := []struct {
@@ -245,7 +247,11 @@ func TestLedgerViewProposedCommitteeMemberPreservesCertificateState(t *testing.T
 			require.Equal(t, test.wantResigned, member.Resigned)
 			if test.wantHot {
 				require.NotNil(t, member.HotKey)
-				require.Equal(t, committeeTestCredential(0x72).Credential, *member.HotKey)
+				require.Equal(
+					t,
+					committeeTestCredential(0x72).Credential,
+					*member.HotKey,
+				)
 			} else {
 				require.Nil(t, member.HotKey)
 			}
@@ -609,38 +615,41 @@ func TestLedgerViewCommitteeMember(t *testing.T) {
 		require.False(t, member.Resigned)
 	})
 
-	t.Run("seated resignation takes precedence over proposal", func(t *testing.T) {
-		lv, db := committeeTestView(
-			t,
-			&conway.ConwayProtocolParameters{},
-		)
-		credential := committeeTestCredential(0x31)
-		hot := committeeTestCredential(0x32).Credential
-		require.NoError(t, db.SetCommitteeMembers(
-			[]*models.CommitteeMember{{
-				ColdCredHash: credential.Credential[:],
-				ExpiresEpoch: 50,
-			}},
-			nil,
-		))
-		seedCommitteeAuthorization(
-			t,
-			db,
-			credential.Credential,
-			hot,
-			1,
-			1,
-		)
-		seedCommitteeResignation(t, db, credential.Credential, 2, 2)
-		storeCommitteeUpdateProposal(t, db, 0x33, credential, 90)
+	t.Run(
+		"seated resignation takes precedence over proposal",
+		func(t *testing.T) {
+			lv, db := committeeTestView(
+				t,
+				&conway.ConwayProtocolParameters{},
+			)
+			credential := committeeTestCredential(0x31)
+			hot := committeeTestCredential(0x32).Credential
+			require.NoError(t, db.SetCommitteeMembers(
+				[]*models.CommitteeMember{{
+					ColdCredHash: credential.Credential[:],
+					ExpiresEpoch: 50,
+				}},
+				nil,
+			))
+			seedCommitteeAuthorization(
+				t,
+				db,
+				credential.Credential,
+				hot,
+				1,
+				1,
+			)
+			seedCommitteeResignation(t, db, credential.Credential, 2, 2)
+			storeCommitteeUpdateProposal(t, db, 0x33, credential, 90)
 
-		member, err := lv.CommitteeMember(credential.Credential)
-		require.NoError(t, err)
-		require.NotNil(t, member)
-		require.Equal(t, uint64(50), member.ExpiryEpoch)
-		require.Nil(t, member.HotKey)
-		require.True(t, member.Resigned)
-	})
+			member, err := lv.CommitteeMember(credential.Credential)
+			require.NoError(t, err)
+			require.NotNil(t, member)
+			require.Equal(t, uint64(50), member.ExpiryEpoch)
+			require.Nil(t, member.HotKey)
+			require.True(t, member.Resigned)
+		},
+	)
 
 	t.Run("unknown", func(t *testing.T) {
 		lv, db := committeeTestView(
@@ -735,38 +744,41 @@ func TestLedgerViewPendingCommitteeCertificateValidationSameTransaction(
 	}
 	for _, certificate := range certificates {
 		for _, credential := range credentials {
-			t.Run(certificateName(certificate)+"/"+credential.name, func(t *testing.T) {
-				switch cert := certificate.(type) {
-				case *lcommon.AuthCommitteeHotCertificate:
-					cert.ColdCredential = credential.credential
-				case *lcommon.ResignCommitteeColdCertificate:
-					cert.ColdCredential = credential.credential
-				}
-				tx := &conway.ConwayTransaction{
-					// Committee certificates are only inspected for a
-					// phase-2-valid transaction, so the fixture must declare
-					// validity or the rule under test never runs.
-					TxIsValid: true,
-					Body: conway.ConwayTransactionBody{
-						TxCertificates: []lcommon.CertificateWrapper{{
-							Type:        certificate.Type(),
-							Certificate: certificate,
-						}},
-					},
-				}
-				err := eras.ValidateTxConway(tx, 0, lv, pparams)
-				var notMember conway.NotCommitteeMemberError
-				if credential.wantNotMember {
-					require.ErrorAs(t, err, &notMember)
-				} else {
-					require.False(
-						t,
-						errors.As(err, &notMember),
-						"matching uncommitted proposal was rejected: %v",
-						err,
-					)
-				}
-			})
+			t.Run(
+				certificateName(certificate)+"/"+credential.name,
+				func(t *testing.T) {
+					switch cert := certificate.(type) {
+					case *lcommon.AuthCommitteeHotCertificate:
+						cert.ColdCredential = credential.credential
+					case *lcommon.ResignCommitteeColdCertificate:
+						cert.ColdCredential = credential.credential
+					}
+					tx := &conway.ConwayTransaction{
+						// Committee certificates are only inspected for a
+						// phase-2-valid transaction, so the fixture must declare
+						// validity or the rule under test never runs.
+						TxIsValid: true,
+						Body: conway.ConwayTransactionBody{
+							TxCertificates: []lcommon.CertificateWrapper{{
+								Type:        certificate.Type(),
+								Certificate: certificate,
+							}},
+						},
+					}
+					err := eras.ValidateTxConway(tx, 0, lv, pparams)
+					var notMember conway.NotCommitteeMemberError
+					if credential.wantNotMember {
+						require.ErrorAs(t, err, &notMember)
+					} else {
+						require.False(
+							t,
+							errors.As(err, &notMember),
+							"matching uncommitted proposal was rejected: %v",
+							err,
+						)
+					}
+				},
+			)
 		}
 	}
 }

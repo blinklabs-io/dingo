@@ -25,8 +25,8 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
-	_ "github.com/glebarez/go-sqlite"
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
 )
 
 // The DISTINCT-bearing statements this package used to run in the rollback
@@ -56,6 +56,7 @@ func newMigratedSQLiteStore(tb testing.TB) *Store {
 			testStoreSequence.Add(1),
 		),
 		"sqlite",
+		false,
 	)
 	require.NoError(tb, err)
 	registry, err := migrations.SQLiteRegistry()
@@ -406,7 +407,11 @@ func TestRollbackSweepStillTruncatesUtxos(t *testing.T) {
 	require.NoError(t, store.writeDB.QueryRow(
 		"SELECT COUNT(*) FROM utxo WHERE added_slot > ?", rolledBackFrom,
 	).Scan(&above))
-	require.Zero(t, above, "rollback must delete every utxo added after the slot")
+	require.Zero(
+		t,
+		above,
+		"rollback must delete every utxo added after the slot",
+	)
 
 	var total int
 	require.NoError(t, store.writeDB.QueryRow(

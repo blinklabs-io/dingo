@@ -89,7 +89,7 @@ func TestQueryLedgerPeerSnapshotDispatch(t *testing.T) {
 		},
 	}
 
-	result, err := ls.Query(query)
+	result, err := ls.Query(query, QueryPoint{})
 	require.NoError(t, err)
 
 	snapshot, ok := result.(olocalstatequery.LedgerPeerSnapshotResult)

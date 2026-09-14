@@ -88,7 +88,12 @@ func registerCollector[T prometheus.Collector](
 	registered := registerExistingOrNew(reg, c)
 	collector, ok := registered.(T)
 	if !ok {
-		panic(fmt.Sprintf("registered collector has unexpected type %T", registered))
+		panic(
+			fmt.Sprintf(
+				"registered collector has unexpected type %T",
+				registered,
+			),
+		)
 	}
 	return collector
 }
@@ -121,43 +126,85 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 		gcCollectors.attempts = prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: badgerMetricNamePrefix + "gc_attempts_total", Help: "Total Badger value-log GC attempts.",
 		}, labels)
-		gcCollectors.successes = prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: badgerMetricNamePrefix + "gc_successes_total", Help: "Total successful Badger value-log GC rewrites.",
-		}, labels)
-		gcCollectors.noRewrite = prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: badgerMetricNamePrefix + "gc_no_rewrite_total", Help: "Total Badger value-log GC attempts with no rewrite.",
-		}, labels)
+		gcCollectors.successes = prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: badgerMetricNamePrefix + "gc_successes_total", Help: "Total successful Badger value-log GC rewrites.",
+			},
+			labels,
+		)
+		gcCollectors.noRewrite = prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: badgerMetricNamePrefix + "gc_no_rewrite_total", Help: "Total Badger value-log GC attempts with no rewrite.",
+			},
+			labels,
+		)
 		gcCollectors.errors = prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: badgerMetricNamePrefix + "gc_errors_total", Help: "Total Badger value-log GC errors.",
 		}, labels)
-		gcCollectors.duration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name: badgerMetricNamePrefix + "gc_duration_seconds", Help: "Duration of Badger value-log GC attempts in seconds.",
-		}, labels)
+		gcCollectors.duration = prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name: badgerMetricNamePrefix + "gc_duration_seconds", Help: "Duration of Badger value-log GC attempts in seconds.",
+			},
+			labels,
+		)
 		gcCollectors.lsmBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: badgerMetricNamePrefix + "gc_lsm_bytes", Help: "Badger LSM size after the last successful value-log GC rewrite.",
 		}, labels)
 		gcCollectors.vlogBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: badgerMetricNamePrefix + "gc_vlog_bytes", Help: "Badger value-log size after the last successful GC rewrite.",
 		}, labels)
-		gcCollectors.reclaimedBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: badgerMetricNamePrefix + "gc_reclaimed_bytes", Help: "Bytes reclaimed by the last successful Badger GC rewrite.",
-		}, labels)
+		gcCollectors.reclaimedBytes = prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: badgerMetricNamePrefix + "gc_reclaimed_bytes", Help: "Bytes reclaimed by the last successful Badger GC rewrite.",
+			},
+			labels,
+		)
 		gcCollectors.consecutive = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: badgerMetricNamePrefix + "gc_consecutive_successes", Help: "Successful value-log GC rewrites in the current GC cycle.",
 		}, labels)
 		gcCollectors.lastSuccess = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: badgerMetricNamePrefix + "gc_last_success_timestamp_seconds", Help: "Unix timestamp of the last successful value-log GC rewrite.",
 		}, labels)
-		gcCollectors.attempts = registerCollector[*prometheus.CounterVec](d.promRegistry, gcCollectors.attempts)
-		gcCollectors.successes = registerCollector[*prometheus.CounterVec](d.promRegistry, gcCollectors.successes)
-		gcCollectors.noRewrite = registerCollector[*prometheus.CounterVec](d.promRegistry, gcCollectors.noRewrite)
-		gcCollectors.errors = registerCollector[*prometheus.CounterVec](d.promRegistry, gcCollectors.errors)
-		gcCollectors.duration = registerCollector[*prometheus.HistogramVec](d.promRegistry, gcCollectors.duration)
-		gcCollectors.lsmBytes = registerCollector[*prometheus.GaugeVec](d.promRegistry, gcCollectors.lsmBytes)
-		gcCollectors.vlogBytes = registerCollector[*prometheus.GaugeVec](d.promRegistry, gcCollectors.vlogBytes)
-		gcCollectors.reclaimedBytes = registerCollector[*prometheus.GaugeVec](d.promRegistry, gcCollectors.reclaimedBytes)
-		gcCollectors.consecutive = registerCollector[*prometheus.GaugeVec](d.promRegistry, gcCollectors.consecutive)
-		gcCollectors.lastSuccess = registerCollector[*prometheus.GaugeVec](d.promRegistry, gcCollectors.lastSuccess)
+		gcCollectors.attempts = registerCollector[*prometheus.CounterVec](
+			d.promRegistry,
+			gcCollectors.attempts,
+		)
+		gcCollectors.successes = registerCollector[*prometheus.CounterVec](
+			d.promRegistry,
+			gcCollectors.successes,
+		)
+		gcCollectors.noRewrite = registerCollector[*prometheus.CounterVec](
+			d.promRegistry,
+			gcCollectors.noRewrite,
+		)
+		gcCollectors.errors = registerCollector[*prometheus.CounterVec](
+			d.promRegistry,
+			gcCollectors.errors,
+		)
+		gcCollectors.duration = registerCollector[*prometheus.HistogramVec](
+			d.promRegistry,
+			gcCollectors.duration,
+		)
+		gcCollectors.lsmBytes = registerCollector[*prometheus.GaugeVec](
+			d.promRegistry,
+			gcCollectors.lsmBytes,
+		)
+		gcCollectors.vlogBytes = registerCollector[*prometheus.GaugeVec](
+			d.promRegistry,
+			gcCollectors.vlogBytes,
+		)
+		gcCollectors.reclaimedBytes = registerCollector[*prometheus.GaugeVec](
+			d.promRegistry,
+			gcCollectors.reclaimedBytes,
+		)
+		gcCollectors.consecutive = registerCollector[*prometheus.GaugeVec](
+			d.promRegistry,
+			gcCollectors.consecutive,
+		)
+		gcCollectors.lastSuccess = registerCollector[*prometheus.GaugeVec](
+			d.promRegistry,
+			gcCollectors.lastSuccess,
+		)
 		badgerGCCollectors.put(d.promRegistry, gcCollectors)
 	}
 	d.gcMetrics = &badgerGCMetrics{

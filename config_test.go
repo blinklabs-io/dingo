@@ -117,17 +117,17 @@ func TestNewConfigMempoolCapacityDefaultsFromRunMode(t *testing.T) {
 	}
 }
 
-func TestNewConfigAPIBindAddressDefaultsToLoopback(t *testing.T) {
+func TestNewConfigPublicBindAddressDefaultsToWildcard(t *testing.T) {
 	cfg := NewConfig(
 		WithRunMode(string(internalconfig.RunModeDev)),
-		WithBindAddr("0.0.0.0"),
 	)
 
 	assert.Equal(t, "0.0.0.0", cfg.BindAddr())
-	assert.Equal(t, internalconfig.DefaultAPIBindAddr, cfg.APIBindAddr())
+	assert.Equal(t, cfg.BindAddr(), cfg.bindAddr)
 
-	cfg = NewConfig(WithAPIBindAddr("192.0.2.10"))
-	assert.Equal(t, "192.0.2.10", cfg.APIBindAddr())
+	cfg = NewConfig(WithBindAddr("192.0.2.10"))
+	assert.Equal(t, "192.0.2.10", cfg.BindAddr())
+	assert.Equal(t, "192.0.2.10", cfg.bindAddr)
 }
 
 func TestNewConfigPreservesExplicitMempoolCapacity(t *testing.T) {
@@ -178,6 +178,23 @@ func TestNewConfigDoesNotDefaultCustomMempoolConfig(t *testing.T) {
 
 	selection := cfg.pluginSelections[plugin.CapabilityMempool]
 	assert.Empty(t, selection.Config)
+}
+
+// TestNewConfigDefaultsValidateForgedBlock is a regression test for issue
+// #3528: NewConfig builds its own internalconfig.Config literal rather than
+// starting from internalconfig's own package-level default (globalConfig,
+// built by its unexported newDefaultConfig), so the fail-closed
+// ValidateForgedBlock=true default had to be set in both places. A caller
+// using the programmatic/library API (NewConfig) rather than the
+// YAML/env-loaded path must still get self-validation of forged blocks
+// enabled by default -- checked on both cfg.cfg.ValidateForgedBlock (the
+// loaded internal config) and cfg.validateForgedBlock (the compat mirror
+// syncCompatFields populates from it, which node_forging.go actually
+// reads); a human reviewer found this test only checked the former.
+func TestNewConfigDefaultsValidateForgedBlock(t *testing.T) {
+	cfg := NewConfig()
+	assert.True(t, cfg.cfg.ValidateForgedBlock)
+	assert.True(t, cfg.validateForgedBlock)
 }
 
 func TestWithPluginSelectionSnapshotsConfig(t *testing.T) {
@@ -251,7 +268,6 @@ func TestWithMidnightConfig(t *testing.T) {
 		Enabled:                     true,
 		ServerEnabled:               true,
 		ReflectionEnabled:           true,
-		AllowInsecureRemote:         true,
 		Port:                        50052,
 		Host:                        "127.0.0.1",
 		CNightPolicyID:              "policy1",
@@ -304,7 +320,6 @@ func TestSyncCompatFieldsMidnightAllFieldsMirrored(t *testing.T) {
 		Enabled:                     true,
 		ServerEnabled:               true,
 		ReflectionEnabled:           true,
-		AllowInsecureRemote:         true,
 		Port:                        50099,
 		Host:                        "127.0.0.1",
 		CNightPolicyID:              "policy1",
