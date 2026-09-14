@@ -34,10 +34,20 @@ import (
 // instant, so tests can put the forge either comfortably inside its slot or
 // past the end of it without sleeping.
 type retryTestSlotClock struct {
-	currentSlot       uint64
-	chainTipSlot      uint64
-	slotsPerKESPeriod uint64
-	slotEnd           time.Time
+	currentSlot  uint64
+	chainTipSlot uint64
+	chainTipHash []byte
+	// primaryTipExplicit selects whether primaryTipSlot/primaryTipHash are
+	// used verbatim. When false the primary tip mirrors the applied tip,
+	// which is the caught-up steady state and what every test that does not
+	// care about the distinction wants. A test that needs an apply backlog
+	// -- the primary chain tip ahead of, behind, or replaced at the applied
+	// tip -- sets it and moves the primary tip on its own.
+	primaryTipExplicit bool
+	primaryTipSlot     uint64
+	primaryTipHash     []byte
+	slotsPerKESPeriod  uint64
+	slotEnd            time.Time
 }
 
 func (c *retryTestSlotClock) CurrentSlot() (uint64, error) {
@@ -48,15 +58,19 @@ func (c *retryTestSlotClock) SlotsPerKESPeriod() uint64 {
 	return c.slotsPerKESPeriod
 }
 
-// ChainTip and PrimaryChainTip report the same point: these tests drive
-// re-selection from the slot clock and the mempool, not from an apply
-// backlog, so the clock describes a caught-up node.
+// ChainTip is the ledger-applied tip. PrimaryChainTip mirrors it unless a
+// test asks for the two to differ: most of these tests drive re-selection
+// from the slot clock and the mempool, not from an apply backlog, so the
+// default describes a caught-up node.
 func (c *retryTestSlotClock) ChainTip() ocommon.Point {
-	return ocommon.Point{Slot: c.chainTipSlot}
+	return ocommon.Point{Slot: c.chainTipSlot, Hash: c.chainTipHash}
 }
 
 func (c *retryTestSlotClock) PrimaryChainTip() ocommon.Point {
-	return ocommon.Point{Slot: c.chainTipSlot}
+	if c.primaryTipExplicit {
+		return ocommon.Point{Slot: c.primaryTipSlot, Hash: c.primaryTipHash}
+	}
+	return c.ChainTip()
 }
 
 func (c *retryTestSlotClock) NextSlotTime() (time.Time, error) {
