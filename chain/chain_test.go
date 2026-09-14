@@ -2534,7 +2534,7 @@ func TestRewindPrimaryChainToPointConcurrentRewinds(t *testing.T) {
 			)
 		}
 	}
-	for idx := uint64(len(testBlocks)-2); idx <= uint64(len(testBlocks)); idx++ {
+	for idx := uint64(len(testBlocks) - 2); idx <= uint64(len(testBlocks)); idx++ {
 		if _, err := db.BlockByIndex(idx, nil); !errors.Is(
 			err, models.ErrBlockNotFound,
 		) {
@@ -3659,8 +3659,9 @@ func TestIteratorCoalescedRollbackDoesNotIncludeUndeliveredBlocks(t *testing.T) 
 		t.Fatalf("first Rollback: %v", err)
 	}
 	// Regrow the same suffix before the iterator consumes its pending marker.
-	// These blocks are removed by the second rollback but were not delivered
-	// after the first marker, so they must not be appended to its undo payload.
+	// The regrown suffix was not delivered after the first marker and must not
+	// be duplicated, while the blocks below that marker were delivered earlier
+	// and must remain in the undo payload.
 	for _, b := range testBlocks[4:] {
 		if err := c.AddBlock(b, nil); err != nil {
 			t.Fatalf("regrow: %v", err)
@@ -3683,10 +3684,10 @@ func TestIteratorCoalescedRollbackDoesNotIncludeUndeliveredBlocks(t *testing.T) 
 	if !reflect.DeepEqual(next.Point, secondTarget) {
 		t.Fatalf("rollback point: got %+v, want %+v", next.Point, secondTarget)
 	}
-	if len(next.RollbackBlocks) != 2 {
-		t.Fatalf("rollback payload length: got %d, want 2", len(next.RollbackBlocks))
+	if len(next.RollbackBlocks) != 4 {
+		t.Fatalf("rollback payload length: got %d, want 4", len(next.RollbackBlocks))
 	}
-	for idx, block := range testBlocks[4:6] {
+	for idx, block := range testBlocks[2:6] {
 		got := next.RollbackBlocks[len(next.RollbackBlocks)-1-idx]
 		if got.Slot != block.SlotNumber() ||
 			!bytes.Equal(got.Hash, block.Hash().Bytes()) {
