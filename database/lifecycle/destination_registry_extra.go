@@ -21,7 +21,7 @@ package lifecycle
 // (node/CLI startup) calls this once, right after NewDestinationRegistry,
 // so the set of available schemes is explicit at the call site instead of
 // depending on which files happened to be linked in.
-func RegisterBuiltinDestinations(registry *DestinationRegistry) {
-	RegisterS3(registry)
-	RegisterGCS(registry)
+func RegisterBuiltinDestinations(registry *DestinationRegistry, opts ...ManifestOption) {
+	RegisterS3(registry, opts...)
+	RegisterGCS(registry, opts...)
 }
