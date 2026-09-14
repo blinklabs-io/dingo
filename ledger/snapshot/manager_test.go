@@ -19,7 +19,6 @@ import (
 	"context"
 	"math/big"
 	"testing"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	promtest "github.com/prometheus/client_golang/prometheus/testutil"
@@ -2159,20 +2158,20 @@ func TestConcurrentFallbackAndAuthoritativeCaptureSerialization(t *testing.T) {
 		}()
 
 		testutil.RequireReceive(
-			t, authoritativeStaged, 5*time.Second,
+			t, authoritativeStaged, testutil.AsyncWait,
 			"authoritative snapshot staged",
 		)
 		testutil.RequireReceive(
-			t, fallbackChecked, 5*time.Second,
+			t, fallbackChecked, testutil.AsyncWait,
 			"fallback pre-check before authoritative commit",
 		)
 		close(allowAuthoritativeCommit)
 		require.NoError(t, testutil.RequireReceive(
-			t, authoritativeDone, 5*time.Second,
+			t, authoritativeDone, testutil.AsyncWait,
 			"authoritative snapshot commit",
 		))
 		fallbackResult := testutil.RequireReceive(
-			t, fallbackDone, 5*time.Second,
+			t, fallbackDone, testutil.AsyncWait,
 			"fallback marker claim",
 		)
 		require.NoError(t, fallbackResult.err)
@@ -2237,12 +2236,12 @@ func TestConcurrentFallbackAndAuthoritativeCaptureSerialization(t *testing.T) {
 		}()
 
 		testutil.RequireReceive(
-			t, authoritativeStarted, 5*time.Second,
+			t, authoritativeStarted, testutil.AsyncWait,
 			"authoritative capture started",
 		)
 		require.NoError(t, fallbackTxn.Commit())
 		require.NoError(t, testutil.RequireReceive(
-			t, authoritativeDone, 5*time.Second,
+			t, authoritativeDone, testutil.AsyncWait,
 			"authoritative replacement commit",
 		))
 

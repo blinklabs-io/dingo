@@ -160,7 +160,14 @@ func (o *Ouroboros) blockfetchClientBlockRaw(
 		o.blockDecodeCache,
 		key,
 		func() (gledger.Block, error) {
-			return o.decodeBlockfetchBlock(blockType, blockData)
+			decodeStart := time.Now()
+			block, err := o.decodeBlockfetchBlock(blockType, blockData)
+			if o.blockfetchMetrics != nil {
+				o.blockfetchMetrics.stageDecode.Observe(
+					time.Since(decodeStart).Seconds(),
+				)
+			}
+			return block, err
 		},
 		o.recordBlockDecodeCacheOutcome,
 	)
