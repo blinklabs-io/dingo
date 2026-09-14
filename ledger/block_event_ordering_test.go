@@ -157,7 +157,7 @@ func TestChainUpdateHandlerPublishesNoTransactionEvents(t *testing.T) {
 	// Block undo events are still the handler's job, one per block.
 	for i := range blocks {
 		evt := testutil.RequireReceive(
-			t, blockCh, 2*time.Second,
+			t, blockCh, testutil.AsyncWait,
 			fmt.Sprintf("block undo event %d", i),
 		)
 		be, ok := evt.Data.(BlockEvent)
@@ -324,7 +324,7 @@ func TestRollbackWaitsForCommittedApplyPublication(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		commitReached,
-		2*time.Second,
+		testutil.AsyncWait,
 		"database commit before Apply publication",
 	)
 
@@ -350,14 +350,14 @@ func TestRollbackWaitsForCommittedApplyPublication(t *testing.T) {
 	require.NoError(t, testutil.RequireReceive(
 		t,
 		applyDone,
-		2*time.Second,
+		testutil.AsyncWait,
 		"block apply transaction",
 	))
 	applyFinished = true
 	applyEvt := testutil.RequireReceive(
 		t,
 		txCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"committed Apply event",
 	)
 	txEvt, ok := applyEvt.Data.(TransactionEvent)
@@ -366,7 +366,7 @@ func TestRollbackWaitsForCommittedApplyPublication(t *testing.T) {
 	require.NoError(t, testutil.RequireReceive(
 		t,
 		rollbackDone,
-		2*time.Second,
+		testutil.AsyncWait,
 		"rollback after Apply publication",
 	))
 	require.Equal(t, fixture.ancestorTip, ls.chain.Tip())
@@ -639,7 +639,7 @@ func TestRollbackChainAndStateEmitsUndoEventsBeforeTruncating(t *testing.T) {
 
 	// The block above the rollback point was visited by the undo emitter.
 	evt := testutil.RequireReceive(
-		t, errCh, 2*time.Second,
+		t, errCh, testutil.AsyncWait,
 		"undo-event decode error for the rolled-back block",
 	)
 	le, ok := evt.Data.(LedgerErrorEvent)
@@ -797,7 +797,7 @@ func TestReconciliationUndoBlocksCoversConcurrentlyAppliedBlock(t *testing.T) {
 	// a decode failure here, so seeing both decode errors is proof both
 	// were included, in newest-first order.
 	first := testutil.RequireReceive(
-		t, errCh, 2*time.Second,
+		t, errCh, testutil.AsyncWait,
 		"undo-event decode error for the race-applied block",
 	)
 	firstEvt, ok := first.Data.(LedgerErrorEvent)
@@ -806,7 +806,7 @@ func TestReconciliationUndoBlocksCoversConcurrentlyAppliedBlock(t *testing.T) {
 	require.Equal(t, raceTip.Point.Hash, firstEvt.Point.Hash)
 
 	second := testutil.RequireReceive(
-		t, errCh, 2*time.Second,
+		t, errCh, testutil.AsyncWait,
 		"undo-event decode error for the originally-applied block",
 	)
 	secondEvt, ok := second.Data.(LedgerErrorEvent)
@@ -872,7 +872,7 @@ func TestReconcilePrimaryChainTipWithLedgerTipEmitsUndoEventsBeforeTruncating(
 	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
 
 	evt := testutil.RequireReceive(
-		t, errCh, 2*time.Second,
+		t, errCh, testutil.AsyncWait,
 		"undo-event decode error for the block the ledger actually applied",
 	)
 	le, ok := evt.Data.(LedgerErrorEvent)
@@ -1056,7 +1056,7 @@ func TestReconcilePrimaryChainTipWithLedgerTipRecoversUndoAfterCrashBetweenRewin
 	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
 
 	evt := testutil.RequireReceive(
-		t, errCh, 2*time.Second,
+		t, errCh, testutil.AsyncWait,
 		"the recovery attempt must still try to deliver an undo "+
 			"notification for the block truncated before the crash",
 	)
@@ -1329,7 +1329,7 @@ func TestBlocksAboveSlotServesLedgerErrorOnlySubscribers(t *testing.T) {
 	)
 
 	evt := testutil.RequireReceive(
-		t, errCh, 2*time.Second,
+		t, errCh, testutil.AsyncWait,
 		"decode error must reach a ledger.error-only subscriber",
 	)
 	le, ok := evt.Data.(LedgerErrorEvent)

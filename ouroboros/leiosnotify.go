@@ -1117,10 +1117,15 @@ func (o *Ouroboros) dispatchLeiosFetch(
 	fn func(),
 ) bool {
 	g := o.leiosFetchGuardFor(connId)
-	if g.inflight.Load() >= leiosFetchMaxInflightPerConn {
-		return false
+	for {
+		current := g.inflight.Load()
+		if current >= leiosFetchMaxInflightPerConn {
+			return false
+		}
+		if g.inflight.CompareAndSwap(current, current+1) {
+			break
+		}
 	}
-	g.inflight.Add(1)
 	go func() {
 		defer g.inflight.Add(-1)
 		g.mu.Lock()

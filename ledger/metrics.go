@@ -65,6 +65,23 @@ type stateMetrics struct {
 	// and "unavailable" means the fetch COMPLETED without caching, which is
 	// routine on a CIP node and would swamp the counter.
 	leiosEbWaitTimeouts prometheus.Counter
+	// Per-stage wall-clock time spent processing one block through the
+	// ledger's slice of the pipeline: header_verify (VRF/KES/signature
+	// checks run when a fetched block arrives), validate (one
+	// transaction's era ledger-rule validation, including Plutus
+	// evaluation, inside ledgerProcessBlock), and apply (writing a
+	// flushed LedgerDeltaBatch's UTXO and transaction rows to the
+	// metadata store). See dingo_blockfetch_stage_duration_seconds in the
+	// ouroboros package for the wire-decode stage, which runs before a
+	// block reaches the ledger at all. Together the two metrics answer
+	// "where does per-block processing time go", which no existing
+	// histogram covers end to end.
+	blockStageDuration *prometheus.HistogramVec
+	// Pre-materialized observers for the stage label values, so the hot
+	// path does not resolve a label on every block or transaction.
+	blockStageHeaderVerify prometheus.Observer
+	blockStageValidate     prometheus.Observer
+	blockStageApply        prometheus.Observer
 	// Incremented when a stored governance proposal's CBOR fails to
 	// decode during the mid-epoch ratifiability check, so the failures
 	// surface as a metric instead of just log volume.
@@ -257,6 +274,35 @@ const (
 	// on a CIP node, so it would overstate them badly.
 	leiosEbWaitOutcomeUnavailable = "unavailable"
 )
+
+// Stage labels for blockStageDuration. See its field doc comment for what
+// each stage covers.
+const (
+	blockStageHeaderVerify = "header_verify"
+	blockStageValidate     = "validate"
+	blockStageApply        = "apply"
+)
+
+// observeBlockStage records one sample of wall-clock time spent in the named
+// per-block processing stage. Safe to call before init (or when metrics are
+// disabled), matching the other observe helpers in this file.
+func (m *stateMetrics) observeBlockStage(stage string, d time.Duration) {
+	if m == nil {
+		return
+	}
+	var obs prometheus.Observer
+	switch stage {
+	case blockStageHeaderVerify:
+		obs = m.blockStageHeaderVerify
+	case blockStageValidate:
+		obs = m.blockStageValidate
+	case blockStageApply:
+		obs = m.blockStageApply
+	}
+	if obs != nil {
+		obs.Observe(d.Seconds())
+	}
+}
 
 // observeLeiosEbWait records one apply-path endorser-block wait under the
 // given outcome. Recording the duration under every outcome (rather than only
@@ -536,6 +582,26 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 			Name: "dingo_metrics_leios_eb_wait_timeouts_total",
 			Help: "ledger apply-path waits for a referenced Leios endorser block that ran to a full bound without it arriving: the diffusion window, or the CIP in-flight-fetch grace phase hard bound",
 		},
+	)
+	m.blockStageDuration = promautoFactory.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "dingo_ledger_block_stage_duration_seconds",
+			Help: "wall-clock time spent in each ledger-owned stage of per-block processing, by stage: header_verify (VRF/KES/signature checks on blockfetch arrival), validate (one transaction's era ledger-rule validation, including Plutus evaluation), apply (writing a flushed delta batch's UTXO and transaction rows to the metadata store)",
+			// 100us to ~3.3s. Block-processing work here ranges from a
+			// single cheap signature check to a Plutus-heavy transaction
+			// or a large multi-block delta-batch flush.
+			Buckets: prometheus.ExponentialBuckets(0.0001, 2, 16),
+		},
+		[]string{"stage"},
+	)
+	m.blockStageHeaderVerify = m.blockStageDuration.WithLabelValues(
+		blockStageHeaderVerify,
+	)
+	m.blockStageValidate = m.blockStageDuration.WithLabelValues(
+		blockStageValidate,
+	)
+	m.blockStageApply = m.blockStageDuration.WithLabelValues(
+		blockStageApply,
 	)
 	m.governanceProposalDecodeFailures = promautoFactory.NewCounter(
 		prometheus.CounterOpts{

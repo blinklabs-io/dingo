@@ -30,9 +30,9 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
-	_ "github.com/glebarez/go-sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
 )
 
 var testStoreSequence atomic.Uint64

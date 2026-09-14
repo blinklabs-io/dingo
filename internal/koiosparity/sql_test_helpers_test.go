@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	_ "github.com/glebarez/go-sqlite"
+	_ "modernc.org/sqlite"
 )
 
 type testDB struct{ db *sql.DB }

@@ -389,17 +389,45 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 // eras.DuplicateInputByronError, which is the same structural verdict and
 // must not fall through to state-dependent producer resolution.
 //
+// lcommon.MalformedReferenceScriptsError and
+// lcommon.MalformedScriptWitnessesError are the same class: both are raised
+// by common.ValidatePlutusScriptsWellFormed, which decodes only the failing
+// transaction's own witness scripts and output/collateral-return script refs
+// (plus any sub-transaction outputs) against the era's protocol-major
+// version. It never resolves a UTxO through LedgerState/LedgerView, so no
+// local replay of a different UTxO history -- and no depth of rewind -- can
+// change its verdict. Left unclassified, this error fell through both the
+// at-tip and behind-tip branches (neither finds a missing-input producer to
+// resolve, since there is none), returned (false, nil) from
+// tryRecoverFromTxValidationError, and let the raw error propagate to the
+// generic pipeline-restart path with the ledger tip unchanged: the pipeline
+// re-read and re-failed the identical block forever with no rewind, no peer
+// rotation, and no halt (observed live on a preview sync: 138 identical
+// "block processing failed, restarting pipeline" warnings for one
+// transaction over 46+ minutes).
+//
 // Deterministic is not the same as correct. The Shelley-family rule
 // deduplicates unconditionally while the CBOR decoder leaves untagged
 // pre-Conway array fields unchecked, so a canonical pre-Conway block can carry
 // a wire-level duplicate cardano-node coalesces and this verdict rejects
 // (preview slot 1462320; blinklabs-io/gouroboros#1989). Recovery must stay
-// non-terminal for that duplicate verdict for exactly that reason.
+// non-terminal for that duplicate verdict for exactly that reason, and for
+// the same reason a false-positive malformed-script verdict must also stay
+// non-terminal: recoverFromDeterministicTxValidationError rewinds and asks
+// chain selection for another candidate rather than halting, so a locally
+// mistaken rejection still leaves the node able to follow a chain a peer
+// later offers.
 func isDeterministicTxValidationError(err error) bool {
 	if _, ok := errors.AsType[shelley.DuplicateInputError](err); ok {
 		return true
 	}
 	if _, ok := errors.AsType[conway.PlutusScriptFailedError](err); ok {
+		return true
+	}
+	if _, ok := errors.AsType[lcommon.MalformedReferenceScriptsError](err); ok {
+		return true
+	}
+	if _, ok := errors.AsType[lcommon.MalformedScriptWitnessesError](err); ok {
 		return true
 	}
 	if isRewardWithdrawalMismatch(err) {

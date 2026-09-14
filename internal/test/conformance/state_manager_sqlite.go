@@ -25,7 +25,7 @@ import (
 
 	badgerblob "github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 	// Registers the "sqlite" driver used for the resetter's own connection.
-	_ "github.com/glebarez/go-sqlite"
+	_ "modernc.org/sqlite"
 )
 
 // sqliteMetadataFileName is the file the sqlite metadata provider creates
@@ -95,9 +95,10 @@ func sqliteResetFileURI(databasePath string) string {
 //     managed set is emptied together; a partial reset is never issued.
 func newSqliteResetter(databasePath string) (*backendResetter, error) {
 	// foreign_keys(0) rather than the provider's (1): see the doc comment.
-	// busy_timeout leads because github.com/glebarez/go-sqlite applies
-	// _pragma options in order and anything ahead of it runs with no busy
-	// handler installed.
+	// busy_timeout leads defensively even though modernc.org/sqlite always
+	// hoists it ahead of the rest of the _pragma list regardless of DSN
+	// order; anything ahead of it would otherwise run with no busy handler
+	// installed.
 	dsn := sqliteResetFileURI(databasePath) +
 		"?_pragma=busy_timeout(30000)" +
 		"&_pragma=foreign_keys(0)"

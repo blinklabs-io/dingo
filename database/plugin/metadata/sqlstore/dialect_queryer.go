@@ -222,6 +222,13 @@ var (
 		`(?is)\s+RETURNING\s+id\s*;?\s*$`,
 	)
 	mysqlIntegerCastPattern = regexp.MustCompile(`(?i)\bAS\s+INTEGER\b`)
+	// mysqlBigintCastPattern covers "CAST(... AS BIGINT)", used instead of
+	// "AS INTEGER" where a value (such as a lovelace amount) can exceed
+	// PostgreSQL's 32-bit INTEGER. SQLite and PostgreSQL both accept BIGINT
+	// as a CAST target directly; MySQL's CAST() has no BIGINT spelling, so
+	// it is translated to SIGNED (64-bit), the same target "AS INTEGER" is
+	// translated to below.
+	mysqlBigintCastPattern = regexp.MustCompile(`(?i)\bAS\s+BIGINT\b`)
 )
 
 func hasReturningID(query string) bool {
@@ -231,6 +238,7 @@ func hasReturningID(query string) bool {
 func translateMySQLReturning(query string) (string, bool) {
 	base := strings.TrimSpace(returningIDPattern.ReplaceAllString(query, ""))
 	base = mysqlIntegerCastPattern.ReplaceAllString(base, "AS SIGNED")
+	base = mysqlBigintCastPattern.ReplaceAllString(base, "AS SIGNED")
 	doNothing := mysqlDoNothingPattern.MatchString(base)
 	isUpsert := mysqlUpdatePattern.MatchString(base)
 	return translateMySQLUpsertWithID(base, isUpsert), doNothing
@@ -253,6 +261,7 @@ var (
 
 func translateMySQLUpsert(query string) string {
 	query = mysqlIntegerCastPattern.ReplaceAllString(query, "AS SIGNED")
+	query = mysqlBigintCastPattern.ReplaceAllString(query, "AS SIGNED")
 	return translateMySQLUpsertWithID(query, false)
 }
 
