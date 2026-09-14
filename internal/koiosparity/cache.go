@@ -24,7 +24,7 @@ import (
 	"path/filepath"
 	"time"
 
-	_ "github.com/glebarez/go-sqlite"
+	_ "modernc.org/sqlite"
 )
 
 const accountCheckpointRetentionEpochs = 4

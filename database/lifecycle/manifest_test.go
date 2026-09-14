@@ -15,7 +15,11 @@
 package lifecycle_test
 
 import (
+	"bytes"
+	"context"
 	"errors"
+	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -88,6 +92,90 @@ func TestManifestDetectsTamperedContent(t *testing.T) {
 			"resolveSnapshotSource can report corruption instead of "+
 			"'not found'",
 	)
+}
+
+func TestManifestRejectsOversizedInput(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, lifecycle.ManifestFileName)
+	require.NoError(t, os.WriteFile(
+		path, bytes.Repeat([]byte{'x'}, lifecycle.MaxManifestBytes+1), 0o600,
+	))
+	_, err := lifecycle.ReadManifest(dir)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "size exceeds maximum")
+	require.ErrorContains(t, err, "1048576")
+	require.ErrorIs(t, err, lifecycle.ErrManifestTooLarge)
+}
+
+func TestWriteManifestRejectsOversizedInput(t *testing.T) {
+	dir := t.TempDir()
+	m := testManifest()
+	m.Description = string(bytes.Repeat([]byte{'x'}, lifecycle.MaxManifestBytes))
+	err := lifecycle.WriteManifest(dir, m)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "exceeds maximum")
+	require.ErrorIs(t, err, lifecycle.ErrManifestTooLarge)
+}
+
+func TestManifestConfiguredLimit(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "snapshot")
+	require.NoError(t, os.Mkdir(dir, 0o700))
+	m := testManifest()
+	require.NoError(t, lifecycle.WriteManifest(dir, m))
+	data, err := os.ReadFile(filepath.Join(dir, lifecycle.ManifestFileName))
+	require.NoError(t, err)
+	for _, maxBytes := range []int64{int64(len(data)) - 1, int64(len(data)), int64(len(data)) + 1, math.MaxInt64} {
+		opts := []lifecycle.ManifestOption{lifecycle.WithManifestMaxBytes(maxBytes)}
+		_, readErr := lifecycle.ReadManifest(dir, opts...)
+		_, parseErr := lifecycle.ParseManifest(data, opts...)
+		_, peekErr := lifecycle.PeekManifest(context.Background(), nil, dir, opts...)
+		entries, listErr := lifecycle.ListSnapshots(base, opts...)
+		writeErr := lifecycle.WriteManifest(dir, m, opts...)
+		for _, err := range []error{readErr, parseErr, peekErr, listErr, writeErr} {
+			if maxBytes < int64(len(data)) {
+				require.ErrorContains(t, err, "exceeds maximum")
+				require.ErrorIs(t, err, lifecycle.ErrManifestTooLarge)
+			} else {
+				require.NoError(t, err)
+			}
+		}
+		if maxBytes < int64(len(data)) {
+			require.Empty(t, entries)
+		} else {
+			require.Len(t, entries, 1)
+		}
+		current, err := os.ReadFile(filepath.Join(dir, lifecycle.ManifestFileName))
+		require.NoError(t, err)
+		require.Equal(t, data, current, "rejected writes leave the existing manifest intact")
+	}
+	// A label that exceeds the exact input limit must fail without replacing
+	// the valid manifest. Raising that same per-call limit permits the update.
+	err = lifecycle.LabelSnapshot(dir, "longer label", "", lifecycle.WithManifestMaxBytes(int64(len(data))))
+	require.ErrorContains(t, err, "exceeds maximum")
+	require.NoError(t, lifecycle.LabelSnapshot(dir, "longer label", "", lifecycle.WithManifestMaxBytes(int64(len(data)+100))))
+}
+
+func TestManifestNegativeLimit(t *testing.T) {
+	opts := []lifecycle.ManifestOption{lifecycle.WithManifestMaxBytes(-1)}
+	_, err := lifecycle.ReadManifest("missing", opts...)
+	require.ErrorContains(t, err, "must be >= 0")
+	_, err = lifecycle.ParseManifest(nil, opts...)
+	require.ErrorContains(t, err, "must be >= 0")
+	require.ErrorContains(t, lifecycle.WriteManifest("missing", testManifest(), opts...), "must be >= 0")
+	constructed := false
+	registry := lifecycle.NewDestinationRegistry()
+	registry.Register("test", func(*url.URL) (lifecycle.CloudDestination, error) {
+		constructed = true
+		return &fakeCloudDestination{}, nil
+	})
+	_, ok, err := lifecycle.FetchCloudManifest(context.Background(), registry, "test://bucket/snapshot", opts...)
+	require.ErrorContains(t, err, "must be >= 0")
+	require.False(t, ok)
+	require.False(t, constructed, "invalid limit must fail before provider construction")
+	_, ok, err = lifecycle.FetchCloudManifest(context.Background(), registry, "test://bucket/snapshot", lifecycle.WithManifestMaxBytes(3))
+	require.True(t, ok)
+	require.ErrorContains(t, err, "does not support manifest options")
 }
 
 // TestManifestRejectsNewerFormatVersion verifies that a manifest whose

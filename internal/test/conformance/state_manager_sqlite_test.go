@@ -20,8 +20,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	_ "github.com/glebarez/go-sqlite"
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
 )
 
 // newSqliteResetterTestDB creates a SQLite file with the given DDL applied and
