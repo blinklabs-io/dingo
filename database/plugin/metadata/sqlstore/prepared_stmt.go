@@ -196,7 +196,16 @@ func (s *Store) queryRowCached(
 	args ...any,
 ) *sql.Row {
 	if cached, ok := s.lookupCachedStmt(query); ok {
-		return stmtForQueryer(ctx, db, cached).QueryRowContext(ctx, args...)
+		// stmtForQueryer returns either the shared, Store-lifetime cached
+		// statement itself (must not be closed here, see
+		// prepareHotStatements) or a *sql.Tx-scoped statement from
+		// (*sql.Tx).StmtContext, which database/sql documents as being
+		// closed automatically when the transaction commits or rolls
+		// back. Either way this call site owns no resource of its own to
+		// close, and closing eagerly would be wrong besides: the *sql.Row
+		// returned below defers running Scan against it until the caller
+		// invokes Scan.
+		return stmtForQueryer(ctx, db, cached).QueryRowContext(ctx, args...) //nolint:sqlclosecheck
 	}
 	return db.QueryRowContext(ctx, query, args...)
 }
@@ -208,7 +217,12 @@ func (s *Store) execCached(
 	args ...any,
 ) (sql.Result, error) {
 	if cached, ok := s.lookupCachedStmt(query); ok {
-		return stmtForQueryer(ctx, db, cached).ExecContext(ctx, args...)
+		// Same reasoning as queryRowCached above: the statement here is
+		// either the shared cache entry (never closed by a call site) or
+		// a Tx-scoped derivative that database/sql closes on its own when
+		// the transaction ends, so there is nothing for this function to
+		// close.
+		return stmtForQueryer(ctx, db, cached).ExecContext(ctx, args...) //nolint:sqlclosecheck
 	}
 	return db.ExecContext(ctx, query, args...)
 }
