@@ -128,7 +128,7 @@ func TestRecordForgedBlockRecordsMetricsAndPublishes(t *testing.T) {
 	evt := dingotestutil.RequireReceive(
 		t,
 		events,
-		time.Second,
+		dingotestutil.AsyncWait,
 		"block forged event",
 	)
 	forged, ok := evt.Data.(event.BlockForgedEvent)

@@ -15,6 +15,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -84,6 +85,68 @@ func TestRequireAddrs(t *testing.T) {
 	t.Run("both missing", func(t *testing.T) {
 		withGlobalFlags(t, "", "", "")
 		require.Error(t, requireAddrs())
+	})
+}
+
+// TestRequireAtPoint covers --at-slot/--at-hash's validation: neither flag
+// set means live-tip-agreement mode (nil, nil); both must be set together,
+// since a historical point (blinklabs-io/dingo#382) is ambiguous by slot
+// alone (see Tip.point); and --at-hash must be valid hex.
+func TestRequireAtPoint(t *testing.T) {
+	t.Run("neither set means live mode", func(t *testing.T) {
+		withGlobalFlags(t, "", "/tmp/dingo.socket", "/tmp/cardano.socket")
+		at, err := requireAtPoint()
+		require.NoError(t, err)
+		assert.Nil(t, at)
+	})
+	t.Run("both set resolves a Tip", func(t *testing.T) {
+		withGlobalFlags(t, "", "/tmp/dingo.socket", "/tmp/cardano.socket")
+		globalFlags.atSlot = 12345
+		globalFlags.atHash = strings.Repeat("ab", 32)
+		at, err := requireAtPoint()
+		require.NoError(t, err)
+		require.NotNil(t, at)
+		assert.Equal(t, uint64(12345), at.Slot)
+		assert.Equal(t, strings.Repeat("ab", 32), at.Hash)
+	})
+	t.Run("slot without hash is rejected", func(t *testing.T) {
+		withGlobalFlags(t, "", "/tmp/dingo.socket", "/tmp/cardano.socket")
+		globalFlags.atSlot = 12345
+		_, err := requireAtPoint()
+		require.Error(t, err)
+	})
+	t.Run("hash without slot is rejected", func(t *testing.T) {
+		withGlobalFlags(t, "", "/tmp/dingo.socket", "/tmp/cardano.socket")
+		globalFlags.atHash = strings.Repeat("ab", 32)
+		_, err := requireAtPoint()
+		require.Error(t, err)
+	})
+	t.Run("invalid hex hash is rejected", func(t *testing.T) {
+		withGlobalFlags(t, "", "/tmp/dingo.socket", "/tmp/cardano.socket")
+		globalFlags.atSlot = 12345
+		globalFlags.atHash = "not-hex"
+		_, err := requireAtPoint()
+		require.Error(t, err)
+	})
+	// TestRequireAtPoint/wrong-length hash is rejected covers the
+	// blinklabs-io/dingo#4183 review finding: valid hex that isn't exactly
+	// 32 bytes used to reach gouroboros as an opaque decode error instead of
+	// a clear CLI validation message.
+	t.Run("valid hex but wrong length hash is rejected", func(t *testing.T) {
+		withGlobalFlags(t, "", "/tmp/dingo.socket", "/tmp/cardano.socket")
+		globalFlags.atSlot = 12345
+		globalFlags.atHash = "aabbcc"
+		_, err := requireAtPoint()
+		require.Error(t, err)
+	})
+	t.Run("valid 32-byte hex hash resolves a Tip", func(t *testing.T) {
+		withGlobalFlags(t, "", "/tmp/dingo.socket", "/tmp/cardano.socket")
+		globalFlags.atSlot = 12345
+		globalFlags.atHash = strings.Repeat("ab", 32)
+		at, err := requireAtPoint()
+		require.NoError(t, err)
+		require.NotNil(t, at)
+		assert.Equal(t, strings.Repeat("ab", 32), at.Hash)
 	})
 }
 
