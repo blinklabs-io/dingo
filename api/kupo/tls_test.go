@@ -25,6 +25,34 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// startOnFreePort binds cfg to a free loopback port, retrying up to
+// testutil.BindAttempts times. testutil.FreePort can only report a port that
+// was free when it looked, so another process claiming it before Start binds
+// is an ordinary race rather than a failure of the code under test. This
+// mirrors api/blockfrost's helper of the same name.
+func startOnFreePort(
+	t *testing.T,
+	ctx context.Context,
+	cfg Config,
+) (*Server, string) {
+	t.Helper()
+	var lastErr error
+	for range testutil.BindAttempts {
+		addr := testutil.FreePort(t)
+		cfg.ListenAddress = addr
+		srv := New(cfg, &mockNode{}, nil)
+		attemptCtx, cancel := context.WithCancel(ctx)
+		lastErr = srv.Start(attemptCtx)
+		if lastErr == nil {
+			t.Cleanup(cancel)
+			return srv, addr
+		}
+		cancel()
+	}
+	t.Fatalf("could not start on a free loopback port: %v", lastErr)
+	return nil, ""
+}
+
 func TestAnonymousPlaintextTLSAndCORS(t *testing.T) {
 	t.Parallel()
 
@@ -44,17 +72,10 @@ func TestAnonymousPlaintextTLSAndCORS(t *testing.T) {
 			client.Timeout = 5 * time.Second
 			ctx, cancel := context.WithCancel(t.Context())
 			t.Cleanup(cancel)
-			addr := testutil.FreePort(t)
-			srv := New(
-				Config{
-					ListenAddress:      addr,
-					TLS:                tc.tls,
-					CORSAllowedOrigins: []string{origin},
-				},
-				&mockNode{},
-				nil,
-			)
-			require.NoError(t, srv.Start(ctx))
+			srv, addr := startOnFreePort(t, ctx, Config{
+				TLS:                tc.tls,
+				CORSAllowedOrigins: []string{origin},
+			})
 			t.Cleanup(func() {
 				stopCtx, stopCancel := context.WithTimeout(
 					context.Background(),
