@@ -48,3 +48,21 @@ type DeferredIndexManager interface {
 	BuildDeferredIndexes() error
 	HasDeferredIndexesPending() (bool, error)
 }
+
+// MissingCriticalDeferredIndexLister is an optional companion to
+// DeferredIndexManager: it answers which critical manifest entries are absent
+// without building anything.
+//
+// BuildCriticalDeferredIndexes is silent while it runs, and building one index
+// on a multi-million-row table takes long enough that an operator watching
+// startup sees nothing at all until it finishes. A caller that can name the
+// missing entries first can attribute that wait while it is happening.
+//
+// Stores that do not implement this report nothing and fall back to logging
+// after the fact.
+type MissingCriticalDeferredIndexLister interface {
+	// MissingCriticalDeferredIndexes returns the names of the
+	// Critical=true manifest entries missing from the schema, in
+	// manifest order. It performs no DDL.
+	MissingCriticalDeferredIndexes() ([]string, error)
+}

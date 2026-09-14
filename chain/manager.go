@@ -20,6 +20,7 @@ import (
 	"maps"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -54,6 +55,27 @@ type ChainManager struct {
 	// continuation onto an abandoned fork; see Chain.rollbackPointBlock.
 	rollbackPointNotOnChain prometheus.Counter
 	mutex                   sync.RWMutex
+	// headerSeq numbers the chain mutations that affect any owned chain's
+	// header queue. It is stamped on ChainHeaderEventType events and, for a
+	// rollback, on the matching ChainRollbackEvent, so a consumer
+	// subscribed to both event types -- which the bus delivers on
+	// independent channels, with no ordering between them -- can still tell
+	// which mutation came first.
+	//
+	// It lives here rather than on Chain because ChainHeaderEventType is a
+	// single topic on the single event bus this manager hands to every
+	// chain it builds (the primary chain and both fork constructors), and a
+	// consumer treats the numbers from all of them as one total order. It
+	// is atomic because a chain stamps under its own c.mutex, not under
+	// cm.mutex.
+	headerSeq atomic.Uint64
+}
+
+// nextHeaderSeq stamps the next chain-mutation sequence number shared by every
+// chain this manager owns. It starts at 1: zero means "unsequenced" to
+// consumers.
+func (cm *ChainManager) nextHeaderSeq() uint64 {
+	return cm.headerSeq.Add(1)
 }
 
 func NewManager(

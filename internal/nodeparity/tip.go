@@ -20,20 +20,36 @@ import (
 	"fmt"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 // Tip is a comparison-friendly snapshot of a node's chain tip: enough to
 // tell whether two nodes agree on the same block (Slot and Hash) without
 // carrying gouroboros's wire types into this package's exported API.
 type Tip struct {
-	Slot        uint64
-	Hash        string // hex-encoded block hash; empty at the origin point
-	BlockNumber uint64
+	Slot uint64 `json:"slot"`
+	// Hash is hex-encoded; empty at the origin point.
+	Hash        string `json:"hash"`
+	BlockNumber uint64 `json:"blockNumber"`
 }
 
 // Equal reports whether two tips name the same point on chain.
 func (t Tip) Equal(other Tip) bool {
 	return t.Slot == other.Slot && t.Hash == other.Hash
+}
+
+// point converts the tip into gouroboros's wire Point type, suitable for
+// localstatequery.Client.Acquire, by hex-decoding Hash back into raw bytes.
+func (t Tip) point() (pcommon.Point, error) {
+	hashBytes, err := hex.DecodeString(t.Hash)
+	if err != nil {
+		return pcommon.Point{}, fmt.Errorf(
+			"decode tip hash %q: %w",
+			t.Hash,
+			err,
+		)
+	}
+	return pcommon.NewPoint(t.Slot, hashBytes), nil
 }
 
 // ReadTip asks conn's ChainSync mini-protocol for the node's current tip.

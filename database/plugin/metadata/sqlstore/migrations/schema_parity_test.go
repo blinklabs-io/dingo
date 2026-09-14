@@ -23,8 +23,8 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
-	_ "github.com/glebarez/go-sqlite"
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
 )
 
 func TestSQLiteVersionOneSchemaIsDeterministic(t *testing.T) {
@@ -45,7 +45,7 @@ func TestSQLiteVersionOneSchemaIsDeterministic(t *testing.T) {
 func migratedSQLiteV1(t *testing.T) (*sql.DB, error) {
 	t.Helper()
 	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
-	db, err := sql.Open("sqlite", "file:"+databasePath)
+	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
 	if err != nil {
 		return nil, err
 	}

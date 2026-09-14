@@ -205,8 +205,10 @@ func bigIntToCardano(i *big.Int) *cardano.BigInt {
 			BigInt: &cardano.BigInt_BigUInt{BigUInt: b},
 		}
 	}
-	abs := new(big.Int).Neg(i)
-	b := abs.Bytes()
+	// CBOR tag 3 stores -1-n, not the absolute value of n.
+	magnitude := new(big.Int).Neg(i)
+	magnitude.Sub(magnitude, big.NewInt(1))
+	b := magnitude.Bytes()
 	if len(b) == 0 {
 		b = []byte{0}
 	}

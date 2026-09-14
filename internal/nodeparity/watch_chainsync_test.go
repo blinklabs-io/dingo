@@ -324,7 +324,9 @@ func TestWatchBlocks_ReceivesMultipleRealEvents(t *testing.T) {
 // directly, rather than measuring real elapsed time: the log line is
 // written with the exact backoff value about to be used, so this is a
 // deterministic check of the same property, not a timing-sensitive one.
-func TestWatchBlocks_ReconnectsQuicklyAfterEstablishedSessionDrops(t *testing.T) {
+func TestWatchBlocks_ReconnectsQuicklyAfterEstablishedSessionDrops(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	const magic = 42

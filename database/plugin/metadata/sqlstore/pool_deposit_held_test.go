@@ -28,8 +28,8 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
-	_ "github.com/glebarez/go-sqlite"
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
 )
 
 // The deposit-held tests drive the production storage path -- SetTransaction
@@ -134,7 +134,14 @@ func writeDepositHeldCert(
 	cert lcommon.Certificate,
 	deposit uint64,
 ) {
-	writeDepositHeldCertWithDeposits(t, store, slot, blockIndex, cert, map[int]uint64{0: deposit})
+	writeDepositHeldCertWithDeposits(
+		t,
+		store,
+		slot,
+		blockIndex,
+		cert,
+		map[int]uint64{0: deposit},
+	)
 }
 
 func writeDepositHeldCertUnknown(
@@ -144,7 +151,14 @@ func writeDepositHeldCertUnknown(
 	blockIndex uint32,
 	cert lcommon.Certificate,
 ) {
-	writeDepositHeldCertWithDeposits(t, store, slot, blockIndex, cert, map[int]uint64{})
+	writeDepositHeldCertWithDeposits(
+		t,
+		store,
+		slot,
+		blockIndex,
+		cert,
+		map[int]uint64{},
+	)
 }
 
 func writeDepositHeldCertWithDeposits(
@@ -427,6 +441,22 @@ func TestPoolDepositHeldUnknownDepositFallsBackToReregistration(t *testing.T) {
 	writeDepositHeldCertUnknown(t, store, 100, 0, depositHeldRegistration(pool))
 	writeDepositHeldCert(t, store, 1_100, 0, depositHeldRegistration(pool), 800)
 	writeDepositHeldCert(t, store, 1_200, 0, depositHeldRetirement(pool, 3), 0)
+
+	var held []sql.NullString
+	rows, err := store.writeDB.Query(`
+SELECT deposit_held FROM pool_registration
+WHERE pool_key_hash = ? ORDER BY added_slot`, pool.Bytes())
+	require.NoError(t, err)
+	defer rows.Close()
+	for rows.Next() {
+		var value sql.NullString
+		require.NoError(t, rows.Scan(&value))
+		held = append(held, value)
+	}
+	require.NoError(t, rows.Err())
+	require.Len(t, held, 2)
+	require.False(t, held[0].Valid)
+	require.False(t, held[1].Valid)
 
 	require.Equal(
 		t,

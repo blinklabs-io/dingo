@@ -183,7 +183,11 @@ func requireGetBlockErrorIs(
 		)
 	}
 	if !errors.Is(err, target) {
-		t.Fatalf("GetBlock error = %v, want errors.Is match for %v", err, target)
+		t.Fatalf(
+			"GetBlock error = %v, want errors.Is match for %v",
+			err,
+			target,
+		)
 	}
 	if err == nil || !strings.Contains(err.Error(), wantSubstr) {
 		t.Fatalf(

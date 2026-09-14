@@ -49,6 +49,7 @@ case "${1:-}" in
     # prevents the failure-artifact path from trying to copy a config volume.
     ;;
   compose)
+    printf 'TXPUMP_WINDOW=%s\n' "${DEVNET_TXPUMP_CONFIRMATION_SLOTS:-600}" >>"${FAKE_DOCKER_LOG}"
     case " $* " in
       *" ps --status running --quiet "*) printf 'fake-container\n' ;;
       *" exec -T "*) printf '1 0 0\n' ;;
@@ -199,6 +200,24 @@ func runFakeDevnetWithEnv(
 	runnerArgs ...string,
 ) fakeDevnetResult {
 	t.Helper()
+	return runFakeDevnetScript(
+		t,
+		"run-tests.sh",
+		testExit,
+		failRm,
+		envOverrides,
+		runnerArgs...)
+}
+
+func runFakeDevnetScript(
+	t *testing.T,
+	script string,
+	testExit int,
+	failRm bool,
+	envOverrides map[string]string,
+	runnerArgs ...string,
+) fakeDevnetResult {
+	t.Helper()
 
 	root := repoRootDir(t)
 	tempRoot := t.TempDir()
@@ -227,7 +246,7 @@ func runFakeDevnetWithEnv(
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	args := []string{
-		filepath.Join(root, "internal", "test", "devnet", "run-tests.sh"),
+		filepath.Join(root, "internal", "test", "devnet", script),
 	}
 	args = append(args, runnerArgs...)
 	cmd := exec.CommandContext(ctx, "bash", args...)
