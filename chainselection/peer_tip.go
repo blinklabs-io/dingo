@@ -446,6 +446,33 @@ func (p *PeerChainTip) SelectionTip() ochainsync.Tip {
 	return p.Tip
 }
 
+// AwaitingFirstHeader reports whether the peer has not delivered a header for
+// its current delivered frontier, so SelectionTip is a bare point carrying no
+// block number: a post-intersect RollBackward that landed outside the retained
+// delivered-header history, or a rollback to origin.
+//
+// Callers that reason about how far a peer has got need this, because for such
+// a peer the delivered frontier is the point the session intersected at rather
+// than anything the peer has shown us, and it does not move until the peer's
+// first RollForward arrives.
+//
+// The test is an approximation: SelectionTip().BlockNumber == 0 is a proxy for
+// "no header delivered", and it is also true for a peer whose delivered
+// frontier genuinely IS block 0, and for one registered from an advertised
+// origin tip. That is harmless at the sole call site in the chainsync
+// recycler's plateau watchdog, which only substitutes the advertised tip when
+// it is strictly greater than the delivered one: for an origin peer that guard
+// is 0 > 0 and the substitution does not happen, and a node pinned at block 0
+// while a peer is ahead is exactly the plateau the resync exists for. A second
+// consumer inherits the approximation rather than the property the name states,
+// so it must either carry an equivalent guard or distinguish the cases itself.
+func (p *PeerChainTip) AwaitingFirstHeader() bool {
+	if p == nil {
+		return false
+	}
+	return p.SelectionTip().BlockNumber == 0
+}
+
 // Touch marks the peer as recently active without changing its advertised tip.
 func (p *PeerChainTip) Touch() {
 	p.LastUpdated = time.Now()

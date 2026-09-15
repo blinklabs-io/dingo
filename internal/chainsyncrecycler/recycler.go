@@ -347,6 +347,30 @@ func shouldRecycleLocalTipPlateau(
 	return true
 }
 
+// advertisesForOwnConnection reports whether the peer whose advertised tip is
+// about to be trusted is the connection the plateau would recycle: either it is
+// the active chainsync client, or there is no active client and the plateau
+// would fall back to this peer anyway.
+//
+// The comparison is ConnectionId equality, which is the identity relation
+// chainselection.peerTips and chainsync.clients use as their map key, and which
+// gouroboros makes stable by populating Connection.id once per connection. It
+// is deliberately NOT the rendered address string the recycler uses to key its
+// cooldown map: a replacement connection to the same peer (listen-port reuse)
+// renders identically while being a distinct connection, and matching on the
+// rendering would let a stale peer tip authorize recycling the replacement.
+// Collapsing those onto one key is right for a rate limit and wrong for an
+// authorization.
+func advertisesForOwnConnection(
+	targetConn *ouroboros.ConnectionId,
+	bestPeer ouroboros.ConnectionId,
+) bool {
+	if targetConn == nil {
+		return true
+	}
+	return *targetConn == bestPeer
+}
+
 // isLedgerApplicationBacklog reports whether a local-tip plateau is caused by
 // the ledger pipeline replaying a backlog of already-fetched blocks rather than
 // by a stalled chainsync stream.
@@ -483,10 +507,33 @@ func (r *Recycler) checkLocalTipPlateau(
 		return
 	}
 	bestPeerTipSlot := bestPeerTip.SelectionTip().Point.Slot
+	targetConn := live.ChainsyncState.GetClientConnId()
+	// SelectionTip is the peer's DELIVERED frontier, which a peer that has not
+	// delivered a header yet pins at the point its session intersected at.
+	// Immediately after a plateau resync that point is the local tip, so the
+	// comparison below disarms this watchdog exactly when it has just acted,
+	// and it cannot re-arm until some peer delivers a header -- which is the
+	// thing that is not happening. The peer's advertised tip is known and
+	// correct throughout that window, so use it while the peer is still
+	// awaiting its first header.
+	//
+	// The advertised tip is untrusted, so the substitution is confined so that
+	// a peer can only ever spend it on itself: it applies only while the peer
+	// awaits its first header, only when it raises the comparison value, and
+	// only when the advertising peer is the connection this watchdog would
+	// recycle. Without that last condition a peer that fabricates a high tip
+	// and delivers nothing could drive repeated recycles of a different,
+	// honest upstream. With it, the worst it can do is have its own connection
+	// reconnected once per cooldown, while the local tip is standing still --
+	// which is what a peer that advertises a tip it never delivers warrants.
+	if bestPeerTip.AwaitingFirstHeader() &&
+		bestPeerTip.Tip.Point.Slot > bestPeerTipSlot &&
+		advertisesForOwnConnection(targetConn, *bestPeer) {
+		bestPeerTipSlot = bestPeerTip.Tip.Point.Slot
+	}
 	if bestPeerTipSlot <= localTipSlot {
 		return
 	}
-	targetConn := live.ChainsyncState.GetClientConnId()
 	if targetConn == nil {
 		targetCopy := *bestPeer
 		targetConn = &targetCopy
