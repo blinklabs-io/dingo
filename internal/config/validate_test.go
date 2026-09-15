@@ -1180,6 +1180,35 @@ func TestValidateSyncModeValidatesMetricsPort(t *testing.T) {
 	assert.Contains(t, err.Error(), "invalid metricsPort")
 }
 
+// TestValidateSyncModeValidatesHealthPort covers the probe listener the
+// Mithril bootstrap now serves. The image's HEALTHCHECK runs against
+// healthPort for the hours a bootstrap takes, so a bad value there has to be
+// rejected before the sync starts rather than surfacing as a refused probe and
+// a replaced container.
+func TestValidateSyncModeValidatesHealthPort(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.HealthPort = 99999999
+	err := cfg.validate(RunModeSync, minUnprivilegedPort)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid healthPort")
+}
+
+// TestValidateSyncModeRejectsHealthMetricsCollision covers the collision the
+// bootstrap can now actually hit: the metrics and health listeners both bind
+// bindAddr during a Mithril sync, so sharing a port fails at bind time and one
+// of the two is lost silently.
+func TestValidateSyncModeRejectsHealthMetricsCollision(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.RelayPort = 0
+	cfg.PrivatePort = 0
+	cfg.ImmutableDbPath = ""
+	cfg.MetricsPort = 12798
+	cfg.HealthPort = 12798
+	err := cfg.validate(RunModeSync, minUnprivilegedPort)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "healthPort")
+}
+
 // TestValidateMithrilReadOnlyModeSkipsAuxPorts is a regression test for
 // the read-only Mithril subcommands (`mithril list`, `mithril show`),
 // which query the aggregator and start no listeners: a bad metrics or

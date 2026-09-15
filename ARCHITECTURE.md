@@ -6402,6 +6402,18 @@ the only one of the three `healthPort` sources a `HEALTHCHECK` can see, and
 reports healthy without probing when that is `0`, so disabling the listener
 does not put the container into a replacement loop.
 
+`dingo mithril sync` serves the same listener, through
+`cmd/dingo.startHealthProbeServer` over the exported
+`internal/node.NewHealthServer`, with a nil tip-gap function. That bootstrap
+is a separate process the container entrypoint runs ahead of `serve`, and on
+mainnet it runs for hours while the image's `HEALTHCHECK` is already probing;
+with no listener the probe is refused and Swarm or ECS replaces the container
+mid-download, then again on every replacement. A nil tip gap is the accurate
+reading for it: live, and not ready with reason `tip gap unavailable`. Because
+that listener now binds during a sync, `healthPort` is range-, privilege- and
+collision-checked in `RunModeSync` as well as the serving modes
+(`internal/config/validate.go`), alongside `metricsPort` and `debugPort`.
+
 Readiness reads its tip gap from `(*dingo.Node).TipGapSlots`
 (`node_health.go`), which is fed by `ledger.LedgerStateConfig.ReportTipGapFunc`
 from the ledger's slot-tick loop — the same value published as the

@@ -175,7 +175,7 @@ func newPprofDebugServer(cfg *config.Config) *http.Server {
 	}
 }
 
-// newHealthServer builds the dedicated liveness/readiness listener, or nil
+// NewHealthServer builds the dedicated liveness/readiness listener, or nil
 // when healthPort is 0.
 //
 // Two properties are load-bearing and are covered by tests:
@@ -190,7 +190,15 @@ func newPprofDebugServer(cfg *config.Config) *http.Server {
 //     container and would be satisfied by loopback, but a Kubernetes kubelet
 //     probe or an ECS/ALB target-group check reaches the container from
 //     outside, and loopback would fail those closed.
-func newHealthServer(
+//
+// It is exported because `dingo mithril sync` serves the same listener while
+// bootstrapping, with a nil tipGap. That bootstrap runs as its own process
+// before serve, for hours on mainnet, and the image's HEALTHCHECK is probing
+// throughout it; without a listener there the probe is refused and an
+// orchestrator replaces the container mid-download. A nil tipGap is the
+// accurate answer for it: live, and not ready because there is no chain tip
+// yet.
+func NewHealthServer(
 	cfg *config.Config,
 	tipGap health.TipGapFunc,
 ) *http.Server {
@@ -436,7 +444,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	// Liveness/readiness listener, on a port of its own so an orchestrator
 	// or load balancer can probe the node without being handed the metrics
 	// or pprof surface. Started for every storage mode.
-	healthServer := newHealthServer(cfg, d.TipGapSlots)
+	healthServer := NewHealthServer(cfg, d.TipGapSlots)
 	if healthServer != nil {
 		logger.Info(
 			"serving health probes on "+healthServer.Addr,

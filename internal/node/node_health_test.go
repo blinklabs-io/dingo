@@ -43,7 +43,7 @@ type healthProbeResponse struct {
 }
 
 // startHealthListener starts the health listener exactly as Run does --
-// newHealthServer, then serveAuxiliaryListener in its own goroutine -- and
+// NewHealthServer, then serveAuxiliaryListener in its own goroutine -- and
 // returns its base URL. Requests in these tests therefore traverse the real
 // net/http server and the real mux, not a handler called directly.
 func startHealthListener(
@@ -56,7 +56,7 @@ func startHealthListener(
 	cfg.BindAddr = "127.0.0.1"
 	cfg.HealthPort = freeTCPPort(t)
 
-	srv := newHealthServer(cfg, tipGap)
+	srv := NewHealthServer(cfg, tipGap)
 	if srv == nil {
 		t.Fatal("expected an enabled health listener")
 	}
@@ -307,7 +307,7 @@ func TestNewHealthServerDisabledOnZeroPort(t *testing.T) {
 	t.Parallel()
 
 	cfg := &config.Config{BindAddr: "127.0.0.1", HealthPort: 0}
-	if srv := newHealthServer(cfg, nil); srv != nil {
+	if srv := NewHealthServer(cfg, nil); srv != nil {
 		t.Fatalf("healthPort 0 must disable the listener, got %+v", srv)
 	}
 }
@@ -320,7 +320,7 @@ func TestHealthServerBindsPublicBindAddr(t *testing.T) {
 	t.Parallel()
 
 	cfg := &config.Config{BindAddr: "0.0.0.0", HealthPort: 12799}
-	srv := newHealthServer(cfg, nil)
+	srv := NewHealthServer(cfg, nil)
 	if srv == nil {
 		t.Fatal("expected an enabled health listener")
 	}
@@ -351,7 +351,7 @@ func TestHealthServerBracketsIPv6BindAddr(t *testing.T) {
 				BindAddr:   test.bindAddr,
 				HealthPort: 12799,
 			}
-			srv := newHealthServer(cfg, nil)
+			srv := NewHealthServer(cfg, nil)
 			if srv == nil {
 				t.Fatal("expected an enabled health listener")
 			}
@@ -377,7 +377,7 @@ func TestHealthListenerBindsIPv6Loopback(t *testing.T) {
 	}
 
 	cfg := &config.Config{HealthPort: freeTCPPort(t), BindAddr: "::1"}
-	srv := newHealthServer(cfg, func() (uint64, bool) { return 4, true })
+	srv := NewHealthServer(cfg, func() (uint64, bool) { return 4, true })
 	if srv == nil {
 		t.Fatal("expected an enabled health listener")
 	}

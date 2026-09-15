@@ -23,7 +23,7 @@ import (
 
 // TestHealthPortDefaultsToDefaultHealthPort pins the health listener's
 // defaults on newDefaultConfig, which is the only place they come from.
-// newHealthServer skips the listener entirely at HealthPort 0 and
+// NewHealthServer skips the listener entirely at HealthPort 0 and
 // ApplyDefaults has no fill-in step for that field, so losing the literal
 // disables the probe outright -- and resetGlobalConfig's separately
 // maintained copy (config_test.go) seeds every other test in this package,

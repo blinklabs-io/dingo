@@ -265,6 +265,12 @@ the Blockfrost, Mesh, and UTxO RPC APIs are enabled, so the probe is
 available in the default `core` relay configuration that the shipped
 `docker-compose.yml` runs.
 
+`dingo mithril sync` serves it too. A Mithril bootstrap runs as its own
+process before the node starts, takes hours on mainnet, and reports live and
+not-ready throughout, so a container HEALTHCHECK pointed at `healthPort`
+keeps passing while the snapshot downloads instead of replacing the container
+partway through it.
+
 | Path | Meaning | 200 when | Non-200 when |
 |------|---------|----------|--------------|
 | `/healthz` (and `/health`) | Liveness | The process is up and the listener is serving | Never, while the process can answer |
