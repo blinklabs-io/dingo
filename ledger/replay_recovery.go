@@ -405,18 +405,80 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 // pre-Conway array fields unchecked, so a canonical pre-Conway block can carry
 // a wire-level duplicate cardano-node coalesces and this verdict rejects
 // (preview slot 1462320; blinklabs-io/gouroboros#1989). Recovery must stay
-// non-terminal for that duplicate verdict for exactly that reason, and for
-// the same reason a false-positive malformed-script verdict must also stay
-// non-terminal: recoverFromDeterministicTxValidationError rewinds and asks
-// chain selection for another candidate rather than halting, so a locally
-// mistaken rejection still leaves the node able to follow a chain a peer
-// later offers.
+// non-terminal for that duplicate verdict for exactly that reason.
+//
+// A missing redeemer is deterministic for every script purpose, spending
+// included. Four rules report it at the gouroboros v0.204.4 pin, all as the
+// one common type; the conway and babbage names are aliases of
+// lcommon.MissingRedeemerForScriptError rather than distinct types, so
+// matching the common type covers all of them. Each of the four either fails
+// outright on an input it could not resolve or skips that input, so an
+// incomplete UTxO window can only withhold a redeemer requirement, never
+// invent one:
+//
+//   - script.ValidateRequiredRedeemers, behind babbage/conway/dijkstra
+//     UtxoValidateRequiredRedeemers, builds a script.TxScriptView for the top
+//     level first, and ResolveTxInputs stops at the first unresolved input,
+//     so the rule returns InputResolutionError or ReferenceInputResolutionError
+//     instead of a verdict. Its Dijkstra sub-transaction levels resolve
+//     through resolveBodyInputs instead, which skips what it cannot resolve
+//     and leaves the failure to UtxoValidateBadInputsUtxo. At v0.204.4 it
+//     derives purposes from script.ScriptPurposes and reports every tag, not
+//     spend alone.
+//   - common.ValidateScriptWitnesses, behind UtxoValidateScriptWitnesses,
+//     skips an unresolved regular input rather than failing, so an incomplete
+//     UTxO window can only withhold a spend requirement, never invent one; an
+//     unresolved reference input is ReferenceInputResolutionError.
+//   - dijkstra.validateDijkstraPlutusRedeemers, reached from both
+//     dijkstra.UtxoValidateRedeemerAndScriptWitnesses and
+//     dijkstra.UtxoValidatePlutusScripts, which ValidateTxDijkstra runs. The
+//     first builds its levels with dijkstraWitnessRuleLevels, which skips an
+//     unresolved consumed input and returns ReferenceInputResolutionError for
+//     an unresolved reference input; the second builds them with
+//     dijkstraScriptLevels, whose ResolveTxInputs fails on the first
+//     unresolved input of either kind.
+//   - Dingo's own validateConwayRequiredPlutusRedeemers reads
+//     resolveConwayScriptInputs, which fails with InputResolutionError on the
+//     first unresolved regular input and ReferenceInputResolutionError on the
+//     first unresolved reference input.
+//
+// A resolved input is addressed by producing transaction hash and output
+// index, so it yields exactly the output its producer wrote, script bit and
+// reference script included. Replaying a different local UTxO history can
+// therefore only add resolutions, and all four rules index redeemers by
+// position in the transaction's own sorted input list rather than by position
+// among the resolved subset, Dijkstra sub-transaction levels included. The
+// verdict is monotone under resolution: no local history removes a
+// missing-redeemer rejection, so no replay repairs one.
+//
+// The genuinely state-dependent cases carry their own types --
+// InputResolutionError, ReferenceInputResolutionError, and
+// shelley.BadInputsUtxoError -- which this function does not classify, so they
+// keep taking the producer-resolution rewind. A false-positive malformed-
+// script verdict must also stay non-terminal: recovery rewinds and asks chain
+// selection for another candidate rather than halting, so a locally mistaken
+// rejection still leaves the node able to follow a chain a peer later offers.
 func isDeterministicTxValidationError(err error) bool {
 	if _, ok := errors.AsType[shelley.DuplicateInputError](err); ok {
 		return true
 	}
 	if _, ok := errors.AsType[conway.PlutusScriptFailedError](err); ok {
 		return true
+	}
+	if missing, ok := errors.AsType[lcommon.MissingRedeemerForScriptError](err); ok {
+		// Enumerated rather than matched on the type alone so that a redeemer
+		// tag added upstream trips the exhaustive linter here and gets its own
+		// classification decision instead of inheriting this one.
+		switch missing.Tag {
+		case lcommon.RedeemerTagSpend,
+			lcommon.RedeemerTagMint,
+			lcommon.RedeemerTagCert,
+			lcommon.RedeemerTagReward,
+			lcommon.RedeemerTagVoting,
+			lcommon.RedeemerTagProposing,
+			lcommon.RedeemerTagGuarding:
+			return true
+		}
 	}
 	if _, ok := errors.AsType[lcommon.MalformedReferenceScriptsError](err); ok {
 		return true
