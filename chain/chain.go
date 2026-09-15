@@ -167,15 +167,19 @@ func blockNumberContiguous(eraId uint8, blockNumber, parentNumber uint64) bool {
 	return false
 }
 
-// maxFirstBlockNumber is the largest block number accepted for the first block
-// of a chain that has been emptied back to origin. Ouroboros numbers the first
-// block after genesis 0 -- the Byron epoch-boundary block on a Byron network,
-// the first block of the starting era on a post-Byron genesis network -- so 0
-// is the expected value. 1 is tolerated as well because some networks and
-// chain indexes number their first block 1; the tolerance costs nothing, since
-// a chain that started one block late is still caught at its second block by
-// the ordinary contiguity check above.
-const maxFirstBlockNumber uint64 = 1
+// firstBlockNumber is the block number of the first block of a Cardano chain,
+// and the only value accepted for the first block of a chain that has been
+// emptied back to origin. Ouroboros numbers the first block after genesis 0 --
+// the Byron epoch-boundary block on a Byron network, the first block of the
+// starting era on a post-Byron genesis network.
+//
+// Nothing wider is safe. blockNumberContiguous compares a candidate against the
+// accepted tip, so a chain that starts at block number 1 is self-consistent
+// from its second block onwards: 2 follows 1, 3 follows 2, and the missing
+// block 0 is never noticed. Tolerating anything above 0 here does not defer the
+// check to the second block, it permanently shortens the chain by exactly the
+// prefix it tolerated -- the same truncated prefix issue #4202 reports.
+const firstBlockNumber uint64 = 0
 
 // originTipHash stands in for the tip hash when a block or header is rejected
 // against a chain at origin: there is no tip block to name.
@@ -215,13 +219,17 @@ func (c *Chain) atOriginAfterMutation() bool {
 		c.mutationGeneration > 0
 }
 
-// firstBlockNumberValid reports whether blockNumber is plausible for the first
-// block of a chain that has been emptied back to origin. The chain package has
-// no knowledge of the network's genesis hash, so the prev-hash half of the
-// continuity check cannot be applied at origin; the block number is the anchor
-// available here, and it is enough to reject a truncated prefix.
+// firstBlockNumberValid reports whether blockNumber is the one a chain emptied
+// back to origin may accept as its first block.
+//
+// The chain package has no knowledge of the network's genesis hash, so the
+// prev-hash half of the continuity check cannot be applied at origin. The block
+// number is the whole of the anchor available here: it closes the truncated
+// prefix of issue #4202, but a candidate that carries block number 0 is still
+// accepted whatever its hash and prev hash say. Binding the first block's hash
+// as well needs the genesis hash, which belongs to the ledger, not here.
 func firstBlockNumberValid(blockNumber uint64) bool {
-	return blockNumber <= maxFirstBlockNumber
+	return blockNumber == firstBlockNumber
 }
 
 // newBlockNotFitChainOriginError builds the rejection for a block or header

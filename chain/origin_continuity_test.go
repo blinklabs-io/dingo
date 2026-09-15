@@ -39,11 +39,14 @@ type originContinuityCase struct {
 // survived the rollback offers next (issue #4202).
 //
 // The chain package does not know the network's genesis hash, so the anchor
-// available at origin is the block number. The first block of a Cardano chain
-// carries block number 0 (Ouroboros numbers the first block after genesis 0 --
-// the Byron epoch-boundary block on a Byron network, the first block of the
-// starting era on a post-Byron genesis network); 1 is tolerated because some
-// networks and chain indexes number their first block 1.
+// available at origin is the block number, and the only value that leaves no
+// gap is 0: Ouroboros numbers the first block after genesis 0 -- the Byron
+// epoch-boundary block on a Byron network, the first block of the starting era
+// on a post-Byron genesis network. Number 1 is rejected rather than tolerated,
+// because the ordinary contiguity check compares a candidate against the
+// accepted tip: a chain anchored at 1 is self-consistent from its second block
+// on and stays short block 0 forever. See
+// TestAddBlockAfterRollbackToOriginRejectsChainShortOfBlockZero.
 var originContinuityCases = []originContinuityCase{
 	{
 		name:        "genuine first block number 0 accepted",
@@ -52,10 +55,10 @@ var originContinuityCases = []originContinuityCase{
 		wantReject:  false,
 	},
 	{
-		name:        "genuine first block number 1 accepted",
+		name:        "first block number 1 rejected",
 		blockNumber: 1,
 		prevHash:    "",
-		wantReject:  false,
+		wantReject:  true,
 	},
 	{
 		name:        "block from further along the chain rejected",
@@ -264,11 +267,11 @@ func TestFreshChainAcceptsFirstBlockFromAnySource(t *testing.T) {
 	}
 }
 
-// queuedFirstHeader is the chain's genuine first header (block number 1), the
+// queuedFirstHeader is the chain's genuine first header (block number 0), the
 // one a chain emptied back to origin legitimately accepts into its queue.
 func queuedFirstHeader() *MockBlock {
 	return &MockBlock{
-		MockBlockNumber: 1,
+		MockBlockNumber: 0,
 		MockSlot:        3360,
 		MockHash:        testHashPrefix + "beef",
 	}
@@ -351,7 +354,7 @@ func TestAddRawBlocksAfterRollbackToOriginWithQueuedHeader(t *testing.T) {
 	// The consistent raw block for that same header is still accepted and
 	// clears the queue.
 	if err := c.AddRawBlocks(
-		[]chain.RawBlock{rawBlockForHeader(header, 1, "")},
+		[]chain.RawBlock{rawBlockForHeader(header, 0, "")},
 	); err != nil {
 		t.Fatalf(
 			"chain must accept the raw block matching its queued first header: %s",
@@ -369,8 +372,8 @@ func TestAddRawBlocksAfterRollbackToOriginWithQueuedHeader(t *testing.T) {
 			header.Hash().Bytes(),
 		)
 	}
-	if tip.BlockNumber != 1 {
-		t.Fatalf("tip block number %d after accepted block, want 1", tip.BlockNumber)
+	if tip.BlockNumber != 0 {
+		t.Fatalf("tip block number %d after accepted block, want 0", tip.BlockNumber)
 	}
 }
 
@@ -379,7 +382,7 @@ func TestAddRawBlocksAfterRollbackToOriginWithQueuedHeader(t *testing.T) {
 // header is queued, addBlockLocked takes the block number (and prev hash) from
 // that header, which the origin check above already anchored at queue time. So
 // even a block whose own body claims a mid-chain number enters the chain as
-// the header's block number 1, not as a truncated prefix. RawBlock carries a
+// the header's block number 0, not as a truncated prefix. RawBlock carries a
 // caller-supplied BlockNumber that is not derived from the queued header,
 // which is why AddRawBlocks is checked directly.
 func TestAddBlockAfterRollbackToOriginUsesQueuedHeaderBlockNumber(t *testing.T) {
@@ -405,10 +408,135 @@ func TestAddBlockAfterRollbackToOriginUsesQueuedHeaderBlockNumber(t *testing.T) 
 	if got := c.HeaderCount(); got != 0 {
 		t.Fatalf("accepted block left %d queued headers, want 0", got)
 	}
-	if tip := c.Tip(); tip.BlockNumber != 1 {
+	if tip := c.Tip(); tip.BlockNumber != 0 {
 		t.Fatalf(
-			"chain recorded block number %d, want the queued header's 1",
+			"chain recorded block number %d, want the queued header's 0",
 			tip.BlockNumber,
 		)
 	}
+}
+
+// TestAddBlockAfterRollbackToOriginRejectsChainShortOfBlockZero pins what an
+// accepted number-1 first block would cost, which the table above does not: the
+// ordinary contiguity check compares a candidate against the accepted tip, so a
+// chain anchored at block number 1 stays self-consistent forever. Block 2
+// chains onto block 1 and is accepted, and nothing downstream ever notices that
+// block 0 is missing -- the chain is permanently short its first block, which
+// is the same truncated prefix issue #4202 reports.
+//
+// Both halves are asserted here: the number-1 first block is rejected, and the
+// number-2 block that would have cemented the short chain is rejected too,
+// because the chain is still at origin. The positive control adds the same pair
+// anchored at block number 0 and requires it to be accepted.
+func TestAddBlockAfterRollbackToOriginRejectsChainShortOfBlockZero(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	c := chainEmptiedToOrigin(t)
+	// A peer whose chainsync cursor survived the rollback offers a block from
+	// further along the chain. The prev hash is arbitrary: at origin there is
+	// no tip to compare it against.
+	short := &MockBlock{
+		MockBlockNumber: 1,
+		MockSlot:        3360,
+		MockHash:        testHashPrefix + "beef",
+		MockPrevHash:    testHashPrefix + "00a0",
+	}
+	err := c.AddBlock(short, nil)
+	if err == nil {
+		t.Fatal(
+			"AddBlock accepted block number 1 as the chain's first block; " +
+				"the chain is then permanently short block 0",
+		)
+	}
+	var notFitErr chain.BlockNotFitChainTipError
+	if !errors.As(err, &notFitErr) {
+		t.Fatalf("expected BlockNotFitChainTipError, got %T: %s", err, err)
+	}
+	assertStillAtOrigin(t, c, "rejected number-1 first block")
+	// This is the block that would make the gap permanent: it chains onto the
+	// number-1 block, so blockNumberContiguous is satisfied and the missing
+	// block 0 is never noticed again. It must be rejected as well, because the
+	// chain is still at origin.
+	next := &MockBlock{
+		MockBlockNumber: 2,
+		MockSlot:        3380,
+		MockHash:        testHashPrefix + "cafe",
+		MockPrevHash:    short.MockHash,
+	}
+	if err := c.AddBlock(next, nil); err == nil {
+		t.Fatal(
+			"AddBlock accepted block number 2 on top of a number-1 first " +
+				"block; the chain is anchored at block number 1 and is " +
+				"permanently short block 0",
+		)
+	}
+	assertStillAtOrigin(t, c, "rejected number-2 second block")
+	// Positive control: the same two-block sequence anchored at block number 0
+	// is the chain the network actually has, and it is accepted.
+	genesisBlock := &MockBlock{
+		MockBlockNumber: 0,
+		MockSlot:        3340,
+		MockHash:        testHashPrefix + "0aa0",
+	}
+	if err := c.AddBlock(genesisBlock, nil); err != nil {
+		t.Fatalf(
+			"chain must accept the network's first block (number 0): %s",
+			err,
+		)
+	}
+	secondBlock := &MockBlock{
+		MockBlockNumber: 1,
+		MockSlot:        3360,
+		MockHash:        testHashPrefix + "beef",
+		MockPrevHash:    genesisBlock.MockHash,
+	}
+	if err := c.AddBlock(secondBlock, nil); err != nil {
+		t.Fatalf("chain must accept block 1 on top of block 0: %s", err)
+	}
+	if tip := c.Tip(); tip.BlockNumber != 1 {
+		t.Fatalf("tip block number %d, want 1", tip.BlockNumber)
+	}
+	if got := firstBlockNumberOnChain(t, c); got != 0 {
+		t.Fatalf(
+			"chain's first block is number %d, want 0: the chain is short "+
+				"its first block",
+			got,
+		)
+	}
+}
+
+// assertStillAtOrigin fails unless the chain is still empty, so a rejected
+// candidate is proven not to have advanced the chain.
+func assertStillAtOrigin(t *testing.T, c *chain.Chain, after string) {
+	t.Helper()
+	if tip := c.Tip(); len(tip.Point.Hash) != 0 {
+		t.Fatalf(
+			"chain advanced past origin after %s: tip %d.%x",
+			after,
+			tip.Point.Slot,
+			tip.Point.Hash,
+		)
+	}
+}
+
+// firstBlockNumberOnChain returns the block number of the chain's first block,
+// read back from origin rather than from the tip, so that a chain missing its
+// prefix is visible.
+func firstBlockNumberOnChain(t *testing.T, c *chain.Chain) uint64 {
+	t.Helper()
+	iter, err := c.FromPoint(ocommon.NewPointOrigin(), false)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain iterator: %s", err)
+	}
+	defer iter.Cancel()
+	next, err := iter.Next(false)
+	if err != nil {
+		t.Fatalf("unexpected error reading the chain's first block: %s", err)
+	}
+	if next == nil {
+		t.Fatal("chain iterator returned no first block")
+	}
+	return next.Block.Number
 }
