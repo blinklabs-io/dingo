@@ -55,7 +55,14 @@ func (a *transactionBatchAccumulator) insertTransaction(
 	args ...any,
 ) (uint, error) {
 	if a.transactionInsert == nil {
-		if dialect, ok := db.(dialectQueryer); ok {
+		// unwrapDialectQueryer, not a bare type assertion: whenever
+		// Config.PromRegistry is set, Store.instrumentedQueryer wraps every
+		// handle it hands out in countingQueryer, making countingQueryer
+		// (not dialectQueryer) db's outermost concrete type. A plain
+		// db.(dialectQueryer) would silently miss that case and leave
+		// a.mysql false on a metrics-enabled MySQL store, routing this
+		// insert down the RETURNING-id path MySQL cannot serve.
+		if dialect, ok := unwrapDialectQueryer(db); ok {
 			a.mysql = dialect.dialect == "mysql"
 		}
 		stmt, err := db.PrepareContext(ctx, transactionInsertSQL)

@@ -46,8 +46,49 @@ var sharedMemoryDBSequence atomic.Uint64
 //
 // journal_mode is deliberately absent: see ensureWALJournalMode. Everything
 // else here is per-connection state that has to be set on each one.
+//
+// wal_autocheckpoint(10000) raises the automatic-checkpoint threshold from
+// SQLite's compiled-in default of 1000 pages (~4MB at the default 4096-byte
+// page size) to 10000 pages (~40MB). Every top-level write transaction
+// (batches of up to 50 blocks; see ledger.batchSize) that pushes the WAL past
+// the threshold triggers a passive checkpoint that copies each dirty page
+// back into metadata.sqlite. Chain-state writes revisit a small set of hot
+// B-tree pages (UTXO/index pages near the tip, sequence counters) far more
+// often than they touch new ones, so a checkpoint firing on nearly every
+// commit rewrites those same pages to the main file over and over -- one
+// physical write per commit instead of one write per accumulated batch of
+// commits. Measured live against a from-genesis preview sync at the old
+// default: ~112MB/s sustained process write throughput (wchar) against a
+// combined ~2.9MB/s of net new data (SQLite file growth + Badger blob
+// growth), with the SQLite side alone accounting for the bulk of it while
+// the WAL file itself held a constant size -- i.e. checkpoint-driven
+// rewrites, not new data. Raising the threshold 10x lets up to 10x as many
+// commits' worth of hot-page churn coalesce into a single checkpoint pass,
+// since a checkpoint only ever needs to write the latest version of a given
+// page once. This value already runs in production via the bulk-load path
+// (see SQLiteDialect's setBulk, and its restore counterpart below, both of
+// which now agree on 10000) for genesis import and snapshot restore, so it
+// is not a new, unvalidated setting -- only its use outside of bulk mode is
+// new.
+//
+// Durability: per DATABASE.md's Cross-Store Durability Contract, synchronous
+// NORMAL under WAL mode means SQLite fsyncs the WAL at checkpoint boundaries,
+// not after every commit -- a committed transaction survives an application
+// crash (the bytes are already in the OS page cache) but an OS crash/power
+// loss can still roll back whatever was written since the last checkpoint's
+// fsync. That was already true at the old 1000-page threshold; this change
+// only widens the rolled-back window from ~4MB to ~40MB of recent commits.
+// It does not introduce a new failure class: SQLite's own WAL replay
+// guarantees the database is never corrupted, only reverted to an earlier
+// consistent point, and Dingo already resumes chain-sync from whatever tip
+// the metadata store reports after any restart (ledger.LedgerState.loadTip),
+// re-fetching and re-applying any blocks peers show as missing via the
+// ordinary FindIntersect/chain-sync path -- the same mechanism that already
+// recovers from an explicit rollback or from the pre-existing Badger-behind-
+// metadata race the Cross-Store Durability Contract section above documents.
 const sqliteCommonPragmas = "&_pragma=busy_timeout(30000)" +
 	"&_pragma=synchronous(NORMAL)" +
+	"&_pragma=wal_autocheckpoint(10000)" +
 	"&_pragma=cache_size(-50000)" +
 	"&_pragma=foreign_keys(1)" +
 	"&_pragma=mmap_size(268435456)"
@@ -181,6 +222,7 @@ func openSQLStore(
 		maintenance  func(context.Context) error
 		backupTo     func(context.Context, string) error
 		restoreFrom  func(context.Context, string) error
+		databasePath string
 	)
 	if dataDir == "" {
 		dsn := fmt.Sprintf(
@@ -205,7 +247,7 @@ func openSQLStore(
 				err,
 			)
 		}
-		databasePath := filepath.Join(dataDir, "metadata.sqlite")
+		databasePath = filepath.Join(dataDir, "metadata.sqlite")
 		// Build a proper file URI so ?, #, %, and other URI-reserved
 		// characters in the configured data directory remain part of the
 		// filename instead of being interpreted as DSN options/fragments.
@@ -245,7 +287,7 @@ func openSQLStore(
 			return ensureWALJournalMode(ctx, databaseURI)
 		}
 		locker = migrations.NewFileLocker(databasePath + ".migrate.lock")
-		diskSizeFunc = sqliteDiskSize(writeDB, databasePath)
+		diskSizeFunc = sqliteDiskSize(readDB, databasePath)
 		maintenance = func(ctx context.Context) error {
 			_, err := writeDB.ExecContext(ctx, "VACUUM")
 			return err
@@ -272,6 +314,7 @@ func openSQLStore(
 		MaintenanceInterval: 24 * time.Hour,
 		BackupTo:            backupTo,
 		RestoreFrom:         restoreFrom,
+		PromRegistry:        dependencies.PromRegistry,
 	})
 	if err != nil {
 		if readDB != writeDB {
@@ -280,19 +323,38 @@ func openSQLStore(
 		_ = writeDB.Close()
 		return nil, nil, nil, err
 	}
+	if dataDir != "" && dependencies.PromRegistry != nil {
+		registerSQLiteFileMetrics(
+			dependencies.PromRegistry,
+			databasePath,
+			store,
+		)
+	}
 	return store, writeDB, readDB, nil
 }
+
+// sqliteDiskSizeQueryTimeout bounds the page_count/page_size PRAGMA reads
+// below, so a Prometheus scrape of dingo_database_sql_disk_bytes cannot
+// stall indefinitely behind a slow or wedged connection.
+const sqliteDiskSizeQueryTimeout = 5 * time.Second
 
 func sqliteDiskSize(
 	db *sql.DB,
 	databasePath string,
 ) func() (int64, error) {
 	return func() (int64, error) {
+		ctx, cancel := context.WithTimeout(
+			context.Background(),
+			sqliteDiskSizeQueryTimeout,
+		)
+		defer cancel()
 		var pageCount, pageSize int64
-		if err := db.QueryRow("PRAGMA page_count").Scan(&pageCount); err != nil {
+		if err := db.QueryRowContext(ctx, "PRAGMA page_count").
+			Scan(&pageCount); err != nil {
 			return 0, fmt.Errorf("SQLite page count: %w", err)
 		}
-		if err := db.QueryRow("PRAGMA page_size").Scan(&pageSize); err != nil {
+		if err := db.QueryRowContext(ctx, "PRAGMA page_size").
+			Scan(&pageSize); err != nil {
 			return 0, fmt.Errorf("SQLite page size: %w", err)
 		}
 		total := pageCount * pageSize
