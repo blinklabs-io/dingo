@@ -302,8 +302,11 @@ func (ls *LedgerState) PoolStakeDistribution(
 	})
 
 	// The VRF key hash lives on the pool registration rather than the
-	// snapshot, so it is fetched in bulk rather than per pool.
-	vrfByPool, err := ls.poolVrfKeyHashes(keyHashes, metaTxn)
+	// snapshot, so it is fetched in bulk rather than per pool. Unbounded
+	// (nil): this snapshot's own pinning behavior is pre-existing and
+	// unchanged by blinklabs-io/dingo#4237's fix to the separate
+	// GetStakeDistribution path -- out of scope here.
+	vrfByPool, err := ls.poolVrfKeyHashes(keyHashes, nil, metaTxn)
 	if err != nil {
 		return nil, err
 	}
@@ -339,6 +342,14 @@ func (ls *LedgerState) PoolStakeDistribution(
 			// leadership-schedule for every operator rather than for the one
 			// pool concerned. The same reasoning keeps chainDepStateLabNonce
 			// serving a slightly stale value instead of aborting.
+			//
+			// Also counted on a metric (blinklabs-io/dingo#4152), not just
+			// logged: a WARN line is easy to miss in normal operation, and
+			// this specific omission is what let a real cross-node
+			// comparison against cardano-node go unnoticed until a manual
+			// diff was run. A rising or persistently nonzero value here is
+			// visible to an operator's existing alerting without one.
+			ls.metrics.incPoolStakeDistributionOmittedPool()
 			ls.config.Logger.Warn(
 				"omitting pool with snapshot stake but no registration",
 				"pool", hex.EncodeToString(pkh.Bytes()),
@@ -375,13 +386,14 @@ func stakeFraction(stake, total uint64) *cbor.Rat {
 
 // poolVrfKeyHashes looks up the VRF key hash each pool will be held to.
 //
-// Resolution goes through registeredPoolVrfKeyHash, the same function
-// verifyRegisteredVrfKey uses to decide whether an incoming block's VRF key
-// belongs to the pool that produced it. That is not an incidental reuse: a
-// leadership schedule is only worth anything if the node that produced it will
-// accept the blocks it promises, so the key this reply names has to be the key
-// block validation will require. Sharing the function means the two cannot
-// drift apart silently.
+// For a live (unpinned) lookup, resolution goes through
+// registeredPoolVrfKeyHash, the same function verifyRegisteredVrfKey uses to
+// decide whether an incoming block's VRF key belongs to the pool that
+// produced it. That is not an incidental reuse: a leadership schedule is only
+// worth anything if the node that produced it will accept the blocks it
+// promises, so the key this reply names has to be the key block validation
+// will require. Sharing the function means the two cannot drift apart
+// silently.
 //
 // It also settles which registration wins when a pool has re-registered with a
 // new VRF key. The Haskell node answers this query from a stake distribution
@@ -390,8 +402,18 @@ func stakeFraction(stake, total uint64) *cbor.Rat {
 // reporting the snapshot-era key here would describe a schedule dingo itself
 // would reject. Matching the validator is what keeps the reply true of the
 // node serving it.
+//
+// asOfSlot pins that same resolution to a historical slot instead
+// (registeredPoolVrfKeyHashAsOfSlot), for a pinned caller: a pool that
+// re-registers with a new VRF key after asOfSlot must still be reported with
+// the key it held at that slot, not its current one (blinklabs-io/dingo#4237).
+// Pass nil for a live lookup -- the caller's own targetSlot equals the current
+// tip, but registeredPoolVrfKeyHash's unbounded "latest registration" behavior
+// is kept for that case rather than routed through the slot-bounded path, so
+// live callers see no behavior change from before asOfSlot existed.
 func (ls *LedgerState) poolVrfKeyHashes(
 	keyHashes []lcommon.PoolKeyHash,
+	asOfSlot *uint64,
 	txn types.Txn,
 ) (map[lcommon.PoolKeyHash]ledger.Blake2b256, error) {
 	out := make(map[lcommon.PoolKeyHash]ledger.Blake2b256, len(keyHashes))
@@ -403,7 +425,13 @@ func (ls *LedgerState) poolVrfKeyHashes(
 		return nil, err
 	}
 	for _, pool := range pools {
-		vrfKeyHash, ok := registeredPoolVrfKeyHash(&pool)
+		var vrfKeyHash lcommon.Blake2b256
+		var ok bool
+		if asOfSlot != nil {
+			vrfKeyHash, ok = registeredPoolVrfKeyHashAsOfSlot(&pool, *asOfSlot)
+		} else {
+			vrfKeyHash, ok = registeredPoolVrfKeyHash(&pool)
+		}
 		if !ok {
 			continue
 		}
