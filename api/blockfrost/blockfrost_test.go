@@ -3544,12 +3544,10 @@ INSERT INTO address_transaction (
 	assert.Nil(t, info.StakeAddress)
 }
 
-func TestKeyScriptStakeAddressDerivation(t *testing.T) {
+func TestNodeAdapterKeyScriptStakeAddress(t *testing.T) {
 	t.Parallel()
 
-	// gouroboros StakeAddress() returns nil for type-2 base addresses
-	// (key payment / script staking); the adapter derives the script
-	// stake address from the staking credential instead.
+	adapter, store, db := newDBBackedAdapter(t)
 	paymentHash := bytes.Repeat([]byte{0x01}, lcommon.AddressHashSize)
 	stakeScriptHash := bytes.Repeat([]byte{0x02}, lcommon.AddressHashSize)
 	addr, err := lcommon.NewAddressFromParts(
@@ -3559,20 +3557,26 @@ func TestKeyScriptStakeAddressDerivation(t *testing.T) {
 		stakeScriptHash,
 	)
 	require.NoError(t, err)
-	require.Nil(t, addr.StakeAddress())
+	utxo := models.Utxo{
+		TxId:          fill32(0x31),
+		PaymentKey:    paymentHash,
+		StakingKey:    stakeScriptHash,
+		CredentialTag: 1,
+		AddedSlot:     10,
+		Amount:        types.Uint64(1_000_000),
+	}
+	insertAdapterUtxo(t, store, &utxo)
+	storePointerOutputCbor(t, db, utxo.TxId, 0, addr, 1_000_000)
 
-	encoded, err := stakeAddressFromCredential(
-		lcommon.Credential{
-			CredType:   lcommon.CredentialTypeScriptHash,
-			Credential: lcommon.CredentialHash(addr.StakeKeyHash()),
-		},
-		lcommon.AddressNetworkTestnet,
-	)
+	info, err := adapter.Address(addr.String())
 	require.NoError(t, err)
-	assert.True(t, strings.HasPrefix(encoded, "stake_test17"))
+	require.NotNil(t, info.StakeAddress)
+	assert.True(t, strings.HasPrefix(*info.StakeAddress, "stake_test17"))
 
-	stakeAddr, err := lcommon.NewAddress(encoded)
+	stakeAddr, err := lcommon.NewAddress(*info.StakeAddress)
 	require.NoError(t, err)
+	assert.Equal(t, uint(lcommon.AddressNetworkTestnet), stakeAddr.NetworkId())
+	assert.Equal(t, uint8(lcommon.AddressTypeNoneScript), stakeAddr.Type())
 	assert.Equal(t, stakeScriptHash, stakeAddr.StakeKeyHash().Bytes())
 }
 
