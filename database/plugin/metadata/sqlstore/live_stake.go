@@ -26,6 +26,48 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
+// rewardLiveStakeAccountQuery is refreshRewardLiveStakeAggregate's account
+// lookup: a plain SELECT with no RETURNING clause, run once per UTxO a stake
+// credential gains or loses -- the same call frequency as
+// sumCredentialUtxoStakeQuery, which it is always paired with in that
+// function. Like sumCredentialUtxoStakeQuery it is safe to route through
+// dialectQueryer.QueryRowContext's ordinary path for every dialect: that
+// wrapper only special-cases a query matched by hasReturningID (a trailing
+// "RETURNING id"), which this query never has, so translate() plus a direct
+// QueryRowContext call is exactly what a cached *sql.Stmt (already
+// dialect-translated at prepare time, see prepareHotStatements) reproduces.
+const rewardLiveStakeAccountQuery = `
+SELECT reward, pool, active, added_slot
+FROM account
+WHERE credential_tag = ? AND staking_key = ?`
+
+// rewardLiveStakeUpsertQuery is refreshRewardLiveStakeAggregate's other
+// per-touch query: the upsert that records the freshly recomputed total.
+// It has no RETURNING clause either (the row's id is never read back here),
+// so it always goes through ExecContext -- both as a one-shot call and,
+// once cached, via a *sql.Stmt returned by stmtForQueryer -- with no
+// dialect-specific branch to bypass. dialectQueryer.translate's ON CONFLICT
+// rewrite for MySQL happens once, at PrepareContext time, exactly as it does
+// for a one-shot ExecContext call today.
+const rewardLiveStakeUpsertQuery = `
+INSERT INTO reward_live_stake (
+    credential_tag, staking_key, pool_key_hash, utxo_stake, reward_stake,
+    total_stake, registered, pool_delegation_slot,
+    pool_delegation_block_index, pool_delegation_cert_index, updated_slot,
+    calculation_version
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+ON CONFLICT (credential_tag, staking_key) DO UPDATE SET
+    pool_key_hash = excluded.pool_key_hash,
+    utxo_stake = excluded.utxo_stake,
+    reward_stake = excluded.reward_stake,
+    total_stake = excluded.total_stake,
+    registered = excluded.registered,
+    pool_delegation_slot = excluded.pool_delegation_slot,
+    pool_delegation_block_index = excluded.pool_delegation_block_index,
+    pool_delegation_cert_index = excluded.pool_delegation_cert_index,
+    updated_slot = excluded.updated_slot,
+    calculation_version = excluded.calculation_version`
+
 func (s *Store) refreshRewardLiveStakeAggregate(
 	ctx context.Context,
 	db queryer,
@@ -39,12 +81,8 @@ func (s *Store) refreshRewardLiveStakeAggregate(
 	var pool []byte
 	var active sql.NullBool
 	var addedSlot sql.NullInt64
-	accountErr := db.QueryRowContext(ctx, `
-SELECT reward, pool, active, added_slot
-FROM account
-WHERE credential_tag = ? AND staking_key = ?`,
-		ref.Tag,
-		ref.Key,
+	accountErr := s.queryRowCached(
+		ctx, db, rewardLiveStakeAccountQuery, ref.Tag, ref.Key,
 	).Scan(&reward, &pool, &active, &addedSlot)
 	if accountErr != nil && !errors.Is(accountErr, sql.ErrNoRows) {
 		return fmt.Errorf("query reward live stake account: %w", accountErr)
@@ -94,24 +132,8 @@ WHERE credential_tag = ? AND staking_key = ?`,
 	if err != nil {
 		return err
 	}
-	_, err = db.ExecContext(ctx, `
-INSERT INTO reward_live_stake (
-    credential_tag, staking_key, pool_key_hash, utxo_stake, reward_stake,
-    total_stake, registered, pool_delegation_slot,
-    pool_delegation_block_index, pool_delegation_cert_index, updated_slot,
-    calculation_version
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
-ON CONFLICT (credential_tag, staking_key) DO UPDATE SET
-    pool_key_hash = excluded.pool_key_hash,
-    utxo_stake = excluded.utxo_stake,
-    reward_stake = excluded.reward_stake,
-    total_stake = excluded.total_stake,
-    registered = excluded.registered,
-    pool_delegation_slot = excluded.pool_delegation_slot,
-    pool_delegation_block_index = excluded.pool_delegation_block_index,
-    pool_delegation_cert_index = excluded.pool_delegation_cert_index,
-    updated_slot = excluded.updated_slot,
-    calculation_version = excluded.calculation_version`,
+	_, err = s.execCached(
+		ctx, db, rewardLiveStakeUpsertQuery,
 		ref.Tag,
 		ref.Key,
 		pool,
@@ -189,20 +211,14 @@ func (s *Store) sumCredentialUtxoStake(
 	db queryer,
 	ref models.StakeCredentialRef,
 ) (uint64, error) {
-	var row *sql.Row
-	if cached, ok := s.lookupCachedStmt(sumCredentialUtxoStakeQuery); ok {
-		row = stmtForQueryer(ctx, db, cached).
-			QueryRowContext(ctx, ref.Tag, ref.Key)
-	} else {
-		// No cached statement -- Start (the only place that populates it)
-		// has not run since a Reset/RestoreFrom last invalidated the cache.
-		// Fall back to the plain one-shot call against db itself rather
-		// than trying to populate the cache here: db already holds
-		// whatever connection it needs (see prepareHotStatements for why a
-		// fresh PrepareContext against s.writeDB at this point could
-		// deadlock against db's own open transaction).
-		row = db.QueryRowContext(ctx, sumCredentialUtxoStakeQuery, ref.Tag, ref.Key)
-	}
+	// No cached statement means Start (the only place that populates it) has
+	// not run since a Reset/RestoreFrom last invalidated the cache;
+	// queryRowCached falls back to a plain one-shot call against db itself in
+	// that case rather than trying to populate the cache here -- db already
+	// holds whatever connection it needs (see prepareHotStatements for why a
+	// fresh PrepareContext against s.writeDB at this point could deadlock
+	// against db's own open transaction).
+	row := s.queryRowCached(ctx, db, sumCredentialUtxoStakeQuery, ref.Tag, ref.Key)
 	var total sql.NullInt64
 	err := row.Scan(&total)
 	if err != nil {
