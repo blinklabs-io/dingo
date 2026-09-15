@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"math"
 	"math/big"
+	"runtime"
 	"runtime/debug"
 	"slices"
 	"strconv"
@@ -46,6 +47,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
+	"github.com/blinklabs-io/dingo/utxoref"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/consensus"
@@ -77,20 +79,52 @@ const (
 	firstBlockIndex              = 1
 	mithrilLedgerSlotSyncKey     = "mithril_ledger_slot"
 	mithrilLedgerHashSyncKey     = "mithril_ledger_hash"
-	// blockPipelineDecodeWorkers is the fixed decode worker count for phase 1
-	// of the block-processing pipeline (issue #1894). Validation workers stay
-	// at 0 (disabled) unless LedgerStateConfig.BlockPipelineValidateEnabled
-	// turns them on (phase 3).
-	blockPipelineDecodeWorkers = 2
-	// blockPipelineValidateWorkers is the fixed VRF/KES validate worker count
-	// for phase 3 of the block-processing pipeline (issue #1894). VRF and KES
-	// verification are each substantially more expensive than a CBOR decode,
-	// so validation is the pipeline's throughput bottleneck; this is kept
-	// equal to blockPipelineDecodeWorkers for now rather than scaled
-	// differently, matching phase 1's fixed-worker-count approach until
-	// there's a throughput profile to size it against.
-	blockPipelineValidateWorkers = 2
+	// blockPipelineMinWorkers is the decode/validate worker count
+	// blockPipelineWorkerCount falls back to on a host that reports fewer
+	// CPUs than this (including GOMAXPROCS(1)). It is the prior hardcoded
+	// worker count for both phase 1 (decode, issue #1894) and phase 3
+	// (VRF/KES validate), kept as a floor so a constrained host never gets
+	// fewer workers than it did before this was made CPU-scaled.
+	blockPipelineMinWorkers = 2
+	// blockPipelineMaxWorkers caps blockPipelineWorkerCount. Both pipeline
+	// stages only prepare work for ledgerProcessBlocksFromSource's single
+	// apply goroutine (see "Why dingo's ledger apply is not wired into
+	// pipeline.ApplyFunc", issue #3227), so decode/validate throughput
+	// past this point outruns the one consumer that can ever drain it;
+	// more workers beyond the cap would only buffer further ahead of that
+	// consumer, not deliver blocks to it any faster.
+	blockPipelineMaxWorkers = 8
 )
+
+// blockPipelineWorkerCount derives the block-pipeline's decode (phase 1) and
+// validate (phase 3) worker count from the host's available CPU parallelism
+// instead of the fixed count of 2 both stages ran at unconditionally before
+// this change. A 16-core host running with BlockPipelineEnabled used only 2
+// of those cores for decode and 2 for VRF/KES validate regardless of how
+// many were free; profiling during a from-genesis sync (issue #4203, the
+// block-application throughput investigation) showed a single core saturated
+// while 15 sat idle. This is the same fixed
+// count for both stages that blockPipelineValidateWorkers' prior doc comment
+// described as provisional ("kept equal ... until there's a throughput
+// profile to size it against"); GOMAXPROCS is that profile input.
+//
+// Both stages remain purely a scheduling change per their existing
+// documentation (BlockPipelineEnabled/BlockPipelineValidateEnabled's config
+// doc comments): this does not alter validation or apply behavior, only how
+// many goroutines share the decode/VRF/KES work before
+// ledgerProcessBlocksFromSource's single-threaded apply consumes it in
+// submission order.
+func blockPipelineWorkerCount() int {
+	n := runtime.GOMAXPROCS(0)
+	switch {
+	case n < blockPipelineMinWorkers:
+		return blockPipelineMinWorkers
+	case n > blockPipelineMaxWorkers:
+		return blockPipelineMaxWorkers
+	default:
+		return n
+	}
+}
 
 // DatabaseOperation represents an asynchronous database operation
 type DatabaseOperation struct {
@@ -1016,6 +1050,13 @@ type LedgerState struct {
 	// deliveries for other ranges and header-queue churn; discarded when
 	// the tracked range itself is delivered.
 	blockfetchRangeFailure blockfetchRangeFailureState
+	// nonExtendingBlockRejections counts, per connection (keyed by
+	// connIdKey), recent "block does not fit chain tip" rejections inside
+	// nonExtendingBlockRejectionWindow. Guarded by chainsyncBlockfetchMutex,
+	// like the rest of the blockfetch drain state above. See
+	// noteNonExtendingBlockRejection and noteBlockAcceptedFromConn
+	// (issue #4272).
+	nonExtendingBlockRejections map[string]nonExtendingBlockRejectionState
 	// deferredHeaderValidation holds block points whose stateful header checks
 	// wait for ledger apply. It is guarded by its own deferredHeaderValidationMu
 	// (NOT the main RWMutex) so the snapshot retention guard
@@ -1461,8 +1502,9 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		// ledger/block_pipeline_apply_contract_test.go; if a gouroboros
 		// bump makes any of them fail, revisit the decision rather than
 		// the test.
+		workerCount := blockPipelineWorkerCount()
 		pipelineOpts := []pipeline.PipelineOption{
-			pipeline.WithDecodeWorkers(blockPipelineDecodeWorkers),
+			pipeline.WithDecodeWorkers(workerCount),
 		}
 		if cfg.BlockPipelineValidateEnabled {
 			// Wire VRF/KES validation (phase 3). Eta0Provider reads the
@@ -1477,7 +1519,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 			// ledger paths.
 			pipelineOpts = append(
 				pipelineOpts,
-				pipeline.WithValidateWorkers(blockPipelineValidateWorkers),
+				pipeline.WithValidateWorkers(workerCount),
 				pipeline.WithEta0Provider(ls.blockPipelineEta0Provider),
 				pipeline.WithSlotsPerKesPeriod(ls.SlotsPerKESPeriod()),
 				pipeline.WithVerifyConfig(lcommon.VerifyConfig{
@@ -7519,7 +7561,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	)
 	// Track outputs from earlier transactions in this block for intra-block
 	// dependencies only when TX validation is enabled.
-	intraBlockUtxos := make(map[string]lcommon.Utxo)
+	intraBlockUtxos := make(map[utxoref.Key]lcommon.Utxo)
 	for i, tx := range block.Transactions() {
 		if delta == nil {
 			delta = NewLedgerDelta(
@@ -7765,12 +7807,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 			// correctly - for failed TXs, Produced() returns collateral return at the
 			// correct index (len(Outputs())), while Outputs() returns regular outputs
 			for _, utxo := range tx.Produced() {
-				key := fmt.Sprintf(
-					"%s:%d",
-					utxo.Id.Id().String(),
-					utxo.Id.Index(),
-				)
-				intraBlockUtxos[key] = utxo
+				intraBlockUtxos[utxoref.ForUtxo(utxo)] = utxo
 			}
 		}
 	}
@@ -11405,8 +11442,8 @@ func (ls *LedgerState) WithTxValidationSession(
 	fn func(
 		validate func(
 			tx ledger.Transaction,
-			consumedUtxos map[string]struct{},
-			createdUtxos map[string]lcommon.Utxo,
+			consumedUtxos map[utxoref.Key]struct{},
+			createdUtxos map[utxoref.Key]lcommon.Utxo,
 		) error,
 		stillCurrent func() bool,
 	) error,
@@ -11417,8 +11454,8 @@ func (ls *LedgerState) WithTxValidationSession(
 	return txn.Do(func(txn *database.Txn) error {
 		validate := func(
 			tx ledger.Transaction,
-			consumedUtxos map[string]struct{},
-			createdUtxos map[string]lcommon.Utxo,
+			consumedUtxos map[utxoref.Key]struct{},
+			createdUtxos map[utxoref.Key]lcommon.Utxo,
 		) error {
 			validationEra, err := resolveValidationEra(
 				tx,
@@ -11544,8 +11581,8 @@ func (ls *LedgerState) ValidateTx(
 // (dependent TX chaining). Both may be nil for no overlay.
 func (ls *LedgerState) ValidateTxWithOverlay(
 	tx lcommon.Transaction,
-	consumedUtxos map[string]struct{},
-	createdUtxos map[string]lcommon.Utxo,
+	consumedUtxos map[utxoref.Key]struct{},
+	createdUtxos map[utxoref.Key]lcommon.Utxo,
 ) error {
 	return ls.validateTxCore(tx, func(txn *database.Txn) *LedgerView {
 		return &LedgerView{
@@ -11841,8 +11878,8 @@ func (ls *LedgerState) forgeBlock() {
 			"tx_count", len(mempoolTxs),
 		)
 
-		consumedInputs := make(map[string]struct{})
-		createdOutputs := make(map[string]lcommon.Utxo)
+		consumedInputs := make(map[utxoref.Key]struct{})
+		createdOutputs := make(map[utxoref.Key]lcommon.Utxo)
 
 		// Iterate through transactions and add them until we hit limits
 		for _, mempoolTx := range mempoolTxs {
@@ -11983,20 +12020,10 @@ func (ls *LedgerState) forgeBlock() {
 			}
 			blockSize += txSize
 			for _, input := range fullTx.Consumed() {
-				key := fmt.Sprintf(
-					"%s:%d",
-					input.Id().String(),
-					input.Index(),
-				)
-				consumedInputs[key] = struct{}{}
+				consumedInputs[utxoref.ForInput(input)] = struct{}{}
 			}
 			for _, output := range fullTx.Produced() {
-				key := fmt.Sprintf(
-					"%s:%d",
-					output.Id.Id().String(),
-					output.Id.Index(),
-				)
-				createdOutputs[key] = output
+				createdOutputs[utxoref.ForUtxo(output)] = output
 			}
 			// Safe to assign: overflow was already checked
 			// via SafeAddExUnits when computing

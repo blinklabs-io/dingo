@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/utxoref"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -51,8 +52,8 @@ func (v *fifoRevalidationBenchmarkValidator) ValidateTx(
 
 func (v *fifoRevalidationBenchmarkValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
-	map[string]struct{},
-	map[string]lcommon.Utxo,
+	map[utxoref.Key]struct{},
+	map[utxoref.Key]lcommon.Utxo,
 ) error {
 	if delay := time.Duration(v.delayNS.Load()); delay > 0 {
 		start := time.Now()
@@ -66,8 +67,8 @@ func (v *fifoRevalidationBenchmarkValidator) WithTxValidationSession(
 	fn func(
 		func(
 			gledger.Transaction,
-			map[string]struct{},
-			map[string]lcommon.Utxo,
+			map[utxoref.Key]struct{},
+			map[utxoref.Key]lcommon.Utxo,
 		) error,
 		func() bool,
 	) error,
