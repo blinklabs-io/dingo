@@ -102,6 +102,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
@@ -147,6 +148,20 @@ func CheckProtocolParams(
 	dingoParams, err := koiosparity.ProtocolParamsFromNative(pp)
 	if err != nil {
 		return nil, fmt.Errorf("convert dingo protocol params: %w", err)
+	}
+
+	// ProtocolParamsFromNative infers the era from pp's own Go type, which
+	// is ambiguous for exactly one case: allegra.AllegraProtocolParameters
+	// is a type alias for shelley.ShelleyProtocolParameters (gouroboros), so
+	// a type switch alone cannot tell Shelley and Allegra apart. Resolve it
+	// authoritatively via HardForkCurrentEraQuery instead, on the same
+	// Acquired connection -- this is the same era index the node's own
+	// wire protocol reports, not a second guess.
+	if eraID, eraErr := client.GetCurrentEra(); eraErr == nil {
+		if era := eras.GetEraById(uint(eraID)); era != nil {
+			dingoParams.EraID = uint(eraID)
+			dingoParams.EraName = era.Name
+		}
 	}
 
 	koiosResp, koiosErr := koios.GetEpochParams(ctx, epoch)

@@ -210,7 +210,14 @@ func ProtocolParamsFromNative(
 	switch pp := pparams.(type) {
 	case *shelley.ShelleyProtocolParameters:
 		// Also covers Allegra: allegra.AllegraProtocolParameters is a type
-		// alias for the Shelley struct, so it lands in this case.
+		// alias for the Shelley struct, so it lands in this case, and the
+		// two eras are indistinguishable from the struct type alone -- the
+		// caller (decodeProtocolParams) overwrites EraID/EraName with the
+		// epoch-correct one afterward when it knows which; a live
+		// LocalStateQuery caller (cmd/node-parity) has no such external
+		// signal, so Shelley is the honest default here.
+		out.EraID = shelley.EraIdShelley
+		out.EraName = shelley.EraNameShelley
 		fillShelleyFamilyParams(
 			out,
 			pp.MinFeeA, pp.MinFeeB, pp.MaxBlockBodySize, pp.MaxTxSize,
@@ -219,6 +226,8 @@ func ProtocolParamsFromNative(
 			pp.MinPoolCost,
 		)
 	case *mary.MaryProtocolParameters:
+		out.EraID = mary.EraIdMary
+		out.EraName = mary.EraNameMary
 		fillShelleyFamilyParams(
 			out,
 			pp.MinFeeA, pp.MinFeeB, pp.MaxBlockBodySize, pp.MaxTxSize,
@@ -227,6 +236,8 @@ func ProtocolParamsFromNative(
 			pp.MinPoolCost,
 		)
 	case *alonzo.AlonzoProtocolParameters:
+		out.EraID = alonzo.EraIdAlonzo
+		out.EraName = alonzo.EraNameAlonzo
 		fillShelleyFamilyParams(
 			out,
 			pp.MinFeeA, pp.MinFeeB, pp.MaxBlockBodySize, pp.MaxTxSize,
@@ -240,6 +251,8 @@ func ProtocolParamsFromNative(
 			pp.CostModels,
 		)
 	case *babbage.BabbageProtocolParameters:
+		out.EraID = babbage.EraIdBabbage
+		out.EraName = babbage.EraNameBabbage
 		fillShelleyFamilyParams(
 			out,
 			pp.MinFeeA, pp.MinFeeB, pp.MaxBlockBodySize, pp.MaxTxSize,
@@ -253,10 +266,14 @@ func ProtocolParamsFromNative(
 			pp.CostModels,
 		)
 	case *conway.ConwayProtocolParameters:
+		out.EraID = conway.EraIdConway
+		out.EraName = conway.EraNameConway
 		fillConwayFamilyParams(out, pp)
 	case *dijkstra.DijkstraProtocolParameters:
 		// Dijkstra embeds the Conway parameter set by value and adds
 		// reference-script fields, none of which are compared here.
+		out.EraID = dijkstra.EraIdDijkstra
+		out.EraName = dijkstra.EraNameDijkstra
 		fillConwayFamilyParams(out, &pp.ConwayProtocolParameters)
 	default:
 		return nil, fmt.Errorf(
