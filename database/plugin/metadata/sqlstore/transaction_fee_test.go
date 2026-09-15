@@ -22,9 +22,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// feelessTransaction mirrors the synthetic transactions used to carry imported
-// certificates into the metadata store: it embeds TransactionBodyBase and does
-// not override Fee, so Fee returns nil.
+// feelessTransaction stands in for a transaction body whose Fee is nil, which
+// is what TransactionBodyBase returns for any body that does not override it --
+// the synthetic transaction carrying imported certificates among them. Fee is
+// overridden here only so a single type can cover both the nil and non-nil
+// cases; the write-path reproduction lives in ledgerstate.
 type feelessTransaction struct {
 	lcommon.TransactionBodyBase
 	fee *big.Int
@@ -64,11 +66,11 @@ func (t *feelessTransaction) Witnesses() lcommon.TransactionWitnessSet {
 	return nil
 }
 
-// TestTransactionFeeTreatsNilAsZero covers the panic that a nil fee used to
-// cause on the write path. TransactionBodyBase.Fee returns nil, so a body that
-// does not override it -- the synthetic transaction carrying imported committee
-// certificates is one -- reached (*big.Int).Uint64 on a nil pointer and took
-// the process down with a SIGSEGV partway through a Mithril bootstrap.
+// TestTransactionFeeTreatsNilAsZero unit-tests the accessor. It does not by
+// itself prove the write path is guarded -- reverting the setTransaction call
+// site leaves this green -- so the reproduction that exercises
+// persistImportedCommitteeCertificates end to end lives in
+// ledgerstate/imported_committee_certificates_test.go.
 func TestTransactionFeeTreatsNilAsZero(t *testing.T) {
 	t.Parallel()
 
