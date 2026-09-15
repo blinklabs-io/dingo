@@ -392,7 +392,7 @@ func openSQLStore(
 			return ensureWALJournalMode(ctx, databaseURI)
 		}
 		locker = migrations.NewFileLocker(databasePath + ".migrate.lock")
-		diskSizeFunc = sqliteDiskSize(writeDB, databasePath)
+		diskSizeFunc = sqliteDiskSize(readDB, databasePath)
 		maintenance = func(ctx context.Context) error {
 			_, err := writeDB.ExecContext(ctx, "VACUUM")
 			return err
@@ -445,16 +445,28 @@ func openSQLStore(
 	return store, writeDB, readDB, nil
 }
 
+// sqliteDiskSizeQueryTimeout bounds the page_count/page_size PRAGMA reads
+// below, so a Prometheus scrape of dingo_database_sql_disk_bytes cannot
+// stall indefinitely behind a slow or wedged connection.
+const sqliteDiskSizeQueryTimeout = 5 * time.Second
+
 func sqliteDiskSize(
 	db *sql.DB,
 	databasePath string,
 ) func() (int64, error) {
 	return func() (int64, error) {
+		ctx, cancel := context.WithTimeout(
+			context.Background(),
+			sqliteDiskSizeQueryTimeout,
+		)
+		defer cancel()
 		var pageCount, pageSize int64
-		if err := db.QueryRow("PRAGMA page_count").Scan(&pageCount); err != nil {
+		if err := db.QueryRowContext(ctx, "PRAGMA page_count").
+			Scan(&pageCount); err != nil {
 			return 0, fmt.Errorf("SQLite page count: %w", err)
 		}
-		if err := db.QueryRow("PRAGMA page_size").Scan(&pageSize); err != nil {
+		if err := db.QueryRowContext(ctx, "PRAGMA page_size").
+			Scan(&pageSize); err != nil {
 			return 0, fmt.Errorf("SQLite page size: %w", err)
 		}
 		total := pageCount * pageSize

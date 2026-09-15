@@ -77,7 +77,14 @@ func newSQLQueryDurationHistogram(
 			"name. Counted at the same chokepoint as " +
 			"dingo_database_sql_operations_total, including the " +
 			"hot-statement cache's cached calls (queryRowCached/execCached " +
-			"in prepared_stmt.go).",
+			"in prepared_stmt.go). For a multi-row SELECT dispatched " +
+			"through QueryContext, this measures dispatch latency only -- " +
+			"database/sql returns *sql.Rows before the driver produces any " +
+			"rows, so the observation is recorded before the caller's " +
+			"Next()/Scan() loop does any work -- not the full " +
+			"query-plus-iteration time. ExecContext, QueryRowContext, and " +
+			"the cached-statement path all block until the statement " +
+			"completes, so their observations do reflect completion.",
 		// 100us to ~1.6s: SQL statements against this store range from a
 		// sub-millisecond point lookup to a multi-block delta-batch write
 		// during from-genesis sync; the default Prometheus buckets (5ms to
@@ -205,6 +212,24 @@ func (q countingQueryer) ExecContext(
 	return result, err
 }
 
+// QueryContext observes dispatch latency, not query-plus-iteration time: for
+// a multi-row SELECT, database/sql returns *sql.Rows as soon as the driver
+// has dispatched the statement, before it has produced any rows, so
+// Observe below runs before the caller's own Next()/Scan() loop -- where a
+// :many query's real cost lives -- does any work. Measured in-tree, a
+// 300000-row SELECT through Store recorded a 0.000111s observation here
+// while the caller's row iteration took 260ms, landing every such query in
+// this histogram's 100-200us bucket regardless of how many rows it actually
+// read. Timing through Close() instead is not available here: the queryer
+// interface (store.go) and every sqlc-generated DBTX interface this wraps
+// (internal/query/{sqlite,postgres,mysql}/db.go, generated code) both
+// declare QueryContext's return type as the concrete *sql.Rows, so there is
+// no wrapper type available to attach completion timing to without changing
+// those generated interfaces at all three of this codebase's 40 :many call
+// sites. The Help text on dingo_database_sql_query_duration_seconds
+// documents this gap; QueryRowContext below and the cached-statement path
+// (prepared_stmt.go's queryRowCached/execCached) are not affected, since
+// database/sql blocks both until the statement completes.
 func (q countingQueryer) QueryContext(
 	ctx context.Context,
 	query string,
