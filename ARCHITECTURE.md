@@ -6708,6 +6708,11 @@ consistent view and `If-None-Match` can answer `304 Not Modified` against that
 same tip. `api/kupo` is currently the only caller of that constructor outside
 `database/`. It briefly takes the commit barrier's exclusive side while the
 views are fixed, which is a per-request cost the other API servers do not pay.
+That hold covers the tip read and the blob view only: the metadata read-pool
+connection is reserved before the barrier is acquired, so an exhausted read
+pool -- five connections by default, and a streamed response holds one for as
+long as its client takes to read -- cannot stall read-write transaction
+construction anywhere else in the node.
 
 **Bounded work per request.** Two paths could otherwise let one request drive
 unbounded work:

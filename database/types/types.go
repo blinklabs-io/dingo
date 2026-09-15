@@ -16,6 +16,7 @@ package types
 
 import (
 	"bytes"
+	"context"
 	"database/sql/driver"
 	"encoding/binary"
 	"encoding/hex"
@@ -316,6 +317,37 @@ type BlobIteratorOptions struct {
 type Txn interface {
 	Commit() error
 	Rollback() error
+}
+
+// ReadReservation is a read-pool connection held on a caller's behalf,
+// with the read transaction not yet begun on it. Begin turns it into a
+// transaction without touching the pool again; Release returns the
+// connection when the caller ends up not beginning one.
+type ReadReservation interface {
+	// Begin begins the reserved read transaction on the already-held
+	// connection. It never waits for the pool, and it takes ownership of
+	// the reservation: the returned Txn's Commit/Rollback returns the
+	// connection, and Begin releases it itself if the transaction could
+	// not be begun. Call it at most once.
+	Begin() Txn
+	// Release returns an unused reservation to the pool. It is a no-op
+	// after Begin, so a caller can defer it unconditionally.
+	Release()
+}
+
+// ReadReserver is implemented by metadata stores that can separate taking
+// a read-pool connection from beginning a transaction on it.
+//
+// It exists for callers that must begin a read transaction while holding a
+// process-wide exclusive lock. Beginning one directly blocks for as long as
+// the read pool stays saturated, and a caller holding such a lock across
+// that wait blocks every unrelated writer for the same unbounded time. A
+// caller reserves first, outside the lock, and begins inside it.
+//
+// The interface is optional: a store that does not implement it is used
+// through Txn/ReadTransaction exactly as before.
+type ReadReserver interface {
+	ReserveRead(ctx context.Context) (ReadReservation, error)
 }
 
 // IrreversibleTxn identifies a transaction whose Rollback cannot undo writes

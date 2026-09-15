@@ -214,6 +214,20 @@ func NewTxnContext(ctx context.Context, db *Database, readWrite bool) *Txn {
 // change blob data between opening the metadata and blob views. Both holds are
 // released as soon as the views are fixed; they are not held for the lifetime
 // of the read.
+//
+// The metadata store's read-pool connection is reserved BEFORE those holds are
+// taken, when the store supports it (types.ReadReserver). Beginning the read
+// transaction is what waits for that pool, the pool is small -- five
+// connections by default -- and a caller can hold its read transaction for the
+// whole of a streamed HTTP response, so that wait is unbounded in principle.
+// Taking it inside the commit barrier would make it unbounded for everything
+// else too: the barrier's exclusive side blocks construction of every
+// read-write Txn that opens a metadata write transaction, which is how a block
+// is applied. Reserving first moves the wait outside both holds and leaves
+// only the tip read and the blob view inside them. The transaction is still
+// BEGUN inside the barrier, so the commit boundary the two views share is
+// unchanged; a store that does not implement types.ReadReserver keeps the
+// previous behavior exactly.
 func NewReadSnapshotContext(
 	ctx context.Context,
 	db *Database,
@@ -221,6 +235,25 @@ func NewReadSnapshotContext(
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	ms := db.Metadata()
+	var reservation types.ReadReservation
+	if reserver, ok := ms.(types.ReadReserver); ok {
+		reserved, err := reserver.ReserveRead(ctx)
+		if err != nil {
+			return nil, ochainsync.Tip{}, fmt.Errorf(
+				"reserve metadata read connection for read snapshot: %w",
+				err,
+			)
+		}
+		reservation = reserved
+	}
+	// Release is a no-op once Begin has handed the connection to the
+	// transaction, so this covers every path that gives up before then --
+	// including the barrier acquire below failing on a cancelled ctx.
+	if reservation != nil {
+		defer reservation.Release()
+	}
+
 	resume, err := db.PauseCommitsContext(ctx)
 	if err != nil {
 		return nil, ochainsync.Tip{}, fmt.Errorf(
@@ -233,8 +266,12 @@ func NewReadSnapshotContext(
 	t := &Txn{db: db}
 	pinBlobStoreForTxn(t, db)
 	var tip ochainsync.Tip
-	if ms := db.Metadata(); ms != nil {
-		t.metadataTxn = ms.ReadTransaction(ctx)
+	if ms != nil {
+		if reservation != nil {
+			t.metadataTxn = reservation.Begin()
+		} else {
+			t.metadataTxn = ms.ReadTransaction(ctx)
+		}
 		if t.metadataTxn == nil {
 			return nil, tip, errors.Join(types.ErrNilTxn, t.Rollback())
 		}

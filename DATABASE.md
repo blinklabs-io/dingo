@@ -1976,9 +1976,18 @@ existing `utxo`, `asset`, and `transaction` rows; it adds no table, column,
 migration, blob key, or encoding.
 
 Kupo creates that transaction with `NewReadSnapshotContext`. The constructor
-first acquires `PauseCommitsContext`, then opens the repeatable-read metadata
-transaction, reads its tip, and opens the blob transaction before immediately
-resuming commits. Every combined write transaction holds the commit barrier's
+first reserves a metadata read-pool connection (`types.ReadReserver`,
+implemented by `sqlstore.Store.ReserveRead`), then acquires
+`PauseCommitsContext`, then begins the repeatable-read metadata transaction on
+the reserved connection, reads its tip, and opens the blob transaction before
+immediately resuming commits. The reservation is what keeps the read-pool wait
+out of the barrier: the pool holds five connections by default and a streamed
+`/matches` response holds its read transaction until the client finishes
+reading, so beginning a transaction can block for an unbounded time. Doing that
+while holding the commit barrier would block construction of every read-write
+`Txn`, block application included, for exactly as long. A metadata store that
+does not implement `types.ReadReserver` falls back to beginning the transaction
+inside the barrier. Every combined write transaction holds the commit barrier's
 shared side for its whole lifetime. Multi-transaction primary-chain rollbacks
 hold a separate destructive-transition barrier from their blob-only block
 deletes through the later ledger metadata truncation; `PauseCommitsContext`
