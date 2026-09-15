@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -85,6 +86,28 @@ const (
 	// isn't otherwise bounded by anything but Koios's own internal paging
 	// (see GetAccountRewardHistory's koiosPageSize truncation-detection).
 	koiosMaxResponseBytes = 32 * 1024 * 1024
+
+	// The following bound the connection-establishment and response-wait
+	// phases of a single Koios HTTP attempt independently of the overall
+	// koiosClientTimeout, as defense-in-depth rather than a replacement for
+	// it. Without them, only two of the four phases below are actually
+	// bounded by anything narrower than koiosClientTimeout:
+	// http.DefaultTransport's own defaults already give a dial a 30s budget
+	// and a TLS handshake a 10s budget (see net/http.DefaultTransport in the
+	// Go standard library), but it sets no ResponseHeaderTimeout at all, so
+	// "connection accepted, server writes nothing" is caught today only by
+	// the coarse, whole-round-trip koiosClientTimeout -- which also has to
+	// cover dial, TLS, and body reads, so a slow dial/handshake eats into
+	// the time actually available to notice a stuck server. Every value
+	// here is chosen to be clearly shorter than koiosClientTimeout so a
+	// phase-specific failure attributes cleanly instead of surfacing as an
+	// undifferentiated overall timeout.
+	koiosClientTimeout         = 60 * time.Second
+	koiosDialTimeout           = 10 * time.Second
+	koiosDialKeepAlive         = 30 * time.Second
+	koiosTLSHandshakeTimeout   = 10 * time.Second
+	koiosResponseHeaderTimeout = 30 * time.Second
+	koiosExpectContinueTimeout = 1 * time.Second
 )
 
 // koiosBaseURLs maps network name to Koios v1 base URL.
@@ -331,13 +354,70 @@ func NewKoiosClient(
 		baseURL: base,
 		apiKey:  apiKey,
 		http: &http.Client{
-			Timeout: 60 * time.Second,
+			Timeout: koiosClientTimeout,
+			Transport: newKoiosTransport(
+				koiosDialTimeout,
+				koiosDialKeepAlive,
+				koiosTLSHandshakeTimeout,
+				koiosResponseHeaderTimeout,
+				koiosExpectContinueTimeout,
+			),
 		},
 		// Public and Free tiers share the 100/10s burst cap; Pro/Premium are
 		// higher, but we don't learn the tier from the key alone, so stay at
 		// the Free-safe ceiling for every client on the public host.
 		limiter: newBurstLimiter(burstLimit, koiosBurstWindow),
 	}, nil
+}
+
+// newKoiosTransport builds the HTTP transport backing a KoiosClient, with
+// explicit, independent timeouts for each connection-establishment phase, in
+// addition to (never instead of) the http.Client-level Timeout set alongside
+// it in NewKoiosClient.
+//
+// It starts from http.DefaultTransport.Clone() rather than a bare
+// &http.Transport{} so this client keeps DefaultTransport's other tuning
+// (HTTP/2 negotiation, proxy-from-environment, idle connection pooling) and
+// only overrides the fields this package cares about giving explicit,
+// shorter-than-the-client-timeout bounds.
+//
+// dialTimeout/dialKeepAlive configure the net.Dialer used for
+// DialContext -- redundant with DefaultTransport's own dial defaults today,
+// but explicit here so this client's dial bound does not silently change if
+// a future Go release ever changes DefaultTransport's defaults.
+// tlsHandshakeTimeout is likewise explicit for the same reason.
+// responseHeaderTimeout is the phase DefaultTransport leaves unbounded: it
+// caps how long the transport waits for the server to start sending a
+// response after the request is fully written, independently of dial/TLS
+// time and independently of the client-level Timeout.
+// expectContinueTimeout caps waiting for a "100 Continue" status before
+// sending a request body when the client sets the Expect header; this
+// client never sets Expect, so it is inert today and included purely for
+// completeness against a future caller of this transport that does.
+func newKoiosTransport(
+	dialTimeout, dialKeepAlive time.Duration,
+	tlsHandshakeTimeout, responseHeaderTimeout, expectContinueTimeout time.Duration,
+) *http.Transport {
+	// http.DefaultTransport is documented as *http.Transport today, but
+	// nothing enforces that at compile time; a comma-ok assertion with a
+	// safe fallback (matching mithril/download.go's newDownloadTransport)
+	// means a future replacement of the package-level default degrades to a
+	// fresh transport with this function's explicit timeouts still applied,
+	// instead of panicking.
+	var transport *http.Transport
+	if base, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport = base.Clone()
+	} else {
+		transport = &http.Transport{Proxy: http.ProxyFromEnvironment}
+	}
+	transport.DialContext = (&net.Dialer{
+		Timeout:   dialTimeout,
+		KeepAlive: dialKeepAlive,
+	}).DialContext
+	transport.TLSHandshakeTimeout = tlsHandshakeTimeout
+	transport.ResponseHeaderTimeout = responseHeaderTimeout
+	transport.ExpectContinueTimeout = expectContinueTimeout
+	return transport
 }
 
 // ResolvedBaseURL reports the API root this client actually queries, with any
