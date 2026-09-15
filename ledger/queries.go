@@ -739,13 +739,22 @@ func (ls *LedgerState) queryShelley(
 // at's epoch matches the live tip's, otherwise from that epoch's persisted
 // pparams row when one was recorded -- see its doc comment),
 // ShelleyEpochNoQuery (queryShelleyEpochNo, unconditionally safe: epoch
-// records are never pruned and carry no other coupled state), and
-// ShelleyUtxoByTxinQuery
-// (queryShelleyUtxoByTxIn, resolving each requested ref's per-row
-// AddedSlot/DeletedSlot against at.Slot -- safe back to
+// records are never pruned and carry no other coupled state),
+// ShelleyUtxoByTxinQuery (queryShelleyUtxoByTxIn, resolving each requested
+// ref's per-row AddedSlot/DeletedSlot against at.Slot -- safe back to
 // checkUtxoRetentionWindow's retention floor, rejected with
 // ErrHistoricalStateUnavailable beyond it; blinklabs-io/dingo#1900's
-// node-parity incremental mode is the real caller this closes a gap for).
+// node-parity incremental mode is the real caller this closes a gap for),
+// and ShelleyUtxoWholeQuery (queryShelleyUtxoWhole, same
+// AddedSlot/DeletedSlot predicate as ShelleyUtxoByTxinQuery applied to the
+// whole table via IterateUtxosAsOf instead of a bounded ref list, and the
+// same checkUtxoRetentionWindow floor -- unlike a per-ref lookup this has
+// no indexed shortcut, so a pinned call costs a full-table scan; accepted
+// deliberately, since node-parity's periodic full checks were reporting a
+// spurious UTxO "divergence" on essentially every run that took long
+// enough for the live tip to move during the walk before this closed the
+// gap -- confirmed live against a real Preview cardano-node, every flagged
+// row's own AddedSlot was strictly after the pinned slot).
 //
 // Intentionally live-only, not a gap: ShelleyGenesisConfigQuery
 // (genesis is an immutable chain-wide constant with no historical variant),
@@ -756,10 +765,6 @@ func (ls *LedgerState) queryShelley(
 // case answers unconditionally from live state regardless of at, because
 // making it historically correct needs storage or reconstruction logic
 // that does not exist yet --
-//   - ShelleyUtxoWholeQuery: a genuinely historical whole-set enumeration
-//     has no efficient indexed path in this schema (would need a
-//     full-table scan or a new temporal index); tracked separately, not
-//     part of this change.
 //   - ShelleyUtxoByAddressQuery: same underlying utxo table and
 //     AddedSlot/DeletedSlot columns as ShelleyUtxoByTxinQuery, so the same
 //     historical predicate could extend here, filtered instead of
@@ -840,7 +845,7 @@ func (ls *LedgerState) queryShelleyLeaf(
 	case *olocalstatequery.ShelleyStakeDistributionQuery:
 		return ls.queryShelleyStakeDistribution(at, txn)
 	case *olocalstatequery.ShelleyUtxoWholeQuery:
-		return ls.queryShelleyUtxoWhole()
+		return ls.queryShelleyUtxoWhole(at, txn)
 	// TODO (#394)
 	/*
 		case *olocalstatequery.ShelleyLedgerTipQuery:
