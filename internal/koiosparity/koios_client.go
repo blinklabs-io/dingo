@@ -306,6 +306,30 @@ func validateKoiosNetwork(network string) error {
 // another deployment, so applying it there would throttle against a limit that
 // does not exist. The per-request retry and timeout handling is unchanged, so a
 // host that does rate-limit still backs off correctly on 429.
+// koiosIdleConnTimeout bounds how long an idle keep-alive connection stays
+// in the client's pool before Go proactively closes it. Shorter than
+// http.DefaultTransport's 90s default: confirmed live against a Koios
+// mirror that a request occasionally hung for the full 60s client Timeout
+// (internal/koiosparity's Timeout) before the retry logic's next attempt
+// succeeded in well under a second -- the signature of a keep-alive
+// connection the server/CDN side had already closed, reused anyway because
+// Go's pool hadn't noticed. A 30s idle limit stays comfortably under common
+// server/CDN idle-timeout values so stale connections get evicted before
+// they can be picked for reuse, instead of surfacing as an occasional
+// unexplained ~60s stall per request.
+const koiosIdleConnTimeout = 30 * time.Second
+
+// newKoiosTransport returns an http.Transport identical to
+// http.DefaultTransport except for IdleConnTimeout -- see that constant's
+// doc comment. Each KoiosClient gets its own Transport (and so its own
+// connection pool) rather than sharing http.DefaultTransport, so this
+// change cannot affect any other HTTP client in the process.
+func newKoiosTransport() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone() //nolint:forcetypeassert
+	t.IdleConnTimeout = koiosIdleConnTimeout
+	return t
+}
+
 func NewKoiosClient(
 	network, apiKey, baseURL string,
 	allowInsecureHTTP bool,
@@ -332,7 +356,8 @@ func NewKoiosClient(
 		baseURL: base,
 		apiKey:  apiKey,
 		http: &http.Client{
-			Timeout: 60 * time.Second,
+			Timeout:   60 * time.Second,
+			Transport: newKoiosTransport(),
 		},
 		// Public and Free tiers share the 100/10s burst cap; Pro/Premium are
 		// higher, but we don't learn the tier from the key alone, so stay at
