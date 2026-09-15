@@ -5379,10 +5379,33 @@ block and is counted on none of the three results -- refusing before building
 is not a fallback outcome, and reporting one would credit or blame a path that
 never ran. Those slots are accounted for as the refusals they are, on
 `dingo_metrics_slotBattlesTotal_int`, `dingo_forge_stale_tip_skip_total` or
-`dingo_forge_sync_skip_total` according to which gate refused them. A slot the
-chain took from us is not a forge this node lost, and `{result="lost"}` should
-not absorb it: read the two together when asking what an aborted selection
-cost.
+`dingo_forge_sync_skip_total` according to which gate refused them -- with one
+exception. A parent slot past the forged slot refuses on
+`errChainTipAheadOfSlot` and moves none of those three; the only counter that
+records it is `cardano_node_metrics_Forge_could_not_forge_int`, which every
+refused build attempt increments.
+`TestForgeRefusesTheFallbackWhenThePrimaryTipPassesTheForgedSlot` pins that
+reading: no fallback result, no slot battle, no stale-tip skip. It is also the
+refusal to expect on a producer whose leader gate clears seconds into its own
+slot -- the trace in issue #3985 -- because the chain has moved past the slot
+rather than merely disagreeing with this node about it, so an operator
+diagnosing a late producer should look for it on `could_not_forge` and find
+the three gate counters flat.
+
+That gate is deliberately left without a counter of its own. The entry gate
+does not count it either: it logs the skip and returns. Adding one only on the
+re-check path would re-create, in reverse, the entry/re-check split the
+re-check exists to remove -- the same reading would move a series or not
+purely on whether the chain passed the slot before block production started or
+during it. What the gate reports is also not what the other three report: it
+is not a contest for the slot and not a node behind the network, only a slot
+the chain has already left, and `could_not_forge` already says a leader slot
+produced nothing.
+
+A slot the chain took from us is not a forge this node lost, and
+`{result="lost"}` should not absorb it: read the fallback vector, the three
+gate counters and `could_not_forge` together when asking what an aborted
+selection cost.
 
 Selection is bounded by the chain moving, not by the clock, unless an operator
 asks otherwise. `ForgeSelectionDeadlineMargin` is off by default; setting it
