@@ -648,6 +648,7 @@ func TestTipGateRefusalsAreSkipsNotFailures(t *testing.T) {
 		errChainTipAtSlot,
 		errPrimaryTipAtSlot,
 		errTipsDisagree,
+		errUpstreamSyncing,
 	} {
 		require.True(t, isTipGateRefusal(err), "%v", err)
 		require.True(
@@ -661,4 +662,106 @@ func TestTipGateRefusalsAreSkipsNotFailures(t *testing.T) {
 	}
 	require.False(t, isTipGateRefusal(errTxValidationSnapshotChanged))
 	require.False(t, isTipGateRefusal(errBlockConstraintsUnsupported))
+}
+
+// TestForgeRefusesABuildAfterARollbackPutsTheTipBehindTheNetwork is the
+// upstream-sync half of the per-attempt re-check, and the reason that gate
+// had to move inside evaluateTipGates.
+//
+// The gate is decided from the LEDGER-APPLIED tip, and the applied tip is the
+// one input to the gates that can move BACKWARDS during a forge: a rollback
+// mid-selection leaves a node that was well inside ForgeSyncToleranceSlots at
+// entry far outside it by the time the retry or the fallback builds. While
+// the decision was taken once, at entry, and never re-run, the retry and the
+// fallback built on the rolled-back view and broadcast the block -- exactly
+// what the gate exists to stop -- with dingo_forge_sync_skip_total flat,
+// because the only place that counter is reached had already been passed.
+//
+// Both ends of the ladder are covered: with slot time left the retry must not
+// re-enter the builder, and with the slot over the transaction-free fallback
+// must not be built either.
+func TestForgeRefusesABuildAfterARollbackPutsTheTipBehindTheNetwork(
+	t *testing.T,
+) {
+	cases := map[string]struct {
+		slotEnd time.Time
+	}{
+		// Slot time left: the loop re-applies the gates before the second
+		// attempt.
+		"before the retry": {slotEnd: time.Now().Add(2 * time.Second)},
+		// No slot time left: the retry path is exhausted immediately and
+		// the fallback is the only thing that can reach a build.
+		"before the transaction-free fallback": {slotEnd: time.Now()},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			block := newForgerTestBlock(10, 2)
+			clock := &retryTestSlotClock{
+				currentSlot:       10,
+				chainTipSlot:      8,
+				slotsPerKESPeriod: 100,
+				slotEnd:           tc.slotEnd,
+				// A live peer whose chain ends at slot 10. At entry the
+				// applied tip trails it by 2, inside the tolerance of 3,
+				// so the slot is admitted and the forge proceeds.
+				upstreamTarget: 10,
+				upstreamLive:   true,
+			}
+			builder := &tipMovingBuilder{
+				block: block,
+				cbor:  block.cbor,
+				clock: clock,
+				// The rollback: the applied tip drops to 5, so the same
+				// upstream target now leads it by 5, beyond the tolerance.
+				tipDuringBuild: 5,
+				selectErr:      errTxValidationSnapshotChanged,
+			}
+			broadcaster := &forgerTestBroadcaster{}
+			forger := newRetryForger(
+				t,
+				clock,
+				builder,
+				broadcaster,
+				withSyncTolerance(3),
+			)
+
+			require.NoError(
+				t,
+				forger.checkAndForgeProduction(context.Background()),
+				"a slot refused because the node fell behind the network is declined, not an error",
+			)
+			require.Equal(
+				t,
+				1,
+				builder.calls,
+				"no attempt may be made against a tip the network has left behind",
+			)
+			require.Equal(
+				t,
+				0,
+				builder.emptyCalls,
+				"the transaction-free fallback is a build like any other and the gate refuses it too",
+			)
+			require.Equal(
+				t,
+				0,
+				broadcaster.calls,
+				"nothing may reach the wire from a rolled-back view",
+			)
+			require.Equal(
+				t,
+				float64(1),
+				testutil.ToFloat64(forger.metrics.forgeSyncSkip),
+				"the refusal is counted where the entry gate counts it",
+			)
+			requireNoFallbackCounted(t, forger)
+			require.Equal(
+				t,
+				float64(0),
+				testutil.ToFloat64(forger.metrics.slotBattlesTotal),
+				"falling behind the network is not a slot battle",
+			)
+			requireStaleTipSkips(t, forger, map[string]float64{})
+		})
+	}
 }

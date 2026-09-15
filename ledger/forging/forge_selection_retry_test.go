@@ -48,6 +48,12 @@ type retryTestSlotClock struct {
 	primaryTipHash     []byte
 	slotsPerKESPeriod  uint64
 	slotEnd            time.Time
+	// upstreamTarget and upstreamLive are what UpstreamSyncStatus reports.
+	// The zero value is (0, false) -- no upstream peer -- which is what
+	// every test that does not exercise the sync gate wants, and what this
+	// clock reported before the fields existed.
+	upstreamTarget uint64
+	upstreamLive   bool
 }
 
 func (c *retryTestSlotClock) CurrentSlot() (uint64, error) {
@@ -80,7 +86,7 @@ func (c *retryTestSlotClock) NextSlotTime() (time.Time, error) {
 func (c *retryTestSlotClock) UpstreamTipSlot() uint64 { return 0 }
 
 func (c *retryTestSlotClock) UpstreamSyncStatus() (uint64, bool) {
-	return 0, false
+	return c.upstreamTarget, c.upstreamLive
 }
 
 // retryTestBuilder fails its first failCount build attempts with err and
@@ -129,6 +135,15 @@ func newRetryForger(
 	forger, err := NewBlockForger(cfg)
 	require.NoError(t, err)
 	return forger
+}
+
+// withSyncTolerance sets ForgeSyncToleranceSlots, the upstream-sync gate's
+// bound, so a test can put a tip inside it at entry and outside it after a
+// rollback without needing realistic slot numbers.
+func withSyncTolerance(slots uint64) func(*ForgerConfig) {
+	return func(cfg *ForgerConfig) {
+		cfg.ForgeSyncToleranceSlots = slots
+	}
 }
 
 // withSelectionDeadlineMargin turns the opt-in selection deadline on for a

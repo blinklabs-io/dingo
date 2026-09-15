@@ -1010,10 +1010,10 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	//
 	// The endorser-block watermark and the upstream sync reading are taken
 	// once per cycle, after the tips; the upstream pair is shared by the
-	// staleness bound inside the gates and the sync gate below (see the sync
-	// gate for why a second read would be wrong). The build attempts re-read
-	// the two tips and carry these two readings rather than taking their
-	// own; see forgeTipReading.
+	// staleness bound and the sync gate, both of which evaluateTipGates
+	// decides (see the sync gate below for why a second read would be
+	// wrong). The build attempts re-read the two tips and carry these two
+	// readings rather than taking their own; see forgeTipReading.
 	reading := f.readTipEvidence(currentSlot)
 	reading.ebSlot = f.readEbEvidence(currentSlot)
 	reading.upstreamTarget, reading.upstreamLive = f.slotClock.UpstreamSyncStatus()
@@ -1022,7 +1022,7 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	tipSlot := gates.tipSlot
 	parentSlot := gates.parentSlot
 	applyGap := gates.applyGap
-	upstreamTarget, upstreamLive := gates.upstreamTarget, gates.upstreamLive
+	upstreamTarget := gates.upstreamTarget
 	// Selected once here, acted on after the leader check below.
 	staleTipReason := gates.staleReason
 
@@ -1267,9 +1267,14 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// one forge cycle evaluate the staleness bound and this gate against
 	// different pairs -- and let a refusal log an upstream_target_slot this
 	// gate never saw. See TestForgeReadsUpstreamSyncStatusOncePerCycle.
-	upstreamTip, upstreamActive := upstreamTarget, upstreamLive
-	if upstreamActive &&
-		f.upstreamSyncSkipsForge(currentSlot, tipSlot, upstreamTip) {
+	//
+	// The verdict comes from evaluateTipGates, like every other gate here,
+	// so each later build attempt re-decides it against a freshly read
+	// applied tip rather than inheriting this one. A node whose tip rolls
+	// back mid-selection is behind the network by the time the retry or the
+	// fallback builds, and the entry reading cannot say so.
+	upstreamTip := upstreamTarget
+	if gates.syncSkip {
 		if f.metrics != nil {
 			f.metrics.forgeSyncSkip.Inc()
 		}
@@ -1932,10 +1937,19 @@ var errBlockConstraintsUnsupported = errors.New(
 // because the primary chain tip moved during selection -- so that is the one
 // window in which the two tips are guaranteed to have moved apart, and the
 // applied tip alone says nothing about it. Every build attempt therefore
-// re-reads the evidence and runs the SAME function, evaluateTipGates, through
+// re-reads the two tips and runs the SAME function, evaluateTipGates, through
 // tipGatesRefuseSlot, so a build the entry gates would have refused cannot be
 // reached by a retry or the fallback. The builder's own parent check does not
 // cover this: it compares the tip for identity only.
+//
+// The upstream-sync gate is part of that set. It is decided from the applied
+// tip too, and the applied tip can move BACKWARDS under a selection pass: a
+// rollback leaves a node that was inside ForgeSyncToleranceSlots at entry
+// outside it by the time the retry or the fallback builds. Deciding it once
+// at entry therefore let exactly the block the gate exists to prevent reach
+// the wire. It is decided against the cycle's single upstream pair, which is
+// carried rather than re-read -- what changes per attempt is the tip that
+// pair is measured against.
 //
 // Nothing downstream catches what these gates catch. Chain.AddLocalBlock
 // checks only that the block's prev-hash names the tip and that its number is
@@ -1963,6 +1977,9 @@ type forgeTipReading struct {
 	// upstream sync gate in checkAndForgeProduction and
 	// TestForgeReadsUpstreamSyncStatusOncePerCycle). The two tips are what a
 	// build attempt re-reads: they are what moves under a selection pass.
+	// Carrying the pair does not freeze the verdicts it feeds -- both the
+	// staleness bound and the sync gate are re-decided per attempt against
+	// the freshly read applied tip.
 	ebSlot uint64
 	// upstreamTarget and upstreamLive are the cycle's single
 	// UpstreamSyncStatus reading.
@@ -1993,6 +2010,14 @@ type forgeTipGates struct {
 	upstreamStale bool
 	appliedStale  bool
 	ebStale       bool
+	// syncSkip is the upstream-sync gate's verdict: this node is too far
+	// behind the network to forge. It lives here, with the rest of the
+	// gates, because it is decided from the SAME upstream pair as
+	// upstreamStale and from the applied tip, and the applied tip moves
+	// under a selection pass -- so a decision taken once at entry is not
+	// the decision that holds when a retry or the fallback builds. See
+	// upstreamSyncSkipsForge for the two states that reach it.
+	syncSkip bool
 	// staleReason is the stale-tip refusal reason, one of the
 	// forgeStaleTipReason* values, or "" when none applies.
 	staleReason string
@@ -2196,6 +2221,13 @@ func (f *BlockForger) evaluateTipGates(r forgeTipReading) forgeTipGates {
 	// node on a chain the watermark has moved past cannot clear.
 	g.ebStale = f.forgeEbStalenessSlots > 0 &&
 		g.ebGap > f.forgeEbStalenessSlots
+	// The upstream-sync gate, decided from the same upstream pair the
+	// staleness bound above uses and from the APPLIED tip. Evaluated here
+	// unconditionally; the caller acts on it in the entry gates' order, so
+	// a reading that trips this and a positional gate is still counted the
+	// way entry counts it.
+	g.syncSkip = r.upstreamLive &&
+		f.upstreamSyncSkipsForge(r.currentSlot, g.tipSlot, r.upstreamTarget)
 
 	switch {
 	case g.primaryTipBehind:
@@ -2266,6 +2298,14 @@ var (
 	errTipsDisagree = errors.New(
 		"applied tip and primary chain tip disagree",
 	)
+	// errUpstreamSyncing reports that the applied tip fell too far behind
+	// the network for this node to forge. Mirrors the entry gate's
+	// upstream-sync skip, which is the one gate whose input -- the applied
+	// tip -- can move backwards under a selection pass: a rollback lands a
+	// node outside the tolerance it was inside at entry.
+	errUpstreamSyncing = errors.New(
+		"chain is syncing from peer",
+	)
 )
 
 // isTipGateRefusal reports whether err is a build attempt declined by the
@@ -2275,7 +2315,8 @@ func isTipGateRefusal(err error) bool {
 	return errors.Is(err, errChainTipAheadOfSlot) ||
 		errors.Is(err, errChainTipAtSlot) ||
 		errors.Is(err, errPrimaryTipAtSlot) ||
-		errors.Is(err, errTipsDisagree)
+		errors.Is(err, errTipsDisagree) ||
+		errors.Is(err, errUpstreamSyncing)
 }
 
 // tipGatesRefuseSlot re-reads the two tips and decides slot with the same
@@ -2319,6 +2360,38 @@ func (f *BlockForger) tipGatesRefuseSlot(
 			gates.primaryTip.Slot,
 			slot,
 		)
+	case gates.unappliedBlockAtSlot():
+		if f.metrics != nil {
+			f.metrics.forgeStaleTipSkipUnappliedRival.Inc()
+		}
+		return fmt.Errorf(
+			"%w: primary chain tip slot %d, applied tip slot %d",
+			errPrimaryTipAtSlot,
+			gates.primaryTip.Slot,
+			gates.tipSlot,
+		)
+	case gates.syncSkip:
+		// The upstream pair is the cycle's, but the applied tip it is
+		// measured against is this attempt's. A rollback during selection
+		// puts a node that was inside the tolerance at entry outside it
+		// now, and building on that reading is the very thing the gate
+		// exists to stop: a block forged from a view the network has
+		// already moved past.
+		if f.metrics != nil {
+			f.metrics.forgeSyncSkip.Inc()
+		}
+		upstreamGap := uint64(0)
+		if gates.upstreamTarget > gates.tipSlot {
+			upstreamGap = gates.upstreamTarget - gates.tipSlot
+		}
+		return fmt.Errorf(
+			"%w: applied tip %d, upstream tip %d, gap %d slots, tolerance %d",
+			errUpstreamSyncing,
+			gates.tipSlot,
+			gates.upstreamTarget,
+			upstreamGap,
+			f.forgeSyncToleranceSlots,
+		)
 	case gates.appliedTipAtSlot():
 		// A rival block occupying our leader slot is the same battle
 		// whether it arrived before the forge started or during it, and
@@ -2330,16 +2403,6 @@ func (f *BlockForger) tipGatesRefuseSlot(
 		return fmt.Errorf(
 			"%w: tip slot %d",
 			errChainTipAtSlot,
-			gates.tipSlot,
-		)
-	case gates.unappliedBlockAtSlot():
-		if f.metrics != nil {
-			f.metrics.forgeStaleTipSkipUnappliedRival.Inc()
-		}
-		return fmt.Errorf(
-			"%w: primary chain tip slot %d, applied tip slot %d",
-			errPrimaryTipAtSlot,
-			gates.primaryTip.Slot,
 			gates.tipSlot,
 		)
 	case gates.staleReason != "":
@@ -3011,11 +3074,12 @@ func (f *BlockForger) upstreamSyncSkipsForge(
 	currentSlot, tipSlot, upstreamTip uint64,
 ) bool {
 	if upstreamTip == 0 {
-		// The tip-ahead gate above returns for currentSlot < parentSlot,
-		// and parentSlot is max(tipSlot, primaryTip.Slot) >= tipSlot, so
-		// currentSlot >= tipSlot here; the equal case is contested and
-		// handled before this point. Guard the subtraction anyway so a
-		// future reordering of the gates cannot turn this into a wrap.
+		// evaluateTipGates computes every gate from one reading before the
+		// caller acts on any of them, so this runs for readings the
+		// positional gates would have refused first -- including a tip at
+		// or past currentSlot. The guard is what makes that safe: it keeps
+		// the subtraction from wrapping, and a tip at or past the slot is
+		// not behind the network by any reading.
 		if currentSlot <= tipSlot {
 			return false
 		}
