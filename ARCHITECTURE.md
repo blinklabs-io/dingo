@@ -64,11 +64,13 @@ internal so generated row types cannot leak into ledger or API packages.
 The SQLite provider is a thin factory around the pure-Go driver. It configures
 one WAL writer, a separate read pool, pragmas, disk-size accounting, migration
 locking, query tracing, daily `VACUUM`, and (on its own two-minute ticker,
-independent of `VACUUM`'s cadence) a forced `PRAGMA wal_checkpoint(TRUNCATE)`
-against the write pool — see `checkpointWAL` and `Store.Checkpoint` in
-DATABASE.md's write-amplification discussion for why the commit-triggered
-`wal_autocheckpoint` alone cannot shrink the WAL file's on-disk size even
-when it fully succeeds. The tagged PostgreSQL/MySQL
+independent of `VACUUM`'s cadence) a best-effort `PRAGMA
+wal_checkpoint(TRUNCATE)` attempt against a dedicated short-timeout
+connection (never the write pool) — see `checkpointWAL` and
+`Store.Checkpoint` in DATABASE.md's write-amplification discussion for why
+the commit-triggered `wal_autocheckpoint` alone cannot shrink the WAL file's
+on-disk size even when it fully succeeds, and why an active reader can leave
+a given TRUNCATE attempt busy. The tagged PostgreSQL/MySQL
 factories configure their direct drivers, pools, advisory migration locks, and
 repeatable-read snapshots. All three return `*sqlstore.Store`; metadata
 business behavior is implemented once in `sqlstore` and dialect translation is

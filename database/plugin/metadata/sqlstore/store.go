@@ -55,13 +55,15 @@ type Config struct {
 	Maintenance         func(context.Context) error
 	MaintenanceInterval time.Duration
 	// Checkpoint is an optional provider-owned hook run on its own ticker,
-	// independent of Maintenance/MaintenanceInterval: SQLite uses it to force
-	// a periodic WAL checkpoint (see sqlite.checkpointWAL) so the on-disk WAL
-	// file has a hard, bounded ceiling regardless of how long any individual
-	// read snapshot is held open, rather than relying solely on the
-	// commit-triggered wal_autocheckpoint passive checkpoint. Left unset (or
-	// CheckpointInterval <= 0), this ticker never starts -- the same
-	// convention Maintenance/MaintenanceInterval already use.
+	// independent of Maintenance/MaintenanceInterval: SQLite uses it to
+	// attempt a periodic WAL TRUNCATE checkpoint (see sqlite.checkpointWAL)
+	// so the on-disk WAL file can be shrunk back down on a schedule, rather
+	// than relying solely on the commit-triggered wal_autocheckpoint passive
+	// checkpoint, which never truncates. This is best-effort: an active read
+	// snapshot can leave a given attempt busy, deferring the reduction to a
+	// later tick instead of guaranteeing an unconditional size ceiling. Left
+	// unset (or CheckpointInterval <= 0), this ticker never starts -- the
+	// same convention Maintenance/MaintenanceInterval already use.
 	Checkpoint         func(context.Context) error
 	CheckpointInterval time.Duration
 	// BackupTo and RestoreFrom are optional provider-owned lifecycle hooks.

@@ -1410,9 +1410,11 @@ high-water mark that only grows or holds steady until something truncates
 it. `checkpointWAL` is that something: a `Store.Checkpoint` callback (a new
 hook alongside `Store.Maintenance`, on its own two-minute ticker independent
 of `Maintenance`'s 24-hour VACUUM cadence — see `sqlstore.Config.Checkpoint`)
-that attempts `PRAGMA wal_checkpoint(TRUNCATE)` every two minutes, giving the
-WAL's on-disk size a hard ceiling regardless of how long any individual
-`readDB` snapshot happens to be held open.
+that attempts `PRAGMA wal_checkpoint(TRUNCATE)` every two minutes, letting
+the WAL's on-disk size be brought back down on a schedule instead of only
+ever growing. This is best-effort, not a hard ceiling: an active `readDB`
+snapshot can leave a given attempt `busy`, in which case the file stays at
+its current size until a later tick succeeds.
 
 The checkpoint runs on a dedicated connection opened fresh for each attempt
 and closed immediately after — never against `writeDB` or `readDB`. An
@@ -1477,12 +1479,14 @@ and `dingo_database_sql_disk_bytes` (`database/plugin/metadata/sqlite/metrics.go
 are pull-based gauges sampled at scrape time — a plain `os.Stat` of
 `metadata.sqlite-wal` and `Store.DiskSize()` respectively — the same pattern
 Badger's own cache gauges already use rather than a background ticker.
-`dingo_database_sql_wal_bytes` is a monotonic high-water mark, not a
-checkpoint-health signal: SQLite's PASSIVE/FULL/RESTART checkpoints backfill
-WAL frames into `metadata.sqlite` but never `ftruncate` the `-wal` file, so
-only a TRUNCATE checkpoint (which dingo does not run periodically) resets it,
-and its steady-state floor is now permanently ~40MB at the raised
-`wal_autocheckpoint` threshold above rather than a transient backlog.
+`dingo_database_sql_wal_bytes` is not a checkpoint-health signal on its own:
+SQLite's PASSIVE/FULL/RESTART checkpoints backfill WAL frames into
+`metadata.sqlite` but never `ftruncate` the `-wal` file, so between
+`checkpointWAL`'s TRUNCATE attempts (see above) the gauge only grows. It is
+not strictly monotonic, though: a successful periodic TRUNCATE attempt can
+drop it back toward zero, while a persistently held reader snapshot can
+leave it at its ~40MB-and-rising floor (the raised `wal_autocheckpoint`
+threshold above) until a later attempt succeeds.
 
 A failed `Sync` is reported as `PartialCommitError`, because at that point the
 blob transaction is committed and carries the new commit timestamp while metadata

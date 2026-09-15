@@ -112,9 +112,12 @@ const sqliteCommonPragmas = "&_pragma=busy_timeout(30000)" +
 // checkpointing is working underneath -- the file's on-disk footprint is a
 // high-water mark that only grows or holds steady until something truncates
 // it. checkpointWAL is that something: a periodic, independent TRUNCATE
-// checkpoint so the WAL's on-disk size actually has a ceiling instead of
-// only ever growing to whatever the largest inter-checkpoint write burst has
-// been so far.
+// checkpoint attempt so the WAL's on-disk size can be brought back down on a
+// schedule instead of only ever growing to whatever the largest
+// inter-checkpoint write burst has been so far. This is best-effort, not an
+// unconditional ceiling: a reader holding an old snapshot can make a given
+// attempt busy (see checkpointBusyTimeout below), in which case the file
+// stays at its current size until a later tick succeeds.
 const checkpointInterval = 2 * time.Minute
 
 // checkpointBusyTimeout bounds how long a single checkpoint attempt waits for
