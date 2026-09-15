@@ -89,14 +89,20 @@ type koiosCoverageTable struct {
 
 // parseKoiosCoverageTable reads the coverage table out of doc.
 //
-// The error covers the two conditions that leave nothing to check at all: the
-// table being absent, or carrying no field rows. problems holds the per-row
+// Every table carrying the coverage header is read, not just the first. A
+// second table under the same header states the coverage contract just as the
+// first does, so reading only one leaves it unchecked -- and a contradiction
+// split across two tables would escape the duplicate-row rule that rejects the
+// same contradiction inside one.
+//
+// The error covers the two conditions that leave nothing to check at all: no
+// such table, or no field rows in any of them. problems holds the per-row
 // faults, which are each worth reporting without abandoning the rest of the
 // table.
 func parseKoiosCoverageTable(doc string) (koiosCoverageTable, error) {
 	lines := strings.Split(doc, "\n")
 
-	header := -1
+	var headers []int
 	for i, line := range lines {
 		if !strings.Contains(line, "|") {
 			continue
@@ -113,11 +119,10 @@ func parseKoiosCoverageTable(doc string) (koiosCoverageTable, error) {
 			}
 		}
 		if matched {
-			header = i
-			break
+			headers = append(headers, i)
 		}
 	}
-	if header < 0 {
+	if len(headers) == 0 {
 		return koiosCoverageTable{}, fmt.Errorf(
 			"%s has no table headed %q; the Koios coverage contract is "+
 				"unchecked until it is restored",
@@ -130,55 +135,72 @@ func parseKoiosCoverageTable(doc string) (koiosCoverageTable, error) {
 		exact:    make(map[koiosFieldKey]koiosDocEntry),
 		wildcard: make(map[koiosFieldKey]koiosDocEntry),
 	}
-	for i := header + 2; i < len(lines); i++ {
-		if !strings.HasPrefix(strings.TrimSpace(lines[i]), "|") {
-			break
-		}
-		cells := splitTableCells(lines[i])
-		if len(cells) < 3 {
-			table.problems = append(table.problems, fmt.Sprintf(
-				"%s: coverage row has %d cells, want at least 3",
-				docLocation(koiosCoverageDoc, i+1),
-				len(cells),
-			))
-			continue
-		}
-		endpoint := unquote(cells[0])
-		class := unquote(cells[1])
-		for _, field := range strings.Split(cells[2], ",") {
-			field = unquote(field)
-			if field == "" {
-				continue
+	for _, header := range headers {
+		for i := header + 2; i < len(lines); i++ {
+			if !strings.HasPrefix(strings.TrimSpace(lines[i]), "|") {
+				break
 			}
-			key := koiosFieldKey{endpoint: endpoint, field: field}
-			entry := koiosDocEntry{class: class, line: i + 1}
-			target := table.exact
-			if strings.HasSuffix(field, "*") {
-				target = table.wildcard
-			}
-			// Assigning over an existing key would drop the earlier row. A
-			// wrong classification followed by a correct duplicate would then
-			// leave only the correct one to compare, so the table would pass
-			// while still telling a reader two different things about the same
-			// field.
-			if previous, duplicate := target[key]; duplicate {
+			cells := splitTableCells(lines[i])
+			if len(cells) < 3 {
 				table.problems = append(table.problems, fmt.Sprintf(
-					"%s: duplicate coverage row for %s %s, already "+
-						"documented at %s",
-					docLocation(koiosCoverageDoc, entry.line),
-					key.endpoint,
-					key.field,
-					docLocation(koiosCoverageDoc, previous.line),
+					"%s: coverage row has %d cells, want at least 3",
+					docLocation(koiosCoverageDoc, i+1),
+					len(cells),
 				))
 				continue
 			}
-			target[key] = entry
+			endpoint := unquote(cells[0])
+			class := unquote(cells[1])
+			fields := 0
+			for _, field := range strings.Split(cells[2], ",") {
+				field = unquote(field)
+				if field == "" {
+					continue
+				}
+				fields++
+				key := koiosFieldKey{endpoint: endpoint, field: field}
+				entry := koiosDocEntry{class: class, line: i + 1}
+				target := table.exact
+				if strings.HasSuffix(field, "*") {
+					target = table.wildcard
+				}
+				// Assigning over an existing key would drop the earlier row. A
+				// wrong classification followed by a correct duplicate would
+				// then leave only the correct one to compare, so the table
+				// would pass while still telling a reader two different things
+				// about the same field.
+				if previous, duplicate := target[key]; duplicate {
+					table.problems = append(table.problems, fmt.Sprintf(
+						"%s: duplicate coverage row for %s %s, already "+
+							"documented at %s",
+						docLocation(koiosCoverageDoc, entry.line),
+						key.endpoint,
+						key.field,
+						docLocation(koiosCoverageDoc, previous.line),
+					))
+					continue
+				}
+				target[key] = entry
+			}
+			// A row whose Fields cell names nothing records no classification,
+			// so every later check skips it: it is neither compared against
+			// the matrix nor rejected for an unknown classification. Dropping
+			// it silently makes an incomplete row read as a documented one.
+			if fields == 0 {
+				table.problems = append(table.problems, fmt.Sprintf(
+					"%s: coverage row for %s names no field, so its "+
+						"classification %q is never checked",
+					docLocation(koiosCoverageDoc, i+1),
+					endpoint,
+					class,
+				))
+			}
 		}
 	}
 	if len(table.exact) == 0 {
 		return koiosCoverageTable{}, fmt.Errorf(
 			"%s: the coverage table has no field rows",
-			docLocation(koiosCoverageDoc, header+1),
+			docLocation(koiosCoverageDoc, headers[0]+1),
 		)
 	}
 	return table, nil
@@ -379,21 +401,178 @@ func TestKoiosCoverageTableRejectsDuplicateRows(t *testing.T) {
 	}
 }
 
+// TestKoiosCoverageTableRejectsRowWithNoField pins the empty-Fields check in
+// parseKoiosCoverageTable.
+//
+// Every later check keys off a (endpoint, field) pair, so a row whose Fields
+// cell names nothing contributes no pair and is skipped by all of them: it is
+// neither compared against koiosCoverageMatrix nor rejected for an unknown
+// classification. Without this, a row carrying an undefined classification for
+// an endpoint the matrix has never heard of reads as documented coverage and
+// passes.
+func TestKoiosCoverageTableRejectsRowWithNoField(t *testing.T) {
+	t.Parallel()
+
+	doc := strings.Join([]string{
+		"| " + strings.Join(koiosCoverageHeader, " | ") + " |",
+		"| --- | --- | --- | --- |",
+		"| `/tip` | exact-match | `abs_slot` | mapped |",
+		"| `/account_info` | bogus-class |  | fields not filled in |",
+	}, "\n")
+
+	table, err := parseKoiosCoverageTable(doc)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	const want = "/account_info names no field"
+	found := false
+	for _, problem := range table.problems {
+		if strings.Contains(problem, want) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("no problem reports %q; got %v", want, table.problems)
+	}
+	// The rest of the table still parses, so one incomplete row does not cost
+	// the checks on every other row.
+	if _, ok := table.exact[koiosFieldKey{
+		endpoint: "/tip",
+		field:    "abs_slot",
+	}]; !ok {
+		t.Error("the complete row was dropped alongside the incomplete one")
+	}
+}
+
+// TestKoiosCoverageTableReadsEverySuchTable pins that a second table under the
+// coverage header is read too.
+//
+// Reading only the first leaves any later one unchecked, so a contradiction
+// split across two tables would pass the duplicate-row rule that rejects the
+// same contradiction inside one, and a row naming an endpoint the matrix lacks
+// would never be compared.
+func TestKoiosCoverageTableReadsEverySuchTable(t *testing.T) {
+	t.Parallel()
+
+	doc := strings.Join([]string{
+		"| " + strings.Join(koiosCoverageHeader, " | ") + " |",
+		"| --- | --- | --- | --- |",
+		"| `/tip` | exact-match | `abs_slot` | mapped |",
+		"",
+		"Prose between the two tables.",
+		"",
+		"| " + strings.Join(koiosCoverageHeader, " | ") + " |",
+		"| --- | --- | --- | --- |",
+		"| `/tip` | unsupported | `abs_slot` | contradicts the first table |",
+		"| `/nope` | exact-match | `bogus` | an endpoint the matrix lacks |",
+	}, "\n")
+
+	table, err := parseKoiosCoverageTable(doc)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	const wantDuplicate = "duplicate coverage row for /tip abs_slot"
+	found := false
+	for _, problem := range table.problems {
+		if strings.Contains(problem, wantDuplicate) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf(
+			"no problem reports %q; got %v",
+			wantDuplicate,
+			table.problems,
+		)
+	}
+	// The second table's other row has to reach the maps, or the comparison
+	// against koiosCoverageMatrix never sees it either.
+	if _, ok := table.exact[koiosFieldKey{
+		endpoint: "/nope",
+		field:    "bogus",
+	}]; !ok {
+		t.Error("the second table's rows were not read")
+	}
+}
+
+// TestKoiosWildcardForPrefersLongestPrefix pins the wildcard selection.
+//
+// One endpoint may carry nested wildcards, `pvt_*` alongside `pvt_motion_*`.
+// Taking the first in sort order compares a pvt_motion_ field against the
+// broader row's classification and then reports the narrower row as matching
+// nothing at all.
+func TestKoiosWildcardForPrefersLongestPrefix(t *testing.T) {
+	t.Parallel()
+
+	wildcard := map[koiosFieldKey]koiosDocEntry{
+		{endpoint: "/epoch_params", field: "pvt_*"}: {
+			class: "unsupported",
+			line:  1,
+		},
+		{endpoint: "/epoch_params", field: "pvt_motion_*"}: {
+			class: "exact-match",
+			line:  2,
+		},
+	}
+
+	key := koiosFieldKey{
+		endpoint: "/epoch_params",
+		field:    "pvt_motion_no_confidence",
+	}
+	match, entry, ok := koiosWildcardFor(wildcard, key)
+	if !ok {
+		t.Fatalf("%v matched no wildcard row", key)
+	}
+	if match.field != "pvt_motion_*" {
+		t.Errorf("matched %q, want the longest matching prefix %q",
+			match.field, "pvt_motion_*")
+	}
+	if entry.class != "exact-match" {
+		t.Errorf("matched class %q, want %q", entry.class, "exact-match")
+	}
+
+	// A field only the broader row covers still resolves to it.
+	broad := koiosFieldKey{endpoint: "/epoch_params", field: "pvt_committee"}
+	match, _, ok = koiosWildcardFor(wildcard, broad)
+	if !ok || match.field != "pvt_*" {
+		t.Errorf("%v matched %q (ok=%v), want %q",
+			broad, match.field, ok, "pvt_*")
+	}
+}
+
 // koiosWildcardFor returns the wildcard row covering key, if any.
 func koiosWildcardFor(
 	wildcard map[koiosFieldKey]koiosDocEntry,
 	key koiosFieldKey,
 ) (koiosFieldKey, koiosDocEntry, bool) {
+	var (
+		best  koiosFieldKey
+		found bool
+	)
 	for _, candidate := range koiosSortedKeys(wildcard) {
 		if candidate.endpoint != key.endpoint {
 			continue
 		}
 		prefix := strings.TrimSuffix(candidate.field, "*")
-		if prefix != "" && strings.HasPrefix(key.field, prefix) {
-			return candidate, wildcard[candidate], true
+		if prefix == "" || !strings.HasPrefix(key.field, prefix) {
+			continue
 		}
+		// One endpoint may carry nested wildcards, `pvt_*` alongside
+		// `pvt_motion_*`. Taking the first in sort order compares a
+		// pvt_motion_ field against the broader row's classification and then
+		// reports the narrower row as matching nothing. The longest matching
+		// prefix is the row a reader would take as governing the field.
+		if found && len(best.field) >= len(candidate.field) {
+			continue
+		}
+		best, found = candidate, true
 	}
-	return koiosFieldKey{}, koiosDocEntry{}, false
+	if !found {
+		return koiosFieldKey{}, koiosDocEntry{}, false
+	}
+	return best, wildcard[best], true
 }
 
 // koiosSortedKeys orders keys so failures are reported deterministically.
