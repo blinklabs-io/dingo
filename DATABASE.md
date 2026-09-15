@@ -1410,6 +1410,32 @@ only a TRUNCATE checkpoint (which dingo does not run periodically) resets it,
 and its steady-state floor is now permanently ~40MB at the raised
 `wal_autocheckpoint` threshold above rather than a transient backlog.
 
+**Write/read connection-pool metrics.** A live goroutine-dump/`pprof`
+investigation found `writeDB` — capped at `SetMaxOpenConns(1)` because SQLite
+allows only one writer regardless of connection count — measurably
+contended: `persistDeferredHeaderValidation`'s per-block durability write
+competes with block-apply's own writes for that single connection, and there
+was no metric showing connection-pool wait time directly, only ad hoc
+pprof/goroutine-dump forensics. `sql.DBStats` — already surfaced by
+`Store.WritePoolStats`/`ReadPoolStats`, but previously read only from tests —
+already carries the missing signal, so `newSQLPoolMetrics`
+(`database/plugin/metadata/sqlstore/metrics.go`, wired from `sqlstore.New`)
+registers it directly, for both pools: `dingo_database_sql_pool_wait_count_total`
+and `dingo_database_sql_pool_wait_duration_seconds_total` (counters, from
+`sql.DBStats`' cumulative `WaitCount`/`WaitDuration`), and
+`dingo_database_sql_pool_open_connections`, `..._in_use_connections`,
+`..._idle_connections`, and `..._max_open_connections` (gauges, from the
+matching point-in-time `DBStats` fields). All six are labeled
+`pool="write"|"read"` and sampled live at scrape time via `GaugeFunc`/
+`CounterFunc` — the same pull-based pattern
+`dingo_database_sql_wal_bytes`/`disk_bytes` already use, rather than a
+background ticker. `pool="write"` is the one this exists for
+(`pool_max_open_connections` reads `1` there on every current provider): a
+sustained `rate()` of its `wait_duration_seconds_total` approaching `1.0`
+means callers are effectively serialized on that single connection.
+`pool="read"` is registered identically for consistency and as a future
+comparison point.
+
 A failed `Sync` is reported as `PartialCommitError`, because at that point the
 blob transaction is committed and carries the new commit timestamp while metadata
 does not — the same inconsistency a failed metadata commit leaves, and the same
