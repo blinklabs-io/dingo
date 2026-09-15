@@ -2531,7 +2531,7 @@ func captureLiveMarkSnapshot(
 		return err == nil &&
 			snapshot != nil &&
 			snapshot.CapturedSlot == snapshotSlot
-	}, 30*time.Second, "live mark snapshot should be captured")
+	}, testutil.AsyncWait, "live mark snapshot should be captured")
 }
 
 // seedPoolRegistration registers a pool so that db.GetPool(poolKeyHash)
@@ -3995,7 +3995,7 @@ func TestPrunePoolSnapshotsWithRetentionFloor_FloorReadIsAtomic(
 			testutil.RequireReceive(
 				t,
 				admitted,
-				15*time.Second,
+				testutil.AsyncWait,
 				"concurrent admission blocked while the guard was pruning (lock-order inversion, issue #3717)",
 			)
 			return nil
@@ -4124,13 +4124,13 @@ func TestPrunePoolSnapshotsWithRetentionFloor_RealPruneNoDeadlock(
 	testutil.RequireReceive(
 		t,
 		applyDone,
-		15*time.Second,
+		testutil.AsyncWait,
 		"apply goroutine blocked taking the mutex while holding the write connection (lock-order inversion, issue #3717)",
 	)
 	err := testutil.RequireReceive(
 		t,
 		guardDone,
-		15*time.Second,
+		testutil.AsyncWait,
 		"retention guard blocked opening the write connection while holding the mutex (lock-order inversion, issue #3717)",
 	)
 	require.NoError(t, err)

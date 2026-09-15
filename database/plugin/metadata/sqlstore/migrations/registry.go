@@ -45,6 +45,7 @@ const (
 	importedPoolBlockCountSchemaRelease        = "imported-pool-block-count"
 	poolDepositHeldSchemaRelease               = "pool-registration-deposit-held"
 	pointerAddressStakeSchemaRelease           = "pointer-address-stake"
+	collateralAssociationSchemaRelease         = "collateral-transaction-associations"
 )
 
 // schemaVersions names every migration in ascending version order.
@@ -74,6 +75,7 @@ var schemaVersions = []struct {
 	{Version: 11, Name: importedPoolBlockCountSchemaRelease, Dir: "v11"},
 	{Version: 12, Name: poolDepositHeldSchemaRelease, Dir: "v12"},
 	{Version: 13, Name: pointerAddressStakeSchemaRelease, Dir: "v13"},
+	{Version: 14, Name: collateralAssociationSchemaRelease, Dir: "v14"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -772,7 +774,12 @@ func loadSQL(path string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read embedded migration %s: %w", path, err)
 	}
-	statements, err := splitSQL(string(content))
+	// The embedded resources carry whatever bytes the working tree held at
+	// build time, so a CRLF checkout would otherwise change the checksum
+	// recorded in schema_migrations and make a database written by one build
+	// report drift against another.
+	normalized := strings.ReplaceAll(string(content), "\r\n", "\n")
+	statements, err := splitSQL(normalized)
 	if err != nil {
 		return nil, fmt.Errorf("parse embedded migration %s: %w", path, err)
 	}
