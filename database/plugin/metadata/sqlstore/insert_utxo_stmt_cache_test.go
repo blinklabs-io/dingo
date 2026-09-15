@@ -48,9 +48,16 @@ func utxoForInsertCacheTest(
 	}
 }
 
-// insertUtxoInTxn runs insertUtxoModel inside its own write transaction, the
-// same one-transaction-per-output access pattern ledgerProcessBlock uses in
-// production (see insertUtxoQueryIgnoreConflict's doc comment).
+// insertUtxoInTxn runs insertUtxoModel inside its own write transaction.
+// This is simpler than production, not representative of it: production
+// applies many outputs within one shared write transaction --
+// LedgerDeltaBatch.apply (ledger/delta.go) applies a whole block batch under
+// the single txn ledger/state.go passes it, and genesis import
+// (ledger/chainsync.go) inserts the entire Byron and Shelley UTxO set inside
+// one txn.Do -- so a caller here that wants to observe the per-transaction
+// Tx-scoped statement retention this cache introduces must call
+// insertUtxoModel repeatedly against one shared transaction instead; see
+// TestInsertUtxoModelBoundsTxScopedStatementRetentionInOneTransaction.
 func insertUtxoInTxn(
 	t *testing.T,
 	store *Store,
@@ -74,8 +81,11 @@ func insertUtxoInTxn(
 // existing row's id via the ON CONFLICT DO NOTHING + fallback SELECT branch,
 // and the stored row round-trips correctly through GetUtxo -- while the
 // cached *sql.Stmt for insertUtxoQueryIgnoreConflict is the same object
-// across independent write transactions, the access pattern
-// ledgerProcessBlock actually uses.
+// across independent write transactions. This exercises independent
+// transactions for simplicity; it is not the production access pattern --
+// see insertUtxoInTxn's doc comment, and
+// TestInsertUtxoModelBoundsTxScopedStatementRetentionInOneTransaction for the
+// real multi-output-per-transaction shape.
 func TestInsertUtxoModelReusesCachedStatementAcrossTransactions(t *testing.T) {
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
@@ -186,6 +196,75 @@ func TestInsertUtxoModelCachesAssetIDLookup(t *testing.T) {
 		cachedBefore,
 		cachedAfter,
 		"expected the same cached *sql.Stmt across independent write transactions",
+	)
+}
+
+// TestInsertUtxoModelBoundsTxScopedStatementRetentionInOneTransaction is the
+// regression test for the retention bug raised against this PR: production
+// applies many outputs within one shared write transaction (a whole block
+// batch via LedgerDeltaBatch.apply, or the entire genesis UTxO set in one
+// txn.Do), not one transaction per output, so insertUtxoModel's INSERT and
+// asset-id lookup are each consulted many times against the same *sql.Tx.
+// Both route through queryRowCached, which derives a Tx-scoped *sql.Stmt via
+// stmtForQueryer/txScopedStmt (prepared_stmt.go). Before
+// perf/reward-live-stake-touch-cache's fix (00bedb10), txScopedStmt called
+// (*sql.Tx).StmtContext on every invocation and database/sql retained every
+// result until commit or rollback, so retention was linear in outputs
+// inserted per transaction: 20000 outputs, each carrying one asset, would
+// have retained 20000 Tx-scoped statements. txScopedStmt now derives the
+// Tx-scoped statement once per (tx, cached) pair and reuses it, so this
+// asserts retention stays bounded regardless of output count.
+func TestInsertUtxoModelBoundsTxScopedStatementRetentionInOneTransaction(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	ctx := context.Background()
+
+	const outputCount = 20_000
+
+	txn := store.Transaction(ctx)
+	sqlTransaction, ok := txn.(*sqlTxn)
+	require.True(t, ok)
+	require.NoError(t, sqlTransaction.beginErr)
+
+	require.NoError(t, store.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			for i := range uint32(outputCount) {
+				utxo := utxoForInsertCacheTest(1, i, 1_000_000+uint64(i))
+				utxo.Assets = []models.Asset{
+					{
+						Name:     []byte("token"),
+						NameHex:  []byte("746f6b656e"),
+						PolicyId: bytes.Repeat([]byte{0xCC}, 28),
+						Fingerprint: []byte(
+							"asset1cccccccccccccccccccccccccccccccccccccccc",
+						),
+						Amount: types.Uint64(1),
+					},
+				}
+				if err := store.insertUtxoModel(ctx, db, utxo, true); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	))
+
+	retained := retainedTxStmtCount(t, sqlTransaction.tx)
+	require.NoError(t, txn.Commit())
+
+	// insertUtxoModel here consults exactly two distinct cached queries --
+	// insertUtxoQueryIgnoreConflict and getAssetIDQuery -- so 2 is the exact
+	// bound, not just an upper one.
+	require.LessOrEqual(
+		t,
+		retained,
+		2,
+		"expected bounded Tx-scoped statement retention for %d outputs, got %d",
+		outputCount,
+		retained,
 	)
 }
 
