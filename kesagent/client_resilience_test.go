@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"net"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -424,5 +425,173 @@ func TestValidateKeyPushWipesItsInputKeyMaterial(t *testing.T) {
 		make([]byte, len(retained)),
 		retained,
 		"the decoded frame's own copy of the signing key must be zeroed",
+	)
+}
+
+// TestClient_ServeKeyBackoffSurvivesAReconnect is the defect a Hello-time
+// backoff reset produced: an agent whose key pushes the node cannot install
+// reconnects successfully every time, so clearing the backoff on a completed
+// handshake restarted the throttle at minReconnectBackoff after every
+// failure. The reconnect interval then stayed flat for as long as the agent
+// kept serving unusable material, which is exactly the case the throttle
+// exists for.
+//
+// Asserted on the backoff itself rather than on an attempt count in a window:
+// the difference between a flat and a doubling interval is one attempt over
+// the first second, and a count would be measuring the scheduler.
+func TestClient_ServeKeyBackoffSurvivesAReconnect(t *testing.T) {
+	t.Parallel()
+
+	skeyData, vkey, opCertCBOR := testKESMaterial(t)
+	ln, sockPath := listenUnix(t)
+
+	// Every connection gets a valid Hello and one valid push, so nothing the
+	// client sees on the wire is a failure: only the install is.
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				sendHello(t, conn, ModeServeKey)
+				_ = writeFrame(conn, MaxKeyPushFrameLen, KeyPush{
+					Type:       "key_push",
+					Period:     0,
+					Depth:      kes.CardanoKesDepth,
+					KESSignKey: skeyData,
+					KESVKey:    vkey,
+					OpCert:     opCertCBOR,
+				})
+				// Hold the connection open so the client's next read is the
+				// idle wait, and the only thing that ends it is the client's
+				// own invalidation after the failed install.
+				_, _ = conn.Read(make([]byte, 1))
+			}(conn)
+		}
+	}()
+
+	c, err := NewClient(Config{SocketPath: sockPath, Mode: ModeServeKey})
+	require.NoError(t, err)
+	defer c.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	const failuresWanted = 2
+	var failures atomic.Int32
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- c.Run(ctx, func(PushedKey) error {
+			if failures.Add(1) >= failuresWanted {
+				cancel()
+			}
+			return errors.New("install rejected by the node")
+		})
+	}()
+
+	select {
+	case <-runErr:
+	case <-time.After(30 * time.Second):
+		t.Fatal("Run did not reach the second failed install")
+	}
+	require.GreaterOrEqual(t, int(failures.Load()), failuresWanted)
+	require.Greater(
+		t, c.currentBackoff(), minReconnectBackoff,
+		"a second failed install must extend the reconnect backoff, "+
+			"not restart it at the minimum",
+	)
+}
+
+// TestClient_SignFailuresAreThrottled covers the sign-mode half of the same
+// property. Every Sign failure path tears the connection down, so the next
+// call redials; without recording those failures nothing throttled a
+// misbehaving sign agent at all, and a forging node retried it at full speed
+// on every leader slot.
+//
+// The success case is asserted in the same test because the two are one
+// contract: the backoff has to grow on failure and clear on a verified
+// signature, and a reset that never happens is as wrong as one that happens
+// too early.
+func TestClient_SignFailuresAreThrottled(t *testing.T) {
+	t.Parallel()
+
+	skeyData, vkey, _ := testKESMaterial(t)
+	ln, sockPath := listenUnix(t)
+
+	// Two connections answered with a signature over the wrong message --
+	// well-formed, correctly typed, right period, and cryptographically
+	// invalid -- then one answered correctly.
+	var served atomic.Int32
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				sendHello(t, conn, ModeSign)
+				var req SignRequest
+				if err := readFrame(conn, MaxSignFrameLen, &req); err != nil {
+					return
+				}
+				message := req.Message
+				if served.Add(1) <= 2 {
+					message = []byte("not the requested message")
+				}
+				sk := &kes.SecretKey{
+					Depth:  kes.CardanoKesDepth,
+					Period: req.Period,
+					Data:   append([]byte(nil), skeyData...),
+				}
+				sig, err := kes.Sign(sk, req.Period, message)
+				if err != nil {
+					return
+				}
+				_ = writeFrame(conn, MaxSignFrameLen, SignResponse{
+					Type:      "sign_response",
+					Period:    req.Period,
+					Signature: sig,
+				})
+			}(conn)
+		}
+	}()
+
+	c, err := NewClient(Config{
+		SocketPath: sockPath,
+		Mode:       ModeSign,
+		KESVKey:    vkey,
+	})
+	require.NoError(t, err)
+	defer c.Close()
+
+	message := []byte("header-bytes")
+	_, err = c.Sign(0, message)
+	require.Error(t, err)
+	first := c.currentBackoff()
+
+	// The backoff from the first failure has to be waited out, or the second
+	// call is refused by the throttle instead of reaching the agent -- which
+	// is the throttle working, and not what this half is measuring.
+	time.Sleep(first)
+	_, err = c.Sign(0, message)
+	require.Error(t, err)
+	second := c.currentBackoff()
+	require.Greater(
+		t, second, first,
+		"a second failed sign must extend the reconnect backoff",
+	)
+
+	time.Sleep(second)
+	sig, err := c.Sign(0, message)
+	require.NoError(t, err)
+	require.True(t, kes.VerifySignedKES(vkey, 0, message, sig))
+	c.mu.Lock()
+	backoff := c.backoff
+	c.mu.Unlock()
+	require.Zero(
+		t, backoff,
+		"a verified signature must clear the backoff its failures accumulated",
 	)
 }

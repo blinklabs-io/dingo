@@ -338,3 +338,75 @@ func TestValidateBlockProducerStartup_KESAgentServeKeyRotationStaysValidated(
 		"rotated KES key must be installed and still carry a validated KES protocol lifetime",
 	)
 }
+
+// TestValidateBlockProducerStartup_KESAgentClosedWhenValidationFails covers
+// the cleanup an agent-backed startup owes when a later step rejects the
+// credentials.
+//
+// The agent is dialled and its serve-key loop is running before the opcert
+// and KES-period checks run, so a rejection there used to return with the
+// client still connected and the loop still installing pushes into
+// credentials the node had refused to start on.
+//
+// Driven by validating against a slot past the operational certificate's
+// expiry: the agent's push installs normally and the KES-period check is what
+// fails, which is exactly the ordering the cleanup exists for.
+func TestValidateBlockProducerStartup_KESAgentClosedWhenValidationFails(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	vrf, _, opcert := devnetCredPaths(t)
+	kesKeyData, err := bursa.LoadKeyFromFile(
+		filepath.Join(devnetKeysDir, "kes.skey"),
+	)
+	require.NoError(t, err)
+	opCertCBOR := devnetOpCertCBOR(t)
+
+	testutil.SkipIfBlockProducerUnsupported(t)
+	sockPath := testutil.UnixSocketPath(t)
+	ln, err := net.Listen("unix", sockPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		writeKesAgentFrame(t, conn, kesagent.Hello{
+			Protocol: kesagent.ProtocolID,
+			Mode:     kesagent.ModeServeKey,
+		})
+		writeKesAgentFrame(t, conn, kesagent.KeyPush{
+			Type:       "key_push",
+			Period:     0,
+			Depth:      kes.CardanoKesDepth,
+			KESSignKey: kesKeyData.SKey,
+			KESVKey:    kesKeyData.VKey,
+			OpCert:     opCertCBOR,
+		})
+		_, _ = conn.Read(make([]byte, 1))
+	}()
+
+	cardanoCfg := shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour))
+	n := newTestNodeForBPWithAgent(
+		t,
+		vrf,
+		opcert,
+		kesagent.ModeServeKey,
+		sockPath,
+		cardanoCfg,
+	)
+	t.Cleanup(n.closeKESAgentClient)
+
+	// slotsPerKESPeriod 129600 x maxKESEvolutions 62 is the first slot past
+	// the certificate's protocol lifetime.
+	_, err = n.validateBlockProducerStartupAtSlot(62 * 129600)
+	require.Error(t, err)
+	require.Nil(
+		t, n.kesAgentClient,
+		"a startup rejected after the agent was dialled must not leave its "+
+			"client and serve-key loop running",
+	)
+}

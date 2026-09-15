@@ -193,11 +193,23 @@ func (n *Node) startKESAgentServeKey(
 	// credentialGeneration.kesSign refuses every signature after the first
 	// mid-run push with "operational certificate is not validated" and the
 	// node stops forging until it is restarted.
+	//
+	// Installed and validated in one call rather than two: as two, the
+	// credentials are published with their lifetime cleared for the duration
+	// of the validation, and a leader slot landing in that window is refused
+	// for exactly the reason this callback exists to prevent. Every rotation
+	// crosses it.
 	loopInstall := func(pk kesagent.PushedKey) error {
-		if err := install(pk); err != nil {
+		genesis, err := n.blockProducerShelleyGenesis()
+		if err != nil {
 			return err
 		}
-		return n.revalidateAgentServedCredentials(creds, startupSlot)
+		return creds.LoadFromAgentServeKeyValidated(
+			n.config.shelleyVRFKey,
+			agentMaterialFromPushedKey(pk),
+			genesis,
+			n.agentInstallSlot(startupSlot),
+		)
 	}
 
 	// The initial push must succeed before startup can proceed -- the same
@@ -238,31 +250,6 @@ func (n *Node) startKESAgentServeKey(
 			)
 		}
 	}()
-	return nil
-}
-
-// revalidateAgentServedCredentials re-runs the operational-certificate and
-// KES-period validation that validateBlockProducerStartupAtSlot runs after a
-// local key load, against the node's current slot. It is what keeps an
-// agent-served credential usable across a key rotation; see the loopInstall
-// callback in startKESAgentServeKey.
-func (n *Node) revalidateAgentServedCredentials(
-	creds *forging.PoolCredentials,
-	fallbackSlot uint64,
-) error {
-	if err := creds.ValidateOpCert(); err != nil {
-		return fmt.Errorf("validate operational certificate: %w", err)
-	}
-	genesis, err := n.blockProducerShelleyGenesis()
-	if err != nil {
-		return err
-	}
-	if err := creds.ValidateKESPeriod(
-		genesis,
-		n.agentInstallSlot(fallbackSlot),
-	); err != nil {
-		return fmt.Errorf("validate KES period: %w", err)
-	}
 	return nil
 }
 

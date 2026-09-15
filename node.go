@@ -1674,6 +1674,25 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 				err,
 			)
 		}
+		// Registered before the checks below, not after the forger is
+		// built: validateBlockProducerStartup may have dialled a KES agent
+		// and started its serve-key loop, and every step between here and
+		// the end of this block can fail. Registering afterwards left that
+		// client and its background loop outside the rollback stack. Every
+		// stop in the closure is nil-guarded, so it is safe this early.
+		started = append(started, func() {
+			if n.blockForger != nil {
+				n.blockForger.Stop()
+			}
+			n.closeKESAgentClient()
+			if n.leaderElection != nil {
+				logErrIfNotNil(
+					n.config.logger,
+					"failed to stop leader election during cleanup",
+					n.leaderElection.Stop(),
+				)
+			}
+		})
 		// Cross-check loaded credentials against ledger state. Mismatch
 		// against on-chain pool registration is fatal; "not yet
 		// registered" is a warning so operators can stage credentials
@@ -1705,19 +1724,6 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 				n.blockForger,
 			)
 		}
-		started = append(started, func() {
-			if n.blockForger != nil {
-				n.blockForger.Stop()
-			}
-			n.closeKESAgentClient()
-			if n.leaderElection != nil {
-				logErrIfNotNil(
-					n.config.logger,
-					"failed to stop leader election during cleanup",
-					n.leaderElection.Stop(),
-				)
-			}
-		})
 	}
 
 	// All components started successfully

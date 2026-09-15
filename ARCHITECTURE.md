@@ -5568,10 +5568,27 @@ set):
   for the life of the node. Installing a push clears the validated KES
   protocol lifetime, exactly as `LoadFromFiles` does, so no credential
   inherits a policy that was never checked against the material now
-  installed; startup re-establishes it for the first push and the loop
-  re-runs `ValidateOpCert`/`ValidateKESPeriod` itself for every later one.
-  Without that, `credentialGeneration.kesSign` refuses every signature after
-  the first rotation with "operational certificate is not validated".
+  installed; startup re-establishes it for the first push, and the loop uses
+  `PoolCredentials.LoadFromAgentServeKeyValidated` for every later one, which
+  installs and re-validates under one write lock. Without the
+  re-validation, `credentialGeneration.kesSign` refuses every signature after
+  the first rotation with "operational certificate is not validated"; with it
+  split across two locked calls, the credentials are published with their
+  lifetime cleared for the duration of the validation, and a leader slot
+  landing in that window is refused for the same reason. Every rotation
+  crosses that window, so the two steps are one operation.
+
+  A reconnect is what makes a failed install recoverable: `Client.Run`
+  invalidates the connection after an install error, and the agent re-sends
+  its current `KeyPush` after the next `Hello`, so material that was
+  temporarily unusable (an opcert whose KES period has not started yet) is
+  retried without waiting for the next evolution. The reconnect backoff is
+  cleared only by an install that succeeds, never by a completed handshake:
+  an agent serving unusable material reconnects fine every time, and
+  resetting on `Hello` left it retried at the minimum interval indefinitely.
+  Sign mode applies the same rule, recording a failure on every path that
+  tears the connection down and clearing the backoff only on a verified
+  signature.
 - **sign**: the node forwards header bytes to the agent and receives
   signatures back; the KES secret key never enters the node process.
   `PoolCredentials.LoadFromAgentSign` installs VRF/opcert material as usual

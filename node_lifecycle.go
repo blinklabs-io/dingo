@@ -1249,7 +1249,7 @@ func (n *Node) reinitializeAPIServers() error {
 // election, block forger, Leios vote wiring) if block production is
 // enabled, reusing the same helper methods Run() calls
 // (node_forging.go) rather than duplicating their bodies.
-func (n *Node) reinitializeBlockProducer() error {
+func (n *Node) reinitializeBlockProducer() (retErr error) {
 	if !n.config.blockProducer {
 		return nil
 	}
@@ -1257,6 +1257,16 @@ func (n *Node) reinitializeBlockProducer() error {
 	if err != nil {
 		return fmt.Errorf("block producer startup validation failed: %w", err)
 	}
+	// validateBlockProducerStartup may have dialled a KES agent and started
+	// its serve-key loop. Unlike Run's failure path this one leaves the node
+	// running, so a failure below would otherwise leave that loop installing
+	// key pushes into credentials no forger holds, against an agent
+	// connection nothing reaches until the node shuts down.
+	defer func() {
+		if retErr != nil {
+			n.closeKESAgentClient()
+		}
+	}()
 	if err := n.validateBlockProducerLedger(creds); err != nil {
 		return fmt.Errorf(
 			"block producer credentials failed ledger check: %w",

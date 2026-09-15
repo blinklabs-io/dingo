@@ -353,6 +353,39 @@ func (pc *PoolCredentials) LoadFromAgentServeKey(
 	return pc.installLoaded(loaded, err, nil)
 }
 
+// LoadFromAgentServeKeyValidated installs an agent key push and re-establishes
+// the operational certificate's validated KES lifetime in one critical
+// section.
+//
+// Installing clears that lifetime -- LoadFromAgentServeKey has to, so no
+// credential inherits a policy never checked against the material now
+// installed -- and validating restores it. Done as two locked calls, the gap
+// between them is a window in which the credentials are published but not
+// validated, and a leader slot landing there is refused with "operational
+// certificate is not validated" and the block is lost. Every KES evolution and
+// opcert rotation crosses that window, on a node whose whole purpose is to
+// forge.
+//
+// A failed validation leaves the credentials cleared of their lifetime, the
+// same fail-closed state ValidateKESPeriod leaves behind on its own.
+func (pc *PoolCredentials) LoadFromAgentServeKeyValidated(
+	vrfSKeyPath string,
+	material AgentKESMaterial,
+	genesis *shelley.ShelleyGenesis,
+	currentSlot uint64,
+) error {
+	// Loaded outside the lock: reading and deriving key material from disk
+	// has nothing to do with the published credentials, and holding the
+	// write lock across it would block every forge attempt for the duration.
+	loaded, loadErr := loadPoolCredentialsFromAgent(vrfSKeyPath, material)
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	if err := pc.installLoadedUnsafe(loaded, loadErr, nil); err != nil {
+		return err
+	}
+	return pc.validateKESPeriodUnsafe(genesis, currentSlot)
+}
+
 // LoadFromAgentSign installs VRF and operational certificate material from
 // local files, as LoadFromFiles does, but delegates every KES signing
 // operation to signer instead of loading a local KES secret key. signer is
@@ -389,6 +422,17 @@ func (pc *PoolCredentials) installLoaded(
 ) error {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
+	return pc.installLoadedUnsafe(loaded, err, remoteSigner)
+}
+
+// installLoadedUnsafe is installLoaded with pc.mu already held, so an install
+// and the validation that re-establishes the opcert lifetime can be one
+// critical section. Callers hold pc.mu.
+func (pc *PoolCredentials) installLoadedUnsafe(
+	loaded *loadedPoolCredentials,
+	err error,
+	remoteSigner RemoteKESSigner,
+) error {
 	pc.generation++
 	if err != nil {
 		pc.clearUnsafe()
@@ -1239,6 +1283,15 @@ func (pc *PoolCredentials) ValidateKESPeriod(
 ) error {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
+	return pc.validateKESPeriodUnsafe(genesis, currentSlot)
+}
+
+// validateKESPeriodUnsafe is ValidateKESPeriod with pc.mu already held.
+// Callers hold pc.mu.
+func (pc *PoolCredentials) validateKESPeriodUnsafe(
+	genesis *shelley.ShelleyGenesis,
+	currentSlot uint64,
+) error {
 	pc.generation++
 	previousOpCertValidation := pc.opCertValidated
 	// Any failed validation leaves the credentials unusable for production

@@ -297,3 +297,94 @@ func TestPoolCredentialsLoadFromAgentSignRequiresSigner(t *testing.T) {
 	err := pc.LoadFromAgentSign(vrfPath, opCertPath, nil)
 	require.ErrorContains(t, err, "requires a non-nil signer")
 }
+
+// TestLoadFromAgentServeKeyValidatedNeverPublishesAnUnvalidatedCredential is
+// the defect that installing and re-validating as two locked calls produced.
+//
+// The install clears the operational certificate's validated lifetime, and
+// the validation restores it. Between two calls the credentials are published
+// with that lifetime cleared, so a forge attempt landing there acquires a
+// generation whose opCertValidated is false and is refused with "operational
+// certificate is not validated" -- a lost block, on every KES evolution and
+// opcert rotation, on a node whose only job is to forge.
+//
+// The reader here is the forge attempt: it acquires a generation and asks for
+// the lifetime exactly as credentialGeneration.kesSign does, throughout a run
+// of installs. A generation whose credentials are loaded must carry a
+// validated lifetime; the only state it may otherwise be in is not-loaded,
+// which is the fail-closed state an install error leaves and which this run
+// never produces.
+func TestLoadFromAgentServeKeyValidatedNeverPublishesAnUnvalidatedCredential(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	vrfPath, kesPath, opCertPath := createTestKeys(t)
+	kesKey, err := loadSecretKeyFromFile(kesPath)
+	require.NoError(t, err)
+	opCertKey, err := bursa.LoadKeyFromFile(opCertPath)
+	require.NoError(t, err)
+
+	material := AgentKESMaterial{
+		AbsolutePeriod: opCertKey.OpCertKesPeriod,
+		KESSKeyData:    kesKey.SKey,
+		KESVKey:        opCertKey.VKey,
+		OpCert: OpCert{
+			KESVKey:     opCertKey.VKey,
+			IssueNumber: opCertKey.OpCertIssueNumber,
+			KESPeriod:   opCertKey.OpCertKesPeriod,
+			Signature:   opCertKey.OpCertSignature,
+			ColdVKey:    opCertKey.OpCertColdVKey,
+		},
+	}
+	genesis := synthGenesis(1, 3, time.Second, time.Unix(0, 0))
+
+	pc := NewPoolCredentials()
+	require.NoError(
+		t,
+		pc.LoadFromAgentServeKeyValidated(vrfPath, material, genesis, 0),
+	)
+
+	done := make(chan struct{})
+	observed := make(chan error, 1)
+	go func() {
+		defer close(observed)
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			generation := pc.acquireCredentialGeneration()
+			loaded := generation.loaded
+			_, _, _, err := generation.validatedKESProtocolLifetime()
+			generation.release()
+			if loaded && err != nil {
+				select {
+				case observed <- err:
+				default:
+				}
+				return
+			}
+		}
+	}()
+
+	// Every iteration is a rotation: the same material re-pushed, which is
+	// what a reconnect produces and what a KES evolution looks like to this
+	// code path.
+	for range 200 {
+		require.NoError(
+			t,
+			pc.LoadFromAgentServeKeyValidated(vrfPath, material, genesis, 0),
+		)
+	}
+	close(done)
+
+	if err, ok := <-observed; ok {
+		t.Fatalf(
+			"a forge attempt observed loaded credentials with no validated "+
+				"lifetime during an agent key install: %v",
+			err,
+		)
+	}
+}

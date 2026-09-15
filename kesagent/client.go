@@ -220,6 +220,15 @@ func (c *Client) invalidateConn(conn net.Conn) {
 
 // connectLocked dials the socket (if not already connected) and performs the
 // bounded Hello handshake. Caller holds c.mu.
+//
+// A completed handshake deliberately does not clear the reconnect backoff.
+// Reaching Hello proves only that something is listening on the socket, and
+// the failures the backoff exists to throttle -- an agent that pushes key
+// material the node cannot install, or one that refuses or corrupts every
+// sign -- all reconnect successfully first. Clearing here restarted every one
+// of them at minReconnectBackoff, however long they had been failing. The
+// reset belongs to the operation that actually succeeded: Run after an
+// install, Sign after a verified signature.
 func (c *Client) connectLocked(ctx context.Context) error {
 	if c.closed {
 		return ErrClosed
@@ -288,8 +297,6 @@ func (c *Client) connectLocked(ctx context.Context) error {
 	}
 
 	c.conn = conn
-	c.backoff = 0
-	c.nextDialAfter = time.Time{}
 	c.cfg.Metrics.setConnected(true)
 	return nil
 }
@@ -319,6 +326,12 @@ func (c *Client) currentBackoff() time.Duration {
 func (c *Client) resetBackoff() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.resetBackoffLocked()
+}
+
+// resetBackoffLocked is resetBackoff for a caller that already holds c.mu,
+// which Sign does for the whole of its request/response exchange.
+func (c *Client) resetBackoffLocked() {
 	c.backoff = 0
 	c.nextDialAfter = time.Time{}
 }
@@ -614,6 +627,7 @@ func (c *Client) Sign(period uint64, message []byte) ([]byte, error) {
 	}
 	if err := c.conn.SetDeadline(time.Now().Add(c.cfg.SignTimeout)); err != nil {
 		_ = c.closeLocked()
+		c.recordDialFailureLocked()
 		return nil, fmt.Errorf("kesagent: set sign deadline: %w", err)
 	}
 	defer func() {
@@ -626,17 +640,20 @@ func (c *Client) Sign(period uint64, message []byte) ([]byte, error) {
 	req := SignRequest{Type: "sign_request", Period: period, Message: message}
 	if err := writeFrame(c.conn, MaxSignFrameLen, req); err != nil {
 		_ = c.closeLocked()
+		c.recordDialFailureLocked()
 		c.cfg.Metrics.incSignFailure()
 		return nil, fmt.Errorf("kesagent: send sign request: %w", err)
 	}
 	var resp SignResponse
 	if err := readFrame(c.conn, MaxSignFrameLen, &resp); err != nil {
 		_ = c.closeLocked()
+		c.recordDialFailureLocked()
 		c.cfg.Metrics.incSignFailure()
 		return nil, fmt.Errorf("kesagent: read sign response: %w", err)
 	}
 	if resp.Type != "sign_response" {
 		_ = c.closeLocked()
+		c.recordDialFailureLocked()
 		c.cfg.Metrics.incSignFailure()
 		return nil, fmt.Errorf(
 			"kesagent: expected sign_response frame, got type %q",
@@ -645,6 +662,7 @@ func (c *Client) Sign(period uint64, message []byte) ([]byte, error) {
 	}
 	if resp.Period != period {
 		_ = c.closeLocked()
+		c.recordDialFailureLocked()
 		c.cfg.Metrics.incSignFailure()
 		return nil, fmt.Errorf(
 			"kesagent: sign response period %d does not match requested period %d",
@@ -661,6 +679,7 @@ func (c *Client) Sign(period uint64, message []byte) ([]byte, error) {
 	}
 	if len(resp.Signature) != kes.CardanoKesSignatureSize {
 		_ = c.closeLocked()
+		c.recordDialFailureLocked()
 		c.cfg.Metrics.incSignFailure()
 		return nil, fmt.Errorf(
 			"kesagent: sign response signature is %d bytes, want %d",
@@ -670,6 +689,7 @@ func (c *Client) Sign(period uint64, message []byte) ([]byte, error) {
 	}
 	if period < c.cfg.OpCertStartPeriod {
 		_ = c.closeLocked()
+		c.recordDialFailureLocked()
 		c.cfg.Metrics.incSignFailure()
 		return nil, fmt.Errorf(
 			"kesagent: sign period %d precedes configured opcert start period %d",
@@ -685,12 +705,17 @@ func (c *Client) Sign(period uint64, message []byte) ([]byte, error) {
 		resp.Signature,
 	) {
 		_ = c.closeLocked()
+		c.recordDialFailureLocked()
 		c.cfg.Metrics.incSignFailure()
 		return nil, errors.New(
 			"kesagent: sign response failed KES signature verification",
 		)
 	}
 
+	// A verified signature is the sign-mode equivalent of Run's completed
+	// install: the only outcome that proves the agent is actually usable, and
+	// therefore the only one that clears the backoff its failures accumulated.
+	c.resetBackoffLocked()
 	c.cfg.Metrics.observeSignLatency(time.Since(start))
 	c.cfg.Metrics.incSignSuccess()
 	return resp.Signature, nil
