@@ -6730,33 +6730,62 @@ with `EADDRINUSE`. An instrumented 500-iteration probe left the port accepting
 in roughly 9% of runs before the fix.
 
 Releasing the port is therefore something `Stop` has to do itself, and doing
-that safely needs three pieces that only make sense together:
+that safely needs four pieces that only make sense together:
 
-- **`Take` — exactly one caller tears a server down.** A server's `Stop` and
+- **`BeginStart` — a start is never invisible to a `Stop`.** A start only
+  becomes visible to the rest of the protocol when it publishes its server, and
+  everything before that point — reading config, building a handler
+  chain, being descheduled — is a window in which a concurrent `Stop` finds nothing to
+  detach, returns `nil`, and lets the start it could not see bind the port
+  behind it. Every `Start` takes the gate as its first statement and releases
+  it with a `defer`, and `Stop` waits the gate out, bounded by its own `ctx`,
+  rather than racing it. Dingo's own composition does not currently reach this
+  window: `plugin.Host` constructs, starts and stops one instance on a single
+  goroutine, and `(*Node).shutdown` takes `liveLifecycleMu` before stopping the
+  API capabilities, which is the same gate `Restore`/`Truncate` hold across
+  `reinitializeAPIServers`. The gate therefore holds the protocol's own
+  contract rather than closing a reachable production defect, and it belongs
+  here because the alternative was each API package growing its own version of
+  it.
+- **`take` — exactly one caller tears a server down.** A server's `Stop` and
   the context monitor its `Start` launched both race to detach the running
-  server and its listener. The winner gets a `Job` and owns completing it; the
-  loser gets the winner's completion channel and waits on it (`AwaitTeardown`)
-  rather than reporting the server down while the port is still bound. A
-  monitor uses `TakeIf`, which detaches only while the server it published is
-  still the current one: a monitor sits on `ctx.Done()` until its caller's
-  context ends, which can be long after its own server was stopped and a
-  restart published another on the same `Listener`, and an unconditional
-  detach there would tear down a replacement it never published. Today every
-  production caller passes the node's `n.ctx` to both the initial start and
-  every restart (`node.go`, `node_lifecycle.go`), so the two contexts are the
-  same one and the cross-detach is not reachable; `TakeIf` closes it at the
-  protocol level rather than relying on that continuing to hold.
+  server and its listener. The winner gets a job and owns completing it; the
+  loser gets the winner's completion channel and waits on it rather than
+  reporting the server down while the port is still bound. A monitor passes a
+  match, which detaches only while the server it published is still the current
+  one: a monitor can outlive its own server, and an unconditional detach there
+  would tear down a replacement it never published. Today every production
+  caller passes the node's `n.ctx` to both the initial start and every restart
+  (`node.go`, `node_lifecycle.go`), so the two contexts are the same one and
+  the cross-detach is not reachable; the match closes it at the protocol level
+  rather than relying on that continuing to hold.
 - **`bindDone` — `Stop` cannot outrun a bind still in flight.** `Bind` closes
   this channel on every exit path, including the one where it finds its server
-  already detached and closes its own socket instead of serving it. `Shutdown`
-  waits on it, which is what lets `Stop` promise the port is free when it
-  returns rather than merely that closing has started. A bind wait that times
-  out still tears down what it detached — the detach made this caller the only
-  remaining reference to that socket — but deliberately does *not* signal
+  already detached and closes its own socket instead of serving it. The
+  teardown waits on it, which is what lets `Stop` promise the port is free when
+  it returns rather than merely that closing has started. A bind wait that
+  times out still tears down what it detached — the detach made this
+  caller the only remaining reference to that socket — but deliberately does *not* signal
   completion to a waiting second caller, because `Bind` still owns a socket it
   could not close.
 - **`teardown` — the loser's wait is honest.** Only a genuinely finished
   teardown closes it, so a caller that reads it as "the port is free" is right.
+
+The context monitor is the `Listener`'s, not each server's. `Watch` launches
+it, and it waits on the server being detached as well as on `ctx.Done()`. The
+context every production caller passes is the node context, which stays live
+across a capability restart and for the rest of the process, so a monitor
+waiting only on that context outlives the server it was launched for, holding
+the stopped `http.Server`, its handler chain, and through that the database
+those handlers were built over. There is one monitor per `Start` and every live
+`Restore` or `Truncate` performs another `Start`, so the retained set grows with
+operator actions and each entry pins a database that restore has already
+replaced. Exiting on the detach is what bounds it.
+
+What a server implements is therefore `BeginStart`/`Publish`/`Watch`/`Bind` in
+`Start`, and a single `Stop` call in `Stop`. Nothing about the lifecycle is
+left for a server to re-derive, which is the point: the defect that prompted
+this was one server carrying a start/stop gate its siblings did not.
 
 `ShutdownFunc` is the one axis the three servers differ on. `apilistener.Graceful`
 (plain `http.Server.Shutdown`) covers Blockfrost and Mesh. `api/utxorpc` supplies
@@ -6774,14 +6803,14 @@ constructs its handler chain atomically with publication and a rejected second
 `Start` cannot replace a running server's handlers. `Bind` reports
 whether it handed the socket to `Serve` rather than closing it, so a `Start`
 whose server was detached mid-bind returns without logging that a listener
-came up when none did. One window stays open by construction: a `Stop` landing
+came up when none did. One window stays open by construction: a teardown landing
 between the ownership check and `Serve` being entered leaves `Serve` an
 already-closed socket. It is inert — `Serve` reports `ErrServerClosed`, which
-the error filter drops, and the port is released by the `Stop` that closed it —
+the error filter drops, and the port is released by the teardown that closed it —
 so the only trace is the log line. Closing it would require `Serve` to signal
 that it registered the listener, which `net/http` does not expose, and any such
-signal would still lose to a `Stop` landing an instant later. And because
-`api/utxorpc`'s context monitor now detaches rather than holding its mutex
+signal would still lose to a teardown landing an instant later. And because
+`api/utxorpc`'s context monitor detaches rather than holding its mutex
 across the shutdown it runs, a concurrent `Stop` is answered by the teardown
 wait instead of blocking on that mutex for as long as a stuck stream keeps
 `Shutdown` busy.
