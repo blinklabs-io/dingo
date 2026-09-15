@@ -100,8 +100,18 @@ func validImmutableFiles(
 		}
 		headerCbor, err := cbor.Encode(header)
 		require.NoError(t, err)
+		// Shelley-onward blocks are a 4+ element top-level array
+		// ([header, transaction_bodies, transaction_witness_sets,
+		// auxiliary_data_set, ...]), never 2. A bare [header, []] collides
+		// with Dijkstra's real CIP-0137 shape (block = [header,
+		// block_body]), which gouroboros' block-offset walker now detects
+		// and rejects as a malformed Dijkstra body rather than silently
+		// falling through -- see blinklabs-io/gouroboros#2301.
 		blockCbor, err := cbor.Encode([]any{
-			cbor.RawMessage(headerCbor), []any{},
+			cbor.RawMessage(headerCbor),
+			[]any{},       // transaction bodies
+			[]any{},       // transaction witness sets
+			map[any]any{}, // auxiliary data set
 		})
 		require.NoError(t, err)
 		blockHash := common.Blake2b256Hash(headerCbor)
