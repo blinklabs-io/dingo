@@ -46,7 +46,7 @@ collateral_by_tx_id) VALUES (X'01', 0, 0, '1', X'02')`)
 	db, err = sql.Open("sqlite", "file:"+dbPath)
 	// Reopen the same file and run the real pending migration.
 	require.NoError(t, err)
-	run(registry)
+	run(registry[:14])
 	require.NoError(t, db.Close())
 	db, err = sql.Open("sqlite", "file:"+dbPath)
 	require.NoError(t, err)
@@ -54,7 +54,7 @@ collateral_by_tx_id) VALUES (X'01', 0, 0, '1', X'02')`)
 	// re-executes the backfill on restart.
 	_, err = db.Exec("DELETE FROM schema_migrations WHERE version = 14")
 	require.NoError(t, err)
-	run(registry)
+	run(registry[:14])
 	var count int
 	require.NoError(t, db.QueryRow(
 		"SELECT COUNT(*) FROM utxo_collateral_input WHERE transaction_hash = X'02'",
