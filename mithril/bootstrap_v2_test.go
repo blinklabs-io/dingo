@@ -100,8 +100,16 @@ func validImmutableFiles(
 		}
 		headerCbor, err := cbor.Encode(header)
 		require.NoError(t, err)
+		// A bare 2-element [header, body] array is indistinguishable from
+		// a Dijkstra-era block ([header, block_body], gouroboros
+		// v0.204.5+'s classifyDijkstraBlock) and gets rejected once its
+		// inner "body" isn't a real Dijkstra block_body (3 or 4
+		// elements). A 3rd element (empty witness set, matching
+		// pre-Dijkstra Shelley+'s [header, tx_bodies, witnesses,
+		// metadata?] shape) is enough for ExtractTransactionOffsets to
+		// recognize this as an ordinary Shelley+ block instead.
 		blockCbor, err := cbor.Encode([]any{
-			cbor.RawMessage(headerCbor), []any{},
+			cbor.RawMessage(headerCbor), []any{}, []any{},
 		})
 		require.NoError(t, err)
 		blockHash := common.Blake2b256Hash(headerCbor)
