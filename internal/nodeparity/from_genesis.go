@@ -318,7 +318,52 @@ func RunFromGenesis(
 				},
 			),
 			chainsync.WithRollBackwardFunc(
-				func(_ chainsync.CallbackContext, _ pcommon.Point, _ chainsync.Tip) error {
+				func(_ chainsync.CallbackContext, point pcommon.Point, _ chainsync.Tip) error {
+					// A rollback invalidates every transaction the running
+					// UTxO reconstruction applied from the now-abandoned
+					// fork -- it must not keep silently building on top of
+					// them. Genesis bulk replay against multiple competing
+					// peers makes short rollbacks a routine occurrence
+					// (confirmed live via Dingo's own "chain switch:
+					// updating active connection" log lines throughout this
+					// tool's own validation runs), so this is not a rare
+					// edge case to leave unhandled.
+					//
+					// Re-baselining at the rollback point -- the same
+					// trusted-from-Dingo approach captureGenesisBaseline
+					// already uses for the very first block -- is simpler
+					// and safer than trying to precisely unwind only the
+					// rolled-back blocks' own changes, and costs only one
+					// GetUTxOWhole call, not repeated per rollback depth.
+					if utxoRefs != nil {
+						refs, err := captureGenesisBaseline(ctx, dingoAddr, magic, point)
+						if err != nil {
+							utxoRefs = nil
+							logf(
+								"nodeparity: rollback to slot %d invalidated the "+
+									"UTxO reconstruction and re-baselining failed "+
+									"(UTxO comparison disabled for the rest of this "+
+									"run): %v",
+								point.Slot, err,
+							)
+						} else {
+							utxoRefs = refs
+							logf(
+								"nodeparity: rolled back to slot %d, "+
+									"UTxO reconstruction re-baselined: %d refs",
+								point.Slot, len(refs),
+							)
+						}
+					}
+					// lastEpoch tracks the highest epoch confirmed on the
+					// canonical chain -- a rollback across an epoch
+					// boundary (possible, if rare, given how far apart
+					// preview/preprod epoch boundaries are relative to a
+					// typical bulk-replay rollback depth) must retreat it
+					// too, or a re-crossing of that same boundary on the
+					// new fork would be silently skipped as already seen.
+					haveLastEpoch = true
+					lastEpoch = point.Slot / previewPreprodEpochLengthSlots
 					return nil
 				},
 			),
