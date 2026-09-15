@@ -1060,8 +1060,8 @@ func compareEpochAccounts(
 	}
 
 	var out []CheckMismatch
-	dingoRows, decodeErrs := creditedAccountRewards(dingoOutputs)
-	for _, decodeErr := range decodeErrs {
+	dingoRows, credentialErrs, poolErrs := creditedAccountRewards(dingoOutputs)
+	for _, decodeErr := range credentialErrs {
 		logger.Warn(
 			"koiosparity: failed to decode reward_account_output credential",
 			"epoch",
@@ -1073,6 +1073,28 @@ func compareEpochAccounts(
 			Network:    network,
 			Epoch:      epoch,
 			Field:      "account_reward_address_decode",
+			DingoValue: fmt.Sprintf("error: %v", decodeErr),
+			KoiosValue: "",
+			Category:   CategoryDBError,
+			CheckedAt:  now,
+		})
+	}
+	// Reported apart from the credential failures above: a corrupt
+	// pool_key_hash is a different column with a different cause, and
+	// account_reward_pool_decode is the field CompareAccountEpoch already
+	// uses for a pool identifier that will not decode.
+	for _, decodeErr := range poolErrs {
+		logger.Warn(
+			"koiosparity: failed to decode reward_account_output pool_key_hash",
+			"epoch",
+			stakeEpoch,
+			"error",
+			decodeErr,
+		)
+		out = append(out, CheckMismatch{
+			Network:    network,
+			Epoch:      epoch,
+			Field:      "account_reward_pool_decode",
 			DingoValue: fmt.Sprintf("error: %v", decodeErr),
 			KoiosValue: "",
 			Category:   CategoryDBError,
@@ -1129,18 +1151,23 @@ func compareEpochAccounts(
 // epoch's decode failures itself, and otherwise merely suppresses the
 // lifecycle diff. Filtering before decoding would make an uncredited row's
 // corrupt credential vanish entirely and silently disable that diff.
+//
+// Credential and pool decode failures are returned separately because the
+// caller reports them under different fields and different log messages: they
+// are different storage problems in different columns, and folding them into
+// one slice made a corrupt pool_key_hash read as a stake-address problem
+// during triage.
 func creditedAccountRewards(
 	outputs []*models.RewardAccountOutput,
-) ([]DingoAccountReward, []error) {
-	rows := make([]DingoAccountReward, 0, len(outputs))
-	var errs []error
+) (rows []DingoAccountReward, credentialErrs, poolErrs []error) {
+	rows = make([]DingoAccountReward, 0, len(outputs))
 	for _, row := range outputs {
 		addr, err := StakeAddressFromCredential(
 			row.StakingKey,
 			row.CredentialTag,
 		)
 		if err != nil {
-			errs = append(errs, err)
+			credentialErrs = append(credentialErrs, err)
 			continue
 		}
 		if !row.Spendable || row.Guarded {
@@ -1161,7 +1188,7 @@ func creditedAccountRewards(
 				hex.EncodeToString(row.PoolKeyHash),
 			)
 			if err != nil {
-				errs = append(errs, err)
+				poolErrs = append(poolErrs, err)
 				continue
 			}
 		}
@@ -1172,7 +1199,7 @@ func creditedAccountRewards(
 			PoolIDBech32: poolID,
 		})
 	}
-	return rows, errs
+	return rows, credentialErrs, poolErrs
 }
 
 // accountLifecycleMismatches (dingo #3099) reports the two account

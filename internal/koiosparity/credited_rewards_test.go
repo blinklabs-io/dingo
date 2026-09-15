@@ -35,7 +35,7 @@ func TestCreditedAccountRewardsSkipsUncredited(t *testing.T) {
 		"F8ADA2B9A94FDD95D35D482BDDDF5A66FFA5B330B539B4613255C1DC",
 	)
 
-	rows, errs := creditedAccountRewards([]*models.RewardAccountOutput{
+	rows, credentialErrs, poolErrs := creditedAccountRewards([]*models.RewardAccountOutput{
 		{
 			StakingKey: unspendable,
 			RewardType: "member",
@@ -56,7 +56,8 @@ func TestCreditedAccountRewardsSkipsUncredited(t *testing.T) {
 			Spendable:  true,
 		},
 	})
-	require.Empty(t, errs)
+	require.Empty(t, credentialErrs)
+	require.Empty(t, poolErrs)
 	require.Len(t, rows, 1,
 		"only the credited row belongs in the comparison")
 	assert.Equal(t, "500", rows[0].Amount)
@@ -74,7 +75,7 @@ func TestCreditedAccountRewardsKeepsLeaderRewards(t *testing.T) {
 		t,
 		"F8ADA2B9A94FDD95D35D482BDDDF5A66FFA5B330B539B4613255C1DC",
 	)
-	rows, errs := creditedAccountRewards([]*models.RewardAccountOutput{
+	rows, credentialErrs, poolErrs := creditedAccountRewards([]*models.RewardAccountOutput{
 		{
 			StakingKey: key,
 			RewardType: "leader",
@@ -82,7 +83,8 @@ func TestCreditedAccountRewardsKeepsLeaderRewards(t *testing.T) {
 			Spendable:  true,
 		},
 	})
-	require.Empty(t, errs)
+	require.Empty(t, credentialErrs)
+	require.Empty(t, poolErrs)
 	require.Len(t, rows, 1)
 	assert.Equal(t, "leader", rows[0].RewardType)
 }
@@ -93,7 +95,7 @@ func TestCreditedAccountRewardsKeepsLeaderRewards(t *testing.T) {
 func TestCreditedAccountRewardsReportsDecodeFailure(t *testing.T) {
 	t.Parallel()
 
-	rows, errs := creditedAccountRewards([]*models.RewardAccountOutput{
+	rows, credentialErrs, poolErrs := creditedAccountRewards([]*models.RewardAccountOutput{
 		{
 			StakingKey: []byte{0x01, 0x02},
 			RewardType: "member",
@@ -102,7 +104,9 @@ func TestCreditedAccountRewardsReportsDecodeFailure(t *testing.T) {
 		},
 	})
 	assert.Empty(t, rows)
-	require.Len(t, errs, 1)
+	require.Len(t, credentialErrs, 1)
+	require.Empty(t, poolErrs,
+		"a credential failure is not a pool failure")
 }
 
 // An uncredited row with an undecodable credential is still reported. The
@@ -120,7 +124,7 @@ func TestCreditedAccountRewardsReportsDecodeFailure(t *testing.T) {
 func TestCreditedAccountRewardsReportsUncreditedDecodeFailure(t *testing.T) {
 	t.Parallel()
 
-	rows, errs := creditedAccountRewards([]*models.RewardAccountOutput{
+	rows, credentialErrs, poolErrs := creditedAccountRewards([]*models.RewardAccountOutput{
 		{
 			StakingKey: []byte{0x01, 0x02},
 			RewardType: "member",
@@ -129,7 +133,9 @@ func TestCreditedAccountRewardsReportsUncreditedDecodeFailure(t *testing.T) {
 		},
 	})
 	assert.Empty(t, rows, "an uncredited row still never enters the comparison")
-	require.Len(t, errs, 1, "but its corrupt credential is still reported")
+	require.Len(t, credentialErrs, 1,
+		"but its corrupt credential is still reported")
+	require.Empty(t, poolErrs)
 }
 
 func mustDecodeHex(t *testing.T, s string) []byte {
@@ -167,7 +173,7 @@ func TestCreditedAccountRewardsCarriesPoolID(t *testing.T) {
 	t.Run("credited row carries its pool", func(t *testing.T) {
 		t.Parallel()
 
-		rows, errs := creditedAccountRewards([]*models.RewardAccountOutput{
+		rows, credentialErrs, poolErrs := creditedAccountRewards([]*models.RewardAccountOutput{
 			{
 				StakingKey:  key,
 				PoolKeyHash: poolHash,
@@ -176,7 +182,8 @@ func TestCreditedAccountRewardsCarriesPoolID(t *testing.T) {
 				Spendable:   true,
 			},
 		})
-		require.Empty(t, errs)
+		require.Empty(t, credentialErrs)
+		require.Empty(t, poolErrs)
 		require.Len(t, rows, 1)
 		assert.Equal(t, wantPoolID, rows[0].PoolIDBech32)
 	})
@@ -184,7 +191,7 @@ func TestCreditedAccountRewardsCarriesPoolID(t *testing.T) {
 	t.Run("absent pool key hash is not a failure", func(t *testing.T) {
 		t.Parallel()
 
-		rows, errs := creditedAccountRewards([]*models.RewardAccountOutput{
+		rows, credentialErrs, poolErrs := creditedAccountRewards([]*models.RewardAccountOutput{
 			{
 				StakingKey: key,
 				RewardType: "member",
@@ -192,7 +199,8 @@ func TestCreditedAccountRewardsCarriesPoolID(t *testing.T) {
 				Spendable:  true,
 			},
 		})
-		require.Empty(t, errs)
+		require.Empty(t, credentialErrs)
+		require.Empty(t, poolErrs)
 		require.Len(t, rows, 1)
 		assert.Empty(t, rows[0].PoolIDBech32)
 	})
@@ -200,7 +208,7 @@ func TestCreditedAccountRewardsCarriesPoolID(t *testing.T) {
 	t.Run("malformed pool key hash is reported", func(t *testing.T) {
 		t.Parallel()
 
-		rows, errs := creditedAccountRewards([]*models.RewardAccountOutput{
+		rows, credentialErrs, poolErrs := creditedAccountRewards([]*models.RewardAccountOutput{
 			{
 				StakingKey:  key,
 				PoolKeyHash: []byte{0x01, 0x02},
@@ -209,7 +217,9 @@ func TestCreditedAccountRewardsCarriesPoolID(t *testing.T) {
 				Spendable:   true,
 			},
 		})
-		require.Len(t, errs, 1)
+		require.Len(t, poolErrs, 1)
+		require.Empty(t, credentialErrs,
+			"a pool failure is not reported as a credential failure")
 		assert.Empty(t, rows,
 			"a row whose pool cannot be decoded is reported, not compared")
 	})
@@ -217,7 +227,7 @@ func TestCreditedAccountRewardsCarriesPoolID(t *testing.T) {
 	t.Run("uncredited row's pool is never decoded", func(t *testing.T) {
 		t.Parallel()
 
-		rows, errs := creditedAccountRewards([]*models.RewardAccountOutput{
+		rows, credentialErrs, poolErrs := creditedAccountRewards([]*models.RewardAccountOutput{
 			{
 				StakingKey:  key,
 				PoolKeyHash: []byte{0x01, 0x02},
@@ -226,8 +236,9 @@ func TestCreditedAccountRewardsCarriesPoolID(t *testing.T) {
 				Spendable:   false,
 			},
 		})
-		require.Empty(t, errs,
+		require.Empty(t, poolErrs,
 			"a row the comparison never sees cannot fail the epoch")
+		require.Empty(t, credentialErrs)
 		assert.Empty(t, rows)
 	})
 }

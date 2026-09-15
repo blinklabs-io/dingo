@@ -1081,6 +1081,20 @@ type accountRewardTotal struct {
 	StakeAddress string
 	RewardType   string
 	Amount       string
+	// ByPool holds each source pool's contribution to Amount, in the order
+	// the rows were read. Amount alone is a sum, and a sum cannot see a
+	// disagreement that preserves it, so the comparison also checks these
+	// against the other side's — see accountRewardPoolsAgree.
+	ByPool []accountRewardPoolAmount
+}
+
+// accountRewardPoolAmount is one pool's contribution to an account's
+// (stake_address, reward_type) total, with the pool identifier already
+// normalized by normalizeAccountPoolID. An empty PoolID names the "no pool"
+// contribution.
+type accountRewardPoolAmount struct {
+	PoolID string
+	Amount string
 }
 
 // CompareAccountEpoch compares every Koios /account_reward_history reference
@@ -1265,18 +1279,19 @@ func CompareAccountEpoch(
 				CheckedAt:  now,
 			})
 		default:
-			if !lovelaceEqual(dr.Amount, kr.Amount) {
-				// Guarded the same way the presence case above is, and the
-				// same way ComparePoolEpoch guards its own value comparison:
-				// before the applying boundary the amount can still change,
-				// so a difference is a statement about timing rather than a
-				// divergence (issue #3857). Leaving this strict while the
-				// presence check is not would report the same epoch as both
-				// a lag and a mismatch.
-				cat := CategoryValueMismatch
-				if rewardsPending {
-					cat = CategoryReferenceLag
-				}
+			// Guarded the same way the presence case above is, and the same
+			// way ComparePoolEpoch guards its own value comparison: before
+			// the applying boundary the amount can still change, so a
+			// difference is a statement about timing rather than a
+			// divergence (issue #3857). Leaving this strict while the
+			// presence check is not would report the same epoch as both a
+			// lag and a mismatch.
+			cat := CategoryValueMismatch
+			if rewardsPending {
+				cat = CategoryReferenceLag
+			}
+			switch {
+			case !lovelaceEqual(dr.Amount, kr.Amount):
 				out = append(out, CheckMismatch{
 					Network:      network,
 					Epoch:        epoch,
@@ -1284,6 +1299,24 @@ func CompareAccountEpoch(
 					Field:        "account_reward_amount",
 					DingoValue:   dr.Amount,
 					KoiosValue:   kr.Amount,
+					Category:     cat,
+					CheckedAt:    now,
+				})
+			case !accountRewardPoolsAgree(dr.ByPool, kr.ByPool):
+				// The totals agree, so the disagreement is over which pool
+				// credited what. A reward account shared by several pools
+				// (dingo #3841) can differ per pool and still sum alike, and
+				// comparing only the sum reports that as a match. Reported
+				// only once the totals do agree: when they do not, the branch
+				// above has already said so and the per-pool breakdown adds
+				// no verdict of its own.
+				out = append(out, CheckMismatch{
+					Network:      network,
+					Epoch:        epoch,
+					StakeAddress: k.address,
+					Field:        "account_reward_pool_amount",
+					DingoValue:   formatAccountRewardPools(dr.ByPool),
+					KoiosValue:   formatAccountRewardPools(kr.ByPool),
 					Category:     cat,
 					CheckedAt:    now,
 				})
@@ -1337,6 +1370,7 @@ func (s accountRewardSide) mismatch(
 // contributes, kept as the raw string so the fold decides when to parse it.
 type accountRewardContribution struct {
 	key    accountRewardKey
+	pool   string
 	amount string
 }
 
@@ -1363,35 +1397,42 @@ func foldAccountRewards(
 	now time.Time,
 ) (map[accountRewardKey]accountRewardTotal, []CheckMismatch) {
 	order := make([]accountRewardKey, 0, len(contributions))
-	grouped := make(map[accountRewardKey][]string, len(contributions))
+	grouped := make(
+		map[accountRewardKey][]accountRewardPoolAmount,
+		len(contributions),
+	)
 	for _, c := range contributions {
 		if _, ok := grouped[c.key]; !ok {
 			order = append(order, c.key)
 		}
-		grouped[c.key] = append(grouped[c.key], c.amount)
+		grouped[c.key] = append(grouped[c.key], accountRewardPoolAmount{
+			PoolID: c.pool,
+			Amount: c.amount,
+		})
 	}
 	totals := make(map[accountRewardKey]accountRewardTotal, len(grouped))
 	var out []CheckMismatch
 	for _, key := range order {
-		amounts := grouped[key]
-		if len(amounts) == 1 {
+		byPool := grouped[key]
+		if len(byPool) == 1 {
 			totals[key] = accountRewardTotal{
 				StakeAddress: key.address,
 				RewardType:   key.rtype,
-				Amount:       amounts[0],
+				Amount:       byPool[0].Amount,
+				ByPool:       byPool,
 			}
 			continue
 		}
 		sum := new(big.Int)
-		for _, raw := range amounts {
-			amount, ok := parseLovelace(raw)
+		for _, contribution := range byPool {
+			amount, ok := parseLovelace(contribution.Amount)
 			if !ok {
 				out = append(out, side.mismatch(
 					network,
 					epoch,
 					key.address,
 					"account_reward_amount",
-					raw,
+					contribution.Amount,
 					CategoryDBError,
 					now,
 				))
@@ -1403,9 +1444,114 @@ func foldAccountRewards(
 			StakeAddress: key.address,
 			RewardType:   key.rtype,
 			Amount:       sum.String(),
+			ByPool:       byPool,
 		}
 	}
 	return totals, out
+}
+
+// accountRewardPoolsAgree reports whether both sides credited the same amount
+// from every pool contributing to one (stake_address, reward_type) key.
+//
+// accountRewardTotal.Amount is a sum across pools, and a sum cannot see a
+// disagreement that preserves it: two per-pool errors of equal magnitude and
+// opposite sign cancel, and so does a total one side attributes entirely to
+// one of the pools the other side splits it between. Both are real
+// divergences in what was credited from which pool, and dingo #3841 makes a
+// reward account shared by several pools an ordinary case rather than an edge
+// one, so the per-pool contributions are compared as well as their sum.
+//
+// A pool present on one side only is compared against zero rather than
+// treated as absent, so a pool that credited nothing on one side and has no
+// row on the other still agrees — the same reading CategoryAcctZeroRewardRow
+// already applies to a one-sided zero row at account granularity.
+//
+// A contribution that does not parse is skipped: foldAccountRewards has
+// already reported it as a CategoryDBError, so the epoch cannot pass on it,
+// and reporting it again here would say nothing new.
+//
+// A side that attributes the key to no pool at all makes no per-pool statement
+// to disagree with, so the totals are then the whole verdict. Koios reports a
+// pool for every member/leader row and Dingo stores one for every credited
+// reward, so this covers reference data that arrives without the attribution
+// rather than a real divergence: treating "no pool" as a pool of its own would
+// report the account as a value mismatch purely because one side did not say
+// which pool paid it.
+func accountRewardPoolsAgree(dingo, koios []accountRewardPoolAmount) bool {
+	if accountRewardPoolsUnattributed(dingo) ||
+		accountRewardPoolsUnattributed(koios) {
+		return true
+	}
+	dingoByPool := accountRewardPoolMap(dingo)
+	koiosByPool := accountRewardPoolMap(koios)
+	for pool := range koiosByPool {
+		if _, ok := dingoByPool[pool]; !ok {
+			dingoByPool[pool] = "0"
+		}
+	}
+	for pool, dingoAmount := range dingoByPool {
+		koiosAmount, ok := koiosByPool[pool]
+		if !ok {
+			koiosAmount = "0"
+		}
+		if _, ok := parseLovelace(dingoAmount); !ok {
+			continue
+		}
+		if _, ok := parseLovelace(koiosAmount); !ok {
+			continue
+		}
+		if !lovelaceEqual(dingoAmount, koiosAmount) {
+			return false
+		}
+	}
+	return true
+}
+
+// accountRewardPoolsUnattributed reports whether a side named no pool for any
+// of its contributions to one key, which is the "no pool" contribution
+// normalizeAccountPoolID passes through unchanged.
+func accountRewardPoolsUnattributed(
+	contributions []accountRewardPoolAmount,
+) bool {
+	for _, c := range contributions {
+		if c.PoolID != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// accountRewardPoolMap indexes one side's contributions by pool. Duplicate
+// (stake_address, reward_type, pool) rows are already reported and dropped as
+// CategoryAcctDuplicate before the fold, so each pool appears at most once.
+func accountRewardPoolMap(
+	contributions []accountRewardPoolAmount,
+) map[string]string {
+	byPool := make(map[string]string, len(contributions))
+	for _, c := range contributions {
+		byPool[c.PoolID] = c.Amount
+	}
+	return byPool
+}
+
+// formatAccountRewardPools renders one side's per-pool contributions as a
+// sorted "pool=amount" list, so the reported value is directly comparable
+// against the other side's and does not depend on the order the rows arrived
+// in. The no-pool contribution is spelled "(none)" rather than as an empty
+// left-hand side.
+func formatAccountRewardPools(
+	contributions []accountRewardPoolAmount,
+) string {
+	parts := make([]string, 0, len(contributions))
+	for _, c := range contributions {
+		pool := c.PoolID
+		if pool == "" {
+			pool = "(none)"
+		}
+		parts = append(parts, pool+"="+c.Amount)
+	}
+	slices.Sort(parts)
+	return strings.Join(parts, " ")
 }
 
 // aggregateKoiosAccountRewards reduces Koios's /account_reward_history rows
@@ -1483,6 +1629,7 @@ func aggregateKoiosAccountRewards(
 		}
 		contributions = append(contributions, accountRewardContribution{
 			key:    key,
+			pool:   poolID,
 			amount: row.Earned,
 		})
 	}
@@ -1548,6 +1695,7 @@ func aggregateDingoAccountRewards(
 		}
 		contributions = append(contributions, accountRewardContribution{
 			key:    key,
+			pool:   poolID,
 			amount: row.Amount,
 		})
 	}

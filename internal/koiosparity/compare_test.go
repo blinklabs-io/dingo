@@ -639,6 +639,8 @@ func TestCompareAccountEpochExactMatch(t *testing.T) {
 // (stake address, reward type) are not automatically duplicates when their
 // pool identities differ.
 func TestCompareAccountEpochAggregatesSharedRewardAccounts(t *testing.T) {
+	t.Parallel()
+
 	now := time.Now()
 	poolOneID, err := PoolKeyHashHexToBech32(
 		hex.EncodeToString(testPoolKeyHash(t, 0x01)),
@@ -786,6 +788,8 @@ func TestCompareAccountEpochSharedAccountPendingRewardsAreALag(t *testing.T) {
 // TestCompareAccountEpochRejectsMalformedAggregatedAmount proves a malformed
 // contribution cannot disappear while account rows are being aggregated.
 func TestCompareAccountEpochRejectsMalformedAggregatedAmount(t *testing.T) {
+	t.Parallel()
+
 	now := time.Now()
 	poolOneID, err := PoolKeyHashHexToBech32(
 		hex.EncodeToString(testPoolKeyHash(t, 0x01)),
@@ -827,6 +831,8 @@ func TestCompareAccountEpochRejectsMalformedAggregatedAmount(t *testing.T) {
 }
 
 func TestCompareAccountEpochRejectsMalformedPoolID(t *testing.T) {
+	t.Parallel()
+
 	ms := CompareAccountEpoch(
 		"preview",
 		100,
@@ -1145,6 +1151,8 @@ func TestCompareAccountEpochOutOfScopeRewardTypesFiltered(t *testing.T) {
 }
 
 func TestCompareAccountEpochUnknownRewardTypeIsDatabaseError(t *testing.T) {
+	t.Parallel()
+
 	now := time.Now()
 	koios := []KoiosAccountRewards{
 		{StakeAddress: "stake1a", RewardType: "unexpected", Earned: "1000000"},
@@ -1413,4 +1421,139 @@ func TestComparePoolEpochMemberRewardsWithoutAccountOutputs(t *testing.T) {
 	require.Equal(t, "member_rewards", ms[0].Field)
 	require.Equal(t, CategoryDBMissing, ms[0].Category)
 	require.Equal(t, StatusError, DetermineStatus(ms))
+}
+
+// TestCompareAccountEpochPerPoolDiscrepanciesDoNotCancel pins the reason the
+// per-(stake_address, reward_type) total is not the only thing compared.
+//
+// A reward account shared by several pools carries one contribution per pool
+// (dingo #3841). Summing those contributions before comparing makes the
+// comparison blind to any disagreement that preserves the sum: two per-pool
+// errors of equal magnitude and opposite sign, or an account whose whole
+// total Dingo attributed to one of the two pools Koios reports it from. Both
+// are real divergences in what the ledger credited from which pool, and the
+// summed totals agree exactly, so the epoch would pass.
+func TestCompareAccountEpochPerPoolDiscrepanciesDoNotCancel(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	poolOneID, err := PoolKeyHashHexToBech32(
+		hex.EncodeToString(testPoolKeyHash(t, 0x01)),
+	)
+	require.NoError(t, err)
+	poolTwoID, err := PoolKeyHashHexToBech32(
+		hex.EncodeToString(testPoolKeyHash(t, 0x02)),
+	)
+	require.NoError(t, err)
+
+	koios := []KoiosAccountRewards{
+		{
+			StakeAddress: "stake1shared",
+			RewardType:   "leader",
+			Earned:       "100",
+			PoolIDBech32: poolOneID,
+		},
+		{
+			StakeAddress: "stake1shared",
+			RewardType:   "leader",
+			Earned:       "200",
+			PoolIDBech32: poolTwoID,
+		},
+	}
+
+	// Control: identical per-pool contributions are still a pass, so the
+	// mismatches below are the swap and not the new comparison itself.
+	agreeing := []DingoAccountReward{
+		{
+			StakeAddress: "stake1shared",
+			RewardType:   "leader",
+			Amount:       "100",
+			PoolIDBech32: poolOneID,
+		},
+		{
+			StakeAddress: "stake1shared",
+			RewardType:   "leader",
+			Amount:       "200",
+			PoolIDBech32: poolTwoID,
+		},
+	}
+	require.Empty(t, CompareAccountEpoch(
+		"preview", 100, koios, agreeing, now, 0, time.Time{}, false,
+	))
+
+	// Equal and opposite per-pool errors: 100+200 and 200+100 both total 300.
+	swapped := []DingoAccountReward{
+		{
+			StakeAddress: "stake1shared",
+			RewardType:   "leader",
+			Amount:       "200",
+			PoolIDBech32: poolOneID,
+		},
+		{
+			StakeAddress: "stake1shared",
+			RewardType:   "leader",
+			Amount:       "100",
+			PoolIDBech32: poolTwoID,
+		},
+	}
+	ms := CompareAccountEpoch(
+		"preview", 100, koios, swapped, now, 0, time.Time{}, false,
+	)
+	require.Len(t, ms, 1, "a cancelling pair is still a divergence")
+	require.Equal(t, "account_reward_pool_amount", ms[0].Field)
+	require.Equal(t, CategoryValueMismatch, ms[0].Category)
+	require.Equal(t, "stake1shared", ms[0].StakeAddress)
+	require.Contains(t, ms[0].DingoValue, poolOneID+"=200")
+	require.Contains(t, ms[0].KoiosValue, poolOneID+"=100")
+	require.Equal(t, StatusFail, DetermineStatus(ms))
+
+	// The whole total attributed to one of the two pools: the sum still
+	// agrees while a pool Koios credited is absent from Dingo entirely.
+	collapsed := []DingoAccountReward{
+		{
+			StakeAddress: "stake1shared",
+			RewardType:   "leader",
+			Amount:       "300",
+			PoolIDBech32: poolOneID,
+		},
+	}
+	ms = CompareAccountEpoch(
+		"preview", 100, koios, collapsed, now, 0, time.Time{}, false,
+	)
+	require.Len(t, ms, 1)
+	require.Equal(t, "account_reward_pool_amount", ms[0].Field)
+	require.Equal(t, CategoryValueMismatch, ms[0].Category)
+
+	// A side that names no pool at all makes no per-pool statement to
+	// disagree with, so the totals stay the whole verdict there. Reference
+	// data that arrives without the attribution is not a divergence in what
+	// was credited, in either direction.
+	unattributedKoios := []KoiosAccountRewards{{
+		StakeAddress: "stake1shared",
+		RewardType:   "leader",
+		Earned:       "300",
+	}}
+	require.Empty(t, CompareAccountEpoch(
+		"preview", 100, unattributedKoios, agreeing, now, 0, time.Time{},
+		false,
+	))
+	unattributedDingo := []DingoAccountReward{{
+		StakeAddress: "stake1shared",
+		RewardType:   "leader",
+		Amount:       "300",
+	}}
+	require.Empty(t, CompareAccountEpoch(
+		"preview", 100, koios, unattributedDingo, now, 0, time.Time{}, false,
+	))
+
+	// Pending rewards downgrade the per-pool finding exactly as they downgrade
+	// the total comparison beside it: before the applying boundary a per-pool
+	// amount can still change (dingo #3857, #4130).
+	longClosed := now.Add(-1388 * 24 * time.Hour)
+	pending := CompareAccountEpoch(
+		"preview", 100, koios, swapped, now, 24, longClosed, true,
+	)
+	require.Len(t, pending, 1)
+	require.Equal(t, "account_reward_pool_amount", pending[0].Field)
+	require.Equal(t, CategoryReferenceLag, pending[0].Category)
 }

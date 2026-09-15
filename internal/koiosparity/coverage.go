@@ -753,7 +753,7 @@ var koiosCoverageMatrix = []KoiosFieldCoverage{
 		Field:      "amount",
 		Class:      CoverageExactMatch,
 		DingoField: "reward_account_output.amount",
-		Reason:     "parsed amounts are compared as aggregated totals grouped by (stake_address, reward_type) across pool contributions; no rounding/sampling/tolerance",
+		Reason:     "parsed amounts are compared as aggregated totals grouped by (stake_address, reward_type), and then per pool contribution so a disagreement that preserves the total is still reported; no rounding/sampling/tolerance",
 	},
 	{
 		Endpoint:   "/account_reward_history",
@@ -767,6 +767,6 @@ var koiosCoverageMatrix = []KoiosFieldCoverage{
 		Field:      "pool_id_bech32",
 		Class:      CoverageDerivedMatch,
 		DingoField: "reward_account_output.pool_key_hash converted to pool ID",
-		Reason:     "distinct pool contributions are aggregated; repeated same-pool rows remain duplicate failures",
+		Reason:     "distinct pool contributions are aggregated and then compared per pool; repeated same-pool rows remain duplicate failures",
 	},
 }
