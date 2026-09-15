@@ -1963,9 +1963,15 @@ type MetadataStore interface {
 	RewardLiveStakeNeedsBackfill(types.Txn) (bool, error)
 
 	// StaleConsensusStakeSnapshotsExist reports whether persisted Mark/Set/Go
-	// stake snapshots or authoritative Mark metadata use an older calculation
+	// stake snapshots or Mark reward metadata use an older calculation
 	// version. Such snapshots cannot safely be recreated from a pruned database.
 	StaleConsensusStakeSnapshotsExist(types.Txn) (bool, error)
+
+	// StaleConsensusStakeSnapshotEpochs returns the distinct epochs
+	// StaleConsensusStakeSnapshotsExist's stale rows belong to, for
+	// diagnostics only -- so the operator-facing error naming a rebootstrap
+	// requirement can name exactly which epochs are affected.
+	StaleConsensusStakeSnapshotEpochs(types.Txn) ([]uint64, error)
 
 	// GetTip retrieves the current chain tip.
 	GetTip(types.Txn) (ochainsync.Tip, error)
