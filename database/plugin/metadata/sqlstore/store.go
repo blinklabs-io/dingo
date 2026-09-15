@@ -120,6 +120,11 @@ type Store struct {
 
 	closeOnce sync.Once
 	closeErr  error
+
+	// stmtMu and stmts back the prepared-statement cache; see
+	// prepared_stmt.go for the mechanism and correctness argument.
+	stmtMu sync.Mutex
+	stmts  map[string]*sql.Stmt
 }
 
 // New constructs a shared store around already-opened connection pools.
@@ -200,7 +205,13 @@ func (s *Store) RestoreFrom(ctx context.Context, srcPath string) error {
 	if s.restoreFrom == nil {
 		return errors.New("metadata restore is not supported by this provider")
 	}
-	return s.restoreFrom(ctx, srcPath)
+	err := s.restoreFrom(ctx, srcPath)
+	// Like Reset, a restore replaces the on-disk/remote schema and data out
+	// from under any statement prepared before it ran; invalidate the cache
+	// regardless of outcome so a later call always re-prepares against
+	// whatever RestoreFrom actually left behind.
+	s.closePreparedStatements()
+	return err
 }
 
 // Reset clears all data this store owns, for providers that supply the
@@ -228,7 +239,15 @@ func (s *Store) Reset(ctx context.Context) error {
 	if s.closed.Load() {
 		return errors.New("metadata reset: store is closed")
 	}
-	return s.reset(ctx)
+	err := s.reset(ctx)
+	// A wired Reset (postgres/mysql) drops and recreates schema objects
+	// (resetDatabase's DROP TABLE ... CASCADE), so any statement cached
+	// before this point may now reference a table that no longer exists in
+	// the form it was prepared against -- invalidate unconditionally,
+	// whether reset succeeded or failed partway, rather than assume a
+	// partial failure left every cached statement's table intact.
+	s.closePreparedStatements()
+	return err
 }
 
 // HasDestructiveReset reports whether Reset actually mutates a live target
@@ -302,6 +321,13 @@ func (s *Store) Start(ctx context.Context) error {
 			return fmt.Errorf("sqlstore: ping read database: %w", err)
 		}
 	}
+	// Must run before ready flips true: this is the only point in the
+	// Store's lifecycle guaranteed to have no write transaction open yet,
+	// which prepareHotStatements' own doc comment explains is required to
+	// prepare against writeDB without risking a self-deadlock under
+	// SetMaxOpenConns(1). Best-effort: see prepareHotStatements for why a
+	// failure here does not abort Start.
+	s.prepareHotStatements(ctx)
 	s.ready.Store(true)
 	// Maintenance owns its own lifetime and must not inherit the startup
 	// context, which callers commonly cancel as soon as Start returns.
@@ -389,6 +415,14 @@ func (s *Store) CloseContext(ctx context.Context) error {
 		s.closeMaintenanceAdmission()
 		s.closed.Store(true)
 		s.ready.Store(false)
+		// Invalidate the prepared-statement cache before the pools it was
+		// prepared against go away. closed is already true above, so any
+		// cachedStmt call racing with this either observes it before
+		// preparing (returns the "store is closed" error) or finishes its
+		// Prepare and then sees closed==true when it goes to install the
+		// result, closing its own statement instead of caching it -- see
+		// prepared_stmt.go.
+		s.closePreparedStatements()
 		if s.bulkConn != nil {
 			// Restore session variables before releasing the dedicated
 			// connection; this is especially important for pooled PostgreSQL
