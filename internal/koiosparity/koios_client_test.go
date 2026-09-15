@@ -557,3 +557,128 @@ func TestGetAccountRewardHistoryEmptyAddressesNoRequest(t *testing.T) {
 	require.Nil(t, items)
 	require.False(t, called)
 }
+
+// TestNewKoiosTransportResponseHeaderTimeout proves newKoiosTransport's
+// ResponseHeaderTimeout is actually enforced by the transport itself, not
+// merely present as a struct field: a server that accepts the connection but
+// blocks well past the configured ResponseHeaderTimeout before writing
+// anything must fail the request in roughly that bound, not in the far
+// longer overall http.Client.Timeout also configured on the same client.
+//
+// This is the phase http.DefaultTransport leaves unbounded (see
+// newKoiosTransport's doc comment): dial and TLS handshake already have
+// independent defaults, so this test is the one that would fail today
+// against the pre-fix client, which relied solely on the coarse top-level
+// Timeout to catch a stuck server.
+func TestNewKoiosTransportResponseHeaderTimeout(t *testing.T) {
+	t.Parallel()
+
+	const (
+		responseHeaderTimeout = 200 * time.Millisecond
+		serverDelay           = 3 * time.Second
+		clientTimeout         = 10 * time.Second // must stay >> responseHeaderTimeout
+	)
+
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Simulate a server that accepts the connection and then never
+			// writes anything for far longer than responseHeaderTimeout:
+			// no headers, no body, just silence on an already-open
+			// connection.
+			time.Sleep(serverDelay)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("too late"))
+		}),
+	)
+	defer srv.Close()
+
+	client := &http.Client{
+		// Deliberately far larger than responseHeaderTimeout: if the
+		// request only failed once this fired, this test would prove
+		// nothing beyond what the client already did before this change.
+		Timeout: clientTimeout,
+		Transport: newKoiosTransport(
+			koiosDialTimeout,
+			koiosDialKeepAlive,
+			koiosTLSHandshakeTimeout,
+			responseHeaderTimeout,
+			koiosExpectContinueTimeout,
+		),
+	}
+
+	start := time.Now()
+	resp, err := client.Get(srv.URL) //nolint:noctx // deliberately no context; client.Timeout/transport timeouts are exactly what's under test
+	elapsed := time.Since(start)
+	if resp != nil {
+		resp.Body.Close()
+	}
+
+	require.Error(
+		t,
+		err,
+		"a server silent past ResponseHeaderTimeout must fail the request",
+	)
+	assert.Contains(
+		t,
+		err.Error(),
+		"timeout awaiting response headers",
+		"failure must be attributable to ResponseHeaderTimeout specifically",
+	)
+	assert.Less(
+		t,
+		elapsed,
+		serverDelay,
+		"must fail before the server ever responds",
+	)
+	assert.Less(
+		t,
+		elapsed,
+		clientTimeout,
+		"must fail well before the unrelated, much larger client-level Timeout",
+	)
+}
+
+// TestNewKoiosTransportDialTimeout proves newKoiosTransport's DialContext
+// timeout is enforced: connecting to an address that never completes the TCP
+// handshake (nothing there to accept or refuse it) must fail within roughly
+// the configured dial timeout, not the far longer client-level Timeout.
+//
+// A non-routable address (RFC 5737 TEST-NET-1, reserved for documentation
+// and guaranteed never to route) stands in for "a firewall silently drops
+// SYN/ACK": the dial attempt neither succeeds nor is immediately refused, so
+// only an explicit dial timeout bounds it.
+func TestNewKoiosTransportDialTimeout(t *testing.T) {
+	t.Parallel()
+
+	const (
+		dialTimeout   = 300 * time.Millisecond
+		clientTimeout = 10 * time.Second // must stay >> dialTimeout
+	)
+
+	client := &http.Client{
+		Timeout: clientTimeout,
+		Transport: newKoiosTransport(
+			dialTimeout,
+			koiosDialKeepAlive,
+			koiosTLSHandshakeTimeout,
+			koiosResponseHeaderTimeout,
+			koiosExpectContinueTimeout,
+		),
+	}
+
+	start := time.Now()
+	//nolint:noctx // deliberately no context; the transport's own dial timeout is exactly what's under test
+	resp, err := client.Get("http://192.0.2.1:81/")
+	elapsed := time.Since(start)
+	if resp != nil {
+		resp.Body.Close()
+	}
+
+	require.Error(t, err, "a black-holed dial target must fail the request")
+	assert.Less(
+		t,
+		elapsed,
+		clientTimeout,
+		"must fail well before the unrelated, much larger client-level Timeout",
+	)
+}
