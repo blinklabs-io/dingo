@@ -1068,9 +1068,11 @@ dingo/
 │   │   └── recycler.go  # Start/Stop loop, tick decision logic
 │   ├── config/          # Configuration parsing
 │   ├── dblifecycle/     # CLI and automatic snapshot orchestration
+│   ├── health/          # Liveness/readiness probe handlers
+│   │   └── health.go    # /health, /healthz, /readyz
 │   ├── integration/     # Integration tests
 │   ├── node/            # Node orchestration (CLI wiring)
-│   │   ├── node.go      # Run(), signal handling, metrics server
+│   │   ├── node.go      # Run(), signal handling, metrics/health servers
 │   │   └── load.go      # Block loading implementation
 │   ├── historyexpiry/   # Ledger-window-based local block history expiry
 │   │   └── pruner.go    # Background expiry scanner
@@ -6683,7 +6685,75 @@ those indexes in place while deferring the remaining manifest entries.
 
 ## External Interfaces
 
-Dingo provides three client-facing APIs plus Bark. All are optional and gated by port configuration. UTxO RPC, Blockfrost, and Mesh are general-purpose external APIs and require `storageMode: api`. Bark is different: it is Dingo's own protocol for Dingo-to-Dingo C2/archive services, not a general-purpose application API.
+Dingo provides three client-facing APIs plus Bark. All are optional and gated by port configuration. UTxO RPC, Blockfrost, and Mesh are general-purpose external APIs and require `storageMode: api`. Bark is different: it is Dingo's own protocol for Dingo-to-Dingo C2/archive services, not a general-purpose application API. The health probes below are not an application API at all: they are operational surface for a container runtime or orchestrator, and are the one HTTP interface here that is available in every storage mode.
+
+### Health probes (`internal/health`)
+
+`internal/node.Run` starts three auxiliary HTTP listeners, all through
+`serveAuxiliaryListener` (bind or serve failures are logged, never fatal):
+Prometheus metrics on `metricsPort`, pprof on `debugPort` when enabled, and
+the health listener on `healthPort` (default `12799`, `0` disables).
+
+The health listener is **not** gated on storage mode. The three API
+listeners start only when `storageMode.IsAPI()`, so a probe wired the same
+way would be inert in the default `core` mode — the mode the shipped
+`docker-compose.yml` runs. It binds `bindAddr`, the address the relay/NtN
+and metrics listeners already use, rather than the API listeners' own
+loopback-by-default address: a Docker `HEALTHCHECK` runs inside the
+container and would be satisfied by loopback, but a Kubernetes kubelet probe
+or an ECS/ALB target-group check reaches the container from outside, and
+loopback would fail those closed. It serves only the three probe paths;
+everything else on that listener is a 404, so metrics and pprof never leak
+onto a port an operator exposes for probing.
+
+| Path | Semantics |
+|------|-----------|
+| `/healthz`, `/health` | Liveness: 200 whenever the process is up and this listener answered. Independent of sync state. |
+| `/readyz` | Readiness: 200 only when the chain tip is within `healthReadyGapSlots` of the wall-clock slot; 503 otherwise. |
+
+The separation is a deliberate operational contract, not two names for one
+check. An orchestrator answers a liveness failure by *restarting* and a
+readiness failure by *draining*. Neither the initial-sync case (legitimately
+hours or days behind) nor the wedged-tip cases (a stalled blockfetch, a
+validation rejection loop) are repaired by a restart, so folding sync state
+into liveness would produce a restart loop that destroys the state an
+operator needs to diagnose. The image's `HEALTHCHECK` therefore probes
+liveness; readiness is documented for `readinessProbe` and load-balancer
+target checks. It reads the port from `DINGO_HEALTH_PORT` (default `12799`),
+the only one of the three `healthPort` sources a `HEALTHCHECK` can see, and
+reports healthy without probing when that is `0`, so disabling the listener
+does not put the container into a replacement loop.
+
+`dingo mithril sync` serves the same listener, through
+`cmd/dingo.startHealthProbeServer` over the exported
+`internal/node.NewHealthServer`, with a nil tip-gap function. That bootstrap
+is a separate process the container entrypoint runs ahead of `serve`, and on
+mainnet it runs for hours while the image's `HEALTHCHECK` is already probing;
+with no listener the probe is refused and Swarm or ECS replaces the container
+mid-download, then again on every replacement. A nil tip gap is the accurate
+reading for it: live, and not ready with reason `tip gap unavailable`. Because
+that listener now binds during a sync, `healthPort` is range-, privilege- and
+collision-checked in `RunModeSync` as well as the serving modes
+(`internal/config/validate.go`), alongside `metricsPort` and `debugPort`.
+
+Readiness reads its tip gap from `(*dingo.Node).TipGapSlots`
+(`node_health.go`), which is fed by `ledger.LedgerStateConfig.ReportTipGapFunc`
+from the ledger's slot-tick loop — the same value published as the
+`dingo_tip_gap_slots` gauge, read directly so readiness does not depend on
+the Prometheus listener. The reading lives in a mutex-guarded `nodeHealth`
+value on `Node` rather than behind `n.ledgerState`, which a live database
+Restore/Truncate replaces; `ledgerStateConfig` closes over the node, so a
+rebuilt ledger keeps reporting into the same state. That state carries a
+generation: `ledgerStateConfig` captures it when it builds a ledger's
+callbacks, `forgetTipGap` advances it at both rebuild entry points
+(`closeStorageForLiveLifecycleOp`, and `reinitializeCoreStorage` for the
+quiesce-failure path that skips it), and `recordTipGap` compares and stores
+under the same lock. A tick the outgoing ledger had already dequeued
+therefore cannot restore a pre-rebuild reading, whichever side of the clear
+it lands on. The gap is reported as
+*unknown*, not zero, until the first slot tick, so a node that has opened
+its database but has not begun following the chain reports not-ready rather
+than reading as perfectly caught up.
 
 ### API security (TLS)
 
