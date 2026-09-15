@@ -3418,14 +3418,18 @@ two separate reads, so an epoch-boundary commit landing between them can't
 make the comparison pass against one epoch while returning another's
 parameters), and `GetEpochNo` (unconditionally safe: epoch records are
 never pruned and carry no other coupled state). `GetStakeDistribution`
-shares `PoolStakeDistribution` with `GetPoolDistr2` but rejects any pinned
-point outright with `ErrHistoricalStateUnavailable`: unlike `GetPoolDistr2`
-(whose denominator, `TotalActiveStake`, is itself a historical per-epoch
-snapshot total), `GetStakeDistribution`'s denominator is
-`TotalCirculatingSupply`, computed from `GetNetworkState`'s reserves row --
-and `GetNetworkState` only ever returns the latest row, with no
-historical-by-slot lookup yet, so honoring a pin here would silently mix a
-correct historical numerator with the current live reserves. `GetUTxOWhole`
+(`queryShelleyStakeDistribution`) also honors a pinned point, but does not
+share `GetPoolDistr2`'s `PoolStakeDistribution`/mark-snapshot path at all
+(see the two-genuinely-different-queries explanation below) --
+`ledger/snapshot`'s `Calculator.CalculateStakeDistributionInTxn`
+reconstructs pool stakes directly as of the pinned slot (or the live tip's
+slot when unpinned) instead. Its denominator, `TotalCirculatingSupply`, is
+computed via `GetNetworkStateAsOfSlot` for the same pinned slot when one is
+given (blinklabs-io/dingo#4152) -- unlike `GetNetworkState`'s
+always-latest-row read, `GetNetworkStateAsOfSlot` does have a
+historical-by-slot lookup, so a pin pairs a correct historical numerator
+with the reserves genuinely in effect at that same point, not today's.
+`GetUTxOWhole`
 is not yet one of the honoring types either -- pinning only matters for a
 query slow enough that the live tip could move underneath it before
 finishing, and a paginated form built to actually need that is tracked
@@ -3558,11 +3562,22 @@ its own fraction is its stake over that same unchanged total.
 `GetUTxOWhole` (`ledger/queries_utxowhole.go`) are the two newest implemented
 leaves in `ledger/queries.go`'s query dispatcher; the `// TODO (#394)` block
 beside them lists the leaves that remain unimplemented. `GetStakeDistribution`
-reads the same
-`PoolStakeDistribution` helper as `GetPoolDistr2` with no pool filter (this
-query has none on the wire, unlike `GetPoolDistr2`), so it cannot report a
-different snapshot or VRF key for the same chain than `GetPoolDistr2` or the
-UTxO RPC `ReadState` handler. `GetUTxOWhole` iterates every live row via
+does *not* read `PoolStakeDistribution` (deliberately, since
+blinklabs-io/dingo#4152: see `queryShelleyStakeDistribution`'s own doc
+comment for the two-genuinely-different-real-cardano-node-queries case,
+confirmed against cardano-ledger source): `GetPoolDistr2` answers from the
+frozen mark/set snapshot leader election itself uses
+(`SnapShot.ssStakeMarkPoolDistr`), but `GetStakeDistribution` answers from
+`ledger/snapshot`'s `Calculator`, reconstructing pool stakes directly from
+live (or pinned-slot) delegation and UTxO state -- matching real
+cardano-node's own `poolsByTotalStakeFraction`, which reads
+`currentSnapshot` rather than one of the regular snapshots for exactly
+this query. Routing both queries through the same mark-snapshot helper (as
+`GetStakeDistribution` used to) silently omitted any pool that registered
+or first delegated after that snapshot was captured -- confirmed live
+against a real Preview cardano-node: 36 real pools reported by cardano-node
+were completely absent from dingo's reply for no reason other than that
+snapshot lag. `GetUTxOWhole` iterates every live row via
 `database.IterateLiveUtxos` and decodes each one's stored CBOR into the
 node-to-client reply shape; each row's CBOR buffer is defensively cloned
 before decoding, since `IterateLiveUtxos` documents that the buffer backing
