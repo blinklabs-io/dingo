@@ -1410,7 +1410,17 @@ counter and the histogram cover every call site through `instrumentedQueryer`
 — domain queries, committee pruning, deferred-index maintenance — including
 the hot-statement cache's cached calls, which bypass `instrumentedQueryer`'s
 wrapper entirely and are counted/timed explicitly instead in
-`queryRowCached`/`execCached` (`prepared_stmt.go`). `dingo_database_sql_wal_bytes`
+`queryRowCached`/`execCached` (`prepared_stmt.go`). For a multi-row SELECT
+issued through `QueryContext`, the histogram observation is dispatch latency
+only: `database/sql` returns `*sql.Rows` before the driver produces any rows,
+so the observation is recorded before the caller's own `Next()`/`Scan()` loop
+— where a `:many` query's real cost lives — does any work. `ExecContext`,
+`QueryRowContext`, and the cached-statement path all block until the
+statement completes, so their observations do reflect completion; see
+`countingQueryer.QueryContext`'s doc comment (`metrics.go`) for the measured
+gap and why timing through `Close()` instead is not available given the
+`*sql.Rows`-typed `queryer`/sqlc `DBTX` interfaces this wraps.
+`dingo_database_sql_wal_bytes`
 and `dingo_database_sql_disk_bytes` (`database/plugin/metadata/sqlite/metrics.go`)
 are pull-based gauges sampled at scrape time — a plain `os.Stat` of
 `metadata.sqlite-wal` and `Store.DiskSize()` respectively — the same pattern

@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
@@ -236,7 +237,10 @@ func TestSQLOperationsCounterCountsCachedAndUncachedQueries(t *testing.T) {
 	// An uncached SELECT through the same instrumented path.
 	before = counterValue(t, reg, "select")
 	var one int
-	require.NoError(t, store.writeDB.QueryRowContext(ctx, "SELECT 1").Scan(&one))
+	require.NoError(
+		t,
+		store.writeDB.QueryRowContext(ctx, "SELECT 1").Scan(&one),
+	)
 	// The raw writeDB.QueryRowContext call above bypasses
 	// instrumentedQueryer entirely (it is not routed through
 	// dbFromTxn/withWriteTransaction), so it must NOT have changed the
@@ -349,6 +353,134 @@ func histogramSampleCount(
 	return 0
 }
 
+// histogramSampleSum returns the summed observed duration recorded for
+// dingo_database_sql_query_duration_seconds under the given op/query label
+// pair, or 0 if no such series has been observed yet.
+func histogramSampleSum(
+	t *testing.T,
+	reg *prometheus.Registry,
+	op, query string,
+) float64 {
+	t.Helper()
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	for _, family := range families {
+		if family.GetName() != "dingo_database_sql_query_duration_seconds" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			var gotOp, gotQuery string
+			for _, label := range metric.GetLabel() {
+				switch label.GetName() {
+				case "op":
+					gotOp = label.GetValue()
+				case "query":
+					gotQuery = label.GetValue()
+				}
+			}
+			if gotOp == op && gotQuery == query {
+				return metric.GetHistogram().GetSampleSum()
+			}
+		}
+	}
+	return 0
+}
+
+// TestSQLQueryDurationHistogramMultiRowMeasuresDispatchNotIteration proves
+// (and pins) the measurement gap documented on countingQueryer.QueryContext
+// (metrics.go) and in DATABASE.md: for a multi-row SELECT, the histogram
+// observes QueryContext's own dispatch latency, not the caller's
+// Next()/Scan() row-iteration time that follows it, because database/sql
+// returns *sql.Rows before the driver has produced any rows. It inserts a
+// large number of rows, issues an uncached multi-row QueryContext call
+// (bypassing queryRowCached/execCached, which are unaffected -- see their
+// own doc comments), and asserts the histogram's recorded observation is a
+// small fraction of the wall-clock time the caller's own iteration loop
+// actually took. A fix that reshaped this to time through completion
+// instead would still pass this assertion; a regression that stopped
+// recording the observation before dispatch returns (for example, moving
+// the timer to wrap the whole call including a synchronous row buffer)
+// would fail it in the other direction, since ExecContext/QueryRowContext
+// already cover the completion-timed case elsewhere in this file.
+func TestSQLQueryDurationHistogramMultiRowMeasuresDispatchNotIteration(
+	t *testing.T,
+) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	store := newMigratedSQLiteStoreWithRegistry(t, reg)
+
+	const rowCount = 50_000
+	require.NoError(t, store.withWriteTransaction(
+		nil,
+		func(db queryer, txnCtx context.Context) error {
+			for batchStart := 0; batchStart < rowCount; batchStart += 500 {
+				var (
+					query string
+					args  []any
+				)
+				batchEnd := min(batchStart+500, rowCount)
+				query = "INSERT INTO sync_state (sync_key, value) VALUES "
+				for i := batchStart; i < batchEnd; i++ {
+					if i > batchStart {
+						query += ", "
+					}
+					query += "(?, ?)"
+					args = append(
+						args,
+						fmt.Sprintf("dispatch_measurement_%d", i),
+						"v",
+					)
+				}
+				if _, err := db.ExecContext(txnCtx, query, args...); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	))
+
+	sumBefore := histogramSampleSum(t, reg, "select", "unknown")
+
+	db, queryCtx, err := store.readDBFromTxn(nil)
+	require.NoError(t, err)
+
+	dispatchStart := time.Now()
+	rows, err := db.QueryContext(
+		queryCtx,
+		"SELECT sync_key, value FROM sync_state "+
+			"WHERE sync_key LIKE 'dispatch_measurement_%'",
+	)
+	require.NoError(t, err)
+	dispatchElapsed := time.Since(dispatchStart)
+
+	var scanned int
+	for rows.Next() {
+		var key, value string
+		require.NoError(t, rows.Scan(&key, &value))
+		scanned++
+	}
+	require.NoError(t, rows.Err())
+	require.NoError(t, rows.Close())
+	totalElapsed := time.Since(dispatchStart)
+	require.Equal(t, rowCount, scanned)
+
+	observed := histogramSampleSum(t, reg, "select", "unknown") - sumBefore
+	t.Logf(
+		"dispatch=%s full-iteration=%s observed-histogram-delta=%.6fs",
+		dispatchElapsed,
+		totalElapsed,
+		observed,
+	)
+
+	require.Less(
+		t,
+		observed,
+		totalElapsed.Seconds()/2,
+		"expected the histogram to observe dispatch latency, not the "+
+			"much larger row-iteration time that followed it",
+	)
+}
+
 // TestSQLQueryDurationHistogramObservesCachedAndUncachedQueries is the
 // duration-histogram analog of
 // TestSQLOperationsCounterCountsCachedAndUncachedQueries: it proves
@@ -361,7 +493,9 @@ func histogramSampleCount(
 // annotation (it predates the sqlc-generated query set -- see its
 // definition in live_stake.go), so its observations must land under
 // query="unknown", not under some guessed name.
-func TestSQLQueryDurationHistogramObservesCachedAndUncachedQueries(t *testing.T) {
+func TestSQLQueryDurationHistogramObservesCachedAndUncachedQueries(
+	t *testing.T,
+) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
 	store := newMigratedSQLiteStoreWithRegistry(t, reg)
