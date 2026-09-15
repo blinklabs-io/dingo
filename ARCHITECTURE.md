@@ -5313,6 +5313,11 @@ a mismatch — a peer block landing mid-selection — rejects the candidate
 before VRF/KES signing (`selected parent changed during block assembly`)
 rather than relying solely on step 7's `Chain.AddLocalBlock` check, which
 still runs as the final backstop against any race not closed here.
+For a non-genesis parent, the candidate slot must be strictly later than the
+parent slot. Immediately before signing, the builder checks the parent again
+inside `Chain.WithTip`, which holds the primary chain mutex through header
+encoding and KES signing. External tip providers without that callback retain
+the final best-effort tip check; local chain admission remains authoritative.
 
 The forger tracks slot battles (competing blocks at the same slot) and skips forging when the node is not sufficiently synced, controlled by `forgeSyncToleranceSlots` and `forgeStaleGapThresholdSlots`.
 
