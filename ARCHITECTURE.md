@@ -6692,8 +6692,14 @@ checkpoint per block. Where `slot_no` holds a block that is the block itself;
 where it does not, it is the next block on chain. `NodeAdapter.Metadata`
 therefore selects the first canonical block whose slot is at least `slot_no`,
 so an empty slot returns the same metadata and `X-Block-Header-Hash` a Kupo
-client would receive. A slot past the newest indexed block has no answer and
-returns `400`, matching Kupo error status for an unresolvable point.
+client would receive. A slot past the newest indexed block returns `400`, which
+is a deliberate divergence rather than a match: Kupo hands that slot's
+preceding checkpoint to a chain-sync `FetchBlockClient` that waits for the next
+block and then answers `200`, and reserves its own `400` for an intersection
+that is not found or a rollback arriving during the fetch. Dingo answers
+`/metadata/{slot_no}` from committed storage rather than a live chain-sync
+client, and does not hold an HTTP request open until a block is forged, so a
+slot with no block yet is refused immediately.
 
 **Reads are snapshot-coordinated.** Every data route opens a coordinated read
 snapshot through `database.NewReadSnapshotContext`, so a response body and the
