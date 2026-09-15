@@ -806,13 +806,17 @@ func TestPublishBlocksOnFullBufferAndLosesNothing(t *testing.T) {
 	}
 
 	done := make(chan struct{})
+	started := make(chan struct{})
 	go func() {
 		defer close(done)
+		close(started)
 		for i := range overflow {
 			eb.Publish(testEvtType, event.NewEvent(testEvtType, buffer+i))
 		}
 	}()
 
+	testutil.RequireReceive(t, started, time.Second, "publisher did not start")
+	require.Len(t, subCh, cap(subCh), "the subscriber buffer must be full")
 	testutil.RequireNoReceive(
 		t,
 		done,
@@ -922,17 +926,21 @@ func TestPublishBlockingUnblocksOnStop(t *testing.T) {
 	const testEvtType event.EventType = "test.blocking.stop"
 	eb := event.NewEventBus(nil, nil)
 
-	_, _ = eb.SubscribeWithBuffer(testEvtType, 1)
+	_, subCh := eb.SubscribeWithBuffer(testEvtType, 1)
 	eb.Publish(testEvtType, event.NewEvent(testEvtType, "first"))
 
+	started := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
+		close(started)
 		done <- eb.PublishBlocking(
 			testEvtType,
 			event.NewEvent(testEvtType, "second"),
 		)
 	}()
 
+	testutil.RequireReceive(t, started, time.Second, "publisher did not start")
+	require.Len(t, subCh, cap(subCh), "the subscriber buffer must be full")
 	testutil.RequireNoReceive(
 		t,
 		done,

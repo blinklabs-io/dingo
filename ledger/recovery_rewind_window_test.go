@@ -23,6 +23,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -152,6 +153,7 @@ func TestWindowedRewindConvergesWhilePrimaryChainExtends(t *testing.T) {
 	// per step is slower than the window each step covers, so a rewind that
 	// re-reads the live tip still converges.
 	stop := make(chan struct{})
+	var appendCount atomic.Int64
 	var appender sync.WaitGroup
 	appender.Go(func() {
 		lastPoint := pc.Tip().Point
@@ -181,6 +183,7 @@ func TestWindowedRewindConvergesWhilePrimaryChainExtends(t *testing.T) {
 				// re-read and try the next one.
 				continue
 			}
+			appendCount.Add(1)
 			lastPoint = ocommon.NewPoint(next.Slot, next.Hash)
 		}
 	})
@@ -197,6 +200,16 @@ func TestWindowedRewindConvergesWhilePrimaryChainExtends(t *testing.T) {
 		"a windowed step must stay within K of the chain's live tip",
 	)
 	require.NoError(t, rewindErr)
+	// Prove the race this test exists for was actually exercised: the
+	// appender must have landed at least one append while the rewind was in
+	// progress, rather than never running or finishing before the rewind
+	// started (a rewind's own rollback shrinks the tip, so comparing tip
+	// block numbers before and after cannot show this).
+	require.Positive(
+		t,
+		appendCount.Load(),
+		"the appender must have extended the chain concurrently with the rewind",
+	)
 }
 
 // TestDeterministicTxRecoveryHaltsOnUnreachableRewind pins the second half of

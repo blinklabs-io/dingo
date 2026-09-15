@@ -141,8 +141,10 @@ func TestPublishAsyncBlocksWhenQueueFull(t *testing.T) {
 	// Enough to fill the subscriber buffer, occupy every async worker, and
 	// saturate the queue.
 	total := event.AsyncQueueSize + event.AsyncWorkerPoolSize + 8
+	started := make(chan struct{})
 	enqueued := make(chan bool, 1)
 	go func() {
+		close(started)
 		for i := range total {
 			if !eb.PublishAsync(testEvtType, event.NewEvent(testEvtType, i)) {
 				enqueued <- false
@@ -152,6 +154,14 @@ func TestPublishAsyncBlocksWhenQueueFull(t *testing.T) {
 		enqueued <- true
 	}()
 
+	testutil.RequireReceive(
+		t, started, time.Second, "publisher did not start",
+	)
+	require.Eventually(t, func() bool {
+		return len(subCh) == cap(subCh)
+	}, time.Second, time.Millisecond,
+		"the subscriber buffer must fill while nothing drains it",
+	)
 	testutil.RequireNoReceive(
 		t,
 		enqueued,
@@ -203,15 +213,21 @@ func TestPublishUnblocksOnStop(t *testing.T) {
 	const testEvtType event.EventType = "test.backpressure.stop"
 
 	eb := event.NewEventBus(nil, nil)
-	_, _ = eb.SubscribeWithBuffer(testEvtType, 1)
+	_, subCh := eb.SubscribeWithBuffer(testEvtType, 1)
 	eb.Publish(testEvtType, event.NewEvent(testEvtType, "fill"))
 
+	started := make(chan struct{})
 	published := make(chan struct{})
 	go func() {
 		defer close(published)
+		close(started)
 		eb.Publish(testEvtType, event.NewEvent(testEvtType, "blocked"))
 	}()
 
+	testutil.RequireReceive(
+		t, started, time.Second, "publisher did not start",
+	)
+	require.Len(t, subCh, cap(subCh), "the subscriber buffer must be full")
 	testutil.RequireNoReceive(
 		t,
 		published,
@@ -249,15 +265,21 @@ func TestPublishUnblocksOnUnsubscribe(t *testing.T) {
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
 
-	subId, _ := eb.SubscribeWithBuffer(testEvtType, 1)
+	subId, subCh := eb.SubscribeWithBuffer(testEvtType, 1)
 	eb.Publish(testEvtType, event.NewEvent(testEvtType, "fill"))
 
+	started := make(chan struct{})
 	published := make(chan struct{})
 	go func() {
 		defer close(published)
+		close(started)
 		eb.Publish(testEvtType, event.NewEvent(testEvtType, "blocked"))
 	}()
 
+	testutil.RequireReceive(
+		t, started, time.Second, "publisher did not start",
+	)
+	require.Len(t, subCh, cap(subCh), "the subscriber buffer must be full")
 	testutil.RequireNoReceive(
 		t,
 		published,
@@ -283,12 +305,14 @@ func TestPublishAsyncUnblocksOnStop(t *testing.T) {
 	const testEvtType event.EventType = "test.async.stop.unblock"
 
 	eb := event.NewEventBus(nil, nil)
-	_, _ = eb.SubscribeWithBuffer(testEvtType, 1)
+	_, subCh := eb.SubscribeWithBuffer(testEvtType, 1)
 
 	// Fill the subscriber, park every async worker, then saturate the queue.
 	total := event.AsyncQueueSize + event.AsyncWorkerPoolSize + 8
+	started := make(chan struct{})
 	result := make(chan bool, 1)
 	go func() {
+		close(started)
 		for i := range total {
 			if !eb.PublishAsync(testEvtType, event.NewEvent(testEvtType, i)) {
 				result <- false
@@ -298,6 +322,14 @@ func TestPublishAsyncUnblocksOnStop(t *testing.T) {
 		result <- true
 	}()
 
+	testutil.RequireReceive(
+		t, started, time.Second, "publisher did not start",
+	)
+	require.Eventually(t, func() bool {
+		return len(subCh) == cap(subCh)
+	}, time.Second, time.Millisecond,
+		"the subscriber buffer must fill while nothing drains it",
+	)
 	testutil.RequireNoReceive(
 		t,
 		result,

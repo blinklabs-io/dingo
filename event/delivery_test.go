@@ -66,16 +66,20 @@ func TestChannelSubscriberDeliverWaitsForCapacity(t *testing.T) {
 	}
 
 	// Deliver to the full buffer must wait rather than drop.
+	started := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
+		close(started)
 		done <- sub.Deliver(NewEvent("test", "overflow"))
 	}()
-
+	<-started
+	if len(sub.ch) != cap(sub.ch) {
+		t.Fatal("expected the delivery buffer to be full")
+	}
 	select {
 	case <-done:
 		t.Fatal("Deliver returned while the buffer was full; event was dropped")
-	case <-time.After(50 * time.Millisecond):
-		// Expected: Deliver is waiting for capacity.
+	default:
 	}
 
 	// Draining one slot releases the waiting Deliver.

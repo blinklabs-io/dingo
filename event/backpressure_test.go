@@ -40,15 +40,18 @@ func TestDeliverWaitsForCapacityThenDelivers(t *testing.T) {
 	sub := newChannelSubscriber("test", 1, nil)
 	require.NoError(t, sub.Deliver(NewEvent("test", "first")))
 
+	started := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
+		close(started)
 		done <- sub.Deliver(NewEvent("test", "second"))
 	}()
-
+	<-started
+	require.Len(t, sub.ch, cap(sub.ch), "the delivery buffer must be full")
 	select {
 	case <-done:
 		t.Fatal("Deliver returned while the buffer was full")
-	case <-time.After(50 * time.Millisecond):
+	default:
 	}
 
 	require.Equal(t, "first", (<-sub.ch).Data)
@@ -72,16 +75,18 @@ func TestDeliverUnblocksOnClose(t *testing.T) {
 	sub := newChannelSubscriber("test", 1, nil)
 	require.NoError(t, sub.Deliver(NewEvent("test", "fill")))
 
+	started := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
+		close(started)
 		done <- sub.Deliver(NewEvent("test", "blocked"))
 	}()
-
-	// Make sure Deliver is actually parked before closing.
+	<-started
+	require.Len(t, sub.ch, cap(sub.ch), "the delivery buffer must be full")
 	select {
 	case <-done:
 		t.Fatal("Deliver returned while the buffer was full")
-	case <-time.After(50 * time.Millisecond):
+	default:
 	}
 
 	closed := make(chan struct{})
@@ -115,15 +120,18 @@ func TestDeliverBlockingUnblocksOnClose(t *testing.T) {
 	sub := newChannelSubscriber("test", 1, nil)
 	require.NoError(t, sub.DeliverBlocking(NewEvent("test", "fill")))
 
+	started := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
+		close(started)
 		done <- sub.DeliverBlocking(NewEvent("test", "blocked"))
 	}()
-
+	<-started
+	require.Len(t, sub.ch, cap(sub.ch), "the delivery buffer must be full")
 	select {
 	case <-done:
 		t.Fatal("DeliverBlocking returned while the buffer was full")
-	case <-time.After(50 * time.Millisecond):
+	default:
 	}
 
 	sub.Close()

@@ -363,16 +363,20 @@ func TestPublishBlocksOnFullChannelUntilDrained(t *testing.T) {
 		eb.Publish(typ, NewEvent(typ, i))
 	}
 
+	started := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		close(started)
 		eb.Publish(typ, NewEvent(typ, "overflow"))
 	}()
 
+	<-started
+	require.Len(t, ch, cap(ch), "the subscriber buffer must be full")
 	select {
 	case <-done:
 		t.Fatal("Publish returned while the subscriber buffer was full")
-	case <-time.After(50 * time.Millisecond):
+	default:
 		// Expected: the publisher is backpressured.
 	}
 
