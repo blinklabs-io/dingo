@@ -404,8 +404,7 @@ func RunFromGenesis(
 									dingoSet[key] = canonicalUTxOEntry(out)
 								}
 								result.UTxORefCount = len(dingoSet)
-								result.UTxOMissing, result.UTxOExtra, result.UTxODiffers =
-									UTxODiff(utxoRefs, dingoSet)
+								result.UTxOMissing, result.UTxOExtra, result.UTxODiffers = UTxODiff(utxoRefs, dingoSet)
 							}
 							_ = lsqUtxo.Client.Release() //nolint:errcheck
 							utxoConn.Close()             //nolint:errcheck
