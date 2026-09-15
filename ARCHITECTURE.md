@@ -5734,6 +5734,17 @@ set):
   Sign mode applies the same rule, recording a failure on every path that
   tears the connection down and clearing the backoff only on a verified
   signature.
+
+  Only a read that has not yet produced a value may be undone by the context
+  that bounded it. `AwaitPushedKey` runs a watcher that invalidates the
+  connection when its caller's context is cancelled, which is what lets a
+  bounded startup give up on a dead agent; the watcher and the read settle
+  against each other exactly once, so the cancellation every such caller owes
+  its context after a successful push cannot take that connection down with
+  it. Without that exclusivity the node dropped a healthy connection on
+  startup about half the time -- a closed channel and a cancelled context are
+  both ready cases of one `select`, chosen at random -- and the rotation the
+  agent had already pushed onto it was seen only after a redial.
 - **sign**: the node forwards header bytes to the agent and receives
   signatures back; the KES secret key never enters the node process.
   `PoolCredentials.LoadFromAgentSign` installs VRF/opcert material as usual

@@ -388,12 +388,43 @@ func (c *Client) AwaitPushedKey(ctx context.Context) (PushedKey, error) {
 	conn := c.conn
 	c.mu.Unlock()
 
+	// The watcher exists to unblock a read that ctx cancelled, so its
+	// invalidation and this call's own settlement have to be mutually
+	// exclusive. Signalling completion by closing readDone alone is not
+	// enough: a select whose cases are both ready picks uniformly at random,
+	// and the goroutine below is routinely still unscheduled when the caller
+	// cancels a startup context it has already bounded successfully. The
+	// watcher then tears down a healthy connection roughly half the time,
+	// and the caller's next AwaitPushedKey has to redial to find the push
+	// the agent had already queued on the connection it lost.
+	//
+	// settle names the winner once. After the read has returned a value the
+	// connection belongs to the Client and not to the call that dialed it,
+	// so a later cancellation of that call's context must leave it alone.
+	var (
+		settleMu sync.Mutex
+		settled  bool
+	)
+	settle := func() bool {
+		settleMu.Lock()
+		defer settleMu.Unlock()
+		if settled {
+			return false
+		}
+		settled = true
+		return true
+	}
 	readDone := make(chan struct{})
-	defer close(readDone)
+	defer func() {
+		settle()
+		close(readDone)
+	}()
 	go func() {
 		select {
 		case <-ctx.Done():
-			c.invalidateConn(conn)
+			if settle() {
+				c.invalidateConn(conn)
+			}
 		case <-readDone:
 		}
 	}()
@@ -440,6 +471,10 @@ func (c *Client) AwaitPushedKey(ctx context.Context) (PushedKey, error) {
 		c.invalidateConn(conn)
 		return PushedKey{}, err
 	}
+	// Settled here rather than left to the deferred settle: the value is in
+	// hand, so the connection stops being this call's to lose from this
+	// point, not from wherever the deferred call happens to run.
+	settle()
 	return pk, nil
 }
 
