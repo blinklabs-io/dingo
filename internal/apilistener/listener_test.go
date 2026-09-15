@@ -863,7 +863,12 @@ func TestWatchShutsDownOnContextCancellation(t *testing.T) {
 // close. Reachable when a context is cancelled between Publish and Watch.
 func TestWatchOnAReplacedServerExitsImmediately(t *testing.T) {
 	l := newListener()
-	stale := &http.Server{Addr: "127.0.0.1:0"} //nolint:gosec // test server
+	stale, err := publishBound(l, "127.0.0.1:0")
+	require.NoError(t, err)
+	require.NoError(t, stopNow(t, l))
+
+	replacement, err := publishBound(l, "127.0.0.1:0")
+	require.NoError(t, err)
 
 	exited := l.Watch(t.Context(), stale, Graceful)
 
@@ -871,5 +876,5 @@ func TestWatchOnAReplacedServerExitsImmediately(t *testing.T) {
 		t, exited, 5*time.Second,
 		"a monitor with no server of its own must not wait",
 	)
-	require.Nil(t, l.Server())
+	require.Same(t, replacement, l.Server())
 }

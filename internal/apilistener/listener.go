@@ -232,6 +232,12 @@ func (l *Listener) detachLocked() {
 func (l *Listener) take(match *http.Server) (*job, chan struct{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.takeLocked(match)
+}
+
+// takeLocked is take with l.mu held. Stop uses it to inspect the start gate
+// and detach without allowing a new Start between those operations.
+func (l *Listener) takeLocked(match *http.Server) (*job, chan struct{}) {
 	// The identity check comes first, and deliberately also covers l.srv being
 	// nil. A caller that named a server and did not get it has nothing of its
 	// own left either way -- already detached, or replaced by a later Start --
@@ -286,8 +292,8 @@ func (l *Listener) Stop(ctx context.Context, fn ShutdownFunc) error {
 	for {
 		l.mu.Lock()
 		startDone := l.startDone
-		l.mu.Unlock()
 		if startDone != nil {
+			l.mu.Unlock()
 			// A start is in flight and may not have published its server yet.
 			// Detaching now would find nothing, report the server down, and
 			// leave that start to bind the port afterwards.
@@ -302,7 +308,11 @@ func (l *Listener) Stop(ctx context.Context, fn ShutdownFunc) error {
 			// spinning.
 			continue
 		}
-		j, inFlight := l.take(nil)
+		// Keep the gate check and detach under one lock. Otherwise a new Start
+		// can begin after the check and publish after take returns, outliving
+		// this Stop call.
+		j, inFlight := l.takeLocked(nil)
+		l.mu.Unlock()
 		if j == nil {
 			return l.awaitTeardown(ctx, inFlight)
 		}

@@ -165,6 +165,12 @@ func isNilInterface(v any) bool {
 }
 
 func (u *Utxorpc) Start(ctx context.Context) error {
+	startDone, err := u.listener.BeginStart()
+	if err != nil {
+		return err
+	}
+	defer u.listener.EndStart(startDone)
+
 	if isNilInterface(u.config.EventBus) {
 		return errors.New("utxorpc: EventBus is required")
 	}
@@ -177,12 +183,6 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 	if u.config.Mempool != nil && isNilInterface(u.config.Mempool) {
 		return errors.New("utxorpc: Mempool must not be a typed nil")
 	}
-	startDone, err := u.listener.BeginStart()
-	if err != nil {
-		return err
-	}
-	defer u.listener.EndStart(startDone)
-
 	server, bindDone, err := u.listener.Publish(func() *http.Server {
 		return u.buildServer()
 	})
