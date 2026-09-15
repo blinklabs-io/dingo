@@ -5049,17 +5049,31 @@ it; a retry or the fallback runs precisely because the primary chain tip moved
 during selection, so that is the one window in which the ledger-applied tip and
 the primary chain tip are guaranteed to have moved apart, and the applied tip
 alone says nothing about it. The re-check therefore applies every gate
-described below against fresh readings of both tips: a parent slot (the
-greater of the two tips) past the forged slot declines it without building; an
-applied tip at the slot is the same slot battle the entry gate declines, and is
-counted in `dingo_metrics_slotBattlesTotal_int` wherever it is detected; a
-primary chain tip already holding an unapplied block at the slot is counted as
-`unapplied_rival_at_leader_slot`; and `primary_tip_behind_applied`,
+described below against fresh readings of both tips, in the order the entry
+gates take them: a parent slot (the greater of the two tips) past the forged
+slot declines it without building; a primary chain tip already holding an
+unapplied block at the slot is counted as `unapplied_rival_at_leader_slot`;
+an applied tip that has fallen more than `forgeSyncToleranceSlots` behind the
+network refuses on `dingo_forge_sync_skip_total`; `primary_tip_behind_applied`,
 `primary_tip_hash_diverged`, `slot_gap` and the opt-in staleness bounds refuse
-as they do at entry, counted on `dingo_forge_stale_tip_skip_total`. The two
+as they do at entry, counted on `dingo_forge_stale_tip_skip_total`; and last,
+an applied tip at the slot is the same slot battle the entry gate declines,
+counted in `dingo_metrics_slotBattlesTotal_int` wherever it is detected. The
+order is what makes the counters agree: entry acts on a stale tip after the
+leader check and only then on the slot battle, so a reading that trips both --
+an applied tip at the forged slot with a diverged or behind primary chain tip
+-- must count as a stale tip here too.
+
+The upstream-sync gate is re-applied for the same reason the others are, and
+its input is the one that can move BACKWARDS: the applied tip. A rollback
+during selection leaves a node that was inside `forgeSyncToleranceSlots` at
+entry outside it by the time the retry or the transaction-free fallback
+builds, so deciding that gate once at entry let exactly the block it exists to
+prevent reach the wire, with `dingo_forge_sync_skip_total` flat. The two
 inputs that are not re-read are the corroborated endorser-block slot and the
 upstream sync reading, which are network evidence taken once per forge cycle
-and carried to each attempt. Without the re-check the forger would compute a
+and carried to each attempt; the sync gate and the staleness bounds are still
+re-decided against that carried pair and each attempt's freshly read tip. Without the re-check the forger would compute a
 VRF proof and KES-sign a block whose parent slot is not below its own, and
 nothing local rejects that before diffusion: `Chain.AddLocalBlock` checks only
 prev-hash and block-number contiguity, so the block is admitted and broadcast
@@ -5071,9 +5085,18 @@ aborted ended, by `result`: `retried` when a later attempt in the same slot
 produced the adopted block, `empty` when the transaction-free fallback did,
 and `lost` when the slot produced no block at all. The first two are counted
 after local adoption rather than after the build, so a block that
-self-validation dropped or `AddBlock` rejected counts as `lost`: every aborted
-selection lands in exactly one bucket, and the bucket says what the slot
-produced.
+self-validation dropped or `AddBlock` rejected counts as `lost`.
+
+This vector covers aborted slots that reached a build, not every aborted slot.
+An abort whose re-check is then refused by the tip gates above produces no
+block and is counted on none of the three results -- refusing before building
+is not a fallback outcome, and reporting one would credit or blame a path that
+never ran. Those slots are accounted for as the refusals they are, on
+`dingo_metrics_slotBattlesTotal_int`, `dingo_forge_stale_tip_skip_total` or
+`dingo_forge_sync_skip_total` according to which gate refused them. A slot the
+chain took from us is not a forge this node lost, and `{result="lost"}` should
+not absorb it: read the two together when asking what an aborted selection
+cost.
 
 Selection is bounded by the chain moving, not by the clock, unless an operator
 asks otherwise. `ForgeSelectionDeadlineMargin` is off by default; setting it
