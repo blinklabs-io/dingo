@@ -31,6 +31,7 @@ var koiosFlags struct {
 	apiKey            string
 	baseURL           string
 	allowInsecureHTTP bool
+	verbose           bool
 }
 
 func fromGenesisCommand() *cobra.Command {
@@ -73,6 +74,10 @@ epoch found a real mismatch.`,
 		&koiosFlags.allowInsecureHTTP, "koios-allow-insecure-http", false,
 		"allow a plain-HTTP --koios-base-url (only for a trusted local/test instance)",
 	)
+	cmd.Flags().BoolVar(
+		&koiosFlags.verbose, "verbose", false,
+		"log each individual UTxO ref that differs (address/amount/assets/datum/scriptref), not just per-epoch counts",
+	)
 	return cmd
 }
 
@@ -99,8 +104,12 @@ func fromGenesisRun(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
+	logLevel := slog.LevelInfo
+	if koiosFlags.verbose {
+		logLevel = slog.LevelDebug
+	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
+		Level: logLevel,
 	}))
 
 	var (
