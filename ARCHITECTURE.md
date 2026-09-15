@@ -5314,6 +5314,120 @@ before VRF/KES signing (`selected parent changed during block assembly`)
 rather than relying solely on step 7's `Chain.AddLocalBlock` check, which
 still runs as the final backstop against any race not closed here.
 
+Neither rejection costs the leader slot. A candidate rejected by the snapshot
+check or the parent-tip check is re-selected inside the same slot, against the
+state the publication produced, until the slot's remaining time falls below
+`ForgeSelectionRetryMargin` or `ForgeSelectionMaxRetries` attempts have been
+made. When no attempt can complete, the forger builds a transaction-free block
+for the slot rather than abandoning it: a pool's reward for a slot does not
+depend on what its block carries, so an empty block is worth the whole slot,
+and it still carries the slot's Leios payload. The fallback needs a
+`BlockBuilder` that accepts the empty-body constraint; an embedder's builder
+that does not simply loses the slot as before.
+
+Every build attempt for a slot -- the first, each retry, and the fallback --
+re-reads both tips and decides the slot again with the same function the
+pre-selection gates used at entry (`evaluateTipGates`, applied through
+`tipGatesRefuseSlot`), so the two decisions cannot drift apart. The entry gates
+decide the slot from evidence read before leader selection, and Leios
+endorser-block production, the KES step and each selection pass all run after
+it; a retry or the fallback runs precisely because the primary chain tip moved
+during selection, so that is the one window in which the ledger-applied tip and
+the primary chain tip are guaranteed to have moved apart, and the applied tip
+alone says nothing about it. The re-check therefore applies every gate
+described below against fresh readings of both tips, in the order the entry
+gates take them: a parent slot (the greater of the two tips) past the forged
+slot declines it without building; a primary chain tip already holding an
+unapplied block at the slot is counted as `unapplied_rival_at_leader_slot`;
+an applied tip that has fallen more than `forgeSyncToleranceSlots` behind the
+network refuses on `dingo_forge_sync_skip_total`; `primary_tip_behind_applied`,
+`primary_tip_hash_diverged`, `slot_gap` and the opt-in staleness bounds refuse
+as they do at entry, counted on `dingo_forge_stale_tip_skip_total`; and last,
+an applied tip at the slot is the same slot battle the entry gate declines,
+counted in `dingo_metrics_slotBattlesTotal_int` wherever it is detected. The
+order is what makes the counters agree: entry acts on a stale tip after the
+leader check and only then on the slot battle, so a reading that trips both --
+an applied tip at the forged slot with a diverged or behind primary chain tip
+-- must count as a stale tip here too.
+
+The upstream-sync gate is re-applied for the same reason the others are, and
+its input is the one that can move BACKWARDS: the applied tip. A rollback
+during selection leaves a node that was inside `forgeSyncToleranceSlots` at
+entry outside it by the time the retry or the transaction-free fallback
+builds, so deciding that gate once at entry let exactly the block it exists to
+prevent reach the wire, with `dingo_forge_sync_skip_total` flat. The two
+inputs that are not re-read are the corroborated endorser-block slot and the
+upstream sync reading, which are network evidence taken once per forge cycle
+and carried to each attempt; the sync gate and the staleness bounds are still
+re-decided against that carried pair and each attempt's freshly read tip. Without the re-check the forger would compute a
+VRF proof and KES-sign a block whose parent slot is not below its own, and
+nothing local rejects that before diffusion: `Chain.AddLocalBlock` checks only
+prev-hash and block-number contiguity, so the block is admitted and broadcast
+to peers, and the slot-order check (`ledger.validateBlockOrder`) runs only
+later, from `ledgerProcessBlock`, when the ledger applies the block.
+
+`dingo_forge_selection_fallback_total` reports how slots whose selection was
+aborted ended, by `result`: `retried` when a later attempt in the same slot
+produced the adopted block, `empty` when the transaction-free fallback did,
+and `lost` when the slot produced no block at all. The first two are counted
+after local adoption rather than after the build, so a block that
+self-validation dropped or `AddBlock` rejected counts as `lost`.
+
+This vector covers aborted slots that reached a build, not every aborted slot.
+An abort whose re-check is then refused by the tip gates above produces no
+block and is counted on none of the three results -- refusing before building
+is not a fallback outcome, and reporting one would credit or blame a path that
+never ran. Those slots are accounted for as the refusals they are, on
+`dingo_metrics_slotBattlesTotal_int`, `dingo_forge_stale_tip_skip_total` or
+`dingo_forge_sync_skip_total` according to which gate refused them -- with one
+exception. A parent slot past the forged slot refuses on
+`errChainTipAheadOfSlot` and moves none of those three; the only counter that
+records it is `cardano_node_metrics_Forge_could_not_forge_int`, which every
+refused build attempt increments.
+`TestForgeRefusesTheFallbackWhenThePrimaryTipPassesTheForgedSlot` pins that
+reading: no fallback result, no slot battle, no stale-tip skip. It is also the
+refusal to expect on a producer whose leader gate clears seconds into its own
+slot -- the trace in issue #3985 -- because the chain has moved past the slot
+rather than merely disagreeing with this node about it, so an operator
+diagnosing a late producer should look for it on `could_not_forge` and find
+the three gate counters flat.
+
+That gate is deliberately left without a counter of its own. The entry gate
+does not count it either: it logs the skip and returns. Adding one only on the
+re-check path would re-create, in reverse, the entry/re-check split the
+re-check exists to remove -- the same reading would move a series or not
+purely on whether the chain passed the slot before block production started or
+during it. What the gate reports is also not what the other three report: it
+is not a contest for the slot and not a node behind the network, only a slot
+the chain has already left, and `could_not_forge` already says a leader slot
+produced nothing.
+
+A slot the chain took from us is not a forge this node lost, and
+`{result="lost"}` should not absorb it: read the fallback vector, the three
+gate counters and `could_not_forge` together when asking what an aborted
+selection cost.
+
+Selection is bounded by the chain moving, not by the clock, unless an operator
+asks otherwise. `ForgeSelectionDeadlineMargin` is off by default; setting it
+stops a selection pass at the end of the slot less that margin and forges what
+has been selected so far, trading a fuller block for one finished inside its
+slot. It is deliberately separate from `ForgeSelectionRetryMargin`, which
+decides only whether another attempt is worth starting and never shortens a
+pass. Within a pass, a candidate is screened against the block-body budget
+before it is re-validated -- re-validation is the expensive step by orders of
+magnitude -- and the exact encoded-body check runs after re-validation, so only
+a transaction the block could actually have carried can end the pass.
+
+Each leader slot that reaches block production emits one `forge timing` log
+line, whatever becomes of it. It carries the slot, the `leader_check` and
+`pre_build` intervals, the `build` duration and the number of build
+`attempts`, the `tx_count`, an `outcome` of `forged`, `empty`, or `lost`, and
+an `adopted` boolean. `outcome` describes what production produced and
+`adopted` whether it reached the chain, so a block dropped by self-validation
+or rejected by `AddBlock` reads as `outcome=forged, adopted=false` rather than
+as a success. Reconstructing those intervals from block timestamps after the
+fact is the only reason a lost slot previously took a field trace to diagnose.
+
 The forger tracks slot battles (competing blocks at the same slot) and skips forging when the node is not sufficiently synced, controlled by `forgeSyncToleranceSlots` and `forgeStaleGapThresholdSlots`.
 
 The forger additionally refuses to forge when the node's own two views of its
