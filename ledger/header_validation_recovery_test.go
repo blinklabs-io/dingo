@@ -28,6 +28,7 @@ import (
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -224,6 +225,7 @@ func TestLedgerProcessBlocksRecoversReadChainValidationFailure(t *testing.T) {
 			Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	ls.metrics.init(prometheus.NewRegistry())
 	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
 
 	done := make(chan struct{})
