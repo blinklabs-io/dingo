@@ -96,6 +96,19 @@ type stateMetrics struct {
 	// of being rejected and denied. A rising value with a flat local tip
 	// means our upstreams are lagging us, not that anything diverged.
 	chainsyncBehindPeers prometheus.Counter
+	// Incremented every time a fetched block fails to extend the chain tip
+	// (chain.BlockNotFitChainTipError). A handful from one connection during
+	// a brief rollback/reorg race is normal; a sustained high rate from one
+	// connection is the signal noteNonExtendingBlockRejection uses to
+	// recycle it (see nonExtendingBlockFloodRecycles) -- this counter makes
+	// that pattern visible before it crosses the recycle threshold, and
+	// across all connections even when none individually crosses it. See
+	// issue #4272.
+	nonExtendingBlockRejections prometheus.Counter
+	// Incremented each time noteNonExtendingBlockRejection actually recycles
+	// a connection for flooding non-extending blocks (as opposed to every
+	// individual rejection, counted above). See issue #4272.
+	nonExtendingBlockFloodRecycles prometheus.Counter
 	// Incremented when at-tip validation recovery detects a non-converging,
 	// descending series of distinct failures and holds at the ledger tip
 	// instead of rewinding the primary chain ever deeper. A rising value
@@ -192,6 +205,18 @@ type stateMetrics struct {
 	// value on a Mithril-bootstrapped node explains a stake shortfall; a
 	// rising value on any node is a live divergence from the network.
 	skippedStakeRewardRounds prometheus.Counter
+	// Incremented each time GetStakeDistribution or GetPoolDistr2 omits a
+	// pool that holds stake at the queried snapshot but has no resolvable
+	// registration/VRF key hash on record. This is a deliberate fallback
+	// (see poolStakeDistribution's own comment), not a failure, so it
+	// does not abort the query -- but a sustained nonzero value means a
+	// real cross-node comparison tool would see dingo's reply as short by
+	// that many pools, the exact condition blinklabs-io/dingo#4152 found
+	// via cmd/node-parity against a real cardano-node without any other
+	// visible symptom. Making this a metric rather than only the existing
+	// WARN log lets that be caught by an alert instead of requiring a
+	// manual diff to notice again.
+	poolStakeDistributionOmittedPools prometheus.Counter
 	// Snapshot of gouroboros/pipeline.PipelineMetrics.Stats() for the
 	// block-processing pipeline (issue #1894), refreshed after every batch
 	// decodeReadChainBatch submits to it. These are gauges rather than
@@ -344,6 +369,13 @@ func (m *stateMetrics) incSkippedStakeRewardRounds() {
 		return
 	}
 	m.skippedStakeRewardRounds.Inc()
+}
+
+func (m *stateMetrics) incPoolStakeDistributionOmittedPool() {
+	if m == nil || m.poolStakeDistributionOmittedPools == nil {
+		return
+	}
+	m.poolStakeDistributionOmittedPools.Inc()
 }
 
 // incBlockPipelineExpectedEta0Error records a block-processing pipeline
@@ -621,6 +653,18 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 			Help: "times a chainsync peer asked for a rollback past the security parameter while its own tip was a strict ancestor of ours (peer behind on our chain, kept attached rather than denied)",
 		},
 	)
+	m.nonExtendingBlockRejections = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_chainsync_non_extending_blocks_total",
+			Help: "fetched blocks that failed to extend the chain tip (chain.BlockNotFitChainTipError). A handful is normal during a brief rollback/reorg race; a sustained high rate from one connection triggers recycling it, see dingo_chainsync_non_extending_block_flood_recycles_total",
+		},
+	)
+	m.nonExtendingBlockFloodRecycles = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_chainsync_non_extending_block_flood_recycles_total",
+			Help: "connections recycled for repeatedly serving blocks that do not extend the chain tip within a bounded window (issue #4272)",
+		},
+	)
 	m.atTipRecoveryNonConverging = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_attip_recovery_nonconverging_total",
@@ -726,6 +770,12 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_skipped_stake_reward_rounds_total",
 			Help: "epoch-boundary reward rounds skipped for want of their inputs; each one leaves reward balances and the leadership stake distribution permanently short by that epoch's rewards, which makes the node reject canonical blocks near the leader-eligibility threshold",
+		},
+	)
+	m.poolStakeDistributionOmittedPools = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_pool_stake_distribution_omitted_pools_total",
+			Help: "pools omitted from GetStakeDistribution/GetPoolDistr2 because they held snapshot stake but had no resolvable registration/VRF key hash on record",
 		},
 	)
 	m.pipelineStuck = promautoFactory.NewGauge(
