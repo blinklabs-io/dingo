@@ -512,12 +512,19 @@ func TestStoreCheckpointTickerIndependentOfMaintenance(t *testing.T) {
 	require.NoError(t, err)
 	maintenanceStarted := make(chan struct{})
 	maintenanceRelease := make(chan struct{})
+	var maintenanceCalls atomic.Uint32
 	var checkpointCalls atomic.Uint32
 	store, err := New(Config{
 		WriteDB: db,
 		Dialect: SQLiteDialect(),
 		Maintenance: func(ctx context.Context) error {
-			close(maintenanceStarted)
+			// The 1ms MaintenanceInterval can re-admit and call this again
+			// before the test calls store.Close(), which is what actually
+			// stops the ticker: guard the one-shot close(maintenanceStarted)
+			// against a second invocation rather than closing it unconditionally.
+			if maintenanceCalls.Add(1) == 1 {
+				close(maintenanceStarted)
+			}
 			select {
 			case <-maintenanceRelease:
 			case <-ctx.Done():
