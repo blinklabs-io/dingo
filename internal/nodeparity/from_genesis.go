@@ -197,7 +197,37 @@ func RunFromGenesis(
 		utxoRefs        UTxOSet
 		utxoBaselineErr error
 		utxoAttempted   bool
+		pendingTxHashes []string
 	)
+
+	// flushPendingTxInfos applies every buffered transaction hash's
+	// input/output changes to utxoRefs in one koios.GetTxInfos call (which
+	// itself still chunks at koiosparity.KoiosTxInfoBatchSize internally),
+	// instead of the one-call-per-block approach this replaced: confirmed
+	// live that firing a separate /tx_info round trip for every block with
+	// at least one transaction made a from-genesis run's epoch cadence
+	// collapse from seconds to tens of minutes per epoch as real chain
+	// activity picked up -- the per-call network latency to Koios, not
+	// payload size, was the actual bottleneck. Buffering up to
+	// KoiosTxInfoBatchSize hashes across multiple blocks before flushing
+	// cuts the number of round trips roughly in proportion to the average
+	// number of transactions per block.
+	flushPendingTxInfos := func() {
+		if utxoRefs == nil || len(pendingTxHashes) == 0 {
+			return
+		}
+		txInfos, err := koios.GetTxInfos(ctx, pendingTxHashes)
+		if err != nil {
+			logf(
+				"nodeparity: koios tx_info fetch failed for %d pending tx(es), "+
+					"UTxO reconstruction may now drift: %v",
+				len(pendingTxHashes), err,
+			)
+		} else {
+			UTxOChanges(utxoRefs, txInfos)
+		}
+		pendingTxHashes = pendingTxHashes[:0]
+	}
 
 	csConn, connErr := ouroboros.New(
 		ouroboros.WithConnection(rawConn),
@@ -241,22 +271,13 @@ func RunFromGenesis(
 							)
 						}
 					} else if utxoRefs != nil {
-						txs := block.Transactions()
-						if len(txs) > 0 {
-							hashes := make([]string, len(txs))
-							for i, tx := range txs {
-								hashes[i] = tx.Hash().String()
-							}
-							txInfos, err := koios.GetTxInfos(ctx, hashes)
-							if err != nil {
-								logf(
-									"nodeparity: koios tx_info fetch failed, "+
-										"UTxO reconstruction may now drift: %v",
-									err,
-								)
-							} else {
-								UTxOChanges(utxoRefs, txInfos)
-							}
+						for _, tx := range block.Transactions() {
+							pendingTxHashes = append(
+								pendingTxHashes, tx.Hash().String(),
+							)
+						}
+						if len(pendingTxHashes) >= koiosparity.KoiosTxInfoBatchSize {
+							flushPendingTxInfos()
 						}
 					}
 
@@ -266,6 +287,12 @@ func RunFromGenesis(
 					}
 					haveLastEpoch = true
 					lastEpoch = epoch
+
+					// About to Acquire and compare at this exact point --
+					// flush any hashes still buffered below the threshold
+					// above so the reconstruction is current through this
+					// block, not just through the last flush.
+					flushPendingTxInfos()
 
 					point := pcommon.NewPoint(
 						block.SlotNumber(), block.Hash().Bytes(),
@@ -339,6 +366,12 @@ func RunFromGenesis(
 					// and safer than trying to precisely unwind only the
 					// rolled-back blocks' own changes, and costs only one
 					// GetUTxOWhole call, not repeated per rollback depth.
+					// Any buffered hashes belong to blocks on the
+					// now-abandoned fork -- discard them rather than
+					// applying them on top of the re-baselined (or
+					// disabled) reconstruction below.
+					pendingTxHashes = pendingTxHashes[:0]
+
 					if utxoRefs != nil {
 						refs, err := captureGenesisBaseline(ctx, dingoAddr, magic, point)
 						if err != nil {

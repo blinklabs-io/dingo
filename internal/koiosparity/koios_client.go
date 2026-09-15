@@ -1377,13 +1377,18 @@ func (k *KoiosClient) GetAccountRewardHistory(
 	return items, nil
 }
 
-// koiosTxInfoBatchSize bounds how many transaction hashes go into a single
+// KoiosTxInfoBatchSize bounds how many transaction hashes go into a single
 // /tx_info request: each 64-char hex hash plus JSON quoting/comma overhead is
 // ~70 bytes, so this many hashes stays comfortably under Koios's request-body
 // size cap (confirmed live: an unbatched request for a full block's worth of
 // hashes was rejected outright with a plain-text "Payload too large" body
 // that fails JSON decoding, rather than any structured error).
-const koiosTxInfoBatchSize = 40
+//
+// Exported so a caller accumulating hashes across multiple blocks before
+// calling GetTxInfos (e.g. nodeparity's from-genesis UTxO reconstruction,
+// blinklabs-io/dingo#1900) can flush at the same size GetTxInfos itself
+// batches at, rather than duplicating this number.
+const KoiosTxInfoBatchSize = 40
 
 // KoiosTxInfoUtxoRef is one entry in a KoiosTxInfoItem's Inputs: just enough
 // to identify a UTxO ref ("<tx_hash>#<tx_index>"), not its content -- an
@@ -1509,8 +1514,8 @@ func (k *KoiosClient) GetTxInfos(
 	txHashes []string,
 ) ([]KoiosTxInfoItem, error) {
 	var all []KoiosTxInfoItem
-	for start := 0; start < len(txHashes); start += koiosTxInfoBatchSize {
-		end := min(start+koiosTxInfoBatchSize, len(txHashes))
+	for start := 0; start < len(txHashes); start += KoiosTxInfoBatchSize {
+		end := min(start+KoiosTxInfoBatchSize, len(txHashes))
 		payload := struct {
 			TxHashes []string `json:"_tx_hashes"`
 			Inputs   bool     `json:"_inputs"`
