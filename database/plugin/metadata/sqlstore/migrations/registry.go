@@ -24,6 +24,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/blinklabs-io/dingo/database/models"
 )
 
 // migrationSQL contains immutable, versioned migration resources.
@@ -45,6 +47,8 @@ const (
 	importedPoolBlockCountSchemaRelease        = "imported-pool-block-count"
 	poolDepositHeldSchemaRelease               = "pool-registration-deposit-held"
 	pointerAddressStakeSchemaRelease           = "pointer-address-stake"
+	collateralAssociationSchemaRelease         = "collateral-transaction-associations"
+	rewardStakeVersionRestampSchemaRelease     = "reward-stake-calculation-version-restamp"
 )
 
 // schemaVersions names every migration in ascending version order.
@@ -74,6 +78,12 @@ var schemaVersions = []struct {
 	{Version: 11, Name: importedPoolBlockCountSchemaRelease, Dir: "v11"},
 	{Version: 12, Name: poolDepositHeldSchemaRelease, Dir: "v12"},
 	{Version: 13, Name: pointerAddressStakeSchemaRelease, Dir: "v13"},
+	{Version: 14, Name: collateralAssociationSchemaRelease, Dir: "v14"},
+	{
+		Version: 15,
+		Name:    rewardStakeVersionRestampSchemaRelease,
+		Dir:     "v15",
+	},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -146,6 +156,10 @@ func registryForDialect(dialect string) ([]Migration, error) {
 		if version.Name == poolDepositHeldSchemaRelease {
 			migration.BackfillRevision = "1"
 			migration.Backfill = poolDepositHeldBackfill
+		}
+		if version.Name == rewardStakeVersionRestampSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = rewardStakeVersionRestampBackfill
 		}
 		ret = append(ret, migration)
 	}
@@ -564,6 +578,196 @@ func committeeTermStartBackfill(
 	}, nil
 }
 
+const (
+	restampCursorPoolPhase   = "P"
+	restampCursorRewardPhase = "R"
+)
+
+// rewardStakeVersionRestampBackfill re-stamps snapshot rows a prior
+// RewardStakeCalculationVersion bump left behind, in two phases encoded in
+// the cursor ("P:<id>" then "R:<id>"), so upgrading in place only forces a
+// rebootstrap for the epochs the version bump actually changed (dingo #4026).
+//
+// pool_stake_snapshot's stored values never depended on calculation version
+// -- see the TotalActiveStake comment in ledger/snapshot/rotation.go -- so
+// every stale row there is re-stamped unconditionally. reward_snapshot's
+// mark-type TotalActiveStake did change (a version-1 row understates it for
+// any epoch that excluded a pool from reward-input distribution); a stale
+// row is only re-stamped when it already agrees with the epoch's
+// independently-recorded epoch_summary.total_active_stake, which never
+// depended on calculation version either. A row that disagrees is left
+// stale on purpose: StaleConsensusStakeSnapshotsExist still fails closed on
+// it, because reconstructing the correct value requires replaying that
+// epoch's stake distribution, which this offline, row-local backfill cannot
+// do.
+func rewardStakeVersionRestampBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	phase, lastID, err := parseRestampCursor(batch.Cursor)
+	if err != nil {
+		return BatchResult{}, err
+	}
+	if phase == restampCursorPoolPhase {
+		lastID, rowCount, done, err := restampPoolStakeSnapshotBatch(
+			ctx, batch, lastID,
+		)
+		if err != nil {
+			return BatchResult{}, err
+		}
+		if !done {
+			return BatchResult{
+				Cursor: formatRestampCursor(restampCursorPoolPhase, lastID),
+				Rows:   rowCount,
+			}, nil
+		}
+		// Pool phase exhausted; hand off to the reward phase from the start.
+		return BatchResult{
+			Cursor: formatRestampCursor(restampCursorRewardPhase, 0),
+			Rows:   rowCount,
+		}, nil
+	}
+	lastID, rowCount, done, err := restampRewardSnapshotBatch(
+		ctx, batch, lastID,
+	)
+	if err != nil {
+		return BatchResult{}, err
+	}
+	return BatchResult{
+		Cursor: formatRestampCursor(restampCursorRewardPhase, lastID),
+		Rows:   rowCount,
+		Done:   done,
+	}, nil
+}
+
+func parseRestampCursor(cursor string) (string, int64, error) {
+	if cursor == "" {
+		return restampCursorPoolPhase, 0, nil
+	}
+	phase, idPart, ok := strings.Cut(cursor, ":")
+	if !ok {
+		return "", 0, fmt.Errorf(
+			"parse reward stake version restamp cursor: %q",
+			cursor,
+		)
+	}
+	id, err := strconv.ParseInt(idPart, 10, 64)
+	if err != nil {
+		return "", 0, fmt.Errorf(
+			"parse reward stake version restamp cursor: %w",
+			err,
+		)
+	}
+	return phase, id, nil
+}
+
+func formatRestampCursor(phase string, lastID int64) string {
+	return phase + ":" + strconv.FormatInt(lastID, 10)
+}
+
+// restampPoolStakeSnapshotBatch re-stamps up to one batch of stale
+// pool_stake_snapshot rows. Their stored totals never depended on
+// calculation version, so every stale row found is safe to re-stamp.
+func restampPoolStakeSnapshotBatch(
+	ctx context.Context,
+	batch Batch,
+	lastID int64,
+) (int64, int64, bool, error) {
+	rows, err := batch.Tx.QueryContext(ctx, batch.Rebind(
+		"SELECT id FROM pool_stake_snapshot WHERE id > ? AND calculation_version <> ? ORDER BY id LIMIT ?",
+	), lastID, models.RewardStakeCalculationVersion, batch.Limit)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return 0, 0, false, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, 0, false, err
+	}
+	if len(ids) == 0 {
+		return lastID, 0, true, nil
+	}
+	for _, id := range ids {
+		if _, err := batch.Tx.ExecContext(ctx,
+			batch.Rebind(
+				"UPDATE pool_stake_snapshot SET calculation_version = ? WHERE id = ?",
+			),
+			models.RewardStakeCalculationVersion, id,
+		); err != nil {
+			return 0, 0, false, err
+		}
+	}
+	return ids[len(ids)-1], int64(len(ids)), false, nil
+}
+
+// restampRewardSnapshotBatch re-stamps up to one batch of stale mark-type
+// reward_snapshot rows whose total_active_stake already agrees with the same
+// epoch's epoch_summary.total_active_stake -- the value that never depended
+// on calculation version. A row that disagrees names an epoch the version
+// bump actually changed and is left stale; StaleConsensusStakeSnapshotsExist
+// still fails closed on it.
+func restampRewardSnapshotBatch(
+	ctx context.Context,
+	batch Batch,
+	lastID int64,
+) (int64, int64, bool, error) {
+	rows, err := batch.Tx.QueryContext(ctx, batch.Rebind(`
+SELECT reward_snapshot.id, reward_snapshot.total_active_stake,
+       epoch_summary.total_active_stake
+FROM reward_snapshot
+LEFT JOIN epoch_summary ON epoch_summary.epoch = reward_snapshot.epoch
+WHERE reward_snapshot.id > ?
+  AND reward_snapshot.snapshot_type = 'mark'
+  AND reward_snapshot.calculation_version <> ?
+ORDER BY reward_snapshot.id LIMIT ?`),
+		lastID, models.RewardStakeCalculationVersion, batch.Limit,
+	)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	defer rows.Close()
+	var (
+		seenIDs []int64
+		safeIDs []int64
+	)
+	for rows.Next() {
+		var id int64
+		var rewardTotal string
+		var epochTotal sql.NullString
+		if err := rows.Scan(&id, &rewardTotal, &epochTotal); err != nil {
+			return 0, 0, false, err
+		}
+		seenIDs = append(seenIDs, id)
+		if epochTotal.Valid && epochTotal.String == rewardTotal {
+			safeIDs = append(safeIDs, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, 0, false, err
+	}
+	if len(seenIDs) == 0 {
+		return lastID, 0, true, nil
+	}
+	for _, id := range safeIDs {
+		if _, err := batch.Tx.ExecContext(ctx,
+			batch.Rebind(
+				"UPDATE reward_snapshot SET calculation_version = ? WHERE id = ?",
+			),
+			models.RewardStakeCalculationVersion, id,
+		); err != nil {
+			return 0, 0, false, err
+		}
+	}
+	return seenIDs[len(seenIDs)-1], int64(len(seenIDs)), false, nil
+}
+
 var (
 	autoIncrementType = regexp.MustCompile(
 		`(?i)integer PRIMARY KEY AUTOINCREMENT`,
@@ -772,7 +976,12 @@ func loadSQL(path string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read embedded migration %s: %w", path, err)
 	}
-	statements, err := splitSQL(string(content))
+	// The embedded resources carry whatever bytes the working tree held at
+	// build time, so a CRLF checkout would otherwise change the checksum
+	// recorded in schema_migrations and make a database written by one build
+	// report drift against another.
+	normalized := strings.ReplaceAll(string(content), "\r\n", "\n")
+	statements, err := splitSQL(normalized)
 	if err != nil {
 		return nil, fmt.Errorf("parse embedded migration %s: %w", path, err)
 	}
