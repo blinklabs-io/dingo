@@ -188,7 +188,7 @@ func metadatumRawToJSON(raw cbor.RawMessage) (string, error) {
 	decoded, err := lcommon.DecodeMetadatumRaw(raw)
 	if err != nil {
 		if strings.Contains(err.Error(), "duplicate key in metadata map") {
-			return "", fmt.Errorf("%w: %v", ErrJSONUnavailable, err)
+			return "", fmt.Errorf("%w: %w", ErrJSONUnavailable, err)
 		}
 		return "", fmt.Errorf("decode raw metadatum: %w", err)
 	}
