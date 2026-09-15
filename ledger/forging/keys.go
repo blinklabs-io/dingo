@@ -1551,7 +1551,7 @@ func (pc *PoolCredentials) validateAgainstLedger(
 			return true, false, fmt.Errorf(
 				"%w: pool registration has %x but loaded VRF key hashes to %x",
 				ErrVRFKeyHashMismatch,
-				regVRF, ourVRF,
+				regVRF, ourVRF.Bytes(),
 			)
 		}
 		vrfMatched = true

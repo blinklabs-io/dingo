@@ -76,6 +76,12 @@ readers handle that condition per record rather than aborting indexing or
 dropping pagination rows. Duplicate top-level labels remain rejected because
 the relational label key is unique and no deterministic row selection exists.
 
+Transaction application records collateral through the durable
+`utxo_collateral_input` association table. Hydration joins that table per
+transaction, so shared collateral remains visible to every owner; rollback
+deletes only the rolled-back transaction's edges. The legacy scalar marker is
+kept solely for compatibility and migration.
+
 The public compatibility interface is decomposing into narrow capabilities so
 components need not inherit the full historical metadata surface. Three are
 cross-cutting -- `LifecycleStore`, `SettingsStore`, and `TxnStore` (which
@@ -105,13 +111,14 @@ fixtures when schema seeding or assertions require raw SQL.
 Startup reserves the write connection, acquires the backend migration lock,
 rejects unversioned metadata tables (users must delete the data directory,
 including metadata and blob stores, and resync), and validates/resumes versioned expand/backfill/contract work before
-advertising readiness. The current registry has migrations 1 through 13:
+advertising readiness. The current registry has migrations 1 through 14:
 `v1alpha1`, `leios-key-registration`, `token-registry-metadata`,
 `account-import-baseline`, `leios-snapshot-keys`,
 `governance-ratification-history`, `account-import-deposit`,
 `committee-credential-tags`, `committee-term-start-presence`,
 `reward-seed-failure`, `imported-pool-block-count`,
-`pool-registration-deposit-held`, and `pointer-address-stake`. `DATABASE.md`
+`pool-registration-deposit-held`, `pointer-address-stake`, and
+`collateral-transaction-associations`. `DATABASE.md`
 is the source of truth for their schema changes and upgrade behavior. It then checks the read
 pool. File-backed
 SQLite uses a
@@ -1175,6 +1182,16 @@ When `Node.Run()` is called, components are initialized in this order:
     Fresh genesis initialization persists both genesis UTxOs and the effective
     Shelley staking declarations, including network-specific `extraConfig`
     pools and delegations, before snapshot capture.
+    A Mithril-bootstrapped node instead reaches `createGenesisBlock` with its
+    tip already past slot 0 and no genesis CBOR yet stored (the bootstrap
+    imports ledger state and ImmutableDB blocks but never runs this
+    function). It still stores the synthetic genesis block CBOR
+    unconditionally — other code depends on it existing structurally — but
+    skips (re-)inserting genesis UTxOs, pools, delegations, and DReps as live
+    rows: the imported ledger snapshot (`ledgerstate/import.go`) already
+    reflects their correct current state as of the bootstrap point, and this
+    function has no way to tell a still-live genesis declaration from one
+    already spent/retired/changed since (blinklabs-io/dingo#4151).
     For networks with a real Byron genesis, an empty database retains a Byron
     epoch cache until the on-chain Shelley boundary is observed. A configured
     experimental Shelley hard-fork epoch is the explicit exception used by
@@ -3401,14 +3418,18 @@ two separate reads, so an epoch-boundary commit landing between them can't
 make the comparison pass against one epoch while returning another's
 parameters), and `GetEpochNo` (unconditionally safe: epoch records are
 never pruned and carry no other coupled state). `GetStakeDistribution`
-shares `PoolStakeDistribution` with `GetPoolDistr2` but rejects any pinned
-point outright with `ErrHistoricalStateUnavailable`: unlike `GetPoolDistr2`
-(whose denominator, `TotalActiveStake`, is itself a historical per-epoch
-snapshot total), `GetStakeDistribution`'s denominator is
-`TotalCirculatingSupply`, computed from `GetNetworkState`'s reserves row --
-and `GetNetworkState` only ever returns the latest row, with no
-historical-by-slot lookup yet, so honoring a pin here would silently mix a
-correct historical numerator with the current live reserves. `GetUTxOWhole`
+(`queryShelleyStakeDistribution`) also honors a pinned point, but does not
+share `GetPoolDistr2`'s `PoolStakeDistribution`/mark-snapshot path at all
+(see the two-genuinely-different-queries explanation below) --
+`ledger/snapshot`'s `Calculator.CalculateStakeDistributionInTxn`
+reconstructs pool stakes directly as of the pinned slot (or the live tip's
+slot when unpinned) instead. Its denominator, `TotalCirculatingSupply`, is
+computed via `GetNetworkStateAsOfSlot` for the same pinned slot when one is
+given (blinklabs-io/dingo#4152) -- unlike `GetNetworkState`'s
+always-latest-row read, `GetNetworkStateAsOfSlot` does have a
+historical-by-slot lookup, so a pin pairs a correct historical numerator
+with the reserves genuinely in effect at that same point, not today's.
+`GetUTxOWhole`
 is not yet one of the honoring types either -- pinning only matters for a
 query slow enough that the live tip could move underneath it before
 finishing, and a paginated form built to actually need that is tracked
@@ -3528,6 +3549,17 @@ protocol constraint rather than a preference. The LocalStateQuery server
 propagates a handler error as a protocol error, so returning one does not fail
 a single query — the node drops the client's connection and `cardano-cli`
 reports only a closed bearer, which is the failure mode #2997 was filed for.
+This is why `localstatequeryServerAcquire` validates an `AcquireSpecificPoint`
+target synchronously, at Acquire time, rather than leaving it to the first
+`Query` (#4156): an Acquire-time rejection has a graceful wire-level
+`AcquireFailure` reply, so a point ahead of the tip or naming the wrong fork
+is now rejected without this failure mode applying at all. A point that
+passes Acquire (on-chain at that instant) but whose historical data a later
+Query can no longer serve — e.g. a rollback or retention-floor pruning
+between Acquire and Query — still hits this same connection-teardown
+behavior; closing that residual gap needs either a gouroboros protocol
+change or cross-cutting historical-state retention, and is tracked
+separately as #4234 rather than attempted here.
 `GetPoolDistr2` therefore logs and omits a pool that holds snapshot stake but
 has no registration to supply a VRF key hash (the unfiltered form covers every
 pool on the chain, so aborting would take `leadership-schedule` down for every
@@ -3541,11 +3573,22 @@ its own fraction is its stake over that same unchanged total.
 `GetUTxOWhole` (`ledger/queries_utxowhole.go`) are the two newest implemented
 leaves in `ledger/queries.go`'s query dispatcher; the `// TODO (#394)` block
 beside them lists the leaves that remain unimplemented. `GetStakeDistribution`
-reads the same
-`PoolStakeDistribution` helper as `GetPoolDistr2` with no pool filter (this
-query has none on the wire, unlike `GetPoolDistr2`), so it cannot report a
-different snapshot or VRF key for the same chain than `GetPoolDistr2` or the
-UTxO RPC `ReadState` handler. `GetUTxOWhole` iterates every live row via
+does *not* read `PoolStakeDistribution` (deliberately, since
+blinklabs-io/dingo#4152: see `queryShelleyStakeDistribution`'s own doc
+comment for the two-genuinely-different-real-cardano-node-queries case,
+confirmed against cardano-ledger source): `GetPoolDistr2` answers from the
+frozen mark/set snapshot leader election itself uses
+(`SnapShot.ssStakeMarkPoolDistr`), but `GetStakeDistribution` answers from
+`ledger/snapshot`'s `Calculator`, reconstructing pool stakes directly from
+live (or pinned-slot) delegation and UTxO state -- matching real
+cardano-node's own `poolsByTotalStakeFraction`, which reads
+`currentSnapshot` rather than one of the regular snapshots for exactly
+this query. Routing both queries through the same mark-snapshot helper (as
+`GetStakeDistribution` used to) silently omitted any pool that registered
+or first delegated after that snapshot was captured -- confirmed live
+against a real Preview cardano-node: 36 real pools reported by cardano-node
+were completely absent from dingo's reply for no reason other than that
+snapshot lag. `GetUTxOWhole` iterates every live row via
 `database.IterateLiveUtxos` and decodes each one's stored CBOR into the
 node-to-client reply shape; each row's CBOR buffer is defensively cloned
 before decoding, since `IterateLiveUtxos` documents that the buffer backing
@@ -4667,7 +4710,83 @@ bodies that still fail reach the ordinary validation and recovery guards
 unchanged. Arming only after an aligned rollback is both the cost gate — a
 healthy node never runs the per-input probes on the steady-state blockfetch
 path — and what makes the check sound, since every later block then arrives
-through the window. Each arming inspects at most
+through the window. Fork churn can re-arm the audit before a body an earlier
+window already vetted is durably applied, since ledger apply lags blockfetch by
+design, so a rearm carries forward the producers that its own rollback left on
+the chain: those recorded from blocks at or below the new rollback point, and
+only while the prior window's fork point is still resolvable on the primary
+chain at its recorded slot. Those blocks are neither truncated nor re-fetched,
+so nothing else would record them again, and discarding them is what reported a
+spend of their outputs as a false missing-producer splice (issue #4102).
+Producers recorded above the new rollback point are dropped: that rollback
+deleted their blocks, so a body spending them is the splice the audit exists to
+report, and the blocks that do belong above the point are re-delivered and
+re-recorded. An endorser block's transactions are recorded against the slot of
+the ranking block that carries the reference, since that is the block whose
+truncation takes them off the chain, and a producer offered at two slots keeps
+the lower one.
+
+Endorser-block references travel with the producers, on the same rule and keyed
+by the same slot, because nothing re-queues a reference for a block the
+rollback left on the chain — that block is not re-fetched. The already-merged
+memo is not carried, since re-merging a closure is idempotent and a stale memo
+would suppress a merge the new window needs. The queue is carried under its own
+lock, together with whatever a drain has in flight: a drain empties the queue,
+probes what it took and rebuilds it from the blockfetch goroutine, so a rearm
+reading only the queue would carry none of the references being probed. A
+reference the audit gave up on for good is carried too, as the slot it was
+dropped at: it never becomes a queued reference and nothing re-queues it, so
+only that record keeps the next window from reporting the closure's producers
+as missing.
+
+One lock owns every transition of the window pointer and every recording of a
+producer into the window it publishes. Arming reads the outgoing window,
+recovery clears and restores it, and blockfetch records into it, from
+goroutines that share no other lock; the atomic pointer makes each access safe
+on its own but does not order the sequence. Without that ownership a rearm
+landing between the blockfetch handler's read of the pointer and its recording
+snapshots a set the block is not in yet and the recording lands in a window
+nothing reads again — the producer is lost although its block is on the chain,
+which is the report this carry-forward exists to prevent. Producers are
+therefore recorded against the window published at the moment of recording, and
+a body that reaches a window it was not audited against must prove primary-chain
+membership at its own point first. Membership is always tested against the
+primary chain rather than by block presence, since a block the node has
+abandoned can outlive its place on the chain. A membership read that fails
+establishes nothing either way, so the rearm's carry-forward, a body recorded
+below the fork point, and a body reaching a replaced window each disarm the
+window and log at `Warn` instead: a window left in service without producers
+it could not vouch for reports their spends as missing producers at `ERROR`.
+The lock is never held across a chain truncation or a blockfetch drain.
+
+A body whose window was replaced while it was being audited stops there rather
+than finishing against the window it loaded. Its producers went into the
+published window, so the window it holds no longer contains them, and a later
+transaction in the same body spending an earlier one's output would be reported
+as a cross-fork splice against the node's own block. The endorser-block
+reference a body carries is committed with its producers, on the same
+membership test and for the same reason: a cert-driven ranking block's body is
+empty, so the reference is the only thing it offers.
+
+Recovery rewinds truncate the primary chain outside this path, so they clear
+the window for the duration and settle it afterwards from the pointer as it
+then stands: a window armed while the rewind ran is kept unless the truncation
+removed the block its fork point names, and otherwise the cleared window is
+restored only when the descent reports that no step committed and the primary
+chain tip has not regressed. Several refusals precede the first truncation, and
+on those the window still describes the chain unchanged. Nothing serialises the
+rewind against blockfetch, so the tip also moves forward underneath it; an
+append deletes nothing, and reading one as a truncation discards a window the
+rewind left entirely valid. The restore is refused outright when anything else
+moved the window pointer while the rewind ran. A nil pointer reads the same
+whether the rewind still owns the clear or a rollback has disarmed since, and
+every disarm follows a committed truncation or a failed membership read,
+neither of which a restore may undo, so a generation counted on
+every transition of the pointer is what keeps a rewind from undoing another
+owner's decision. That holds only while every other truncation of the primary
+chain moves the pointer, so the divergence reconciler's rewind to a common
+ancestor disarms the window too, unless the rewind is refused before deleting
+anything. Each arming inspects at most
 `continuationAuditBlockBudget` bodies and retains at most
 `continuationAuditMaxProducedTxs` in-window producers; reaching that producer
 cap disarms the window, logs at `Warn` and counts `disarmed_cap`, so "the audit

@@ -192,6 +192,18 @@ type stateMetrics struct {
 	// value on a Mithril-bootstrapped node explains a stake shortfall; a
 	// rising value on any node is a live divergence from the network.
 	skippedStakeRewardRounds prometheus.Counter
+	// Incremented each time GetStakeDistribution or GetPoolDistr2 omits a
+	// pool that holds stake at the queried snapshot but has no resolvable
+	// registration/VRF key hash on record. This is a deliberate fallback
+	// (see poolStakeDistribution's own comment), not a failure, so it
+	// does not abort the query -- but a sustained nonzero value means a
+	// real cross-node comparison tool would see dingo's reply as short by
+	// that many pools, the exact condition blinklabs-io/dingo#4152 found
+	// via cmd/node-parity against a real cardano-node without any other
+	// visible symptom. Making this a metric rather than only the existing
+	// WARN log lets that be caught by an alert instead of requiring a
+	// manual diff to notice again.
+	poolStakeDistributionOmittedPools prometheus.Counter
 	// Snapshot of gouroboros/pipeline.PipelineMetrics.Stats() for the
 	// block-processing pipeline (issue #1894), refreshed after every batch
 	// decodeReadChainBatch submits to it. These are gauges rather than
@@ -344,6 +356,13 @@ func (m *stateMetrics) incSkippedStakeRewardRounds() {
 		return
 	}
 	m.skippedStakeRewardRounds.Inc()
+}
+
+func (m *stateMetrics) incPoolStakeDistributionOmittedPool() {
+	if m == nil || m.poolStakeDistributionOmittedPools == nil {
+		return
+	}
+	m.poolStakeDistributionOmittedPools.Inc()
 }
 
 // incBlockPipelineExpectedEta0Error records a block-processing pipeline
@@ -726,6 +745,12 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_skipped_stake_reward_rounds_total",
 			Help: "epoch-boundary reward rounds skipped for want of their inputs; each one leaves reward balances and the leadership stake distribution permanently short by that epoch's rewards, which makes the node reject canonical blocks near the leader-eligibility threshold",
+		},
+	)
+	m.poolStakeDistributionOmittedPools = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_pool_stake_distribution_omitted_pools_total",
+			Help: "pools omitted from GetStakeDistribution/GetPoolDistr2 because they held snapshot stake but had no resolvable registration/VRF key hash on record",
 		},
 	)
 	m.pipelineStuck = promautoFactory.NewGauge(

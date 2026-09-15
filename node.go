@@ -2147,6 +2147,7 @@ func (n *Node) backfillRewardLiveStake() error {
 	var (
 		needed         bool
 		staleSnapshots bool
+		staleEpochs    []uint64
 	)
 	if err := n.db.MetadataTxn(false).Do(func(txn *database.Txn) error {
 		if n.config.skipRewardLiveStakeBackfillCheck {
@@ -2170,6 +2171,20 @@ func (n *Node) backfillRewardLiveStake() error {
 			)
 		if err != nil {
 			return fmt.Errorf("check stake snapshot provenance: %w", err)
+		}
+		if staleSnapshots {
+			// Diagnostics only: naming the affected epochs in the error below
+			// does not change the fail-closed decision above.
+			staleEpochs, err = n.db.Metadata().
+				StaleConsensusStakeSnapshotEpochs(
+					txn.Metadata(),
+				)
+			if err != nil {
+				return fmt.Errorf(
+					"list stale stake snapshot epochs: %w",
+					err,
+				)
+			}
 		}
 		return nil
 	}); err != nil {
@@ -2200,10 +2215,13 @@ func (n *Node) backfillRewardLiveStake() error {
 		}
 	}
 	if staleSnapshots {
-		return errors.New(
-			"consensus stake snapshots were produced by an older accounting " +
-				"version and cannot be safely reconstructed from this database; " +
-				"rebootstrap from immutable blocks or a trusted snapshot",
+		return fmt.Errorf(
+			"consensus stake snapshots for epoch(s) %v were produced by an "+
+				"older accounting version and cannot be safely reconstructed "+
+				"from this database; rebootstrap from immutable blocks or a "+
+				"trusted snapshot. See DATABASE.md's "+
+				"RewardStakeCalculationVersion section",
+			staleEpochs,
 		)
 	}
 	return nil

@@ -202,6 +202,22 @@ func ledgerInputIDBytes(input lcommon.TransactionInput) []byte {
 	return id[:]
 }
 
+// consumedInputKey is a comparable, allocation-free dedup key for a
+// transaction input's hash+index. ensureTransactionConsumedUtxos and
+// ensureGapConsumedUtxos use it to skip repeated processing of an input a
+// transaction's Consumed() set lists more than once. Both fields are plain
+// value types (a fixed-size byte array and a uint32), so using this struct
+// as a map key never allocates, unlike the fmt.Sprintf-formatted hex string
+// this replaced on the block-application hot path.
+type consumedInputKey struct {
+	id    lcommon.Blake2b256
+	index uint32
+}
+
+func newConsumedInputKey(input lcommon.TransactionInput) consumedInputKey {
+	return consumedInputKey{id: input.Id(), index: input.Index()}
+}
+
 func bytePrefix(data []byte) []byte {
 	const count = 8
 	if len(data) < count {
@@ -619,14 +635,14 @@ func (d *Database) ensureTransactionConsumedUtxos(
 	inFlight, _ := acc.(inFlightProducerLookup)
 	spenderTxHash := ledgerHashBytes(tx.Hash())
 	recoveredUtxos := make([]models.Utxo, 0, len(consumed))
-	seen := make(map[string]struct{}, len(consumed))
+	seen := make(map[consumedInputKey]struct{}, len(consumed))
 	// Read the Mithril trust boundary once: below it, absent producer rows are
 	// legitimately expected (the snapshot does not carry pre-boundary history);
 	// past it the node should hold complete producer history.
 	mithrilBoundarySlot := d.MithrilTrustBoundarySlot(txn)
 	for _, input := range consumed {
 		inputTxId := ledgerInputIDBytes(input)
-		inputKey := fmt.Sprintf("%x:%d", inputTxId, input.Index())
+		inputKey := newConsumedInputKey(input)
 		if _, ok := seen[inputKey]; ok {
 			continue
 		}
@@ -748,10 +764,10 @@ func (d *Database) ensureGapConsumedUtxos(
 	}
 	spenderTxHash := ledgerHashBytes(tx.Hash())
 	recoveredUtxos := make([]models.Utxo, 0, len(consumed))
-	seen := make(map[string]struct{}, len(consumed))
+	seen := make(map[consumedInputKey]struct{}, len(consumed))
 	for _, input := range consumed {
 		inputTxId := ledgerInputIDBytes(input)
-		inputKey := fmt.Sprintf("%x:%d", inputTxId, input.Index())
+		inputKey := newConsumedInputKey(input)
 		if _, ok := seen[inputKey]; ok {
 			continue
 		}

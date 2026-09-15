@@ -49,7 +49,7 @@ WHERE credential_tag = ? AND staking_key = ?`,
 	if accountErr != nil && !errors.Is(accountErr, sql.ErrNoRows) {
 		return fmt.Errorf("query reward live stake account: %w", accountErr)
 	}
-	utxoStake, err := sumCredentialUtxoStake(ctx, db, ref)
+	utxoStake, err := s.sumCredentialUtxoStake(ctx, db, ref)
 	if err != nil {
 		return fmt.Errorf("sum reward live stake UTxOs: %w", err)
 	}
@@ -168,18 +168,43 @@ ON CONFLICT (credential_tag, staking_key) DO UPDATE SET
 // invariant already rules out, not a live behavior change -- the same
 // single-writer argument LatestPoolOpCertSequence relied on for its NULL
 // case (commit cee516017).
-func sumCredentialUtxoStake(
+//
+// This is a method (rather than the free function it used to be) so it can
+// reach s.lookupCachedStmt: profiling a synced node found this single query
+// -- called on every UTxO a stake credential gains or loses, via
+// refreshRewardLiveStakeAggregate -- was 17.55% of total process CPU, the
+// largest single hotspot found. It was already the single-aggregate rewrite
+// described above rather than the row-streaming sumUint64Rows path, so the
+// remaining cost was the one-shot QueryRowContext call pattern itself
+// recompiling the statement on every invocation; see prepared_stmt.go for
+// why caching and reusing one *sql.Stmt here is safe and
+// BenchmarkSumCredentialUtxoStake for the measured effect.
+const sumCredentialUtxoStakeQuery = `
+SELECT SUM(CAST(amount AS BIGINT))
+FROM utxo
+WHERE credential_tag = ? AND staking_key = ? AND deleted_slot = 0`
+
+func (s *Store) sumCredentialUtxoStake(
 	ctx context.Context,
 	db queryer,
 	ref models.StakeCredentialRef,
 ) (uint64, error) {
+	var row *sql.Row
+	if cached, ok := s.lookupCachedStmt(sumCredentialUtxoStakeQuery); ok {
+		row = stmtForQueryer(ctx, db, cached).
+			QueryRowContext(ctx, ref.Tag, ref.Key)
+	} else {
+		// No cached statement -- Start (the only place that populates it)
+		// has not run since a Reset/RestoreFrom last invalidated the cache.
+		// Fall back to the plain one-shot call against db itself rather
+		// than trying to populate the cache here: db already holds
+		// whatever connection it needs (see prepareHotStatements for why a
+		// fresh PrepareContext against s.writeDB at this point could
+		// deadlock against db's own open transaction).
+		row = db.QueryRowContext(ctx, sumCredentialUtxoStakeQuery, ref.Tag, ref.Key)
+	}
 	var total sql.NullInt64
-	err := db.QueryRowContext(ctx, `
-SELECT SUM(CAST(amount AS BIGINT))
-FROM utxo
-WHERE credential_tag = ? AND staking_key = ? AND deleted_slot = 0`,
-		ref.Tag, ref.Key,
-	).Scan(&total)
+	err := row.Scan(&total)
 	if err != nil {
 		return 0, err
 	}
@@ -667,6 +692,13 @@ func (s *Store) StaleConsensusStakeSnapshotsExist(
 		)
 	}
 	var stale bool
+	// The reward_snapshot clause deliberately does not restrict to
+	// authoritative rows: a non-authoritative fallback row (written by
+	// captureMarkSnapshot) is a real source for reward calculation whenever
+	// no authoritative row has been captured yet, so it must fail this gate
+	// on its own version rather than rely on authoritativeMarkRewardSnapshotExists
+	// separately rejecting a version mismatch when the fallback is consulted
+	// (dingo #4026).
 	err = db.QueryRowContext(ctx, `
 SELECT EXISTS (
     SELECT 1 FROM pool_stake_snapshot
@@ -675,7 +707,6 @@ SELECT EXISTS (
 ) OR EXISTS (
     SELECT 1 FROM reward_snapshot
     WHERE snapshot_type = 'mark'
-      AND authoritative = TRUE
       AND calculation_version <> ?
 )`,
 		models.RewardStakeCalculationVersion,
@@ -688,6 +719,50 @@ SELECT EXISTS (
 		)
 	}
 	return stale, nil
+}
+
+// StaleConsensusStakeSnapshotEpochs is diagnostics only, for the operator-
+// facing error StaleConsensusStakeSnapshotsExist gates on; it is not itself
+// part of the fail-closed check.
+func (s *Store) StaleConsensusStakeSnapshotEpochs(
+	txn types.Txn,
+) ([]uint64, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"stale consensus stake snapshot epochs: resolve db: %w",
+			err,
+		)
+	}
+	rows, err := db.QueryContext(ctx, `
+SELECT epoch FROM pool_stake_snapshot
+WHERE snapshot_type IN ('mark', 'set', 'go') AND calculation_version <> ?
+UNION
+SELECT epoch FROM reward_snapshot
+WHERE snapshot_type = 'mark' AND calculation_version <> ?
+ORDER BY epoch`,
+		models.RewardStakeCalculationVersion,
+		models.RewardStakeCalculationVersion,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"listing stale stake snapshot epochs: %w",
+			err,
+		)
+	}
+	defer rows.Close()
+	var epochs []uint64
+	for rows.Next() {
+		var epoch uint64
+		if err := rows.Scan(&epoch); err != nil {
+			return nil, err
+		}
+		epochs = append(epochs, epoch)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return epochs, nil
 }
 
 func (s *Store) GetLiveStakeInputsForPools(
