@@ -222,6 +222,15 @@ func parseCertStateConway(
 		if len(elem) == 0 || i == pIdx || i == dIdx || i == drepIdx {
 			continue
 		}
+		// Only a credential-to-authorization map can be the committee map.
+		// Testing that first keeps a wrong-candidate element from reaching a
+		// parser that now fails closed, which would abort the whole import
+		// over an element that was never the committee state.
+		if !looksLikeCommitteeCredentialMap(
+			committeeMapElement(certState[i:]),
+		) {
+			continue
+		}
 		hotKeys, resignations, committeeErr := parseCommitteeVState(
 			certState[i:],
 		)
@@ -1595,6 +1604,23 @@ func isCborArray(data []byte) bool {
 	return data[0]>>5 == 4 || data[0] == 0x9f
 }
 
+// committeeMapElement resolves the element parseCommitteeVState would read as
+// the committee hot-key map, unwrapping the historical single-array wrapper the
+// parser also accepts. The Conway heuristic scan uses it to test candidacy
+// before committing to a parse that fails closed on a malformed entry.
+func committeeMapElement(fields [][]byte) []byte {
+	if len(fields) == 0 {
+		return nil
+	}
+	if isCborArray(fields[0]) {
+		if nested, err := decodeRawElements(fields[0]); err == nil &&
+			len(nested) >= 2 {
+			return nested[0]
+		}
+	}
+	return fields[0]
+}
+
 func parseCommitteeVState(
 	fields [][]byte,
 ) ([]ParsedCommitteeHotKey, []Credential, error) {
@@ -1616,14 +1642,30 @@ func parseCommitteeVState(
 		}
 	}
 	entries, err := decodeMapEntries(committeeFields[0])
-	if err == nil {
+	if err == nil && len(entries) > 0 {
 		for _, entry := range entries {
+			// Fail closed on every entry. Dropping one silently leaves that
+			// member's authorization missing, and downstream a missing
+			// authorization is the same Conway unknown-voter rejection this
+			// parser exists to prevent -- a partial committee is as broken as
+			// an empty one, and quieter.
 			cold, coldErr := parseCredential(entry.KeyRaw)
+			if coldErr != nil {
+				return nil, nil, fmt.Errorf(
+					"decoding committee cold credential: %w",
+					coldErr,
+				)
+			}
 			hot, resigned, hotErr := parseCommitteeAuthorization(
 				entry.ValueRaw,
 			)
-			if coldErr != nil || hotErr != nil {
-				continue
+			if hotErr != nil {
+				return nil, nil, fmt.Errorf(
+					"decoding committee authorization for cold "+
+						"credential %x: %w",
+					cold.Hash,
+					hotErr,
+				)
 			}
 			if resigned {
 				resignations = append(resignations, cold)
@@ -1632,21 +1674,6 @@ func parseCommitteeVState(
 			hotKeys = append(
 				hotKeys,
 				ParsedCommitteeHotKey{Cold: cold, Hot: hot},
-			)
-		}
-		// A committee map with entries that yields nothing means the
-		// encoding was not understood. Returning an empty set here is
-		// indistinguishable from a genuinely unauthorized committee, and
-		// downstream that makes every committee vote fail the Conway
-		// unknown-voter rule on a node that has no way to notice. Fail the
-		// import instead.
-		if len(entries) > 0 &&
-			len(hotKeys) == 0 &&
-			len(resignations) == 0 {
-			return nil, nil, fmt.Errorf(
-				"committee state has %d entries but none could be "+
-					"decoded; refusing to import an empty committee",
-				len(entries),
 			)
 		}
 	}

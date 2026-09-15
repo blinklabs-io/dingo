@@ -1003,3 +1003,69 @@ func TestParseCommitteeVStateRejectsMalformedResignationMap(t *testing.T) {
 		t.Fatal("a committee map of undecodable entries must fail the import")
 	}
 }
+
+// TestParseCommitteeVStateFailsOnPartiallyUndecodableMap covers the gap the
+// all-or-nothing guard left open: a map holding one good authorization beside
+// one undecodable entry used to return the single hot key and a nil error, so
+// the other member's authorization vanished. Downstream that is the same
+// Conway unknown-voter rejection an empty committee causes, just harder to
+// see, so any undecodable entry must fail the import.
+func TestParseCommitteeVStateFailsOnPartiallyUndecodableMap(t *testing.T) {
+	t.Parallel()
+
+	coldGood := toFixed28(bytes.Repeat([]byte{0xa1}, 28))
+	coldBad := toFixed28(bytes.Repeat([]byte{0xa2}, 28))
+	hot := toFixed28(bytes.Repeat([]byte{0xb1}, 28))
+
+	enc := func(v any) []byte {
+		t.Helper()
+		b, err := cbor.Encode(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+
+	goodKey := enc([]any{uint64(1), coldGood})
+	goodVal := enc([]any{uint64(0), cbor.RawMessage(enc([]any{uint64(1), hot}))})
+	badKey := enc([]any{uint64(1), coldBad})
+
+	for name, badVal := range map[string][]byte{
+		// A resignation whose payload is not a StrictMaybe Anchor.
+		"malformed resignation": enc([]any{uint64(1), []any{uint64(1)}}),
+		// An authorization tag the sum type does not define.
+		"unknown tag": enc([]any{uint64(2), cbor.RawMessage(goodVal)}),
+		// A credential tag outside the defined range.
+		"bad credential tag": enc(
+			[]any{uint64(0), cbor.RawMessage(enc([]any{uint64(5), hot}))},
+		),
+	} {
+		m := []byte{0xa2}
+		m = append(m, goodKey...)
+		m = append(m, goodVal...)
+		m = append(m, badKey...)
+		m = append(m, badVal...)
+
+		hotKeys, resignations, err := parseCommitteeVState(
+			[][]byte{m, {0x00}},
+		)
+		if err == nil {
+			t.Fatalf(
+				"%s: a map with one undecodable entry must fail the "+
+					"import, got %d hot keys and %d resignations",
+				name,
+				len(hotKeys),
+				len(resignations),
+			)
+		}
+		if hotKeys != nil || resignations != nil {
+			t.Fatalf(
+				"%s: a failed committee parse must not return partial "+
+					"results, got %d hot keys and %d resignations",
+				name,
+				len(hotKeys),
+				len(resignations),
+			)
+		}
+	}
+}
