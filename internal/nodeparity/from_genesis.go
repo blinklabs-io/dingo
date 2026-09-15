@@ -78,6 +78,17 @@ type EpochResult struct {
 	UTxOExtra     []string
 	UTxODiffers   []string
 	UTxORefCount  int
+
+	// Timing breakdown, purely diagnostic: which phase actually spent the
+	// wall-clock time this epoch. Added after live testing found each of
+	// TxInfoFlushCount, ProtocolParamsAndStakeElapsed, and UTxOElapsed had,
+	// in turn, been the dominant cost at different points as chain activity
+	// grew -- rather than continuing to guess and re-fix one at a time,
+	// this makes the split visible every epoch going forward.
+	TxInfoFlushCount              int
+	TxInfoFlushElapsed            time.Duration
+	ProtocolParamsAndStakeElapsed time.Duration
+	UTxOElapsed                   time.Duration
 }
 
 // FromGenesisReporter receives one EpochResult per epoch boundary
@@ -192,12 +203,14 @@ func RunFromGenesis(
 	}
 
 	var (
-		lastEpoch       uint64
-		haveLastEpoch   bool
-		utxoRefs        UTxOSet
-		utxoBaselineErr error
-		utxoAttempted   bool
-		pendingTxHashes []string
+		lastEpoch          uint64
+		haveLastEpoch      bool
+		utxoRefs           UTxOSet
+		utxoBaselineErr    error
+		utxoAttempted      bool
+		pendingTxHashes    []string
+		txInfoFlushCount   int
+		txInfoFlushElapsed time.Duration
 	)
 
 	// flushPendingTxInfos applies every buffered transaction hash's
@@ -216,7 +229,10 @@ func RunFromGenesis(
 		if utxoRefs == nil || len(pendingTxHashes) == 0 {
 			return
 		}
+		start := time.Now()
 		txInfos, err := koios.GetTxInfos(ctx, pendingTxHashes)
+		txInfoFlushCount++
+		txInfoFlushElapsed += time.Since(start)
 		if err != nil {
 			logf(
 				"nodeparity: koios tx_info fetch failed for %d pending tx(es), "+
@@ -303,6 +319,7 @@ func RunFromGenesis(
 					// on their own connection -- see koios_check.go's doc
 					// comment for why sharing one would needlessly cut them
 					// off at UTxO's much tighter retention floor.
+					psStart := time.Now()
 					if psConn, lsqPS, err := acquireWithRetry(ctx, dingoAddr, magic, point); err != nil {
 						result.ProtocolParamsErr = err
 						result.StakeErr = err
@@ -318,7 +335,9 @@ func RunFromGenesis(
 						_ = lsqPS.Client.Release() //nolint:errcheck
 						psConn.Close()             //nolint:errcheck
 					}
+					result.ProtocolParamsAndStakeElapsed = time.Since(psStart)
 
+					utxoStart := time.Now()
 					if utxoRefs != nil {
 						result.UTxOAttempted = true
 						if utxoConn, lsqUtxo, err := acquireWithRetry(ctx, dingoAddr, magic, point); err != nil {
@@ -343,6 +362,12 @@ func RunFromGenesis(
 					} else if utxoBaselineErr != nil {
 						result.UTxOAttempted = false
 					}
+					result.UTxOElapsed = time.Since(utxoStart)
+
+					result.TxInfoFlushCount = txInfoFlushCount
+					result.TxInfoFlushElapsed = txInfoFlushElapsed
+					txInfoFlushCount = 0
+					txInfoFlushElapsed = 0
 
 					report(result)
 					return nil

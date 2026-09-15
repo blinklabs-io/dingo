@@ -121,6 +121,14 @@ func fromGenesisRun(cmd *cobra.Command, _ []string) error {
 	report := func(r nodeparity.EpochResult) {
 		epochsChecked++
 
+		logger.Debug("epoch timing",
+			"epoch", r.Epoch,
+			"tx_info_flushes", r.TxInfoFlushCount,
+			"tx_info_flush_elapsed", r.TxInfoFlushElapsed.String(),
+			"protocol_params_and_stake_elapsed", r.ProtocolParamsAndStakeElapsed.String(),
+			"utxo_elapsed", r.UTxOElapsed.String(),
+		)
+
 		// koiosparity.DetermineStatus distinguishes a real Dingo/Koios
 		// disagreement (StatusFail) from a comparison that could not be
 		// trusted at all -- most commonly a Koios fetch failure, which
