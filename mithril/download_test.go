@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -237,6 +238,97 @@ func TestDownloadSnapshotResume(t *testing.T) {
 	require.Equal(t, fullContent, data)
 }
 
+// injectedIdle drives a download's idle detection from the test instead of
+// from the wall clock. Production reports progress after each body write, so
+// a test names the byte offsets it wants a stall at; the injector then fires
+// the moment the download next arms its body watchdog, which is where a real
+// timer would have fired had the transfer genuinely stopped there.
+//
+// Only idleTimeoutReader.Read resets a watchdog, so an injected idle is
+// always delivered around a body read and never to the watchdog covering the
+// request headers, whose expiry would abort an attempt before it read
+// anything and turn a resume into a restart.
+type injectedIdle struct {
+	mu      sync.Mutex
+	at      map[int64]struct{}
+	pending bool
+	count   int
+}
+
+func newInjectedIdle(offsets ...int64) *injectedIdle {
+	at := make(map[int64]struct{}, len(offsets))
+	for _, offset := range offsets {
+		at[offset] = struct{}{}
+	}
+	return &injectedIdle{at: at}
+}
+
+// progress is a DownloadConfig.OnProgress callback. It arms an idle timeout
+// when a report lands on a requested offset.
+func (i *injectedIdle) progress(p DownloadProgress) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if _, ok := i.at[p.BytesDownloaded]; !ok {
+		return
+	}
+	delete(i.at, p.BytesDownloaded)
+	i.pending = true
+}
+
+// watchdog is a DownloadConfig.idleWatchdogs factory. The configured timeout
+// is deliberately ignored: this watchdog expires when the test says so.
+func (i *injectedIdle) watchdog(_ time.Duration, onIdle func()) idleWatchdog {
+	return &injectedIdleWatchdog{injector: i, onIdle: onIdle}
+}
+
+// arm requests an idle timeout that no progress report can trigger, for a
+// stall before the attempt reads anything. Call it before the response is
+// written: only a body read consumes the request, so arming early is what
+// keeps the delivery point fixed.
+func (i *injectedIdle) arm() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.pending = true
+}
+
+func (i *injectedIdle) take() bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if !i.pending {
+		return false
+	}
+	i.pending = false
+	i.count++
+	return true
+}
+
+// delivered reports how many injected idle timeouts the download consumed.
+func (i *injectedIdle) delivered() int {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.count
+}
+
+// remaining reports how many requested offsets were never reached.
+func (i *injectedIdle) remaining() int {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return len(i.at)
+}
+
+type injectedIdleWatchdog struct {
+	injector *injectedIdle
+	onIdle   func()
+}
+
+func (w *injectedIdleWatchdog) Reset() {
+	if w.injector.take() {
+		w.onIdle()
+	}
+}
+
+func (w *injectedIdleWatchdog) Stop() {}
+
 func TestDownloadSnapshotIdleTimeoutRetriesAndResumes(t *testing.T) {
 	t.Parallel()
 
@@ -246,7 +338,7 @@ func TestDownloadSnapshotIdleTimeoutRetriesAndResumes(t *testing.T) {
 
 	server := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			switch requestCount.Add(1) {
+			switch n := requestCount.Add(1); n {
 			case 1:
 				w.Header().
 					Set("Content-Length", fmt.Sprintf("%d", len(fullContent)))
@@ -256,7 +348,7 @@ func TestDownloadSnapshotIdleTimeoutRetriesAndResumes(t *testing.T) {
 					flusher.Flush()
 				}
 				<-r.Context().Done()
-			default:
+			case 2:
 				select {
 				case resumeRangeCh <- r.Header.Get("Range"):
 				default:
@@ -265,11 +357,29 @@ func TestDownloadSnapshotIdleTimeoutRetriesAndResumes(t *testing.T) {
 				w.Header().Set("Content-Length", "3")
 				w.WriteHeader(http.StatusPartialContent)
 				_, _ = w.Write(fullContent[3:])
+			default:
+				// A request the script does not cover means the download
+				// retried without the test injecting an idle timeout.
+				// Report that here instead of serving a range the client
+				// did not ask for, which would resurface later as an
+				// unrelated Content-Range restart failure.
+				t.Errorf(
+					"unexpected download request %d with Range %q",
+					n,
+					r.Header.Get("Range"),
+				)
+				http.Error(
+					w,
+					"unexpected request",
+					http.StatusConflict,
+				)
 			}
 		}),
 	)
 	t.Cleanup(server.Close)
 
+	// Stall the transfer once, after the first three bytes have landed.
+	idle := newInjectedIdle(3)
 	destDir := t.TempDir()
 	cfg := DownloadConfig{
 		URL:               server.URL + "/snapshot.tar.zst",
@@ -277,36 +387,39 @@ func TestDownloadSnapshotIdleTimeoutRetriesAndResumes(t *testing.T) {
 		DestDir:           destDir,
 		Filename:          "idle-retry.tar.zst",
 		ExpectedSize:      int64(len(fullContent)),
-		IdleTimeout:       50 * time.Millisecond,
-		MaxIdleRetries:    1,
+		// Any positive value enables idle detection; the injector, not
+		// this duration, decides when the transfer counts as idle.
+		IdleTimeout:    time.Minute,
+		MaxIdleRetries: 1,
+		OnProgress:     idle.progress,
+		idleWatchdogs:  idle.watchdog,
 	}
-	timeout := cfg.IdleTimeout*time.Duration(cfg.MaxIdleRetries+1) +
-		500*time.Millisecond
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		testutil.AsyncWait,
+	)
 	defer cancel()
 
-	path, err := DownloadSnapshot(
-		ctx,
-		cfg,
-	)
+	path, err := DownloadSnapshot(ctx, cfg)
 	require.NoError(t, err)
 	require.Equal(t, filepath.Join(destDir, "idle-retry.tar.zst"), path)
 	require.Equal(t, int32(2), requestCount.Load())
+	require.Equal(
+		t,
+		1,
+		idle.delivered(),
+		"download did not act on the injected idle timeout",
+	)
+	require.Zero(t, idle.remaining(), "injected stall was never reached")
 	require.Equal(
 		t,
 		"bytes=3-",
 		testutil.RequireReceive(
 			t,
 			resumeRangeCh,
-			time.Second,
+			testutil.AsyncWait,
 			"retry resume range",
 		),
-	)
-	testutil.RequireNoReceive(
-		t,
-		resumeRangeCh,
-		100*time.Millisecond,
-		"no extra resume retries",
 	)
 
 	data, err := os.ReadFile(path)
@@ -317,14 +430,38 @@ func TestDownloadSnapshotIdleTimeoutRetriesAndResumes(t *testing.T) {
 func TestDownloadSnapshotIdleRetriesResetAfterProgress(t *testing.T) {
 	t.Parallel()
 
-	fullContent := []byte("AAABBBCCC")
+	// Three stalls against a budget of one, arranged so the download only
+	// survives them if progress restores the budget: the first and third
+	// attempts read nothing and each spend a retry, and the second reads
+	// three bytes. Spending two retries either side of that progress is
+	// what distinguishes a budget that resets from one that merely is not
+	// charged for a productive attempt.
+	fullContent := []byte("AAABBB")
 	var requestCount atomic.Int32
-	rangeCh := make(chan string, 2)
+	rangeCh := make(chan string, 4)
+	idle := newInjectedIdle(3)
 
 	server := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			switch requestCount.Add(1) {
+			select {
+			case rangeCh <- r.Header.Get("Range"):
+			default:
+			}
+			switch n := requestCount.Add(1); n {
 			case 1:
+				// Stall before a single byte arrives.
+				idle.arm()
+				w.Header().Set(
+					"Content-Length",
+					fmt.Sprintf("%d", len(fullContent)),
+				)
+				w.WriteHeader(http.StatusOK)
+				if flusher, ok := w.(http.Flusher); ok {
+					flusher.Flush()
+				}
+				<-r.Context().Done()
+			case 2:
+				// Make progress, then stall at three bytes.
 				w.Header().Set(
 					"Content-Length",
 					fmt.Sprintf("%d", len(fullContent)),
@@ -335,28 +472,35 @@ func TestDownloadSnapshotIdleRetriesResetAfterProgress(t *testing.T) {
 					flusher.Flush()
 				}
 				<-r.Context().Done()
-			case 2:
-				select {
-				case rangeCh <- r.Header.Get("Range"):
-				default:
-				}
-				w.Header().Set("Content-Range", "bytes 3-8/9")
-				w.Header().Set("Content-Length", "6")
+			case 3:
+				// Stall again without adding a byte.
+				idle.arm()
+				w.Header().Set("Content-Range", "bytes 3-5/6")
+				w.Header().Set("Content-Length", "3")
 				w.WriteHeader(http.StatusPartialContent)
-				_, _ = w.Write(fullContent[3:6])
 				if flusher, ok := w.(http.Flusher); ok {
 					flusher.Flush()
 				}
 				<-r.Context().Done()
-			default:
-				select {
-				case rangeCh <- r.Header.Get("Range"):
-				default:
-				}
-				w.Header().Set("Content-Range", "bytes 6-8/9")
+			case 4:
+				w.Header().Set("Content-Range", "bytes 3-5/6")
 				w.Header().Set("Content-Length", "3")
 				w.WriteHeader(http.StatusPartialContent)
-				_, _ = w.Write(fullContent[6:])
+				_, _ = w.Write(fullContent[3:])
+			default:
+				// See TestDownloadSnapshotIdleTimeoutRetriesAndResumes:
+				// an unscripted request is a defect in the retry path,
+				// not a range to serve.
+				t.Errorf(
+					"unexpected download request %d with Range %q",
+					n,
+					r.Header.Get("Range"),
+				)
+				http.Error(
+					w,
+					"unexpected request",
+					http.StatusConflict,
+				)
 			}
 		}),
 	)
@@ -369,13 +513,17 @@ func TestDownloadSnapshotIdleRetriesResetAfterProgress(t *testing.T) {
 		DestDir:           destDir,
 		Filename:          "idle-progress-reset.tar.zst",
 		ExpectedSize:      int64(len(fullContent)),
-		IdleTimeout:       50 * time.Millisecond,
-		MaxIdleRetries:    1,
+		// Any positive value enables idle detection; the injector, not
+		// this duration, decides when the transfer counts as idle.
+		IdleTimeout:    time.Minute,
+		MaxIdleRetries: 1,
+		OnProgress:     idle.progress,
+		idleWatchdogs:  idle.watchdog,
 	}
-	// The retry path may wait for the configured idle timeout more than once;
-	// leave enough room for scheduler and HTTP-server variance on Windows.
-	timeout := 5 * time.Second
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		testutil.AsyncWait,
+	)
 	defer cancel()
 
 	path, err := DownloadSnapshot(ctx, cfg)
@@ -385,27 +533,28 @@ func TestDownloadSnapshotIdleRetriesResetAfterProgress(t *testing.T) {
 		filepath.Join(destDir, "idle-progress-reset.tar.zst"),
 		path,
 	)
-	require.Equal(t, int32(3), requestCount.Load())
+	require.Equal(t, int32(4), requestCount.Load())
 	require.Equal(
 		t,
-		"bytes=3-",
-		testutil.RequireReceive(
-			t,
-			rangeCh,
-			time.Second,
-			"first retry resume range",
-		),
+		3,
+		idle.delivered(),
+		"download did not act on all three injected idle timeouts",
 	)
-	require.Equal(
-		t,
-		"bytes=6-",
-		testutil.RequireReceive(
+	require.Zero(t, idle.remaining(), "an injected stall was never reached")
+	for i, want := range []string{"", "", "bytes=3-", "bytes=3-"} {
+		require.Equal(
 			t,
-			rangeCh,
-			time.Second,
-			"second retry resume range",
-		),
-	)
+			want,
+			testutil.RequireReceive(
+				t,
+				rangeCh,
+				testutil.AsyncWait,
+				"request range",
+			),
+			"request %d range",
+			i+1,
+		)
+	}
 
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
@@ -503,20 +652,32 @@ func TestDownloadSnapshotAcceptsHTTPSByDefault(t *testing.T) {
 	require.NotContains(t, err.Error(), "must use https")
 }
 
+// armed reports whether an idle period is currently running. Tests assert on
+// it so they can read the timer's state at once, instead of waiting out a
+// wall-clock interval and inferring the state from what did not happen.
+func (t *idleTimer) armed() bool {
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.current != nil
+}
+
+// TestIdleTimeoutReaderStopsTimerBetweenReads proves the reader disarms its
+// watchdog once a read returns, so a consumer that is slow to ask for the
+// next chunk is not mistaken for a stalled transfer. The timeout is long and
+// never waited on: the assertion reads the timer's armed state, so the test
+// neither pays for the interval nor races it.
 func TestIdleTimeoutReaderStopsTimerBetweenReads(t *testing.T) {
 	t.Parallel()
 
-	idleCh := make(chan struct{}, 1)
-	reader := newIdleTimeoutReader(
-		bytes.NewReader([]byte("abc")),
-		20*time.Millisecond,
-		func() {
-			select {
-			case idleCh <- struct{}{}:
-			default:
-			}
-		},
-	)
+	var idleCount atomic.Int32
+	timer := newIdleTimer(time.Hour, func() {
+		idleCount.Add(1)
+	})
+	reader := newIdleTimeoutReader(bytes.NewReader([]byte("abc")), timer)
+	require.True(t, timer.armed(), "constructor should arm the timer")
 
 	buf := make([]byte, 1)
 	n, err := reader.Read(buf)
@@ -524,12 +685,12 @@ func TestIdleTimeoutReaderStopsTimerBetweenReads(t *testing.T) {
 	require.Equal(t, 1, n)
 	require.Equal(t, []byte("a"), buf)
 
-	testutil.RequireNoReceive(
+	require.False(
 		t,
-		idleCh,
-		50*time.Millisecond,
+		timer.armed(),
 		"idle timer should be stopped between reads",
 	)
+	require.Zero(t, idleCount.Load())
 }
 
 func TestDownloadSnapshotContextCancel(t *testing.T) {
