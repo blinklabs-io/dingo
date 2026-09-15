@@ -34,6 +34,7 @@ import (
 // prepared on a transaction must not escape it.
 type transactionBatchAccumulator struct {
 	transactionInsert *sql.Stmt
+	mysql             bool
 }
 
 const transactionInsertSQL = `
@@ -54,11 +55,25 @@ func (a *transactionBatchAccumulator) insertTransaction(
 	args ...any,
 ) (uint, error) {
 	if a.transactionInsert == nil {
+		if dialect, ok := db.(dialectQueryer); ok {
+			a.mysql = dialect.dialect == "mysql"
+		}
 		stmt, err := db.PrepareContext(ctx, transactionInsertSQL)
 		if err != nil {
 			return 0, err
 		}
 		a.transactionInsert = stmt
+	}
+	if a.mysql {
+		result, err := a.transactionInsert.ExecContext(ctx, args...)
+		if err != nil {
+			return 0, err
+		}
+		id, err := result.LastInsertId()
+		if err != nil {
+			return 0, err
+		}
+		return uint(id), nil
 	}
 	var id int64
 	if err := a.transactionInsert.QueryRowContext(ctx, args...).Scan(&id); err != nil {
