@@ -22,6 +22,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -152,4 +153,56 @@ func TestMySQLForeignKeyIndexErrorDetection(t *testing.T) {
 	require.False(t, isMySQLForeignKeyIndexError(
 		fmt.Errorf("Error 1553 (HY000): unrelated DDL failure"),
 	))
+}
+
+// TestNewDialectQueryerIdempotentUnderCountingQueryer proves
+// newDialectQueryer's idempotence guard still recognizes an
+// already-dialect-wrapped handle when countingQueryer sits on top of it, as
+// Store.instrumentedQueryer produces whenever Config.PromRegistry is set.
+// Without unwrapDialectQueryer, db's concrete type at this call is
+// countingQueryer, not dialectQueryer, so the guard would miss it and wrap
+// a second dialectQueryer around the countingQueryer -- translating every
+// operational query's SQL text twice on every call, and (via
+// transactionBatchAccumulator.insertTransaction's identical assertion) also
+// leaving MySQL's own dialect check unable to see through the wrapper.
+func TestNewDialectQueryerIdempotentUnderCountingQueryer(t *testing.T) {
+	t.Parallel()
+	db, err := sql.Open("sqlite", "file::memory:?cache=shared")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	inner := dialectQueryer{queryer: db, dialect: "postgres"}
+	counter := prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "test_unwrap_dialect_queryer_total"},
+		[]string{"op"},
+	)
+	wrapped := countingQueryer{queryer: inner, counter: counter}
+
+	got := newDialectQueryer(wrapped, "postgres")
+	gotWrapped, ok := got.(countingQueryer)
+	require.True(
+		t,
+		ok,
+		"expected newDialectQueryer to return the countingQueryer unchanged, not re-wrap it in another dialectQueryer",
+	)
+	_, isDialect := gotWrapped.queryer.(dialectQueryer)
+	require.True(t, isDialect)
+}
+
+// TestUnwrapDialectQueryerFindsDialectUnderCountingQueryer is the direct
+// unit test for the helper transaction_write.go's insertTransaction and
+// newDialectQueryer's idempotence guard both rely on to see past
+// countingQueryer.
+func TestUnwrapDialectQueryerFindsDialectUnderCountingQueryer(t *testing.T) {
+	t.Parallel()
+	db, err := sql.Open("sqlite", "file::memory:?cache=shared")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	inner := dialectQueryer{queryer: db, dialect: "mysql"}
+	wrapped := countingQueryer{queryer: inner, counter: nil}
+
+	got, ok := unwrapDialectQueryer(wrapped)
+	require.True(t, ok)
+	require.Equal(t, "mysql", got.dialect)
 }
