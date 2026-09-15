@@ -165,7 +165,12 @@ func TestForgeReResolvesLeiosDataWhenParentChanges(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
-	require.Len(t, builder.seen, 2, "the forge must retry after a parent change")
+	require.Len(
+		t,
+		builder.seen,
+		2,
+		"the forge must retry after a parent change",
+	)
 	require.NotNil(
 		t,
 		builder.seen[0].Certificate,
@@ -430,10 +435,12 @@ func TestForgeKeepsAnnouncementWhenParentIsUnchanged(t *testing.T) {
 			slotsPerKESPeriod: 100,
 			slotEnd:           time.Now().Add(time.Hour),
 		},
-		LeiosProduceChecker:             &forgerTestLeiosChecker{allowed: true},
-		LeiosEBBroadcaster:              &forgerTestLeiosCaster{},
-		LeiosTxValidator:                &sessionMockTxValidator{},
-		LeiosMempool:                    forgerTestMempoolProvider{txs: leiosAnnouncementTxs(t)},
+		LeiosProduceChecker: &forgerTestLeiosChecker{allowed: true},
+		LeiosEBBroadcaster:  &forgerTestLeiosCaster{},
+		LeiosTxValidator:    &sessionMockTxValidator{},
+		LeiosMempool: forgerTestMempoolProvider{
+			txs: leiosAnnouncementTxs(t),
+		},
 		LeiosCertificateProvider:        &forgerTestLeiosCerts{},
 		LeiosParentAnnouncementProvider: parent,
 		PromRegistry:                    prometheus.NewRegistry(),
@@ -624,7 +631,12 @@ func TestForgeMarksTheReResolvedEndorserBlockSlot(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
-	require.Len(t, builder.seen, 2, "the forge must retry after a parent change")
+	require.Len(
+		t,
+		builder.seen,
+		2,
+		"the forge must retry after a parent change",
+	)
 	require.NotNil(t, builder.seen[1].Certificate)
 	require.Equal(
 		t,

@@ -1738,11 +1738,16 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 			// a slot that is no longer ours to take.
 			f.logger.Warn(
 				"forge skip: the chain moved under this slot during block production",
-				"slot", currentSlot,
-				"tip_slot", f.slotClock.ChainTip().Slot,
-				"primary_tip_slot", f.slotClock.PrimaryChainTip().Slot,
-				"attempts", stats.attempts,
-				"error", err,
+				"slot",
+				currentSlot,
+				"tip_slot",
+				f.slotClock.ChainTip().Slot,
+				"primary_tip_slot",
+				f.slotClock.PrimaryChainTip().Slot,
+				"attempts",
+				stats.attempts,
+				"error",
+				err,
 			)
 			return nil
 		}
@@ -2652,10 +2657,14 @@ func (f *BlockForger) buildBlockForSlot(
 		if tipErr := f.tipGatesRefuseSlot(slot, entry); tipErr != nil {
 			f.logger.Warn(
 				"leader slot lost: the chain moved under the slot before the transaction-free fallback",
-				"slot", slot,
-				"attempts", stats.attempts,
-				"selection_error", err,
-				"error", tipErr,
+				"slot",
+				slot,
+				"attempts",
+				stats.attempts,
+				"selection_error",
+				err,
+				"error",
+				tipErr,
 			)
 			return nil, nil, stats, fmt.Errorf(
 				"%w; the slot was superseded before the transaction-free fallback: %w",
@@ -2679,10 +2688,14 @@ func (f *BlockForger) buildBlockForSlot(
 			f.observeSelectionFallback(forgeSelectionResultLost)
 			f.logger.Error(
 				"leader slot lost: selection was aborted and no empty block could be built",
-				"slot", slot,
-				"attempts", stats.attempts,
-				"selection_error", err,
-				"error", emptyErr,
+				"slot",
+				slot,
+				"attempts",
+				stats.attempts,
+				"selection_error",
+				err,
+				"error",
+				emptyErr,
 			)
 			// Report both halves of the failure. The selection
 			// abort explains why the fallback was reached, but it
@@ -2702,9 +2715,12 @@ func (f *BlockForger) buildBlockForSlot(
 		stats.fallbackResult = forgeSelectionResultEmpty
 		f.logger.Warn(
 			"forging a transaction-free block: selection could not complete inside the slot",
-			"slot", slot,
-			"attempts", stats.attempts,
-			"selection_error", err,
+			"slot",
+			slot,
+			"attempts",
+			stats.attempts,
+			"selection_error",
+			err,
 		)
 		return block, blockCbor, stats, nil
 	}
@@ -2753,8 +2769,10 @@ func (f *BlockForger) buildBlockForSlot(
 				stats.fallbackResult = forgeSelectionResultRetried
 				f.logger.Info(
 					"block transactions re-selected after the chain moved mid-selection",
-					"slot", slot,
-					"attempts", stats.attempts,
+					"slot",
+					slot,
+					"attempts",
+					stats.attempts,
 				)
 			}
 			return block, blockCbor, stats, nil
@@ -2775,8 +2793,10 @@ func (f *BlockForger) buildBlockForSlot(
 		if !haveDeadline {
 			f.logger.Warn(
 				"forge selection aborted and the slot clock cannot bound a retry",
-				"slot", slot,
-				"error", err,
+				"slot",
+				slot,
+				"error",
+				err,
 			)
 			return lost(err)
 		}
@@ -2792,10 +2812,14 @@ func (f *BlockForger) buildBlockForSlot(
 		}
 		f.logger.Warn(
 			"forge selection aborted by a concurrent ledger publication, re-selecting",
-			"slot", slot,
-			"attempt", stats.attempts,
-			"slot_remaining", remaining,
-			"error", err,
+			"slot",
+			slot,
+			"attempt",
+			stats.attempts,
+			"slot_remaining",
+			remaining,
+			"error",
+			err,
 		)
 		// The next attempt re-reads the chain tip, so anything resolved
 		// against the previous parent has to be resolved again. This

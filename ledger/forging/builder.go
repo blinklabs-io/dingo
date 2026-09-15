@@ -565,11 +565,16 @@ func (b *DefaultBlockBuilder) buildBlock(
 					maxBlockSize {
 					b.logger.Debug(
 						"skipping transaction - does not fit the remaining block body",
-						"component", "forging",
-						"tx_hash", mempoolTx.Hash,
-						"selected_body_size", dijkstraBodySize,
-						"block_tx_size", len(blockTxCbor),
-						"max_block_body_size", maxBlockSize,
+						"component",
+						"forging",
+						"tx_hash",
+						mempoolTx.Hash,
+						"selected_body_size",
+						dijkstraBodySize,
+						"block_tx_size",
+						len(blockTxCbor),
+						"max_block_body_size",
+						maxBlockSize,
 					)
 					continue
 				}
