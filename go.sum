@@ -25,8 +25,8 @@ cloud.google.com/go/storage v1.67.0 h1:8xD3NvKuHE4c+b/kmSIVBdTc0BiOjplx+KecKGR9f
 cloud.google.com/go/storage v1.67.0/go.mod h1:UsS9OgFg/XHOSYakQ8ZtLWWeyGkk1WnmD/GsGfN0BHM=
 cloud.google.com/go/trace v1.16.0 h1:GmQovzFc5F0CNfl0VLgL64aoTtu7xsM0YajW2GlG9+E=
 cloud.google.com/go/trace v1.16.0/go.mod h1:r+bdAn16dKLSV1G2D5v3e58IlQlizfxWrUfjx7kM7X0=
-connectrpc.com/connect v1.20.0 h1:6TNDAB+WeNd2uolWNlYczB5E0KNNaVMNUEx8JEUsPmQ=
-connectrpc.com/connect v1.20.0/go.mod h1:A2ygJrukXwWy32vkCAAHNVguZrqZ+jeZ9rGRnGR4dN4=
+connectrpc.com/connect v1.21.0 h1:LhqSJt7jHf5NJBo9Jq/t/9FjcYAideif0mg+qe2jCUs=
+connectrpc.com/connect v1.21.0/go.mod h1:A2ygJrukXwWy32vkCAAHNVguZrqZ+jeZ9rGRnGR4dN4=
 connectrpc.com/grpchealth v1.5.0 h1:nHEVTwz9WYKxW2JTYUFD337q76oAZMvot9jX0WjVCQo=
 connectrpc.com/grpchealth v1.5.0/go.mod h1:fC9WGwKmDruKCNh8wj2rThiaxxoiXxvsCVIu2Ex2voA=
 connectrpc.com/grpcreflect v1.3.0 h1:Y4V+ACf8/vOb1XOc251Qun7jMB75gCUNw6llvB9csXc=
@@ -121,8 +121,8 @@ github.com/bits-and-blooms/bitset v1.24.6 h1:qcrftZUVBIwfs+m+nhoCBAPT+ZPZZjti8Sb
 github.com/bits-and-blooms/bitset v1.24.6/go.mod h1:7hO7Gc7Pp1vODcmWvKMRA9BNmbv6a/7QIWpPxHddWR8=
 github.com/blang/semver v3.5.1+incompatible h1:cQNTCjp13qL8KC3Nbxr/y2Bqb63oX6wdnnjpJbkM4JQ=
 github.com/blang/semver v3.5.1+incompatible/go.mod h1:kRBLl5iJ+tD4TcOOxsy/0fnwebNt5EWlYSAyrTnjyyk=
-github.com/blinklabs-io/bark v0.1.0 h1:hnFSOcnOlEUoHz7dFsT67aNVip+oYyPo6iKk6y1/TKc=
-github.com/blinklabs-io/bark v0.1.0/go.mod h1:Csm/dR5sdx4T/N9cZ3ZO+3tFmSWFul2HnmWDQtugWms=
+github.com/blinklabs-io/bark v0.2.0 h1:PWMUGaMj28omfWwKLjRsE0OVFlzDJlicEVMMfv+JDCg=
+github.com/blinklabs-io/bark v0.2.0/go.mod h1:Csm/dR5sdx4T/N9cZ3ZO+3tFmSWFul2HnmWDQtugWms=
 github.com/blinklabs-io/bursa v0.16.1-0.20260817233527-1eb8b64db609 h1:mRg3/s1Ydj9vqkIbh/mWL6SH3N45WA1S1WT3a1xFBY4=
 github.com/blinklabs-io/bursa v0.16.1-0.20260817233527-1eb8b64db609/go.mod h1:/SKC0QJhEV39p5K3RmUr8NAEHxmY3SGJi8ycXtXlNWQ=
 github.com/blinklabs-io/go-bip39 v0.2.0 h1:rHYih+JzqaFVuP+UfvByKTAdJPeYtlvZu49yUGrZUk8=
@@ -213,8 +213,6 @@ github.com/getsops/gopgagent v0.0.0-20241224165529-7044f28e491e h1:y/1nzrdF+RPds
 github.com/getsops/gopgagent v0.0.0-20241224165529-7044f28e491e/go.mod h1:awFzISqLJoZLm+i9QQ4SgMNHDqljH6jWV0B36V5MrUM=
 github.com/getsops/sops/v3 v3.13.3 h1:saYczbT88kD1saNChe1cAbFQe5mrRhTIfEw3TaEcmK0=
 github.com/getsops/sops/v3 v3.13.3/go.mod h1:3mUuUtKnJ63IzIvU4LQoDXdp0ZvorY5s2hEc7UVNfx8=
-github.com/glebarez/go-sqlite v1.23.0 h1:FyhIq4jqmgphQAUlY79zPldYGwISEZikaDfhiGWkkaI=
-github.com/glebarez/go-sqlite v1.23.0/go.mod h1:IIYrOH3L0rHY3jb4IXOHoWdklNajSGUN2eJcvK8WrnI=
 github.com/go-jose/go-jose/v4 v4.1.4 h1:moDMcTHmvE6Groj34emNPLs/qtYXRVcd6S7NHbHz3kA=
 github.com/go-jose/go-jose/v4 v4.1.4/go.mod h1:x4oUasVrzR7071A4TnHLGSPpNOm2a21K9Kf04k1rs08=
 github.com/go-logr/logr v1.2.2/go.mod h1:jdQByPbusPIv2/zmleS9BjJVeZ6kBagPoEUsqbVz/1A=
@@ -314,8 +312,8 @@ github.com/jackc/pgpassfile v1.0.0 h1:/6Hmqy13Ss2zCq62VdNG8tM1wchn8zjSGOBJ6icpsI
 github.com/jackc/pgpassfile v1.0.0/go.mod h1:CEx0iS5ambNFdcRtxPj5JhEz+xB6uRky5eyVu/W2HEg=
 github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 h1:iCEnooe7UlwOQYpKFhBabPMi4aNAfoODPEFNiAnClxo=
 github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761/go.mod h1:5TJZWKEWniPve33vlWYSoGYefn3gLQRzjfDlhSJ9ZKM=
-github.com/jackc/pgx/v5 v5.10.0 h1:VhSvgU2jSli8o3AqIEOTJr7rZwAEUVo4E4XhR94Zfr0=
-github.com/jackc/pgx/v5 v5.10.0/go.mod h1:mal1tBGAFfLHvZzaYh77YS/eC6IX9OWbRV1QIIM0Jn4=
+github.com/jackc/pgx/v5 v5.11.0 h1:IzBBtyK9AHqf98cctWFifYSci2hgQR/cd56wB4p+ogg=
+github.com/jackc/pgx/v5 v5.11.0/go.mod h1:mal1tBGAFfLHvZzaYh77YS/eC6IX9OWbRV1QIIM0Jn4=
 github.com/jackc/puddle/v2 v2.2.2 h1:PR8nw+E/1w0GLuRFSmiioY6UooMp6KJv0/61nB7icHo=
 github.com/jackc/puddle/v2 v2.2.2/go.mod h1:vriiEXHvEE654aYKXXjOvZM39qJ0q+azkZFrfEOc3H4=
 github.com/jinzhu/copier v0.4.0 h1:w3ciUoD19shMCRargcpm0cm91ytaBhDvuRpz1ODO/U8=
@@ -544,8 +542,8 @@ golang.org/x/sync v0.0.0-20180314180146-1d60e4601c6f/go.mod h1:RxMgew5VJxzue5/jJ
 golang.org/x/sync v0.0.0-20181108010431-42b317875d0f/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
 golang.org/x/sync v0.0.0-20190423024810-112230192c58/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
 golang.org/x/sync v0.0.0-20220722155255-886fb9371eb4/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
-golang.org/x/sync v0.22.0 h1:SZjpbeLmrCk4xhRSZFNZW5gFUeCeFgjekvI/+gfScek=
-golang.org/x/sync v0.22.0/go.mod h1:9xrNwdLfx4jkKbNva9FpL6vEN7evnE43NNNJQ2LF3+0=
+golang.org/x/sync v0.23.0 h1:KameEIfc1IkluZyXWLn39Wd4tURc6GbCiISGiZm2bQk=
+golang.org/x/sync v0.23.0/go.mod h1:sUUOizhqBxiL6pEWpqNLUiaJn1ShEbZ6BBqskPbjZm0=
 golang.org/x/sys v0.0.0-20180830151530-49385e6e1522/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
 golang.org/x/sys v0.0.0-20190215142949-d0b11bdaac8a/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
 golang.org/x/sys v0.0.0-20190412213103-97732733099d/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
@@ -590,8 +588,8 @@ golang.org/x/xerrors v0.0.0-20191204190536-9bdfabe68543/go.mod h1:I/5z698sn9Ka8T
 golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
 gonum.org/v1/gonum v0.17.0 h1:VbpOemQlsSMrYmn7T2OUvQ4dqxQXU+ouZFQsZOx50z4=
 gonum.org/v1/gonum v0.17.0/go.mod h1:El3tOrEuMpv2UdMrbNlKEh9vd86bmQ6vqIcDwxEOc1E=
-google.golang.org/api v0.294.0 h1:8gASjJxdtcIieB3OqbkLcF0FfbXVNqKtU5iozD1ssvA=
-google.golang.org/api v0.294.0/go.mod h1:02qB8+Ox1ZFzcaKFMguy1nQLJmSIyvV6Ff4txJEXtl4=
+google.golang.org/api v0.297.0 h1:WktxTsnnx0yZNnsR6j0q6hR21RnnK81FHTOPy/ux4OE=
+google.golang.org/api v0.297.0/go.mod h1:S4m8x0M6OkQpkOzGk1y9JG2sm4fFQrMh6dxzjCTszhE=
 google.golang.org/appengine v1.1.0/go.mod h1:EbEs0AVv82hx2wNQdGPgUI5lhzA/G0D9YwlJXL52JkM=
 google.golang.org/appengine v1.4.0/go.mod h1:xpcJRLb0r/rnEns0DIKYYv+WjYCduHsrkT7/EB5XEv4=
 google.golang.org/genproto v0.0.0-20180817151627-c66870c02cf8/go.mod h1:JiN7NxoALGmiZfu7CAH4rXhgtRTLTxftemlI0sWmxmc=
