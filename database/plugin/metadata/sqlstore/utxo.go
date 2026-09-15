@@ -870,6 +870,44 @@ func queryStakeRefsDeduped(
 	return ret, nil
 }
 
+// mergeStakeCredentialRefs merges any number of stake-credential reference
+// slices into one, with duplicates removed by MapKey and each credential's
+// first occurrence kept. setTransaction uses it to fold the credentials
+// touched by a transaction's certificates, consumed inputs, and produced
+// outputs into a single refreshRewardLiveStakeRefs pass: the same credential
+// legitimately appears in more than one of these (a wallet's own change
+// output alongside a certificate it just submitted, or several outputs to one
+// address), and each occurrence would otherwise trigger its own full
+// sumCredentialUtxoStake recompute for what is, after all of the
+// transaction's mutations are applied, the same final total.
+func mergeStakeCredentialRefs(
+	refSlices ...[]models.StakeCredentialRef,
+) []models.StakeCredentialRef {
+	total := 0
+	for _, refs := range refSlices {
+		total += len(refs)
+	}
+	if total == 0 {
+		return nil
+	}
+	seen := make(map[string]models.StakeCredentialRef, total)
+	order := make([]string, 0, total)
+	for _, refs := range refSlices {
+		for _, ref := range refs {
+			key := ref.MapKey()
+			if _, ok := seen[key]; !ok {
+				order = append(order, key)
+			}
+			seen[key] = ref
+		}
+	}
+	ret := make([]models.StakeCredentialRef, len(order))
+	for i, key := range order {
+		ret[i] = seen[key]
+	}
+	return ret
+}
+
 func utxoIDPredicate(ids []models.UtxoId) (string, []any) {
 	parts := make([]string, len(ids))
 	args := make([]any, 0, len(ids)*2)

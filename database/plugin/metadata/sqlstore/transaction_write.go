@@ -230,6 +230,10 @@ RETURNING id`,
 			); err != nil {
 				return err
 			}
+			// Collected here and merged with this transaction's UTxO-driven
+			// refresh below rather than refreshed immediately: see the
+			// mergeStakeCredentialRefs call beside stakeRefs for why.
+			var certificateRefs []models.StakeCredentialRef
 			if transaction.IsValid() {
 				if err := s.applyTransactionWithdrawals(
 					ctx,
@@ -242,7 +246,8 @@ RETURNING id`,
 				); err != nil {
 					return err
 				}
-				certificateRefs, err := s.applyTransactionCertificates(
+				var err error
+				certificateRefs, err = s.applyTransactionCertificates(
 					ctx,
 					db,
 					transactionID,
@@ -254,13 +259,6 @@ RETURNING id`,
 				)
 				if err != nil {
 					return err
-				}
-				if !historicalBackfill {
-					if err := s.refreshRewardLiveStakeRefs(
-						ctx, db, certificateRefs, point.Slot,
-					); err != nil {
-						return err
-					}
 				}
 			}
 			collateralReturn := transaction.CollateralReturn()
@@ -409,8 +407,32 @@ FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 			if err != nil {
 				return err
 			}
-			stakeRefs = append(stakeRefs, producedStakeRefs...)
-			return s.refreshRewardLiveStakeRefs(ctx, db, stakeRefs, point.Slot)
+			// Merge and dedupe every credential this transaction touched --
+			// via its certificates, consumed inputs, and produced outputs --
+			// into one refresh pass. Each source is already deduped against
+			// itself (applyTransactionCertificates and queryUtxoStakeRefs
+			// both key by MapKey), but producedStakeRefs is not, and none of
+			// the three is deduped against the others: a transaction with
+			// several outputs to the same staking credential (an ordinary
+			// change pattern), or one that both spends from and pays back to
+			// the credential a certificate in the same transaction just
+			// registered or delegated, would otherwise run
+			// refreshRewardLiveStakeAggregate's sumCredentialUtxoStake scan
+			// once per occurrence instead of once per credential. Every one
+			// of this transaction's mutations is already applied to db by
+			// this point, so merging changes nothing about the refreshed
+			// values -- it only removes the repeat scans (see
+			// TestSetTransactionRefreshesSharedCredentialOnce).
+			return s.refreshRewardLiveStakeRefs(
+				ctx,
+				db,
+				mergeStakeCredentialRefs(
+					certificateRefs,
+					stakeRefs,
+					producedStakeRefs,
+				),
+				point.Slot,
+			)
 		},
 	)
 }
