@@ -156,11 +156,22 @@ func TestPublishOrderedWaitsForCapacityRatherThanDropping(t *testing.T) {
 		}
 	}()
 
-	// The publisher must still be parked: nothing is draining yet.
+	// The publisher must still be parked: nothing is draining yet. Wait for
+	// the lane's queue to actually fill rather than assuming it will within
+	// an arbitrary window -- that is what proves the publisher is blocked on
+	// capacity, not merely slow.
+	lane := eb.orderedLane("ordered.full")
+	deadline := time.Now().Add(2 * time.Second)
+	for len(lane.queue) != cap(lane.queue) {
+		if time.Now().After(deadline) {
+			t.Fatal("the ordered lane never filled up while nothing drained it")
+		}
+		time.Sleep(time.Millisecond)
+	}
 	select {
 	case <-published:
 		t.Fatal("publisher completed without backpressure from a full lane")
-	case <-time.After(200 * time.Millisecond):
+	default:
 	}
 
 	close(release)
@@ -297,6 +308,9 @@ func TestPublishOrderedContextRejectsCancelledContextWithRoomInLane(
 	select {
 	case evt := <-ch:
 		t.Fatalf("cancelled publish was delivered: %v", evt.Data)
-	case <-time.After(200 * time.Millisecond):
+	default:
+		// PublishOrderedContext already returned false synchronously above,
+		// so nothing further can deliver to ch; no window needs to be waited
+		// out.
 	}
 }

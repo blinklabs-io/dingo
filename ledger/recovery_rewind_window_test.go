@@ -23,6 +23,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -152,6 +153,15 @@ func TestWindowedRewindConvergesWhilePrimaryChainExtends(t *testing.T) {
 	// per step is slower than the window each step covers, so a rewind that
 	// re-reads the live tip still converges.
 	stop := make(chan struct{})
+	// rewindInProgress marks the window during which the rewind call below
+	// is actually in flight: 1 from just before it is invoked to just before
+	// it returns, 0 otherwise. Recording it alongside each successful append
+	// (both atomics, so Go's memory model orders the two consistently) is
+	// what proves overlap -- a plain append counter alone cannot, since the
+	// appender keeps running until close(stop) and could land its only
+	// successful append after the rewind already returned.
+	var rewindInProgress atomic.Int32
+	var appendDuringRewind atomic.Int64
 	var appender sync.WaitGroup
 	appender.Go(func() {
 		lastPoint := pc.Tip().Point
@@ -181,14 +191,19 @@ func TestWindowedRewindConvergesWhilePrimaryChainExtends(t *testing.T) {
 				// re-read and try the next one.
 				continue
 			}
+			if rewindInProgress.Load() == 1 {
+				appendDuringRewind.Add(1)
+			}
 			lastPoint = ocommon.NewPoint(next.Slot, next.Hash)
 		}
 	})
 
 	target := ocommon.NewPoint(raw[0].Slot, raw[0].Hash)
+	rewindInProgress.Store(1)
 	committed, rewindErr := ls.rollbackPrimaryChainInSecurityParamWindows(
 		target,
 	)
+	rewindInProgress.Store(0)
 	close(stop)
 	appender.Wait()
 
@@ -203,6 +218,16 @@ func TestWindowedRewindConvergesWhilePrimaryChainExtends(t *testing.T) {
 		t,
 		committed,
 		"a descent that reached its target committed its steps",
+	)
+	// Prove the race this test exists for was actually exercised: the
+	// appender must have landed at least one append while the rewind was
+	// actually in flight, not merely at some point before close(stop) (a
+	// rewind's own rollback shrinks the tip, so comparing tip block numbers
+	// before and after cannot show this).
+	require.Positive(
+		t,
+		appendDuringRewind.Load(),
+		"the appender must have extended the chain concurrently with the rewind",
 	)
 }
 
