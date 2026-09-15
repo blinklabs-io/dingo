@@ -182,11 +182,16 @@ type ParsedUTxO struct {
 	StakingKey    []byte // 28 bytes, extracted from address
 	CredentialTag uint8  // stake credential tag: 0 key hash, 1 script hash
 	PaymentScript bool   // true when payment credential is a script hash
-	Amount        uint64 // lovelace
-	Assets        []ParsedAsset
-	DatumHash     []byte // optional
-	Datum         []byte // optional inline datum CBOR
-	ScriptRef     []byte // optional reference script CBOR
+	// Pointer is the certificate position named by a pointer address. Pointer
+	// outputs have no staking credential in their address; the stake query
+	// resolves this position against certificate history at the evaluation
+	// slot.
+	Pointer   *models.UtxoPointer
+	Amount    uint64 // lovelace
+	Assets    []ParsedAsset
+	DatumHash []byte // optional
+	Datum     []byte // optional inline datum CBOR
+	ScriptRef []byte // optional reference script CBOR
 }
 
 // ParsedAsset represents a native asset within a UTxO.
@@ -239,20 +244,32 @@ type importedCommitteeTransaction struct {
 	certs []lcommon.Certificate
 }
 
-func (t importedCommitteeTransaction) Type() int                { return 0 }
-func (t importedCommitteeTransaction) Cbor() []byte             { return t.hash[:] }
-func (t importedCommitteeTransaction) Id() lcommon.Blake2b256   { return t.hash }
+func (t importedCommitteeTransaction) Type() int { return 0 }
+
+func (t importedCommitteeTransaction) Cbor() []byte { return t.hash[:] }
+
+func (t importedCommitteeTransaction) Id() lcommon.Blake2b256 { return t.hash }
+
 func (t importedCommitteeTransaction) Hash() lcommon.Blake2b256 { return t.hash }
+
 func (t importedCommitteeTransaction) ProtocolParameterUpdates() (uint64, map[lcommon.Blake2b224]lcommon.ProtocolParameterUpdate) {
 	return 0, nil
 }
-func (t importedCommitteeTransaction) LeiosHash() lcommon.Blake2b256            { return t.hash }
-func (t importedCommitteeTransaction) Metadata() lcommon.TransactionMetadatum   { return nil }
-func (t importedCommitteeTransaction) AuxiliaryData() lcommon.AuxiliaryData     { return nil }
-func (t importedCommitteeTransaction) IsValid() bool                            { return true }
-func (t importedCommitteeTransaction) Certificates() []lcommon.Certificate      { return t.certs }
-func (t importedCommitteeTransaction) Consumed() []lcommon.TransactionInput     { return nil }
-func (t importedCommitteeTransaction) Produced() []lcommon.Utxo                 { return nil }
+
+func (t importedCommitteeTransaction) LeiosHash() lcommon.Blake2b256 { return t.hash }
+
+func (t importedCommitteeTransaction) Metadata() lcommon.TransactionMetadatum { return nil }
+
+func (t importedCommitteeTransaction) AuxiliaryData() lcommon.AuxiliaryData { return nil }
+
+func (t importedCommitteeTransaction) IsValid() bool { return true }
+
+func (t importedCommitteeTransaction) Certificates() []lcommon.Certificate { return t.certs }
+
+func (t importedCommitteeTransaction) Consumed() []lcommon.TransactionInput { return nil }
+
+func (t importedCommitteeTransaction) Produced() []lcommon.Utxo { return nil }
+
 func (t importedCommitteeTransaction) Witnesses() lcommon.TransactionWitnessSet { return nil }
 
 // ParsedAccount represents a stake account with its delegation.
@@ -3446,7 +3463,9 @@ func persistImportedCommitteeCertificates(
 	for _, authorization := range certState.CommitteeHotKeys {
 		cold, hot := authorization.Cold, authorization.Hot
 		if len(cold.Hash) != 28 || len(hot.Hash) != 28 {
-			return errors.New("committee authorization credentials must be 28 bytes")
+			return errors.New(
+				"committee authorization credentials must be 28 bytes",
+			)
 		}
 		var coldHash, hotHash lcommon.Blake2b224
 		copy(coldHash[:], cold.Hash)
@@ -3463,7 +3482,9 @@ func persistImportedCommitteeCertificates(
 	}
 	for _, cold := range certState.CommitteeResignations {
 		if len(cold.Hash) != 28 {
-			return errors.New("committee resignation credential must be 28 bytes")
+			return errors.New(
+				"committee resignation credential must be 28 bytes",
+			)
 		}
 		var coldHash lcommon.Blake2b224
 		copy(coldHash[:], cold.Hash)

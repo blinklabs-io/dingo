@@ -34,7 +34,9 @@ import (
 // release stores key 21 in an int64 with omitempty and returns a non-nil zero
 // for both, so a Sign() > 0 test collapses the two states and lets a
 // transaction declare a zero treasury alongside a needed PlutusV1/V2 script.
-func TestConwayFeaturesRuleDistinguishesAbsentFromDeclaredZeroTreasury(t *testing.T) {
+func TestConwayFeaturesRuleDistinguishesAbsentFromDeclaredZeroTreasury(
+	t *testing.T,
+) {
 	for _, tc := range []struct {
 		name          string
 		script        lcommon.Script

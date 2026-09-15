@@ -29,6 +29,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -36,6 +37,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/blinklabs-io/dingo/internal/nodeparity"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/spf13/cobra"
 )
@@ -56,6 +58,8 @@ var globalFlags struct {
 	dingoAddr   string
 	cardanoAddr string
 	metricsAddr string
+	atSlot      uint64
+	atHash      string
 }
 
 func main() {
@@ -81,10 +85,12 @@ preview or preprod.
 Default action (no subcommand): run one check cycle and print the result,
 same as 'check'.
 
-This tool never pins a specific historical block: Dingo's LocalStateQuery
-Acquire always answers at its live tip (blinklabs-io/dingo#382), so every
-check instead confirms both nodes agree on a tip before and after the
-query, discarding (not failing) the cycle if they don't.`,
+By default, each check confirms both nodes agree on a tip and pins the
+comparison to that point (blinklabs-io/dingo#382). Pass --at-slot and
+--at-hash together to instead compare at an explicit historical block,
+regardless of where either node's live tip currently is -- this is what
+lets a caller fall behind and still walk through specific past blocks one
+at a time.`,
 		Args: cobra.NoArgs,
 		RunE: checkRun,
 		// This tool logs structured JSON via slog; cobra's own plain-text
@@ -111,6 +117,14 @@ query, discarding (not failing) the cycle if they don't.`,
 	rootCmd.PersistentFlags().StringVar(
 		&globalFlags.metricsAddr, "metrics-addr", defaultMetricsAddr,
 		"address to serve Prometheus /metrics on for 'watch' (empty disables it; unused by 'check')",
+	)
+	rootCmd.PersistentFlags().Uint64Var(
+		&globalFlags.atSlot, "at-slot", 0,
+		"explicit historical mode (check only): compare at this exact slot instead of the live tip -- requires --at-hash",
+	)
+	rootCmd.PersistentFlags().StringVar(
+		&globalFlags.atHash, "at-hash", "",
+		"explicit historical mode (check only): hex-encoded block hash at --at-slot, disambiguating it across a fork/rollback",
 	)
 
 	rootCmd.AddCommand(checkCommand())
@@ -148,6 +162,53 @@ func requireAddrs() error {
 		return errors.New("--cardano-addr is required")
 	}
 	return nil
+}
+
+// requireAtPoint validates --at-slot/--at-hash: both-or-neither, since a
+// historical point (blinklabs-io/dingo#382) needs both the slot and the
+// hash to be unambiguous across a fork/rollback (see Tip.point). Returns
+// nil, nil when neither flag was set, meaning "live-tip-agreement mode" --
+// Check's existing default behavior.
+func requireAtPoint() (*nodeparity.Tip, error) {
+	if globalFlags.atSlot == 0 && globalFlags.atHash == "" {
+		return nil, nil
+	}
+	if globalFlags.atSlot == 0 || globalFlags.atHash == "" {
+		return nil, errors.New(
+			"--at-slot and --at-hash must both be set, or neither",
+		)
+	}
+	decoded, err := hex.DecodeString(globalFlags.atHash)
+	if err != nil {
+		return nil, fmt.Errorf("--at-hash: %w", err)
+	}
+	if len(decoded) != 32 {
+		return nil, fmt.Errorf(
+			"--at-hash: must decode to 32 bytes, got %d",
+			len(decoded),
+		)
+	}
+	return &nodeparity.Tip{
+		Slot: globalFlags.atSlot,
+		Hash: globalFlags.atHash,
+	}, nil
+}
+
+// rejectAtPointFlags errors if --at-slot/--at-hash were set, for a command
+// that has no historical-point mode. Both flags are registered on the root
+// command (rootCmd.PersistentFlags()), inherited by every subcommand
+// including 'watch', but only 'check' (via requireAtPoint) has any
+// historical-point mode to apply them to -- 'watch' silently accepted and
+// ignored them otherwise, with no error or warning that they had no effect
+// (blinklabs-io/dingo#4183 review).
+func rejectAtPointFlags(commandName string) error {
+	if globalFlags.atSlot == 0 && globalFlags.atHash == "" {
+		return nil
+	}
+	return fmt.Errorf(
+		"--at-slot/--at-hash are not supported by %q -- explicit historical mode is 'check'-only",
+		commandName,
+	)
 }
 
 // networkMagic resolves a network name to its Ouroboros network magic, the
