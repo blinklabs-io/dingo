@@ -17,6 +17,7 @@ package koiosparity
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -647,8 +648,50 @@ func TestNewKoiosTransportResponseHeaderTimeout(t *testing.T) {
 // and guaranteed never to route) stands in for "a firewall silently drops
 // SYN/ACK": the dial attempt neither succeeds nor is immediately refused, so
 // only an explicit dial timeout bounds it.
+//
+// Three properties distinguish this from a coincidentally-fast, differently
+// caused failure:
+//
+//  1. The proxy environment variables net/http's ProxyFromEnvironment (part
+//     of http.DefaultTransport, which newKoiosTransport clones) consults are
+//     cleared for the duration of the test. An HTTP_PROXY/http_proxy set in
+//     the test's execution environment would make the client dial the proxy
+//     instead of 192.0.2.1:81, so the request could fail fast (or succeed)
+//     through the proxy without ever exercising the 300ms dial bound at all
+//     — passing the test for the wrong reason, and inconsistently depending
+//     on the environment it runs in.
+//  2. The returned error must classify as a dial timeout specifically (a
+//     net.Error whose Timeout() reports true), not merely "some error" — a
+//     fast "connection refused" or "network unreachable" would satisfy the
+//     old require.Error(...) assertion without ever hitting the 300ms bound
+//     (confirmed by contrast: dialing a closed local port instead returns a
+//     non-timeout "connection refused" with Timeout() false). This dial
+//     timeout does not reliably chain os.ErrDeadlineExceeded — verified
+//     empirically to surface it in most but not all runs, depending on
+//     which of two internal error paths net.Dialer's deadline hits — so
+//     Timeout() is the classification actually asserted here.
+//  3. elapsed is bounded tightly against dialTimeout itself, not merely
+//     against the unrelated, far larger client-level Timeout. Measured
+//     dial-timeout failures land within a few milliseconds of dialTimeout
+//     (300ms); a bound that only excludes clientTimeout (10s) would not
+//     distinguish this from, say, http.DefaultTransport's own 30s dial
+//     default happening to lose a race against something else.
 func TestNewKoiosTransportDialTimeout(t *testing.T) {
-	t.Parallel()
+	// Not t.Parallel: t.Setenv (below) forbids it, and the whole point of
+	// clearing these process-wide proxy env vars is to isolate this test
+	// from whatever the ambient environment has set.
+
+	// Cleared rather than left to the ambient environment: any of these set
+	// in the test's execution environment would redirect the dial through a
+	// proxy instead of exercising DialContext's own timeout (see doc comment
+	// point 1).
+	for _, key := range []string{
+		"HTTP_PROXY", "http_proxy",
+		"HTTPS_PROXY", "https_proxy",
+		"NO_PROXY", "no_proxy",
+	} {
+		t.Setenv(key, "")
+	}
 
 	const (
 		dialTimeout   = 300 * time.Millisecond
@@ -675,10 +718,87 @@ func TestNewKoiosTransportDialTimeout(t *testing.T) {
 	}
 
 	require.Error(t, err, "a black-holed dial target must fail the request")
+
+	var netErr net.Error
+	require.ErrorAs(
+		t,
+		err,
+		&netErr,
+		"failure must be a net.Error, not some other error shape",
+	)
+	assert.True(
+		t,
+		netErr.Timeout(),
+		"failure must classify as a timeout, not e.g. a fast refusal/unreachable error",
+	)
+
 	assert.Less(
 		t,
 		elapsed,
 		clientTimeout,
 		"must fail well before the unrelated, much larger client-level Timeout",
 	)
+	assert.Less(
+		t,
+		elapsed,
+		2*dialTimeout,
+		"must fail close to the configured dial timeout itself, not merely "+
+			"before the far larger client-level Timeout or DefaultTransport's "+
+			"own 30s dial default",
+	)
+}
+
+// fakeRoundTripper is a http.RoundTripper that is deliberately not
+// *http.Transport, standing in for whatever a future caller might install as
+// http.DefaultTransport.
+type fakeRoundTripper struct{}
+
+func (fakeRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("fakeRoundTripper: not implemented")
+}
+
+// TestNewKoiosTransportFallsBackWhenDefaultTransportIsNotHTTPTransport proves
+// newKoiosTransport's comma-ok assertion on http.DefaultTransport: when the
+// package-level default is not a *http.Transport (a bare .(*http.Transport)
+// assertion would panic here), newKoiosTransport must still return a usable
+// *http.Transport with every explicit timeout this package configures, rather
+// than crashing NewKoiosClient.
+func TestNewKoiosTransportFallsBackWhenDefaultTransportIsNotHTTPTransport(
+	t *testing.T,
+) {
+	// Not t.Parallel: swaps the process-global http.DefaultTransport.
+	original := http.DefaultTransport
+	http.DefaultTransport = fakeRoundTripper{}
+	t.Cleanup(func() { http.DefaultTransport = original })
+
+	require.NotPanics(t, func() {
+		transport := newKoiosTransport(
+			koiosDialTimeout,
+			koiosDialKeepAlive,
+			koiosTLSHandshakeTimeout,
+			koiosResponseHeaderTimeout,
+			koiosExpectContinueTimeout,
+		)
+		require.NotNil(t, transport)
+		assert.NotNil(
+			t,
+			transport.DialContext,
+			"fallback transport must still get the configured DialContext",
+		)
+		assert.Equal(
+			t,
+			koiosTLSHandshakeTimeout,
+			transport.TLSHandshakeTimeout,
+		)
+		assert.Equal(
+			t,
+			koiosResponseHeaderTimeout,
+			transport.ResponseHeaderTimeout,
+		)
+		assert.Equal(
+			t,
+			koiosExpectContinueTimeout,
+			transport.ExpectContinueTimeout,
+		)
+	})
 }

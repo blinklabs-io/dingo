@@ -398,7 +398,18 @@ func newKoiosTransport(
 	dialTimeout, dialKeepAlive time.Duration,
 	tlsHandshakeTimeout, responseHeaderTimeout, expectContinueTimeout time.Duration,
 ) *http.Transport {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// http.DefaultTransport is documented as *http.Transport today, but
+	// nothing enforces that at compile time; a comma-ok assertion with a
+	// safe fallback (matching mithril/download.go's newDownloadTransport)
+	// means a future replacement of the package-level default degrades to a
+	// fresh transport with this function's explicit timeouts still applied,
+	// instead of panicking.
+	var transport *http.Transport
+	if base, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport = base.Clone()
+	} else {
+		transport = &http.Transport{Proxy: http.ProxyFromEnvironment}
+	}
 	transport.DialContext = (&net.Dialer{
 		Timeout:   dialTimeout,
 		KeepAlive: dialKeepAlive,
