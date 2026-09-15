@@ -15,6 +15,7 @@
 package cardano
 
 import (
+	"io/fs"
 	"testing"
 )
 
@@ -202,5 +203,64 @@ func TestEmbedFS_PrimeTestnet(t *testing.T) {
 	}
 	if cfg.ByronGenesis() == nil {
 		t.Fatal("expected ByronGenesis to be loaded")
+	}
+}
+
+// TestEmbeddedConfigPathReachesEveryNetwork is the defect the helper exists
+// for: every caller that has only a network name derived the config path by
+// appending "/config.json", and prime-testnet's upstream config is named
+// configuration.yaml, so that network could not be started from the embedded
+// filesystem at all.
+//
+// Enumerating the embedded directories rather than listing names keeps a
+// network added to the //go:embed directive under this check automatically --
+// the same property bin/config-parity.sh relies on.
+func TestEmbeddedConfigPathReachesEveryNetwork(t *testing.T) {
+	t.Parallel()
+
+	entries, err := fs.ReadDir(EmbeddedConfigFS, ".")
+	if err != nil {
+		t.Fatalf("reading the embedded root: %v", err)
+	}
+	networks := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		networks++
+		network := entry.Name()
+		t.Run(network, func(t *testing.T) {
+			t.Parallel()
+			cfg, err := LoadCardanoNodeConfigWithFallback(
+				EmbeddedConfigPath(network),
+				network,
+				EmbeddedConfigFS,
+			)
+			if err != nil {
+				t.Fatalf(
+					"%s is not loadable at the derived path %q: %v",
+					network, EmbeddedConfigPath(network), err,
+				)
+			}
+			if cfg.ShelleyGenesis() == nil {
+				t.Error("expected ShelleyGenesis to be loaded")
+			}
+		})
+	}
+	if networks == 0 {
+		t.Fatal("the embedded filesystem contains no network directories")
+	}
+}
+
+// TestEmbeddedConfigPathFallsBackToConfigJSON covers the name reported for a
+// network that is not embedded at all. Returning the conventional name means
+// the caller's error names the file it expected, rather than whichever
+// candidate happened to be tried last.
+func TestEmbeddedConfigPathFallsBackToConfigJSON(t *testing.T) {
+	t.Parallel()
+
+	if got, want := EmbeddedConfigPath("no-such-network"),
+		"no-such-network/config.json"; got != want {
+		t.Errorf("EmbeddedConfigPath = %q, want %q", got, want)
 	}
 }

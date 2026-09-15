@@ -221,7 +221,7 @@ func resumeBackfill(
 		if network == "" {
 			network = "preview"
 		}
-		cardanoConfigPath = network + "/config.json"
+		cardanoConfigPath = cardano.EmbeddedConfigPath(network)
 	}
 	nodeCfg, nodeCfgErr := cardano.LoadCardanoNodeConfigWithFallback(
 		cardanoConfigPath,
