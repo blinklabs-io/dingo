@@ -96,15 +96,38 @@ func (b *cancellableBarrier) notifyLocked() {
 // holding exclusive access, otherwise proceeds immediately alongside any
 // other concurrent reader.
 func (b *cancellableBarrier) RLock() {
+	// context.Background() never cancels, so the error is unreachable.
+	_ = b.RLockContext(context.Background())
+}
+
+// RLockContext is RLock, but ctx can abandon the wait behind a queued or held
+// writer. A cancelled call does not increment readers and therefore needs no
+// matching RUnlock.
+func (b *cancellableBarrier) RLockContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	b.mu.Lock()
 	for b.writerWaiting {
 		ch := b.changedLocked()
 		b.mu.Unlock()
-		<-ch
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 		b.mu.Lock()
+	}
+	// Cancellation can race the writer's release and select the changed
+	// notification above. Recheck before recording the shared hold so callers
+	// never need to release a lock for an operation they already abandoned.
+	if err := ctx.Err(); err != nil {
+		b.mu.Unlock()
+		return err
 	}
 	b.readers++
 	b.mu.Unlock()
+	return nil
 }
 
 // RUnlock releases the shared side.

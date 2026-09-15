@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/api/blockfrost"
+	"github.com/blinklabs-io/dingo/api/kupo"
 	"github.com/blinklabs-io/dingo/api/mesh"
 	"github.com/blinklabs-io/dingo/api/utxorpc"
 	"github.com/blinklabs-io/dingo/plugin"
@@ -91,6 +92,19 @@ func registerAPIProbe(
 				deps blockfrost.ProviderDependencies,
 			) (string, plugin.Instance, error) {
 				probe.host = deps.Host
+				return name, probe.instance(), nil
+			},
+		)
+	case plugin.CapabilityAPIKupo:
+		err = plugin.Register(
+			host,
+			descriptor,
+			func() apiProbeConfig { return apiProbeConfig{} },
+			func(
+				context.Context,
+				apiProbeConfig,
+				kupo.ProviderDependencies,
+			) (string, plugin.Instance, error) {
 				return name, probe.instance(), nil
 			},
 		)
@@ -272,6 +286,7 @@ func TestAPIPluginSelectionDefaultPortPerCapability(t *testing.T) {
 
 	want := map[plugin.Capability]uint{
 		plugin.CapabilityAPIBlockfrost: 3000,
+		plugin.CapabilityAPIKupo:       0,
 		plugin.CapabilityAPIMesh:       8080,
 		plugin.CapabilityAPIUtxorpc:    9090,
 	}
@@ -299,6 +314,7 @@ func TestNodeRunSkipsZeroPortAPIProviders(t *testing.T) {
 	probes := map[plugin.Capability]*apiLifecycleProbe{
 		plugin.CapabilityAPIUtxorpc:    {},
 		plugin.CapabilityAPIBlockfrost: {},
+		plugin.CapabilityAPIKupo:       {},
 		plugin.CapabilityAPIMesh:       {},
 	}
 	for capability, probe := range probes {
@@ -307,7 +323,7 @@ func TestNodeRunSkipsZeroPortAPIProviders(t *testing.T) {
 	}
 	// Force a deterministic failure after the API startup section so Run
 	// returns without requiring an external shutdown signal. Reaching block
-	// producer validation proves all three zero-port decisions were exercised.
+	// producer validation proves all four zero-port decisions were exercised.
 	n.config.blockProducer = true
 
 	require.ErrorIs(
@@ -336,7 +352,8 @@ func TestNodeRunAPIStartupFailureCleansUpStartedProviders(t *testing.T) {
 
 	n := newAPIPluginRuntimeNode(t)
 	utxorpcProbe := &apiLifecycleProbe{}
-	blockfrostProbe := &apiLifecycleProbe{
+	blockfrostProbe := &apiLifecycleProbe{}
+	kupoProbe := &apiLifecycleProbe{
 		startErr: errors.New("injected API startup failure"),
 	}
 	meshProbe := &apiLifecycleProbe{}
@@ -357,12 +374,20 @@ func TestNodeRunAPIStartupFailureCleansUpStartedProviders(t *testing.T) {
 	registerAPIProbe(
 		t,
 		n.pluginHost,
+		plugin.CapabilityAPIKupo,
+		"probe",
+		kupoProbe,
+	)
+	registerAPIProbe(
+		t,
+		n.pluginHost,
 		plugin.CapabilityAPIMesh,
 		"probe",
 		meshProbe,
 	)
 	selectAPIProbe(n, plugin.CapabilityAPIUtxorpc, "probe", 19090)
 	selectAPIProbe(n, plugin.CapabilityAPIBlockfrost, "probe", 13000)
+	selectAPIProbe(n, plugin.CapabilityAPIKupo, "probe", 11442)
 	selectAPIProbe(n, plugin.CapabilityAPIMesh, "probe", 0)
 
 	err := n.Run(context.Background())
@@ -371,6 +396,8 @@ func TestNodeRunAPIStartupFailureCleansUpStartedProviders(t *testing.T) {
 	assert.Equal(t, int32(1), utxorpcProbe.stops.Load())
 	assert.Equal(t, int32(1), blockfrostProbe.starts.Load())
 	assert.Equal(t, int32(1), blockfrostProbe.stops.Load())
+	assert.Equal(t, int32(1), kupoProbe.starts.Load())
+	assert.Equal(t, int32(1), kupoProbe.stops.Load())
 	assert.Zero(t, meshProbe.starts.Load())
 	assert.Zero(t, meshProbe.stops.Load())
 }

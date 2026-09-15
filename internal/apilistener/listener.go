@@ -13,7 +13,7 @@
 // permissions and limitations under the License.
 
 // Package apilistener owns the start/stop protocol shared by Dingo's HTTP API
-// servers (api/blockfrost, api/mesh, api/utxorpc).
+// servers (api/blockfrost, api/kupo, api/mesh, api/utxorpc).
 //
 // The protocol exists because http.Server.Shutdown only closes listeners that
 // Serve has already registered, and each server binds its socket before
@@ -29,7 +29,7 @@
 // not report the server down before the winner has finished (teardown).
 //
 // It lives here rather than in each API package because those pieces are
-// subtle in the same way in all three -- see awaitSignal's doc comment for the
+// subtle in the same way in all four -- see awaitSignal's doc comment for the
 // recheck that a second copy would be most likely to lose.
 package apilistener
 

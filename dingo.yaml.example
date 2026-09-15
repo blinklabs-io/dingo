@@ -78,6 +78,10 @@ plugins:
         #   mode: server
         #   certFilePath: "/run/secrets/blockfrost.crt"
         #   keyFilePath: "/run/secrets/blockfrost.key"
+    kupo:
+      provider: "builtin"
+      config:
+        port: 1442
     mesh:
       provider: "builtin"
       config:
@@ -88,7 +92,7 @@ plugins:
         port: 9090
 
 # Shared optional TLS default for every selected plugins.api.* provider
-# (Blockfrost, Mesh, UTxO RPC). Each field resolves independently:
+# (Blockfrost, Kupo, Mesh, UTxO RPC). Each field resolves independently:
 # plugins.api.<name>.config.tls overrides a field for that provider only
 # (see the commented example above). Leaving this section out keeps the API
 # listeners plaintext. API listeners use the root bindAddr, whose default is

@@ -728,6 +728,15 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 						Provider: "builtin",
 						Config:   map[string]any{"port": uint(3000)},
 					},
+					// Port 0 leaves Kupo disabled unless an operator
+					// configures one, matching internal/config's default.
+					// The provider still has to be named here:
+					// apiPluginSelection rejects an empty Provider, and it
+					// runs before the port gate that makes the API optional.
+					Kupo: hostplugin.Selection{
+						Provider: "builtin",
+						Config:   map[string]any{"port": uint(0)},
+					},
 					Mesh: hostplugin.Selection{
 						Provider: "builtin",
 						Config:   map[string]any{"port": uint(8080)},
@@ -871,6 +880,7 @@ func (c *Config) syncCompatFields() {
 	c.pluginSelections = map[hostplugin.Capability]hostplugin.Selection{
 		hostplugin.CapabilityStorageBlob: c.cfg.Plugins.Storage.Blob, hostplugin.CapabilityStorageMetadata: c.cfg.Plugins.Storage.Metadata,
 		hostplugin.CapabilityMempool: c.cfg.Plugins.Mempool, hostplugin.CapabilityAPIBlockfrost: c.cfg.Plugins.API.Blockfrost,
+		hostplugin.CapabilityAPIKupo: c.cfg.Plugins.API.Kupo,
 		hostplugin.CapabilityAPIMesh: c.cfg.Plugins.API.Mesh, hostplugin.CapabilityAPIUtxorpc: c.cfg.Plugins.API.Utxorpc,
 	}
 }
@@ -903,6 +913,8 @@ func WithPluginSelection(
 			c.cfg.Plugins.Mempool = selection
 		case hostplugin.CapabilityAPIBlockfrost:
 			c.cfg.Plugins.API.Blockfrost = selection
+		case hostplugin.CapabilityAPIKupo:
+			c.cfg.Plugins.API.Kupo = selection
 		case hostplugin.CapabilityAPIMesh:
 			c.cfg.Plugins.API.Mesh = selection
 		case hostplugin.CapabilityAPIUtxorpc:
@@ -1033,7 +1045,7 @@ func WithCardanoNodeConfig(
 }
 
 // WithBindAddr specifies the IP address used by relay, metrics, and public
-// Blockfrost, Mesh, and UTxO RPC listeners. The default is 0.0.0.0.
+// Blockfrost, Kupo, Mesh, and UTxO RPC listeners. The default is 0.0.0.0.
 func WithBindAddr(addr string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BindAddr = addr
@@ -1132,8 +1144,8 @@ func WithUtxorpcPort(port uint) ConfigOptionFunc {
 }
 
 // WithAPIConfig sets the shared api.tls policy applied to every
-// selected plugins.api.* provider (Blockfrost, Mesh, UTxORPC) unless that
-// provider's own plugins.api.<name>.config.tls overrides a field.
+// selected plugins.api.* provider (Blockfrost, Kupo, Mesh, UTxORPC) unless
+// that provider's own plugins.api.<name>.config.tls overrides a field.
 // See internal/apiconfig and ARCHITECTURE.md's "API security" section.
 func WithAPIConfig(cfg internalconfig.APIConfig) ConfigOptionFunc {
 	return func(c *Config) {
