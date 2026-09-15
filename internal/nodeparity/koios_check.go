@@ -104,6 +104,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/protocol/localstatequery"
+	"golang.org/x/sync/errgroup"
 )
 
 // KoiosNetworks are the only networks Koios's own client, and this
@@ -222,12 +223,26 @@ func stakeRelDiff(dingoStake uint64, koiosStakeStr string) (relDiff float64, ok 
 	return relDiff, true
 }
 
+// stakeCheckConcurrency bounds how many /pool_history requests
+// CheckStakeDistribution has in flight at once. Confirmed live against the
+// Koios mirror this comparison runs against: a single /pool_history call
+// averaged ~1.5s, and issuing them one pool at a time made the
+// stake-distribution check alone take ~2 minutes per epoch with preview's
+// current 75 active pools -- almost entirely spent waiting on network
+// round trips, not on anything CPU-bound, so bounded concurrency is a safe
+// win. Kept well short of unbounded to avoid hammering a mirror another
+// team is hosting for us (unlike the public host, which has its own
+// documented tier limits this comparison must not trip either).
+const stakeCheckConcurrency = 8
+
 // CheckStakeDistribution compares Dingo's own pool-by-pool active stake
 // (queried live via client, already Acquired to the point under test)
 // against Koios's /pool_history for epoch, for every pool Dingo itself
 // reports -- see this file's doc comment for why this iterates Dingo's own
 // (small) pool set rather than Koios's full historical pool_list, and why
-// VRF keys are not compared.
+// VRF keys are not compared. The per-pool /pool_history calls run with
+// bounded concurrency (stakeCheckConcurrency) rather than sequentially --
+// see that constant's doc comment.
 func CheckStakeDistribution(
 	ctx context.Context,
 	client *localstatequery.Client,
@@ -238,35 +253,63 @@ func CheckStakeDistribution(
 	if err != nil {
 		return nil, fmt.Errorf("dingo stake distribution query: %w", err)
 	}
-	var mismatches []StakeMismatch
+
+	type poolStake struct {
+		bech32 string
+		stake  uint64
+	}
+	pools := make([]poolStake, 0, len(pd.Pools))
 	for pid, entry := range pd.Pools {
-		poolBech32 := pid.String()
-		hist, err := koios.GetPoolEpochHistory(ctx, poolBech32, epoch)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"koios pool_history for %s epoch %d: %w",
-				poolBech32, epoch, err,
-			)
-		}
-		if hist == nil {
-			// No Koios row for this pool/epoch at all -- e.g. a pool that
-			// only just registered this epoch and has no snapshot yet.
-			// Not a mismatch: nothing to compare against.
-			continue
-		}
-		relDiff, ok := stakeRelDiff(entry.TotalPoolStake, hist.ActiveStake)
-		if !ok {
-			continue
-		}
-		if relDiff > stakeRelativeTolerance {
-			mismatches = append(mismatches, StakeMismatch{
-				PoolIDBech32: poolBech32,
-				DingoStake:   entry.TotalPoolStake,
-				KoiosStake:   hist.ActiveStake,
-				RelDiff:      relDiff,
-			})
+		pools = append(pools, poolStake{pid.String(), entry.TotalPoolStake})
+	}
+
+	results := make([]*StakeMismatch, len(pools))
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(stakeCheckConcurrency)
+	for i, p := range pools {
+		g.Go(func() error {
+			hist, err := koios.GetPoolEpochHistory(gctx, p.bech32, epoch)
+			if err != nil {
+				return fmt.Errorf(
+					"koios pool_history for %s epoch %d: %w",
+					p.bech32, epoch, err,
+				)
+			}
+			if hist == nil {
+				// No Koios row for this pool/epoch at all -- e.g. a pool
+				// that only just registered this epoch and has no
+				// snapshot yet. Not a mismatch: nothing to compare
+				// against.
+				return nil
+			}
+			relDiff, ok := stakeRelDiff(p.stake, hist.ActiveStake)
+			if !ok {
+				return nil
+			}
+			if relDiff > stakeRelativeTolerance {
+				results[i] = &StakeMismatch{
+					PoolIDBech32: p.bech32,
+					DingoStake:   p.stake,
+					KoiosStake:   hist.ActiveStake,
+					RelDiff:      relDiff,
+				}
+			}
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+
+	var mismatches []StakeMismatch
+	for _, m := range results {
+		if m != nil {
+			mismatches = append(mismatches, *m)
 		}
 	}
+	sort.Slice(mismatches, func(i, j int) bool {
+		return mismatches[i].PoolIDBech32 < mismatches[j].PoolIDBech32
+	})
 	return mismatches, nil
 }
 
