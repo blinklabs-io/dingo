@@ -2165,6 +2165,18 @@ func (ls *LedgerState) queryShelleyUtxoByTxIn(
 //     transition changing the stability-window formula (Byron's small 2k
 //     vs every Shelley+ era's much larger 3k/f) -- see
 //     persistConsumedUtxoPruneFloor's doc comment for both cases in detail.
+//     This bound is skipped entirely (utxoPruningDeferredForCatchup) while
+//     this node is still catching up to a known upstream target, mirroring
+//     cleanupConsumedUtxos' own defer condition: cleanup never runs during
+//     catch-up, so nothing has actually been pruned yet, and computing
+//     this bound from the live tip anyway would be too STRICT rather than
+//     too lenient -- rejecting an Acquire the node had already promised was
+//     answerable, moments earlier, for a row that was never deleted (a
+//     from-genesis replay's tip advances far faster than real block
+//     cadence, so this window used to open within single-digit epochs of
+//     starting, tearing down the whole LocalStateQuery connection with no
+//     graceful per-query failure available; blinklabs-io/dingo#382 residual
+//     Acquire/Query race).
 //   - The durably persisted floor (readConsumedUtxoPruneFloor) recording
 //     the highest slot cleanup has ever actually begun pruning up to. This
 //     is exactly right for what's already been pruned, but reads zero on a
@@ -2193,7 +2205,8 @@ func (ls *LedgerState) checkUtxoRetentionWindow(
 	}
 	var retentionFloor uint64
 	stabilityWindow := ls.calculateStabilityWindow()
-	if stabilityWindow != 0 && tip.Point.Slot > stabilityWindow {
+	if stabilityWindow != 0 && tip.Point.Slot > stabilityWindow &&
+		!ls.utxoPruningDeferredForCatchup(tip.Point.Slot, stabilityWindow) {
 		retentionFloor = tip.Point.Slot - stabilityWindow
 	}
 	persistedFloor, err := ls.readConsumedUtxoPruneFloor(txn)
