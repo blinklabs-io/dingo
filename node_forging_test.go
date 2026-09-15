@@ -229,12 +229,14 @@ func TestValidateBlockProducerLedger_NonDevnetVRFMismatchIsFatal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("validateBlockProducerStartupAtSlot: %v", err)
 	}
-	err = n.validateBlockProducerLedgerWithView(
+	err = n.validateBlockProducerLedgerWithViewAtSlot(
 		creds,
 		testBlockProducerLedgerView{
 			registered: true,
 			regVRFHash: mismatchedVRFHash(),
 		},
+		nil,
+		0,
 	)
 	if !errors.Is(err, forging.ErrVRFKeyHashMismatch) {
 		t.Fatalf("expected VRF mismatch error, got: %v", err)
@@ -252,12 +254,14 @@ func TestValidateBlockProducerLedger_DevnetVRFMismatchWarns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("validateBlockProducerStartupAtSlot: %v", err)
 	}
-	err = n.validateBlockProducerLedgerWithView(
+	err = n.validateBlockProducerLedgerWithViewAtSlot(
 		creds,
 		testBlockProducerLedgerView{
 			registered: true,
 			regVRFHash: mismatchedVRFHash(),
 		},
+		nil,
+		0,
 	)
 	if err != nil {
 		t.Fatalf("devnet mismatch should warn and continue: %v", err)

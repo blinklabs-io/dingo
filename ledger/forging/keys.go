@@ -24,6 +24,7 @@ import (
 	"io"
 	"math"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sync"
 
@@ -1059,19 +1060,9 @@ type LedgerView interface {
 // registration is not fatal because operators commonly stage their keys
 // before submitting the registration certificate.
 //
-// The opcert counter check here is staleness-only (candidate below the
-// last observed value), not the full era-scoped no-gap rule the forge
-// loop's checkOpCertSequence and block application enforce. Startup
-// cannot apply that rule safely: the era for "now" would have to come
-// from a wall-clock slot, while the observed baseline
-// (LatestOpCertSequence) only reflects the applied chain, and those two
-// can disagree on a node whose applied tip is behind wall-clock time (an
-// interrupted sync, a resume after downtime, a restore to an older
-// snapshot) -- a pool several rotations into its life would look gapped
-// against a baseline that just hasn't caught up yet, and refusing
-// startup for it would prevent the node from ever syncing to the point
-// that makes the baseline correct. The forge loop's own gate does not
-// have this problem, since it runs near the chain tip.
+// ValidateAgainstLedger applies the staleness-only rule for callers that do
+// not have protocol parameters. Node startup uses ValidateAgainstLedgerAtSlot
+// so it can apply the era-specific rule before enabling production.
 //
 // Three return values describe the outcome:
 //   - registered: true if the pool registration was found on chain.
@@ -1084,6 +1075,127 @@ type LedgerView interface {
 //     devnet callers may choose to warn on ErrVRFKeyHashMismatch.
 func (pc *PoolCredentials) ValidateAgainstLedger(
 	view LedgerView,
+) (registered, vrfMatched bool, err error) {
+	return pc.validateAgainstLedger(view, false)
+}
+
+// ErrOpCertEraUnevaluable reports that the era in effect at a startup slot
+// could not be resolved, so the era-scoped no-gap operational-certificate
+// counter rule was not evaluable there.
+//
+// It is never returned as the error result of ValidateAgainstLedgerAtSlot. An
+// unresolved era means the rule was not evaluated, not that it was violated,
+// and refusing startup on it strands a producer that is merely behind: the
+// node cannot then sync to the state that would resolve the era. The forge
+// loop re-applies the full rule for every won leader slot
+// (BlockForger.checkOpCertSequence) with both operands read from near-tip
+// state and fails closed per slot, so a gapped counter still cannot produce a
+// block.
+var ErrOpCertEraUnevaluable = errors.New(
+	"operational certificate era rule not evaluable",
+)
+
+// LedgerValidationResult describes the outcome of a startup ledger
+// cross-check.
+type LedgerValidationResult struct {
+	// Registered is true if the pool registration was found on chain.
+	Registered bool
+	// VRFMatched is true if Registered and the on-chain VRF key hash matched
+	// the loaded VRF verification key. False otherwise, including when the VRF
+	// verification key is unavailable (a seed-only VRF skey).
+	VRFMatched bool
+	// EraUnevaluable is non-nil when the era in effect at the requested slot
+	// could not be resolved, so the era-scoped no-gap counter rule was left
+	// unenforced and only the staleness rule was applied. It wraps
+	// ErrOpCertEraUnevaluable. The cross-check still succeeds; callers should
+	// log it where an operator will see it.
+	EraUnevaluable error
+}
+
+// ValidateAgainstLedgerAtSlot applies the era-specific operational-certificate
+// counter rule for slot, on top of the cross-checks ValidateAgainstLedger
+// performs.
+//
+// slot must come from the same pipeline stage as the counter baseline the
+// rule is judged against: LedgerView.LatestOpCertSequence reflects only the
+// applied chain, so slot must be an applied-chain slot and not a wall-clock
+// one.
+//
+// A non-nil error means the ledger view disagrees with the loaded credentials.
+// An era that cannot be resolved is reported in
+// LedgerValidationResult.EraUnevaluable instead, and leaves the staleness rule
+// (candidate below the last observed counter) in force.
+func (pc *PoolCredentials) ValidateAgainstLedgerAtSlot(
+	view LedgerView,
+	params ProtocolParamsProvider,
+	slot uint64,
+) (LedgerValidationResult, error) {
+	enforceNoGap, unevaluable := opCertNoGapRuleForSlot(params, slot)
+	registered, vrfMatched, err := pc.validateAgainstLedger(view, enforceNoGap)
+	return LedgerValidationResult{
+		Registered:     registered,
+		VRFMatched:     vrfMatched,
+		EraUnevaluable: unevaluable,
+	}, err
+}
+
+// opCertNoGapRuleForSlot reports whether the era in effect at slot enforces
+// the no-gap opcert counter rule. When the era cannot be resolved it returns
+// false with a non-nil reason wrapping ErrOpCertEraUnevaluable rather than an
+// error: the rule is left unenforced for this check, not treated as violated.
+func opCertNoGapRuleForSlot(
+	params ProtocolParamsProvider,
+	slot uint64,
+) (enforceNoGap bool, unevaluable error) {
+	if params == nil || isNilProtocolParamsProvider(params) {
+		return false, fmt.Errorf(
+			"%w: no protocol parameters provider",
+			ErrOpCertEraUnevaluable,
+		)
+	}
+	pparams := params.ProtocolParamsForSlot(slot)
+	if pparams == nil {
+		return false, fmt.Errorf(
+			"%w: protocol parameters unavailable for slot %d",
+			ErrOpCertEraUnevaluable,
+			slot,
+		)
+	}
+	limits, err := extractPParamsLimits(pparams)
+	if err != nil {
+		return false, fmt.Errorf(
+			"%w: resolve era for slot %d: %w",
+			ErrOpCertEraUnevaluable,
+			slot,
+			err,
+		)
+	}
+	return !limits.era.isTPraos(), nil
+}
+
+// isNilProtocolParamsProvider reports whether provider wraps a typed nil.
+// An interface holding a nil-able typed value is not equal to nil, so a
+// caller passing a nil *LedgerState would otherwise reach
+// ProtocolParamsForSlot on a nil receiver. Mirrors plugin.isNilInstance.
+func isNilProtocolParamsProvider(provider ProtocolParamsProvider) bool {
+	value := reflect.ValueOf(provider)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map,
+		reflect.Pointer, reflect.Slice, reflect.UnsafePointer:
+		return value.IsNil()
+	case reflect.Invalid, reflect.Bool, reflect.Int, reflect.Int8,
+		reflect.Int16, reflect.Int32, reflect.Int64, reflect.Uint,
+		reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Uintptr, reflect.Float32, reflect.Float64, reflect.Complex64,
+		reflect.Complex128, reflect.Array, reflect.String, reflect.Struct:
+		return false
+	}
+	return false
+}
+
+func (pc *PoolCredentials) validateAgainstLedger(
+	view LedgerView,
+	enforceNoGap bool,
 ) (registered, vrfMatched bool, err error) {
 	pc.mu.RLock()
 	defer pc.mu.RUnlock()
@@ -1116,7 +1228,7 @@ func (pc *PoolCredentials) ValidateAgainstLedger(
 			return true, false, fmt.Errorf(
 				"%w: pool registration has %x but loaded VRF key hashes to %x",
 				ErrVRFKeyHashMismatch,
-				regVRF, ourVRF,
+				regVRF, ourVRF.Bytes(),
 			)
 		}
 		vrfMatched = true
@@ -1125,16 +1237,11 @@ func (pc *PoolCredentials) ValidateAgainstLedger(
 	if err != nil {
 		return true, vrfMatched, fmt.Errorf("opcert sequence lookup: %w", err)
 	}
-	// enforceNoGap is always false here; see the doc comment above for why
-	// startup cannot safely apply the era-scoped no-gap half of this rule.
-	// validateOpCertSequence rather than eras.ValidateOpCertCounter so this
-	// check and the forge loop's share the persistable-counter bound as well
-	// as the era rule.
 	if seqErr := validateOpCertSequence(
 		latestSeq,
 		seqFound,
 		pc.opCert.IssueNumber,
-		false,
+		enforceNoGap,
 	); seqErr != nil {
 		return true, vrfMatched, fmt.Errorf(
 			"opcert sequence %d invalid: %w",

@@ -6821,7 +6821,13 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						// block so that UTxOs created by earlier non-validated
 						// blocks are visible during validation lookups.
 						if shouldValidateBlock && len(deltaBatch.deltas) > 0 {
-							if err := deltaBatch.apply(ls, txn); err != nil {
+							applyStart := time.Now()
+							err := deltaBatch.apply(ls, txn)
+							ls.metrics.observeBlockStage(
+								blockStageApply,
+								time.Since(applyStart),
+							)
+							if err != nil {
 								deltaBatch.Release()
 								return err
 							}
@@ -7004,7 +7010,13 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						}
 					}
 					// Apply delta batch
-					if err := deltaBatch.apply(ls, txn); err != nil {
+					applyStart := time.Now()
+					err := deltaBatch.apply(ls, txn)
+					ls.metrics.observeBlockStage(
+						blockStageApply,
+						time.Since(applyStart),
+					)
+					if err != nil {
 						deltaBatch.Release()
 						return err
 					}
@@ -7327,7 +7339,11 @@ func (ls *LedgerState) ledgerProcessBlock(
 		if err := eras.ValidateOpCertPersistableCounter(
 			opCertIssueNumber,
 		); err != nil {
-			return nil, fmt.Errorf("pool %x: %w", opCertPoolKeyHash, err)
+			return nil, fmt.Errorf(
+				"pool %x: %w",
+				opCertPoolKeyHash.Bytes(),
+				err,
+			)
 		}
 		// Counter monotonicity is the stateful half of inbound opcert
 		// validation: read the pool's last-seen counter before processing this
@@ -7350,7 +7366,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 			if err != nil {
 				return nil, fmt.Errorf(
 					"read opcert counter for pool %x: %w",
-					opCertPoolKeyHash,
+					opCertPoolKeyHash.Bytes(),
 					err,
 				)
 			}
@@ -7360,7 +7376,11 @@ func (ls *LedgerState) ledgerProcessBlock(
 				opCertIssueNumber,
 				opCertNoGapRuleApplies(block.Era().Id),
 			); err != nil {
-				return nil, fmt.Errorf("pool %x: %w", opCertPoolKeyHash, err)
+				return nil, fmt.Errorf(
+					"pool %x: %w",
+					opCertPoolKeyHash.Bytes(),
+					err,
+				)
 			}
 		}
 	}
@@ -7616,11 +7636,16 @@ func (ls *LedgerState) ledgerProcessBlock(
 					horizonAnchorSlot: parent.slot,
 				}).pinCommitteeState(committeeEpoch, pp).
 					pinSyntheticV2CostModel(synthetic)
+				validateStart := time.Now()
 				err := validationEra.ValidateTxFunc(
 					tx,
 					point.Slot,
 					lv,
 					pp,
+				)
+				ls.metrics.observeBlockStage(
+					blockStageValidate,
+					time.Since(validateStart),
 				)
 				// A LedgerView predicate that swallowed a genuine storage
 				// error into a false verdict (issue #1649) can have

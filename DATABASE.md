@@ -1,5 +1,23 @@
 # Dingo Database
 
+## Snapshot manifest limits
+
+Snapshot manifest I/O defaults to a 1 MiB encoded size limit before JSON
+decoding. Library callers can pass `lifecycle.WithManifestMaxBytes(n)` to
+manifest read/write/parse, label, catalog, snapshot, and restore operations.
+Use the same option for creation and consumption; zero selects 1 MiB and
+negative values fail before I/O. Cloud callers pass the option when
+registering S3/GCS destinations to set their catalog and fetch defaults.
+`PeekManifest` and `FetchCloudManifest` also accept per-call options; a custom
+destination must implement `ConfigurableCloudManifestFetcher` to honor
+those options, otherwise an explicit error is returned. The optional
+arguments change exported Go function types; direct existing calls retain
+their default behavior. Manifest encoding and checksums are unchanged.
+These limits bound manifest I/O, not bulk cloud snapshot downloads.
+Limit violations wrap `lifecycle.ErrManifestTooLarge`. Bark snapshot verify
+and restore report this as `ResourceExhausted` for local and cloud manifests,
+distinct from missing snapshots, checksum corruption, or cloud transport errors.
+
 ## Storage provider ownership
 
 Blob and metadata stores are constructed by the application plugin host and
@@ -130,6 +148,18 @@ transactions can reference one output; the legacy single-column marker is not
 used by the new store. `v1alpha1` also creates the `node_settings_gate` table
 described below: the schema is unreleased, so a new table belongs in the
 initial version rather than in a version of its own.
+
+Collateral inputs are stored in the `utxo_collateral_input` association table,
+keyed by `(utxo_id, transaction_hash)`. This is the authoritative many-to-many
+relationship: one output can be collateral for multiple transactions, and
+rollback removes only the association belonging to the rolled-back
+transaction. Migration `v14` copies non-NULL legacy
+`utxo.collateral_by_tx_id` markers before new writes use the association table;
+the copy is idempotent and applies equally to SQLite, PostgreSQL, and MySQL.
+Because the legacy scalar overwrote earlier owners, `v14` cannot reconstruct
+those discarded edges. The blob store may still retain transaction/block CBOR,
+but migrations do not parse it; recovering such history requires an explicit
+chain reindex/resync before it can be represented in this table.
 
 The v1alpha1 schema also includes
 `idx_pool_opcert_sequence_pool_sequence` (see `pool_opcert_sequence` below).
@@ -266,6 +296,12 @@ Rows are written only for outputs applied after the upgrade: the `utxo` table
 stores no address bytes, so a database synced earlier keeps understating pointer
 stake for its existing outputs until it is resynced or the rows are rebuilt from
 the output CBOR in the blob store.
+
+Migration `v14` (`collateral-transaction-associations`, integer version 14)
+adds `utxo_collateral_input` and backfills one edge per non-NULL legacy
+`utxo.collateral_by_tx_id`. The scalar column held a single owner, so a UTxO
+used as collateral by more than one transaction kept only the last writer and
+rollback of that writer discarded the association for the others.
 
 The upgrade runner owns a `schema_migrations` row per contiguous integer version with
 `version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`, `dirty`,
@@ -532,6 +568,8 @@ erDiagram
     TRANSACTION ||..o{ UTXO : "hash = spent_at_tx_id"
     TRANSACTION ||..o{ UTXO : "hash = referenced_by_tx_id"
     TRANSACTION ||..o{ UTXO : "hash = collateral_by_tx_id"
+    TRANSACTION ||..o{ UTXO_COLLATERAL_INPUT : "transaction_hash"
+    UTXO ||..o{ UTXO_COLLATERAL_INPUT : "utxo_id"
 ```
 
 ### Certificates, Accounts, and Pools
@@ -752,6 +790,7 @@ post-Mithril-boundary strictness (see below).
 |---|---|---|---|
 | `transaction` | `id`, `hash`, `block_hash`, `slot`, `block_index`, `type`, `fee`, `collateral_fee`, `ttl`, `valid`, `metadata` | PK `id`; unique `hash`; indexes `block_hash`, `slot` | One row per transaction. `block_hash` and `slot` point to the blob block. `fee` is the declared body fee; `collateral_fee` is the collateral consumed into the fee pot by a phase-2-invalid transaction (collateral inputs minus collateral return) and zero for valid transactions. The epoch fee pot sums `fee` for valid rows plus `collateral_fee` for invalid rows. `metadata` is populated only in API mode. |
 | `utxo` | `id`, `transaction_id`, `collateral_return_for_tx_id`, `tx_id`, `output_idx`, `payment_key`, `credential_tag`, `staking_key`, `datum_hash`, `spent_at_tx_id`, `referenced_by_tx_id`, `collateral_by_tx_id`, `added_slot`, `deleted_slot`, `amount`, `payment_script` | PK `id`; unique `(tx_id, output_idx)`; unique `collateral_return_for_tx_id`; indexes `transaction_id`, `payment_key`, `staking_key`, spend/reference/collateral tx hashes, and `added_slot`; composites `idx_utxo_deleted_staking_amount` (`deleted_slot`, `credential_tag`, `staking_key`, `amount`), `idx_utxo_staking_deleted_amount` (`credential_tag`, `staking_key`, `deleted_slot`, `amount`), and `idx_utxo_deleted_payment_script` (`deleted_slot`, `payment_script`, `amount`) | Produced outputs use `transaction_id -> transaction.id`. Collateral returns use `collateral_return_for_tx_id -> transaction.id`. Inputs/reference/collateral joins are logical: `spent_at_tx_id`, `referenced_by_tx_id`, and `collateral_by_tx_id` store transaction hashes. `credential_tag`: 0 key hash, 1 script hash for stake-bearing outputs. The `(credential_tag, staking_key, deleted_slot, amount)` composite backs stake-credential live UTxO sums such as DRep voting-power tallying. `payment_script` is a bool set at index time from the output address type (true when the payment credential is a script hash); the `(deleted_slot, payment_script, amount)` composite backs the network script-locked supply sum (blockfrost `/network` `supply.locked`). It is derived only at write time, so a database synced before this column existed reports script-locked supply only for UTxOs created after the upgrade until it is rebuilt from chain data. |
+| `utxo_collateral_input` | `utxo_id`, `transaction_hash` | PK `(utxo_id, transaction_hash)`; index `transaction_hash` | Authoritative many-to-many collateral relationship. Migration `v14` backfills one edge from each non-NULL legacy `utxo.collateral_by_tx_id`; apply and rollback maintain edges independently. |
 | `utxo_pointer` | `utxo_id`, `ptr_slot`, `ptr_tx_index`, `ptr_cert_index` | PK `utxo_id`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_pointer_target` (`ptr_slot`, `ptr_tx_index`, `ptr_cert_index`) | One row per output at a pointer address (address types 4 and 5). Such an address names the position of a stake registration certificate -- `(slot, transaction index in block, certificate index in transaction)` -- instead of carrying a stake credential, so the `utxo` row has no `staking_key` and the position is recorded here. The credential is resolved when stake is computed, not at write time, because it is a function of the certificate history at the slot being evaluated: a pointer may name a position no certificate occupies yet, de-registration removes the reference permanently, and Conway stops counting pointer stake altogether. The cascade is how rollback reaches these rows. Nothing validates an address's pointer payload, so a component above `int64` is dropped rather than stored or raised: no certificate can occupy such a position, and failing the write would stall ingestion of a block the network accepted. |
 | `asset` | `id`, `utxo_id`, `policy_id`, `name`, `name_hex`, `fingerprint`, `amount` | PK `id`; unique `(name, policy_id, utxo_id)`; named index `idx_asset_policy_id` on `policy_id`; indexes `name_hex`, `fingerprint`, `amount` | Multi-asset quantities attached to `utxo.id`. The unique key backs ledger-state import `ON CONFLICT`; the policy-id query index can be deferred during bulk load. Use `utxo.deleted_slot = 0` for live balances. |
 | `asset_mint_burn` | `id`, `tx_hash`, `policy_id`, `name`, `fingerprint`, `slot`, `quantity`, `tx_index` | PK `id`; unique `(tx_hash, policy_id, name)` (`idx_asset_mint_burn_unique`); composite `(policy_id, name, slot)` (`idx_asset_mint_burn_lookup`); indexes `fingerprint`, `slot` | API-mode-only mint/burn history: one row per `(transaction, asset)` for every tx that mints or burns the asset. Populated from `tx.AssetMint()` during indexing; `quantity` is a signed decimal string (negative for burns). Unlike `asset` (live holdings), this preserves full history so Blockfrost `/assets/{asset}` can derive `initial_mint_tx_hash` (earliest event by `(slot, tx_index, id)`) and `mint_or_burn_count` (row count). The unique key makes re-applying a transaction after a rollback idempotent. Rows with `slot > rollback_slot` are deleted alongside `transaction` on rollback. |
@@ -787,6 +826,20 @@ rebuild path creates any of them that is absent before touching the manifest.
 That includes the critical rebuild: it is the last step before `serve` clears
 `sync_status` and the node accepts API writes, while the full rebuild that
 clears the pending marker can run as background maintenance long afterwards.
+
+The child column of an `ON DELETE CASCADE` foreign key whose parent rows the
+rollback path deletes is classified critical rather than lazy, which is the
+same rule at a different point in the cycle. The rollback sweep's
+`DELETE FROM "transaction" WHERE slot > ?` cascades into `utxo`, and SQLite
+enforces that cascade with an implicit
+`DELETE FROM utxo WHERE transaction_id = ?` per deleted parent row, so
+`idx_utxo_transaction_id` has to be resident from the moment the database is
+marked ready: a rollback can run as soon as live sync resumes, and without the
+index each deleted transaction scans the whole `utxo` table.
+`EXPLAIN QUERY PLAN` of the parent statement does not show this — it reports
+only the indexed search over `transaction`. InnoDB requires an index on every
+foreign-key child column and refuses to drop it, so only the SQLite (and
+PostgreSQL) dialects can reach the state where it is missing.
 
 Excluding an index from the manifest does not restore it on databases already
 on disk: a binary whose manifest still carried it dropped it at the start of a
