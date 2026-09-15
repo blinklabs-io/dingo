@@ -286,6 +286,70 @@ func (ls *LedgerState) queryShelleyEpochNo(
 	return []any{epoch}, nil
 }
 
+// VerifyPointQueryable checks that at, once Acquired, is guaranteed to be
+// answerable by every point-aware query type below -- not just that it is
+// still on this node's chain (verifyPointOnChain), but that it is not older
+// than the strictest per-query-type retention floor (UTxO whole/by-ref via
+// checkUtxoRetentionWindow, stake/pool distribution via
+// PoolStakeDistribution's own recency check, current protocol parameters
+// via queryShelleyCurrentProtocolParams's persisted-row lookup).
+//
+// Called from the LocalStateQuery server's Acquire handler
+// (ouroboros/localstatequery.go), not from Query itself: the Ouroboros
+// LocalStateQuery wire protocol has no way to fail an individual query
+// after a successful Acquire -- confirmed against gouroboros' own
+// StateMap, whose Querying state has exactly one transition (Result) and
+// no Failure transition at all, unlike Acquiring (which supports
+// AcquireFailurePointTooOld/PointNotOnChain). A point Acquire allowed but
+// a later query could not actually answer therefore has no protocol-legal
+// way to report that -- confirmed live: the connection simply drops
+// ("protocol is shutting down" client-side) instead of returning a clean
+// rejection, for any of the three retention-bounded query types above,
+// whenever their own floor is stricter than whatever check an earlier,
+// successful call on the same connection happened to exercise.
+//
+// Real cardano-node never hits this: its own historical retention is one
+// uniform window (the security parameter k) shared by every query type, so
+// a successful Acquire there already guarantees every query answers.
+// Checking every one of Dingo's independent, differently-sized retention
+// windows here, upfront, gives Dingo that same guarantee instead of
+// discovering the gap mid-query. The cost is symmetric: a connection that
+// only ever intended to ask a genuinely unbounded query (queryShelleyEpochNo)
+// at a point older than UTxO's or stake distribution's own floor is now
+// also refused at Acquire, even though that specific query alone could
+// have answered -- accepted deliberately, since the protocol gives no way
+// to know in advance which query type a session will ask, and refusing a
+// point upfront is a well-defined, protocol-legal AcquireFailure, unlike
+// discovering the same gap mid-query.
+//
+// Unpinned (at.pinned() false) always succeeds: the live tip trivially
+// satisfies every retention window.
+func (ls *LedgerState) VerifyPointQueryable(
+	txn *database.Txn,
+	at QueryPoint,
+) error {
+	if !at.pinned() {
+		return nil
+	}
+	if txn == nil {
+		txn = ls.db.Transaction(false)
+		defer txn.Release()
+	}
+	if err := ls.verifyPointOnChain(txn, at); err != nil {
+		return err
+	}
+	if err := ls.checkUtxoRetentionWindow(txn, at); err != nil {
+		return err
+	}
+	if _, err := ls.PoolStakeDistribution(nil, at, txn); err != nil {
+		return err
+	}
+	if _, err := ls.queryShelleyCurrentProtocolParams(at, txn); err != nil {
+		return err
+	}
+	return nil
+}
+
 // Query answers a decoded LocalStateQuery message against Dingo's live
 // ledger state, or against the historical point at named by QueryPoint.
 //
