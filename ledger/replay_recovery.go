@@ -408,21 +408,35 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 // non-terminal for that duplicate verdict for exactly that reason.
 //
 // A missing redeemer is deterministic for every script purpose, spending
-// included. Three rules report it, all as the one common type; the conway and
-// babbage names are aliases of lcommon.MissingRedeemerForScriptError rather
-// than distinct types, so matching the common type covers all of them. None of
-// the three can reach its redeemer check on an input it failed to resolve:
+// included. Four rules report it at the gouroboros v0.204.4 pin, all as the
+// one common type; the conway and babbage names are aliases of
+// lcommon.MissingRedeemerForScriptError rather than distinct types, so
+// matching the common type covers all of them. Each of the four either fails
+// outright on an input it could not resolve or skips that input, so an
+// incomplete UTxO window can only withhold a redeemer requirement, never
+// invent one:
 //
 //   - script.ValidateRequiredRedeemers, behind babbage/conway/dijkstra
-//     UtxoValidateRequiredRedeemers, builds a script.TxScriptView first, and
-//     ResolveTxInputs stops at the first unresolved input, so the rule returns
-//     InputResolutionError or ReferenceInputResolutionError instead of a
-//     verdict. At gouroboros v0.204.4 it derives purposes from
-//     script.ScriptPurposes and reports every tag, not spend alone.
+//     UtxoValidateRequiredRedeemers, builds a script.TxScriptView for the top
+//     level first, and ResolveTxInputs stops at the first unresolved input,
+//     so the rule returns InputResolutionError or ReferenceInputResolutionError
+//     instead of a verdict. Its Dijkstra sub-transaction levels resolve
+//     through resolveBodyInputs instead, which skips what it cannot resolve
+//     and leaves the failure to UtxoValidateBadInputsUtxo. At v0.204.4 it
+//     derives purposes from script.ScriptPurposes and reports every tag, not
+//     spend alone.
 //   - common.ValidateScriptWitnesses, behind UtxoValidateScriptWitnesses,
 //     skips an unresolved regular input rather than failing, so an incomplete
 //     UTxO window can only withhold a spend requirement, never invent one; an
 //     unresolved reference input is ReferenceInputResolutionError.
+//   - dijkstra.validateDijkstraPlutusRedeemers, reached from both
+//     dijkstra.UtxoValidateRedeemerAndScriptWitnesses and
+//     dijkstra.UtxoValidatePlutusScripts, which ValidateTxDijkstra runs. The
+//     first builds its levels with dijkstraWitnessRuleLevels, which skips an
+//     unresolved consumed input and returns ReferenceInputResolutionError for
+//     an unresolved reference input; the second builds them with
+//     dijkstraScriptLevels, whose ResolveTxInputs fails on the first
+//     unresolved input of either kind.
 //   - Dingo's own validateConwayRequiredPlutusRedeemers reads
 //     resolveConwayScriptInputs, which fails with InputResolutionError on the
 //     first unresolved regular input and ReferenceInputResolutionError on the
@@ -431,7 +445,7 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 // A resolved input is addressed by producing transaction hash and output
 // index, so it yields exactly the output its producer wrote, script bit and
 // reference script included. Replaying a different local UTxO history can
-// therefore only add resolutions, and all three rules index redeemers by
+// therefore only add resolutions, and all four rules index redeemers by
 // position in the transaction's own sorted input list rather than by position
 // among the resolved subset, Dijkstra sub-transaction levels included. The
 // verdict is monotone under resolution: no local history removes a

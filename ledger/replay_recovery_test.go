@@ -2714,12 +2714,13 @@ func TestReplayRecoveryRejectsDeterministicMissingRedeemer(t *testing.T) {
 	}
 }
 
-// The spend purpose is the one the upstream UtxoValidateRequiredRedeemers rule
-// can report, and it reaches its redeemer check only on inputs that already
-// resolved, so its verdict is as replay-invariant as the other six. A joined
-// error chain must still reach isRewardWithdrawalMismatch: ValidateTxConway
-// runs every rule and joins the failures rather than stopping at the first, so
-// a spend-tagged missing redeemer can arrive alongside a withdrawal mismatch.
+// The spend purpose is one of the seven tags the upstream
+// UtxoValidateRequiredRedeemers rule reports at the gouroboros v0.204.4 pin,
+// and it reaches its redeemer check only on inputs that already resolved, so
+// its verdict is as replay-invariant as the other six. A joined error chain
+// must still reach isRewardWithdrawalMismatch: ValidateTxConway runs every
+// rule and joins the failures rather than stopping at the first, so a
+// spend-tagged missing redeemer can arrive alongside a withdrawal mismatch.
 func TestIsDeterministicMissingRedeemerAcrossJoinedErrors(t *testing.T) {
 	t.Parallel()
 
@@ -2748,12 +2749,32 @@ func TestIsDeterministicMissingRedeemerAcrossJoinedErrors(t *testing.T) {
 		)),
 		"a joined chain carrying a withdrawal mismatch stays deterministic",
 	)
-	// The control: an unresolved input is state-dependent even when it is
-	// joined with a deterministic verdict of its own class.
+	// The control, on the bare error: an unresolved input carries no
+	// deterministic classification of its own. It is only a control in
+	// isolation -- errors.AsType walks a join, so an InputResolutionError
+	// joined with any classified verdict classifies deterministic, which the
+	// monotone argument above makes correct.
 	require.False(
 		t,
 		isDeterministicTxValidationError(lcommon.InputResolutionError{}),
 		"an unresolved input is decided by local UTxO state",
+	)
+	require.True(
+		t,
+		isDeterministicTxValidationError(errors.Join(
+			lcommon.InputResolutionError{},
+			lcommon.MissingRedeemerForScriptError{
+				ScriptHash: lcommon.Blake2b224Hash([]byte("joined-mint")),
+				Tag:        lcommon.RedeemerTagMint,
+				Index:      0,
+				RedeemerKey: lcommon.RedeemerKey{
+					Tag:   lcommon.RedeemerTagMint,
+					Index: 0,
+				},
+			},
+		)),
+		"a join carrying a missing redeemer stays deterministic even "+
+			"alongside an unresolved input",
 	)
 }
 
