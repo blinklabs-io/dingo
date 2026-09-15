@@ -322,25 +322,25 @@ func validateAccessPoint(
 	return nil
 }
 
-// validateRootValencies checks that valency (the hot/active target) does not
-// exceed warmValency (the warm/established target), matching the
-// ouroboros-network invariant that the warm target must be >= the hot target
-// (LocalRootPeers.hs: getWarmValency w >= getHotValency h). A warmValency of
-// zero means it was not set in the config; cardano-node's parser defaults it
-// to valency in that case, so no comparison is needed.
-//
-// Note: valency is intentionally not bounded by the number of configured
-// access points here. An access point may be a DNS name that resolves to
-// multiple addresses, and the upstream bound applies to that resolved group,
-// not to the raw access-point count.
+// validateRootValencies checks the ordering and access-point bound specified
+// by blinklabs-io/dingo#3291. An empty access-point list is allowed because
+// the shipped network topologies use it with peer snapshots.
 func validateRootValencies(
 	fieldPrefix string,
 	warmValency uint,
 	valency uint,
+	accessPointCount int,
 ) error {
-	if warmValency != 0 && valency > warmValency {
+	if warmValency != 0 && warmValency > valency {
 		return fmt.Errorf(
-			"%s.valency must be <= %s.warmValency",
+			"%s.warmValency must be <= %s.valency",
+			fieldPrefix,
+			fieldPrefix,
+		)
+	}
+	if accessPointCount > 0 && valency > uint(accessPointCount) {
+		return fmt.Errorf(
+			"%s.valency must be <= len(%s.accessPoints)",
 			fieldPrefix,
 			fieldPrefix,
 		)
@@ -363,6 +363,7 @@ func (t *TopologyConfig) validate() error {
 			fieldPrefix,
 			localRoot.WarmValency,
 			localRoot.Valency,
+			len(localRoot.AccessPoints),
 		); err != nil {
 			return err
 		}
@@ -382,6 +383,7 @@ func (t *TopologyConfig) validate() error {
 			fieldPrefix,
 			publicRoot.WarmValency,
 			publicRoot.Valency,
+			len(publicRoot.AccessPoints),
 		); err != nil {
 			return err
 		}

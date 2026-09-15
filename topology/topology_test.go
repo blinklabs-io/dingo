@@ -383,20 +383,29 @@ func TestNewTopologyConfigFromReader_ValidationErrors(t *testing.T) {
 			wantErr: "localRoots[0].accessPoints[0].port must be in range 1-65535",
 		},
 		{
-			name: "local root valency exceeds warm valency",
+			name: "local root warm valency exceeds valency",
 			json: `{
   "localRoots": [
     {
-      "accessPoints": [
-        {"address": "127.0.0.1", "port": 3001},
-        {"address": "127.0.0.2", "port": 3001}
-      ],
-			"valency": 2,
-			"warmValency": 1
+					"accessPoints": [{"address": "127.0.0.1", "port": 3001}],
+					"valency": 1,
+					"warmValency": 2
     }
   ]
 }`,
-			wantErr: "localRoots[0].valency must be <= localRoots[0].warmValency",
+			wantErr: "localRoots[0].warmValency must be <= localRoots[0].valency",
+		},
+		{
+			name: "local root valency exceeds access points",
+			json: `{
+  "localRoots": [
+    {
+      "accessPoints": [{"address": "127.0.0.1", "port": 3001}],
+      "valency": 2
+    }
+  ]
+}`,
+			wantErr: "localRoots[0].valency must be <= len(localRoots[0].accessPoints)",
 		},
 		{
 			name: "public root empty address",
@@ -423,20 +432,29 @@ func TestNewTopologyConfigFromReader_ValidationErrors(t *testing.T) {
 			wantErr: "publicRoots[0].accessPoints[0].port must be in range 1-65535",
 		},
 		{
-			name: "public root valency exceeds warm valency",
+			name: "public root warm valency exceeds valency",
 			json: `{
   "publicRoots": [
     {
-      "accessPoints": [
-        {"address": "public.example.com", "port": 3001},
-        {"address": "public2.example.com", "port": 3001}
-      ],
-			"valency": 2,
-			"warmValency": 1
+					"accessPoints": [{"address": "public.example.com", "port": 3001}],
+					"valency": 1,
+					"warmValency": 2
     }
   ]
 }`,
-			wantErr: "publicRoots[0].valency must be <= publicRoots[0].warmValency",
+			wantErr: "publicRoots[0].warmValency must be <= publicRoots[0].valency",
+		},
+		{
+			name: "public root valency exceeds access points",
+			json: `{
+  "publicRoots": [
+    {
+      "accessPoints": [{"address": "public.example.com", "port": 3001}],
+      "valency": 2
+    }
+  ]
+}`,
+			wantErr: "publicRoots[0].valency must be <= len(publicRoots[0].accessPoints)",
 		},
 		{
 			name: "bootstrap peer empty address",
@@ -489,7 +507,7 @@ func TestNewTopologyConfigFromReader_AllowsEmptyAccessPointsWithValency(t *testi
 	require.NoError(t, err)
 }
 
-func TestNewTopologyConfigFromReader_RejectsWarmValencyBelowValency(t *testing.T) {
+func TestNewTopologyConfigFromReader_AllowsWarmValencyBelowValency(t *testing.T) {
 	jsonData := `{
 	"localRoots": [
 		{
@@ -504,15 +522,10 @@ func TestNewTopologyConfigFromReader_RejectsWarmValencyBelowValency(t *testing.T
 }`
 
 	_, err := topology.NewTopologyConfigFromReader(strings.NewReader(jsonData))
-	require.Error(t, err)
-	require.Contains(
-		t,
-		err.Error(),
-		"localRoots[0].valency must be <= localRoots[0].warmValency",
-	)
+	require.NoError(t, err)
 }
 
-func TestNewTopologyConfigFromReader_AllowsValencyBelowWarmValency(t *testing.T) {
+func TestNewTopologyConfigFromReader_RejectsWarmValencyAboveValency(t *testing.T) {
 	jsonData := `{
 	"localRoots": [
 		{
@@ -526,23 +539,8 @@ func TestNewTopologyConfigFromReader_AllowsValencyBelowWarmValency(t *testing.T)
 }`
 
 	_, err := topology.NewTopologyConfigFromReader(strings.NewReader(jsonData))
-	require.NoError(t, err)
-}
-
-// Access points may be DNS names that resolve to multiple addresses, so
-// valency is not bounded by the configured access-point count.
-func TestNewTopologyConfigFromReader_AllowsValencyAboveAccessPointCount(t *testing.T) {
-	jsonData := `{
-	"localRoots": [
-		{
-			"accessPoints": [{"address": "relays.pool.example", "port": 3001}],
-			"valency": 2
-		}
-	]
-}`
-
-	_, err := topology.NewTopologyConfigFromReader(strings.NewReader(jsonData))
-	require.NoError(t, err)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "localRoots[0].warmValency must be <= localRoots[0].valency")
 }
 
 func TestNewPeerSnapshotConfigFromReader_ParsesButValidateRejectsMissingRelayPort(
