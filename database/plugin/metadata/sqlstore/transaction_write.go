@@ -599,18 +599,19 @@ RETURNING id`,
 			if err != nil {
 				return err
 			}
-			stakeRefs := make([]models.StakeCredentialRef, 0)
+			var certificateRefs []models.StakeCredentialRef
 			if transaction.IsValid() {
-				certificateRefs, err := s.applyTransactionCertificates(
+				var err error
+				certificateRefs, err = s.applyTransactionCertificates(
 					ctx, db, transactionID, transaction.Certificates(),
 					point, index, certDeposits, allowUnknownDeposits,
 				)
 				if err != nil {
 					return err
 				}
-				stakeRefs = append(stakeRefs, certificateRefs...)
 			}
 			collateralReturn := transaction.CollateralReturn()
+			producedStakeRefs := make([]models.StakeCredentialRef, 0)
 			for _, produced := range transaction.Produced() {
 				model, err := models.UtxoLedgerToModel(produced, point.Slot)
 				if err != nil {
@@ -631,13 +632,27 @@ RETURNING id`,
 					return err
 				}
 				if len(model.StakingKey) > 0 {
-					stakeRefs = append(stakeRefs, models.NewStakeCredentialRef(
-						model.CredentialTag,
-						model.StakingKey,
-					))
+					producedStakeRefs = append(
+						producedStakeRefs,
+						models.NewStakeCredentialRef(
+							model.CredentialTag,
+							model.StakingKey,
+						),
+					)
 				}
 			}
-			return s.refreshRewardLiveStakeRefs(ctx, db, stakeRefs, point.Slot)
+			// Merge and dedupe as setTransaction does: certificateRefs and
+			// producedStakeRefs are each already deduped against themselves,
+			// but not against each other, and a certificate touching the same
+			// credential as one of this gap block's produced outputs would
+			// otherwise trigger a repeat sumCredentialUtxoStake scan for the
+			// same final total.
+			return s.refreshRewardLiveStakeRefs(
+				ctx,
+				db,
+				mergeStakeCredentialRefs(certificateRefs, producedStakeRefs),
+				point.Slot,
+			)
 		},
 	)
 }
@@ -706,7 +721,15 @@ RETURNING id`,
 					outputs[i].StakingKey,
 				))
 			}
-			return s.refreshRewardLiveStakeRefs(ctx, db, refs, 0)
+			// Genesis outputs commonly repeat a staking credential across
+			// several UTxOs; dedupe as setTransaction does so each credential
+			// gets one sumCredentialUtxoStake scan instead of one per output.
+			return s.refreshRewardLiveStakeRefs(
+				ctx,
+				db,
+				mergeStakeCredentialRefs(refs),
+				0,
+			)
 		},
 	)
 }

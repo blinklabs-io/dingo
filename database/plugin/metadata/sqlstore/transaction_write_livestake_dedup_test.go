@@ -15,6 +15,7 @@
 package sqlstore
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"testing"
@@ -206,6 +207,187 @@ WHERE credential_tag = ? AND staking_key = ?`,
 		t,
 		registered,
 		"expected the stake registration certificate to be reflected",
+	)
+}
+
+// TestSetTransactionSharedOuterTxnKeepsCredentialsIndependent drives two
+// SetTransaction calls through one caller-managed, block-scoped *sql.Tx --
+// the shape every real block application uses via (*database.Txn).Metadata(),
+// obtained once per block and passed to every transaction in it -- rather
+// than the nil txn every other test in this file passes (which makes
+// withWriteTransaction open and commit an independent transaction per call).
+// It proves two things the per-transaction, nil-txn tests cannot:
+//
+//  1. Merged/deduped stake-credential refs from the first SetTransaction call
+//     do not carry over and affect the second call's own dedup set. Each
+//     fixture uses its own distinct credential, so a leak would show up as
+//     the second call's sumCredentialUtxoStake delta being something other
+//     than exactly 1, or as one credential's final utxo_stake reflecting the
+//     other transaction's amounts.
+//  2. The Tx-scoped *sql.Stmt retention stmtForQueryer/txScopedStmt creates
+//     against the shared *sql.Tx (see prepared_stmt.go) stays bounded by the
+//     distinct cached queries consulted, not by how many SetTransaction calls
+//     share the transaction -- the mechanism #4271 (commit 00bedb10) fixed.
+func TestSetTransactionSharedOuterTxnKeepsCredentialsIndependent(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+
+	fx1 := buildSharedCredentialTx(t, 0x01)
+	fx2 := buildSharedCredentialTx(t, 0x02)
+	require.NotEqual(
+		t,
+		fx1.ref.MapKey(),
+		fx2.ref.MapKey(),
+		"fixtures must use distinct credentials to prove no cross-transaction leakage",
+	)
+	seedConsumedUtxo(t, store, fx1)
+	seedConsumedUtxo(t, store, fx2)
+
+	ctx := context.Background()
+	txn := store.Transaction(ctx)
+	sqlTransaction, ok := txn.(*sqlTxn)
+	require.True(t, ok)
+	require.NoError(t, sqlTransaction.beginErr)
+
+	before := store.sumCredentialUtxoStakeCalls.Load()
+	require.NoError(t, store.SetTransaction(
+		fx1.tx, fx1.point, 0, fx1.certDeposits, false, txn,
+	))
+	afterFirst := store.sumCredentialUtxoStakeCalls.Load()
+	require.Equal(
+		t,
+		int64(1),
+		afterFirst-before,
+		"expected exactly one sumCredentialUtxoStake call for fx1's credential",
+	)
+
+	require.NoError(t, store.SetTransaction(
+		fx2.tx, fx2.point, 0, fx2.certDeposits, false, txn,
+	))
+	afterSecond := store.sumCredentialUtxoStakeCalls.Load()
+	require.Equal(
+		t,
+		int64(1),
+		afterSecond-afterFirst,
+		"expected exactly one sumCredentialUtxoStake call for fx2's credential; "+
+			"anything else means the second call's merge picked up state left "+
+			"over from the first",
+	)
+
+	// Measure retention before commit closes the Tx-scoped statements out
+	// from under retainedTxStmtCount.
+	retained := retainedTxStmtCount(t, sqlTransaction.tx)
+	require.NoError(t, txn.Commit())
+	require.LessOrEqual(
+		t,
+		retained,
+		len(hotStatements),
+		"expected Tx-scoped statement retention bounded by the distinct cached "+
+			"queries consulted, not by the number of SetTransaction calls "+
+			"sharing this transaction",
+	)
+
+	for _, fx := range []sharedCredentialTxFixture{fx1, fx2} {
+		var utxoStake string
+		require.NoError(t, store.writeDB.QueryRow(`
+SELECT utxo_stake FROM reward_live_stake
+WHERE credential_tag = ? AND staking_key = ?`,
+			int64(fx.ref.Tag), fx.ref.Key,
+		).Scan(&utxoStake))
+		require.Equal(
+			t,
+			fmt.Sprintf("%d", fx.producedAmount),
+			utxoStake,
+			"expected each credential's own consumed/produced UTxOs reflected "+
+				"independently of the other transaction sharing the outer txn",
+		)
+	}
+}
+
+// TestSetGapBlockTransactionRefreshesSharedCredentialOnce proves
+// SetGapBlockTransaction dedupes a stake credential named by both a
+// certificate and a produced output before refreshing -- the same class of
+// redundant-refresh bug setTransaction's own mergeStakeCredentialRefs call
+// fixes. Before this fix, certificateRefs and each produced output's own ref
+// were appended to one shared slice with no deduplication between the two
+// sources, so a credential named by both would trigger sumCredentialUtxoStake
+// twice for the same final total.
+func TestSetGapBlockTransactionRefreshesSharedCredentialOnce(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	fx := buildSharedCredentialTx(t, 0x05)
+
+	before := store.sumCredentialUtxoStakeCalls.Load()
+	require.NoError(t, store.SetGapBlockTransaction(
+		fx.tx, fx.point, 0, fx.certDeposits, nil,
+	))
+	got := store.sumCredentialUtxoStakeCalls.Load() - before
+	require.Equal(
+		t,
+		int64(1),
+		got,
+		"expected exactly one sumCredentialUtxoStake call for the credential "+
+			"named by both the certificate and the produced output",
+	)
+}
+
+// TestSetGenesisTransactionRefreshesSharedCredentialOnce proves
+// SetGenesisTransaction dedupes a stake credential repeated across multiple
+// genesis outputs -- the same class of fix as
+// TestSetGapBlockTransactionRefreshesSharedCredentialOnce. Before this fix,
+// every output appended its own ref with no dedup at all, so a credential
+// holding several genesis UTxOs (a common real pattern) would trigger
+// sumCredentialUtxoStake once per output instead of once overall.
+func TestSetGenesisTransactionRefreshesSharedCredentialOnce(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+
+	stakingKey := credentialKeyForIndex(0)
+	txHash := bytes.Repeat([]byte{0x09}, 32)
+	blockHash := bytes.Repeat([]byte{0x0a}, 32)
+
+	outputs := []models.Utxo{
+		{
+			TxId:          txHash,
+			OutputIdx:     0,
+			StakingKey:    stakingKey,
+			CredentialTag: 0,
+			Amount:        1_000_000,
+		},
+		{
+			TxId:          txHash,
+			OutputIdx:     1,
+			StakingKey:    stakingKey,
+			CredentialTag: 0,
+			Amount:        2_000_000,
+		},
+	}
+
+	before := store.sumCredentialUtxoStakeCalls.Load()
+	require.NoError(
+		t,
+		store.SetGenesisTransaction(txHash, blockHash, outputs, nil),
+	)
+	got := store.sumCredentialUtxoStakeCalls.Load() - before
+	require.Equal(
+		t,
+		int64(1),
+		got,
+		"expected exactly one sumCredentialUtxoStake call for the credential "+
+			"shared by two genesis outputs",
+	)
+
+	var utxoStake string
+	require.NoError(t, store.writeDB.QueryRow(`
+SELECT utxo_stake FROM reward_live_stake
+WHERE credential_tag = ? AND staking_key = ?`,
+		int64(0), stakingKey,
+	).Scan(&utxoStake))
+	require.Equal(
+		t,
+		"3000000",
+		utxoStake,
+		"expected both genesis outputs' amounts reflected in one merged refresh",
 	)
 }
 
