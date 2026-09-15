@@ -1111,6 +1111,36 @@ provenance. Startup-reconstructed historical rows retain their post-boundary
 capture slot so they remain distinguishable and are not used for hard
 leader-threshold rejection.
 
+#### RewardStakeCalculationVersion and the Startup Provenance Gate
+
+`models.RewardStakeCalculationVersion` (`database/models/reward_state.go`)
+identifies the stake-accounting algorithm behind persisted `pool_stake_snapshot`
+and `reward_snapshot` rows; it is bumped whenever that calculation changes so an
+upgrade cannot silently trust an older value. At every startup,
+`StaleConsensusStakeSnapshotsExist` (`database/plugin/metadata/sqlstore/live_stake.go`)
+checks both tables for any Mark/Set/Go `pool_stake_snapshot` row or Mark
+`reward_snapshot` row (authoritative or fallback) carrying a version other than
+the current one, and `Node.backfillRewardLiveStake` (`node.go`) fails closed at
+startup if any are found, naming the affected epochs: such a snapshot cannot be
+safely reconstructed from a pruned database, since recomputing it correctly
+would require replaying that epoch's historical stake distribution.
+
+A version bump does not necessarily mean every existing database is affected,
+though. Migration `v15` (`reward-stake-calculation-version-restamp`,
+`database/plugin/metadata/sqlstore/migrations/registry.go`) runs a two-phase
+backfill on upgrade: every stale `pool_stake_snapshot` row is re-stamped to the
+current version unconditionally, because its stored totals have never depended
+on calculation version (see `TotalActiveStake`'s comment in
+`ledger/snapshot/rotation.go`). A stale Mark `reward_snapshot` row is re-stamped
+only when its `total_active_stake` already agrees with the same epoch's
+`epoch_summary.total_active_stake` -- a value that also never depended on
+calculation version -- which is exactly the condition identifying an epoch the
+version bump did not actually change. A row that disagrees names an epoch the
+bump did change and is deliberately left at its old version for the startup
+gate above to keep failing closed on; only that database, and only from that
+epoch, genuinely requires a rebootstrap from immutable blocks or a trusted
+snapshot.
+
 #### Snapshot and Reward-State Retention
 
 Every epoch transition runs `cleanupOldSnapshots`, which prunes to the four

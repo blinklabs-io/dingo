@@ -667,6 +667,13 @@ func (s *Store) StaleConsensusStakeSnapshotsExist(
 		)
 	}
 	var stale bool
+	// The reward_snapshot clause deliberately does not restrict to
+	// authoritative rows: a non-authoritative fallback row (written by
+	// captureMarkSnapshot) is a real source for reward calculation whenever
+	// no authoritative row has been captured yet, so it must fail this gate
+	// on its own version rather than rely on authoritativeMarkRewardSnapshotExists
+	// separately rejecting a version mismatch when the fallback is consulted
+	// (dingo #4026).
 	err = db.QueryRowContext(ctx, `
 SELECT EXISTS (
     SELECT 1 FROM pool_stake_snapshot
@@ -675,7 +682,6 @@ SELECT EXISTS (
 ) OR EXISTS (
     SELECT 1 FROM reward_snapshot
     WHERE snapshot_type = 'mark'
-      AND authoritative = TRUE
       AND calculation_version <> ?
 )`,
 		models.RewardStakeCalculationVersion,
@@ -688,6 +694,50 @@ SELECT EXISTS (
 		)
 	}
 	return stale, nil
+}
+
+// StaleConsensusStakeSnapshotEpochs is diagnostics only, for the operator-
+// facing error StaleConsensusStakeSnapshotsExist gates on; it is not itself
+// part of the fail-closed check.
+func (s *Store) StaleConsensusStakeSnapshotEpochs(
+	txn types.Txn,
+) ([]uint64, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"stale consensus stake snapshot epochs: resolve db: %w",
+			err,
+		)
+	}
+	rows, err := db.QueryContext(ctx, `
+SELECT epoch FROM pool_stake_snapshot
+WHERE snapshot_type IN ('mark', 'set', 'go') AND calculation_version <> ?
+UNION
+SELECT epoch FROM reward_snapshot
+WHERE snapshot_type = 'mark' AND calculation_version <> ?
+ORDER BY epoch`,
+		models.RewardStakeCalculationVersion,
+		models.RewardStakeCalculationVersion,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"listing stale stake snapshot epochs: %w",
+			err,
+		)
+	}
+	defer rows.Close()
+	var epochs []uint64
+	for rows.Next() {
+		var epoch uint64
+		if err := rows.Scan(&epoch); err != nil {
+			return nil, err
+		}
+		epochs = append(epochs, epoch)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return epochs, nil
 }
 
 func (s *Store) GetLiveStakeInputsForPools(
