@@ -23,10 +23,12 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/blinklabs-io/bursa"
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/leiosheader"
+	"github.com/blinklabs-io/dingo/kesagent"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
@@ -64,9 +66,30 @@ func (n *Node) validateBlockProducerStartup() (*forging.PoolCredentials, error) 
 
 func (n *Node) validateBlockProducerStartupAtSlot(
 	currentSlot uint64,
-) (*forging.PoolCredentials, error) {
-	creds := forging.NewPoolCredentials()
-	if err := creds.LoadFromFiles(
+) (creds *forging.PoolCredentials, retErr error) {
+	creds = forging.NewPoolCredentials()
+	agentBacked := n.config.shelleyKESAgentSocket != ""
+	if agentBacked {
+		// Agent startup installs the client before the remaining credential
+		// validation below. Do not leave that client and its serve-key loop
+		// running when a later validation step rejects the credentials.
+		defer func() {
+			if retErr != nil {
+				n.closeKESAgentClient()
+			}
+		}()
+	}
+	if n.config.shelleyKESAgentSocket != "" {
+		if err := n.loadBlockProducerCredentialsFromAgent(
+			creds,
+			currentSlot,
+		); err != nil {
+			return nil, fmt.Errorf(
+				"load pool credentials from KES agent: %w",
+				err,
+			)
+		}
+	} else if err := creds.LoadFromFiles(
 		n.config.shelleyVRFKey,
 		n.config.shelleyKESKey,
 		n.config.shelleyOperationalCertificate,
@@ -105,6 +128,236 @@ func (n *Node) validateBlockProducerStartupAtSlot(
 		"opcert_expiry_period", creds.OpCertExpiryPeriod(),
 	)
 	return creds, nil
+}
+
+// loadBlockProducerCredentialsFromAgent dials the configured KES agent and
+// installs its material into creds, in either serve-key or sign mode. VRF and
+// the operational certificate are always still read from local files; the
+// KES agent protocol carries only the KES signing key (and, in serve-key
+// mode, the opcert alongside it).
+//
+// It closes and replaces any previously dialed agent client first: this
+// method also runs on a live-lifecycle rebuild
+// (reinitializeBlockProducer -> validateBlockProducerStartup), and must not
+// leak the prior connection or its background goroutine.
+func (n *Node) loadBlockProducerCredentialsFromAgent(
+	creds *forging.PoolCredentials,
+	currentSlot uint64,
+) error {
+	n.closeKESAgentClient()
+
+	mode := n.config.shelleyKESAgentMode
+	if mode == "" {
+		mode = kesagent.ModeServeKey
+	}
+
+	switch mode {
+	case kesagent.ModeServeKey:
+		return n.startKESAgentServeKey(creds, currentSlot)
+	case kesagent.ModeSign:
+		return n.startKESAgentSign(creds)
+	default:
+		return fmt.Errorf("unknown KES agent mode %q", mode)
+	}
+}
+
+// startKESAgentServeKey blocks for the agent's initial key push, installs it,
+// and starts a background loop that installs every subsequent push (a KES
+// key rotation) for as long as the node runs.
+func (n *Node) startKESAgentServeKey(
+	creds *forging.PoolCredentials,
+	startupSlot uint64,
+) error {
+	client, err := kesagent.NewClient(kesagent.Config{
+		SocketPath: n.config.shelleyKESAgentSocket,
+		Mode:       kesagent.ModeServeKey,
+		Logger:     n.config.logger,
+	})
+	if err != nil {
+		return err
+	}
+
+	install := func(pk kesagent.PushedKey) error {
+		return creds.LoadFromAgentServeKey(
+			n.config.shelleyVRFKey,
+			agentMaterialFromPushedKey(pk),
+		)
+	}
+	// Installing a push clears the validated KES protocol lifetime, exactly
+	// as LoadFromFiles does, so no credential can inherit a policy that was
+	// never checked against the material now installed. The initial push is
+	// followed by validateBlockProducerStartupAtSlot's own ValidateOpCert /
+	// ValidateKESPeriod, which re-establishes it; a push arriving later --
+	// a KES evolution, an opcert rotation, or a re-push after a reconnect --
+	// is not, so the loop must re-establish it itself. Without this,
+	// credentialGeneration.kesSign refuses every signature after the first
+	// mid-run push with "operational certificate is not validated" and the
+	// node stops forging until it is restarted.
+	//
+	// Installed and validated in one call rather than two: as two, the
+	// credentials are published with their lifetime cleared for the duration
+	// of the validation, and a leader slot landing in that window is refused
+	// for exactly the reason this callback exists to prevent. Every rotation
+	// crosses it.
+	loopInstall := func(pk kesagent.PushedKey) error {
+		genesis, err := n.blockProducerShelleyGenesis()
+		if err != nil {
+			return err
+		}
+		return creds.LoadFromAgentServeKeyValidated(
+			n.config.shelleyVRFKey,
+			agentMaterialFromPushedKey(pk),
+			genesis,
+			n.agentInstallSlot(startupSlot),
+		)
+	}
+
+	// The initial push must succeed before startup can proceed -- the same
+	// contract LoadFromFiles has (a load failure fails block-producer
+	// startup outright) -- bounded so a dead agent fails startup rather than
+	// hanging it.
+	//nolint:contextcheck // n.ctx is the node's lifecycle context; startup itself is bounded here
+	ctx, cancel := context.WithTimeout(
+		n.blockProducerContext(),
+		kesagent.DefaultHelloTimeout*2,
+	)
+	defer cancel()
+	pk, err := client.AwaitPushedKey(ctx)
+	if err != nil {
+		_ = client.Close()
+		return fmt.Errorf("await initial KES agent key push: %w", err)
+	}
+	// ledger/forging copies the key bytes it keeps, so this copy is dead as
+	// soon as the install returns; Client.Run does the same for every later
+	// push.
+	installErr := install(pk)
+	pk.Wipe()
+	if installErr != nil {
+		_ = client.Close()
+		return installErr
+	}
+
+	n.kesAgentClient = client
+	//nolint:contextcheck // background loop is bound to the node's lifecycle, not this call
+	runCtx, runCancel := context.WithCancel(n.blockProducerContext())
+	n.kesAgentCancel = runCancel
+	go func() {
+		if err := client.Run(runCtx, loopInstall); err != nil &&
+			!errors.Is(err, context.Canceled) {
+			n.config.logger.Error(
+				"kes agent serve-key loop exited",
+				"error", err,
+			)
+		}
+	}()
+	return nil
+}
+
+// agentInstallSlot returns the slot an agent key install is validated
+// against: the node's current slot, or fallbackSlot when no ledger state is
+// wired or the slot clock cannot answer. Production block-producer startup
+// always has ledger state -- validateBlockProducerStartup requires it before
+// the agent path can run -- so the fallback exists for the same reason
+// blockProducerContext's does: a test driving
+// validateBlockProducerStartupAtSlot against a bare &Node{config} validates
+// against the slot it passed in.
+func (n *Node) agentInstallSlot(fallbackSlot uint64) uint64 {
+	if n.ledgerState == nil {
+		return fallbackSlot
+	}
+	currentSlot, err := n.ledgerState.CurrentSlot()
+	if err != nil {
+		return fallbackSlot
+	}
+	return currentSlot
+}
+
+// startKESAgentSign installs sign-mode credentials: VRF and the operational
+// certificate from local files, KES signing delegated to the agent for the
+// lifetime of the client. There is no background loop in this mode -- the
+// agent evolves its own key internally on every Sign call.
+func (n *Node) startKESAgentSign(creds *forging.PoolCredentials) error {
+	opCertKey, err := bursa.LoadKeyFromFile(
+		n.config.shelleyOperationalCertificate,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"failed to load operational certificate for KES agent sign mode: %w",
+			err,
+		)
+	}
+	client, err := kesagent.NewClient(kesagent.Config{
+		SocketPath:        n.config.shelleyKESAgentSocket,
+		Mode:              kesagent.ModeSign,
+		SignTimeout:       n.config.shelleyKESAgentSignTimeout,
+		KESVKey:           opCertKey.VKey,
+		OpCertStartPeriod: opCertKey.OpCertKesPeriod,
+		Logger:            n.config.logger,
+	})
+	if err != nil {
+		return err
+	}
+	if err := creds.LoadFromAgentSign(
+		n.config.shelleyVRFKey,
+		n.config.shelleyOperationalCertificate,
+		client,
+	); err != nil {
+		_ = client.Close()
+		return err
+	}
+	n.kesAgentClient = client
+	return nil
+}
+
+// agentMaterialFromPushedKey adapts a validated kesagent.PushedKey to
+// ledger/forging's own AgentKESMaterial shape, keeping ledger/forging free of
+// a dependency on the kesagent package.
+func agentMaterialFromPushedKey(
+	pk kesagent.PushedKey,
+) forging.AgentKESMaterial {
+	return forging.AgentKESMaterial{
+		AbsolutePeriod: pk.AbsolutePeriod,
+		KESSKeyData:    pk.KESSKeyData,
+		KESVKey:        pk.KESVKey,
+		OpCert: forging.OpCert{
+			KESVKey:     pk.OpCert.KESVKey,
+			IssueNumber: pk.OpCert.IssueNumber,
+			KESPeriod:   pk.OpCert.KESPeriod,
+			Signature:   pk.OpCert.ColdSig,
+			ColdVKey:    pk.OpCert.ColdVKey,
+		},
+	}
+}
+
+// blockProducerContext returns n.ctx, or context.Background() when it is
+// nil. Production nodes always have n.ctx set by Run() before block-producer
+// startup runs; the fallback exists only so a test that exercises
+// validateBlockProducerStartupAtSlot directly against a bare &Node{config}
+// (the established pattern in node_forging_test.go) does not have to
+// construct a full node lifecycle just to dial a KES agent.
+func (n *Node) blockProducerContext() context.Context {
+	if n.ctx != nil {
+		return n.ctx
+	}
+	return context.Background()
+}
+
+// closeKESAgentClient stops the serve-key background loop (if any) and
+// closes the agent connection. Safe to call when neither exists.
+func (n *Node) closeKESAgentClient() {
+	if n.kesAgentCancel != nil {
+		n.kesAgentCancel()
+		n.kesAgentCancel = nil
+	}
+	if n.kesAgentClient != nil {
+		if err := n.kesAgentClient.Close(); err != nil {
+			n.config.logger.Warn(
+				"failed to close KES agent client",
+				"error", err,
+			)
+		}
+		n.kesAgentClient = nil
+	}
 }
 
 func (n *Node) blockProducerShelleyGenesis() (*shelley.ShelleyGenesis, error) {
