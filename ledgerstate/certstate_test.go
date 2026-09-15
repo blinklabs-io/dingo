@@ -760,8 +760,9 @@ func TestParseCommitteeVStateAuthorizationSumType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// value = [1, null]  -- CommitteeMemberResigned
-	resignValue, err := cbor.Encode([]any{uint64(1), nil})
+	// value = [1, []]  -- CommitteeMemberResigned with SNothing, which is
+	// how encodeStrictMaybe writes an absent anchor.
+	resignValue, err := cbor.Encode([]any{uint64(1), []any{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -844,17 +845,27 @@ func TestParseCommitteeAuthorizationRejectsNonAnchorResignation(t *testing.T) {
 		t.Fatal("expected [1, uint] to be rejected as a resignation")
 	}
 
-	// A genuine absent anchor still parses.
-	good, err := cbor.Encode([]any{uint64(1), nil})
+	// SNothing is an empty array, so that is the absent anchor that parses.
+	good, err := cbor.Encode([]any{uint64(1), []any{}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, resigned, err := parseCommitteeAuthorization(good)
 	if err != nil {
-		t.Fatalf("[1, null] should parse as a resignation: %v", err)
+		t.Fatalf("[1, []] should parse as a resignation: %v", err)
 	}
 	if !resigned {
-		t.Fatal("[1, null] should be flagged as resigned")
+		t.Fatal("[1, []] should be flagged as resigned")
+	}
+
+	// CBOR null is what the certificate codec writes, not the ledger state's
+	// StrictMaybe, and decodeStrictMaybe refuses it.
+	nullPayload, err := cbor.Encode([]any{uint64(1), nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := parseCommitteeAuthorization(nullPayload); err == nil {
+		t.Fatal("[1, null] is not a StrictMaybe encoding and must be rejected")
 	}
 
 	// And a map whose values are [1, <uint>] must not look like a committee.
@@ -892,20 +903,15 @@ func TestParseCommitteeAuthorizationRejectsMalformedAnchor(t *testing.T) {
 
 	good32 := anchorCBOR(t, 32)
 
-	valid := map[string][]byte{}
-	for name, payload := range map[string][]byte{
-		"null":        {0xf6},
-		"empty array": {0x80},
-		"bare anchor": good32,
-	} {
-		valid[name] = payload
-	}
-	// [anchor] -- the one-element StrictMaybe wrapper.
+	// [anchor] -- SJust, the one-element StrictMaybe wrapper.
 	wrapped, err := cbor.Encode([]any{cbor.RawMessage(good32)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	valid["wrapped anchor"] = wrapped
+	valid := map[string][]byte{
+		"empty array (SNothing)": {0x80},
+		"wrapped anchor (SJust)": wrapped,
+	}
 
 	for name, payload := range valid {
 		entry, err := cbor.Encode(
@@ -944,11 +950,25 @@ func TestParseCommitteeAuthorizationRejectsMalformedAnchor(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	nullPayload, err := cbor.Encode([]any{uint64(1), nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bareAnchor, err := cbor.Encode(
+		[]any{uint64(1), cbor.RawMessage(good32)},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	for name, entry := range map[string][]byte{
 		"array of a scalar":     nestedScalar,
 		"anchor hash too short": shortHash,
 		"three-field anchor":    threeField,
 		"url and hash swapped":  swapped,
+		// Neither is a StrictMaybe encoding; decodeStrictMaybe refuses both.
+		"null payload": nullPayload,
+		"bare anchor":  bareAnchor,
 	} {
 		if _, _, err := parseCommitteeAuthorization(entry); err == nil {
 			t.Fatalf("%s must not decode as a resignation", name)

@@ -1755,29 +1755,28 @@ func isValidAnchor(data []byte) bool {
 	return len(hash) == 32
 }
 
-// isResignationPayload reports whether data is a StrictMaybe Anchor. The
-// accepted forms are CBOR null or an empty array for an absent anchor, a
-// one-element array wrapping an anchor, and the anchor itself. Every other
-// shape is rejected, so a malformed entry such as [1, [1]] reaches the
-// undecodable-entry error path instead of importing as a resignation.
+// isResignationPayload reports whether data is a StrictMaybe Anchor as the
+// ledger encodes it. encodeStrictMaybe writes an empty array for SNothing and a
+// one-element array wrapping the value for SJust, and decodeStrictMaybe rejects
+// every other shape -- including CBOR null and a bare anchor. Accepting those
+// would import as resignations two encodings the node never writes and its own
+// decoder refuses, so they are rejected here and reach the undecodable-entry
+// error path instead.
 func isResignationPayload(data []byte) bool {
-	if len(data) == 0 {
+	// decodeRawArray accepts CBOR null, so check the major type first or the
+	// SNothing case below would let null through.
+	if !isCborArray(data) {
 		return false
-	}
-	if data[0] == 0xf6 { // null: absent anchor
-		return true
 	}
 	items, err := decodeRawArray(data)
 	if err != nil {
 		return false
 	}
 	switch len(items) {
-	case 0: // empty array: absent anchor
+	case 0: // SNothing
 		return true
-	case 1: // [anchor]
+	case 1: // SJust anchor
 		return isValidAnchor(items[0])
-	case 2: // the anchor itself
-		return isValidAnchor(data)
 	}
 	return false
 }
