@@ -143,11 +143,6 @@ func (o *Ouroboros) registerLeiosServeWaiter(
 			map[ouroboros.ConnectionId][]chan struct{},
 		)
 	}
-	if (len(checkLiveness) == 0 || checkLiveness[0]) &&
-		o.connManager != nil &&
-		o.connManager.GetConnectionById(connId) != nil {
-		delete(o.leiosServeWaitersReleased, connId)
-	}
 	o.leiosServeWaiters[connId] = append(o.leiosServeWaiters[connId], ch)
 	o.leiosServeWaitersMu.Unlock()
 
@@ -174,60 +169,6 @@ func (o *Ouroboros) registerLeiosServeWaiter(
 		o.releaseLeiosServeWaiter(connId, ch)
 	}
 	return ch, cancel
-}
-
-// registerLeiosNotifyServeWaiter registers a close waiter even during the
-// short interval before connmanager publishes a newly accepted connection.
-// A prior release marker distinguishes that live publication window from a
-// connection already removed during teardown.
-func (o *Ouroboros) registerLeiosNotifyServeWaiter(
-	connId ouroboros.ConnectionId,
-) (done <-chan struct{}, cancel func()) {
-	if o.connManager != nil && o.connManager.GetConnectionById(connId) == nil {
-		o.leiosServeWaitersMu.Lock()
-		releasedAt, alreadyReleased := o.leiosServeWaitersReleased[connId]
-		if alreadyReleased && time.Since(releasedAt) >= time.Minute {
-			delete(o.leiosServeWaitersReleased, connId)
-			alreadyReleased = false
-		}
-		if alreadyReleased {
-			o.leiosServeWaitersMu.Unlock()
-			done := make(chan struct{})
-			close(done)
-			return done, func() {}
-		}
-		// Keep the marker check and waiter insertion under one lock. A close
-		// callback can otherwise record the release between those operations.
-		ch := make(chan struct{})
-		if o.leiosServeWaiters == nil {
-			o.leiosServeWaiters = make(map[ouroboros.ConnectionId][]chan struct{})
-		}
-		o.leiosServeWaiters[connId] = append(o.leiosServeWaiters[connId], ch)
-		o.leiosServeWaitersMu.Unlock()
-		return ch, func() {
-			o.leiosServeWaitersMu.Lock()
-			defer o.leiosServeWaitersMu.Unlock()
-			waiters := o.leiosServeWaiters[connId]
-			for i, waiter := range waiters {
-				if waiter == ch {
-					o.leiosServeWaiters[connId] = slices.Delete(waiters, i, i+1)
-					break
-				}
-			}
-			if len(o.leiosServeWaiters[connId]) == 0 {
-				delete(o.leiosServeWaiters, connId)
-			}
-		}
-	} else {
-		done, cancel = o.registerLeiosServeWaiter(connId)
-	}
-	select {
-	case <-done:
-		cancel()
-		return done, func() {}
-	default:
-		return done, cancel
-	}
 }
 
 // releaseLeiosServeWaiter deregisters one waiter channel and closes it, both
@@ -257,35 +198,21 @@ func (o *Ouroboros) releaseLeiosServeWaiter(
 // clears them. It is called from the node's connection-closed callback, which
 // connmanager drives from a per-connection goroutine blocked on the
 // connection's ErrorChan. That goroutine is independent of the chainsync
-// or LeiosNotify server callback, so it still runs while a callback is parked
+// server callback, so it still runs while a callback is parked
 // -- which is precisely why the release cannot come from
 // the protocol's own done channel.
 func (o *Ouroboros) ReleaseLeiosServeWaiters(
 	connId ouroboros.ConnectionId,
 ) {
 	o.leiosServeWaitersMu.Lock()
-	if o.leiosServeWaitersReleased == nil {
-		o.leiosServeWaitersReleased = make(map[ouroboros.ConnectionId]time.Time)
-	}
-	now := time.Now()
-	for id, releasedAt := range o.leiosServeWaitersReleased {
-		if now.Sub(releasedAt) >= time.Minute {
-			delete(o.leiosServeWaitersReleased, id)
-		}
-	}
-	o.leiosServeWaitersReleased[connId] = now
 	waiters := o.leiosServeWaiters[connId]
 	delete(o.leiosServeWaiters, connId)
 	o.leiosServeWaitersMu.Unlock()
 	for _, ch := range waiters {
 		close(ch)
 	}
-	// Cancel before removing the cursor: a racing notification request checks
-	// its cancellation channel under the same log lock before registering.
-	// This also covers a request returning an offer during disconnection.
-	if o.leiosEBLog != nil {
-		o.leiosEBLog.removeConn(leiosConnectionIdString(connId))
-	}
+	// Wake the NtC closure waiters. LeiosNotify cursor cleanup is owner-specific
+	// and is handled by the connection-owned callback.
 }
 
 // RegisterLeiosServeWaiterForTesting exposes registerLeiosServeWaiter so the

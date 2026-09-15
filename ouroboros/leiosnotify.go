@@ -110,6 +110,8 @@ type leiosForgedEBLog struct {
 	items   []leiosForgedEBEntry
 	base    int            // logical index of items[0]
 	cursors map[string]int // connKey → next logical index to serve
+	// owners distinguish connection lifetimes that reuse an address pair.
+	owners map[string]*oleiosnotify.Server
 	// reservations are entries returned to RequestNext but not yet confirmed
 	// sent by the mini-protocol server. retries pin failed reservations until a
 	// subsequently connected peer successfully receives them.
@@ -126,6 +128,7 @@ type leiosForgedEBLog struct {
 func newLeiosForgedEBLog() *leiosForgedEBLog {
 	return &leiosForgedEBLog{
 		cursors:      make(map[string]int),
+		owners:       make(map[string]*oleiosnotify.Server),
 		reservations: make(map[string]leiosDeliveryReservation),
 		retries:      make(map[int]int),
 		retryCursors: make(map[string]int),
@@ -158,14 +161,21 @@ func (l *leiosForgedEBLog) append(entry leiosForgedEBEntry) {
 // lock so a closed request cannot recreate a cursor removed by disconnect.
 func (l *leiosForgedEBLog) nextWhileConnected(
 	connKey string,
-	done <-chan struct{},
+	owner *oleiosnotify.Server,
+	connectionDone <-chan any,
 ) (*leiosForgedEBEntry, chan struct{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	select {
-	case <-done:
+	case <-connectionDone:
 		return nil, l.wakeCh
 	default:
+	}
+	if owner != nil {
+		if existing := l.owners[connKey]; existing != nil && existing != owner {
+			return nil, l.wakeCh
+		}
+		l.owners[connKey] = owner
 	}
 	if reserved, ok := l.reservations[connKey]; ok {
 		idx := reserved.index - l.base
@@ -200,9 +210,16 @@ func (l *leiosForgedEBLog) nextWhileConnected(
 // complete commits a reserved cursor only after the LeiosNotify server has
 // successfully sent its response. A failed send leaves the cursor in place
 // and pins the entry for a reconnect to retry.
-func (l *leiosForgedEBLog) complete(connKey string, delivered bool) {
+func (l *leiosForgedEBLog) complete(
+	connKey string,
+	owner *oleiosnotify.Server,
+	delivered bool,
+) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if owner != nil && l.owners[connKey] != owner {
+		return
+	}
 	reserved, ok := l.reservations[connKey]
 	if !ok {
 		return
@@ -301,9 +318,18 @@ func (l *leiosForgedEBLog) nextRetryLocked(
 	return nextRetry, found
 }
 
-// removeConn unregisters a connection cursor and prunes newly freed entries.
-func (l *leiosForgedEBLog) removeConn(connKey string) {
+func (l *leiosForgedEBLog) removeConnOwned(
+	connKey string,
+	owner *oleiosnotify.Server,
+) {
 	l.mu.Lock()
+	defer l.mu.Unlock()
+	if owner != nil && l.owners[connKey] == owner {
+		l.removeConnLocked(connKey)
+	}
+}
+
+func (l *leiosForgedEBLog) removeConnLocked(connKey string) {
 	if reserved, ok := l.reservations[connKey]; ok {
 		if !reserved.retry {
 			l.retries[reserved.index]++
@@ -311,17 +337,31 @@ func (l *leiosForgedEBLog) removeConn(connKey string) {
 		delete(l.reservations, connKey)
 	}
 	delete(l.cursors, connKey)
+	delete(l.owners, connKey)
 	delete(l.retryCursors, connKey)
 	l.pruneLocked()
-	l.mu.Unlock()
 }
 
 // registerConn pre-registers connKey at the current tail, or at the oldest
 // failed delivery, so entries appended between connection open and the peer's
 // first RequestNext are not pruned before the cursor is established. It is a
-// no-op when connKey is already registered.
-func (l *leiosForgedEBLog) registerConn(connKey string) {
+// no-op for the same owner. A replacement releases the old owner's reservation
+// into the retry queue before registering its own cursor.
+func (l *leiosForgedEBLog) registerConn(
+	connKey string,
+	owner *oleiosnotify.Server,
+	isCurrent func() bool,
+) {
 	l.mu.Lock()
+	defer l.mu.Unlock()
+	// Validate manager ownership under the cursor lock: an old startup may
+	// have looked up its connection before a replacement was registered.
+	if isCurrent != nil && !isCurrent() {
+		return
+	}
+	if existing := l.owners[connKey]; existing != nil && existing != owner {
+		l.removeConnLocked(connKey)
+	}
 	if _, exists := l.cursors[connKey]; !exists {
 		cursor := l.base + len(l.items)
 		if retry, found := l.nextRetryLocked(connKey, l.base); found {
@@ -332,7 +372,14 @@ func (l *leiosForgedEBLog) registerConn(connKey string) {
 			l.retryCursors[connKey] = cursor
 		}
 	}
-	l.mu.Unlock()
+	if owner != nil {
+		// Registration identifies the current connection lifetime. A delayed
+		// close callback for an older lifetime is owner-guarded below.
+		l.owners[connKey] = owner
+	}
+	wake := l.wakeCh
+	l.wakeCh = make(chan struct{})
+	close(wake)
 }
 
 // leiosEBLogMaxEntries is the maximum number of forged-EB entries the log
@@ -454,7 +501,11 @@ func (o *Ouroboros) leiosnotifyServerResponseSent(
 	_ protocol.Message,
 	err error,
 ) {
-	o.leiosEBLog.complete(leiosConnectionIdString(ctx.ConnectionId), err == nil)
+	o.leiosEBLog.complete(
+		leiosConnectionIdString(ctx.ConnectionId),
+		ctx.Server,
+		err == nil,
+	)
 }
 
 func (o *Ouroboros) leiosnotifyClientConnOpts() []oleiosnotify.LeiosNotifyOptionFunc {
@@ -495,9 +546,11 @@ func (o *Ouroboros) leiosnotifyClientStart(
 	// Pre-register the server-side cursor now that we know the peer
 	// supports LeiosNotify. This ensures EBs forged between here and
 	// the peer's first RequestNext are not pruned.
-	o.leiosEBLog.registerConn(connKey)
+	o.leiosEBLog.registerConn(connKey, conn.LeiosNotify().Server, func() bool {
+		return o.connManager.GetConnectionById(connId) == conn
+	})
 	if err := conn.LeiosNotify().Client.Sync(); err != nil {
-		o.leiosEBLog.removeConn(connKey)
+		o.leiosEBLog.removeConnOwned(connKey, conn.LeiosNotify().Server)
 		return err
 	}
 	return nil
@@ -1890,11 +1943,18 @@ func (o *Ouroboros) leiosnotifyServerRequestNext(
 		return nil, nil
 	}
 	connKey := leiosConnectionIdString(ctx.ConnectionId)
-	// Protocol completion waits for this callback to return. Use the
-	// connection manager's independent close notification instead.
-	done, cancel := o.registerLeiosNotifyServeWaiter(ctx.ConnectionId)
+	// Protocol completion waits for this callback to return. The owning
+	// connection can close before connmanager publishes it, so observe its
+	// independent lifecycle channel.
+	done := ctx.ConnectionDoneChan
 	protocolDone := ctx.Server.DoneChan()
-	defer cancel()
+	defer func() {
+		select {
+		case <-ctx.ConnectionDoneChan:
+			o.RemoveLeiosNotifyConnectionOwner(ctx.ConnectionId, ctx.Server)
+		default:
+		}
+	}()
 
 	// If the connection is already closing, return without touching the
 	// cursor map. This prevents re-registering a stale cursor after
@@ -1908,7 +1968,11 @@ func (o *Ouroboros) leiosnotifyServerRequestNext(
 	}
 
 	for {
-		entry, wakeCh := o.leiosEBLog.nextWhileConnected(connKey, done)
+		entry, wakeCh := o.leiosEBLog.nextWhileConnected(
+			connKey,
+			ctx.Server,
+			ctx.ConnectionDoneChan,
+		)
 		if entry != nil {
 			if msg := leiosForgedEBOffer(entry); msg != nil {
 				return msg, nil
@@ -1922,6 +1986,16 @@ func (o *Ouroboros) leiosnotifyServerRequestNext(
 		case <-protocolDone:
 			return nil, errors.New("leios-notify protocol closed")
 		}
+	}
+}
+
+// RemoveLeiosNotifyConnectionOwner removes only the cursor owned by conn.
+func (o *Ouroboros) RemoveLeiosNotifyConnectionOwner(
+	connId ouroboros.ConnectionId,
+	owner *oleiosnotify.Server,
+) {
+	if o.leiosEBLog != nil {
+		o.leiosEBLog.removeConnOwned(leiosConnectionIdString(connId), owner)
 	}
 }
 
