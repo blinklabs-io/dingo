@@ -165,11 +165,15 @@ func fromGenesisRun(cmd *cobra.Command, _ []string) error {
 		} else if r.UTxOErr != nil {
 			logger.Warn("utxo check did not run",
 				"epoch", r.Epoch, "error", r.UTxOErr)
-		} else if len(r.UTxOMissing) > 0 || len(r.UTxOExtra) > 0 {
+		} else if len(r.UTxOMissing) > 0 || len(r.UTxOExtra) > 0 || len(r.UTxODiffers) > 0 {
 			utxoMismatches++
 			logger.Warn("utxo set mismatch",
 				"epoch", r.Epoch, "missing", len(r.UTxOMissing),
-				"extra", len(r.UTxOExtra), "dingo_ref_count", r.UTxORefCount)
+				"extra", len(r.UTxOExtra), "differs", len(r.UTxODiffers),
+				"dingo_ref_count", r.UTxORefCount)
+			for _, d := range r.UTxODiffers {
+				logger.Debug("utxo content differs", "epoch", r.Epoch, "detail", d)
+			}
 		} else {
 			logger.Info("utxo set match",
 				"epoch", r.Epoch, "ref_count", r.UTxORefCount)

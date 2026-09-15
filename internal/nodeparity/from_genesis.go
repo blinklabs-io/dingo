@@ -76,6 +76,7 @@ type EpochResult struct {
 	UTxOErr       error
 	UTxOMissing   []string
 	UTxOExtra     []string
+	UTxODiffers   []string
 	UTxORefCount  int
 }
 
@@ -146,7 +147,7 @@ func captureGenesisBaseline(
 	dingoAddr string,
 	magic uint32,
 	point pcommon.Point,
-) (UTxORefSet, error) {
+) (UTxOSet, error) {
 	conn, lsq, err := acquireWithRetry(ctx, dingoAddr, magic, point)
 	if err != nil {
 		return nil, err
@@ -157,11 +158,12 @@ func captureGenesisBaseline(
 		return nil, fmt.Errorf("genesis GetUTxOWhole: %w", err)
 	}
 	_ = lsq.Client.Release() //nolint:errcheck
-	refs := make(UTxORefSet, len(utxos.Results))
-	for id := range utxos.Results {
-		refs[fmt.Sprintf("%s#%d", id.Hash.String(), id.Idx)] = true
+	set := make(UTxOSet, len(utxos.Results))
+	for id, out := range utxos.Results {
+		key := fmt.Sprintf("%s#%d", id.Hash.String(), id.Idx)
+		set[key] = canonicalUTxOEntry(out)
 	}
-	return refs, nil
+	return set, nil
 }
 
 // RunFromGenesis is documented at the top of this file.
@@ -192,7 +194,7 @@ func RunFromGenesis(
 	var (
 		lastEpoch       uint64
 		haveLastEpoch   bool
-		utxoRefs        UTxORefSet
+		utxoRefs        UTxOSet
 		utxoBaselineErr error
 		utxoAttempted   bool
 	)
@@ -299,12 +301,14 @@ func RunFromGenesis(
 							if err != nil {
 								result.UTxOErr = fmt.Errorf("dingo GetUTxOWhole: %w", err)
 							} else {
-								dingoRefs := make(UTxORefSet, len(utxos.Results))
-								for id := range utxos.Results {
-									dingoRefs[fmt.Sprintf("%s#%d", id.Hash.String(), id.Idx)] = true
+								dingoSet := make(UTxOSet, len(utxos.Results))
+								for id, out := range utxos.Results {
+									key := fmt.Sprintf("%s#%d", id.Hash.String(), id.Idx)
+									dingoSet[key] = canonicalUTxOEntry(out)
 								}
-								result.UTxORefCount = len(dingoRefs)
-								result.UTxOMissing, result.UTxOExtra = UTxORefDiff(utxoRefs, dingoRefs)
+								result.UTxORefCount = len(dingoSet)
+								result.UTxOMissing, result.UTxOExtra, result.UTxODiffers =
+									UTxODiff(utxoRefs, dingoSet)
 							}
 							_ = lsqUtxo.Client.Release() //nolint:errcheck
 							utxoConn.Close()             //nolint:errcheck

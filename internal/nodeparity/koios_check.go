@@ -55,13 +55,20 @@ package nodeparity
 //     Koios's pool_history does not return one; comparing it would need a
 //     separate pool_info call per pool per epoch, deferred as follow-up
 //     scope.
-//   - UTxO set: existence only ("does this ref exist"), not content
-//     (address/amount/assets/datum/script) -- built from Koios's own
-//     /tx_info input/output data via a from-genesis reconstruction, seeded
-//     from Dingo's own answer captured at the earliest point Dingo will
-//     still Acquire. Extending to full content comparison is real,
-//     documented future scope (KoiosTxInfoItem's doc comment), not yet
-//     built.
+//   - UTxO set: full content (address, ADA amount, multi-asset tokens,
+//     datum presence/form, reference script hash), not just existence --
+//     built from Koios's own /tx_info input/output data via a
+//     from-genesis reconstruction, seeded from Dingo's own answer
+//     captured at the earliest point Dingo will still Acquire.
+//     koiosparity.CanonicalKoiosUTxOEntry and this package's own
+//     canonicalUTxOEntry (shared with the cardano-node-based
+//     Check/DiffSnapshots) are built to produce byte-identical strings for
+//     the same real-world UTxO content, so UTxODiff compares them
+//     directly. Not yet live-verified against real Koios data at the time
+//     this was written (both Koios sources' rate limits were exhausted
+//     from same-day testing) -- verified only against the documented
+//     /tx_info response schema and this package's own unit tests; treat
+//     the first live run as the real confirmation.
 //
 // Each of the three runs its own independent Acquire, on its own
 // connection, rather than sharing one the way Check's live-tip-agreement
@@ -248,41 +255,58 @@ func CheckStakeDistribution(
 	return mismatches, nil
 }
 
-// UTxORefSet is a live UTxO set represented as just its ref identities
-// ("<txHash>#<outputIndex>"), matching CheckUTxO's existence-only scope --
-// see this file's doc comment.
-type UTxORefSet map[string]bool
+// UTxOSet is a live UTxO set mapping ref ("<txHash>#<outputIndex>") to its
+// canonical content encoding: koiosparity.CanonicalKoiosUTxOEntry for a ref
+// tracked from Koios's own /tx_info data, or canonicalUTxOEntry (this
+// package's own, shared with the cardano-node-based Check/DiffSnapshots)
+// for a ref read directly from Dingo. The two encoders are built to
+// produce byte-identical strings for the same real-world UTxO content, so
+// UTxODiff can compare them directly -- full content, not just existence.
+type UTxOSet map[string]string
 
-// UTxOChanges applies one block's transactions to a running UTxORefSet using
+// UTxOChanges applies one block's transactions to a running UTxOSet using
 // Koios's own reported inputs/outputs for them (via txInfos, typically
 // fetched through koiosparity.KoiosClient.GetTxInfos) -- not Dingo's own
 // decode of the same block -- so the running reconstruction stays
 // independent of Dingo end to end, not just at its genesis seed.
-func UTxOChanges(refs UTxORefSet, txInfos []koiosparity.KoiosTxInfoItem) {
+func UTxOChanges(set UTxOSet, txInfos []koiosparity.KoiosTxInfoItem) {
 	for _, info := range txInfos {
 		for _, in := range info.Inputs {
-			delete(refs, fmt.Sprintf("%s#%d", in.TxHash, in.TxIndex))
+			delete(set, fmt.Sprintf("%s#%d", in.TxHash, in.TxIndex))
 		}
 		for _, out := range info.Outputs {
-			refs[fmt.Sprintf("%s#%d", out.TxHash, out.TxIndex)] = true
+			key := fmt.Sprintf("%s#%d", out.TxHash, out.TxIndex)
+			set[key] = koiosparity.CanonicalKoiosUTxOEntry(out)
 		}
 	}
 }
 
-// UTxORefDiff reports which refs are present in want but missing from got,
-// and vice versa, both sorted for deterministic output.
-func UTxORefDiff(want, got UTxORefSet) (missing, extra []string) {
-	for k := range want {
-		if !got[k] {
+// UTxODiff reports every divergence between want (the Koios-derived
+// reconstruction) and got (Dingo's own live answer): refs present in want
+// but missing from got, refs present in got but missing from want, and
+// refs present in both whose canonical content disagrees -- all sorted for
+// deterministic output. A ref in both diffs's differs slice is the sharper
+// class of bug: both sides agree it exists, but disagree on what it
+// actually contains.
+func UTxODiff(want, got UTxOSet) (missing, extra, differs []string) {
+	for k, wantVal := range want {
+		gotVal, ok := got[k]
+		switch {
+		case !ok:
 			missing = append(missing, k)
+		case wantVal != gotVal:
+			differs = append(differs, fmt.Sprintf(
+				"%s: koios=%q dingo=%q", k, wantVal, gotVal,
+			))
 		}
 	}
 	for k := range got {
-		if !want[k] {
+		if _, ok := want[k]; !ok {
 			extra = append(extra, k)
 		}
 	}
 	sort.Strings(missing)
 	sort.Strings(extra)
-	return missing, extra
+	sort.Strings(differs)
+	return missing, extra, differs
 }

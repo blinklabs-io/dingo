@@ -78,41 +78,45 @@ func TestStakeRelDiffDetectsRealMismatches(t *testing.T) {
 	}
 }
 
-// TestUTxORefDiffDetectsRealMismatches proves UTxORefDiff both directions:
-// identical sets report no difference, and a deliberately injected
-// missing/extra ref is caught precisely.
-func TestUTxORefDiffDetectsRealMismatches(t *testing.T) {
-	dingo := UTxORefSet{
-		"4843cf2e582b2f9ce37600e5ab4cc678991f988f8780fed05407f9537f7712bd#0": true,
-		"e3ca57e8f323265742a8f4e79ff9af884c9ff8719bd4f7788adaea4c33ba07b6#0": true,
+// TestUTxODiffDetectsRealMismatches proves UTxODiff in all three directions:
+// identical sets report no difference, a deliberately injected missing/extra
+// ref is caught precisely, and a ref present on both sides with disagreeing
+// content is reported as a "differs" entry rather than being missed.
+func TestUTxODiffDetectsRealMismatches(t *testing.T) {
+	dingo := UTxOSet{
+		"4843cf2e582b2f9ce37600e5ab4cc678991f988f8780fed05407f9537f7712bd#0": "addr1abc|1000000",
+		"e3ca57e8f323265742a8f4e79ff9af884c9ff8719bd4f7788adaea4c33ba07b6#0": "addr1def|2000000",
 	}
-	identical := UTxORefSet{
-		"4843cf2e582b2f9ce37600e5ab4cc678991f988f8780fed05407f9537f7712bd#0": true,
-		"e3ca57e8f323265742a8f4e79ff9af884c9ff8719bd4f7788adaea4c33ba07b6#0": true,
+	identical := UTxOSet{
+		"4843cf2e582b2f9ce37600e5ab4cc678991f988f8780fed05407f9537f7712bd#0": "addr1abc|1000000",
+		"e3ca57e8f323265742a8f4e79ff9af884c9ff8719bd4f7788adaea4c33ba07b6#0": "addr1def|2000000",
 	}
-	if missing, extra := UTxORefDiff(identical, dingo); len(missing) != 0 || len(extra) != 0 {
-		t.Fatalf("identical sets reported a difference: missing=%v extra=%v", missing, extra)
+	if missing, extra, differs := UTxODiff(identical, dingo); len(missing) != 0 || len(extra) != 0 || len(differs) != 0 {
+		t.Fatalf("identical sets reported a difference: missing=%v extra=%v differs=%v", missing, extra, differs)
 	}
 
-	koiosReconstruction := UTxORefSet{
-		"4843cf2e582b2f9ce37600e5ab4cc678991f988f8780fed05407f9537f7712bd#0": true,
-		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa#0": true,
+	koiosReconstruction := UTxOSet{
+		"4843cf2e582b2f9ce37600e5ab4cc678991f988f8780fed05407f9537f7712bd#0": "addr1abc|9999999",
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa#0": "addr1zzz|3000000",
 	}
-	missing, extra := UTxORefDiff(koiosReconstruction, dingo)
+	missing, extra, differs := UTxODiff(koiosReconstruction, dingo)
 	if len(missing) != 1 || missing[0] != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa#0" {
 		t.Fatalf("expected exactly the injected missing ref, got %v", missing)
 	}
 	if len(extra) != 1 || extra[0] != "e3ca57e8f323265742a8f4e79ff9af884c9ff8719bd4f7788adaea4c33ba07b6#0" {
 		t.Fatalf("expected exactly the injected extra ref, got %v", extra)
 	}
+	if len(differs) != 1 {
+		t.Fatalf("expected exactly one content mismatch, got %v", differs)
+	}
 }
 
 // TestUTxOChangesAppliesInputsAndOutputs proves the running reconstruction
-// correctly adds new outputs and removes spent inputs from Koios's own
-// tx_info data.
+// correctly adds new outputs (with their full canonical content, not just
+// their ref) and removes spent inputs from Koios's own tx_info data.
 func TestUTxOChangesAppliesInputsAndOutputs(t *testing.T) {
-	refs := UTxORefSet{
-		"spent0000000000000000000000000000000000000000000000000000000000#0": true,
+	set := UTxOSet{
+		"spent0000000000000000000000000000000000000000000000000000000000#0": "addr1spent|500000",
 	}
 	txInfos := []koiosparity.KoiosTxInfoItem{
 		{
@@ -120,22 +124,36 @@ func TestUTxOChangesAppliesInputsAndOutputs(t *testing.T) {
 			Inputs: []koiosparity.KoiosTxInfoUtxoRef{
 				{TxHash: "spent0000000000000000000000000000000000000000000000000000000000", TxIndex: 0},
 			},
-			Outputs: []koiosparity.KoiosTxInfoUtxoRef{
-				{TxHash: "newtx000000000000000000000000000000000000000000000000000000000", TxIndex: 0},
-				{TxHash: "newtx000000000000000000000000000000000000000000000000000000000", TxIndex: 1},
+			Outputs: []koiosparity.KoiosTxInfoOutput{
+				{
+					TxHash:  "newtx000000000000000000000000000000000000000000000000000000000",
+					TxIndex: 0,
+					PaymentAddr: struct {
+						Bech32 string `json:"bech32"`
+					}{Bech32: "addr1new0"},
+					Value: "1000000",
+				},
+				{
+					TxHash:  "newtx000000000000000000000000000000000000000000000000000000000",
+					TxIndex: 1,
+					PaymentAddr: struct {
+						Bech32 string `json:"bech32"`
+					}{Bech32: "addr1new1"},
+					Value: "2000000",
+				},
 			},
 		},
 	}
-	UTxOChanges(refs, txInfos)
+	UTxOChanges(set, txInfos)
 
-	if refs["spent0000000000000000000000000000000000000000000000000000000000#0"] {
-		t.Fatal("spent input was not removed from the ref set")
+	if _, ok := set["spent0000000000000000000000000000000000000000000000000000000000#0"]; ok {
+		t.Fatal("spent input was not removed from the set")
 	}
-	if !refs["newtx000000000000000000000000000000000000000000000000000000000#0"] ||
-		!refs["newtx000000000000000000000000000000000000000000000000000000000#1"] {
-		t.Fatal("new outputs were not added to the ref set")
+	if set["newtx000000000000000000000000000000000000000000000000000000000#0"] != "addr1new0|1000000" ||
+		set["newtx000000000000000000000000000000000000000000000000000000000#1"] != "addr1new1|2000000" {
+		t.Fatalf("new outputs were not added with correct canonical content: %v", set)
 	}
-	if len(refs) != 2 {
-		t.Fatalf("expected exactly 2 live refs after the change, got %d: %v", len(refs), refs)
+	if len(set) != 2 {
+		t.Fatalf("expected exactly 2 live refs after the change, got %d: %v", len(set), set)
 	}
 }

@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1384,36 +1385,125 @@ func (k *KoiosClient) GetAccountRewardHistory(
 // that fails JSON decoding, rather than any structured error).
 const koiosTxInfoBatchSize = 40
 
-// KoiosTxInfoUtxoRef is one entry in a KoiosTxInfoItem's Inputs or Outputs:
-// just enough to identify a UTxO ref ("<tx_hash>#<tx_index>"), not its full
-// content. See KoiosTxInfoItem's doc comment for why.
+// KoiosTxInfoUtxoRef is one entry in a KoiosTxInfoItem's Inputs: just enough
+// to identify a UTxO ref ("<tx_hash>#<tx_index>"), not its content -- an
+// input is being consumed, so only its identity is ever needed to remove it
+// from a running reconstruction, never what it contained.
 type KoiosTxInfoUtxoRef struct {
 	TxHash  string `json:"tx_hash"`
 	TxIndex int    `json:"tx_index"`
 }
 
-// KoiosTxInfoItem is one transaction from /tx_info, projected down to just
-// the fields a UTxO-set reconstruction needs: which refs it consumes
-// (Inputs) and which it creates (Outputs). Requesting with _inputs:true is
-// required for Inputs to be populated at all -- Koios omits it by default.
-//
-// Deliberately not modeling output content (address, value, assets, datum,
-// script) even though /tx_info returns it: this type only supports
-// existence-based UTxO comparison (does Dingo's live GetUTxOWhole agree with
-// Koios on which refs exist), not content-based comparison (do the two
-// sides agree on what each ref actually contains). Extending to content
-// comparison is real future scope, not yet built or verified
-// (blinklabs-io/dingo#1900).
+// KoiosTxInfoAsset is one multi-asset entry on a KoiosTxInfoOutput.
+// PolicyID and AssetName are both hex, matching gouroboros'
+// Blake2b224.String()/hex.EncodeToString conventions exactly (Koios's own
+// documented examples are lowercase hex the same way), which is what lets
+// CanonicalKoiosUTxOEntry produce a string directly comparable to
+// nodeparity's canonicalUTxOEntry without any re-encoding.
+type KoiosTxInfoAsset struct {
+	PolicyID  string `json:"policy_id"`
+	AssetName string `json:"asset_name"`
+	Quantity  string `json:"quantity"`
+}
+
+// KoiosTxInfoInlineDatum is the non-null shape of a KoiosTxInfoOutput's
+// InlineDatum -- only its presence matters here (to distinguish the
+// "inline" and "hash-only" datum forms), not its content.
+type KoiosTxInfoInlineDatum struct {
+	Bytes string `json:"bytes"`
+}
+
+// KoiosTxInfoReferenceScript is the non-null shape of a KoiosTxInfoOutput's
+// ReferenceScript.
+type KoiosTxInfoReferenceScript struct {
+	Hash string `json:"hash"`
+}
+
+// KoiosTxInfoOutput is one output from a KoiosTxInfoItem's Outputs, with
+// enough content to build the same canonical encoding
+// nodeparity.canonicalUTxOEntry builds from a live LocalStateQuery
+// GetUTxOWhole result: address, ADA value, multi-asset tokens, datum
+// presence/form, and reference script hash.
+type KoiosTxInfoOutput struct {
+	TxHash      string `json:"tx_hash"`
+	TxIndex     int    `json:"tx_index"`
+	PaymentAddr struct {
+		Bech32 string `json:"bech32"`
+	} `json:"payment_addr"`
+	// Value is the ADA-only amount (lovelace, as a plain decimal string,
+	// e.g. "157832856") -- multi-asset tokens are reported separately in
+	// AssetList, mirroring gouroboros' own TransactionOutput.Amount()
+	// (ADA only) versus .Assets() (everything else) split.
+	Value string `json:"value"`
+	// DatumHash is non-nil whenever the output carries ANY datum, hash-only
+	// or inline -- mirroring gouroboros' TransactionOutput.DatumHash(),
+	// which is likewise set for both forms (only .Datum() itself
+	// distinguishes them, matching InlineDatum here).
+	DatumHash       *string                     `json:"datum_hash"`
+	InlineDatum     *KoiosTxInfoInlineDatum     `json:"inline_datum"`
+	ReferenceScript *KoiosTxInfoReferenceScript `json:"reference_script"`
+	AssetList       []KoiosTxInfoAsset          `json:"asset_list"`
+}
+
+// KoiosTxInfoItem is one transaction from /tx_info: which refs it consumes
+// (Inputs) and which outputs it creates, with enough content on each output
+// for full content-based UTxO comparison (see CanonicalKoiosUTxOEntry), not
+// merely existence. Requesting with _inputs/_assets/_scripts:true (done by
+// GetTxInfos) is required for Inputs, AssetList, and the datum/reference-
+// script fields to be populated at all -- Koios omits all of them by
+// default.
 type KoiosTxInfoItem struct {
 	TxHash  string               `json:"tx_hash"`
 	Inputs  []KoiosTxInfoUtxoRef `json:"inputs"`
-	Outputs []KoiosTxInfoUtxoRef `json:"outputs"`
+	Outputs []KoiosTxInfoOutput  `json:"outputs"`
 }
 
-// GetTxInfos fetches input/output refs for the given transaction hashes,
-// batched to stay under Koios's request-size cap. A hash Koios does not
-// recognize is simply absent from the result rather than an error, matching
-// GetPoolEpochHistory's "missing means missing" contract.
+// CanonicalKoiosUTxOEntry builds a deterministic string encoding of out,
+// directly comparable (byte-for-byte, when the two sides genuinely agree)
+// to nodeparity's own canonicalUTxOEntry -- same field order, same "|"
+// separators, same asset sort order (policy then asset name, both already
+// hex so a plain string sort matches gouroboros' own raw-byte
+// bytes.Compare sort), same datum "form:hash" encoding. Kept in this
+// package (not nodeparity) since it depends only on Koios's own response
+// shape, not on gouroboros.
+func CanonicalKoiosUTxOEntry(out KoiosTxInfoOutput) string {
+	var sb strings.Builder
+	sb.WriteString(out.PaymentAddr.Bech32)
+	sb.WriteString("|")
+	sb.WriteString(out.Value)
+
+	if len(out.AssetList) > 0 {
+		assets := make([]KoiosTxInfoAsset, len(out.AssetList))
+		copy(assets, out.AssetList)
+		sort.Slice(assets, func(i, j int) bool {
+			if assets[i].PolicyID != assets[j].PolicyID {
+				return assets[i].PolicyID < assets[j].PolicyID
+			}
+			return assets[i].AssetName < assets[j].AssetName
+		})
+		for _, a := range assets {
+			fmt.Fprintf(&sb, "|%s.%s=%s", a.PolicyID, a.AssetName, a.Quantity)
+		}
+	}
+
+	if out.DatumHash != nil {
+		form := "hash"
+		if out.InlineDatum != nil {
+			form = "inline"
+		}
+		fmt.Fprintf(&sb, "|datum=%s:%s", form, *out.DatumHash)
+	}
+	if out.ReferenceScript != nil {
+		fmt.Fprintf(&sb, "|scriptref=%s", out.ReferenceScript.Hash)
+	}
+	return sb.String()
+}
+
+// GetTxInfos fetches input refs and full output content for the given
+// transaction hashes, batched to stay under Koios's request-size cap. A
+// hash Koios does not recognize is simply absent from the result rather
+// than an error, matching GetPoolEpochHistory's "missing means missing"
+// contract.
 func (k *KoiosClient) GetTxInfos(
 	ctx context.Context,
 	txHashes []string,
@@ -1424,9 +1514,13 @@ func (k *KoiosClient) GetTxInfos(
 		payload := struct {
 			TxHashes []string `json:"_tx_hashes"`
 			Inputs   bool     `json:"_inputs"`
+			Assets   bool     `json:"_assets"`
+			Scripts  bool     `json:"_scripts"`
 		}{
 			TxHashes: txHashes[start:end],
 			Inputs:   true,
+			Assets:   true,
+			Scripts:  true,
 		}
 		resp, err := k.post(ctx, "/tx_info", payload)
 		if err != nil {
