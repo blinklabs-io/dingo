@@ -15,14 +15,15 @@
 package sqlite
 
 import (
+	"bytes"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -67,11 +68,16 @@ func TestCheckpointWALTruncatesFile(t *testing.T) {
 	before, err := os.Stat(walPath)
 	require.NoError(t, err)
 	require.Positive(
-		t, before.Size(),
+		t,
+		before.Size(),
 		"WAL file should hold uncheckpointed frames before the forced checkpoint",
 	)
 
-	require.NoError(t, checkpointWAL(writeDB, slog.Default())(t.Context()))
+	databaseURI := sqliteFileURI(filepath.Join(dataDir, "metadata.sqlite"))
+	require.NoError(
+		t,
+		checkpointWAL(databaseURI, slog.Default())(t.Context()),
+	)
 
 	after, err := os.Stat(walPath)
 	require.NoError(t, err)
@@ -81,18 +87,22 @@ func TestCheckpointWALTruncatesFile(t *testing.T) {
 	)
 }
 
-// TestCheckpointWALSerializesAgainstWriteTransaction proves the correctness
-// argument behind issuing the periodic checkpoint against writeDB rather
-// than readDB: writeDB is capped at SetMaxOpenConns(1) (see
-// openSQLStore/sqliteCommonPragmas), so a checkpoint query issued against it
-// cannot be scheduled onto a second connection -- it must wait for the sole
-// connection like any other writeDB caller, which makes it impossible for
-// checkpointWAL to run concurrently with (or interrupt) an in-progress write
-// transaction on the same pool.
-func TestCheckpointWALSerializesAgainstWriteTransaction(t *testing.T) {
+// TestCheckpointWALDoesNotBlockWriteBehindReaderSnapshot is the regression
+// test for the writeDB-based design checkpointWAL used before: issuing
+// PRAGMA wal_checkpoint(TRUNCATE) against writeDB (SetMaxOpenConns(1))
+// blocked that sole connection -- and therefore every other write -- for up
+// to the full busy_timeout(30000) whenever a readDB snapshot was open, since
+// the checkpoint's busy handler has to wait out that snapshot before it can
+// truncate. Measured against that design: a checkpoint attempt with one open
+// readDB snapshot took 30.04s, blocked a concurrent writeDB insert for
+// 29.99s of that, and still finished with busy=1 (no truncation).
+// checkpointWAL now issues the pragma from a dedicated connection with a
+// short busy_timeout instead, so it fails fast on the same busy=1 outcome
+// and a concurrent writeDB write is never blocked by it.
+func TestCheckpointWALDoesNotBlockWriteBehindReaderSnapshot(t *testing.T) {
 	t.Parallel()
 	dataDir := t.TempDir()
-	store, writeDB, _, err := openSQLStore(
+	store, writeDB, readDB, err := openSQLStore(
 		Config{DataDir: dataDir},
 		metadata.ProviderDependencies{},
 	)
@@ -101,49 +111,82 @@ func TestCheckpointWALSerializesAgainstWriteTransaction(t *testing.T) {
 	t.Cleanup(func() {
 		require.NoError(t, store.Close())
 	})
-	require.Equal(t, 1, writeDB.Stats().MaxOpenConnections)
 
 	_, err = writeDB.ExecContext(
 		t.Context(),
 		"CREATE TABLE checkpoint_probe (n INTEGER)",
 	)
 	require.NoError(t, err)
+	_, err = writeDB.ExecContext(
+		t.Context(),
+		"INSERT INTO checkpoint_probe (n) VALUES (0)",
+	)
+	require.NoError(t, err)
 
-	txStarted := make(chan struct{})
-	var mu sync.Mutex
-	var commitAt time.Time
+	// Hold a readDB snapshot open so a TRUNCATE checkpoint can never
+	// complete (busy=1): this is the condition under which the old
+	// writeDB-based design blocked concurrent writes for up to
+	// busy_timeout(30000).
+	readTx, err := readDB.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = readTx.Rollback()
+	})
+	var probe int
+	require.NoError(
+		t,
+		readTx.QueryRowContext(
+			t.Context(),
+			"SELECT n FROM checkpoint_probe LIMIT 1",
+		).Scan(&probe),
+	)
 
-	var wg sync.WaitGroup
-	wg.Go(func() {
-		tx, err := writeDB.BeginTx(t.Context(), nil)
-		require.NoError(t, err)
-		_, err = tx.ExecContext(
+	type writeResult struct {
+		duration time.Duration
+		err      error
+	}
+	writeResultCh := make(chan writeResult, 1)
+	go func() {
+		started := time.Now()
+		_, execErr := writeDB.ExecContext(
 			t.Context(),
 			"INSERT INTO checkpoint_probe (n) VALUES (1)",
 		)
-		require.NoError(t, err)
-		close(txStarted)
-		// Hold the sole writeDB connection open long enough that a
-		// concurrent checkpoint attempt has to wait for it if checkpointWAL
-		// is correctly serialized against an in-flight write transaction.
-		time.Sleep(200 * time.Millisecond)
-		require.NoError(t, tx.Commit())
-		mu.Lock()
-		commitAt = time.Now()
-		mu.Unlock()
-	})
+		writeResultCh <- writeResult{
+			duration: time.Since(started),
+			err:      execErr,
+		}
+	}()
 
-	<-txStarted
-	require.NoError(t, checkpointWAL(writeDB, slog.Default())(t.Context()))
-	checkpointReturnedAt := time.Now()
-	wg.Wait()
+	var logBuf bytes.Buffer
+	checkpointLogger := slog.New(slog.NewTextHandler(&logBuf, nil))
 
-	mu.Lock()
-	defer mu.Unlock()
-	require.False(
+	databaseURI := sqliteFileURI(filepath.Join(dataDir, "metadata.sqlite"))
+	checkpointStarted := time.Now()
+	require.NoError(
 		t,
-		checkpointReturnedAt.Before(commitAt),
-		"checkpointWAL must not return before the in-flight write "+
-			"transaction it overlapped with commits",
+		checkpointWAL(databaseURI, checkpointLogger)(t.Context()),
+	)
+	checkpointDuration := time.Since(checkpointStarted)
+	require.Less(
+		t, checkpointDuration, 2*time.Second,
+		"a dedicated-connection checkpoint attempt should fail fast on a "+
+			"blocked truncate, not wait out busy_timeout(30000)",
+	)
+	require.Contains(
+		t, logBuf.String(), "could not fully complete",
+		"the open reader snapshot should make the truncate impossible, "+
+			"reproducing the busy=1 condition the old design blocked on",
+	)
+
+	result := testutil.RequireReceive(
+		t, writeResultCh, 2*time.Second,
+		"concurrent writeDB insert must not be blocked behind the "+
+			"checkpoint attempt",
+	)
+	require.NoError(t, result.err)
+	require.Less(
+		t, result.duration, 2*time.Second,
+		"a concurrent write must not be blocked behind the checkpoint attempt",
 	)
 }

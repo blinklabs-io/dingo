@@ -1410,23 +1410,36 @@ high-water mark that only grows or holds steady until something truncates
 it. `checkpointWAL` is that something: a `Store.Checkpoint` callback (a new
 hook alongside `Store.Maintenance`, on its own two-minute ticker independent
 of `Maintenance`'s 24-hour VACUUM cadence — see `sqlstore.Config.Checkpoint`)
-that forces `PRAGMA wal_checkpoint(TRUNCATE)` against `writeDB` every two
-minutes, giving the WAL's on-disk size a hard ceiling regardless of how long
-any individual `readDB` snapshot happens to be held open. It is issued
-against `writeDB`, not `readDB`: `writeDB` is capped at
-`SetMaxOpenConns(1)`, so `database/sql` itself serializes the checkpoint
-query behind any write transaction already using that sole connection —
-it cannot run concurrently with, or interrupt, an in-flight write, only ever
-between one write transaction's commit and the next one's begin. SQLite
-tracks WAL locks at the shared-memory/file level rather than per
-`database/sql` pool, so issuing the pragma from `writeDB` still correctly
-waits for (or reports busy against) a snapshot held open through one of
-`readDB`'s separate connections. If that wait exceeds `busy_timeout(30000)`,
-`PRAGMA wal_checkpoint` reports `busy=1` with a partial `checkpointed` count
-rather than an error, logged at `Warn`; the next tick retries rather than
-looping here. TRUNCATE, not the safer-sounding RESTART, is deliberate: as
-shown above, RESTART does not shrink the file at all, so it cannot make the
-gauge move.
+that attempts `PRAGMA wal_checkpoint(TRUNCATE)` every two minutes, giving the
+WAL's on-disk size a hard ceiling regardless of how long any individual
+`readDB` snapshot happens to be held open.
+
+The checkpoint runs on a dedicated connection opened fresh for each attempt
+and closed immediately after — never against `writeDB` or `readDB`. An
+earlier version issued it against `writeDB` on the theory that
+`SetMaxOpenConns(1)` would just serialize the checkpoint query behind any
+write transaction already using that sole connection. Measured, that
+serialization was the bug: `PRAGMA wal_checkpoint(TRUNCATE)` invokes the
+driver's busy handler synchronously, and once a reader's open `readDB`
+snapshot makes the truncate impossible, the call blocks for the full
+`busy_timeout(30000)` before giving up — 30.04s measured — holding
+`writeDB`'s only connection the entire time and blocking a concurrent
+`writeDB` insert for 29.99s of that, for a result that was still `busy=1`
+with nothing truncated. Neither Go context cancellation nor a shorter select
+loop around the call can shorten that wait once it has entered the driver.
+A dedicated connection with a much shorter `busy_timeout` (250ms, see
+`checkpointBusyTimeout`) hits the same `busy=1` outcome but fails fast
+instead — 271ms measured — and never occupies `writeDB` at all, so a
+concurrent write is never blocked behind a checkpoint tick regardless of how
+long a `readDB` snapshot is held open. SQLite tracks WAL locks at the
+shared-memory/file level rather than per `database/sql` connection, so the
+dedicated connection still correctly observes (or reports busy against) a
+snapshot held open through one of `readDB`'s connections. If the 250ms wait
+is exceeded, `PRAGMA wal_checkpoint` reports `busy=1` with a partial
+`checkpointed` count rather than an error, logged at `Warn`; the next tick
+retries rather than looping here. TRUNCATE, not the safer-sounding RESTART,
+is deliberate: as shown above, RESTART does not shrink the file at all, so
+it cannot make the gauge move.
 
 **SQL-side metrics.** Badger's own write/read/cache/GC counters
 (`database_blob_*`, `database/plugin/blob/badger/metrics.go`) have existed for

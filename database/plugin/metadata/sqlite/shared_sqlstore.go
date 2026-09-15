@@ -117,35 +117,70 @@ const sqliteCommonPragmas = "&_pragma=busy_timeout(30000)" +
 // been so far.
 const checkpointInterval = 2 * time.Minute
 
-// checkpointWAL returns a Store.Checkpoint callback that forces
-// PRAGMA wal_checkpoint(TRUNCATE) against writeDB on checkpointInterval's
-// ticker (see openSQLStore).
+// checkpointBusyTimeout bounds how long a single checkpoint attempt waits for
+// a reader's old snapshot to close before giving up for this tick.
 //
-// writeDB, not readDB, is the right pool to issue this against: writeDB is
-// capped at SetMaxOpenConns(1) (see this file's Config wiring), so
-// database/sql itself serializes the checkpoint query behind any write
-// transaction already using that single connection -- it cannot run
-// concurrently with (or interrupt) an in-flight write, only ever run between
-// one write transaction's Commit and the next one's BeginTx. SQLite tracks
-// WAL locks at the shared-memory/file level rather than per database/sql
-// pool, so issuing the pragma from writeDB still correctly waits for (or
-// reports busy against) any reader holding a snapshot open through readDB's
-// separate connections.
+// The attempt is deliberately never issued against writeDB. PRAGMA
+// wal_checkpoint(TRUNCATE) invokes the driver's busy handler synchronously
+// inside the call, and neither Go context cancellation nor a select loop
+// around it can interrupt that wait once the call has entered the driver:
+// verified directly, cancelling the context at 300ms still let a blocking
+// wal_checkpoint(TRUNCATE) run for the full busy_timeout(30000) before
+// returning. Issuing the checkpoint from writeDB -- which is capped at
+// SetMaxOpenConns(1) -- would therefore hold the only connection every real
+// write needs for up to 30 seconds whenever a readDB snapshot is open:
+// measured, a checkpoint attempt against writeDB with one open readDB
+// snapshot took 30.04s, blocked a concurrent writeDB insert for 29.99s of
+// that, and still finished with busy=1 (no truncation). A dedicated
+// connection with a short busy_timeout hits the same busy=1 outcome, but
+// fast: measured 271ms to return. checkpointWAL below uses that dedicated
+// connection instead, so a blocked checkpoint tick costs at most this bound,
+// not up to 30 seconds, and never contends with writeDB at all.
+const checkpointBusyTimeout = 250 * time.Millisecond
+
+// checkpointWAL returns a Store.Checkpoint callback that attempts
+// PRAGMA wal_checkpoint(TRUNCATE) on checkpointInterval's ticker (see
+// openSQLStore), against a dedicated connection opened fresh for each
+// attempt and closed immediately after -- never against writeDB or readDB.
+// See checkpointBusyTimeout's doc comment for why: writeDB's sole connection
+// has to stay free for real writes, and the whole point of this design is to
+// give up quickly on a blocked checkpoint rather than occupy it. SQLite
+// tracks WAL locks at the shared-memory/file level rather than per
+// database/sql connection, so a separate connection to the same file still
+// correctly observes (or reports busy against) a snapshot readDB holds open.
 //
 // TRUNCATE, not the safer-sounding RESTART, is deliberate: checkpointInterval's
 // doc comment above shows RESTART does not shrink the file at all, so it
-// cannot make dingo_database_sql_wal_bytes move. TRUNCATE additionally waits
-// (bounded by the busy_timeout(30000) pragma already on this connection) for
-// any reader still holding an old snapshot before it can truncate; if that
-// wait is exceeded, PRAGMA wal_checkpoint reports busy=1 with a partial
-// checkpointed count rather than an error or a blocked call -- logged at Warn
-// so a persistently blocked checkpoint (rather than a single slow tick) is
-// visible to an operator, and left for the next tick to retry rather than
-// retried in a loop here.
-func checkpointWAL(writeDB *sql.DB, logger *slog.Logger) func(context.Context) error {
+// cannot make dingo_database_sql_wal_bytes move. If the bounded wait above is
+// exceeded, PRAGMA wal_checkpoint reports busy=1 with a partial checkpointed
+// count rather than an error -- logged at Warn so a persistently blocked
+// checkpoint (rather than a single slow tick) is visible to an operator, and
+// left for the next tick to retry rather than retried in a loop here.
+func checkpointWAL(
+	databaseURI string,
+	logger *slog.Logger,
+) func(context.Context) error {
 	return func(ctx context.Context) error {
+		db, err := sqlstore.OpenDB(
+			"sqlite",
+			fmt.Sprintf(
+				"%s?_pragma=busy_timeout(%d)",
+				databaseURI,
+				checkpointBusyTimeout.Milliseconds(),
+			),
+			"sqlite",
+			false, // short-lived per-tick connection; not worth tracing
+		)
+		if err != nil {
+			return fmt.Errorf("open WAL checkpoint connection: %w", err)
+		}
+		defer func() {
+			_ = db.Close()
+		}()
+		db.SetMaxOpenConns(1)
+
 		var busy, walLog, checkpointed int
-		row := writeDB.QueryRowContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
+		row := db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
 		if err := row.Scan(&busy, &walLog, &checkpointed); err != nil {
 			return fmt.Errorf("WAL checkpoint: %w", err)
 		}
@@ -366,7 +401,7 @@ func openSQLStore(
 		if checkpointLogger == nil {
 			checkpointLogger = slog.Default()
 		}
-		checkpoint = checkpointWAL(writeDB, checkpointLogger)
+		checkpoint = checkpointWAL(databaseURI, checkpointLogger)
 		backupTo = func(ctx context.Context, dstPath string) error {
 			return backupSQLite(ctx, databasePath, dataDir, dstPath)
 		}

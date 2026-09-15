@@ -224,8 +224,12 @@ func New(config Config) (*Store, error) {
 		prepare:                     config.Prepare,
 		reset:                       config.Reset,
 		validateBackup:              config.ValidateBackup,
-		sqlOperations:               newSQLOperationsCounter(config.PromRegistry),
-		sqlQueryDuration:            newSQLQueryDurationHistogram(config.PromRegistry),
+		sqlOperations: newSQLOperationsCounter(
+			config.PromRegistry,
+		),
+		sqlQueryDuration: newSQLQueryDurationHistogram(
+			config.PromRegistry,
+		),
 	}, nil
 }
 
@@ -474,12 +478,21 @@ func (s *Store) CloseContext(ctx context.Context) error {
 			// sessions where session_replication_role is connection-scoped.
 			_ = s.restoreNormalPragmas(ctx)
 		}
-		// Cancel both tickers up front, before waiting on either: each
-		// ticker's own goroutine observes its ctx.Done() and returns even if
-		// this function's ctx times out first, so unconditionally requesting
-		// both cancellations here -- rather than only reaching the second
-		// one after the first successfully waited -- guarantees neither
-		// leaks past this call regardless of which wait (if any) times out.
+		// Cancel both tickers up front, before waiting on either. Cancelling
+		// stops each ticker's select loop from admitting a new tick, but it
+		// does not interrupt a tick already in flight: neither Maintenance's
+		// VACUUM nor SQLite's checkpointWAL observes context cancellation
+		// once its underlying driver call has started, so a tick that began
+		// just before Close is called still runs to completion regardless of
+		// ctx. checkpointWAL bounds that wait to checkpointBusyTimeout (see
+		// its doc comment) rather than the 30-second busy_timeout an
+		// in-flight checkpoint against writeDB used to allow, so in practice
+		// neither ticker's goroutine outlives this call by more than that
+		// bound. Requesting both cancellations here -- rather than only
+		// reaching the second one after the first successfully waited --
+		// still matters: it lets the two waits below run against tickers
+		// that are both already trying to stop, instead of serializing one
+		// ticker's shutdown behind the other's.
 		if s.maintenanceCancel != nil {
 			s.maintenanceCancel()
 		}
