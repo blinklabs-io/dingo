@@ -1395,10 +1395,15 @@ a while but were never on a dashboard; the metadata store had no equivalent
 instrumentation at all until the write-amplification investigation above added
 it. `dingo_database_sql_operations_total{op}` (counter,
 `database/plugin/metadata/sqlstore/metrics.go`) is incremented once per SQL
-statement at Store's single query chokepoint (`instrumentedQueryer`),
-classified by leading keyword (insert/update/delete/select/other) parsed past
-each query's sqlc-generated `-- name: X :verb` comment; it is a no-op unless
-`Config.PromRegistry` is set. `dingo_database_sql_wal_bytes` and
+statement, classified by leading keyword (insert/update/delete/select/other)
+parsed past each query's sqlc-generated `-- name: X :verb` comment; it is a
+no-op unless `Config.PromRegistry` is set. Most calls are counted at Store's
+single query chokepoint (`instrumentedQueryer`); the hot-statement cache
+(`prepared_stmt.go`'s `queryRowCached`/`execCached`) and
+`transactionBatchAccumulator.insertTransaction`'s prepared batch-insert path
+(`transaction_write.go`) both call their cached `*sql.Stmt` directly, bypassing
+that chokepoint, and so count themselves explicitly instead.
+`dingo_database_sql_wal_bytes` and
 `dingo_database_sql_disk_bytes` (`database/plugin/metadata/sqlite/metrics.go`)
 are pull-based gauges sampled at scrape time — a plain `os.Stat` of
 `metadata.sqlite-wal` and `Store.DiskSize()` respectively — the same pattern

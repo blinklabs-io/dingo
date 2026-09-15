@@ -44,7 +44,10 @@ func newSQLOperationsCounter(
 			"classified by leading SQL keyword (insert/update/delete/select/" +
 			"other). Counted at Store's single query chokepoint " +
 			"(instrumentedQueryer), so this covers every domain query, not " +
-			"only the hand-picked hot statements prepared_stmt.go caches.",
+			"only the hand-picked hot statements prepared_stmt.go caches, " +
+			"plus the transactionBatchAccumulator's own prepared batch-insert " +
+			"path (transaction_write.go), which counts itself for the same " +
+			"reason prepared_stmt.go's cache hits do.",
 	}, []string{"op"})
 	if err := reg.Register(counter); err != nil {
 		var already prometheus.AlreadyRegisteredError
@@ -145,3 +148,9 @@ func (q countingQueryer) QueryRowContext(
 // wrapper. queryRowCached and execCached count those calls explicitly
 // instead, so a hot statement is still counted exactly once, just not by
 // this type.
+//
+// transactionBatchAccumulator.insertTransaction (transaction_write.go) is
+// the same shape for a different reason: it holds its own cached *sql.Stmt
+// scoped to one accumulator/transaction rather than going through
+// prepareHotStatements' Store-wide cache, so it also never reaches this
+// wrapper and counts itself explicitly for the same reason.

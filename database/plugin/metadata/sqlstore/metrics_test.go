@@ -287,6 +287,42 @@ func TestSQLOperationsCounterNilWhenNoRegistry(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestBatchInsertTransactionIsCounted is the regression test for
+// transactionBatchAccumulator.insertTransaction (transaction_write.go):
+// it executes its cached transactionInsert statement directly against a
+// *sql.Stmt, bypassing countingQueryer entirely, so without its own
+// sqlOperations counting the batch-insert path used by API backfill would be
+// silently absent from dingo_database_sql_operations_total.
+func TestBatchInsertTransactionIsCounted(t *testing.T) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	store := newMigratedSQLiteStoreWithRegistry(t, reg)
+	ctx := context.Background()
+
+	txn := store.Transaction(ctx)
+	db, dbCtx, err := store.dbFromTxn(txn)
+	require.NoError(t, err)
+
+	acc, ok := store.NewBatchAccumulator().(*transactionBatchAccumulator)
+	require.True(t, ok)
+
+	before := counterValue(t, reg, "insert")
+	_, err = acc.insertTransaction(
+		dbCtx,
+		db,
+		[]byte{0x20}, []byte{0x21}, nil, 1, 0, "0", "0", "0", 0, true,
+	)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		before+1,
+		counterValue(t, reg, "insert"),
+		"expected the batch accumulator's prepared insert to be counted",
+	)
+
+	require.NoError(t, txn.Rollback())
+}
+
 // TestMissingCriticalDeferredIndexesIsCounted is the regression test for
 // dingo_database_sql_operations_total's Help text claim that it covers
 // every domain query: MissingCriticalDeferredIndexes used to call
