@@ -201,7 +201,7 @@ func TestLocalstatequeryProtocol_PointAheadOfTip_ConnectionSurvivesAndStaysUsabl
 			ouroboros.WithServer(true),
 			ouroboros.WithLocalStateQueryConfig(
 				olocalstatequery.NewConfig(
-					o.localstatequeryServerConnOpts()...,
+					o.localstatequeryServerConnOpts(false)...,
 				),
 			),
 		)
