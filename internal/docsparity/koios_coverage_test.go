@@ -15,6 +15,7 @@
 package docsparity_test
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
@@ -62,7 +63,37 @@ func koiosCoverageDocEntries(
 ) (map[koiosFieldKey]koiosDocEntry, map[koiosFieldKey]koiosDocEntry) {
 	t.Helper()
 
-	doc := readRepoFile(t, root, koiosCoverageDoc)
+	table, err := parseKoiosCoverageTable(
+		readRepoFile(t, root, koiosCoverageDoc),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, problem := range table.problems {
+		t.Error(problem)
+	}
+	return table.exact, table.wildcard
+}
+
+// koiosCoverageTable is one parsed coverage table: the classifications it
+// states, and the row-level faults found while reading it.
+//
+// Parsing is separated from reporting so the parser's own rules can be checked
+// against a table written to break them, rather than only against whatever
+// ARCHITECTURE.md happens to contain today.
+type koiosCoverageTable struct {
+	exact    map[koiosFieldKey]koiosDocEntry
+	wildcard map[koiosFieldKey]koiosDocEntry
+	problems []string
+}
+
+// parseKoiosCoverageTable reads the coverage table out of doc.
+//
+// The error covers the two conditions that leave nothing to check at all: the
+// table being absent, or carrying no field rows. problems holds the per-row
+// faults, which are each worth reporting without abandoning the rest of the
+// table.
+func parseKoiosCoverageTable(doc string) (koiosCoverageTable, error) {
 	lines := strings.Split(doc, "\n")
 
 	header := -1
@@ -87,7 +118,7 @@ func koiosCoverageDocEntries(
 		}
 	}
 	if header < 0 {
-		t.Fatalf(
+		return koiosCoverageTable{}, fmt.Errorf(
 			"%s has no table headed %q; the Koios coverage contract is "+
 				"unchecked until it is restored",
 			koiosCoverageDoc,
@@ -95,19 +126,21 @@ func koiosCoverageDocEntries(
 		)
 	}
 
-	exact := make(map[koiosFieldKey]koiosDocEntry)
-	wildcard := make(map[koiosFieldKey]koiosDocEntry)
+	table := koiosCoverageTable{
+		exact:    make(map[koiosFieldKey]koiosDocEntry),
+		wildcard: make(map[koiosFieldKey]koiosDocEntry),
+	}
 	for i := header + 2; i < len(lines); i++ {
 		if !strings.HasPrefix(strings.TrimSpace(lines[i]), "|") {
 			break
 		}
 		cells := splitTableCells(lines[i])
 		if len(cells) < 3 {
-			t.Errorf(
+			table.problems = append(table.problems, fmt.Sprintf(
 				"%s: coverage row has %d cells, want at least 3",
 				docLocation(koiosCoverageDoc, i+1),
 				len(cells),
-			)
+			))
 			continue
 		}
 		endpoint := unquote(cells[0])
@@ -119,20 +152,36 @@ func koiosCoverageDocEntries(
 			}
 			key := koiosFieldKey{endpoint: endpoint, field: field}
 			entry := koiosDocEntry{class: class, line: i + 1}
+			target := table.exact
 			if strings.HasSuffix(field, "*") {
-				wildcard[key] = entry
+				target = table.wildcard
+			}
+			// Assigning over an existing key would drop the earlier row. A
+			// wrong classification followed by a correct duplicate would then
+			// leave only the correct one to compare, so the table would pass
+			// while still telling a reader two different things about the same
+			// field.
+			if previous, duplicate := target[key]; duplicate {
+				table.problems = append(table.problems, fmt.Sprintf(
+					"%s: duplicate coverage row for %s %s, already "+
+						"documented at %s",
+					docLocation(koiosCoverageDoc, entry.line),
+					key.endpoint,
+					key.field,
+					docLocation(koiosCoverageDoc, previous.line),
+				))
 				continue
 			}
-			exact[key] = entry
+			target[key] = entry
 		}
 	}
-	if len(exact) == 0 {
-		t.Fatalf(
+	if len(table.exact) == 0 {
+		return koiosCoverageTable{}, fmt.Errorf(
 			"%s: the coverage table has no field rows",
 			docLocation(koiosCoverageDoc, header+1),
 		)
 	}
-	return exact, wildcard
+	return table, nil
 }
 
 // koiosCoverageClasses returns every classification the code defines, so an
@@ -265,6 +314,68 @@ func TestArchitectureDocumentsKoiosCoverageMatrix(t *testing.T) {
 			key.endpoint,
 			key.field,
 		)
+	}
+}
+
+// TestKoiosCoverageTableRejectsDuplicateRows pins the duplicate check in
+// parseKoiosCoverageTable.
+//
+// The classifications are read into a map keyed by (endpoint, field), so a
+// second row for a key would otherwise assign over the first. A table that
+// states a wrong classification and then contradicts it with a correct
+// duplicate would be read as stating only the correct one, and would pass
+// while still telling a reader two different things about the same field.
+//
+// Both the exact and the wildcard map are checked, because they are separate
+// maps and a check added to one is not a check on the other.
+func TestKoiosCoverageTableRejectsDuplicateRows(t *testing.T) {
+	t.Parallel()
+
+	doc := strings.Join([]string{
+		"| " + strings.Join(koiosCoverageHeader, " | ") + " |",
+		"| --- | --- | --- | --- |",
+		"| `/tip` | exact-match | `abs_slot` | mapped |",
+		"| `/tip` | unsupported | `abs_slot` | contradicts the row above |",
+		"| `/epoch_params` | exact-match | `pvt_*` | mapped |",
+		"| `/epoch_params` | unsupported | `pvt_*` | contradicts it |",
+	}, "\n")
+
+	table, err := parseKoiosCoverageTable(doc)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(table.problems) != 2 {
+		t.Fatalf(
+			"want both duplicate rows reported, got %d problem(s): %v",
+			len(table.problems),
+			table.problems,
+		)
+	}
+	for _, want := range []string{
+		"duplicate coverage row for /tip abs_slot",
+		"duplicate coverage row for /epoch_params pvt_*",
+	} {
+		found := false
+		for _, problem := range table.problems {
+			if strings.Contains(problem, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("no problem reports %q; got %v", want, table.problems)
+		}
+	}
+
+	// The first row of each pair is the one kept. Reporting the duplicate is
+	// the whole point, so which row survives only has to be deterministic.
+	exactKey := koiosFieldKey{endpoint: "/tip", field: "abs_slot"}
+	if got := table.exact[exactKey].class; got != "exact-match" {
+		t.Errorf("exact row for %v kept class %q, want the first row", exactKey, got)
+	}
+	wildcardKey := koiosFieldKey{endpoint: "/epoch_params", field: "pvt_*"}
+	if got := table.wildcard[wildcardKey].class; got != "exact-match" {
+		t.Errorf("wildcard row for %v kept class %q, want the first row", wildcardKey, got)
 	}
 }
 
