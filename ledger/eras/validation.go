@@ -106,7 +106,7 @@ func checkPoolMarginFloor(
 		if margin.Cmp(minMargin) < 0 {
 			return fmt.Errorf(
 				"pool %x margin %s below minimum pool margin %s",
-				reg.Operator,
+				reg.Operator.Bytes(),
 				margin.RatString(),
 				minMargin.RatString(),
 			)

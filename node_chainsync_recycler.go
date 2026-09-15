@@ -489,8 +489,11 @@ func (n *Node) startChainsyncStallRecycler(
 
 // waitChainsyncStallRecycler stops the recycler and waits for it to exit.
 //
-// This wait is intentionally not bounded by the shutdown timeout: advancing
-// while the recycler is still active can race dependency teardown.
+// The wait itself is unbounded: advancing while the recycler is still active
+// can race dependency teardown. shutdown() bounds it from outside with
+// stopWithDeadline, which is safe only because the recycler reaches node
+// components solely through WithLiveComponents, whose TryLock on
+// liveLifecycleMu fails while shutdown holds that lock.
 func (n *Node) waitChainsyncStallRecycler() {
 	if n.chainsyncStallRecycler == nil {
 		return
