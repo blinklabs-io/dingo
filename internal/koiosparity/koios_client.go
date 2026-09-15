@@ -1376,6 +1376,78 @@ func (k *KoiosClient) GetAccountRewardHistory(
 	return items, nil
 }
 
+// koiosTxInfoBatchSize bounds how many transaction hashes go into a single
+// /tx_info request: each 64-char hex hash plus JSON quoting/comma overhead is
+// ~70 bytes, so this many hashes stays comfortably under Koios's request-body
+// size cap (confirmed live: an unbatched request for a full block's worth of
+// hashes was rejected outright with a plain-text "Payload too large" body
+// that fails JSON decoding, rather than any structured error).
+const koiosTxInfoBatchSize = 40
+
+// KoiosTxInfoUtxoRef is one entry in a KoiosTxInfoItem's Inputs or Outputs:
+// just enough to identify a UTxO ref ("<tx_hash>#<tx_index>"), not its full
+// content. See KoiosTxInfoItem's doc comment for why.
+type KoiosTxInfoUtxoRef struct {
+	TxHash  string `json:"tx_hash"`
+	TxIndex int    `json:"tx_index"`
+}
+
+// KoiosTxInfoItem is one transaction from /tx_info, projected down to just
+// the fields a UTxO-set reconstruction needs: which refs it consumes
+// (Inputs) and which it creates (Outputs). Requesting with _inputs:true is
+// required for Inputs to be populated at all -- Koios omits it by default.
+//
+// Deliberately not modeling output content (address, value, assets, datum,
+// script) even though /tx_info returns it: this type only supports
+// existence-based UTxO comparison (does Dingo's live GetUTxOWhole agree with
+// Koios on which refs exist), not content-based comparison (do the two
+// sides agree on what each ref actually contains). Extending to content
+// comparison is real future scope, not yet built or verified
+// (blinklabs-io/dingo#1900).
+type KoiosTxInfoItem struct {
+	TxHash  string               `json:"tx_hash"`
+	Inputs  []KoiosTxInfoUtxoRef `json:"inputs"`
+	Outputs []KoiosTxInfoUtxoRef `json:"outputs"`
+}
+
+// GetTxInfos fetches input/output refs for the given transaction hashes,
+// batched to stay under Koios's request-size cap. A hash Koios does not
+// recognize is simply absent from the result rather than an error, matching
+// GetPoolEpochHistory's "missing means missing" contract.
+func (k *KoiosClient) GetTxInfos(
+	ctx context.Context,
+	txHashes []string,
+) ([]KoiosTxInfoItem, error) {
+	var all []KoiosTxInfoItem
+	for start := 0; start < len(txHashes); start += koiosTxInfoBatchSize {
+		end := min(start+koiosTxInfoBatchSize, len(txHashes))
+		payload := struct {
+			TxHashes []string `json:"_tx_hashes"`
+			Inputs   bool     `json:"_inputs"`
+		}{
+			TxHashes: txHashes[start:end],
+			Inputs:   true,
+		}
+		resp, err := k.post(ctx, "/tx_info", payload)
+		if err != nil {
+			return nil, fmt.Errorf("tx_info batch [%d:%d]: %w", start, end, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf(
+				"koios /tx_info: status %d body: %s",
+				resp.StatusCode,
+				resp.Body,
+			)
+		}
+		var items []KoiosTxInfoItem
+		if err := json.Unmarshal(resp.Body, &items); err != nil {
+			return nil, fmt.Errorf("koios /tx_info decode: %w", err)
+		}
+		all = append(all, items...)
+	}
+	return all, nil
+}
+
 // parseTotalFromContentRange extracts the total count from a Content-Range header
 // like "0-999/5000". Returns -1 on parse failure.
 func parseTotalFromContentRange(header string) int {

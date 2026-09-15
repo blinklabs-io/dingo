@@ -610,7 +610,7 @@ func seedKoiosBabbageProtocolParams(
 		))
 		require.Len(t, resp, 1)
 		require.NoError(t, cache.UpsertEpochParams(
-			epochParamsFromKoios(network, epoch, &resp[0], time.Now()),
+			EpochParamsFromKoios(network, epoch, &resp[0], time.Now()),
 		))
 	}
 }

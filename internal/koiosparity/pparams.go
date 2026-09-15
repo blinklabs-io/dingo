@@ -176,7 +176,7 @@ func decodeProtocolParams(
 			err,
 		)
 	}
-	out, err := protocolParamsFromNative(pparams)
+	out, err := ProtocolParamsFromNative(pparams)
 	if err != nil {
 		return nil, err
 	}
@@ -186,7 +186,7 @@ func decodeProtocolParams(
 	return out, nil
 }
 
-// protocolParamsFromNative flattens a decoded era-specific parameter struct.
+// ProtocolParamsFromNative flattens a decoded era-specific parameter struct.
 //
 // A per-era switch is deliberate rather than routing through
 // ProtocolParameters.Utxorpc(): the values compared here are the ones the
@@ -196,7 +196,14 @@ func decodeProtocolParams(
 // era must be added here — which is why the default case is an error and not
 // a silent empty result: an unhandled era must surface as a dingo_db_error,
 // never as a PASS with nothing compared.
-func protocolParamsFromNative(
+//
+// Exported (not just decodeProtocolParams' own internal helper) because
+// cmd/node-parity's Koios-backed comparison (blinklabs-io/dingo#1900) needs
+// exactly the same conversion from a live LocalStateQuery
+// GetCurrentProtocolParams() result, which decodes to this same
+// lcommon.ProtocolParameters interface -- reusing this avoids a second,
+// drifting copy of the per-era field-extraction switch below.
+func ProtocolParamsFromNative(
 	pparams lcommon.ProtocolParameters,
 ) (*DingoProtocolParams, error) {
 	out := &DingoProtocolParams{}
