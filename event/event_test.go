@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -793,7 +794,8 @@ func TestPublishBlocksOnFullBufferAndLosesNothing(t *testing.T) {
 	t.Parallel()
 
 	const testEvtType event.EventType = "test.backpressure"
-	eb := event.NewEventBus(nil, nil)
+	reg := prometheus.NewRegistry()
+	eb := event.NewEventBus(reg, nil)
 	defer eb.Stop()
 
 	const buffer = 16
@@ -806,16 +808,30 @@ func TestPublishBlocksOnFullBufferAndLosesNothing(t *testing.T) {
 	}
 
 	done := make(chan struct{})
-	started := make(chan struct{})
 	go func() {
 		defer close(done)
-		close(started)
 		for i := range overflow {
 			eb.Publish(testEvtType, event.NewEvent(testEvtType, buffer+i))
 		}
 	}()
 
-	testutil.RequireReceive(t, started, time.Second, "publisher did not start")
+	// Wait for the blocked-delivery metric rather than merely checking the
+	// buffer is full: the buffer was already full from the fill loop above,
+	// so a one-time length check cannot prove the overflow publisher
+	// actually reached its blocking path.
+	require.Eventually(t, func() bool {
+		return counterValue(
+			t,
+			reg,
+			"event_delivery_blocked_total",
+			map[string]string{
+				"type": string(testEvtType),
+				"kind": "in-memory",
+			},
+		) >= 1
+	}, 2*time.Second, 5*time.Millisecond,
+		"a backpressured delivery should be counted",
+	)
 	require.Len(t, subCh, cap(subCh), "the subscriber buffer must be full")
 	testutil.RequireNoReceive(
 		t,
@@ -924,22 +940,37 @@ func TestPublishBlockingUnblocksOnStop(t *testing.T) {
 	t.Parallel()
 
 	const testEvtType event.EventType = "test.blocking.stop"
-	eb := event.NewEventBus(nil, nil)
+	reg := prometheus.NewRegistry()
+	eb := event.NewEventBus(reg, nil)
 
 	_, subCh := eb.SubscribeWithBuffer(testEvtType, 1)
 	eb.Publish(testEvtType, event.NewEvent(testEvtType, "first"))
 
-	started := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		close(started)
 		done <- eb.PublishBlocking(
 			testEvtType,
 			event.NewEvent(testEvtType, "second"),
 		)
 	}()
 
-	testutil.RequireReceive(t, started, time.Second, "publisher did not start")
+	// Wait for the blocked-delivery metric rather than merely checking the
+	// buffer is full: the buffer was already full from the fill above, so a
+	// one-time length check cannot prove PublishBlocking actually reached its
+	// blocking path.
+	require.Eventually(t, func() bool {
+		return counterValue(
+			t,
+			reg,
+			"event_delivery_blocked_total",
+			map[string]string{
+				"type": string(testEvtType),
+				"kind": "in-memory",
+			},
+		) >= 1
+	}, 2*time.Second, 5*time.Millisecond,
+		"the blocked PublishBlocking should be counted before Stop is exercised",
+	)
 	require.Len(t, subCh, cap(subCh), "the subscriber buffer must be full")
 	testutil.RequireNoReceive(
 		t,

@@ -66,13 +66,13 @@ func TestChannelSubscriberDeliverWaitsForCapacity(t *testing.T) {
 	}
 
 	// Deliver to the full buffer must wait rather than drop.
-	started := make(chan struct{})
+	blocked := make(chan struct{})
+	sub.onBlocked = func() { close(blocked) }
 	done := make(chan error, 1)
 	go func() {
-		close(started)
 		done <- sub.Deliver(NewEvent("test", "overflow"))
 	}()
-	<-started
+	<-blocked
 	if len(sub.ch) != cap(sub.ch) {
 		t.Fatal("expected the delivery buffer to be full")
 	}

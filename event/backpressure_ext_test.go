@@ -212,20 +212,33 @@ func TestPublishUnblocksOnStop(t *testing.T) {
 
 	const testEvtType event.EventType = "test.backpressure.stop"
 
-	eb := event.NewEventBus(nil, nil)
+	reg := prometheus.NewRegistry()
+	eb := event.NewEventBus(reg, nil)
 	_, subCh := eb.SubscribeWithBuffer(testEvtType, 1)
 	eb.Publish(testEvtType, event.NewEvent(testEvtType, "fill"))
 
-	started := make(chan struct{})
 	published := make(chan struct{})
 	go func() {
 		defer close(published)
-		close(started)
 		eb.Publish(testEvtType, event.NewEvent(testEvtType, "blocked"))
 	}()
 
-	testutil.RequireReceive(
-		t, started, time.Second, "publisher did not start",
+	// Wait for the blocked-delivery metric rather than merely checking the
+	// buffer is full: the buffer was already full from the fill above, so a
+	// one-time length check cannot prove the second Publish actually reached
+	// its blocking path.
+	require.Eventually(t, func() bool {
+		return counterValue(
+			t,
+			reg,
+			"event_delivery_blocked_total",
+			map[string]string{
+				"type": string(testEvtType),
+				"kind": "in-memory",
+			},
+		) >= 1
+	}, 2*time.Second, 5*time.Millisecond,
+		"the blocked Publish should be counted before Stop is exercised",
 	)
 	require.Len(t, subCh, cap(subCh), "the subscriber buffer must be full")
 	testutil.RequireNoReceive(
@@ -262,22 +275,35 @@ func TestPublishUnblocksOnUnsubscribe(t *testing.T) {
 
 	const testEvtType event.EventType = "test.backpressure.unsubscribe"
 
-	eb := event.NewEventBus(nil, nil)
+	reg := prometheus.NewRegistry()
+	eb := event.NewEventBus(reg, nil)
 	defer eb.Stop()
 
 	subId, subCh := eb.SubscribeWithBuffer(testEvtType, 1)
 	eb.Publish(testEvtType, event.NewEvent(testEvtType, "fill"))
 
-	started := make(chan struct{})
 	published := make(chan struct{})
 	go func() {
 		defer close(published)
-		close(started)
 		eb.Publish(testEvtType, event.NewEvent(testEvtType, "blocked"))
 	}()
 
-	testutil.RequireReceive(
-		t, started, time.Second, "publisher did not start",
+	// Wait for the blocked-delivery metric rather than merely checking the
+	// buffer is full: the buffer was already full from the fill above, so a
+	// one-time length check cannot prove the second Publish actually reached
+	// its blocking path.
+	require.Eventually(t, func() bool {
+		return counterValue(
+			t,
+			reg,
+			"event_delivery_blocked_total",
+			map[string]string{
+				"type": string(testEvtType),
+				"kind": "in-memory",
+			},
+		) >= 1
+	}, 2*time.Second, 5*time.Millisecond,
+		"the blocked Publish should be counted before Unsubscribe is exercised",
 	)
 	require.Len(t, subCh, cap(subCh), "the subscriber buffer must be full")
 	testutil.RequireNoReceive(
