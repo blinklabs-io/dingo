@@ -65,6 +65,23 @@ type stateMetrics struct {
 	// and "unavailable" means the fetch COMPLETED without caching, which is
 	// routine on a CIP node and would swamp the counter.
 	leiosEbWaitTimeouts prometheus.Counter
+	// Per-stage wall-clock time spent processing one block through the
+	// ledger's slice of the pipeline: header_verify (VRF/KES/signature
+	// checks run when a fetched block arrives), validate (one
+	// transaction's era ledger-rule validation, including Plutus
+	// evaluation, inside ledgerProcessBlock), and apply (writing a
+	// flushed LedgerDeltaBatch's UTXO and transaction rows to the
+	// metadata store). See dingo_blockfetch_stage_duration_seconds in the
+	// ouroboros package for the wire-decode stage, which runs before a
+	// block reaches the ledger at all. Together the two metrics answer
+	// "where does per-block processing time go", which no existing
+	// histogram covers end to end.
+	blockStageDuration *prometheus.HistogramVec
+	// Pre-materialized observers for the stage label values, so the hot
+	// path does not resolve a label on every block or transaction.
+	blockStageHeaderVerify prometheus.Observer
+	blockStageValidate     prometheus.Observer
+	blockStageApply        prometheus.Observer
 	// Incremented when a stored governance proposal's CBOR fails to
 	// decode during the mid-epoch ratifiability check, so the failures
 	// surface as a metric instead of just log volume.
@@ -175,6 +192,18 @@ type stateMetrics struct {
 	// value on a Mithril-bootstrapped node explains a stake shortfall; a
 	// rising value on any node is a live divergence from the network.
 	skippedStakeRewardRounds prometheus.Counter
+	// Incremented each time GetStakeDistribution or GetPoolDistr2 omits a
+	// pool that holds stake at the queried snapshot but has no resolvable
+	// registration/VRF key hash on record. This is a deliberate fallback
+	// (see poolStakeDistribution's own comment), not a failure, so it
+	// does not abort the query -- but a sustained nonzero value means a
+	// real cross-node comparison tool would see dingo's reply as short by
+	// that many pools, the exact condition blinklabs-io/dingo#4152 found
+	// via cmd/node-parity against a real cardano-node without any other
+	// visible symptom. Making this a metric rather than only the existing
+	// WARN log lets that be caught by an alert instead of requiring a
+	// manual diff to notice again.
+	poolStakeDistributionOmittedPools prometheus.Counter
 	// Snapshot of gouroboros/pipeline.PipelineMetrics.Stats() for the
 	// block-processing pipeline (issue #1894), refreshed after every batch
 	// decodeReadChainBatch submits to it. These are gauges rather than
@@ -258,6 +287,35 @@ const (
 	leiosEbWaitOutcomeUnavailable = "unavailable"
 )
 
+// Stage labels for blockStageDuration. See its field doc comment for what
+// each stage covers.
+const (
+	blockStageHeaderVerify = "header_verify"
+	blockStageValidate     = "validate"
+	blockStageApply        = "apply"
+)
+
+// observeBlockStage records one sample of wall-clock time spent in the named
+// per-block processing stage. Safe to call before init (or when metrics are
+// disabled), matching the other observe helpers in this file.
+func (m *stateMetrics) observeBlockStage(stage string, d time.Duration) {
+	if m == nil {
+		return
+	}
+	var obs prometheus.Observer
+	switch stage {
+	case blockStageHeaderVerify:
+		obs = m.blockStageHeaderVerify
+	case blockStageValidate:
+		obs = m.blockStageValidate
+	case blockStageApply:
+		obs = m.blockStageApply
+	}
+	if obs != nil {
+		obs.Observe(d.Seconds())
+	}
+}
+
 // observeLeiosEbWait records one apply-path endorser-block wait under the
 // given outcome. Recording the duration under every outcome (rather than only
 // timeouts) is what makes the metric answer the question that matters: whether
@@ -298,6 +356,13 @@ func (m *stateMetrics) incSkippedStakeRewardRounds() {
 		return
 	}
 	m.skippedStakeRewardRounds.Inc()
+}
+
+func (m *stateMetrics) incPoolStakeDistributionOmittedPool() {
+	if m == nil || m.poolStakeDistributionOmittedPools == nil {
+		return
+	}
+	m.poolStakeDistributionOmittedPools.Inc()
 }
 
 // incBlockPipelineExpectedEta0Error records a block-processing pipeline
@@ -537,6 +602,26 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 			Help: "ledger apply-path waits for a referenced Leios endorser block that ran to a full bound without it arriving: the diffusion window, or the CIP in-flight-fetch grace phase hard bound",
 		},
 	)
+	m.blockStageDuration = promautoFactory.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "dingo_ledger_block_stage_duration_seconds",
+			Help: "wall-clock time spent in each ledger-owned stage of per-block processing, by stage: header_verify (VRF/KES/signature checks on blockfetch arrival), validate (one transaction's era ledger-rule validation, including Plutus evaluation), apply (writing a flushed delta batch's UTXO and transaction rows to the metadata store)",
+			// 100us to ~3.3s. Block-processing work here ranges from a
+			// single cheap signature check to a Plutus-heavy transaction
+			// or a large multi-block delta-batch flush.
+			Buckets: prometheus.ExponentialBuckets(0.0001, 2, 16),
+		},
+		[]string{"stage"},
+	)
+	m.blockStageHeaderVerify = m.blockStageDuration.WithLabelValues(
+		blockStageHeaderVerify,
+	)
+	m.blockStageValidate = m.blockStageDuration.WithLabelValues(
+		blockStageValidate,
+	)
+	m.blockStageApply = m.blockStageDuration.WithLabelValues(
+		blockStageApply,
+	)
 	m.governanceProposalDecodeFailures = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "dingo_governance_proposal_decode_failures_total",
@@ -660,6 +745,12 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_skipped_stake_reward_rounds_total",
 			Help: "epoch-boundary reward rounds skipped for want of their inputs; each one leaves reward balances and the leadership stake distribution permanently short by that epoch's rewards, which makes the node reject canonical blocks near the leader-eligibility threshold",
+		},
+	)
+	m.poolStakeDistributionOmittedPools = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_pool_stake_distribution_omitted_pools_total",
+			Help: "pools omitted from GetStakeDistribution/GetPoolDistr2 because they held snapshot stake but had no resolvable registration/VRF key hash on record",
 		},
 	)
 	m.pipelineStuck = promautoFactory.NewGauge(

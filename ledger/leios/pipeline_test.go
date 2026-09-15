@@ -17,7 +17,6 @@ package leios
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -816,7 +815,7 @@ func TestStaleQuorumRejectedThroughEventLoop(t *testing.T) {
 		defer f.mgr.mu.Unlock()
 		_, ok := f.mgr.canonicalRbs[rbHash]
 		return ok
-	}, 2*time.Second, "announcing ranking block recorded")
+	}, testutil.AsyncWait, "announcing ranking block recorded")
 
 	f.eventBus.Publish(chain.ChainUpdateEventType, event.NewEvent(
 		chain.ChainUpdateEventType,
@@ -830,7 +829,7 @@ func TestStaleQuorumRejectedThroughEventLoop(t *testing.T) {
 		defer f.mgr.mu.Unlock()
 		_, ok := f.mgr.canonicalRbs[rbHash]
 		return !ok
-	}, 2*time.Second, "rollback orphans the announcing ranking block")
+	}, testutil.AsyncWait, "rollback orphans the announcing ranking block")
 
 	f.eventBus.Publish(EbQuorumEventType, event.NewEvent(
 		EbQuorumEventType,
@@ -846,7 +845,7 @@ func TestStaleQuorumRejectedThroughEventLoop(t *testing.T) {
 			f.mgr.metrics.certsRejectedTotal.
 				WithLabelValues("non_canonical_announcement"),
 		) == 1
-	}, 2*time.Second, "stale quorum event rejected")
+	}, testutil.AsyncWait, "stale quorum event rejected")
 
 	f.mgr.mu.Lock()
 	_, recreated := f.mgr.instances[ebSlot]
@@ -1013,7 +1012,7 @@ func TestPipelineLifecycleAndEventDispatch(t *testing.T) {
 
 	testutil.WaitForCondition(t, func() bool {
 		return len(f.mgr.EligibleCertifiedEbs()) == 1
-	}, 2*time.Second, "eb becomes eligible after quorum event is dispatched")
+	}, testutil.AsyncWait, "eb becomes eligible after quorum event is dispatched")
 }
 
 func TestMarkEmbeddedPreservesOtherOccurrence(t *testing.T) {

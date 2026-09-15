@@ -17,6 +17,7 @@ package ledger
 import (
 	"encoding/hex"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"testing"
@@ -294,4 +295,96 @@ func TestGenesisUtxoStorageAndRetrieval(t *testing.T) {
 
 		readTxn.Rollback() //nolint:errcheck
 	}
+}
+
+// TestCreateGenesisBlockSkipsUtxoInsertionAfterMithrilBootstrap is the
+// regression test for blinklabs-io/dingo#4151: after a Mithril bootstrap,
+// createGenesisBlock unconditionally recreated every Byron/Shelley genesis
+// UTxO as a live row, without checking whether the imported ledger snapshot
+// already reflects that output as spent. Found via cmd/node-parity against
+// a real cardano-node: genesis-declared funds that the real chain spent long
+// ago reappeared as live in dingo's answer, byte-for-byte matching the raw
+// genesis declaration.
+//
+// Simulates the bootstrap shape the same way
+// TestCreateGenesisBlockBackfillsMissingNetworkState does: a currentTip past
+// slot 0 with no genesis CBOR yet stored, which is exactly the condition
+// createGenesisBlock's own comment attributes to "after Mithril bootstrap
+// which imports ledger state and ImmutableDB blocks but does not create the
+// synthetic genesis block." Proves createGenesisBlock no longer inserts a
+// live row for a real preview genesis UTxO on that path, while still
+// creating the synthetic genesis block CBOR structurally (other code, e.g.
+// this same function's own HasGenesisCbor short-circuit, depends on it
+// existing).
+func TestCreateGenesisBlockSkipsUtxoInsertionAfterMithrilBootstrap(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		"preview/config.json",
+		"preview",
+		cardano.EmbeddedConfigFS,
+	)
+	require.NoError(t, err)
+
+	byronGenesisUtxos, err := nodeCfg.ByronGenesis().GenesisUtxos()
+	require.NoError(t, err)
+	require.NotEmpty(
+		t, byronGenesisUtxos,
+		"preview config must declare at least one Byron genesis UTxO "+
+			"for this test to be meaningful",
+	)
+	sample := byronGenesisUtxos[0]
+	sampleTxId := sample.Id.Id().Bytes()
+	sampleOutputIdx := sample.Id.Index()
+
+	genesisHash, err := GenesisBlockHash(nodeCfg)
+	require.NoError(t, err)
+
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Database:          db,
+			CardanoNodeConfig: nodeCfg,
+			Logger: slog.New(
+				slog.NewTextHandler(io.Discard, nil),
+			),
+		},
+	}
+	// No genesis CBOR pre-seeded (unlike the normal from-genesis case),
+	// and currentTip already past slot 0: this is exactly the shape
+	// createGenesisBlock's own comment attributes to a fresh Mithril
+	// bootstrap, before it has ever run.
+	ls.currentTip.Point.Slot = 42
+	require.NoError(t, ls.createGenesisBlock())
+
+	require.True(
+		t, db.HasGenesisCbor(0, genesisHash[:]),
+		"the synthetic genesis block CBOR must still be created "+
+			"structurally, even though its UTxOs are not inserted as live",
+	)
+
+	exists, err := db.UtxoExists(sampleTxId, sampleOutputIdx, nil)
+	require.NoError(t, err)
+	require.False(
+		t, exists,
+		"a genesis UTxO must not be (re-)inserted as a live row after a "+
+			"Mithril bootstrap -- the imported ledger snapshot is the only "+
+			"authority on whether it is still live or was already spent "+
+			"before the bootstrap point",
+	)
+
+	// Re-running (as a real startup would on every restart) must remain
+	// idempotent and continue to skip insertion.
+	require.NoError(t, ls.createGenesisBlock())
+	exists, err = db.UtxoExists(sampleTxId, sampleOutputIdx, nil)
+	require.NoError(t, err)
+	require.False(t, exists)
 }

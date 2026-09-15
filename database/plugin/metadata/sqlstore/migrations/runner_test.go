@@ -27,8 +27,8 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/glebarez/go-sqlite"
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
 )
 
 var addColumnPattern = regexp.MustCompile(

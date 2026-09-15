@@ -30,7 +30,12 @@ func checkCommand() *cobra.Command {
 both nodes' tips, and if they agree, compares protocol parameters, stake
 distribution, and the whole UTxO set. Exits nonzero if the two diverged, or
 if the cycle had to be discarded because the nodes never held a stable
-common tip -- a caller must not read a discarded cycle as a clean match.`,
+common tip -- a caller must not read a discarded cycle as a clean match.
+
+Pass --at-slot and --at-hash together to compare at an explicit historical
+block instead of the live tip (blinklabs-io/dingo#382): neither node needs
+to be near its own live tip for this, and a point neither can reconstruct
+surfaces as a command error rather than a discarded cycle.`,
 		Args: cobra.NoArgs,
 		RunE: checkRun,
 	}
@@ -48,9 +53,17 @@ func checkRun(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	at, err := requireAtPoint()
+	if err != nil {
+		return err
+	}
 
 	result, err := nodeparity.Check(
-		cmd.Context(), globalFlags.dingoAddr, globalFlags.cardanoAddr, magic,
+		cmd.Context(),
+		globalFlags.dingoAddr,
+		globalFlags.cardanoAddr,
+		magic,
+		at,
 	)
 	if err != nil {
 		return err
