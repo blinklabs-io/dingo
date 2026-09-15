@@ -32,7 +32,26 @@ import (
 	"github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/protocol/localstatequery"
+	"golang.org/x/sync/errgroup"
 )
+
+// txInfoConcurrency bounds how many /tx_info batch requests
+// flushPendingTxInfos has in flight at once -- matches
+// koios_check.go's stakeCheckConcurrency: confirmed live against the same
+// Koios mirror that individual requests stall often enough (not just a
+// rare one-off) that sequential batches stack their stalls additively
+// (e.g. 3 stalled batches in one epoch costing 3x a single stall's
+// latency). Concurrency lets independent batches overlap instead.
+const txInfoConcurrency = 8
+
+// txInfoOpportunisticFlushThreshold is how many hashes accumulate before
+// flushPendingTxInfos is called mid-epoch (a forced flush still always
+// happens right before each epoch-boundary comparison regardless of this
+// threshold -- see that call site). Sized to give the concurrent flush
+// below a full set of batches to fan out, rather than flushing a single
+// koiosparity.KoiosTxInfoBatchSize-sized batch at a time with nothing to
+// parallelize.
+const txInfoOpportunisticFlushThreshold = txInfoConcurrency * koiosparity.KoiosTxInfoBatchSize
 
 // previewPreprodEpochLengthSlots is the epoch length, in slots, on both
 // preview and preprod (config/cardano/{preview,preprod}/shelley-genesis.json's
@@ -214,33 +233,65 @@ func RunFromGenesis(
 	)
 
 	// flushPendingTxInfos applies every buffered transaction hash's
-	// input/output changes to utxoRefs in one koios.GetTxInfos call (which
-	// itself still chunks at koiosparity.KoiosTxInfoBatchSize internally),
-	// instead of the one-call-per-block approach this replaced: confirmed
-	// live that firing a separate /tx_info round trip for every block with
-	// at least one transaction made a from-genesis run's epoch cadence
-	// collapse from seconds to tens of minutes per epoch as real chain
-	// activity picked up -- the per-call network latency to Koios, not
-	// payload size, was the actual bottleneck. Buffering up to
-	// KoiosTxInfoBatchSize hashes across multiple blocks before flushing
-	// cuts the number of round trips roughly in proportion to the average
-	// number of transactions per block.
+	// input/output changes to utxoRefs, instead of the one-call-per-block
+	// approach this originally replaced: confirmed live that firing a
+	// separate /tx_info round trip for every block with at least one
+	// transaction made a from-genesis run's epoch cadence collapse from
+	// seconds to tens of minutes per epoch as real chain activity picked
+	// up -- the per-call network latency to Koios, not payload size, was
+	// the actual bottleneck.
+	//
+	// Splits pendingTxHashes into koiosparity.KoiosTxInfoBatchSize-sized
+	// chunks and fetches them with bounded concurrency (txInfoConcurrency)
+	// rather than one at a time: confirmed live that individual requests to
+	// this Koios mirror stall often enough that sequential batches stack
+	// their stalls additively (multiple ~20s-60s stalls in a single busy
+	// epoch, one after another). Concurrent fetching lets independent
+	// batches' stalls overlap instead.
+	//
+	// Chunk results are applied to utxoRefs in their original chunk order
+	// (not completion order) once every fetch finishes: two batches can
+	// still be causally related (a UTxO created in an earlier block and
+	// spent in a later one, both pending at flush time), so applying them
+	// out of order could silently no-op a spend against a UTxO that
+	// (out of order) looks like it doesn't exist yet.
 	flushPendingTxInfos := func() {
 		if utxoRefs == nil || len(pendingTxHashes) == 0 {
 			return
 		}
-		start := time.Now()
-		txInfos, err := koios.GetTxInfos(ctx, pendingTxHashes)
+		chunks := make([][]string, 0, (len(pendingTxHashes)+koiosparity.KoiosTxInfoBatchSize-1)/koiosparity.KoiosTxInfoBatchSize)
+		for start := 0; start < len(pendingTxHashes); start += koiosparity.KoiosTxInfoBatchSize {
+			end := min(start+koiosparity.KoiosTxInfoBatchSize, len(pendingTxHashes))
+			chunks = append(chunks, pendingTxHashes[start:end])
+		}
+		results := make([][]koiosparity.KoiosTxInfoItem, len(chunks))
+		errs := make([]error, len(chunks))
+
+		flushStart := time.Now()
+		g, gctx := errgroup.WithContext(ctx)
+		g.SetLimit(txInfoConcurrency)
+		for i, chunk := range chunks {
+			g.Go(func() error {
+				txInfos, err := koios.GetTxInfos(gctx, chunk)
+				results[i] = txInfos
+				errs[i] = err
+				return nil
+			})
+		}
+		_ = g.Wait() // errors are per-chunk in errs; nothing here to fail on
 		txInfoFlushCount++
-		txInfoFlushElapsed += time.Since(start)
-		if err != nil {
-			logf(
-				"nodeparity: koios tx_info fetch failed for %d pending tx(es), "+
-					"UTxO reconstruction may now drift: %v",
-				len(pendingTxHashes), err,
-			)
-		} else {
-			UTxOChanges(utxoRefs, txInfos)
+		txInfoFlushElapsed += time.Since(flushStart)
+
+		for i, chunk := range chunks {
+			if err := errs[i]; err != nil {
+				logf(
+					"nodeparity: koios tx_info fetch failed for %d pending tx(es), "+
+						"UTxO reconstruction may now drift: %v",
+					len(chunk), err,
+				)
+				continue
+			}
+			UTxOChanges(utxoRefs, results[i])
 		}
 		pendingTxHashes = pendingTxHashes[:0]
 	}
@@ -292,7 +343,7 @@ func RunFromGenesis(
 								pendingTxHashes, tx.Hash().String(),
 							)
 						}
-						if len(pendingTxHashes) >= koiosparity.KoiosTxInfoBatchSize {
+						if len(pendingTxHashes) >= txInfoOpportunisticFlushThreshold {
 							flushPendingTxInfos()
 						}
 					}
