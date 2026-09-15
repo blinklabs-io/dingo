@@ -1666,9 +1666,20 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		// saving the slot once the slot's block is on the chain. Both
 		// counters used to be incremented at build time, which reported
 		// a slot as saved even when self-validation dropped the block or
-		// AddBlock rejected it. Every aborted selection still lands in
-		// exactly one bucket: the block that did not make it counts as
-		// lost, which is what the slot produced.
+		// AddBlock rejected it. An aborted selection that REACHED a build
+		// still lands in exactly one bucket: the block that did not make
+		// it counts as lost, which is what the slot produced.
+		//
+		// An abort that tipGatesRefuseSlot then refuses is not one of
+		// those. It never reached a build, so buildBlockForSlot returns
+		// with fallbackResult empty and this vector is not touched at
+		// all: the slot is accounted for on the counter of the gate that
+		// refused it. requireNoFallbackCounted asserts exactly that in
+		// TestForgeRefusesABuildAfterARollbackPutsTheTipBehindTheNetwork
+		// and its siblings. Reporting a fallback result there would
+		// credit or blame a path that never ran, and a refusal is not a
+		// forge this node lost; see ARCHITECTURE.md on reading the two
+		// together.
 		if buildStats.fallbackResult != "" {
 			result := buildStats.fallbackResult
 			if !forgeAdopted {
