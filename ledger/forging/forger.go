@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -3451,8 +3452,8 @@ func selectValidLeiosTransactions(
 			validate TxValidationFunc,
 			stillCurrent func() bool,
 		) error {
-			consumed := make(map[string]struct{})
-			created := make(map[string]lcommon.Utxo)
+			consumed := make(map[utxoref.Key]struct{})
+			created := make(map[utxoref.Key]lcommon.Utxo)
 			for _, mempoolTx := range txs {
 				// The EB wire reference is the transaction's only representation
 				// in this slot. Do not expose outputs from a transaction that the
@@ -3466,18 +3467,10 @@ func selectValidLeiosTransactions(
 				}
 				selected = append(selected, mempoolTx)
 				for _, input := range tx.Consumed() {
-					key := fmt.Sprintf(
-						"%s:%d",
-						input.Id().String(),
-						input.Index(),
-					)
-					consumed[key] = struct{}{}
+					consumed[utxoref.ForInput(input)] = struct{}{}
 				}
 				for _, utxo := range tx.Produced() {
-					key := fmt.Sprintf(
-						"%s:%d", utxo.Id.Id().String(), utxo.Id.Index(),
-					)
-					created[key] = utxo
+					created[utxoref.ForUtxo(utxo)] = utxo
 				}
 			}
 			if !stillCurrent() {

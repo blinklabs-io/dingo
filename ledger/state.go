@@ -46,6 +46,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
+	"github.com/blinklabs-io/dingo/utxoref"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/consensus"
@@ -1016,6 +1017,13 @@ type LedgerState struct {
 	// deliveries for other ranges and header-queue churn; discarded when
 	// the tracked range itself is delivered.
 	blockfetchRangeFailure blockfetchRangeFailureState
+	// nonExtendingBlockRejections counts, per connection (keyed by
+	// connIdKey), recent "block does not fit chain tip" rejections inside
+	// nonExtendingBlockRejectionWindow. Guarded by chainsyncBlockfetchMutex,
+	// like the rest of the blockfetch drain state above. See
+	// noteNonExtendingBlockRejection and noteBlockAcceptedFromConn
+	// (issue #4272).
+	nonExtendingBlockRejections map[string]nonExtendingBlockRejectionState
 	// deferredHeaderValidation holds block points whose stateful header checks
 	// wait for ledger apply. It is guarded by its own deferredHeaderValidationMu
 	// (NOT the main RWMutex) so the snapshot retention guard
@@ -7519,7 +7527,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	)
 	// Track outputs from earlier transactions in this block for intra-block
 	// dependencies only when TX validation is enabled.
-	intraBlockUtxos := make(map[string]lcommon.Utxo)
+	intraBlockUtxos := make(map[utxoref.Key]lcommon.Utxo)
 	for i, tx := range block.Transactions() {
 		if delta == nil {
 			delta = NewLedgerDelta(
@@ -7765,12 +7773,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 			// correctly - for failed TXs, Produced() returns collateral return at the
 			// correct index (len(Outputs())), while Outputs() returns regular outputs
 			for _, utxo := range tx.Produced() {
-				key := fmt.Sprintf(
-					"%s:%d",
-					utxo.Id.Id().String(),
-					utxo.Id.Index(),
-				)
-				intraBlockUtxos[key] = utxo
+				intraBlockUtxos[utxoref.ForUtxo(utxo)] = utxo
 			}
 		}
 	}
@@ -11405,8 +11408,8 @@ func (ls *LedgerState) WithTxValidationSession(
 	fn func(
 		validate func(
 			tx ledger.Transaction,
-			consumedUtxos map[string]struct{},
-			createdUtxos map[string]lcommon.Utxo,
+			consumedUtxos map[utxoref.Key]struct{},
+			createdUtxos map[utxoref.Key]lcommon.Utxo,
 		) error,
 		stillCurrent func() bool,
 	) error,
@@ -11417,8 +11420,8 @@ func (ls *LedgerState) WithTxValidationSession(
 	return txn.Do(func(txn *database.Txn) error {
 		validate := func(
 			tx ledger.Transaction,
-			consumedUtxos map[string]struct{},
-			createdUtxos map[string]lcommon.Utxo,
+			consumedUtxos map[utxoref.Key]struct{},
+			createdUtxos map[utxoref.Key]lcommon.Utxo,
 		) error {
 			validationEra, err := resolveValidationEra(
 				tx,
@@ -11544,8 +11547,8 @@ func (ls *LedgerState) ValidateTx(
 // (dependent TX chaining). Both may be nil for no overlay.
 func (ls *LedgerState) ValidateTxWithOverlay(
 	tx lcommon.Transaction,
-	consumedUtxos map[string]struct{},
-	createdUtxos map[string]lcommon.Utxo,
+	consumedUtxos map[utxoref.Key]struct{},
+	createdUtxos map[utxoref.Key]lcommon.Utxo,
 ) error {
 	return ls.validateTxCore(tx, func(txn *database.Txn) *LedgerView {
 		return &LedgerView{
@@ -11841,8 +11844,8 @@ func (ls *LedgerState) forgeBlock() {
 			"tx_count", len(mempoolTxs),
 		)
 
-		consumedInputs := make(map[string]struct{})
-		createdOutputs := make(map[string]lcommon.Utxo)
+		consumedInputs := make(map[utxoref.Key]struct{})
+		createdOutputs := make(map[utxoref.Key]lcommon.Utxo)
 
 		// Iterate through transactions and add them until we hit limits
 		for _, mempoolTx := range mempoolTxs {
@@ -11983,20 +11986,10 @@ func (ls *LedgerState) forgeBlock() {
 			}
 			blockSize += txSize
 			for _, input := range fullTx.Consumed() {
-				key := fmt.Sprintf(
-					"%s:%d",
-					input.Id().String(),
-					input.Index(),
-				)
-				consumedInputs[key] = struct{}{}
+				consumedInputs[utxoref.ForInput(input)] = struct{}{}
 			}
 			for _, output := range fullTx.Produced() {
-				key := fmt.Sprintf(
-					"%s:%d",
-					output.Id.Id().String(),
-					output.Id.Index(),
-				)
-				createdOutputs[key] = output
+				createdOutputs[utxoref.ForUtxo(output)] = output
 			}
 			// Safe to assign: overflow was already checked
 			// via SafeAddExUnits when computing

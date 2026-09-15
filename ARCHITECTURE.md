@@ -3802,6 +3802,32 @@ variant of this recovery (gated on a `blockfetchMinBatchGapSlots` tip gap,
 which never applied at tip) still runs for its own case before the bound is
 reached.
 
+A peer that keeps serving blocks which do not extend the current chain tip
+(`Chain.AddBlockWithPointDeferred` returning `BlockNotFitChainTipError`) is
+tracked the same way: `flushPendingBlockfetchBlocksDeferred` logs and ignores
+each one ("ignoring blockfetch block ... does not fit on current chain tip"),
+so unlike a hard processing error this never reaches
+`handleEventBlockfetch`'s own recycle-on-error check, and the peer previously
+stayed selected as best peer indefinitely (issue #4272). A per-connection
+count (`LedgerState.nonExtendingBlockRejections`, keyed by `connIdKey`) bounds
+this the same way `blockfetchRangeFailure` bounds an unfetchable range, but
+windowed rather than kept as an unbounded consecutive streak: a rejection more
+than `nonExtendingBlockRejectionWindow` (30s) after the count's window started
+restarts it at 1 instead of accumulating, so rejections spread thinly over a
+long connection lifetime never combine into a false positive. Reaching
+`nonExtendingBlockRejectionThreshold` (20) inside the window publishes
+`ledger.ConnectionRecycleRequestedEventType` with reason
+`"non_extending_block_flood"` — the same recycle mechanism header/crypto
+verification failures use — so peer governance's normal connection-closed
+handling (short-lived-connection backoff, cold-state demotion, reconnect) takes
+over from there; nothing here bans or scores the peer directly. The count for
+a connection is cleared entirely (`noteBlockAcceptedFromConn`) the moment that
+same connection delivers a block that DOES extend the chain, so a peer racing
+a brief, legitimate rollback/reorg — which can genuinely serve a handful of
+now-stale blocks before converging — is never punished for it, while hundreds
+of rejections per second from a peer that never converges crosses the bound
+almost immediately.
+
 Bootstrap topology peers remain chain-selection eligible after bootstrap exit
 as a fallback ingress source, but peer governance lowers their priority to zero.
 This lets non-bootstrap peers win same-tip transport selection without
@@ -5648,9 +5674,20 @@ counter is recorded for every applied block -- naming the bound, rather than
 letting the block fail inside `UpdatePoolOpCertSequence` once its
 transactions are already applied. The forge loop's pre-flight and the block
 builder refuse the same counter, so the node never forges a block it could
-not then apply. The bound is unreachable from Babbage onward, where Praos
-rejects a counter more than one past the last seen; only the TPraos eras,
-which enforce monotonicity alone, admit an arbitrary first counter.
+not then apply. `ledgerstate.importOpCertCounters` refuses it too: the
+certified HeaderState counter map is decoded at the reference's full
+`uint64` width (`decodeOpCertCounters`), so a Mithril restore is the one
+write path into `pool_opcert_sequence` whose counters were never checked
+against a chain rule first. `Store.UpdatePoolOpCertSequence` holds the only
+insert into that table, and block application and the Mithril import are its
+only non-test callers, so those two plus the forging pre-flight and the block
+builder are every place the bound has to be named; the rollback recompute
+derives `pool`.`latest_op_cert_sequence` from rows already inside it, and
+`ImportPool` and the pool registration and retirement certificates write that
+column as zero. The bound is unreachable through block application from
+Babbage onward, where Praos rejects a counter more than one past the last
+seen; only the TPraos eras, which enforce monotonicity alone, admit an
+arbitrary first counter.
 
 `LedgerState.LatestOpCertSequence` -- the `LedgerView` method both this
 gate and startup's `PoolCredentials.ValidateAgainstLedger` read through --
@@ -9067,21 +9104,17 @@ is.
 Neither mode re-reads either tip after the point is acquired, and there
 is no "sandwich" (before/after tip comparison) discarding a cycle if the
 tip moved during the walk -- an earlier design had one; the current code
-does not. In live-tip mode this means the whole-UTxO walk (see
-`QuerySnapshot`), which can take on the order of a couple of minutes
-against Dingo's disk-backed store, runs against whatever `GetUTxOWhole`
-actually returns once acquired: `GetUTxOWhole` takes no point argument
-and always answers at Dingo's live tip regardless of what was acquired
-(see below), so a live tip advancing during a long walk can only make
-Dingo's own UTxO answer drift ahead of the point cardano-node was
-pinned to, not be caught and discarded -- a comparison run this way
-should be read as approximate for the UTxO field specifically. The
-stake-distribution and protocol-parameter halves of the same session
-*are* answered at the acquired point on both sides, so those two fields
-stay exactly consistent with each other regardless of how long the walk
-takes. `Check` uses one already-dialed connection per node for the
-whole cycle, so the ChainSync and LocalStateQuery reads share a single
-session per node.
+does not. This used to matter for the whole-UTxO walk specifically:
+`GetUTxOWhole` took no point argument and always answered at Dingo's live
+tip regardless of what was acquired, so a live tip advancing during the
+walk's several-minute duration made Dingo's own UTxO answer drift ahead of
+the point cardano-node was genuinely pinned to -- not caught or discarded,
+just silently wrong. `GetUTxOWhole` now honors the acquired point the same
+way stake distribution and protocol params already did (see below), so
+all three fields stay consistent with each other and with the point they
+were pinned to, regardless of how long the walk takes. `Check` uses one
+already-dialed connection per node for the whole cycle, so the ChainSync
+and LocalStateQuery reads share a single session per node.
 
 Point pinning against a real cardano-node's `Acquire(point)` genuinely
 pins its whole reply for the rest of the session, no matter how long the
@@ -9137,18 +9170,27 @@ rejected with `ErrHistoricalStateUnavailable`
 (`ledger.checkUtxoRetentionWindow`) rather than risk answering "absent" for
 a ref whose spend record is already gone -- except in API storage mode,
 which never prunes spent rows and so has no such floor. `GetUTxOWhole`
-(`queryShelleyUtxoWhole`) honors the point only when it names the live tip
-exactly, for the reason above: unlike a per-ref lookup, answering the
-whole live set as of an arbitrary historical slot has no indexed shortcut
-in this schema -- it would need a full-table scan applying the same
-per-row predicate to every UTxO ever created, which is both far slower
-than the live path (already the subject of most of this file's
-`queryShelleyUtxoWhole` coverage) and still exposed to the identical
-retention gap for a slot at or past the same cleanup floor. Any other
-pinned point is rejected with `ErrHistoricalStateUnavailable` instead of
-silently answered from live state, the same as it was before; a paginated,
-retention-aware historical form remains a possible future extension,
-tracked separately as blinklabs-io/dingo#4082. Every other query type
+(`queryShelleyUtxoWhole`) now honors the point too (blinklabs-io/dingo#382),
+via the same `AddedSlot`/`DeletedSlot` predicate as `GetUTxOByTxIn`
+(`database.IterateUtxoRefsAsOf`) applied to the whole table instead of a
+bounded ref list, and the same `checkUtxoRetentionWindow` floor -- a pin
+older than it is rejected with `ErrHistoricalStateUnavailable`, same as
+`GetUTxOByTxIn`. Unlike a per-ref lookup, this has no indexed shortcut:
+for a pin near the live tip (the common case -- every periodic node-parity
+checkpoint), `added_slot <= pinnedSlot` matches nearly every row ever
+created, live or already spent, so answering a pinned call costs a
+full-table scan rather than the live path's indexed `deleted_slot = 0`
+filter -- slower, but a wrong answer was worse than a slow one for a tool
+whose whole purpose is catching real ledger divergence. Before this fix,
+this handler ignored the pinned point entirely and always answered from
+live state, which made it the one comparison field cmd/node-parity's
+periodic full checks reported as "diverged" on essentially every run that
+took long enough for the live tip to move during the walk -- confirmed
+live against a real Preview cardano-node: every flagged row's own
+`AddedSlot` was strictly after the pinned slot. A streaming (rather than
+fully-materialized) reply remains a possible future extension for the
+live path's own memory profile, tracked separately as
+blinklabs-io/dingo#4082 -- unrelated to this fix. Every other query type
 still ignores the acquired point and answers from live state --
 `ShelleyUtxoByAddressQuery` shares the same utxo table and columns as
 `GetUTxOByTxIn` and could extend the same way, but no current caller needs

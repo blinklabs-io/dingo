@@ -96,6 +96,19 @@ type stateMetrics struct {
 	// of being rejected and denied. A rising value with a flat local tip
 	// means our upstreams are lagging us, not that anything diverged.
 	chainsyncBehindPeers prometheus.Counter
+	// Incremented every time a fetched block fails to extend the chain tip
+	// (chain.BlockNotFitChainTipError). A handful from one connection during
+	// a brief rollback/reorg race is normal; a sustained high rate from one
+	// connection is the signal noteNonExtendingBlockRejection uses to
+	// recycle it (see nonExtendingBlockFloodRecycles) -- this counter makes
+	// that pattern visible before it crosses the recycle threshold, and
+	// across all connections even when none individually crosses it. See
+	// issue #4272.
+	nonExtendingBlockRejections prometheus.Counter
+	// Incremented each time noteNonExtendingBlockRejection actually recycles
+	// a connection for flooding non-extending blocks (as opposed to every
+	// individual rejection, counted above). See issue #4272.
+	nonExtendingBlockFloodRecycles prometheus.Counter
 	// Incremented when at-tip validation recovery detects a non-converging,
 	// descending series of distinct failures and holds at the ledger tip
 	// instead of rewinding the primary chain ever deeper. A rising value
@@ -638,6 +651,18 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		prometheus.CounterOpts{
 			Name: "dingo_chainsync_behind_peers_total",
 			Help: "times a chainsync peer asked for a rollback past the security parameter while its own tip was a strict ancestor of ours (peer behind on our chain, kept attached rather than denied)",
+		},
+	)
+	m.nonExtendingBlockRejections = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_chainsync_non_extending_blocks_total",
+			Help: "fetched blocks that failed to extend the chain tip (chain.BlockNotFitChainTipError). A handful is normal during a brief rollback/reorg race; a sustained high rate from one connection triggers recycling it, see dingo_chainsync_non_extending_block_flood_recycles_total",
+		},
+	)
+	m.nonExtendingBlockFloodRecycles = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_chainsync_non_extending_block_flood_recycles_total",
+			Help: "connections recycled for repeatedly serving blocks that do not extend the chain tip within a bounded window (issue #4272)",
 		},
 	)
 	m.atTipRecoveryNonConverging = promautoFactory.NewCounter(

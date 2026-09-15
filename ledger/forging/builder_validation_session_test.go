@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -70,8 +71,8 @@ func (v *sessionMockTxValidator) ValidateTx(tx ledger.Transaction) error {
 // asserts that does not happen.
 func (v *sessionMockTxValidator) ValidateTxWithOverlay(
 	_ ledger.Transaction,
-	_ map[string]struct{},
-	_ map[string]lcommon.Utxo,
+	_ map[utxoref.Key]struct{},
+	_ map[utxoref.Key]lcommon.Utxo,
 ) error {
 	return nil
 }
@@ -80,8 +81,8 @@ func (v *sessionMockTxValidator) WithTxValidationSession(
 	fn func(
 		validate func(
 			tx ledger.Transaction,
-			consumed map[string]struct{},
-			created map[string]lcommon.Utxo,
+			consumed map[utxoref.Key]struct{},
+			created map[utxoref.Key]lcommon.Utxo,
 		) error,
 		stillCurrent func() bool,
 	) error,
@@ -90,8 +91,8 @@ func (v *sessionMockTxValidator) WithTxValidationSession(
 	stale := v.alwaysStale
 	validate := func(
 		tx ledger.Transaction,
-		_ map[string]struct{},
-		_ map[string]lcommon.Utxo,
+		_ map[utxoref.Key]struct{},
+		_ map[utxoref.Key]lcommon.Utxo,
 	) error {
 		v.validateCalls++
 		if v.onValidate != nil {
