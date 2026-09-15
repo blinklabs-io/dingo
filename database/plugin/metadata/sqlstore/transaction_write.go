@@ -26,19 +26,78 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
-type immediateBatchAccumulator struct{}
+// transactionBatchAccumulator owns statements that are safe to reuse for one
+// metadata transaction.  API backfill keeps one SQL transaction open across a
+// block window; preparing the transaction upsert for every row defeats much
+// of that batching.  The statement is deliberately scoped to the accumulator
+// (and therefore to one caller transaction), because database/sql statements
+// prepared on a transaction must not escape it.
+type transactionBatchAccumulator struct {
+	transactionInsert *sql.Stmt
+	mysql             bool
+}
 
-func (*immediateBatchAccumulator) Reset() {}
+const transactionInsertSQL = `
+INSERT INTO "transaction" (
+    hash, block_hash, metadata, slot, type, fee, collateral_fee, ttl,
+    block_index, valid
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (hash) DO UPDATE SET
+    block_hash = excluded.block_hash,
+    block_index = excluded.block_index,
+    slot = excluded.slot,
+    collateral_fee = excluded.collateral_fee
+RETURNING id`
+
+func (a *transactionBatchAccumulator) insertTransaction(
+	ctx context.Context,
+	db queryer,
+	args ...any,
+) (uint, error) {
+	if a.transactionInsert == nil {
+		if dialect, ok := db.(dialectQueryer); ok {
+			a.mysql = dialect.dialect == "mysql"
+		}
+		stmt, err := db.PrepareContext(ctx, transactionInsertSQL)
+		if err != nil {
+			return 0, err
+		}
+		a.transactionInsert = stmt
+	}
+	if a.mysql {
+		result, err := a.transactionInsert.ExecContext(ctx, args...)
+		if err != nil {
+			return 0, err
+		}
+		id, err := result.LastInsertId()
+		if err != nil {
+			return 0, err
+		}
+		return uint(id), nil
+	}
+	var id int64
+	if err := a.transactionInsert.QueryRowContext(ctx, args...).Scan(&id); err != nil {
+		return 0, err
+	}
+	return uint(id), nil
+}
+
+func (a *transactionBatchAccumulator) Reset() {
+	if a.transactionInsert != nil {
+		_ = a.transactionInsert.Close()
+		a.transactionInsert = nil
+	}
+}
 
 func (s *Store) NewBatchAccumulator() types.MetadataBatchAccumulator {
-	return &immediateBatchAccumulator{}
+	return &transactionBatchAccumulator{}
 }
 
 func (s *Store) FlushBatch(
 	accumulator types.MetadataBatchAccumulator,
 	_ types.Txn,
 ) error {
-	if _, ok := accumulator.(*immediateBatchAccumulator); !ok {
+	if _, ok := accumulator.(*transactionBatchAccumulator); !ok {
 		return fmt.Errorf(
 			"sqlstore FlushBatch: wrong accumulator type %T",
 			accumulator,
@@ -57,18 +116,21 @@ func (s *Store) SetTransactionBatched(
 	accumulator types.MetadataBatchAccumulator,
 	txn types.Txn,
 ) error {
-	if _, ok := accumulator.(*immediateBatchAccumulator); !ok {
+	if _, ok := accumulator.(*transactionBatchAccumulator); !ok {
 		return fmt.Errorf(
 			"SetTransactionBatched: wrong accumulator type %T",
 			accumulator,
 		)
 	}
-	return s.SetTransaction(
+	return s.setTransactionBatched(
 		transaction,
 		point,
 		index,
 		certDeposits,
 		skipWithdrawalWitness,
+		false,
+		false,
+		accumulator,
 		txn,
 	)
 }
@@ -87,15 +149,16 @@ func (s *Store) SetTransactionBatchedHistorical(
 	accumulator types.MetadataBatchAccumulator,
 	txn types.Txn,
 ) error {
-	if _, ok := accumulator.(*immediateBatchAccumulator); !ok {
+	if _, ok := accumulator.(*transactionBatchAccumulator); !ok {
 		return fmt.Errorf(
 			"SetTransactionBatchedHistorical: wrong accumulator type %T",
 			accumulator,
 		)
 	}
-	return s.setTransaction(
+	return s.setTransactionBatched(
 		transaction, point, index, certDeposits,
-		skipWithdrawalWitness, historicalBackfill, false, txn,
+		skipWithdrawalWitness, historicalBackfill, false,
+		accumulator, txn,
 	)
 }
 
@@ -110,6 +173,24 @@ func (s *Store) SetTransaction(
 	return s.setTransaction(
 		transaction, point, index, certDeposits,
 		skipWithdrawalWitness, false, false, txn,
+	)
+}
+
+func (s *Store) setTransactionBatched(
+	transaction lcommon.Transaction,
+	point ocommon.Point,
+	index uint32,
+	certDeposits map[int]uint64,
+	skipWithdrawalWitness bool,
+	historicalBackfill bool,
+	tolerateConsumedInputConflict bool,
+	accumulator types.MetadataBatchAccumulator,
+	txn types.Txn,
+) error {
+	return s.setTransactionWithAccumulator(
+		transaction, point, index, certDeposits,
+		skipWithdrawalWitness, historicalBackfill,
+		tolerateConsumedInputConflict, accumulator, txn,
 	)
 }
 
@@ -157,6 +238,24 @@ func (s *Store) setTransaction(
 	tolerateConsumedInputConflict bool,
 	txn types.Txn,
 ) error {
+	return s.setTransactionWithAccumulator(
+		transaction, point, index, certDeposits,
+		skipWithdrawalWitness, historicalBackfill,
+		tolerateConsumedInputConflict, nil, txn,
+	)
+}
+
+func (s *Store) setTransactionWithAccumulator(
+	transaction lcommon.Transaction,
+	point ocommon.Point,
+	index uint32,
+	certDeposits map[int]uint64,
+	skipWithdrawalWitness bool,
+	historicalBackfill bool,
+	tolerateConsumedInputConflict bool,
+	accumulator types.MetadataBatchAccumulator,
+	txn types.Txn,
+) error {
 	if transaction == nil {
 		return errors.New("set transaction: nil transaction")
 	}
@@ -186,28 +285,36 @@ func (s *Store) setTransaction(
 			if err != nil {
 				return err
 			}
-			transactionID, err := queryReturnedID(ctx, db, `
-INSERT INTO "transaction" (
-    hash, block_hash, metadata, slot, type, fee, collateral_fee, ttl,
-    block_index, valid
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (hash) DO UPDATE SET
-    block_hash = excluded.block_hash,
-    block_index = excluded.block_index,
-    slot = excluded.slot,
-    collateral_fee = excluded.collateral_fee
-RETURNING id`,
-				hash,
-				point.Hash,
-				metadataValue,
-				point.Slot,
-				transaction.Type(),
-				decimalUint64(types.Uint64(transaction.Fee().Uint64())),
-				decimalUint64(types.Uint64(collateralFee)),
-				decimalUint64(types.Uint64(transaction.TTL())),
-				index,
-				transaction.IsValid(),
-			)
+			var transactionID int64
+			if batched, ok := accumulator.(*transactionBatchAccumulator); ok {
+				var id uint
+				id, err = batched.insertTransaction(ctx, db,
+					hash,
+					point.Hash,
+					metadataValue,
+					point.Slot,
+					transaction.Type(),
+					decimalUint64(types.Uint64(transaction.Fee().Uint64())),
+					decimalUint64(types.Uint64(collateralFee)),
+					decimalUint64(types.Uint64(transaction.TTL())),
+					index,
+					transaction.IsValid(),
+				)
+				transactionID = int64(id)
+			} else {
+				transactionID, err = queryReturnedID(ctx, db, transactionInsertSQL,
+					hash,
+					point.Hash,
+					metadataValue,
+					point.Slot,
+					transaction.Type(),
+					decimalUint64(types.Uint64(transaction.Fee().Uint64())),
+					decimalUint64(types.Uint64(collateralFee)),
+					decimalUint64(types.Uint64(transaction.TTL())),
+					index,
+					transaction.IsValid(),
+				)
+			}
 			if err != nil {
 				return fmt.Errorf("create transaction %x: %w", hash, err)
 			}

@@ -173,8 +173,12 @@ func (s *Store) closePreparedStatements() {
 // cached's already-compiled statement instead of recompiling one from
 // scratch wherever database/sql allows it.
 //
-//   - *sql.Tx: (*sql.Tx).StmtContext hands back a transaction-scoped
-//     *sql.Stmt. Per database/sql's own documentation, this reuses cached's
+//   - *sql.Tx: txScopedStmt hands back a transaction-scoped *sql.Stmt,
+//     deriving it with (*sql.Tx).StmtContext on first use and reusing the
+//     same derived *sql.Stmt for every later call against the same (tx,
+//     cached) pair -- see txScopedStmt for why a fresh StmtContext call per
+//     row is itself a retention bug, not just a missed optimization. Per
+//     database/sql's own documentation, StmtContext reuses cached's
 //     underlying driver statement when tx is running on the same connection
 //     cached was prepared against, and transparently re-prepares on tx's
 //     connection otherwise -- either way the result is correct, but only the
@@ -195,19 +199,106 @@ func (s *Store) closePreparedStatements() {
 //   - anything else (a bare *sql.DB, or any future queryer implementation):
 //     cached was prepared directly against s.writeDB, so it is already the
 //     right handle to call with no further translation needed.
-func stmtForQueryer(
+func (s *Store) stmtForQueryer(
 	ctx context.Context,
 	db queryer,
 	cached *sql.Stmt,
 ) *sql.Stmt {
 	switch v := db.(type) {
 	case *sql.Tx:
-		return v.StmtContext(ctx, cached)
+		return s.txScopedStmt(ctx, v, cached)
 	case dialectQueryer:
-		return stmtForQueryer(ctx, v.queryer, cached)
+		return s.stmtForQueryer(ctx, v.queryer, cached)
 	default:
 		return cached
 	}
+}
+
+// txScopedStmt returns the *sql.Stmt tx should use for cached, deriving it
+// with (*sql.Tx).StmtContext only on the first call for this (tx, cached)
+// pair within the transaction's lifetime and returning the same derived
+// *sql.Stmt on every later call.
+//
+// Without this, a caller that consults the same cached statement many times
+// inside one transaction -- refreshRewardLiveStakeRefs loops
+// refreshRewardLiveStakeAggregate over every stake ref inside one
+// withWriteTransaction, and DeleteUtxos/importUtxos/the genesis paths pass
+// whole ref slices the same way -- derives a brand new Tx-scoped *sql.Stmt
+// on every row. database/sql appends every such *sql.Stmt to the *sql.Tx's
+// own internal list and only releases it at commit or rollback (see
+// database/sql's Tx.stmts), so retention was linear in rows times cached
+// statements consulted per row: measured in-tree, 2000 refs in one write
+// transaction retained 4000 Tx-scoped statements with the reward-live-stake
+// cache entries active, and 0 with hotStatements emptied. Deriving once per
+// transaction keeps the parse-cost saving prepareHotStatements exists for
+// without that retention, because it is the same object being reused --
+// exactly the cached, Store-lifetime statement's own reuse story, one layer
+// down.
+//
+// The cache lives in s.txStmts, keyed by tx itself, rather than on a
+// wrapper type threaded through the queryer chain (dialectQueryer, the
+// only other layer in that chain) deliberately: dbFromTxn and
+// withWriteTransaction hand every caller the *sql.Tx itself (unwrapped, or
+// wrapped only in dialectQueryer), and at least one caller --
+// requireAccountBaselineTransaction -- type-asserts through dialectQueryer
+// looking for exactly a *sql.Tx to confirm it is running inside a write
+// transaction. Substituting a different concrete type there would silently
+// break that check. Keying by the *sql.Tx pointer instead leaves every
+// existing type assertion on db's dynamic type untouched.
+//
+// store.go's sqlTxn.releaseConnection, called from both Commit and
+// Rollback, evicts tx's entry from s.txStmts (via evictTxStmts) once tx
+// itself is finished, so this cache never outlives the transaction it was
+// built for and never grows across transactions: a later transaction gets a
+// new *sql.Tx from the driver and therefore a fresh, empty entry here.
+func (s *Store) txScopedStmt(
+	ctx context.Context,
+	tx *sql.Tx,
+	cached *sql.Stmt,
+) *sql.Stmt {
+	s.txStmtMu.Lock()
+	if derived, ok := s.txStmts[tx][cached]; ok {
+		s.txStmtMu.Unlock()
+		return derived
+	}
+	s.txStmtMu.Unlock()
+
+	// StmtContext itself can block on I/O (re-preparing on tx's connection
+	// when it differs from cached's), so it runs outside the lock. A
+	// concurrent caller deriving the same (tx, cached) pair at the same time
+	// would each derive their own *sql.Stmt here; the second store below
+	// discards the loser rather than leaking it, so the map never disagrees
+	// with which one is "the" cached derivative even under that race.
+	derived := tx.StmtContext(ctx, cached)
+
+	s.txStmtMu.Lock()
+	defer s.txStmtMu.Unlock()
+	if existing, ok := s.txStmts[tx][cached]; ok {
+		return existing
+	}
+	if s.txStmts == nil {
+		s.txStmts = make(map[*sql.Tx]map[*sql.Stmt]*sql.Stmt)
+	}
+	if s.txStmts[tx] == nil {
+		s.txStmts[tx] = make(map[*sql.Stmt]*sql.Stmt)
+	}
+	s.txStmts[tx][cached] = derived
+	return derived
+}
+
+// evictTxStmts discards tx's entry in the per-transaction Tx-scoped
+// statement cache, if any. Safe to call with a nil tx (a *sqlTxn that never
+// obtained a real *sql.Tx, see store.go's transaction/beginWriteTx error
+// paths) and safe to call more than once: both are plain map operations
+// that no-op when there is nothing to remove. It does not close any
+// statement itself -- database/sql already closes every *sql.Stmt it
+// derived from tx once tx commits or rolls back, which by construction has
+// already happened by the time a caller (sqlTxn.releaseConnection) invokes
+// this.
+func (s *Store) evictTxStmts(tx *sql.Tx) {
+	s.txStmtMu.Lock()
+	delete(s.txStmts, tx)
+	s.txStmtMu.Unlock()
 }
 
 // queryRowCached and execCached are the shared cache-or-fallback dance
@@ -234,7 +325,7 @@ func (s *Store) queryRowCached(
 		// close, and closing eagerly would be wrong besides: the *sql.Row
 		// returned below defers running Scan against it until the caller
 		// invokes Scan.
-		return stmtForQueryer(ctx, db, cached).QueryRowContext(ctx, args...) //nolint:sqlclosecheck
+		return s.stmtForQueryer(ctx, db, cached).QueryRowContext(ctx, args...) //nolint:sqlclosecheck
 	}
 	return db.QueryRowContext(ctx, query, args...)
 }
@@ -251,7 +342,7 @@ func (s *Store) execCached(
 		// a Tx-scoped derivative that database/sql closes on its own when
 		// the transaction ends, so there is nothing for this function to
 		// close.
-		return stmtForQueryer(ctx, db, cached).ExecContext(ctx, args...) //nolint:sqlclosecheck
+		return s.stmtForQueryer(ctx, db, cached).ExecContext(ctx, args...) //nolint:sqlclosecheck
 	}
 	return db.ExecContext(ctx, query, args...)
 }
