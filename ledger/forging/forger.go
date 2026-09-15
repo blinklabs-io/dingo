@@ -2336,6 +2336,9 @@ func isTipGateRefusal(err error) bool {
 // the forged slot AND a diverged or behind primary chain tip therefore counts
 // on dingo_forge_stale_tip_skip_total at entry, so it must count there here
 // too -- which is why the staleReason case sits above appliedTipAtSlot below.
+// Every adjacent pair whose order decides a counter is pinned by
+// TestForgeCountsAStaleTipAheadOfASlotBattleOnTheRetry, one subtest per pair;
+// reordering any of them reds that subtest and nothing else.
 //
 // Two of the entry gate's sub-decisions do not apply here and are deliberately
 // not re-run. The pre-leader-check ownership and fence checks on an applied tip

@@ -767,25 +767,78 @@ func TestForgeRefusesABuildAfterARollbackPutsTheTipBehindTheNetwork(
 }
 
 // TestForgeCountsAStaleTipAheadOfASlotBattleOnTheRetry pins the re-check's
-// decision ORDER against the entry gates', for the one reading that trips two
-// of them at once.
+// decision ORDER against the entry gates', for the readings that trip more
+// than one gate at once.
 //
-// checkAndForgeProduction acts on staleTipReason after the leader check and
-// takes its slot-battle decision only after that, so a reading with the
-// applied tip AT the forged slot and a primary chain tip that is diverged or
-// behind is counted on dingo_forge_stale_tip_skip_total at entry, not as a
-// slot battle. tipGatesRefuseSlot checked appliedTipAtSlot first, so the same
-// reading reached through a retry moved dingo_metrics_slotBattlesTotal_int
-// instead: the same event on the same node counted in two different series
-// purely on whether a peer's block landed before the forge started or during
-// it. Both refuse the slot either way; only the counters disagreed.
+// Every case here refuses the slot whichever gate is asked first, so nothing
+// about the block produced is at stake: the only thing the order decides is
+// WHICH counter moves, and the re-check has to move the one entry would have
+// moved. Ordering is the whole subject of this test, and each case is one
+// adjacent pair in the switch whose order no other test constrains -- reorder
+// that pair and this test, alone, goes red.
+//
+// The pairs, in the switch's order:
+//
+//   - unappliedBlockAtSlot above syncSkip. A primary chain tip holding an
+//     unapplied block AT the forged slot, with the applied tip far enough
+//     behind it to be outside ForgeSyncToleranceSlots as well. Entry takes
+//     the unapplied-block refusal before it reaches the sync gate, so this
+//     counts unapplied_rival_at_leader_slot, not dingo_forge_sync_skip_total.
+//
+//   - syncSkip above staleReason. An applied tip outside the tolerance whose
+//     apply backlog is also wider than forgePrimaryChainTipToleranceSlots.
+//     Entry takes the sync skip before the leader check and the stale-tip
+//     refusal only after it, so this counts dingo_forge_sync_skip_total, not
+//     slot_gap.
+//
+//   - staleReason above appliedTipAtSlot. checkAndForgeProduction acts on
+//     staleTipReason after the leader check and takes its slot-battle
+//     decision only after that, so a reading with the applied tip AT the
+//     forged slot and a primary chain tip that is diverged or behind is
+//     counted on dingo_forge_stale_tip_skip_total at entry, not as a slot
+//     battle. tipGatesRefuseSlot checked appliedTipAtSlot first, so the same
+//     reading reached through a retry moved dingo_metrics_slotBattlesTotal_int
+//     instead: the same event on the same node counted in two different series
+//     purely on whether a peer's block landed before the forge started or
+//     during it.
+//
+// Every case runs against ONE network view -- a live upstream whose chain ends
+// at slot 10, tolerance 3 -- so the readings differ only in the two tips, which
+// is the pair a retry or the fallback re-reads.
 func TestForgeCountsAStaleTipAheadOfASlotBattleOnTheRetry(t *testing.T) {
 	applied := bytes.Repeat([]byte{0xAA}, 32)
 	rival := bytes.Repeat([]byte{0xBB}, 32)
 	cases := map[string]struct {
-		move   func(*retryTestSlotClock)
+		move func(*retryTestSlotClock)
+		// reason is the dingo_forge_stale_tip_skip_total label expected to
+		// hold 1, or "" when the refusal is counted somewhere else.
 		reason string
+		// syncSkip is the expected dingo_forge_sync_skip_total.
+		syncSkip float64
 	}{
+		// The primary chain tip holds an unapplied block at the forged
+		// slot while the applied tip has rolled back to 5, which the
+		// upstream target at 10 leads by more than the tolerance of 3.
+		// Both gates refuse; entry refuses on the unapplied block first.
+		"unapplied rival at the slot outranks a tip outside the sync tolerance": {
+			move: func(c *retryTestSlotClock) {
+				c.chainTipSlot = 5
+				c.primaryTipSlot = 10
+			},
+			reason: forgeStaleTipReasonUnappliedRival,
+		},
+		// The applied tip rolls back to 3, outside the tolerance of 3
+		// against the upstream target at 10, and far enough behind the
+		// primary chain tip at 9 for the apply backlog to exceed
+		// forgePrimaryChainTipToleranceSlots as well. Entry takes the
+		// sync skip before the leader check, so slot_gap must not move.
+		"sync skip outranks the slot-gap stale reason": {
+			move: func(c *retryTestSlotClock) {
+				c.chainTipSlot = 3
+				c.primaryTipSlot = 9
+			},
+			syncSkip: 1,
+		},
 		// Chain selection replaced the block at the forged slot with a
 		// competing one at the same slot that the ledger has applied
 		// under the old hash.
@@ -816,6 +869,12 @@ func TestForgeCountsAStaleTipAheadOfASlotBattleOnTheRetry(t *testing.T) {
 				applied,
 				time.Now().Add(2*time.Second),
 			)
+			// One network view for every reading: a live peer whose
+			// chain ends at slot 10. At entry the applied tip trails it
+			// by 1, inside the tolerance of 3, so every case is admitted
+			// and reaches the builder.
+			clock.upstreamTarget = 10
+			clock.upstreamLive = true
 			builder := &tipMovingBuilder{
 				block:     block,
 				cbor:      block.cbor,
@@ -824,7 +883,13 @@ func TestForgeCountsAStaleTipAheadOfASlotBattleOnTheRetry(t *testing.T) {
 				selectErr: errTxValidationSnapshotChanged,
 			}
 			broadcaster := &forgerTestBroadcaster{}
-			forger := newRetryForger(t, clock, builder, broadcaster)
+			forger := newRetryForger(
+				t,
+				clock,
+				builder,
+				broadcaster,
+				withSyncTolerance(3),
+			)
 
 			require.NoError(
 				t,
@@ -834,7 +899,7 @@ func TestForgeCountsAStaleTipAheadOfASlotBattleOnTheRetry(t *testing.T) {
 				t,
 				1,
 				builder.calls,
-				"the retry must not re-enter the builder while the two tips disagree",
+				"the retry must not re-enter the builder while a gate refuses the slot",
 			)
 			require.Equal(t, 0, builder.emptyCalls)
 			require.Equal(t, 0, broadcaster.calls)
@@ -843,11 +908,19 @@ func TestForgeCountsAStaleTipAheadOfASlotBattleOnTheRetry(t *testing.T) {
 				t,
 				float64(0),
 				testutil.ToFloat64(forger.metrics.slotBattlesTotal),
-				"entry counts this reading as a stale tip, so the re-check must too",
+				"entry refuses this reading on an earlier gate, so the re-check must too",
 			)
-			requireStaleTipSkips(t, forger, map[string]float64{
-				tc.reason: 1,
-			})
+			require.Equal(
+				t,
+				tc.syncSkip,
+				testutil.ToFloat64(forger.metrics.forgeSyncSkip),
+				"dingo_forge_sync_skip_total must move exactly when entry moves it",
+			)
+			want := map[string]float64{}
+			if tc.reason != "" {
+				want[tc.reason] = 1
+			}
+			requireStaleTipSkips(t, forger, want)
 		})
 	}
 }
