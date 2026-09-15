@@ -37,10 +37,23 @@ const sqliteFileMetricNamePrefix = "dingo_database_sql_"
 // callback). registerSQLiteFileMetrics is called only for an on-disk store
 // (dataDir != "") with a non-nil PromRegistry; see openSQLStore.
 //
-// The WAL gauge is the direct, on-disk complement to
-// sqliteCommonPragmas' wal_autocheckpoint fix: a WAL that keeps growing well
-// past 10000 pages (~40MB) between samples means checkpoints are falling
-// behind the write rate, not just running less often than before.
+// The WAL gauge reports the -wal file's current size, not whether
+// checkpointing is keeping up: SQLite's PASSIVE, FULL, and RESTART
+// checkpoint modes (including the automatic checkpoint
+// wal_autocheckpoint(10000) triggers -- see sqliteCommonPragmas in
+// shared_sqlstore.go) all backfill WAL frames into metadata.sqlite but
+// never ftruncate the -wal file itself, so this gauge only ever grows and
+// is reset by a TRUNCATE-mode checkpoint, which dingo does not run
+// periodically. Measured live against a sustained write workload, it held
+// steady at 42007552 bytes across PASSIVE/FULL/RESTART checkpoints alike,
+// with busy=0 and checkpointed==log (fully checkpointed) each time, and
+// only returned to 0 after an explicit TRUNCATE checkpoint. A healthy store
+// and one whose checkpoints have stalled read identically here once the WAL
+// has grown once; use it to see the on-disk WAL footprint, not checkpoint
+// health. Raising wal_autocheckpoint to 10000 also raises this gauge's
+// permanent steady-state floor from SQLite's old ~4MB (1000-page default)
+// to ~40MB: that WAL size is now a normal, permanent part of the on-disk
+// footprint, not a transient backlog.
 func registerSQLiteFileMetrics(
 	reg prometheus.Registerer,
 	databasePath string,
@@ -52,7 +65,11 @@ func registerSQLiteFileMetrics(
 		sqliteFileMetricNamePrefix+"wal_bytes",
 		"Current size in bytes of the SQLite WAL file "+
 			"(metadata.sqlite-wal). Sampled live from the filesystem on "+
-			"each scrape.",
+			"each scrape. This is a monotonic high-water mark, not a "+
+			"checkpoint-health signal: PASSIVE/FULL/RESTART checkpoints "+
+			"never shrink the file, only a TRUNCATE checkpoint does, so a "+
+			"steady non-zero value (permanently ~40MB at the configured "+
+			"wal_autocheckpoint threshold) is expected, not a backlog.",
 		func() float64 {
 			info, err := os.Stat(walPath)
 			if err != nil {
@@ -77,13 +94,19 @@ func registerSQLiteFileMetrics(
 	)
 }
 
-// safeRegisterGaugeFunc registers a GaugeFunc and silently keeps whatever is
-// already registered under name on a duplicate registration, the same
-// accommodation sqlstore's newSQLOperationsCounter and
-// database/plugin/blob/badger's registerBlobMetrics make for a registry
-// shared by more than one store (as some test harnesses use). A gauge, not a
-// counter, has no cumulative state to lose by falling back to the existing
-// collector instead of panicking.
+// safeRegisterGaugeFunc registers a GaugeFunc under name, replacing whatever
+// collector a prior registration installed there instead of silently keeping
+// it. Unlike newSQLOperationsCounter's counter (a stateless label schema that
+// is genuinely safe to share across two Store instances on the same
+// registry, as some test harnesses do) or a plain gauge with no captured
+// state, this GaugeFunc's fn closes over one specific store (walPath, or the
+// *sqlstore.Store passed to registerSQLiteFileMetrics): keeping the first
+// registration on a duplicate-registration error would leave every later
+// scrape reading the first, possibly since-closed, store forever, silently
+// going stale (or reporting 0) once that store closes while a replacement
+// store on the same registry keeps running. Unregistering the stale
+// collector and installing the new one keeps the gauge reading whichever
+// store most recently called this.
 func safeRegisterGaugeFunc(
 	reg prometheus.Registerer,
 	name, help string,
@@ -96,6 +119,14 @@ func safeRegisterGaugeFunc(
 	if err := reg.Register(gauge); err != nil {
 		var already prometheus.AlreadyRegisteredError
 		if !errors.As(err, &already) {
+			panic(err)
+		}
+		if !reg.Unregister(already.ExistingCollector) {
+			panic(
+				"safeRegisterGaugeFunc: failed to unregister existing collector for " + name,
+			)
+		}
+		if err := reg.Register(gauge); err != nil {
 			panic(err)
 		}
 	}

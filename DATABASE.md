@@ -1402,10 +1402,13 @@ each query's sqlc-generated `-- name: X :verb` comment; it is a no-op unless
 `dingo_database_sql_disk_bytes` (`database/plugin/metadata/sqlite/metrics.go`)
 are pull-based gauges sampled at scrape time — a plain `os.Stat` of
 `metadata.sqlite-wal` and `Store.DiskSize()` respectively — the same pattern
-Badger's own cache gauges already use rather than a background ticker. All
-three are wired into the `examples/koios-parity-compose` Grafana stack: the
-new `dingo-badger-storage` dashboard for Badger's existing metrics, and the
-SQL counters/gauges alongside the existing dashboards there.
+Badger's own cache gauges already use rather than a background ticker.
+`dingo_database_sql_wal_bytes` is a monotonic high-water mark, not a
+checkpoint-health signal: SQLite's PASSIVE/FULL/RESTART checkpoints backfill
+WAL frames into `metadata.sqlite` but never `ftruncate` the `-wal` file, so
+only a TRUNCATE checkpoint (which dingo does not run periodically) resets it,
+and its steady-state floor is now permanently ~40MB at the raised
+`wal_autocheckpoint` threshold above rather than a transient backlog.
 
 A failed `Sync` is reported as `PartialCommitError`, because at that point the
 blob transaction is committed and carries the new commit timestamp while metadata
