@@ -573,6 +573,16 @@ block at the target is re-applied; when no such ancestor exists it fails with
 (issue #3678). `enforceDurableTipFloor` is the path that produces such a
 target.
 
+At-tip transaction and deferred-header recovery may call
+`rollbackWithOptions(..., repairSameTip=true)` when a failed block left
+metadata mutations above the current durable tip. That first repair restores
+spent UTxOs and removes speculative rows without publishing a local-ledger
+rollback event; repeated delivery of the same failure reuses the repaired
+same-tip state, while deeper scheduled rewinds perform the normal full
+rollback. Replay-holding, deterministic transaction, and header-validation
+recovery use the same option so the repair rule stays consistent across all
+recovery entry points.
+
 `rollbackWithResync` reloads `epochCache`, `currentEra`, `currentPParams` and
 the synthetic-PlutusV2-cost-model marker from the database *after* the
 metadata transaction that truncates it has already committed. A failure to

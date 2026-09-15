@@ -191,7 +191,11 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 	// block's post-apply state; the matching ledger rollback has to be
 	// explicit, for the same reason it is on the transaction-validation
 	// path.
-	if err := ls.rollback(rewindPoint); err != nil {
+	if err := ls.rollbackWithOptions(
+		rewindPoint,
+		pointMatches(rewindPoint, ledgerTip.Point),
+		true,
+	); err != nil {
 		return false, fmt.Errorf(
 			"rollback ledger state after header validation failure: %w",
 			err,

@@ -3481,3 +3481,11 @@ API-mode Mithril backfill replays historical withdrawal transactions after
 importing the snapshot's current reward balances. Its transaction-ingest
 option records the withdrawal history without applying the live-path
 balance-sufficiency check; normal ledger ingestion retains that validation.
+
+# At-tip recovery repair
+
+At-tip validation recovery can explicitly run the metadata rollback sweep
+against the current durable tip when a failed block may have left spent UTxOs
+or other speculative rows above it. The first repair restores those rows;
+retries of the same failure reuse the repaired state instead of repeating the
+full sweep. Ordinary same-tip rollback remains a no-op.
