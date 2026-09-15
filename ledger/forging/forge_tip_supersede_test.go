@@ -765,3 +765,89 @@ func TestForgeRefusesABuildAfterARollbackPutsTheTipBehindTheNetwork(
 		})
 	}
 }
+
+// TestForgeCountsAStaleTipAheadOfASlotBattleOnTheRetry pins the re-check's
+// decision ORDER against the entry gates', for the one reading that trips two
+// of them at once.
+//
+// checkAndForgeProduction acts on staleTipReason after the leader check and
+// takes its slot-battle decision only after that, so a reading with the
+// applied tip AT the forged slot and a primary chain tip that is diverged or
+// behind is counted on dingo_forge_stale_tip_skip_total at entry, not as a
+// slot battle. tipGatesRefuseSlot checked appliedTipAtSlot first, so the same
+// reading reached through a retry moved dingo_metrics_slotBattlesTotal_int
+// instead: the same event on the same node counted in two different series
+// purely on whether a peer's block landed before the forge started or during
+// it. Both refuse the slot either way; only the counters disagreed.
+func TestForgeCountsAStaleTipAheadOfASlotBattleOnTheRetry(t *testing.T) {
+	applied := bytes.Repeat([]byte{0xAA}, 32)
+	rival := bytes.Repeat([]byte{0xBB}, 32)
+	cases := map[string]struct {
+		move   func(*retryTestSlotClock)
+		reason string
+	}{
+		// Chain selection replaced the block at the forged slot with a
+		// competing one at the same slot that the ledger has applied
+		// under the old hash.
+		"primary chain tip diverged at the forged slot": {
+			move: func(c *retryTestSlotClock) {
+				c.chainTipSlot = 10
+				c.primaryTipSlot = 10
+				c.primaryTipHash = rival
+			},
+			reason: forgeStaleTipReasonHashDiverged,
+		},
+		// The ledger is at the forged slot while the primary chain tip
+		// this node would parent on is a slot behind it.
+		"primary chain tip behind the applied tip": {
+			move: func(c *retryTestSlotClock) {
+				c.chainTipSlot = 10
+				c.primaryTipSlot = 9
+			},
+			reason: forgeStaleTipReasonPrimaryTipBehind,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			block := newForgerTestBlock(10, 2)
+			clock := applyBacklogClock(
+				10,
+				9,
+				applied,
+				time.Now().Add(2*time.Second),
+			)
+			builder := &tipMovingBuilder{
+				block:     block,
+				cbor:      block.cbor,
+				clock:     clock,
+				moveTip:   tc.move,
+				selectErr: errTxValidationSnapshotChanged,
+			}
+			broadcaster := &forgerTestBroadcaster{}
+			forger := newRetryForger(t, clock, builder, broadcaster)
+
+			require.NoError(
+				t,
+				forger.checkAndForgeProduction(context.Background()),
+			)
+			require.Equal(
+				t,
+				1,
+				builder.calls,
+				"the retry must not re-enter the builder while the two tips disagree",
+			)
+			require.Equal(t, 0, builder.emptyCalls)
+			require.Equal(t, 0, broadcaster.calls)
+			requireNoFallbackCounted(t, forger)
+			require.Equal(
+				t,
+				float64(0),
+				testutil.ToFloat64(forger.metrics.slotBattlesTotal),
+				"entry counts this reading as a stale tip, so the re-check must too",
+			)
+			requireStaleTipSkips(t, forger, map[string]float64{
+				tc.reason: 1,
+			})
+		})
+	}
+}

@@ -2327,9 +2327,17 @@ func isTipGateRefusal(err error) bool {
 // re-read; see forgeTipReading.
 //
 // The decisions are taken in the entry gates' order, so a reading that trips
-// more than one is counted the way entry would have counted it. Two of the
-// entry gate's sub-decisions do not apply here and are deliberately not
-// re-run. The pre-leader-check ownership and fence checks on an applied tip
+// more than one is counted the way entry would have counted it. That order is
+// not the order the gates are declared in: entry takes the parent-slot and
+// unapplied-block decisions before leader selection, then the upstream-sync
+// skip, and only AFTER the leader check the stale-tip refusal and, last, the
+// slot battle for an applied tip at the slot. A reading with an applied tip at
+// the forged slot AND a diverged or behind primary chain tip therefore counts
+// on dingo_forge_stale_tip_skip_total at entry, so it must count there here
+// too -- which is why the staleReason case sits above appliedTipAtSlot below.
+//
+// Two of the entry gate's sub-decisions do not apply here and are deliberately
+// not re-run. The pre-leader-check ownership and fence checks on an applied tip
 // at the slot exist to recognise this node's OWN block already at the tip; a
 // build attempt runs before this slot's block exists, under a fence this
 // attempt itself reserved, so an applied tip at the slot can only be a
@@ -2392,19 +2400,6 @@ func (f *BlockForger) tipGatesRefuseSlot(
 			upstreamGap,
 			f.forgeSyncToleranceSlots,
 		)
-	case gates.appliedTipAtSlot():
-		// A rival block occupying our leader slot is the same battle
-		// whether it arrived before the forge started or during it, and
-		// only counting the first would under-report battles precisely on
-		// the producers that lose them late.
-		if f.metrics != nil {
-			f.metrics.slotBattlesTotal.Inc()
-		}
-		return fmt.Errorf(
-			"%w: tip slot %d",
-			errChainTipAtSlot,
-			gates.tipSlot,
-		)
 	case gates.staleReason != "":
 		f.countStaleTipSkip(gates.staleReason)
 		return fmt.Errorf(
@@ -2418,6 +2413,20 @@ func (f *BlockForger) tipGatesRefuseSlot(
 			gates.applyGap,
 			f.forgePrimaryChainTipToleranceSlots,
 			gates.staleSource(),
+		)
+	case gates.appliedTipAtSlot():
+		// A rival block occupying our leader slot is the same battle
+		// whether it arrived before the forge started or during it, and
+		// only counting the first would under-report battles precisely on
+		// the producers that lose them late. Last, because entry takes its
+		// slot-battle decision after the stale-tip refusal above.
+		if f.metrics != nil {
+			f.metrics.slotBattlesTotal.Inc()
+		}
+		return fmt.Errorf(
+			"%w: tip slot %d",
+			errChainTipAtSlot,
+			gates.tipSlot,
 		)
 	}
 	return nil
