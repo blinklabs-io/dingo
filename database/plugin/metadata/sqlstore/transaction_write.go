@@ -26,6 +26,19 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
+// transactionFee returns a transaction's fee, treating a nil fee as zero.
+// TransactionBodyBase.Fee returns nil, so any body that does not override it --
+// such as the synthetic transactions used to carry imported certificates --
+// would otherwise panic here. ledger/eras applies the same guard before
+// comparing a fee against the computed minimum.
+func transactionFee(transaction lcommon.Transaction) types.Uint64 {
+	fee := transaction.Fee()
+	if fee == nil {
+		return 0
+	}
+	return types.Uint64(fee.Uint64())
+}
+
 type immediateBatchAccumulator struct{}
 
 func (*immediateBatchAccumulator) Reset() {}
@@ -202,7 +215,7 @@ RETURNING id`,
 				metadataValue,
 				point.Slot,
 				transaction.Type(),
-				decimalUint64(types.Uint64(transaction.Fee().Uint64())),
+				decimalUint64(transactionFee(transaction)),
 				decimalUint64(types.Uint64(collateralFee)),
 				decimalUint64(types.Uint64(transaction.TTL())),
 				index,
@@ -461,7 +474,7 @@ RETURNING id`,
 				point.Hash,
 				point.Slot,
 				transaction.Type(),
-				decimalUint64(types.Uint64(transaction.Fee().Uint64())),
+				decimalUint64(transactionFee(transaction)),
 				decimalUint64(types.Uint64(collateralFee)),
 				decimalUint64(types.Uint64(transaction.TTL())),
 				index,
