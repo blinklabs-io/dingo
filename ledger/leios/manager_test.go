@@ -211,11 +211,22 @@ func (f *fakeEpochProvider) EpochForSlot(slot uint64) (uint64, error) {
 }
 
 type fakeSlotProvider struct {
+	mu   sync.Mutex
 	slot uint64
 }
 
 func (f *fakeSlotProvider) CurrentOrTipSlot() uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.slot
+}
+
+// setSlot advances (or rewinds) the wall-clock slot the vote window is
+// measured against.
+func (f *fakeSlotProvider) setSlot(slot uint64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.slot = slot
 }
 
 type fakeParamsProvider struct {
@@ -441,7 +452,7 @@ func TestVoteManagerHandleVoteAndServe(t *testing.T) {
 	result := testutil.RequireReceive(
 		t,
 		startNextVotes(fixture, done, "conn-b", 1),
-		2*time.Second,
+		testutil.AsyncWait,
 		"vote served to other connection",
 	)
 	require.NoError(t, result.err)
@@ -480,7 +491,7 @@ func TestVoteManagerDoesNotEchoToOrigin(t *testing.T) {
 	result := testutil.RequireReceive(
 		t,
 		resultCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"aborted NextVotes returns",
 	)
 	assert.Error(t, result.err)
@@ -503,7 +514,7 @@ func TestVoteManagerNextVotesCursorAdvances(t *testing.T) {
 	result := testutil.RequireReceive(
 		t,
 		startNextVotes(fixture, done, "conn-b", 1),
-		2*time.Second,
+		testutil.AsyncWait,
 		"first serve",
 	)
 	require.NoError(t, result.err)
@@ -521,7 +532,7 @@ func TestVoteManagerNextVotesCursorAdvances(t *testing.T) {
 	result = testutil.RequireReceive(
 		t,
 		secondCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"aborted NextVotes returns",
 	)
 	assert.Error(t, result.err)
@@ -545,7 +556,7 @@ func TestVoteManagerRemoveConnectionResetsCursor(t *testing.T) {
 	result := testutil.RequireReceive(
 		t,
 		startNextVotes(fixture, done, "conn-b", 1),
-		2*time.Second,
+		testutil.AsyncWait,
 		"first serve",
 	)
 	require.NoError(t, result.err)
@@ -555,7 +566,7 @@ func TestVoteManagerRemoveConnectionResetsCursor(t *testing.T) {
 	result = testutil.RequireReceive(
 		t,
 		startNextVotes(fixture, done, "conn-b", 1),
-		2*time.Second,
+		testutil.AsyncWait,
 		"serve again after cursor reset",
 	)
 	require.NoError(t, result.err)
@@ -594,7 +605,7 @@ func TestVoteManagerNextVotesAccumulatesAcrossInserts(t *testing.T) {
 	result := testutil.RequireReceive(
 		t,
 		resultCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"NextVotes returns once count votes are available",
 	)
 	require.NoError(t, result.err)
@@ -620,7 +631,7 @@ func TestVoteManagerStopUnblocksNextVotes(t *testing.T) {
 	result := testutil.RequireReceive(
 		t,
 		resultCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"Stop unblocks NextVotes",
 	)
 	assert.ErrorIs(t, result.err, ErrVoteManagerStopped)
@@ -639,7 +650,7 @@ func TestVoteManagerDedupIgnoresResubmission(t *testing.T) {
 	result := testutil.RequireReceive(
 		t,
 		startNextVotes(fixture, done, "conn-b", 1),
-		2*time.Second,
+		testutil.AsyncWait,
 		"vote served once",
 	)
 	require.NoError(t, result.err)
@@ -652,7 +663,7 @@ func TestVoteManagerDedupIgnoresResubmission(t *testing.T) {
 	)
 	close(done)
 	testutil.RequireReceive(
-		t, secondCh, 2*time.Second, "aborted NextVotes returns",
+		t, secondCh, testutil.AsyncWait, "aborted NextVotes returns",
 	)
 }
 
@@ -778,7 +789,7 @@ func TestVoteManagerQuorumBuildsCertificate(t *testing.T) {
 	evt := testutil.RequireReceive(
 		t,
 		quorumCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"quorum event published",
 	)
 	quorum, ok := evt.Data.(EbQuorumEvent)
@@ -879,7 +890,7 @@ func TestVoteManagerQuorumRequiresVerifiedStake(t *testing.T) {
 	evt := testutil.RequireReceive(
 		t,
 		quorumCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"quorum event after verified stake crosses tau",
 	)
 	quorum, ok := evt.Data.(EbQuorumEvent)
@@ -915,7 +926,7 @@ func TestVoteManagerOwnVoteEmission(t *testing.T) {
 	)
 	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
 	emittedEvent := testutil.RequireReceive(
-		t, emittedCh, 2*time.Second, "prototype vote emission",
+		t, emittedCh, testutil.AsyncWait, "prototype vote emission",
 	)
 	emitted, ok := emittedEvent.Data.(VoteEmittedEvent)
 	require.True(t, ok)
@@ -959,7 +970,7 @@ func TestVoteManagerOwnVoteEmission(t *testing.T) {
 	result := testutil.RequireReceive(
 		t,
 		startNextVotes(fixture, done, "conn-b", 1),
-		2*time.Second,
+		testutil.AsyncWait,
 		"own vote served to peers",
 	)
 	require.NoError(t, result.err)
@@ -1031,7 +1042,7 @@ func TestVoteManagerDoesNotEmitVoteAfterVotingReconfiguredDuringSigning(
 	testutil.RequireReceive(
 		t,
 		signingEntered,
-		2*time.Second,
+		testutil.AsyncWait,
 		"local vote signing",
 	)
 
@@ -1060,19 +1071,19 @@ func TestVoteManagerDoesNotEmitVoteAfterVotingReconfiguredDuringSigning(
 			fixture.mgr.votingKey == nil &&
 			fixture.mgr.deferredVotingKey == replacementKey &&
 			slices.Equal(fixture.mgr.deferredVotingPool, replacementPool[:])
-	}, 2*time.Second, "replacement voting configuration installed")
+	}, testutil.AsyncWait, "replacement voting configuration installed")
 
 	releaseSigning()
 	testutil.RequireReceive(
 		t,
 		observeDone,
-		2*time.Second,
+		testutil.AsyncWait,
 		"vote emission return",
 	)
 	result := testutil.RequireReceive(
 		t,
 		configuredCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"replacement voting configuration",
 	)
 	require.NoError(t, result.err)
@@ -1139,7 +1150,7 @@ func TestVoteManagerPeerPrototypeVoteRequeuedForRelay(t *testing.T) {
 	require.NoError(t, fixture.mgr.HandlePrototypeVote("conn-a", vote))
 
 	requeued := testutil.RequireReceive(
-		t, receivedCh, 2*time.Second, "peer vote requeued for relay",
+		t, receivedCh, testutil.AsyncWait, "peer vote requeued for relay",
 	)
 	data, ok := requeued.Data.(VoteReceivedEvent)
 	require.True(t, ok)
@@ -1177,7 +1188,7 @@ func TestVoteManagerQueuedPeerPrototypeVoteRequeuedForRelayAfterAnnouncement(
 	requeued := testutil.RequireReceive(
 		t,
 		receivedCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"queued peer vote requeued for relay once its ranking block resolves",
 	)
 	data, ok := requeued.Data.(VoteReceivedEvent)
@@ -1206,7 +1217,7 @@ func TestVoteManagerDuplicatePeerPrototypeVoteNotRequeuedForRelay(
 	vote := fixture.makePrototypeVote(t, 3, rbHash)
 	require.NoError(t, fixture.mgr.HandlePrototypeVote("conn-a", vote))
 	testutil.RequireReceive(
-		t, receivedCh, 2*time.Second, "first delivery requeued for relay",
+		t, receivedCh, testutil.AsyncWait, "first delivery requeued for relay",
 	)
 
 	require.NoError(t, fixture.mgr.HandlePrototypeVote("conn-b", vote))
@@ -1303,7 +1314,7 @@ func TestVoteManagerPrototypeQuorumPreservesSigningContext(t *testing.T) {
 	evt := testutil.RequireReceive(
 		t,
 		quorumCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"prototype quorum certificate",
 	)
 	quorum, ok := evt.Data.(EbQuorumEvent)
@@ -1931,7 +1942,7 @@ func TestVoteManagerDeferredVotingReplaysCurrentEpochAnnouncementsInOrder(
 		emittedEvent := testutil.RequireReceive(
 			t,
 			emittedCh,
-			2*time.Second,
+			testutil.AsyncWait,
 			"replayed vote emission after on-chain key resolution",
 		)
 		emitted, ok := emittedEvent.Data.(VoteEmittedEvent)
@@ -1961,7 +1972,7 @@ func TestVoteManagerDeferredVotingReplaysCurrentEpochAnnouncementsInOrder(
 	emittedEvent := testutil.RequireReceive(
 		t,
 		emittedCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"vote after the deferred announcement becomes acquired",
 	)
 	emitted, ok := emittedEvent.Data.(VoteEmittedEvent)
@@ -2011,7 +2022,7 @@ func TestVoteManagerConfigureVotingReplaysPreloadedAnnouncements(
 	emittedEvent := testutil.RequireReceive(
 		t,
 		emittedCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"preloaded announcement replay during voting configuration",
 	)
 	emitted, ok := emittedEvent.Data.(VoteEmittedEvent)
@@ -2108,7 +2119,7 @@ func TestVoteManagerConfigureVotingDiscardsStaleLookupAfterActivation(
 			testutil.RequireReceive(
 				t,
 				keyProvider.entered,
-				2*time.Second,
+				testutil.AsyncWait,
 				"initial epoch key lookup",
 			)
 
@@ -2116,7 +2127,7 @@ func TestVoteManagerConfigureVotingDiscardsStaleLookupAfterActivation(
 			emittedEvent := testutil.RequireReceive(
 				t,
 				emittedCh,
-				2*time.Second,
+				testutil.AsyncWait,
 				"newer epoch voting activation",
 			)
 			emitted, ok := emittedEvent.Data.(VoteEmittedEvent)
@@ -2127,7 +2138,7 @@ func TestVoteManagerConfigureVotingDiscardsStaleLookupAfterActivation(
 			result := testutil.RequireReceive(
 				t,
 				configuredCh,
-				2*time.Second,
+				testutil.AsyncWait,
 				"configuration after stale lookup release",
 			)
 			require.NoError(t, result.err)
@@ -2260,7 +2271,7 @@ func TestVoteManagerConfigureVotingReportsSupersededDifferentPoolReplacement(
 			testutil.RequireReceive(
 				t,
 				keyProvider.entered,
-				2*time.Second,
+				testutil.AsyncWait,
 				"original voting key lookup",
 			)
 
@@ -2283,7 +2294,7 @@ func TestVoteManagerConfigureVotingReportsSupersededDifferentPoolReplacement(
 			originalResult := testutil.RequireReceive(
 				t,
 				originalResultCh,
-				2*time.Second,
+				testutil.AsyncWait,
 				"superseded original voting configuration",
 			)
 			require.NoError(t, originalResult.err)
@@ -2410,7 +2421,7 @@ func TestVoteManagerConfigureVotingDiscardsStaleLookupAfterDeferredRetry(
 			testutil.RequireReceive(
 				t,
 				keyProvider.entered,
-				2*time.Second,
+				testutil.AsyncWait,
 				"initial epoch key lookup",
 			)
 
@@ -2419,7 +2430,7 @@ func TestVoteManagerConfigureVotingDiscardsStaleLookupAfterDeferredRetry(
 			result := testutil.RequireReceive(
 				t,
 				configuredCh,
-				2*time.Second,
+				testutil.AsyncWait,
 				"configuration after stale lookup release",
 			)
 			require.NoError(t, result.err)
@@ -2488,7 +2499,7 @@ func TestVoteManagerConfigureVotingDoesNotBeatNewerInFlightRetry(
 	testutil.RequireReceive(
 		t,
 		keyProvider.entered,
-		2*time.Second,
+		testutil.AsyncWait,
 		"initial epoch key lookup",
 	)
 	retryDone := make(chan struct{})
@@ -2499,7 +2510,7 @@ func TestVoteManagerConfigureVotingDoesNotBeatNewerInFlightRetry(
 	testutil.RequireReceive(
 		t,
 		keyProvider.currentEntered,
-		2*time.Second,
+		testutil.AsyncWait,
 		"newer retry key lookup",
 	)
 
@@ -2507,7 +2518,7 @@ func TestVoteManagerConfigureVotingDoesNotBeatNewerInFlightRetry(
 	result := testutil.RequireReceive(
 		t,
 		configuredCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"configuration while newer retry remains in flight",
 	)
 	require.NoError(t, result.err)
@@ -2518,7 +2529,7 @@ func TestVoteManagerConfigureVotingDoesNotBeatNewerInFlightRetry(
 	fixture.mgr.mu.Unlock()
 
 	keyProvider.releaseCurrentLookup()
-	testutil.RequireReceive(t, retryDone, 2*time.Second, "newer deferred retry")
+	testutil.RequireReceive(t, retryDone, testutil.AsyncWait, "newer deferred retry")
 	fixture.mgr.mu.Lock()
 	assert.Nil(t, fixture.mgr.votingKey)
 	assert.Same(t, key, fixture.mgr.deferredVotingKey)
@@ -2648,7 +2659,7 @@ func TestVoteManagerDeferredVotingRetriesFailedReplayLookup(
 	emittedEvent := testutil.RequireReceive(
 		t,
 		emittedCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"announcement replay after committee provider recovery",
 	)
 	emitted, ok := emittedEvent.Data.(VoteEmittedEvent)
@@ -2803,7 +2814,7 @@ func TestVoteManagerDeferredVotingRetryRetainsMismatchedKeyUntilRecovery(
 	emittedEvent := testutil.RequireReceive(
 		t,
 		emittedCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"vote emission after mismatched registration recovers",
 	)
 	emitted, ok := emittedEvent.Data.(VoteEmittedEvent)
@@ -2885,7 +2896,7 @@ func TestVoteManagerDeferredVotingRetryRetainsProviderFailureUntilRecovery(
 	emittedEvent := testutil.RequireReceive(
 		t,
 		emittedCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"vote emission after deferred provider recovery",
 	)
 	emitted, ok := emittedEvent.Data.(VoteEmittedEvent)
@@ -3220,7 +3231,7 @@ func TestVoteManagerRollbackPrunesVotes(t *testing.T) {
 		return len(fixture.mgr.VotesByIds(
 			[]lcommon.LeiosVoteId{{SlotNo: 590, VoterId: 1}},
 		)) == 0
-	}, 2*time.Second, "votes after the rollback point are pruned")
+	}, testutil.AsyncWait, "votes after the rollback point are pruned")
 	assert.Len(
 		t,
 		fixture.mgr.VotesByIds(
@@ -3272,7 +3283,7 @@ func TestVoteManagerEpochTransitionPrunes(t *testing.T) {
 		return len(fixture.mgr.VotesByIds(
 			[]lcommon.LeiosVoteId{{SlotNo: 350, VoterId: 0}},
 		)) == 0
-	}, 2*time.Second, "votes older than the previous epoch are pruned")
+	}, testutil.AsyncWait, "votes older than the previous epoch are pruned")
 	assert.Len(
 		t,
 		fixture.mgr.VotesByIds(
@@ -3563,7 +3574,7 @@ func TestVoteManagerNextVotesAbortDoesNotSkipVotes(t *testing.T) {
 	result := testutil.RequireReceive(
 		t,
 		resultCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"aborted NextVotes returns",
 	)
 	require.Error(t, result.err)
@@ -3574,7 +3585,7 @@ func TestVoteManagerNextVotesAbortDoesNotSkipVotes(t *testing.T) {
 	result = testutil.RequireReceive(
 		t,
 		startNextVotes(fixture, done2, "conn-b", 1),
-		2*time.Second,
+		testutil.AsyncWait,
 		"vote re-served after aborted request",
 	)
 	require.NoError(t, result.err)
@@ -3639,7 +3650,7 @@ func TestVoteManagerEvictedVoteDoesNotRecount(t *testing.T) {
 	evt := testutil.RequireReceive(
 		t,
 		quorumCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"quorum event after genuine quorum",
 	)
 	quorum, ok := evt.Data.(EbQuorumEvent)
@@ -3785,7 +3796,7 @@ func TestVoteManagerRecordsRetainedWhileTallyLive(t *testing.T) {
 	evt := testutil.RequireReceive(
 		t,
 		quorumCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"quorum reached with deduplicated stake",
 	)
 	quorum, ok := evt.Data.(EbQuorumEvent)
@@ -4059,7 +4070,7 @@ func TestVoteManagerRollbackAllowsReVoteForNewChain(t *testing.T) {
 		return len(fixture.mgr.VotesByIds(
 			[]lcommon.LeiosVoteId{{SlotNo: 590, VoterId: 1}},
 		)) == 0
-	}, 2*time.Second, "rolled-back vote is pruned")
+	}, testutil.AsyncWait, "rolled-back vote is pruned")
 
 	// The rollback also dropped the dedup record, so a vote for the
 	// replacement chain's endorser block is accepted rather than being
@@ -4112,14 +4123,14 @@ func TestVoteManagerRollbackRejectsInFlightLocalPrototypeVote(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		params.entered,
-		2*time.Second,
+		testutil.AsyncWait,
 		"committee lookup",
 	)
 	fixture.mgr.handleRollback(chain.ChainRollbackEvent{
 		Point: ocommon.Point{Slot: 550},
 	})
 	close(params.release)
-	testutil.RequireReceive(t, done, 2*time.Second, "in-flight emission exit")
+	testutil.RequireReceive(t, done, testutil.AsyncWait, "in-flight emission exit")
 
 	testutil.RequireNoReceive(
 		t, emittedCh, 300*time.Millisecond,
@@ -4156,7 +4167,7 @@ func TestVoteManagerRollbackRejectsInFlightResolvedPrototypeVote(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		params.entered,
-		2*time.Second,
+		testutil.AsyncWait,
 		"committee lookup",
 	)
 	fixture.mgr.handleRollback(chain.ChainRollbackEvent{
@@ -4164,7 +4175,7 @@ func TestVoteManagerRollbackRejectsInFlightResolvedPrototypeVote(t *testing.T) {
 	})
 	close(params.release)
 	require.NoError(t, testutil.RequireReceive(
-		t, done, 2*time.Second, "resolved vote exit",
+		t, done, testutil.AsyncWait, "resolved vote exit",
 	))
 
 	assert.Empty(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{

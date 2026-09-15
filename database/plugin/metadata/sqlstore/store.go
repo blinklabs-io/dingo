@@ -40,6 +40,11 @@ type Config struct {
 	// StorageMode controls retention of API-only transaction detail. Empty
 	// selects the consensus-focused core mode.
 	StorageMode string
+	// CommitteeAuthRetentionSlots overrides how far back superseded
+	// auth_committee_hot rows are retained for rollback, in slots. Zero
+	// selects DefaultCommitteeAuthRetentionSlots; see committee_prune.go for
+	// the retention rule and why the window has to cover the rollback bound.
+	CommitteeAuthRetentionSlots uint64
 
 	Migrations      []migrations.Migration
 	MigrationLocker migrations.Locker
@@ -88,6 +93,11 @@ type Store struct {
 	logger      *slog.Logger
 	storageMode string
 
+	// committeeAuthRetentionSlots is the configured rollback window for
+	// auth_committee_hot pruning. Read it through committeeAuthRetention(),
+	// which applies the default, rather than directly.
+	committeeAuthRetentionSlots uint64
+
 	migrations        []migrations.Migration
 	migrationLocker   migrations.Locker
 	diskSize          func() (int64, error)
@@ -110,6 +120,11 @@ type Store struct {
 
 	closeOnce sync.Once
 	closeErr  error
+
+	// stmtMu and stmts back the prepared-statement cache; see
+	// prepared_stmt.go for the mechanism and correctness argument.
+	stmtMu sync.Mutex
+	stmts  map[string]*sql.Stmt
 }
 
 // New constructs a shared store around already-opened connection pools.
@@ -129,6 +144,17 @@ func New(config Config) (*Store, error) {
 	if config.StorageMode == "" {
 		config.StorageMode = types.StorageModeCore
 	}
+	if config.MaintenanceInterval <= 0 {
+		config.MaintenanceInterval = committeeAuthMaintenanceInterval
+	}
+	if config.CommitteeAuthRetentionSlots != 0 &&
+		config.CommitteeAuthRetentionSlots < DefaultCommitteeAuthRetentionSlots {
+		return nil, fmt.Errorf(
+			"sqlstore: committee auth retention slots %d is below the safe rollback window %d",
+			config.CommitteeAuthRetentionSlots,
+			DefaultCommitteeAuthRetentionSlots,
+		)
+	}
 	switch config.StorageMode {
 	case types.StorageModeCore, types.StorageModeAPI:
 	default:
@@ -143,21 +169,22 @@ func New(config Config) (*Store, error) {
 		)
 	}
 	return &Store{
-		writeDB:          config.WriteDB,
-		readDB:           config.ReadDB,
-		dialect:          config.Dialect,
-		logger:           config.Logger,
-		storageMode:      config.StorageMode,
-		migrations:       config.Migrations,
-		migrationLocker:  config.MigrationLocker,
-		diskSize:         config.DiskSize,
-		maintenance:      config.Maintenance,
-		maintenanceEvery: config.MaintenanceInterval,
-		backupTo:         config.BackupTo,
-		restoreFrom:      config.RestoreFrom,
-		prepare:          config.Prepare,
-		reset:            config.Reset,
-		validateBackup:   config.ValidateBackup,
+		writeDB:                     config.WriteDB,
+		readDB:                      config.ReadDB,
+		dialect:                     config.Dialect,
+		logger:                      config.Logger,
+		storageMode:                 config.StorageMode,
+		committeeAuthRetentionSlots: config.CommitteeAuthRetentionSlots,
+		migrations:                  config.Migrations,
+		migrationLocker:             config.MigrationLocker,
+		diskSize:                    config.DiskSize,
+		maintenance:                 config.Maintenance,
+		maintenanceEvery:            config.MaintenanceInterval,
+		backupTo:                    config.BackupTo,
+		restoreFrom:                 config.RestoreFrom,
+		prepare:                     config.Prepare,
+		reset:                       config.Reset,
+		validateBackup:              config.ValidateBackup,
 	}, nil
 }
 
@@ -178,7 +205,13 @@ func (s *Store) RestoreFrom(ctx context.Context, srcPath string) error {
 	if s.restoreFrom == nil {
 		return errors.New("metadata restore is not supported by this provider")
 	}
-	return s.restoreFrom(ctx, srcPath)
+	err := s.restoreFrom(ctx, srcPath)
+	// Like Reset, a restore replaces the on-disk/remote schema and data out
+	// from under any statement prepared before it ran; invalidate the cache
+	// regardless of outcome so a later call always re-prepares against
+	// whatever RestoreFrom actually left behind.
+	s.closePreparedStatements()
+	return err
 }
 
 // Reset clears all data this store owns, for providers that supply the
@@ -206,7 +239,15 @@ func (s *Store) Reset(ctx context.Context) error {
 	if s.closed.Load() {
 		return errors.New("metadata reset: store is closed")
 	}
-	return s.reset(ctx)
+	err := s.reset(ctx)
+	// A wired Reset (postgres/mysql) drops and recreates schema objects
+	// (resetDatabase's DROP TABLE ... CASCADE), so any statement cached
+	// before this point may now reference a table that no longer exists in
+	// the form it was prepared against -- invalidate unconditionally,
+	// whether reset succeeded or failed partway, rather than assume a
+	// partial failure left every cached statement's table intact.
+	s.closePreparedStatements()
+	return err
 }
 
 // HasDestructiveReset reports whether Reset actually mutates a live target
@@ -280,6 +321,13 @@ func (s *Store) Start(ctx context.Context) error {
 			return fmt.Errorf("sqlstore: ping read database: %w", err)
 		}
 	}
+	// Must run before ready flips true: this is the only point in the
+	// Store's lifecycle guaranteed to have no write transaction open yet,
+	// which prepareHotStatements' own doc comment explains is required to
+	// prepare against writeDB without risking a self-deadlock under
+	// SetMaxOpenConns(1). Best-effort: see prepareHotStatements for why a
+	// failure here does not abort Start.
+	s.prepareHotStatements(ctx)
 	s.ready.Store(true)
 	// Maintenance owns its own lifetime and must not inherit the startup
 	// context, which callers commonly cancel as soon as Start returns.
@@ -367,6 +415,14 @@ func (s *Store) CloseContext(ctx context.Context) error {
 		s.closeMaintenanceAdmission()
 		s.closed.Store(true)
 		s.ready.Store(false)
+		// Invalidate the prepared-statement cache before the pools it was
+		// prepared against go away. closed is already true above, so any
+		// cachedStmt call racing with this either observes it before
+		// preparing (returns the "store is closed" error) or finishes its
+		// Prepare and then sees closed==true when it goes to install the
+		// result, closing its own statement instead of caching it -- see
+		// prepared_stmt.go.
+		s.closePreparedStatements()
 		if s.bulkConn != nil {
 			// Restore session variables before releasing the dedicated
 			// connection; this is especially important for pooled PostgreSQL
@@ -395,7 +451,7 @@ func (s *Store) closePools() error {
 }
 
 func (s *Store) startMaintenance() {
-	if s.maintenance == nil || s.maintenanceEvery <= 0 {
+	if s.maintenanceEvery <= 0 {
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -421,7 +477,7 @@ func (s *Store) startMaintenance() {
 					return
 				}
 				started := time.Now()
-				err := s.maintenance(ctx)
+				err := s.runMaintenance(ctx)
 				s.maintenanceState.CompareAndSwap(1, 0)
 				if err != nil {
 					if ctx.Err() == nil {
@@ -444,6 +500,19 @@ func (s *Store) startMaintenance() {
 			}
 		}
 	}()
+}
+
+func (s *Store) runMaintenance(ctx context.Context) error {
+	var errs []error
+	if s.maintenance != nil {
+		if err := s.maintenance(ctx); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if err := s.pruneCommitteeHotAuthorizationsMaintenance(ctx); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }
 
 func (s *Store) closeMaintenanceAdmission() {

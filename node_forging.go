@@ -145,6 +145,17 @@ func (v blockProducerLedgerView) LatestOpCertSequence(
 	return v.ls.LatestOpCertSequence(poolID)
 }
 
+// blockProducerEraSource supplies the era context for the startup
+// operational-certificate counter check. *ledger.LedgerState implements it.
+type blockProducerEraSource interface {
+	forging.ProtocolParamsProvider
+	// Tip is the applied-chain tip. Its slot scopes the counter rule.
+	Tip() ochainsync.Tip
+	// CurrentSlot is the wall-clock slot. It is read only to report how far
+	// the applied tip lags; it must not scope the counter rule.
+	CurrentSlot() (uint64, error)
+}
+
 // validateBlockProducerLedger runs the ledger-aware cross-check against
 // the loaded credentials. Must be called after the ledger has started so
 // pool registrations can be queried. A pool that is not yet registered
@@ -152,34 +163,83 @@ func (v blockProducerLedgerView) LatestOpCertSequence(
 func (n *Node) validateBlockProducerLedger(
 	creds *forging.PoolCredentials,
 ) error {
-	view := blockProducerLedgerView{ls: n.ledgerState}
-	return n.validateBlockProducerLedgerWithView(creds, view)
+	if n.ledgerState == nil {
+		return errors.New(
+			"block producer ledger cross-check requires ledger state",
+		)
+	}
+	return n.validateBlockProducerLedgerWithSource(
+		creds,
+		blockProducerLedgerView{ls: n.ledgerState},
+		n.ledgerState,
+	)
 }
 
-func (n *Node) validateBlockProducerLedgerWithView(
+// validateBlockProducerLedgerWithSource resolves the slot whose era scopes the
+// startup opcert counter rule, then runs the cross-check.
+//
+// The slot is the applied chain tip, never the wall clock. The counter
+// baseline (LedgerView.LatestOpCertSequence) is produced by the applied-chain
+// stage, so the era that scopes the rule has to be read from the same stage. A
+// wall-clock slot makes LedgerState.ProtocolParamsForSlot forecast forward
+// through the era shape: on a node whose applied tip lags -- interrupted sync,
+// restart after downtime, restore from an older snapshot -- it resolves a
+// Praos era the applied chain has not reached while the baseline is still
+// pre-catch-up, so a pool several rotations into its life looks gapped and
+// startup is refused, leaving the node unable to sync to the point that would
+// make the baseline correct. LedgerState.CurrentOrTipSlot is not a substitute:
+// it returns whichever of the two slots is ahead, which is the wall-clock slot
+// in exactly that case.
+func (n *Node) validateBlockProducerLedgerWithSource(
 	creds *forging.PoolCredentials,
 	view forging.LedgerView,
+	source blockProducerEraSource,
+) error {
+	var slot uint64
+	if source != nil {
+		slot = source.Tip().Point.Slot
+		if wallSlot, wallErr := source.CurrentSlot(); wallErr == nil &&
+			wallSlot > slot {
+			n.config.logger.Warn(
+				"block producer opcert counter rule scoped to the applied chain tip, which is behind wall-clock time",
+				"component", "node",
+				"tip_slot", slot,
+				"wall_clock_slot", wallSlot,
+				"slots_behind", wallSlot-slot,
+			)
+		}
+	}
+	return n.validateBlockProducerLedgerWithViewAtSlot(
+		creds,
+		view,
+		source,
+		slot,
+	)
+}
+
+func (n *Node) validateBlockProducerLedgerWithViewAtSlot(
+	creds *forging.PoolCredentials,
+	view forging.LedgerView,
+	params forging.ProtocolParamsProvider,
+	slot uint64,
 ) error {
 	if creds == nil {
 		return errors.New("nil pool credentials")
 	}
-	// Startup deliberately checks only for a stale counter, not the
-	// era-scoped no-gap rule the forge loop and block application enforce.
-	// The era for "now" would have to come from LedgerState.CurrentSlot,
-	// which is wall-clock and valid regardless of sync state; the baseline
-	// comes from LatestOpCertSequence, which reflects only the applied
-	// chain. On a node whose applied tip is behind wall-clock time (an
-	// interrupted initial sync, a resume after downtime, a restore to an
-	// older snapshot), those two can disagree: the era resolves to
-	// whatever the wall clock says while the baseline is still the stale,
-	// pre-catch-up counter, so a pool several rotations into its life
-	// would look gapped and fail startup -- unable to then sync to the
-	// point that would make the baseline correct. The forge loop's own
-	// gate does not have this problem: it runs after the upstream-sync
-	// skip and the leader check, so both its era and its baseline come
-	// from near-tip state, and it fails closed per slot rather than
-	// refusing to start the node at all.
-	registered, vrfMatched, err := creds.ValidateAgainstLedger(view)
+	result, err := creds.ValidateAgainstLedgerAtSlot(view, params, slot)
+	if result.EraUnevaluable != nil {
+		// Not evaluable is not violated. Startup continues; the forge loop
+		// applies the full era-scoped rule per won leader slot once the
+		// node is near the tip, and fails closed there.
+		n.config.logger.Warn(
+			"block producer opcert counter gap rule not evaluated at startup; the forge loop enforces it per leader slot",
+			"component", "node",
+			"pool_id", creds.GetPoolID().String(),
+			"slot", slot,
+			"reason", result.EraUnevaluable,
+		)
+	}
+	registered, vrfMatched := result.Registered, result.VRFMatched
 	if err != nil {
 		if errors.Is(err, forging.ErrVRFKeyHashMismatch) &&
 			n.config.network == "devnet" {
@@ -369,17 +429,26 @@ func (n *Node) initBlockForger(
 
 	// Create the block forger with the real leader election
 	forger, err := forging.NewBlockForger(forging.ForgerConfig{
-		Mode:                            forging.ModeProduction,
-		Logger:                          n.config.logger,
-		Credentials:                     creds,
-		LeaderChecker:                   election,
-		BlockBuilder:                    builder,
-		BlockBroadcaster:                broadcaster,
-		ConfirmedTxs:                    mempoolAdapter,
-		BlockForged:                     blockForged,
-		SlotClock:                       slotClock,
-		ForgeSyncToleranceSlots:         n.config.forgeSyncToleranceSlots,
-		ForgeStaleGapThresholdSlots:     n.config.forgeStaleGapThresholdSlots,
+		Mode:                               forging.ModeProduction,
+		Logger:                             n.config.logger,
+		Credentials:                        creds,
+		LeaderChecker:                      election,
+		BlockBuilder:                       builder,
+		BlockBroadcaster:                   broadcaster,
+		ConfirmedTxs:                       mempoolAdapter,
+		BlockForged:                        blockForged,
+		SlotClock:                          slotClock,
+		ForgeSyncToleranceSlots:            n.config.forgeSyncToleranceSlots,
+		ForgeStaleGapThresholdSlots:        n.config.forgeStaleGapThresholdSlots,
+		ForgePrimaryChainTipToleranceSlots: n.config.forgePrimaryChainTipToleranceSlots,
+		ForgeUpstreamStalenessSlots:        n.config.forgeUpstreamStalenessSlots,
+		ForgeAppliedTipStalenessSlots:      n.config.forgeAppliedTipStalenessSlots,
+		ForgeEndorserBlockStalenessSlots:   n.config.forgeEndorserBlockStalenessSlots,
+		// Closure, not a method value: n.ouroboros is rebuilt live, so this
+		// resolves the current instance when the forge loop asks.
+		LeiosVerifiedEbSlot: func() uint64 {
+			return n.ouroboros().MaxVerifiedEndorserBlockSlot()
+		},
 		BlockValidator:                  blockValidator,
 		ForgeFence:                      forgeFence,
 		PromRegistry:                    n.config.promRegistry,
@@ -753,24 +822,31 @@ func (a *slotClockAdapter) SlotsPerKESPeriod() uint64 {
 	return a.ledgerState.SlotsPerKESPeriod()
 }
 
-func (a *slotClockAdapter) ChainTipSlot() uint64 {
-	return a.ledgerState.ChainTipSlot()
+// ChainTip returns the ledger-applied tip. LedgerState.Tip reads one atomic
+// tip snapshot, so the returned slot and hash are always from the same tip.
+func (a *slotClockAdapter) ChainTip() ocommon.Point {
+	return a.ledgerState.Tip().Point
 }
 
-// ChainTipHash satisfies forging.ChainTipHashProvider. It lets the
-// forger tell its own block at the current slot from a rival's by hash
-// rather than inferring it from the forge fence, which is in-memory only
-// when no fence store is wired. Both this and ChainTipSlot read the same
-// tip snapshot; a tip that moves between the two reads simply fails the
-// hash match and falls back to the fence.
+// ChainTipHash satisfies the deprecated forging.ChainTipHashProvider. The
+// forger no longer calls it: it takes the tip hash from ChainTip above,
+// which returns slot and hash from one snapshot. Kept so the adapter still
+// satisfies that exported interface for any external caller.
 func (a *slotClockAdapter) ChainTipHash() []byte {
 	return a.ledgerState.Tip().Point.Hash
 }
 
-// The forger type-asserts for this optional interface, so losing the
-// method would silently fall back to the fence rather than fail to
-// build.
 var _ forging.ChainTipHashProvider = (*slotClockAdapter)(nil)
+
+// PrimaryChainTip returns the primary chain's BLOCK tip -- chain.Tip(), the
+// newest block added to the chain, which runs ahead of the ledger-applied tip
+// while the pipeline replays. It is NOT the header frontier: that is
+// chain.HeaderTip(), and nothing in the forge gate reads it. The primary chain
+// returns its tip under one lock, so the returned slot and hash are always
+// from the same tip.
+func (a *slotClockAdapter) PrimaryChainTip() ocommon.Point {
+	return a.ledgerState.PrimaryChainTip().Point
+}
 
 func (a *slotClockAdapter) NextSlotTime() (time.Time, error) {
 	return a.ledgerState.NextSlotTime()

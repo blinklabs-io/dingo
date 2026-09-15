@@ -21,8 +21,8 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
-	_ "github.com/glebarez/go-sqlite"
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
 )
 
 // depositHeldBackfillDB returns a database migrated to the version before the
@@ -39,7 +39,7 @@ func depositHeldBackfillDB(
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 13)
+	require.Len(t, registry, 15)
 	runTo := func(versions []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,
@@ -131,7 +131,9 @@ func TestDepositHeldBackfillLeavesUnknownDepositUnpopulated(t *testing.T) {
 // A re-registration does not pay a second deposit. The backfill must carry
 // forward the first registration's retained amount when the protocol deposit
 // changed before the later registration.
-func TestDepositHeldBackfillCarriesInitialDepositAcrossReregistration(t *testing.T) {
+func TestDepositHeldBackfillCarriesInitialDepositAcrossReregistration(
+	t *testing.T,
+) {
 	t.Parallel()
 	db, runTo := depositHeldBackfillDB(t)
 	keyHash := []byte("legacy-pool-key-hash-0000005")
@@ -155,7 +157,9 @@ WHERE pool_key_hash = ? ORDER BY added_slot DESC LIMIT 1`, keyHash).Scan(&held))
 	require.Equal(t, "500000000", held)
 }
 
-func TestDepositHeldBackfillLeavesUnknownReregistrationUnpopulated(t *testing.T) {
+func TestDepositHeldBackfillLeavesUnknownReregistrationUnpopulated(
+	t *testing.T,
+) {
 	t.Parallel()
 	db, runTo := depositHeldBackfillDB(t)
 	keyHash := []byte("legacy-pool-key-hash-0000006")

@@ -88,11 +88,11 @@ func TestCleanupConsumedUtxos_TimerStopsOnClose(t *testing.T) {
 	// absence check below is measuring a stopped timer rather than one that
 	// simply never started.
 	testutil.RequireReceive(
-		t, fires, 5*time.Second,
+		t, fires, testutil.AsyncWait,
 		"cleanup timer must fire while the ledger state is open",
 	)
 	testutil.RequireReceive(
-		t, fires, 5*time.Second,
+		t, fires, testutil.AsyncWait,
 		"cleanup timer must re-arm itself while the ledger state is open",
 	)
 
@@ -134,7 +134,7 @@ func TestCleanupConsumedUtxos_CloseWaitsForActiveCallback(t *testing.T) {
 
 	ls.scheduleCleanupConsumedUtxos()
 	testutil.RequireReceive(
-		t, entered, 5*time.Second,
+		t, entered, testutil.AsyncWait,
 		"cleanup timer callback must start before Close is called",
 	)
 
@@ -148,7 +148,7 @@ func TestCleanupConsumedUtxos_CloseWaitsForActiveCallback(t *testing.T) {
 
 	close(release)
 	err := testutil.RequireReceive(
-		t, closeReturned, 10*time.Second,
+		t, closeReturned, testutil.AsyncWait,
 		"Close must return once the in-flight cleanup callback finishes",
 	)
 	require.NoError(t, err)
@@ -202,7 +202,7 @@ func TestCleanupConsumedUtxos_RepeatedCloseIsSafe(t *testing.T) {
 
 	ls.scheduleCleanupConsumedUtxos()
 	testutil.RequireReceive(
-		t, fires, 5*time.Second,
+		t, fires, testutil.AsyncWait,
 		"cleanup timer must fire while the ledger state is open",
 	)
 

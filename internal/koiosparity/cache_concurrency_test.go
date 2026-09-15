@@ -23,8 +23,8 @@ import (
 	"testing"
 	"time"
 
-	sqlite "github.com/glebarez/go-sqlite"
 	"github.com/stretchr/testify/require"
+	sqlite "modernc.org/sqlite"
 )
 
 // busyTimeoutMargin exceeds OpenCache's hardcoded 5s busy_timeout pragma,
@@ -85,12 +85,16 @@ func TestSaveAccountFetchChunkProgressWaitsOutSlowConcurrentWriter(
 	require.NoError(t, err)
 	_, err = txA.Exec(
 		`DELETE FROM koios_account_fetch_staged_rows WHERE network = ? AND epoch = ? AND chunk_hash = ?`,
-		network, epoch, "chunk-A",
+		network,
+		epoch,
+		"chunk-A",
 	)
 	require.NoError(t, err)
 	_, err = txA.Exec(
 		`DELETE FROM koios_account_checked WHERE network = ? AND epoch = ? AND chunk_hash = ?`,
-		network, epoch, "chunk-A",
+		network,
+		epoch,
+		"chunk-A",
 	)
 	require.NoError(t, err)
 
@@ -174,9 +178,7 @@ func TestSaveAccountFetchChunkProgressConcurrentWritersDoNotHitSQLiteBusy(
 		errs := make([]error, workers)
 		start := make(chan struct{})
 		for w := range workers {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				<-start
 				chunkHash := "chunk-" + strconv.Itoa(w)
 				addr := "addr-" + strconv.Itoa(w)
@@ -190,7 +192,7 @@ func TestSaveAccountFetchChunkProgressConcurrentWritersDoNotHitSQLiteBusy(
 					[]string{addr},
 					now,
 				)
-			}()
+			})
 		}
 		close(start)
 		wg.Wait()

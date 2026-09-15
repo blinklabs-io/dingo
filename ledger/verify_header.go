@@ -1897,6 +1897,45 @@ func registeredPoolVrfKeyHash(
 	return vrfHash, true
 }
 
+// registeredPoolVrfKeyHashAsOfSlot is registeredPoolVrfKeyHash's
+// point-in-time counterpart: it resolves the VRF key hash a pool was held
+// to as of a specific historical slot rather than its current one.
+//
+// pool.Registration is loaded (loadPoolsAssociations) ordered added_slot
+// DESC, so the first entry at or before slot is the registration that was
+// in force at that point -- the same "later re-registration wins" rule
+// registeredPoolVrfKeyHash applies for "now", just bounded to a slot in the
+// past. A pool that re-registers with a new VRF key after slot must not
+// have that later key attributed to it here (blinklabs-io/dingo#4237): a
+// pinned GetStakeDistribution reply pairs each pool's historical stake with
+// the key that was actually in force at that slot, not whatever is
+// registered today.
+//
+// Unlike registeredPoolVrfKeyHash, this does not fall back to pool.VrfKeyHash
+// on a miss: that field is the pool's current, always-latest VRF key, and
+// falling back to it here would silently reintroduce the same bug for any
+// pool with no registration on record at or before slot.
+func registeredPoolVrfKeyHashAsOfSlot(
+	pool *models.Pool,
+	slot uint64,
+) (lcommon.Blake2b256, bool) {
+	var vrfHash lcommon.Blake2b256
+	if pool == nil {
+		return vrfHash, false
+	}
+	for _, reg := range pool.Registration {
+		if reg.AddedSlot > slot {
+			continue
+		}
+		if len(reg.VrfKeyHash) != len(vrfHash) {
+			return vrfHash, false
+		}
+		copy(vrfHash[:], reg.VrfKeyHash)
+		return vrfHash, true
+	}
+	return vrfHash, false
+}
+
 // maxKESEvolutions returns the maximum number of KES evolutions allowed before
 // an operational certificate expires, from Shelley genesis. Returns 0 when the
 // genesis is unavailable or carries a non-positive value; the caller,
@@ -1930,7 +1969,8 @@ func (ls *LedgerState) epochNonceHex(epochId uint64, nonce []byte) string {
 	}
 	ls.Lock()
 	defer ls.Unlock()
-	if cachedNonce, ok := ls.epochNonceHexCache[epochId]; ok && bytes.Equal(cachedNonce.nonce, nonce) {
+	if cachedNonce, ok := ls.epochNonceHexCache[epochId]; ok &&
+		bytes.Equal(cachedNonce.nonce, nonce) {
 		return cachedNonce.hex
 	}
 	nonceHex := hex.EncodeToString(nonce)

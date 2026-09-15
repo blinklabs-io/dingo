@@ -24,7 +24,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -227,7 +226,7 @@ func TestDecodeReadChainBatchDoesNotDeadlockOnManyValidationErrors(
 	testutil.RequireReceive(
 		t,
 		done,
-		20*time.Second,
+		testutil.AsyncWait,
 		"decodeReadChainBatch deadlocked submitting validation-failing "+
 			"blocks whose errors were never drained from errorsChan "+
 			"(issue #1894 regression)",
@@ -283,7 +282,7 @@ func stopAndDrainBlockPipeline(
 			testutil.RequireReceive(
 				t,
 				ls.blockPipelineErrorsDone,
-				5*time.Second,
+				testutil.AsyncWait,
 				"drainBlockPipelineErrors did not exit after Stop",
 			)
 		})
@@ -401,7 +400,7 @@ func TestDrainBlockPipelineErrorsApplyPendingLimitIsNotUnexpected(
 	testutil.RequireReceive(
 		t,
 		othersDone,
-		30*time.Second,
+		testutil.AsyncWait,
 		"every block after the first should have reached the validate "+
 			"stage while the first one was held there",
 	)
@@ -409,7 +408,7 @@ func TestDrainBlockPipelineErrorsApplyPendingLimitIsNotUnexpected(
 	testutil.RequireReceive(
 		t,
 		done,
-		30*time.Second,
+		testutil.AsyncWait,
 		"decodeReadChainBatch did not finish after the held block was "+
 			"released",
 	)

@@ -132,6 +132,11 @@ var flagSpecs = []flagSpec{
 		"error instead of skipping when a consumed UTxO past the Mithril sync boundary cannot be found or recovered",
 	),
 	boolFlag(
+		"SkipRewardLiveStakeBackfillCheck",
+		"skip-reward-live-stake-backfill-check",
+		"skip the reward_live_stake startup consistency check (advanced/diagnostic use only, unsafe to leave enabled permanently)",
+	),
+	boolFlag(
 		"Tracing",
 		"tracing",
 		"enable OpenTelemetry tracing (configure destination with OTEL_EXPORTER_OTLP_* env vars)",
@@ -675,6 +680,26 @@ var flagSpecs = []flagSpec{
 		"ForgeStaleGapThresholdSlots",
 		"forge-stale-gap-threshold-slots",
 		"slot gap threshold for stale slot clock alerts",
+	),
+	uint64Flag(
+		"ForgePrimaryChainTipToleranceSlots",
+		"forge-primary-chain-tip-tolerance-slots",
+		"max slots the ledger-applied tip may trail this node's own primary chain tip (chain.Tip()) before skipping block forging",
+	),
+	uint64Flag(
+		"ForgeUpstreamStalenessSlots",
+		"forge-upstream-staleness-slots",
+		"max slots the newest block this node holds may trail the corroborated upstream target before skipping block forging",
+	),
+	uint64Flag(
+		"ForgeAppliedTipStalenessSlots",
+		"forge-applied-tip-staleness-slots",
+		"max slots the newest block this node holds may be older than the current slot before skipping block forging (0 disables)",
+	),
+	uint64Flag(
+		"ForgeEndorserBlockStalenessSlots",
+		"forge-endorser-block-staleness-slots",
+		"max slots a corroborated Leios endorser block may lead the ledger-applied tip before skipping block forging (0 disables)",
 	),
 	boolFlag(
 		"ValidateForgedBlock",

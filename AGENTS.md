@@ -50,6 +50,16 @@ make govulncheck  # reachable Go vulnerabilities; needs network
 - Update `ARCHITECTURE.md` for any change to component responsibilities, package boundaries, startup/composition, EventBus topics/payloads, plugin interfaces, lifecycle/concurrency behavior, or cross-component flows among ledger, database, mempool, networking, API, and node wiring.
 - In final responses, report documentation status the same way tests are reported: either list the docs updated or explicitly state that `DATABASE.md`/`ARCHITECTURE.md` were checked and not affected.
 
+## Comments
+
+Comments explain an invariant, a non-obvious algorithm, or a gotcha: why this
+order, why this bound, why the obvious thing is wrong. Delete comments that
+restate the code below them, label sections, or narrate a change's history.
+Prose explaining how a system works belongs in documentation.
+
+Doc comments on exported identifiers are the exception. They are published API
+documentation: keep them accurate and in `// Name ...` form.
+
 ## Non-obvious invariants
 
 - EventBus for async cross-component notifications: use `event.EventBus.SubscribeFunc()` for block/chain/mempool/peer events. Synchronous state queries between components still use direct method calls.
@@ -80,6 +90,7 @@ make govulncheck  # reachable Go vulnerabilities; needs network
 | `chainselection.chain_switch` | active peer changed |
 | `epoch.transition` | epoch boundary — triggers stake snapshot |
 | `mempool.add_tx` / `mempool.remove_tx` | tx lifecycle |
+| `dmq.add_message` / `dmq.remove_message` | CIP-0137 DMQ message pool lifecycle |
 | `connmanager.conn_closed` | connection closed |
 | `peergov.peer_churn` | peer rotation |
 
