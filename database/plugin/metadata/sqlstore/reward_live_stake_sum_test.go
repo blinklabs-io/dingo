@@ -289,7 +289,11 @@ func TestSumCredentialUtxoStakeReusesCachedStatementAcrossTransactions(t *testin
 		secondStmt,
 		"expected the same cached *sql.Stmt across independent write transactions",
 	)
-	require.Equal(t, 1, entries)
+	// hotStatements now has more than just sumCredentialUtxoStakeQuery (see
+	// prepared_stmt.go); this asserts no spurious extra entry was created
+	// beyond the fixed set Start prepares eagerly, not that the cache holds
+	// exactly one statement.
+	require.Equal(t, len(hotStatements), entries)
 }
 
 // TestSumCredentialUtxoStakeConcurrentReuse drives many goroutines through
@@ -353,10 +357,13 @@ func TestSumCredentialUtxoStakeConcurrentReuse(t *testing.T) {
 	store.stmtMu.Lock()
 	entries := len(store.stmts)
 	store.stmtMu.Unlock()
+	// hotStatements now has more than just sumCredentialUtxoStakeQuery (see
+	// prepared_stmt.go); this asserts concurrent first use created no
+	// spurious extra entry beyond the fixed set Start prepares eagerly.
 	require.Equal(
 		t,
-		1,
+		len(hotStatements),
 		entries,
-		"expected concurrent first use to converge on a single cached statement",
+		"expected concurrent first use to converge on the fixed set of cached statements",
 	)
 }

@@ -125,6 +125,22 @@ type Store struct {
 	// prepared_stmt.go for the mechanism and correctness argument.
 	stmtMu sync.Mutex
 	stmts  map[string]*sql.Stmt
+
+	// sumCredentialUtxoStakeCalls counts invocations of
+	// sumCredentialUtxoStake, the per-credential full live-UTxO aggregate
+	// scan that refreshRewardLiveStakeAggregate runs on every touch (see
+	// live_stake.go). It exists purely for test observability -- proving
+	// that a transaction touching one stake credential through a
+	// certificate, a consumed input, and a produced output triggers that
+	// scan at most once, not once per occurrence. No production code path
+	// reads it.
+	sumCredentialUtxoStakeCalls atomic.Int64
+
+	// txStmtMu and txStmts back the per-transaction Tx-scoped statement
+	// cache; see prepared_stmt.go's txScopedStmt/evictTxStmts for the
+	// mechanism and correctness argument.
+	txStmtMu sync.Mutex
+	txStmts  map[*sql.Tx]map[*sql.Stmt]*sql.Stmt
 }
 
 // New constructs a shared store around already-opened connection pools.
@@ -697,6 +713,17 @@ func (t *sqlTxn) Rollback() error {
 }
 
 func (t *sqlTxn) releaseConnection() {
+	// Evict this transaction's derived Tx-scoped statement cache before
+	// releasing the connection: t.tx is committed or rolled back by the
+	// caller (Commit/Rollback, above) by the time releaseConnection runs,
+	// which is also when database/sql closes every *sql.Stmt it derived
+	// from t.tx (see prepared_stmt.go's txScopedStmt), so there is nothing
+	// left in owner.txStmts[t.tx] worth keeping. This bounds owner.txStmts
+	// to the store's concurrently open transactions rather than every
+	// transaction ever opened.
+	if t.owner != nil {
+		t.owner.evictTxStmts(t.tx)
+	}
 	if t.release != nil {
 		t.release()
 		t.release = nil
