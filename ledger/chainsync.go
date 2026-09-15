@@ -92,6 +92,30 @@ const (
 	// discards its record entirely.
 	blockfetchMaxSameRangeFailures = 3
 
+	// nonExtendingBlockRejectionThreshold is how many blocks fetched from the
+	// same peer connection may fail chain.AddBlockWithPointDeferred with
+	// BlockNotFitChainTipError inside nonExtendingBlockRejectionWindow before
+	// that connection is recycled (issue #4272).
+	//
+	// A peer racing a legitimate rollback/reorg can serve a handful of
+	// blocks that briefly no longer fit while its own view of the fork
+	// catches up to ours (or ours to its); that settles in at most a few
+	// exchanges bounded by normal chain-selection convergence, not dozens.
+	// A peer that keeps this up well past any plausible race -- hundreds of
+	// rejections at multiple per second, as observed live -- crosses this
+	// bound almost immediately, while a transient race spread over the
+	// window does not come close. noteBlockAcceptedFromConn forgives the
+	// count entirely the moment the same connection actually extends the
+	// chain, so a peer that only briefly raced is never punished for it.
+	nonExtendingBlockRejectionThreshold = 20
+
+	// nonExtendingBlockRejectionWindow bounds how far apart two
+	// non-extending-block rejections from the same connection can be and
+	// still count toward the same flood. A gap longer than this restarts
+	// the count, so sparse, unrelated rejections spread across a long
+	// connection lifetime never accumulate into a false recycle.
+	nonExtendingBlockRejectionWindow = 30 * time.Second
+
 	// Warn after this many consecutive watchdog expirations while the same
 	// protocol request is still blocked outside the ledger mutex. The request
 	// remains protected from duplicate retries, but a permanently wedged peer
@@ -4190,6 +4214,7 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferred(
 				e.Point,
 			)
 		}
+		headerVerifyStart := time.Now()
 		if !headerAlreadyVerified {
 			verifyErr = ls.verifyBlockHeaderCryptoBeforeApply(e.Block)
 		} else {
@@ -4199,6 +4224,10 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferred(
 				true,
 			)
 		}
+		ls.metrics.observeBlockStage(
+			blockStageHeaderVerify,
+			time.Since(headerVerifyStart),
+		)
 		if verifyErr != nil {
 			if IsHeaderVerificationDeferred(verifyErr) {
 				ls.markDeferredHeaderValidation(e.Point)
@@ -4473,6 +4502,121 @@ func (ls *LedgerState) noteBlockfetchRangeUnavailable(
 		pending,
 	)
 	return true
+}
+
+// nonExtendingBlockRejectionState counts recent "block does not fit chain
+// tip" rejections (chain.BlockNotFitChainTipError) from one connection,
+// bounded to nonExtendingBlockRejectionWindow. See
+// nonExtendingBlockRejectionThreshold for why this is windowed rather than a
+// simple consecutive streak.
+type nonExtendingBlockRejectionState struct {
+	windowStart time.Time
+	count       int
+}
+
+// evaluateNonExtendingBlockRejection folds one more non-extending-block
+// rejection into state at time now and reports whether the connection has
+// now crossed nonExtendingBlockRejectionThreshold rejections inside
+// nonExtendingBlockRejectionWindow. A gap since the window started that
+// exceeds the window restarts the count at 1 instead of accumulating, so
+// rejections spread thinly over a long connection lifetime never combine
+// into a false flood. Pure and deterministic so it can be tested directly
+// against synthetic timestamps, matching
+// chainsyncrecycler.shouldRecycleLocalTipPlateau.
+func evaluateNonExtendingBlockRejection(
+	state nonExtendingBlockRejectionState,
+	now time.Time,
+) (nonExtendingBlockRejectionState, bool) {
+	if state.count == 0 ||
+		now.Sub(state.windowStart) > nonExtendingBlockRejectionWindow {
+		state = nonExtendingBlockRejectionState{windowStart: now, count: 1}
+	} else {
+		state.count++
+	}
+	if state.count >= nonExtendingBlockRejectionThreshold {
+		return nonExtendingBlockRejectionState{}, true
+	}
+	return state, false
+}
+
+// noteNonExtendingBlockRejection records one non-extending-block rejection
+// from connId and, once evaluateNonExtendingBlockRejection reports the
+// connection has crossed the bounded flood threshold, logs and queues a
+// ConnectionRecycleRequestedEvent for it -- the same recycle mechanism
+// header/crypto verification failures already use just above, applied to a
+// peer that keeps serving blocks that do not extend the chain (issue #4272)
+// instead of the "ignore and keep retrying it as best peer" behavior that
+// let one peer flood ~300k rejected blocks across four reconnects live.
+//
+// The caller must hold ls.chainsyncBlockfetchMutex, which guards
+// ls.nonExtendingBlockRejections along with the rest of the blockfetch drain
+// state.
+func (ls *LedgerState) noteNonExtendingBlockRejection(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+	pending *pendingPublishes,
+) {
+	key := connIdKey(connId)
+	if key == "" {
+		return
+	}
+	if ls.nonExtendingBlockRejections == nil {
+		ls.nonExtendingBlockRejections = make(
+			map[string]nonExtendingBlockRejectionState,
+		)
+	}
+	next, shouldRecycle := evaluateNonExtendingBlockRejection(
+		ls.nonExtendingBlockRejections[key],
+		time.Now(),
+	)
+	if !shouldRecycle {
+		ls.nonExtendingBlockRejections[key] = next
+		return
+	}
+	delete(ls.nonExtendingBlockRejections, key)
+	// Tests construct LedgerState without metrics; guard against a nil
+	// Counter so the production codepath stays simple.
+	if ls.metrics.nonExtendingBlockFloodRecycles != nil {
+		ls.metrics.nonExtendingBlockFloodRecycles.Inc()
+	}
+	ls.config.Logger.Warn(
+		"recycling connection after repeated non-extending block rejections",
+		"component", "ledger",
+		"connection_id", connId.String(),
+		"slot", point.Slot,
+		"hash", hex.EncodeToString(point.Hash),
+		"threshold", nonExtendingBlockRejectionThreshold,
+		"window", nonExtendingBlockRejectionWindow.String(),
+	)
+	if ls.config.EventBus == nil {
+		return
+	}
+	pending.add(
+		ls.config.EventBus,
+		ConnectionRecycleRequestedEventType,
+		event.NewEvent(
+			ConnectionRecycleRequestedEventType,
+			ConnectionRecycleRequestedEvent{
+				ConnectionId: connId,
+				Reason:       "non_extending_block_flood",
+			},
+		),
+	)
+}
+
+// noteBlockAcceptedFromConn clears any non-extending-block rejection count
+// tracked for connId. A connection that just extended the chain has proven
+// it is not stuck replaying an abandoned fork, so rejections from before
+// that success (a brief rollback race, a stale queued header) must not
+// accumulate toward a later, unrelated flood.
+func (ls *LedgerState) noteBlockAcceptedFromConn(
+	connId ouroboros.ConnectionId,
+) {
+	key := connIdKey(connId)
+	if key == "" {
+		return
+	}
+	delete(ls.nonExtendingBlockRejections, key)
 }
 
 // startQueuedBlockfetchOnLocked starts the queued range on connId and, if that
@@ -4891,6 +5035,11 @@ func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 			validationEnabled, _ := ls.validationStateSnapshot()
 			ls.auditContinuationBlock(pendingEvent, validationEnabled)
 			ls.checkSlotBattle(pendingEvent, nil)
+			// This connection just extended the chain, so it is not stuck
+			// replaying an abandoned fork; forgive any earlier non-extending
+			// rejections instead of letting them combine with a later,
+			// unrelated flood.
+			ls.noteBlockAcceptedFromConn(pendingEvent.ConnectionId)
 			continue
 		}
 		ls.clearDeferredHeaderValidation(pendingEvent.Point)
@@ -4918,6 +5067,23 @@ func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 		)
 		if errors.As(addBlockErr, &notMatchErr) {
 			ls.clearQueuedHeaders()
+		}
+		if errors.As(addBlockErr, &notFitErr) {
+			// A peer that keeps serving blocks that do not extend the chain
+			// is never otherwise demoted: this error is deliberately
+			// swallowed as "ignored" above rather than returned, so it never
+			// reaches handleEventBlockfetch's recycle-on-error check. Track
+			// it here instead (issue #4272).
+			// Tests construct LedgerState without metrics; guard against a
+			// nil Counter so the production codepath stays simple.
+			if ls.metrics.nonExtendingBlockRejections != nil {
+				ls.metrics.nonExtendingBlockRejections.Inc()
+			}
+			ls.noteNonExtendingBlockRejection(
+				pendingEvent.ConnectionId,
+				pendingEvent.Point,
+				pubs,
+			)
 		}
 		ls.checkSlotBattle(pendingEvent, addBlockErr)
 	}
@@ -4993,7 +5159,16 @@ func (ls *LedgerState) createGenesisBlock() error {
 		return fmt.Errorf("get genesis block hash: %w", err)
 	}
 
-	if ls.currentTip.Point.Slot > 0 {
+	// bootstrappedFromMithril is true only on the fall-through path below:
+	// a chain already past slot 0 whose genesis CBOR was never created,
+	// which happens specifically when a Mithril bootstrap imported ledger
+	// state and ImmutableDB blocks without going through this function
+	// first. Captured once, here, rather than re-read inline further
+	// down: this function's only caller runs it once at startup before
+	// any concurrent chain-extension could move currentTip, so a single
+	// snapshot is representative for the whole call.
+	bootstrappedFromMithril := ls.currentTip.Point.Slot > 0
+	if bootstrappedFromMithril {
 		// Validate existing chain data matches the current genesis config.
 		// If genesis CBOR exists in the blob store with the expected hash,
 		// the database was created with a matching genesis. Older databases
@@ -5142,20 +5317,39 @@ func (ls *LedgerState) createGenesisBlock() error {
 			return fmt.Errorf("store genesis cbor: %w", err)
 		}
 
-		// Store each genesis transaction with its UTxOs
-		for txHashArray, utxos := range txUtxos {
-			if err := ls.db.SetGenesisTransaction(
-				txHashArray[:],
-				genesisHash[:],
-				utxos,
-				utxoOffsets,
-				txn,
-			); err != nil {
-				return fmt.Errorf(
-					"set genesis transaction %x: %w",
-					txHashArray[:8],
-					err,
-				)
+		// Store each genesis transaction with its UTxOs -- but only for a
+		// from-genesis sync. A Mithril-bootstrapped node's imported ledger
+		// snapshot already reflects the *current*, correct live/spent
+		// status of every genesis output as of the bootstrap point: a
+		// genesis UTxO still unspent there is already present in that
+		// import, and one spent at any point before it is correctly
+		// absent. This function has no way to tell those two cases apart
+		// from genesis data alone (it never replayed the history between
+		// slot 0 and the bootstrap point), so inserting these rows here
+		// would either duplicate an already-imported live UTxO or
+		// resurrect one genuinely spent long ago as live again --
+		// exactly the divergence blinklabs-io/dingo#4151 found via
+		// cmd/node-parity against a real cardano-node. The synthetic
+		// genesis block CBOR above is still stored unconditionally: other
+		// code depends on it existing structurally (e.g. this function's
+		// own HasGenesisCbor short-circuit above, and the Shelley genesis
+		// hash used elsewhere), independent of whether its per-output
+		// UTxOs are (re-)inserted into the live UTxO store.
+		if !bootstrappedFromMithril {
+			for txHashArray, utxos := range txUtxos {
+				if err := ls.db.SetGenesisTransaction(
+					txHashArray[:],
+					genesisHash[:],
+					utxos,
+					utxoOffsets,
+					txn,
+				); err != nil {
+					return fmt.Errorf(
+						"set genesis transaction %x: %w",
+						txHashArray[:8],
+						err,
+					)
+				}
 			}
 		}
 
@@ -5184,17 +5378,40 @@ func (ls *LedgerState) createGenesisBlock() error {
 			return err
 		}
 
-		ls.config.Logger.Info(
-			fmt.Sprintf("stored %d genesis transactions with %d total UTxOs",
-				len(txUtxos),
-				len(genesisUtxos),
-			),
-			"component", "ledger",
-			"treasury", 0,
-			"reserves", genesisReserves,
-		)
+		if bootstrappedFromMithril {
+			ls.config.Logger.Info(
+				"stored synthetic genesis block CBOR; skipped inserting "+
+					"genesis UTxOs (already reflected by the Mithril-"+
+					"imported ledger snapshot)",
+				"component", "ledger",
+				"genesis_transactions", len(txUtxos),
+				"genesis_utxos", len(genesisUtxos),
+				"treasury", 0,
+				"reserves", genesisReserves,
+			)
+		} else {
+			ls.config.Logger.Info(
+				fmt.Sprintf("stored %d genesis transactions with %d total UTxOs",
+					len(txUtxos),
+					len(genesisUtxos),
+				),
+				"component", "ledger",
+				"treasury", 0,
+				"reserves", genesisReserves,
+			)
+		}
 
-		// Load genesis staking data (pool registrations + delegations)
+		// Load genesis staking data (pool registrations + delegations) --
+		// but only for a from-genesis sync, for the same reason genesis
+		// UTxO insertion is skipped above (blinklabs-io/dingo#4151).
+		// SetGenesisStaking upserts current-state pool/delegation rows
+		// (ON CONFLICT ... DO UPDATE), and a Mithril-bootstrapped node's
+		// imported ledger snapshot (ledgerstate/import.go's
+		// importCertState) already reflects the correct *current*
+		// pool/delegation state as of the bootstrap point -- reapplying
+		// stale genesis-config values here would resurrect a pool or
+		// delegation genuinely retired/changed long before the bootstrap
+		// point, the same resurrection bug #4151 found for UTxOs.
 		genesisPools, poolDelegators, err := shelleyGenesis.InitialPools()
 		if err != nil {
 			return fmt.Errorf("parse genesis staking: %w", err)
@@ -5203,8 +5420,8 @@ func (ls *LedgerState) createGenesisBlock() error {
 		if err != nil {
 			return fmt.Errorf("parse genesis stake delegations: %w", err)
 		}
-		if len(genesisPools) > 0 ||
-			len(genesisStake) > 0 {
+		if !bootstrappedFromMithril &&
+			(len(genesisPools) > 0 || len(genesisStake) > 0) {
 			ls.config.Logger.Info(
 				fmt.Sprintf(
 					"loading genesis staking: %d pools, %d delegations",
@@ -5227,9 +5444,12 @@ func (ls *LedgerState) createGenesisBlock() error {
 		// Load Conway genesis bootstrap data (initial DReps and
 		// stake/vote delegations). The conway-genesis.json may declare
 		// pre-existing DReps and delegations for test networks; mainnet
-		// has none.
+		// has none. Same bootstrappedFromMithril guard as genesis
+		// staking above, for the same reason: SetGenesisGovernance
+		// upserts current-state DRep/delegation rows that a Mithril
+		// import has already populated correctly.
 		conwayGenesis := ls.config.CardanoNodeConfig.ConwayGenesis()
-		if conwayGenesis != nil &&
+		if !bootstrappedFromMithril && conwayGenesis != nil &&
 			(len(conwayGenesis.InitialDReps) > 0 ||
 				len(conwayGenesis.Delegs) > 0) {
 			ls.config.Logger.Info(

@@ -39,6 +39,22 @@ func TestQuoteIdentifier(t *testing.T) {
 	require.Equal(t, "`a``b`", MySQLDialect().QuoteIdentifier("a`b"))
 }
 
+// TestTranslateMySQLUpsertRewritesBigintCast covers the "AS BIGINT" cast
+// added for sumCredentialUtxoStake: SQLite and PostgreSQL both accept BIGINT
+// directly, but MySQL's CAST() has no BIGINT spelling, so
+// dialectQueryer.translate (which calls translateMySQLUpsert for every mysql
+// query, not only upserts) must rewrite it to the 64-bit "AS SIGNED" form the
+// same way it already does for "AS INTEGER".
+func TestTranslateMySQLUpsertRewritesBigintCast(t *testing.T) {
+	t.Parallel()
+	query := `SELECT SUM(CAST(amount AS BIGINT)) FROM utxo WHERE credential_tag = ? AND staking_key = ? AND deleted_slot = 0`
+	require.Equal(
+		t,
+		`SELECT SUM(CAST(amount AS SIGNED)) FROM utxo WHERE credential_tag = ? AND staking_key = ? AND deleted_slot = 0`,
+		translateMySQLUpsert(query),
+	)
+}
+
 func TestTranslateMySQLReservedIdentifiers(t *testing.T) {
 	t.Parallel()
 	query := `SELECT "transaction"."hash", "index" FROM "transaction"`

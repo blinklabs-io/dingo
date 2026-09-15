@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
@@ -381,7 +380,7 @@ func TestEnsureBlockfetchDrainingAfterForkQueueFailureRecoversWhenStartFails(
 	)
 
 	resyncEvt := testutil.RequireReceive(
-		t, resyncCh, 2*time.Second,
+		t, resyncCh, testutil.AsyncWait,
 		"a chainsync re-sync must be requested when the recovery "+
 			"restart itself fails",
 	)

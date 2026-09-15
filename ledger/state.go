@@ -1016,6 +1016,13 @@ type LedgerState struct {
 	// deliveries for other ranges and header-queue churn; discarded when
 	// the tracked range itself is delivered.
 	blockfetchRangeFailure blockfetchRangeFailureState
+	// nonExtendingBlockRejections counts, per connection (keyed by
+	// connIdKey), recent "block does not fit chain tip" rejections inside
+	// nonExtendingBlockRejectionWindow. Guarded by chainsyncBlockfetchMutex,
+	// like the rest of the blockfetch drain state above. See
+	// noteNonExtendingBlockRejection and noteBlockAcceptedFromConn
+	// (issue #4272).
+	nonExtendingBlockRejections map[string]nonExtendingBlockRejectionState
 	// deferredHeaderValidation holds block points whose stateful header checks
 	// wait for ledger apply. It is guarded by its own deferredHeaderValidationMu
 	// (NOT the main RWMutex) so the snapshot retention guard
@@ -1081,7 +1088,25 @@ type LedgerState struct {
 	// Cross-fork continuation audit (issue #3005). Armed by a local
 	// rollback and consumed by the blockfetch handler; see
 	// ledger/continuation_audit.go for the cost and soundness argument.
-	continuationAudit    atomic.Pointer[continuationAuditWindow]
+	//
+	// continuationAuditMutex owns every transition of the pointer, and every
+	// recording of a body into the window it publishes. The atomic makes
+	// each access safe on its own; it is the *sequence* that matters here,
+	// because arming reads the outgoing window and recovery clears and
+	// restores it, and those goroutines share no other lock. It is the
+	// innermost of the ledger's locks -- only a window's own per-field
+	// mutexes are taken under it -- and it is never held across a chain
+	// truncation or a blockfetch drain. See armContinuationAudit,
+	// commitContinuationAuditBody and settleAuditAfterRewind.
+	continuationAuditMutex sync.Mutex
+	continuationAudit      atomic.Pointer[continuationAuditWindow]
+	// continuationAuditGen counts transitions of that pointer, under the
+	// same lock. A recovery rewind clears the pointer and may put it back
+	// afterwards, and the pointer alone cannot tell "still cleared by me"
+	// from "disarmed by a rollback in the meantime" -- both are nil. The
+	// generation distinguishes them, so a restore never overwrites another
+	// owner's decision. See publishContinuationAudit.
+	continuationAuditGen uint64
 	mithrilLedgerSlot    uint64 // blocks at or below this slot are Mithril-verified; skip validation
 	mithrilLedgerHash    []byte // hash for mithrilLedgerSlot, used as a stable chainsync intersect point
 	lastLocalRollbackSeq uint64
@@ -1288,6 +1313,10 @@ type LedgerState struct {
 	// cleanupWG, so a lifecycle test can hold a run in flight and assert
 	// that Close drains it.
 	cleanupConsumedUtxosRunHook func()
+	// Test hook replacing the primary-chain membership read the continuation
+	// audit makes. A healthy store never fails that read, so without it the
+	// audit's handling of a failed read cannot be driven from a test.
+	continuationAuditContainsPoint func(ocommon.Point) (bool, error)
 }
 
 // upstreamSyncState is one connection-generation snapshot. Consumers must not
@@ -3882,7 +3911,7 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 	if pointMatches(ls.Tip().Point, point) {
 		ls.armContinuationAudit(point, "chainsync rollback")
 	} else {
-		ls.continuationAudit.Store(nil)
+		ls.disarmContinuationAudit()
 	}
 	return nil
 }
@@ -3920,7 +3949,7 @@ func (ls *LedgerState) reportFailedLedgerRollbackAfterTruncation(
 	point ocommon.Point,
 	cause error,
 ) error {
-	ls.continuationAudit.Store(nil)
+	ls.disarmContinuationAudit()
 	ledgerTip := ls.Tip()
 	ls.config.Logger.Error(
 		"primary chain truncated but ledger rollback failed; "+
@@ -6765,7 +6794,13 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						// block so that UTxOs created by earlier non-validated
 						// blocks are visible during validation lookups.
 						if shouldValidateBlock && len(deltaBatch.deltas) > 0 {
-							if err := deltaBatch.apply(ls, txn); err != nil {
+							applyStart := time.Now()
+							err := deltaBatch.apply(ls, txn)
+							ls.metrics.observeBlockStage(
+								blockStageApply,
+								time.Since(applyStart),
+							)
+							if err != nil {
 								deltaBatch.Release()
 								return err
 							}
@@ -6948,7 +6983,13 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						}
 					}
 					// Apply delta batch
-					if err := deltaBatch.apply(ls, txn); err != nil {
+					applyStart := time.Now()
+					err := deltaBatch.apply(ls, txn)
+					ls.metrics.observeBlockStage(
+						blockStageApply,
+						time.Since(applyStart),
+					)
+					if err != nil {
 						deltaBatch.Release()
 						return err
 					}
@@ -7271,7 +7312,11 @@ func (ls *LedgerState) ledgerProcessBlock(
 		if err := eras.ValidateOpCertPersistableCounter(
 			opCertIssueNumber,
 		); err != nil {
-			return nil, fmt.Errorf("pool %x: %w", opCertPoolKeyHash, err)
+			return nil, fmt.Errorf(
+				"pool %x: %w",
+				opCertPoolKeyHash.Bytes(),
+				err,
+			)
 		}
 		// Counter monotonicity is the stateful half of inbound opcert
 		// validation: read the pool's last-seen counter before processing this
@@ -7294,7 +7339,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 			if err != nil {
 				return nil, fmt.Errorf(
 					"read opcert counter for pool %x: %w",
-					opCertPoolKeyHash,
+					opCertPoolKeyHash.Bytes(),
 					err,
 				)
 			}
@@ -7304,7 +7349,11 @@ func (ls *LedgerState) ledgerProcessBlock(
 				opCertIssueNumber,
 				opCertNoGapRuleApplies(block.Era().Id),
 			); err != nil {
-				return nil, fmt.Errorf("pool %x: %w", opCertPoolKeyHash, err)
+				return nil, fmt.Errorf(
+					"pool %x: %w",
+					opCertPoolKeyHash.Bytes(),
+					err,
+				)
 			}
 		}
 	}
@@ -7560,11 +7609,16 @@ func (ls *LedgerState) ledgerProcessBlock(
 					horizonAnchorSlot: parent.slot,
 				}).pinCommitteeState(committeeEpoch, pp).
 					pinSyntheticV2CostModel(synthetic)
+				validateStart := time.Now()
 				err := validationEra.ValidateTxFunc(
 					tx,
 					point.Slot,
 					lv,
 					pp,
+				)
+				ls.metrics.observeBlockStage(
+					blockStageValidate,
+					time.Since(validateStart),
 				)
 				// A LedgerView predicate that swallowed a genuine storage
 				// error into a false verdict (issue #1649) can have
@@ -9312,6 +9366,7 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		// pre-SetLedger case only -- it is never reachable from an
 		// untrusted peer, since every chainsync-driven path runs after
 		// SetLedger.
+		tipBeforeRewind := ls.chain.Tip().Point
 		rewindErr := func() error {
 			if ls.config.ChainManager.SecurityParamConfigured() {
 				return ls.config.ChainManager.RewindPrimaryChainToPoint(
@@ -9322,6 +9377,19 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 				ancestor,
 			)
 		}()
+		// This truncation runs outside both paths that transition the
+		// continuation-audit window: the rollback that arms and disarms
+		// it, and the recovery rewind that clears and settles it. A window
+		// left armed over it holds producers for blocks it deleted, and a
+		// recovery rewind settling afterwards restores the window it
+		// cleared unless the pointer generation moved, so the truncation
+		// must be a transition of its own. A rewind refused before its
+		// first deletion leaves the window describing an unchanged chain.
+		// See settleAuditAfterRewind.
+		if rewindErr == nil ||
+			primaryChainTipRegressed(tipBeforeRewind, ls.chain.Tip().Point) {
+			ls.disarmContinuationAudit()
+		}
 		if rewindErr != nil {
 			return rewindErr
 		}
