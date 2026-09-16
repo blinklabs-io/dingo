@@ -1179,8 +1179,20 @@ When `Node.Run()` is called, components are initialized in this order:
     candidate that may have evolved. After the
     tip loads, `healMithrilGapBlockNonces` reconstructs the evolving-nonce fold
     across any Mithril "gap blocks" (see Mithril Bootstrap) before header
-    verification computes an epoch nonce; only then does LedgerState subscribe
-    to chainsync/blockfetch/chain-update EventBus events.
+    verification computes an epoch nonce, and `healTruncateGapBlockNonces` then
+    repairs a tip whose own `block_nonce` row is empty because a disaster-
+    recovery truncate (or, for Ouroboros Genesis chain selection, an ordinary
+    rollback deeper than the security parameter) landed on a slot the routine
+    3-epoch retention window had already pruned — see Truncate in DATABASE.md.
+    It folds forward from the nearest surviving checkpoint through the
+    still-present block CBOR up to the tip, sharing `foldBlockEtaV` with the
+    Mithril heal so the two can never compute a nonce differently, and warns
+    and leaves state as-is (rather than failing startup) when no checkpoint
+    exists to fold from — unreachable for a genuine truncate-created gap,
+    since `database.TruncateAfterSlot` already refuses such a truncate. The
+    same reconstruction also runs after `LedgerState.rollback` in-process, the
+    only other caller of `TruncateAfterSlot`. Only then does LedgerState
+    subscribe to chainsync/blockfetch/chain-update EventBus events.
     Fresh genesis initialization persists both genesis UTxOs and the effective
     Shelley staking declarations, including network-specific `extraConfig`
     pools and delegations, before snapshot capture.

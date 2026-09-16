@@ -433,18 +433,53 @@ func (d *Database) TruncateAfterSlot(
 		if len(newNonce) == 0 &&
 			truncateBlock.Type != byron.BlockTypeByronEbb &&
 			truncateBlock.Type != byron.BlockTypeByronMain {
-			return ochainsync.Tip{}, nil, fmt.Errorf(
-				"truncate target at slot %d (hash %x) has no stored block "+
-					"nonce: the block_nonce row may have been pruned by "+
-					"routine 3-epoch retention; resuming nonce computation "+
-					"from an empty value would silently corrupt the epoch "+
-					"nonce for every epoch computed afterward and fail VRF "+
-					"verification for the whole following epoch -- choose a "+
-					"truncate target within the retained window, or restore "+
-					"the block_nonce history for this point first",
+			// A pruned target nonce is reconstructible as long as a
+			// checkpoint row (is_checkpoint=1, retained forever, written
+			// once per epoch) survives at or before the target's own slot:
+			// LedgerState's startup heal (healTruncateGapBlockNonces) folds
+			// the evolving nonce forward from that checkpoint through the
+			// still-present block CBOR between it and the target -- this
+			// truncate only ever deletes blocks strictly AFTER its target,
+			// never at or before it, so that history is guaranteed present
+			// -- and persists the correct nonce before any epoch nonce or
+			// VRF check runs. This package intentionally has no ledger/era
+			// knowledge to perform that fold itself (see AGENTS.md's
+			// database/ledger boundary), so it only verifies a checkpoint
+			// exists and defers the actual reconstruction to the ledger
+			// layer.
+			//
+			// No checkpoint before the target means reconstruction has
+			// nothing to fold from -- reject exactly as before, since
+			// resuming nonce computation from an empty value would
+			// silently corrupt every epoch nonce computed afterward.
+			hasCheckpoint, cpErr := d.hasBlockNonceCheckpointAtOrBeforeSlot(
 				point.Slot,
-				point.Hash,
+				txn,
 			)
+			if cpErr != nil {
+				return ochainsync.Tip{}, nil, fmt.Errorf(
+					"check for a block_nonce checkpoint before truncate target: %w",
+					cpErr,
+				)
+			}
+			if !hasCheckpoint {
+				return ochainsync.Tip{}, nil, fmt.Errorf(
+					"truncate target at slot %d (hash %x) has no stored "+
+						"block nonce and no earlier checkpoint exists to "+
+						"reconstruct it from: the block_nonce row may have "+
+						"been pruned by routine 3-epoch retention; resuming "+
+						"nonce computation from an empty value would "+
+						"silently corrupt the epoch nonce for every epoch "+
+						"computed afterward and fail VRF verification for "+
+						"the whole following epoch -- choose a truncate "+
+						"target within the retained window, or restore the "+
+						"block_nonce history for this point first",
+					point.Slot,
+					point.Hash,
+				)
+			}
+			// Leave newNonce nil: the caller's tip will carry no nonce
+			// until LedgerState's startup heal reconstructs it.
 		}
 	}
 	// Write tip to DB

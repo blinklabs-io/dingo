@@ -23,17 +23,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestTruncateAfterSlotRejectsTargetWithPrunedNonce reproduces a
-// live-incident finding: dingo prunes non-checkpoint block_nonce rows older
-// than 3 epochs behind the current tip (ledger/state.go's
-// cleanupBlockNoncesBefore), keeping only each epoch's single checkpoint
-// row. A disaster-recovery truncate (database/lifecycle/truncate.go) can
-// roll the tip back to an arbitrary historical point that is *older* than
-// that 3-epoch retention window -- exactly the case that already ran
-// against a live database and produced a wrong epoch nonce for the epoch
-// immediately following the truncate point (every VRF verification in that
-// epoch then failed against real, canonical chain headers on 4 independent
-// nodes).
+// TestTruncateAfterSlotAllowsTargetWithPrunedNonceWhenCheckpointSurvives
+// reproduces a live-incident finding: dingo prunes non-checkpoint
+// block_nonce rows older than 3 epochs behind the current tip
+// (ledger/state.go's cleanupBlockNoncesBefore), keeping only each epoch's
+// single checkpoint row. A disaster-recovery truncate
+// (database/lifecycle/truncate.go) can roll the tip back to an arbitrary
+// historical point that is *older* than that 3-epoch retention window --
+// exactly the case that already ran against a live database and produced a
+// wrong epoch nonce for the epoch immediately following the truncate point
+// (every VRF verification in that epoch then failed against real, canonical
+// chain headers on 4 independent nodes).
 //
 // TruncateAfterSlot fetches the new tip's evolving nonce with a single
 // exact-point lookup (GetBlockNonce(point)). GetBlockNonce returns (nil,
@@ -41,17 +41,29 @@ import (
 // block's own block_nonce row has already been pruned (its epoch's
 // checkpoint is some other, earlier block), TruncateAfterSlot used to
 // silently return an empty nonce instead of failing loudly. A node restart
-// after such a truncate then seeds the resumed evolving-nonce fold
+// after such a truncate then seeded the resumed evolving-nonce fold
 // (LedgerState.loadTip -> ledgerProcessBlocks' runningNonce) from empty
 // bytes, corrupting every block nonce computed for the remainder of the
 // epoch and, through it, the following epoch's nonce.
 //
+// TruncateAfterSlot now allows this truncate to proceed with a nil nonce
+// instead: as long as a checkpoint row survives at or before the target's
+// slot, LedgerState's startup heal (healTruncateGapBlockNonces) can fold the
+// evolving nonce forward from it through the still-present block CBOR
+// between checkpoint and target -- this package has no ledger/era knowledge
+// to do that fold itself (see AGENTS.md's database/ledger boundary), so it
+// only verifies a checkpoint exists here and defers the reconstruction.
+// TestHealTruncateGapBlockNonces_ReconstructsFromCheckpoint (ledger package)
+// proves that reconstruction produces the correct nonce.
+//
 // This test does not fold real VRF outputs (it does not need real block
 // content to demonstrate the defect): it shows that a truncate target whose
-// own block_nonce row was pruned must now fail loudly instead of silently
-// returning an empty nonce, even though an earlier, non-pruned checkpoint
-// row exists for the same epoch.
-func TestTruncateAfterSlotRejectsTargetWithPrunedNonce(t *testing.T) {
+// own block_nonce row was pruned succeeds with a nil nonce -- not a silently
+// wrong one -- when an earlier, non-pruned checkpoint row exists for the
+// same epoch.
+func TestTruncateAfterSlotAllowsTargetWithPrunedNonceWhenCheckpointSurvives(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	db := newTestDB(t)
@@ -123,20 +135,74 @@ func TestTruncateAfterSlotRejectsTargetWithPrunedNonce(t *testing.T) {
 		"sanity check: the epoch's checkpoint row must survive retention pruning")
 
 	// Re-run the exact same truncate against the now-pruned target. Before
-	// the fix, this silently returned (Tip, nil-nonce, nil-error) -- the
-	// exact live-incident mechanism: a deep 'dingo database truncate'
+	// PR #4343's fix, this silently returned (Tip, nil-nonce, nil-error) --
+	// the exact live-incident mechanism: a deep 'dingo database truncate'
 	// landing on a pruned slot silently corrupted the resumed nonce chain,
-	// causing every VRF verification in the following epoch to fail
-	// against real, canonical chain headers on 4 independent
-	// Preview-testnet nodes. TruncateAfterSlot must now refuse to proceed
-	// instead of silently substituting an empty nonce.
+	// causing every VRF verification in the following epoch to fail against
+	// real, canonical chain headers on 4 independent Preview-testnet nodes.
+	// It must still return a nil nonce here (there is nothing else to
+	// return -- the target's own row is gone), but must NOT error now that
+	// a checkpoint survives to reconstruct from: LedgerState's startup heal
+	// is responsible for actually computing and persisting the correct
+	// nonce before anything folds forward from it.
+	_, nonceAfterPruning, err := db.TruncateAfterSlot(point, 0, nil)
+	require.NoError(t, err,
+		"TruncateAfterSlot must allow a truncate whose target's block_nonce "+
+			"row was pruned when an earlier checkpoint survives to "+
+			"reconstruct from, deferring the fold to LedgerState's startup "+
+			"heal instead of rejecting a genuinely recoverable truncate")
+	require.Nil(t, nonceAfterPruning)
+}
+
+// TestTruncateAfterSlotRejectsTargetWithPrunedNonceAndNoCheckpoint verifies
+// the fallback this package retains for the case reconstruction genuinely
+// cannot handle: when no checkpoint row survives at or before the truncate
+// target at all (e.g. block_nonce history predating checkpoint retention, or
+// outright corruption), there is nothing for LedgerState's startup heal to
+// fold forward from, so TruncateAfterSlot must still fail loudly instead of
+// letting the tip end up with an unreconstructable nil nonce.
+func TestTruncateAfterSlotRejectsTargetWithPrunedNonceAndNoCheckpoint(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDB(t)
+
+	// Truncate target with its own (non-checkpoint) nonce row, but no
+	// checkpoint row anywhere before it.
+	targetBlock := testIndexedBlock(1500, 1, 0x15)
+	targetBlock.Type = babbage.BlockTypeBabbage
+	require.NoError(t, db.BlockCreate(targetBlock, nil))
+	targetNonce := bytes.Repeat([]byte{0xc2}, 32)
+	require.NoError(t, db.SetBlockNonce(
+		targetBlock.Hash,
+		targetBlock.Slot,
+		targetNonce,
+		false, // isCheckpoint
+		nil,
+	))
+
+	point := ocommon.Point{Slot: targetBlock.Slot, Hash: targetBlock.Hash}
+
+	// Simulate the target's own row being pruned (e.g. by routine 3-epoch
+	// retention) with no checkpoint anywhere to fall back to.
+	require.NoError(t, db.DeleteBlockNoncesBeforeSlotWithoutCheckpoints(
+		targetBlock.Slot+1,
+		nil,
+	))
+	prunedNonce, err := db.GetBlockNonce(point, nil)
+	require.NoError(t, err)
+	require.Empty(t, prunedNonce,
+		"sanity check: the target's own block_nonce row must actually "+
+			"be gone")
+
 	_, nonceAfterPruning, err := db.TruncateAfterSlot(point, 0, nil)
 	require.Error(t, err,
-		"TruncateAfterSlot must reject a target whose block_nonce row has "+
-			"been pruned instead of silently continuing with an empty "+
-			"nonce -- doing so would seed the resumed evolving-nonce fold "+
-			"with wrong state and corrupt every subsequent epoch's "+
+		"TruncateAfterSlot must reject a target whose block_nonce row was "+
+			"pruned when no checkpoint survives to reconstruct from -- "+
+			"there is nothing for the startup heal to fold forward from, "+
+			"so silently continuing would corrupt every subsequent epoch's "+
 			"VRF-verification nonce")
-	require.Contains(t, err.Error(), "no stored block")
+	require.Contains(t, err.Error(), "no earlier checkpoint exists")
 	require.Nil(t, nonceAfterPruning)
 }
