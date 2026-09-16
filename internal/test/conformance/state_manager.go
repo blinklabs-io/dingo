@@ -378,9 +378,7 @@ func (m *DingoStateManager) LoadInitialState(
 			m.utxoIDs[id] = struct{}{}
 		}
 	}
-	for credential, deposit := range state.StakeCredentialDeposits {
-		m.stakeDeposits[credential] = deposit
-	}
+	maps.Copy(m.stakeDeposits, state.StakeCredentialDeposits)
 	m.syncRewardBalanceMirrors()
 
 	txn := m.db.Transaction(true)
