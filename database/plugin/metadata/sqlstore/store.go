@@ -232,12 +232,8 @@ func New(config Config) (*Store, error) {
 		prepare:                     config.Prepare,
 		reset:                       config.Reset,
 		validateBackup:              config.ValidateBackup,
-		sqlOperations: newSQLOperationsCounter(
-			config.PromRegistry,
-		),
-		sqlQueryDuration: newSQLQueryDurationHistogram(
-			config.PromRegistry,
-		),
+		sqlOperations:               newSQLOperationsCounter(config.PromRegistry),
+		sqlQueryDuration:            newSQLQueryDurationHistogram(config.PromRegistry),
 	}, nil
 }
 

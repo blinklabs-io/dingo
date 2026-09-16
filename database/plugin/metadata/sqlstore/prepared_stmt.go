@@ -30,6 +30,24 @@ var hotStatements = []string{
 	sumCredentialUtxoStakeQuery,
 	rewardLiveStakeAccountQuery,
 	rewardLiveStakeUpsertQuery,
+	insertUtxoQuery,
+	insertUtxoQueryIgnoreConflict,
+	getAssetIDQuery,
+}
+
+// cacheableForDialect reports whether query is safe to serve from the
+// hot-statement cache when running against dialect. The only unsafe
+// combination today is a RETURNING-id query on MySQL: dialectQueryer.
+// QueryRowContext (dialect_queryer.go) special-cases exactly that shape and
+// never calls QueryRowContext with the translated text at all, instead
+// issuing its own ExecContext + LastInsertId (or RowsAffected, for an
+// ON CONFLICT DO NOTHING that matched nothing) sequence -- a cached
+// *sql.Stmt would sit unused by that path regardless of whether one exists,
+// so prepareHotStatements skips creating it. PostgreSQL supports RETURNING
+// natively (dialectQueryer.QueryRowContext takes its ordinary path there,
+// like SQLite), so this only ever excludes the MySQL+RETURNING pair.
+func cacheableForDialect(dialect, query string) bool {
+	return dialect != "mysql" || !hasReturningID(query)
 }
 
 // prepareHotStatements prepares every entry in hotStatements once against
@@ -91,6 +109,17 @@ func (s *Store) prepareHotStatements(ctx context.Context) {
 	// helper purely for consistency with every other call site.
 	dialectDB := s.instrumentedQueryer(s.writeDB)
 	for _, query := range hotStatements {
+		if !cacheableForDialect(s.dialect.Name(), query) {
+			// See insertUtxoQuery's doc comment (transaction_write.go): a
+			// RETURNING-id query is never safe to cache on MySQL, because
+			// dialectQueryer.QueryRowContext's MySQL emulation for it bypasses
+			// QueryRowContext (and so any cached *sql.Stmt) entirely. Leave it
+			// out of the cache for that dialect+shape combination rather than
+			// prepare a statement nothing will ever look up: queryRowCached's
+			// existing "not found" fallback already calls db.QueryRowContext
+			// directly, which dialectQueryer handles correctly on its own.
+			continue
+		}
 		// Cached for reuse: stmt is stored in s.stmts below and lives for
 		// the Store's lifetime, closed by closePreparedStatements on
 		// Reset, RestoreFrom, and CloseContext (see that function's doc

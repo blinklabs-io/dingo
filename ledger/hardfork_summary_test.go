@@ -686,6 +686,94 @@ func TestHardForkSummary_KnownTransitionRejectsPastSuccessorBound(
 	}
 }
 
+// TestHardForkSummary_KnownTransitionSuccessorTracksLiveTip is a regression
+// test for a node-side horizon-computation gap distinct from #3844: the
+// appended successor era used to measure its own safe zone only from the
+// announced boundary, never from how far the live tip has actually advanced
+// past it. A node that fails to apply the block crossing that boundary (for
+// any reason -- this is the exact class of bug this fixture reproduces, not
+// its cause) keeps reconstructing this same Summary on every retry with the
+// SAME transitionInfo and epoch cache, since neither changes without a
+// successful apply. Before this fix, the successor's horizon was pinned at
+// boundary+safeZone forever, so once the live tip passed that fixed point
+// every further block or transaction slot fell "past horizon" permanently --
+// a live, canonical chain rejected as though its own tip did not exist, even
+// though nothing about the transition or the chain's own history changed.
+//
+// This reproduces the reported live-incident signature directly: the current
+// published tip's own slot judged past horizon, looping "block processing
+// failed, restarting pipeline" forever with no way to recover because retrying
+// recomputes the identical, still-too-narrow bound every time.
+func TestHardForkSummary_KnownTransitionSuccessorTracksLiveTip(t *testing.T) {
+	t.Parallel()
+
+	const (
+		epochSize     = uint64(100)
+		safeZoneSlots = uint64(250)
+		knownEpoch    = uint64(7)
+		boundarySlot  = uint64(700) // first slot of epoch 7 (400 + (7-4)*100)
+		// The live tip has advanced far past where a boundary-only successor
+		// bound (700+250 snapped to 1_000) could ever reach.
+		liveTipSlot = uint64(50_000)
+	)
+	ls := &LedgerState{
+		epochCache: []models.Epoch{{
+			EpochId:       4,
+			StartSlot:     400,
+			SlotLength:    1_000,
+			LengthInSlots: 100,
+			EraId:         1,
+		}},
+		currentEra:     eras.EraDesc{Id: 1, Name: "Shelley"},
+		transitionInfo: hardfork.NewTransitionKnown(knownEpoch),
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(liveTipSlot, []byte("tip")),
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: minimalShelleyGenesisCfg(t),
+		},
+	}
+	shape := hardfork.Shape{
+		Eras: []hardfork.ShapeEntry{{
+			EraID: 1,
+			Params: hardfork.EraParams{
+				EpochSize:     epochSize,
+				SlotLength:    time.Second,
+				SafeZoneSlots: safeZoneSlots,
+			},
+		}},
+	}
+	ls.cachedShape.Store(&shape)
+	ls.publishSnapshotsLocked()
+
+	sum, err := ls.HardForkSummary()
+	require.NoError(t, err)
+	require.Len(t, sum.Eras, 2)
+	require.NotNil(t, sum.Eras[0].End)
+	assert.Equal(t, boundarySlot, sum.Eras[0].End.Slot)
+
+	// The live tip's own slot -- what the reported incident actually failed
+	// on -- must resolve. Before this fix this returned ErrPastHorizon
+	// because the successor's fixed bound (1_000) never accounted for the
+	// tip having reached 50_000.
+	info, err := sum.SlotToEpoch(liveTipSlot)
+	require.NoError(
+		t, err,
+		"the live tip's own slot must stay within the horizon",
+	)
+	assert.GreaterOrEqual(t, info.Epoch, knownEpoch)
+
+	require.NotNil(t, sum.Eras[1].End)
+	assert.Greater(
+		t,
+		sum.Eras[1].End.Slot,
+		liveTipSlot,
+		"the successor horizon must extend past the live tip, not freeze at "+
+			"boundary+safeZone",
+	)
+	assert.Equal(t, uint64(50_300), sum.Eras[1].End.Slot)
+}
+
 func TestHardForkSummary_RejectsSlotPastSafeZone(t *testing.T) {
 	t.Parallel()
 

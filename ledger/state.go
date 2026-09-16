@@ -1859,6 +1859,7 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	// transition epoch, matching the Haskell HFC semantics.
 	ls.evaluateTriggerAtEpoch()
 	ls.evaluateTransitionImpossible()
+	ls.evaluateProtocolVersionBump()
 	ls.evaluateHardForkInitiationStability()
 	// Publish the transitionInfo changes made above so snapshot readers observe
 	// the reconstructed startup state. The HFI stability evaluation above may
@@ -3661,6 +3662,9 @@ func (ls *LedgerState) rollbackWithResync(
 	//     the post-rollback pparams already carry a major-version
 	//     bump that the rollback didn't undo (the rolled-back chain
 	//     still has the bump committed at an earlier point).
+	//   - evaluateProtocolVersionBump restores Known(currentEpoch+1) if
+	//     a classic (pre-Conway) update proposal reaching genesis-key
+	//     quorum for a version bump survived the rollback.
 	//   - evaluateHardForkInitiationStability restores Known(N+1) if
 	//     a HardForkInitiation governance action survived the
 	//     rollback and is still ratifiable past the voting deadline.
@@ -3680,6 +3684,7 @@ func (ls *LedgerState) rollbackWithResync(
 	// of committing stale data.
 	ls.hfiEvalDoneEpoch = 0
 	ls.hfiEvalGeneration.Add(1)
+	ls.evaluateProtocolVersionBump()
 	ls.evaluateHardForkInitiationStability()
 	// Always update nonce - clear it on genesis rollback, set
 	// it otherwise
@@ -6359,12 +6364,14 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					rolloverResult.NewCurrentEpoch.EpochId,
 				)
 			}
-			// Re-apply any TestXHardForkAtEpoch override. This matters both
-			// when no eraTransitions/HardFork occurred (the rollover reset
+			// Re-apply any TestXHardForkAtEpoch override, and re-check the
+			// classic quorum trigger. Both matter when no
+			// eraTransitions/HardFork occurred (the rollover reset
 			// transitionInfo to Unknown above) and when an era transition
 			// advanced ls.currentEra to a new era whose own successor may
-			// carry its own AtEpoch override.
+			// carry its own AtEpoch override or already-met quorum.
 			ls.evaluateTriggerAtEpoch()
+			ls.evaluateProtocolVersionBump()
 			ls.publishSnapshotsLocked()
 			ls.Unlock()
 
@@ -7147,6 +7154,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				// epoch-end slot instead of a stale safeZone cap.
 				ls.evaluateTriggerAtEpoch()
 				ls.evaluateTransitionImpossible()
+				ls.evaluateProtocolVersionBump()
 				ls.evaluateHardForkInitiationStability()
 				// Capture tip for logging while holding the lock
 				tipForLog = ls.currentTip
@@ -8148,6 +8156,99 @@ func (ls *LedgerState) evaluateTriggerAtEpoch() {
 	ls.transitionInfo = hardfork.NewTransitionKnown(epoch)
 }
 
+// evaluateProtocolVersionBump sets transitionInfo to TransitionKnown(current
+// epoch + 1) when the current era's NextEraTrigger is TriggerAtVersion (the
+// classic pre-Conway Shelley update-proposal path: Byron through Babbage all
+// use it) and a protocol-parameter update already meeting the configured
+// genesis-key quorum, if enacted right now, would bump the protocol major
+// version into the next era.
+//
+// This is the "pparams-bump detection" evaluateHardForkInitiationStability's
+// own doc comment already names as a higher-priority sibling: without it,
+// transitionInfo stays TransitionUnknown for the entire epoch preceding any
+// version-triggered hard fork (every historical Cardano hard fork before
+// Conway's governance-driven HardForkInitiation), so BuildSummary's ordinary
+// tip-anchored safe zone is the only source of horizon and it lands exactly
+// at the era boundary with no margin past it -- not the extra epoch
+// SuccessorEra provides once a transition is confirmed. A transaction whose
+// validity interval crosses even slightly past the boundary is then
+// permanently rejected with hardfork.ErrPastHorizon, indistinguishable from a
+// truly invalid transaction, even though the same block is canonical and
+// every node that reaches quorum-based TransitionKnown early accepts it.
+//
+// Unlike TriggerAtEpoch, the classic update-proposal system has no
+// protocol-enforced voting deadline: a genesis delegate may submit a
+// different, superseding proposal in any block of the submission epoch,
+// right up to its last slot, so "quorum met" here is not guaranteed final
+// the way a post-deadline CIP-1694 tally is. That asymmetry is why this
+// function reads state instead of gating on a deadline that does not exist
+// for this trigger kind, and why it never touches enactment: it only ever
+// calls Database.ForecastPParamUpdates (via forecastPendingPParamUpdate),
+// which is documented to mirror ComputeAndApplyPParamUpdates' quorum, decode,
+// and apply semantics exactly while performing no writes, so calling it here
+// cannot make ComputeAndApplyPParamUpdates itself, or any other
+// protocol-parameter enactment, run any earlier than it already does at the
+// real epoch rollover. A premature or later-superseded reading only widens
+// the forecast horizon for the remainder of this epoch; it never changes
+// which era's validation rules apply (ls.currentEra) or what pparams get
+// enacted (both still come solely from processEpochRollover's own,
+// independent, unaffected re-read at the real boundary), and every
+// Shelley-family era shares the same epoch size and slot length, so even a
+// wrongly-forecast successor's slot/time arithmetic still matches the era
+// that actually continues.
+//
+// The call is a no-op when:
+//   - the shape is unavailable, the current era is unknown to it, or its
+//     NextEraTrigger is not TriggerAtVersion (i.e. a TestXHardForkAtEpoch
+//     override, or the final configured era),
+//   - currentPParams is nil or has no forecast-eligible pparams update
+//     functions for this era (e.g. Byron),
+//   - no pending update meets the configured genesis-key quorum for next
+//     epoch, or the one that does would not bump the protocol major version
+//     into a later era,
+//   - transitionInfo is already TransitionKnown(current epoch + 1), matching
+//     evaluateTriggerAtEpoch's own idempotency guard and avoiding a redundant
+//     DB read on every subsequent block once the boundary is confirmed.
+//
+// Call under ls.Lock() (runtime paths) or without a lock during
+// single-threaded startup.
+func (ls *LedgerState) evaluateProtocolVersionBump() {
+	shape := ls.eraShape()
+	if len(shape.Eras) == 0 {
+		return
+	}
+	entry, ok := shape.EraForID(ls.currentEra.Id)
+	if !ok {
+		return
+	}
+	if entry.NextEraTrigger.Kind != hardfork.TriggerAtVersion {
+		return
+	}
+	targetEpoch := ls.currentEpoch.EpochId + 1
+	if ls.transitionInfo.State == hardfork.TransitionKnown &&
+		ls.transitionInfo.KnownEpoch == targetEpoch {
+		return
+	}
+	if ls.currentPParams == nil {
+		return
+	}
+	forecasted := ls.forecastPendingPParamUpdate(
+		ls.currentEra, targetEpoch, ls.currentPParams,
+	)
+	if forecasted == nil {
+		return
+	}
+	oldVer, oldErr := GetProtocolVersion(ls.currentPParams)
+	newVer, newErr := GetProtocolVersion(forecasted)
+	if oldErr != nil || newErr != nil {
+		return
+	}
+	if !ls.isHardForkTransition(oldVer, newVer) {
+		return
+	}
+	ls.transitionInfo = hardfork.NewTransitionKnown(targetEpoch)
+}
+
 // evaluateTransitionImpossible sets transitionInfo to TransitionImpossible
 // when the safe-zone end for the current era already reaches or exceeds the
 // current epoch's end slot.
@@ -8231,12 +8332,13 @@ func (ls *LedgerState) evaluateHardForkInitiationStability() {
 		return
 	}
 	// Defer to any TransitionKnown already set by a higher-priority
-	// source (TestXHardForkAtEpoch override or pparams-bump
-	// detection). Only promote from Unknown / Impossible, matching
-	// the pattern of the sibling evaluators on this code path. This
-	// also gives idempotency: once we've published the upcoming
-	// boundary, subsequent block-apply invocations short-circuit
-	// without a DB lookup.
+	// source (TestXHardForkAtEpoch override via evaluateTriggerAtEpoch,
+	// or the classic quorum trigger via evaluateProtocolVersionBump).
+	// Only promote from Unknown / Impossible, matching the pattern of
+	// the sibling evaluators on this code path. This also gives
+	// idempotency: once we've published the upcoming boundary,
+	// subsequent block-apply invocations short-circuit without a DB
+	// lookup.
 	if ls.transitionInfo.State == hardfork.TransitionKnown {
 		return
 	}
@@ -11141,6 +11243,19 @@ func (ls *LedgerState) ByronProtocolMagic() (uint32, error) {
 	}
 	// #nosec G115 -- the protocol magic is checked against the uint32 range above.
 	return uint32(protocolMagic), nil
+}
+
+// ByronFeePolicy returns the fee policy from the active Byron genesis.
+func (ls *LedgerState) ByronFeePolicy() (int64, int64, error) {
+	if ls == nil || ls.config.CardanoNodeConfig == nil {
+		return 0, 0, errors.New("byron genesis configuration is unavailable")
+	}
+	genesis := ls.config.CardanoNodeConfig.ByronGenesis()
+	if genesis == nil {
+		return 0, 0, errors.New("byron genesis configuration is unavailable")
+	}
+	policy := genesis.BlockVersionData.TxFeePolicy
+	return policy.Summand, policy.Multiplier, nil
 }
 
 // UtxoByRef returns a single UTxO by reference
