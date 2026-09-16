@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -114,14 +115,45 @@ func TestDecodeImmutableBlockBatchCancellation(t *testing.T) {
 func TestDecodeImmutableBlockBatchDecodeErrorCancelsWorkers(t *testing.T) {
 	t.Parallel()
 	blocks := immutableDecodeBenchmarkBlocks(t)
-	blocks[len(blocks)/2].Cbor = []byte{0xff}
-	_, err := decodeImmutableBlockBatch(
-		context.Background(),
-		blocks,
-		lcommon.VerifyConfig{SkipBodyHashValidation: true},
-		8,
-	)
-	require.Error(t, err)
+	decodeErr := errors.New("decode failed")
+	cancelObserved := make(chan struct{})
+	var cancelOnce sync.Once
+	decoder := func(
+		ctx context.Context,
+		index int,
+		_ immutable.Block,
+		_ lcommon.VerifyConfig,
+	) (gledger.Block, error) {
+		if index == 0 {
+			return nil, decodeErr
+		}
+		select {
+		case <-ctx.Done():
+			cancelOnce.Do(func() { close(cancelObserved) })
+			return nil, ctx.Err()
+		}
+	}
+	resultCh := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_, err := decodeImmutableBlockBatchWithDecoder(
+			ctx,
+			blocks,
+			lcommon.VerifyConfig{SkipBodyHashValidation: true},
+			8,
+			decoder,
+		)
+		resultCh <- err
+	}()
+	select {
+	case <-cancelObserved:
+	case <-time.After(2 * time.Second):
+		cancel()
+		require.Fail(t, "worker cancellation was not observed")
+	}
+	err := <-resultCh
+	require.ErrorIs(t, err, decodeErr)
 }
 
 func BenchmarkDecodeImmutableBlockBatch(b *testing.B) {
