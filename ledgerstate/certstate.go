@@ -774,6 +774,10 @@ func looksLikeDeposits(m map[string]uint64) bool {
 // pool-key-hash -> uint64 shape are told apart by magnitude.
 const minDepositLovelace = 1_000_000 // 1 ADA
 
+// poolKeyHashLen is the length in bytes of a pool key hash, whose
+// hex encoding is twice that.
+const poolKeyHashLen = 28
+
 // mergePoolRetirements decodes the PState `retiring` map -- pool key hash ->
 // the epoch the pool is scheduled to retire at -- and records the epoch on the
 // matching parsed pools.
@@ -818,9 +822,15 @@ func mergePoolRetirements(
 }
 
 // looksLikeRetiringEpochs reports whether m is plausibly the PState
-// `retiring` map: non-empty, every value small enough to be an epoch
-// number rather than a lovelace deposit, and every key a pool that
-// poolParams also registered.
+// `retiring` map: non-empty, keyed by pool key hashes, every value small
+// enough to be an epoch number rather than a lovelace deposit, and mostly
+// naming pools that poolParams also registered.
+//
+// The poolParams check is a majority rather than a requirement on every
+// key. A retiring pool whose params entry failed to parse is absent from
+// pools, and rejecting the whole map over one such key would drop every
+// other pool's retirement too -- the same all-or-nothing loss this decode
+// exists to prevent. Unknown keys simply match no pool in the merge.
 func looksLikeRetiringEpochs(
 	m map[string]uint64,
 	known map[string]struct{},
@@ -828,15 +838,20 @@ func looksLikeRetiringEpochs(
 	if len(m) == 0 {
 		return false
 	}
+	var recognized int
 	for keyHash, epoch := range m {
+		if len(keyHash) != 2*poolKeyHashLen {
+			return false
+		}
 		if epoch >= minDepositLovelace {
 			return false
 		}
-		if _, ok := known[keyHash]; !ok {
-			return false
+		if _, ok := known[keyHash]; ok {
+			recognized++
 		}
 	}
-	return true
+	// Use multiplication to avoid integer division rounding.
+	return recognized*2 >= len(m)
 }
 
 // ErrNotPoolParams signals that the input CBOR is not shaped like a full

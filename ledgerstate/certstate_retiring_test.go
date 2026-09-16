@@ -210,21 +210,20 @@ func TestParsePStateDoesNotReadDepositsAsRetirements(t *testing.T) {
 }
 
 // cardano-ledger removes a pool from psRetiring and psStakePoolParams
-// together, so every retiring key names a registered pool. A map holding an
-// unknown key is some other small-uint map and must be rejected rather than
-// scheduling a retirement no pool asked for.
-func TestParsePStateRejectsRetiringMapWithUnknownPool(t *testing.T) {
+// together, so a small-uint map whose keys mostly do not name registered
+// pools is some other map and must not schedule retirements.
+func TestParsePStateRejectsRetiringMapOfUnknownPools(t *testing.T) {
 	t.Parallel()
 
 	poolHash := bytes.Repeat([]byte{0x11}, 28)
-	strangerHash := bytes.Repeat([]byte{0x77}, 28)
 
 	poolParams := encodeCborMap(t, poolHash, testPoolParams(0x11))
 	emptyMap := encodeCborMap(t)
 	notRetiring := encodeCborMap(
 		t,
 		poolHash, uint64(658),
-		strangerHash, uint64(3),
+		bytes.Repeat([]byte{0x77}, 28), uint64(3),
+		bytes.Repeat([]byte{0x78}, 28), uint64(4),
 	)
 	deposits := encodeCborMap(t, poolHash, testPoolDeposit)
 
@@ -240,6 +239,46 @@ func TestParsePStateRejectsRetiringMapWithUnknownPool(t *testing.T) {
 	if pools[0].RetiringEpoch != nil {
 		t.Fatalf(
 			"unknown-pool map accepted as retiring: epoch %d",
+			*pools[0].RetiringEpoch,
+		)
+	}
+}
+
+// A pool whose params entry failed to parse is absent from the parsed pools,
+// but that must not cost every other pool its retirement -- the all-or-nothing
+// loss this decode exists to prevent.
+func TestParsePStateKeepsRetirementsDespiteUnparsedPool(t *testing.T) {
+	t.Parallel()
+
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	unparsedHash := bytes.Repeat([]byte{0x77}, 28)
+
+	poolParams := encodeCborMap(t, poolHash, testPoolParams(0x11))
+	emptyMap := encodeCborMap(t)
+	retiring := encodeCborMap(
+		t,
+		poolHash, uint64(658),
+		unparsedHash, uint64(659),
+	)
+	deposits := encodeCborMap(t, poolHash, testPoolDeposit)
+
+	pools, err := parsePState(
+		encodeTestPState(t, poolParams, emptyMap, retiring, deposits),
+	)
+	if err != nil {
+		t.Fatalf("parsePState failed: %v", err)
+	}
+	if len(pools) != 1 {
+		t.Fatalf("expected 1 pool, got %d", len(pools))
+	}
+	if pools[0].RetiringEpoch == nil {
+		t.Fatalf(
+			"retirement dropped because another pool was unparsed",
+		)
+	}
+	if *pools[0].RetiringEpoch != 658 {
+		t.Fatalf(
+			"retirement epoch mismatch: got %d, want 658",
 			*pools[0].RetiringEpoch,
 		)
 	}
