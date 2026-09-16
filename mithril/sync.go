@@ -841,9 +841,12 @@ func Sync(
 
 	// The Mithril certificate commits to ImmutableDB content. Ancillary ledger
 	// states can be newer than that certified point because they come from the
-	// source node's volatile database. Select only a ledger state at or below
-	// the certified immutable tip; later blocks must go through normal ledger
-	// validation when the node starts.
+	// source node's volatile database. importLedgerState selects a state at or
+	// below the certified immutable tip when one is available there; a verified
+	// ancillary tree with nothing at or below that tip may instead hand back
+	// its newest state regardless of slot, vouched for by the ancillary
+	// manifest signature rather than by the certified range. Either way, later
+	// blocks must go through normal ledger validation when the node starts.
 	certifiedTip, err := certifiedImmutable.GetTip()
 	if err != nil {
 		return SyncResult{}, fmt.Errorf(
@@ -873,12 +876,13 @@ func Sync(
 	var loadResult *node.LoadBlobsResult
 	var ledgerStateSlot uint64
 	var ledgerStateHash []byte
+	var ledgerStateBeyondCertifiedTip bool
 	g, gctx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
 		cfg.emit(SyncProgress{Phase: PhaseLedgerImport, Active: true})
 		defer cfg.emit(SyncProgress{Phase: PhaseLedgerImport, Active: false})
-		slot, hash, importErr := importLedgerState(
+		slot, hash, beyondCertifiedTip, importErr := importLedgerState(
 			gctx, db, logger, nodeCfg, bootstrapResult, catchUp,
 			certifiedTip.Slot,
 			func(p ledgerstate.ImportProgress) {
@@ -897,6 +901,7 @@ func Sync(
 		}
 		ledgerStateSlot = slot
 		ledgerStateHash = hash
+		ledgerStateBeyondCertifiedTip = beyondCertifiedTip
 		if len(hash) > 0 {
 			cfg.emit(
 				SyncProgress{
@@ -952,7 +957,15 @@ func Sync(
 	if err := g.Wait(); err != nil {
 		return SyncResult{}, err
 	}
-	if ledgerStateSlot > certifiedTip.Slot {
+	// A ledger state past the certified tip is refused unless
+	// importLedgerState itself vouches for the reason: a verified ancillary
+	// tree's signed manifest can legitimately carry a state newer than the
+	// certified ImmutableDB boundary (the aggregator packages it from the
+	// source node's volatile database), and that state's authenticity comes
+	// from the ancillary signature, not from being within the certified
+	// range. Any other path producing a slot past certifiedTip is exactly the
+	// bug this check exists to catch.
+	if ledgerStateSlot > certifiedTip.Slot && !ledgerStateBeyondCertifiedTip {
 		return SyncResult{}, fmt.Errorf(
 			"selected ledger state slot %d is past certified ImmutableDB tip slot %d",
 			ledgerStateSlot,
@@ -984,7 +997,10 @@ func Sync(
 	}
 
 	// The imported ledger state is deliberately at or behind the certified
-	// ImmutableDB tip. Raw blocks after it remain in the primary chain, but
+	// ImmutableDB tip, or — for a verified ancillary state the signature
+	// vouches for directly — slightly ahead of it. Raw blocks after it remain
+	// in the primary chain (fetched and validated normally at node startup,
+	// exactly as they already are for the suffix past the certified tip), and
 	// the metadata ledger cursor stays at the imported state so normal node
 	// startup replays and validates that entire suffix.
 	recentBlocks, err := database.BlocksRecent(db, 1)

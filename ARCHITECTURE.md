@@ -6066,7 +6066,7 @@ Every read of a bootstrapped tree goes through one of them:
 | tree | opened by | read by |
 |---|---|---|
 | immutable | `findImmutableDir` / `chunkDirUnder` | `immutable.NewFromRootVerified`, once, reused for the trust-boundary tip read, the catch-up divergence check, and the blob copy (`node.WithImmutableDB`) |
-| ancillary | `ledgerDir` | the signed-manifest verification and the ledger-state import (`ledgerstate.OpenSnapshotAtOrBefore`, `ParseSnapshotFile`, `ImportConfig.State.UTxOTableFile`) |
+| ancillary | `ledgerDir` | the signed-manifest verification and the ledger-state import (`ledgerstate.OpenSnapshotAtOrBefore`, falling back to `ledgerstate.OpenNewestSnapshot` when verified and nothing qualifies at or before the certified tip, `ParseSnapshotFile`, `ImportConfig.State.UTxOTableFile`) |
 | extraction | `openVerifiedDir` | the ledger-state import's fallback, for v1 snapshots that keep the state in `db/ledger` |
 
 The v2 pipelined copy reads through the same handle extraction is writing
@@ -6297,12 +6297,29 @@ selecting the one after it.
 Tree selection carries one rule more, because emptying a tree is destruction
 rather than planting and would otherwise slip past the above. Nothing is looked
 at after an ancillary tree whose contents the ancillary key signed
-(`AncillaryVerified`), even when it yields no state: the extraction directory is
-not covered by that signature, so falling through would let whoever emptied the
-first tree choose the second. Where nothing was verified there is no downgrade
-to make and the fallback stays — v1 keeps its ledger state in the main archive,
-so looking there is how that layout works at all, and it is also what covers an
-ancillary tree holding only states newer than the certified tip.
+(`AncillaryVerified`), when it yields no usable state at any slot: the
+extraction directory is not covered by that signature, so falling through would
+let whoever emptied the first tree choose the second. Where nothing was
+verified there is no downgrade to make and the fallback stays — v1 keeps its
+ledger state in the main archive, so looking there is how that layout works at
+all.
+
+A verified ancillary tree holding only states newer than the certified
+ImmutableDB tip is the one case that is not treated as "yields no usable
+state": `selectLedgerStateSnapshot` (`mithril/sync_import.go`) retries such a
+tree with `ledgerstate.OpenNewestSnapshot`, which runs the same
+symlink/substitution-safe search with no slot ceiling, and accepts whatever it
+finds. That state is not a downgrade to an unsigned tree — the ancillary
+manifest signs it directly — so it is not the case the refusal above exists to
+prevent; it is the aggregator packaging the ancillary ledger state from the
+source node's volatile database, which can land past the certified boundary
+between the two being packaged. `mithril/sync.go`'s certified-tip guard accepts
+a slot past `certifiedTip` only when `selectLedgerStateSnapshot` reports it
+came from this path (`beyondCertifiedTip`); any other way of producing a slot
+past the certified tip still fails there. The raw blocks between the certified
+tip and that slightly-newer imported slot are not copied into the blob store by
+this path — they reach it the same way every block past the certified tip
+already does, through normal Ouroboros validation after the node starts.
 
 A symlinked UTxO table fails on the same rule rather than being reported
 absent: a caller cannot otherwise tell "this snapshot has no table" from "this
