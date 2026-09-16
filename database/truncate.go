@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
@@ -413,6 +414,36 @@ func (d *Database) TruncateAfterSlot(
 			return ochainsync.Tip{}, nil, fmt.Errorf(
 				"failed to get block nonce: %w",
 				err,
+			)
+		}
+		// GetBlockNonce returns (nil, nil) -- not an error -- when no row
+		// matches the point. Routine operation only ever keeps block_nonce
+		// rows for the last 3 epochs plus each epoch's single checkpoint row
+		// (see ledger/state.go's cleanupBlockNoncesBefore), so a disaster-
+		// recovery truncate to an older point can land on a slot whose own
+		// row has already been pruned. Silently continuing with an empty
+		// nonce here would seed the resumed evolving-nonce fold
+		// (LedgerState.loadTip -> ledgerProcessBlocks' runningNonce) with
+		// the wrong value, corrupting every block nonce computed for the
+		// rest of the epoch and, through it, the following epoch's nonce --
+		// causing VRF verification to fail for every header in that epoch,
+		// from every honest peer, with no error at truncate time to explain
+		// why. Byron-era blocks are the sole legitimate empty-nonce case
+		// (PBFT has no Praos nonce), so exempt them.
+		if len(newNonce) == 0 &&
+			truncateBlock.Type != byron.BlockTypeByronEbb &&
+			truncateBlock.Type != byron.BlockTypeByronMain {
+			return ochainsync.Tip{}, nil, fmt.Errorf(
+				"truncate target at slot %d (hash %x) has no stored block "+
+					"nonce: the block_nonce row may have been pruned by "+
+					"routine 3-epoch retention; resuming nonce computation "+
+					"from an empty value would silently corrupt the epoch "+
+					"nonce for every epoch computed afterward and fail VRF "+
+					"verification for the whole following epoch -- choose a "+
+					"truncate target within the retained window, or restore "+
+					"the block_nonce history for this point first",
+				point.Slot,
+				point.Hash,
 			)
 		}
 	}
