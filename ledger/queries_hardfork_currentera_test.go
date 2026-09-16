@@ -94,6 +94,19 @@ func TestQueryHardFork_CurrentEra_PinnedPointResolvesEraAtThatPoint(
 // resolved, and this must fail with ErrHistoricalStateUnavailable rather
 // than silently falling back to the live era (the exact bug this handler
 // otherwise reproduces every time) or panicking on a nil era descriptor.
+//
+// Deliberately seeds an epoch-0 row too (human review, Chris Guiney,
+// dingo#4320): resolveAsOfEpoch previously fell back to epoch 0, with no
+// way to distinguish "genuinely epoch 0" from "no covering row found," when
+// GetEpochBySlot found nothing for the pinned slot. On any genesis-synced
+// node an epoch-0 row always exists, so GetEpoch(0) would then succeed and
+// silently answer Byron for a point actually in a later era -- this test's
+// previous fixture omitted the epoch-0 row entirely, so it passed for the
+// wrong reason (both the fallback epoch and the real target epoch were
+// missing) without ever exercising that silent-wrong-answer path. Slot 50
+// here resolves to neither epoch 0 (slots 0-9) nor epoch 6 (starts at slot
+// 600) -- a genuine gap, not the chain's start -- so a correct fix must
+// still reject it even with epoch 0 present.
 func TestQueryHardFork_CurrentEra_NoEpochRecordRejected(t *testing.T) {
 	t.Parallel()
 
@@ -103,6 +116,9 @@ func TestQueryHardFork_CurrentEra_NoEpochRecordRejected(t *testing.T) {
 	ls.currentEpoch = models.Epoch{EpochId: 6}
 	ls.publishSnapshotsLocked()
 
+	require.NoError(t, ls.db.SetEpoch(
+		0, 0, nil, nil, nil, nil, eras.ByronEraDesc.Id, 1, 10, nil,
+	))
 	require.NoError(t, ls.db.SetEpoch(
 		600, 6, nil, nil, nil, nil, eras.ConwayEraDesc.Id, 1, 100, nil,
 	))

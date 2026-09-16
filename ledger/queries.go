@@ -219,10 +219,25 @@ func (ls *LedgerState) VerifyPointOnChain(at QueryPoint) error {
 // (at.pinned() false) means live, resolving the live tip's own epoch
 // instead. Shared by every query handler that reconstructs epoch-keyed
 // historical state (blinklabs-io/dingo#382) -- PoolStakeDistribution,
-// queryShelleyCurrentProtocolParams, queryShelleyEpochNo -- so the
-// live-vs-pinned epoch lookup is written once rather than once per handler.
-// A slot with no covering epoch record (a chain that has applied no blocks
-// yet) resolves to epoch 0, matching epochAtTip's existing convention.
+// queryShelleyCurrentProtocolParams, queryShelleyEpochNo, queryHardFork,
+// queryShelleyStakeDistribution -- so the live-vs-pinned epoch lookup is
+// written once rather than once per handler.
+//
+// found is false only on the pinned path, when at.Slot has no covering
+// epoch record at all (human review, dingo#4319/#4320: confirmed live and
+// reproduced against this tree that a pinned point whose slot genuinely
+// falls outside every epoch record's range previously fell through to
+// epoch 0 here, and a caller that then looked up epoch 0's row got a
+// real, successful answer for the wrong epoch -- Byron/epoch-0 era,
+// protocol params, or circulating supply, silently substituted for
+// whatever epoch the point actually belonged to). Callers must reject
+// with ErrHistoricalStateUnavailable when found is false rather than
+// proceeding with epoch 0.
+//
+// The unpinned path's current == nil case is a different, legitimate
+// convention (epochAtTip's own, matched here): a chain that has applied no
+// blocks yet genuinely has no current epoch other than 0, so found is true
+// there -- only the pinned path's "no covering row" case is the bug.
 //
 // Takes the whole QueryPoint, not a bare slot: a point pinned at slot 0
 // (a real, validated chain point -- see QueryPoint.pinned()'s own doc
@@ -232,25 +247,35 @@ func (ls *LedgerState) VerifyPointOnChain(at QueryPoint) error {
 func (ls *LedgerState) resolveAsOfEpoch(
 	txn *database.Txn,
 	at QueryPoint,
-) (uint64, error) {
+) (epoch uint64, found bool, err error) {
 	if !at.pinned() {
 		_, current, err := ls.epochAtTip(txn)
 		if err != nil {
-			return 0, err
+			return 0, false, err
 		}
 		if current == nil {
-			return 0, nil
+			return 0, true, nil
 		}
-		return current.EpochId, nil
+		return current.EpochId, true, nil
 	}
-	epoch, err := ls.db.GetEpochBySlot(at.Slot, txn)
+	epochRow, err := ls.db.GetEpochBySlot(at.Slot, txn)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
-	if epoch == nil {
-		return 0, nil
+	if epochRow == nil {
+		return 0, false, nil
 	}
-	return epoch.EpochId, nil
+	return epochRow.EpochId, true, nil
+}
+
+// errEpochNotResolved is returned by resolveAsOfEpoch's callers when it
+// reports found=false -- see that function's doc comment.
+func errEpochNotResolved(at QueryPoint) error {
+	return fmt.Errorf(
+		"%w: no epoch record covers slot %d",
+		ErrHistoricalStateUnavailable,
+		at.Slot,
+	)
 }
 
 // queryShelleyEpochNo answers GetEpochNo: the epoch containing at (unpinned
@@ -281,9 +306,12 @@ func (ls *LedgerState) queryShelleyEpochNo(
 		txn = ls.db.Transaction(false)
 		defer txn.Release()
 	}
-	epoch, err := ls.resolveAsOfEpoch(txn, at)
+	epoch, found, err := ls.resolveAsOfEpoch(txn, at)
 	if err != nil {
 		return nil, err
+	}
+	if !found {
+		return nil, errEpochNotResolved(at)
 	}
 	return []any{epoch}, nil
 }
@@ -294,7 +322,10 @@ func (ls *LedgerState) queryShelleyEpochNo(
 // than the strictest per-query-type retention floor (UTxO whole/by-ref via
 // checkUtxoRetentionWindow, stake/pool distribution via
 // PoolStakeDistribution's own recency check, current protocol parameters
-// via queryShelleyCurrentProtocolParams's persisted-row lookup).
+// via queryShelleyCurrentProtocolParams's persisted-row lookup, current era
+// via queryHardFork's HardForkCurrentEraQuery case -- added after human
+// review found this same PR introduced two new ErrHistoricalStateUnavailable
+// returns in that path without covering it here, dingo#4319/#4320).
 //
 // Called from the LocalStateQuery server's Acquire handler
 // (ouroboros/localstatequery.go), not from Query itself: the Ouroboros
@@ -306,8 +337,8 @@ func (ls *LedgerState) queryShelleyEpochNo(
 // a later query could not actually answer therefore has no protocol-legal
 // way to report that -- confirmed live: the connection simply drops
 // ("protocol is shutting down" client-side) instead of returning a clean
-// rejection, for any of the three retention-bounded query types above,
-// whenever their own floor is stricter than whatever check an earlier,
+// rejection, for any of the retention-bounded query types above, whenever
+// their own floor is stricter than whatever check an earlier,
 // successful call on the same connection happened to exercise.
 //
 // Real cardano-node never hits this: its own historical retention is one
@@ -359,10 +390,23 @@ func (ls *LedgerState) VerifyPointQueryable(
 	if err := ls.checkUtxoRetentionWindow(txn, at); err != nil {
 		return err
 	}
-	if _, err := ls.PoolStakeDistribution(nil, at, txn); err != nil {
+	if err := ls.verifyStakeDistributionRetentionOnly(txn, at); err != nil {
 		return err
 	}
 	if _, err := ls.queryShelleyCurrentProtocolParams(at, txn); err != nil {
+		return err
+	}
+	// queryHardFork's HardForkCurrentEraQuery case (GetCurrentEra) is
+	// point-aware and returns ErrHistoricalStateUnavailable when
+	// resolveAsOfEpoch can't resolve at to an epoch (human review,
+	// dingo#4319/#4320) -- exercised here for the same reason every other
+	// check above is: Querying has no Failure transition, so a rejection
+	// surfacing from Query instead of here drops the connection rather
+	// than returning a clean AcquireFailure.
+	if _, err := ls.queryHardFork(
+		&olocalstatequery.HardForkQuery{Query: &olocalstatequery.HardForkCurrentEraQuery{}},
+		at, txn,
+	); err != nil {
 		return err
 	}
 	return nil
@@ -536,9 +580,12 @@ func (ls *LedgerState) queryHardFork(
 			txn = ls.db.Transaction(false)
 			defer txn.Release()
 		}
-		targetEpoch, err := ls.resolveAsOfEpoch(txn, at)
+		targetEpoch, found, err := ls.resolveAsOfEpoch(txn, at)
 		if err != nil {
 			return nil, err
+		}
+		if !found {
+			return nil, errEpochNotResolved(at)
 		}
 		epochRow, err := ls.db.GetEpoch(targetEpoch, txn)
 		if err != nil {
