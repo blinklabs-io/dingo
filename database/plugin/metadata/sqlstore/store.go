@@ -86,8 +86,11 @@ type Config struct {
 	// PromRegistry is optional. When set, Store registers
 	// dingo_database_sql_operations_total, a counter of every statement
 	// issued through Store's shared query chokepoint (instrumentedQueryer),
-	// labeled by its best-effort operation classification (see
-	// classifySQLOp in metrics.go). Store also registers six
+	// labeled by its best-effort operation classification, and
+	// dingo_database_sql_query_duration_seconds, a histogram of each such
+	// statement's wall-clock duration labeled by that same op
+	// classification plus, when known, the sqlc-generated query name (see
+	// classifySQLStatement in metrics.go). Store also registers six
 	// dingo_database_sql_pool_* connection-pool metrics per pool, labeled
 	// pool="write"|"read" and sampled live from WritePoolStats/
 	// ReadPoolStats on every scrape (see newSQLPoolMetrics in metrics.go)
@@ -142,9 +145,10 @@ type Store struct {
 	stmtMu sync.Mutex
 	stmts  map[string]*sql.Stmt
 
-	// sqlOperations is nil when Config.PromRegistry was nil; see
-	// instrumentedQueryer and metrics.go.
-	sqlOperations *prometheus.CounterVec
+	// sqlOperations and sqlQueryDuration are nil when Config.PromRegistry
+	// was nil; see instrumentedQueryer and metrics.go.
+	sqlOperations    *prometheus.CounterVec
+	sqlQueryDuration *prometheus.HistogramVec
 
 	// txStmtMu and txStmts back the per-transaction Tx-scoped statement
 	// cache; see prepared_stmt.go's txScopedStmt/evictTxStmts for the
@@ -212,6 +216,7 @@ func New(config Config) (*Store, error) {
 		reset:                       config.Reset,
 		validateBackup:              config.ValidateBackup,
 		sqlOperations:               newSQLOperationsCounter(config.PromRegistry),
+		sqlQueryDuration:            newSQLQueryDurationHistogram(config.PromRegistry),
 	}
 	// Registered against store.WritePoolStats/ReadPoolStats (not
 	// config.WriteDB.Stats/config.ReadDB.Stats directly) so every backend
@@ -682,19 +687,25 @@ type queryer interface {
 }
 
 // instrumentedQueryer applies dialect translation (newDialectQueryer) and,
-// when Config.PromRegistry was set, statement-count instrumentation
-// (countingQueryer) around db. Every call site that used to call
-// newDialectQueryer directly calls this instead, so
-// dingo_database_sql_operations_total's totals reflect Store's entire SQL
-// surface -- domain queries, committee pruning, deferred-index maintenance,
-// and the hot-statement cache -- from one place, rather than requiring every
-// call site to remember to instrument itself.
+// when Config.PromRegistry was set, statement-count and duration
+// instrumentation (countingQueryer) around db. Every call site that used to
+// call newDialectQueryer directly calls this instead, so
+// dingo_database_sql_operations_total's totals and
+// dingo_database_sql_query_duration_seconds's observations both reflect
+// Store's entire SQL surface -- domain queries, committee pruning,
+// deferred-index maintenance, and the hot-statement cache -- from one
+// place, rather than requiring every call site to remember to instrument
+// itself.
 func (s *Store) instrumentedQueryer(db queryer) queryer {
 	dq := newDialectQueryer(db, s.dialect.Name())
-	if s.sqlOperations == nil {
+	if s.sqlOperations == nil && s.sqlQueryDuration == nil {
 		return dq
 	}
-	return countingQueryer{queryer: dq, counter: s.sqlOperations}
+	return countingQueryer{
+		queryer:  dq,
+		counter:  s.sqlOperations,
+		duration: s.sqlQueryDuration,
+	}
 }
 
 type sqlTxn struct {

@@ -198,11 +198,15 @@ func (ls *LedgerState) hardForkSummaryAnchoredAt(
 	// transition, because the rollover is deterministic within the stability
 	// window. Append the successor era starting at the announced boundary so the
 	// horizon covers the first post-boundary epoch. hardfork.SuccessorEra bounds
-	// it by the successor's own safe zone measured from that boundary, which
-	// always snaps up to at least the next epoch boundary; the successor stays
-	// open only when the resolved safe zone is zero
+	// it by the successor's own safe zone measured from max(tipSlot+1,
+	// boundary) -- the same tipSlot BuildSummary used for the bounded era
+	// above -- which always snaps up to at least the next epoch boundary; the
+	// successor stays open only when the resolved safe zone is zero
 	// (UnsafeIndefiniteSafeZone), the same rule BuildSummary applies to the
-	// current era. Take the successor by shape order rather than EraID+1 so
+	// current era. Passing tipSlot here, rather than measuring only from the
+	// boundary, is what keeps the successor's horizon rolling forward with the
+	// live tip once the boundary is behind it instead of freezing at
+	// boundary+safeZone. Take the successor by shape order rather than EraID+1 so
 	// non-contiguous EraID values still resolve; when the current era is the
 	// last modeled era (the transition re-arms an era the ledger already
 	// occupies), reuse the current era's params — epoch length and slot length
@@ -229,6 +233,7 @@ func (ls *LedgerState) hardForkSummaryAnchoredAt(
 					SafeZoneSlots: succParams.SafeZoneSlots,
 					GenesisWindow: succParams.GenesisWindow,
 				},
+				tipSlot,
 			))
 		}
 	}
