@@ -827,6 +827,8 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 	}
 	// Keep every Undo enqueue and its corresponding chain truncation atomic
 	// with respect to a block-apply commit's AfterCommit Apply publication.
+	ls.chainsyncBlockfetchMutex.Lock()
+	defer ls.chainsyncBlockfetchMutex.Unlock()
 	ls.transactionEventMutex.Lock()
 	defer ls.transactionEventMutex.Unlock()
 
