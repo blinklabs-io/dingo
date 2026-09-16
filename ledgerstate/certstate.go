@@ -685,6 +685,7 @@ func parsePStateMaps(ps [][]byte) ([]ParsedPool, error) {
 	}
 
 	mergePoolDeposits(bestPools, ps, bestIdx)
+	mergePoolRetirements(bestPools, ps, bestIdx)
 	return bestPools, bestWarning
 }
 
@@ -697,7 +698,7 @@ func mergePoolDeposits(
 		if i == poolParamsIdx {
 			continue
 		}
-		deposits := parsePoolDeposits(elem)
+		deposits := parsePoolUint64Map(elem)
 		if deposits == nil || !looksLikeDeposits(deposits) {
 			continue
 		}
@@ -712,16 +713,20 @@ func mergePoolDeposits(
 	}
 }
 
-// parsePoolDeposits decodes the pool deposits map.
-// Returns nil on decode failure. Skipped entries are counted
-// but not reported since deposits are supplementary data.
-func parsePoolDeposits(data []byte) map[string]uint64 {
+// parsePoolUint64Map decodes a CBOR map of pool key hash -> unsigned
+// integer, keyed by hex-encoded pool key hash. Both PState maps that
+// carry scalar values have this shape: poolDeposits (lovelace) and
+// retiring (epoch numbers). Returns nil when the input is not a map;
+// entries whose key or value fails to decode are skipped, which is how
+// maps of a different value shape (futurePoolParams, whose values are
+// arrays) decode to an empty result rather than an error.
+func parsePoolUint64Map(data []byte) map[string]uint64 {
 	entries, err := decodeMapEntries(data)
 	if err != nil {
 		return nil
 	}
 
-	deposits := make(map[string]uint64, len(entries))
+	values := make(map[string]uint64, len(entries))
 	for _, entry := range entries {
 		var keyHash []byte
 		if _, err := cbor.Decode(
@@ -737,10 +742,10 @@ func parsePoolDeposits(data []byte) map[string]uint64 {
 			continue
 		}
 
-		deposits[hex.EncodeToString(keyHash)] = amount
+		values[hex.EncodeToString(keyHash)] = amount
 	}
 
-	return deposits
+	return values
 }
 
 // looksLikeDeposits returns true if the map values are plausibly
@@ -749,7 +754,6 @@ func parsePoolDeposits(data []byte) map[string]uint64 {
 // numbers are small (currently < 1,000). We check whether the
 // majority of values exceed this threshold.
 func looksLikeDeposits(m map[string]uint64) bool {
-	const minDepositLovelace = 1_000_000 // 1 ADA
 	if len(m) == 0 {
 		return false
 	}
@@ -762,6 +766,77 @@ func looksLikeDeposits(m map[string]uint64) bool {
 	// Require at least half the values to look like deposits.
 	// Use multiplication to avoid integer division rounding.
 	return large*2 >= len(m)
+}
+
+// minDepositLovelace separates a pool deposit from a retirement epoch.
+// Pool deposits are at least 1 ADA on every network, while epoch numbers
+// are small (currently < 1,000), so the two PState maps that share the
+// pool-key-hash -> uint64 shape are told apart by magnitude.
+const minDepositLovelace = 1_000_000 // 1 ADA
+
+// mergePoolRetirements decodes the PState `retiring` map -- pool key hash ->
+// the epoch the pool is scheduled to retire at -- and records the epoch on the
+// matching parsed pools.
+//
+// The map is identified by shape rather than by position: PState layouts
+// differ by era (Shelley encodes four elements, Conway seven) and the Conway
+// element order is not fixed, so there is no index to key off. A candidate
+// must map pool key hashes to values that are all below minDepositLovelace,
+// which excludes poolDeposits, and every key must name a pool from
+// poolParams, which holds because cardano-ledger's POOLREAP removes a pool
+// from psRetiring and psStakePoolParams together. futurePoolParams is
+// excluded for free: its values are arrays, so they fail the uint64 decode
+// and leave an empty map.
+func mergePoolRetirements(
+	pools []ParsedPool,
+	ps [][]byte,
+	poolParamsIdx int,
+) {
+	known := make(map[string]struct{}, len(pools))
+	for i := range pools {
+		known[hex.EncodeToString(pools[i].PoolKeyHash)] = struct{}{}
+	}
+	for i, elem := range ps {
+		if i == poolParamsIdx {
+			continue
+		}
+		retiring := parsePoolUint64Map(elem)
+		if !looksLikeRetiringEpochs(retiring, known) {
+			continue
+		}
+		for j := range pools {
+			epoch, ok := retiring[hex.EncodeToString(
+				pools[j].PoolKeyHash,
+			)]
+			if !ok {
+				continue
+			}
+			pools[j].RetiringEpoch = &epoch
+		}
+		return
+	}
+}
+
+// looksLikeRetiringEpochs reports whether m is plausibly the PState
+// `retiring` map: non-empty, every value small enough to be an epoch
+// number rather than a lovelace deposit, and every key a pool that
+// poolParams also registered.
+func looksLikeRetiringEpochs(
+	m map[string]uint64,
+	known map[string]struct{},
+) bool {
+	if len(m) == 0 {
+		return false
+	}
+	for keyHash, epoch := range m {
+		if epoch >= minDepositLovelace {
+			return false
+		}
+		if _, ok := known[keyHash]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // ErrNotPoolParams signals that the input CBOR is not shaped like a full
