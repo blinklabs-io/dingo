@@ -238,6 +238,13 @@ func NewReadSnapshotContext(
 	ms := db.Metadata()
 	var reservation types.ReadReservation
 	if reserver, ok := ms.(types.ReadReserver); ok {
+		if err := db.acquireReadSnapshotAdmission(ctx); err != nil {
+			return nil, ochainsync.Tip{}, fmt.Errorf(
+				"admit read snapshot: %w",
+				err,
+			)
+		}
+		defer db.releaseReadSnapshotAdmission()
 		reserved, err := reserver.ReserveRead(ctx)
 		if err != nil {
 			return nil, ochainsync.Tip{}, fmt.Errorf(
