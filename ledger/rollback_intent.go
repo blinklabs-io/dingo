@@ -79,13 +79,16 @@ func (ls *LedgerState) ensureRollbackIntent(
 	if pending {
 		if existing.Slot != point.Slot ||
 			!bytes.Equal(existing.Hash, point.Hash) {
-			return fmt.Errorf(
-				"rollback intent point %d does not match requested point %d",
-				existing.Slot,
-				point.Slot,
-			)
+			// A record for another point is an interrupted operation. It
+			// cannot safely be replayed as part of this rollback, so discard
+			// the stale outbox and let the current operation establish a new
+			// durable intent rather than wedging every later rollback.
+			if err := clearRollbackIntent(ls.db); err != nil {
+				return fmt.Errorf("clear stale rollback intent: %w", err)
+			}
+		} else {
+			return nil
 		}
-		return nil
 	}
 	if rollbackBlocks == nil {
 		rollbackBlocks, err = ls.readBlocksAboveSlot(point.Slot)
@@ -171,11 +174,12 @@ func (ls *LedgerState) recoverRollbackIntent() error {
 	current := ls.currentTip.Point
 	ls.RUnlock()
 	if current.Slot < point.Slot {
-		return fmt.Errorf(
-			"ledger tip %d is behind rollback intent point %d",
-			current.Slot,
-			point.Slot,
+		ls.config.Logger.Warn(
+			"discarding rollback intent ahead of the applied ledger tip",
+			"component", "ledger", "ledger_tip_slot", current.Slot,
+			"intent_slot", point.Slot,
 		)
+		return clearRollbackIntent(ls.db)
 	}
 	ls.emitRollbackTransactionEvents(blocks)
 	if err := ls.rollback(point); err != nil {
