@@ -135,23 +135,24 @@ func (e *hardForkApplyTxError) MarshalCBOR() ([]byte, error) {
 }
 
 func (e *hardForkApplyTxError) utxowFailure() []any {
-	utxoFailure := []any{
-		e.era,
-		e.inputSetEmptyFailure(),
-	}
-
+	// The Shelley/Allegra/Mary/Alonzo/Babbage UTXOW constructors below
+	// decode their payload as the bare UTXO predicate failure (no era
+	// wrapper): gouroboros's UtxoFailure.unmarshalPayload takes the era
+	// from its parent rather than from this payload. Only the Conway
+	// leaf below decodes through UtxoFailure's own UnmarshalCBOR, which
+	// does expect the [era, err] form.
 	switch e.era {
 	case gledger.EraIdShelley, gledger.EraIdAllegra, gledger.EraIdMary:
 		return []any{
 			gledger.ShelleyUtxowUtxoFailure,
-			utxoFailure,
+			e.inputSetEmptyFailure(),
 		}
 	case gledger.EraIdAlonzo:
 		return []any{
 			gledger.AlonzoUtxowShelleyInAlonzo,
 			[]any{
 				gledger.ShelleyUtxowUtxoFailure,
-				utxoFailure,
+				e.inputSetEmptyFailure(),
 			},
 		}
 	case gledger.EraIdBabbage:
@@ -159,13 +160,16 @@ func (e *hardForkApplyTxError) utxowFailure() []any {
 			gledger.BabbageUtxowUtxoFailure,
 			[]any{
 				gledger.BabbageUtxoAlonzoInBabbage,
-				utxoFailure,
+				e.inputSetEmptyFailure(),
 			},
 		}
 	case gledger.EraIdConway:
 		return []any{
 			gledger.ConwayUtxowUtxoFailure,
-			utxoFailure,
+			[]any{
+				e.era,
+				e.inputSetEmptyFailure(),
+			},
 		}
 	default:
 		return []any{
