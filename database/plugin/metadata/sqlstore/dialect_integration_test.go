@@ -3,6 +3,7 @@
 package sqlstore
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
@@ -15,6 +16,9 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/database/types"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	mysqldriver "github.com/go-sql-driver/mysql"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/stretchr/testify/require"
@@ -119,6 +123,7 @@ func testSQLStoreIntegration(
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	require.NoError(t, store.Start(context.Background()))
 	require.True(t, store.Ready())
+	testBatchedTransactionWrites(t, store)
 
 	txn := store.Transaction(t.Context())
 	require.NoError(t, store.SetCommitTimestamp(42, txn))
@@ -447,4 +452,47 @@ INSERT INTO redeemer (
 
 	// Exercise the many-to-many collateral contract on this dialect.
 	collateralProductionFlow(t, store, db)
+}
+
+func testBatchedTransactionWrites(t *testing.T, store *Store) {
+	t.Helper()
+	makeTransaction := func(id byte) lcommon.Transaction {
+		input, err := mockledger.NewTransactionInputBuilder().
+			WithTxId(bytes.Repeat([]byte{id + 0x10}, 32)).
+			WithIndex(0).
+			Build()
+		require.NoError(t, err)
+		output, err := mockledger.NewTransactionOutputBuilder().
+			WithAddress("addr_test1qz2fxv2umyhttkxyxp8x0dlpdt3k6cwng5pxj3jhsydzer3jcu5d8ps7zex2k2xt3uqxgjqnnj83ws8lhrn648jjxtwq2ytjqp").
+			WithLovelace(5_000_000).
+			Build()
+		require.NoError(t, err)
+		transaction, err := mockledger.NewTransactionBuilder().
+			WithId(bytes.Repeat([]byte{id}, 32)).
+			WithInputs(input).
+			WithOutputs(output).
+			Build()
+		require.NoError(t, err)
+		return transaction
+	}
+
+	for id, historical := range []bool{false, true} {
+		transaction := makeTransaction(byte(id + 1))
+		txn := store.Transaction(t.Context())
+		batch := store.NewBatchAccumulator()
+		point := ocommon.Point{Slot: uint64(id + 1), Hash: transaction.Hash().Bytes()}
+		var err error
+		if historical {
+			err = store.SetTransactionBatchedHistorical(
+				transaction, point, uint32(id), nil, false, true, batch, txn,
+			)
+		} else {
+			err = store.SetTransactionBatched(
+				transaction, point, uint32(id), nil, false, batch, txn,
+			)
+		}
+		require.NoError(t, err)
+		require.NoError(t, store.FlushBatch(batch, txn))
+		require.NoError(t, txn.Commit())
+	}
 }

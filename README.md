@@ -23,9 +23,7 @@ A high-performance Cardano blockchain node implementation in Go by Blink Labs. D
 - Chain rollback support for handling forks with automatic state restoration
 - Fast bootstrapping via built-in Mithril client
 - Optional Midnight event indexing and MidnightState gRPC service
-- Multiple external interfaces: general-purpose APIs (UTxO RPC,
-  Blockfrost-compatible REST, Kupo-compatible REST, Mesh/Rosetta) plus Bark
-  for Dingo-to-Dingo C2 and archive services
+- Multiple external interfaces: general-purpose APIs (UTxO RPC, Blockfrost-compatible REST, Mesh/Rosetta) plus Bark for Dingo-to-Dingo C2 and archive services
 
 Note: On Windows systems, named pipes are used instead of Unix sockets for node-to-client communication.
 
@@ -93,8 +91,6 @@ The following environment variables modify Dingo's behavior:
 - `DINGO_PLUGINS_API_BLOCKFROST_CONFIG_PORT`
   - TCP port for the Blockfrost-compatible REST API (default: `3000`)
   - Compatibility alias: `DINGO_BLOCKFROST_PORT`
-- `DINGO_PLUGINS_API_KUPO_CONFIG_PORT`
-  - TCP port for the Kupo-compatible REST API (recommended: `1442`; disabled by default)
 - `DINGO_PLUGINS_API_MESH_CONFIG_PORT`
   - TCP port for the Mesh (Coinbase Rosetta) API (default: `8080`)
   - Compatibility alias: `DINGO_MESH_PORT`
@@ -112,6 +108,12 @@ The following environment variables modify Dingo's behavior:
 - `DINGO_BARK_OPERATOR_CERTIFICATE_FINGERPRINTS`
   - Comma-separated SHA-256 client certificate fingerprints authorized for
     destructive Bark DatabaseService RPCs.
+- `DINGO_HEALTH_PORT`
+  - TCP port for the liveness/readiness probe listener (default: `12799`,
+    `0` disables). Binds `bindAddr`, like the relay and metrics listeners.
+- `DINGO_HEALTH_READY_GAP_SLOTS`
+  - Slots the chain tip may trail the wall-clock slot while `/readyz` still
+    reports ready (default: `1000`)
 - `DINGO_DEBUG_BIND_ADDR`
   - IP address to bind for unauthenticated pprof endpoints (default:
     `127.0.0.1`)
@@ -128,7 +130,7 @@ The following environment variables modify Dingo's behavior:
   - Storage mode: `core` (default) or `api`
   - `core` stores only consensus data (UTxOs, certs, pools, protocol params)
   - `api` additionally stores witnesses, scripts, datums, redeemers, and tx metadata
-  - API servers (Blockfrost, Kupo, UTxO RPC, Mesh) require `api` mode
+  - API servers (Blockfrost, UTxO RPC, Mesh) require `api` mode
 - `DINGO_RUN_MODE`
   - Application-wide operational mode for a bare `dingo` invocation:
     `serve` (default), `load`, `dev`, or `leios`
@@ -246,13 +248,73 @@ The image is based on Debian bookworm-slim and includes `cardano-cli`, `nview`, 
 | 3001 | Ouroboros NtN (node-to-node) | Enabled |
 | 3002 | Ouroboros NtC over TCP | Enabled |
 | 12798 | Prometheus metrics | Enabled |
-| 1442 | Kupo-compatible REST API | Disabled |
+| 12799 | Health probes (`/health`, `/healthz`, `/readyz`) | Enabled |
 | 3000 | Blockfrost REST API | Disabled |
 | 8080 | Mesh (Rosetta) REST API | Disabled |
 | 9090 | UTxO RPC (gRPC) | Disabled |
 | 50051 | Midnight state (gRPC) | Disabled |
 | — | Bark archive (gRPC) | Disabled (example when enabled: 9091) |
 | — | pprof debug endpoints | Disabled (`DINGO_DEBUG_PORT=0`; loopback when enabled) |
+
+## Health Probes
+
+Dingo serves liveness and readiness on a listener of its own
+(`healthPort`, default `12799`), separate from Prometheus metrics, pprof,
+and every API listener. It starts in both storage modes and whether or not
+the Blockfrost, Mesh, and UTxO RPC APIs are enabled, so the probe is
+available in the default `core` relay configuration that the shipped
+`docker-compose.yml` runs.
+
+`dingo mithril sync` serves it too. A Mithril bootstrap runs as its own
+process before the node starts, takes hours on mainnet, and reports live and
+not-ready throughout, so a container HEALTHCHECK pointed at `healthPort`
+keeps passing while the snapshot downloads instead of replacing the container
+partway through it.
+
+| Path | Meaning | 200 when | Non-200 when |
+|------|---------|----------|--------------|
+| `/healthz` (and `/health`) | Liveness | The process is up and the listener is serving | Never, while the process can answer |
+| `/readyz` | Readiness | The chain tip is within `healthReadyGapSlots` (default `1000`) of the wall-clock slot | Starting up, bootstrapping from Mithril, catching up, or the tip has frozen |
+
+Both return JSON carrying the readiness verdict, a reason, and the observed
+tip gap in slots:
+
+```json
+{"live":true,"ready":false,"reason":"tip gap 4211 slots exceeds tolerance of 1000 slots","tipGapSlots":4211,"status":"unhealthy"}
+```
+
+The split is deliberate, because an orchestrator acts on the two
+differently. Docker, Swarm, and ECS replace an unhealthy container, and
+Kubernetes restarts a container whose `livenessProbe` fails; a node doing an
+initial sync is legitimately not useful for hours or days, and none of the
+conditions that freeze a tip are repaired by a restart loop. So liveness
+stays independent of sync state and is what the image's `HEALTHCHECK`
+probes; that check follows `DINGO_HEALTH_PORT` and reports healthy without
+probing when it is `0`. Readiness is the signal that catches a frozen tip, and failing it
+removes a pod from a Service or a target from a load balancer without
+killing the node.
+
+Kubernetes:
+
+```yaml
+livenessProbe:
+  httpGet: { path: /healthz, port: 12799 }
+  periodSeconds: 30
+readinessProbe:
+  httpGet: { path: /readyz, port: 12799 }
+  periodSeconds: 15
+```
+
+The readiness tolerance matches `forgeStaleGapThresholdSlots`: both answer
+"has this node stopped following the chain?", and a probe that flapped more
+readily than the forger's own staleness gate would evict a node the forger
+still considers current. Raise `healthReadyGapSlots` on a network with a
+lower active slot coefficient, or lower it to detect a stall sooner at the
+cost of flapping on quiet stretches of chain.
+
+The tip gap is read from the ledger's slot clock — the same value the
+`dingo_tip_gap_slots` gauge exports — so readiness does not depend on the
+Prometheus listener.
 
 ## Storage Modes
 
@@ -262,7 +324,7 @@ Dingo has two storage modes commonly used in three node configurations:
 |---|---|---|
 | Relay | `storageMode: core`, `blockProducer: false` | Validates and follows the chain, participates in NtN/NtC, relays blocks and transactions, and stores consensus state without API history |
 | Block producer | `storageMode: core`, `blockProducer: true` plus VRF/KES/opcert paths | Includes the relay behavior, leader election, block forging, forged-block self-validation, and block diffusion |
-| Data/API node | `storageMode: api`, `blockProducer: false` | Stores consensus state plus transaction, witness, script, datum, redeemer, governance, and metadata history; starts configured Blockfrost, Kupo, Mesh, and UTxO RPC providers |
+| Data/API node | `storageMode: api`, `blockProducer: false` | Stores consensus state plus transaction, witness, script, datum, redeemer, governance, and metadata history; starts configured Blockfrost, Mesh, and UTxO RPC providers |
 
 `core` is the default and smallest storage/runtime surface. The producer
 profile adds forging and key operations to it. API mode adds historical
@@ -284,14 +346,13 @@ storageMode: "api"
 
 ## API Servers and Bark
 
-Dingo includes four general-purpose external APIs, an Acropolis-compatible
-Midnight state service, and Bark. UTxO RPC, Blockfrost, Kupo, and Mesh are
+Dingo includes three general-purpose external APIs, an Acropolis-compatible
+Midnight state service, and Bark. UTxO RPC, Blockfrost, and Mesh are
 client-facing APIs and require `storageMode: "api"`.
-Their built-in providers are registered with the instance-owned plugin host
-and can be configured
+Their built-in providers are registered with the instance-owned plugin host,
+start on their provider defaults in API mode, and can be configured
 independently under `plugins.api`. Set an individual port to 0 to disable that
-interface. Kupo is disabled by default and must have a nonzero port to enable
-it; the other providers start on their defaults in API mode.
+interface.
 
 Midnight indexing and serving are separate opt-ins. `midnight.enabled` starts
 the indexer, while `midnight.serverEnabled` starts the gRPC listener for rows
@@ -306,7 +367,7 @@ Bark is Dingo's own Dingo-to-Dingo archive protocol rather than an application
 API. It is configured separately with `barkPort` and `barkBaseUrl`.
 
 For public client access, the API listeners may be exposed directly or placed
-behind a reverse proxy or API gateway. UTxO RPC, Blockfrost, Kupo, and Mesh support
+behind a reverse proxy or API gateway. UTxO RPC, Blockfrost, and Mesh support
 optional in-process TLS and accept requests without credentials.
 
 The shorter `DINGO_UTXORPC_PORT`, `DINGO_BLOCKFROST_PORT`, and
@@ -318,16 +379,15 @@ takes precedence.
 |-----------|--------------|---------|----------|------|
 | UTxO RPC | `DINGO_PLUGINS_API_UTXORPC_CONFIG_PORT` | 9090 | gRPC | General-purpose client API (v1alpha and v1beta) |
 | Blockfrost | `DINGO_PLUGINS_API_BLOCKFROST_CONFIG_PORT` | 3000 | REST | General-purpose client API |
-| Kupo | `DINGO_PLUGINS_API_KUPO_CONFIG_PORT` | 0 (disabled) | REST | Chain-index query API (v2.12-compatible surface; port 1442 recommended) |
 | Mesh (Rosetta) | `DINGO_PLUGINS_API_MESH_CONFIG_PORT` | 8080 | REST | General-purpose client API |
 | Midnight | `DINGO_MIDNIGHT_PORT` | 50051 (server off) | gRPC | Acropolis-compatible Midnight state API |
 | Bark | `DINGO_BARK_PORT` | disabled | Connect/gRPC | Dingo-to-Dingo C2/archive protocol |
 
 ```bash
-# Enable Kupo on its standard port and Blockfrost on port 3100
+# Enable Blockfrost API on port 3100 and UTxO RPC on port 9090
 DINGO_STORAGE_MODE=api \
-  DINGO_PLUGINS_API_KUPO_CONFIG_PORT=1442 \
   DINGO_PLUGINS_API_BLOCKFROST_CONFIG_PORT=3100 \
+  DINGO_PLUGINS_API_UTXORPC_CONFIG_PORT=9090 \
   ./dingo
 ```
 
@@ -338,69 +398,13 @@ storageMode: "api"
 plugins:
   api:
     blockfrost: {provider: builtin, config: {port: 3100}}
-    kupo: {provider: builtin, config: {port: 1442}}
+    utxorpc: {provider: builtin, config: {port: 9090}}
 ```
-
-### Kupo API
-
-The built-in `kupo` provider exposes the Kupo v2.12 chain-index HTTP surface.
-It is disabled by default; set its port to `1442` (the conventional Kupo port)
-to enable it. It supports match searches, datum and script
-resolution, checkpoint and block-metadata lookup, pattern discovery, health,
-and Prometheus-format metrics:
-
-- `GET /matches` and `GET /matches/{pattern}`
-- `GET /datums/{datum-hash}` and `GET /scripts/{script-hash}`
-- `GET /checkpoints`, `GET /checkpoints/{slot-no}`, and
-  `GET /metadata/{slot-no}`
-- `GET /patterns` and `GET /patterns/{pattern}`
-- `PUT /patterns`, `PUT /patterns/{pattern}`, `DELETE /patterns/{pattern}`,
-  and `DELETE /matches/{pattern}` with the immutable-pattern behavior below
-- `GET /health` and `GET /metrics`
-
-Every route is also available below the Kupo v2.12 `/v1` prefix (for example,
-`GET /v1/matches` and `GET /v1/health`).
-
-The checkpoint routes are a compatibility view over Dingo's committed
-canonical block history, not a second indexer-resume checkpoint store.
-`/checkpoints` returns a bounded, exponentially spaced sample across the
-ledger security window, and the slot route returns an exact point or its
-nearest canonical ancestor. This lets Kupo clients validate cursor bounds
-without maintaining a second checkpoint lifecycle.
-
-Dingo indexes every transaction output in API storage mode, so its installed
-Kupo pattern set is permanently `["*"]`. Pattern reads report that global
-pattern. Pattern additions are idempotent and return `["*"]` without rolling
-the node back or rebuilding its index. Pattern and match deletion is rejected
-with `400 Bad Request`: deleting either would violate Dingo's complete-index
-contract and could remove chain state used by another API.
-
-Match paths still accept Kupo address/credential, asset, transaction-output,
-metadata-label, and wildcard patterns as query selectors. They also support Kupo's `spent`,
-`unspent`, `resolve_hashes`, `order`, inclusive `created_after`,
-`created_before`, `spent_after`, and `spent_before` bounds, plus `policy_id`,
-`asset_name`, `transaction_id`, and `output_index` filters. A slot bound may
-include its block hash as `slot.header-hash`; Dingo verifies that point before
-answering so a stale-fork cursor fails rather than silently selecting another
-block. `output_index` requires `transaction_id`, `asset_name` requires
-`policy_id`, and lower or upper time bounds are mutually exclusive in the same
-way as Kupo.
-
-Successful query responses carry `X-Most-Recent-Checkpoint` and `ETag` for the
-indexed tip. Data lookups read their body and tip from one coordinated database
-snapshot. `If-None-Match` returns `304 Not Modified` when that snapshot tip
-hash is unchanged. Match quantities are JSON integers by default; clients can
-request decimal strings with
-`Accept: application/json;asset-quantity=string`.
-`/health` returns `200` when synchronized, `202` while connected and catching
-up, or `503` while disconnected; `/metrics` exposes the same health state with
-an unconditional `200` status. Both routes return JSON when `Accept` is absent
-and Prometheus text for `Accept: text/plain` or `Accept: */*`.
 
 ### API TLS
 
 `api.tls` sets a shared default TLS policy for every selected
-`plugins.api.*` provider (Blockfrost, Kupo, Mesh, UTxO RPC). Each field resolves
+`plugins.api.*` provider (Blockfrost, Mesh, UTxO RPC). Each field resolves
 independently: `plugins.api.<name>.config.tls` overrides a field for that
 provider only, otherwise the shared value is used and an unset policy remains
 plaintext. With `mode: server`, both certificate and key paths are required
@@ -449,7 +453,7 @@ and its own `tls` config — not as an all-or-nothing fallback that applies only
 when both newer scopes are completely unset. For example, if shared `api.tls`
 sets only `mode: server` with no `certFilePath`/`keyFilePath`, UTxO RPC still
 inherits the two paths from the legacy root settings. The root pair is not
-promoted onto Blockfrost, Kupo, or Mesh, since doing so would silently switch a
+promoted onto Blockfrost or Mesh, since doing so would silently switch a
 previously plaintext listener to TLS on upgrade. `bindAddr` and
 `corsAllowedOrigins` are unrelated to this policy and remain root-level
 settings shared by all listeners (`bindAddr` is also used by the relay/NtN
@@ -608,7 +612,7 @@ This imports:
 - Protocol parameters, governance state, treasury/reserves
 - Complete epoch history for slot-to-time calculations
 
-Individual transaction records, certificate history, witness/script/datum storage, and governance vote records for blocks before the snapshot are not stored by the snapshot itself. In `core` mode these are not needed — consensus, block production, and serving blocks to peers work without them, and new blocks processed after bootstrap will have full metadata. In `api` mode, `dingo mithril sync` automatically runs a backfill step after loading the snapshot to populate this historical data, so API servers (Blockfrost, Kupo, UTxO RPC, Mesh) have complete records from genesis.
+Individual transaction records, certificate history, witness/script/datum storage, and governance vote records for blocks before the snapshot are not stored by the snapshot itself. In `core` mode these are not needed — consensus, block production, and serving blocks to peers work without them, and new blocks processed after bootstrap will have full metadata. In `api` mode, `dingo mithril sync` automatically runs a backfill step after loading the snapshot to populate this historical data, so API servers (Blockfrost, UTxO RPC, Mesh) have complete records from genesis.
 
 ### Replay and bootstrap behavior
 
@@ -732,7 +736,7 @@ Dingo supports pluggable storage backends for both blob storage (blocks, transac
 
 ### Available Plugins
 
-For local source builds, `badger`, `sqlite`, the default mempool, and all four
+For local source builds, `badger`, `sqlite`, the default mempool, and all three
 built-in API providers are always available. GCS and S3 require
 `-tags dingo_extra_plugins` or an official release binary. The same tag adds
 the operational PostgreSQL and MySQL metadata providers, backed by the shared
@@ -757,7 +761,6 @@ Mempool Plugins:
 
 API Plugins:
 - `blockfrost` - Blockfrost-compatible REST API
-- `kupo` - Kupo-compatible chain-index REST API
 - `mesh` - Mesh (Coinbase Rosetta) REST API
 - `utxorpc` - UTxO RPC gRPC API (serves both v1alpha and v1beta)
 
@@ -879,9 +882,6 @@ uppercases them with underscore separators (`dataDir` becomes
 `..._CONFIG_DATA_DIR`). The pre-plugin API port variables `DINGO_UTXORPC_PORT`,
 `DINGO_BLOCKFROST_PORT`, and `DINGO_MESH_PORT` still work as compatibility
 aliases, and setting an API port to `0` disables that server.
-Kupo has no pre-plugin port alias; use
-`DINGO_PLUGINS_API_KUPO_CONFIG_PORT` or
-`plugins.api.kupo.config.port`.
 
 ### Listing Available Plugins
 
@@ -985,7 +985,6 @@ validation record.
   - [x] UTxO RPC (gRPC), serving v1alpha and v1beta
   - [ ] WIP Blockfrost-compatible REST API (required endpoint families are
         implemented; compatibility hardening and reward parity are ongoing)
-  - [x] Kupo-compatible chain-index REST API
   - [x] Mesh (Coinbase Rosetta) API
   - [x] Optional Midnight event indexer and MidnightState gRPC service
 - [x] Mithril Bootstrap

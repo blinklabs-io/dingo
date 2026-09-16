@@ -35,8 +35,8 @@ import (
 // committeePresent: true for a 1-element StrictMaybe Committee
 // wrapper with a 2/3 quorum and empty members; false for SNothing.
 //
-// The shape mirrors testGovStateData but exposes the roots so
-// tests can assert seeding behavior end to end.
+// The shape mirrors Conway's seven-field GovState encoding but exposes the
+// roots so tests can assert seeding behavior end to end.
 func govStateWithRoots(
 	t *testing.T,
 	roots [4]*ParsedGovActionId,
@@ -89,15 +89,18 @@ func govStateWithRootsAndProposals(
 			nil,
 		},
 	}
-	if drepPulsingState != nil {
-		govState = append(
-			govState,
-			map[uint64]uint64{},
-			map[uint64]uint64{},
-			map[uint64]uint64{},
-			drepPulsingState,
+	if drepPulsingState == nil {
+		drepPulsingState = drepPulsingStateWithEnactCommittee(
+			t, committee,
 		)
 	}
+	govState = append(
+		govState,
+		map[uint64]uint64{},
+		map[uint64]uint64{},
+		map[uint64]uint64{},
+		drepPulsingState,
+	)
 	data, err := cbor.Encode(govState)
 	require.NoError(t, err)
 	return data
@@ -141,9 +144,35 @@ func govActionStateForTest(
 	}
 }
 
+// snothingCommittee is the StrictMaybe SNothing encoding shared by
+// cgsCommittee and EnactState.ensCommittee: a zero-element array.
+func snothingCommittee() any {
+	return []any{}
+}
+
+// drepPulsingStateWithRatified builds a pulsing state whose
+// rsEnactState carries no committee, matching a cgsCommittee of
+// SNothing.
 func drepPulsingStateWithRatified(
+	t *testing.T,
 	proposals ...any,
 ) any {
+	t.Helper()
+	return drepPulsingStateWithEnactCommittee(
+		t, snothingCommittee(), proposals...,
+	)
+}
+
+func drepPulsingStateWithEnactCommittee(
+	t *testing.T,
+	committee any,
+	proposals ...any,
+) any {
+	t.Helper()
+	// RatifyState.rsEnactState is an EnactState whose first field is the
+	// committee StrictMaybe. The remaining fields are irrelevant here, but
+	// are retained to match Conway's seven-field encoding.
+	enactState := []any{committee, nil, nil, nil, nil, nil, nil}
 	return []any{
 		[]any{
 			[]any{},
@@ -151,13 +180,301 @@ func drepPulsingStateWithRatified(
 			map[uint64]uint64{},
 			map[uint64]uint64{},
 		},
+		[]any{enactState, proposals, []any{}, false},
+	}
+}
+
+// constitutionForTest is the constitution field shape shared by the
+// governance fixtures in this file.
+func constitutionForTest() any {
+	return []any{
 		[]any{
-			[]any{},
-			proposals,
-			[]any{},
-			false,
+			"https://example.com/constitution",
+			bytes.Repeat([]byte{0xAA}, 32),
+		},
+		nil,
+	}
+}
+
+// conwayGovStateWithPulsing assembles the seven-field Conway
+// ConwayGovState encoding around the given cgsCommittee and
+// cgsDRepPulsingState.
+func conwayGovStateWithPulsing(
+	t *testing.T,
+	committee any,
+	pulsing any,
+) []byte {
+	t.Helper()
+	rootsAny := encodeRootsAsAny(t, [4]*ParsedGovActionId{})
+	data, err := cbor.Encode([]any{
+		[]any{rootsAny, []any{}},
+		committee,
+		constitutionForTest(),
+		map[uint64]uint64{},
+		map[uint64]uint64{},
+		map[uint64]uint64{},
+		pulsing,
+	})
+	require.NoError(t, err)
+	return data
+}
+
+func govImportConfigForTest(
+	db *database.Database,
+	govStateData []byte,
+) ImportConfig {
+	return ImportConfig{
+		Database: db,
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		State: &RawLedgerState{
+			GovStateData:  govStateData,
+			Epoch:         500,
+			EraIndex:      EraConway,
+			EraBoundEpoch: 100,
+			EraBoundSlot:  10_000,
+		},
+		EpochLength: func(uint) (uint, uint, error) {
+			return 1, 100, nil
 		},
 	}
+}
+
+func committeeWithMember(t *testing.T, hash []byte, expiry uint64) any {
+	t.Helper()
+	// Credential array keys must be kept as raw CBOR map keys; encoding a
+	// Go map with []byte keys would produce a bytestring key instead.
+	key, err := cbor.Encode([]any{uint64(0), hash})
+	require.NoError(t, err)
+	value, err := cbor.Encode(expiry)
+	require.NoError(t, err)
+	memberMap := cbor.RawMessage(append(append([]byte{0xa1}, key...), value...))
+	return []any{[]any{memberMap, cbor.Rat{Rat: big.NewRat(2, 3)}}}
+}
+
+func TestParseGovStateCommitteeMatchesEnactState(t *testing.T) {
+	hash := bytes.Repeat([]byte{0x42}, 28)
+	committee := committeeWithMember(t, hash, 700)
+	rootsAny := encodeRootsAsAny(t, [4]*ParsedGovActionId{})
+	data, err := cbor.Encode([]any{
+		[]any{rootsAny, []any{}},
+		committee,
+		constitutionForTest(),
+		map[uint64]uint64{}, map[uint64]uint64{}, map[uint64]uint64{},
+		drepPulsingStateWithEnactCommittee(t, committee),
+	})
+	require.NoError(t, err)
+	parsed, err := ParseGovState(data, EraConway)
+	require.NoError(t, err)
+	require.Len(t, parsed.Committee, 1)
+	require.Len(t, parsed.EnactCommittee, 1)
+	assert.Equal(t, parsed.Committee, parsed.EnactCommittee)
+	assert.Equal(t, parsed.CommitteeQuorum.Rat, parsed.EnactCommitteeQuorum.Rat)
+}
+
+func TestParseGovStateEnactedWarningKeepsCommittee(t *testing.T) {
+	committee := committeeWithMember(t, bytes.Repeat([]byte{0x42}, 28), 700)
+	rootsAny := encodeRootsAsAny(t, [4]*ParsedGovActionId{})
+	data, err := cbor.Encode([]any{
+		[]any{rootsAny, []any{}}, committee,
+		constitutionForTest(),
+		map[uint64]uint64{}, map[uint64]uint64{}, map[uint64]uint64{},
+		drepPulsingStateWithEnactCommittee(t, committee),
+	})
+	require.NoError(t, err)
+	// Keep the active committee valid while making rsEnacted contain a
+	// malformed action. The warning must not become a committee error.
+	data, err = cbor.Encode([]any{
+		[]any{rootsAny, []any{}}, committee,
+		constitutionForTest(),
+		map[uint64]uint64{}, map[uint64]uint64{}, map[uint64]uint64{},
+		drepPulsingStateWithEnactCommittee(t, committee, cbor.RawMessage{0x01}),
+	})
+	require.NoError(t, err)
+	parsed, err := ParseGovState(data, EraConway)
+	require.Error(t, err)
+	// A malformed rsEnacted entry is warning-grade; it must not be
+	// reported as a failure to decode the enact-state committee.
+	assert.Nil(t, parsed.PulsingStateParseError)
+	require.Len(t, parsed.EnactCommittee, 1)
+	assert.True(t, parsed.EnactedActionTypesUnknown)
+}
+
+func TestImportGovStateRejectsCommitteeMismatch(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	left := committeeWithMember(t, bytes.Repeat([]byte{0x42}, 28), 700)
+	right := committeeWithMember(t, bytes.Repeat([]byte{0x43}, 28), 700)
+	// rsEnacted is empty, so nothing can have rewritten ensCommittee and
+	// the two views are required to agree.
+	govStateData := conwayGovStateWithPulsing(
+		t, left, drepPulsingStateWithEnactCommittee(t, right),
+	)
+	err = importGovState(
+		context.Background(),
+		govImportConfigForTest(db, govStateData),
+		func(ImportProgress) {},
+	)
+	require.EqualError(t, err,
+		"governance committee disagrees between cgsCommittee "+
+			"and rsEnactState with no committee action in rsEnacted")
+}
+
+// TestImportGovStateAcceptsCommitteeChangeInRsEnacted covers the mainnet
+// bootstrap shape: a snapshot from an epoch whose RATIFY pass accepted an
+// UpdateCommittee. ENACT rewrote EnactState.ensCommittee, so
+// RatifyState.rsEnactState carries the committee ConwayEPOCH will install
+// at the next boundary while cgsCommittee still carries the one in force.
+// The importer must persist cgsCommittee and must not reject the
+// snapshot.
+func TestImportGovStateAcceptsCommitteeChangeInRsEnacted(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	activeHash := bytes.Repeat([]byte{0x42}, 28)
+	nextHash := bytes.Repeat([]byte{0x43}, 28)
+	active := committeeWithMember(t, activeHash, 700)
+	next := committeeWithMember(t, nextHash, 900)
+	update := govActionStateForTest(
+		bytes.Repeat([]byte{0x77}, 32),
+		0,
+		govActionTypeUpdateCommittee,
+		nil,
+		499,
+	)
+	govStateData := conwayGovStateWithPulsing(
+		t,
+		active,
+		drepPulsingStateWithEnactCommittee(t, next, update),
+	)
+	require.NoError(t, importGovState(
+		context.Background(),
+		govImportConfigForTest(db, govStateData),
+		func(ImportProgress) {},
+	))
+
+	members, err := db.GetCommitteeMembers(nil)
+	require.NoError(t, err)
+	require.Len(t, members, 1)
+	assert.Equal(t, activeHash, members[0].ColdCredHash)
+	assert.Equal(t, uint64(700), members[0].ExpiresEpoch)
+}
+
+// TestImportGovStateAcceptsNoConfidenceInRsEnacted covers the other
+// committee-rewriting action: ENACT sets ensCommittee to SNothing for
+// NoConfidence, so rsEnactState carries no committee while cgsCommittee
+// still does.
+func TestImportGovStateAcceptsNoConfidenceInRsEnacted(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	activeHash := bytes.Repeat([]byte{0x42}, 28)
+	active := committeeWithMember(t, activeHash, 700)
+	noConfidence := govActionStateForTest(
+		bytes.Repeat([]byte{0x78}, 32),
+		0,
+		govActionTypeNoConfidence,
+		nil,
+		499,
+	)
+	govStateData := conwayGovStateWithPulsing(
+		t,
+		active,
+		drepPulsingStateWithEnactCommittee(
+			t, snothingCommittee(), noConfidence,
+		),
+	)
+	require.NoError(t, importGovState(
+		context.Background(),
+		govImportConfigForTest(db, govStateData),
+		func(ImportProgress) {},
+	))
+
+	members, err := db.GetCommitteeMembers(nil)
+	require.NoError(t, err)
+	require.Len(t, members, 1)
+	assert.Equal(t, activeHash, members[0].ColdCredHash)
+}
+
+// TestImportGovStateRejectsMismatchWithNonCommitteeRsEnacted keeps the
+// check armed for the actions that cannot touch the committee: a
+// TreasuryWithdrawals in rsEnacted leaves ensCommittee alone, so a
+// disagreement there is still corruption.
+func TestImportGovStateRejectsMismatchWithNonCommitteeRsEnacted(
+	t *testing.T,
+) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	left := committeeWithMember(t, bytes.Repeat([]byte{0x42}, 28), 700)
+	right := committeeWithMember(t, bytes.Repeat([]byte{0x43}, 28), 700)
+	withdrawal := govActionStateForTest(
+		bytes.Repeat([]byte{0x79}, 32),
+		0,
+		govActionTypeTreasuryWithdrawals,
+		nil,
+		499,
+	)
+	govStateData := conwayGovStateWithPulsing(
+		t,
+		left,
+		drepPulsingStateWithEnactCommittee(t, right, withdrawal),
+	)
+	err = importGovState(
+		context.Background(),
+		govImportConfigForTest(db, govStateData),
+		func(ImportProgress) {},
+	)
+	require.EqualError(t, err,
+		"governance committee disagrees between cgsCommittee "+
+			"and rsEnactState with no committee action in rsEnacted")
+}
+
+// TestImportGovStateRejectsAbsentEnactState covers the absence case: an
+// rsEnactState encoded as an empty array. EnactState always encodes seven
+// fields in Conway, so this is malformed input and must not silently
+// disarm the corroboration.
+func TestImportGovStateRejectsAbsentEnactState(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	committee := committeeWithMember(t, bytes.Repeat([]byte{0x42}, 28), 700)
+	pulsing := []any{
+		[]any{
+			[]any{},
+			map[uint64]uint64{},
+			map[uint64]uint64{},
+			map[uint64]uint64{},
+		},
+		[]any{[]any{}, []any{}, []any{}, false},
+	}
+	govStateData := conwayGovStateWithPulsing(t, committee, pulsing)
+	err = importGovState(
+		context.Background(),
+		govImportConfigForTest(db, govStateData),
+		func(ImportProgress) {},
+	)
+	require.EqualError(t, err,
+		"parsing imported governance pulsing state: RatifyState enact "+
+			"state has 0 elements, expected 7")
+}
+
+// TestImportGovStateSkipsParityWhenEnactedTypesUnknown covers an
+// undecidable rsEnacted: with an entry whose action type cannot be
+// recovered, whether a committee action was accepted is unknown, so the
+// corroboration is unavailable rather than failed.
+func TestImportGovStateSkipsParityWhenEnactedTypesUnknown(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	left := committeeWithMember(t, bytes.Repeat([]byte{0x42}, 28), 700)
+	right := committeeWithMember(t, bytes.Repeat([]byte{0x43}, 28), 700)
+	govStateData := conwayGovStateWithPulsing(
+		t,
+		left,
+		drepPulsingStateWithEnactCommittee(
+			t, right, cbor.RawMessage{0x01},
+		),
+	)
+	require.NoError(t, importGovState(
+		context.Background(),
+		govImportConfigForTest(db, govStateData),
+		func(ImportProgress) {},
+	))
 }
 
 func TestImportGovStateSeedsPrevGovActionIds(t *testing.T) {
@@ -325,7 +642,7 @@ func TestImportGovStateMarksRatifiedParameterChangeFromDRepPulsingState(
 		[4]*ParsedGovActionId{ppRoot, nil, nil, nil},
 		false,
 		[]any{proposal},
-		drepPulsingStateWithRatified(proposal),
+		drepPulsingStateWithRatified(t, proposal),
 	)
 
 	cfg := ImportConfig{

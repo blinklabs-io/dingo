@@ -801,6 +801,26 @@ type UtxoStore interface {
 		fn func(*models.Utxo) error,
 	) error
 
+	// IterateUtxosAsOf invokes fn once for each UTxO row that was live as
+	// of atSlot -- added at or before atSlot, and either never spent or
+	// spent strictly after atSlot -- in unspecified order. fn receives a
+	// pointer to a row that is reused between callbacks -- copy out
+	// anything you intend to retain. Returning a non-nil error from fn
+	// aborts iteration and that error is propagated up.
+	//
+	// Unlike IterateLiveUtxos, this has no indexed shortcut in this
+	// schema: for atSlot near the live tip (the common caller, a pinned
+	// LocalStateQuery point), "added_slot <= atSlot" matches nearly every
+	// row ever created, live or already spent, so this is effectively a
+	// full-table scan. Callers pin this cost to genuinely pinned queries
+	// only, never the live (unpinned) path, which keeps using
+	// IterateLiveUtxos' indexed deleted_slot = 0 filter unchanged.
+	IterateUtxosAsOf(
+		atSlot uint64,
+		txn types.Txn,
+		fn func(*models.Utxo) error,
+	) error
+
 	// MarkUtxosDeletedAtSlot marks every live UTxO row matching one
 	// of refs as deleted at atSlot. Refs that don't match any live
 	// row are silently ignored (the SQL filter is deleted_slot == 0,
@@ -1975,9 +1995,15 @@ type MetadataStore interface {
 	RewardLiveStakeNeedsBackfill(types.Txn) (bool, error)
 
 	// StaleConsensusStakeSnapshotsExist reports whether persisted Mark/Set/Go
-	// stake snapshots or authoritative Mark metadata use an older calculation
+	// stake snapshots or Mark reward metadata use an older calculation
 	// version. Such snapshots cannot safely be recreated from a pruned database.
 	StaleConsensusStakeSnapshotsExist(types.Txn) (bool, error)
+
+	// StaleConsensusStakeSnapshotEpochs returns the distinct epochs
+	// StaleConsensusStakeSnapshotsExist's stale rows belong to, for
+	// diagnostics only -- so the operator-facing error naming a rebootstrap
+	// requirement can name exactly which epochs are affected.
+	StaleConsensusStakeSnapshotEpochs(types.Txn) ([]uint64, error)
 
 	// GetTip retrieves the current chain tip.
 	GetTip(types.Txn) (ochainsync.Tip, error)

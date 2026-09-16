@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -264,6 +265,11 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	//   - relay, private: serving modes only (required there);
 	//   - metrics, debug: serving modes and the Mithril sync operation
 	//     (RunModeSync); the read-only Mithril subcommands start neither;
+	//   - health: serving modes and the Mithril sync operation
+	//     (RunModeSync). The sync bootstrap serves the probe too, reporting
+	//     live and not-ready, because the image's HEALTHCHECK runs against
+	//     that port for the hours the bootstrap takes and a refused probe
+	//     has the container replaced mid-download;
 	//   - bark: serving modes only (not storage-gated);
 	//   - UTxORPC, Blockfrost, Kupo, Mesh, Midnight: serving modes under API
 	//     storage. Dev mode forces API storage on at startup, and node.Run
@@ -297,6 +303,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		{"privatePort", c.PrivateBindAddr, c.PrivatePort, serving, serving},
 		{"metricsPort", c.BindAddr, c.MetricsPort, auxListeners, serving},
 		{"debugPort", c.DebugBindAddr, c.DebugPort, auxListeners, false},
+		{"healthPort", c.BindAddr, c.HealthPort, auxListeners, false},
 		{"barkPort", c.BarkHost, c.BarkPort, serving, false},
 		{
 			"plugins.api.utxorpc.config.port",
@@ -847,21 +854,41 @@ func validatePort(
 }
 
 // bindAddrsOverlap reports whether two listener bind addresses can
-// contend for the same port: equal addresses always do, and a wildcard
-// address overlaps every other address. Hostname aliases for the same
-// interface (e.g. "localhost" vs "127.0.0.1") are not resolved; such
-// conflicts surface at bind time instead.
+// contend for the same port: equivalent addresses always do, and a wildcard
+// address overlaps every other address. Addresses are compared in canonical
+// form, so two spellings of one IP literal ("::1" and "0:0:0:0:0:0:0:1")
+// are recognized as the same listener rather than passing validation and
+// failing at bind time. Hostname aliases for the same interface (e.g.
+// "localhost" vs "127.0.0.1") are not resolved; those conflicts still
+// surface at bind time.
 func bindAddrsOverlap(a, b string) bool {
-	if a == b {
+	normA, normB := normalizeBindAddr(a), normalizeBindAddr(b)
+	if normA == normB {
 		return true
 	}
-	return isWildcardAddr(a) || isWildcardAddr(b)
+	return isWildcardAddr(normA) || isWildcardAddr(normB)
 }
 
-// isWildcardAddr reports whether a bind address selects all interfaces.
+// normalizeBindAddr canonicalizes an IP literal so that equivalent
+// spellings compare equal. Brackets are stripped because a bind address may
+// be written the way it appears inside a host:port string, and an
+// IPv4-mapped IPv6 literal is unmapped because it binds the IPv4 address it
+// names. Anything that is not an IP literal -- a hostname, or the empty
+// string that means "all interfaces" -- is returned unchanged.
+func normalizeBindAddr(addr string) string {
+	literal := strings.TrimSuffix(strings.TrimPrefix(addr, "["), "]")
+	parsed, err := netip.ParseAddr(literal)
+	if err != nil {
+		return addr
+	}
+	return parsed.Unmap().String()
+}
+
+// isWildcardAddr reports whether a bind address selects all interfaces. The
+// argument is expected in the canonical form normalizeBindAddr produces.
 func isWildcardAddr(addr string) bool {
 	switch addr {
-	case "", "0.0.0.0", "::", "[::]":
+	case "", "0.0.0.0", "::":
 		return true
 	default:
 		return false
