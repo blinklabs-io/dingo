@@ -1186,12 +1186,18 @@ When `Node.Run()` is called, components are initialized in this order:
     3-epoch retention window had already pruned — see Truncate in DATABASE.md.
     It folds forward from the nearest surviving checkpoint through the
     still-present block CBOR up to the tip, sharing `foldBlockEtaV` with the
-    Mithril heal so the two can never compute a nonce differently, and warns
-    and leaves state as-is (rather than failing startup) when no checkpoint
-    exists to fold from — unreachable for a genuine truncate-created gap,
-    since `database.TruncateAfterSlot` already refuses such a truncate. The
-    same reconstruction also runs after `LedgerState.rollback` in-process, the
-    only other caller of `TruncateAfterSlot`. Only then does LedgerState
+    Mithril heal so the two can never compute a nonce differently, and
+    hard-fails startup (unlike the Mithril heal's own no-anchor case) when no
+    checkpoint on the primary chain exists to fold from:
+    `database.TruncateAfterSlot`'s own guard only checks that a checkpoint
+    row exists, not that it sits on the primary chain, so it can let a
+    truncate through on the strength of a checkpoint belonging to a
+    since-abandoned fork — this heal's primary-chain-aware search is the
+    check that actually enforces the promise, and continuing with an empty
+    nonce would reproduce the same VRF corruption the whole mechanism exists
+    to prevent. The same reconstruction also runs after `LedgerState.rollback`
+    in-process, the only other caller of `TruncateAfterSlot`. Only then does
+    LedgerState
     subscribe to chainsync/blockfetch/chain-update EventBus events.
     Fresh genesis initialization persists both genesis UTxOs and the effective
     Shelley staking declarations, including network-specific `extraConfig`

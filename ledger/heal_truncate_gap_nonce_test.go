@@ -326,7 +326,7 @@ func TestHealTruncateGapBlockNonces_NoOpForByronTip(t *testing.T) {
 // startup outright: the real safety enforcement for a genuine
 // truncate-created gap lives in TruncateAfterSlot's checkpoint check, not
 // here.
-func TestHealTruncateGapBlockNonces_NoOpWithoutCheckpoint(t *testing.T) {
+func TestHealTruncateGapBlockNonces_FailsWithoutCheckpoint(t *testing.T) {
 	t.Parallel()
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
@@ -345,7 +345,72 @@ func TestHealTruncateGapBlockNonces_NoOpWithoutCheckpoint(t *testing.T) {
 	ls := newTruncateGapHealTestLedgerState(t, db, 500, tipHash, nil)
 	ls.config.CardanoNodeConfig = newConwayBootstrapStabilityCfg(t)
 
-	require.NoError(t, ls.healTruncateGapBlockNonces(t.Context()))
+	err = ls.healTruncateGapBlockNonces(t.Context())
+	require.Error(t, err)
+	require.ErrorContains(t, err, "no block_nonce checkpoint")
 	require.Empty(t, ls.currentTipBlockNonce)
 	require.Equal(t, 0, countBlockNonces(t, db))
+}
+
+// TestHealTruncateGapBlockNonces_FailsWhenOnlyCheckpointIsForkOnly proves the
+// heal refuses to proceed -- rather than silently leaving the tip nonce
+// empty -- when the only block_nonce checkpoint at or before the tip belongs
+// to a since-abandoned fork. database.TruncateAfterSlot's own guard checks
+// only that a checkpoint row exists, not that it sits on the primary chain
+// (it has no chain-topology knowledge to do so), so it can let a truncate
+// through on the strength of a checkpoint this heal then correctly refuses
+// to use.
+func TestHealTruncateGapBlockNonces_FailsWhenOnlyCheckpointIsForkOnly(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	canonicalChain := cm.PrimaryChain()
+
+	var origin lcommon.Blake2b256
+	blocks, err := fixtures.GenerateConwayChain(1, origin, 100, 10, 2)
+	require.NoError(t, err)
+	require.Len(t, blocks, 2)
+	for _, block := range blocks {
+		require.NoError(t, canonicalChain.AddBlock(block, nil))
+	}
+	tipBlock := blocks[1]
+
+	// The only checkpoint at or before the tip belongs to a fork that
+	// diverges from genesis -- never added to the canonical chain at all --
+	// modeling a checkpoint whose fork was abandoned without its
+	// block_nonce row being cleaned up by whatever rollback should have
+	// pruned it.
+	forkCheckpointHash := bytes.Repeat([]byte{0xf0}, 32)
+	require.NoError(t, db.BlockCreate(models.Block{
+		ID:     99,
+		Slot:   50,
+		Hash:   forkCheckpointHash,
+		Cbor:   blocks[0].Cbor(),
+		Number: 99,
+		Type:   conway.BlockTypeConway,
+	}, nil))
+	require.NoError(t, db.SetBlockNonce(
+		forkCheckpointHash,
+		50,
+		bytes.Repeat([]byte{0xaa}, 32),
+		true, // isCheckpoint
+		nil,
+	))
+
+	ls := newTruncateGapHealTestLedgerState(
+		t, db, tipBlock.SlotNumber(), tipBlock.Hash().Bytes(), nil)
+	ls.config.CardanoNodeConfig = newConwayBootstrapStabilityCfg(t)
+	ls.chain = canonicalChain
+
+	err = ls.healTruncateGapBlockNonces(t.Context())
+	require.Error(t, err)
+	require.ErrorContains(t, err, "primary chain")
+	require.Empty(t, ls.currentTipBlockNonce)
 }

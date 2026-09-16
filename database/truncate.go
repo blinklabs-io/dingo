@@ -433,7 +433,7 @@ func (d *Database) TruncateAfterSlot(
 		if len(newNonce) == 0 &&
 			truncateBlock.Type != byron.BlockTypeByronEbb &&
 			truncateBlock.Type != byron.BlockTypeByronMain {
-			// A pruned target nonce is reconstructible as long as a
+			// A pruned target nonce is USUALLY reconstructible whenever a
 			// checkpoint row (is_checkpoint=1, retained forever, written
 			// once per epoch) survives at or before the target's own slot:
 			// LedgerState's startup heal (healTruncateGapBlockNonces) folds
@@ -443,10 +443,17 @@ func (d *Database) TruncateAfterSlot(
 			// never at or before it, so that history is guaranteed present
 			// -- and persists the correct nonce before any epoch nonce or
 			// VRF check runs. This package intentionally has no ledger/era
-			// knowledge to perform that fold itself (see AGENTS.md's
-			// database/ledger boundary), so it only verifies a checkpoint
-			// exists and defers the actual reconstruction to the ledger
-			// layer.
+			// or chain-topology knowledge to perform that fold itself (see
+			// AGENTS.md's database/ledger boundary), so this check is
+			// deliberately coarse: it only verifies that SOME checkpoint row
+			// exists at or before the target slot, not that it sits on the
+			// current primary chain (a checkpoint written for a
+			// later-abandoned fork is never guaranteed cleaned up by every
+			// rollback path). The ledger layer's heal re-derives the anchor
+			// with full primary-chain awareness and is the actual safety
+			// boundary: it hard-fails startup rather than silently leaving
+			// the tip nonce empty if the checkpoint this check found turns
+			// out not to be usable after all.
 			//
 			// No checkpoint before the target means reconstruction has
 			// nothing to fold from -- reject exactly as before, since

@@ -67,17 +67,24 @@ import (
 // epoch from every honest peer, with no error at truncate time to explain
 // why.
 //
-// When no reconstructable checkpoint exists, this warns and leaves state
-// as-is rather than failing LedgerState startup outright -- mirroring
-// healMithrilGapBlockNonces's own no-anchor case ("reconstructing from an
-// unknown seed would be worse than guessing"). That case should be
-// unreachable for a genuine truncate-created gap: TruncateAfterSlot already
-// refuses to let a truncate through when no checkpoint survives at or
-// before its target, so the actual safety enforcement for that scenario
-// lives there, not here. A tip with an empty nonce and no checkpoint below
-// it instead means this chain never went through ordinary ledger block
-// application at all (e.g. a test harness that seeds the primary chain
-// index directly without ever computing nonces) -- not a repairable gap.
+// When no reconstructable checkpoint exists, this HARD-FAILS (returns an
+// error, which both call sites treat as fatal) rather than warning and
+// leaving state as-is. This deliberately does NOT mirror
+// healMithrilGapBlockNonces's own no-anchor case: database.TruncateAfterSlot's
+// own guard is a coarse, chain-topology-blind check (it verifies a
+// checkpoint row exists at or before the target slot, not that it sits on
+// the current primary chain -- see its doc comment), so by the time this
+// heal runs with an empty tip nonce and Byron already excluded,
+// TruncateAfterSlot has already promised a checkpoint exists. If this
+// heal's own primary-chain-aware search still can't find one, that promise
+// was not actually kept -- most plausibly because the only checkpoint row
+// at or before the target belongs to a since-abandoned fork that survived
+// whatever rollback should have pruned it -- and continuing with an empty
+// nonce would reproduce exactly the corruption this whole mechanism exists
+// to prevent, just discovered one layer later. A tip with an empty nonce
+// and truly no checkpoint below it at all (e.g. a test harness that seeds
+// the primary chain index directly without ever computing nonces) is
+// equally not repairable, so it fails the same way.
 func (ls *LedgerState) healTruncateGapBlockNonces(ctx context.Context) error {
 	ls.RLock()
 	tipPoint := ls.currentTip.Point
@@ -177,46 +184,45 @@ func (ls *LedgerState) healTruncateGapBlockNonces(ctx context.Context) error {
 			break
 		}
 		if anchorRow == nil {
-			// No checkpoint at or before the tip is actually on the primary
-			// chain. TruncateAfterSlot already refuses to let a truncate
-			// through when no checkpoint exists at or before its target, so
-			// a real disaster-recovery truncate should never produce this
-			// tip in the first place; this is reached by chains that never
-			// went through ledger block application at all (e.g. a test
-			// harness that seeds the chain index directly) rather than a
-			// truncate this heal failed to repair. Mirrors
-			// healMithrilGapBlockNonces's own no-anchor case: reconstructing
-			// from an unknown seed would be worse than guessing, so decline
-			// and leave state as-is rather than block startup outright.
-			ls.config.Logger.Warn(
-				"skipped truncate gap block nonce reconstruction: no "+
-					"checkpoint block_nonce row at or before the tip is on "+
-					"the primary chain",
-				"tip_slot", tipPoint.Slot,
-				"component", "ledger",
+			// Every checkpoint row at or before the tip belongs to a
+			// since-abandoned fork (or none exist at all): TruncateAfterSlot's
+			// own guard checked only row existence, not primary-chain
+			// membership, so its promise that a usable checkpoint exists was
+			// not kept. Continuing with an empty tip nonce here would
+			// reproduce the exact silent VRF corruption this mechanism
+			// exists to prevent -- fail loudly instead.
+			return fmt.Errorf(
+				"truncate gap nonce heal found no block_nonce checkpoint "+
+					"at or before tip slot %d that is actually on the "+
+					"primary chain: database.TruncateAfterSlot's own guard "+
+					"only checks that a checkpoint row exists, not that it "+
+					"sits on the current primary chain, so a checkpoint "+
+					"belonging to a since-abandoned fork can pass that "+
+					"guard without being usable here; resuming with an "+
+					"empty nonce would corrupt VRF verification for the "+
+					"whole following epoch",
+				tipPoint.Slot,
 			)
-			return nil
 		}
 	} else if len(checkpointCandidates) > 0 {
 		anchorRow = &checkpointCandidates[0]
 	}
 	if anchorRow == nil {
-		// No usable checkpoint at all. As above, a real disaster-recovery
-		// truncate can't have produced this tip (TruncateAfterSlot's own
-		// checkpoint check would have refused it), so this reflects a chain
-		// that never wrote block_nonce history through normal ledger block
-		// application. Warn and leave state as-is rather than block
-		// startup: the actual safety enforcement for a genuine
-		// truncate-created gap lives in TruncateAfterSlot, which already
-		// requires a reconstructable checkpoint to exist before allowing
-		// the truncate through.
-		ls.config.Logger.Warn(
-			"skipped truncate gap block nonce reconstruction: no "+
-				"checkpoint block_nonce row exists at or before the tip",
-			"tip_slot", tipPoint.Slot,
-			"component", "ledger",
+		// No usable checkpoint at all -- either no chain index is attached
+		// (offline tooling) and no checkpoint row exists regardless, or (with
+		// a chain index attached) already returned above. A tip with an
+		// empty nonce and nothing to reconstruct from means this chain never
+		// wrote block_nonce history through normal ledger block application
+		// (e.g. a test harness that seeds the chain index directly) -- not a
+		// repairable gap, so fail the same way rather than silently leaving
+		// the tip nonce empty.
+		return fmt.Errorf(
+			"truncate gap nonce heal found no block_nonce checkpoint row "+
+				"at or before tip slot %d: resuming with an empty nonce "+
+				"would corrupt VRF verification for the whole following "+
+				"epoch",
+			tipPoint.Slot,
 		)
-		return nil
 	}
 	if anchorIter != nil {
 		defer anchorIter.Cancel()
