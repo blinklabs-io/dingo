@@ -487,6 +487,11 @@ func TestApplyMIRCerts_PotTransferTreasuryToReserves(t *testing.T) {
 		"reserves increased by pot transfer")
 }
 
+// TestApplyMIRCerts_PotTransferOverflow verifies that an inbound transfer
+// that would overflow the destination pot's uint64 balance discards the
+// boundary as a no-op rather than failing the epoch rollover, the same as an
+// over-budget distribution: a hard error here would wedge the node, since the
+// stored certificate is re-read and re-fails on every deterministic retry.
 func TestApplyMIRCerts_PotTransferOverflow(t *testing.T) {
 	t.Parallel()
 
@@ -497,8 +502,8 @@ func TestApplyMIRCerts_PotTransferOverflow(t *testing.T) {
 		seedMIRPotTransfer(t, gdb, mirPotReserves, 1, 500)
 		require.NoError(t, db.Metadata().SetNetworkState(maxUint, 1, 50, nil))
 
-		err := applyMIRCertsErr(ls, db, 0, 1_000)
-		require.ErrorContains(t, err, "overflow treasury")
+		require.NoError(t, applyMIRCertsErr(ls, db, 0, 1_000),
+			"pot overflow must not fail the epoch boundary")
 		state, stateErr := db.Metadata().GetNetworkState(nil)
 		require.NoError(t, stateErr)
 		require.Equal(t, maxUint, uint64(state.Treasury))
@@ -511,8 +516,8 @@ func TestApplyMIRCerts_PotTransferOverflow(t *testing.T) {
 		seedMIRPotTransfer(t, gdb, mirPotTreasury, 1, 500)
 		require.NoError(t, db.Metadata().SetNetworkState(1, maxUint, 50, nil))
 
-		err := applyMIRCertsErr(ls, db, 0, 1_000)
-		require.ErrorContains(t, err, "overflow reserves")
+		require.NoError(t, applyMIRCertsErr(ls, db, 0, 1_000),
+			"pot overflow must not fail the epoch boundary")
 		state, stateErr := db.Metadata().GetNetworkState(nil)
 		require.NoError(t, stateErr)
 		require.Equal(t, uint64(1), uint64(state.Treasury))

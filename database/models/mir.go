@@ -36,8 +36,11 @@ type MoveInstantaneousRewards struct {
 // epoch-boundary application logic. One of OtherPot > 0 (pot-to-pot transfer)
 // or len(Rewards) > 0 (credential distribution) will be non-empty.
 type MIREffect struct {
-	// ID is the move_instantaneous_rewards row ID, used to order the
-	// certificates of an ended epoch before their deltas are folded.
+	// ID is the move_instantaneous_rewards row ID. Ordering comes from the
+	// store query (`ORDER BY added_slot ASC, id ASC` in
+	// GetMIRCertsInSlotRange) and from consuming effects in receipt order,
+	// not from this field; ID itself is only read for the "MIR %d carries no
+	// delta" error message.
 	ID uint
 	// Pot is the source Ada pot: 0 = Reserves, 1 = Treasury.
 	Pot uint
