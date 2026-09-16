@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
+	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -60,15 +61,6 @@ var ErrNotImplemented = errors.New("not implemented")
 // whatever verdict the rule produced from the false negative.
 var ErrLedgerViewStorageFault = errors.New("ledger view storage fault")
 
-// utxoMemoKey identifies a resolved UTxO by its fixed-size components
-// (transaction hash + output index) for LedgerView.utxoMemo. Using the raw
-// hash avoids both the fmt.Sprintf allocation and the hex-encoding
-// UtxoById's consumedUtxos/intraBlockUtxos overlay key already pays for.
-type utxoMemoKey struct {
-	txId  lcommon.Blake2b256
-	index uint32
-}
-
 type LedgerView struct {
 	ls  *LedgerState
 	txn *database.Txn
@@ -78,11 +70,9 @@ type LedgerView struct {
 	committeePParams     lcommon.ProtocolParameters
 	committeeStatePinned bool
 	// intraBlockUtxos tracks outputs created by earlier transactions in the same block.
-	// Key format: hex(txId) + ":" + outputIdx
-	intraBlockUtxos map[string]lcommon.Utxo
+	intraBlockUtxos map[utxoref.Key]lcommon.Utxo
 	// consumedUtxos tracks inputs consumed by pending mempool transactions.
-	// Key format: hex(txId) + ":" + outputIdx
-	consumedUtxos map[string]struct{}
+	consumedUtxos map[utxoref.Key]struct{}
 	// utxoMemoMu guards utxoMemo. Production views are built per transaction
 	// or query and used from one goroutine; the lock keeps a future shared
 	// view safe at negligible cost next to the database read it saves.
@@ -96,7 +86,7 @@ type LedgerView struct {
 	// entry added between calls still takes precedence. Every caller shares
 	// the cached Output and must not mutate it. Lazily allocated; never
 	// shared across views.
-	utxoMemo map[utxoMemoKey]lcommon.Utxo
+	utxoMemo map[utxoref.Key]lcommon.Utxo
 	// skipPhase2Validation is set for accepted block replay, where
 	// the producer's isValid flag is authoritative for Phase-2 results.
 	// Currently unreachable from production: ledgerProcessBlock's sole
@@ -237,6 +227,11 @@ var _ lcommon.DRepDelegationState = (*LedgerView)(nil)
 // witnesses rather than fail to build.
 var _ eras.ByronProtocolMagicProvider = (*LedgerView)(nil)
 
+// Byron minimum-fee validation requires the fee policy from Byron genesis.
+// Pin the optional capability to the concrete validation view so interface
+// drift fails at build time instead of disabling the rule.
+var _ eras.ByronFeePolicyProvider = (*LedgerView)(nil)
+
 // UtxoValidateValueNotConservedUtxo discovers this capability with a runtime
 // type assertion and, unlike the assertions above, degrades rather than fails
 // when it misses: a failed assertion silently refunds a legacy stake
@@ -264,10 +259,14 @@ func (lv *LedgerView) ByronProtocolMagic() (uint32, error) {
 	return lv.ls.ByronProtocolMagic()
 }
 
+func (lv *LedgerView) ByronFeePolicy() (int64, int64, error) {
+	return lv.ls.ByronFeePolicy()
+}
+
 func (lv *LedgerView) UtxoById(
 	utxoId lcommon.TransactionInput,
 ) (lcommon.Utxo, error) {
-	key := fmt.Sprintf("%s:%d", utxoId.Id().String(), utxoId.Index())
+	key := utxoref.ForInput(utxoId)
 	// Check consumed UTxOs first (spent by pending mempool TX)
 	if lv.consumedUtxos != nil {
 		if _, ok := lv.consumedUtxos[key]; ok {
@@ -285,11 +284,12 @@ func (lv *LedgerView) UtxoById(
 		}
 	}
 	// Consult the memo only after both overlays, so an overlay entry added
-	// between calls on this view still takes precedence.
-	memoKey := utxoMemoKey{txId: utxoId.Id(), index: utxoId.Index()}
+	// between calls on this view still takes precedence. The memo shares
+	// the same key as consumedUtxos/intraBlockUtxos, so no second key needs
+	// to be computed here.
 	lv.utxoMemoMu.Lock()
 	if lv.utxoMemo != nil {
-		if utxo, ok := lv.utxoMemo[memoKey]; ok {
+		if utxo, ok := lv.utxoMemo[key]; ok {
 			lv.utxoMemoMu.Unlock()
 			return utxo, nil
 		}
@@ -324,9 +324,9 @@ func (lv *LedgerView) UtxoById(
 	}
 	lv.utxoMemoMu.Lock()
 	if lv.utxoMemo == nil {
-		lv.utxoMemo = make(map[utxoMemoKey]lcommon.Utxo, 4)
+		lv.utxoMemo = make(map[utxoref.Key]lcommon.Utxo, 4)
 	}
-	lv.utxoMemo[memoKey] = result
+	lv.utxoMemo[key] = result
 	lv.utxoMemoMu.Unlock()
 	return result, nil
 }

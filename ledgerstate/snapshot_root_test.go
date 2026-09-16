@@ -781,6 +781,69 @@ func TestOpenSnapshotAtOrBeforePrefersTheNewestAcrossFormats(t *testing.T) {
 	}
 }
 
+// TestOpenNewestSnapshotFindsAStateAboveAnyTrustBoundary pins the behavior
+// OpenSnapshotAtOrBefore deliberately refuses: a tree whose only ledger state
+// sits past whatever slot a caller would otherwise trust. A verified Mithril
+// ancillary archive ships exactly this shape (see mithril/sync_import.go), and
+// OpenNewestSnapshot is how that caller finds it and learns its slot.
+func TestOpenNewestSnapshotFindsAStateAboveAnyTrustBoundary(t *testing.T) {
+	t.Parallel()
+
+	dir := writeUTxOHDSnapshot(t, "300", "newer than certified", "table")
+
+	files, slot, err := OpenNewestSnapshot(openTree(t, dir))
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	defer files.Close()
+	if slot != 300 {
+		t.Fatalf("expected slot 300, got %d", slot)
+	}
+	got, err := io.ReadAll(files.State)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if string(got) != "newer than certified" {
+		t.Fatalf("expected the only state present, got %q", string(got))
+	}
+
+	// OpenSnapshotAtOrBefore must keep refusing the same tree at any bound
+	// below the state's slot: OpenNewestSnapshot is an additional entry point,
+	// not a relaxation of the existing one.
+	if _, err := OpenSnapshotAtOrBefore(openTree(t, dir), 299); !errors.Is(
+		err, ErrNoUsableLedgerState,
+	) {
+		t.Fatalf(
+			"expected OpenSnapshotAtOrBefore to still refuse slot 300 above maxSlot 299, got %v",
+			err,
+		)
+	}
+}
+
+// TestOpenNewestSnapshotFailsOnATreeWithNoLedgerState pins that
+// OpenNewestSnapshot is not a blanket fallback: a tree with no ledger
+// directory at all (or one holding nothing usable) still reports
+// ErrNoUsableLedgerState, exactly like OpenSnapshotAtOrBefore does. This is
+// the case a verified ancillary tree being genuinely emptied or interrupted
+// must still hit — accepting anything here would be the downgrade the
+// verified-tree guard in mithril/sync_import.go exists to prevent.
+func TestOpenNewestSnapshotFailsOnATreeWithNoLedgerState(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	files, slot, err := OpenNewestSnapshot(openTree(t, dir))
+	if !errors.Is(err, ErrNoUsableLedgerState) {
+		t.Fatalf("expected ErrNoUsableLedgerState, got %v", err)
+	}
+	if files != nil {
+		t.Fatalf("expected no files, got %+v", files)
+	}
+	if slot != 0 {
+		t.Fatalf("expected slot 0 on failure, got %d", slot)
+	}
+}
+
 // TestParseSnapshotBytesParsesWhatTheCallerHolds keeps the buffer the caller
 // verified the thing that gets parsed.
 //
