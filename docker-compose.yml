@@ -30,6 +30,8 @@ services:
       - "3001:3001"
       # Prometheus metrics (localhost only by default)
       - "127.0.0.1:12798:12798"
+      # Liveness (/health, /healthz) and readiness (/readyz) probes
+      - "127.0.0.1:12799:12799"
       # UTxO RPC (gRPC, localhost only by default)
       - "127.0.0.1:9090:9090"
     volumes:
@@ -38,7 +40,10 @@ services:
       # Unix socket for cardano-cli and other NtC clients
       - dingo-ipc:/ipc
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:12798/metrics"]
+      # Liveness, not readiness: an unhealthy container is replaced, and a
+      # node that is still syncing is legitimately unready for hours. Probe
+      # /readyz from a Kubernetes readinessProbe or a load balancer instead.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:12799/health"]
       interval: 30s
       timeout: 5s
       start_period: 60s

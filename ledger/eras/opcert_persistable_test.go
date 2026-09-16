@@ -70,16 +70,14 @@ func TestValidateOpCertPersistableCounter(t *testing.T) {
 	}
 }
 
-// TestMaxPersistableOpCertCounterMatchesSignedColumn documents why the bound
-// is where it is: it is the largest value a signed 64-bit SQL column holds,
-// which is what checkedInt64 enforces at the metadata store.
-func TestMaxPersistableOpCertCounterMatchesSignedColumn(t *testing.T) {
-	assert.Equal(
-		t,
-		uint64(math.MaxInt64),
-		eras.MaxPersistableOpCertCounter,
-	)
-}
+// The bound is the largest value a signed 64-bit SQL column holds, which is
+// what sqlstore.checkedInt64 enforces at the metadata store. That coupling is
+// asserted by ledgerstate.TestPersistableOpCertBoundMatchesStore, which drives
+// the constant through the real store write in both directions. The previous
+// ledger/eras test only compared the constant with math.MaxInt64; this test
+// also catches drift in the store's checkedInt64 boundary. It cannot be
+// asserted here because checkedInt64 is unexported and ledger/eras sits below
+// the database packages.
 
 // TestValidateOpCertCounterMaxUint64DoesNotWrap pins the era rule's gap
 // comparison at the top of the counter domain: an unchanged counter at
