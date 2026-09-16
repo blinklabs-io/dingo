@@ -5417,16 +5417,19 @@ node's to lead.
 
 That asymmetry is deliberate, and it is not the entry/re-check split the
 per-attempt re-check exists to remove. It is the line `could_not_forge` is
-drawn on throughout `checkAndForgeProduction`: a refusal AFTER
+drawn on throughout `checkAndForgeProduction`: the counter records a slot this
+node was ESTABLISHED to lead and did not forge. A refusal after
 `checkLeaderSafe` increments it -- the stale-tip refusal, the slot battle, the
 KES and OpCert refusals, a credential reload during selection -- because
 `about_to_lead` has already moved and `node_is_leader` never will, and the
 cardano-node parity counters stop balancing on a lost leader slot otherwise. A
-refusal BEFORE the leader check does not, because leadership was never
-established. Every build attempt is post-leader-check by construction, which
-is why all five re-check refusals increment it while three of the five entry
-refusals -- parent slot past the slot, unapplied block at the slot, and the
-upstream-sync skip -- do not. Making the entry side match would make
+refusal before the leader check does not, because leadership has not been
+established there; the one that does is the slot battle lost under the forge
+fence, where the durable fence proves this node led the slot and forged it on
+an earlier pass. Every build attempt is post-leader-check by construction,
+which is why all five re-check refusals increment it while three of the five
+entry refusals -- parent slot past the slot, unapplied block at the slot, and
+the upstream-sync skip -- do not. Making the entry side match would make
 `could_not_forge` count leader CHECKS rather than lost blocks, overstating
 them by roughly the reciprocal of the active slot coefficient: the same
 mistake `dingo_forge_stale_tip_skip_total` was corrected for once already, by

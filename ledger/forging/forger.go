@@ -1067,9 +1067,10 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// No counter moves on this refusal. It runs before checkLeaderSafe, so
 	// the slot may never have been this node's to forge -- on a node whose
 	// clock trails the network it fires for any peer block that arrives a
-	// slot early -- and could_not_forge is reserved for post-leader-check
-	// refusals precisely so it keeps counting lost blocks rather than leader
-	// checks. The same condition met DURING production does reach
+	// slot early -- and could_not_forge records a slot this node was
+	// ESTABLISHED to lead and did not forge, so that it keeps counting lost
+	// blocks rather than leader checks. The same condition met DURING
+	// production does reach
 	// could_not_forge, because leadership is proven by then; see
 	// errChainTipAheadOfSlot and ARCHITECTURE.md for both signatures and why
 	// they are not made to match. A scheduled leader slot swallowed here is
