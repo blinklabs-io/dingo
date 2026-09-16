@@ -121,12 +121,16 @@ func (e *hardForkApplyTxError) Unwrap() error {
 }
 
 func (e *hardForkApplyTxError) MarshalCBOR() ([]byte, error) {
+	utxowFailureType := gledger.ApplyTxErrorUtxowFailure
+	if e.era == gledger.EraIdConway {
+		utxowFailureType = gledger.ConwayLedgerUtxowFailure
+	}
 	return cbor.Encode([]any{
 		[]any{
 			e.era,
 			[]any{
 				[]any{
-					gledger.ApplyTxErrorUtxowFailure,
+					utxowFailureType,
 					e.utxowFailure(),
 				},
 			},
@@ -166,10 +170,7 @@ func (e *hardForkApplyTxError) utxowFailure() []any {
 	case gledger.EraIdConway:
 		return []any{
 			gledger.ConwayUtxowUtxoFailure,
-			[]any{
-				e.era,
-				e.inputSetEmptyFailure(),
-			},
+			e.inputSetEmptyFailure(),
 		}
 	default:
 		return []any{
