@@ -94,10 +94,13 @@ func newSQLOperationsCounter(
 // theirs the same way) because the underlying store allows only one writer
 // regardless of connection count, so any second concurrent write path --
 // for example ledger block-apply racing persistDeferredHeaderValidation's
-// per-block durability write -- can only ever queue behind it. A sustained
-// rate() of pool="write"'s wait_duration_seconds_total approaching 1.0
-// means callers are effectively serialized on that single connection. The
-// read pool is registered identically for consistency and as a future
+// per-block durability write -- can only ever queue behind it. rate() of
+// pool="write"'s wait_duration_seconds_total over a window is the average
+// number of callers waiting concurrently, not a value capped at 1.0: a
+// sustained value near 1.0 already means a caller is waiting essentially
+// continuously, and simultaneous waiters each accrue wait time
+// independently, so real contention can push it well above 1.0. The read
+// pool is registered identically for consistency and as a future
 // comparison point, even though it is not the pool this specific finding
 // is about.
 func newSQLPoolMetrics(
@@ -165,11 +168,13 @@ func newSQLPoolMetrics(
 		reg,
 		sqlMetricNamePrefix+"pool_wait_duration_seconds_total",
 		"Cumulative time callers have spent waiting for a connection "+
-			"from this pool, from sql.DBStats.WaitDuration. For "+
-			"pool=\"write\", a sustained rate() of this over a window "+
-			"approaching 1.0 means the single write connection is "+
-			"saturated -- callers are effectively serialized behind it. "+
-			"Labeled pool=\"write\"|\"read\".",
+			"from this pool, from sql.DBStats.WaitDuration. rate() of this "+
+			"over a window is the average number of callers waiting "+
+			"concurrently, not a value capped at 1.0: for pool=\"write\", "+
+			"a sustained value near 1.0 already means a caller is waiting "+
+			"essentially continuously, and concurrent waiters each accrue "+
+			"wait time independently, so real contention can push it well "+
+			"above 1.0. Labeled pool=\"write\"|\"read\".",
 		constLabels,
 		func() float64 { return statsFn().WaitDuration.Seconds() },
 	)

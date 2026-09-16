@@ -1455,11 +1455,13 @@ matching point-in-time `DBStats` fields). All six are labeled
 `CounterFunc` — the same pull-based pattern
 `dingo_database_sql_wal_bytes`/`disk_bytes` already use, rather than a
 background ticker. `pool="write"` is the one this exists for
-(`pool_max_open_connections` reads `1` there on every current provider): a
-sustained `rate()` of its `wait_duration_seconds_total` approaching `1.0`
-means callers are effectively serialized on that single connection.
-`pool="read"` is registered identically for consistency and as a future
-comparison point.
+(`pool_max_open_connections` reads `1` there on every current provider):
+`rate()` of its `wait_duration_seconds_total` over a window is the average
+number of callers waiting concurrently, not a value capped at `1.0` — a
+sustained value near `1.0` already means a caller is waiting essentially
+continuously, and concurrent waiters each accrue wait time independently,
+so real contention can push it well above `1.0`. `pool="read"` is
+registered identically for consistency and as a future comparison point.
 
 A failed `Sync` is reported as `PartialCommitError`, because at that point the
 blob transaction is committed and carries the new commit timestamp while metadata
