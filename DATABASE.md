@@ -1150,11 +1150,12 @@ rollback across the boundary where those rewards were applied. It only ever
 deletes rows below that window (but see the deferred-header retention pin
 below, which can hold `pool_stake_snapshot` rows longer).
 
-`reward_account_output` is the one table whose retention depends on node
-configuration: it is retained WITHOUT BOUND, instead of pruned to the window
-below, whenever the database is in API storage mode (`types.StorageModeAPI`,
-issue #1875, so the Blockfrost account reward-history endpoint can serve an
-account's full history) or the in-process Koios parity observer is enabled
+`reward_account_output` and `pool_stake_snapshot` are the two tables whose
+retention depends on node configuration. `reward_account_output` is retained
+WITHOUT BOUND, instead of pruned to the window below, whenever the database
+is in API storage mode (`types.StorageModeAPI`, issue #1875, so the
+Blockfrost account reward-history endpoint can serve an account's full
+history) or the in-process Koios parity observer is enabled
 (`Manager.SetRewardAccountOutputRetentionUnbounded`, wired from
 `KoiosParityConfig.Enabled` in `node.go`/`node_lifecycle.go`, issue #4188). The
 observer validates a closed epoch only after fetching and comparing against
@@ -1162,14 +1163,28 @@ Koios over the network, which can fall arbitrarily far behind chain
 progression during a from-genesis or catch-up sync — well past the fixed
 4-epoch window — so without this a checked epoch's `reward_account_output`
 rows are routinely gone before the observer ever reads them.
-`reward_stake_input` is pruned to the window in every case, including both of
-the above.
+
+`pool_stake_snapshot` is likewise retained WITHOUT BOUND in API storage mode
+only (`cleanupOldSnapshots`, `ledger/snapshot/rotation.go`, issue #1900): API
+mode's whole purpose is retaining full history for historical queries, and a
+fixed 3-epoch pool-snapshot window contradicts that for `GetStakeDistribution`/
+`GetPoolDistr2` pinned to an older epoch, the same way an unbounded UTxO table
+does for `GetUTxOWhole`. Confirmed live (node-parity from-genesis validation):
+with only UTxO's own window removed, a historical Acquire still failed at
+exactly this pool-snapshot floor instead, since `VerifyPointQueryable`'s
+Acquire-time gate (issue #382) checks stake retention on every Acquire
+regardless of which query type the caller actually intends to ask. Unlike
+`reward_account_output`, the Koios parity observer does not separately extend
+`pool_stake_snapshot`'s retention -- only API storage mode does.
+
+`reward_stake_input` is pruned to the window in every case, regardless of
+storage mode or the observer.
 
 Pruned at `epoch < current-3`:
 
 | Table | Scales with | Pruned by |
 |---|---|---|
-| `pool_stake_snapshot` | pools per epoch | `DeletePoolStakeSnapshotsBeforeEpoch` |
+| `pool_stake_snapshot` | pools per epoch | `DeletePoolStakeSnapshotsBeforeEpoch` (CORE mode only) |
 | `reward_stake_input` | delegators per epoch | `DeleteRewardStateBeforeEpoch` / `DeleteRewardStakeInputBeforeEpoch` |
 | `reward_account_output` | delegators per epoch | `DeleteRewardStateBeforeEpoch` (CORE mode, observer disabled only) |
 
@@ -3235,10 +3250,14 @@ departed at 244 and 245, and `= $epoch` matches none of those later epochs.
 
 `pool_registration` and `pool_retirement` are retained for the life of the
 database, while `pool_stake_snapshot` is pruned to `currentEpoch - 3` by
-`Manager.cleanupOldSnapshots`. That is why this query, and not a pool-set
-membership read, is the departure evidence available to an observer running
-behind the node. Backends differ only in identifier quoting (`"transaction"` on
-SQLite/Postgres, `` `transaction` `` on MySQL).
+`Manager.cleanupOldSnapshots` in CORE storage mode (unbounded in API mode --
+see the pool-stake-snapshot retention discussion above). In CORE mode, that
+windowing is why this query, and not a pool-set membership read, is the
+departure evidence available to an observer running behind the node; in API
+mode the snapshot table itself remains a viable alternative, but this query
+is still used uniformly rather than branching behavior on storage mode.
+Backends differ only in identifier quoting (`"transaction"` on SQLite/Postgres,
+`` `transaction` `` on MySQL).
 
 ```sql
 WITH latest_reg AS (
