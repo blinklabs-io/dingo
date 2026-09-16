@@ -256,6 +256,64 @@ func captureGenesisBaseline(
 	return set, nil
 }
 
+// errUTxOTainted is returned by utxoVerdict for utxoVerdictTainted -- see
+// that constant's doc comment.
+var errUTxOTainted = errors.New(
+	"tx_info fetch failed during this epoch; " +
+		"UTxO reconstruction was re-baselined from " +
+		"Dingo directly, so this epoch's comparison " +
+		"would be against Dingo itself and was skipped",
+)
+
+// utxoVerdictMode is utxoVerdict's per-epoch decision of which UTxO-check
+// outcome applies this epoch.
+type utxoVerdictMode int
+
+const (
+	// utxoVerdictNoBaseline: the genesis baseline was never captured (or
+	// capturing it failed) -- the UTxO half of this comparison is
+	// unavailable, this epoch and for the rest of the run.
+	utxoVerdictNoBaseline utxoVerdictMode = iota
+	// utxoVerdictTainted: a tx_info failure this epoch forced a re-baseline
+	// from Dingo's own answer (see flushPendingTxInfos) -- comparing now
+	// would silently pass by construction, not confirm anything against
+	// Koios.
+	utxoVerdictTainted
+	// utxoVerdictCompare: run the real Dingo-vs-reconstruction comparison.
+	utxoVerdictCompare
+)
+
+// utxoVerdict decides utxoVerdictMode purely from local state -- no network
+// I/O -- extracted from RunFromGenesis's roll-forward callback specifically
+// so the regression it fixes is directly assertable (human review,
+// dingo#4319): a Koios outage during tx_info reconstruction being reported
+// as a false "utxo set match" instead of "not run", because
+// utxoTaintedThisEpoch was closure state inside a 500+ line function
+// literal that no test exercised. Reverting the taint check this function
+// replaces would make TestUTxOVerdict's tainted case fail.
+//
+// utxoBaselineErr is not a parameter: whether the genesis baseline capture
+// itself failed (utxoBaselineErr != nil) or was simply never attempted yet
+// (both nil), the outcome is identical -- utxoVerdictNoBaseline, with
+// UTxOAttempted left false and no error surfaced on EpochResult, matching
+// RunFromGenesis's behavior before this extraction. A caller that wants to
+// log the baseline failure's cause does so once, from utxoBaselineErr
+// directly, at the point that error was captured -- not from this
+// per-epoch decision.
+func utxoVerdict(
+	tainted bool,
+	utxoRefs UTxOSet,
+) (mode utxoVerdictMode, err error) {
+	switch {
+	case tainted:
+		return utxoVerdictTainted, errUTxOTainted
+	case utxoRefs != nil:
+		return utxoVerdictCompare, nil
+	default:
+		return utxoVerdictNoBaseline, nil
+	}
+}
+
 // nextSessionRetryDelay computes how long RunFromGenesis's reconnect loop
 // should wait before its next reconnect attempt (sleepFor), and what delay
 // the attempt after that should use if it also fails (nextDelay).
@@ -300,7 +358,6 @@ func RunFromGenesis(
 		lastEpoch          uint64
 		haveLastEpoch      bool
 		utxoRefs           UTxOSet
-		utxoBaselineErr    error
 		utxoAttempted      bool
 		pendingTxHashes    []string
 		txInfoFlushCount   int
@@ -519,7 +576,6 @@ func RunFromGenesis(
 							utxoAttempted = true
 							refs, err := captureGenesisBaseline(ctx, dingoAddr, magic, point)
 							if err != nil {
-								utxoBaselineErr = err
 								logf(
 									"nodeparity: genesis UTxO baseline unavailable "+
 										"(UTxO comparison disabled for this run): %v",
@@ -588,20 +644,13 @@ func RunFromGenesis(
 						result.ProtocolParamsAndStakeElapsed = time.Since(psStart)
 
 						utxoStart := time.Now()
-						if utxoTaintedThisEpoch {
-							// See utxoTaintedThisEpoch's doc comment: utxoRefs
-							// was just re-baselined from Dingo's own answer at
-							// this same point, so comparing it now would
-							// silently pass by construction rather than
-							// confirming anything against Koios.
+						switch mode, verdictErr := utxoVerdict(
+							utxoTaintedThisEpoch, utxoRefs,
+						); mode {
+						case utxoVerdictTainted:
 							result.UTxOAttempted = true
-							result.UTxOErr = errors.New(
-								"tx_info fetch failed during this epoch; " +
-									"UTxO reconstruction was re-baselined from " +
-									"Dingo directly, so this epoch's comparison " +
-									"would be against Dingo itself and was skipped",
-							)
-						} else if utxoRefs != nil {
+							result.UTxOErr = verdictErr
+						case utxoVerdictCompare:
 							result.UTxOAttempted = true
 							if utxoConn, lsqUtxo, err := acquireWithRetry(ctx, dingoAddr, magic, point); err != nil {
 								result.UTxOErr = err
@@ -621,7 +670,7 @@ func RunFromGenesis(
 								_ = lsqUtxo.Client.Release() //nolint:errcheck
 								utxoConn.Close()             //nolint:errcheck
 							}
-						} else if utxoBaselineErr != nil {
+						case utxoVerdictNoBaseline:
 							result.UTxOAttempted = false
 						}
 						result.UTxOElapsed = time.Since(utxoStart)
