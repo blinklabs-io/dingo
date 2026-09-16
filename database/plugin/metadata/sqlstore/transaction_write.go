@@ -80,8 +80,8 @@ func (a *transactionBatchAccumulator) insertTransaction(
 		a.transactionInsert = stmt
 	}
 	if a.sqlOperations != nil {
-		a.sqlOperations.WithLabelValues(classifySQLOp(transactionInsertSQL)).
-			Inc()
+		op, _ := classifySQLStatement(transactionInsertSQL)
+		a.sqlOperations.WithLabelValues(op).Inc()
 	}
 	if a.mysql {
 		result, err := a.transactionInsert.ExecContext(ctx, args...)
@@ -870,6 +870,59 @@ DELETE FROM asset_mint_burn WHERE slot > ?`,
 	)
 }
 
+// insertUtxoQuery is insertUtxoModel's ordinary-path INSERT (ignoreConflict
+// == false), used where a caller expects the (tx_id, output_idx) pair to be
+// new. It carries a trailing "RETURNING id" (see hasReturningID in
+// dialect_queryer.go), so prepareHotStatements deliberately does not cache
+// it on MySQL: dialectQueryer.QueryRowContext's MySQL RETURNING-id emulation
+// does its own ExecContext+LastInsertId dance instead of ever calling
+// QueryRowContext with the translated query text, so a cached *sql.Stmt here
+// would never be consulted by that path and MySQL is left on the existing
+// uncached fallback instead. SQLite and PostgreSQL both support RETURNING
+// natively, so this participates in the hot-statement cache normally on
+// those dialects.
+const insertUtxoQuery = `
+INSERT INTO utxo (
+    transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
+    staking_key, credential_tag, datum_hash, spent_at_tx_id,
+    referenced_by_tx_id, collateral_by_tx_id, added_slot, deleted_slot,
+    amount, output_idx, payment_script
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+RETURNING id`
+
+// insertUtxoQueryIgnoreConflict is insertUtxoModel's actual production path
+// (every real call site passes ignoreConflict == true): identical to
+// insertUtxoQuery but with ON CONFLICT (tx_id, output_idx) DO NOTHING, for
+// the snapshot-import case where this output may already exist. The
+// hot-statement cache is keyed by exact query text, so this needs its own
+// constant distinct from insertUtxoQuery -- see that constant's doc comment
+// for the MySQL RETURNING caveat, which applies here identically. This was
+// dingo's single largest uncached raw-SQL call site: a 30s CPU profile of a
+// live from-genesis Preview sync attributed 3.07s (8.8% of total samples) to
+// this one QueryRowContext call, almost entirely modernc.org/sqlite
+// re-parsing and re-planning the identical statement text on every UTxO
+// output insert.
+const insertUtxoQueryIgnoreConflict = `
+INSERT INTO utxo (
+    transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
+    staking_key, credential_tag, datum_hash, spent_at_tx_id,
+    referenced_by_tx_id, collateral_by_tx_id, added_slot, deleted_slot,
+    amount, output_idx, payment_script
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (tx_id, output_idx) DO NOTHING
+RETURNING id`
+
+// getAssetIDQuery looks up the id of the asset row insertUtxoModel's
+// ImportAsset call just created (or matched via its own ON CONFLICT), so
+// utxo.Assets[i].ID can be populated for the caller. It carries no RETURNING
+// clause, so unlike insertUtxoQuery/insertUtxoQueryIgnoreConflict it needs no
+// dialect-specific handling and is always safe to route through the
+// hot-statement cache.
+const getAssetIDQuery = `
+SELECT id FROM asset
+WHERE utxo_id = ? AND policy_id = ? AND name = ?
+ORDER BY id DESC LIMIT 1`
+
 func (s *Store) insertUtxoModel(
 	ctx context.Context,
 	db queryer,
@@ -880,19 +933,12 @@ func (s *Store) insertUtxoModel(
 	if err != nil {
 		return err
 	}
-	conflict := ""
+	query := insertUtxoQuery
 	if ignoreConflict {
-		conflict = " ON CONFLICT (tx_id, output_idx) DO NOTHING"
+		query = insertUtxoQueryIgnoreConflict
 	}
 	var id int64
-	err = db.QueryRowContext(ctx, `
-INSERT INTO utxo (
-    transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
-    staking_key, credential_tag, datum_hash, spent_at_tx_id,
-    referenced_by_tx_id, collateral_by_tx_id, added_slot, deleted_slot,
-    amount, output_idx, payment_script
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`+conflict+`
-RETURNING id`,
+	err = s.queryRowCached(ctx, db, query,
 		params.TransactionID,
 		params.CollateralReturnForTxID,
 		params.TxID,
@@ -969,10 +1015,7 @@ WHERE id = ?`,
 			return err
 		}
 		var assetID uint
-		if err := db.QueryRowContext(ctx, `
-SELECT id FROM asset
-WHERE utxo_id = ? AND policy_id = ? AND name = ?
-ORDER BY id DESC LIMIT 1`,
+		if err := s.queryRowCached(ctx, db, getAssetIDQuery,
 			id,
 			asset.PolicyId,
 			asset.Name,

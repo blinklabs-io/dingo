@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
@@ -79,6 +80,53 @@ func TestOpenSharedSQLStoreFilePoolsAndWAL(t *testing.T) {
 	require.NoError(t, err)
 	require.Positive(t, size)
 	require.FileExists(t, filepath.Join(dataDir, "metadata.sqlite"))
+}
+
+// TestDiskSizeDoesNotBlockOnBusyWriteConnection is the regression test for
+// sqliteDiskSize querying through the write pool: writeDB has
+// SetMaxOpenConns(1), so an open write transaction holds that pool's only
+// connection until it commits or rolls back. DiskSize() (wired to
+// dingo_database_sql_disk_bytes, scraped by Prometheus) must not share that
+// pool, or a live write transaction stalls every scrape behind it.
+// sqliteDiskSize now queries readDB, an independently sized pool, so this
+// passes with an open write transaction held for the whole call.
+func TestDiskSizeDoesNotBlockOnBusyWriteConnection(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	store, _, _, err := openSQLStore(
+		Config{},
+		metadata.ProviderDependencies{DataDir: dataDir},
+	)
+	require.NoError(t, err)
+	require.NoError(t, store.Start(context.Background()))
+	t.Cleanup(func() {
+		require.NoError(t, store.Close())
+	})
+
+	txn := store.Transaction(context.Background())
+	t.Cleanup(func() {
+		_ = txn.Rollback()
+	})
+
+	done := make(chan struct{})
+	var (
+		size        int64
+		diskSizeErr error
+	)
+	go func() {
+		defer close(done)
+		size, diskSizeErr = store.DiskSize()
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal(
+			"DiskSize blocked behind the write transaction's sole connection",
+		)
+	}
+	require.NoError(t, diskSizeErr)
+	require.Positive(t, size)
 }
 
 // TestOpenSharedSQLStoreWALAutocheckpoint pins the raised checkpoint
