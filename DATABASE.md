@@ -1395,16 +1395,36 @@ a while but were never on a dashboard; the metadata store had no equivalent
 instrumentation at all until the write-amplification investigation above added
 it. `dingo_database_sql_operations_total{op}` (counter,
 `database/plugin/metadata/sqlstore/metrics.go`) is incremented once per SQL
-statement, classified by leading keyword (insert/update/delete/select/other)
-parsed past each query's sqlc-generated `-- name: X :verb` comment; it is a
-no-op unless `Config.PromRegistry` is set. Most calls are counted at Store's
-single query chokepoint (`instrumentedQueryer`); the hot-statement cache
-(`prepared_stmt.go`'s `queryRowCached`/`execCached`) and
+statement at Store's single query chokepoint (`instrumentedQueryer`),
+classified by leading keyword (insert/update/delete/select/other) parsed past
+each query's sqlc-generated `-- name: X :verb` comment; it is a no-op unless
+`Config.PromRegistry` is set. `dingo_database_sql_query_duration_seconds{op,
+query}` (histogram, same file and chokepoint, added alongside this section)
+observes each statement's wall-clock duration at the same point, labeled by
+that op classification plus, when known, the sqlc-generated query name itself
+(`classifySQLStatement`; `"unknown"` for a hand-written query with no `--
+name:` annotation, such as the cached `sumCredentialUtxoStake` query). The
+query name is safe as a label because it is one of a small, fixed, code-
+controlled set of sqlc annotations, not user input or raw SQL text. Both the
+counter and the histogram cover every call site through `instrumentedQueryer`
+— domain queries, committee pruning, deferred-index maintenance — including
+the hot-statement cache's cached calls and
 `transactionBatchAccumulator.insertTransaction`'s prepared batch-insert path
-(`transaction_write.go`) both call their cached `*sql.Stmt` directly, bypassing
-that chokepoint, and so count themselves explicitly instead.
-`dingo_database_sql_wal_bytes` and
-`dingo_database_sql_disk_bytes` (`database/plugin/metadata/sqlite/metrics.go`)
+(`transaction_write.go`), both of which bypass `instrumentedQueryer`'s
+wrapper entirely by calling their cached `*sql.Stmt` directly and are
+counted/timed explicitly instead in `queryRowCached`/`execCached`
+(`prepared_stmt.go`) or their own call site. For a multi-row SELECT
+issued through `QueryContext`, the histogram observation is dispatch latency
+only: `database/sql` returns `*sql.Rows` before the driver produces any rows,
+so the observation is recorded before the caller's own `Next()`/`Scan()` loop
+— where a `:many` query's real cost lives — does any work. `ExecContext`,
+`QueryRowContext`, and the cached-statement path all block until the
+statement completes, so their observations do reflect completion; see
+`countingQueryer.QueryContext`'s doc comment (`metrics.go`) for the measured
+gap and why timing through `Close()` instead is not available given the
+`*sql.Rows`-typed `queryer`/sqlc `DBTX` interfaces this wraps.
+`dingo_database_sql_wal_bytes`
+and `dingo_database_sql_disk_bytes` (`database/plugin/metadata/sqlite/metrics.go`)
 are pull-based gauges sampled at scrape time — a plain `os.Stat` of
 `metadata.sqlite-wal` and `Store.DiskSize()` respectively — the same pattern
 Badger's own cache gauges already use rather than a background ticker.
