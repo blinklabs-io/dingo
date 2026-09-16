@@ -48,6 +48,228 @@ func TestWallet_AddAfterQuarantinesSubmittedOutputs(t *testing.T) {
 	require.Equal(t, "pending", selected[0].TxHash)
 }
 
+func TestWallet_ReconcileRemovesRolledBackOutput(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	w := NewWallet()
+	w.now = func() time.Time { return now }
+	w.AddAfter(time.Second, makeUTxO("parent", 0, 5_000_000))
+	now = now.Add(time.Second)
+	w.ReconcileSnapshot([]UTxO{makeUTxO("parent", 0, 5_000_000)}, nil)
+	require.Equal(t, 1, w.Len())
+	w.ReconcileSnapshot(nil, nil)
+	require.Zero(t, w.Len())
+	_, _, err := w.SelectCoins(1_000_000)
+	require.ErrorIs(t, err, ErrInsufficientFunds)
+}
+
+func TestWallet_ReconcileRestoresFundingOutput(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	w := NewWallet()
+	w.now = func() time.Time { return now }
+	w.Add(makeUTxO("funding", 0, 5_000_000))
+	w.AddAfter(time.Second, makeUTxO("parent", 0, 2_000_000))
+	selected, _, err := w.SelectCoins(1_000_000)
+	require.NoError(t, err)
+	require.Len(t, selected, 1)
+	require.Zero(t, w.Len())
+
+	now = now.Add(time.Second)
+	// The parent is absent after rollback, while the original funding output
+	// remains in the acquired snapshot and is restored for continued payment.
+	w.ReconcileSnapshot([]UTxO{makeUTxO("funding", 0, 5_000_000)}, nil)
+	require.Equal(t, 1, w.Len())
+}
+
+func TestWalletPendingChildNotReselected(t *testing.T) {
+	w := NewWallet()
+	source := makeUTxO("source", 0, 10_000_000)
+	w.Add(source)
+	selected, _, err := w.SelectCoins(2_000_000)
+	require.NoError(t, err)
+	w.Reserve("parent", selected, []UTxO{makeUTxO("parent", 0, 8_000_000)}, 0)
+	w.Reserve(
+		"child",
+		[]UTxO{makeUTxO("parent", 0, 8_000_000)},
+		[]UTxO{makeUTxO("child", 0, 7_000_000)},
+		0,
+	)
+	w.ReconcileSnapshot(
+		[]UTxO{makeUTxO("parent", 0, 8_000_000)},
+		map[string]bool{"parent": true, "child": true},
+	)
+	_, _, err = w.SelectCoins(1)
+	require.ErrorIs(
+		t,
+		err,
+		ErrInsufficientFunds,
+		"pending child output must not be selected",
+	)
+}
+
+func TestWalletRollbackRestoresFundingForNextPayment(t *testing.T) {
+	w := NewWallet()
+	source := makeUTxO("funding", 0, 5_000_000)
+	w.Add(source)
+	inputs, _, err := w.SelectCoins(1_000_000)
+	require.NoError(t, err)
+	w.Reserve("tx", inputs, []UTxO{makeUTxO("tx", 0, 4_000_000)}, 0)
+	w.ReconcileSnapshot([]UTxO{source}, map[string]bool{"tx": false})
+	require.Empty(t, w.PendingIDs(), "confirmed or rejected records must be retired")
+	selected, _, err := w.SelectCoins(1_000_000)
+	require.NoError(t, err)
+	require.Equal(t, source.TxHash, selected[0].TxHash)
+}
+
+func TestWalletRollbackRestoresOnlyInputsPresentInSnapshot(t *testing.T) {
+	w := NewWallet()
+	first := makeUTxO("first", 0, 3_000_000)
+	second := makeUTxO("second", 0, 4_000_000)
+	w.Add(first, second)
+	inputs, _, err := w.SelectCoins(6_000_000)
+	require.NoError(t, err)
+	w.Reserve("tx", inputs, nil, 0)
+	w.ReconcileSnapshot([]UTxO{first}, map[string]bool{"tx": false})
+	selected, _, err := w.SelectCoins(1_000_000)
+	require.NoError(t, err)
+	require.Len(t, selected, 1)
+	require.Equal(t, first.TxHash, selected[0].TxHash)
+	_, _, err = w.SelectCoins(1_000_000)
+	require.ErrorIs(
+		t,
+		err,
+		ErrInsufficientFunds,
+		"missing rollback input must remain spent",
+	)
+}
+
+func TestWalletRollbackRevivesSeededInputWithSnapshotAddress(t *testing.T) {
+	key := &UTxOKey{Address: []byte{1, 2, 3}}
+	w := NewWallet()
+	source := makeUTxO("funding", 0, 5_000_000)
+	source.SigningKey = key
+	w.Add(source)
+	inputs, _, err := w.SelectCoins(1_000_000)
+	require.NoError(t, err)
+	w.RecordAccepted("parent", inputs, []UTxO{{
+		TxHash: "parent", Index: 0, Amount: 4_000_000, SigningKey: key,
+	}}, 0)
+	require.Zero(t, w.Len(), "acceptance alone must not expose parent outputs")
+
+	// The child is authoritative and retires the pending parent record.
+	w.ReconcileSnapshot(
+		[]UTxO{{TxHash: "parent", Index: 0, Amount: 4_000_000}},
+		nil,
+	)
+	require.Equal(
+		t,
+		uint64(4_000_000),
+		w.Balance(),
+		"confirmed parent remains usable",
+	)
+	// A rollback revives the seeded input, but it has no prior wallet or
+	// pending record. The authoritative snapshot carries only its address.
+	w.ReconcileSnapshot(
+		[]UTxO{
+			{
+				TxHash:  source.TxHash,
+				Index:   source.Index,
+				Amount:  source.Amount,
+				address: key.Address,
+			},
+		},
+		nil,
+	)
+	selected, _, err := w.SelectCoins(1_000_000)
+	require.NoError(t, err)
+	require.Equal(t, source.TxHash, selected[0].TxHash)
+	require.Same(t, key, selected[0].SigningKey)
+}
+
+func TestWalletConfirmedParentOutputSurvivesPendingControl(t *testing.T) {
+	w := NewWallet()
+	parentOut := makeUTxO("parent", 0, 4_000_000)
+	w.Reserve(
+		"parent",
+		[]UTxO{makeUTxO("funding", 0, 5_000_000)},
+		[]UTxO{parentOut},
+		0,
+	)
+	w.ReconcileSnapshot([]UTxO{parentOut}, map[string]bool{"parent": false})
+	selected, _, err := w.SelectCoins(1_000_000)
+	require.NoError(t, err)
+	require.Equal(t, parentOut.TxHash, selected[0].TxHash)
+}
+
+func TestWalletSnapshotPreservesOutputPacing(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	w := NewWallet()
+	w.now = func() time.Time { return now }
+	source := makeUTxO("source", 0, 5_000_000)
+	w.Add(source)
+	inputs, _, err := w.SelectCoins(1_000_000)
+	require.NoError(t, err)
+	w.Reserve("tx", inputs, []UTxO{makeUTxO("tx", 0, 4_000_000)}, time.Minute)
+	w.ReconcileSnapshot(
+		[]UTxO{makeUTxO("tx", 0, 4_000_000)},
+		map[string]bool{"tx": false},
+	)
+	_, _, err = w.SelectCoins(1_000_000)
+	require.ErrorIs(
+		t,
+		err,
+		ErrInsufficientFunds,
+		"chain visibility must not remove output pacing",
+	)
+	// A later snapshot arrives after the pending record has been retired. The
+	// deadline remains attached to the current output, not historical state.
+	w.ReconcileSnapshot([]UTxO{makeUTxO("tx", 0, 4_000_000)}, nil)
+	_, _, err = w.SelectCoins(1_000_000)
+	require.ErrorIs(
+		t,
+		err,
+		ErrInsufficientFunds,
+		"later snapshots must preserve pacing",
+	)
+	now = now.Add(time.Minute)
+	selected, _, err := w.SelectCoins(1_000_000)
+	require.NoError(t, err)
+	require.Equal(t, "tx", selected[0].TxHash)
+}
+
+func TestWalletRecordAcceptedUnsignedUsesDelayedOutputs(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	w := NewWallet()
+	w.now = func() time.Time { return now }
+	w.Add(makeUTxO("funding", 0, 5_000_000))
+	inputs, _, err := w.SelectCoins(1_000_000)
+	require.NoError(t, err)
+	w.RecordAccepted(
+		"tx",
+		inputs,
+		[]UTxO{makeUTxO("tx", 0, 4_000_000)},
+		time.Minute,
+	)
+	require.Empty(t, w.PendingIDs())
+	require.Equal(t, 0, w.Len())
+	now = now.Add(time.Minute)
+	require.Equal(t, 1, w.Len())
+}
+
+func TestWalletRecordAcceptedKeyedZeroChangeReservesInputs(t *testing.T) {
+	key := &UTxOKey{Address: []byte{1, 2, 3}}
+	w := NewWallet()
+	source := makeUTxO("funding", 0, 5_000_000)
+	source.SigningKey = key
+	w.Add(source)
+	inputs, _, err := w.SelectCoins(5_000_000)
+	require.NoError(t, err)
+	w.RecordAccepted("tx", inputs, nil, time.Minute)
+	require.Len(t, w.PendingIDs(), 1)
+	w.ReconcileSnapshot([]UTxO{source}, map[string]bool{"tx": true})
+	_, _, err = w.SelectCoins(1)
+	require.ErrorIs(t, err, ErrInsufficientFunds)
+}
+
 // TestWallet_ZeroValueRemainsUsable verifies that adding the injectable clock
 // does not break callers that construct Wallet using its zero value.
 func TestWallet_ZeroValueRemainsUsable(t *testing.T) {

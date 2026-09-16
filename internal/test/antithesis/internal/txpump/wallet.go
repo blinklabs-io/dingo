@@ -30,23 +30,38 @@ type UTxO struct {
 	Amount      uint64   // lovelace
 	SigningKey  *UTxOKey // optional: Ed25519 key for signing inputs from this UTxO
 	availableAt time.Time
+	address     []byte
 }
 
 // ErrInsufficientFunds is returned by SelectCoins when the wallet does not
 // hold enough ADA to cover the requested amount.
 var ErrInsufficientFunds = errors.New("wallet: insufficient funds")
 
+type pendingTx struct{ inputs, outputs []UTxO }
+
 // Wallet tracks the set of known UTxOs and provides thread-safe coin
 // selection using a largest-first strategy.
 type Wallet struct {
-	mu    sync.Mutex
-	utxos []UTxO
-	now   func() time.Time
+	mu        sync.Mutex
+	utxos     []UTxO
+	now       func() time.Time
+	addresses map[string]*UTxOKey
+	pending   map[string]pendingTx
 }
 
 // NewWallet returns an empty Wallet.
 func NewWallet() *Wallet {
-	return &Wallet{now: time.Now}
+	return &Wallet{
+		now:       time.Now,
+		addresses: make(map[string]*UTxOKey),
+		pending:   make(map[string]pendingTx),
+	}
+}
+
+func utxoKey(
+	u UTxO,
+) string {
+	return u.TxHash + ":" + strconv.FormatUint(uint64(u.Index), 10)
 }
 
 func (w *Wallet) currentTime() time.Time {
@@ -54,6 +69,15 @@ func (w *Wallet) currentTime() time.Time {
 		return w.now()
 	}
 	return time.Now()
+}
+
+func (w *Wallet) ensureMaps() {
+	if w.addresses == nil {
+		w.addresses = make(map[string]*UTxOKey)
+	}
+	if w.pending == nil {
+		w.pending = make(map[string]pendingTx)
+	}
 }
 
 // AddAfter appends UTxOs that become available for coin selection after the
@@ -75,10 +99,139 @@ func (w *Wallet) isAvailable(utxo UTxO, now time.Time) bool {
 	return utxo.availableAt.IsZero() || !utxo.availableAt.After(now)
 }
 
+func (w *Wallet) SigningAddresses() [][]byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.ensureMaps()
+	out := make([][]byte, 0, len(w.addresses))
+	for _, k := range w.addresses {
+		out = append(out, append([]byte(nil), k.Address...))
+	}
+	return out
+}
+
+func (w *Wallet) Reserve(
+	id string,
+	inputs, outputs []UTxO,
+	delay time.Duration,
+) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.ensureMaps()
+	if delay > 0 {
+		at := w.currentTime().Add(delay)
+		for i := range outputs {
+			outputs[i].availableAt = at
+		}
+	}
+	w.pending[id] = pendingTx{
+		append([]UTxO(nil), inputs...),
+		append([]UTxO(nil), outputs...),
+	}
+}
+
+// RecordAccepted records an accepted transaction. Unsigned harness wallets
+// retain the historical pacing-only output behavior; keyed wallets use
+// reservations reconciled against LSQ.
+func (w *Wallet) RecordAccepted(
+	id string,
+	inputs, outputs []UTxO,
+	delay time.Duration,
+) {
+	if len(w.SigningAddresses()) == 0 {
+		w.AddAfter(delay, outputs...)
+		return
+	}
+	w.Reserve(id, inputs, outputs, delay)
+}
+
+// ReconcileSnapshot replaces spendable state with the acquired LSQ snapshot.
+// LocalTxMonitor presence keeps a transaction's input reservation. Once it is
+// absent, only source inputs present in the LSQ snapshot can be restored.
+func (w *Wallet) ReconcileSnapshot(snapshot []UTxO, presence map[string]bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.ensureMaps()
+	chain := make(map[string]UTxO, len(snapshot))
+	prior := make(map[string]UTxO, len(w.utxos))
+	for _, u := range w.utxos {
+		prior[utxoKey(u)] = u
+	}
+	pendingOutputs := make(map[string]UTxO)
+	for _, tx := range w.pending {
+		for _, out := range tx.outputs {
+			pendingOutputs[utxoKey(out)] = out
+		}
+	}
+	for _, u := range snapshot {
+		if old, ok := prior[utxoKey(u)]; ok {
+			u.availableAt = old.availableAt
+			u.SigningKey = old.SigningKey
+		}
+		if pending, ok := pendingOutputs[utxoKey(u)]; ok {
+			u.availableAt = pending.availableAt
+			if pending.SigningKey != nil {
+				u.SigningKey = pending.SigningKey
+			}
+		}
+		if k := w.addresses[string(u.address)]; k != nil {
+			u.SigningKey = k
+		}
+		chain[utxoKey(u)] = u
+	}
+	reserved := make(map[string]struct{})
+	for id, tx := range w.pending {
+		if presence[id] {
+			for _, in := range tx.inputs {
+				reserved[utxoKey(in)] = struct{}{}
+			}
+			for _, out := range tx.outputs {
+				reserved[utxoKey(out)] = struct{}{}
+			}
+			continue
+		}
+		for _, in := range tx.inputs {
+			if _, ok := chain[utxoKey(in)]; ok {
+				// Keep the authoritative snapshot's value and restore only
+				// signing metadata held by the reservation.
+				current := chain[utxoKey(in)]
+				current.SigningKey = in.SigningKey
+				chain[utxoKey(in)] = current
+			}
+		}
+		delete(w.pending, id)
+		// Terminal records are retired immediately; correctness lives in the
+		// current snapshot and pending reservations, not an archive.
+	}
+	for key := range reserved {
+		delete(chain, key)
+	}
+	w.utxos = w.utxos[:0]
+	for _, u := range chain {
+		w.utxos = append(w.utxos, u)
+	}
+}
+
+func (w *Wallet) PendingIDs() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := make([]string, 0, len(w.pending))
+	for id := range w.pending {
+		out = append(out, id)
+	}
+	return out
+}
+
 // Add appends one or more UTxOs to the wallet.
 func (w *Wallet) Add(utxos ...UTxO) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.ensureMaps()
+	for _, u := range utxos {
+		if u.SigningKey != nil {
+			w.addresses[string(u.SigningKey.Address)] = u.SigningKey
+		}
+	}
 	w.utxos = append(w.utxos, utxos...)
 }
 
@@ -159,12 +312,12 @@ func (w *Wallet) SelectCoins(targetAmount uint64) ([]UTxO, uint64, error) {
 	// Remove selected UTxOs from the wallet.
 	selectedSet := make(map[string]struct{}, len(selected))
 	for _, u := range selected {
-		key := u.TxHash + ":" + strconv.FormatUint(uint64(u.Index), 10)
+		key := utxoKey(u)
 		selectedSet[key] = struct{}{}
 	}
 	remaining := w.utxos[:0]
 	for _, u := range w.utxos {
-		key := u.TxHash + ":" + strconv.FormatUint(uint64(u.Index), 10)
+		key := utxoKey(u)
 		if _, spent := selectedSet[key]; !spent {
 			remaining = append(remaining, u)
 		}
