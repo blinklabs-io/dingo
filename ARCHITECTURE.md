@@ -536,6 +536,16 @@ compares the staged fields too, as a fail-safe for a path that ever forgets to
 bump; the counter is the test that works, because a retry re-committing the
 same blocks reproduces every field exactly).
 
+The queued-header list is one of the staged fields, so a mutation that touches
+only the header queue counts as a chain mutation and bumps the counter as well:
+`addBlockHeader`, `ClearHeaders`, and `rollbackLocked`'s two queued-header
+paths. `addBlockLocked` deletes the matched header and advances the tip under a
+single increment, because one mutation is one bump rather than one per field. A
+header mutation that did not bump would be invisible to both restore guards,
+which would then write a stale queue back over it -- dropping a header the
+chain had accepted, or re-queueing one a rollback had already published a
+`HeaderInvalidationRollback` for.
+
 The rollback halves cannot be staged the same way, because they commit
 separately: `rollbackChainAndStateDeferred` truncates the primary chain first
 (`chain.RollbackDeferred`, whose per-block deletions commit as they go) and
@@ -4541,6 +4551,45 @@ writes the pre-batch snapshot back only while the chain still shows what that
 batch left behind; otherwise a concurrent rollback's result would be overwritten
 with a tip index above the blocks that rollback deleted, leaving the chain
 claiming a tip it does not store.
+
+The same release also opens a commit-lag window on the store side, and the chain
+closes it with two barriers that the block-deleting paths -- `rollbackLocked`
+and `ChainManager.RewindPrimaryChainToPoint` -- both take before their removal
+loops run. `Chain.addRawBlocks` and `Chain.AddBlocks` advance `tipBlockIndex`
+inside their transaction's closure and commit only after both chain locks are
+released, so anything taking `Chain.mutex` in between sees a tip index whose
+block the store cannot serve: `ChainManager.removeBlockByIndex` opens its own
+transaction, and no transaction sees another's uncommitted writes. Those two
+hold `Chain.batchCommitMutex` for read across their whole `txn.Do`, and the
+removal paths hold it for write. `Chain.addBlockInternal` cannot use that shape,
+because with a caller-supplied `*database.Txn` the chain neither performs nor
+observes the commit; it instead records the transaction in `Chain.pendingAdds`
+before mutating memory and releases the record from `database.Txn.OnFinish`,
+which fires on commit *and* on rollback. The removal paths' write hold excludes
+a new record from appearing, and `awaitPendingCallerAdds` then waits for the
+records already in flight. That wait is bounded (`pendingAddDrainTimeout`) and
+logs at ERROR on expiry rather than blocking forever, so a caller that abandons
+its transaction -- or rolls the chain back from inside one it has not finished
+-- leaves that one removal exposed to the original window instead of wedging
+every chain mutation behind it. Every in-tree add passes a nil transaction, for
+which `Database.BlockCreate` opens and commits its own before the tip advances,
+so the live blockfetch and forging paths record nothing.
+
+A transaction carries a hold for exactly as long as it carries at least one
+in-flight add, and three rules follow from that. An add rejected before it
+mutated anything leaves its transaction carrying nothing, so `discardLast`
+drops the hold with the last snapshot rather than leaving a removal path to
+wait out the bound for an add that does not exist. The bound is charged once
+per abandoned transaction rather than once per removal path: the hold itself is
+never evicted, because the restoration snapshots it carries are owed to that
+transaction whenever it concludes, so `awaitDrained` marks a hold that outlives
+a wait and fails later waits immediately, clearing the mark when the hold is
+released. And `rollbackLocked`'s queued-header fast path, which answers without
+waiting because it removes no block, is taken only while no caller add is
+outstanding -- it trims the very queue `finishCallerTxnAdd` restores, so taking
+it underneath an outstanding add would let that restore write the pre-add queue
+back over the trim. With no hold outstanding the fast path is taken exactly as
+often as before, which is always for in-tree callers.
 
 All five recovery rewinds go through `rewindPrimaryChainForRecovery`, which
 carries the one classification a pipeline restart cannot help with. A rewind

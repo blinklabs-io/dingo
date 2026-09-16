@@ -47,14 +47,27 @@ const (
 )
 
 type Chain struct {
-	eventBus             *event.EventBus
-	manager              *ChainManager
-	waitingChan          chan struct{}
-	headers              []queuedHeader
-	blocks               []ocommon.Point
-	iterators            []*ChainIterator
-	currentTip           ochainsync.Tip
-	tipBlockIndex        uint64
+	eventBus      *event.EventBus
+	manager       *ChainManager
+	waitingChan   chan struct{}
+	headers       []queuedHeader
+	blocks        []ocommon.Point
+	iterators     []*ChainIterator
+	currentTip    ochainsync.Tip
+	tipBlockIndex uint64
+	// mutationGeneration counts every mutation of the in-memory chain state
+	// that the two restore paths snapshot: currentTip, tipBlockIndex, the
+	// queued-header list, and the ephemeral block buffer. Both
+	// batchRestoreIsSafeLocked and finishCallerTxnAdd write a snapshot back
+	// only while the counter still shows the chain is exactly where that
+	// mutation left it, so a mutation that does not bump it is invisible to
+	// them and gets silently overwritten.
+	//
+	// A mutation is one bump, not one per field. addBlockLocked deletes the
+	// matched header and advances the tip under a single increment; the
+	// header-only mutations -- addBlockHeader, ClearHeaders, and
+	// rollbackLocked's two queued-header paths -- bump it themselves because
+	// nothing else does it for them. Guarded by c.mutex.
 	mutationGeneration   uint64
 	lastCommonBlockIndex uint64
 	id                   ChainId
@@ -114,8 +127,16 @@ type Chain struct {
 	//
 	// It covers only the transactions the chain itself owns. addBlockInternal
 	// takes a caller-supplied transaction whose commit the chain neither
-	// performs nor observes, so the same window remains open there.
+	// performs nor observes; pendingAdds closes the same window there, using
+	// this mutex's read side to exclude a record from appearing under a
+	// removal path that already holds it for write.
 	batchCommitMutex sync.RWMutex
+
+	// pendingAdds keeps a removal path from resolving a block index whose
+	// store write is still held in an uncommitted caller-supplied
+	// transaction. Only adds that carry such a transaction record with it.
+	// See pendingAddBarrier.
+	pendingAdds pendingAddBarrier
 
 	// headerSeq is the fallback chain-mutation counter used only by a Chain
 	// built without a ChainManager, which nothing outside this package's
@@ -263,6 +284,14 @@ func (c *Chain) addBlockHeader(
 	}
 	// Add header
 	c.headers = append(c.headers, queued)
+	// The queued-header list is part of the state both in-memory restore
+	// paths snapshot (Chain.addRawBlocks/AddBlocks through
+	// batchRestoreIsSafeLocked, and a caller-supplied transaction through
+	// finishCallerTxnAdd), so queueing a header is a chain mutation and has
+	// to be counted as one. A restore that wrote its snapshot back over this
+	// append would drop a header the chain accepted, with no invalidation
+	// published for it. See the mutationGeneration field.
+	c.mutationGeneration++
 	// Surface a Leios endorser-block announcement the moment its ranking
 	// block's header enters the queue. The apply-driven ChainUpdateEventType
 	// cannot serve this: applying an EB-announcing ranking block waits on
@@ -557,6 +586,25 @@ func (c *Chain) addBlockInternal(
 	if c == nil {
 		return event.Event{}, errors.New("chain is nil")
 	}
+	if txn == nil && c.persistent {
+		endStandalone, err := c.beginStandaloneAdd()
+		if err != nil {
+			return event.Event{}, fmt.Errorf(
+				"wait for caller transaction adds: %w", err,
+			)
+		}
+		defer endStandalone()
+	}
+	// A caller-supplied transaction carries the block's store write out of the
+	// chain's sight: addBlockLocked advances the tip under c.mutex, and the
+	// caller commits at a moment the chain neither performs nor observes.
+	// Record it before the tip moves and release the record when that
+	// transaction concludes -- on commit and on rollback alike -- so a removal
+	// path in between cannot ask the store for the index it left behind. A nil
+	// transaction needs none of this: the chain's own write commits before the
+	// tip advances. See pendingAddBarrier.
+	endAdd := c.beginCallerTxnAdd(txn)
+	defer endAdd()
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	// We get a write lock on the manager to cover the integrity checks and adding the block below
@@ -566,6 +614,7 @@ func (c *Chain) addBlockInternal(
 	if err := c.reconcile(); err != nil {
 		return event.Event{}, fmt.Errorf("reconcile chain: %w", err)
 	}
+	c.recordCallerTxnAdd(txn)
 	evt, err := c.addBlockLocked(
 		block,
 		point,
@@ -574,6 +623,7 @@ func (c *Chain) addBlockInternal(
 		matchPendingHeader,
 	)
 	if err != nil {
+		c.pendingAdds.discardLast(txn)
 		return event.Event{}, err
 	}
 	// Deferred callers (the mutex-holding blockfetch drain) publish through the
@@ -1484,6 +1534,59 @@ func (c *Chain) rollbackLocked(
 	// batchCommitMutex field.
 	c.batchCommitMutex.Lock()
 	defer c.batchCommitMutex.Unlock()
+	// A queued-header rollback does not remove persistent blocks and therefore
+	// must not wait for unrelated caller transactions. Check that case before
+	// waiting; the full check is repeated below after the wait because headers
+	// can change while a caller transaction concludes.
+	//
+	// Removing no persistent block is not the same as mutating nothing: this
+	// path trims the queued-header list, which is exactly the state
+	// finishCallerTxnAdd restores when a caller-supplied transaction rolls
+	// back. Taking it underneath an outstanding caller add would let that
+	// restore write the pre-add queue back over the trim, resurrecting
+	// headers this path has already published a HeaderInvalidationRollback
+	// for. So it is taken only while no such add is in flight; otherwise the
+	// rollback falls through to awaitPendingCallerAdds and re-checks the
+	// header queue afterwards. Every in-tree add passes a nil transaction and
+	// records no hold, so the fast path is taken exactly as often as before.
+	c.mutex.Lock()
+	if len(c.headers) > 0 && c.pendingAdds.heldCount() == 0 {
+		idx, err := c.findQueuedHeader(point)
+		if err != nil {
+			c.mutex.Unlock()
+			return nil, err
+		}
+		if idx >= 0 {
+			// Same invalidation the post-wait header path publishes
+			// below. Those headers never become blocks, and this path
+			// returns no chain.update event, so without it any
+			// announcement they carried stays armed with nothing left
+			// to void it.
+			discarded := c.queuedHeaderHashes()[idx+1:]
+			dropped := len(discarded)
+			c.headers = slices.Delete(c.headers, idx+1, len(c.headers))
+			if dropped > 0 {
+				// Trimming the queue is a chain mutation; see the
+				// mutationGeneration field.
+				c.mutationGeneration++
+				c.queueDeferredEventLocked(headerInvalidationEvent(
+					point,
+					HeaderInvalidationRollback,
+					c.nextHeaderSeqLocked(),
+					discarded,
+				))
+			}
+			c.mutex.Unlock()
+			return nil, nil
+		}
+	}
+	c.mutex.Unlock()
+	// The write hold above excludes further caller-transaction adds; this waits
+	// for the ones already recorded, so no index the removal loop reaches is
+	// one the store has yet to be given. See pendingAddBarrier.
+	if err := c.awaitPendingCallerAdds(); err != nil {
+		return nil, fmt.Errorf("wait for pending caller transactions: %w", err)
+	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	// We get a write lock on the manager to cover the integrity checks and block deletions
@@ -1517,6 +1620,9 @@ func (c *Chain) rollbackLocked(
 			// the announcements would stay armed with nothing left to
 			// void them.
 			if dropped > 0 {
+				// Trimming the queue is a chain mutation; see the
+				// mutationGeneration field.
+				c.mutationGeneration++
 				c.queueDeferredEventLocked(headerInvalidationEvent(
 					point,
 					HeaderInvalidationRollback,
@@ -1754,6 +1860,9 @@ func (c *Chain) ClearHeaders() {
 	// block was ever added. Everything at or below the block tip survives;
 	// the queue held only what was above it.
 	if hadHeaders {
+		// Clearing the queue is a chain mutation; see the
+		// mutationGeneration field.
+		c.mutationGeneration++
 		c.queueDeferredEventLocked(headerInvalidationEvent(
 			c.currentTip.Point,
 			HeaderInvalidationQueueCleared,
