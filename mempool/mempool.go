@@ -30,7 +30,6 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/plugin"
-	"github.com/blinklabs-io/dingo/utxoref"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -112,8 +111,8 @@ type TxValidator interface {
 	ValidateTx(tx gledger.Transaction) error
 	ValidateTxWithOverlay(
 		tx gledger.Transaction,
-		consumedUtxos map[utxoref.Key]struct{},
-		createdUtxos map[utxoref.Key]lcommon.Utxo,
+		consumedUtxos map[string]struct{},
+		createdUtxos map[string]lcommon.Utxo,
 	) error
 }
 
@@ -125,8 +124,8 @@ type TxValidationSessionProvider interface {
 	WithTxValidationSession(func(
 		validate func(
 			tx gledger.Transaction,
-			consumedUtxos map[utxoref.Key]struct{},
-			createdUtxos map[utxoref.Key]lcommon.Utxo,
+			consumedUtxos map[string]struct{},
+			createdUtxos map[string]lcommon.Utxo,
 		) error,
 		stillCurrent func() bool,
 	) error) error
@@ -231,7 +230,7 @@ type revalidationCandidate struct {
 	txByHash     map[string]*MempoolTransaction
 	sizeBytes    int64
 	invalid      map[string]*MempoolTransaction
-	invalidUtxos map[utxoref.Key]struct{}
+	invalidUtxos map[string]struct{}
 }
 
 func newRevalidationCandidate() *revalidationCandidate {
@@ -239,7 +238,7 @@ func newRevalidationCandidate() *revalidationCandidate {
 		overlay:      newUtxoOverlay(),
 		txByHash:     make(map[string]*MempoolTransaction),
 		invalid:      make(map[string]*MempoolTransaction),
-		invalidUtxos: make(map[utxoref.Key]struct{}),
+		invalidUtxos: make(map[string]struct{}),
 	}
 }
 
@@ -305,8 +304,8 @@ type appliedTx struct {
 	hash     string
 	txType   uint
 	cbor     []byte
-	consumed []utxoref.Key                // UTxO keys consumed by this TX
-	created  map[utxoref.Key]lcommon.Utxo // UTxO keys created by this TX
+	consumed []string                // UTxO keys consumed by this TX
+	created  map[string]lcommon.Utxo // UTxO keys created by this TX
 }
 
 func cloneAppliedTx(at appliedTx) appliedTx {
@@ -334,15 +333,15 @@ func (m *Mempool) recordMutationLocked(mutation mempoolMutation) {
 
 // utxoOverlay tracks cumulative UTxO state changes from all pending mempool TXs.
 type utxoOverlay struct {
-	consumed map[utxoref.Key]struct{}     // all inputs consumed by pending TXs
-	created  map[utxoref.Key]lcommon.Utxo // all outputs created by pending TXs
-	applied  []appliedTx                  // ordered list for rebuild
+	consumed map[string]struct{}     // all inputs consumed by pending TXs
+	created  map[string]lcommon.Utxo // all outputs created by pending TXs
+	applied  []appliedTx             // ordered list for rebuild
 }
 
 func newUtxoOverlay() *utxoOverlay {
 	return &utxoOverlay{
-		consumed: make(map[utxoref.Key]struct{}),
-		created:  make(map[utxoref.Key]lcommon.Utxo),
+		consumed: make(map[string]struct{}),
+		created:  make(map[string]lcommon.Utxo),
 	}
 }
 
@@ -357,18 +356,22 @@ func (o *utxoOverlay) applyTx(
 		hash:    hash,
 		txType:  txType,
 		cbor:    cbor,
-		created: make(map[utxoref.Key]lcommon.Utxo),
+		created: make(map[string]lcommon.Utxo),
 	}
 	// Consumed is the consensus spent set: regular inputs for valid
 	// transactions and collateral for phase-2-invalid transactions. Using
 	// Inputs here would incorrectly reserve an input the ledger does not spend.
 	for _, input := range tx.Consumed() {
-		key := utxoref.ForInput(input)
+		key := fmt.Sprintf("%s:%d", input.Id().String(), input.Index())
 		o.consumed[key] = struct{}{}
 		at.consumed = append(at.consumed, key)
 	}
 	for _, utxo := range tx.Produced() {
-		key := utxoref.ForUtxo(utxo)
+		key := fmt.Sprintf(
+			"%s:%d",
+			utxo.Id.Id().String(),
+			utxo.Id.Index(),
+		)
 		o.created[key] = utxo
 		at.created[key] = utxo
 	}
@@ -377,15 +380,15 @@ func (o *utxoOverlay) applyTx(
 
 // reset clears the overlay to empty state.
 func (o *utxoOverlay) reset() {
-	o.consumed = make(map[utxoref.Key]struct{})
-	o.created = make(map[utxoref.Key]lcommon.Utxo)
+	o.consumed = make(map[string]struct{})
+	o.created = make(map[string]lcommon.Utxo)
 	o.applied = nil
 }
 
 // rebuildAggregates rebuilds consumed/created maps from the applied list.
 func (o *utxoOverlay) rebuildAggregates() {
-	o.consumed = make(map[utxoref.Key]struct{})
-	o.created = make(map[utxoref.Key]lcommon.Utxo)
+	o.consumed = make(map[string]struct{})
+	o.created = make(map[string]lcommon.Utxo)
 	for _, at := range o.applied {
 		for _, key := range at.consumed {
 			o.consumed[key] = struct{}{}
@@ -416,7 +419,7 @@ func (o *utxoOverlay) removeBatchWithDescendants(
 	hashes map[string]struct{},
 ) []string {
 	// Remove specified TXs and collect their created UTxOs
-	orphanedUtxos := make(map[utxoref.Key]struct{})
+	orphanedUtxos := make(map[string]struct{})
 	var remaining []appliedTx
 	for _, at := range o.applied {
 		if _, remove := hashes[at.hash]; remove {
@@ -467,9 +470,9 @@ func (o *utxoOverlay) removeBatchWithDescendants(
 // the overlay. Used to validate incoming TXs before committing eviction.
 func (o *utxoOverlay) simulateRemoveBatch(
 	hashes map[string]struct{},
-) (map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo) {
+) (map[string]struct{}, map[string]lcommon.Utxo) {
 	// Remove specified TXs and collect their created UTxOs
-	orphanedUtxos := make(map[utxoref.Key]struct{})
+	orphanedUtxos := make(map[string]struct{})
 	remaining := make([]appliedTx, 0, len(o.applied))
 	for _, at := range o.applied {
 		if _, remove := hashes[at.hash]; remove {
@@ -507,8 +510,8 @@ func (o *utxoOverlay) simulateRemoveBatch(
 		}
 	}
 	// Rebuild maps from surviving TXs
-	consumed := make(map[utxoref.Key]struct{})
-	created := make(map[utxoref.Key]lcommon.Utxo)
+	consumed := make(map[string]struct{})
+	created := make(map[string]lcommon.Utxo)
 	for _, at := range remaining {
 		for _, key := range at.consumed {
 			consumed[key] = struct{}{}
@@ -1112,8 +1115,8 @@ func (m *Mempool) rebuildOverlayAttempt() ([]event.Event, error) {
 	err := m.withTxValidationSession(func(
 		validate func(
 			gledger.Transaction,
-			map[utxoref.Key]struct{},
-			map[utxoref.Key]lcommon.Utxo,
+			map[string]struct{},
+			map[string]lcommon.Utxo,
 		) error,
 		stillCurrent func() bool,
 	) error {
@@ -1322,8 +1325,8 @@ func (m *Mempool) revalidateAppliedTx(
 	tx *MempoolTransaction,
 	validate func(
 		gledger.Transaction,
-		map[utxoref.Key]struct{},
-		map[utxoref.Key]lcommon.Utxo,
+		map[string]struct{},
+		map[string]lcommon.Utxo,
 	) error,
 ) {
 	if tx == nil {
@@ -1377,8 +1380,8 @@ func (m *Mempool) withTxValidationSession(
 	fn func(
 		validate func(
 			gledger.Transaction,
-			map[utxoref.Key]struct{},
-			map[utxoref.Key]lcommon.Utxo,
+			map[string]struct{},
+			map[string]lcommon.Utxo,
 		) error,
 		stillCurrent func() bool,
 	) error,

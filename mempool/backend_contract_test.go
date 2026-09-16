@@ -26,7 +26,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/event"
 	dingotestutil "github.com/blinklabs-io/dingo/internal/test/testutil"
-	"github.com/blinklabs-io/dingo/utxoref"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -174,8 +173,8 @@ func runBackendContract(t *testing.T, factory backendContractFactory) {
 		bus := event.NewEventBus(nil, nil)
 		pool := factory(t, MempoolConfig{
 			EventBus: bus,
-			Validator: newOverlayValidator(map[utxoref.Key]lcommon.Utxo{
-				utxoref.ForInput(baseInput): {
+			Validator: newOverlayValidator(map[string]lcommon.Utxo{
+				originalInputHash + ":1": {
 					Id:     baseInput,
 					Output: buildMockOutput(t, 50_000_000),
 				},
@@ -270,9 +269,9 @@ func TestFIFOBackendContract(t *testing.T) {
 
 	t.Run("revalidation", func(t *testing.T) {
 		const inputHash = "0c07395aed88bdddc6de0518d1462dd0ec7e52e1e3a53599f7cdb24dc80237f8"
+		inputKey := inputHash + ":1"
 		input := buildMockInput(t, inputHash, 1)
-		inputKey := utxoref.ForInput(input)
-		validator := newOverlayValidator(map[utxoref.Key]lcommon.Utxo{
+		validator := newOverlayValidator(map[string]lcommon.Utxo{
 			inputKey: {Id: input, Output: buildMockOutput(t, 50_000_000)},
 		})
 		pool, err := NewFIFO(MempoolConfig{
@@ -297,9 +296,9 @@ func TestDAGBackendContract(t *testing.T) {
 
 	t.Run("revalidation", func(t *testing.T) {
 		const inputHash = "0c07395aed88bdddc6de0518d1462dd0ec7e52e1e3a53599f7cdb24dc80237f8"
+		inputKey := inputHash + ":1"
 		input := buildMockInput(t, inputHash, 1)
-		inputKey := utxoref.ForInput(input)
-		validator := newOverlayValidator(map[utxoref.Key]lcommon.Utxo{
+		validator := newOverlayValidator(map[string]lcommon.Utxo{
 			inputKey: {Id: input, Output: buildMockOutput(t, 50_000_000)},
 		})
 		pool, err := NewDAG(MempoolConfig{

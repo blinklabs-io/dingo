@@ -23,7 +23,6 @@ import (
 
 	dingoversion "github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/dingo/ledger/eras"
-	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -87,15 +86,15 @@ type TxValidator interface {
 	// txs (enables spending intra-block outputs).
 	ValidateTxWithOverlay(
 		tx ledger.Transaction,
-		consumedUtxos map[utxoref.Key]struct{},
-		createdUtxos map[utxoref.Key]lcommon.Utxo,
+		consumedUtxos map[string]struct{},
+		createdUtxos map[string]lcommon.Utxo,
 	) error
 }
 
 type TxValidationFunc = func(
 	tx ledger.Transaction,
-	consumedUtxos map[utxoref.Key]struct{},
-	createdUtxos map[utxoref.Key]lcommon.Utxo,
+	consumedUtxos map[string]struct{},
+	createdUtxos map[string]lcommon.Utxo,
 ) error
 
 // TxValidationSessionProvider pins an ordered validation pass to one ledger
@@ -356,11 +355,11 @@ func (b *DefaultBlockBuilder) buildBlock(
 	// Track UTxO inputs consumed by transactions already selected
 	// for this block. This detects intra-block double-spends where
 	// two mempool transactions attempt to spend the same UTxO.
-	consumedInputs := make(map[utxoref.Key]struct{})
+	consumedInputs := make(map[string]struct{})
 	// Track UTxO outputs created by already-selected transactions.
 	// Passed to ValidateTxWithOverlay so later transactions in the
 	// same block can spend outputs from earlier intra-block txs.
-	createdOutputs := make(map[utxoref.Key]lcommon.Utxo)
+	createdOutputs := make(map[string]lcommon.Utxo)
 
 	// selectTransactions iterates mempoolTxs and adds them to the block
 	// candidate lists (closed over below) until a limit is hit. It runs
@@ -427,10 +426,14 @@ func (b *DefaultBlockBuilder) buildBlock(
 			// Check for intra-block double-spends using the consensus spent
 			// set. A phase-2-invalid transaction consumes collateral, not
 			// its regular inputs.
-			txInputKeys := make([]utxoref.Key, 0, len(fullTx.Consumed()))
+			txInputKeys := make([]string, 0, len(fullTx.Consumed()))
 			doubleSpend := false
 			for _, input := range fullTx.Consumed() {
-				key := utxoref.ForInput(input)
+				key := fmt.Sprintf(
+					"%s:%d",
+					input.Id().String(),
+					input.Index(),
+				)
 				if _, exists := consumedInputs[key]; exists {
 					b.logger.Debug(
 						"skipping transaction - double-spend within block",
@@ -613,7 +616,12 @@ func (b *DefaultBlockBuilder) buildBlock(
 			// Record created outputs so later transactions in this block
 			// can spend intra-block outputs without hitting the DB.
 			for _, utxo := range fullTx.Produced() {
-				createdOutputs[utxoref.ForUtxo(utxo)] = utxo
+				key := fmt.Sprintf(
+					"%s:%d",
+					utxo.Id.Id().String(),
+					utxo.Id.Index(),
+				)
+				createdOutputs[key] = utxo
 			}
 
 			b.logger.Debug(
@@ -643,8 +651,8 @@ func (b *DefaultBlockBuilder) buildBlock(
 		selectErr = selectTransactions(
 			func(
 				_ ledger.Transaction,
-				_ map[utxoref.Key]struct{},
-				_ map[utxoref.Key]lcommon.Utxo,
+				_ map[string]struct{},
+				_ map[string]lcommon.Utxo,
 			) error {
 				return nil
 			},

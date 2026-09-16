@@ -32,7 +32,6 @@ import (
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/mempool"
-	"github.com/blinklabs-io/dingo/utxoref"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -64,8 +63,8 @@ func (txsubmissionTestValidator) ValidateTx(gledger.Transaction) error {
 
 func (txsubmissionTestValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
-	map[utxoref.Key]struct{},
-	map[utxoref.Key]lcommon.Utxo,
+	map[string]struct{},
+	map[string]lcommon.Utxo,
 ) error {
 	return nil
 }
@@ -87,8 +86,8 @@ func (v txsubmissionSelectiveRejectingValidator) ValidateTx(
 
 func (v txsubmissionSelectiveRejectingValidator) ValidateTxWithOverlay(
 	tx gledger.Transaction,
-	_ map[utxoref.Key]struct{},
-	_ map[utxoref.Key]lcommon.Utxo,
+	_ map[string]struct{},
+	_ map[string]lcommon.Utxo,
 ) error {
 	return v.ValidateTx(tx)
 }

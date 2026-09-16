@@ -40,7 +40,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/event"
 	dingotestutil "github.com/blinklabs-io/dingo/internal/test/testutil"
-	"github.com/blinklabs-io/dingo/utxoref"
 )
 
 // =============================================================================
@@ -83,8 +82,8 @@ func (v *changingSessionValidator) ValidateTx(gledger.Transaction) error {
 
 func (v *changingSessionValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
-	map[utxoref.Key]struct{},
-	map[utxoref.Key]lcommon.Utxo,
+	map[string]struct{},
+	map[string]lcommon.Utxo,
 ) error {
 	return nil
 }
@@ -93,8 +92,8 @@ func (v *changingSessionValidator) WithTxValidationSession(
 	fn func(
 		func(
 			gledger.Transaction,
-			map[utxoref.Key]struct{},
-			map[utxoref.Key]lcommon.Utxo,
+			map[string]struct{},
+			map[string]lcommon.Utxo,
 		) error,
 		func() bool,
 	) error,
@@ -103,8 +102,8 @@ func (v *changingSessionValidator) WithTxValidationSession(
 	return fn(
 		func(
 			gledger.Transaction,
-			map[utxoref.Key]struct{},
-			map[utxoref.Key]lcommon.Utxo,
+			map[string]struct{},
+			map[string]lcommon.Utxo,
 		) error {
 			return nil
 		},
@@ -125,8 +124,8 @@ func (v *blockingSessionValidator) ValidateTx(gledger.Transaction) error {
 
 func (v *blockingSessionValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
-	map[utxoref.Key]struct{},
-	map[utxoref.Key]lcommon.Utxo,
+	map[string]struct{},
+	map[string]lcommon.Utxo,
 ) error {
 	return nil
 }
@@ -135,8 +134,8 @@ func (v *blockingSessionValidator) WithTxValidationSession(
 	fn func(
 		func(
 			gledger.Transaction,
-			map[utxoref.Key]struct{},
-			map[utxoref.Key]lcommon.Utxo,
+			map[string]struct{},
+			map[string]lcommon.Utxo,
 		) error,
 		func() bool,
 	) error,
@@ -144,8 +143,8 @@ func (v *blockingSessionValidator) WithTxValidationSession(
 	v.startOnce.Do(func() { close(v.started) })
 	validate := func(
 		gledger.Transaction,
-		map[utxoref.Key]struct{},
-		map[utxoref.Key]lcommon.Utxo,
+		map[string]struct{},
+		map[string]lcommon.Utxo,
 	) error {
 		<-v.release
 		return nil
@@ -166,8 +165,8 @@ func (v *blockingOverlayValidator) ValidateTx(gledger.Transaction) error {
 
 func (v *blockingOverlayValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
-	map[utxoref.Key]struct{},
-	map[utxoref.Key]lcommon.Utxo,
+	map[string]struct{},
+	map[string]lcommon.Utxo,
 ) error {
 	if v.shouldBlock.Load() {
 		v.startOnce.Do(func() { close(v.started) })
@@ -190,8 +189,8 @@ func (v *mockValidator) ValidateTx(tx gledger.Transaction) error {
 
 func (v *mockValidator) ValidateTxWithOverlay(
 	tx gledger.Transaction,
-	_ map[utxoref.Key]struct{},
-	_ map[utxoref.Key]lcommon.Utxo,
+	_ map[string]struct{},
+	_ map[string]lcommon.Utxo,
 ) error {
 	return v.ValidateTx(tx)
 }
@@ -327,12 +326,12 @@ func TestUtxoOverlayUsesConsensusConsumedInputsForInvalidTx(t *testing.T) {
 	overlay := newUtxoOverlay()
 	overlay.applyTx(tx.Hash().String(), uint(conway.EraIdConway), tx.Cbor(), tx)
 	for _, input := range tx.Inputs() {
-		key := utxoref.ForInput(input)
+		key := fmt.Sprintf("%s:%d", input.Id().String(), input.Index())
 		assert.NotContains(t, overlay.consumed, key,
 			"invalid transaction regular inputs must remain available")
 	}
 	for _, input := range tx.Collateral() {
-		key := utxoref.ForInput(input)
+		key := fmt.Sprintf("%s:%d", input.Id().String(), input.Index())
 		assert.Contains(t, overlay.consumed, key,
 			"invalid transaction collateral must be consumed")
 	}
@@ -3993,12 +3992,12 @@ func TestMempool_MEM03_NoDeadlockOnConcurrentPublish(
 // It checks that all inputs exist (in overlay created or base UTxOs)
 // and none are in the consumed set.
 type overlayValidator struct {
-	baseUtxos map[utxoref.Key]lcommon.Utxo // simulated database UTxOs
+	baseUtxos map[string]lcommon.Utxo // simulated database UTxOs
 	mu        sync.Mutex
 }
 
 func newOverlayValidator(
-	utxos map[utxoref.Key]lcommon.Utxo,
+	utxos map[string]lcommon.Utxo,
 ) *overlayValidator {
 	return &overlayValidator{baseUtxos: utxos}
 }
@@ -4011,13 +4010,17 @@ func (v *overlayValidator) ValidateTx(
 
 func (v *overlayValidator) ValidateTxWithOverlay(
 	tx gledger.Transaction,
-	consumedUtxos map[utxoref.Key]struct{},
-	createdUtxos map[utxoref.Key]lcommon.Utxo,
+	consumedUtxos map[string]struct{},
+	createdUtxos map[string]lcommon.Utxo,
 ) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	for _, input := range tx.Inputs() {
-		key := utxoref.ForInput(input)
+		key := fmt.Sprintf(
+			"%s:%d",
+			input.Id().String(),
+			input.Index(),
+		)
 		// Check consumed first (double-spend)
 		if consumedUtxos != nil {
 			if _, spent := consumedUtxos[key]; spent {
@@ -4040,7 +4043,7 @@ func (v *overlayValidator) ValidateTxWithOverlay(
 }
 
 // removeBaseUtxo simulates a UTxO being consumed by a confirmed block.
-func (v *overlayValidator) removeBaseUtxo(key utxoref.Key) {
+func (v *overlayValidator) removeBaseUtxo(key string) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	delete(v.baseUtxos, key)
@@ -4114,12 +4117,12 @@ func buildMockOutput(
 func TestOverlayDoubleSpendRejection(t *testing.T) {
 	// Setup: one UTxO in the "database"
 	inputHash := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	sharedInput := buildMockInput(t, inputHash, 0)
-	utxoKey := utxoref.ForInput(sharedInput)
+	utxoKey := inputHash + ":0"
 
+	sharedInput := buildMockInput(t, inputHash, 0)
 	baseOutput := buildMockOutput(t, 1000000)
 
-	baseUtxos := map[utxoref.Key]lcommon.Utxo{
+	baseUtxos := map[string]lcommon.Utxo{
 		utxoKey: {Id: sharedInput, Output: baseOutput},
 	}
 	v := newOverlayValidator(baseUtxos)
@@ -4159,12 +4162,12 @@ func TestOverlayDoubleSpendRejection(t *testing.T) {
 func TestOverlayDependentTxChaining(t *testing.T) {
 	// Setup: one UTxO in the "database"
 	inputHash := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	baseInput := buildMockInput(t, inputHash, 0)
-	utxoKey := utxoref.ForInput(baseInput)
+	utxoKey := inputHash + ":0"
 
+	baseInput := buildMockInput(t, inputHash, 0)
 	baseOutput := buildMockOutput(t, 2000000)
 
-	baseUtxos := map[utxoref.Key]lcommon.Utxo{
+	baseUtxos := map[string]lcommon.Utxo{
 		utxoKey: {Id: baseInput, Output: baseOutput},
 	}
 	v := newOverlayValidator(baseUtxos)
@@ -4184,12 +4187,12 @@ func TestOverlayDependentTxChaining(t *testing.T) {
 	overlay.applyTx(txA.Hash().String(), 0, nil, txA)
 
 	// Verify TX-A's output is in the overlay created set
-	inputFromA := buildMockInput(t, txHashA, 0)
-	txAOutputKey := utxoref.ForInput(inputFromA)
+	txAOutputKey := txHashA + ":0"
 	_, created := overlay.created[txAOutputKey]
 	assert.True(t, created, "TX-A output should be in created set")
 
 	// TX-B consumes TX-A's output (which only exists in overlay, not DB)
+	inputFromA := buildMockInput(t, txHashA, 0)
 	txB := buildMockTx(
 		t,
 		"2222222222222222222222222222222222222222222222222222222222222222",
@@ -4231,12 +4234,12 @@ func TestOverlayRebuildOnChainUpdate(t *testing.T) {
 	// The real TX has input: 0c07395aed88bdddc6de0518d1462dd0ec7e52e1e3a53599f7cdb24dc80237f8:1
 
 	realInputHash := "0c07395aed88bdddc6de0518d1462dd0ec7e52e1e3a53599f7cdb24dc80237f8"
+	realInputKey := realInputHash + ":1"
 
 	// Create a base UTxO set containing the real TX's input
 	realInput := buildMockInput(t, realInputHash, 1)
-	realInputKey := utxoref.ForInput(realInput)
 	realOutput := buildMockOutput(t, 50000000)
-	baseUtxos := map[utxoref.Key]lcommon.Utxo{
+	baseUtxos := map[string]lcommon.Utxo{
 		realInputKey: {Id: realInput, Output: realOutput},
 	}
 	v := newOverlayValidator(baseUtxos)
@@ -4583,8 +4586,8 @@ func (v *blockingRejectingValidator) ValidateTx(gledger.Transaction) error {
 
 func (v *blockingRejectingValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
-	map[utxoref.Key]struct{},
-	map[utxoref.Key]lcommon.Utxo,
+	map[string]struct{},
+	map[string]lcommon.Utxo,
 ) error {
 	return nil
 }
@@ -4593,8 +4596,8 @@ func (v *blockingRejectingValidator) WithTxValidationSession(
 	fn func(
 		func(
 			gledger.Transaction,
-			map[utxoref.Key]struct{},
-			map[utxoref.Key]lcommon.Utxo,
+			map[string]struct{},
+			map[string]lcommon.Utxo,
 		) error,
 		func() bool,
 	) error,
@@ -4602,8 +4605,8 @@ func (v *blockingRejectingValidator) WithTxValidationSession(
 	v.startOnce.Do(func() { close(v.started) })
 	validate := func(
 		tx gledger.Transaction,
-		_ map[utxoref.Key]struct{},
-		_ map[utxoref.Key]lcommon.Utxo,
+		_ map[string]struct{},
+		_ map[string]lcommon.Utxo,
 	) error {
 		<-v.release
 		if tx != nil && tx.Hash().String() == v.rejectHash {

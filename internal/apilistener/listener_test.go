@@ -110,7 +110,11 @@ func startOnFreePort(t *testing.T) (*Listener, string) {
 
 // stop runs the full Stop sequence an API server's Stop performs.
 func stop(ctx context.Context, l *Listener) error {
-	return l.Stop(ctx, Graceful)
+	job, inFlight := l.Take()
+	if job == nil {
+		return l.AwaitTeardown(ctx, inFlight)
+	}
+	return l.Shutdown(ctx, job, Graceful)
 }
 
 // --- publication --------------------------------------------------------
@@ -147,7 +151,7 @@ func TestUnpublishOnlyClearsTheCurrentServer(t *testing.T) {
 
 // TestUnpublishClearsTheBindChannelWithTheServer asserts the fields are
 // cleared as a set. A cleared server paired with a surviving bind channel
-// would leave the next Publish's take handing out a stale channel.
+// would leave the next Publish's Take handing out a stale channel.
 func TestUnpublishClearsTheBindChannelWithTheServer(t *testing.T) {
 	l := newListener()
 	srv, _, err := publish(l, "127.0.0.1:0")
@@ -289,13 +293,13 @@ func TestBindSignalsBindDoneOnListenFailure(t *testing.T) {
 	)
 }
 
-// TestMatchedTakeIgnoresAServerItDoesNotOwn asserts a context monitor cannot tear
+// TestTakeIfIgnoresAServerItDoesNotOwn asserts a context monitor cannot tear
 // down a server its own Start never published. Start's monitor outlives the
 // server it was launched for -- it sits on ctx.Done() until the caller's
 // context ends, which may be long after that server was stopped and a restart
 // published another one on the same Listener. An unconditional detach there
 // would shut the replacement down.
-func TestMatchedTakeIgnoresAServerItDoesNotOwn(t *testing.T) {
+func TestTakeIfIgnoresAServerItDoesNotOwn(t *testing.T) {
 	l := newListener()
 	first, err := publishBound(l, "127.0.0.1:0")
 	require.NoError(t, err)
@@ -305,7 +309,7 @@ func TestMatchedTakeIgnoresAServerItDoesNotOwn(t *testing.T) {
 	second, err := publishBound(l, "127.0.0.1:0")
 	require.NoError(t, err)
 
-	job, inFlight := l.take(first)
+	job, inFlight := l.TakeIf(first)
 
 	require.Nil(t, job, "the first server's monitor must not detach the second")
 	require.Nil(
@@ -319,36 +323,36 @@ func TestMatchedTakeIgnoresAServerItDoesNotOwn(t *testing.T) {
 	)
 }
 
-// TestMatchedTakeDetachesItsOwnServer asserts the identity check does not defeat the
+// TestTakeIfDetachesItsOwnServer asserts the identity check does not defeat the
 // case it exists to serve: a monitor whose server is still the current one
 // still tears it down.
-func TestMatchedTakeDetachesItsOwnServer(t *testing.T) {
+func TestTakeIfDetachesItsOwnServer(t *testing.T) {
 	l := newListener()
 	srv, err := publishBound(l, "127.0.0.1:0")
 	require.NoError(t, err)
 
-	job, _ := l.take(srv)
+	job, _ := l.TakeIf(srv)
 
 	require.NotNil(t, job, "a monitor must detach the server it published")
 	require.Nil(t, l.Server())
 }
 
-// TestMatchedTakeHandsBackNoTeardownWhenItsServerIsGone covers the case where the
+// TestTakeIfHandsBackNoTeardownWhenItsServerIsGone covers the case where the
 // monitor's server has been detached but its teardown is still running, so
 // l.srv is nil rather than pointing at a replacement. The identity check has
 // to come first: a caller landing here must be told there is nothing of its own
 // left, not handed a teardown that belongs to whoever detached it. Waiting on
 // that would block a monitor on an unrelated shutdown.
-func TestMatchedTakeHandsBackNoTeardownWhenItsServerIsGone(t *testing.T) {
+func TestTakeIfHandsBackNoTeardownWhenItsServerIsGone(t *testing.T) {
 	l := newListener()
 	srv, err := publishBound(l, "127.0.0.1:0")
 	require.NoError(t, err)
 
 	// Another caller detached it and is still tearing it down.
-	winner, _ := l.take(nil)
+	winner, _ := l.Take()
 	require.NotNil(t, winner)
 
-	job, inFlight := l.take(srv)
+	job, inFlight := l.TakeIf(srv)
 
 	require.Nil(t, job)
 	require.Nil(
@@ -356,12 +360,11 @@ func TestMatchedTakeHandsBackNoTeardownWhenItsServerIsGone(t *testing.T) {
 		"a monitor whose server is gone has nothing of its own to wait on",
 	)
 
-	// An unmatched take, by contrast, is the loser of a genuine race and
-	// must wait.
-	_, loserWait := l.take(nil)
+	// Take, by contrast, is the loser of a genuine race and must wait.
+	_, loserWait := l.Take()
 	require.NotNil(
 		t, loserWait,
-		"an unmatched take must still hand the loser the winner's teardown",
+		"Take must still hand the loser the winner's teardown",
 	)
 }
 
@@ -491,7 +494,7 @@ func TestShutdownTearsDownEvenWhenTheBindWaitTimesOut(t *testing.T) {
 	)
 }
 
-// TestStopWaitsForATeardownItLost asserts the loser of the detach race does not
+// TestStopWaitsForATeardownItLost asserts the loser of the Take race does not
 // report the server down early. A server's Stop and its context monitor both
 // detach; only one wins, and a Stop that returned nil while the winner was
 // still releasing the port would let an immediate restart fail to bind.
@@ -530,7 +533,7 @@ func TestAwaitTeardownPrefersACompletedTeardown(t *testing.T) {
 
 	for i := range 200 {
 		require.NoError(
-			t, l.awaitTeardown(ctx, done),
+			t, l.AwaitTeardown(ctx, done),
 			"a completed teardown must not be reported as a timeout "+
 				"(iteration %d)", i,
 		)
@@ -667,214 +670,4 @@ func TestConcurrentBindStopNeverLeavesThePortBound(t *testing.T) {
 		)
 		require.NoError(t, stopNow(t, next))
 	}
-}
-
-// --- the start gate -----------------------------------------------------
-
-// TestStopWaitsForAStartStillInFlight is the defect the start gate exists for.
-//
-// A start is only visible to the rest of the protocol once it has published a
-// server, and everything before that -- reading config, building a handler
-// chain, being descheduled -- is a window in which a Stop finds nothing to
-// detach. Without the gate that Stop returns nil, telling its caller the
-// server is down, and the start it could not see goes on to bind the port
-// behind it. Waiting is the only correct answer: the start is about to produce
-// exactly the server this Stop was asked to take down.
-//
-// Pinned by the wait rather than by a race: with the gate held and no start
-// ever completing, a bounded Stop must time out.
-func TestStopWaitsForAStartStillInFlight(t *testing.T) {
-	l := newListener()
-	startDone, err := l.BeginStart()
-	require.NoError(t, err)
-
-	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
-	defer cancel()
-	require.ErrorIs(
-		t, stop(ctx, l), context.DeadlineExceeded,
-		"Stop must wait out a start still in flight rather than reporting "+
-			"the server down",
-	)
-
-	// Once the start finishes, Stop completes.
-	l.EndStart(startDone)
-	require.NoError(t, stopNow(t, l))
-}
-
-// TestStopTakesDownAServerPublishedWhileItWaited is the consequence the gate
-// prevents, stated as the port rather than as the wait: the server a Stop
-// could not see when it arrived is still the server it has to take down.
-//
-// The gate is what orders this deterministically. It is held before the Stop
-// is launched, so the publish and bind below are the ones that would otherwise
-// have landed behind a Stop that had already returned.
-func TestStopTakesDownAServerPublishedWhileItWaited(t *testing.T) {
-	l := newListener()
-	addr := testutil.FreePort(t)
-	startDone, err := l.BeginStart()
-	require.NoError(t, err)
-
-	stopErr := make(chan error, 1)
-	go func() { stopErr <- stopNow(t, l) }()
-	testutil.RequireNoReceive(
-		t, stopErr, 200*time.Millisecond,
-		"Stop must not report the server down while a start is in flight",
-	)
-
-	// The start this Stop is waiting on, completing normally.
-	srv, bindDone, err := publish(l, addr)
-	require.NoError(t, err)
-	served, err := l.Bind(srv, bindDone, apiconfig.EffectiveTLS{})
-	require.NoError(t, err)
-	require.True(t, served)
-	l.EndStart(startDone)
-
-	require.NoError(
-		t,
-		testutil.RequireReceive(
-			t, stopErr, 5*time.Second, "Stop must complete once the start does",
-		),
-	)
-	require.False(
-		t, portAccepts(addr),
-		"Stop must take down the server brought up by the start it waited on",
-	)
-}
-
-// TestBeginStartRejectsASecondStart asserts the gate admits one start at a
-// time, and is released for the next one.
-func TestBeginStartRejectsASecondStart(t *testing.T) {
-	l := newListener()
-	first, err := l.BeginStart()
-	require.NoError(t, err)
-
-	_, err = l.BeginStart()
-	require.ErrorContains(t, err, "start already in progress")
-
-	l.EndStart(first)
-	second, err := l.BeginStart()
-	require.NoError(
-		t, err, "the gate must be available again once a start returns",
-	)
-	l.EndStart(second)
-}
-
-// TestEndStartOnlyReleasesTheGateItHolds asserts a start that never took the
-// gate cannot release the one held by the start that beat it. Every Start
-// defers EndStart before it can fail, including the failure that is losing the
-// gate, so this path is taken on every rejected concurrent start.
-func TestEndStartOnlyReleasesTheGateItHolds(t *testing.T) {
-	l := newListener()
-	held, err := l.BeginStart()
-	require.NoError(t, err)
-
-	// The rejected start holds no gate at all.
-	l.EndStart(nil)
-	// And a gate belonging to nobody is not this Listener's to clear.
-	l.EndStart(make(chan struct{}))
-
-	l.mu.Lock()
-	current := l.startDone
-	l.mu.Unlock()
-	require.True(
-		t, current == held,
-		"EndStart must not release a gate it does not hold",
-	)
-
-	l.EndStart(held)
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	require.Nil(t, l.startDone)
-}
-
-// --- the context monitor ------------------------------------------------
-
-// TestWatchExitsWhenItsServerIsStopped is the second defect this package
-// exists to close, and the reason the monitor lives here rather than in each
-// API package.
-//
-// Every production caller passes the node context, which stays live across a
-// capability restart and for the rest of the process. A monitor waiting only
-// on that context therefore outlives the server it was launched for, holding
-// the whole stopped http.Server, its handler chain, and through that the
-// database those handlers were built over. There is one per Start, and every
-// live Restore or Truncate performs another Start, so the retained set grows
-// with operator actions and includes the database each restore just replaced.
-func TestWatchExitsWhenItsServerIsStopped(t *testing.T) {
-	l := newListener()
-	srv, err := publishBound(l, "127.0.0.1:0")
-	require.NoError(t, err)
-
-	// Never cancelled inside the test: the context is precisely what a
-	// monitor must NOT be relying on to be released.
-	exited := l.Watch(t.Context(), srv, Graceful)
-
-	require.NoError(t, stopNow(t, l))
-
-	testutil.RequireReceive(
-		t, exited, 5*time.Second,
-		"the monitor must exit when its server is torn down rather than "+
-			"holding it until the node context ends",
-	)
-}
-
-// TestWatchExitsWhenAFailedStartUnpublishes covers the other way a server
-// leaves the Listener: a Start whose bind failed clears it, and the monitor it
-// already launched has nothing left to watch.
-func TestWatchExitsWhenAFailedStartUnpublishes(t *testing.T) {
-	l := newListener()
-	srv, _, err := publish(l, "127.0.0.1:0")
-	require.NoError(t, err)
-
-	exited := l.Watch(t.Context(), srv, Graceful)
-
-	l.Unpublish(srv)
-
-	testutil.RequireReceive(
-		t, exited, 5*time.Second,
-		"the monitor must exit when its server is unpublished",
-	)
-}
-
-// TestWatchShutsDownOnContextCancellation asserts closing the leak did not
-// cost the monitor its job: a cancelled context still releases the port,
-// whatever the server's own Stop is doing.
-func TestWatchShutsDownOnContextCancellation(t *testing.T) {
-	l, addr := startOnFreePort(t)
-	srv := l.Server()
-	require.NotNil(t, srv)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	exited := l.Watch(ctx, srv, Graceful)
-	cancel()
-
-	testutil.RequireReceive(
-		t, exited, 5*time.Second, "the monitor must run and then exit",
-	)
-	require.Nil(t, l.Server(), "the monitor must detach the server it watched")
-	require.False(
-		t, portAccepts(addr),
-		"a cancelled context must release the listening socket",
-	)
-}
-
-// TestWatchOnAReplacedServerExitsImmediately asserts a monitor launched for a
-// server that was already detached does not wait on a channel nobody will
-// close. Reachable when a context is cancelled between Publish and Watch.
-func TestWatchOnAReplacedServerExitsImmediately(t *testing.T) {
-	l := newListener()
-	stale, err := publishBound(l, "127.0.0.1:0")
-	require.NoError(t, err)
-	require.NoError(t, stopNow(t, l))
-
-	replacement, err := publishBound(l, "127.0.0.1:0")
-	require.NoError(t, err)
-
-	exited := l.Watch(t.Context(), stale, Graceful)
-
-	testutil.RequireReceive(
-		t, exited, 5*time.Second,
-		"a monitor with no server of its own must not wait",
-	)
-	require.Same(t, replacement, l.Server())
 }

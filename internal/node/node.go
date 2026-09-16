@@ -19,11 +19,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/pprof"
 	"os/signal"
-	"strconv"
 	"syscall"
 	"time"
 
@@ -31,7 +29,6 @@ import (
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/internal/config"
-	"github.com/blinklabs-io/dingo/internal/health"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/prometheus/client_golang/prometheus"
@@ -61,14 +58,16 @@ func gracefulShutdown(
 	logger *slog.Logger,
 	metricsServer *http.Server,
 	debugServer *http.Server,
-	healthServer *http.Server,
 	d *dingo.Node,
 	timeout time.Duration,
 ) error {
+	var debugShutdown func(context.Context) error
+	if debugServer != nil {
+		debugShutdown = debugServer.Shutdown
+	}
 	shutdownErr := shutdownNodeResources(
 		metricsServer.Shutdown,
-		optionalShutdown(debugServer),
-		optionalShutdown(healthServer),
+		debugShutdown,
 		d.Stop,
 		timeout,
 	)
@@ -82,19 +81,9 @@ func gracefulShutdown(
 	return shutdownErr
 }
 
-// optionalShutdown adapts a listener that may be disabled (a nil *http.Server)
-// to the shutdown func shutdownNodeResources takes.
-func optionalShutdown(srv *http.Server) func(context.Context) error {
-	if srv == nil {
-		return nil
-	}
-	return srv.Shutdown
-}
-
 func shutdownNodeResources(
 	metricsServerShutdown func(context.Context) error,
 	debugServerShutdown func(context.Context) error,
-	healthServerShutdown func(context.Context) error,
 	nodeStop func() error,
 	timeout time.Duration,
 ) error {
@@ -115,14 +104,6 @@ func shutdownNodeResources(
 			err = errors.Join(
 				err,
 				fmt.Errorf("debug server shutdown: %w", shutdownErr),
-			)
-		}
-	}
-	if healthServerShutdown != nil {
-		if shutdownErr := healthServerShutdown(shutdownCtx); shutdownErr != nil {
-			err = errors.Join(
-				err,
-				fmt.Errorf("health server shutdown: %w", shutdownErr),
 			)
 		}
 	}
@@ -172,54 +153,6 @@ func newPprofDebugServer(cfg *config.Config) *http.Server {
 		Addr:              cfg.DebugListenAddress(),
 		Handler:           debugMux,
 		ReadHeaderTimeout: 60 * time.Second,
-	}
-}
-
-// NewHealthServer builds the dedicated liveness/readiness listener, or nil
-// when healthPort is 0.
-//
-// Two properties are load-bearing and are covered by tests:
-//
-//  1. It is not gated on storage mode. All three API listeners are started
-//     only when storageMode.IsAPI(), and the shipped docker-compose.yml runs
-//     the default `core` mode, so a probe wired the way the APIs are would be
-//     inert in exactly the configuration the image ships with.
-//  2. It binds cfg.BindAddr, the address the relay and metrics listeners
-//     already use, not the API listeners' loopback-by-default address. A
-//     probe is operational surface: a Docker HEALTHCHECK runs inside the
-//     container and would be satisfied by loopback, but a Kubernetes kubelet
-//     probe or an ECS/ALB target-group check reaches the container from
-//     outside, and loopback would fail those closed.
-//
-// It is exported because `dingo mithril sync` serves the same listener while
-// bootstrapping, with a nil tipGap. That bootstrap runs as its own process
-// before serve, for hours on mainnet, and the image's HEALTHCHECK is probing
-// throughout it; without a listener there the probe is refused and an
-// orchestrator replaces the container mid-download. A nil tipGap is the
-// accurate answer for it: live, and not ready because there is no chain tip
-// yet.
-func NewHealthServer(
-	cfg *config.Config,
-	tipGap health.TipGapFunc,
-) *http.Server {
-	if cfg.HealthPort == 0 {
-		return nil
-	}
-	readyTipGapSlots := uint64(cfg.HealthReadyGapSlots)
-	if readyTipGapSlots == 0 {
-		readyTipGapSlots = config.DefaultHealthReadyGapSlots
-	}
-	return &http.Server{
-		// JoinHostPort, not "%s:%d": an IPv6 bindAddr such as "::" has to
-		// be bracketed or net.Listen rejects the address.
-		Addr: net.JoinHostPort(
-			cfg.BindAddr,
-			strconv.FormatUint(uint64(cfg.HealthPort), 10),
-		),
-		Handler:           health.NewMux(tipGap, readyTipGapSlots),
-		ReadHeaderTimeout: 10 * time.Second,
-		WriteTimeout:      10 * time.Second,
-		IdleTimeout:       60 * time.Second,
 	}
 }
 
@@ -298,9 +231,10 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			listeners,
 			dingo.ListenerConfig{
 				ListenNetwork: "tcp",
-				ListenAddress: net.JoinHostPort(
+				ListenAddress: fmt.Sprintf(
+					"%s:%d",
 					cfg.BindAddr,
-					strconv.FormatUint(uint64(cfg.RelayPort), 10),
+					cfg.RelayPort,
 				),
 				ReuseAddress: true,
 			},
@@ -312,9 +246,10 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			listeners,
 			dingo.ListenerConfig{
 				ListenNetwork: "tcp",
-				ListenAddress: net.JoinHostPort(
+				ListenAddress: fmt.Sprintf(
+					"%s:%d",
 					cfg.PrivateBindAddr,
-					strconv.FormatUint(uint64(cfg.PrivatePort), 10),
+					cfg.PrivatePort,
 				),
 				UseNtC: true,
 			},
@@ -416,9 +351,10 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	// pprof or other handlers registered on DefaultServeMux.
 	metricsMux := http.NewServeMux()
 	metricsMux.Handle("/metrics", promhttp.Handler())
-	metricsAddr := net.JoinHostPort(
+	metricsAddr := fmt.Sprintf(
+		"%s:%d",
 		cfg.BindAddr,
-		strconv.FormatUint(uint64(cfg.MetricsPort), 10),
+		cfg.MetricsPort,
 	)
 	logger.Info(
 		"serving prometheus metrics on "+metricsAddr,
@@ -441,16 +377,6 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			"component", "node",
 		)
 	}
-	// Liveness/readiness listener, on a port of its own so an orchestrator
-	// or load balancer can probe the node without being handed the metrics
-	// or pprof surface. Started for every storage mode.
-	healthServer := NewHealthServer(cfg, d.TipGapSlots)
-	if healthServer != nil {
-		logger.Info(
-			"serving health probes on "+healthServer.Addr,
-			"component", "node",
-		)
-	}
 	// Wait for interrupt/termination signal
 	signalCtx, signalCtxStop := signal.NotifyContext(
 		context.Background(),
@@ -467,9 +393,6 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	go serveAuxiliaryListener("metrics", metricsServer, logger)
 	if debugServer != nil {
 		go serveAuxiliaryListener("pprof debug", debugServer, logger)
-	}
-	if healthServer != nil {
-		go serveAuxiliaryListener("health", healthServer, logger)
 	}
 	go func() {
 		//nolint:contextcheck
@@ -492,7 +415,6 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			logger,
 			metricsServer,
 			debugServer,
-			healthServer,
 			d,
 			shutdownTimeout,
 		); err != nil {
@@ -508,7 +430,6 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			logger,
 			metricsServer,
 			debugServer,
-			healthServer,
 			d,
 			shutdownTimeout,
 		); err != nil {
@@ -520,10 +441,13 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	logger.Error("node error", "error", err)
 	signalCtxStop()
 
+	var debugShutdown func(context.Context) error
+	if debugServer != nil {
+		debugShutdown = debugServer.Shutdown
+	}
 	cleanupErr := shutdownNodeResources(
 		metricsServer.Shutdown,
-		optionalShutdown(debugServer),
-		optionalShutdown(healthServer),
+		debugShutdown,
 		d.Stop,
 		shutdownTimeout,
 	)

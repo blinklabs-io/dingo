@@ -3547,12 +3547,9 @@ INSERT INTO address_transaction (
 func TestKeyScriptStakeAddressDerivation(t *testing.T) {
 	t.Parallel()
 
-	// gouroboros StakeAddress() now resolves type-2 base addresses (key
-	// payment / script staking) directly (blinklabs-io/gouroboros#2328);
-	// the adapter no longer needs its own fallback derivation for this
-	// case. Assert the two stay equivalent so a gouroboros regression
-	// back to the old nil-for-KeyScript behavior is caught here rather
-	// than as a missing StakeAddress in production responses.
+	// gouroboros StakeAddress() returns nil for type-2 base addresses
+	// (key payment / script staking); the adapter derives the script
+	// stake address from the staking credential instead.
 	paymentHash := bytes.Repeat([]byte{0x01}, lcommon.AddressHashSize)
 	stakeScriptHash := bytes.Repeat([]byte{0x02}, lcommon.AddressHashSize)
 	addr, err := lcommon.NewAddressFromParts(
@@ -3562,8 +3559,7 @@ func TestKeyScriptStakeAddressDerivation(t *testing.T) {
 		stakeScriptHash,
 	)
 	require.NoError(t, err)
-	stakeAddr := addr.StakeAddress()
-	require.NotNil(t, stakeAddr)
+	require.Nil(t, addr.StakeAddress())
 
 	encoded, err := stakeAddressFromCredential(
 		lcommon.Credential{
@@ -3574,11 +3570,10 @@ func TestKeyScriptStakeAddressDerivation(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.True(t, strings.HasPrefix(encoded, "stake_test17"))
-	assert.Equal(t, encoded, stakeAddr.String())
 
-	decoded, err := lcommon.NewAddress(encoded)
+	stakeAddr, err := lcommon.NewAddress(encoded)
 	require.NoError(t, err)
-	assert.Equal(t, stakeScriptHash, decoded.StakeKeyHash().Bytes())
+	assert.Equal(t, stakeScriptHash, stakeAddr.StakeKeyHash().Bytes())
 }
 
 func TestHandleAddress(t *testing.T) {

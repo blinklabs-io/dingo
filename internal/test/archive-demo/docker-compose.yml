@@ -51,9 +51,7 @@ services:
       - utxo-keys:/configs/utxo-keys
 
   minio:
-    # minio/minio is no longer publicly pullable from Docker Hub; quay.io
-    # is MinIO's other public registry for the same images.
-    image: quay.io/minio/minio:latest
+    image: minio/minio:latest
     container_name: archivedemo-minio
     command: server /data --console-address ":9001"
     environment:
@@ -75,9 +73,7 @@ services:
       start_period: 5s
 
   minio-init:
-    # See the minio service comment above: quay.io/minio/mc replaces
-    # minio/mc, which is no longer publicly pullable from Docker Hub.
-    image: quay.io/minio/mc:latest
+    image: minio/mc:latest
     container_name: archivedemo-minio-init
     depends_on:
       minio:

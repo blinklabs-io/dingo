@@ -39,7 +39,11 @@ func TestKeepaliveClientResponsePublishesPeerActivity(t *testing.T) {
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.2"), Port: 3001},
 	}
 
-	o.keepaliveClientResponse(connId, 42)
+	err := o.keepaliveClientResponse(
+		okeepalive.CallbackContext{ConnectionId: connId},
+		42,
+	)
+	require.NoError(t, err)
 
 	select {
 	case evt := <-evtCh:

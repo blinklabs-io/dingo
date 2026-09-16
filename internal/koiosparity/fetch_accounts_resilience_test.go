@@ -919,8 +919,8 @@ func TestFetchAccountRewardsForEpochForceRefreshDowngradesCoverageOnPostDispatch
 // very first dispatched batch could otherwise starve slower, otherwise-
 // healthy chunks of a chance to complete at all. Placing all five injected
 // failures in the last chunks (indices numAccounts/chunkSize-5 and up) lets
-// earlier, ordinary chunks complete and checkpoint before dispatch reaches
-// the failing ones.
+// every earlier, ordinary chunk complete and checkpoint deterministically
+// before dispatch ever reaches the failing ones.
 func TestFetchAccountRewardsForEpochMegaScenario(t *testing.T) {
 	t.Parallel()
 
@@ -1076,13 +1076,18 @@ func TestFetchAccountRewardsForEpochMegaScenario(t *testing.T) {
 
 	doneAfterRun1, err := cache.GetDoneAccountChunkHashes("preview", 300)
 	require.NoError(t, err)
-	// The ordinary chunks dispatch before the 5 special-role chunks, but a
-	// few can still be saving their checkpoints when a special chunk fails
-	// and cancels the fetch. The exact count is scheduler-dependent.
-	require.NotEmpty(
+	// The 19 ordinary chunks (indices 0-18) dispatch and complete well before
+	// dispatch ever reaches the 5 special-role chunks (indices 19-23,
+	// gated behind accountFetchConcurrency concurrent slots), so all 19 must
+	// have checkpointed by the time the fast-failing truncated-response
+	// chunk cancels the rest. Asserted as a lower bound, not an exact count,
+	// since exactly how many of the 5 special chunks also race to
+	// completion before cancellation propagates is not guaranteed.
+	require.GreaterOrEqual(
 		t,
-		doneAfterRun1,
-		"ordinary chunks completed before the failure must remain checkpointed",
+		len(doneAfterRun1),
+		19,
+		"every ordinary chunk dispatched before the failing ones must have checkpointed",
 	)
 	require.Less(
 		t,

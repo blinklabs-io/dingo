@@ -6,7 +6,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
-	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -89,9 +88,9 @@ func TestExtractAddressKeys_ScriptPaymentTypes(t *testing.T) {
 			wantStakeTag: 1,
 		},
 		{
-			// Type 5: script payment + pointer staking
+			// Type 5: script payment + pointer staking (enterprise-like min length)
 			name:       "type5_script_payment_pointer",
-			addr:       append(buildShelleyAddr(5, 1, payHash, nil), 0, 0, 0),
+			addr:       buildShelleyAddr(5, 1, payHash, nil),
 			wantScript: true,
 			wantPayKey: true,
 		},
@@ -115,7 +114,7 @@ func TestExtractAddressKeys_ScriptPaymentTypes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			result := &ParsedUTxO{}
-			require.NoError(t, extractAddressKeys(tc.addr, result))
+			extractAddressKeys(tc.addr, result)
 			require.Equal(
 				t,
 				tc.wantScript,
@@ -140,21 +139,6 @@ func TestExtractAddressKeys_ScriptPaymentTypes(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestExtractAddressKeysRejectsMalformedPointer(t *testing.T) {
-	addr := append(
-		[]byte{lcommon.AddressTypeKeyPointer << 4},
-		bytes.Repeat([]byte{0xab}, lcommon.AddressHashSize)...,
-	)
-
-	result := &ParsedUTxO{}
-	err := extractAddressKeys(addr, result)
-
-	require.Error(t, err)
-	require.ErrorContains(t, err, "decoding pointer address")
-	require.Empty(t, result.PaymentKey)
-	require.Empty(t, result.StakingKey)
 }
 
 func TestUTxOToModel_PropagatesPaymentScript(t *testing.T) {

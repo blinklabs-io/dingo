@@ -760,7 +760,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 						o.config.Logger.Error(
 							fmt.Sprintf(
 								"failed to add tx %x to mempool: %s",
-								tx.Hash().Bytes(),
+								tx.Hash(),
 								err,
 							),
 							"component", "network",

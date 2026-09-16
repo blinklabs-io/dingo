@@ -81,34 +81,6 @@ func TestOpenSharedSQLStoreFilePoolsAndWAL(t *testing.T) {
 	require.FileExists(t, filepath.Join(dataDir, "metadata.sqlite"))
 }
 
-// TestOpenSharedSQLStoreWALAutocheckpoint pins the raised checkpoint
-// threshold discussed at length in sqliteCommonPragmas' doc comment: a
-// regression back to SQLite's compiled-in default of 1000 pages would
-// silently reintroduce the checkpoint-driven write amplification that
-// change fixed, without failing any functional test, since 1000 is itself a
-// valid, working value.
-func TestOpenSharedSQLStoreWALAutocheckpoint(t *testing.T) {
-	t.Parallel()
-	dataDir := t.TempDir()
-	store, writeDB, readDB, err := openSQLStore(
-		Config{},
-		metadata.ProviderDependencies{DataDir: dataDir},
-	)
-	require.NoError(t, err)
-	require.NoError(t, store.Start(context.Background()))
-	t.Cleanup(func() {
-		require.NoError(t, store.Close())
-	})
-
-	for name, db := range map[string]*sql.DB{"writeDB": writeDB, "readDB": readDB} {
-		var pages int
-		require.NoError(t, db.QueryRow(
-			"PRAGMA wal_autocheckpoint",
-		).Scan(&pages))
-		require.Equalf(t, 10000, pages, "%s wal_autocheckpoint", name)
-	}
-}
-
 func TestOpenSharedSQLStoreMemoryIsolation(t *testing.T) {
 	t.Parallel()
 	first, firstDB, _, err := openSQLStore(

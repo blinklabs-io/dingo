@@ -17,8 +17,6 @@ package mempool
 import (
 	"context"
 	"errors"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -26,7 +24,6 @@ import (
 
 	dingotestutil "github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
-	"github.com/blinklabs-io/dingo/utxoref"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -56,8 +53,8 @@ func (v *countingFailValidator) ValidateTx(gledger.Transaction) error {
 
 func (v *countingFailValidator) ValidateTxWithOverlay(
 	tx gledger.Transaction,
-	_ map[utxoref.Key]struct{},
-	_ map[utxoref.Key]lcommon.Utxo,
+	_ map[string]struct{},
+	_ map[string]lcommon.Utxo,
 ) error {
 	v.calls++
 	if tx.Hash().String() == v.failHash {
@@ -83,8 +80,8 @@ func (v *oneShotBlockingValidator) ValidateTx(gledger.Transaction) error {
 
 func (v *oneShotBlockingValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
-	map[utxoref.Key]struct{},
-	map[utxoref.Key]lcommon.Utxo,
+	map[string]struct{},
+	map[string]lcommon.Utxo,
 ) error {
 	v.calls.Add(1)
 	if v.advanceEveryCall.Load() {
@@ -101,8 +98,8 @@ func (v *oneShotBlockingValidator) WithTxValidationSession(
 	fn func(
 		validate func(
 			gledger.Transaction,
-			map[utxoref.Key]struct{},
-			map[utxoref.Key]lcommon.Utxo,
+			map[string]struct{},
+			map[string]lcommon.Utxo,
 		) error,
 		stillCurrent func() bool,
 	) error,
@@ -116,38 +113,14 @@ func (v *oneShotBlockingValidator) WithTxValidationSession(
 	)
 }
 
-// testGraphRefKey turns a test-only "<label>:<index>" ref string (e.g.
-// "parent:0") into the utxoref.Key the DAG now indexes by, without needing a
-// real transaction hash: NewBlake2b256 embeds label's bytes directly (padded
-// with zeros), which is a distinct, deterministic value for every distinct
-// label the DAG tests use.
-func testGraphRefKey(ref string) utxoref.Key {
-	label, indexStr, ok := strings.Cut(ref, ":")
-	if !ok {
-		panic("testGraphRefKey: ref missing ':index' suffix: " + ref)
-	}
-	index, err := strconv.ParseUint(indexStr, 10, 32)
-	if err != nil {
-		panic("testGraphRefKey: bad index in ref " + ref + ": " + err.Error())
-	}
-	return utxoref.Key{
-		TxId:  lcommon.NewBlake2b256([]byte(label)),
-		Index: uint32(index),
-	}
-}
-
 func graphTx(hash string, inputs []string, outputs ...string) appliedTx {
-	consumed := make([]utxoref.Key, 0, len(inputs))
-	for _, input := range inputs {
-		consumed = append(consumed, testGraphRefKey(input))
-	}
-	created := make(map[utxoref.Key]lcommon.Utxo, len(outputs))
+	created := make(map[string]lcommon.Utxo, len(outputs))
 	for _, output := range outputs {
-		created[testGraphRefKey(output)] = lcommon.Utxo{}
+		created[output] = lcommon.Utxo{}
 	}
 	return appliedTx{
 		hash:     hash,
-		consumed: consumed,
+		consumed: inputs,
 		created:  created,
 	}
 }
@@ -173,11 +146,7 @@ func TestTransactionDAGTopologicalOrderAndDescendants(t *testing.T) {
 		"right":      {},
 		"grandchild": {},
 	}, graph.descendants(map[string]struct{}{"parent": {}}))
-	assert.Equal(
-		t,
-		"parent",
-		graph.producerByUtxo[testGraphRefKey("parent:0")],
-	)
+	assert.Equal(t, "parent", graph.producerByUtxo["parent:0"])
 }
 
 func TestTransactionDAGConfirmedRemovalPreservesDescendants(t *testing.T) {
@@ -239,8 +208,8 @@ func TestDAGTracksAdmittedTransactionDependencies(t *testing.T) {
 	const originalInputHash = "0c07395aed88bdddc6de0518d1462dd0ec7e52e1e3a53599f7cdb24dc80237f8"
 	baseInput := buildMockInput(t, originalInputHash, 1)
 	pool, err := NewDAG(MempoolConfig{
-		Validator: newOverlayValidator(map[utxoref.Key]lcommon.Utxo{
-			utxoref.ForInput(baseInput): {
+		Validator: newOverlayValidator(map[string]lcommon.Utxo{
+			originalInputHash + ":1": {
 				Id:     baseInput,
 				Output: buildMockOutput(t, 50_000_000),
 			},
@@ -290,11 +259,10 @@ func TestDAGDoesNotWatermarkEvict(t *testing.T) {
 		totalSize <= int64(float64(capacity)*DefaultEvictionWatermark) {
 		capacity++
 	}
-	baseInput := buildMockInput(t, originalInputHash, 1)
 	pool, err := NewDAG(MempoolConfig{
-		Validator: newOverlayValidator(map[utxoref.Key]lcommon.Utxo{
-			utxoref.ForInput(baseInput): {
-				Id:     baseInput,
+		Validator: newOverlayValidator(map[string]lcommon.Utxo{
+			originalInputHash + ":1": {
+				Id:     buildMockInput(t, originalInputHash, 1),
 				Output: buildMockOutput(t, 50_000_000),
 			},
 		}),

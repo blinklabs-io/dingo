@@ -121,7 +121,7 @@ func TestTallyDRepVotesIncludesAlwaysNoConfidence(t *testing.T) {
 		PParams: pparams,
 		GovAction: &lcommon.UpdateCommitteeGovAction{
 			Type:       uint(lcommon.GovActionTypeUpdateCommittee),
-			CredEpochs: map[*lcommon.Credential]uint64{},
+			CredEpochs: map[*lcommon.Credential]uint{},
 		},
 		ActiveDRepCount: 0,
 		MajorVersion:    10,

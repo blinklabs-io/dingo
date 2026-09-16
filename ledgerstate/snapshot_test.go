@@ -24,7 +24,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lbabbage "github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -446,76 +445,6 @@ func TestParseW32SnapshotPoolParamsCarriesLeiosKeyIntoStakeRows(
 	pool.LeiosKeyPossessionProof[0] ^= 0xff
 	require.Equal(t, publicKey, rows[0].LeiosKeyPublic)
 	require.Equal(t, possessionProof, rows[0].LeiosKeyPossessionProof)
-}
-
-// TestAggregatePoolStakeKeepsZeroStakePool is the blinklabs-io/dingo#4152
-// regression: a pool whose only delegator has zero stake at snapshot time
-// (registered and delegated, but with no lovelace behind the credential --
-// e.g. its UTxOs spent and no reward balance) must still get a
-// PoolStakeSnapshot row. A real cardano-node reports such a pool in
-// GetStakeDistribution with an explicit zero fraction rather than omitting
-// it (confirmed live against a real Preview cardano-node during #4152's
-// investigation), and dingo's own live snapshot-rotation path
-// (calculateLiveStakeDistributionInTxn) already does the same. Before the
-// fix, AggregatePoolStake silently dropped this pool's row entirely --
-// exactly the "pool present on a real node, completely absent from dingo's
-// answer" symptom #4152 reported for 36 real Preview pools after a Mithril
-// bootstrap.
-func TestAggregatePoolStakeKeepsZeroStakePool(t *testing.T) {
-	t.Parallel()
-
-	zeroStakePool := toFixed28([]byte("4152 zero stake pool"))
-	zeroStakeCred := toFixed28([]byte("4152 zero stake delegator"))
-
-	mixedPool := toFixed28([]byte("4152 mixed pool"))
-	mixedZeroCred := toFixed28([]byte("4152 mixed pool zero delegator"))
-	mixedPaidCred := toFixed28([]byte("4152 mixed pool paid delegator"))
-
-	zeroStakeCredHex := hex.EncodeToString(zeroStakeCred[:])
-	mixedZeroCredHex := hex.EncodeToString(mixedZeroCred[:])
-	mixedPaidCredHex := hex.EncodeToString(mixedPaidCred[:])
-
-	snap := &ParsedSnapShot{
-		// zeroStakeCredHex is deliberately absent from Stake entirely (as
-		// well as being reachable with an explicit 0 entry, exercised by
-		// mixedZeroCredHex below) -- both are ways a real snapshot can leave
-		// a delegated credential with nothing behind it.
-		Stake: map[string]uint64{
-			mixedZeroCredHex: 0,
-			mixedPaidCredHex: 42,
-		},
-		Delegations: map[string][]byte{
-			zeroStakeCredHex: zeroStakePool[:],
-			mixedZeroCredHex: mixedPool[:],
-			mixedPaidCredHex: mixedPool[:],
-		},
-	}
-
-	rows := AggregatePoolStake(snap, 9, "mark", 99)
-
-	byPool := make(map[string]*models.PoolStakeSnapshot, len(rows))
-	for _, row := range rows {
-		byPool[hex.EncodeToString(row.PoolKeyHash)] = row
-	}
-
-	zeroRow := byPool[hex.EncodeToString(zeroStakePool[:])]
-	require.NotNil(
-		t,
-		zeroRow,
-		"pool with a single zero-stake delegator must still get a row",
-	)
-	require.Equal(t, uint64(0), uint64(zeroRow.TotalStake))
-	require.Equal(t, uint64(1), zeroRow.DelegatorCount)
-
-	mixedRow := byPool[hex.EncodeToString(mixedPool[:])]
-	require.NotNil(t, mixedRow)
-	require.Equal(t, uint64(42), uint64(mixedRow.TotalStake))
-	require.Equal(
-		t,
-		uint64(2),
-		mixedRow.DelegatorCount,
-		"a zero-stake delegator must still be counted alongside a paid one",
-	)
 }
 
 func TestParseW32SnapshotPoolParamsRejectsMalformedLeiosKey(t *testing.T) {

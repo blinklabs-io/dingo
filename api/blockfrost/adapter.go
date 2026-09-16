@@ -3291,6 +3291,32 @@ func (a *NodeAdapter) Address(
 	if stakeAddr := addr.StakeAddress(); stakeAddr != nil {
 		encoded := stakeAddr.String()
 		stakeAddress = &encoded
+	} else if addr.Type() == lcommon.AddressTypeKeyScript {
+		// gouroboros Address.StakeAddress() has no case for
+		// key-payment/script-staking base addresses; build the script
+		// stake address from the staking credential directly.
+		networkID, err := uintToUint8(
+			addr.NetworkId(),
+			"address network id",
+		)
+		if err != nil {
+			return AddressInfo{}, err
+		}
+		encoded, err := stakeAddressFromCredential(
+			lcommon.Credential{
+				CredType:   lcommon.CredentialTypeScriptHash,
+				Credential: lcommon.CredentialHash(addr.StakeKeyHash()),
+			},
+			networkID,
+		)
+		if err != nil {
+			return AddressInfo{}, fmt.Errorf(
+				"derive script stake address for %q: %w",
+				address,
+				err,
+			)
+		}
+		stakeAddress = &encoded
 	}
 
 	addrType := "shelley"

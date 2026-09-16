@@ -22,7 +22,6 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
-	"github.com/blinklabs-io/dingo/utxoref"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -38,20 +37,27 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// utxoRefKey mirrors the "<hex txid>:<index>" overlay key UtxoById builds
+// for consumedUtxos/intraBlockUtxos (ledger/view.go), so tests can populate
+// those maps exactly like production does.
+func utxoRefKey(in lcommon.TransactionInput) string {
+	return fmt.Sprintf("%s:%d", in.Id().String(), in.Index())
+}
+
 // distinctUtxoRefs returns the number of distinct (txId, index) refs a
 // transaction's spend, collateral, and reference inputs name together --
 // the number of database reads a single validation of tx should need with
 // the per-view memo, however many times a rule resolves the same ref.
 func distinctUtxoRefs(tx lcommon.Transaction) int {
-	seen := map[utxoref.Key]struct{}{}
+	seen := map[string]struct{}{}
 	for _, in := range tx.Inputs() {
-		seen[utxoref.ForInput(in)] = struct{}{}
+		seen[utxoRefKey(in)] = struct{}{}
 	}
 	for _, in := range tx.Collateral() {
-		seen[utxoref.ForInput(in)] = struct{}{}
+		seen[utxoRefKey(in)] = struct{}{}
 	}
 	for _, in := range tx.ReferenceInputs() {
-		seen[utxoref.ForInput(in)] = struct{}{}
+		seen[utxoRefKey(in)] = struct{}{}
 	}
 	return len(seen)
 }
@@ -216,7 +222,7 @@ func TestLedgerViewUtxoByIdChecksOverlaysBeforeMemo(t *testing.T) {
 	lv := &LedgerView{
 		txn:           txn,
 		ls:            fx.dingoLS,
-		consumedUtxos: map[utxoref.Key]struct{}{},
+		consumedUtxos: map[string]struct{}{},
 	}
 
 	// First call: nothing consumed yet, resolves from the database and
@@ -226,7 +232,7 @@ func TestLedgerViewUtxoByIdChecksOverlaysBeforeMemo(t *testing.T) {
 
 	// Simulate a caller marking the same ref consumed on this view between
 	// calls.
-	lv.consumedUtxos[utxoref.ForInput(input)] = struct{}{}
+	lv.consumedUtxos[utxoRefKey(input)] = struct{}{}
 
 	_, err = lv.UtxoById(input)
 	require.ErrorIs(
@@ -527,14 +533,14 @@ func TestLedgerViewMemoizedUtxosUnchangedByValidation(t *testing.T) {
 	require.Len(t, lv.utxoMemo, distinctUtxoRefs(fx.tx))
 
 	for key, cached := range lv.utxoMemo {
-		stored, err := fx.db.UtxoByRef(key.TxId.Bytes(), key.Index, nil)
+		stored, err := fx.db.UtxoByRef(key.txId.Bytes(), key.index, nil)
 		require.NoError(t, err)
 		fresh, err := stored.Decode()
 		require.NoError(t, err)
 		require.Equal(
 			t, fresh, cached.Output,
 			"memoized output %s#%d was mutated during validation",
-			key.TxId.String(), key.Index,
+			key.txId.String(), key.index,
 		)
 	}
 }

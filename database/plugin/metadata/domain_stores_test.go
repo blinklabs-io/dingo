@@ -132,7 +132,6 @@ var utxoStoreMethods = []string{
 	"GetScriptLockedSupply",
 	"GetUtxosByAssets",
 	"IterateLiveUtxos",
-	"IterateUtxosAsOf",
 }
 
 // transactionStoreMethods is the chain-transaction domain: sqlstore's

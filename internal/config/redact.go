@@ -147,8 +147,6 @@ var logPlainConfigFields = []string{
 	"GenesisBootstrap.Enabled",
 	"GenesisBootstrap.PromotionMinDiversityGroups",
 	"GenesisBootstrap.WindowSlots",
-	"HealthPort",
-	"HealthReadyGapSlots",
 	"HistoryExpiry.Enabled",
 	"HistoryExpiry.Frequency",
 	"ImmutableDbPath",

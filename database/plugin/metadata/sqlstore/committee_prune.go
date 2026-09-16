@@ -172,7 +172,7 @@ func (s *Store) pruneCommitteeHotAuthorizationsMaintenance(
 		return nil
 	}
 	horizon := tip.Point.Slot - retention
-	db := s.instrumentedQueryer(s.writeDB)
+	db := newDialectQueryer(s.writeDB, s.dialect.Name())
 	for {
 		result, err := db.ExecContext(ctx, `
 DELETE FROM auth_committee_hot

@@ -59,19 +59,8 @@ import (
 // all on the common path.
 const utxoWholeResolveWorkers = 16
 
-// queryShelleyUtxoWhole answers GetUTxOWhole: every UTxO live as of right
-// now (or, for a pinned at, as of that exact point).
-//
-// A pinned at used to be silently ignored -- this answered from live state
-// regardless of what point was Acquired, unlike GetStakeDistribution and
-// GetPoolDistr2's own pinning support and unlike a real cardano-node, which
-// genuinely pins its whole reply for the rest of the LocalStateQuery
-// session (blinklabs-io/dingo#382). That made this the one comparison
-// field cmd/node-parity's periodic full checks reported as "diverged" on
-// essentially every run that took long enough for the live tip to move
-// during the walk -- confirmed live against a real Preview cardano-node:
-// every flagged UTxO's own AddedSlot was strictly after the pinned slot,
-// i.e. it was created after the point this reply claimed to answer for.
+// queryShelleyUtxoWhole answers GetUTxOWhole: every live UTxO in the
+// current ledger state.
 //
 // cardano-cli's own client-side guidance is that a whole-UTxO dump
 // ("query utxo --whole-utxo") is only practical against a small network;
@@ -79,13 +68,7 @@ const utxoWholeResolveWorkers = 16
 // mainnet-scale chain should expect this to be slow and to return a large
 // reply. This exists primarily to support LocalStateQuery-based tooling
 // (e.g. the devnet cross-node ledger-state comparison,
-// blinklabs-io/dingo#1900) rather than as a query aimed at a busy chain. A
-// pinned at is slower still: IterateUtxosAsOf has no indexed shortcut for
-// "added_slot <= X" against an X near the live tip (it matches nearly
-// every row ever created, live or already spent), unlike IterateLiveUtxos'
-// indexed deleted_slot = 0 filter -- accepted deliberately rather than left
-// unfixed, since a wrong answer is worse than a slow one for a tool whose
-// whole purpose is catching real ledger divergence.
+// blinklabs-io/dingo#1900) rather than as a query aimed at a busy chain.
 //
 // Resolves every live UTxO's CBOR across a worker pool rather than
 // IterateLiveUtxos' inline per-row loadCbor: on a chain whose live UTxOs
@@ -112,15 +95,7 @@ const utxoWholeResolveWorkers = 16
 // worker pool cannot parallelize away. This is not yet a complete fix;
 // see the linked issue for the full investigation and a recommended next
 // step (streaming the reply instead of fully materializing it).
-func (ls *LedgerState) queryShelleyUtxoWhole(
-	at QueryPoint,
-	txn *database.Txn,
-) (any, error) {
-	if txn == nil {
-		txn = ls.db.Transaction(false)
-		defer txn.Release()
-	}
-
+func (ls *LedgerState) queryShelleyUtxoWhole() (any, error) {
 	// A bare UtxoRef, not a ref-plus-UtxoId pair: UtxoId is trivially
 	// reconstructed from a ref (see resolveRow below), so storing it here
 	// too would retain the same 32-byte hash and index twice per entry --
@@ -130,34 +105,20 @@ func (ls *LedgerState) queryShelleyUtxoWhole(
 	// all (rather than a bounded window) is a further, larger memory cost
 	// this doc comment already tracks as future work -- see the linked
 	// issue's "streaming the reply" note -- deliberately not attempted
-	// here: IterateLiveUtxoRefs'/IterateUtxoRefsAsOf's enumeration
-	// transaction would have to stay open for the whole resolve phase
-	// instead of the current brief enumeration pass, holding one more
-	// connection from the same scarce metadata pool this PR's
-	// worker-side blob-only-txn fix exists to stop starving (wolf31o2
-	// review).
+	// here: IterateLiveUtxoRefs' enumeration transaction would have to
+	// stay open for the whole resolve phase instead of the current brief
+	// enumeration pass, holding one more connection from the same scarce
+	// metadata pool this PR's worker-side blob-only-txn fix exists to
+	// stop starving (wolf31o2 review).
 	var live []database.UtxoRef
-	collect := func(u *models.Utxo) error {
+	err := ls.db.IterateLiveUtxoRefs(nil, func(u *models.Utxo) error {
 		var ref database.UtxoRef
 		copy(ref.TxId[:], u.TxId)
 		ref.OutputIdx = u.OutputIdx
 		live = append(live, ref)
 		return nil
-	}
-	if at.pinned() {
-		// A pin older than the retention floor cannot be answered
-		// correctly: a row spent between at.Slot and the floor may
-		// already be hard-deleted, and IterateUtxosAsOf has no way to
-		// distinguish that from a row that was never live at at.Slot at
-		// all (blinklabs-io/dingo#382 review) -- same reasoning
-		// queryShelleyUtxoByTxIn's identical check documents.
-		if err := ls.checkUtxoRetentionWindow(txn, at); err != nil {
-			return nil, err
-		}
-		if err := ls.db.IterateUtxoRefsAsOf(at.Slot, txn, collect); err != nil {
-			return nil, err
-		}
-	} else if err := ls.db.IterateLiveUtxoRefs(txn, collect); err != nil {
+	})
+	if err != nil {
 		return nil, err
 	}
 

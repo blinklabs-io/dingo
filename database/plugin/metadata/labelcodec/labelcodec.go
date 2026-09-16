@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"slices"
 	"sort"
-	"strings"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -187,9 +186,6 @@ func decodeMetadataLabelMap(
 func metadatumRawToJSON(raw cbor.RawMessage) (string, error) {
 	decoded, err := lcommon.DecodeMetadatumRaw(raw)
 	if err != nil {
-		if strings.Contains(err.Error(), "duplicate key in metadata map") {
-			return "", fmt.Errorf("%w: %w", ErrJSONUnavailable, err)
-		}
 		return "", fmt.Errorf("decode raw metadatum: %w", err)
 	}
 	tmpValue, err := metadatumToJSONValue(decoded)

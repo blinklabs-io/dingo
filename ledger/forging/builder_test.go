@@ -24,7 +24,6 @@ import (
 
 	dingotestutil "github.com/blinklabs-io/dingo/internal/test/testutil"
 	dingoversion "github.com/blinklabs-io/dingo/internal/version"
-	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -1144,8 +1143,8 @@ func (v *mockTxValidator) ValidateTx(tx ledger.Transaction) error {
 
 func (v *mockTxValidator) ValidateTxWithOverlay(
 	tx ledger.Transaction,
-	_ map[utxoref.Key]struct{},
-	_ map[utxoref.Key]lcommon.Utxo,
+	_ map[string]struct{},
+	_ map[string]lcommon.Utxo,
 ) error {
 	return v.ValidateTx(tx)
 }

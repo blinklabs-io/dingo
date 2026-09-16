@@ -19,13 +19,12 @@ import (
 
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/gouroboros/connection"
 	okeepalive "github.com/blinklabs-io/gouroboros/protocol/keepalive"
 )
 
 func (o *Ouroboros) keepaliveConnOpts() []okeepalive.KeepAliveOptionFunc {
 	opts := []okeepalive.KeepAliveOptionFunc{
-		okeepalive.WithOnKeepAliveResponseReceived(
+		okeepalive.WithKeepAliveResponseFunc(
 			o.instrumentKeepaliveResponse(o.keepaliveClientResponse),
 		),
 	}
@@ -46,27 +45,29 @@ func (o *Ouroboros) keepaliveConnOpts() []okeepalive.KeepAliveOptionFunc {
 }
 
 func (o *Ouroboros) instrumentKeepaliveResponse(
-	fn func(connection.ConnectionId, uint16),
-) func(connection.ConnectionId, uint16) {
-	return func(connId connection.ConnectionId, cookie uint16) {
+	fn func(okeepalive.CallbackContext, uint16) error,
+) func(okeepalive.CallbackContext, uint16) error {
+	return func(ctx okeepalive.CallbackContext, cookie uint16) error {
 		start := time.Now()
-		fn(connId, cookie)
-		o.recordProtocolMessage("keepalive", nil, time.Since(start))
+		err := fn(ctx, cookie)
+		o.recordProtocolMessage("keepalive", err, time.Since(start))
+		return err
 	}
 }
 
 func (o *Ouroboros) keepaliveClientResponse(
-	connId connection.ConnectionId,
+	ctx okeepalive.CallbackContext,
 	_ uint16,
-) {
+) error {
 	if o.eventBus == nil {
-		return
+		return nil
 	}
 	evt := event.NewEvent(
 		chainselection.PeerActivityEventType,
 		chainselection.PeerActivityEvent{
-			ConnectionId: connId,
+			ConnectionId: ctx.ConnectionId,
 		},
 	)
 	o.eventBus.Publish(chainselection.PeerActivityEventType, evt)
+	return nil
 }

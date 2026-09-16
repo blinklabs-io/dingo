@@ -186,9 +186,7 @@ func TestWindowedRewindConvergesWhilePrimaryChainExtends(t *testing.T) {
 	})
 
 	target := ocommon.NewPoint(raw[0].Slot, raw[0].Hash)
-	committed, rewindErr := ls.rollbackPrimaryChainInSecurityParamWindows(
-		target,
-	)
+	rewindErr := ls.rollbackPrimaryChainInSecurityParamWindows(target)
 	close(stop)
 	appender.Wait()
 
@@ -199,11 +197,6 @@ func TestWindowedRewindConvergesWhilePrimaryChainExtends(t *testing.T) {
 		"a windowed step must stay within K of the chain's live tip",
 	)
 	require.NoError(t, rewindErr)
-	require.True(
-		t,
-		committed,
-		"a descent that reached its target committed its steps",
-	)
 }
 
 // TestDeterministicTxRecoveryHaltsOnUnreachableRewind pins the second half of
@@ -546,18 +539,13 @@ func TestWindowedRewindRefusesRecoveryTargetTheChainDoesNotHold(t *testing.T) {
 	)
 
 	tipBefore := pc.Tip()
-	committed, err := ls.rollbackPrimaryChainInSecurityParamWindows(target)
+	err = ls.rollbackPrimaryChainInSecurityParamWindows(target)
 	require.ErrorIs(t, err, chain.ErrRollbackPointNotOnChain)
 	require.Equal(
 		t,
 		tipBefore,
 		pc.Tip(),
 		"a target the chain does not hold must be refused before any step is committed",
-	)
-	require.False(
-		t,
-		committed,
-		"the refusal must report that nothing was truncated",
 	)
 }
 
@@ -606,17 +594,12 @@ func TestWindowedRewindRefusesSlotZeroTargetTheStoreDoesNotHold(t *testing.T) {
 
 	target := ocommon.NewPoint(0, testHashBytes("slot-zero-target-absent"))
 	tipBefore := pc.Tip()
-	committed, err := ls.rollbackPrimaryChainInSecurityParamWindows(target)
+	err = ls.rollbackPrimaryChainInSecurityParamWindows(target)
 	require.ErrorIs(t, err, models.ErrBlockNotFound)
 	require.Equal(
 		t,
 		tipBefore,
 		pc.Tip(),
 		"a slot-zero target the store does not hold must not truncate the chain",
-	)
-	require.False(
-		t,
-		committed,
-		"the refusal must report that nothing was truncated",
 	)
 }

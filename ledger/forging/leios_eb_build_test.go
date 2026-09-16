@@ -17,10 +17,10 @@ package forging
 import (
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -74,7 +74,7 @@ func TestBuildLeiosEBNoValidRefs(t *testing.T) {
 }
 
 type leiosOverlayValidator struct {
-	base   map[utxoref.Key]struct{}
+	base   map[string]struct{}
 	reject map[string]struct{}
 }
 
@@ -84,14 +84,14 @@ func (v *leiosOverlayValidator) ValidateTx(tx ledger.Transaction) error {
 
 func (v *leiosOverlayValidator) ValidateTxWithOverlay(
 	tx ledger.Transaction,
-	consumed map[utxoref.Key]struct{},
-	created map[utxoref.Key]lcommon.Utxo,
+	consumed map[string]struct{},
+	created map[string]lcommon.Utxo,
 ) error {
 	if _, reject := v.reject[tx.Hash().String()]; reject {
 		return errors.New("rejected parent")
 	}
 	for _, input := range tx.Inputs() {
-		key := utxoref.ForInput(input)
+		key := fmt.Sprintf("%s:%d", input.Id().String(), input.Index())
 		if _, spent := consumed[key]; spent {
 			return errors.New("already consumed")
 		}
@@ -113,7 +113,7 @@ func TestSelectValidLeiosTransactionsPreservesDependentChain(t *testing.T) {
 	child, err := conway.NewConwayTransactionFromCbor(childCbor)
 	require.NoError(t, err)
 	baseInput := parent.Inputs()[0]
-	baseKey := utxoref.ForInput(baseInput)
+	baseKey := fmt.Sprintf("%s:%d", baseInput.Id().String(), baseInput.Index())
 	txs := []MempoolTransaction{
 		{
 			Hash: parent.Hash().String(),
@@ -128,7 +128,7 @@ func TestSelectValidLeiosTransactionsPreservesDependentChain(t *testing.T) {
 	}
 
 	selected, err := selectValidLeiosTransactions(txs, &leiosOverlayValidator{
-		base:   map[utxoref.Key]struct{}{baseKey: {}},
+		base:   map[string]struct{}{baseKey: {}},
 		reject: map[string]struct{}{},
 	})
 	require.NoError(t, err)
@@ -143,7 +143,7 @@ func TestSelectValidLeiosTransactionsRejectsInvalidChain(t *testing.T) {
 	child, err := conway.NewConwayTransactionFromCbor(childCbor)
 	require.NoError(t, err)
 	baseInput := parent.Inputs()[0]
-	baseKey := utxoref.ForInput(baseInput)
+	baseKey := fmt.Sprintf("%s:%d", baseInput.Id().String(), baseInput.Index())
 	txs := []MempoolTransaction{
 		{
 			Hash: parent.Hash().String(),
@@ -158,7 +158,7 @@ func TestSelectValidLeiosTransactionsRejectsInvalidChain(t *testing.T) {
 	}
 
 	selected, err := selectValidLeiosTransactions(txs, &leiosOverlayValidator{
-		base: map[utxoref.Key]struct{}{baseKey: {}},
+		base: map[string]struct{}{baseKey: {}},
 		reject: map[string]struct{}{
 			parent.Hash().String(): {},
 		},
@@ -177,7 +177,7 @@ func TestSelectValidLeiosTransactionsRejectsUnrepresentableParent(
 	child, err := conway.NewConwayTransactionFromCbor(childCbor)
 	require.NoError(t, err)
 	baseInput := parent.Inputs()[0]
-	baseKey := utxoref.ForInput(baseInput)
+	baseKey := fmt.Sprintf("%s:%d", baseInput.Id().String(), baseInput.Index())
 
 	selected, err := selectValidLeiosTransactions(
 		[]MempoolTransaction{
@@ -188,7 +188,7 @@ func TestSelectValidLeiosTransactionsRejectsUnrepresentableParent(
 				Type: conway.TxTypeConway,
 			},
 		},
-		&leiosOverlayValidator{base: map[utxoref.Key]struct{}{baseKey: {}}},
+		&leiosOverlayValidator{base: map[string]struct{}{baseKey: {}}},
 	)
 	require.NoError(t, err)
 	require.Empty(t, selected)

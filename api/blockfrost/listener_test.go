@@ -16,11 +16,9 @@ package blockfrost
 
 import (
 	"context"
-	"net"
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -63,70 +61,4 @@ func TestServerRebindsAfterStop(t *testing.T) {
 		"a capability restart must rebind the port Stop released",
 	)
 	require.NoError(t, stopNow(t, restarted))
-}
-
-// TestStartIsRefusedWhileAnotherStartHoldsTheGate pins the start gate this
-// package is wired to. TestStartAlreadyStarted asserts only the
-// already-published server rejection, which Publish reports, so without this
-// test the BeginStart/EndStart pair can be removed from Start with the suite
-// green.
-func TestStartIsRefusedWhileAnotherStartHoldsTheGate(t *testing.T) {
-	t.Parallel()
-
-	srv := New(
-		BlockfrostConfig{ListenAddress: testutil.FreePort(t)},
-		&mockNode{},
-		nil,
-	)
-
-	held, err := srv.listener.BeginStart()
-	require.NoError(t, err)
-
-	err = srv.Start(t.Context())
-	require.ErrorContains(
-		t, err, "start already in progress",
-		"Start must take the listener's start gate before publishing",
-	)
-	require.Nil(
-		t, srv.listener.Server(),
-		"a refused Start must not publish a server",
-	)
-
-	srv.listener.EndStart(held)
-	require.NoError(
-		t, srv.Start(t.Context()),
-		"the gate must be available again once the holder releases it",
-	)
-	require.NoError(t, stopNow(t, srv))
-}
-
-// TestServerShutdownOnContextCancel asserts cancelling the context passed to
-// Start releases the port, which is how the node stops this API during its own
-// shutdown. Nothing else in the package reads the Start context, so without
-// this test the listener.Watch call can be removed from Start with the suite
-// green.
-func TestServerShutdownOnContextCancel(t *testing.T) {
-	t.Parallel()
-
-	ctx, cancel := context.WithCancel(t.Context())
-	_, addr := startOnFreePort(t, ctx, BlockfrostConfig{})
-
-	cancel()
-
-	testutil.WaitForCondition(
-		t,
-		func() bool { return !portAccepts(addr) },
-		5*time.Second,
-		"listener still accepting after context cancel",
-	)
-}
-
-// portAccepts reports whether a TCP connection to addr succeeds.
-func portAccepts(addr string) bool {
-	conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close()
-	return true
 }

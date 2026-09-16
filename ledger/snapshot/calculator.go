@@ -116,27 +116,6 @@ func (c *Calculator) CalculateStakeDistribution(
 	return dist, err
 }
 
-// CalculateStakeDistributionInTxn is CalculateStakeDistribution for a caller
-// that already holds an open transaction and needs this calculation to
-// observe the exact same database snapshot as the rest of its own work,
-// rather than whatever is current when a fresh transaction is opened here.
-// Same plain "stake at slot" semantics: no epoch-boundary reward inputs, no
-// CIP-0163 inactivity gate.
-func (c *Calculator) CalculateStakeDistributionInTxn(
-	ctx context.Context,
-	txn *database.Txn,
-	slot uint64,
-) (*StakeDistribution, error) {
-	return c.calculateHistoricalStakeDistributionInTxn(
-		ctx,
-		txn,
-		slot,
-		0,
-		0,
-		0,
-	)
-}
-
 // boundaryRewardSlot validates the epoch-boundary reward cut before it reaches
 // SQL. SNAP reward semantics are defined only for the mark snapshot's own
 // boundary, whose snapshot slot is exactly one before the boundary slot (see

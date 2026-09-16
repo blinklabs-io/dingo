@@ -34,30 +34,10 @@ func newDialectQueryer(db queryer, dialect string) queryer {
 	if dialect == "sqlite" {
 		return db
 	}
-	if wrapped, ok := unwrapDialectQueryer(db); ok && wrapped.dialect == dialect {
+	if wrapped, ok := db.(dialectQueryer); ok && wrapped.dialect == dialect {
 		return db
 	}
 	return dialectQueryer{queryer: db, dialect: dialect}
-}
-
-// unwrapDialectQueryer reports whether db is, or wraps, a dialectQueryer,
-// unwrapping the one layer Store.instrumentedQueryer can put between a
-// caller and it: countingQueryer, applied around the dialectQueryer it
-// builds whenever Config.PromRegistry is set (see instrumentedQueryer).
-// Without this, a caller that receives an instrumented handle back --
-// operationalQueries and newDialectQueryer's own idempotence check among
-// them -- would see countingQueryer as db's concrete type, never find the
-// dialectQueryer underneath, and re-wrap or mis-detect dialect identity on
-// every metrics-enabled Store. This is the same unwrap
-// requireAccountBaselineTransaction (account.go) and stmtForQueryer
-// (prepared_stmt.go) already perform for the same reason, one layer
-// further in for *sql.Tx.
-func unwrapDialectQueryer(db queryer) (dialectQueryer, bool) {
-	if wrapped, ok := db.(countingQueryer); ok {
-		db = wrapped.queryer
-	}
-	wrapped, ok := db.(dialectQueryer)
-	return wrapped, ok
 }
 
 func (q dialectQueryer) ExecContext(

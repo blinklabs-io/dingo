@@ -221,10 +221,10 @@ find /configs -type d -exec chmod 0755 {} +
 find /configs -type f -exec chmod 0644 {} +
 
 # cardano-node refuses to start when vrf.skey has "other" read permissions,
-# so the per-pool keys directories must be 0700/0600. Pools listed in
-# DINGO_POOL_IDS are consumed by dingo containers, which run as a non-root
-# user, and get chowned below to match. Pool 2 stays root-owned for the
-# cardano-producer container, which runs as root.
+# so the per-pool keys directories must be 0700/0600. Pool 1 is consumed by
+# the dingo container (uid 100, gid 101 in the dingo image), so chown it to
+# match. Pool 2 stays root-owned for the cardano-producer container, which
+# runs as root.
 for pool_dir in /configs/[0-9]*; do
     keys_dir="$pool_dir/keys"
     if [ -d "$keys_dir" ]; then
@@ -232,19 +232,6 @@ for pool_dir in /configs/[0-9]*; do
         find "$keys_dir" -type f -exec chmod 0600 {} +
     fi
 done
-# Chown the key dirs of pools consumed by dingo containers to the dingo
-# image's uid/gid. The uid/gid come from docker-compose.yml rather than
-# being hardcoded here, because the authoritative value is the `adduser
-# --uid` pin in the repo root Dockerfile and the two must not drift. They
-# did drift once: the image moved from uid 100 to 1000 while this script
-# still chowned to 100:101, so the dingo producer failed startup with
-# "failed to load VRF signing key: ... permission denied".
-DINGO_POOL_IDS="${DINGO_POOL_IDS:-1}"
-DINGO_UID="${DINGO_UID:-1000}"
-DINGO_GID="${DINGO_GID:-1000}"
-echo "chowning dingo pool keys to ${DINGO_UID}:${DINGO_GID} (pools: ${DINGO_POOL_IDS})"
-for id in ${DINGO_POOL_IDS}; do
-    if [ -d "/configs/${id}/keys" ]; then
-        chown -R "${DINGO_UID}:${DINGO_GID}" "/configs/${id}/keys"
-    fi
-done
+if [ -d /configs/1/keys ]; then
+    chown -R 100:101 /configs/1/keys
+fi

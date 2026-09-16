@@ -261,7 +261,7 @@ func (s *Store) MissingCriticalDeferredIndexes() ([]string, error) {
 		return nil, err
 	}
 	ctx := context.Background()
-	db := s.instrumentedQueryer(s.readDB)
+	db := newDialectQueryer(s.readDB, s.dialect.Name())
 	var missing []string
 	for _, index := range deferred.CriticalManifest() {
 		exists, err := s.deferredIndexExists(ctx, db, index)
@@ -286,7 +286,7 @@ func (s *Store) HasDeferredIndexesPending() (bool, error) {
 		return false, err
 	}
 	var value string
-	err := s.instrumentedQueryer(s.readDB).QueryRowContext(
+	err := newDialectQueryer(s.readDB, s.dialect.Name()).QueryRowContext(
 		context.Background(),
 		"SELECT value FROM sync_state WHERE sync_key = ?",
 		deferred.SyncStateKey,

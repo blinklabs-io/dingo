@@ -295,7 +295,7 @@ func TestCommitteeMemberReadsPendingUpdateCommitteeProposal(t *testing.T) {
 	action, err := common.NewUpdateCommitteeGovAction(
 		nil,
 		nil,
-		map[*common.Credential]uint64{&coldCredential: 999},
+		map[*common.Credential]uint{&coldCredential: 999},
 		cbor.Rat{Rat: big.NewRat(2, 3)},
 	)
 	require.NoError(t, err)

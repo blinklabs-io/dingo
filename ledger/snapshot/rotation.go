@@ -542,24 +542,16 @@ func (m *Manager) saveRewardStateInputRows(
 // account, malformed credential tag, missing margin, or a malformed owner
 // key hash), excludes that single pool from a working copy of the stake
 // distribution, logs a warning, and retries. Real Cardano reward semantics
-// resolve active reward stake from registered, delegated credentials alone
-// (resolveActiveInstantStakeCredentials in cardano-ledger never consults the
-// stake-pool set), so a pool with no resolvable registration does not shrink
-// the active reward stake: its delegators keep contributing to the sigma_a
-// denominator, and the pool itself simply does not participate in pool
-// reward distribution for the epoch since its own registration data cannot
-// be used to compute one; its delegators are not otherwise penalized. Any
-// other error (for example a totals mismatch within the stake distribution
+// already exclude a pool with no resolvable registration from the active
+// reward stake: its delegators simply do not participate in pool reward
+// distribution for the epoch: they are not otherwise penalized. Any other
+// error (for example a totals mismatch within the stake distribution
 // itself, or a missing ended-epoch row) is a genuine data-integrity problem
 // unrelated to pool registration quality and is returned unchanged so the
 // caller still hard-fails on it.
 //
 // The returned distribution is the one actually consumed to build
-// poolInputs/stakeInputs, so its TotalPoolCount and TotalDelegators are safe
-// to use for RewardSnapshot. TotalActiveStake is not derived from this
-// returned, post-exclusion distribution: buildRewardStateInputs computes it
-// from the pre-exclusion rewardDistribution so a degraded pool's delegators
-// keep contributing to the sigma_a denominator.
+// poolInputs/stakeInputs, so its totals are safe to use for RewardSnapshot.
 func (m *Manager) rewardInputsSkippingDegradedPools(
 	epoch uint64,
 	distribution *StakeDistribution,

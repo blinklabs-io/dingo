@@ -89,10 +89,6 @@ func TestLocalTxSubmissionRejectReason_FallbackIsHardForkApplyTxErr(
 			var validationErr *gledger.ShelleyTxValidationError
 			require.ErrorAs(t, decoded, &validationErr)
 			assert.Equal(t, uint8(era), validationErr.Era)
-
-			if era == gledger.EraIdConway {
-				assert.Contains(t, decoded.Error(), "InputSetEmptyUtxo")
-			}
 		})
 	}
 }

@@ -88,7 +88,7 @@ func storeCommitteeUpdateProposalInTxn(
 	action, err := lcommon.NewUpdateCommitteeGovAction(
 		nil,
 		nil,
-		map[*lcommon.Credential]uint64{&credential: uint64(expiry)},
+		map[*lcommon.Credential]uint{&credential: uint(expiry)},
 		cbor.Rat{Rat: big.NewRat(2, 3)},
 	)
 	require.NoError(t, err)
@@ -913,7 +913,7 @@ func TestLedgerViewProposedCommitteeMemberChainsFromNoConfidenceRoot(
 	action, err := lcommon.NewUpdateCommitteeGovAction(
 		nil,
 		nil,
-		map[*lcommon.Credential]uint64{&cold: uint64(90)},
+		map[*lcommon.Credential]uint{&cold: uint(90)},
 		cbor.Rat{Rat: big.NewRat(2, 3)},
 	)
 	require.NoError(t, err)
