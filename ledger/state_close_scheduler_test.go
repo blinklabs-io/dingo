@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -65,7 +66,7 @@ func TestCloseStopsForgingScheduler(t *testing.T) {
 	// scheduler that was never ticking in the first place.
 	require.Eventually(
 		t, func() bool { return ticks.Load() > 0 },
-		time.Second, time.Millisecond,
+		testutil.AsyncWait, time.Millisecond,
 		"scheduler must be ticking before Close",
 	)
 
