@@ -1713,46 +1713,42 @@ func (cs *ChainSelector) pinIncumbentDuringCatchUpLocked(
 	if incumbentTip == nil || challengerTip == nil {
 		return false
 	}
-	// Release if the incumbent is no longer a viable selection target.
+	// Release if the incumbent is no longer a viable selection target. This is
+	// a MANDATORY release, never subject to the switch-back debounce below:
+	// there is no "keeping" a connection that is gone, ineligible, stale, or
+	// implausible, whoever the challenger is.
 	if !cs.isPeerSelectableLocked(previousBest, incumbentTip, false) {
 		return false
 	}
-	// Progress-aware escape: never pin to a stalled incumbent forever.
-	if cs.localTipStalledLocked() {
-		return false
-	}
-	// Longer-chain escape: a challenger genuinely taller than the incumbent
-	// by more than the head margin is a real longer chain, not a sibling
-	// head-fork — release so the node converges to it promptly.
+
+	// Every release condition below is DISCRETIONARY: the incumbent is still
+	// alive and selectable, and the escape is a per-evaluation judgment call
+	// that the challenger looks better right now. Both existing escapes have
+	// no memory of very recent switches, so both are gated by the same
+	// switch-back debounce, not just the longer-chain one: refuse to hand the
+	// active connection back to a peer abandoned less than switchBackCooldown
+	// ago, even though it currently satisfies an escape, unless the
+	// challenger was never recently active. This does not weaken either
+	// escape's liveness guarantee -- a genuinely new candidate (not the peer
+	// we just left) is adopted immediately regardless of which escape fired --
+	// it only stops the active connection ping-ponging between a small set of
+	// very recently active peers.
 	//
-	// "Taller" is measured on delivered frontiers, so it only means a longer
-	// chain when the two peers disagree about where the chain ends. When they
-	// advertise the identical canonical tip they are treated as the same chain
-	// unless retained delivered history contradicts them (sameCanonicalChain is
-	// an allowance, not proof), and the challenger is then read as merely
-	// further along in serving that chain to us; handing the
-	// pipeline over buys no chain and costs a chainsync/blockfetch reset plus,
-	// via the ledger's fresh-cursor path, a close of the connection we just
-	// selected. The stall escape above still releases an incumbent that stops
-	// driving local tip progress, so this cannot pin to a peer that is not
-	// actually feeding us.
-	incumbentBlock := incumbentTip.SelectionTip().BlockNumber
-	challengerBlock := challengerTip.SelectionTip().BlockNumber
-	if challengerBlock > safeAddUint64(incumbentBlock, catchUpPinHeadMargin) &&
-		!sameCanonicalChain(incumbentTip, challengerTip) {
-		// Switch-back debounce: refuse to hand the active connection back to
-		// a peer abandoned within switchBackCooldown, even though it
-		// currently leads by more than the margin. Without this, two peers
-		// whose delivered frontiers repeatedly leapfrog each other by more
-		// than catchUpPinHeadMargin -- plausible on ordinary header-delivery
-		// jitter near the tip, where each peer's next single header can
-		// itself cross the margin -- hand the chainsync/blockfetch pipeline
-		// back and forth on every crossing, arbitrarily often. This does not
-		// weaken convergence: a genuinely better peer that was NOT just the
-		// incumbent is never debounced, and the progress-stall and
-		// incumbent-unselectable escapes above always run first and are
-		// never subject to this cooldown, so a dead/stalled incumbent can
-		// never hide behind it.
+	// This matters most for the progress-stall escape just below: once the
+	// applied local tip stalls, localTipStalledLocked stays true on EVERY
+	// subsequent evaluation until progress resumes, so an unguarded stall
+	// escape provides no pinning at all for as long as the stall lasts --
+	// every evaluation falls through to bare Praos ranking with zero
+	// hysteresis. If the switching itself is what is preventing a batch from
+	// ever completing (observed live: rapid reselection racing
+	// ledger.handleChainSwitchEvent's connection handoff), the stall
+	// condition never clears on its own, and the resulting thrash is
+	// indistinguishable from the longer-chain-escape storm this pin was
+	// already hardened against -- just reached through the other escape.
+	if cs.localTipStalledLocked() || cs.longerChainEscapeLocked(
+		incumbentTip,
+		challengerTip,
+	) {
 		if cs.switchBackDebouncedLocked(challengerConn) {
 			cs.config.Logger.Debug(
 				"debouncing switch back to recently abandoned connection",
@@ -1767,6 +1763,28 @@ func (cs *ChainSelector) pinIncumbentDuringCatchUpLocked(
 	// Otherwise this is a head micro-fork / same-height sibling: pin the
 	// incumbent and do not hand off the pipeline.
 	return true
+}
+
+// longerChainEscapeLocked reports whether challengerTip is genuinely taller
+// than incumbentTip by more than catchUpPinHeadMargin -- a real longer chain,
+// not a sibling head-fork.
+//
+// "Taller" is measured on delivered frontiers, so it only means a longer
+// chain when the two peers disagree about where the chain ends. When they
+// advertise the identical canonical tip they are treated as the same chain
+// unless retained delivered history contradicts them (sameCanonicalChain is
+// an allowance, not proof), and the challenger is then read as merely further
+// along in serving that chain to us; handing the pipeline over buys no chain
+// and costs a chainsync/blockfetch reset plus, via the ledger's fresh-cursor
+// path, a close of the connection we just selected.
+func (cs *ChainSelector) longerChainEscapeLocked(
+	incumbentTip *PeerChainTip,
+	challengerTip *PeerChainTip,
+) bool {
+	incumbentBlock := incumbentTip.SelectionTip().BlockNumber
+	challengerBlock := challengerTip.SelectionTip().BlockNumber
+	return challengerBlock > safeAddUint64(incumbentBlock, catchUpPinHeadMargin) &&
+		!sameCanonicalChain(incumbentTip, challengerTip)
 }
 
 // switchBackDebouncedLocked reports whether connId was the active connection

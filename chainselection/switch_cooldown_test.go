@@ -155,6 +155,120 @@ func TestSwitchBackCooldownBoundsOscillationFrequency(t *testing.T) {
 	)
 }
 
+// TestSwitchBackCooldownBoundsStallEscapeOscillation reproduces a second,
+// structurally similar storm: once the applied local tip stalls,
+// localTipStalledLocked stays true on every subsequent evaluation until
+// progress resumes, so before this fix the progress-stall escape released
+// the pin unconditionally forever -- providing no hysteresis at all,
+// regardless of catchUpPinHeadMargin, for as long as the stall lasted. Live
+// Preview reports showed exactly this: the local tip flatlined (confirmed by
+// two direct metric reads with zero movement) while three connections
+// oscillated sub-second-to-few-seconds apart, including a direct
+// back-and-forth between the same two peers ~227ms apart -- well inside
+// SwitchBackCooldown, which the first fix (gating only the longer-chain
+// escape) did not protect because the stall escape released the pin before
+// that gate was ever reached. The switching itself is what prevents any
+// blockfetch batch from completing, so the stall never clears on its own: a
+// self-sustaining livelock.
+func TestSwitchBackCooldownBoundsStallEscapeOscillation(t *testing.T) {
+	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	cs := NewChainSelector(ChainSelectorConfig{})
+	installFakeClock(cs, clk)
+
+	peerA := newTestConnectionId(1)
+	peerB := newTestConnectionId(2)
+	peerC := newTestConnectionId(3)
+
+	cs.SetLocalTip(tip(5000, 5000, "local"))
+	require.True(t, cs.updatePeerTipObserved(
+		peerA,
+		tip(5001, 5001, "a-0"),
+		tip(5001, 5001, "a-0"),
+		nil,
+	))
+	require.Equal(t, peerA, *cs.GetBestPeer())
+
+	// The applied local tip never advances again: past the stall timeout,
+	// localTipStalledLocked is true on every following evaluation for the
+	// rest of the test.
+	clk.Advance(catchUpPinStallTimeout + time.Second)
+
+	// B edges A by a single block -- well within catchUpPinHeadMargin, so
+	// only the (now-engaged) stall escape can release the pin here; the
+	// longer-chain escape does not apply at this margin. This first switch
+	// must still happen promptly: a genuinely new candidate is never
+	// debounced, so the stall escape's liveness guarantee is unaffected.
+	require.True(t, cs.updatePeerTipObserved(
+		peerB,
+		tip(5002, 5002, "b-0"),
+		tip(5002, 5002, "b-0"),
+		nil,
+	))
+	require.Equal(t, peerB, *cs.GetBestPeer(),
+		"the stall escape must still release the pin for a new candidate")
+
+	// Reproduce the storm: A and B keep leapfrogging by a single block, well
+	// within the margin, driven entirely by the unconditional stall escape.
+	switches := 0
+	for i := range 20 {
+		active := *cs.GetBestPeer()
+		challenger := peerA
+		if active == peerA {
+			challenger = peerB
+		}
+		next := peerBlockNumber(t, cs, active) + 1
+		slot := 10_000 + uint64(i)
+		hash := fmt.Sprintf("stall-burst-%d", i)
+		require.True(t, cs.updatePeerTipObserved(
+			challenger,
+			tip(next, slot, hash),
+			tip(next, slot, hash),
+			nil,
+		))
+		if *cs.GetBestPeer() == challenger {
+			switches++
+		}
+	}
+	assert.Equal(
+		t,
+		0,
+		switches,
+		"switch-back debounce must suppress every immediate reversal driven by the stall escape",
+	)
+
+	// A genuinely new peer (never recently active) must still be adopted
+	// immediately even while the stall condition remains engaged throughout.
+	// Unambiguously ahead of BOTH A and B (not merely tied with whichever one
+	// the burst loop last bumped), so selectBestChainLocked's upstream pick
+	// cannot land back on A or B by a map-iteration-order tiebreak among
+	// equal-height peers.
+	next := max(
+		peerBlockNumber(t, cs, peerA),
+		peerBlockNumber(t, cs, peerB),
+	) + 50
+	require.True(t, cs.updatePeerTipObserved(
+		peerC,
+		tip(next, 99_999, "c-0"),
+		tip(next, 99_999, "c-0"),
+		nil,
+	))
+	assert.Equal(t, peerC, *cs.GetBestPeer(),
+		"a genuinely new candidate must not be debounced under the stall escape")
+
+	// The cooldown is a rate limit, not a permanent freeze: once it elapses,
+	// a connection abandoned earlier is reclaimable again.
+	clk.Advance(defaultSwitchBackCooldown)
+	next = peerBlockNumber(t, cs, peerC) + 1
+	require.True(t, cs.updatePeerTipObserved(
+		peerA,
+		tip(next, 999_999, "a-final"),
+		tip(next, 999_999, "a-final"),
+		nil,
+	))
+	assert.Equal(t, peerA, *cs.GetBestPeer(),
+		"a previously abandoned connection must be reclaimable once the cooldown elapses")
+}
+
 // TestSwitchBackCooldownDoesNotBlockGenuinelyNewChallenger asserts the
 // debounce is keyed per-connection: a third peer that was never the active
 // connection is adopted immediately even while the original incumbent is

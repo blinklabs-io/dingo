@@ -4129,32 +4129,50 @@ The existing equal-tip incumbent preservation (when `ComparePraosTips` returns
 `ChainEqual`, and the same-block transport tiebreaker) is preserved and runs
 ahead of the pin.
 
-**Switch-back cooldown bounds the longer-chain escape's rate.** The
-longer-chain escape above is a per-evaluation snapshot comparison with no
-memory of very recent switches: two peers whose delivered frontiers
-repeatedly leapfrog each other by more than `catchUpPinHeadMargin` — plausible
-on ordinary per-header delivery jitter near the tip, since a single newly
-delivered header can itself cross a margin of two blocks — can otherwise hand
-the active connection back and forth on every such crossing, arbitrarily
-often. This was observed live on Preview near the real chain tip: the active
+**Switch-back cooldown bounds both discretionary escapes' rate.** Both
+escapes above are per-evaluation snapshot judgments with no memory of very
+recent switches: two peers whose delivered frontiers repeatedly leapfrog each
+other by more than `catchUpPinHeadMargin` — plausible on ordinary per-header
+delivery jitter near the tip, since a single newly delivered header can
+itself cross a margin of two blocks — can hand the active connection back and
+forth on every such crossing via the longer-chain escape; and once the
+applied local tip stalls, `localTipStalledLocked` stays true on *every*
+subsequent evaluation until progress resumes, so an unguarded progress-stall
+escape provides no hysteresis at all for as long as the stall lasts,
+regardless of margin — every evaluation falls through to bare Praos ranking.
+Both were observed live on Preview near the real chain tip: the active
 connection flapped between the same 2-3 peer connections multiple times per
-second with no net progress, saturating `chainsyncMutex` /
-`chainsyncBlockfetchMutex` in `ledger.handleChainSwitchEvent` and backing up
-the event bus's `chainselection.chain_switch` subscriber queue toward its
-100,000-entry capacity. `ChainSelectorConfig.SwitchBackCooldown` (default 2s,
-`defaultSwitchBackCooldown`) rate-limits it: `recordSwitchAwayLocked` marks
-the abandoned connection's departure time in `ChainSelector.recentlyLeft`,
-and the longer-chain escape's release is itself gated by
-`switchBackDebouncedLocked` — a connection abandoned less than the cooldown
-ago cannot reclaim the active connection through that escape again, even
-though it currently leads by more than the margin. This is a rate limit, not
-a correctness change: a genuinely new challenger (never recently active) is
-never debounced, a persistent lead is still adopted once the cooldown
-elapses, and the progress-stall and incumbent-unselectable escapes are
-evaluated first and are never subject to it, so a dead/stalled incumbent can
-never hide behind the cooldown. Regression tests:
-`TestSwitchBackCooldownBoundsOscillationFrequency` and
-`TestSwitchBackCooldownDoesNotBlockGenuinelyNewChallenger`
+second with no net progress (in one occurrence with the applied local tip
+itself confirmed flatlined by direct metric reads), saturating
+`chainsyncMutex` / `chainsyncBlockfetchMutex` in
+`ledger.handleChainSwitchEvent` and backing up the event bus's
+`chainselection.chain_switch` subscriber queue toward its 100,000-entry
+capacity. Because the switching itself is what prevents a blockfetch batch
+from ever completing (see the fork-extension recovery below), an
+unprotected stall escape is self-sustaining: the stall never clears on its
+own once the thrash starts.
+
+`ChainSelectorConfig.SwitchBackCooldown` (default 2s,
+`defaultSwitchBackCooldown`) rate-limits both. `pinIncumbentDuringCatchUpLocked`
+treats releasing the pin for an incumbent that is no longer selectable
+(disconnected/ineligible/stale/implausible) as the only MANDATORY,
+never-debounced release — there is no "keeping" a connection that is gone.
+Every other release is DISCRETIONARY (the incumbent is still alive): if
+either the progress-stall escape or `longerChainEscapeLocked` (the
+longer-chain comparison, factored out unchanged) would release the pin,
+`switchBackDebouncedLocked` gets the final say. `recordSwitchAwayLocked`
+marks the abandoned connection's departure time in
+`ChainSelector.recentlyLeft` on every switch; a connection abandoned less
+than the cooldown ago cannot reclaim the active connection through either
+discretionary escape, even though it currently satisfies one. This is a rate
+limit, not a correctness change: a genuinely new challenger (never recently
+active) is adopted immediately regardless of which escape fired, and a
+persistent lead is still adopted once the cooldown elapses — so neither
+escape's liveness guarantee is weakened, only the ping-pong between a small
+set of very recently active peers is bounded. Regression tests:
+`TestSwitchBackCooldownBoundsOscillationFrequency` (longer-chain escape),
+`TestSwitchBackCooldownBoundsStallEscapeOscillation` (progress-stall
+escape), and `TestSwitchBackCooldownDoesNotBlockGenuinelyNewChallenger`
 (`chainselection/switch_cooldown_test.go`).
 
 ## Network and Protocol Handling
