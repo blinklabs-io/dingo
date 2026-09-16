@@ -3002,13 +3002,59 @@ transition and extends era history (a boundary deadlock). The successor era
 takes the next era's params by configured shape order (not `EraID + 1`, which
 would break on non-contiguous era IDs), falling back to the current era's params
 when the ledger already occupies the last modeled era. `hardfork.SuccessorEra`
-bounds it by the successor's own safe zone measured from the boundary, which
-always snaps up to at least the end of the first post-boundary epoch; the
-successor stays open only when the resolved safe zone is zero
-(`UnsafeIndefiniteSafeZone`), the same rule `BuildSummary` applies to the
-current era. Where that live bound is finite, a header past it fails with
+bounds it by the successor's own safe zone measured from
+`max(tipSlot+1, boundary)` — the same tip-anchored rule `BuildSummary`'s
+`TransitionUnknown` branch applies to the current era — which always snaps up
+to at least the end of the first post-boundary epoch; the successor stays open
+only when the resolved safe zone is zero (`UnsafeIndefiniteSafeZone`), the same
+rule `BuildSummary` applies to the current era. Measuring only from the
+boundary itself (the previous behavior) froze the successor's horizon at
+`boundary+safeZone` regardless of how far the live tip advanced past it: a node
+unable to apply the block that consumes the transition keeps reconstructing the
+same summary from the same unchanged `TransitionKnown` and epoch cache on every
+retry, so a frozen bound could never grow and every later slot became
+permanently past-horizon. Anchoring on the tip instead means the horizon keeps
+pace with it exactly as the current era's does. Where that live bound is
+finite, a header past it fails with
 `hardfork.ErrPastHorizon` before `ensureEpochForSlot` can extend the forecasted
-epoch/nonce cache. That past-horizon failure is classified as a deferred
+epoch/nonce cache.
+
+A known transition (`TransitionKnown`) is set by one of four
+`ls.evaluateXXX` methods, run in this order at every block-apply tip update,
+startup, and (a rollback-surviving subset of them) rollback:
+`evaluateTriggerAtEpoch` (the `TestXHardForkAtEpoch` config override, for the
+era's `TriggerAtEpoch` kind), `evaluateTransitionImpossible` (promotes to
+`TransitionImpossible` once the ordinary safe zone already reaches the
+current epoch's end), `evaluateProtocolVersionBump` (the era's
+`TriggerAtVersion` kind: every historical Cardano hard fork before Conway's
+CIP-1694 governance, detected by peeking -- via
+`Database.ForecastPParamUpdates`, read-only, no enactment -- whether a
+protocol-parameter update already meeting the configured genesis-key quorum
+would bump the protocol major version into a later era at the next epoch
+boundary), and `evaluateHardForkInitiationStability` (the Conway+
+CIP-1694 `HardForkInitiation` governance action, post-voting-deadline only).
+Each era's `NextEraTrigger` kind is exactly one of `TriggerAtEpoch`,
+`TriggerAtVersion`, or `TriggerNotDuringThisExecution` (the final configured
+era), so `evaluateTriggerAtEpoch` and `evaluateProtocolVersionBump` never
+compete for the same era. Unlike the CIP-1694 path, the classic
+update-proposal system has no protocol-enforced voting deadline -- a genesis
+delegate may submit a superseding proposal in any block of the submission
+epoch -- so `evaluateProtocolVersionBump` reads fresh state on every call
+rather than gating on a deadline that does not exist for this trigger kind;
+a premature or later-superseded reading only widens the forecast horizon for
+the rest of the epoch; it never changes `ls.currentEra` or what
+`processEpochRollover` actually enacts, both of which re-read the real
+quorum state independently at the boundary. Without this evaluator,
+`transitionInfo` stays `TransitionUnknown` for the entire epoch preceding
+any version-triggered hard fork, so the ordinary tip-anchored safe zone (see
+above) lands exactly at the era boundary with no margin past it instead of
+the extra epoch `SuccessorEra` provides once a transition is confirmed, and
+a transaction whose validity interval crosses even slightly past the
+boundary is permanently rejected with `hardfork.ErrPastHorizon` --
+indistinguishable from a genuinely invalid transaction, even though the same
+block is canonical on every node that detects the quorum early.
+
+That past-horizon failure is classified as a deferred
 condition (wrapped in `errHeaderVerificationDeferred`), not a peer fault: during
 catch-up the header chain legitimately runs ahead of the applied tip and crosses
 epoch boundaries, so the block is kept queued for in-order re-verification once
