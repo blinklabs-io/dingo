@@ -92,6 +92,21 @@ func (e OutputNotPositiveByronError) Error() string {
 	)
 }
 
+// OutputNegativeByronError is returned when a Byron transaction output has a
+// negative value.
+type OutputNegativeByronError struct {
+	Index  int
+	Amount *big.Int
+}
+
+func (e OutputNegativeByronError) Error() string {
+	return fmt.Sprintf(
+		"output %d has negative value: %s",
+		e.Index,
+		e.Amount.String(),
+	)
+}
+
 // DuplicateInputByronError is returned when a Byron transaction
 // contains duplicate inputs.
 type DuplicateInputByronError struct {
@@ -196,6 +211,7 @@ type byronValidationRuleFunc func(tx lcommon.Transaction) error
 var byronValidationRules = []byronValidationRuleFunc{
 	byronValidateInputsNotEmpty,
 	byronValidateOutputsNotEmpty,
+	byronValidateOutputsNonNegative,
 	byronValidateNoDuplicateInputs,
 }
 
@@ -226,6 +242,23 @@ func byronValidateOutputsNotEmpty(
 ) error {
 	if len(tx.Outputs()) == 0 {
 		return OutputSetEmptyByronError{}
+	}
+	return nil
+}
+
+// byronValidateOutputsNonNegative ensures that output amounts are not
+// negative. Zero-value outputs are valid in Byron.
+func byronValidateOutputsNonNegative(
+	tx lcommon.Transaction,
+) error {
+	for i, output := range tx.Outputs() {
+		amount := output.Amount()
+		if amount != nil && amount.Sign() < 0 {
+			return OutputNegativeByronError{
+				Index:  i,
+				Amount: amount,
+			}
+		}
 	}
 	return nil
 }

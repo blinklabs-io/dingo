@@ -134,6 +134,20 @@ func TestValidateTxByron_MainnetZeroValueOutput(t *testing.T) {
 	assert.NoError(t, ValidateTxByron(tx, 4_427_376, nil, nil))
 }
 
+func TestValidateTxByron_NegativeValueOutput(t *testing.T) {
+	tx := &testByronTx{
+		inputs: []lcommon.TransactionInput{
+			newTestInput(0x01, 0),
+		},
+		outputs: []lcommon.TransactionOutput{
+			testOutput{amount: big.NewInt(-100)},
+		},
+	}
+	err := ValidateTxByron(tx, 0, nil, nil)
+	require.Error(t, err)
+	assert.ErrorAs(t, err, &OutputNegativeByronError{})
+}
+
 func TestValidateTxByron_MainnetRedeemWitness(t *testing.T) {
 	// This is the transaction that failed at Mainnet slot 3313. Its witness
 	// is a constructor-2 redeem witness with the [vkey, signature] payload
