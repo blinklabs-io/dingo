@@ -105,6 +105,17 @@ func currentEpochNo(
 // rejection). ErrAcquireFailurePointTooOld is never retried: more attempts
 // only give Dingo's retention floor more time to advance, making a
 // genuinely-too-old point even more too-old, never less.
+//
+// The same budget also bounds retrying a failed Dial itself (confirmed
+// live: a v9 from-genesis run died at epoch 129/129 clean on a bare "dial:
+// ouroboros.New: connection shutdown initiated: EOF" -- a one-off transient
+// hiccup, not a real divergence, but currentEpochNo's caller treats any
+// error from acquireWithRetry as fatal to the whole run, unlike the
+// protocol-params/stake and UTxO call sites, which already record an
+// acquireWithRetry failure into that epoch's EpochResult and continue).
+// Unlike ErrAcquireFailurePointNotOnChain, a dial failure carries no signal
+// about whether retrying helps, so it gets the same fixed budget rather than
+// a special-cased one.
 const (
 	acquireRetries    = 10
 	acquireRetryDelay = 200 * time.Millisecond
@@ -155,42 +166,51 @@ type EpochResult struct {
 type FromGenesisReporter func(EpochResult)
 
 // acquireWithRetry dials a fresh connection and Acquires point on it,
-// retrying on ErrAcquireFailurePointNotOnChain -- see acquireRetries' doc
-// comment. Returns ok=false, with the connection already closed, on any
-// failure.
+// retrying both a failed Dial and an Acquire that failed with
+// ErrAcquireFailurePointNotOnChain -- see acquireRetries' doc comment.
+// Returns ok=false, with any connection it opened already closed, on any
+// failure other than context cancellation, on which it returns ctx.Err()
+// directly rather than a wrapped dial/acquire error.
 func acquireWithRetry(
 	ctx context.Context,
 	dingoAddr string,
 	magic uint32,
 	point pcommon.Point,
 ) (conn *ouroboros.Connection, lsq *localstatequery.LocalStateQuery, err error) {
-	conn, dialErr := Dial(ctx, dingoAddr, magic)
-	if dialErr != nil {
-		return nil, nil, fmt.Errorf("dial: %w", dialErr)
-	}
-	lsq = conn.LocalStateQuery()
-	if lsq == nil || lsq.Client == nil {
-		conn.Close() //nolint:errcheck
-		return nil, nil, errors.New("LocalStateQuery client unavailable")
-	}
-	var acquireErr error
+	var lastErr error
 	for attempt := 0; attempt < acquireRetries; attempt++ {
-		acquireErr = lsq.Client.Acquire(&point)
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, nil, ctx.Err()
+			case <-time.After(acquireRetryDelay):
+			}
+		}
+
+		dialConn, dialErr := Dial(ctx, dingoAddr, magic)
+		if dialErr != nil {
+			lastErr = fmt.Errorf("dial: %w", dialErr)
+			continue
+		}
+
+		dialLsq := dialConn.LocalStateQuery()
+		if dialLsq == nil || dialLsq.Client == nil {
+			dialConn.Close() //nolint:errcheck
+			lastErr = errors.New("LocalStateQuery client unavailable")
+			continue
+		}
+
+		acquireErr := dialLsq.Client.Acquire(&point)
 		if acquireErr == nil {
-			return conn, lsq, nil
+			return dialConn, dialLsq, nil
 		}
+		dialConn.Close() //nolint:errcheck
+		lastErr = fmt.Errorf("acquire: %w", acquireErr)
 		if !errors.Is(acquireErr, localstatequery.ErrAcquireFailurePointNotOnChain) {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			conn.Close() //nolint:errcheck
-			return nil, nil, ctx.Err()
-		case <-time.After(acquireRetryDelay):
+			return nil, nil, lastErr
 		}
 	}
-	conn.Close() //nolint:errcheck
-	return nil, nil, fmt.Errorf("acquire: %w", acquireErr)
+	return nil, nil, lastErr
 }
 
 // captureGenesisBaseline Acquires point (the very first block RunFromGenesis
