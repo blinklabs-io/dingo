@@ -1850,6 +1850,11 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 			ls.handleRewardPrecomputeEpochTransition,
 		)
 	}
+	// The subscription above cannot fire for an epoch that began before this
+	// process did, so catch up the in-progress epoch's reward round here.
+	// Without it, a node started mid-epoch calculates that round inline inside
+	// the next epoch-rollover transaction instead of ahead of it.
+	ls.queueStartupRewardPrecompute()
 	// Now that both tip and epoch are loaded, check whether the safe zone
 	// already covers the epoch end (TransitionImpossible).  This handles the
 	// case where the node was shut down after the tip advanced past the
