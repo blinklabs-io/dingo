@@ -231,6 +231,22 @@ type StakeMismatch struct {
 	KoiosFault bool
 }
 
+// stakeDiffFailureKind classifies why stakeDiffLovelace could not compute an
+// exact diff -- see that function's doc comment for why the two failure
+// cases must not be conflated: stakeDiffUnparseableKoios is a Koios-side
+// data fault (KoiosFault: true, excluded from the mismatch count),
+// stakeDiffOverflow is a genuine Dingo-side fault (a real mismatch, not
+// excluded) -- a human reviewer found the two were being conflated,
+// silently hiding a Dingo-side bug as if it were unremarkable Koios noise
+// (dingo#4319).
+type stakeDiffFailureKind int
+
+const (
+	stakeDiffOK stakeDiffFailureKind = iota
+	stakeDiffUnparseableKoios
+	stakeDiffOverflow
+)
+
 // stakeDiffLovelace computes the exact signed difference between dingoStake
 // and koiosStakeStr, in whole lovelace -- not a relative fraction. Both
 // sides report an exact integer with nothing to round: GetPoolDistr2's
@@ -239,24 +255,31 @@ type StakeMismatch struct {
 // fractional or exponent form (unlike, say, protocol-parameter rationals
 // elsewhere in this package). There is therefore no independent-computation
 // rounding for a tolerance to absorb: any nonzero difference is a real
-// disagreement. ok is false only when koiosStakeStr fails to parse as an
-// integer.
-func stakeDiffLovelace(dingoStake uint64, koiosStakeStr string) (diff int64, ok bool) {
+// disagreement.
+//
+// kind is stakeDiffOK unless one of two things fails, and the caller must
+// tell them apart:
+//   - koiosStakeStr fails to parse as an integer at all -- a Koios-side data
+//     fault.
+//   - both values parse, but their difference doesn't fit in int64.
+//     Cardano's entire max supply (45 billion ADA = 4.5e16 lovelace) fits
+//     comfortably inside int64's range (~9.2e18) with room to spare, so a
+//     difference this large only happens if dingoStake itself is an
+//     implausible value -- a genuine Dingo-side fault, not a Koios one.
+func stakeDiffLovelace(
+	dingoStake uint64,
+	koiosStakeStr string,
+) (diff int64, kind stakeDiffFailureKind) {
 	koiosInt, parsed := new(big.Int).SetString(koiosStakeStr, 10)
 	if !parsed {
-		return 0, false
+		return 0, stakeDiffUnparseableKoios
 	}
 	dingoInt := new(big.Int).SetUint64(dingoStake)
 	diffInt := new(big.Int).Sub(dingoInt, koiosInt)
 	if !diffInt.IsInt64() {
-		// Cardano's entire max supply (45 billion ADA = 4.5e16 lovelace)
-		// fits comfortably inside int64's range (~9.2e18) with room to
-		// spare, so a difference this large only happens if koiosStakeStr
-		// is corrupted well past anything meaningful to report as a
-		// lovelace amount.
-		return 0, false
+		return 0, stakeDiffOverflow
 	}
-	return diffInt.Int64(), true
+	return diffInt.Int64(), stakeDiffOK
 }
 
 // stakeCheckConcurrency bounds how many /pool_history requests
@@ -328,14 +351,26 @@ func CheckStakeDistribution(
 				}
 				return nil
 			}
-			diff, ok := stakeDiffLovelace(p.stake, hist.ActiveStake)
-			if !ok {
+			diff, kind := stakeDiffLovelace(p.stake, hist.ActiveStake)
+			switch kind {
+			case stakeDiffOK:
+				// Falls through to the ordinary numeric comparison below.
+			case stakeDiffUnparseableKoios:
 				results[i] = &StakeMismatch{
 					PoolIDBech32: p.bech32,
 					DingoStake:   p.stake,
 					KoiosStake:   hist.ActiveStake,
 					Reason:       "unparseable koios active_stake value",
 					KoiosFault:   true,
+				}
+				return nil
+			case stakeDiffOverflow:
+				results[i] = &StakeMismatch{
+					PoolIDBech32: p.bech32,
+					DingoStake:   p.stake,
+					KoiosStake:   hist.ActiveStake,
+					Reason: "stake difference too large to represent -- " +
+						"dingo's reported stake is implausible",
 				}
 				return nil
 			}

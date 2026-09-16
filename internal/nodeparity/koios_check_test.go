@@ -15,6 +15,7 @@
 package nodeparity
 
 import (
+	"math"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
@@ -41,8 +42,8 @@ func TestNewKoiosClientRejectsMainnet(t *testing.T) {
 func TestStakeDiffLovelaceIsExact(t *testing.T) {
 	const dingoStake = 100_000_000_000_000
 
-	diff, ok := stakeDiffLovelace(dingoStake, "100000000000000")
-	if !ok {
+	diff, kind := stakeDiffLovelace(dingoStake, "100000000000000")
+	if kind != stakeDiffOK {
 		t.Fatal("rejected a valid decimal lovelace string")
 	}
 	if diff != 0 {
@@ -51,8 +52,8 @@ func TestStakeDiffLovelaceIsExact(t *testing.T) {
 
 	// A 1-lovelace difference is real and exact integers have nothing to
 	// round -- it must be reported, not treated as noise.
-	diff, ok = stakeDiffLovelace(dingoStake, "100000000000001")
-	if !ok {
+	diff, kind = stakeDiffLovelace(dingoStake, "100000000000001")
+	if kind != stakeDiffOK {
 		t.Fatal("rejected a valid decimal lovelace string")
 	}
 	if diff != -1 {
@@ -61,23 +62,45 @@ func TestStakeDiffLovelaceIsExact(t *testing.T) {
 
 	// A real divergence -- Koios reporting a materially different value --
 	// must be caught.
-	diff, ok = stakeDiffLovelace(dingoStake, "190000000000000")
-	if !ok {
+	diff, kind = stakeDiffLovelace(dingoStake, "190000000000000")
+	if kind != stakeDiffOK {
 		t.Fatal("rejected a valid decimal lovelace string")
 	}
 	if diff != -90_000_000_000_000 {
 		t.Fatalf("a real ~90%% stake divergence was not reported exactly: got %d", diff)
 	}
 
-	if _, ok := stakeDiffLovelace(dingoStake, "not-a-number"); ok {
-		t.Fatal("accepted an unparseable koios value")
+	if _, kind := stakeDiffLovelace(dingoStake, "not-a-number"); kind != stakeDiffUnparseableKoios {
+		t.Fatalf("expected stakeDiffUnparseableKoios for an unparseable koios value, got %v", kind)
 	}
 
 	// Two independently-reported zero-stake pools must compare as an exact
 	// match.
-	diff, ok = stakeDiffLovelace(0, "0")
-	if !ok || diff != 0 {
-		t.Fatalf("zero vs zero: ok=%v diff=%v, want ok=true diff=0", ok, diff)
+	diff, kind = stakeDiffLovelace(0, "0")
+	if kind != stakeDiffOK || diff != 0 {
+		t.Fatalf("zero vs zero: kind=%v diff=%v, want stakeDiffOK diff=0", kind, diff)
+	}
+}
+
+// TestStakeDiffLovelaceOverflowIsNotAKoiosFault is the regression a human
+// reviewer found (Chris Guiney, dingo#4319): stakeDiffLovelace's IsInt64
+// branch fires when both values parse but their difference is too large to
+// represent -- reachable not just from a corrupted koios string, but from
+// Dingo itself reporting an impossible TotalPoolStake (Cardano's entire max
+// supply fits comfortably inside int64's range, so this only happens if
+// dingoStake itself is implausible). Conflating this with the
+// unparseable-koios-string case labelled it a Koios fault and silently
+// dropped it from the mismatch count, hiding a genuine Dingo-side bug as if
+// it were unremarkable Koios noise. dingoStake is deliberately set well
+// beyond Cardano's real max supply (45 billion ADA / 4.5e16 lovelace) to
+// force the overflow while koiosStakeStr itself parses cleanly.
+func TestStakeDiffLovelaceOverflowIsNotAKoiosFault(t *testing.T) {
+	const implausibleDingoStake = math.MaxUint64
+
+	diff, kind := stakeDiffLovelace(implausibleDingoStake, "0")
+	if kind != stakeDiffOverflow {
+		t.Fatalf("expected stakeDiffOverflow for a Dingo-side implausible "+
+			"stake, got kind=%v diff=%v", kind, diff)
 	}
 }
 
