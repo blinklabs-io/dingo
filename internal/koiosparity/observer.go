@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/blinklabs-io/dingo/event"
@@ -130,13 +131,29 @@ type ObserverConfig struct {
 //
 // HandleEpochTransitionEvent — the EventBus subscriber callback — never
 // performs Koios/database I/O itself: it only records the epoch and wakes
-// run's background goroutine, which does the actual work. This keeps
-// EventBus dispatch to this subscriber fast regardless of how long a Koios
-// fetch takes, and (together with node.go's own "authoritative
-// epoch-boundary snapshot capture happens inside the write transaction;
-// event.Publish happens after Unlock" ordering) guarantees Koios/network
-// I/O only ever starts after the epoch-boundary transaction has committed
-// and the ledger lock has been released — this code never acquires it.
+// the background goroutines, which do the actual work. This keeps EventBus
+// dispatch to this subscriber fast regardless of how long a Koios fetch
+// takes, and (together with node.go's own "authoritative epoch-boundary
+// snapshot capture happens inside the write transaction; event.Publish
+// happens after Unlock" ordering) guarantees Koios/network I/O only ever
+// starts after the epoch-boundary transaction has committed and the ledger
+// lock has been released — this code never acquires it.
+//
+// Two independent background goroutines drain two independent queues (dingo
+// #4339): run/pending/wake drive the fast pool/epoch-aggregate fetch+check
+// (CheckEpoch with accountsEnabled=false, regardless of
+// ObserverConfig.AccountsEnabled) for every epoch, and — only when
+// AccountsEnabled is true — runAccounts/pendingAccounts/wakeAccounts
+// separately drive the slow, rate-limited per-account fetch+check (#3097,
+// CheckEpoch with accountsEnabled=true) on its own schedule. Before this
+// split, a single goroutine fetched pools+params+accounts and only then
+// checked one epoch at a time in strict order, so an epoch's ~5,000-request
+// per-account fetch (Preview: tens of minutes) blocked every later epoch's
+// fast aggregate check from ever running — exactly the class of exact-parity
+// reward-round defect this observer exists to catch could sit undetected for
+// as long as the account backlog took to drain. The account queue can now
+// fall arbitrarily far behind the aggregate queue without affecting how
+// quickly a strict-mode aggregate/pool mismatch fires FatalFunc.
 type Observer struct {
 	cfg   ObserverConfig
 	cache *Cache
@@ -145,30 +162,41 @@ type Observer struct {
 	mu      sync.Mutex
 	pending map[uint64]struct{} // epochs requested for (re)validation
 
-	wake chan struct{}
-	wg   sync.WaitGroup
+	// pendingAccounts is pending's twin for the slow per-account queue (see
+	// the Observer doc comment). Guarded by the same mu as pending: both are
+	// small, infrequently-touched sets, so sharing one mutex avoids a second
+	// lock without any meaningful contention cost.
+	pendingAccounts map[uint64]struct{}
 
-	// cancel stops run's background goroutine. It is the CancelFunc of the
-	// context derived (in Start) from the ctx passed to Start, rather than a
-	// channel Stop closes directly — a context.CancelFunc is inherently safe
-	// to invoke more than once (subsequent calls are no-ops), which is what
-	// lets Stop be called more than once on the same Observer (e.g. once from
-	// node.go's started-stack cleanup on a startup failure, and again from
-	// node_shutdown.go's normal shutdown path) without panicking the way
-	// closing an already-closed channel would. nil until Start succeeds, so
-	// Stop guards against calling a nil func when Start was never called.
+	wake         chan struct{}
+	wakeAccounts chan struct{}
+	wg           sync.WaitGroup
+
+	// cancel stops both run and runAccounts's background goroutines. It is
+	// the CancelFunc of the context derived (in Start) from the ctx passed to
+	// Start, rather than a channel Stop closes directly — a
+	// context.CancelFunc is inherently safe to invoke more than once
+	// (subsequent calls are no-ops), which is what lets Stop be called more
+	// than once on the same Observer (e.g. once from node.go's started-stack
+	// cleanup on a startup failure, and again from node_shutdown.go's normal
+	// shutdown path) without panicking the way closing an already-closed
+	// channel would. nil until Start succeeds, so Stop guards against calling
+	// a nil func when Start was never called.
 	cancel context.CancelFunc
 
 	// fatalFired is set once FatalFunc has been called for a strict-mode
-	// failure. Only ever read/written from run's single goroutine (via
-	// processEpoch/fail/stopping), so it needs no lock of its own.
-	fatalFired bool
+	// failure. Written from fail, which run and runAccounts's goroutines can
+	// now both call concurrently (dingo #4339's queue split), so it is an
+	// atomic.Bool rather than a plain bool guarded only by "one goroutine at
+	// a time".
+	fatalFired atomic.Bool
 
 	// started guards against calling Start more than once on the same
 	// Observer: a second call would silently overwrite o.cancel (orphaning
-	// the first run goroutine, which nothing would ever cancel/wait on
-	// again) and launch a second concurrent run goroutine racing the first
-	// over o.pending/o.cache. Checked and set under o.mu.
+	// the first run/runAccounts goroutines, which nothing would ever
+	// cancel/wait on again) and launch second concurrent run/runAccounts
+	// goroutines racing the first over o.pending/o.pendingAccounts/o.cache.
+	// Checked and set under o.mu.
 	started bool
 }
 
@@ -213,11 +241,13 @@ func NewObserver(cfg ObserverConfig) (*Observer, error) {
 	}
 
 	return &Observer{
-		cfg:     cfg,
-		cache:   cache,
-		koios:   koios,
-		pending: make(map[uint64]struct{}),
-		wake:    make(chan struct{}, defaultQueueBuffer),
+		cfg:             cfg,
+		cache:           cache,
+		koios:           koios,
+		pending:         make(map[uint64]struct{}),
+		pendingAccounts: make(map[uint64]struct{}),
+		wake:            make(chan struct{}, defaultQueueBuffer),
+		wakeAccounts:    make(chan struct{}, defaultQueueBuffer),
 	}, nil
 }
 
@@ -226,14 +256,18 @@ func NewObserver(cfg ObserverConfig) (*Observer, error) {
 // (backfilling full history for a fresh attach or a restart, using the
 // cache's own persisted check/fetch status as the sole resumable checkpoint
 // — no separate checkpoint file is introduced), then launches the
-// background goroutine that drains pending epochs. Subscribe the returned
-// Observer's HandleEpochTransitionEvent to event.EpochTransitionEventType
-// before or after calling Start; live events and the seeded backlog feed
-// the same pending set either way.
+// background goroutine(s) that drain pending epochs: run always, for the
+// fast pool/aggregate queue, and — only when cfg.AccountsEnabled — a second,
+// independent runAccounts goroutine for the slow per-account queue (dingo
+// #4339; see the Observer doc comment). Subscribe the returned Observer's
+// HandleEpochTransitionEvent to event.EpochTransitionEventType before or
+// after calling Start; live events and the seeded backlog feed the same
+// pending sets either way.
 //
 // Start may only be called once per Observer; a second call returns an
-// error rather than silently orphaning the first run goroutine (construct a
-// new Observer instead, e.g. via NewObserver, if a fresh Start is needed).
+// error rather than silently orphaning the first run/runAccounts goroutines
+// (construct a new Observer instead, e.g. via NewObserver, if a fresh Start
+// is needed).
 func (o *Observer) Start(ctx context.Context) error {
 	o.mu.Lock()
 	if o.started {
@@ -264,13 +298,19 @@ func (o *Observer) Start(ctx context.Context) error {
 		o.run(runCtx)
 	})
 	o.signalWake()
+	if o.cfg.AccountsEnabled {
+		o.wg.Go(func() {
+			o.runAccounts(runCtx)
+		})
+		o.signalWakeAccounts()
+	}
 	return nil
 }
 
 // seedBacklog implements Start's backlog-seed step: see Start's doc comment.
 // Factored out (rather than inlined in Start) so a test can exercise exactly
-// what gets added to o.pending without racing run's background goroutine,
-// which Start launches immediately afterward.
+// what gets added to o.pending/o.pendingAccounts without racing the
+// background goroutines, which Start launches immediately afterward.
 func (o *Observer) seedBacklog(ctx context.Context) error {
 	latest, err := o.cfg.Source.GetLatestEpoch(ctx)
 	if err != nil {
@@ -323,10 +363,16 @@ func (o *Observer) seedBacklog(ctx context.Context) error {
 		return nil
 	}
 
-	needing, err := o.cache.GetEpochsNeedingCheck(
-		o.cfg.Network,
-		o.cfg.AccountsEnabled,
-	)
+	// Always queried with accountsEnabled=false for o.pending: pool/aggregate
+	// staleness (s.epoch IS NULL, or fetched_at > last_checked_at) is
+	// independent of AccountsEnabled, so this is exactly the fast queue's own
+	// criterion — an epoch selected only by the true-variant's extra
+	// account-coverage-staleness clause has nothing stale on the aggregate
+	// side and must not be re-queued into the fast queue for it (that would
+	// re-report a stale aggregate-only PASS result on every restart purely
+	// because per-account coverage happens to be missing, racing whichever
+	// queue reaches it first).
+	needing, err := o.cache.GetEpochsNeedingCheck(o.cfg.Network, false)
 	if err != nil {
 		return fmt.Errorf("seed koiosparity observer backlog: %w", err)
 	}
@@ -349,15 +395,42 @@ func (o *Observer) seedBacklog(ctx context.Context) error {
 	}
 	o.mu.Unlock()
 
+	// The account-coverage-aware variant additionally selects an epoch whose
+	// per-account reference data is absent, incomplete, or stale relative to
+	// the last check — queue those into the slow per-account queue rather
+	// than the fast one (dingo #4339). This can overlap with `needing` above
+	// (an epoch can be stale on both dimensions at once); queuing it into
+	// pendingAccounts too is harmless since fetchAccountsIfNeeded's own
+	// coverage-completeness gate makes it a no-op Koios-request-wise for an
+	// epoch whose account coverage was actually already fine.
+	if o.cfg.AccountsEnabled {
+		needingAccounts, err := o.cache.GetEpochsNeedingCheck(
+			o.cfg.Network,
+			true,
+		)
+		if err != nil {
+			return fmt.Errorf("seed koiosparity observer backlog: %w", err)
+		}
+		o.mu.Lock()
+		for _, e := range needingAccounts {
+			if e >= seedFrom && e <= throughEpoch {
+				o.pendingAccounts[e] = struct{}{}
+			}
+		}
+		o.mu.Unlock()
+	}
+
 	// An epoch whose pool data/check status is already fine can still be
 	// missing #3097's per-account coverage entirely (e.g. it was fetched
 	// before AccountsEnabled was turned on) — neither GetEpochsNeedingCheck
 	// nor GetUncachedEpochs above would ever flag it purely for that
 	// reason once accountsEnabled's own staleness branch is satisfied by a
-	// prior check. Add those epochs to the backlog too, independent of why
-	// GetEpochsNeedingCheck/GetUncachedEpochs may or may not have already
-	// selected them, the same way fetchIfNeeded's fetchAccountsIfNeeded
-	// gates on account coverage independently of fetchPoolsIfNeeded.
+	// prior check. Add those epochs to the slow per-account queue (dingo
+	// #4339), independent of why GetEpochsNeedingCheck/GetUncachedEpochs may
+	// or may not have already selected them, the same way
+	// fetchAccountsIfNeeded gates on account coverage independently of
+	// fetchPoolsIfNeeded. Deliberately not added to o.pending: nothing about
+	// missing account coverage implies the pool/aggregate data is stale.
 	if o.cfg.AccountsEnabled {
 		missingAccounts, err := o.cache.GetEpochsMissingAccountCoverage(
 			o.cfg.Network,
@@ -372,7 +445,7 @@ func (o *Observer) seedBacklog(ctx context.Context) error {
 		}
 		o.mu.Lock()
 		for _, e := range missingAccounts {
-			o.pending[e] = struct{}{}
+			o.pendingAccounts[e] = struct{}{}
 		}
 		o.mu.Unlock()
 	}
@@ -384,7 +457,9 @@ func (o *Observer) seedBacklog(ctx context.Context) error {
 	// Without this seed the epoch is never queued, processEpoch never
 	// runs, and fetchIfNeeded's fetchParamsIfNeeded gate is never
 	// reached — the parameter row would never arrive for exactly the
-	// caches that need backfilling.
+	// caches that need backfilling. Params are part of the fast
+	// pool/aggregate comparison (checkEpoch's step 1d), not the per-account
+	// one, so this only ever seeds o.pending.
 	missingParams, err := o.cache.GetEpochsMissingParams(
 		o.cfg.Network,
 		seedFrom,
@@ -402,14 +477,15 @@ func (o *Observer) seedBacklog(ctx context.Context) error {
 }
 
 // Stop cancels the observer's background processing and releases its cache
-// and Koios client. It always blocks until run's goroutine has actually
-// exited before closing the cache — closing the cache out from under a
-// still-running goroutine would race that goroutine's own cache queries, and
-// the caller's node.go composition depends on Stop returning only once it is
-// safe to tear down the database/blob store the source reads from. ctx only
-// bounds how long Stop waits *quietly*: once ctx expires, Stop logs a warning
-// that in-flight work is taking longer than expected but keeps waiting for
-// run to actually exit (the goroutine itself still exits promptly once the
+// and Koios client. It always blocks until run's goroutine (and
+// runAccounts's, when cfg.AccountsEnabled started it) has actually exited
+// before closing the cache — closing the cache out from under a still-running
+// goroutine would race that goroutine's own cache queries, and the caller's
+// node.go composition depends on Stop returning only once it is safe to tear
+// down the database/blob store the source reads from. ctx only bounds how
+// long Stop waits *quietly*: once ctx expires, Stop logs a warning that
+// in-flight work is taking longer than expected but keeps waiting for the
+// goroutine(s) to actually exit (each one still exits promptly once the
 // in-flight call returns, since it also observes ctx.Done() — the same ctx
 // passed to Start — at its next opportunity, so this is expected to resolve
 // quickly in practice rather than hang).
@@ -448,8 +524,11 @@ func (o *Observer) Stop(ctx context.Context) error {
 // HandleEpochTransitionEvent is the event.EventBus subscriber callback —
 // register it with SubscribeFunc(event.EpochTransitionEventType, ...). It
 // only records data.PreviousEpoch (the epoch that just closed) and wakes the
-// background goroutine; see the Observer doc comment for why it must never
-// do slower work itself.
+// background goroutine(s); see the Observer doc comment for why it must
+// never do slower work itself. Every epoch always goes on the fast
+// pool/aggregate queue; it additionally goes on the slow per-account queue
+// only when cfg.AccountsEnabled, since that queue does not run at all
+// otherwise (see Start).
 func (o *Observer) HandleEpochTransitionEvent(evt event.Event) {
 	data, ok := evt.Data.(event.EpochTransitionEvent)
 	if !ok {
@@ -457,13 +536,26 @@ func (o *Observer) HandleEpochTransitionEvent(evt event.Event) {
 	}
 	o.mu.Lock()
 	o.pending[data.PreviousEpoch] = struct{}{}
+	if o.cfg.AccountsEnabled {
+		o.pendingAccounts[data.PreviousEpoch] = struct{}{}
+	}
 	o.mu.Unlock()
 	o.signalWake()
+	if o.cfg.AccountsEnabled {
+		o.signalWakeAccounts()
+	}
 }
 
 func (o *Observer) signalWake() {
 	select {
 	case o.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (o *Observer) signalWakeAccounts() {
+	select {
+	case o.wakeAccounts <- struct{}{}:
 	default:
 	}
 }
@@ -479,6 +571,12 @@ func (o *Observer) signalWake() {
 // stale prior result. Duplicate events for the same epoch (dingo emits both
 // a slot-clock-driven and a block-driven epoch.transition for the same
 // boundary) collapse harmlessly into the same set entry.
+//
+// run only ever performs the fast pool/epoch-aggregate fetch+check
+// (processEpoch, CheckEpoch with accountsEnabled=false); runAccounts is its
+// independent twin for the slow per-account fetch+check (dingo #4339). The
+// two share o.cache/o.koios and o.fail/o.fatalFired but otherwise never
+// block on each other.
 func (o *Observer) run(ctx context.Context) {
 	for {
 		select {
@@ -519,16 +617,62 @@ func (o *Observer) run(ctx context.Context) {
 	}
 }
 
+// runAccounts is run's twin for the slow, rate-limited per-account queue
+// (dingo #4339): same draining shape, over o.pendingAccounts/o.wakeAccounts,
+// calling processAccountEpoch instead of processEpoch. Only launched by
+// Start when cfg.AccountsEnabled.
+func (o *Observer) runAccounts(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		o.mu.Lock()
+		todo := make([]uint64, 0, len(o.pendingAccounts))
+		for e := range o.pendingAccounts {
+			todo = append(todo, e)
+		}
+		clear(o.pendingAccounts)
+		o.mu.Unlock()
+
+		if len(todo) > 0 {
+			slices.Sort(todo)
+			for _, epoch := range todo {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				o.processAccountEpoch(ctx, epoch)
+				if o.cfg.Strict && o.stopping() {
+					return
+				}
+			}
+			continue
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-o.wakeAccounts:
+		}
+	}
+}
+
 // stopping reports whether a strict-mode failure has already fired
-// FatalFunc, so run's loop stops promptly instead of processing further
-// epochs after strict validation has already failed.
+// FatalFunc, so run/runAccounts's loops stop promptly instead of processing
+// further epochs after strict validation has already failed.
 func (o *Observer) stopping() bool {
-	return o.fatalFired
+	return o.fatalFired.Load()
 }
 
 // processEpoch fetches (if not already cached) and checks exactly one
-// epoch, then reports/records the outcome. Strict-mode cancellation is
-// triggered here, once, on the first failure.
+// epoch's fast pool/epoch-aggregate data, then reports/records the outcome.
+// Strict-mode cancellation is triggered here, once, on the first failure.
+// The per-account phase (#3097) never runs from here — see
+// processAccountEpoch — regardless of cfg.AccountsEnabled.
 func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 	if err := o.fetchIfNeeded(ctx, epoch); err != nil {
 		if cancelled(ctx, err) {
@@ -554,7 +698,7 @@ func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 		o.cfg.Network,
 		epoch,
 		o.cfg.GraceHours,
-		o.cfg.AccountsEnabled,
+		false,
 		o.cfg.Logger,
 	)
 	if err != nil {
@@ -576,13 +720,115 @@ func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 	if o.cfg.OnResult != nil {
 		o.cfg.OnResult(result)
 	}
-	if o.cfg.AccountsEnabled {
-		if err := o.cache.PruneAccountCoverage(o.cfg.Network, epoch); err != nil {
-			o.cfg.Logger.Warn(
-				"koiosparity observer: prune account coverage failed",
-				"network", o.cfg.Network, "epoch", epoch, "error", err,
+	if result.Status != StatusPass {
+		significant := CountSignificant(result.Mismatches)
+		o.fail(epoch, fmt.Errorf(
+			"parity %s at epoch %d (%d significant of %d mismatch(es))",
+			result.Status, epoch, significant, len(result.Mismatches),
+		))
+		return
+	}
+	o.cfg.Logger.Info("koiosparity observer: epoch validated",
+		"network", o.cfg.Network, "epoch", epoch)
+}
+
+// processAccountEpoch fetches (if not already cached) and checks exactly one
+// epoch's slow #3097 per-account data, then reports/records the outcome.
+// Strict-mode cancellation is triggered here, once, on the first failure —
+// independent of processEpoch's own strict-mode cancellation, so an
+// aggregate-phase failure and an account-phase failure both reach fail/
+// FatalFunc through the same exactly-once path (see fail).
+//
+// fetchPoolsIfNeeded/fetchParamsIfNeeded are called again here even though
+// processEpoch already calls them: each is a cheap cache-presence check that
+// no-ops once the fast queue has already fetched them, and this queue must
+// not assume the fast queue has already reached this epoch — compareEpochAccounts
+// (via CheckEpoch's accountsEnabled=true path) needs the koios_epoch_info row
+// fetchPoolsIfNeeded provides.
+func (o *Observer) processAccountEpoch(ctx context.Context, epoch uint64) {
+	if err := o.fetchPoolsIfNeeded(ctx, epoch); err != nil {
+		if cancelled(ctx, err) {
+			o.cfg.Logger.Debug(
+				"koiosparity observer: account-queue pool fetch interrupted by shutdown",
+				"network",
+				o.cfg.Network,
+				"epoch",
+				epoch,
+				"error",
+				err,
 			)
+			return
 		}
+		o.reportError(epoch, fmt.Errorf("fetch koios reference: %w", err))
+		return
+	}
+	if err := o.fetchParamsIfNeeded(ctx, epoch); err != nil {
+		if cancelled(ctx, err) {
+			o.cfg.Logger.Debug(
+				"koiosparity observer: account-queue params fetch interrupted by shutdown",
+				"network",
+				o.cfg.Network,
+				"epoch",
+				epoch,
+				"error",
+				err,
+			)
+			return
+		}
+		o.reportError(epoch, fmt.Errorf("fetch koios reference: %w", err))
+		return
+	}
+	if err := o.fetchAccountsIfNeeded(ctx, epoch); err != nil {
+		if cancelled(ctx, err) {
+			o.cfg.Logger.Debug(
+				"koiosparity observer: account fetch interrupted by shutdown",
+				"network",
+				o.cfg.Network,
+				"epoch",
+				epoch,
+				"error",
+				err,
+			)
+			return
+		}
+		o.reportError(epoch, fmt.Errorf("fetch koios reference: %w", err))
+		return
+	}
+
+	result, err := CheckEpoch(
+		ctx,
+		o.cache,
+		o.cfg.Source,
+		o.cfg.Network,
+		epoch,
+		o.cfg.GraceHours,
+		true,
+		o.cfg.Logger,
+	)
+	if err != nil {
+		if cancelled(ctx, err) {
+			o.cfg.Logger.Debug(
+				"koiosparity observer: account check interrupted by shutdown",
+				"network",
+				o.cfg.Network,
+				"epoch",
+				epoch,
+				"error",
+				err,
+			)
+			return
+		}
+		o.reportError(epoch, fmt.Errorf("check: %w", err))
+		return
+	}
+	if o.cfg.OnResult != nil {
+		o.cfg.OnResult(result)
+	}
+	if err := o.cache.PruneAccountCoverage(o.cfg.Network, epoch); err != nil {
+		o.cfg.Logger.Warn(
+			"koiosparity observer: prune account coverage failed",
+			"network", o.cfg.Network, "epoch", epoch, "error", err,
+		)
 	}
 	if result.Status != StatusPass {
 		significant := CountSignificant(result.Mismatches)
@@ -645,27 +891,20 @@ func (o *Observer) reportError(epoch uint64, err error) {
 	}
 }
 
-// fetchIfNeeded fetches Koios reference data for epoch only if it is not
-// already cached — a historical epoch's Koios reference never changes, so a
-// re-request (e.g. after a Dingo-side rollback re-signals the same epoch)
-// would just be wasted work. It fetches the pool-level reference data first
-// (fetchPoolsIfNeeded), then — when cfg.AccountsEnabled — the per-account
-// reference data (fetchAccountsIfNeeded, #3097), since the two are gated by
-// independent cache state (koios_epoch_info presence vs.
-// koios_account_coverage completeness) and either can need (re)fetching
-// independently of the other (e.g. AccountsEnabled being turned on after
-// pool-level data for this epoch was already fetched).
+// fetchIfNeeded fetches the fast pool/epoch-aggregate Koios reference data
+// for epoch only if it is not already cached — a historical epoch's Koios
+// reference never changes, so a re-request (e.g. after a Dingo-side rollback
+// re-signals the same epoch) would just be wasted work. This deliberately
+// never fetches #3097's per-account reference data (fetchAccountsIfNeeded):
+// dingo #4339 moved that into its own, independently-scheduled queue (see
+// runAccounts/processAccountEpoch) precisely so a slow per-account fetch for
+// one epoch can never delay this fast fetch — and therefore the fast
+// pool/aggregate check that follows it — for any later epoch.
 func (o *Observer) fetchIfNeeded(ctx context.Context, epoch uint64) error {
 	if err := o.fetchPoolsIfNeeded(ctx, epoch); err != nil {
 		return err
 	}
-	if err := o.fetchParamsIfNeeded(ctx, epoch); err != nil {
-		return err
-	}
-	if !o.cfg.AccountsEnabled {
-		return nil
-	}
-	return o.fetchAccountsIfNeeded(ctx, epoch)
+	return o.fetchParamsIfNeeded(ctx, epoch)
 }
 
 // fetchParamsIfNeeded fetches the /epoch_params reference row for epoch only
@@ -920,8 +1159,12 @@ func (o *Observer) fetchAccountsIfNeeded(
 }
 
 // fail logs a per-epoch failure and, in strict mode, fires FatalFunc exactly
-// once (the first failure across the observer's lifetime) — only ever
-// called from run's single goroutine, so fatalFired needs no lock.
+// once (the first failure across the observer's lifetime). run and
+// runAccounts's goroutines can both call this concurrently (dingo #4339's
+// queue split), so the exactly-once guarantee is enforced with an atomic
+// compare-and-swap on fatalFired rather than a plain read-then-write, which
+// could otherwise let both goroutines' near-simultaneous first failures each
+// observe fatalFired as false and both invoke FatalFunc.
 func (o *Observer) fail(epoch uint64, err error) {
 	o.cfg.Logger.Error(
 		"koiosparity observer: epoch validation failed",
@@ -934,10 +1177,12 @@ func (o *Observer) fail(epoch uint64, err error) {
 		"strict",
 		o.cfg.Strict,
 	)
-	if !o.cfg.Strict || o.fatalFired {
+	if !o.cfg.Strict {
 		return
 	}
-	o.fatalFired = true
+	if !o.fatalFired.CompareAndSwap(false, true) {
+		return
+	}
 	if o.cfg.FatalFunc != nil {
 		o.cfg.FatalFunc(fmt.Errorf("koios parity: epoch %d: %w", epoch, err))
 	}
