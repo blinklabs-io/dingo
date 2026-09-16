@@ -1279,12 +1279,26 @@ func (m *DingoStateManager) committeeActionRatified(
 		return false, nil
 	}
 
-	elected := m.hasActiveCommitteeMember(currentEpoch)
-	drepThreshold := conwayPP.DRepVotingThresholds.CommitteeNoConfidence.Rat
-	spoThreshold := conwayPP.PoolVotingThresholds.CommitteeNoConfidence.Rat
-	if elected {
-		drepThreshold = conwayPP.DRepVotingThresholds.CommitteeNormal.Rat
-		spoThreshold = conwayPP.PoolVotingThresholds.CommitteeNormal.Rat
+	// NoConfidence and UpdateCommittee use different thresholds (and, below,
+	// different AlwaysNoConfidence implicit-vote accounting): a Motion of No
+	// Confidence is always judged against MotionNoConfidence, regardless of
+	// whether a committee is currently seated, while UpdateCommittee selects
+	// CommitteeNormal/CommitteeNoConfidence based on whether one is. Sharing
+	// one threshold pair between the two (as an earlier revision did) let a
+	// NoConfidence vector accept or reject against the wrong bar.
+	isNoConfidence := proposal.ActionType == common.GovActionTypeNoConfidence
+	var drepThreshold, spoThreshold *big.Rat
+	if isNoConfidence {
+		drepThreshold = conwayPP.DRepVotingThresholds.MotionNoConfidence.Rat
+		spoThreshold = conwayPP.PoolVotingThresholds.MotionNoConfidence.Rat
+	} else {
+		elected := m.hasActiveCommitteeMember(currentEpoch)
+		drepThreshold = conwayPP.DRepVotingThresholds.CommitteeNoConfidence.Rat
+		spoThreshold = conwayPP.PoolVotingThresholds.CommitteeNoConfidence.Rat
+		if elected {
+			drepThreshold = conwayPP.DRepVotingThresholds.CommitteeNormal.Rat
+			spoThreshold = conwayPP.PoolVotingThresholds.CommitteeNormal.Rat
+		}
 	}
 	if drepThreshold == nil {
 		drepThreshold = new(big.Rat)
@@ -1295,7 +1309,7 @@ func (m *DingoStateManager) committeeActionRatified(
 
 	deposits := m.activeProposalDeposits(currentEpoch)
 	drepAccepted, err := m.drepAcceptedForCommitteeAction(
-		txn, proposal, deposits, drepThreshold,
+		txn, proposal, deposits, drepThreshold, isNoConfidence,
 	)
 	if err != nil {
 		return false, err
@@ -1304,7 +1318,7 @@ func (m *DingoStateManager) committeeActionRatified(
 		return false, nil
 	}
 	return m.spoAcceptedForCommitteeAction(
-		txn, proposal, deposits, spoThreshold,
+		txn, proposal, deposits, spoThreshold, isNoConfidence,
 	)
 }
 
@@ -1413,16 +1427,19 @@ func (m *DingoStateManager) credentialVotingStake(
 
 // drepAcceptedForCommitteeAction tallies DRep-delegated stake for a
 // NoConfidence/UpdateCommittee proposal. AlwaysAbstain delegators are
-// excluded entirely; AlwaysNoConfidence delegators count only toward the
-// denominator (this proposal is never itself a No-Confidence-only virtual
-// yes vote here, matching MockStateManager's drepAcceptedForUpdateCommittee).
-// A credential-backed DRep must be active to count, and an explicit Abstain
-// vote on this proposal excludes its delegated stake from the denominator.
+// excluded entirely. AlwaysNoConfidence delegators count toward the
+// denominator always, and toward the numerator (yes) too when isNoConfidence
+// is true -- mirroring production's tallyDRepVotes, which treats the
+// AlwaysNoConfidence virtual DRep as an automatic yes specifically on a
+// NoConfidence action and an automatic no otherwise. A credential-backed
+// DRep must be active to count, and an explicit Abstain vote on this
+// proposal excludes its delegated stake from the denominator.
 func (m *DingoStateManager) drepAcceptedForCommitteeAction(
 	txn *database.Txn,
 	proposal *conformance.ProposalState,
 	deposits map[mockledger.RewardAccountKey]uint64,
 	threshold *big.Rat,
+	isNoConfidence bool,
 ) (bool, error) {
 	if threshold.Sign() == 0 {
 		return true, nil
@@ -1438,7 +1455,11 @@ func (m *DingoStateManager) drepAcceptedForCommitteeAction(
 			if err != nil {
 				return false, err
 			}
-			totalStake.Add(totalStake, new(big.Int).SetUint64(stake))
+			stakeInt := new(big.Int).SetUint64(stake)
+			totalStake.Add(totalStake, stakeInt)
+			if isNoConfidence {
+				yesStake.Add(yesStake, stakeInt)
+			}
 		case common.DrepTypeAddrKeyHash, common.DrepTypeScriptHash:
 			if len(delegation.Credential) != common.Blake2b224Size {
 				continue
@@ -1483,13 +1504,17 @@ func (m *DingoStateManager) drepAcceptedForCommitteeAction(
 // NoConfidence/UpdateCommittee proposal, mirroring MockStateManager's
 // spoAcceptedForUpdateCommittee non-voter semantics: during Conway
 // bootstrap every silent pool is excluded from the denominator; afterward a
-// silent pool whose reward account delegates AlwaysAbstain is excluded and
-// every other silent pool counts as an implicit No.
+// silent pool whose reward account delegates AlwaysAbstain is excluded, one
+// that delegates AlwaysNoConfidence counts as an implicit Yes when
+// isNoConfidence is true (an implicit No otherwise, same as production's
+// tallySPOVotes PoolRewardAccountAutoVoteNoConfidence handling), and every
+// other silent pool counts as an implicit No.
 func (m *DingoStateManager) spoAcceptedForCommitteeAction(
 	txn *database.Txn,
 	proposal *conformance.ProposalState,
 	deposits map[mockledger.RewardAccountKey]uint64,
 	threshold *big.Rat,
+	isNoConfidence bool,
 ) (bool, error) {
 	if threshold.Sign() == 0 {
 		return true, nil
@@ -1536,9 +1561,17 @@ func (m *DingoStateManager) spoAcceptedForCommitteeAction(
 			continue
 		}
 		if rewardAccount, ok := m.govState.PoolRewardAccounts[pool]; ok {
-			if delegation, ok := m.govState.DRepDelegationsByCredential[rewardAccount]; ok &&
-				delegation.Type == common.DrepTypeAbstain {
-				continue
+			if delegation, ok := m.govState.DRepDelegationsByCredential[rewardAccount]; ok {
+				switch delegation.Type {
+				case common.DrepTypeAbstain:
+					continue
+				case common.DrepTypeNoConfidence:
+					totalStake.Add(totalStake, stake)
+					if isNoConfidence {
+						yesStake.Add(yesStake, stake)
+					}
+					continue
+				}
 			}
 		}
 		totalStake.Add(totalStake, stake)
