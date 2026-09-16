@@ -53,12 +53,27 @@ const txInfoConcurrency = 8
 // parallelize.
 const txInfoOpportunisticFlushThreshold = txInfoConcurrency * koiosparity.KoiosTxInfoBatchSize
 
-// previewPreprodEpochLengthSlots is the epoch length, in slots, on both
-// preview and preprod (config/cardano/{preview,preprod}/shelley-genesis.json's
-// epochLength) -- the two networks this comparison ever runs against (see
-// koios_check.go's doc comment), so a single constant is sufficient rather
-// than a per-network lookup.
-const previewPreprodEpochLengthSlots = 86400
+// epochLengthSlotsByNetwork is each network's epoch length, in slots
+// (config/cardano/{preview,preprod}/shelley-genesis.json's epochLength) --
+// the two networks this comparison ever runs against (see koios_check.go's
+// doc comment). NOT the same value on both: preview is 86400, preprod is
+// 432000 (5x longer) -- a single shared constant here previously made
+// RunFromGenesis divide preprod's slot number by preview's epoch length,
+// reporting five real Shelley epochs as one and running every check at the
+// wrong boundary.
+//
+// Valid from genesis (slot 0) with no Byron-era offset to account for:
+// confirmed against both networks' own genesis configs that Byron's
+// startTime exactly equals Shelley's systemStart (preview:
+// byron-genesis.json startTime 1666656000 == shelley-genesis.json
+// systemStart 2022-10-25T00:00:00Z; preprod: startTime 1654041600 ==
+// systemStart 2022-06-01T00:00:00Z) -- both networks launched directly at
+// Shelley genesis with a zero-length Byron era, so slot 0 is already epoch
+// 0 in Shelley terms on both.
+var epochLengthSlotsByNetwork = map[string]uint64{
+	"preview": 86400,
+	"preprod": 432000,
+}
 
 // acquireRetries and acquireRetryDelay bound how long RunFromGenesis retries
 // an Acquire that failed with ErrAcquireFailurePointNotOnChain: a brand-new
@@ -212,6 +227,10 @@ func RunFromGenesis(
 			network,
 		)
 	}
+	// Safe to index directly: epochLengthSlotsByNetwork has an entry for
+	// every network KoiosNetworks accepts, and the check above already
+	// rejected anything else.
+	epochLengthSlots := epochLengthSlotsByNetwork[network]
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
@@ -255,7 +274,17 @@ func RunFromGenesis(
 	// spent in a later one, both pending at flush time), so applying them
 	// out of order could silently no-op a spend against a UTxO that
 	// (out of order) looks like it doesn't exist yet.
-	flushPendingTxInfos := func() {
+	//
+	// point is the chain point the caller is currently at (the block just
+	// processed), used only to re-baseline if any chunk fails: a failed
+	// chunk means the reconstruction is now missing an unknown set of
+	// spends/creates, so comparing it against Dingo's live answer could
+	// report a false divergence. Re-baselining at the current point --
+	// reusing captureGenesisBaseline, the same recovery already used on
+	// rollback -- discards the untrustworthy incremental state in favor of
+	// Dingo's own live truth, rather than silently comparing a
+	// known-incomplete set.
+	flushPendingTxInfos := func(point pcommon.Point) {
 		if utxoRefs == nil || len(pendingTxHashes) == 0 {
 			return
 		}
@@ -282,18 +311,38 @@ func RunFromGenesis(
 		txInfoFlushCount++
 		txInfoFlushElapsed += time.Since(flushStart)
 
+		failed := false
 		for i, chunk := range chunks {
 			if err := errs[i]; err != nil {
 				logf(
-					"nodeparity: koios tx_info fetch failed for %d pending tx(es), "+
-						"UTxO reconstruction may now drift: %v",
+					"nodeparity: koios tx_info fetch failed for %d pending tx(es): %v",
 					len(chunk), err,
 				)
+				failed = true
 				continue
 			}
 			UTxOChanges(utxoRefs, results[i])
 		}
 		pendingTxHashes = pendingTxHashes[:0]
+
+		if failed {
+			refs, err := captureGenesisBaseline(ctx, dingoAddr, magic, point)
+			if err != nil {
+				utxoRefs = nil
+				logf(
+					"nodeparity: re-baseline after tx_info failure also failed "+
+						"(UTxO comparison disabled for the rest of this run): %v",
+					err,
+				)
+			} else {
+				utxoRefs = refs
+				logf(
+					"nodeparity: re-baselined the UTxO reconstruction after a "+
+						"tx_info failure: %d refs",
+					len(refs),
+				)
+			}
+		}
 	}
 
 	csConn, connErr := ouroboros.New(
@@ -316,12 +365,12 @@ func RunFromGenesis(
 							blockData,
 						)
 					}
+					point := pcommon.NewPoint(
+						block.SlotNumber(), block.Hash().Bytes(),
+					)
 
 					if !utxoAttempted {
 						utxoAttempted = true
-						point := pcommon.NewPoint(
-							block.SlotNumber(), block.Hash().Bytes(),
-						)
 						refs, err := captureGenesisBaseline(ctx, dingoAddr, magic, point)
 						if err != nil {
 							utxoBaselineErr = err
@@ -344,11 +393,11 @@ func RunFromGenesis(
 							)
 						}
 						if len(pendingTxHashes) >= txInfoOpportunisticFlushThreshold {
-							flushPendingTxInfos()
+							flushPendingTxInfos(point)
 						}
 					}
 
-					epoch := block.SlotNumber() / previewPreprodEpochLengthSlots
+					epoch := block.SlotNumber() / epochLengthSlots
 					if haveLastEpoch && epoch <= lastEpoch {
 						return nil
 					}
@@ -359,11 +408,8 @@ func RunFromGenesis(
 					// flush any hashes still buffered below the threshold
 					// above so the reconstruction is current through this
 					// block, not just through the last flush.
-					flushPendingTxInfos()
+					flushPendingTxInfos(point)
 
-					point := pcommon.NewPoint(
-						block.SlotNumber(), block.Hash().Bytes(),
-					)
 					result := EpochResult{Epoch: epoch}
 
 					// Protocol params and stake each get their own Acquire,
@@ -475,7 +521,7 @@ func RunFromGenesis(
 					// too, or a re-crossing of that same boundary on the
 					// new fork would be silently skipped as already seen.
 					haveLastEpoch = true
-					lastEpoch = point.Slot / previewPreprodEpochLengthSlots
+					lastEpoch = point.Slot / epochLengthSlots
 					return nil
 				},
 			),
