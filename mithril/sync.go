@@ -278,7 +278,7 @@ type SyncConfig struct {
 	DataDir                string                     // node database path
 	StorageMode            string                     // "api" | "core"
 	CardanoNodeConfig      *cardano.CardanoNodeConfig // genesis + Mithril verification keys; if nil, loaded from EmbeddedConfigFS for Network
-	CardanoConfigPath      string                     // optional explicit config.json path (else "<network>/config.json")
+	CardanoConfigPath      string                     // optional explicit config path (else the network's embedded config)
 	Backend                string                     // Mithril artifact backend; same semantics as BootstrapConfig.Backend (empty selects v2)
 	AggregatorURL          string                     // optional; defaults per-network
 	AllowInsecureHTTP      bool                       // permit plain-HTTP aggregator/artifact URLs; local dev/test only
@@ -371,7 +371,7 @@ func Sync(
 	if nodeCfg == nil {
 		cardanoConfigPath := cfg.CardanoConfigPath
 		if cardanoConfigPath == "" {
-			cardanoConfigPath = filepath.Join(network, "config.json")
+			cardanoConfigPath = cardano.EmbeddedConfigPath(network)
 		}
 		var err error
 		nodeCfg, err = cardano.LoadCardanoNodeConfigWithFallback(

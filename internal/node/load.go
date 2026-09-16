@@ -551,7 +551,7 @@ func LoadWithDB(
 		if network == "" {
 			network = "preview"
 		}
-		cardanoConfigPath = network + "/config.json"
+		cardanoConfigPath = cardano.EmbeddedConfigPath(network)
 	}
 	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
 		cardanoConfigPath,
