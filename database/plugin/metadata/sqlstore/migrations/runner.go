@@ -136,7 +136,32 @@ func (r *Runner) runMigration(
 	migration Migration,
 	current state,
 	exists bool,
-) error {
+) (runErr error) {
+	var restoreSQLiteForeignKeys func() error
+	if r.Dialect == "sqlite" {
+		var enabled int
+		if err := conn.QueryRowContext(
+			ctx, "PRAGMA foreign_keys",
+		).Scan(&enabled); err != nil {
+			return r.upgradeError(migration, PhaseExpand, err)
+		}
+		restoreSQLiteForeignKeys = func() error {
+			_, err := conn.ExecContext(
+				ctx,
+				fmt.Sprintf("PRAGMA foreign_keys = %d", enabled),
+			)
+			return err
+		}
+		defer func() {
+			if err := restoreSQLiteForeignKeys(); err != nil && runErr == nil {
+				runErr = r.upgradeError(
+					migration,
+					PhaseContract,
+					fmt.Errorf("restore foreign_keys pragma: %w", err),
+				)
+			}
+		}()
+	}
 	checksum := migration.checksum()
 	if !exists {
 		current = state{
