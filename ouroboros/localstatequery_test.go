@@ -103,6 +103,13 @@ func TestLocalstatequeryServerAcquire_PointOnChain_Succeeds(t *testing.T) {
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: ocommon.NewPoint(2, tipHash),
 	}, nil))
+	// VerifyPointQueryable now also exercises queryHardFork's
+	// HardForkCurrentEraQuery case (human review, dingo#4319/#4320), which
+	// needs an epoch record covering the acquired slot to resolve an era
+	// from -- newTestLedgerStateWithChain seeds blocks only.
+	require.NoError(t, db.SetEpoch(
+		0, 0, nil, nil, nil, nil, 0, 1, 100, nil,
+	))
 
 	connID := ouroboros.ConnectionId{}
 	err := o.localstatequeryServerAcquire(

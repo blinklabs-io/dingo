@@ -198,7 +198,30 @@ func (o *Ouroboros) localstatequeryServerAcquire(
 					err,
 				)
 			}
-			return err
+			// An error matching neither sentinel means something
+			// unexpected (a real database error, say) happened inside
+			// VerifyPointQueryable's own reads rather than the point
+			// genuinely being unqueryable (human review, Chris Guiney,
+			// dingo#4320): returning it bare here has gouroboros'
+			// handleAcquire treat it as a fatal protocol error and tear
+			// down the connection, reintroducing the exact
+			// connection-killing failure mode this whole mechanism exists
+			// to avoid, just triggered by a different kind of error. Map
+			// it to the same AcquireFailurePointTooOld a well-behaved
+			// client already knows how to handle (retry against a
+			// different point) instead, logging the real error here since
+			// the client only ever sees the generic wire-level rejection.
+			o.config.Logger.Error(
+				"local-state-query Acquire validation failed unexpectedly",
+				"component", "network",
+				"connection_id", ctx.ConnectionId.String(),
+				"error", err,
+			)
+			return fmt.Errorf(
+				"%w: %w",
+				olocalstatequery.ErrAcquireFailurePointTooOld,
+				err,
+			)
 		}
 		o.localstatequeryAcquireMutex.Lock()
 		o.localstatequeryAcquiredPoints[ctx.ConnectionId] = point
