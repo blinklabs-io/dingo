@@ -500,7 +500,7 @@ func (m *mockLedgerState) CommitteeMembers() (
 }
 
 func (m *mockLedgerState) DRepRegistration(
-	_ lcommon.Blake2b224,
+	_ lcommon.Credential,
 ) (*lcommon.DRepRegistration, error) {
 	return nil, nil
 }

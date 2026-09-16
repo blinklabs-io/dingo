@@ -303,13 +303,24 @@ adds `utxo_collateral_input` and backfills one edge per non-NULL legacy
 used as collateral by more than one transaction kept only the last writer and
 rollback of that writer discarded the association for the others.
 
+Migration `v16` (`governance-proposal-optional-anchor`, integer version 16)
+makes `governance_proposal.anchor_url` and `anchor_hash` nullable on every SQL
+provider. SQLite rebuilds `governance_proposal` and its ratification-history
+table because it cannot drop the existing `NOT NULL` constraints in place.
+The runner disables SQLite foreign-key enforcement before starting the expand
+transaction, commits the complete rebuild and its phase advance together, and
+restores the connection's original foreign-key mode with an independent bounded
+context even when the migration context was canceled. A failed rebuild therefore
+leaves the original tables intact and a retry still begins from `expand`.
+
 The upgrade runner owns a `schema_migrations` row per contiguous integer version with
 `version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`, `dirty`,
 Unix-millisecond `started_at`/`updated_at`, and nullable `completed_at`.
 Phases are `expand`, `backfill`, `contract`, and `complete`. The runner marks a
-phase dirty before work, executes idempotent DDL, commits each data batch and
-cursor checkpoint in the same transaction, and only marks a version complete
-after contract/index DDL succeeds. Completed checksum drift, registry gaps,
+phase dirty before work, executes idempotent DDL, and commits each data batch and
+cursor checkpoint in the same transaction. SQLite also commits each expand DDL
+set and its phase advance in one transaction. The runner only marks a version
+complete after contract/index DDL succeeds. Completed checksum drift, registry gaps,
 unknown phases, inconsistent completion state, and a database newer than the
 binary are hard startup errors. File-backed SQLite uses a cross-process lock
 file and in-memory SQLite uses a process lock. Store readiness remains false
