@@ -25,7 +25,6 @@ import (
 	"log/slog"
 	"math"
 	"math/big"
-	"runtime"
 	"runtime/debug"
 	"slices"
 	"strconv"
@@ -47,7 +46,6 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
-	"github.com/blinklabs-io/dingo/utxoref"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/consensus"
@@ -79,52 +77,20 @@ const (
 	firstBlockIndex              = 1
 	mithrilLedgerSlotSyncKey     = "mithril_ledger_slot"
 	mithrilLedgerHashSyncKey     = "mithril_ledger_hash"
-	// blockPipelineMinWorkers is the decode/validate worker count
-	// blockPipelineWorkerCount falls back to on a host that reports fewer
-	// CPUs than this (including GOMAXPROCS(1)). It is the prior hardcoded
-	// worker count for both phase 1 (decode, issue #1894) and phase 3
-	// (VRF/KES validate), kept as a floor so a constrained host never gets
-	// fewer workers than it did before this was made CPU-scaled.
-	blockPipelineMinWorkers = 2
-	// blockPipelineMaxWorkers caps blockPipelineWorkerCount. Both pipeline
-	// stages only prepare work for ledgerProcessBlocksFromSource's single
-	// apply goroutine (see "Why dingo's ledger apply is not wired into
-	// pipeline.ApplyFunc", issue #3227), so decode/validate throughput
-	// past this point outruns the one consumer that can ever drain it;
-	// more workers beyond the cap would only buffer further ahead of that
-	// consumer, not deliver blocks to it any faster.
-	blockPipelineMaxWorkers = 8
+	// blockPipelineDecodeWorkers is the fixed decode worker count for phase 1
+	// of the block-processing pipeline (issue #1894). Validation workers stay
+	// at 0 (disabled) unless LedgerStateConfig.BlockPipelineValidateEnabled
+	// turns them on (phase 3).
+	blockPipelineDecodeWorkers = 2
+	// blockPipelineValidateWorkers is the fixed VRF/KES validate worker count
+	// for phase 3 of the block-processing pipeline (issue #1894). VRF and KES
+	// verification are each substantially more expensive than a CBOR decode,
+	// so validation is the pipeline's throughput bottleneck; this is kept
+	// equal to blockPipelineDecodeWorkers for now rather than scaled
+	// differently, matching phase 1's fixed-worker-count approach until
+	// there's a throughput profile to size it against.
+	blockPipelineValidateWorkers = 2
 )
-
-// blockPipelineWorkerCount derives the block-pipeline's decode (phase 1) and
-// validate (phase 3) worker count from the host's available CPU parallelism
-// instead of the fixed count of 2 both stages ran at unconditionally before
-// this change. A 16-core host running with BlockPipelineEnabled used only 2
-// of those cores for decode and 2 for VRF/KES validate regardless of how
-// many were free; profiling during a from-genesis sync (issue #4203, the
-// block-application throughput investigation) showed a single core saturated
-// while 15 sat idle. This is the same fixed
-// count for both stages that blockPipelineValidateWorkers' prior doc comment
-// described as provisional ("kept equal ... until there's a throughput
-// profile to size it against"); GOMAXPROCS is that profile input.
-//
-// Both stages remain purely a scheduling change per their existing
-// documentation (BlockPipelineEnabled/BlockPipelineValidateEnabled's config
-// doc comments): this does not alter validation or apply behavior, only how
-// many goroutines share the decode/VRF/KES work before
-// ledgerProcessBlocksFromSource's single-threaded apply consumes it in
-// submission order.
-func blockPipelineWorkerCount() int {
-	n := runtime.GOMAXPROCS(0)
-	switch {
-	case n < blockPipelineMinWorkers:
-		return blockPipelineMinWorkers
-	case n > blockPipelineMaxWorkers:
-		return blockPipelineMaxWorkers
-	default:
-		return n
-	}
-}
 
 // DatabaseOperation represents an asynchronous database operation
 type DatabaseOperation struct {
@@ -541,12 +507,6 @@ func historicalBlockValidationDecision(
 // the node to shut down. The callback should trigger graceful shutdown.
 type FatalErrorFunc func(err error)
 
-// ReportTipGapFunc receives the wall-clock-to-tip distance in slots on every
-// slot-clock tick, the same value the dingo_tip_gap_slots gauge carries. It
-// exists so a caller can classify sync health without scraping Prometheus:
-// the node's readiness probe reads it. Optional; nil disables the report.
-type ReportTipGapFunc func(gapSlots uint64)
-
 // GetActiveConnectionFunc is a callback to retrieve the currently active
 // chainsync connection ID for chain selection purposes.
 type GetActiveConnectionFunc func() *ouroboros.ConnectionId
@@ -634,7 +594,6 @@ type LedgerStateConfig struct {
 	PeerHeaderLookupFunc        PeerHeaderLookupFunc
 	GenesisSelectionStateFunc   GenesisSelectionStateFunc
 	FatalErrorFunc              FatalErrorFunc
-	ReportTipGapFunc            ReportTipGapFunc
 	ForgedBlockChecker          ForgedBlockChecker
 	SlotBattleRecorder          SlotBattleRecorder
 	EndorserBlockProvider       EndorserBlockProviderFunc
@@ -1057,13 +1016,6 @@ type LedgerState struct {
 	// deliveries for other ranges and header-queue churn; discarded when
 	// the tracked range itself is delivered.
 	blockfetchRangeFailure blockfetchRangeFailureState
-	// nonExtendingBlockRejections counts, per connection (keyed by
-	// connIdKey), recent "block does not fit chain tip" rejections inside
-	// nonExtendingBlockRejectionWindow. Guarded by chainsyncBlockfetchMutex,
-	// like the rest of the blockfetch drain state above. See
-	// noteNonExtendingBlockRejection and noteBlockAcceptedFromConn
-	// (issue #4272).
-	nonExtendingBlockRejections map[string]nonExtendingBlockRejectionState
 	// deferredHeaderValidation holds block points whose stateful header checks
 	// wait for ledger apply. It is guarded by its own deferredHeaderValidationMu
 	// (NOT the main RWMutex) so the snapshot retention guard
@@ -1129,32 +1081,23 @@ type LedgerState struct {
 	// Cross-fork continuation audit (issue #3005). Armed by a local
 	// rollback and consumed by the blockfetch handler; see
 	// ledger/continuation_audit.go for the cost and soundness argument.
-	//
-	// continuationAuditMutex owns every transition of the pointer, and every
-	// recording of a body into the window it publishes. The atomic makes
-	// each access safe on its own; it is the *sequence* that matters here,
-	// because arming reads the outgoing window and recovery clears and
-	// restores it, and those goroutines share no other lock. It is the
-	// innermost of the ledger's locks -- only a window's own per-field
-	// mutexes are taken under it -- and it is never held across a chain
-	// truncation or a blockfetch drain. See armContinuationAudit,
-	// commitContinuationAuditBody and settleAuditAfterRewind.
-	continuationAuditMutex sync.Mutex
 	continuationAudit      atomic.Pointer[continuationAuditWindow]
-	// continuationAuditGen counts transitions of that pointer, under the
-	// same lock. A recovery rewind clears the pointer and may put it back
-	// afterwards, and the pointer alone cannot tell "still cleared by me"
-	// from "disarmed by a rollback in the meantime" -- both are nil. The
-	// generation distinguishes them, so a restore never overwrites another
-	// owner's decision. See publishContinuationAudit.
-	continuationAuditGen uint64
-	mithrilLedgerSlot    uint64 // blocks at or below this slot are Mithril-verified; skip validation
-	mithrilLedgerHash    []byte // hash for mithrilLedgerSlot, used as a stable chainsync intersect point
-	lastLocalRollbackSeq uint64
+	mithrilLedgerSlot      uint64 // blocks at or below this slot are Mithril-verified; skip validation
+	mithrilLedgerHash      []byte // hash for mithrilLedgerSlot, used as a stable chainsync intersect point
+	lastLocalRollbackSeq   uint64
+	lastLocalRollbackPoint ocommon.Point
+	// rollbackTruncateAfterSlotFunc is a deterministic failure seam for the
+	// rollback recovery test. Production uses Database.TruncateAfterSlot;
+	// keeping the seam on LedgerState avoids changing the database contract just
+	// to make a provider failure reproducible.
+	rollbackTruncateAfterSlotFunc func(
+		ocommon.Point,
+		uint64,
+		*database.Txn,
+	) (ochainsync.Tip, []byte, error)
 	// lastIntersectAnchorFallbackWarn throttles
 	// warnIntersectAnchorFallback. Unix nanoseconds; 0 means never warned.
 	lastIntersectAnchorFallbackWarn atomic.Int64
-	lastLocalRollbackPoint          ocommon.Point
 
 	// Subscription IDs for event bus unsubscribe on close
 	chainsyncSubID           event.EventSubscriberId
@@ -1354,10 +1297,6 @@ type LedgerState struct {
 	// cleanupWG, so a lifecycle test can hold a run in flight and assert
 	// that Close drains it.
 	cleanupConsumedUtxosRunHook func()
-	// Test hook replacing the primary-chain membership read the continuation
-	// audit makes. A healthy store never fails that read, so without it the
-	// audit's handling of a failed read cannot be driven from a test.
-	continuationAuditContainsPoint func(ocommon.Point) (bool, error)
 }
 
 // upstreamSyncState is one connection-generation snapshot. Consumers must not
@@ -1509,9 +1448,8 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		// ledger/block_pipeline_apply_contract_test.go; if a gouroboros
 		// bump makes any of them fail, revisit the decision rather than
 		// the test.
-		workerCount := blockPipelineWorkerCount()
 		pipelineOpts := []pipeline.PipelineOption{
-			pipeline.WithDecodeWorkers(workerCount),
+			pipeline.WithDecodeWorkers(blockPipelineDecodeWorkers),
 		}
 		if cfg.BlockPipelineValidateEnabled {
 			// Wire VRF/KES validation (phase 3). Eta0Provider reads the
@@ -1526,7 +1464,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 			// ledger paths.
 			pipelineOpts = append(
 				pipelineOpts,
-				pipeline.WithValidateWorkers(workerCount),
+				pipeline.WithValidateWorkers(blockPipelineValidateWorkers),
 				pipeline.WithEta0Provider(ls.blockPipelineEta0Provider),
 				pipeline.WithSlotsPerKesPeriod(ls.SlotsPerKESPeriod()),
 				pipeline.WithVerifyConfig(lcommon.VerifyConfig{
@@ -2766,13 +2704,10 @@ func (ls *LedgerState) handleSlotTicks() {
 
 		// Update wall-clock-based metrics every tick
 		// (must run even when chain is stalled or catching up)
-		tipGap := uint64(0)
 		if tick.Slot > tipSlot {
-			tipGap = tick.Slot - tipSlot
-		}
-		ls.metrics.tipGapSlots.Set(float64(tipGap))
-		if ls.config.ReportTipGapFunc != nil {
-			ls.config.ReportTipGapFunc(tipGap)
+			ls.metrics.tipGapSlots.Set(float64(tick.Slot - tipSlot))
+		} else {
+			ls.metrics.tipGapSlots.Set(0)
 		}
 		if currentEpoch.LengthInSlots > 0 {
 			ls.metrics.epochLengthSlots.Set(float64(currentEpoch.LengthInSlots))
@@ -3213,42 +3148,12 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 }
 
 func (ls *LedgerState) rollback(point ocommon.Point) error {
-	return ls.rollbackWithResync(point, true)
+	return ls.rollbackWithBlocks(point, nil, true)
 }
 
-// rollbackCommittedError reports an error found after the metadata rollback
-// transaction and in-memory tip update have committed. Callers that publish
-// side effects separately must not treat this as an all-or-nothing failure.
-type rollbackCommittedError struct {
-	err error
-}
-
-func (e *rollbackCommittedError) Error() string { return e.err.Error() }
-
-func (e *rollbackCommittedError) Unwrap() error { return e.err }
-
-func (ls *LedgerState) rollbackWithoutResync(point ocommon.Point) error {
-	return ls.rollbackWithResync(point, false)
-}
-
-func (ls *LedgerState) publishLocalLedgerRollback(point ocommon.Point) {
-	if ls.config.EventBus == nil {
-		return
-	}
-	ls.config.EventBus.Publish(
-		event.ChainsyncResyncEventType,
-		event.NewEvent(
-			event.ChainsyncResyncEventType,
-			event.ChainsyncResyncEvent{
-				Reason: event.ChainsyncResyncReasonLocalLedgerRollback,
-				Point:  point,
-			},
-		),
-	)
-}
-
-func (ls *LedgerState) rollbackWithResync(
+func (ls *LedgerState) rollbackWithBlocks(
 	point ocommon.Point,
+	rollbackBlocks []models.Block,
 	publishResync bool,
 ) error {
 	// Rolling back to the point we already sit at is a no-op. Skip
@@ -3766,6 +3671,37 @@ func (ls *LedgerState) rollbackWithResync(
 	return clearRollbackIntent(ls.db)
 }
 
+// rollbackCommittedError reports an error found after the metadata rollback
+// transaction and in-memory tip update have committed. Callers that publish
+// side effects separately must not treat this as an all-or-nothing failure.
+type rollbackCommittedError struct {
+	err error
+}
+
+func (e *rollbackCommittedError) Error() string { return e.err.Error() }
+
+func (e *rollbackCommittedError) Unwrap() error { return e.err }
+
+func (ls *LedgerState) rollbackWithoutResync(point ocommon.Point) error {
+	return ls.rollbackWithBlocks(point, nil, false)
+}
+
+func (ls *LedgerState) publishLocalLedgerRollback(point ocommon.Point) {
+	if ls.config.EventBus == nil {
+		return
+	}
+	ls.config.EventBus.Publish(
+		event.ChainsyncResyncEventType,
+		event.NewEvent(
+			event.ChainsyncResyncEventType,
+			event.ChainsyncResyncEvent{
+				Reason: event.ChainsyncResyncReasonLocalLedgerRollback,
+				Point:  point,
+			},
+		),
+	)
+}
+
 // drainBlockPipelineBeforeRollback waits, up to
 // BlockPipelineRollbackDrainTimeout, for ls.blockPipeline to finish any
 // decode/validate work already submitted before a rollback proceeds to
@@ -3985,7 +3921,7 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 	if pointMatches(ls.Tip().Point, point) {
 		ls.armContinuationAudit(point, "chainsync rollback")
 	} else {
-		ls.disarmContinuationAudit()
+		ls.continuationAudit.Store(nil)
 	}
 	return nil
 }
@@ -4023,7 +3959,7 @@ func (ls *LedgerState) reportFailedLedgerRollbackAfterTruncation(
 	point ocommon.Point,
 	cause error,
 ) error {
-	ls.disarmContinuationAudit()
+	ls.continuationAudit.Store(nil)
 	ledgerTip := ls.Tip()
 	ls.config.Logger.Error(
 		"primary chain truncated but ledger rollback failed; "+
@@ -4180,7 +4116,7 @@ func (ls *LedgerState) processChainIteratorRollback(
 				"ledger_tip_hash",
 				hex.EncodeToString(currentTip.Point.Hash),
 			)
-			if err := ls.rollbackWithBlocks(point, rollbackBlocks); err != nil {
+			if err := ls.rollbackWithBlocks(point, rollbackBlocks, true); err != nil {
 				return err
 			}
 			return errRestartLedgerPipeline
@@ -7413,11 +7349,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 		if err := eras.ValidateOpCertPersistableCounter(
 			opCertIssueNumber,
 		); err != nil {
-			return nil, fmt.Errorf(
-				"pool %x: %w",
-				opCertPoolKeyHash.Bytes(),
-				err,
-			)
+			return nil, fmt.Errorf("pool %x: %w", opCertPoolKeyHash, err)
 		}
 		// Counter monotonicity is the stateful half of inbound opcert
 		// validation: read the pool's last-seen counter before processing this
@@ -7440,7 +7372,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 			if err != nil {
 				return nil, fmt.Errorf(
 					"read opcert counter for pool %x: %w",
-					opCertPoolKeyHash.Bytes(),
+					opCertPoolKeyHash,
 					err,
 				)
 			}
@@ -7450,11 +7382,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 				opCertIssueNumber,
 				opCertNoGapRuleApplies(block.Era().Id),
 			); err != nil {
-				return nil, fmt.Errorf(
-					"pool %x: %w",
-					opCertPoolKeyHash.Bytes(),
-					err,
-				)
+				return nil, fmt.Errorf("pool %x: %w", opCertPoolKeyHash, err)
 			}
 		}
 	}
@@ -7627,7 +7555,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	)
 	// Track outputs from earlier transactions in this block for intra-block
 	// dependencies only when TX validation is enabled.
-	intraBlockUtxos := make(map[utxoref.Key]lcommon.Utxo)
+	intraBlockUtxos := make(map[string]lcommon.Utxo)
 	for i, tx := range block.Transactions() {
 		if delta == nil {
 			delta = NewLedgerDelta(
@@ -7873,7 +7801,12 @@ func (ls *LedgerState) ledgerProcessBlock(
 			// correctly - for failed TXs, Produced() returns collateral return at the
 			// correct index (len(Outputs())), while Outputs() returns regular outputs
 			for _, utxo := range tx.Produced() {
-				intraBlockUtxos[utxoref.ForUtxo(utxo)] = utxo
+				key := fmt.Sprintf(
+					"%s:%d",
+					utxo.Id.Id().String(),
+					utxo.Id.Index(),
+				)
+				intraBlockUtxos[key] = utxo
 			}
 		}
 	}
@@ -9462,7 +9395,6 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		// pre-SetLedger case only -- it is never reachable from an
 		// untrusted peer, since every chainsync-driven path runs after
 		// SetLedger.
-		tipBeforeRewind := ls.chain.Tip().Point
 		rewindErr := func() error {
 			if ls.config.ChainManager.SecurityParamConfigured() {
 				return ls.config.ChainManager.RewindPrimaryChainToPoint(
@@ -9473,19 +9405,6 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 				ancestor,
 			)
 		}()
-		// This truncation runs outside both paths that transition the
-		// continuation-audit window: the rollback that arms and disarms
-		// it, and the recovery rewind that clears and settles it. A window
-		// left armed over it holds producers for blocks it deleted, and a
-		// recovery rewind settling afterwards restores the window it
-		// cleared unless the pointer generation moved, so the truncation
-		// must be a transition of its own. A rewind refused before its
-		// first deletion leaves the window describing an unchanged chain.
-		// See settleAuditAfterRewind.
-		if rewindErr == nil ||
-			primaryChainTipRegressed(tipBeforeRewind, ls.chain.Tip().Point) {
-			ls.disarmContinuationAudit()
-		}
 		if rewindErr != nil {
 			return rewindErr
 		}
@@ -11508,8 +11427,8 @@ func (ls *LedgerState) WithTxValidationSession(
 	fn func(
 		validate func(
 			tx ledger.Transaction,
-			consumedUtxos map[utxoref.Key]struct{},
-			createdUtxos map[utxoref.Key]lcommon.Utxo,
+			consumedUtxos map[string]struct{},
+			createdUtxos map[string]lcommon.Utxo,
 		) error,
 		stillCurrent func() bool,
 	) error,
@@ -11520,8 +11439,8 @@ func (ls *LedgerState) WithTxValidationSession(
 	return txn.Do(func(txn *database.Txn) error {
 		validate := func(
 			tx ledger.Transaction,
-			consumedUtxos map[utxoref.Key]struct{},
-			createdUtxos map[utxoref.Key]lcommon.Utxo,
+			consumedUtxos map[string]struct{},
+			createdUtxos map[string]lcommon.Utxo,
 		) error {
 			validationEra, err := resolveValidationEra(
 				tx,
@@ -11647,8 +11566,8 @@ func (ls *LedgerState) ValidateTx(
 // (dependent TX chaining). Both may be nil for no overlay.
 func (ls *LedgerState) ValidateTxWithOverlay(
 	tx lcommon.Transaction,
-	consumedUtxos map[utxoref.Key]struct{},
-	createdUtxos map[utxoref.Key]lcommon.Utxo,
+	consumedUtxos map[string]struct{},
+	createdUtxos map[string]lcommon.Utxo,
 ) error {
 	return ls.validateTxCore(tx, func(txn *database.Txn) *LedgerView {
 		return &LedgerView{
@@ -11944,8 +11863,8 @@ func (ls *LedgerState) forgeBlock() {
 			"tx_count", len(mempoolTxs),
 		)
 
-		consumedInputs := make(map[utxoref.Key]struct{})
-		createdOutputs := make(map[utxoref.Key]lcommon.Utxo)
+		consumedInputs := make(map[string]struct{})
+		createdOutputs := make(map[string]lcommon.Utxo)
 
 		// Iterate through transactions and add them until we hit limits
 		for _, mempoolTx := range mempoolTxs {
@@ -12086,10 +12005,20 @@ func (ls *LedgerState) forgeBlock() {
 			}
 			blockSize += txSize
 			for _, input := range fullTx.Consumed() {
-				consumedInputs[utxoref.ForInput(input)] = struct{}{}
+				key := fmt.Sprintf(
+					"%s:%d",
+					input.Id().String(),
+					input.Index(),
+				)
+				consumedInputs[key] = struct{}{}
 			}
 			for _, output := range fullTx.Produced() {
-				createdOutputs[utxoref.ForUtxo(output)] = output
+				key := fmt.Sprintf(
+					"%s:%d",
+					output.Id.Id().String(),
+					output.Id.Index(),
+				)
+				createdOutputs[key] = output
 			}
 			// Safe to assign: overflow was already checked
 			// via SafeAddExUnits when computing
