@@ -326,6 +326,22 @@ func (ls *LedgerState) queryShelleyEpochNo(
 //
 // Unpinned (at.pinned() false) always succeeds: the live tip trivially
 // satisfies every retention window.
+//
+// KNOWN GAP (CodeRabbit review, dingo#4319): this check runs in its own
+// transaction, which closes before the caller (localstatequeryServerAcquire)
+// records at as this connection's acquired point. cleanupConsumedUtxos runs
+// as an unsynchronized background goroutine (ledger/state.go, `go
+// ls.cleanupConsumedUtxos()`), not serialized against Acquire in any way, so
+// it -- or an equivalent cleanup pass in ledger/snapshot's rotation.go, or
+// pparams retention -- could in principle advance a retention floor past at
+// in the gap between this function returning and the point being recorded,
+// leaving a query against an already-acquired point exposed to the exact
+// mid-query failure this whole mechanism exists to prevent. Acquire-time
+// validation alone cannot close this: doing so needs every relevant pruning
+// path to know about and defer to currently-acquired points until Release,
+// ReAcquire, or disconnect -- a cross-cutting feature spanning three
+// independent pruning subsystems, not a fix scoped to this function.
+// Deferred rather than rushed; tracked as a follow-up issue.
 func (ls *LedgerState) VerifyPointQueryable(
 	txn *database.Txn,
 	at QueryPoint,
