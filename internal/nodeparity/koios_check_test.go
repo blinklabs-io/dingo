@@ -31,50 +31,53 @@ func TestNewKoiosClientRejectsMainnet(t *testing.T) {
 	}
 }
 
-// TestStakeRelDiffDetectsRealMismatches proves stakeRelDiff both directions:
-// it must not flag identical or negligibly-different amounts, and it must
-// flag a real divergence. Real observed Preview values (100 trillion
+// TestStakeDiffLovelaceIsExact proves stakeDiffLovelace has no tolerance at
+// all: both GetPoolDistr2's TotalPoolStake and Koios's pool_history
+// active_stake are exact integers with nothing to round between two
+// independent computations, so even a 1-lovelace difference must be
+// reported, not absorbed. Real observed Preview values (100 trillion
 // lovelace per pool), not toy numbers, so a comparison that only worked by
 // coincidence at small values would still be caught.
-func TestStakeRelDiffDetectsRealMismatches(t *testing.T) {
+func TestStakeDiffLovelaceIsExact(t *testing.T) {
 	const dingoStake = 100_000_000_000_000
 
-	relDiff, ok := stakeRelDiff(dingoStake, "100000000000000")
+	diff, ok := stakeDiffLovelace(dingoStake, "100000000000000")
 	if !ok {
 		t.Fatal("rejected a valid decimal lovelace string")
 	}
-	if relDiff > stakeRelativeTolerance {
-		t.Fatalf("identical amounts produced relDiff=%v > tolerance %v", relDiff, stakeRelativeTolerance)
+	if diff != 0 {
+		t.Fatalf("identical amounts produced a nonzero diff: %d", diff)
 	}
 
-	// A genuinely negligible 1-lovelace difference must not false-positive.
-	relDiff, ok = stakeRelDiff(dingoStake, "100000000000001")
+	// A 1-lovelace difference is real and exact integers have nothing to
+	// round -- it must be reported, not treated as noise.
+	diff, ok = stakeDiffLovelace(dingoStake, "100000000000001")
 	if !ok {
 		t.Fatal("rejected a valid decimal lovelace string")
 	}
-	if relDiff > stakeRelativeTolerance {
-		t.Fatalf("a negligible 1-lovelace difference (relDiff=%v) exceeded tolerance %v", relDiff, stakeRelativeTolerance)
+	if diff != -1 {
+		t.Fatalf("a real 1-lovelace difference was not reported exactly: got %d, want -1", diff)
 	}
 
 	// A real divergence -- Koios reporting a materially different value --
 	// must be caught.
-	relDiff, ok = stakeRelDiff(dingoStake, "190000000000000")
+	diff, ok = stakeDiffLovelace(dingoStake, "190000000000000")
 	if !ok {
 		t.Fatal("rejected a valid decimal lovelace string")
 	}
-	if relDiff <= stakeRelativeTolerance {
-		t.Fatalf("a real ~90%% stake divergence was not detected: relDiff=%v", relDiff)
+	if diff != -90_000_000_000_000 {
+		t.Fatalf("a real ~90%% stake divergence was not reported exactly: got %d", diff)
 	}
 
-	if _, ok := stakeRelDiff(dingoStake, "not-a-number"); ok {
+	if _, ok := stakeDiffLovelace(dingoStake, "not-a-number"); ok {
 		t.Fatal("accepted an unparseable koios value")
 	}
 
 	// Two independently-reported zero-stake pools must compare as an exact
-	// match, not an undefined 0/0.
-	relDiff, ok = stakeRelDiff(0, "0")
-	if !ok || relDiff != 0 {
-		t.Fatalf("zero vs zero: ok=%v relDiff=%v, want ok=true relDiff=0", ok, relDiff)
+	// match.
+	diff, ok = stakeDiffLovelace(0, "0")
+	if !ok || diff != 0 {
+		t.Fatalf("zero vs zero: ok=%v diff=%v, want ok=true diff=0", ok, diff)
 	}
 }
 

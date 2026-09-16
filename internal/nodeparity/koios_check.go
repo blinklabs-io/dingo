@@ -207,39 +207,46 @@ func CheckProtocolParams(
 type StakeMismatch struct {
 	PoolIDBech32 string
 	DingoStake   uint64
-	KoiosStake   string // Koios's literal decimal string, kept exact
-	RelDiff      float64
+	// KoiosStake is Koios's literal decimal string, kept exact -- "" when
+	// Koios has no pool_history row for this pool/epoch at all (Reason
+	// explains why that itself counts as a mismatch here).
+	KoiosStake string
+	// DiffLovelace is the exact signed difference (Dingo - Koios), in
+	// whole lovelace. Meaningless (left 0) when Reason is set: those cases
+	// have no numeric Koios value to diff against.
+	DiffLovelace int64
+	// Reason is non-empty only for the two cases that are not a numeric
+	// disagreement: "no koios row for nonzero dingo stake" or "unparseable
+	// koios active_stake value". Empty for an ordinary numeric mismatch.
+	Reason string
 }
 
-// stakeRelativeTolerance bounds how far Dingo's own reported per-pool active
-// stake (GetPoolDistr2's TotalPoolStake) may differ, relative to Koios's
-// independently-reported pool_history active_stake for the same pool and
-// epoch, before it counts as a real mismatch rather than rounding noise
-// between two independent computations over the same underlying integers.
-const stakeRelativeTolerance = 0.0005
-
-// stakeRelDiff computes how far dingoStake differs from koiosStakeStr, as a
-// fraction of koiosStake -- or of dingoStake when both are zero, so two
-// independently-reported zero-stake pools still compare as an exact match
-// rather than an undefined 0/0. ok is false only when koiosStakeStr fails to
-// parse as a number.
-func stakeRelDiff(dingoStake uint64, koiosStakeStr string) (relDiff float64, ok bool) {
-	koiosFloat, parsed := new(big.Float).SetString(koiosStakeStr)
+// stakeDiffLovelace computes the exact signed difference between dingoStake
+// and koiosStakeStr, in whole lovelace -- not a relative fraction. Both
+// sides report an exact integer with nothing to round: GetPoolDistr2's
+// TotalPoolStake is a uint64, and Koios's pool_history active_stake is
+// documented and observed as a plain decimal integer string, never a
+// fractional or exponent form (unlike, say, protocol-parameter rationals
+// elsewhere in this package). There is therefore no independent-computation
+// rounding for a tolerance to absorb: any nonzero difference is a real
+// disagreement. ok is false only when koiosStakeStr fails to parse as an
+// integer.
+func stakeDiffLovelace(dingoStake uint64, koiosStakeStr string) (diff int64, ok bool) {
+	koiosInt, parsed := new(big.Int).SetString(koiosStakeStr, 10)
 	if !parsed {
 		return 0, false
 	}
-	dingoFloat := new(big.Float).SetUint64(dingoStake)
-	denom := koiosFloat
-	if denom.Sign() == 0 {
-		denom = dingoFloat
+	dingoInt := new(big.Int).SetUint64(dingoStake)
+	diffInt := new(big.Int).Sub(dingoInt, koiosInt)
+	if !diffInt.IsInt64() {
+		// Cardano's entire max supply (45 billion ADA = 4.5e16 lovelace)
+		// fits comfortably inside int64's range (~9.2e18) with room to
+		// spare, so a difference this large only happens if koiosStakeStr
+		// is corrupted well past anything meaningful to report as a
+		// lovelace amount.
+		return 0, false
 	}
-	if denom.Sign() == 0 {
-		return 0, true
-	}
-	diff := new(big.Float).Sub(dingoFloat, koiosFloat)
-	diff.Abs(diff)
-	relDiff, _ = new(big.Float).Quo(diff, denom).Float64()
-	return relDiff, true
+	return diffInt.Int64(), true
 }
 
 // stakeCheckConcurrency bounds how many /pool_history requests
@@ -295,22 +302,38 @@ func CheckStakeDistribution(
 				)
 			}
 			if hist == nil {
-				// No Koios row for this pool/epoch at all -- e.g. a pool
-				// that only just registered this epoch and has no
-				// snapshot yet. Not a mismatch: nothing to compare
-				// against.
+				if p.stake == 0 {
+					// A pool that just registered this epoch, with no
+					// active stake yet and no Koios snapshot yet either --
+					// both sides agree there's nothing here.
+					return nil
+				}
+				// Dingo reports real stake for a pool Koios has no
+				// pool_history row for at all -- that disagreement itself
+				// is the mismatch, not a reason to skip.
+				results[i] = &StakeMismatch{
+					PoolIDBech32: p.bech32,
+					DingoStake:   p.stake,
+					Reason:       "no koios pool_history row for nonzero dingo stake",
+				}
 				return nil
 			}
-			relDiff, ok := stakeRelDiff(p.stake, hist.ActiveStake)
+			diff, ok := stakeDiffLovelace(p.stake, hist.ActiveStake)
 			if !ok {
-				return nil
-			}
-			if relDiff > stakeRelativeTolerance {
 				results[i] = &StakeMismatch{
 					PoolIDBech32: p.bech32,
 					DingoStake:   p.stake,
 					KoiosStake:   hist.ActiveStake,
-					RelDiff:      relDiff,
+					Reason:       "unparseable koios active_stake value",
+				}
+				return nil
+			}
+			if diff != 0 {
+				results[i] = &StakeMismatch{
+					PoolIDBech32: p.bech32,
+					DingoStake:   p.stake,
+					KoiosStake:   hist.ActiveStake,
+					DiffLovelace: diff,
 				}
 			}
 			return nil
