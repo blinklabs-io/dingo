@@ -808,7 +808,7 @@ func (m *DingoStateManager) ApplyTransaction(
 		}
 		m.removeUtxoIDs(tx.Collateral())
 		if tx.CollateralReturn() != nil {
-			m.addUtxoID(tx.Hash(), uint32(len(tx.Outputs())))
+			m.addUtxoID(tx.Hash(), len(tx.Outputs()))
 		}
 		return nil
 	}
@@ -881,7 +881,7 @@ func (m *DingoStateManager) ApplyTransaction(
 	m.applyRewardWithdrawals(tx)
 	m.removeUtxoIDs(tx.Inputs())
 	for outIdx := range tx.Outputs() {
-		m.addUtxoID(txHash, uint32(outIdx))
+		m.addUtxoID(txHash, outIdx)
 	}
 	return nil
 }
@@ -1556,7 +1556,7 @@ func (m *DingoStateManager) GetStateSnapshot() *conformance.StateSnapshot {
 	}
 }
 
-func (m *DingoStateManager) addUtxoID(hash common.Blake2b256, index uint32) {
+func (m *DingoStateManager) addUtxoID(hash common.Blake2b256, index int) {
 	m.utxoIDs[fmt.Sprintf("%x#%d", hash[:], index)] = struct{}{}
 }
 
