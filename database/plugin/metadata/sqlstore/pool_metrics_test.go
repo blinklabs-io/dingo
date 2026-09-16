@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -193,6 +194,16 @@ func TestWritePoolWaitMetricsReflectContention(t *testing.T) {
 		)
 	default:
 	}
+
+	// Hold the connection a little longer once the wait is confirmed
+	// queued, so the blocked write accumulates a duration large enough to
+	// survive the host's clock resolution. Releasing immediately made
+	// dingo_database_sql_pool_wait_duration_seconds_total read back as
+	// exactly 0 on Windows CI: WaitCount had already incremented (proving
+	// database/sql queued the request), but the queued-to-released window
+	// was short enough that time.Since(waitStart) rounded to zero on that
+	// platform's timer.
+	time.Sleep(50 * time.Millisecond)
 
 	// Release the held connection so the waiting write can proceed.
 	require.NoError(t, holder.Rollback())
