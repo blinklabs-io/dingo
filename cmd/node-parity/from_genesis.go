@@ -55,6 +55,129 @@ func splitStakeMismatches(
 	return real, faults
 }
 
+// fromGenesisCounters accumulates from-genesis's per-epoch verdicts across
+// a whole run: recordEpoch is the report callback's actual logic, pulled
+// out of that closure so a test can drive it directly with a synthetic
+// EpochResult and assert on the resulting counts -- rather than only on
+// splitStakeMismatches in isolation, which proves the partition is correct
+// but not that this counting actually uses it (human review, Chris Guiney,
+// dingo#4319: reverting recordEpoch's stake branch to the old
+// "stakeMismatches++ for any non-empty StakeMismatches" shape left a
+// helper-only test green).
+//
+// The six Incomplete counters matter as much as the three Mismatch ones:
+// each increments whenever a check could not be trusted at all (a Koios
+// fetch failure, a Dingo query error, or a Koios-side data fault) rather
+// than confirming a real match. Without them, a run whose Koios side was
+// degraded throughout reports 0 mismatches across the board and exits 0,
+// indistinguishable from a run that genuinely verified everything (human
+// review, Chris Guiney, dingo#4319).
+type fromGenesisCounters struct {
+	epochsChecked                                 int
+	ppMismatches, stakeMismatches, utxoMismatches int
+	ppIncomplete, stakeIncomplete, utxoIncomplete int
+}
+
+// recordEpoch is documented on fromGenesisCounters.
+func (c *fromGenesisCounters) recordEpoch(
+	r nodeparity.EpochResult,
+	logger *slog.Logger,
+) {
+	c.epochsChecked++
+
+	logger.Debug("epoch timing",
+		"epoch", r.Epoch,
+		"tx_info_flushes", r.TxInfoFlushCount,
+		"tx_info_flush_elapsed", r.TxInfoFlushElapsed.String(),
+		"protocol_params_and_stake_elapsed", r.ProtocolParamsAndStakeElapsed.String(),
+		"utxo_elapsed", r.UTxOElapsed.String(),
+	)
+
+	// koiosparity.DetermineStatus distinguishes a real Dingo/Koios
+	// disagreement (StatusFail) from a comparison that could not be
+	// trusted at all -- most commonly a Koios fetch failure, which
+	// CompareEpochProtocolParams reports as a CategoryDBError mismatch
+	// entry rather than a Go error return (mirroring koios-parity's own
+	// reporting convention exactly). Treating every non-empty
+	// mismatches slice as a real mismatch would count "Koios's daily
+	// quota is exhausted" the same as "Dingo answered the wrong value,"
+	// which are very different things to page someone about.
+	if r.ProtocolParamsErr != nil {
+		c.ppIncomplete++
+		logger.Warn("protocol params check did not run",
+			"epoch", r.Epoch, "error", r.ProtocolParamsErr)
+	} else {
+		switch koiosparity.DetermineStatus(r.ProtocolParamsMismatches) {
+		case koiosparity.StatusFail:
+			c.ppMismatches++
+			for _, m := range r.ProtocolParamsMismatches {
+				logger.Warn("protocol params mismatch",
+					"epoch", r.Epoch, "field", m.Field,
+					"dingo", m.DingoValue, "koios", m.KoiosValue,
+					"category", m.Category)
+			}
+		case koiosparity.StatusError:
+			c.ppIncomplete++
+			for _, m := range r.ProtocolParamsMismatches {
+				logger.Warn("protocol params check incomplete",
+					"epoch", r.Epoch, "field", m.Field,
+					"dingo", m.DingoValue, "category", m.Category)
+			}
+		default:
+			logger.Info("protocol params match", "epoch", r.Epoch)
+		}
+	}
+
+	if r.StakeErr != nil {
+		c.stakeIncomplete++
+		logger.Warn("stake distribution check did not run",
+			"epoch", r.Epoch, "error", r.StakeErr)
+	} else {
+		realMismatches, faults := splitStakeMismatches(r.StakeMismatches)
+		if len(faults) > 0 {
+			c.stakeIncomplete++
+		}
+		for _, m := range faults {
+			logger.Warn("stake distribution check incomplete",
+				"epoch", r.Epoch, "pool", m.PoolIDBech32,
+				"dingo_stake", m.DingoStake, "koios_stake", m.KoiosStake,
+				"reason", m.Reason)
+		}
+		if len(realMismatches) > 0 {
+			c.stakeMismatches++
+			for _, m := range realMismatches {
+				logger.Warn("stake distribution mismatch",
+					"epoch", r.Epoch, "pool", m.PoolIDBech32,
+					"dingo_stake", m.DingoStake, "koios_stake", m.KoiosStake,
+					"diff_lovelace", m.DiffLovelace, "reason", m.Reason)
+			}
+		} else if len(faults) == 0 {
+			logger.Info("stake distribution match", "epoch", r.Epoch)
+		}
+	}
+
+	if !r.UTxOAttempted {
+		c.utxoIncomplete++
+		logger.Debug("utxo check skipped (no genesis baseline)", "epoch", r.Epoch)
+	} else if r.UTxOErr != nil {
+		c.utxoIncomplete++
+		logger.Warn("utxo check did not run",
+			"epoch", r.Epoch, "error", r.UTxOErr)
+	} else if len(r.UTxOMissing) > 0 || len(r.UTxOExtra) > 0 || len(r.UTxODiffers) > 0 {
+		c.utxoMismatches++
+		logger.Warn("utxo set mismatch",
+			"epoch", r.Epoch, "missing", len(r.UTxOMissing),
+			"extra", len(r.UTxOExtra), "differs", len(r.UTxODiffers),
+			"dingo_ref_count", r.UTxORefCount)
+		for _, d := range r.UTxODiffers {
+			logger.Debug("utxo content differs", "epoch", r.Epoch, "detail", d)
+		}
+	} else {
+		logger.Info("utxo set match",
+			"epoch", r.Epoch, "ref_count", r.UTxORefCount)
+	}
+}
+
 func fromGenesisCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "from-genesis",
@@ -133,98 +256,9 @@ func fromGenesisRun(cmd *cobra.Command, _ []string) error {
 		Level: logLevel,
 	}))
 
-	var (
-		epochsChecked   int
-		ppMismatchCount int
-		stakeMismatches int
-		utxoMismatches  int
-	)
+	var counters fromGenesisCounters
 	report := func(r nodeparity.EpochResult) {
-		epochsChecked++
-
-		logger.Debug("epoch timing",
-			"epoch", r.Epoch,
-			"tx_info_flushes", r.TxInfoFlushCount,
-			"tx_info_flush_elapsed", r.TxInfoFlushElapsed.String(),
-			"protocol_params_and_stake_elapsed", r.ProtocolParamsAndStakeElapsed.String(),
-			"utxo_elapsed", r.UTxOElapsed.String(),
-		)
-
-		// koiosparity.DetermineStatus distinguishes a real Dingo/Koios
-		// disagreement (StatusFail) from a comparison that could not be
-		// trusted at all -- most commonly a Koios fetch failure, which
-		// CompareEpochProtocolParams reports as a CategoryDBError mismatch
-		// entry rather than a Go error return (mirroring koios-parity's own
-		// reporting convention exactly). Treating every non-empty
-		// mismatches slice as a real mismatch would count "Koios's daily
-		// quota is exhausted" the same as "Dingo answered the wrong value,"
-		// which are very different things to page someone about.
-		if r.ProtocolParamsErr != nil {
-			logger.Warn("protocol params check did not run",
-				"epoch", r.Epoch, "error", r.ProtocolParamsErr)
-		} else {
-			switch koiosparity.DetermineStatus(r.ProtocolParamsMismatches) {
-			case koiosparity.StatusFail:
-				ppMismatchCount++
-				for _, m := range r.ProtocolParamsMismatches {
-					logger.Warn("protocol params mismatch",
-						"epoch", r.Epoch, "field", m.Field,
-						"dingo", m.DingoValue, "koios", m.KoiosValue,
-						"category", m.Category)
-				}
-			case koiosparity.StatusError:
-				for _, m := range r.ProtocolParamsMismatches {
-					logger.Warn("protocol params check incomplete",
-						"epoch", r.Epoch, "field", m.Field,
-						"dingo", m.DingoValue, "category", m.Category)
-				}
-			default:
-				logger.Info("protocol params match", "epoch", r.Epoch)
-			}
-		}
-
-		if r.StakeErr != nil {
-			logger.Warn("stake distribution check did not run",
-				"epoch", r.Epoch, "error", r.StakeErr)
-		} else {
-			realMismatches, faults := splitStakeMismatches(r.StakeMismatches)
-			for _, m := range faults {
-				logger.Warn("stake distribution check incomplete",
-					"epoch", r.Epoch, "pool", m.PoolIDBech32,
-					"dingo_stake", m.DingoStake, "koios_stake", m.KoiosStake,
-					"reason", m.Reason)
-			}
-			if len(realMismatches) > 0 {
-				stakeMismatches++
-				for _, m := range realMismatches {
-					logger.Warn("stake distribution mismatch",
-						"epoch", r.Epoch, "pool", m.PoolIDBech32,
-						"dingo_stake", m.DingoStake, "koios_stake", m.KoiosStake,
-						"diff_lovelace", m.DiffLovelace, "reason", m.Reason)
-				}
-			} else if len(faults) == 0 {
-				logger.Info("stake distribution match", "epoch", r.Epoch)
-			}
-		}
-
-		if !r.UTxOAttempted {
-			logger.Debug("utxo check skipped (no genesis baseline)", "epoch", r.Epoch)
-		} else if r.UTxOErr != nil {
-			logger.Warn("utxo check did not run",
-				"epoch", r.Epoch, "error", r.UTxOErr)
-		} else if len(r.UTxOMissing) > 0 || len(r.UTxOExtra) > 0 || len(r.UTxODiffers) > 0 {
-			utxoMismatches++
-			logger.Warn("utxo set mismatch",
-				"epoch", r.Epoch, "missing", len(r.UTxOMissing),
-				"extra", len(r.UTxOExtra), "differs", len(r.UTxODiffers),
-				"dingo_ref_count", r.UTxORefCount)
-			for _, d := range r.UTxODiffers {
-				logger.Debug("utxo content differs", "epoch", r.Epoch, "detail", d)
-			}
-		} else {
-			logger.Info("utxo set match",
-				"epoch", r.Epoch, "ref_count", r.UTxORefCount)
-		}
+		counters.recordEpoch(r, logger)
 	}
 
 	logf := func(format string, args ...any) {
@@ -236,10 +270,13 @@ func fromGenesisRun(cmd *cobra.Command, _ []string) error {
 	)
 
 	logger.Info("run summary",
-		"epochs_checked", epochsChecked,
-		"protocol_param_mismatches", ppMismatchCount,
-		"stake_mismatches", stakeMismatches,
-		"utxo_mismatches", utxoMismatches,
+		"epochs_checked", counters.epochsChecked,
+		"protocol_param_mismatches", counters.ppMismatches,
+		"stake_mismatches", counters.stakeMismatches,
+		"utxo_mismatches", counters.utxoMismatches,
+		"protocol_param_checks_incomplete", counters.ppIncomplete,
+		"stake_checks_incomplete", counters.stakeIncomplete,
+		"utxo_checks_incomplete", counters.utxoIncomplete,
 	)
 
 	// context.Canceled is this command's own documented normal way to
@@ -251,10 +288,10 @@ func fromGenesisRun(cmd *cobra.Command, _ []string) error {
 	if err != nil && !errors.Is(err, context.Canceled) {
 		return err
 	}
-	if ppMismatchCount > 0 || stakeMismatches > 0 || utxoMismatches > 0 {
+	if counters.ppMismatches > 0 || counters.stakeMismatches > 0 || counters.utxoMismatches > 0 {
 		return fmt.Errorf(
 			"ledger state diverged from Koios: %d protocol-param, %d stake, %d utxo mismatch epoch(s)",
-			ppMismatchCount, stakeMismatches, utxoMismatches,
+			counters.ppMismatches, counters.stakeMismatches, counters.utxoMismatches,
 		)
 	}
 	return nil
