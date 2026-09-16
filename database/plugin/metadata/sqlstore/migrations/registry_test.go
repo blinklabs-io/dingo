@@ -150,7 +150,7 @@ func TestSQLiteRegistry(t *testing.T) {
 	require.NotNil(t, registry[14].Backfill)
 	require.Equal(t, 16, registry[15].Version)
 	require.Equal(t, governanceProposalOptionalAnchorSchemaRelease, registry[15].Name)
-	require.Len(t, registry[15].SQL["sqlite"].Expand, 23)
+	require.Len(t, registry[15].SQL["sqlite"].Expand, 21)
 	require.Empty(t, registry[15].Backfill)
 }
 

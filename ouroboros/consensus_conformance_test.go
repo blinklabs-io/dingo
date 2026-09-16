@@ -29,6 +29,7 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/ouroboros-mock/consensus"
 	"github.com/blinklabs-io/ouroboros-mock/consensus/format"
+	"github.com/stretchr/testify/require"
 )
 
 // TestConsensusConformanceVectors replays the upstream consensus-
@@ -134,6 +135,32 @@ func TestConsensusConformanceKGuardIsLive(t *testing.T) {
 	if exercised == 0 {
 		t.Skip("no vector carries both security_param>0 and local_tip")
 	}
+}
+
+func TestSelectedPeerTraceUsesPeerIdentityForEqualTips(t *testing.T) {
+	t.Parallel()
+	tip := format.Tip{Slot: 10, Hash: format.HexBytes{0xaa}, BlockNumber: 10}
+	first := format.ServedMessage{
+		Protocol:   format.ProtocolChainSync,
+		MsgType:    format.ChainSyncMsgRollForward,
+		Tip:        &tip,
+		HeaderCbor: format.HexBytes{0x01},
+	}
+	second := first
+	second.HeaderCbor = format.HexBytes{0x02}
+	capture := &format.ConsensusCapture{Peers: []format.PeerInput{
+		{PeerID: 1, Served: []format.ServedMessage{first}},
+		{PeerID: 2, Served: []format.ServedMessage{second}},
+	}}
+	a := newReplayAdapter(t, capture)
+	selected := a.connFor(2)
+	other := a.connFor(1)
+	chainTip := toGouroborosTip(tip)
+	require.True(t, a.cs.UpdatePeerTip(selected, chainTip, nil))
+	require.True(t, a.cs.UpdatePeerTip(other, chainTip, nil))
+	require.Equal(t, selected, *a.cs.GetBestPeer())
+
+	require.Equal(t, capture.Peers[1].Served, a.selectedPeerTrace())
 }
 
 const (
@@ -376,21 +403,13 @@ func (a *replayAdapter) DrainDownstreamChainSync() []format.ServedMessage {
 }
 
 func (a *replayAdapter) selectedPeerTrace() []format.ServedMessage {
-	best, ok := a.BestTip()
-	if !ok {
+	best := a.cs.GetBestPeer()
+	if best == nil {
 		return nil
 	}
 	for _, peer := range a.capture.Peers {
-		for i := len(peer.Served) - 1; i >= 0; i-- {
-			message := peer.Served[i]
-			if message.MsgType != format.ChainSyncMsgRollForward ||
-				message.Tip == nil {
-				continue
-			}
-			if tipsEqual(*message.Tip, best) {
-				return cloneServedMessages(peer.Served)
-			}
-			break
+		if a.connFor(peer.PeerID) == *best {
+			return cloneServedMessages(peer.Served)
 		}
 	}
 	return nil

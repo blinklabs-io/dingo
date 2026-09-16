@@ -434,10 +434,30 @@ func (m *DingoStateManager) LoadInitialState(
 		}
 	}
 
-	for _, hash := range state.DRepRegistrations {
-		drep := &models.Drep{Credential: hash[:], Active: true}
+	for credential, registered := range state.DRepRegistrationsByCredential {
+		if !registered {
+			continue
+		}
+		credentialTag, err := models.CredentialTagFromUint(credential.CredType)
+		if err != nil {
+			return fmt.Errorf("seed drep credential tag: %w", err)
+		}
+		drep := &models.Drep{
+			Credential:    credential.Credential[:],
+			CredentialTag: credentialTag,
+			Active:        true,
+		}
 		if err := m.db.CreateDrep(txn, drep); err != nil {
 			return fmt.Errorf("seed drep: %w", err)
+		}
+	}
+	for _, hash := range state.DRepRegistrations {
+		if hasDRepCredentialHash(state.DRepRegistrationsByCredential, hash) {
+			continue
+		}
+		drep := &models.Drep{Credential: hash[:], Active: true}
+		if err := m.db.CreateDrep(txn, drep); err != nil {
+			return fmt.Errorf("seed legacy drep: %w", err)
 		}
 	}
 
@@ -1006,7 +1026,7 @@ func (m *DingoStateManager) updateGovStateForCertificate(
 		}
 	case common.CertificateTypeDeregistrationDrep:
 		if c, ok := cert.(*common.DeregistrationDrepCertificate); ok {
-			m.govState.DeregisterDRep(c.DrepCredential.Credential)
+			m.govState.DeregisterDRepCredential(c.DrepCredential)
 		}
 	case common.CertificateTypeUpdateDrep:
 		if c, ok := cert.(*common.UpdateDrepCertificate); ok {
@@ -1029,6 +1049,18 @@ func (m *DingoStateManager) updateGovStateForCertificate(
 	default:
 		// Other certificate types not relevant to governance pre-validation.
 	}
+}
+
+func hasDRepCredentialHash(
+	registrations map[mockledger.RewardAccountKey]bool,
+	hash common.Blake2b224,
+) bool {
+	for credential, registered := range registrations {
+		if registered && credential.Credential == hash {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *DingoStateManager) updateStakeDepositForCertificate(
