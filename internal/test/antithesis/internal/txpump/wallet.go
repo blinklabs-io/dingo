@@ -37,7 +37,10 @@ type UTxO struct {
 // hold enough ADA to cover the requested amount.
 var ErrInsufficientFunds = errors.New("wallet: insufficient funds")
 
-type pendingTx struct{ inputs, outputs []UTxO }
+type pendingTx struct {
+	inputs, outputs []UTxO
+	absent          bool
+}
 
 // Wallet tracks the set of known UTxOs and provides thread-safe coin
 // selection using a largest-first strategy.
@@ -125,8 +128,8 @@ func (w *Wallet) Reserve(
 		}
 	}
 	w.pending[id] = pendingTx{
-		append([]UTxO(nil), inputs...),
-		append([]UTxO(nil), outputs...),
+		inputs:  append([]UTxO(nil), inputs...),
+		outputs: append([]UTxO(nil), outputs...),
 	}
 }
 
@@ -198,6 +201,15 @@ func (w *Wallet) ReconcileSnapshot(snapshot []UTxO, presence map[string]bool) {
 				current.SigningKey = in.SigningKey
 				chain[utxoKey(in)] = current
 			}
+		}
+		if !tx.absent {
+			// A node can remove a forged transaction from the mempool before
+			// its committed outputs and spent inputs are visible to LSQ. Keep
+			// the record through one absent observation so the next reconcile
+			// can distinguish that race from a real rollback.
+			tx.absent = true
+			w.pending[id] = tx
+			continue
 		}
 		delete(w.pending, id)
 		// Terminal records are retired immediately; correctness lives in the
