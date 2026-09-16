@@ -65,6 +65,14 @@ type ChainTipProvider interface {
 	Tip() ochainsync.Tip
 }
 
+// ChainTipSigningProvider binds a callback to the chain-tip lock. Production
+// chain implementations use this to keep the parent snapshot stable through
+// header encoding and KES signing. Providers that do not implement it retain
+// the best-effort final tip check for compatibility with embedders.
+type ChainTipSigningProvider interface {
+	WithTip(func(ochainsync.Tip) error) error
+}
+
 // EpochNonceProvider provides the epoch nonce for VRF proof generation.
 type EpochNonceProvider interface {
 	// CurrentEpoch returns the current epoch number.
@@ -272,6 +280,14 @@ var errParentChangedDuringBuild = errors.New(
 	"selected parent changed during block assembly",
 )
 
+// errParentSlotNotBelowBlock indicates that a normal live-tip block would
+// name a parent at the same or a later slot. Such a block is invalid under
+// Praos slot ordering; equal-slot alternatives must use their explicit
+// predecessor context rather than the live tip.
+var errParentSlotNotBelowBlock = errors.New(
+	"parent slot is not below the forged slot",
+)
+
 // tipsEqual reports whether two chain tips reference the same point and
 // block number. Slot and hash are both required: a rollback can restore a
 // prior slot, and two forged blocks never share a hash.
@@ -312,6 +328,14 @@ func (b *DefaultBlockBuilder) buildBlock(
 	// genesis is BlockNo 0. When the tip is genesis (empty hash), the
 	// chain has no blocks yet so the next block number is 0.
 	isGenesis := len(currentTip.Point.Hash) == 0
+	if !isGenesis && slot <= currentTip.Point.Slot {
+		return nil, nil, fmt.Errorf(
+			"%w: parent slot %d, block slot %d",
+			errParentSlotNotBelowBlock,
+			currentTip.Point.Slot,
+			slot,
+		)
+	}
 
 	var nextBlockNumber uint64
 	if !isGenesis {
@@ -1085,28 +1109,54 @@ func (b *DefaultBlockBuilder) buildBlock(
 		}
 	}
 
-	// Sign the block header with KES.
-	// First, we need to serialize the header body for signing.
-	headerBodyCbor, err := cbor.Encode(headerBody)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to encode header body: %w", err)
-	}
+	// Sign the block header with KES. A production Chain binds this callback
+	// to its mutex, so the parent cannot change between the final comparison
+	// and the signature. The fallback preserves compatibility with external
+	// providers that only expose Tip; their final read remains advisory and
+	// AddBlock is still the authoritative admission check.
+	var headerCbor []byte
+	encodeAndSign := func(reTip ochainsync.Tip) error {
+		if !tipsEqual(reTip, currentTip) {
+			return fmt.Errorf(
+				"%w: parent tip changed from %x/%d to %x/%d before signing",
+				errParentChangedDuringBuild,
+				currentTip.Point.Hash,
+				currentTip.BlockNumber,
+				reTip.Point.Hash,
+				reTip.BlockNumber,
+			)
+		}
+		// First, serialize the header body for signing.
+		headerBodyCbor, err := cbor.Encode(headerBody)
+		if err != nil {
+			return fmt.Errorf("failed to encode header body: %w", err)
+		}
 
-	signature, err := credentials.kesSign(kesPeriod, headerBodyCbor)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to sign block header: %w", err)
-	}
+		signature, err := credentials.kesSign(kesPeriod, headerBodyCbor)
+		if err != nil {
+			return fmt.Errorf("failed to sign block header: %w", err)
+		}
 
-	// Build the block CBOR using the pre-encoded header body to
-	// ensure the prevHash encoding (null vs bytes) matches what was
-	// signed. Re-encoding via the gouroboros struct types would
-	// lose the null encoding for genesis blocks.
-	headerCbor, err := cbor.Encode(rawBlockHeader{
-		Body:      cbor.RawMessage(headerBodyCbor),
-		Signature: signature,
-	})
+		// Build the block CBOR using the pre-encoded header body to
+		// ensure the prevHash encoding (null vs bytes) matches what was
+		// signed. Re-encoding via the gouroboros struct types would
+		// lose the null encoding for genesis blocks.
+		headerCbor, err = cbor.Encode(rawBlockHeader{
+			Body:      cbor.RawMessage(headerBodyCbor),
+			Signature: signature,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to encode block header: %w", err)
+		}
+		return nil
+	}
+	if provider, ok := b.chainTip.(ChainTipSigningProvider); ok {
+		err = provider.WithTip(encodeAndSign)
+	} else {
+		err = encodeAndSign(b.chainTip.Tip())
+	}
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to encode block header: %w", err)
+		return nil, nil, err
 	}
 	blockCbor, err := encodeBlockCbor(
 		limits.era,
