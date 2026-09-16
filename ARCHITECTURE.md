@@ -4129,6 +4129,34 @@ The existing equal-tip incumbent preservation (when `ComparePraosTips` returns
 `ChainEqual`, and the same-block transport tiebreaker) is preserved and runs
 ahead of the pin.
 
+**Switch-back cooldown bounds the longer-chain escape's rate.** The
+longer-chain escape above is a per-evaluation snapshot comparison with no
+memory of very recent switches: two peers whose delivered frontiers
+repeatedly leapfrog each other by more than `catchUpPinHeadMargin` — plausible
+on ordinary per-header delivery jitter near the tip, since a single newly
+delivered header can itself cross a margin of two blocks — can otherwise hand
+the active connection back and forth on every such crossing, arbitrarily
+often. This was observed live on Preview near the real chain tip: the active
+connection flapped between the same 2-3 peer connections multiple times per
+second with no net progress, saturating `chainsyncMutex` /
+`chainsyncBlockfetchMutex` in `ledger.handleChainSwitchEvent` and backing up
+the event bus's `chainselection.chain_switch` subscriber queue toward its
+100,000-entry capacity. `ChainSelectorConfig.SwitchBackCooldown` (default 2s,
+`defaultSwitchBackCooldown`) rate-limits it: `recordSwitchAwayLocked` marks
+the abandoned connection's departure time in `ChainSelector.recentlyLeft`,
+and the longer-chain escape's release is itself gated by
+`switchBackDebouncedLocked` — a connection abandoned less than the cooldown
+ago cannot reclaim the active connection through that escape again, even
+though it currently leads by more than the margin. This is a rate limit, not
+a correctness change: a genuinely new challenger (never recently active) is
+never debounced, a persistent lead is still adopted once the cooldown
+elapses, and the progress-stall and incumbent-unselectable escapes are
+evaluated first and are never subject to it, so a dead/stalled incumbent can
+never hide behind the cooldown. Regression tests:
+`TestSwitchBackCooldownBoundsOscillationFrequency` and
+`TestSwitchBackCooldownDoesNotBlockGenuinelyNewChallenger`
+(`chainselection/switch_cooldown_test.go`).
+
 ## Network and Protocol Handling
 
 ### Ouroboros Protocol Stack
@@ -11907,6 +11935,37 @@ prevent — merely logging and returning does not. Regression tests:
 `TestTryResolveForkExtensionDoesNotThrashAlreadyRunningBlockfetch`, and
 `TestEnsureBlockfetchDrainingAfterForkQueueFailureRecoversWhenStartFails`
 (`ledger/chainsync_fork_queue_full_test.go`).
+
+**The success path's own blockfetch restart had the same gap.** The "ancestor
+is the local tip, extend without rollback" branch of `tryResolveFork` queues
+the fork-path headers successfully and then calls
+`restartQueuedBlockfetchAfterForkLocked(e.ConnectionId, ...)` to fetch their
+bodies. Unlike the queue-overflow failure path above, a failure here (for
+example `e.ConnectionId`'s connection closing between the fork-resolution
+decision and this dispatch — including via
+`ConnectionRecycleRequestedEvent`, which a rapid string of chain-selection
+reversals can itself trigger: a peer that just lost the active connection has
+its still-in-flight or now-stale blocks rejected as not extending the
+(already-moved) chain tip, and `noteNonExtendingBlockRejection` recycles it
+once enough of those land inside `nonExtendingBlockRejectionWindow`) was only
+logged (`"failed to start blockfetch after fork extension"`), leaving the
+just-queued headers with nothing ever scheduled to fetch their bodies —
+observed live as continuous reselection with no block-apply progress at all,
+the fork-extension counterpart of the queue-overflow stall documented above.
+`recoverBlockfetchRestartFailureLocked` (`ledger/chainsync.go`) closes it:
+first it retries the restart against whatever connection chain selection
+currently has active (mirroring the fallback `handleChainSwitchEvent` already
+uses for its own handoff target), and only if no live alternative exists (or
+that retry also fails) does it fall back to the queue-overflow path's own
+recovery — `clearQueuedHeaders` plus a chainsync re-sync
+(`ChainsyncResyncReasonForkExtensionRestartFailed`) — so the pipeline resumes
+on reconnect instead of idling forever. See also the anti-flap pin's
+`SwitchBackCooldown` above, which bounds how often chain selection can hand
+the active connection away in the first place and is the primary mitigation
+for the reversal storm that triggers this failure mode. Regression tests:
+`TestRecoverBlockfetchRestartFailureRetriesLiveActiveConnection` and
+`TestRecoverBlockfetchRestartFailureFallsBackToResyncWithoutLiveConnection`
+(`ledger/chainsync_fork_extension_restart_test.go`).
 
 **Metrics** (`ledger/metrics.go`): `decodeReadChainBatch` refreshes a set of
 gauges — `dingo_ledger_block_pipeline_blocks_decoded`,

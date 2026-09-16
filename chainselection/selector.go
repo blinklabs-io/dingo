@@ -69,6 +69,12 @@ const (
 	// is the key safety valve that guarantees the node can never pin to a
 	// non-progressing peer forever.
 	catchUpPinStallTimeout = 20 * time.Second
+
+	// defaultSwitchBackCooldown is the default minimum time a connection must
+	// stay abandoned before the longer-chain escape (see
+	// pinIncumbentDuringCatchUpLocked) may hand the active connection back to
+	// it. See ChainSelectorConfig.SwitchBackCooldown.
+	defaultSwitchBackCooldown = 2 * time.Second
 )
 
 // safeBlockDiff computes the difference between two block numbers as int64,
@@ -124,6 +130,21 @@ type ChainSelectorConfig struct {
 	// connection and whether any samples exist. Used only to choose a
 	// peer when two peers advertise the exact same selected block.
 	BlockfetchLatency func(ouroboros.ConnectionId) (time.Duration, bool)
+	// SwitchBackCooldown bounds the rate of active-connection handoffs
+	// driven by the anti-flap pin's longer-chain escape
+	// (pinIncumbentDuringCatchUpLocked): once the active connection moves
+	// away from a peer, that peer cannot reclaim it via the longer-chain
+	// escape again until this much time has passed, even if it currently
+	// leads by more than catchUpPinHeadMargin. This is a rate limit, not a
+	// correctness rule -- the peer is still adopted once the cooldown
+	// expires (or immediately via the incumbent-unselectable or
+	// progress-stall escapes, which this never gates) -- and it exists
+	// because two peers whose delivered frontiers repeatedly leapfrog each
+	// other by more than the margin can otherwise hand the chainsync/
+	// blockfetch pipeline back and forth on every such crossing. 0 (the
+	// zero value) is replaced with defaultSwitchBackCooldown by
+	// NewChainSelector, matching EvaluationInterval and StaleTipThreshold.
+	SwitchBackCooldown time.Duration
 }
 
 // ChainSelector tracks chain tips from multiple peers and selects the best
@@ -155,6 +176,14 @@ type ChainSelector struct {
 	localTipProgressAt    time.Time
 	// nowFn is injectable for deterministic tests; defaults to time.Now.
 	nowFn func() time.Time
+
+	// switchBackCooldown is the resolved value of
+	// ChainSelectorConfig.SwitchBackCooldown (defaulted by NewChainSelector).
+	switchBackCooldown time.Duration
+	// recentlyLeft records, per connection, when the active connection last
+	// moved away from it. Read and written under mutex. See
+	// switchBackDebouncedLocked and recordSwitchAwayLocked.
+	recentlyLeft map[ouroboros.ConnectionId]time.Time
 
 	// lastCorroborationFailedConn dedups GenesisCorroborationFailedEvent so a
 	// persistently uncorroborated fast source does not emit an event on every
@@ -222,6 +251,9 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 	if cfg.StaleTipThreshold == 0 {
 		cfg.StaleTipThreshold = defaultStaleTipThreshold
 	}
+	if cfg.SwitchBackCooldown == 0 {
+		cfg.SwitchBackCooldown = defaultSwitchBackCooldown
+	}
 	maxPeers := cfg.MaxTrackedPeers
 	if maxPeers <= 0 {
 		maxPeers = DefaultMaxTrackedPeers
@@ -239,15 +271,17 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 		cfg.MinCorroboratingPeers = 1
 	}
 	cs := &ChainSelector{
-		config:            cfg,
-		securityParam:     cfg.SecurityParam,
-		maxTrackedPeers:   maxPeers,
-		mode:              SelectionModePraos,
-		peerTips:          make(map[ouroboros.ConnectionId]*PeerChainTip),
-		eligible:          make(map[ouroboros.ConnectionId]bool),
-		priority:          make(map[ouroboros.ConnectionId]int),
-		evaluationTrigger: make(chan struct{}, 1),
-		nowFn:             time.Now,
+		config:             cfg,
+		securityParam:      cfg.SecurityParam,
+		maxTrackedPeers:    maxPeers,
+		mode:               SelectionModePraos,
+		peerTips:           make(map[ouroboros.ConnectionId]*PeerChainTip),
+		eligible:           make(map[ouroboros.ConnectionId]bool),
+		priority:           make(map[ouroboros.ConnectionId]int),
+		evaluationTrigger:  make(chan struct{}, 1),
+		nowFn:              time.Now,
+		switchBackCooldown: cfg.SwitchBackCooldown,
+		recentlyLeft:       make(map[ouroboros.ConnectionId]time.Time),
 	}
 	if cfg.GenesisMode {
 		cs.mode = SelectionModeGenesis
@@ -772,6 +806,7 @@ func (cs *ChainSelector) deletePeerLocked(connId ouroboros.ConnectionId) {
 	delete(cs.peerTips, connId)
 	delete(cs.eligible, connId)
 	delete(cs.priority, connId)
+	delete(cs.recentlyLeft, connId)
 }
 
 // RemovePeer removes a peer from tracking.
@@ -1668,6 +1703,7 @@ func (cs *ChainSelector) localTipStalledLocked() bool {
 func (cs *ChainSelector) pinIncumbentDuringCatchUpLocked(
 	previousBest ouroboros.ConnectionId,
 	incumbentTip *PeerChainTip,
+	challengerConn ouroboros.ConnectionId,
 	challengerTip *PeerChainTip,
 ) bool {
 	// Inactive near genesis / before any local tip has been applied.
@@ -1704,11 +1740,63 @@ func (cs *ChainSelector) pinIncumbentDuringCatchUpLocked(
 	challengerBlock := challengerTip.SelectionTip().BlockNumber
 	if challengerBlock > safeAddUint64(incumbentBlock, catchUpPinHeadMargin) &&
 		!sameCanonicalChain(incumbentTip, challengerTip) {
+		// Switch-back debounce: refuse to hand the active connection back to
+		// a peer abandoned within switchBackCooldown, even though it
+		// currently leads by more than the margin. Without this, two peers
+		// whose delivered frontiers repeatedly leapfrog each other by more
+		// than catchUpPinHeadMargin -- plausible on ordinary header-delivery
+		// jitter near the tip, where each peer's next single header can
+		// itself cross the margin -- hand the chainsync/blockfetch pipeline
+		// back and forth on every crossing, arbitrarily often. This does not
+		// weaken convergence: a genuinely better peer that was NOT just the
+		// incumbent is never debounced, and the progress-stall and
+		// incumbent-unselectable escapes above always run first and are
+		// never subject to this cooldown, so a dead/stalled incumbent can
+		// never hide behind it.
+		if cs.switchBackDebouncedLocked(challengerConn) {
+			cs.config.Logger.Debug(
+				"debouncing switch back to recently abandoned connection",
+				"incumbent", previousBest.String(),
+				"challenger", challengerConn.String(),
+				"switch_back_cooldown", cs.switchBackCooldown,
+			)
+			return true
+		}
 		return false
 	}
 	// Otherwise this is a head micro-fork / same-height sibling: pin the
 	// incumbent and do not hand off the pipeline.
 	return true
+}
+
+// switchBackDebouncedLocked reports whether connId was the active connection
+// until less than switchBackCooldown ago. Must be called with cs.mutex held.
+func (cs *ChainSelector) switchBackDebouncedLocked(
+	connId ouroboros.ConnectionId,
+) bool {
+	if cs.switchBackCooldown <= 0 {
+		return false
+	}
+	leftAt, ok := cs.recentlyLeft[connId]
+	if !ok {
+		return false
+	}
+	return cs.now().Sub(leftAt) < cs.switchBackCooldown
+}
+
+// recordSwitchAwayLocked notes that the active connection just moved away
+// from left, arming the switch-back debounce for it, and clears any stale
+// entry for the newly adopted connection (it is active now, not abandoned).
+// Must be called with cs.mutex held.
+func (cs *ChainSelector) recordSwitchAwayLocked(
+	left ouroboros.ConnectionId,
+	adopted ouroboros.ConnectionId,
+) {
+	if cs.recentlyLeft == nil {
+		cs.recentlyLeft = make(map[ouroboros.ConnectionId]time.Time)
+	}
+	cs.recentlyLeft[left] = cs.now()
+	delete(cs.recentlyLeft, adopted)
 }
 
 func (cs *ChainSelector) evaluateBestPeerLocked() (
@@ -1771,6 +1859,7 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 			} else if cs.pinIncumbentDuringCatchUpLocked(
 				*previousBest,
 				previousPeerTip,
+				*newBest,
 				newPeerTip,
 			) {
 				// Anti-flap incumbent pin: the challenger is canonically
@@ -1804,6 +1893,9 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 		}
 		newTip := newPeerTip.Tip
 		newObservedTip := newPeerTip.SelectionTip()
+		if previousBest != nil {
+			cs.recordSwitchAwayLocked(*previousBest, *newBest)
+		}
 		cs.bestPeerConn = newBest
 		switchOccurred = true
 
