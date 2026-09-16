@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -35,7 +36,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/testutil"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -210,7 +211,7 @@ func TestEnsureReferencedEndorserBlocksDoesNotBlockOnUnreadAnnouncement(
 	// it is cached before anything actually depends on it.
 	select {
 	case <-fetchedCh:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("background by-point fetch was never dispatched")
 	}
 	require.Positive(t, fetched.Load())
@@ -536,13 +537,13 @@ func TestLeiosEbWaitMetricsRecordOutcomeAndDuration(t *testing.T) {
 	require.Equal(
 		t,
 		4,
-		testutil.CollectAndCount(ls.metrics.leiosEbWaitSeconds),
+		promtestutil.CollectAndCount(ls.metrics.leiosEbWaitSeconds),
 	)
 	require.Zero(t, leiosWaitTestHistogram(t, reg, "arrived"))
 	require.Zero(t, leiosWaitTestHistogram(t, reg, "timeout"))
 	require.Zero(t, leiosWaitTestHistogram(t, reg, "cancelled"))
 	require.Zero(t, leiosWaitTestHistogram(t, reg, "unavailable"))
-	require.Zero(t, testutil.ToFloat64(ls.metrics.leiosEbWaitTimeouts))
+	require.Zero(t, promtestutil.ToFloat64(ls.metrics.leiosEbWaitTimeouts))
 
 	ebHash := lcommon.NewBlake2b256(leiosTestHash(0xE7))
 
@@ -558,7 +559,7 @@ func TestLeiosEbWaitMetricsRecordOutcomeAndDuration(t *testing.T) {
 	require.Equal(
 		t,
 		float64(1),
-		testutil.ToFloat64(ls.metrics.leiosEbWaitTimeouts),
+		promtestutil.ToFloat64(ls.metrics.leiosEbWaitTimeouts),
 	)
 	require.Zero(t, leiosWaitTestHistogram(t, reg, "arrived"))
 
@@ -579,7 +580,7 @@ func TestLeiosEbWaitMetricsRecordOutcomeAndDuration(t *testing.T) {
 	require.Equal(
 		t,
 		float64(1),
-		testutil.ToFloat64(ls.metrics.leiosEbWaitTimeouts),
+		promtestutil.ToFloat64(ls.metrics.leiosEbWaitTimeouts),
 	)
 }
 
@@ -636,7 +637,7 @@ func TestLeiosEbWaitCancellationIsNotCountedAsTimeout(t *testing.T) {
 			require.Equal(
 				t,
 				4,
-				testutil.CollectAndCount(ls.metrics.leiosEbWaitSeconds),
+				promtestutil.CollectAndCount(ls.metrics.leiosEbWaitSeconds),
 			)
 
 			if cancelOnPoll == 0 {
@@ -667,7 +668,7 @@ func TestLeiosEbWaitCancellationIsNotCountedAsTimeout(t *testing.T) {
 			require.Zero(t, leiosWaitTestHistogram(t, reg, "arrived"))
 			require.Zero(
 				t,
-				testutil.ToFloat64(ls.metrics.leiosEbWaitTimeouts),
+				promtestutil.ToFloat64(ls.metrics.leiosEbWaitTimeouts),
 				"a cancelled pass must not be counted as a diffusion-window timeout",
 			)
 		})
@@ -1296,7 +1297,7 @@ func TestMandatoryFetchIsNotStarvedByBestEffortSpawns(t *testing.T) {
 	for range leiosBackfillConcurrency {
 		select {
 		case <-spawned:
-		case <-time.After(5 * time.Second):
+		case <-time.After(testutil.AsyncWait):
 			t.Fatal("best-effort spawns never occupied the budget")
 		}
 	}
@@ -1315,7 +1316,7 @@ func TestMandatoryFetchIsNotStarvedByBestEffortSpawns(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal(
 			"mandatory certified fetch was starved by best-effort spawns; " +
 				"it must have its own reserved budget",
@@ -1381,7 +1382,7 @@ func TestCIPGraceUnavailableIsNotRecordedAsATimeout(t *testing.T) {
 	)
 	require.Zero(
 		t,
-		testutil.ToFloat64(ls.metrics.leiosEbWaitTimeouts),
+		promtestutil.ToFloat64(ls.metrics.leiosEbWaitTimeouts),
 		"the timeout counter must not move for a routine unfetchable block",
 	)
 }

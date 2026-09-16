@@ -118,10 +118,10 @@ func startApplyContractPipeline(
 	t.Cleanup(func() {
 		require.NoError(t, p.Stop())
 		testutil.RequireReceive(
-			t, errsDone, 5*time.Second, "errors drain did not exit",
+			t, errsDone, testutil.AsyncWait, "errors drain did not exit",
 		)
 		testutil.RequireReceive(
-			t, resultsDone, 5*time.Second, "results drain did not exit",
+			t, resultsDone, testutil.AsyncWait, "results drain did not exit",
 		)
 	})
 	return p, drained
@@ -178,7 +178,7 @@ func TestPipelineApplyFuncIsSerialAndInSubmissionOrder(t *testing.T) {
 	// Results still arrive in the same order after apply.
 	for i := range numBlocks {
 		item := testutil.RequireReceive(
-			t, drained, 5*time.Second, "results drain",
+			t, drained, testutil.AsyncWait, "results drain",
 		)
 		require.Equal(t, uint64(i), item.SequenceNumber()) //nolint:gosec
 		require.True(t, item.IsApplied())
@@ -223,7 +223,7 @@ func TestPipelineApplyFuncErrorDoesNotStopLaterBlocks(t *testing.T) {
 	var failedItem *pipeline.BlockItem
 	for range numBlocks {
 		item := testutil.RequireReceive(
-			t, drained, 5*time.Second, "results drain",
+			t, drained, testutil.AsyncWait, "results drain",
 		)
 		if item.SequenceNumber() == failSeq {
 			failedItem = item
@@ -275,7 +275,7 @@ func TestPipelineApplyFuncSkipsUndecodableBlockButAppliesTheNext(t *testing.T) {
 	var sawDecodeError bool
 	for range 3 {
 		item := testutil.RequireReceive(
-			t, drained, 5*time.Second, "results drain",
+			t, drained, testutil.AsyncWait, "results drain",
 		)
 		if item.SequenceNumber() == 1 {
 			require.Error(t, item.DecodeError())
@@ -317,7 +317,7 @@ func TestPipelineWaitForDrainCoversApplyFunc(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		blockStarted,
-		5*time.Second,
+		testutil.AsyncWait,
 		"ApplyFunc did not start",
 	)
 	// A drain barrier shorter than the apply work it covers times out.

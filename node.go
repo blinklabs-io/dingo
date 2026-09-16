@@ -187,6 +187,10 @@ type Node struct {
 	// own documented "keeps syncing normally" behavior.
 	snapshotMu sync.Mutex
 
+	// health carries the sync signals the readiness probe reads. See
+	// node_health.go; it survives a live database restore/truncate rebuild.
+	health nodeHealth
+
 	// rebuildableMetrics tracks every Prometheus collector registered by a
 	// component a live database restore/truncate rebuilds, so
 	// closeStorageForLiveLifecycleOp can unregister them before the
@@ -1818,14 +1822,19 @@ func taintValue(relaxed bool) string {
 // subscriber does node-to-node work and a local client reconnecting in a
 // tight loop would otherwise wedge the EventBus. This callback is the NtC
 // counterpart to HandleConnClosedEvent, which already performs the
-// equivalent RemoveClient cleanup for NtN closes via that event. Guarding on
-// isNtC here keeps the release exactly-once: an NtN close still cleans up
-// only through HandleConnClosedEvent.
+// equivalent RemoveClient cleanup for NtN closes via that event. Guarding
+// chainsync cleanup on isNtC keeps RemoveClient exactly-once; serving waits
+// are released directly for both connection modes.
 func (n *Node) handleConnManagerClosed(
 	connId ouroboros.ConnectionId,
 	isNtC bool,
 	_ error,
 ) {
+	// Release both NtC closure waits and NtN notification waits independently
+	// of the protocol receive loop that is running the serving callback.
+	if o := n.ouroboros(); o != nil {
+		o.ReleaseLeiosServeWaiters(connId)
+	}
 	if !isNtC {
 		return
 	}
@@ -1833,11 +1842,6 @@ func (n *Node) handleConnManagerClosed(
 		n.chainsyncState.RemoveClient(connId)
 	}
 	if o := n.ouroboros(); o != nil {
-		// Wake any NtC chainsync server callback parked waiting for this
-		// connection's certified endorser closure. connmanager drives this
-		// callback from its own per-connection goroutine, so it runs even
-		// while that server callback still owns gouroboros's receive loop.
-		o.ReleaseLeiosServeWaiters(connId)
 		// Clear any LocalStateQuery pinned point this connection acquired:
 		// a client that disconnects without a clean Release must not leak
 		// its map entry (blinklabs-io/dingo#382).
@@ -2134,6 +2138,7 @@ func (n *Node) backfillRewardLiveStake() error {
 	var (
 		needed         bool
 		staleSnapshots bool
+		staleEpochs    []uint64
 	)
 	if err := n.db.MetadataTxn(false).Do(func(txn *database.Txn) error {
 		if n.config.skipRewardLiveStakeBackfillCheck {
@@ -2157,6 +2162,20 @@ func (n *Node) backfillRewardLiveStake() error {
 			)
 		if err != nil {
 			return fmt.Errorf("check stake snapshot provenance: %w", err)
+		}
+		if staleSnapshots {
+			// Diagnostics only: naming the affected epochs in the error below
+			// does not change the fail-closed decision above.
+			staleEpochs, err = n.db.Metadata().
+				StaleConsensusStakeSnapshotEpochs(
+					txn.Metadata(),
+				)
+			if err != nil {
+				return fmt.Errorf(
+					"list stale stake snapshot epochs: %w",
+					err,
+				)
+			}
 		}
 		return nil
 	}); err != nil {
@@ -2187,10 +2206,13 @@ func (n *Node) backfillRewardLiveStake() error {
 		}
 	}
 	if staleSnapshots {
-		return errors.New(
-			"consensus stake snapshots were produced by an older accounting " +
-				"version and cannot be safely reconstructed from this database; " +
-				"rebootstrap from immutable blocks or a trusted snapshot",
+		return fmt.Errorf(
+			"consensus stake snapshots for epoch(s) %v were produced by an "+
+				"older accounting version and cannot be safely reconstructed "+
+				"from this database; rebootstrap from immutable blocks or a "+
+				"trusted snapshot. See DATABASE.md's "+
+				"RewardStakeCalculationVersion section",
+			staleEpochs,
 		)
 	}
 	return nil

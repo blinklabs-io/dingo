@@ -118,7 +118,7 @@ func (preprodLedgerState) TimeToSlot(t time.Time) (uint64, error) {
 	return preprodByronSlots + uint64(t.Unix()-byronEnd), nil
 }
 
-func readPreprodFixture(t *testing.T, name string) []byte {
+func readErasFixture(t *testing.T, name string) []byte {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("testdata", name))
 	require.NoError(t, err)
@@ -133,7 +133,7 @@ func preprodFixtureProtocolParams(
 		PlutusV3 []int64 `json:"PlutusV3"`
 	}
 	require.NoError(t, json.Unmarshal(
-		readPreprodFixture(t, preprodCostModelsFile),
+		readErasFixture(t, preprodCostModelsFile),
 		&costModels,
 	))
 	require.Len(t, costModels.PlutusV3, preprodPlutusV3Params)
@@ -162,7 +162,7 @@ func TestEvaluateTxConwayPreprodFixtures(t *testing.T) {
 		t.Run(fixture.name, func(t *testing.T) {
 			blk, err := gledger.NewBlockFromCbor(
 				gledger.BlockTypeConway,
-				readPreprodFixture(t, fixture.blockFile),
+				readErasFixture(t, fixture.blockFile),
 			)
 			require.NoError(t, err)
 
@@ -181,7 +181,7 @@ func TestEvaluateTxConwayPreprodFixtures(t *testing.T) {
 
 			var inputTxBytes [][]byte
 			_, err = cbor.Decode(
-				readPreprodFixture(t, fixture.inputsFile),
+				readErasFixture(t, fixture.inputsFile),
 				&inputTxBytes,
 			)
 			require.NoError(t, err)

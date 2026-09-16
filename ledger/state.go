@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"math"
 	"math/big"
+	"runtime"
 	"runtime/debug"
 	"slices"
 	"strconv"
@@ -46,6 +47,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
+	"github.com/blinklabs-io/dingo/utxoref"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/consensus"
@@ -77,20 +79,52 @@ const (
 	firstBlockIndex              = 1
 	mithrilLedgerSlotSyncKey     = "mithril_ledger_slot"
 	mithrilLedgerHashSyncKey     = "mithril_ledger_hash"
-	// blockPipelineDecodeWorkers is the fixed decode worker count for phase 1
-	// of the block-processing pipeline (issue #1894). Validation workers stay
-	// at 0 (disabled) unless LedgerStateConfig.BlockPipelineValidateEnabled
-	// turns them on (phase 3).
-	blockPipelineDecodeWorkers = 2
-	// blockPipelineValidateWorkers is the fixed VRF/KES validate worker count
-	// for phase 3 of the block-processing pipeline (issue #1894). VRF and KES
-	// verification are each substantially more expensive than a CBOR decode,
-	// so validation is the pipeline's throughput bottleneck; this is kept
-	// equal to blockPipelineDecodeWorkers for now rather than scaled
-	// differently, matching phase 1's fixed-worker-count approach until
-	// there's a throughput profile to size it against.
-	blockPipelineValidateWorkers = 2
+	// blockPipelineMinWorkers is the decode/validate worker count
+	// blockPipelineWorkerCount falls back to on a host that reports fewer
+	// CPUs than this (including GOMAXPROCS(1)). It is the prior hardcoded
+	// worker count for both phase 1 (decode, issue #1894) and phase 3
+	// (VRF/KES validate), kept as a floor so a constrained host never gets
+	// fewer workers than it did before this was made CPU-scaled.
+	blockPipelineMinWorkers = 2
+	// blockPipelineMaxWorkers caps blockPipelineWorkerCount. Both pipeline
+	// stages only prepare work for ledgerProcessBlocksFromSource's single
+	// apply goroutine (see "Why dingo's ledger apply is not wired into
+	// pipeline.ApplyFunc", issue #3227), so decode/validate throughput
+	// past this point outruns the one consumer that can ever drain it;
+	// more workers beyond the cap would only buffer further ahead of that
+	// consumer, not deliver blocks to it any faster.
+	blockPipelineMaxWorkers = 8
 )
+
+// blockPipelineWorkerCount derives the block-pipeline's decode (phase 1) and
+// validate (phase 3) worker count from the host's available CPU parallelism
+// instead of the fixed count of 2 both stages ran at unconditionally before
+// this change. A 16-core host running with BlockPipelineEnabled used only 2
+// of those cores for decode and 2 for VRF/KES validate regardless of how
+// many were free; profiling during a from-genesis sync (issue #4203, the
+// block-application throughput investigation) showed a single core saturated
+// while 15 sat idle. This is the same fixed
+// count for both stages that blockPipelineValidateWorkers' prior doc comment
+// described as provisional ("kept equal ... until there's a throughput
+// profile to size it against"); GOMAXPROCS is that profile input.
+//
+// Both stages remain purely a scheduling change per their existing
+// documentation (BlockPipelineEnabled/BlockPipelineValidateEnabled's config
+// doc comments): this does not alter validation or apply behavior, only how
+// many goroutines share the decode/VRF/KES work before
+// ledgerProcessBlocksFromSource's single-threaded apply consumes it in
+// submission order.
+func blockPipelineWorkerCount() int {
+	n := runtime.GOMAXPROCS(0)
+	switch {
+	case n < blockPipelineMinWorkers:
+		return blockPipelineMinWorkers
+	case n > blockPipelineMaxWorkers:
+		return blockPipelineMaxWorkers
+	default:
+		return n
+	}
+}
 
 // DatabaseOperation represents an asynchronous database operation
 type DatabaseOperation struct {
@@ -507,6 +541,12 @@ func historicalBlockValidationDecision(
 // the node to shut down. The callback should trigger graceful shutdown.
 type FatalErrorFunc func(err error)
 
+// ReportTipGapFunc receives the wall-clock-to-tip distance in slots on every
+// slot-clock tick, the same value the dingo_tip_gap_slots gauge carries. It
+// exists so a caller can classify sync health without scraping Prometheus:
+// the node's readiness probe reads it. Optional; nil disables the report.
+type ReportTipGapFunc func(gapSlots uint64)
+
 // GetActiveConnectionFunc is a callback to retrieve the currently active
 // chainsync connection ID for chain selection purposes.
 type GetActiveConnectionFunc func() *ouroboros.ConnectionId
@@ -594,6 +634,7 @@ type LedgerStateConfig struct {
 	PeerHeaderLookupFunc        PeerHeaderLookupFunc
 	GenesisSelectionStateFunc   GenesisSelectionStateFunc
 	FatalErrorFunc              FatalErrorFunc
+	ReportTipGapFunc            ReportTipGapFunc
 	ForgedBlockChecker          ForgedBlockChecker
 	SlotBattleRecorder          SlotBattleRecorder
 	EndorserBlockProvider       EndorserBlockProviderFunc
@@ -1016,6 +1057,13 @@ type LedgerState struct {
 	// deliveries for other ranges and header-queue churn; discarded when
 	// the tracked range itself is delivered.
 	blockfetchRangeFailure blockfetchRangeFailureState
+	// nonExtendingBlockRejections counts, per connection (keyed by
+	// connIdKey), recent "block does not fit chain tip" rejections inside
+	// nonExtendingBlockRejectionWindow. Guarded by chainsyncBlockfetchMutex,
+	// like the rest of the blockfetch drain state above. See
+	// noteNonExtendingBlockRejection and noteBlockAcceptedFromConn
+	// (issue #4272).
+	nonExtendingBlockRejections map[string]nonExtendingBlockRejectionState
 	// deferredHeaderValidation holds block points whose stateful header checks
 	// wait for ledger apply. It is guarded by its own deferredHeaderValidationMu
 	// (NOT the main RWMutex) so the snapshot retention guard
@@ -1081,7 +1129,25 @@ type LedgerState struct {
 	// Cross-fork continuation audit (issue #3005). Armed by a local
 	// rollback and consumed by the blockfetch handler; see
 	// ledger/continuation_audit.go for the cost and soundness argument.
-	continuationAudit    atomic.Pointer[continuationAuditWindow]
+	//
+	// continuationAuditMutex owns every transition of the pointer, and every
+	// recording of a body into the window it publishes. The atomic makes
+	// each access safe on its own; it is the *sequence* that matters here,
+	// because arming reads the outgoing window and recovery clears and
+	// restores it, and those goroutines share no other lock. It is the
+	// innermost of the ledger's locks -- only a window's own per-field
+	// mutexes are taken under it -- and it is never held across a chain
+	// truncation or a blockfetch drain. See armContinuationAudit,
+	// commitContinuationAuditBody and settleAuditAfterRewind.
+	continuationAuditMutex sync.Mutex
+	continuationAudit      atomic.Pointer[continuationAuditWindow]
+	// continuationAuditGen counts transitions of that pointer, under the
+	// same lock. A recovery rewind clears the pointer and may put it back
+	// afterwards, and the pointer alone cannot tell "still cleared by me"
+	// from "disarmed by a rollback in the meantime" -- both are nil. The
+	// generation distinguishes them, so a restore never overwrites another
+	// owner's decision. See publishContinuationAudit.
+	continuationAuditGen uint64
 	mithrilLedgerSlot    uint64 // blocks at or below this slot are Mithril-verified; skip validation
 	mithrilLedgerHash    []byte // hash for mithrilLedgerSlot, used as a stable chainsync intersect point
 	lastLocalRollbackSeq uint64
@@ -1288,6 +1354,10 @@ type LedgerState struct {
 	// cleanupWG, so a lifecycle test can hold a run in flight and assert
 	// that Close drains it.
 	cleanupConsumedUtxosRunHook func()
+	// Test hook replacing the primary-chain membership read the continuation
+	// audit makes. A healthy store never fails that read, so without it the
+	// audit's handling of a failed read cannot be driven from a test.
+	continuationAuditContainsPoint func(ocommon.Point) (bool, error)
 }
 
 // upstreamSyncState is one connection-generation snapshot. Consumers must not
@@ -1439,8 +1509,9 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		// ledger/block_pipeline_apply_contract_test.go; if a gouroboros
 		// bump makes any of them fail, revisit the decision rather than
 		// the test.
+		workerCount := blockPipelineWorkerCount()
 		pipelineOpts := []pipeline.PipelineOption{
-			pipeline.WithDecodeWorkers(blockPipelineDecodeWorkers),
+			pipeline.WithDecodeWorkers(workerCount),
 		}
 		if cfg.BlockPipelineValidateEnabled {
 			// Wire VRF/KES validation (phase 3). Eta0Provider reads the
@@ -1455,7 +1526,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 			// ledger paths.
 			pipelineOpts = append(
 				pipelineOpts,
-				pipeline.WithValidateWorkers(blockPipelineValidateWorkers),
+				pipeline.WithValidateWorkers(workerCount),
 				pipeline.WithEta0Provider(ls.blockPipelineEta0Provider),
 				pipeline.WithSlotsPerKesPeriod(ls.SlotsPerKESPeriod()),
 				pipeline.WithVerifyConfig(lcommon.VerifyConfig{
@@ -2687,10 +2758,13 @@ func (ls *LedgerState) handleSlotTicks() {
 
 		// Update wall-clock-based metrics every tick
 		// (must run even when chain is stalled or catching up)
+		tipGap := uint64(0)
 		if tick.Slot > tipSlot {
-			ls.metrics.tipGapSlots.Set(float64(tick.Slot - tipSlot))
-		} else {
-			ls.metrics.tipGapSlots.Set(0)
+			tipGap = tick.Slot - tipSlot
+		}
+		ls.metrics.tipGapSlots.Set(float64(tipGap))
+		if ls.config.ReportTipGapFunc != nil {
+			ls.config.ReportTipGapFunc(tipGap)
 		}
 		if currentEpoch.LengthInSlots > 0 {
 			ls.metrics.epochLengthSlots.Set(float64(currentEpoch.LengthInSlots))
@@ -3882,7 +3956,7 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 	if pointMatches(ls.Tip().Point, point) {
 		ls.armContinuationAudit(point, "chainsync rollback")
 	} else {
-		ls.continuationAudit.Store(nil)
+		ls.disarmContinuationAudit()
 	}
 	return nil
 }
@@ -3920,7 +3994,7 @@ func (ls *LedgerState) reportFailedLedgerRollbackAfterTruncation(
 	point ocommon.Point,
 	cause error,
 ) error {
-	ls.continuationAudit.Store(nil)
+	ls.disarmContinuationAudit()
 	ledgerTip := ls.Tip()
 	ls.config.Logger.Error(
 		"primary chain truncated but ledger rollback failed; "+
@@ -5666,34 +5740,10 @@ const (
 	// retry at noProgressBackoffMax means hammering it at that rate for as
 	// long as the process runs.
 	noProgressStuckThreshold = 50
-	// noProgressStuckBackoffMax bounds the wait once stuck. The pipeline
-	// keeps retrying, because the condition can still be cleared from
-	// outside (a peer serving a different chain, an operator repairing
-	// state), but at a rate that neither burns CPU nor buries the logs.
+	// noProgressStuckBackoffMax is retained for the backoff calculation and
+	// metric tests; the retry loop stops when the threshold is reached.
 	noProgressStuckBackoffMax = 30 * time.Second
-	// noProgressStuckReannounceInterval is how many further no-progress
-	// restarts pass between ERROR announcements once the pipeline is stuck.
-	// Announcing the transition once and then dropping to WARN every 100
-	// restarts made a node that had stopped following the chain look quiet
-	// to log-level alerting: one ERROR line covered 18 hours, mixed into
-	// 129k WARN lines from everything else (issue #3261). At the stuck
-	// backoff ceiling this re-announces roughly every ten minutes, which is
-	// often enough to alert on and rare enough not to become the noise it
-	// replaces.
-	noProgressStuckReannounceInterval = 20
 )
-
-// pipelineStuckShouldAnnounce reports whether a stuck no-progress restart
-// warrants an ERROR announcement. True on the transition into stuck and every
-// noProgressStuckReannounceInterval restarts after it, so the condition stays
-// visible for as long as it lasts rather than only when it began.
-func pipelineStuckShouldAnnounce(consecutiveNoProgress int) bool {
-	if consecutiveNoProgress < noProgressStuckThreshold {
-		return false
-	}
-	return (consecutiveNoProgress-noProgressStuckThreshold)%
-		noProgressStuckReannounceInterval == 0
-}
 
 // runLedgerReadChainAttempt runs one read+process attempt: it launches
 // readChain on a fresh child context of ctx, hands the result channel to
@@ -5785,6 +5835,28 @@ func ledgerPipelineRetryDelay(
 ) (time.Duration, bool) {
 	backoff, stuck := ledgerPipelineBackoff(consecutiveNoProgress)
 	return max(backoff, minimum), stuck
+}
+
+// stopStuckLedgerPipeline reports the terminal form of a pipeline failure
+// that has replayed the same applied tip too many times. A bare restart cannot
+// change a deterministic verdict, so continuing would leave the node silently
+// following neither the stored chain nor its peers (issue #3975).
+func (ls *LedgerState) stopStuckLedgerPipeline(
+	err error,
+	progress pipelineProgress,
+) {
+	if !progress.stuck() {
+		return
+	}
+	if ls.config.Logger != nil {
+		ls.config.Logger.Error(
+			"ledger pipeline stopped after repeated no-progress restarts; operator intervention is required",
+			"component", "ledger",
+			"consecutive_no_progress", progress.consecutiveNoProgress,
+			"tip_slot", progress.lastTipSlot,
+			"error", err,
+		)
+	}
 }
 
 // certifiedEndorserBlockPipelineRetryDelay returns how long the pipeline waits
@@ -5944,21 +6016,11 @@ func (ls *LedgerState) ledgerProcessBlocksWithAttempt(
 				progress.consecutiveNoProgress,
 				endorserStuck,
 			)
-			if endorserStuck &&
-				pipelineStuckShouldAnnounce(
-					progress.consecutiveNoProgress,
-				) {
-				ls.config.Logger.Error(
-					"ledger pipeline stuck: a certified endorser block has stayed unavailable across repeated restarts without advancing the tip; the node is no longer following the chain",
-					"component",
-					"ledger",
-					"consecutive_no_progress",
-					progress.consecutiveNoProgress,
-					"tip_slot",
-					progress.lastTipSlot,
-					"error",
-					err,
-				)
+			if endorserStuck {
+				halted = true
+				ls.metrics.setPipelineHalted()
+				ls.stopStuckLedgerPipeline(err, progress)
+				return
 			}
 			timer := time.NewTimer(
 				certifiedEndorserBlockPipelineRetryDelay(
@@ -5984,31 +6046,13 @@ func (ls *LedgerState) ledgerProcessBlocksWithAttempt(
 			progress.consecutiveNoProgress,
 			stuck,
 		)
+		if stuck {
+			halted = true
+			ls.metrics.setPipelineHalted()
+			ls.stopStuckLedgerPipeline(err, progress)
+			return
+		}
 		if progress.consecutiveNoProgress > 0 {
-			// Announce the stuck condition at ERROR on the transition and
-			// periodically for as long as it lasts: a deterministic failure
-			// is not going to clear on its own, and a node that has stopped
-			// following the chain must not fall silent at ERROR after one
-			// line while the WARN below is buried among unrelated warnings
-			// (issue #3261).
-			if stuck &&
-				pipelineStuckShouldAnnounce(
-					progress.consecutiveNoProgress,
-				) {
-				ls.config.Logger.Error(
-					"ledger pipeline stuck: repeated restarts are not advancing the tip, so the failure is deterministic and will not clear on its own; the node is no longer following the chain",
-					"component",
-					"ledger",
-					"consecutive_no_progress",
-					progress.consecutiveNoProgress,
-					"tip_slot",
-					tipSlot,
-					"backoff",
-					backoff,
-					"error",
-					err,
-				)
-			}
 			if progress.consecutiveNoProgress == 10 ||
 				progress.consecutiveNoProgress%100 == 0 {
 				ls.config.Logger.Warn(
@@ -6795,7 +6839,13 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						// block so that UTxOs created by earlier non-validated
 						// blocks are visible during validation lookups.
 						if shouldValidateBlock && len(deltaBatch.deltas) > 0 {
-							if err := deltaBatch.apply(ls, txn); err != nil {
+							applyStart := time.Now()
+							err := deltaBatch.apply(ls, txn)
+							ls.metrics.observeBlockStage(
+								blockStageApply,
+								time.Since(applyStart),
+							)
+							if err != nil {
 								deltaBatch.Release()
 								return err
 							}
@@ -6978,7 +7028,13 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						}
 					}
 					// Apply delta batch
-					if err := deltaBatch.apply(ls, txn); err != nil {
+					applyStart := time.Now()
+					err := deltaBatch.apply(ls, txn)
+					ls.metrics.observeBlockStage(
+						blockStageApply,
+						time.Since(applyStart),
+					)
+					if err != nil {
 						deltaBatch.Release()
 						return err
 					}
@@ -7301,7 +7357,11 @@ func (ls *LedgerState) ledgerProcessBlock(
 		if err := eras.ValidateOpCertPersistableCounter(
 			opCertIssueNumber,
 		); err != nil {
-			return nil, fmt.Errorf("pool %x: %w", opCertPoolKeyHash, err)
+			return nil, fmt.Errorf(
+				"pool %x: %w",
+				opCertPoolKeyHash.Bytes(),
+				err,
+			)
 		}
 		// Counter monotonicity is the stateful half of inbound opcert
 		// validation: read the pool's last-seen counter before processing this
@@ -7324,7 +7384,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 			if err != nil {
 				return nil, fmt.Errorf(
 					"read opcert counter for pool %x: %w",
-					opCertPoolKeyHash,
+					opCertPoolKeyHash.Bytes(),
 					err,
 				)
 			}
@@ -7334,7 +7394,11 @@ func (ls *LedgerState) ledgerProcessBlock(
 				opCertIssueNumber,
 				opCertNoGapRuleApplies(block.Era().Id),
 			); err != nil {
-				return nil, fmt.Errorf("pool %x: %w", opCertPoolKeyHash, err)
+				return nil, fmt.Errorf(
+					"pool %x: %w",
+					opCertPoolKeyHash.Bytes(),
+					err,
+				)
 			}
 		}
 	}
@@ -7507,7 +7571,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	)
 	// Track outputs from earlier transactions in this block for intra-block
 	// dependencies only when TX validation is enabled.
-	intraBlockUtxos := make(map[string]lcommon.Utxo)
+	intraBlockUtxos := make(map[utxoref.Key]lcommon.Utxo)
 	for i, tx := range block.Transactions() {
 		if delta == nil {
 			delta = NewLedgerDelta(
@@ -7590,11 +7654,16 @@ func (ls *LedgerState) ledgerProcessBlock(
 					horizonAnchorSlot: parent.slot,
 				}).pinCommitteeState(committeeEpoch, pp).
 					pinSyntheticV2CostModel(synthetic)
+				validateStart := time.Now()
 				err := validationEra.ValidateTxFunc(
 					tx,
 					point.Slot,
 					lv,
 					pp,
+				)
+				ls.metrics.observeBlockStage(
+					blockStageValidate,
+					time.Since(validateStart),
 				)
 				// A LedgerView predicate that swallowed a genuine storage
 				// error into a false verdict (issue #1649) can have
@@ -7748,12 +7817,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 			// correctly - for failed TXs, Produced() returns collateral return at the
 			// correct index (len(Outputs())), while Outputs() returns regular outputs
 			for _, utxo := range tx.Produced() {
-				key := fmt.Sprintf(
-					"%s:%d",
-					utxo.Id.Id().String(),
-					utxo.Id.Index(),
-				)
-				intraBlockUtxos[key] = utxo
+				intraBlockUtxos[utxoref.ForUtxo(utxo)] = utxo
 			}
 		}
 	}
@@ -9342,6 +9406,7 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		// pre-SetLedger case only -- it is never reachable from an
 		// untrusted peer, since every chainsync-driven path runs after
 		// SetLedger.
+		tipBeforeRewind := ls.chain.Tip().Point
 		rewindErr := func() error {
 			if ls.config.ChainManager.SecurityParamConfigured() {
 				return ls.config.ChainManager.RewindPrimaryChainToPoint(
@@ -9352,6 +9417,19 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 				ancestor,
 			)
 		}()
+		// This truncation runs outside both paths that transition the
+		// continuation-audit window: the rollback that arms and disarms
+		// it, and the recovery rewind that clears and settles it. A window
+		// left armed over it holds producers for blocks it deleted, and a
+		// recovery rewind settling afterwards restores the window it
+		// cleared unless the pointer generation moved, so the truncation
+		// must be a transition of its own. A rewind refused before its
+		// first deletion leaves the window describing an unchanged chain.
+		// See settleAuditAfterRewind.
+		if rewindErr == nil ||
+			primaryChainTipRegressed(tipBeforeRewind, ls.chain.Tip().Point) {
+			ls.disarmContinuationAudit()
+		}
 		if rewindErr != nil {
 			return rewindErr
 		}
@@ -11374,8 +11452,8 @@ func (ls *LedgerState) WithTxValidationSession(
 	fn func(
 		validate func(
 			tx ledger.Transaction,
-			consumedUtxos map[string]struct{},
-			createdUtxos map[string]lcommon.Utxo,
+			consumedUtxos map[utxoref.Key]struct{},
+			createdUtxos map[utxoref.Key]lcommon.Utxo,
 		) error,
 		stillCurrent func() bool,
 	) error,
@@ -11386,8 +11464,8 @@ func (ls *LedgerState) WithTxValidationSession(
 	return txn.Do(func(txn *database.Txn) error {
 		validate := func(
 			tx ledger.Transaction,
-			consumedUtxos map[string]struct{},
-			createdUtxos map[string]lcommon.Utxo,
+			consumedUtxos map[utxoref.Key]struct{},
+			createdUtxos map[utxoref.Key]lcommon.Utxo,
 		) error {
 			validationEra, err := resolveValidationEra(
 				tx,
@@ -11513,8 +11591,8 @@ func (ls *LedgerState) ValidateTx(
 // (dependent TX chaining). Both may be nil for no overlay.
 func (ls *LedgerState) ValidateTxWithOverlay(
 	tx lcommon.Transaction,
-	consumedUtxos map[string]struct{},
-	createdUtxos map[string]lcommon.Utxo,
+	consumedUtxos map[utxoref.Key]struct{},
+	createdUtxos map[utxoref.Key]lcommon.Utxo,
 ) error {
 	return ls.validateTxCore(tx, func(txn *database.Txn) *LedgerView {
 		return &LedgerView{
@@ -11810,8 +11888,8 @@ func (ls *LedgerState) forgeBlock() {
 			"tx_count", len(mempoolTxs),
 		)
 
-		consumedInputs := make(map[string]struct{})
-		createdOutputs := make(map[string]lcommon.Utxo)
+		consumedInputs := make(map[utxoref.Key]struct{})
+		createdOutputs := make(map[utxoref.Key]lcommon.Utxo)
 
 		// Iterate through transactions and add them until we hit limits
 		for _, mempoolTx := range mempoolTxs {
@@ -11952,20 +12030,10 @@ func (ls *LedgerState) forgeBlock() {
 			}
 			blockSize += txSize
 			for _, input := range fullTx.Consumed() {
-				key := fmt.Sprintf(
-					"%s:%d",
-					input.Id().String(),
-					input.Index(),
-				)
-				consumedInputs[key] = struct{}{}
+				consumedInputs[utxoref.ForInput(input)] = struct{}{}
 			}
 			for _, output := range fullTx.Produced() {
-				key := fmt.Sprintf(
-					"%s:%d",
-					output.Id.Id().String(),
-					output.Id.Index(),
-				)
-				createdOutputs[key] = output
+				createdOutputs[utxoref.ForUtxo(output)] = output
 			}
 			// Safe to assign: overflow was already checked
 			// via SafeAddExUnits when computing

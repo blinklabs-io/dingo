@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -2148,18 +2149,14 @@ func (f *BlockForger) checkOpCertSequence(
 // lower of the two, so a node whose pipeline is behind is measured as behind
 // rather than credited with headers it has admitted but not applied.
 func (f *BlockForger) upstreamSyncSkipsForge(
-	currentSlot, tipSlot, upstreamTip uint64,
+	_, tipSlot, upstreamTip uint64,
 ) bool {
 	if upstreamTip == 0 {
-		// The tip-ahead gate above returns for currentSlot < parentSlot,
-		// and parentSlot is max(tipSlot, primaryTip.Slot) >= tipSlot, so
-		// currentSlot >= tipSlot here; the equal case is contested and
-		// handled before this point. Guard the subtraction anyway so a
-		// future reordering of the gates cannot turn this into a wrap.
-		if currentSlot <= tipSlot {
-			return false
-		}
-		return currentSlot-tipSlot > f.forgeSyncToleranceSlots
+		// An unpublished target is not evidence that a peer is ahead. The
+		// wall-clock slot can be arbitrarily far past our tip during an
+		// ordinary network gap, so comparing it with tipSlot would reject
+		// valid leader slots on an otherwise current node (issue #4201).
+		return false
 	}
 	return upstreamTip > tipSlot &&
 		upstreamTip-tipSlot > f.forgeSyncToleranceSlots
@@ -2523,8 +2520,8 @@ func selectValidLeiosTransactions(
 			validate TxValidationFunc,
 			stillCurrent func() bool,
 		) error {
-			consumed := make(map[string]struct{})
-			created := make(map[string]lcommon.Utxo)
+			consumed := make(map[utxoref.Key]struct{})
+			created := make(map[utxoref.Key]lcommon.Utxo)
 			for _, mempoolTx := range txs {
 				// The EB wire reference is the transaction's only representation
 				// in this slot. Do not expose outputs from a transaction that the
@@ -2538,18 +2535,10 @@ func selectValidLeiosTransactions(
 				}
 				selected = append(selected, mempoolTx)
 				for _, input := range tx.Consumed() {
-					key := fmt.Sprintf(
-						"%s:%d",
-						input.Id().String(),
-						input.Index(),
-					)
-					consumed[key] = struct{}{}
+					consumed[utxoref.ForInput(input)] = struct{}{}
 				}
 				for _, utxo := range tx.Produced() {
-					key := fmt.Sprintf(
-						"%s:%d", utxo.Id.Id().String(), utxo.Id.Index(),
-					)
-					created[key] = utxo
+					created[utxoref.ForUtxo(utxo)] = utxo
 				}
 			}
 			if !stillCurrent() {

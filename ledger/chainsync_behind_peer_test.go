@@ -32,6 +32,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
 // behindPeerFixture is a ledger state on a linked chain long enough that a
@@ -290,7 +291,7 @@ func TestHandleEventChainsyncRollbackStillRejectsDeepForkPeer(t *testing.T) {
 			e.Reason,
 		)
 		assert.Equal(t, f.connId, e.ConnectionId)
-	case <-time.After(time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("expected over-K rejection for a genuinely divergent peer")
 	}
 }
@@ -318,7 +319,7 @@ func TestHandleEventChainsyncRollbackRejectsUnknownPeerTipOverK(t *testing.T) {
 			event.ChainsyncResyncReasonRollbackExceedsK,
 			e.Reason,
 		)
-	case <-time.After(time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("expected over-K rejection for an unknown peer tip")
 	}
 }
@@ -355,7 +356,7 @@ func TestHandleEventChainsyncRollbackRejectsPeerTipAheadOfUs(t *testing.T) {
 			event.ChainsyncResyncReasonRollbackExceedsK,
 			e.Reason,
 		)
-	case <-time.After(time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("expected over-K rejection for a peer ahead of us")
 	}
 }
@@ -432,7 +433,7 @@ func TestHandleEventChainsyncRollbackRejectsPeerTipEqualToOurs(t *testing.T) {
 			event.ChainsyncResyncReasonRollbackExceedsK,
 			e.Reason,
 		)
-	case <-time.After(time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("expected over-K rejection for a peer at our own tip")
 	}
 }

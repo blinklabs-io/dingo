@@ -52,19 +52,91 @@ func (n *Node) validateBlockProducerStartup() (*forging.PoolCredentials, error) 
 			"block producer mode requires ledger state for current slot",
 		)
 	}
-	currentSlot, err := n.ledgerState.CurrentSlot()
-	if err != nil {
+	if _, err := n.ledgerState.CurrentSlot(); err != nil {
 		if !errors.Is(err, ledger.ErrBeforeGenesis) {
 			return nil, fmt.Errorf("compute current slot: %w", err)
 		}
-		currentSlot = 0
+		// Clock before genesis: preserve the historical hard fail through the
+		// strict preflight (an opcert can never be "current" before genesis).
+		return n.validateBlockProducerStartupForClock(0, true)
 	}
-	return n.validateBlockProducerStartupAtSlot(currentSlot)
+	// The current wall-clock slot only reliably places an operational
+	// certificate in time when the confirmed era history spans the wall clock.
+	// A node importing from genesis or restarting far behind has confirmed
+	// history that stops at its newest applied era: CurrentSlot then
+	// extrapolates through that era's slot length — a fresh mainnet node
+	// judges the wall clock with Byron's 20s slots even though the real chain
+	// moved to one-second slots at epoch 208 — which cannot judge an opcert for
+	// the actual chain.
+	supportedSlot, supported, err := n.ledgerState.
+		WallClockSlotFromConfirmedHistory()
+	if err != nil {
+		return nil, fmt.Errorf("wall-clock slot from confirmed history: %w", err)
+	}
+	return n.validateBlockProducerStartupForClock(supportedSlot, supported)
 }
 
-func (n *Node) validateBlockProducerStartupAtSlot(
-	currentSlot uint64,
+// validateBlockProducerStartupForClock decides how to judge the operational
+// certificate given a wall-clock slot and whether the confirmed era history
+// actually supports it.
+//
+// When supported, this is the strict historical preflight: a certificate
+// staged for the future or already expired fails startup here. When not
+// supported, the KES-period plausibility check is deferred rather than
+// skipped — credential material is still validated and the protocol lifetime
+// is still armed, so the forger's per-slot gate has the data it needs to
+// reject the certificate before Praos leader selection.
+//
+// Split out from validateBlockProducerStartup so both branches are reachable
+// without a live LedgerState, the same reason
+// validateBlockProducerStartupAtSlot and validateBlockProducerLedgerWithView
+// exist separately.
+func (n *Node) validateBlockProducerStartupForClock(
+	slot uint64,
+	supported bool,
 ) (*forging.PoolCredentials, error) {
+	if supported {
+		return n.validateBlockProducerStartupAtSlot(slot)
+	}
+	creds, err := n.validateBlockProducerCredentialMaterial()
+	if err != nil {
+		return nil, err
+	}
+	genesis, err := n.blockProducerShelleyGenesis()
+	if err != nil {
+		return nil, err
+	}
+	if err := creds.ArmKesProtocolLifetime(genesis); err != nil {
+		return nil, fmt.Errorf("arm KES protocol lifetime: %w", err)
+	}
+	opCert := creds.GetOpCert()
+	if opCert == nil {
+		return nil, errors.New("block producer operational certificate is nil")
+	}
+	var tipSlot uint64
+	if n.ledgerState != nil {
+		tipSlot = n.ledgerState.ChainTipSlot()
+	}
+	n.config.logger.Warn(
+		"block producer startup: confirmed era history does not span the current wall-clock slot yet; "+
+			"deferring the operational-certificate KES-period plausibility check until the ledger catches up. "+
+			"The opcert KES lifetime is re-checked per slot and forging cannot proceed while it fails; "+
+			"sync progress additionally gates forging whenever an upstream peer is active.",
+		"component", "node",
+		"tip_slot", tipSlot,
+		"opcert_kes_period", opCert.KESPeriod,
+		"opcert_expiry_period", creds.OpCertExpiryPeriod(),
+	)
+	return creds, nil
+}
+
+// validateBlockProducerCredentialMaterial loads the pool credentials and
+// validates the operational certificate's structure and cold-key signature,
+// without judging it against any slot. The slot-dependent KES-period
+// plausibility check lives in validateBlockProducerStartupAtSlot; callers
+// needing the certificate armed but not yet placed in time combine this with
+// PoolCredentials.ArmKesProtocolLifetime.
+func (n *Node) validateBlockProducerCredentialMaterial() (*forging.PoolCredentials, error) {
 	creds := forging.NewPoolCredentials()
 	if err := creds.LoadFromFiles(
 		n.config.shelleyVRFKey,
@@ -75,6 +147,16 @@ func (n *Node) validateBlockProducerStartupAtSlot(
 	}
 	if err := creds.ValidateOpCert(); err != nil {
 		return nil, fmt.Errorf("validate operational certificate: %w", err)
+	}
+	return creds, nil
+}
+
+func (n *Node) validateBlockProducerStartupAtSlot(
+	currentSlot uint64,
+) (*forging.PoolCredentials, error) {
+	creds, err := n.validateBlockProducerCredentialMaterial()
+	if err != nil {
+		return nil, err
 	}
 	genesis, err := n.blockProducerShelleyGenesis()
 	if err != nil {
@@ -145,6 +227,17 @@ func (v blockProducerLedgerView) LatestOpCertSequence(
 	return v.ls.LatestOpCertSequence(poolID)
 }
 
+// blockProducerEraSource supplies the era context for the startup
+// operational-certificate counter check. *ledger.LedgerState implements it.
+type blockProducerEraSource interface {
+	forging.ProtocolParamsProvider
+	// Tip is the applied-chain tip. Its slot scopes the counter rule.
+	Tip() ochainsync.Tip
+	// CurrentSlot is the wall-clock slot. It is read only to report how far
+	// the applied tip lags; it must not scope the counter rule.
+	CurrentSlot() (uint64, error)
+}
+
 // validateBlockProducerLedger runs the ledger-aware cross-check against
 // the loaded credentials. Must be called after the ledger has started so
 // pool registrations can be queried. A pool that is not yet registered
@@ -152,34 +245,83 @@ func (v blockProducerLedgerView) LatestOpCertSequence(
 func (n *Node) validateBlockProducerLedger(
 	creds *forging.PoolCredentials,
 ) error {
-	view := blockProducerLedgerView{ls: n.ledgerState}
-	return n.validateBlockProducerLedgerWithView(creds, view)
+	if n.ledgerState == nil {
+		return errors.New(
+			"block producer ledger cross-check requires ledger state",
+		)
+	}
+	return n.validateBlockProducerLedgerWithSource(
+		creds,
+		blockProducerLedgerView{ls: n.ledgerState},
+		n.ledgerState,
+	)
 }
 
-func (n *Node) validateBlockProducerLedgerWithView(
+// validateBlockProducerLedgerWithSource resolves the slot whose era scopes the
+// startup opcert counter rule, then runs the cross-check.
+//
+// The slot is the applied chain tip, never the wall clock. The counter
+// baseline (LedgerView.LatestOpCertSequence) is produced by the applied-chain
+// stage, so the era that scopes the rule has to be read from the same stage. A
+// wall-clock slot makes LedgerState.ProtocolParamsForSlot forecast forward
+// through the era shape: on a node whose applied tip lags -- interrupted sync,
+// restart after downtime, restore from an older snapshot -- it resolves a
+// Praos era the applied chain has not reached while the baseline is still
+// pre-catch-up, so a pool several rotations into its life looks gapped and
+// startup is refused, leaving the node unable to sync to the point that would
+// make the baseline correct. LedgerState.CurrentOrTipSlot is not a substitute:
+// it returns whichever of the two slots is ahead, which is the wall-clock slot
+// in exactly that case.
+func (n *Node) validateBlockProducerLedgerWithSource(
 	creds *forging.PoolCredentials,
 	view forging.LedgerView,
+	source blockProducerEraSource,
+) error {
+	var slot uint64
+	if source != nil {
+		slot = source.Tip().Point.Slot
+		if wallSlot, wallErr := source.CurrentSlot(); wallErr == nil &&
+			wallSlot > slot {
+			n.config.logger.Warn(
+				"block producer opcert counter rule scoped to the applied chain tip, which is behind wall-clock time",
+				"component", "node",
+				"tip_slot", slot,
+				"wall_clock_slot", wallSlot,
+				"slots_behind", wallSlot-slot,
+			)
+		}
+	}
+	return n.validateBlockProducerLedgerWithViewAtSlot(
+		creds,
+		view,
+		source,
+		slot,
+	)
+}
+
+func (n *Node) validateBlockProducerLedgerWithViewAtSlot(
+	creds *forging.PoolCredentials,
+	view forging.LedgerView,
+	params forging.ProtocolParamsProvider,
+	slot uint64,
 ) error {
 	if creds == nil {
 		return errors.New("nil pool credentials")
 	}
-	// Startup deliberately checks only for a stale counter, not the
-	// era-scoped no-gap rule the forge loop and block application enforce.
-	// The era for "now" would have to come from LedgerState.CurrentSlot,
-	// which is wall-clock and valid regardless of sync state; the baseline
-	// comes from LatestOpCertSequence, which reflects only the applied
-	// chain. On a node whose applied tip is behind wall-clock time (an
-	// interrupted initial sync, a resume after downtime, a restore to an
-	// older snapshot), those two can disagree: the era resolves to
-	// whatever the wall clock says while the baseline is still the stale,
-	// pre-catch-up counter, so a pool several rotations into its life
-	// would look gapped and fail startup -- unable to then sync to the
-	// point that would make the baseline correct. The forge loop's own
-	// gate does not have this problem: it runs after the upstream-sync
-	// skip and the leader check, so both its era and its baseline come
-	// from near-tip state, and it fails closed per slot rather than
-	// refusing to start the node at all.
-	registered, vrfMatched, err := creds.ValidateAgainstLedger(view)
+	result, err := creds.ValidateAgainstLedgerAtSlot(view, params, slot)
+	if result.EraUnevaluable != nil {
+		// Not evaluable is not violated. Startup continues; the forge loop
+		// applies the full era-scoped rule per won leader slot once the
+		// node is near the tip, and fails closed there.
+		n.config.logger.Warn(
+			"block producer opcert counter gap rule not evaluated at startup; the forge loop enforces it per leader slot",
+			"component", "node",
+			"pool_id", creds.GetPoolID().String(),
+			"slot", slot,
+			"reason", result.EraUnevaluable,
+		)
+	}
+	registered, vrfMatched := result.Registered, result.VRFMatched
 	if err != nil {
 		if errors.Is(err, forging.ErrVRFKeyHashMismatch) &&
 			n.config.network == "devnet" {
