@@ -97,6 +97,38 @@ func checkAsOfEpochRecency(
 	return nil
 }
 
+// verifyStakeDistributionRetentionOnly checks the same retention floor
+// PoolStakeDistribution enforces, without materializing anything
+// PoolStakeDistribution actually reads (human review, Chris Guiney,
+// dingo#4319/#4320): VerifyPointQueryable previously called
+// PoolStakeDistribution(nil, at, txn) -- the unfiltered form -- purely to
+// see whether it returned an error, discarding the result. That reads the
+// whole mark-snapshot via markStakeByPool and runs totalCirculatingSupply's
+// as-of-slot reconstruction, real work on every pinned Acquire that a
+// client issuing GetPoolDistr2 afterward then pays for a second time, and
+// one that never asks for stake distribution at all (e.g. GetEpochNo) pays
+// for once with nothing to show for it. The floor itself only needs the
+// two epoch numbers and checkAsOfEpochRecency, both already cheap.
+func (ls *LedgerState) verifyStakeDistributionRetentionOnly(
+	txn *database.Txn,
+	at QueryPoint,
+) error {
+	targetEpoch, found, err := ls.resolveAsOfEpoch(txn, at)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return errEpochNotResolved(at)
+	}
+	liveEpoch, _, err := ls.resolveAsOfEpoch(txn, QueryPoint{})
+	if err != nil {
+		return err
+	}
+	return checkAsOfEpochRecency(
+		targetEpoch, liveEpoch, ls.db.StorageMode() == types.StorageModeAPI,
+	)
+}
+
 // PoolStakeShare is one pool's entry in the active stake distribution.
 type PoolStakeShare struct {
 	PoolKeyHash lcommon.PoolKeyHash
@@ -213,12 +245,17 @@ func (ls *LedgerState) PoolStakeDistribution(
 			tip.Point.Slot,
 		)
 	}
-	epoch, err := ls.resolveAsOfEpoch(txn, at)
+	epoch, found, err := ls.resolveAsOfEpoch(txn, at)
 	if err != nil {
 		return nil, err
 	}
+	if !found {
+		return nil, errEpochNotResolved(at)
+	}
 	if at.pinned() {
-		liveEpoch, err := ls.resolveAsOfEpoch(txn, QueryPoint{})
+		// Unpinned, so always found=true (see resolveAsOfEpoch's doc
+		// comment) -- not checked here.
+		liveEpoch, _, err := ls.resolveAsOfEpoch(txn, QueryPoint{})
 		if err != nil {
 			return nil, err
 		}
