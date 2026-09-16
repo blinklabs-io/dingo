@@ -42,6 +42,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
+	"github.com/blinklabs-io/dingo/utxoref"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -74,8 +75,8 @@ func (noopTxValidator) ValidateTx(gledger.Transaction) error { return nil }
 
 func (noopTxValidator) ValidateTxWithOverlay(
 	_ gledger.Transaction,
-	_ map[string]struct{},
-	_ map[string]lcommon.Utxo,
+	_ map[utxoref.Key]struct{},
+	_ map[utxoref.Key]lcommon.Utxo,
 ) error {
 	return nil
 }
