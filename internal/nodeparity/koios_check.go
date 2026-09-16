@@ -55,6 +55,25 @@ package nodeparity
 //     Koios's pool_history does not return one; comparing it would need a
 //     separate pool_info call per pool per epoch, deferred as follow-up
 //     scope.
+//
+//     KNOWN GAP (CodeRabbit review, dingo#4319): this only iterates the
+//     pools Dingo itself reports via GetPoolDistr2, so it can detect a
+//     pool whose Dingo-reported stake disagrees with Koios, but not a pool
+//     Dingo's ledger state is missing entirely (a real bug that would look
+//     identical to "this pool just isn't active yet" from here). Closing
+//     this gap properly needs a per-epoch source of Koios's own active-pool
+//     set to compare Dingo's list against -- Koios has no bulk endpoint for
+//     that (pool_history is single-pool only; pool_list returns every
+//     pool ever registered, historically 1000+ on preview alone, with only
+//     a live/current active_stake, not a historical one). Iterating that
+//     full list per epoch would reintroduce, one level up the call stack,
+//     the exact sequential-Koios-call cost this file's own concurrency
+//     work (stakeCheckConcurrency) was written to eliminate, and using
+//     pool_list's current registration status as a stand-in for a
+//     historical epoch's membership would be actively wrong for any epoch
+//     not near Koios's live tip -- worse than the documented gap it would
+//     replace. Deferred rather than rushed; see dingo#4319's follow-up
+//     issue for tracking.
 //   - UTxO set: full content (address, ADA amount, multi-asset tokens,
 //     datum presence/form, reference script hash), not just existence --
 //     built from Koios's own /tx_info input/output data via a
