@@ -97,7 +97,7 @@ func checkAsOfEpochRecency(
 	return nil
 }
 
-// verifyStakeDistributionRetentionOnly checks the same retention floor
+// verifyStakeDistributionRetentionOnly checks the same retention floors
 // PoolStakeDistribution enforces, without materializing anything
 // PoolStakeDistribution actually reads (human review, Chris Guiney,
 // dingo#4319/#4320): VerifyPointQueryable previously called
@@ -107,8 +107,22 @@ func checkAsOfEpochRecency(
 // as-of-slot reconstruction, real work on every pinned Acquire that a
 // client issuing GetPoolDistr2 afterward then pays for a second time, and
 // one that never asks for stake distribution at all (e.g. GetEpochNo) pays
-// for once with nothing to show for it. The floor itself only needs the
-// two epoch numbers and checkAsOfEpochRecency, both already cheap.
+// for once with nothing to show for it.
+//
+// Two independent floors, not one: checkAsOfEpochRecency covers the
+// mark-snapshot pruning window, but PoolStakeDistribution (both directly,
+// and via queryShelleyStakeDistribution) also calls totalCirculatingSupply
+// with asOfSlot=at.Slot for a pinned at, which separately requires a
+// network_state row at or before that slot -- rejecting with
+// ErrHistoricalStateUnavailable when none exists (see that function's doc
+// comment). A first version of this function checked only the epoch floor:
+// reproduced live that it then accepted a point both GetPoolDistr2 and
+// GetStakeDistribution still rejected, because no network_state row
+// happened to cover that slot even though the epoch itself was recent
+// enough -- reopening the bare "handleQuery returns that error, connection
+// drops" failure this whole change exists to close. Checking only that a
+// covering row exists (not reading genesis config or computing a value)
+// keeps this as cheap as the epoch check.
 func (ls *LedgerState) verifyStakeDistributionRetentionOnly(
 	txn *database.Txn,
 	at QueryPoint,
@@ -124,9 +138,28 @@ func (ls *LedgerState) verifyStakeDistributionRetentionOnly(
 	if err != nil {
 		return err
 	}
-	return checkAsOfEpochRecency(
+	if err := checkAsOfEpochRecency(
 		targetEpoch, liveEpoch, ls.db.StorageMode() == types.StorageModeAPI,
-	)
+	); err != nil {
+		return err
+	}
+	if at.pinned() {
+		metaTxn := txn.Metadata()
+		state, err := ls.db.Metadata().GetNetworkStateAsOfSlot(at.Slot, metaTxn)
+		if err != nil {
+			return err
+		}
+		if state == nil {
+			return fmt.Errorf(
+				"%w: circulating supply as of slot %d cannot be "+
+					"reconstructed -- no network_state row exists at or "+
+					"before that slot",
+				ErrHistoricalStateUnavailable,
+				at.Slot,
+			)
+		}
+	}
+	return nil
 }
 
 // PoolStakeShare is one pool's entry in the active stake distribution.
