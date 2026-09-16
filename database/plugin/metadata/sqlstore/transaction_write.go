@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // transactionBatchAccumulator owns statements that are safe to reuse for one
@@ -35,6 +36,13 @@ import (
 type transactionBatchAccumulator struct {
 	transactionInsert *sql.Stmt
 	mysql             bool
+	// sqlOperations is the same counter instrumentedQueryer increments for
+	// every other query path (see metrics.go); nil when Config.PromRegistry
+	// was nil. insertTransaction executes transactionInsert directly against
+	// a cached *sql.Stmt rather than through a queryer, so it is never
+	// wrapped in countingQueryer and must count itself here to keep
+	// dingo_database_sql_operations_total covering this path too.
+	sqlOperations *prometheus.CounterVec
 }
 
 const transactionInsertSQL = `
@@ -55,7 +63,14 @@ func (a *transactionBatchAccumulator) insertTransaction(
 	args ...any,
 ) (uint, error) {
 	if a.transactionInsert == nil {
-		if dialect, ok := db.(dialectQueryer); ok {
+		// unwrapDialectQueryer, not a bare type assertion: whenever
+		// Config.PromRegistry is set, Store.instrumentedQueryer wraps every
+		// handle it hands out in countingQueryer, making countingQueryer
+		// (not dialectQueryer) db's outermost concrete type. A plain
+		// db.(dialectQueryer) would silently miss that case and leave
+		// a.mysql false on a metrics-enabled MySQL store, routing this
+		// insert down the RETURNING-id path MySQL cannot serve.
+		if dialect, ok := unwrapDialectQueryer(db); ok {
 			a.mysql = dialect.dialect == "mysql"
 		}
 		stmt, err := db.PrepareContext(ctx, transactionInsertSQL)
@@ -63,6 +78,10 @@ func (a *transactionBatchAccumulator) insertTransaction(
 			return 0, err
 		}
 		a.transactionInsert = stmt
+	}
+	if a.sqlOperations != nil {
+		a.sqlOperations.WithLabelValues(classifySQLOp(transactionInsertSQL)).
+			Inc()
 	}
 	if a.mysql {
 		result, err := a.transactionInsert.ExecContext(ctx, args...)
@@ -90,7 +109,7 @@ func (a *transactionBatchAccumulator) Reset() {
 }
 
 func (s *Store) NewBatchAccumulator() types.MetadataBatchAccumulator {
-	return &transactionBatchAccumulator{}
+	return &transactionBatchAccumulator{sqlOperations: s.sqlOperations}
 }
 
 func (s *Store) FlushBatch(

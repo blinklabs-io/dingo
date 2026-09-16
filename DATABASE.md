@@ -1372,7 +1372,12 @@ outright with `SQLITE_BUSY` instead of waiting, and journal mode is persistent
 in the database header so once is enough; `busy_timeout` leads the remaining
 pragma list, because the driver applies `_pragma` directives in DSN order and
 anything ahead of it would run with no busy handler installed), so committed metadata reaches disk
-at WAL checkpoints (every 1000 pages by default). Badger is opened with its
+at WAL checkpoints (every 10000 pages, ~40MB at the default 4096-byte page
+size, via `sqliteCommonPragmas`'s `wal_autocheckpoint`; raised from SQLite's
+1000-page compiled-in default because a checkpoint firing on nearly every
+block-apply commit was rewriting the same hot B-tree pages to
+`metadata.sqlite` on almost every commit instead of letting several commits'
+worth of touches to a page coalesce into one checkpoint write). Badger is opened with its
 default `SyncWrites=false` and a 128MiB memtable, so committed blob writes can
 sit unflushed far longer — at chain tip dingo writes only a few MiB of blocks per
 hour, so the memtable may not rotate for hours. Without the sync barrier an
@@ -1383,6 +1388,32 @@ metadata tip (`cleanupOrphanedBlobs`) but cannot rebuild blocks missing *beneath
 it, so it rolls the ledger back to the blob tip instead. That rollback can be
 arbitrarily deep and, on a Mithril-bootstrapped node, can reach the
 `mithril_ledger_slot` trust boundary, past which no rollback is possible at all.
+
+**SQL-side metrics.** Badger's own write/read/cache/GC counters
+(`database_blob_*`, `database/plugin/blob/badger/metrics.go`) have existed for
+a while but were never on a dashboard; the metadata store had no equivalent
+instrumentation at all until the write-amplification investigation above added
+it. `dingo_database_sql_operations_total{op}` (counter,
+`database/plugin/metadata/sqlstore/metrics.go`) is incremented once per SQL
+statement, classified by leading keyword (insert/update/delete/select/other)
+parsed past each query's sqlc-generated `-- name: X :verb` comment; it is a
+no-op unless `Config.PromRegistry` is set. Most calls are counted at Store's
+single query chokepoint (`instrumentedQueryer`); the hot-statement cache
+(`prepared_stmt.go`'s `queryRowCached`/`execCached`) and
+`transactionBatchAccumulator.insertTransaction`'s prepared batch-insert path
+(`transaction_write.go`) both call their cached `*sql.Stmt` directly, bypassing
+that chokepoint, and so count themselves explicitly instead.
+`dingo_database_sql_wal_bytes` and
+`dingo_database_sql_disk_bytes` (`database/plugin/metadata/sqlite/metrics.go`)
+are pull-based gauges sampled at scrape time — a plain `os.Stat` of
+`metadata.sqlite-wal` and `Store.DiskSize()` respectively — the same pattern
+Badger's own cache gauges already use rather than a background ticker.
+`dingo_database_sql_wal_bytes` is a monotonic high-water mark, not a
+checkpoint-health signal: SQLite's PASSIVE/FULL/RESTART checkpoints backfill
+WAL frames into `metadata.sqlite` but never `ftruncate` the `-wal` file, so
+only a TRUNCATE checkpoint (which dingo does not run periodically) resets it,
+and its steady-state floor is now permanently ~40MB at the raised
+`wal_autocheckpoint` threshold above rather than a transient backlog.
 
 A failed `Sync` is reported as `PartialCommitError`, because at that point the
 blob transaction is committed and carries the new commit timestamp while metadata
