@@ -5572,11 +5572,14 @@ Those three change how the counter has to be read, and not only in the
 bookkeeping. `checkAndForgeProduction` runs once per slot from the forging
 loop, so while the forging keys are invalid the gates refuse -- and increment
 -- on EVERY slot that reaches them, not once per leader slot. That is the
-overstatement by roughly the reciprocal of the active slot coefficient the
-paragraph above argues the design avoids, and it lands on the failure an
-operator is most likely to be reading this counter to diagnose: an expired
-operational certificate does not raise `could_not_forge` from zero to this
-pool's handful of lost slots per epoch, it raises it to one per slot. So
+overstatement the paragraph above argues the design avoids, and it is larger
+than the figure that paragraph names: one increment per slot against one per
+leader slot is a factor of about 1/(sigma*f) for a pool holding an active
+stake fraction sigma, of which the reciprocal of the active slot coefficient
+is only the sigma = 1 bound. It also lands on the failure an operator is most
+likely to be reading this counter to diagnose: an expired operational
+certificate does not raise `could_not_forge` from zero to this pool's handful
+of lost slots per epoch, it raises it to one per slot. So
 `could_not_forge` is a lost-block count only while the forging keys are valid.
 While they are not, the diagnosis is on the gauges the same code path sets
 every slot before it refuses -- `cardano_node_metrics_currentKESPeriod_int`

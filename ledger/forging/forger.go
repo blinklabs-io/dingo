@@ -1086,10 +1086,11 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// that cannot sign. Because checkAndForgeProduction runs once per slot,
 	// those three increment on every slot that reaches them while the keys are
 	// invalid rather than once per leader slot, so the counter over-reports by
-	// roughly 1/f exactly when an operator is reading it to diagnose an
-	// expired opcert. Read it as a lost-block count only while the forging
-	// keys are valid; ARCHITECTURE.md records the full rule, the per-slot
-	// inflation and the cardano-node comparison.
+	// about 1/(sigma*f) for an active stake fraction sigma -- exactly when an
+	// operator is reading it to diagnose an expired opcert. Read it as a
+	// lost-block count only while the forging keys are valid; ARCHITECTURE.md
+	// records the full rule, the per-slot inflation and the cardano-node
+	// comparison.
 	if gates.tipAheadOfSlot() {
 		// Detect stale data: if the tip is far ahead of the slot clock,
 		// the database likely contains chain data from a different genesis.
@@ -1339,9 +1340,9 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// per slot they increment on EVERY slot that reaches them while the keys
 	// are invalid, not once per leader slot. The counter is therefore a
 	// lost-block count only while the forging keys are valid; an expired or
-	// not-yet-valid operational certificate drives it to one per slot, roughly
-	// 1/f times the blocks actually lost. The KES gauges updated just above
-	// (currentKESPeriod against the opcert start/expiry periods, and
+	// not-yet-valid operational certificate drives it to one per slot, about
+	// 1/(sigma*f) times the blocks actually lost. The KES gauges updated just
+	// above (currentKESPeriod against the opcert start/expiry periods, and
 	// remainingKESPeriods) and the Error lines here are the unambiguous
 	// signal for that failure. ARCHITECTURE.md carries the full rule and the
 	// cardano-node comparison, where the equivalent check runs in the leader
