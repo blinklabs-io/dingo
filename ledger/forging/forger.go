@@ -1067,15 +1067,29 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// No counter moves on this refusal. It runs before checkLeaderSafe, so
 	// the slot may never have been this node's to forge -- on a node whose
 	// clock trails the network it fires for any peer block that arrives a
-	// slot early -- and could_not_forge records a slot this node was
-	// ESTABLISHED to lead and did not forge, so that it keeps counting lost
-	// blocks rather than leader checks. The same condition met DURING
-	// production does reach
-	// could_not_forge, because leadership is proven by then; see
-	// errChainTipAheadOfSlot and ARCHITECTURE.md for both signatures and why
-	// they are not made to match. A scheduled leader slot swallowed here is
-	// still attributable: logGateSkip raises the line to Warn with
-	// leader_slot.
+	// slot early -- and leaving it uncounted is what keeps could_not_forge
+	// counting lost blocks rather than leader checks. The same condition met
+	// DURING production does reach could_not_forge, because leadership is
+	// proven by then; see errChainTipAheadOfSlot and ARCHITECTURE.md for both
+	// signatures and why they are not made to match. A scheduled leader slot
+	// swallowed here is still attributable: logGateSkip raises the line to
+	// Warn with leader_slot.
+	//
+	// "Counts lost blocks" is the intent of the counter, not an invariant it
+	// holds: could_not_forge is not exclusively a record of slots this node
+	// was established to lead. Two kinds of refusal increment it before the
+	// leader check -- the slot battle lost under the forge fence, where the
+	// fence itself establishes that this node led the slot, and the three
+	// forging-key validity gates below (KES protocol lifetime, operational
+	// certificate not yet valid, operational certificate expired), which have
+	// to run before Praos leader selection so nothing is signed with a key
+	// that cannot sign. Because checkAndForgeProduction runs once per slot,
+	// those three increment on every slot that reaches them while the keys are
+	// invalid rather than once per leader slot, so the counter over-reports by
+	// roughly 1/f exactly when an operator is reading it to diagnose an
+	// expired opcert. Read it as a lost-block count only while the forging
+	// keys are valid; ARCHITECTURE.md records the full rule, the per-slot
+	// inflation and the cardano-node comparison.
 	if gates.tipAheadOfSlot() {
 		// Detect stale data: if the tip is far ahead of the slot clock,
 		// the database likely contains chain data from a different genesis.
@@ -1318,6 +1332,20 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// selection, Leios work, or ranking-block construction. The expiry was
 	// checked for overflow when the production forger was created, so these
 	// comparisons cannot wrap.
+	//
+	// The three refusals below are the exception to the rule stated at the
+	// tipAheadOfSlot gate above: they increment could_not_forge without a
+	// leader check behind them, and because checkAndForgeProduction runs once
+	// per slot they increment on EVERY slot that reaches them while the keys
+	// are invalid, not once per leader slot. The counter is therefore a
+	// lost-block count only while the forging keys are valid; an expired or
+	// not-yet-valid operational certificate drives it to one per slot, roughly
+	// 1/f times the blocks actually lost. The KES gauges updated just above
+	// (currentKESPeriod against the opcert start/expiry periods, and
+	// remainingKESPeriods) and the Error lines here are the unambiguous
+	// signal for that failure. ARCHITECTURE.md carries the full rule and the
+	// cardano-node comparison, where the equivalent check runs in the leader
+	// branch instead.
 	slotsPerKESPeriod := f.slotClock.SlotsPerKESPeriod()
 	if slotsPerKESPeriod == 0 {
 		return errors.New("slots per KES period is zero")

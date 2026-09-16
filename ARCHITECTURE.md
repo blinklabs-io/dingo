@@ -5538,23 +5538,65 @@ node's to lead.
 
 That asymmetry is deliberate, and it is not the entry/re-check split the
 per-attempt re-check exists to remove. It is the line `could_not_forge` is
-drawn on throughout `checkAndForgeProduction`: the counter records a slot this
-node was ESTABLISHED to lead and did not forge. A refusal after
-`checkLeaderSafe` increments it -- the stale-tip refusal, the slot battle, the
-KES and OpCert refusals, a credential reload during selection -- because
-`about_to_lead` has already moved and `node_is_leader` never will, and the
-cardano-node parity counters stop balancing on a lost leader slot otherwise. A
-refusal before the leader check does not, because leadership has not been
-established there; the one that does is the slot battle lost under the forge
-fence, where the durable fence proves this node led the slot and forged it on
-an earlier pass. Every build attempt is post-leader-check by construction,
-which is why all five re-check refusals increment it while three of the five
-entry refusals -- parent slot past the slot, unapplied block at the slot, and
-the upstream-sync skip -- do not. Making the entry side match would make
-`could_not_forge` count leader CHECKS rather than lost blocks, overstating
-them by roughly the reciprocal of the active slot coefficient: the same
-mistake `dingo_forge_stale_tip_skip_total` was corrected for once already, by
-moving its gate below the leader check.
+drawn on for the tip gates, and the intent behind it is that the counter
+report lost blocks rather than leader checks. Every tip-gate refusal after
+`checkLeaderSafe` increments it -- the stale-tip refusal, the slot battle, and
+the credential refusals that can fire during selection (a reload, a KES
+revalidation, the KES evolution) -- because `about_to_lead` has already moved
+and `node_is_leader` never will, and the cardano-node parity counters stop
+balancing on a lost leader slot otherwise. Of the five entry tip gates the
+three that refuse before the leader check -- parent slot past the slot,
+unapplied block at the slot, and the upstream-sync skip -- do not, because
+leadership has not been established there. Every build attempt is
+post-leader-check by construction, which is why all five re-check refusals
+increment it. Making the entry side match would make `could_not_forge` count
+leader CHECKS rather than lost blocks, overstating them by roughly the
+reciprocal of the active slot coefficient: the same mistake
+`dingo_forge_stale_tip_skip_total` was corrected for once already, by moving
+its gate below the leader check.
+
+The leader check is not the line itself, though, and the counter is not an
+exceptionless record of slots this node was established to lead. Four
+refusals in `checkAndForgeProduction` increment it BEFORE `checkLeaderSafe`:
+
+- the slot battle lost under the forge fence, where the durable fence proves
+  this node led the slot and forged it on an earlier pass, so leadership is
+  established by the fence rather than by the leader check; and
+- the three forging-key validity gates, which run before Praos leader
+  selection so that no VRF proof and no KES signature is computed with a key
+  that cannot sign -- the KES protocol lifetime failing validation, the
+  operational certificate not yet valid for the current KES period, and the
+  operational certificate expired.
+
+Those three change how the counter has to be read, and not only in the
+bookkeeping. `checkAndForgeProduction` runs once per slot from the forging
+loop, so while the forging keys are invalid the gates refuse -- and increment
+-- on EVERY slot that reaches them, not once per leader slot. That is the
+overstatement by roughly the reciprocal of the active slot coefficient the
+paragraph above argues the design avoids, and it lands on the failure an
+operator is most likely to be reading this counter to diagnose: an expired
+operational certificate does not raise `could_not_forge` from zero to this
+pool's handful of lost slots per epoch, it raises it to one per slot. So
+`could_not_forge` is a lost-block count only while the forging keys are valid.
+While they are not, the diagnosis is on the gauges the same code path sets
+every slot before it refuses -- `cardano_node_metrics_currentKESPeriod_int`
+against `cardano_node_metrics_operationalCertificateStartKESPeriod_int` and
+`cardano_node_metrics_operationalCertificateExpiryKESPeriod_int`, and
+`cardano_node_metrics_remainingKESPeriods_int` -- and on the Error log lines
+those three refusals write, which name the cause directly.
+
+For reference, the counter's cardano-node analogue draws the line in the other
+place. In ouroboros-consensus `checkShouldForge` evolves the forge state
+first and only calls `checkCanForge` in the leader branch, so
+`TraceNodeCannotForge` -- the event behind `Forge.could_not_forge` -- fires
+only once leadership is established (`PraosCannotForge` is documented as
+"whilst we believe ourselves to be a leader for this slot, we are nonetheless
+unable to forge"), and the expired-key case is not on that event at all: it is
+caught in `updateForgeState` and traced as a forge-state update error. Dingo's
+three key gates therefore count on a series its namesake does not, and count
+it per slot. Whether to make them agree -- counting once per leader slot, not
+at all, or on a counter of their own -- is a behaviour question, not a
+documentation one, and is deliberately left out of this PR.
 
 A separate schedule-driven counter would close the gap from the other side --
 the shape `unapplied_rival_at_leader_slot` uses for the one other
