@@ -972,13 +972,6 @@ func Sync(
 			certifiedTip.Slot,
 		)
 	}
-	if err := setStableMithrilLedgerTip(
-		db,
-		ledgerStateSlot,
-		ledgerStateHash,
-	); err != nil {
-		return SyncResult{}, err
-	}
 
 	// The pipelined copy stores produced-UTxO offsets per block but does not
 	// advance the offsets-complete marker, and the post-bootstrap copy only
@@ -998,11 +991,13 @@ func Sync(
 
 	// The imported ledger state is deliberately at or behind the certified
 	// ImmutableDB tip, or — for a verified ancillary state the signature
-	// vouches for directly — slightly ahead of it. Raw blocks after it remain
-	// in the primary chain (fetched and validated normally at node startup,
-	// exactly as they already are for the suffix past the certified tip), and
-	// the metadata ledger cursor stays at the imported state so normal node
-	// startup replays and validates that entire suffix.
+	// vouches for directly — slightly ahead of it. Either way, the artifact
+	// import above did not copy the blocks between the certified tip and the
+	// imported state's slot into the blob store. This Sync call closes that
+	// gap itself, immediately below: from stored volatile blocks left over
+	// from a prior run when available, from a relay otherwise. Anything past
+	// the imported state's slot is left for ordinary node-startup replay, not
+	// fetched here.
 	recentBlocks, err := database.BlocksRecent(db, 1)
 	if err != nil {
 		return SyncResult{}, fmt.Errorf("reading chain tip: %w", err)
@@ -1229,6 +1224,24 @@ func Sync(
 			"count", len(gapBlocks),
 		)
 		cfg.emit(SyncProgress{Phase: PhaseGapBlocks, Active: false})
+	}
+
+	// Deferred until here rather than run right after the certified-tip
+	// guard above: setStableMithrilLedgerTip looks the ledger state's block
+	// up by point, and for a verified ancillary state past the certified tip
+	// (ledgerStateBeyondCertifiedTip) that block is not copied by the
+	// immutable-copy step above — it is only stored once the gap-block
+	// sections immediately above this comment fetch and store it. Calling
+	// this any earlier fails that lookup on exactly the fresh-bootstrap path
+	// this exists to support. For the pre-existing at-or-below-certified-tip
+	// case the block was always already present, so moving the call later
+	// changes nothing about when the point becomes visible.
+	if err := setStableMithrilLedgerTip(
+		db,
+		ledgerStateSlot,
+		ledgerStateHash,
+	); err != nil {
+		return SyncResult{}, err
 	}
 	if isAPIMode(cfg.StorageMode) {
 		if err := updateMithrilReadyState(

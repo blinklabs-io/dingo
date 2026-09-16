@@ -370,10 +370,9 @@ func importLedgerState(
 	beyondCertifiedTip bool,
 	err error,
 ) {
-	snapshot, stateDir, signedBy, beyondCertifiedTip, err :=
-		selectLedgerStateSnapshot(
-			logger, result, maxTrustedSlot,
-		)
+	snapshot, stateDir, signedBy, beyondCertifiedTip, err := selectLedgerStateSnapshot(
+		logger, result, maxTrustedSlot,
+	)
 	if err != nil {
 		return 0, nil, false, err
 	}
