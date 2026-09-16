@@ -101,9 +101,17 @@ type koiosCoverageTable struct {
 // table.
 func parseKoiosCoverageTable(doc string) (koiosCoverageTable, error) {
 	lines := strings.Split(doc, "\n")
+	insideFence := make([]bool, len(lines))
+	var fences fenceTracker
+	for i, line := range lines {
+		_, insideFence[i] = fences.step(line)
+	}
 
 	var headers []int
 	for i, line := range lines {
+		if insideFence[i] {
+			continue
+		}
 		if !strings.Contains(line, "|") {
 			continue
 		}
@@ -135,8 +143,15 @@ func parseKoiosCoverageTable(doc string) (koiosCoverageTable, error) {
 		exact:    make(map[koiosFieldKey]koiosDocEntry),
 		wildcard: make(map[koiosFieldKey]koiosDocEntry),
 	}
-	for _, header := range headers {
-		for i := header + 2; i < len(lines); i++ {
+	for headerIndex, header := range headers {
+		end := len(lines)
+		if headerIndex+1 < len(headers) {
+			end = headers[headerIndex+1]
+		}
+		for i := header + 2; i < end; i++ {
+			if insideFence[i] {
+				continue
+			}
 			if !strings.HasPrefix(strings.TrimSpace(lines[i]), "|") {
 				break
 			}
@@ -197,7 +212,7 @@ func parseKoiosCoverageTable(doc string) (koiosCoverageTable, error) {
 			}
 		}
 	}
-	if len(table.exact) == 0 {
+	if len(table.exact)+len(table.wildcard) == 0 {
 		return koiosCoverageTable{}, fmt.Errorf(
 			"%s: the coverage table has no field rows",
 			docLocation(koiosCoverageDoc, headers[0]+1),
