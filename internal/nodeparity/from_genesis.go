@@ -18,7 +18,11 @@ package nodeparity
 // doc comment) end to end: follows dingoAddr's chain from genesis, and at
 // every epoch boundary runs all three checks against Koios, each on its own
 // Acquire (see koios_check.go's doc comment for why they must not share
-// one). Runs until ctx is cancelled or the ChainSync session ends.
+// one). Runs until ctx is cancelled: a chainsync session ending for any
+// other reason (a dial failure, a currentEpochNo error, a protocol-level
+// session drop -- none of which indicate a real divergence, which is
+// reported through EpochResult instead) is not fatal -- see the reconnect
+// loop's own doc comment further down.
 
 import (
 	"context"
@@ -252,6 +256,26 @@ func captureGenesisBaseline(
 	return set, nil
 }
 
+// nextSessionRetryDelay computes how long RunFromGenesis's reconnect loop
+// should wait before its next reconnect attempt (sleepFor), and what delay
+// the attempt after that should use if it also fails (nextDelay).
+// progressed being true resets the backoff to base rather than letting it
+// keep growing across a run that is mostly healthy with only occasional
+// hiccups -- growth (doubling, capped at maxDelay) is reserved for a
+// session that fails immediately on every reconnect attempt (e.g. Dingo
+// genuinely down).
+func nextSessionRetryDelay(
+	delay time.Duration,
+	progressed bool,
+	base time.Duration,
+	maxDelay time.Duration,
+) (sleepFor, nextDelay time.Duration) {
+	if progressed {
+		delay = base
+	}
+	return delay, min(delay*2, maxDelay)
+}
+
 // RunFromGenesis is documented at the top of this file.
 func RunFromGenesis(
 	ctx context.Context,
@@ -272,11 +296,6 @@ func RunFromGenesis(
 		logf = func(string, ...any) {}
 	}
 
-	rawConn, dialErr := dialRaw(ctx, protoFromAddr(dingoAddr), dingoAddr)
-	if dialErr != nil {
-		return fmt.Errorf("dial raw chainsync connection: %w", dialErr)
-	}
-
 	var (
 		lastEpoch          uint64
 		haveLastEpoch      bool
@@ -286,6 +305,18 @@ func RunFromGenesis(
 		pendingTxHashes    []string
 		txInfoFlushCount   int
 		txInfoFlushElapsed time.Duration
+		// lastPoint is the most recent chain point either callback below has
+		// started processing, updated before any of that point's own work
+		// runs (see the reconnect loop's doc comment further down) -- a
+		// fresh session after a reconnect resumes chainsync from here
+		// instead of Origin, so hours of already-verified epochs are never
+		// replayed.
+		lastPoint = pcommon.NewPointOrigin()
+		// progressed records whether the current chainsync session has
+		// successfully processed at least one point since it was
+		// (re)established -- see sessionRetryDelay's doc comment for why
+		// this gates resetting the reconnect backoff.
+		progressed bool
 		// utxoTaintedThisEpoch is set whenever a tx_info failure forced a
 		// mid-epoch re-baseline (see flushPendingTxInfos) and cleared once
 		// that epoch's result has been reported. A re-baseline replaces
@@ -395,239 +426,349 @@ func RunFromGenesis(
 		}
 	}
 
-	csConn, connErr := ouroboros.New(
-		ouroboros.WithConnection(rawConn),
-		ouroboros.WithNetworkMagic(magic),
-		ouroboros.WithNodeToNode(false),
-		ouroboros.WithMuxerSegmentReadTimeout(0),
-		ouroboros.WithChainSyncConfig(chainsync.NewConfig(
-			chainsync.WithRollForwardFunc(
-				func(
-					_ chainsync.CallbackContext,
-					_ uint,
-					blockData any,
-					_ chainsync.Tip,
-				) error {
-					block, ok := blockData.(lcommon.Block)
-					if !ok {
-						return fmt.Errorf(
-							"unexpected roll-forward payload type %T",
-							blockData,
-						)
-					}
-					point := pcommon.NewPoint(
-						block.SlotNumber(), block.Hash().Bytes(),
-					)
+	// sessionRetryDelay/sessionRetryMaxDelay bound the backoff between
+	// reconnect attempts after the chainsync session itself ends for a
+	// reason unrelated to any real mismatch -- a raw dial failure,
+	// ouroboros.New failing, cs.Client.Sync failing, or (confirmed live: a
+	// from-genesis run 129 clean epochs in died outright on exactly this)
+	// currentEpochNo returning an error, which gouroboros' chainsync client
+	// treats identically to any other roll-forward/roll-backward callback
+	// error -- tearing the whole session down rather than skipping one
+	// block. None of these indicate a real UTxO/stake/protocol-params
+	// divergence (those are already recorded per-epoch into EpochResult and
+	// never reach here), so the right response is to reconnect and resume
+	// from lastPoint, not to give up on the whole run. Only ctx
+	// cancellation (the tool's normal Ctrl-C stop) exits this loop.
+	//
+	// The backoff resets to sessionRetryDelay once a session has made real
+	// progress (progressed=true, i.e. it got at least one point past
+	// currentEpochNo) before failing again, rather than growing without
+	// bound over a run that is mostly healthy with only occasional
+	// hiccups -- growth is reserved for a session that fails immediately on
+	// every reconnect attempt (e.g. Dingo genuinely down).
+	const (
+		sessionRetryDelay    = 1 * time.Second
+		sessionRetryMaxDelay = 30 * time.Second
+	)
+	delay := sessionRetryDelay
 
-					if !utxoAttempted {
-						utxoAttempted = true
-						refs, err := captureGenesisBaseline(ctx, dingoAddr, magic, point)
-						if err != nil {
-							utxoBaselineErr = err
-							logf(
-								"nodeparity: genesis UTxO baseline unavailable "+
-									"(UTxO comparison disabled for this run): %v",
-								err,
-							)
-						} else {
-							utxoRefs = refs
-							logf(
-								"nodeparity: genesis UTxO baseline captured: %d refs",
-								len(refs),
+	// retryOrStop sleeps for delay (advanced per nextSessionRetryDelay),
+	// returning ctx.Err() early if ctx is cancelled during the wait -- the
+	// caller's loop must return immediately if ok is false. logMsg is
+	// logged first, unless ctx is already done.
+	retryOrStop := func(logMsg string, cause error) (ok bool, err error) {
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		sleepFor, next := nextSessionRetryDelay(
+			delay, progressed, sessionRetryDelay, sessionRetryMaxDelay,
+		)
+		logf(logMsg+" (retrying in %s): %v", sleepFor, cause)
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-time.After(sleepFor):
+		}
+		delay = next
+		return true, nil
+	}
+
+	for {
+		progressed = false
+
+		rawConn, dialErr := dialRaw(ctx, protoFromAddr(dingoAddr), dingoAddr)
+		if dialErr != nil {
+			ok, err := retryOrStop(
+				"nodeparity: dial raw chainsync connection failed",
+				dialErr,
+			)
+			if !ok {
+				return err
+			}
+			continue
+		}
+
+		csConn, connErr := ouroboros.New(
+			ouroboros.WithConnection(rawConn),
+			ouroboros.WithNetworkMagic(magic),
+			ouroboros.WithNodeToNode(false),
+			ouroboros.WithMuxerSegmentReadTimeout(0),
+			ouroboros.WithChainSyncConfig(chainsync.NewConfig(
+				chainsync.WithRollForwardFunc(
+					func(
+						_ chainsync.CallbackContext,
+						_ uint,
+						blockData any,
+						_ chainsync.Tip,
+					) error {
+						block, ok := blockData.(lcommon.Block)
+						if !ok {
+							return fmt.Errorf(
+								"unexpected roll-forward payload type %T",
+								blockData,
 							)
 						}
-					} else if utxoRefs != nil {
-						for _, tx := range block.Transactions() {
-							pendingTxHashes = append(
-								pendingTxHashes, tx.Hash().String(),
-							)
-						}
-						if len(pendingTxHashes) >= txInfoOpportunisticFlushThreshold {
-							flushPendingTxInfos(point)
-						}
-					}
-
-					epoch, err := currentEpochNo(ctx, dingoAddr, magic, point)
-					if err != nil {
-						return fmt.Errorf(
-							"determine current epoch at slot %d: %w",
-							block.SlotNumber(), err,
+						point := pcommon.NewPoint(
+							block.SlotNumber(), block.Hash().Bytes(),
 						)
-					}
-					if haveLastEpoch && epoch <= lastEpoch {
-						return nil
-					}
-					haveLastEpoch = true
-					lastEpoch = epoch
+						// Recorded before any of this block's own work runs --
+						// see lastPoint's doc comment above.
+						lastPoint = point
 
-					// About to Acquire and compare at this exact point --
-					// flush any hashes still buffered below the threshold
-					// above so the reconstruction is current through this
-					// block, not just through the last flush.
-					flushPendingTxInfos(point)
-
-					result := EpochResult{Epoch: epoch}
-
-					// Protocol params and stake each get their own Acquire,
-					// on their own connection -- see koios_check.go's doc
-					// comment for why sharing one would needlessly cut them
-					// off at UTxO's much tighter retention floor.
-					psStart := time.Now()
-					if psConn, lsqPS, err := acquireWithRetry(ctx, dingoAddr, magic, point); err != nil {
-						result.ProtocolParamsErr = err
-						result.StakeErr = err
-					} else {
-						mismatches, err := CheckProtocolParams(ctx, lsqPS.Client, koios, network, epoch)
-						result.ProtocolParamsErr = err
-						result.ProtocolParamsMismatches = mismatches
-
-						stakeMismatches, err := CheckStakeDistribution(ctx, lsqPS.Client, koios, epoch)
-						result.StakeErr = err
-						result.StakeMismatches = stakeMismatches
-
-						_ = lsqPS.Client.Release() //nolint:errcheck
-						psConn.Close()             //nolint:errcheck
-					}
-					result.ProtocolParamsAndStakeElapsed = time.Since(psStart)
-
-					utxoStart := time.Now()
-					if utxoTaintedThisEpoch {
-						// See utxoTaintedThisEpoch's doc comment: utxoRefs
-						// was just re-baselined from Dingo's own answer at
-						// this same point, so comparing it now would
-						// silently pass by construction rather than
-						// confirming anything against Koios.
-						result.UTxOAttempted = true
-						result.UTxOErr = errors.New(
-							"tx_info fetch failed during this epoch; " +
-								"UTxO reconstruction was re-baselined from " +
-								"Dingo directly, so this epoch's comparison " +
-								"would be against Dingo itself and was skipped",
-						)
-					} else if utxoRefs != nil {
-						result.UTxOAttempted = true
-						if utxoConn, lsqUtxo, err := acquireWithRetry(ctx, dingoAddr, magic, point); err != nil {
-							result.UTxOErr = err
-						} else {
-							utxos, err := lsqUtxo.Client.GetUTxOWhole()
+						if !utxoAttempted {
+							utxoAttempted = true
+							refs, err := captureGenesisBaseline(ctx, dingoAddr, magic, point)
 							if err != nil {
-								result.UTxOErr = fmt.Errorf("dingo GetUTxOWhole: %w", err)
+								utxoBaselineErr = err
+								logf(
+									"nodeparity: genesis UTxO baseline unavailable "+
+										"(UTxO comparison disabled for this run): %v",
+									err,
+								)
 							} else {
-								dingoSet := make(UTxOSet, len(utxos.Results))
-								for id, out := range utxos.Results {
-									key := fmt.Sprintf("%s#%d", id.Hash.String(), id.Idx)
-									dingoSet[key] = canonicalUTxOEntry(out)
-								}
-								result.UTxORefCount = len(dingoSet)
-								result.UTxOMissing, result.UTxOExtra, result.UTxODiffers = UTxODiff(utxoRefs, dingoSet)
+								utxoRefs = refs
+								logf(
+									"nodeparity: genesis UTxO baseline captured: %d refs",
+									len(refs),
+								)
 							}
-							_ = lsqUtxo.Client.Release() //nolint:errcheck
-							utxoConn.Close()             //nolint:errcheck
+						} else if utxoRefs != nil {
+							for _, tx := range block.Transactions() {
+								pendingTxHashes = append(
+									pendingTxHashes, tx.Hash().String(),
+								)
+							}
+							if len(pendingTxHashes) >= txInfoOpportunisticFlushThreshold {
+								flushPendingTxInfos(point)
+							}
 						}
-					} else if utxoBaselineErr != nil {
-						result.UTxOAttempted = false
-					}
-					result.UTxOElapsed = time.Since(utxoStart)
-					utxoTaintedThisEpoch = false
 
-					result.TxInfoFlushCount = txInfoFlushCount
-					result.TxInfoFlushElapsed = txInfoFlushElapsed
-					txInfoFlushCount = 0
-					txInfoFlushElapsed = 0
-
-					report(result)
-					return nil
-				},
-			),
-			chainsync.WithRollBackwardFunc(
-				func(_ chainsync.CallbackContext, point pcommon.Point, _ chainsync.Tip) error {
-					// A rollback invalidates every transaction the running
-					// UTxO reconstruction applied from the now-abandoned
-					// fork -- it must not keep silently building on top of
-					// them. Genesis bulk replay against multiple competing
-					// peers makes short rollbacks a routine occurrence
-					// (confirmed live via Dingo's own "chain switch:
-					// updating active connection" log lines throughout this
-					// tool's own validation runs), so this is not a rare
-					// edge case to leave unhandled.
-					//
-					// Re-baselining at the rollback point -- the same
-					// trusted-from-Dingo approach captureGenesisBaseline
-					// already uses for the very first block -- is simpler
-					// and safer than trying to precisely unwind only the
-					// rolled-back blocks' own changes, and costs only one
-					// GetUTxOWhole call, not repeated per rollback depth.
-					// Any buffered hashes belong to blocks on the
-					// now-abandoned fork -- discard them rather than
-					// applying them on top of the re-baselined (or
-					// disabled) reconstruction below.
-					pendingTxHashes = pendingTxHashes[:0]
-
-					if utxoRefs != nil {
-						refs, err := captureGenesisBaseline(ctx, dingoAddr, magic, point)
+						epoch, err := currentEpochNo(ctx, dingoAddr, magic, point)
 						if err != nil {
-							utxoRefs = nil
-							logf(
-								"nodeparity: rollback to slot %d invalidated the "+
-									"UTxO reconstruction and re-baselining failed "+
-									"(UTxO comparison disabled for the rest of this "+
-									"run): %v",
+							return fmt.Errorf(
+								"determine current epoch at slot %d: %w",
+								block.SlotNumber(), err,
+							)
+						}
+						progressed = true
+						if haveLastEpoch && epoch <= lastEpoch {
+							return nil
+						}
+						haveLastEpoch = true
+						lastEpoch = epoch
+
+						// About to Acquire and compare at this exact point --
+						// flush any hashes still buffered below the threshold
+						// above so the reconstruction is current through this
+						// block, not just through the last flush.
+						flushPendingTxInfos(point)
+
+						result := EpochResult{Epoch: epoch}
+
+						// Protocol params and stake each get their own Acquire,
+						// on their own connection -- see koios_check.go's doc
+						// comment for why sharing one would needlessly cut them
+						// off at UTxO's much tighter retention floor.
+						psStart := time.Now()
+						if psConn, lsqPS, err := acquireWithRetry(ctx, dingoAddr, magic, point); err != nil {
+							result.ProtocolParamsErr = err
+							result.StakeErr = err
+						} else {
+							mismatches, err := CheckProtocolParams(ctx, lsqPS.Client, koios, network, epoch)
+							result.ProtocolParamsErr = err
+							result.ProtocolParamsMismatches = mismatches
+
+							stakeMismatches, err := CheckStakeDistribution(ctx, lsqPS.Client, koios, epoch)
+							result.StakeErr = err
+							result.StakeMismatches = stakeMismatches
+
+							_ = lsqPS.Client.Release() //nolint:errcheck
+							psConn.Close()             //nolint:errcheck
+						}
+						result.ProtocolParamsAndStakeElapsed = time.Since(psStart)
+
+						utxoStart := time.Now()
+						if utxoTaintedThisEpoch {
+							// See utxoTaintedThisEpoch's doc comment: utxoRefs
+							// was just re-baselined from Dingo's own answer at
+							// this same point, so comparing it now would
+							// silently pass by construction rather than
+							// confirming anything against Koios.
+							result.UTxOAttempted = true
+							result.UTxOErr = errors.New(
+								"tx_info fetch failed during this epoch; " +
+									"UTxO reconstruction was re-baselined from " +
+									"Dingo directly, so this epoch's comparison " +
+									"would be against Dingo itself and was skipped",
+							)
+						} else if utxoRefs != nil {
+							result.UTxOAttempted = true
+							if utxoConn, lsqUtxo, err := acquireWithRetry(ctx, dingoAddr, magic, point); err != nil {
+								result.UTxOErr = err
+							} else {
+								utxos, err := lsqUtxo.Client.GetUTxOWhole()
+								if err != nil {
+									result.UTxOErr = fmt.Errorf("dingo GetUTxOWhole: %w", err)
+								} else {
+									dingoSet := make(UTxOSet, len(utxos.Results))
+									for id, out := range utxos.Results {
+										key := fmt.Sprintf("%s#%d", id.Hash.String(), id.Idx)
+										dingoSet[key] = canonicalUTxOEntry(out)
+									}
+									result.UTxORefCount = len(dingoSet)
+									result.UTxOMissing, result.UTxOExtra, result.UTxODiffers = UTxODiff(utxoRefs, dingoSet)
+								}
+								_ = lsqUtxo.Client.Release() //nolint:errcheck
+								utxoConn.Close()             //nolint:errcheck
+							}
+						} else if utxoBaselineErr != nil {
+							result.UTxOAttempted = false
+						}
+						result.UTxOElapsed = time.Since(utxoStart)
+						utxoTaintedThisEpoch = false
+
+						result.TxInfoFlushCount = txInfoFlushCount
+						result.TxInfoFlushElapsed = txInfoFlushElapsed
+						txInfoFlushCount = 0
+						txInfoFlushElapsed = 0
+
+						report(result)
+						return nil
+					},
+				),
+				chainsync.WithRollBackwardFunc(
+					func(_ chainsync.CallbackContext, point pcommon.Point, _ chainsync.Tip) error {
+						// Recorded before any of this rollback's own work runs
+						// -- see lastPoint's doc comment above.
+						lastPoint = point
+
+						// A rollback invalidates every transaction the running
+						// UTxO reconstruction applied from the now-abandoned
+						// fork -- it must not keep silently building on top of
+						// them. Genesis bulk replay against multiple competing
+						// peers makes short rollbacks a routine occurrence
+						// (confirmed live via Dingo's own "chain switch:
+						// updating active connection" log lines throughout this
+						// tool's own validation runs), so this is not a rare
+						// edge case to leave unhandled.
+						//
+						// Re-baselining at the rollback point -- the same
+						// trusted-from-Dingo approach captureGenesisBaseline
+						// already uses for the very first block -- is simpler
+						// and safer than trying to precisely unwind only the
+						// rolled-back blocks' own changes, and costs only one
+						// GetUTxOWhole call, not repeated per rollback depth.
+						// Any buffered hashes belong to blocks on the
+						// now-abandoned fork -- discard them rather than
+						// applying them on top of the re-baselined (or
+						// disabled) reconstruction below.
+						pendingTxHashes = pendingTxHashes[:0]
+
+						if utxoRefs != nil {
+							refs, err := captureGenesisBaseline(ctx, dingoAddr, magic, point)
+							if err != nil {
+								utxoRefs = nil
+								logf(
+									"nodeparity: rollback to slot %d invalidated the "+
+										"UTxO reconstruction and re-baselining failed "+
+										"(UTxO comparison disabled for the rest of this "+
+										"run): %v",
+									point.Slot, err,
+								)
+							} else {
+								utxoRefs = refs
+								logf(
+									"nodeparity: rolled back to slot %d, "+
+										"UTxO reconstruction re-baselined: %d refs",
+									point.Slot, len(refs),
+								)
+							}
+						}
+						// lastEpoch tracks the highest epoch confirmed on the
+						// canonical chain -- a rollback across an epoch
+						// boundary (possible, if rare, given how far apart
+						// preview/preprod epoch boundaries are relative to a
+						// typical bulk-replay rollback depth) must retreat it
+						// too, or a re-crossing of that same boundary on the
+						// new fork would be silently skipped as already seen.
+						epoch, err := currentEpochNo(ctx, dingoAddr, magic, point)
+						if err != nil {
+							return fmt.Errorf(
+								"determine current epoch at rollback slot %d: %w",
 								point.Slot, err,
 							)
-						} else {
-							utxoRefs = refs
-							logf(
-								"nodeparity: rolled back to slot %d, "+
-									"UTxO reconstruction re-baselined: %d refs",
-								point.Slot, len(refs),
-							)
 						}
-					}
-					// lastEpoch tracks the highest epoch confirmed on the
-					// canonical chain -- a rollback across an epoch
-					// boundary (possible, if rare, given how far apart
-					// preview/preprod epoch boundaries are relative to a
-					// typical bulk-replay rollback depth) must retreat it
-					// too, or a re-crossing of that same boundary on the
-					// new fork would be silently skipped as already seen.
-					epoch, err := currentEpochNo(ctx, dingoAddr, magic, point)
-					if err != nil {
-						return fmt.Errorf(
-							"determine current epoch at rollback slot %d: %w",
-							point.Slot, err,
-						)
-					}
-					haveLastEpoch = true
-					lastEpoch = epoch
-					return nil
-				},
-			),
-		)),
-	)
-	if connErr != nil {
-		rawConn.Close() //nolint:errcheck
-		return fmt.Errorf("ouroboros.New (chainsync): %w", connErr)
-	}
-	defer csConn.Close() //nolint:errcheck
-
-	stopOnCancel := context.AfterFunc(ctx, func() { csConn.Close() }) //nolint:errcheck
-	defer stopOnCancel()
-
-	cs := csConn.ChainSync()
-	if cs == nil || cs.Client == nil {
-		return errors.New("ChainSync client unavailable")
-	}
-	if err := cs.Client.Sync([]pcommon.Point{pcommon.NewPointOrigin()}); err != nil {
-		return fmt.Errorf("start chainsync from origin: %w", err)
-	}
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case sessionErr, ok := <-csConn.ErrorChan():
-		if !ok {
-			return nil
+						progressed = true
+						haveLastEpoch = true
+						lastEpoch = epoch
+						return nil
+					},
+				),
+			)),
+		)
+		if connErr != nil {
+			rawConn.Close() //nolint:errcheck
+			ok, err := retryOrStop(
+				"nodeparity: ouroboros.New (chainsync) failed",
+				connErr,
+			)
+			if !ok {
+				return err
+			}
+			continue
 		}
-		return sessionErr
+		// Registered as soon as csConn exists, matching this loop's
+		// single-shot predecessor: a ctx cancellation during cs.Client.Sync
+		// itself (not just during the final select below) must still close
+		// csConn to unblock it, not wait for Sync to return on its own.
+		stopOnCancel := context.AfterFunc(ctx, func() { csConn.Close() }) //nolint:errcheck
+
+		cs := csConn.ChainSync()
+		if cs == nil || cs.Client == nil {
+			stopOnCancel()
+			csConn.Close() //nolint:errcheck
+			return errors.New("ChainSync client unavailable")
+		}
+		if err := cs.Client.Sync([]pcommon.Point{lastPoint}); err != nil {
+			stopOnCancel()
+			csConn.Close() //nolint:errcheck
+			ok, retryErr := retryOrStop(
+				fmt.Sprintf(
+					"nodeparity: start chainsync from slot %d failed",
+					lastPoint.Slot,
+				),
+				err,
+			)
+			if !ok {
+				return retryErr
+			}
+			continue
+		}
+
+		var sessionErr error
+		select {
+		case <-ctx.Done():
+			stopOnCancel()
+			csConn.Close() //nolint:errcheck
+			return ctx.Err()
+		case err, ok := <-csConn.ErrorChan():
+			stopOnCancel()
+			csConn.Close() //nolint:errcheck
+			if !ok {
+				return nil
+			}
+			sessionErr = err
+		}
+
+		ok, err := retryOrStop(
+			fmt.Sprintf(
+				"nodeparity: chainsync session ended, resuming from slot %d",
+				lastPoint.Slot,
+			),
+			sessionErr,
+		)
+		if !ok {
+			return err
+		}
 	}
 }
