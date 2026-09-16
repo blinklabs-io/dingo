@@ -685,7 +685,7 @@ func (ls *LedgerState) recoverFromDeterministicTxValidationError(
 	}
 	if err := ls.rollbackWithOptions(
 		rewindPoint,
-		pointMatches(rewindPoint, ledgerTip.Point),
+		!resyncSpent && pointMatches(rewindPoint, ledgerTip.Point),
 		true,
 	); err != nil {
 		return false, fmt.Errorf(

@@ -1070,15 +1070,17 @@ type LedgerState struct {
 	// lock order and deadlocks the node (issue #3717). The eviction+floor read is
 	// atomic; a header admitted after the lock is released is handled by the next
 	// cleanup pass (the floor is a lower-watermark recomputed each pass).
-	deferredHeaderValidation   map[string]struct{}
-	deferredHeaderValidationMu sync.Mutex
-	checkpointWrittenForEpoch  bool
-	closed                     atomic.Bool
-	closeMu                    sync.Mutex
-	closeDone                  chan struct{}
-	closeErr                   error
-	inRecovery                 bool // guards against recursive recovery in SubmitAsyncDBTxn
-	lastAtTipRecovery          *atTipRecoveryAttempt
+	deferredHeaderValidation    map[string]struct{}
+	deferredHeaderValidationMu  sync.Mutex
+	checkpointWrittenForEpoch   bool
+	closed                      atomic.Bool
+	closeMu                     sync.Mutex
+	closeDone                   chan struct{}
+	closeErr                    error
+	inRecovery                  bool // guards against recursive recovery in SubmitAsyncDBTxn
+	lastAtTipRecovery           *atTipRecoveryAttempt
+	lastHeaderValidationFailure *headerValidationError
+	lastHeaderValidationTip     ocommon.Point
 	// At-tip recovery non-convergence tracking (issue #2939). A descending
 	// series of *distinct* (block, tx) validation failures each resets the
 	// same-block escalation to attempt 1, so the escalate-and-cap logic in

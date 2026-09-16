@@ -90,6 +90,11 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 	ls.RLock()
 	ledgerTip := ls.currentTip
 	ls.RUnlock()
+	sameFailureAtTip := ls.lastHeaderValidationFailure != nil &&
+		pointMatches(ls.lastHeaderValidationFailure.BlockPoint, validationErr.BlockPoint) &&
+		pointMatches(ls.lastHeaderValidationTip, ledgerTip.Point)
+	ls.lastHeaderValidationFailure = validationErr
+	ls.lastHeaderValidationTip = ledgerTip.Point
 
 	// The ledger tip is normally the last block that applied cleanly, so it
 	// already precedes the failing block and rewinding to it drops the
@@ -193,7 +198,7 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 	// path.
 	if err := ls.rollbackWithOptions(
 		rewindPoint,
-		pointMatches(rewindPoint, ledgerTip.Point),
+		!sameFailureAtTip && pointMatches(rewindPoint, ledgerTip.Point),
 		true,
 	); err != nil {
 		return false, fmt.Errorf(

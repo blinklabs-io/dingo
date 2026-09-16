@@ -154,6 +154,7 @@ func TestHeaderValidationRecoveryRewindsPastRejectedBlock(t *testing.T) {
 		},
 	}
 	ls.currentTip = ledgerTip
+	ls.metrics.init(prometheus.NewRegistry())
 	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
 	require.Equal(t, blocks[4].Slot, cm.PrimaryChain().Tip().Point.Slot,
 		"the rejected block and its successor should start on the chain")
