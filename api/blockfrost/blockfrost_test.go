@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	cardano "github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -3578,6 +3579,33 @@ func TestNodeAdapterKeyScriptStakeAddress(t *testing.T) {
 	assert.Equal(t, uint(lcommon.AddressNetworkTestnet), stakeAddr.NetworkId())
 	assert.Equal(t, uint8(lcommon.AddressTypeNoneScript), stakeAddr.Type())
 	assert.Equal(t, stakeScriptHash, stakeAddr.StakeKeyHash().Bytes())
+
+	mainnetCfg, err := cardano.NewCardanoNodeConfigFromEmbedFS(
+		cardano.EmbeddedConfigFS,
+		"mainnet/config.json",
+	)
+	require.NoError(t, err)
+	mainnetAdapter, mainnetStore, mainnetDB := newDBBackedAdapter(t, mainnetCfg)
+	mainnetAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyScript,
+		lcommon.AddressNetworkMainnet,
+		paymentHash,
+		stakeScriptHash,
+	)
+	require.NoError(t, err)
+	mainnetUtxo := utxo
+	insertAdapterUtxo(t, mainnetStore, &mainnetUtxo)
+	storePointerOutputCbor(t, mainnetDB, mainnetUtxo.TxId, 0, mainnetAddr, 1_000_000)
+
+	mainnetInfo, err := mainnetAdapter.Address(mainnetAddr.String())
+	require.NoError(t, err)
+	require.NotNil(t, mainnetInfo.StakeAddress)
+	assert.True(t, strings.HasPrefix(*mainnetInfo.StakeAddress, "stake17"))
+	mainnetStakeAddr, err := lcommon.NewAddress(*mainnetInfo.StakeAddress)
+	require.NoError(t, err)
+	mainnetStakeBytes, err := mainnetStakeAddr.Bytes()
+	require.NoError(t, err)
+	assert.Equal(t, uint8(0xf1), mainnetStakeBytes[0])
 }
 
 func TestHandleAddress(t *testing.T) {

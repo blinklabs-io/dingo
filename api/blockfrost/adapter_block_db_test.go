@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
+	cardano "github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -45,6 +46,7 @@ import (
 // not perform slot/epoch/time math, and NewLedgerState tolerates a nil config.
 func newDBBackedAdapter(
 	t *testing.T,
+	nodeConfig ...*cardano.CardanoNodeConfig,
 ) (*NodeAdapter, *sql.DB, *database.Database) {
 	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{
@@ -55,11 +57,15 @@ func newDBBackedAdapter(
 	cm, err := chain.NewManager(db, nil)
 	require.NoError(t, err)
 
-	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
+	lsConfig := ledger.LedgerStateConfig{
 		Database:     db,
 		ChainManager: cm,
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
-	})
+	}
+	if len(nodeConfig) > 0 {
+		lsConfig.CardanoNodeConfig = nodeConfig[0]
+	}
+	ls, err := ledger.NewLedgerState(lsConfig)
 	require.NoError(t, err)
 
 	adapter, err := NewNodeAdapter(ls, nil)
