@@ -271,8 +271,15 @@ func validateUnknownVoters(
 		switch voter.Type {
 		case lcommon.VoterTypeDRepKeyHash,
 			lcommon.VoterTypeDRepScriptHash:
+			credentialType := uint(lcommon.CredentialTypeAddrKeyHash)
+			if voter.Type == lcommon.VoterTypeDRepScriptHash {
+				credentialType = lcommon.CredentialTypeScriptHash
+			}
 			registration, err := ls.DRepRegistration(
-				lcommon.Blake2b224(voter.Hash),
+				lcommon.Credential{
+					CredType:   credentialType,
+					Credential: lcommon.Blake2b224(voter.Hash),
+				},
 			)
 			if err != nil {
 				return err

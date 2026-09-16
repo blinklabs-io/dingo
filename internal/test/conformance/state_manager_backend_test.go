@@ -550,7 +550,10 @@ func TestDRepRegistrationPropagatesBackendErrors(t *testing.T) {
 	require.NoError(t, m.Close())
 
 	provider := NewDingoStateProvider(m)
-	_, err = provider.DRepRegistration(testHash28(0x41))
+	_, err = provider.DRepRegistration(common.Credential{
+		CredType:   common.CredentialTypeAddrKeyHash,
+		Credential: testHash28(0x41),
+	})
 	require.Error(
 		t,
 		err,
