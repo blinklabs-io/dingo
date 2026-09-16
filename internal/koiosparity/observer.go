@@ -161,8 +161,9 @@ type Observer struct {
 	cache *Cache
 	koios *KoiosClient
 
-	mu      sync.Mutex
-	pending map[uint64]struct{} // epochs requested for (re)validation
+	mu       sync.Mutex
+	pending  map[uint64]struct{} // epochs requested for (re)validation
+	resultMu sync.Mutex
 
 	// pendingAccounts is pending's twin for the slow per-account queue (see
 	// the Observer doc comment). Guarded by the same mu as pending: both are
@@ -736,9 +737,7 @@ func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 		o.reportError(epoch, fmt.Errorf("check: %w", err))
 		return
 	}
-	if o.cfg.OnResult != nil {
-		o.cfg.OnResult(result)
-	}
+	o.emitResult(result)
 	if result.Status != StatusPass {
 		significant := CountSignificant(result.Mismatches)
 		o.fail(epoch, fmt.Errorf(
@@ -824,9 +823,7 @@ func (o *Observer) processAccountEpoch(ctx context.Context, epoch uint64) {
 		o.reportError(epoch, fmt.Errorf("check: %w", err))
 		return
 	}
-	if o.cfg.OnResult != nil {
-		o.cfg.OnResult(result)
-	}
+	o.emitResult(result)
 	if err := o.cache.PruneAccountCoverage(o.cfg.Network, epoch); err != nil {
 		o.cfg.Logger.Warn(
 			"koiosparity observer: prune account coverage failed",
@@ -876,22 +873,29 @@ func cancelled(ctx context.Context, err error) bool {
 // consistent with that existing behavior.
 func (o *Observer) reportError(epoch uint64, err error) {
 	o.fail(epoch, err)
-	if o.cfg.OnResult != nil {
-		now := time.Now()
-		o.cfg.OnResult(&EpochCompareResult{
-			Network: o.cfg.Network,
-			Epoch:   epoch,
-			Status:  StatusError,
-			Mismatches: []CheckMismatch{{
-				Network:    o.cfg.Network,
-				Epoch:      epoch,
-				Field:      "observer_error",
-				DingoValue: fmt.Sprintf("error: %v", err),
-				Category:   CategoryDBError,
-				CheckedAt:  now,
-			}},
-		})
+	now := time.Now()
+	o.emitResult(&EpochCompareResult{
+		Network: o.cfg.Network,
+		Epoch:   epoch,
+		Status:  StatusError,
+		Mismatches: []CheckMismatch{{
+			Network:    o.cfg.Network,
+			Epoch:      epoch,
+			Field:      "observer_error",
+			DingoValue: fmt.Sprintf("error: %v", err),
+			Category:   CategoryDBError,
+			CheckedAt:  now,
+		}},
+	})
+}
+
+func (o *Observer) emitResult(result *EpochCompareResult) {
+	if o.cfg.OnResult == nil {
+		return
 	}
+	o.resultMu.Lock()
+	defer o.resultMu.Unlock()
+	o.cfg.OnResult(result)
 }
 
 // fetchIfNeeded fetches the fast pool/epoch-aggregate Koios reference data

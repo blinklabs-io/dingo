@@ -1560,10 +1560,19 @@ func (c *Cache) UpsertCheckEpochStatus(status CheckEpochStatus) error {
 			`INSERT INTO check_epoch_status
 		(network, epoch, last_checked_at, status, mismatch_count, dingo_pool_count, koios_pool_count, only_dingo_pools, only_koios_pools)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(network, epoch) DO UPDATE SET last_checked_at=excluded.last_checked_at, status=excluded.status,
-		mismatch_count=excluded.mismatch_count, dingo_pool_count=excluded.dingo_pool_count,
-		koios_pool_count=excluded.koios_pool_count, only_dingo_pools=excluded.only_dingo_pools,
-		only_koios_pools=excluded.only_koios_pools`,
+			ON CONFLICT(network, epoch) DO UPDATE SET last_checked_at=excluded.last_checked_at,
+			status=CASE WHEN check_epoch_status.status <> 'PASS' AND excluded.status = 'PASS'
+				THEN check_epoch_status.status ELSE excluded.status END,
+			mismatch_count=CASE WHEN check_epoch_status.status <> 'PASS' AND excluded.status = 'PASS'
+				THEN check_epoch_status.mismatch_count ELSE excluded.mismatch_count END,
+			dingo_pool_count=CASE WHEN check_epoch_status.status <> 'PASS' AND excluded.status = 'PASS'
+				THEN check_epoch_status.dingo_pool_count ELSE excluded.dingo_pool_count END,
+			koios_pool_count=CASE WHEN check_epoch_status.status <> 'PASS' AND excluded.status = 'PASS'
+				THEN check_epoch_status.koios_pool_count ELSE excluded.koios_pool_count END,
+			only_dingo_pools=CASE WHEN check_epoch_status.status <> 'PASS' AND excluded.status = 'PASS'
+				THEN check_epoch_status.only_dingo_pools ELSE excluded.only_dingo_pools END,
+			only_koios_pools=CASE WHEN check_epoch_status.status <> 'PASS' AND excluded.status = 'PASS'
+				THEN check_epoch_status.only_koios_pools ELSE excluded.only_koios_pools END`,
 			status.Network,
 			status.Epoch,
 			status.LastCheckedAt,
