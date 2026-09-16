@@ -227,6 +227,26 @@ The same run used about 17.9 GB of host `/data` at the time of sampling. Treat
 these API bootstrap values as preliminary and leave substantial additional CPU,
 RAM, and disk headroom until a complete bootstrap measurement is available.
 
+### API-mode bootstrap measurements
+
+The following complete Mithril API-mode runs used Dingo `origin/main` at
+commit `034c12e6`. The Preprod backfill was followed by a deferred
+critical-index rebuild; the overall duration includes both phases. These are
+environment-specific planning baselines, not capacity guarantees.
+
+| Network | Dingo ref | Storage mode | Backfill | Deferred index rebuild | Overall | Blocks / transactions |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| Preprod | `origin/main` (`034c12e6`) | `api` | 6h09m06s | 12m30.607s | ~6h21m37.7s | 5,169,107 / 6,795,854 |
+| Preview | `origin/main` (`034c12e6`) | `api` | 7h38m34s | not separately recorded | 7h38m34s | 4,658,378 / 6,890,796 |
+
+The API-mode runs reached approximately 8.1 GiB RSS on Preprod and 9.6 GiB
+RSS on Preview at their highest observed checkpoints. Peak CPU was about 1.29
+core-equivalents on both runs; swap reached about 145 MiB on Preprod and
+125 MiB on Preview. The observed data footprints were approximately 60 GiB
+and 49 GiB respectively. These resource readings were captured during active
+bootstrap and should not be used as steady-state serving requirements; leave
+additional headroom for host I/O, memory pressure, and future network growth.
+
 ## Docker
 
 ```bash
