@@ -5219,56 +5219,55 @@ standalone ahead of node composition.
 
 ### DMQ Message Authentication
 
-`dmq.Authenticator` is phase 2 of CIP-0137's DMQ (issue #1949 of 7). Like
-`MessageMempool`, it is a standalone, unwired component: nothing in the
-codebase calls it yet, since driving it from an inbound message and then
-feeding an authenticated message to `MessageMempool.Add` is protocol-wiring
-work for a later phase (issue #1950 runs the node-to-node mini-protocol;
-issue #1953 composes the whole DMQ subsystem into `node.go`).
+Phase 2 of CIP-0137's DMQ (issue #1949 of 7) is provided directly by
+`github.com/blinklabs-io/gouroboros/protocol/common`'s
+`MessageAuthenticator`, not a bespoke dingo type. An earlier version of this
+codebase carried its own `dmq.Authenticator` because that upstream type had
+two mismatches with real Cardano pool credentials -- it verified the
+operational certificate's cold signature over a CBOR encoding of
+`[KESVerificationKey, IssueNumber, KESPeriod]` instead of the raw
+`OCertSignable` byte concatenation cardano-node actually uses (the same
+mismatch this codebase's own `verify_opcert.go` documents and fixed for
+block headers), and its injected KES-verifier callback collapsed the KES
+evolution offset by conflating the message's claimed period with the
+certificate's own issuance period -- plus a pool-ID hash derived with the
+wrong width (Blake2b-256 instead of Cardano's real Blake2b-224). All three
+are fixed upstream (blinklabs-io/gouroboros#2315, #2325), and
+`MessageAuthenticator` now verifies KES signatures in-process (no injected
+callback required) and gates on a stake-weighted `StakeAuthority` interface
+rather than a boolean registered-pool set, so this codebase no longer needs
+its own copy.
 
-`Verify` runs CIP-0137's full authentication chain against one message, in
-order: expiry (`msg.IsValidAt`), message-ID integrity
-(`ComputeDmqMessageID`), pool-ID derivation plus stake-distribution
-authorization, the operational certificate's cold-key signature, that the
-message's claimed KES period does not precede the certificate's own issuance
-period, the KES signature over the payload, and operational-certificate
-issue-number monotonicity (replay protection). Stake authorization is checked
-before either signature: deriving a pool ID from `ColdVerificationKey` needs
-no signature, so anyone can self-sign an internally consistent opcert/KES
-chain over freshly generated keys, and checking authorization first turns
-away a message from an unregistered identity before paying for an ed25519
-verify and the ~2ms KES verify. `Verify` returns nil only when every check
-passes; the issue-number baseline for the message's pool is not advanced
-until then, so a message that fails an earlier check cannot poison replay
-protection for a later, legitimately higher-numbered certificate from the
-same pool.
+Nothing in the codebase constructs a `MessageAuthenticator` yet: driving one
+from an inbound message and then feeding an authenticated message to
+`MessageMempool.Add` is protocol-wiring work for a later phase (issue #1950
+runs the node-to-node mini-protocol; issue #1953 composes the whole DMQ
+subsystem into `node.go`).
 
-Authenticator deliberately does not reuse
-`github.com/blinklabs-io/gouroboros/protocol/common`'s `MessageAuthenticator`.
-That type has two mismatches with real Cardano pool credentials: it verifies
-the operational certificate's cold signature over a CBOR encoding of
-`[KESVerificationKey, IssueNumber, KESPeriod]`, but a pool's real,
-already-issued operational certificate is signed over the raw `OCertSignable`
-byte concatenation cardano-node uses -- the same mismatch this codebase's own
-`verify_opcert.go` documents and fixed for block headers; and its injected
-KES-verifier callback receives the message's own claimed KES period standing
-in for both the certificate's issuance period and the slot used to derive it,
-which collapses the KES evolution offset to zero regardless of how many
-periods have actually elapsed since the certificate was issued. CIP-0137
-messages carry a pool's real operational certificate, so `Authenticator`
-verifies them with `gouroboros/ledger`'s conformance-tested `OpCert` and KES
-primitives directly -- the same ones this codebase's block-header
-verification uses -- rather than through that wrapper.
+`VerifyMessage` runs CIP-0137's full authentication chain against one
+message, in order: message-ID integrity, pool-ID derivation plus
+stake-distribution authorization, the operational certificate's cold-key
+signature, that the message's claimed KES period does not precede the
+certificate's own issuance period, the KES signature over the payload, and
+operational-certificate issue-number monotonicity (replay protection). Stake
+authorization is checked before either signature: deriving a pool ID from
+`ColdVerificationKey` needs no signature, so anyone can self-sign an
+internally consistent opcert/KES chain over freshly generated keys, and
+checking authorization first turns away a message from an unregistered
+identity before paying for an ed25519 verify and a KES verify. Expiry is a
+separate concern, handled by gouroboros' `TTLValidator` before
+`VerifyMessage` is called.
 
-Pool authorization is injected through the narrow `StakeAuthority` interface
-(`PoolActiveStake(poolKeyHash) (uint64, error)`), following the same
-composition pattern `node_leios.go`'s stake adapters use for Leios committee
-formation: `dmq` stays decoupled from `ledger`/`database` so it remains
-usable and unit-testable standalone, and a later composition phase adapts
-`ledger.LedgerView.GetPoolStake` to it. The opcert issue-number cache has no
-automatic eviction; `ForgetPool` lets a caller drop a pool's baseline when it
-is no longer registered or active, mirroring `MessageMempool.RemovePeer` and
-gouroboros' `RemoveKESOpCertCacheEntry`.
+Pool authorization is injected through `protocol/common.StakeAuthority`
+(`PoolActiveStake(poolKeyHash [28]byte) (uint64, error)`) at construction --
+`NewMessageAuthenticator` returns `ErrAuthenticatorMisconfigured` without
+one. Composition (issue #1953) adapts `ledger.LedgerView.GetPoolStake` to it,
+following the same pattern `node_leios.go`'s stake adapters use for Leios
+committee formation, so this codebase's ledger/database access stays out of
+gouroboros' dependency graph. The opcert issue-number cache has no automatic
+eviction; `RemoveKESOpCertCacheEntry` lets a caller drop a pool's baseline
+when it is no longer registered or active, mirroring
+`MessageMempool.RemovePeer`.
 
 ## Block Production
 
@@ -11641,8 +11640,12 @@ primary chain (`chain.Chain`) and decodes them into
 before. When `LedgerStateConfig.BlockPipelineEnabled` is set (config
 `blockPipelineEnabled` / `DINGO_BLOCK_PIPELINE_ENABLED` /
 `--block-pipeline-enabled`; default off), `LedgerState` owns a
-`github.com/blinklabs-io/gouroboros/pipeline.BlockPipeline` with 2 decode
-workers and validation disabled (`ValidateWorkers: 0`). Each gathered batch
+`github.com/blinklabs-io/gouroboros/pipeline.BlockPipeline` with decode
+workers set by `blockPipelineWorkerCount()` (`ledger/state.go`) — the host's
+`GOMAXPROCS`, floored at `blockPipelineMinWorkers` (2, the prior fixed count)
+and capped at `blockPipelineMaxWorkers` (8) — and validation disabled
+(`ValidateWorkers: 0`) unless `BlockPipelineValidateEnabled` is also set, in
+which case validate workers use the same CPU-scaled count. Each gathered batch
 of raw blocks (`decodeReadChainBatch`) is submitted to the pipeline up
 front and drained back from `Results()` in submission order — the
 pipeline's apply stage guarantees this ordering regardless of which worker
