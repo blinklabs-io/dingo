@@ -75,8 +75,10 @@ func (OutputSetEmptyByronError) Error() string {
 	return "transaction has no outputs"
 }
 
-// OutputNotPositiveByronError is returned when a Byron transaction
-// output has a non-positive value.
+// OutputNotPositiveByronError is retained for API compatibility.
+//
+// Deprecated: Byron consensus permits zero-value outputs, so validation no
+// longer returns this error.
 type OutputNotPositiveByronError struct {
 	Index  int
 	Amount *big.Int
@@ -194,7 +196,6 @@ type byronValidationRuleFunc func(tx lcommon.Transaction) error
 var byronValidationRules = []byronValidationRuleFunc{
 	byronValidateInputsNotEmpty,
 	byronValidateOutputsNotEmpty,
-	byronValidateOutputsPositive,
 	byronValidateNoDuplicateInputs,
 }
 
@@ -225,27 +226,6 @@ func byronValidateOutputsNotEmpty(
 ) error {
 	if len(tx.Outputs()) == 0 {
 		return OutputSetEmptyByronError{}
-	}
-	return nil
-}
-
-// byronValidateOutputsPositive ensures that all outputs have
-// positive values.
-func byronValidateOutputsPositive(
-	tx lcommon.Transaction,
-) error {
-	zero := new(big.Int)
-	for i, output := range tx.Outputs() {
-		amount := output.Amount()
-		if amount == nil || amount.Cmp(zero) <= 0 {
-			if amount == nil {
-				amount = new(big.Int)
-			}
-			return OutputNotPositiveByronError{
-				Index:  i,
-				Amount: amount,
-			}
-		}
 	}
 	return nil
 }
