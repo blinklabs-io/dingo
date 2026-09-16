@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"errors"
 	"log/slog"
 	"maps"
 	"math/big"
@@ -94,6 +95,20 @@ type fakeLSQState struct {
 	// exercises the genuinely-unbounded case Dial's WithQueryTimeout(0)
 	// creates for a query after a successful Acquire.
 	stallQuery <-chan struct{}
+	// failCurrentEraAfterCalls, when nonzero, makes the Nth-and-later
+	// HardForkCurrentEraQuery call fail instead of answering
+	// ledger.EraIdConway -- simulating dingo's queryHardFork returning
+	// errEpochNotResolved for a pinned point no epoch row covers
+	// (bcddd518), for CheckProtocolParams's GetCurrentEra-error handling
+	// (human review, Chris Guiney, dingo#4319). Counted rather than a bare
+	// bool: gouroboros' own client-side GetCurrentProtocolParams issues a
+	// HardForkCurrentEraQuery of its own first, to pick a decode target,
+	// before CheckProtocolParams's explicit GetCurrentEra call -- failing
+	// unconditionally broke that first, unrelated call too, never reaching
+	// the code this field exists to exercise. 0 (the default) never fails,
+	// keeping every existing test's behavior unchanged.
+	failCurrentEraAfterCalls int
+	currentEraCalls          int
 }
 
 func newFakeLSQState() *fakeLSQState {
@@ -256,6 +271,15 @@ func (s *fakeLSQState) stallQueryUntil(done <-chan struct{}) {
 	s.stallQuery = done
 }
 
+// failCurrentEraQueryAfter makes this node's Nth-and-later
+// HardForkCurrentEraQuery answer fail -- see the failCurrentEraAfterCalls
+// field's doc comment.
+func (s *fakeLSQState) failCurrentEraQueryAfter(calls int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failCurrentEraAfterCalls = calls
+}
+
 // config builds the localstatequery.Config a real gouroboros server uses to
 // answer exactly the four query types incremental mode's per-block and full
 // checks need (GetCurrentProtocolParams, GetStakeDistribution,
@@ -326,6 +350,16 @@ func (s *fakeLSQState) config() localstatequery.Config {
 					// dingo's own ledger/queries.go queryHardFork).
 					switch inner.Query.(type) {
 					case *localstatequery.HardForkCurrentEraQuery:
+						s.mu.Lock()
+						s.currentEraCalls++
+						fail := s.failCurrentEraAfterCalls > 0 &&
+							s.currentEraCalls > s.failCurrentEraAfterCalls
+						s.mu.Unlock()
+						if fail {
+							return nil, errors.New(
+								"fake: no epoch record covers this point",
+							)
+						}
 						return int(ledger.EraIdConway), nil
 					default:
 						return nil, nil //nolint:nilnil // not exercised by these tests
@@ -572,8 +606,7 @@ func newIncrementalHarness(
 	t *testing.T, blockCount int,
 ) (dingoAddr, cardanoAddr string, dingoState, cardanoState *fakeLSQState) {
 	t.Helper()
-	dingoAddr, cardanoAddr, dingoState, cardanoState, _ =
-		newIncrementalHarnessWithServer(t, blockCount, false)
+	dingoAddr, cardanoAddr, dingoState, cardanoState, _ = newIncrementalHarnessWithServer(t, blockCount, false)
 	return dingoAddr, cardanoAddr, dingoState, cardanoState
 }
 
@@ -813,8 +846,7 @@ func TestRunIncremental_FullCheckIntervalFiresOnItsOwn(t *testing.T) {
 // is 1-5 days away depending on network).
 func TestRunIncremental_EpochTransitionFiresOnItsOwn(t *testing.T) {
 	t.Parallel()
-	dingoAddr, cardanoAddr, dingoState, cardanoState, cardanoServer :=
-		newIncrementalHarnessWithServer(t, 20, true)
+	dingoAddr, cardanoAddr, dingoState, cardanoState, cardanoServer := newIncrementalHarnessWithServer(t, 20, true)
 	// FullCheckInterval set high enough that only the epoch transition
 	// (never the interval) can explain the second full check.
 	blocks, fullChecks := runIncrementalForTest(t, dingoAddr, cardanoAddr, 1000)
@@ -845,8 +877,7 @@ func TestRunIncremental_EpochTransitionFiresOnItsOwn(t *testing.T) {
 // in one place, independent of any live network's current state.
 func TestRunIncremental_MismatchFiresFullCheck(t *testing.T) {
 	t.Parallel()
-	dingoAddr, cardanoAddr, dingoState, _, cardanoServer :=
-		newIncrementalHarnessWithServer(t, 20, true)
+	dingoAddr, cardanoAddr, dingoState, _, cardanoServer := newIncrementalHarnessWithServer(t, 20, true)
 	blocks, fullChecks := runIncrementalForTest(t, dingoAddr, cardanoAddr, 1000)
 	drainFullCheck(t, fullChecks, FullCheckStartup, 10*time.Second)
 
@@ -918,8 +949,7 @@ func TestRunIncremental_PerBlockCheckIgnoresStakeDistributionDivergence(
 	t *testing.T,
 ) {
 	t.Parallel()
-	dingoAddr, cardanoAddr, dingoState, cardanoState, cardanoServer :=
-		newIncrementalHarnessWithServer(t, 20, true)
+	dingoAddr, cardanoAddr, dingoState, cardanoState, cardanoServer := newIncrementalHarnessWithServer(t, 20, true)
 	blocks, fullChecks := runIncrementalForTest(t, dingoAddr, cardanoAddr, 1000)
 	drainFullCheck(t, fullChecks, FullCheckStartup, 10*time.Second)
 
@@ -968,8 +998,7 @@ func TestRunIncremental_PerBlockCheckIgnoresStakeDistributionDivergence(
 // runs and is still reported via OnFullCheck, exactly as before.
 func TestEstablishBaseline_ResumesFromReachablePriorCursor(t *testing.T) {
 	t.Parallel()
-	dingoAddr, cardanoAddr, _, cardanoState, cardanoServer :=
-		newIncrementalHarnessWithServer(t, 10, false)
+	dingoAddr, cardanoAddr, _, cardanoState, cardanoServer := newIncrementalHarnessWithServer(t, 10, false)
 	// The resume gate additionally requires the prior cursor's own epoch to
 	// still match the live tip's (see buildStartupCursor's doc comment on
 	// why replaying across an epoch boundary is not yet safe) -- set both
@@ -1044,8 +1073,7 @@ func TestEstablishBaseline_ResumesFromReachablePriorCursor(t *testing.T) {
 // cursor itself resumes from.
 func TestEstablishBaseline_FallsBackWhenPriorPointUnreachable(t *testing.T) {
 	t.Parallel()
-	dingoAddr, cardanoAddr, dingoState, _, cardanoServer :=
-		newIncrementalHarnessWithServer(t, 10, false)
+	dingoAddr, cardanoAddr, dingoState, _, cardanoServer := newIncrementalHarnessWithServer(t, 10, false)
 
 	priorPoint := cardanoServer.chain.Points[2]
 	priorTip := Tip{
@@ -1102,8 +1130,7 @@ func TestEstablishBaseline_FallsBackWhenPriorEpochDiffersFromLiveTip(
 	t *testing.T,
 ) {
 	t.Parallel()
-	dingoAddr, cardanoAddr, _, cardanoState, cardanoServer :=
-		newIncrementalHarnessWithServer(t, 10, false)
+	dingoAddr, cardanoAddr, _, cardanoState, cardanoServer := newIncrementalHarnessWithServer(t, 10, false)
 	cardanoState.setEpoch(5) // the live tip's epoch
 
 	priorPoint := cardanoServer.chain.Points[2]
@@ -1376,8 +1403,7 @@ func TestBuildStartupCursor_StalledEpochQueryIsBounded(t *testing.T) {
 // set.
 func TestIncrementalSession_NoProgressWhenFirstBlockAlwaysFails(t *testing.T) {
 	t.Parallel()
-	dingoAddr, cardanoAddr, dingoState, _, cardanoServer :=
-		newIncrementalHarnessWithServer(t, 10, false)
+	dingoAddr, cardanoAddr, dingoState, _, cardanoServer := newIncrementalHarnessWithServer(t, 10, false)
 
 	startPoint := cardanoServer.chain.Points[cardanoServer.baselineTipIndex]
 	startTip := Tip{
@@ -1385,8 +1411,7 @@ func TestIncrementalSession_NoProgressWhenFirstBlockAlwaysFails(t *testing.T) {
 		Hash:        hex.EncodeToString(startPoint.Hash),
 		BlockNumber: uint64(cardanoServer.baselineTipIndex), //nolint:gosec
 	}
-	firstBlockPoint :=
-		cardanoServer.chain.Points[cardanoServer.baselineTipIndex+1]
+	firstBlockPoint := cardanoServer.chain.Points[cardanoServer.baselineTipIndex+1]
 	dingoState.rejectAcquireAtSlot(firstBlockPoint.Slot)
 
 	cursorFile := filepath.Join(t.TempDir(), "cursor.json")

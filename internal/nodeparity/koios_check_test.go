@@ -15,11 +15,64 @@
 package nodeparity
 
 import (
+	"context"
 	"math"
+	"net"
 	"testing"
+
+	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
 )
+
+// TestCheckProtocolParams_CurrentEraErrorFailsTheCheck is the regression a
+// human reviewer found (Chris Guiney, dingo#4319): CheckProtocolParams used
+// to ignore a GetCurrentEra error and fall back to
+// ProtocolParamsFromNative's type-inferred era guess, which cannot tell
+// Shelley and Allegra apart. queryHardFork's HardForkCurrentEraQuery case
+// now returns errEpochNotResolved for a pinned point no epoch row covers
+// (bcddd518) instead of silently answering era 0, so GetCurrentEra can
+// newly fail here -- and swallowing that error in an Allegra epoch left
+// the wrong guessed era in place, producing a false pparams_era mismatch
+// (CompareEpochProtocolParams/DetermineStatus) reported as "ledger state
+// diverged from Koios" for what was actually a failed query.
+//
+// koios is pointed at an unreachable address deliberately: a fixed
+// GetCurrentEra error must fail this check before ever reaching Koios, so
+// this test does not need a working Koios fake to prove it.
+func TestCheckProtocolParams_CurrentEraErrorFailsTheCheck(t *testing.T) {
+	t.Parallel()
+	const magic = 42
+
+	dingoState := newFakeLSQState()
+	// GetCurrentProtocolParams issues a HardForkCurrentEraQuery of its own
+	// first (to pick a decode target) -- that first call must still
+	// succeed, or CheckProtocolParams fails at that unrelated, earlier
+	// step instead of reaching the GetCurrentEra call this test targets.
+	dingoState.failCurrentEraQueryAfter(1)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	dingoState.serveLSQOnly(t, listener, magic)
+
+	ctx := context.Background()
+	conn, lsq, err := acquireWithRetry(
+		ctx, listener.Addr().String(), magic, pcommon.NewPointOrigin(),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close() }) //nolint:errcheck
+
+	koios, err := NewKoiosClient("preview", "", "http://127.0.0.1:1/api/v1", true)
+	require.NoError(t, err)
+
+	mismatches, err := CheckProtocolParams(ctx, lsq.Client, koios, "preview", 1)
+	require.Error(t, err,
+		"a GetCurrentEra failure must fail the whole check, not silently "+
+			"fall back to an ambiguous type-inferred era guess")
+	assert.Nil(t, mismatches)
+}
 
 func TestNewKoiosClientRejectsMainnet(t *testing.T) {
 	if _, err := NewKoiosClient("mainnet", "", "", false); err == nil {
@@ -102,6 +155,69 @@ func TestStakeDiffLovelaceOverflowIsNotAKoiosFault(t *testing.T) {
 		t.Fatalf("expected stakeDiffOverflow for a Dingo-side implausible "+
 			"stake, got kind=%v diff=%v", kind, diff)
 	}
+}
+
+// TestEvaluatePoolStake pins CheckStakeDistribution's actual per-pool
+// decision -- the StakeMismatch (or nil) it returns for the pool's real
+// caller, not just stakeDiffLovelace's own return values in isolation
+// (human review, Chris Guiney, dingo#4319: TestStakeDiffLovelaceOverflowIsNotAKoiosFault
+// alone doesn't prove this function still builds the right StakeMismatch
+// for an overflowing dingo stake -- reverting its stakeDiffOverflow case in
+// place to the old "same as unparseable, KoiosFault true" shape would have
+// left that test green).
+func TestEvaluatePoolStake(t *testing.T) {
+	t.Run("no koios row, zero dingo stake: both sides agree, no mismatch", func(t *testing.T) {
+		got := evaluatePoolStake("pool1new", 0, nil)
+		assert.Nil(t, got)
+	})
+
+	t.Run("no koios row, nonzero dingo stake: a real mismatch", func(t *testing.T) {
+		got := evaluatePoolStake("pool1missing", 100, nil)
+		require.NotNil(t, got)
+		assert.False(t, got.KoiosFault)
+		assert.Equal(t, "no koios pool_history row for nonzero dingo stake", got.Reason)
+	})
+
+	t.Run("unparseable koios value: a koios fault, excluded from mismatch counting by callers", func(t *testing.T) {
+		got := evaluatePoolStake("pool1fault", 100, &koiosparity.KoiosPoolHistoryItem{
+			ActiveStake: "not-a-number",
+		})
+		require.NotNil(t, got)
+		assert.True(t, got.KoiosFault)
+		assert.Equal(t, "unparseable koios active_stake value", got.Reason)
+	})
+
+	t.Run("dingo-side overflow: a real mismatch, not a koios fault", func(t *testing.T) {
+		got := evaluatePoolStake("pool1overflow", math.MaxUint64, &koiosparity.KoiosPoolHistoryItem{
+			ActiveStake: "0",
+		})
+		require.NotNil(t, got,
+			"an implausible dingo stake must still be reported as a mismatch")
+		assert.False(t, got.KoiosFault,
+			"a dingo-side overflow must not be excluded from the mismatch count as if it were koios noise")
+		assert.Equal(
+			t,
+			"stake difference too large to represent -- dingo's reported stake is implausible",
+			got.Reason,
+		)
+	})
+
+	t.Run("real numeric divergence", func(t *testing.T) {
+		got := evaluatePoolStake("pool1diverge", 100, &koiosparity.KoiosPoolHistoryItem{
+			ActiveStake: "50",
+		})
+		require.NotNil(t, got)
+		assert.False(t, got.KoiosFault)
+		assert.Empty(t, got.Reason)
+		assert.Equal(t, int64(50), got.DiffLovelace)
+	})
+
+	t.Run("exact match: no mismatch", func(t *testing.T) {
+		got := evaluatePoolStake("pool1match", 100, &koiosparity.KoiosPoolHistoryItem{
+			ActiveStake: "100",
+		})
+		assert.Nil(t, got)
+	})
 }
 
 // TestUTxODiffDetectsRealMismatches proves UTxODiff in all three directions:

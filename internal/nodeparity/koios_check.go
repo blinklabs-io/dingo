@@ -177,11 +177,25 @@ func CheckProtocolParams(
 	// authoritatively via HardForkCurrentEraQuery instead, on the same
 	// Acquired connection -- this is the same era index the node's own
 	// wire protocol reports, not a second guess.
-	if eraID, eraErr := client.GetCurrentEra(); eraErr == nil {
-		if era := eras.GetEraById(uint(eraID)); era != nil {
-			dingoParams.EraID = uint(eraID)
-			dingoParams.EraName = era.Name
-		}
+	//
+	// A GetCurrentEra error must fail this whole check, not be silently
+	// swallowed in favor of the ambiguous type-inferred guess (human
+	// review, Chris Guiney, dingo#4319): queryHardFork's HardForkCurrentEraQuery
+	// case now returns errEpochNotResolved for a pinned point no epoch row
+	// covers (bcddd518) instead of silently answering era 0, so this call
+	// can newly fail. Ignoring that error in an Allegra epoch left the
+	// type-inferred guess (Shelley) in place, CompareEpochProtocolParams
+	// then reported a real pparams_era CategoryValueMismatch against
+	// Koios's correct "allegra", and DetermineStatus returned StatusFail --
+	// reporting "ledger state diverged from Koios" for what was actually a
+	// failed query, not a real divergence.
+	eraID, eraErr := client.GetCurrentEra()
+	if eraErr != nil {
+		return nil, fmt.Errorf("dingo current era query: %w", eraErr)
+	}
+	if era := eras.GetEraById(uint(eraID)); era != nil {
+		dingoParams.EraID = uint(eraID)
+		dingoParams.EraName = era.Name
 	}
 
 	koiosResp, koiosErr := koios.GetEpochParams(ctx, epoch)
@@ -294,6 +308,69 @@ func stakeDiffLovelace(
 // documented tier limits this comparison must not trip either).
 const stakeCheckConcurrency = 8
 
+// evaluatePoolStake decides one pool's StakeMismatch (nil for a clean
+// match), given Dingo's own stake for it and Koios's /pool_history answer
+// (nil if Koios has no row for this pool/epoch at all) -- the whole
+// decision CheckStakeDistribution's per-pool goroutine makes, pulled out so
+// a test can drive it directly with a synthetic hist instead of needing a
+// real Koios server (human review, Chris Guiney, dingo#4319: b11b7c63's
+// stakeDiffOverflow fix was tested only at stakeDiffLovelace directly,
+// never through the function that actually builds the StakeMismatch
+// clients see, so reverting this function's overflow case in place would
+// have left every existing test green).
+func evaluatePoolStake(
+	poolBech32 string,
+	dingoStake uint64,
+	hist *koiosparity.KoiosPoolHistoryItem,
+) *StakeMismatch {
+	if hist == nil {
+		if dingoStake == 0 {
+			// A pool that just registered this epoch, with no active stake
+			// yet and no Koios snapshot yet either -- both sides agree
+			// there's nothing here.
+			return nil
+		}
+		// Dingo reports real stake for a pool Koios has no pool_history
+		// row for at all -- that disagreement itself is the mismatch, not
+		// a reason to skip.
+		return &StakeMismatch{
+			PoolIDBech32: poolBech32,
+			DingoStake:   dingoStake,
+			Reason:       "no koios pool_history row for nonzero dingo stake",
+		}
+	}
+	diff, kind := stakeDiffLovelace(dingoStake, hist.ActiveStake)
+	switch kind {
+	case stakeDiffOK:
+		// Falls through to the ordinary numeric comparison below.
+	case stakeDiffUnparseableKoios:
+		return &StakeMismatch{
+			PoolIDBech32: poolBech32,
+			DingoStake:   dingoStake,
+			KoiosStake:   hist.ActiveStake,
+			Reason:       "unparseable koios active_stake value",
+			KoiosFault:   true,
+		}
+	case stakeDiffOverflow:
+		return &StakeMismatch{
+			PoolIDBech32: poolBech32,
+			DingoStake:   dingoStake,
+			KoiosStake:   hist.ActiveStake,
+			Reason: "stake difference too large to represent -- " +
+				"dingo's reported stake is implausible",
+		}
+	}
+	if diff != 0 {
+		return &StakeMismatch{
+			PoolIDBech32: poolBech32,
+			DingoStake:   dingoStake,
+			KoiosStake:   hist.ActiveStake,
+			DiffLovelace: diff,
+		}
+	}
+	return nil
+}
+
 // CheckStakeDistribution compares Dingo's own pool-by-pool active stake
 // (queried live via client, already Acquired to the point under test)
 // against Koios's /pool_history for epoch, for every pool Dingo itself
@@ -334,54 +411,7 @@ func CheckStakeDistribution(
 					p.bech32, epoch, err,
 				)
 			}
-			if hist == nil {
-				if p.stake == 0 {
-					// A pool that just registered this epoch, with no
-					// active stake yet and no Koios snapshot yet either --
-					// both sides agree there's nothing here.
-					return nil
-				}
-				// Dingo reports real stake for a pool Koios has no
-				// pool_history row for at all -- that disagreement itself
-				// is the mismatch, not a reason to skip.
-				results[i] = &StakeMismatch{
-					PoolIDBech32: p.bech32,
-					DingoStake:   p.stake,
-					Reason:       "no koios pool_history row for nonzero dingo stake",
-				}
-				return nil
-			}
-			diff, kind := stakeDiffLovelace(p.stake, hist.ActiveStake)
-			switch kind {
-			case stakeDiffOK:
-				// Falls through to the ordinary numeric comparison below.
-			case stakeDiffUnparseableKoios:
-				results[i] = &StakeMismatch{
-					PoolIDBech32: p.bech32,
-					DingoStake:   p.stake,
-					KoiosStake:   hist.ActiveStake,
-					Reason:       "unparseable koios active_stake value",
-					KoiosFault:   true,
-				}
-				return nil
-			case stakeDiffOverflow:
-				results[i] = &StakeMismatch{
-					PoolIDBech32: p.bech32,
-					DingoStake:   p.stake,
-					KoiosStake:   hist.ActiveStake,
-					Reason: "stake difference too large to represent -- " +
-						"dingo's reported stake is implausible",
-				}
-				return nil
-			}
-			if diff != 0 {
-				results[i] = &StakeMismatch{
-					PoolIDBech32: p.bech32,
-					DingoStake:   p.stake,
-					KoiosStake:   hist.ActiveStake,
-					DiffLovelace: diff,
-				}
-			}
+			results[i] = evaluatePoolStake(p.bech32, p.stake, hist)
 			return nil
 		})
 	}
