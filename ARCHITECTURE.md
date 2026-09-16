@@ -11977,13 +11977,52 @@ uses for its own handoff target), and only if no live alternative exists (or
 that retry also fails) does it fall back to the queue-overflow path's own
 recovery — `clearQueuedHeaders` plus a chainsync re-sync
 (`ChainsyncResyncReasonForkExtensionRestartFailed`) — so the pipeline resumes
-on reconnect instead of idling forever. See also the anti-flap pin's
-`SwitchBackCooldown` above, which bounds how often chain selection can hand
-the active connection away in the first place and is the primary mitigation
-for the reversal storm that triggers this failure mode. Regression tests:
+on reconnect instead of idling forever. Regression tests:
 `TestRecoverBlockfetchRestartFailureRetriesLiveActiveConnection` and
 `TestRecoverBlockfetchRestartFailureFallsBackToResyncWithoutLiveConnection`
 (`ledger/chainsync_fork_extension_restart_test.go`).
+
+**The same success path also bypassed #1922's in-flight-batch protection
+through a side channel.** `handoffPipelineOnSwitchLocked`
+(`ledger/chainsync.go`, invoked from `detectConnectionSwitch` on a plain
+chain-selection switch) already lets an in-flight blockfetch batch run to
+completion across such a switch rather than canceling it (#1922, "preserve
+in-flight blockfetch batch across chain switch") — canceling on every switch
+of two peers alternating as best peer prevented blockfetch from ever
+completing a batch at all. But `restartQueuedBlockfetchAfterForkLocked`, called from the
+success path just described, did not share that protection: it
+unconditionally closed `chainsyncBlockfetchReadyChan` and restarted on
+`connId` even when a batch was already healthily in flight on a *different*
+connection. This caller runs on essentially every active-connection switch —
+the newly active connection's next header almost never fits a header queue
+built by the connection it replaced, so it resolves here as a
+from-current-tip "fork" — so it re-introduced exactly the bug #1922 fixed,
+through a path #1922 never touched. Because
+`handleEventBlockfetchBlockDeferred` only accepts a delivered block whose
+connection matches the *current* `activeBlockfetchConnId` (or the shadow
+connection), tearing down a batch and reassigning `activeBlockfetchConnId`
+discards every block already in flight from it, silently and without a
+counter. Confirmed live on a Preview instance running with
+`SwitchBackCooldown` already deployed and switch frequency measurably bounded
+to roughly one switch per cooldown window: the applied local tip still never
+advanced (`dingo_ledger_block_stage_duration_seconds{stage="apply"}` held at
+a zero sample count throughout) while blockfetch protocol messages kept
+arriving and being wire-decoded — the switch RATE was bounded, but one switch
+was still enough to discard whatever the previous batch had in flight, so no
+batch ever survived to completion.
+`restartQueuedBlockfetchAfterForkLocked` now defers to a healthy in-flight
+batch from a different connection exactly like `handoffPipelineOnSwitchLocked`
+does — `selectedBlockfetchConnId` still retargets to `connId` for the *next*
+batch, so the fork-extending headers still get fetched, just after the
+current batch finishes rather than by discarding it. A restart requested for
+the *same* connection that is already fetching still tears down and restarts
+unconditionally: there is no other peer being preempted in that case, and
+`TestStartQueuedBlockfetchAfterForkRestartClearsShadowState`
+(`ledger/chainsync_shadow_test.go`) depends on that path resetting per-batch
+shadow state. Regression tests:
+`TestRestartQueuedBlockfetchAfterForkPreservesInFlightBatchFromOtherConnection`
+and `TestRestartQueuedBlockfetchAfterForkStillRestartsSameConnection`
+(`ledger/chainsync_fork_extension_inflight_test.go`).
 
 **Metrics** (`ledger/metrics.go`): `decodeReadChainBatch` refreshes a set of
 gauges — `dingo_ledger_block_pipeline_blocks_decoded`,

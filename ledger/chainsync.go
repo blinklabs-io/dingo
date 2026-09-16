@@ -4298,6 +4298,46 @@ func (ls *LedgerState) restartQueuedBlockfetchAfterForkLocked(
 	connId ouroboros.ConnectionId,
 	pending *pendingPublishes,
 ) error {
+	// When a batch is already in progress on a DIFFERENT connection, let it
+	// complete rather than canceling it, exactly like
+	// handoffPipelineOnSwitchLocked already does for a plain chain-selection
+	// switch (#1922, "preserve in-flight blockfetch batch across chain
+	// switch"): the fetched blocks are canonical regardless of which peer
+	// serves them, so tearing down a healthy in-flight batch buys nothing
+	// and only wastes it. selectedBlockfetchConnId is retargeted below
+	// regardless, so the NEXT batch uses connId once the current one
+	// finishes (or times out / fails, which retries on the then-current
+	// selection).
+	//
+	// This caller (tryResolveFork's "fork extends from current tip" branch)
+	// runs on essentially every active-connection switch: the newly active
+	// connection's next header almost never fits a header queue built by the
+	// connection it replaced, so it resolves here as a from-current-tip
+	// "fork". Before this fix, that unconditionally interrupted whatever
+	// batch was in flight -- bypassing handoffPipelineOnSwitchLocked's
+	// protection entirely via this side channel -- and
+	// handleEventBlockfetchBlockDeferred only accepts blocks whose
+	// connection matches the CURRENT activeBlockfetchConnId, silently
+	// discarding every block already in flight from the batch just torn
+	// down. If the active connection changes faster than one batch's
+	// round-trip, every fetched block is discarded on arrival and the ledger
+	// can never apply anything: observed live as a chain-switch storm with
+	// confirmed zero block-apply progress even after the switch RATE was
+	// bounded (see the chainselection anti-flap pin's SwitchBackCooldown).
+	//
+	// A restart requested for the SAME connection that is already fetching
+	// still tears down and restarts unconditionally (below): the fork just
+	// resolved may have extended the header queue with a wider or different
+	// range than the in-flight request covers, and there is no "different
+	// peer" to protect against here -- see
+	// TestStartQueuedBlockfetchAfterForkRestartClearsShadowState, which
+	// depends on this path resetting per-batch shadow state even when connId
+	// is already the active connection.
+	if ls.chainsyncBlockfetchReadyChan != nil &&
+		!sameConnectionId(ls.activeBlockfetchConnId, connId) {
+		ls.selectedBlockfetchConnId = connId
+		return nil
+	}
 	if ls.chainsyncBlockfetchReadyChan != nil {
 		if ls.chainsyncBlockfetchTimeoutTimer != nil {
 			ls.chainsyncBlockfetchTimeoutTimer.Stop()
