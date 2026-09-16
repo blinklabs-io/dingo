@@ -427,6 +427,31 @@ func TestDownloadSnapshotIdleTimeoutRetriesAndResumes(t *testing.T) {
 	require.Equal(t, fullContent, data)
 }
 
+func TestDownloadSnapshotIdleTimeoutUsesConfiguredTimer(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "2")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("A"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	t.Cleanup(server.Close)
+
+	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
+		URL:               server.URL + "/snapshot.tar.zst",
+		AllowInsecureHTTP: true,
+		DestDir:           t.TempDir(),
+		Filename:          "configured-idle-timeout.tar.zst",
+		IdleTimeout:       100 * time.Millisecond,
+		MaxIdleRetries:    0,
+	})
+	require.ErrorIs(t, err, errDownloadIdleTimeout)
+}
+
 func TestDownloadSnapshotIdleRetriesResetAfterProgress(t *testing.T) {
 	t.Parallel()
 
