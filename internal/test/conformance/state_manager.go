@@ -34,6 +34,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	hostplugin "github.com/blinklabs-io/dingo/plugin"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -1258,7 +1259,9 @@ func (m *DingoStateManager) ratifyProposals(
 // return account's DRep voting power (CIP-1694 counts an active proposal's
 // deposit as part of the depositor's active voting stake), so calling it
 // here would still fail the same vector the vote-shape heuristic does. See
-// issue #4007.
+// issue #4007. The production gap itself is tracked separately as issue
+// #4355 -- it affects every DRep-gated action type's real ratification,
+// not just these two, so it is out of scope for this harness-local fix.
 func (m *DingoStateManager) committeeActionRatified(
 	txn *database.Txn,
 	proposal *conformance.ProposalState,
@@ -1270,6 +1273,17 @@ func (m *DingoStateManager) committeeActionRatified(
 			"committee action ratification: protocol parameters are %T, want *conway.ConwayProtocolParameters",
 			m.protocolParams,
 		)
+	}
+
+	// ledger/governance's ShouldRatify refuses NoConfidence and
+	// UpdateCommittee outright during Conway bootstrap (protocol major 9) --
+	// Conway validation admits only InfoAction, ParameterChange, and
+	// HardForkInitiation proposals during that phase. Gate both action
+	// types the same way here: without this, a bootstrap-era proposal that
+	// production would reject purely on protocol version could still
+	// ratify through the stake tally below.
+	if conwayPP.ProtocolVersion.Major == common.ProtocolVersionConway {
+		return false, nil
 	}
 
 	if proposal.ActionType == common.GovActionTypeUpdateCommittee &&
@@ -1287,25 +1301,38 @@ func (m *DingoStateManager) committeeActionRatified(
 	// one threshold pair between the two (as an earlier revision did) let a
 	// NoConfidence vector accept or reject against the wrong bar.
 	isNoConfidence := proposal.ActionType == common.GovActionTypeNoConfidence
-	var drepThreshold, spoThreshold *big.Rat
+	var drepThresholdRat, spoThresholdRat cbor.Rat
 	if isNoConfidence {
-		drepThreshold = conwayPP.DRepVotingThresholds.MotionNoConfidence.Rat
-		spoThreshold = conwayPP.PoolVotingThresholds.MotionNoConfidence.Rat
+		drepThresholdRat = conwayPP.DRepVotingThresholds.MotionNoConfidence
+		spoThresholdRat = conwayPP.PoolVotingThresholds.MotionNoConfidence
 	} else {
 		elected := m.hasActiveCommitteeMember(currentEpoch)
-		drepThreshold = conwayPP.DRepVotingThresholds.CommitteeNoConfidence.Rat
-		spoThreshold = conwayPP.PoolVotingThresholds.CommitteeNoConfidence.Rat
+		drepThresholdRat = conwayPP.DRepVotingThresholds.CommitteeNoConfidence
+		spoThresholdRat = conwayPP.PoolVotingThresholds.CommitteeNoConfidence
 		if elected {
-			drepThreshold = conwayPP.DRepVotingThresholds.CommitteeNormal.Rat
-			spoThreshold = conwayPP.PoolVotingThresholds.CommitteeNormal.Rat
+			drepThresholdRat = conwayPP.DRepVotingThresholds.CommitteeNormal
+			spoThresholdRat = conwayPP.PoolVotingThresholds.CommitteeNormal
 		}
 	}
-	if drepThreshold == nil {
-		drepThreshold = new(big.Rat)
+	// A nil Rat means the protocol parameters never carried this threshold
+	// at all -- a plumbing bug, not "no threshold required" (that case is a
+	// genuine zero value, e.g. big.NewRat(0, 1), which votingStakeAccepted
+	// already treats as auto-accept). ouroboros-mock's reference
+	// (updateCommitteeAcceptedWithStake) errors on exactly this rather than
+	// silently ratifying, and a harness whose purpose is to surface
+	// divergence from the real ledger must fail closed the same way.
+	if drepThresholdRat.Rat == nil {
+		return false, errors.New(
+			"committee action ratification: missing DRep threshold",
+		)
 	}
-	if spoThreshold == nil {
-		spoThreshold = new(big.Rat)
+	if spoThresholdRat.Rat == nil {
+		return false, errors.New(
+			"committee action ratification: missing SPO threshold",
+		)
 	}
+	drepThreshold := drepThresholdRat.Rat
+	spoThreshold := spoThresholdRat.Rat
 
 	deposits := m.activeProposalDeposits(currentEpoch)
 	drepAccepted, err := m.drepAcceptedForCommitteeAction(

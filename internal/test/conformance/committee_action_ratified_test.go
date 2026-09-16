@@ -15,6 +15,7 @@
 package conformance
 
 import (
+	"encoding/hex"
 	"math/big"
 	"testing"
 
@@ -166,4 +167,104 @@ func TestCommitteeActionRatifiedUpdateCommitteeKeepsNoConfidenceDenominatorOnly(
 		"UpdateCommittee must not grant AlwaysNoConfidence delegation an "+
 			"implicit yes vote",
 	)
+}
+
+// TestProcessEpochBoundaryRatifiesUpdateCommitteeWithoutCommitteeVote closes
+// the gap a PR review found in the two tests above: both call
+// committeeActionRatified directly, so neither one proves ratifyProposals
+// actually routes UpdateCommittee/NoConfidence proposals to it. Reverting
+// just that routing (back to the pre-#4007 hasCC-requiring heuristic) while
+// keeping committeeActionRatified and both direct-call tests left the whole
+// package green, including those two tests -- nothing exercised the
+// decision of *which* ratification path a real proposal takes.
+//
+// This test drives the real entry point, ProcessEpochBoundary, the way the
+// harness calls it for every vector: a DRep and an SPO each cast an
+// explicit yes vote (the exact shape issue #4007's "CC re-election" vector
+// carries) and no committee vote is ever recorded. It only ratifies if
+// ProcessEpochBoundary's call into ratifyProposals actually reaches
+// committeeActionRatified for this action type; the old heuristic requires
+// a committee yes-vote that never exists here, so this proposal stays
+// stuck pending under it.
+func TestProcessEpochBoundaryRatifiesUpdateCommitteeWithoutCommitteeVote(
+	t *testing.T,
+) {
+	m, err := NewDingoStateManager()
+	require.NoError(t, err)
+	defer func() { require.NoError(t, m.Close()) }()
+
+	reachable := cbor.Rat{Rat: big.NewRat(1, 2)}
+	m.protocolParams = &conway.ConwayProtocolParameters{
+		ProtocolVersion: common.ProtocolParametersProtocolVersion{Major: 10},
+		DRepVotingThresholds: conway.DRepVotingThresholds{
+			MotionNoConfidence:    reachable,
+			CommitteeNormal:       reachable,
+			CommitteeNoConfidence: reachable,
+		},
+		PoolVotingThresholds: conway.PoolVotingThresholds{
+			MotionNoConfidence:    reachable,
+			CommitteeNormal:       reachable,
+			CommitteeNoConfidence: reachable,
+		},
+	}
+
+	// One DRep, backed by real delegated stake, votes yes.
+	drepCredentialHash := testHash28(0xe1)
+	drepStakeCredential := mockledger.RewardAccountKey{
+		CredType:   common.CredentialTypeAddrKeyHash,
+		Credential: testHash28(0xe2),
+	}
+	m.govState.DRepDelegationsByCredential[drepStakeCredential] = common.Drep{
+		Type:       common.DrepTypeAddrKeyHash,
+		Credential: drepCredentialHash[:],
+	}
+	m.govState.DRepRegistrationsByCredential[mockledger.RewardAccountKey{
+		CredType:   common.CredentialTypeAddrKeyHash,
+		Credential: drepCredentialHash,
+	}] = true
+	m.govState.RewardAccountBalances[drepStakeCredential] = 1_000_000
+
+	// One pool, backed by real delegated stake, votes yes.
+	poolHash := testHash28(0xe3)
+	poolStakeCredential := mockledger.RewardAccountKey{
+		CredType:   common.CredentialTypeAddrKeyHash,
+		Credential: testHash28(0xe4),
+	}
+	m.govState.PoolRegistrations[poolHash] = true
+	m.govState.PoolDelegationsByCredential[poolStakeCredential] = poolHash
+	m.govState.RewardAccountBalances[poolStakeCredential] = 1_000_000
+
+	// Vote keys match the real format committeeActionRatified reads:
+	// "<voter type digit>:<hex credential hash>" (see recordVotesInGovState).
+	votes := map[string]uint8{
+		formatVoteKey(common.VoterTypeDRepKeyHash, drepCredentialHash): 1,
+		formatVoteKey(common.VoterTypeStakingPoolKeyHash, poolHash):    1,
+	}
+
+	const govActionID = "e5e5e5e5#0"
+	m.govState.Proposals[govActionID] = &conformance.ProposalState{
+		GovActionInfo: conformance.GovActionInfo{
+			ActionType:     common.GovActionTypeUpdateCommittee,
+			SubmittedEpoch: 0,
+			ExpiresAfter:   10,
+			Votes:          votes,
+		},
+	}
+
+	require.NoError(t, m.ProcessEpochBoundary(1))
+
+	ratified := m.govState.Proposals[govActionID].RatifiedEpoch
+	require.NotNil(
+		t,
+		ratified,
+		"an UpdateCommittee proposal with DRep+SPO yes votes and no "+
+			"committee vote must ratify through the real "+
+			"ProcessEpochBoundary/ratifyProposals path",
+	)
+}
+
+// formatVoteKey builds a GovActionInfo.Votes key exactly as
+// recordVotesInGovState does: "<voter type digit>:<hex credential hash>".
+func formatVoteKey(voterType uint8, credential common.Blake2b224) string {
+	return string(rune('0'+voterType)) + ":" + hex.EncodeToString(credential[:])
 }

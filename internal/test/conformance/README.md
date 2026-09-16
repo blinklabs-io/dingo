@@ -13,6 +13,17 @@ local SQLite backend (the default, no setup required -- see
 [PostgreSQL backend](#postgresql-backend)), or a real MySQL backend (see
 [MySQL backend](#mysql-backend)).
 
+One decision is a deliberate exception to "not a hand-rolled second
+implementation": `ratifyProposals` decides `NoConfidence`/`UpdateCommittee`
+ratification with a harness-local stake-weighted tally
+(`committeeActionRatified` in `state_manager.go`) instead of calling
+`ledger/governance`'s real `ShouldRatify`. That production tally does not yet
+count an active proposal's own deposit as part of its return account's DRep
+voting power (CIP-1694 active voting stake -- tracked as issue #4355), so
+calling it here would still misjudge the same vectors this harness-local
+tally exists to get right. Every other governance and ledger decision in this
+package still goes through the real production code.
+
 ## What the vectors cover
 
 The vectors exercise **Conway era** ledger rules:
