@@ -35,6 +35,26 @@ var koiosFlags struct {
 	verbose           bool
 }
 
+// splitStakeMismatches partitions mismatches into real Dingo/Koios
+// divergences and KoiosFault entries (an unparseable koios active_stake
+// value -- a comparison Koios's own data made untrustworthy, not a Dingo
+// divergence; see StakeMismatch.KoiosFault's doc comment). Counting a fault
+// toward a real mismatch total would page on Koios's own data quality, the
+// same wrong outcome the protocol-params branch avoids via
+// koiosparity.DetermineStatus.
+func splitStakeMismatches(
+	mismatches []nodeparity.StakeMismatch,
+) (real, faults []nodeparity.StakeMismatch) {
+	for _, m := range mismatches {
+		if m.KoiosFault {
+			faults = append(faults, m)
+		} else {
+			real = append(real, m)
+		}
+	}
+	return real, faults
+}
+
 func fromGenesisCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "from-genesis",
@@ -166,16 +186,25 @@ func fromGenesisRun(cmd *cobra.Command, _ []string) error {
 		if r.StakeErr != nil {
 			logger.Warn("stake distribution check did not run",
 				"epoch", r.Epoch, "error", r.StakeErr)
-		} else if len(r.StakeMismatches) > 0 {
-			stakeMismatches++
-			for _, m := range r.StakeMismatches {
-				logger.Warn("stake distribution mismatch",
+		} else {
+			realMismatches, faults := splitStakeMismatches(r.StakeMismatches)
+			for _, m := range faults {
+				logger.Warn("stake distribution check incomplete",
 					"epoch", r.Epoch, "pool", m.PoolIDBech32,
 					"dingo_stake", m.DingoStake, "koios_stake", m.KoiosStake,
-					"diff_lovelace", m.DiffLovelace, "reason", m.Reason)
+					"reason", m.Reason)
 			}
-		} else {
-			logger.Info("stake distribution match", "epoch", r.Epoch)
+			if len(realMismatches) > 0 {
+				stakeMismatches++
+				for _, m := range realMismatches {
+					logger.Warn("stake distribution mismatch",
+						"epoch", r.Epoch, "pool", m.PoolIDBech32,
+						"dingo_stake", m.DingoStake, "koios_stake", m.KoiosStake,
+						"diff_lovelace", m.DiffLovelace, "reason", m.Reason)
+				}
+			} else if len(faults) == 0 {
+				logger.Info("stake distribution match", "epoch", r.Epoch)
+			}
 		}
 
 		if !r.UTxOAttempted {

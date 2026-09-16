@@ -219,6 +219,16 @@ type StakeMismatch struct {
 	// disagreement: "no koios row for nonzero dingo stake" or "unparseable
 	// koios active_stake value". Empty for an ordinary numeric mismatch.
 	Reason string
+	// KoiosFault is true only for the "unparseable koios active_stake
+	// value" case: a comparison Koios's own data made untrustworthy, not a
+	// real Dingo/Koios disagreement -- matching koiosparity.StatusError's
+	// treatment of a Koios-side fetch failure, and unlike the "no koios row
+	// for nonzero dingo stake" case (KoiosFault false), which is a genuine
+	// divergence. A caller counting real mismatches must exclude this case
+	// the same way it already excludes a StakeErr; a caller comparing on
+	// Reason's literal string instead would silently miscount if this
+	// doc-comment's wording ever changed.
+	KoiosFault bool
 }
 
 // stakeDiffLovelace computes the exact signed difference between dingoStake
@@ -325,6 +335,7 @@ func CheckStakeDistribution(
 					DingoStake:   p.stake,
 					KoiosStake:   hist.ActiveStake,
 					Reason:       "unparseable koios active_stake value",
+					KoiosFault:   true,
 				}
 				return nil
 			}
