@@ -1160,8 +1160,12 @@ When `Node.Run()` is called, components are initialized in this order:
     Mithril bootstrap imports raw blocks up to the certified immutable tip
     while leaving the ledger cursor at the earlier imported ledger state, and
     LedgerState.Start replays that whole suffix as ordinary BlockActionApply
-    events, so the indexer sees those blocks once through the live path
-    instead of scanning them here as well. A failure to resolve the tip aborts
+    events, so the indexer sees those blocks once through the live path.
+    Trusted full-block CBOR decoding during this replay is performed in a
+    bounded worker pool (two through eight workers, selected from
+    GOMAXPROCS), with a 50-block batch and indexed result reordering; chain
+    insertion and ledger replay remain serial and cancellation propagates
+    through the bounded job/result queues. A failure to resolve the tip aborts
     startup rather than falling back to an unbounded sweep. Inserts are
     idempotent (ON CONFLICT DO NOTHING) so a crash-restart replay is safe.
     Progress is observable through `dingo_midnight_indexer_checkpoint_slot`,
