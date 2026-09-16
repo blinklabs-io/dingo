@@ -15,6 +15,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -171,7 +172,7 @@ func fromGenesisRun(cmd *cobra.Command, _ []string) error {
 				logger.Warn("stake distribution mismatch",
 					"epoch", r.Epoch, "pool", m.PoolIDBech32,
 					"dingo_stake", m.DingoStake, "koios_stake", m.KoiosStake,
-					"rel_diff", m.RelDiff)
+					"diff_lovelace", m.DiffLovelace, "reason", m.Reason)
 			}
 		} else {
 			logger.Info("stake distribution match", "epoch", r.Epoch)
@@ -212,7 +213,13 @@ func fromGenesisRun(cmd *cobra.Command, _ []string) error {
 		"utxo_mismatches", utxoMismatches,
 	)
 
-	if err != nil {
+	// context.Canceled is this command's own documented normal way to
+	// stop ("Runs until interrupted (Ctrl-C)...") -- returning it here
+	// unconditionally made the mismatch check below unreachable on the
+	// single most common way to end a run, so a clean run and one that
+	// found real divergence exited identically. Treat it as a normal
+	// stop and fall through to the mismatch check instead.
+	if err != nil && !errors.Is(err, context.Canceled) {
 		return err
 	}
 	if ppMismatchCount > 0 || stakeMismatches > 0 || utxoMismatches > 0 {
