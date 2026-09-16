@@ -1542,16 +1542,29 @@ func CanonicalKoiosUTxOEntry(out KoiosTxInfoOutput) string {
 	return sb.String()
 }
 
-// GetTxInfos fetches input refs and full output content for the given
-// transaction hashes, batched to stay under Koios's request-size cap. A
-// hash Koios does not recognize is simply absent from the result rather
-// than an error, matching GetPoolEpochHistory's "missing means missing"
-// contract.
+// GetTxInfos fetches input refs and full output content for every one of
+// txHashes, batched to stay under Koios's request-size cap.
+//
+// Unlike GetPoolEpochHistory's "missing means missing" contract (a
+// legitimate outcome there -- a pool with no snapshot row yet), a
+// transaction hash given to GetTxInfos is never optional: the caller
+// (nodeparity's from-genesis UTxO reconstruction, blinklabs-io/dingo#1900)
+// asked for it because a block it already trusts contains that exact
+// transaction, so Koios omitting it from the response means either
+// transient incompleteness or that this specific hash isn't indexed yet --
+// applying only the hashes that did come back would silently and
+// permanently lose that transaction's spends/creates from the running
+// reconstruction. Requires exactly one result per requested hash --
+// erroring, not silently dropping, on any that are missing or duplicated --
+// and returns them in request order (not Koios's response order) so a
+// caller applying dependent transactions (a UTxO created by one hash and
+// spent by a later one in the same request) does so in the same order the
+// chain itself does.
 func (k *KoiosClient) GetTxInfos(
 	ctx context.Context,
 	txHashes []string,
 ) ([]KoiosTxInfoItem, error) {
-	var all []KoiosTxInfoItem
+	byHash := make(map[string]KoiosTxInfoItem, len(txHashes))
 	for start := 0; start < len(txHashes); start += KoiosTxInfoBatchSize {
 		end := min(start+KoiosTxInfoBatchSize, len(txHashes))
 		payload := struct {
@@ -1580,7 +1593,27 @@ func (k *KoiosClient) GetTxInfos(
 		if err := json.Unmarshal(resp.Body, &items); err != nil {
 			return nil, fmt.Errorf("koios /tx_info decode: %w", err)
 		}
-		all = append(all, items...)
+		for _, item := range items {
+			if _, dup := byHash[item.TxHash]; dup {
+				return nil, fmt.Errorf(
+					"koios /tx_info: duplicate result for tx hash %s",
+					item.TxHash,
+				)
+			}
+			byHash[item.TxHash] = item
+		}
+	}
+
+	all := make([]KoiosTxInfoItem, len(txHashes))
+	for i, hash := range txHashes {
+		item, ok := byHash[hash]
+		if !ok {
+			return nil, fmt.Errorf(
+				"koios /tx_info: no result for requested tx hash %s",
+				hash,
+			)
+		}
+		all[i] = item
 	}
 	return all, nil
 }
