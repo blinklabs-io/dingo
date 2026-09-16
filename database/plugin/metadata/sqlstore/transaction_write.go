@@ -80,8 +80,8 @@ func (a *transactionBatchAccumulator) insertTransaction(
 		a.transactionInsert = stmt
 	}
 	if a.sqlOperations != nil {
-		a.sqlOperations.WithLabelValues(classifySQLOp(transactionInsertSQL)).
-			Inc()
+		op, _ := classifySQLStatement(transactionInsertSQL)
+		a.sqlOperations.WithLabelValues(op).Inc()
 	}
 	if a.mysql {
 		result, err := a.transactionInsert.ExecContext(ctx, args...)

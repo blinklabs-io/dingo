@@ -17,6 +17,7 @@ package sqlstore
 import (
 	"context"
 	"database/sql"
+	"time"
 )
 
 // hotStatements is the fixed, exhaustive list of query texts Start prepares
@@ -206,6 +207,14 @@ func (s *Store) stmtForQueryer(
 	}
 }
 
+// txScopedStmtAfterDerive, when non-nil, runs synchronously inside
+// txScopedStmt immediately after tx.StmtContext returns and before the
+// derived statement is (re-)inserted into s.txStmts. Production code never
+// sets this -- it exists only so a test can force the eviction race window
+// between derivation and insertion deterministically instead of relying on
+// scheduler timing (see TestTxScopedStmtDoesNotLeakAcrossConcurrentEviction).
+var txScopedStmtAfterDerive func()
+
 // txScopedStmt returns the *sql.Stmt tx should use for cached, deriving it
 // with (*sql.Tx).StmtContext only on the first call for this (tx, cached)
 // pair within the transaction's lifetime and returning the same derived
@@ -243,6 +252,25 @@ func (s *Store) stmtForQueryer(
 // itself is finished, so this cache never outlives the transaction it was
 // built for and never grows across transactions: a later transaction gets a
 // new *sql.Tx from the driver and therefore a fresh, empty entry here.
+//
+// This requires tx to be used by exactly one goroutine at a time, start to
+// finish: derivation above runs with s.txStmtMu released (StmtContext can
+// block on I/O), so a concurrent Commit/Rollback on the SAME *sqlTxn could
+// run releaseConnection/evictTxStmts in that window and have this call's own
+// insert below recreate the now-evicted entry afterward, retaining a *sql.Stmt
+// tied to an already-finished transaction for the Store's lifetime
+// (TestTxScopedStmtDoesNotLeakAcrossConcurrentEviction reproduces this
+// directly, by calling txScopedStmt and evictTxStmts concurrently against one
+// tx). dingo's real write path never creates that window: withWriteTransaction
+// and database.Txn.Do both run the caller's callback to completion,
+// synchronously, in the same goroutine that then calls Commit/Rollback, and
+// the one place in the ledger that fans a single logical read out across
+// goroutines against a shared *database.Txn -- queryShelleyUtxoWhole's
+// resolve pool (ledger/queries_utxowhole.go) -- deliberately gives each
+// worker its own transaction instead of sharing the caller's, exactly to
+// avoid this. A caller-supplied txn threaded through several sequential
+// domain calls (the common "if txn == nil { txn = ... }" shape used
+// throughout database/*.go) stays on one goroutine the same way.
 func (s *Store) txScopedStmt(
 	ctx context.Context,
 	tx *sql.Tx,
@@ -262,6 +290,9 @@ func (s *Store) txScopedStmt(
 	// discards the loser rather than leaking it, so the map never disagrees
 	// with which one is "the" cached derivative even under that race.
 	derived := tx.StmtContext(ctx, cached)
+	if txScopedStmtAfterDerive != nil {
+		txScopedStmtAfterDerive()
+	}
 
 	s.txStmtMu.Lock()
 	defer s.txStmtMu.Unlock()
@@ -308,13 +339,14 @@ func (s *Store) queryRowCached(
 	args ...any,
 ) *sql.Row {
 	if cached, ok := s.lookupCachedStmt(query); ok {
-		// Counted here, not by countingQueryer: stmtForQueryer resolves
-		// straight to a *sql.Stmt, bypassing db (and any countingQueryer
-		// wrapping it) entirely -- see metrics.go's doc comment on
-		// countingQueryer's PrepareContext for why that makes this the
-		// right place to count a cache hit.
+		// Counted and timed here, not by countingQueryer: stmtForQueryer
+		// resolves straight to a *sql.Stmt, bypassing db (and any
+		// countingQueryer wrapping it) entirely -- see metrics.go's doc
+		// comment on countingQueryer's PrepareContext for why that makes
+		// this the right place to count and time a cache hit.
+		op, name := classifySQLStatement(query)
 		if s.sqlOperations != nil {
-			s.sqlOperations.WithLabelValues(classifySQLOp(query)).Inc()
+			s.sqlOperations.WithLabelValues(op).Inc()
 		}
 		// stmtForQueryer returns either the shared, Store-lifetime cached
 		// statement itself (must not be closed here, see
@@ -325,7 +357,15 @@ func (s *Store) queryRowCached(
 		// close, and closing eagerly would be wrong besides: the *sql.Row
 		// returned below defers running Scan against it until the caller
 		// invokes Scan.
-		return s.stmtForQueryer(ctx, db, cached).QueryRowContext(ctx, args...) //nolint:sqlclosecheck
+		stmt := s.stmtForQueryer(ctx, db, cached) //nolint:sqlclosecheck
+		if s.sqlQueryDuration == nil {
+			return stmt.QueryRowContext(ctx, args...)
+		}
+		start := time.Now()
+		row := stmt.QueryRowContext(ctx, args...)
+		s.sqlQueryDuration.WithLabelValues(op, name).
+			Observe(time.Since(start).Seconds())
+		return row
 	}
 	return db.QueryRowContext(ctx, query, args...)
 }
@@ -337,15 +377,24 @@ func (s *Store) execCached(
 	args ...any,
 ) (sql.Result, error) {
 	if cached, ok := s.lookupCachedStmt(query); ok {
+		op, name := classifySQLStatement(query)
 		if s.sqlOperations != nil {
-			s.sqlOperations.WithLabelValues(classifySQLOp(query)).Inc()
+			s.sqlOperations.WithLabelValues(op).Inc()
 		}
 		// Same reasoning as queryRowCached above: the statement here is
 		// either the shared cache entry (never closed by a call site) or
 		// a Tx-scoped derivative that database/sql closes on its own when
 		// the transaction ends, so there is nothing for this function to
 		// close.
-		return s.stmtForQueryer(ctx, db, cached).ExecContext(ctx, args...) //nolint:sqlclosecheck
+		stmt := s.stmtForQueryer(ctx, db, cached) //nolint:sqlclosecheck
+		if s.sqlQueryDuration == nil {
+			return stmt.ExecContext(ctx, args...)
+		}
+		start := time.Now()
+		result, err := stmt.ExecContext(ctx, args...)
+		s.sqlQueryDuration.WithLabelValues(op, name).
+			Observe(time.Since(start).Seconds())
+		return result, err
 	}
 	return db.ExecContext(ctx, query, args...)
 }
