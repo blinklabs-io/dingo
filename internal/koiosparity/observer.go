@@ -21,11 +21,13 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/blinklabs-io/dingo/event"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -171,6 +173,11 @@ type Observer struct {
 	wake         chan struct{}
 	wakeAccounts chan struct{}
 	wg           sync.WaitGroup
+
+	// aggFetch collapses the pool/epoch-aggregate reference fetch that both
+	// queues need for the same epoch into one round of Koios requests; see
+	// fetchAggregateIfNeeded.
+	aggFetch singleflight.Group
 
 	// cancel stops both run and runAccounts's background goroutines. It is
 	// the CancelFunc of the context derived (in Start) from the ctx passed to
@@ -392,6 +399,18 @@ func (o *Observer) seedBacklog(ctx context.Context) error {
 	}
 	for _, e := range uncached {
 		o.pending[e] = struct{}{}
+		// An epoch with no koios_epoch_info row at all is invisible to every
+		// other seed query below: GetEpochsNeedingCheck selects FROM that
+		// table and GetEpochsMissingAccountCoverage requires a row in it. It
+		// therefore has to be queued for the per-account check from here, or
+		// #3097's comparison would not run for any never-fetched epoch until
+		// some later restart re-seeded it — which is the whole backlog on the
+		// bulk-sync node dingo #4339 is about. processAccountEpoch fetches
+		// the aggregate reference itself, so the account queue does not
+		// depend on the aggregate queue having reached the epoch first.
+		if o.cfg.AccountsEnabled {
+			o.pendingAccounts[e] = struct{}{}
+		}
 	}
 	o.mu.Unlock()
 
@@ -739,33 +758,17 @@ func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 // aggregate-phase failure and an account-phase failure both reach fail/
 // FatalFunc through the same exactly-once path (see fail).
 //
-// fetchPoolsIfNeeded/fetchParamsIfNeeded are called again here even though
-// processEpoch already calls them: each is a cheap cache-presence check that
-// no-ops once the fast queue has already fetched them, and this queue must
-// not assume the fast queue has already reached this epoch — compareEpochAccounts
-// (via CheckEpoch's accountsEnabled=true path) needs the koios_epoch_info row
-// fetchPoolsIfNeeded provides.
+// fetchIfNeeded runs here too, even though processEpoch also calls it: this
+// queue must not assume the fast queue has already reached this epoch, since
+// compareEpochAccounts (via CheckEpoch's accountsEnabled=true path) needs the
+// koios_epoch_info row it provides. fetchIfNeeded's own per-epoch gate
+// collapses the two queues' overlapping calls into one round of Koios
+// requests.
 func (o *Observer) processAccountEpoch(ctx context.Context, epoch uint64) {
-	if err := o.fetchPoolsIfNeeded(ctx, epoch); err != nil {
+	if err := o.fetchIfNeeded(ctx, epoch); err != nil {
 		if cancelled(ctx, err) {
 			o.cfg.Logger.Debug(
-				"koiosparity observer: account-queue pool fetch interrupted by shutdown",
-				"network",
-				o.cfg.Network,
-				"epoch",
-				epoch,
-				"error",
-				err,
-			)
-			return
-		}
-		o.reportError(epoch, fmt.Errorf("fetch koios reference: %w", err))
-		return
-	}
-	if err := o.fetchParamsIfNeeded(ctx, epoch); err != nil {
-		if cancelled(ctx, err) {
-			o.cfg.Logger.Debug(
-				"koiosparity observer: account-queue params fetch interrupted by shutdown",
+				"koiosparity observer: account-queue aggregate fetch interrupted by shutdown",
 				"network",
 				o.cfg.Network,
 				"epoch",
@@ -900,11 +903,37 @@ func (o *Observer) reportError(epoch uint64, err error) {
 // runAccounts/processAccountEpoch) precisely so a slow per-account fetch for
 // one epoch can never delay this fast fetch — and therefore the fast
 // pool/aggregate check that follows it — for any later epoch.
+//
+// Both queues call this, since the account queue must not assume the
+// aggregate queue has already reached the epoch, so it is gated per epoch
+// with singleflight. The cache-presence gates below (fetchPoolsIfNeeded's
+// GetUncachedEpochs, fetchParamsIfNeeded's parameter-row lookup) only
+// suppress a fetch that has already *finished*, so ungated an epoch
+// transition — which wakes both queues at once with the same epoch — has
+// each of them resolve the pool universe and fetch /epoch_info,
+// /epoch_params, /totals and every chunked /pool_history request
+// independently, doubling the aggregate half of a Koios quota this observer
+// is explicitly designed around.
+//
+// Keying per epoch, rather than serializing all aggregate fetches, keeps the
+// queues independent except when they are on the same epoch — where the
+// later caller was about to do exactly this work anyway.
+//
+// Sharing one call's result across both callers is sound because both
+// goroutines are driven by the same context (the one Start derives and Stop
+// cancels), so a cancellation observed by the in-flight fetch is a
+// cancellation for the waiting caller too.
 func (o *Observer) fetchIfNeeded(ctx context.Context, epoch uint64) error {
-	if err := o.fetchPoolsIfNeeded(ctx, epoch); err != nil {
-		return err
-	}
-	return o.fetchParamsIfNeeded(ctx, epoch)
+	_, err, _ := o.aggFetch.Do(
+		strconv.FormatUint(epoch, 10),
+		func() (any, error) {
+			if err := o.fetchPoolsIfNeeded(ctx, epoch); err != nil {
+				return nil, err
+			}
+			return nil, o.fetchParamsIfNeeded(ctx, epoch)
+		},
+	)
+	return err
 }
 
 // fetchParamsIfNeeded fetches the /epoch_params reference row for epoch only

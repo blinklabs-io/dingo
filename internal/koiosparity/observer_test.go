@@ -1604,6 +1604,177 @@ func TestObserverAggregateCheckDoesNotWaitForSlowAccountFetch(t *testing.T) {
 	mu.Unlock()
 }
 
+// TestObserverSeedBacklogQueuesUncachedEpochsForAccountCheck pins the half of
+// #4339's queue split that the split itself can silently drop: an epoch whose
+// Koios reference has never been fetched at all.
+//
+// Every other backlog-seed query reads FROM koios_epoch_info
+// (GetEpochsNeedingCheck) or requires a row in it
+// (GetEpochsMissingAccountCoverage), so a never-fetched epoch is visible only
+// to GetUncachedEpochs. Queuing that result into the aggregate queue alone
+// would leave #3097's per-account exact parity unrun for the entire seeded
+// backlog until the next restart — precisely the bulk-sync case #4339 is
+// about, where the whole backlog is uncached.
+func TestObserverSeedBacklogQueuesUncachedEpochsForAccountCheck(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDatabaseSourceDB(t)
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+
+	sqlDB := sourceSQLDB(t, source.db)
+	require.NoError(t, sqlDB.Create(&models.EpochSummary{
+		Epoch:            12,
+		TotalActiveStake: types.Uint64(1),
+		SnapshotReady:    true,
+	}).Error)
+
+	o, err := NewObserver(ObserverConfig{
+		Network:         "preview",
+		CachePath:       filepath.Join(t.TempDir(), "cache.db"),
+		Source:          source,
+		AccountsEnabled: true,
+		Logger:          slog.New(slog.DiscardHandler),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = o.Stop(context.Background()) })
+
+	require.NoError(t, o.seedBacklog(context.Background()))
+
+	o.mu.Lock()
+	_, aggregateQueued := o.pending[11]
+	_, accountQueued := o.pendingAccounts[11]
+	o.mu.Unlock()
+
+	require.True(t, aggregateQueued,
+		"epoch 11 has no cached Koios reference and must be queued for the "+
+			"aggregate check")
+	require.True(t, accountQueued,
+		"an epoch with no cached Koios reference at all must also be queued "+
+			"for the per-account check, which no other seed query can select "+
+			"it for")
+}
+
+// TestObserverFetchesAggregateReferenceOncePerEpochAcrossQueues pins the
+// Koios request cost of #4339's queue split. Both queues need the same
+// pool/epoch-aggregate reference rows for an epoch, and both are woken by the
+// same epoch transition, so an ungated split issues the whole aggregate fetch
+// — pool universe resolution, /epoch_info, /epoch_params, /totals and every
+// chunked /pool_history request — twice for every epoch whenever accounts are
+// enabled. Koios quota is a bounded daily budget this observer is explicitly
+// designed around, so the second fetch must collapse into the first.
+//
+// /pool_list sleeps to hold the first fetch open long enough for the second
+// queue to reach the same epoch, which is what makes the doubled-cost failure
+// deterministic rather than timing-dependent.
+func TestObserverFetchesAggregateReferenceOncePerEpochAcrossQueues(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDatabaseSourceDB(t)
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+
+	var mu sync.Mutex
+	counts := map[string]int{}
+	countPath := func(path string) {
+		mu.Lock()
+		counts[path]++
+		mu.Unlock()
+	}
+	countOf := func(path string) int {
+		mu.Lock()
+		defer mu.Unlock()
+		return counts[path]
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			countPath(r.URL.Path)
+			switch r.URL.Path {
+			case "/tip":
+				_, _ = w.Write([]byte(`[{"epoch_no":999999}]`))
+			case "/pool_list", "/pool_updates":
+				time.Sleep(250 * time.Millisecond)
+				_, _ = w.Write([]byte(`[]`))
+			case "/account_list", "/account_reward_history":
+				_, _ = w.Write([]byte(`[]`))
+			case "/epoch_info":
+				_, _ = fmt.Fprintf(
+					w,
+					`[{"epoch_no":%s,"era":"conway","out_sum":"100","fees":"10",`+
+						`"tx_count":1,"blk_count":1,"start_time":1000,"end_time":2000,`+
+						`"first_block_time":1000,"last_block_time":1999,`+
+						`"active_stake":"1000000","total_rewards":"100",`+
+						`"avg_blk_reward":"1"}]`,
+					r.URL.Query().Get("_epoch_no"),
+				)
+			case "/epoch_params":
+				_, _ = fmt.Fprintf(
+					w,
+					previewBabbageEpochParamsTmpl,
+					r.URL.Query().Get("_epoch_no"),
+				)
+			case "/totals":
+				_, _ = fmt.Fprintf(
+					w,
+					`[{"epoch_no":%s,"treasury":"10","reserves":"20","fees":"30",`+
+						`"reward":"1"}]`,
+					r.URL.Query().Get("_epoch_no"),
+				)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		},
+	))
+	t.Cleanup(srv.Close)
+
+	var results atomic.Int32
+	o, err := NewObserver(ObserverConfig{
+		BaseURL:            srv.URL,
+		AllowInsecureHTTP:  true,
+		Network:            "preview",
+		CachePath:          filepath.Join(t.TempDir(), "cache.db"),
+		Source:             source,
+		AccountsEnabled:    true,
+		Logger:             slog.New(slog.DiscardHandler),
+		FetchRetryAttempts: 3,
+		FetchRetryDelay:    5 * time.Millisecond,
+		OnResult:           func(*EpochCompareResult) { results.Add(1) },
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = o.Stop(context.Background()) })
+
+	// Started against a source with no committed epoch data, so seedBacklog
+	// queues nothing and the counts below describe exactly one epoch.
+	require.NoError(t, o.Start(context.Background()))
+
+	eb := event.NewEventBus(nil, nil)
+	defer eb.Stop()
+	eb.SubscribeFunc(
+		event.EpochTransitionEventType,
+		o.HandleEpochTransitionEvent,
+	)
+	seedDingoEpochAggregate(t, source, 5, 1_000_000, 10, 20, 30)
+	publishEpochTransition(eb, 5)
+
+	// One result from each queue: both have finished the epoch, so no further
+	// fetch can arrive after this point.
+	testutil.WaitForCondition(t, func() bool {
+		return results.Load() >= 2
+	}, 30*time.Second, "both queues should report a result for epoch 5")
+
+	require.Equal(t, 1, countOf("/epoch_info"),
+		"the aggregate reference fetch must be issued once per epoch, not "+
+			"once per queue")
+	require.Equal(t, 1, countOf("/pool_list"),
+		"the pool universe must be resolved once per epoch, not once per queue")
+	require.Equal(t, 1, countOf("/epoch_params"),
+		"the protocol-parameter reference must be fetched once per epoch, "+
+			"not once per queue")
+}
+
 // TestObserverFailureReportsSignificantMismatchCount is the user-visible half
 // of the fix: the number an operator reads in the strict-mode fatal error and
 // in the observer's "epoch validation failed" log line.

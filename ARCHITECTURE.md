@@ -8031,10 +8031,26 @@ second sync:
     to `pendingAccounts` alone; the aggregate queue's own `GetEpochsNeedingCheck`
     call for `seedBacklog` always passes `accountsEnabled=false`, so an epoch
     whose pool/aggregate data is already fresh is never re-queued into `pending`
-    purely because its account coverage happens to be stale. Both goroutines
-    share `fail`'s exactly-once `FatalFunc` dispatch, now an atomic
-    compare-and-swap on `fatalFired` rather than a plain bool, since either
-    goroutine's failure can fire it concurrently with the other's.
+    purely because its account coverage happens to be stale. An epoch with no
+    `koios_epoch_info` row at all is visible to `GetUncachedEpochs` alone —
+    `GetEpochsNeedingCheck` selects from that table and
+    `GetEpochsMissingAccountCoverage` requires a row in it — so `seedBacklog`
+    queues that result onto both sets when `AccountsEnabled`, without which
+    #3097's comparison would not run for any never-fetched epoch until a later
+    restart re-seeded it, which is the entire backlog on a bulk-syncing node.
+    Both goroutines share `fail`'s exactly-once `FatalFunc` dispatch, now an
+    atomic compare-and-swap on `fatalFired` rather than a plain bool, since
+    either goroutine's failure can fire it concurrently with the other's.
+    Because the account queue must not assume the aggregate queue has already
+    reached an epoch, `processAccountEpoch` calls `fetchIfNeeded` too; that
+    call is gated per epoch with `singleflight` (`Observer.aggFetch`), since
+    the cache-presence gates inside it only suppress a fetch that has already
+    finished and an epoch transition wakes both queues with the same epoch at
+    once — ungated, each queue resolves the pool universe and fetches
+    `/epoch_info`, `/epoch_params`, `/totals` and every chunked `/pool_history`
+    request independently, doubling the aggregate half of the Koios quota
+    budget. Keying per epoch rather than serializing all aggregate fetches
+    keeps the queues independent except on the epoch they share.
 - **Composition** (`node.go`, `node_koiosparity.go`, `node_shutdown.go`,
   `node_lifecycle.go`): `Node.Run()` configures `n.snapshotMgr` and installs
   both epoch-boundary reward-snapshot hooks (`SetEpochBoundarySnapshotStakeHook`/
