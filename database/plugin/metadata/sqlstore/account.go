@@ -130,6 +130,20 @@ func requireAccountBaselineTransaction(db queryer) error {
 		if _, ok := db.(*sql.Tx); ok {
 			return nil
 		}
+		// Both wrapper types unwrap the same way (a queryer field holding the
+		// handle underneath); countingQueryer has to be checked here for the
+		// same reason stmtForQueryer in prepared_stmt.go does: whenever
+		// Config.PromRegistry is set, Store.instrumentedQueryer wraps every
+		// handle it hands out in countingQueryer, including the *sql.Tx a
+		// real write transaction passes down to this check. Without this
+		// case, a real write transaction's *sql.Tx would never be seen
+		// (countingQueryer, not dialectQueryer, is the outermost type in the
+		// sqlite case), and this would reject every account-baseline write
+		// as "outside a write transaction" on a metrics-enabled Store.
+		if wrapped, ok := db.(countingQueryer); ok {
+			db = wrapped.queryer
+			continue
+		}
 		wrapped, ok := db.(dialectQueryer)
 		if !ok {
 			return errors.New(
