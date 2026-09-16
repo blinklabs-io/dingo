@@ -750,7 +750,7 @@ func TestApplyUpdateCommittee_PersistsEnactedQuorum(t *testing.T) {
 
 	action := &lcommon.UpdateCommitteeGovAction{
 		Credentials: []lcommon.Credential{},
-		CredEpochs:  map[*lcommon.Credential]uint{},
+		CredEpochs:  map[*lcommon.Credential]uint64{},
 		Quorum:      cbor.Rat{Rat: big.NewRat(3, 5)},
 	}
 	err := applyUpdateCommittee(
@@ -818,7 +818,7 @@ func TestApplyUpdateCommittee_ReelectionStartsFreshCredentialTerm(
 	require.NoError(t, applyUpdateCommittee(
 		&EnactmentContext{DB: db, Slot: 70},
 		&lcommon.UpdateCommitteeGovAction{
-			CredEpochs: map[*lcommon.Credential]uint{
+			CredEpochs: map[*lcommon.Credential]uint64{
 				coldCredential: 30,
 			},
 			Quorum: cbor.Rat{Rat: big.NewRat(1, 2)},
@@ -916,7 +916,7 @@ func TestApplyUpdateCommitteePreservesZeroTermStartSlot(t *testing.T) {
 	require.NoError(t, applyUpdateCommittee(
 		&EnactmentContext{DB: db, Slot: 50},
 		&lcommon.UpdateCommitteeGovAction{
-			CredEpochs: map[*lcommon.Credential]uint{credential: 20},
+			CredEpochs: map[*lcommon.Credential]uint64{credential: 20},
 			Quorum:     cbor.Rat{Rat: big.NewRat(1, 2)},
 		},
 		0,

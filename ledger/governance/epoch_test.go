@@ -1116,11 +1116,11 @@ func TestProcessEpochCommitteeTermLimit(t *testing.T) {
 	t.Parallel()
 
 	const currentEpoch = uint64(10)
-	uintPtr := func(value uint) *uint { return &value }
+	uintPtr := func(value uint64) *uint64 { return &value }
 	tests := []struct {
 		name         string
 		termLimit    uint64
-		memberExpiry *uint
+		memberExpiry *uint64
 		actionType   lcommon.GovActionType
 		wantRatified bool
 	}{
@@ -1172,7 +1172,7 @@ func TestProcessEpochCommitteeTermLimit(t *testing.T) {
 			var action lcommon.GovAction
 			switch test.actionType {
 			case lcommon.GovActionTypeUpdateCommittee:
-				members := make(map[*lcommon.Credential]uint)
+				members := make(map[*lcommon.Credential]uint64)
 				if test.memberExpiry != nil {
 					credential := &lcommon.Credential{
 						CredType: lcommon.CredentialTypeAddrKeyHash,
