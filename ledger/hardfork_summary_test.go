@@ -686,6 +686,94 @@ func TestHardForkSummary_KnownTransitionRejectsPastSuccessorBound(
 	}
 }
 
+// TestHardForkSummary_KnownTransitionSuccessorTracksLiveTip is a regression
+// test for a node-side horizon-computation gap distinct from #3844: the
+// appended successor era used to measure its own safe zone only from the
+// announced boundary, never from how far the live tip has actually advanced
+// past it. A node that fails to apply the block crossing that boundary (for
+// any reason -- this is the exact class of bug this fixture reproduces, not
+// its cause) keeps reconstructing this same Summary on every retry with the
+// SAME transitionInfo and epoch cache, since neither changes without a
+// successful apply. Before this fix, the successor's horizon was pinned at
+// boundary+safeZone forever, so once the live tip passed that fixed point
+// every further block or transaction slot fell "past horizon" permanently --
+// a live, canonical chain rejected as though its own tip did not exist, even
+// though nothing about the transition or the chain's own history changed.
+//
+// This reproduces the reported live-incident signature directly: the current
+// published tip's own slot judged past horizon, looping "block processing
+// failed, restarting pipeline" forever with no way to recover because retrying
+// recomputes the identical, still-too-narrow bound every time.
+func TestHardForkSummary_KnownTransitionSuccessorTracksLiveTip(t *testing.T) {
+	t.Parallel()
+
+	const (
+		epochSize     = uint64(100)
+		safeZoneSlots = uint64(250)
+		knownEpoch    = uint64(7)
+		boundarySlot  = uint64(700) // first slot of epoch 7 (400 + (7-4)*100)
+		// The live tip has advanced far past where a boundary-only successor
+		// bound (700+250 snapped to 1_000) could ever reach.
+		liveTipSlot = uint64(50_000)
+	)
+	ls := &LedgerState{
+		epochCache: []models.Epoch{{
+			EpochId:       4,
+			StartSlot:     400,
+			SlotLength:    1_000,
+			LengthInSlots: 100,
+			EraId:         1,
+		}},
+		currentEra:     eras.EraDesc{Id: 1, Name: "Shelley"},
+		transitionInfo: hardfork.NewTransitionKnown(knownEpoch),
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(liveTipSlot, []byte("tip")),
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: minimalShelleyGenesisCfg(t),
+		},
+	}
+	shape := hardfork.Shape{
+		Eras: []hardfork.ShapeEntry{{
+			EraID: 1,
+			Params: hardfork.EraParams{
+				EpochSize:     epochSize,
+				SlotLength:    time.Second,
+				SafeZoneSlots: safeZoneSlots,
+			},
+		}},
+	}
+	ls.cachedShape.Store(&shape)
+	ls.publishSnapshotsLocked()
+
+	sum, err := ls.HardForkSummary()
+	require.NoError(t, err)
+	require.Len(t, sum.Eras, 2)
+	require.NotNil(t, sum.Eras[0].End)
+	assert.Equal(t, boundarySlot, sum.Eras[0].End.Slot)
+
+	// The live tip's own slot -- what the reported incident actually failed
+	// on -- must resolve. Before this fix this returned ErrPastHorizon
+	// because the successor's fixed bound (1_000) never accounted for the
+	// tip having reached 50_000.
+	info, err := sum.SlotToEpoch(liveTipSlot)
+	require.NoError(
+		t, err,
+		"the live tip's own slot must stay within the horizon",
+	)
+	assert.GreaterOrEqual(t, info.Epoch, knownEpoch)
+
+	require.NotNil(t, sum.Eras[1].End)
+	assert.Greater(
+		t,
+		sum.Eras[1].End.Slot,
+		liveTipSlot,
+		"the successor horizon must extend past the live tip, not freeze at "+
+			"boundary+safeZone",
+	)
+	assert.Equal(t, uint64(50_300), sum.Eras[1].End.Slot)
+}
+
 func TestHardForkSummary_RejectsSlotPastSafeZone(t *testing.T) {
 	t.Parallel()
 
@@ -975,4 +1063,115 @@ func TestHardForkSummary_HorizonAnchoredAtAppliedParent(t *testing.T) {
 		behind.Eras[0].End.Slot,
 		"an anchor behind the published tip must not shrink the horizon",
 	)
+}
+
+func TestWallClockSlotFromConfirmedHistory_SupportedWhenEraSpansNow(t *testing.T) {
+	// A single unbounded era whose slot length is 1s spans the real wall
+	// clock, so the method returns the true current slot. The exact slot
+	// changes every second, but it must be far larger than the warm-up
+	// overhead of a fresh epoch cache (a value that can only grow, never
+	// shrink).
+	ls := &LedgerState{
+		epochCache: []models.Epoch{
+			{
+				EpochId:       5,
+				StartSlot:     500,
+				SlotLength:    1000,
+				LengthInSlots: 100,
+				EraId:         1,
+			},
+		},
+		currentEra:     eras.EraDesc{Id: 1, Name: "Shelley"},
+		transitionInfo: hardfork.NewTransitionKnown(7),
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(550, []byte("tip")),
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
+		},
+	}
+	// UnsafeIndefiniteSafeZone → End nil → now always in-era.
+	ls.cachedShape.Store(&hardfork.Shape{
+		Eras: []hardfork.ShapeEntry{{
+			EraID: 1,
+			Params: hardfork.EraParams{
+				EpochSize:     100,
+				SlotLength:    time.Second,
+				SafeZoneSlots: 0,
+			},
+		}},
+	})
+	ls.publishSnapshotsLocked()
+
+	slot, ok, err := ls.WallClockSlotFromConfirmedHistory()
+	require.NoError(t, err)
+	require.True(t, ok, "a 1s-era covering now must resolve the wall-clock slot")
+	assert.Greater(t, slot, uint64(100_000_000),
+		"2026 wall-clock slot via 1s slots since 2022-10-25 must exceed 100M")
+}
+
+func TestWallClockSlotFromConfirmedHistory_UnsupportedWhenPastHorizon(t *testing.T) {
+	// A bounded era whose forecast horizon ends far in the past (fresh
+	// mainnet has only a single bounded Byron era) cannot resolve the
+	// current wall-clock time, so the method must return false.
+	ls := &LedgerState{
+		epochCache: []models.Epoch{
+			{
+				EpochId:       0,
+				StartSlot:     0,
+				SlotLength:    20000,
+				LengthInSlots: 21600,
+				EraId:         0,
+			},
+		},
+		currentEra: eras.EraDesc{Id: 0, Name: "Byron"},
+		transitionInfo: hardfork.TransitionInfo{
+			State: hardfork.TransitionUnknown,
+		},
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(0, []byte("genesis")),
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
+		},
+	}
+	// NormalSafeZone snaps the end well within the same epoch — far past the
+	// real wall clock in 2026.
+	ls.cachedShape.Store(&hardfork.Shape{
+		Eras: []hardfork.ShapeEntry{{
+			EraID: 0,
+			Params: hardfork.EraParams{
+				EpochSize:     21600,
+				SlotLength:    20 * time.Second,
+				SafeZoneSlots: 21600,
+			},
+			NextEraTrigger: hardfork.NewTriggerAtEpoch(1),
+		}},
+	})
+	ls.publishSnapshotsLocked()
+
+	slot, ok, err := ls.WallClockSlotFromConfirmedHistory()
+	require.NoError(t, err,
+		"past-horizon is the deferral signal, not an internal failure")
+	assert.False(t, ok,
+		"bounded era horizon must not resolve the current wall-clock slot")
+	assert.Zero(t, slot)
+}
+
+func TestWallClockSlotFromConfirmedHistory_EmptyCache(t *testing.T) {
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	// An empty epoch cache is an internal failure, not the past-horizon
+	// deferral signal. It must surface as an error: reporting it as
+	// unsupported would let the block producer downgrade a hard startup
+	// failure into a warning and carry on with an unjudged certificate.
+	slot, ok, err := ls.WallClockSlotFromConfirmedHistory()
+	require.Error(t, err, "empty epoch cache must not masquerade as deferral")
+	assert.False(t, ok)
+	assert.Zero(t, slot)
 }

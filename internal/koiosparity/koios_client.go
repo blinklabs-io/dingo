@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -86,6 +87,36 @@ const (
 	// isn't otherwise bounded by anything but Koios's own internal paging
 	// (see GetAccountRewardHistory's koiosPageSize truncation-detection).
 	koiosMaxResponseBytes = 32 * 1024 * 1024
+
+	// The following bound the connection-establishment and response-wait
+	// phases of a single Koios HTTP attempt independently of the overall
+	// koiosRequestTimeout (below), as defense-in-depth rather than a
+	// replacement for it. Without them, only two of the four phases below
+	// are actually bounded by anything narrower than koiosRequestTimeout:
+	// http.DefaultTransport's own defaults already give a dial a 30s budget
+	// and a TLS handshake a 10s budget (see net/http.DefaultTransport in the
+	// Go standard library), but it sets no ResponseHeaderTimeout at all, so
+	// "connection accepted, server writes nothing" is caught today only by
+	// the coarse, whole-round-trip koiosRequestTimeout -- which also has to
+	// cover dial, TLS, and body reads, so a slow dial/handshake eats into
+	// the time actually available to notice a stuck server. Every value
+	// here is chosen to be clearly shorter than koiosRequestTimeout so a
+	// phase-specific failure attributes cleanly instead of surfacing as an
+	// undifferentiated overall timeout.
+	//
+	// This package originally paired these with a 60s overall client
+	// timeout (koiosClientTimeout, since removed): koiosRequestTimeout
+	// replaced it at 20s after live investigation found individual requests
+	// stalling for nearly the full 60s (see koiosRequestTimeout's own doc
+	// comment). koiosResponseHeaderTimeout is lowered from its original 30s
+	// to stay under that tighter 20s bound -- at 30s it could never fire
+	// before koiosRequestTimeout already had, making it dead weight (human
+	// review, Chris Guiney, dingo#4319).
+	koiosDialTimeout           = 10 * time.Second
+	koiosDialKeepAlive         = 30 * time.Second
+	koiosTLSHandshakeTimeout   = 10 * time.Second
+	koiosResponseHeaderTimeout = 15 * time.Second
+	koiosExpectContinueTimeout = 1 * time.Second
 )
 
 // koiosBaseURLs maps network name to Koios v1 base URL.
@@ -332,17 +363,6 @@ const koiosIdleConnTimeout = 30 * time.Second
 // under a minute.
 const koiosRequestTimeout = 20 * time.Second
 
-// newKoiosTransport returns an http.Transport identical to
-// http.DefaultTransport except for IdleConnTimeout -- see that constant's
-// doc comment. Each KoiosClient gets its own Transport (and so its own
-// connection pool) rather than sharing http.DefaultTransport, so this
-// change cannot affect any other HTTP client in the process.
-func newKoiosTransport() *http.Transport {
-	t := http.DefaultTransport.(*http.Transport).Clone() //nolint:forcetypeassert
-	t.IdleConnTimeout = koiosIdleConnTimeout
-	return t
-}
-
 func NewKoiosClient(
 	network, apiKey, baseURL string,
 	allowInsecureHTTP bool,
@@ -369,14 +389,77 @@ func NewKoiosClient(
 		baseURL: base,
 		apiKey:  apiKey,
 		http: &http.Client{
-			Timeout:   koiosRequestTimeout,
-			Transport: newKoiosTransport(),
+			Timeout: koiosRequestTimeout,
+			Transport: newKoiosTransport(
+				koiosDialTimeout,
+				koiosDialKeepAlive,
+				koiosTLSHandshakeTimeout,
+				koiosResponseHeaderTimeout,
+				koiosExpectContinueTimeout,
+			),
 		},
 		// Public and Free tiers share the 100/10s burst cap; Pro/Premium are
 		// higher, but we don't learn the tier from the key alone, so stay at
 		// the Free-safe ceiling for every client on the public host.
 		limiter: newBurstLimiter(burstLimit, koiosBurstWindow),
 	}, nil
+}
+
+// newKoiosTransport builds the HTTP transport backing a KoiosClient, with
+// explicit, independent timeouts for each connection-establishment phase, in
+// addition to (never instead of) the http.Client-level Timeout set alongside
+// it in NewKoiosClient.
+//
+// It starts from http.DefaultTransport.Clone() rather than a bare
+// &http.Transport{} so this client keeps DefaultTransport's other tuning
+// (HTTP/2 negotiation, proxy-from-environment, idle connection pooling) and
+// only overrides the fields this package cares about giving explicit,
+// shorter-than-the-client-timeout bounds.
+//
+// dialTimeout/dialKeepAlive configure the net.Dialer used for
+// DialContext -- redundant with DefaultTransport's own dial defaults today,
+// but explicit here so this client's dial bound does not silently change if
+// a future Go release ever changes DefaultTransport's defaults.
+// tlsHandshakeTimeout is likewise explicit for the same reason.
+// responseHeaderTimeout is the phase DefaultTransport leaves unbounded: it
+// caps how long the transport waits for the server to start sending a
+// response after the request is fully written, independently of dial/TLS
+// time and independently of the client-level Timeout.
+// expectContinueTimeout caps waiting for a "100 Continue" status before
+// sending a request body when the client sets the Expect header; this
+// client never sets Expect, so it is inert today and included purely for
+// completeness against a future caller of this transport that does.
+//
+// Also sets IdleConnTimeout to koiosIdleConnTimeout, shorter than
+// DefaultTransport's 90s default -- see that constant's doc comment for
+// why (a stale, server/CDN-closed keep-alive connection reused anyway is
+// suspected to contribute to the stalls koiosRequestTimeout's doc comment
+// describes).
+func newKoiosTransport(
+	dialTimeout, dialKeepAlive time.Duration,
+	tlsHandshakeTimeout, responseHeaderTimeout, expectContinueTimeout time.Duration,
+) *http.Transport {
+	// http.DefaultTransport is documented as *http.Transport today, but
+	// nothing enforces that at compile time; a comma-ok assertion with a
+	// safe fallback (matching mithril/download.go's newDownloadTransport)
+	// means a future replacement of the package-level default degrades to a
+	// fresh transport with this function's explicit timeouts still applied,
+	// instead of panicking.
+	var transport *http.Transport
+	if base, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport = base.Clone()
+	} else {
+		transport = &http.Transport{Proxy: http.ProxyFromEnvironment}
+	}
+	transport.DialContext = (&net.Dialer{
+		Timeout:   dialTimeout,
+		KeepAlive: dialKeepAlive,
+	}).DialContext
+	transport.TLSHandshakeTimeout = tlsHandshakeTimeout
+	transport.ResponseHeaderTimeout = responseHeaderTimeout
+	transport.ExpectContinueTimeout = expectContinueTimeout
+	transport.IdleConnTimeout = koiosIdleConnTimeout
+	return transport
 }
 
 // ResolvedBaseURL reports the API root this client actually queries, with any
@@ -1325,7 +1408,8 @@ const accountListLogEveryPages = 50
 // KoiosAccountRewardHistoryItem is one row from /account_reward_history,
 // covering every documented field. PoolIDBech32 is null for reward types with
 // no associated pool (treasury/reserves/refund; see CompareAccountEpoch's
-// doc comment on which Koios reward types are currently in scope).
+// doc comment on which Koios reward types are currently in scope). For
+// in-scope rows it identifies the pool contribution used during aggregation.
 //
 // /account_rewards (the older endpoint some Koios docs still reference) is
 // deprecated; /account_reward_history is the replacement, taking the same
