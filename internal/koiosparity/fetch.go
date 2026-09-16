@@ -854,7 +854,7 @@ func fetchEpoch(
 	// the epoch looking unfetched and it is simply re-fetched. Committing
 	// them after would advance fetched_at with no parameter row behind it.
 	if err := cache.UpsertEpochParams(
-		epochParamsFromKoios(network, epoch, paramsResp, now),
+		EpochParamsFromKoios(network, epoch, paramsResp, now),
 	); err != nil {
 		return 0, fmt.Errorf("commit epoch params: %w", err)
 	}
@@ -1105,21 +1105,26 @@ func fetchEpochParamsOnly(
 		return classifyFetchErr(fmt.Errorf("get epoch params: %w", err))
 	}
 	if err := cache.UpsertEpochParams(
-		epochParamsFromKoios(network, epoch, paramsResp, time.Now().UTC()),
+		EpochParamsFromKoios(network, epoch, paramsResp, time.Now().UTC()),
 	); err != nil {
 		return fmt.Errorf("commit epoch params: %w", err)
 	}
 	return nil
 }
 
-// epochParamsFromKoios flattens a /epoch_params response into the cache row.
+// EpochParamsFromKoios flattens a /epoch_params response into the cache row.
 //
 // Every value is carried across as the literal text Koios published — a
 // json.Number keeps its own digits, so "7.21e-05" is stored exactly as sent
 // with no float round-trip — and a null becomes "", which
 // CompareEpochProtocolParams reads as "this era does not define this
 // parameter" rather than as zero.
-func epochParamsFromKoios(
+//
+// Exported so cmd/node-parity's Koios-backed comparison
+// (blinklabs-io/dingo#1900) can build the same row shape
+// CompareEpochProtocolParams expects directly from a live GetEpochParams
+// call, without going through this package's own cache.
+func EpochParamsFromKoios(
 	network string,
 	epoch uint64,
 	resp *KoiosEpochParamsResp,

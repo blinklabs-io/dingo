@@ -53,7 +53,17 @@ const stakeSnapshotRetentionEpochs = 3
 // off by the same one-epoch shift: at liveEpoch 6, targetEpoch 3 resolves
 // to snapshot epoch 2, which the floor (6-3=3) has already pruned, but
 // 6-3=3 is not > 3 so the un-shifted comparison wrongly accepted it.
-func checkAsOfEpochRecency(targetEpoch, liveEpoch uint64) error {
+//
+// apiStorageMode skips the retention-window check entirely (matching
+// cleanupOldSnapshots' own API-mode carve-out, added alongside this
+// parameter): pool-stake snapshots are never pruned in that mode, so
+// there is no floor to reject against. The ahead-of-live-epoch check
+// above still applies regardless of storage mode -- that is a real
+// ordering violation, not a pruning question.
+func checkAsOfEpochRecency(
+	targetEpoch, liveEpoch uint64,
+	apiStorageMode bool,
+) error {
 	if targetEpoch > liveEpoch {
 		return fmt.Errorf(
 			"%w: as-of epoch %d is ahead of the live epoch (%d)",
@@ -61,6 +71,9 @@ func checkAsOfEpochRecency(targetEpoch, liveEpoch uint64) error {
 			targetEpoch,
 			liveEpoch,
 		)
+	}
+	if apiStorageMode {
+		return nil
 	}
 	if liveEpoch < stakeSnapshotRetentionEpochs {
 		// cleanupOldSnapshots itself does nothing below this floor (its own
@@ -209,7 +222,9 @@ func (ls *LedgerState) PoolStakeDistribution(
 		if err != nil {
 			return nil, err
 		}
-		if err := checkAsOfEpochRecency(epoch, liveEpoch); err != nil {
+		if err := checkAsOfEpochRecency(
+			epoch, liveEpoch, ls.db.StorageMode() == types.StorageModeAPI,
+		); err != nil {
 			return nil, err
 		}
 	}
