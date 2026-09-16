@@ -1063,6 +1063,18 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// below, which distinguish a competing block at the applied tip from one
 	// only on the primary chain tip. Dropping equal slots here would also
 	// collide with the contested-slot handling in #3955, which needs them.
+	//
+	// No counter moves on this refusal. It runs before checkLeaderSafe, so
+	// the slot may never have been this node's to forge -- on a node whose
+	// clock trails the network it fires for any peer block that arrives a
+	// slot early -- and could_not_forge is reserved for post-leader-check
+	// refusals precisely so it keeps counting lost blocks rather than leader
+	// checks. The same condition met DURING production does reach
+	// could_not_forge, because leadership is proven by then; see
+	// errChainTipAheadOfSlot and ARCHITECTURE.md for both signatures and why
+	// they are not made to match. A scheduled leader slot swallowed here is
+	// still attributable: logGateSkip raises the line to Warn with
+	// leader_slot.
 	if gates.tipAheadOfSlot() {
 		// Detect stale data: if the tip is far ahead of the slot clock,
 		// the database likely contains chain data from a different genesis.
@@ -2292,6 +2304,13 @@ var (
 	// errChainTipAheadOfSlot reports that the parent slot -- the greater of
 	// the applied tip and the primary chain tip -- moved past the slot being
 	// forged. Mirrors the entry gate's tipAheadOfSlot refusal.
+	//
+	// The one refusal here that moves none of the three gate counters.
+	// checkAndForgeProduction still records it on could_not_forge, which it
+	// increments for every failed build before asking whether the failure
+	// was a tip-gate refusal -- correct, because a build attempt runs after
+	// the leader check. The entry gate runs before it and counts nothing;
+	// ARCHITECTURE.md records what an operator sees in each case.
 	errChainTipAheadOfSlot = errors.New(
 		"chain tip is ahead of the forged slot",
 	)

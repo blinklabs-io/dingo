@@ -5380,31 +5380,74 @@ never ran. Those slots are accounted for as the refusals they are, on
 `dingo_metrics_slotBattlesTotal_int`, `dingo_forge_stale_tip_skip_total` or
 `dingo_forge_sync_skip_total` according to which gate refused them -- with one
 exception. A parent slot past the forged slot refuses on
-`errChainTipAheadOfSlot` and moves none of those three; the only counter that
-records it is `cardano_node_metrics_Forge_could_not_forge_int`, which every
-refused build attempt increments.
+`errChainTipAheadOfSlot` and moves none of those three. What records it there
+is `cardano_node_metrics_Forge_could_not_forge_int`, which
+`checkAndForgeProduction` increments for every failed build before it asks
+whether the failure was a tip-gate refusal.
 `TestForgeRefusesTheFallbackWhenThePrimaryTipPassesTheForgedSlot` pins that
-reading: no fallback result, no slot battle, no stale-tip skip. It is also the
-refusal to expect on a producer whose leader gate clears seconds into its own
-slot -- the trace in issue #3985 -- because the chain has moved past the slot
-rather than merely disagreeing with this node about it, so an operator
-diagnosing a late producer should look for it on `could_not_forge` and find
-the three gate counters flat.
+reading: no fallback result, no slot battle, no stale-tip skip.
 
-That gate is deliberately left without a counter of its own. The entry gate
-does not count it either: it logs the skip and returns. Adding one only on the
-re-check path would re-create, in reverse, the entry/re-check split the
-re-check exists to remove -- the same reading would move a series or not
-purely on whether the chain passed the slot before block production started or
-during it. What the gate reports is also not what the other three report: it
-is not a contest for the slot and not a node behind the network, only a slot
-the chain has already left, and `could_not_forge` already says a leader slot
-produced nothing.
+That holds only when the chain passes the slot DURING block production. The
+same condition met at entry -- `tipAheadOfSlot` in the pre-selection gates --
+logs the skip and returns without moving any counter, so a slot lost to a
+chain that has left it looks different depending on when it left, and an
+operator has to know which of the two to expect:
+
+- The chain passes the slot during production. Leadership is already proven,
+  so `Forge_about_to_lead` and `Forge_node_is_leader` have both moved;
+  `could_not_forge` moves with the refusal and the three gate counters stay
+  flat. This is the shape to expect on a producer whose leader gate clears
+  seconds into its own slot, holds a selection pass open past the end of it,
+  and finds the chain beyond the slot when the retry or the fallback re-checks
+  -- the trace in issue #3985.
+- The chain is already past the slot at entry. This gate runs before the
+  leader check, so `Forge_about_to_lead` moves and nothing else does: not
+  `node_is_leader`, not `node_not_leader`, not `could_not_forge`, and none of
+  the three gate counters. The only signature is that shape -- a leader check
+  with no leader-check counter after it -- and the gate's log line, which
+  `logGateSkip` raises from Debug to Warn with `leader_slot=true` when the VRF
+  schedule says the slot was one this node was to lead. A parent slot more
+  than `forgeStaleGapThresholdSlots` past the clock is logged at Error with
+  the same marker instead, as a probable genesis mismatch.
+
+The second case is also the routine one on a node whose clock trails the
+network: a peer's block for slot N arrives while this node's slot clock still
+reads N-1, and the gate refuses a slot that was almost certainly never this
+node's to lead.
+
+That asymmetry is deliberate, and it is not the entry/re-check split the
+per-attempt re-check exists to remove. It is the line `could_not_forge` is
+drawn on throughout `checkAndForgeProduction`: a refusal AFTER
+`checkLeaderSafe` increments it -- the stale-tip refusal, the slot battle, the
+KES and OpCert refusals, a credential reload during selection -- because
+`about_to_lead` has already moved and `node_is_leader` never will, and the
+cardano-node parity counters stop balancing on a lost leader slot otherwise. A
+refusal BEFORE the leader check does not, because leadership was never
+established. Every build attempt is post-leader-check by construction, which
+is why all five re-check refusals increment it while three of the five entry
+refusals -- parent slot past the slot, unapplied block at the slot, and the
+upstream-sync skip -- do not. Making the entry side match would make
+`could_not_forge` count leader CHECKS rather than lost blocks, overstating
+them by roughly the reciprocal of the active slot coefficient: the same
+mistake `dingo_forge_stale_tip_skip_total` was corrected for once already, by
+moving its gate below the leader check.
+
+A separate schedule-driven counter would close the gap from the other side --
+the shape `unapplied_rival_at_leader_slot` uses for the one other
+pre-leader-check refusal that can swallow a scheduled leader slot -- and the
+schedule lookup it would be taken from is already made here, for the log
+level. It is not added here. It would not make the two paths agree either,
+since the re-check records the same reading on `could_not_forge` instead, and
+which vector it belongs on is a metrics question of its own:
+`dingo_forge_stale_tip_skip_total` reports this node's two views of its own
+chain disagreeing, or its ledger trailing the network, and a chain past the
+slot clock is neither.
 
 A slot the chain took from us is not a forge this node lost, and
 `{result="lost"}` should not absorb it: read the fallback vector, the three
 gate counters and `could_not_forge` together when asking what an aborted
-selection cost.
+selection cost, and for a slot the chain had already left before the leader
+check ran, the gate's `leader_slot=true` log line is the only record there is.
 
 Selection is bounded by the chain moving, not by the clock, unless an operator
 asks otherwise. `ForgeSelectionDeadlineMargin` is off by default; setting it
