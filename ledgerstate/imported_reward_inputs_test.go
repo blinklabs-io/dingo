@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/stretchr/testify/require"
 )
 
@@ -84,6 +85,9 @@ func TestDeriveRewardInputsReconciles(t *testing.T) {
 	require.Equal(t, uint64(2), bundle.snapshot.TotalPoolCount)
 	require.Equal(t, uint64(3), bundle.snapshot.TotalDelegators)
 	require.Equal(t, uint64(12_000), uint64(bundle.snapshot.TotalActiveStake))
+	require.Equal(t, models.RewardStakeCalculationVersion,
+		bundle.snapshot.CalculationVersion,
+		"imported reward snapshots must use the current calculation version")
 	require.Len(t, bundle.stakeInputs, 3)
 
 	byPool := map[string]*struct {
