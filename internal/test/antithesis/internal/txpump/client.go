@@ -113,7 +113,10 @@ func (c *NodeClient) SubmitTx(eraID uint16, txBytes []byte) error {
 // ReconcileWallet reads the controlled UTxO snapshot and pending transaction
 // presence at the node. Missing outputs are a successful empty result; query
 // errors are returned so callers can leave wallet state unchanged.
-// LSQ and transaction-monitor snapshots are acquired independently.
+// LSQ and transaction-monitor snapshots are acquired independently. Wallet
+// reconciliation keeps inputs reserved across one ambiguous absence because a
+// Dingo producer can remove a forged transaction from the mempool before its
+// spend is visible to LSQ.
 func (c *NodeClient) ReconcileWallet(
 	addresses [][]byte,
 	txIDs []string,
@@ -185,10 +188,10 @@ func (c *NodeClient) ReconcileWallet(
 		}
 		presence[txID] = present
 	}
-	// Observe transaction presence before acquiring the authoritative UTxO
-	// snapshot. A transaction can confirm between the two observations; the
-	// monitor result must describe the state at or before the LSQ snapshot so a
-	// confirmed spend cannot resurrect its source input.
+	// Observe transaction presence before acquiring the UTxO snapshot. The
+	// observations are independent: a forged transaction can leave the mempool
+	// before its spent inputs disappear from LSQ. Wallet reconciliation therefore
+	// treats one absent observation as ambiguous and retains the reservation.
 	if err := lsq.Client.AcquireVolatileTip(); err != nil {
 		return nil, nil, fmt.Errorf(
 			"node %s: acquire volatile tip: %w",

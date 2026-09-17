@@ -185,6 +185,8 @@ func (w *Wallet) ReconcileSnapshot(snapshot []UTxO, presence map[string]bool) {
 	reserved := make(map[string]struct{})
 	for id, tx := range w.pending {
 		if presence[id] {
+			tx.absent = false
+			w.pending[id] = tx
 			for _, in := range tx.inputs {
 				reserved[utxoKey(in)] = struct{}{}
 			}
@@ -209,6 +211,9 @@ func (w *Wallet) ReconcileSnapshot(snapshot []UTxO, presence map[string]bool) {
 			// can distinguish that race from a real rollback.
 			tx.absent = true
 			w.pending[id] = tx
+			for _, in := range tx.inputs {
+				reserved[utxoKey(in)] = struct{}{}
+			}
 			continue
 		}
 		delete(w.pending, id)
