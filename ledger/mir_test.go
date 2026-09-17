@@ -22,6 +22,8 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger/eras"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1198,4 +1200,76 @@ func TestApplyMIRCerts_NetNegativeDeltaDiscardsBoundary(t *testing.T) {
 	assert.Equal(t, uint64(1_000), uint64(state.Treasury),
 		"the pot transfer at the same boundary is discarded too")
 	assert.Equal(t, uint64(50), state.Slot)
+}
+
+// TestLedgerView_PendingMIRRewardDeltas verifies the query
+// eras.validateMIRAccumulatedRewards relies on to see MIR certificates
+// already committed earlier in the current epoch: it must sum deltas per
+// credential within [epochStartSlot, uptoSlot] inclusive, and exclude
+// anything outside that window on either side.
+func TestLedgerView_PendingMIRRewardDeltas(t *testing.T) {
+	t.Parallel()
+
+	ls, db, gdb := newMIRTestLedger(t)
+	ls.currentEpoch = models.Epoch{StartSlot: 100}
+
+	cred := mirCred28(0x77)
+	other := mirCred28(0x78)
+	// Before epochStartSlot=100 — excluded.
+	seedMIRDistribution(t, gdb, mirPotReserves, 50,
+		[]models.MoveInstantaneousRewardsReward{
+			{Credential: cred, Amount: big.NewInt(1_000)},
+		})
+	// Within the window, two certs on the same credential.
+	seedMIRDistribution(t, gdb, mirPotReserves, 150,
+		[]models.MoveInstantaneousRewardsReward{
+			{Credential: cred, Amount: big.NewInt(10)},
+		})
+	seedMIRDistribution(t, gdb, mirPotReserves, 200,
+		[]models.MoveInstantaneousRewardsReward{
+			{Credential: cred, Amount: big.NewInt(-3)},
+			{Credential: other, Amount: big.NewInt(5)},
+		})
+	// After uptoSlot=200 — excluded, as if not yet validated.
+	seedMIRDistribution(t, gdb, mirPotReserves, 201,
+		[]models.MoveInstantaneousRewardsReward{
+			{Credential: cred, Amount: big.NewInt(999)},
+		})
+
+	txn := db.Transaction(false)
+	var totals map[eras.MIRCredentialKey]*big.Int
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		lv := &LedgerView{ls: ls, txn: txn}
+		var err error
+		totals, err = lv.PendingMIRRewardDeltas(200)
+		return err
+	}))
+
+	credKey := eras.MIRCredentialKey{Credential: lcommon.NewBlake2b224(cred)}
+	otherKey := eras.MIRCredentialKey{Credential: lcommon.NewBlake2b224(other)}
+	require.Contains(t, totals, credKey)
+	assert.Equal(t, big.NewInt(7), totals[credKey],
+		"10 at slot 150 plus -3 at slot 200, excluding slot 50 and slot 201")
+	require.Contains(t, totals, otherKey)
+	assert.Equal(t, big.NewInt(5), totals[otherKey])
+}
+
+// TestLedgerView_PendingMIRRewardDeltas_BeforeEpochStart verifies that a
+// validating slot before the current epoch's start (a stale/overlay call)
+// returns no pending deltas rather than an inverted or negative range.
+func TestLedgerView_PendingMIRRewardDeltas_BeforeEpochStart(t *testing.T) {
+	t.Parallel()
+
+	ls, db, _ := newMIRTestLedger(t)
+	ls.currentEpoch = models.Epoch{StartSlot: 100}
+
+	txn := db.Transaction(false)
+	var totals map[eras.MIRCredentialKey]*big.Int
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		lv := &LedgerView{ls: ls, txn: txn}
+		var err error
+		totals, err = lv.PendingMIRRewardDeltas(50)
+		return err
+	}))
+	assert.Empty(t, totals)
 }
