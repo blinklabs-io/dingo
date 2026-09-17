@@ -870,6 +870,44 @@ func queryStakeRefsDeduped(
 	return ret, nil
 }
 
+// mergeStakeCredentialRefs merges any number of stake-credential reference
+// slices into one, with duplicates removed by MapKey and each credential's
+// first occurrence kept. setTransaction uses it to fold the credentials
+// touched by a transaction's certificates, consumed inputs, and produced
+// outputs into a single refreshRewardLiveStakeRefs pass: the same credential
+// legitimately appears in more than one of these (a wallet's own change
+// output alongside a certificate it just submitted, or several outputs to one
+// address), and each occurrence would otherwise trigger its own full
+// sumCredentialUtxoStake recompute for what is, after all of the
+// transaction's mutations are applied, the same final total.
+func mergeStakeCredentialRefs(
+	refSlices ...[]models.StakeCredentialRef,
+) []models.StakeCredentialRef {
+	total := 0
+	for _, refs := range refSlices {
+		total += len(refs)
+	}
+	if total == 0 {
+		return nil
+	}
+	seen := make(map[string]models.StakeCredentialRef, total)
+	order := make([]string, 0, total)
+	for _, refs := range refSlices {
+		for _, ref := range refs {
+			key := ref.MapKey()
+			if _, ok := seen[key]; !ok {
+				order = append(order, key)
+			}
+			seen[key] = ref
+		}
+	}
+	ret := make([]models.StakeCredentialRef, len(order))
+	for i, key := range order {
+		ret[i] = seen[key]
+	}
+	return ret
+}
+
 func utxoIDPredicate(ids []models.UtxoId) (string, []any) {
 	parts := make([]string, len(ids))
 	args := make([]any, 0, len(ids)*2)
@@ -939,6 +977,47 @@ func (s *Store) getUtxo(
 	return ret, nil
 }
 
+// utxoRefsByTxID looks up every utxo row for the distinct tx_id hashes in
+// refs -- the same tx_id-driven, index-friendly shape queryUtxoStakeRefs
+// uses (see its doc comment and issue #4067) -- and returns them alongside
+// the (tx_id, output_idx) index refs asked for, so the caller can filter the
+// extra rows (other outputs of the same transaction) down to exactly the
+// requested references in Go.
+func (s *Store) utxoRefsByTxID(
+	txn types.Txn,
+	refs []models.UtxoId,
+) ([]models.Utxo, map[string]map[uint32]struct{}, error) {
+	refs = dedupeUtxoIDs(refs)
+	if len(refs) == 0 {
+		return []models.Utxo{}, nil, nil
+	}
+	txIDs, wanted := distinctUtxoTxIDs(refs)
+	ret := []models.Utxo{}
+	// One bind variable per distinct tx_id; 400 keeps this portable to
+	// SQLite's conservative 999-parameter configuration, with headroom to
+	// spare versus the old OR-predicate form's two binds per reference.
+	for start := 0; start < len(txIDs); start += 400 {
+		end := min(start+400, len(txIDs))
+		batch := txIDs[start:end]
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(batch)), ",")
+		args := make([]any, len(batch))
+		for i, txID := range batch {
+			args[i] = txID
+		}
+		utxos, err := s.queryUtxosWithAssets(
+			txn,
+			"tx_id IN ("+placeholders+")",
+			args,
+			"",
+		)
+		if err != nil {
+			return nil, nil, err
+		}
+		ret = append(ret, utxos...)
+	}
+	return ret, wanted, nil
+}
+
 // GetUtxosByRefs retrieves multiple live UTxOs by their (tx_id, output_idx)
 // references in a single batch. Refs with no matching live UTxO are simply
 // absent from the result. A ref repeated in the input yields at most one
@@ -947,23 +1026,23 @@ func (s *Store) GetUtxosByRefs(
 	refs []models.UtxoId,
 	txn types.Txn,
 ) ([]models.Utxo, error) {
-	ret := []models.Utxo{}
-	refs = dedupeUtxoIDs(refs)
-	// Two bind variables per reference; 400 keeps this portable to
-	// SQLite's conservative 999-parameter configuration.
-	for start := 0; start < len(refs); start += 400 {
-		end := min(start+400, len(refs))
-		predicate, args := utxoIDPredicate(refs[start:end])
-		utxos, err := s.queryUtxosWithAssets(
-			txn,
-			"deleted_slot = 0 AND ("+predicate+")",
-			args,
-			"",
-		)
-		if err != nil {
-			return nil, err
+	utxos, wanted, err := s.utxoRefsByTxID(txn, refs)
+	if err != nil {
+		return nil, err
+	}
+	ret := make([]models.Utxo, 0, len(utxos))
+	for _, u := range utxos {
+		outs, ok := wanted[string(u.TxId)]
+		if !ok {
+			continue
 		}
-		ret = append(ret, utxos...)
+		if _, ok := outs[u.OutputIdx]; !ok {
+			continue
+		}
+		if u.DeletedSlot != 0 {
+			continue
+		}
+		ret = append(ret, u)
 	}
 	return ret, nil
 }
@@ -979,30 +1058,32 @@ func (s *Store) GetUtxosByRefsAsOf(
 	atSlot uint64,
 	txn types.Txn,
 ) ([]models.Utxo, error) {
-	ret := []models.Utxo{}
-	refs = dedupeUtxoIDs(refs)
-	sqlSlot, err := checkedInt64(atSlot)
+	// Slots are stored as signed SQLite INTEGERs. atSlot is compared in Go
+	// below rather than bound to SQL, so reject an out-of-domain value here
+	// instead of silently matching every live row against it.
+	if _, err := checkedInt64(atSlot); err != nil {
+		return nil, err
+	}
+	utxos, wanted, err := s.utxoRefsByTxID(txn, refs)
 	if err != nil {
 		return nil, err
 	}
-	// Two bind variables per reference, plus the two slot bounds; 400
-	// keeps this portable to SQLite's conservative 999-parameter
-	// configuration, matching GetUtxosByRefs' own chunking.
-	for start := 0; start < len(refs); start += 400 {
-		end := min(start+400, len(refs))
-		predicate, idArgs := utxoIDPredicate(refs[start:end])
-		args := append([]any{sqlSlot, sqlSlot}, idArgs...)
-		utxos, err := s.queryUtxosWithAssets(
-			txn,
-			"added_slot <= ? AND (deleted_slot = 0 OR deleted_slot > ?) AND ("+
-				predicate+")",
-			args,
-			"",
-		)
-		if err != nil {
-			return nil, err
+	ret := make([]models.Utxo, 0, len(utxos))
+	for _, u := range utxos {
+		outs, ok := wanted[string(u.TxId)]
+		if !ok {
+			continue
 		}
-		ret = append(ret, utxos...)
+		if _, ok := outs[u.OutputIdx]; !ok {
+			continue
+		}
+		if u.AddedSlot > atSlot {
+			continue
+		}
+		if u.DeletedSlot != 0 && u.DeletedSlot <= atSlot {
+			continue
+		}
+		ret = append(ret, u)
 	}
 	return ret, nil
 }
@@ -1672,6 +1753,53 @@ func (s *Store) IterateLiveUtxos(
 		ctx,
 		"SELECT "+sqliteUtxoColumns+" FROM utxo WHERE deleted_slot = 0",
 	)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		row, err := scanSQLiteUtxo(rows)
+		if err != nil {
+			return err
+		}
+		model, err := utxoFromSQLite(row)
+		if err != nil {
+			return err
+		}
+		if err := fn(model); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+// IterateUtxosAsOf invokes fn once for each UTxO row live as of atSlot --
+// added at or before atSlot, and either never spent or spent strictly
+// after atSlot -- matching UtxosByRefsAsOf's identical predicate for a
+// bounded ref list, here applied to the whole table. See the
+// MetadataStore interface doc comment for why this has no indexed
+// shortcut, unlike IterateLiveUtxos' deleted_slot = 0 filter.
+func (s *Store) IterateUtxosAsOf(
+	atSlot uint64,
+	txn types.Txn,
+	fn func(*models.Utxo) error,
+) error {
+	if fn == nil {
+		return errors.New("iterate UTxOs as of slot: callback is nil")
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	sqlSlot, err := checkedInt64(atSlot)
+	if err != nil {
+		return err
+	}
+	query := s.dialect.Rebind(
+		"SELECT " + sqliteUtxoColumns + ` FROM utxo
+WHERE added_slot <= ? AND (deleted_slot = 0 OR deleted_slot > ?)`,
+	)
+	rows, err := db.QueryContext(ctx, query, sqlSlot, sqlSlot)
 	if err != nil {
 		return err
 	}

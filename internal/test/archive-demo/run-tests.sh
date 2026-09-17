@@ -26,6 +26,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.yml"
+TESTNET_YAML="${SCRIPT_DIR}/testnet.yaml"
 PRUNING_DATA_DIR="${SCRIPT_DIR}/tmp/dingo-pruning-data"
 
 KEEP_UP=false
@@ -69,6 +70,9 @@ INSPECT_DIR="$(mktemp -d)"
 INSPECT_BIN="${INSPECT_DIR}/inspect-blob"
 ( cd "${PROJECT_ROOT}" && go build -tags archive_demo -o "${INSPECT_BIN}" ./internal/test/archive-demo/cmd/inspect-blob )
 
+log "Preflighting genesis allocation..."
+"${SCRIPT_DIR}/../preflight-genesis-supply.sh" "${TESTNET_YAML}"
+
 log "Bringing up archive-demo stack..."
 mkdir -p "${PRUNING_DATA_DIR}"
 chmod 777 "${PRUNING_DATA_DIR}"
@@ -93,4 +97,4 @@ cd "${PROJECT_ROOT}"
 ARCHIVEDEMO_INSPECT_BIN="${INSPECT_BIN}" \
 ARCHIVEDEMO_PRUNING_DATA_DIR="${PRUNING_DATA_DIR}" \
 go test -tags archive_demo -count=1 -v -timeout 15m \
-  ./internal/test/archive-demo/internal/archivedemo/scenarios/ "${TEST_ARGS[@]}"
+  ./internal/test/archive-demo/internal/archivedemo/scenarios/ ${TEST_ARGS[@]+"${TEST_ARGS[@]}"}

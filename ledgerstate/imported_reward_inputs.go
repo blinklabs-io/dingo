@@ -217,13 +217,14 @@ func deriveRewardInputs(
 	return &rewardInputBundle{
 		epoch: epoch,
 		snapshot: &models.RewardSnapshot{
-			Epoch:            epoch,
-			SnapshotType:     "mark",
-			TotalActiveStake: types.Uint64(totalStake),
-			TotalPoolCount:   uint64(len(poolInputs)),
-			TotalDelegators:  totalDelegators,
-			CapturedSlot:     capturedSlot,
-			BoundarySlot:     boundarySlot,
+			Epoch:              epoch,
+			SnapshotType:       "mark",
+			TotalActiveStake:   types.Uint64(totalStake),
+			TotalPoolCount:     uint64(len(poolInputs)),
+			TotalDelegators:    totalDelegators,
+			CapturedSlot:       capturedSlot,
+			BoundarySlot:       boundarySlot,
+			CalculationVersion: models.RewardStakeCalculationVersion,
 			// Provisional, not authoritative: this basis was reconstructed
 			// from an imported snapshot rather than captured at this node's
 			// own SNAP point, so a later authoritative capture must be free

@@ -1419,7 +1419,7 @@ func TestResetNextEpochNonceReadyAllowsReEmit(t *testing.T) {
 		require.True(t, ok)
 		assert.Equal(t, uint64(10), readyEvent.CurrentEpoch)
 		assert.Equal(t, uint64(11), readyEvent.ReadyEpoch)
-	case <-time.After(time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("expected nonce-ready event after rollback reset")
 	}
 }
@@ -1498,7 +1498,7 @@ func TestDatabaseWorkerPoolBasic(t *testing.T) {
 	case result := <-resultChan:
 		assert.NoError(t, result.Error)
 		assert.Equal(t, int32(1), executedCount.Load())
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("timeout waiting for operation result")
 	}
 
@@ -1532,7 +1532,7 @@ func TestDatabaseWorkerPoolOpFuncPanicReturnsWrappedError(t *testing.T) {
 	case result := <-resultChan:
 		require.ErrorIs(t, result.Error, database.ErrTxnPanic)
 		require.ErrorContains(t, result.Error, "opfunc boom")
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("timeout waiting for operation result")
 	}
 
@@ -1551,7 +1551,7 @@ func TestDatabaseWorkerPoolOpFuncPanicReturnsWrappedError(t *testing.T) {
 	case result := <-okResultChan:
 		require.NoError(t, result.Error)
 		require.Equal(t, int32(1), executedCount.Load())
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("timeout waiting for post-panic operation result")
 	}
 
@@ -1599,7 +1599,7 @@ func TestDatabaseWorkerPoolInFlightOperations(t *testing.T) {
 	// Wait for at least one operation to start processing
 	require.Eventually(t, func() bool {
 		return completedCount.Load() > 0
-	}, 5*time.Second, 5*time.Millisecond, "at least one operation should start")
+	}, testutil.AsyncWait, 5*time.Millisecond, "at least one operation should start")
 
 	// Shutdown the pool - this should wait for all operations to complete
 	pool.Shutdown(5 * time.Second)
@@ -1723,7 +1723,7 @@ func TestDatabaseWorkerPoolSubmitAfterShutdown(t *testing.T) {
 	case result := <-resultChan:
 		assert.Error(t, result.Error)
 		assert.Contains(t, result.Error.Error(), "shut down")
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("timeout waiting for error result")
 	}
 }
@@ -1765,7 +1765,7 @@ func TestDatabaseWorkerPoolShutdownDoesNotPanicWithInFlightOperations(
 	testutil.WaitForCondition(
 		t,
 		func() bool { return inFlight.Load() > 0 },
-		2*time.Second,
+		testutil.AsyncWait,
 		"at least one operation should be running",
 	)
 
@@ -1779,7 +1779,7 @@ func TestDatabaseWorkerPoolShutdownDoesNotPanicWithInFlightOperations(
 
 	select {
 	case <-shutdownDone:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("timeout waiting for Shutdown")
 	}
 }
@@ -1877,7 +1877,7 @@ func TestDatabaseWorkerPoolShutdownTimesOutOnSlowOperation(t *testing.T) {
 
 	select {
 	case <-started:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("timeout waiting for operation to start")
 	}
 
@@ -1901,7 +1901,7 @@ func TestDatabaseWorkerPoolShutdownTimesOutOnSlowOperation(t *testing.T) {
 	close(blockUntil)
 	select {
 	case <-resultChan:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("timeout waiting for stuck operation to finally complete")
 	}
 }
@@ -1941,7 +1941,7 @@ func TestDatabaseWorkerPoolShutdownTimeoutSpawnsNoWaiterGoroutine(
 
 	select {
 	case <-started:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("timeout waiting for operation to start")
 	}
 
@@ -1982,7 +1982,7 @@ func TestDatabaseWorkerPoolShutdownTimeoutSpawnsNoWaiterGoroutine(
 	close(blockUntil)
 	select {
 	case <-resultChan:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("timeout waiting for stuck operation to finally complete")
 	}
 }
@@ -2563,7 +2563,7 @@ func TestEpochRollover_NoDeadlockDuringTransaction(t *testing.T) {
 			require.NoError(t, err)
 		default:
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("deadlock detected - epoch rollover did not complete in time")
 	}
 }
@@ -2732,7 +2732,7 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 			int32(0),
 			"readers should have been able to read during transaction",
 		)
-	case <-time.After(10 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("timeout - possible deadlock with concurrent readers")
 	}
 }
@@ -5228,7 +5228,7 @@ func TestCloseDoesNotHoldBlockfetchContinuationMutexWhileWaiting(t *testing.T) {
 	require.Eventually(
 		t,
 		ls.closed.Load,
-		time.Second,
+		testutil.AsyncWait,
 		time.Millisecond,
 		"Close did not begin before releasing the continuation mutex",
 	)
@@ -5239,7 +5239,7 @@ func TestCloseDoesNotHoldBlockfetchContinuationMutexWhileWaiting(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		schedulingDone,
-		time.Second,
+		testutil.AsyncWait,
 		"Close did not release blockfetchContinuationMu before waiting",
 	)
 	require.True(
@@ -5255,7 +5255,7 @@ func TestCloseDoesNotHoldBlockfetchContinuationMutexWhileWaiting(t *testing.T) {
 	err := testutil.RequireReceive(
 		t,
 		closeDone,
-		5*time.Second,
+		testutil.AsyncWait,
 		"Close did not finish after the continuation worker drained",
 	)
 	require.NoError(t, err)

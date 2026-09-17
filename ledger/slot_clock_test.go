@@ -385,7 +385,7 @@ func TestSlotClockStartOverlappingStopWaitsOnlyForStoppedGeneration(
 	testutil.RequireReceive(
 		t,
 		oldStateReleased,
-		time.Second,
+		testutil.AsyncWait,
 		"stopped generation should release its lifecycle state",
 	)
 	replacementCtx, cancelReplacement := context.WithCancel(
@@ -433,9 +433,9 @@ func TestSlotClockReceivesTicks(t *testing.T) {
 	defer clock.Stop()
 
 	// Wait for a tick. The bound is a deadlock guard, not a latency
-	// budget: 200ms is four nominal slot periods, so a slot-clock
-	// goroutine delayed by CI scheduling load misses it with no retry.
-	tick := testutil.RequireReceive(t, ch, 10*time.Second, "slot tick")
+	// budget: a slot-clock goroutine delayed by scheduling load must not
+	// fail the test, because there is no retry after a missed receive.
+	tick := testutil.RequireReceive(t, ch, testutil.AsyncWait, "slot tick")
 	assert.GreaterOrEqual(t, tick.Slot, uint64(0))
 	assert.False(t, tick.SlotStart.IsZero())
 }
@@ -611,7 +611,7 @@ func TestSlotClockContextCancellation(t *testing.T) {
 	select {
 	case <-done:
 		// Good, clock stopped
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("clock did not stop after context cancellation")
 	}
 
@@ -855,7 +855,7 @@ func TestSlotClockStopClosesSubscriberChannels(t *testing.T) {
 	select {
 	case <-done:
 		// Good, channel was closed and goroutine exited
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("subscriber goroutine did not exit after Stop")
 	}
 
@@ -918,7 +918,7 @@ func TestSlotClockPastHorizonIsNotAnErrorAndResumes(t *testing.T) {
 	// While past the horizon: the transition is announced once, no ticks.
 	require.Eventually(t, func() bool {
 		return strings.Contains(readLog(), "behind the wall clock")
-	}, 3*time.Second, 10*time.Millisecond,
+	}, testutil.AsyncWait, 10*time.Millisecond,
 		"the clock should report the past-horizon state once")
 	testutil.RequireNoReceive(
 		t, ch, 100*time.Millisecond,
@@ -933,12 +933,12 @@ func TestSlotClockPastHorizonIsNotAnErrorAndResumes(t *testing.T) {
 	// Once era history covers the slot, ticks resume and that is announced.
 	provider.resolved.Store(true)
 	tick := testutil.RequireReceive(
-		t, ch, 3*time.Second, "tick after era history catches up",
+		t, ch, testutil.AsyncWait, "tick after era history catches up",
 	)
 	assert.NotZero(t, tick.Slot)
 	require.Eventually(t, func() bool {
 		return strings.Contains(readLog(), "resuming slot ticks")
-	}, 3*time.Second, 10*time.Millisecond,
+	}, testutil.AsyncWait, 10*time.Millisecond,
 		"recovery should be reported once")
 	assert.NotContains(t, readLog(), "level=ERROR")
 }

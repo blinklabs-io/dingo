@@ -167,11 +167,11 @@ func TestLocalTxSubmissionRejectReason_DijkstraMempoolFailure(t *testing.T) {
 func TestLocalTxSubmissionRejectReason_InputSetEmptyIsStructured(t *testing.T) {
 	t.Parallel()
 	fixtures := map[uint16]string{
-		gledger.EraIdShelley:  "81820181820082048103",
-		gledger.EraIdAllegra:  "81820281820082048103",
-		gledger.EraIdMary:     "81820381820082048103",
-		gledger.EraIdAlonzo:   "818204818200820082048103",
-		gledger.EraIdBabbage:  "818205818200820282018103",
+		gledger.EraIdShelley: "81820181820082048103",
+		gledger.EraIdAllegra: "81820281820082048103",
+		gledger.EraIdMary:    "81820381820082048103",
+		gledger.EraIdAlonzo:  "818204818200820082048103",
+		gledger.EraIdBabbage: "818205818200820282018103",
 		// Conway LEDGER uses UtxowFailure tag 1, unlike Shelley–Babbage tag 0.
 		// cardano-ledger 2c33b4f858c0e62b300d121996a479f505d8c0e5,
 		// eras/conway/impl/src/Cardano/Ledger/Conway/Rules/Ledger.hs.

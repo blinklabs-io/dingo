@@ -479,7 +479,7 @@ func TestCheckAndForgeProductionRejectsIdentityReloadDuringSelection(
 	dingotestutil.RequireReceive(
 		t,
 		leader.entered,
-		time.Second,
+		dingotestutil.AsyncWait,
 		"leader entered",
 	)
 
@@ -495,7 +495,7 @@ func TestCheckAndForgeProductionRejectsIdentityReloadDuringSelection(
 	reloadErr := dingotestutil.RequireReceive(
 		t,
 		reloadDone,
-		time.Second,
+		dingotestutil.AsyncWait,
 		"identity-changing reload completion",
 	)
 	require.ErrorContains(t, reloadErr, "cannot change pool or VRF identity")
@@ -503,7 +503,7 @@ func TestCheckAndForgeProductionRejectsIdentityReloadDuringSelection(
 	require.NoError(t, dingotestutil.RequireReceive(
 		t,
 		forgeDone,
-		time.Second,
+		dingotestutil.AsyncWait,
 		"forge completion",
 	))
 	require.Equal(t, 1, leader.callCount())
@@ -585,7 +585,7 @@ func TestCheckAndForgeProductionRejectsReentrantBuilderReload(t *testing.T) {
 	forgeErr := dingotestutil.RequireReceive(
 		t,
 		forgeDone,
-		time.Second,
+		dingotestutil.AsyncWait,
 		"reentrant builder reload completion",
 	)
 	require.ErrorContains(t, forgeErr, "credential generation changed")
@@ -641,7 +641,7 @@ func TestCheckAndForgeProductionRejectsReentrantLeiosRevalidation(
 	require.NoError(t, dingotestutil.RequireReceive(
 		t,
 		forgeDone,
-		time.Second,
+		dingotestutil.AsyncWait,
 		"reentrant Leios revalidation completion",
 	))
 	require.NoError(t, leiosChecker.callbackErr)

@@ -209,13 +209,19 @@ type Ouroboros struct {
 	// multi-second EB fetch from head-of-line blocking every later offer on
 	// the connection.
 	leiosFetchGuards sync.Map // ouroboros.ConnectionId → *leiosFetchGuard
-	// (slot, EB hash) occurrences with a fetch already in progress, so a given
-	// endorser block occurrence is fetched once across all connections (it is
+	// (slot, EB hash) occurrences with a transaction-offer fetch in progress,
+	// deduplicating that work across all connections (it is
 	// offered on every connection). Keyed by slot and hash together, not hash
 	// alone, so an in-flight fetch for one occurrence does not suppress a
 	// legitimate offer of the same content-addressed hash recurring at a
 	// different slot (issue #3513).
 	leiosFetchInProgress sync.Map // leiosBlockKey(point.Slot, point.Hash) → struct{}
+	// Manifest offers have their own claim: a pending manifest fetch must not
+	// suppress a transaction offer needed to complete the same occurrence.
+	leiosManifestFetchInProgress sync.Map // leiosBlockKey(point.Slot, point.Hash) → struct{}
+	// leiosFetchClaimPublished is an instance-local test seam used to hold a
+	// claimed offer before dispatch and expose admission ordering deterministically.
+	leiosFetchClaimPublished func()
 
 	// Locally-forged EB broadcast log (cursors are owned by the log).
 	leiosEBLog *leiosForgedEBLog
@@ -427,6 +433,15 @@ type blockfetchMetrics struct {
 	blocksUnder1s      atomic.Int64
 	blocksUnder3s      atomic.Int64
 	blocksUnder5s      atomic.Int64
+	// Wall-clock time spent decoding one fetched block's raw CBOR bytes
+	// into a gledger.Block, by stage ("decode"). Only observed on a
+	// decode-cache miss, since a hit reuses another connection's already
+	// decoded result and does no decode work of its own. See
+	// dingo_ledger_block_stage_duration_seconds in the ledger package for
+	// the header-verify/validate/apply stages that follow once a decoded
+	// block reaches the ledger.
+	stageDuration *prometheus.HistogramVec
+	stageDecode   prometheus.Observer
 }
 
 // NewOuroboros builds a fully-wired Ouroboros. Every dependency is supplied up
@@ -573,6 +588,19 @@ func (o *Ouroboros) initBlockfetchMetrics() {
 			Help: "percentage of blocks fetched in less than 5 seconds",
 		},
 	)
+	o.blockfetchMetrics.stageDuration = promautoFactory.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "dingo_blockfetch_stage_duration_seconds",
+			Help: "wall-clock time spent in each blockfetch-owned stage of per-block processing, by stage: decode (CBOR-decoding one fetched block's raw bytes, on a decode-cache miss only)",
+			// 100us to ~3.3s, matching
+			// dingo_ledger_block_stage_duration_seconds so the two
+			// histograms are comparable across the same block's stages.
+			Buckets: prometheus.ExponentialBuckets(0.0001, 2, 16),
+		},
+		[]string{"stage"},
+	)
+	o.blockfetchMetrics.stageDecode = o.blockfetchMetrics.stageDuration.
+		WithLabelValues("decode")
 }
 
 // isTrustedNtCListener reports whether l is verified reachable only from
