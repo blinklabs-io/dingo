@@ -1273,3 +1273,48 @@ func TestLedgerView_PendingMIRRewardDeltas_BeforeEpochStart(t *testing.T) {
 	}))
 	assert.Empty(t, totals)
 }
+
+// TestLedgerView_PendingMIRRewardDeltas_SeparatesPots proves the query keys
+// its totals by source pot as well as credential: a reserves cert and a
+// treasury cert for the same credential must land in two separate entries,
+// never summed together, matching the reference's separate iRReserves and
+// iRTreasury maps.
+func TestLedgerView_PendingMIRRewardDeltas_SeparatesPots(t *testing.T) {
+	t.Parallel()
+
+	ls, db, gdb := newMIRTestLedger(t)
+	ls.currentEpoch = models.Epoch{StartSlot: 100}
+
+	cred := mirCred28(0x79)
+	seedMIRDistribution(t, gdb, mirPotReserves, 150,
+		[]models.MoveInstantaneousRewardsReward{
+			{Credential: cred, Amount: big.NewInt(100)},
+		})
+	seedMIRDistribution(t, gdb, mirPotTreasury, 150,
+		[]models.MoveInstantaneousRewardsReward{
+			{Credential: cred, Amount: big.NewInt(-50)},
+		})
+
+	txn := db.Transaction(false)
+	var totals map[eras.MIRCredentialKey]*big.Int
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		lv := &LedgerView{ls: ls, txn: txn}
+		var err error
+		totals, err = lv.PendingMIRRewardDeltas(200)
+		return err
+	}))
+
+	reservesKey := eras.MIRCredentialKey{
+		Credential: lcommon.NewBlake2b224(cred),
+		Pot:        mirPotReserves,
+	}
+	treasuryKey := eras.MIRCredentialKey{
+		Credential: lcommon.NewBlake2b224(cred),
+		Pot:        mirPotTreasury,
+	}
+	require.Contains(t, totals, reservesKey)
+	assert.Equal(t, big.NewInt(100), totals[reservesKey],
+		"the reserves cert must not be netted against the treasury cert")
+	require.Contains(t, totals, treasuryKey)
+	assert.Equal(t, big.NewInt(-50), totals[treasuryKey])
+}

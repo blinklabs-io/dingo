@@ -21,14 +21,19 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
-// MIRCredentialKey identifies one stake credential for the purpose of folding
-// move instantaneous rewards deltas accumulated within an epoch. Both the tag
-// and the hash are required: a key hash and a script hash may coincidentally
-// share 28 bytes, and the reference keeps them in separate maps
-// (iRReserves/iRTreasury are keyed by Credential, which carries its type).
+// MIRCredentialKey identifies one stake credential within one source pot, for
+// the purpose of folding move instantaneous rewards deltas accumulated within
+// an epoch. All three fields are required: a key hash and a script hash may
+// coincidentally share 28 bytes (hence Tag), and the reference keeps reserves
+// and treasury deltas in two entirely separate maps -- iRReserves and
+// iRTreasury, each keyed by Credential -- so a surplus pending in one pot must
+// never offset a deficit in the other (hence Pot). Pot uses the same 0
+// (reserves) / 1 (treasury) convention as cert.Reward.Source and
+// models.MIREffect.Pot.
 type MIRCredentialKey struct {
 	Tag        uint8
 	Credential lcommon.Blake2b224
+	Pot        uint
 }
 
 // MIRPendingRewardsProvider is satisfied by the dingo ledger state to expose
@@ -58,6 +63,7 @@ type MIRPendingRewardsProvider interface {
 type MIRProducesNegativeUpdateError struct {
 	CredentialTag uint8
 	Credential    lcommon.Blake2b224
+	Pot           uint
 	Existing      *big.Int
 	Delta         *big.Int
 }
@@ -72,8 +78,9 @@ func (e MIRProducesNegativeUpdateError) Error() string {
 		delta = e.Delta.String()
 	}
 	return fmt.Sprintf(
-		"MIR produces negative update: credential %x existing %s delta %s",
+		"MIR produces negative update: credential %x pot %d existing %s delta %s",
 		e.Credential[:],
+		e.Pot,
 		existing,
 		delta,
 	)
@@ -130,6 +137,7 @@ func validateMIRAccumulatedRewards(
 				//nolint:gosec // CredType is decode-validated to 0 or 1 by gouroboros
 				Tag:        uint8(cred.CredType),
 				Credential: cred.Credential,
+				Pot:        cert.Reward.Source,
 			}
 			existing := running[key]
 			if existing == nil {
@@ -140,6 +148,7 @@ func validateMIRAccumulatedRewards(
 				return MIRProducesNegativeUpdateError{
 					CredentialTag: key.Tag,
 					Credential:    key.Credential,
+					Pot:           key.Pot,
 					Existing:      existing,
 					Delta:         delta,
 				}

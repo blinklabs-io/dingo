@@ -54,13 +54,23 @@ func mirCredential(seed byte) lcommon.Credential {
 	}
 }
 
-// mirCert builds a distribution MIR certificate with one credential->delta
-// entry. delta may be negative (delta_coin is signed).
+// mirCert builds a reserves-sourced distribution MIR certificate with one
+// credential->delta entry. delta may be negative (delta_coin is signed).
 func mirCert(cred lcommon.Credential, delta int64) *lcommon.MoveInstantaneousRewardsCertificate {
+	return mirCertFromPot(cred, 0, delta)
+}
+
+// mirCertFromPot builds a distribution MIR certificate sourced from the given
+// pot (0 = reserves, 1 = treasury) with one credential->delta entry.
+func mirCertFromPot(
+	cred lcommon.Credential,
+	pot uint,
+	delta int64,
+) *lcommon.MoveInstantaneousRewardsCertificate {
 	credCopy := cred
 	return &lcommon.MoveInstantaneousRewardsCertificate{
 		Reward: lcommon.MoveInstantaneousRewardsCertificateReward{
-			Source: 0,
+			Source: pot,
 			Rewards: map[*lcommon.Credential]*big.Int{
 				&credCopy: big.NewInt(delta),
 			},
@@ -69,8 +79,16 @@ func mirCert(cred lcommon.Credential, delta int64) *lcommon.MoveInstantaneousRew
 }
 
 func mirKey(cred lcommon.Credential) MIRCredentialKey {
+	return mirKeyFromPot(cred, 0)
+}
+
+func mirKeyFromPot(cred lcommon.Credential, pot uint) MIRCredentialKey {
 	//nolint:gosec // test-only, CredType is always 0 or 1
-	return MIRCredentialKey{Tag: uint8(cred.CredType), Credential: cred.Credential}
+	return MIRCredentialKey{
+		Tag:        uint8(cred.CredType),
+		Credential: cred.Credential,
+		Pot:        pot,
+	}
 }
 
 // TestValidateMIRAccumulatedRewards_SingleTxSequential covers +10 then -11 and
@@ -172,6 +190,71 @@ func TestValidateMIRAccumulatedRewards_CrossTxSameEpoch(t *testing.T) {
 				}
 				tx := &mirTx{certs: []lcommon.Certificate{mirCert(cred, -10)}}
 				err := validateMIRAccumulatedRewards(tx, 200, ls, era.major)
+				require.NoError(t, err)
+			})
+		})
+	}
+}
+
+// TestValidateMIRAccumulatedRewards_CrossPotIsolation proves a reserves
+// surplus cannot offset a treasury deficit for the same credential: the
+// reference tracks iRReserves and iRTreasury as two entirely separate maps,
+// so a certificate drawing from one pot must never be able to fund a negative
+// delta drawn from the other.
+func TestValidateMIRAccumulatedRewards_CrossPotIsolation(t *testing.T) {
+	t.Parallel()
+
+	for _, era := range []struct {
+		name  string
+		major uint
+	}{
+		{"Alonzo", lcommon.ProtocolVersionAlonzo},
+		{"Babbage", lcommon.ProtocolVersionBabbage},
+	} {
+		t.Run(era.name, func(t *testing.T) {
+			t.Parallel()
+
+			cred := mirCredential(0x06)
+
+			t.Run("reserves +100 then treasury -50 in one tx rejects", func(t *testing.T) {
+				t.Parallel()
+				tx := &mirTx{certs: []lcommon.Certificate{
+					mirCertFromPot(cred, 0, 100),
+					mirCertFromPot(cred, 1, -50),
+				}}
+				ls := newMockLedgerState()
+				err := validateMIRAccumulatedRewards(tx, 100, ls, era.major)
+				require.Error(t, err,
+					"a reserves surplus must not offset a treasury deficit")
+				var negErr MIRProducesNegativeUpdateError
+				require.True(t, errors.As(err, &negErr), "expected MIRProducesNegativeUpdateError, got %T: %v", err, err)
+				assert.Equal(t, uint(1), negErr.Pot)
+				assert.Equal(t, big.NewInt(0), negErr.Existing)
+				assert.Equal(t, big.NewInt(-50), negErr.Delta)
+			})
+
+			t.Run("reserves +100 pending, treasury -50 across txs rejects", func(t *testing.T) {
+				t.Parallel()
+				ls := newMockLedgerState()
+				ls.pendingMIR = map[MIRCredentialKey]*big.Int{
+					mirKeyFromPot(cred, 0): big.NewInt(100),
+				}
+				tx := &mirTx{certs: []lcommon.Certificate{
+					mirCertFromPot(cred, 1, -50),
+				}}
+				err := validateMIRAccumulatedRewards(tx, 200, ls, era.major)
+				require.Error(t, err,
+					"pending reserves state must not be visible to a treasury key")
+			})
+
+			t.Run("same-pot accumulation still offsets correctly", func(t *testing.T) {
+				t.Parallel()
+				tx := &mirTx{certs: []lcommon.Certificate{
+					mirCertFromPot(cred, 1, 100),
+					mirCertFromPot(cred, 1, -50),
+				}}
+				ls := newMockLedgerState()
+				err := validateMIRAccumulatedRewards(tx, 100, ls, era.major)
 				require.NoError(t, err)
 			})
 		})

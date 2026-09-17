@@ -231,6 +231,7 @@ func (lv *LedgerView) PendingMIRRewardDeltas(
 			key := eras.MIRCredentialKey{
 				Tag:        reward.CredentialTag,
 				Credential: lcommon.NewBlake2b224(reward.Credential),
+				Pot:        effect.Pot,
 			}
 			if existing, ok := totals[key]; ok {
 				totals[key] = new(big.Int).Add(existing, reward.Amount)
