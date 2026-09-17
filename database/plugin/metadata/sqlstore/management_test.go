@@ -84,6 +84,66 @@ func TestGetPoolByVrfKeyHashExcludesRetiredPool(t *testing.T) {
 
 }
 
+// TestGetPoolByVrfKeyHashSkipsRetiredCandidateForActiveOwner is the
+// regression test for a CodeRabbit finding on this PR: a retired pool's own
+// historical registration of a key must not shadow a different, currently
+// active pool that legitimately re-registered the same, by-then-free key.
+// Both pools have a pool_registration row naming the key, so both are
+// candidates; picking only one arbitrarily (the smaller pool_id) and
+// checking retirement on just that one can resolve the whole lookup to nil
+// even though the key is genuinely in use.
+func TestGetPoolByVrfKeyHashSkipsRetiredCandidateForActiveOwner(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+
+	poolA := make([]byte, 28)
+	poolA[0] = 1 // inserted first -> smaller pool_id
+	poolB := make([]byte, 28)
+	poolB[0] = 2
+	key := make([]byte, 32)
+	key[0] = 0xA
+
+	// Pool A registers the key, then retires (effective at epoch 1).
+	require.NoError(t, store.ImportPool(
+		&models.Pool{PoolKeyHash: poolA, VrfKeyHash: key},
+		&models.PoolRegistration{
+			PoolKeyHash: poolA,
+			VrfKeyHash:  key,
+			AddedSlot:   5,
+		},
+		nil,
+	))
+	require.NoError(t, store.RetirePools(nil, [][]byte{poolA}, 1, 10))
+
+	// Pool B legitimately re-registers the same, now-free key later.
+	require.NoError(t, store.ImportPool(
+		&models.Pool{PoolKeyHash: poolB, VrfKeyHash: key},
+		&models.PoolRegistration{
+			PoolKeyHash: poolB,
+			VrfKeyHash:  key,
+			AddedSlot:   50,
+		},
+		nil,
+	))
+
+	require.NoError(t, store.SetEpoch(0, 1, nil, nil, nil, nil, 0, 1, 100, nil))
+	require.NoError(t, store.SetTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("tip")},
+		BlockNumber: 1,
+	}, nil))
+
+	got, err := store.GetPoolByVrfKeyHash(key, 60, nil)
+	require.NoError(t, err)
+	require.NotNil(
+		t,
+		got,
+		"pool B actively holds this key; must not report it free",
+	)
+	require.Equal(t, poolB, got.PoolKeyHash)
+}
+
 // TestGetPoolByVrfKeyHashPreservesActiveKeyDuringDeferredReRegistration is
 // the regression test for issue #4352: a pool re-registering with a new VRF
 // key mid-epoch must not free its old key before the epoch boundary, because

@@ -567,8 +567,16 @@ func (s *Store) GetPoolByVrfKeyHash(
 	if err != nil {
 		return nil, fmt.Errorf("GetPoolByVrfKeyHash: %w", err)
 	}
-	var poolID uint
-	err = db.QueryRowContext(ctx, `
+	// Ranked, not a single winner picked in SQL: a pool_registration row
+	// naming this key can belong to a pool that has since retired (its own
+	// later history just never happened to touch this key again), and a
+	// retired candidate must not shadow a different, genuinely active pool
+	// that legitimately re-registered the same, by-then-free key. Trying
+	// every candidate in tier order and returning the first one
+	// activePoolOrNil confirms is still active is what makes retirement
+	// correctly fall through to the next candidate instead of resolving
+	// the whole lookup to nil.
+	rows, err := db.QueryContext(ctx, `
 WITH candidates AS (
     SELECT DISTINCT pool_id FROM pool_registration WHERE vrf_key_hash = ?
 ),
@@ -612,32 +620,60 @@ same_epoch_claimant AS (
     JOIN candidates cd ON cd.pool_id = pr.pool_id
     WHERE pr.vrf_key_hash = ? AND pr.added_slot >= ?
 )
-SELECT pool_id FROM active_owner
-UNION ALL
-SELECT pool_id FROM same_epoch_claimant
-WHERE NOT EXISTS (SELECT 1 FROM active_owner)
-ORDER BY pool_id
-LIMIT 1`,
+SELECT pool_id, 0 AS tier FROM active_owner
+UNION
+SELECT pool_id, 1 AS tier FROM same_epoch_claimant
+ORDER BY tier, pool_id`,
 		vrfKeyHash,
 		slotValue,
 		vrfKeyHash,
 		vrfKeyHash,
 		slotValue,
-	).Scan(&poolID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
+	)
 	if err != nil {
 		return nil, err
 	}
-	pool, err := queryPool(ctx, db, "id = ?", poolID)
-	if err != nil || pool == nil {
-		return pool, err
+	var poolIDs []uint
+	for rows.Next() {
+		var poolID uint
+		var tier int
+		if err := rows.Scan(&poolID, &tier); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		poolIDs = append(poolIDs, poolID)
 	}
-	if err := s.loadPoolAssociations(ctx, db, pool, true); err != nil {
+	if err := rows.Close(); err != nil {
 		return nil, err
 	}
-	return s.activePoolOrNil(ctx, db, pool)
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	seen := make(map[uint]struct{}, len(poolIDs))
+	for _, poolID := range poolIDs {
+		if _, ok := seen[poolID]; ok {
+			continue
+		}
+		seen[poolID] = struct{}{}
+		pool, err := queryPool(ctx, db, "id = ?", poolID)
+		if err != nil {
+			return nil, err
+		}
+		if pool == nil {
+			continue
+		}
+		if err := s.loadPoolAssociations(ctx, db, pool, true); err != nil {
+			return nil, err
+		}
+		active, err := s.activePoolOrNil(ctx, db, pool)
+		if err != nil {
+			return nil, err
+		}
+		if active != nil {
+			return active, nil
+		}
+	}
+	return nil, nil
 }
 
 // activePoolOrNil applies the same current-registration/retirement semantics
