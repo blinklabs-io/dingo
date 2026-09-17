@@ -1479,49 +1479,6 @@ func importedPoolKeys(
 	return present, absent, nil
 }
 
-// assertPoolsImported fails the import when a pool carrying a scheduled
-// retirement has no row in the pool table. RetirePools silently skips a key
-// hash it cannot resolve, which would reproduce the very gap these rows
-// exist to close, so the mismatch is surfaced instead of logged.
-func assertPoolsImported(
-	store metadata.MetadataStore,
-	metaTxn types.Txn,
-	keyHashes [][]byte,
-) error {
-	poolKeyHashSize := len(lcommon.PoolKeyHash{})
-	lookup := make([]lcommon.PoolKeyHash, 0, len(keyHashes))
-	for _, keyHash := range keyHashes {
-		if len(keyHash) != poolKeyHashSize {
-			return fmt.Errorf(
-				"malformed pool key hash %x (%d bytes, want %d)",
-				keyHash,
-				len(keyHash),
-				poolKeyHashSize,
-			)
-		}
-		var pkh lcommon.PoolKeyHash
-		copy(pkh[:], keyHash)
-		lookup = append(lookup, pkh)
-	}
-
-	existing, err := store.GetPools(lookup, metaTxn)
-	if err != nil {
-		return fmt.Errorf("loading pools: %w", err)
-	}
-	present := make(map[string]struct{}, len(existing))
-	for i := range existing {
-		present[string(existing[i].PoolKeyHash)] = struct{}{}
-	}
-	for _, keyHash := range keyHashes {
-		if _, ok := present[string(keyHash)]; !ok {
-			return fmt.Errorf(
-				"pool %x not found in the pool table", keyHash,
-			)
-		}
-	}
-	return nil
-}
-
 // importDReps imports parsed DReps into the metadata store.
 func importDReps(
 	ctx context.Context,
