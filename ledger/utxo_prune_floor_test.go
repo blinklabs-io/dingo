@@ -472,7 +472,7 @@ func TestConsumedUtxoPruneFloorIsReadFromTheDatabase(t *testing.T) {
 	// transaction before any in-process cache could observe it -- is honored
 	// immediately, with no reload step.
 	require.NoError(t, f.db.SetSyncState(
-		"consumed_utxo_prune_slot",
+		database.ConsumedUtxoPruneFloorSyncKey,
 		strconv.FormatUint(pruneFixtureRetainedSlot, 10),
 		nil,
 	))
@@ -489,7 +489,7 @@ func TestConsumedUtxoPruneFloorIsReadFromTheDatabase(t *testing.T) {
 
 	// A malformed value fails closed rather than reading as "nothing swept".
 	require.NoError(t, f.db.SetSyncState(
-		"consumed_utxo_prune_slot", "not-a-slot", nil,
+		database.ConsumedUtxoPruneFloorSyncKey, "not-a-slot", nil,
 	))
 	_, _, err = f.ls.rollbackBelowConsumedUtxoPruneFloor(
 		ocommon.NewPoint(pruneFixtureFloorSlot, nil),
@@ -589,7 +589,7 @@ func TestHandleEventChainsyncRollbackRejectsBelowPruneFloor(t *testing.T) {
 	// A floor above the rollback target, as a sweep at a higher tip would
 	// have left behind.
 	require.NoError(t, fixture.ls.db.SetSyncState(
-		"consumed_utxo_prune_slot",
+		database.ConsumedUtxoPruneFloorSyncKey,
 		strconv.FormatUint(fixture.currentTip.Point.Slot, 10),
 		nil,
 	))

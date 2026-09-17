@@ -903,17 +903,15 @@ func TestTruncateRejectsPreCancelledContextWithoutRecordingMarker(
 	)
 }
 
-// TestTruncateClearsConsumedUtxoPruneFloorAboveTarget covers the interaction
+// TestTruncateRejectsConsumedUtxoPruneFloorAboveTarget covers the interaction
 // between CIP-0135 truncate and the consumed-UTxO prune floor (issue #3766).
 //
 // The floor records how deep the consumed-UTxO sweep hard-deleted spent rows,
 // and ledger.LedgerState.rollback refuses any target below it. Truncate is
-// deliberately allowed to go deeper -- as it is with the security parameter --
-// so a floor left above the new tip would refuse every subsequent rollback
-// until the node resynced past it, wedging the recovery the truncate was run to
-// enable. A truncate that crosses the floor therefore clears it; one that stops
-// at or above it leaves it in place.
-func TestTruncateClearsConsumedUtxoPruneFloorAboveTarget(t *testing.T) {
+// deliberately refuses to go deeper, because a floor left above the new tip
+// identifies UTxOs that cannot be restored. A truncate at or above the floor
+// leaves the floor in place.
+func TestTruncateRejectsConsumedUtxoPruneFloorAboveTarget(t *testing.T) {
 	const sweptSlot uint64 = 35
 
 	sweptTxId := bytes.Repeat([]byte{0x3B}, 32)
@@ -953,23 +951,21 @@ func TestTruncateClearsConsumedUtxoPruneFloorAboveTarget(t *testing.T) {
 		return f
 	}
 
-	t.Run("target below the floor clears it", func(t *testing.T) {
+	t.Run("target below the floor is rejected", func(t *testing.T) {
 		f := newFixtureWithFloor(t)
 		// blocks[1] is at slot 20, below the swept slot.
 		_, err := lifecycle.Truncate(
 			context.Background(), f.db, f.blocks[1], 0, false, 0,
 		)
-		require.NoError(t, err)
+		require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
 		floor, err := f.db.ConsumedUtxoPruneFloor(nil)
 		require.NoError(t, err)
-		require.Zero(
+		require.Equal(
 			t,
+			sweptSlot,
 			floor,
-			"a truncate past the floor must not leave it above the new tip",
+			"a rejected truncate must preserve the prune floor",
 		)
-		// Clearing the record is an admission that this database has no
-		// rollback boundary left to enforce, not a claim that the swept rows
-		// came back.
 		requireSweptUtxoAbsent(t, f)
 	})
 

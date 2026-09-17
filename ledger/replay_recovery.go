@@ -209,6 +209,8 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 	if !errors.As(err, &validationErr) {
 		return false, nil
 	}
+	ls.consumedUtxoPruneMutex.Lock()
+	defer ls.consumedUtxoPruneMutex.Unlock()
 	if isDeterministicTxValidationError(validationErr.Cause) {
 		return ls.recoverFromDeterministicTxValidationError(validationErr)
 	}
@@ -360,7 +362,7 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 	// available. If metadata synchronization fails, the primary chain is still
 	// at a valid retained point and the standard divergence reconciler can
 	// finish rolling metadata back to its common ancestor.
-	if err := ls.rollback(rewindPoint); err != nil {
+	if err := ls.rollbackWithResync(rewindPoint, true); err != nil {
 		return false, fmt.Errorf(
 			"rollback ledger state for replay recovery: %w",
 			err,
@@ -726,7 +728,7 @@ func (ls *LedgerState) recoverFromDeterministicTxValidationError(
 			err,
 		)
 	}
-	if err := ls.rollback(rewindPoint); err != nil {
+	if err := ls.rollbackWithResync(rewindPoint, true); err != nil {
 		return false, fmt.Errorf(
 			"rollback ledger state after deterministic transaction validation failure: %w",
 			err,
@@ -1574,7 +1576,7 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 	// re-measure after any gouroboros bump instead of trusting this line.
 	// Stale numbers here have twice pointed diagnosis at the wrong root
 	// cause (#3165, #3678).
-	if err := ls.rollback(rewindPoint); err != nil {
+	if err := ls.rollbackWithResync(rewindPoint, true); err != nil {
 		return false, fmt.Errorf(
 			"rollback ledger state after validation failure: %w",
 			err,

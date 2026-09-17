@@ -1009,7 +1009,11 @@ type LedgerState struct {
 	// of the apply cursor (nil when no endorser-block fetcher is configured).
 	leiosBackfill *leiosBackfiller
 	sync.RWMutex
-	chainsyncMutex                sync.Mutex
+	chainsyncMutex sync.Mutex
+	// consumedUtxoPruneMutex serializes irreversible consumed-UTxO cleanup
+	// with rollback flows that may truncate the primary chain before restoring
+	// ledger metadata.
+	consumedUtxoPruneMutex        sync.Mutex
 	chainsyncBlockfetchMutex      sync.Mutex
 	chainsyncBlockfetchReadyMutex sync.Mutex
 	// bufferedHeaderMutex guards bufferedHeaderEvents alone. That map is
@@ -3203,6 +3207,8 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 		// "absent" for a ref that was actually there (blinklabs-io/dingo#382
 		// review). Returning here just skips this run; the next periodic
 		// tick tries again from the same (or a later) floor.
+		ls.consumedUtxoPruneMutex.Lock()
+		defer ls.consumedUtxoPruneMutex.Unlock()
 		if err := ls.persistConsumedUtxoPruneFloor(floor, nil); err != nil {
 			ls.config.Logger.Error(
 				"failed to persist consumed UTxO prune floor",
@@ -3307,7 +3313,17 @@ func (ls *LedgerState) resolveRollbackTarget(
 }
 
 func (ls *LedgerState) rollback(point ocommon.Point) error {
-	return ls.rollbackWithResync(point, true)
+	return ls.withConsumedUtxoPruneBoundary(func() error {
+		return ls.rollbackWithResync(point, true)
+	})
+}
+
+func (ls *LedgerState) withConsumedUtxoPruneBoundary(
+	fn func() error,
+) error {
+	ls.consumedUtxoPruneMutex.Lock()
+	defer ls.consumedUtxoPruneMutex.Unlock()
+	return fn()
 }
 
 // rollbackCommittedError reports an error found after the metadata rollback
@@ -3322,7 +3338,9 @@ func (e *rollbackCommittedError) Error() string { return e.err.Error() }
 func (e *rollbackCommittedError) Unwrap() error { return e.err }
 
 func (ls *LedgerState) rollbackWithoutResync(point ocommon.Point) error {
-	return ls.rollbackWithResync(point, false)
+	return ls.withConsumedUtxoPruneBoundary(func() error {
+		return ls.rollbackWithResync(point, false)
+	})
 }
 
 func (ls *LedgerState) publishLocalLedgerRollback(point ocommon.Point) {
@@ -3935,6 +3953,8 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 	point ocommon.Point,
 	pubs *pendingPublishes,
 ) error {
+	ls.consumedUtxoPruneMutex.Lock()
+	defer ls.consumedUtxoPruneMutex.Unlock()
 	ls.RLock()
 	mithrilLedgerSlot := ls.mithrilLedgerSlot
 	currentTip := ls.currentTip
@@ -4053,7 +4073,7 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 	// dropped and no chain.update is produced at all). drainChain is
 	// idempotent per chain.
 	pubs.drainChain(ls.chain)
-	if err := ls.rollback(point); err != nil {
+	if err := ls.rollbackWithResync(point, true); err != nil {
 		// ls.rollback can fail with the ledger already sitting on the
 		// rollback point: the no-op branch it takes when the tip
 		// already matches returns enforceDurableTipFloor's error
@@ -9341,6 +9361,8 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 	if ls.chain == nil || ls.config.ChainManager == nil {
 		return nil
 	}
+	ls.consumedUtxoPruneMutex.Lock()
+	defer ls.consumedUtxoPruneMutex.Unlock()
 	ls.RLock()
 	ledgerTip := ls.currentTip
 	ls.RUnlock()
@@ -9432,7 +9454,7 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 			// validateAndEmitRollbackUndo contract, and the next
 			// reconciliation attempt lands right back in this same
 			// branch and retries both.
-			if err := ls.rollbackWithoutResync(chainTip.Point); err != nil {
+			if err := ls.rollbackWithResync(chainTip.Point, false); err != nil {
 				if _, ok := errors.AsType[*rollbackCommittedError](err); ok {
 					ls.emitRollbackTransactionEvents(undoBlocks)
 				}
@@ -9699,7 +9721,7 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		// TestReconcilePrimaryChainTipWithLedgerTipRecoversUndoAfterCrashBetweenRewindAndEmit).
 		// A true durable, atomic handoff across every rollback path --
 		// not just this one -- is tracked as issue #3817.
-		if err := ls.rollbackWithoutResync(ancestor); err != nil {
+		if err := ls.rollbackWithResync(ancestor, false); err != nil {
 			if _, ok := errors.AsType[*rollbackCommittedError](err); ok {
 				ls.emitRollbackTransactionEvents(undoBlocks)
 			}
@@ -9958,7 +9980,7 @@ func (ls *LedgerState) enforceDurableTipFloor() error {
 		"applied_floor_hash",
 		hex.EncodeToString(floor.Hash),
 	)
-	return ls.rollback(floor)
+	return ls.rollbackWithResync(floor, true)
 }
 
 func (ls *LedgerState) latestLedgerPrimaryChainAncestor(

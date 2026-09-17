@@ -81,6 +81,8 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 	if !errors.As(err, &validationErr) {
 		return false, nil
 	}
+	ls.consumedUtxoPruneMutex.Lock()
+	defer ls.consumedUtxoPruneMutex.Unlock()
 	// Nothing to rewind: report not-recovered rather than sending the
 	// pipeline back into the same block believing it was handled.
 	if ls.chain == nil || ls.config.ChainManager == nil {
@@ -191,7 +193,7 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 	// block's post-apply state; the matching ledger rollback has to be
 	// explicit, for the same reason it is on the transaction-validation
 	// path.
-	if err := ls.rollback(rewindPoint); err != nil {
+	if err := ls.rollbackWithResync(rewindPoint, true); err != nil {
 		return false, fmt.Errorf(
 			"rollback ledger state after header validation failure: %w",
 			err,

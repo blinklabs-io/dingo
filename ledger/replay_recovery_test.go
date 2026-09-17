@@ -1739,7 +1739,7 @@ func TestReplayRecoveryArmsAuditAfterPrimaryAndLedgerRewind(t *testing.T) {
 
 func TestReplayRecoveryRefusesBelowPruneFloorBeforeChainRewind(t *testing.T) {
 	ls := newReplayRecoveryAuditLedger(t, true)
-	const pruneFloorSyncKey = "consumed_utxo_prune_slot"
+	const pruneFloorSyncKey = database.ConsumedUtxoPruneFloorSyncKey
 	require.NoError(t, ls.db.SetSyncState(pruneFloorSyncKey, "120", nil))
 	chainTipBefore := ls.chain.Tip().Point
 	bus := event.NewEventBus(nil, nil)

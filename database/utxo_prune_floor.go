@@ -37,8 +37,6 @@ import (
 // tip while this floor stays fixed at the highest tip the node reached (issue
 // #3766). Recording the floor lets rollback refuse rather than silently
 // diverge.
-const consumedUtxoPruneFloorSyncKey = "consumed_utxo_prune_slot"
-
 // ConsumedUtxoPruneFloor returns the highest slot the consumed-UTxO sweep has
 // hard-deleted spent rows at or below, or 0 when nothing has been swept.
 // Rolling back below this slot cannot restore the UTxOs consumed above it.
@@ -47,7 +45,7 @@ const consumedUtxoPruneFloorSyncKey = "consumed_utxo_prune_slot"
 // "nothing swept", because callers use it to refuse a destructive rollback and
 // a floor that cannot be verified must not read as absent.
 func (d *Database) ConsumedUtxoPruneFloor(txn *Txn) (uint64, error) {
-	val, err := d.GetSyncState(consumedUtxoPruneFloorSyncKey, txn)
+	val, err := d.GetSyncState(ConsumedUtxoPruneFloorSyncKey, txn)
 	if err != nil {
 		return 0, fmt.Errorf("read consumed UTxO prune floor: %w", err)
 	}
@@ -72,40 +70,8 @@ func (d *Database) ConsumedUtxoPruneFloor(txn *Txn) (uint64, error) {
 // removed do not become restorable because a later sweep ran at a lower slot.
 func (d *Database) writeConsumedUtxoPruneFloor(slot uint64, txn *Txn) error {
 	return d.SetSyncState(
-		consumedUtxoPruneFloorSyncKey,
+		ConsumedUtxoPruneFloorSyncKey,
 		strconv.FormatUint(slot, 10),
 		txn,
 	)
-}
-
-// ClearConsumedUtxoPruneFloorAbove drops the recorded floor when it is above
-// slot, reporting the previous value and whether it was cleared.
-//
-// This exists for lifecycle.Truncate, which deliberately rewinds further than
-// the live ledger may -- it is not bound by the security parameter either,
-// because an operator invoking CIP-0135 disaster recovery has taken
-// responsibility for the resulting state. Leaving a floor above the new tip
-// would refuse every subsequent rollback until the node resynced past it,
-// wedging the recovery the truncate was performed to enable. The consumed rows
-// swept between slot and the old floor stay gone; clearing the record is an
-// admission that this database no longer has a rollback boundary it can
-// enforce, not a claim that those rows came back.
-func (d *Database) ClearConsumedUtxoPruneFloorAbove(
-	slot uint64,
-	txn *Txn,
-) (uint64, bool, error) {
-	current, err := d.ConsumedUtxoPruneFloor(txn)
-	if err != nil {
-		return 0, false, err
-	}
-	if current <= slot {
-		return current, false, nil
-	}
-	if err := d.DeleteSyncState(consumedUtxoPruneFloorSyncKey, txn); err != nil {
-		return current, false, fmt.Errorf(
-			"clear consumed UTxO prune floor: %w",
-			err,
-		)
-	}
-	return current, true, nil
 }

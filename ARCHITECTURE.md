@@ -618,7 +618,7 @@ deeper rewind, until the descent ran out of room at the Mithril anchor and the
 pipeline halted with a UTxO set no rewind could repair (issue #3766).
 
 The sweep therefore records how deep it removed rows in the
-`consumed_utxo_prune_slot` sync-state key, written in the same transaction that
+`consumed_utxo_prune_floor` sync-state key, written in the same transaction that
 removes them. The value is read from the database at each check rather than
 mirrored in memory: a mirror is only ever refreshed after the sweep's own
 transaction commits, so between commit and refresh it reports a floor lower than
