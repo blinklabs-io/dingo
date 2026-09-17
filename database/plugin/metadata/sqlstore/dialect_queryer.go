@@ -34,10 +34,30 @@ func newDialectQueryer(db queryer, dialect string) queryer {
 	if dialect == "sqlite" {
 		return db
 	}
-	if wrapped, ok := db.(dialectQueryer); ok && wrapped.dialect == dialect {
+	if wrapped, ok := unwrapDialectQueryer(db); ok && wrapped.dialect == dialect {
 		return db
 	}
 	return dialectQueryer{queryer: db, dialect: dialect}
+}
+
+// unwrapDialectQueryer reports whether db is, or wraps, a dialectQueryer,
+// unwrapping the one layer Store.instrumentedQueryer can put between a
+// caller and it: countingQueryer, applied around the dialectQueryer it
+// builds whenever Config.PromRegistry is set (see instrumentedQueryer).
+// Without this, a caller that receives an instrumented handle back --
+// operationalQueries and newDialectQueryer's own idempotence check among
+// them -- would see countingQueryer as db's concrete type, never find the
+// dialectQueryer underneath, and re-wrap or mis-detect dialect identity on
+// every metrics-enabled Store. This is the same unwrap
+// requireAccountBaselineTransaction (account.go) and stmtForQueryer
+// (prepared_stmt.go) already perform for the same reason, one layer
+// further in for *sql.Tx.
+func unwrapDialectQueryer(db queryer) (dialectQueryer, bool) {
+	if wrapped, ok := db.(countingQueryer); ok {
+		db = wrapped.queryer
+	}
+	wrapped, ok := db.(dialectQueryer)
+	return wrapped, ok
 }
 
 func (q dialectQueryer) ExecContext(
@@ -222,6 +242,13 @@ var (
 		`(?is)\s+RETURNING\s+id\s*;?\s*$`,
 	)
 	mysqlIntegerCastPattern = regexp.MustCompile(`(?i)\bAS\s+INTEGER\b`)
+	// mysqlBigintCastPattern covers "CAST(... AS BIGINT)", used instead of
+	// "AS INTEGER" where a value (such as a lovelace amount) can exceed
+	// PostgreSQL's 32-bit INTEGER. SQLite and PostgreSQL both accept BIGINT
+	// as a CAST target directly; MySQL's CAST() has no BIGINT spelling, so
+	// it is translated to SIGNED (64-bit), the same target "AS INTEGER" is
+	// translated to below.
+	mysqlBigintCastPattern = regexp.MustCompile(`(?i)\bAS\s+BIGINT\b`)
 )
 
 func hasReturningID(query string) bool {
@@ -231,6 +258,7 @@ func hasReturningID(query string) bool {
 func translateMySQLReturning(query string) (string, bool) {
 	base := strings.TrimSpace(returningIDPattern.ReplaceAllString(query, ""))
 	base = mysqlIntegerCastPattern.ReplaceAllString(base, "AS SIGNED")
+	base = mysqlBigintCastPattern.ReplaceAllString(base, "AS SIGNED")
 	doNothing := mysqlDoNothingPattern.MatchString(base)
 	isUpsert := mysqlUpdatePattern.MatchString(base)
 	return translateMySQLUpsertWithID(base, isUpsert), doNothing
@@ -253,6 +281,7 @@ var (
 
 func translateMySQLUpsert(query string) string {
 	query = mysqlIntegerCastPattern.ReplaceAllString(query, "AS SIGNED")
+	query = mysqlBigintCastPattern.ReplaceAllString(query, "AS SIGNED")
 	return translateMySQLUpsertWithID(query, false)
 }
 

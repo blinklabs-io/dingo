@@ -89,6 +89,10 @@ func TestLocalTxSubmissionRejectReason_FallbackIsHardForkApplyTxErr(
 			var validationErr *gledger.ShelleyTxValidationError
 			require.ErrorAs(t, decoded, &validationErr)
 			assert.Equal(t, uint8(era), validationErr.Era)
+
+			if era == gledger.EraIdConway {
+				assert.Contains(t, decoded.Error(), "InputSetEmptyUtxo")
+			}
 		})
 	}
 }
@@ -136,7 +140,10 @@ func TestLocalTxSubmissionServerSubmitTx_PreservesRejectEra(t *testing.T) {
 			o, connID := newTxSubmissionTestOuroboros(t)
 			err := o.localtxsubmissionServerSubmitTx(
 				olocaltxsubmission.CallbackContext{ConnectionId: connID},
-				olocaltxsubmission.NewMsgSubmitTx(era, []byte{0x80}).Transaction,
+				olocaltxsubmission.NewMsgSubmitTx(
+					era,
+					[]byte{0x80},
+				).Transaction,
 			)
 			require.ErrorContains(t, err, "decode transaction")
 			var reason cborRejectReason
@@ -154,7 +161,12 @@ func TestLocalTxSubmissionServerSubmitTx_PreservesRejectEra(t *testing.T) {
 			var rejectedEra uint16
 			_, err = cbor.Decode(failure[0], &rejectedEra)
 			require.NoError(t, err)
-			assert.Equal(t, era, rejectedEra, "reject envelope must preserve submitted era")
+			assert.Equal(
+				t,
+				era,
+				rejectedEra,
+				"reject envelope must preserve submitted era",
+			)
 		})
 	}
 }

@@ -96,7 +96,9 @@ type scriptedLedgerReadIterator struct {
 
 type failingLedgerReadIterator struct{}
 
-func (failingLedgerReadIterator) Next(bool) (*chain.ChainIteratorResult, error) {
+func (failingLedgerReadIterator) Next(
+	bool,
+) (*chain.ChainIteratorResult, error) {
 	return nil, errors.New("iterator storage failure")
 }
 
@@ -105,7 +107,11 @@ func TestLedgerReadChainIteratorForwardsIteratorError(t *testing.T) {
 
 	resultCh := make(chan readChainResult, 1)
 	ls := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
-	ls.ledgerReadChainIterator(t.Context(), failingLedgerReadIterator{}, resultCh)
+	ls.ledgerReadChainIterator(
+		t.Context(),
+		failingLedgerReadIterator{},
+		resultCh,
+	)
 	result := <-resultCh
 	require.Error(t, result.err)
 	assert.Contains(t, result.err.Error(), "iterator storage failure")

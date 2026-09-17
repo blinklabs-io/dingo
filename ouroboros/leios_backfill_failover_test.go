@@ -183,7 +183,7 @@ func TestFetchEndorserBlockOnConnSkipsBusyConnection(t *testing.T) {
 			connId,
 			nil,
 			point,
-			leiosBackfillPerAttemptTimeout,
+			time.Now().Add(leiosBackfillPerAttemptTimeout),
 		)
 	}()
 	err := testutil.RequireReceive(

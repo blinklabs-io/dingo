@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -182,11 +183,16 @@ type ParsedUTxO struct {
 	StakingKey    []byte // 28 bytes, extracted from address
 	CredentialTag uint8  // stake credential tag: 0 key hash, 1 script hash
 	PaymentScript bool   // true when payment credential is a script hash
-	Amount        uint64 // lovelace
-	Assets        []ParsedAsset
-	DatumHash     []byte // optional
-	Datum         []byte // optional inline datum CBOR
-	ScriptRef     []byte // optional reference script CBOR
+	// Pointer is the certificate position named by a pointer address. Pointer
+	// outputs have no staking credential in their address; the stake query
+	// resolves this position against certificate history at the evaluation
+	// slot.
+	Pointer   *models.UtxoPointer
+	Amount    uint64 // lovelace
+	Assets    []ParsedAsset
+	DatumHash []byte // optional
+	Datum     []byte // optional inline datum CBOR
+	ScriptRef []byte // optional reference script CBOR
 }
 
 // ParsedAsset represents a native asset within a UTxO.
@@ -239,20 +245,32 @@ type importedCommitteeTransaction struct {
 	certs []lcommon.Certificate
 }
 
-func (t importedCommitteeTransaction) Type() int                { return 0 }
-func (t importedCommitteeTransaction) Cbor() []byte             { return t.hash[:] }
-func (t importedCommitteeTransaction) Id() lcommon.Blake2b256   { return t.hash }
+func (t importedCommitteeTransaction) Type() int { return 0 }
+
+func (t importedCommitteeTransaction) Cbor() []byte { return t.hash[:] }
+
+func (t importedCommitteeTransaction) Id() lcommon.Blake2b256 { return t.hash }
+
 func (t importedCommitteeTransaction) Hash() lcommon.Blake2b256 { return t.hash }
+
 func (t importedCommitteeTransaction) ProtocolParameterUpdates() (uint64, map[lcommon.Blake2b224]lcommon.ProtocolParameterUpdate) {
 	return 0, nil
 }
-func (t importedCommitteeTransaction) LeiosHash() lcommon.Blake2b256            { return t.hash }
-func (t importedCommitteeTransaction) Metadata() lcommon.TransactionMetadatum   { return nil }
-func (t importedCommitteeTransaction) AuxiliaryData() lcommon.AuxiliaryData     { return nil }
-func (t importedCommitteeTransaction) IsValid() bool                            { return true }
-func (t importedCommitteeTransaction) Certificates() []lcommon.Certificate      { return t.certs }
-func (t importedCommitteeTransaction) Consumed() []lcommon.TransactionInput     { return nil }
-func (t importedCommitteeTransaction) Produced() []lcommon.Utxo                 { return nil }
+
+func (t importedCommitteeTransaction) LeiosHash() lcommon.Blake2b256 { return t.hash }
+
+func (t importedCommitteeTransaction) Metadata() lcommon.TransactionMetadatum { return nil }
+
+func (t importedCommitteeTransaction) AuxiliaryData() lcommon.AuxiliaryData { return nil }
+
+func (t importedCommitteeTransaction) IsValid() bool { return true }
+
+func (t importedCommitteeTransaction) Certificates() []lcommon.Certificate { return t.certs }
+
+func (t importedCommitteeTransaction) Consumed() []lcommon.TransactionInput { return nil }
+
+func (t importedCommitteeTransaction) Produced() []lcommon.Utxo { return nil }
+
 func (t importedCommitteeTransaction) Witnesses() lcommon.TransactionWitnessSet { return nil }
 
 // ParsedAccount represents a stake account with its delegation.
@@ -2435,6 +2453,22 @@ func importOpCertCounters(
 		}
 		var poolKeyHash lcommon.PoolKeyHash
 		copy(poolKeyHash[:], poolKey)
+		// decodeOpCertCounters decodes the certified counter map at the
+		// reference's full uint64 width, independently of the header types
+		// the gouroboros pin declares, so this is the one write path into
+		// pool_opcert_sequence whose counters were never narrowed or checked
+		// against a chain rule first. Refuse an unrecordable counter here,
+		// naming the bound the way block application and forging name it,
+		// rather than letting it reach checkedInt64 and abort the import
+		// with a message that reports only that an unsigned SQL value
+		// exceeds int64.
+		if err := eras.ValidateOpCertPersistableCounter(sequence); err != nil {
+			return fmt.Errorf(
+				"storing certified opcert counter for pool %x: %w",
+				poolKeyHash,
+				err,
+			)
+		}
 		if err := store.UpdatePoolOpCertSequence(
 			poolKeyHash, sequence, slot, txn,
 		); err != nil {
@@ -2845,7 +2879,6 @@ func validateImportedRewardPParams(
 			currentEpoch,
 		)
 	}
-
 	store := cfg.Database.Metadata()
 	currentAvailable, err := importedPParamsAvailable(
 		store,
@@ -3150,12 +3183,48 @@ func importGovState(
 	if govState == nil {
 		return nil
 	}
+	if govState.CommitteeParseError != nil {
+		return fmt.Errorf(
+			"parsing imported committee: %w",
+			govState.CommitteeParseError,
+		)
+	}
+	if govState.PulsingStateParseError != nil {
+		return fmt.Errorf(
+			"parsing imported governance pulsing state: %w",
+			govState.PulsingStateParseError,
+		)
+	}
 	if err != nil {
 		// Non-fatal warnings from committee/proposals parsing
 		cfg.Logger.Warn(
 			"governance state parsed with warnings",
 			"component", "ledgerstate",
 			"error", err,
+		)
+	}
+	// cgsCommittee is the committee in force at the snapshot.
+	// RatifyState.rsEnactState is not a second copy of it: RATIFY folds
+	// every accepted action into rsEnactState via ENACT
+	// (cardano-ledger Conway/Rules/Ratify.hs, ratifyTransition), and
+	// ConwayEPOCH copies the result into cgsCommittee at the *next*
+	// boundary (Conway/Rules/Epoch.hs, "cgsCommitteeL .~ ensCommittee").
+	// Only NoConfidence and UpdateCommittee rewrite ensCommittee
+	// (Conway/Rules/Enact.hs), so the two views corroborate each other
+	// exactly when rsEnacted carries neither. A snapshot from an epoch
+	// that ratified a committee action is expected to disagree, and the
+	// importer records those actions as ratified below so the next
+	// boundary enacts them.
+	if govState.EnactCommitteeSet &&
+		!govState.EnactedCommitteeChange &&
+		!govState.EnactedActionTypesUnknown &&
+		!committeeStatesEqual(
+			govState.Committee, govState.CommitteeQuorum,
+			govState.EnactCommittee, govState.EnactCommitteeQuorum,
+		) {
+		return errors.New(
+			"governance committee disagrees between cgsCommittee " +
+				"and rsEnactState with no committee action in rsEnacted",
 		)
 	}
 
@@ -3431,6 +3500,63 @@ func importGovState(
 	return nil
 }
 
+// committeeStatesEqual compares two decoded views of the same
+// StrictMaybe (Committee era). The quorum carries the SNothing/SJust
+// distinction: parseCommittee returns a nil quorum only for SNothing, so
+// an absent committee and a seated committee with an empty member map do
+// not compare equal.
+func committeeStatesEqual(
+	left []ParsedCommitteeMember,
+	leftQuorum *cbor.Rat,
+	right []ParsedCommitteeMember,
+	rightQuorum *cbor.Rat,
+) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	leftKeys := committeeMemberKeys(left)
+	rightKeys := committeeMemberKeys(right)
+	for i := range leftKeys {
+		if leftKeys[i] != rightKeys[i] {
+			return false
+		}
+	}
+	if (leftQuorum == nil) != (rightQuorum == nil) {
+		return false
+	}
+	if leftQuorum == nil {
+		return true
+	}
+	if (leftQuorum.Rat == nil) != (rightQuorum.Rat == nil) {
+		return false
+	}
+	if leftQuorum.Rat == nil {
+		return true
+	}
+	return leftQuorum.Cmp(rightQuorum.Rat) == 0
+}
+
+// committeeMemberKeys renders each member as a sortable key and returns
+// them ordered, so the comparison does not depend on the order the CBOR
+// member map was decoded in.
+func committeeMemberKeys(members []ParsedCommitteeMember) []string {
+	keys := make([]string, 0, len(members))
+	for _, member := range members {
+		keys = append(keys, committeeMemberKey(member))
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func committeeMemberKey(member ParsedCommitteeMember) string {
+	return fmt.Sprintf(
+		"%d:%x:%d",
+		member.ColdCredential.Type,
+		member.ColdCredential.Hash,
+		member.ExpiresEpoch,
+	)
+}
+
 func persistImportedCommitteeCertificates(
 	db *database.Database,
 	certState *ParsedCertState,
@@ -3446,7 +3572,9 @@ func persistImportedCommitteeCertificates(
 	for _, authorization := range certState.CommitteeHotKeys {
 		cold, hot := authorization.Cold, authorization.Hot
 		if len(cold.Hash) != 28 || len(hot.Hash) != 28 {
-			return errors.New("committee authorization credentials must be 28 bytes")
+			return errors.New(
+				"committee authorization credentials must be 28 bytes",
+			)
 		}
 		var coldHash, hotHash lcommon.Blake2b224
 		copy(coldHash[:], cold.Hash)
@@ -3463,7 +3591,9 @@ func persistImportedCommitteeCertificates(
 	}
 	for _, cold := range certState.CommitteeResignations {
 		if len(cold.Hash) != 28 {
-			return errors.New("committee resignation credential must be 28 bytes")
+			return errors.New(
+				"committee resignation credential must be 28 bytes",
+			)
 		}
 		var coldHash lcommon.Blake2b224
 		copy(coldHash[:], cold.Hash)
@@ -3698,11 +3828,12 @@ func committeeRootActionType(noConfidence bool) uint8 {
 // need to depend on the gouroboros lcommon package — these match the
 // CIP-1694 GovActionType wire values.
 const (
-	govActionTypeParameterChange    uint8 = 0
-	govActionTypeHardForkInitiation uint8 = 1
-	govActionTypeNoConfidence       uint8 = 3
-	govActionTypeUpdateCommittee    uint8 = 4
-	govActionTypeNewConstitution    uint8 = 5
+	govActionTypeParameterChange     uint8 = 0
+	govActionTypeHardForkInitiation  uint8 = 1
+	govActionTypeTreasuryWithdrawals uint8 = 2
+	govActionTypeNoConfidence        uint8 = 3
+	govActionTypeUpdateCommittee     uint8 = 4
+	govActionTypeNewConstitution     uint8 = 5
 )
 
 func snapshotEpochAnchorSlot(

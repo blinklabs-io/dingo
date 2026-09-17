@@ -23,7 +23,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	hostplugin "github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/assert"
@@ -41,6 +40,8 @@ func validTestConfig() *Config {
 		RelayPort:            3001,
 		PrivatePort:          3002,
 		MetricsPort:          12798,
+		HealthPort:           DefaultHealthPort,
+		HealthReadyGapSlots:  DefaultHealthReadyGapSlots,
 		DebugBindAddr:        DefaultDebugBindAddr,
 		ShutdownTimeout:      DefaultShutdownTimeout,
 		LedgerCatchupTimeout: DefaultLedgerCatchupTimeout,
@@ -48,7 +49,6 @@ func validTestConfig() *Config {
 		Chainsync:            DefaultChainsyncConfig(),
 		HistoryExpiry:        DefaultHistoryExpiryConfig(),
 		Midnight:             DefaultMidnightConfig(),
-		APIBindAddr:          DefaultAPIBindAddr,
 		Mithril: MithrilConfig{
 			Enabled: true,
 			Backend: "v2",
@@ -71,53 +71,12 @@ func TestValidateDefaultsPass(t *testing.T) {
 	assert.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
 }
 
-func TestValidateAPIExposureRequiresAuthOnRemoteBind(t *testing.T) {
+func TestValidatePublicAPIAllowsLoopback(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.StorageMode = storageModeAPI
-	cfg.APIBindAddr = "0.0.0.0"
-
-	err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "without authentication")
-	assert.Contains(t, err.Error(), "blockfrost")
-}
-
-func TestValidateAPIExposureAllowsUnauthenticatedLoopback(t *testing.T) {
-	cfg := validTestConfig()
-	cfg.StorageMode = storageModeAPI
-	cfg.APIBindAddr = "127.0.0.1"
+	cfg.BindAddr = "127.0.0.1"
 
 	require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
-}
-
-func TestValidateAPIExposureAllowsAuthenticatedRemoteBind(t *testing.T) {
-	cfg := validTestConfig()
-	cfg.StorageMode = storageModeAPI
-	cfg.APIBindAddr = "192.0.2.10"
-	mode := string(apiconfig.AuthModeToken)
-	tokenPath := "/run/secrets/api-token"
-	cfg.API.Auth.Mode = &mode
-	cfg.API.Auth.TokenFilePath = &tokenPath
-
-	require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
-}
-
-func TestValidateAPIExposureHonorsProviderAuthOverride(t *testing.T) {
-	cfg := validTestConfig()
-	cfg.StorageMode = storageModeAPI
-	cfg.APIBindAddr = "192.0.2.10"
-	mode := string(apiconfig.AuthModeToken)
-	tokenPath := "/run/secrets/api-token"
-	cfg.API.Auth.Mode = &mode
-	cfg.API.Auth.TokenFilePath = &tokenPath
-	cfg.Plugins.API.Mesh.Config["auth"] = map[string]any{
-		"mode": "disabled",
-	}
-
-	err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "plugins.api.mesh.config")
-	assert.Contains(t, err.Error(), "without authentication")
 }
 
 func TestValidate(t *testing.T) {
@@ -272,13 +231,50 @@ func TestValidate(t *testing.T) {
 			},
 		},
 		{
-			name: "mesh uses API bind address for port collision checks",
+			// Two spellings of one IPv6 literal name one listener. A
+			// string comparison lets them past validation, and the
+			// health listener is then one of two servers racing for the
+			// same TCP endpoint.
+			name: "equivalent IPv6 spellings collide",
+			modify: func(c *Config) {
+				c.BindAddr = "::1"
+				c.PrivateBindAddr = "127.0.0.1"
+				c.DebugBindAddr = "0:0:0:0:0:0:0:1"
+				c.DebugPort = c.HealthPort
+			},
+			wantErr: "is assigned to both",
+		},
+		{
+			// The long-form IPv6 wildcard selects every interface just as
+			// "::" does, so it overlaps a specific address.
+			name: "long-form IPv6 wildcard overlaps a specific address",
+			modify: func(c *Config) {
+				c.BindAddr = "0:0:0:0:0:0:0:0"
+				c.PrivateBindAddr = "127.0.0.1"
+				c.DebugBindAddr = "127.0.0.1"
+				c.DebugPort = c.HealthPort
+			},
+			wantErr: "is assigned to both",
+		},
+		{
+			// Normalization must not invent collisions: distinct
+			// loopback addresses still legally share a port.
+			name: "distinct IPv6 addresses may share a port",
+			modify: func(c *Config) {
+				c.BindAddr = "::1"
+				c.PrivateBindAddr = "127.0.0.1"
+				c.DebugBindAddr = "::2"
+				c.DebugPort = c.HealthPort
+			},
+		},
+		{
+			name: "mesh shares bind address with metrics for collision checks",
 			modify: func(c *Config) {
 				c.StorageMode = storageModeAPI
 				c.BindAddr = "127.0.0.2"
-				c.APIBindAddr = "127.0.0.1"
 				c.MetricsPort = APIPluginPort(c.Plugins.API.Mesh)
 			},
+			wantErr: "is assigned to both",
 		},
 		{
 			name: "bark on distinct bind address may share a port",
@@ -298,6 +294,31 @@ func TestValidate(t *testing.T) {
 				c.DebugPort = 13000
 				c.Midnight.Host = "127.0.0.2"
 				c.Midnight.Port = 13000
+			},
+			wantErr: "is assigned to both",
+		},
+		{
+			// The health listener binds BindAddr, like metrics, so two of
+			// them on one port is a real bind failure at startup.
+			name: "health port collides with metrics port",
+			modify: func(c *Config) {
+				c.HealthPort = c.MetricsPort
+			},
+			wantErr: "is assigned to both",
+		},
+		{
+			name: "health port disabled with zero",
+			modify: func(c *Config) {
+				c.HealthPort = 0
+			},
+		},
+		{
+			// The health listener is not storage-gated, unlike the API
+			// listeners, so its collision is reported in core mode too.
+			name: "core mode still validates health port collision",
+			modify: func(c *Config) {
+				c.StorageMode = storageModeCore
+				c.HealthPort = c.RelayPort
 			},
 			wantErr: "is assigned to both",
 		},
@@ -746,48 +767,35 @@ func TestValidateMidnightServerPolicy(t *testing.T) {
 			},
 		},
 		{
-			name: "remote plaintext denied",
+			name: "remote plaintext allowed",
 			configure: func(c *Config) {
 				c.StorageMode = storageModeAPI
 				c.Midnight.ServerEnabled = true
 				c.Midnight.Host = "192.0.2.1"
 			},
-			wantErr: "midnight.allowInsecureRemote",
 		},
 		{
-			name: "wildcard ipv4 plaintext denied",
+			name: "wildcard ipv4 plaintext allowed",
 			configure: func(c *Config) {
 				c.StorageMode = storageModeAPI
 				c.Midnight.ServerEnabled = true
 				c.Midnight.Host = "0.0.0.0"
 			},
-			wantErr: "midnight.allowInsecureRemote",
 		},
 		{
-			name: "wildcard ipv6 plaintext denied",
+			name: "wildcard ipv6 plaintext allowed",
 			configure: func(c *Config) {
 				c.StorageMode = storageModeAPI
 				c.Midnight.ServerEnabled = true
 				c.Midnight.Host = "::"
 			},
-			wantErr: "midnight.allowInsecureRemote",
 		},
 		{
-			name: "unspecified plaintext denied",
+			name: "unspecified plaintext allowed",
 			configure: func(c *Config) {
 				c.StorageMode = storageModeAPI
 				c.Midnight.ServerEnabled = true
 				c.Midnight.Host = ""
-			},
-			wantErr: "midnight.allowInsecureRemote",
-		},
-		{
-			name: "remote plaintext explicit override",
-			configure: func(c *Config) {
-				c.StorageMode = storageModeAPI
-				c.Midnight.ServerEnabled = true
-				c.Midnight.Host = "192.0.2.1"
-				c.Midnight.AllowInsecureRemote = true
 			},
 		},
 		{
@@ -1170,6 +1178,35 @@ func TestValidateSyncModeValidatesMetricsPort(t *testing.T) {
 	err := cfg.validate(RunModeSync, minUnprivilegedPort)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid metricsPort")
+}
+
+// TestValidateSyncModeValidatesHealthPort covers the probe listener the
+// Mithril bootstrap now serves. The image's HEALTHCHECK runs against
+// healthPort for the hours a bootstrap takes, so a bad value there has to be
+// rejected before the sync starts rather than surfacing as a refused probe and
+// a replaced container.
+func TestValidateSyncModeValidatesHealthPort(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.HealthPort = 99999999
+	err := cfg.validate(RunModeSync, minUnprivilegedPort)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid healthPort")
+}
+
+// TestValidateSyncModeRejectsHealthMetricsCollision covers the collision the
+// bootstrap can now actually hit: the metrics and health listeners both bind
+// bindAddr during a Mithril sync, so sharing a port fails at bind time and one
+// of the two is lost silently.
+func TestValidateSyncModeRejectsHealthMetricsCollision(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.RelayPort = 0
+	cfg.PrivatePort = 0
+	cfg.ImmutableDbPath = ""
+	cfg.MetricsPort = 12798
+	cfg.HealthPort = 12798
+	err := cfg.validate(RunModeSync, minUnprivilegedPort)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "healthPort")
 }
 
 // TestValidateMithrilReadOnlyModeSkipsAuxPorts is a regression test for

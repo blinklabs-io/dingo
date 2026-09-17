@@ -187,6 +187,10 @@ type Node struct {
 	// own documented "keeps syncing normally" behavior.
 	snapshotMu sync.Mutex
 
+	// health carries the sync signals the readiness probe reads. See
+	// node_health.go; it survives a live database restore/truncate rebuild.
+	health nodeHealth
+
 	// rebuildableMetrics tracks every Prometheus collector registered by a
 	// component a live database restore/truncate rebuilds, so
 	// closeStorageForLiveLifecycleOp can unregister them before the
@@ -214,8 +218,8 @@ func New(cfg Config) (*Node, error) {
 	}
 	for capability, selection := range cfg.pluginSelections {
 		// API capabilities are validated against their *merged* config
-		// (shared api.tls/api.auth defaults folded in) so an invalid
-		// effective TLS/auth policy -- e.g. a partial certificate/key
+		// (shared api.tls defaults folded in) so an invalid
+		// effective TLS policy -- e.g. a partial certificate/key
 		// pair -- is rejected here, before any listener starts, using
 		// the exact same merge apiPluginSelection applies at Start()/
 		// reinitializeAPIServers time. See apiProviderConfig.
@@ -292,9 +296,9 @@ func legacyUtxorpcTLSPolicy(cfg *Config) apiconfig.TLSPolicy {
 	}
 }
 
-// apiProviderConfig merges the shared api.tls/api.auth policy (and, for
+// apiProviderConfig merges the shared api.tls policy (and, for
 // UTxORPC only, the legacy root TLS compatibility fields) into selection's
-// own "tls"/"auth" config sections, field by field, and returns the result.
+// own "tls" config section, field by field, and returns the result.
 // It is the single place this merge happens, called both by the early
 // plugin-selection validation in New() and by apiPluginSelection, so a
 // provider config validated at startup and the one actually resolved at
@@ -311,7 +315,6 @@ func (c *Config) apiProviderConfig(
 		selection.Config,
 		legacyTLS,
 		c.apiConfig.TLS,
-		c.apiConfig.Auth,
 	)
 	if err != nil {
 		return selection, fmt.Errorf(
@@ -326,7 +329,7 @@ func (c *Config) apiProviderConfig(
 // apiProviderConfigPath maps each API capability to the dotted config path
 // its provider config lives at, for error messages -- see
 // validateAPIProviderSecurityPolicy and each provider's own
-// cfg.TLS.Resolve/cfg.Auth.Resolve call, which use the identical path.
+// cfg.TLS.Resolve call, which uses the identical path.
 var apiProviderConfigPath = map[plugin.Capability]string{
 	plugin.CapabilityAPIBlockfrost: "plugins.api.blockfrost.config",
 	plugin.CapabilityAPIMesh:       "plugins.api.mesh.config",
@@ -334,8 +337,8 @@ var apiProviderConfigPath = map[plugin.Capability]string{
 }
 
 // validateAPIProviderSecurityPolicy resolves and validates the merged
-// tls/auth sections of an API provider's config (already merged with the
-// shared api.tls/api.auth defaults by apiProviderConfig), surfacing a
+// tls section of an API provider's config (already merged with the
+// shared api.tls defaults by apiProviderConfig), surfacing a
 // partial certificate/key pair or an invalid mode before any listener
 // starts -- the same validation each provider's own RegisterProvider
 // factory performs at Resolve()/Start() time, run here again so New()
@@ -350,13 +353,6 @@ func validateAPIProviderSecurityPolicy(
 		return fmt.Errorf("%s.tls: %w", configPath, err)
 	}
 	if _, err := tlsPolicy.Resolve(configPath + ".tls"); err != nil {
-		return err
-	}
-	authPolicy, err := apiconfig.DecodeAuthPolicy(rawConfig)
-	if err != nil {
-		return fmt.Errorf("%s.auth: %w", configPath, err)
-	}
-	if _, err := authPolicy.Resolve(configPath + ".auth"); err != nil {
 		return err
 	}
 	return nil
@@ -579,6 +575,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			StorageMode:    string(n.config.storageMode),
 			MaxConnections: n.config.DatabaseWorkerPoolConfig.WorkerPoolSize,
 			Logger:         n.config.logger, PromRegistry: n.config.promRegistry,
+			TracingEnabled: n.config.tracing,
 		},
 	)
 	if err != nil {
@@ -871,6 +868,17 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		return fmt.Errorf("configuring snapshot manager: %w", err)
 	}
 	n.snapshotMgr.SetPromRegistry(n.config.promRegistry)
+	// When the Koios parity observer is enabled, retain reward_account_output
+	// without bound in CORE storage mode too (dingo #4188): the observer only
+	// validates a closed epoch after fetching and comparing against Koios over
+	// the network, which can fall arbitrarily far behind chain progression
+	// during a from-genesis or catch-up sync, well past the fixed 4-epoch
+	// window cleanupOldSnapshots otherwise prunes reward_account_output to.
+	// Set before CaptureGenesisSnapshot/Start below, matching every other
+	// snapshot-manager configuration call in this sequence.
+	n.snapshotMgr.SetRewardAccountOutputRetentionUnbounded(
+		n.config.koiosParity.Enabled,
+	)
 	// Prune pool snapshots through the deferred-header retention guard, so a
 	// snapshot a queued/deferred header still needs for leader validation is
 	// never pruned out from under it and misread as pool absence, and the
@@ -942,7 +950,8 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			ledgerStateDrainConfirmed = false
 			n.config.logger.Error(
 				"ledger state did not fully shut down; skipping database close because a background goroutine may still be using it",
-				"error", err,
+				"error",
+				err,
 			)
 		}
 	})
@@ -1396,7 +1405,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			utxorpc.ProviderDependencies{
 				Logger: n.config.logger, EventBus: n.eventBus,
 				LedgerState: n.ledgerState, Mempool: n.mempool,
-				Host:               n.config.apiBindAddr,
+				Host:               n.config.bindAddr,
 				CORSAllowedOrigins: n.config.corsAllowedOrigins,
 			},
 		)
@@ -1486,16 +1495,15 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 					}
 					return block.Number, true, nil
 				},
-				Host:                n.config.midnight.Host,
-				Port:                n.config.midnight.Port,
-				TLSCertFilePath:     n.config.tlsCertFilePath,
-				TLSKeyFilePath:      n.config.tlsKeyFilePath,
-				AllowInsecureRemote: n.config.midnight.AllowInsecureRemote,
-				ReflectionEnabled:   n.config.midnight.ReflectionEnabled,
-				ShutdownTimeout:     n.config.shutdownTimeout,
-				Database:            midnightserver.NewDatabase(n.db),
-				SlotTimer:           n.ledgerState,
-				PromRegistry:        n.config.promRegistry,
+				Host:              n.config.midnight.Host,
+				Port:              n.config.midnight.Port,
+				TLSCertFilePath:   n.config.tlsCertFilePath,
+				TLSKeyFilePath:    n.config.tlsKeyFilePath,
+				ReflectionEnabled: n.config.midnight.ReflectionEnabled,
+				ShutdownTimeout:   n.config.shutdownTimeout,
+				Database:          midnightserver.NewDatabase(n.db),
+				SlotTimer:         n.ledgerState,
+				PromRegistry:      n.config.promRegistry,
 			},
 		)
 		if err != nil {
@@ -1537,7 +1545,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			n.ctx, n.pluginHost, plugin.CapabilityAPIBlockfrost,
 			blockfrostSelection.Provider, blockfrostSelection.Config,
 			blockfrost.ProviderDependencies{
-				Node: adapter, Logger: n.config.logger, Host: n.config.apiBindAddr,
+				Node: adapter, Logger: n.config.logger, Host: n.config.bindAddr,
 				CORSAllowedOrigins: n.config.corsAllowedOrigins,
 			},
 		)
@@ -1580,7 +1588,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 				Database:            mesh.NewMeshDatabase(n.db),
 				Chain:               n.ledgerState.Chain(),
 				Mempool:             n.mempool,
-				Host:                n.config.apiBindAddr,
+				Host:                n.config.bindAddr,
 				Network:             n.config.network,
 				NetworkMagic:        n.config.networkMagic,
 				GenesisHash:         genesisHash,
@@ -1812,14 +1820,19 @@ func taintValue(relaxed bool) string {
 // subscriber does node-to-node work and a local client reconnecting in a
 // tight loop would otherwise wedge the EventBus. This callback is the NtC
 // counterpart to HandleConnClosedEvent, which already performs the
-// equivalent RemoveClient cleanup for NtN closes via that event. Guarding on
-// isNtC here keeps the release exactly-once: an NtN close still cleans up
-// only through HandleConnClosedEvent.
+// equivalent RemoveClient cleanup for NtN closes via that event. Guarding
+// chainsync cleanup on isNtC keeps RemoveClient exactly-once; serving waits
+// are released directly for both connection modes.
 func (n *Node) handleConnManagerClosed(
 	connId ouroboros.ConnectionId,
 	isNtC bool,
 	_ error,
 ) {
+	// Release both NtC closure waits and NtN notification waits independently
+	// of the protocol receive loop that is running the serving callback.
+	if o := n.ouroboros(); o != nil {
+		o.ReleaseLeiosServeWaiters(connId)
+	}
 	if !isNtC {
 		return
 	}
@@ -1827,11 +1840,6 @@ func (n *Node) handleConnManagerClosed(
 		n.chainsyncState.RemoveClient(connId)
 	}
 	if o := n.ouroboros(); o != nil {
-		// Wake any NtC chainsync server callback parked waiting for this
-		// connection's certified endorser closure. connmanager drives this
-		// callback from its own per-connection goroutine, so it runs even
-		// while that server callback still owns gouroboros's receive loop.
-		o.ReleaseLeiosServeWaiters(connId)
 		// Clear any LocalStateQuery pinned point this connection acquired:
 		// a client that disconnects without a clean Release must not leak
 		// its map entry (blinklabs-io/dingo#382).
@@ -2099,22 +2107,83 @@ func (n *Node) nodeSettingsGateValues() nodesettings.Values {
 // stake aggregate existed. It runs after commit-timestamp recovery and before
 // ledger processing can advance the chain, so the next epoch-boundary snapshot
 // cannot observe a partially populated aggregate.
+//
+// SkipRewardLiveStakeBackfillCheck bypasses the reward_live_stake half of
+// this. The consistency check itself -- not just a genuine repair -- scans
+// the whole live UTxO table every call, so on a mainnet-scale database it
+// costs as much as a full rebuild on every single startup regardless of
+// whether one is needed. This is for advanced/diagnostic use only: skipping
+// it is safe when the database is already known to be consistent (e.g.
+// repeated restarts during investigation of an unrelated issue), but unsafe
+// to leave enabled permanently since it is what catches a stale or
+// pre-migration reward_live_stake table.
+//
+// Both probes are read-only and run on the read-only metadata connection; the
+// writer is opened only for an actual rebuild. See ARCHITECTURE.md.
+//
+// The flag deliberately does not reach StaleConsensusStakeSnapshotsExist.
+// That is a different kind of check: a pair of indexed EXISTS probes whose
+// cost does not scale with the UTxO set, guarding against snapshots produced
+// by an older accounting version. It fails closed because such a database
+// cannot be safely reconstructed, and no cost argument justifies disabling
+// it, so it runs on every startup whether or not the scan is skipped.
 func (n *Node) backfillRewardLiveStake() error {
-	return n.db.MetadataTxn(true).Do(func(txn *database.Txn) error {
-		needed, err := n.db.Metadata().RewardLiveStakeNeedsBackfill(
-			txn.Metadata(),
-		)
-		if err != nil {
-			return fmt.Errorf("check reward live stake backfill: %w", err)
+	// Both probes are read-only, so they run on the read-only metadata
+	// connection and the writer stays idle. Only a genuine rebuild needs the
+	// writer, which is opened separately below. Holding the writer open across
+	// the probes would contend with block processing on SQLite and, when the
+	// scan is skipped, would defeat the startup-cost purpose of the flag.
+	var (
+		needed         bool
+		staleSnapshots bool
+		staleEpochs    []uint64
+	)
+	if err := n.db.MetadataTxn(false).Do(func(txn *database.Txn) error {
+		if n.config.skipRewardLiveStakeBackfillCheck {
+			n.config.logger.Warn(
+				"skipping reward_live_stake backfill consistency check",
+				"component", "node",
+			)
+		} else {
+			var err error
+			needed, err = n.db.Metadata().RewardLiveStakeNeedsBackfill(
+				txn.Metadata(),
+			)
+			if err != nil {
+				return fmt.Errorf("check reward live stake backfill: %w", err)
+			}
 		}
-		staleSnapshots, err := n.db.Metadata().
+		var err error
+		staleSnapshots, err = n.db.Metadata().
 			StaleConsensusStakeSnapshotsExist(
 				txn.Metadata(),
 			)
 		if err != nil {
 			return fmt.Errorf("check stake snapshot provenance: %w", err)
 		}
-		if needed {
+		if staleSnapshots {
+			// Diagnostics only: naming the affected epochs in the error below
+			// does not change the fail-closed decision above.
+			staleEpochs, err = n.db.Metadata().
+				StaleConsensusStakeSnapshotEpochs(
+					txn.Metadata(),
+				)
+			if err != nil {
+				return fmt.Errorf(
+					"list stale stake snapshot epochs: %w",
+					err,
+				)
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	// Both call sites run before ledger processing can advance the chain, so
+	// nothing can write reward_live_stake between the probe above and the
+	// rebuild below.
+	if needed {
+		if err := n.db.MetadataTxn(true).Do(func(txn *database.Txn) error {
 			tip, err := n.db.GetTip(txn)
 			if err != nil {
 				return fmt.Errorf(
@@ -2129,16 +2198,22 @@ func (n *Node) backfillRewardLiveStake() error {
 			if err := n.db.RebuildRewardLiveStake(tip.Point.Slot, txn); err != nil {
 				return fmt.Errorf("backfill reward live stake: %w", err)
 			}
+			return nil
+		}); err != nil {
+			return err
 		}
-		if staleSnapshots {
-			return errors.New(
-				"consensus stake snapshots were produced by an older accounting " +
-					"version and cannot be safely reconstructed from this database; " +
-					"rebootstrap from immutable blocks or a trusted snapshot",
-			)
-		}
-		return nil
-	})
+	}
+	if staleSnapshots {
+		return fmt.Errorf(
+			"consensus stake snapshots for epoch(s) %v were produced by an "+
+				"older accounting version and cannot be safely reconstructed "+
+				"from this database; rebootstrap from immutable blocks or a "+
+				"trusted snapshot. See DATABASE.md's "+
+				"RewardStakeCalculationVersion section",
+			staleEpochs,
+		)
+	}
+	return nil
 }
 
 // startDeferredIndexMaintenance finishes lazy deferred-index rebuilds

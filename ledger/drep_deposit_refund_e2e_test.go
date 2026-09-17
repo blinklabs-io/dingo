@@ -185,7 +185,7 @@ func TestDRepDeregistrationRefundsRecordedDeposit(t *testing.T) {
 	)
 
 	// Supporting evidence for why the acceptance holds.
-	reg, err := lv.DRepRegistration(cred.Credential)
+	reg, err := lv.DRepRegistration(cred)
 	require.NoError(t, err)
 	require.NotNil(t, reg)
 	require.NotNil(t, reg.Deposit)
@@ -210,7 +210,7 @@ func TestDRepRegistrationsReportRecordedDeposits(t *testing.T) {
 	regs, err := lv.DRepRegistrations()
 	require.NoError(t, err)
 	require.Len(t, regs, 1)
-	require.Equal(t, active.Credential, regs[0].Credential)
+	require.Equal(t, active, regs[0].Credential)
 	require.NotNil(t, regs[0].Deposit)
 	require.Equal(t, uint64(drepRefundTestRecordedDeposit), *regs[0].Deposit)
 }
@@ -233,7 +233,7 @@ func TestDRepRegistrationReportsNilForUnregisteredCredential(t *testing.T) {
 		Active:        true,
 	}))
 
-	reg, err := lv.DRepRegistration(cred.Credential)
+	reg, err := lv.DRepRegistration(cred)
 	require.NoError(t, err)
 	require.NotNil(t, reg)
 	require.Nil(t, reg.Deposit)

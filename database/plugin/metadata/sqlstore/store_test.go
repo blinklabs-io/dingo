@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -27,9 +28,11 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	_ "github.com/glebarez/go-sqlite"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
 )
 
 var testStoreSequence atomic.Uint64
@@ -450,6 +453,132 @@ func TestStoreMaintenanceLifecycle(t *testing.T) {
 	}
 	require.NoError(t, store.Close())
 	require.Equal(t, uint32(1), calls.Load())
+}
+
+// TestStoreCheckpointLifecycle mirrors TestStoreMaintenanceLifecycle for the
+// independent Checkpoint ticker: it must start on its own cadence, run at
+// least once, and CloseContext must wait for an in-flight call to finish
+// rather than abandoning it mid-run.
+func TestStoreCheckpointLifecycle(t *testing.T) {
+	t.Parallel()
+	db, err := sql.Open(
+		"sqlite",
+		fmt.Sprintf(
+			"file:sqlstore_%d?mode=memory&cache=shared",
+			testStoreSequence.Add(1),
+		),
+	)
+	require.NoError(t, err)
+	started := make(chan struct{})
+	var calls atomic.Uint32
+	store, err := New(Config{
+		WriteDB: db,
+		Dialect: SQLiteDialect(),
+		Checkpoint: func(ctx context.Context) error {
+			if calls.Add(1) == 1 {
+				close(started)
+			}
+			<-ctx.Done()
+			return ctx.Err()
+		},
+		CheckpointInterval: time.Millisecond,
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.Start(context.Background()))
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("checkpoint did not start")
+	}
+	require.NoError(t, store.Close())
+	require.Equal(t, uint32(1), calls.Load())
+}
+
+// TestStoreCheckpointTickerIndependentOfMaintenance proves the two tickers
+// run on separate cadences: a Checkpoint ticking every millisecond fires
+// several times while a single Maintenance call (configured to run once,
+// slowly) is still in flight, so a slow VACUUM can never delay or skip a WAL
+// checkpoint and vice versa -- the two must not share one ticker or one
+// admission gate.
+func TestStoreCheckpointTickerIndependentOfMaintenance(t *testing.T) {
+	t.Parallel()
+	db, err := sql.Open(
+		"sqlite",
+		fmt.Sprintf(
+			"file:sqlstore_%d?mode=memory&cache=shared",
+			testStoreSequence.Add(1),
+		),
+	)
+	require.NoError(t, err)
+	maintenanceStarted := make(chan struct{})
+	maintenanceRelease := make(chan struct{})
+	var maintenanceCalls atomic.Uint32
+	var checkpointCalls atomic.Uint32
+	store, err := New(Config{
+		WriteDB: db,
+		Dialect: SQLiteDialect(),
+		Maintenance: func(ctx context.Context) error {
+			// The 1ms MaintenanceInterval can re-admit and call this again
+			// before the test calls store.Close(), which is what actually
+			// stops the ticker: guard the one-shot close(maintenanceStarted)
+			// against a second invocation rather than closing it unconditionally.
+			if maintenanceCalls.Add(1) == 1 {
+				close(maintenanceStarted)
+			}
+			select {
+			case <-maintenanceRelease:
+			case <-ctx.Done():
+			}
+			return ctx.Err()
+		},
+		MaintenanceInterval: time.Millisecond,
+		Checkpoint: func(ctx context.Context) error {
+			checkpointCalls.Add(1)
+			return nil
+		},
+		CheckpointInterval: time.Millisecond,
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.Start(context.Background()))
+
+	select {
+	case <-maintenanceStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("maintenance did not start")
+	}
+	// Maintenance is now blocked in-flight (holding its own admission slot).
+	// Give the checkpoint ticker time to fire multiple times regardless.
+	require.Eventually(t, func() bool {
+		return checkpointCalls.Load() >= 3
+	}, 2*time.Second, time.Millisecond, "checkpoint ticker must keep running while maintenance is blocked")
+
+	close(maintenanceRelease)
+	require.NoError(t, store.Close())
+}
+
+func TestStoreMaintenancePrunesAfterOptionalMaintenanceError(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	const coldTag = uint8(lcommon.CredentialTypeAddrKeyHash)
+	cold := credentialHash(0xc6)
+	for i := 1; i <= committeeAuthPruneBatch*2; i++ {
+		seedAuthorization(
+			t, store, coldTag, cold,
+			uint8(lcommon.CredentialTypeAddrKeyHash), hotHash(0x74, i),
+			uint64(i), uint64(i), // #nosec G115
+		)
+	}
+	require.NoError(t, store.SetTip(ochainsync.Tip{
+		Point: ocommon.Point{Slot: preprodTipSlot, Hash: []byte("tip")},
+	}, nil))
+	maintenanceErr := errors.New("optional maintenance failed")
+	store.maintenance = func(context.Context) error {
+		return maintenanceErr
+	}
+
+	err := store.runMaintenance(context.Background())
+	require.ErrorIs(t, err, maintenanceErr)
+	require.Equal(t, 1, authRowCountFor(t, store, coldTag, cold))
 }
 
 func TestStoreStartsForPostgresDialect(t *testing.T) {

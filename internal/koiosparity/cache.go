@@ -24,7 +24,7 @@ import (
 	"path/filepath"
 	"time"
 
-	_ "github.com/glebarez/go-sqlite"
+	_ "modernc.org/sqlite"
 )
 
 const accountCheckpointRetentionEpochs = 4
@@ -204,7 +204,8 @@ type KoiosAccountRewards struct {
 	// not yet compared against anything in Dingo's schema.
 	SpendableEpoch uint64
 	// PoolIDBech32 is Koios's pool_id_bech32 — null/empty for reward types
-	// with no associated pool. Stored for reference only.
+	// with no associated pool. It identifies the source contribution during
+	// CompareAccountEpoch aggregation.
 	PoolIDBech32 string
 	FetchedAt    time.Time
 }
@@ -603,11 +604,37 @@ func (c *Cache) UpsertEpochParams(p KoiosEpochParams) error {
 			 decentralisation=excluded.decentralisation,
 			 min_utxo_value=excluded.min_utxo_value, coins_per_utxo_size=excluded.coins_per_utxo_size,
 			 fetched_at=excluded.fetched_at`,
-			p.Network, p.Epoch, p.Era, p.MinFeeA, p.MinFeeB, p.MaxBlockBodySize, p.MaxTxSize,
-			p.MaxBlockHeaderSize, p.KeyDeposit, p.PoolDeposit, p.MaxEpoch, p.NOpt, p.A0, p.Rho, p.Tau,
-			p.ProtocolMajor, p.ProtocolMinor, p.MinPoolCost, p.PriceMem, p.PriceStep, p.MaxTxExMem,
-			p.MaxTxExSteps, p.MaxBlockExMem, p.MaxBlockExSteps, p.MaxValueSize, p.CollateralPercentage,
-			p.MaxCollateralInputs, p.CostModels, p.Decentralisation, p.MinUtxoValue, p.CoinsPerUtxoSize,
+			p.Network,
+			p.Epoch,
+			p.Era,
+			p.MinFeeA,
+			p.MinFeeB,
+			p.MaxBlockBodySize,
+			p.MaxTxSize,
+			p.MaxBlockHeaderSize,
+			p.KeyDeposit,
+			p.PoolDeposit,
+			p.MaxEpoch,
+			p.NOpt,
+			p.A0,
+			p.Rho,
+			p.Tau,
+			p.ProtocolMajor,
+			p.ProtocolMinor,
+			p.MinPoolCost,
+			p.PriceMem,
+			p.PriceStep,
+			p.MaxTxExMem,
+			p.MaxTxExSteps,
+			p.MaxBlockExMem,
+			p.MaxBlockExSteps,
+			p.MaxValueSize,
+			p.CollateralPercentage,
+			p.MaxCollateralInputs,
+			p.CostModels,
+			p.Decentralisation,
+			p.MinUtxoValue,
+			p.CoinsPerUtxoSize,
 			p.FetchedAt,
 		)
 		return err
@@ -640,14 +667,15 @@ func (c *Cache) GetEpochParams(
 	err := c.db.QueryRow(
 		`SELECT `+epochParamsColumns+` FROM koios_epoch_params WHERE network = ? AND epoch = ?`,
 		network, epoch,
-	).Scan(
-		&p.Network, &p.Epoch, &p.Era, &p.MinFeeA, &p.MinFeeB, &p.MaxBlockBodySize, &p.MaxTxSize,
-		&p.MaxBlockHeaderSize, &p.KeyDeposit, &p.PoolDeposit, &p.MaxEpoch, &p.NOpt, &p.A0, &p.Rho, &p.Tau,
-		&p.ProtocolMajor, &p.ProtocolMinor, &p.MinPoolCost, &p.PriceMem, &p.PriceStep, &p.MaxTxExMem,
-		&p.MaxTxExSteps, &p.MaxBlockExMem, &p.MaxBlockExSteps, &p.MaxValueSize, &p.CollateralPercentage,
-		&p.MaxCollateralInputs, &p.CostModels, &p.Decentralisation, &p.MinUtxoValue, &p.CoinsPerUtxoSize,
-		&p.FetchedAt,
-	)
+	).
+		Scan(
+			&p.Network, &p.Epoch, &p.Era, &p.MinFeeA, &p.MinFeeB, &p.MaxBlockBodySize, &p.MaxTxSize,
+			&p.MaxBlockHeaderSize, &p.KeyDeposit, &p.PoolDeposit, &p.MaxEpoch, &p.NOpt, &p.A0, &p.Rho, &p.Tau,
+			&p.ProtocolMajor, &p.ProtocolMinor, &p.MinPoolCost, &p.PriceMem, &p.PriceStep, &p.MaxTxExMem,
+			&p.MaxTxExSteps, &p.MaxBlockExMem, &p.MaxBlockExSteps, &p.MaxValueSize, &p.CollateralPercentage,
+			&p.MaxCollateralInputs, &p.CostModels, &p.Decentralisation, &p.MinUtxoValue, &p.CoinsPerUtxoSize,
+			&p.FetchedAt,
+		)
 	if err != nil {
 		return nil, err
 	}
@@ -1209,7 +1237,10 @@ func (c *Cache) GetZeroRewardSummary(
 // sequential epoch check). An evicted incomplete epoch is correct to restart
 // from scratch; retaining it indefinitely would let repeated failed backfills
 // defeat the bound.
-func (c *Cache) PruneAccountCoverage(network string, throughEpoch uint64) error {
+func (c *Cache) PruneAccountCoverage(
+	network string,
+	throughEpoch uint64,
+) error {
 	if throughEpoch < accountCheckpointRetentionEpochs {
 		return nil
 	}
@@ -2080,7 +2111,9 @@ func (c *Cache) assertClaimedSource(tx *sql.Tx, network string) error {
 	if current != claimed {
 		return fmt.Errorf(
 			"koios source for %q changed from %q to %q while this run was writing; refusing to write another host's answers into this cache",
-			network, claimed, current,
+			network,
+			claimed,
+			current,
 		)
 	}
 	return nil
@@ -2317,9 +2350,9 @@ GROUP BY network`); err != nil {
 			err,
 		)
 	}
-	// idx_kar_net_epoch_addr_type must be non-unique: Koios can legitimately
-	// return duplicate (network, epoch, stake_address, reward_type) rows
-	// (see CategoryAcctDuplicate's doc comment), and a unique constraint
+	// idx_kar_net_epoch_addr_type must be non-unique: multiple pool
+	// contributions can legitimately share (network, epoch, stake_address,
+	// reward_type), and a unique constraint
 	// would abort CommitAccountRewardsForEpoch's insert with a constraint
 	// error before CompareAccountEpoch ever gets a chance to detect and
 	// report the duplicate as an acct_duplicate FAIL. Explicitly drop any

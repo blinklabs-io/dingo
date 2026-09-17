@@ -87,10 +87,17 @@ type Index struct {
 	//   - Any WHERE predicate used by the rollback path
 	//     (DeleteXAfterSlot), since rollbacks can occur as soon
 	//     as live sync resumes.
+	//   - The child column of any ON DELETE CASCADE foreign key
+	//     whose parent rows the rollback path deletes. SQLite
+	//     enforces such a cascade with an implicit
+	//     DELETE FROM child WHERE fk_column = ? per deleted parent
+	//     row, so without the child index each parent row scans the
+	//     whole child table. EXPLAIN QUERY PLAN of the parent
+	//     statement does not show it.
 	//
-	// Everything else is lazy: FK reverse-lookups,
-	// witness/redeemer secondary indexes, and any column that is
-	// only SELECTed or SET but never filtered.
+	// Everything else is lazy: FK reverse-lookups no cascade
+	// depends on, witness/redeemer secondary indexes, and any
+	// column that is only SELECTed or SET but never filtered.
 	Critical bool
 }
 
@@ -160,10 +167,20 @@ var Manifest = []Index{
 		Columns: []string{"added_slot"},
 		Notes:   "Rollback range scan", Critical: true,
 	},
+	// idx_utxo_transaction_id is critical because the rollback sweep's
+	// DELETE FROM "transaction" WHERE slot > ? cascades through
+	// fk_transaction_outputs, and SQLite resolves that cascade with one
+	// DELETE FROM utxo WHERE transaction_id = ? per deleted transaction
+	// row. Deferred, each of those is a full scan of utxo: measured on a
+	// preview relay, a 1,001-transaction rollback against a 3.2M row utxo
+	// table took 556s with the index absent and 0.095s with it present,
+	// with no log output in between.
 	{
 		Name: "idx_utxo_transaction_id", Table: "utxo",
 		Columns: []string{"transaction_id"},
-		Notes:   "Foreign-key reverse lookup",
+		Notes: "Rollback DELETE cascade into utxo " +
+			"(fk_transaction_outputs)",
+		Critical: true,
 	},
 	{
 		Name: "idx_utxo_deleted_staking_amount", Table: "utxo",

@@ -280,6 +280,7 @@ func buildConwayValidationRules() []indexedUtxoValidationRule {
 		lcommon.UtxoValidationRulePlutusScripts,
 		lcommon.UtxoValidationRuleCommitteeCertificates,
 		lcommon.UtxoValidationRuleUnknownVoters,
+		lcommon.UtxoValidationRuleDelegation,
 	}
 	descriptors := conway.UtxoValidationRuleDescriptors()
 	indexes := make([]int, len(skipRuleIds))
@@ -305,6 +306,10 @@ func buildConwayValidationRules() []indexedUtxoValidationRule {
 		indexedUtxoValidationRule{
 			index:          indexes[4],
 			validationFunc: validateUnknownVoters,
+		},
+		indexedUtxoValidationRule{
+			index:          indexes[5],
+			validationFunc: validateDelegationConwayBootstrapAware,
 		},
 	)
 	slices.SortFunc(ret, func(a, b indexedUtxoValidationRule) int {
@@ -641,9 +646,13 @@ func validateTxPlutusConwayWithContext(
 			}
 		}
 		redeemer := script.Redeemer{
-			Tag:     redeemerKey.Tag,
-			Index:   redeemerKey.Index,
-			Data:    redeemerValue.Data.Data,
+			Tag:   redeemerKey.Tag,
+			Index: redeemerKey.Index,
+			// Normalize: cardano-ledger rebuilds every script-visible value,
+			// so a script observes the encoding the Plutus encoder writes,
+			// not the definite/indefinite-length choice this transaction was
+			// built with. serialiseData exposes the difference.
+			Data:    data.Normalize(redeemerValue.Data.Data),
 			ExUnits: redeemerValue.ExUnits,
 		}
 		_, execErr, err := evaluateConwayPlutusScript(
@@ -1175,13 +1184,17 @@ func evaluateConwayPlutusScript(
 			return lcommon.ExUnits{}, nil, err
 		}
 		ctx := script.NewScriptContextV3(txInfoV3, redeemer, purpose)
+		costModel, err := requiredCostModel(pp.CostModels, 2, "PlutusV3")
+		if err != nil {
+			return lcommon.ExUnits{}, nil, err
+		}
 		evalContext, err := cek.NewEvalContext(
 			lang.LanguageVersionV3,
 			cek.ProtoVersion{
 				Major: pp.ProtocolVersion.Major,
 				Minor: pp.ProtocolVersion.Minor,
 			},
-			pp.CostModels[2],
+			costModel,
 		)
 		if err != nil {
 			return lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
@@ -1217,13 +1230,17 @@ func evaluateConwayPlutusScript(
 			return lcommon.ExUnits{}, nil, err
 		}
 		ctx := script.NewScriptContextV1V2(txInfoV2, purpose)
+		costModel, err := requiredCostModel(pp.CostModels, 1, "PlutusV2")
+		if err != nil {
+			return lcommon.ExUnits{}, nil, err
+		}
 		evalContext, err := cek.NewEvalContext(
 			lang.LanguageVersionV2,
 			cek.ProtoVersion{
 				Major: pp.ProtocolVersion.Major,
 				Minor: pp.ProtocolVersion.Minor,
 			},
-			pp.CostModels[1],
+			costModel,
 		)
 		if err != nil {
 			return lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
@@ -1251,13 +1268,17 @@ func evaluateConwayPlutusScript(
 			return lcommon.ExUnits{}, nil, err
 		}
 		ctx := script.NewScriptContextV1V2(txInfoV1, purpose)
+		costModel, err := requiredCostModel(pp.CostModels, 0, "PlutusV1")
+		if err != nil {
+			return lcommon.ExUnits{}, nil, err
+		}
 		evalContext, err := cek.NewEvalContext(
 			lang.LanguageVersionV1,
 			cek.ProtoVersion{
 				Major: pp.ProtocolVersion.Major,
 				Minor: pp.ProtocolVersion.Minor,
 			},
-			pp.CostModels[0],
+			costModel,
 		)
 		if err != nil {
 			return lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
@@ -1442,7 +1463,10 @@ func EvaluateTxConway(
 		}
 		retTotalExUnits, err = SafeAddExUnits(retTotalExUnits, usedBudget)
 		if err != nil {
-			return 0, lcommon.ExUnits{}, nil, fmt.Errorf("aggregate execution units: %w", err)
+			return 0, lcommon.ExUnits{}, nil, fmt.Errorf(
+				"aggregate execution units: %w",
+				err,
+			)
 		}
 		retRedeemerExUnits[lcommon.RedeemerKey{
 			Tag:   redeemer.Tag,

@@ -208,7 +208,7 @@ func TestPruneAccountCoverageBoundsCheckpointRows(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	const firstEpoch = uint64(100)
 	const epochs = accountCheckpointRetentionEpochs + 3
-	for i := uint64(0); i < epochs; i++ {
+	for i := range uint64(epochs) {
 		epoch := firstEpoch + i
 		require.NoError(t, cache.SaveAccountFetchChunkProgress(
 			"preview", epoch, fmt.Sprintf("chunk-%d", epoch),
@@ -226,7 +226,10 @@ func TestPruneAccountCoverageBoundsCheckpointRows(t *testing.T) {
 			}}, 3, true, now,
 		))
 	}
-	require.NoError(t, cache.PruneAccountCoverage("preview", firstEpoch+epochs-1))
+	require.NoError(
+		t,
+		cache.PruneAccountCoverage("preview", firstEpoch+epochs-1),
+	)
 
 	var checked, staged int
 	require.NoError(t, cache.db.QueryRow(
@@ -248,9 +251,16 @@ func TestPruneAccountCoverageBoundsCheckpointRows(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, oldRows, 1)
 	require.Empty(t, CompareAccountEpoch(
-		"preview", oldEpoch, oldRows,
-		[]DingoAccountReward{{StakeAddress: "stake1reward", RewardType: "member", Amount: "42"}},
-		now, 0, time.Time{}, false,
+		"preview",
+		oldEpoch,
+		oldRows,
+		[]DingoAccountReward{
+			{StakeAddress: "stake1reward", RewardType: "member", Amount: "42"},
+		},
+		now,
+		0,
+		time.Time{},
+		false,
 	))
 }
 
@@ -324,10 +334,11 @@ func TestAccountCoverageSummaryMigrationBackfillsLegacyRows(t *testing.T) {
 // idx_kar_net_epoch_addr_type's widening from unique to non-unique actually
 // lets CommitAccountRewardsForEpoch insert two rows sharing the exact same
 // (network, epoch, stake_address, reward_type) key without erroring — the
-// real-world case is Koios itself legitimately returning a duplicate
-// /account_reward_history row (see CategoryAcctDuplicate's doc comment), not
-// just two rows with different reward_type values for the same address
-// (already covered by TestCommitAccountRewardsForEpoch). Before the index was
+// real-world case is multiple pool contributions sharing the same key, plus a
+// literal duplicate that CompareAccountEpoch must report (see
+// CategoryAcctDuplicate's doc comment), not just two rows with different
+// reward_type values for the same address (already covered by
+// TestCommitAccountRewardsForEpoch). Before the index was
 // widened to non-unique, this insert would have failed with a UNIQUE
 // constraint violation before CompareAccountEpoch ever got a chance to flag
 // the duplicate as acct_duplicate.
