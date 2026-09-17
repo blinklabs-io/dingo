@@ -395,7 +395,7 @@ func openSQLStore(
 			return ensureWALJournalMode(ctx, databaseURI)
 		}
 		locker = migrations.NewFileLocker(databasePath + ".migrate.lock")
-		diskSizeFunc = sqliteDiskSize(readDB, databasePath)
+		diskSizeFunc = sqliteDiskSize(databaseURI, databasePath)
 		maintenance = func(ctx context.Context) error {
 			_, err := writeDB.ExecContext(ctx, "VACUUM")
 			return err
@@ -453,8 +453,48 @@ func openSQLStore(
 // stall indefinitely behind a slow or wedged connection.
 const sqliteDiskSizeQueryTimeout = 5 * time.Second
 
+// sqliteDiskSize returns a Store.DiskSize callback that opens a dedicated
+// connection fresh for each call and closes it immediately after -- never
+// against writeDB or readDB. This mirrors checkpointWAL's own dedicated
+// connection above. An earlier version queried readDB directly: one gauge
+// read left a connection idled back into that shared pool indefinitely
+// (neither pool sets SetConnMaxIdleTime/SetConnMaxLifetime), confirmed by
+// inspecting readDB's own sql.DB.Stats().OpenConnections after a single
+// DiskSize() call (see TestDiskSizeDoesNotLeaveReadDBConnectionOpen). Against
+// the live perf-branch containers this change was written to fix,
+// checkpointWAL's PRAGMA wal_checkpoint(TRUNCATE) logged busy=1 on
+// essentially every tick from shortly after startup onward, and an external,
+// independently-opened `sqlite3 metadata.sqlite "PRAGMA
+// wal_checkpoint(TRUNCATE)"` reproduced the identical busy=1 result --
+// confirming a real, OS-level WAL condition rather than an artifact of this
+// process's own bookkeeping. Moving this gauge onto its own dedicated,
+// immediately-closed connection made the warnings stop and the observed
+// on-disk -wal file shrink (~130MB down to ~55MB on the affected instance).
+//
+// That correlation is real; the exact mechanism it goes through is not
+// pinned down. SQLite's own documentation for wal_checkpoint says
+// RESTART/TRUNCATE block only on an active writer or a reader still on an
+// old snapshot, not on a connection that is merely idle in a pool, and a
+// direct reproduction against this exact DSN and driver bears that out:
+// TestWALCheckpointTruncateIdleConnectionDoesNotBlock runs this function's
+// old two-PRAGMA-read pattern against readDB, leaves the connection open in
+// the pool afterward, and still observes a clean, non-busy TRUNCATE against
+// real, substantial WAL content -- while an actual held, uncommitted read
+// transaction (the same test's positive control) does reproduce busy=1. So
+// "a merely-attached idle connection blocks TRUNCATE" is not the isolated
+// cause; production readDB traffic is far higher-concurrency than that
+// lab reproduction, and the true trigger there was not identified further.
+// The dedicated-connection design stands on the production before/after
+// observation and on matching checkpointWAL's already-established pattern,
+// independent of a fully isolated microscopic explanation.
+//
+// Unlike checkpointWAL (which only ever runs PRAGMA wal_checkpoint, an
+// operation with no meaningful "read-only" mode), this gauge's two PRAGMA
+// reads are opened with mode=ro, matching readDB's own read-only DSN: it
+// never has a reason to write, and read-only fails closed instead of
+// silently taking a write-capable connection if that ever changes.
 func sqliteDiskSize(
-	db *sql.DB,
+	databaseURI string,
 	databasePath string,
 ) func() (int64, error) {
 	return func() (int64, error) {
@@ -463,6 +503,24 @@ func sqliteDiskSize(
 			sqliteDiskSizeQueryTimeout,
 		)
 		defer cancel()
+		db, err := sqlstore.OpenDB(
+			"sqlite",
+			fmt.Sprintf(
+				"%s?mode=ro&_pragma=busy_timeout(%d)",
+				databaseURI,
+				sqliteDiskSizeQueryTimeout.Milliseconds(),
+			),
+			"sqlite",
+			false, // short-lived per-call connection; not worth tracing
+		)
+		if err != nil {
+			return 0, fmt.Errorf("open SQLite disk size connection: %w", err)
+		}
+		defer func() {
+			_ = db.Close()
+		}()
+		db.SetMaxOpenConns(1)
+
 		var pageCount, pageSize int64
 		if err := db.QueryRowContext(ctx, "PRAGMA page_count").
 			Scan(&pageCount); err != nil {
