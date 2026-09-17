@@ -112,29 +112,25 @@ func TestBlockfetchServerRequestRangeRejectsInvalidEnd(t *testing.T) {
 
 			// Prove the asynchronous sender is reachable through this exact
 			// handler and connection before testing its endpoint rejection.
+			// Assert on whole protocol messages, not whole muxer segments:
+			// StartBatch and the first block body legitimately share one
+			// segment whenever the async sender queues the body before the
+			// send loop has closed the segment carrying StartBatch.
 			assertValidBatch := func() {
 				t.Helper()
 				peer.send(t, oblockfetch.ProtocolId,
 					oblockfetch.NewMsgRequestRange(start, validEnd))
-				segment := peer.readResponse(t, 5*time.Second)
-				require.Equal(
-					t,
-					oblockfetch.ProtocolId,
-					segment.GetProtocolId(),
-				)
+				protocolId, payload := peer.readMessage(t, 5*time.Second)
+				require.Equal(t, oblockfetch.ProtocolId, protocolId)
 				require.Equal(
 					t,
 					[]byte{0x81, oblockfetch.MessageTypeStartBatch},
-					segment.Payload,
+					payload,
 				)
-				segment = peer.readResponse(t, 5*time.Second)
-				require.Equal(
-					t,
-					oblockfetch.ProtocolId,
-					segment.GetProtocolId(),
-				)
+				protocolId, payload = peer.readMessage(t, 5*time.Second)
+				require.Equal(t, oblockfetch.ProtocolId, protocolId)
 				var msg oblockfetch.MsgBlock
-				_, err := cbor.Decode(segment.Payload, &msg)
+				_, err := cbor.Decode(payload, &msg)
 				require.NoError(t, err)
 				require.Equal(
 					t,
@@ -146,16 +142,12 @@ func TestBlockfetchServerRequestRangeRejectsInvalidEnd(t *testing.T) {
 				)
 				require.NoError(t, err)
 				require.Equal(t, wrapped, msg.WrappedBlock)
-				segment = peer.readResponse(t, 5*time.Second)
-				require.Equal(
-					t,
-					oblockfetch.ProtocolId,
-					segment.GetProtocolId(),
-				)
+				protocolId, payload = peer.readMessage(t, 5*time.Second)
+				require.Equal(t, oblockfetch.ProtocolId, protocolId)
 				require.Equal(
 					t,
 					[]byte{0x81, oblockfetch.MessageTypeBatchDone},
-					segment.Payload,
+					payload,
 				)
 			}
 			assertValidBatch()
@@ -164,12 +156,12 @@ func TestBlockfetchServerRequestRangeRejectsInvalidEnd(t *testing.T) {
 				oblockfetch.ProtocolId,
 				oblockfetch.NewMsgRequestRange(start, invalidEnd),
 			)
-			segment := peer.readResponse(t, 5*time.Second)
-			require.Equal(t, oblockfetch.ProtocolId, segment.GetProtocolId())
+			protocolId, payload := peer.readMessage(t, 5*time.Second)
+			require.Equal(t, oblockfetch.ProtocolId, protocolId)
 			require.Equal(
 				t,
 				[]byte{0x81, oblockfetch.MessageTypeNoBlocks},
-				segment.Payload,
+				payload,
 				"invalid end must be rejected before StartBatch",
 			)
 			// Rejection must also leave the same connection able to serve.
@@ -213,10 +205,10 @@ func newRegisteredBlockfetchServerPeer(
 	}()
 	peer.send(t, handshake.ProtocolId,
 		ouroboros_mock.ConversationEntryHandshakeRequestOutput.Messages[0])
-	segment := peer.readResponse(t, 5*time.Second)
-	require.Equal(t, uint16(handshake.ProtocolId), segment.GetProtocolId())
+	protocolId, payload := peer.readMessage(t, 5*time.Second)
+	require.Equal(t, uint16(handshake.ProtocolId), protocolId)
 	var accepted handshake.MsgAcceptVersion
-	_, err = cbor.Decode(segment.Payload, &accepted)
+	_, err = cbor.Decode(payload, &accepted)
 	require.NoError(t, err)
 	require.Equal(t, uint8(handshake.MessageTypeAcceptVersion), accepted.Type())
 	select {

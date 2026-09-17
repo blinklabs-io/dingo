@@ -26,6 +26,19 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// transactionFee returns a transaction's fee, treating a nil fee as zero.
+// TransactionBodyBase.Fee returns nil, so any body that does not override it --
+// such as the synthetic transactions used to carry imported certificates --
+// would otherwise panic here. ledger/eras applies the same guard before
+// comparing a fee against the computed minimum.
+func transactionFee(transaction lcommon.Transaction) types.Uint64 {
+	fee := transaction.Fee()
+	if fee == nil {
+		return 0
+	}
+	return types.Uint64(fee.Uint64())
+}
+
 // transactionBatchAccumulator owns statements that are safe to reuse for one
 // metadata transaction.  API backfill keeps one SQL transaction open across a
 // block window; preparing the transaction upsert for every row defeats much
@@ -312,7 +325,7 @@ func (s *Store) setTransactionWithAccumulator(
 					metadataValue,
 					point.Slot,
 					transaction.Type(),
-					decimalUint64(types.Uint64(transaction.Fee().Uint64())),
+					decimalUint64(transactionFee(transaction)),
 					decimalUint64(types.Uint64(collateralFee)),
 					decimalUint64(types.Uint64(transaction.TTL())),
 					index,
@@ -326,7 +339,7 @@ func (s *Store) setTransactionWithAccumulator(
 					metadataValue,
 					point.Slot,
 					transaction.Type(),
-					decimalUint64(types.Uint64(transaction.Fee().Uint64())),
+					decimalUint64(transactionFee(transaction)),
 					decimalUint64(types.Uint64(collateralFee)),
 					decimalUint64(types.Uint64(transaction.TTL())),
 					index,
@@ -608,7 +621,7 @@ RETURNING id`,
 				point.Hash,
 				point.Slot,
 				transaction.Type(),
-				decimalUint64(types.Uint64(transaction.Fee().Uint64())),
+				decimalUint64(transactionFee(transaction)),
 				decimalUint64(types.Uint64(collateralFee)),
 				decimalUint64(types.Uint64(transaction.TTL())),
 				index,
