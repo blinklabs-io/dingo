@@ -29,6 +29,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
           ref: main
+          persist-credentials: false
 
       - name: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
@@ -46,8 +47,10 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-1.26.x-
 
-      # Prepares a linked worktree (sharing the main checkout's authenticated
-      # `origin` remote, so a plain `git push` later just works) checked out
+      # Prepares a linked worktree (sharing the main checkout's `origin`
+      # remote; push auth is not persisted in git config -- it is provided by
+      # the credential helper configured via `gh auth setup-git` in the
+      # publish-benchmark-data step) checked out
       # to the benchmark-data branch. First-run bootstrap: if the branch
       # doesn't exist on origin yet, create it locally as an empty orphan
       # branch instead of failing.
@@ -169,9 +172,14 @@ jobs:
         # env rather than interpolating it directly into the script.
         env:
           RUN_FILE: ${{ steps.run-bench.outputs.run_file }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
+          # The checkout step uses persist-credentials: false, so the shared
+          # `origin` remote has no stored token. Re-establish push auth via
+          # gh's credential helper (uses GH_TOKEN) before pushing results.
+          gh auth setup-git
           run_file="${RUN_FILE}"
           basename "${run_file}" > ../benchmark-data-branch/runs/latest.txt
 
