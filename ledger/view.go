@@ -614,11 +614,19 @@ func (lv *LedgerView) IsPoolRegistered(pkh lcommon.PoolKeyHash) bool {
 
 // IsVrfKeyInUse checks if a VRF key hash is registered by another pool.
 // Returns (inUse, owningPoolId, error).
+//
+// The reservation checked here is the one effective as of the start of the
+// current epoch, not a pool's most recent registration: a re-registration
+// submitted during the epoch in progress is deferred to the next boundary
+// (cardano-ledger's psFutureStakePoolParams), so the pool's prior key stays
+// reserved until then. See GetPoolByVrfKeyHash.
 func (lv *LedgerView) IsVrfKeyInUse(
 	vrfKeyHash lcommon.Blake2b256,
 ) (bool, lcommon.PoolKeyHash, error) {
+	epochStartSlot := lv.ls.loadConsensusSnapshot().currentEpoch.StartSlot
 	pool, err := lv.ls.db.GetPoolByVrfKeyHash(
 		vrfKeyHash.Bytes(),
+		epochStartSlot,
 		lv.txn,
 	)
 	if err != nil {

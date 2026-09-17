@@ -77,7 +77,7 @@ func TestGetPoolByVrfKeyHashExcludesRetiredPool(t *testing.T) {
 		Point:       ocommon.Point{Slot: 100, Hash: []byte("tip")},
 		BlockNumber: 1,
 	}, nil))
-	got, err := store.GetPoolByVrfKeyHash(vrfKey, nil)
+	got, err := store.GetPoolByVrfKeyHash(vrfKey, 0, nil)
 	require.NoError(t, err)
 	require.Nil(t, got)
 

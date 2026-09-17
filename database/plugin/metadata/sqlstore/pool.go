@@ -509,24 +509,134 @@ func (s *Store) GetPool(
 	return pool, nil
 }
 
+// GetPoolByVrfKeyHash returns the pool that currently claims the given VRF
+// key hash as of the given epoch's start slot, or nil if no active pool
+// claims it.
+//
+// This method backs LedgerView.IsVrfKeyInUse, whose contract is to report
+// only currently registered pools. Retired registrations remain in the
+// history but must not reserve their old VRF key indefinitely -- handled
+// below by activePoolOrNil, unchanged from before.
+//
+// A "claim" is either of two things cardano-ledger's POOL rule tracks
+// separately:
+//
+//  1. The pool whose EFFECTIVE registration -- not necessarily its most
+//     recent one -- has this key. The POOL rule inserts a pool's first-ever
+//     registration into psStakePools immediately, but defers any subsequent
+//     re-registration through psFutureStakePoolParams until the next epoch
+//     boundary, so a pool that re-registers with a new VRF key mid-epoch
+//     must keep reserving its OLD key until epochStartSlot advances past
+//     that re-registration. This mirrors GetPoolVrfKeyHashAtSlot /
+//     GetPoolEarliestVrfKeyHashAtSlot's forward-direction resolution of the
+//     same rule (see electingVrfKeyHashWithCache in ledger/verify_header.go)
+//     -- this is the reverse lookup, given a key, finding the pool.
+//  2. Any pool whose registration THIS epoch (added_slot >= epochStartSlot)
+//     used this key, even if a later same-epoch re-registration superseded
+//     it. psVRFKeyHashes retains every key placed in
+//     psFutureStakePoolParams during the epoch, not only the current
+//     pending value, so a pool cycling A -> B -> C must still be refused a
+//     later same-epoch reuse of B. LedgerView.IsVrfKeyInUse's caller
+//     (gouroboros's validatePoolRegistration) already special-cases
+//     "owningPool == cert.Operator" by comparing against PoolCurrentState,
+//     which is not this pool's effective key but its latest registration --
+//     exactly what is needed here, since the reused key must not match
+//     that latest registration for the reuse to be rejected. This method
+//     only needs to report the claim; it does not decide the outcome.
+//
+// (1) takes priority when both would resolve to a claim (cross-pool
+// conflicts are the more common, more clearly "in use" case); (2) is
+// consulted only when (1) finds nothing.
+//
+// Retirement precedence (a later re-registration can cancel an earlier
+// retirement) is deliberately left to the existing live-state check in
+// activePoolOrNil rather than reimplemented here against epochStartSlot:
+// retirement timing is not the defect this method fixes, and reusing the
+// same logic GetPool already relies on avoids a second, divergent
+// implementation of it.
 func (s *Store) GetPoolByVrfKeyHash(
 	vrfKeyHash []byte,
+	epochStartSlot uint64,
 	txn types.Txn,
 ) (*models.Pool, error) {
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
-	pool, err := queryPool(ctx, db, "vrf_key_hash = ?", vrfKeyHash)
+	slotValue, err := checkedInt64(epochStartSlot)
+	if err != nil {
+		return nil, fmt.Errorf("GetPoolByVrfKeyHash: %w", err)
+	}
+	var poolID uint
+	err = db.QueryRowContext(ctx, `
+WITH candidates AS (
+    SELECT DISTINCT pool_id FROM pool_registration WHERE vrf_key_hash = ?
+),
+pre_boundary AS (
+    SELECT pr.pool_id, pr.vrf_key_hash,
+           ROW_NUMBER() OVER (
+               PARTITION BY pr.pool_id
+               ORDER BY pr.added_slot DESC,
+                        COALESCE(t.block_index, 0) DESC,
+                        COALESCE(c.cert_index, 0) DESC
+           ) rn
+    FROM pool_registration pr
+    JOIN candidates cd ON cd.pool_id = pr.pool_id
+    LEFT JOIN certs c ON c.id = pr.certificate_id
+    LEFT JOIN "transaction" t ON t.id = c.transaction_id
+    WHERE pr.added_slot < ?
+),
+earliest AS (
+    SELECT pr.pool_id, pr.vrf_key_hash,
+           ROW_NUMBER() OVER (
+               PARTITION BY pr.pool_id
+               ORDER BY pr.added_slot ASC,
+                        COALESCE(t.block_index, 0) ASC,
+                        COALESCE(c.cert_index, 0) ASC
+           ) rn
+    FROM pool_registration pr
+    JOIN candidates cd ON cd.pool_id = pr.pool_id
+    LEFT JOIN certs c ON c.id = pr.certificate_id
+    LEFT JOIN "transaction" t ON t.id = c.transaction_id
+),
+active_owner AS (
+    SELECT cd.pool_id
+    FROM candidates cd
+    LEFT JOIN pre_boundary pb ON pb.pool_id = cd.pool_id AND pb.rn = 1
+    LEFT JOIN earliest ea ON ea.pool_id = cd.pool_id AND ea.rn = 1
+    WHERE COALESCE(pb.vrf_key_hash, ea.vrf_key_hash) = ?
+),
+same_epoch_claimant AS (
+    SELECT DISTINCT pr.pool_id
+    FROM pool_registration pr
+    JOIN candidates cd ON cd.pool_id = pr.pool_id
+    WHERE pr.vrf_key_hash = ? AND pr.added_slot >= ?
+)
+SELECT pool_id FROM active_owner
+UNION ALL
+SELECT pool_id FROM same_epoch_claimant
+WHERE NOT EXISTS (SELECT 1 FROM active_owner)
+ORDER BY pool_id
+LIMIT 1`,
+		vrfKeyHash,
+		slotValue,
+		vrfKeyHash,
+		vrfKeyHash,
+		slotValue,
+	).Scan(&poolID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	pool, err := queryPool(ctx, db, "id = ?", poolID)
 	if err != nil || pool == nil {
 		return pool, err
 	}
 	if err := s.loadPoolAssociations(ctx, db, pool, true); err != nil {
 		return nil, err
 	}
-	// This method backs LedgerView.IsVrfKeyInUse, whose contract is to report
-	// only currently registered pools. Retired registrations remain in the
-	// history but must not reserve their old VRF key indefinitely.
 	return s.activePoolOrNil(ctx, db, pool)
 }
 
