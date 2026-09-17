@@ -39,7 +39,7 @@ const expectedBlueprintVectorCount = 2575
 // previous separate statistics pass cost.
 func TestRulesConformanceVectors(t *testing.T) {
 	results := sqliteCorpusResults(t)
-	require.Len(t, results, expectedBlueprintVectorCount)
 	reportCorpus(t, "sqlite", results)
+	require.Len(t, results, expectedBlueprintVectorCount)
 	assertCorpus(t, "sqlite", results)
 }

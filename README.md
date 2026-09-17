@@ -1070,7 +1070,7 @@ result is not complete node conformance.
 | Profile | Command | Current scope |
 | --- | --- | --- |
 | Ledger rules | `go test ./internal/test/conformance/` | Blueprint ledger vectors, Dingo era validation entry points, and real SQLite/backend behavior; reports counts by era and rule family |
-| Deterministic consensus | `go test ./ouroboros/ -run TestConsensusConformance` | Five shared scenarios covering origin ingestion, within-k and beyond-k forks, rollback/intersection, peer scheduling, density/tie-breaking, and downstream ChainSync observations |
+| Deterministic consensus | `go test ./ouroboros/ -run TestConsensusConformance` | Five shared scenarios covering origin ingestion, within-k and beyond-k forks, rollback/intersection, tie-breaking, and downstream ChainSync observations |
 | Reference node | `./internal/test/devnet/run-tests.sh --conformance` | Explicit Dingo-versus-`cardano-node` live compatibility profile; it is not run by either deterministic profile |
 
 The release and Linux CI gates run the ledger and deterministic profiles as
