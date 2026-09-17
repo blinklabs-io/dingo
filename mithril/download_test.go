@@ -327,6 +327,8 @@ func (w *injectedIdleWatchdog) Reset() {
 	}
 }
 
+// Reset invokes the injected callback synchronously, so Stop has no concurrent
+// callback to wait for in this deterministic test double.
 func (w *injectedIdleWatchdog) Stop() {}
 
 func TestDownloadSnapshotIdleTimeoutRetriesAndResumes(t *testing.T) {
@@ -441,7 +443,9 @@ func TestDownloadSnapshotIdleTimeoutUsesConfiguredTimer(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
+	ctx, cancel := context.WithTimeout(context.Background(), testutil.AsyncWait)
+	defer cancel()
+	_, err := DownloadSnapshot(ctx, DownloadConfig{
 		URL:               server.URL + "/snapshot.tar.zst",
 		AllowInsecureHTTP: true,
 		DestDir:           t.TempDir(),
