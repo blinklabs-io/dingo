@@ -262,7 +262,7 @@ func TestParsePStateSelectsUTxOHDPoolMap(t *testing.T) {
 		t.Fatalf("encoding PState: %v", err)
 	}
 
-	pools, err := parsePState(pstate)
+	pools, _, err := parsePStateWithRetirements(pstate)
 	if err != nil {
 		t.Fatalf("parsePState failed: %v", err)
 	}
@@ -370,7 +370,7 @@ func TestParsePStateDijkstraLeiosKeyField(t *testing.T) {
 				t.Fatalf("encoding PState: %v", err)
 			}
 
-			pools, err := parsePState(pstate)
+			pools, _, err := parsePStateWithRetirements(pstate)
 			if tc.wantError {
 				if err == nil {
 					t.Fatal("expected malformed Leios key to fail")

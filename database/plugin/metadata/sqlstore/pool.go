@@ -1117,6 +1117,11 @@ WHERE r.rn = 1 AND r.epoch > ?
       g.pool_key_hash IS NULL
       OR (r.added_slot, r.synth, r.block_index, r.cert_index)
          > (g.added_slot, g.synth, g.block_index, g.cert_index)
+      OR (
+          (r.added_slot, r.synth, r.block_index, r.cert_index)
+             = (g.added_slot, g.synth, g.block_index, g.cert_index)
+          AND r.synth = 1
+      )
   )
 ORDER BY r.epoch, r.added_slot, r.block_index, r.cert_index`,
 		currentEpoch,

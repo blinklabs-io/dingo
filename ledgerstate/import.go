@@ -27,6 +27,7 @@ import (
 	"os"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -1380,6 +1381,7 @@ func importPendingPoolRetirements(
 	metaTxn := txn.Metadata()
 
 	total := 0
+	var missing []string
 	for _, epoch := range epochs {
 		select {
 		case <-ctx.Done():
@@ -1389,14 +1391,19 @@ func importPendingPoolRetirements(
 		default:
 		}
 		keyHashes := byEpoch[epoch]
-		if err := assertPoolsImported(
-			store, metaTxn, keyHashes,
-		); err != nil {
+		present, absent, err := importedPoolKeys(store, metaTxn, keyHashes)
+		if err != nil {
 			return fmt.Errorf(
-				"pools scheduled to retire at epoch %d: %w",
+				"checking pools scheduled to retire at epoch %d: %w",
 				epoch,
 				err,
 			)
+		}
+		for _, keyHash := range absent {
+			missing = append(missing, fmt.Sprintf("epoch %d: %x", epoch, keyHash))
+		}
+		if len(present) == 0 {
+			continue
 		}
 		// The snapshot carries no certificate slot for a pending
 		// retirement, so the registrations' own added slot is reused.
@@ -1404,7 +1411,7 @@ func importPendingPoolRetirements(
 		// sorting with the rest of the import and behind any retirement
 		// certificate seen in a later live block.
 		if err := store.RetirePools(
-			metaTxn, keyHashes, epoch, slot,
+			metaTxn, present, epoch, slot,
 		); err != nil {
 			return fmt.Errorf(
 				"retiring pools scheduled for epoch %d: %w",
@@ -1420,6 +1427,12 @@ func importPendingPoolRetirements(
 			"committing pool retirements: %w", err,
 		)
 	}
+	if len(missing) > 0 {
+		return fmt.Errorf(
+			"pools scheduled to retire were not imported: %s",
+			strings.Join(missing, ", "),
+		)
+	}
 
 	cfg.Logger.Info(
 		"imported pending pool retirements",
@@ -1428,6 +1441,42 @@ func importPendingPoolRetirements(
 		"epochs", len(epochs),
 	)
 	return nil
+}
+
+func importedPoolKeys(
+	store metadata.MetadataStore,
+	metaTxn types.Txn,
+	keyHashes [][]byte,
+) (present, absent [][]byte, err error) {
+	poolKeyHashSize := len(lcommon.PoolKeyHash{})
+	lookup := make([]lcommon.PoolKeyHash, 0, len(keyHashes))
+	for _, keyHash := range keyHashes {
+		if len(keyHash) != poolKeyHashSize {
+			return nil, nil, fmt.Errorf(
+				"malformed pool key hash %x (%d bytes, want %d)",
+				keyHash, len(keyHash), poolKeyHashSize,
+			)
+		}
+		var pkh lcommon.PoolKeyHash
+		copy(pkh[:], keyHash)
+		lookup = append(lookup, pkh)
+	}
+	existing, err := store.GetPools(lookup, metaTxn)
+	if err != nil {
+		return nil, nil, fmt.Errorf("loading pools: %w", err)
+	}
+	presentSet := make(map[string]struct{}, len(existing))
+	for i := range existing {
+		presentSet[string(existing[i].PoolKeyHash)] = struct{}{}
+	}
+	for _, keyHash := range keyHashes {
+		if _, ok := presentSet[string(keyHash)]; ok {
+			present = append(present, keyHash)
+		} else {
+			absent = append(absent, keyHash)
+		}
+	}
+	return present, absent, nil
 }
 
 // assertPoolsImported fails the import when a pool carrying a scheduled

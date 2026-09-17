@@ -124,7 +124,7 @@ func TestParsePStateDecodesPendingRetirements(t *testing.T) {
 		stayingHash, testPoolDeposit,
 	)
 
-	pools, err := parsePState(
+	pools, _, err := parsePStateWithRetirements(
 		encodeTestPState(t, poolParams, emptyMap, retiring, deposits),
 	)
 	if err != nil {
@@ -185,7 +185,7 @@ func TestParsePStateDoesNotReadDepositsAsRetirements(t *testing.T) {
 	emptyMap := encodeCborMap(t)
 	deposits := encodeCborMap(t, poolHash, testPoolDeposit)
 
-	pools, err := parsePState(
+	pools, _, err := parsePStateWithRetirements(
 		encodeTestPState(t, poolParams, emptyMap, emptyMap, deposits),
 	)
 	if err != nil {
@@ -227,7 +227,7 @@ func TestParsePStateRejectsRetiringMapOfUnknownPools(t *testing.T) {
 	)
 	deposits := encodeCborMap(t, poolHash, testPoolDeposit)
 
-	pools, err := parsePState(
+	pools, _, err := parsePStateWithRetirements(
 		encodeTestPState(t, poolParams, emptyMap, notRetiring, deposits),
 	)
 	if err != nil {
@@ -262,7 +262,7 @@ func TestParsePStateKeepsRetirementsDespiteUnparsedPool(t *testing.T) {
 	)
 	deposits := encodeCborMap(t, poolHash, testPoolDeposit)
 
-	pools, err := parsePState(
+	pools, _, err := parsePStateWithRetirements(
 		encodeTestPState(t, poolParams, emptyMap, retiring, deposits),
 	)
 	if err != nil {
@@ -337,7 +337,7 @@ func TestParsePStateConwayDecodesPendingRetirements(t *testing.T) {
 		t.Fatalf("encoding Conway PState: %v", err)
 	}
 
-	pools, err := parsePStateConway(pstate)
+	pools, _, err := parsePStateConwayWithRetirements(pstate)
 	if err != nil {
 		t.Fatalf("parsePStateConway failed: %v", err)
 	}

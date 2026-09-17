@@ -282,11 +282,6 @@ func parseCertStateConway(
 // PState is encoded as an array of 7 elements rather than the
 // traditional {poolParams, futurePoolParams, retiring, deposits}
 // map.
-func parsePStateConway(data []byte) ([]ParsedPool, error) {
-	pools, _, err := parsePStateConwayWithRetirements(data)
-	return pools, err
-}
-
 func parsePStateConwayWithRetirements(
 	data []byte,
 ) ([]ParsedPool, map[uint64][][]byte, error) {
@@ -636,13 +631,6 @@ func parsePoolDelegation(data []byte) ([]byte, bool) {
 	}
 
 	return nil, false
-}
-
-// parsePState decodes the pool state.
-// PState = [poolParams, futurePoolParams, retiring, poolDeposits]
-func parsePState(data []byte) ([]ParsedPool, error) {
-	pools, _, err := parsePStateWithRetirements(data)
-	return pools, err
 }
 
 func parsePStateWithRetirements(
