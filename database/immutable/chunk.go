@@ -39,10 +39,14 @@ type chunk struct {
 	currentEntry *secondaryIndexEntry
 	nextEntry    *secondaryIndexEntry
 	fileSize     int64
+	// nextReadOffset tracks the file position after the most recent block
+	// read. Immutable chunks are walked in offset order, so subsequent reads
+	// can use Read directly and avoid a seek (or positional-read syscall).
+	nextReadOffset int64
 }
 
 func newChunk() *chunk {
-	return &chunk{}
+	return &chunk{nextReadOffset: -1}
 }
 
 // Open takes an already-open chunk file rather than a path so the caller
@@ -110,9 +114,10 @@ func (c *chunk) Next() (*Block, error) {
 			)
 		}
 		blockData := make([]byte, int(blockSize))
-		// Seek to offset
-		if _, err := c.file.Seek(currOffset, 0); err != nil {
-			return nil, err
+		if c.nextReadOffset != currOffset {
+			if _, err := c.file.Seek(currOffset, 0); err != nil {
+				return nil, err
+			}
 		}
 		n, err := c.file.Read(blockData)
 		if err != nil {
@@ -125,6 +130,7 @@ func (c *chunk) Next() (*Block, error) {
 				n,
 			)
 		}
+		c.nextReadOffset = currOffset + int64(n)
 		blkType, blkBytes, err := c.unwrapBlock(blockData)
 		if err != nil {
 			return nil, err
@@ -195,9 +201,10 @@ func (c *chunk) Next() (*Block, error) {
 			)
 		}
 		blockData := make([]byte, int(blockSize))
-		// Seek to offset
-		if _, err := c.file.Seek(currOffset, 0); err != nil {
-			return nil, err
+		if c.nextReadOffset != currOffset {
+			if _, err := c.file.Seek(currOffset, 0); err != nil {
+				return nil, err
+			}
 		}
 		n, err := c.file.Read(blockData)
 		if err != nil {
@@ -210,6 +217,7 @@ func (c *chunk) Next() (*Block, error) {
 				n,
 			)
 		}
+		c.nextReadOffset = currOffset + int64(n)
 		blkType, blkBytes, err := c.unwrapBlock(blockData)
 		if err != nil {
 			return nil, err
