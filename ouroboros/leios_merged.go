@@ -211,8 +211,6 @@ func (o *Ouroboros) ReleaseLeiosServeWaiters(
 	for _, ch := range waiters {
 		close(ch)
 	}
-	// Wake the NtC closure waiters. LeiosNotify cursor cleanup is owner-specific
-	// and is handled by the connection-owned callback.
 }
 
 // RegisterLeiosServeWaiterForTesting exposes registerLeiosServeWaiter so the

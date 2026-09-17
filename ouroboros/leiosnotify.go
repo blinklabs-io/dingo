@@ -345,8 +345,9 @@ func (l *leiosForgedEBLog) removeConnLocked(connKey string) {
 // registerConn pre-registers connKey at the current tail, or at the oldest
 // failed delivery, so entries appended between connection open and the peer's
 // first RequestNext are not pruned before the cursor is established. It is a
-// no-op for the same owner. A replacement releases the old owner's reservation
-// into the retry queue before registering its own cursor.
+// preserves the cursor for the same owner. It also wakes parked requests so a
+// replacement can observe the ownership change. A replacement releases the
+// old owner's reservation into the retry queue before registering its cursor.
 func (l *leiosForgedEBLog) registerConn(
 	connKey string,
 	owner *oleiosnotify.Server,
@@ -354,8 +355,9 @@ func (l *leiosForgedEBLog) registerConn(
 ) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	// Validate manager ownership under the cursor lock: an old startup may
-	// have looked up its connection before a replacement was registered.
+	// Validate manager ownership under the cursor lock. This is the only path
+	// that takes the connection-manager lock while holding l.mu; close callbacks
+	// invoke this code after releasing the manager lock, preserving the order.
 	if isCurrent != nil && !isCurrent() {
 		return
 	}
