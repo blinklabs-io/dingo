@@ -1808,6 +1808,56 @@ func finalizePrecomputedRewardOutputs(
 	return updated, nil
 }
 
+// queueStartupRewardPrecompute queues the stake-reward precompute for the
+// epoch that is already in progress.
+//
+// The EventBus subscription that normally drives the precompute only fires at
+// an epoch boundary, so a node started mid-epoch never queues the round its
+// next boundary will apply. applyStakeRewards then finds no precompute and
+// falls back to calculateStakeRewardApplication -- the whole round, over every
+// delegator in the mark snapshot -- inside the epoch-rollover write
+// transaction, on the block-processing goroutine. On mainnet that scan takes
+// minutes, during which no block is applied and any leader slot in the window
+// is lost. The async path exists precisely so the calculation never holds
+// SQLite's single writer (see precomputeStakeRewards); this restores it for
+// the one case the event cannot cover.
+//
+// Idempotent and self-limiting: precomputeStakeRewardsCalculate returns early
+// when a valid precompute already exists, so a restart that has one costs a
+// lookup, and a node still syncing defers on the reward prefilter slot rather
+// than scanning inputs it does not yet have.
+func (ls *LedgerState) queueStartupRewardPrecompute() {
+	ls.queueStartupRewardPrecomputeWith(
+		ls.precomputeStakeRewardsAfterEpochTransition,
+	)
+}
+
+func (ls *LedgerState) queueStartupRewardPrecomputeWith(
+	precompute func(event.EpochTransitionEvent) error,
+) {
+	ls.RLock()
+	epoch := ls.currentEpoch
+	ls.RUnlock()
+	// An epoch with no length has not been established yet (fresh database),
+	// and queueRewardPrecompute drops an event without a nonce, so there is
+	// nothing to catch up on in either case.
+	if epoch.LengthInSlots == 0 || len(epoch.Nonce) == 0 {
+		return
+	}
+	evt := event.EpochTransitionEvent{
+		NewEpoch:     epoch.EpochId,
+		BoundarySlot: epoch.StartSlot,
+		EpochNonce:   epoch.Nonce,
+	}
+	if epoch.EpochId > 0 {
+		evt.PreviousEpoch = epoch.EpochId - 1
+	}
+	if epoch.StartSlot > 0 {
+		evt.SnapshotSlot = epoch.StartSlot - 1
+	}
+	ls.queueRewardPrecompute(evt, precompute)
+}
+
 func (ls *LedgerState) handleRewardPrecomputeEpochTransition(evt event.Event) {
 	ls.handleRewardPrecomputeEpochTransitionWith(
 		evt,

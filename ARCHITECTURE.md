@@ -1190,8 +1190,26 @@ When `Node.Run()` is called, components are initialized in this order:
     candidate that may have evolved. After the
     tip loads, `healMithrilGapBlockNonces` reconstructs the evolving-nonce fold
     across any Mithril "gap blocks" (see Mithril Bootstrap) before header
-    verification computes an epoch nonce; only then does LedgerState subscribe
-    to chainsync/blockfetch/chain-update EventBus events.
+    verification computes an epoch nonce, and `healTruncateGapBlockNonces` then
+    repairs a tip whose own `block_nonce` row is empty because a disaster-
+    recovery truncate (or, for Ouroboros Genesis chain selection, an ordinary
+    rollback deeper than the security parameter) landed on a slot the routine
+    3-epoch retention window had already pruned — see Truncate in DATABASE.md.
+    It folds forward from the nearest surviving checkpoint through the
+    still-present block CBOR up to the tip, sharing `foldBlockEtaV` with the
+    Mithril heal so the two can never compute a nonce differently, and
+    hard-fails startup (unlike the Mithril heal's own no-anchor case) when no
+    checkpoint on the primary chain exists to fold from:
+    `database.TruncateAfterSlot`'s own guard only checks that a checkpoint
+    row exists, not that it sits on the primary chain, so it can let a
+    truncate through on the strength of a checkpoint belonging to a
+    since-abandoned fork — this heal's primary-chain-aware search is the
+    check that actually enforces the promise, and continuing with an empty
+    nonce would reproduce the same VRF corruption the whole mechanism exists
+    to prevent. The same reconstruction also runs after `LedgerState.rollback`
+    in-process, the only other caller of `TruncateAfterSlot`. Only then does
+    LedgerState
+    subscribe to chainsync/blockfetch/chain-update EventBus events.
     Fresh genesis initialization persists both genesis UTxOs and the effective
     Shelley staking declarations, including network-specific `extraConfig`
     pools and delegations, before snapshot capture.
@@ -11743,6 +11761,15 @@ work, never correctness. A rollback or authoritative snapshot replacement
 therefore drops stale work and leaves the boundary path to recalculate. Pre-Babbage precomputation is deferred until applied block
 progress reaches the RUPD prefilter slot, which queues a retry using the actual
 captured slot; later eras can precompute immediately.
+`LedgerState.Start` queues the same work once for the epoch already in progress
+(`queueStartupRewardPrecompute`), because the epoch-transition event cannot fire
+for an epoch that began before the process did. Without that catch-up, a node
+started mid-epoch reaches its next boundary with no precompute and
+`applyStakeRewards` recalculates the whole round inline, inside the
+epoch-rollover write transaction on the block-processing goroutine — the exact
+serialization the async path exists to avoid. The catch-up is idempotent: an
+existing precompute is detected and skipped, and a node still syncing defers on
+the RUPD prefilter slot as above.
 The EventBus callback only queues this work. One background calculation runs at
 a time, and epoch transitions received while it runs are coalesced to the newest
 pending event. This prevents the minutes-long calculation from blocking
