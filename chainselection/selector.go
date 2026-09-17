@@ -70,10 +70,11 @@ const (
 	// non-progressing peer forever.
 	catchUpPinStallTimeout = 20 * time.Second
 
-	// defaultSwitchBackCooldown is the default minimum time a connection must
-	// stay abandoned before the longer-chain escape (see
-	// pinIncumbentDuringCatchUpLocked) may hand the active connection back to
-	// it. See ChainSelectorConfig.SwitchBackCooldown.
+	// defaultSwitchBackCooldown is the default minimum time between
+	// discretionary releases of the anti-flap pin (see
+	// pinIncumbentDuringCatchUpLocked): per connection, before an abandoned
+	// peer may reclaim the active connection, and globally, between any two
+	// discretionary hand-offs. See ChainSelectorConfig.SwitchBackCooldown.
 	defaultSwitchBackCooldown = 2 * time.Second
 )
 
@@ -159,15 +160,16 @@ type ChainSelectorConfig struct {
 	// export a counter.
 	OnRollbackRegistration func(RollbackRegistrationOutcome)
 	// SwitchBackCooldown bounds the rate of active-connection handoffs
-	// driven by the anti-flap pin's longer-chain escape
-	// (pinIncumbentDuringCatchUpLocked): once the active connection moves
-	// away from a peer, that peer cannot reclaim it via the longer-chain
-	// escape again until this much time has passed, even if it currently
-	// leads by more than catchUpPinHeadMargin. This is a rate limit, not a
-	// correctness rule -- the peer is still adopted once the cooldown
-	// expires (or immediately via the incumbent-unselectable or
-	// progress-stall escapes, which this never gates) -- and it exists
-	// because two peers whose delivered frontiers repeatedly leapfrog each
+	// driven by the anti-flap pin's discretionary escapes -- longer-chain
+	// and progress-stall (pinIncumbentDuringCatchUpLocked). Once the active
+	// connection moves away from a peer, that peer cannot reclaim it through
+	// either escape until this much time has passed, and no discretionary
+	// hand-off to any connection happens within this much time of the
+	// previous one, even if the challenger currently leads by more than
+	// catchUpPinHeadMargin. This is a rate limit, not a correctness rule --
+	// the challenger is still adopted once the cooldown expires, and the
+	// mandatory incumbent-unselectable release is never gated -- and it
+	// exists because peers whose delivered frontiers repeatedly leapfrog each
 	// other by more than the margin can otherwise hand the chainsync/
 	// blockfetch pipeline back and forth on every such crossing. 0 (the
 	// zero value) is replaced with defaultSwitchBackCooldown by
@@ -1818,6 +1820,10 @@ func (cs *ChainSelector) localTipStalledLocked() bool {
 //     (progress-aware escape — cannot pin to a dead peer forever).
 //   - the challenger is genuinely ahead of the incumbent by more than
 //     catchUpPinHeadMargin blocks (a real longer chain, not a head micro-fork).
+//
+// The last two releases are DISCRETIONARY and are rate-limited by
+// SwitchBackCooldown, both per abandoned connection and globally across every
+// discretionary hand-off; the releases above them are mandatory and ungated.
 //
 // Otherwise it PINS (returns true, keep the incumbent).
 //
