@@ -65,9 +65,9 @@ func (o *Ouroboros) localtxsubmissionServerSubmitTx(
 			"role", "server",
 			"connection_id", ctx.ConnectionId.String(),
 		)
-		return newLocalTxSubmissionRejectReason(tx.EraId, errors.New(
+		return errors.New(
 			"local-tx-submission: unexpected transaction content type",
-		))
+		)
 	}
 	// Add transaction to mempool
 	err := o.mempool.AddTransaction(
@@ -127,16 +127,13 @@ func newLocalTxSubmissionRejectReason(
 			}
 		}
 	}
-	if eraId == gledger.EraIdConway || eraId == gledger.EraIdDijkstra {
-		return &hardForkApplyTxError{
-			era: eraId,
-			err: err,
-		}
-	}
 	return &unrepresentableTxSubmissionError{err: err}
 }
 
 func (e *hardForkApplyTxError) Error() string {
+	if e.err == nil {
+		return "transaction rejection has no cause"
+	}
 	return e.err.Error()
 }
 
@@ -153,7 +150,7 @@ func (e *hardForkApplyTxError) MarshalCBOR() ([]byte, error) {
 			[]any{dijkstraLedgerUtxowFailure, e.utxowFailure()},
 		}
 	case e.inputSetEmpty && e.era == gledger.EraIdConway:
-		failure = []any{conwayLedgerUtxowFailure, e.utxowFailure()}
+		failure = []any{gledger.ConwayLedgerUtxowFailure, e.utxowFailure()}
 	case e.inputSetEmpty:
 		failure = []any{gledger.ApplyTxErrorUtxowFailure, e.utxowFailure()}
 	case e.era == gledger.EraIdDijkstra:
@@ -186,7 +183,6 @@ func (e *unrepresentableTxSubmissionError) MarshalCBOR() ([]byte, error) {
 }
 
 const (
-	conwayLedgerUtxowFailure      = 1
 	conwayLedgerMempoolFailure    = 7
 	dijkstraMempoolFailure        = 2
 	dijkstraMempoolLedgerFailure  = 1

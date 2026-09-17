@@ -63,7 +63,7 @@ func TestLocalTxSubmissionServerSubmitTx_NonByteContentReturnsError(
 	})
 }
 
-func TestLocalTxSubmissionRejectReason_ConwayMempoolFailure(
+func TestLocalTxSubmissionRejectReason_ConwayGenericIsUnrepresentable(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -75,36 +75,8 @@ func TestLocalTxSubmissionRejectReason_ConwayMempoolFailure(
 	reason, ok := err.(cborRejectReason)
 	require.True(t, ok)
 
-	wireBytes, marshalErr := reason.MarshalCBOR()
-	require.NoError(t, marshalErr)
-	var envelope []cbor.RawMessage
-	_, err = cbor.Decode(wireBytes, &envelope)
-	require.NoError(t, err)
-	require.Len(t, envelope, 1)
-	var eraFailure []cbor.RawMessage
-	_, err = cbor.Decode(envelope[0], &eraFailure)
-	require.NoError(t, err)
-	require.Len(t, eraFailure, 2)
-	var era uint16
-	_, err = cbor.Decode(eraFailure[0], &era)
-	require.NoError(t, err)
-	assert.Equal(t, uint16(gledger.EraIdConway), era)
-	var applyFailures []cbor.RawMessage
-	_, err = cbor.Decode(eraFailure[1], &applyFailures)
-	require.NoError(t, err)
-	require.Len(t, applyFailures, 1)
-	var failure []cbor.RawMessage
-	_, err = cbor.Decode(applyFailures[0], &failure)
-	require.NoError(t, err)
-	require.Len(t, failure, 2)
-	var failureType uint
-	_, err = cbor.Decode(failure[0], &failureType)
-	require.NoError(t, err)
-	assert.Equal(t, uint(conwayLedgerMempoolFailure), failureType)
-	var message string
-	_, err = cbor.Decode(failure[1], &message)
-	require.NoError(t, err)
-	assert.Equal(t, "plain validation failure", message)
+	_, marshalErr := reason.MarshalCBOR()
+	require.ErrorContains(t, marshalErr, "not representable")
 }
 
 func TestLocalTxSubmissionRejectReason_UnsupportedGenericIsUnrepresentable(
@@ -142,10 +114,6 @@ func TestLocalTxSubmissionRejectReason_DijkstraMempoolFailure(t *testing.T) {
 		cause    error
 		expected string
 	}{
-		"generic": {
-			cause:    errors.New("generic rejection"),
-			expected: "8182078182027167656e657269632072656a656374696f6e",
-		},
 		"empty inputs": {
 			cause:    shelley.InputSetEmptyUtxoError{},
 			expected: "818207818201820182008104",
@@ -341,7 +309,7 @@ func TestLocalTxSubmissionServer_ConwayRejectThenAccept(t *testing.T) {
 			if calls == 1 {
 				return newLocalTxSubmissionRejectReason(
 					gledger.EraIdConway,
-					errors.New("generic rejection"),
+					shelley.InputSetEmptyUtxoError{},
 				)
 			}
 			return nil
@@ -363,7 +331,7 @@ func TestLocalTxSubmissionServer_ConwayRejectThenAccept(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint(olocaltxsubmission.MessageTypeRejectTx), firstType)
 	expectedReject, err := hex.DecodeString(
-		"8182068182077167656e657269632072656a656374696f6e",
+		"81820681820182008104",
 	)
 	require.NoError(t, err)
 	assert.Equal(t, expectedReject, []byte(firstItems[1]))
@@ -393,7 +361,7 @@ func TestLocalTxSubmissionServer_DijkstraRejectThenAccept(t *testing.T) {
 			calls++
 			if calls == 1 {
 				return newLocalTxSubmissionRejectReason(
-					gledger.EraIdDijkstra, errors.New("generic rejection"),
+					gledger.EraIdDijkstra, shelley.InputSetEmptyUtxoError{},
 				)
 			}
 			return nil
@@ -414,7 +382,7 @@ func TestLocalTxSubmissionServer_DijkstraRejectThenAccept(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint(olocaltxsubmission.MessageTypeRejectTx), firstType)
 	expectedReject, err := hex.DecodeString(
-		"8182078182027167656e657269632072656a656374696f6e",
+		"818207818201820182008104",
 	)
 	require.NoError(t, err)
 	assert.Equal(t, expectedReject, []byte(firstItems[1]))
