@@ -27,6 +27,8 @@ import (
 // using the stub block type from block_event_test.go (same package).
 
 func TestValidateForgedBlockNilBlockReturnsError(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	err := ls.ValidateForgedBlock(nil, nil)
 	require.Error(t, err)
@@ -34,6 +36,8 @@ func TestValidateForgedBlockNilBlockReturnsError(t *testing.T) {
 }
 
 func TestValidateForgedBodyHashZeroHashReturnsError(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	// Use a stub block with a non-Byron era and an all-zero body hash.
 	block := &stubValidateBlock{
@@ -47,6 +51,8 @@ func TestValidateForgedBodyHashZeroHashReturnsError(t *testing.T) {
 }
 
 func TestValidateForgedBodyHashNonZeroHashPasses(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	var h lcommon.Blake2b256
 	raw := make([]byte, 32)
@@ -61,6 +67,8 @@ func TestValidateForgedBodyHashNonZeroHashPasses(t *testing.T) {
 }
 
 func TestValidateForgedTxsEmptyBlockPasses(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	block := &stubValidateBlock{slot: 100}
 	err := ls.validateForgedTxs(block)

@@ -66,6 +66,8 @@ func newFileTestDB(t *testing.T) *database.Database {
 func TestBackfillProcessBlockGovernanceRenewsDRepFromCertificateOnly(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	backfill := NewBackfill(db, nil, slog.Default())
 
@@ -112,6 +114,8 @@ func TestBackfillProcessBlockGovernanceRenewsDRepFromCertificateOnly(
 }
 
 func TestBackfillProcessBlockGovernanceRenewsDRepInDijkstra(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	backfill := NewBackfill(db, nil, slog.Default())
 
@@ -165,6 +169,8 @@ func closeTestDB(db *database.Database) error {
 }
 
 func TestBackfillBatchSizeDefaultAndOverride(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
@@ -174,6 +180,8 @@ func TestBackfillBatchSizeDefaultAndOverride(t *testing.T) {
 }
 
 func TestBackfillSetBatchSizeRejectsInvalid(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
@@ -183,6 +191,8 @@ func TestBackfillSetBatchSizeRejectsInvalid(t *testing.T) {
 }
 
 func TestNeedsBackfill_NoCheckpoint(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
@@ -193,6 +203,8 @@ func TestNeedsBackfill_NoCheckpoint(t *testing.T) {
 }
 
 func TestNeedsBackfill_NoCheckpointWithBlocks(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
@@ -218,6 +230,8 @@ func TestNeedsBackfill_NoCheckpointWithBlocks(t *testing.T) {
 }
 
 func TestNeedsBackfill_IncompleteCheckpoint(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
@@ -241,6 +255,8 @@ func TestNeedsBackfill_IncompleteCheckpoint(t *testing.T) {
 }
 
 func TestNeedsBackfill_CompletedCheckpoint(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
@@ -264,6 +280,8 @@ func TestNeedsBackfill_CompletedCheckpoint(t *testing.T) {
 }
 
 func TestRun_EmptyBlobStore(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
@@ -278,6 +296,8 @@ func TestRun_EmptyBlobStore(t *testing.T) {
 }
 
 func TestRun_AlreadyCompleted(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
@@ -300,6 +320,8 @@ func TestRun_AlreadyCompleted(t *testing.T) {
 }
 
 func TestRun_CancelledContext_EmptyBlobStore(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
@@ -327,6 +349,8 @@ func TestRun_CancelledContext_EmptyBlobStore(t *testing.T) {
 }
 
 func TestRun_IncompleteCheckpointAtZeroStartsAtSlotZero(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	now := time.Now()
@@ -362,6 +386,8 @@ func TestRun_IncompleteCheckpointAtZeroStartsAtSlotZero(t *testing.T) {
 }
 
 func TestRun_EndSlotLeavesLaterBlocksForLedgerReplay(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
@@ -408,6 +434,8 @@ func TestRun_EndSlotLeavesLaterBlocksForLedgerReplay(t *testing.T) {
 // TestRun_EmitsFinalProgressForShortRun ensures final interval metrics are
 // published even when the run finishes before the normal 10s progress tick.
 func TestRun_EmitsFinalProgressForShortRun(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	now := time.Now()
@@ -454,6 +482,8 @@ func TestRun_EmitsFinalProgressForShortRun(t *testing.T) {
 // slot 0 — that log fires from inside the iteration loop and so only
 // emits when the iterator visits that slot.
 func TestRun_IncompleteCheckpointAtZeroVisitsSlotZero(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	now := time.Now()
@@ -506,6 +536,8 @@ func TestRun_IncompleteCheckpointAtZeroVisitsSlotZero(t *testing.T) {
 // explicit setter call, Run() picks up the sync-state marker and applies it
 // as the skip threshold. This is the path Mithril sync depends on.
 func TestBackfill_AutoDetectsImmutableUtxoOffsetsTip(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
@@ -534,6 +566,8 @@ func TestBackfill_AutoDetectsImmutableUtxoOffsetsTip(t *testing.T) {
 // that intentionally need offset repair below the immutable-copy tip cannot
 // have the optimisation silently re-enabled behind their back.
 func TestBackfill_ExplicitZeroOverridesAutoDetect(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
@@ -568,6 +602,8 @@ func TestBackfill_ExplicitZeroOverridesAutoDetect(t *testing.T) {
 // or a stricter repair threshold) without depending on what the
 // immutable-copy phase happened to leave behind.
 func TestBackfill_ExplicitNonZeroOverridesAutoDetect(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
@@ -591,6 +627,8 @@ func TestBackfill_ExplicitNonZeroOverridesAutoDetect(t *testing.T) {
 }
 
 func TestRun_CancelledContext_WithBlocks(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 

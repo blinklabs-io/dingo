@@ -141,6 +141,8 @@ func seedImportedDrep(
 // defect was a plausible internal value becoming the wrong consensus
 // decision.
 func TestDRepDeregistrationRefundsRecordedDeposit(t *testing.T) {
+	t.Parallel()
+
 	lv, db := newStakeRefundTestView(t)
 	cred := drepRefundTestCredential(0xd1)
 	seedImportedDrep(t, db, cred, drepRefundTestRecordedDeposit, 100, true)
@@ -183,7 +185,7 @@ func TestDRepDeregistrationRefundsRecordedDeposit(t *testing.T) {
 	)
 
 	// Supporting evidence for why the acceptance holds.
-	reg, err := lv.DRepRegistration(cred.Credential)
+	reg, err := lv.DRepRegistration(cred)
 	require.NoError(t, err)
 	require.NotNil(t, reg)
 	require.NotNil(t, reg.Deposit)
@@ -195,6 +197,8 @@ func TestDRepDeregistrationRefundsRecordedDeposit(t *testing.T) {
 // reads its deposits through the batched query, so this is what executes
 // GetDrepLastRegistrationDeposits' derived-table join.
 func TestDRepRegistrationsReportRecordedDeposits(t *testing.T) {
+	t.Parallel()
+
 	lv, db := newStakeRefundTestView(t)
 	active := drepRefundTestCredential(0xd2)
 	inactive := drepRefundTestCredential(0xd3)
@@ -206,7 +210,7 @@ func TestDRepRegistrationsReportRecordedDeposits(t *testing.T) {
 	regs, err := lv.DRepRegistrations()
 	require.NoError(t, err)
 	require.Len(t, regs, 1)
-	require.Equal(t, active.Credential, regs[0].Credential)
+	require.Equal(t, active, regs[0].Credential)
 	require.NotNil(t, regs[0].Deposit)
 	require.Equal(t, uint64(drepRefundTestRecordedDeposit), *regs[0].Deposit)
 }
@@ -216,6 +220,8 @@ func TestDRepRegistrationsReportRecordedDeposits(t *testing.T) {
 // registration_drep history reports no deposit rather than an error, through
 // both views.
 func TestDRepRegistrationReportsNilForUnregisteredCredential(t *testing.T) {
+	t.Parallel()
+
 	lv, db := newStakeRefundTestView(t)
 	cred := drepRefundTestCredential(0xd4)
 	tag, err := models.CredentialTagFromUint(uint(cred.CredType))
@@ -227,7 +233,7 @@ func TestDRepRegistrationReportsNilForUnregisteredCredential(t *testing.T) {
 		Active:        true,
 	}))
 
-	reg, err := lv.DRepRegistration(cred.Credential)
+	reg, err := lv.DRepRegistration(cred)
 	require.NoError(t, err)
 	require.NotNil(t, reg)
 	require.Nil(t, reg.Deposit)

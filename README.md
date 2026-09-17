@@ -108,6 +108,12 @@ The following environment variables modify Dingo's behavior:
 - `DINGO_BARK_OPERATOR_CERTIFICATE_FINGERPRINTS`
   - Comma-separated SHA-256 client certificate fingerprints authorized for
     destructive Bark DatabaseService RPCs.
+- `DINGO_HEALTH_PORT`
+  - TCP port for the liveness/readiness probe listener (default: `12799`,
+    `0` disables). Binds `bindAddr`, like the relay and metrics listeners.
+- `DINGO_HEALTH_READY_GAP_SLOTS`
+  - Slots the chain tip may trail the wall-clock slot while `/readyz` still
+    reports ready (default: `1000`)
 - `DINGO_DEBUG_BIND_ADDR`
   - IP address to bind for unauthenticated pprof endpoints (default:
     `127.0.0.1`)
@@ -146,9 +152,6 @@ The following environment variables modify Dingo's behavior:
 - `DINGO_MIDNIGHT_REFLECTION_ENABLED`
   - Enable gRPC reflection on the Midnight server; requires the server
     (default: `false`)
-- `DINGO_MIDNIGHT_ALLOW_INSECURE_REMOTE`
-  - Permit a plaintext Midnight listener on a wildcard, hostname, or concrete
-    non-loopback address (default: `false`)
 - `DINGO_MIDNIGHT_HOST`
   - Midnight gRPC listen address (default: `127.0.0.1`)
 - `DINGO_MIDNIGHT_PORT`
@@ -190,6 +193,60 @@ Dingo creates a `dingo.socket` file that speaks Ouroboros node-to-client and is 
 
 Cardano configuration files are bundled in the Docker image. For local builds, you can find them at [docker-cardano-configs](https://github.com/blinklabs-io/docker-cardano-configs/tree/main/config).
 
+### Runtime resource requirements
+
+Dingo's resource needs depend on the network, storage mode, and whether it is
+bootstrapping or serving near the chain tip. The following measurements were
+captured on September 4, 2026 from nine process samples at 30-second intervals
+(about four minutes) on otherwise shared 32 GiB hosts. CPU values below are
+derived from the recorded process percentages (`%CPU / 100`) and represent
+core-equivalents, not a new sampling run. They are observations, not capacity
+guarantees; the mainnet sample was on released `v0.70.5`, while the Preprod
+and Preview samples used an `origin/main` build.
+
+| Network and mode | Average CPU cores | Peak CPU cores | Average RSS | Peak RSS |
+| --- | ---: | ---: | ---: | ---: |
+| Mainnet, `core` | 0.863 | 0.864 | 4.3 GiB | 4.5 GiB |
+| Preprod, `core` | 0.545 | 0.547 | 1.5 GiB | 1.5 GiB |
+| Preview, `core` | 0.095 | 0.096 | 1.3 GiB | 1.4 GiB |
+
+For a practical starting point, provision at least 2 vCPUs and 8 GiB RAM for
+a `core` node. This leaves CPU and memory headroom above the observed mainnet
+serve sample and allows for variation from peer activity, compaction, upgrades,
+and catch-up. A node that serves APIs or uses `storageMode: api` should use at
+least 4 vCPUs and 16 GiB RAM until longer production-like measurements are
+available. Disk capacity must also cover the selected storage mode and its
+temporary bootstrap peak.
+
+API-mode Mithril bootstrap is a separate workload and needs more resources than
+near-tip serving. An in-progress Preview sample averaged 0.932 CPU cores
+(0.972 peak, derived from the recorded percentages) and grew from 0.3 GiB to
+3.0 GiB RSS in about four minutes while importing a snapshot; the
+run had reached 1.8% ledger/UTxO import, so its eventual peak was not measured.
+The same run used about 17.9 GB of host `/data` at the time of sampling. Treat
+these API bootstrap values as preliminary and leave substantial additional CPU,
+RAM, and disk headroom until a complete bootstrap measurement is available.
+
+### API-mode bootstrap measurements
+
+The following complete Mithril API-mode runs used Dingo `origin/main` at
+commit `034c12e6`. The Preprod backfill was followed by a deferred
+critical-index rebuild; the overall duration includes both phases. These are
+environment-specific planning baselines, not capacity guarantees.
+
+| Network | Dingo ref | Storage mode | Backfill | Deferred index rebuild | Overall | Blocks / transactions |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| Preprod | `origin/main` (`034c12e6`) | `api` | 6h09m06s | 12m30.607s | ~6h21m37.7s | 5,169,107 / 6,795,854 |
+| Preview | `origin/main` (`034c12e6`) | `api` | 7h38m34s | not separately recorded | 7h38m34s | 4,658,378 / 6,890,796 |
+
+The API-mode runs reached approximately 8.1 GiB RSS on Preprod and 9.6 GiB
+RSS on Preview at their highest observed checkpoints. Peak CPU was about 1.29
+core-equivalents on both runs; swap reached about 145 MiB on Preprod and
+125 MiB on Preview. The observed data footprints were approximately 60 GiB
+and 49 GiB respectively. These resource readings were captured during active
+bootstrap and should not be used as steady-state serving requirements; leave
+additional headroom for host I/O, memory pressure, and future network growth.
+
 ## Docker
 
 ```bash
@@ -211,12 +268,73 @@ The image is based on Debian bookworm-slim and includes `cardano-cli`, `nview`, 
 | 3001 | Ouroboros NtN (node-to-node) | Enabled |
 | 3002 | Ouroboros NtC over TCP | Enabled |
 | 12798 | Prometheus metrics | Enabled |
+| 12799 | Health probes (`/health`, `/healthz`, `/readyz`) | Enabled |
 | 3000 | Blockfrost REST API | Disabled |
 | 8080 | Mesh (Rosetta) REST API | Disabled |
 | 9090 | UTxO RPC (gRPC) | Disabled |
 | 50051 | Midnight state (gRPC) | Disabled |
 | — | Bark archive (gRPC) | Disabled (example when enabled: 9091) |
 | — | pprof debug endpoints | Disabled (`DINGO_DEBUG_PORT=0`; loopback when enabled) |
+
+## Health Probes
+
+Dingo serves liveness and readiness on a listener of its own
+(`healthPort`, default `12799`), separate from Prometheus metrics, pprof,
+and every API listener. It starts in both storage modes and whether or not
+the Blockfrost, Mesh, and UTxO RPC APIs are enabled, so the probe is
+available in the default `core` relay configuration that the shipped
+`docker-compose.yml` runs.
+
+`dingo mithril sync` serves it too. A Mithril bootstrap runs as its own
+process before the node starts, takes hours on mainnet, and reports live and
+not-ready throughout, so a container HEALTHCHECK pointed at `healthPort`
+keeps passing while the snapshot downloads instead of replacing the container
+partway through it.
+
+| Path | Meaning | 200 when | Non-200 when |
+|------|---------|----------|--------------|
+| `/healthz` (and `/health`) | Liveness | The process is up and the listener is serving | Never, while the process can answer |
+| `/readyz` | Readiness | The chain tip is within `healthReadyGapSlots` (default `1000`) of the wall-clock slot | Starting up, bootstrapping from Mithril, catching up, or the tip has frozen |
+
+Both return JSON carrying the readiness verdict, a reason, and the observed
+tip gap in slots:
+
+```json
+{"live":true,"ready":false,"reason":"tip gap 4211 slots exceeds tolerance of 1000 slots","tipGapSlots":4211,"status":"unhealthy"}
+```
+
+The split is deliberate, because an orchestrator acts on the two
+differently. Docker, Swarm, and ECS replace an unhealthy container, and
+Kubernetes restarts a container whose `livenessProbe` fails; a node doing an
+initial sync is legitimately not useful for hours or days, and none of the
+conditions that freeze a tip are repaired by a restart loop. So liveness
+stays independent of sync state and is what the image's `HEALTHCHECK`
+probes; that check follows `DINGO_HEALTH_PORT` and reports healthy without
+probing when it is `0`. Readiness is the signal that catches a frozen tip, and failing it
+removes a pod from a Service or a target from a load balancer without
+killing the node.
+
+Kubernetes:
+
+```yaml
+livenessProbe:
+  httpGet: { path: /healthz, port: 12799 }
+  periodSeconds: 30
+readinessProbe:
+  httpGet: { path: /readyz, port: 12799 }
+  periodSeconds: 15
+```
+
+The readiness tolerance matches `forgeStaleGapThresholdSlots`: both answer
+"has this node stopped following the chain?", and a probe that flapped more
+readily than the forger's own staleness gate would evict a node the forger
+still considers current. Raise `healthReadyGapSlots` on a network with a
+lower active slot coefficient, or lower it to detect a stall sooner at the
+cost of flapping on quiet stretches of chain.
+
+The tip gap is read from the ledger's slot clock — the same value the
+`dingo_tip_gap_slots` gauge exports — so readiness does not depend on the
+Prometheus listener.
 
 ## Storage Modes
 
@@ -260,19 +378,17 @@ Midnight indexing and serving are separate opt-ins. `midnight.enabled` starts
 the indexer, while `midnight.serverEnabled` starts the gRPC listener for rows
 already present in the Midnight tables; either may be enabled independently in
 API storage mode. The listener defaults to `127.0.0.1:50051`. Reflection is
-available only with `midnight.reflectionEnabled`. Plaintext wildcard, hostname,
-and concrete non-loopback binds are rejected unless
-`midnight.allowInsecureRemote` is set; configuring both
-`tlsCertFilePath` and `tlsKeyFilePath` permits a remote TLS listener. Dingo does
-not add authentication to this Acropolis-compatible service.
+available only with `midnight.reflectionEnabled`. Configuring both
+`tlsCertFilePath` and `tlsKeyFilePath` enables TLS; plaintext is also
+supported. Dingo does not add authentication to this
+Acropolis-compatible service.
 
 Bark is Dingo's own Dingo-to-Dingo archive protocol rather than an application
 API. It is configured separately with `barkPort` and `barkBaseUrl`.
 
-For public client access, place the API listeners behind a reverse proxy or API
-gateway — that remains fully supported. In addition, UTxO RPC, Blockfrost, and
-Mesh share one in-process TLS/authentication surface, so an operator can also
-secure any subset of them without a proxy in front.
+For public client access, the API listeners may be exposed directly or placed
+behind a reverse proxy or API gateway. UTxO RPC, Blockfrost, and Mesh support
+optional in-process TLS and accept requests without credentials.
 
 The shorter `DINGO_UTXORPC_PORT`, `DINGO_BLOCKFROST_PORT`, and
 `DINGO_MESH_PORT` names remain supported for compatibility. If both a
@@ -305,15 +421,17 @@ plugins:
     utxorpc: {provider: builtin, config: {port: 9090}}
 ```
 
-### API TLS and Authentication
+### API TLS
 
-`api.tls`/`api.auth` set a shared default TLS and authentication policy for
-every selected `plugins.api.*` provider (Blockfrost, Mesh, UTxO RPC). Each
-field resolves independently: `plugins.api.<name>.config.tls`/`config.auth`
-overrides any field for that provider only, and an explicit
-`mode: disabled` at the provider level turns off an inherited policy rather
-than merely leaving it unset. The default everywhere is `disabled`, so an
-existing reverse-proxy/no-auth deployment is unaffected on upgrade.
+`api.tls` sets a shared default TLS policy for every selected
+`plugins.api.*` provider (Blockfrost, Mesh, UTxO RPC). Each field resolves
+independently: `plugins.api.<name>.config.tls` overrides a field for that
+provider only, otherwise the shared value is used and an unset policy remains
+plaintext. With `mode: server`, both certificate and key paths are required
+before the listener binds; TLS remains optional. Explicit `mode: disabled`
+keeps a provider plaintext even when a shared TLS policy is configured. CLI and
+environment values for the shared TLS policy retain the normal
+CLI > environment > YAML > default precedence.
 
 ```yaml
 api:
@@ -321,25 +439,17 @@ api:
     mode: server
     certFilePath: /run/secrets/api.crt
     keyFilePath: /run/secrets/api.key
-  auth:
-    mode: token
-    tokenFilePath: /run/secrets/api-token
-
 plugins:
   api:
-    # Inherits TLS and auth from api.tls/api.auth above unchanged.
+    # Inherits TLS from api.tls above.
     utxorpc:
       provider: builtin
       config:
         port: 9090
-    # Explicitly opts out of the inherited token auth (e.g. this listener
-    # sits behind its own gateway that already authenticates callers).
     mesh:
       provider: builtin
       config:
         port: 8080
-        auth:
-          mode: disabled
     # Overrides just the certificate/key for this provider; the inherited
     # api.tls.mode ("server") still applies.
     blockfrost:
@@ -351,47 +461,13 @@ plugins:
           keyFilePath: /run/secrets/blockfrost.key
 ```
 
-Credential locations:
+API routes require no credentials.
+TLS certificate/key file contents are never written to logs, error messages,
+or effective-config output.
 
-- **HTTP** (Blockfrost, Mesh, UTxO RPC's own REST/JSON access): send
-  `Authorization: Bearer <token>`. Blockfrost also accepts its own
-  `project_id: <token>` header as an alias for the same shared token — real
-  Blockfrost clients already send their API key that way, so
-  `auth.mode: token` secures Blockfrost against both header styles from one
-  configured token.
-- **Connect/gRPC** (UTxO RPC): send the identical
-  `Authorization: Bearer <token>` request header; every Connect/gRPC
-  handler UTxO RPC serves, including health checking and reflection,
-  requires it once auth is enabled.
-- **Liveness/readiness probes.** This is deliberate, not an oversight: once
-  `auth.mode: token` is set for a provider, *every* route it serves requires
-  the credential, with no separate unauthenticated allowlist for health
-  checking — Blockfrost's `GET /health` and UTxO RPC's
-  `grpc.health.v1.Health/Check` are no exception, matching how every other
-  route on that listener behaves. A container-orchestrator probe (e.g. a
-  Kubernetes liveness/readiness check) that cannot attach the shared
-  credential will therefore fail once auth is enabled. Configure the probe
-  to send the same `Authorization: Bearer <token>` header the rest of your
-  clients use (most probe mechanisms support a custom header/exec command),
-  or point liveness/readiness checks at a plain TCP connect to the listener
-  port instead of the HTTP/gRPC health route, or run the probe against an
-  unauthenticated in-cluster path (e.g. a `mode: disabled` provider carrying
-  only observability traffic) rather than the public listener.
-- A missing or invalid credential fails closed: `401` over HTTP,
-  `Unauthenticated` over Connect/gRPC. A browser's CORS preflight
-  (`OPTIONS`) never needs a credential — browsers never attach
-  `Authorization` to one — but every other request, including a
-  non-preflight `OPTIONS`, still authenticates normally.
-- A partial `certFilePath`/`keyFilePath` pair (only one set) fails
-  validation at startup, before any listener binds, with an error naming
-  the full config path (e.g. `plugins.api.blockfrost.config.tls`).
-- Tokens and certificate/key file *contents* are never written to logs,
-  error messages, or effective-config output — only file paths and mode
-  names are.
-
-The pre-existing root `tlsCertFilePath`/`tlsKeyFilePath` fields remain a
-supported compatibility input with two consumers. The Midnight gRPC server
-uses the pair directly when explicitly enabled. UTxO RPC merges it as the
+The pre-existing root `tlsCertFilePath`/`tlsKeyFilePath` fields remain
+supported compatibility inputs: Midnight uses the pair directly when its
+listener is enabled, and UTxO RPC merges it as the
 lowest-priority policy, field by field, alongside the shared `api.tls` default
 and its own `tls` config — not as an all-or-nothing fallback that applies only
 when both newer scopes are completely unset. For example, if shared `api.tls`
@@ -401,7 +477,8 @@ promoted onto Blockfrost or Mesh, since doing so would silently switch a
 previously plaintext listener to TLS on upgrade. `bindAddr` and
 `corsAllowedOrigins` are unrelated to this policy and remain root-level
 settings shared by all listeners (`bindAddr` is also used by the relay/NtN
-listener, not just the APIs).
+listener, not just the APIs). API listeners use `bindAddr`, whose default is
+`0.0.0.0`; CORS remains operator-chosen through `corsAllowedOrigins`.
 
 ### Archive And History Expiry Nodes
 
@@ -706,6 +783,11 @@ API Plugins:
 - `blockfrost` - Blockfrost-compatible REST API
 - `mesh` - Mesh (Coinbase Rosetta) REST API
 - `utxorpc` - UTxO RPC gRPC API (serves both v1alpha and v1beta)
+
+Badger value-log GC runs every five minutes at a 0.5 discard ratio by default.
+Operators may set `gc: false` for a controlled bulk load, but should re-enable
+GC for steady-state operation. GC activity and measurement guidance are
+documented in [`docs/badger-gc.md`](docs/badger-gc.md).
 
 ### Plugin Selection
 

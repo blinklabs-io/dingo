@@ -54,12 +54,14 @@ func newConnManagerWithCloseEvents(
 // events never runs again: the node quietly stops following the chain while
 // continuing to forge, and only a restart clears it.
 func TestNtCConnectionCloseDoesNotPublishPeerEvent(t *testing.T) {
+	t.Parallel()
+
 	cm, closeEvents := newConnManagerWithCloseEvents(t)
 	conn := newUnstartedConnection(t)
 
 	require.True(
 		t,
-		cm.addNtCConnectionWithIPKey(conn, true, "127.0.0.1:3002", ""),
+		cm.addConnectionImpl(conn, true, true, "127.0.0.1:3002", "", nil),
 	)
 
 	conn.ErrorChan() <- errors.New("ntc connection closed")
@@ -76,6 +78,8 @@ func TestNtCConnectionCloseDoesNotPublishPeerEvent(t *testing.T) {
 // The control for the test above: the same harness must still observe the
 // event for a node-to-node connection, or NtN peer cleanup never happens.
 func TestNtNConnectionClosePublishesPeerEvent(t *testing.T) {
+	t.Parallel()
+
 	cm, closeEvents := newConnManagerWithCloseEvents(t)
 	conn := newUnstartedConnection(t)
 
@@ -100,12 +104,14 @@ func TestNtNConnectionClosePublishesPeerEvent(t *testing.T) {
 // Suppressing the event must not suppress the connection manager's own
 // cleanup: the NtC connection still has to leave the connection table.
 func TestNtCConnectionCloseStillRemovesConnection(t *testing.T) {
+	t.Parallel()
+
 	cm, _ := newConnManagerWithCloseEvents(t)
 	conn := newUnstartedConnection(t)
 
 	require.True(
 		t,
-		cm.addNtCConnectionWithIPKey(conn, true, "127.0.0.1:3002", ""),
+		cm.addConnectionImpl(conn, true, true, "127.0.0.1:3002", "", nil),
 	)
 	require.NotNil(t, cm.GetConnectionById(conn.Id()))
 

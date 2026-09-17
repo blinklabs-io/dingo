@@ -40,6 +40,8 @@ import (
 func TestHandleEventChainsyncRollbackToBlockTipDoesNotPublishLedgerRollback(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() { bus.Stop() })
@@ -116,6 +118,8 @@ func TestHandleEventChainsyncRollbackToBlockTipDoesNotPublishLedgerRollback(
 // (replay recovery, iterator rollback, reconcile paths) inherit the
 // same guarantee.
 func TestRollbackAtCurrentTipIsNoop(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() { bus.Stop() })

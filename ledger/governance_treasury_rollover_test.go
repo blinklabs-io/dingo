@@ -240,6 +240,8 @@ func (f *treasuryRolloverFixture) accountReward(
 func TestProcessEpochRolloverTreasuryRatificationUsesRunningBudget(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	f := newTreasuryRolloverFixture(t, 100)
 	firstAddress, firstReturn, firstCredential := f.rewardAddress(t, 0x11)
 	secondAddress, secondReturn, secondCredential := f.rewardAddress(t, 0x21)
@@ -306,6 +308,8 @@ func TestProcessEpochRolloverTreasuryRatificationUsesRunningBudget(
 func TestProcessEpochRolloverEnactmentFailureRollsBackAndRetries(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	f := newTreasuryRolloverFixture(t, 100)
 	failingAddress, failingReturn, failingCredential := f.rewardAddress(t, 0x71)
 	succeedingAddress, succeedingReturn, succeedingCredential := f.rewardAddress(
@@ -386,6 +390,8 @@ func TestProcessEpochRolloverEnactmentFailureRollsBackAndRetries(
 func TestProcessEpochRolloverReplayEnactmentFailureRemainsFatal(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	f := newTreasuryRolloverFixture(t, 100)
 	withdrawAddress, _, stakeCredential := f.rewardAddress(t, 0x81)
 	proposal := f.addProposal(

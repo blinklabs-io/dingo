@@ -43,8 +43,84 @@ type forgingMetrics struct {
 	blockSizeBytes   prometheus.Histogram
 	blockTxCount     prometheus.Histogram
 	forgeSyncSkip    prometheus.Counter
-	slotClockErrors  prometheus.Counter
-	tipGapSlots      prometheus.Gauge
+	// Leader checks refused because this node's own views of its chain did not
+	// agree, or because the newest block it holds was stale. Six reasons,
+	// each from a different pair of inputs:
+	//
+	//   - "slot_gap": the ledger-applied tip trails this node's primary
+	//     chain tip by more than ForgePrimaryChainTipToleranceSlots.
+	//     Inputs: applied tip slot, primary tip slot.
+	//   - "primary_tip_hash_diverged": primary chain tip and applied tip sit at the SAME
+	//     slot but name different blocks -- an equal-slot fork the ledger has
+	//     not applied. Inputs: applied tip hash, primary chain tip hash.
+	//   - "primary_tip_behind_applied": the primary chain tip is at a LOWER slot than the
+	//     applied tip, so the parent the builder would use is one the ledger
+	//     has already built past. Inputs: applied tip slot, primary tip slot.
+	//   - "unapplied_rival_at_leader_slot": the primary chain tip already holds
+	//     a block AT this slot that the ledger has not applied, so forging
+	//     would parent a block for slot S on a tip already at slot S.
+	//     Inputs: current slot, applied tip slot, primary tip slot.
+	//   - "eb_manifest_ahead": the headers alone looked fine, and a
+	//     corroborated Leios endorser block leads the applied tip by more
+	//     than ForgeEndorserBlockStalenessSlots -- proof a ranking block
+	//     exists at a slot whose header this node has not admitted. Opt-in
+	//     and off by default, and governed by that bound ALONE rather than by
+	//     the local ForgePrimaryChainTipToleranceSlots, so this series stays
+	//     at 0 unless an operator sets it. Inputs: applied tip slot, highest
+	//     corroborated endorser-block slot.
+	//   - "applied_tip_stale": the newest block this node holds by ANY
+	//     evidence is too old, with the local tips in agreement. BOTH of its
+	//     sources are opt-in and off by default, so this series stays at 0
+	//     unless an operator sets a bound: trailing the corroborated upstream
+	//     target by more than ForgeUpstreamStalenessSlots, or trailing the
+	//     current wall-clock slot by more than ForgeAppliedTipStalenessSlots.
+	//     It is the only reason that fires when header admission and ledger
+	//     application stall TOGETHER, which is exactly when every gap above
+	//     reads 0 -- but note the upstream bound compares a BLOCK this node
+	//     holds against a target published at HEADER admission, so it must be
+	//     set well above the expected inter-block gap.
+	//
+	// Every value counts lost blocks rather than leader checks, but they do
+	// not establish leadership the same way. Five are counted after leader
+	// selection has proven this node elected. "unapplied_rival_at_leader_slot"
+	// is refused BEFORE the leader check -- it is the one gate that can drop a
+	// scheduled leader slot without moving node_is_leader, not_leader or
+	// could_not_forge -- so it is counted from the precomputed VRF schedule
+	// (isScheduledLeaderSlot), the same read that raises its log line to WARN.
+	// That basis fails quiet when no schedule is cached for the epoch, so it
+	// can under-count. It excludes this node's OWN just-forged block: when
+	// the unapplied block at the primary chain tip is one SlotTracker (or,
+	// failing that, the forge fence) claims for this slot, the skip is logged
+	// at Debug and nothing is counted, because that slot produced a block
+	// rather than losing one.
+	//
+	// The reasons do not share a diagnosis: "slot_gap",
+	// "primary_tip_hash_diverged" and "unapplied_rival_at_leader_slot" mean
+	// the ledger pipeline is behind this node's own primary chain;
+	// "primary_tip_behind_applied" is the opposite -- the ledger is AHEAD of
+	// the primary chain, which is chain/ledger reconciliation rather than an
+	// apply backlog. Those are local checks. "eb_manifest_ahead", and
+	// "applied_tip_stale" when its UPSTREAM-TARGET bound fires, are not: they
+	// mean this node is behind the NETWORK, both firing on evidence of a block
+	// it does not hold. "applied_tip_stale" from its WALL-CLOCK bound is
+	// neither -- it reports AGE, not network progress: no block for that many
+	// slots is the chain being quiet as readily as this node missing one, and
+	// it is a backstop for the case with no upstream target to compare
+	// against. The "stale_source" field on the log line says which of the two
+	// fired. All three are opt-in and stay at 0 on a default configuration.
+	// See ARCHITECTURE.md, "Block Production".
+	forgeStaleTipSkip *prometheus.CounterVec
+	// Pre-materialized children for the reason label values, so the leader
+	// check does not resolve a label on every skip and neither series is
+	// absent from a dashboard before the first skip.
+	forgeStaleTipSkipSlotGap          prometheus.Counter
+	forgeStaleTipSkipHashDiverged     prometheus.Counter
+	forgeStaleTipSkipPrimaryTipBehind prometheus.Counter
+	forgeStaleTipSkipUnappliedRival   prometheus.Counter
+	forgeStaleTipSkipAppliedStale     prometheus.Counter
+	forgeStaleTipSkipEbAhead          prometheus.Counter
+	slotClockErrors                   prometheus.Counter
+	tipGapSlots                       prometheus.Gauge
 
 	// Slots refused by the persisted last-forged-slot fence. Any
 	// increment means the node was asked to forge a slot it had
@@ -181,10 +257,35 @@ func initForgingMetrics(
 			Help: "errors reading slot clock for forging",
 		},
 	)
+	m.forgeStaleTipSkip = factory.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "dingo_forge_stale_tip_skip_total",
+			Help: "forging attempts skipped because this node's ledger-applied tip, its own primary chain tip and its corroborated endorser-block evidence did not describe the same chain position, or because the newest block it holds was stale; by reason (slot_gap, primary_tip_hash_diverged, primary_tip_behind_applied, unapplied_rival_at_leader_slot, eb_manifest_ahead, applied_tip_stale)",
+		},
+		[]string{"reason"},
+	)
+	m.forgeStaleTipSkipSlotGap = m.forgeStaleTipSkip.WithLabelValues(
+		forgeStaleTipReasonSlotGap,
+	)
+	m.forgeStaleTipSkipHashDiverged = m.forgeStaleTipSkip.WithLabelValues(
+		forgeStaleTipReasonHashDiverged,
+	)
+	m.forgeStaleTipSkipPrimaryTipBehind = m.forgeStaleTipSkip.WithLabelValues(
+		forgeStaleTipReasonPrimaryTipBehind,
+	)
+	m.forgeStaleTipSkipUnappliedRival = m.forgeStaleTipSkip.WithLabelValues(
+		forgeStaleTipReasonUnappliedRival,
+	)
+	m.forgeStaleTipSkipAppliedStale = m.forgeStaleTipSkip.WithLabelValues(
+		forgeStaleTipReasonAppliedStale,
+	)
+	m.forgeStaleTipSkipEbAhead = m.forgeStaleTipSkip.WithLabelValues(
+		forgeStaleTipReasonEbManifestAhead,
+	)
 	m.tipGapSlots = factory.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "dingo_forge_tip_gap_slots",
-			Help: "latest observed tip gap in slots",
+			Help: "ledger-apply backlog in slots at the last leader check (primary chain tip minus ledger-applied tip)",
 		},
 	)
 	m.forgeValidationDuration = factory.NewHistogram(

@@ -181,7 +181,7 @@ func requireTransactionEvent(
 	evt := testutil.RequireReceive(
 		t,
 		events,
-		2*time.Second,
+		testutil.AsyncWait,
 		"post-commit transaction event",
 	)
 	txEvt, ok := evt.Data.(TransactionEvent)
@@ -192,6 +192,8 @@ func requireTransactionEvent(
 }
 
 func TestLedgerDeltaPublishesApplyEventsOnlyAfterCommit(t *testing.T) {
+	t.Parallel()
+
 	t.Run("commit publishes in transaction order", func(t *testing.T) {
 		ls, db, events := newTransactionEventTestLedger(t)
 		delta := newTransactionEventTestDelta(t, 1, 0)

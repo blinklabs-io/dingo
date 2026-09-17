@@ -15,6 +15,7 @@
 package mempool
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -39,6 +40,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/event"
 	dingotestutil "github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/utxoref"
 )
 
 // =============================================================================
@@ -81,8 +83,8 @@ func (v *changingSessionValidator) ValidateTx(gledger.Transaction) error {
 
 func (v *changingSessionValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
-	map[string]struct{},
-	map[string]lcommon.Utxo,
+	map[utxoref.Key]struct{},
+	map[utxoref.Key]lcommon.Utxo,
 ) error {
 	return nil
 }
@@ -91,8 +93,8 @@ func (v *changingSessionValidator) WithTxValidationSession(
 	fn func(
 		func(
 			gledger.Transaction,
-			map[string]struct{},
-			map[string]lcommon.Utxo,
+			map[utxoref.Key]struct{},
+			map[utxoref.Key]lcommon.Utxo,
 		) error,
 		func() bool,
 	) error,
@@ -101,8 +103,8 @@ func (v *changingSessionValidator) WithTxValidationSession(
 	return fn(
 		func(
 			gledger.Transaction,
-			map[string]struct{},
-			map[string]lcommon.Utxo,
+			map[utxoref.Key]struct{},
+			map[utxoref.Key]lcommon.Utxo,
 		) error {
 			return nil
 		},
@@ -123,8 +125,8 @@ func (v *blockingSessionValidator) ValidateTx(gledger.Transaction) error {
 
 func (v *blockingSessionValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
-	map[string]struct{},
-	map[string]lcommon.Utxo,
+	map[utxoref.Key]struct{},
+	map[utxoref.Key]lcommon.Utxo,
 ) error {
 	return nil
 }
@@ -133,8 +135,8 @@ func (v *blockingSessionValidator) WithTxValidationSession(
 	fn func(
 		func(
 			gledger.Transaction,
-			map[string]struct{},
-			map[string]lcommon.Utxo,
+			map[utxoref.Key]struct{},
+			map[utxoref.Key]lcommon.Utxo,
 		) error,
 		func() bool,
 	) error,
@@ -142,8 +144,8 @@ func (v *blockingSessionValidator) WithTxValidationSession(
 	v.startOnce.Do(func() { close(v.started) })
 	validate := func(
 		gledger.Transaction,
-		map[string]struct{},
-		map[string]lcommon.Utxo,
+		map[utxoref.Key]struct{},
+		map[utxoref.Key]lcommon.Utxo,
 	) error {
 		<-v.release
 		return nil
@@ -164,8 +166,8 @@ func (v *blockingOverlayValidator) ValidateTx(gledger.Transaction) error {
 
 func (v *blockingOverlayValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
-	map[string]struct{},
-	map[string]lcommon.Utxo,
+	map[utxoref.Key]struct{},
+	map[utxoref.Key]lcommon.Utxo,
 ) error {
 	if v.shouldBlock.Load() {
 		v.startOnce.Do(func() { close(v.started) })
@@ -188,8 +190,8 @@ func (v *mockValidator) ValidateTx(tx gledger.Transaction) error {
 
 func (v *mockValidator) ValidateTxWithOverlay(
 	tx gledger.Transaction,
-	_ map[string]struct{},
-	_ map[string]lcommon.Utxo,
+	_ map[utxoref.Key]struct{},
+	_ map[utxoref.Key]lcommon.Utxo,
 ) error {
 	return v.ValidateTx(tx)
 }
@@ -325,12 +327,12 @@ func TestUtxoOverlayUsesConsensusConsumedInputsForInvalidTx(t *testing.T) {
 	overlay := newUtxoOverlay()
 	overlay.applyTx(tx.Hash().String(), uint(conway.EraIdConway), tx.Cbor(), tx)
 	for _, input := range tx.Inputs() {
-		key := fmt.Sprintf("%s:%d", input.Id().String(), input.Index())
+		key := utxoref.ForInput(input)
 		assert.NotContains(t, overlay.consumed, key,
 			"invalid transaction regular inputs must remain available")
 	}
 	for _, input := range tx.Collateral() {
-		key := fmt.Sprintf("%s:%d", input.Id().String(), input.Index())
+		key := utxoref.ForInput(input)
 		assert.Contains(t, overlay.consumed, key,
 			"invalid transaction collateral must be consumed")
 	}
@@ -1436,9 +1438,18 @@ func TestMempoolConsumer_CacheIsBoundedByRetainedBytes(t *testing.T) {
 	first := consumer.NextTx(false)
 	require.NotNil(t, first)
 	require.Equal(t, "small", first.Hash)
-	assert.Nil(t, consumer.NextTx(false), "7 retained bytes exceed the per-consumer limit")
+	assert.Nil(
+		t,
+		consumer.NextTx(false),
+		"7 retained bytes exceed the per-consumer limit",
+	)
 	assert.Equal(t, int64(4), retainedConsumerCacheBytes(consumer))
-	assert.Equal(t, 1, consumer.nextTxIdx, "unadvertised tx stays at the cursor")
+	assert.Equal(
+		t,
+		1,
+		consumer.nextTxIdx,
+		"unadvertised tx stays at the cursor",
+	)
 	assert.NotNil(t, consumer.GetTxFromCache("small"))
 
 	consumer.RemoveTxFromCache("small")
@@ -1509,7 +1520,9 @@ func TestMempoolConsumer_DefaultCacheBudgetHasFloor(t *testing.T) {
 	consumer := mustAddConsumer(t, m, newTestConnectionId(0))
 
 	require.Greater(
-		t, consumer.cacheLimitBytes, int64(300),
+		t,
+		consumer.cacheLimitBytes,
+		int64(300),
 		"unfloored derivation (capacity/4=250) would permanently skip this body",
 	)
 
@@ -1576,18 +1589,44 @@ func TestMempoolConsumer_CachesShareAggregateByteLimit(t *testing.T) {
 	second := mustAddConsumer(t, m, secondID)
 
 	require.NotNil(t, first.NextTx(false))
-	assert.Nil(t, second.NextTx(false), "two retained copies exceed aggregate limit")
-	assert.Equal(t, 0, second.nextTxIdx, "aggregate backpressure preserves cursor")
-	assert.Equal(t, int64(6), retainedConsumerCacheBytes(first)+retainedConsumerCacheBytes(second))
-	assert.NotNil(t, first.GetTxFromCache(tx.Hash), "advertised body is retransmittable")
+	assert.Nil(
+		t,
+		second.NextTx(false),
+		"two retained copies exceed aggregate limit",
+	)
+	assert.Equal(
+		t,
+		0,
+		second.nextTxIdx,
+		"aggregate backpressure preserves cursor",
+	)
+	assert.Equal(
+		t,
+		int64(6),
+		retainedConsumerCacheBytes(first)+retainedConsumerCacheBytes(second),
+	)
+	assert.NotNil(
+		t,
+		first.GetTxFromCache(tx.Hash),
+		"advertised body is retransmittable",
+	)
 
 	first.RemoveTxFromCache(tx.Hash)
 	require.NotNil(t, second.NextTx(false))
-	assert.Equal(t, int64(6), retainedConsumerCacheBytes(first)+retainedConsumerCacheBytes(second))
+	assert.Equal(
+		t,
+		int64(6),
+		retainedConsumerCacheBytes(first)+retainedConsumerCacheBytes(second),
+	)
 	assert.NotNil(t, second.GetTxFromCache(tx.Hash))
 
 	m.RemoveConsumer(secondID)
-	assert.Equal(t, int64(0), retainedConsumerCacheBytes(second), "consumer removal releases bytes")
+	assert.Equal(
+		t,
+		int64(0),
+		retainedConsumerCacheBytes(second),
+		"consumer removal releases bytes",
+	)
 }
 
 // TestMempoolConsumer_RemovalRejectsLaterCacheWrites directly verifies the
@@ -3587,6 +3626,31 @@ func TestMempool_RemovalsContinueDuringRevalidation(t *testing.T) {
 	}
 }
 
+func TestMempool_ConfirmedTransactionLogVisibleAtInfoLevel(t *testing.T) {
+	var buf bytes.Buffer
+	m, err := NewMempool(MempoolConfig{
+		Logger: slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{
+			Level: slog.LevelInfo,
+		})),
+		EventBus:        event.NewEventBus(nil, nil),
+		PromRegistry:    prometheus.NewRegistry(),
+		Validator:       newMockValidator(),
+		MempoolCapacity: 1024 * 1024,
+	})
+	require.NoError(t, err)
+	require.NoError(t, m.Start(context.Background()))
+	defer m.Stop(context.Background())
+
+	require.NoError(
+		t,
+		m.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t)),
+	)
+	hash := m.Transactions()[0].Hash
+	m.RemoveTxsByHash([]string{hash})
+
+	assert.Contains(t, buf.String(), "confirmed transaction")
+}
+
 func TestMempool_EvictionIsReconciledDuringRevalidation(t *testing.T) {
 	validator := newBlockingSessionValidator()
 	firstTx := getTestTxBytes(t)
@@ -3929,12 +3993,12 @@ func TestMempool_MEM03_NoDeadlockOnConcurrentPublish(
 // It checks that all inputs exist (in overlay created or base UTxOs)
 // and none are in the consumed set.
 type overlayValidator struct {
-	baseUtxos map[string]lcommon.Utxo // simulated database UTxOs
+	baseUtxos map[utxoref.Key]lcommon.Utxo // simulated database UTxOs
 	mu        sync.Mutex
 }
 
 func newOverlayValidator(
-	utxos map[string]lcommon.Utxo,
+	utxos map[utxoref.Key]lcommon.Utxo,
 ) *overlayValidator {
 	return &overlayValidator{baseUtxos: utxos}
 }
@@ -3947,17 +4011,13 @@ func (v *overlayValidator) ValidateTx(
 
 func (v *overlayValidator) ValidateTxWithOverlay(
 	tx gledger.Transaction,
-	consumedUtxos map[string]struct{},
-	createdUtxos map[string]lcommon.Utxo,
+	consumedUtxos map[utxoref.Key]struct{},
+	createdUtxos map[utxoref.Key]lcommon.Utxo,
 ) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	for _, input := range tx.Inputs() {
-		key := fmt.Sprintf(
-			"%s:%d",
-			input.Id().String(),
-			input.Index(),
-		)
+		key := utxoref.ForInput(input)
 		// Check consumed first (double-spend)
 		if consumedUtxos != nil {
 			if _, spent := consumedUtxos[key]; spent {
@@ -3980,7 +4040,7 @@ func (v *overlayValidator) ValidateTxWithOverlay(
 }
 
 // removeBaseUtxo simulates a UTxO being consumed by a confirmed block.
-func (v *overlayValidator) removeBaseUtxo(key string) {
+func (v *overlayValidator) removeBaseUtxo(key utxoref.Key) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	delete(v.baseUtxos, key)
@@ -4054,12 +4114,12 @@ func buildMockOutput(
 func TestOverlayDoubleSpendRejection(t *testing.T) {
 	// Setup: one UTxO in the "database"
 	inputHash := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	utxoKey := inputHash + ":0"
-
 	sharedInput := buildMockInput(t, inputHash, 0)
+	utxoKey := utxoref.ForInput(sharedInput)
+
 	baseOutput := buildMockOutput(t, 1000000)
 
-	baseUtxos := map[string]lcommon.Utxo{
+	baseUtxos := map[utxoref.Key]lcommon.Utxo{
 		utxoKey: {Id: sharedInput, Output: baseOutput},
 	}
 	v := newOverlayValidator(baseUtxos)
@@ -4099,12 +4159,12 @@ func TestOverlayDoubleSpendRejection(t *testing.T) {
 func TestOverlayDependentTxChaining(t *testing.T) {
 	// Setup: one UTxO in the "database"
 	inputHash := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	utxoKey := inputHash + ":0"
-
 	baseInput := buildMockInput(t, inputHash, 0)
+	utxoKey := utxoref.ForInput(baseInput)
+
 	baseOutput := buildMockOutput(t, 2000000)
 
-	baseUtxos := map[string]lcommon.Utxo{
+	baseUtxos := map[utxoref.Key]lcommon.Utxo{
 		utxoKey: {Id: baseInput, Output: baseOutput},
 	}
 	v := newOverlayValidator(baseUtxos)
@@ -4124,12 +4184,12 @@ func TestOverlayDependentTxChaining(t *testing.T) {
 	overlay.applyTx(txA.Hash().String(), 0, nil, txA)
 
 	// Verify TX-A's output is in the overlay created set
-	txAOutputKey := txHashA + ":0"
+	inputFromA := buildMockInput(t, txHashA, 0)
+	txAOutputKey := utxoref.ForInput(inputFromA)
 	_, created := overlay.created[txAOutputKey]
 	assert.True(t, created, "TX-A output should be in created set")
 
 	// TX-B consumes TX-A's output (which only exists in overlay, not DB)
-	inputFromA := buildMockInput(t, txHashA, 0)
 	txB := buildMockTx(
 		t,
 		"2222222222222222222222222222222222222222222222222222222222222222",
@@ -4171,12 +4231,12 @@ func TestOverlayRebuildOnChainUpdate(t *testing.T) {
 	// The real TX has input: 0c07395aed88bdddc6de0518d1462dd0ec7e52e1e3a53599f7cdb24dc80237f8:1
 
 	realInputHash := "0c07395aed88bdddc6de0518d1462dd0ec7e52e1e3a53599f7cdb24dc80237f8"
-	realInputKey := realInputHash + ":1"
 
 	// Create a base UTxO set containing the real TX's input
 	realInput := buildMockInput(t, realInputHash, 1)
+	realInputKey := utxoref.ForInput(realInput)
 	realOutput := buildMockOutput(t, 50000000)
-	baseUtxos := map[string]lcommon.Utxo{
+	baseUtxos := map[utxoref.Key]lcommon.Utxo{
 		realInputKey: {Id: realInput, Output: realOutput},
 	}
 	v := newOverlayValidator(baseUtxos)
@@ -4458,7 +4518,12 @@ func TestMempoolConsumer_ConcurrentRemovalReleasesRetainedBytes(t *testing.T) {
 
 	got := make(chan *MempoolTransaction, 1)
 	go func() { got <- consumer.NextTx(true) }()
-	dingotestutil.RequireNoReceive(t, got, 100*time.Millisecond, "cache is full")
+	dingotestutil.RequireNoReceive(
+		t,
+		got,
+		100*time.Millisecond,
+		"cache is full",
+	)
 
 	cacheCleared := make(chan struct{})
 	releaseClear := make(chan struct{})
@@ -4474,7 +4539,12 @@ func TestMempoolConsumer_ConcurrentRemovalReleasesRetainedBytes(t *testing.T) {
 		m.RemoveConsumer(connID)
 		close(removed)
 	}()
-	dingotestutil.RequireReceive(t, cacheCleared, 2*time.Second, "final cache clear")
+	dingotestutil.RequireReceive(
+		t,
+		cacheCleared,
+		2*time.Second,
+		"final cache clear",
+	)
 
 	assert.Nil(t, dingotestutil.RequireReceive(
 		t, got, 2*time.Second, "blocking NextTx released by removal",
@@ -4513,8 +4583,8 @@ func (v *blockingRejectingValidator) ValidateTx(gledger.Transaction) error {
 
 func (v *blockingRejectingValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
-	map[string]struct{},
-	map[string]lcommon.Utxo,
+	map[utxoref.Key]struct{},
+	map[utxoref.Key]lcommon.Utxo,
 ) error {
 	return nil
 }
@@ -4523,8 +4593,8 @@ func (v *blockingRejectingValidator) WithTxValidationSession(
 	fn func(
 		func(
 			gledger.Transaction,
-			map[string]struct{},
-			map[string]lcommon.Utxo,
+			map[utxoref.Key]struct{},
+			map[utxoref.Key]lcommon.Utxo,
 		) error,
 		func() bool,
 	) error,
@@ -4532,8 +4602,8 @@ func (v *blockingRejectingValidator) WithTxValidationSession(
 	v.startOnce.Do(func() { close(v.started) })
 	validate := func(
 		tx gledger.Transaction,
-		_ map[string]struct{},
-		_ map[string]lcommon.Utxo,
+		_ map[utxoref.Key]struct{},
+		_ map[utxoref.Key]lcommon.Utxo,
 	) error {
 		<-v.release
 		if tx != nil && tx.Hash().String() == v.rejectHash {

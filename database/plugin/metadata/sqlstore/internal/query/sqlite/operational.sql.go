@@ -2741,6 +2741,26 @@ func (q *Queries) GetMidnightRegistrationsByBlock(ctx context.Context, blockNumb
 	return items, nil
 }
 
+const getNetworkStateAsOfSlot = `-- name: GetNetworkStateAsOfSlot :one
+SELECT id, treasury, reserves, slot
+FROM network_state
+WHERE slot <= ?
+ORDER BY slot DESC
+LIMIT 1
+`
+
+func (q *Queries) GetNetworkStateAsOfSlot(ctx context.Context, slot int64) (NetworkState, error) {
+	row := q.db.QueryRowContext(ctx, getNetworkStateAsOfSlot, slot)
+	var i NetworkState
+	err := row.Scan(
+		&i.ID,
+		&i.Treasury,
+		&i.Reserves,
+		&i.Slot,
+	)
+	return i, err
+}
+
 const getOffchainMetadata = `-- name: GetOffchainMetadata :one
 SELECT fetched_at, next_fetch_after, created_at, updated_at, url,
        source_type, status, content_type, last_error, hash, body_hash,
@@ -3617,9 +3637,12 @@ SELECT transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
        deleted_slot, amount, output_idx, payment_script
 FROM utxo
 WHERE added_slot > ?
-ORDER BY id DESC
+ORDER BY added_slot DESC, id DESC
 `
 
+// Order by added_slot before id so the sort is the reverse of
+// idx_utxo_added_slot's own order; ordering by id alone costs a full table
+// scan. See the Store wrapper for the full rationale.
 func (q *Queries) GetUtxosAddedAfterSlot(ctx context.Context, addedSlot sql.NullInt64) ([]Utxo, error) {
 	rows, err := q.db.QueryContext(ctx, getUtxosAddedAfterSlot, addedSlot)
 	if err != nil {

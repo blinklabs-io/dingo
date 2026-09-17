@@ -71,6 +71,8 @@ var _ prometheus.Registerer = &blockingRegisterer{}
 // snapshot-and-clear until Register fully completes -- proving the two
 // are now atomic with respect to each other, not just the append.
 func TestRebuildableRegistererRegisterIsAtomicWithUnregisterAll(t *testing.T) {
+	t.Parallel()
+
 	blocking := &blockingRegisterer{
 		real:      prometheus.NewRegistry(),
 		startedCh: make(chan struct{}),
@@ -128,6 +130,8 @@ func TestRebuildableRegistererRegisterIsAtomicWithUnregisterAll(t *testing.T) {
 // collector registered the normal (rebuilt-component) way is correctly
 // cleared.
 func TestRetainedComponentPromRegistryBypassesRebuildableWrapper(t *testing.T) {
+	t.Parallel()
+
 	real := prometheus.NewRegistry()
 	n := &Node{config: NewConfig()}
 	n.rebuildableMetrics = newRebuildableRegisterer(real)

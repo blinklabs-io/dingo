@@ -20,10 +20,13 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
 func TestPendingPublishesFlushesInOrder(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 
@@ -59,7 +62,7 @@ func TestPendingPublishesFlushesInOrder(t *testing.T) {
 
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("queued events were not delivered")
 	}
 	mu.Lock()
@@ -75,6 +78,8 @@ func TestPendingPublishesFlushesInOrder(t *testing.T) {
 }
 
 func TestPendingPublishesIgnoresNilBus(t *testing.T) {
+	t.Parallel()
+
 	var pending pendingPublishes
 	pending.add(nil, LedgerErrorEventType, event.NewEvent(
 		LedgerErrorEventType,
@@ -90,6 +95,8 @@ func TestPendingPublishesIgnoresNilBus(t *testing.T) {
 // buffer is full. Publishing directly would park both sides forever;
 // queueing and flushing after the unlock lets the subscriber drain.
 func TestPendingPublishesBreaksLockCycle(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 
@@ -135,14 +142,14 @@ func TestPendingPublishesBreaksLockCycle(t *testing.T) {
 
 	select {
 	case <-finished:
-	case <-time.After(10 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("publisher deadlocked while holding the lock")
 	}
 
 	for range 4 {
 		select {
 		case <-handled:
-		case <-time.After(10 * time.Second):
+		case <-time.After(testutil.AsyncWait):
 			t.Fatal("subscriber did not drain after the lock was released")
 		}
 	}

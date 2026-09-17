@@ -17,6 +17,13 @@ FROM network_state
 ORDER BY slot DESC
 LIMIT 1;
 
+-- name: GetNetworkStateAsOfSlot :one
+SELECT id, treasury, reserves, slot
+FROM network_state
+WHERE slot <= ?
+ORDER BY slot DESC
+LIMIT 1;
+
 -- name: SetNetworkState :exec
 INSERT INTO network_state (treasury, reserves, slot)
 VALUES (?, ?, ?)
@@ -921,6 +928,9 @@ FROM asset
 WHERE utxo_id = ?
 ORDER BY id;
 
+-- Order by added_slot before id so the sort is the reverse of
+-- idx_utxo_added_slot's own order; ordering by id alone costs a full table
+-- scan. See the Store wrapper for the full rationale.
 -- name: GetUtxosAddedAfterSlot :many
 SELECT transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
        staking_key, credential_tag, datum_hash, spent_at_tx_id,
@@ -928,7 +938,7 @@ SELECT transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
        deleted_slot, amount, output_idx, payment_script
 FROM utxo
 WHERE added_slot > ?
-ORDER BY id DESC;
+ORDER BY added_slot DESC, id DESC;
 
 -- name: GetLiveUtxoRefsBySlot :many
 SELECT tx_id, output_idx

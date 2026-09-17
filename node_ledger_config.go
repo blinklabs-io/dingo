@@ -59,6 +59,7 @@ func (n *Node) chainsyncSyncTarget(
 // n.chainSelector are all replaced by a live rebuild -- a method value
 // would pin the rebuilt ledger to the outgoing instance.
 func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
+	healthGeneration := n.health.currentGeneration()
 	return ledger.LedgerStateConfig{
 		ChainManager:       n.chainManager,
 		Database:           n.db,
@@ -123,14 +124,13 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		// dingo's forward path applies the current announcement normally
 		// (CIP-conformant).
 		LeiosApplyEndorserBlockTxs: !n.config.isMusashiNetwork(),
-		// dingo's leadership stake omits reward-account balances (staking
-		// rewards are not yet computed), which spuriously rejects the
-		// dominant pool's eligible blocks on Musashi's concentrated
-		// topology and wedges the chain. Trust rather than reject there
-		// until reward calculation lands; enforce on real networks where
-		// the omission is negligible. TPraos bootstrap pool-threshold
-		// checks are waived separately inside header validation after
-		// genesis overlay slots are handled.
+		// The leadership stake includes reward-account balances; see
+		// LedgerStateConfig.SkipLeaderStakeThresholdCheck. The check
+		// rejected the dominant pool's eligible blocks on Musashi's
+		// concentrated topology and wedged the chain, so it is downgraded
+		// to a warning there and enforced on real networks. TPraos
+		// bootstrap pool-threshold checks are waived separately inside
+		// header validation after genesis overlay slots are handled.
 		SkipLeaderStakeThresholdCheck: n.config.prototypeTrustBypassesEnabled(),
 		// On Musashi, certified endorser txs and Dijkstra ranking-block txs are
 		// trusted by the prototype; skip dingo's per-tx validation to match it
@@ -288,12 +288,20 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 			}
 			return n.chainSelector.GenesisSelectionState()
 		},
+		// Feeds the node's readiness probe (internal/health) the same
+		// wall-clock-to-tip gap the dingo_tip_gap_slots gauge carries, so
+		// /readyz needs neither the Prometheus listener nor a live
+		// n.ledgerState pointer. A closure over n, not a method value on
+		// n.ledgerState, so a live rebuild keeps reporting.
+		ReportTipGapFunc: func(gapSlots uint64) {
+			n.health.recordTipGap(healthGeneration, gapSlots)
+		},
 		FatalErrorFunc: func(err error) {
 			n.config.logger.Error(
 				"fatal ledger error, initiating shutdown",
 				"error", err,
 			)
-			n.cancel()
+			n.cancelForFatal(err)
 		},
 	}
 }

@@ -34,6 +34,8 @@ import (
 // removes, so this only passes if pool state is restored before
 // certificates are deleted, not after.
 func TestTruncateAfterSlotRestoresPoolDenormalizedFields(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	targetBlock := testIndexedBlock(1500, 1, 0x15)

@@ -28,6 +28,8 @@ import (
 // previously disagreed with the byte counts logged alongside it, producing
 // lines like "45.3% (8.2 GB / 14.2 GB)" where 8.2/14.2 is 57.7%.
 func TestNewImmutableProgressByteBased(t *testing.T) {
+	t.Parallel()
+
 	var last DownloadProgress
 	var logs bytes.Buffer
 	cfg := BootstrapConfig{
@@ -62,6 +64,8 @@ func TestNewImmutableProgressByteBased(t *testing.T) {
 // TestNewImmutableProgressClamp verifies the byte-percent is clamped to 100
 // when accumulated bytes overshoot the estimated (average-derived) total.
 func TestNewImmutableProgressClamp(t *testing.T) {
+	t.Parallel()
+
 	var last DownloadProgress
 	cfg := BootstrapConfig{
 		Logger:     slog.New(slog.DiscardHandler),
@@ -79,6 +83,8 @@ func TestNewImmutableProgressClamp(t *testing.T) {
 // TestNewImmutableProgressUnknownTotalFallback verifies that when the total
 // size is unavailable the percent falls back to the archive-count fraction.
 func TestNewImmutableProgressUnknownTotalFallback(t *testing.T) {
+	t.Parallel()
+
 	var last DownloadProgress
 	cfg := BootstrapConfig{
 		Logger:     slog.New(slog.DiscardHandler),
@@ -93,6 +99,8 @@ func TestNewImmutableProgressUnknownTotalFallback(t *testing.T) {
 }
 
 func TestWithProgressContext(t *testing.T) {
+	t.Parallel()
+
 	var got DownloadProgress
 	progress := withProgressContext(
 		func(p DownloadProgress) { got = p },

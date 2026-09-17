@@ -26,6 +26,8 @@ import (
 )
 
 func TestNewLogger_JSONFormatProducesValidJSON(t *testing.T) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 	logger, levelOK, formatOK := newLogger(&buf, "json", "info", false)
 	require.True(t, levelOK)
@@ -48,6 +50,8 @@ func TestNewLogger_JSONFormatProducesValidJSON(t *testing.T) {
 }
 
 func TestNewLogger_TextFormatIsNotJSON(t *testing.T) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 	logger, _, formatOK := newLogger(&buf, "text", "info", false)
 	require.True(t, formatOK)
@@ -64,6 +68,8 @@ func TestNewLogger_TextFormatIsNotJSON(t *testing.T) {
 }
 
 func TestNewLogger_EmptyFormatDefaultsToText(t *testing.T) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 	logger, _, formatOK := newLogger(&buf, "", "info", false)
 	require.True(t, formatOK)
@@ -73,6 +79,8 @@ func TestNewLogger_EmptyFormatDefaultsToText(t *testing.T) {
 }
 
 func TestNewLogger_UnknownFormatFallsBackToTextAndReportsNotOK(t *testing.T) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 	logger, _, formatOK := newLogger(&buf, "xml", "info", false)
 	assert.False(t, formatOK)
@@ -82,6 +90,8 @@ func TestNewLogger_UnknownFormatFallsBackToTextAndReportsNotOK(t *testing.T) {
 }
 
 func TestNewLogger_LevelFiltersBelowThreshold(t *testing.T) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 	logger, levelOK, _ := newLogger(&buf, "text", "warn", false)
 	require.True(t, levelOK)
@@ -95,6 +105,8 @@ func TestNewLogger_LevelFiltersBelowThreshold(t *testing.T) {
 }
 
 func TestNewLogger_UnknownLevelReportsNotOKAndUsesInfo(t *testing.T) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 	logger, levelOK, _ := newLogger(&buf, "text", "bogus", false)
 	assert.False(t, levelOK)
@@ -107,6 +119,8 @@ func TestNewLogger_UnknownLevelReportsNotOKAndUsesInfo(t *testing.T) {
 }
 
 func TestNewLogger_DebugFlagOverridesLevel(t *testing.T) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 	// level=error, but --debug must force debug level.
 	logger, _, _ := newLogger(&buf, "text", "error", true)
@@ -116,6 +130,8 @@ func TestNewLogger_DebugFlagOverridesLevel(t *testing.T) {
 }
 
 func TestParseLogLevel(t *testing.T) {
+	t.Parallel()
+
 	cases := []struct {
 		in     string
 		want   slog.Level

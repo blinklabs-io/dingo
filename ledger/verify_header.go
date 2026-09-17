@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	utxorpc "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
@@ -101,9 +102,18 @@ var (
 
 // IsHeaderVerificationDeferred reports whether header-only verification could
 // not proceed because required ledger state, epoch data, or stake snapshot
-// data is not available yet.
+// data is not available yet. errEpochNonceUnavailable is included: a cached
+// epoch entry with no published nonce yet (Byron always, or a post-Byron
+// epoch transiently) is the same "not ready, not proof of invalidity"
+// condition as a slot outside the published cache entirely -- treating it as
+// a hard failure would let a chain-selection or Leios-announcement caller
+// wrongly reject and recycle an honest peer over a transient local gap
+// instead of retrying once the nonce is published (matches how
+// errBlockPipelineEta0Unavailable, which wraps the same sentinel, is already
+// treated as non-fatal on the block-pipeline path).
 func IsHeaderVerificationDeferred(err error) bool {
-	return errors.Is(err, errHeaderVerificationDeferred)
+	return errors.Is(err, errHeaderVerificationDeferred) ||
+		errors.Is(err, errEpochNonceUnavailable)
 }
 
 func (b headerOnlyBlock) Header() ledger.BlockHeader { return b.header }
@@ -161,20 +171,28 @@ func (ls *LedgerState) ValidateBlockHeaderCrypto(
 
 // ShouldVerifyChainSelectionHeaderCrypto reports whether a header at the
 // given slot is eligible to have its cryptography verified right now via
-// ValidateChainSelectionHeaderCrypto. It mirrors the same exemptions the
-// ledger's own chainsync header-queue path already applies
-// (shouldVerifyChainsyncHeaderCrypto): verification is skipped while bulk
-// historical/catch-up loading has not yet enabled live validation, and for
+// ValidateChainSelectionHeaderCrypto. Verification is skipped only for
 // slots already covered by an imported Mithril snapshot, since those slots
 // were authenticated by the certificate chain during import and the
-// restored database does not retain every historical epoch nonce. A caller
-// that skips verification because this returns false must still treat the
-// header as eligible, not reject it -- the same trust boundary the ledger's
-// own pipeline already extends to this data.
+// restored database does not retain every historical epoch nonce. It is not
+// exempted merely because bulk historical/catch-up loading has not yet
+// enabled live validation (issue #3528). A caller that skips verification
+// because this returns false must still treat the header as eligible, not
+// reject it -- the same trust boundary the ledger's own pipeline already
+// extends to this data.
+//
+// Unlike shouldEnforceBlockPipelineCrypto (the ledger's own chainsync
+// header-queue gate), this does NOT also skip when the epoch nonce isn't
+// cached yet: that gate can rely on a later retry once the nonce becomes
+// available, but chain selection has no such retry -- a header this
+// returns false for is never re-verified. ValidateChainSelectionHeaderCrypto
+// already handles a not-yet-available epoch by returning a deferred error
+// (see IsHeaderVerificationDeferred) rather than failing, so it's always
+// safe to attempt verification here and let the verifier decide.
 func (ls *LedgerState) ShouldVerifyChainSelectionHeaderCrypto(
 	slot uint64,
 ) bool {
-	return ls.shouldVerifyChainsyncHeaderCrypto(slot)
+	return !ls.slotCoveredByMithril(slot)
 }
 
 // ValidateChainSelectionHeaderCrypto verifies a header's VRF/KES cryptography
@@ -434,7 +452,8 @@ func (ls *LedgerState) headerVerificationEpoch(
 	// must never be advanced past the HFC safe zone or a known era boundary.
 	// Check the immutable summary first so ErrPastHorizon is surfaced before
 	// ensureEpochForSlot mutates any forecasted nonce state.
-	if len(ls.loadConsensusSnapshot().epochCache) > 0 {
+	if snapshot := ls.loadConsensusSnapshot(); snapshot != nil &&
+		len(snapshot.epochCache) > 0 {
 		summary, err := ls.HardForkSummary()
 		if err != nil {
 			return models.Epoch{}, fmt.Errorf(
@@ -1010,9 +1029,13 @@ func (ls *LedgerState) ledgerTipBehindSlot(slot uint64) bool {
 // even when the decentralization parameter enables overlay slots elsewhere in
 // the same epoch.
 //
-// Byron blocks are skipped (PBFT). A missing total-stake or unavailable active
-// slot coefficient is logged and skipped rather than rejecting, to tolerate
-// early-chain bootstrap states where the genesis snapshot is not yet written.
+// Byron blocks are skipped (PBFT). A state that leaves the threshold
+// unevaluable -- a zero total active stake, a missing or non-positive active
+// slot coefficient, or a post-Mithril mark row reconstructed after its target
+// boundary -- is rejected rather than skipped; only the explicitly selected
+// prototype profile logs it and trusts the block. The snapshot cases carry
+// errLeaderStakeSnapshotUnavailable, so header verification running ahead of
+// the ledger apply cursor defers instead of rejecting.
 //
 // epochCacheSnapshot returns the published epoch cache, or nil when no
 // snapshot has been published. The test-helper wrappers that pin a cache for
@@ -1189,17 +1212,23 @@ func (ls *LedgerState) verifyBlockLeaderEligibilityWithCache(
 	)
 	ls.metrics.observeLeaderThresholdMargin(margin)
 	if !belowThreshold {
-		// dingo's leadership stake is delegated UTxO only; staking rewards are
-		// not yet computed, so reward-account balances are missing from the
-		// stake distribution. On the prototype network the dominant pool's
-		// reward accrual pushes its true relative stake above the UTxO-only
-		// figure, so this UTxO-only threshold spuriously rejects its eligible
-		// blocks. Trust the block there (all cryptographic header checks above
-		// still passed) rather than wedge the chain; enforce elsewhere. See
+		// The leadership stake includes reward-account balances:
+		// refreshRewardLiveStakeAggregate stores total_stake =
+		// utxo_stake + reward_stake (reward_stake from account.reward) and
+		// GetLiveStakeInputsForPools selects total_stake; the historical
+		// reconstruction adds the same term in getStakeByPoolsAtSlot. An
+		// earlier comment here claimed the stake was delegated UTxO only.
+		// That was stale, and #3165 was diagnosed from it rather than from
+		// the code.
+		//
+		// On the concentrated prototype topology this check still rejected
+		// the dominant pool's eligible blocks and wedged the chain, so it is
+		// downgraded to a warning there; all cryptographic header checks
+		// above still passed. See
 		// LedgerStateConfig.SkipLeaderStakeThresholdCheck.
 		if ls.config.SkipLeaderStakeThresholdCheck {
 			ls.config.Logger.Warn(
-				"leader eligibility below stake-derived threshold; trusting block (leadership stake omits reward balances)",
+				"leader eligibility below stake-derived threshold; trusting block (prototype trust bypass)",
 				"slot",
 				block.SlotNumber(),
 				"pool",
@@ -1398,25 +1427,47 @@ func (ls *LedgerState) leaderEligibilityStakeWithCache(
 	if ls.shouldSkipPostMithrilMarkEligibilityWithCache(
 		snapshot, snapshotEpoch, epochCache,
 	) {
-		if ls.config.Logger != nil {
-			ls.config.Logger.Warn(
-				"skipping leader eligibility check: post-Mithril mark snapshot was reconstructed after the target boundary",
-				"slot",
-				block.SlotNumber(),
-				"epoch",
-				epochId,
-				"snapshot_epoch",
-				snapshotEpoch,
-				"snapshot_type",
-				snapshotType,
-				"captured_slot",
-				snapshot.CapturedSlot,
-				"component",
-				"ledger",
-			)
+		// The reconstructed row makes a hard threshold *comparison* unsafe,
+		// but that means eligibility is unevaluable, not automatically
+		// satisfied. Mirror the zero-active-stake and missing-coefficient
+		// guards above: only the explicitly selected prototype profile may
+		// trust the block anyway; a standard profile must reject (wrapped so
+		// header verification running ahead of the ledger apply cursor
+		// defers instead).
+		if ls.config.SkipLeaderStakeThresholdCheck {
+			if ls.config.Logger != nil {
+				ls.config.Logger.Warn(
+					"skipping leader eligibility check: post-Mithril mark snapshot was reconstructed after the target boundary (prototype profile)",
+					"slot",
+					block.SlotNumber(),
+					"epoch",
+					epochId,
+					"snapshot_epoch",
+					snapshotEpoch,
+					"snapshot_type",
+					snapshotType,
+					"captured_slot",
+					snapshot.CapturedSlot,
+					"component",
+					"ledger",
+				)
+			}
+			return uint64(snapshot.TotalStake), 0, snapshotEpoch, snapshotType,
+				true, nil
 		}
-		return uint64(snapshot.TotalStake), 0, snapshotEpoch, snapshotType,
-			true, nil
+		return 0, 0, snapshotEpoch, snapshotType, false,
+			fmt.Errorf(
+				"%w: block header verification rejected at slot %d: "+
+					"post-Mithril mark snapshot for epoch %d was "+
+					"reconstructed after the target boundary "+
+					"(captured slot %d); leader eligibility for "+
+					"producer pool %x cannot be evaluated",
+				errLeaderStakeSnapshotUnavailable,
+				block.SlotNumber(),
+				snapshotEpoch,
+				snapshot.CapturedSlot,
+				poolKeyHash[:],
+			)
 	}
 	totalStake, err := ls.db.Metadata().GetTotalActiveStake(
 		snapshotEpoch,
@@ -1618,6 +1669,37 @@ func (ls *LedgerState) electingVrfKeyHashWithCache(
 			copy(hash[:], vrfKeyHash)
 			return hash, true, nil
 		}
+		// Both lookups missed. That is ordinarily the unanswerable gap the
+		// error below reports, but it is also exactly what a Mithril
+		// bootstrap produces for the epoch boundary the node crosses right
+		// after import: the snapshot import writes only the pool's live
+		// registration, stamped at the import slot, and never replays the
+		// certificate history that produced it. So a pool that has in fact
+		// been continuously registered the whole time has no row at or
+		// before a cutoff/capture slot that predates the import (issue
+		// #4047).
+		//
+		// mithrilLedgerSlot pins that import slot for the life of the
+		// process (set once at startup, like the other reads of this field
+		// in this file), so a capture at or below it is diagnostic: the
+		// snapshot that elected this pool was captured no later than the
+		// bootstrap boundary, which only a bootstrap-created gap explains.
+		// Falling back to the live registration here is the same trust
+		// electingVrfKeyHashWithCache already extends when ok is false --
+		// no snapshot at all -- applied to the narrower case of a snapshot
+		// whose registration history the import could not carry. It is not
+		// the general "no history found" fallback #3842 removed: outside
+		// this bootstrap-anchor window, a genuine gap still hard-rejects
+		// rather than resolving the pool's current (possibly rotated) key.
+		if ls.mithrilLedgerSlot != 0 && capturedSlot <= ls.mithrilLedgerSlot {
+			pool, poolErr := ls.db.GetPool(poolKeyHash, true, nil)
+			if poolErr != nil && !errors.Is(poolErr, models.ErrPoolNotFound) {
+				return lcommon.Blake2b256{}, false, poolErr
+			}
+			if hash, ok := registeredPoolVrfKeyHash(pool); ok {
+				return hash, true, nil
+			}
+		}
 		return lcommon.Blake2b256{}, false, fmt.Errorf(
 			"%w at cutoff slot %d or capture slot %d for pool %x",
 			errVrfKeyRegistrationHistoryUnavailable,
@@ -1637,24 +1719,47 @@ func (ls *LedgerState) electingVrfKeyHashWithCache(
 // electingPoolParamsCutoffSlot reports the slot up to which pool registrations
 // were in force in the snapshot that elected this block's producer.
 //
-// That is not the snapshot's own capture slot. A snapshot freezes stake as it
-// stands at the capture, but it freezes pool *parameters* as of one epoch
-// earlier, because cardano-ledger's EPOCH rule runs SNAP before it merges
-// psFutureStakePoolParams into psStakePoolParams. A re-registration submitted
-// during epoch N is therefore not merged until the boundary into N+1, and the
-// snapshot taken at that same boundary is captured before the merge -- so it
-// still carries the parameters that were in force through the end of N-1.
+// Which slot that is depends on the era in force during the epoch the snapshot
+// was captured in, because the two rules involved run in the opposite order on
+// either side of the Dijkstra hard fork. The merge of psFutureStakePoolParams
+// into psStakePools -- where a re-registration submitted during the epoch
+// waits -- lives in cardano-ledger's POOLREAP rule; SNAP is what freezes the
+// snapshot. The EPOCH rule sequences them:
 //
-// Concretely, on Preview a pool rotated its VRF key at slot 3279920 (epoch 37)
+//   - Conway and earlier run SNAP first, then POOLREAP
+//     (Conway.Rules.Epoch: `trans @(EraRule "SNAP")` precedes
+//     `trans @(EraRule "POOLREAP")`). The snapshot taken at the boundary out
+//     of epoch N is captured before that epoch's re-registrations merge, so it
+//     still carries the parameters in force through the end of N-1. The cutoff
+//     is the last slot of the epoch preceding the capture.
+//
+//   - Dijkstra runs POOLREAP first, then SNAP
+//     (Dijkstra.Rules.Epoch: POOLREAP is the first transition in
+//     epochTransition, SNAP the last). The re-registrations submitted during
+//     epoch N are merged before the snapshot is frozen, so the snapshot
+//     carries them. The cutoff is the capture slot itself.
+//
+// Both halves are load-bearing and each was learned from a node wedging on a
+// canonical block.
+//
+// On Preview (Conway) a pool rotated its VRF key at slot 3279920 (epoch 37)
 // and the chain kept electing it on the old key through epoch 39. Binding the
-// key to the electing snapshot's capture slot (3283199, after the rotation)
-// resolves the new key and wedges epoch 39, one epoch later than the wedge that
-// binding to the live registration produces (issue #3842).
+// key to the capture slot (3283199, after the rotation) resolves the new key
+// and wedges epoch 39, one epoch later than the wedge that binding to the live
+// registration produces (issue #3842).
 //
-// The cutoff is the last slot of the epoch preceding the one the snapshot was
-// captured in, which is exactly the capture slot of the previous snapshot.
-// Deriving it from the epoch boundary rather than reading that snapshot row
-// keeps it defined for a pool that is absent from the earlier snapshot.
+// On a Dijkstra network a pool rotated its VRF key at slot 639855 (epoch 29,
+// epochs of 21600 slots from 604800). The mark snapshot electing epoch 31 was
+// captured at 647999, and the chain elected the pool on the rotated key from
+// epoch 31. Lagging the cutoff to 626399 resolves the pre-rotation key and
+// wedges on the first block the pool produces after the rotation is in force
+// (issue #4326).
+//
+// For the lagged case the cutoff is the last slot of the epoch preceding the
+// one the snapshot was captured in, which is exactly the capture slot of the
+// previous snapshot. Deriving it from the epoch boundary rather than reading
+// that snapshot row keeps it defined for a pool that is absent from the
+// earlier snapshot.
 //
 //nolint:unused // retained as a test helper
 func (ls *LedgerState) electingPoolParamsCutoffSlot(
@@ -1704,12 +1809,35 @@ func (ls *LedgerState) electingPoolParamsCutoffSlotWithCache(
 		// exists.
 		return 0, 0, false, nil //nolint:nilerr // unplaceable capture is "unavailable", not an error
 	}
+	if poolParamsMergedBeforeSnapshot(capturedEpoch.EraId) {
+		// POOLREAP ran before SNAP, so the capture already carries every
+		// registration accepted through the end of the captured epoch.
+		// Returning the capture slot for both values also makes the
+		// GetPoolEarliestVrfKeyHashAtSlot fallback in
+		// electingVrfKeyHashWithCache a no-op here, which is correct: that
+		// fallback exists for the deferral this era does not have, and it
+		// searches the same range the primary lookup just searched.
+		return snapshot.CapturedSlot, snapshot.CapturedSlot, true, nil
+	}
 	if capturedEpoch.StartSlot == 0 {
 		// Captured in the first epoch: there is no preceding epoch to take
 		// parameters from, so registration history cannot answer.
 		return 0, 0, false, nil
 	}
 	return capturedEpoch.StartSlot - 1, snapshot.CapturedSlot, true, nil
+}
+
+// poolParamsMergedBeforeSnapshot reports whether the EPOCH rule in force
+// during the epoch a stake snapshot was captured in merges
+// psFutureStakePoolParams into psStakePools before SNAP freezes the snapshot.
+//
+// The era to ask about is the captured epoch's own, not the validated block's:
+// the EPOCH transition out of epoch N runs under the protocol version in force
+// during N, and HARDFORK is a sub-rule of that same transition. A block two
+// epochs after a hard fork into Dijkstra can therefore be elected by a
+// snapshot that Conway's ordering froze.
+func poolParamsMergedBeforeSnapshot(eraId uint) bool {
+	return eraId >= dijkstra.EraIdDijkstra
 }
 
 // verifyRegisteredVrfKey rejects a block whose VRF verification key (carried in
@@ -1816,10 +1944,50 @@ func registeredPoolVrfKeyHash(
 	return vrfHash, true
 }
 
+// registeredPoolVrfKeyHashAsOfSlot is registeredPoolVrfKeyHash's
+// point-in-time counterpart: it resolves the VRF key hash a pool was held
+// to as of a specific historical slot rather than its current one.
+//
+// pool.Registration is loaded (loadPoolsAssociations) ordered added_slot
+// DESC, so the first entry at or before slot is the registration that was
+// in force at that point -- the same "later re-registration wins" rule
+// registeredPoolVrfKeyHash applies for "now", just bounded to a slot in the
+// past. A pool that re-registers with a new VRF key after slot must not
+// have that later key attributed to it here (blinklabs-io/dingo#4237): a
+// pinned GetStakeDistribution reply pairs each pool's historical stake with
+// the key that was actually in force at that slot, not whatever is
+// registered today.
+//
+// Unlike registeredPoolVrfKeyHash, this does not fall back to pool.VrfKeyHash
+// on a miss: that field is the pool's current, always-latest VRF key, and
+// falling back to it here would silently reintroduce the same bug for any
+// pool with no registration on record at or before slot.
+func registeredPoolVrfKeyHashAsOfSlot(
+	pool *models.Pool,
+	slot uint64,
+) (lcommon.Blake2b256, bool) {
+	var vrfHash lcommon.Blake2b256
+	if pool == nil {
+		return vrfHash, false
+	}
+	for _, reg := range pool.Registration {
+		if reg.AddedSlot > slot {
+			continue
+		}
+		if len(reg.VrfKeyHash) != len(vrfHash) {
+			return vrfHash, false
+		}
+		copy(vrfHash[:], reg.VrfKeyHash)
+		return vrfHash, true
+	}
+	return vrfHash, false
+}
+
 // maxKESEvolutions returns the maximum number of KES evolutions allowed before
 // an operational certificate expires, from Shelley genesis. Returns 0 when the
-// genesis is unavailable, in which case opcert KES-period expiry is left to the
-// lighter future-cert guard inside VerifyBlock.
+// genesis is unavailable or carries a non-positive value; the caller,
+// verifyOpCertHeaderCrypto, treats that 0 as a configuration error and fails
+// closed rather than falling back to a lighter guard (issue #3528).
 func (ls *LedgerState) maxKESEvolutions() uint64 {
 	if ls.config.CardanoNodeConfig == nil {
 		return 0
@@ -1848,7 +2016,8 @@ func (ls *LedgerState) epochNonceHex(epochId uint64, nonce []byte) string {
 	}
 	ls.Lock()
 	defer ls.Unlock()
-	if cachedNonce, ok := ls.epochNonceHexCache[epochId]; ok && bytes.Equal(cachedNonce.nonce, nonce) {
+	if cachedNonce, ok := ls.epochNonceHexCache[epochId]; ok &&
+		bytes.Equal(cachedNonce.nonce, nonce) {
 		return cachedNonce.hex
 	}
 	nonceHex := hex.EncodeToString(nonce)
@@ -1909,7 +2078,13 @@ func (ls *LedgerState) blockPipelineEta0Provider(slot uint64) (string, error) {
 //
 // Returns the matching epoch or an error if no epoch covers the slot.
 func (ls *LedgerState) epochForSlot(slot uint64) (models.Epoch, error) {
-	return epochForSlotInCache(ls.loadConsensusSnapshot().epochCache, slot)
+	snapshot := ls.loadConsensusSnapshot()
+	if snapshot == nil {
+		return models.Epoch{}, errors.New(
+			"epoch cache snapshot not yet published",
+		)
+	}
+	return epochForSlotInCache(snapshot.epochCache, slot)
 }
 
 // epochForSlotInCache resolves a slot to its epoch against a caller-supplied
@@ -2127,11 +2302,11 @@ func (ls *LedgerState) PrunePoolSnapshotsWithRetentionFloor(
 // slotFromHeaderValidationKey extracts the slot from a deferred-header map key,
 // which headerValidationPointKey formats as "<slot>:<hex-hash>".
 func slotFromHeaderValidationKey(key string) (uint64, error) {
-	sep := strings.IndexByte(key, ':')
-	if sep < 0 {
+	before, _, ok := strings.Cut(key, ":")
+	if !ok {
 		return 0, fmt.Errorf("malformed header validation key %q", key)
 	}
-	return strconv.ParseUint(key[:sep], 10, 64)
+	return strconv.ParseUint(before, 10, 64)
 }
 
 // ensureEpochForSlot advances the epoch cache until it covers the target
@@ -2175,6 +2350,9 @@ func (ls *LedgerState) ensureEpochForSlot(
 func (ls *LedgerState) advanceEpochCache() error {
 	// Read last epoch from the lock-free consensus snapshot
 	snapshot := ls.loadConsensusSnapshot()
+	if snapshot == nil {
+		return errors.New("epoch cache snapshot not yet published")
+	}
 	cache := snapshot.epochCache
 	if len(cache) == 0 {
 		return errors.New("epoch cache is empty")

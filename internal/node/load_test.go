@@ -53,6 +53,117 @@ func TestExtractHeaderCbor(t *testing.T) {
 	}
 }
 
+func immutableDecodeBenchmarkBlocks(t *testing.T) []immutable.Block {
+	t.Helper()
+	immutableDir := filepath.Join(
+		"..", "..", "database", "immutable", "testdata",
+	)
+	imm, err := immutable.New(immutableDir)
+	require.NoError(t, err)
+	iter, err := imm.BlocksFromPoint(ocommon.Point{})
+	require.NoError(t, err)
+	defer iter.Close()
+	blocks := make([]immutable.Block, 0, loadBlockBatchSize)
+	for len(blocks) < cap(blocks) {
+		block, err := iter.Next()
+		require.NoError(t, err)
+		if block == nil {
+			break
+		}
+		blocks = append(blocks, *block)
+	}
+	require.Len(t, blocks, loadBlockBatchSize)
+	return blocks
+}
+
+func TestDecodeImmutableBlockBatchPreservesOrder(t *testing.T) {
+	t.Parallel()
+	blocks := immutableDecodeBenchmarkBlocks(t)
+	verifyCfg := lcommon.VerifyConfig{SkipBodyHashValidation: true}
+	serial, err := decodeImmutableBlockBatch(
+		context.Background(), blocks, verifyCfg, 1,
+	)
+	require.NoError(t, err)
+	for _, workers := range []int{2, 4, 8} {
+		got, err := decodeImmutableBlockBatch(
+			context.Background(), blocks, verifyCfg, workers,
+		)
+		require.NoError(t, err)
+		require.Len(t, got, len(serial))
+		for i := range serial {
+			require.Equal(t, serial[i].Hash(), got[i].Hash())
+			require.Equal(t, serial[i].SlotNumber(), got[i].SlotNumber())
+		}
+	}
+}
+
+func TestDecodeImmutableBlockBatchCancellation(t *testing.T) {
+	t.Parallel()
+	blocks := immutableDecodeBenchmarkBlocks(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := decodeImmutableBlockBatch(
+		ctx,
+		blocks,
+		lcommon.VerifyConfig{SkipBodyHashValidation: true},
+		4,
+	)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestDecodeImmutableBlockBatchDecodeErrorCancelsWorkers(t *testing.T) {
+	t.Parallel()
+	blocks := immutableDecodeBenchmarkBlocks(t)
+	blocks[len(blocks)/2].Cbor = []byte{0xff}
+	_, err := decodeImmutableBlockBatch(
+		context.Background(),
+		blocks,
+		lcommon.VerifyConfig{SkipBodyHashValidation: true},
+		8,
+	)
+	require.Error(t, err)
+}
+
+func BenchmarkDecodeImmutableBlockBatch(b *testing.B) {
+	immutableDir := filepath.Join(
+		"..", "..", "database", "immutable", "testdata",
+	)
+	imm, err := immutable.New(immutableDir)
+	if err != nil {
+		b.Fatal(err)
+	}
+	iter, err := imm.BlocksFromPoint(ocommon.Point{})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer iter.Close()
+	blocks := make([]immutable.Block, 0, loadBlockBatchSize)
+	for len(blocks) < cap(blocks) {
+		block, err := iter.Next()
+		if err != nil {
+			b.Fatal(err)
+		}
+		if block == nil {
+			break
+		}
+		blocks = append(blocks, *block)
+	}
+	verifyCfg := lcommon.VerifyConfig{SkipBodyHashValidation: true}
+	for _, workers := range []int{1, 2, 4, 8} {
+		b.Run(fmt.Sprintf("workers=%d", workers), func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				if _, err := decodeImmutableBlockBatch(
+					context.Background(), blocks, verifyCfg, workers,
+				); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 func TestCborArrayHeaderLen(t *testing.T) {
 	t.Parallel()
 
@@ -230,6 +341,8 @@ func TestCopyBlocksRaw_PreservesByronEbbLinkageAtOrigin(t *testing.T) {
 }
 
 func TestCopyBlocksRawWithCallback_StoresUtxoOffsets(t *testing.T) {
+	t.Parallel()
+
 	// No t.Parallel(): newTestDB shares process-wide plugin state
 	// (see database.go:164), so concurrent test runs race on
 	// instance-local provider setup and the in-memory schema migration.
@@ -318,6 +431,11 @@ func TestCopyBlocksRawWithCallback_StoresUtxoOffsets(t *testing.T) {
 
 	blobTxn := db.BlobTxn(false)
 	defer blobTxn.Rollback() //nolint:errcheck
+	// db.Blob() is non-nil: database.New rejects a nil or typed-nil blob
+	// store (database/database.go), so the nil-receiver branch of
+	// blobStoreRef.blobStore that nilaway traces is unreachable for any
+	// constructed database.
+	//nolint:nilaway // database.New requires a non-nil blob store
 	offsetData, err := db.Blob().GetUtxo(
 		blobTxn.Blob(),
 		expectedTxHash,
@@ -343,6 +461,8 @@ func TestCopyBlocksRawWithCallback_StoresUtxoOffsets(t *testing.T) {
 }
 
 func TestStoreRawBlockUtxoOffsetsPropagatesExtractError(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	txn := db.BlobTxn(true)
 	defer txn.Rollback() //nolint:errcheck
@@ -361,6 +481,8 @@ func TestStoreRawBlockUtxoOffsetsPropagatesExtractError(t *testing.T) {
 }
 
 func TestStoreRawBlockUtxoOffsetsSkipsByronEbb(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	txn := db.BlobTxn(true)
 	defer txn.Rollback() //nolint:errcheck
@@ -393,6 +515,8 @@ func TestStoreRawBlockUtxoOffsetsSkipsByronEbb(t *testing.T) {
 func TestCopyBlocksRawWithCallback_BackfillsWhenChainTipPastImmutableTip(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	// No t.Parallel(): newTestDB shares process-wide plugin state
 	// (see database.go:164), so concurrent test runs race on
 	// instance-local provider setup and the in-memory schema migration.
@@ -645,6 +769,9 @@ func TestLoadWithDBConfiguresRawChainSecurityParamBeforeHooks(t *testing.T) {
 // feature gate flows from the loaded config into the load-mode ledger config,
 // so `dingo load` computes the same reward state as an enabled serve node
 // instead of the legacy residual-to-reserves behavior.
+// Not t.Parallel: this and the other TestLoadWithDB* tests swap the
+// package-level newLedgerStateForLoad / installEpochBoundarySnapshotHookForLoad
+// seams.
 func TestLoadWithDBPropagatesFullPotRewards(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	stopAfterCapture := errors.New("stop after ledger config capture")
@@ -682,6 +809,8 @@ func TestLoadWithDBPropagatesFullPotRewards(t *testing.T) {
 }
 
 func TestLoadWithDBRejectsFullPotRewardsOnStandardNetwork(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	err := LoadWithDB(
 		context.Background(),
@@ -701,6 +830,8 @@ func TestLoadWithDBRejectsFullPotRewardsOnStandardNetwork(t *testing.T) {
 }
 
 func TestLoadWithDBRejectsFullPotRewardsFromCardanoConfigNetwork(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	for _, test := range []struct {
 		name         string
@@ -831,6 +962,8 @@ func TestLoadCaptureFailureTrackerConcurrentRecord(t *testing.T) {
 // block-producer load when the underlying capture fails, mirroring
 // node.go's handleGenesisSnapshotError guard for the normal Run path.
 func TestCaptureLoadGenesisSnapshot_BlockProducerFatal(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	mgr := snapshot.NewManager(db, nil, logger)
@@ -852,6 +985,8 @@ func TestCaptureLoadGenesisSnapshot_BlockProducerFatal(t *testing.T) {
 // non-block-producer load only warns and continues when the capture fails,
 // matching the relay behavior of node.go's handleGenesisSnapshotError.
 func TestCaptureLoadGenesisSnapshot_RelayWarnsAndContinues(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	mgr := snapshot.NewManager(db, nil, logger)
@@ -883,6 +1018,8 @@ func TestCaptureLoadGenesisSnapshot_RelayWarnsAndContinues(t *testing.T) {
 func TestLoadWithDBCapturesGenesisMarkSnapshotForShelleyGenesisStaking(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	// No t.Parallel(): newTestDB shares process-wide plugin state (see
 	// database construction, so concurrent test runs share no provider options and
 	// the in-memory schema migration.
@@ -978,6 +1115,8 @@ func decodeImmutableBlockHeader(
 // TestRunPlannerStats_WithSQLiteStore verifies that RunPlannerStats succeeds
 // against an in-memory SQLite database and populates sqlite_stat1.
 func TestRunPlannerStats_WithSQLiteStore(t *testing.T) {
+	t.Parallel()
+
 	db := newFileTestDB(t)
 	require.NoError(t, db.Metadata().ImportUtxos([]models.Utxo{
 		{
@@ -1003,6 +1142,8 @@ func TestRunPlannerStats_WithSQLiteStore(t *testing.T) {
 // TestRunPlannerStats_Idempotent verifies that repeated planner-stat
 // maintenance stays safe for resume/restart paths.
 func TestRunPlannerStats_Idempotent(t *testing.T) {
+	t.Parallel()
+
 	db := newFileTestDB(t)
 
 	require.NoError(t, RunPlannerStats(db, slog.Default()))
@@ -1019,6 +1160,8 @@ func TestRunPlannerStats_Idempotent(t *testing.T) {
 }
 
 func TestRunPlannerStats_ReturnsErrorWhenUpdaterFails(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	require.NoError(t, closeTestDB(db))
 
@@ -1049,6 +1192,8 @@ func mustOpenImmutable(t *testing.T, dir string) *immutable.ImmutableDb {
 // cannot be driven from outside it, so the substitution is placed where a
 // concurrent writer would land it.
 func TestLoadBlobsWithDBCopiesFromTheSuppliedDatabase(t *testing.T) {
+	t.Parallel()
+
 	base := t.TempDir()
 	ours := filepath.Join(base, "immutable")
 	requireChunkTrio(t, "00000", ours)
@@ -1102,6 +1247,8 @@ func TestLoadBlobsWithDBCopiesFromTheSuppliedDatabase(t *testing.T) {
 // directory by pathname, which is the open a caller passing the option is
 // trying to avoid.
 func TestLoadBlobsWithDBRefusesNilImmutableDB(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	_, err := LoadBlobsWithDB(

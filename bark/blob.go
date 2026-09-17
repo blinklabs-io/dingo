@@ -356,6 +356,33 @@ func (b *BlobStoreBark) GetBlockLocal(
 	return b.upstream.GetBlock(txn, slot, hash)
 }
 
+// archiveReportedMissing reports whether notFound answers the reference
+// this node actually asked for. FetchBlock echoes an unresolved reference
+// back carrying the identifiers the caller supplied, and this client always
+// supplies both slot and hash, so the answer for this request carries both
+// too. Anything else describes a different block and is not evidence that
+// this one is absent. The hash is compared case-insensitively because the
+// field is hex text echoed verbatim.
+func archiveReportedMissing(
+	notFound []*archivev1alpha1.BlockRef,
+	slot uint64,
+	hash []byte,
+) bool {
+	wantHash := hex.EncodeToString(hash)
+	for _, ref := range notFound {
+		if ref == nil || ref.Slot == nil || ref.Hash == nil {
+			continue
+		}
+		if ref.GetSlot() != slot {
+			continue
+		}
+		if strings.EqualFold(ref.GetHash(), wantHash) {
+			return true
+		}
+	}
+	return false
+}
+
 // fetchBlockFromArchive resolves a (slot, hash) block via the bark archive
 // service: requests a signed URL, downloads the CBOR, and returns it along
 // with the metadata carried in the archive response.
@@ -387,6 +414,27 @@ func (b *BlobStoreBark) fetchBlockFromArchive(
 
 	blocks := resp.Msg.GetBlocks()
 	if len(blocks) != 1 {
+		// The archive reports a block it does not hold under not_found and
+		// still answers the rest of the batch, so an empty blocks list
+		// carrying the not_found entry for this reference is a missing
+		// block rather than a broken archive. Report it the way a local
+		// blob store reports one.
+		//
+		// The entry has to be the one that was asked for. A returned block
+		// is re-verified against (slot, hash) by verifyArchiveBlock, but
+		// nothing re-verifies an absence, so an archive echoing some other
+		// reference would otherwise have this node record the requested
+		// block as missing on the strength of an answer about a different
+		// block.
+		if len(blocks) == 0 &&
+			archiveReportedMissing(resp.Msg.GetNotFound(), slot, hash) {
+			return nil, types.BlockMetadata{},
+				fmt.Errorf(
+					"bark: archive has no block at slot %d: %w",
+					slot,
+					types.ErrBlobKeyNotFound,
+				)
+		}
 		return nil, types.BlockMetadata{},
 			fmt.Errorf("expected 1 block, got %d", len(blocks))
 	}

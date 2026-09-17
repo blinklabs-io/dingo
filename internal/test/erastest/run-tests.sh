@@ -74,6 +74,9 @@ if ! docker compose version &>/dev/null; then
   die "docker compose plugin is not installed"
 fi
 
+log "Preflighting genesis allocation..."
+"${SCRIPT_DIR}/../preflight-genesis-supply.sh" "${TESTNET_YAML}"
+
 log "Building eras-stack images..."
 docker compose -f "${COMPOSE_FILE}" build dingo-producer configurator
 
@@ -119,7 +122,7 @@ export ERASTEST_RELAY_ADDR="localhost:${RELAY_PORT}"
 export ERASTEST_TESTNET_YAML="${TESTNET_YAML}"
 
 if [[ "${HAS_RUN}" == "false" ]]; then
-  TEST_ARGS=(-run 'TestEraTransitions|TestPV11Readiness' "${TEST_ARGS[@]}")
+  TEST_ARGS=(-run 'TestEraTransitions|TestPV11Readiness' ${TEST_ARGS[@]+"${TEST_ARGS[@]}"})
 fi
 
 # Default timeout: ~6 epochs * 75s ≈ 7.5 min for a healthy traversal

@@ -116,7 +116,9 @@ type namedStop struct {
 // quiesceComponentStops is every component quiesceForLiveLifecycleOp stops
 // whose own Stop cancels a context and then waits on a sync.WaitGroup with no
 // deadline of its own. Each is therefore bounded by stopWithDeadline rather
-// than called directly.
+// than called directly. shutdown() stops the same set in its phase 1 (see
+// shutdownPhase1ComponentStops), so a component added here is bounded there
+// too.
 //
 // Ordering is preserved from the inline calls it replaced: the Leios pipeline
 // manager stops before the vote manager because it consumes that manager's
@@ -491,6 +493,12 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 func (n *Node) closeStorageForLiveLifecycleOp(ctx context.Context) error {
 	var err error
 
+	// Storage is going away, so the ledger that feeds the readiness probe
+	// stops ticking here and does not resume until the rebuilt one reaches
+	// its first tick. Drop the last reported tip gap rather than let
+	// /readyz keep answering 200 from it for the length of the rebuild.
+	n.health.forgetTipGap()
+
 	if n.ledgerState != nil {
 		if closeErr := n.ledgerState.Close(); closeErr != nil {
 			// Fail closed: do not nil n.ledgerState, close n.db, or stop
@@ -593,6 +601,9 @@ func (n *Node) closeStorageForLiveLifecycleOp(ctx context.Context) error {
 // (LedgerState, Mempool, ChainsyncState, ConnManager, PeerGov) once the new
 // objects exist, exactly like Run()'s late-binding setters do.
 func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
+	// The previous ledger's tip-gap observation must not make readiness look
+	// healthy while Restore or Truncate is rebuilding the core storage.
+	n.health.forgetTipGap()
 	deps := n.storageDependencies(n.config.dataDir)
 	deps.PromRegistry = n.config.promRegistry
 	stores, err := internalplugins.ResolveStorage(
@@ -628,8 +639,9 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 	n.chainManager = cm
 	// The contextcheck exemption below covers ledgerStateConfig's
 	// EndorserBlockFetcher callback: it is driven by the ledger's own later
-	// call, exactly as the method value it replaced was, and only defers
-	// resolving n.ouroboros() -- it does not inherit this function's ctx.
+	// call and receives that call's fetch context. The closure only defers
+	// resolving n.ouroboros() until the callback fires; it does not inherit this
+	// reinitialization function's ctx.
 	state, err := ledger.NewLedgerState(
 		n.ledgerStateConfig(), //nolint:contextcheck
 	)
@@ -695,13 +707,13 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 	return nil
 }
 
-// reinitializeMidnightIndexer recreates the Midnight indexer (if API
-// storage mode) before n.ledgerState.Start, for the same race-avoidance
+// reinitializeMidnightIndexer recreates the enabled Midnight indexer in API
+// storage mode before n.ledgerState.Start, for the same race-avoidance
 // reason Run() creates it before starting the ledger: the synchronous
 // backfill must run while no new blocks can arrive, and the EventBus
 // subscription must exist before any BlockActionApply event can fire.
 func (n *Node) reinitializeMidnightIndexer() error {
-	if !n.config.storageMode.IsAPI() {
+	if !midnightIndexerActive(n.config.storageMode, n.config.midnight) {
 		return nil
 	}
 	if err := n.ledgerState.PrepareEpochCacheForStartup(); err != nil {
@@ -710,41 +722,7 @@ func (n *Node) reinitializeMidnightIndexer() error {
 			err,
 		)
 	}
-	midnightIdx, err := midnightindexer.New(midnightindexer.Config{
-		EventBus:                    n.eventBus,
-		Metadata:                    n.db.Metadata(),
-		SlotTimer:                   n.ledgerState,
-		Logger:                      n.config.logger,
-		PromRegistry:                n.config.promRegistry,
-		CNightPolicyID:              n.config.midnight.CNightPolicyID,
-		CNightAssetName:             n.config.midnight.CNightAssetName,
-		MappingValidatorAddress:     n.config.midnight.MappingValidatorAddress,
-		AuthTokenPolicyID:           n.config.midnight.AuthTokenPolicyID,
-		AuthTokenAssetName:          n.config.midnight.AuthTokenAssetName,
-		TechnicalCommitteeAddress:   n.config.midnight.TechnicalCommitteeAddress,
-		TechnicalCommitteePolicyID:  n.config.midnight.TechnicalCommitteePolicyID,
-		CouncilAddress:              n.config.midnight.CouncilAddress,
-		CouncilPolicyID:             n.config.midnight.CouncilPolicyID,
-		PermissionedCandidatePolicy: n.config.midnight.PermissionedCandidatePolicy,
-		CommitteeCandidateAddress:   n.config.midnight.CommitteeCandidateAddress,
-		SlotToEpoch: func(slot uint64) (uint64, error) {
-			epoch, err := n.ledgerState.SlotToEpoch(slot)
-			if err != nil {
-				return 0, err
-			}
-			return epoch.EpochId, nil
-		},
-		BlockIterator: func(startSlot, endSlot uint64, fn func(models.Block) error) error {
-			return database.ForEachBlockInRangeDB(n.db, startSlot, endSlot, fn)
-		},
-		FatalErrorFunc: func(err error) {
-			n.config.logger.Error(
-				"fatal midnight indexer error, initiating shutdown",
-				"error", err,
-			)
-			n.cancel()
-		},
-	})
+	midnightIdx, err := midnightindexer.New(n.midnightIndexerConfig())
 	if err != nil {
 		return fmt.Errorf("recreating midnight indexer: %w", err)
 	}
@@ -780,6 +758,13 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 		return fmt.Errorf("configuring snapshot manager: %w", err)
 	}
 	n.snapshotMgr.SetPromRegistry(n.config.promRegistry)
+	// Mirror the Koios parity observer's enablement into the rebuilt snapshot
+	// manager too (see Run()'s identical call in node.go, dingo #4188), or a
+	// live restore/truncate would silently drop back to CORE mode's 4-epoch
+	// reward_account_output retention even though the observer is enabled.
+	n.snapshotMgr.SetRewardAccountOutputRetentionUnbounded(
+		n.config.koiosParity.Enabled,
+	)
 	// Prune pool snapshots through the deferred-header retention guard, so a
 	// snapshot a queued/deferred header still needs for leader validation is
 	// never pruned out from under it and misread as pool absence, and the
@@ -1130,16 +1115,15 @@ func (n *Node) reinitializeAPIServers() error {
 					}
 					return block.Number, true, nil
 				},
-				Host:                n.config.midnight.Host,
-				Port:                n.config.midnight.Port,
-				TLSCertFilePath:     n.config.tlsCertFilePath,
-				TLSKeyFilePath:      n.config.tlsKeyFilePath,
-				AllowInsecureRemote: n.config.midnight.AllowInsecureRemote,
-				ReflectionEnabled:   n.config.midnight.ReflectionEnabled,
-				ShutdownTimeout:     n.config.shutdownTimeout,
-				Database:            midnightserver.NewDatabase(n.db),
-				SlotTimer:           n.ledgerState,
-				PromRegistry:        n.config.promRegistry,
+				Host:              n.config.midnight.Host,
+				Port:              n.config.midnight.Port,
+				TLSCertFilePath:   n.config.tlsCertFilePath,
+				TLSKeyFilePath:    n.config.tlsKeyFilePath,
+				ReflectionEnabled: n.config.midnight.ReflectionEnabled,
+				ShutdownTimeout:   n.config.shutdownTimeout,
+				Database:          midnightserver.NewDatabase(n.db),
+				SlotTimer:         n.ledgerState,
+				PromRegistry:      n.config.promRegistry,
 			},
 		)
 		if err != nil {
@@ -1350,6 +1334,7 @@ func (n *Node) storageDependencies(
 		StorageMode:    string(n.config.storageMode),
 		MaxConnections: n.config.DatabaseWorkerPoolConfig.WorkerPoolSize,
 		Logger:         n.config.logger,
+		TracingEnabled: n.config.tracing,
 	}
 }
 

@@ -26,6 +26,8 @@ import (
 // combination: setupTracing only runs when tracing is enabled, so stdout
 // export alone exports nothing and must not fail silently.
 func TestWarnIfTracingMisconfigured(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name          string
 		tracing       bool

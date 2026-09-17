@@ -34,7 +34,9 @@ import (
 	"github.com/blinklabs-io/dingo/keystore"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/kes"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/blinklabs-io/gouroboros/vrf"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -156,6 +158,77 @@ func writeTestOpCert(t *testing.T, contents string) string {
 	path := filepath.Join(t.TempDir(), "opcert.cert")
 	require.NoError(t, os.WriteFile(path, []byte(contents), 0o600))
 	return path
+}
+
+func TestArmKesProtocolLifetime(t *testing.T) {
+	vrfPath, kesPath, opCertPath := createTestKeys(t)
+	genesis := synthGenesis(
+		129600, 62, time.Second,
+		time.Date(2017, 9, 23, 21, 44, 51, 0, time.UTC),
+	)
+
+	pc := NewPoolCredentials()
+	err := pc.LoadFromFiles(vrfPath, kesPath, opCertPath)
+	require.NoError(t, err)
+
+	// Before arming there is no usable protocol lifetime.
+	assert.Zero(t, pc.OpCertExpiryPeriod())
+	assert.Zero(t, pc.PeriodsRemaining(1))
+
+	require.NoError(t, pc.ArmKesProtocolLifetime(genesis))
+	assert.Equal(t, uint64(0), pc.opCertStartKES)
+	assert.Equal(t, uint64(62), pc.maxKESEvolutions)
+	assert.Equal(t, uint64(62), pc.opCertExpiryKES)
+	assert.Equal(t, uint64(62), pc.OpCertExpiryPeriod())
+	// Periods inside the armed window count down; at/after expiry they are 0.
+	assert.Equal(t, uint64(57), pc.PeriodsRemaining(5))
+	assert.Equal(t, uint64(61), pc.PeriodsRemaining(1))
+	assert.Zero(t, pc.PeriodsRemaining(62))
+	assert.Zero(t, pc.PeriodsRemaining(100))
+	assert.True(t, pc.opCertValidated)
+}
+
+func TestArmKesProtocolLifetime_RequiresGenesis(t *testing.T) {
+	vrfPath, kesPath, opCertPath := createTestKeys(t)
+	pc := NewPoolCredentials()
+	require.NoError(t, pc.LoadFromFiles(vrfPath, kesPath, opCertPath))
+
+	err := pc.ArmKesProtocolLifetime(nil)
+	require.Error(t, err)
+	// The opcert structure may validate before the genesis is consulted, but
+	// without genesis data there is no protocol lifetime to enforce.
+	assert.Zero(t, pc.maxKESEvolutions)
+	assert.Zero(t, pc.opCertExpiryKES)
+	assert.Zero(t, pc.OpCertExpiryPeriod())
+	assert.Zero(t, pc.PeriodsRemaining(1))
+}
+
+func TestArmKesProtocolLifetime_RequiresCredentials(t *testing.T) {
+	genesis := synthGenesis(
+		129600, 62, time.Second,
+		time.Date(2017, 9, 23, 21, 44, 51, 0, time.UTC),
+	)
+	pc := NewPoolCredentials()
+	err := pc.ArmKesProtocolLifetime(genesis)
+	require.Error(t, err)
+	assert.Zero(t, pc.OpCertExpiryPeriod())
+}
+
+func TestArmKesProtocolLifetime_RequiresPositiveMaxEvolutions(t *testing.T) {
+	vrfPath, kesPath, opCertPath := createTestKeys(t)
+	genesis := synthGenesis(
+		129600, 0, time.Second,
+		time.Date(2017, 9, 23, 21, 44, 51, 0, time.UTC),
+	)
+	pc := NewPoolCredentials()
+	require.NoError(t, pc.LoadFromFiles(vrfPath, kesPath, opCertPath))
+
+	err := pc.ArmKesProtocolLifetime(genesis)
+	require.Error(t, err)
+	assert.Zero(t, pc.maxKESEvolutions)
+	assert.Zero(t, pc.opCertExpiryKES)
+	assert.Zero(t, pc.OpCertExpiryPeriod())
+	assert.Zero(t, pc.PeriodsRemaining(1))
 }
 
 func TestPoolCredentialsLoadFromFiles(t *testing.T) {
@@ -289,7 +362,11 @@ func TestPoolCredentialsInvalidOpCertCannotPublishKESPolicy(t *testing.T) {
 		writeTestOpCert(t, corrupted),
 	))
 
-	require.ErrorContains(t, pc.ValidateOpCert(), "signature verification failed")
+	require.ErrorContains(
+		t,
+		pc.ValidateOpCert(),
+		"signature verification failed",
+	)
 	require.ErrorContains(
 		t,
 		pc.ValidateKESPeriod(
@@ -949,7 +1026,11 @@ func TestValidateOpCertPreservesValidatedKESLifetime(t *testing.T) {
 	pc.mu.Lock()
 	pc.opCert.Signature[0] ^= 0xff
 	pc.mu.Unlock()
-	require.ErrorContains(t, pc.ValidateOpCert(), "signature verification failed")
+	require.ErrorContains(
+		t,
+		pc.ValidateOpCert(),
+		"signature verification failed",
+	)
 	require.Zero(t, pc.OpCertExpiryPeriod())
 
 	invalidGeneration := pc.acquireCredentialGeneration()
@@ -1299,6 +1380,53 @@ func TestValidateAgainstLedger_OpCertEqualOrAhead(t *testing.T) {
 	}
 }
 
+func TestValidateAgainstLedgerAtSlotAppliesEraCounterRule(t *testing.T) {
+	cases := []struct {
+		name      string
+		params    lcommon.ProtocolParameters
+		wantError bool
+	}{
+		{
+			name:   "tpraos permits forward counter",
+			params: &shelley.ShelleyProtocolParameters{ProtocolMajor: 2},
+		},
+		{
+			name:      "praos rejects gapped counter",
+			params:    &babbage.BabbageProtocolParameters{},
+			wantError: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pc := newCredsForLedger(t)
+			pc.opCert.IssueNumber = 7
+			view := &fakeLedgerView{
+				registered: true,
+				regVRFHash: lcommon.Blake2b256Hash(pc.vrfVKey),
+				seqFound:   true,
+				latestSeq:  5,
+			}
+			params := &mockPParamsProvider{pparams: tc.params}
+			result, err := pc.ValidateAgainstLedgerAtSlot(view, params, 0)
+			if result.EraUnevaluable != nil {
+				t.Fatalf(
+					"era resolved from real parameters, got: %v",
+					result.EraUnevaluable,
+				)
+			}
+			if tc.wantError {
+				if err == nil {
+					t.Fatal("expected gapped Praos counter to be rejected")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ValidateAgainstLedgerAtSlot: %v", err)
+			}
+		})
+	}
+}
+
 func TestValidateAgainstLedger_NoObservedOpCertSequence(t *testing.T) {
 	// A registered pool may not have produced a block yet, so the ledger
 	// can have no observed opcert sequence. Must not block startup.
@@ -1466,4 +1594,24 @@ func TestValidateOpCertSequence(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestArmKesProtocolLifetime_RequiresSigningMaterial pins that Arm reports
+// failure when it cannot arm anything. With an opcert present but no signing
+// material the certificate cannot be validated, so the protocol lifetime
+// would be unreadable; returning nil there would tell the block producer the
+// per-slot forge gate has data to enforce when it has none.
+func TestArmKesProtocolLifetime_RequiresSigningMaterial(t *testing.T) {
+	genesis := synthGenesis(
+		129600, 62, time.Second,
+		time.Date(2017, 9, 23, 21, 44, 51, 0, time.UTC),
+	)
+	pc := &PoolCredentials{opCert: &OpCert{KESPeriod: 1}}
+	require.False(t, pc.IsLoaded())
+
+	err := pc.ArmKesProtocolLifetime(genesis)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "signing material not loaded")
+	assert.Zero(t, pc.OpCertExpiryPeriod())
+	assert.Zero(t, pc.PeriodsRemaining(1))
 }

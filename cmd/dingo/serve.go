@@ -385,7 +385,7 @@ func openConfiguredDatabase(
 		internalplugins.StorageDependencies{
 			DataDir: cfg.DatabasePath, RunMode: string(cfg.RunMode),
 			StorageMode: storageMode, MaxConnections: maxConnections,
-			Logger: logger,
+			Logger: logger, TracingEnabled: cfg.Tracing,
 		},
 	)
 }

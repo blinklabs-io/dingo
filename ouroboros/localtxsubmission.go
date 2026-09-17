@@ -95,7 +95,7 @@ type cborRejectReason interface {
 }
 
 type hardForkApplyTxError struct {
-	era uint8
+	era uint16
 	err error
 }
 
@@ -107,7 +107,7 @@ func newLocalTxSubmissionRejectReason(
 		return err
 	}
 	return &hardForkApplyTxError{
-		era: uint8(eraId), //nolint:gosec // Cardano era IDs fit in uint8
+		era: eraId,
 		err: err,
 	}
 }
@@ -121,12 +121,16 @@ func (e *hardForkApplyTxError) Unwrap() error {
 }
 
 func (e *hardForkApplyTxError) MarshalCBOR() ([]byte, error) {
+	utxowFailureType := gledger.ApplyTxErrorUtxowFailure
+	if e.era == gledger.EraIdConway {
+		utxowFailureType = gledger.ConwayLedgerUtxowFailure
+	}
 	return cbor.Encode([]any{
 		[]any{
 			e.era,
 			[]any{
 				[]any{
-					gledger.ApplyTxErrorUtxowFailure,
+					utxowFailureType,
 					e.utxowFailure(),
 				},
 			},
@@ -135,23 +139,24 @@ func (e *hardForkApplyTxError) MarshalCBOR() ([]byte, error) {
 }
 
 func (e *hardForkApplyTxError) utxowFailure() []any {
-	utxoFailure := []any{
-		e.era,
-		e.inputSetEmptyFailure(),
-	}
-
+	// The Shelley/Allegra/Mary/Alonzo/Babbage UTXOW constructors below
+	// decode their payload as the bare UTXO predicate failure (no era
+	// wrapper): gouroboros's UtxoFailure.unmarshalPayload takes the era
+	// from its parent rather than from this payload. Only the Conway
+	// leaf below decodes through UtxoFailure's own UnmarshalCBOR, which
+	// does expect the [era, err] form.
 	switch e.era {
 	case gledger.EraIdShelley, gledger.EraIdAllegra, gledger.EraIdMary:
 		return []any{
 			gledger.ShelleyUtxowUtxoFailure,
-			utxoFailure,
+			e.inputSetEmptyFailure(),
 		}
 	case gledger.EraIdAlonzo:
 		return []any{
 			gledger.AlonzoUtxowShelleyInAlonzo,
 			[]any{
 				gledger.ShelleyUtxowUtxoFailure,
-				utxoFailure,
+				e.inputSetEmptyFailure(),
 			},
 		}
 	case gledger.EraIdBabbage:
@@ -159,13 +164,13 @@ func (e *hardForkApplyTxError) utxowFailure() []any {
 			gledger.BabbageUtxowUtxoFailure,
 			[]any{
 				gledger.BabbageUtxoAlonzoInBabbage,
-				utxoFailure,
+				e.inputSetEmptyFailure(),
 			},
 		}
 	case gledger.EraIdConway:
 		return []any{
 			gledger.ConwayUtxowUtxoFailure,
-			utxoFailure,
+			e.inputSetEmptyFailure(),
 		}
 	default:
 		return []any{

@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"slices"
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -90,7 +91,13 @@ func (tx metadataOnlyTransaction) Produced() []lcommon.Utxo {
 // let a truncate proceed past a boundary that could not actually be
 // verified, rather than merely under-informing a heuristic.
 func (d *Database) MithrilTrustBoundarySlot(txn *Txn) uint64 {
-	slot, err := d.MithrilTrustBoundarySlotStrict(txn)
+	// Deliberately not MithrilTrustBoundarySlotStrict: this runs once per
+	// transaction that consumes inputs, and the strict variant pays an extra
+	// sync_state enumeration on the empty-value path — which is the common
+	// path here, since a genesis-synced node has no boundary row at all.
+	// This caller discards every failure as 0 regardless, so the distinction
+	// that enumeration buys is worth nothing to it.
+	slot, err := d.mithrilTrustBoundarySlot(txn)
 	if err != nil {
 		d.logger.Warn(
 			"failed to read Mithril trust boundary from sync state; "+
@@ -111,7 +118,38 @@ func (d *Database) MithrilTrustBoundarySlot(txn *Txn) uint64 {
 // persisted boundary must not be indistinguishable from "no snapshot was
 // ever imported" for a caller enforcing a safety check, or the check is
 // defeated exactly when it matters most.
+//
+// That includes a recorded empty value. GetSyncState reports an absent key
+// as the empty string, so an empty return alone cannot tell "no snapshot was
+// ever imported" from "a boundary row exists and holds nothing"; only the
+// second is malformed, and the two are separated here by asking the
+// sync_state keyspace whether the row exists at all. The extra query runs
+// only on that path.
 func (d *Database) MithrilTrustBoundarySlotStrict(txn *Txn) (uint64, error) {
+	val, err := d.GetSyncState(mithrilLedgerSlotSyncKey, txn)
+	if err != nil {
+		return 0, fmt.Errorf("read Mithril trust boundary: %w", err)
+	}
+	if val == "" {
+		recorded, err := d.mithrilTrustBoundaryRecorded(txn)
+		if err != nil {
+			return 0, err
+		}
+		if recorded {
+			return 0, errors.New(
+				"parse Mithril trust boundary: empty value",
+			)
+		}
+		return 0, nil
+	}
+	return parseMithrilTrustBoundary(val)
+}
+
+// mithrilTrustBoundarySlot is MithrilTrustBoundarySlotStrict without the
+// absent-versus-empty distinction, for the fail-open accessor that discards
+// it anyway. An absent key and a key recorded with an empty value both come
+// back as 0 with no error.
+func (d *Database) mithrilTrustBoundarySlot(txn *Txn) (uint64, error) {
 	val, err := d.GetSyncState(mithrilLedgerSlotSyncKey, txn)
 	if err != nil {
 		return 0, fmt.Errorf("read Mithril trust boundary: %w", err)
@@ -119,6 +157,10 @@ func (d *Database) MithrilTrustBoundarySlotStrict(txn *Txn) (uint64, error) {
 	if val == "" {
 		return 0, nil
 	}
+	return parseMithrilTrustBoundary(val)
+}
+
+func parseMithrilTrustBoundary(val string) (uint64, error) {
 	slot, err := strconv.ParseUint(val, 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf(
@@ -128,6 +170,23 @@ func (d *Database) MithrilTrustBoundarySlotStrict(txn *Txn) (uint64, error) {
 		)
 	}
 	return slot, nil
+}
+
+// mithrilTrustBoundaryRecorded reports whether a mithril_ledger_slot
+// sync_state row exists, which GetSyncState's empty-string return cannot
+// express on its own (the metadata store maps the driver's no-rows error to
+// ""). ListSyncStateKeysByPrefix enumerates the small sync_state keyspace and
+// matches the byte prefix in Go, so the exact key is checked here rather than
+// trusting the prefix match alone.
+func (d *Database) mithrilTrustBoundaryRecorded(txn *Txn) (bool, error) {
+	keys, err := d.ListSyncStateKeysByPrefix(mithrilLedgerSlotSyncKey, txn)
+	if err != nil {
+		return false, fmt.Errorf(
+			"read Mithril trust boundary: %w",
+			err,
+		)
+	}
+	return slices.Contains(keys, mithrilLedgerSlotSyncKey), nil
 }
 
 func ledgerHashBytes(hash lcommon.Blake2b256) []byte {
@@ -141,6 +200,22 @@ func ledgerHashPrefix(hash lcommon.Blake2b256) []byte {
 func ledgerInputIDBytes(input lcommon.TransactionInput) []byte {
 	id := input.Id()
 	return id[:]
+}
+
+// consumedInputKey is a comparable, allocation-free dedup key for a
+// transaction input's hash+index. ensureTransactionConsumedUtxos and
+// ensureGapConsumedUtxos use it to skip repeated processing of an input a
+// transaction's Consumed() set lists more than once. Both fields are plain
+// value types (a fixed-size byte array and a uint32), so using this struct
+// as a map key never allocates, unlike the fmt.Sprintf-formatted hex string
+// this replaced on the block-application hot path.
+type consumedInputKey struct {
+	id    lcommon.Blake2b256
+	index uint32
+}
+
+func newConsumedInputKey(input lcommon.TransactionInput) consumedInputKey {
+	return consumedInputKey{id: input.Id(), index: input.Index()}
 }
 
 func bytePrefix(data []byte) []byte {
@@ -415,6 +490,7 @@ func (d *Database) SetGapBlockTransaction(
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	idx uint32,
+	certDeposits map[int]uint64,
 	offsets *BlockIngestionResult,
 	txn *Txn,
 ) error {
@@ -486,7 +562,7 @@ func (d *Database) SetGapBlockTransaction(
 	}
 
 	if err := d.transactionStore().SetGapBlockTransaction(
-		tx, point, idx, txn.Metadata(),
+		tx, point, idx, certDeposits, txn.Metadata(),
 	); err != nil {
 		return fmt.Errorf(
 			"set gap block transaction metadata: %w", err,
@@ -559,14 +635,14 @@ func (d *Database) ensureTransactionConsumedUtxos(
 	inFlight, _ := acc.(inFlightProducerLookup)
 	spenderTxHash := ledgerHashBytes(tx.Hash())
 	recoveredUtxos := make([]models.Utxo, 0, len(consumed))
-	seen := make(map[string]struct{}, len(consumed))
+	seen := make(map[consumedInputKey]struct{}, len(consumed))
 	// Read the Mithril trust boundary once: below it, absent producer rows are
 	// legitimately expected (the snapshot does not carry pre-boundary history);
 	// past it the node should hold complete producer history.
 	mithrilBoundarySlot := d.MithrilTrustBoundarySlot(txn)
 	for _, input := range consumed {
 		inputTxId := ledgerInputIDBytes(input)
-		inputKey := fmt.Sprintf("%x:%d", inputTxId, input.Index())
+		inputKey := newConsumedInputKey(input)
 		if _, ok := seen[inputKey]; ok {
 			continue
 		}
@@ -688,10 +764,10 @@ func (d *Database) ensureGapConsumedUtxos(
 	}
 	spenderTxHash := ledgerHashBytes(tx.Hash())
 	recoveredUtxos := make([]models.Utxo, 0, len(consumed))
-	seen := make(map[string]struct{}, len(consumed))
+	seen := make(map[consumedInputKey]struct{}, len(consumed))
 	for _, input := range consumed {
 		inputTxId := ledgerInputIDBytes(input)
-		inputKey := fmt.Sprintf("%x:%d", inputTxId, input.Index())
+		inputKey := newConsumedInputKey(input)
 		if _, ok := seen[inputKey]; ok {
 			continue
 		}
@@ -1147,8 +1223,8 @@ func (d *Database) SetGenesisTransaction(
 	); err != nil {
 		return fmt.Errorf(
 			"SetGenesisTransaction failed for tx %x block %x: %w",
-			txHash[:8],
-			blockHash[:8],
+			bytePrefix(txHash),
+			bytePrefix(blockHash),
 			err,
 		)
 	}

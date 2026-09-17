@@ -21,11 +21,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -39,6 +41,25 @@ import (
 
 type captureSlogHandler struct {
 	records []slog.Record
+}
+
+type trackingDownloadBody struct {
+	reader bytes.Reader
+	read   atomic.Int64
+}
+
+func (b *trackingDownloadBody) Read(p []byte) (int, error) {
+	n, err := b.reader.Read(p)
+	b.read.Add(int64(n))
+	return n, err
+}
+
+func (b *trackingDownloadBody) Close() error { return nil }
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
 }
 
 func (h *captureSlogHandler) Enabled(context.Context, slog.Level) bool {
@@ -59,6 +80,8 @@ func (h *captureSlogHandler) WithGroup(string) slog.Handler {
 }
 
 func TestDownloadSnapshot(t *testing.T) {
+	t.Parallel()
+
 	content := []byte("fake-snapshot-archive-data-for-testing")
 
 	server := httptest.NewServer(
@@ -107,6 +130,8 @@ func TestDownloadSnapshot(t *testing.T) {
 }
 
 func TestDownloadSnapshotRoutineLogsAtDebug(t *testing.T) {
+	t.Parallel()
+
 	content := []byte("snapshot")
 	server := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -147,6 +172,8 @@ func TestDownloadSnapshotRoutineLogsAtDebug(t *testing.T) {
 }
 
 func TestNewPooledDownloadTransportUsesHTTP1Connections(t *testing.T) {
+	t.Parallel()
+
 	transport := newPooledDownloadTransport(4)
 
 	require.False(t, transport.DisableKeepAlives)
@@ -161,6 +188,8 @@ func TestNewPooledDownloadTransportUsesHTTP1Connections(t *testing.T) {
 }
 
 func TestDownloadSnapshotResume(t *testing.T) {
+	t.Parallel()
+
 	// Full content: "AAABBB"
 	fullContent := []byte("AAABBB")
 
@@ -209,6 +238,8 @@ func TestDownloadSnapshotResume(t *testing.T) {
 }
 
 func TestDownloadSnapshotIdleTimeoutRetriesAndResumes(t *testing.T) {
+	t.Parallel()
+
 	fullContent := []byte("AAABBB")
 	var requestCount atomic.Int32
 	resumeRangeCh := make(chan string, 1)
@@ -284,6 +315,8 @@ func TestDownloadSnapshotIdleTimeoutRetriesAndResumes(t *testing.T) {
 }
 
 func TestDownloadSnapshotIdleRetriesResetAfterProgress(t *testing.T) {
+	t.Parallel()
+
 	fullContent := []byte("AAABBBCCC")
 	var requestCount atomic.Int32
 	rangeCh := make(chan string, 2)
@@ -339,7 +372,9 @@ func TestDownloadSnapshotIdleRetriesResetAfterProgress(t *testing.T) {
 		IdleTimeout:       50 * time.Millisecond,
 		MaxIdleRetries:    1,
 	}
-	timeout := 3*cfg.IdleTimeout + 500*time.Millisecond
+	// The retry path may wait for the configured idle timeout more than once;
+	// leave enough room for scheduler and HTTP-server variance on Windows.
+	timeout := 5 * time.Second
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -378,6 +413,8 @@ func TestDownloadSnapshotIdleRetriesResetAfterProgress(t *testing.T) {
 }
 
 func TestDownloadSnapshotRejectsNegativeMaxIdleRetries(t *testing.T) {
+	t.Parallel()
+
 	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
 		URL:            "http://example.invalid/snapshot.tar.zst",
 		DestDir:        t.TempDir(),
@@ -393,6 +430,8 @@ func TestDownloadSnapshotRejectsNegativeMaxIdleRetries(t *testing.T) {
 // untrusted, so the scheme is checked up front rather than relying on
 // httpsOnlyRedirect, which only governs where a redirect may lead.
 func TestDownloadSnapshotRejectsPlainHTTPByDefault(t *testing.T) {
+	t.Parallel()
+
 	called := false
 	server := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -419,6 +458,8 @@ func TestDownloadSnapshotRejectsPlainHTTPByDefault(t *testing.T) {
 // DownloadConfig.AllowInsecureHTTP is a working, explicit escape hatch
 // (used throughout this package's own httptest-based tests).
 func TestDownloadSnapshotAllowsPlainHTTPWithEscapeHatch(t *testing.T) {
+	t.Parallel()
+
 	content := []byte("fake-snapshot-data")
 	server := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -444,6 +485,8 @@ func TestDownloadSnapshotAllowsPlainHTTPWithEscapeHatch(t *testing.T) {
 // against the loopback TLS test server's self-signed certificate, which
 // is expected — the point is that it isn't rejected for its scheme).
 func TestDownloadSnapshotAcceptsHTTPSByDefault(t *testing.T) {
+	t.Parallel()
+
 	server := httptest.NewTLSServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
@@ -461,6 +504,8 @@ func TestDownloadSnapshotAcceptsHTTPSByDefault(t *testing.T) {
 }
 
 func TestIdleTimeoutReaderStopsTimerBetweenReads(t *testing.T) {
+	t.Parallel()
+
 	idleCh := make(chan struct{}, 1)
 	reader := newIdleTimeoutReader(
 		bytes.NewReader([]byte("abc")),
@@ -488,6 +533,8 @@ func TestIdleTimeoutReaderStopsTimerBetweenReads(t *testing.T) {
 }
 
 func TestDownloadSnapshotContextCancel(t *testing.T) {
+	t.Parallel()
+
 	server := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Simulate a slow response that never completes
@@ -511,6 +558,8 @@ func TestDownloadSnapshotContextCancel(t *testing.T) {
 }
 
 func TestDownloadSnapshotServerError(t *testing.T) {
+	t.Parallel()
+
 	server := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			http.Error(
@@ -534,6 +583,8 @@ func TestDownloadSnapshotServerError(t *testing.T) {
 }
 
 func TestDownloadSnapshotTransientRetrySucceeds(t *testing.T) {
+	t.Parallel()
+
 	content := []byte("ok-after-transient")
 	var requestCount atomic.Int32
 
@@ -575,6 +626,8 @@ func TestDownloadSnapshotTransientRetrySucceeds(t *testing.T) {
 }
 
 func TestDownloadSnapshotTransientRetryExhausted(t *testing.T) {
+	t.Parallel()
+
 	var requestCount atomic.Int32
 
 	server := httptest.NewServer(
@@ -604,6 +657,8 @@ func TestDownloadSnapshotTransientRetryExhausted(t *testing.T) {
 }
 
 func TestIsTransientDownloadError(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name      string
 		err       error
@@ -654,6 +709,8 @@ func TestIsTransientDownloadError(t *testing.T) {
 }
 
 func TestDownloadSnapshotSizeVerification(t *testing.T) {
+	t.Parallel()
+
 	content := []byte("exact-size-content")
 
 	server := httptest.NewServer(
@@ -684,6 +741,8 @@ func TestDownloadSnapshotSizeVerification(t *testing.T) {
 }
 
 func TestDownloadSnapshotSizeMismatch(t *testing.T) {
+	t.Parallel()
+
 	content := []byte("short-content")
 
 	server := httptest.NewServer(
@@ -710,6 +769,187 @@ func TestDownloadSnapshotSizeMismatch(t *testing.T) {
 	require.Contains(t, err.Error(), "download size mismatch")
 }
 
+func TestDownloadSnapshotBoundsResponseRead(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		expect  int64
+		wantErr bool
+	}{
+		{name: "exact boundary", body: "abc", expect: 3},
+		{name: "over boundary", body: "abcdefgh", expect: 3, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			responseBody := &trackingDownloadBody{}
+			responseBody.reader = *bytes.NewReader([]byte(tc.body))
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       responseBody,
+					Header:     make(http.Header),
+				}, nil
+			})}
+			path, err := DownloadSnapshot(context.Background(), DownloadConfig{
+				URL:                 "https://example.test/snapshot.tar.zst",
+				DestDir:             t.TempDir(),
+				Filename:            "bounded.tar.zst",
+				ExpectedSize:        tc.expect,
+				HTTPClient:          client,
+				MaxTransientRetries: -1,
+			})
+			if tc.wantErr {
+				require.Error(t, err)
+				require.ErrorIs(t, err, ErrDownloadTooLarge)
+				require.Contains(t, err.Error(), "exceeds expected size")
+				require.Empty(t, path)
+				require.LessOrEqual(t, responseBody.read.Load(), tc.expect+1)
+				return
+			}
+			require.NoError(t, err)
+			data, readErr := os.ReadFile(path)
+			require.NoError(t, readErr)
+			require.Equal(t, tc.body, string(data))
+			require.Equal(t, tc.expect, responseBody.read.Load())
+		})
+	}
+}
+
+func TestDownloadSnapshotMaxExpectedSizeDoesNotOverflow(t *testing.T) {
+	body := &trackingDownloadBody{}
+	body.reader = *bytes.NewReader([]byte("x"))
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: body, Header: make(http.Header)}, nil
+	})}
+	path, err := DownloadSnapshot(context.Background(), DownloadConfig{
+		URL:          "https://example.test/snapshot.tar.zst",
+		DestDir:      t.TempDir(),
+		Filename:     "max.tar.zst",
+		ExpectedSize: math.MaxInt64,
+		MaxBytes:     math.MaxInt64,
+		HTTPClient:   client,
+	})
+	require.ErrorContains(t, err, "download size mismatch")
+	require.Equal(t, int64(1), body.read.Load())
+	require.Empty(t, path)
+}
+
+func TestDownloadSnapshotConfiguredByteLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name, prefix, body, contentRange string
+		status                           int
+		contentLength, wantRead          int64
+		wantError, removed               bool
+	}{
+		{name: "below", body: "ab", status: 200, contentLength: -1, wantRead: 2},
+		{name: "exact", body: "abc", status: 200, contentLength: -1, wantRead: 3},
+		{name: "stream oversized", body: "abcdefgh", status: 200, contentLength: -1, wantRead: 4, wantError: true, removed: true},
+		{name: "header oversized", body: "abcdefgh", status: 200, contentLength: 8, wantError: true},
+		{name: "resume exact", prefix: "a", body: "bc", status: 206, contentRange: "bytes 1-2/3", contentLength: -1, wantRead: 2},
+		{name: "resume oversized", prefix: "a", body: "bcdefgh", status: 206, contentRange: "bytes 1-7/8", contentLength: -1, wantRead: 3, wantError: true, removed: true},
+		{name: "resume header oversized", prefix: "a", body: "bcdefgh", status: 206, contentRange: "bytes 1-7/8", contentLength: math.MaxInt64, wantError: true},
+		{name: "range ignored", prefix: "ab", body: "abc", status: 200, contentLength: -1, wantRead: 3},
+		{name: "range ignored oversized", prefix: "ab", body: "abcdefgh", status: 200, contentLength: -1, wantRead: 4, wantError: true, removed: true},
+		{name: "already complete", prefix: "abc", status: 416, contentRange: "bytes */3", contentLength: -1},
+		{name: "existing oversized", prefix: "abcd", status: 416, contentRange: "bytes */4", contentLength: -1, wantError: true, removed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			dest := filepath.Join(dir, "archive")
+			if tc.prefix != "" {
+				require.NoError(t, os.WriteFile(dest, []byte(tc.prefix), 0o600))
+			}
+			body := &trackingDownloadBody{reader: *bytes.NewReader([]byte(tc.body))}
+			requests := 0
+			cfg := DownloadConfig{
+				URL: "https://example.test/archive", DestDir: dir, Filename: "archive",
+				MaxBytes: 3,
+				HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					requests++
+					if tc.prefix != "" {
+						require.Equal(t, fmt.Sprintf("bytes=%d-", len(tc.prefix)), r.Header.Get("Range"))
+					}
+					return &http.Response{StatusCode: tc.status, Body: body,
+						ContentLength: tc.contentLength, Header: http.Header{"Content-Range": {tc.contentRange}}}, nil
+				})},
+			}
+			path, err := DownloadSnapshot(context.Background(), cfg)
+			require.Equal(t, tc.wantRead, body.read.Load(), "response read must stay within remaining file budget plus one probe byte")
+			if tc.wantError {
+				require.ErrorIs(t, err, ErrDownloadTooLarge)
+				require.Empty(t, path)
+				if tc.removed {
+					require.NoFileExists(t, dest)
+				}
+			} else {
+				require.NoError(t, err)
+				data, err := os.ReadFile(path)
+				require.NoError(t, err)
+				want := tc.body
+				if tc.status != 200 {
+					want = tc.prefix + tc.body
+				}
+				require.Equal(t, want, string(data))
+			}
+			wantRequests := 1
+			if len(tc.prefix) > 3 {
+				wantRequests = 0
+			}
+			require.Equal(t, wantRequests, requests, "size errors must not retry")
+		})
+	}
+}
+
+func TestDownloadSnapshotRestartByteLimit(t *testing.T) {
+	for _, advertised := range []bool{false, true} {
+		for _, content := range []string{"abc", "abcdefgh"} {
+			t.Run(fmt.Sprintf("advertised=%t/length=%d", advertised, len(content)), func(t *testing.T) {
+				dir := t.TempDir()
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "archive"), []byte("a"), 0o600))
+				body := &trackingDownloadBody{reader: *bytes.NewReader([]byte(content))}
+				requests := 0
+				path, err := DownloadSnapshot(context.Background(), DownloadConfig{
+					URL: "https://example.test/archive", DestDir: dir, Filename: "archive", MaxBytes: 3,
+					HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+						requests++
+						if requests == 1 {
+							return &http.Response{StatusCode: 206, Body: io.NopCloser(strings.NewReader("ignored")), Header: http.Header{"Content-Range": {"bytes 2-3/4"}}}, nil
+						}
+						require.Empty(t, r.Header.Get("Range"))
+						length := int64(-1)
+						if advertised {
+							length = int64(len(content))
+						}
+						return &http.Response{StatusCode: 200, Body: body, ContentLength: length, Header: make(http.Header)}, nil
+					})},
+				})
+				require.Equal(t, 2, requests)
+				if len(content) > 3 {
+					require.ErrorIs(t, err, ErrDownloadTooLarge)
+					wantRead := int64(4)
+					if advertised {
+						wantRead = 0
+					}
+					require.Equal(t, wantRead, body.read.Load())
+				} else {
+					require.NoError(t, err)
+					data, err := os.ReadFile(path)
+					require.NoError(t, err)
+					require.Equal(t, content, string(data))
+				}
+			})
+		}
+	}
+}
+
+func TestDownloadConfigByteLimit(t *testing.T) {
+	require.Equal(t, DefaultMaxDownloadBytes, (DownloadConfig{}).sizeLimit())
+	require.Error(t, (DownloadConfig{MaxBytes: -1}).Validate())
+	require.ErrorIs(t, (DownloadConfig{MaxBytes: 3, ExpectedSize: 4}).Validate(), ErrDownloadTooLarge)
+	require.NoError(t, (DownloadConfig{MaxBytes: math.MaxInt64, ExpectedSize: math.MaxInt64}).Validate())
+	require.Equal(t, int64(2), (DownloadConfig{MaxBytes: 3, ExpectedSize: 2}).sizeLimit())
+}
+
 // TestDownloadSnapshotRejectsPreexistingSymlinkEscape proves the TOCTOU
 // fix for issue #3147: a symlink placed at the download destination
 // path *before* the download starts, pointing outside DestDir, must
@@ -718,6 +958,8 @@ func TestDownloadSnapshotSizeMismatch(t *testing.T) {
 // the OS and follow such a symlink, writing attacker-controlled data
 // outside DestDir.
 func TestDownloadSnapshotRejectsPreexistingSymlinkEscape(t *testing.T) {
+	t.Parallel()
+
 	if runtime.GOOS == "windows" {
 		t.Skip("creating symlinks requires elevated privileges on windows")
 	}
@@ -760,6 +1002,8 @@ func TestDownloadSnapshotRejectsPreexistingSymlinkEscape(t *testing.T) {
 // would silently succeed and write through such a symlink, because
 // neither call inspects what it is binding to before using it.
 func TestDownloadSnapshotRefusesSymlinkedDestDir(t *testing.T) {
+	t.Parallel()
+
 	server := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte("data"))
@@ -802,6 +1046,8 @@ func TestDownloadSnapshotRefusesSymlinkedDestDir(t *testing.T) {
 // publish.yml), but this proves the behavior rather than just the
 // absence of a CVE identifier.
 func TestOsRootRejectsFinalSymlinkWithTrailingSlash(t *testing.T) {
+	t.Parallel()
+
 	if runtime.GOOS == "windows" {
 		t.Skip("creating symlinks requires elevated privileges on windows")
 	}
@@ -829,6 +1075,8 @@ func TestOsRootRejectsFinalSymlinkWithTrailingSlash(t *testing.T) {
 }
 
 func TestDownloadSnapshotDefaultFilename(t *testing.T) {
+	t.Parallel()
+
 	server := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte("data"))
@@ -852,6 +1100,8 @@ func TestDownloadSnapshotDefaultFilename(t *testing.T) {
 }
 
 func TestParseContentRangeStart(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name   string
 		header string
@@ -908,6 +1158,8 @@ func TestParseContentRangeStart(t *testing.T) {
 }
 
 func TestDownloadSnapshotResumeContentRangeMismatch(t *testing.T) {
+	t.Parallel()
+
 	// Server returns 206 but with the wrong Content-Range start
 	// offset. The downloader should detect this and restart from
 	// scratch.
@@ -973,6 +1225,8 @@ func TestDownloadSnapshotResumeContentRangeMismatch(t *testing.T) {
 }
 
 func TestDownloadSnapshotResumeMissingContentRange(t *testing.T) {
+	t.Parallel()
+
 	// Server returns 206 without a Content-Range header. The
 	// downloader should treat this as a mismatch (since
 	// parseContentRangeStart returns -1) and restart from scratch.
@@ -1060,7 +1314,46 @@ func createTestArchive(
 	return buf.Bytes()
 }
 
+func TestExtractArchiveZstdLimits(t *testing.T) {
+	archive := createTestArchive(t, map[string]string{"payload": strings.Repeat("x", 4096)})
+	var frame zstd.Header
+	require.NoError(t, frame.Decode(archive))
+	require.True(t, frame.SingleSegment)
+	require.Greater(t, frame.FrameContentSize, uint64(1024))
+	require.Less(t, frame.FrameContentSize, uint64(1<<20))
+	archivePath := filepath.Join(t.TempDir(), "archive.tar.zst")
+	require.NoError(t, os.WriteFile(archivePath, archive, 0o600))
+	for _, tc := range []struct {
+		name           string
+		window, memory uint64
+		wantError      bool
+	}{
+		{name: "valid", window: 1 << 20, memory: 1 << 20},
+		{name: "window exceeded", window: 1024, memory: 1 << 20, wantError: true},
+		{name: "memory exceeded", window: 1 << 20, memory: 1024, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "extracted")
+			_, err := ExtractArchive(context.Background(), archivePath, dir, nil, WithZstdLimits(tc.window, tc.memory))
+			if tc.wantError {
+				// For a single-segment frame, the pinned decoder derives the
+				// window from FCS. Both the memory check in framedec.reset
+				// and the async window check return ErrDecoderSizeExceeded.
+				require.ErrorIs(t, err, zstd.ErrDecoderSizeExceeded)
+				require.NoDirExists(t, dir)
+			} else {
+				require.NoError(t, err)
+				data, err := os.ReadFile(filepath.Join(dir, "payload"))
+				require.NoError(t, err)
+				require.Equal(t, strings.Repeat("x", 4096), string(data))
+			}
+		})
+	}
+}
+
 func TestExtractArchive(t *testing.T) {
+	t.Parallel()
+
 	files := map[string]string{
 		"immutable/00000.chunk":     "chunk0 data",
 		"immutable/00000.primary":   "primary0 data",
@@ -1096,6 +1389,8 @@ func TestExtractArchive(t *testing.T) {
 }
 
 func TestExtractArchiveDirectoryTraversal(t *testing.T) {
+	t.Parallel()
+
 	// Create an archive with a path traversal attempt
 	archiveData := createTestArchive(t, map[string]string{
 		"../../../etc/passwd": "evil",
@@ -1113,6 +1408,8 @@ func TestExtractArchiveDirectoryTraversal(t *testing.T) {
 }
 
 func TestExtractArchiveWithDirectories(t *testing.T) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 
 	zw, err := zstd.NewWriter(&buf)
@@ -1161,6 +1458,8 @@ func TestExtractArchiveWithDirectories(t *testing.T) {
 }
 
 func TestValidRelPath(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name  string
 		path  string

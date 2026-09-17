@@ -143,6 +143,7 @@ type Querier interface {
 	GetMidnightDeregistrationsByBlock(ctx context.Context, blockNumber int64) ([]MidnightDeregistration, error)
 	GetMidnightEpochCandidatesByEpoch(ctx context.Context, epoch int64) (MidnightEpochCandidate, error)
 	GetMidnightRegistrationsByBlock(ctx context.Context, blockNumber int64) ([]MidnightRegistration, error)
+	GetNetworkStateAsOfSlot(ctx context.Context, slot int64) (NetworkState, error)
 	GetNodeSettings(ctx context.Context) (GetNodeSettingsRow, error)
 	GetNodeSettingsGates(ctx context.Context) ([]GetNodeSettingsGatesRow, error)
 	GetOffchainMetadata(ctx context.Context, arg GetOffchainMetadataParams) (OffchainMetadatum, error)
@@ -172,6 +173,9 @@ type Querier interface {
 	GetUtxoIDByRef(ctx context.Context, arg GetUtxoIDByRefParams) (int64, error)
 	GetUtxoIncludingSpent(ctx context.Context, arg GetUtxoIncludingSpentParams) (Utxo, error)
 	GetUtxoRefsBySlot(ctx context.Context, addedSlot sql.NullInt64) ([]GetUtxoRefsBySlotRow, error)
+	// Order by added_slot before id so the sort is the reverse of
+	// idx_utxo_added_slot's own order; ordering by id alone costs a full table
+	// scan. See the Store wrapper for the full rationale.
 	GetUtxosAddedAfterSlot(ctx context.Context, addedSlot sql.NullInt64) ([]Utxo, error)
 	GetUtxosDeletedBeforeSlot(ctx context.Context, arg GetUtxosDeletedBeforeSlotParams) ([]Utxo, error)
 	ImportAccount(ctx context.Context, arg ImportAccountParams) (int64, error)

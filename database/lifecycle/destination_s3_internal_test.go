@@ -17,9 +17,18 @@
 package lifecycle
 
 import (
+	"bytes"
+	"context"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 	"github.com/stretchr/testify/require"
@@ -28,6 +37,8 @@ import (
 // TestIsS3NotFoundErrorMatchesNoSuchKey verifies the case AWS's own S3
 // actually returns from GetObject on a missing key.
 func TestIsS3NotFoundErrorMatchesNoSuchKey(t *testing.T) {
+	t.Parallel()
+
 	require.True(t, isS3NotFoundError(&types.NoSuchKey{}))
 }
 
@@ -35,6 +46,8 @@ func TestIsS3NotFoundErrorMatchesNoSuchKey(t *testing.T) {
 // s3types.NotFound check, kept even though AWS's own GetObject never
 // actually constructs one.
 func TestIsS3NotFoundErrorMatchesTypedNotFound(t *testing.T) {
+	t.Parallel()
+
 	require.True(t, isS3NotFoundError(&types.NotFound{}))
 }
 
@@ -46,6 +59,8 @@ func TestIsS3NotFoundErrorMatchesTypedNotFound(t *testing.T) {
 // would miss this, silently treating a confirmed-absent snapshot as a
 // real communication failure instead.
 func TestIsS3NotFoundErrorMatchesGenericNotFoundCode(t *testing.T) {
+	t.Parallel()
+
 	err := &smithy.GenericAPIError{Code: "NotFound", Message: "not found"}
 	require.True(t, isS3NotFoundError(err))
 }
@@ -54,6 +69,8 @@ func TestIsS3NotFoundErrorMatchesGenericNotFoundCode(t *testing.T) {
 // throttling, a generic error code that isn't "NotFound") are not
 // misclassified as a confirmed-absent object.
 func TestIsS3NotFoundErrorRejectsOtherErrors(t *testing.T) {
+	t.Parallel()
+
 	require.False(t, isS3NotFoundError(errors.New("connection reset")))
 	require.False(t, isS3NotFoundError(
 		&smithy.GenericAPIError{Code: "AccessDenied", Message: "denied"},
@@ -61,3 +78,42 @@ func TestIsS3NotFoundErrorRejectsOtherErrors(t *testing.T) {
 }
 
 var _ smithy.APIError = (*smithy.GenericAPIError)(nil)
+
+type manifestRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f manifestRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func TestS3ManifestByteLimits(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, WriteManifest(dir, Manifest{Network: "preview"}))
+	data, err := os.ReadFile(filepath.Join(dir, ManifestFileName))
+	require.NoError(t, err)
+	for _, oversized := range []bool{false, true} {
+		t.Run(fmt.Sprintf("oversized=%t", oversized), func(t *testing.T) {
+			body := bytes.NewReader(data)
+			client := s3.NewFromConfig(aws.Config{
+				Region: "test", Credentials: aws.AnonymousCredentials{},
+				HTTPClient: &http.Client{Transport: manifestRoundTripper(func(*http.Request) (*http.Response, error) {
+					return &http.Response{StatusCode: 200, Body: io.NopCloser(body), ContentLength: -1, Header: make(http.Header)}, nil
+				})},
+			})
+			d := s3Destination{client: client, bucket: "test", prefix: "snapshot"}
+			limit := int64(len(data))
+			if oversized {
+				limit = 3
+			}
+			_, err := d.FetchManifestWithOptions(context.Background(), WithManifestMaxBytes(limit))
+			if oversized {
+				require.ErrorContains(t, err, "size exceeds maximum")
+				require.ErrorIs(t, err, ErrManifestTooLarge)
+				require.False(t, errors.Is(err, ErrCloudSnapshotNotFound))
+				require.Equal(t, 4, len(data)-body.Len(), "cloud read must stop at limit plus probe")
+			} else {
+				require.NoError(t, err)
+				require.Zero(t, body.Len())
+			}
+		})
+	}
+}

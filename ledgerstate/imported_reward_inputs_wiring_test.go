@@ -47,6 +47,8 @@ const testdataLedgerSnapshot = "testdata/devnet-ledger-snapshot-epoch4.cbor"
 // which is exactly how the pool-distr defect above survived unit tests, a
 // gate, and review.
 func TestSeedImportedRewardInputsWritesRows(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 
@@ -142,6 +144,8 @@ func TestSeedImportedRewardInputsWritesRows(t *testing.T) {
 // already carries. This is the case issue #3165 turned on -- it is also how a
 // pool that has since retired gets described at all.
 func TestSeedImportedRewardInputsUsesSnapshotPoolParams(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 
@@ -179,6 +183,8 @@ func TestSeedImportedRewardInputsUsesSnapshotPoolParams(t *testing.T) {
 // looks like, and stripping the parsed parameters reproduces it without
 // needing a fixture in that format.
 func TestSeedImportedRewardInputsWritesNothingWithoutPoolParams(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 

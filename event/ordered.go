@@ -61,6 +61,27 @@ type orderedLane struct {
 // Each event type gets its own lane, so a slow subscriber delays only its own
 // event type instead of holding up every async event as it would on the shared
 // pool.
+//
+// It returns once the event is enqueued on the lane, not once it has been
+// delivered: the lane's worker calls Publish afterwards, on its own schedule.
+// A true return means the event was accepted for delivery, and says nothing
+// about whether the worker has delivered it yet. Publish, by contrast, hands
+// the event to every subscriber before it returns.
+//
+// A caller that must observe the result of a publish cannot do so by reading
+// the subscriber channel non-blockingly -- with a select/default, a len(ch)
+// check, or a drain loop that stops at the first empty read. Those report an
+// event that is enqueued but not yet delivered as no event at all, which in a
+// test turns an assertion into a race against the worker. Publish a barrier
+// event through the same lane and block until it comes back instead: the lane
+// is a FIFO drained by exactly one worker, so receiving the barrier proves
+// every event enqueued before it has already reached the subscriber. Every
+// subscriber on that lane receives the barrier too, so give it a Data type
+// they skip rather than act on.
+//
+// See switchBarrier in ouroboros/consensus_conformance_test.go for the
+// pattern, and blinklabs-io/dingo#4145 for the failures a non-blocking drain
+// produced.
 func (e *EventBus) PublishOrdered(eventType EventType, evt Event) bool {
 	return e.PublishOrderedContext(context.Background(), eventType, evt)
 }
