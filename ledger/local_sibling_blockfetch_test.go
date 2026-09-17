@@ -52,6 +52,11 @@ func stageInFlightBlockfetchBatch(
 	connId := testRecycleConnId()
 	ls.activeBlockfetchConnId = connId
 	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+	previousMithrilLedgerSlot := ls.mithrilLedgerSlot
+	ls.mithrilLedgerSlot = point.Slot
+	defer func() {
+		ls.mithrilLedgerSlot = previousMithrilLedgerSlot
+	}()
 	require.NoError(t, ls.handleEventBlockfetchBlockDeferred(
 		BlockfetchEvent{
 			ConnectionId: connId,
