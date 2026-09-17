@@ -5588,18 +5588,66 @@ against `cardano_node_metrics_operationalCertificateStartKESPeriod_int` and
 `cardano_node_metrics_remainingKESPeriods_int` -- and on the Error log lines
 those three refusals write, which name the cause directly.
 
-For reference, the counter's cardano-node analogue draws the line in the other
-place. In ouroboros-consensus `checkShouldForge` evolves the forge state
-first and only calls `checkCanForge` in the leader branch, so
-`TraceNodeCannotForge` -- the event behind `Forge.could_not_forge` -- fires
-only once leadership is established (`PraosCannotForge` is documented as
-"whilst we believe ourselves to be a leader for this slot, we are nonetheless
-unable to forge"), and the expired-key case is not on that event at all: it is
-caught in `updateForgeState` and traced as a forge-state update error. Dingo's
-three key gates therefore count on a series its namesake does not, and count
-it per slot. Whether to make them agree -- counting once per leader slot, not
-at all, or on a counter of their own -- is a behaviour question, not a
-documentation one, and is deliberately left out of this PR.
+For reference, the counter's cardano-node analogue does not treat the three
+gates alike, and what it does differs per gate rather than across the set.
+Each entry below was read off the source on both sides rather than inferred
+from its neighbours. The ouroboros-consensus files are
+`Ouroboros/Consensus/Block/Forging.hs`,
+`Ouroboros/Consensus/Protocol/Praos.hs`,
+`Ouroboros/Consensus/Protocol/Ledger/HotKey.hs`,
+`Ouroboros/Consensus/Shelley/Node/Praos.hs` and
+`Ouroboros/Consensus/NodeKernel/Forge.hs`; the metric names come from
+cardano-node's `Cardano/Node/Tracing/Tracers/Consensus.hs`.
+
+- Operational certificate NOT YET VALID (`kesPeriod < opCertStart`): same
+  condition, same series, different frequency. `praosCheckCanForge` throws
+  `PraosCannotForgeKeyNotUsableYet` on exactly this predicate -- the KES start
+  period after the wall-clock period -- `getIsLeaderProof` traces that as
+  `TraceNodeCannotForge`, and `asMetrics` maps that event to the
+  `Forge.could-not-forge` counter. `checkShouldForge` reaches `checkCanForge`
+  only in its `Just isLeader` branch, so cardano-node moves the counter once
+  per leader slot where Dingo moves it once per slot. Parity here means
+  keeping the increment on this counter and fixing only how often it fires.
+  Dropping it, or moving it to a counter of its own, would break a parity that
+  currently holds.
+- Operational certificate EXPIRED (`kesPeriod >= opCertExpiry`): different
+  series, same frequency. Consensus catches this one before the leader check
+  rather than after it. `updateForgeState` for a Praos block is
+  `HotKey.evolve` at the wall-clock period; `evolveKey` finds the target period
+  `AfterKESEnd`, poisons the key and returns `UpdateFailed`, so
+  `checkShouldForge` returns `ForgeStateUpdateError` and never evaluates
+  `checkCanForge` -- which is what the note on
+  `PraosCannotForgeKeyNotUsableYet` means when it says the opposite case is
+  caught in `updateForgeState`. That traces as `TraceForgeStateUpdateError`,
+  whose metrics are `Forge.StateUpdateError` set to the slot plus the KES
+  gauges, with `currentKESPeriod` and `remainingKESPeriods` driven to 0 --
+  never `Forge.could-not-forge`. A poisoned key fails every later evolution,
+  so cardano-node reports this on every slot as well. Parity here means the
+  opposite of the entry above: leave the per-slot frequency alone and take the
+  condition off `could_not_forge`, onto the state-update signal. Dingo already
+  sets those same KES gauges on this path every slot; it is the counter that
+  is extra.
+- KES protocol lifetime NOT VALIDATED: no analogue on either series.
+  `PraosCannotForge` has exactly one constructor, so no condition other than
+  not-yet-valid reaches `TraceNodeCannotForge` under Praos, and the states
+  behind this gate -- credentials not loaded, operational certificate not
+  validated, a zero maximum-evolutions or expiry period -- are ones a
+  cardano-node producer does not carry into its forging loop, since its
+  `HotKey` is built from a validated certificate before `BlockForging` exists.
+  The nearest reachable equivalent, a KES range of zero length, lands on the
+  `AfterKESEnd` update-error path above. Parity says nothing about how often
+  to report this one, only that `could_not_forge` is the wrong place for it.
+
+Two things follow, and they are narrower than the shorthand used earlier in
+this section. Only one of the three gates counts on a series its namesake does
+not count on at all; one is counted by the namesake on the same series and
+differs from it in frequency alone; one has no namesake. And the per-slot
+inflation described above is an accurate account of what an operator sees on
+all three, but it is a parity divergence for only one of them -- the
+not-yet-valid gate -- because the other two are not on the namesake's counter
+in the first place. Whether to act on any of this is a behaviour question, not
+a documentation one, and is deliberately left out of this PR; if it is taken
+up it is three separate changes rather than one rule applied three times.
 
 A separate schedule-driven counter would close the gap from the other side --
 the shape `unapplied_rival_at_leader_slot` uses for the one other

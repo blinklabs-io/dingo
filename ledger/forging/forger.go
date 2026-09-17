@@ -1344,9 +1344,20 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// 1/(sigma*f) times the blocks actually lost. The KES gauges updated just
 	// above (currentKESPeriod against the opcert start/expiry periods, and
 	// remainingKESPeriods) and the Error lines here are the unambiguous
-	// signal for that failure. ARCHITECTURE.md carries the full rule and the
-	// cardano-node comparison, where the equivalent check runs in the leader
-	// branch instead.
+	// signal for that failure.
+	//
+	// The cardano-node comparison differs per gate rather than across the set.
+	// Not-yet-valid is PraosCannotForgeKeyNotUsableYet, which reaches the same
+	// Forge.could-not-forge counter but only from the leader branch of
+	// checkShouldForge, so it differs from this code in frequency alone and
+	// parity means fixing the frequency, not moving the series. Expired is
+	// caught before the leader check by HotKey.evolveKey poisoning the key,
+	// and is reported on Forge.StateUpdateError with the KES gauges instead,
+	// at the same per-slot frequency -- so parity there means the opposite,
+	// leaving the frequency and taking it off this counter. The
+	// lifetime-validation failure has no analogue on either series.
+	// ARCHITECTURE.md carries the full rule with the file references on both
+	// sides.
 	slotsPerKESPeriod := f.slotClock.SlotsPerKESPeriod()
 	if slotsPerKESPeriod == 0 {
 		return errors.New("slots per KES period is zero")
