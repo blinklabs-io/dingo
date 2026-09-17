@@ -6981,6 +6981,14 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 							BlockNumber: next.BlockNumber(),
 						}
 						blocksProcessed++
+						// Per-block composition metrics (issue #4367): era,
+						// transaction count, script/redeemer presence, UTxO
+						// churn, certificate count. Recorded here, not for
+						// the Mithril-gap-closure skip branch above, since
+						// only this branch actually ran ledgerProcessBlock.
+						ls.metrics.observeBlockComposition(
+							computeBlockComposition(next),
+						)
 						// Calculate block rolling nonce (evolving nonce η_v).
 						// The evolving nonce is ALWAYS computed for every block.
 						// The candidate nonce (used in epoch nonce calc) is
