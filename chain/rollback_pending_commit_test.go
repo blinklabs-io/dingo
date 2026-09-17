@@ -85,10 +85,18 @@ func TestRollbackDoesNotResolveUncommittedBlockIndex(t *testing.T) {
 		prev := tip.Point.Hash
 		slot := tip.Point.Slot
 		num := tip.BlockNumber
-		for range n {
+		// Every round after the first starts from a chain the rollback
+		// emptied back to origin, and such a chain only accepts block
+		// number 0 as its first block (see the origin continuity check in
+		// chain.go), so the batch that regrows it must start there rather
+		// than at 1. Later blocks increment as usual.
+		atOrigin := len(tip.Point.Hash) == 0
+		for i := range n {
 			seq++
 			slot++
-			num++
+			if !atOrigin || i > 0 {
+				num++
+			}
 			hash := pendingCommitHash(fmt.Sprintf("pending-commit-%d", seq))
 			out = append(out, chain.RawBlock{
 				Slot:        slot,
@@ -181,8 +189,14 @@ func TestAddBlocksRestoresMemoryAfterBatchFailure(t *testing.T) {
 	if tip.Point.Slot != 0 || len(tip.Point.Hash) != 0 || tip.BlockNumber != 0 {
 		t.Fatalf("failed batch advanced in-memory tip: %+v", tip)
 	}
-	if _, err := db.BlockByIndex(3, nil); !errors.Is(err, models.ErrBlockNotFound) {
-		t.Fatalf("expected failed batch block to be absent from storage, got %v", err)
+	if _, err := db.BlockByIndex(3, nil); !errors.Is(
+		err,
+		models.ErrBlockNotFound,
+	) {
+		t.Fatalf(
+			"expected failed batch block to be absent from storage, got %v",
+			err,
+		)
 	}
 	if err := pc.Rollback(ocommon.Point{}); err != nil {
 		t.Fatalf("rollback after failed batch: %v", err)

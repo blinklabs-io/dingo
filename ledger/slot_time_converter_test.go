@@ -486,7 +486,9 @@ func TestSlotTimeConverter_SlotToTimeWithHorizonFromAnchorsAtParent(
 // entry conditions (slotToTimePrelude) and the summary build count through the
 // anchored path. HardForkSummary walks the whole epoch cache and allocates on
 // every call, and this conversion runs once per Plutus transaction.
-func TestSlotTimeConverter_SlotToTimeWithHorizonFromSharesPrelude(t *testing.T) {
+func TestSlotTimeConverter_SlotToTimeWithHorizonFromSharesPrelude(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	genesis := testShelleyGenesis(t)

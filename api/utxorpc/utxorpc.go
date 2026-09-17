@@ -30,7 +30,6 @@ import (
 	"connectrpc.com/connect"
 	"connectrpc.com/grpchealth"
 	"connectrpc.com/grpcreflect"
-	"github.com/blinklabs-io/dingo/internal/apiauth"
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/blinklabs-io/dingo/internal/apilistener"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
@@ -52,8 +51,8 @@ const (
 	DefaultMaxUtxoKeys     = 1000
 	DefaultMaxHistoryItems = 10000
 	DefaultMaxDataKeys     = 1000
-	// DefaultMaxRequestBody bounds each Connect message before it is decoded
-	// or authenticated. Connect applies the same limit to the compressed wire
+	// DefaultMaxRequestBody bounds each Connect message before it is decoded.
+	// Connect applies the same limit to the compressed wire
 	// message and to its decompressed form, preventing a small compressed body
 	// from expanding without bound during unary request decoding.
 	DefaultMaxRequestBody = 1 << 20 // 1 MiB
@@ -75,7 +74,6 @@ type Utxorpc struct {
 	// internal/apilistener.
 	listener *apilistener.Listener
 	config   UtxorpcConfig
-	verifier *apiauth.Verifier
 }
 
 type UtxorpcConfig struct {
@@ -83,14 +81,9 @@ type UtxorpcConfig struct {
 	EventBus    UtxorpcEventBus
 	LedgerState UtxorpcLedgerState
 	Mempool     UtxorpcMempool
-	// TLS and Auth are the resolved (merged, validated) equivalents of
-	// what was previously TlsCertFilePath/TlsKeyFilePath fields here --
-	// see ProviderConfig's doc comment and ARCHITECTURE.md's "API
-	// security" section.
-	TLS  apiconfig.EffectiveTLS
-	Auth apiconfig.EffectiveAuth
-	Host string
-	Port uint
+	TLS         apiconfig.EffectiveTLS
+	Host        string
+	Port        uint
 
 	// Request size limits (0 = use default)
 	MaxBlockRefs int
@@ -172,10 +165,16 @@ func isNilInterface(v any) bool {
 }
 
 func (u *Utxorpc) Start(ctx context.Context) error {
+	startDone, err := u.listener.BeginStart()
+	if err != nil {
+		return err
+	}
+	defer u.listener.EndStart(startDone)
+
 	if isNilInterface(u.config.EventBus) {
 		return errors.New("utxorpc: EventBus is required")
 	}
-	// Typed-nil guard for optional deps — untyped nil is allowed at startup
+	// Typed-nil guard for optional deps - untyped nil is allowed at startup
 	// (handlers check per-request), but a typed nil (*T)(nil) stored in the
 	// interface field would bypass handler nil-checks and cause a panic.
 	if u.config.LedgerState != nil && isNilInterface(u.config.LedgerState) {
@@ -184,59 +183,22 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 	if u.config.Mempool != nil && isNilInterface(u.config.Mempool) {
 		return errors.New("utxorpc: Mempool must not be a typed nil")
 	}
-	// Built before the mux so newServeMux can install the shared
-	// credential-verification interceptor (internal/apiauth) on every
-	// Connect/gRPC handler it registers, including health and reflection.
-	verifier, err := apiauth.NewVerifier(u.config.Auth)
-	if err != nil {
-		return fmt.Errorf("utxorpc: %w", err)
-	}
-	// The verifier is installed inside the build callback so it is published
-	// with the server it belongs to: a second Start is rejected before the
-	// callback runs, and so cannot replace a running server's verifier.
 	server, bindDone, err := u.listener.Publish(func() *http.Server {
-		u.verifier = verifier
 		return u.buildServer()
 	})
 	if err != nil {
 		return err
 	}
 
-	// Launched before the bind so a context cancelled mid-bind still tears the
-	// server down: Take is what makes an in-flight bind close its own socket.
+	// Watched before the bind so a context cancelled mid-bind still tears the
+	// server down: the detach is what makes an in-flight bind close its own
+	// socket.
 	//
-	// The detach also means this no longer holds a lock across the shutdown it
-	// runs, so a concurrent Stop is answered by the teardown wait rather than
-	// blocking on the mutex for as long as a stuck stream keeps Shutdown busy.
-	go func() { //nolint:gosec // G118: goroutine intentionally outlives ctx to perform graceful shutdown
-		<-ctx.Done()
-		job, _ := u.listener.TakeIf(server)
-		// Nil when a concurrent Stop won the detach -- it owns the teardown
-		// and its caller is already waiting on it -- or when this server was
-		// already stopped and a restart published another one, which is not
-		// this monitor's to touch. Either way there is nothing to do here.
-		if job != nil {
-			u.config.Logger.Debug(
-				"context cancelled, shutting down utxorpc gRPC server",
-			)
-			//nolint:contextcheck // shutdownCtx is intentionally created from background to allow shutdown to complete even if ctx is cancelled
-			shutdownCtx, cancel := context.WithTimeout(
-				context.Background(),
-				30*time.Second,
-			)
-			defer cancel()
-			//nolint:contextcheck // see above
-			if err := u.listener.Shutdown(
-				shutdownCtx, job, u.gracefulShutdown,
-			); err != nil {
-				u.config.Logger.Error(
-					"failed to shutdown utxorpc gRPC server on context cancellation",
-					"error",
-					err,
-				)
-			}
-		}
-	}()
+	// The detach also means the monitor no longer holds a lock across the
+	// shutdown it runs, so a concurrent Stop is answered by the teardown wait
+	// rather than blocking on the mutex for as long as a stuck stream keeps
+	// Shutdown busy.
+	u.listener.Watch(ctx, server, u.gracefulShutdown)
 
 	if _, err := u.listener.Bind(
 		server, bindDone, u.config.TLS,
@@ -253,15 +215,6 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 // the plaintext listener has to opt into unencrypted HTTP/2 explicitly, which
 // gRPC clients require.
 func (u *Utxorpc) buildServer() *http.Server {
-	// CORS must wrap authentication, not the reverse: httpcors.Handler
-	// fully answers an OPTIONS preflight itself and never calls the
-	// handler it wraps for one, so browsers -- which never attach
-	// Authorization to a preflight request -- never need a credential to
-	// pass CORS negotiation. Every other request, including a
-	// non-preflight OPTIONS, still reaches the mux (and so the
-	// per-procedure auth interceptor) normally. See internal/apiauth's
-	// Middleware doc comment for the HTTP-side statement of the same
-	// ordering rule.
 	handler := httpcors.Handler(
 		u.newServeMux(),
 		httpcors.Config{
@@ -324,16 +277,6 @@ func (u *Utxorpc) newServeMux() *http.ServeMux {
 		connect.WithCompressMinBytes(1024),
 		connect.WithReadMaxBytes(DefaultMaxRequestBody),
 	)
-	// When authentication is enabled, every Connect/gRPC handler this mux
-	// registers -- including health and reflection -- requires a valid
-	// credential; there is no separate unauthenticated allowlist for
-	// those two, unlike CORS preflight (see Start's doc comment).
-	if u.verifier != nil {
-		compress1KB = connect.WithOptions(
-			compress1KB,
-			connect.WithInterceptors(apiauth.Interceptor(u.verifier)),
-		)
-	}
 	queryPath, queryHandler := queryconnect.NewQueryServiceHandler(
 		&queryServiceServer{utxorpc: u},
 		compress1KB,
@@ -502,12 +445,7 @@ func unencryptedHTTP2Protocols() *http.Protocols {
 // has been released, so a capability restart on the same port can rebind --
 // see internal/apilistener.
 func (u *Utxorpc) Stop(ctx context.Context) error {
-	job, inFlight := u.listener.Take()
-	if job == nil {
-		return u.listener.AwaitTeardown(ctx, inFlight)
-	}
-	u.config.Logger.Debug("shutting down utxorpc gRPC server")
-	return u.listener.Shutdown(ctx, job, u.gracefulShutdown)
+	return u.listener.Stop(ctx, u.gracefulShutdown)
 }
 
 // gracefulShutdown drains server, escalating to a hard Close if it does not

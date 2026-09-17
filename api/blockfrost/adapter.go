@@ -3291,32 +3291,6 @@ func (a *NodeAdapter) Address(
 	if stakeAddr := addr.StakeAddress(); stakeAddr != nil {
 		encoded := stakeAddr.String()
 		stakeAddress = &encoded
-	} else if addr.Type() == lcommon.AddressTypeKeyScript {
-		// gouroboros Address.StakeAddress() has no case for
-		// key-payment/script-staking base addresses; build the script
-		// stake address from the staking credential directly.
-		networkID, err := uintToUint8(
-			addr.NetworkId(),
-			"address network id",
-		)
-		if err != nil {
-			return AddressInfo{}, err
-		}
-		encoded, err := stakeAddressFromCredential(
-			lcommon.Credential{
-				CredType:   lcommon.CredentialTypeScriptHash,
-				Credential: lcommon.CredentialHash(addr.StakeKeyHash()),
-			},
-			networkID,
-		)
-		if err != nil {
-			return AddressInfo{}, fmt.Errorf(
-				"derive script stake address for %q: %w",
-				address,
-				err,
-			)
-		}
-		stakeAddress = &encoded
 	}
 
 	addrType := "shelley"
@@ -3654,13 +3628,16 @@ func (a *NodeAdapter) MetadataTransactions(
 	ret := make([]MetadataTransactionJSONInfo, 0, len(txs))
 	for _, tx := range txs {
 		jsonValue, _, err := labelcodec.RawValues(tx.Metadata, label)
-		if err != nil {
+		if err != nil && !errors.Is(err, labelcodec.ErrJSONUnavailable) {
 			return nil, 0, fmt.Errorf(
 				"extract json metadata label %d from tx %x: %w",
 				label,
 				tx.Hash,
 				err,
 			)
+		}
+		if errors.Is(err, labelcodec.ErrJSONUnavailable) {
+			jsonValue = nil
 		}
 		ret = append(ret, MetadataTransactionJSONInfo{
 			TxHash:       hex.EncodeToString(tx.Hash),
@@ -3704,7 +3681,7 @@ func (a *NodeAdapter) MetadataTransactionsCBOR(
 
 	ret := make([]MetadataTransactionCBORInfo, 0, len(txs))
 	for _, tx := range txs {
-		_, cborValue, err := labelcodec.RawValues(tx.Metadata, label)
+		cborValue, err := labelcodec.RawValue(tx.Metadata, label)
 		if err != nil {
 			return nil, 0, fmt.Errorf(
 				"extract cbor metadata label %d from tx %x: %w",
@@ -3996,9 +3973,13 @@ func (a *NodeAdapter) TransactionMetadata(
 	}
 	ret := make([]TransactionMetadataInfo, 0, len(entries))
 	for _, entry := range entries {
+		var jsonMetadata json.RawMessage
+		if entry.JSONError == nil {
+			jsonMetadata = json.RawMessage(entry.JsonValue)
+		}
 		ret = append(ret, TransactionMetadataInfo{
 			Label:        strconv.FormatUint(entry.Label, 10),
-			JSONMetadata: json.RawMessage(entry.JsonValue),
+			JSONMetadata: jsonMetadata,
 		})
 	}
 	return ret, nil

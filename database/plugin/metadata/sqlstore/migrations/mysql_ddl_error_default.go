@@ -24,7 +24,7 @@ import (
 )
 
 // Keep the default SQLite build free of optional MySQL driver dependencies.
-func isMySQLDDLAlreadyApplied(context.Context, *sql.Conn, string, error) bool {
+func isMySQLDDLAlreadyApplied(context.Context, ddlExecer, string, error) bool {
 	return false
 }
 
@@ -44,7 +44,7 @@ var mysqlIndexPrefixPatternDefault = regexp.MustCompile(`\(\d+\)?`)
 // present before treating the error as an idempotent replay.
 func isMySQLDDLAlreadyAppliedOnConn(
 	ctx context.Context,
-	conn *sql.Conn,
+	conn ddlExecer,
 	statement string,
 	err error,
 ) bool {
@@ -102,24 +102,25 @@ LIMIT 1`, definition[3], definition[2]).Scan(&nonUnique); err != nil {
 // is treated as an idempotent replay.
 func mysqlColumnAlreadyPresentDefault(
 	ctx context.Context,
-	conn *sql.Conn,
+	conn ddlExecer,
 	statement string,
 ) bool {
-	table, column, ok := parseAddColumnStatement(statement)
+	table, column, definition, ok := parseAddColumnStatement(statement)
 	if !ok {
 		return false
 	}
-	var exists int
+	var reported sql.NullString
 	return conn.QueryRowContext(ctx, `
-SELECT 1
+SELECT data_type
 FROM information_schema.columns
 WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?
-LIMIT 1`, table, column).Scan(&exists) == nil && exists == 1
+LIMIT 1`, table, column).Scan(&reported) == nil &&
+		mysqlColumnTypeMatches(reported, definition)
 }
 
 func mysqlIndexExistsDefault(
 	ctx context.Context,
-	conn *sql.Conn,
+	conn ddlExecer,
 	table, name string,
 ) bool {
 	var exists int

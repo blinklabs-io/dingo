@@ -241,7 +241,7 @@ if [ -z "$stake_vkey" ]; then
     exit 1
 fi
 cp "$stake_vkey" /configs/utxo-keys/stake/txpump.stake.vkey
-if ! cardano-cli stake-address key-hash \
+if ! cardano-cli latest stake-address key-hash \
     --stake-verification-key-file /configs/utxo-keys/stake/txpump.stake.vkey \
     >/tmp/txpump-stake-key-hash; then
     echo "generated delegation stake verification key is invalid: $stake_vkey" >&2

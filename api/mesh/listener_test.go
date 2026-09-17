@@ -604,3 +604,37 @@ func TestRoutesRejectNonPost(t *testing.T) {
 		}
 	}
 }
+
+// TestStartIsRefusedWhileAnotherStartHoldsTheGate pins the start gate this
+// package is wired to. TestConcurrentStartStopNeverLeavesThePortBound cancels
+// the Start context on every iteration, so the monitor tears down any start a
+// Stop missed and the gate itself is never observed; without this test the
+// BeginStart/EndStart pair can be removed from Start with the suite green.
+func TestStartIsRefusedWhileAnotherStartHoldsTheGate(t *testing.T) {
+	t.Parallel()
+
+	srv := newTestServer(
+		t, newTestDeps(),
+		func(c *ServerConfig) { c.ListenAddress = testutil.FreePort(t) },
+	)
+
+	held, err := srv.listener.BeginStart()
+	require.NoError(t, err)
+
+	err = srv.Start(t.Context())
+	require.ErrorContains(
+		t, err, "start already in progress",
+		"Start must take the listener's start gate before publishing",
+	)
+	require.Nil(
+		t, srv.listener.Server(),
+		"a refused Start must not publish a server",
+	)
+
+	srv.listener.EndStart(held)
+	require.NoError(
+		t, srv.Start(t.Context()),
+		"the gate must be available again once the holder releases it",
+	)
+	require.NoError(t, srv.Stop(t.Context()))
+}

@@ -75,13 +75,16 @@ func (d Diff) Lines() []string {
 	return lines
 }
 
-// DiffSnapshots compares two Snapshots and returns every divergence found:
-// protocol parameter differences (as a single unified-looking JSON diff),
-// stake distribution differences per pool, and UTxO set differences per
-// output. Diff.Empty() is true when the two snapshots are equal.
-func DiffSnapshots(a, b *Snapshot) Diff {
+// diffProtocolParams compares two Snapshots' protocol parameters only,
+// leaving Diff.StakeDistribution and Diff.UTxO unset. Split out from
+// diffProtocolParamsAndStake so incremental.go's per-block check -- which
+// cannot compare stake distribution against Dingo at all (its
+// GetStakeDistribution handler only answers when the pinned point equals
+// its live tip, never true for a per-block walk that is behind tip by
+// design; see queryProtocolParams's doc comment) -- can reuse just this
+// half.
+func diffProtocolParams(a, b *Snapshot) Diff {
 	var d Diff
-
 	if !proto.Equal(a.ProtocolParams, b.ProtocolParams) {
 		d.ProtocolParamsDiff = fmt.Sprintf(
 			"protocol parameters differ:\n--- a ---\n%s\n--- b ---\n%s",
@@ -89,6 +92,18 @@ func DiffSnapshots(a, b *Snapshot) Diff {
 			protojson.Format(b.ProtocolParams),
 		)
 	}
+	return d
+}
+
+// diffProtocolParamsAndStake compares two Snapshots' protocol parameters and
+// stake distribution only, leaving Diff.UTxO unset. Split out from
+// DiffSnapshots so full-ledger-state cycles (Check's own comparison, and
+// incremental mode's periodic full checkpoints) can reuse this half without
+// duplicating it. Incremental mode's per-block check uses diffProtocolParams
+// instead -- see its doc comment for why stake distribution cannot be part
+// of that path.
+func diffProtocolParamsAndStake(a, b *Snapshot) Diff {
+	d := diffProtocolParams(a, b)
 
 	for _, poolID := range sortedPoolIDs(a.StakeDistribution) {
 		aEntry := a.StakeDistribution[poolID]
@@ -130,6 +145,15 @@ func DiffSnapshots(a, b *Snapshot) Diff {
 			))
 		}
 	}
+	return d
+}
+
+// DiffSnapshots compares two Snapshots and returns every divergence found:
+// protocol parameter differences (as a single unified-looking JSON diff),
+// stake distribution differences per pool, and UTxO set differences per
+// output. Diff.Empty() is true when the two snapshots are equal.
+func DiffSnapshots(a, b *Snapshot) Diff {
+	d := diffProtocolParamsAndStake(a, b)
 
 	utxoDiffCount := 0
 	report := func(format string, args ...any) {
@@ -150,7 +174,11 @@ func DiffSnapshots(a, b *Snapshot) Diff {
 	}
 	for _, key := range sortedStringKeys(b.UTxOEntries) {
 		if _, ok := a.UTxOEntries[key]; !ok {
-			report("utxo %s present in b, missing in a: %s", key, b.UTxOEntries[key])
+			report(
+				"utxo %s present in b, missing in a: %s",
+				key,
+				b.UTxOEntries[key],
+			)
 		}
 	}
 	if utxoDiffCount > maxUTxODiffLines {

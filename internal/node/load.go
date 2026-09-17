@@ -20,7 +20,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -45,11 +47,27 @@ import (
 // larger import batches, so keep the runtime load batch size aligned with the
 // chain import batch cap.
 const (
-	loadBlockBatchSize  = 50
-	progressLogInterval = 10 * time.Second
+	loadBlockBatchSize   = 50
+	progressLogInterval  = 10 * time.Second
+	loadDecodeMinWorkers = 2
+	loadDecodeMaxWorkers = 8
 
 	immutableUtxoOffsetsSyncStateKey = "immutable_utxo_offsets_tip"
 )
+
+// loadDecodeWorkerCount bounds the parallel full-block decoder used by the
+// trusted Mithril load path. Chain insertion and ledger replay remain serial;
+// only the CPU-heavy CBOR decode is parallelized.
+func loadDecodeWorkerCount() int {
+	n := runtime.GOMAXPROCS(0)
+	if n < loadDecodeMinWorkers {
+		return loadDecodeMinWorkers
+	}
+	if n > loadDecodeMaxWorkers {
+		return loadDecodeMaxWorkers
+	}
+	return n
+}
 
 // newLedgerStateForLoad is replaceable in tests so load-mode composition can
 // be verified without replaying a full ImmutableDB fixture.
@@ -225,7 +243,7 @@ func ensureDB(
 		internalplugins.StorageDependencies{
 			DataDir: cfg.DatabasePath, RunMode: string(cfg.RunMode),
 			StorageMode: cfg.StorageMode, MaxConnections: cfg.DatabaseWorkers,
-			Logger: logger,
+			Logger: logger, TracingEnabled: cfg.Tracing,
 		},
 	)
 	if err != nil {
@@ -379,10 +397,110 @@ func WithDeferredIndexes(
 	return &DeferredIndexRebuilder{manager: manager}
 }
 
+// criticalIndexRebuildLogThreshold is how long the critical-index check
+// may take before it is reported even though nothing in the critical subset
+// was missing. A complete manifest costs one catalog lookup per entry and
+// stays well under it; anything slower did work an operator watching a
+// startup should see attributed.
+const criticalIndexRebuildLogThreshold = time.Second
+
+// ensureCriticalDeferredIndexes rebuilds every missing critical manifest
+// entry, whether or not a drop/rebuild cycle is outstanding.
+//
+// The pending marker records that a cycle was interrupted; it does not
+// record which indexes exist, and it is not durable across a Mithril sync:
+// mithril/sync.go rebuilds the critical subset and then calls
+// updateMithrilReadyState, whose db.ClearSyncState is an unqualified
+// DELETE FROM sync_state. Until that clear learned to carry
+// deferred.SyncStateKey across it (mithril/sync_import.go), every completed
+// Mithril sync erased the marker moments after BuildCritical set it, leaving
+// the database with the critical subset built, the lazy remainder dropped,
+// and nothing recording either — the state two Mithril-bootstrapped preview
+// nodes were found in, missing the utxo child index the rollback DELETE
+// cascades through. Databases bootstrapped by any binary released so far are
+// still in it, and nothing else recreates those indexes: the schema migration
+// that created them is recorded complete, so its CREATE INDEX IF NOT EXISTS
+// never runs again, and the manifest is only consulted by a cycle that is no
+// longer pending.
+//
+// BuildCriticalDeferredIndexes skips indexes that are present, so this is a
+// catalog lookup per entry on a healthy database, and it never touches the
+// marker.
+func ensureCriticalDeferredIndexes(
+	manager metadata.DeferredIndexManager,
+	logger *slog.Logger,
+) error {
+	missing, listed := missingCriticalDeferredIndexes(manager, logger)
+	if listed && len(missing) > 0 {
+		// Logged before the build: building one index on a
+		// multi-million-row table takes minutes, and the rebuild itself
+		// is silent while it runs.
+		logger.Info(
+			"rebuilding missing critical deferred metadata indexes",
+			"indexes", strings.Join(missing, ","),
+			"count", len(missing),
+		)
+	}
+	start := time.Now()
+	if err := manager.BuildCriticalDeferredIndexes(); err != nil {
+		return err
+	}
+	elapsed := time.Since(start)
+	if (listed && len(missing) > 0) ||
+		elapsed >= criticalIndexRebuildLogThreshold {
+		attrs := []any{
+			"duration", elapsed,
+			// The store runs the critical rebuild inside
+			// withDeferredIndexWrite, which restores any missing
+			// deferred.Retained index first. Both halves are inside
+			// this measurement.
+			"duration_covers",
+			"critical rebuild and retained-index restore",
+		}
+		if listed {
+			indexes := "none"
+			if len(missing) > 0 {
+				indexes = strings.Join(missing, ",")
+			}
+			attrs = append(attrs, "critical_indexes_built", indexes)
+		}
+		logger.Info(
+			"critical deferred metadata index check complete",
+			attrs...,
+		)
+	}
+	return nil
+}
+
+// missingCriticalDeferredIndexes names the critical manifest entries absent
+// from the schema. The second return reports whether the store could answer:
+// stores that do not implement the lister, and read errors on the catalog
+// query, fall back to logging after the rebuild rather than failing a startup
+// over a log line.
+func missingCriticalDeferredIndexes(
+	manager metadata.DeferredIndexManager,
+	logger *slog.Logger,
+) ([]string, bool) {
+	lister, ok := manager.(metadata.MissingCriticalDeferredIndexLister)
+	if !ok {
+		return nil, false
+	}
+	missing, err := lister.MissingCriticalDeferredIndexes()
+	if err != nil {
+		logger.Warn(
+			"could not list missing critical deferred metadata indexes; "+
+				"rebuilding without naming them",
+			"error", err,
+		)
+		return nil, false
+	}
+	return missing, true
+}
+
 // RepairCriticalDeferredIndexes rebuilds the API/rollback-critical
-// subset if a prior run left deferred indexes pending. It leaves the
-// pending marker in place so RepairDeferredIndexes can finish the
-// lazy remainder later.
+// subset, and reports when a prior run left deferred indexes pending. It
+// leaves the pending marker in place so RepairDeferredIndexes can finish
+// the lazy remainder later.
 func RepairCriticalDeferredIndexes(
 	db *database.Database,
 	logger *slog.Logger,
@@ -395,20 +513,23 @@ func RepairCriticalDeferredIndexes(
 	if err != nil {
 		return err
 	}
-	if !pending {
-		return nil
+	if pending {
+		logger.Warn(
+			"critical deferred metadata indexes pending from a prior run; " +
+				"rebuilding before serving API traffic",
+		)
 	}
-	logger.Warn(
-		"critical deferred metadata indexes pending from a prior run; " +
-			"rebuilding before serving API traffic",
-	)
-	return manager.BuildCriticalDeferredIndexes()
+	return ensureCriticalDeferredIndexes(manager, logger)
 }
 
 // RepairDeferredIndexes rebuilds any deferred indexes that were
 // recorded as pending by a prior interrupted run. It is safe to call
 // when no rebuild is outstanding: BuildDeferredIndexes is itself
 // idempotent and clears the marker.
+//
+// With no cycle outstanding it still restores any missing critical index,
+// because the rollback path the node is about to run depends on those and
+// the marker cannot answer whether they exist.
 func RepairDeferredIndexes(
 	db *database.Database,
 	logger *slog.Logger,
@@ -422,7 +543,7 @@ func RepairDeferredIndexes(
 		return err
 	}
 	if !pending {
-		return nil
+		return ensureCriticalDeferredIndexes(manager, logger)
 	}
 	logger.Warn(
 		"deferred metadata indexes pending from a prior run; " +
@@ -810,11 +931,11 @@ func copyBlocksDirect(
 	c *chain.Chain,
 	replayBatches chan<- []gledger.Block,
 ) (int, uint64, error) {
-	immutable, err := immutable.New(immutableDir)
+	immDB, err := immutable.New(immutableDir)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to read immutable DB: %w", err)
 	}
-	immutableTip, err := immutable.GetTip()
+	immutableTip, err := immDB.GetTip()
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to read immutable DB tip: %w", err)
 	}
@@ -833,7 +954,7 @@ func copyBlocksDirect(
 		)
 		return 0, immutableTip.Slot, nil
 	}
-	iter, err := immutable.BlocksFromPoint(chainTip.Point)
+	iter, err := immDB.BlocksFromPoint(chainTip.Point)
 	if err != nil {
 		return 0, 0, fmt.Errorf(
 			"failed to get immutable DB iterator: %w",
@@ -845,11 +966,11 @@ func copyBlocksDirect(
 	startTime := time.Now()
 	lastProgressLog := time.Time{}
 	var lastProgressSlot uint64
-	blockBatch := make([]gledger.Block, 0, loadBlockBatchSize)
 	verifyCfg := lcommon.VerifyConfig{
 		SkipBodyHashValidation: true,
 	}
 	for {
+		rawBatch := make([]immutable.Block, 0, loadBlockBatchSize)
 		for {
 			next, err := iter.Next()
 			if err != nil {
@@ -860,28 +981,26 @@ func copyBlocksDirect(
 			if next == nil {
 				break
 			}
-			tmpBlock, err := gledger.NewBlockFromCbor(
-				next.Type,
-				next.Cbor,
-				verifyCfg,
-			)
-			if err != nil {
-				return blocksCopied, immutableTip.Slot, fmt.Errorf(
-					"decoding block CBOR: %w", err,
-				)
-			}
 			if blocksCopied == 0 &&
 				next.Slot == chainTip.Point.Slot &&
 				bytes.Equal(next.Hash, chainTip.Point.Hash) {
 				continue
 			}
-			blockBatch = append(blockBatch, tmpBlock)
-			if len(blockBatch) == cap(blockBatch) {
+			rawBatch = append(rawBatch, *next)
+			if len(rawBatch) == cap(rawBatch) {
 				break
 			}
 		}
-		if len(blockBatch) == 0 {
+		if len(rawBatch) == 0 {
 			break
+		}
+		blockBatch, err := decodeImmutableBlockBatch(
+			ctx, rawBatch, verifyCfg, loadDecodeWorkerCount(),
+		)
+		if err != nil {
+			return blocksCopied, immutableTip.Slot, fmt.Errorf(
+				"decoding block CBOR: %w", err,
+			)
 		}
 		if err := c.AddBlocks(blockBatch); err != nil {
 			return blocksCopied, immutableTip.Slot, fmt.Errorf(
@@ -903,7 +1022,6 @@ func copyBlocksDirect(
 		}
 		blocksCopied += len(blockBatch)
 		lastProgressSlot = replayBatch[len(replayBatch)-1].SlotNumber()
-		blockBatch = blockBatch[:0]
 		maybeLogBlockCopyProgress(
 			logger,
 			"copying blocks from immutable DB",
@@ -919,6 +1037,113 @@ func copyBlocksDirect(
 		}
 	}
 	return blocksCopied, immutableTip.Slot, nil
+}
+
+type immutableDecodeResult struct {
+	index int
+	block gledger.Block
+	err   error
+}
+
+type immutableDecodeJob struct {
+	index int
+	block immutable.Block
+}
+
+// decodeImmutableBlockBatch decodes a bounded batch with ordered results.
+// Sending jobs through a small buffered channel provides backpressure, while
+// the result index prevents completion order from changing chain order. A
+// cancellation stops both the dispatcher and workers without leaving a
+// goroutine blocked on a full channel.
+func decodeImmutableBlockBatch(
+	ctx context.Context,
+	rawBlocks []immutable.Block,
+	verifyCfg lcommon.VerifyConfig,
+	workerCount int,
+) ([]gledger.Block, error) {
+	if len(rawBlocks) == 0 {
+		return nil, nil
+	}
+	if workerCount < 1 {
+		workerCount = 1
+	}
+	if workerCount > len(rawBlocks) {
+		workerCount = len(rawBlocks)
+	}
+	decodeCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	queueSize := workerCount * 2
+	if queueSize > len(rawBlocks) {
+		queueSize = len(rawBlocks)
+	}
+	jobs := make(chan immutableDecodeJob, queueSize)
+	results := make(chan immutableDecodeResult, queueSize)
+	var workers sync.WaitGroup
+	workers.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer workers.Done()
+			for {
+				select {
+				case <-decodeCtx.Done():
+					return
+				case job, ok := <-jobs:
+					if !ok {
+						return
+					}
+					block, err := gledger.NewBlockFromCbor(
+						job.block.Type, job.block.Cbor, verifyCfg,
+					)
+					select {
+					case results <- immutableDecodeResult{
+						index: job.index, block: block, err: err,
+					}:
+					case <-decodeCtx.Done():
+						return
+					}
+				}
+			}
+		}()
+	}
+	go func() {
+		defer close(jobs)
+		for index, block := range rawBlocks {
+			select {
+			case jobs <- immutableDecodeJob{index: index, block: block}:
+			case <-decodeCtx.Done():
+				return
+			}
+		}
+	}()
+	go func() {
+		workers.Wait()
+		close(results)
+	}()
+
+	decoded := make([]gledger.Block, len(rawBlocks))
+	seen := 0
+	var firstErr error
+	for result := range results {
+		if result.err != nil && firstErr == nil {
+			firstErr = result.err
+			cancel()
+			continue
+		}
+		if result.err == nil {
+			decoded[result.index] = result.block
+			seen++
+		}
+	}
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if seen != len(rawBlocks) {
+		return nil, errors.New("parallel immutable block decode ended early")
+	}
+	return decoded, nil
 }
 
 // CopyImmutableBlobsBounded copies immutable blocks into the blob store from

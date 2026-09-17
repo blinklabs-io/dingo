@@ -19,11 +19,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"math"
+	"sync"
 	"testing"
 	"time"
 
 	dingotestutil "github.com/blinklabs-io/dingo/internal/test/testutil"
 	dingoversion "github.com/blinklabs-io/dingo/internal/version"
+	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -69,6 +71,52 @@ type mockChainTip struct {
 
 func (m *mockChainTip) Tip() ochainsync.Tip {
 	return m.tip
+}
+
+type advancingChainTip struct {
+	initial   ochainsync.Tip
+	advanced  ochainsync.Tip
+	advanceAt int
+	calls     int
+}
+
+func (m *advancingChainTip) Tip() ochainsync.Tip {
+	m.calls++
+	if m.calls >= m.advanceAt {
+		return m.advanced
+	}
+	return m.initial
+}
+
+type lockedChainTip struct {
+	mu              sync.Mutex
+	initial         ochainsync.Tip
+	advanced        ochainsync.Tip
+	withTipCalls    int
+	advanceRequest  chan struct{}
+	advanceComplete chan struct{}
+}
+
+func (m *lockedChainTip) Tip() ochainsync.Tip {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.initial
+}
+
+func (m *lockedChainTip) WithTip(fn func(ochainsync.Tip) error) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.withTipCalls++
+	close(m.advanceRequest)
+	return fn(m.initial)
+}
+
+func (m *lockedChainTip) requestAdvance() {
+	<-m.advanceRequest
+	m.mu.Lock()
+	m.initial = m.advanced
+	m.mu.Unlock()
+	close(m.advanceComplete)
 }
 
 type reentrantChainTip struct {
@@ -434,7 +482,7 @@ func TestDefaultBuilderRejectsReentrantProviderReload(t *testing.T) {
 	result := dingotestutil.RequireReceive(
 		t,
 		resultCh,
-		time.Second,
+		dingotestutil.AsyncWait,
 		"reentrant default-builder provider reload completion",
 	)
 	require.ErrorContains(t, result.err, "credential generation changed")
@@ -491,6 +539,183 @@ func TestBuildBlockEmptyMempool(t *testing.T) {
 	assert.Equal(t, uint64(1001), block.SlotNumber())
 	assert.Equal(t, uint64(101), block.BlockNumber())
 	assert.Equal(t, 0, len(block.Transactions()))
+}
+
+func TestBuildBlockRejectsTipChangeBeforeSigning(t *testing.T) {
+	creds := setupTestCredentials(t)
+	initial := ochainsync.Tip{
+		Point: ocommon.Point{
+			Slot: 1000,
+			Hash: bytes.Repeat([]byte{0x01}, 32),
+		},
+		BlockNumber: 100,
+	}
+	advanced := ochainsync.Tip{
+		Point: ocommon.Point{
+			Slot: 1001,
+			Hash: bytes.Repeat([]byte{0x02}, 32),
+		},
+		BlockNumber: 101,
+	}
+	chainTip := &advancingChainTip{
+		initial:   initial,
+		advanced:  advanced,
+		advanceAt: 3,
+	}
+	pparams := &conway.ConwayProtocolParameters{
+		MaxTxSize:        16384,
+		MaxBlockBodySize: 90112,
+		MaxBlockExUnits: lcommon.ExUnits{
+			Memory: 62000000,
+			Steps:  20000000000,
+		},
+	}
+	builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
+		Mempool:         &mockMempool{},
+		PParamsProvider: &mockPParamsProvider{pparams: pparams},
+		ChainTip:        chainTip,
+		EpochNonce: &mockEpochNonceProvider{
+			epoch: 1,
+			nonce: make([]byte, 32),
+		},
+		Credentials: creds,
+	})
+	require.NoError(t, err)
+
+	block, blockCbor, err := builder.BuildBlock(1001, 0)
+	require.ErrorIs(t, err, errParentChangedDuringBuild)
+	assert.Nil(t, block)
+	assert.Nil(t, blockCbor)
+	assert.GreaterOrEqual(t, chainTip.calls, 3)
+}
+
+func TestBuildBlockBindsSigningToTipLock(t *testing.T) {
+	creds := setupTestCredentials(t)
+	initial := ochainsync.Tip{
+		Point: ocommon.Point{
+			Slot: 1000,
+			Hash: bytes.Repeat([]byte{0x01}, 32),
+		},
+		BlockNumber: 100,
+	}
+	chainTip := &lockedChainTip{
+		initial: initial,
+		advanced: ochainsync.Tip{
+			Point: ocommon.Point{
+				Slot: 1001,
+				Hash: bytes.Repeat([]byte{0x02}, 32),
+			},
+			BlockNumber: 101,
+		},
+		advanceRequest:  make(chan struct{}),
+		advanceComplete: make(chan struct{}),
+	}
+	go chainTip.requestAdvance()
+	pparams := &conway.ConwayProtocolParameters{
+		MaxTxSize:        16384,
+		MaxBlockBodySize: 90112,
+		MaxBlockExUnits: lcommon.ExUnits{
+			Memory: 62000000,
+			Steps:  20000000000,
+		},
+	}
+	builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
+		Mempool:         &mockMempool{},
+		PParamsProvider: &mockPParamsProvider{pparams: pparams},
+		ChainTip:        chainTip,
+		EpochNonce: &mockEpochNonceProvider{
+			epoch: 1,
+			nonce: make([]byte, 32),
+		},
+		Credentials: creds,
+	})
+	require.NoError(t, err)
+
+	block, blockCbor, err := builder.BuildBlock(1001, 0)
+	require.NoError(t, err)
+	require.NotNil(t, block)
+	require.NotEmpty(t, blockCbor)
+	assert.Equal(t, 1, chainTip.withTipCalls)
+	select {
+	case <-chainTip.advanceComplete:
+	case <-time.After(time.Second):
+		t.Fatal("tip advance did not wait for signing critical section")
+	}
+}
+
+func TestBuildBlockRequiresLiveTipParentBelowBlockSlot(t *testing.T) {
+	for _, tc := range []struct {
+		name                        string
+		slot                        uint64
+		genesis, withLeios, wantErr bool
+	}{
+		{name: "same slot", slot: 1000, wantErr: true},
+		{name: "earlier slot", slot: 999, wantErr: true},
+		{name: "later slot", slot: 1001},
+		{name: "genesis origin", slot: 0, genesis: true},
+		{name: "later slot through Leios entrypoint", slot: 1001, withLeios: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			creds := setupTestCredentials(t)
+			pparams := &conway.ConwayProtocolParameters{
+				MaxTxSize:        16384,
+				MaxBlockBodySize: 90112,
+				MaxBlockExUnits: lcommon.ExUnits{
+					Memory: 62000000,
+					Steps:  20000000000,
+				},
+			}
+			hash := bytes.Repeat([]byte{1}, 32)
+			if tc.genesis {
+				hash = nil
+			}
+			builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
+				Mempool: &mockMempool{},
+				PParamsProvider: &mockPParamsProvider{
+					pparams: pparams,
+				},
+				ChainTip: &mockChainTip{
+					tip: ochainsync.Tip{
+						Point:       ocommon.Point{Slot: 1000, Hash: hash},
+						BlockNumber: 100,
+					},
+				},
+				EpochNonce: &mockEpochNonceProvider{
+					epoch: 1,
+					nonce: make([]byte, 32),
+				},
+				Credentials: creds,
+			})
+			require.NoError(t, err)
+			var block ledger.Block
+			var blockCbor []byte
+			if tc.withLeios {
+				block, blockCbor, err = builder.BuildBlockWithLeios(
+					tc.slot,
+					0,
+					LeiosBlockData{},
+				)
+			} else {
+				block, blockCbor, err = builder.BuildBlock(tc.slot, 0)
+			}
+			if tc.wantErr {
+				require.ErrorIs(t, err, errParentSlotNotBelowBlock)
+				assert.Nil(t, block)
+				assert.Nil(t, blockCbor)
+				return
+			}
+			require.NoError(t, err)
+			assert.NotNil(t, block)
+			assert.NotEmpty(t, blockCbor)
+			if tc.genesis {
+				assert.Equal(t, uint64(0), block.BlockNumber())
+				assert.Empty(t, block.PrevHash())
+			} else {
+				assert.Equal(t, uint64(101), block.BlockNumber())
+				assert.Greater(t, block.SlotNumber(), uint64(1000))
+			}
+		})
+	}
 }
 
 func TestBuildBlockUsesSlotEpochForVRFNonce(t *testing.T) {
@@ -1060,6 +1285,74 @@ func TestBuildBlockBlockSizeLimit(t *testing.T) {
 	)
 }
 
+// TestBuildBlockExcludesTransactionWhoseExactAssembledBodyExceedsLimit
+// exercises the boundary a raw-CBOR-size approximation cannot see: a single
+// minimal Conway tx's raw CBOR is 52 bytes, but the assembled block body
+// re-wraps decoded fields into separate transaction-body/witness-set arrays,
+// which is one byte larger (53) and not the same size as the raw tx CBOR. A
+// MaxBlockBodySize set to exactly the raw size would pass a raw-sum
+// approximation, but the build loop's segmented body-size accounting
+// (segmentedBodySize) tracks the real assembled size per candidate
+// transaction, so the transaction is excluded from the block before it is
+// ever added rather than only being caught by the final assembled-size
+// safety net after the whole block is built.
+func TestBuildBlockExcludesTransactionWhoseExactAssembledBodyExceedsLimit(
+	t *testing.T,
+) {
+	creds := setupTestCredentials(t)
+
+	txCbor := makeMinimalTxCbor(t, 0x01, 0)
+	rawSize := uint(len(txCbor))
+
+	mempool := &mockMempool{
+		transactions: []MempoolTransaction{
+			{Hash: "tx1", Cbor: txCbor, Type: conway.TxTypeConway},
+		},
+	}
+
+	// MaxBlockBodySize equals the transaction's raw CBOR length exactly, so
+	// a raw-sum approximation would admit it, but the exact assembled body
+	// is one byte larger and must be excluded.
+	pparams := &conway.ConwayProtocolParameters{
+		MaxTxSize:        rawSize,
+		MaxBlockBodySize: rawSize,
+		MaxBlockExUnits: lcommon.ExUnits{
+			Memory: 62000000,
+			Steps:  20000000000,
+		},
+	}
+	pparamsProvider := &mockPParamsProvider{pparams: pparams}
+
+	chainTip := &mockChainTip{
+		tip: ochainsync.Tip{
+			Point: ocommon.Point{
+				Slot: 1000,
+				Hash: make([]byte, 32),
+			},
+			BlockNumber: 100,
+		},
+	}
+
+	epochNonce := &mockEpochNonceProvider{epoch: 1, nonce: make([]byte, 32)}
+
+	builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
+		Mempool:         mempool,
+		PParamsProvider: pparamsProvider,
+		ChainTip:        chainTip,
+		EpochNonce:      epochNonce,
+		Credentials:     creds,
+	})
+	require.NoError(t, err)
+
+	block, _, err := builder.BuildBlock(1001, 0)
+	require.NoError(t, err)
+	assert.Empty(
+		t,
+		block.Transactions(),
+		"the only mempool transaction's exact assembled body exceeds MaxBlockBodySize and must be excluded, not silently included",
+	)
+}
+
 // mockTxValidator implements TxValidator for testing. It rejects
 // transactions whose hashes appear in the rejectHashes set.
 type mockTxValidator struct {
@@ -1075,8 +1368,8 @@ func (v *mockTxValidator) ValidateTx(tx ledger.Transaction) error {
 
 func (v *mockTxValidator) ValidateTxWithOverlay(
 	tx ledger.Transaction,
-	_ map[string]struct{},
-	_ map[string]lcommon.Utxo,
+	_ map[utxoref.Key]struct{},
+	_ map[utxoref.Key]lcommon.Utxo,
 ) error {
 	return v.ValidateTx(tx)
 }

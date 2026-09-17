@@ -78,7 +78,9 @@ func TestRestoreResolvesBlobStoreWithLoadRunMode(t *testing.T) {
 				badger.WithDataDir(deps.DataDir),
 				badger.WithGc(deps.RunMode != "load"),
 				badger.WithDeferOpen(),
-				badger.WithValueLogFileSize(testutil.TestBadgerValueLogFileSize),
+				badger.WithValueLogFileSize(
+					testutil.TestBadgerValueLogFileSize,
+				),
 				badger.WithMemTableSize(testutil.TestBadgerMemTableSize),
 			)
 			if err != nil {
@@ -100,7 +102,12 @@ func TestRestoreResolvesBlobStoreWithLoadRunMode(t *testing.T) {
 		testDestinationRegistry,
 		snapshotDir,
 		targetDir,
-		lifecycle.RestoreStorageConfig{},
+		// The capturing badger provider registered above takes struct{}
+		// as its config type and already hardcodes the bounded test
+		// sizes itself, so a non-empty storageConfig.Blob here would
+		// fail decodeStrict's strict decode into struct{} rather than
+		// reach the store.
+		lifecycle.RestoreStorageConfig{}, // restoreconfig:zero-value-required
 	)
 	require.NoError(t, err)
 
