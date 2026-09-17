@@ -607,6 +607,11 @@ Or use the subcommand form for more control:
 ./dingo -n preview mithril sync
 ```
 
+For reproducible fresh-bootstrap comparisons, pin an exact artifact with
+`--mithril-pinned-digest <digest>` or `DINGO_MITHRIL_PINNED_DIGEST`. The pin is
+rejected for catch-up runs and cannot override the artifact recorded by an
+interrupted import.
+
 The Docker entrypoint manages both a first-run or resumed Mithril sync and the
 subsequent `serve` process as direct children. It forwards SIGINT and SIGTERM
 to whichever child is active, waits for that child to finish, and returns the

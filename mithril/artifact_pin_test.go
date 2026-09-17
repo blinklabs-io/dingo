@@ -93,6 +93,53 @@ func openSyncedDB(t *testing.T, dataDir string) *database.Database {
 	return db
 }
 
+func TestValidateExplicitArtifactPin(t *testing.T) {
+	t.Parallel()
+
+	resumePin := pinnedArtifact{Digest: "resume-digest"}
+	tests := []struct {
+		name      string
+		explicit  string
+		hasPin    bool
+		wantError string
+	}{
+		{
+			name:     "empty explicit pin",
+			hasPin:   true,
+			explicit: "",
+		},
+		{
+			name:     "matching explicit pin",
+			hasPin:   true,
+			explicit: resumePin.Digest,
+		},
+		{
+			name:     "no durable pin",
+			hasPin:   false,
+			explicit: "fresh-digest",
+		},
+		{
+			name:      "conflicting explicit pin",
+			hasPin:    true,
+			explicit:  "other-digest",
+			wantError: "conflicts with the interrupted import pin",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateExplicitArtifactPin(
+				tt.explicit, resumePin, tt.hasPin,
+			)
+			if tt.wantError == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantError)
+		})
+	}
+}
+
 func syncConfigForFixture(
 	fixture *v2Fixture,
 	dataDir string,

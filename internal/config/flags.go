@@ -784,6 +784,12 @@ var flagSpecs = []flagSpec{
 		"Mithril artifact backend: v1 (legacy snapshots) or v2 (incremental database)",
 	),
 	stringFlag(
+		"Mithril.PinnedDigest",
+		"mithril-pinned-digest",
+		"",
+		"Mithril artifact digest to use for a fresh bootstrap",
+	),
+	stringFlag(
 		"Mithril.DownloadDir",
 		"mithril-download-dir",
 		"",

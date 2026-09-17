@@ -131,6 +131,25 @@ type catchUpDecision struct {
 	upToDate bool   // marker already at/beyond the latest artifact: no-op
 }
 
+// validateExplicitArtifactPin rejects a user-selected artifact that conflicts
+// with the durable identity recorded by an interrupted import. A missing
+// durable pin is handled by the existing resume dispatch, which refuses to
+// guess which artifact the partial rows came from.
+func validateExplicitArtifactPin(
+	explicit string,
+	resumePin pinnedArtifact,
+	hasResumePin bool,
+) error {
+	if explicit != "" && hasResumePin && explicit != resumePin.Digest {
+		return fmt.Errorf(
+			"explicit Mithril artifact pin %s conflicts with the interrupted "+
+				"import pin %s",
+			explicit, resumePin.Digest,
+		)
+	}
+	return nil
+}
+
 // decideCatchUp resolves whether this Sync run engages catch-up semantics.
 func decideCatchUp(
 	ctx context.Context,
@@ -286,6 +305,7 @@ type SyncConfig struct {
 	DownloadIdleTimeout    string                     // optional; passed to BootstrapConfig
 	DownloadMaxIdleRetries int                        // must be >= 0
 	DownloadMaxBytes       int64                      // per compressed object; zero uses DefaultMaxDownloadBytes
+	PinnedDigest           string                     // optional exact artifact hash/digest for a fresh bootstrap
 	VerifyCertChain        bool
 	CleanupAfterLoad       bool
 	StoragePlugins         StoragePlugins
@@ -486,6 +506,12 @@ func Sync(
 	}
 	catchUp = dec.engage
 	catchUpStart = dec.start
+	if mode == syncModeCatchUp && cfg.PinnedDigest != "" {
+		return SyncResult{}, errors.New(
+			"explicit Mithril artifact pin requires a fresh database; " +
+				"catch-up runs always select the latest compatible artifact",
+		)
+	}
 
 	// Artifact pin. A run that was interrupted after it began mutating the
 	// database must import the artifact those partial rows and ledger-state
@@ -494,7 +520,7 @@ func Sync(
 	// partially imported one, and the fresh-bootstrap import neither
 	// reconciles nor diverges-checks, so both snapshots' UTxOs, accounts,
 	// pools and DReps are left live.
-	pinnedDigest := ""
+	pinnedDigest := cfg.PinnedDigest
 	var resumePin pinnedArtifact
 	if mode == syncModeResume {
 		pin, hasPin, pinErr := getPinnedArtifact(db)
@@ -503,6 +529,11 @@ func Sync(
 		}
 		switch {
 		case hasPin:
+			if err := validateExplicitArtifactPin(
+				pinnedDigest, pin, hasPin,
+			); err != nil {
+				return SyncResult{}, err
+			}
 			if err := pin.validateForRun(cfg.Backend, network); err != nil {
 				return SyncResult{}, err
 			}
@@ -518,6 +549,12 @@ func Sync(
 				"certified_tip_slot", pin.CertifiedTipSlot,
 			)
 		case catchUp:
+			if pinnedDigest != "" {
+				return SyncResult{}, errors.New(
+					"explicit Mithril artifact pin requires a fresh database; " +
+					"interrupted catch-up runs must select the latest compatible artifact",
+				)
+			}
 			// A catch-up import runs with Reconcile enabled: every live row
 			// absent from the newly selected snapshot's live set is marked
 			// inactive after the import pass, so selecting a newer artifact

@@ -203,6 +203,7 @@ var logPlainConfigFields = []string{
 	"Mithril.DownloadIdleTimeout",
 	"Mithril.DownloadMaxIdleRetries",
 	"Mithril.Enabled",
+	"Mithril.PinnedDigest",
 	"Mithril.VerifyCertificates",
 	"Network",
 	"NetworkMagic",
