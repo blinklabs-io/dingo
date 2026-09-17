@@ -63,6 +63,17 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 	return f(r)
 }
 
+type contextBlockingBody struct {
+	ctx context.Context
+}
+
+func (b *contextBlockingBody) Read([]byte) (int, error) {
+	<-b.ctx.Done()
+	return 0, b.ctx.Err()
+}
+
+func (*contextBlockingBody) Close() error { return nil }
+
 func (h *captureSlogHandler) Enabled(context.Context, slog.Level) bool {
 	return true
 }
@@ -432,28 +443,35 @@ func TestDownloadSnapshotIdleTimeoutRetriesAndResumes(t *testing.T) {
 func TestDownloadSnapshotIdleTimeoutUsesConfiguredTimer(t *testing.T) {
 	t.Parallel()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Length", "2")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("A"))
-		if flusher, ok := w.(http.Flusher); ok {
-			flusher.Flush()
-		}
-		<-r.Context().Done()
-	}))
-	t.Cleanup(server.Close)
+	var requestCount atomic.Int32
+	client := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			requestCount.Add(1)
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Status:        "200 OK",
+				Header:        http.Header{"Content-Length": []string{"2"}},
+				Body:          &contextBlockingBody{ctx: r.Context()},
+				ContentLength: 2,
+				Request:       r,
+			}, nil
+		}),
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), testutil.AsyncWait)
 	defer cancel()
 	_, err := DownloadSnapshot(ctx, DownloadConfig{
-		URL:               server.URL + "/snapshot.tar.zst",
+		URL:               "https://example.com/snapshot.tar.zst",
 		AllowInsecureHTTP: true,
 		DestDir:           t.TempDir(),
 		Filename:          "configured-idle-timeout.tar.zst",
-		IdleTimeout:       100 * time.Millisecond,
-		MaxIdleRetries:    0,
+		IdleTimeout:       20 * time.Millisecond,
+		MaxIdleRetries:    1,
+		HTTPClient:        client,
 	})
 	require.ErrorIs(t, err, errDownloadIdleTimeout)
+	require.Contains(t, err.Error(), "writing snapshot data")
+	require.Equal(t, int32(2), requestCount.Load())
 }
 
 func TestDownloadSnapshotIdleRetriesResetAfterProgress(t *testing.T) {
@@ -720,6 +738,23 @@ func TestIdleTimeoutReaderStopsTimerBetweenReads(t *testing.T) {
 		"idle timer should be stopped between reads",
 	)
 	require.Zero(t, idleCount.Load())
+}
+
+func TestIdleTimerRunsCallback(t *testing.T) {
+	t.Parallel()
+
+	fired := make(chan struct{})
+	timer := newIdleTimer(10*time.Millisecond, func() {
+		close(fired)
+	})
+	t.Cleanup(timer.Stop)
+
+	testutil.RequireReceive(
+		t,
+		fired,
+		testutil.AsyncWait,
+		"idle timer callback",
+	)
 }
 
 func TestDownloadSnapshotContextCancel(t *testing.T) {
