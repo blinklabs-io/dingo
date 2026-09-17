@@ -263,6 +263,207 @@ func TestProcessEpochBoundaryRatifiesUpdateCommitteeWithoutCommitteeVote(
 	)
 }
 
+// TestProcessEpochBoundaryRatifiesNoConfidenceWithoutCommitteeVote is
+// TestProcessEpochBoundaryRatifiesUpdateCommitteeWithoutCommitteeVote's
+// NoConfidence twin. A PR review found that the UpdateCommittee test alone
+// only pins that half of ratifyProposals's routing: reverting just the
+// NoConfidence arm back to the pre-#4007 hasCC-requiring heuristic (leaving
+// UpdateCommittee routed through committeeActionRatified) left every test,
+// including both routing tests and both direct-call tests, green.
+func TestProcessEpochBoundaryRatifiesNoConfidenceWithoutCommitteeVote(
+	t *testing.T,
+) {
+	m, err := NewDingoStateManager()
+	require.NoError(t, err)
+	defer func() { require.NoError(t, m.Close()) }()
+
+	reachable := cbor.Rat{Rat: big.NewRat(1, 2)}
+	m.protocolParams = &conway.ConwayProtocolParameters{
+		ProtocolVersion: common.ProtocolParametersProtocolVersion{Major: 10},
+		DRepVotingThresholds: conway.DRepVotingThresholds{
+			MotionNoConfidence:    reachable,
+			CommitteeNormal:       reachable,
+			CommitteeNoConfidence: reachable,
+		},
+		PoolVotingThresholds: conway.PoolVotingThresholds{
+			MotionNoConfidence:    reachable,
+			CommitteeNormal:       reachable,
+			CommitteeNoConfidence: reachable,
+		},
+	}
+
+	drepCredentialHash := testHash28(0xf1)
+	drepStakeCredential := mockledger.RewardAccountKey{
+		CredType:   common.CredentialTypeAddrKeyHash,
+		Credential: testHash28(0xf2),
+	}
+	m.govState.DRepDelegationsByCredential[drepStakeCredential] = common.Drep{
+		Type:       common.DrepTypeAddrKeyHash,
+		Credential: drepCredentialHash[:],
+	}
+	m.govState.DRepRegistrationsByCredential[mockledger.RewardAccountKey{
+		CredType:   common.CredentialTypeAddrKeyHash,
+		Credential: drepCredentialHash,
+	}] = true
+	m.govState.RewardAccountBalances[drepStakeCredential] = 1_000_000
+
+	poolHash := testHash28(0xf3)
+	poolStakeCredential := mockledger.RewardAccountKey{
+		CredType:   common.CredentialTypeAddrKeyHash,
+		Credential: testHash28(0xf4),
+	}
+	m.govState.PoolRegistrations[poolHash] = true
+	m.govState.PoolDelegationsByCredential[poolStakeCredential] = poolHash
+	m.govState.RewardAccountBalances[poolStakeCredential] = 1_000_000
+
+	votes := map[string]uint8{
+		formatVoteKey(common.VoterTypeDRepKeyHash, drepCredentialHash): 1,
+		formatVoteKey(common.VoterTypeStakingPoolKeyHash, poolHash):    1,
+	}
+
+	const govActionID = "f5f5f5f5#0"
+	m.govState.Proposals[govActionID] = &conformance.ProposalState{
+		GovActionInfo: conformance.GovActionInfo{
+			ActionType:     common.GovActionTypeNoConfidence,
+			SubmittedEpoch: 0,
+			ExpiresAfter:   10,
+			Votes:          votes,
+		},
+	}
+
+	require.NoError(t, m.ProcessEpochBoundary(1))
+
+	ratified := m.govState.Proposals[govActionID].RatifiedEpoch
+	require.NotNil(
+		t,
+		ratified,
+		"a NoConfidence proposal with DRep+SPO yes votes and no committee "+
+			"vote must ratify through the real ProcessEpochBoundary/"+
+			"ratifyProposals path",
+	)
+}
+
+// TestCommitteeActionRatifiedRefusesDuringConwayBootstrap pins the Conway
+// bootstrap gate directly: the exact same DRep/SPO-backed NoConfidence
+// setup that TestProcessEpochBoundaryRatifiesNoConfidenceWithoutCommitteeVote
+// proves ratifies at protocol major 10 must NOT ratify at major 9, since
+// ledger/governance's ShouldRatify refuses NoConfidence and UpdateCommittee
+// outright during bootstrap regardless of votes. A PR review found this
+// gate was added without any test pinning it: deleting it left every
+// existing test green.
+func TestCommitteeActionRatifiedRefusesDuringConwayBootstrap(t *testing.T) {
+	m, err := NewDingoStateManager()
+	require.NoError(t, err)
+	defer func() { require.NoError(t, m.Close()) }()
+
+	pparamsAt := func(major uint) *conway.ConwayProtocolParameters {
+		return &conway.ConwayProtocolParameters{
+			ProtocolVersion: common.ProtocolParametersProtocolVersion{
+				Major: major,
+			},
+			DRepVotingThresholds: conway.DRepVotingThresholds{
+				MotionNoConfidence: cbor.Rat{Rat: big.NewRat(1, 2)},
+			},
+			// Trivial (zero): this test isolates the DRep side and the
+			// bootstrap gate, not SPO stake -- no pool is set up below.
+			PoolVotingThresholds: conway.PoolVotingThresholds{
+				MotionNoConfidence: trivialThreshold,
+			},
+		}
+	}
+
+	credential := mockledger.RewardAccountKey{
+		CredType:   common.CredentialTypeAddrKeyHash,
+		Credential: testHash28(0xf6),
+	}
+	m.govState.DRepDelegationsByCredential[credential] = common.Drep{
+		Type: common.DrepTypeNoConfidence,
+	}
+	m.govState.RewardAccountBalances[credential] = 1_000_000
+
+	proposal := &conformance.ProposalState{
+		GovActionInfo: conformance.GovActionInfo{
+			ActionType: common.GovActionTypeNoConfidence,
+			Votes:      map[string]uint8{},
+		},
+	}
+
+	txn := m.db.Transaction(false)
+	defer txn.Release()
+
+	m.protocolParams = pparamsAt(9)
+	ratifiedAtBootstrap, err := m.committeeActionRatified(txn, proposal, 5)
+	require.NoError(t, err)
+	require.False(
+		t,
+		ratifiedAtBootstrap,
+		"protocol major 9 (Conway bootstrap) must refuse NoConfidence "+
+			"ratification regardless of votes",
+	)
+
+	m.protocolParams = pparamsAt(10)
+	ratifiedAfterBootstrap, err := m.committeeActionRatified(txn, proposal, 5)
+	require.NoError(t, err)
+	require.True(
+		t,
+		ratifiedAfterBootstrap,
+		"the same state must ratify once past bootstrap (major 10), "+
+			"proving major 9 alone caused the refusal above",
+	)
+}
+
+// TestRatifyProposalsGatesTreasuryWithdrawalDuringConwayBootstrap pins the
+// bootstrap gate a PR review asked for on ratifyProposals's vote-shape
+// heuristic path: unlike UpdateCommittee/NoConfidence, TreasuryWithdrawal
+// and NewConstitution have no stake tally to hand to ShouldRatify, so
+// ratifyProposals must check inConwayBootstrap directly for them.
+func TestRatifyProposalsGatesTreasuryWithdrawalDuringConwayBootstrap(
+	t *testing.T,
+) {
+	m, err := NewDingoStateManager()
+	require.NoError(t, err)
+	defer func() { require.NoError(t, m.Close()) }()
+
+	m.protocolParams = &conway.ConwayProtocolParameters{
+		ProtocolVersion: common.ProtocolParametersProtocolVersion{Major: 9},
+	}
+
+	const govActionID = "f7f7f7f7#0"
+	m.govState.Proposals[govActionID] = &conformance.ProposalState{
+		GovActionInfo: conformance.GovActionInfo{
+			ActionType:     common.GovActionTypeTreasuryWithdrawal,
+			SubmittedEpoch: 0,
+			ExpiresAfter:   10,
+			Votes: map[string]uint8{
+				formatVoteKey(
+					common.VoterTypeConstitutionalCommitteeHotKeyHash,
+					testHash28(0xf8),
+				): 1,
+				formatVoteKey(common.VoterTypeDRepKeyHash, testHash28(0xf9)): 1,
+			},
+		},
+	}
+
+	require.NoError(t, m.ProcessEpochBoundary(1))
+	require.Nil(
+		t,
+		m.govState.Proposals[govActionID].RatifiedEpoch,
+		"TreasuryWithdrawal must not ratify during Conway bootstrap "+
+			"regardless of votes",
+	)
+
+	m.protocolParams = &conway.ConwayProtocolParameters{
+		ProtocolVersion: common.ProtocolParametersProtocolVersion{Major: 10},
+	}
+	require.NoError(t, m.ProcessEpochBoundary(2))
+	require.NotNil(
+		t,
+		m.govState.Proposals[govActionID].RatifiedEpoch,
+		"the same votes must ratify once past bootstrap (major 10), "+
+			"proving major 9 alone caused the refusal above",
+	)
+}
+
 // formatVoteKey builds a GovActionInfo.Votes key exactly as
 // recordVotesInGovState does: "<voter type digit>:<hex credential hash>".
 func formatVoteKey(voterType uint8, credential common.Blake2b224) string {

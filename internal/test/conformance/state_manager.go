@@ -34,7 +34,6 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	hostplugin "github.com/blinklabs-io/dingo/plugin"
-	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -1216,11 +1215,20 @@ func (m *DingoStateManager) ratifyProposals(
 				)
 			}
 		case common.GovActionTypeHardForkInitiation:
+			// Conway bootstrap explicitly admits HardForkInitiation
+			// alongside ParameterChange (ledger/governance's ShouldRatify),
+			// so no bootstrap gate applies to either of those two.
 			meetsRequirements = hasCC && hasDRep && hasSPO
-		case common.GovActionTypeNewConstitution,
-			common.GovActionTypeParameterChange,
-			common.GovActionTypeTreasuryWithdrawal:
+		case common.GovActionTypeParameterChange:
 			meetsRequirements = hasCC && hasDRep
+		case common.GovActionTypeNewConstitution,
+			common.GovActionTypeTreasuryWithdrawal:
+			// Unlike ParameterChange/HardForkInitiation, ShouldRatify
+			// refuses these two outright during Conway bootstrap regardless
+			// of votes. This heuristic path has no tally to hand ShouldRatify
+			// (see committeeActionRatified for the pair that does), so the
+			// bootstrap ineligibility has to be checked directly here.
+			meetsRequirements = hasCC && hasDRep && !m.inConwayBootstrap()
 		default:
 			meetsRequirements = len(voterTypesWithYes) >= 2
 		}
@@ -1241,27 +1249,35 @@ func (m *DingoStateManager) ratifyProposals(
 	return nil
 }
 
+// inConwayBootstrap reports whether the active protocol parameters are at
+// Conway's bootstrap major version (common.ProtocolVersionConway, 9),
+// during which ledger/governance's ShouldRatify refuses several action
+// types (NoConfidence, UpdateCommittee, NewConstitution,
+// TreasuryWithdrawal, Info) outright, regardless of votes.
+func (m *DingoStateManager) inConwayBootstrap() bool {
+	conwayPP, ok := m.protocolParams.(*conway.ConwayProtocolParameters)
+	return ok && conwayPP.ProtocolVersion.Major == common.ProtocolVersionConway
+}
+
 // committeeActionRatified evaluates NoConfidence/UpdateCommittee
-// ratification with a real stake-weighted DRep/SPO tally instead of the
-// vote-shape heuristic ratifyProposals uses for other action types. It
-// mirrors cardano-ledger's votingCommitteeThresholdInternal (the committee
-// never votes on either action type) and ports the reference algorithm
-// ouroboros-mock's MockStateManager uses for the same rule
-// (credentialVotingStake / drepAcceptedForUpdateCommittee /
-// spoAcceptedForUpdateCommittee), reading UTxO stake from the real backend
-// (m.db) instead of an in-memory UTxO set. Every other input --
-// delegations, reward balances, proposal deposits/return accounts,
-// committee membership -- already lives in m.govState, populated the same
-// way for both state managers.
+// ratification with a real stake-weighted DRep/SPO tally: it builds a
+// deposit-inclusive governance.ProposalTally itself (reading UTxO stake from
+// the real backend via m.db, since this state manager -- unlike
+// MockStateManager -- has no in-memory UTxO set) and hands the actual
+// ratification decision to ledger/governance's real ShouldRatify. That keeps
+// threshold selection (MotionNoConfidence vs. CommitteeNormal/
+// CommitteeNoConfidence), the Conway bootstrap gate, and
+// committeeTermsWithinLimit under production's own tests instead of a second,
+// hand-maintained copy of each -- an earlier revision duplicated the
+// threshold selection and bootstrap gate here, and the duplication itself
+// went untested and drifted (see PR #4333 review history).
 //
-// This intentionally does not reuse ledger/governance's ShouldRatify:
-// that production tally does not yet add a proposal's own deposit to its
-// return account's DRep voting power (CIP-1694 counts an active proposal's
-// deposit as part of the depositor's active voting stake), so calling it
-// here would still fail the same vector the vote-shape heuristic does. See
-// issue #4007. The production gap itself is tracked separately as issue
-// #4355 -- it affects every DRep-gated action type's real ratification,
-// not just these two, so it is out of scope for this harness-local fix.
+// The one thing this cannot delegate to ShouldRatify is the tally itself:
+// production's DRep voting-power query does not yet add a proposal's own
+// deposit to its return account's DRep voting power (CIP-1694 counts an
+// active proposal's deposit as part of the depositor's active voting stake).
+// That gap is tracked separately as issue #4355 -- it affects every
+// DRep-gated action type's real ratification, not just these two.
 func (m *DingoStateManager) committeeActionRatified(
 	txn *database.Txn,
 	proposal *conformance.ProposalState,
@@ -1275,99 +1291,97 @@ func (m *DingoStateManager) committeeActionRatified(
 		)
 	}
 
-	// ledger/governance's ShouldRatify refuses NoConfidence and
-	// UpdateCommittee outright during Conway bootstrap (protocol major 9) --
-	// Conway validation admits only InfoAction, ParameterChange, and
-	// HardForkInitiation proposals during that phase. Gate both action
-	// types the same way here: without this, a bootstrap-era proposal that
-	// production would reject purely on protocol version could still
-	// ratify through the stake tally below.
-	if conwayPP.ProtocolVersion.Major == common.ProtocolVersionConway {
-		return false, nil
-	}
-
-	if proposal.ActionType == common.GovActionTypeUpdateCommittee &&
-		!committeeTermsWithinLimit(
-			proposal, currentEpoch, conwayPP.CommitteeTermLimit,
-		) {
-		return false, nil
-	}
-
-	// NoConfidence and UpdateCommittee use different thresholds (and, below,
-	// different AlwaysNoConfidence implicit-vote accounting): a Motion of No
-	// Confidence is always judged against MotionNoConfidence, regardless of
-	// whether a committee is currently seated, while UpdateCommittee selects
-	// CommitteeNormal/CommitteeNoConfidence based on whether one is. Sharing
-	// one threshold pair between the two (as an earlier revision did) let a
-	// NoConfidence vector accept or reject against the wrong bar.
-	isNoConfidence := proposal.ActionType == common.GovActionTypeNoConfidence
-	var drepThresholdRat, spoThresholdRat cbor.Rat
-	if isNoConfidence {
-		drepThresholdRat = conwayPP.DRepVotingThresholds.MotionNoConfidence
-		spoThresholdRat = conwayPP.PoolVotingThresholds.MotionNoConfidence
-	} else {
-		elected := m.hasActiveCommitteeMember(currentEpoch)
-		drepThresholdRat = conwayPP.DRepVotingThresholds.CommitteeNoConfidence
-		spoThresholdRat = conwayPP.PoolVotingThresholds.CommitteeNoConfidence
-		if elected {
-			drepThresholdRat = conwayPP.DRepVotingThresholds.CommitteeNormal
-			spoThresholdRat = conwayPP.PoolVotingThresholds.CommitteeNormal
-		}
-	}
-	// A nil Rat means the protocol parameters never carried this threshold
-	// at all -- a plumbing bug, not "no threshold required" (that case is a
-	// genuine zero value, e.g. big.NewRat(0, 1), which votingStakeAccepted
-	// already treats as auto-accept). ouroboros-mock's reference
-	// (updateCommitteeAcceptedWithStake) errors on exactly this rather than
-	// silently ratifying, and a harness whose purpose is to surface
-	// divergence from the real ledger must fail closed the same way.
-	if drepThresholdRat.Rat == nil {
-		return false, errors.New(
-			"committee action ratification: missing DRep threshold",
-		)
-	}
-	if spoThresholdRat.Rat == nil {
-		return false, errors.New(
-			"committee action ratification: missing SPO threshold",
-		)
-	}
-	drepThreshold := drepThresholdRat.Rat
-	spoThreshold := spoThresholdRat.Rat
-
 	deposits := m.activeProposalDeposits(currentEpoch)
-	drepAccepted, err := m.drepAcceptedForCommitteeAction(
-		txn, proposal, deposits, drepThreshold, isNoConfidence,
+	drepYes, drepTotal, err := m.drepStakeForCommitteeAction(
+		txn, proposal, deposits,
 	)
 	if err != nil {
 		return false, err
 	}
-	if !drepAccepted {
-		return false, nil
-	}
-	return m.spoAcceptedForCommitteeAction(
-		txn, proposal, deposits, spoThreshold, isNoConfidence,
+	spoYes, spoTotal, err := m.spoStakeForCommitteeAction(
+		txn, proposal, deposits,
 	)
+	if err != nil {
+		return false, err
+	}
+
+	committeeNoConfidence, err := m.committeeInNoConfidence(txn)
+	if err != nil {
+		return false, err
+	}
+
+	// ShouldRatify's UpdateCommittee branch requires a decoded GovAction to
+	// check committeeTermsWithinLimit; build one directly from the
+	// proposed-member expiries already tracked in-memory rather than
+	// round-tripping through CBOR. committeeTermsWithinLimit only reads
+	// CredEpochs' values, so the keys need only be distinct pointers.
+	var govAction common.GovAction
+	if proposal.ActionType == common.GovActionTypeUpdateCommittee {
+		govAction = syntheticUpdateCommitteeGovAction(proposal)
+	}
+
+	decision := governance.ShouldRatify(governance.RatifyInputs{
+		Tally: &governance.ProposalTally{
+			ActionType:     uint8(proposal.ActionType), //nolint:gosec // bounded by the small fixed set of GovActionType values
+			DRepYesStake:   drepYes,
+			DRepTotalStake: drepTotal,
+			SPOYesStake:    spoYes,
+			SPOTotalStake:  spoTotal,
+		},
+		PParams:               conwayPP,
+		GovAction:             govAction,
+		CurrentEpoch:          currentEpoch,
+		MajorVersion:          conwayPP.ProtocolVersion.Major,
+		CommitteeNoConfidence: committeeNoConfidence,
+	})
+	return decision.Ratified, nil
 }
 
-// hasActiveCommitteeMember reports whether any seated committee member's
-// term has not yet expired, mirroring the upstream (unexported)
-// GovernanceState.hasActiveCommitteeMember used to pick the CommitteeNormal
-// vs. CommitteeNoConfidence threshold.
-func (m *DingoStateManager) hasActiveCommitteeMember(currentEpoch uint64) bool {
-	for _, member := range m.govState.CommitteeMembersByCredential {
-		if member != nil && currentEpoch <= member.ExpiryEpoch {
-			return true
-		}
+// committeeInNoConfidence reports whether the current committee-purpose root
+// (the most recently enacted NoConfidence/UpdateCommittee action) is itself
+// a NoConfidence action, mirroring ledger/governance's unexported
+// committeeNoConfidenceState. ShouldRatify uses this, not simply whether a
+// committee member is currently seated, to select CommitteeNormal vs.
+// CommitteeNoConfidence for an UpdateCommittee proposal.
+func (m *DingoStateManager) committeeInNoConfidence(
+	txn *database.Txn,
+) (bool, error) {
+	rootID := m.govState.Roots.ConstitutionalCommittee
+	if rootID == nil {
+		return false, nil
 	}
-	for hash, member := range m.govState.CommitteeMembers {
-		if hasCredentialHash(m.govState.CommitteeMembersByCredential, hash) {
+	root, err := m.lookupGovernanceProposal(txn, *rootID)
+	if err != nil {
+		return false, err
+	}
+	if root == nil {
+		return false, nil
+	}
+	return common.GovActionType(root.ActionType) ==
+		common.GovActionTypeNoConfidence, nil
+}
+
+// syntheticUpdateCommitteeGovAction builds just enough of a
+// common.UpdateCommitteeGovAction for ShouldRatify's committeeTermsWithinLimit
+// check: that function only reads CredEpochs' values (each proposed member's
+// expiry epoch), never its keys, so the keys need only be distinct pointers.
+func syntheticUpdateCommitteeGovAction(
+	proposal *conformance.ProposalState,
+) *common.UpdateCommitteeGovAction {
+	credEpochs := make(
+		map[*common.Credential]uint,
+		len(proposal.ProposedMembersByCredential)+len(proposal.ProposedMembers),
+	)
+	for _, expiry := range proposal.ProposedMembersByCredential {
+		credEpochs[new(common.Credential)] = uint(expiry)
+	}
+	for hash, expiry := range proposal.ProposedMembers {
+		if hasCredentialHash(proposal.ProposedMembersByCredential, hash) {
 			continue
 		}
-		if member != nil && currentEpoch <= member.ExpiryEpoch {
-			return true
-		}
+		credEpochs[new(common.Credential)] = uint(expiry)
 	}
-	return false
+	return &common.UpdateCommitteeGovAction{CredEpochs: credEpochs}
 }
 
 // hasCredentialHash reports whether values already has an entry whose
@@ -1383,35 +1397,6 @@ func hasCredentialHash[V any](
 		}
 	}
 	return false
-}
-
-// committeeTermsWithinLimit implements Conway RATIFY's validCommitteeTerm
-// predicate directly off the in-memory proposal (no CBOR decode needed):
-// every proposed member's expiry must be within CommitteeTermLimit epochs
-// of currentEpoch.
-func committeeTermsWithinLimit(
-	proposal *conformance.ProposalState,
-	currentEpoch uint64,
-	termLimit uint64,
-) bool {
-	withinLimit := func(expiryEpoch uint64) bool {
-		return expiryEpoch <= currentEpoch ||
-			expiryEpoch-currentEpoch <= termLimit
-	}
-	for _, expiry := range proposal.ProposedMembersByCredential {
-		if !withinLimit(expiry) {
-			return false
-		}
-	}
-	for hash, expiry := range proposal.ProposedMembers {
-		if hasCredentialHash(proposal.ProposedMembersByCredential, hash) {
-			continue
-		}
-		if !withinLimit(expiry) {
-			return false
-		}
-	}
-	return true
 }
 
 // activeProposalDeposits sums, per return-account credential, the deposits
@@ -1452,25 +1437,23 @@ func (m *DingoStateManager) credentialVotingStake(
 		deposits[credential], nil
 }
 
-// drepAcceptedForCommitteeAction tallies DRep-delegated stake for a
-// NoConfidence/UpdateCommittee proposal. AlwaysAbstain delegators are
-// excluded entirely. AlwaysNoConfidence delegators count toward the
-// denominator always, and toward the numerator (yes) too when isNoConfidence
-// is true -- mirroring production's tallyDRepVotes, which treats the
-// AlwaysNoConfidence virtual DRep as an automatic yes specifically on a
-// NoConfidence action and an automatic no otherwise. A credential-backed
-// DRep must be active to count, and an explicit Abstain vote on this
-// proposal excludes its delegated stake from the denominator.
-func (m *DingoStateManager) drepAcceptedForCommitteeAction(
+// drepStakeForCommitteeAction tallies DRep-delegated yes/total stake for a
+// NoConfidence/UpdateCommittee proposal, for governance.ProposalTally's
+// DRepYesStake/DRepTotalStake (threshold comparison is ShouldRatify's job,
+// not this function's). AlwaysAbstain delegators are excluded entirely.
+// AlwaysNoConfidence delegators count toward the total always, and toward
+// yes too when the proposal itself is a NoConfidence action -- mirroring
+// production's tallyDRepVotes, which treats the AlwaysNoConfidence virtual
+// DRep as an automatic yes specifically on a NoConfidence action and an
+// automatic no otherwise. A credential-backed DRep must be active to count,
+// and an explicit Abstain vote on this proposal excludes its delegated
+// stake from the total.
+func (m *DingoStateManager) drepStakeForCommitteeAction(
 	txn *database.Txn,
 	proposal *conformance.ProposalState,
 	deposits map[mockledger.RewardAccountKey]uint64,
-	threshold *big.Rat,
-	isNoConfidence bool,
-) (bool, error) {
-	if threshold.Sign() == 0 {
-		return true, nil
-	}
+) (uint64, uint64, error) {
+	isNoConfidence := proposal.ActionType == common.GovActionTypeNoConfidence
 	yesStake := new(big.Int)
 	totalStake := new(big.Int)
 	for credential, delegation := range m.govState.DRepDelegationsByCredential {
@@ -1480,7 +1463,7 @@ func (m *DingoStateManager) drepAcceptedForCommitteeAction(
 		case common.DrepTypeNoConfidence:
 			stake, err := m.credentialVotingStake(txn, credential, deposits)
 			if err != nil {
-				return false, err
+				return 0, 0, err
 			}
 			stakeInt := new(big.Int).SetUint64(stake)
 			totalStake.Add(totalStake, stakeInt)
@@ -1507,7 +1490,7 @@ func (m *DingoStateManager) drepAcceptedForCommitteeAction(
 			}
 			stake, err := m.credentialVotingStake(txn, credential, deposits)
 			if err != nil {
-				return false, err
+				return 0, 0, err
 			}
 			stakeInt := new(big.Int).SetUint64(stake)
 			vote, voted := proposal.Votes[fmt.Sprintf(
@@ -1524,28 +1507,34 @@ func (m *DingoStateManager) drepAcceptedForCommitteeAction(
 			}
 		}
 	}
-	return votingStakeAccepted(yesStake, totalStake, threshold), nil
+	yes, err := bigIntToUint64(yesStake, "drep yes stake")
+	if err != nil {
+		return 0, 0, err
+	}
+	total, err := bigIntToUint64(totalStake, "drep total stake")
+	if err != nil {
+		return 0, 0, err
+	}
+	return yes, total, nil
 }
 
-// spoAcceptedForCommitteeAction tallies pool-delegated stake for a
-// NoConfidence/UpdateCommittee proposal, mirroring MockStateManager's
-// spoAcceptedForUpdateCommittee non-voter semantics: during Conway
-// bootstrap every silent pool is excluded from the denominator; afterward a
-// silent pool whose reward account delegates AlwaysAbstain is excluded, one
-// that delegates AlwaysNoConfidence counts as an implicit Yes when
-// isNoConfidence is true (an implicit No otherwise, same as production's
-// tallySPOVotes PoolRewardAccountAutoVoteNoConfidence handling), and every
-// other silent pool counts as an implicit No.
-func (m *DingoStateManager) spoAcceptedForCommitteeAction(
+// spoStakeForCommitteeAction tallies pool-delegated yes/total stake for a
+// NoConfidence/UpdateCommittee proposal, for governance.ProposalTally's
+// SPOYesStake/SPOTotalStake. There is no Conway-bootstrap branch here:
+// ShouldRatify itself refuses both action types outright during bootstrap
+// before ever reading this tally, so a bootstrap-specific adjustment to the
+// tally would never run (an earlier revision carried one that PR #4333
+// review found was already dead code for exactly this reason). A silent
+// pool whose reward account delegates AlwaysAbstain is excluded; one that
+// delegates AlwaysNoConfidence counts as an implicit Yes when the proposal
+// is a NoConfidence action (an implicit No otherwise, same as production's
+// tallySPOVotes PoolRewardAccountAutoVoteNoConfidence handling); every other
+// silent pool counts as an implicit No.
+func (m *DingoStateManager) spoStakeForCommitteeAction(
 	txn *database.Txn,
 	proposal *conformance.ProposalState,
 	deposits map[mockledger.RewardAccountKey]uint64,
-	threshold *big.Rat,
-	isNoConfidence bool,
-) (bool, error) {
-	if threshold.Sign() == 0 {
-		return true, nil
-	}
+) (uint64, uint64, error) {
 	poolStake := make(map[common.PoolKeyHash]*big.Int)
 	for credential, pool := range m.govState.PoolDelegationsByCredential {
 		if !m.govState.IsPoolRegistered(pool) {
@@ -1553,7 +1542,7 @@ func (m *DingoStateManager) spoAcceptedForCommitteeAction(
 		}
 		stake, err := m.credentialVotingStake(txn, credential, deposits)
 		if err != nil {
-			return false, err
+			return 0, 0, err
 		}
 		if current, ok := poolStake[pool]; ok {
 			current.Add(current, new(big.Int).SetUint64(stake))
@@ -1562,10 +1551,7 @@ func (m *DingoStateManager) spoAcceptedForCommitteeAction(
 		}
 	}
 
-	conwayPP, _ := m.protocolParams.(*conway.ConwayProtocolParameters)
-	inBootstrap := conwayPP != nil &&
-		conwayPP.ProtocolVersion.Major == common.ProtocolVersionConway
-
+	isNoConfidence := proposal.ActionType == common.GovActionTypeNoConfidence
 	yesStake := new(big.Int)
 	totalStake := new(big.Int)
 	for pool, stake := range poolStake {
@@ -1584,9 +1570,6 @@ func (m *DingoStateManager) spoAcceptedForCommitteeAction(
 			}
 			continue
 		}
-		if inBootstrap {
-			continue
-		}
 		if rewardAccount, ok := m.govState.PoolRewardAccounts[pool]; ok {
 			if delegation, ok := m.govState.DRepDelegationsByCredential[rewardAccount]; ok {
 				switch delegation.Type {
@@ -1603,25 +1586,28 @@ func (m *DingoStateManager) spoAcceptedForCommitteeAction(
 		}
 		totalStake.Add(totalStake, stake)
 	}
-	return votingStakeAccepted(yesStake, totalStake, threshold), nil
+	yes, err := bigIntToUint64(yesStake, "spo yes stake")
+	if err != nil {
+		return 0, 0, err
+	}
+	total, err := bigIntToUint64(totalStake, "spo total stake")
+	if err != nil {
+		return 0, 0, err
+	}
+	return yes, total, nil
 }
 
-// votingStakeAccepted reports whether yesStake/totalStake meets threshold,
-// computed with integer cross-multiplication (no floating point / rational
-// division) to avoid rounding bias either direction.
-func votingStakeAccepted(
-	yesStake *big.Int,
-	totalStake *big.Int,
-	threshold *big.Rat,
-) bool {
-	if threshold.Sign() == 0 {
-		return true
+// bigIntToUint64 converts a non-negative stake total to uint64, failing
+// closed instead of silently truncating if it ever somehow exceeds uint64
+// range (real ADA amounts never approach this bound).
+func bigIntToUint64(v *big.Int, name string) (uint64, error) {
+	if !v.IsUint64() {
+		return 0, fmt.Errorf(
+			"committee action ratification: %s overflows uint64: %s",
+			name, v.String(),
+		)
 	}
-	if totalStake.Sign() == 0 {
-		return false
-	}
-	return new(big.Int).Mul(yesStake, threshold.Denom()).
-		Cmp(new(big.Int).Mul(totalStake, threshold.Num())) >= 0
+	return v.Uint64(), nil
 }
 
 // persistRatification sets the real governance_proposal row's ratification
