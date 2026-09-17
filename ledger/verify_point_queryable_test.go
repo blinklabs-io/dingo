@@ -15,14 +15,36 @@
 package ledger
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
+
+// cardanoNodeConfigWithMaxLovelaceSupply builds a *cardano.CardanoNodeConfig
+// whose ShelleyGenesis().MaxLovelaceSupply is nonzero -- the exact condition
+// circulatingSupplyGenesis (ledger/queries.go) gates
+// verifyStakeDistributionRetentionOnly's network_state floor on. Without
+// this, that floor is inactive and a fixture cannot actually exercise it
+// either direction (human review, Chris Guiney, dingo#4319/#4320: a first
+// version of TestVerifyPointQueryable_NoNetworkStateRow_Rejected used a
+// fixture with no CardanoNodeConfig at all, so it happened to pass, but
+// only because the gate it meant to test was never active -- pinning
+// over-rejection, not the real requirement).
+func cardanoNodeConfigWithMaxLovelaceSupply(t *testing.T, maxLovelaceSupply uint64) *cardano.CardanoNodeConfig {
+	t.Helper()
+	cfg := &cardano.CardanoNodeConfig{}
+	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(
+		fmt.Sprintf(`{"maxLovelaceSupply": %d}`, maxLovelaceSupply),
+	)))
+	return cfg
+}
 
 // TestVerifyPointQueryable_WithinAllFloors_Accepted covers the accept
 // direction (human review, Chris Guiney, dingo#4319/#4320: "VerifyPointQueryable
@@ -36,6 +58,11 @@ func TestVerifyPointQueryable_WithinAllFloors_Accepted(t *testing.T) {
 
 	db := newTestDB(t)
 	ls := newPoolDistr2Ledger(t, db)
+	// Activates verifyStakeDistributionRetentionOnly's network_state floor
+	// (circulatingSupplyGenesis) -- see cardanoNodeConfigWithMaxLovelaceSupply's
+	// doc comment for why this fixture must set it to genuinely prove the
+	// accept direction, not just the case where the floor never runs at all.
+	ls.config.CardanoNodeConfig = cardanoNodeConfigWithMaxLovelaceSupply(t, 45_000_000_000_000_000)
 	ls.currentEra = eras.ConwayEraDesc
 	ls.currentPParams = conwayPParamsWithCostModels(
 		map[uint][]int64{0: {1, 1, 1}},
@@ -112,11 +139,53 @@ func TestVerifyPointQueryable_PastRetentionFloor_Rejected(t *testing.T) {
 // Identical to TestVerifyPointQueryable_WithinAllFloors_Accepted (pinned
 // point's epoch equals the live epoch, so queryShelleyCurrentProtocolParams
 // answers from the live snapshot rather than needing a historical pparams
-// row) except for the one thing this test is about: no
-// db.Metadata().SetNetworkState call, so no network_state row exists at
-// any slot. Isolating every other floor this way means only the new check
-// this test targets can be why this fails.
+// row, and CardanoNodeConfig is set so the network_state floor is actually
+// active -- see cardanoNodeConfigWithMaxLovelaceSupply's doc comment; a
+// fixture without it would pass here for the wrong reason, since the floor
+// this test targets would never run at all) except for the one thing this
+// test is about: no db.Metadata().SetNetworkState call, so no
+// network_state row exists at any slot. Isolating every other floor this
+// way means only the new check this test targets can be why this fails.
 func TestVerifyPointQueryable_NoNetworkStateRow_Rejected(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	ls.config.CardanoNodeConfig = cardanoNodeConfigWithMaxLovelaceSupply(t, 45_000_000_000_000_000)
+	ls.currentEra = eras.ConwayEraDesc
+	ls.currentPParams = conwayPParamsWithCostModels(
+		map[uint][]int64{0: {1, 1, 1}},
+	)
+	ls.currentEpoch = models.Epoch{EpochId: 3}
+	ls.publishSnapshotsLocked()
+
+	hash := repeatedBytes(32, 0x0B)
+	seedBlockAtSlot(t, ls, 350, hash)
+	seedEpochs(t, ls, map[uint64]uint64{300: 3})
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(350, hash),
+	}, nil))
+
+	err := ls.VerifyPointQueryable(nil, QueryPoint{Slot: 350, Hash: hash})
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
+}
+
+// TestVerifyPointQueryable_NoNetworkStateRow_AcceptedWhenFloorInactive is
+// the regression a human reviewer found (Chris Guiney, dingo#4319/#4320):
+// verifyStakeDistributionRetentionOnly's network_state floor was
+// unconditional, so it rejected a point every real query would have
+// answered whenever totalCirculatingSupply itself never reaches
+// GetNetworkStateAsOfSlot -- no CardanoNodeConfig (as here, and as every
+// other ledger test in this repository already constructs a LedgerState),
+// no ShelleyGenesis, or a genesis with no MaxLovelaceSupply. Identical to
+// TestVerifyPointQueryable_NoNetworkStateRow_Rejected (same missing row)
+// except CardanoNodeConfig is left nil, so this one must accept where that
+// one must reject -- proving the floor is genuinely conditional, not just
+// present or absent.
+func TestVerifyPointQueryable_NoNetworkStateRow_AcceptedWhenFloorInactive(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	db := newTestDB(t)
@@ -136,8 +205,7 @@ func TestVerifyPointQueryable_NoNetworkStateRow_Rejected(t *testing.T) {
 	}, nil))
 
 	err := ls.VerifyPointQueryable(nil, QueryPoint{Slot: 350, Hash: hash})
-	require.Error(t, err)
-	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
+	require.NoError(t, err)
 }
 
 // TestVerifyPointQueryable_UnknownEraId_Rejected is the regression a human

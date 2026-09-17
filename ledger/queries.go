@@ -1431,6 +1431,15 @@ func (ls *LedgerState) totalActiveStake(
 // caller who happens to name slot 0 still passes a non-nil pointer to it,
 // exactly the same "whole QueryPoint, not a bare uint64" caution
 // resolveAsOfEpoch's doc comment explains for other pinned-point callers.
+//
+// circulatingSupplyGenesis (below) decides whether this function reads
+// network_state at all -- shared with
+// verifyStakeDistributionRetentionOnly's own network_state floor
+// (ledger/pool_stake_distribution.go) so the two conditions cannot drift
+// apart (human review, Chris Guiney, dingo#4319/#4320: an earlier,
+// unconditional version of that floor rejected a point every one of this
+// function's real callers would have answered just fine via the
+// totalActiveStake fallback below).
 func (ls *LedgerState) totalCirculatingSupply(
 	epoch uint64,
 	asOfSlot *uint64,
@@ -1440,11 +1449,8 @@ func (ls *LedgerState) totalCirculatingSupply(
 	fallback := func() (uint64, error) {
 		return ls.totalActiveStake(epoch, exists, txn)
 	}
-	if ls.config.CardanoNodeConfig == nil {
-		return fallback()
-	}
-	genesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
-	if genesis == nil || genesis.MaxLovelaceSupply == 0 {
+	genesis := ls.circulatingSupplyGenesis()
+	if genesis == nil {
 		return fallback()
 	}
 	var state *models.NetworkState
@@ -1486,6 +1492,26 @@ func (ls *LedgerState) totalCirculatingSupply(
 		return 1, nil
 	}
 	return circulation, nil
+}
+
+// circulatingSupplyGenesis returns the genesis config totalCirculatingSupply
+// needs to read network_state at all, or nil when it takes its
+// totalActiveStake fallback instead -- no CardanoNodeConfig, no
+// ShelleyGenesis, or a genesis with no MaxLovelaceSupply, matching only a
+// hand-built LedgerState a test constructs rather than one backing a real
+// node, which always has both. Shared with
+// verifyStakeDistributionRetentionOnly (ledger/pool_stake_distribution.go)
+// so its own network_state floor cannot silently drift stricter than what
+// totalCirculatingSupply itself actually requires.
+func (ls *LedgerState) circulatingSupplyGenesis() *gshelley.ShelleyGenesis {
+	if ls.config.CardanoNodeConfig == nil {
+		return nil
+	}
+	genesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if genesis == nil || genesis.MaxLovelaceSupply == 0 {
+		return nil
+	}
+	return genesis
 }
 
 func (ls *LedgerState) queryShelleyGenesisConfig(
