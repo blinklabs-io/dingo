@@ -696,11 +696,9 @@ func parsePStateMaps(ps [][]byte) ([]ParsedPool, map[uint64][][]byte, error) {
 			bestIdx = m.idx
 		}
 	}
-	if len(bestPools) == 0 {
-		return bestPools, nil, bestWarning
+	if len(bestPools) > 0 {
+		mergePoolDeposits(bestPools, ps, bestIdx)
 	}
-
-	mergePoolDeposits(bestPools, ps, bestIdx)
 	retirements := mergePoolRetirements(bestPools, ps, bestIdx)
 	return bestPools, retirements, bestWarning
 }
