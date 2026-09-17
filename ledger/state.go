@@ -541,6 +541,12 @@ func historicalBlockValidationDecision(
 // the node to shut down. The callback should trigger graceful shutdown.
 type FatalErrorFunc func(err error)
 
+// ReportTipGapFunc receives the wall-clock-to-tip distance in slots on every
+// slot-clock tick, the same value the dingo_tip_gap_slots gauge carries. It
+// exists so a caller can classify sync health without scraping Prometheus:
+// the node's readiness probe reads it. Optional; nil disables the report.
+type ReportTipGapFunc func(gapSlots uint64)
+
 // GetActiveConnectionFunc is a callback to retrieve the currently active
 // chainsync connection ID for chain selection purposes.
 type GetActiveConnectionFunc func() *ouroboros.ConnectionId
@@ -628,6 +634,7 @@ type LedgerStateConfig struct {
 	PeerHeaderLookupFunc        PeerHeaderLookupFunc
 	GenesisSelectionStateFunc   GenesisSelectionStateFunc
 	FatalErrorFunc              FatalErrorFunc
+	ReportTipGapFunc            ReportTipGapFunc
 	ForgedBlockChecker          ForgedBlockChecker
 	SlotBattleRecorder          SlotBattleRecorder
 	EndorserBlockProvider       EndorserBlockProviderFunc
@@ -1020,8 +1027,29 @@ type LedgerState struct {
 	// primary request. A timeout may fire while the request is blocked in the
 	// protocol client; keeping its generation lets the timeout wait instead of
 	// issuing a duplicate request on the same batch.
-	blockfetchRequestGeneration         uint64
-	blockfetchPrimaryRequestGeneration  uint64
+	blockfetchRequestGeneration        uint64
+	blockfetchPrimaryRequestGeneration uint64
+	// blockfetchRollbackGeneration counts rollbacks that abandon the chain
+	// segment an in-flight blockfetch batch was requested for, without also
+	// superseding that batch. It is published before the truncation, so any
+	// batch that observed an older value was requested against a chain
+	// segment the rollback has since discarded and its blocks must not be
+	// applied.
+	//
+	// Only the locally forged sibling adoption bumps it. The chainsync
+	// rollback paths (handleEventChainsyncRollback, tryResolveFork) re-queue
+	// the winning fork's headers and restart blockfetch under
+	// chainsyncBlockfetchMutex, which supersedes the in-flight batch by
+	// itself; AdoptLocalForgedSibling does neither -- it rolls back and
+	// adopts from the forge loop, holding only chainsyncMutex.
+	//
+	// Atomic because the bump happens under chainsyncMutex while the read
+	// happens under chainsyncBlockfetchMutex.
+	blockfetchRollbackGeneration atomic.Uint64
+	// blockfetchBatchRollbackGeneration is blockfetchRollbackGeneration as
+	// observed when the current batch was requested. Guarded by
+	// chainsyncBlockfetchMutex, like the rest of the per-batch state.
+	blockfetchBatchRollbackGeneration   uint64
 	blockfetchRequestsInFlight          map[string]chan struct{}
 	blockfetchShadowRequestsInFlight    map[string]struct{}
 	blockfetchInFlightTimeoutGeneration uint64
@@ -1349,6 +1377,9 @@ type LedgerState struct {
 	// cleanupWG, so a lifecycle test can hold a run in flight and assert
 	// that Close drains it.
 	cleanupConsumedUtxosRunHook func()
+	// startupRewardPrecomputeHook is test-only observability for the startup
+	// catch-up boundary; it runs after the real queue call.
+	startupRewardPrecomputeHook func()
 	// Test hook replacing the primary-chain membership read the continuation
 	// audit makes. A healthy store never fails that read, so without it the
 	// audit's handling of a failed read cannot be driven from a test.
@@ -1807,6 +1838,17 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	if err := ls.healMithrilGapBlockNonces(ctx); err != nil {
 		return fmt.Errorf("failed to heal Mithril gap block nonces: %w", err)
 	}
+	// Reconstruct the tip's block_nonce when a disaster-recovery truncate
+	// (database/lifecycle.Truncate) landed on a target whose own nonce row
+	// had already been pruned by routine 3-epoch retention.
+	// database.TruncateAfterSlot allows that truncate to proceed as long as
+	// a checkpoint survives before the target, deferring the actual
+	// reconstruction to here -- must run after healMithrilGapBlockNonces
+	// (so a Mithril-healed tip nonce is already reflected) and before any
+	// epoch nonce is computed, for the same reason as the Mithril heal.
+	if err := ls.healTruncateGapBlockNonces(ctx); err != nil {
+		return fmt.Errorf("failed to heal truncate gap block nonces: %w", err)
+	}
 	// Setup event handlers only after startup nonce repair is complete, so a
 	// Mithril-bootstrapped node cannot process chainsync/blockfetch events with
 	// stale gap-block nonces. ChainSync and chain-update can burst at bulk-sync
@@ -1845,6 +1887,14 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 			ls.handleRewardPrecomputeEpochTransition,
 		)
 	}
+	// The subscription above cannot fire for an epoch that began before this
+	// process did, so catch up the in-progress epoch's reward round here.
+	// Without it, a node started mid-epoch calculates that round inline inside
+	// the next epoch-rollover transaction instead of ahead of it.
+	ls.queueStartupRewardPrecompute()
+	if ls.startupRewardPrecomputeHook != nil {
+		ls.startupRewardPrecomputeHook()
+	}
 	// Now that both tip and epoch are loaded, check whether the safe zone
 	// already covers the epoch end (TransitionImpossible).  This handles the
 	// case where the node was shut down after the tip advanced past the
@@ -1854,6 +1904,7 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	// transition epoch, matching the Haskell HFC semantics.
 	ls.evaluateTriggerAtEpoch()
 	ls.evaluateTransitionImpossible()
+	ls.evaluateProtocolVersionBump()
 	ls.evaluateHardForkInitiationStability()
 	// Publish the transitionInfo changes made above so snapshot readers observe
 	// the reconstructed startup state. The HFI stability evaluation above may
@@ -2753,10 +2804,13 @@ func (ls *LedgerState) handleSlotTicks() {
 
 		// Update wall-clock-based metrics every tick
 		// (must run even when chain is stalled or catching up)
+		tipGap := uint64(0)
 		if tick.Slot > tipSlot {
-			ls.metrics.tipGapSlots.Set(float64(tick.Slot - tipSlot))
-		} else {
-			ls.metrics.tipGapSlots.Set(0)
+			tipGap = tick.Slot - tipSlot
+		}
+		ls.metrics.tipGapSlots.Set(float64(tipGap))
+		if ls.config.ReportTipGapFunc != nil {
+			ls.config.ReportTipGapFunc(tipGap)
 		}
 		if currentEpoch.LengthInSlots > 0 {
 			ls.metrics.epochLengthSlots.Set(float64(currentEpoch.LengthInSlots))
@@ -3200,10 +3254,40 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	return ls.rollbackWithOptions(point, false, true)
 }
 
+// rollbackCommittedError reports an error found after the metadata rollback
+// transaction and in-memory tip update have committed. Callers that publish
+// side effects separately must not treat this as an all-or-nothing failure.
+type rollbackCommittedError struct {
+	err error
+}
+
+func (e *rollbackCommittedError) Error() string { return e.err.Error() }
+
+func (e *rollbackCommittedError) Unwrap() error { return e.err }
+
+func (ls *LedgerState) rollbackWithoutResync(point ocommon.Point) error {
+	return ls.rollbackWithOptions(point, false, false)
+}
+
+func (ls *LedgerState) publishLocalLedgerRollback(point ocommon.Point) {
+	if ls.config.EventBus == nil {
+		return
+	}
+	ls.config.EventBus.Publish(
+		event.ChainsyncResyncEventType,
+		event.NewEvent(
+			event.ChainsyncResyncEventType,
+			event.ChainsyncResyncEvent{
+				Reason: event.ChainsyncResyncReasonLocalLedgerRollback,
+				Point:  point,
+			},
+		),
+	)
+}
+
 // rollbackWithOptions restores metadata even when point is already the
 // in-memory ledger tip when repairSameTip is set. At-tip validation recovery
-// can leave consumed UTxOs above the durable tip (for example after Mithril
-// gap replay), so the usual same-point no-op must not skip UTxO restoration.
+// can leave consumed UTxOs above the durable tip after a partial apply.
 func (ls *LedgerState) rollbackWithOptions(
 	point ocommon.Point,
 	repairSameTip bool,
@@ -3628,6 +3712,9 @@ func (ls *LedgerState) rollbackWithOptions(
 	//     the post-rollback pparams already carry a major-version
 	//     bump that the rollback didn't undo (the rolled-back chain
 	//     still has the bump committed at an earlier point).
+	//   - evaluateProtocolVersionBump restores Known(currentEpoch+1) if
+	//     a classic (pre-Conway) update proposal reaching genesis-key
+	//     quorum for a version bump survived the rollback.
 	//   - evaluateHardForkInitiationStability restores Known(N+1) if
 	//     a HardForkInitiation governance action survived the
 	//     rollback and is still ratifiable past the voting deadline.
@@ -3647,6 +3734,7 @@ func (ls *LedgerState) rollbackWithOptions(
 	// of committing stale data.
 	ls.hfiEvalDoneEpoch = 0
 	ls.hfiEvalGeneration.Add(1)
+	ls.evaluateProtocolVersionBump()
 	ls.evaluateHardForkInitiationStability()
 	// Always update nonce - clear it on genesis rollback, set
 	// it otherwise
@@ -3657,6 +3745,31 @@ func (ls *LedgerState) rollbackWithOptions(
 	ls.updateTipMetrics(newTipDensity)
 	ls.publishSnapshotsLocked()
 	ls.Unlock()
+	// Reconstruct the new tip's block_nonce if TruncateAfterSlot above
+	// allowed this rollback to proceed with an empty nonce: its own row was
+	// pruned by routine 3-epoch retention, but a checkpoint survives below
+	// it (see database.TruncateAfterSlot's checkpoint check). An ordinary,
+	// Praos-security-parameter-bounded rollback target never falls outside
+	// that retention window, so this is reachable only for a Genesis-mode
+	// rollback -- Ouroboros Genesis has no k-bound and can roll back
+	// arbitrarily deep to resolve a dense competing chain. Must run before
+	// publishLocalLedgerRollback below, whose resync event can otherwise
+	// let another component observe the still-empty nonce, and before any
+	// further block application seeds runningNonce from it (see
+	// healTruncateGapBlockNonces's doc comment for the corruption this
+	// prevents).
+	if healErr := ls.healTruncateGapBlockNonces(context.Background()); healErr != nil {
+		if ls.config.FatalErrorFunc != nil {
+			ls.config.FatalErrorFunc(healErr)
+		}
+		return &rollbackCommittedError{err: healErr}
+	}
+	if healErr := ls.healTruncateGapBlockNonces(context.Background()); healErr != nil {
+		if ls.config.FatalErrorFunc != nil {
+			ls.config.FatalErrorFunc(healErr)
+		}
+		return &rollbackCommittedError{err: healErr}
+	}
 	if publishResync && !sameTip {
 		ls.publishLocalLedgerRollback(point)
 	}
@@ -3702,37 +3815,6 @@ func (ls *LedgerState) rollbackWithOptions(
 		return &rollbackCommittedError{err: floorErr}
 	}
 	return nil
-}
-
-// rollbackCommittedError reports an error found after the metadata rollback
-// transaction and in-memory tip update have committed. Callers that publish
-// side effects separately must not treat this as an all-or-nothing failure.
-type rollbackCommittedError struct {
-	err error
-}
-
-func (e *rollbackCommittedError) Error() string { return e.err.Error() }
-
-func (e *rollbackCommittedError) Unwrap() error { return e.err }
-
-func (ls *LedgerState) rollbackWithoutResync(point ocommon.Point) error {
-	return ls.rollbackWithOptions(point, false, false)
-}
-
-func (ls *LedgerState) publishLocalLedgerRollback(point ocommon.Point) {
-	if ls.config.EventBus == nil {
-		return
-	}
-	ls.config.EventBus.Publish(
-		event.ChainsyncResyncEventType,
-		event.NewEvent(
-			event.ChainsyncResyncEventType,
-			event.ChainsyncResyncEvent{
-				Reason: event.ChainsyncResyncReasonLocalLedgerRollback,
-				Point:  point,
-			},
-		),
-	)
 }
 
 // drainBlockPipelineBeforeRollback waits, up to
@@ -4742,12 +4824,6 @@ func (ls *LedgerState) calculateStabilityWindowForEra(eraId uint) uint64 {
 	return window.Uint64()
 }
 
-// consumedUtxoPruneFloorSyncKey is the durable sync_state marker key
-// recording the highest slot floor cleanupConsumedUtxos has ever computed
-// and begun pruning consumed UTxOs up to. See persistConsumedUtxoPruneFloor
-// and readConsumedUtxoPruneFloor.
-const consumedUtxoPruneFloorSyncKey = "consumed_utxo_prune_floor"
-
 // persistConsumedUtxoPruneFloor durably records floor as the highest slot
 // cleanupConsumedUtxos has ever begun pruning consumed UTxOs up to, so
 // checkUtxoRetentionWindow can reject a pin below it even after the tip
@@ -4770,7 +4846,11 @@ const consumedUtxoPruneFloorSyncKey = "consumed_utxo_prune_floor"
 // never needs to be undone by rollback or truncate, since rows already
 // hard-deleted cannot become un-deleted -- unlike
 // SyntheticV2CostModelClearedEpochSyncKey, this marker has no
-// RecomputeAfterTruncate counterpart.
+// RecomputeAfterTruncate counterpart. It does have a reject-before-mutating
+// counterpart, though: database/lifecycle's disaster-recovery Truncate
+// reads this same marker (database.ConsumedUtxoPruneFloorSyncKey) before
+// touching anything, and refuses a target older than it -- see that
+// function's doc comment.
 func (ls *LedgerState) persistConsumedUtxoPruneFloor(
 	floor uint64,
 	txn *database.Txn,
@@ -4783,7 +4863,7 @@ func (ls *LedgerState) persistConsumedUtxoPruneFloor(
 		return nil
 	}
 	if err := ls.db.SetSyncState(
-		consumedUtxoPruneFloorSyncKey,
+		database.ConsumedUtxoPruneFloorSyncKey,
 		strconv.FormatUint(floor, 10),
 		txn,
 	); err != nil {
@@ -4803,7 +4883,7 @@ func (ls *LedgerState) persistConsumedUtxoPruneFloor(
 func (ls *LedgerState) readConsumedUtxoPruneFloor(
 	txn *database.Txn,
 ) (uint64, error) {
-	marker, err := ls.db.GetSyncState(consumedUtxoPruneFloorSyncKey, txn)
+	marker, err := ls.db.GetSyncState(database.ConsumedUtxoPruneFloorSyncKey, txn)
 	if err != nil {
 		return 0, fmt.Errorf(
 			"read consumed UTxO prune floor: %w",
@@ -6357,12 +6437,14 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					rolloverResult.NewCurrentEpoch.EpochId,
 				)
 			}
-			// Re-apply any TestXHardForkAtEpoch override. This matters both
-			// when no eraTransitions/HardFork occurred (the rollover reset
+			// Re-apply any TestXHardForkAtEpoch override, and re-check the
+			// classic quorum trigger. Both matter when no
+			// eraTransitions/HardFork occurred (the rollover reset
 			// transitionInfo to Unknown above) and when an era transition
 			// advanced ls.currentEra to a new era whose own successor may
-			// carry its own AtEpoch override.
+			// carry its own AtEpoch override or already-met quorum.
 			ls.evaluateTriggerAtEpoch()
+			ls.evaluateProtocolVersionBump()
 			ls.publishSnapshotsLocked()
 			ls.Unlock()
 
@@ -6974,6 +7056,27 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 							BlockNumber: next.BlockNumber(),
 						}
 						blocksProcessed++
+						// Per-block composition metrics (issue #4367): era,
+						// transaction count, script/redeemer presence, UTxO
+						// churn, certificate count. Recorded here, not for
+						// the Mithril-gap-closure skip branch above, since
+						// only this branch actually ran ledgerProcessBlock.
+						//
+						// These are observed inside the batch's DB
+						// transaction, so a later block in the same batch
+						// failing rolls the transaction back while leaving
+						// the earlier blocks' counts recorded; the pipeline
+						// then restarts from the unchanged tip and counts
+						// them again. The counters therefore track blocks
+						// processed rather than blocks durably applied, and
+						// drift upward across apply retries -- the same
+						// property the blockStageDuration observations in
+						// this closure already have. Read them as relative
+						// rates for correlation, which is what issue #4367
+						// asks of them, not as an exact applied-block count.
+						ls.metrics.observeBlockComposition(
+							computeBlockComposition(next),
+						)
 						// Calculate block rolling nonce (evolving nonce η_v).
 						// The evolving nonce is ALWAYS computed for every block.
 						// The candidate nonce (used in epoch nonce calc) is
@@ -7145,6 +7248,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				// epoch-end slot instead of a stale safeZone cap.
 				ls.evaluateTriggerAtEpoch()
 				ls.evaluateTransitionImpossible()
+				ls.evaluateProtocolVersionBump()
 				ls.evaluateHardForkInitiationStability()
 				// Capture tip for logging while holding the lock
 				tipForLog = ls.currentTip
@@ -8146,6 +8250,99 @@ func (ls *LedgerState) evaluateTriggerAtEpoch() {
 	ls.transitionInfo = hardfork.NewTransitionKnown(epoch)
 }
 
+// evaluateProtocolVersionBump sets transitionInfo to TransitionKnown(current
+// epoch + 1) when the current era's NextEraTrigger is TriggerAtVersion (the
+// classic pre-Conway Shelley update-proposal path: Byron through Babbage all
+// use it) and a protocol-parameter update already meeting the configured
+// genesis-key quorum, if enacted right now, would bump the protocol major
+// version into the next era.
+//
+// This is the "pparams-bump detection" evaluateHardForkInitiationStability's
+// own doc comment already names as a higher-priority sibling: without it,
+// transitionInfo stays TransitionUnknown for the entire epoch preceding any
+// version-triggered hard fork (every historical Cardano hard fork before
+// Conway's governance-driven HardForkInitiation), so BuildSummary's ordinary
+// tip-anchored safe zone is the only source of horizon and it lands exactly
+// at the era boundary with no margin past it -- not the extra epoch
+// SuccessorEra provides once a transition is confirmed. A transaction whose
+// validity interval crosses even slightly past the boundary is then
+// permanently rejected with hardfork.ErrPastHorizon, indistinguishable from a
+// truly invalid transaction, even though the same block is canonical and
+// every node that reaches quorum-based TransitionKnown early accepts it.
+//
+// Unlike TriggerAtEpoch, the classic update-proposal system has no
+// protocol-enforced voting deadline: a genesis delegate may submit a
+// different, superseding proposal in any block of the submission epoch,
+// right up to its last slot, so "quorum met" here is not guaranteed final
+// the way a post-deadline CIP-1694 tally is. That asymmetry is why this
+// function reads state instead of gating on a deadline that does not exist
+// for this trigger kind, and why it never touches enactment: it only ever
+// calls Database.ForecastPParamUpdates (via forecastPendingPParamUpdate),
+// which is documented to mirror ComputeAndApplyPParamUpdates' quorum, decode,
+// and apply semantics exactly while performing no writes, so calling it here
+// cannot make ComputeAndApplyPParamUpdates itself, or any other
+// protocol-parameter enactment, run any earlier than it already does at the
+// real epoch rollover. A premature or later-superseded reading only widens
+// the forecast horizon for the remainder of this epoch; it never changes
+// which era's validation rules apply (ls.currentEra) or what pparams get
+// enacted (both still come solely from processEpochRollover's own,
+// independent, unaffected re-read at the real boundary), and every
+// Shelley-family era shares the same epoch size and slot length, so even a
+// wrongly-forecast successor's slot/time arithmetic still matches the era
+// that actually continues.
+//
+// The call is a no-op when:
+//   - the shape is unavailable, the current era is unknown to it, or its
+//     NextEraTrigger is not TriggerAtVersion (i.e. a TestXHardForkAtEpoch
+//     override, or the final configured era),
+//   - currentPParams is nil or has no forecast-eligible pparams update
+//     functions for this era (e.g. Byron),
+//   - no pending update meets the configured genesis-key quorum for next
+//     epoch, or the one that does would not bump the protocol major version
+//     into a later era,
+//   - transitionInfo is already TransitionKnown(current epoch + 1), matching
+//     evaluateTriggerAtEpoch's own idempotency guard and avoiding a redundant
+//     DB read on every subsequent block once the boundary is confirmed.
+//
+// Call under ls.Lock() (runtime paths) or without a lock during
+// single-threaded startup.
+func (ls *LedgerState) evaluateProtocolVersionBump() {
+	shape := ls.eraShape()
+	if len(shape.Eras) == 0 {
+		return
+	}
+	entry, ok := shape.EraForID(ls.currentEra.Id)
+	if !ok {
+		return
+	}
+	if entry.NextEraTrigger.Kind != hardfork.TriggerAtVersion {
+		return
+	}
+	targetEpoch := ls.currentEpoch.EpochId + 1
+	if ls.transitionInfo.State == hardfork.TransitionKnown &&
+		ls.transitionInfo.KnownEpoch == targetEpoch {
+		return
+	}
+	if ls.currentPParams == nil {
+		return
+	}
+	forecasted := ls.forecastPendingPParamUpdate(
+		ls.currentEra, targetEpoch, ls.currentPParams,
+	)
+	if forecasted == nil {
+		return
+	}
+	oldVer, oldErr := GetProtocolVersion(ls.currentPParams)
+	newVer, newErr := GetProtocolVersion(forecasted)
+	if oldErr != nil || newErr != nil {
+		return
+	}
+	if !ls.isHardForkTransition(oldVer, newVer) {
+		return
+	}
+	ls.transitionInfo = hardfork.NewTransitionKnown(targetEpoch)
+}
+
 // evaluateTransitionImpossible sets transitionInfo to TransitionImpossible
 // when the safe-zone end for the current era already reaches or exceeds the
 // current epoch's end slot.
@@ -8229,12 +8426,13 @@ func (ls *LedgerState) evaluateHardForkInitiationStability() {
 		return
 	}
 	// Defer to any TransitionKnown already set by a higher-priority
-	// source (TestXHardForkAtEpoch override or pparams-bump
-	// detection). Only promote from Unknown / Impossible, matching
-	// the pattern of the sibling evaluators on this code path. This
-	// also gives idempotency: once we've published the upcoming
-	// boundary, subsequent block-apply invocations short-circuit
-	// without a DB lookup.
+	// source (TestXHardForkAtEpoch override via evaluateTriggerAtEpoch,
+	// or the classic quorum trigger via evaluateProtocolVersionBump).
+	// Only promote from Unknown / Impossible, matching the pattern of
+	// the sibling evaluators on this code path. This also gives
+	// idempotency: once we've published the upcoming boundary,
+	// subsequent block-apply invocations short-circuit without a DB
+	// lookup.
 	if ls.transitionInfo.State == hardfork.TransitionKnown {
 		return
 	}
@@ -11139,6 +11337,19 @@ func (ls *LedgerState) ByronProtocolMagic() (uint32, error) {
 	}
 	// #nosec G115 -- the protocol magic is checked against the uint32 range above.
 	return uint32(protocolMagic), nil
+}
+
+// ByronFeePolicy returns the fee policy from the active Byron genesis.
+func (ls *LedgerState) ByronFeePolicy() (int64, int64, error) {
+	if ls == nil || ls.config.CardanoNodeConfig == nil {
+		return 0, 0, errors.New("byron genesis configuration is unavailable")
+	}
+	genesis := ls.config.CardanoNodeConfig.ByronGenesis()
+	if genesis == nil {
+		return 0, 0, errors.New("byron genesis configuration is unavailable")
+	}
+	policy := genesis.BlockVersionData.TxFeePolicy
+	return policy.Summand, policy.Multiplier, nil
 }
 
 // UtxoByRef returns a single UTxO by reference

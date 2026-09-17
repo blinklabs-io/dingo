@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"math"
+	"sync"
 	"testing"
 	"time"
 
@@ -70,6 +71,52 @@ type mockChainTip struct {
 
 func (m *mockChainTip) Tip() ochainsync.Tip {
 	return m.tip
+}
+
+type advancingChainTip struct {
+	initial   ochainsync.Tip
+	advanced  ochainsync.Tip
+	advanceAt int
+	calls     int
+}
+
+func (m *advancingChainTip) Tip() ochainsync.Tip {
+	m.calls++
+	if m.calls >= m.advanceAt {
+		return m.advanced
+	}
+	return m.initial
+}
+
+type lockedChainTip struct {
+	mu              sync.Mutex
+	initial         ochainsync.Tip
+	advanced        ochainsync.Tip
+	withTipCalls    int
+	advanceRequest  chan struct{}
+	advanceComplete chan struct{}
+}
+
+func (m *lockedChainTip) Tip() ochainsync.Tip {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.initial
+}
+
+func (m *lockedChainTip) WithTip(fn func(ochainsync.Tip) error) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.withTipCalls++
+	close(m.advanceRequest)
+	return fn(m.initial)
+}
+
+func (m *lockedChainTip) requestAdvance() {
+	<-m.advanceRequest
+	m.mu.Lock()
+	m.initial = m.advanced
+	m.mu.Unlock()
+	close(m.advanceComplete)
 }
 
 type reentrantChainTip struct {
@@ -492,6 +539,183 @@ func TestBuildBlockEmptyMempool(t *testing.T) {
 	assert.Equal(t, uint64(1001), block.SlotNumber())
 	assert.Equal(t, uint64(101), block.BlockNumber())
 	assert.Equal(t, 0, len(block.Transactions()))
+}
+
+func TestBuildBlockRejectsTipChangeBeforeSigning(t *testing.T) {
+	creds := setupTestCredentials(t)
+	initial := ochainsync.Tip{
+		Point: ocommon.Point{
+			Slot: 1000,
+			Hash: bytes.Repeat([]byte{0x01}, 32),
+		},
+		BlockNumber: 100,
+	}
+	advanced := ochainsync.Tip{
+		Point: ocommon.Point{
+			Slot: 1001,
+			Hash: bytes.Repeat([]byte{0x02}, 32),
+		},
+		BlockNumber: 101,
+	}
+	chainTip := &advancingChainTip{
+		initial:   initial,
+		advanced:  advanced,
+		advanceAt: 3,
+	}
+	pparams := &conway.ConwayProtocolParameters{
+		MaxTxSize:        16384,
+		MaxBlockBodySize: 90112,
+		MaxBlockExUnits: lcommon.ExUnits{
+			Memory: 62000000,
+			Steps:  20000000000,
+		},
+	}
+	builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
+		Mempool:         &mockMempool{},
+		PParamsProvider: &mockPParamsProvider{pparams: pparams},
+		ChainTip:        chainTip,
+		EpochNonce: &mockEpochNonceProvider{
+			epoch: 1,
+			nonce: make([]byte, 32),
+		},
+		Credentials: creds,
+	})
+	require.NoError(t, err)
+
+	block, blockCbor, err := builder.BuildBlock(1001, 0)
+	require.ErrorIs(t, err, errParentChangedDuringBuild)
+	assert.Nil(t, block)
+	assert.Nil(t, blockCbor)
+	assert.GreaterOrEqual(t, chainTip.calls, 3)
+}
+
+func TestBuildBlockBindsSigningToTipLock(t *testing.T) {
+	creds := setupTestCredentials(t)
+	initial := ochainsync.Tip{
+		Point: ocommon.Point{
+			Slot: 1000,
+			Hash: bytes.Repeat([]byte{0x01}, 32),
+		},
+		BlockNumber: 100,
+	}
+	chainTip := &lockedChainTip{
+		initial: initial,
+		advanced: ochainsync.Tip{
+			Point: ocommon.Point{
+				Slot: 1001,
+				Hash: bytes.Repeat([]byte{0x02}, 32),
+			},
+			BlockNumber: 101,
+		},
+		advanceRequest:  make(chan struct{}),
+		advanceComplete: make(chan struct{}),
+	}
+	go chainTip.requestAdvance()
+	pparams := &conway.ConwayProtocolParameters{
+		MaxTxSize:        16384,
+		MaxBlockBodySize: 90112,
+		MaxBlockExUnits: lcommon.ExUnits{
+			Memory: 62000000,
+			Steps:  20000000000,
+		},
+	}
+	builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
+		Mempool:         &mockMempool{},
+		PParamsProvider: &mockPParamsProvider{pparams: pparams},
+		ChainTip:        chainTip,
+		EpochNonce: &mockEpochNonceProvider{
+			epoch: 1,
+			nonce: make([]byte, 32),
+		},
+		Credentials: creds,
+	})
+	require.NoError(t, err)
+
+	block, blockCbor, err := builder.BuildBlock(1001, 0)
+	require.NoError(t, err)
+	require.NotNil(t, block)
+	require.NotEmpty(t, blockCbor)
+	assert.Equal(t, 1, chainTip.withTipCalls)
+	select {
+	case <-chainTip.advanceComplete:
+	case <-time.After(time.Second):
+		t.Fatal("tip advance did not wait for signing critical section")
+	}
+}
+
+func TestBuildBlockRequiresLiveTipParentBelowBlockSlot(t *testing.T) {
+	for _, tc := range []struct {
+		name                        string
+		slot                        uint64
+		genesis, withLeios, wantErr bool
+	}{
+		{name: "same slot", slot: 1000, wantErr: true},
+		{name: "earlier slot", slot: 999, wantErr: true},
+		{name: "later slot", slot: 1001},
+		{name: "genesis origin", slot: 0, genesis: true},
+		{name: "later slot through Leios entrypoint", slot: 1001, withLeios: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			creds := setupTestCredentials(t)
+			pparams := &conway.ConwayProtocolParameters{
+				MaxTxSize:        16384,
+				MaxBlockBodySize: 90112,
+				MaxBlockExUnits: lcommon.ExUnits{
+					Memory: 62000000,
+					Steps:  20000000000,
+				},
+			}
+			hash := bytes.Repeat([]byte{1}, 32)
+			if tc.genesis {
+				hash = nil
+			}
+			builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
+				Mempool: &mockMempool{},
+				PParamsProvider: &mockPParamsProvider{
+					pparams: pparams,
+				},
+				ChainTip: &mockChainTip{
+					tip: ochainsync.Tip{
+						Point:       ocommon.Point{Slot: 1000, Hash: hash},
+						BlockNumber: 100,
+					},
+				},
+				EpochNonce: &mockEpochNonceProvider{
+					epoch: 1,
+					nonce: make([]byte, 32),
+				},
+				Credentials: creds,
+			})
+			require.NoError(t, err)
+			var block ledger.Block
+			var blockCbor []byte
+			if tc.withLeios {
+				block, blockCbor, err = builder.BuildBlockWithLeios(
+					tc.slot,
+					0,
+					LeiosBlockData{},
+				)
+			} else {
+				block, blockCbor, err = builder.BuildBlock(tc.slot, 0)
+			}
+			if tc.wantErr {
+				require.ErrorIs(t, err, errParentSlotNotBelowBlock)
+				assert.Nil(t, block)
+				assert.Nil(t, blockCbor)
+				return
+			}
+			require.NoError(t, err)
+			assert.NotNil(t, block)
+			assert.NotEmpty(t, blockCbor)
+			if tc.genesis {
+				assert.Equal(t, uint64(0), block.BlockNumber())
+				assert.Empty(t, block.PrevHash())
+			} else {
+				assert.Equal(t, uint64(101), block.BlockNumber())
+				assert.Greater(t, block.SlotNumber(), uint64(1000))
+			}
+		})
+	}
 }
 
 func TestBuildBlockUsesSlotEpochForVRFNonce(t *testing.T) {
