@@ -15,14 +15,66 @@
 package ledger
 
 import (
+	"io"
+	"log/slog"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/require"
 )
+
+func TestLedgerStateStartQueuesStartupRewardPrecompute(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
+
+	nonce := []byte{0x30, 0x93, 0x65, 0x6a}
+	require.NoError(t, db.SetEpoch(
+		0, 0, nonce, nil, nil, nil,
+		eras.ShelleyEraDesc.Id, 1, 100, nil,
+	))
+	pparamsCbor, err := cbor.Encode(&shelley.ShelleyProtocolParameters{
+		ProtocolMajor: 7,
+		ProtocolMinor: 0,
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParams(
+		pparamsCbor, 0, 0, eras.ShelleyEraDesc.Id, nil,
+	))
+
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ls.Close()
+	})
+
+	startupQueued := make(chan struct{})
+	ls.startupRewardPrecomputeHook = func() {
+		ls.rewardPrecomputeMu.Lock()
+		queued := ls.rewardPrecomputePending != nil
+		ls.rewardPrecomputeMu.Unlock()
+		require.True(t, queued, "Start must queue the established current epoch")
+		close(startupQueued)
+	}
+
+	_ = ls.Start(t.Context())
+	testutil.RequireReceive(t, startupQueued, 2*time.Second, "startup precompute queued")
+}
 
 // The EventBus subscription that drives the reward precompute only fires at an
 // epoch boundary, so an epoch already in progress when the process starts has

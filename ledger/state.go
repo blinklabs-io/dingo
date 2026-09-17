@@ -1354,6 +1354,9 @@ type LedgerState struct {
 	// cleanupWG, so a lifecycle test can hold a run in flight and assert
 	// that Close drains it.
 	cleanupConsumedUtxosRunHook func()
+	// startupRewardPrecomputeHook is test-only observability for the startup
+	// catch-up boundary; it runs after the real queue call.
+	startupRewardPrecomputeHook func()
 	// Test hook replacing the primary-chain membership read the continuation
 	// audit makes. A healthy store never fails that read, so without it the
 	// audit's handling of a failed read cannot be driven from a test.
@@ -1855,6 +1858,9 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	// Without it, a node started mid-epoch calculates that round inline inside
 	// the next epoch-rollover transaction instead of ahead of it.
 	ls.queueStartupRewardPrecompute()
+	if ls.startupRewardPrecomputeHook != nil {
+		ls.startupRewardPrecomputeHook()
+	}
 	// Now that both tip and epoch are loaded, check whether the safe zone
 	// already covers the epoch end (TransitionImpossible).  This handles the
 	// case where the node was shut down after the tip advanced past the
