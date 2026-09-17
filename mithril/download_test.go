@@ -338,8 +338,8 @@ func (w *injectedIdleWatchdog) Reset() {
 	}
 }
 
-// Reset invokes the injected callback synchronously, so Stop has no concurrent
-// callback to wait for in this deterministic test double.
+// Stop has no concurrent callback to wait for because Reset invokes the
+// injected callback synchronously in this deterministic test double.
 func (w *injectedIdleWatchdog) Stop() {}
 
 func TestDownloadSnapshotIdleTimeoutRetriesAndResumes(t *testing.T) {
