@@ -4245,21 +4245,43 @@ treats releasing the pin for an incumbent that is no longer selectable
 never-debounced release — there is no "keeping" a connection that is gone.
 Every other release is DISCRETIONARY (the incumbent is still alive): if
 either the progress-stall escape or `longerChainEscapeLocked` (the
-longer-chain comparison, factored out unchanged) would release the pin,
-`switchBackDebouncedLocked` gets the final say. `recordSwitchAwayLocked`
-marks the abandoned connection's departure time in
-`ChainSelector.recentlyLeft` on every switch; a connection abandoned less
-than the cooldown ago cannot reclaim the active connection through either
-discretionary escape, even though it currently satisfies one. This is a rate
-limit, not a correctness change: a genuinely new challenger (never recently
-active) is adopted immediately regardless of which escape fired, and a
-persistent lead is still adopted once the cooldown elapses — so neither
-escape's liveness guarantee is weakened, only the ping-pong between a small
-set of very recently active peers is bounded. Regression tests:
-`TestSwitchBackCooldownBoundsOscillationFrequency` (longer-chain escape),
-`TestSwitchBackCooldownBoundsStallEscapeOscillation` (progress-stall
-escape), and `TestSwitchBackCooldownDoesNotBlockGenuinelyNewChallenger`
-(`chainselection/switch_cooldown_test.go`).
+longer-chain comparison, factored out unchanged) would release the pin, two
+gates get the final say: `switchBackDebouncedLocked` (per-connection: was
+*this* challenger the specific connection just abandoned?) and
+`switchBackRateLimitedLocked` (global: did *any* discretionary release happen
+at all less than the cooldown ago?). `recordSwitchAwayLocked` marks the
+abandoned connection's departure time in `ChainSelector.recentlyLeft` on
+every switch, for the per-connection gate; `lastDiscretionarySwitchAt` is
+stamped only when a discretionary release actually fires, for the global one.
+
+The per-connection gate alone stops exactly two peers ping-ponging, but not
+three or more: real peer connections whose delivered frontiers take turns
+marginally leading each other rotate through it, and by the time evaluation
+cycles back to a given connection it is essentially never "the one just
+abandoned" (some other peer was left more recently), so the per-connection
+debounce never engages for it even under realistic, non-zero inter-arrival
+jitter — confirmed live as three peer connections thrashing roughly every 2
+seconds indefinitely, applied block height completely frozen throughout.
+`switchBackRateLimitedLocked` closes this by bounding the aggregate
+discretionary hand-off rate to at most one per cooldown window, independent of
+which connection is involved or how many are rotating through the incumbent
+role. This remains a rate limit, not a correctness change: a genuinely new
+challenger is still adopted, but no faster than once per cooldown window
+globally, rather than being exempted outright — exempting "never seen as
+active before" is exactly the property a small rotating set of real peers can
+each satisfy in turn forever, which is the gap this closes. A persistent lead
+is still adopted once the cooldown elapses, so neither escape's liveness
+guarantee is weakened; only the maximum hand-off rate is bounded, now
+regardless of how many distinct peers take turns leading. Regression tests:
+`TestSwitchBackCooldownBoundsOscillationFrequency` (longer-chain escape,
+two peers), `TestSwitchBackCooldownBoundsStallEscapeOscillation`
+(progress-stall escape, two peers plus a delayed third), and
+`TestSwitchBackRateLimitBoundsThreeWayRotation` (three peers rotating under
+realistic jitter, the live incident's actual shape) in
+`chainselection/switch_cooldown_test.go`.
+`TestSwitchBackCooldownDoesNotBlockGenuinelyNewChallenger` now pins the
+corrected contract: a new challenger arriving inside the global cooldown
+window is rate-limited like any other, and adopted once that window elapses.
 
 ## Network and Protocol Handling
 
