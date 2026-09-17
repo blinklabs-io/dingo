@@ -1493,6 +1493,39 @@ and `dingo_database_sql_disk_bytes` (`database/plugin/metadata/sqlite/metrics.go
 are pull-based gauges sampled at scrape time — a plain `os.Stat` of
 `metadata.sqlite-wal` and `Store.DiskSize()` respectively — the same pattern
 Badger's own cache gauges already use rather than a background ticker.
+`Store.DiskSize()`'s two `PRAGMA page_count`/`page_size` reads (`sqliteDiskSize`,
+`shared_sqlstore.go`) run on a connection opened fresh for the call and closed
+immediately after, mirroring `checkpointWAL` above rather than using `writeDB`
+or `readDB`. An earlier version queried through `readDB` directly, and one
+gauge read left a connection idled back into that pool indefinitely (neither
+pool sets `SetConnMaxIdleTime`/`SetConnMaxLifetime`); from that point on,
+`checkpointWAL`'s `PRAGMA wal_checkpoint(TRUNCATE)` logged "a reader is still
+holding an old snapshot" on essentially every tick, rather than only
+occasionally, for the rest of the process's life. Reproduced against a live
+affected instance: an external, independently-opened `sqlite3 metadata.sqlite
+"PRAGMA wal_checkpoint(TRUNCATE)"` returned the same `busy=1` result the
+process's own `checkpointWAL` was logging, and moving this gauge to its own
+dedicated connection (this change) made the warnings stop and the `-wal` file
+shrink (observed ~130MB down to ~55MB on the affected instance) -- so the
+correlation and the fix are real. What the mechanism is *not*, however, is
+"any connection merely attached to the pool blocks TRUNCATE": SQLite's own
+documentation for `wal_checkpoint` states that RESTART/TRUNCATE block only on
+an active writer or a reader still reading an old snapshot, not on a
+connection that is idle, and a direct reproduction confirms this for this
+exact driver and DSN --
+`TestWALCheckpointTruncateIdleConnectionDoesNotBlock` (`shared_sqlstore_test.go`)
+runs `sqliteDiskSize`'s exact pre-fix query pattern (two
+`QueryRowContext(...).Scan(...)` calls against `readDB`, connection left
+open in the pool afterward) immediately before a `PRAGMA
+wal_checkpoint(TRUNCATE)` attempt against real, substantial WAL content and
+observes `busy=0`, a full truncation to zero bytes, and `readDB`'s own
+`OpenConnections` staying at 1 throughout -- while an actual held, uncommitted
+read transaction (the same test's positive control) does reproduce `busy=1`.
+So the specific, isolatable cause of the production symptom is not "the idle
+connection's mere presence in the pool"; it is left open here rather than
+asserted, and the dedicated-connection fix stands on the production
+before/after evidence and on matching `checkpointWAL`'s already-established
+pattern, independent of a fully isolated microscopic explanation.
 `dingo_database_sql_wal_bytes` is not a checkpoint-health signal on its own:
 SQLite's PASSIVE/FULL/RESTART checkpoints backfill WAL frames into
 `metadata.sqlite` but never `ftruncate` the `-wal` file, so between
