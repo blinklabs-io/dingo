@@ -1833,6 +1833,17 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	if err := ls.healMithrilGapBlockNonces(ctx); err != nil {
 		return fmt.Errorf("failed to heal Mithril gap block nonces: %w", err)
 	}
+	// Reconstruct the tip's block_nonce when a disaster-recovery truncate
+	// (database/lifecycle.Truncate) landed on a target whose own nonce row
+	// had already been pruned by routine 3-epoch retention.
+	// database.TruncateAfterSlot allows that truncate to proceed as long as
+	// a checkpoint survives before the target, deferring the actual
+	// reconstruction to here -- must run after healMithrilGapBlockNonces
+	// (so a Mithril-healed tip nonce is already reflected) and before any
+	// epoch nonce is computed, for the same reason as the Mithril heal.
+	if err := ls.healTruncateGapBlockNonces(ctx); err != nil {
+		return fmt.Errorf("failed to heal truncate gap block nonces: %w", err)
+	}
 	// Setup event handlers only after startup nonce repair is complete, so a
 	// Mithril-bootstrapped node cannot process chainsync/blockfetch events with
 	// stale gap-block nonces. ChainSync and chain-update can burst at bulk-sync
@@ -3716,6 +3727,25 @@ func (ls *LedgerState) rollbackWithResync(
 	ls.updateTipMetrics(newTipDensity)
 	ls.publishSnapshotsLocked()
 	ls.Unlock()
+	// Reconstruct the new tip's block_nonce if TruncateAfterSlot above
+	// allowed this rollback to proceed with an empty nonce: its own row was
+	// pruned by routine 3-epoch retention, but a checkpoint survives below
+	// it (see database.TruncateAfterSlot's checkpoint check). An ordinary,
+	// Praos-security-parameter-bounded rollback target never falls outside
+	// that retention window, so this is reachable only for a Genesis-mode
+	// rollback -- Ouroboros Genesis has no k-bound and can roll back
+	// arbitrarily deep to resolve a dense competing chain. Must run before
+	// publishLocalLedgerRollback below, whose resync event can otherwise
+	// let another component observe the still-empty nonce, and before any
+	// further block application seeds runningNonce from it (see
+	// healTruncateGapBlockNonces's doc comment for the corruption this
+	// prevents).
+	if healErr := ls.healTruncateGapBlockNonces(context.Background()); healErr != nil {
+		if ls.config.FatalErrorFunc != nil {
+			ls.config.FatalErrorFunc(healErr)
+		}
+		return &rollbackCommittedError{err: healErr}
+	}
 	if publishResync {
 		ls.publishLocalLedgerRollback(point)
 	}
