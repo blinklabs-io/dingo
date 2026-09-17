@@ -20,8 +20,8 @@ import (
 	"os"
 )
 
-// entryReader is what the chunk and index readers need of a file: read, seek,
-// size, close.
+// entryReader is what the chunk and index readers need of a file: read, read at,
+// seek, size, close.
 //
 // It is an interface rather than *os.File so a verified database can hand the
 // readers the bytes it checked instead of a descriptor they read again. A
@@ -33,6 +33,7 @@ import (
 // own; nothing can reach them. See ImmutableDb.openEntry.
 type entryReader interface {
 	io.ReadSeeker
+	io.ReaderAt
 	io.Closer
 	// Size is the entry's length, the way Stat().Size() is a file's.
 	Size() (int64, error)
@@ -47,6 +48,10 @@ type fileEntry struct {
 }
 
 func (f fileEntry) Read(p []byte) (int, error) { return f.file.Read(p) }
+
+func (f fileEntry) ReadAt(p []byte, off int64) (int, error) {
+	return f.file.ReadAt(p, off)
+}
 
 func (f fileEntry) Seek(offset int64, whence int) (int64, error) {
 	return f.file.Seek(offset, whence)
@@ -77,6 +82,10 @@ func newBytesEntry(data []byte) *bytesEntry {
 }
 
 func (b *bytesEntry) Read(p []byte) (int, error) { return b.reader.Read(p) }
+
+func (b *bytesEntry) ReadAt(p []byte, off int64) (int, error) {
+	return b.reader.ReadAt(p, off)
+}
 
 func (b *bytesEntry) Seek(offset int64, whence int) (int64, error) {
 	return b.reader.Seek(offset, whence)
