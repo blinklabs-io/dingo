@@ -133,6 +133,8 @@ func TestDecodeImmutableBlockBatchDecodeErrorCancelsWorkers(t *testing.T) {
 	decodeErr := errors.New("decode failed")
 	cancelObserved := make(chan struct{})
 	var cancelOnce sync.Once
+	const workerCount = 8
+	workersReady := make(chan struct{}, workerCount-1)
 	decoder := func(
 		ctx context.Context,
 		index int,
@@ -140,8 +142,12 @@ func TestDecodeImmutableBlockBatchDecodeErrorCancelsWorkers(t *testing.T) {
 		_ lcommon.VerifyConfig,
 	) (gledger.Block, error) {
 		if index == 0 {
+			for range workerCount - 1 {
+				<-workersReady
+			}
 			return nil, decodeErr
 		}
+		workersReady <- struct{}{}
 		select {
 		case <-ctx.Done():
 			cancelOnce.Do(func() { close(cancelObserved) })
@@ -156,7 +162,7 @@ func TestDecodeImmutableBlockBatchDecodeErrorCancelsWorkers(t *testing.T) {
 			ctx,
 			blocks,
 			lcommon.VerifyConfig{SkipBodyHashValidation: true},
-			8,
+			workerCount,
 			decoder,
 		)
 		resultCh <- err
