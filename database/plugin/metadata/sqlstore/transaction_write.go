@@ -20,7 +20,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
-	sqlitequery "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/internal/query/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -1007,7 +1006,7 @@ WHERE id = ?`,
 	for i := range utxo.Assets {
 		asset := &utxo.Assets[i]
 		asset.UtxoID = utxo.ID
-		err := s.execCached(ctx, db, importAssetQuery,
+		_, err := s.execCached(ctx, db, importAssetQuery,
 			asset.Name,
 			asset.NameHex,
 			asset.PolicyId,
