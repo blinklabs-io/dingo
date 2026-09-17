@@ -4475,10 +4475,10 @@ before mutating memory and releases the record from `database.Txn.OnFinish`,
 which fires on commit *and* on rollback. The removal paths' write hold excludes
 a new record from appearing, and `awaitPendingCallerAdds` then waits for the
 records already in flight. That wait is bounded (`pendingAddDrainTimeout`) and
-logs at ERROR on expiry rather than blocking forever, so a caller that abandons
-its transaction -- or rolls the chain back from inside one it has not finished
--- leaves that one removal exposed to the original window instead of wedging
-every chain mutation behind it. Every in-tree add passes a nil transaction, for
+on expiry the removal path returns an error before deleting persistent blocks,
+and the expired hold is charged once until its transaction finishes. A caller
+that abandons its transaction therefore fails closed rather than exposing an
+uncommitted index to the removal loop. Every in-tree add passes a nil transaction, for
 which `Database.BlockCreate` opens and commits its own before the tip advances,
 so the live blockfetch and forging paths record nothing.
 

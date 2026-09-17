@@ -1352,7 +1352,7 @@ constructed behind it.
 callback that runs exactly once when the transaction reaches its terminal state
 on any path -- a successful commit, a failed commit, an explicit `Rollback`, a
 `Release`, and the rollback `Commit` performs for a read-only transaction --
-dispatched from `finishLocked` without the transaction lock held, so a callback
+dispatched by the terminal paths after the transaction lock is released, so a callback
 may take locks of its own. It is deliberately weaker than `AfterCommit`:
 `AfterCommit` carries a durability claim and so does not fire on rollback, which
 makes it the wrong hook for anything acquired for the transaction's *lifetime* --
