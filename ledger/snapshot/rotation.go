@@ -432,20 +432,31 @@ func (m *Manager) buildRewardStateInputs(
 		return nil, err
 	}
 
+	totalActiveStake := sumPoolStakes(rewardDistribution.PoolStakes)
+	// The full reward-stake distribution's sum minus the post-exclusion
+	// distribution's sum is exactly the stake degraded-pool exclusion removed
+	// from reward_pool_input. Persisting it lets reward calculation verify
+	// the input rows sum to precisely totalActiveStake minus this value
+	// instead of only checking they do not exceed it (dingo #4025); without
+	// it, a proportionally reduced (rather than merely incomplete) input set
+	// would pass the same non-exceeding bound silently.
+	excludedActiveStake := types.Uint64(
+		totalActiveStake - sumPoolStakes(effective.PoolStakes),
+	)
+
 	return &rewardStateBundle{
 		snapshot: &models.RewardSnapshot{
-			Epoch:        epoch,
-			SnapshotType: snapshotType,
-			TotalActiveStake: types.Uint64(
-				sumPoolStakes(rewardDistribution.PoolStakes),
-			),
-			TotalPoolCount:     uint64(len(effective.PoolStakes)),
-			TotalDelegators:    sumDelegators(effective.DelegatorCount),
-			CapturedSlot:       distribution.Slot,
-			BoundarySlot:       evt.BoundarySlot,
-			EpochNonce:         evt.EpochNonce,
-			ProtocolVersion:    evt.ProtocolVersion,
-			CalculationVersion: models.RewardStakeCalculationVersion,
+			Epoch:               epoch,
+			SnapshotType:        snapshotType,
+			TotalActiveStake:    types.Uint64(totalActiveStake),
+			ExcludedActiveStake: &excludedActiveStake,
+			TotalPoolCount:      uint64(len(effective.PoolStakes)),
+			TotalDelegators:     sumDelegators(effective.DelegatorCount),
+			CapturedSlot:        distribution.Slot,
+			BoundarySlot:        evt.BoundarySlot,
+			EpochNonce:          evt.EpochNonce,
+			ProtocolVersion:     evt.ProtocolVersion,
+			CalculationVersion:  models.RewardStakeCalculationVersion,
 		},
 		poolInputs:  poolInputs,
 		stakeInputs: stakeInputs,
