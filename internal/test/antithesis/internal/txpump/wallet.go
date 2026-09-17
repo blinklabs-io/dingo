@@ -184,7 +184,8 @@ func (w *Wallet) ReconcileSnapshot(snapshot []UTxO, presence map[string]bool) {
 	}
 	reserved := make(map[string]struct{})
 	for id, tx := range w.pending {
-		if presence[id] {
+		present, observed := presence[id]
+		if present {
 			for _, in := range tx.inputs {
 				reserved[utxoKey(in)] = struct{}{}
 			}
@@ -202,7 +203,7 @@ func (w *Wallet) ReconcileSnapshot(snapshot []UTxO, presence map[string]bool) {
 				chain[utxoKey(in)] = current
 			}
 		}
-		if !tx.absent {
+		if !observed && !tx.absent {
 			// A node can remove a forged transaction from the mempool before
 			// its committed outputs and spent inputs are visible to LSQ. Keep
 			// the record through one absent observation so the next reconcile
