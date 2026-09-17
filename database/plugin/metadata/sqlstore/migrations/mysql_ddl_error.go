@@ -39,7 +39,7 @@ var mysqlIndexDefinitionPattern = regexp.MustCompile(
 // duplicate-name error for a different object definition.
 func isMySQLDDLAlreadyAppliedOnConn(
 	ctx context.Context,
-	conn *sql.Conn,
+	conn ddlExecer,
 	statement string,
 	err error,
 ) bool {

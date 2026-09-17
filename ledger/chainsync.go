@@ -3965,11 +3965,10 @@ func (ls *LedgerState) tryResolveFork(
 			ls.chain.HeaderCount() > 0 {
 			ls.chainsyncBlockfetchMutex.Lock()
 			if err := ls.restartQueuedBlockfetchAfterForkLocked(e.ConnectionId, pending); err != nil {
-				ls.config.Logger.Warn(
-					"failed to start blockfetch after fork extension",
-					"component", "ledger",
-					"error", err,
-					"connection_id", e.ConnectionId.String(),
+				ls.recoverBlockfetchRestartFailureLocked(
+					e.ConnectionId,
+					err,
+					pending,
 				)
 			}
 			ls.chainsyncBlockfetchMutex.Unlock()
@@ -4260,6 +4259,12 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferred(
 	}
 	ls.pendingBlockfetchEvents = append(ls.pendingBlockfetchEvents, e)
 	ls.batchBlocksReceived++
+	// Range progress is noted where the block actually extends the chain,
+	// not here. Arrival alone is not progress: a block from a batch a
+	// rollback has superseded is discarded unapplied, and one that no
+	// longer fits the tip is declined, yet either would clear the failure
+	// record for the range that is stuck. See
+	// flushPendingBlockfetchBlocksDeferred.
 	if len(ls.pendingBlockfetchEvents) >= blockfetchCommitBatchSize {
 		if err := ls.flushPendingBlockfetchBlocksDeferred(pubs); err != nil {
 			return err
@@ -4300,6 +4305,46 @@ func (ls *LedgerState) restartQueuedBlockfetchAfterForkLocked(
 	connId ouroboros.ConnectionId,
 	pending *pendingPublishes,
 ) error {
+	// When a batch is already in progress on a DIFFERENT connection, let it
+	// complete rather than canceling it, exactly like
+	// handoffPipelineOnSwitchLocked already does for a plain chain-selection
+	// switch (#1922, "preserve in-flight blockfetch batch across chain
+	// switch"): the fetched blocks are canonical regardless of which peer
+	// serves them, so tearing down a healthy in-flight batch buys nothing
+	// and only wastes it. selectedBlockfetchConnId is retargeted below
+	// regardless, so the NEXT batch uses connId once the current one
+	// finishes (or times out / fails, which retries on the then-current
+	// selection).
+	//
+	// This caller (tryResolveFork's "fork extends from current tip" branch)
+	// runs on essentially every active-connection switch: the newly active
+	// connection's next header almost never fits a header queue built by the
+	// connection it replaced, so it resolves here as a from-current-tip
+	// "fork". Before this fix, that unconditionally interrupted whatever
+	// batch was in flight -- bypassing handoffPipelineOnSwitchLocked's
+	// protection entirely via this side channel -- and
+	// handleEventBlockfetchBlockDeferred only accepts blocks whose
+	// connection matches the CURRENT activeBlockfetchConnId, silently
+	// discarding every block already in flight from the batch just torn
+	// down. If the active connection changes faster than one batch's
+	// round-trip, every fetched block is discarded on arrival and the ledger
+	// can never apply anything: observed live as a chain-switch storm with
+	// confirmed zero block-apply progress even after the switch RATE was
+	// bounded (see the chainselection anti-flap pin's SwitchBackCooldown).
+	//
+	// A restart requested for the SAME connection that is already fetching
+	// still tears down and restarts unconditionally (below): the fork just
+	// resolved may have extended the header queue with a wider or different
+	// range than the in-flight request covers, and there is no "different
+	// peer" to protect against here -- see
+	// TestStartQueuedBlockfetchAfterForkRestartClearsShadowState, which
+	// depends on this path resetting per-batch shadow state even when connId
+	// is already the active connection.
+	if ls.chainsyncBlockfetchReadyChan != nil &&
+		!sameConnectionId(ls.activeBlockfetchConnId, connId) {
+		ls.selectedBlockfetchConnId = connId
+		return nil
+	}
 	if ls.chainsyncBlockfetchReadyChan != nil {
 		// The old protocol request cannot be cancelled. Keep late events from
 		// being admitted after the replacement generation is installed when
@@ -4328,6 +4373,67 @@ func (ls *LedgerState) restartQueuedBlockfetchAfterForkLocked(
 	}
 	ls.selectedBlockfetchConnId = connId
 	return ls.startQueuedBlockfetchLocked(connId, pending)
+}
+
+// recoverBlockfetchRestartFailureLocked handles a failed
+// restartQueuedBlockfetchAfterForkLocked call for the "fork extends from
+// current tip" path. failedConnId's connection can die between the
+// fork-resolution decision (made against the connection the fork-extending
+// headers arrived on) and this dispatch -- notably via
+// ConnectionRecycleRequestedEvent, which a rapid string of chain-selection
+// reversals can itself trigger: a peer that loses the active connection
+// mid-batch has its still-in-flight or queued blocks rejected as not
+// extending the (now different) chain tip, and enough of those in a short
+// window recycle it (see noteNonExtendingBlockRejection). Left unhandled
+// here, the fork-extension headers just queued above stay queued with
+// nothing ever scheduled to fetch their bodies -- observed live as
+// continuous reselection with no block-apply progress at all, logged as
+// "failed to start blockfetch after fork extension" / "failed to lookup
+// connection ID".
+//
+// First retry against whatever connection chain selection currently has
+// active, mirroring the fallback handleChainSwitchEvent already uses when
+// its own handoff target is unavailable. If no live alternative exists (or
+// it also fails), fall back to the same recovery
+// ensureBlockfetchDrainingAfterForkQueueFailure uses for the sibling "queued
+// headers with no active fetcher" failure: drop the stranded queue and
+// request a fresh chainsync intersect, so the pipeline resumes on
+// reconnect instead of idling forever.
+//
+// Must be called with ls.chainsyncBlockfetchMutex held.
+func (ls *LedgerState) recoverBlockfetchRestartFailureLocked(
+	failedConnId ouroboros.ConnectionId,
+	restartErr error,
+	pending *pendingPublishes,
+) {
+	if ls.config.GetActiveConnectionFunc != nil {
+		if activeConnId := ls.config.GetActiveConnectionFunc(); activeConnId != nil &&
+			!sameConnectionId(*activeConnId, failedConnId) &&
+			ls.isConnectionLive(*activeConnId) {
+			if retryErr := ls.restartQueuedBlockfetchAfterForkLocked(*activeConnId, pending); retryErr == nil {
+				ls.config.Logger.Info(
+					"retried blockfetch restart after fork extension on the current active connection",
+					"component", "ledger",
+					"failed_connection_id", failedConnId.String(),
+					"active_connection_id", activeConnId.String(),
+					"error", restartErr,
+				)
+				return
+			}
+		}
+	}
+	ls.config.Logger.Warn(
+		"failed to start blockfetch after fork extension, dropping queued headers and requesting chainsync re-sync",
+		"component", "ledger",
+		"error", restartErr,
+		"connection_id", failedConnId.String(),
+	)
+	ls.clearQueuedHeaders()
+	ls.requestChainsyncResync(
+		failedConnId,
+		event.ChainsyncResyncReasonForkExtensionRestartFailed,
+		pending,
+	)
 }
 
 // ensureBlockfetchDrainingAfterForkQueueFailure restarts blockfetch for
@@ -4731,6 +4837,13 @@ func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 	ls.activeBlockfetchStart = time.Now()
 	ls.firstBlockReceived = false
 	headerStart, headerEnd := ls.chain.HeaderRange(blockfetchBatchSize)
+	// Tag the batch with the rollback generation current at request time.
+	// The blocks it delivers are only valid for the chain segment these
+	// queued headers describe; a rollback that abandons that segment
+	// publishes a newer generation before truncating, and the flush below
+	// discards anything still carrying this one. See
+	// blockfetchRollbackGeneration.
+	ls.blockfetchBatchRollbackGeneration = ls.blockfetchRollbackGeneration.Load()
 	ls.blockfetchRequestGeneration++
 	primaryRequestGeneration := ls.blockfetchRequestGeneration
 	ls.blockfetchPrimaryRequestGeneration = primaryRequestGeneration
@@ -5000,22 +5113,64 @@ func (ls *LedgerState) startQueuedBlockfetchFromEventLocked(
 	}()
 }
 
-// blockfetchBatchSuperseded reports whether the primary chain has rolled back
-// since the batch that produced the buffered blocks was requested.
+// blockfetchBatchStillCurrent reports whether the batch the pending blockfetch
+// events belong to was requested against the chain segment and header queue the
+// chain still holds -- that is, whether neither rollback generation has moved
+// since the request. See blockfetchRollbackGeneration and
+// chainRollbackGeneration.
 //
-// The rollback paths take chainsyncBlockfetchMutex for the rollback, so a
-// rollback cannot interleave with a flush that holds it, and they publish the
-// new generation before they change the chain. A reader that has observed a
-// chain change caused by a rollback therefore always observes the new
-// generation here, whether it read under that mutex or not. A rollback that
-// validation refuses restores the generation under the same mutex, so a
-// refused attempt never reads as superseded.
-func (ls *LedgerState) blockfetchBatchSuperseded() bool {
-	return ls.blockfetchBatchChainGeneration !=
-		ls.chainRollbackGeneration.Load()
+// It is passed to the chain as an admission predicate so the comparison and
+// the tip mutation it guards happen under one lock; it is also used directly
+// as a fast path, to drop a whole superseded batch without offering any of it
+// to the chain. Callers must hold chainsyncBlockfetchMutex, which is what
+// guards blockfetchBatchRollbackGeneration; the chain calls it while holding
+// its own mutex, and takes neither of the ledger's.
+func (ls *LedgerState) blockfetchBatchStillCurrent() bool {
+	return ls.blockfetchBatchRollbackGeneration ==
+		ls.blockfetchRollbackGeneration.Load() &&
+		ls.blockfetchBatchChainGeneration ==
+			ls.chainRollbackGeneration.Load()
 }
 
-// flushPendingBlockfetchBlocksDeferred flushes pending blockfetch events and
+// discardStaleBlockfetchBatch drops blocks delivered for a batch that a
+// rollback has since superseded, releasing the deferred-header-validation
+// bookkeeping each of them registered on arrival. It performs the same cleanup
+// the flush does for a block the chain declines, minus the add.
+//
+// Nothing is lost by dropping them: the rollback cleared the queued headers
+// these blocks were fetched against, so the chain would reject every one of
+// them anyway (their parent is no longer on the chain), and any block still
+// wanted after the rollback is re-offered by chainsync and re-fetched by the
+// next batch.
+//
+// The blockfetch range-failure record is deliberately left alone. These blocks
+// never reached the chain, so they are not evidence that the range which is
+// currently stuck can be obtained; clearing it here would reset the count that
+// eventually drops an unservable queued header -- the header that blocks local
+// forging, and the routine aftermath of the slot battle this path resolves.
+func (ls *LedgerState) discardStaleBlockfetchBatch(
+	pending []BlockfetchEvent,
+) error {
+	for _, pendingEvent := range pending {
+		ls.clearDeferredHeaderValidation(pendingEvent.Point)
+		if err := ls.clearPersistentDeferredHeaderValidation(
+			pendingEvent.Point,
+			nil,
+		); err != nil {
+			return err
+		}
+	}
+	ls.config.Logger.Warn(
+		"discarding blockfetch blocks fetched before a chain rollback",
+		"component", "ledger",
+		"block_count", len(pending),
+		"batch_generation", ls.blockfetchBatchRollbackGeneration,
+		"rollback_generation", ls.blockfetchRollbackGeneration.Load(),
+	)
+	return nil
+}
+
+// flushPendingBlockfetchBlocksDeferred is flushPendingBlockfetchBlocks that
 // queues each committed block's chain.update onto pubs instead of letting the
 // chain publish it inline. The blockfetch drain runs under
 // chainsyncBlockfetchMutex; an inline, back-pressured chain.update publish
@@ -5033,20 +5188,16 @@ func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 	}
 	pending := ls.pendingBlockfetchEvents
 	ls.pendingBlockfetchEvents = ls.pendingBlockfetchEvents[:0]
-	if ls.blockfetchBatchSuperseded() {
-		// The chain moved after this batch was requested, so these blocks
-		// continue a chain the node has abandoned. They cannot be applied, and
-		// handing them to chain insertion is not merely futile: fork
-		// resolution rolls back, re-queues the winning peer's header path and
-		// only then restarts blockfetch, so the first stale block would be
-		// rejected as not matching that replacement queue and would clear it,
-		// leaving nothing queued and nothing fetching (issue #3771). Drop them
-		// and let the restarted batch fetch the current continuation instead.
-		ls.config.Logger.Debug(
-			"discarding blockfetch blocks for superseded chain",
-			"component", "ledger",
-			"discarded_blocks", len(pending),
-		)
+	// A rollback published a newer generation after this batch was
+	// requested, so these blocks were fetched for a chain segment that no
+	// longer exists. Discard them rather than offering them to the chain:
+	// the batch was requested against the abandoned segment's queued
+	// headers, which the rollback cleared, and the winner that replaced it
+	// is already on the chain. See blockfetchRollbackGeneration.
+	if !ls.blockfetchBatchStillCurrent() {
+		if err := ls.discardStaleBlockfetchBatch(pending); err != nil {
+			return err
+		}
 		return nil
 	}
 	// Commit each block before exposing it on the primary chain. The chain tip
@@ -5054,24 +5205,28 @@ func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 	// already-advanced in-memory tip can strand the node on a fork when ancestor
 	// lookups hit uncommitted state.
 	for i, pendingEvent := range pending {
-		// A rollback holds chainsyncBlockfetchMutex for its whole duration, so
-		// it cannot land between two insertions of this loop while the flush
-		// holds the same mutex. Re-read anyway: the check is one atomic load,
-		// and it keeps the loop correct on its own terms rather than on a
-		// locking arrangement two files away.
-		if ls.blockfetchBatchSuperseded() {
-			ls.config.Logger.Debug(
-				"discarding blockfetch blocks for superseded chain",
-				"component", "ledger",
-				"discarded_blocks", len(pending)-i,
-			)
-			break
-		}
-		evt, addBlockErr := ls.chain.AddBlockWithPointDeferred(
+		// The generation test above is a fast path, not the guarantee. It
+		// releases nothing, but it also holds nothing: a rollback can publish
+		// its generation and truncate between that test and this add, because
+		// the adoption that does so holds chainsyncMutex while this drain
+		// holds chainsyncBlockfetchMutex. Passing the same comparison as an
+		// admission predicate makes it atomic with the tip mutation it
+		// guards -- the chain evaluates it under the mutex that serializes
+		// every chain mutation, so no rollback can interleave between the
+		// two.
+		evt, addBlockErr := ls.chain.AddBlockWithPointDeferredIf(
 			pendingEvent.Block,
 			pendingEvent.Point,
 			nil,
+			ls.blockfetchBatchStillCurrent,
 		)
+		if errors.Is(addBlockErr, chain.ErrBlockAddNotAdmitted) {
+			// A rollback superseded this batch after the fast path let it
+			// through. Every event still unprocessed belongs to that same
+			// batch, so drop the remainder in one go instead of offering
+			// each one to a chain that will decline it for the same reason.
+			return ls.discardStaleBlockfetchBatch(pending[i:])
+		}
 		if addBlockErr == nil {
 			ls.batchBlocksApplied++
 			// Only a body accepted by chain insertion proves that the tracked
@@ -5096,6 +5251,16 @@ func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 			validationEnabled, _ := ls.validationStateSnapshot()
 			ls.auditContinuationBlock(pendingEvent, validationEnabled)
 			ls.checkSlotBattle(pendingEvent, nil)
+			// The block extended the chain, so the range it belongs to
+			// is fetchable after all and any failure record for it is
+			// stale. Noting it here rather than on arrival is what keeps
+			// the count meaningful: the record exists to unstick a
+			// queued header whose body cannot be applied, which is
+			// exactly the state a delivered-but-never-applied block
+			// leaves the queue in -- and, per
+			// noteBlockfetchRangeUnavailable, the routine aftermath of a
+			// tip slot battle, which is the case this path creates.
+			ls.noteBlockfetchRangeProgress(pendingEvent.Point)
 			// This connection just extended the chain, so it is not stuck
 			// replaying an abandoned fork; forgive any earlier non-extending
 			// rejections instead of letting them combine with a later,
@@ -5134,7 +5299,7 @@ func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 			// generation before they touch the chain, so any mismatch a
 			// rollback caused is observed here as a generation that has
 			// already moved.
-			if !ls.blockfetchBatchSuperseded() {
+			if ls.blockfetchBatchStillCurrent() {
 				ls.clearQueuedHeaders()
 			}
 		}

@@ -530,7 +530,7 @@ func TestRefusedRollbackKeepsInFlightBatch(t *testing.T) {
 	)
 
 	f.ls.chainsyncBlockfetchMutex.Lock()
-	superseded := f.ls.blockfetchBatchSuperseded()
+	superseded := !f.ls.blockfetchBatchStillCurrent()
 	f.ls.chainsyncBlockfetchMutex.Unlock()
 	require.False(
 		t,
