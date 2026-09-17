@@ -651,14 +651,22 @@ func TestTickResyncsOnLocalTipPlateau(t *testing.T) {
 	)
 }
 
-// rollbackRegisteredPeer builds the chain-selection state a peer is left in
-// immediately after a plateau resync: the connection was closed for a fresh
-// chainsync, the peer re-intersected at the local tip and sent exactly one
-// post-intersect RollBackward, so its DELIVERED frontier is that intersection
-// point with no block number while its ADVERTISED tip is well ahead. This is
-// the shape ApplyRollback produces for any rollback point outside the retained
-// delivered-header history, and the shape #3989's rollback registration
-// records for a peer chain selection has not seen a header from at all.
+// rollbackRegisteredPeer hand-builds the peer tip a peer holds immediately
+// after a plateau resync: its DELIVERED frontier is the point its session
+// intersected at, carrying no block number, while its ADVERTISED tip is well
+// ahead. It is the shape ApplyRollback produces for a rollback point outside
+// the retained delivered-header history, and the shape
+// newPeerChainTipFromRollback records for a connection chain selection has
+// seen no header from at all.
+//
+// The tests below pair it with fakeChainSelector, so they exercise the
+// watchdog's decision GIVEN that peer tip and prove nothing about whether
+// chain selection ever hands the watchdog one. It does, but only through the
+// rollback registration and the awaiting-first-header selectability exemption
+// in chainselection; that half is covered end to end against a real
+// ChainSelector in recycler_chainselection_test.go, and reverting either of
+// those two chainselection changes turns
+// TestTickResyncsOnPlateauAfterRecycleWithRealChainSelector red.
 func rollbackRegisteredPeer(
 	connId ouroboros.ConnectionId,
 	intersectSlot uint64,

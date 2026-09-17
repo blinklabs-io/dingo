@@ -493,8 +493,9 @@ func (p *PeerChainTip) SelectionTip() ochainsync.Tip {
 
 // AwaitingFirstHeader reports whether the peer has not delivered a header for
 // its current delivered frontier, so SelectionTip is a bare point carrying no
-// block number: a post-intersect RollBackward that landed outside the retained
-// delivered-header history, or a rollback to origin.
+// block number: an entry registered from a post-FindIntersect RollBackward
+// (newPeerChainTipFromRollback), a RollBackward on a tracked peer that landed
+// outside the retained delivered-header history, or a rollback to origin.
 //
 // Callers that reason about how far a peer has got need this, because for such
 // a peer the delivered frontier is the point the session intersected at rather

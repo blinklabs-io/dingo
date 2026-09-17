@@ -517,6 +517,22 @@ func (r *Recycler) checkLocalTipPlateau(
 	// correct throughout that window, so use it while the peer is still
 	// awaiting its first header.
 	//
+	// This only ever runs because chain selection tracks that peer. The
+	// sequence a plateau resync sets off is: the resync closes the connection
+	// (LocalTipPlateau is in chainsyncResyncRequiresFreshConnection,
+	// ouroboros/chainsync.go), the ConnectionClosedEvent subscription in
+	// node.go calls ChainSelector.RemovePeer, which drops the peer tip and
+	// clears bestPeerConn, and the replacement's only chainsync traffic until
+	// the network's next block is its post-FindIntersect MsgRollBackward.
+	// Chain selection registers the peer from that rollback
+	// (registerPeerFromRollbackLocked) and exempts an entry with no delivered
+	// header from the two behind-filters in isPeerSelectableLocked, which is
+	// what makes it selectable with a delivered block number of 0. Without
+	// both of those GetBestPeer() is nil for the whole window and this
+	// function has already returned above -- the watchdog is not disarmed by
+	// the comparison, it has no peer to compare against at all. The two
+	// changes are only useful together, so keep them together.
+	//
 	// The advertised tip is untrusted, so the substitution is confined so that
 	// a peer can only ever spend it on itself: it applies only while the peer
 	// awaits its first header, only when it raises the comparison value, and
