@@ -27,6 +27,7 @@ import (
 	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
 	gouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	oblockfetch "github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/protocol/handshake"
@@ -38,45 +39,54 @@ import (
 // path that validates the end point after accepting a valid start point. The
 // sender-level tests cannot cover this branch because they bypass the handler.
 func TestBlockfetchServerRequestRangeRejectsInvalidEnd(t *testing.T) {
-	ledgerState := newTestLedgerState(t)
-	blocks, err := testfixtures.GenerateConwayChain(3)
-	require.NoError(t, err)
-	for _, block := range blocks {
-		require.NoError(t, ledgerState.Chain().AddBlock(block, nil))
-	}
-	// Keep block 1 as an actual rolled-back point. Chain.FromPoint rejects
-	// this point through its membership check even though BlockByPoint can
-	// still resolve the historical block from the manager cache.
-	require.NoError(t, ledgerState.Chain().Rollback(ocommon.NewPoint(
-		blocks[0].SlotNumber(),
-		blocks[0].Hash().Bytes(),
-	)))
-
-	point := func(index int) ocommon.Point {
-		return ocommon.NewPoint(
-			blocks[index].SlotNumber(),
-			blocks[index].Hash().Bytes(),
-		)
-	}
-	start := point(0)
-	validEnd := point(0)
-	missingEndHash := make([]byte, 32)
-	copy(missingEndHash, "missing-end")
 	cases := []struct {
 		name string
-		end  ocommon.Point
+		end  func([]gledger.Block) ocommon.Point
 	}{
 		{
 			name: "missing end",
-			end:  ocommon.NewPoint(validEnd.Slot, missingEndHash),
+			end: func(blocks []gledger.Block) ocommon.Point {
+				missingEndHash := make([]byte, 32)
+				copy(missingEndHash, "missing-end")
+				return ocommon.NewPoint(blocks[0].SlotNumber(), missingEndHash)
+			},
 		},
 		{
 			name: "rolled-back fork end",
-			end:  point(1),
+			end: func(blocks []gledger.Block) ocommon.Point {
+				return ocommon.NewPoint(
+					blocks[1].SlotNumber(),
+					blocks[1].Hash().Bytes(),
+				)
+			},
 		},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
+			ledgerState := newTestLedgerState(t)
+			blocks, err := testfixtures.GenerateConwayChain(3)
+			require.NoError(t, err)
+			for _, block := range blocks {
+				require.NoError(t, ledgerState.Chain().AddBlock(block, nil))
+			}
+			// Keep block 1 as an actual rolled-back point. Chain.FromPoint
+			// rejects this point through its membership check even though
+			// BlockByPoint can still resolve the historical block from the
+			// manager cache.
+			require.NoError(t, ledgerState.Chain().Rollback(ocommon.NewPoint(
+				blocks[0].SlotNumber(),
+				blocks[0].Hash().Bytes(),
+			)))
+
+			point := func(index int) ocommon.Point {
+				return ocommon.NewPoint(
+					blocks[index].SlotNumber(),
+					blocks[index].Hash().Bytes(),
+				)
+			}
+			start := point(0)
+			validEnd := point(0)
+			invalidEnd := test.end(blocks)
 			logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 			bus := event.NewEventBus(nil, logger)
 			t.Cleanup(bus.Close)
@@ -152,7 +162,7 @@ func TestBlockfetchServerRequestRangeRejectsInvalidEnd(t *testing.T) {
 			peer.send(
 				t,
 				oblockfetch.ProtocolId,
-				oblockfetch.NewMsgRequestRange(start, test.end),
+				oblockfetch.NewMsgRequestRange(start, invalidEnd),
 			)
 			segment := peer.readResponse(t, 5*time.Second)
 			require.Equal(t, oblockfetch.ProtocolId, segment.GetProtocolId())

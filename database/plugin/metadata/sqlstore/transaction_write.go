@@ -20,7 +20,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
-	sqlitequery "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/internal/query/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -903,6 +902,7 @@ RETURNING id`
 // re-parsing and re-planning the identical statement text on every UTxO
 // output insert.
 const insertUtxoQueryIgnoreConflict = `
+-- name: CreateUtxoIfAbsent :one
 INSERT INTO utxo (
     transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
     staking_key, credential_tag, datum_hash, spent_at_tx_id,
@@ -911,6 +911,17 @@ INSERT INTO utxo (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (tx_id, output_idx) DO NOTHING
 RETURNING id`
+
+// importAssetQuery is the conflict-tolerant asset INSERT used by both the
+// snapshot importer and insertUtxoModel. It is a fixed query shape on every
+// imported asset, so keep one prepared statement for the Store lifetime just
+// like the surrounding UTxO importer statements.
+const importAssetQuery = `
+INSERT INTO asset (
+    name, name_hex, policy_id, fingerprint, utxo_id, amount
+) VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT (name, policy_id, utxo_id) DO NOTHING
+`
 
 // getAssetIDQuery looks up the id of the asset row insertUtxoModel's
 // ImportAsset call just created (or matched via its own ON CONFLICT), so
@@ -993,22 +1004,18 @@ WHERE id = ?`,
 	if err := persistUtxoPointer(ctx, db, id, utxo.Pointer); err != nil {
 		return err
 	}
-	q := s.operationalQueries(db)
 	for i := range utxo.Assets {
 		asset := &utxo.Assets[i]
 		asset.UtxoID = utxo.ID
-		err := q.ImportAsset(
-			ctx,
-			sqlitequery.ImportAssetParams{
-				Name:        asset.Name,
-				NameHex:     asset.NameHex,
-				PolicyID:    asset.PolicyId,
-				Fingerprint: asset.Fingerprint,
-				UtxoID:      sql.NullInt64{Int64: id, Valid: true},
-				Amount: sql.NullString{
-					String: decimalUint64(asset.Amount),
-					Valid:  true,
-				},
+		_, err := s.execCached(ctx, db, importAssetQuery,
+			asset.Name,
+			asset.NameHex,
+			asset.PolicyId,
+			asset.Fingerprint,
+			sql.NullInt64{Int64: id, Valid: true},
+			sql.NullString{
+				String: decimalUint64(asset.Amount),
+				Valid:  true,
 			},
 		)
 		if err != nil {
