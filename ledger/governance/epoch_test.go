@@ -160,7 +160,16 @@ WHERE credential_tag = ? AND staking_key = ? AND added_slot = ?`,
 	}
 }
 
-func TestProcessEpochExpiresProposalAndRefundsDeposit(t *testing.T) {
+// TestProcessEpochExpiresProposalWithoutRefundingDeposit pins the first half
+// of the expire/drop split (dingo#4411): marking a proposal expired must not
+// itself refund its deposit. cardano-ledger does not return an expired
+// governance action's deposit until one full epoch after it is marked
+// expired -- refunding it immediately inflated the very next mark snapshot's
+// total active stake by the deposit amount whenever the return account was
+// still delegated. See
+// TestProcessEpochDropsExpiredProposalAndRefundsDepositNextEpoch for the
+// drop half.
+func TestProcessEpochExpiresProposalWithoutRefundingDeposit(t *testing.T) {
 	t.Parallel()
 
 	db, store := newTallyTestDB(t)
@@ -214,10 +223,16 @@ func TestProcessEpochExpiresProposalAndRefundsDeposit(t *testing.T) {
 	require.NoError(t, txn.Commit())
 
 	assert.Equal(t, 1, out.ExpiredCount)
+	assert.Equal(t, 0, out.DroppedCount)
 	account, err := store.GetAccountByCredential(0, stakeCred, false, nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
-	assert.Equal(t, uint64(12), uint64(account.Reward))
+	assert.Equal(
+		t,
+		uint64(5),
+		uint64(account.Reward),
+		"marking a proposal expired must not refund its deposit yet",
+	)
 
 	proposal, err := db.GetGovernanceProposal(txHash, 0, nil)
 	require.NoError(t, err)
@@ -225,9 +240,106 @@ func TestProcessEpochExpiresProposalAndRefundsDeposit(t *testing.T) {
 	require.NotNil(t, proposal.ExpiredSlot)
 	assert.Equal(t, uint64(5), *proposal.ExpiredEpoch)
 	assert.Equal(t, uint64(500), *proposal.ExpiredSlot)
+	assert.Nil(t, proposal.DroppedEpoch)
+	assert.Nil(t, proposal.DroppedSlot)
 }
 
-func TestProcessEpochReplaysBoundaryExpiredProposalAfterStakeRewardReset(
+// TestProcessEpochDropsExpiredProposalAndRefundsDepositNextEpoch is the
+// regression test for dingo#4411: a proposal marked expired at epoch E must
+// have its deposit refunded only when ProcessEpoch runs for epoch E+1, not
+// immediately.
+func TestProcessEpochDropsExpiredProposalAndRefundsDepositNextEpoch(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, store := newTallyTestDB(t)
+	stakeCred := testBytes(28, 2)
+	rewardAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		stakeCred,
+	)
+	require.NoError(t, err)
+	rewardAddrBytes, err := rewardAddr.Bytes()
+	require.NoError(t, err)
+
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
+		StakingKey: stakeCred,
+		Reward:     types.Uint64(5),
+		Active:     true,
+	}))
+	txHash := testBytes(32, 3)
+	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
+		TxHash:        txHash,
+		ActionIndex:   0,
+		ActionType:    uint8(lcommon.GovActionTypeInfo),
+		ProposedEpoch: 1,
+		ExpiresEpoch:  4,
+		AnchorURL:     "https://example.invalid/expired",
+		AnchorHash:    testBytes(32, 4),
+		Deposit:       7,
+		ReturnAddress: rewardAddrBytes,
+		AddedSlot:     100,
+	}, nil))
+
+	runEpoch := func(newEpoch, boundarySlot uint64) *EpochOutput {
+		t.Helper()
+		txn := db.MetadataTxn(true)
+		defer txn.Release()
+		out, err := ProcessEpoch(&EpochInput{
+			DB:           db,
+			Txn:          txn,
+			PrevEpoch:    newEpoch - 1,
+			NewEpoch:     newEpoch,
+			BoundarySlot: boundarySlot,
+			PParams:      conwayPParamsFixture(10),
+			UpdateFn: func(
+				pparams lcommon.ProtocolParameters,
+				_ any,
+			) (lcommon.ProtocolParameters, error) {
+				return pparams, nil
+			},
+		})
+		require.NoError(t, err)
+		require.NoError(t, txn.Commit())
+		return out
+	}
+
+	// Epoch 5: marked expired, no refund yet.
+	out := runEpoch(5, 500)
+	assert.Equal(t, 1, out.ExpiredCount)
+	assert.Equal(t, 0, out.DroppedCount)
+	account, err := store.GetAccountByCredential(0, stakeCred, false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	assert.Equal(t, uint64(5), uint64(account.Reward))
+
+	// Epoch 6: dropped, deposit refunded now.
+	out = runEpoch(6, 600)
+	assert.Equal(t, 0, out.ExpiredCount)
+	assert.Equal(t, 1, out.DroppedCount)
+	account, err = store.GetAccountByCredential(0, stakeCred, false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	assert.Equal(t, uint64(12), uint64(account.Reward))
+
+	proposal, err := db.GetGovernanceProposal(txHash, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, proposal.ExpiredEpoch)
+	assert.Equal(t, uint64(5), *proposal.ExpiredEpoch)
+	require.NotNil(t, proposal.DroppedEpoch)
+	require.NotNil(t, proposal.DroppedSlot)
+	assert.Equal(t, uint64(6), *proposal.DroppedEpoch)
+	assert.Equal(t, uint64(600), *proposal.DroppedSlot)
+}
+
+// TestProcessEpochReplaysBoundaryDroppedProposalAfterStakeRewardReset mirrors
+// TestProcessEpochReplaysBoundaryTreasuryWithdrawalAfterStakeRewardReset for
+// the drop step: a crash-replayed boundary must reapply the deposit refund's
+// treasury/pot side effects without re-marking the proposal dropped twice.
+func TestProcessEpochReplaysBoundaryDroppedProposalAfterStakeRewardReset(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -250,16 +362,16 @@ func TestProcessEpochReplaysBoundaryExpiredProposalAfterStakeRewardReset(
 	}, nil))
 	require.NoError(t, store.SetNetworkState(100, 20, 1, nil))
 
-	runEpoch := func() *EpochOutput {
+	runEpoch := func(newEpoch, boundarySlot uint64) *EpochOutput {
 		t.Helper()
 		txn := db.MetadataTxn(true)
 		defer txn.Release()
 		out, err := ProcessEpoch(&EpochInput{
 			DB:           db,
 			Txn:          txn,
-			PrevEpoch:    4,
-			NewEpoch:     5,
-			BoundarySlot: 500,
+			PrevEpoch:    newEpoch - 1,
+			NewEpoch:     newEpoch,
+			BoundarySlot: boundarySlot,
 			PParams:      conwayPParamsFixture(10),
 			UpdateFn: func(
 				pparams lcommon.ProtocolParameters,
@@ -273,19 +385,29 @@ func TestProcessEpochReplaysBoundaryExpiredProposalAfterStakeRewardReset(
 		return out
 	}
 
-	out := runEpoch()
+	// Epoch 5: marked expired, no refund/treasury effect yet.
+	out := runEpoch(5, 500)
 	assert.Equal(t, 1, out.ExpiredCount)
 	state, err := store.GetNetworkState(nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, uint64(100), uint64(state.Treasury))
+
+	// Epoch 6: dropped, deposit refunded to treasury (no reward account).
+	out = runEpoch(6, 600)
+	assert.Equal(t, 1, out.DroppedCount)
+	state, err = store.GetNetworkState(nil)
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	assert.Equal(t, uint64(125), uint64(state.Treasury))
 
 	// Crash replay re-applies stake rewards first, which resets the same
-	// boundary NetworkState row before governance is run again.
-	require.NoError(t, store.SetNetworkState(100, 20, 500, nil))
+	// boundary NetworkState row before governance is run again for the same
+	// (epoch 6) boundary.
+	require.NoError(t, store.SetNetworkState(100, 20, 600, nil))
 
-	out = runEpoch()
-	assert.Equal(t, 0, out.ExpiredCount)
+	out = runEpoch(6, 600)
+	assert.Equal(t, 0, out.DroppedCount)
 	state, err = store.GetNetworkState(nil)
 	require.NoError(t, err)
 	require.NotNil(t, state)
@@ -324,25 +446,40 @@ func TestProcessEpochReturnsMissingRewardAccountRefundToTreasury(
 	}, nil))
 	require.NoError(t, store.SetNetworkState(100, 20, 1, nil))
 
-	txn := db.MetadataTxn(true)
-	defer txn.Release()
-	out, err := ProcessEpoch(&EpochInput{
-		DB:           db,
-		Txn:          txn,
-		PrevEpoch:    4,
-		NewEpoch:     5,
-		BoundarySlot: 500,
-		PParams:      conwayPParamsFixture(10),
-		UpdateFn: func(
-			pparams lcommon.ProtocolParameters,
-			_ any,
-		) (lcommon.ProtocolParameters, error) {
-			return pparams, nil
-		},
-	})
-	require.NoError(t, err)
-	require.NoError(t, txn.Commit())
+	runEpoch := func(newEpoch, boundarySlot uint64) *EpochOutput {
+		t.Helper()
+		txn := db.MetadataTxn(true)
+		defer txn.Release()
+		out, err := ProcessEpoch(&EpochInput{
+			DB:           db,
+			Txn:          txn,
+			PrevEpoch:    newEpoch - 1,
+			NewEpoch:     newEpoch,
+			BoundarySlot: boundarySlot,
+			PParams:      conwayPParamsFixture(10),
+			UpdateFn: func(
+				pparams lcommon.ProtocolParameters,
+				_ any,
+			) (lcommon.ProtocolParameters, error) {
+				return pparams, nil
+			},
+		})
+		require.NoError(t, err)
+		require.NoError(t, txn.Commit())
+		return out
+	}
+
+	// Epoch 5: marked expired, no treasury effect yet.
+	out := runEpoch(5, 500)
 	assert.Equal(t, 1, out.ExpiredCount)
+	state, err := store.GetNetworkState(nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, uint64(100), uint64(state.Treasury))
+
+	// Epoch 6: dropped, unclaimed deposit routed to treasury now.
+	out = runEpoch(6, 600)
+	assert.Equal(t, 1, out.DroppedCount)
 
 	active, err := store.GetAccountByCredential(0, stakeCred, false, nil)
 	require.NoError(t, err)
@@ -350,7 +487,7 @@ func TestProcessEpochReturnsMissingRewardAccountRefundToTreasury(
 	account, err := store.GetAccountByCredential(0, stakeCred, true, nil)
 	require.NoError(t, err)
 	assert.Nil(t, account)
-	state, err := store.GetNetworkState(nil)
+	state, err = store.GetNetworkState(nil)
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	assert.Equal(t, uint64(107), uint64(state.Treasury))
@@ -362,6 +499,8 @@ func TestProcessEpochReturnsMissingRewardAccountRefundToTreasury(
 	require.NotNil(t, proposal.ExpiredSlot)
 	assert.Equal(t, uint64(5), *proposal.ExpiredEpoch)
 	assert.Equal(t, uint64(500), *proposal.ExpiredSlot)
+	require.NotNil(t, proposal.DroppedEpoch)
+	assert.Equal(t, uint64(6), *proposal.DroppedEpoch)
 }
 
 // TestProcessEpochBootstrapParameterChangeWithoutCommitteeDoesNotRatify
@@ -1480,27 +1619,35 @@ func TestProcessEpochOrphanedSiblingMissingReturnAccountGoesToTreasury(
 		nil,
 	))
 
-	txn := db.MetadataTxn(true)
-	defer txn.Release()
-	out, err := ProcessEpoch(&EpochInput{
-		DB:           db,
-		Txn:          txn,
-		PrevEpoch:    4,
-		NewEpoch:     5,
-		BoundarySlot: 500,
-		PParams:      conwayPParamsFixture(10),
-		UpdateFn: func(p lcommon.ProtocolParameters, _ any) (lcommon.ProtocolParameters, error) {
-			return p, nil
-		},
-	})
-	require.NoError(t, err)
-	require.NoError(t, txn.Commit())
+	runEpoch := func(newEpoch, boundarySlot uint64) *EpochOutput {
+		t.Helper()
+		txn := db.MetadataTxn(true)
+		defer txn.Release()
+		out, err := ProcessEpoch(&EpochInput{
+			DB:           db,
+			Txn:          txn,
+			PrevEpoch:    newEpoch - 1,
+			NewEpoch:     newEpoch,
+			BoundarySlot: boundarySlot,
+			PParams:      conwayPParamsFixture(10),
+			UpdateFn: func(p lcommon.ProtocolParameters, _ any) (lcommon.ProtocolParameters, error) {
+				return p, nil
+			},
+		})
+		require.NoError(t, err)
+		require.NoError(t, txn.Commit())
+		return out
+	}
+
+	out := runEpoch(5, 500)
 
 	assert.Equal(t, 1, out.OrphanedCount)
 
 	child, err := db.GetGovernanceProposal(childHash, 0, nil)
 	require.NoError(t, err)
 	require.NotNil(t, child.ExpiredEpoch)
+	assert.Nil(t, child.DroppedEpoch,
+		"orphaned proposal must not be dropped/refunded yet")
 
 	missing, err := store.GetAccountByCredential(
 		0,
@@ -1512,6 +1659,15 @@ func TestProcessEpochOrphanedSiblingMissingReturnAccountGoesToTreasury(
 	assert.Nil(t, missing, "orphan refund must not create a reward account")
 
 	state, err := store.GetNetworkState(nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, uint64(100), uint64(state.Treasury),
+		"the orphaned proposal's deposit must not reach the treasury yet")
+
+	// Next epoch's drop step routes the unclaimed deposit to the treasury.
+	out = runEpoch(6, 600)
+	assert.Equal(t, 1, out.DroppedCount)
+	state, err = store.GetNetworkState(nil)
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	assert.Equal(t, uint64(125), uint64(state.Treasury))
@@ -1556,21 +1712,27 @@ func TestProcessEpochTransitiveOrphanRemoval(t *testing.T) {
 		nil,
 	))
 
-	txn := db.MetadataTxn(true)
-	defer txn.Release()
-	out, err := ProcessEpoch(&EpochInput{
-		DB:           db,
-		Txn:          txn,
-		PrevEpoch:    4,
-		NewEpoch:     5,
-		BoundarySlot: 500,
-		PParams:      conwayPParamsFixture(10),
-		UpdateFn: func(p lcommon.ProtocolParameters, _ any) (lcommon.ProtocolParameters, error) {
-			return p, nil
-		},
-	})
-	require.NoError(t, err)
-	require.NoError(t, txn.Commit())
+	runEpoch := func(newEpoch, boundarySlot uint64) *EpochOutput {
+		t.Helper()
+		txn := db.MetadataTxn(true)
+		defer txn.Release()
+		out, err := ProcessEpoch(&EpochInput{
+			DB:           db,
+			Txn:          txn,
+			PrevEpoch:    newEpoch - 1,
+			NewEpoch:     newEpoch,
+			BoundarySlot: boundarySlot,
+			PParams:      conwayPParamsFixture(10),
+			UpdateFn: func(p lcommon.ProtocolParameters, _ any) (lcommon.ProtocolParameters, error) {
+				return p, nil
+			},
+		})
+		require.NoError(t, err)
+		require.NoError(t, txn.Commit())
+		return out
+	}
+
+	out := runEpoch(5, 500)
 
 	assert.Equal(t, 1, out.EnactedCount)
 	assert.Equal(t, 2, out.OrphanedCount)
@@ -1581,10 +1743,21 @@ func TestProcessEpochTransitiveOrphanRemoval(t *testing.T) {
 		require.NotNil(t, p.ExpiredEpoch,
 			"proposal %x should be orphaned", hash)
 		assert.Equal(t, uint64(5), *p.ExpiredEpoch)
+		assert.Nil(t, p.DroppedEpoch,
+			"orphaned proposal %x must not be dropped/refunded yet", hash)
 	}
 
-	// Enacted parent's deposit (10) + orphaned child (20) + grandchild (30) = 60.
+	// Enactment returns its deposit immediately (10); the orphaned child (20)
+	// and grandchild (30) are only marked expired this epoch, not dropped.
 	account, err := store.GetAccountByCredential(0, stakeCred, false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	assert.Equal(t, uint64(10), uint64(account.Reward))
+
+	// Next epoch's drop step refunds both orphaned deposits (20 + 30 = 50).
+	out = runEpoch(6, 600)
+	assert.Equal(t, 2, out.DroppedCount)
+	account, err = store.GetAccountByCredential(0, stakeCred, false, nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, uint64(60), uint64(account.Reward))
@@ -1753,22 +1926,29 @@ func TestProcessEpochOrphanAfterExpiry(t *testing.T) {
 		nil,
 	))
 
-	txn := db.MetadataTxn(true)
-	defer txn.Release()
-	out, err := ProcessEpoch(&EpochInput{
-		DB:           db,
-		Txn:          txn,
-		PrevEpoch:    4,
-		NewEpoch:     5,
-		BoundarySlot: 500,
-		PParams:      conwayPParamsFixture(10),
-		UpdateFn: func(p lcommon.ProtocolParameters, _ any) (lcommon.ProtocolParameters, error) {
-			return p, nil
-		},
-	})
-	require.NoError(t, err)
-	require.NoError(t, txn.Commit())
+	runEpoch := func(newEpoch, boundarySlot uint64) *EpochOutput {
+		t.Helper()
+		txn := db.MetadataTxn(true)
+		defer txn.Release()
+		out, err := ProcessEpoch(&EpochInput{
+			DB:           db,
+			Txn:          txn,
+			PrevEpoch:    newEpoch - 1,
+			NewEpoch:     newEpoch,
+			BoundarySlot: boundarySlot,
+			PParams:      conwayPParamsFixture(10),
+			UpdateFn: func(p lcommon.ProtocolParameters, _ any) (lcommon.ProtocolParameters, error) {
+				return p, nil
+			},
+		})
+		require.NoError(t, err)
+		require.NoError(t, txn.Commit())
+		return out
+	}
 
+	// Epoch 5: parent expires and orphans the child; neither deposit is
+	// refunded yet.
+	out := runEpoch(5, 500)
 	assert.Equal(t, 1, out.ExpiredCount)
 	assert.Equal(t, 1, out.OrphanedCount)
 
@@ -1776,8 +1956,23 @@ func TestProcessEpochOrphanAfterExpiry(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, child.ExpiredEpoch)
 	assert.Equal(t, uint64(5), *child.ExpiredEpoch)
+	assert.Nil(t, child.DroppedEpoch)
 
 	account, err := store.GetAccountByCredential(0, stakeCred, false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	assert.Equal(
+		t,
+		uint64(0),
+		uint64(account.Reward),
+		"neither deposit may be refunded in the epoch the proposals expire",
+	)
+
+	// Epoch 6: both deposits (parent + orphaned child) are dropped and
+	// refunded together.
+	out = runEpoch(6, 600)
+	assert.Equal(t, 2, out.DroppedCount)
+	account, err = store.GetAccountByCredential(0, stakeCred, false, nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, uint64(30), uint64(account.Reward))

@@ -11611,10 +11611,33 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    truncated, trailing, unsupported, or mismatched action data fails before
    enactment, tally, or ledger-view use. After enactment, descendants of the
    winning purpose-chain action remain active; competing siblings and their
-   descendant subtrees are expired and refunded. Natural expiry instead
-   removes the expired action's descendant subtree. These lifecycle writes use
-   `expired_slot` and reward journals so slot rollback restores both proposal
-   availability and deposits.
+   descendant subtrees are marked expired. Natural expiry instead marks the
+   expired action's own descendant subtree. Neither refunds a deposit at this
+   point (see the DROP step below); these lifecycle writes use `expired_slot`
+   and reward journals so slot rollback restores both proposal availability
+   and deposits.
+
+   **DROP** (dingo#4411): marking a proposal expired -- whether by natural
+   expiry or as an orphaned competing sibling -- does not itself return its
+   deposit. cardano-ledger drops an expired action, and returns its deposit,
+   one full epoch later, the same one-epoch delay ratification has before
+   enactment; refunding immediately made the very next epoch's mark snapshot
+   double-count the deposit for any return account still delegated to a pool,
+   inflating that pool's stake and its network-wide total by the deposit
+   amount. This runs as its own step, *before* natural expiry/orphan removal
+   mark any new proposals expired in the same tick, so a proposal marked
+   expired this epoch is not eligible for its own drop until the following
+   epoch's tick: `GetExpiredAwaitingDropGovernanceProposals` finds proposals
+   expired in a prior epoch whose deposit has not yet been returned, refunds
+   each (`refundProposalDeposit`), and stamps `governance_proposal_drop`
+   (`dropped_epoch`/`dropped_slot`) -- a companion table, not columns on
+   `governance_proposal`, because that table was last rebuilt via
+   rename-and-recreate with an unqualified `SELECT *` in the
+   `governance-proposal-optional-anchor` migration, which cannot tolerate
+   columns added to it afterward. Proposals already durably dropped at this
+   exact boundary are replayed fail-closed via
+   `GetDroppedGovernanceProposalsAt`, mirroring the enacted-proposal replay
+   above.
 
    The governance adapter resolves both Conway and Dijkstra protocol-parameter
    types. Action decoding follows the active parameter type, so a Dijkstra

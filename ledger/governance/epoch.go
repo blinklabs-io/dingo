@@ -73,6 +73,7 @@ type EpochOutput struct {
 	EnactedCount      int
 	RatifiedCount     int
 	ExpiredCount      int
+	DroppedCount      int
 	OrphanedCount     int
 	HardForkInitiated bool
 	// PlutusV2CostModelWritten is true when any proposal enacted this tick
@@ -285,20 +286,83 @@ func ProcessEpoch(
 		}
 	}
 
+	// --- DROP (deposit return for proposals expired in a prior epoch) --
+	//
+	// cardano-ledger does not return an expired governance action's deposit
+	// in the same epoch it is detected as expired: the actual removal (and
+	// deposit refund) happens one full epoch later, the same one-epoch delay
+	// ratification has before enactment above. Processing this drop step
+	// before EXPIRY below -- which marks proposals expired for the *current*
+	// epoch -- is what preserves that delay: a proposal marked expired below
+	// is not visible to this step until the following epoch's tick reads it
+	// here (dingo#4411: refunding immediately inflated the very next mark
+	// snapshot's total active stake by the deposit amount for any refund
+	// landing on a delegated, still-registered reward account).
+	replayedDropped, err := in.DB.GetDroppedGovernanceProposalsAt(
+		in.NewEpoch,
+		in.BoundarySlot,
+		in.Txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get boundary-dropped proposals: %w", err)
+	}
+	droppable, err := in.DB.GetExpiredAwaitingDropGovernanceProposals(in.Txn)
+	if err != nil {
+		return nil, fmt.Errorf("get expired-awaiting-drop proposals: %w", err)
+	}
+	dropProposal := func(p *models.GovernanceProposal, replay bool) error {
+		if err := refundProposalDeposit(
+			in.DB,
+			in.Txn,
+			p,
+			in.BoundarySlot,
+		); err != nil {
+			return fmt.Errorf(
+				"refund dropped proposal deposit %s#%d: %w",
+				shortHash(p.TxHash),
+				p.ActionIndex,
+				err,
+			)
+		}
+		if replay {
+			return nil
+		}
+		droppedEpoch := in.NewEpoch
+		droppedSlot := in.BoundarySlot
+		p.DroppedEpoch = &droppedEpoch
+		p.DroppedSlot = &droppedSlot
+		if err := in.DB.SetGovernanceProposal(p, in.Txn); err != nil {
+			return fmt.Errorf("mark dropped: %w", err)
+		}
+		out.DroppedCount++
+		return nil
+	}
+	for _, p := range replayedDropped {
+		if err := dropProposal(p, true); err != nil {
+			return nil, err
+		}
+	}
+	for _, p := range droppable {
+		if err := dropProposal(p, false); err != nil {
+			return nil, err
+		}
+	}
+
 	// --- EXPIRY -------------------------------------------------------
 	// Fetch proposals whose expiry epoch is in the past but which have
 	// not yet been enacted, expired, or deleted. The active-proposals
 	// query used below excludes these by construction (it filters
 	// `expires_epoch >= NewEpoch`), so we need a dedicated read to mark
-	// them expired and return their deposits.
+	// them expired. Marking expired does not return the deposit -- see the
+	// DROP step above, which does so exactly one epoch later.
 	expired, err := in.DB.GetExpiringGovernanceProposals(
 		in.NewEpoch, in.Txn,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get expiring proposals: %w", err)
 	}
-	// Same replay window as enacted proposals: expired deposits that were
-	// routed to treasury must be restored after the reward pot reset.
+	// Replay window for the "mark expired" write itself (idempotent, but
+	// kept symmetric with the enact/drop replay reads above).
 	replayedExpired, err := in.DB.GetExpiredGovernanceProposalsAt(
 		in.NewEpoch,
 		in.BoundarySlot,
@@ -308,19 +372,6 @@ func ProcessEpoch(
 		return nil, fmt.Errorf("get boundary-expired proposals: %w", err)
 	}
 	expireProposal := func(p *models.GovernanceProposal, replay bool) error {
-		if err := refundProposalDeposit(
-			in.DB,
-			in.Txn,
-			p,
-			in.BoundarySlot,
-		); err != nil {
-			return fmt.Errorf(
-				"refund expired proposal deposit %s#%d: %w",
-				shortHash(p.TxHash),
-				p.ActionIndex,
-				err,
-			)
-		}
 		if replay {
 			return nil
 		}
@@ -1034,12 +1085,11 @@ func removeOrphanedProposals(
 			continue
 		}
 		removed[identity] = struct{}{}
-		if err := refundProposalDeposit(db, txn, proposal, slot); err != nil {
-			return count, fmt.Errorf(
-				"refund removed proposal deposit %s#%d: %w",
-				shortHash(proposal.TxHash), proposal.ActionIndex, err,
-			)
-		}
+		// The deposit is not refunded here: marking ExpiredEpoch/ExpiredSlot
+		// is enough to make this proposal eligible for the drop step next
+		// epoch (see the DROP section of ProcessEpoch), which returns the
+		// deposit exactly once. Refunding immediately here as well as there
+		// would double-refund it.
 		expiredEpoch := epoch
 		expiredSlot := slot
 		proposal.ExpiredEpoch = &expiredEpoch
