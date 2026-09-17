@@ -31,8 +31,65 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/ouroboros-mock/conformance"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/require"
 )
+
+func TestLoadInitialStatePreservesTypedDRepRegistrations(t *testing.T) {
+	t.Parallel()
+	m, err := NewDingoStateManager()
+	require.NoError(t, err)
+	defer func() { require.NoError(t, m.Close()) }()
+
+	hash := testHash28(0xd1)
+	key := mockledger.RewardAccountKey{
+		CredType: common.CredentialTypeAddrKeyHash, Credential: hash,
+	}
+	script := mockledger.RewardAccountKey{
+		CredType: common.CredentialTypeScriptHash, Credential: hash,
+	}
+	require.NoError(t, m.LoadInitialState(&conformance.ParsedInitialState{
+		DRepRegistrations: []common.Blake2b224{hash},
+		DRepRegistrationsByCredential: map[mockledger.RewardAccountKey]bool{
+			key: true, script: true,
+		},
+	}, &conway.ConwayProtocolParameters{}))
+
+	keyDRep, err := m.db.GetDrepByCredential(0, hash[:], false, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint8(0), keyDRep.CredentialTag)
+	scriptDRep, err := m.db.GetDrepByCredential(1, hash[:], false, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint8(1), scriptDRep.CredentialTag)
+
+	dreps, err := m.db.GetActiveDreps(nil)
+	require.NoError(t, err)
+	require.Len(t, dreps, 2)
+}
+
+func TestDRepDeregistrationPreservesOtherCredentialType(t *testing.T) {
+	t.Parallel()
+	m, err := NewDingoStateManager()
+	require.NoError(t, err)
+	defer func() { require.NoError(t, m.Close()) }()
+
+	hash := testHash28(0xd2)
+	key := common.Credential{
+		CredType: common.CredentialTypeAddrKeyHash, Credential: hash,
+	}
+	script := common.Credential{
+		CredType: common.CredentialTypeScriptHash, Credential: hash,
+	}
+	m.govState.RegisterDRepCredentialUntil(key, 10)
+	m.govState.RegisterDRepCredentialUntil(script, 10)
+	m.updateGovStateForCertificate(&common.DeregistrationDrepCertificate{
+		CertType:       uint(common.CertificateTypeDeregistrationDrep),
+		DrepCredential: script,
+	})
+
+	require.True(t, m.govState.IsDRepCredentialRegistered(key))
+	require.False(t, m.govState.IsDRepCredentialRegistered(script))
+}
 
 func TestPersistRatificationStoresEpochAndBoundarySlot(t *testing.T) {
 	m, err := NewDingoStateManager()
@@ -295,7 +352,7 @@ func TestCommitteeMemberReadsPendingUpdateCommitteeProposal(t *testing.T) {
 	action, err := common.NewUpdateCommitteeGovAction(
 		nil,
 		nil,
-		map[*common.Credential]uint{&coldCredential: 999},
+		map[*common.Credential]uint64{&coldCredential: 999},
 		cbor.Rat{Rat: big.NewRat(2, 3)},
 	)
 	require.NoError(t, err)
@@ -550,7 +607,10 @@ func TestDRepRegistrationPropagatesBackendErrors(t *testing.T) {
 	require.NoError(t, m.Close())
 
 	provider := NewDingoStateProvider(m)
-	_, err = provider.DRepRegistration(testHash28(0x41))
+	_, err = provider.DRepRegistration(common.Credential{
+		CredType:   common.CredentialTypeAddrKeyHash,
+		Credential: testHash28(0x41),
+	})
 	require.Error(
 		t,
 		err,

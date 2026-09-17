@@ -1202,6 +1202,18 @@ func (d *Database) UtxosByAssets(
 	return utxos, nil
 }
 
+// ConsumedUtxoPruneFloorSyncKey is the durable sync_state marker key
+// recording the highest slot the periodic consumed-UTxO cleanup
+// (ledger.LedgerState's cleanupConsumedUtxos, which calls
+// UtxosDeleteConsumed below) has ever begun hard-deleting spent UTxO rows
+// up to. Both ledger (which writes it via persistConsumedUtxoPruneFloor)
+// and database/lifecycle's disaster-recovery Truncate (which reads it to
+// refuse a target older than what routine cleanup has already destroyed)
+// need to agree on this key, so it is exported from here as the single
+// source of truth for its name rather than duplicated as a string literal
+// in both packages.
+const ConsumedUtxoPruneFloorSyncKey = "consumed_utxo_prune_floor"
+
 func (d *Database) UtxosDeleteConsumed(
 	slot uint64,
 	limit int,
@@ -1413,6 +1425,34 @@ func (d *Database) IterateLiveUtxoRefs(
 	}
 	return d.Transaction(false).Do(func(t *Txn) error {
 		return d.utxoStore().IterateLiveUtxos(t.Metadata(), fn)
+	})
+}
+
+// IterateUtxoRefsAsOf is IterateLiveUtxoRefs' historical counterpart: it
+// invokes fn once for each UTxO row live as of atSlot rather than live
+// right now, and likewise does not resolve u.Cbor (see
+// ledger.queryShelleyUtxoWhole, its only caller as of this writing, which
+// resolves CBOR itself across a worker pool). As with IterateLiveUtxoRefs,
+// the callback receives a pointer to a row whose underlying buffer is
+// reused between callbacks -- copy out anything you intend to retain past
+// the current call. When txn is nil a read transaction is opened
+// internally.
+//
+// Callers pinning atSlot should check checkUtxoRetentionWindow (or the
+// equivalent guarantee for their own use) first: a slot older than this
+// node's spent-UTxO retention floor cannot be answered correctly by this
+// query, since the rows it would need may already be pruned -- see
+// IterateUtxosAsOf's doc comment on the MetadataStore interface.
+func (d *Database) IterateUtxoRefsAsOf(
+	atSlot uint64,
+	txn *Txn,
+	fn func(*models.Utxo) error,
+) error {
+	if txn != nil {
+		return d.utxoStore().IterateUtxosAsOf(atSlot, txn.Metadata(), fn)
+	}
+	return d.Transaction(false).Do(func(t *Txn) error {
+		return d.utxoStore().IterateUtxosAsOf(atSlot, t.Metadata(), fn)
 	})
 }
 

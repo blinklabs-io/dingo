@@ -20,25 +20,102 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
-	sqlitequery "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/internal/query/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
-type immediateBatchAccumulator struct{}
+// transactionBatchAccumulator owns statements that are safe to reuse for one
+// metadata transaction.  API backfill keeps one SQL transaction open across a
+// block window; preparing the transaction upsert for every row defeats much
+// of that batching.  The statement is deliberately scoped to the accumulator
+// (and therefore to one caller transaction), because database/sql statements
+// prepared on a transaction must not escape it.
+type transactionBatchAccumulator struct {
+	transactionInsert *sql.Stmt
+	mysql             bool
+	// sqlOperations is the same counter instrumentedQueryer increments for
+	// every other query path (see metrics.go); nil when Config.PromRegistry
+	// was nil. insertTransaction executes transactionInsert directly against
+	// a cached *sql.Stmt rather than through a queryer, so it is never
+	// wrapped in countingQueryer and must count itself here to keep
+	// dingo_database_sql_operations_total covering this path too.
+	sqlOperations *prometheus.CounterVec
+}
 
-func (*immediateBatchAccumulator) Reset() {}
+const transactionInsertSQL = `
+INSERT INTO "transaction" (
+    hash, block_hash, metadata, slot, type, fee, collateral_fee, ttl,
+    block_index, valid
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (hash) DO UPDATE SET
+    block_hash = excluded.block_hash,
+    block_index = excluded.block_index,
+    slot = excluded.slot,
+    collateral_fee = excluded.collateral_fee
+RETURNING id`
+
+func (a *transactionBatchAccumulator) insertTransaction(
+	ctx context.Context,
+	db queryer,
+	args ...any,
+) (uint, error) {
+	if a.transactionInsert == nil {
+		// unwrapDialectQueryer, not a bare type assertion: whenever
+		// Config.PromRegistry is set, Store.instrumentedQueryer wraps every
+		// handle it hands out in countingQueryer, making countingQueryer
+		// (not dialectQueryer) db's outermost concrete type. A plain
+		// db.(dialectQueryer) would silently miss that case and leave
+		// a.mysql false on a metrics-enabled MySQL store, routing this
+		// insert down the RETURNING-id path MySQL cannot serve.
+		if dialect, ok := unwrapDialectQueryer(db); ok {
+			a.mysql = dialect.dialect == "mysql"
+		}
+		stmt, err := db.PrepareContext(ctx, transactionInsertSQL)
+		if err != nil {
+			return 0, err
+		}
+		a.transactionInsert = stmt
+	}
+	if a.sqlOperations != nil {
+		op, _ := classifySQLStatement(transactionInsertSQL)
+		a.sqlOperations.WithLabelValues(op).Inc()
+	}
+	if a.mysql {
+		result, err := a.transactionInsert.ExecContext(ctx, args...)
+		if err != nil {
+			return 0, err
+		}
+		id, err := result.LastInsertId()
+		if err != nil {
+			return 0, err
+		}
+		return uint(id), nil
+	}
+	var id int64
+	if err := a.transactionInsert.QueryRowContext(ctx, args...).Scan(&id); err != nil {
+		return 0, err
+	}
+	return uint(id), nil
+}
+
+func (a *transactionBatchAccumulator) Reset() {
+	if a.transactionInsert != nil {
+		_ = a.transactionInsert.Close()
+		a.transactionInsert = nil
+	}
+}
 
 func (s *Store) NewBatchAccumulator() types.MetadataBatchAccumulator {
-	return &immediateBatchAccumulator{}
+	return &transactionBatchAccumulator{sqlOperations: s.sqlOperations}
 }
 
 func (s *Store) FlushBatch(
 	accumulator types.MetadataBatchAccumulator,
 	_ types.Txn,
 ) error {
-	if _, ok := accumulator.(*immediateBatchAccumulator); !ok {
+	if _, ok := accumulator.(*transactionBatchAccumulator); !ok {
 		return fmt.Errorf(
 			"sqlstore FlushBatch: wrong accumulator type %T",
 			accumulator,
@@ -57,18 +134,21 @@ func (s *Store) SetTransactionBatched(
 	accumulator types.MetadataBatchAccumulator,
 	txn types.Txn,
 ) error {
-	if _, ok := accumulator.(*immediateBatchAccumulator); !ok {
+	if _, ok := accumulator.(*transactionBatchAccumulator); !ok {
 		return fmt.Errorf(
 			"SetTransactionBatched: wrong accumulator type %T",
 			accumulator,
 		)
 	}
-	return s.SetTransaction(
+	return s.setTransactionBatched(
 		transaction,
 		point,
 		index,
 		certDeposits,
 		skipWithdrawalWitness,
+		false,
+		false,
+		accumulator,
 		txn,
 	)
 }
@@ -87,15 +167,16 @@ func (s *Store) SetTransactionBatchedHistorical(
 	accumulator types.MetadataBatchAccumulator,
 	txn types.Txn,
 ) error {
-	if _, ok := accumulator.(*immediateBatchAccumulator); !ok {
+	if _, ok := accumulator.(*transactionBatchAccumulator); !ok {
 		return fmt.Errorf(
 			"SetTransactionBatchedHistorical: wrong accumulator type %T",
 			accumulator,
 		)
 	}
-	return s.setTransaction(
+	return s.setTransactionBatched(
 		transaction, point, index, certDeposits,
-		skipWithdrawalWitness, historicalBackfill, false, txn,
+		skipWithdrawalWitness, historicalBackfill, false,
+		accumulator, txn,
 	)
 }
 
@@ -110,6 +191,24 @@ func (s *Store) SetTransaction(
 	return s.setTransaction(
 		transaction, point, index, certDeposits,
 		skipWithdrawalWitness, false, false, txn,
+	)
+}
+
+func (s *Store) setTransactionBatched(
+	transaction lcommon.Transaction,
+	point ocommon.Point,
+	index uint32,
+	certDeposits map[int]uint64,
+	skipWithdrawalWitness bool,
+	historicalBackfill bool,
+	tolerateConsumedInputConflict bool,
+	accumulator types.MetadataBatchAccumulator,
+	txn types.Txn,
+) error {
+	return s.setTransactionWithAccumulator(
+		transaction, point, index, certDeposits,
+		skipWithdrawalWitness, historicalBackfill,
+		tolerateConsumedInputConflict, accumulator, txn,
 	)
 }
 
@@ -157,6 +256,24 @@ func (s *Store) setTransaction(
 	tolerateConsumedInputConflict bool,
 	txn types.Txn,
 ) error {
+	return s.setTransactionWithAccumulator(
+		transaction, point, index, certDeposits,
+		skipWithdrawalWitness, historicalBackfill,
+		tolerateConsumedInputConflict, nil, txn,
+	)
+}
+
+func (s *Store) setTransactionWithAccumulator(
+	transaction lcommon.Transaction,
+	point ocommon.Point,
+	index uint32,
+	certDeposits map[int]uint64,
+	skipWithdrawalWitness bool,
+	historicalBackfill bool,
+	tolerateConsumedInputConflict bool,
+	accumulator types.MetadataBatchAccumulator,
+	txn types.Txn,
+) error {
 	if transaction == nil {
 		return errors.New("set transaction: nil transaction")
 	}
@@ -186,28 +303,36 @@ func (s *Store) setTransaction(
 			if err != nil {
 				return err
 			}
-			transactionID, err := queryReturnedID(ctx, db, `
-INSERT INTO "transaction" (
-    hash, block_hash, metadata, slot, type, fee, collateral_fee, ttl,
-    block_index, valid
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (hash) DO UPDATE SET
-    block_hash = excluded.block_hash,
-    block_index = excluded.block_index,
-    slot = excluded.slot,
-    collateral_fee = excluded.collateral_fee
-RETURNING id`,
-				hash,
-				point.Hash,
-				metadataValue,
-				point.Slot,
-				transaction.Type(),
-				decimalUint64(types.Uint64(transaction.Fee().Uint64())),
-				decimalUint64(types.Uint64(collateralFee)),
-				decimalUint64(types.Uint64(transaction.TTL())),
-				index,
-				transaction.IsValid(),
-			)
+			var transactionID int64
+			if batched, ok := accumulator.(*transactionBatchAccumulator); ok {
+				var id uint
+				id, err = batched.insertTransaction(ctx, db,
+					hash,
+					point.Hash,
+					metadataValue,
+					point.Slot,
+					transaction.Type(),
+					decimalUint64(types.Uint64(transaction.Fee().Uint64())),
+					decimalUint64(types.Uint64(collateralFee)),
+					decimalUint64(types.Uint64(transaction.TTL())),
+					index,
+					transaction.IsValid(),
+				)
+				transactionID = int64(id)
+			} else {
+				transactionID, err = queryReturnedID(ctx, db, transactionInsertSQL,
+					hash,
+					point.Hash,
+					metadataValue,
+					point.Slot,
+					transaction.Type(),
+					decimalUint64(types.Uint64(transaction.Fee().Uint64())),
+					decimalUint64(types.Uint64(collateralFee)),
+					decimalUint64(types.Uint64(transaction.TTL())),
+					index,
+					transaction.IsValid(),
+				)
+			}
 			if err != nil {
 				return fmt.Errorf("create transaction %x: %w", hash, err)
 			}
@@ -230,6 +355,10 @@ RETURNING id`,
 			); err != nil {
 				return err
 			}
+			// Collected here and merged with this transaction's UTxO-driven
+			// refresh below rather than refreshed immediately: see the
+			// mergeStakeCredentialRefs call beside stakeRefs for why.
+			var certificateRefs []models.StakeCredentialRef
 			if transaction.IsValid() {
 				if err := s.applyTransactionWithdrawals(
 					ctx,
@@ -242,7 +371,8 @@ RETURNING id`,
 				); err != nil {
 					return err
 				}
-				certificateRefs, err := s.applyTransactionCertificates(
+				var err error
+				certificateRefs, err = s.applyTransactionCertificates(
 					ctx,
 					db,
 					transactionID,
@@ -254,13 +384,6 @@ RETURNING id`,
 				)
 				if err != nil {
 					return err
-				}
-				if !historicalBackfill {
-					if err := s.refreshRewardLiveStakeRefs(
-						ctx, db, certificateRefs, point.Slot,
-					); err != nil {
-						return err
-					}
 				}
 			}
 			collateralReturn := transaction.CollateralReturn()
@@ -409,8 +532,32 @@ FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 			if err != nil {
 				return err
 			}
-			stakeRefs = append(stakeRefs, producedStakeRefs...)
-			return s.refreshRewardLiveStakeRefs(ctx, db, stakeRefs, point.Slot)
+			// Merge and dedupe every credential this transaction touched --
+			// via its certificates, consumed inputs, and produced outputs --
+			// into one refresh pass. Each source is already deduped against
+			// itself (applyTransactionCertificates and queryUtxoStakeRefs
+			// both key by MapKey), but producedStakeRefs is not, and none of
+			// the three is deduped against the others: a transaction with
+			// several outputs to the same staking credential (an ordinary
+			// change pattern), or one that both spends from and pays back to
+			// the credential a certificate in the same transaction just
+			// registered or delegated, would otherwise run
+			// refreshRewardLiveStakeAggregate's sumCredentialUtxoStake scan
+			// once per occurrence instead of once per credential. Every one
+			// of this transaction's mutations is already applied to db by
+			// this point, so merging changes nothing about the refreshed
+			// values -- it only removes the repeat scans (see
+			// TestSetTransactionRefreshesSharedCredentialOnce).
+			return s.refreshRewardLiveStakeRefs(
+				ctx,
+				db,
+				mergeStakeCredentialRefs(
+					certificateRefs,
+					stakeRefs,
+					producedStakeRefs,
+				),
+				point.Slot,
+			)
 		},
 	)
 }
@@ -470,18 +617,19 @@ RETURNING id`,
 			if err != nil {
 				return err
 			}
-			stakeRefs := make([]models.StakeCredentialRef, 0)
+			var certificateRefs []models.StakeCredentialRef
 			if transaction.IsValid() {
-				certificateRefs, err := s.applyTransactionCertificates(
+				var err error
+				certificateRefs, err = s.applyTransactionCertificates(
 					ctx, db, transactionID, transaction.Certificates(),
 					point, index, certDeposits, allowUnknownDeposits,
 				)
 				if err != nil {
 					return err
 				}
-				stakeRefs = append(stakeRefs, certificateRefs...)
 			}
 			collateralReturn := transaction.CollateralReturn()
+			producedStakeRefs := make([]models.StakeCredentialRef, 0)
 			for _, produced := range transaction.Produced() {
 				model, err := models.UtxoLedgerToModel(produced, point.Slot)
 				if err != nil {
@@ -502,13 +650,27 @@ RETURNING id`,
 					return err
 				}
 				if len(model.StakingKey) > 0 {
-					stakeRefs = append(stakeRefs, models.NewStakeCredentialRef(
-						model.CredentialTag,
-						model.StakingKey,
-					))
+					producedStakeRefs = append(
+						producedStakeRefs,
+						models.NewStakeCredentialRef(
+							model.CredentialTag,
+							model.StakingKey,
+						),
+					)
 				}
 			}
-			return s.refreshRewardLiveStakeRefs(ctx, db, stakeRefs, point.Slot)
+			// Merge and dedupe as setTransaction does: certificateRefs and
+			// producedStakeRefs are each already deduped against themselves,
+			// but not against each other, and a certificate touching the same
+			// credential as one of this gap block's produced outputs would
+			// otherwise trigger a repeat sumCredentialUtxoStake scan for the
+			// same final total.
+			return s.refreshRewardLiveStakeRefs(
+				ctx,
+				db,
+				mergeStakeCredentialRefs(certificateRefs, producedStakeRefs),
+				point.Slot,
+			)
 		},
 	)
 }
@@ -577,7 +739,15 @@ RETURNING id`,
 					outputs[i].StakingKey,
 				))
 			}
-			return s.refreshRewardLiveStakeRefs(ctx, db, refs, 0)
+			// Genesis outputs commonly repeat a staking credential across
+			// several UTxOs; dedupe as setTransaction does so each credential
+			// gets one sumCredentialUtxoStake scan instead of one per output.
+			return s.refreshRewardLiveStakeRefs(
+				ctx,
+				db,
+				mergeStakeCredentialRefs(refs),
+				0,
+			)
 		},
 	)
 }
@@ -699,6 +869,71 @@ DELETE FROM asset_mint_burn WHERE slot > ?`,
 	)
 }
 
+// insertUtxoQuery is insertUtxoModel's ordinary-path INSERT (ignoreConflict
+// == false), used where a caller expects the (tx_id, output_idx) pair to be
+// new. It carries a trailing "RETURNING id" (see hasReturningID in
+// dialect_queryer.go), so prepareHotStatements deliberately does not cache
+// it on MySQL: dialectQueryer.QueryRowContext's MySQL RETURNING-id emulation
+// does its own ExecContext+LastInsertId dance instead of ever calling
+// QueryRowContext with the translated query text, so a cached *sql.Stmt here
+// would never be consulted by that path and MySQL is left on the existing
+// uncached fallback instead. SQLite and PostgreSQL both support RETURNING
+// natively, so this participates in the hot-statement cache normally on
+// those dialects.
+const insertUtxoQuery = `
+INSERT INTO utxo (
+    transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
+    staking_key, credential_tag, datum_hash, spent_at_tx_id,
+    referenced_by_tx_id, collateral_by_tx_id, added_slot, deleted_slot,
+    amount, output_idx, payment_script
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+RETURNING id`
+
+// insertUtxoQueryIgnoreConflict is insertUtxoModel's actual production path
+// (every real call site passes ignoreConflict == true): identical to
+// insertUtxoQuery but with ON CONFLICT (tx_id, output_idx) DO NOTHING, for
+// the snapshot-import case where this output may already exist. The
+// hot-statement cache is keyed by exact query text, so this needs its own
+// constant distinct from insertUtxoQuery -- see that constant's doc comment
+// for the MySQL RETURNING caveat, which applies here identically. This was
+// dingo's single largest uncached raw-SQL call site: a 30s CPU profile of a
+// live from-genesis Preview sync attributed 3.07s (8.8% of total samples) to
+// this one QueryRowContext call, almost entirely modernc.org/sqlite
+// re-parsing and re-planning the identical statement text on every UTxO
+// output insert.
+const insertUtxoQueryIgnoreConflict = `
+-- name: CreateUtxoIfAbsent :one
+INSERT INTO utxo (
+    transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
+    staking_key, credential_tag, datum_hash, spent_at_tx_id,
+    referenced_by_tx_id, collateral_by_tx_id, added_slot, deleted_slot,
+    amount, output_idx, payment_script
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (tx_id, output_idx) DO NOTHING
+RETURNING id`
+
+// importAssetQuery is the conflict-tolerant asset INSERT used by both the
+// snapshot importer and insertUtxoModel. It is a fixed query shape on every
+// imported asset, so keep one prepared statement for the Store lifetime just
+// like the surrounding UTxO importer statements.
+const importAssetQuery = `
+INSERT INTO asset (
+    name, name_hex, policy_id, fingerprint, utxo_id, amount
+) VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT (name, policy_id, utxo_id) DO NOTHING
+`
+
+// getAssetIDQuery looks up the id of the asset row insertUtxoModel's
+// ImportAsset call just created (or matched via its own ON CONFLICT), so
+// utxo.Assets[i].ID can be populated for the caller. It carries no RETURNING
+// clause, so unlike insertUtxoQuery/insertUtxoQueryIgnoreConflict it needs no
+// dialect-specific handling and is always safe to route through the
+// hot-statement cache.
+const getAssetIDQuery = `
+SELECT id FROM asset
+WHERE utxo_id = ? AND policy_id = ? AND name = ?
+ORDER BY id DESC LIMIT 1`
+
 func (s *Store) insertUtxoModel(
 	ctx context.Context,
 	db queryer,
@@ -709,19 +944,12 @@ func (s *Store) insertUtxoModel(
 	if err != nil {
 		return err
 	}
-	conflict := ""
+	query := insertUtxoQuery
 	if ignoreConflict {
-		conflict = " ON CONFLICT (tx_id, output_idx) DO NOTHING"
+		query = insertUtxoQueryIgnoreConflict
 	}
 	var id int64
-	err = db.QueryRowContext(ctx, `
-INSERT INTO utxo (
-    transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
-    staking_key, credential_tag, datum_hash, spent_at_tx_id,
-    referenced_by_tx_id, collateral_by_tx_id, added_slot, deleted_slot,
-    amount, output_idx, payment_script
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`+conflict+`
-RETURNING id`,
+	err = s.queryRowCached(ctx, db, query,
 		params.TransactionID,
 		params.CollateralReturnForTxID,
 		params.TxID,
@@ -776,32 +1004,25 @@ WHERE id = ?`,
 	if err := persistUtxoPointer(ctx, db, id, utxo.Pointer); err != nil {
 		return err
 	}
-	q := s.operationalQueries(db)
 	for i := range utxo.Assets {
 		asset := &utxo.Assets[i]
 		asset.UtxoID = utxo.ID
-		err := q.ImportAsset(
-			ctx,
-			sqlitequery.ImportAssetParams{
-				Name:        asset.Name,
-				NameHex:     asset.NameHex,
-				PolicyID:    asset.PolicyId,
-				Fingerprint: asset.Fingerprint,
-				UtxoID:      sql.NullInt64{Int64: id, Valid: true},
-				Amount: sql.NullString{
-					String: decimalUint64(asset.Amount),
-					Valid:  true,
-				},
+		_, err := s.execCached(ctx, db, importAssetQuery,
+			asset.Name,
+			asset.NameHex,
+			asset.PolicyId,
+			asset.Fingerprint,
+			sql.NullInt64{Int64: id, Valid: true},
+			sql.NullString{
+				String: decimalUint64(asset.Amount),
+				Valid:  true,
 			},
 		)
 		if err != nil {
 			return err
 		}
 		var assetID uint
-		if err := db.QueryRowContext(ctx, `
-SELECT id FROM asset
-WHERE utxo_id = ? AND policy_id = ? AND name = ?
-ORDER BY id DESC LIMIT 1`,
+		if err := s.queryRowCached(ctx, db, getAssetIDQuery,
 			id,
 			asset.PolicyId,
 			asset.Name,
