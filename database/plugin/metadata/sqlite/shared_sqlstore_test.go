@@ -129,6 +129,69 @@ func TestDiskSizeDoesNotBlockOnBusyWriteConnection(t *testing.T) {
 	require.Positive(t, size)
 }
 
+// TestDiskSizeDoesNotLeaveReadDBConnectionOpen is the regression test for
+// sqliteDiskSize pinning a WAL reader open in readDB's shared pool. Live
+// symptom this reproduces: perf's containers logged checkpointWAL's "a
+// reader is still holding an old snapshot" warning every ~2 minutes, for as
+// long as the process ran, after sqliteDiskSize started reading through
+// readDB instead of writeDB; vanilla (never moved off writeDB) never logged
+// it once. Reproduced directly against a live affected container: an
+// external, independently-opened `sqlite3 metadata.sqlite "PRAGMA
+// wal_checkpoint(TRUNCATE)"` returned the same busy=1 result dingo's own
+// checkpointWAL was logging, confirming a real, OS-level WAL lock rather
+// than an artifact of this process's own bookkeeping.
+//
+// checkpointWAL's PRAGMA wal_checkpoint(TRUNCATE) needs every connection
+// other than its own dedicated one to be fully detached to complete the
+// final truncation step -- not merely for no reader to hold a stale
+// snapshot. Neither pool sets SetConnMaxIdleTime or SetConnMaxLifetime, so
+// once a connection is idled into readDB's pool it stays attached
+// indefinitely. Before the fix, sqliteDiskSize queried readDB directly: one
+// DiskSize() call left a connection sitting in that pool that had not been
+// there before and that nothing ever closes on its own, so from that point
+// on every later WAL checkpoint(TRUNCATE) attempt had an attached connection
+// to contend with. After the fix, sqliteDiskSize opens and closes its own
+// dedicated connection per call, exactly like checkpointWAL already does, so
+// readDB is never touched and never gains one.
+func TestDiskSizeDoesNotLeaveReadDBConnectionOpen(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	store, _, readDB, err := openSQLStore(
+		Config{},
+		metadata.ProviderDependencies{DataDir: dataDir},
+	)
+	require.NoError(t, err)
+	require.NoError(t, store.Start(context.Background()))
+	t.Cleanup(func() {
+		require.NoError(t, store.Close())
+	})
+
+	// Force-evict whatever idle connection migrations left behind during
+	// Start, so the assertion below reflects DiskSize's own effect rather
+	// than incidental startup activity.
+	readDB.SetMaxIdleConns(0)
+	readDB.SetMaxIdleConns(DefaultMaxConnections)
+	require.Zero(
+		t,
+		readDB.Stats().OpenConnections,
+		"test setup: expected a clean readDB baseline before DiskSize",
+	)
+
+	// One DiskSize() call, mirroring a single Prometheus scrape of
+	// dingo_database_sql_disk_bytes (see metrics.go).
+	_, err = store.DiskSize()
+	require.NoError(t, err)
+
+	require.Zerof(
+		t,
+		readDB.Stats().OpenConnections,
+		"DiskSize() left %d connection(s) open in readDB's shared pool; "+
+			"a WAL checkpoint(TRUNCATE) attempt will report busy for as "+
+			"long as any of them remain attached",
+		readDB.Stats().OpenConnections,
+	)
+}
+
 // TestOpenSharedSQLStoreWALAutocheckpoint pins the raised checkpoint
 // threshold discussed at length in sqliteCommonPragmas' doc comment: a
 // regression back to SQLite's compiled-in default of 1000 pages would

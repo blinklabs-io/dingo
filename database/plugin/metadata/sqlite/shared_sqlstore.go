@@ -395,7 +395,7 @@ func openSQLStore(
 			return ensureWALJournalMode(ctx, databaseURI)
 		}
 		locker = migrations.NewFileLocker(databasePath + ".migrate.lock")
-		diskSizeFunc = sqliteDiskSize(readDB, databasePath)
+		diskSizeFunc = sqliteDiskSize(databaseURI, databasePath)
 		maintenance = func(ctx context.Context) error {
 			_, err := writeDB.ExecContext(ctx, "VACUUM")
 			return err
@@ -453,8 +453,37 @@ func openSQLStore(
 // stall indefinitely behind a slow or wedged connection.
 const sqliteDiskSizeQueryTimeout = 5 * time.Second
 
+// sqliteDiskSize returns a Store.DiskSize callback that opens a dedicated
+// connection fresh for each call and closes it immediately after -- never
+// against writeDB or readDB. This mirrors checkpointWAL's own dedicated
+// connection above, and for the same underlying reason: a connection that
+// sits in a shared pool between calls (as this used to, against readDB)
+// stays attached to the database for as long as the pool keeps it idle,
+// which by default is indefinitely (neither pool sets
+// SetConnMaxIdleTime/SetConnMaxLifetime). checkpointWAL's periodic PRAGMA
+// wal_checkpoint(TRUNCATE) requires that no other connection be attached at
+// all to complete the final truncation step, not merely that no reader hold
+// a stale snapshot -- so a single long-lived readDB connection that this
+// gauge alone keeps open is enough to make every later TRUNCATE attempt
+// report busy for as long as that connection exists, independent of how
+// recently it last ran a query. Reproduced directly: opening this store,
+// calling DiskSize() once, and then inspecting readDB's own
+// sql.DB.Stats().OpenConnections shows a connection that was not there
+// before and never closes on its own (see
+// TestDiskSizeDoesNotLeaveReadDBConnectionOpen); against the live
+// perf-branch containers this change was written to fix, an external,
+// independently-opened `sqlite3 metadata.sqlite "PRAGMA
+// wal_checkpoint(TRUNCATE)"` reproduced the exact same busy=1 result dingo's
+// own checkpointWAL was logging, confirming the block is a real, OS-level
+// WAL lock and not an artifact of this process's own bookkeeping.
+//
+// Unlike checkpointWAL (which only ever runs PRAGMA wal_checkpoint, an
+// operation with no meaningful "read-only" mode), this gauge's two PRAGMA
+// reads are opened with mode=ro, matching readDB's own read-only DSN: it
+// never has a reason to write, and read-only fails closed instead of
+// silently taking a write-capable connection if that ever changes.
 func sqliteDiskSize(
-	db *sql.DB,
+	databaseURI string,
 	databasePath string,
 ) func() (int64, error) {
 	return func() (int64, error) {
@@ -463,6 +492,24 @@ func sqliteDiskSize(
 			sqliteDiskSizeQueryTimeout,
 		)
 		defer cancel()
+		db, err := sqlstore.OpenDB(
+			"sqlite",
+			fmt.Sprintf(
+				"%s?mode=ro&_pragma=busy_timeout(%d)",
+				databaseURI,
+				sqliteDiskSizeQueryTimeout.Milliseconds(),
+			),
+			"sqlite",
+			false, // short-lived per-call connection; not worth tracing
+		)
+		if err != nil {
+			return 0, fmt.Errorf("open SQLite disk size connection: %w", err)
+		}
+		defer func() {
+			_ = db.Close()
+		}()
+		db.SetMaxOpenConns(1)
+
 		var pageCount, pageSize int64
 		if err := db.QueryRowContext(ctx, "PRAGMA page_count").
 			Scan(&pageCount); err != nil {

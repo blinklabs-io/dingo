@@ -1493,6 +1493,24 @@ and `dingo_database_sql_disk_bytes` (`database/plugin/metadata/sqlite/metrics.go
 are pull-based gauges sampled at scrape time — a plain `os.Stat` of
 `metadata.sqlite-wal` and `Store.DiskSize()` respectively — the same pattern
 Badger's own cache gauges already use rather than a background ticker.
+`Store.DiskSize()`'s two `PRAGMA page_count`/`page_size` reads (`sqliteDiskSize`,
+`shared_sqlstore.go`) run on a connection opened fresh for the call and closed
+immediately after, for the identical reason `checkpointWAL` above does not use
+`writeDB` or `readDB`: a connection idled back into either pool between calls
+stays attached to the database indefinitely (neither pool sets
+`SetConnMaxIdleTime`/`SetConnMaxLifetime`), and `checkpointWAL`'s
+`PRAGMA wal_checkpoint(TRUNCATE)` needs every other connection fully detached
+to complete its final truncation step, not merely for no reader to hold a
+stale snapshot. An earlier version queried through `readDB` directly; one
+gauge read left a connection sitting in that pool indefinitely, so every
+later `checkpointWAL` tick had an attached connection to contend with and
+logged "a reader is still holding an old snapshot" on essentially every tick
+from shortly after startup onward rather than only occasionally. Reproduced
+against a live affected instance: an external, independently-opened
+`sqlite3 metadata.sqlite "PRAGMA wal_checkpoint(TRUNCATE)"` returned the same
+`busy=1` result the process's own `checkpointWAL` was logging, confirming a
+real, OS-level WAL lock rather than an artifact of that process's own
+bookkeeping.
 `dingo_database_sql_wal_bytes` is not a checkpoint-health signal on its own:
 SQLite's PASSIVE/FULL/RESTART checkpoints backfill WAL frames into
 `metadata.sqlite` but never `ftruncate` the `-wal` file, so between
