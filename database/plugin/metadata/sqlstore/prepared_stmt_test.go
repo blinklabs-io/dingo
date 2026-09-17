@@ -365,3 +365,64 @@ func TestRefreshRewardLiveStakeRefsBoundsTxScopedStatementRetention(t *testing.T
 		retained,
 	)
 }
+
+// TestTxScopedStmtDoesNotLeakAcrossConcurrentEviction reproduces,
+// deterministically via txScopedStmtAfterDerive, the eviction race
+// txScopedStmt's own doc comment documents: tx.StmtContext runs with
+// s.txStmtMu released, so a concurrent Commit/Rollback on the same tx can run
+// evictTxStmts in the window between derivation and this call's own insert,
+// which then recreates the just-evicted entry.
+//
+// This only happens when a single tx is driven by more than one goroutine at
+// once -- exactly the misuse txScopedStmt's doc comment explains dingo's real
+// call sites never commit. This test deliberately performs that misuse (calls
+// txScopedStmt and evictTxStmts concurrently against the same tx, forcing the
+// interleaving with the hook rather than relying on scheduler timing) to
+// confirm the mechanism is real, not just asserted -- it does not exercise any
+// path dingo's production code reaches.
+func TestTxScopedStmtDoesNotLeakAcrossConcurrentEviction(t *testing.T) {
+	store := newMigratedSQLiteStore(t)
+	ctx := context.Background()
+
+	cached, ok := store.lookupCachedStmt(sumCredentialUtxoStakeQuery)
+	require.True(t, ok)
+
+	tx, err := store.writeDB.BeginTx(ctx, nil)
+	require.NoError(t, err)
+
+	derivedStarted := make(chan struct{})
+	evictionDone := make(chan struct{})
+	txScopedStmtAfterDerive = func() {
+		close(derivedStarted)
+		<-evictionDone
+	}
+	t.Cleanup(func() { txScopedStmtAfterDerive = nil })
+
+	deriveDone := make(chan *sql.Stmt, 1)
+	go func() {
+		deriveDone <- store.txScopedStmt(ctx, tx, cached)
+	}()
+
+	<-derivedStarted
+	// Simulate sqlTxn.releaseConnection racing in during the gap between
+	// derivation and insertion: commit tx for real, then evict its cache
+	// entry, exactly what releaseConnection does on the real Commit path.
+	require.NoError(t, tx.Commit())
+	store.evictTxStmts(tx)
+	close(evictionDone)
+
+	derived := <-deriveDone
+	require.NotNil(t, derived)
+
+	store.txStmtMu.Lock()
+	_, leaked := store.txStmts[tx]
+	store.txStmtMu.Unlock()
+	require.True(
+		t,
+		leaked,
+		"expected the deliberately forced race to recreate s.txStmts[tx] "+
+			"after eviction -- if this now fails, txScopedStmt's eviction "+
+			"race was fixed and this test (and its doc comment reference) "+
+			"should be updated to match",
+	)
+}

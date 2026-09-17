@@ -211,6 +211,7 @@ func (s *Store) sumCredentialUtxoStake(
 	db queryer,
 	ref models.StakeCredentialRef,
 ) (uint64, error) {
+	s.sumCredentialUtxoStakeCalls.Add(1)
 	// No cached statement means Start (the only place that populates it) has
 	// not run since a Reset/RestoreFrom last invalidated the cache;
 	// queryRowCached falls back to a plain one-shot call against db itself in
