@@ -334,6 +334,39 @@ func nextSessionRetryDelay(
 	return delay, min(delay*2, maxDelay)
 }
 
+// applyTxInfoResults applies each successful chunk's tx_info changes to
+// utxoRefs and reports whether any chunk failed -- pulled out of
+// flushPendingTxInfos, which threads that result straight into
+// utxoTaintedThisEpoch, so a test can drive the actual failure decision
+// directly with synthetic chunks/results/errs instead of needing a real
+// Koios server (human review, Chris Guiney, dingo#4319): the fix for a
+// Koios outage being reported as a false "utxo set match" was pinned only
+// at utxoVerdict, the function that reads utxoTaintedThisEpoch, never at
+// anything that decides what sets it. Does no network I/O itself --
+// chunks/results/errs are already-fetched, matching the same
+// already-fetched-input shape evaluatePoolStake uses for the identical
+// reason.
+func applyTxInfoResults(
+	utxoRefs UTxOSet,
+	chunks [][]string,
+	results [][]koiosparity.KoiosTxInfoItem,
+	errs []error,
+	logf func(format string, args ...any),
+) (anyFailed bool) {
+	for i, chunk := range chunks {
+		if err := errs[i]; err != nil {
+			logf(
+				"nodeparity: koios tx_info fetch failed for %d pending tx(es): %v",
+				len(chunk), err,
+			)
+			anyFailed = true
+			continue
+		}
+		UTxOChanges(utxoRefs, results[i])
+	}
+	return anyFailed
+}
+
 // RunFromGenesis is documented at the top of this file.
 func RunFromGenesis(
 	ctx context.Context,
@@ -448,18 +481,7 @@ func RunFromGenesis(
 		txInfoFlushCount++
 		txInfoFlushElapsed += time.Since(flushStart)
 
-		failed := false
-		for i, chunk := range chunks {
-			if err := errs[i]; err != nil {
-				logf(
-					"nodeparity: koios tx_info fetch failed for %d pending tx(es): %v",
-					len(chunk), err,
-				)
-				failed = true
-				continue
-			}
-			UTxOChanges(utxoRefs, results[i])
-		}
+		failed := applyTxInfoResults(utxoRefs, chunks, results, errs, logf)
 		pendingTxHashes = pendingTxHashes[:0]
 
 		if failed {

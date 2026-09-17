@@ -15,9 +15,11 @@
 package nodeparity
 
 import (
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/koiosparity"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -47,6 +49,53 @@ func TestUTxOVerdict(t *testing.T) {
 		mode, err := utxoVerdict(false, nil)
 		assert.Equal(t, utxoVerdictNoBaseline, mode)
 		assert.NoError(t, err)
+	})
+}
+
+// TestApplyTxInfoResults pins flushPendingTxInfos's actual failure
+// decision -- the one that sets utxoTaintedThisEpoch -- not just
+// utxoVerdict, which only reads that flag (human review, Chris Guiney,
+// dingo#4319): TestUTxOVerdict alone doesn't prove a tx_info fetch failure
+// is what makes utxoTaintedThisEpoch true in the first place. Reverting
+// applyTxInfoResults to always return false (as if every chunk always
+// succeeded) would make the "one chunk fails" subtest below fail.
+func TestApplyTxInfoResults(t *testing.T) {
+	noopLogf := func(string, ...any) {}
+
+	t.Run("all chunks succeed: no failure, changes applied", func(t *testing.T) {
+		refs := UTxOSet{"spent#0": "addr|100|||"}
+		chunks := [][]string{{"tx1"}}
+		results := [][]koiosparity.KoiosTxInfoItem{
+			{{
+				TxHash:  "tx1",
+				Inputs:  []koiosparity.KoiosTxInfoUtxoRef{{TxHash: "spent", TxIndex: 0}},
+				Outputs: []koiosparity.KoiosTxInfoOutput{{TxHash: "tx1", TxIndex: 0}},
+			}},
+		}
+		errs := []error{nil}
+
+		failed := applyTxInfoResults(refs, chunks, results, errs, noopLogf)
+		assert.False(t, failed)
+		_, stillPresent := refs["spent#0"]
+		assert.False(t, stillPresent, "a successful chunk's spend must be applied")
+		_, created := refs["tx1#0"]
+		assert.True(t, created, "a successful chunk's new output must be applied")
+	})
+
+	t.Run("one chunk fails: reported failed, its own changes not applied, others still are", func(t *testing.T) {
+		refs := UTxOSet{}
+		chunks := [][]string{{"tx1"}, {"tx2"}}
+		results := [][]koiosparity.KoiosTxInfoItem{
+			nil, // tx1's chunk failed -- no results for it
+			{{TxHash: "tx2", Outputs: []koiosparity.KoiosTxInfoOutput{{TxHash: "tx2", TxIndex: 0}}}},
+		}
+		errs := []error{errors.New("koios stalled"), nil}
+
+		failed := applyTxInfoResults(refs, chunks, results, errs, noopLogf)
+		assert.True(t, failed,
+			"a single failed chunk must taint the whole flush, even if other chunks succeeded")
+		_, created := refs["tx2#0"]
+		assert.True(t, created, "an independently-succeeding chunk's changes must still be applied")
 	})
 }
 
