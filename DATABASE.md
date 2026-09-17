@@ -3343,11 +3343,38 @@ in two tiers, checked in order:
 
 Both candidate sets are pre-filtered to pool IDs with *any* historical
 `pool_registration` row naming the queried key, so the query only walks a
-pool's full history when it has ever plausibly held that key. Retirement is
-checked afterward via the existing `activePoolOrNil`, unchanged: retirement
-timing is a separate concern from this deferral, and reusing that check
-avoids a second, divergent implementation of POOLREAP cancellation
+pool's full history when it has ever plausibly held that key.
+
+The query returns every matching pool ID ranked by tier (1 before 2, `pool_id`
+ascending within a tier), not a single winner picked by `LIMIT 1`: a long-
+retired pool's own last-ever registration can still satisfy tier 1's
+per-candidate effective-key computation (registration history and retirement
+are tracked independently, so retiring never rewrites what a pool's
+registrations said), so a retired candidate and a different, genuinely active
+pool that later re-registered the same, by-then-free key can both appear as
+candidates for one lookup. The Go loop tries each ranked candidate through the
+existing `activePoolOrNil` in turn and returns the first one that is still
+active, rather than checking retirement on only whichever candidate a single
+`ORDER BY ... LIMIT 1` happened to pick -- otherwise the retired candidate
+being tried first resolves the whole lookup to nil even though the key is
+genuinely in use (caught by review on this PR;
+`TestGetPoolByVrfKeyHashSkipsRetiredCandidateForActiveOwner`). Retirement
+itself is still checked via the existing `activePoolOrNil`, unchanged:
+retirement timing is a separate concern from this deferral, and reusing that
+check avoids a second, divergent implementation of POOLREAP cancellation
 precedence.
+
+`epochStartSlot` must be pinned once at the start of the validation or query
+that calls this, not re-read from a live snapshot on every call:
+`LedgerView.epochStartSlot` (see `ledger/view.go`) is set at every real
+construction site (`NewView`, `ledgerProcessBlock`, `validateTxCore`,
+`ValidateTxWithOverlay`, `EvaluateTx`) from the same snapshot that pins
+`committeeEpoch` and `pp` alongside it, for the same reason: a long-running
+validation (e.g. evaluating scripts) can span a writer publishing a newer
+epoch boundary, and reading it live would let one certificate's deferral
+check disagree with another's in the same transaction or block, or with
+itself across repeated calls (caught by review on this PR;
+`TestLedgerViewIsVrfKeyInUseIgnoresConcurrentSnapshotRepublish`).
 
 ### `GetPoolsRetiringAtEpoch`
 

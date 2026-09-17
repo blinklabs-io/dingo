@@ -3349,6 +3349,16 @@ The `LedgerView` interface provides query access to ledger state:
   final slot of a pending action's inclusive expiry epoch so ancestry,
   hard-fork succession, proposal expiry, and security-group voting use the
   persisted Dingo state.
+- `IsVrfKeyInUse` reads `epochStartSlot`, pinned on the view at every real
+  construction site (`NewView`, `ledgerProcessBlock`, `validateTxCore`,
+  `ValidateTxWithOverlay`, `EvaluateTx`) from the same snapshot that pins
+  `committeeEpoch`/`pp` alongside it -- the same `horizonAnchorSlot`
+  rationale above: a long-running validation must not see a different
+  epoch boundary partway through because the writer published a newer
+  snapshot, which would let one certificate's VRF-key deferral check
+  disagree with another's in the same transaction or block. See
+  `GetPoolByVrfKeyHash` in `DATABASE.md` for the query-side deferral logic
+  this feeds (issue #4352).
 - The credential-aware committee capability reports separately whether its
   SQL view is authoritative, resolves cold and hot credentials with their
   key/script tags intact, and treats an authoritative empty committee as real
