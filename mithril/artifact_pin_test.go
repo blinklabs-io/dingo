@@ -140,6 +140,15 @@ func TestValidateExplicitArtifactPin(t *testing.T) {
 	}
 }
 
+func TestResumeArtifactIdentityValidationRequiresDurablePin(t *testing.T) {
+	t.Parallel()
+
+	assert.False(t, resumeArtifactIdentityValidationEnabled(pinnedArtifact{}))
+	assert.True(t, resumeArtifactIdentityValidationEnabled(pinnedArtifact{
+		Digest: "resume-digest",
+	}))
+}
+
 func syncConfigForFixture(
 	fixture *v2Fixture,
 	dataDir string,

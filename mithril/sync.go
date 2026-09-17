@@ -150,6 +150,10 @@ func validateExplicitArtifactPin(
 	return nil
 }
 
+func resumeArtifactIdentityValidationEnabled(pin pinnedArtifact) bool {
+	return pin.Digest != ""
+}
+
 // decideCatchUp resolves whether this Sync run engages catch-up semantics.
 func decideCatchUp(
 	ctx context.Context,
@@ -673,7 +677,7 @@ func Sync(
 		BootstrapConfig{
 			OnChunkContiguous: chunkHook,
 			OnArtifactSelected: func(sel SelectedArtifact) error {
-				if pinnedDigest != "" {
+				if resumeArtifactIdentityValidationEnabled(resumePin) {
 					if (resumePin.Backend != "" &&
 						normalizeBackend(sel.Backend) != resumePin.Backend) ||
 						(resumePin.Network != "" && sel.Network != resumePin.Network) ||
@@ -773,7 +777,7 @@ func Sync(
 	// answering the pinned digest with different content (a republished
 	// beacon) is a recovery decision for the operator, not something to import
 	// over the partial rows.
-	if pinnedDigest != "" {
+	if resumeArtifactIdentityValidationEnabled(resumePin) {
 		if err := resumePin.verifyResolved(
 			bootstrapResult.Snapshot,
 		); err != nil {
