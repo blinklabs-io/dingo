@@ -98,6 +98,21 @@ func TestDecodeImmutableBlockBatchPreservesOrder(t *testing.T) {
 	}
 }
 
+func TestDecodeImmutableBlockBatchReportsRealDecodeError(t *testing.T) {
+	t.Parallel()
+
+	blocks := immutableDecodeBenchmarkBlocks(t)
+	blocks[0].Cbor = []byte{0xff}
+
+	_, err := decodeImmutableBlockBatch(
+		context.Background(),
+		blocks,
+		lcommon.VerifyConfig{SkipBodyHashValidation: true},
+		1,
+	)
+	require.Error(t, err)
+}
+
 func TestDecodeImmutableBlockBatchCancellation(t *testing.T) {
 	t.Parallel()
 	blocks := immutableDecodeBenchmarkBlocks(t)
