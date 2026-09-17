@@ -575,18 +575,13 @@ func (s *Store) importUtxos(
 				}
 				for j := range item.Assets {
 					asset := item.Assets[j]
-					if err := q.ImportAsset(
-						ctx,
-						sqlitequery.ImportAssetParams{
-							Name:        asset.Name,
-							NameHex:     asset.NameHex,
-							PolicyID:    asset.PolicyId,
-							Fingerprint: asset.Fingerprint,
-							UtxoID:      validInt64(id),
-							Amount: validString(
-								decimalUint64(asset.Amount),
-							),
-						},
+					if _, err := s.execCached(ctx, db, importAssetQuery,
+						asset.Name,
+						asset.NameHex,
+						asset.PolicyId,
+						asset.Fingerprint,
+						validInt64(id),
+						validString(decimalUint64(asset.Amount)),
 					); err != nil {
 						return fmt.Errorf(
 							"import UTxO asset: %w",

@@ -32,6 +32,7 @@ var hotStatements = []string{
 	rewardLiveStakeUpsertQuery,
 	insertUtxoQuery,
 	insertUtxoQueryIgnoreConflict,
+	importAssetQuery,
 	getAssetIDQuery,
 }
 

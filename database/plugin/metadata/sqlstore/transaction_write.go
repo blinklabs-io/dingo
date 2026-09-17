@@ -912,6 +912,17 @@ INSERT INTO utxo (
 ON CONFLICT (tx_id, output_idx) DO NOTHING
 RETURNING id`
 
+// importAssetQuery is the conflict-tolerant asset INSERT used by both the
+// snapshot importer and insertUtxoModel. It is a fixed query shape on every
+// imported asset, so keep one prepared statement for the Store lifetime just
+// like the surrounding UTxO importer statements.
+const importAssetQuery = `
+INSERT INTO asset (
+    name, name_hex, policy_id, fingerprint, utxo_id, amount
+) VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT (name, policy_id, utxo_id) DO NOTHING
+`
+
 // getAssetIDQuery looks up the id of the asset row insertUtxoModel's
 // ImportAsset call just created (or matched via its own ON CONFLICT), so
 // utxo.Assets[i].ID can be populated for the caller. It carries no RETURNING
@@ -993,22 +1004,18 @@ WHERE id = ?`,
 	if err := persistUtxoPointer(ctx, db, id, utxo.Pointer); err != nil {
 		return err
 	}
-	q := s.operationalQueries(db)
 	for i := range utxo.Assets {
 		asset := &utxo.Assets[i]
 		asset.UtxoID = utxo.ID
-		err := q.ImportAsset(
-			ctx,
-			sqlitequery.ImportAssetParams{
-				Name:        asset.Name,
-				NameHex:     asset.NameHex,
-				PolicyID:    asset.PolicyId,
-				Fingerprint: asset.Fingerprint,
-				UtxoID:      sql.NullInt64{Int64: id, Valid: true},
-				Amount: sql.NullString{
-					String: decimalUint64(asset.Amount),
-					Valid:  true,
-				},
+		err := s.execCached(ctx, db, importAssetQuery,
+			asset.Name,
+			asset.NameHex,
+			asset.PolicyId,
+			asset.Fingerprint,
+			sql.NullInt64{Int64: id, Valid: true},
+			sql.NullString{
+				String: decimalUint64(asset.Amount),
+				Valid:  true,
 			},
 		)
 		if err != nil {
