@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
@@ -472,6 +473,382 @@ func TestLedgerViewPoolCurrentStatePendingRetirement(t *testing.T) {
 	)
 
 	require.NoError(t, dbtest.CloseDatabase(db))
+}
+
+// TestLedgerViewIsVrfKeyInUseRespectsEpochBoundaryDeferral is the
+// LedgerView-level regression test for issue #4352, exercised through the
+// real certificate-application pipeline rather than the store layer
+// directly: a pool re-registering with a new VRF key mid-epoch must not
+// free its old key before the epoch boundary IsVrfKeyInUse is asked about.
+func TestLedgerViewIsVrfKeyInUseRespectsEpochBoundaryDeferral(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	lv := &LedgerView{ls: ls}
+
+	poolKeyHash := lcommon.PoolKeyHash(
+		lcommon.NewBlake2b224(bytes.Repeat([]byte{0xc1}, 28)),
+	)
+	oldVrfKeyHash := lcommon.NewBlake2b256([]byte{0xc2, 0x01})
+	newVrfKeyHash := lcommon.NewBlake2b256([]byte{0xc2, 0x02})
+
+	applyRegistration := func(
+		slot uint64,
+		txIDSeed byte,
+		vrfKeyHash lcommon.VrfKeyHash,
+	) {
+		input, err := mockledger.NewSimpleTransactionInput(
+			bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size),
+			0,
+		)
+		require.NoError(t, err)
+		output, err := mockledger.NewTransactionOutputBuilder().
+			WithAddress("addr1qytna5k2fq9ler0fuk45j7zfwv7t2zwhp777nvdjqqfr5tz8ztpwnk8zq5ngetcz5k5mckgkajnygtsra9aej2h3ek5seupmvd").
+			WithLovelace(1_000_000).
+			Build()
+		require.NoError(t, err)
+		cert := &lcommon.PoolRegistrationCertificate{
+			CertType:   uint(lcommon.CertificateTypePoolRegistration),
+			Operator:   poolKeyHash,
+			VrfKeyHash: vrfKeyHash,
+			Pledge:     1_000_000,
+			Cost:       340_000_000,
+			Margin:     cbor.Rat{Rat: big.NewRat(1, 20)},
+			RewardAccount: lcommon.AddrKeyHash(
+				lcommon.NewBlake2b224([]byte{txIDSeed, 0x03}),
+			),
+		}
+		txBuilder := mockledger.NewTransactionBuilder()
+		txBuilder.WithId(bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size))
+		txBuilder.WithType(gledger.TxTypeDijkstra)
+		txBuilder.WithValid(true)
+		txBuilder.WithInputs(input)
+		txBuilder.WithOutputs(output)
+		txBuilder.WithCertificates(cert)
+		tx, err := txBuilder.Build()
+		require.NoError(t, err)
+		point := ocommon.Point{
+			Slot: slot,
+			Hash: bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size),
+		}
+		require.NoError(
+			t,
+			db.SetTransactionMetadataOnly(
+				tx, point, 0, map[int]uint64{0: 500_000_000}, nil,
+			),
+		)
+	}
+
+	// P registers with the old key before the current epoch begins.
+	applyRegistration(10, 0x01, oldVrfKeyHash)
+	// P re-registers with a new key mid-epoch (slot 50), inside the epoch
+	// that starts at slot 30 below. Not yet effective.
+	applyRegistration(50, 0x02, newVrfKeyHash)
+
+	ls.Lock()
+	ls.currentEpoch = models.Epoch{StartSlot: 30}
+	ls.publishSnapshotsLocked()
+	ls.Unlock()
+
+	inUse, owner, err := lv.IsVrfKeyInUse(oldVrfKeyHash)
+	require.NoError(t, err)
+	assert.True(t, inUse,
+		"the pre-boundary key must still be reported as reserved")
+	assert.Equal(t, poolKeyHash, owner)
+
+	// The new key is already claimed by P itself, as its same-epoch
+	// pending registration -- reported as "in use, by P" rather than
+	// free, which is what lets gouroboros's caller compare against
+	// PoolCurrentState and still allow P to keep using its own pending
+	// key without being rejected as a self-conflict.
+	inUse, owner, err = lv.IsVrfKeyInUse(newVrfKeyHash)
+	require.NoError(t, err)
+	assert.True(t, inUse, "P's own pending key must be reported claimed")
+	assert.Equal(t, poolKeyHash, owner)
+
+	require.NoError(t, dbtest.CloseDatabase(db))
+}
+
+// TestLedgerViewIsVrfKeyInUseRejectsSameOperatorReuseOfSupersededFutureKey
+// is the LedgerView-level regression test for the PV11+ follow-up to
+// #4352: pool P cycles A -> B -> C within one epoch, then attempts to
+// reuse B again. IsVrfKeyInUse must report B as still claimed by P (even
+// though B is neither P's effective key, A, nor its current pending key,
+// C), which is the signal gouroboros's validatePoolRegistration needs to
+// compare against PoolCurrentState and reject the reuse: PoolCurrentState
+// returns P's latest registration (C), which does not equal the requested
+// key (B).
+func TestLedgerViewIsVrfKeyInUseRejectsSameOperatorReuseOfSupersededFutureKey(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	lv := &LedgerView{ls: ls}
+
+	poolKeyHash := lcommon.PoolKeyHash(
+		lcommon.NewBlake2b224(bytes.Repeat([]byte{0xd1}, 28)),
+	)
+	keyA := lcommon.NewBlake2b256([]byte{0xd2, 0x01})
+	keyB := lcommon.NewBlake2b256([]byte{0xd2, 0x02})
+	keyC := lcommon.NewBlake2b256([]byte{0xd2, 0x03})
+
+	applyRegistration := func(
+		slot uint64,
+		txIDSeed byte,
+		vrfKeyHash lcommon.VrfKeyHash,
+	) {
+		input, err := mockledger.NewSimpleTransactionInput(
+			bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size),
+			0,
+		)
+		require.NoError(t, err)
+		output, err := mockledger.NewTransactionOutputBuilder().
+			WithAddress("addr1qytna5k2fq9ler0fuk45j7zfwv7t2zwhp777nvdjqqfr5tz8ztpwnk8zq5ngetcz5k5mckgkajnygtsra9aej2h3ek5seupmvd").
+			WithLovelace(1_000_000).
+			Build()
+		require.NoError(t, err)
+		cert := &lcommon.PoolRegistrationCertificate{
+			CertType:   uint(lcommon.CertificateTypePoolRegistration),
+			Operator:   poolKeyHash,
+			VrfKeyHash: vrfKeyHash,
+			Pledge:     1_000_000,
+			Cost:       340_000_000,
+			Margin:     cbor.Rat{Rat: big.NewRat(1, 20)},
+			RewardAccount: lcommon.AddrKeyHash(
+				lcommon.NewBlake2b224([]byte{txIDSeed, 0x03}),
+			),
+		}
+		txBuilder := mockledger.NewTransactionBuilder()
+		txBuilder.WithId(bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size))
+		txBuilder.WithType(gledger.TxTypeDijkstra)
+		txBuilder.WithValid(true)
+		txBuilder.WithInputs(input)
+		txBuilder.WithOutputs(output)
+		txBuilder.WithCertificates(cert)
+		tx, err := txBuilder.Build()
+		require.NoError(t, err)
+		point := ocommon.Point{
+			Slot: slot,
+			Hash: bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size),
+		}
+		require.NoError(
+			t,
+			db.SetTransactionMetadataOnly(
+				tx, point, 0, map[int]uint64{0: 500_000_000}, nil,
+			),
+		)
+	}
+
+	applyRegistration(10, 0x01, keyA) // pre-epoch: P's active key
+	applyRegistration(50, 0x02, keyB) // this epoch: P: A -> B
+	applyRegistration(70, 0x03, keyC) // this epoch: P: B -> C, supersedes B
+
+	ls.Lock()
+	ls.currentEpoch = models.Epoch{StartSlot: 30}
+	ls.publishSnapshotsLocked()
+	ls.Unlock()
+
+	inUse, owner, err := lv.IsVrfKeyInUse(keyB)
+	require.NoError(t, err)
+	assert.True(t, inUse,
+		"a superseded same-epoch future key must still be claimed")
+	assert.Equal(t, poolKeyHash, owner)
+
+	// The mechanism the caller relies on: P's current (latest)
+	// registration is genuinely C, which disagrees with a requested B,
+	// so gouroboros's validatePoolRegistration rejects the reuse.
+	current, _, err := lv.PoolCurrentState(poolKeyHash)
+	require.NoError(t, err)
+	require.NotNil(t, current)
+	assert.Equal(t, keyC, current.VrfKeyHash)
+
+	require.NoError(t, dbtest.CloseDatabase(db))
+}
+
+// newUnwrittenDijkstraPoolRegistrationTx builds a real
+// *gdijkstra-compatible transaction carrying one pool registration
+// certificate, WITHOUT writing it to the database -- for passing directly
+// to eras.ValidateTxDijkstra so the actual rejection path (not just its
+// preconditions) is exercised, the way dijkstra_pool_margin_floor_e2e_test.go
+// does for the CIP-23 rule.
+func newUnwrittenDijkstraPoolRegistrationTx(
+	t *testing.T,
+	txIDSeed byte,
+	operator lcommon.PoolKeyHash,
+	vrfKeyHash lcommon.VrfKeyHash,
+) lcommon.Transaction {
+	t.Helper()
+	input, err := mockledger.NewSimpleTransactionInput(
+		bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size),
+		0,
+	)
+	require.NoError(t, err)
+	output, err := mockledger.NewTransactionOutputBuilder().
+		WithAddress("addr1qytna5k2fq9ler0fuk45j7zfwv7t2zwhp777nvdjqqfr5tz8ztpwnk8zq5ngetcz5k5mckgkajnygtsra9aej2h3ek5seupmvd").
+		WithLovelace(1_000_000).
+		Build()
+	require.NoError(t, err)
+	cert := &lcommon.PoolRegistrationCertificate{
+		CertType:   uint(lcommon.CertificateTypePoolRegistration),
+		Operator:   operator,
+		VrfKeyHash: vrfKeyHash,
+		Pledge:     1_000_000,
+		Cost:       340_000_000,
+		Margin:     cbor.Rat{Rat: big.NewRat(1, 20)},
+		RewardAccount: lcommon.AddrKeyHash(
+			lcommon.NewBlake2b224([]byte{txIDSeed, 0x03}),
+		),
+	}
+	txBuilder := mockledger.NewTransactionBuilder()
+	txBuilder.WithId(bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size))
+	txBuilder.WithType(gledger.TxTypeDijkstra)
+	txBuilder.WithValid(true)
+	txBuilder.WithInputs(input)
+	txBuilder.WithOutputs(output)
+	txBuilder.WithCertificates(cert)
+	tx, err := txBuilder.Build()
+	require.NoError(t, err)
+	return tx
+}
+
+// TestValidateTxDijkstraRejectsDifferentPoolClaimingActiveKeyDuringDeferral
+// is the full end-to-end proof of #4352's acceptance criterion "reject a
+// different pool registering the active key during the deferral window":
+// not just that IsVrfKeyInUse reports the right owner, but that the real
+// validation entry point actually returns a rejection for it. Protocol
+// version 12 (Dijkstra) is required: DuplicateVrfKeysDisallowed only
+// applies the check for major > 10.
+func TestValidateTxDijkstraRejectsDifferentPoolClaimingActiveKeyDuringDeferral(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	// newRewardCalculationTestLedger, not a bare &LedgerState{}: other
+	// Dijkstra/Conway UTxO rules ValidateTxDijkstra also runs (e.g.
+	// UtxoValidateProposalNetworkIds) call LedgerView.NetworkId(), which
+	// needs a real config.CardanoNodeConfig with loaded genesis.
+	ls, db := newRewardCalculationTestLedger(t)
+	lv := &LedgerView{ls: ls}
+
+	poolP := lcommon.PoolKeyHash(
+		lcommon.NewBlake2b224(bytes.Repeat([]byte{0xe1}, 28)),
+	)
+	poolQ := lcommon.PoolKeyHash(
+		lcommon.NewBlake2b224(bytes.Repeat([]byte{0xe2}, 28)),
+	)
+	keyA := lcommon.NewBlake2b256([]byte{0xe3, 0x01})
+	keyB := lcommon.NewBlake2b256([]byte{0xe3, 0x02})
+
+	applyRegistration := func(slot uint64, txIDSeed byte, operator lcommon.PoolKeyHash, vrfKeyHash lcommon.VrfKeyHash) {
+		tx := newUnwrittenDijkstraPoolRegistrationTx(
+			t, txIDSeed, operator, vrfKeyHash,
+		)
+		point := ocommon.Point{
+			Slot: slot,
+			Hash: bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size),
+		}
+		require.NoError(
+			t,
+			db.SetTransactionMetadataOnly(
+				tx, point, 0, map[int]uint64{0: 500_000_000}, nil,
+			),
+		)
+	}
+
+	applyRegistration(10, 0x01, poolP, keyA) // pre-epoch: P's active key
+	applyRegistration(50, 0x02, poolP, keyB) // this epoch: P: A -> B, deferred
+
+	ls.Lock()
+	ls.currentEpoch = models.Epoch{StartSlot: 30}
+	ls.publishSnapshotsLocked()
+	ls.Unlock()
+
+	// Q attempts to claim key A, which is still P's active key during the
+	// deferral window. Not written to the database -- this is the
+	// certificate under validation, not setup.
+	conflictingTx := newUnwrittenDijkstraPoolRegistrationTx(t, 0x03, poolQ, keyA)
+	err := eras.ValidateTxDijkstra(
+		conflictingTx,
+		60,
+		lv,
+		dijkstraTestProtocolParameters(),
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already registered")
+}
+
+// TestValidateTxDijkstraRejectsSameOperatorReuseOfSupersededFutureKey is
+// the full end-to-end proof of the PV11+ follow-up to #4352: pool P cycles
+// A -> B -> C within one epoch, then attempts to reuse B again. This
+// proves the actual rejection fires through the real validation entry
+// point, not just that IsVrfKeyInUse and PoolCurrentState individually
+// return the values the rejection depends on.
+func TestValidateTxDijkstraRejectsSameOperatorReuseOfSupersededFutureKey(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, db := newRewardCalculationTestLedger(t)
+	lv := &LedgerView{ls: ls}
+
+	poolP := lcommon.PoolKeyHash(
+		lcommon.NewBlake2b224(bytes.Repeat([]byte{0xf1}, 28)),
+	)
+	keyA := lcommon.NewBlake2b256([]byte{0xf2, 0x01})
+	keyB := lcommon.NewBlake2b256([]byte{0xf2, 0x02})
+	keyC := lcommon.NewBlake2b256([]byte{0xf2, 0x03})
+
+	applyRegistration := func(slot uint64, txIDSeed byte, vrfKeyHash lcommon.VrfKeyHash) {
+		tx := newUnwrittenDijkstraPoolRegistrationTx(
+			t, txIDSeed, poolP, vrfKeyHash,
+		)
+		point := ocommon.Point{
+			Slot: slot,
+			Hash: bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size),
+		}
+		require.NoError(
+			t,
+			db.SetTransactionMetadataOnly(
+				tx, point, 0, map[int]uint64{0: 500_000_000}, nil,
+			),
+		)
+	}
+
+	applyRegistration(10, 0x01, keyA) // pre-epoch: P's active key
+	applyRegistration(50, 0x02, keyB) // this epoch: P: A -> B
+	applyRegistration(70, 0x03, keyC) // this epoch: P: B -> C, supersedes B
+
+	ls.Lock()
+	ls.currentEpoch = models.Epoch{StartSlot: 30}
+	ls.publishSnapshotsLocked()
+	ls.Unlock()
+
+	// P attempts to reuse B, a key it itself proposed and then superseded
+	// within the same epoch. Not written to the database.
+	reuseTx := newUnwrittenDijkstraPoolRegistrationTx(t, 0x04, poolP, keyB)
+	err := eras.ValidateTxDijkstra(
+		reuseTx,
+		80,
+		lv,
+		dijkstraTestProtocolParameters(),
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already registered")
 }
 
 func TestLedgerViewSkipPhase2Validation(t *testing.T) {
