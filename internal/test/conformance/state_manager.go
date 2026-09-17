@@ -1525,17 +1525,17 @@ func syntheticUpdateCommitteeGovAction(
 	proposal *conformance.ProposalState,
 ) *common.UpdateCommitteeGovAction {
 	credEpochs := make(
-		map[*common.Credential]uint,
+		map[*common.Credential]uint64,
 		len(proposal.ProposedMembersByCredential)+len(proposal.ProposedMembers),
 	)
 	for _, expiry := range proposal.ProposedMembersByCredential {
-		credEpochs[new(common.Credential)] = uint(expiry)
+		credEpochs[new(common.Credential)] = expiry
 	}
 	for hash, expiry := range proposal.ProposedMembers {
 		if hasCredentialHash(proposal.ProposedMembersByCredential, hash) {
 			continue
 		}
-		credEpochs[new(common.Credential)] = uint(expiry)
+		credEpochs[new(common.Credential)] = expiry
 	}
 	return &common.UpdateCommitteeGovAction{CredEpochs: credEpochs}
 }
