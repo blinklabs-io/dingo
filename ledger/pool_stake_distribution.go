@@ -123,6 +123,16 @@ func checkAsOfEpochRecency(
 // drops" failure this whole change exists to close. Checking only that a
 // covering row exists (not reading genesis config or computing a value)
 // keeps this as cheap as the epoch check.
+//
+// The network_state floor is gated on the exact same condition
+// totalCirculatingSupply itself gates its GetNetworkStateAsOfSlot read on
+// (human review, Chris Guiney, dingo#4319/#4320): a first version of this
+// gate was unconditional, so it rejected a point every real query would
+// have happily answered whenever ls.config.CardanoNodeConfig is nil or its
+// ShelleyGenesis carries no MaxLovelaceSupply -- totalCirculatingSupply
+// itself never reaches GetNetworkStateAsOfSlot in that case, falling back
+// to totalActiveStake instead, so requiring a network_state row here was
+// stricter than what PoolStakeDistribution actually needs.
 func (ls *LedgerState) verifyStakeDistributionRetentionOnly(
 	txn *database.Txn,
 	at QueryPoint,
@@ -143,7 +153,7 @@ func (ls *LedgerState) verifyStakeDistributionRetentionOnly(
 	); err != nil {
 		return err
 	}
-	if at.pinned() {
+	if at.pinned() && ls.circulatingSupplyGenesis() != nil {
 		metaTxn := txn.Metadata()
 		state, err := ls.db.Metadata().GetNetworkStateAsOfSlot(at.Slot, metaTxn)
 		if err != nil {

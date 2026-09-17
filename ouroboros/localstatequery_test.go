@@ -113,11 +113,13 @@ func TestLocalstatequeryServerAcquire_PointOnChain_Succeeds(t *testing.T) {
 	require.NoError(t, db.SetEpoch(
 		0, 0, nil, nil, nil, nil, 0, 1, 100, nil,
 	))
-	// verifyStakeDistributionRetentionOnly's second floor (human review,
-	// Chris Guiney, dingo#4319/#4320) requires a network_state row at or
-	// before the pinned slot, matching what PoolStakeDistribution's own
-	// totalCirculatingSupply call separately requires.
-	require.NoError(t, db.Metadata().SetNetworkState(0, 1_000, 0, nil))
+	// verifyStakeDistributionRetentionOnly's network_state floor is gated
+	// on CardanoNodeConfig having a real ShelleyGenesis with a nonzero
+	// MaxLovelaceSupply (ledger.circulatingSupplyGenesis) -- newTestLedgerStateWithChain
+	// sets neither, so that floor is inactive here and needs no
+	// network_state row seeded (human review, Chris Guiney, dingo#4319/#4320:
+	// an earlier version of this fixture seeded one, which the floor never
+	// actually checked, since it was never active in the first place).
 
 	connID := ouroboros.ConnectionId{}
 	err := o.localstatequeryServerAcquire(
