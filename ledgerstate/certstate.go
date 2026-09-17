@@ -223,7 +223,28 @@ func parseCertStateConway(
 		if len(elem) == 0 || i == pIdx || i == dIdx || i == drepIdx {
 			continue
 		}
-		hotKeys, resignations := parseCommitteeVState(certState[i:])
+		// Only a credential-to-authorization map can be the committee map.
+		// Testing that first keeps a wrong-candidate element from reaching a
+		// parser that now fails closed, which would abort the whole import
+		// over an element that was never the committee state.
+		if !looksLikeCommitteeCredentialMap(
+			committeeMapElement(certState[i:]),
+		) {
+			continue
+		}
+		hotKeys, resignations, committeeErr := parseCommitteeVState(
+			certState[i:],
+		)
+		if committeeErr != nil {
+			// An element that decodes as a committee map but whose
+			// entries cannot be read is a real decode failure, not a
+			// wrong-candidate miss. Surface it rather than moving on
+			// and silently importing an empty committee.
+			return nil, fmt.Errorf(
+				"parsing committee state: %w",
+				committeeErr,
+			)
+		}
 		if len(hotKeys) == 0 && len(resignations) == 0 {
 			continue
 		}
@@ -1647,7 +1668,13 @@ func parseVState(data []byte) (
 	// hot-key authorizations and resignations alongside the DRep map; retain
 	// the credential tags so imported state cannot alias key and script hashes.
 	dreps, warning := parseDRepMap(vs[0])
-	hotKeys, resignations := parseCommitteeVState(vs[1:])
+	hotKeys, resignations, committeeErr := parseCommitteeVState(vs[1:])
+	if committeeErr != nil {
+		return nil, nil, nil, fmt.Errorf(
+			"parsing committee state: %w",
+			committeeErr,
+		)
+	}
 	return dreps, hotKeys, resignations, warning
 }
 
@@ -1667,7 +1694,8 @@ func looksLikeCommitteeCredentialMap(data []byte) bool {
 	if _, err := parseCredential(entry.KeyRaw); err != nil {
 		return false
 	}
-	_, err := parseCommitteeHotCredential(entry.ValueRaw)
+	// A resignation is still a committee map entry, so accept it here.
+	_, _, err := parseCommitteeAuthorization(entry.ValueRaw)
 	return err == nil
 }
 
@@ -1679,13 +1707,30 @@ func isCborArray(data []byte) bool {
 	return data[0]>>5 == 4 || data[0] == 0x9f
 }
 
+// committeeMapElement resolves the element parseCommitteeVState would read as
+// the committee hot-key map, unwrapping the historical single-array wrapper the
+// parser also accepts. The Conway heuristic scan uses it to test candidacy
+// before committing to a parse that fails closed on a malformed entry.
+func committeeMapElement(fields [][]byte) []byte {
+	if len(fields) == 0 {
+		return nil
+	}
+	if isCborArray(fields[0]) {
+		if nested, err := decodeRawElements(fields[0]); err == nil &&
+			len(nested) >= 2 {
+			return nested[0]
+		}
+	}
+	return fields[0]
+}
+
 func parseCommitteeVState(
 	fields [][]byte,
-) ([]ParsedCommitteeHotKey, []Credential) {
+) ([]ParsedCommitteeHotKey, []Credential, error) {
 	var hotKeys []ParsedCommitteeHotKey
 	var resignations []Credential
 	if len(fields) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	// The canonical shape is [ccHotKeys, ccRes]. Some historical encoders wrap
 	// those two fields in one committee-state array, which may itself be
@@ -1700,11 +1745,33 @@ func parseCommitteeVState(
 		}
 	}
 	entries, err := decodeMapEntries(committeeFields[0])
-	if err == nil {
+	if err == nil && len(entries) > 0 {
 		for _, entry := range entries {
+			// Fail closed on every entry. Dropping one silently leaves that
+			// member's authorization missing, and downstream a missing
+			// authorization is the same Conway unknown-voter rejection this
+			// parser exists to prevent -- a partial committee is as broken as
+			// an empty one, and quieter.
 			cold, coldErr := parseCredential(entry.KeyRaw)
-			hot, hotErr := parseCommitteeHotCredential(entry.ValueRaw)
-			if coldErr != nil || hotErr != nil {
+			if coldErr != nil {
+				return nil, nil, fmt.Errorf(
+					"decoding committee cold credential: %w",
+					coldErr,
+				)
+			}
+			hot, resigned, hotErr := parseCommitteeAuthorization(
+				entry.ValueRaw,
+			)
+			if hotErr != nil {
+				return nil, nil, fmt.Errorf(
+					"decoding committee authorization for cold "+
+						"credential %x: %w",
+					cold.Hash,
+					hotErr,
+				)
+			}
+			if resigned {
+				resignations = append(resignations, cold)
 				continue
 			}
 			hotKeys = append(
@@ -1714,7 +1781,7 @@ func parseCommitteeVState(
 		}
 	}
 	if len(committeeFields) < 2 {
-		return hotKeys, nil
+		return hotKeys, resignations, nil
 	}
 	resignationEntries, resignationErr := decodeMapEntries(committeeFields[1])
 	if resignationErr == nil {
@@ -1724,7 +1791,7 @@ func parseCommitteeVState(
 				resignations = append(resignations, cold)
 			}
 		}
-		return hotKeys, resignations
+		return hotKeys, resignations, nil
 	}
 	if values, arrayErr := decodeRawArray(committeeFields[1]); arrayErr == nil {
 		for _, value := range values {
@@ -1734,18 +1801,114 @@ func parseCommitteeVState(
 			}
 		}
 	}
-	return hotKeys, resignations
+	return hotKeys, resignations, nil
 }
 
-func parseCommitteeHotCredential(data []byte) (Credential, error) {
+// parseCommitteeAuthorization decodes one value of the committee map. The
+// ledger encodes it as the CommitteeAuthorization sum type:
+//
+//	[0, hot_credential]  CommitteeHotCredential -- the member authorized a hot key
+//	[1, maybe_anchor]    CommitteeMemberResigned
+//
+// Older encoders emitted a bare credential or a single-element wrapper, so both
+// are still accepted. Returning the resigned flag separately keeps a resignation
+// from being mistaken for an authorization, and keeps an unrecognized shape an
+// error rather than a silently dropped entry.
+func parseCommitteeAuthorization(
+	data []byte,
+) (Credential, bool, error) {
 	if credential, err := parseCredential(data); err == nil {
-		return credential, nil
+		return credential, false, nil
 	}
 	wrapped, err := decodeRawArray(data)
-	if err != nil || len(wrapped) != 1 {
-		return Credential{}, errors.New("decoding committee hot credential")
+	if err != nil {
+		return Credential{}, false, errors.New(
+			"decoding committee authorization",
+		)
 	}
-	return parseCredential(wrapped[0])
+	switch len(wrapped) {
+	case 1:
+		credential, credErr := parseCredential(wrapped[0])
+		return credential, false, credErr
+	case 2:
+		var tag uint64
+		if _, tagErr := cbor.Decode(wrapped[0], &tag); tagErr != nil {
+			return Credential{}, false, errors.New(
+				"decoding committee authorization tag",
+			)
+		}
+		switch tag {
+		case committeeAuthHotCredential:
+			credential, credErr := parseCredential(wrapped[1])
+			return credential, false, credErr
+		case committeeAuthResigned:
+			// The payload is StrictMaybe Anchor: absent (null) or an
+			// array. Anything else -- an integer, a bare byte string,
+			// a bool -- is not a resignation, and accepting it would
+			// let an unrelated credential-keyed map pass
+			// looksLikeCommitteeCredentialMap and be misread as the
+			// committee map by the Conway element scan.
+			if !isResignationPayload(wrapped[1]) {
+				return Credential{}, false, errors.New(
+					"decoding committee resignation payload",
+				)
+			}
+			return Credential{}, true, nil
+		}
+	}
+	return Credential{}, false, errors.New(
+		"decoding committee authorization",
+	)
+}
+
+// CommitteeAuthorization constructor tags.
+const (
+	committeeAuthHotCredential uint64 = 0
+	committeeAuthResigned      uint64 = 1
+)
+
+// isValidAnchor reports whether data is an anchor: [url, 32-byte hash]. The
+// shape and the hash length match parseConstitution's anchor handling.
+func isValidAnchor(data []byte) bool {
+	anchor, err := decodeRawArray(data)
+	if err != nil || len(anchor) != 2 {
+		return false
+	}
+	var url string
+	if _, err := cbor.Decode(anchor[0], &url); err != nil {
+		return false
+	}
+	var hash []byte
+	if _, err := cbor.Decode(anchor[1], &hash); err != nil {
+		return false
+	}
+	return len(hash) == 32
+}
+
+// isResignationPayload reports whether data is a StrictMaybe Anchor as the
+// ledger encodes it. encodeStrictMaybe writes an empty array for SNothing and a
+// one-element array wrapping the value for SJust, and decodeStrictMaybe rejects
+// every other shape -- including CBOR null and a bare anchor. Accepting those
+// would import as resignations two encodings the node never writes and its own
+// decoder refuses, so they are rejected here and reach the undecodable-entry
+// error path instead.
+func isResignationPayload(data []byte) bool {
+	// decodeRawArray accepts CBOR null, so check the major type first or the
+	// SNothing case below would let null through.
+	if !isCborArray(data) {
+		return false
+	}
+	items, err := decodeRawArray(data)
+	if err != nil {
+		return false
+	}
+	switch len(items) {
+	case 0: // SNothing
+		return true
+	case 1: // SJust anchor
+		return isValidAnchor(items[0])
+	}
+	return false
 }
 
 // parseDRepMap decodes a DRep credential -> DRepState map.

@@ -98,14 +98,20 @@ type Config struct {
 	// PromRegistry is optional. When set, Store registers
 	// dingo_database_sql_operations_total, a counter of every statement
 	// issued through Store's shared query chokepoint (instrumentedQueryer),
-	// labeled by its best-effort operation classification (see
-	// classifySQLStatement in metrics.go), and
+	// labeled by its best-effort operation classification, and
 	// dingo_database_sql_query_duration_seconds, a histogram of each such
 	// statement's wall-clock duration labeled by that same op
 	// classification plus, when known, the sqlc-generated query name (see
-	// classifySQLStatement). Left nil, instrumentation is a no-op -- the
-	// same convention database/plugin/blob/badger uses for its own
-	// promRegistry.
+	// classifySQLStatement in metrics.go). Store also registers six
+	// dingo_database_sql_pool_* connection-pool metrics per pool, labeled
+	// pool="write"|"read" and sampled live from WritePoolStats/
+	// ReadPoolStats on every scrape (see newSQLPoolMetrics in metrics.go)
+	// -- most notably pool_wait_count_total and
+	// pool_wait_duration_seconds_total, which for pool="write" are the
+	// direct signal for contention on the single writer connection every
+	// current provider caps that pool to. Left nil, instrumentation is a
+	// no-op -- the same convention database/plugin/blob/badger uses for its
+	// own promRegistry.
 	PromRegistry prometheus.Registerer
 }
 
@@ -223,7 +229,7 @@ func New(config Config) (*Store, error) {
 			"sqlstore: migration locker is required when migrations are configured",
 		)
 	}
-	return &Store{
+	store := &Store{
 		writeDB:                     config.WriteDB,
 		readDB:                      config.ReadDB,
 		dialect:                     config.Dialect,
@@ -244,7 +250,17 @@ func New(config Config) (*Store, error) {
 		validateBackup:              config.ValidateBackup,
 		sqlOperations:               newSQLOperationsCounter(config.PromRegistry),
 		sqlQueryDuration:            newSQLQueryDurationHistogram(config.PromRegistry),
-	}, nil
+	}
+	// Registered against store.WritePoolStats/ReadPoolStats (not
+	// config.WriteDB.Stats/config.ReadDB.Stats directly) so every backend
+	// (SQLite, Postgres, MySQL) gets write/read pool contention metrics for
+	// free through the same two accessor methods callers already use, with
+	// no provider-specific wiring required. See newSQLPoolMetrics' doc
+	// comment for the metric shapes and why the write pool is the one that
+	// matters.
+	newSQLPoolMetrics(config.PromRegistry, "write", store.WritePoolStats)
+	newSQLPoolMetrics(config.PromRegistry, "read", store.ReadPoolStats)
+	return store, nil
 }
 
 func (s *Store) BackupTo(ctx context.Context, dstPath string) error {
