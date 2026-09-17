@@ -870,6 +870,44 @@ func queryStakeRefsDeduped(
 	return ret, nil
 }
 
+// mergeStakeCredentialRefs merges any number of stake-credential reference
+// slices into one, with duplicates removed by MapKey and each credential's
+// first occurrence kept. setTransaction uses it to fold the credentials
+// touched by a transaction's certificates, consumed inputs, and produced
+// outputs into a single refreshRewardLiveStakeRefs pass: the same credential
+// legitimately appears in more than one of these (a wallet's own change
+// output alongside a certificate it just submitted, or several outputs to one
+// address), and each occurrence would otherwise trigger its own full
+// sumCredentialUtxoStake recompute for what is, after all of the
+// transaction's mutations are applied, the same final total.
+func mergeStakeCredentialRefs(
+	refSlices ...[]models.StakeCredentialRef,
+) []models.StakeCredentialRef {
+	total := 0
+	for _, refs := range refSlices {
+		total += len(refs)
+	}
+	if total == 0 {
+		return nil
+	}
+	seen := make(map[string]models.StakeCredentialRef, total)
+	order := make([]string, 0, total)
+	for _, refs := range refSlices {
+		for _, ref := range refs {
+			key := ref.MapKey()
+			if _, ok := seen[key]; !ok {
+				order = append(order, key)
+			}
+			seen[key] = ref
+		}
+	}
+	ret := make([]models.StakeCredentialRef, len(order))
+	for i, key := range order {
+		ret[i] = seen[key]
+	}
+	return ret
+}
+
 func utxoIDPredicate(ids []models.UtxoId) (string, []any) {
 	parts := make([]string, len(ids))
 	args := make([]any, 0, len(ids)*2)
@@ -1715,6 +1753,53 @@ func (s *Store) IterateLiveUtxos(
 		ctx,
 		"SELECT "+sqliteUtxoColumns+" FROM utxo WHERE deleted_slot = 0",
 	)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		row, err := scanSQLiteUtxo(rows)
+		if err != nil {
+			return err
+		}
+		model, err := utxoFromSQLite(row)
+		if err != nil {
+			return err
+		}
+		if err := fn(model); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+// IterateUtxosAsOf invokes fn once for each UTxO row live as of atSlot --
+// added at or before atSlot, and either never spent or spent strictly
+// after atSlot -- matching UtxosByRefsAsOf's identical predicate for a
+// bounded ref list, here applied to the whole table. See the
+// MetadataStore interface doc comment for why this has no indexed
+// shortcut, unlike IterateLiveUtxos' deleted_slot = 0 filter.
+func (s *Store) IterateUtxosAsOf(
+	atSlot uint64,
+	txn types.Txn,
+	fn func(*models.Utxo) error,
+) error {
+	if fn == nil {
+		return errors.New("iterate UTxOs as of slot: callback is nil")
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	sqlSlot, err := checkedInt64(atSlot)
+	if err != nil {
+		return err
+	}
+	query := s.dialect.Rebind(
+		"SELECT " + sqliteUtxoColumns + ` FROM utxo
+WHERE added_slot <= ? AND (deleted_slot = 0 OR deleted_slot > ?)`,
+	)
+	rows, err := db.QueryContext(ctx, query, sqlSlot, sqlSlot)
 	if err != nil {
 		return err
 	}

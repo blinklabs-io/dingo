@@ -1060,6 +1060,7 @@ type DingoAccountReward struct {
 	StakeAddress string
 	RewardType   string
 	Amount       string // lovelace decimal string
+	PoolIDBech32 string // source pool for shared reward-account aggregation
 }
 
 // accountRewardKey identifies one (stake_address, reward_type) reward row
@@ -1069,6 +1070,31 @@ type DingoAccountReward struct {
 type accountRewardKey struct {
 	address string
 	rtype   string
+}
+
+type accountRewardSourceKey struct {
+	accountRewardKey
+	poolID string
+}
+
+type accountRewardTotal struct {
+	StakeAddress string
+	RewardType   string
+	Amount       string
+	// ByPool holds each source pool's contribution to Amount, in the order
+	// the rows were read. Amount alone is a sum, and a sum cannot see a
+	// disagreement that preserves it, so the comparison also checks these
+	// against the other side's — see accountRewardPoolsAgree.
+	ByPool []accountRewardPoolAmount
+}
+
+// accountRewardPoolAmount is one pool's contribution to an account's
+// (stake_address, reward_type) total, with the pool identifier already
+// normalized by normalizeAccountPoolID. An empty PoolID names the "no pool"
+// contribution.
+type accountRewardPoolAmount struct {
+	PoolID string
+	Amount string
 }
 
 // CompareAccountEpoch compares every Koios /account_reward_history reference
@@ -1109,13 +1135,16 @@ type accountRewardKey struct {
 //
 // graceHours/epochEndTime/now/network/epoch all mirror ComparePoolEpoch's
 // identical parameters and meaning.
+//
 // rewardsPending reports that the boundary applying this epoch's rewards has
 // not been reached, so a one-sided row on either side is timing rather than
 // divergence: Dingo has not computed the epoch, so every account Koios has a
 // reward for looks absent, and the spendable flags Dingo has computed are still
 // provisional, so a row it will later forfeit has no Koios counterpart. See
 // DingoPoolEpochData.RewardsPending; this is the account-granularity half of
-// the same guard (dingo #3857, #4130).
+// the same guard (dingo #3857, #4130). It is a required parameter rather than
+// a variadic option so a caller cannot silently omit it and get the strict
+// answer for an epoch that has not been computed.
 func CompareAccountEpoch(
 	network string,
 	epoch uint64,
@@ -1124,65 +1153,21 @@ func CompareAccountEpoch(
 	now time.Time,
 	graceHours int,
 	epochEndTime time.Time,
-	rewardsPendingArg ...bool,
+	rewardsPending bool,
 ) []CheckMismatch {
-	rewardsPending := len(rewardsPendingArg) > 0 && rewardsPendingArg[0]
-	var out []CheckMismatch
-
-	koiosByKey := make(map[accountRewardKey]KoiosAccountRewards, len(koiosRows))
-	koiosSeen := make(map[accountRewardKey]int, len(koiosRows))
-	for _, r := range koiosRows {
-		if koiosAccountRewardTypesOutOfScope[r.RewardType] {
-			continue
-		}
-		k := accountRewardKey{r.StakeAddress, r.RewardType}
-		koiosSeen[k]++
-		if koiosSeen[k] > 1 {
-			out = append(out, CheckMismatch{
-				Network:      network,
-				Epoch:        epoch,
-				StakeAddress: r.StakeAddress,
-				Field:        "account_reward_duplicate",
-				DingoValue:   "",
-				KoiosValue: fmt.Sprintf(
-					"reward_type=%s amount=%s duplicated in koios reference data (occurrence %d)",
-					r.RewardType,
-					r.Earned,
-					koiosSeen[k],
-				),
-				Category:  CategoryAcctDuplicate,
-				CheckedAt: now,
-			})
-			continue
-		}
-		koiosByKey[k] = r
-	}
-
-	dingoByKey := make(map[accountRewardKey]DingoAccountReward, len(dingoRows))
-	dingoSeen := make(map[accountRewardKey]int, len(dingoRows))
-	for _, r := range dingoRows {
-		k := accountRewardKey{r.StakeAddress, r.RewardType}
-		dingoSeen[k]++
-		if dingoSeen[k] > 1 {
-			out = append(out, CheckMismatch{
-				Network:      network,
-				Epoch:        epoch,
-				StakeAddress: r.StakeAddress,
-				Field:        "account_reward_duplicate",
-				DingoValue: fmt.Sprintf(
-					"reward_type=%s amount=%s duplicated in dingo committed state (occurrence %d)",
-					r.RewardType,
-					r.Amount,
-					dingoSeen[k],
-				),
-				KoiosValue: "",
-				Category:   CategoryAcctDuplicate,
-				CheckedAt:  now,
-			})
-			continue
-		}
-		dingoByKey[k] = r
-	}
+	koiosByKey, koiosMismatches := aggregateKoiosAccountRewards(
+		network,
+		epoch,
+		koiosRows,
+		now,
+	)
+	dingoByKey, dingoMismatches := aggregateDingoAccountRewards(
+		network,
+		epoch,
+		dingoRows,
+		now,
+	)
+	out := append(koiosMismatches, dingoMismatches...)
 
 	allKeys := make([]accountRewardKey, 0, len(koiosByKey)+len(dingoByKey))
 	seenKey := make(map[accountRewardKey]bool, len(koiosByKey)+len(dingoByKey))
@@ -1223,16 +1208,17 @@ func CompareAccountEpoch(
 		switch {
 		case koiosOK && !dingoOK:
 			// The chain-position form of the same question the grace window
-			// asks, and the one that survives a replay: an epoch Dingo has not
-			// computed yet makes every Koios reward look absent here, which is
-			// a statement about timing rather than a divergence (issue #3857).
+			// asks, and the one that survives a replay: an epoch Dingo has
+			// not computed yet makes every Koios reward look absent here,
+			// which is a statement about timing rather than a divergence
+			// (issue #3857).
 			cat := CategoryAcctOnlyKoios
 			switch {
-			case isZeroRewardAmount(kr.Earned):
+			case isZeroRewardAmount(kr.Amount):
 				// Both sides credited nothing; see
 				// CategoryAcctZeroRewardRow. This outranks either timing
-				// case: a zero row is not a value the other side can
-				// publish later, so waiting cannot change the answer.
+				// case: a zero row is not a value the other side can publish
+				// later, so waiting cannot change the answer.
 				cat = CategoryAcctZeroRewardRow
 			case rewardsPending:
 				cat = CategoryReferenceLag
@@ -1248,7 +1234,7 @@ func CompareAccountEpoch(
 				DingoValue:   "",
 				KoiosValue: fmt.Sprintf(
 					"%s (type=%s)",
-					kr.Earned,
+					kr.Amount,
 					kr.RewardType,
 				),
 				Category:  cat,
@@ -1293,25 +1279,44 @@ func CompareAccountEpoch(
 				CheckedAt:  now,
 			})
 		default:
-			if !lovelaceEqual(dr.Amount, kr.Earned) {
-				// Guarded the same way the presence case above is, and the
-				// same way ComparePoolEpoch guards its own value comparison:
-				// before the applying boundary the amount can still change,
-				// so a difference is a statement about timing rather than a
-				// divergence (issue #3857). Leaving this strict while the
-				// presence check is not would report the same epoch as both
-				// a lag and a mismatch.
-				cat := CategoryValueMismatch
-				if rewardsPending {
-					cat = CategoryReferenceLag
-				}
+			// Guarded the same way the presence case above is, and the same
+			// way ComparePoolEpoch guards its own value comparison: before
+			// the applying boundary the amount can still change, so a
+			// difference is a statement about timing rather than a
+			// divergence (issue #3857). Leaving this strict while the
+			// presence check is not would report the same epoch as both a
+			// lag and a mismatch.
+			cat := CategoryValueMismatch
+			if rewardsPending {
+				cat = CategoryReferenceLag
+			}
+			switch {
+			case !lovelaceEqual(dr.Amount, kr.Amount):
 				out = append(out, CheckMismatch{
 					Network:      network,
 					Epoch:        epoch,
 					StakeAddress: k.address,
 					Field:        "account_reward_amount",
 					DingoValue:   dr.Amount,
-					KoiosValue:   kr.Earned,
+					KoiosValue:   kr.Amount,
+					Category:     cat,
+					CheckedAt:    now,
+				})
+			case !accountRewardPoolsAgree(dr.ByPool, kr.ByPool):
+				// The totals agree, so the disagreement is over which pool
+				// credited what. A reward account shared by several pools
+				// (dingo #3841) can differ per pool and still sum alike, and
+				// comparing only the sum reports that as a match. Reported
+				// only once the totals do agree: when they do not, the branch
+				// above has already said so and the per-pool breakdown adds
+				// no verdict of its own.
+				out = append(out, CheckMismatch{
+					Network:      network,
+					Epoch:        epoch,
+					StakeAddress: k.address,
+					Field:        "account_reward_pool_amount",
+					DingoValue:   formatAccountRewardPools(dr.ByPool),
+					KoiosValue:   formatAccountRewardPools(kr.ByPool),
 					Category:     cat,
 					CheckedAt:    now,
 				})
@@ -1320,6 +1325,401 @@ func CompareAccountEpoch(
 	}
 
 	return out
+}
+
+// accountRewardSide names which side of the comparison a reward row came
+// from. Both sides fold identically, so one implementation serves both rather
+// than two near-identical copies, which is what let an earlier revision record
+// a Dingo-side pool-decode failure in the Koios value column.
+type accountRewardSide int
+
+const (
+	accountRewardSideDingo accountRewardSide = iota
+	accountRewardSideKoios
+)
+
+// mismatch builds a CheckMismatch attributing value to the side it came from,
+// leaving the other side's column empty.
+func (s accountRewardSide) mismatch(
+	network string,
+	epoch uint64,
+	address string,
+	field string,
+	value string,
+	category string,
+	now time.Time,
+) CheckMismatch {
+	m := CheckMismatch{
+		Network:      network,
+		Epoch:        epoch,
+		StakeAddress: address,
+		Field:        field,
+		Category:     category,
+		CheckedAt:    now,
+	}
+	if s == accountRewardSideDingo {
+		m.DingoValue = value
+	} else {
+		m.KoiosValue = value
+	}
+	return m
+}
+
+// accountRewardContribution is one reward row reduced to the fold's inputs:
+// the (stake_address, reward_type) key it belongs to and the amount it
+// contributes, kept as the raw string so the fold decides when to parse it.
+type accountRewardContribution struct {
+	key    accountRewardKey
+	pool   string
+	amount string
+}
+
+// foldAccountRewards sums one side's contributions into a single total per
+// (stake_address, reward_type).
+//
+// A key with exactly one contribution is not aggregated at all: its amount
+// passes through verbatim, so a malformed spelling reaches the presence and
+// value comparisons unchanged and receives the verdict they already define
+// for it (acct_zero_reward_row is refused, lovelaceEqual compares unequal)
+// rather than a second, different verdict from the fold.
+//
+// A key with more than one contribution must be summed, and there a
+// contribution that cannot be parsed cannot be dropped quietly: the remaining
+// lovelace would be compared as though it were the whole account total, so a
+// real shortfall would read as agreement. Each unparsable contribution is
+// reported as a CategoryDBError and the rest are still summed, so the epoch
+// can never pass on a total that was never fully formed.
+func foldAccountRewards(
+	network string,
+	epoch uint64,
+	side accountRewardSide,
+	contributions []accountRewardContribution,
+	now time.Time,
+) (map[accountRewardKey]accountRewardTotal, []CheckMismatch) {
+	order := make([]accountRewardKey, 0, len(contributions))
+	grouped := make(
+		map[accountRewardKey][]accountRewardPoolAmount,
+		len(contributions),
+	)
+	for _, c := range contributions {
+		if _, ok := grouped[c.key]; !ok {
+			order = append(order, c.key)
+		}
+		grouped[c.key] = append(grouped[c.key], accountRewardPoolAmount{
+			PoolID: c.pool,
+			Amount: c.amount,
+		})
+	}
+	totals := make(map[accountRewardKey]accountRewardTotal, len(grouped))
+	var out []CheckMismatch
+	for _, key := range order {
+		byPool := grouped[key]
+		if len(byPool) == 1 {
+			totals[key] = accountRewardTotal{
+				StakeAddress: key.address,
+				RewardType:   key.rtype,
+				Amount:       byPool[0].Amount,
+				ByPool:       byPool,
+			}
+			continue
+		}
+		sum := new(big.Int)
+		for _, contribution := range byPool {
+			amount, ok := parseLovelace(contribution.Amount)
+			if !ok {
+				out = append(out, side.mismatch(
+					network,
+					epoch,
+					key.address,
+					"account_reward_amount",
+					contribution.Amount,
+					CategoryDBError,
+					now,
+				))
+				continue
+			}
+			sum.Add(sum, amount)
+		}
+		totals[key] = accountRewardTotal{
+			StakeAddress: key.address,
+			RewardType:   key.rtype,
+			Amount:       sum.String(),
+			ByPool:       byPool,
+		}
+	}
+	return totals, out
+}
+
+// accountRewardPoolsAgree reports whether both sides credited the same amount
+// from every pool contributing to one (stake_address, reward_type) key.
+//
+// accountRewardTotal.Amount is a sum across pools, and a sum cannot see a
+// disagreement that preserves it: two per-pool errors of equal magnitude and
+// opposite sign cancel, and so does a total one side attributes entirely to
+// one of the pools the other side splits it between. Both are real
+// divergences in what was credited from which pool, and dingo #3841 makes a
+// reward account shared by several pools an ordinary case rather than an edge
+// one, so the per-pool contributions are compared as well as their sum.
+//
+// A pool present on one side only is compared against zero rather than
+// treated as absent, so a pool that credited nothing on one side and has no
+// row on the other still agrees — the same reading CategoryAcctZeroRewardRow
+// already applies to a one-sided zero row at account granularity.
+//
+// A contribution that does not parse is skipped: foldAccountRewards has
+// already reported it as a CategoryDBError, so the epoch cannot pass on it,
+// and reporting it again here would say nothing new.
+//
+// A side that attributes the key to no pool at all makes no per-pool statement
+// to disagree with, so the totals are then the whole verdict. Koios reports a
+// pool for every member/leader row and Dingo stores one for every credited
+// reward, so this covers reference data that arrives without the attribution
+// rather than a real divergence: treating "no pool" as a pool of its own would
+// report the account as a value mismatch purely because one side did not say
+// which pool paid it.
+func accountRewardPoolsAgree(dingo, koios []accountRewardPoolAmount) bool {
+	if accountRewardPoolsUnattributed(dingo) ||
+		accountRewardPoolsUnattributed(koios) {
+		return true
+	}
+	dingoByPool := accountRewardPoolMap(dingo)
+	koiosByPool := accountRewardPoolMap(koios)
+	for pool := range koiosByPool {
+		if _, ok := dingoByPool[pool]; !ok {
+			dingoByPool[pool] = "0"
+		}
+	}
+	for pool, dingoAmount := range dingoByPool {
+		koiosAmount, ok := koiosByPool[pool]
+		if !ok {
+			koiosAmount = "0"
+		}
+		if _, ok := parseLovelace(dingoAmount); !ok {
+			continue
+		}
+		if _, ok := parseLovelace(koiosAmount); !ok {
+			continue
+		}
+		if !lovelaceEqual(dingoAmount, koiosAmount) {
+			return false
+		}
+	}
+	return true
+}
+
+// accountRewardPoolsUnattributed reports whether a side named no pool for any
+// of its contributions to one key, which is the "no pool" contribution
+// normalizeAccountPoolID passes through unchanged.
+func accountRewardPoolsUnattributed(
+	contributions []accountRewardPoolAmount,
+) bool {
+	for _, c := range contributions {
+		if c.PoolID != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// accountRewardPoolMap indexes one side's contributions by pool. Duplicate
+// (stake_address, reward_type, pool) rows are already reported and dropped as
+// CategoryAcctDuplicate before the fold, so each pool appears at most once.
+func accountRewardPoolMap(
+	contributions []accountRewardPoolAmount,
+) map[string]string {
+	byPool := make(map[string]string, len(contributions))
+	for _, c := range contributions {
+		byPool[c.PoolID] = c.Amount
+	}
+	return byPool
+}
+
+// formatAccountRewardPools renders one side's per-pool contributions as a
+// sorted "pool=amount" list, so the reported value is directly comparable
+// against the other side's and does not depend on the order the rows arrived
+// in. The no-pool contribution is spelled "(none)" rather than as an empty
+// left-hand side.
+func formatAccountRewardPools(
+	contributions []accountRewardPoolAmount,
+) string {
+	parts := make([]string, 0, len(contributions))
+	for _, c := range contributions {
+		pool := c.PoolID
+		if pool == "" {
+			pool = "(none)"
+		}
+		parts = append(parts, pool+"="+c.Amount)
+	}
+	slices.Sort(parts)
+	return strings.Join(parts, " ")
+}
+
+// aggregateKoiosAccountRewards reduces Koios's /account_reward_history rows
+// to one total per (stake_address, reward_type), summing the contributions of
+// distinct pools. A reward account can be shared by several pools, so two
+// rows carrying the same key but different pool identities are two
+// contributions to one account total rather than a duplicate. A repeated
+// (stake_address, reward_type, pool) row still is one, and is reported as
+// CategoryAcctDuplicate without contributing to the total.
+//
+// A reward type that is neither in scope nor deliberately out of scope, and a
+// pool identifier that does not decode, are reported as CategoryDBError
+// instead of being folded: either would otherwise surface as an acct_only_* or
+// a value_mismatch, both of which read as a Dingo defect rather than as
+// reference data this code cannot interpret.
+func aggregateKoiosAccountRewards(
+	network string,
+	epoch uint64,
+	rows []KoiosAccountRewards,
+	now time.Time,
+) (map[accountRewardKey]accountRewardTotal, []CheckMismatch) {
+	const side = accountRewardSideKoios
+	contributions := make([]accountRewardContribution, 0, len(rows))
+	seen := make(map[accountRewardSourceKey]int, len(rows))
+	var out []CheckMismatch
+	for _, row := range rows {
+		if koiosAccountRewardTypesOutOfScope[row.RewardType] {
+			continue
+		}
+		if row.RewardType != "member" && row.RewardType != "leader" {
+			out = append(out, side.mismatch(
+				network,
+				epoch,
+				row.StakeAddress,
+				"account_reward_type",
+				row.RewardType,
+				CategoryDBError,
+				now,
+			))
+			continue
+		}
+		poolID, ok := normalizeAccountPoolID(row.PoolIDBech32)
+		if !ok {
+			out = append(out, side.mismatch(
+				network,
+				epoch,
+				row.StakeAddress,
+				"account_reward_pool_decode",
+				row.PoolIDBech32,
+				CategoryDBError,
+				now,
+			))
+			continue
+		}
+		key := accountRewardKey{row.StakeAddress, row.RewardType}
+		source := accountRewardSourceKey{key, poolID}
+		seen[source]++
+		if seen[source] > 1 {
+			out = append(out, side.mismatch(
+				network,
+				epoch,
+				row.StakeAddress,
+				"account_reward_duplicate",
+				fmt.Sprintf(
+					"reward_type=%s pool=%s amount=%s duplicated in koios reference data (occurrence %d)",
+					row.RewardType,
+					poolID,
+					row.Earned,
+					seen[source],
+				),
+				CategoryAcctDuplicate,
+				now,
+			))
+			continue
+		}
+		contributions = append(contributions, accountRewardContribution{
+			key:    key,
+			pool:   poolID,
+			amount: row.Earned,
+		})
+	}
+	totals, foldMismatches := foldAccountRewards(
+		network, epoch, side, contributions, now,
+	)
+	return totals, append(out, foldMismatches...)
+}
+
+// aggregateDingoAccountRewards is aggregateKoiosAccountRewards for the Dingo
+// side, folding the reward_account_output rows the ledger credited into the
+// same per-(stake_address, reward_type) totals so the two sides are
+// comparable.
+//
+// It has no reward-type validation of its own. creditedAccountRewards passes
+// through whatever reward_type the row carries, and a type Dingo wrote that
+// Koios never reports surfaces as an acct_only_dingo on that key, which is
+// the finding worth having.
+func aggregateDingoAccountRewards(
+	network string,
+	epoch uint64,
+	rows []DingoAccountReward,
+	now time.Time,
+) (map[accountRewardKey]accountRewardTotal, []CheckMismatch) {
+	const side = accountRewardSideDingo
+	contributions := make([]accountRewardContribution, 0, len(rows))
+	seen := make(map[accountRewardSourceKey]int, len(rows))
+	var out []CheckMismatch
+	for _, row := range rows {
+		poolID, ok := normalizeAccountPoolID(row.PoolIDBech32)
+		if !ok {
+			out = append(out, side.mismatch(
+				network,
+				epoch,
+				row.StakeAddress,
+				"account_reward_pool_decode",
+				row.PoolIDBech32,
+				CategoryDBError,
+				now,
+			))
+			continue
+		}
+		key := accountRewardKey{row.StakeAddress, row.RewardType}
+		source := accountRewardSourceKey{key, poolID}
+		seen[source]++
+		if seen[source] > 1 {
+			out = append(out, side.mismatch(
+				network,
+				epoch,
+				row.StakeAddress,
+				"account_reward_duplicate",
+				fmt.Sprintf(
+					"reward_type=%s pool=%s amount=%s duplicated in dingo committed state (occurrence %d)",
+					row.RewardType,
+					poolID,
+					row.Amount,
+					seen[source],
+				),
+				CategoryAcctDuplicate,
+				now,
+			))
+			continue
+		}
+		contributions = append(contributions, accountRewardContribution{
+			key:    key,
+			pool:   poolID,
+			amount: row.Amount,
+		})
+	}
+	totals, foldMismatches := foldAccountRewards(
+		network, epoch, side, contributions, now,
+	)
+	return totals, append(out, foldMismatches...)
+}
+
+// normalizeAccountPoolID reduces a bech32 pool identifier to the canonical
+// spelling both sides aggregate on, so that two renderings of the same pool
+// are one source rather than two. An empty identifier is valid and
+// normalizes to itself: Koios reports no pool for reward types that have
+// none.
+func normalizeAccountPoolID(poolID string) (string, bool) {
+	if poolID == "" {
+		return "", true
+	}
+	keyHex, err := PoolKeyHashHex(poolID)
+	if err != nil {
+		return "", false
+	}
+	normalized, err := PoolKeyHashHexToBech32(keyHex)
+	return normalized, err == nil
 }
 
 // lovelaceEqual reports whether a and b represent the same non-negative

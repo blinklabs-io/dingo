@@ -33,6 +33,11 @@ services:
       context: .
       dockerfile: Dockerfile.configurator
     container_name: eras-configurator
+    environment:
+      # Must match the dingo user pinned in the repo root Dockerfile;
+      # configurator.sh chowns the pool key directories to it.
+      DINGO_UID: "${ERASTEST_DINGO_UID:-1000}"
+      DINGO_GID: "${ERASTEST_DINGO_GID:-1000}"
     volumes:
       - ./testnet.yaml:/testnet.yaml
       - p1-configs:/configs/1

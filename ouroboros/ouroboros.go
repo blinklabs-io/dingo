@@ -208,13 +208,19 @@ type Ouroboros struct {
 	// multi-second EB fetch from head-of-line blocking every later offer on
 	// the connection.
 	leiosFetchGuards sync.Map // ouroboros.ConnectionId → *leiosFetchGuard
-	// (slot, EB hash) occurrences with a fetch already in progress, so a given
-	// endorser block occurrence is fetched once across all connections (it is
+	// (slot, EB hash) occurrences with a transaction-offer fetch in progress,
+	// deduplicating that work across all connections (it is
 	// offered on every connection). Keyed by slot and hash together, not hash
 	// alone, so an in-flight fetch for one occurrence does not suppress a
 	// legitimate offer of the same content-addressed hash recurring at a
 	// different slot (issue #3513).
 	leiosFetchInProgress sync.Map // leiosBlockKey(point.Slot, point.Hash) → struct{}
+	// Manifest offers have their own claim: a pending manifest fetch must not
+	// suppress a transaction offer needed to complete the same occurrence.
+	leiosManifestFetchInProgress sync.Map // leiosBlockKey(point.Slot, point.Hash) → struct{}
+	// leiosFetchClaimPublished is an instance-local test seam used to hold a
+	// claimed offer before dispatch and expose admission ordering deterministically.
+	leiosFetchClaimPublished func()
 
 	// Locally-forged EB broadcast log (cursors are owned by the log).
 	leiosEBLog *leiosForgedEBLog
