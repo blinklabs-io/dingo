@@ -456,26 +456,37 @@ const sqliteDiskSizeQueryTimeout = 5 * time.Second
 // sqliteDiskSize returns a Store.DiskSize callback that opens a dedicated
 // connection fresh for each call and closes it immediately after -- never
 // against writeDB or readDB. This mirrors checkpointWAL's own dedicated
-// connection above, and for the same underlying reason: a connection that
-// sits in a shared pool between calls (as this used to, against readDB)
-// stays attached to the database for as long as the pool keeps it idle,
-// which by default is indefinitely (neither pool sets
-// SetConnMaxIdleTime/SetConnMaxLifetime). checkpointWAL's periodic PRAGMA
-// wal_checkpoint(TRUNCATE) requires that no other connection be attached at
-// all to complete the final truncation step, not merely that no reader hold
-// a stale snapshot -- so a single long-lived readDB connection that this
-// gauge alone keeps open is enough to make every later TRUNCATE attempt
-// report busy for as long as that connection exists, independent of how
-// recently it last ran a query. Reproduced directly: opening this store,
-// calling DiskSize() once, and then inspecting readDB's own
-// sql.DB.Stats().OpenConnections shows a connection that was not there
-// before and never closes on its own (see
-// TestDiskSizeDoesNotLeaveReadDBConnectionOpen); against the live
-// perf-branch containers this change was written to fix, an external,
+// connection above. An earlier version queried readDB directly: one gauge
+// read left a connection idled back into that shared pool indefinitely
+// (neither pool sets SetConnMaxIdleTime/SetConnMaxLifetime), confirmed by
+// inspecting readDB's own sql.DB.Stats().OpenConnections after a single
+// DiskSize() call (see TestDiskSizeDoesNotLeaveReadDBConnectionOpen). Against
+// the live perf-branch containers this change was written to fix,
+// checkpointWAL's PRAGMA wal_checkpoint(TRUNCATE) logged busy=1 on
+// essentially every tick from shortly after startup onward, and an external,
 // independently-opened `sqlite3 metadata.sqlite "PRAGMA
-// wal_checkpoint(TRUNCATE)"` reproduced the exact same busy=1 result dingo's
-// own checkpointWAL was logging, confirming the block is a real, OS-level
-// WAL lock and not an artifact of this process's own bookkeeping.
+// wal_checkpoint(TRUNCATE)"` reproduced the identical busy=1 result --
+// confirming a real, OS-level WAL condition rather than an artifact of this
+// process's own bookkeeping. Moving this gauge onto its own dedicated,
+// immediately-closed connection made the warnings stop and the observed
+// on-disk -wal file shrink (~130MB down to ~55MB on the affected instance).
+//
+// That correlation is real; the exact mechanism it goes through is not
+// pinned down. SQLite's own documentation for wal_checkpoint says
+// RESTART/TRUNCATE block only on an active writer or a reader still on an
+// old snapshot, not on a connection that is merely idle in a pool, and a
+// direct reproduction against this exact DSN and driver bears that out:
+// TestWALCheckpointTruncateIdleConnectionDoesNotBlock runs this function's
+// old two-PRAGMA-read pattern against readDB, leaves the connection open in
+// the pool afterward, and still observes a clean, non-busy TRUNCATE against
+// real, substantial WAL content -- while an actual held, uncommitted read
+// transaction (the same test's positive control) does reproduce busy=1. So
+// "a merely-attached idle connection blocks TRUNCATE" is not the isolated
+// cause; production readDB traffic is far higher-concurrency than that
+// lab reproduction, and the true trigger there was not identified further.
+// The dedicated-connection design stands on the production before/after
+// observation and on matching checkpointWAL's already-established pattern,
+// independent of a fully isolated microscopic explanation.
 //
 // Unlike checkpointWAL (which only ever runs PRAGMA wal_checkpoint, an
 // operation with no meaningful "read-only" mode), this gauge's two PRAGMA
