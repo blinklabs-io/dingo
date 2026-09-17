@@ -303,13 +303,24 @@ adds `utxo_collateral_input` and backfills one edge per non-NULL legacy
 used as collateral by more than one transaction kept only the last writer and
 rollback of that writer discarded the association for the others.
 
+Migration `v16` (`governance-proposal-optional-anchor`, integer version 16)
+makes `governance_proposal.anchor_url` and `anchor_hash` nullable on every SQL
+provider. SQLite rebuilds `governance_proposal` and its ratification-history
+table because it cannot drop the existing `NOT NULL` constraints in place.
+The runner disables SQLite foreign-key enforcement before starting the expand
+transaction, commits the complete rebuild and its phase advance together, and
+restores the connection's original foreign-key mode with an independent bounded
+context even when the migration context was canceled. A failed rebuild therefore
+leaves the original tables intact and a retry still begins from `expand`.
+
 The upgrade runner owns a `schema_migrations` row per contiguous integer version with
 `version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`, `dirty`,
 Unix-millisecond `started_at`/`updated_at`, and nullable `completed_at`.
 Phases are `expand`, `backfill`, `contract`, and `complete`. The runner marks a
-phase dirty before work, executes idempotent DDL, commits each data batch and
-cursor checkpoint in the same transaction, and only marks a version complete
-after contract/index DDL succeeds. Completed checksum drift, registry gaps,
+phase dirty before work, executes idempotent DDL, and commits each data batch and
+cursor checkpoint in the same transaction. SQLite also commits each expand DDL
+set and its phase advance in one transaction. The runner only marks a version
+complete after contract/index DDL succeeds. Completed checksum drift, registry gaps,
 unknown phases, inconsistent completion state, and a database newer than the
 binary are hard startup errors. File-backed SQLite uses a cross-process lock
 file and in-memory SQLite uses a process lock. Store readiness remains false
@@ -673,7 +684,7 @@ erDiagram
 | `network_donation` | `id`, `slot`, `epoch`, `amount` | PK `id`; unique `slot`; index `epoch` | Per-block Conway treasury donation, tagged with its epoch. `amount` is a plain integer column (not `types.Uint64`) so `SUM` aggregates directly across backends. All donation sources applied under the same block slot, including Leios endorser-block effects recorded under a ranking block, are accumulated before this per-slot row is written. Donations accumulate during an epoch and are moved into `network_state.treasury` at the next epoch boundary; rows are kept (not deleted on apply) so a rollback drops them by slot and re-application re-derives the same total. |
 | `pparams` | `id`, `cbor`, `added_slot`, `epoch`, `era_id` | PK `id`; index `added_slot` | CBOR protocol parameters. Query by `epoch <= ?` and matching `era_id`. Dijkstra's on-chain CBOR intentionally omits the genesis-only `CommitteeStakeCoverage` and `QuorumStakeThreshold` fields. Ledger reconstruction rehydrates any absent values from the configured Dijkstra genesis through `loadPersistedProtocolParameters` and validates the reconstructed pair before publishing it; an invalid configured pair therefore fails restart instead of entering consensus or Leios state. A Mithril ledger-state import writes the snapshot epoch's current parameters and any distinct previous parameters compatible with the preceding epoch's actual era in one metadata transaction, while reusing an already-satisfying row on re-entry. A translated new-era previous payload is never stored under the old era; the dependent imported reward basis and any stale provisional inputs are removed instead. |
 | `pparam_update` | `id`, `genesis_hash`, `cbor`, `added_slot`, `epoch` | PK `id`; index `added_slot` | Proposed protocol-parameter updates. `epoch` is the SUBMISSION epoch carried by the on-chain `[proposed_updates, epoch]` structure (gouroboros `Update.Epoch`), stored verbatim at ingest. Per the Shelley update system a proposal submitted in epoch `e` is enacted as epoch `e+1`'s parameters at the `e -> e+1` boundary; enactment (`ComputeAndApplyPParamUpdates`) therefore filters by submission epoch `e` while writing the resulting `pparams` row for the enactment epoch `e+1`. |
-| `sync_state` | `sync_key`, `value` | PK `sync_key` | Key/value state for sync/load work. `sync_status` (`in_progress`/`backfill`/cleared; unknown non-empty values are treated as incomplete) is ephemeral and cleared on completion. Mithril stores `mithril_ledger_slot` plus `mithril_ledger_hash` as the trusted replay/intersect boundary point. For new imports this is the selected ledger-state point at or below the certificate-backed ImmutableDB tip; the metadata `tip` remains at the same point so later raw blocks undergo ordinary ledger replay. Ancillary-only volatile state is never recorded as trusted. `mithril_immutable_max` persists the highest immutable file number a Mithril sync imported (written *after* the completion clear, since clearing wipes all `sync_state`) so a later `dingo mithril sync` catch-up can skip already-present immutable archives when the marker exists. `mithril_catchup_active` is ephemeral (set when a catch-up import starts mutating, wiped on completion): it routes an interrupted catch-up back through catch-up semantics (reconcile) on the next run, which a markerless catch-up otherwise leaves no trace of. `mithril_pinned_artifact` is ephemeral on the same terms (written from `BootstrapConfig.OnArtifactSelected` before the first download, wiped by the completion clear): a JSON record (`backend`, `network`, `digest`, `epoch`, `immutable_file_number`, `certificate_hash`, `certified_tip_slot`) naming the artifact the in-flight run is importing. A resuming run (`sync_status` non-empty) resolves that exact artifact instead of the aggregator's latest, because the bootstrap import runs with `ImportConfig.Reconcile` off and every metadata import phase is insert-if-absent: importing a newer snapshot's live set over a partially imported older one leaves the union of the two, with UTxOs spent between the artifacts still live and accounts/pools/DReps the newer snapshot dropped still active. The `import_checkpoint` rows cannot detect that, being keyed `"{digest}:{slot}"`. `certified_tip_slot` is filled in once the certified ImmutableDB is opened, so a resume that reuses an extraction cache no longer matching the pinned artifact is refused rather than imported. A missing pin on a non-catch-up resume, a pin for another backend or network, an aggregator that no longer serves the pinned artifact or serves it under a moved beacon, and a mismatched certified tip are all fail-closed with an explicit recovery instruction; an interrupted catch-up without a pin still proceeds, because its reconcile pass removes the interrupted artifact's rows. `deferred_header_validation:<slot>:<hash>` is written when blockfetch defers stateful header checks to ledger apply; the value is `true` and the row is deleted after the strict apply-time check passes. `forge_fence:<poolid>` is the block producer's last-forged-slot fence (`forging.NewSyncStateForgeFenceStore`, `ledger/forging/store.go`): a JSON record (`format_version`, `pool_id`, `last_forged_slot`) written *before* the header for a slot is signed, so a crash between signing and adoption still leaves the slot recorded. The forger refuses any slot at or below it, which is the only duplicate-slot protection that survives a restart or a rolled-back tip. It is namespaced by pool id so a node re-keyed to different credentials is not gated by a fence it never signed under, it only ever moves forward (a lower slot leaves the stronger value in place), and a record that fails to decode or whose `pool_id`/`format_version` does not match is an error rather than "no fence", since reporting no fence would let a slot be signed twice. A chain rollback never lowers it: a rollback does not un-sign a block that may already have reached peers. A Mithril import that completes with a full `ClearSyncState` (`mithril/sync_import.go`) does drop it, so a block producer that bootstraps from a snapshot restarts with no fence and is protected only by the chain-tip check until it next forges (issue #3736). `delegator_inactivity_activated` guards the CIP-0163 one-time activation stamp (`ledger.LedgerState.activateDelegatorInactivityIfNeeded`): its value is the activation epoch `A` (the entered epoch, stored as a decimal string), and any non-empty value means activation has run, so later rollovers skip it even after a restart. It is durable but not permanent: a chain rollback to before epoch `A` clears it (`recomputeAccountExpirationsAfterRollback` calls `DeleteSyncState` alongside `ResetAccountExpirationActivation`), so a subsequent re-sync re-runs activation. The stored epoch is read back (`ledger.LedgerState.delegatorInactivityActivationEpoch`) as the activation floor the rollback recompute clamps expirations up to, since the activation stamp writes `A + DelegatorInactivity` without leaving a witness. `synthetic_v2_cost_model` (`database.SyntheticV2CostModelSyncKey`) records whether the PlutusV2 cost model currently in force is still `HardForkBabbage`'s fabricated default (`"true"`) rather than real governance/protocol-update data (`"false"`); an absent value falls back to comparing the current cost model directly against the known fabricated default (`ledger.resolveSyntheticV2CostModel`), which is what makes a database that predates this key behave correctly instead of silently defaulting to "not synthetic." `synthetic_v2_cost_model_cleared_epoch` (`database.SyntheticV2CostModelClearedEpochSyncKey`) is the companion provenance marker: its value is the epoch at which real PlutusV2 cost-model data was last confirmed written (decimal string; absent means never confirmed), set alongside `synthetic_v2_cost_model` = `"false"` whenever CIP-1694 governance enactment or a pre-Conway Shelley-style protocol-parameter update explicitly writes the cost model (not merely carries an unchanged value forward). Like `delegator_inactivity_activated`, it is durable but not permanent: `database.RecomputeSyntheticV2CostModelMarkerAfterTruncate` (mirroring the CIP-0163 pattern, called from both `ledger.LedgerState.rollback` and `database/lifecycle.Truncate`) deletes it and restores `synthetic_v2_cost_model` to `"true"` when a rollback or truncate crosses back before the confirming epoch, so a re-sync onto a fork that never re-enacts the write re-derives synthetic status instead of trusting a stale confirmation. `consumed_utxo_prune_floor` (`ledger`'s `consumedUtxoPruneFloorSyncKey`) records the highest slot `cleanupConsumedUtxos` has ever begun pruning consumed UTxOs up to (decimal string; absent/zero means no pruning floor has ever been committed, i.e. no consumed row has yet become eligible for pruning -- `cleanupConsumedUtxos` itself still runs on its usual periodic tick regardless, it just has nothing to persist a floor for until the tip clears one stability window and storage mode/catch-up state allow it). Monotonic: a write only ever raises it. Unlike the other markers on this row, it is never undone by rollback or truncate, since rows already hard-deleted under a given floor cannot become un-deleted by a later rollback. `ledger.LedgerState.checkUtxoRetentionWindow` (answering a pinned `GetUTxOByTxIn`) combines this with a fresh estimate from the current tip and era's own stability window and rejects a pin below the larger (stricter) of the two, because the fresh estimate alone can be too lenient right after the tip moves in a way this durable floor already accounts for: a rollback lowering the tip, or an era transition widening the stability-window formula (Byron's small `2k` vs every Shelley+ era's much larger `3k/f`) (blinklabs-io/dingo#382). |
+| `sync_state` | `sync_key`, `value` | PK `sync_key` | Key/value state for sync/load work. `sync_status` (`in_progress`/`backfill`/cleared; unknown non-empty values are treated as incomplete) is ephemeral and cleared on completion. Mithril stores `mithril_ledger_slot` plus `mithril_ledger_hash` as the trusted replay/intersect boundary point. For new imports this is the selected ledger-state point at or below the certificate-backed ImmutableDB tip; the metadata `tip` remains at the same point so later raw blocks undergo ordinary ledger replay. Ancillary-only volatile state is never recorded as trusted. `mithril_immutable_max` persists the highest immutable file number a Mithril sync imported (written *after* the completion clear, since clearing wipes all `sync_state`) so a later `dingo mithril sync` catch-up can skip already-present immutable archives when the marker exists. `mithril_catchup_active` is ephemeral (set when a catch-up import starts mutating, wiped on completion): it routes an interrupted catch-up back through catch-up semantics (reconcile) on the next run, which a markerless catch-up otherwise leaves no trace of. `mithril_pinned_artifact` is ephemeral on the same terms (written from `BootstrapConfig.OnArtifactSelected` before the first download, wiped by the completion clear): a JSON record (`backend`, `network`, `digest`, `epoch`, `immutable_file_number`, `certificate_hash`, `certified_tip_slot`) naming the artifact the in-flight run is importing. A resuming run (`sync_status` non-empty) resolves that exact artifact instead of the aggregator's latest, because the bootstrap import runs with `ImportConfig.Reconcile` off and every metadata import phase is insert-if-absent: importing a newer snapshot's live set over a partially imported older one leaves the union of the two, with UTxOs spent between the artifacts still live and accounts/pools/DReps the newer snapshot dropped still active. The `import_checkpoint` rows cannot detect that, being keyed `"{digest}:{slot}"`. `certified_tip_slot` is filled in once the certified ImmutableDB is opened, so a resume that reuses an extraction cache no longer matching the pinned artifact is refused rather than imported. A missing pin on a non-catch-up resume, a pin for another backend or network, an aggregator that no longer serves the pinned artifact or serves it under a moved beacon, and a mismatched certified tip are all fail-closed with an explicit recovery instruction; an interrupted catch-up without a pin still proceeds, because its reconcile pass removes the interrupted artifact's rows. `deferred_header_validation:<slot>:<hash>` is written when blockfetch defers stateful header checks to ledger apply; the value is `true` and the row is deleted after the strict apply-time check passes. `forge_fence:<poolid>` is the block producer's last-forged-slot fence (`forging.NewSyncStateForgeFenceStore`, `ledger/forging/store.go`): a JSON record (`format_version`, `pool_id`, `last_forged_slot`) written *before* the header for a slot is signed, so a crash between signing and adoption still leaves the slot recorded. The forger refuses any slot at or below it, which is the only duplicate-slot protection that survives a restart or a rolled-back tip. It is namespaced by pool id so a node re-keyed to different credentials is not gated by a fence it never signed under, it only ever moves forward (a lower slot leaves the stronger value in place), and a record that fails to decode or whose `pool_id`/`format_version` does not match is an error rather than "no fence", since reporting no fence would let a slot be signed twice. A chain rollback never lowers it: a rollback does not un-sign a block that may already have reached peers. A Mithril import that completes with a full `ClearSyncState` (`mithril/sync_import.go`) does drop it, so a block producer that bootstraps from a snapshot restarts with no fence and is protected only by the chain-tip check until it next forges (issue #3736). `delegator_inactivity_activated` guards the CIP-0163 one-time activation stamp (`ledger.LedgerState.activateDelegatorInactivityIfNeeded`): its value is the activation epoch `A` (the entered epoch, stored as a decimal string), and any non-empty value means activation has run, so later rollovers skip it even after a restart. It is durable but not permanent: a chain rollback to before epoch `A` clears it (`recomputeAccountExpirationsAfterRollback` calls `DeleteSyncState` alongside `ResetAccountExpirationActivation`), so a subsequent re-sync re-runs activation. The stored epoch is read back (`ledger.LedgerState.delegatorInactivityActivationEpoch`) as the activation floor the rollback recompute clamps expirations up to, since the activation stamp writes `A + DelegatorInactivity` without leaving a witness. `synthetic_v2_cost_model` (`database.SyntheticV2CostModelSyncKey`) records whether the PlutusV2 cost model currently in force is still `HardForkBabbage`'s fabricated default (`"true"`) rather than real governance/protocol-update data (`"false"`); an absent value falls back to comparing the current cost model directly against the known fabricated default (`ledger.resolveSyntheticV2CostModel`), which is what makes a database that predates this key behave correctly instead of silently defaulting to "not synthetic." `synthetic_v2_cost_model_cleared_epoch` (`database.SyntheticV2CostModelClearedEpochSyncKey`) is the companion provenance marker: its value is the epoch at which real PlutusV2 cost-model data was last confirmed written (decimal string; absent means never confirmed), set alongside `synthetic_v2_cost_model` = `"false"` whenever CIP-1694 governance enactment or a pre-Conway Shelley-style protocol-parameter update explicitly writes the cost model (not merely carries an unchanged value forward). Like `delegator_inactivity_activated`, it is durable but not permanent: `database.RecomputeSyntheticV2CostModelMarkerAfterTruncate` (mirroring the CIP-0163 pattern, called from both `ledger.LedgerState.rollback` and `database/lifecycle.Truncate`) deletes it and restores `synthetic_v2_cost_model` to `"true"` when a rollback or truncate crosses back before the confirming epoch, so a re-sync onto a fork that never re-enacts the write re-derives synthetic status instead of trusting a stale confirmation. `consumed_utxo_prune_floor` (`database.ConsumedUtxoPruneFloorSyncKey`, written by `ledger`'s `persistConsumedUtxoPruneFloor`) records the highest slot `cleanupConsumedUtxos` has ever begun pruning consumed UTxOs up to (decimal string; absent/zero means no pruning floor has ever been committed, i.e. no consumed row has yet become eligible for pruning -- `cleanupConsumedUtxos` itself still runs on its usual periodic tick regardless, it just has nothing to persist a floor for until the tip clears one stability window and storage mode/catch-up state allow it). Monotonic: a write only ever raises it. Unlike the other markers on this row, it is never undone by rollback or truncate, since rows already hard-deleted under a given floor cannot become un-deleted by a later rollback. `ledger.LedgerState.checkUtxoRetentionWindow` (answering a pinned `GetUTxOByTxIn`) combines this with a fresh estimate from the current tip and era's own stability window and rejects a pin below the larger (stricter) of the two, because the fresh estimate alone can be too lenient right after the tip moves in a way this durable floor already accounts for: a rollback lowering the tip, or an era transition widening the stability-window formula (Byron's small `2k` vs every Shelley+ era's much larger `3k/f`) (blinklabs-io/dingo#382). `database/lifecycle.Truncate` also reads this marker directly (a plain `sync_state` read needing no era-dependent computation, so no live `*LedgerState` is required) and refuses a target older than it in core storage mode, before any mutation: `TruncateAfterSlot`'s `UtxosUnspend` promises every UTxO spent after the target slot is "restored as unspent", but a spent row already hard-deleted under this floor cannot be restored -- the bulk `UPDATE` simply matches zero rows for it, silently leaving the live UTxO set short of what the surviving chain needs. This mirrors the block_nonce retention gap `TruncateAfterSlot` itself rejects (see the Truncate entry above): a disaster-recovery truncate can target a point far older than the live rollback path's own security-parameter bound, reaching past this floor in a way ordinary bounded rollback never does. API storage mode is exempt, since it never hard-deletes spent rows at all. |
 | `backfill_checkpoint` | `id`, `phase`, `last_slot`, `total_slots`, `started_at`, `updated_at`, `completed` | PK `id`; unique `phase` | Durable application-level backfill progress keyed by `phase`; `metadata` tracks API-mode historical metadata backfill, and `midnight` tracks the last slot the Midnight indexer committed (written by both its startup backfill and its live block-event path, and used as the resume point for the next startup sweep). Schema/data upgrade checkpoints belong to `schema_migrations` instead. |
 | `import_checkpoint` | `id`, `import_key`, `phase` | PK `id`; unique `import_key` | Mithril snapshot import resume state. `import_key` is usually `{digest}:{slot}`. Catch-up imports leave `import_key` empty to force a full pass. |
 
@@ -1372,7 +1383,12 @@ outright with `SQLITE_BUSY` instead of waiting, and journal mode is persistent
 in the database header so once is enough; `busy_timeout` leads the remaining
 pragma list, because the driver applies `_pragma` directives in DSN order and
 anything ahead of it would run with no busy handler installed), so committed metadata reaches disk
-at WAL checkpoints (every 1000 pages by default). Badger is opened with its
+at WAL checkpoints (every 10000 pages, ~40MB at the default 4096-byte page
+size, via `sqliteCommonPragmas`'s `wal_autocheckpoint`; raised from SQLite's
+1000-page compiled-in default because a checkpoint firing on nearly every
+block-apply commit was rewriting the same hot B-tree pages to
+`metadata.sqlite` on almost every commit instead of letting several commits'
+worth of touches to a page coalesce into one checkpoint write). Badger is opened with its
 default `SyncWrites=false` and a 128MiB memtable, so committed blob writes can
 sit unflushed far longer — at chain tip dingo writes only a few MiB of blocks per
 hour, so the memtable may not rotate for hours. Without the sync barrier an
@@ -1383,6 +1399,108 @@ metadata tip (`cleanupOrphanedBlobs`) but cannot rebuild blocks missing *beneath
 it, so it rolls the ledger back to the blob tip instead. That rollback can be
 arbitrarily deep and, on a Mithril-bootstrapped node, can reach the
 `mithril_ledger_slot` trust boundary, past which no rollback is possible at all.
+
+**Periodic forced WAL checkpoint (`checkpointWAL`,
+`database/plugin/metadata/sqlite/shared_sqlstore.go`).** Raising
+`wal_autocheckpoint` (above) fixed the write-amplification problem but
+surfaced a second one: `dingo_database_sql_wal_bytes` (below) never showed a
+single decrease, on any of four live instances, one of which had no other
+change applied at all. `wal_autocheckpoint` only ever invokes a PASSIVE
+checkpoint, and PASSIVE — like FULL and RESTART — backfills WAL frames into
+`metadata.sqlite` and lets future commits reuse that reclaimed space, but
+never calls `ftruncate` on the `-wal` file itself; only
+`SQLITE_CHECKPOINT_TRUNCATE` does. Verified directly against a copy of a
+live, actively-growing `metadata.sqlite`: with zero readers blocking it
+(every attempt reported `busy=0` with `checkpointed==log`, i.e. a fully
+successful checkpoint), PASSIVE, FULL, and RESTART each left a
+68062432-byte `-wal` file at exactly 68062432 bytes, while TRUNCATE alone
+dropped it to 0. So the gauge — a plain `os.Stat` of that file — could never
+show reclaim under `wal_autocheckpoint` alone, no matter how well passive
+checkpointing was working underneath; the file's on-disk footprint is a
+high-water mark that only grows or holds steady until something truncates
+it. `checkpointWAL` is that something: a `Store.Checkpoint` callback (a new
+hook alongside `Store.Maintenance`, on its own two-minute ticker independent
+of `Maintenance`'s 24-hour VACUUM cadence — see `sqlstore.Config.Checkpoint`)
+that attempts `PRAGMA wal_checkpoint(TRUNCATE)` every two minutes, letting
+the WAL's on-disk size be brought back down on a schedule instead of only
+ever growing. This is best-effort, not a hard ceiling: an active `readDB`
+snapshot can leave a given attempt `busy`, in which case the file stays at
+its current size until a later tick succeeds.
+
+The checkpoint runs on a dedicated connection opened fresh for each attempt
+and closed immediately after — never against `writeDB` or `readDB`. An
+earlier version issued it against `writeDB` on the theory that
+`SetMaxOpenConns(1)` would just serialize the checkpoint query behind any
+write transaction already using that sole connection. Measured, that
+serialization was the bug: `PRAGMA wal_checkpoint(TRUNCATE)` invokes the
+driver's busy handler synchronously, and once a reader's open `readDB`
+snapshot makes the truncate impossible, the call blocks for the full
+`busy_timeout(30000)` before giving up — 30.04s measured — holding
+`writeDB`'s only connection the entire time and blocking a concurrent
+`writeDB` insert for 29.99s of that, for a result that was still `busy=1`
+with nothing truncated. Neither Go context cancellation nor a shorter select
+loop around the call can shorten that wait once it has entered the driver.
+A dedicated connection with a much shorter `busy_timeout` (250ms, see
+`checkpointBusyTimeout`) hits the same `busy=1` outcome but fails fast
+instead — 271ms measured — and never occupies `writeDB` at all, so a
+concurrent write is never blocked behind a checkpoint tick regardless of how
+long a `readDB` snapshot is held open. SQLite tracks WAL locks at the
+shared-memory/file level rather than per `database/sql` connection, so the
+dedicated connection still correctly observes (or reports busy against) a
+snapshot held open through one of `readDB`'s connections. If the 250ms wait
+is exceeded, `PRAGMA wal_checkpoint` reports `busy=1` with a partial
+`checkpointed` count rather than an error, logged at `Warn`; the next tick
+retries rather than looping here. TRUNCATE, not the safer-sounding RESTART,
+is deliberate: as shown above, RESTART does not shrink the file at all, so
+it cannot make the gauge move.
+
+**SQL-side metrics.** Badger's own write/read/cache/GC counters
+(`database_blob_*`, `database/plugin/blob/badger/metrics.go`) have existed for
+a while but were never on a dashboard; the metadata store had no equivalent
+instrumentation at all until the write-amplification investigation above added
+it. `dingo_database_sql_operations_total{op}` (counter,
+`database/plugin/metadata/sqlstore/metrics.go`) is incremented once per SQL
+statement at Store's single query chokepoint (`instrumentedQueryer`),
+classified by leading keyword (insert/update/delete/select/other) parsed past
+each query's sqlc-generated `-- name: X :verb` comment; it is a no-op unless
+`Config.PromRegistry` is set. `dingo_database_sql_query_duration_seconds{op,
+query}` (histogram, same file and chokepoint, added alongside this section)
+observes each statement's wall-clock duration at the same point, labeled by
+that op classification plus, when known, the sqlc-generated query name itself
+(`classifySQLStatement`; `"unknown"` for a hand-written query with no `--
+name:` annotation, such as the cached `sumCredentialUtxoStake` query). The
+query name is safe as a label because it is one of a small, fixed, code-
+controlled set of sqlc annotations, not user input or raw SQL text. Both the
+counter and the histogram cover every call site through `instrumentedQueryer`
+— domain queries, committee pruning, deferred-index maintenance — including
+the hot-statement cache's cached calls and
+`transactionBatchAccumulator.insertTransaction`'s prepared batch-insert path
+(`transaction_write.go`), both of which bypass `instrumentedQueryer`'s
+wrapper entirely by calling their cached `*sql.Stmt` directly and are
+counted/timed explicitly instead in `queryRowCached`/`execCached`
+(`prepared_stmt.go`) or their own call site. For a multi-row SELECT
+issued through `QueryContext`, the histogram observation is dispatch latency
+only: `database/sql` returns `*sql.Rows` before the driver produces any rows,
+so the observation is recorded before the caller's own `Next()`/`Scan()` loop
+— where a `:many` query's real cost lives — does any work. `ExecContext`,
+`QueryRowContext`, and the cached-statement path all block until the
+statement completes, so their observations do reflect completion; see
+`countingQueryer.QueryContext`'s doc comment (`metrics.go`) for the measured
+gap and why timing through `Close()` instead is not available given the
+`*sql.Rows`-typed `queryer`/sqlc `DBTX` interfaces this wraps.
+`dingo_database_sql_wal_bytes`
+and `dingo_database_sql_disk_bytes` (`database/plugin/metadata/sqlite/metrics.go`)
+are pull-based gauges sampled at scrape time — a plain `os.Stat` of
+`metadata.sqlite-wal` and `Store.DiskSize()` respectively — the same pattern
+Badger's own cache gauges already use rather than a background ticker.
+`dingo_database_sql_wal_bytes` is not a checkpoint-health signal on its own:
+SQLite's PASSIVE/FULL/RESTART checkpoints backfill WAL frames into
+`metadata.sqlite` but never `ftruncate` the `-wal` file, so between
+`checkpointWAL`'s TRUNCATE attempts (see above) the gauge only grows. It is
+not strictly monotonic, though: a successful periodic TRUNCATE attempt can
+drop it back toward zero, while a persistently held reader snapshot can
+leave it at its ~40MB-and-rising floor (the raised `wal_autocheckpoint`
+threshold above) until a later attempt succeeds.
 
 A failed `Sync` is reported as `PartialCommitError`, because at that point the
 blob transaction is committed and carries the new commit timestamp while metadata

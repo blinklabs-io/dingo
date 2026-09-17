@@ -143,6 +143,19 @@ func (c *Chain) Tip() ochainsync.Tip {
 	return c.currentTip
 }
 
+// WithTip runs fn while holding the chain mutex. It is intended for operations
+// that must bind a result to the exact tip snapshot they observed, such as
+// signing a block header. fn must not call back into c or block on a chain
+// operation.
+func (c *Chain) WithTip(fn func(ochainsync.Tip) error) error {
+	if c == nil {
+		return errors.New("chain is nil")
+	}
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	return fn(c.currentTip)
+}
+
 func (c *Chain) HeaderTip() ochainsync.Tip {
 	if c == nil {
 		return ochainsync.Tip{}
@@ -165,6 +178,86 @@ func blockNumberContiguous(eraId uint8, blockNumber, parentNumber uint64) bool {
 		return true
 	}
 	return false
+}
+
+// firstBlockNumber is the block number of the first block of a Cardano chain,
+// and the only value accepted for the first block of a chain that has been
+// emptied back to origin. Ouroboros numbers the first block after genesis 0 --
+// the Byron epoch-boundary block on a Byron network, the first block of the
+// starting era on a post-Byron genesis network.
+//
+// Nothing wider is safe. blockNumberContiguous compares a candidate against the
+// accepted tip, so a chain that starts at block number 1 is self-consistent
+// from its second block onwards: 2 follows 1, 3 follows 2, and the missing
+// block 0 is never noticed. Tolerating anything above 0 here does not defer the
+// check to the second block, it permanently shortens the chain by exactly the
+// prefix it tolerated -- the same truncated prefix issue #4202 reports.
+const firstBlockNumber uint64 = 0
+
+// originTipHash stands in for the tip hash when a block or header is rejected
+// against a chain at origin: there is no tip block to name.
+const originTipHash = "origin"
+
+// atOriginAfterMutation reports whether this chain sits at origin -- no tip
+// block -- after having been mutated at least once. That is the state
+// rollbackLocked leaves behind for a rollback to origin: it drops every queued
+// header and resets tipBlockIndex to 0.
+//
+// The distinction matters because the continuity checks below are skipped when
+// there is no tip to chain onto, and a rollback to origin can produce that
+// state at any time during a run. A peer whose chainsync cursor is still ahead
+// then delivers block N rather than the network's first block, and it is
+// accepted as the chain's first block: the chain grows with a silently missing
+// prefix, and the epoch nonce folded over it is wrong, so every header in the
+// next epoch fails VRF verification (issue #4202).
+//
+// The predicate deliberately ignores the header queue. A queued header does
+// not anchor an incoming raw block: addRawBlockLocked only checks that the
+// block's hash matches c.headers[0], while RawBlock.BlockNumber is whatever
+// the caller supplied. Queuing the chain's first header and then handing over
+// a same-hash block from further along the chain would otherwise skip this
+// check, delete the queued header and persist that block number. RawBlock and
+// AddRawBlocks are exported, so the chain cannot assume its callers derive
+// those fields consistently: the check has to hold for the exported API, not
+// only for the in-tree producers. (addBlockLocked takes the block number from
+// a matching queued header, which this same check anchored when the header was
+// queued.)
+//
+// A chain that has never been mutated is deliberately excluded. It has no
+// anchor yet -- the chain package does not know the network's genesis hash --
+// and it is the state the bulk block importer fills from a local immutable
+// database, which legitimately establishes the chain's first block itself.
+func (c *Chain) atOriginAfterMutation() bool {
+	return c.tipBlockIndex < initialBlockIndex &&
+		c.mutationGeneration > 0
+}
+
+// firstBlockNumberValid reports whether blockNumber is the one a chain emptied
+// back to origin may accept as its first block.
+//
+// The chain package has no knowledge of the network's genesis hash, so the
+// prev-hash half of the continuity check cannot be applied at origin. The block
+// number is the whole of the anchor available here: it closes the truncated
+// prefix of issue #4202, but a candidate that carries block number 0 is still
+// accepted whatever its hash and prev hash say. Binding the first block's hash
+// as well needs the genesis hash, which belongs to the ledger, not here.
+func firstBlockNumberValid(blockNumber uint64) bool {
+	return blockNumber == firstBlockNumber
+}
+
+// newBlockNotFitChainOriginError builds the rejection for a block or header
+// offered as the first block of a chain sitting at origin. Reusing
+// BlockNotFitChainTipError keeps the ledger's existing recovery path, which
+// re-intersects the offending connection rather than failing the node.
+func newBlockNotFitChainOriginError(
+	blockHash string,
+	blockPrevHash string,
+) BlockNotFitChainTipError {
+	return NewBlockNotFitChainTipError(
+		blockHash,
+		blockPrevHash,
+		originTipHash,
+	)
 }
 
 func (c *Chain) headerTip() ochainsync.Tip {
@@ -260,6 +353,15 @@ func (c *Chain) addBlockHeader(
 				headerTip.BlockNumber,
 			)
 		}
+	} else if c.atOriginAfterMutation() &&
+		!firstBlockNumberValid(queued.blockNumber) {
+		// The chain was rolled back to origin, so there is no tip to chain
+		// onto and the checks above cannot run. Anchor the first header on
+		// its block number instead; see atOriginAfterMutation.
+		return newBlockNotFitChainOriginError(
+			headerHash.String(),
+			headerPrevHash.String(),
+		)
 	}
 	// Add header
 	c.headers = append(c.headers, queued)
@@ -639,6 +741,15 @@ func (c *Chain) addBlockLocked(
 				c.currentTip.BlockNumber,
 			)
 		}
+	} else if c.atOriginAfterMutation() && !firstBlockNumberValid(blockNumber) {
+		// Chain rolled back to origin: anchor the first block on its block
+		// number -- taken from the matching queued header when there is one --
+		// the only continuity the chain can check here. A queued header does
+		// not exempt the block from the check. See atOriginAfterMutation.
+		return event.Event{}, newBlockNotFitChainOriginError(
+			hex.EncodeToString(blockHashBytes),
+			hex.EncodeToString(blockPrevHashBytes),
+		)
 	}
 	// Build new block record
 	tmpPoint := point
@@ -908,6 +1019,16 @@ func (c *Chain) addRawBlockLocked(
 				hex.EncodeToString(c.currentTip.Point.Hash),
 			)
 		}
+	} else if c.atOriginAfterMutation() &&
+		!firstBlockNumberValid(rb.BlockNumber) {
+		// Chain rolled back to origin: anchor the first block on its block
+		// number, the only continuity the chain can check here. A queued
+		// header does not exempt the block -- the hash check above binds the
+		// hash, not the number. See atOriginAfterMutation.
+		return event.Event{}, newBlockNotFitChainOriginError(
+			hex.EncodeToString(rb.Hash),
+			hex.EncodeToString(rb.PrevHash),
+		)
 	}
 	tmpPoint := ocommon.NewPoint(rb.Slot, rb.Hash)
 	newBlockIndex := c.tipBlockIndex + 1

@@ -193,6 +193,12 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 
 // Start starts the HTTP server in a background goroutine.
 func (s *Server) Start(ctx context.Context) error {
+	startDone, err := s.listener.BeginStart()
+	if err != nil {
+		return err
+	}
+	defer s.listener.EndStart(startDone)
+
 	server, bindDone, err := s.listener.Publish(func() *http.Server {
 		mux := http.NewServeMux()
 		s.registerRoutes(mux)
@@ -214,39 +220,10 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 
-	// Launched before the bind so a context cancelled mid-bind still tears the
-	// server down: Take is what makes an in-flight bind close its own socket.
-	go func() { //nolint:gosec // G118: goroutine intentionally outlives ctx to perform graceful shutdown
-		<-ctx.Done()
-		job, _ := s.listener.TakeIf(server)
-		// Nil when a concurrent Stop won the detach -- it owns the teardown
-		// and its caller is already waiting on it -- or when this server was
-		// already stopped and a restart published another one, which is not
-		// this monitor's to touch. Either way there is nothing to do here.
-		if job != nil {
-			s.logger.Debug(
-				"context cancelled, shutting down " +
-					"Mesh API server",
-			)
-			//nolint:contextcheck
-			shutdownCtx, cancel := context.WithTimeout(
-				context.Background(),
-				30*time.Second,
-			)
-			defer cancel()
-			//nolint:contextcheck
-			if err := s.listener.Shutdown(
-				shutdownCtx, job, apilistener.Graceful,
-			); err != nil {
-				s.logger.Error(
-					"failed to shutdown Mesh API "+
-						"server on context "+
-						"cancellation",
-					"error", err,
-				)
-			}
-		}
-	}()
+	// Watched before the bind so a context cancelled mid-bind still tears the
+	// server down: the detach is what makes an in-flight bind close its own
+	// socket.
+	s.listener.Watch(ctx, server, apilistener.Graceful)
 
 	served, err := s.listener.Bind(server, bindDone, s.config.TLS)
 	if err != nil {
@@ -254,9 +231,9 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 	if !served {
-		// A concurrent Stop or context cancellation detached this server while
-		// it was binding, so Bind closed the socket rather than serving it.
-		// Saying the listener came up would be false.
+		// A context cancellation detached this server while it was binding, so
+		// Bind closed the socket rather than serving it. Saying the listener
+		// came up would be false.
 		return nil
 	}
 
@@ -271,12 +248,7 @@ func (s *Server) Start(ctx context.Context) error {
 // Stop gracefully shuts down the HTTP server, and does not return until the
 // listening socket has been released -- see internal/apilistener.
 func (s *Server) Stop(ctx context.Context) error {
-	job, inFlight := s.listener.Take()
-	if job == nil {
-		return s.listener.AwaitTeardown(ctx, inFlight)
-	}
-	s.logger.Debug("shutting down Mesh API server")
-	return s.listener.Shutdown(ctx, job, apilistener.Graceful)
+	return s.listener.Stop(ctx, apilistener.Graceful)
 }
 
 // registerRoutes registers all Mesh API endpoints.

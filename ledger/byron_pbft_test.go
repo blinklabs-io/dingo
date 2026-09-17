@@ -92,7 +92,7 @@ func newSignedByronPBFTBlock(
 	template models.Block,
 	protocolMagic uint32,
 	epoch uint64,
-	slot uint16,
+	slot uint64,
 	difficulty uint64,
 	previousHash lcommon.Blake2b256,
 	issuer byronPBFTTestKey,
@@ -134,7 +134,7 @@ func newSignedByronPBFTBlock(
 	epochSlot := struct {
 		cbor.StructAsArray
 		Epoch uint64
-		Slot  uint16
+		Slot  uint64
 	}{Epoch: epoch, Slot: slot}
 	chainDifficulty := struct {
 		cbor.StructAsArray
@@ -145,7 +145,7 @@ func newSignedByronPBFTBlock(
 		BlockVersion    byron.ByronBlockVersion
 		SoftwareVersion byron.ByronSoftwareVersion
 		Attributes      any
-		ExtraProof      lcommon.Blake2b256
+		ExtraProof      []byte
 	}{
 		BlockVersion:    header.ExtraData.BlockVersion,
 		SoftwareVersion: header.ExtraData.SoftwareVersion,

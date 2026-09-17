@@ -26,6 +26,7 @@ import (
 	"maps"
 	"math/big"
 	"os"
+	"sort"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -34,6 +35,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	hostplugin "github.com/blinklabs-io/dingo/plugin"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -134,6 +136,8 @@ type DingoStateManager struct {
 	// committeeQuorums tracks the new quorum of pending UpdateCommittee
 	// proposals, keyed by gov action id, consumed at enactment.
 	committeeQuorums map[string]*big.Rat
+	utxoIDs          map[string]struct{}
+	stakeDeposits    map[mockledger.RewardAccountKey]uint64
 
 	// lastSlot/blockIndex give each transaction within the same slot a
 	// distinct, increasing block index, matching production's
@@ -185,6 +189,8 @@ func newDingoStateManager(opts realBackendOptions) (*DingoStateManager, error) {
 		govState:          conformance.NewGovernanceState(),
 		committeeRemovals: make(map[string]map[common.Blake2b224]struct{}),
 		committeeQuorums:  make(map[string]*big.Rat),
+		utxoIDs:           make(map[string]struct{}),
+		stakeDeposits:     make(map[mockledger.RewardAccountKey]uint64),
 	}, nil
 }
 
@@ -261,6 +267,8 @@ func (m *DingoStateManager) Reset() error {
 	m.govState = conformance.NewGovernanceState()
 	m.committeeRemovals = make(map[string]map[common.Blake2b224]struct{})
 	m.committeeQuorums = make(map[string]*big.Rat)
+	m.utxoIDs = make(map[string]struct{})
+	m.stakeDeposits = make(map[mockledger.RewardAccountKey]uint64)
 	m.lastSlot = 0
 	m.blockIndex = 0
 
@@ -365,6 +373,12 @@ func (m *DingoStateManager) LoadInitialState(
 	// below drives the same seed data through real backend writes.
 	m.govState = conformance.NewGovernanceState()
 	m.govState.LoadFromParsedState(state)
+	for id, parsedUtxo := range state.Utxos {
+		if parsedUtxo.Output != nil {
+			m.utxoIDs[id] = struct{}{}
+		}
+	}
+	maps.Copy(m.stakeDeposits, state.StakeCredentialDeposits)
 	m.syncRewardBalanceMirrors()
 
 	txn := m.db.Transaction(true)
@@ -393,6 +407,10 @@ func (m *DingoStateManager) LoadInitialState(
 			Reward:        types.Uint64(balance),
 			ImportDeposit: initialDeposit,
 		}
+		if drep, delegated := state.DRepDelegationsByCredential[credential]; delegated {
+			account.Drep = append([]byte(nil), drep.Credential...)
+			account.DrepType = uint64(drep.Type) //nolint:gosec // conformance DRep types are bounded ledger enums.
+		}
 		if err := m.db.Metadata().ImportAccount(
 			account,
 			txn.Metadata(),
@@ -414,10 +432,30 @@ func (m *DingoStateManager) LoadInitialState(
 		}
 	}
 
-	for _, hash := range state.DRepRegistrations {
-		drep := &models.Drep{Credential: hash[:], Active: true}
+	for credential, registered := range state.DRepRegistrationsByCredential {
+		if !registered {
+			continue
+		}
+		credentialTag, err := models.CredentialTagFromUint(credential.CredType)
+		if err != nil {
+			return fmt.Errorf("seed drep credential tag: %w", err)
+		}
+		drep := &models.Drep{
+			Credential:    credential.Credential[:],
+			CredentialTag: credentialTag,
+			Active:        true,
+		}
 		if err := m.db.CreateDrep(txn, drep); err != nil {
 			return fmt.Errorf("seed drep: %w", err)
+		}
+	}
+	for _, hash := range state.DRepRegistrations {
+		if hasDRepCredentialHash(state.DRepRegistrationsByCredential, hash) {
+			continue
+		}
+		drep := &models.Drep{Credential: hash[:], Active: true}
+		if err := m.db.CreateDrep(txn, drep); err != nil {
+			return fmt.Errorf("seed legacy drep: %w", err)
 		}
 	}
 
@@ -783,7 +821,14 @@ func (m *DingoStateManager) ApplyTransaction(
 		if err := m.applyInvalidTransaction(txn, tx, slot); err != nil {
 			return err
 		}
-		return txn.Commit()
+		if err := txn.Commit(); err != nil {
+			return err
+		}
+		m.removeUtxoIDs(tx.Collateral())
+		if tx.CollateralReturn() != nil {
+			m.addUtxoID(tx.Hash(), len(tx.Outputs()))
+		}
+		return nil
 	}
 
 	if err := m.spendUtxos(txn, tx.Inputs(), slot); err != nil {
@@ -845,7 +890,35 @@ func (m *DingoStateManager) ApplyTransaction(
 		}
 	}
 
-	return txn.Commit()
+	if err := txn.Commit(); err != nil {
+		return err
+	}
+	for _, cert := range tx.Certificates() {
+		m.updateStakeDepositForCertificate(cert)
+	}
+	m.applyRewardWithdrawals(tx)
+	m.removeUtxoIDs(tx.Inputs())
+	for outIdx := range tx.Outputs() {
+		m.addUtxoID(txHash, outIdx)
+	}
+	return nil
+}
+
+func (m *DingoStateManager) applyRewardWithdrawals(tx common.Transaction) {
+	for address, amount := range tx.Withdrawals() {
+		credential, err := address.RewardAccountCredential()
+		if err != nil || amount.Sign() < 0 || !amount.IsUint64() {
+			continue
+		}
+		key := rewardAccountKey(credential)
+		balance, exists := m.govState.RewardAccountBalances[key]
+		if exists && amount.Uint64() <= balance {
+			m.govState.RewardAccountBalances[key] = balance - amount.Uint64()
+		}
+	}
+	m.govState.RewardAccounts = rewardBalancesByHash(
+		m.govState.RewardAccountBalances,
+	)
 }
 
 // applyInvalidTransaction handles a phase-2-invalid transaction: only
@@ -898,6 +971,7 @@ func (m *DingoStateManager) updateGovStateForCertificate(
 	case common.CertificateTypeStakeRegistrationDelegation:
 		if c, ok := cert.(*common.StakeRegistrationDelegationCertificate); ok {
 			m.govState.RegisterStakeCredential(c.StakeCredential)
+			m.govState.SetPoolDelegation(c.StakeCredential, c.PoolKeyHash)
 		}
 	case common.CertificateTypeVoteRegistrationDelegation:
 		if c, ok := cert.(*common.VoteRegistrationDelegationCertificate); ok {
@@ -908,6 +982,11 @@ func (m *DingoStateManager) updateGovStateForCertificate(
 		if c, ok := cert.(*common.StakeVoteRegistrationDelegationCertificate); ok {
 			m.govState.RegisterStakeCredential(c.StakeCredential)
 			m.govState.SetDRepDelegation(c.StakeCredential, c.Drep)
+			m.govState.SetPoolDelegation(c.StakeCredential, c.PoolKeyHash)
+		}
+	case common.CertificateTypeStakeDelegation:
+		if c, ok := cert.(*common.StakeDelegationCertificate); ok && c.StakeCredential != nil {
+			m.govState.SetPoolDelegation(*c.StakeCredential, c.PoolKeyHash)
 		}
 	case common.CertificateTypeVoteDelegation:
 		if c, ok := cert.(*common.VoteDelegationCertificate); ok {
@@ -916,6 +995,7 @@ func (m *DingoStateManager) updateGovStateForCertificate(
 	case common.CertificateTypeStakeVoteDelegation:
 		if c, ok := cert.(*common.StakeVoteDelegationCertificate); ok {
 			m.govState.SetDRepDelegation(c.StakeCredential, c.Drep)
+			m.govState.SetPoolDelegation(c.StakeCredential, c.PoolKeyHash)
 		}
 	case common.CertificateTypeStakeDeregistration:
 		if c, ok := cert.(*common.StakeDeregistrationCertificate); ok {
@@ -928,6 +1008,8 @@ func (m *DingoStateManager) updateGovStateForCertificate(
 	case common.CertificateTypePoolRegistration:
 		if c, ok := cert.(*common.PoolRegistrationCertificate); ok {
 			m.govState.RegisterPool(c.Operator)
+			credential := c.RewardAccountCredential()
+			m.govState.SetPoolRewardAccount(c.Operator, rewardAccountKey(credential))
 		}
 	case common.CertificateTypePoolRetirement:
 		if c, ok := cert.(*common.PoolRetirementCertificate); ok {
@@ -935,11 +1017,21 @@ func (m *DingoStateManager) updateGovStateForCertificate(
 		}
 	case common.CertificateTypeRegistrationDrep:
 		if c, ok := cert.(*common.RegistrationDrepCertificate); ok {
-			m.govState.RegisterDRep(c.DrepCredential.Credential)
+			m.govState.RegisterDRepCredentialUntil(
+				c.DrepCredential,
+				m.currentEpoch+m.drepInactivityPeriod(),
+			)
 		}
 	case common.CertificateTypeDeregistrationDrep:
 		if c, ok := cert.(*common.DeregistrationDrepCertificate); ok {
-			m.govState.DeregisterDRep(c.DrepCredential.Credential)
+			m.govState.DeregisterDRepCredential(c.DrepCredential)
+		}
+	case common.CertificateTypeUpdateDrep:
+		if c, ok := cert.(*common.UpdateDrepCertificate); ok {
+			m.govState.RegisterDRepCredentialUntil(
+				c.DrepCredential,
+				m.currentEpoch+m.drepInactivityPeriod(),
+			)
 		}
 	case common.CertificateTypeAuthCommitteeHot:
 		if c, ok := cert.(*common.AuthCommitteeHotCertificate); ok {
@@ -955,6 +1047,64 @@ func (m *DingoStateManager) updateGovStateForCertificate(
 	default:
 		// Other certificate types not relevant to governance pre-validation.
 	}
+}
+
+func hasDRepCredentialHash(
+	registrations map[mockledger.RewardAccountKey]bool,
+	hash common.Blake2b224,
+) bool {
+	for credential, registered := range registrations {
+		if registered && credential.Credential == hash {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *DingoStateManager) updateStakeDepositForCertificate(
+	cert common.Certificate,
+) {
+	var credential common.Credential
+	var deposit uint64
+	var registered bool
+	switch c := cert.(type) {
+	case *common.StakeRegistrationCertificate:
+		credential, registered = c.StakeCredential, true
+		if pp, ok := m.protocolParams.(*conway.ConwayProtocolParameters); ok {
+			deposit = uint64(pp.KeyDeposit)
+		}
+	case *common.RegistrationCertificate:
+		credential, deposit, registered = c.StakeCredential, depositAmount(c.Amount), true
+	case *common.StakeRegistrationDelegationCertificate:
+		credential, deposit, registered = c.StakeCredential, depositAmount(c.Amount), true
+	case *common.VoteRegistrationDelegationCertificate:
+		credential, deposit, registered = c.StakeCredential, depositAmount(c.Amount), true
+	case *common.StakeVoteRegistrationDelegationCertificate:
+		credential, deposit, registered = c.StakeCredential, depositAmount(c.Amount), true
+	case *common.StakeDeregistrationCertificate:
+		delete(m.stakeDeposits, rewardAccountKey(c.StakeCredential))
+		return
+	case *common.DeregistrationCertificate:
+		delete(m.stakeDeposits, rewardAccountKey(c.StakeCredential))
+		return
+	}
+	if registered {
+		m.stakeDeposits[rewardAccountKey(credential)] = deposit
+	}
+}
+
+func rewardAccountKey(credential common.Credential) mockledger.RewardAccountKey {
+	return mockledger.RewardAccountKey{
+		CredType:   credential.CredType,
+		Credential: credential.Credential,
+	}
+}
+
+func (m *DingoStateManager) drepInactivityPeriod() uint64 {
+	if pp, ok := m.protocolParams.(*conway.ConwayProtocolParameters); ok {
+		return pp.DRepInactivityPeriod
+	}
+	return defaultDRepInactivityPeriod
 }
 
 // recordProposalsInGovState mirrors newly submitted proposals into the
@@ -976,7 +1126,13 @@ func (m *DingoStateManager) recordProposalsInGovState(
 			ActionType:      getActionType(action),
 			ExpiresAfter:    m.currentEpoch + govActionLifetime,
 			SubmittedEpoch:  m.currentEpoch,
+			Deposit:         proposal.Deposit(),
 			ProposedMembers: make(map[common.Blake2b224]uint64),
+		}
+		rewardAccount := proposal.RewardAccount()
+		if credential, err := rewardAccount.RewardAccountCredential(); err == nil {
+			key := rewardAccountKey(credential)
+			info.ReturnAccount = &key
 		}
 		extractActionSpecificData(action, &info)
 
@@ -1797,6 +1953,37 @@ func (m *DingoStateManager) GetGovernanceState() *conformance.GovernanceState {
 	return m.govState
 }
 
+// GetStateSnapshot implements conformance.StateSnapshotProvider. The
+// conformance harness compares only observable ledger state; the database
+// remains authoritative for validation while this projection tracks the
+// committed UTxO identities alongside the same writes.
+func (m *DingoStateManager) GetStateSnapshot() *conformance.StateSnapshot {
+	utxoIDs := make([]string, 0, len(m.utxoIDs))
+	for id := range m.utxoIDs {
+		utxoIDs = append(utxoIDs, id)
+	}
+	sort.Strings(utxoIDs)
+	return &conformance.StateSnapshot{
+		CurrentEpoch:                   m.currentEpoch,
+		UtxoIDs:                        utxoIDs,
+		StakeRegistrationsByCredential: maps.Clone(m.govState.StakeRegistrationsByCredential),
+		RewardAccountBalances:          maps.Clone(m.govState.RewardAccountBalances),
+		StakeCredentialDeposits:        maps.Clone(m.stakeDeposits),
+		PoolRegistrations:              maps.Clone(m.govState.PoolRegistrations),
+		Governance:                     m.govState,
+	}
+}
+
+func (m *DingoStateManager) addUtxoID(hash common.Blake2b256, index int) {
+	m.utxoIDs[fmt.Sprintf("%x#%d", hash[:], index)] = struct{}{}
+}
+
+func (m *DingoStateManager) removeUtxoIDs(inputs []common.TransactionInput) {
+	for _, input := range inputs {
+		delete(m.utxoIDs, input.String())
+	}
+}
+
 // SetRewardBalances implements conformance.StateManager.SetRewardBalances.
 //
 // Reward-account balances are injected by the harness itself (precomputed
@@ -1895,6 +2082,9 @@ func (m *DingoStateManager) proposalToModel(
 		ExpiresEpoch:  info.ExpiresAfter,
 		PolicyHash:    info.PolicyHash,
 	}
+	if info.ActionType == common.GovActionTypeUpdateCommittee {
+		proposal.GovActionCbor = initialCommitteeProposalCbor(info)
+	}
 
 	if info.ParentActionId != nil {
 		parentTxHash := parseProposalTxHash(*info.ParentActionId)
@@ -1911,6 +2101,37 @@ func (m *DingoStateManager) proposalToModel(
 	}
 
 	return proposal
+}
+
+// initialCommitteeProposalCbor reconstructs the action body needed by Dingo's
+// committee lookup for a proposal imported from a vector initial_state. The
+// vector's canonical projection carries the committee additions/removals and
+// parent, but not the original action bytes.
+func initialCommitteeProposalCbor(info conformance.GovActionInfo) []byte {
+	action := &common.UpdateCommitteeGovAction{
+		Type:        uint(common.GovActionTypeUpdateCommittee),
+		Credentials: make([]common.Credential, 0, len(info.RemovedMembers)),
+		CredEpochs:  make(map[*common.Credential]uint64),
+		Quorum:      cbor.Rat{Rat: big.NewRat(0, 1)},
+	}
+	for credential := range info.RemovedMembers {
+		action.Credentials = append(action.Credentials, credential.AsCredential())
+	}
+	for credential, epoch := range info.ProposedMembersByCredential {
+		cred := credential.AsCredential()
+		action.CredEpochs[&cred] = epoch
+	}
+	if info.ParentActionId != nil {
+		parent := &common.GovActionId{}
+		copy(parent.TransactionId[:], parseProposalTxHash(*info.ParentActionId))
+		parent.GovActionIdx = parseProposalActionIdx(*info.ParentActionId)
+		action.ActionId = parent
+	}
+	encoded, err := cbor.Encode(action)
+	if err != nil {
+		return nil
+	}
+	return encoded
 }
 
 // Helper functions
@@ -1975,7 +2196,17 @@ func extractActionSpecificData(
 		for cred, epoch := range ga.CredEpochs {
 			if cred != nil {
 				info.ProposedMembers[cred.Credential] = uint64(epoch)
+				if info.ProposedMembersByCredential == nil {
+					info.ProposedMembersByCredential = make(
+						map[mockledger.RewardAccountKey]uint64,
+					)
+				}
+				info.ProposedMembersByCredential[rewardAccountKey(*cred)] = uint64(epoch)
 			}
+		}
+		info.RemovedMembers = make(map[mockledger.RewardAccountKey]bool)
+		for _, cred := range ga.Credentials {
+			info.RemovedMembers[rewardAccountKey(cred)] = true
 		}
 	case *common.NoConfidenceGovAction:
 		if ga.ActionId != nil {

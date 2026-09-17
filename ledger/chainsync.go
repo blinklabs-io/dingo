@@ -3965,11 +3965,10 @@ func (ls *LedgerState) tryResolveFork(
 			ls.chain.HeaderCount() > 0 {
 			ls.chainsyncBlockfetchMutex.Lock()
 			if err := ls.restartQueuedBlockfetchAfterForkLocked(e.ConnectionId, pending); err != nil {
-				ls.config.Logger.Warn(
-					"failed to start blockfetch after fork extension",
-					"component", "ledger",
-					"error", err,
-					"connection_id", e.ConnectionId.String(),
+				ls.recoverBlockfetchRestartFailureLocked(
+					e.ConnectionId,
+					err,
+					pending,
 				)
 			}
 			ls.chainsyncBlockfetchMutex.Unlock()
@@ -4299,6 +4298,46 @@ func (ls *LedgerState) restartQueuedBlockfetchAfterForkLocked(
 	connId ouroboros.ConnectionId,
 	pending *pendingPublishes,
 ) error {
+	// When a batch is already in progress on a DIFFERENT connection, let it
+	// complete rather than canceling it, exactly like
+	// handoffPipelineOnSwitchLocked already does for a plain chain-selection
+	// switch (#1922, "preserve in-flight blockfetch batch across chain
+	// switch"): the fetched blocks are canonical regardless of which peer
+	// serves them, so tearing down a healthy in-flight batch buys nothing
+	// and only wastes it. selectedBlockfetchConnId is retargeted below
+	// regardless, so the NEXT batch uses connId once the current one
+	// finishes (or times out / fails, which retries on the then-current
+	// selection).
+	//
+	// This caller (tryResolveFork's "fork extends from current tip" branch)
+	// runs on essentially every active-connection switch: the newly active
+	// connection's next header almost never fits a header queue built by the
+	// connection it replaced, so it resolves here as a from-current-tip
+	// "fork". Before this fix, that unconditionally interrupted whatever
+	// batch was in flight -- bypassing handoffPipelineOnSwitchLocked's
+	// protection entirely via this side channel -- and
+	// handleEventBlockfetchBlockDeferred only accepts blocks whose
+	// connection matches the CURRENT activeBlockfetchConnId, silently
+	// discarding every block already in flight from the batch just torn
+	// down. If the active connection changes faster than one batch's
+	// round-trip, every fetched block is discarded on arrival and the ledger
+	// can never apply anything: observed live as a chain-switch storm with
+	// confirmed zero block-apply progress even after the switch RATE was
+	// bounded (see the chainselection anti-flap pin's SwitchBackCooldown).
+	//
+	// A restart requested for the SAME connection that is already fetching
+	// still tears down and restarts unconditionally (below): the fork just
+	// resolved may have extended the header queue with a wider or different
+	// range than the in-flight request covers, and there is no "different
+	// peer" to protect against here -- see
+	// TestStartQueuedBlockfetchAfterForkRestartClearsShadowState, which
+	// depends on this path resetting per-batch shadow state even when connId
+	// is already the active connection.
+	if ls.chainsyncBlockfetchReadyChan != nil &&
+		!sameConnectionId(ls.activeBlockfetchConnId, connId) {
+		ls.selectedBlockfetchConnId = connId
+		return nil
+	}
 	if ls.chainsyncBlockfetchReadyChan != nil {
 		if ls.chainsyncBlockfetchTimeoutTimer != nil {
 			ls.chainsyncBlockfetchTimeoutTimer.Stop()
@@ -4323,6 +4362,67 @@ func (ls *LedgerState) restartQueuedBlockfetchAfterForkLocked(
 	}
 	ls.selectedBlockfetchConnId = connId
 	return ls.startQueuedBlockfetchLocked(connId, pending)
+}
+
+// recoverBlockfetchRestartFailureLocked handles a failed
+// restartQueuedBlockfetchAfterForkLocked call for the "fork extends from
+// current tip" path. failedConnId's connection can die between the
+// fork-resolution decision (made against the connection the fork-extending
+// headers arrived on) and this dispatch -- notably via
+// ConnectionRecycleRequestedEvent, which a rapid string of chain-selection
+// reversals can itself trigger: a peer that loses the active connection
+// mid-batch has its still-in-flight or queued blocks rejected as not
+// extending the (now different) chain tip, and enough of those in a short
+// window recycle it (see noteNonExtendingBlockRejection). Left unhandled
+// here, the fork-extension headers just queued above stay queued with
+// nothing ever scheduled to fetch their bodies -- observed live as
+// continuous reselection with no block-apply progress at all, logged as
+// "failed to start blockfetch after fork extension" / "failed to lookup
+// connection ID".
+//
+// First retry against whatever connection chain selection currently has
+// active, mirroring the fallback handleChainSwitchEvent already uses when
+// its own handoff target is unavailable. If no live alternative exists (or
+// it also fails), fall back to the same recovery
+// ensureBlockfetchDrainingAfterForkQueueFailure uses for the sibling "queued
+// headers with no active fetcher" failure: drop the stranded queue and
+// request a fresh chainsync intersect, so the pipeline resumes on
+// reconnect instead of idling forever.
+//
+// Must be called with ls.chainsyncBlockfetchMutex held.
+func (ls *LedgerState) recoverBlockfetchRestartFailureLocked(
+	failedConnId ouroboros.ConnectionId,
+	restartErr error,
+	pending *pendingPublishes,
+) {
+	if ls.config.GetActiveConnectionFunc != nil {
+		if activeConnId := ls.config.GetActiveConnectionFunc(); activeConnId != nil &&
+			!sameConnectionId(*activeConnId, failedConnId) &&
+			ls.isConnectionLive(*activeConnId) {
+			if retryErr := ls.restartQueuedBlockfetchAfterForkLocked(*activeConnId, pending); retryErr == nil {
+				ls.config.Logger.Info(
+					"retried blockfetch restart after fork extension on the current active connection",
+					"component", "ledger",
+					"failed_connection_id", failedConnId.String(),
+					"active_connection_id", activeConnId.String(),
+					"error", restartErr,
+				)
+				return
+			}
+		}
+	}
+	ls.config.Logger.Warn(
+		"failed to start blockfetch after fork extension, dropping queued headers and requesting chainsync re-sync",
+		"component", "ledger",
+		"error", restartErr,
+		"connection_id", failedConnId.String(),
+	)
+	ls.clearQueuedHeaders()
+	ls.requestChainsyncResync(
+		failedConnId,
+		event.ChainsyncResyncReasonForkExtensionRestartFailed,
+		pending,
+	)
 }
 
 // ensureBlockfetchDrainingAfterForkQueueFailure restarts blockfetch for

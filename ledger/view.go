@@ -227,6 +227,11 @@ var _ lcommon.DRepDelegationState = (*LedgerView)(nil)
 // witnesses rather than fail to build.
 var _ eras.ByronProtocolMagicProvider = (*LedgerView)(nil)
 
+// Byron minimum-fee validation requires the fee policy from Byron genesis.
+// Pin the optional capability to the concrete validation view so interface
+// drift fails at build time instead of disabling the rule.
+var _ eras.ByronFeePolicyProvider = (*LedgerView)(nil)
+
 // UtxoValidateValueNotConservedUtxo discovers this capability with a runtime
 // type assertion and, unlike the assertions above, degrades rather than fails
 // when it misses: a failed assertion silently refunds a legacy stake
@@ -252,6 +257,10 @@ func (lv *LedgerView) NetworkId() uint {
 
 func (lv *LedgerView) ByronProtocolMagic() (uint32, error) {
 	return lv.ls.ByronProtocolMagic()
+}
+
+func (lv *LedgerView) ByronFeePolicy() (int64, int64, error) {
+	return lv.ls.ByronFeePolicy()
 }
 
 func (lv *LedgerView) UtxoById(
@@ -1407,9 +1416,18 @@ func (lv *LedgerView) CommitteeMembers() ([]lcommon.CommitteeMember, error) {
 // DRepRegistration returns a DRep registration by credential.
 // Returns nil if the credential is not registered as an active DRep.
 func (lv *LedgerView) DRepRegistration(
-	credential lcommon.Blake2b224,
+	credential lcommon.Credential,
 ) (*lcommon.DRepRegistration, error) {
-	drep, err := lv.ls.db.GetDrep(credential[:], false, lv.txn)
+	credentialTag, err := models.CredentialTagFromUint(credential.CredType)
+	if err != nil {
+		return nil, err
+	}
+	drep, err := lv.ls.db.GetDrepByCredential(
+		credentialTag,
+		credential.Credential[:],
+		false,
+		lv.txn,
+	)
 	if err != nil {
 		if errors.Is(err, models.ErrDrepNotFound) {
 			return nil, nil
@@ -1418,7 +1436,7 @@ func (lv *LedgerView) DRepRegistration(
 	}
 	deposit, err := lv.ls.db.GetDrepLastRegistrationDeposit(
 		drep.CredentialTag,
-		credential[:],
+		credential.Credential[:],
 		lv.txn,
 	)
 	if err != nil {
@@ -1479,8 +1497,11 @@ func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
 			depositPtr = new(deposit)
 		}
 		reg := lcommon.DRepRegistration{
-			Credential: lcommon.NewBlake2b224(drep.Credential),
-			Deposit:    depositPtr,
+			Credential: lcommon.Credential{
+				CredType:   uint(drep.CredentialTag),
+				Credential: lcommon.NewBlake2b224(drep.Credential),
+			},
+			Deposit: depositPtr,
 		}
 		if drep.AnchorURL != "" || len(drep.AnchorHash) > 0 {
 			if len(drep.AnchorHash) != 32 {
