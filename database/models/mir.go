@@ -37,10 +37,7 @@ type MoveInstantaneousRewards struct {
 // or len(Rewards) > 0 (credential distribution) will be non-empty.
 type MIREffect struct {
 	// ID is the move_instantaneous_rewards row ID. Ordering comes from the
-	// store query (`ORDER BY added_slot ASC, id ASC` in
-	// GetMIRCertsInSlotRange) and from consuming effects in receipt order,
-	// not from this field; ID itself is only read for the "MIR %d carries no
-	// delta" error message.
+	// store query and this value is also the mir_id join key for reward rows.
 	ID uint
 	// Pot is the source Ada pot: 0 = Reserves, 1 = Treasury.
 	Pot uint

@@ -119,6 +119,15 @@ func applyMIRCertsErr(
 	})
 }
 
+func TestApplyMIRCerts_UnknownPotDiscardsBoundary(t *testing.T) {
+	t.Parallel()
+
+	ls, db, gdb := newMIRTestLedger(t)
+	seedMIRDistribution(t, gdb, 2, 500, nil)
+
+	assert.NoError(t, applyMIRCertsErr(ls, db, 0, 1_000))
+}
+
 // TestApplyMIRCerts_DistributionFromReserves_RegisteredAccount verifies that a
 // MIR cert distributing from reserves credits the registered reward account and
 // debits reserves.

@@ -310,7 +310,10 @@ func (ls *LedgerState) collectMIRBoundary(
 			continue
 		}
 		if effect.Pot != mirPotReserves && effect.Pot != mirPotTreasury {
-			return nil, fmt.Errorf("unknown MIR pot %d", effect.Pot)
+			boundary.discard = fmt.Sprintf(
+				"unknown MIR source pot %d", effect.Pot,
+			)
+			return boundary, nil
 		}
 		for _, reward := range effect.Rewards {
 			ref := models.NewStakeCredentialRef(
