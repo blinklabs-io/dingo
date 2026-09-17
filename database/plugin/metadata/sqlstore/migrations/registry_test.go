@@ -164,7 +164,11 @@ func TestSQLiteRegistry(t *testing.T) {
 			"    FOREIGN KEY (`proposal_id`) REFERENCES `governance_proposal`(`id`) ON DELETE CASCADE\n"+
 			")",
 	)
-	require.Empty(t, registry[16].Backfill)
+	// An upgraded database already refunded every proposal it marked
+	// expired, so v17 must stamp those as dropped rather than let the new
+	// drop step refund them again.
+	require.NotNil(t, registry[16].Backfill)
+	require.Equal(t, "1", registry[16].BackfillRevision)
 }
 
 // TestPointerStakeMigrationTranslatesForProviders pins the postgres and mysql

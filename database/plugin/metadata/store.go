@@ -241,8 +241,11 @@ type GovernanceStore interface {
 	// later, the same one-epoch delay ratification has before enactment.
 	// Used at epoch start, before marking any new proposals expired, to
 	// return the deposit and finalize ("drop") proposals expired as of a
-	// prior boundary (dingo#4411).
+	// prior boundary (dingo#4411). Only proposals whose expired_epoch is
+	// strictly below the given epoch are returned, so a reprocessed
+	// boundary cannot drop a proposal in the epoch that expired it.
 	GetExpiredAwaitingDropGovernanceProposals(
+		epoch uint64,
 		txn types.Txn,
 	) ([]*models.GovernanceProposal, error)
 

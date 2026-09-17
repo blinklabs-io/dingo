@@ -185,11 +185,13 @@ func (d *Database) GetExpiredGovernanceProposalsAt(
 	return proposals, nil
 }
 
-// GetExpiredAwaitingDropGovernanceProposals returns proposals marked expired
-// in a prior epoch whose deposit has not yet been returned. Used at epoch
-// start, before marking any new proposals expired, to return the deposit and
-// finalize proposals expired as of a prior boundary (dingo#4411).
+// GetExpiredAwaitingDropGovernanceProposals returns proposals whose
+// expired_epoch is strictly below the given epoch and whose deposit has not
+// yet been returned. Used at epoch start, before marking any new proposals
+// expired, to return the deposit and finalize proposals expired as of a prior
+// boundary (dingo#4411).
 func (d *Database) GetExpiredAwaitingDropGovernanceProposals(
+	epoch uint64,
 	txn *Txn,
 ) ([]*models.GovernanceProposal, error) {
 	if txn == nil {
@@ -197,7 +199,7 @@ func (d *Database) GetExpiredAwaitingDropGovernanceProposals(
 		defer txn.Release()
 	}
 	proposals, err := d.governanceStore().
-		GetExpiredAwaitingDropGovernanceProposals(txn.Metadata())
+		GetExpiredAwaitingDropGovernanceProposals(epoch, txn.Metadata())
 	if err != nil {
 		return nil, fmt.Errorf(
 			"failed to get expired-awaiting-drop governance proposals: %w",

@@ -115,13 +115,20 @@ func (s *Store) GetExpiredGovernanceProposalsAt(
 }
 
 func (s *Store) GetExpiredAwaitingDropGovernanceProposals(
+	epoch uint64,
 	txn types.Txn,
 ) ([]*models.GovernanceProposal, error) {
+	// `expired_epoch < ?` is the one-epoch delay itself, not a redundant
+	// guard on the caller's step ordering: a boundary that is reprocessed
+	// after a commit crash reruns this query against rows the first pass
+	// already marked expired at that same epoch, and an unbounded predicate
+	// would refund them in the epoch they expired (dingo#4411).
 	return s.queryGovernanceProposals(
 		txn,
-		"expired_epoch IS NOT NULL AND dropped_epoch IS NULL "+
+		"expired_epoch < ? AND dropped_epoch IS NULL "+
 			"AND deleted_slot IS NULL",
 		governanceProposalOrderSQL,
+		epoch,
 	)
 }
 
