@@ -405,7 +405,7 @@ func (s *Store) setTransactionWithAccumulator(
 				0,
 				len(transaction.Produced()),
 			)
-			producedStakeRefs := make([]models.StakeCredentialRef, 0)
+			producedStakeDeltas := make([]stakeCredentialDelta, 0)
 			for _, produced := range transaction.Produced() {
 				model, err := models.UtxoLedgerToModel(produced, point.Slot)
 				if err != nil {
@@ -433,12 +433,15 @@ func (s *Store) setTransactionWithAccumulator(
 				}
 				producedModels = append(producedModels, model)
 				if len(model.StakingKey) > 0 {
-					producedStakeRefs = append(producedStakeRefs,
-						models.NewStakeCredentialRef(
-							model.CredentialTag,
-							model.StakingKey,
-						),
+					gain, err := producedStakeCredentialDelta(
+						model.CredentialTag,
+						model.StakingKey,
+						model.Amount,
 					)
+					if err != nil {
+						return err
+					}
+					producedStakeDeltas = append(producedStakeDeltas, gain)
 				}
 			}
 			if err := s.applyTransactionAPIDetails(
@@ -541,33 +544,35 @@ FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 			if historicalBackfill {
 				return nil
 			}
-			stakeRefs, err := queryUtxoStakeRefs(ctx, db, refs, false)
+			consumedStakeDeltas, err := queryUtxoStakeConsumedDeltas(
+				ctx,
+				db,
+				refs,
+			)
 			if err != nil {
 				return err
 			}
-			// Merge and dedupe every credential this transaction touched --
-			// via its certificates, consumed inputs, and produced outputs --
-			// into one refresh pass. Each source is already deduped against
-			// itself (applyTransactionCertificates and queryUtxoStakeRefs
-			// both key by MapKey), but producedStakeRefs is not, and none of
-			// the three is deduped against the others: a transaction with
+			// Merge every credential this transaction touched -- via its
+			// certificates, consumed inputs, and produced outputs -- into
+			// one incremental refresh pass instead of the full
+			// sumCredentialUtxoStake rescan refreshRewardLiveStakeRefs would
+			// run once per occurrence (dingo #4421): a transaction with
 			// several outputs to the same staking credential (an ordinary
 			// change pattern), or one that both spends from and pays back to
 			// the credential a certificate in the same transaction just
-			// registered or delegated, would otherwise run
-			// refreshRewardLiveStakeAggregate's sumCredentialUtxoStake scan
-			// once per occurrence instead of once per credential. Every one
-			// of this transaction's mutations is already applied to db by
-			// this point, so merging changes nothing about the refreshed
-			// values -- it only removes the repeat scans (see
-			// TestSetTransactionRefreshesSharedCredentialOnce).
-			return s.refreshRewardLiveStakeRefs(
+			// registered or delegated, has its per-source deltas summed into
+			// one net delta before refreshRewardLiveStakeAggregateDelta
+			// applies it, so the result matches what a full-scan recompute
+			// after all of this transaction's mutations would find (see
+			// TestSetTransactionRefreshesSharedCredentialOnce and
+			// TestSetTransactionIncrementalDeltaMatchesFullScan).
+			return s.refreshRewardLiveStakeDeltas(
 				ctx,
 				db,
-				mergeStakeCredentialRefs(
-					certificateRefs,
-					stakeRefs,
-					producedStakeRefs,
+				mergeStakeCredentialDeltas(
+					refsToStakeCredentialDeltas(certificateRefs),
+					consumedStakeDeltas,
+					producedStakeDeltas,
 				),
 				point.Slot,
 			)
@@ -642,7 +647,7 @@ RETURNING id`,
 				}
 			}
 			collateralReturn := transaction.CollateralReturn()
-			producedStakeRefs := make([]models.StakeCredentialRef, 0)
+			producedStakeDeltas := make([]stakeCredentialDelta, 0)
 			for _, produced := range transaction.Produced() {
 				model, err := models.UtxoLedgerToModel(produced, point.Slot)
 				if err != nil {
@@ -663,25 +668,30 @@ RETURNING id`,
 					return err
 				}
 				if len(model.StakingKey) > 0 {
-					producedStakeRefs = append(
-						producedStakeRefs,
-						models.NewStakeCredentialRef(
-							model.CredentialTag,
-							model.StakingKey,
-						),
+					gain, err := producedStakeCredentialDelta(
+						model.CredentialTag,
+						model.StakingKey,
+						model.Amount,
 					)
+					if err != nil {
+						return err
+					}
+					producedStakeDeltas = append(producedStakeDeltas, gain)
 				}
 			}
-			// Merge and dedupe as setTransaction does: certificateRefs and
-			// producedStakeRefs are each already deduped against themselves,
-			// but not against each other, and a certificate touching the same
-			// credential as one of this gap block's produced outputs would
-			// otherwise trigger a repeat sumCredentialUtxoStake scan for the
-			// same final total.
-			return s.refreshRewardLiveStakeRefs(
+			// Merge as setTransactionWithAccumulator does: certificateRefs
+			// and producedStakeDeltas are each already deduped/summed
+			// against themselves, but not against each other, and a
+			// certificate touching the same credential as one of this gap
+			// block's produced outputs would otherwise apply that
+			// credential's delta twice instead of once net.
+			return s.refreshRewardLiveStakeDeltas(
 				ctx,
 				db,
-				mergeStakeCredentialRefs(certificateRefs, producedStakeRefs),
+				mergeStakeCredentialDeltas(
+					refsToStakeCredentialDeltas(certificateRefs),
+					producedStakeDeltas,
+				),
 				point.Slot,
 			)
 		},

@@ -1152,6 +1152,63 @@ gate above to keep failing closed on; only that database, and only from that
 epoch, genuinely requires a rebootstrap from immutable blocks or a trusted
 snapshot.
 
+#### Incremental live-UTxO stake maintenance (dingo #4421)
+
+`reward_live_stake.utxo_stake` is a per-credential running total, not just a
+cached recomputation. Before this change, every touch (a UTxO gain or loss)
+recomputed a credential's entire live-UTxO total from scratch with
+`sumCredentialUtxoStake`'s `SELECT SUM(...) FROM utxo WHERE ... AND
+deleted_slot = 0` -- correct, and self-healing by construction (the `utxo`
+table is always the source of truth), but O(live UTxOs held by that
+credential) on every single touch. One real credential already held 20,003
+live UTxOs during from-genesis Preview sync, and this function alone
+accounted for 26-28% of total process CPU.
+
+The block-application hot path (`setTransactionWithAccumulator`, which
+`SetTransaction`, `SetTransactionBatched`, `SetTransactionBatchedHistorical`,
+and `SetTransactionLeiosClosure` all funnel through, plus
+`SetGapBlockTransaction`) now computes the exact signed lovelace delta its own
+UTxO mutations make to each touched credential -- a produced output's amount,
+the negative of a consumed input's amount, 0 for a certificate-only touch --
+merges same-credential deltas within one transaction
+(`mergeStakeCredentialDeltas`), and applies the net delta to the stored
+running total (`refreshRewardLiveStakeAggregateDelta`, an indexed
+`(credential_tag, staking_key)` point read plus checked arithmetic) instead of
+rescanning. Every other caller (rollback sweeps, `DeleteUtxos`,
+`SetGenesisTransaction`, certificate/account-only refreshes such as pool
+retirement and expiry) is unchanged and still calls the original full-scan
+`refreshRewardLiveStakeAggregate`/`refreshRewardLiveStakeRefs`.
+
+This trades away the full-scan path's self-healing property for the
+credentials it accelerates, so the design leans on three layers instead of
+one:
+
+1. **Crash atomicity.** The delta is applied inside the same write
+   transaction as the UTxO row mutation it accounts for (the same
+   `withWriteTransaction` scope every other write in this package already
+   uses), so a crash mid-apply rolls both back together. There is no window
+   where the UTxO table changes but the running total does not, or vice versa.
+2. **Every full-scan touch re-syncs.** A rollback sweep, `DeleteUtxos`, or any
+   other caller still on the authoritative path recomputes and overwrites
+   `utxo_stake` from scratch for whatever credentials it touches, healing any
+   drift the incremental path may have introduced for those credentials as a
+   side effect of running at all.
+3. **Startup reconciliation is the explicit backstop.** `RewardLiveStakeNeedsBackfill`
+   (above) already compares every credential's stored `utxo_stake` against a
+   fresh authoritative scan on every startup, before block application
+   resumes (`Node.backfillRewardLiveStake`, called ahead of
+   `LedgerState.Start`), and `RebuildRewardLiveStake` corrects the whole table
+   on any mismatch. This pre-existing mechanism is not new, but it is now
+   load-bearing for the incremental path too: any bug that silently corrupts
+   the running total (a missed or double-applied delta) is limited to
+   persisting until the next node startup, not forever. It is exercised
+   directly by `TestRewardLiveStakeNeedsBackfillHealsCorruptedRunningTotal`.
+
+A credential's first-ever touch (no `reward_live_stake` row yet) always falls
+back to the authoritative scan to establish a baseline rather than trusting a
+delta against an unknown prior value; this is cheap specifically because such
+a credential has, by construction, few live UTxOs at that point.
+
 #### Snapshot and Reward-State Retention
 
 Every epoch transition runs `cleanupOldSnapshots`, which prunes to the four
