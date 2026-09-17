@@ -4749,12 +4749,6 @@ func (ls *LedgerState) calculateStabilityWindowForEra(eraId uint) uint64 {
 	return window.Uint64()
 }
 
-// consumedUtxoPruneFloorSyncKey is the durable sync_state marker key
-// recording the highest slot floor cleanupConsumedUtxos has ever computed
-// and begun pruning consumed UTxOs up to. See persistConsumedUtxoPruneFloor
-// and readConsumedUtxoPruneFloor.
-const consumedUtxoPruneFloorSyncKey = "consumed_utxo_prune_floor"
-
 // persistConsumedUtxoPruneFloor durably records floor as the highest slot
 // cleanupConsumedUtxos has ever begun pruning consumed UTxOs up to, so
 // checkUtxoRetentionWindow can reject a pin below it even after the tip
@@ -4777,7 +4771,11 @@ const consumedUtxoPruneFloorSyncKey = "consumed_utxo_prune_floor"
 // never needs to be undone by rollback or truncate, since rows already
 // hard-deleted cannot become un-deleted -- unlike
 // SyntheticV2CostModelClearedEpochSyncKey, this marker has no
-// RecomputeAfterTruncate counterpart.
+// RecomputeAfterTruncate counterpart. It does have a reject-before-mutating
+// counterpart, though: database/lifecycle's disaster-recovery Truncate
+// reads this same marker (database.ConsumedUtxoPruneFloorSyncKey) before
+// touching anything, and refuses a target older than it -- see that
+// function's doc comment.
 func (ls *LedgerState) persistConsumedUtxoPruneFloor(
 	floor uint64,
 	txn *database.Txn,
@@ -4790,7 +4788,7 @@ func (ls *LedgerState) persistConsumedUtxoPruneFloor(
 		return nil
 	}
 	if err := ls.db.SetSyncState(
-		consumedUtxoPruneFloorSyncKey,
+		database.ConsumedUtxoPruneFloorSyncKey,
 		strconv.FormatUint(floor, 10),
 		txn,
 	); err != nil {
@@ -4810,7 +4808,7 @@ func (ls *LedgerState) persistConsumedUtxoPruneFloor(
 func (ls *LedgerState) readConsumedUtxoPruneFloor(
 	txn *database.Txn,
 ) (uint64, error) {
-	marker, err := ls.db.GetSyncState(consumedUtxoPruneFloorSyncKey, txn)
+	marker, err := ls.db.GetSyncState(database.ConsumedUtxoPruneFloorSyncKey, txn)
 	if err != nil {
 		return 0, fmt.Errorf(
 			"read consumed UTxO prune floor: %w",

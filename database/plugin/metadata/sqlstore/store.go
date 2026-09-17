@@ -160,6 +160,16 @@ type Store struct {
 	stmtMu sync.Mutex
 	stmts  map[string]*sql.Stmt
 
+	// sumCredentialUtxoStakeCalls counts invocations of
+	// sumCredentialUtxoStake, the per-credential full live-UTxO aggregate
+	// scan that refreshRewardLiveStakeAggregate runs on every touch (see
+	// live_stake.go). It exists purely for test observability -- proving
+	// that a transaction touching one stake credential through a
+	// certificate, a consumed input, and a produced output triggers that
+	// scan at most once, not once per occurrence. No production code path
+	// reads it.
+	sumCredentialUtxoStakeCalls atomic.Int64
+
 	// sqlOperations and sqlQueryDuration are nil when Config.PromRegistry
 	// was nil; see instrumentedQueryer and metrics.go.
 	sqlOperations    *prometheus.CounterVec
