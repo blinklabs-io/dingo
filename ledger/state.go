@@ -1027,8 +1027,29 @@ type LedgerState struct {
 	// primary request. A timeout may fire while the request is blocked in the
 	// protocol client; keeping its generation lets the timeout wait instead of
 	// issuing a duplicate request on the same batch.
-	blockfetchRequestGeneration         uint64
-	blockfetchPrimaryRequestGeneration  uint64
+	blockfetchRequestGeneration        uint64
+	blockfetchPrimaryRequestGeneration uint64
+	// blockfetchRollbackGeneration counts rollbacks that abandon the chain
+	// segment an in-flight blockfetch batch was requested for, without also
+	// superseding that batch. It is published before the truncation, so any
+	// batch that observed an older value was requested against a chain
+	// segment the rollback has since discarded and its blocks must not be
+	// applied.
+	//
+	// Only the locally forged sibling adoption bumps it. The chainsync
+	// rollback paths (handleEventChainsyncRollback, tryResolveFork) re-queue
+	// the winning fork's headers and restart blockfetch under
+	// chainsyncBlockfetchMutex, which supersedes the in-flight batch by
+	// itself; AdoptLocalForgedSibling does neither -- it rolls back and
+	// adopts from the forge loop, holding only chainsyncMutex.
+	//
+	// Atomic because the bump happens under chainsyncMutex while the read
+	// happens under chainsyncBlockfetchMutex.
+	blockfetchRollbackGeneration atomic.Uint64
+	// blockfetchBatchRollbackGeneration is blockfetchRollbackGeneration as
+	// observed when the current batch was requested. Guarded by
+	// chainsyncBlockfetchMutex, like the rest of the per-batch state.
+	blockfetchBatchRollbackGeneration   uint64
 	blockfetchRequestsInFlight          map[string]chan struct{}
 	blockfetchShadowRequestsInFlight    map[string]struct{}
 	blockfetchInFlightTimeoutGeneration uint64
@@ -1354,6 +1375,9 @@ type LedgerState struct {
 	// cleanupWG, so a lifecycle test can hold a run in flight and assert
 	// that Close drains it.
 	cleanupConsumedUtxosRunHook func()
+	// startupRewardPrecomputeHook is test-only observability for the startup
+	// catch-up boundary; it runs after the real queue call.
+	startupRewardPrecomputeHook func()
 	// Test hook replacing the primary-chain membership read the continuation
 	// audit makes. A healthy store never fails that read, so without it the
 	// audit's handling of a failed read cannot be driven from a test.
@@ -1812,6 +1836,17 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	if err := ls.healMithrilGapBlockNonces(ctx); err != nil {
 		return fmt.Errorf("failed to heal Mithril gap block nonces: %w", err)
 	}
+	// Reconstruct the tip's block_nonce when a disaster-recovery truncate
+	// (database/lifecycle.Truncate) landed on a target whose own nonce row
+	// had already been pruned by routine 3-epoch retention.
+	// database.TruncateAfterSlot allows that truncate to proceed as long as
+	// a checkpoint survives before the target, deferring the actual
+	// reconstruction to here -- must run after healMithrilGapBlockNonces
+	// (so a Mithril-healed tip nonce is already reflected) and before any
+	// epoch nonce is computed, for the same reason as the Mithril heal.
+	if err := ls.healTruncateGapBlockNonces(ctx); err != nil {
+		return fmt.Errorf("failed to heal truncate gap block nonces: %w", err)
+	}
 	// Setup event handlers only after startup nonce repair is complete, so a
 	// Mithril-bootstrapped node cannot process chainsync/blockfetch events with
 	// stale gap-block nonces. ChainSync and chain-update can burst at bulk-sync
@@ -1849,6 +1884,14 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 			event.EpochTransitionEventType,
 			ls.handleRewardPrecomputeEpochTransition,
 		)
+	}
+	// The subscription above cannot fire for an epoch that began before this
+	// process did, so catch up the in-progress epoch's reward round here.
+	// Without it, a node started mid-epoch calculates that round inline inside
+	// the next epoch-rollover transaction instead of ahead of it.
+	ls.queueStartupRewardPrecompute()
+	if ls.startupRewardPrecomputeHook != nil {
+		ls.startupRewardPrecomputeHook()
 	}
 	// Now that both tip and epoch are loaded, check whether the safe zone
 	// already covers the epoch end (TransitionImpossible).  This handles the
@@ -3695,6 +3738,25 @@ func (ls *LedgerState) rollbackWithResync(
 	ls.updateTipMetrics(newTipDensity)
 	ls.publishSnapshotsLocked()
 	ls.Unlock()
+	// Reconstruct the new tip's block_nonce if TruncateAfterSlot above
+	// allowed this rollback to proceed with an empty nonce: its own row was
+	// pruned by routine 3-epoch retention, but a checkpoint survives below
+	// it (see database.TruncateAfterSlot's checkpoint check). An ordinary,
+	// Praos-security-parameter-bounded rollback target never falls outside
+	// that retention window, so this is reachable only for a Genesis-mode
+	// rollback -- Ouroboros Genesis has no k-bound and can roll back
+	// arbitrarily deep to resolve a dense competing chain. Must run before
+	// publishLocalLedgerRollback below, whose resync event can otherwise
+	// let another component observe the still-empty nonce, and before any
+	// further block application seeds runningNonce from it (see
+	// healTruncateGapBlockNonces's doc comment for the corruption this
+	// prevents).
+	if healErr := ls.healTruncateGapBlockNonces(context.Background()); healErr != nil {
+		if ls.config.FatalErrorFunc != nil {
+			ls.config.FatalErrorFunc(healErr)
+		}
+		return &rollbackCommittedError{err: healErr}
+	}
 	if publishResync {
 		ls.publishLocalLedgerRollback(point)
 	}
@@ -4749,12 +4811,6 @@ func (ls *LedgerState) calculateStabilityWindowForEra(eraId uint) uint64 {
 	return window.Uint64()
 }
 
-// consumedUtxoPruneFloorSyncKey is the durable sync_state marker key
-// recording the highest slot floor cleanupConsumedUtxos has ever computed
-// and begun pruning consumed UTxOs up to. See persistConsumedUtxoPruneFloor
-// and readConsumedUtxoPruneFloor.
-const consumedUtxoPruneFloorSyncKey = "consumed_utxo_prune_floor"
-
 // persistConsumedUtxoPruneFloor durably records floor as the highest slot
 // cleanupConsumedUtxos has ever begun pruning consumed UTxOs up to, so
 // checkUtxoRetentionWindow can reject a pin below it even after the tip
@@ -4777,7 +4833,11 @@ const consumedUtxoPruneFloorSyncKey = "consumed_utxo_prune_floor"
 // never needs to be undone by rollback or truncate, since rows already
 // hard-deleted cannot become un-deleted -- unlike
 // SyntheticV2CostModelClearedEpochSyncKey, this marker has no
-// RecomputeAfterTruncate counterpart.
+// RecomputeAfterTruncate counterpart. It does have a reject-before-mutating
+// counterpart, though: database/lifecycle's disaster-recovery Truncate
+// reads this same marker (database.ConsumedUtxoPruneFloorSyncKey) before
+// touching anything, and refuses a target older than it -- see that
+// function's doc comment.
 func (ls *LedgerState) persistConsumedUtxoPruneFloor(
 	floor uint64,
 	txn *database.Txn,
@@ -4790,7 +4850,7 @@ func (ls *LedgerState) persistConsumedUtxoPruneFloor(
 		return nil
 	}
 	if err := ls.db.SetSyncState(
-		consumedUtxoPruneFloorSyncKey,
+		database.ConsumedUtxoPruneFloorSyncKey,
 		strconv.FormatUint(floor, 10),
 		txn,
 	); err != nil {
@@ -4810,7 +4870,7 @@ func (ls *LedgerState) persistConsumedUtxoPruneFloor(
 func (ls *LedgerState) readConsumedUtxoPruneFloor(
 	txn *database.Txn,
 ) (uint64, error) {
-	marker, err := ls.db.GetSyncState(consumedUtxoPruneFloorSyncKey, txn)
+	marker, err := ls.db.GetSyncState(database.ConsumedUtxoPruneFloorSyncKey, txn)
 	if err != nil {
 		return 0, fmt.Errorf(
 			"read consumed UTxO prune floor: %w",
@@ -6983,6 +7043,27 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 							BlockNumber: next.BlockNumber(),
 						}
 						blocksProcessed++
+						// Per-block composition metrics (issue #4367): era,
+						// transaction count, script/redeemer presence, UTxO
+						// churn, certificate count. Recorded here, not for
+						// the Mithril-gap-closure skip branch above, since
+						// only this branch actually ran ledgerProcessBlock.
+						//
+						// These are observed inside the batch's DB
+						// transaction, so a later block in the same batch
+						// failing rolls the transaction back while leaving
+						// the earlier blocks' counts recorded; the pipeline
+						// then restarts from the unchanged tip and counts
+						// them again. The counters therefore track blocks
+						// processed rather than blocks durably applied, and
+						// drift upward across apply retries -- the same
+						// property the blockStageDuration observations in
+						// this closure already have. Read them as relative
+						// rates for correlation, which is what issue #4367
+						// asks of them, not as an exact applied-block count.
+						ls.metrics.observeBlockComposition(
+							computeBlockComposition(next),
+						)
 						// Calculate block rolling nonce (evolving nonce η_v).
 						// The evolving nonce is ALWAYS computed for every block.
 						// The candidate nonce (used in epoch nonce calc) is
