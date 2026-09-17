@@ -40,6 +40,6 @@ const expectedBlueprintVectorCount = 2575
 func TestRulesConformanceVectors(t *testing.T) {
 	results := sqliteCorpusResults(t)
 	reportCorpus(t, "sqlite", results)
-	require.Len(t, results, expectedBlueprintVectorCount)
+	require.Equal(t, expectedBlueprintVectorCount, len(results))
 	assertCorpus(t, "sqlite", results)
 }

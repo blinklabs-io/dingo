@@ -16,8 +16,10 @@ local SQLite backend (the default, no setup required -- see
 
 ## What the vectors cover
 
-The pinned archive contains ledger-rule vectors across the Shelley, Allegra,
-Mary, Alonzo, Babbage, and Conway eras, plus one synthetic rollback fixture:
+The pinned archive contains the Conway ImpSpec ledger corpus plus one synthetic
+rollback fixture. Its paths group inherited rule specifications under Shelley,
+Allegra, Mary, Alonzo, Babbage, and Conway labels, but Dingo executes every
+archive vector through the Conway validation entry point:
 
 - UTxO validation — inputs, outputs, fees, collateral
 - Certificate processing — stake, pool, DRep, committee
