@@ -829,6 +829,7 @@ func (o *Ouroboros) chainsyncServerFindIntersect(
 			err,
 		)
 	}
+	o.chainsyncState.SetClientOwner(ctx.ConnectionId, ctx.Server)
 	retPoint = *intersectPoint
 	return retPoint, tip, nil
 }
@@ -864,6 +865,7 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 			err,
 		)
 	}
+	o.chainsyncState.SetClientOwner(ctx.ConnectionId, ctx.Server)
 	// LookupClient snapshots this same field under clientState's own lock,
 	// scoped to this one connection rather than the whole chainsync State,
 	// so a slow RollBackward send here cannot stall AddClient/LookupClient/

@@ -1819,7 +1819,9 @@ func (n *Node) handleConnManagerClosedOwner(
 	}
 	if isNtC {
 		if n.chainsyncState != nil {
-			n.chainsyncState.RemoveClient(conn.Id())
+			n.chainsyncState.RemoveClientOwner(
+				conn.Id(), conn.ChainSync().Server,
+			)
 		}
 		if o := n.ouroboros(); o != nil {
 			o.ReleaseLocalStateQueryAcquiredPoint(conn.Id())

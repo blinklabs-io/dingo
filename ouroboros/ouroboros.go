@@ -194,7 +194,7 @@ type Ouroboros struct {
 	// The chainsync server callback owns gouroboros's receive loop while it
 	// runs, so Protocol.DoneChan() cannot close underneath it; the release
 	// signal has to come from connmanager's per-connection ErrorChan watcher
-	// instead (see ReleaseLeiosServeWaiters).
+	// instead (see ReleaseLeiosServeWaitersOwner).
 	leiosServeWaiters   map[ouroboros.ConnectionId][]leiosServeWaiter
 	leiosServeWaitersMu sync.Mutex
 	// NtC CertRB closure-resolution metrics.

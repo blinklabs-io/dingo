@@ -206,13 +206,9 @@ func (o *Ouroboros) releaseLeiosServeWaiter(
 	}
 }
 
-// ReleaseLeiosServeWaiters wakes every serving wait pending on connId and
-// clears them. It is called from the node's connection-closed callback, which
-// connmanager drives from a per-connection goroutine blocked on the
-// connection's ErrorChan. That goroutine is independent of the chainsync
-// server callback, so it still runs while a callback is parked
-// -- which is precisely why the release cannot come from
-// the protocol's own done channel.
+// ReleaseLeiosServeWaiters is an unscoped test helper that wakes every serving
+// wait pending on connId. Production close handling uses the owner-scoped
+// variant so a delayed callback cannot release a replacement connection.
 func (o *Ouroboros) ReleaseLeiosServeWaiters(
 	connId ouroboros.ConnectionId,
 ) {

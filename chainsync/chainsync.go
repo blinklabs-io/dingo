@@ -226,7 +226,8 @@ type State struct {
 	config        Config
 
 	// Server-side clients (node-to-client connections)
-	clients map[ouroboros.ConnectionId]*ChainsyncClientState
+	clients      map[ouroboros.ConnectionId]*ChainsyncClientState
+	clientOwners map[ouroboros.ConnectionId]*ochainsync.Server
 
 	// Tracked outbound clients (node-to-node connections)
 	trackedClients     map[ouroboros.ConnectionId]*TrackedClient
@@ -310,6 +311,7 @@ func NewStateWithConfig(
 		chainProvider:  chainProvider,
 		config:         cfg,
 		clients:        make(map[ouroboros.ConnectionId]*ChainsyncClientState),
+		clientOwners:   make(map[ouroboros.ConnectionId]*ochainsync.Server),
 		trackedClients: make(map[ouroboros.ConnectionId]*TrackedClient),
 		seenHeaders:    make(map[uint64][]headerRecord),
 		observedHeaders: make(
@@ -409,6 +411,38 @@ func (s *State) RemoveClient(connId connection.ConnectionId) {
 	}
 	// Remove client state entry
 	delete(s.clients, connId)
+	delete(s.clientOwners, connId)
+}
+
+// SetClientOwner associates a server instance with a client connection.
+func (s *State) SetClientOwner(
+	connId connection.ConnectionId,
+	owner *ochainsync.Server,
+) {
+	s.Lock()
+	defer s.Unlock()
+	if _, ok := s.clients[connId]; ok {
+		s.clientOwners[connId] = owner
+	}
+}
+
+// RemoveClientOwner removes a client only when the close belongs to its
+// currently registered server instance.
+func (s *State) RemoveClientOwner(
+	connId connection.ConnectionId,
+	owner *ochainsync.Server,
+) {
+	s.Lock()
+	defer s.Unlock()
+	if current, ok := s.clientOwners[connId]; !ok || current != owner {
+		return
+	}
+	if clientState := s.clients[connId]; clientState != nil &&
+		clientState.ChainIter != nil {
+		clientState.ChainIter.Cancel()
+	}
+	delete(s.clients, connId)
+	delete(s.clientOwners, connId)
 }
 
 // GetClientConnId returns the active chainsync client
