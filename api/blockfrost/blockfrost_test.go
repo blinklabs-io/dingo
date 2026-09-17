@@ -3606,6 +3606,34 @@ func TestNodeAdapterKeyScriptStakeAddress(t *testing.T) {
 	mainnetStakeBytes, err := mainnetStakeAddr.Bytes()
 	require.NoError(t, err)
 	assert.Equal(t, uint8(0xf1), mainnetStakeBytes[0])
+
+	keyStakeHash := bytes.Repeat([]byte{0x03}, lcommon.AddressHashSize)
+	keyAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyKey,
+		lcommon.AddressNetworkTestnet,
+		paymentHash,
+		keyStakeHash,
+	)
+	require.NoError(t, err)
+	keyUtxo := models.Utxo{
+		TxId:          fill32(0x32),
+		PaymentKey:    paymentHash,
+		StakingKey:    keyStakeHash,
+		CredentialTag: 0,
+		AddedSlot:     10,
+		Amount:        types.Uint64(1_000_000),
+	}
+	insertAdapterUtxo(t, store, &keyUtxo)
+	storePointerOutputCbor(t, db, keyUtxo.TxId, 0, keyAddr, 1_000_000)
+
+	keyInfo, err := adapter.Address(keyAddr.String())
+	require.NoError(t, err)
+	require.NotNil(t, keyInfo.StakeAddress)
+	assert.True(t, strings.HasPrefix(*keyInfo.StakeAddress, "stake_test1u"))
+	keyStakeAddr, err := lcommon.NewAddress(*keyInfo.StakeAddress)
+	require.NoError(t, err)
+	assert.Equal(t, uint8(lcommon.AddressTypeNoneKey), keyStakeAddr.Type())
+	assert.Equal(t, keyStakeHash, keyStakeAddr.StakeKeyHash().Bytes())
 }
 
 func TestHandleAddress(t *testing.T) {

@@ -41,9 +41,8 @@ import (
 
 // newDBBackedAdapter builds a NodeAdapter over a real, in-package LedgerState
 // backed by an on-disk (temp-dir) database, plus the sqlite metadata store so
-// tests can insert transaction/block rows directly. No CardanoNodeConfig is
-// supplied because the exercised paths (blockOutputAndFees, nextBlockHash) do
-// not perform slot/epoch/time math, and NewLedgerState tolerates a nil config.
+// tests can insert transaction/block rows directly. A CardanoNodeConfig is
+// optional; callers supply one when exercising network-specific behavior.
 func newDBBackedAdapter(
 	t *testing.T,
 	nodeConfig ...*cardano.CardanoNodeConfig,
