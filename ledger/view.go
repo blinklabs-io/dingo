@@ -1544,7 +1544,10 @@ func (lv *LedgerView) DRepRegistration(
 	}
 	reg := &lcommon.DRepRegistration{
 		Credential: credential,
-		Deposit:    lv.drepRegistrationDeposit(credential, deposit),
+		Deposit: lv.drepRegistrationDeposit(
+			credential.Credential,
+			deposit,
+		),
 	}
 	if drep.AnchorURL != "" || len(drep.AnchorHash) > 0 {
 		if len(drep.AnchorHash) != 32 {

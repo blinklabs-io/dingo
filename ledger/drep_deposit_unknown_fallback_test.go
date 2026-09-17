@@ -118,7 +118,7 @@ func TestDrepDeregistrationFallsBackToCurrentDepositWhenUnrecorded(
 	}
 
 	// Supporting evidence for why the acceptance holds.
-	reg, err := lv.DRepRegistration(cred.Credential)
+	reg, err := lv.DRepRegistration(cred)
 	require.NoError(t, err)
 	require.NotNil(t, reg)
 	require.NotNil(
@@ -196,7 +196,7 @@ func TestDrepDeregistrationKeepsRecordedZeroAuthoritative(t *testing.T) {
 	cred := drepRefundTestCredential(0xe4)
 	seedImportedDrep(t, db, cred, 0, 100, true)
 
-	reg, err := lv.DRepRegistration(cred.Credential)
+	reg, err := lv.DRepRegistration(cred)
 	require.NoError(t, err)
 	require.NotNil(t, reg)
 	require.NotNil(
@@ -239,7 +239,7 @@ func TestDrepRegistrationsFallBackForUnrecordedDeposit(t *testing.T) {
 	require.NoError(t, err)
 	byCredential := map[string]*uint64{}
 	for _, reg := range registrations {
-		byCredential[string(reg.Credential[:])] = reg.Deposit
+		byCredential[string(reg.Credential.Credential[:])] = reg.Deposit
 	}
 
 	got := byCredential[string(unrecorded.Credential[:])]
@@ -281,7 +281,7 @@ func TestDrepRegistrationReportsAbsenceInAPreConwayEra(t *testing.T) {
 	cred := drepRefundTestCredential(0xe7)
 	seedActiveDrepWithoutRegistration(t, db, cred, 100)
 
-	reg, err := lv.DRepRegistration(cred.Credential)
+	reg, err := lv.DRepRegistration(cred)
 	require.NoError(t, err)
 	require.NotNil(t, reg)
 	require.Nil(
@@ -326,7 +326,7 @@ func TestDrepRegistrationReportsAbsenceWithoutAPublishedSnapshot(t *testing.T) {
 	cred := drepRefundTestCredential(0xe8)
 	seedActiveDrepWithoutRegistration(t, db, cred, 100)
 
-	reg, err := lv.DRepRegistration(cred.Credential)
+	reg, err := lv.DRepRegistration(cred)
 	require.NoError(t, err)
 	require.NotNil(t, reg)
 	require.Nil(t, reg.Deposit)
@@ -376,7 +376,7 @@ func TestDrepRegistrationReportsAbsenceForTypedNilParams(t *testing.T) {
 	seedActiveDrepWithoutRegistration(t, db, cred, 100)
 
 	require.NotPanics(t, func() {
-		reg, err := lv.DRepRegistration(cred.Credential)
+		reg, err := lv.DRepRegistration(cred)
 		require.NoError(t, err)
 		require.NotNil(t, reg)
 		require.Nil(
