@@ -399,8 +399,10 @@ type rewardStateBundle struct {
 // pool, lowers its apparent performance, and under-credits every member and
 // leader reward on the node — a divergence proportional to the excluded pool's
 // share of active stake. It is therefore computed from the full reward-stake
-// distribution, and the reward calculation requires the reward_pool_input rows
-// to sum to no more than it rather than to exactly it.
+// distribution. Reward calculation checks the reward_pool_input rows sum to
+// exactly that minus the snapshot's tracked ExcludedActiveStake when it is
+// set (dingo #4025); a snapshot captured before that tracking existed (nil)
+// falls back to checking the rows sum to no more than it.
 func (m *Manager) buildRewardStateInputs(
 	epoch uint64,
 	snapshotType string,
