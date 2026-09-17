@@ -133,8 +133,8 @@ func (ls *LedgerState) applyMIRCerts(
 	if err != nil {
 		return fmt.Errorf("apply MIR certs: %w", err)
 	}
-	availableReserves, reservesOk := boundary.availablePot("reserves", reserves)
-	availableTreasury, treasuryOk := boundary.availablePot("treasury", treasury)
+	availableReserves, reservesOk := boundary.availablePot(mirPotReserves, reserves)
+	availableTreasury, treasuryOk := boundary.availablePot(mirPotTreasury, treasury)
 	if boundary.discard != "" {
 		ls.discardMIRBoundary(boundarySlot, boundary.discard)
 		return nil
@@ -492,12 +492,16 @@ func (ls *LedgerState) applyMIRCredits(
 	return appliedReserves, appliedTreasury, nil
 }
 
-// availablePot resolves name's ("reserves" or "treasury") balance after
-// folding the boundary's pot-to-pot transfers. cardano-ledger computes
-// `reserves + deltaReserves` over unbounded Coin, so a net outflow larger
-// than the available balance yields a negative one and the rule takes its
-// no-op branch; ok=false reports that case, logged by the capacity check's
-// own "skipping over-budget MIR" line in applyMIRCerts.
+// availablePot resolves pot's (mirPotReserves or mirPotTreasury) balance
+// after folding the boundary's pot-to-pot transfers. It selects on the same
+// uint pot addTransfer and addCredit switch on, rather than a separate string
+// representation, so an unhandled value is a default-branch discard here too
+// instead of silently resolving to the reserves fields.
+//
+// cardano-ledger computes `reserves + deltaReserves` over unbounded Coin, so
+// a net outflow larger than the available balance yields a negative one and
+// the rule takes its no-op branch; ok=false reports that case, logged by the
+// capacity check's own "skipping over-budget MIR" line in applyMIRCerts.
 //
 // A uint64 overflow on the inbound side has no cardano-ledger analogue
 // either, since real chain balances never approach it. Unlike the capacity
@@ -506,12 +510,19 @@ func (ls *LedgerState) applyMIRCredits(
 // over-budget warning, so the log names the actual overflow instead of
 // reporting zero distributed against it.
 func (b *mirBoundary) availablePot(
-	name string,
+	pot uint,
 	balance uint64,
 ) (available uint64, ok bool) {
-	in, out := b.reservesIn, b.reservesOut
-	if name == "treasury" {
-		in, out = b.treasuryIn, b.treasuryOut
+	var name string
+	var in, out uint64
+	switch pot {
+	case mirPotReserves:
+		name, in, out = "reserves", b.reservesIn, b.reservesOut
+	case mirPotTreasury:
+		name, in, out = "treasury", b.treasuryIn, b.treasuryOut
+	default:
+		b.discard = fmt.Sprintf("unknown MIR pot %d", pot)
+		return 0, false
 	}
 	if balance > ^uint64(0)-in {
 		b.discard = fmt.Sprintf(

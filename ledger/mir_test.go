@@ -150,13 +150,45 @@ func applyMIRCertsErrEra(
 	})
 }
 
+// TestApplyMIRCerts_UnknownPotDiscardsBoundary verifies that an unknown-pot
+// distribution certificate discards the whole boundary rather than merely
+// being skipped: an otherwise-valid credit at the same boundary must not be
+// applied either. A lone unknown-pot row with no reward entries can't tell
+// discard apart from skip, since both leave an empty boundary and the same
+// unchanged state; seeding a valid credit alongside it separates them.
 func TestApplyMIRCerts_UnknownPotDiscardsBoundary(t *testing.T) {
 	t.Parallel()
 
 	ls, db, gdb := newMIRTestLedger(t)
+	cred := mirCred28(0x15)
+	seedMIRDistribution(
+		t,
+		gdb,
+		mirPotReserves,
+		400,
+		[]models.MoveInstantaneousRewardsReward{
+			{Credential: cred, Amount: new(big.Int).SetUint64(500)},
+		},
+	)
 	seedMIRDistribution(t, gdb, 2, 500, nil)
+	require.NoError(t, db.CreateAccount(nil, &models.Account{
+		StakingKey: cred,
+		Active:     true,
+	}))
+	require.NoError(t, db.Metadata().SetNetworkState(1_000, 10_000, 50, nil))
 
 	assert.NoError(t, applyMIRCertsErr(ls, db, 0, 1_000))
+
+	account, err := db.GetAccountByCredential(0, cred, false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	assert.Equal(t, uint64(0), uint64(account.Reward),
+		"an unknown pot elsewhere in the boundary discards the whole "+
+			"boundary, including an otherwise-valid credit")
+
+	state, err := db.Metadata().GetNetworkState(nil)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(10_000), uint64(state.Reserves))
 }
 
 // TestApplyMIRCerts_DistributionFromReserves_RegisteredAccount verifies that a
@@ -685,6 +717,9 @@ func TestApplyMIRCerts_TransferTotalOverflowIsNoOp(t *testing.T) {
 	t.Parallel()
 
 	ls, db, gdb := newMIRTestLedger(t)
+	var logBuf bytes.Buffer
+	ls.config.Logger = slog.New(slog.NewTextHandler(&logBuf, nil))
+
 	maxUint := ^uint64(0)
 	seedMIRPotTransfer(t, gdb, mirPotReserves, maxUint, 200)
 	seedMIRPotTransfer(t, gdb, mirPotReserves, maxUint, 400)
@@ -697,6 +732,16 @@ func TestApplyMIRCerts_TransferTotalOverflowIsNoOp(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint64(1_000), uint64(state.Treasury))
 	assert.Equal(t, uint64(10_000), uint64(state.Reserves))
+
+	// Removing addTransfer's overflow guard would still leave reservesOut and
+	// reservesIn/treasuryIn wrapped to a smaller value, and the boundary would
+	// fall into the generic over-budget no-op with the same untouched state
+	// asserted above. Only the discard log line distinguishes the two, so pin
+	// it directly.
+	assertLogContains(t, &logBuf, []string{
+		"discarding uncreditable MIR at epoch boundary",
+		"MIR pot transfer total overflow",
+	})
 }
 
 // TestApplyMIRCerts_OutsideEpochRange verifies that a MIR cert submitted
