@@ -50,6 +50,7 @@ const (
 	collateralAssociationSchemaRelease            = "collateral-transaction-associations"
 	rewardStakeVersionRestampSchemaRelease        = "reward-stake-calculation-version-restamp"
 	governanceProposalOptionalAnchorSchemaRelease = "governance-proposal-optional-anchor"
+	rewardSnapshotExcludedStakeSchemaRelease      = "reward-snapshot-excluded-active-stake"
 )
 
 // schemaVersions names every migration in ascending version order.
@@ -89,6 +90,11 @@ var schemaVersions = []struct {
 		Version: 16,
 		Name:    governanceProposalOptionalAnchorSchemaRelease,
 		Dir:     "v16",
+	},
+	{
+		Version: 17,
+		Name:    rewardSnapshotExcludedStakeSchemaRelease,
+		Dir:     "v17",
 	},
 }
 
