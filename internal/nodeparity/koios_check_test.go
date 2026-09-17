@@ -43,7 +43,10 @@ import (
 // GetCurrentEra error must fail this check before ever reaching Koios, so
 // this test does not need a working Koios fake to prove it.
 func TestCheckProtocolParams_CurrentEraErrorFailsTheCheck(t *testing.T) {
-	t.Parallel()
+	// Not t.Parallel: this package has 70+ other parallel tests binding
+	// their own ephemeral TCP listeners; running standalone removes any
+	// exposure to resource contention from that as a variable while this
+	// test is still new.
 	const magic = 42
 
 	dingoState := newFakeLSQState()
@@ -70,7 +73,11 @@ func TestCheckProtocolParams_CurrentEraErrorFailsTheCheck(t *testing.T) {
 	mismatches, err := CheckProtocolParams(ctx, lsq.Client, koios, "preview", 1)
 	require.Error(t, err,
 		"a GetCurrentEra failure must fail the whole check, not silently "+
-			"fall back to an ambiguous type-inferred era guess")
+			"fall back to an ambiguous type-inferred era guess -- saw %d "+
+			"HardForkCurrentEraQuery call(s) (expected 2: one from "+
+			"GetCurrentProtocolParams's own internal lookup, one from "+
+			"CheckProtocolParams's explicit call)",
+		dingoState.seenCurrentEraCalls())
 	assert.Nil(t, mismatches)
 }
 

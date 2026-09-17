@@ -280,6 +280,16 @@ func (s *fakeLSQState) failCurrentEraQueryAfter(calls int) {
 	s.failCurrentEraAfterCalls = calls
 }
 
+// seenCurrentEraCalls reports how many HardForkCurrentEraQuery calls this
+// node has answered so far -- purely diagnostic, for a test to report
+// exactly what happened on a failure instead of leaving "error expected
+// but got nil" to guess from.
+func (s *fakeLSQState) seenCurrentEraCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.currentEraCalls
+}
+
 // config builds the localstatequery.Config a real gouroboros server uses to
 // answer exactly the four query types incremental mode's per-block and full
 // checks need (GetCurrentProtocolParams, GetStakeDistribution,
