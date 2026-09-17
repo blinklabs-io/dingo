@@ -188,7 +188,15 @@ normal chain rollback, this does not reject a target beyond the configured
 security parameter — it is intended for disaster recovery scenarios (see
 CIP-0135) where the chain must be rewound further than Ouroboros Praos's
 built-in rollback limit allows. The resulting database is resync-ready
-from the target point.`,
+from the target point.
+
+A target older than what this database's own routine retention has already
+pruned is refused rather than silently producing a corrupt resync-ready
+state: this command checks the target against the recorded Mithril trust
+boundary and the consumed-UTxO retention floor before touching anything. A
+refusal means the local database no longer holds enough history to safely
+resync from that point; a fully synced peer's snapshot is the recovery
+path, not a shallower local target.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg := config.FromContext(cmd.Context())

@@ -76,6 +76,7 @@ type Node struct {
 	poolRelayProvider       *ledger.PoolRelayProvider
 	chainsyncState          *chainsync.State
 	chainSelector           *chainselection.ChainSelector
+	chainSelectionMetrics   *chainSelectionMetrics
 	eventBus                *event.EventBus
 	pluginHost              *plugin.Host
 	destinationRegistry     *lifecycle.DestinationRegistry
@@ -187,6 +188,10 @@ type Node struct {
 	// own documented "keeps syncing normally" behavior.
 	snapshotMu sync.Mutex
 
+	// health carries the sync signals the readiness probe reads. See
+	// node_health.go; it survives a live database restore/truncate rebuild.
+	health nodeHealth
+
 	// rebuildableMetrics tracks every Prometheus collector registered by a
 	// component a live database restore/truncate rebuilds, so
 	// closeStorageForLiveLifecycleOp can unregister them before the
@@ -251,6 +256,7 @@ func New(cfg Config) (*Node, error) {
 	n.configWrapPromRegistry()
 	n.registerBuildInfo()
 	n.registerRTSMetrics()
+	n.registerChainSelectionMetrics()
 	// NewEventBus starts background async-worker goroutines, so create the bus
 	// only after configuration validates. If it were created earlier, a
 	// validation failure would return a nil Node while leaving those goroutines
@@ -1105,24 +1111,11 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		!n.config.intersectTip &&
 		len(n.config.intersectPoints) == 0
 	n.chainSelector = chainselection.NewChainSelector(
-		chainselection.ChainSelectorConfig{
-			Logger:                n.config.logger,
-			EventBus:              n.eventBus,
-			SecurityParam:         chainSelectorSecurityParam,
-			GenesisMode:           genesisSelectionMode,
-			GenesisWindowSlots:    genesisWindowSlots,
-			MinCorroboratingPeers: n.config.genesisCorroborationPeers,
-			ConnectionLive: func(connId ouroboros.ConnectionId) bool {
-				return n.connManager != nil &&
-					n.connManager.GetConnectionById(connId) != nil
-			},
-			BlockfetchLatency: func(connId ouroboros.ConnectionId) (time.Duration, bool) {
-				if n.chainsyncState == nil {
-					return 0, false
-				}
-				return n.chainsyncState.BlockfetchLatency(connId)
-			},
-		},
+		n.buildChainSelectorConfig(
+			chainSelectorSecurityParam,
+			genesisSelectionMode,
+			genesisWindowSlots,
+		),
 	)
 	// Seed chain selection from the applied ledger tip before peers connect.
 	// Without this initial observation, the plausibility guard treats the
@@ -1949,6 +1942,36 @@ func (n *Node) subscribeConnectionEvents() {
 	)
 }
 
+// buildChainSelectorConfig assembles the ChainSelectorConfig this node passes
+// to chainselection.NewChainSelector. It is the single composition site for
+// the selector's callbacks, so a hook that is not set here is silently absent
+// at runtime no matter what the chainselection package offers.
+func (n *Node) buildChainSelectorConfig(
+	securityParam uint64,
+	genesisMode bool,
+	genesisWindowSlots uint64,
+) chainselection.ChainSelectorConfig {
+	return chainselection.ChainSelectorConfig{
+		Logger:                n.config.logger,
+		EventBus:              n.eventBus,
+		SecurityParam:         securityParam,
+		GenesisMode:           genesisMode,
+		GenesisWindowSlots:    genesisWindowSlots,
+		MinCorroboratingPeers: n.config.genesisCorroborationPeers,
+		ConnectionLive: func(connId ouroboros.ConnectionId) bool {
+			return n.connManager != nil &&
+				n.connManager.GetConnectionById(connId) != nil
+		},
+		BlockfetchLatency: func(connId ouroboros.ConnectionId) (time.Duration, bool) {
+			if n.chainsyncState == nil {
+				return 0, false
+			}
+			return n.chainsyncState.BlockfetchLatency(connId)
+		},
+		OnRollbackRegistration: n.recordRollbackRegistration,
+	}
+}
+
 // subscribeChainSelectorEvents wires the EventBus subscriptions that feed the
 // chain selector: peer tip/activity observations, chain switch and
 // selected-to-none transitions, fork monitoring, connection teardown, and the
@@ -2132,6 +2155,7 @@ func (n *Node) backfillRewardLiveStake() error {
 	var (
 		needed         bool
 		staleSnapshots bool
+		staleEpochs    []uint64
 	)
 	if err := n.db.MetadataTxn(false).Do(func(txn *database.Txn) error {
 		if n.config.skipRewardLiveStakeBackfillCheck {
@@ -2155,6 +2179,20 @@ func (n *Node) backfillRewardLiveStake() error {
 			)
 		if err != nil {
 			return fmt.Errorf("check stake snapshot provenance: %w", err)
+		}
+		if staleSnapshots {
+			// Diagnostics only: naming the affected epochs in the error below
+			// does not change the fail-closed decision above.
+			staleEpochs, err = n.db.Metadata().
+				StaleConsensusStakeSnapshotEpochs(
+					txn.Metadata(),
+				)
+			if err != nil {
+				return fmt.Errorf(
+					"list stale stake snapshot epochs: %w",
+					err,
+				)
+			}
 		}
 		return nil
 	}); err != nil {
@@ -2185,10 +2223,13 @@ func (n *Node) backfillRewardLiveStake() error {
 		}
 	}
 	if staleSnapshots {
-		return errors.New(
-			"consensus stake snapshots were produced by an older accounting " +
-				"version and cannot be safely reconstructed from this database; " +
-				"rebootstrap from immutable blocks or a trusted snapshot",
+		return fmt.Errorf(
+			"consensus stake snapshots for epoch(s) %v were produced by an "+
+				"older accounting version and cannot be safely reconstructed "+
+				"from this database; rebootstrap from immutable blocks or a "+
+				"trusted snapshot. See DATABASE.md's "+
+				"RewardStakeCalculationVersion section",
+			staleEpochs,
 		)
 	}
 	return nil

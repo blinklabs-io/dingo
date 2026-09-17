@@ -17,7 +17,7 @@ case ",${TXPUMP_TYPES:-},"  in
       echo "txpump: delegation credentials are missing" >&2
       exit 1
     fi
-    TXPUMP_DELEGATION_STAKE_KEY_HASH="$(cardano-cli stake-address key-hash --stake-verification-key-file "${stake_key}")"
+    TXPUMP_DELEGATION_STAKE_KEY_HASH="$(cardano-cli latest stake-address key-hash --stake-verification-key-file "${stake_key}")"
     TXPUMP_DELEGATION_POOL_KEY_HASH="$(cardano-cli stake-pool id --cold-verification-key-file "${pool_key}" --output-format hex)"
     export TXPUMP_DELEGATION_STAKE_KEY_HASH TXPUMP_DELEGATION_POOL_KEY_HASH
     ;;

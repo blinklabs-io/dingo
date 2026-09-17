@@ -3071,6 +3071,305 @@
       "type": "timeseries",
       "id": 203,
       "description": "Block forge rate and served block rate over time."
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 76
+      },
+      "id": 300,
+      "title": "Block Composition & SQL Correlation",
+      "type": "row",
+      "transparent": true
+    },
+    {
+      "type": "timeseries",
+      "title": "SQL Query Volume",
+      "id": 301,
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 77
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "auto"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "expr": "sum by (op) (rate(dingo_database_sql_operations_total{network=\"$network\",instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{op}} ops/s",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "expr": "sum(rate(dingo_database_sql_query_duration_seconds_count{network=\"$network\",instance=~\"$instance\"}[5m]))",
+          "legendFormat": "queries/s (all ops)",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "transparent": true,
+      "description": "SQL statement rate against the metadata store, by leading keyword (insert/update/delete/select/other), alongside total query rate. Compare against the block-composition panels in this row to see what kind of block content drove a change in query volume (issue #4367)."
+    },
+    {
+      "type": "timeseries",
+      "title": "Block Composition by Era",
+      "id": 302,
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 77
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "auto"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "expr": "sum by (era) (rate(dingo_ledger_blocks_total{network=\"$network\",instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{era}} blocks/s",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "expr": "sum by (era) (rate(dingo_ledger_block_transactions_total{network=\"$network\",instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{era}} txs/s",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "transparent": true,
+      "description": "Applied block and transaction rate by era. An era transition or a run of transaction-heavy blocks shows up here before it shows up as SQL load."
+    },
+    {
+      "type": "timeseries",
+      "title": "Script & Redeemer Activity",
+      "id": 303,
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 84
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "auto"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "expr": "sum by (era) (rate(dingo_ledger_blocks_with_scripts_total{network=\"$network\",instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{era}} script blocks/s",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "expr": "sum by (era) (rate(dingo_ledger_redeemers_total{network=\"$network\",instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{era}} redeemers/s",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "transparent": true,
+      "description": "Rate of blocks carrying at least one Plutus V1/V2/V3 script or redeemer, and the finer-grained redeemer count itself -- a run of script-heavy blocks is one of the more expensive causes of a SQL query-volume spike."
+    },
+    {
+      "type": "timeseries",
+      "title": "UTxO Churn & Certificates",
+      "id": 304,
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 84
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "auto"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "expr": "sum by (era) (rate(dingo_ledger_utxo_created_total{network=\"$network\",instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{era}} created/s",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "expr": "sum by (era) (rate(dingo_ledger_utxo_consumed_total{network=\"$network\",instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{era}} consumed/s",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "expr": "sum by (era) (rate(dingo_ledger_certificates_total{network=\"$network\",instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{era}} certs/s",
+          "range": true,
+          "refId": "C"
+        }
+      ],
+      "transparent": true,
+      "description": "UTxO creation/consumption (from each transaction's Produced()/Consumed(), correct for phase-2-failed transactions) and certificate rate by era -- both known query-heavy paths."
     }
   ]
 }

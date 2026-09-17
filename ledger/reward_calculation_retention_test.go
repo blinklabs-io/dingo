@@ -15,6 +15,8 @@
 package ledger
 
 import (
+	"bytes"
+	"log/slog"
 	"math/big"
 	"testing"
 
@@ -24,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -205,4 +208,139 @@ func TestApplyStakeRewardsAcceptsZeroDelegatorSnapshot(t *testing.T) {
 			txn, retentionNewEpoch, retentionBoundarySlot,
 		)
 	}), "an empty snapshot must reconcile normally, not error")
+}
+
+// seedPrunedStakeInputSnapshot seeds a mark snapshot and pool input that
+// survive retention over an empty reward_stake_input credential set -- the
+// same aged-out-epoch shape TestApplyStakeRewardsSkipsPrunedStakeInputs
+// seeds -- so a test can drive the retention skip without duplicating the
+// pool/account wiring at every call site.
+func seedPrunedStakeInputSnapshot(
+	t *testing.T,
+	db *database.Database,
+	poolKey, rewardAccount []byte,
+) {
+	t.Helper()
+	meta := db.Metadata()
+	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+		Epoch:            retentionRewardSnapshotEpoch,
+		SnapshotType:     "mark",
+		TotalActiveStake: 1_000,
+		TotalPoolCount:   1,
+		TotalDelegators:  2,
+		CapturedSlot:     100,
+		BoundarySlot:     100,
+		ProtocolVersion:  7,
+	}, nil))
+	require.NoError(t, meta.SaveRewardPoolInputs([]*models.RewardPoolInput{
+		{
+			Epoch:                      retentionRewardSnapshotEpoch,
+			PoolKeyHash:                poolKey,
+			RewardAccount:              rewardAccount,
+			RewardAccountCredentialTag: 0,
+			Margin:                     &types.Rat{Rat: big.NewRat(1, 10)},
+			Pledge:                     500,
+			Cost:                       1_000,
+			DelegatedStake:             1_000,
+			OwnerStake:                 500,
+			DelegatorCount:             2,
+			CapturedSlot:               100,
+			BoundarySlot:               100,
+		},
+	}, nil))
+	require.NoError(t, db.CreateAccount(nil, &models.Account{
+		StakingKey: rewardAccount,
+		Pool:       poolKey,
+		Active:     true,
+	}))
+	// reward_stake_input is deliberately absent: those rows aged out of the
+	// retention window.
+}
+
+// TestApplyStakeRewardsSkipsPrunedStakeInputsReportsLoudly proves the
+// retention skip added for dingo #2987 is reported the same way its three
+// sibling skips in calculateStakeRewardApplication are, through
+// reportSkippedStakeRewards: counted, and logged with the permanent-shortfall
+// consequence spelled out. Before this fix the retention skip was the one
+// silent-by-comparison exception to what this file otherwise guards against
+// (see TestSkippedStakeRewardsIsReportedLoudly and issue #3165) -- it logged
+// inline at Warn with a bare reason and no metric increment, so monitoring
+// built on the shared skippedStakeRewardRounds counter never saw this
+// specific permanent-reward-loss condition.
+func TestApplyStakeRewardsSkipsPrunedStakeInputsReportsLoudly(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newRewardCalculationTestLedger(t)
+	seedRetentionRewardEpochs(t, db)
+	seedPrunedStakeInputSnapshot(
+		t, db, rewardCalcHash(0x33), rewardCalcHash(0x44),
+	)
+
+	var logs bytes.Buffer
+	ls.config.Logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{
+		Level: slog.LevelWarn,
+	}))
+
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return ls.applyStakeRewards(
+			txn, retentionNewEpoch, retentionBoundarySlot,
+		)
+	}), "aged-out stake inputs must still skip, not error")
+
+	out := logs.String()
+	require.NotEmpty(t, out,
+		"the retention skip must be visible at the default log level, "+
+			"the same as its three sibling skips")
+	assert.Contains(t, out, "level=WARN")
+	assert.Contains(
+		t,
+		out,
+		"reward stake inputs for the snapshot epoch are no longer retained",
+	)
+	assert.Contains(t, out, "reward_snapshot_epoch=1")
+	assert.Contains(t, out, "snapshot_delegators=2")
+	// The consequence, not just the event -- see reportSkippedStakeRewards.
+	assert.Contains(t, out, "permanently")
+	assert.Contains(t, out, "basis was never persisted")
+}
+
+// TestSkippedPrunedStakeInputsSuppressedDuringPrecompute proves the retention
+// skip honors reportSkips like its three siblings in
+// calculateStakeRewardApplication. The opportunistic precompute pass reads the
+// same possibly-not-yet-retained inputs ahead of the real boundary and can
+// miss while the round is still unapplied -- reportSkips exists precisely so
+// that miss is not logged or counted as a skipped round the authoritative
+// call goes on to apply moments later.
+func TestSkippedPrunedStakeInputsSuppressedDuringPrecompute(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newRewardCalculationTestLedger(t)
+	seedRetentionRewardEpochs(t, db)
+	seedPrunedStakeInputSnapshot(
+		t, db, rewardCalcHash(0x55), rewardCalcHash(0x66),
+	)
+
+	var logs bytes.Buffer
+	ls.config.Logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{
+		Level: slog.LevelWarn,
+	}))
+
+	txn := db.Transaction(false)
+	defer func() { _ = txn.Rollback() }()
+	app, ok, err := ls.calculateStakeRewardApplication(
+		txn,
+		retentionNewEpoch,
+		retentionBoundarySlot,
+		retentionBoundarySlot,
+		false,
+	)
+	require.NoError(t, err)
+	require.False(t, ok)
+	require.Nil(t, app)
+
+	assert.Empty(t, logs.String(),
+		"an opportunistic precompute miss must stay silent, like its three "+
+			"sibling skips, since the authoritative call still gets to apply "+
+			"the round")
 }

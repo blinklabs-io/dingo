@@ -162,6 +162,19 @@ func (c *Chain) Tip() ochainsync.Tip {
 	return c.currentTip
 }
 
+// WithTip runs fn while holding the chain mutex. It is intended for operations
+// that must bind a result to the exact tip snapshot they observed, such as
+// signing a block header. fn must not call back into c or block on a chain
+// operation.
+func (c *Chain) WithTip(fn func(ochainsync.Tip) error) error {
+	if c == nil {
+		return errors.New("chain is nil")
+	}
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	return fn(c.currentTip)
+}
+
 func (c *Chain) HeaderTip() ochainsync.Tip {
 	if c == nil {
 		return ochainsync.Tip{}
@@ -169,6 +182,74 @@ func (c *Chain) HeaderTip() ochainsync.Tip {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	return c.headerTip()
+}
+
+// TipPredecessor reports the block context an alternative to the current chain
+// tip must be built on: the tip itself (the block that would be competed with)
+// and the point of the tip's immediate predecessor, which becomes the
+// alternative block's parent.
+//
+// This is the data ouroboros-consensus' mkCurrentBlockContext returns for its
+// EQ case, where a leader whose slot is already occupied forges an alternative
+// with the same block number as the occupant and the occupant's predecessor as
+// parent (Ouroboros/Consensus/NodeKernel/Forge.hs).
+//
+// ok is false whenever that context cannot be established: an empty chain, a
+// tip that is the first block on the chain (its parent is genesis, which is not
+// a rollback target here), or a predecessor the chain can no longer resolve.
+// Callers must treat that as "no alternative can be built" and must not fall
+// back to the live tip: binding the tip itself as parent produces a block whose
+// parent slot equals its own, which envelope validation and every Praos peer
+// reject.
+func (c *Chain) TipPredecessor() (
+	parent ocommon.Point,
+	tip ochainsync.Tip,
+	ok bool,
+) {
+	if c == nil {
+		return ocommon.Point{}, ochainsync.Tip{}, false
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	// Both lookups below go through blockByIndexLocked, which resolves a
+	// common-prefix index against the primary chain when this chain is an
+	// in-memory fork. That read needs the primary-chain lock as well as the
+	// manager lock, in the chain -> primary -> manager order this helper
+	// establishes; taking manager.mutex directly would let a concurrent
+	// primary-chain mutation move the common prefix between the two lookups
+	// and yield a tip and a parent that never sat next to each other.
+	unlockBlockIndexReadLocks := c.lockBlockIndexReadLocks()
+	defer unlockBlockIndexReadLocks()
+	// initialBlockIndex is the first block; it has no predecessor on this
+	// chain, and neither does an empty chain.
+	if c.tipBlockIndex <= initialBlockIndex {
+		return ocommon.Point{}, ochainsync.Tip{}, false
+	}
+	tipBlock, err := c.blockByIndexLocked(c.tipBlockIndex)
+	if err != nil {
+		return ocommon.Point{}, ochainsync.Tip{}, false
+	}
+	parentBlock, err := c.blockByIndexLocked(c.tipBlockIndex - 1)
+	if err != nil {
+		return ocommon.Point{}, ochainsync.Tip{}, false
+	}
+	// Cross-check the two records against each other and against the tip this
+	// chain advertises. The chain maintains all three invariants, but a caller
+	// of this function is about to sign a block against the answer, so a
+	// disagreement is reported as "no context" rather than resolved.
+	//
+	// The parent must also sit strictly below the tip's slot. That is the
+	// ordering contract this function's doc comment states, and the caller
+	// signs against the answer: a parent whose slot is at or above the
+	// contested slot produces a block Praos and envelope validation reject.
+	if !bytes.Equal(tipBlock.Hash, c.currentTip.Point.Hash) ||
+		!bytes.Equal(tipBlock.PrevHash, parentBlock.Hash) ||
+		parentBlock.Slot >= tipBlock.Slot {
+		return ocommon.Point{}, ochainsync.Tip{}, false
+	}
+	return ocommon.NewPoint(parentBlock.Slot, parentBlock.Hash),
+		c.currentTip,
+		true
 }
 
 // blockNumberContiguous reports whether a block number legitimately follows its
@@ -184,6 +265,86 @@ func blockNumberContiguous(eraId uint8, blockNumber, parentNumber uint64) bool {
 		return true
 	}
 	return false
+}
+
+// firstBlockNumber is the block number of the first block of a Cardano chain,
+// and the only value accepted for the first block of a chain that has been
+// emptied back to origin. Ouroboros numbers the first block after genesis 0 --
+// the Byron epoch-boundary block on a Byron network, the first block of the
+// starting era on a post-Byron genesis network.
+//
+// Nothing wider is safe. blockNumberContiguous compares a candidate against the
+// accepted tip, so a chain that starts at block number 1 is self-consistent
+// from its second block onwards: 2 follows 1, 3 follows 2, and the missing
+// block 0 is never noticed. Tolerating anything above 0 here does not defer the
+// check to the second block, it permanently shortens the chain by exactly the
+// prefix it tolerated -- the same truncated prefix issue #4202 reports.
+const firstBlockNumber uint64 = 0
+
+// originTipHash stands in for the tip hash when a block or header is rejected
+// against a chain at origin: there is no tip block to name.
+const originTipHash = "origin"
+
+// atOriginAfterMutation reports whether this chain sits at origin -- no tip
+// block -- after having been mutated at least once. That is the state
+// rollbackLocked leaves behind for a rollback to origin: it drops every queued
+// header and resets tipBlockIndex to 0.
+//
+// The distinction matters because the continuity checks below are skipped when
+// there is no tip to chain onto, and a rollback to origin can produce that
+// state at any time during a run. A peer whose chainsync cursor is still ahead
+// then delivers block N rather than the network's first block, and it is
+// accepted as the chain's first block: the chain grows with a silently missing
+// prefix, and the epoch nonce folded over it is wrong, so every header in the
+// next epoch fails VRF verification (issue #4202).
+//
+// The predicate deliberately ignores the header queue. A queued header does
+// not anchor an incoming raw block: addRawBlockLocked only checks that the
+// block's hash matches c.headers[0], while RawBlock.BlockNumber is whatever
+// the caller supplied. Queuing the chain's first header and then handing over
+// a same-hash block from further along the chain would otherwise skip this
+// check, delete the queued header and persist that block number. RawBlock and
+// AddRawBlocks are exported, so the chain cannot assume its callers derive
+// those fields consistently: the check has to hold for the exported API, not
+// only for the in-tree producers. (addBlockLocked takes the block number from
+// a matching queued header, which this same check anchored when the header was
+// queued.)
+//
+// A chain that has never been mutated is deliberately excluded. It has no
+// anchor yet -- the chain package does not know the network's genesis hash --
+// and it is the state the bulk block importer fills from a local immutable
+// database, which legitimately establishes the chain's first block itself.
+func (c *Chain) atOriginAfterMutation() bool {
+	return c.tipBlockIndex < initialBlockIndex &&
+		c.mutationGeneration > 0
+}
+
+// firstBlockNumberValid reports whether blockNumber is the one a chain emptied
+// back to origin may accept as its first block.
+//
+// The chain package has no knowledge of the network's genesis hash, so the
+// prev-hash half of the continuity check cannot be applied at origin. The block
+// number is the whole of the anchor available here: it closes the truncated
+// prefix of issue #4202, but a candidate that carries block number 0 is still
+// accepted whatever its hash and prev hash say. Binding the first block's hash
+// as well needs the genesis hash, which belongs to the ledger, not here.
+func firstBlockNumberValid(blockNumber uint64) bool {
+	return blockNumber == firstBlockNumber
+}
+
+// newBlockNotFitChainOriginError builds the rejection for a block or header
+// offered as the first block of a chain sitting at origin. Reusing
+// BlockNotFitChainTipError keeps the ledger's existing recovery path, which
+// re-intersects the offending connection rather than failing the node.
+func newBlockNotFitChainOriginError(
+	blockHash string,
+	blockPrevHash string,
+) BlockNotFitChainTipError {
+	return NewBlockNotFitChainTipError(
+		blockHash,
+		blockPrevHash,
+		originTipHash,
+	)
 }
 
 func (c *Chain) headerTip() ochainsync.Tip {
@@ -279,6 +440,15 @@ func (c *Chain) addBlockHeader(
 				headerTip.BlockNumber,
 			)
 		}
+	} else if c.atOriginAfterMutation() &&
+		!firstBlockNumberValid(queued.blockNumber) {
+		// The chain was rolled back to origin, so there is no tip to chain
+		// onto and the checks above cannot run. Anchor the first header on
+		// its block number instead; see atOriginAfterMutation.
+		return newBlockNotFitChainOriginError(
+			headerHash.String(),
+			headerPrevHash.String(),
+		)
 	}
 	// Add header
 	c.headers = append(c.headers, queued)
@@ -421,7 +591,7 @@ func (c *Chain) AddBlock(
 	block ledger.Block,
 	txn *database.Txn,
 ) error {
-	evt, err := c.addBlockInternal(block, ocommon.Point{}, txn, true, false)
+	evt, err := c.addBlockInternal(block, ocommon.Point{}, txn, true, false, nil)
 	if err != nil {
 		return err
 	}
@@ -457,6 +627,7 @@ func (c *Chain) AddLocalBlock(block ledger.Block) error {
 		nil,
 		false,
 		false,
+		nil,
 	)
 	if err != nil {
 		return err
@@ -473,6 +644,29 @@ func (c *Chain) AddLocalBlock(block ledger.Block) error {
 	return nil
 }
 
+// AddLocalBlockDeferred adds a locally forged block exactly like AddLocalBlock
+// but, instead of publishing the resulting chain.update inline, enqueues it on
+// the chain-level sequencer under c.mutex and returns it. This is the entry
+// point for a forged block adopted from a path that holds a ledger mutex --
+// specifically the equal-slot alternative, which rolls the chain back to the
+// contested block's parent under chainsyncMutex and then adopts the local
+// sibling. Publishing inline from there is the drain deadlock described on
+// AddBlockWithPointDeferred; enqueuing under c.mutex also keeps this add
+// ordered behind the rollback that preceded it. A returned event with an empty
+// Type means there is nothing to publish.
+func (c *Chain) AddLocalBlockDeferred(
+	block ledger.Block,
+) (event.Event, error) {
+	return c.addBlockInternal(
+		block,
+		ocommon.Point{},
+		nil,
+		false,
+		true,
+		nil,
+	)
+}
+
 // AddBlockWithPoint adds a block using a caller-supplied point. This avoids
 // recomputing the block hash when the caller already has the canonical slot/hash
 // pair from a validated upstream source such as blockfetch.
@@ -481,7 +675,7 @@ func (c *Chain) AddBlockWithPoint(
 	point ocommon.Point,
 	txn *database.Txn,
 ) error {
-	evt, err := c.addBlockInternal(block, point, txn, true, false)
+	evt, err := c.addBlockInternal(block, point, txn, true, false, nil)
 	if err != nil {
 		return err
 	}
@@ -515,7 +709,33 @@ func (c *Chain) AddBlockWithPointDeferred(
 	point ocommon.Point,
 	txn *database.Txn,
 ) (event.Event, error) {
-	return c.addBlockInternal(block, point, txn, true, true)
+	return c.addBlockInternal(block, point, txn, true, true, nil)
+}
+
+// AddBlockWithPointDeferredIf is AddBlockWithPointDeferred with a caller
+// supplied admission predicate, evaluated while the chain mutex is held and
+// before any chain state is read or written. When admit reports false the add
+// is abandoned and ErrBlockAddNotAdmitted is returned; nothing is mutated and
+// no event is queued.
+//
+// It exists because a precondition checked by the caller before calling is
+// not a precondition of the mutation. The blockfetch drain holds
+// chainsyncBlockfetchMutex, not the chainsyncMutex the equal-slot alternative
+// adoption holds, so a rollback can publish a new generation and truncate the
+// chain in the window between the drain testing its batch and this add taking
+// the chain mutex. Passing the test as a predicate closes that window: the
+// generation comparison and the tip mutation it guards become one atomic step
+// under the same lock every other chain mutation takes.
+//
+// admit must not acquire the chain or manager mutex, and must not block: it
+// runs on the chain's own write path.
+func (c *Chain) AddBlockWithPointDeferredIf(
+	block ledger.Block,
+	point ocommon.Point,
+	txn *database.Txn,
+	admit func() bool,
+) (event.Event, error) {
+	return c.addBlockInternal(block, point, txn, true, true, admit)
 }
 
 // queueDeferredEventLocked appends evt to the chain-level sequencer. The caller
@@ -572,6 +792,7 @@ func (c *Chain) addBlockInternal(
 	txn *database.Txn,
 	matchPendingHeader bool,
 	deferred bool,
+	admit func() bool,
 ) (event.Event, error) {
 	if c == nil {
 		return event.Event{}, errors.New("chain is nil")
@@ -600,6 +821,14 @@ func (c *Chain) addBlockInternal(
 	// We get a write lock on the manager to cover the integrity checks and adding the block below
 	c.manager.mutex.Lock()
 	defer c.manager.mutex.Unlock()
+	// Ask the caller, under the same lock that serializes every chain
+	// mutation, whether this add is still wanted. Evaluating it here is the
+	// point: a caller that checks its own precondition before calling has
+	// already released whatever it inspected, so a rollback landing in
+	// between would leave that check stale. See AddBlockWithPointDeferredIf.
+	if admit != nil && !admit() {
+		return event.Event{}, ErrBlockAddNotAdmitted
+	}
 	// Verify chain integrity
 	if err := c.reconcile(); err != nil {
 		return event.Event{}, fmt.Errorf("reconcile chain: %w", err)
@@ -679,6 +908,15 @@ func (c *Chain) addBlockLocked(
 				c.currentTip.BlockNumber,
 			)
 		}
+	} else if c.atOriginAfterMutation() && !firstBlockNumberValid(blockNumber) {
+		// Chain rolled back to origin: anchor the first block on its block
+		// number -- taken from the matching queued header when there is one --
+		// the only continuity the chain can check here. A queued header does
+		// not exempt the block from the check. See atOriginAfterMutation.
+		return event.Event{}, newBlockNotFitChainOriginError(
+			hex.EncodeToString(blockHashBytes),
+			hex.EncodeToString(blockPrevHashBytes),
+		)
 	}
 	// Build new block record
 	tmpPoint := point
@@ -948,6 +1186,16 @@ func (c *Chain) addRawBlockLocked(
 				hex.EncodeToString(c.currentTip.Point.Hash),
 			)
 		}
+	} else if c.atOriginAfterMutation() &&
+		!firstBlockNumberValid(rb.BlockNumber) {
+		// Chain rolled back to origin: anchor the first block on its block
+		// number, the only continuity the chain can check here. A queued
+		// header does not exempt the block -- the hash check above binds the
+		// hash, not the number. See atOriginAfterMutation.
+		return event.Event{}, newBlockNotFitChainOriginError(
+			hex.EncodeToString(rb.Hash),
+			hex.EncodeToString(rb.PrevHash),
+		)
 	}
 	tmpPoint := ocommon.NewPoint(rb.Slot, rb.Hash)
 	newBlockIndex := c.tipBlockIndex + 1
