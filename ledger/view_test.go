@@ -546,16 +546,25 @@ func TestLedgerViewIsVrfKeyInUseRespectsEpochBoundaryDeferral(t *testing.T) {
 		)
 	}
 
+	// A genesis registration predating both keys under test makes the
+	// pinned epochStartSlot load-bearing rather than coincidental: without
+	// it, GetPoolByVrfKeyHash's earliest-registration fallback (for a
+	// pool with no pre-boundary registration) would resolve to this
+	// genesis key instead of oldVrfKeyHash whenever epochStartSlot is
+	// wrong, giving a visibly different, wrong answer rather than
+	// happening to still match.
+	applyRegistration(1, 0x09, lcommon.NewBlake2b256([]byte{0xc2, 0x00}))
 	// P registers with the old key before the current epoch begins.
 	applyRegistration(10, 0x01, oldVrfKeyHash)
 	// P re-registers with a new key mid-epoch (slot 50), inside the epoch
 	// that starts at slot 30 below. Not yet effective.
 	applyRegistration(50, 0x02, newVrfKeyHash)
 
-	ls.Lock()
-	ls.currentEpoch = models.Epoch{StartSlot: 30}
-	ls.publishSnapshotsLocked()
-	ls.Unlock()
+	// Pinned directly on the view, mirroring how real validation call
+	// sites (NewView, ledgerProcessBlock, validateTxCore) pin
+	// epochStartSlot at construction time rather than leaving
+	// IsVrfKeyInUse to re-read ls.loadConsensusSnapshot() live.
+	lv.epochStartSlot = 30
 
 	inUse, owner, err := lv.IsVrfKeyInUse(oldVrfKeyHash)
 	require.NoError(t, err)
@@ -572,6 +581,120 @@ func TestLedgerViewIsVrfKeyInUseRespectsEpochBoundaryDeferral(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, inUse, "P's own pending key must be reported claimed")
 	assert.Equal(t, poolKeyHash, owner)
+
+	require.NoError(t, dbtest.CloseDatabase(db))
+}
+
+// TestLedgerViewIsVrfKeyInUseIgnoresConcurrentSnapshotRepublish is the
+// regression test for a CodeRabbit finding on this PR: IsVrfKeyInUse must
+// use the epoch boundary pinned on the view at construction time, not
+// whatever ls.loadConsensusSnapshot() returns when it happens to be
+// called. A validation operation can run long enough that the writer
+// publishes a newer snapshot -- and a new epoch boundary -- while it is
+// still in progress; if IsVrfKeyInUse re-read that live snapshot, two
+// calls against the same view could disagree with each other depending
+// on exactly when each one ran, and would disagree with PoolCurrentState
+// and every other pinned field (committeeEpoch, pp, syntheticV2CostModel)
+// the same view is validating against.
+func TestLedgerViewIsVrfKeyInUseIgnoresConcurrentSnapshotRepublish(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	lv := &LedgerView{ls: ls}
+
+	poolKeyHash := lcommon.PoolKeyHash(
+		lcommon.NewBlake2b224(bytes.Repeat([]byte{0xc9}, 28)),
+	)
+	keyA := lcommon.NewBlake2b256([]byte{0xca, 0x01})
+	keyB := lcommon.NewBlake2b256([]byte{0xca, 0x02})
+
+	applyRegistration := func(slot uint64, txIDSeed byte, vrfKeyHash lcommon.VrfKeyHash) {
+		input, err := mockledger.NewSimpleTransactionInput(
+			bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size),
+			0,
+		)
+		require.NoError(t, err)
+		output, err := mockledger.NewTransactionOutputBuilder().
+			WithAddress("addr1qytna5k2fq9ler0fuk45j7zfwv7t2zwhp777nvdjqqfr5tz8ztpwnk8zq5ngetcz5k5mckgkajnygtsra9aej2h3ek5seupmvd").
+			WithLovelace(1_000_000).
+			Build()
+		require.NoError(t, err)
+		cert := &lcommon.PoolRegistrationCertificate{
+			CertType:   uint(lcommon.CertificateTypePoolRegistration),
+			Operator:   poolKeyHash,
+			VrfKeyHash: vrfKeyHash,
+			Pledge:     1_000_000,
+			Cost:       340_000_000,
+			Margin:     cbor.Rat{Rat: big.NewRat(1, 20)},
+			RewardAccount: lcommon.AddrKeyHash(
+				lcommon.NewBlake2b224([]byte{txIDSeed, 0x03}),
+			),
+		}
+		txBuilder := mockledger.NewTransactionBuilder()
+		txBuilder.WithId(bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size))
+		txBuilder.WithType(gledger.TxTypeDijkstra)
+		txBuilder.WithValid(true)
+		txBuilder.WithInputs(input)
+		txBuilder.WithOutputs(output)
+		txBuilder.WithCertificates(cert)
+		tx, err := txBuilder.Build()
+		require.NoError(t, err)
+		point := ocommon.Point{
+			Slot: slot,
+			Hash: bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size),
+		}
+		require.NoError(
+			t,
+			db.SetTransactionMetadataOnly(
+				tx, point, 0, map[int]uint64{0: 500_000_000}, nil,
+			),
+		)
+	}
+
+	applyRegistration(10, 0x01, keyA) // pre-epoch: P's active key
+	applyRegistration(50, 0x02, keyB) // this epoch (starts at 30): deferred
+
+	// Pinned once, as if at the start of a long-running validation.
+	lv.epochStartSlot = 30
+
+	inUse, owner, err := lv.IsVrfKeyInUse(keyA)
+	require.NoError(t, err)
+	require.True(t, inUse)
+	require.Equal(t, poolKeyHash, owner)
+
+	// The writer advances the published epoch past the deferred
+	// re-registration's slot while this view's validation is still
+	// notionally in progress -- exactly the race the pinning avoids.
+	ls.Lock()
+	ls.currentEpoch = models.Epoch{StartSlot: 60}
+	ls.publishSnapshotsLocked()
+	ls.Unlock()
+
+	// The same view, asked again, must still answer as of its pinned
+	// boundary (30): keyA still active, keyB still not yet effective.
+	// Reading the live snapshot instead would flip this to keyA freed,
+	// keyB active -- the boundary having "already passed" from the
+	// writer's perspective, but not from this validation's.
+	inUse, owner, err = lv.IsVrfKeyInUse(keyA)
+	require.NoError(t, err)
+	assert.True(t, inUse,
+		"a concurrent snapshot republish must not change this view's answer")
+	assert.Equal(t, poolKeyHash, owner)
+
+	inUse, _, err = lv.IsVrfKeyInUse(keyB)
+	require.NoError(t, err)
+	assert.True(t, inUse,
+		"keyB is still claimed by P's own same-epoch pending registration "+
+			"per this view's pinned boundary, regardless of the live one")
 
 	require.NoError(t, dbtest.CloseDatabase(db))
 }
@@ -658,10 +781,11 @@ func TestLedgerViewIsVrfKeyInUseRejectsSameOperatorReuseOfSupersededFutureKey(
 	applyRegistration(50, 0x02, keyB) // this epoch: P: A -> B
 	applyRegistration(70, 0x03, keyC) // this epoch: P: B -> C, supersedes B
 
-	ls.Lock()
-	ls.currentEpoch = models.Epoch{StartSlot: 30}
-	ls.publishSnapshotsLocked()
-	ls.Unlock()
+	// Pinned directly on the view, mirroring how real validation call
+	// sites (NewView, ledgerProcessBlock, validateTxCore) pin
+	// epochStartSlot at construction time rather than leaving
+	// IsVrfKeyInUse to re-read ls.loadConsensusSnapshot() live.
+	lv.epochStartSlot = 30
 
 	inUse, owner, err := lv.IsVrfKeyInUse(keyB)
 	require.NoError(t, err)
@@ -773,10 +897,11 @@ func TestValidateTxDijkstraRejectsDifferentPoolClaimingActiveKeyDuringDeferral(
 	applyRegistration(10, 0x01, poolP, keyA) // pre-epoch: P's active key
 	applyRegistration(50, 0x02, poolP, keyB) // this epoch: P: A -> B, deferred
 
-	ls.Lock()
-	ls.currentEpoch = models.Epoch{StartSlot: 30}
-	ls.publishSnapshotsLocked()
-	ls.Unlock()
+	// Pinned directly on the view, mirroring how real validation call
+	// sites (NewView, ledgerProcessBlock, validateTxCore) pin
+	// epochStartSlot at construction time rather than leaving
+	// IsVrfKeyInUse to re-read ls.loadConsensusSnapshot() live.
+	lv.epochStartSlot = 30
 
 	// Q attempts to claim key A, which is still P's active key during the
 	// deferral window. Not written to the database -- this is the
@@ -833,10 +958,11 @@ func TestValidateTxDijkstraRejectsSameOperatorReuseOfSupersededFutureKey(
 	applyRegistration(50, 0x02, keyB) // this epoch: P: A -> B
 	applyRegistration(70, 0x03, keyC) // this epoch: P: B -> C, supersedes B
 
-	ls.Lock()
-	ls.currentEpoch = models.Epoch{StartSlot: 30}
-	ls.publishSnapshotsLocked()
-	ls.Unlock()
+	// Pinned directly on the view, mirroring how real validation call
+	// sites (NewView, ledgerProcessBlock, validateTxCore) pin
+	// epochStartSlot at construction time rather than leaving
+	// IsVrfKeyInUse to re-read ls.loadConsensusSnapshot() live.
+	lv.epochStartSlot = 30
 
 	// P attempts to reuse B, a key it itself proposed and then superseded
 	// within the same epoch. Not written to the database.
