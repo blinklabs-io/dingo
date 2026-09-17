@@ -32,25 +32,13 @@ import (
 	"go.uber.org/goleak"
 )
 
-// unixTestTempDir creates a short-lived temp directory suitable for Unix
-// socket paths. t.TempDir() embeds the full test name, easily exceeding macOS's
-// 104-byte sockaddr_un.sun_path limit. Using a short prefix keeps the path
-// under the limit on all platforms.
-func unixTestTempDir(t *testing.T) string {
-	t.Helper()
-	dir, err := os.MkdirTemp("", "dt*")
-	require.NoError(t, err)
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	return dir
-}
-
 // TestStartListener_UnixSocket_RemovesStaleSocketFile verifies that a stale
 // Unix socket file left over from an unclean shutdown is automatically removed
 // before binding a new listener.
 func TestStartListener_UnixSocket_RemovesStaleSocketFile(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
-	socketPath := filepath.Join(unixTestTempDir(t), "test.sock")
+	socketPath := unixTestSocketPath(t, unixTestTempDir(t), "test.sock")
 
 	// Create a stale unix socket file to simulate an unclean previous shutdown:
 	// listen, disable auto-unlink on close, then close so the socket file
@@ -100,7 +88,7 @@ func TestStartListener_UnixSocket_RemovesStaleSocketFile(t *testing.T) {
 func TestStartListener_UnixSocket_NoExistingFile(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
-	socketPath := filepath.Join(unixTestTempDir(t), "test.sock")
+	socketPath := unixTestSocketPath(t, unixTestTempDir(t), "test.sock")
 	// No pre-existing socket file
 
 	cfg := ConnectionManagerConfig{
@@ -196,13 +184,13 @@ func TestStartListener_UnixSocket_ErrorOnSymlink(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	tempDir := unixTestTempDir(t)
-	targetPath := filepath.Join(tempDir, "target.sock")
+	targetPath := unixTestSocketPath(t, tempDir, "target.sock")
 	staleLn, err := net.Listen("unix", targetPath)
 	require.NoError(t, err)
 	staleLn.(*net.UnixListener).SetUnlinkOnClose(false)
 	require.NoError(t, staleLn.Close())
 
-	socketPath := filepath.Join(tempDir, "link.sock")
+	socketPath := unixTestSocketPath(t, tempDir, "link.sock")
 	require.NoError(t, os.Symlink(targetPath, socketPath))
 
 	cfg := ConnectionManagerConfig{
@@ -233,7 +221,7 @@ func TestStartListener_UnixSocket_ErrorOnSymlink(t *testing.T) {
 func TestStartListener_UnixSocket_ErrorOnLiveSocket(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
-	socketPath := filepath.Join(unixTestTempDir(t), "live.sock")
+	socketPath := unixTestSocketPath(t, unixTestTempDir(t), "live.sock")
 	liveLn, err := net.Listen("unix", socketPath)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, liveLn.Close()) })
@@ -277,7 +265,7 @@ func TestStartListener_UnixSocket_PropagatesRemovalError(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	tempDir := unixTestTempDir(t)
-	socketPath := filepath.Join(tempDir, "stale.sock")
+	socketPath := unixTestSocketPath(t, tempDir, "stale.sock")
 	staleLn, err := net.Listen("unix", socketPath)
 	require.NoError(t, err)
 	staleLn.(*net.UnixListener).SetUnlinkOnClose(false)

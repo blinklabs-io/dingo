@@ -31,6 +31,8 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	gshelley "github.com/blinklabs-io/gouroboros/ledger/shelley"
+	protocol "github.com/blinklabs-io/gouroboros/protocol"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
@@ -305,6 +307,27 @@ func (ls *LedgerState) queryShelleyEpochNo(
 // full scope (every query pinnable at any historical point) remains out of
 // scope for what cross-node validation via node-parity actually needs.
 func (ls *LedgerState) Query(query any, at QueryPoint) (any, error) {
+	return ls.query(query, at, 0)
+}
+
+// QueryWithProtocolVersion answers a LocalStateQuery using the negotiated
+// node-to-client version when a result has version-dependent wire encoding.
+// A zero version preserves the direct-call behavior used by non-network
+// callers and selects the current result layout only where the result itself
+// is constructed as such.
+func (ls *LedgerState) QueryWithProtocolVersion(
+	query any,
+	at QueryPoint,
+	protocolVersion uint16,
+) (any, error) {
+	return ls.query(query, at, protocolVersion)
+}
+
+func (ls *LedgerState) query(
+	query any,
+	at QueryPoint,
+	protocolVersion uint16,
+) (any, error) {
 	// txn is nil on the live (unpinned) path -- every handler below falls
 	// back to opening its own transaction in that case, unchanged from
 	// before this point-pinning existed. When pinned, this one transaction
@@ -323,7 +346,7 @@ func (ls *LedgerState) Query(query any, at QueryPoint) (any, error) {
 	}
 	switch q := query.(type) {
 	case *olocalstatequery.BlockQuery:
-		return ls.queryBlock(q, at, txn)
+		return ls.queryBlock(q, at, txn, protocolVersion)
 	case *olocalstatequery.SystemStartQuery:
 		return ls.querySystemStart()
 	case *olocalstatequery.ChainBlockNoQuery:
@@ -339,12 +362,13 @@ func (ls *LedgerState) queryBlock(
 	query *olocalstatequery.BlockQuery,
 	at QueryPoint,
 	txn *database.Txn,
+	protocolVersion uint16,
 ) (any, error) {
 	switch q := query.Query.(type) {
 	case *olocalstatequery.HardForkQuery:
 		return ls.queryHardFork(q)
 	case *olocalstatequery.ShelleyQuery:
-		return ls.queryShelley(q, at, txn)
+		return ls.queryShelley(q, at, txn, protocolVersion)
 	default:
 		return nil, fmt.Errorf("unsupported query type: %T", q)
 	}
@@ -718,8 +742,9 @@ func (ls *LedgerState) queryShelley(
 	query *olocalstatequery.ShelleyQuery,
 	at QueryPoint,
 	txn *database.Txn,
+	protocolVersion uint16,
 ) (any, error) {
-	return ls.queryShelleyLeaf(query.Query, at, txn)
+	return ls.queryShelleyLeaf(query.Query, at, txn, protocolVersion)
 }
 
 // queryShelleyLeaf dispatches a decoded Shelley block-query leaf and returns
@@ -804,16 +829,17 @@ func (ls *LedgerState) queryShelleyLeaf(
 	query any,
 	at QueryPoint,
 	txn *database.Txn,
+	protocolVersion uint16,
 ) (any, error) {
 	switch q := query.(type) {
 	case *olocalstatequery.ShelleyCborQuery:
-		return ls.queryShelleyCbor(q, at, txn)
+		return ls.queryShelleyCbor(q, at, txn, protocolVersion)
 	case *olocalstatequery.ShelleyEpochNoQuery:
 		return ls.queryShelleyEpochNo(at, txn)
 	case *olocalstatequery.ShelleyCurrentProtocolParamsQuery:
 		return ls.queryShelleyCurrentProtocolParams(at, txn)
 	case *olocalstatequery.ShelleyGenesisConfigQuery:
-		return ls.queryShelleyGenesisConfig()
+		return ls.queryShelleyGenesisConfig(protocolVersion)
 	case *olocalstatequery.ShelleyUtxoByAddressQuery:
 		return ls.queryShelleyUtxoByAddress(q.Addrs)
 	case *olocalstatequery.ShelleyUtxoByTxinQuery:
@@ -873,8 +899,9 @@ func (ls *LedgerState) queryShelleyCbor(
 	q *olocalstatequery.ShelleyCborQuery,
 	at QueryPoint,
 	txn *database.Txn,
+	protocolVersion uint16,
 ) (any, error) {
-	inner, err := ls.queryShelleyLeaf(q.Query, at, txn)
+	inner, err := ls.queryShelleyLeaf(q.Query, at, txn, protocolVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -1271,9 +1298,124 @@ func (ls *LedgerState) totalCirculatingSupply(
 	return circulation, nil
 }
 
-func (ls *LedgerState) queryShelleyGenesisConfig() (any, error) {
+func (ls *LedgerState) queryShelleyGenesisConfig(
+	protocolVersion uint16,
+) (any, error) {
 	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
-	return []any{shelleyGenesis}, nil
+	if protocolVersion == 0 ||
+		protocolVersion < 21+protocol.ProtocolVersionNtCOffset {
+		return []any{shelleyGenesis}, nil
+	}
+	result, err := genesisConfigResult(shelleyGenesis)
+	if err != nil {
+		return nil, err
+	}
+	return []any{result}, nil
+}
+
+// genesisConfigResult adapts Dingo's genesis model to the current
+// node-to-client GetGenesisConfig result. The current codec is intentionally
+// separate from ShelleyGenesis.MarshalCBOR: that method is the legacy layout,
+// while version 21 compactGenesis omits ordinary initial funds and staking and
+// retains the optional injection configuration.
+func genesisConfigResult(
+	genesis *gshelley.ShelleyGenesis,
+) (olocalstatequery.GenesisConfigResult, error) {
+	if genesis == nil {
+		return olocalstatequery.GenesisConfigResult{}, errors.New(
+			"unable to get shelley genesis config",
+		)
+	}
+	legacyCBOR, err := genesis.MarshalCBOR()
+	if err != nil {
+		return olocalstatequery.GenesisConfigResult{}, err
+	}
+	var fields []cbor.RawMessage
+	if _, err := cbor.Decode(legacyCBOR, &fields); err != nil {
+		return olocalstatequery.GenesisConfigResult{}, err
+	}
+	if len(fields) != 15 {
+		return olocalstatequery.GenesisConfigResult{}, fmt.Errorf(
+			"legacy Shelley genesis: expected 15 fields, got %d", len(fields),
+		)
+	}
+	var networkID uint8
+	if _, err := cbor.Decode(fields[2], &networkID); err != nil {
+		return olocalstatequery.GenesisConfigResult{}, fmt.Errorf(
+			"decode genesis network id: %w", err,
+		)
+	}
+	start := genesis.SystemStart.UTC()
+	startPicoseconds := (int64(start.Hour())*3600+
+		int64(start.Minute())*60+int64(start.Second()))*1_000_000_000_000 +
+		int64(start.Nanosecond())*1000
+	slotLength := new(big.Rat).Mul(genesis.SlotLength.Rat, big.NewRat(1_000_000, 1))
+	if !slotLength.IsInt() || !slotLength.Num().IsInt64() {
+		return olocalstatequery.GenesisConfigResult{}, fmt.Errorf(
+			"genesis slot length is not an int64 number of microseconds: %s",
+			slotLength.String(),
+		)
+	}
+	if genesis.MaxLovelaceSupply > uint64(math.MaxInt64) {
+		return olocalstatequery.GenesisConfigResult{}, fmt.Errorf(
+			"genesis max lovelace supply exceeds int64: %d",
+			genesis.MaxLovelaceSupply,
+		)
+	}
+	pp := genesis.ProtocolParameters
+	result := olocalstatequery.GenesisConfigResult{
+		Start: olocalstatequery.SystemStartResult{
+			Year: *big.NewInt(int64(start.Year())), Day: int64(start.YearDay()),
+			Picoseconds: *big.NewInt(startPicoseconds),
+		},
+		NetworkMagic: int(genesis.NetworkMagic), NetworkId: networkID,
+		ActiveSlotsCoeff: []any{genesis.ActiveSlotsCoeff.Num(), genesis.ActiveSlotsCoeff.Denom()},
+		SecurityParam:    genesis.SecurityParam, EpochLength: genesis.EpochLength,
+		SlotsPerKESPeriod: genesis.SlotsPerKESPeriod, MaxKESEvolutions: genesis.MaxKESEvolutions,
+		SlotLength: int(slotLength.Num().Int64()), UpdateQuorum: genesis.UpdateQuorum,
+		MaxLovelaceSupply: int64(genesis.MaxLovelaceSupply), // #nosec G115 -- checked above
+		GenDelegs:         fields[12],
+		ProtocolParams: olocalstatequery.GenesisConfigResultProtocolParameters{
+			MinFeeA: int(pp.MinFeeA), MinFeeB: int(pp.MinFeeB),
+			MaxBlockBodySize: int(pp.MaxBlockBodySize), MaxTxSize: int(pp.MaxTxSize),
+			MaxBlockHeaderSize: int(pp.MaxBlockHeaderSize), KeyDeposit: int(pp.KeyDeposit),
+			PoolDeposit: int(pp.PoolDeposit), EMax: int(pp.MaxEpoch), NOpt: int(pp.NOpt),
+			A0:                    []int{int(pp.A0.Num().Int64()), int(pp.A0.Denom().Int64())},
+			Rho:                   []int{int(pp.Rho.Num().Int64()), int(pp.Rho.Denom().Int64())},
+			Tau:                   []int{int(pp.Tau.Num().Int64()), int(pp.Tau.Denom().Int64())},
+			DecentralizationParam: []int{int(pp.Decentralization.Num().Int64()), int(pp.Decentralization.Denom().Int64())},
+			ExtraEntropy:          pp.ExtraEntropy, ProtocolVersionMajor: int(pp.ProtocolVersion.Major),
+			ProtocolVersionMinor: int(pp.ProtocolVersion.Minor), MinUTxOValue: int(pp.MinUtxoValue),
+			MinPoolCost: int(pp.MinPoolCost),
+		},
+	}
+	initialFunds, err := cbor.Encode([]any{})
+	if err != nil {
+		return olocalstatequery.GenesisConfigResult{}, fmt.Errorf(
+			"encode compact genesis initial funds: %w", err,
+		)
+	}
+	staking, err := cbor.Encode([]any{[]any{}, map[any]any{}})
+	if err != nil {
+		return olocalstatequery.GenesisConfigResult{}, fmt.Errorf(
+			"encode compact genesis staking: %w", err,
+		)
+	}
+	// The current ledger compactGenesis erases these two startup-only fields.
+	// Keep the raw values available only through the legacy path.
+	result.InitialFunds = initialFunds
+	result.Staking = staking
+	if genesis.ExtraConfig == nil {
+		result.ExtraConfig, err = cbor.Encode([]any{})
+	} else {
+		result.ExtraConfig, err = cbor.Encode([]any{genesis.ExtraConfig})
+	}
+	if err != nil {
+		return olocalstatequery.GenesisConfigResult{}, fmt.Errorf(
+			"encode genesis extra config: %w", err,
+		)
+	}
+	return result, nil
 }
 
 // queryShelleyStakePools answers GetStakePools: the set of currently
