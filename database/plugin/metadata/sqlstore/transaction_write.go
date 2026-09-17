@@ -903,6 +903,7 @@ RETURNING id`
 // re-parsing and re-planning the identical statement text on every UTxO
 // output insert.
 const insertUtxoQueryIgnoreConflict = `
+-- name: CreateUtxoIfAbsent :one
 INSERT INTO utxo (
     transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
     staking_key, credential_tag, datum_hash, spent_at_tx_id,
