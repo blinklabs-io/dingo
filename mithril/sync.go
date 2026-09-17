@@ -552,7 +552,7 @@ func Sync(
 			if pinnedDigest != "" {
 				return SyncResult{}, errors.New(
 					"explicit Mithril artifact pin requires a fresh database; " +
-					"interrupted catch-up runs must select the latest compatible artifact",
+						"interrupted catch-up runs must select the latest compatible artifact",
 				)
 			}
 			// A catch-up import runs with Reconcile enabled: every live row
