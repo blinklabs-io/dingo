@@ -1502,6 +1502,34 @@ drop it back toward zero, while a persistently held reader snapshot can
 leave it at its ~40MB-and-rising floor (the raised `wal_autocheckpoint`
 threshold above) until a later attempt succeeds.
 
+**Write/read connection-pool metrics.** A live goroutine-dump/`pprof`
+investigation found `writeDB` — capped at `SetMaxOpenConns(1)` because SQLite
+allows only one writer regardless of connection count — measurably
+contended: `persistDeferredHeaderValidation`'s per-block durability write
+competes with block-apply's own writes for that single connection, and there
+was no metric showing connection-pool wait time directly, only ad hoc
+pprof/goroutine-dump forensics. `sql.DBStats` — already surfaced by
+`Store.WritePoolStats`/`ReadPoolStats`, but previously read only from tests —
+already carries the missing signal, so `newSQLPoolMetrics`
+(`database/plugin/metadata/sqlstore/metrics.go`, wired from `sqlstore.New`)
+registers it directly, for both pools: `dingo_database_sql_pool_wait_count_total`
+and `dingo_database_sql_pool_wait_duration_seconds_total` (counters, from
+`sql.DBStats`' cumulative `WaitCount`/`WaitDuration`), and
+`dingo_database_sql_pool_open_connections`, `..._in_use_connections`,
+`..._idle_connections`, and `..._max_open_connections` (gauges, from the
+matching point-in-time `DBStats` fields). All six are labeled
+`pool="write"|"read"` and sampled live at scrape time via `GaugeFunc`/
+`CounterFunc` — the same pull-based pattern
+`dingo_database_sql_wal_bytes`/`disk_bytes` already use, rather than a
+background ticker. `pool="write"` is the one this exists for
+(`pool_max_open_connections` reads `1` there on every current provider):
+`rate()` of its `wait_duration_seconds_total` over a window is the average
+number of callers waiting concurrently, not a value capped at `1.0` — a
+sustained value near `1.0` already means a caller is waiting essentially
+continuously, and concurrent waiters each accrue wait time independently,
+so real contention can push it well above `1.0`. `pool="read"` is
+registered identically for consistency and as a future comparison point.
+
 A failed `Sync` is reported as `PartialCommitError`, because at that point the
 blob transaction is committed and carries the new commit timestamp while metadata
 does not — the same inconsistency a failed metadata commit leaves, and the same
