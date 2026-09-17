@@ -40,8 +40,6 @@ func transactionFee(transaction lcommon.Transaction) types.Uint64 {
 	return types.Uint64(fee.Uint64())
 }
 
-type immediateBatchAccumulator struct{}
-
 // transactionBatchAccumulator owns statements that are safe to reuse for one
 // metadata transaction.  API backfill keeps one SQL transaction open across a
 // block window; preparing the transaction upsert for every row defeats much
