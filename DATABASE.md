@@ -3305,6 +3305,50 @@ consensus-critical question is actually asked, using the boundary the node
 already persists for exactly this purpose, avoids adding a row that other
 `added_slot`-scoped readers have to reason about.
 
+### `GetPoolByVrfKeyHash`
+
+Backs `LedgerView.IsVrfKeyInUse`, the reverse of the pair above: given a VRF
+key hash, find whichever pool currently claims it, respecting the same
+`psStakePools`/`psFutureStakePoolParams` deferral instead of the denormalized
+`pool.vrf_key_hash` column, which the certificate-application path
+(`applyPoolRegistrationCertificate`) always overwrites immediately regardless
+of epoch boundary. Reading that column directly let a pool's old VRF key
+appear free to a different pool the moment a re-registration was applied, even
+though cardano-ledger keeps the old key reserved until the next epoch boundary
+merges `psFutureStakePoolParams` into `psStakePools` (issue #4352).
+
+Takes the current epoch's start slot (`epochStartSlot`) and resolves a claim
+in two tiers, checked in order:
+
+1. **Effective owner.** The pool whose most recent registration strictly
+   before `epochStartSlot` has this key (`pre_boundary`), falling back to a
+   candidate's globally earliest registration (`earliest`) when it has none
+   before the boundary -- the same first-registration-is-immediate exception
+   `GetPoolEarliestVrfKeyHashAtSlot` encodes, needed here so a pool's
+   first-ever registration, submitted mid-epoch, still reserves its key
+   against every other pool immediately rather than only from the next
+   boundary.
+2. **Same-epoch claimant.** Any pool with *any* registration this epoch
+   (`added_slot >= epochStartSlot`) naming this key, even one since
+   superseded by a later same-epoch re-registration. Consulted only when (1)
+   finds nothing. This tier exists because `psVRFKeyHashes` retains every key
+   a pool ever placed in `psFutureStakePoolParams` during the epoch, not only
+   the current pending one: a pool cycling `A -> B -> C` within one epoch must
+   still be refused a later same-epoch reuse of `B`. `IsVrfKeyInUse`'s caller
+   (gouroboros's `validatePoolRegistration`) special-cases
+   `owningPool == cert.Operator` by comparing against `PoolCurrentState`
+   (the pool's latest registration, `C` here) rather than its effective one;
+   reporting `B` as claimed by that same pool, not free, is what lets that
+   comparison catch the reuse.
+
+Both candidate sets are pre-filtered to pool IDs with *any* historical
+`pool_registration` row naming the queried key, so the query only walks a
+pool's full history when it has ever plausibly held that key. Retirement is
+checked afterward via the existing `activePoolOrNil`, unchanged: retirement
+timing is a separate concern from this deferral, and reusing that check
+avoids a second, divergent implementation of POOLREAP cancellation
+precedence.
+
 ### `GetPoolsRetiringAtEpoch`
 
 Pools whose effective retirement takes effect at a given epoch, with the reward
