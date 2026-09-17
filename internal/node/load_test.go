@@ -102,7 +102,7 @@ func TestDecodeImmutableBlockBatchReportsRealDecodeError(t *testing.T) {
 	t.Parallel()
 
 	blocks := immutableDecodeBenchmarkBlocks(t)
-	blocks[0].Cbor = []byte{0xff}
+	blocks[len(blocks)/2].Cbor = []byte{0xff}
 
 	_, err := decodeImmutableBlockBatch(
 		context.Background(),

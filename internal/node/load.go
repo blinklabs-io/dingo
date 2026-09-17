@@ -1050,6 +1050,9 @@ type immutableDecodeJob struct {
 	block immutable.Block
 }
 
+// immutableBlockDecoder is a test seam: production decoding ignores the
+// context and index, while tests can fail a selected job and observe the
+// derived cancellation context. NewBlockFromCbor itself is not cancellable.
 type immutableBlockDecoder func(
 	context.Context,
 	int,
