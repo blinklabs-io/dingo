@@ -20,9 +20,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"time"
 )
+
+const sqlitePragmaRestoreTimeout = 5 * time.Second
 
 type Runner struct {
 	DB       *sql.DB
@@ -135,7 +138,40 @@ func (r *Runner) runMigration(
 	migration Migration,
 	current state,
 	exists bool,
-) error {
+) (runErr error) {
+	var restoreSQLiteForeignKeys func() error
+	if r.Dialect == "sqlite" {
+		var enabled int
+		if err := conn.QueryRowContext(
+			ctx, "PRAGMA foreign_keys",
+		).Scan(&enabled); err != nil {
+			return r.upgradeError(migration, PhaseExpand, err)
+		}
+		restoreSQLiteForeignKeys = func() error {
+			restoreCtx, cancel := context.WithTimeout(
+				context.Background(),
+				sqlitePragmaRestoreTimeout,
+			)
+			defer cancel()
+			_, err := conn.ExecContext(
+				restoreCtx,
+				fmt.Sprintf("PRAGMA foreign_keys = %d", enabled),
+			)
+			return err
+		}
+		defer func() {
+			if err := restoreSQLiteForeignKeys(); err != nil {
+				runErr = errors.Join(runErr, r.upgradeError(
+					migration,
+					PhaseContract,
+					fmt.Errorf("restore foreign_keys pragma: %w", err),
+				))
+			}
+		}()
+		if _, err := conn.ExecContext(ctx, "PRAGMA foreign_keys = OFF"); err != nil {
+			return r.upgradeError(migration, PhaseExpand, err)
+		}
+	}
 	checksum := migration.checksum()
 	if !exists {
 		current = state{
@@ -154,17 +190,7 @@ func (r *Runner) runMigration(
 		if err := r.setDirty(ctx, conn, migration.Version, PhaseExpand); err != nil {
 			return r.upgradeError(migration, PhaseExpand, err)
 		}
-		if err := execDDL(ctx, conn, sqlPhases.Expand, r.Dialect); err != nil {
-			return r.upgradeError(migration, PhaseExpand, err)
-		}
-		if err := r.setPhase(
-			ctx,
-			conn,
-			migration.Version,
-			PhaseBackfill,
-			current.cursor,
-			false,
-		); err != nil {
+		if err := r.runExpand(ctx, conn, migration, current, sqlPhases.Expand); err != nil {
 			return r.upgradeError(migration, PhaseExpand, err)
 		}
 		current.phase = PhaseBackfill
@@ -194,6 +220,38 @@ func (r *Runner) runMigration(
 		"name", migration.Name,
 	)
 	return nil
+}
+
+func (r *Runner) runExpand(
+	ctx context.Context,
+	conn *sql.Conn,
+	migration Migration,
+	current state,
+	statements []string,
+) error {
+	if r.Dialect != "sqlite" {
+		if err := execDDL(ctx, conn, statements, r.Dialect); err != nil {
+			return err
+		}
+		return r.setPhase(
+			ctx, conn, migration.Version, PhaseBackfill, current.cursor, false,
+		)
+	}
+
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := execDDL(ctx, tx, statements, r.Dialect); err != nil {
+		return err
+	}
+	if err := r.setPhase(
+		ctx, tx, migration.Version, PhaseBackfill, current.cursor, false,
+	); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (r *Runner) runBackfill(
@@ -524,6 +582,11 @@ type stateExecer interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 }
 
+type ddlExecer interface {
+	stateExecer
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
 func (r *Runner) setPhase(
 	ctx context.Context,
 	exec stateExecer,
@@ -620,22 +683,22 @@ func (r *Runner) upgradeError(
 
 func execDDL(
 	ctx context.Context,
-	conn *sql.Conn,
+	exec ddlExecer,
 	statements []string,
 	dialect string,
 ) error {
 	for index, statement := range statements {
-		if _, err := conn.ExecContext(ctx, statement); err != nil {
+		if _, err := exec.ExecContext(ctx, statement); err != nil {
 			if dialect == "mysql" &&
-				isMySQLDDLAlreadyAppliedOnConn(ctx, conn, statement, err) {
+				isMySQLDDLAlreadyAppliedOnConn(ctx, exec, statement, err) {
 				continue
 			}
 			if dialect == "sqlite" &&
-				isSQLiteDDLAlreadyAppliedOnConn(ctx, conn, statement, err) {
+				isSQLiteDDLAlreadyAppliedOnConn(ctx, exec, statement, err) {
 				continue
 			}
 			if dialect == "postgres" &&
-				isPostgresDDLAlreadyAppliedOnConn(ctx, conn, statement, err) {
+				isPostgresDDLAlreadyAppliedOnConn(ctx, exec, statement, err) {
 				continue
 			}
 			return fmt.Errorf("statement %d: %w", index+1, err)
@@ -647,21 +710,79 @@ func execDDL(
 // parseAddColumnStatement extracts the table and column named by an
 // ALTER TABLE <table> ADD COLUMN <column> ... statement. Identifier quoting
 // differs per dialect, so every supported quote character is trimmed.
-func parseAddColumnStatement(statement string) (string, string, bool) {
-	fields := strings.Fields(strings.TrimSuffix(strings.TrimSpace(statement), ";"))
+func parseAddColumnStatement(statement string) (string, string, string, bool) {
+	fields := strings.Fields(
+		strings.TrimSuffix(strings.TrimSpace(statement), ";"),
+	)
 	if len(fields) < 6 ||
 		!strings.EqualFold(fields[0], "ALTER") ||
 		!strings.EqualFold(fields[1], "TABLE") ||
 		!strings.EqualFold(fields[3], "ADD") ||
 		!strings.EqualFold(fields[4], "COLUMN") {
-		return "", "", false
+		return "", "", "", false
 	}
 	table := strings.Trim(fields[2], "`\"")
 	column := strings.Trim(fields[5], "`\"")
 	if table == "" || column == "" {
-		return "", "", false
+		return "", "", "", false
 	}
-	return table, column, true
+	return table, column, strings.TrimSpace(strings.Join(fields[6:], " ")), true
+}
+
+var columnConstraintKeywords = map[string]struct{}{
+	"as": {}, "auto_increment": {}, "check": {}, "collate": {},
+	"comment": {}, "constraint": {}, "default": {}, "generated": {},
+	"not": {}, "null": {}, "primary": {}, "references": {}, "unique": {},
+}
+
+var columnTypeAliases = map[string]string{
+	"character varying":           "varchar",
+	"timestamp with time zone":    "timestamptz",
+	"timestamp without time zone": "timestamp",
+}
+
+var columnTypeArgsPattern = regexp.MustCompile(`\s*\([^)]*\)`)
+
+func declaredColumnType(definition string) string {
+	fields := strings.Fields(definition)
+	end := len(fields)
+	for index, field := range fields {
+		name, _, _ := strings.Cut(field, "(")
+		if _, stop := columnConstraintKeywords[strings.ToLower(name)]; stop {
+			end = index
+			break
+		}
+	}
+	return strings.Join(fields[:end], " ")
+}
+
+func normalizeColumnType(value string) string {
+	normalized := columnTypeArgsPattern.ReplaceAllString(
+		strings.ToLower(value),
+		"",
+	)
+	normalized = strings.Join(strings.Fields(normalized), " ")
+	if alias, ok := columnTypeAliases[normalized]; ok {
+		return alias
+	}
+	return normalized
+}
+
+func addColumnTypeMatches(reported sql.NullString, definition string) bool {
+	return reported.Valid && normalizeColumnType(reported.String) ==
+		normalizeColumnType(declaredColumnType(definition))
+}
+
+func mysqlColumnTypeMatches(reported sql.NullString, definition string) bool {
+	if !reported.Valid {
+		return false
+	}
+	actual := normalizeColumnType(reported.String)
+	declared := normalizeColumnType(declaredColumnType(definition))
+	if declared == "boolean" {
+		declared = "tinyint"
+	}
+	return actual == declared
 }
 
 // isPostgresDDLAlreadyAppliedOnConn reports whether an ADD COLUMN statement
@@ -681,7 +802,7 @@ func parseAddColumnStatement(statement string) (string, string, bool) {
 // is only linked under the dingo_extra_plugins build tag.
 func isPostgresDDLAlreadyAppliedOnConn(
 	ctx context.Context,
-	conn *sql.Conn,
+	conn ddlExecer,
 	statement string,
 	err error,
 ) bool {
@@ -693,46 +814,49 @@ func isPostgresDDLAlreadyAppliedOnConn(
 		// unrelated duplicate-definition error into a no-op.
 		return false
 	}
-	table, column, ok := parseAddColumnStatement(statement)
+	table, column, definition, ok := parseAddColumnStatement(statement)
 	if !ok {
 		return false
 	}
-	var found int
+	var reported sql.NullString
 	if queryErr := conn.QueryRowContext(
 		ctx,
-		`SELECT 1 FROM information_schema.columns
+		`SELECT data_type FROM information_schema.columns
 WHERE table_name = $1 AND column_name = $2`,
 		table,
 		column,
-	).Scan(&found); queryErr != nil {
+	).Scan(&reported); queryErr != nil {
 		return false
 	}
-	return found == 1
+	return addColumnTypeMatches(reported, definition)
 }
 
 func isSQLiteDDLAlreadyAppliedOnConn(
 	ctx context.Context,
-	conn *sql.Conn,
+	conn ddlExecer,
 	statement string,
 	err error,
 ) bool {
-	if !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+	if !strings.Contains(
+		strings.ToLower(err.Error()),
+		"duplicate column name",
+	) {
 		return false
 	}
-	table, column, ok := parseAddColumnStatement(statement)
+	table, column, definition, ok := parseAddColumnStatement(statement)
 	if !ok {
 		return false
 	}
-	var found int
+	var reported sql.NullString
 	if queryErr := conn.QueryRowContext(
 		ctx,
-		"SELECT 1 FROM pragma_table_info(?) WHERE name = ?",
+		"SELECT type FROM pragma_table_info(?) WHERE name = ?",
 		table,
 		column,
-	).Scan(&found); queryErr != nil {
+	).Scan(&reported); queryErr != nil {
 		return false
 	}
-	return found == 1
+	return addColumnTypeMatches(reported, definition)
 }
 
 func boundedCursor(cursor string) string {

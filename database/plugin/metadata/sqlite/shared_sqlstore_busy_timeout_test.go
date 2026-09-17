@@ -23,14 +23,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The driver applies _pragma directives verbatim, in the order they appear in
-// the DSN -- github.com/glebarez/go-sqlite does not carry modernc's fix that
-// hoists busy_timeout ahead of the rest. So any pragma listed before
-// busy_timeout runs with no busy handler installed and fails immediately on
-// contention rather than waiting.
+// modernc.org/sqlite always hoists busy_timeout ahead of the rest of the
+// _pragma list regardless of DSN order, so this ordering is defensive rather
+// than load-bearing today. It still matters as documentation: any pragma
+// listed before busy_timeout in the source DSN would, on a driver without
+// that hoisting behavior, run with no busy handler installed and fail
+// immediately on contention rather than waiting.
 //
 // Every pragma after it that touches the database file -- cache_size and
-// mmap_size both do -- is then one that gives up instantly instead of
+// mmap_size both do -- would then be one that gives up instantly instead of
 // waiting out a concurrent writer.
 //
 // Pin the ordering directly. A concurrency test alone would only fail when

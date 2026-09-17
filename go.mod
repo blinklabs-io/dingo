@@ -1,12 +1,12 @@
 module github.com/blinklabs-io/dingo
 
-go 1.26.0
+go 1.26.5
 
 toolchain go1.26.7
 
 require (
 	cloud.google.com/go/storage v1.67.0
-	connectrpc.com/connect v1.20.0
+	connectrpc.com/connect v1.21.0
 	connectrpc.com/grpchealth v1.5.0
 	connectrpc.com/grpcreflect v1.3.0
 	github.com/Microsoft/go-winio v0.6.2
@@ -17,22 +17,21 @@ require (
 	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.22.34
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.110.0
 	github.com/aws/smithy-go v1.28.1
-	github.com/blinklabs-io/bark v0.1.0
+	github.com/blinklabs-io/bark v0.2.0
 	github.com/blinklabs-io/bursa v0.16.1-0.20260817233527-1eb8b64db609
-	github.com/blinklabs-io/gouroboros v0.204.0
-	github.com/blinklabs-io/ouroboros-mock v0.19.0
-	github.com/blinklabs-io/plutigo v0.6.0
+	github.com/blinklabs-io/gouroboros v0.205.4
+	github.com/blinklabs-io/ouroboros-mock v0.20.2
+	github.com/blinklabs-io/plutigo v0.7.1
 	github.com/blockfrost/blockfrost-go v0.5.0
 	github.com/btcsuite/btcd/btcutil v1.2.0
 	github.com/consensys/gnark-crypto v0.21.0
 	github.com/dgraph-io/badger/v4 v4.9.6
 	github.com/fxamacker/cbor/v2 v2.9.3
 	github.com/getsops/sops/v3 v3.13.3
-	github.com/glebarez/go-sqlite v1.23.0
 	github.com/go-sql-driver/mysql v1.10.1
 	github.com/google/uuid v1.6.0
 	github.com/ipfs/go-cid v0.6.2
-	github.com/jackc/pgx/v5 v5.10.0
+	github.com/jackc/pgx/v5 v5.11.0
 	github.com/kelseyhightower/envconfig v1.4.0
 	github.com/klauspost/compress v1.19.2
 	github.com/prometheus/client_golang v1.24.1
@@ -47,11 +46,11 @@ require (
 	go.opentelemetry.io/otel/sdk v1.46.0
 	go.uber.org/automaxprocs v1.6.0
 	go.uber.org/goleak v1.3.0
-	golang.org/x/crypto v0.56.0
+	golang.org/x/crypto v0.57.0
 	golang.org/x/net v0.58.0
-	golang.org/x/sync v0.22.0
-	golang.org/x/sys v0.47.0
-	google.golang.org/api v0.294.0
+	golang.org/x/sync v0.23.0
+	golang.org/x/sys v0.48.0
+	google.golang.org/api v0.297.0
 	google.golang.org/grpc v1.83.2
 	google.golang.org/grpc/cmd/protoc-gen-go-grpc v1.6.2
 	google.golang.org/protobuf v1.36.12
@@ -202,8 +201,8 @@ require (
 	go.opentelemetry.io/proto/otlp v1.11.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/term v0.45.0 // indirect
-	golang.org/x/text v0.41.0 // indirect
+	golang.org/x/term v0.46.0 // indirect
+	golang.org/x/text v0.42.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/genproto v0.0.0-20260720171339-e059f2f05d78 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260819154853-08b0e4226688 // indirect

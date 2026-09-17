@@ -22,7 +22,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -84,6 +86,28 @@ const (
 	// isn't otherwise bounded by anything but Koios's own internal paging
 	// (see GetAccountRewardHistory's koiosPageSize truncation-detection).
 	koiosMaxResponseBytes = 32 * 1024 * 1024
+
+	// The following bound the connection-establishment and response-wait
+	// phases of a single Koios HTTP attempt independently of the overall
+	// koiosClientTimeout, as defense-in-depth rather than a replacement for
+	// it. Without them, only two of the four phases below are actually
+	// bounded by anything narrower than koiosClientTimeout:
+	// http.DefaultTransport's own defaults already give a dial a 30s budget
+	// and a TLS handshake a 10s budget (see net/http.DefaultTransport in the
+	// Go standard library), but it sets no ResponseHeaderTimeout at all, so
+	// "connection accepted, server writes nothing" is caught today only by
+	// the coarse, whole-round-trip koiosClientTimeout -- which also has to
+	// cover dial, TLS, and body reads, so a slow dial/handshake eats into
+	// the time actually available to notice a stuck server. Every value
+	// here is chosen to be clearly shorter than koiosClientTimeout so a
+	// phase-specific failure attributes cleanly instead of surfacing as an
+	// undifferentiated overall timeout.
+	koiosClientTimeout         = 60 * time.Second
+	koiosDialTimeout           = 10 * time.Second
+	koiosDialKeepAlive         = 30 * time.Second
+	koiosTLSHandshakeTimeout   = 10 * time.Second
+	koiosResponseHeaderTimeout = 30 * time.Second
+	koiosExpectContinueTimeout = 1 * time.Second
 )
 
 // koiosBaseURLs maps network name to Koios v1 base URL.
@@ -284,40 +308,229 @@ func validateKoiosNetwork(network string) error {
 }
 
 // NewKoiosClient creates a client for the given network.
-func NewKoiosClient(network, apiKey string) (*KoiosClient, error) {
-	return newKoiosClient(network, apiKey, "")
-}
-
-// newKoiosClient is NewKoiosClient with an optional base-URL override.
-// The network is still validated, so an unsupported network is rejected
-// whether or not an override is supplied.
 //
-// The override exists because the alternative -- rewriting the entry for
-// this network in the process-wide koiosBaseURLs map and restoring it
-// afterwards -- is a global that every concurrently constructed client in
-// the process reads through validateKoiosNetwork, which is what kept this
-// package's tests from running in parallel.
-func newKoiosClient(
-	network, apiKey, baseOverride string,
+// baseURL overrides the public koios.rest host for the network, for a
+// self-hosted or mirrored Koios instance. It is the full v1 API root, e.g.
+// "https://preview-koios.example.com/api/v1"; a trailing slash is trimmed so
+// the caller does not have to care. Empty selects the public host.
+//
+// The override is a parameter rather than a rewrite of this network's entry
+// in the process-wide koiosBaseURLs map, because that map is a global every
+// concurrently constructed client reads through validateKoiosNetwork. Tests
+// point a client at an httptest server through this parameter, which is what
+// lets this package's tests run in parallel.
+//
+// The network is validated before baseURL is consulted, so an unsupported
+// network is rejected whether or not an override is supplied.
+//
+// A custom host also drops the burst cap. koiosBurstLimitSafe describes
+// koios.rest's own published Public/Free tier window and says nothing about
+// another deployment, so applying it there would throttle against a limit that
+// does not exist. The per-request retry and timeout handling is unchanged, so a
+// host that does rate-limit still backs off correctly on 429.
+func NewKoiosClient(
+	network, apiKey, baseURL string,
+	allowInsecureHTTP bool,
 ) (*KoiosClient, error) {
 	if err := validateKoiosNetwork(network); err != nil {
 		return nil, err
 	}
 	base := koiosBaseURLs[network]
-	if baseOverride != "" {
-		base = baseOverride
+	burstLimit := koiosBurstLimitSafe
+	if trimmed := strings.TrimRight(strings.TrimSpace(baseURL), "/"); trimmed != "" {
+		if err := validateKoiosBaseURL(trimmed, allowInsecureHTTP); err != nil {
+			return nil, err
+		}
+		base = trimmed
+		// The cap is dropped for a custom deployment, not for a custom
+		// spelling of the public one. An override naming a koios.rest host is
+		// still subject to that host's published window, and dropping the cap
+		// there would earn avoidable 429 cooldowns.
+		if !isPublicKoiosHost(trimmed) {
+			burstLimit = 0
+		}
 	}
 	return &KoiosClient{
 		baseURL: base,
 		apiKey:  apiKey,
 		http: &http.Client{
-			Timeout: 60 * time.Second,
+			Timeout: koiosClientTimeout,
+			Transport: newKoiosTransport(
+				koiosDialTimeout,
+				koiosDialKeepAlive,
+				koiosTLSHandshakeTimeout,
+				koiosResponseHeaderTimeout,
+				koiosExpectContinueTimeout,
+			),
 		},
 		// Public and Free tiers share the 100/10s burst cap; Pro/Premium are
 		// higher, but we don't learn the tier from the key alone, so stay at
-		// the Free-safe ceiling for every client.
-		limiter: newBurstLimiter(koiosBurstLimitSafe, koiosBurstWindow),
+		// the Free-safe ceiling for every client on the public host.
+		limiter: newBurstLimiter(burstLimit, koiosBurstWindow),
 	}, nil
+}
+
+// newKoiosTransport builds the HTTP transport backing a KoiosClient, with
+// explicit, independent timeouts for each connection-establishment phase, in
+// addition to (never instead of) the http.Client-level Timeout set alongside
+// it in NewKoiosClient.
+//
+// It starts from http.DefaultTransport.Clone() rather than a bare
+// &http.Transport{} so this client keeps DefaultTransport's other tuning
+// (HTTP/2 negotiation, proxy-from-environment, idle connection pooling) and
+// only overrides the fields this package cares about giving explicit,
+// shorter-than-the-client-timeout bounds.
+//
+// dialTimeout/dialKeepAlive configure the net.Dialer used for
+// DialContext -- redundant with DefaultTransport's own dial defaults today,
+// but explicit here so this client's dial bound does not silently change if
+// a future Go release ever changes DefaultTransport's defaults.
+// tlsHandshakeTimeout is likewise explicit for the same reason.
+// responseHeaderTimeout is the phase DefaultTransport leaves unbounded: it
+// caps how long the transport waits for the server to start sending a
+// response after the request is fully written, independently of dial/TLS
+// time and independently of the client-level Timeout.
+// expectContinueTimeout caps waiting for a "100 Continue" status before
+// sending a request body when the client sets the Expect header; this
+// client never sets Expect, so it is inert today and included purely for
+// completeness against a future caller of this transport that does.
+func newKoiosTransport(
+	dialTimeout, dialKeepAlive time.Duration,
+	tlsHandshakeTimeout, responseHeaderTimeout, expectContinueTimeout time.Duration,
+) *http.Transport {
+	// http.DefaultTransport is documented as *http.Transport today, but
+	// nothing enforces that at compile time; a comma-ok assertion with a
+	// safe fallback (matching mithril/download.go's newDownloadTransport)
+	// means a future replacement of the package-level default degrades to a
+	// fresh transport with this function's explicit timeouts still applied,
+	// instead of panicking.
+	var transport *http.Transport
+	if base, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport = base.Clone()
+	} else {
+		transport = &http.Transport{Proxy: http.ProxyFromEnvironment}
+	}
+	transport.DialContext = (&net.Dialer{
+		Timeout:   dialTimeout,
+		KeepAlive: dialKeepAlive,
+	}).DialContext
+	transport.TLSHandshakeTimeout = tlsHandshakeTimeout
+	transport.ResponseHeaderTimeout = responseHeaderTimeout
+	transport.ExpectContinueTimeout = expectContinueTimeout
+	return transport
+}
+
+// ResolvedBaseURL reports the API root this client actually queries, with any
+// userinfo removed so it is safe to log or persist.
+//
+// The resolved host is the identity of the oracle a parity run is judging
+// Dingo against, and it is not otherwise visible anywhere: an override that
+// silently failed to apply produces a run indistinguishable from one against
+// the intended host. Callers record it (Cache.RecordKoiosSource) and log it
+// once at startup for exactly that reason.
+func (c *KoiosClient) ResolvedBaseURL() string {
+	return redactKoiosBaseURL(c.baseURL)
+}
+
+// redactKoiosBaseURL strips userinfo from a Koios API root.
+//
+// validateKoiosBaseURL already rejects a query string and a fragment, so
+// userinfo is the only place a credential can survive into a validated base
+// URL, and dropping it leaves scheme, host and path — the parts that identify
+// the oracle — intact. An unparseable value is reported as a placeholder
+// rather than echoed, on the same rule redactURLError follows.
+func redactKoiosBaseURL(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return "invalid URL"
+	}
+	parsed.User = nil
+	return parsed.String()
+}
+
+// isPublicKoiosHost reports whether a base URL names a koios.rest deployment,
+// whose published tier window applies however the URL was spelled -- as a
+// built-in default or as an override naming the same host.
+func isPublicKoiosHost(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		// Unparseable never reaches here (validateKoiosBaseURL runs first),
+		// but treat it as public so an unexpected shape keeps the cap rather
+		// than losing it.
+		return true
+	}
+	// A single terminal dot is a valid DNS spelling of the same name, so
+	// "preview.koios.rest." must not read as a different, non-public host and
+	// lose the cap.
+	host := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
+	return host == "koios.rest" || strings.HasSuffix(host, ".koios.rest")
+}
+
+// validateKoiosBaseURL rejects a custom host this client must not send an API
+// key to, or trust reference data from.
+//
+// get and post attach APIKey as a Bearer token to every request, so plain HTTP
+// puts the token on the wire in cleartext. It also leaves the reference data
+// this tool compares Dingo against tamperable in flight, and a comparison
+// against forged reference data can report a false PASS -- the one outcome a
+// parity checker must never produce. allowInsecureHTTP is the local dev/test
+// escape hatch, mirroring Mithril.AllowInsecureHTTP.
+func validateKoiosBaseURL(rawURL string, allowInsecureHTTP bool) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		// rawURL is never echoed: an operator can put credentials in it as
+		// userinfo or as a credential-shaped query parameter, and a validation
+		// error is written to the same log the URI redaction protects.
+		return fmt.Errorf("parse koios base URL: %w", redactURLError(err))
+	}
+	if parsed.Host == "" {
+		return errors.New(
+			"koios base URL has no host; give the full v1 API root, e.g. https://host/api/v1",
+		)
+	}
+	// get and post build an endpoint by appending a path and its own query to
+	// this root. A root that already carries a query or fragment would put the
+	// appended path after that delimiter, so the request would silently reach
+	// a different endpoint than intended.
+	if parsed.RawQuery != "" || parsed.ForceQuery {
+		return errors.New(
+			"koios base URL must not carry a query string; give the bare v1 API root, e.g. https://host/api/v1",
+		)
+	}
+	// url.URL has no ForceFragment counterpart to ForceQuery, so a bare "#"
+	// parses to an empty Fragment and would otherwise be accepted — and the
+	// appended endpoint path would still land after the delimiter.
+	if parsed.Fragment != "" || strings.Contains(rawURL, "#") {
+		return errors.New(
+			"koios base URL must not carry a fragment; give the bare v1 API root, e.g. https://host/api/v1",
+		)
+	}
+	switch parsed.Scheme {
+	case "https":
+		return nil
+	case "http":
+		if allowInsecureHTTP {
+			return nil
+		}
+		return errors.New(
+			"koios base URL uses plain HTTP, which would send the API key in cleartext and leave the reference data tamperable; use https or set allowInsecureHttp for local dev/test",
+		)
+	default:
+		return fmt.Errorf(
+			"koios base URL must use http or https, got scheme %q",
+			parsed.Scheme,
+		)
+	}
+}
+
+// redactURLError strips the URL from a *url.Error so a parse failure cannot
+// carry credentials into a log. url.Parse wraps the offending string in the
+// error it returns, which is exactly the value being kept out of logs.
+func redactURLError(err error) error {
+	if urlErr, ok := errors.AsType[*url.Error](err); ok {
+		return fmt.Errorf("%s: %w", urlErr.Op, urlErr.Err)
+	}
+	return errors.New("invalid URL")
 }
 
 // burstLimiter enforces a sliding-window request budget matching Koios's
@@ -1153,7 +1366,8 @@ const accountListLogEveryPages = 50
 // KoiosAccountRewardHistoryItem is one row from /account_reward_history,
 // covering every documented field. PoolIDBech32 is null for reward types with
 // no associated pool (treasury/reserves/refund; see CompareAccountEpoch's
-// doc comment on which Koios reward types are currently in scope).
+// doc comment on which Koios reward types are currently in scope). For
+// in-scope rows it identifies the pool contribution used during aggregation.
 //
 // /account_rewards (the older endpoint some Koios docs still reference) is
 // deprecated; /account_reward_history is the replacement, taking the same

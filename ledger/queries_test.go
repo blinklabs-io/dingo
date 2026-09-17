@@ -37,6 +37,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	protocol "github.com/blinklabs-io/gouroboros/protocol"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
@@ -69,6 +70,95 @@ func newTestEraHistoryCfg(t testing.TB) *cardano.CardanoNodeConfig {
 	)
 	require.NoError(t, err)
 	return cfg
+}
+
+func TestGenesisConfigResultUsesNegotiatedLayout(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		"musashi/config.json",
+		"musashi",
+		cardano.EmbeddedConfigFS,
+	)
+	require.NoError(t, err)
+	genesis := cfg.ShelleyGenesis()
+	require.NotNil(t, genesis.ExtraConfig)
+	ls := &LedgerState{config: LedgerStateConfig{CardanoNodeConfig: cfg}}
+	legacyResult, err := ls.queryShelleyGenesisConfig(
+		20 + protocol.ProtocolVersionNtCOffset,
+	)
+	require.NoError(t, err)
+	legacyValues, ok := legacyResult.([]any)
+	require.True(t, ok)
+	require.Len(t, legacyValues, 1)
+	require.Same(t, genesis, legacyValues[0])
+	currentResult, err := ls.queryShelleyGenesisConfig(
+		21 + protocol.ProtocolVersionNtCOffset,
+	)
+	require.NoError(t, err)
+	currentValues, ok := currentResult.([]any)
+	require.True(t, ok)
+	require.Len(t, currentValues, 1)
+	currentGenesis, ok := currentValues[0].(olocalstatequery.GenesisConfigResult)
+	require.True(t, ok)
+	require.NotNil(t, currentGenesis.ExtraConfig)
+	query := &olocalstatequery.BlockQuery{
+		Query: &olocalstatequery.ShelleyQuery{
+			Query: &olocalstatequery.ShelleyGenesisConfigQuery{},
+		},
+	}
+	queried, err := ls.QueryWithProtocolVersion(
+		query,
+		QueryPoint{},
+		21+protocol.ProtocolVersionNtCOffset,
+	)
+	require.NoError(t, err)
+	queriedValues, ok := queried.([]any)
+	require.True(t, ok)
+	queriedGenesis, ok := queriedValues[0].(olocalstatequery.GenesisConfigResult)
+	require.True(t, ok)
+	require.NotNil(t, queriedGenesis.ExtraConfig)
+
+	legacy, err := genesis.MarshalCBOR()
+	require.NoError(t, err)
+	var legacyFields []cbor.RawMessage
+	_, err = cbor.Decode(legacy, &legacyFields)
+	require.NoError(t, err)
+	require.Len(t, legacyFields, 15)
+
+	result, err := genesisConfigResult(genesis)
+	require.NoError(t, err)
+	encoded, err := cbor.Encode(result)
+	require.NoError(t, err)
+	var currentFields []cbor.RawMessage
+	_, err = cbor.Decode(encoded, &currentFields)
+	require.NoError(t, err)
+	require.Len(t, currentFields, 16)
+	var currentPParams []cbor.RawMessage
+	_, err = cbor.Decode(currentFields[11], &currentPParams)
+	require.NoError(t, err)
+	require.Len(t, currentPParams, 17)
+	var extra []cbor.RawMessage
+	_, err = cbor.Decode(currentFields[15], &extra)
+	require.NoError(t, err)
+	require.Len(t, extra, 1)
+	var decodedCurrent olocalstatequery.GenesisConfigResult
+	_, err = cbor.Decode(encoded, &decodedCurrent)
+	require.NoError(t, err)
+	require.NotEmpty(t, decodedCurrent.ExtraConfig)
+	var decodedInitialFunds []cbor.RawMessage
+	_, err = cbor.Decode(decodedCurrent.InitialFunds, &decodedInitialFunds)
+	require.NoError(t, err)
+	require.Empty(t, decodedInitialFunds)
+	var decodedStaking []cbor.RawMessage
+	_, err = cbor.Decode(decodedCurrent.Staking, &decodedStaking)
+	require.NoError(t, err)
+	require.Len(t, decodedStaking, 2)
+
+	var legacyWireValues []any
+	_, err = cbor.Decode(legacy, &legacyWireValues)
+	require.NoError(t, err)
+	require.Len(t, legacyWireValues, 15)
 }
 
 func requireEraDesc(t testing.TB, eraId uint) eras.EraDesc {
@@ -246,7 +336,7 @@ func TestQueryShelleyUtxoByTxIn_EmptySlice(t *testing.T) {
 	t.Parallel()
 
 	ls := &LedgerState{}
-	result, err := ls.queryShelleyUtxoByTxIn(nil)
+	result, err := ls.queryShelleyUtxoByTxIn(nil, QueryPoint{}, nil)
 	require.NoError(t, err)
 	// Should return []any{empty map}
 	arr, ok := result.([]any)
@@ -332,7 +422,7 @@ func TestQueryShelleyUtxoByTxIn_MultipleInputs(t *testing.T) {
 	)
 
 	ls := &LedgerState{db: db}
-	result, err := ls.queryShelleyUtxoByTxIn(txIns)
+	result, err := ls.queryShelleyUtxoByTxIn(txIns, QueryPoint{}, nil)
 	require.NoError(t, err)
 
 	arr, ok := result.([]any)

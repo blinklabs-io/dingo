@@ -1175,7 +1175,17 @@ func (e *EventBus) deliverWithTimeout(
 	}
 }
 
-// Publish allows a producer to send an event of a particular type to all subscribers
+// Publish allows a producer to send an event of a particular type to all
+// subscribers.
+//
+// Delivery is inline: Publish hands the event to every subscriber on the
+// caller's goroutine, returning once each has taken it or been unsubscribed
+// for failing to. A stopped or closed bus delivers nothing.
+//
+// PublishOrdered and PublishAsync are the opposite: they return once the event
+// is queued and deliver it from another goroutine afterwards. A caller that
+// reads a subscriber channel expecting the event to already be there can rely
+// on that only with the inline paths, Publish and PublishBlocking.
 func (e *EventBus) Publish(eventType EventType, evt Event) {
 	e.stopMu.RLock()
 	if e.stopped || e.closed {

@@ -19,16 +19,39 @@ import (
 	"log/slog"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// chainSwitchBarrierTimeout bounds the wait for the barrier below. It is a
+// deadlock bound, not a settling delay: the barrier is already queued behind
+// whatever the selector decided by the time the wait starts, so the normal
+// cost is one lane hand-off.
+const chainSwitchBarrierTimeout = 30 * time.Second
+
+// chainSwitchBarrier is a sentinel published through the chain-switch ordered
+// lane so the test below can tell "no switch was decided" from "the switch has
+// not been delivered yet".
+//
+// ChainSelector.publishSelection routes chain switches through
+// EventBus.PublishOrdered (blinklabs-io/dingo#3550), so
+// HandlePeerTipUpdateEvent returns before the lane worker has handed the event
+// to any subscriber. A lane is a FIFO drained by exactly one worker, so a
+// sentinel enqueued after those switches is delivered after them: receiving it
+// back is proof that every switch published earlier on this goroutine has
+// already reached the subscription. Its Data type is not ChainSwitchEvent, so
+// it is skipped rather than counted as a decision. Same construction as
+// switchBarrier in ouroboros/consensus_conformance_test.go.
+type chainSwitchBarrier struct{}
 
 // TestCanonicalFrontierCrossingDoesNotCloseAPeerAheadOfLocalTip closes the loop
 // between chain selection and the ledger's fresh-cursor handling.
@@ -138,14 +161,33 @@ func TestCanonicalFrontierCrossingDoesNotCloseAPeerAheadOfLocalTip(
 		deliver(step.conn, step.block)
 	}
 
-	// The selector publishes synchronously from the update call, so everything
-	// it decided is already buffered on the subscriber channel.
+	// The selector publishes through an ordered lane, so a switch it decided
+	// during the deliveries above may not have reached switchCh yet. Enqueue a
+	// barrier behind those switches and read until it comes back: everything
+	// ahead of it in the lane's FIFO has been delivered by then.
+	require.True(
+		t,
+		selectorBus.PublishOrdered(
+			chainselection.ChainSwitchEventType,
+			event.NewEvent(
+				chainselection.ChainSwitchEventType,
+				chainSwitchBarrier{},
+			),
+		),
+		"event bus refused the chain-switch barrier",
+	)
 	var checked int
 	for drained := false; !drained; {
-		select {
-		case evt := <-switchCh:
-			switchEvent, ok := evt.Data.(chainselection.ChainSwitchEvent)
-			require.True(t, ok)
+		evt := testutil.RequireReceive(
+			t,
+			switchCh,
+			chainSwitchBarrierTimeout,
+			"chain-switch barrier",
+		)
+		switch switchEvent := evt.Data.(type) {
+		case chainSwitchBarrier:
+			drained = true
+		case chainselection.ChainSwitchEvent:
 			checked++
 			assert.False(
 				t,
@@ -158,7 +200,9 @@ func TestCanonicalFrontierCrossingDoesNotCloseAPeerAheadOfLocalTip(
 				switchEvent.NewObservedTip.BlockNumber,
 			)
 		default:
-			drained = true
+			// Only the selector and the barrier above publish on this
+			// lane, so anything else is a bug in one of them.
+			t.Fatalf("unexpected %T on the chain_switch lane", evt.Data)
 		}
 	}
 	require.Positive(

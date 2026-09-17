@@ -217,7 +217,8 @@ func TestNewParityMetricsIn_PreMaterializesZeroSeries(t *testing.T) {
 
 	skipped := byName["node_parity_checks_skipped_total"]
 	require.NotNil(
-		t, skipped,
+		t,
+		skipped,
 		"node_parity_checks_skipped_total must already be exposed before any skip is recorded",
 	)
 	gotReasons := make(map[string]float64, len(skipped.GetMetric()))
@@ -229,7 +230,7 @@ func TestNewParityMetricsIn_PreMaterializesZeroSeries(t *testing.T) {
 		}
 	}
 	for _, reason := range []string{
-		nodeparity.SkipTipMismatch, nodeparity.SkipTipAdvanced,
+		nodeparity.SkipTipMismatch,
 	} {
 		value, ok := gotReasons[reason]
 		assert.True(t, ok, "reason %q must already be exposed", reason)
@@ -238,7 +239,8 @@ func TestNewParityMetricsIn_PreMaterializesZeroSeries(t *testing.T) {
 
 	divergence := byName["node_parity_divergence_total"]
 	require.NotNil(
-		t, divergence,
+		t,
+		divergence,
 		"node_parity_divergence_total must already be exposed before any divergence is recorded",
 	)
 	gotFields := make(map[string]float64, len(divergence.GetMetric()))
@@ -325,15 +327,19 @@ func TestParityMetrics_RecordCheckError_Increments(t *testing.T) {
 }
 
 // TestParityMetrics_RecordSkip_IncrementsByReason covers that skipped
-// cycles are tracked separately per reason code (tip_mismatch vs.
-// tip_advanced), and that recording one reason does not also bump the
-// other -- an operator diagnosing "why do checks keep getting skipped"
-// needs the two failure modes distinguishable, not merged into one count.
+// cycles are tracked separately per reason code, and that recording one
+// reason does not also bump another -- an operator diagnosing "why do
+// checks keep getting skipped" needs distinct failure modes distinguishable,
+// not merged into one count. Uses a second, made-up reason string (rather
+// than a second nodeparity.Skip* constant -- tip_mismatch is currently the
+// only one that exists) purely to exercise the CounterVec's per-label
+// independence; recordSkip itself does not validate its argument against
+// nodeparity's Skip* constants.
 func TestParityMetrics_RecordSkip_IncrementsByReason(t *testing.T) {
 	metrics, _ := newTestParityMetrics(t)
 	metrics.recordSkip(nodeparity.SkipTipMismatch)
 	metrics.recordSkip(nodeparity.SkipTipMismatch)
-	metrics.recordSkip(nodeparity.SkipTipAdvanced)
+	metrics.recordSkip("other_reason")
 
 	assert.Equal(
 		t,
@@ -348,9 +354,7 @@ func TestParityMetrics_RecordSkip_IncrementsByReason(t *testing.T) {
 		t,
 		float64(1),
 		promtestutil.ToFloat64(
-			metrics.checksSkippedTotal.WithLabelValues(
-				nodeparity.SkipTipAdvanced,
-			),
+			metrics.checksSkippedTotal.WithLabelValues("other_reason"),
 		),
 	)
 	assert.Equal(

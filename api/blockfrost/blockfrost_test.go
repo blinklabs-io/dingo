@@ -56,6 +56,54 @@ func TestRedeemerExecutionFee(t *testing.T) {
 	assert.Equal(t, uint64(21647), fee)
 }
 
+func TestMetadataJSONUnavailableSerializesAsNull(t *testing.T) {
+	payload, err := json.Marshal(MetadataTransactionJSONResponse{
+		TxHash:       "deadbeef",
+		JSONMetadata: nil,
+	})
+	require.NoError(t, err)
+	require.JSONEq(t, `{"tx_hash":"deadbeef","json_metadata":null}`, string(payload))
+}
+
+func TestMetadataTransactionsCollisionKeepsLabelAndRawCBOR(t *testing.T) {
+	t.Parallel()
+	adapter, raw, _ := newDBBackedAdapter(t)
+	validHash := bytes.Repeat([]byte{0x41}, 32)
+	ambiguousHash := bytes.Repeat([]byte{0x42}, 32)
+	validMetadata, err := hex.DecodeString("a11902d1626f6b")
+	require.NoError(t, err)
+	ambiguousMetadata, err := hex.DecodeString("a11902d1a20163696e7461316474657874")
+	require.NoError(t, err)
+	validTx := &models.Transaction{Hash: validHash, Metadata: validMetadata}
+	ambiguousTx := &models.Transaction{Hash: ambiguousHash, Metadata: ambiguousMetadata}
+	insertAdapterTransaction(t, raw, validTx)
+	insertAdapterTransaction(t, raw, ambiguousTx)
+	ambiguousLabelCBOR, err := hex.DecodeString("a20163696e7461316474657874")
+	require.NoError(t, err)
+	_, err = raw.Exec(`INSERT INTO transaction_metadata_label (transaction_id, label, slot, cbor_value, json_value) VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?)`,
+		validTx.ID, "721", 1, []byte{0x62, 0x6f, 0x6b}, `"ok"`,
+		ambiguousTx.ID, "721", 2, ambiguousLabelCBOR, nil)
+	require.NoError(t, err)
+	jsonRows, total, err := adapter.MetadataTransactions(721, PaginationParams{Count: 2, Page: 1, Order: PaginationOrderAsc})
+	require.NoError(t, err)
+	require.Equal(t, 2, total)
+	require.Len(t, jsonRows, 2)
+	require.Equal(t, `"ok"`, string(jsonRows[0].JSONMetadata))
+	require.Nil(t, jsonRows[1].JSONMetadata)
+	cborRows, _, err := adapter.MetadataTransactionsCBOR(721, PaginationParams{Count: 2, Page: 1, Order: PaginationOrderAsc})
+	require.NoError(t, err)
+	require.Len(t, cborRows, 2)
+	require.Equal(t, "a20163696e7461316474657874", cborRows[1].Metadata)
+	transactionJSON, err := adapter.TransactionMetadata(ambiguousHash)
+	require.NoError(t, err)
+	require.Len(t, transactionJSON, 1)
+	require.Equal(t, "", string(transactionJSON[0].JSONMetadata))
+	transactionCBOR, err := adapter.TransactionMetadataCBOR(ambiguousHash)
+	require.NoError(t, err)
+	require.Len(t, transactionCBOR, 1)
+	require.Equal(t, "a20163696e7461316474657874", transactionCBOR[0].CBORMetadata)
+}
+
 // mockNode implements BlockfrostNode for testing.
 type mockNode struct {
 	chainTip                      ChainTipInfo
@@ -3499,9 +3547,12 @@ INSERT INTO address_transaction (
 func TestKeyScriptStakeAddressDerivation(t *testing.T) {
 	t.Parallel()
 
-	// gouroboros StakeAddress() returns nil for type-2 base addresses
-	// (key payment / script staking); the adapter derives the script
-	// stake address from the staking credential instead.
+	// gouroboros StakeAddress() now resolves type-2 base addresses (key
+	// payment / script staking) directly (blinklabs-io/gouroboros#2328);
+	// the adapter no longer needs its own fallback derivation for this
+	// case. Assert the two stay equivalent so a gouroboros regression
+	// back to the old nil-for-KeyScript behavior is caught here rather
+	// than as a missing StakeAddress in production responses.
 	paymentHash := bytes.Repeat([]byte{0x01}, lcommon.AddressHashSize)
 	stakeScriptHash := bytes.Repeat([]byte{0x02}, lcommon.AddressHashSize)
 	addr, err := lcommon.NewAddressFromParts(
@@ -3511,7 +3562,8 @@ func TestKeyScriptStakeAddressDerivation(t *testing.T) {
 		stakeScriptHash,
 	)
 	require.NoError(t, err)
-	require.Nil(t, addr.StakeAddress())
+	stakeAddr := addr.StakeAddress()
+	require.NotNil(t, stakeAddr)
 
 	encoded, err := stakeAddressFromCredential(
 		lcommon.Credential{
@@ -3522,10 +3574,11 @@ func TestKeyScriptStakeAddressDerivation(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.True(t, strings.HasPrefix(encoded, "stake_test17"))
+	assert.Equal(t, encoded, stakeAddr.String())
 
-	stakeAddr, err := lcommon.NewAddress(encoded)
+	decoded, err := lcommon.NewAddress(encoded)
 	require.NoError(t, err)
-	assert.Equal(t, stakeScriptHash, stakeAddr.StakeKeyHash().Bytes())
+	assert.Equal(t, stakeScriptHash, decoded.StakeKeyHash().Bytes())
 }
 
 func TestHandleAddress(t *testing.T) {
@@ -3770,6 +3823,23 @@ func TestHandleMetadataTransactions(t *testing.T) {
 	require.Len(t, resp, 1)
 	assert.Equal(t, "txhash1", resp[0].TxHash)
 	assert.JSONEq(t, `{"name":"nft-one"}`, string(resp[0].JSONMetadata))
+}
+
+func TestHandleMetadataTransactionsKeepsUnavailableJSONAsNull(t *testing.T) {
+	t.Parallel()
+	mock := &mockNode{metadataJSONTotal: 1, metadataJSON: []MetadataTransactionJSONInfo{{
+		TxHash: "txhash-ambiguous", JSONMetadata: nil,
+	}}}
+	b := newTestBlockfrost(mock)
+	req := httptest.NewRequest(http.MethodGet, "/api/v0/metadata/txs/labels/721", nil)
+	req.SetPathValue("label", "721")
+	w := httptest.NewRecorder()
+	b.handleMetadataTransactions(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	var resp []MetadataTransactionJSONResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	require.Len(t, resp, 1)
+	assert.Equal(t, "null", string(resp[0].JSONMetadata))
 }
 
 func TestHandleMetadataTransactionsCBOR(t *testing.T) {

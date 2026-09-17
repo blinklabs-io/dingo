@@ -403,10 +403,14 @@ func (ls *LedgerState) reconciliationUndoBlocks(
 	if err != nil {
 		ls.config.Logger.Warn(
 			"failed to read applied block points for reconciliation undo events",
-			"component", "ledger",
-			"error", err,
-			"ancestor_slot", ancestor.Slot,
-			"ledger_tip_slot", ledgerTipSlot,
+			"component",
+			"ledger",
+			"error",
+			err,
+			"ancestor_slot",
+			ancestor.Slot,
+			"ledger_tip_slot",
+			ledgerTipSlot,
 		)
 		return nil
 	}

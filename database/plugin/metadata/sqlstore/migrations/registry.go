@@ -16,6 +16,7 @@ package migrations
 
 import (
 	"context"
+	"database/sql"
 	"embed"
 	"errors"
 	"fmt"
@@ -23,6 +24,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/blinklabs-io/dingo/database/models"
 )
 
 // migrationSQL contains immutable, versioned migration resources.
@@ -31,17 +34,22 @@ import (
 var migrationSQL embed.FS
 
 const (
-	initialSchemaRelease                       = "v1alpha1"
-	leiosKeySchemaRelease                      = "leios-key-registration"
-	tokenRegistrySchemaRelease                 = "token-registry-metadata"
-	accountBaselineSchemaRelease               = "account-import-baseline"
-	leiosSnapshotKeySchemaRelease              = "leios-snapshot-keys"
-	governanceRatificationHistorySchemaRelease = "governance-ratification-history"
-	accountDepositSchemaRelease                = "account-import-deposit"
-	committeeCredentialTagsSchemaRelease       = "committee-credential-tags"
-	committeeTermStartPresenceSchemaRelease    = "committee-term-start-presence"
-	rewardSeedFailureSchemaRelease             = "reward-seed-failure"
-	importedPoolBlockCountSchemaRelease        = "imported-pool-block-count"
+	initialSchemaRelease                          = "v1alpha1"
+	leiosKeySchemaRelease                         = "leios-key-registration"
+	tokenRegistrySchemaRelease                    = "token-registry-metadata"
+	accountBaselineSchemaRelease                  = "account-import-baseline"
+	leiosSnapshotKeySchemaRelease                 = "leios-snapshot-keys"
+	governanceRatificationHistorySchemaRelease    = "governance-ratification-history"
+	accountDepositSchemaRelease                   = "account-import-deposit"
+	committeeCredentialTagsSchemaRelease          = "committee-credential-tags"
+	committeeTermStartPresenceSchemaRelease       = "committee-term-start-presence"
+	rewardSeedFailureSchemaRelease                = "reward-seed-failure"
+	importedPoolBlockCountSchemaRelease           = "imported-pool-block-count"
+	poolDepositHeldSchemaRelease                  = "pool-registration-deposit-held"
+	pointerAddressStakeSchemaRelease              = "pointer-address-stake"
+	collateralAssociationSchemaRelease            = "collateral-transaction-associations"
+	rewardStakeVersionRestampSchemaRelease        = "reward-stake-calculation-version-restamp"
+	governanceProposalOptionalAnchorSchemaRelease = "governance-proposal-optional-anchor"
 )
 
 // schemaVersions names every migration in ascending version order.
@@ -69,6 +77,19 @@ var schemaVersions = []struct {
 	},
 	{Version: 10, Name: rewardSeedFailureSchemaRelease, Dir: "v10"},
 	{Version: 11, Name: importedPoolBlockCountSchemaRelease, Dir: "v11"},
+	{Version: 12, Name: poolDepositHeldSchemaRelease, Dir: "v12"},
+	{Version: 13, Name: pointerAddressStakeSchemaRelease, Dir: "v13"},
+	{Version: 14, Name: collateralAssociationSchemaRelease, Dir: "v14"},
+	{
+		Version: 15,
+		Name:    rewardStakeVersionRestampSchemaRelease,
+		Dir:     "v15",
+	},
+	{
+		Version: 16,
+		Name:    governanceProposalOptionalAnchorSchemaRelease,
+		Dir:     "v16",
+	},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -115,6 +136,33 @@ func registryForDialect(dialect string) ([]Migration, error) {
 	for index, version := range schemaVersions {
 		sqlForDialect := loaded[index]
 		if dialect != "sqlite" {
+			nativeExpand, nativeExpandErr := loadOptionalSQL(
+				version.Dir + "/" + dialect + "/expand.sql",
+			)
+			nativeContract, nativeContractErr := loadOptionalSQL(
+				version.Dir + "/" + dialect + "/contract.sql",
+			)
+			if nativeExpandErr != nil {
+				return nil, nativeExpandErr
+			}
+			if nativeContractErr != nil {
+				return nil, nativeContractErr
+			}
+			if nativeExpand != nil || nativeContract != nil {
+				sqlForDialect = SQL{
+					Expand:   nativeExpand,
+					Contract: nativeContract,
+				}
+				ret = append(ret, Migration{
+					Version:          version.Version,
+					Name:             version.Name,
+					BackfillRevision: "none",
+					SQL: map[string]SQL{
+						dialect: sqlForDialect,
+					},
+				})
+				continue
+			}
 			sqlForDialect.Expand = translateSchemaSQLInSchema(
 				loaded[index].Expand,
 				dialect,
@@ -138,9 +186,370 @@ func registryForDialect(dialect string) ([]Migration, error) {
 			migration.BackfillRevision = "1"
 			migration.Backfill = committeeTermStartBackfill
 		}
+		if version.Name == poolDepositHeldSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = poolDepositHeldBackfill
+		}
+		if version.Name == rewardStakeVersionRestampSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = rewardStakeVersionRestampBackfill
+		}
 		ret = append(ret, migration)
 	}
 	return ret, nil
+}
+
+type poolDepositPosition struct {
+	slot, blockIndex, certIndex int64
+}
+
+type poolDepositRegistration struct {
+	id              int64
+	position        poolDepositPosition
+	historyComplete bool
+	held            sql.NullString
+	amount          sql.NullString
+}
+
+type poolDepositRetirement struct {
+	position        poolDepositPosition
+	historyComplete bool
+	epoch           int64
+}
+
+func poolDepositPositionBeforeOrEqual(a, b poolDepositPosition) bool {
+	if a.slot != b.slot {
+		return a.slot < b.slot
+	}
+	if a.blockIndex != b.blockIndex {
+		return a.blockIndex < b.blockIndex
+	}
+	return a.certIndex <= b.certIndex
+}
+
+// poolDepositHeldBackfill reconstructs psDeposits from the persisted
+// registration and retirement history. A registration after a completed reap
+// starts a new deposit cycle; all other registrations carry the preceding
+// cycle's held amount. The pool ID cursor makes each batch independently
+// resumable, and the NULL predicate makes replay non-destructive.
+func poolDepositHeldBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	lastID := int64(0)
+	if batch.Cursor != "" {
+		parsed, err := strconv.ParseInt(batch.Cursor, 10, 64)
+		if err != nil {
+			return BatchResult{}, fmt.Errorf(
+				"parse pool deposit backfill cursor: %w",
+				err,
+			)
+		}
+		lastID = parsed
+	}
+	rows, err := batch.Tx.QueryContext(ctx, batch.Rebind(
+		"SELECT id FROM pool WHERE id > ? ORDER BY id LIMIT ?",
+	), lastID, batch.Limit)
+	if err != nil {
+		return BatchResult{}, err
+	}
+	defer rows.Close()
+	var poolIDs []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return BatchResult{}, err
+		}
+		poolIDs = append(poolIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		return BatchResult{}, err
+	}
+	if len(poolIDs) == 0 {
+		return BatchResult{Cursor: batch.Cursor, Done: true}, nil
+	}
+	for _, poolID := range poolIDs {
+		if err := backfillPoolDeposits(ctx, batch, poolID); err != nil {
+			return BatchResult{}, err
+		}
+	}
+	return BatchResult{
+		Cursor: strconv.FormatInt(poolIDs[len(poolIDs)-1], 10),
+		Rows:   int64(len(poolIDs)),
+	}, nil
+}
+
+func backfillPoolDeposits(
+	ctx context.Context,
+	batch Batch,
+	poolID int64,
+) error {
+	regs, err := poolDepositRegistrations(ctx, batch, poolID)
+	if err != nil {
+		return err
+	}
+	rets, err := poolDepositRetirements(ctx, batch, poolID)
+	if err != nil {
+		return err
+	}
+	var previous poolDepositRegistration
+	var havePrevious bool
+	for _, reg := range regs {
+		if reg.held.Valid {
+			if _, err := parsePoolDeposit(reg.held.String); err != nil {
+				return fmt.Errorf(
+					"pool %d registration %d: %w",
+					poolID,
+					reg.id,
+					err,
+				)
+			}
+			previous = reg
+			havePrevious = true
+			continue
+		}
+		var held *uint64
+		unknownPrevious := false
+		if !havePrevious {
+			held, err = parsePoolDepositValue(reg.amount)
+			unknownPrevious = held == nil
+		} else {
+			held, err = previousHeld(previous)
+		}
+		if err != nil {
+			return fmt.Errorf(
+				"pool %d registration %d: %w",
+				poolID,
+				reg.id,
+				err,
+			)
+		}
+		if havePrevious {
+			retirement, found := latestPoolRetirement(rets, reg.position)
+			if found &&
+				poolDepositPositionBeforeOrEqual(
+					previous.position,
+					retirement.position,
+				) {
+				epoch, resolved, epochErr := poolDepositEpochAtSlot(
+					ctx,
+					batch,
+					reg.position.slot,
+				)
+				if epochErr != nil {
+					return epochErr
+				}
+				if !resolved {
+					return fmt.Errorf(
+						"resync required: cannot reconstruct pool %d registration %d without epoch history at slot %d",
+						poolID,
+						reg.id,
+						reg.position.slot,
+					)
+				}
+				if epoch >= retirement.epoch {
+					held, err = parsePoolDepositValue(reg.amount)
+				} else {
+					held, err = previousHeld(previous)
+				}
+			}
+		}
+		if err != nil {
+			return fmt.Errorf(
+				"pool %d registration %d: %w",
+				poolID,
+				reg.id,
+				err,
+			)
+		}
+		if held == nil {
+			previous = reg
+			havePrevious = true
+			continue
+		}
+		if _, err := batch.Tx.ExecContext(ctx, batch.Rebind(
+			"UPDATE pool_registration SET deposit_held = ? WHERE id = ? AND deposit_held IS NULL",
+		), strconv.FormatUint(*held, 10), reg.id); err != nil {
+			return fmt.Errorf(
+				"pool %d registration %d: write held deposit: %w",
+				poolID,
+				reg.id,
+				err,
+			)
+		}
+		if !unknownPrevious {
+			reg.held = sql.NullString{
+				String: strconv.FormatUint(*held, 10),
+				Valid:  true,
+			}
+		}
+		previous = reg
+		havePrevious = true
+	}
+	return nil
+}
+
+func poolDepositRegistrations(
+	ctx context.Context,
+	batch Batch,
+	poolID int64,
+) ([]poolDepositRegistration, error) {
+	rows, err := batch.Tx.QueryContext(ctx, batch.Rebind(`
+SELECT pr.id, pr.added_slot, COALESCE(t.block_index, 0),
+       COALESCE(c.cert_index, 0),
+       CASE WHEN pr.certificate_id IS NULL OR pr.certificate_id = 0
+            OR (c.id IS NOT NULL AND t.id IS NOT NULL) THEN 1 ELSE 0 END,
+       pr.deposit_held, pr.deposit_amount
+FROM pool_registration pr
+LEFT JOIN certs c ON c.id = pr.certificate_id
+LEFT JOIN "transaction" t ON t.id = c.transaction_id
+WHERE pr.pool_id = ?
+ORDER BY pr.added_slot,
+         CASE WHEN pr.certificate_id IS NULL OR pr.certificate_id = 0 THEN 1 ELSE 0 END,
+         COALESCE(t.block_index, 0), COALESCE(c.cert_index, 0), pr.id`), poolID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ret []poolDepositRegistration
+	for rows.Next() {
+		var row poolDepositRegistration
+		if err := rows.Scan(
+			&row.id,
+			&row.position.slot,
+			&row.position.blockIndex,
+			&row.position.certIndex,
+			&row.historyComplete,
+			&row.held,
+			&row.amount,
+		); err != nil {
+			return nil, err
+		}
+		if !row.historyComplete {
+			return nil, fmt.Errorf(
+				"resync required: incomplete certificate history for pool %d registration %d",
+				poolID,
+				row.id,
+			)
+		}
+		ret = append(ret, row)
+	}
+	return ret, rows.Err()
+}
+
+func poolDepositRetirements(
+	ctx context.Context,
+	batch Batch,
+	poolID int64,
+) ([]poolDepositRetirement, error) {
+	rows, err := batch.Tx.QueryContext(ctx, batch.Rebind(`
+SELECT rt.added_slot, COALESCE(t.block_index, 0), COALESCE(c.cert_index, 0),
+       CASE WHEN rt.certificate_id IS NULL OR rt.certificate_id = 0
+            OR (c.id IS NOT NULL AND t.id IS NOT NULL) THEN 1 ELSE 0 END,
+       rt.epoch
+FROM pool_retirement rt
+LEFT JOIN certs c ON c.id = rt.certificate_id
+LEFT JOIN "transaction" t ON t.id = c.transaction_id
+WHERE rt.pool_id = ?
+	ORDER BY rt.added_slot, COALESCE(t.block_index, 0),
+		CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END,
+		COALESCE(c.cert_index, 0)`), poolID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ret []poolDepositRetirement
+	for rows.Next() {
+		var row poolDepositRetirement
+		if err := rows.Scan(
+			&row.position.slot,
+			&row.position.blockIndex,
+			&row.position.certIndex,
+			&row.historyComplete,
+			&row.epoch,
+		); err != nil {
+			return nil, err
+		}
+		if !row.historyComplete {
+			return nil, fmt.Errorf(
+				"resync required: incomplete certificate history for pool %d retirement at slot %d",
+				poolID,
+				row.position.slot,
+			)
+		}
+		ret = append(ret, row)
+	}
+	return ret, rows.Err()
+}
+
+func latestPoolRetirement(
+	retirements []poolDepositRetirement,
+	at poolDepositPosition,
+) (poolDepositRetirement, bool) {
+	var latest poolDepositRetirement
+	found := false
+	for _, retirement := range retirements {
+		if poolDepositPositionBeforeOrEqual(retirement.position, at) {
+			latest, found = retirement, true
+		}
+	}
+	return latest, found
+}
+
+func poolDepositEpochAtSlot(
+	ctx context.Context,
+	batch Batch,
+	slot int64,
+) (int64, bool, error) {
+	var epoch, start, length sql.NullInt64
+	err := batch.Tx.QueryRowContext(ctx, batch.Rebind(`
+SELECT epoch_id, start_slot, length_in_slots FROM epoch
+WHERE start_slot <= ? ORDER BY start_slot DESC LIMIT 1`), slot).Scan(&epoch, &start, &length)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf(
+			"resolve epoch for pool deposit backfill at slot %d: %w",
+			slot,
+			err,
+		)
+	}
+	if !epoch.Valid || !start.Valid || !length.Valid ||
+		slot >= start.Int64+length.Int64 {
+		return 0, false, nil
+	}
+	return epoch.Int64, true, nil
+}
+
+func parsePoolDeposit(value string) (uint64, error) {
+	parsed, err := strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid deposit %q: %w", value, err)
+	}
+	return parsed, nil
+}
+
+func parsePoolDepositValue(value sql.NullString) (*uint64, error) {
+	if !value.Valid || value.String == "" {
+		return nil, nil
+	}
+	parsed, err := parsePoolDeposit(value.String)
+	if err != nil {
+		return nil, err
+	}
+	return &parsed, nil
+}
+
+func previousHeld(reg poolDepositRegistration) (*uint64, error) {
+	if !reg.held.Valid {
+		return parsePoolDepositValue(reg.amount)
+	}
+	parsed, err := parsePoolDeposit(reg.held.String)
+	if err != nil {
+		return nil, err
+	}
+	return &parsed, nil
 }
 
 // committeeTermStartBackfill is deliberately data-driven rather than a
@@ -155,7 +564,10 @@ func committeeTermStartBackfill(
 	if batch.Cursor != "" {
 		parsed, err := strconv.ParseInt(batch.Cursor, 10, 64)
 		if err != nil {
-			return BatchResult{}, fmt.Errorf("parse committee backfill cursor: %w", err)
+			return BatchResult{}, fmt.Errorf(
+				"parse committee backfill cursor: %w",
+				err,
+			)
 		}
 		lastID = parsed
 	}
@@ -193,7 +605,200 @@ func committeeTermStartBackfill(
 			return BatchResult{}, err
 		}
 	}
-	return BatchResult{Cursor: strconv.FormatInt(ids[len(ids)-1], 10), Rows: int64(len(ids))}, nil
+	return BatchResult{
+		Cursor: strconv.FormatInt(ids[len(ids)-1], 10),
+		Rows:   int64(len(ids)),
+	}, nil
+}
+
+const (
+	restampCursorPoolPhase   = "P"
+	restampCursorRewardPhase = "R"
+)
+
+// rewardStakeVersionRestampBackfill re-stamps snapshot rows a prior
+// RewardStakeCalculationVersion bump left behind, in two phases encoded in
+// the cursor ("P:<id>" then "R:<id>"), so upgrading in place only forces a
+// rebootstrap for the epochs the version bump actually changed (dingo #4026).
+//
+// pool_stake_snapshot's stored values never depended on calculation version
+// -- see the TotalActiveStake comment in ledger/snapshot/rotation.go -- so
+// every stale row there is re-stamped unconditionally. reward_snapshot's
+// mark-type TotalActiveStake did change (a version-1 row understates it for
+// any epoch that excluded a pool from reward-input distribution); a stale
+// row is only re-stamped when it already agrees with the epoch's
+// independently-recorded epoch_summary.total_active_stake, which never
+// depended on calculation version either. A row that disagrees is left
+// stale on purpose: StaleConsensusStakeSnapshotsExist still fails closed on
+// it, because reconstructing the correct value requires replaying that
+// epoch's stake distribution, which this offline, row-local backfill cannot
+// do.
+func rewardStakeVersionRestampBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	phase, lastID, err := parseRestampCursor(batch.Cursor)
+	if err != nil {
+		return BatchResult{}, err
+	}
+	if phase == restampCursorPoolPhase {
+		lastID, rowCount, done, err := restampPoolStakeSnapshotBatch(
+			ctx, batch, lastID,
+		)
+		if err != nil {
+			return BatchResult{}, err
+		}
+		if !done {
+			return BatchResult{
+				Cursor: formatRestampCursor(restampCursorPoolPhase, lastID),
+				Rows:   rowCount,
+			}, nil
+		}
+		// Pool phase exhausted; hand off to the reward phase from the start.
+		return BatchResult{
+			Cursor: formatRestampCursor(restampCursorRewardPhase, 0),
+			Rows:   rowCount,
+		}, nil
+	}
+	lastID, rowCount, done, err := restampRewardSnapshotBatch(
+		ctx, batch, lastID,
+	)
+	if err != nil {
+		return BatchResult{}, err
+	}
+	return BatchResult{
+		Cursor: formatRestampCursor(restampCursorRewardPhase, lastID),
+		Rows:   rowCount,
+		Done:   done,
+	}, nil
+}
+
+func parseRestampCursor(cursor string) (string, int64, error) {
+	if cursor == "" {
+		return restampCursorPoolPhase, 0, nil
+	}
+	phase, idPart, ok := strings.Cut(cursor, ":")
+	if !ok {
+		return "", 0, fmt.Errorf(
+			"parse reward stake version restamp cursor: %q",
+			cursor,
+		)
+	}
+	id, err := strconv.ParseInt(idPart, 10, 64)
+	if err != nil {
+		return "", 0, fmt.Errorf(
+			"parse reward stake version restamp cursor: %w",
+			err,
+		)
+	}
+	return phase, id, nil
+}
+
+func formatRestampCursor(phase string, lastID int64) string {
+	return phase + ":" + strconv.FormatInt(lastID, 10)
+}
+
+// restampPoolStakeSnapshotBatch re-stamps up to one batch of stale
+// pool_stake_snapshot rows. Their stored totals never depended on
+// calculation version, so every stale row found is safe to re-stamp.
+func restampPoolStakeSnapshotBatch(
+	ctx context.Context,
+	batch Batch,
+	lastID int64,
+) (int64, int64, bool, error) {
+	rows, err := batch.Tx.QueryContext(ctx, batch.Rebind(
+		"SELECT id FROM pool_stake_snapshot WHERE id > ? AND calculation_version <> ? ORDER BY id LIMIT ?",
+	), lastID, models.RewardStakeCalculationVersion, batch.Limit)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return 0, 0, false, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, 0, false, err
+	}
+	if len(ids) == 0 {
+		return lastID, 0, true, nil
+	}
+	for _, id := range ids {
+		if _, err := batch.Tx.ExecContext(ctx,
+			batch.Rebind(
+				"UPDATE pool_stake_snapshot SET calculation_version = ? WHERE id = ?",
+			),
+			models.RewardStakeCalculationVersion, id,
+		); err != nil {
+			return 0, 0, false, err
+		}
+	}
+	return ids[len(ids)-1], int64(len(ids)), false, nil
+}
+
+// restampRewardSnapshotBatch re-stamps up to one batch of stale mark-type
+// reward_snapshot rows whose total_active_stake already agrees with the same
+// epoch's epoch_summary.total_active_stake -- the value that never depended
+// on calculation version. A row that disagrees names an epoch the version
+// bump actually changed and is left stale; StaleConsensusStakeSnapshotsExist
+// still fails closed on it.
+func restampRewardSnapshotBatch(
+	ctx context.Context,
+	batch Batch,
+	lastID int64,
+) (int64, int64, bool, error) {
+	rows, err := batch.Tx.QueryContext(ctx, batch.Rebind(`
+SELECT reward_snapshot.id, reward_snapshot.total_active_stake,
+       epoch_summary.total_active_stake
+FROM reward_snapshot
+LEFT JOIN epoch_summary ON epoch_summary.epoch = reward_snapshot.epoch
+WHERE reward_snapshot.id > ?
+  AND reward_snapshot.snapshot_type = 'mark'
+  AND reward_snapshot.calculation_version <> ?
+ORDER BY reward_snapshot.id LIMIT ?`),
+		lastID, models.RewardStakeCalculationVersion, batch.Limit,
+	)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	defer rows.Close()
+	var (
+		seenIDs []int64
+		safeIDs []int64
+	)
+	for rows.Next() {
+		var id int64
+		var rewardTotal string
+		var epochTotal sql.NullString
+		if err := rows.Scan(&id, &rewardTotal, &epochTotal); err != nil {
+			return 0, 0, false, err
+		}
+		seenIDs = append(seenIDs, id)
+		if epochTotal.Valid && epochTotal.String == rewardTotal {
+			safeIDs = append(safeIDs, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, 0, false, err
+	}
+	if len(seenIDs) == 0 {
+		return lastID, 0, true, nil
+	}
+	for _, id := range safeIDs {
+		if _, err := batch.Tx.ExecContext(ctx,
+			batch.Rebind(
+				"UPDATE reward_snapshot SET calculation_version = ? WHERE id = ?",
+			),
+			models.RewardStakeCalculationVersion, id,
+		); err != nil {
+			return 0, 0, false, err
+		}
+	}
+	return seenIDs[len(seenIDs)-1], int64(len(seenIDs)), false, nil
 }
 
 var (
@@ -404,7 +1009,12 @@ func loadSQL(path string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read embedded migration %s: %w", path, err)
 	}
-	statements, err := splitSQL(string(content))
+	// The embedded resources carry whatever bytes the working tree held at
+	// build time, so a CRLF checkout would otherwise change the checksum
+	// recorded in schema_migrations and make a database written by one build
+	// report drift against another.
+	normalized := strings.ReplaceAll(string(content), "\r\n", "\n")
+	statements, err := splitSQL(normalized)
 	if err != nil {
 		return nil, fmt.Errorf("parse embedded migration %s: %w", path, err)
 	}

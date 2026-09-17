@@ -482,7 +482,9 @@ func parseMempackTxOut(
 	}
 
 	// Extract payment and staking keys from the raw address
-	extractAddressKeys(decoded.Address, result)
+	if err := extractAddressKeys(decoded.Address, result); err != nil {
+		return nil, err
+	}
 
 	return result, nil
 }
@@ -498,9 +500,9 @@ func parseMempackTxOut(
 //     extract.
 //   - Types 14-15 (reward/stake): These are used for reward
 //     withdrawals and do not appear in transaction outputs (UTxOs).
-func extractAddressKeys(addr []byte, result *ParsedUTxO) {
+func extractAddressKeys(addr []byte, result *ParsedUTxO) error {
 	if len(addr) < 1 {
-		return
+		return nil
 	}
 
 	headerByte := addr[0]
@@ -528,15 +530,42 @@ func extractAddressKeys(addr []byte, result *ParsedUTxO) {
 			result.StakingKey = bytes.Clone(addr[29:57])
 			result.CredentialTag = 1
 		}
-	case (addrType == 4 || addrType == 5) && len(addr) >= 29:
-		// Pointer address: 1 header + 28 payment + pointer
+	case addrType == 4 || addrType == 5:
+		// Pointer address: 1 header + 28 payment + three variable-length
+		// naturals. Validate the pointer through the canonical address
+		// decoder before storing even the payment credential; otherwise a
+		// truncated pointer could be treated as an enterprise address.
+		parsed, err := lcommon.NewAddressFromBytes(addr)
+		if err != nil {
+			return fmt.Errorf("decoding pointer address: %w", err)
+		}
+		if _, ok := parsed.StakingPayload().(lcommon.AddressPayloadPointer); !ok {
+			return errors.New(
+				"decoding pointer address: missing pointer payload",
+			)
+		}
 		result.PaymentKey = bytes.Clone(addr[1:29])
 		result.PaymentScript = paymentIsScript
+		// Decode the pointer with the canonical address parser so the
+		// variable-length integer rules stay in one place. Preserve the
+		// existing fail-soft behavior for malformed or unrepresentable
+		// pointer payloads: the spendable UTxO remains importable, but it
+		// contributes no pointer-derived stake.
+		if parsed, err := lcommon.NewAddressFromBytes(addr); err == nil {
+			if pointer, ok := parsed.StakingPayload().(lcommon.AddressPayloadPointer); ok {
+				result.Pointer = &models.UtxoPointer{
+					Slot:      pointer.Slot,
+					TxIndex:   pointer.TxIndex,
+					CertIndex: pointer.CertIndex,
+				}
+			}
+		}
 	case (addrType == 6 || addrType == 7) && len(addr) >= 29:
 		// Enterprise address: 1 header + 28 payment
 		result.PaymentKey = bytes.Clone(addr[1:29])
 		result.PaymentScript = paymentIsScript
 	}
+	return nil
 }
 
 // parseCborTxOut decodes a standard CBOR-encoded TxOut.
@@ -592,6 +621,13 @@ func parseCborTxOut(
 	}
 	if addr.Type()&lcommon.AddressTypeScriptBit == lcommon.AddressTypeScriptBit {
 		result.PaymentScript = true
+	}
+	if pointer, ok := addr.StakingPayload().(lcommon.AddressPayloadPointer); ok {
+		result.Pointer = &models.UtxoPointer{
+			Slot:      pointer.Slot,
+			TxIndex:   pointer.TxIndex,
+			CertIndex: pointer.CertIndex,
+		}
 	}
 
 	if dh := txOut.DatumHash(); dh != nil {
@@ -881,6 +917,13 @@ func UTxOToModel(u *ParsedUTxO, slot uint64) models.Utxo {
 		DatumHash:     u.DatumHash,
 		Datum:         u.Datum,
 		ScriptRef:     u.ScriptRef,
+	}
+	if u.Pointer != nil {
+		utxo.Pointer = &models.UtxoPointer{
+			Slot:      u.Pointer.Slot,
+			TxIndex:   u.Pointer.TxIndex,
+			CertIndex: u.Pointer.CertIndex,
+		}
 	}
 
 	// Convert assets

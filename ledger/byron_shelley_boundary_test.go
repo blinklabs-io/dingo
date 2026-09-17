@@ -517,7 +517,7 @@ func TestByronShelleyBoundaryDefersReadResultDoneUntilCachedBatchApplied(
 	// Pass 1: discovers the epoch boundary and defers firstShelley into
 	// cachedNextBatch without applying it.
 	testutil.RequireReceive(
-		t, passReached, 2*time.Second,
+		t, passReached, testutil.AsyncWait,
 		"pass 1 (boundary discovery) never reached the done-signal hook",
 	)
 	requireDoneNotYetClosed(
@@ -528,7 +528,7 @@ func TestByronShelleyBoundaryDefersReadResultDoneUntilCachedBatchApplied(
 	// Pass 2: runs the epoch/era rollover and then actually applies
 	// firstShelley.
 	testutil.RequireReceive(
-		t, passReached, 2*time.Second,
+		t, passReached, testutil.AsyncWait,
 		"pass 2 (cached-batch apply) never reached the done-signal hook",
 	)
 	ls.RLock()
@@ -551,7 +551,7 @@ func TestByronShelleyBoundaryDefersReadResultDoneUntilCachedBatchApplied(
 
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("readChainResult.done was never closed")
 	}
 }
@@ -609,14 +609,14 @@ func TestByronShelleyBoundaryClosesReadResultDoneOnEpochRolloverFailure(
 	// and the rest of pass 1 don't touch CardanoNodeConfig for this
 	// single-block batch, so clearing it here only affects pass 2.
 	testutil.RequireReceive(
-		t, passReached, 2*time.Second,
+		t, passReached, testutil.AsyncWait,
 		"pass 1 (boundary discovery) never reached the done-signal hook",
 	)
 	ls.config.CardanoNodeConfig = nil
 	releasePass <- struct{}{}
 
 	err := testutil.RequireReceive(
-		t, processDone, 2*time.Second,
+		t, processDone, testutil.AsyncWait,
 		"ledgerProcessBlocksFromSource never returned after the forced "+
 			"epoch-rollover failure",
 	)
@@ -624,7 +624,7 @@ func TestByronShelleyBoundaryClosesReadResultDoneOnEpochRolloverFailure(
 
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal(
 			"readChainResult.done was left open after an epoch-rollover " +
 				"failure, which would block the read-chain reader goroutine " +
