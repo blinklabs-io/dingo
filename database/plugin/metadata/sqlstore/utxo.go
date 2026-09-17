@@ -533,10 +533,24 @@ func (s *Store) importUtxos(
 				if err != nil {
 					return err
 				}
-				id, err := q.CreateUtxoIfAbsent(
-					ctx,
-					sqlitequery.CreateUtxoIfAbsentParams(params),
-				)
+				var id int64
+				err = s.queryRowCached(ctx, db, insertUtxoQueryIgnoreConflict,
+					params.TransactionID,
+					params.CollateralReturnForTxID,
+					params.TxID,
+					params.PaymentKey,
+					params.StakingKey,
+					params.CredentialTag,
+					params.DatumHash,
+					nullBytes(params.SpentAtTxID),
+					nullBytes(params.ReferencedByTxID),
+					nullBytes(params.CollateralByTxID),
+					params.AddedSlot,
+					params.DeletedSlot,
+					params.Amount,
+					params.OutputIdx,
+					params.PaymentScript,
+				).Scan(&id)
 				if errors.Is(err, sql.ErrNoRows) {
 					id, err = q.GetUtxoIDByRef(
 						ctx,
@@ -575,18 +589,13 @@ func (s *Store) importUtxos(
 				}
 				for j := range item.Assets {
 					asset := item.Assets[j]
-					if err := q.ImportAsset(
-						ctx,
-						sqlitequery.ImportAssetParams{
-							Name:        asset.Name,
-							NameHex:     asset.NameHex,
-							PolicyID:    asset.PolicyId,
-							Fingerprint: asset.Fingerprint,
-							UtxoID:      validInt64(id),
-							Amount: validString(
-								decimalUint64(asset.Amount),
-							),
-						},
+					if _, err := s.execCached(ctx, db, importAssetQuery,
+						asset.Name,
+						asset.NameHex,
+						asset.PolicyId,
+						asset.Fingerprint,
+						validInt64(id),
+						validString(decimalUint64(asset.Amount)),
 					); err != nil {
 						return fmt.Errorf(
 							"import UTxO asset: %w",
