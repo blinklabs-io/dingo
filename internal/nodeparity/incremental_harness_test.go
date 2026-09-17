@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
-	"errors"
 	"log/slog"
 	"maps"
 	"math/big"
@@ -95,20 +94,6 @@ type fakeLSQState struct {
 	// exercises the genuinely-unbounded case Dial's WithQueryTimeout(0)
 	// creates for a query after a successful Acquire.
 	stallQuery <-chan struct{}
-	// failCurrentEraAfterCalls, when nonzero, makes the Nth-and-later
-	// HardForkCurrentEraQuery call fail instead of answering
-	// ledger.EraIdConway -- simulating dingo's queryHardFork returning
-	// errEpochNotResolved for a pinned point no epoch row covers
-	// (bcddd518), for CheckProtocolParams's GetCurrentEra-error handling
-	// (human review, Chris Guiney, dingo#4319). Counted rather than a bare
-	// bool: gouroboros' own client-side GetCurrentProtocolParams issues a
-	// HardForkCurrentEraQuery of its own first, to pick a decode target,
-	// before CheckProtocolParams's explicit GetCurrentEra call -- failing
-	// unconditionally broke that first, unrelated call too, never reaching
-	// the code this field exists to exercise. 0 (the default) never fails,
-	// keeping every existing test's behavior unchanged.
-	failCurrentEraAfterCalls int
-	currentEraCalls          int
 }
 
 func newFakeLSQState() *fakeLSQState {
@@ -271,25 +256,6 @@ func (s *fakeLSQState) stallQueryUntil(done <-chan struct{}) {
 	s.stallQuery = done
 }
 
-// failCurrentEraQueryAfter makes this node's Nth-and-later
-// HardForkCurrentEraQuery answer fail -- see the failCurrentEraAfterCalls
-// field's doc comment.
-func (s *fakeLSQState) failCurrentEraQueryAfter(calls int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.failCurrentEraAfterCalls = calls
-}
-
-// seenCurrentEraCalls reports how many HardForkCurrentEraQuery calls this
-// node has answered so far -- purely diagnostic, for a test to report
-// exactly what happened on a failure instead of leaving "error expected
-// but got nil" to guess from.
-func (s *fakeLSQState) seenCurrentEraCalls() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.currentEraCalls
-}
-
 // config builds the localstatequery.Config a real gouroboros server uses to
 // answer exactly the four query types incremental mode's per-block and full
 // checks need (GetCurrentProtocolParams, GetStakeDistribution,
@@ -360,16 +326,6 @@ func (s *fakeLSQState) config() localstatequery.Config {
 					// dingo's own ledger/queries.go queryHardFork).
 					switch inner.Query.(type) {
 					case *localstatequery.HardForkCurrentEraQuery:
-						s.mu.Lock()
-						s.currentEraCalls++
-						fail := s.failCurrentEraAfterCalls > 0 &&
-							s.currentEraCalls > s.failCurrentEraAfterCalls
-						s.mu.Unlock()
-						if fail {
-							return nil, errors.New(
-								"fake: no epoch record covers this point",
-							)
-						}
 						return int(ledger.EraIdConway), nil
 					default:
 						return nil, nil //nolint:nilnil // not exercised by these tests

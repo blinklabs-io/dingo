@@ -15,70 +15,76 @@
 package nodeparity
 
 import (
-	"context"
+	"errors"
 	"math"
-	"net"
 	"testing"
 
-	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/blinklabs-io/gouroboros/ledger/allegra"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
 )
 
-// TestCheckProtocolParams_CurrentEraErrorFailsTheCheck is the regression a
-// human reviewer found (Chris Guiney, dingo#4319): CheckProtocolParams used
-// to ignore a GetCurrentEra error and fall back to
-// ProtocolParamsFromNative's type-inferred era guess, which cannot tell
-// Shelley and Allegra apart. queryHardFork's HardForkCurrentEraQuery case
-// now returns errEpochNotResolved for a pinned point no epoch row covers
-// (bcddd518) instead of silently answering era 0, so GetCurrentEra can
-// newly fail here -- and swallowing that error in an Allegra epoch left
-// the wrong guessed era in place, producing a false pparams_era mismatch
-// (CompareEpochProtocolParams/DetermineStatus) reported as "ledger state
-// diverged from Koios" for what was actually a failed query.
+// TestApplyResolvedEra is the regression a human reviewer found (Chris
+// Guiney, dingo#4319): CheckProtocolParams used to ignore a GetCurrentEra
+// error and fall back to ProtocolParamsFromNative's type-inferred era
+// guess, which cannot tell Shelley and Allegra apart. queryHardFork's
+// HardForkCurrentEraQuery case now returns errEpochNotResolved for a
+// pinned point no epoch row covers (bcddd518) instead of silently
+// answering era 0, so GetCurrentEra can newly fail -- and swallowing that
+// error in an Allegra epoch left the wrong guessed era in place, producing
+// a false pparams_era mismatch (CompareEpochProtocolParams/DetermineStatus)
+// reported as "ledger state diverged from Koios" for what was actually a
+// failed query, not a real divergence.
 //
-// koios is pointed at an unreachable address deliberately: a fixed
-// GetCurrentEra error must fail this check before ever reaching Koios, so
-// this test does not need a working Koios fake to prove it.
-func TestCheckProtocolParams_CurrentEraErrorFailsTheCheck(t *testing.T) {
-	// Not t.Parallel: this package has 70+ other parallel tests binding
-	// their own ephemeral TCP listeners; running standalone removes any
-	// exposure to resource contention from that as a variable while this
-	// test is still new.
-	const magic = 42
+// Exercised directly against applyResolvedEra with plain values rather
+// than over a real localstatequery.Client: the earlier version of this
+// test drove the regression through a fake wire server and asserted on
+// exactly how many HardForkCurrentEraQuery calls occurred, which made it
+// depend on gouroboros's internal call count for GetCurrentProtocolParams
+// -- an implementation detail of a third-party client, not this package's
+// contract -- and that assumption did not hold on every CI runner.
+func TestApplyResolvedEra(t *testing.T) {
+	t.Run("era query error fails, does not fall back to a guess", func(t *testing.T) {
+		dingoParams := &koiosparity.DingoProtocolParams{
+			EraID:   uint(shelley.EraIdShelley),
+			EraName: "shelley",
+		}
+		err := applyResolvedEra(dingoParams, -1, errors.New("boom"))
+		require.Error(t, err)
+		// The pre-existing type-inferred guess must survive untouched --
+		// this is what "not silently swallowed" means in practice: the
+		// caller sees the error and never trusts these fields.
+		require.Equal(t, uint(shelley.EraIdShelley), dingoParams.EraID)
+		require.Equal(t, "shelley", dingoParams.EraName)
+	})
 
-	dingoState := newFakeLSQState()
-	// GetCurrentProtocolParams issues a HardForkCurrentEraQuery of its own
-	// first (to pick a decode target) -- that first call must still
-	// succeed, or CheckProtocolParams fails at that unrelated, earlier
-	// step instead of reaching the GetCurrentEra call this test targets.
-	dingoState.failCurrentEraQueryAfter(1)
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = listener.Close() })
-	dingoState.serveLSQOnly(t, listener, magic)
+	t.Run("resolved era overwrites an ambiguous guess", func(t *testing.T) {
+		// ProtocolParamsFromNative's ambiguous guess: Allegra's params
+		// type is a type alias for Shelley's, so the type switch alone
+		// guesses "shelley" even in an Allegra epoch.
+		dingoParams := &koiosparity.DingoProtocolParams{
+			EraID:   uint(shelley.EraIdShelley),
+			EraName: "shelley",
+		}
+		err := applyResolvedEra(dingoParams, int(allegra.EraIdAllegra), nil)
+		require.NoError(t, err)
+		require.Equal(t, uint(allegra.EraIdAllegra), dingoParams.EraID)
+		require.Equal(t, "Allegra", dingoParams.EraName)
+	})
 
-	ctx := context.Background()
-	conn, lsq, err := acquireWithRetry(
-		ctx, listener.Addr().String(), magic, pcommon.NewPointOrigin(),
-	)
-	require.NoError(t, err)
-	t.Cleanup(func() { conn.Close() }) //nolint:errcheck
-
-	koios, err := NewKoiosClient("preview", "", "http://127.0.0.1:1/api/v1", true)
-	require.NoError(t, err)
-
-	mismatches, err := CheckProtocolParams(ctx, lsq.Client, koios, "preview", 1)
-	require.Error(t, err,
-		"a GetCurrentEra failure must fail the whole check, not silently "+
-			"fall back to an ambiguous type-inferred era guess -- saw %d "+
-			"HardForkCurrentEraQuery call(s) (expected 2: one from "+
-			"GetCurrentProtocolParams's own internal lookup, one from "+
-			"CheckProtocolParams's explicit call)",
-		dingoState.seenCurrentEraCalls())
-	assert.Nil(t, mismatches)
+	t.Run("unknown era ID leaves the existing guess in place without erroring", func(t *testing.T) {
+		dingoParams := &koiosparity.DingoProtocolParams{
+			EraID:   uint(shelley.EraIdShelley),
+			EraName: "shelley",
+		}
+		err := applyResolvedEra(dingoParams, 999, nil)
+		require.NoError(t, err)
+		require.Equal(t, uint(shelley.EraIdShelley), dingoParams.EraID)
+		require.Equal(t, "shelley", dingoParams.EraName)
+	})
 }
 
 func TestNewKoiosClientRejectsMainnet(t *testing.T) {

@@ -154,6 +154,31 @@ func NewKoiosClient(
 // CompareEpochProtocolParams finds. An empty, non-nil slice means a clean
 // comparison ran and found no disagreement; a nil slice paired with a non-nil
 // error means the comparison itself could not run.
+// applyResolvedEra applies an already-resolved HardForkCurrentEraQuery
+// result to dingoParams, or fails outright if that resolution itself
+// failed. Split out of CheckProtocolParams so the regression this guards
+// against -- a GetCurrentEra error being silently swallowed in favor of an
+// ambiguous type-inferred era guess (human review, Chris Guiney, dingo#4319)
+// -- is provable with plain values, not a live wire round-trip: exercising
+// it through the real localstatequery.Client would make the test depend on
+// gouroboros's exact number of HardForkCurrentEraQuery calls per
+// CheckProtocolParams invocation, which is an internal timing detail of a
+// third-party client, not part of this package's contract.
+func applyResolvedEra(
+	dingoParams *koiosparity.DingoProtocolParams,
+	eraID int,
+	eraErr error,
+) error {
+	if eraErr != nil {
+		return fmt.Errorf("dingo current era query: %w", eraErr)
+	}
+	if era := eras.GetEraById(uint(eraID)); era != nil {
+		dingoParams.EraID = uint(eraID)
+		dingoParams.EraName = era.Name
+	}
+	return nil
+}
+
 func CheckProtocolParams(
 	ctx context.Context,
 	client *localstatequery.Client,
@@ -190,12 +215,8 @@ func CheckProtocolParams(
 	// reporting "ledger state diverged from Koios" for what was actually a
 	// failed query, not a real divergence.
 	eraID, eraErr := client.GetCurrentEra()
-	if eraErr != nil {
-		return nil, fmt.Errorf("dingo current era query: %w", eraErr)
-	}
-	if era := eras.GetEraById(uint(eraID)); era != nil {
-		dingoParams.EraID = uint(eraID)
-		dingoParams.EraName = era.Name
+	if err := applyResolvedEra(dingoParams, eraID, eraErr); err != nil {
+		return nil, err
 	}
 
 	koiosResp, koiosErr := koios.GetEpochParams(ctx, epoch)
