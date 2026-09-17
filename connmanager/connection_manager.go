@@ -719,9 +719,6 @@ func (c *ConnectionManager) addConnectionImpl(
 				"peer_addr", peerAddr,
 			)
 		}
-		if onClose != nil {
-			onClose()
-		}
 		return false
 	}
 	c.goroutineWg.Add(1)
@@ -758,9 +755,6 @@ func (c *ConnectionManager) addConnectionImpl(
 			)
 			c.releaseIPSlot(ipKey)
 			c.goroutineWg.Done()
-			if onClose != nil {
-				onClose()
-			}
 			return false
 
 		case existing.isInbound && !isInbound:
