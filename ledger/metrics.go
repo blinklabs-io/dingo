@@ -278,13 +278,12 @@ type stateMetrics struct {
 	// for script-validation volume than blocksWithScriptsTotal, since a
 	// block can carry many redeemers across its transactions.
 	redeemersTotal *prometheus.CounterVec
-	// utxoCreatedTotal/utxoConsumedTotal are summed from each transaction's
-	// Produced()/Consumed(), not its raw Outputs()/Inputs(): for a
-	// phase-2-failed transaction Produced() correctly returns only the
-	// collateral return (at index len(Outputs())), while Outputs() would
-	// report outputs that were never actually created. See the same
-	// distinction in ledgerProcessBlock's intraBlockUtxos population
-	// (state.go).
+	// utxoCreatedTotal/utxoConsumedTotal follow Produced()/Consumed()
+	// semantics, not raw Outputs()/Inputs(): a phase-2-failed transaction
+	// creates only its collateral return (at index len(Outputs())) and
+	// consumes only its collateral, while Outputs()/Inputs() would report
+	// entries that never took effect. See the same distinction in
+	// ledgerProcessBlock's intraBlockUtxos population (state.go).
 	utxoCreatedTotal  *prometheus.CounterVec
 	utxoConsumedTotal *prometheus.CounterVec
 	certificatesTotal *prometheus.CounterVec
@@ -376,9 +375,9 @@ type blockComposition struct {
 }
 
 // computeBlockComposition derives a blockComposition from one applied block.
-// UTxO churn is read from each transaction's Produced()/Consumed(), not its
-// raw Outputs()/Inputs() -- see the utxoCreatedTotal/utxoConsumedTotal field
-// doc comment for why. A block counts as carrying scripts when any
+// UTxO churn follows Produced()/Consumed() semantics, not raw
+// Outputs()/Inputs() -- see the utxoCreatedTotal/utxoConsumedTotal field doc
+// comment for why. A block counts as carrying scripts when any
 // transaction's witness set has a Plutus V1/V2/V3 script or at least one
 // redeemer: a redeemer alone still means phase-2 script evaluation ran, even
 // when the script itself is supplied by a reference input rather than the
@@ -388,7 +387,20 @@ func computeBlockComposition(block lcommon.Block) blockComposition {
 	txs := block.Transactions()
 	c.transactions = len(txs)
 	for _, tx := range txs {
-		c.utxoCreated += len(tx.Produced())
+		// This runs inside the block-apply DB transaction for every applied
+		// block, so the created-UTxO count is taken without building the
+		// UTxOs. Produced() allocates an lcommon.Utxo per output and
+		// round-trips the transaction hash through hex to construct each
+		// one's input reference; only its length is wanted here, and every
+		// era defines Produced() for a valid transaction as exactly one UTxO
+		// per output. The phase-2-failed rule differs by era (Alonzo produces
+		// nothing, Babbage onward at most a collateral return), so that case
+		// is still read from Produced() rather than restated here.
+		if tx.IsValid() {
+			c.utxoCreated += len(tx.Outputs())
+		} else {
+			c.utxoCreated += len(tx.Produced())
+		}
 		c.utxoConsumed += len(tx.Consumed())
 		c.certificates += len(tx.Certificates())
 		witnesses := tx.Witnesses()
@@ -977,7 +989,7 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	m.blocksTotal = promautoFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_blocks_total",
-			Help: "applied blocks, by era",
+			Help: "blocks processed by the ledger apply path, by era; a block reprocessed after an apply retry is counted again, so this tracks processing rate rather than an exact durably-applied count",
 		},
 		[]string{"era"},
 	)
@@ -1005,14 +1017,14 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	m.utxoCreatedTotal = promautoFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_utxo_created_total",
-			Help: "UTxOs created by applied blocks, by era, from each transaction's Produced() (not raw Outputs(), which is wrong for phase-2-failed transactions)",
+			Help: "UTxOs created by applied blocks, by era; a phase-2-failed transaction contributes only its collateral return, not its ordinary outputs",
 		},
 		[]string{"era"},
 	)
 	m.utxoConsumedTotal = promautoFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_utxo_consumed_total",
-			Help: "UTxOs consumed by applied blocks, by era, from each transaction's Consumed() (not raw Inputs(), which is wrong for phase-2-failed transactions)",
+			Help: "UTxOs consumed by applied blocks, by era; a phase-2-failed transaction contributes only its collateral inputs, not its ordinary inputs",
 		},
 		[]string{"era"},
 	)

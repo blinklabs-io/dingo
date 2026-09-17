@@ -24,9 +24,11 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	omockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // newTestConwayBlock builds a minimal in-memory Conway block from transaction
@@ -272,4 +274,65 @@ func TestObserveBlockCompositionNoopWhenMetricsDisabled(t *testing.T) {
 	var m stateMetrics
 	// m.init is never called: every field stays nil.
 	m.observeBlockComposition(blockComposition{era: "Conway", transactions: 1})
+}
+
+// compositionSpyTx counts how many times a transaction's produced UTxO set is
+// materialized while its block's composition is computed.
+type compositionSpyTx struct {
+	lcommon.Transaction
+	producedCalls *int
+}
+
+func (t compositionSpyTx) Produced() []lcommon.Utxo {
+	*t.producedCalls++
+	return t.Transaction.Produced()
+}
+
+// TestComputeBlockCompositionCountsValidOutputsWithoutBuildingUtxos pins the
+// hot-path contract. computeBlockComposition runs inside the ledger's
+// block-apply database transaction for every applied block, so counting the
+// UTxOs a valid transaction creates must not build them: Produced() allocates
+// one lcommon.Utxo per output and round-trips the transaction hash through hex
+// to construct each UTxO's input reference, and the only use for that here is
+// its length. Every era defines Produced() for a valid transaction as exactly
+// one UTxO per output, so len(Outputs()) is the same number without the
+// allocations. The phase-2-failed case, whose rule differs by era, is still
+// read from Produced() -- see
+// TestComputeBlockCompositionPhase2FailedTransactionUsesProducedNotOutputs.
+func TestComputeBlockCompositionCountsValidOutputsWithoutBuildingUtxos(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const txCount, outputsPerTx = 3, 4
+	producedCalls := 0
+	txs := make([]lcommon.Transaction, 0, txCount)
+	for range txCount {
+		outputs := make([]lcommon.TransactionOutput, 0, outputsPerTx)
+		for range outputsPerTx {
+			outputs = append(outputs, &babbage.BabbageTransactionOutput{})
+		}
+		built, err := omockledger.NewTransactionBuilder().
+			WithValid(true).
+			WithInputs(testInput('f', 0)).
+			WithOutputs(outputs...).
+			Build()
+		require.NoError(t, err)
+		txs = append(txs, compositionSpyTx{
+			Transaction:   built,
+			producedCalls: &producedCalls,
+		})
+	}
+	block := &validityOutcomeTestBlock{txs: txs, era: conway.EraConway}
+
+	c := computeBlockComposition(block)
+
+	assert.Equal(t, txCount*outputsPerTx, c.utxoCreated)
+	assert.Equal(t, txCount, c.utxoConsumed)
+	assert.Equal(
+		t,
+		0,
+		producedCalls,
+		"counting a valid transaction's created UTxOs must not build them",
+	)
 }

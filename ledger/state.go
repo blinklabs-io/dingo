@@ -6986,6 +6986,19 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						// churn, certificate count. Recorded here, not for
 						// the Mithril-gap-closure skip branch above, since
 						// only this branch actually ran ledgerProcessBlock.
+						//
+						// These are observed inside the batch's DB
+						// transaction, so a later block in the same batch
+						// failing rolls the transaction back while leaving
+						// the earlier blocks' counts recorded; the pipeline
+						// then restarts from the unchanged tip and counts
+						// them again. The counters therefore track blocks
+						// processed rather than blocks durably applied, and
+						// drift upward across apply retries -- the same
+						// property the blockStageDuration observations in
+						// this closure already have. Read them as relative
+						// rates for correlation, which is what issue #4367
+						// asks of them, not as an exact applied-block count.
 						ls.metrics.observeBlockComposition(
 							computeBlockComposition(next),
 						)
