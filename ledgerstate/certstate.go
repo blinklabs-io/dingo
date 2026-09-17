@@ -70,7 +70,7 @@ func parseCertState3(
 	result.CommitteeHotKeys = hotKeys
 	result.CommitteeResignations = resignations
 
-	pools, err := parsePState(certState[1])
+	pools, retirements, err := parsePStateWithRetirements(certState[1])
 	if err != nil {
 		if pools == nil {
 			return nil, fmt.Errorf(
@@ -80,6 +80,7 @@ func parseCertState3(
 		warnings = append(warnings, err)
 	}
 	result.Pools = pools
+	result.PendingPoolRetirements = retirements
 
 	accounts, err := parseDState(certState[2])
 	if err != nil {
@@ -233,7 +234,7 @@ func parseCertStateConway(
 
 	// Parse PState if found
 	if pIdx >= 0 {
-		pools, err := parsePStateConway(certState[pIdx])
+		pools, retirements, err := parsePStateConwayWithRetirements(certState[pIdx])
 		if err != nil {
 			if pools == nil {
 				return nil, fmt.Errorf(
@@ -243,6 +244,7 @@ func parseCertStateConway(
 			warnings = append(warnings, err)
 		}
 		result.Pools = pools
+		result.PendingPoolRetirements = retirements
 	} else {
 		warnings = append(warnings, fmt.Errorf(
 			"could not identify PState in Conway "+
@@ -281,9 +283,16 @@ func parseCertStateConway(
 // traditional {poolParams, futurePoolParams, retiring, deposits}
 // map.
 func parsePStateConway(data []byte) ([]ParsedPool, error) {
+	pools, _, err := parsePStateConwayWithRetirements(data)
+	return pools, err
+}
+
+func parsePStateConwayWithRetirements(
+	data []byte,
+) ([]ParsedPool, map[uint64][][]byte, error) {
 	ps, err := decodeRawArray(data)
 	if err != nil {
-		return nil, fmt.Errorf("decoding PState: %w", err)
+		return nil, nil, fmt.Errorf("decoding PState: %w", err)
 	}
 
 	return parsePStateMaps(ps)
@@ -632,18 +641,25 @@ func parsePoolDelegation(data []byte) ([]byte, bool) {
 // parsePState decodes the pool state.
 // PState = [poolParams, futurePoolParams, retiring, poolDeposits]
 func parsePState(data []byte) ([]ParsedPool, error) {
+	pools, _, err := parsePStateWithRetirements(data)
+	return pools, err
+}
+
+func parsePStateWithRetirements(
+	data []byte,
+) ([]ParsedPool, map[uint64][][]byte, error) {
 	ps, err := decodeRawElements(data)
 	if err != nil {
-		return nil, fmt.Errorf("decoding PState: %w", err)
+		return nil, nil, fmt.Errorf("decoding PState: %w", err)
 	}
 	if len(ps) < 1 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	return parsePStateMaps(ps)
 }
 
-func parsePStateMaps(ps [][]byte) ([]ParsedPool, error) {
+func parsePStateMaps(ps [][]byte) ([]ParsedPool, map[uint64][][]byte, error) {
 	type mapEntry struct {
 		idx  int
 		size int
@@ -659,7 +675,7 @@ func parsePStateMaps(ps [][]byte) ([]ParsedPool, error) {
 		}
 	}
 	if len(maps) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	slices.SortFunc(
@@ -681,12 +697,12 @@ func parsePStateMaps(ps [][]byte) ([]ParsedPool, error) {
 		}
 	}
 	if len(bestPools) == 0 {
-		return bestPools, bestWarning
+		return bestPools, nil, bestWarning
 	}
 
 	mergePoolDeposits(bestPools, ps, bestIdx)
-	mergePoolRetirements(bestPools, ps, bestIdx)
-	return bestPools, bestWarning
+	retirements := mergePoolRetirements(bestPools, ps, bestIdx)
+	return bestPools, retirements, bestWarning
 }
 
 func mergePoolDeposits(
@@ -795,7 +811,7 @@ func mergePoolRetirements(
 	pools []ParsedPool,
 	ps [][]byte,
 	poolParamsIdx int,
-) {
+) map[uint64][][]byte {
 	known := make(map[string]struct{}, len(pools))
 	for i := range pools {
 		known[hex.EncodeToString(pools[i].PoolKeyHash)] = struct{}{}
@@ -808,6 +824,7 @@ func mergePoolRetirements(
 		if !looksLikeRetiringEpochs(retiring, known) {
 			continue
 		}
+		result := make(map[uint64][][]byte)
 		for j := range pools {
 			epoch, ok := retiring[hex.EncodeToString(
 				pools[j].PoolKeyHash,
@@ -816,9 +833,19 @@ func mergePoolRetirements(
 				continue
 			}
 			pools[j].RetiringEpoch = &epoch
+			result[epoch] = append(result[epoch], slices.Clone(pools[j].PoolKeyHash))
 		}
-		return
+		for keyHash, epoch := range retiring {
+			if _, ok := known[keyHash]; !ok {
+				decoded, err := hex.DecodeString(keyHash)
+				if err == nil {
+					result[epoch] = append(result[epoch], decoded)
+				}
+			}
+		}
+		return result
 	}
+	return nil
 }
 
 // looksLikeRetiringEpochs reports whether m is plausibly the PState

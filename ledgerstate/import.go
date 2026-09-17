@@ -223,11 +223,12 @@ type Credential struct {
 
 // ParsedCertState holds the parsed delegation, pool, and DRep state.
 type ParsedCertState struct {
-	Accounts              []ParsedAccount
-	Pools                 []ParsedPool
-	DReps                 []ParsedDRep
-	CommitteeHotKeys      []ParsedCommitteeHotKey
-	CommitteeResignations []Credential
+	Accounts               []ParsedAccount
+	Pools                  []ParsedPool
+	PendingPoolRetirements map[uint64][][]byte
+	DReps                  []ParsedDRep
+	CommitteeHotKeys       []ParsedCommitteeHotKey
+	CommitteeResignations  []Credential
 }
 
 type ParsedCommitteeHotKey struct {
@@ -1039,6 +1040,7 @@ func importCertState(
 	if len(certState.Pools) > 0 {
 		if err := importPools(
 			ctx, cfg, certState.Pools, slot,
+			certState.PendingPoolRetirements,
 		); err != nil {
 			return 0, fmt.Errorf("importing pools: %w", err)
 		}
@@ -1196,6 +1198,7 @@ func importPools(
 	cfg ImportConfig,
 	pools []ParsedPool,
 	slot uint64,
+	retirementMaps ...map[uint64][][]byte,
 ) error {
 	cfg.Logger.Info(
 		"importing pools",
@@ -1215,6 +1218,13 @@ func importPools(
 
 	inBatch := 0
 	pendingRetirements := make(map[uint64][][]byte)
+	if len(retirementMaps) > 0 {
+		for epoch, keyHashes := range retirementMaps[0] {
+			pendingRetirements[epoch] = append(
+				pendingRetirements[epoch], keyHashes...,
+			)
+		}
+	}
 	for _, pool := range pools {
 		select {
 		case <-ctx.Done():
@@ -1224,7 +1234,7 @@ func importPools(
 		default:
 		}
 
-		if pool.RetiringEpoch != nil {
+		if len(retirementMaps) == 0 && pool.RetiringEpoch != nil {
 			epoch := *pool.RetiringEpoch
 			pendingRetirements[epoch] = append(
 				pendingRetirements[epoch],

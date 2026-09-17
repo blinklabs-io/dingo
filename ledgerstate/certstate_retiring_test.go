@@ -284,6 +284,35 @@ func TestParsePStateKeepsRetirementsDespiteUnparsedPool(t *testing.T) {
 	}
 }
 
+func TestParsePStateRetainsUnparsedRetirementKeys(t *testing.T) {
+	t.Parallel()
+
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	unparsedHash := bytes.Repeat([]byte{0x77}, 28)
+	poolParams := encodeCborMap(t, poolHash, testPoolParams(0x11))
+	retiring := encodeCborMap(
+		t, poolHash, uint64(658), unparsedHash, uint64(659),
+	)
+	pools, retirements, err := parsePStateWithRetirements(
+		encodeTestPState(
+			t, poolParams, encodeCborMap(t), retiring, encodeCborMap(t),
+		),
+	)
+	if err != nil {
+		t.Fatalf("parsePState failed: %v", err)
+	}
+	if len(pools) != 1 {
+		t.Fatalf("expected 1 pool, got %d", len(pools))
+	}
+	if got := len(retirements[658]); got != 1 {
+		t.Fatalf("expected one parsed retirement, got %d", got)
+	}
+	if got := len(retirements[659]); got != 1 ||
+		!bytes.Equal(retirements[659][0], unparsedHash) {
+		t.Fatalf("unparsed retirement key was not retained: %x", retirements[659])
+	}
+}
+
 // The Conway PState is a seven-element array whose order is not fixed, so
 // the retiring map must still be found by shape.
 func TestParsePStateConwayDecodesPendingRetirements(t *testing.T) {
