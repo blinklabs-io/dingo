@@ -63,7 +63,14 @@ internal so generated row types cannot leak into ledger or API packages.
 
 The SQLite provider is a thin factory around the pure-Go driver. It configures
 one WAL writer, a separate read pool, pragmas, disk-size accounting, migration
-locking, query tracing, and daily `VACUUM`. The tagged PostgreSQL/MySQL
+locking, query tracing, daily `VACUUM`, and (on its own two-minute ticker,
+independent of `VACUUM`'s cadence) a best-effort `PRAGMA
+wal_checkpoint(TRUNCATE)` attempt against a dedicated short-timeout
+connection (never the write pool) — see `checkpointWAL` and
+`Store.Checkpoint` in DATABASE.md's write-amplification discussion for why
+the commit-triggered `wal_autocheckpoint` alone cannot shrink the WAL file's
+on-disk size even when it fully succeeds, and why an active reader can leave
+a given TRUNCATE attempt busy. The tagged PostgreSQL/MySQL
 factories configure their direct drivers, pools, advisory migration locks, and
 repeatable-read snapshots. All three return `*sqlstore.Store`; metadata
 business behavior is implemented once in `sqlstore` and dialect translation is
@@ -1153,8 +1160,12 @@ When `Node.Run()` is called, components are initialized in this order:
     Mithril bootstrap imports raw blocks up to the certified immutable tip
     while leaving the ledger cursor at the earlier imported ledger state, and
     LedgerState.Start replays that whole suffix as ordinary BlockActionApply
-    events, so the indexer sees those blocks once through the live path
-    instead of scanning them here as well. A failure to resolve the tip aborts
+    events, so the indexer sees those blocks once through the live path.
+    Trusted full-block CBOR decoding during this replay is performed in a
+    bounded worker pool (two through eight workers, selected from
+    GOMAXPROCS), with a 50-block batch and indexed result reordering; chain
+    insertion and ledger replay remain serial and cancellation propagates
+    through the bounded job/result queues. A failure to resolve the tip aborts
     startup rather than falling back to an unbounded sweep. Inserts are
     idempotent (ON CONFLICT DO NOTHING) so a crash-restart replay is safe.
     Progress is observable through `dingo_midnight_indexer_checkpoint_slot`,
@@ -1179,8 +1190,26 @@ When `Node.Run()` is called, components are initialized in this order:
     candidate that may have evolved. After the
     tip loads, `healMithrilGapBlockNonces` reconstructs the evolving-nonce fold
     across any Mithril "gap blocks" (see Mithril Bootstrap) before header
-    verification computes an epoch nonce; only then does LedgerState subscribe
-    to chainsync/blockfetch/chain-update EventBus events.
+    verification computes an epoch nonce, and `healTruncateGapBlockNonces` then
+    repairs a tip whose own `block_nonce` row is empty because a disaster-
+    recovery truncate (or, for Ouroboros Genesis chain selection, an ordinary
+    rollback deeper than the security parameter) landed on a slot the routine
+    3-epoch retention window had already pruned — see Truncate in DATABASE.md.
+    It folds forward from the nearest surviving checkpoint through the
+    still-present block CBOR up to the tip, sharing `foldBlockEtaV` with the
+    Mithril heal so the two can never compute a nonce differently, and
+    hard-fails startup (unlike the Mithril heal's own no-anchor case) when no
+    checkpoint on the primary chain exists to fold from:
+    `database.TruncateAfterSlot`'s own guard only checks that a checkpoint
+    row exists, not that it sits on the primary chain, so it can let a
+    truncate through on the strength of a checkpoint belonging to a
+    since-abandoned fork — this heal's primary-chain-aware search is the
+    check that actually enforces the promise, and continuing with an empty
+    nonce would reproduce the same VRF corruption the whole mechanism exists
+    to prevent. The same reconstruction also runs after `LedgerState.rollback`
+    in-process, the only other caller of `TruncateAfterSlot`. Only then does
+    LedgerState
+    subscribe to chainsync/blockfetch/chain-update EventBus events.
     Fresh genesis initialization persists both genesis UTxOs and the effective
     Shelley staking declarations, including network-specific `extraConfig`
     pools and delegations, before snapshot capture.
@@ -2899,6 +2928,17 @@ signal; chainsync client cleanup remains specific to each connection mode.
 For the current respun prototype, the notify vote dialect is specifically the three-field `(announcing_rb_hash, voter_id, signature)` form. The selected-chain `chain.update` path records an announcement only after its ranking block is adopted; merely observing an eligible ChainSync header cannot make a local vote eligible. A bounded TTL queue holds votes that race ahead of adoption and retains a bounded set of alternate signatures per voter, so an invalid first candidate cannot suppress a later valid vote. Local votes use that same LeiosNotify stream; each outbound response reserves its log entry and commits the per-peer cursor only after gouroboros reports a successful send. Failed or aborted sends release the reservation into a counted retry set retained across reconnects; a reconnect advances through every pending retry on its stream rather than clearing only the first failed entry. The transitional offered-ID and four-field forms remain decode-compatible only.
 For the current respun prototype, the notify vote dialect is specifically the three-field `(announcing_rb_hash, voter_id, signature)` form. Announcements are armed from the ordered `chain.header` stream rather than from `chain.update`: a ranking-block header whose VRF/KES this node verified, admitted to the primary chain's header queue and inside the vote window, arms a local vote before its block has been fetched, validated or applied. A header admitted *without* verification -- the deferred-epoch-nonce, validation-disabled and Mithril-covered paths, which reach `Chain.AddBlockHeader` rather than `AddVerifiedBlockHeader` -- arms nothing, so a chainsync peer cannot make this node sign a vote for a ranking block it never authenticated and so occupy the `(slot, voter_id)` the honest block's vote needs; an unverified header is announced only once its block is applied, through the idempotent `chain.update` backstop. `ChainHeaderInvalidationEvent`, on the same stream and therefore never reordered against announcements, retracts announcements whose ranking blocks left the chain, and a rollback prunes by comparing its `Seq` against each announcement record's, so an announcement sequenced after the rollback is not dropped by it. A bounded TTL queue holds votes that race ahead of adoption and retains a bounded set of alternate signatures per voter, so an invalid first candidate cannot suppress a later valid vote. Local votes use that same LeiosNotify stream; each outbound response reserves its log entry and commits the per-peer cursor only after gouroboros reports a successful send. Failed or aborted sends release the reservation into a counted retry set retained across reconnects; a reconnect advances through every pending retry on its stream rather than clearing only the first failed entry. The transitional offered-ID and four-field forms remain decode-compatible only.
 
+Manifest and transaction offers reserve a per-connection fetch slot before
+claiming their `(slot, hash)` occurrence. A full connection publishes no claim;
+claim contention releases the reservation. The worker consumes the reserved slot
+without a second admission check, so rejected offers cannot suppress another
+peer's work. Claims are released when the fetch finishes, including errors.
+The manifest worker rechecks the cache after acquiring its
+connection guard, since transaction fetching or historical backfill may have
+already supplied the manifest. Manifest claims are separate from transaction
+offer claims: an outstanding manifest fetch must not suppress the subsequent
+transaction offer needed to complete the endorser block.
+
 LeiosFetch dispatch reserves one of four in-flight slots on the connection's
 fetch guard with an atomic compare-and-swap before starting a worker. Concurrent
 callbacks sharing that guard cannot exceed its admission bound; worker
@@ -3002,13 +3042,59 @@ transition and extends era history (a boundary deadlock). The successor era
 takes the next era's params by configured shape order (not `EraID + 1`, which
 would break on non-contiguous era IDs), falling back to the current era's params
 when the ledger already occupies the last modeled era. `hardfork.SuccessorEra`
-bounds it by the successor's own safe zone measured from the boundary, which
-always snaps up to at least the end of the first post-boundary epoch; the
-successor stays open only when the resolved safe zone is zero
-(`UnsafeIndefiniteSafeZone`), the same rule `BuildSummary` applies to the
-current era. Where that live bound is finite, a header past it fails with
+bounds it by the successor's own safe zone measured from
+`max(tipSlot+1, boundary)` — the same tip-anchored rule `BuildSummary`'s
+`TransitionUnknown` branch applies to the current era — which always snaps up
+to at least the end of the first post-boundary epoch; the successor stays open
+only when the resolved safe zone is zero (`UnsafeIndefiniteSafeZone`), the same
+rule `BuildSummary` applies to the current era. Measuring only from the
+boundary itself (the previous behavior) froze the successor's horizon at
+`boundary+safeZone` regardless of how far the live tip advanced past it: a node
+unable to apply the block that consumes the transition keeps reconstructing the
+same summary from the same unchanged `TransitionKnown` and epoch cache on every
+retry, so a frozen bound could never grow and every later slot became
+permanently past-horizon. Anchoring on the tip instead means the horizon keeps
+pace with it exactly as the current era's does. Where that live bound is
+finite, a header past it fails with
 `hardfork.ErrPastHorizon` before `ensureEpochForSlot` can extend the forecasted
-epoch/nonce cache. That past-horizon failure is classified as a deferred
+epoch/nonce cache.
+
+A known transition (`TransitionKnown`) is set by one of four
+`ls.evaluateXXX` methods, run in this order at every block-apply tip update,
+startup, and (a rollback-surviving subset of them) rollback:
+`evaluateTriggerAtEpoch` (the `TestXHardForkAtEpoch` config override, for the
+era's `TriggerAtEpoch` kind), `evaluateTransitionImpossible` (promotes to
+`TransitionImpossible` once the ordinary safe zone already reaches the
+current epoch's end), `evaluateProtocolVersionBump` (the era's
+`TriggerAtVersion` kind: every historical Cardano hard fork before Conway's
+CIP-1694 governance, detected by peeking -- via
+`Database.ForecastPParamUpdates`, read-only, no enactment -- whether a
+protocol-parameter update already meeting the configured genesis-key quorum
+would bump the protocol major version into a later era at the next epoch
+boundary), and `evaluateHardForkInitiationStability` (the Conway+
+CIP-1694 `HardForkInitiation` governance action, post-voting-deadline only).
+Each era's `NextEraTrigger` kind is exactly one of `TriggerAtEpoch`,
+`TriggerAtVersion`, or `TriggerNotDuringThisExecution` (the final configured
+era), so `evaluateTriggerAtEpoch` and `evaluateProtocolVersionBump` never
+compete for the same era. Unlike the CIP-1694 path, the classic
+update-proposal system has no protocol-enforced voting deadline -- a genesis
+delegate may submit a superseding proposal in any block of the submission
+epoch -- so `evaluateProtocolVersionBump` reads fresh state on every call
+rather than gating on a deadline that does not exist for this trigger kind;
+a premature or later-superseded reading only widens the forecast horizon for
+the rest of the epoch; it never changes `ls.currentEra` or what
+`processEpochRollover` actually enacts, both of which re-read the real
+quorum state independently at the boundary. Without this evaluator,
+`transitionInfo` stays `TransitionUnknown` for the entire epoch preceding
+any version-triggered hard fork, so the ordinary tip-anchored safe zone (see
+above) lands exactly at the era boundary with no margin past it instead of
+the extra epoch `SuccessorEra` provides once a transition is confirmed, and
+a transaction whose validity interval crosses even slightly past the
+boundary is permanently rejected with `hardfork.ErrPastHorizon` --
+indistinguishable from a genuinely invalid transaction, even though the same
+block is canonical on every node that detects the quorum early.
+
+That past-horizon failure is classified as a deferred
 condition (wrapped in `errHeaderVerificationDeferred`), not a peer fault: during
 catch-up the header chain legitimately runs ahead of the applied tip and crosses
 epoch boundaries, so the block is kept queued for in-order re-verification once
@@ -4128,6 +4214,52 @@ pin to a dead/minority peer:
 The existing equal-tip incumbent preservation (when `ComparePraosTips` returns
 `ChainEqual`, and the same-block transport tiebreaker) is preserved and runs
 ahead of the pin.
+
+**Switch-back cooldown bounds both discretionary escapes' rate.** Both
+escapes above are per-evaluation snapshot judgments with no memory of very
+recent switches: two peers whose delivered frontiers repeatedly leapfrog each
+other by more than `catchUpPinHeadMargin` — plausible on ordinary per-header
+delivery jitter near the tip, since a single newly delivered header can
+itself cross a margin of two blocks — can hand the active connection back and
+forth on every such crossing via the longer-chain escape; and once the
+applied local tip stalls, `localTipStalledLocked` stays true on *every*
+subsequent evaluation until progress resumes, so an unguarded progress-stall
+escape provides no hysteresis at all for as long as the stall lasts,
+regardless of margin — every evaluation falls through to bare Praos ranking.
+Both were observed live on Preview near the real chain tip: the active
+connection flapped between the same 2-3 peer connections multiple times per
+second with no net progress (in one occurrence with the applied local tip
+itself confirmed flatlined by direct metric reads), saturating
+`chainsyncMutex` / `chainsyncBlockfetchMutex` in
+`ledger.handleChainSwitchEvent` and backing up the event bus's
+`chainselection.chain_switch` subscriber queue toward its 100,000-entry
+capacity. Because the switching itself is what prevents a blockfetch batch
+from ever completing (see the fork-extension recovery below), an
+unprotected stall escape is self-sustaining: the stall never clears on its
+own once the thrash starts.
+
+`ChainSelectorConfig.SwitchBackCooldown` (default 2s,
+`defaultSwitchBackCooldown`) rate-limits both. `pinIncumbentDuringCatchUpLocked`
+treats releasing the pin for an incumbent that is no longer selectable
+(disconnected/ineligible/stale/implausible) as the only MANDATORY,
+never-debounced release — there is no "keeping" a connection that is gone.
+Every other release is DISCRETIONARY (the incumbent is still alive): if
+either the progress-stall escape or `longerChainEscapeLocked` (the
+longer-chain comparison, factored out unchanged) would release the pin,
+`switchBackDebouncedLocked` gets the final say. `recordSwitchAwayLocked`
+marks the abandoned connection's departure time in
+`ChainSelector.recentlyLeft` on every switch; a connection abandoned less
+than the cooldown ago cannot reclaim the active connection through either
+discretionary escape, even though it currently satisfies one. This is a rate
+limit, not a correctness change: a genuinely new challenger (never recently
+active) is adopted immediately regardless of which escape fired, and a
+persistent lead is still adopted once the cooldown elapses — so neither
+escape's liveness guarantee is weakened, only the ping-pong between a small
+set of very recently active peers is bounded. Regression tests:
+`TestSwitchBackCooldownBoundsOscillationFrequency` (longer-chain escape),
+`TestSwitchBackCooldownBoundsStallEscapeOscillation` (progress-stall
+escape), and `TestSwitchBackCooldownDoesNotBlockGenuinelyNewChallenger`
+(`chainselection/switch_cooldown_test.go`).
 
 ## Network and Protocol Handling
 
@@ -5314,6 +5446,11 @@ a mismatch — a peer block landing mid-selection — rejects the candidate
 before VRF/KES signing (`selected parent changed during block assembly`)
 rather than relying solely on step 7's `Chain.AddLocalBlock` check, which
 still runs as the final backstop against any race not closed here.
+For a non-genesis parent, the candidate slot must be strictly later than the
+parent slot. Immediately before signing, the builder checks the parent again
+inside `Chain.WithTip`, which holds the primary chain mutex through header
+encoding and KES signing. External tip providers without that callback retain
+the final best-effort tip check; local chain admission remains authoritative.
 
 The forger tracks slot battles (competing blocks at the same slot) and skips forging when the node is not sufficiently synced, controlled by `forgeSyncToleranceSlots` and `forgeStaleGapThresholdSlots`.
 
@@ -6066,7 +6203,7 @@ Every read of a bootstrapped tree goes through one of them:
 | tree | opened by | read by |
 |---|---|---|
 | immutable | `findImmutableDir` / `chunkDirUnder` | `immutable.NewFromRootVerified`, once, reused for the trust-boundary tip read, the catch-up divergence check, and the blob copy (`node.WithImmutableDB`) |
-| ancillary | `ledgerDir` | the signed-manifest verification and the ledger-state import (`ledgerstate.OpenSnapshotAtOrBefore`, `ParseSnapshotFile`, `ImportConfig.State.UTxOTableFile`) |
+| ancillary | `ledgerDir` | the signed-manifest verification and the ledger-state import (`ledgerstate.OpenSnapshotAtOrBefore`, falling back to `ledgerstate.OpenNewestSnapshot` when verified and nothing qualifies at or before the certified tip, `ParseSnapshotFile`, `ImportConfig.State.UTxOTableFile`) |
 | extraction | `openVerifiedDir` | the ledger-state import's fallback, for v1 snapshots that keep the state in `db/ledger` |
 
 The v2 pipelined copy reads through the same handle extraction is writing
@@ -6297,12 +6434,29 @@ selecting the one after it.
 Tree selection carries one rule more, because emptying a tree is destruction
 rather than planting and would otherwise slip past the above. Nothing is looked
 at after an ancillary tree whose contents the ancillary key signed
-(`AncillaryVerified`), even when it yields no state: the extraction directory is
-not covered by that signature, so falling through would let whoever emptied the
-first tree choose the second. Where nothing was verified there is no downgrade
-to make and the fallback stays — v1 keeps its ledger state in the main archive,
-so looking there is how that layout works at all, and it is also what covers an
-ancillary tree holding only states newer than the certified tip.
+(`AncillaryVerified`), when it yields no usable state at any slot: the
+extraction directory is not covered by that signature, so falling through would
+let whoever emptied the first tree choose the second. Where nothing was
+verified there is no downgrade to make and the fallback stays — v1 keeps its
+ledger state in the main archive, so looking there is how that layout works at
+all.
+
+A verified ancillary tree holding only states newer than the certified
+ImmutableDB tip is the one case that is not treated as "yields no usable
+state": `selectLedgerStateSnapshot` (`mithril/sync_import.go`) retries such a
+tree with `ledgerstate.OpenNewestSnapshot`, which runs the same
+symlink/substitution-safe search with no slot ceiling, and accepts whatever it
+finds. That state is not a downgrade to an unsigned tree — the ancillary
+manifest signs it directly — so it is not the case the refusal above exists to
+prevent; it is the aggregator packaging the ancillary ledger state from the
+source node's volatile database, which can land past the certified boundary
+between the two being packaged. `mithril/sync.go`'s certified-tip guard accepts
+a slot past `certifiedTip` only when `selectLedgerStateSnapshot` reports it
+came from this path (`beyondCertifiedTip`); any other way of producing a slot
+past the certified tip still fails there. The raw blocks between the certified
+tip and that slightly-newer imported slot are not copied into the blob store by
+this path — they reach it the same way every block past the certified tip
+already does, through normal Ouroboros validation after the node starts.
 
 A symlinked UTxO table fails on the same rule rather than being reported
 absent: a caller cannot otherwise tell "this snapshot has no table" from "this
@@ -11607,6 +11761,15 @@ work, never correctness. A rollback or authoritative snapshot replacement
 therefore drops stale work and leaves the boundary path to recalculate. Pre-Babbage precomputation is deferred until applied block
 progress reaches the RUPD prefilter slot, which queues a retry using the actual
 captured slot; later eras can precompute immediately.
+`LedgerState.Start` queues the same work once for the epoch already in progress
+(`queueStartupRewardPrecompute`), because the epoch-transition event cannot fire
+for an epoch that began before the process did. Without that catch-up, a node
+started mid-epoch reaches its next boundary with no precompute and
+`applyStakeRewards` recalculates the whole round inline, inside the
+epoch-rollover write transaction on the block-processing goroutine — the exact
+serialization the async path exists to avoid. The catch-up is idempotent: an
+existing precompute is detected and skipped, and a node still syncing defers on
+the RUPD prefilter slot as above.
 The EventBus callback only queues this work. One background calculation runs at
 a time, and epoch transitions received while it runs are coalesced to the newest
 pending event. This prevents the minutes-long calculation from blocking
@@ -11907,6 +12070,76 @@ prevent — merely logging and returning does not. Regression tests:
 `TestTryResolveForkExtensionDoesNotThrashAlreadyRunningBlockfetch`, and
 `TestEnsureBlockfetchDrainingAfterForkQueueFailureRecoversWhenStartFails`
 (`ledger/chainsync_fork_queue_full_test.go`).
+
+**The success path's own blockfetch restart had the same gap.** The "ancestor
+is the local tip, extend without rollback" branch of `tryResolveFork` queues
+the fork-path headers successfully and then calls
+`restartQueuedBlockfetchAfterForkLocked(e.ConnectionId, ...)` to fetch their
+bodies. Unlike the queue-overflow failure path above, a failure here (for
+example `e.ConnectionId`'s connection closing between the fork-resolution
+decision and this dispatch — including via
+`ConnectionRecycleRequestedEvent`, which a rapid string of chain-selection
+reversals can itself trigger: a peer that just lost the active connection has
+its still-in-flight or now-stale blocks rejected as not extending the
+(already-moved) chain tip, and `noteNonExtendingBlockRejection` recycles it
+once enough of those land inside `nonExtendingBlockRejectionWindow`) was only
+logged (`"failed to start blockfetch after fork extension"`), leaving the
+just-queued headers with nothing ever scheduled to fetch their bodies —
+observed live as continuous reselection with no block-apply progress at all,
+the fork-extension counterpart of the queue-overflow stall documented above.
+`recoverBlockfetchRestartFailureLocked` (`ledger/chainsync.go`) closes it:
+first it retries the restart against whatever connection chain selection
+currently has active (mirroring the fallback `handleChainSwitchEvent` already
+uses for its own handoff target), and only if no live alternative exists (or
+that retry also fails) does it fall back to the queue-overflow path's own
+recovery — `clearQueuedHeaders` plus a chainsync re-sync
+(`ChainsyncResyncReasonForkExtensionRestartFailed`) — so the pipeline resumes
+on reconnect instead of idling forever. Regression tests:
+`TestRecoverBlockfetchRestartFailureRetriesLiveActiveConnection` and
+`TestRecoverBlockfetchRestartFailureFallsBackToResyncWithoutLiveConnection`
+(`ledger/chainsync_fork_extension_restart_test.go`).
+
+**The same success path also bypassed #1922's in-flight-batch protection
+through a side channel.** `handoffPipelineOnSwitchLocked`
+(`ledger/chainsync.go`, invoked from `detectConnectionSwitch` on a plain
+chain-selection switch) already lets an in-flight blockfetch batch run to
+completion across such a switch rather than canceling it (#1922, "preserve
+in-flight blockfetch batch across chain switch") — canceling on every switch
+of two peers alternating as best peer prevented blockfetch from ever
+completing a batch at all. But `restartQueuedBlockfetchAfterForkLocked`, called from the
+success path just described, did not share that protection: it
+unconditionally closed `chainsyncBlockfetchReadyChan` and restarted on
+`connId` even when a batch was already healthily in flight on a *different*
+connection. This caller runs on essentially every active-connection switch —
+the newly active connection's next header almost never fits a header queue
+built by the connection it replaced, so it resolves here as a
+from-current-tip "fork" — so it re-introduced exactly the bug #1922 fixed,
+through a path #1922 never touched. Because
+`handleEventBlockfetchBlockDeferred` only accepts a delivered block whose
+connection matches the *current* `activeBlockfetchConnId` (or the shadow
+connection), tearing down a batch and reassigning `activeBlockfetchConnId`
+discards every block already in flight from it, silently and without a
+counter. Confirmed live on a Preview instance running with
+`SwitchBackCooldown` already deployed and switch frequency measurably bounded
+to roughly one switch per cooldown window: the applied local tip still never
+advanced (`dingo_ledger_block_stage_duration_seconds{stage="apply"}` held at
+a zero sample count throughout) while blockfetch protocol messages kept
+arriving and being wire-decoded — the switch RATE was bounded, but one switch
+was still enough to discard whatever the previous batch had in flight, so no
+batch ever survived to completion.
+`restartQueuedBlockfetchAfterForkLocked` now defers to a healthy in-flight
+batch from a different connection exactly like `handoffPipelineOnSwitchLocked`
+does — `selectedBlockfetchConnId` still retargets to `connId` for the *next*
+batch, so the fork-extending headers still get fetched, just after the
+current batch finishes rather than by discarding it. A restart requested for
+the *same* connection that is already fetching still tears down and restarts
+unconditionally: there is no other peer being preempted in that case, and
+`TestStartQueuedBlockfetchAfterForkRestartClearsShadowState`
+(`ledger/chainsync_shadow_test.go`) depends on that path resetting per-batch
+shadow state. Regression tests:
+`TestRestartQueuedBlockfetchAfterForkPreservesInFlightBatchFromOtherConnection`
+and `TestRestartQueuedBlockfetchAfterForkStillRestartsSameConnection`
+(`ledger/chainsync_fork_extension_inflight_test.go`).
 
 **Metrics** (`ledger/metrics.go`): `decodeReadChainBatch` refreshes a set of
 gauges — `dingo_ledger_block_pipeline_blocks_decoded`,

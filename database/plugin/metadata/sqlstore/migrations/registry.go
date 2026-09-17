@@ -34,21 +34,22 @@ import (
 var migrationSQL embed.FS
 
 const (
-	initialSchemaRelease                       = "v1alpha1"
-	leiosKeySchemaRelease                      = "leios-key-registration"
-	tokenRegistrySchemaRelease                 = "token-registry-metadata"
-	accountBaselineSchemaRelease               = "account-import-baseline"
-	leiosSnapshotKeySchemaRelease              = "leios-snapshot-keys"
-	governanceRatificationHistorySchemaRelease = "governance-ratification-history"
-	accountDepositSchemaRelease                = "account-import-deposit"
-	committeeCredentialTagsSchemaRelease       = "committee-credential-tags"
-	committeeTermStartPresenceSchemaRelease    = "committee-term-start-presence"
-	rewardSeedFailureSchemaRelease             = "reward-seed-failure"
-	importedPoolBlockCountSchemaRelease        = "imported-pool-block-count"
-	poolDepositHeldSchemaRelease               = "pool-registration-deposit-held"
-	pointerAddressStakeSchemaRelease           = "pointer-address-stake"
-	collateralAssociationSchemaRelease         = "collateral-transaction-associations"
-	rewardStakeVersionRestampSchemaRelease     = "reward-stake-calculation-version-restamp"
+	initialSchemaRelease                          = "v1alpha1"
+	leiosKeySchemaRelease                         = "leios-key-registration"
+	tokenRegistrySchemaRelease                    = "token-registry-metadata"
+	accountBaselineSchemaRelease                  = "account-import-baseline"
+	leiosSnapshotKeySchemaRelease                 = "leios-snapshot-keys"
+	governanceRatificationHistorySchemaRelease    = "governance-ratification-history"
+	accountDepositSchemaRelease                   = "account-import-deposit"
+	committeeCredentialTagsSchemaRelease          = "committee-credential-tags"
+	committeeTermStartPresenceSchemaRelease       = "committee-term-start-presence"
+	rewardSeedFailureSchemaRelease                = "reward-seed-failure"
+	importedPoolBlockCountSchemaRelease           = "imported-pool-block-count"
+	poolDepositHeldSchemaRelease                  = "pool-registration-deposit-held"
+	pointerAddressStakeSchemaRelease              = "pointer-address-stake"
+	collateralAssociationSchemaRelease            = "collateral-transaction-associations"
+	rewardStakeVersionRestampSchemaRelease        = "reward-stake-calculation-version-restamp"
+	governanceProposalOptionalAnchorSchemaRelease = "governance-proposal-optional-anchor"
 )
 
 // schemaVersions names every migration in ascending version order.
@@ -83,6 +84,11 @@ var schemaVersions = []struct {
 		Version: 15,
 		Name:    rewardStakeVersionRestampSchemaRelease,
 		Dir:     "v15",
+	},
+	{
+		Version: 16,
+		Name:    governanceProposalOptionalAnchorSchemaRelease,
+		Dir:     "v16",
 	},
 }
 
@@ -130,6 +136,33 @@ func registryForDialect(dialect string) ([]Migration, error) {
 	for index, version := range schemaVersions {
 		sqlForDialect := loaded[index]
 		if dialect != "sqlite" {
+			nativeExpand, nativeExpandErr := loadOptionalSQL(
+				version.Dir + "/" + dialect + "/expand.sql",
+			)
+			nativeContract, nativeContractErr := loadOptionalSQL(
+				version.Dir + "/" + dialect + "/contract.sql",
+			)
+			if nativeExpandErr != nil {
+				return nil, nativeExpandErr
+			}
+			if nativeContractErr != nil {
+				return nil, nativeContractErr
+			}
+			if nativeExpand != nil || nativeContract != nil {
+				sqlForDialect = SQL{
+					Expand:   nativeExpand,
+					Contract: nativeContract,
+				}
+				ret = append(ret, Migration{
+					Version:          version.Version,
+					Name:             version.Name,
+					BackfillRevision: "none",
+					SQL: map[string]SQL{
+						dialect: sqlForDialect,
+					},
+				})
+				continue
+			}
 			sqlForDialect.Expand = translateSchemaSQLInSchema(
 				loaded[index].Expand,
 				dialect,
