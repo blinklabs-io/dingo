@@ -202,7 +202,9 @@ func TestComputeBlockCompositionPhase2FailedTransactionUsesProducedNotOutputs(
 	c := computeBlockComposition(block)
 
 	assert.Equal(
-		t, 1, c.utxoCreated,
+		t,
+		1,
+		c.utxoCreated,
 		"an invalid tx must count only its collateral return, not both ordinary outputs",
 	)
 	assert.Equal(
@@ -249,17 +251,61 @@ func TestObserveBlockCompositionRecordsUnderEraLabel(t *testing.T) {
 		certificates: 0,
 	})
 
-	assert.Equal(t, float64(1), blockCompositionCounterValue(m.blocksTotal, "Babbage"))
-	assert.Equal(t, float64(1), blockCompositionCounterValue(m.blocksTotal, "Conway"))
-	assert.Equal(t, float64(2), blockCompositionCounterValue(m.blockTransactionsTotal, "Babbage"))
-	assert.Equal(t, float64(1), blockCompositionCounterValue(m.blockTransactionsTotal, "Conway"))
-	assert.Equal(t, float64(1), blockCompositionCounterValue(m.blocksWithScriptsTotal, "Babbage"))
-	assert.Equal(t, float64(0), blockCompositionCounterValue(m.blocksWithScriptsTotal, "Conway"))
-	assert.Equal(t, float64(3), blockCompositionCounterValue(m.redeemersTotal, "Babbage"))
-	assert.Equal(t, float64(4), blockCompositionCounterValue(m.utxoCreatedTotal, "Babbage"))
-	assert.Equal(t, float64(5), blockCompositionCounterValue(m.utxoConsumedTotal, "Babbage"))
-	assert.Equal(t, float64(1), blockCompositionCounterValue(m.certificatesTotal, "Babbage"))
-	assert.Equal(t, float64(0), blockCompositionCounterValue(m.certificatesTotal, "Conway"))
+	assert.Equal(
+		t,
+		float64(1),
+		blockCompositionCounterValue(m.blocksTotal, "Babbage"),
+	)
+	assert.Equal(
+		t,
+		float64(1),
+		blockCompositionCounterValue(m.blocksTotal, "Conway"),
+	)
+	assert.Equal(
+		t,
+		float64(2),
+		blockCompositionCounterValue(m.blockTransactionsTotal, "Babbage"),
+	)
+	assert.Equal(
+		t,
+		float64(1),
+		blockCompositionCounterValue(m.blockTransactionsTotal, "Conway"),
+	)
+	assert.Equal(
+		t,
+		float64(1),
+		blockCompositionCounterValue(m.blocksWithScriptsTotal, "Babbage"),
+	)
+	assert.Equal(
+		t,
+		float64(0),
+		blockCompositionCounterValue(m.blocksWithScriptsTotal, "Conway"),
+	)
+	assert.Equal(
+		t,
+		float64(3),
+		blockCompositionCounterValue(m.redeemersTotal, "Babbage"),
+	)
+	assert.Equal(
+		t,
+		float64(4),
+		blockCompositionCounterValue(m.utxoCreatedTotal, "Babbage"),
+	)
+	assert.Equal(
+		t,
+		float64(5),
+		blockCompositionCounterValue(m.utxoConsumedTotal, "Babbage"),
+	)
+	assert.Equal(
+		t,
+		float64(1),
+		blockCompositionCounterValue(m.certificatesTotal, "Babbage"),
+	)
+	assert.Equal(
+		t,
+		float64(0),
+		blockCompositionCounterValue(m.certificatesTotal, "Conway"),
+	)
 
 	// Two distinct era labels, no more.
 	assert.Equal(t, 2, testutil.CollectAndCount(m.blocksTotal))
