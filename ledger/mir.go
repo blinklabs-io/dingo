@@ -23,6 +23,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/governance"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 )
 
 const (
@@ -66,14 +67,12 @@ const (
 //     (`hardforkAlonzoAllowMIRTransfer`); majors 2-4 (Shelley, Allegra, Mary)
 //     instead use `Map.union`, left-biased on the newer entry, so two
 //     positive certificates for one credential in a single pre-Alonzo epoch
-//     would net to only the later amount under the reference, while this
-//     fold sums both. This code does not thread protocol version into the
-//     boundary fold, so it keeps the additive sum for every era rather than
-//     branching on it: negative deltas are already rejected pre-Alonzo
-//     (`MIRNegativesNotCurrentlyAllowed`), and pre-#3981 each certificate was
-//     credited independently, which already produced this same sum, so
-//     summing here is not a regression against prior Dingo behavior even
-//     where it diverges from the reference's pre-Alonzo replace semantics.
+//     net to only the later amount under the reference rather than their
+//     sum. This fold branches on the ended epoch's era to match: it sums for
+//     era >= Alonzo and replaces with the latest certificate's amount
+//     otherwise. Negative deltas are already rejected pre-Alonzo
+//     (`MIRNegativesNotCurrentlyAllowed`), so this replace case only ever
+//     overwrites with another non-negative amount.
 //   - Registered, active reward accounts are credited the folded total from the
 //     source pot.
 //   - Credentials without a registered account are silently skipped — unlike
@@ -108,6 +107,7 @@ func (ls *LedgerState) applyMIRCerts(
 	txn *database.Txn,
 	epochStartSlot uint64,
 	boundarySlot uint64,
+	epochEraID uint,
 ) error {
 	effects, err := ls.db.GetMIRCertsInSlotRange(
 		epochStartSlot, boundarySlot, txn,
@@ -118,17 +118,12 @@ func (ls *LedgerState) applyMIRCerts(
 	if len(effects) == 0 {
 		return nil
 	}
-	boundary, err := ls.collectMIRBoundary(txn, effects)
+	boundary, err := ls.collectMIRBoundary(txn, effects, epochEraID)
 	if err != nil {
 		return err
 	}
 	if boundary.discard != "" {
-		ls.config.Logger.Warn(
-			"discarding uncreditable MIR at epoch boundary",
-			"slot", boundarySlot,
-			"reason", boundary.discard,
-			"component", "ledger",
-		)
+		ls.discardMIRBoundary(boundarySlot, boundary.discard)
 		return nil
 	}
 	if boundary.isEmpty() {
@@ -138,12 +133,12 @@ func (ls *LedgerState) applyMIRCerts(
 	if err != nil {
 		return fmt.Errorf("apply MIR certs: %w", err)
 	}
-	availableReserves, reservesOk := mirAvailablePot(
-		reserves, boundary.reservesIn, boundary.reservesOut,
-	)
-	availableTreasury, treasuryOk := mirAvailablePot(
-		treasury, boundary.treasuryIn, boundary.treasuryOut,
-	)
+	availableReserves, reservesOk := boundary.availablePot("reserves", reserves)
+	availableTreasury, treasuryOk := boundary.availablePot("treasury", treasury)
+	if boundary.discard != "" {
+		ls.discardMIRBoundary(boundarySlot, boundary.discard)
+		return nil
+	}
 	if !reservesOk || !treasuryOk ||
 		boundary.totalReserves > availableReserves ||
 		boundary.totalTreasury > availableTreasury {
@@ -171,6 +166,18 @@ func (ls *LedgerState) applyMIRCerts(
 	}
 	return ls.db.Metadata().
 		SetNetworkState(newTreasury, newReserves, boundarySlot, txn.Metadata())
+}
+
+// discardMIRBoundary logs why a folded MIR boundary cannot be credited at
+// all, the shared log line for every boundary.discard reason regardless of
+// which step set it.
+func (ls *LedgerState) discardMIRBoundary(boundarySlot uint64, reason string) {
+	ls.config.Logger.Warn(
+		"discarding uncreditable MIR at epoch boundary",
+		"slot", boundarySlot,
+		"reason", reason,
+		"component", "ledger",
+	)
 }
 
 // mirCredit is one registered-account credit selected for application at an
@@ -290,14 +297,22 @@ func (b *mirBoundary) addTransfer(sourcePot uint, amount uint64) {
 // added_slot then row ID and each certificate's rewards by row ID, so the
 // resulting credit order — and therefore the reward journal — is deterministic
 // for a given stored epoch.
+//
+// epochEraID gates how a repeated (pot, credential) entry combines with its
+// running total: additively for era >= Alonzo, matching `Map.unionWith (<>)`,
+// or replaced by the latest certificate's amount below Alonzo, matching
+// `Map.union`'s left bias on the newer entry. See the era discussion on
+// applyMIRCerts.
 func (ls *LedgerState) collectMIRBoundary(
 	txn *database.Txn,
 	effects []models.MIREffect,
+	epochEraID uint,
 ) (*mirBoundary, error) {
 	registered, err := ls.registeredMIRAccounts(txn, effects)
 	if err != nil {
 		return nil, err
 	}
+	additive := epochEraID >= alonzo.EraIdAlonzo
 	boundary := &mirBoundary{}
 	pending := make(map[mirPendingKey]*big.Int)
 	order := make([]mirPendingKey, 0, len(effects))
@@ -340,7 +355,11 @@ func (ls *LedgerState) collectMIRBoundary(
 				pending[key] = total
 				order = append(order, key)
 			}
-			total.Add(total, reward.Amount)
+			if additive {
+				total.Add(total, reward.Amount)
+			} else {
+				total.Set(reward.Amount)
+			}
 		}
 	}
 	for _, key := range order {
@@ -473,18 +492,32 @@ func (ls *LedgerState) applyMIRCredits(
 	return appliedReserves, appliedTreasury, nil
 }
 
-// mirAvailablePot folds the epoch's pot-to-pot transfers into a pot balance.
-// cardano-ledger computes `reserves + deltaReserves` over unbounded Coin, so a
-// net outflow larger than the pot yields a negative available balance and the
-// rule takes its no-op branch; ok=false reports that case. A uint64 overflow on
-// the inbound side has no cardano-ledger analogue either, since real chain
-// balances never approach it; it is folded into the same ok=false no-op
-// rather than an error, matching addTransfer and addCredit's overflow
-// handling, so corrupt stored state cannot wedge the node on retry.
-func mirAvailablePot(
-	balance, in, out uint64,
+// availablePot resolves name's ("reserves" or "treasury") balance after
+// folding the boundary's pot-to-pot transfers. cardano-ledger computes
+// `reserves + deltaReserves` over unbounded Coin, so a net outflow larger
+// than the available balance yields a negative one and the rule takes its
+// no-op branch; ok=false reports that case, logged by the capacity check's
+// own "skipping over-budget MIR" line in applyMIRCerts.
+//
+// A uint64 overflow on the inbound side has no cardano-ledger analogue
+// either, since real chain balances never approach it. Unlike the capacity
+// no-op, it discards the boundary through the same b.discard mechanism as
+// addCredit and addTransfer's overflow cases rather than the generic
+// over-budget warning, so the log names the actual overflow instead of
+// reporting zero distributed against it.
+func (b *mirBoundary) availablePot(
+	name string,
+	balance uint64,
 ) (available uint64, ok bool) {
+	in, out := b.reservesIn, b.reservesOut
+	if name == "treasury" {
+		in, out = b.treasuryIn, b.treasuryOut
+	}
 	if balance > ^uint64(0)-in {
+		b.discard = fmt.Sprintf(
+			"MIR pot transfer would overflow %s: pot has %d, moving %d",
+			name, balance, in,
+		)
 		return 0, false
 	}
 	available = balance + in
