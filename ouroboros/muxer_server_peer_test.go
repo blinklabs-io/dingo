@@ -17,9 +17,11 @@ package ouroboros
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
+	"slices"
 	"testing"
 	"time"
 
@@ -54,6 +56,10 @@ type muxerServerPeer struct {
 	peerConn net.Conn
 	errChan  chan error
 	muxer    *muxer.Muxer
+	// pending holds segment payload bytes read but not yet returned by
+	// readMessage, and pendingProtocolId the protocol those bytes belong to.
+	pending           []byte
+	pendingProtocolId uint16
 }
 
 // newMuxerServerPeer creates the net.Pipe pair and muxer, and returns the
@@ -135,4 +141,161 @@ func (p *muxerServerPeer) readResponse(
 	_, err := io.ReadFull(p.peerConn, payload)
 	require.NoError(t, err)
 	return &muxer.Segment{SegmentHeader: header, Payload: payload}
+}
+
+// readMessage returns the protocol ID and encoded bytes of the next single
+// protocol message, bounded by timeout.
+//
+// A muxer segment boundary is not a message boundary. gouroboros' protocol
+// send loop drains everything already queued into one payload buffer and
+// emits it as a single segment (up to maxMessagesPerSegment messages), and
+// splits a payload larger than muxer.SegmentMaxPayloadLength across several
+// segments. So whenever the server queues a second message before the send
+// loop has decided the boundary for the first, both messages arrive in one
+// segment; comparing a whole segment payload against one encoded message is
+// therefore racy. readMessage reassembles the byte stream and hands back
+// exactly one CBOR message per call, which is what the protocol actually
+// guarantees.
+//
+// Do not mix readMessage and readResponse on the same peer: readMessage
+// buffers whatever a segment carried past the message it returns, and
+// readResponse would read the connection past that buffer.
+func (p *muxerServerPeer) readMessage(
+	t *testing.T,
+	timeout time.Duration,
+) (uint16, []byte) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if len(p.pending) > 0 {
+			var raw cbor.RawMessage
+			n, err := cbor.Decode(p.pending, &raw)
+			switch {
+			case err == nil:
+				// Cap the returned slice so a later append for a
+				// continuation segment cannot write into it.
+				msg := p.pending[:n:n]
+				p.pending = p.pending[n:]
+				return p.pendingProtocolId, msg
+			case errors.Is(err, io.ErrUnexpectedEOF), errors.Is(err, io.EOF):
+				// Message split across segments; read the rest below.
+			default:
+				require.NoError(t, err, "decoding buffered segment payload")
+			}
+		}
+		remaining := time.Until(deadline)
+		require.Positive(
+			t,
+			remaining,
+			"timed out waiting for a complete protocol message",
+		)
+		segment := p.readResponse(t, remaining)
+		if len(p.pending) == 0 {
+			p.pendingProtocolId = segment.GetProtocolId()
+		} else {
+			require.Equal(
+				t,
+				p.pendingProtocolId,
+				segment.GetProtocolId(),
+				"segment for a different protocol split a buffered message",
+			)
+		}
+		p.pending = append(p.pending, segment.Payload...)
+	}
+}
+
+// encodeSegment returns the wire bytes of one raw segment, so a test can
+// present exactly the framing gouroboros' send loop is allowed to produce.
+func encodeSegment(t *testing.T, protocolId uint16, payload []byte) []byte {
+	t.Helper()
+	segment := muxer.NewSegment(protocolId, payload, true)
+	require.NotNil(t, segment)
+	buf := &bytes.Buffer{}
+	require.NoError(
+		t,
+		binary.Write(buf, binary.BigEndian, segment.SegmentHeader),
+	)
+	_, err := buf.Write(segment.Payload)
+	require.NoError(t, err)
+	return buf.Bytes()
+}
+
+// TestMuxerServerPeerReadMessage pins the framing readMessage exists for: a
+// segment boundary is not a message boundary, so a segment may carry several
+// messages and a message may span several segments. Asserting on whole
+// segment payloads made
+// TestBlockfetchServerRequestRangeRejectsInvalidEnd flaky whenever the
+// blockfetch send loop batched StartBatch and the first block body together.
+func TestMuxerServerPeerReadMessage(t *testing.T) {
+	const protocolId = uint16(3)
+	first, err := cbor.Encode([]any{uint(2)})
+	require.NoError(t, err)
+	second, err := cbor.Encode(
+		[]any{uint(4), cbor.NewByteString(bytes.Repeat([]byte{0xab}, 64))},
+	)
+	require.NoError(t, err)
+	third, err := cbor.Encode([]any{uint(5)})
+	require.NoError(t, err)
+
+	for _, test := range []struct {
+		name     string
+		segments [][]byte
+	}{
+		{
+			name:     "one message per segment",
+			segments: [][]byte{first, second, third},
+		},
+		{
+			name: "all messages batched into one segment",
+			segments: [][]byte{
+				slices.Concat(first, second, third),
+			},
+		},
+		{
+			name: "message split across segments",
+			segments: [][]byte{
+				slices.Concat(first, second[:10]),
+				slices.Concat(second[10:], third),
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			serverConn, peerConn := net.Pipe()
+			t.Cleanup(func() {
+				_ = serverConn.Close()
+				_ = peerConn.Close()
+			})
+			peer := &muxerServerPeer{peerConn: peerConn}
+			// Encode on the test goroutine: only the blocking writes
+			// belong in the writer, which cannot call require.
+			wire := make([][]byte, 0, len(test.segments))
+			for _, payload := range test.segments {
+				wire = append(
+					wire,
+					encodeSegment(t, protocolId, payload),
+				)
+			}
+			written := make(chan error, 1)
+			go func() {
+				for _, segment := range wire {
+					if _, err := serverConn.Write(segment); err != nil {
+						written <- err
+						return
+					}
+				}
+				written <- nil
+			}()
+			for _, want := range [][]byte{first, second, third} {
+				gotProtocolId, got := peer.readMessage(t, 5*time.Second)
+				require.Equal(t, protocolId, gotProtocolId)
+				require.Equal(t, want, got)
+			}
+			select {
+			case err := <-written:
+				require.NoError(t, err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("segment writer did not finish")
+			}
+		})
+	}
 }
