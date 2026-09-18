@@ -485,3 +485,110 @@ func TestHardForkSummaryCache_ConcurrentAccessIsRaceFree(t *testing.T) {
 		require.NoError(t, err)
 	}
 }
+
+// TestHardForkSummaryCache_ServesCachedResultWithinGeneration asserts that the
+// cache is actually consulted, which no other test in this package does: the
+// four invalidation tests above, the concurrency test, and the whole rest of
+// the ledger suite all pass unchanged when the cache lookup is removed
+// entirely, because they only prove a *stale* result is never served. Without
+// this test a refactor that made the key never match would stay green while
+// silently restoring the per-call O(known epochs) rebuild that issue #2093 was
+// filed for.
+//
+// Pointer identity is the assertion rather than value equality precisely
+// because the published state is left untouched across the repeated calls: a
+// rebuild produces an equal Summary at a different address, so only identity
+// distinguishes a served cache entry from a fresh walk.
+func TestHardForkSummaryCache_ServesCachedResultWithinGeneration(t *testing.T) {
+	t.Parallel()
+
+	cache := []models.Epoch{
+		{
+			EpochId:       0,
+			StartSlot:     0,
+			SlotLength:    1000,
+			LengthInSlots: 100,
+			EraId:         1,
+		},
+		{
+			EpochId:       1,
+			StartSlot:     100,
+			SlotLength:    1000,
+			LengthInSlots: 100,
+			EraId:         1,
+		},
+	}
+	ls := &LedgerState{
+		epochCache: cache,
+		currentEra: eras.EraDesc{Id: 1, Name: "Shelley"},
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(150, []byte("tip")),
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	first, err := ls.HardForkSummary()
+	require.NoError(t, err)
+	second, err := ls.HardForkSummary()
+	require.NoError(t, err)
+	assert.Same(
+		t,
+		first,
+		second,
+		"a repeated call within one publication generation must be served "+
+			"from the cache, not rebuilt",
+	)
+
+	// A new publication generation must force a rebuild even though no
+	// summary input actually changed: generation is the whole invalidation
+	// signal, so it cannot be skipped when the published values compare equal.
+	ls.Lock()
+	ls.publishSnapshotsLocked()
+	ls.Unlock()
+
+	third, err := ls.HardForkSummary()
+	require.NoError(t, err)
+	assert.NotSame(
+		t,
+		second,
+		third,
+		"a new publication generation must invalidate the cached entry",
+	)
+	assert.Equal(
+		t,
+		second,
+		third,
+		"republishing unchanged state must rebuild to an equal summary",
+	)
+
+	fourth, err := ls.HardForkSummary()
+	require.NoError(t, err)
+	assert.Same(
+		t,
+		third,
+		fourth,
+		"the rebuilt entry must itself be cached at the new generation",
+	)
+
+	// The horizon anchor is the other half of the key: a different anchor at
+	// the same generation must not be served the anchor-0 entry.
+	anchored, err := ls.hardForkSummaryAnchoredAt(20_000)
+	require.NoError(t, err)
+	assert.NotSame(
+		t,
+		fourth,
+		anchored,
+		"a different horizon anchor must not be served another anchor's entry",
+	)
+	anchoredAgain, err := ls.hardForkSummaryAnchoredAt(20_000)
+	require.NoError(t, err)
+	assert.Same(
+		t,
+		anchored,
+		anchoredAgain,
+		"a repeated call at the same anchor and generation must be cached",
+	)
+}
