@@ -491,32 +491,27 @@ func (p *PeerChainTip) SelectionTip() ochainsync.Tip {
 	return p.Tip
 }
 
-// AwaitingFirstHeader reports whether the peer has not delivered a header for
-// its current delivered frontier, so SelectionTip is a bare point carrying no
-// block number: an entry registered from a post-FindIntersect RollBackward
-// (newPeerChainTipFromRollback), a RollBackward on a tracked peer that landed
-// outside the retained delivered-header history, or a rollback to origin.
+// AwaitingFirstHeader reports whether chain selection registered this peer
+// from a chainsync rollback (newPeerChainTipFromRollback, the post-FindIntersect
+// MsgRollBackward on a connection it was not tracking) and the peer has not
+// delivered a header since. For such a peer SelectionTip is the point its
+// session intersected at, carrying no block number, and it does not move until
+// the peer's first RollForward arrives: it is evidence of the intersection and
+// nothing else. Callers that reason about how far a peer has got need to tell
+// that apart from a delivered frontier.
 //
-// Callers that reason about how far a peer has got need this, because for such
-// a peer the delivered frontier is the point the session intersected at rather
-// than anything the peer has shown us, and it does not move until the peer's
-// first RollForward arrives.
-//
-// The test is an approximation: SelectionTip().BlockNumber == 0 is a proxy for
-// "no header delivered", and it is also true for a peer whose delivered
-// frontier genuinely IS block 0, and for one registered from an advertised
-// origin tip. That is harmless at the sole call site in the chainsync
-// recycler's plateau watchdog, which only substitutes the advertised tip when
-// it is strictly greater than the delivered one: for an origin peer that guard
-// is 0 > 0 and the substitution does not happen, and a node pinned at block 0
-// while a peer is ahead is exactly the plateau the resync exists for. A second
-// consumer inherits the approximation rather than the property the name states,
-// so it must either carry an equivalent guard or distinguish the cases itself.
+// It reads the awaitingFirstHeader flag rather than testing for a zero
+// delivered block number, because the two are not the same property. A tracked
+// peer that has delivered headers and then rolls back to a point outside its
+// retained delivered-header history is also left with a zero block number
+// (ApplyRollback keeps the point and cannot recover a block number for it),
+// but it has delivered headers on this connection and is not awaiting its
+// first one. So is a peer whose delivered frontier genuinely is origin.
 func (p *PeerChainTip) AwaitingFirstHeader() bool {
 	if p == nil {
 		return false
 	}
-	return p.SelectionTip().BlockNumber == 0
+	return p.awaitingFirstHeader
 }
 
 // Touch marks the peer as recently active without changing its advertised tip.

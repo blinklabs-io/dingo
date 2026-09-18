@@ -517,6 +517,13 @@ func (r *Recycler) checkLocalTipPlateau(
 	// correct throughout that window, so use it while the peer is still
 	// awaiting its first header.
 	//
+	// "Awaiting its first header" is the flag chain selection sets when it
+	// registers a peer from a rollback, NOT a delivered block number of 0. A
+	// tracked peer that has delivered headers and then rolls back outside its
+	// retained delivered-header history is also left with block number 0, but
+	// it has delivered headers on this connection, so it is judged on its
+	// delivered frontier like any other and its advertisement is not used.
+	//
 	// This only ever runs because chain selection tracks that peer. The
 	// sequence a plateau resync sets off is: the resync closes the connection
 	// (LocalTipPlateau is in chainsyncResyncRequiresFreshConnection,

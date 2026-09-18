@@ -651,34 +651,47 @@ func TestTickResyncsOnLocalTipPlateau(t *testing.T) {
 	)
 }
 
-// rollbackRegisteredPeer hand-builds the peer tip a peer holds immediately
-// after a plateau resync: its DELIVERED frontier is the point its session
-// intersected at, carrying no block number, while its ADVERTISED tip is well
-// ahead. It is the shape ApplyRollback produces for a rollback point outside
-// the retained delivered-header history, and the shape
-// newPeerChainTipFromRollback records for a connection chain selection has
-// seen no header from at all.
+// rollbackRegisteredPeer returns the peer tip a peer holds immediately after a
+// plateau resync: its DELIVERED frontier is the point its session intersected
+// at, carrying no block number, while its ADVERTISED tip is well ahead. It is
+// obtained from a real ChainSelector that registers the peer from its
+// post-FindIntersect rollback (registerPeerFromRollbackLocked), because only
+// that path records the peer as awaiting its first header. Hand-building the
+// shape with NewPeerChainTip plus ApplyRollback does not: a rollback outside
+// the retained delivered-header history zeroes the delivered block number too,
+// but that is a peer which HAS delivered a header, and it is not awaiting one
+// (see TestTickDoesNotResyncAfterADeliveredPeerRollsBackOutsideItsHistory).
 //
-// The tests below pair it with fakeChainSelector, so they exercise the
-// watchdog's decision GIVEN that peer tip and prove nothing about whether
-// chain selection ever hands the watchdog one. It does, but only through the
-// rollback registration and the awaiting-first-header selectability exemption
-// in chainselection; that half is covered end to end against a real
-// ChainSelector in recycler_chainselection_test.go, and reverting either of
-// those two chainselection changes turns
+// The tests below pair the returned tip with fakeChainSelector, so they
+// exercise the watchdog's decision GIVEN that peer tip and prove nothing about
+// whether chain selection ever hands the watchdog one as its best peer. It
+// does, but only through the rollback registration and the
+// awaiting-first-header selectability exemption in chainselection; that half
+// is covered end to end against a real ChainSelector in
+// recycler_chainselection_test.go, and reverting either of those two
+// chainselection changes turns
 // TestTickResyncsOnPlateauAfterRecycleWithRealChainSelector red.
 func rollbackRegisteredPeer(
 	connId ouroboros.ConnectionId,
 	intersectSlot uint64,
 	advertisedSlot uint64,
 ) *chainselection.PeerChainTip {
-	advertised := testTip(advertisedSlot, advertisedSlot/2)
-	peerTip := chainselection.NewPeerChainTip(connId, advertised, nil)
-	peerTip.ApplyRollback(
-		ocommon.NewPoint(intersectSlot, []byte("intersect")),
-		advertised,
-	)
-	return peerTip
+	sel := chainselection.NewChainSelector(chainselection.ChainSelectorConfig{
+		Logger: discardLogger(),
+		ConnectionLive: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+		DisableEventSubscriptions: true,
+	})
+	sel.HandlePeerRollbackEvent(event.NewEvent(
+		chainselection.PeerRollbackEventType,
+		chainselection.PeerRollbackEvent{
+			ConnectionId: connId,
+			Point:        ocommon.NewPoint(intersectSlot, []byte("intersect")),
+			Tip:          testTip(advertisedSlot, advertisedSlot/2),
+		},
+	))
+	return sel.GetPeerTip(connId)
 }
 
 // TestTickResyncsOnPlateauWhenBestPeerAwaitsFirstHeader is the watchdog's
