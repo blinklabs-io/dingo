@@ -22,7 +22,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
-	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 // pendingAddDrainTimeout bounds how long a rollback waits for block adds whose
@@ -77,18 +76,22 @@ const pendingAddDrainTimeout = 30 * time.Second
 // in-tree caller -- including the per-block blockfetch path that runs at chain
 // tip -- passes a nil transaction and touches this barrier not at all.
 type pendingAddBarrier struct {
-	// mu guards pending and drained. pending is a set, not a count: one
-	// transaction may carry any number of adds, and its single OnFinish
-	// callback releases all of them at once. drained is closed when pending
+	// mu guards pending, active, discarded, and drained. pending is a set, not
+	// a count: one transaction may carry any number of adds, and an OnFinish
+	// callback releases all of them at once. active counts add attempts that
+	// have reserved the shared exclusion but have not returned. drained closes
+	// when pending
 	// empties, and is nil whenever pending is empty.
 	//
 	// expired holds the subset of pending that outlived a removal path's
 	// wait. It exists so that wait is paid once rather than once per
 	// removal; see awaitDrained.
-	mu      sync.Mutex
-	pending map[*database.Txn][]callerTxnAdd
-	drained chan struct{}
-	expired map[*database.Txn]struct{}
+	mu        sync.Mutex
+	pending   map[*database.Txn][]callerTxnAdd
+	active    map[*database.Txn]int
+	discarded map[*database.Txn]int
+	drained   chan struct{}
+	expired   map[*database.Txn]struct{}
 }
 
 // callerTxnAdd records the chain state immediately before one block was added
@@ -96,19 +99,11 @@ type pendingAddBarrier struct {
 // the last compatible snapshot keeps the in-memory tip from naming a block
 // that the store never committed.
 type callerTxnAdd struct {
-	tip        ochainsync.Tip
-	tipIndex   uint64
-	generation uint64
-	headers    []queuedHeader
-	blocks     []ocommon.Point
-}
-
-// holds reports whether txn is currently recorded as carrying an in-flight add.
-func (b *pendingAddBarrier) holds(txn *database.Txn) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	_, ok := b.pending[txn]
-	return ok
+	tip              ochainsync.Tip
+	tipIndex         uint64
+	generation       uint64
+	headerGeneration uint64
+	headers          []queuedHeader
 }
 
 // hold records txn as carrying an in-flight add. It reports whether this is the
@@ -119,6 +114,10 @@ func (b *pendingAddBarrier) holds(txn *database.Txn) bool {
 func (b *pendingAddBarrier) hold(txn *database.Txn) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.active == nil {
+		b.active = make(map[*database.Txn]int)
+	}
+	b.active[txn]++
 	if _, ok := b.pending[txn]; ok {
 		return false
 	}
@@ -142,13 +141,9 @@ func (b *pendingAddBarrier) record(txn *database.Txn, add callerTxnAdd) {
 
 // discardLast drops the snapshot recorded for an add that then failed.
 //
-// A transaction carries a hold for exactly as long as it carries at least one
-// in-flight add, so discarding the last snapshot drops the hold with it. An
-// add that fails before addBlockLocked mutated anything leaves its transaction
-// carrying nothing, and a hold for such a transaction is a removal path
-// waiting for a chain add that does not exist: it would pay
-// pendingAddDrainTimeout and then abort the rollback. A later add on the same
-// transaction takes a fresh hold.
+// The active-attempt reservation keeps a concurrent attempt from losing its
+// future record when this snapshot is discarded. completeAttempt drops the
+// hold only once every attempt has returned and no successful snapshot remains.
 func (b *pendingAddBarrier) discardLast(txn *database.Txn) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -156,11 +151,27 @@ func (b *pendingAddBarrier) discardLast(txn *database.Txn) {
 	if !ok || len(adds) == 0 {
 		return
 	}
-	if len(adds) == 1 {
-		b.releaseLocked(txn)
+	b.pending[txn] = adds[:len(adds)-1]
+	if b.discarded == nil {
+		b.discarded = make(map[*database.Txn]int)
+	}
+	b.discarded[txn]++
+}
+
+// completeAttempt drops one add attempt's active reservation. A rejected-only
+// transaction releases its otherwise-empty hold once every concurrent attempt
+// has left the add path; a successful attempt keeps the hold through finish.
+func (b *pendingAddBarrier) completeAttempt(txn *database.Txn) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.active[txn] > 1 {
+		b.active[txn]--
 		return
 	}
-	b.pending[txn] = adds[:len(adds)-1]
+	delete(b.active, txn)
+	if len(b.pending[txn]) == 0 && b.discarded[txn] > 0 {
+		b.releaseLocked(txn)
+	}
 }
 
 func (b *pendingAddBarrier) adds(txn *database.Txn) []callerTxnAdd {
@@ -189,6 +200,8 @@ func (b *pendingAddBarrier) releaseLocked(txn *database.Txn) {
 		return
 	}
 	delete(b.pending, txn)
+	delete(b.active, txn)
+	delete(b.discarded, txn)
 	delete(b.expired, txn)
 	if len(b.pending) == 0 && b.drained != nil {
 		close(b.drained)
@@ -270,12 +283,10 @@ func (b *pendingAddBarrier) markExpired() int {
 // caller that adds a block and then rolls the chain back on the same goroutine
 // deadlock against its own hold.
 //
-// An add on a transaction already recorded skips the exclusion entirely. A
-// rollback draining right now is already waiting for that transaction, so the
-// add widens nothing -- while queueing it behind the rollback's write lock
-// would pair a rollback waiting on a transaction with the goroutine that owns
-// that transaction waiting on the rollback, and neither would move until the
-// drain expired.
+// Every attempt takes the exclusion before reserving the transaction's hold.
+// Otherwise a failed first attempt can release the hold after a concurrent
+// second attempt has observed it but before that second attempt records its
+// snapshot, leaving the successful add invisible to rollback.
 func (c *Chain) beginCallerTxnAdd(txn *database.Txn) func() {
 	// A nil transaction leaves the store write to the chain, which commits it
 	// before the tip advances. A non-persistent chain writes to the manager's
@@ -284,14 +295,14 @@ func (c *Chain) beginCallerTxnAdd(txn *database.Txn) func() {
 	if txn == nil || !c.persistent {
 		return func() {}
 	}
-	if c.pendingAdds.holds(txn) {
-		return func() {}
-	}
 	c.batchCommitMutex.RLock()
 	if c.pendingAdds.hold(txn) {
 		txn.OnFinish(func() { c.finishCallerTxnAdd(txn) })
 	}
-	return c.batchCommitMutex.RUnlock
+	return func() {
+		c.pendingAdds.completeAttempt(txn)
+		c.batchCommitMutex.RUnlock()
+	}
 }
 
 // beginStandaloneAdd prevents a standalone add from being built on a
@@ -314,10 +325,11 @@ func (c *Chain) recordCallerTxnAdd(txn *database.Txn) {
 		return
 	}
 	c.pendingAdds.record(txn, callerTxnAdd{
-		tip:        c.currentTip,
-		tipIndex:   c.tipBlockIndex,
-		generation: c.mutationGeneration,
-		headers:    append([]queuedHeader(nil), c.headers...),
+		tip:              c.currentTip,
+		tipIndex:         c.tipBlockIndex,
+		generation:       c.mutationGeneration,
+		headerGeneration: c.headerMutationGeneration,
+		headers:          append([]queuedHeader(nil), c.headers...),
 	})
 }
 
@@ -327,14 +339,18 @@ func (c *Chain) recordCallerTxnAdd(txn *database.Txn) {
 // resurrect a state that no longer describes the store.
 func (c *Chain) finishCallerTxnAdd(txn *database.Txn) {
 	adds := c.pendingAdds.adds(txn)
-	if txn.IsCommitted() || len(adds) == 0 {
+	committed := txn.IsCommitted()
+	if committed || len(adds) == 0 {
+		c.finishPendingTxnEvents(txn, committed)
 		c.pendingAdds.release(txn)
+		c.PublishPendingChainUpdates()
 		return
 	}
 	c.mutex.Lock()
 	for i := len(adds) - 1; i >= 0; i-- {
 		add := adds[i]
-		if c.tipBlockIndex != add.tipIndex+1 || c.mutationGeneration != add.generation+1 {
+		if c.tipBlockIndex != add.tipIndex+1 ||
+			c.mutationGeneration != add.generation+1 {
 			slog.Default().Error(
 				"skipped in-memory restore after caller transaction rollback: chain moved under the add",
 				"component", "chain",
@@ -347,13 +363,15 @@ func (c *Chain) finishCallerTxnAdd(txn *database.Txn) {
 		c.currentTip = add.tip
 		c.tipBlockIndex = add.tipIndex
 		c.mutationGeneration = add.generation
-		c.headers = add.headers
-		if !c.persistent {
-			c.blocks = add.blocks
+		if c.headerMutationGeneration == add.headerGeneration+1 {
+			c.headerMutationGeneration = add.headerGeneration
+			c.headers = add.headers
 		}
 	}
 	c.mutex.Unlock()
+	c.finishPendingTxnEvents(txn, false)
 	c.pendingAdds.release(txn)
+	c.PublishPendingChainUpdates()
 }
 
 // awaitPendingCallerAdds waits for the adds whose store write is still in a

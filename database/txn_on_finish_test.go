@@ -123,3 +123,21 @@ func TestOnFinishCallbackMayTakeLocks(t *testing.T) {
 	require.NoError(t, txn.Commit())
 	require.True(t, held.TryLock(), "nested callback never ran")
 }
+
+// TestOnFinishNestedRegistrationRunsImmediately documents the intentional
+// exception to pre-finish registration order: once finished is set, a nested
+// registration runs inline rather than joining callbacks already dequeued.
+func TestOnFinishNestedRegistrationRunsImmediately(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	txn := db.BlobTxn(true)
+	var order []string
+	txn.OnFinish(func() {
+		order = append(order, "first")
+		txn.OnFinish(func() { order = append(order, "nested") })
+	})
+	txn.OnFinish(func() { order = append(order, "second") })
+	require.NoError(t, txn.Rollback())
+	require.Equal(t, []string{"first", "nested", "second"}, order)
+}

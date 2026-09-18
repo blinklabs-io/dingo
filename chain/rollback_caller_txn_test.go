@@ -22,6 +22,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -112,28 +113,25 @@ func TestRollbackWaitsForUncommittedCallerTransaction(t *testing.T) {
 	// The rollback must still be waiting: reaching its removal loop now is
 	// exactly the defect, and it reports it as a not-found index rather than
 	// by blocking.
-	select {
-	case err := <-done:
-		t.Fatalf(
-			"rollback resolved indices of an uncommitted caller transaction instead of waiting: %v",
-			err,
-		)
-	case <-time.After(500 * time.Millisecond):
-	}
+	waitUntilGoroutineIn(t, "chain.(*pendingAddBarrier).awaitDrained")
+	testutil.RequireNoReceive(
+		t,
+		done,
+		50*time.Millisecond,
+		"rollback resolved an uncommitted caller transaction",
+	)
 
 	if err := txn.Commit(); err != nil {
 		t.Fatalf("commit caller transaction: %v", err)
 	}
 
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("rollback after the caller transaction committed: %v", err)
-		}
-	case <-time.After(30 * time.Second):
-		t.Fatal(
-			"rollback did not resume after the caller transaction committed",
-		)
+	if err := testutil.RequireReceive(
+		t,
+		done,
+		30*time.Second,
+		"rollback did not resume after the caller transaction committed",
+	); err != nil {
+		t.Fatalf("rollback after the caller transaction committed: %v", err)
 	}
 
 	if tip := c.Tip(); tip.Point.Slot != testBlocks[2].SlotNumber() {
@@ -167,16 +165,13 @@ func TestRollbackResumesWhenCallerTransactionRollsBack(t *testing.T) {
 	// ending" from "waited the barrier out".
 	done := make(chan error, 1)
 	go func() { done <- c.Rollback(rollbackPoint()) }()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("rollback after caller transaction rollback: %v", err)
-		}
-	case <-time.After(15 * time.Second):
-		t.Fatal(
-			"rollback did not resume after the caller transaction rolled back: " +
-				"the barrier is released only on commit",
-		)
+	if err := testutil.RequireReceive(
+		t,
+		done,
+		15*time.Second,
+		"rollback did not resume after the caller transaction rolled back",
+	); err != nil {
+		t.Fatalf("rollback after caller transaction rollback: %v", err)
 	}
 	if tip := c.Tip(); tip.Point.Slot != testBlocks[2].SlotNumber() {
 		t.Fatalf("unexpected tip after rollback of caller transaction: %+v", tip)
@@ -193,22 +188,24 @@ func TestStandaloneAddDoesNotBuildOnAbortedCallerAdd(t *testing.T) {
 
 	result := make(chan error, 1)
 	go func() { result <- c.AddBlock(testBlocks[5], nil) }()
-	select {
-	case err := <-result:
-		t.Fatalf("dependent standalone add completed before caller transaction: %v", err)
-	case <-time.After(500 * time.Millisecond):
-	}
+	waitUntilGoroutineIn(t, "chain.(*pendingAddBarrier).awaitDrained")
+	testutil.RequireNoReceive(
+		t,
+		result,
+		50*time.Millisecond,
+		"dependent standalone add completed before caller transaction",
+	)
 
 	if err := txn.Rollback(); err != nil {
 		t.Fatalf("rollback caller transaction: %v", err)
 	}
-	select {
-	case err := <-result:
-		if err == nil {
-			t.Fatal("dependent standalone add succeeded after caller transaction rollback")
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("dependent standalone add did not resume after caller transaction rollback")
+	if err := testutil.RequireReceive(
+		t,
+		result,
+		5*time.Second,
+		"dependent standalone add did not resume after caller transaction rollback",
+	); err == nil {
+		t.Fatal("dependent standalone add succeeded after caller transaction rollback")
 	}
 	if tip := c.Tip(); tip.Point.Slot != testBlocks[3].SlotNumber() {
 		t.Fatalf("unexpected tip after dependent add: %+v", tip)

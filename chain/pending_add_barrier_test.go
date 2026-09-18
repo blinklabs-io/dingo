@@ -92,12 +92,11 @@ func TestCallerTxnHoldSkipped(t *testing.T) {
 	}
 }
 
-// TestRepeatAddOnHeldTxnSkipsTheExclusion pins that a second add on a
-// transaction already recorded neither records again nor queues behind the
-// removal path's write hold. Queueing it there would pair a rollback waiting on
-// a transaction with the goroutine that owns that transaction waiting on the
-// rollback, and neither would move until the drain expired.
-func TestRepeatAddOnHeldTxnSkipsTheExclusion(t *testing.T) {
+// TestRepeatAddOnHeldTxnTakesTheExclusion pins that every add attempt takes the
+// shared side before touching the transaction's hold. Otherwise two concurrent
+// adds can race a failed first attempt dropping the shared hold while the
+// second attempt has not recorded its snapshot yet.
+func TestRepeatAddOnHeldTxnTakesTheExclusion(t *testing.T) {
 	db := newBarrierTestDB(t)
 	c := &Chain{persistent: true}
 	txn := db.BlobTxn(true)
@@ -105,21 +104,52 @@ func TestRepeatAddOnHeldTxnSkipsTheExclusion(t *testing.T) {
 	c.beginCallerTxnAdd(txn)()
 
 	c.batchCommitMutex.Lock()
-	defer c.batchCommitMutex.Unlock()
 	done := make(chan struct{})
+	started := make(chan struct{})
 	go func() {
 		defer close(done)
+		close(started)
 		c.beginCallerTxnAdd(txn)()
 	}()
+	<-started
+	select {
+	case <-done:
+		t.Fatal("repeat add bypassed the removal path's write exclusion")
+	default:
+	}
+	c.batchCommitMutex.Unlock()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal(
-			"repeat add on an already-recorded transaction queued behind the removal path",
-		)
+		t.Fatal("repeat add did not resume after the exclusion was released")
 	}
 	if got := c.pendingAdds.heldCount(); got != 1 {
 		t.Fatalf("repeat add recorded %d holds, want 1", got)
+	}
+}
+
+// TestFailedConcurrentAttemptCannotDropAnotherSnapshot pins the race between
+// two adds sharing one transaction. The second attempt reserves the hold before
+// the first discards its failed snapshot, so its later record cannot be lost.
+func TestFailedConcurrentAttemptCannotDropAnotherSnapshot(t *testing.T) {
+	t.Parallel()
+
+	db := newBarrierTestDB(t)
+	c := &Chain{persistent: true}
+	txn := db.BlobTxn(true)
+	defer txn.Release()
+	endFirst := c.beginCallerTxnAdd(txn)
+	c.pendingAdds.record(txn, callerTxnAdd{})
+	endSecond := c.beginCallerTxnAdd(txn)
+	c.pendingAdds.discardLast(txn)
+	endFirst()
+	c.pendingAdds.record(txn, callerTxnAdd{})
+	endSecond()
+	if got := len(c.pendingAdds.adds(txn)); got != 1 {
+		t.Fatalf("second add recorded %d snapshots, want 1", got)
+	}
+	if got := c.pendingAdds.heldCount(); got != 1 {
+		t.Fatalf("failed first add dropped the shared hold: %d holds", got)
 	}
 }
 

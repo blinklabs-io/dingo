@@ -534,8 +534,8 @@ func (t *Txn) runAfterCommitCallback(fn func()) {
 // OnFinish registers fn to run once this transaction has reached its terminal
 // state, on every path that gets it there: a successful commit, a failed
 // commit, an explicit Rollback, a Release, and the rollback Commit performs for
-// a read-only transaction. Callbacks run in registration order, exactly once,
-// without the transaction lock held.
+// a read-only transaction. Callbacks registered before the transaction finishes
+// run in registration order, exactly once, without the transaction lock held.
 //
 // It is deliberately weaker than AfterCommit, and that is the point. AfterCommit
 // carries a durability claim ("this transaction committed") and so does not fire
@@ -547,7 +547,10 @@ func (t *Txn) runAfterCommitCallback(fn func()) {
 //
 // Registration on an already-finished transaction runs fn immediately rather
 // than dropping it, so an acquire-then-register sequence cannot lose its release
-// to a transaction that concluded in between. A callback that panics has its
+// to a transaction that concluded in between. This includes registration from
+// a callback already being dispatched: the nested callback runs immediately and
+// may therefore precede callbacks that were queued before the transaction
+// finished. A callback that panics has its
 // panic recovered and logged: it neither reaches the goroutine that finished the
 // transaction nor stops the remaining callbacks from running, so one caller's
 // bug cannot strand another caller's hold.
@@ -572,28 +575,22 @@ func (t *Txn) OnFinish(fn func()) {
 // Commit's deferred cleanup also runs on the path where a provider panicked
 // mid-commit: there the transaction is not terminal yet -- the recovery rollback
 // still owns that transition -- and firing "this transaction is over" before it
-// actually is would release a hold the transaction still needs. Draining in a
-// loop picks up callbacks a callback registers. Concurrent drains take disjoint
-// callbacks, so exactly-once holds without a dispatching flag.
+// actually is would release a hold the transaction still needs. Registrations
+// made after finished is set run inline in OnFinish and never join this queue.
 func (t *Txn) dispatchOnFinish() {
 	if !t.onFinishArmed.Load() {
 		return
 	}
-	for {
-		t.lock.Lock()
-		if !t.finished {
-			t.lock.Unlock()
-			return
-		}
-		callbacks := t.onFinish
-		t.onFinish = nil
+	t.lock.Lock()
+	if !t.finished {
 		t.lock.Unlock()
-		if len(callbacks) == 0 {
-			return
-		}
-		for _, fn := range callbacks {
-			t.runFinishCallback(fn)
-		}
+		return
+	}
+	callbacks := t.onFinish
+	t.onFinish = nil
+	t.lock.Unlock()
+	for _, fn := range callbacks {
+		t.runFinishCallback(fn)
 	}
 }
 

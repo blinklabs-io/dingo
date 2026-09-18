@@ -15,6 +15,7 @@
 package chain_test
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -176,5 +177,93 @@ func TestRejectedFirstCallerAddLeavesNoBarrierHold(t *testing.T) {
 		t.Fatal(
 			"rollback waited on a caller transaction that carries no chain add",
 		)
+	}
+}
+
+// TestClearHeadersDuringCallerTxnSurvivesAbort pins that restoring an aborted
+// block add never resurrects a header queue cleared after that add.
+func TestClearHeadersDuringCallerTxnSurvivesAbort(t *testing.T) {
+	t.Parallel()
+
+	db, c := headerRestoreChain(t)
+	txn := db.BlobTxn(true)
+	defer txn.Release()
+	if err := c.AddBlock(testBlocks[3], txn); err != nil {
+		t.Fatalf("AddBlock on caller transaction: %v", err)
+	}
+	c.ClearHeaders()
+	if err := txn.Rollback(); err != nil {
+		t.Fatalf("rollback caller transaction: %v", err)
+	}
+	if got := c.HeaderCount(); got != 0 {
+		t.Fatalf("rollback resurrected %d cleared headers", got)
+	}
+	if tip := c.Tip(); tip.Point.Slot != testBlocks[2].SlotNumber() {
+		t.Fatalf("aborted add left the tip advanced: %+v", tip)
+	}
+}
+
+// TestHeaderQueuedDuringCallerTxnSurvivesAbort pins the other header-only
+// mutation: a later header must not be overwritten by the add's old snapshot.
+func TestHeaderQueuedDuringCallerTxnSurvivesAbort(t *testing.T) {
+	t.Parallel()
+
+	db, c := headerRestoreChain(t)
+	txn := db.BlobTxn(true)
+	defer txn.Release()
+	if err := c.AddBlock(testBlocks[3], txn); err != nil {
+		t.Fatalf("AddBlock on caller transaction: %v", err)
+	}
+	next := &MockBlock{
+		MockBlockNumber: 7,
+		MockSlot:        120,
+		MockHash:        testHashPrefix + "0007",
+		MockPrevHash:    testHashPrefix + "0006",
+	}
+	if err := c.AddBlockHeader(next); err != nil {
+		t.Fatalf("AddBlockHeader during caller transaction: %v", err)
+	}
+	if err := txn.Rollback(); err != nil {
+		t.Fatalf("rollback caller transaction: %v", err)
+	}
+	if got := c.HeaderCount(); got != 3 {
+		t.Fatalf("queue holds %d headers after abort, want 3", got)
+	}
+	_, end := c.HeaderRange(10)
+	if end.Slot != next.SlotNumber() {
+		t.Fatalf("rollback dropped later header: end slot %d, want %d", end.Slot, next.SlotNumber())
+	}
+	if tip := c.Tip(); tip.Point.Slot != testBlocks[2].SlotNumber() {
+		t.Fatalf("aborted add left the tip advanced: %+v", tip)
+	}
+}
+
+// TestQueuedHeaderRollbackWithoutSecurityParamStillRefuses verifies that the
+// pre-wait fast path preserves Rollback's persistent-chain configuration gate.
+func TestQueuedHeaderRollbackWithoutSecurityParamStillRefuses(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	c := cm.PrimaryChain()
+	for i, block := range testBlocks[:3] {
+		if err := c.AddBlock(block, nil); err != nil {
+			t.Fatalf("AddBlock(%d): %v", i, err)
+		}
+	}
+	for i, block := range testBlocks[3:] {
+		if err := c.AddBlockHeader(block); err != nil {
+			t.Fatalf("AddBlockHeader(%d): %v", i+3, err)
+		}
+	}
+	err = c.Rollback(headerPoint(testBlocks[3]))
+	if !errors.Is(err, chain.ErrSecurityParamNotConfigured) {
+		t.Fatalf("Rollback error = %v, want ErrSecurityParamNotConfigured", err)
+	}
+	if got := c.HeaderCount(); got != 3 {
+		t.Fatalf("refused rollback trimmed queue to %d headers, want 3", got)
 	}
 }
