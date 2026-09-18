@@ -549,11 +549,19 @@ func (s *Store) GetPool(
 // consulted only when (1) finds nothing.
 //
 // Retirement precedence (a later re-registration can cancel an earlier
-// retirement) is deliberately left to the existing live-state check in
-// activePoolOrNil rather than reimplemented here against epochStartSlot:
-// retirement timing is not the defect this method fixes, and reusing the
-// same logic GetPool already relies on avoids a second, divergent
-// implementation of it.
+// retirement, and an already-effective retirement invalidates a
+// registration that predates it) is resolved against epochStartSlot's own
+// epoch, mirroring GetActivePoolKeyHashesAtSlot's precedence rule --
+// deliberately NOT against the live tip (activePoolOrNil's contract): a
+// pool that retired, and later submitted a fresh registration for a
+// DIFFERENT key, un-retires via that new registration (cardano-ledger
+// treats it as a first registration, not a deferred re-registration,
+// since the pool had left psStakePools). Checking retirement against
+// "now" rather than epochStartSlot let that pool's stale, pre-retirement
+// registration for its OLD key still resolve as active_owner here,
+// reporting the old key in use when the pool no longer holds it --
+// reintroducing this method's own bug class (caught in review;
+// TestGetPoolByVrfKeyHashFreesKeyAfterRetirementThenDifferentKeyReRegistration).
 func (s *Store) GetPoolByVrfKeyHash(
 	vrfKeyHash []byte,
 	epochStartSlot uint64,
@@ -572,16 +580,26 @@ func (s *Store) GetPoolByVrfKeyHash(
 	// later history just never happened to touch this key again), and a
 	// retired candidate must not shadow a different, genuinely active pool
 	// that legitimately re-registered the same, by-then-free key. Trying
-	// every candidate in tier order and returning the first one
-	// activePoolOrNil confirms is still active is what makes retirement
-	// correctly fall through to the next candidate instead of resolving
-	// the whole lookup to nil.
+	// every ranked candidate in tier order and returning the first one
+	// the query already confirms is active (via the retirement precedence
+	// below) is what makes retirement correctly fall through to the next
+	// candidate instead of resolving the whole lookup to nil.
 	rows, err := db.QueryContext(ctx, `
 WITH candidates AS (
     SELECT DISTINCT pool_id FROM pool_registration WHERE vrf_key_hash = ?
 ),
+-- epoch_bound resolves to NULL, not an error, when no epoch row covers
+-- epochStartSlot (e.g. a test fixture with no epoch data seeded): a
+-- retirement is then never treated as confirmed-effective, which fails
+-- toward "still active" rather than incorrectly freeing a key.
+epoch_bound AS (
+    SELECT epoch_id FROM epoch WHERE start_slot <= ?
+    ORDER BY start_slot DESC LIMIT 1
+),
 pre_boundary AS (
-    SELECT pr.pool_id, pr.vrf_key_hash,
+    SELECT pr.pool_id, pr.vrf_key_hash, pr.added_slot,
+           COALESCE(t.block_index, 0) blk_idx,
+           COALESCE(c.cert_index, 0) cert_idx,
            ROW_NUMBER() OVER (
                PARTITION BY pr.pool_id
                ORDER BY pr.added_slot DESC,
@@ -595,7 +613,9 @@ pre_boundary AS (
     WHERE pr.added_slot < ?
 ),
 earliest AS (
-    SELECT pr.pool_id, pr.vrf_key_hash,
+    SELECT pr.pool_id, pr.vrf_key_hash, pr.added_slot,
+           COALESCE(t.block_index, 0) blk_idx,
+           COALESCE(c.cert_index, 0) cert_idx,
            ROW_NUMBER() OVER (
                PARTITION BY pr.pool_id
                ORDER BY pr.added_slot ASC,
@@ -607,17 +627,68 @@ earliest AS (
     LEFT JOIN certs c ON c.id = pr.certificate_id
     LEFT JOIN "transaction" t ON t.id = c.transaction_id
 ),
-active_owner AS (
-    SELECT cd.pool_id
+effective_reg AS (
+    SELECT cd.pool_id,
+           COALESCE(pb.vrf_key_hash, ea.vrf_key_hash) vrf_key_hash,
+           COALESCE(pb.added_slot, ea.added_slot) added_slot,
+           COALESCE(pb.blk_idx, ea.blk_idx) blk_idx,
+           COALESCE(pb.cert_idx, ea.cert_idx) cert_idx
     FROM candidates cd
     LEFT JOIN pre_boundary pb ON pb.pool_id = cd.pool_id AND pb.rn = 1
     LEFT JOIN earliest ea ON ea.pool_id = cd.pool_id AND ea.rn = 1
-    WHERE COALESCE(pb.vrf_key_hash, ea.vrf_key_hash) = ?
+),
+-- Not slot-bounded: a retirement certificate's own added_slot only
+-- matters for precedence against a registration (which happened more
+-- recently), not for whether epochStartSlot has "seen" it yet -- that is
+-- what comparing epoch_bound against rt.epoch (the retirement's target
+-- epoch) below is for.
+latest_ret AS (
+    SELECT rt.pool_id, rt.added_slot, rt.epoch,
+           CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END synthetic_ret,
+           COALESCE(t.block_index, 0) blk_idx,
+           COALESCE(c.cert_index, 0) cert_idx,
+           ROW_NUMBER() OVER (
+               PARTITION BY rt.pool_id
+               ORDER BY rt.added_slot DESC,
+                        CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END DESC,
+                        COALESCE(t.block_index, 0) DESC,
+                        COALESCE(c.cert_index, 0) DESC
+           ) rn
+    FROM pool_retirement rt
+    JOIN candidates cd ON cd.pool_id = rt.pool_id
+    LEFT JOIN certs c ON c.id = rt.certificate_id
+    LEFT JOIN "transaction" t ON t.id = c.transaction_id
+),
+-- Whether a candidate pool is retired as of epochStartSlot, independent
+-- of which key or tier is being asked about: a retired pool must not
+-- claim a key through EITHER tier. Applied to both below, not only
+-- active_owner -- restricting it to active_owner alone still let a
+-- retired pool's own same-epoch registration leak through
+-- same_epoch_claimant unfiltered (caught alongside the finding above by
+-- TestGetPoolByVrfKeyHashExcludesRetiredPool regressing against this
+-- fix's first draft).
+pool_active AS (
+    SELECT er.pool_id
+    FROM effective_reg er
+    LEFT JOIN latest_ret lrt ON lrt.pool_id = er.pool_id AND lrt.rn = 1
+    WHERE lrt.pool_id IS NULL
+      OR lrt.added_slot < er.added_slot
+      OR (lrt.added_slot = er.added_slot AND lrt.synthetic_ret = 0 AND lrt.blk_idx < er.blk_idx)
+      OR (lrt.added_slot = er.added_slot AND lrt.synthetic_ret = 0 AND lrt.blk_idx = er.blk_idx AND lrt.cert_idx < er.cert_idx)
+      OR lrt.epoch > (SELECT epoch_id FROM epoch_bound)
+      OR (SELECT epoch_id FROM epoch_bound) IS NULL
+),
+active_owner AS (
+    SELECT er.pool_id
+    FROM effective_reg er
+    JOIN pool_active pa ON pa.pool_id = er.pool_id
+    WHERE er.vrf_key_hash = ?
 ),
 same_epoch_claimant AS (
     SELECT DISTINCT pr.pool_id
     FROM pool_registration pr
     JOIN candidates cd ON cd.pool_id = pr.pool_id
+    JOIN pool_active pa ON pa.pool_id = pr.pool_id
     WHERE pr.vrf_key_hash = ? AND pr.added_slot >= ?
 )
 SELECT pool_id, 0 AS tier FROM active_owner
@@ -625,6 +696,7 @@ UNION
 SELECT pool_id, 1 AS tier FROM same_epoch_claimant
 ORDER BY tier, pool_id`,
 		vrfKeyHash,
+		slotValue,
 		slotValue,
 		vrfKeyHash,
 		vrfKeyHash,
@@ -655,6 +727,12 @@ ORDER BY tier, pool_id`,
 			continue
 		}
 		seen[poolID] = struct{}{}
+		// The query already resolved retirement precedence as of
+		// epochStartSlot (see active_owner above), so a candidate
+		// reaching here is confirmed active at that boundary -- no
+		// second, live-tense check (activePoolOrNil) is applied, since
+		// that would reintroduce exactly the inconsistency this method
+		// exists to avoid.
 		pool, err := queryPool(ctx, db, "id = ?", poolID)
 		if err != nil {
 			return nil, err
@@ -665,13 +743,7 @@ ORDER BY tier, pool_id`,
 		if err := s.loadPoolAssociations(ctx, db, pool, true); err != nil {
 			return nil, err
 		}
-		active, err := s.activePoolOrNil(ctx, db, pool)
-		if err != nil {
-			return nil, err
-		}
-		if active != nil {
-			return active, nil
-		}
+		return pool, nil
 	}
 	return nil, nil
 }

@@ -433,6 +433,82 @@ func TestGetPoolByVrfKeyHashClaimsSupersededSameEpochFutureKey(
 	require.Equal(t, poolKey, got.PoolKeyHash)
 }
 
+// TestGetPoolByVrfKeyHashFreesKeyAfterRetirementThenDifferentKeyReRegistration
+// is the regression test for a human reviewer finding on this PR:
+// activePoolOrNil checked retirement against the live database tip, not
+// against epochStartSlot. A pool that retires and later submits a fresh
+// registration for a DIFFERENT key un-retires via that new registration
+// (cardano-ledger treats it as a first registration, not a deferred
+// re-registration, since the pool had left psStakePools). Checking
+// retirement against "now" let that pool's stale, pre-retirement
+// registration for its OLD key still resolve as active, reporting the old
+// key in use when the pool no longer holds it -- this PR's own bug class,
+// reintroduced.
+func TestGetPoolByVrfKeyHashFreesKeyAfterRetirementThenDifferentKeyReRegistration(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+
+	poolP := make([]byte, 28)
+	poolP[0] = 1
+	keyA := make([]byte, 32)
+	keyA[0] = 0xA
+	keyB := make([]byte, 32)
+	keyB[0] = 0xB
+
+	// P registers with key A early.
+	require.NoError(t, store.ImportPool(
+		&models.Pool{PoolKeyHash: poolP, VrfKeyHash: keyA},
+		&models.PoolRegistration{
+			PoolKeyHash: poolP,
+			VrfKeyHash:  keyA,
+			AddedSlot:   5,
+		},
+		nil,
+	))
+	// P retires, effective epoch 1 (well before epoch 4).
+	require.NoError(t, store.RetirePools(nil, [][]byte{poolP}, 1, 110))
+	// Long after the retirement has taken effect, P submits a fresh
+	// registration with a DIFFERENT key B -- this is what "un-retires" P.
+	require.NoError(t, store.ImportPool(
+		&models.Pool{PoolKeyHash: poolP, VrfKeyHash: keyB},
+		&models.PoolRegistration{
+			PoolKeyHash: poolP,
+			VrfKeyHash:  keyB,
+			AddedSlot:   410,
+		},
+		nil,
+	))
+
+	require.NoError(
+		t,
+		store.SetEpoch(0, 1, nil, nil, nil, nil, 0, 100, 100, nil),
+	)
+	require.NoError(
+		t,
+		store.SetEpoch(400, 4, nil, nil, nil, nil, 0, 100, 100, nil),
+	)
+	require.NoError(t, store.SetTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 405, Hash: []byte("tip")},
+		BlockNumber: 1,
+	}, nil))
+
+	// Querying key A at the start of epoch 4: P is already retired as of
+	// this boundary, and its old registration for A predates that
+	// retirement, so A must be reported free -- B's later, still-pending
+	// re-registration must not resurrect P as A's owner.
+	got, err := store.GetPoolByVrfKeyHash(keyA, 400, nil)
+	require.NoError(t, err)
+	require.Nil(
+		t,
+		got,
+		"P retired before this boundary; its stale registration for A "+
+			"must not resurrect as active via a later, different-key "+
+			"re-registration",
+	)
+}
+
 func TestCommitTimestamp(t *testing.T) {
 	t.Parallel()
 	store := newManagementTestStore(t)
