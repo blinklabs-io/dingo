@@ -18,27 +18,12 @@ import (
 	"math/big"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/stretchr/testify/require"
 )
-
-// publishEmptyEpochSnapshot gives a bare, hand-constructed LedgerState (as
-// newRewardCalculationTestLedger builds) a non-nil published consensus
-// snapshot. LedgerView.IsVrfKeyInUse reads the current epoch's start slot
-// from that snapshot (issue #4352); a LedgerState that never published one
-// has a nil *consensusSnapshot and panics on the dereference. These tests
-// don't exercise any VRF-key-deferral scenario, so an epoch starting at
-// slot 0 is sufficient -- only avoiding the nil dereference matters here.
-func publishEmptyEpochSnapshot(ls *LedgerState) {
-	ls.Lock()
-	defer ls.Unlock()
-	ls.currentEpoch = models.Epoch{StartSlot: 0}
-	ls.publishSnapshotsLocked()
-}
 
 // dijkstraPoolCertTx builds a real *gdijkstra.DijkstraTransaction carrying a
 // single pool registration certificate with the given margin, for exercising
@@ -96,7 +81,6 @@ func TestValidateTxDijkstraRejectsBelowFloorPoolMarginThroughLedgerView(
 
 	ls, _ := newRewardCalculationTestLedger(t)
 	ls.config.MinPoolMargin = 150 // 1.5%
-	publishEmptyEpochSnapshot(ls)
 	lv := &LedgerView{ls: ls}
 
 	tx := dijkstraPoolCertTx(1, 1000) // 0.1%, below the 1.5% floor
@@ -117,7 +101,6 @@ func TestValidateTxDijkstraAcceptsAtOrAboveFloorPoolMarginThroughLedgerView(
 	t.Run("at floor", func(t *testing.T) {
 		ls, _ := newRewardCalculationTestLedger(t)
 		ls.config.MinPoolMargin = 150 // 1.5%
-		publishEmptyEpochSnapshot(ls)
 		lv := &LedgerView{ls: ls}
 
 		tx := dijkstraPoolCertTx(150, 10_000) // exactly 1.5%
@@ -135,7 +118,6 @@ func TestValidateTxDijkstraAcceptsAtOrAboveFloorPoolMarginThroughLedgerView(
 	t.Run("above floor", func(t *testing.T) {
 		ls, _ := newRewardCalculationTestLedger(t)
 		ls.config.MinPoolMargin = 150 // 1.5%
-		publishEmptyEpochSnapshot(ls)
 		lv := &LedgerView{ls: ls}
 
 		tx := dijkstraPoolCertTx(5, 100) // 5%
@@ -153,7 +135,6 @@ func TestValidateTxDijkstraAcceptsAtOrAboveFloorPoolMarginThroughLedgerView(
 	t.Run("floor disabled", func(t *testing.T) {
 		ls, _ := newRewardCalculationTestLedger(t)
 		ls.config.MinPoolMargin = 0
-		publishEmptyEpochSnapshot(ls)
 		lv := &LedgerView{ls: ls}
 
 		// Even a zero margin cert must not trip the rule when the floor is
