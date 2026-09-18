@@ -486,16 +486,17 @@ func (s *Store) ClaimFallbackRewardSnapshot(
 			updated, err := queries.UpdateFallbackRewardSnapshot(
 				ctx,
 				sqlitequery.UpdateFallbackRewardSnapshotParams{
-					TotalActiveStake:   params.TotalActiveStake,
-					TotalPoolCount:     params.TotalPoolCount,
-					TotalDelegators:    params.TotalDelegators,
-					CapturedSlot:       params.CapturedSlot,
-					BoundarySlot:       params.BoundarySlot,
-					EpochNonce:         params.EpochNonce,
-					ProtocolVersion:    params.ProtocolVersion,
-					CalculationVersion: params.CalculationVersion,
-					Epoch:              params.Epoch,
-					SnapshotType:       params.SnapshotType,
+					TotalActiveStake:    params.TotalActiveStake,
+					TotalPoolCount:      params.TotalPoolCount,
+					TotalDelegators:     params.TotalDelegators,
+					CapturedSlot:        params.CapturedSlot,
+					BoundarySlot:        params.BoundarySlot,
+					EpochNonce:          params.EpochNonce,
+					ProtocolVersion:     params.ProtocolVersion,
+					CalculationVersion:  params.CalculationVersion,
+					ExcludedActiveStake: params.ExcludedActiveStake,
+					Epoch:               params.Epoch,
+					SnapshotType:        params.SnapshotType,
 				},
 			)
 			if err == nil && updated == 1 {
@@ -1018,7 +1019,10 @@ boundary_slot = excluded.boundary_slot`
 	}
 	lookupQuery := s.dialect.Rebind(
 		`SELECT o.id, o.epoch, o.credential_tag, o.staking_key, o.pool_key_hash, o.reward_type
-FROM reward_account_output o JOIN (` + strings.Join(rowSelects, " UNION ALL ") + `) v
+FROM reward_account_output o JOIN (` + strings.Join(
+			rowSelects,
+			" UNION ALL ",
+		) + `) v
 ON o.epoch = v.epoch AND o.credential_tag = v.credential_tag AND
    o.staking_key = v.staking_key AND o.pool_key_hash = v.pool_key_hash AND
    o.reward_type = v.reward_type`,
@@ -1383,17 +1387,18 @@ func (s *Store) deleteRewardPair(
 }
 
 type rewardSnapshotQueryParams struct {
-	Epoch              int64
-	SnapshotType       string
-	TotalActiveStake   string
-	TotalPoolCount     int64
-	TotalDelegators    int64
-	CapturedSlot       int64
-	BoundarySlot       int64
-	EpochNonce         []byte
-	ProtocolVersion    int64
-	Authoritative      bool
-	CalculationVersion int64
+	Epoch               int64
+	SnapshotType        string
+	TotalActiveStake    string
+	TotalPoolCount      int64
+	TotalDelegators     int64
+	CapturedSlot        int64
+	BoundarySlot        int64
+	EpochNonce          []byte
+	ProtocolVersion     int64
+	Authoritative       bool
+	CalculationVersion  int64
+	ExcludedActiveStake sql.NullString
 }
 
 func rewardSnapshotParams(
@@ -1427,18 +1432,26 @@ func rewardSnapshotParams(
 	if err != nil {
 		return rewardSnapshotQueryParams{}, err
 	}
+	var excludedActiveStake sql.NullString
+	if snapshot.ExcludedActiveStake != nil {
+		excludedActiveStake = sql.NullString{
+			String: decimalUint64(*snapshot.ExcludedActiveStake),
+			Valid:  true,
+		}
+	}
 	return rewardSnapshotQueryParams{
-		Epoch:              epoch,
-		SnapshotType:       snapshot.SnapshotType,
-		TotalActiveStake:   decimalUint64(snapshot.TotalActiveStake),
-		TotalPoolCount:     totalPoolCount,
-		TotalDelegators:    totalDelegators,
-		CapturedSlot:       capturedSlot,
-		BoundarySlot:       boundarySlot,
-		EpochNonce:         snapshot.EpochNonce,
-		ProtocolVersion:    protocolVersion,
-		Authoritative:      snapshot.Authoritative,
-		CalculationVersion: calculationVersion,
+		Epoch:               epoch,
+		SnapshotType:        snapshot.SnapshotType,
+		TotalActiveStake:    decimalUint64(snapshot.TotalActiveStake),
+		TotalPoolCount:      totalPoolCount,
+		TotalDelegators:     totalDelegators,
+		CapturedSlot:        capturedSlot,
+		BoundarySlot:        boundarySlot,
+		EpochNonce:          snapshot.EpochNonce,
+		ProtocolVersion:     protocolVersion,
+		Authoritative:       snapshot.Authoritative,
+		CalculationVersion:  calculationVersion,
+		ExcludedActiveStake: excludedActiveStake,
 	}, nil
 }
 
@@ -1452,19 +1465,31 @@ func rewardSnapshotFromSQLite(
 	if err != nil {
 		return nil, err
 	}
+	var excludedActiveStake *types.Uint64
+	if row.ExcludedActiveStake.Valid {
+		excluded, err := parseUint64(
+			"reward excluded active stake",
+			row.ExcludedActiveStake.String,
+		)
+		if err != nil {
+			return nil, err
+		}
+		excludedActiveStake = (*types.Uint64)(&excluded)
+	}
 	return &models.RewardSnapshot{
-		ID:                 uint(row.ID),
-		Epoch:              uint64(row.Epoch),
-		SnapshotType:       row.SnapshotType,
-		TotalActiveStake:   types.Uint64(totalActiveStake),
-		TotalPoolCount:     uint64(row.TotalPoolCount),
-		TotalDelegators:    uint64(row.TotalDelegators),
-		CapturedSlot:       uint64(row.CapturedSlot),
-		BoundarySlot:       uint64(row.BoundarySlot),
-		EpochNonce:         row.EpochNonce,
-		ProtocolVersion:    uint(row.ProtocolVersion),
-		Authoritative:      row.Authoritative,
-		CalculationVersion: uint(row.CalculationVersion),
+		ID:                  uint(row.ID),
+		Epoch:               uint64(row.Epoch),
+		SnapshotType:        row.SnapshotType,
+		TotalActiveStake:    types.Uint64(totalActiveStake),
+		ExcludedActiveStake: excludedActiveStake,
+		TotalPoolCount:      uint64(row.TotalPoolCount),
+		TotalDelegators:     uint64(row.TotalDelegators),
+		CapturedSlot:        uint64(row.CapturedSlot),
+		BoundarySlot:        uint64(row.BoundarySlot),
+		EpochNonce:          row.EpochNonce,
+		ProtocolVersion:     uint(row.ProtocolVersion),
+		Authoritative:       row.Authoritative,
+		CalculationVersion:  uint(row.CalculationVersion),
 	}, nil
 }
 

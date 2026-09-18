@@ -31,6 +31,8 @@ import (
 )
 
 func TestParseVoteSigningKey(t *testing.T) {
+	t.Parallel()
+
 	key, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 42))
 	require.NoError(t, err)
 	require.NotNil(t, key)
@@ -40,11 +42,15 @@ func TestParseVoteSigningKey(t *testing.T) {
 }
 
 func TestParseVoteSigningKeyRejectsZero(t *testing.T) {
+	t.Parallel()
+
 	_, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 0))
 	assert.ErrorIs(t, err, ErrInvalidSigningKey)
 }
 
 func TestParseVoteSigningKeyRejectsAboveModulus(t *testing.T) {
+	t.Parallel()
+
 	// The scalar field modulus itself is out of range (no silent
 	// reduction)
 	modulusHex := hex.EncodeToString(fr.Modulus().Bytes())
@@ -53,6 +59,8 @@ func TestParseVoteSigningKeyRejectsAboveModulus(t *testing.T) {
 }
 
 func TestParseVoteSigningKeyRejectsMalformed(t *testing.T) {
+	t.Parallel()
+
 	for _, input := range []string{
 		"",
 		"zz",
@@ -68,6 +76,8 @@ func TestParseVoteSigningKeyRejectsMalformed(t *testing.T) {
 // path: operator key files must never be silently reduced mod the scalar
 // field modulus.
 func TestParseVoteSigningKeyStillRejectsUnreducedScalars(t *testing.T) {
+	t.Parallel()
+
 	// An out-of-range scalar.
 	padded := make([]byte, voteSigningKeySize)
 	padded[0] = 0xf3
@@ -85,6 +95,8 @@ func TestParseVoteSigningKeyStillRejectsUnreducedScalars(t *testing.T) {
 }
 
 func TestLoadVoteSigningKeyFile(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	path := filepath.Join(dir, "vote.skey")
 	// Trailing whitespace must be tolerated
@@ -99,6 +111,8 @@ func TestLoadVoteSigningKeyFile(t *testing.T) {
 }
 
 func TestLoadVoteSigningKeyFileCardanoTextEnvelope(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	path := filepath.Join(dir, "bls.skey")
 	scalar := make([]byte, voteSigningKeySize)
@@ -119,6 +133,8 @@ func TestLoadVoteSigningKeyFileCardanoTextEnvelope(t *testing.T) {
 }
 
 func TestLoadVoteSigningKeyFileRejectsTrailingCbor(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	path := filepath.Join(dir, "bls.skey")
 	scalar := make([]byte, voteSigningKeySize)
@@ -137,6 +153,8 @@ func TestLoadVoteSigningKeyFileRejectsTrailingCbor(t *testing.T) {
 }
 
 func TestLoadVoteSigningKeyFileRejectsUnsupportedEnvelope(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	path := filepath.Join(dir, "node.skey")
 	content := `{"type":"Node KES Signing Key","description":"","cborHex":"582001"}`
@@ -148,6 +166,8 @@ func TestLoadVoteSigningKeyFileRejectsUnsupportedEnvelope(t *testing.T) {
 }
 
 func TestLoadVoteSigningKeyFileRejectsLoosePermissions(t *testing.T) {
+	t.Parallel()
+
 	if runtime.GOOS == "windows" {
 		t.Skip("file permission checks are not enforced on windows")
 	}
@@ -162,6 +182,8 @@ func TestLoadVoteSigningKeyFileRejectsLoosePermissions(t *testing.T) {
 }
 
 func TestLoadVoteSigningKeyFileMissing(t *testing.T) {
+	t.Parallel()
+
 	_, err := LoadVoteSigningKeyFile(
 		filepath.Join(t.TempDir(), "does-not-exist"),
 	)
@@ -169,6 +191,8 @@ func TestLoadVoteSigningKeyFileMissing(t *testing.T) {
 }
 
 func TestParseVoterPublicKey(t *testing.T) {
+	t.Parallel()
+
 	key, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 42))
 	require.NoError(t, err)
 	pubHex := hex.EncodeToString(key.PublicKeyBytes())
@@ -178,6 +202,8 @@ func TestParseVoterPublicKey(t *testing.T) {
 }
 
 func TestParseVoterPublicKeyRejectsMalformed(t *testing.T) {
+	t.Parallel()
+
 	for _, input := range []string{
 		"",
 		"zz",
@@ -201,6 +227,8 @@ func TestParseVoterPublicKeyRejectsMalformed(t *testing.T) {
 }
 
 func TestNewVoterRegistry(t *testing.T) {
+	t.Parallel()
+
 	key1, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 11))
 	require.NoError(t, err)
 	key2, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 22))
@@ -225,6 +253,8 @@ func TestNewVoterRegistry(t *testing.T) {
 }
 
 func TestNewVoterRegistryEmpty(t *testing.T) {
+	t.Parallel()
+
 	registry, err := NewVoterRegistry(nil)
 	require.NoError(t, err)
 	assert.Equal(t, 0, registry.Size())
@@ -233,6 +263,8 @@ func TestNewVoterRegistryEmpty(t *testing.T) {
 }
 
 func TestVoterRegistryZeroValueRegister(t *testing.T) {
+	t.Parallel()
+
 	key, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 11))
 	require.NoError(t, err)
 	var registry VoterRegistry
@@ -245,6 +277,8 @@ func TestVoterRegistryZeroValueRegister(t *testing.T) {
 }
 
 func TestNewVoterRegistryRejectsInvalidEntries(t *testing.T) {
+	t.Parallel()
+
 	key, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 11))
 	require.NoError(t, err)
 	pubHex := hex.EncodeToString(key.PublicKeyBytes())
@@ -263,6 +297,8 @@ func TestNewVoterRegistryRejectsInvalidEntries(t *testing.T) {
 }
 
 func TestNewVoterRegistryNormalizesPoolHashCase(t *testing.T) {
+	t.Parallel()
+
 	key, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 11))
 	require.NoError(t, err)
 	poolHashHex := "ABCDEF" + testPoolHash(0)[6:]
@@ -277,6 +313,8 @@ func TestNewVoterRegistryNormalizesPoolHashCase(t *testing.T) {
 }
 
 func TestNewVoterRegistryRejectsWrongLengthPoolHash(t *testing.T) {
+	t.Parallel()
+
 	key, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 11))
 	require.NoError(t, err)
 	// Valid hex, but not a 28-byte pool key hash
@@ -287,6 +325,8 @@ func TestNewVoterRegistryRejectsWrongLengthPoolHash(t *testing.T) {
 }
 
 func TestNewVoterRegistryRejectsDuplicateNormalizedEntries(t *testing.T) {
+	t.Parallel()
+
 	key, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 11))
 	require.NoError(t, err)
 	pubHex := hex.EncodeToString(key.PublicKeyBytes())
@@ -302,6 +342,8 @@ func TestNewVoterRegistryRejectsDuplicateNormalizedEntries(t *testing.T) {
 }
 
 func TestLoadVoteSigningKeyFileRejectsOversized(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	path := filepath.Join(dir, "vote.skey")
 	content := fmt.Sprintf("%064x", 42) + strings.Repeat(" ", 2048)

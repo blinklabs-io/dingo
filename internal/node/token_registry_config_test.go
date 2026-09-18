@@ -31,6 +31,8 @@ import (
 //
 // dingo.NewConfigFromInternal is a different path and cannot catch this.
 func TestBuildDingoConfigCarriesTokenRegistry(t *testing.T) {
+	t.Parallel()
+
 	cfg := &config.Config{
 		TokenRegistry: config.TokenRegistryConfig{
 			Enabled:               true,
@@ -72,6 +74,8 @@ func TestBuildDingoConfigCarriesTokenRegistry(t *testing.T) {
 // TestBuildDingoConfigTokenRegistryDefaultsOff pins the deliberate default
 // through the same production path.
 func TestBuildDingoConfigTokenRegistryDefaultsOff(t *testing.T) {
+	t.Parallel()
+
 	built := buildDingoConfig(
 		&config.Config{},
 		nil,

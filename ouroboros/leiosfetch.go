@@ -24,6 +24,11 @@ import (
 	oleiosfetch "github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
 )
 
+// maxLeiosFetchVoteIDs bounds vote-manager lookup and response cloning per
+// request, matching the batch size supported by the standalone vote protocol.
+// This is a local serving policy, not a LeiosFetch wire-format restriction.
+const maxLeiosFetchVoteIDs = 1000
+
 func (o *Ouroboros) leiosfetchServerConnOpts() []oleiosfetch.LeiosFetchOptionFunc {
 	return []oleiosfetch.LeiosFetchOptionFunc{
 		oleiosfetch.WithBlockRequestFunc(
@@ -185,6 +190,13 @@ func (o *Ouroboros) leiosfetchServerVotesRequest(
 		// unavailable vote manager as an empty result instead of failing the
 		// shared bearer.
 		return oleiosfetch.NewMsgVotes(make([]cbor.RawMessage, 0)), nil
+	}
+	if len(voteIds) > maxLeiosFetchVoteIDs {
+		return nil, fmt.Errorf(
+			"leios-fetch vote ID request exceeds limit: %d > %d",
+			len(voteIds),
+			maxLeiosFetchVoteIDs,
+		)
 	}
 	// MsgVotesRequestVoteId aliases lcommon.LeiosVoteId; unknown ids
 	// are omitted from the response.

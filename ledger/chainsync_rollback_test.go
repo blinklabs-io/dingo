@@ -61,6 +61,8 @@ func (m testSecurityParamLedger) SecurityParam() int {
 }
 
 func TestHandleEventChainsyncRollbackSynchronizesLedgerTip(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 
 	err := fixture.ls.handleEventChainsyncRollback(
@@ -87,6 +89,8 @@ func TestHandleEventChainsyncRollbackSynchronizesLedgerTip(t *testing.T) {
 func TestHandleEventChainsyncRollbackRejectsBelowMithrilBoundary(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() { bus.Stop() })
@@ -146,7 +150,7 @@ func TestHandleEventChainsyncRollbackRejectsBelowMithrilBoundary(
 	e := testutil.RequireReceive(
 		t,
 		resyncCh,
-		time.Second,
+		testutil.AsyncWait,
 		"expected Mithril rollback-boundary resync event",
 	)
 	assert.Equal(
@@ -170,6 +174,8 @@ func TestHandleEventChainsyncRollbackRejectsBelowMithrilBoundary(
 func TestHandleEventChainsyncRollbackPrunesStaleBlockNonces(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	competingHash := testHashBytes("competing-ancestor-slot")
 	require.NoError(
@@ -215,6 +221,8 @@ func TestHandleEventChainsyncRollbackPrunesStaleBlockNonces(
 }
 
 func TestLoadTipPrunesStaleBlockNonces(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	competingHash := testHashBytes("competing-tip-slot")
 	require.NoError(
@@ -261,6 +269,8 @@ func TestLoadTipPrunesStaleBlockNonces(t *testing.T) {
 func TestRollbackRepairsTipAtDurableFloorOnNoOpAndSameSlotPaths(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 
 	// Leave currentTip at a point whose nonce was never durably applied. A
@@ -290,6 +300,8 @@ func TestRollbackRepairsTipAtDurableFloorOnNoOpAndSameSlotPaths(
 func TestHandleEventChainsyncRollbackDoesNotSkipDifferentPeerHistory(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 
 	otherConnId := ouroboros.ConnectionId{
@@ -327,6 +339,8 @@ func TestHandleEventChainsyncRollbackDoesNotSkipDifferentPeerHistory(
 func TestHandleEventChainsyncRollbackSkipsSamePeerLoop(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 
 	// A genuinely un-crossable rollback point: a fork block below our tip
@@ -375,6 +389,8 @@ func TestHandleEventChainsyncRollbackSkipsSamePeerLoop(
 func TestHandleEventChainsyncRollbackExceedsKDeclinesReconcilingDivergedLedgerTip(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	putPrimaryChainOnForkBeyondK(t, fixture, "live-rollback")
 
@@ -427,7 +443,7 @@ func TestHandleEventChainsyncRollbackExceedsKDeclinesReconcilingDivergedLedgerTi
 	e := testutil.RequireReceive(
 		t,
 		resyncCh,
-		time.Second,
+		testutil.AsyncWait,
 		"expected over-K resync event",
 	)
 	assert.Equal(t, event.ChainsyncResyncReasonRollbackExceedsK, e.Reason)
@@ -456,6 +472,8 @@ func TestHandleEventChainsyncRollbackExceedsKDeclinesReconcilingDivergedLedgerTi
 func TestHandleEventChainsyncRollbackReconcileFindsMithrilBoundaryAncestor(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 
 	// A longer fork than putPrimaryChainOnForkBeyondK's: the rollback
@@ -527,7 +545,7 @@ func TestHandleEventChainsyncRollbackReconcileFindsMithrilBoundaryAncestor(
 	e := testutil.RequireReceive(
 		t,
 		resyncCh,
-		time.Second,
+		testutil.AsyncWait,
 		"expected a Mithril-boundary resync event, not a generic "+
 			"reconciliation-error propagation",
 	)
@@ -555,6 +573,8 @@ func TestHandleEventChainsyncRollbackReconcileFindsMithrilBoundaryAncestor(
 // management gets the signal to reconnect and negotiate a fresh
 // intersection.
 func TestLedgerReadChainRequestsResyncOnOverKReconcile(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	putPrimaryChainOnForkBeyondK(t, fixture, "ledger-read-chain-resync")
 
@@ -578,13 +598,13 @@ func TestLedgerReadChainRequestsResyncOnOverKReconcile(t *testing.T) {
 	}()
 
 	testutil.RequireReceive(
-		t, done, 2*time.Second,
+		t, done, testutil.AsyncWait,
 		"ledgerReadChain should give up and return, not hang, on an "+
 			"unreconcilable over-K divergence",
 	)
 
 	e := testutil.RequireReceive(
-		t, resyncCh, time.Second,
+		t, resyncCh, testutil.AsyncWait,
 		"expected an over-K resync event from ledgerReadChain",
 	)
 	assert.Equal(t, event.ChainsyncResyncReasonRollbackExceedsK, e.Reason)
@@ -611,6 +631,8 @@ func TestLedgerReadChainRequestsResyncOnOverKReconcile(t *testing.T) {
 func TestLedgerReadChainRequestsResyncOnMithrilBoundaryReconcile(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 
 	// Diverge to a fork well within K (forkDepth 1, K is 2), so this
@@ -646,13 +668,13 @@ func TestLedgerReadChainRequestsResyncOnMithrilBoundaryReconcile(
 	}()
 
 	testutil.RequireReceive(
-		t, done, 2*time.Second,
+		t, done, testutil.AsyncWait,
 		"ledgerReadChain should give up and return, not hang, on an "+
 			"unreconcilable Mithril-boundary divergence",
 	)
 
 	e := testutil.RequireReceive(
-		t, resyncCh, time.Second,
+		t, resyncCh, testutil.AsyncWait,
 		"expected a Mithril-boundary resync event from ledgerReadChain",
 	)
 	assert.Equal(
@@ -693,6 +715,8 @@ func TestLedgerReadChainRequestsResyncOnMithrilBoundaryReconcile(
 func TestLedgerProcessBlocksRetriesInsteadOfHaltingOnOverKReconcile(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	putPrimaryChainOnForkBeyondK(t, fixture, "pipeline-retry-over-k")
 
@@ -717,14 +741,14 @@ func TestLedgerProcessBlocksRetriesInsteadOfHaltingOnOverKReconcile(
 	t.Cleanup(func() {
 		cancel()
 		testutil.RequireReceive(
-			t, done, 5*time.Second,
+			t, done, testutil.AsyncWait,
 			"ledgerProcessBlocksWithAttempt must exit once its context "+
 				"is canceled",
 		)
 	})
 
 	first := testutil.RequireReceive(
-		t, resyncCh, 2*time.Second,
+		t, resyncCh, testutil.AsyncWait,
 		"expected the first over-K resync event",
 	)
 	assert.Equal(t, event.ChainsyncResyncReasonRollbackExceedsK, first.Reason)
@@ -734,7 +758,7 @@ func TestLedgerProcessBlocksRetriesInsteadOfHaltingOnOverKReconcile(
 	// restarted a fresh ledgerReadChain attempt rather than exiting for
 	// good after the first one returned.
 	second := testutil.RequireReceive(
-		t, resyncCh, 2*time.Second,
+		t, resyncCh, testutil.AsyncWait,
 		"the pipeline must retry and reach the over-K branch again "+
 			"instead of halting after the first rejection",
 	)
@@ -759,6 +783,8 @@ func TestLedgerProcessBlocksRetriesInsteadOfHaltingOnOverKReconcile(
 }
 
 func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 
 	forkHash := testHashBytes("fork-block")
@@ -794,6 +820,7 @@ func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
 		},
 		notFitErr,
 		nil,
+		false,
 	)
 	require.NoError(t, err)
 	require.True(t, resolved)
@@ -812,6 +839,8 @@ func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
 }
 
 func TestHandleEventChainsyncForkRecordsAdmittedHeaderFrontier(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	// Keep the test at header admission; no blockfetch worker is needed.
 	fixture.ls.chainsyncBlockfetchReadyChan = make(chan struct{})
@@ -846,10 +875,22 @@ func TestHandleEventChainsyncForkRecordsAdmittedHeaderFrontier(t *testing.T) {
 	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
 	require.Equal(t, 1, fixture.ls.chain.HeaderCount())
 	assert.Equal(t, header.slot, fixture.ls.chain.HeaderTip().Point.Slot)
-	assert.Equal(t, header.slot, fixture.ls.syncUpstreamTipSlot.Load())
+	// mockHeader carries no real VRF/KES material to verify, and this fork's
+	// rollback target (the ancestor tip) sits behind the header's own slot,
+	// so it cannot be exempted as Mithril-covered either (that would forbid
+	// the very rollback this fork resolution performs). An unverified fork
+	// header is still admitted onto the local header chain -- that's
+	// ordinary, safe chain-shape bookkeeping -- but issue #3528 requires
+	// genuine trust (real verification or a Mithril certificate) before it
+	// may advance the shared "trusted sync progress" frontier
+	// (recordAdmittedHeaderFrontier), so syncUpstreamTipSlot must stay at
+	// its zero value here.
+	assert.Zero(t, fixture.ls.syncUpstreamTipSlot.Load())
 }
 
 func TestTryResolveForkGenesisRejectsLongerSparseCandidate(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	fixture.ls.config.GenesisSelectionStateFunc = func() (bool, uint64) {
 		return true, 15
@@ -881,6 +922,7 @@ func TestTryResolveForkGenesisRejectsLongerSparseCandidate(t *testing.T) {
 		},
 		notFitErr,
 		nil,
+		false,
 	)
 
 	require.NoError(t, err)
@@ -890,6 +932,8 @@ func TestTryResolveForkGenesisRejectsLongerSparseCandidate(t *testing.T) {
 }
 
 func TestTryResolveForkGenesisAcceptsDenserShorterCandidate(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	require.NoError(
 		t,
@@ -962,6 +1006,8 @@ func TestTryResolveForkGenesisAcceptsDenserShorterCandidate(t *testing.T) {
 }
 
 func TestTryResolveForkUsesPraosAfterGenesisExit(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	fixture.ls.config.GenesisSelectionStateFunc = func() (bool, uint64) {
 		return false, 15
@@ -992,6 +1038,7 @@ func TestTryResolveForkUsesPraosAfterGenesisExit(t *testing.T) {
 		},
 		notFitErr,
 		nil,
+		false,
 	)
 
 	require.NoError(t, err)
@@ -1003,6 +1050,8 @@ func TestTryResolveForkUsesPraosAfterGenesisExit(t *testing.T) {
 func TestHandleEventChainsyncBlockHeaderIgnoresObservedPredecessor(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	testCases := []struct {
 		name          string
 		differentPeer bool
@@ -1114,6 +1163,8 @@ func TestHandleEventChainsyncBlockHeaderIgnoresObservedPredecessor(
 func TestTryResolveForkExceedsKDeclinesReconcilingDivergedLedgerTip(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	putPrimaryChainOnForkBeyondK(t, fixture, "live-fork-resolution")
 
@@ -1153,6 +1204,7 @@ func TestTryResolveForkExceedsKDeclinesReconcilingDivergedLedgerTip(
 		},
 		notFitErr,
 		nil,
+		false,
 	)
 	require.NoError(t, err)
 	// The not-fit error was handled (a resync was requested), even though
@@ -1178,7 +1230,7 @@ func TestTryResolveForkExceedsKDeclinesReconcilingDivergedLedgerTip(
 	e := testutil.RequireReceive(
 		t,
 		resyncCh,
-		time.Second,
+		testutil.AsyncWait,
 		"expected over-K fork-resolution resync event",
 	)
 	assert.Equal(
@@ -1190,6 +1242,8 @@ func TestTryResolveForkExceedsKDeclinesReconcilingDivergedLedgerTip(
 }
 
 func TestTryResolveForkPropagatesAncestorLookupError(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	ancestorLookupErr := errors.New("ancestor lookup failed")
 	fixture.ls.lookupBlockByHash = func([]byte) (models.Block, error) {
@@ -1227,6 +1281,7 @@ func TestTryResolveForkPropagatesAncestorLookupError(t *testing.T) {
 		},
 		notFitErr,
 		nil,
+		false,
 	)
 
 	require.False(t, resolved)
@@ -1237,6 +1292,8 @@ func TestTryResolveForkPropagatesAncestorLookupError(t *testing.T) {
 func TestHandleEventChainsyncBlockHeaderRestoresMismatchCountOnAncestorLookupError(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	ancestorLookupErr := errors.New("ancestor lookup failed")
 	fixture.ls.lookupBlockByHash = func([]byte) (models.Block, error) {
@@ -1278,6 +1335,8 @@ func TestHandleEventChainsyncBlockHeaderRestoresMismatchCountOnAncestorLookupErr
 }
 
 func TestTryResolveForkDoesNotAdvanceLaggingLedgerTip(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() { bus.Stop() })
@@ -1360,6 +1419,7 @@ func TestTryResolveForkDoesNotAdvanceLaggingLedgerTip(t *testing.T) {
 		},
 		notFitErr,
 		nil,
+		false,
 	)
 	require.NoError(t, err)
 	require.True(t, resolved)
@@ -1386,6 +1446,8 @@ func TestTryResolveForkDoesNotAdvanceLaggingLedgerTip(t *testing.T) {
 }
 
 func TestTryResolveForkQueuesKnownPeerForkSegment(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 
 	forkHash1 := testHashBytes("fork-block-1")
@@ -1437,6 +1499,7 @@ func TestTryResolveForkQueuesKnownPeerForkSegment(t *testing.T) {
 		},
 		notFitErr,
 		nil,
+		false,
 	)
 	require.NoError(t, err)
 	require.True(t, resolved)
@@ -1453,6 +1516,8 @@ func TestTryResolveForkQueuesKnownPeerForkSegment(t *testing.T) {
 }
 
 func TestTryResolveForkUsesObservedPeerHistoryFallback(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 
 	forkHash1 := testHashBytes("observed-fork-block-1")
@@ -1523,6 +1588,7 @@ func TestTryResolveForkUsesObservedPeerHistoryFallback(t *testing.T) {
 		},
 		notFitErr,
 		nil,
+		false,
 	)
 	require.NoError(t, err)
 	require.True(t, resolved)
@@ -1541,6 +1607,8 @@ func TestTryResolveForkUsesObservedPeerHistoryFallback(t *testing.T) {
 func TestHandleEventChainsyncBlockHeaderMissingAncestorRequestsResync(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() { bus.Stop() })
@@ -1610,7 +1678,7 @@ func TestHandleEventChainsyncBlockHeaderMissingAncestorRequestsResync(
 	resync := testutil.RequireReceive(
 		t,
 		resyncCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"expected chainsync resync event",
 	)
 	assert.Equal(t, fixture.connId, resync.ConnectionId)
@@ -1626,6 +1694,8 @@ func TestHandleEventChainsyncBlockHeaderMissingAncestorRequestsResync(
 }
 
 func TestRollbackPublishesChainsyncResyncAtRollbackPoint(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() { bus.Stop() })
@@ -1654,7 +1724,7 @@ func TestRollbackPublishesChainsyncResyncAtRollbackPoint(t *testing.T) {
 	resync := testutil.RequireReceive(
 		t,
 		resyncCh,
-		2*time.Second,
+		testutil.AsyncWait,
 		"expected chainsync resync event",
 	)
 	assert.Equal(
@@ -1669,6 +1739,8 @@ func TestRollbackPublishesChainsyncResyncAtRollbackPoint(t *testing.T) {
 func TestRecoverAfterLocalRollbackReplaysPeerHeaderHistory(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 
 	require.NoError(
@@ -1783,6 +1855,8 @@ func TestRecoverAfterLocalRollbackReplaysPeerHeaderHistory(
 func TestRecoverAfterLocalRollbackRetargetsSelectedBlockfetchConn(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
 	require.NoError(t, fixture.ls.db.SetTip(fixture.ancestorTip, nil))
@@ -1869,6 +1943,8 @@ func TestRecoverAfterLocalRollbackRetargetsSelectedBlockfetchConn(
 func TestRecoverAfterLocalRollbackClearsSelectionWhenEveryConnectionFails(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
 	require.NoError(t, fixture.ls.db.SetTip(fixture.ancestorTip, nil))
@@ -1935,6 +2011,8 @@ func TestRecoverAfterLocalRollbackClearsSelectionWhenEveryConnectionFails(
 func TestRecoverAfterLocalRollbackReportsBlockfetchFailure(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
 	require.NoError(t, fixture.ls.db.SetTip(fixture.ancestorTip, nil))
@@ -1989,6 +2067,8 @@ func TestRecoverAfterLocalRollbackReportsBlockfetchFailure(
 func TestRecoverAfterLocalRollbackResetsStateWithoutTrackedClients(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 
 	header := mockHeader{
@@ -2054,6 +2134,8 @@ func TestRecoverAfterLocalRollbackResetsStateWithoutTrackedClients(
 func TestRecoverAfterLocalRollbackDoesNotUsePreRollbackTipAsStalenessSignal(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 
 	result := fixture.ls.RecoverAfterLocalRollback(
@@ -2067,6 +2149,8 @@ func TestRecoverAfterLocalRollbackDoesNotUsePreRollbackTipAsStalenessSignal(
 }
 
 func TestRecoverAfterLocalRollbackReturnsEmptyResultWhenChainNil(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	fixture.ls.chain = nil
 
@@ -2081,6 +2165,8 @@ func TestRecoverAfterLocalRollbackReturnsEmptyResultWhenChainNil(t *testing.T) {
 func TestRecoverAfterLocalRollbackSkipsConnectionCloseWhenPrimaryChainTipPastRollbackPoint(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 
 	queuedHeader := mockHeader{
@@ -2131,6 +2217,8 @@ func TestRecoverAfterLocalRollbackSkipsConnectionCloseWhenPrimaryChainTipPastRol
 func TestRecoverPeerHeaderHistoryFromPointSkipsHeadersAlreadyAtChainTip(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 
 	advancedHash := testHashBytes("recovery-already-at-tip")
@@ -2192,6 +2280,8 @@ func TestRecoverPeerHeaderHistoryFromPointSkipsHeadersAlreadyAtChainTip(
 func TestHandleEventChainsyncBlockHeaderIgnoresStaleRollForwardBehindTip(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() { bus.Stop() })
@@ -2252,6 +2342,8 @@ func TestHandleEventChainsyncBlockHeaderIgnoresStaleRollForwardBehindTip(
 }
 
 func TestReconcilePrimaryChainTipWithLedgerTipRollsBackMetadata(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 
 	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
@@ -2272,6 +2364,8 @@ func TestReconcilePrimaryChainTipWithLedgerTipRollsBackMetadata(t *testing.T) {
 func TestReconcilePrimaryChainTipWithLedgerTipRollsBackMissingLedgerTipToCommonAncestor(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	forkHash := testHashBytes("startup-primary-chain-fork")
 	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
@@ -2322,6 +2416,8 @@ func TestReconcilePrimaryChainTipWithLedgerTipRollsBackMissingLedgerTipToCommonA
 func TestReconcileLivePrimaryChainLedgerDivergenceExportedWrapperRecoversSubKFork(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 
 	forkHash := testHashBytes("live-sub-k-fork")
@@ -2370,6 +2466,8 @@ func TestReconcileLivePrimaryChainLedgerDivergenceExportedWrapperRecoversSubKFor
 func TestReconcileLivePrimaryChainLedgerDivergenceRequestsMithrilResync(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	forkHash := testHashBytes("live-mithril-boundary-fork")
 	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
@@ -2399,7 +2497,7 @@ func TestReconcileLivePrimaryChainLedgerDivergenceRequestsMithrilResync(
 	e := testutil.RequireReceive(
 		t,
 		resyncCh,
-		time.Second,
+		testutil.AsyncWait,
 		"expected live Mithril-boundary resync event",
 	)
 	require.Equal(
@@ -2419,6 +2517,8 @@ func TestReconcileLivePrimaryChainLedgerDivergenceRequestsMithrilResync(
 func TestReconcilePrimaryChainTipWithLedgerTipCatchesUpWhenAheadBeyondK(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	fixture.ls.currentEra.Id = 1
 	fixture.ls.config.CardanoNodeConfig.ShelleyGenesis().SecurityParam = 2
@@ -2479,6 +2579,8 @@ func TestReconcilePrimaryChainTipWithLedgerTipCatchesUpWhenAheadBeyondK(
 func TestIntersectPointsDoesNotUsePrimaryChainWhenLedgerTipMissing(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	forkHash := testHashBytes("intersect-primary-chain-fork")
 	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
@@ -2500,6 +2602,8 @@ func TestIntersectPointsDoesNotUsePrimaryChainWhenLedgerTipMissing(
 }
 
 func TestProcessChainIteratorRollbackAppliesMatchingRollback(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 
 	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
@@ -2524,6 +2628,8 @@ func TestProcessChainIteratorRollbackAppliesMatchingRollback(t *testing.T) {
 func TestProcessChainIteratorRollbackNoopWhenLedgerAlreadyAtPoint(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 
 	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
@@ -2548,6 +2654,8 @@ func TestProcessChainIteratorRollbackNoopWhenLedgerAlreadyAtPoint(
 }
 
 func TestProcessChainIteratorRollbackSkipsStaleRollback(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 
 	currentNonce := append([]byte(nil), fixture.ls.currentTipBlockNonce...)
@@ -2585,6 +2693,8 @@ func TestProcessChainIteratorRollbackSkipsStaleRollback(t *testing.T) {
 func TestProcessChainIteratorRollbackAppliesStaleRollbackWhenLedgerTipAbandoned(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	putPrimaryChainOnForkBeyondK(t, fixture, "abandoned-ledger-tip")
 
@@ -2614,6 +2724,8 @@ func TestProcessChainIteratorRollbackAppliesStaleRollbackWhenLedgerTipAbandoned(
 func TestLedgerProcessBlocksFromSourceRestartsOnStaleIteratorRollback(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 
 	readChainResultCh := make(chan readChainResult, 1)
@@ -2633,6 +2745,8 @@ func TestLedgerProcessBlocksFromSourceRestartsOnStaleIteratorRollback(
 func TestHandleEventChainsyncBlockHeaderIgnoresHistoricalPrimaryHeader(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	fixture.ls.config.GenesisSelectionStateFunc = func() (bool, uint64) {
 		return true, 100
@@ -2694,6 +2808,8 @@ func TestHandleEventChainsyncBlockHeaderIgnoresHistoricalPrimaryHeader(
 // every slot-zero point would classify a replay of that block as a fork.
 // Only the origin point, which carries no hash, is rejected outright.
 func TestHeaderAlreadyOnPrimaryChainAcceptsSlotZeroBlock(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	require.NoError(t, err)
@@ -2769,6 +2885,8 @@ func TestHeaderAlreadyOnPrimaryChainAcceptsSlotZeroBlock(t *testing.T) {
 }
 
 func TestHeaderAlreadyOnPrimaryChainUsesHashIndexPrefilter(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	localTip := fixture.ls.chain.Tip()
 	lookupCalls := 0
@@ -2790,6 +2908,8 @@ func TestHeaderAlreadyOnPrimaryChainUsesHashIndexPrefilter(t *testing.T) {
 }
 
 func TestHeaderAlreadyOnPrimaryChainSupportsLegacyHashIndexMiss(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	localTip := fixture.ls.chain.Tip()
 
@@ -2808,6 +2928,8 @@ func TestHeaderAlreadyOnPrimaryChainSupportsLegacyHashIndexMiss(t *testing.T) {
 }
 
 func TestHeaderAlreadyOnPrimaryChainSkipsLookupBeyondLocalTip(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	localTip := fixture.ls.chain.Tip()
 	lookupCalled := false
@@ -3006,6 +3128,8 @@ func testHashBytes(seed string) []byte {
 func TestHandleEventChainsyncRollbackClassifiesStalePeerBelowMithrilBoundary(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() { bus.Stop() })
@@ -3047,7 +3171,7 @@ func TestHandleEventChainsyncRollbackClassifiesStalePeerBelowMithrilBoundary(
 	e := testutil.RequireReceive(
 		t,
 		resyncCh,
-		time.Second,
+		testutil.AsyncWait,
 		"expected stale-peer resync event",
 	)
 	assert.Equal(
@@ -3065,6 +3189,8 @@ func TestHandleEventChainsyncRollbackClassifiesStalePeerBelowMithrilBoundary(
 func TestHandleEventChainsyncRollbackRejectsDivergentPeerTipAboveMithrilBoundary(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() { bus.Stop() })
@@ -3113,7 +3239,7 @@ func TestHandleEventChainsyncRollbackRejectsDivergentPeerTipAboveMithrilBoundary
 	e := testutil.RequireReceive(
 		t,
 		resyncCh,
-		time.Second,
+		testutil.AsyncWait,
 		"expected divergent-peer resync event",
 	)
 	assert.Equal(

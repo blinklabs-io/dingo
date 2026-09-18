@@ -34,6 +34,20 @@ import (
 // model-specific error when the public method contract requires one.
 var ErrNotFound = errors.New("metadata not found")
 
+// The interfaces below are the compiled-in metadata provider contract
+// (database/plugin/PLUGIN_DEVELOPMENT.md). A provider maintained outside this
+// repository builds against a pinned module version, so adding a method or a
+// parameter here breaks it at compile time on the version bump that carries
+// the change.
+//
+// That break is the intended behaviour, not an oversight to be smoothed over.
+// Several of these methods feed consensus-visible stake and reward
+// arithmetic, where a provider that silently kept an older, narrower
+// implementation would return an answer that is wrong rather than absent. A
+// runtime capability probe or a defaulted shim would produce exactly that, so
+// changes are made to the interface directly and a provider is required to
+// fail the build until it implements them.
+
 // LifecycleStore is the narrow lifecycle capability used by composition code.
 type LifecycleStore interface {
 	// Close closes the metadata store and releases all resources.
@@ -202,16 +216,44 @@ type GovernanceStore interface {
 	// GetExpiringGovernanceProposals returns proposals whose
 	// `expires_epoch` is strictly less than the given epoch and that
 	// have not yet been enacted, expired, or soft-deleted. Used at
-	// epoch boundaries to mark expired proposals and return deposits.
+	// epoch boundaries to mark proposals expired (ineligible for further
+	// ratification). Their deposit is not returned yet -- see
+	// GetExpiredAwaitingDropGovernanceProposals.
 	GetExpiringGovernanceProposals(
 		epoch uint64,
 		txn types.Txn,
 	) ([]*models.GovernanceProposal, error)
 
-	// GetExpiredGovernanceProposalsAt returns proposals that were expired at
-	// the given epoch-boundary slot. Used to replay deposit-return side effects
-	// when stake reward pot reset is reapplied after a boundary commit crash.
+	// GetExpiredGovernanceProposalsAt returns proposals that were marked
+	// expired at the given epoch-boundary slot. Used to replay the "mark
+	// expired" side effect when a boundary commit crash requires
+	// reprocessing the same boundary.
 	GetExpiredGovernanceProposalsAt(
+		epoch uint64,
+		slot uint64,
+		txn types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
+	// GetExpiredAwaitingDropGovernanceProposals returns proposals that were
+	// marked expired in a prior epoch but whose deposit has not yet been
+	// returned. cardano-ledger does not refund an expired proposal's deposit
+	// in the same epoch it is marked expired -- that happens one full epoch
+	// later, the same one-epoch delay ratification has before enactment.
+	// Used at epoch start, before marking any new proposals expired, to
+	// return the deposit and finalize ("drop") proposals expired as of a
+	// prior boundary (dingo#4411). Only proposals whose expired_epoch is
+	// strictly below the given epoch are returned, so a reprocessed
+	// boundary cannot drop a proposal in the epoch that expired it.
+	GetExpiredAwaitingDropGovernanceProposals(
+		epoch uint64,
+		txn types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
+	// GetDroppedGovernanceProposalsAt returns proposals that were dropped
+	// (deposit returned, finalized) at the given epoch-boundary slot. Used to
+	// replay the deposit-return side effect when stake reward pot reset is
+	// reapplied after a boundary commit crash.
+	GetDroppedGovernanceProposalsAt(
 		epoch uint64,
 		slot uint64,
 		txn types.Txn,
@@ -518,6 +560,33 @@ type GovernanceStore interface {
 		types.Txn,
 	) (uint64, error)
 
+	// GetDrepLastRegistrationDeposit returns the deposit amount recorded
+	// against the most recent registration certificate for the DRep
+	// credential, or 0 when no registration certificate history exists.
+	// The live drep row does not carry a deposit amount (registration and
+	// deregistration certificates supply/refund it, but nothing persists
+	// it on the current-state row), so deregistration-refund validation
+	// must read it from the registration_drep history instead.
+	GetDrepLastRegistrationDeposit(
+		uint8, // credentialTag
+		[]byte, // credential
+		types.Txn,
+	) (*uint64, error)
+
+	// GetDrepLastRegistrationDeposits is the set form of
+	// GetDrepLastRegistrationDeposit over the active DRep set: it returns
+	// the most recent registration deposit of every DRep GetActiveDreps
+	// reports, keyed by models.DrepDepositKey. Credentials with no
+	// registration_drep row are absent from the map, which reads back as
+	// the same 0 the singular form returns. Restricting it to the active
+	// set matches the callers, which are all listing exactly that set, and
+	// keeps the scan from growing with the registration history of DReps
+	// that have since deregistered. Listing them one at a time otherwise
+	// costs one query per DRep.
+	GetDrepLastRegistrationDeposits(
+		types.Txn,
+	) (map[string]uint64, error)
+
 	// CreateDrep inserts a Drep row directly. Used by callers (e.g.
 	// fixture seeding from outside the plugin packages) that already
 	// have a fully-populated model and want a single-row insert without
@@ -578,6 +647,28 @@ type UtxoStore interface {
 		types.Txn,
 	) ([]models.Utxo, error)
 
+	// GetUtxosByRefsAsOf retrieves the UTxOs matching refs as they stood at
+	// atSlot: a row is included when its AddedSlot is at-or-before atSlot
+	// and it was either never spent (DeletedSlot == 0) or was spent
+	// strictly after atSlot. Refs with no matching row under that
+	// predicate are simply absent from the result, the same as
+	// GetUtxosByRefs.
+	//
+	// Unlike GetUtxosByRefs, "no matching row" is ambiguous once atSlot is
+	// old enough: it means either "genuinely never live at atSlot" or "was
+	// live at atSlot but its spend record has since been hard-deleted by
+	// the periodic stability-window cleanup" (see UtxosDeleteConsumed).
+	// This method has no way to tell the two apart -- callers pinning a
+	// historical point (ledger.Query, blinklabs-io/dingo#382/#1900) must
+	// reject a point older than their own retention floor themselves
+	// before calling this, rather than trust a possibly-incomplete result
+	// here.
+	GetUtxosByRefsAsOf(
+		refs []models.UtxoId,
+		atSlot uint64,
+		txn types.Txn,
+	) ([]models.Utxo, error)
+
 	// DeleteUtxo removes a single unspent transaction output.
 	DeleteUtxo(models.UtxoId, types.Txn) error
 
@@ -609,9 +700,13 @@ type UtxoStore interface {
 	// GetUtxosByAddressWithOrdering). The database layer performs full
 	// exact-address CBOR filtering when ExactAddress is set. An empty
 	// patterns slice returns (nil, nil), matching the coordinated
-	// Database.UtxosByAddress's empty-input handling.
+	// Database.UtxosByAddress's empty-input handling. maxResults is a
+	// required, positive bound on the number of candidate rows returned;
+	// exceeding it yields models.ErrTooManyUtxoResults instead of an
+	// unbounded or silently truncated result.
 	GetUtxosByAddress(
 		[]models.UtxoAddressPattern,
+		int,
 		types.Txn,
 	) ([]models.Utxo, error)
 
@@ -718,6 +813,26 @@ type UtxoStore interface {
 	// implementations are free to page or stream the underlying
 	// query as long as the callback contract is honored.
 	IterateLiveUtxos(
+		txn types.Txn,
+		fn func(*models.Utxo) error,
+	) error
+
+	// IterateUtxosAsOf invokes fn once for each UTxO row that was live as
+	// of atSlot -- added at or before atSlot, and either never spent or
+	// spent strictly after atSlot -- in unspecified order. fn receives a
+	// pointer to a row that is reused between callbacks -- copy out
+	// anything you intend to retain. Returning a non-nil error from fn
+	// aborts iteration and that error is propagated up.
+	//
+	// Unlike IterateLiveUtxos, this has no indexed shortcut in this
+	// schema: for atSlot near the live tip (the common caller, a pinned
+	// LocalStateQuery point), "added_slot <= atSlot" matches nearly every
+	// row ever created, live or already spent, so this is effectively a
+	// full-table scan. Callers pin this cost to genuinely pinned queries
+	// only, never the live (unpinned) path, which keeps using
+	// IterateLiveUtxos' indexed deleted_slot = 0 filter unchanged.
+	IterateUtxosAsOf(
+		atSlot uint64,
 		txn types.Txn,
 		fn func(*models.Utxo) error,
 	) error
@@ -955,6 +1070,7 @@ type TransactionStore interface {
 		lcommon.Transaction,
 		ocommon.Point,
 		uint32, // idx
+		map[int]uint64, // certDeposits; see SetTransaction
 		types.Txn,
 	) error
 
@@ -1097,6 +1213,23 @@ type StakeSnapshotStore interface {
 		uint64, // boundarySlot
 		uint64, // expiryEpoch (0 = gate off)
 		uint64, // inactivityPeriod
+		types.Txn,
+	) ([]*models.RewardStakeInput, error)
+
+	// GetPointerStakeInputsForPools returns the per-credential stake held at a
+	// pointer address for pools in poolKeyHashes, resolved and delegated as of
+	// slot. It is additive: the caller adds it to what
+	// GetLiveStakeInputsForPools returned, because reward_live_stake never
+	// carries pointer-derived UTxO stake -- attribution depends on certificate
+	// history at slot, not on anything the live aggregate's incremental
+	// maintenance can express. boundarySlot is the epoch-boundary era gate
+	// (0 = no boundary; see GetEpochBoundaryStakeByPools), and expiryEpoch
+	// drives the same live CIP-0163 gate GetLiveStakeInputsForPools applies.
+	GetPointerStakeInputsForPools(
+		[][]byte, // poolKeyHashes
+		uint64, // slot
+		uint64, // boundarySlot (0 = no boundary)
+		uint64, // expiryEpoch (0 = gate off)
 		types.Txn,
 	) ([]*models.RewardStakeInput, error)
 
@@ -1729,11 +1862,27 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]models.PoolRegistration, error)
 
-	// GetPoolByVrfKeyHash retrieves an active pool by its VRF key hash.
-	// Returns nil if no active pool uses this VRF key.
+	// GetPoolByVrfKeyHash retrieves the pool that currently claims the
+	// given VRF key hash, as of the given epoch's start slot. Returns nil
+	// if no active pool claims it.
+	//
+	// A pool re-registering with a new VRF key mid-epoch does not free its
+	// old key until epochStartSlot advances past that re-registration
+	// (cardano-ledger defers a re-registration through
+	// psFutureStakePoolParams until the next epoch boundary; only a pool's
+	// first-ever registration is immediate). Callers must pass the current
+	// epoch's start slot, not an arbitrary point in the past.
+	//
+	// A key a pool proposed earlier in the same epoch and then superseded
+	// with a later re-registration (A -> B -> C) also still counts as
+	// claimed by that pool for the rest of the epoch, even though it is
+	// no longer that pool's pending value either: psVRFKeyHashes retains
+	// every key placed in psFutureStakePoolParams during the epoch, not
+	// only the current one.
 	GetPoolByVrfKeyHash(
-		[]byte, // vrfKeyHash
-		types.Txn,
+		vrfKeyHash []byte,
+		epochStartSlot uint64,
+		txn types.Txn,
 	) (*models.Pool, error)
 
 	// GetActivePoolRelays retrieves all relays from currently active pools.
@@ -1878,9 +2027,15 @@ type MetadataStore interface {
 	RewardLiveStakeNeedsBackfill(types.Txn) (bool, error)
 
 	// StaleConsensusStakeSnapshotsExist reports whether persisted Mark/Set/Go
-	// stake snapshots or authoritative Mark metadata use an older calculation
+	// stake snapshots or Mark reward metadata use an older calculation
 	// version. Such snapshots cannot safely be recreated from a pruned database.
 	StaleConsensusStakeSnapshotsExist(types.Txn) (bool, error)
+
+	// StaleConsensusStakeSnapshotEpochs returns the distinct epochs
+	// StaleConsensusStakeSnapshotsExist's stale rows belong to, for
+	// diagnostics only -- so the operator-facing error naming a rebootstrap
+	// requirement can name exactly which epochs are affected.
+	StaleConsensusStakeSnapshotEpochs(types.Txn) ([]uint64, error)
 
 	// GetTip retrieves the current chain tip.
 	GetTip(types.Txn) (ochainsync.Tip, error)
@@ -2278,7 +2433,10 @@ type MetadataStore interface {
 	// SaveImportedPoolBlockCounts records the per-pool block counts a bootstrap
 	// snapshot carries for one epoch, which is the only source of pool
 	// performance for an epoch that ended below the trust anchor.
-	SaveImportedPoolBlockCounts([]models.ImportedPoolBlockCount, types.Txn) error
+	SaveImportedPoolBlockCounts(
+		[]models.ImportedPoolBlockCount,
+		types.Txn,
+	) error
 
 	// SaveImportedEpochBlockTotal records that an epoch's block counts came
 	// from a bootstrap snapshot and the total its per-pool rows sum to. It is
@@ -2400,6 +2558,12 @@ type MetadataStore interface {
 
 	// GetNetworkState retrieves the most recent network state.
 	GetNetworkState(types.Txn) (*models.NetworkState, error)
+
+	// GetNetworkStateAsOfSlot retrieves the most recent network state
+	// recorded at or before the given slot, for a historical
+	// GetStakeDistribution answer (blinklabs-io/dingo#382) rather than
+	// GetNetworkState's always-latest row.
+	GetNetworkStateAsOfSlot(uint64, types.Txn) (*models.NetworkState, error)
 
 	// DeleteNetworkStateAfterSlot removes network state records
 	// added after the given slot. This is used during chain

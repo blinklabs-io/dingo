@@ -37,6 +37,10 @@ import (
 // broad EventBus event stays NtN-only.
 type ConnectionManagerConnClosedFunc func(ouroboros.ConnectionId, bool, error)
 
+// ConnectionManagerConnClosedOwnerFunc receives the closed connection itself,
+// preserving ownership when a connection ID is reused by a replacement.
+type ConnectionManagerConnClosedOwnerFunc func(*ouroboros.Connection, bool, error)
+
 const (
 	// metricNamePrefix is the common prefix for all connection manager metrics
 	metricNamePrefix = "cardano_node_metrics_connectionManager_"
@@ -45,11 +49,14 @@ const (
 	// simultaneous inbound connections accepted by the connection manager.
 	// This prevents resource exhaustion from malicious or accidental
 	// connection floods.
-	DefaultMaxInboundConnections = 100
+	DefaultMaxInboundConnections  = 100
+	DefaultMaxNtCConnections      = 100
+	DefaultMaxNtCConnectionsPerIP = 5
 )
 
 type connectionInfo struct {
 	conn      *ouroboros.Connection
+	onClose   func()
 	peerAddr  string
 	isInbound bool
 	isNtC     bool   // true for node-to-client (local) connections
@@ -85,6 +92,9 @@ type ConnectionManager struct {
 	duplexPeers          int
 	prunableConns        int
 	trackedConnCount     int
+	ntcAdmissionMutex    sync.Mutex
+	ntcCount             int
+	ntcIPConns           map[string]int
 }
 
 // DefaultMaxConnectionsPerIP is the default maximum number of concurrent
@@ -92,12 +102,13 @@ type ConnectionManager struct {
 const DefaultMaxConnectionsPerIP = 5
 
 type ConnectionManagerConfig struct {
-	PromRegistry     prometheus.Registerer
-	Logger           *slog.Logger
-	EventBus         *event.EventBus
-	ConnClosedFunc   ConnectionManagerConnClosedFunc
-	Listeners        []ListenerConfig
-	OutboundConnOpts []ouroboros.ConnectionOptionFunc
+	PromRegistry        prometheus.Registerer
+	Logger              *slog.Logger
+	EventBus            *event.EventBus
+	ConnClosedFunc      ConnectionManagerConnClosedFunc
+	ConnClosedOwnerFunc ConnectionManagerConnClosedOwnerFunc
+	Listeners           []ListenerConfig
+	OutboundConnOpts    []ouroboros.ConnectionOptionFunc
 	// ListenersProvider and OutboundConnOptsProvider supply the two fields
 	// above lazily, on first use rather than at construction. They take
 	// precedence over the plain fields and are each invoked exactly once.
@@ -118,7 +129,9 @@ type ConnectionManagerConfig struct {
 	// MaxConnectionsPerIP limits the number of concurrent inbound
 	// connections from the same IP address. IPv6 addresses are grouped
 	// by /64 prefix. A value of 0 means use DefaultMaxConnectionsPerIP.
-	MaxConnectionsPerIP int
+	MaxConnectionsPerIP    int
+	MaxNtCConns            int
+	MaxNtCConnectionsPerIP int
 }
 
 type connectionManagerMetrics struct {
@@ -128,6 +141,7 @@ type connectionManagerMetrics struct {
 	duplexConns         prometheus.Gauge
 	fullDuplexConns     prometheus.Gauge
 	prunableConns       prometheus.Gauge
+	ntcRejectedConns    *prometheus.CounterVec
 }
 
 type peerConnectionSummary struct {
@@ -176,6 +190,12 @@ func NewConnectionManager(cfg ConnectionManagerConfig) *ConnectionManager {
 	if cfg.MaxConnectionsPerIP <= 0 {
 		cfg.MaxConnectionsPerIP = DefaultMaxConnectionsPerIP
 	}
+	if cfg.MaxNtCConns <= 0 {
+		cfg.MaxNtCConns = DefaultMaxNtCConnections
+	}
+	if cfg.MaxNtCConnectionsPerIP <= 0 {
+		cfg.MaxNtCConnectionsPerIP = DefaultMaxNtCConnectionsPerIP
+	}
 	c := &ConnectionManager{
 		config: cfg,
 		connections: make(
@@ -185,6 +205,7 @@ func NewConnectionManager(cfg ConnectionManagerConfig) *ConnectionManager {
 		peerConnectivity: make(map[string]peerConnectionSummary),
 		pendingConns:     make(map[net.Conn]struct{}),
 		ipConns:          make(map[string]int),
+		ntcIPConns:       make(map[string]int),
 	}
 	if cfg.PromRegistry != nil {
 		c.initMetrics()
@@ -243,6 +264,13 @@ func (c *ConnectionManager) consumeInboundSlot() {
 func (c *ConnectionManager) initMetrics() {
 	promautoFactory := promauto.With(c.config.PromRegistry)
 	c.metrics = &connectionManagerMetrics{}
+	c.metrics.ntcRejectedConns = promautoFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: metricNamePrefix + "ntcRejectedConns_total",
+			Help: "number of node-to-client connections rejected by admission limits",
+		},
+		[]string{"reason"},
+	)
 	c.metrics.incomingConns = promautoFactory.NewGauge(prometheus.GaugeOpts{
 		Name: metricNamePrefix + "incomingConns",
 		Help: "number of incoming connections",
@@ -661,7 +689,7 @@ func (c *ConnectionManager) AddConnection(
 	isInbound bool,
 	peerAddr string,
 ) bool {
-	return c.addConnectionImpl(conn, isInbound, false, peerAddr, "")
+	return c.addConnectionImpl(conn, isInbound, false, peerAddr, "", nil)
 }
 
 func (c *ConnectionManager) addConnectionWithIPKey(
@@ -670,16 +698,7 @@ func (c *ConnectionManager) addConnectionWithIPKey(
 	peerAddr string,
 	ipKey string,
 ) bool {
-	return c.addConnectionImpl(conn, isInbound, false, peerAddr, ipKey)
-}
-
-func (c *ConnectionManager) addNtCConnectionWithIPKey(
-	conn *ouroboros.Connection,
-	isInbound bool,
-	peerAddr string,
-	ipKey string,
-) bool {
-	return c.addConnectionImpl(conn, isInbound, true, peerAddr, ipKey)
+	return c.addConnectionImpl(conn, isInbound, false, peerAddr, ipKey, nil)
 }
 
 func (c *ConnectionManager) addConnectionImpl(
@@ -688,6 +707,7 @@ func (c *ConnectionManager) addConnectionImpl(
 	isNtC bool,
 	peerAddr string,
 	ipKey string,
+	onClose func(),
 ) bool {
 	// Check if shutting down before adding to WaitGroup to prevent panic
 	// during Stop()'s Wait() call. Must hold the same lock used to set closing.
@@ -709,6 +729,9 @@ func (c *ConnectionManager) addConnectionImpl(
 	c.goroutineWg.Add(1)
 	c.listenersMutex.Unlock()
 
+	if onClose != nil {
+		onClose = sync.OnceFunc(onClose)
+	}
 	connId := conn.Id()
 	c.connectionsMutex.Lock()
 
@@ -777,6 +800,9 @@ func (c *ConnectionManager) addConnectionImpl(
 			if existingIPKey != "" {
 				c.releaseIPSlot(existingIPKey)
 			}
+			if existing.onClose != nil {
+				existing.onClose()
+			}
 			// The evicted connection's own error-watcher goroutine cannot
 			// deliver this: by the time its ErrorChan fires, RemoveConnection
 			// finds either no entry or the replacement's entry for connId
@@ -784,6 +810,7 @@ func (c *ConnectionManager) addConnectionImpl(
 			// call, an evicted NtC connection's chainsync server-side client
 			// state (and its live chain iterator) would never be released.
 			c.notifyEvictedConnectionClosed(connId, existingIsNtC)
+			c.notifyEvictedConnectionClosedOwner(existingConn, existingIsNtC)
 			c.connectionsMutex.Lock()
 
 		default:
@@ -821,13 +848,18 @@ func (c *ConnectionManager) addConnectionImpl(
 			if existingIPKey != "" {
 				c.releaseIPSlot(existingIPKey)
 			}
+			if existing.onClose != nil {
+				existing.onClose()
+			}
 			c.notifyEvictedConnectionClosed(connId, existingIsNtC)
+			c.notifyEvictedConnectionClosedOwner(existingConn, existingIsNtC)
 			c.connectionsMutex.Lock()
 		}
 	}
 
 	c.connections[connId] = &connectionInfo{
 		conn:      conn,
+		onClose:   onClose,
 		isInbound: isInbound,
 		isNtC:     isNtC,
 		peerAddr:  peerAddr,
@@ -844,6 +876,9 @@ func (c *ConnectionManager) addConnectionImpl(
 	c.updateConnectionMetrics()
 	go func() {
 		defer c.goroutineWg.Done()
+		if onClose != nil {
+			defer onClose()
+		}
 		err := <-conn.ErrorChan()
 		// Remove connection (also releases IP slot)
 		if !c.RemoveConnection(connId, conn) {
@@ -881,6 +916,9 @@ func (c *ConnectionManager) addConnectionImpl(
 		if c.config.ConnClosedFunc != nil {
 			c.config.ConnClosedFunc(connId, isNtC, err)
 		}
+		if c.config.ConnClosedOwnerFunc != nil {
+			c.config.ConnClosedOwnerFunc(conn, isNtC, err)
+		}
 	}()
 	return true
 }
@@ -910,6 +948,15 @@ func (c *ConnectionManager) notifyEvictedConnectionClosed(
 		return
 	}
 	c.config.ConnClosedFunc(connId, isNtC, errConnectionReplaced)
+}
+
+func (c *ConnectionManager) notifyEvictedConnectionClosedOwner(
+	conn *ouroboros.Connection,
+	isNtC bool,
+) {
+	if c.config.ConnClosedOwnerFunc != nil {
+		c.config.ConnClosedOwnerFunc(conn, isNtC, errConnectionReplaced)
+	}
 }
 
 func (c *ConnectionManager) RemoveConnection(
@@ -942,6 +989,9 @@ func (c *ConnectionManager) RemoveConnection(
 	// Decrement per-IP counter if the connection had a tracked IP key
 	if info != nil && info.ipKey != "" {
 		c.releaseIPSlot(info.ipKey)
+	}
+	if info.onClose != nil {
+		info.onClose()
 	}
 	c.updateConnectionMetrics()
 	return true

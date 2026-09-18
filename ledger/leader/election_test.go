@@ -32,6 +32,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ledgerpkg "github.com/blinklabs-io/dingo/ledger"
 )
 
@@ -98,6 +99,9 @@ type mockEpochProvider struct {
 	// epochSlotRange, when set, overrides EpochSlotRange's default fixed
 	// range so tests can model Byron-era offsets or variable epoch lengths.
 	epochSlotRange func(epoch uint64) (EpochSlotRange, error)
+	// consensusModeErr, when set, makes ConsensusModeForEpoch fail so tests
+	// can model an unresolvable era forecast.
+	consensusModeErr error
 }
 
 func newMockEpochProvider() *mockEpochProvider {
@@ -168,8 +172,11 @@ func (m *mockEpochProvider) ActiveSlotCoeff() float64 {
 
 func (m *mockEpochProvider) ConsensusModeForEpoch(
 	epoch uint64,
-) consensus.ConsensusMode {
-	return consensus.ConsensusModeTPraos
+) (consensus.ConsensusMode, error) {
+	if m.consensusModeErr != nil {
+		return 0, m.consensusModeErr
+	}
+	return consensus.ConsensusModeTPraos, nil
 }
 
 func (m *mockEpochProvider) SetEpochNonce(nonce []byte) {
@@ -404,7 +411,7 @@ func TestElectionStopDoesNotDeadlockOnMonitorSelectRace(t *testing.T) {
 
 		select {
 		case <-stopDone:
-		case <-time.After(2 * time.Second):
+		case <-time.After(testutil.AsyncWait):
 			t.Fatalf("Stop() deadlocked on iteration %d", i)
 		}
 		eventBus.Stop()
@@ -475,7 +482,7 @@ func TestElectionStopWaitsForInFlightScheduleComputation(t *testing.T) {
 	// almost immediately.
 	select {
 	case <-blocking.started:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("schedule computation never started")
 	}
 
@@ -495,7 +502,7 @@ func TestElectionStopWaitsForInFlightScheduleComputation(t *testing.T) {
 	select {
 	case err := <-stopDone:
 		require.NoError(t, err)
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("Stop did not return after the in-flight computation finished")
 	}
 }
@@ -678,7 +685,7 @@ func TestElectionIgnoresStalePersistedSchedule(t *testing.T) {
 		require.NoError(t, err)
 		return persistedAfterLoad != nil &&
 			bytes.Equal(makeElectionNonce(0x55), persistedAfterLoad.EpochNonce)
-	}, 2*time.Second, 50*time.Millisecond)
+	}, testutil.AsyncWait, 50*time.Millisecond)
 }
 
 func TestElectionPersistsComputedSchedule(t *testing.T) {
@@ -715,7 +722,7 @@ func TestElectionPersistsComputedSchedule(t *testing.T) {
 		persisted, err = store.LoadSchedule(schedule.Epoch, poolId)
 		require.NoError(t, err)
 		return persisted != nil
-	}, 2*time.Second, 50*time.Millisecond)
+	}, testutil.AsyncWait, 50*time.Millisecond)
 	require.NotNil(t, persisted)
 	assert.Equal(
 		t,
@@ -760,7 +767,7 @@ func TestElectionPrecomputesNextEpochAtStartupWhenNonceReady(t *testing.T) {
 		schedule := election.ScheduleForEpoch(11)
 		return schedule != nil &&
 			bytes.Equal(electionTestNonce11, schedule.EpochNonce)
-	}, 30*time.Second, 100*time.Millisecond,
+	}, testutil.AsyncWait, 100*time.Millisecond,
 		"next epoch schedule should be precomputed at startup")
 
 	require.Eventually(t, func() bool {
@@ -768,7 +775,7 @@ func TestElectionPrecomputesNextEpochAtStartupWhenNonceReady(t *testing.T) {
 		require.NoError(t, err)
 		return schedule != nil &&
 			bytes.Equal(electionTestNonce11, schedule.EpochNonce)
-	}, 2*time.Second, 50*time.Millisecond,
+	}, testutil.AsyncWait, 50*time.Millisecond,
 		"next epoch schedule should be persisted at startup")
 }
 
@@ -1091,7 +1098,7 @@ func TestElectionEpochTransition(t *testing.T) {
 			)
 		}
 		return ready
-	}, 30*time.Second, 100*time.Millisecond, "schedule should update to epoch 11")
+	}, testutil.AsyncWait, 100*time.Millisecond, "schedule should update to epoch 11")
 
 	// Schedule should be updated to new epoch
 	schedule = election.CurrentSchedule()
@@ -1147,7 +1154,7 @@ func TestElectionPrecomputesNextEpochOnNonceReady(t *testing.T) {
 		schedule := election.ScheduleForEpoch(11)
 		return schedule != nil &&
 			bytes.Equal(electionTestNonce11, schedule.EpochNonce)
-	}, 30*time.Second, 100*time.Millisecond,
+	}, testutil.AsyncWait, 100*time.Millisecond,
 		"next epoch schedule should be precomputed after nonce-ready event")
 
 	require.Eventually(t, func() bool {
@@ -1155,7 +1162,7 @@ func TestElectionPrecomputesNextEpochOnNonceReady(t *testing.T) {
 		require.NoError(t, err)
 		return schedule != nil &&
 			bytes.Equal(electionTestNonce11, schedule.EpochNonce)
-	}, 2*time.Second, 50*time.Millisecond,
+	}, testutil.AsyncWait, 50*time.Millisecond,
 		"next epoch schedule should be persisted")
 }
 
@@ -1206,7 +1213,7 @@ func TestElectionRollbackKeepsCurrentSchedule(t *testing.T) {
 		return bytes.Equal(schedule.EpochNonce, current.EpochNonce) &&
 			assert.ObjectsAreEqual(leaderSlots, currentLeaderSlots) &&
 			election.ShouldProduceBlock(leaderSlot)
-	}, time.Second, 20*time.Millisecond,
+	}, testutil.AsyncWait, 20*time.Millisecond,
 		"rollback should not invalidate a stable current-epoch schedule")
 }
 
@@ -1243,7 +1250,7 @@ func TestElectionRollbackKeepsPrecomputedNextSchedule(t *testing.T) {
 	require.Eventually(t, func() bool {
 		nextBefore = election.ScheduleForEpoch(11)
 		return nextBefore != nil
-	}, 30*time.Second, 100*time.Millisecond)
+	}, testutil.AsyncWait, 100*time.Millisecond)
 	require.NotNil(t, nextBefore)
 	expectedSlots := nextBefore.LeaderSlotsSnapshot()
 	expectedNonce := append([]byte(nil), nextBefore.EpochNonce...)
@@ -1264,7 +1271,7 @@ func TestElectionRollbackKeepsPrecomputedNextSchedule(t *testing.T) {
 				expectedSlots,
 				schedule.LeaderSlotsSnapshot(),
 			)
-	}, time.Second, 20*time.Millisecond,
+	}, testutil.AsyncWait, 20*time.Millisecond,
 		"rollback should not invalidate a precomputed next-epoch schedule")
 }
 
@@ -1297,7 +1304,7 @@ func TestElectionConcurrentAccess(t *testing.T) {
 	// both cache-hit and cache-miss paths.
 	require.Eventually(t, func() bool {
 		return election.CurrentSchedule() != nil
-	}, 30*time.Second, 50*time.Millisecond,
+	}, testutil.AsyncWait, 50*time.Millisecond,
 		"initial schedule should be computed before concurrent access")
 
 	// Concurrent reads and operations
@@ -1315,4 +1322,175 @@ func TestElectionConcurrentAccess(t *testing.T) {
 	for range 20 {
 		<-done
 	}
+}
+
+// Parent cancellation must join the worker generation before any concurrent
+// Stop returns or a new Start can replace the worker channels.
+func TestElectionParentCancellationWaitsForGeneration(t *testing.T) {
+	pool := lcommon.PoolKeyHash{}
+	inner := newMockStakeProvider()
+	inner.totalStake = 10000
+	inner.poolStakes[string(pool[:])] = 1000
+	blocked := &blockingStakeProvider{
+		mockStakeProvider: inner,
+		started:           make(chan struct{}),
+		release:           make(chan struct{}),
+	}
+	var release sync.Once
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Stop()
+	defer release.Do(func() { close(blocked.release) })
+	e := NewElection(
+		pool,
+		electionTestVRFSeed,
+		blocked,
+		newMockEpochProvider(),
+		bus,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	require.NoError(t, e.Start(parent))
+	select {
+	case <-blocked.started:
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("worker did not reach provider")
+	}
+	cancel()
+	// Start must inspect the canceled generation context, even before its
+	// coordinator has acquired the election mutex and marked it stopped.
+	restarted := make(chan error, 1)
+	go func() { restarted <- e.Start(t.Context()) }()
+	select {
+	case <-restarted:
+		t.Fatal("Start replaced an undrained canceled generation")
+	case <-time.After(50 * time.Millisecond):
+	}
+	require.Eventually(t, func() bool {
+		e.mu.RLock()
+		defer e.mu.RUnlock()
+		return !e.running
+	}, testutil.AsyncWait, time.Millisecond)
+	canceled, cancelWait := context.WithCancel(t.Context())
+	cancelWait()
+	require.ErrorIs(t, e.Start(canceled), context.Canceled)
+	stopped := make(chan error, 2)
+	for range 2 {
+		go func() { stopped <- e.Stop() }()
+	}
+	select {
+	case <-stopped:
+		t.Fatal("Stop returned before canceled generation drained")
+	case <-time.After(50 * time.Millisecond):
+	}
+	release.Do(func() { close(blocked.release) })
+	for range 2 {
+		select {
+		case err := <-stopped:
+			require.NoError(t, err)
+		case <-time.After(testutil.AsyncWait):
+			t.Fatal("Stop did not complete after canceled worker drained")
+		}
+	}
+	select {
+	case err := <-restarted:
+		require.NoError(t, err)
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("restart did not complete after canceled worker drained")
+	}
+	e.mu.RLock()
+	running := e.running
+	e.mu.RUnlock()
+	require.True(t, running, "old generation waiters must not stop the restart")
+	go func() { stopped <- e.Stop() }()
+	select {
+	case err := <-stopped:
+		require.NoError(t, err)
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("restarted generation did not stop")
+	}
+}
+
+// gatedElectionContext signals when Start evaluates its cancellation select.
+type gatedElectionContext struct {
+	context.Context
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (c *gatedElectionContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.entered) })
+	return c.Context.Done()
+}
+
+func TestElectionCanceledWaiterAfterReplacement(t *testing.T) {
+	oldCtx, cancelOld := context.WithCancel(t.Context())
+	cancelOld()
+	oldDone := make(chan struct{})
+	e := &Election{lifecycleCtx: oldCtx, lifecycleDone: oldDone}
+	waitCtx, cancelWait := context.WithCancel(t.Context())
+	defer cancelWait()
+	ctx := &gatedElectionContext{Context: waitCtx, entered: make(chan struct{})}
+	afterWait := func() {
+		// This waiter selected generation completion before cancellation. A
+		// second caller installs a healthy replacement before it reacquires mu.
+		e.mu.Lock()
+		e.running = true
+		e.lifecycleCtx = t.Context()
+		e.lifecycleDone = make(chan struct{})
+		cancelWait()
+		e.mu.Unlock()
+	}
+	result := make(chan error, 1)
+	go func() { result <- e.start(ctx, afterWait) }()
+	select {
+	case <-ctx.entered:
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("Start did not wait for generation completion")
+	}
+	close(oldDone)
+	select {
+	case err := <-result:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("Start did not return after generation completion")
+	}
+}
+
+// TestComputeScheduleDeclinesUnresolvableConsensusMode pins the caller half of
+// the fail-closed consensus-mode forecast. The mode selects both the VRF input
+// construction and the threshold, so a schedule computed from a substituted
+// default is a leader-slot list cardano-node will reject. computeSchedule must
+// return the resolution error rather than produce one.
+func TestComputeScheduleDeclinesUnresolvableConsensusMode(t *testing.T) {
+	t.Parallel()
+
+	poolId := lcommon.PoolKeyHash{}
+	stakeProvider := newMockStakeProvider()
+	stakeProvider.totalStake = 1_000_000
+	stakeProvider.poolStakes[string(poolId[:])] = 1_000_000
+
+	epochProvider := newMockEpochProvider()
+	epochProvider.consensusModeErr = errors.New("era shape unavailable")
+
+	eventBus := event.NewEventBus(nil, nil)
+	defer eventBus.Stop()
+
+	election := NewElection(
+		poolId,
+		electionTestVRFSeed,
+		stakeProvider,
+		epochProvider,
+		eventBus,
+		slog.New(slog.DiscardHandler),
+	)
+
+	schedule, err := election.computeSchedule(
+		context.Background(),
+		epochProvider.CurrentEpoch(),
+	)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "era shape unavailable")
+	require.Nil(t, schedule,
+		"no schedule may be produced from an unresolved consensus mode")
 }

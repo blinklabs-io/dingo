@@ -16,6 +16,7 @@ package database
 
 import (
 	"github.com/blinklabs-io/dingo/database/models"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -122,6 +123,30 @@ func (d *Database) DeleteBlockNoncesAfterPoint(
 		return d.metadata.DeleteBlockNoncesAfterPoint(point, nil)
 	}
 	return d.metadata.DeleteBlockNoncesAfterPoint(point, txn.Metadata())
+}
+
+// hasBlockNonceCheckpointAtOrBeforeSlot reports whether at least one valid
+// (32-byte) checkpoint block_nonce row exists at or before slot. Checkpoint
+// rows are retained forever regardless of the routine 3-epoch retention
+// window (see DeleteBlockNoncesBeforeSlotWithoutCheckpoints), so this is
+// what TruncateAfterSlot consults to decide whether a truncate target whose
+// own nonce row was pruned can still be reconstructed -- by
+// LedgerState's startup heal, which has the ledger/era knowledge this
+// package deliberately does not -- rather than rejected outright.
+func (d *Database) hasBlockNonceCheckpointAtOrBeforeSlot(
+	slot uint64,
+	txn *Txn,
+) (bool, error) {
+	rows, err := d.GetBlockNoncesInSlotRange(0, slot+1, txn)
+	if err != nil {
+		return false, err
+	}
+	for _, row := range rows {
+		if row.IsCheckpoint && len(row.Nonce) == lcommon.Blake2b256Size {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (d *Database) SetBlockNonce(

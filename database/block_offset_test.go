@@ -27,6 +27,8 @@ import (
 )
 
 func TestExtractTransactionOffsets(t *testing.T) {
+	t.Parallel()
+
 	// Load blocks from immutable test data
 	imm, err := immutable.New("immutable/testdata")
 	require.NoError(t, err, "failed to open immutable database")
@@ -182,6 +184,8 @@ func TestExtractTransactionOffsets(t *testing.T) {
 }
 
 func TestExtractTransactionOffsetsEmptyBlock(t *testing.T) {
+	t.Parallel()
+
 	// Test that the function handles blocks with empty/minimal structure
 	// Byron EBB blocks have a different structure
 

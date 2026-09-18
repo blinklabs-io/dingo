@@ -23,6 +23,8 @@ import (
 )
 
 func TestNormalizePeerAddr(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		input    string
@@ -58,6 +60,8 @@ func TestNormalizePeerAddr(t *testing.T) {
 }
 
 func TestHasInboundPeerAddress(t *testing.T) {
+	t.Parallel()
+
 	cm := NewConnectionManager(ConnectionManagerConfig{
 		OutboundSourcePort: 3001,
 	})
@@ -100,6 +104,8 @@ func TestHasInboundPeerAddress(t *testing.T) {
 }
 
 func TestHasInboundPeerAddressDisabledWithoutPortReuse(t *testing.T) {
+	t.Parallel()
+
 	cm := NewConnectionManager(ConnectionManagerConfig{})
 	cm.connections[ouroboros.ConnectionId{}] = &connectionInfo{
 		conn:      &ouroboros.Connection{},

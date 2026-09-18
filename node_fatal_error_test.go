@@ -17,12 +17,17 @@ package dingo
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"testing"
 
+	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/stretchr/testify/require"
 )
 
 func TestCancelForFatalMakesShutdownReturnError(t *testing.T) {
+	t.Parallel()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	n := &Node{ctx: ctx, cancel: cancel}
 	want := errors.New("strict parity mismatch")
@@ -33,6 +38,8 @@ func TestCancelForFatalMakesShutdownReturnError(t *testing.T) {
 }
 
 func TestParentCancellationRemainsCleanShutdown(t *testing.T) {
+	t.Parallel()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	n := &Node{ctx: ctx, cancel: cancel}
 
@@ -42,6 +49,8 @@ func TestParentCancellationRemainsCleanShutdown(t *testing.T) {
 }
 
 func TestFatalDuringStartupOverridesCancellationError(t *testing.T) {
+	t.Parallel()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	n := &Node{ctx: ctx, cancel: cancel}
 	want := errors.New("strict parity mismatch during startup")
@@ -49,4 +58,26 @@ func TestFatalDuringStartupOverridesCancellationError(t *testing.T) {
 	n.cancelForFatal(want)
 
 	require.ErrorIs(t, n.resolveRunError(context.Canceled), want)
+}
+
+func TestLedgerFatalCallbackPreservesShutdownCause(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	n := &Node{
+		ctx:    ctx,
+		cancel: cancel,
+		config: Config{
+			cfg:    &internalconfig.Config{},
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	callback := n.ledgerStateConfig().FatalErrorFunc
+	want := errors.New("ledger component failure")
+	callback(want)
+	require.ErrorIs(t, ctx.Err(), context.Canceled)
+	require.ErrorIs(t, n.waitForShutdown(), want)
+	require.ErrorIs(t, n.resolveRunError(context.Canceled), want)
+
+	callback(errors.New("later ledger failure"))
+	require.ErrorIs(t, n.waitForShutdown(), want)
 }

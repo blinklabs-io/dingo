@@ -15,10 +15,13 @@
 package cardano
 
 import (
+	"io/fs"
 	"testing"
 )
 
 func TestNewCardanoNodeConfigFromEmbedFS(t *testing.T) {
+	t.Parallel()
+
 	// Test loading config from embedded filesystem
 	cfg, err := NewCardanoNodeConfigFromEmbedFS(
 		EmbeddedConfigFS,
@@ -52,6 +55,8 @@ func TestNewCardanoNodeConfigFromEmbedFS(t *testing.T) {
 }
 
 func TestNewCardanoNodeConfigFromEmbedFS_InvalidPath(t *testing.T) {
+	t.Parallel()
+
 	// Test loading config from embedded filesystem with invalid path
 	_, err := NewCardanoNodeConfigFromEmbedFS(
 		EmbeddedConfigFS,
@@ -63,6 +68,8 @@ func TestNewCardanoNodeConfigFromEmbedFS_InvalidPath(t *testing.T) {
 }
 
 func TestLoadCardanoNodeConfigWithFallbackNormalizesEmbedPath(t *testing.T) {
+	t.Parallel()
+
 	cfg, err := LoadCardanoNodeConfigWithFallback(
 		`preview\config.json`,
 		"preview",
@@ -77,6 +84,8 @@ func TestLoadCardanoNodeConfigWithFallbackNormalizesEmbedPath(t *testing.T) {
 }
 
 func TestEmbedFS_ListFiles(t *testing.T) {
+	t.Parallel()
+
 	// Test that embedded FS contains expected files in preview directory
 	previewEntries, err := EmbeddedConfigFS.ReadDir("preview")
 	if err != nil {
@@ -108,6 +117,8 @@ func TestEmbedFS_ListFiles(t *testing.T) {
 }
 
 func TestEmbedFS_AllNetworks(t *testing.T) {
+	t.Parallel()
+
 	networks := []string{"preview", "preprod", "mainnet", "devnet"}
 	expectedFiles := []string{
 		"config.json",
@@ -158,5 +169,98 @@ func TestEmbedFS_AllNetworks(t *testing.T) {
 				t.Errorf("expected ByronGenesis to be loaded for %s", network)
 			}
 		})
+	}
+}
+
+func TestEmbedFS_PrimeTestnet(t *testing.T) {
+	t.Parallel()
+
+	const network = "prime-testnet"
+	expectedFiles := []string{
+		"configuration.yaml",
+		"topology.json",
+		"genesis/byron/genesis.json",
+		"genesis/shelley/genesis.json",
+		"genesis/shelley/genesis.alonzo.json",
+		"genesis/shelley/genesis.conway.json",
+	}
+
+	for _, file := range expectedFiles {
+		if _, err := EmbeddedConfigFS.Open(network + "/" + file); err != nil {
+			t.Errorf("expected to find %s/%s: %v", network, file, err)
+		}
+	}
+
+	cfg, err := NewCardanoNodeConfigFromEmbedFS(
+		EmbeddedConfigFS,
+		network+"/configuration.yaml",
+	)
+	if err != nil {
+		t.Fatalf("failed to load %s config: %v", network, err)
+	}
+	if cfg.ShelleyGenesis() == nil {
+		t.Fatal("expected ShelleyGenesis to be loaded")
+	}
+	if cfg.ByronGenesis() == nil {
+		t.Fatal("expected ByronGenesis to be loaded")
+	}
+}
+
+// TestEmbeddedConfigPathReachesEveryNetwork is the defect the helper exists
+// for: every caller that has only a network name derived the config path by
+// appending "/config.json", and prime-testnet's upstream config is named
+// configuration.yaml, so that network could not be started from the embedded
+// filesystem at all.
+//
+// Enumerating the embedded directories rather than listing names keeps a
+// network added to the //go:embed directive under this check automatically --
+// the same property bin/config-parity.sh relies on.
+func TestEmbeddedConfigPathReachesEveryNetwork(t *testing.T) {
+	t.Parallel()
+
+	entries, err := fs.ReadDir(EmbeddedConfigFS, ".")
+	if err != nil {
+		t.Fatalf("reading the embedded root: %v", err)
+	}
+	networks := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		networks++
+		network := entry.Name()
+		t.Run(network, func(t *testing.T) {
+			t.Parallel()
+			cfg, err := LoadCardanoNodeConfigWithFallback(
+				EmbeddedConfigPath(network),
+				network,
+				EmbeddedConfigFS,
+			)
+			if err != nil {
+				t.Fatalf(
+					"%s is not loadable at the derived path %q: %v",
+					network, EmbeddedConfigPath(network), err,
+				)
+			}
+			if cfg.ShelleyGenesis() == nil {
+				t.Error("expected ShelleyGenesis to be loaded")
+			}
+		})
+	}
+	if networks == 0 {
+		t.Fatal("the embedded filesystem contains no network directories")
+	}
+}
+
+// TestEmbeddedConfigPathFallsBackToConfigJSON covers the name reported for a
+// network that is not embedded at all. Returning the conventional name means
+// the caller's error names the file it expected, rather than whichever
+// candidate happened to be tried last.
+func TestEmbeddedConfigPathFallsBackToConfigJSON(t *testing.T) {
+	t.Parallel()
+
+	if got, want := EmbeddedConfigPath("no-such-network"),
+		"no-such-network/config.json"; got != want {
+		t.Errorf("EmbeddedConfigPath = %q, want %q", got, want)
 	}
 }

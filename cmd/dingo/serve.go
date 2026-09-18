@@ -221,7 +221,7 @@ func resumeBackfill(
 		if network == "" {
 			network = "preview"
 		}
-		cardanoConfigPath = network + "/config.json"
+		cardanoConfigPath = cardano.EmbeddedConfigPath(network)
 	}
 	nodeCfg, nodeCfgErr := cardano.LoadCardanoNodeConfigWithFallback(
 		cardanoConfigPath,
@@ -385,7 +385,7 @@ func openConfiguredDatabase(
 		internalplugins.StorageDependencies{
 			DataDir: cfg.DatabasePath, RunMode: string(cfg.RunMode),
 			StorageMode: storageMode, MaxConnections: maxConnections,
-			Logger: logger,
+			Logger: logger, TracingEnabled: cfg.Tracing,
 		},
 	)
 }

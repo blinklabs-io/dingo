@@ -24,6 +24,8 @@ import (
 // typo'd or stale snapshot type fails fast with an error instead of
 // silently querying and returning zero rows.
 func TestGetPoolStakeSnapshotsByEpoch_RejectsInvalidSnapshotType(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	_, err := db.GetPoolStakeSnapshotsByEpoch(1, "marc", nil)
 	require.Error(t, err)
@@ -34,6 +36,8 @@ func TestGetPoolStakeSnapshotsByEpoch_RejectsInvalidSnapshotType(t *testing.T) {
 // snapshot type passes validation and reaches the query layer (returning an
 // empty, not an error, result for an epoch with no rows).
 func TestGetPoolStakeSnapshotsByEpoch_AcceptsKnownTypes(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	for _, snapshotType := range []string{"mark", "set", "go", "actv"} {
 		rows, err := db.GetPoolStakeSnapshotsByEpoch(1, snapshotType, nil)

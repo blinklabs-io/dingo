@@ -30,6 +30,8 @@ import (
 // avoid recomputing the heavy account/utxo voting-power query once per
 // proposal; it must be consensus-identical to the per-call path.
 func TestLoadDRepVotingStateMatchesLazyTally(t *testing.T) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	drepCred := testBytes(28, 1)
 	stakeCred := testBytes(28, 2)
@@ -80,6 +82,8 @@ func TestLoadDRepVotingStateMatchesLazyTally(t *testing.T) {
 // AlwaysNoConfidence bucketing correctly. This is the reuse pattern
 // ProcessEpoch relies on: load once, tally every proposal.
 func TestPrecomputedDRepStateReusedAcrossProposals(t *testing.T) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	stakeCred := testBytes(28, 4)
 	seedDRepStake(
@@ -113,6 +117,8 @@ func TestPrecomputedDRepStateReusedAcrossProposals(t *testing.T) {
 // TestLoadSPOVotingStateMatchesLazyTally asserts the SPO voting-power
 // snapshot precompute is consensus-identical to the lazy per-call path.
 func TestLoadSPOVotingStateMatchesLazyTally(t *testing.T) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	poolKeyHash := testBytes(28, 50)
 	rewardAccount := testBytes(28, 51)

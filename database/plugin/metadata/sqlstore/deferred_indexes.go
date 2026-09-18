@@ -25,7 +25,10 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 )
 
-var _ metadata.DeferredIndexManager = (*Store)(nil)
+var (
+	_ metadata.DeferredIndexManager               = (*Store)(nil)
+	_ metadata.MissingCriticalDeferredIndexLister = (*Store)(nil)
+)
 
 // withDeferredIndexWrite runs fn in one write transaction, with every
 // deferred.Retained index guaranteed resident before fn sees the database.
@@ -249,6 +252,33 @@ WHERE type = 'index' AND name = ? LIMIT 1`
 	return found != 0, err
 }
 
+// MissingCriticalDeferredIndexes reports the Critical=true manifest entries
+// absent from the schema, in manifest order, using the read connection and no
+// DDL. Callers use it to name the indexes a rebuild is about to build before
+// the rebuild starts.
+func (s *Store) MissingCriticalDeferredIndexes() ([]string, error) {
+	if err := s.ensureReady(); err != nil {
+		return nil, err
+	}
+	ctx := context.Background()
+	db := s.instrumentedQueryer(s.readDB)
+	var missing []string
+	for _, index := range deferred.CriticalManifest() {
+		exists, err := s.deferredIndexExists(ctx, db, index)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"check deferred index %s: %w",
+				index.Name,
+				err,
+			)
+		}
+		if !exists {
+			missing = append(missing, index.Name)
+		}
+	}
+	return missing, nil
+}
+
 // HasDeferredIndexesPending reports whether a prior drop/rebuild cycle still
 // owns the durable recovery marker.
 func (s *Store) HasDeferredIndexesPending() (bool, error) {
@@ -256,7 +286,7 @@ func (s *Store) HasDeferredIndexesPending() (bool, error) {
 		return false, err
 	}
 	var value string
-	err := newDialectQueryer(s.readDB, s.dialect.Name()).QueryRowContext(
+	err := s.instrumentedQueryer(s.readDB).QueryRowContext(
 		context.Background(),
 		"SELECT value FROM sync_state WHERE sync_key = ?",
 		deferred.SyncStateKey,

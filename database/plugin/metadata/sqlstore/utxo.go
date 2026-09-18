@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -60,6 +61,16 @@ func (s *Store) CreateUtxo(txn types.Txn, utxo *models.Utxo) error {
 				return err
 			}
 			utxo.ID = uint(id)
+			// A pointer address carries its stake reference as a
+			// position rather than a credential, so it lives in
+			// utxo_pointer rather than in a utxo column. Writing the
+			// utxo row alone would silently drop it -- the same
+			// omission insertUtxoModel avoids on the block-apply path.
+			if err := persistUtxoPointer(
+				ctx, db, id, utxo.Pointer,
+			); err != nil {
+				return err
+			}
 			for i := range utxo.Assets {
 				asset := &utxo.Assets[i]
 				asset.UtxoID = utxo.ID
@@ -144,6 +155,19 @@ func (s *Store) DeleteUtxos(
 	)
 }
 
+// utxoStakeRefsAddedAfterSlotQuery and utxoStakeRefsDeletedAfterSlotQuery
+// collect the stake credentials whose live stake a rollback sweep has to
+// recompute. They are deliberately free of SQL DISTINCT so the planner keeps
+// using the index that answers the slot predicate; see
+// queryStakeRefsDeduped. TestRollbackStakeRefQueriesUseSlotIndexes pins the
+// resulting SQLite query plans.
+const (
+	utxoStakeRefsAddedAfterSlotQuery = "SELECT credential_tag, staking_key " +
+		"FROM utxo WHERE added_slot > ?"
+	utxoStakeRefsDeletedAfterSlotQuery = "SELECT credential_tag, staking_key " +
+		"FROM utxo WHERE deleted_slot > ?"
+)
+
 func (s *Store) DeleteUtxosAfterSlot(
 	slot uint64,
 	txn types.Txn,
@@ -155,11 +179,19 @@ func (s *Store) DeleteUtxosAfterSlot(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
-			refs, err := queryStakeRefs(
+			// No SQL DISTINCT here: it makes SQLite prefer
+			// idx_utxo_staking_deleted_amount (which already yields
+			// (credential_tag, staking_key) order, so the temp B-tree can
+			// be skipped) over the purpose-built idx_utxo_added_slot. That
+			// index has no added_slot column, so the scan is not covering
+			// and every entry costs a row lookup just to test the
+			// predicate -- a full pass over the utxo table on every
+			// rollback. Dedupe in Go instead, which also keeps the plan
+			// stable across the MySQL and Postgres dialects.
+			refs, err := queryStakeRefsDeduped(
 				ctx,
 				db,
-				"SELECT DISTINCT credential_tag, staking_key FROM utxo "+
-					"WHERE added_slot > ?",
+				utxoStakeRefsAddedAfterSlotQuery,
 				slotValue,
 			)
 			if err != nil {
@@ -260,11 +292,13 @@ func (s *Store) SetUtxosNotDeletedAfterSlot(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
-			refs, err := queryStakeRefs(
+			// See DeleteUtxosAfterSlot: SQL DISTINCT costs a full index
+			// scan here too, in place of a range search on
+			// idx_utxo_deleted_staking_amount.
+			refs, err := queryStakeRefsDeduped(
 				ctx,
 				db,
-				"SELECT DISTINCT credential_tag, staking_key FROM utxo "+
-					"WHERE deleted_slot > ?",
+				utxoStakeRefsDeletedAfterSlotQuery,
 				slotValue,
 			)
 			if err != nil {
@@ -499,10 +533,24 @@ func (s *Store) importUtxos(
 				if err != nil {
 					return err
 				}
-				id, err := q.CreateUtxoIfAbsent(
-					ctx,
-					sqlitequery.CreateUtxoIfAbsentParams(params),
-				)
+				var id int64
+				err = s.queryRowCached(ctx, db, insertUtxoQueryIgnoreConflict,
+					params.TransactionID,
+					params.CollateralReturnForTxID,
+					params.TxID,
+					params.PaymentKey,
+					params.StakingKey,
+					params.CredentialTag,
+					params.DatumHash,
+					nullBytes(params.SpentAtTxID),
+					nullBytes(params.ReferencedByTxID),
+					nullBytes(params.CollateralByTxID),
+					params.AddedSlot,
+					params.DeletedSlot,
+					params.Amount,
+					params.OutputIdx,
+					params.PaymentScript,
+				).Scan(&id)
 				if errors.Is(err, sql.ErrNoRows) {
 					id, err = q.GetUtxoIDByRef(
 						ctx,
@@ -531,20 +579,23 @@ func (s *Store) importUtxos(
 				} else if err != nil {
 					return fmt.Errorf("import UTxO: %w", err)
 				}
+				// See CreateUtxo: the pointer position is a separate
+				// row, and persistUtxoPointer converges, so an output
+				// already imported keeps the same position.
+				if err := persistUtxoPointer(
+					ctx, db, id, item.Pointer,
+				); err != nil {
+					return err
+				}
 				for j := range item.Assets {
 					asset := item.Assets[j]
-					if err := q.ImportAsset(
-						ctx,
-						sqlitequery.ImportAssetParams{
-							Name:        asset.Name,
-							NameHex:     asset.NameHex,
-							PolicyID:    asset.PolicyId,
-							Fingerprint: asset.Fingerprint,
-							UtxoID:      validInt64(id),
-							Amount: validString(
-								decimalUint64(asset.Amount),
-							),
-						},
+					if _, err := s.execCached(ctx, db, importAssetQuery,
+						asset.Name,
+						asset.NameHex,
+						asset.PolicyId,
+						asset.Fingerprint,
+						validInt64(id),
+						validString(decimalUint64(asset.Amount)),
 					); err != nil {
 						return fmt.Errorf(
 							"import UTxO asset: %w",
@@ -634,6 +685,239 @@ func (s *Store) refreshRewardLiveStakeRefs(
 	return nil
 }
 
+// stakeCredentialDelta pairs a stake credential with the signed lovelace
+// change one write's UTxO mutations made to its live-UTxO total. See
+// refreshRewardLiveStakeAggregateDelta.
+type stakeCredentialDelta struct {
+	ref   models.StakeCredentialRef
+	delta int64
+}
+
+// refsToStakeCredentialDeltas widens a plain ref slice -- a certificate-only
+// touch, which never changes the utxo table -- into zero-delta entries so it
+// can be merged with a slice that does carry a real UTxO delta.
+func refsToStakeCredentialDeltas(
+	refs []models.StakeCredentialRef,
+) []stakeCredentialDelta {
+	if len(refs) == 0 {
+		return nil
+	}
+	ret := make([]stakeCredentialDelta, len(refs))
+	for i, ref := range refs {
+		ret[i] = stakeCredentialDelta{ref: ref}
+	}
+	return ret
+}
+
+// mergeStakeCredentialDeltas merges delta slices into one entry per
+// credential, summing every occurrence's delta -- unlike
+// mergeStakeCredentialRefs, which keeps only a ref's first occurrence, this
+// has to add every occurrence's contribution or a credential appearing in
+// both a consumed input and a produced output within the same transaction
+// (an ordinary change pattern) would silently drop one side of its net
+// effect. Order follows first occurrence, matching mergeStakeCredentialRefs.
+func mergeStakeCredentialDeltas(
+	deltaSlices ...[]stakeCredentialDelta,
+) []stakeCredentialDelta {
+	total := 0
+	for _, deltas := range deltaSlices {
+		total += len(deltas)
+	}
+	if total == 0 {
+		return nil
+	}
+	sums := make(map[string]int64, total)
+	refs := make(map[string]models.StakeCredentialRef, total)
+	order := make([]string, 0, total)
+	for _, deltas := range deltaSlices {
+		for _, d := range deltas {
+			key := d.ref.MapKey()
+			if _, ok := refs[key]; !ok {
+				order = append(order, key)
+				refs[key] = d.ref
+			}
+			sums[key] += d.delta
+		}
+	}
+	ret := make([]stakeCredentialDelta, len(order))
+	for i, key := range order {
+		ret[i] = stakeCredentialDelta{ref: refs[key], delta: sums[key]}
+	}
+	return ret
+}
+
+// refreshRewardLiveStakeDeltas is refreshRewardLiveStakeRefs's incremental
+// counterpart, applying each entry's exact signed UTxO delta instead of
+// re-deriving it with a full scan. See refreshRewardLiveStakeAggregateDelta
+// for which callers this is safe for.
+func (s *Store) refreshRewardLiveStakeDeltas(
+	ctx context.Context,
+	db queryer,
+	deltas []stakeCredentialDelta,
+	slot uint64,
+) error {
+	for i := range deltas {
+		if err := s.refreshRewardLiveStakeAggregateDelta(
+			ctx, db, deltas[i].ref, slot, deltas[i].delta,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// producedStakeCredentialDelta builds the delta a produced UTxO output
+// contributes to its stake credential's running live-UTxO total.
+//
+// inserted reports whether this write actually created the output's row.
+// insertUtxoModel's conflict-tolerant form is an ON CONFLICT (tx_id,
+// output_idx) DO NOTHING insert, so an output whose row already exists -- a
+// snapshot import creates outputs before their producing transaction is
+// replayed, and a gap-closure or Leios re-apply can revisit a transaction
+// already stored -- leaves the utxo table unchanged. A delta must state the
+// change this write made to that table, not the change it intended, so a
+// conflicting output contributes 0: its amount is already inside the running
+// total that the row it collided with was counted into. Counting it again
+// would inflate the credential's live stake permanently, since the
+// incremental path has no scan to correct it (dingo #4421).
+//
+// amount is already bounded within int64 by CheckedUint64FromBigInt
+// (UtxoLedgerToModel's caller), well inside a real lovelace value's range
+// (ada's total supply is far below both int64's and uint64's ceiling), but
+// this checks explicitly rather than trusting that indirectly like
+// sumCredentialUtxoStakeQuery's doc comment argues for the SQL-side sum.
+func producedStakeCredentialDelta(
+	tag uint8,
+	key []byte,
+	amount types.Uint64,
+	inserted bool,
+) (stakeCredentialDelta, error) {
+	if uint64(amount) > math.MaxInt64 {
+		return stakeCredentialDelta{}, fmt.Errorf(
+			"produced UTxO amount overflow: %d",
+			uint64(amount),
+		)
+	}
+	ret := stakeCredentialDelta{ref: models.NewStakeCredentialRef(tag, key)}
+	if inserted {
+		ret.delta = int64(amount)
+	}
+	return ret, nil
+}
+
+// utxoStakeConsumedDeltaQuery is queryUtxoStakeConsumedDeltas' batched
+// lookup, built the same way utxoStakeRefsByTxIDQuery is: driven by distinct
+// tx_id values with the (tx_id, output_idx) pair filtered in Go, so SQLite's
+// planner stays on the unique tx_id_output_idx index instead of falling back
+// to a full idx_utxo_staking_deleted_amount scan once the batch has more than
+// a handful of terms (dingo #4067).
+func utxoStakeConsumedDeltaQuery(n int) string {
+	return "SELECT tx_id, output_idx, credential_tag, staking_key, amount " +
+		"FROM utxo WHERE tx_id IN (" +
+		strings.TrimSuffix(strings.Repeat("?,", n), ",") + ")"
+}
+
+// queryUtxoStakeConsumedDeltas is queryUtxoStakeRefs's counterpart for the
+// setTransactionWithAccumulator fast path: alongside each spent input's
+// credential it also reads the row's amount, so the caller can pass
+// refreshRewardLiveStakeAggregateDelta the exact negative delta a spend
+// contributes instead of falling back to sumCredentialUtxoStake's full scan.
+//
+// ids must name only the inputs this write actually transitioned from live to
+// deleted -- the ones whose UPDATE reported a row affected -- and not every
+// input the transaction lists. An input the write skipped because the row was
+// already spent (by an earlier certified endorser block on the Leios closure
+// path, or by an earlier application of this same transaction) changed
+// nothing in the utxo table, so subtracting its amount would drive the
+// credential's running total permanently below its real live stake, or fail
+// the write outright on applyUtxoStakeDelta's underflow guard. Those inputs
+// belong in the caller's zero-delta touch set instead (dingo #4421).
+//
+// deleted_slot is not filtered on: ids names exactly the inputs this
+// transaction just spent, by (tx_id, output_idx), so the deleted_slot value
+// (already set to this transaction's slot by the caller) does not change
+// which row answers the lookup.
+func queryUtxoStakeConsumedDeltas(
+	ctx context.Context,
+	db queryer,
+	ids []models.UtxoId,
+) ([]stakeCredentialDelta, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	txIDs, wanted := distinctUtxoTxIDs(ids)
+	sums := make(map[string]int64, len(ids))
+	refs := make(map[string]models.StakeCredentialRef, len(ids))
+	order := make([]string, 0, len(ids))
+	for start := 0; start < len(txIDs); start += 400 {
+		end := min(start+400, len(txIDs))
+		batch := txIDs[start:end]
+		args := make([]any, len(batch))
+		for i, txID := range batch {
+			args[i] = txID
+		}
+		query := utxoStakeConsumedDeltaQuery(len(batch))
+		rows, err := db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, err
+		}
+		scanErr := func() error {
+			defer rows.Close()
+			for rows.Next() {
+				var txID []byte
+				var outputIdx sql.NullInt64
+				var tag int64
+				var key []byte
+				var raw sql.NullString
+				if err := rows.Scan(
+					&txID, &outputIdx, &tag, &key, &raw,
+				); err != nil {
+					return err
+				}
+				if len(key) == 0 || !outputIdx.Valid {
+					continue
+				}
+				outs, ok := wanted[string(txID)]
+				if !ok {
+					continue
+				}
+				if _, ok := outs[uint32(outputIdx.Int64)]; !ok {
+					continue
+				}
+				if !raw.Valid || raw.String == "" {
+					continue
+				}
+				amount, err := parseUint64("consumed UTxO amount", raw.String)
+				if err != nil {
+					return err
+				}
+				if amount > math.MaxInt64 {
+					return fmt.Errorf(
+						"consumed UTxO amount overflow: %d",
+						amount,
+					)
+				}
+				ref := models.NewStakeCredentialRef(uint8(tag), key)
+				mapKey := ref.MapKey()
+				if _, ok := refs[mapKey]; !ok {
+					order = append(order, mapKey)
+					refs[mapKey] = ref
+				}
+				sums[mapKey] -= int64(amount)
+			}
+			return rows.Err()
+		}()
+		if scanErr != nil {
+			return nil, scanErr
+		}
+	}
+	ret := make([]stakeCredentialDelta, len(order))
+	for i, key := range order {
+		ret[i] = stakeCredentialDelta{ref: refs[key], delta: sums[key]}
+	}
+	return ret, nil
+}
+
 func currentTipSlot(ctx context.Context, db queryer) (uint64, error) {
 	var slot sql.NullInt64
 	err := db.QueryRowContext(
@@ -649,6 +933,49 @@ func currentTipSlot(ctx context.Context, db queryer) (uint64, error) {
 	return uint64(slot.Int64), nil
 }
 
+// distinctUtxoTxIDs returns the distinct tx_id hashes among ids, in
+// first-seen order, alongside a lookup from tx_id (as a string map key) to
+// the set of output indexes requested for that transaction.
+func distinctUtxoTxIDs(
+	ids []models.UtxoId,
+) ([][]byte, map[string]map[uint32]struct{}) {
+	wanted := make(map[string]map[uint32]struct{}, len(ids))
+	order := make([][]byte, 0, len(ids))
+	for _, id := range ids {
+		key := string(id.Hash)
+		outs, ok := wanted[key]
+		if !ok {
+			outs = make(map[uint32]struct{}, 1)
+			wanted[key] = outs
+			order = append(order, id.Hash)
+		}
+		outs[id.Idx] = struct{}{}
+	}
+	return order, wanted
+}
+
+// utxoStakeRefsByTxIDQuery builds the tx_id-driven lookup queryUtxoStakeRefs
+// runs per batch of n distinct transaction hashes. It deliberately carries no
+// "deleted_slot = 0" predicate -- see queryUtxoStakeRefs -- so deleted_slot
+// is filtered in Go instead.
+//
+// Filtering by tx_id alone -- rather than an OR of per-(tx_id, output_idx)
+// equalities, see utxoIDPredicate -- keeps SQLite's planner on the leading
+// column of the unique tx_id_output_idx index no matter how many terms are
+// in the batch. The OR-of-pairs form defeats that index past a handful of
+// terms and falls back to a full scan of idx_utxo_deleted_staking_amount
+// once liveOnly's "deleted_slot = 0" looks like a cheaper driving predicate --
+// measured on an 11M-row live UTxO table in issue #4067, which starves block
+// application for minutes at a time. The caller filters the extra rows this
+// query can return (other outputs of the same transaction, and, for liveOnly,
+// already-deleted ones) down to the exact requested (tx_id, output_idx)
+// pairs in Go.
+func utxoStakeRefsByTxIDQuery(n int) string {
+	return "SELECT tx_id, output_idx, deleted_slot, credential_tag, " +
+		"staking_key FROM utxo WHERE tx_id IN (" +
+		strings.TrimSuffix(strings.Repeat("?,", n), ",") + ")"
+}
+
 func queryUtxoStakeRefs(
 	ctx context.Context,
 	db queryer,
@@ -659,27 +986,64 @@ func queryUtxoStakeRefs(
 	if len(ids) == 0 {
 		return ret, nil
 	}
+	txIDs, wanted := distinctUtxoTxIDs(ids)
 	seen := make(map[string]struct{})
-	// Two bind variables per reference; 400 keeps this portable to SQLite's
-	// conservative 999-parameter configuration.
-	for start := 0; start < len(ids); start += 400 {
-		end := min(start+400, len(ids))
-		predicate, args := utxoIDPredicate(ids[start:end])
-		query := "SELECT DISTINCT credential_tag, staking_key FROM utxo WHERE (" +
-			predicate + ")"
-		if liveOnly {
-			query += " AND deleted_slot = 0"
+	// One bind variable per distinct tx_id; 400 keeps this portable to
+	// SQLite's conservative 999-parameter configuration, with headroom to
+	// spare versus the old form's two binds per reference.
+	for start := 0; start < len(txIDs); start += 400 {
+		end := min(start+400, len(txIDs))
+		batch := txIDs[start:end]
+		args := make([]any, len(batch))
+		for i, txID := range batch {
+			args[i] = txID
 		}
-		rows, err := queryStakeRefs(ctx, db, query, args...)
+		query := utxoStakeRefsByTxIDQuery(len(batch))
+		rows, err := db.QueryContext(ctx, query, args...)
 		if err != nil {
 			return nil, err
 		}
-		for _, ref := range rows {
-			if _, ok := seen[ref.MapKey()]; ok {
-				continue
+		scanErr := func() error {
+			defer rows.Close()
+			for rows.Next() {
+				var txID []byte
+				var outputIdx sql.NullInt64
+				var deletedSlot sql.NullInt64
+				var tag int64
+				var key []byte
+				if err := rows.Scan(
+					&txID,
+					&outputIdx,
+					&deletedSlot,
+					&tag,
+					&key,
+				); err != nil {
+					return err
+				}
+				if len(key) == 0 || !outputIdx.Valid {
+					continue
+				}
+				if liveOnly && deletedSlot.Int64 != 0 {
+					continue
+				}
+				outs, ok := wanted[string(txID)]
+				if !ok {
+					continue
+				}
+				if _, ok := outs[uint32(outputIdx.Int64)]; !ok {
+					continue
+				}
+				ref := models.NewStakeCredentialRef(uint8(tag), key)
+				if _, ok := seen[ref.MapKey()]; ok {
+					continue
+				}
+				seen[ref.MapKey()] = struct{}{}
+				ret = append(ret, ref)
 			}
-			seen[ref.MapKey()] = struct{}{}
-			ret = append(ret, ref)
+			return rows.Err()
+		}()
+		if scanErr != nil {
+			return nil, scanErr
 		}
 	}
 	return ret, nil
@@ -709,6 +1073,81 @@ func queryStakeRefs(
 		ret = append(ret, models.NewStakeCredentialRef(uint8(tag), key))
 	}
 	return ret, rows.Err()
+}
+
+// queryStakeRefsDeduped runs query and returns its stake credential
+// references with duplicates removed, preserving the order of first
+// occurrence. It exists so range-scan queries over utxo can be written
+// without a SQL DISTINCT: DISTINCT over (credential_tag, staking_key)
+// pushes SQLite onto an index that supplies that ordering rather than onto
+// the index that satisfies the WHERE clause, turning a bounded range search
+// into a full table pass. queryStakeRefs already materialises every row, so
+// deduping in Go costs one map insert per row.
+//
+// Neither the result nor the seen set is presized from len(rows): the callers
+// are rollback sweeps, where a window of thousands of rows routinely collapses
+// to a handful of credentials, so sizing for the input would reserve orders of
+// magnitude more than the output needs.
+func queryStakeRefsDeduped(
+	ctx context.Context,
+	db queryer,
+	query string,
+	args ...any,
+) ([]models.StakeCredentialRef, error) {
+	rows, err := queryStakeRefs(ctx, db, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	ret := []models.StakeCredentialRef{}
+	seen := make(map[string]struct{})
+	for _, ref := range rows {
+		// MapKey allocates, so compute it once per row.
+		key := ref.MapKey()
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		ret = append(ret, ref)
+	}
+	return ret, nil
+}
+
+// mergeStakeCredentialRefs merges any number of stake-credential reference
+// slices into one, with duplicates removed by MapKey and each credential's
+// first occurrence kept. setTransaction uses it to fold the credentials
+// touched by a transaction's certificates, consumed inputs, and produced
+// outputs into a single refreshRewardLiveStakeRefs pass: the same credential
+// legitimately appears in more than one of these (a wallet's own change
+// output alongside a certificate it just submitted, or several outputs to one
+// address), and each occurrence would otherwise trigger its own full
+// sumCredentialUtxoStake recompute for what is, after all of the
+// transaction's mutations are applied, the same final total.
+func mergeStakeCredentialRefs(
+	refSlices ...[]models.StakeCredentialRef,
+) []models.StakeCredentialRef {
+	total := 0
+	for _, refs := range refSlices {
+		total += len(refs)
+	}
+	if total == 0 {
+		return nil
+	}
+	seen := make(map[string]models.StakeCredentialRef, total)
+	order := make([]string, 0, total)
+	for _, refs := range refSlices {
+		for _, ref := range refs {
+			key := ref.MapKey()
+			if _, ok := seen[key]; !ok {
+				order = append(order, key)
+			}
+			seen[key] = ref
+		}
+	}
+	ret := make([]models.StakeCredentialRef, len(order))
+	for i, key := range order {
+		ret[i] = seen[key]
+	}
+	return ret
 }
 
 func utxoIDPredicate(ids []models.UtxoId) (string, []any) {
@@ -780,6 +1219,47 @@ func (s *Store) getUtxo(
 	return ret, nil
 }
 
+// utxoRefsByTxID looks up every utxo row for the distinct tx_id hashes in
+// refs -- the same tx_id-driven, index-friendly shape queryUtxoStakeRefs
+// uses (see its doc comment and issue #4067) -- and returns them alongside
+// the (tx_id, output_idx) index refs asked for, so the caller can filter the
+// extra rows (other outputs of the same transaction) down to exactly the
+// requested references in Go.
+func (s *Store) utxoRefsByTxID(
+	txn types.Txn,
+	refs []models.UtxoId,
+) ([]models.Utxo, map[string]map[uint32]struct{}, error) {
+	refs = dedupeUtxoIDs(refs)
+	if len(refs) == 0 {
+		return []models.Utxo{}, nil, nil
+	}
+	txIDs, wanted := distinctUtxoTxIDs(refs)
+	ret := []models.Utxo{}
+	// One bind variable per distinct tx_id; 400 keeps this portable to
+	// SQLite's conservative 999-parameter configuration, with headroom to
+	// spare versus the old OR-predicate form's two binds per reference.
+	for start := 0; start < len(txIDs); start += 400 {
+		end := min(start+400, len(txIDs))
+		batch := txIDs[start:end]
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(batch)), ",")
+		args := make([]any, len(batch))
+		for i, txID := range batch {
+			args[i] = txID
+		}
+		utxos, err := s.queryUtxosWithAssets(
+			txn,
+			"tx_id IN ("+placeholders+")",
+			args,
+			"",
+		)
+		if err != nil {
+			return nil, nil, err
+		}
+		ret = append(ret, utxos...)
+	}
+	return ret, wanted, nil
+}
+
 // GetUtxosByRefs retrieves multiple live UTxOs by their (tx_id, output_idx)
 // references in a single batch. Refs with no matching live UTxO are simply
 // absent from the result. A ref repeated in the input yields at most one
@@ -788,23 +1268,64 @@ func (s *Store) GetUtxosByRefs(
 	refs []models.UtxoId,
 	txn types.Txn,
 ) ([]models.Utxo, error) {
-	ret := []models.Utxo{}
-	refs = dedupeUtxoIDs(refs)
-	// Two bind variables per reference; 400 keeps this portable to
-	// SQLite's conservative 999-parameter configuration.
-	for start := 0; start < len(refs); start += 400 {
-		end := min(start+400, len(refs))
-		predicate, args := utxoIDPredicate(refs[start:end])
-		utxos, err := s.queryUtxosWithAssets(
-			txn,
-			"deleted_slot = 0 AND ("+predicate+")",
-			args,
-			"",
-		)
-		if err != nil {
-			return nil, err
+	utxos, wanted, err := s.utxoRefsByTxID(txn, refs)
+	if err != nil {
+		return nil, err
+	}
+	ret := make([]models.Utxo, 0, len(utxos))
+	for _, u := range utxos {
+		outs, ok := wanted[string(u.TxId)]
+		if !ok {
+			continue
 		}
-		ret = append(ret, utxos...)
+		if _, ok := outs[u.OutputIdx]; !ok {
+			continue
+		}
+		if u.DeletedSlot != 0 {
+			continue
+		}
+		ret = append(ret, u)
+	}
+	return ret, nil
+}
+
+// GetUtxosByRefsAsOf retrieves the UTxOs matching refs as they stood at
+// atSlot: created at-or-before atSlot and either still live (deleted_slot =
+// 0) or spent strictly after it (deleted_slot > atSlot). See the UtxoStore
+// interface doc comment for the retention caveat callers must enforce
+// themselves -- a row spent long enough ago can already be hard-deleted by
+// the periodic stability-window cleanup regardless of atSlot.
+func (s *Store) GetUtxosByRefsAsOf(
+	refs []models.UtxoId,
+	atSlot uint64,
+	txn types.Txn,
+) ([]models.Utxo, error) {
+	// Slots are stored as signed SQLite INTEGERs. atSlot is compared in Go
+	// below rather than bound to SQL, so reject an out-of-domain value here
+	// instead of silently matching every live row against it.
+	if _, err := checkedInt64(atSlot); err != nil {
+		return nil, err
+	}
+	utxos, wanted, err := s.utxoRefsByTxID(txn, refs)
+	if err != nil {
+		return nil, err
+	}
+	ret := make([]models.Utxo, 0, len(utxos))
+	for _, u := range utxos {
+		outs, ok := wanted[string(u.TxId)]
+		if !ok {
+			continue
+		}
+		if _, ok := outs[u.OutputIdx]; !ok {
+			continue
+		}
+		if u.AddedSlot > atSlot {
+			continue
+		}
+		if u.DeletedSlot != 0 && u.DeletedSlot <= atSlot {
+			continue
+		}
+		ret = append(ret, u)
 	}
 	return ret, nil
 }
@@ -825,6 +1346,22 @@ func dedupeUtxoIDs(ids []models.UtxoId) []models.UtxoId {
 	return ret
 }
 
+// GetUtxosAddedAfterSlot returns every UTxO added after slot, newest first.
+//
+// The rollback sweep calls this (through UtxosDeleteRolledback) immediately
+// before DeleteUtxosAfterSlot, to hand the blob store the objects it has to
+// drop. The statement used to end in "ORDER BY id DESC". id is the rowid, so
+// SQLite satisfied that by walking the table backwards -- a full SCAN, with
+// readahead defeated by the descending direction -- rather than
+// range-searching idx_utxo_added_slot, and the sweep read the entire utxo
+// table to return the handful of rows a rollback actually touches.
+//
+// Ordering by added_slot first fixes it without giving up a deterministic
+// order: idx_utxo_added_slot is (added_slot, rowid) and id is the rowid, so
+// "ORDER BY added_slot DESC, id DESC" is exactly that index's reverse order.
+// SQLite walks the matching range backwards and needs no sorter, at every
+// table size and whether or not ANALYZE has run.
+// TestGetUtxosAddedAfterSlotUsesSlotIndex pins the plan.
 func (s *Store) GetUtxosAddedAfterSlot(
 	slot uint64,
 	txn types.Txn,
@@ -947,18 +1484,61 @@ func (s *Store) GetUtxosDeletedBeforeSlot(
 // every chunk it appears in -- before assets are loaded once on the final
 // deduplicated set, so asset-loading cost is bounded by the result size
 // rather than chunk count times candidate-set size.
+//
+// maxResults must be positive: it is an explicit, caller-supplied bound on
+// the number of candidate rows this call may materialize, since a broad
+// pattern set (or an address with an unusually large UTxO set) would
+// otherwise force an unbounded result. Exceeding it returns
+// models.ErrTooManyUtxoResults rather than silently truncating the answer.
 func (s *Store) GetUtxosByAddress(
 	patterns []models.UtxoAddressPattern,
+	maxResults int,
 	txn types.Txn,
 ) ([]models.Utxo, error) {
 	if len(patterns) == 0 {
 		return nil, nil
 	}
+	if maxResults <= 0 {
+		return nil, fmt.Errorf(
+			"GetUtxosByAddress: maxResults must be positive, got %d",
+			maxResults,
+		)
+	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
-	limit := s.dialect.ParameterLimit()
+	paramLimit := s.dialect.ParameterLimit()
+	// chunkQueryLimit is a fixed per-chunk SQL LIMIT, one more than
+	// maxResults, computed once rather than shrunk by the deduplicated
+	// count already collected (len(ret)). A shrinking limit is unsound
+	// across overlapping chunks: chunk A's coarse branch and chunk B's
+	// exact-address branch can both match the same physical row, so a
+	// chunk full of already-seen duplicates would leave no budget left
+	// to see a chunk's own, still-unseen matches, silently returning an
+	// incomplete answer instead of detecting the overflow. A fixed
+	// maxResults+1 per chunk avoids that: by construction, at most
+	// maxResults of a chunk's returned rows can already be in ret
+	// (ret's own length is checked against maxResults after every
+	// insertion below), so whenever a chunk's true match count exceeds
+	// maxResults+1, at least one of its returned rows is guaranteed to
+	// be new, which is what actually proves the overflow. 0 means
+	// unbounded, guarding maxResults+1 against overflow when the caller
+	// passes math.MaxInt (a query-level LIMIT would be moot at that
+	// bound regardless).
+	chunkQueryLimit := 0
+	if maxResults < math.MaxInt {
+		chunkQueryLimit = maxResults + 1
+	}
+	// queryUtxos appends one extra bind parameter for the LIMIT clause
+	// whenever chunkQueryLimit > 0. That parameter must be reserved here
+	// too, or a chunk that fills exactly to paramLimit on WHERE-clause
+	// args alone produces a statement with paramLimit+1 total parameters,
+	// which the dialect may reject.
+	limitParamReserve := 0
+	if chunkQueryLimit > 0 {
+		limitParamReserve = 1
+	}
 	type utxoKey struct {
 		txId string
 		idx  uint32
@@ -976,6 +1556,7 @@ func (s *Store) GetUtxosByAddress(
 			"utxo.deleted_slot = 0 AND ("+strings.Join(branches, " OR ")+")",
 			args,
 			"",
+			chunkQueryLimit,
 		)
 		if err != nil {
 			return err
@@ -987,6 +1568,13 @@ func (s *Store) GetUtxosByAddress(
 			}
 			seen[key] = struct{}{}
 			ret = append(ret, utxos[i])
+			if len(ret) > maxResults {
+				return fmt.Errorf(
+					"GetUtxosByAddress: %w (maxResults=%d)",
+					models.ErrTooManyUtxoResults,
+					maxResults,
+				)
+			}
 		}
 		branches = nil
 		args = nil
@@ -1003,8 +1591,8 @@ func (s *Store) GetUtxosByAddress(
 			return nil, err
 		}
 		if len(branches) > 0 &&
-			(len(args)+len(branchArgs) > limit ||
-				len(branches)+len(branchOrs) >= max(1, limit/2)) {
+			(len(args)+len(branchArgs)+limitParamReserve > paramLimit ||
+				len(branches)+len(branchOrs) >= max(1, paramLimit/2)) {
 			if err := runQuery(); err != nil {
 				return nil, err
 			}
@@ -1427,16 +2015,66 @@ func (s *Store) IterateLiveUtxos(
 	return rows.Err()
 }
 
+// IterateUtxosAsOf invokes fn once for each UTxO row live as of atSlot --
+// added at or before atSlot, and either never spent or spent strictly
+// after atSlot -- matching UtxosByRefsAsOf's identical predicate for a
+// bounded ref list, here applied to the whole table. See the
+// MetadataStore interface doc comment for why this has no indexed
+// shortcut, unlike IterateLiveUtxos' deleted_slot = 0 filter.
+func (s *Store) IterateUtxosAsOf(
+	atSlot uint64,
+	txn types.Txn,
+	fn func(*models.Utxo) error,
+) error {
+	if fn == nil {
+		return errors.New("iterate UTxOs as of slot: callback is nil")
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	sqlSlot, err := checkedInt64(atSlot)
+	if err != nil {
+		return err
+	}
+	query := s.dialect.Rebind(
+		"SELECT " + sqliteUtxoColumns + ` FROM utxo
+WHERE added_slot <= ? AND (deleted_slot = 0 OR deleted_slot > ?)`,
+	)
+	rows, err := db.QueryContext(ctx, query, sqlSlot, sqlSlot)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		row, err := scanSQLiteUtxo(rows)
+		if err != nil {
+			return err
+		}
+		model, err := utxoFromSQLite(row)
+		if err != nil {
+			return err
+		}
+		if err := fn(model); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
 // queryUtxos runs predicate/args against the utxo table and returns the
 // matching rows without loading assets -- callers that need to deduplicate
 // candidates across multiple queries (e.g. chunked GetUtxosByAddress) should
 // use this and load assets once on the final deduplicated set, rather than
-// paying the asset-load cost once per query.
+// paying the asset-load cost once per query. limit <= 0 means unbounded; a
+// positive limit appends a SQL LIMIT clause so a broad predicate cannot
+// force an unbounded result set to be materialized.
 func (s *Store) queryUtxos(
 	txn types.Txn,
 	predicate string,
 	args []any,
 	order string,
+	limit int,
 ) ([]models.Utxo, error) {
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
@@ -1445,6 +2083,10 @@ func (s *Store) queryUtxos(
 	query := "SELECT " + sqliteUtxoColumns + " FROM utxo WHERE " + predicate
 	if order != "" {
 		query += " ORDER BY " + order
+	}
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
 	}
 	rows, err := db.QueryContext(
 		ctx,
@@ -1483,7 +2125,7 @@ func (s *Store) queryUtxosWithAssets(
 	if err != nil {
 		return nil, err
 	}
-	ret, err := s.queryUtxos(txn, predicate, args, order)
+	ret, err := s.queryUtxos(txn, predicate, args, order, 0)
 	if err != nil {
 		return nil, err
 	}

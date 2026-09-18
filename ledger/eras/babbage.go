@@ -227,6 +227,11 @@ func ValidateTxBabbage(
 			)
 		}
 	}
+	if err := validateMIRAccumulatedRewards(
+		tx, slot, ls, tmpPparams.ProtocolMajorVersion(),
+	); err != nil {
+		errs = append(errs, err)
+	}
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
@@ -283,13 +288,13 @@ func ValidateTxBabbage(
 	}
 	// Evaluate scripts
 	var txInfoV2 script.TxInfoV2
+	txInfos := newTxInfoCache(
+		ls,
+		tx,
+		slices.Concat(resolvedInputs, resolvedRefInputs),
+	)
 	if txHasRedeemers(tx) {
-		txInfoV2, err = script.NewTxInfoV2FromTransaction(
-			ls,
-			tx,
-			slices.Concat(resolvedInputs, resolvedRefInputs),
-			script.StrictValidityUpperBoundForTransaction(tx),
-		)
+		txInfoV2, err = txInfos.v2()
 		if err != nil {
 			return err
 		}
@@ -310,12 +315,10 @@ func ValidateTxBabbage(
 		}
 		switch s := tmpScript.(type) {
 		case lcommon.PlutusV1Script:
-			txInfoV1, err := script.NewTxInfoV1FromTransaction(
-				ls,
-				tx,
-				slices.Concat(resolvedInputs, resolvedRefInputs),
-				script.StrictValidityUpperBoundForTransaction(tx),
-			)
+			// Built at most once per transaction via txInfos, regardless of
+			// how many PlutusV1 redeemers share it (issue: redundant
+			// per-redeemer TxInfo rebuild).
+			txInfoV1, err := txInfos.v1()
 			if err != nil {
 				return err
 			}
@@ -325,13 +328,17 @@ func ValidateTxBabbage(
 				datum = tmp.Datum
 			}
 			sc := script.NewScriptContextV1V2(txInfoV1, purpose)
+			costModel, err := requiredCostModel(tmpPparams.CostModels, 0, "PlutusV1")
+			if err != nil {
+				return err
+			}
 			evalContext, err := cek.NewEvalContext(
 				lang.LanguageVersionV1,
 				cek.ProtoVersion{
 					Major: tmpPparams.ProtocolMajor,
 					Minor: tmpPparams.ProtocolMinor,
 				},
-				tmpPparams.CostModels[0],
+				costModel,
 			)
 			if err != nil {
 				return fmt.Errorf("build evaluation context: %w", err)
@@ -373,28 +380,35 @@ func ValidateTxBabbage(
 				)
 			}
 		case lcommon.PlutusV2Script:
-			txInfoV2, err := script.NewTxInfoV2FromTransaction(
-				ls,
-				tx,
-				slices.Concat(resolvedInputs, resolvedRefInputs),
-				script.StrictValidityUpperBoundForTransaction(tx),
-			)
-			if err != nil {
-				return err
+			// Real cardano-ledger rejects this transaction outright at the
+			// UTXOW level, before any script runs, when PlutusV2 has no real
+			// cost model yet -- see ErrNoCostModelForPlutusV2.
+			if syntheticV2CostModelInEffect(ls) {
+				return fmt.Errorf(
+					"script %s: %w",
+					tmpScript.Hash(),
+					ErrNoCostModelForPlutusV2,
+				)
 			}
+			// txInfoV2 is already built above (the .Redeemers this loop
+			// ranges over came from it); reused here rather than rebuilt.
 			// Get spent UTxO datum
 			var datum data.PlutusData
 			if tmp, ok := purpose.(script.ScriptPurposeSpending); ok {
 				datum = tmp.Datum
 			}
 			sc := script.NewScriptContextV1V2(txInfoV2, purpose)
+			costModel, err := requiredCostModel(tmpPparams.CostModels, 1, "PlutusV2")
+			if err != nil {
+				return err
+			}
 			evalContext, err := cek.NewEvalContext(
 				lang.LanguageVersionV2,
 				cek.ProtoVersion{
 					Major: tmpPparams.ProtocolMajor,
 					Minor: tmpPparams.ProtocolMinor,
 				},
-				tmpPparams.CostModels[1],
+				costModel,
 			)
 			if err != nil {
 				return fmt.Errorf("build evaluation context: %w", err)
@@ -511,13 +525,13 @@ func EvaluateTxBabbage(
 	retRedeemerExUnits := make(map[lcommon.RedeemerKey]lcommon.ExUnits)
 	var err error
 	var txInfoV2 script.TxInfoV2
+	txInfos := newTxInfoCache(
+		ls,
+		tx,
+		slices.Concat(resolvedInputs, resolvedRefInputs),
+	)
 	if txHasRedeemers(tx) {
-		txInfoV2, err = script.NewTxInfoV2FromTransaction(
-			ls,
-			tx,
-			slices.Concat(resolvedInputs, resolvedRefInputs),
-			script.StrictValidityUpperBoundForTransaction(tx),
-		)
+		txInfoV2, err = txInfos.v2()
 		if err != nil {
 			return 0, lcommon.ExUnits{}, nil, err
 		}
@@ -539,12 +553,9 @@ func EvaluateTxBabbage(
 		}
 		switch s := tmpScript.(type) {
 		case lcommon.PlutusV1Script:
-			txInfoV1, err := script.NewTxInfoV1FromTransaction(
-				ls,
-				tx,
-				slices.Concat(resolvedInputs, resolvedRefInputs),
-				script.StrictValidityUpperBoundForTransaction(tx),
-			)
+			// Built at most once per transaction via txInfos, regardless of
+			// how many PlutusV1 redeemers share it.
+			txInfoV1, err := txInfos.v1()
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, err
 			}
@@ -554,13 +565,17 @@ func EvaluateTxBabbage(
 				datum = tmp.Datum
 			}
 			sc := script.NewScriptContextV1V2(txInfoV1, purpose)
+			costModel, err := requiredCostModel(tmpPparams.CostModels, 0, "PlutusV1")
+			if err != nil {
+				return 0, lcommon.ExUnits{}, nil, err
+			}
 			evalContext, err := cek.NewEvalContext(
 				lang.LanguageVersionV1,
 				cek.ProtoVersion{
 					Major: tmpPparams.ProtocolMajor,
 					Minor: tmpPparams.ProtocolMinor,
 				},
-				tmpPparams.CostModels[0],
+				costModel,
 			)
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
@@ -584,28 +599,35 @@ func EvaluateTxBabbage(
 				Index: redeemer.Index,
 			}] = usedBudget
 		case lcommon.PlutusV2Script:
-			txInfoV2, err := script.NewTxInfoV2FromTransaction(
-				ls,
-				tx,
-				slices.Concat(resolvedInputs, resolvedRefInputs),
-				script.StrictValidityUpperBoundForTransaction(tx),
-			)
-			if err != nil {
-				return 0, lcommon.ExUnits{}, nil, err
+			// Mirrors ValidateTxBabbage's identical check: a transaction
+			// that would be rejected outright at validation time must not
+			// be quoted a fee/ex-units estimate implying it's valid.
+			if syntheticV2CostModelInEffect(ls) {
+				return 0, lcommon.ExUnits{}, nil, fmt.Errorf(
+					"script %s: %w",
+					tmpScript.Hash(),
+					ErrNoCostModelForPlutusV2,
+				)
 			}
+			// txInfoV2 is already built above (the .Redeemers this loop
+			// ranges over came from it); reused here rather than rebuilt.
 			// Get spent UTxO datum
 			var datum data.PlutusData
 			if tmp, ok := purpose.(script.ScriptPurposeSpending); ok {
 				datum = tmp.Datum
 			}
 			sc := script.NewScriptContextV1V2(txInfoV2, purpose)
+			costModel, err := requiredCostModel(tmpPparams.CostModels, 1, "PlutusV2")
+			if err != nil {
+				return 0, lcommon.ExUnits{}, nil, err
+			}
 			evalContext, err := cek.NewEvalContext(
 				lang.LanguageVersionV2,
 				cek.ProtoVersion{
 					Major: tmpPparams.ProtocolMajor,
 					Minor: tmpPparams.ProtocolMinor,
 				},
-				tmpPparams.CostModels[1],
+				costModel,
 			)
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)

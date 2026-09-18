@@ -101,6 +101,8 @@ func futureHeaderEvent(slot uint64, arrival time.Time) ChainsyncEvent {
 }
 
 func TestAwaitChainsyncHeaderAdmissionBoundaries(t *testing.T) {
+	t.Parallel()
+
 	systemStart := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
 
 	t.Run("current header is accepted immediately", func(t *testing.T) {
@@ -210,6 +212,8 @@ func TestAwaitChainsyncHeaderAdmissionBoundaries(t *testing.T) {
 }
 
 func TestAwaitChainsyncHeaderAdmissionPropagatesCancellation(t *testing.T) {
+	t.Parallel()
+
 	systemStart := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
 	arrival := systemStart.Add(100 * time.Second)
 	ls, _ := newFutureHeaderTestLedger(t, systemStart, arrival)
@@ -226,6 +230,8 @@ func TestAwaitChainsyncHeaderAdmissionPropagatesCancellation(t *testing.T) {
 }
 
 func TestAwaitChainsyncHeaderAdmissionFailsClosedOnNilContext(t *testing.T) {
+	t.Parallel()
+
 	systemStart := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
 	arrival := systemStart.Add(100 * time.Second)
 	ls, _ := newFutureHeaderTestLedger(t, systemStart, arrival)
@@ -241,6 +247,8 @@ func TestAwaitChainsyncHeaderAdmissionFailsClosedOnNilContext(t *testing.T) {
 func TestAwaitChainsyncHeaderAdmissionFailsClosedOnConversionError(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	systemStart := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
 	arrival := systemStart.Add(100 * time.Second)
 	ls, waits := newFutureHeaderTestLedger(t, systemStart, arrival)
@@ -261,6 +269,8 @@ func TestAwaitChainsyncHeaderAdmissionFailsClosedOnConversionError(
 }
 
 func TestFutureHeaderWaitDoesNotHoldChainsyncMutex(t *testing.T) {
+	t.Parallel()
+
 	systemStart := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
 	arrival := systemStart.Add(100 * time.Second)
 	ls, _ := newFutureHeaderTestLedger(t, systemStart, arrival)
@@ -293,6 +303,8 @@ func TestFutureHeaderWaitDoesNotHoldChainsyncMutex(t *testing.T) {
 }
 
 func TestAwaitChainsyncHeaderAdmissionUsesCrossEraSlotOnset(t *testing.T) {
+	t.Parallel()
+
 	ls := crossEraLedger(t)
 	provider := newSlotTimeConverterProvider(ls.timeConv())
 	clock := NewSlotClock(provider, DefaultSlotClockConfig())

@@ -88,7 +88,7 @@ func storeCommitteeUpdateProposalInTxn(
 	action, err := lcommon.NewUpdateCommitteeGovAction(
 		nil,
 		nil,
-		map[*lcommon.Credential]uint{&credential: uint(expiry)},
+		map[*lcommon.Credential]uint64{&credential: uint64(expiry)},
 		cbor.Rat{Rat: big.NewRat(2, 3)},
 	)
 	require.NoError(t, err)
@@ -197,7 +197,11 @@ INSERT INTO resign_committee_cold (
 	require.NoError(t, err)
 }
 
-func TestLedgerViewProposedCommitteeMemberPreservesCertificateState(t *testing.T) {
+func TestLedgerViewProposedCommitteeMemberPreservesCertificateState(
+	t *testing.T,
+) {
+	t.Parallel()
+
 	tests := []struct {
 		name         string
 		seed         func(*testing.T, *database.Database, lcommon.Credential)
@@ -243,7 +247,11 @@ func TestLedgerViewProposedCommitteeMemberPreservesCertificateState(t *testing.T
 			require.Equal(t, test.wantResigned, member.Resigned)
 			if test.wantHot {
 				require.NotNil(t, member.HotKey)
-				require.Equal(t, committeeTestCredential(0x72).Credential, *member.HotKey)
+				require.Equal(
+					t,
+					committeeTestCredential(0x72).Credential,
+					*member.HotKey,
+				)
 			} else {
 				require.Nil(t, member.HotKey)
 			}
@@ -252,6 +260,8 @@ func TestLedgerViewProposedCommitteeMemberPreservesCertificateState(t *testing.T
 }
 
 func TestLedgerViewCommitteeCredentialsDoNotAliasByHash(t *testing.T) {
+	t.Parallel()
+
 	lv, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
 	hash := committeeTestCredential(0x81).Credential
 	keyCold := lcommon.Credential{
@@ -301,6 +311,8 @@ func TestLedgerViewCommitteeCredentialsDoNotAliasByHash(t *testing.T) {
 }
 
 func TestLedgerViewCommitteeHotCredentialSelection(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name       string
 		expiries   []uint64
@@ -448,6 +460,8 @@ func TestLedgerViewCommitteeHotCredentialSelection(t *testing.T) {
 }
 
 func TestLedgerViewCommitteeProposalUsesPinnedSnapshot(t *testing.T) {
+	t.Parallel()
+
 	lv, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
 	cold := committeeTestCredential(0x91)
 	storeCommitteeUpdateProposal(t, db, 0x92, cold, 90)
@@ -465,6 +479,8 @@ func TestLedgerViewCommitteeProposalUsesPinnedSnapshot(t *testing.T) {
 }
 
 func TestCommitteeCredentialStorageRollbackPreservesTags(t *testing.T) {
+	t.Parallel()
+
 	_, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
 	hash := committeeTestCredential(0xa1).Credential
 	members := []*models.CommitteeMember{
@@ -511,6 +527,8 @@ func TestCommitteeCredentialStorageRollbackPreservesTags(t *testing.T) {
 }
 
 func TestCommitteeTermStartPresenceSurvivesStorageRollback(t *testing.T) {
+	t.Parallel()
+
 	_, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
 	cold := committeeTestCredential(0xa2)
 	require.NoError(t, db.SetCommitteeMembers(
@@ -553,6 +571,8 @@ func TestCommitteeTermStartPresenceSurvivesStorageRollback(t *testing.T) {
 }
 
 func TestLedgerViewCommitteeMember(t *testing.T) {
+	t.Parallel()
+
 	t.Run("seated", func(t *testing.T) {
 		lv, db := committeeTestView(
 			t,
@@ -595,38 +615,41 @@ func TestLedgerViewCommitteeMember(t *testing.T) {
 		require.False(t, member.Resigned)
 	})
 
-	t.Run("seated resignation takes precedence over proposal", func(t *testing.T) {
-		lv, db := committeeTestView(
-			t,
-			&conway.ConwayProtocolParameters{},
-		)
-		credential := committeeTestCredential(0x31)
-		hot := committeeTestCredential(0x32).Credential
-		require.NoError(t, db.SetCommitteeMembers(
-			[]*models.CommitteeMember{{
-				ColdCredHash: credential.Credential[:],
-				ExpiresEpoch: 50,
-			}},
-			nil,
-		))
-		seedCommitteeAuthorization(
-			t,
-			db,
-			credential.Credential,
-			hot,
-			1,
-			1,
-		)
-		seedCommitteeResignation(t, db, credential.Credential, 2, 2)
-		storeCommitteeUpdateProposal(t, db, 0x33, credential, 90)
+	t.Run(
+		"seated resignation takes precedence over proposal",
+		func(t *testing.T) {
+			lv, db := committeeTestView(
+				t,
+				&conway.ConwayProtocolParameters{},
+			)
+			credential := committeeTestCredential(0x31)
+			hot := committeeTestCredential(0x32).Credential
+			require.NoError(t, db.SetCommitteeMembers(
+				[]*models.CommitteeMember{{
+					ColdCredHash: credential.Credential[:],
+					ExpiresEpoch: 50,
+				}},
+				nil,
+			))
+			seedCommitteeAuthorization(
+				t,
+				db,
+				credential.Credential,
+				hot,
+				1,
+				1,
+			)
+			seedCommitteeResignation(t, db, credential.Credential, 2, 2)
+			storeCommitteeUpdateProposal(t, db, 0x33, credential, 90)
 
-		member, err := lv.CommitteeMember(credential.Credential)
-		require.NoError(t, err)
-		require.NotNil(t, member)
-		require.Equal(t, uint64(50), member.ExpiryEpoch)
-		require.Nil(t, member.HotKey)
-		require.True(t, member.Resigned)
-	})
+			member, err := lv.CommitteeMember(credential.Credential)
+			require.NoError(t, err)
+			require.NotNil(t, member)
+			require.Equal(t, uint64(50), member.ExpiryEpoch)
+			require.Nil(t, member.HotKey)
+			require.True(t, member.Resigned)
+		},
+	)
 
 	t.Run("unknown", func(t *testing.T) {
 		lv, db := committeeTestView(
@@ -672,6 +695,8 @@ func TestLedgerViewCommitteeMember(t *testing.T) {
 func TestLedgerViewPendingCommitteeCertificateValidationSameTransaction(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pparams := &conway.ConwayProtocolParameters{}
 	initialView, db := committeeTestView(t, pparams)
 	seated := committeeTestCredential(0x61)
@@ -719,38 +744,41 @@ func TestLedgerViewPendingCommitteeCertificateValidationSameTransaction(
 	}
 	for _, certificate := range certificates {
 		for _, credential := range credentials {
-			t.Run(certificateName(certificate)+"/"+credential.name, func(t *testing.T) {
-				switch cert := certificate.(type) {
-				case *lcommon.AuthCommitteeHotCertificate:
-					cert.ColdCredential = credential.credential
-				case *lcommon.ResignCommitteeColdCertificate:
-					cert.ColdCredential = credential.credential
-				}
-				tx := &conway.ConwayTransaction{
-					// Committee certificates are only inspected for a
-					// phase-2-valid transaction, so the fixture must declare
-					// validity or the rule under test never runs.
-					TxIsValid: true,
-					Body: conway.ConwayTransactionBody{
-						TxCertificates: []lcommon.CertificateWrapper{{
-							Type:        certificate.Type(),
-							Certificate: certificate,
-						}},
-					},
-				}
-				err := eras.ValidateTxConway(tx, 0, lv, pparams)
-				var notMember conway.NotCommitteeMemberError
-				if credential.wantNotMember {
-					require.ErrorAs(t, err, &notMember)
-				} else {
-					require.False(
-						t,
-						errors.As(err, &notMember),
-						"matching uncommitted proposal was rejected: %v",
-						err,
-					)
-				}
-			})
+			t.Run(
+				certificateName(certificate)+"/"+credential.name,
+				func(t *testing.T) {
+					switch cert := certificate.(type) {
+					case *lcommon.AuthCommitteeHotCertificate:
+						cert.ColdCredential = credential.credential
+					case *lcommon.ResignCommitteeColdCertificate:
+						cert.ColdCredential = credential.credential
+					}
+					tx := &conway.ConwayTransaction{
+						// Committee certificates are only inspected for a
+						// phase-2-valid transaction, so the fixture must declare
+						// validity or the rule under test never runs.
+						TxIsValid: true,
+						Body: conway.ConwayTransactionBody{
+							TxCertificates: []lcommon.CertificateWrapper{{
+								Type:        certificate.Type(),
+								Certificate: certificate,
+							}},
+						},
+					}
+					err := eras.ValidateTxConway(tx, 0, lv, pparams)
+					var notMember conway.NotCommitteeMemberError
+					if credential.wantNotMember {
+						require.ErrorAs(t, err, &notMember)
+					} else {
+						require.False(
+							t,
+							errors.As(err, &notMember),
+							"matching uncommitted proposal was rejected: %v",
+							err,
+						)
+					}
+				},
+			)
 		}
 	}
 }
@@ -772,6 +800,8 @@ func certificateName(certificate lcommon.Certificate) string {
 func TestLedgerViewCommitteeHotCredentialMemberRejectsUnsupportedTag(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	lv, _ := committeeTestView(t, &conway.ConwayProtocolParameters{})
 	unsupported := lcommon.Credential{
 		CredType:   99,
@@ -791,6 +821,8 @@ func TestLedgerViewCommitteeHotCredentialMemberRejectsUnsupportedTag(
 // A re-elected member has several committee_member rows for one credential.
 // Counting hashes alone dropped it from the seated list entirely.
 func TestLedgerViewCommitteeMembersIncludesReelectedMember(t *testing.T) {
+	t.Parallel()
+
 	lv, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
 	cold := committeeTestCredential(0x91)
 	seedCommitteeMemberTerm(t, db, cold, 100, 10)
@@ -848,6 +880,8 @@ INSERT INTO committee_member (
 func TestLedgerViewProposedCommitteeMemberChainsFromNoConfidenceRoot(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	lv, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
 	cold := committeeTestCredential(0x81)
 
@@ -879,7 +913,7 @@ func TestLedgerViewProposedCommitteeMemberChainsFromNoConfidenceRoot(
 	action, err := lcommon.NewUpdateCommitteeGovAction(
 		nil,
 		nil,
-		map[*lcommon.Credential]uint{&cold: uint(90)},
+		map[*lcommon.Credential]uint64{&cold: uint64(90)},
 		cbor.Rat{Rat: big.NewRat(2, 3)},
 	)
 	require.NoError(t, err)
@@ -919,6 +953,8 @@ func TestLedgerViewProposedCommitteeMemberChainsFromNoConfidenceRoot(
 // committee was seated and is now authoritatively empty, as after a
 // NoConfidence enactment, which must still reject a former member.
 func TestLedgerViewCommitteeStateAvailableTracksSeatedMembers(t *testing.T) {
+	t.Parallel()
+
 	lv, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
 
 	// A reachable store with no committee rows at all is not authoritative.

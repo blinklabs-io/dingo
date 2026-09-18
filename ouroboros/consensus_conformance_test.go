@@ -15,17 +15,21 @@
 package ouroboros
 
 import (
+	"bytes"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/ouroboros-mock/consensus"
 	"github.com/blinklabs-io/ouroboros-mock/consensus/format"
+	"github.com/stretchr/testify/require"
 )
 
 // TestConsensusConformanceVectors replays the upstream consensus-
@@ -35,13 +39,56 @@ import (
 // unexported chainsync handlers directly — no exported test hooks leak
 // into production code.
 func TestConsensusConformanceVectors(t *testing.T) {
+	t.Parallel()
+
 	vectors, err := consensus.CapturedVectors()
 	if err != nil {
 		t.Fatalf("CapturedVectors: %v", err)
 	}
-	if len(vectors) == 0 {
-		t.Skip("no captured vectors embedded")
+	const expectedScenarioCount = 5
+	if len(vectors) != expectedScenarioCount {
+		t.Fatalf(
+			"consensus profile has %d scenarios, want %d; update the profile summary and tests with the shared corpus",
+			len(vectors),
+			expectedScenarioCount,
+		)
 	}
+	expectedNames := map[string]bool{
+		"intersect_origin_one_rollforward": true,
+		"within_k_fork_v1":                 true,
+		"fork_and_select_v1":               true,
+		"slot_battle_v1":                   true,
+		"exceeds_k_no_switch_v1":           true,
+	}
+	profileCounts := map[string]int{
+		"single-peer": 0,
+		"fork-switch": 0,
+		"no-switch":   0,
+	}
+	for _, cv := range vectors {
+		if !expectedNames[cv.Name] {
+			t.Fatalf("unexpected consensus scenario %q", cv.Name)
+		}
+		delete(expectedNames, cv.Name)
+		switch {
+		case len(cv.Vector.Capture.Peers) == 1:
+			profileCounts["single-peer"]++
+		case cv.Vector.Capture.ExpectedOutput.ExpectedRollback != nil:
+			profileCounts["fork-switch"]++
+		default:
+			profileCounts["no-switch"]++
+		}
+	}
+	if len(expectedNames) != 0 {
+		t.Fatalf("consensus profile is missing scenarios: %v", expectedNames)
+	}
+	t.Logf(
+		"Consensus conformance profile: total=%d single-peer=%d fork-switch=%d no-switch=%d",
+		len(vectors),
+		profileCounts["single-peer"],
+		profileCounts["fork-switch"],
+		profileCounts["no-switch"],
+	)
 	for _, cv := range vectors {
 		t.Run(cv.Name, func(t *testing.T) {
 			a := newReplayAdapter(t, cv.Vector.Capture)
@@ -72,6 +119,8 @@ func TestConsensusConformanceVectors(t *testing.T) {
 // and fail the final_tip assertion. If this passed, the main conformance
 // run would be a vacuous k=0 test in disguise.
 func TestConsensusConformanceKGuardIsLive(t *testing.T) {
+	t.Parallel()
+
 	vectors, err := consensus.CapturedVectors()
 	if err != nil {
 		t.Fatalf("CapturedVectors: %v", err)
@@ -129,26 +178,81 @@ func TestConsensusConformanceKGuardIsLive(t *testing.T) {
 	}
 }
 
+func TestSelectedPeerTraceUsesPeerIdentityForEqualTips(t *testing.T) {
+	t.Parallel()
+	tip := format.Tip{Slot: 10, Hash: format.HexBytes{0xaa}, BlockNumber: 10}
+	first := format.ServedMessage{
+		Protocol:   format.ProtocolChainSync,
+		MsgType:    format.ChainSyncMsgRollForward,
+		Tip:        &tip,
+		HeaderCbor: format.HexBytes{0x01},
+	}
+	second := first
+	second.HeaderCbor = format.HexBytes{0x02}
+	capture := &format.ConsensusCapture{Peers: []format.PeerInput{
+		{PeerID: 1, Served: []format.ServedMessage{first}},
+		{PeerID: 2, Served: []format.ServedMessage{second}},
+	}}
+	a := newReplayAdapter(t, capture)
+	selected := a.connFor(2)
+	other := a.connFor(1)
+	chainTip := toGouroborosTip(tip)
+	require.True(t, a.cs.UpdatePeerTip(selected, chainTip, nil))
+	require.True(t, a.cs.UpdatePeerTip(other, chainTip, nil))
+	require.Equal(t, selected, *a.cs.GetBestPeer())
+
+	require.Equal(t, capture.Peers[1].Served, a.selectedPeerTrace())
+}
+
 const (
 	tipEventBuffer    = 4096
 	switchEventBuffer = 1024
+	// switchBarrierTimeout bounds the wait for the barrier below. It is a
+	// deadlock bound, not a settling delay: the barrier is already queued
+	// behind the switches when the wait starts, so the normal cost is one
+	// lane hand-off.
+	switchBarrierTimeout = 30 * time.Second
 )
+
+// switchBarrier is a sentinel published through the chain-switch ordered lane
+// so Stabilize can tell "no switch was decided" from "the switch has not been
+// delivered yet".
+//
+// ChainSelector.publishSelection routes chain switches through
+// EventBus.PublishOrdered (blinklabs-io/dingo#3550), so EvaluateAndSwitch
+// returns before the lane worker has handed them to subscribers. A lane is a
+// FIFO drained by exactly one worker, so a sentinel enqueued after those
+// switches is delivered after them: receiving it back is proof that every
+// switch published earlier on this goroutine has already reached the
+// subscription. Its Data type is not ChainSwitchEvent, so it is skipped rather
+// than recorded as a decision.
+type switchBarrier struct{}
 
 // replayAdapter implements consensus.Replayer by driving dingo's real
 // chainsync handlers and chain selector. The harness identifies peers by
 // the vector's peer_id; the adapter synthesizes a stable ConnectionId per
 // peer_id.
 type replayAdapter struct {
-	o        *Ouroboros
-	cs       *chainselection.ChainSelector
-	bus      *event.EventBus
-	conns    map[uint64]ouroboros.ConnectionId
-	tipCh    <-chan event.Event
-	switchCh <-chan event.Event
-	switches []format.SwitchEvent
+	t          *testing.T
+	o          *Ouroboros
+	cs         *chainselection.ChainSelector
+	bus        *event.EventBus
+	conns      map[uint64]ouroboros.ConnectionId
+	capture    *format.ConsensusCapture
+	tipCh      <-chan event.Event
+	switchCh   <-chan event.Event
+	switches   []format.SwitchEvent
+	headers    map[string]replayHeader
+	downstream []format.ServedMessage
 
 	headersFed    int
 	tipEventsSeen int
+}
+
+type replayHeader struct {
+	hash     []byte
+	prevHash []byte
+	slot     uint64
 }
 
 func newReplayAdapter(
@@ -195,12 +299,15 @@ func newReplayAdapter(
 	})
 	o.eventBus = bus
 	return &replayAdapter{
+		t:        t,
 		o:        o,
 		cs:       cs,
 		bus:      bus,
 		conns:    make(map[uint64]ouroboros.ConnectionId),
+		capture:  capture,
 		tipCh:    tipCh,
 		switchCh: switchCh,
+		headers:  make(map[string]replayHeader),
 	}
 }
 
@@ -216,6 +323,13 @@ func (a *replayAdapter) RollForward(
 		era, hdr, toGouroborosTip(tip),
 	); err != nil {
 		return err
+	}
+	hash := hdr.Hash()
+	prevHash := hdr.PrevHash()
+	a.headers[string(hash[:])] = replayHeader{
+		hash:     append([]byte(nil), hash[:]...),
+		prevHash: append([]byte(nil), prevHash[:]...),
+		slot:     hdr.SlotNumber(),
 	}
 	a.headersFed++
 	return nil
@@ -249,24 +363,64 @@ func (a *replayAdapter) RollBackward(
 }
 
 func (a *replayAdapter) Stabilize() {
+	a.t.Helper()
 	// Drain queued peer-tip updates into the selector, force a synchronous
-	// evaluation, then collect any switch decisions it emitted. All
-	// synchronous: no sleeps, no races.
+	// evaluation, then collect any switch decisions it emitted. No sleeps
+	// and no polling.
+	//
+	// chainselection.peer_tip_update is still published inline, on this
+	// goroutine, by chainsyncClientRollForward, so every tip update is
+	// already queued by the time Stabilize runs and a non-blocking drain
+	// sees all of them. Chain switches are not: they go through an ordered
+	// lane, so they need the barrier below.
 	drainEvents(a.tipCh, func(evt event.Event) {
 		a.tipEventsSeen++
 		a.cs.HandlePeerTipUpdateEvent(evt)
 	})
 	a.cs.EvaluateAndSwitch()
-	drainEvents(a.switchCh, func(evt event.Event) {
-		e, ok := evt.Data.(chainselection.ChainSwitchEvent)
-		if !ok {
+	a.collectSwitchesThroughBarrier()
+	a.downstream = a.selectedPeerTrace()
+}
+
+// collectSwitchesThroughBarrier records every chain switch the selector has
+// published so far, using a sentinel enqueued behind them as the drain barrier.
+// See switchBarrier for why a non-blocking drain is not one.
+func (a *replayAdapter) collectSwitchesThroughBarrier() {
+	a.t.Helper()
+	if !a.bus.PublishOrdered(
+		chainselection.ChainSwitchEventType,
+		event.NewEvent(chainselection.ChainSwitchEventType, switchBarrier{}),
+	) {
+		a.t.Fatal("event bus refused the chain-switch barrier")
+	}
+	for {
+		evt := testutil.RequireReceive(
+			a.t,
+			a.switchCh,
+			switchBarrierTimeout,
+			"chain-switch barrier",
+		)
+		switch e := evt.Data.(type) {
+		case switchBarrier:
 			return
+		case chainselection.ChainSwitchEvent:
+			a.switches = append(a.switches, format.SwitchEvent{
+				PreviousTip:   fromGouroborosTip(e.PreviousTip),
+				NewTip:        fromGouroborosTip(e.NewTip),
+				RollbackPoint: a.rollbackPoint(e),
+			})
+		default:
+			// Only the selector and the barrier above publish on this
+			// lane, so anything else is a bug in one of them. Skipping it
+			// would still terminate -- the barrier is behind it in the
+			// same FIFO -- but it would drop a switch decision the
+			// harness then reports as "never switched", which is a much
+			// worse diagnosis than naming the payload.
+			a.t.Fatalf(
+				"unexpected %T on the chain_switch lane", evt.Data,
+			)
 		}
-		a.switches = append(a.switches, format.SwitchEvent{
-			PreviousTip: fromGouroborosTip(e.PreviousTip),
-			NewTip:      fromGouroborosTip(e.NewTip),
-		})
-	})
+	}
 }
 
 func (a *replayAdapter) BestTip() (format.Tip, bool) {
@@ -283,6 +437,93 @@ func (a *replayAdapter) BestTip() (format.Tip, bool) {
 
 func (a *replayAdapter) DrainSwitchEvents() []format.SwitchEvent {
 	return a.switches
+}
+
+func (a *replayAdapter) DrainDownstreamChainSync() []format.ServedMessage {
+	return a.downstream
+}
+
+func (a *replayAdapter) selectedPeerTrace() []format.ServedMessage {
+	best := a.cs.GetBestPeer()
+	if best == nil {
+		return nil
+	}
+	for _, peer := range a.capture.Peers {
+		if a.connFor(peer.PeerID) == *best {
+			return cloneServedMessages(peer.Served)
+		}
+	}
+	return nil
+}
+
+func (a *replayAdapter) rollbackPoint(e chainselection.ChainSwitchEvent) *format.Point {
+	previous := e.PreviousObservedTip
+	if len(previous.Point.Hash) == 0 && previous.Point.Slot == 0 {
+		previous = e.PreviousTip
+	}
+	newTip := e.NewObservedTip
+	if !e.NewObservedTipSet {
+		newTip = e.NewTip
+	}
+
+	newAncestors := a.ancestors(newTip)
+	for current := previous; ; {
+		key := string(current.Point.Hash)
+		if header, ok := newAncestors[key]; ok {
+			return &format.Point{
+				Slot: header.slot,
+				Hash: append(format.HexBytes(nil), header.hash...),
+			}
+		}
+		header, ok := a.headers[key]
+		if !ok || isZeroHash(header.prevHash) {
+			break
+		}
+		current.Point.Hash = append([]byte(nil), header.prevHash...)
+		current.Point.Slot = 0
+	}
+	return &format.Point{}
+}
+
+func (a *replayAdapter) ancestors(tip ochainsync.Tip) map[string]replayHeader {
+	ancestors := make(map[string]replayHeader)
+	current := tip.Point.Hash
+	for len(current) != 0 && !isZeroHash(current) {
+		header, ok := a.headers[string(current)]
+		if !ok {
+			break
+		}
+		ancestors[string(current)] = header
+		current = header.prevHash
+	}
+	return ancestors
+}
+
+func isZeroHash(hash []byte) bool {
+	return len(hash) == 0 || bytes.Equal(hash, make([]byte, len(hash)))
+}
+
+func tipsEqual(a, b format.Tip) bool {
+	return a.Slot == b.Slot && a.BlockNumber == b.BlockNumber && bytes.Equal(a.Hash, b.Hash)
+}
+
+func cloneServedMessages(messages []format.ServedMessage) []format.ServedMessage {
+	cloned := make([]format.ServedMessage, len(messages))
+	for i, message := range messages {
+		cloned[i] = message
+		cloned[i].HeaderCbor = append(format.HexBytes(nil), message.HeaderCbor...)
+		if message.Tip != nil {
+			tip := *message.Tip
+			tip.Hash = append(format.HexBytes(nil), message.Tip.Hash...)
+			cloned[i].Tip = &tip
+		}
+		if message.Point != nil {
+			point := *message.Point
+			point.Hash = append(format.HexBytes(nil), message.Point.Hash...)
+			cloned[i].Point = &point
+		}
+	}
+	return cloned
 }
 
 func (a *replayAdapter) connFor(peerID uint64) ouroboros.ConnectionId {

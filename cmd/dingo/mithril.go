@@ -465,6 +465,47 @@ func runMithrilSync(
 			}
 		}()
 	}
+	healthServer, healthErr := startHealthProbeServer(
+		logger,
+		cfg,
+		"mithril",
+	)
+	if healthErr != nil {
+		logger.Warn(
+			"failed to start health probe server; continuing",
+			"component", "mithril",
+			"port", cfg.HealthPort,
+			"error", healthErr,
+		)
+	}
+	defer func() {
+		if healthServer == nil {
+			return
+		}
+		shutdownCtx, cancel := context.WithTimeout(
+			context.WithoutCancel(ctx),
+			5*time.Second,
+		)
+		defer cancel()
+		if shutdownErr := healthServer.Shutdown(shutdownCtx); shutdownErr != nil {
+			logger.Warn(
+				"failed to stop health probe server",
+				"component", "mithril",
+				"error", shutdownErr,
+			)
+		}
+	}()
+	if healthServer != nil {
+		go func() {
+			if serverErr := <-healthServer.Err(); serverErr != nil {
+				logger.Error(
+					"health probe server stopped",
+					"component", "mithril",
+					"error", serverErr,
+				)
+			}
+		}()
+	}
 	debugServer, debugErr := startDebugPprofServer(
 		logger,
 		cfg,
@@ -576,6 +617,7 @@ func runMithrilSync(
 		AggregatorURL:          cfg.Mithril.AggregatorURL,
 		AllowInsecureHTTP:      cfg.Mithril.AllowInsecureHTTP,
 		DownloadDir:            cfg.Mithril.DownloadDir,
+		PinnedDigest:           cfg.Mithril.PinnedDigest,
 		DownloadIdleTimeout:    cfg.Mithril.DownloadIdleTimeout,
 		DownloadMaxIdleRetries: cfg.Mithril.DownloadMaxIdleRetries,
 		VerifyCertChain:        cfg.Mithril.VerifyCertificates,
@@ -587,6 +629,7 @@ func runMithrilSync(
 		RunMode:           string(config.RunModeLoad),
 		BackfillBatchSize: cfg.BackfillBatchSize,
 		DatabaseWorkers:   cfg.DatabaseWorkers,
+		Tracing:           cfg.Tracing,
 		Logger:            logger,
 		OnProgress:        onProgress,
 	})

@@ -787,6 +787,12 @@ func (h *databaseServiceHandler) resolveSnapshotSource(
 	if localErr == nil {
 		return localDir, nil
 	}
+	if errors.Is(localErr, lifecycle.ErrManifestTooLarge) {
+		return "", connect.NewError(
+			connect.CodeResourceExhausted,
+			fmt.Errorf("snapshot %q manifest exceeds size limit: %w", snapshotID, localErr),
+		)
+	}
 	// A corrupted/hand-edited manifest means the snapshot IS there, just
 	// unusable — report that distinctly rather than falling through to
 	// "not found", which would otherwise be indistinguishable from a
@@ -803,8 +809,12 @@ func (h *databaseServiceHandler) resolveSnapshotSource(
 	}
 	cloudURI, exists, cloudErr := h.cloudSnapshotExists(ctx, snapshotID)
 	if cloudErr != nil {
+		code := connect.CodeUnavailable
+		if errors.Is(cloudErr, lifecycle.ErrManifestTooLarge) {
+			code = connect.CodeResourceExhausted
+		}
 		return "", connect.NewError(
-			connect.CodeUnavailable,
+			code,
 			fmt.Errorf(
 				"check cloud destination for snapshot %q: %w",
 				snapshotID,
@@ -1309,6 +1319,13 @@ func (h *databaseServiceHandler) GetDatabaseInfo(
 	// (the s3/gcs blob plugins, which store nothing locally) returns
 	// (0, nil), so this degrades to 0 for those rather than erroring.
 	var sizeBytes uint64
+	// db.Blob() is non-nil here: database.New rejects a nil or typed-nil
+	// stores.Blob (database/database.go), and the only production
+	// SetBlobStore callers (node.go, node_lifecycle.go) install the non-nil
+	// wrapper bark.NewBarkBlobStore returns on a nil error. nilaway reports
+	// the nil-receiver branch of blobStoreRef.blobStore (database/
+	// blob_store.go) instead, which no installed database reaches.
+	//nolint:nilaway // database.New requires a non-nil blob store
 	if blobSize, err := db.Blob().DiskSize(); err == nil && blobSize > 0 {
 		sizeBytes += uint64(
 			blobSize,

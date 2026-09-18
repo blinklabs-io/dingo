@@ -31,7 +31,17 @@ id, tx_hash, action_index, action_type, proposed_epoch, expires_epoch,
 parent_tx_hash, parent_action_idx, enacted_epoch, enacted_slot,
 ratified_epoch, ratified_slot, policy_hash, anchor_url, anchor_hash, deposit,
 return_address, gov_action_cbor, expired_epoch, expired_slot, added_slot,
-deleted_slot`
+deleted_slot, dropped_epoch, dropped_slot`
+
+// governanceProposalFromSQL joins in the drop-state companion table (see its
+// migration comment for why dropped_epoch/dropped_slot are not columns on
+// governance_proposal itself). Every column name across the two tables is
+// unique, so callers can keep referencing dropped_epoch/dropped_slot and
+// every other governance_proposal column unqualified.
+const governanceProposalFromSQL = `
+FROM governance_proposal
+LEFT JOIN governance_proposal_drop
+  ON governance_proposal_drop.proposal_id = governance_proposal.id`
 
 const governanceProposalOrderSQL = `
 proposed_epoch ASC, added_slot ASC, tx_hash ASC, action_index ASC`
@@ -51,8 +61,7 @@ func (s *Store) GetGovernanceProposal(
 	}
 	proposal, err := scanGovernanceProposal(db.QueryRowContext(
 		ctx,
-		"SELECT "+governanceProposalColumns+`
- FROM governance_proposal
+		"SELECT "+governanceProposalColumns+governanceProposalFromSQL+`
  WHERE tx_hash = ? AND action_index = ? AND deleted_slot IS NULL
  LIMIT 1`,
 		txHash,
@@ -99,6 +108,38 @@ func (s *Store) GetExpiredGovernanceProposalsAt(
 		txn,
 		"expired_epoch = ? AND expired_slot = ? "+
 			"AND enacted_epoch IS NULL AND deleted_slot IS NULL",
+		governanceProposalOrderSQL,
+		epoch,
+		slot,
+	)
+}
+
+func (s *Store) GetExpiredAwaitingDropGovernanceProposals(
+	epoch uint64,
+	txn types.Txn,
+) ([]*models.GovernanceProposal, error) {
+	// `expired_epoch < ?` is the one-epoch delay itself, not a redundant
+	// guard on the caller's step ordering: a boundary that is reprocessed
+	// after a commit crash reruns this query against rows the first pass
+	// already marked expired at that same epoch, and an unbounded predicate
+	// would refund them in the epoch they expired (dingo#4411).
+	return s.queryGovernanceProposals(
+		txn,
+		"expired_epoch < ? AND dropped_epoch IS NULL "+
+			"AND deleted_slot IS NULL",
+		governanceProposalOrderSQL,
+		epoch,
+	)
+}
+
+func (s *Store) GetDroppedGovernanceProposalsAt(
+	epoch uint64,
+	slot uint64,
+	txn types.Txn,
+) ([]*models.GovernanceProposal, error) {
+	return s.queryGovernanceProposals(
+		txn,
+		"dropped_epoch = ? AND dropped_slot = ? AND deleted_slot IS NULL",
 		governanceProposalOrderSQL,
 		epoch,
 		slot,
@@ -164,8 +205,7 @@ func (s *Store) GetLastEnactedGovernanceProposal(
 	}
 	proposal, err := scanGovernanceProposal(db.QueryRowContext(
 		ctx,
-		"SELECT "+governanceProposalColumns+`
- FROM governance_proposal
+		"SELECT "+governanceProposalColumns+governanceProposalFromSQL+`
  WHERE action_type IN (`+bindPlaceholders(len(args))+`)
    AND enacted_epoch IS NOT NULL AND deleted_slot IS NULL
  ORDER BY enacted_epoch DESC, enacted_slot DESC, id DESC
@@ -272,6 +312,27 @@ RETURNING id`,
 				return err
 			}
 			proposal.ID = id
+
+			// dropped_epoch/dropped_slot live in a companion table (see
+			// governance_proposal_drop's migration comment for why), rather
+			// than as columns on governance_proposal itself.
+			if proposal.DroppedEpoch != nil {
+				if _, err := db.ExecContext(ctx, `
+INSERT INTO governance_proposal_drop (
+    proposal_id, dropped_epoch, dropped_slot
+) VALUES (?, ?, ?)
+ON CONFLICT (proposal_id) DO UPDATE SET
+    dropped_epoch = COALESCE(excluded.dropped_epoch,
+                             governance_proposal_drop.dropped_epoch),
+    dropped_slot = COALESCE(excluded.dropped_slot,
+                            governance_proposal_drop.dropped_slot)`,
+					id,
+					proposal.DroppedEpoch,
+					proposal.DroppedSlot,
+				); err != nil {
+					return err
+				}
+			}
 
 			if proposal.RatifiedEpoch == nil {
 				return nil
@@ -488,6 +549,11 @@ func (s *Store) DeleteGovernanceProposalsAfterSlot(
 				 WHERE expired_slot > ?`,
 					args: []any{slot},
 				},
+				{
+					query: `DELETE FROM governance_proposal_drop
+				 WHERE dropped_slot > ?`,
+					args: []any{slot},
+				},
 			}
 			for _, query := range queries {
 				if _, err := db.ExecContext(
@@ -540,8 +606,8 @@ func (s *Store) queryGovernanceProposals(
 	}
 	rows, err := db.QueryContext(
 		ctx,
-		"SELECT "+governanceProposalColumns+
-			" FROM governance_proposal WHERE "+predicate+" ORDER BY "+order,
+		"SELECT "+governanceProposalColumns+governanceProposalFromSQL+
+			" WHERE "+predicate+" ORDER BY "+order,
 		args...,
 	)
 	if err != nil {
@@ -587,6 +653,8 @@ func scanGovernanceProposal(
 		&proposal.ExpiredSlot,
 		&proposal.AddedSlot,
 		&proposal.DeletedSlot,
+		&proposal.DroppedEpoch,
+		&proposal.DroppedSlot,
 	)
 	if err != nil {
 		return nil, err
@@ -747,10 +815,7 @@ func (s *Store) GetResignedCommitteeMembers(
 	// MAX(added_slot) >= termStart, so the term comparison still happens per
 	// credential, just in Go.
 	latest := make(map[string]uint64, len(coldCredentials))
-	chunkSize := s.dialect.ParameterLimit() / 2
-	if chunkSize < 1 {
-		chunkSize = 1
-	}
+	chunkSize := max(s.dialect.ParameterLimit()/2, 1)
 	for start := 0; start < len(coldCredentials); start += chunkSize {
 		end := min(start+chunkSize, len(coldCredentials))
 		chunk := coldCredentials[start:end]

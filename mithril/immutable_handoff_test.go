@@ -78,6 +78,8 @@ func requireTip(t *testing.T, imm *immutable.ImmutableDb) ocommon.Point {
 // bootstrap performs, in order, with the substitution placed exactly where a
 // concurrent writer would land it.
 func TestBootstrapImmutableSurvivesHandoffSwap(t *testing.T) {
+	t.Parallel()
+
 	// The two lookups that produce a BootstrapResult's ImmutableDir: v1 walks
 	// the extracted layouts, v2 knows the archives land in `immutable`.
 	lookups := map[string]func(extractDir string) *vettedDir{
@@ -152,6 +154,8 @@ func mustOpenBootstrapped(
 // nothing vetted — so the absence of a handle has to be an error, not a
 // slower path.
 func TestOpenBootstrappedImmutableRefusesUnvettedResult(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	requireChunkTrio(t, "00000", dir)
 
@@ -164,6 +168,8 @@ func TestOpenBootstrappedImmutableRefusesUnvettedResult(t *testing.T) {
 // released once and that a second release — Cleanup after an explicit close, or
 // the deferred close after Cleanup — is not an error.
 func TestBootstrapResultCloseHandlesIsIdempotent(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	openRoot := func() *os.Root {
 		root, err := os.OpenRoot(dir)
@@ -196,7 +202,9 @@ func TestBootstrapResultCloseHandlesIsIdempotent(t *testing.T) {
 // pathname search would succeed while describing a tree nothing checked — and
 // for the ancillary tree that check is a signature.
 func TestImportLedgerStateRefusesUnvettedResult(t *testing.T) {
-	_, _, err := importLedgerState(
+	t.Parallel()
+
+	_, _, _, err := importLedgerState(
 		t.Context(),
 		nil,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -226,6 +234,8 @@ func TestImportLedgerStateRefusesUnvettedResult(t *testing.T) {
 // distinctively. That is what makes the control case below prove its point: the
 // tree is reachable and would have been read, were the entry not a symlink.
 func TestImportLedgerStateRefusesSymlinkedState(t *testing.T) {
+	t.Parallel()
+
 	build := func(t *testing.T, symlink bool) *BootstrapResult {
 		t.Helper()
 		dir := t.TempDir()
@@ -253,7 +263,7 @@ func TestImportLedgerStateRefusesSymlinkedState(t *testing.T) {
 
 	// Control: an ordinary state file is discovered and read, reaching the
 	// parser. Without this the refusal below could be any other failure.
-	_, _, err := importLedgerState(
+	_, _, _, err := importLedgerState(
 		t.Context(), nil, discard, nil, build(t, false),
 		false, ^uint64(0), nil,
 	)
@@ -261,7 +271,7 @@ func TestImportLedgerStateRefusesSymlinkedState(t *testing.T) {
 	require.ErrorContains(t, err, "parsing ledger state",
 		"the control tree must be read, or the refusal proves nothing")
 
-	_, _, err = importLedgerState(
+	_, _, _, err = importLedgerState(
 		t.Context(), nil, discard, nil, build(t, true),
 		false, ^uint64(0), nil,
 	)
@@ -286,6 +296,8 @@ func TestImportLedgerStateRefusesSymlinkedState(t *testing.T) {
 // A tree with genuinely no ledger state still falls through — that is the
 // v1 layout, where the state lives in the main archive's db/ledger.
 func TestImportLedgerStateRefusesUnsafeAncillaryTree(t *testing.T) {
+	t.Parallel()
+
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// The extraction directory holds a readable state throughout, so a
@@ -317,7 +329,7 @@ func TestImportLedgerStateRefusesUnsafeAncillaryTree(t *testing.T) {
 		t.Cleanup(func() { _ = ancRoot.Close() })
 
 		extractDir, extractRoot := newExtract(t)
-		_, _, err = importLedgerState(
+		_, _, _, err = importLedgerState(
 			t.Context(), nil, discard, nil,
 			&BootstrapResult{
 				AncillaryDir:  anc,
@@ -340,7 +352,7 @@ func TestImportLedgerStateRefusesUnsafeAncillaryTree(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = ancRoot.Close() })
 
-		_, _, err = importLedgerState(
+		_, _, _, err = importLedgerState(
 			t.Context(), nil, discard, nil,
 			&BootstrapResult{
 				AncillaryDir:  anc,
@@ -370,6 +382,8 @@ func TestImportLedgerStateRefusesUnsafeAncillaryTree(t *testing.T) {
 // v1 layout works, its ledger state living in the main archive, and it also
 // covers an ancillary tree holding only states newer than the certified tip.
 func TestImportLedgerStateWillNotLookPastAVerifiedTree(t *testing.T) {
+	t.Parallel()
+
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	run := func(t *testing.T, verified bool) error {
@@ -400,7 +414,7 @@ func TestImportLedgerStateWillNotLookPastAVerifiedTree(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = extractRoot.Close() })
 
-		_, _, err = importLedgerState(
+		_, _, _, err = importLedgerState(
 			t.Context(), nil, discard, nil,
 			&BootstrapResult{
 				AncillaryDir:      anc,
@@ -431,6 +445,141 @@ func TestImportLedgerStateWillNotLookPastAVerifiedTree(t *testing.T) {
 	})
 }
 
+// TestSelectLedgerStateSnapshotAcceptsVerifiedAncillaryStateNewerThanCertifiedTip
+// pins issues #3850 / #4038: a verified ancillary tree whose only ledger state
+// sits above maxTrustedSlot is the shape the aggregator ordinarily ships (the
+// ancillary ledger state comes from the source node's volatile database), not
+// the emptied/tampered tree TestImportLedgerStateWillNotLookPastAVerifiedTree
+// covers. The manifest signature vouches for that state directly, so it must
+// be selected and flagged beyondCertifiedTip rather than refused.
+func TestSelectLedgerStateSnapshotAcceptsVerifiedAncillaryStateNewerThanCertifiedTip(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	anc := t.TempDir()
+	slotDir := filepath.Join(anc, "ledger", "300")
+	require.NoError(t, os.MkdirAll(slotDir, 0o750))
+	stateBytes := []byte("newer than certified")
+	require.NoError(t, os.WriteFile(
+		filepath.Join(slotDir, "state"), stateBytes, 0o640,
+	))
+	ancRoot, err := openVerifiedDir(anc)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ancRoot.Close() })
+
+	const maxTrustedSlot = 100 // nothing in the tree is at or below this
+	sum := sha256.Sum256(stateBytes)
+
+	snapshot, stateDir, signedBy, beyondCertifiedTip, err :=
+		selectLedgerStateSnapshot(
+			discard,
+			&BootstrapResult{
+				AncillaryDir:      anc,
+				AncillaryRoot:     ancRoot,
+				AncillaryVerified: true,
+				AncillaryDigests: map[string]string{
+					"ledger/300/state": hex.EncodeToString(sum[:]),
+				},
+			},
+			maxTrustedSlot,
+		)
+	require.NoError(t, err)
+	require.NotNil(t, snapshot)
+	defer snapshot.Close()
+
+	assert.True(
+		t, beyondCertifiedTip,
+		"a verified ancillary state past maxTrustedSlot must be flagged, "+
+			"so the caller knows why it is allowed past the certified-tip guard",
+	)
+	assert.Equal(t, anc, stateDir)
+	assert.NotNil(t, signedBy)
+
+	got, err := io.ReadAll(snapshot.State)
+	require.NoError(t, err)
+	assert.Equal(t, "newer than certified", string(got))
+}
+
+// TestSelectLedgerStateSnapshotStillRefusesAGenuinelyEmptyVerifiedTree is the
+// negative case alongside the test above: a verified tree with no ledger
+// state at any slot — not just none at or below maxTrustedSlot — must still
+// refuse rather than report beyondCertifiedTip. This is the emptied/tampered
+// shape the verified-tree guard exists to catch, and accepting it here would
+// be exactly the downgrade TestImportLedgerStateWillNotLookPastAVerifiedTree
+// already pins at the importLedgerState level.
+func TestSelectLedgerStateSnapshotStillRefusesAGenuinelyEmptyVerifiedTree(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	anc := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(anc, "ledger"), 0o750))
+	ancRoot, err := openVerifiedDir(anc)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ancRoot.Close() })
+
+	_, _, _, beyondCertifiedTip, err := selectLedgerStateSnapshot(
+		discard,
+		&BootstrapResult{
+			AncillaryDir:      anc,
+			AncillaryRoot:     ancRoot,
+			AncillaryVerified: true,
+			AncillaryDigests:  map[string]string{"ledger/100/state": "00"},
+		},
+		100,
+	)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "refusing to import one from elsewhere")
+	assert.False(t, beyondCertifiedTip)
+}
+
+// TestImportLedgerStateAcceptsAVerifiedAncillaryStateNewerThanCertifiedTip is
+// the same case as the selectLedgerStateSnapshot test above, exercised through
+// importLedgerState itself, so the search-stage fix is proven where the real
+// caller enters it. It only needs to reach the parser (proving the search
+// selected the newer state instead of refusing) — parsing minimal non-ledger
+// bytes is expected to fail on its own terms, exactly as the existing
+// "unverified tree falls through" subtest above already relies on.
+func TestImportLedgerStateAcceptsAVerifiedAncillaryStateNewerThanCertifiedTip(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	anc := t.TempDir()
+	slotDir := filepath.Join(anc, "ledger", "300")
+	require.NoError(t, os.MkdirAll(slotDir, 0o750))
+	stateBytes := []byte{0x81, 0x00}
+	require.NoError(t, os.WriteFile(
+		filepath.Join(slotDir, "state"), stateBytes, 0o640,
+	))
+	ancRoot, err := openVerifiedDir(anc)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ancRoot.Close() })
+	sum := sha256.Sum256(stateBytes)
+
+	_, _, _, err = importLedgerState(
+		t.Context(), nil, discard, nil,
+		&BootstrapResult{
+			AncillaryDir:      anc,
+			AncillaryRoot:     ancRoot,
+			AncillaryVerified: true,
+			AncillaryDigests: map[string]string{
+				"ledger/300/state": hex.EncodeToString(sum[:]),
+			},
+		},
+		false, 100, nil,
+	)
+	assert.ErrorContains(t, err, "parsing ledger state")
+	assert.NotErrorIs(t, err, ledgerstate.ErrNoUsableLedgerState)
+}
+
 // TestDownloadAncillaryReportsArchiveWhenTreeUnusable pins that a downloaded
 // ancillary archive is still reported for cleanup when the tree it extracted to
 // turns out to hold no ledger state.
@@ -440,6 +589,8 @@ func TestImportLedgerStateWillNotLookPastAVerifiedTree(t *testing.T) {
 // and losing it would leave the download behind in an operator-supplied
 // directory, where no temp-dir removal sweeps it up.
 func TestDownloadAncillaryReportsArchiveWhenTreeUnusable(t *testing.T) {
+	t.Parallel()
+
 	// An ancillary archive whose payload has no ledger state at all.
 	archive := writeTestArchive(t, map[string]string{
 		"immutable/00000.chunk": "not ledger state",
@@ -487,6 +638,8 @@ func TestDownloadAncillaryReportsArchiveWhenTreeUnusable(t *testing.T) {
 // is a temp dir that gets removed wholesale, and a leak when the operator
 // supplied one.
 func TestDownloadAncillaryReportsArchiveOnFailure(t *testing.T) {
+	t.Parallel()
+
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
 	snapshot := func(locations ...string) *SnapshotListItem {
 		return &SnapshotListItem{
@@ -580,6 +733,8 @@ func TestDownloadAncillaryReportsArchiveOnFailure(t *testing.T) {
 func TestDownloadAncillaryKeepsTheReportedArchiveInsideDownloadDir(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	srv := httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "nope", http.StatusInternalServerError)
@@ -629,6 +784,8 @@ func TestDownloadAncillaryKeepsTheReportedArchiveInsideDownloadDir(
 // ancillary download in an operator-supplied directory, which nothing
 // afterwards sweeps.
 func TestDownloadAncillaryV2ReportsArchiveWhenManifestUnverified(t *testing.T) {
+	t.Parallel()
+
 	// Ledger state present, so the tree gets past the usability check and the
 	// missing manifest is what fails — the case this test is about.
 	archive := writeTestArchive(t, map[string]string{
@@ -687,6 +844,8 @@ func TestDownloadAncillaryV2ReportsArchiveWhenManifestUnverified(t *testing.T) {
 // Both downloaders, because the two reached this branch by different routes and
 // only one of them removed.
 func TestDownloadAncillaryRemovesAnUnusableExtraction(t *testing.T) {
+	t.Parallel()
+
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
 	// No ledger state anywhere in it, which is what makes the tree unusable.
 	archive := writeTestArchive(t, map[string]string{
@@ -810,6 +969,8 @@ func requireTrioDigests(t *testing.T, dir string) map[string]string {
 func TestBootstrappedImmutableRefusesAFileSubstitutedAfterVerification(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	// Which file is taken decides which read notices, so both the tip read and
 	// the block copy are covered.
 	for _, tc := range []struct {
@@ -899,6 +1060,8 @@ func TestBootstrappedImmutableRefusesAFileSubstitutedAfterVerification(
 func TestImportLedgerStateRefusesStateSubstitutedAfterTheManifest(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
 	// A one-element CBOR array: parses far enough to fail distinctively, so a
 	// tree that is read reports "parsing ledger state" rather than anything
@@ -952,7 +1115,7 @@ func TestImportLedgerStateRefusesStateSubstitutedAfterTheManifest(
 			}
 
 			// Control: the tree the manifest covered is read.
-			_, _, err := importLedgerState(
+			_, _, _, err := importLedgerState(
 				t.Context(), nil, discard, nil, build(t, false),
 				false, ^uint64(0), nil,
 			)
@@ -960,7 +1123,7 @@ func TestImportLedgerStateRefusesStateSubstitutedAfterTheManifest(
 			require.ErrorContains(t, err, "parsing ledger state",
 				"the signed tree must be read, or the refusal proves nothing")
 
-			_, _, err = importLedgerState(
+			_, _, _, err = importLedgerState(
 				t.Context(), nil, discard, nil, build(t, true),
 				false, ^uint64(0), nil,
 			)
@@ -983,6 +1146,8 @@ func TestImportLedgerStateRefusesStateSubstitutedAfterTheManifest(
 // a file nothing signed has to fail at the point of use too, or an entry
 // planted afterwards is refused only by a check that already ran.
 func TestImportLedgerStateRefusesAStateTheManifestDoesNotCover(t *testing.T) {
+	t.Parallel()
+
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
 	dir := t.TempDir()
 	slotDir := filepath.Join(dir, "ledger", "200")
@@ -994,7 +1159,7 @@ func TestImportLedgerStateRefusesAStateTheManifestDoesNotCover(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = root.Close() })
 
-	_, _, err = importLedgerState(
+	_, _, _, err = importLedgerState(
 		t.Context(), nil, discard, nil,
 		&BootstrapResult{
 			AncillaryDir:      dir,
@@ -1018,6 +1183,8 @@ func TestImportLedgerStateRefusesAStateTheManifestDoesNotCover(t *testing.T) {
 // mismatch a repointed name causes would be reported as a corrupt download,
 // sending the pool round the locations again and deleting a trio it wrote.
 func TestCheckImmutableTrioHashesThroughTheHandle(t *testing.T) {
+	t.Parallel()
+
 	parent := t.TempDir()
 	ours := filepath.Join(parent, "immutable")
 	requireChunkTrio(t, "00000", ours)
@@ -1068,6 +1235,8 @@ func TestCheckImmutableTrioHashesThroughTheHandle(t *testing.T) {
 // leave the parser re-reading a file that can change under it, so the shape of
 // this signature is the guarantee.
 func TestVerifySignedStateChecksTheBytesItIsGiven(t *testing.T) {
+	t.Parallel()
+
 	signed := []byte("the signed ledger state")
 	sum := sha256.Sum256(signed)
 	digests := map[string]string{
@@ -1098,6 +1267,8 @@ func TestVerifySignedStateChecksTheBytesItIsGiven(t *testing.T) {
 // not cover must fail rather than travel down with no digest, because an empty
 // digest is how an unsigned tree is decoded unchecked.
 func TestSignedTableDigestRefusesAnUncoveredTable(t *testing.T) {
+	t.Parallel()
+
 	digests := map[string]string{"ledger/100/tables": "abc123"}
 	snapshot := &ledgerstate.SnapshotFiles{
 		StatePath: "ledger/100/state",
@@ -1139,6 +1310,8 @@ func TestSignedTableDigestRefusesAnUncoveredTable(t *testing.T) {
 // unverified, which is the one outcome nothing should be able to reach by
 // removing something.
 func TestOpenBootstrappedImmutableRefusesAnEmptyDigestMap(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	requireChunkTrio(t, "00000", dir)
 	root, err := os.OpenRoot(dir)

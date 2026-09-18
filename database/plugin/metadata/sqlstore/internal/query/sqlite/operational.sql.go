@@ -1832,6 +1832,83 @@ func (q *Queries) GetDrepByHash(ctx context.Context, credential []byte) (Drep, e
 	return i, err
 }
 
+const getDrepLastRegistrationDeposit = `-- name: GetDrepLastRegistrationDeposit :one
+SELECT deposit_amount
+FROM registration_drep
+WHERE credential_tag = ? AND drep_credential = ?
+ORDER BY added_slot DESC
+LIMIT 1
+`
+
+type GetDrepLastRegistrationDepositParams struct {
+	CredentialTag  int64
+	DrepCredential []byte
+}
+
+// Unlike GetDrepLastRegistrationSlot, this does not exclude certificate_id
+// = 0 rows: those are the Mithril ledger-state import's bootstrap-slot
+// registrations (see ImportDrepRegistration), and their deposit_amount is
+// the real amount owed on deregistration. On a bootstrapped node such a
+// row is often a DRep's only registration, so excluding it here would
+// compute a refund of 0 for a deposit that was actually paid.
+func (q *Queries) GetDrepLastRegistrationDeposit(ctx context.Context, arg GetDrepLastRegistrationDepositParams) (sql.NullString, error) {
+	row := q.db.QueryRowContext(ctx, getDrepLastRegistrationDeposit, arg.CredentialTag, arg.DrepCredential)
+	var deposit_amount sql.NullString
+	err := row.Scan(&deposit_amount)
+	return deposit_amount, err
+}
+
+const getDrepLastRegistrationDeposits = `-- name: GetDrepLastRegistrationDeposits :many
+SELECT r.credential_tag, r.drep_credential, r.deposit_amount
+FROM drep d
+JOIN registration_drep r
+  ON r.id = (
+      SELECT reg.id
+      FROM registration_drep reg
+      WHERE reg.credential_tag = d.credential_tag
+        AND reg.drep_credential = d.credential
+      ORDER BY reg.added_slot DESC, reg.id DESC
+      LIMIT 1
+  )
+WHERE d.active = TRUE
+`
+
+type GetDrepLastRegistrationDepositsRow struct {
+	CredentialTag  int64
+	DrepCredential []byte
+	DepositAmount  sql.NullString
+}
+
+// The set form of GetDrepLastRegistrationDeposit, for reading the deposits
+// of the active DReps GetActiveDreps returns in one round trip instead of
+// one query per DRep. Same certificate_id treatment: bootstrap-slot import
+// rows count, because their deposit_amount is the real amount owed.
+// Drive this lookup from active drep rows. The correlated lookup uses the
+// registration credential index for each active DRep, so history left behind
+// by DReps that have since deregistered does not become the outer scan.
+func (q *Queries) GetDrepLastRegistrationDeposits(ctx context.Context) ([]GetDrepLastRegistrationDepositsRow, error) {
+	rows, err := q.db.QueryContext(ctx, getDrepLastRegistrationDeposits)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []GetDrepLastRegistrationDepositsRow{}
+	for rows.Next() {
+		var i GetDrepLastRegistrationDepositsRow
+		if err := rows.Scan(&i.CredentialTag, &i.DrepCredential, &i.DepositAmount); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getDrepLastRegistrationSlot = `-- name: GetDrepLastRegistrationSlot :one
 SELECT CAST(COALESCE(MAX(added_slot), 0) AS INTEGER)
 FROM registration_drep
@@ -2664,6 +2741,26 @@ func (q *Queries) GetMidnightRegistrationsByBlock(ctx context.Context, blockNumb
 	return items, nil
 }
 
+const getNetworkStateAsOfSlot = `-- name: GetNetworkStateAsOfSlot :one
+SELECT id, treasury, reserves, slot
+FROM network_state
+WHERE slot <= ?
+ORDER BY slot DESC
+LIMIT 1
+`
+
+func (q *Queries) GetNetworkStateAsOfSlot(ctx context.Context, slot int64) (NetworkState, error) {
+	row := q.db.QueryRowContext(ctx, getNetworkStateAsOfSlot, slot)
+	var i NetworkState
+	err := row.Scan(
+		&i.ID,
+		&i.Treasury,
+		&i.Reserves,
+		&i.Slot,
+	)
+	return i, err
+}
+
 const getOffchainMetadata = `-- name: GetOffchainMetadata :one
 SELECT fetched_at, next_fetch_after, created_at, updated_at, url,
        source_type, status, content_type, last_error, hash, body_hash,
@@ -3110,7 +3207,8 @@ func (q *Queries) GetRewardSeedFailure(ctx context.Context, arg GetRewardSeedFai
 const getRewardSnapshot = `-- name: GetRewardSnapshot :one
 SELECT id, epoch, snapshot_type, total_active_stake, total_pool_count,
        total_delegators, captured_slot, boundary_slot, epoch_nonce,
-       protocol_version, authoritative, calculation_version
+       protocol_version, authoritative, calculation_version,
+       excluded_active_stake
 FROM reward_snapshot
 WHERE epoch = ? AND snapshot_type = ?
 `
@@ -3136,6 +3234,7 @@ func (q *Queries) GetRewardSnapshot(ctx context.Context, arg GetRewardSnapshotPa
 		&i.ProtocolVersion,
 		&i.Authoritative,
 		&i.CalculationVersion,
+		&i.ExcludedActiveStake,
 	)
 	return i, err
 }
@@ -3540,9 +3639,12 @@ SELECT transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
        deleted_slot, amount, output_idx, payment_script
 FROM utxo
 WHERE added_slot > ?
-ORDER BY id DESC
+ORDER BY added_slot DESC, id DESC
 `
 
+// Order by added_slot before id so the sort is the reverse of
+// idx_utxo_added_slot's own order; ordering by id alone costs a full table
+// scan. See the Store wrapper for the full rationale.
 func (q *Queries) GetUtxosAddedAfterSlot(ctx context.Context, addedSlot sql.NullInt64) ([]Utxo, error) {
 	rows, err := q.db.QueryContext(ctx, getUtxosAddedAfterSlot, addedSlot)
 	if err != nil {
@@ -3912,24 +4014,26 @@ const insertRewardSnapshot = `-- name: InsertRewardSnapshot :one
 INSERT INTO reward_snapshot (
     epoch, snapshot_type, total_active_stake, total_pool_count,
     total_delegators, captured_slot, boundary_slot, epoch_nonce,
-    protocol_version, authoritative, calculation_version
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    protocol_version, authoritative, calculation_version,
+    excluded_active_stake
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (epoch, snapshot_type) DO NOTHING
 RETURNING id
 `
 
 type InsertRewardSnapshotParams struct {
-	Epoch              int64
-	SnapshotType       string
-	TotalActiveStake   string
-	TotalPoolCount     int64
-	TotalDelegators    int64
-	CapturedSlot       int64
-	BoundarySlot       int64
-	EpochNonce         []byte
-	ProtocolVersion    int64
-	Authoritative      bool
-	CalculationVersion int64
+	Epoch               int64
+	SnapshotType        string
+	TotalActiveStake    string
+	TotalPoolCount      int64
+	TotalDelegators     int64
+	CapturedSlot        int64
+	BoundarySlot        int64
+	EpochNonce          []byte
+	ProtocolVersion     int64
+	Authoritative       bool
+	CalculationVersion  int64
+	ExcludedActiveStake sql.NullString
 }
 
 func (q *Queries) InsertRewardSnapshot(ctx context.Context, arg InsertRewardSnapshotParams) (int64, error) {
@@ -3945,6 +4049,7 @@ func (q *Queries) InsertRewardSnapshot(ctx context.Context, arg InsertRewardSnap
 		arg.ProtocolVersion,
 		arg.Authoritative,
 		arg.CalculationVersion,
+		arg.ExcludedActiveStake,
 	)
 	var id int64
 	err := row.Scan(&id)
@@ -4379,8 +4484,9 @@ const saveRewardSnapshot = `-- name: SaveRewardSnapshot :one
 INSERT INTO reward_snapshot (
     epoch, snapshot_type, total_active_stake, total_pool_count,
     total_delegators, captured_slot, boundary_slot, epoch_nonce,
-    protocol_version, authoritative, calculation_version
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    protocol_version, authoritative, calculation_version,
+    excluded_active_stake
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (epoch, snapshot_type) DO UPDATE SET
     total_active_stake = excluded.total_active_stake,
     total_pool_count = excluded.total_pool_count,
@@ -4390,22 +4496,24 @@ ON CONFLICT (epoch, snapshot_type) DO UPDATE SET
     epoch_nonce = excluded.epoch_nonce,
     protocol_version = excluded.protocol_version,
     authoritative = excluded.authoritative,
-    calculation_version = excluded.calculation_version
+    calculation_version = excluded.calculation_version,
+    excluded_active_stake = excluded.excluded_active_stake
 RETURNING id
 `
 
 type SaveRewardSnapshotParams struct {
-	Epoch              int64
-	SnapshotType       string
-	TotalActiveStake   string
-	TotalPoolCount     int64
-	TotalDelegators    int64
-	CapturedSlot       int64
-	BoundarySlot       int64
-	EpochNonce         []byte
-	ProtocolVersion    int64
-	Authoritative      bool
-	CalculationVersion int64
+	Epoch               int64
+	SnapshotType        string
+	TotalActiveStake    string
+	TotalPoolCount      int64
+	TotalDelegators     int64
+	CapturedSlot        int64
+	BoundarySlot        int64
+	EpochNonce          []byte
+	ProtocolVersion     int64
+	Authoritative       bool
+	CalculationVersion  int64
+	ExcludedActiveStake sql.NullString
 }
 
 func (q *Queries) SaveRewardSnapshot(ctx context.Context, arg SaveRewardSnapshotParams) (int64, error) {
@@ -4421,6 +4529,7 @@ func (q *Queries) SaveRewardSnapshot(ctx context.Context, arg SaveRewardSnapshot
 		arg.ProtocolVersion,
 		arg.Authoritative,
 		arg.CalculationVersion,
+		arg.ExcludedActiveStake,
 	)
 	var id int64
 	err := row.Scan(&id)
@@ -4998,21 +5107,23 @@ SET total_active_stake = ?,
     epoch_nonce = ?,
     protocol_version = ?,
     authoritative = FALSE,
-    calculation_version = ?
+    calculation_version = ?,
+    excluded_active_stake = ?
 WHERE epoch = ? AND snapshot_type = ? AND authoritative = FALSE
 `
 
 type UpdateFallbackRewardSnapshotParams struct {
-	TotalActiveStake   string
-	TotalPoolCount     int64
-	TotalDelegators    int64
-	CapturedSlot       int64
-	BoundarySlot       int64
-	EpochNonce         []byte
-	ProtocolVersion    int64
-	CalculationVersion int64
-	Epoch              int64
-	SnapshotType       string
+	TotalActiveStake    string
+	TotalPoolCount      int64
+	TotalDelegators     int64
+	CapturedSlot        int64
+	BoundarySlot        int64
+	EpochNonce          []byte
+	ProtocolVersion     int64
+	CalculationVersion  int64
+	ExcludedActiveStake sql.NullString
+	Epoch               int64
+	SnapshotType        string
 }
 
 func (q *Queries) UpdateFallbackRewardSnapshot(ctx context.Context, arg UpdateFallbackRewardSnapshotParams) (int64, error) {
@@ -5025,6 +5136,7 @@ func (q *Queries) UpdateFallbackRewardSnapshot(ctx context.Context, arg UpdateFa
 		arg.EpochNonce,
 		arg.ProtocolVersion,
 		arg.CalculationVersion,
+		arg.ExcludedActiveStake,
 		arg.Epoch,
 		arg.SnapshotType,
 	)

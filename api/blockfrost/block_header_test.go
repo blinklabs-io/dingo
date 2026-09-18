@@ -61,6 +61,8 @@ func expectedVRFBech32(t *testing.T) string {
 }
 
 func TestPraosHeaderFieldsShelley(t *testing.T) {
+	t.Parallel()
+
 	var h shelley.ShelleyBlockHeader
 	h.Body.VrfKey = testVRFKey
 	h.Body.OpCertHotVkey = testHotVkey
@@ -78,6 +80,8 @@ func TestPraosHeaderFieldsShelley(t *testing.T) {
 }
 
 func TestPraosHeaderFieldsAllegraTPraos(t *testing.T) {
+	t.Parallel()
+
 	// Allegra embeds the Shelley header body (TPraos era).
 	var h allegra.AllegraBlockHeader
 	h.Body.VrfKey = testVRFKey
@@ -95,6 +99,8 @@ func TestPraosHeaderFieldsAllegraTPraos(t *testing.T) {
 }
 
 func TestPraosHeaderFieldsBabbage(t *testing.T) {
+	t.Parallel()
+
 	var h babbage.BabbageBlockHeader
 	h.Body.VrfKey = testVRFKey
 	h.Body.OpCert.HotVkey = testHotVkey
@@ -111,6 +117,8 @@ func TestPraosHeaderFieldsBabbage(t *testing.T) {
 }
 
 func TestPraosHeaderFieldsConway(t *testing.T) {
+	t.Parallel()
+
 	var h conway.ConwayBlockHeader
 	h.Body.VrfKey = testVRFKey
 	h.Body.OpCert.HotVkey = testHotVkey
@@ -129,6 +137,8 @@ func TestPraosHeaderFieldsConway(t *testing.T) {
 // TestPraosHeaderFieldsByron covers the genesis/pre-Shelley edge case: Byron
 // headers carry no VRF or operational certificate, so all three fields are nil.
 func TestPraosHeaderFieldsByron(t *testing.T) {
+	t.Parallel()
+
 	var h byron.ByronMainBlockHeader
 	// Sanity check that the Byron header satisfies the header interface used
 	// by praosHeaderFields.
@@ -146,6 +156,8 @@ func TestPraosHeaderFieldsByron(t *testing.T) {
 // empty-string values; block_vrf/op_cert stay nil while the counter is always
 // reported.
 func TestPraosHeaderFieldsEmptyVRFAndOpCert(t *testing.T) {
+	t.Parallel()
+
 	var h conway.ConwayBlockHeader
 	h.Body.OpCert.SequenceNumber = 5
 
@@ -158,6 +170,8 @@ func TestPraosHeaderFieldsEmptyVRFAndOpCert(t *testing.T) {
 }
 
 func TestBech32EncodeDataVRF(t *testing.T) {
+	t.Parallel()
+
 	encoded, err := bech32EncodeData("vrf_vk", testVRFKey)
 	require.NoError(t, err)
 	assert.True(t, strings.HasPrefix(encoded, "vrf_vk1"))

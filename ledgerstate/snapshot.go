@@ -546,7 +546,10 @@ func parseCurrentEra(
 	// NewEpochState rather than a snapshot that omits them.
 	blocksPrev, err := parseBlocksMade(nes[1])
 	if err != nil {
-		return nil, fmt.Errorf("decoding blocks made in previous epoch: %w", err)
+		return nil, fmt.Errorf(
+			"decoding blocks made in previous epoch: %w",
+			err,
+		)
 	}
 	blocksCur, err := parseBlocksMade(nes[2])
 	if err != nil {
@@ -1585,7 +1588,11 @@ func parseBlocksMade(data cbor.RawMessage) (map[string]uint64, error) {
 	for i, entry := range entries {
 		var poolKeyHash []byte
 		if _, err := cbor.Decode(entry.KeyRaw, &poolKeyHash); err != nil {
-			return nil, fmt.Errorf("entry %d: decoding pool key hash: %w", i, err)
+			return nil, fmt.Errorf(
+				"entry %d: decoding pool key hash: %w",
+				i,
+				err,
+			)
 		}
 		if len(poolKeyHash) != credentialHashSize {
 			return nil, fmt.Errorf(
@@ -1706,7 +1713,9 @@ func parsePoolParamsMap(
 
 // AggregatePoolStake aggregates per-credential stake into per-pool
 // totals, producing PoolStakeSnapshot models suitable for database
-// storage.
+// storage. Every pool with at least one delegated credential gets a row,
+// even when every one of its delegators is at zero stake -- see the loop
+// below and blinklabs-io/dingo#4152.
 func AggregatePoolStake(
 	snap *ParsedSnapShot,
 	epoch uint64,
@@ -1732,27 +1741,41 @@ func AggregatePoolStake(
 			poolMap[poolHex] = agg
 		}
 
-		// Add this credential's stake to the pool total.
-		// Only count delegators that have non-zero stake so the
-		// count is consistent with totalStake.
-		if stake, ok := snap.Stake[credHex]; ok && stake > 0 {
+		// Every credential delegated to this pool counts as a delegator,
+		// matching the live snapshot-rotation path
+		// (calculateLiveStakeDistributionInTxn in ledger/snapshot/calculator.go),
+		// which increments DelegatorCount for every reward_live_stake row it
+		// reads regardless of that row's stake amount. A credential can be
+		// genuinely delegated with zero lovelace behind it at snapshot time
+		// (its UTxOs spent, no reward balance) -- that is still a real
+		// delegator, not a decode gap, and a real cardano-node's own
+		// GetStakeDistribution reply reports the pool anyway (confirmed live
+		// against a real Preview cardano-node during blinklabs-io/dingo#4152:
+		// it answers with an explicit zero StakeFraction rather than omitting
+		// the pool). Gating the count on stake > 0, as this used to, made a
+		// pool whose only delegator(s) happened to be at zero stake
+		// contribute nothing here at all.
+		agg.delegatorCount++
+		if stake, ok := snap.Stake[credHex]; ok {
 			agg.totalStake += stake
-			agg.delegatorCount++
 		}
 	}
 
-	// Convert to models, skipping pools with zero stake
-	// (delegators without a stake entry should not produce
-	// misleading snapshot records).
+	// Convert to models. Every pool with at least one delegator gets a row,
+	// including one whose aggregated stake is zero -- dropping those rows (as
+	// this used to) is what made a registered, actively-delegated pool vanish
+	// from GetStakeDistribution/GetPoolDistr2 entirely after a Mithril
+	// bootstrap, rather than reporting it with a zero stake the way a real
+	// cardano-node does (blinklabs-io/dingo#4152). The row survives only
+	// until the live snapshot-rotation path (which never applied this skip)
+	// recomputes the epoch a few epochs later; until then the pool is simply
+	// missing.
 	snapshots := make(
 		[]*models.PoolStakeSnapshot,
 		0,
 		len(poolMap),
 	)
 	for poolHex, agg := range poolMap {
-		if agg.totalStake == 0 {
-			continue
-		}
 		poolKeyHash, err := hex.DecodeString(poolHex)
 		if err != nil {
 			// poolHex was self-encoded via hex.EncodeToString,

@@ -27,6 +27,8 @@ import (
 // is what lets a catch-up download begin at the immutable-import marker instead
 // of zero.
 func TestSequencerStartOffsetProcessesFromStart(t *testing.T) {
+	t.Parallel()
+
 	var mu sync.Mutex
 	var order []uint64
 	seq := newInOrderSequencerFrom(3, 6, func(num uint64) error {
@@ -45,6 +47,8 @@ func TestSequencerStartOffsetProcessesFromStart(t *testing.T) {
 
 // newInOrderSequencer is the start=0 special case and must be unchanged.
 func TestSequencerStartOffsetZeroMatchesDefault(t *testing.T) {
+	t.Parallel()
+
 	var mu sync.Mutex
 	var order []uint64
 	seq := newInOrderSequencerFrom(0, 3, func(num uint64) error {

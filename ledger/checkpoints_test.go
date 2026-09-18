@@ -22,11 +22,15 @@ import (
 )
 
 func TestValidateCheckpointNoCheckpointsConfigured(t *testing.T) {
+	t.Parallel()
+
 	require.NoError(t, ValidateCheckpoint(nil, 100, "abc"))
 	require.NoError(t, ValidateCheckpoint(map[uint64]string{}, 100, "abc"))
 }
 
 func TestValidateCheckpointNoCheckpointAtHeight(t *testing.T) {
+	t.Parallel()
+
 	cps := map[uint64]string{2000: "aabb"}
 	// A block at a height with no configured checkpoint is always accepted,
 	// regardless of its hash.
@@ -34,16 +38,22 @@ func TestValidateCheckpointNoCheckpointAtHeight(t *testing.T) {
 }
 
 func TestValidateCheckpointMatch(t *testing.T) {
+	t.Parallel()
+
 	cps := map[uint64]string{2000: "aabbcc"}
 	require.NoError(t, ValidateCheckpoint(cps, 2000, "aabbcc"))
 }
 
 func TestValidateCheckpointMatchIsCaseInsensitive(t *testing.T) {
+	t.Parallel()
+
 	cps := map[uint64]string{2000: "AABBCC"}
 	require.NoError(t, ValidateCheckpoint(cps, 2000, "aabbcc"))
 }
 
 func TestValidateCheckpointMismatch(t *testing.T) {
+	t.Parallel()
+
 	cps := map[uint64]string{2000: "aabbcc"}
 	err := ValidateCheckpoint(cps, 2000, "ddeeff")
 	require.Error(t, err)

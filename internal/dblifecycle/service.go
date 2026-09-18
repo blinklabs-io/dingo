@@ -134,6 +134,7 @@ func (s *Service) openDatabase(
 			StorageMode:    s.cfg.StorageMode,
 			MaxConnections: s.cfg.DatabaseWorkers,
 			Logger:         s.logger,
+			TracingEnabled: s.cfg.Tracing,
 		},
 	)
 	if err != nil {

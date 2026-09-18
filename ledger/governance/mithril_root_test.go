@@ -29,6 +29,8 @@ import (
 // snapshot must be accepted by validateParentChain when the per-
 // purpose root has been seeded as a synthetic enacted row.
 func TestMithrilSeededRootUnblocksChainedProposal(t *testing.T) {
+	t.Parallel()
+
 	db, _ := newTallyTestDB(t)
 
 	rootHash := testBytes(32, 0xA1)
@@ -88,6 +90,8 @@ func TestMithrilSeededRootUnblocksChainedProposal(t *testing.T) {
 func TestValidateParentChain_NoConfidenceRootAllowsCommitteeUpdate(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	rootHash := testBytes(32, 0xC1)
 	parentIdx := uint32(2)
 

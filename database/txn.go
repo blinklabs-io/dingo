@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"runtime/debug"
 	"sync"
 	"time"
@@ -63,14 +64,24 @@ type Txn struct {
 	// pin that keeps that store from being drained out from under the
 	// transaction; it is guarded by lock and cleared by
 	// releaseBlobPinLocked. See blob_store.go.
-	blobStore   blob.BlobStore
-	blobPin     *blobStoreRef
-	lock        sync.Mutex
-	finished    bool
-	committed   bool
-	readWrite   bool
-	afterCommit []func()
-	dispatching bool
+	blobStore blob.BlobStore
+	blobPin   *blobStoreRef
+	// sharedBlob marks a Txn built by withMetadataForRecovery, whose
+	// blobTxn/blobStore are borrowed from another Txn rather than opened
+	// (and pinned) here. rollback must not tear down a handle it doesn't
+	// own -- see withMetadataForRecovery.
+	sharedBlob bool
+	// sharedMetadata is sharedBlob's mirror image, for a Txn built by
+	// withBlobForRecovery: metadataTxn is borrowed from another Txn rather
+	// than opened here. Commit/rollback must not act on a metadata handle
+	// they don't own -- see withBlobForRecovery.
+	sharedMetadata bool
+	lock           sync.Mutex
+	finished       bool
+	committed      bool
+	readWrite      bool
+	afterCommit    []func()
+	dispatching    bool
 
 	// barrierHeld records whether this Txn holds the shared side of
 	// db.commitBarrier (see acquireCommitBarrier). Guarded by lock.
@@ -247,6 +258,118 @@ func (t *Txn) DB() *Database {
 	return t.db
 }
 
+// withMetadataForRecovery returns a Txn that adds a metadata read
+// transaction to t's already-pinned blob handle, for a caller that holds a
+// blob-only Txn (t.Metadata() == nil) but needs metadata access for a rare
+// fallback path -- currently only ResolveUtxoCborWithRecovery's call into
+// utxoRecoveryBlockForTx.
+//
+// It deliberately does not go through Database.Transaction (which calls
+// pinBlobStoreForTxn and so re-pins whatever blob store is *currently*
+// installed): t already pinned a store when it was constructed, and that is
+// the store the caller's own resolve attempt just missed on. Re-pinning here
+// would let a concurrent SetBlobStore swap hand recovery a different store
+// than the one being recovered from -- silently failing to find data that is
+// only in the old store, or (if the store were ever a writable target here)
+// repairing the wrong one (blinklabs-io/dingo#1900 review).
+//
+// The returned Txn's blobTxn/blobStore are the same values as t's, marked
+// sharedBlob so Release/Rollback tears down only the metadata transaction
+// opened here, not the borrowed blob handle -- t (or whatever constructed
+// it) still owns that and keeps using it afterward. Only valid for a
+// read-only t; the only current caller's t is always BlobTxn(false).
+func (t *Txn) withMetadataForRecovery() (*Txn, func()) {
+	aug := &Txn{
+		db: t.db,
+		// readWrite carried over from t, not defaulted to false: it is
+		// what repairUtxoBlob's IsReadWrite() check uses to decide
+		// whether to write the recovered offset through this shared
+		// blobTxn directly or open an independent transaction on the
+		// same store. Forcing it false here would make a write-capable
+		// caller's repair commit independently of the caller's own
+		// transaction, so a later rollback of that caller would no
+		// longer undo the repair (blinklabs-io/dingo#1900 review).
+		readWrite:  t.readWrite,
+		blobTxn:    t.blobTxn,
+		blobStore:  t.blobStore,
+		sharedBlob: true,
+	}
+	if t.db != nil {
+		if ms := t.db.Metadata(); ms != nil {
+			// Must be acquired before opening the metadata transaction
+			// below, not just around its eventual Commit -- see
+			// acquireCommitBarrier's own doc comment. Only actually
+			// takes the lock when aug.readWrite is true (checked
+			// internally), matching NewMetadataOnlyTxn's identical call.
+			acquireCommitBarrier(aug, true)
+			if aug.readWrite {
+				aug.metadataTxn = ms.Transaction(context.Background())
+			} else {
+				aug.metadataTxn = ms.ReadTransaction(context.Background())
+			}
+		}
+	}
+	return aug, aug.Release
+}
+
+// withBlobForRecovery returns a Txn that adds a fresh blob transaction to
+// t's already-pinned blob store, for a caller that holds a metadata-only
+// Txn (t.Blob() == nil) but needs blob access for a rare fallback path --
+// currently only ResolveUtxoCborWithRecovery's call into
+// utxoRecoveryBlockForTx/recoverUtxoCbor, which fetches the producing
+// block's raw CBOR from the blob store (cubic review: this case was
+// previously left with no blob handle at all, so BlockByPointTxn returned
+// ErrNilTxn instead of reconstructing the CBOR).
+//
+// This needs no sharedBlob-style ownership guard on the blob side:
+// NewMetadataOnlyTxn already pins t's blob store (BlobStore-dependent
+// helpers like recordBlobOrphansOnCommit work off any *Txn a caller
+// happens to hold), it just never opens a transaction on it. This opens a
+// genuinely new one, on that same already-pinned store rather than
+// whatever store is *currently* installed -- reusing t's own pin instead
+// of taking a new one, for the identical reason withMetadataForRecovery's
+// own doc comment gives. Because aug fully owns this blobTxn (not
+// borrowed from t), Release/Commit/Rollback tear it down normally;
+// sharedBlob is deliberately left false.
+//
+// aug.metadataTxn, on the other hand, *is* borrowed from t -- the mirror
+// image of withMetadataForRecovery's borrowed blobTxn, marked
+// sharedMetadata for the identical reason: Commit/rollback must not act
+// on a metadata handle this Txn doesn't own (cubic review: an earlier
+// version of this function left sharedMetadata unset, so releasing aug
+// rolled back -- and so finished -- t's own metadata transaction,
+// discarding a write-capable caller's uncommitted metadata as a side
+// effect of a call that only meant to add blob access).
+//
+// aug.readWrite is hardcoded false regardless of t's own readWrite: aug's
+// cleanup is always aug.Release, which unconditionally rolls back
+// (Release calls Rollback, never Commit), so aug.blobTxn can never
+// outlive this one recovery call. repairUtxoBlob checks
+// txn.IsReadWrite() to decide whether to write the recovered offset
+// through the given txn's own blob handle (its caller's responsibility to
+// later commit) or open and commit an independent write transaction of
+// its own. A write-capable t made aug.readWrite true too, which put
+// repairUtxoBlob on the first branch -- writing into aug.blobTxn as if
+// its eventual commit were someone else's job, when aug.blobTxn's only
+// possible fate is the rollback above. The repair was silently discarded
+// every time, regardless of whether t itself ever committed (cubic
+// review). Forcing false here routes every repair through
+// repairUtxoBlob's independent-writer branch instead, which commits on
+// its own.
+func (t *Txn) withBlobForRecovery() (*Txn, func()) {
+	aug := &Txn{
+		db:             t.db,
+		readWrite:      false,
+		metadataTxn:    t.metadataTxn,
+		sharedMetadata: true,
+		blobStore:      t.blobStore,
+	}
+	if aug.blobStore != nil {
+		aug.blobTxn = aug.blobStore.NewTransaction(aug.readWrite)
+	}
+	return aug, aug.Release
+}
+
 // BlobStore returns the blob store this transaction was opened on, which is
 // the store its Blob transaction handle belongs to and the one every blob
 // operation in the transaction must use. It is stable for the transaction's
@@ -317,23 +440,86 @@ func (t *Txn) dispatchAfterCommit() {
 	}
 }
 
-// runAfterCommitCallback runs a single after-commit callback, recovering and
-// logging any panic. Callbacks run detached from the transaction (after the
-// durable commit, without the txn lock), so a panic must not escape the drain
-// loop: an escaping panic would leave dispatching=true, silently stranding
-// every callback registered afterward, and would drop the callbacks already
-// dequeued for this drain. Panics are logged, not propagated.
+// ErrTxnPanic identifies an error produced by recovering a panic raised by
+// transaction-related work, as opposed to an ordinary error a caller
+// returned deliberately. Every transaction worker that can convert a panic
+// into an error return (Txn.Do; ledger.DatabaseWorkerPool.executeOperation)
+// wraps it with this sentinel via NewTxnPanicError, so a caller can tell
+// "the underlying operation failed" (an ordinary error) apart from
+// "something the operation didn't expect to fail this way panicked" (this)
+// with a single errors.Is check, regardless of which worker recovered it.
+var ErrTxnPanic = errors.New("transaction worker panicked")
+
+// NewTxnPanicError formats a recovered panic value r (from the given
+// worker/context label) into an error wrapping ErrTxnPanic. It is the
+// shared error half of the panic contract documented below; logTxnPanic is
+// the shared logging half.
+func NewTxnPanicError(context string, r any) error {
+	return fmt.Errorf("%w: %s: %v", ErrTxnPanic, context, r)
+}
+
+// Panic contract for transaction workers (this function and Do, below,
+// plus ledger.DatabaseWorkerPool.executeOperation): a panic raised by
+// transaction-related work is always recovered and logged with its stack
+// trace via logTxnPanic, and -- when the worker has anywhere to put it -- an
+// error wrapping ErrTxnPanic via NewTxnPanicError, before the recovering
+// deferred func decides what happens next. What differs between workers is
+// only that next step, and the difference tracks whether the worker has a
+// caller to hand the result to:
+//   - Do and executeOperation both run underneath a caller that is
+//     synchronously waiting on a result (Do's caller on the stack;
+//     executeOperation's via its result channel), so both convert the
+//     panic into a returned ErrTxnPanic-wrapped error instead of crashing
+//     that caller's goroutine out from under it. Do additionally rolls
+//     back before returning, since it -- unlike executeOperation, whose
+//     OpFunc owns any transaction it opened -- is itself the transaction
+//     boundary.
+//   - runAfterCommitCallback runs detached on the dispatch loop, after the
+//     registering caller has already moved on and after the transaction
+//     has already durably committed; there is nobody left to hand a
+//     result to, and it may be only one of several callbacks in the
+//     current drain. Returning or re-panicking here would drop every
+//     other callback already dequeued for this drain and strand every
+//     callback registered afterward (see the comment below), so it logs
+//     and continues instead -- the one case where the contract's error
+//     half has nowhere to go.
+//
+// logTxnPanic implements the shared logging half of that contract so every
+// path reports a panic identically; it never itself panics, even when
+// logger is nil (a bare Txn built directly for a test may have no db, and
+// so no logger, but must still finish the corresponding cleanup).
+func logTxnPanic(logger *slog.Logger, msg string, r any) {
+	if logger == nil {
+		return
+	}
+	logger.Error(
+		msg,
+		"panic", fmt.Sprintf("%v", r),
+		"stack", string(debug.Stack()),
+	)
+}
+
+// runAfterCommitCallback runs a single after-commit callback. See the panic
+// contract above Do: a panic here is logged, not propagated, because a
+// panic escaping the drain loop would leave dispatching=true, silently
+// stranding every callback registered afterward, and would drop the
+// callbacks already dequeued for this drain.
 func (t *Txn) runAfterCommitCallback(fn func()) {
 	defer func() {
-		if r := recover(); r != nil && t.db != nil {
-			t.db.logger.Error(
-				"panic in after-commit callback",
-				"panic", fmt.Sprintf("%v", r),
-				"stack", string(debug.Stack()),
-			)
+		if r := recover(); r != nil {
+			logTxnPanic(t.logger(), "panic in after-commit callback", r)
 		}
 	}()
 	fn()
+}
+
+// logger returns the transaction's logger, or nil if this Txn was built
+// without a db (as bare Txn{} literals in tests do).
+func (t *Txn) logger() *slog.Logger {
+	if t.db == nil {
+		return nil
+	}
+	return t.db.logger
 }
 
 type savepointTxn interface {
@@ -368,45 +554,70 @@ func (t *Txn) RollbackTo(name string) error {
 	return savepointer.RollbackTo(name)
 }
 
-// Do executes the specified function in the context of the transaction. Any errors returned will result
-// in the transaction being rolled back. If the function panics, the transaction is rolled back and the
-// panic is re-raised after logging.
-func (t *Txn) Do(fn func(*Txn) error) error {
+// Do executes the specified function in the context of the transaction. Any
+// errors returned will result in the transaction being rolled back. If the
+// function panics, the transaction is rolled back and Do returns an error
+// wrapping ErrTxnPanic instead of letting the panic escape -- see the panic
+// contract above runAfterCommitCallback for how this fits the same contract
+// as executeOperation and why runAfterCommitCallback itself cannot do the
+// same.
+func (t *Txn) Do(fn func(*Txn) error) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			// Log the panic before attempting rollback
-			t.db.logger.Error(
+			logTxnPanic(
+				t.logger(),
 				"panic in transaction function, ensuring rollback",
-				"panic", fmt.Sprintf("%v", r),
-				"stack", string(debug.Stack()),
+				r,
 			)
-			// Attempt rollback to ensure transaction is cleaned up
-			if err := t.Rollback(); err != nil {
-				t.db.logger.Error(
-					"rollback failed after panic",
-					"panic", fmt.Sprintf("%v", r),
-					"rollback_error", err,
+			// Attempt rollback to ensure transaction is cleaned up. This
+			// call is itself already inside Do's one recovery defer, so a
+			// second panic from Rollback (or the underlying store's
+			// Rollback it calls) would otherwise propagate straight out
+			// of this already-executing deferred function -- the
+			// outermost frame in Do -- and crash the goroutine instead of
+			// returning the converted error below. safeRollback recovers
+			// that second panic too, so Do always returns rather than
+			// ever re-panicking.
+			if rbErr := safeRollback(t); rbErr != nil {
+				logTxnPanic(t.logger(), "rollback failed after panic", rbErr)
+				err = fmt.Errorf(
+					"%w (rollback also failed: %w)",
+					NewTxnPanicError("transaction function", r),
+					rbErr,
 				)
+				return
 			}
-			// Re-panic to propagate the error up the stack
-			panic(r)
+			err = NewTxnPanicError("transaction function", r)
 		}
 	}()
 
-	if err := fn(t); err != nil {
-		if err2 := t.Rollback(); err2 != nil {
+	if fnErr := fn(t); fnErr != nil {
+		if rbErr := t.Rollback(); rbErr != nil {
 			return fmt.Errorf(
 				"rollback failed: %w: original error: %w",
-				err2,
-				err,
+				rbErr,
+				fnErr,
 			)
 		}
-		return err
+		return fnErr
 	}
-	if err := t.Commit(); err != nil {
-		return fmt.Errorf("commit failed: %w", err)
+	if commitErr := t.Commit(); commitErr != nil {
+		return fmt.Errorf("commit failed: %w", commitErr)
 	}
 	return nil
+}
+
+// safeRollback calls t.Rollback(), recovering and converting to an error
+// any panic Rollback itself (or the underlying blob/metadata store's
+// Rollback it calls) raises. See the comment at its call site in Do for
+// why this recovery must be nested rather than relying on Do's own.
+func safeRollback(t *Txn) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("rollback panicked: %v", r)
+		}
+	}()
+	return t.Rollback()
 }
 
 func (t *Txn) Commit() error {
@@ -444,10 +655,19 @@ func (t *Txn) Commit() error {
 	if !t.readWrite {
 		return t.rollback()
 	}
-	// Update the commit timestamp in both DBs if using both.
-	// Track timestamp for error reporting if partial commit occurs.
+	// Update the commit timestamp in both DBs if using both. Skipped
+	// entirely when sharedBlob (mirrors the guard below): t.blobTxn is
+	// borrowed from another Txn (see withMetadataForRecovery) that still
+	// owns committing or rolling it back, so writing a timestamp into it
+	// here -- left staged but never actually committed by this call --
+	// would either sit uncommitted until the owner's own Commit runs, or
+	// be overwritten by the owner's own timestamp; neither is this Txn's
+	// to decide (chrisguiney review; not reachable by any caller today,
+	// since the only current sharedBlob wrapper is only ever
+	// Released/Rolled back, never committed).
 	var commitTimestamp int64
-	if t.blobTxn != nil && t.metadataTxn != nil {
+	if t.blobTxn != nil && t.metadataTxn != nil &&
+		!t.sharedBlob && !t.sharedMetadata {
 		commitTimestamp = time.Now().UnixMilli()
 		if err := t.db.updateCommitTimestamp(t, commitTimestamp); err != nil {
 			// Rollback both transactions on timestamp update failure
@@ -457,12 +677,18 @@ func (t *Txn) Commit() error {
 			return fmt.Errorf("failed to update commit timestamp: %w", err)
 		}
 	}
-	// Commit blob transaction first (so if this fails, metadata never commits)
-	if t.blobTxn != nil {
+	// Commit blob transaction first (so if this fails, metadata never
+	// commits). Guarded by !t.sharedBlob for the same ownership reason as
+	// above and as rollback's own identical guard: committing a borrowed
+	// blobTxn here would commit its owner's transaction out from under it.
+	if t.blobTxn != nil && !t.sharedBlob {
 		if err := t.blobTxn.Commit(); err != nil {
-			// Blob commit failed - rollback metadata only
+			// Blob commit failed - rollback metadata only. Skipped when
+			// sharedMetadata: that handle is borrowed (see
+			// withBlobForRecovery), so a failure in this Txn's own blob
+			// commit is not this Txn's ownership to roll back for.
 			// Note: Most DB engines auto-rollback on commit failure
-			if t.metadataTxn != nil {
+			if t.metadataTxn != nil && !t.sharedMetadata {
 				_ = t.metadataTxn.Rollback()
 			}
 			t.finishLocked()
@@ -481,7 +707,8 @@ func (t *Txn) Commit() error {
 		// commit. Only combined transactions pay the cost -- blob-only bulk
 		// paths sync at their own barriers, and Sync is a store-wide flush, so
 		// the next combined commit also makes those batches durable.
-		if blobStore := t.blobStore; blobStore != nil && t.metadataTxn != nil {
+		if blobStore := t.blobStore; blobStore != nil &&
+			t.metadataTxn != nil && !t.sharedMetadata {
 			if syncErr := blobStore.Sync(); syncErr != nil {
 				_ = t.metadataTxn.Rollback()
 				t.finishLocked()
@@ -506,8 +733,11 @@ func (t *Txn) Commit() error {
 			}
 		}
 	}
-	// Commit metadata transaction
-	if t.metadataTxn != nil {
+	// Commit metadata transaction. Guarded by !t.sharedMetadata for the
+	// same ownership reason as the blob-commit guard above: committing a
+	// borrowed metadataTxn here would commit its owner's transaction out
+	// from under it (cubic review; withBlobForRecovery).
+	if t.metadataTxn != nil && !t.sharedMetadata {
 		if err := t.metadataTxn.Commit(); err != nil {
 			_ = t.metadataTxn.Rollback()
 			t.finishLocked()
@@ -548,19 +778,53 @@ func (t *Txn) rollback() error {
 	if t.finished {
 		return nil
 	}
+	// Deferred, not a plain trailing call: a panicking provider Rollback
+	// below (blobTxn or metadataTxn) must not skip marking the
+	// transaction finished and releasing its commit barrier hold, or
+	// that hold leaks for the process's lifetime -- see finishLocked's
+	// own doc comment. Do's safeRollback recovers the panic that skips
+	// past this defer's own call site, but only after this defer has
+	// already run during the panic unwind.
+	defer t.finishLocked()
 	var errs []error
-	if t.blobTxn != nil {
-		if err := t.blobTxn.Rollback(); err != nil {
+	if t.blobTxn != nil && !t.sharedBlob {
+		if err := safeProviderRollback(t.logger(), t.blobTxn); err != nil {
 			errs = append(errs, fmt.Errorf("blob rollback: %w", err))
 		}
 	}
-	if t.metadataTxn != nil {
-		if err := t.metadataTxn.Rollback(); err != nil {
+	if t.metadataTxn != nil && !t.sharedMetadata {
+		if err := safeProviderRollback(t.logger(), t.metadataTxn); err != nil {
 			errs = append(errs, fmt.Errorf("metadata rollback: %w", err))
 		}
 	}
-	t.finishLocked()
 	return errors.Join(errs...)
+}
+
+// safeProviderRollback calls txn.Rollback(), recovering, logging, and
+// converting to an ErrTxnPanic-wrapped error any panic it raises. Without
+// the recovery, a panic from the blob store's Rollback would skip the
+// metadata store's Rollback entirely (and vice versa): rollback's own
+// finishLocked defer would still mark the transaction finished, but
+// finished is exactly what makes a later Rollback/Release call a no-op, so
+// there would be no way to ever retry the provider whose Rollback never
+// ran -- silently leaking its connection/transaction for the process's
+// lifetime. logTxnPanic is called here directly (not left to a caller)
+// because this can be reached from Do's ordinary-error path -- fn
+// returned a normal error, and this provider's Rollback then panics while
+// cleaning up -- which has no other recover site to log through; the
+// panic contract promises every panic is logged, not just the ones that
+// happen to bubble through Do's own recovery block. The error is wrapped
+// with ErrTxnPanic (not a bare fmt.Errorf) for the matching reason:
+// errors.Is(err, ErrTxnPanic) must identify this panic too, regardless of
+// which of Do's two call paths reaches it.
+func safeProviderRollback(logger *slog.Logger, txn types.Txn) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			logTxnPanic(logger, "panic during provider rollback", r)
+			err = NewTxnPanicError("provider rollback", r)
+		}
+	}()
+	return txn.Rollback()
 }
 
 // Release releases transaction resources. For read-only transactions, this

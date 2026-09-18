@@ -15,7 +15,10 @@
 package dingo
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
+	"encoding/binary"
 	"errors"
 	"io"
 	"log/slog"
@@ -37,6 +40,7 @@ import (
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/dingo/mempool"
@@ -44,12 +48,16 @@ import (
 	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/blinklabs-io/dingo/plugin"
 	gouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/kes"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/blinklabs-io/gouroboros/vrf"
 	ouroboros_mock "github.com/blinklabs-io/ouroboros-mock"
-	"github.com/blinklabs-io/ouroboros-mock/fixtures"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -131,7 +139,7 @@ func newLiveLifecycleTestNodeWithGenesis(
 		cm.SetLedger(nodeTestSecurityParamLedger{securityParam: 432}),
 	)
 
-	points := loadLiveLifecycleTestBlocks(t, cm.PrimaryChain(), numBlocks)
+	points := loadLiveLifecycleTestBlocks(t, db, cm.PrimaryChain(), numBlocks)
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point:       points[len(points)-1],
 		BlockNumber: uint64(len(points)),
@@ -249,10 +257,28 @@ func newLiveLifecycleTestNodeWithGenesis(
 	return n, points
 }
 
-// loadLiveLifecycleTestBlocks loads valid generated Babbage blocks into c.
+// loadLiveLifecycleTestBlocks loads valid generated Babbage blocks into c and
+// records a checkpoint block_nonce row for the first one.
 // The lifecycle tests configure the Babbage hard-fork override where needed.
+//
+// These blocks are added directly to the chain index rather than run
+// through LedgerState's normal block-application path (ledgerProcessBlocks),
+// so no block_nonce row would otherwise exist for any of them -- unlike a
+// really-synced chain, which writes one for every applied block including a
+// per-epoch checkpoint (see ledgerProcessBlocks's "First block we persist in
+// the current epoch becomes the checkpoint"). Without at least one
+// checkpoint here, any test that truncates or rolls back into this range
+// hits database.TruncateAfterSlot's checkpoint check with nothing to
+// satisfy it -- correctly refused, but for a test-harness gap rather than a
+// genuine unreconstructable truncate. The nonce value itself is a fixed
+// placeholder, not folded from real VRF output: these tests assert
+// lifecycle/selection behavior, not nonce correctness, and Genesis header
+// verification here derives its epoch nonce independently for epoch 0
+// (Shelley-genesis-derived, not block-nonce-folded), so a placeholder
+// doesn't feed into anything crypto-verified.
 func loadLiveLifecycleTestBlocks(
 	t *testing.T,
+	db *database.Database,
 	c *chain.Chain,
 	numBlocks int,
 ) []ocommon.Point {
@@ -261,12 +287,21 @@ func loadLiveLifecycleTestBlocks(
 	require.NoError(t, err)
 
 	var points []ocommon.Point
-	for _, block := range blocks {
+	for i, block := range blocks {
 		require.NoError(t, c.AddBlock(block, nil))
 		points = append(points, ocommon.Point{
 			Slot: block.SlotNumber(),
 			Hash: block.Hash().Bytes(),
 		})
+		if i == 0 {
+			require.NoError(t, db.SetBlockNonce(
+				block.Hash().Bytes(),
+				block.SlotNumber(),
+				bytes.Repeat([]byte{0x5c}, 32),
+				true, // isCheckpoint
+				nil,
+			))
+		}
 	}
 	require.NotEmpty(t, points, "no blocks loaded from testdata")
 	require.Len(t, points, numBlocks)
@@ -311,6 +346,8 @@ func lifecycleSnapshot(
 // pointer and panics before the node ever finishes starting. The handlers are
 // attached separately, once the instance exists, by attachLeiosHandlers.
 func TestInitLeiosManagersDoNotRequireOuroboros(t *testing.T) {
+	t.Parallel()
+
 	n, _ := newLiveLifecycleTestNode(t, 2)
 	// Exactly the state Run is in when it reaches the Leios init calls.
 	n.ouroborosRef.Store(nil)
@@ -331,6 +368,8 @@ func TestInitLeiosManagersDoNotRequireOuroboros(t *testing.T) {
 // rebuild that does not carry them across silently drops Leios vote and
 // pipeline handling on a Dijkstra node, while everything else keeps working.
 func TestLiveLifecycleRebuildPreservesLeiosHandlers(t *testing.T) {
+	t.Parallel()
+
 	n, _ := newLiveLifecycleTestNode(t, 4)
 
 	// Zero-value managers: this asserts only that the same handlers survive
@@ -368,6 +407,8 @@ func TestLiveLifecycleRebuildPreservesLeiosHandlers(t *testing.T) {
 // leave n.ctx alone, so the node's normal shutdown signalling is
 // unaffected by having gone through a live truncate.
 func TestLiveTruncateRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 20
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -462,6 +503,8 @@ func TestLiveTruncateRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
 func TestLiveTruncateReinitializationPreservesDelegatorInactivityConfig(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const numBlocks = 20
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -501,6 +544,8 @@ func TestLiveTruncateReinitializationPreservesDelegatorInactivityConfig(
 func TestLiveTruncateReinitializationPreservesSnapshotManagerDelegatorInactivityConfig(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const numBlocks = 20
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -600,6 +645,122 @@ func registerGenesisForkTestPeer(
 	return oConn.Id()
 }
 
+// generateValidatedConwayForkChain is fixtures.GenerateConwayChain's
+// structural counterpart with genuine VRF/KES crypto: issue #3528 made
+// header admission require real cryptographic verification (previously
+// skipped whenever ValidateHistorical was disabled, the ordinary bulk-sync
+// default), so a competing fork exercised through the normal chainsync
+// event path now needs a real, verifiable VRF proof against the ledger's
+// actual cached epoch nonce -- fixtures.GenerateConwayChain's headers carry
+// no VRF/KES material at all and are rejected outright.
+//
+// Unlike internal/test/testutil.BuildValidatedConwayBlockBytes, this proves
+// the VRF output directly for the caller-chosen slot rather than searching
+// a window for one that beats a leadership threshold: gouroboros'
+// verifyBlockHeaderOnlyCrypto path used at header admission time skips
+// stake-pool/leadership validation (VerifyConfig.SkipStakePoolValidation),
+// checking only that the VRF proof and KES signature are well-formed and
+// match the given epoch nonce -- so any real, non-degenerate keypair
+// suffices, and this chains multiple blocks by real prevHash/hash linkage
+// the way a peer's actual fork would.
+func generateValidatedConwayForkChain(
+	t *testing.T,
+	epochNonce []byte,
+	startBlockNumber uint64,
+	prevHash lcommon.Blake2b256,
+	startSlot, slotIncrement uint64,
+	count int,
+) []gledger.Block {
+	t.Helper()
+
+	var seed [32]byte
+	copy(seed[:], []byte("genesis-fork-chain-vrf-kes-seed"))
+	vrfPk, vrfSk, err := vrf.KeyGen(seed[:])
+	require.NoError(t, err)
+
+	kesSeed := seed
+	kesSeed[0] ^= 0xAA
+	kesSk, kesPk, err := kes.KeyGen(kes.CardanoKesDepth, kesSeed[:])
+	require.NoError(t, err)
+
+	coldSeed := seed
+	coldSeed[0] ^= 0xBB
+	coldPrivKey := ed25519.NewKeyFromSeed(coldSeed[:])
+	coldPubKey := coldPrivKey.Public().(ed25519.PublicKey)
+
+	const opCertSeqNum = uint64(0)
+	const opCertKesPeriod = uint64(0)
+	var opCertBody [48]byte
+	copy(opCertBody[:32], kesPk)
+	binary.BigEndian.PutUint64(opCertBody[32:40], uint64(opCertSeqNum))
+	binary.BigEndian.PutUint64(opCertBody[40:48], uint64(opCertKesPeriod))
+	opCertSig := ed25519.Sign(coldPrivKey, opCertBody[:])
+
+	bodyHash := testutil.ConwayEmptyBodyHash(t)
+
+	var issuerVkey lcommon.IssuerVkey
+	copy(issuerVkey[:], coldPubKey)
+
+	blocks := make([]gledger.Block, 0, count)
+	currentPrev := prevHash
+	for i := range count {
+		slot := startSlot + uint64(i)*slotIncrement
+		blockNumber := startBlockNumber + uint64(i)
+
+		vrfInput, err := vrf.MkInputVrf(int64(slot), epochNonce) //nolint:gosec
+		require.NoError(t, err)
+		vrfProof, vrfOutput, err := vrf.Prove(vrfSk, vrfInput)
+		require.NoError(t, err)
+
+		headerBody := babbage.BabbageBlockHeaderBody{
+			BlockNumber: blockNumber,
+			Slot:        slot,
+			PrevHash:    currentPrev,
+			IssuerVkey:  issuerVkey,
+			VrfKey:      vrfPk,
+			VrfResult: lcommon.VrfResult{
+				Output: vrfOutput,
+				Proof:  vrfProof,
+			},
+			BlockBodySize: 0,
+			BlockBodyHash: bodyHash,
+			OpCert: babbage.BabbageOpCert{
+				HotVkey:        kesPk,
+				SequenceNumber: opCertSeqNum,
+				KesPeriod:      opCertKesPeriod,
+				Signature:      opCertSig,
+			},
+			ProtoVersion: babbage.BabbageProtoVersion{Major: 10},
+		}
+		headerBodyCbor, err := cbor.Encode(headerBody)
+		require.NoError(t, err)
+		// Store the CBOR on the header body so VerifyBlock's
+		// extractOriginalBodyCbor can retrieve it for KES verification.
+		headerBody.SetCbor(headerBodyCbor)
+
+		kesSig, err := kes.Sign(kesSk, uint64(opCertKesPeriod), headerBodyCbor)
+		require.NoError(t, err)
+
+		block := &conway.ConwayBlock{
+			BlockHeader: &conway.ConwayBlockHeader{
+				BabbageBlockHeader: babbage.BabbageBlockHeader{
+					Body:      headerBody,
+					Signature: kesSig,
+				},
+			},
+		}
+		raw, err := cbor.Encode(block)
+		require.NoError(t, err)
+
+		decoded, err := conway.NewConwayBlockFromCbor(raw)
+		require.NoError(t, err)
+
+		blocks = append(blocks, decoded)
+		currentPrev = decoded.Hash()
+	}
+	return blocks
+}
+
 // requireGenesisDeepForkWins drives a competing fork that only Ouroboros
 // Genesis density selection can win, and requires the ledger to switch to
 // it.
@@ -637,19 +798,32 @@ func requireGenesisDeepForkWins(
 		"the local tip must be ahead of the fork intersection for this to be a deep fork",
 	)
 
-	// Real Conway blocks from the shared ouroboros-mock fixtures rather than
-	// a locally defined header stub: their headers round-trip through CBOR,
-	// so the ledger sees the same hashes and prev-hashes a peer would send.
-	// Block numbers continue from the intersection, which keeps the branch
-	// shorter than the local chain.
-	forkBlocks, err := fixtures.GenerateConwayChain(
+	// Real, genuinely VRF/KES-signed Conway blocks rather than
+	// fixtures.GenerateConwayChain's crypto-free stubs: issue #3528 made
+	// header admission require real cryptographic verification against the
+	// ledger's actual cached epoch nonce, so a fork driven through the
+	// ordinary chainsync event path needs a real proof to be admitted at
+	// all. Their headers round-trip through CBOR, so the ledger sees the
+	// same hashes and prev-hashes a peer would send. Block numbers continue
+	// from the intersection, which keeps the branch shorter than the local
+	// chain.
+	ancestorEpoch, err := n.ledgerState.SlotToEpoch(ancestor.Slot)
+	require.NoError(t, err)
+	epochNonce := n.ledgerState.EpochNonce(ancestorEpoch.EpochId)
+	require.NotEmpty(
+		t,
+		epochNonce,
+		"ledger must have a cached nonce for the fork intersection's epoch",
+	)
+	forkBlocks := generateValidatedConwayForkChain(
+		t,
+		epochNonce,
 		uint64(ancestorIdx)+1,
 		lcommon.NewBlake2b256(ancestor.Hash),
 		ancestor.Slot+2,
 		2,
 		2,
 	)
-	require.NoError(t, err)
 	forkTipBlock := forkBlocks[len(forkBlocks)-1]
 	require.Less(
 		t,
@@ -716,6 +890,8 @@ func requireGenesisDeepForkWins(
 // before the truncate against the ledger Run() would have built, and after
 // it against the one the lifecycle path rebuilt.
 func TestLiveTruncatePreservesGenesisForkSelection(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 25
 	n, points := newGenesisSelectionTestNode(t, numBlocks)
 
@@ -740,6 +916,8 @@ func TestLiveTruncatePreservesGenesisForkSelection(t *testing.T) {
 // same live-lifecycle path, which rebuilds the ledger through the same
 // reinitializeCoreStorage call.
 func TestLiveRestorePreservesGenesisForkSelection(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 25
 	n, points := newGenesisSelectionTestNode(t, numBlocks)
 
@@ -768,6 +946,8 @@ func TestLiveRestorePreservesGenesisForkSelection(t *testing.T) {
 // n.liveLifecycleMu: two Truncate calls racing must not interleave their
 // quiesce/rebuild sequences.
 func TestLiveTruncateIsSerializedAgainstConcurrentCalls(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -812,6 +992,8 @@ func TestLiveTruncateIsSerializedAgainstConcurrentCalls(t *testing.T) {
 func TestLiveTruncateRejectsTargetAheadOfTipWithoutTearingDownNode(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -853,6 +1035,8 @@ func TestLiveTruncateRejectsTargetAheadOfTipWithoutTearingDownNode(
 func TestLiveTruncateCancelsWhenStorageProviderDrainIsUnconfirmed(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -860,6 +1044,20 @@ func TestLiveTruncateCancelsWhenStorageProviderDrainIsUnconfirmed(
 	// provider then returns from CloseContext at the deadline while its owned
 	// close continues asynchronously.
 	n.deferredIndexMaintenanceDone = make(chan struct{})
+
+	// Capture the blob store's own completion signal before Truncate closes
+	// n.db out from under it: BlobStoreBadger.Closed() closes only once its
+	// background CloseContext cleanup (GC drain, then badger.DB.Close(),
+	// which releases the on-disk directory lock) has actually finished, so
+	// waiting on it -- instead of polling by repeatedly reopening the data
+	// directory -- proves drain completion directly rather than guessing at
+	// a bound. See BlobStoreBadger.Closed's doc comment for why CloseContext
+	// returning is not itself that signal.
+	blobCloser, ok := n.db.Blob().(interface{ Closed() <-chan struct{} })
+	require.True(
+		t, ok,
+		"test harness blob store does not expose a completion signal",
+	)
 
 	shortCtx, cancel := context.WithTimeout(
 		context.Background(),
@@ -878,23 +1076,27 @@ func TestLiveTruncateCancelsWhenStorageProviderDrainIsUnconfirmed(
 	require.Error(t, n.ctx.Err())
 	require.Nil(t, n.db, "storage must not be reopened before provider drain")
 
-	// Wait for the provider-owned background close before TempDir cleanup. A
-	// scratch runtime can acquire the same path only after the old Badger lock
-	// is released; the cancelled Node itself remains stopped and never reopens.
-	require.Eventually(t, func() bool {
-		deps := n.storageDependencies(n.config.dataDir)
-		deps.PromRegistry = n.config.promRegistry
-		runtime, openErr := internalplugins.OpenDatabase(
-			context.Background(),
-			n.databaseConfig(),
-			n.storageSelections(),
-			deps,
-		)
-		if openErr != nil {
-			return false
-		}
-		return runtime.Close(context.Background()) == nil
-	}, 5*time.Second, 10*time.Millisecond)
+	// Wait for the provider-owned background close before TempDir cleanup,
+	// via its own completion signal rather than a fixed bound: the cancelled
+	// Node itself remains stopped and never reopens.
+	testutil.RequireReceive(
+		t, blobCloser.Closed(), 30*time.Second,
+		"storage provider background close never confirmed drain",
+	)
+
+	// Once drain is confirmed, a scratch runtime opening the same data
+	// directory must succeed deterministically -- the old Badger lock is
+	// guaranteed released, so this is a single attempt, not a poll.
+	deps := n.storageDependencies(n.config.dataDir)
+	deps.PromRegistry = n.config.promRegistry
+	runtime, openErr := internalplugins.OpenDatabase(
+		context.Background(),
+		n.databaseConfig(),
+		n.storageSelections(),
+		deps,
+	)
+	require.NoError(t, openErr)
+	require.NoError(t, runtime.Close(context.Background()))
 }
 
 // TestLiveTruncateResumesAfterCompletedStorageStopFailure proves that an
@@ -903,6 +1105,8 @@ func TestLiveTruncateCancelsWhenStorageProviderDrainIsUnconfirmed(
 // synchronously; the real Badger provider behind it also closes before
 // StopCapability returns.
 func TestLiveTruncateResumesAfterCompletedStorageStopFailure(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -969,6 +1173,8 @@ func TestLiveTruncateResumesAfterCompletedStorageStopFailure(t *testing.T) {
 // over: reopening storage while that worker might still be using it would
 // race the new database instance against the old one. Truncate must
 // instead cancel the node for a supervised restart.
+// Not t.Parallel: swaps ledger.CloseDBWorkerPoolShutdownTimeout, a variable
+// in another package that every concurrent LedgerState close would observe.
 func TestLiveTruncateCancelsInsteadOfResumingWhenStorageDrainUnconfirmed(
 	t *testing.T,
 ) {
@@ -1060,6 +1266,8 @@ func TestLiveTruncateCancelsInsteadOfResumingWhenStorageDrainUnconfirmed(
 // fails ("resume also failed"); with the fix, it must succeed and leave
 // the node fully usable.
 func TestLiveTruncateClosesTmpDBBeforeResumingAfterOpenFailure(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -1109,6 +1317,8 @@ func TestLiveTruncateClosesTmpDBBeforeResumingAfterOpenFailure(t *testing.T) {
 // snapshot back onto the running node, and confirm it comes back with the
 // same tip and every subsystem rebuilt and rewired, same as Truncate.
 func TestLiveRestoreRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -1145,6 +1355,8 @@ func TestLiveRestoreRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
 }
 
 func TestStopForPendingRestoreRollbackCancelsNode(t *testing.T) {
+	t.Parallel()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	n := &Node{ctx: ctx, cancel: cancel}
 	pendingErr := errors.Join(
@@ -1173,6 +1385,8 @@ func TestStopForPendingRestoreRollbackCancelsNode(t *testing.T) {
 // snapshot must be rejected with the node's original data and tip
 // completely intact and the node still usable.
 func TestLiveRestoreRejectsCorruptedSnapshotWithoutDataLoss(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -1234,6 +1448,8 @@ func TestLiveRestoreRejectsCorruptedSnapshotWithoutDataLoss(t *testing.T) {
 // data and tip left completely untouched and the node still usable,
 // rather than the node being torn down (dingo#1651 follow-up).
 func TestLiveRestoreRejectsNetworkMismatchWithoutDataLoss(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -1316,6 +1532,8 @@ func TestLiveRestoreRejectsNetworkMismatchWithoutDataLoss(t *testing.T) {
 func TestQuiesceForLiveLifecycleOpHandlesUninitializedOuroborosAndUnconfirmedConnShutdown(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cm := connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{
 		Logger: logger,
@@ -1382,6 +1600,8 @@ func requireNoDir(t *testing.T, dir string) {
 // reinitializeAndResume call, or -- across a restart --
 // removeConfirmedRestoreBackup once Run() itself succeeds) may do that.
 func TestSwapInRestoredDataDirRetainsBackupUntilCallerConfirms(t *testing.T) {
+	t.Parallel()
+
 	base := t.TempDir()
 	dataDir := filepath.Join(base, "data")
 	stagingDir := dataDir + restoreStagingSuffix
@@ -1437,6 +1657,8 @@ func withInjectedFirstSyncFailure(
 // assumes it's still in place. swapInRestoredDataDir must roll the first
 // rename back and report a normal (recoverable) error when that rollback
 // succeeds.
+// Not t.Parallel: withInjectedFirstSyncFailure swaps a package-level sync
+// seam that every concurrent restore in this package would observe.
 func TestSwapInRestoredDataDirRollsBackWhenFirstSyncFails(t *testing.T) {
 	base := t.TempDir()
 	dataDir := filepath.Join(base, "data")
@@ -1514,6 +1736,8 @@ func TestSwapInRestoredDataDirUnrecoverableWhenFirstSyncFailsAndRollbackFails(
 func TestReconcileInterruptedLiveRestoreSwapNoOpWithoutInterruption(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	base := t.TempDir()
 	dataDir := filepath.Join(base, "data")
 	writeMarkerFile(t, dataDir, "original")
@@ -1539,6 +1763,8 @@ func TestReconcileInterruptedLiveRestoreSwapNoOpWithoutInterruption(
 func TestReconcileInterruptedLiveRestoreSwapRollsBackWhenInterruptedBetweenRenames(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	base := t.TempDir()
 	dataDir := filepath.Join(base, "data")
 	backupDir := dataDir + preRestoreBackupSuffix
@@ -1567,6 +1793,8 @@ func TestReconcileInterruptedLiveRestoreSwapRollsBackWhenInterruptedBetweenRenam
 func TestReconcileInterruptedLiveRestoreSwapKeepsRestoredDataWhenBothPresent(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	base := t.TempDir()
 	dataDir := filepath.Join(base, "data")
 	backupDir := dataDir + preRestoreBackupSuffix
@@ -1597,6 +1825,8 @@ func TestReconcileInterruptedLiveRestoreSwapKeepsRestoredDataWhenBothPresent(
 func TestReconcileInterruptedLiveRestoreSwapPropagatesRollbackFailure(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	if runtime.GOOS == "windows" {
 		t.Skip("directory permission bits don't apply the same way on windows")
 	}
@@ -1682,6 +1912,8 @@ func addBlocksSerially(t *testing.T, n *Node, blocks []gledger.Block) {
 // (epochLength=100, real testdata blocks are 20 slots apart), and confirms
 // the tip actually advances again after each one, not just the first.
 func TestSecondLiveTruncateResumesTipAdvancement(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 20
 	n, points := newLiveLifecycleTestNodeWithGenesis(
 		t, numBlocks, smallEpochGenesisCfgForLifecycleTest(t),

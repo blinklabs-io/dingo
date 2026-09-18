@@ -10,6 +10,8 @@ import (
 // highest immutable file number a Mithril sync imported, so a later catch-up can
 // bound its download and anchor the chain-intersection check.
 func TestImmutableImportMarkerRoundTrip(t *testing.T) {
+	t.Parallel()
+
 	db := newSyncModeTestDB(t)
 
 	_, ok, err := getImmutableImportMarker(db)
@@ -34,6 +36,8 @@ func TestImmutableImportMarkerRoundTrip(t *testing.T) {
 // CIP-0163 guard: false on a fresh database, true once the durable
 // immutable-import marker a completed Mithril sync leaves behind is present.
 func TestWasBootstrapped(t *testing.T) {
+	t.Parallel()
+
 	db := newSyncModeTestDB(t)
 
 	got, err := WasBootstrapped(db)

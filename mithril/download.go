@@ -81,6 +81,10 @@ func withProgressContext(
 }
 
 const (
+	// DefaultMaxDownloadBytes bounds each compressed archive, including any
+	// resumed prefix. It matches the existing 1 TiB extraction budget.
+	DefaultMaxDownloadBytes int64 = 1 << 40
+
 	defaultDownloadIdleTimeout = 2 * time.Minute
 	defaultDownloadIdleRetries = 12
 
@@ -90,6 +94,10 @@ const (
 )
 
 var (
+	// ErrDownloadTooLarge identifies a configured or expected size limit.
+	// It is terminal: retrying cannot increase the permitted file size.
+	ErrDownloadTooLarge = errors.New("download size limit exceeded")
+
 	errDownloadIdleTimeout = errors.New("download idle timeout")
 	// errDownloadTransient is wrapped into errors returned by
 	// downloadSnapshotOnce for HTTP 429 and HTTP 5xx responses so that
@@ -122,6 +130,11 @@ type DownloadConfig struct {
 	// the downloaded file size is verified after download. A
 	// mismatch returns an error.
 	ExpectedSize int64
+	// MaxBytes bounds the complete downloaded file, including resumed bytes,
+	// even when ExpectedSize or Content-Length is absent. Zero selects
+	// DefaultMaxDownloadBytes; negative values are invalid. This is a
+	// per-object bound, not an aggregate bootstrap or transfer-byte budget.
+	MaxBytes int64
 	// Logger is used for logging download progress.
 	Logger *slog.Logger
 	// OnProgress is called periodically with download progress.
@@ -151,10 +164,25 @@ type DownloadConfig struct {
 	// escape hatch for local development and tests (e.g. against an
 	// httptest server) and should not be set in production.
 	AllowInsecureHTTP bool
+	// idleWatchdogs, when non-nil, replaces the wall-clock watchdog that
+	// decides a transfer has gone idle. It is unexported so only this
+	// package's own tests can supply one: they need idleness to occur at a
+	// chosen point in the byte stream, because a wall-clock bound short
+	// enough to keep a test fast is also short enough for a loaded machine
+	// to trip on its own, and one that is safely long makes every run wait
+	// for it. Production leaves this nil and gets newIdleTimer.
+	idleWatchdogs func(time.Duration, func()) idleWatchdog
 }
 
 // Validate checks DownloadConfig values before use.
 func (cfg DownloadConfig) Validate() error {
+	if cfg.MaxBytes < 0 {
+		return errors.New("download config MaxBytes must be >= 0")
+	}
+	if cfg.ExpectedSize > cfg.maxBytes() {
+		return fmt.Errorf("%w: expected size %d exceeds maximum %d bytes",
+			ErrDownloadTooLarge, cfg.ExpectedSize, cfg.maxBytes())
+	}
 	if cfg.MaxIdleRetries < 0 {
 		return fmt.Errorf(
 			"download config MaxIdleRetries must be >= 0, got %d",
@@ -169,36 +197,82 @@ func (cfg DownloadConfig) Validate() error {
 	return nil
 }
 
+func (cfg DownloadConfig) maxBytes() int64 {
+	if cfg.MaxBytes > 0 {
+		return cfg.MaxBytes
+	}
+	return DefaultMaxDownloadBytes
+}
+
+func (cfg DownloadConfig) sizeLimit() int64 {
+	limit := cfg.maxBytes()
+	if cfg.ExpectedSize > 0 && cfg.ExpectedSize < limit {
+		limit = cfg.ExpectedSize
+	}
+	return limit
+}
+
+func (cfg DownloadConfig) sizeLimitError() error {
+	if cfg.ExpectedSize > 0 && cfg.ExpectedSize <= cfg.maxBytes() {
+		return fmt.Errorf("%w: download response exceeds expected size %d bytes",
+			ErrDownloadTooLarge, cfg.ExpectedSize)
+	}
+	return fmt.Errorf("%w: download response exceeds maximum %d bytes",
+		ErrDownloadTooLarge, cfg.maxBytes())
+}
+
+// idleWatchdog bounds the time a download may spend making no progress.
+// A download arms one while it waits for response headers and re-arms one
+// around every body read; an armed watchdog that expires cancels the
+// download so the retry loop can resume from the bytes already on disk.
+// A watchdog is armed by its constructor.
+type idleWatchdog interface {
+	// Reset abandons any running idle period and starts a new one.
+	Reset()
+	// Stop abandons any running idle period without starting another. It
+	// returns only once a callback that was already firing has returned.
+	Stop()
+}
+
+// newIdleWatchdog builds the watchdog enforcing this download's idle
+// timeout, or nil when idle detection is disabled.
+func (cfg DownloadConfig) newIdleWatchdog(onIdle func()) idleWatchdog {
+	timeout := cfg.idleTimeout()
+	if timeout <= 0 {
+		return nil
+	}
+	if cfg.idleWatchdogs != nil {
+		return cfg.idleWatchdogs(timeout, onIdle)
+	}
+	return newIdleTimer(timeout, onIdle)
+}
+
 type idleTimeoutReader struct {
-	reader io.Reader
-	timer  *idleTimer
+	reader   io.Reader
+	watchdog idleWatchdog
 }
 
 func newIdleTimeoutReader(
 	reader io.Reader,
-	timeout time.Duration,
-	onIdle func(),
+	watchdog idleWatchdog,
 ) *idleTimeoutReader {
-	if timeout <= 0 {
-		return &idleTimeoutReader{reader: reader}
-	}
 	return &idleTimeoutReader{
-		reader: reader,
-		timer:  newIdleTimer(timeout, onIdle),
+		reader:   reader,
+		watchdog: watchdog,
 	}
 }
 
 func (r *idleTimeoutReader) Read(p []byte) (int, error) {
-	if r.timer != nil {
-		r.timer.Reset()
-		defer r.timer.Stop()
+	if r.watchdog != nil {
+		r.watchdog.Reset()
+		defer r.watchdog.Stop()
 	}
 	return r.reader.Read(p)
 }
 
 func (r *idleTimeoutReader) Stop() {
-	if r.timer != nil {
-		r.timer.Stop()
+	if r.watchdog != nil {
+		r.watchdog.Stop()
 	}
 }
 
@@ -694,6 +768,10 @@ func downloadSnapshotOnce(
 	var existingSize int64
 	if fi, err := root.Stat(filename); err == nil {
 		existingSize = fi.Size()
+		if existingSize > cfg.sizeLimit() {
+			root.Remove(filename) //nolint:errcheck
+			return "", cfg.sizeLimitError()
+		}
 	}
 
 	req, err := http.NewRequestWithContext(
@@ -727,12 +805,9 @@ func downloadSnapshotOnce(
 			CheckRedirect: httpsOnlyRedirect,
 		}
 	}
-	var headerTimer *idleTimer
-	if idleTimeout > 0 {
-		headerTimer = newIdleTimer(idleTimeout, func() {
-			cancelDownload(downloadIdleTimeoutCause(idleTimeout))
-		})
-	}
+	headerTimer := cfg.newIdleWatchdog(func() {
+		cancelDownload(downloadIdleTimeoutCause(idleTimeout))
+	})
 	resp, err := client.Do( //nolint:gosec // URL from caller-provided config; HTTPS-only redirect policy prevents downgrade
 		req,
 	)
@@ -765,6 +840,9 @@ func downloadSnapshotOnce(
 		existingSize = 0 // reset: not resuming
 		if resp.ContentLength > 0 {
 			totalSize = resp.ContentLength
+		}
+		if resp.ContentLength > cfg.sizeLimit() {
+			return "", cfg.sizeLimitError()
 		}
 		file, err = root.OpenFile(
 			filename,
@@ -826,11 +904,9 @@ func downloadSnapshotOnce(
 					err,
 				)
 			}
-			if idleTimeout > 0 {
-				headerTimer = newIdleTimer(idleTimeout, func() {
-					cancelDownload(downloadIdleTimeoutCause(idleTimeout))
-				})
-			}
+			headerTimer = cfg.newIdleWatchdog(func() {
+				cancelDownload(downloadIdleTimeoutCause(idleTimeout))
+			})
 			resp2, err := client.Do( //nolint:gosec // same URL retried after Content-Range mismatch
 				req,
 			)
@@ -873,11 +949,18 @@ func downloadSnapshotOnce(
 			// Replace the original response body with the
 			// fresh full-download stream.
 			resp.Body = resp2.Body
+			if resp2.ContentLength > cfg.sizeLimit() {
+				file.Close()
+				return "", cfg.sizeLimitError()
+			}
 			if resp2.ContentLength > 0 {
 				totalSize = resp2.ContentLength
 			}
 		} else {
 			// Resume supported with matching offset
+			if resp.ContentLength > cfg.sizeLimit()-existingSize {
+				return "", cfg.sizeLimitError()
+			}
 			if resp.ContentLength > 0 {
 				totalSize = existingSize + resp.ContentLength
 			}
@@ -984,20 +1067,40 @@ func downloadSnapshotOnce(
 		onProgress:  cfg.OnProgress,
 	}
 
-	body := newIdleTimeoutReader(resp.Body, idleTimeout, func() {
-		cancelDownload(downloadIdleTimeoutCause(idleTimeout))
-	})
-	if _, err := io.Copy(pw, body); err != nil {
+	body := newIdleTimeoutReader(
+		resp.Body,
+		cfg.newIdleWatchdog(func() {
+			cancelDownload(downloadIdleTimeoutCause(idleTimeout))
+		}),
+	)
+	// Copy only the remaining file budget, then probe one byte without
+	// writing it. Separate probing avoids limit+1 overflow at MaxInt64.
+	_, copyErr := io.Copy(pw, io.LimitReader(body, cfg.sizeLimit()-existingSize))
+	if copyErr == nil && pw.written == cfg.sizeLimit() {
+		var probe [1]byte
+		var n int
+		n, copyErr = io.ReadFull(body, probe[:])
+		if n > 0 {
+			copyErr = cfg.sizeLimitError()
+		} else if errors.Is(copyErr, io.EOF) {
+			copyErr = nil
+		}
+	}
+	if copyErr != nil {
 		body.Stop()
 		file.Close()
 		file = nil
+		if errors.Is(copyErr, ErrDownloadTooLarge) {
+			root.Remove(filename) //nolint:errcheck
+			return "", copyErr
+		}
 		if cause := context.Cause(downloadCtx); errors.Is(
 			cause,
 			errDownloadIdleTimeout,
 		) {
 			return "", fmt.Errorf("writing snapshot data: %w", cause)
 		}
-		return "", fmt.Errorf("writing snapshot data: %w", err)
+		return "", fmt.Errorf("writing snapshot data: %w", copyErr)
 	}
 	body.Stop()
 
@@ -1061,6 +1164,12 @@ func downloadSnapshotOnce(
 }
 
 const (
+	// Keep decoder allocations bounded independently of klauspost/compress
+	// defaults. These limits are intentionally separate from extracted-file
+	// limits because a hostile frame can allocate before tar validation runs.
+	maxZstdWindowSize    = 512 << 20
+	maxZstdDecoderMemory = 256 << 20
+
 	// maxExtractFileSize is the maximum allowed size for a single
 	// extracted file (8 GiB). Must be large enough for mainnet
 	// ancillary ledger state files (UTxO tables can be multi-GB).
@@ -1123,8 +1232,9 @@ func extractArchiveFile(
 		"destination", destDir,
 	)
 
+	extractCfg := newExtractConfig(opts)
 	workDir, publish, cleanup, err := prepareExtractDestination(
-		destDir, newExtractConfig(opts),
+		destDir, extractCfg,
 	)
 	if err != nil {
 		return "", err
@@ -1140,8 +1250,14 @@ func extractArchiveFile(
 	}
 	countingFile := &countingReader{reader: file}
 
-	// Create zstd reader
-	zr, err := zstd.NewReader(countingFile)
+	// Bound decoder allocations explicitly. The library default is a protocol
+	// maximum rather than an application resource policy, and may change when
+	// the dependency is upgraded.
+	zr, err := zstd.NewReader(
+		countingFile,
+		zstd.WithDecoderMaxWindow(extractCfg.maxZstdWindowSize),
+		zstd.WithDecoderMaxMemory(extractCfg.maxZstdMemory),
+	)
 	if err != nil {
 		return "", fmt.Errorf(
 			"creating zstd reader: %w",

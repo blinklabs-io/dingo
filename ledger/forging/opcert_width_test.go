@@ -43,6 +43,9 @@ func decodeCborArrayElementUint(
 	require.NoError(t, err)
 	require.Greater(t, len(elements), index)
 	var value uint64
+	// require.Greater above fails the test unless len(elements) > index,
+	// which nilaway does not model.
+	//nolint:nilaway // bounded by the require.Greater above
 	_, err = cbor.Decode(elements[index], &value)
 	require.NoError(t, err)
 	return value
@@ -123,16 +126,12 @@ func TestPraosOpCertEncodesCounterBeyondUint32(t *testing.T) {
 // encoder intact, so no bound of dingo's stands between the certificate and
 // the forged header.
 //
-// buildBlock re-decodes the block it encoded, so the outcome depends on the
-// width the linked gouroboros release declares, and both outcomes assert the
-// counter was not narrowed. A release that decodes the field as uint64
-// returns a block whose header carries the full counter. The pinned release
-// decodes ShelleyBlockHeaderBody.OpCertSequenceNumber as uint32 and reports
-// the overflow from inside gouroboros, naming the untruncated value: had the
-// forging path narrowed the counter, the encoded value would have been zero
-// and that decode would have succeeded. That remaining failure is upstream's
-// and is what a release carrying gouroboros #2256 removes; before this change
-// the same certificate was refused earlier, by dingo's own uint32 bound.
+// buildBlock re-decodes the block it encoded, so the assertion depends on
+// gouroboros decoding the field at full width: the module is pinned past
+// gouroboros #2256, which widened
+// shelley.ShelleyBlockHeaderBody.OpCertSequenceNumber from uint32 to
+// uint64, so the re-decode now returns a block whose header carries the
+// full counter rather than reporting an upstream overflow.
 func TestBuildBlockDoesNotNarrowOpCertCounterAtUint32(t *testing.T) {
 	const counter = uint64(math.MaxUint32) + 1
 	creds := setupTestCredentials(t)
@@ -140,18 +139,14 @@ func TestBuildBlockDoesNotNarrowOpCertCounterAtUint32(t *testing.T) {
 
 	builder := newTPraosTestBuilder(t, creds)
 	block, _, err := builder.BuildBlock(1001, 0)
-	if err == nil {
-		header, ok := block.Header().(*shelley.ShelleyBlockHeader)
-		require.True(t, ok, "TPraos forge must return a Shelley header")
-		assert.Equal(
-			t,
-			counter,
-			uint64(header.Body.OpCertSequenceNumber),
-		)
-		return
-	}
-	assert.NotContains(t, err.Error(), "exceeds uint32 max")
-	assert.Contains(t, err.Error(), "4294967296 overflows uint32")
+	require.NoError(t, err)
+	header, ok := block.Header().(*shelley.ShelleyBlockHeader)
+	require.True(t, ok, "TPraos forge must return a Shelley header")
+	assert.Equal(
+		t,
+		counter,
+		uint64(header.Body.OpCertSequenceNumber),
+	)
 }
 
 // TestBuildBlockRejectsOpCertCounterAbovePersistableBound covers the other

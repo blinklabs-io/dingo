@@ -108,6 +108,7 @@ func openSQLiteBackupDB(
 		"sqlite",
 		backupSourceDSN(databasePath),
 		"sqlite",
+		false, // one-shot backup-source connection; not worth tracing
 	)
 	if err != nil {
 		return nil, err

@@ -624,7 +624,9 @@ func (p *DingoStateProvider) legacyCommitteeMember(
 	}
 	for _, member := range members {
 		if member.ColdCredentialTag != coldTag ||
-			common.NewBlake2b224(member.ColdCredHash) != coldCredential.Credential {
+			common.NewBlake2b224(
+				member.ColdCredHash,
+			) != coldCredential.Credential {
 			continue
 		}
 		result := &common.CommitteeMember{
@@ -667,7 +669,9 @@ func (p *DingoStateProvider) realCommitteeMember(
 	found := false
 	for _, member := range members {
 		if member.ColdCredentialTag == coldTag &&
-			common.NewBlake2b224(member.ColdCredHash) == coldCredential.Credential {
+			common.NewBlake2b224(
+				member.ColdCredHash,
+			) == coldCredential.Credential {
 			if found && (member.TermStartSlot < termStartSlot ||
 				(member.TermStartSlot == termStartSlot && member.AddedSlot < addedSlot) ||
 				(member.TermStartSlot == termStartSlot && member.AddedSlot == addedSlot && member.ID < memberID)) {
@@ -836,7 +840,10 @@ func (p *DingoStateProvider) CommitteeHotCredentialMember(
 		},
 	)
 	if err != nil {
-		return nil, fmt.Errorf("lookup active committee hot credentials: %w", err)
+		return nil, fmt.Errorf(
+			"lookup active committee hot credentials: %w",
+			err,
+		)
 	}
 	for _, authorization := range authorizations {
 		if authorization.HotCredentialTag != hotTag ||
@@ -862,30 +869,43 @@ func (p *DingoStateProvider) CommitteeHotCredentialMember(
 	return nil, nil
 }
 
-// DRepRegistration looks up a DRep registration by credential hash. The
-// real store keys DRep rows by (credentialTag, credential); the upstream
-// conformance interface only carries the hash, so both credential tags are
-// checked, matching the tag-agnostic semantics the harness has always used.
+// DRepRegistration looks up a DRep registration by its full credential.
 func (p *DingoStateProvider) DRepRegistration(
-	credential common.Blake2b224,
+	credential common.Credential,
 ) (*common.DRepRegistration, error) {
-	for _, tag := range [...]uint8{0, 1} {
-		drep, err := withBadConnRetry(func() (*models.Drep, error) {
-			return p.manager.db.GetDrepByCredential(
-				tag, credential[:], false, nil,
-			)
-		})
-		if err != nil {
-			if errors.Is(err, models.ErrDrepNotFound) {
-				continue
-			}
-			return nil, fmt.Errorf("lookup drep registration: %w", err)
-		}
-		if drep != nil && drep.Active {
-			return &common.DRepRegistration{Credential: credential}, nil
-		}
+	tag, err := models.CredentialTagFromUint(credential.CredType)
+	if err != nil {
+		return nil, err
 	}
-	return nil, nil
+	drep, err := withBadConnRetry(func() (*models.Drep, error) {
+		return p.manager.db.GetDrepByCredential(
+			tag, credential.Credential[:], false, nil,
+		)
+	})
+	if err != nil {
+		if errors.Is(err, models.ErrDrepNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("lookup drep registration: %w", err)
+	}
+	if drep == nil || !drep.Active {
+		return nil, nil
+	}
+	deposit, err := withBadConnRetry(func() (*uint64, error) {
+		return p.manager.db.GetDrepLastRegistrationDeposit(
+			tag, credential.Credential[:], nil,
+		)
+	})
+	if err != nil {
+		return nil, fmt.Errorf(
+			"lookup drep last registration deposit: %w",
+			err,
+		)
+	}
+	return &common.DRepRegistration{
+		Credential: credential,
+		Deposit:    deposit,
+	}, nil
 }
 
 // DRepDelegation returns the DRep a stake credential is vote-delegated to, or
@@ -942,10 +962,43 @@ func (p *DingoStateProvider) DRepRegistrations() ([]common.DRepRegistration, err
 	if err != nil {
 		return nil, fmt.Errorf("lookup active dreps: %w", err)
 	}
+	// Report the recorded deposit here too. Production's
+	// ledger.LedgerView.DRepRegistrations does, and a vector that validates a
+	// deregistration refund through this plural view would otherwise be judged
+	// against a deposit of 0 -- passing for the same reason the bug existed.
+	//
+	// One batched read rather than a query per DRep: this view is rebuilt for
+	// every vector, and the single-row form makes a list of N active DReps
+	// cost N+1 round trips.
+	deposits, err := withBadConnRetry(func() (map[string]uint64, error) {
+		return p.manager.db.GetDrepLastRegistrationDeposits(nil)
+	})
+	if err != nil {
+		return nil, fmt.Errorf(
+			"lookup drep last registration deposits: %w",
+			err,
+		)
+	}
 	result := make([]common.DRepRegistration, 0, len(dreps))
 	for _, drep := range dreps {
+		// A credential with no registration row is absent from the map and
+		// reports no deposit, preserving the v0.204.0 distinction between
+		// an absent deposit and a recorded zero.
+		deposit, ok := deposits[models.DrepDepositKey(
+			drep.CredentialTag,
+			drep.Credential,
+		)]
 		result = append(result, common.DRepRegistration{
-			Credential: common.NewBlake2b224(drep.Credential),
+			Credential: common.Credential{
+				CredType:   uint(drep.CredentialTag),
+				Credential: common.NewBlake2b224(drep.Credential),
+			},
+			Deposit: func() *uint64 {
+				if !ok {
+					return nil
+				}
+				return &deposit
+			}(),
 		})
 	}
 	return result, nil

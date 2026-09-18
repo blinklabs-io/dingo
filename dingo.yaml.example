@@ -70,16 +70,14 @@ plugins:
       provider: "builtin"
       config:
         port: 3000
-        # Per-provider overrides of the shared api.tls/api.auth defaults
-        # below (uncomment to use). Any field left unset here inherits the
-        # corresponding api.tls/api.auth field; mode: disabled explicitly
-        # turns off an inherited policy for this provider only.
+        # Per-provider override of the shared api.tls default below
+        # (uncomment to use). Any field left unset here inherits the
+        # corresponding api.tls field; mode: disabled explicitly keeps this
+        # provider plaintext.
         # tls:
         #   mode: server
         #   certFilePath: "/run/secrets/blockfrost.crt"
         #   keyFilePath: "/run/secrets/blockfrost.key"
-        # auth:
-        #   mode: disabled
     mesh:
       provider: "builtin"
       config:
@@ -89,12 +87,12 @@ plugins:
       config:
         port: 9090
 
-# Shared TLS and authentication defaults for every selected plugins.api.*
-# provider (Blockfrost, Mesh, UTxO RPC). Each field resolves independently:
-# plugins.api.<name>.config.tls/config.auth overrides any field for that
-# provider only (see the commented example above). The default everywhere
-# is "disabled", so leaving this section out changes nothing for an
-# existing deployment.
+# Shared optional TLS default for every selected plugins.api.* provider
+# (Blockfrost, Mesh, UTxO RPC). Each field resolves independently:
+# plugins.api.<name>.config.tls overrides a field for that provider only
+# (see the commented example above). Leaving this section out keeps the API
+# listeners plaintext. API listeners use the root bindAddr, whose default is
+# 0.0.0.0. CORS remains operator-chosen through corsAllowedOrigins.
 #
 # api:
 #   tls:
@@ -102,18 +100,6 @@ plugins:
 #     mode: server
 #     certFilePath: "/run/secrets/api.crt"
 #     keyFilePath: "/run/secrets/api.key"
-#   auth:
-#     # "disabled" (default) or "token". Callers present the shared secret
-#     # as "Authorization: Bearer <token>" (HTTP and Connect/gRPC); the
-#     # built-in Blockfrost API also accepts it via its own "project_id"
-#     # header, matching real Blockfrost clients. token and tokenFilePath
-#     # are mutually exclusive; tokenFilePath is preferred (also settable
-#     # via DINGO_API_AUTH_TOKEN_FILE_PATH -- token has no environment
-#     # variable of its own, to avoid encouraging secrets into a
-#     # container's env dump).
-#     mode: token
-#     tokenFilePath: "/run/secrets/api-token"
-
 # Path to the UNIX domain socket file used by the server
 # CLI: --socket-path
 socketPath: "dingo.socket"
@@ -141,7 +127,8 @@ logging:
 # TLS on upgrade. To secure Blockfrost and/or Mesh (or to override UTxO
 # RPC's own certificate independently of this shared one), use the top-level
 # api.tls section or each provider's own plugins.api.<name>.config.tls --
-# see the "api:" section above and README.md's "API TLS and Authentication".
+# see the "api:" section above and README.md's "API TLS". TLS is optional;
+# a complete certificate/key pair is required only when TLS is enabled.
 #
 # Can be overridden with the TLS_CERT_FILE_PATH environment variable
 tlsCertFilePath: ""
@@ -157,6 +144,35 @@ topology: ""
 # TCP port to bind for Prometheus metrics endpoint
 # CLI: --metrics-port
 metricsPort: 12798
+
+# TCP port for the liveness/readiness probe listener. 0 disables it.
+# Binds bindAddr, like the relay and metrics listeners: a kubelet or
+# load-balancer probe reaches the container from
+# outside, so loopback would fail those closed.
+#
+#   GET /health, GET /healthz  -> liveness. 200 whenever the process is up
+#     and serving, independent of sync state. This is what the container
+#     HEALTHCHECK probes: an orchestrator answers an unhealthy container by
+#     replacing it, and a node in initial sync is legitimately not useful
+#     for hours without needing to be killed.
+#   GET /readyz                -> readiness. 200 only once the chain tip is
+#     within healthReadyGapSlots of the wall-clock slot; 503 while syncing,
+#     bootstrapping, or when the tip has frozen. Use it for a Kubernetes
+#     readinessProbe or a load-balancer target check, where failing drains
+#     traffic instead of restarting the node.
+#
+# Both bodies are JSON carrying the readiness verdict, a reason, and the
+# observed tip gap.
+# CLI: --health-port  Env: DINGO_HEALTH_PORT
+healthPort: 12799
+
+# How far the chain tip may trail the wall-clock slot while /readyz still
+# reports ready. Matches forgeStaleGapThresholdSlots: both answer "has this
+# node stopped following the chain?", and a readiness probe that flapped
+# more readily than the forger's own staleness gate would evict a node the
+# forger still considers current. 0 takes the default.
+# CLI: --health-ready-gap-slots  Env: DINGO_HEALTH_READY_GAP_SLOTS
+healthReadyGapSlots: 1000
 
 # TCP port to bind for pprof debug endpoints (heap, profile, goroutine, etc).
 # 0 disables. Operators opt in; never enable in production by default — debug
@@ -352,6 +368,19 @@ koiosParity:
   # Can be overridden with DINGO_KOIOS_PARITY_API_KEY
   # CLI: --koios-parity-api-key
   apiKey: ""
+  # Koios v1 API root override, for a self-hosted or mirrored instance.
+  # Empty selects the public host for the network above. A custom host is not
+  # subject to the public tier's burst cap, since that ceiling describes
+  # koios.rest's own published tiers.
+  # Can be overridden with DINGO_KOIOS_PARITY_BASE_URL
+  # CLI: --koios-parity-base-url
+  baseUrl: ""
+  # Allow a plain-HTTP baseUrl. The API key is attached as a Bearer token to
+  # every request, so cleartext transport exposes it, and tampered reference
+  # data can make a parity comparison report a false PASS. Local dev/test only.
+  # Can be overridden with DINGO_KOIOS_PARITY_ALLOW_INSECURE_HTTP
+  # CLI: --koios-parity-allow-insecure-http
+  allowInsecureHttp: false
   # Stop/cancel the node on the first Koios/tool error or exact parity
   # mismatch instead of logging it and continuing normal operation.
   # Can be overridden with DINGO_KOIOS_PARITY_STRICT
@@ -444,6 +473,18 @@ intersectTip: false
 forgeSyncToleranceSlots: 0
 forgeStaleGapThresholdSlots: 0
 
+# validateForgedBlock re-validates a locally-forged block (header crypto,
+# body hash, per-tx ledger rules including Plutus phase-2 evaluation)
+# before it is adopted and diffused, catching a bug that would otherwise
+# forge and diffuse an invalid block. Enabled by default (fail closed).
+# This re-validation runs synchronously inside the forging deadline with
+# no separate time budget, so on a block producer with heavy Plutus
+# traffic it adds real latency to every forged block; set to false only
+# if that cost is unacceptable and the risk of forging an invalid block
+# is understood and accepted.
+# CLI: --validate-forged-block  Env: DINGO_VALIDATE_FORGED_BLOCK
+# validateForgedBlock: true
+
 # Application-wide operational mode for a bare dingo invocation:
 # "serve" (default), "load", "dev", or "leios"
 # - serve: Full node with network connectivity (default)
@@ -524,6 +565,28 @@ blockPipelineValidateEnabled: false
 # Can be overridden with the CARDANO_STRICT_UTXO_VALIDATION environment variable
 # CLI: --strict-utxo-validation
 strictUtxoValidation: true
+
+# Skip the startup consistency check between reward_live_stake and the live
+# UTxO/account set (default: false, i.e. the check runs).
+#
+# The check scans the entire live UTxO table on every startup, whether or not
+# anything actually needs repairing, so on a mainnet-scale database it costs
+# as much as a full rebuild each time the node starts. Advanced/diagnostic use
+# only: skipping is safe when the database is already known to be consistent,
+# such as repeated restarts while investigating an unrelated issue. It is
+# unsafe to leave enabled permanently, because this check is what catches a
+# stale or pre-migration reward_live_stake table.
+#
+# This does not disable the stake-snapshot provenance check that runs in the
+# same startup step. That one is a pair of indexed existence probes whose cost
+# does not scale with the UTxO set, and it fails closed on a database whose
+# consensus stake snapshots came from an older accounting version, so it
+# always runs.
+#
+# Can be overridden with the CARDANO_SKIP_REWARD_LIVE_STAKE_BACKFILL_CHECK
+# environment variable
+# CLI: --skip-reward-live-stake-backfill-check
+skipRewardLiveStakeBackfillCheck: false
 
 # Peer targets - target number of peers in each state
 # Known, established, and active peer targets are goals, not hard limits.
@@ -608,13 +671,13 @@ genesisBootstrap:
 # Indexing requires BOTH enabled: true AND API storage mode; either alone is
 # not enough. The gRPC server is a separate, explicit opt-in and also requires
 # API storage mode. It can serve persisted Midnight rows without running the
-# indexer. Plaintext is loopback-only unless allowInsecureRemote is set; use
-# tlsCertFilePath/tlsKeyFilePath for a protected remote listener.
+# indexer. Plaintext and TLS are supported; use tlsCertFilePath/tlsKeyFilePath
+# when TLS transport is desired.
 # CLI: --midnight-enabled, --midnight-server-enabled,
-#   --midnight-reflection-enabled, --midnight-allow-insecure-remote,
+#   --midnight-reflection-enabled,
 #   --midnight-port, --midnight-host
 # Env: DINGO_MIDNIGHT_ENABLED, DINGO_MIDNIGHT_SERVER_ENABLED,
-#   DINGO_MIDNIGHT_REFLECTION_ENABLED, DINGO_MIDNIGHT_ALLOW_INSECURE_REMOTE,
+#   DINGO_MIDNIGHT_REFLECTION_ENABLED,
 #   DINGO_MIDNIGHT_PORT, DINGO_MIDNIGHT_HOST
 # Midnight chain addresses and policy-ID/asset-name constants are YAML only.
 midnight:
@@ -624,12 +687,9 @@ midnight:
   serverEnabled: false
   # Expose gRPC service discovery. Requires serverEnabled. Default: false.
   reflectionEnabled: false
-  # Allow plaintext on a wildcard, hostname, or concrete non-loopback bind.
-  # Use only when transport security is supplied outside Dingo. Default: false.
-  allowInsecureRemote: false
   # gRPC listen port. Must be non-zero when serverEnabled is true.
   port: 50051
-  # gRPC listen address. Plaintext defaults to loopback-only.
+  # gRPC listen address. Plaintext is supported.
   host: "127.0.0.1"
   # Midnight network constants. Known network defaults are applied when
   # available; set these explicitly for custom networks or overrides.
@@ -717,6 +777,11 @@ mithril:
   # out upstream)
   # CLI: --mithril-backend
   backend: "v2"
+  # Optional exact artifact identity for a fresh bootstrap: a v1 snapshot
+  # digest or v2 Cardano database artifact hash. It is rejected for catch-up
+  # runs and cannot override an interrupted import's durable pin.
+  # CLI: --mithril-pinned-digest  Env: DINGO_MITHRIL_PINNED_DIGEST
+  pinnedDigest: ""
   # Directory for downloading snapshot archives
   # If empty, a randomized temporary directory is created automatically
   # downloadDir: ""

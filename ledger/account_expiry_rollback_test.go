@@ -72,6 +72,7 @@ func newExpiryRollbackTestLedger(
 	ls := &LedgerState{
 		db: db,
 		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
 			Logger: slog.New(
 				slog.NewTextHandler(io.Discard, nil),
 			),
@@ -186,6 +187,8 @@ func runRollbackRecompute(
 func TestRecomputeAccountExpirationsAfterRollbackDropsOrphanedRenewal(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const inactivity = uint64(90)
 	ls, db := newExpiryRollbackTestLedger(t, true, inactivity)
 
@@ -216,6 +219,8 @@ func TestRecomputeAccountExpirationsAfterRollbackDropsOrphanedRenewal(
 // TestRecomputeAccountExpirationsAfterRollbackGateOff verifies the recomputation
 // is a no-op when the gate is off: the E2-derived expiration is left untouched.
 func TestRecomputeAccountExpirationsAfterRollbackGateOff(t *testing.T) {
+	t.Parallel()
+
 	const inactivity = uint64(90)
 	ls, db := newExpiryRollbackTestLedger(t, false, inactivity)
 
@@ -256,6 +261,8 @@ func TestRecomputeAccountExpirationsAfterRollbackGateOff(t *testing.T) {
 func TestRecomputeAccountExpirationsAfterRollbackClampsToActivationFloor(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const (
 		inactivity      = uint64(90)
 		activationEpoch = uint64(500)
@@ -312,6 +319,8 @@ func TestRecomputeAccountExpirationsAfterRollbackClampsToActivationFloor(
 func TestRecomputeAccountExpirationsAfterRollbackResetsOrphanOnly(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const inactivity = uint64(90)
 	ls, db := newExpiryRollbackTestLedger(t, true, inactivity)
 
@@ -343,6 +352,8 @@ func TestRecomputeAccountExpirationsAfterRollbackResetsOrphanOnly(
 func TestRecomputeAccountExpirationsAfterRollbackActivationMembership(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const (
 		inactivity      = uint64(90)
 		activationEpoch = uint64(2)
@@ -407,6 +418,8 @@ func TestRecomputeAccountExpirationsAfterRollbackActivationMembership(
 func TestRecomputeAccountExpirationsAfterRollbackRestoresPreActivationWitness(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const (
 		inactivity      = uint64(90)
 		activationEpoch = uint64(2)
@@ -446,6 +459,8 @@ func TestRecomputeAccountExpirationsAfterRollbackRestoresPreActivationWitness(
 func TestRecomputeAccountExpirationsAfterRollbackDoesNotFloorAccountInactiveAtActivation(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const (
 		inactivity      = uint64(90)
 		activationEpoch = uint64(2)
@@ -491,6 +506,8 @@ func TestRecomputeAccountExpirationsAfterRollbackDoesNotFloorAccountInactiveAtAc
 func TestRecomputeAccountExpirationsAfterRollbackBeforeActivation(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const inactivity = uint64(90)
 	ls, db := newExpiryRollbackTestLedger(t, true, inactivity)
 	cred := renewTestCred(0x44)

@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
+	cardano "github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -40,11 +41,11 @@ import (
 
 // newDBBackedAdapter builds a NodeAdapter over a real, in-package LedgerState
 // backed by an on-disk (temp-dir) database, plus the sqlite metadata store so
-// tests can insert transaction/block rows directly. No CardanoNodeConfig is
-// supplied because the exercised paths (blockOutputAndFees, nextBlockHash) do
-// not perform slot/epoch/time math, and NewLedgerState tolerates a nil config.
+// tests can insert transaction/block rows directly. A CardanoNodeConfig is
+// optional; callers supply one when exercising network-specific behavior.
 func newDBBackedAdapter(
 	t *testing.T,
+	nodeConfig ...*cardano.CardanoNodeConfig,
 ) (*NodeAdapter, *sql.DB, *database.Database) {
 	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{
@@ -55,11 +56,15 @@ func newDBBackedAdapter(
 	cm, err := chain.NewManager(db, nil)
 	require.NoError(t, err)
 
-	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
+	lsConfig := ledger.LedgerStateConfig{
 		Database:     db,
 		ChainManager: cm,
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
-	})
+	}
+	if len(nodeConfig) > 0 {
+		lsConfig.CardanoNodeConfig = nodeConfig[0]
+	}
+	ls, err := ledger.NewLedgerState(lsConfig)
 	require.NoError(t, err)
 
 	adapter, err := NewNodeAdapter(ls, nil)
@@ -200,6 +205,8 @@ func storePointerOutputCbor(
 }
 
 func TestNodeAdapterAddressPointerIncludesSnapshotUtxos(t *testing.T) {
+	t.Parallel()
+
 	adapter, store, db := newDBBackedAdapter(t)
 
 	paymentHash := bytes.Repeat([]byte{0xab}, lcommon.AddressHashSize)
@@ -285,6 +292,8 @@ func TestNodeAdapterAddressPointerIncludesSnapshotUtxos(t *testing.T) {
 }
 
 func TestNodeAdapterAddressPointerRejectsMissingCandidateCbor(t *testing.T) {
+	t.Parallel()
+
 	adapter, store, _ := newDBBackedAdapter(t)
 
 	paymentHash := bytes.Repeat([]byte{0xab}, lcommon.AddressHashSize)
@@ -302,6 +311,8 @@ func TestNodeAdapterAddressPointerRejectsMissingCandidateCbor(t *testing.T) {
 }
 
 func TestNodeAdapterEnterpriseAddressExcludesPointerUtxos(t *testing.T) {
+	t.Parallel()
+
 	adapter, store, db := newDBBackedAdapter(t)
 
 	paymentHash := bytes.Repeat([]byte{0xab}, lcommon.AddressHashSize)
@@ -362,6 +373,8 @@ func TestNodeAdapterEnterpriseAddressExcludesPointerUtxos(t *testing.T) {
 // including the phase-2 invalid transaction branch where the collateral return
 // (not the discarded outputs) counts toward block output.
 func TestNodeAdapterBlockOutputAndFees(t *testing.T) {
+	t.Parallel()
+
 	adapter, store, _ := newDBBackedAdapter(t)
 
 	blockHash := fill32(0xab)
@@ -410,6 +423,8 @@ func TestNodeAdapterBlockOutputAndFees(t *testing.T) {
 // TestNodeAdapterBlockOutputAndFeesEmpty verifies a block with no transactions
 // aggregates to zero rather than erroring.
 func TestNodeAdapterBlockOutputAndFeesEmpty(t *testing.T) {
+	t.Parallel()
+
 	adapter, _, _ := newDBBackedAdapter(t)
 
 	output, fees, err := adapter.blockOutputAndFees(fill32(0xcd))
@@ -422,6 +437,8 @@ func TestNodeAdapterBlockOutputAndFeesEmpty(t *testing.T) {
 // summing amounts/fees whose total exceeds uint64 must produce the true total
 // rather than silently wrapping.
 func TestNodeAdapterBlockOutputAndFeesNoOverflow(t *testing.T) {
+	t.Parallel()
+
 	adapter, store, _ := newDBBackedAdapter(t)
 
 	blockHash := fill32(0xef)
@@ -461,6 +478,8 @@ func TestNodeAdapterBlockOutputAndFeesNoOverflow(t *testing.T) {
 // resolves to nil (short-circuit), and a block whose successor index is absent
 // resolves to nil via ErrBlockNotFound.
 func TestNodeAdapterNextBlockHash(t *testing.T) {
+	t.Parallel()
+
 	adapter, _, db := newDBBackedAdapter(t)
 
 	// Three consecutive blocks at Cardano heights 0, 1, 2. Dingo's blob index
@@ -513,6 +532,8 @@ func TestNodeAdapterNextBlockHash(t *testing.T) {
 // propagate as an error rather than degrade into a successful URL/hash-only
 // response that hides the store failure.
 func TestNodeAdapterPoolMetadataOffchainStoreError(t *testing.T) {
+	t.Parallel()
+
 	adapter, store, _ := newDBBackedAdapter(t)
 
 	poolKeyHash := bytes.Repeat([]byte{0x0a}, 28)

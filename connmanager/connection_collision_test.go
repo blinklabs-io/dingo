@@ -50,6 +50,8 @@ func waitForConnectionManagerWatchers(
 }
 
 func TestAddConnectionRejectsInboundCollisionWithOutbound(t *testing.T) {
+	t.Parallel()
+
 	cm := NewConnectionManager(ConnectionManagerConfig{})
 	outbound := newUnstartedConnection(t)
 	inbound := newUnstartedConnection(t)
@@ -64,6 +66,8 @@ func TestAddConnectionRejectsInboundCollisionWithOutbound(t *testing.T) {
 }
 
 func TestReplacedConnectionCloseDoesNotPublishStaleEvent(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 	_, closeEvents := bus.Subscribe(ConnectionClosedEventType)
@@ -119,6 +123,8 @@ func TestReplacedConnectionCloseDoesNotPublishStaleEvent(t *testing.T) {
 // server-side client state (and its live chain iterator) would never be
 // released.
 func TestSameDirectionCollisionNotifiesEvictedConnection(t *testing.T) {
+	t.Parallel()
+
 	type call struct {
 		isNtC bool
 		err   error
@@ -134,11 +140,11 @@ func TestSameDirectionCollisionNotifiesEvictedConnection(t *testing.T) {
 
 	require.True(
 		t,
-		cm.addNtCConnectionWithIPKey(first, true, "127.0.0.1:3002", ""),
+		cm.addConnectionImpl(first, true, true, "127.0.0.1:3002", "", nil),
 	)
 	require.True(
 		t,
-		cm.addNtCConnectionWithIPKey(second, true, "127.0.0.1:3002", ""),
+		cm.addConnectionImpl(second, true, true, "127.0.0.1:3002", "", nil),
 	)
 	require.Same(t, second, cm.GetConnectionById(second.Id()))
 
@@ -162,5 +168,96 @@ func TestSameDirectionCollisionNotifiesEvictedConnection(t *testing.T) {
 	)
 
 	second.ErrorChan() <- nil
+	waitForConnectionManagerWatchers(t, cm)
+}
+
+func TestConnectionClosedOwnerCallbackPreservesConnectionLifetime(t *testing.T) {
+	t.Parallel()
+	type call struct {
+		conn *ouroboros.Connection
+		err  error
+	}
+	calls := make(chan call, 2)
+	cm := NewConnectionManager(ConnectionManagerConfig{
+		ConnClosedOwnerFunc: func(conn *ouroboros.Connection, _ bool, err error) {
+			calls <- call{conn: conn, err: err}
+		},
+	})
+	first := newUnstartedConnection(t)
+	second := newUnstartedConnection(t)
+	require.True(t, cm.addConnectionImpl(first, true, true, "127.0.0.1:3002", "", nil))
+	require.True(t, cm.addConnectionImpl(second, true, true, "127.0.0.1:3002", "", nil))
+	evicted := testutil.RequireReceive(t, calls, time.Second, "expected owner callback for collision eviction")
+	require.Same(t, first, evicted.conn)
+	require.ErrorIs(t, evicted.err, errConnectionReplaced)
+	second.ErrorChan() <- errors.New("normal close")
+	closed := testutil.RequireReceive(t, calls, time.Second, "expected owner callback for normal close")
+	require.Same(t, second, closed.conn)
+	first.ErrorChan() <- nil
+	testutil.RequireNoReceive(
+		t,
+		calls,
+		200*time.Millisecond,
+		"evicted connection's late close must not trigger a second owner callback",
+	)
+	waitForConnectionManagerWatchers(t, cm)
+}
+
+func TestInboundCollisionOwnerCallbackUsesEvictedConnection(t *testing.T) {
+	t.Parallel()
+
+	type call struct {
+		conn  *ouroboros.Connection
+		isNtC bool
+		err   error
+	}
+	calls := make(chan call, 2)
+	cm := NewConnectionManager(ConnectionManagerConfig{
+		ConnClosedOwnerFunc: func(conn *ouroboros.Connection, isNtC bool, err error) {
+			calls <- call{conn: conn, isNtC: isNtC, err: err}
+		},
+	})
+	inbound := newUnstartedConnection(t)
+	outbound := newUnstartedConnection(t)
+
+	require.True(t, cm.addConnectionImpl(
+		inbound, true, true, "127.0.0.1:3002", "", nil,
+	))
+	require.True(t, cm.addConnectionImpl(
+		outbound, false, false, "127.0.0.1:3002", "", nil,
+	))
+	require.Same(t, outbound, cm.GetConnectionById(outbound.Id()))
+
+	evicted := testutil.RequireReceive(
+		t,
+		calls,
+		time.Second,
+		"expected owner callback for inbound collision eviction",
+	)
+	require.Same(t, inbound, evicted.conn)
+	require.True(t, evicted.isNtC)
+	require.ErrorIs(t, evicted.err, errConnectionReplaced)
+
+	// The evicted transport may report its own close after the synchronous
+	// collision notification, but that stale report must not invoke the owner
+	// callback again or remove the replacement's ownership.
+	inbound.ErrorChan() <- errors.New("late evicted close")
+	testutil.RequireNoReceive(
+		t,
+		calls,
+		200*time.Millisecond,
+		"evicted connection's late close must not trigger a duplicate callback",
+	)
+
+	outbound.ErrorChan() <- errors.New("live connection closed")
+	closed := testutil.RequireReceive(
+		t,
+		calls,
+		time.Second,
+		"expected owner callback for replacement close",
+	)
+	require.Same(t, outbound, closed.conn)
+	require.False(t, closed.isNtC)
+	require.EqualError(t, closed.err, "live connection closed")
 	waitForConnectionManagerWatchers(t, cm)
 }

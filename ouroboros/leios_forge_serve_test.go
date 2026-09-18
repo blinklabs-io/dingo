@@ -25,11 +25,13 @@ import (
 )
 
 func TestEnqueueLeiosPrototypeVote(t *testing.T) {
+	t.Parallel()
+
 	o := &Ouroboros{leiosEBLog: newLeiosForgedEBLog()}
 	const connA = "peer-a"
 	const connB = "peer-b"
-	o.leiosEBLog.registerConn(connA)
-	o.leiosEBLog.registerConn(connB)
+	o.leiosEBLog.registerConn(connA, nil, nil)
+	o.leiosEBLog.registerConn(connB, nil, nil)
 	vote := lcommon.LeiosPrototypeVote{
 		AnnouncingRbHash: lcommon.NewBlake2b256([]byte("announcing-rb")),
 		VoterId:          7,
@@ -47,11 +49,13 @@ func TestEnqueueLeiosPrototypeVote(t *testing.T) {
 }
 
 func TestEnqueueLeiosPrototypeVoteFromPeerExcludesOrigin(t *testing.T) {
+	t.Parallel()
+
 	o := &Ouroboros{leiosEBLog: newLeiosForgedEBLog()}
 	const originConn = "peer-origin"
 	const otherConn = "peer-other"
-	o.leiosEBLog.registerConn(originConn)
-	o.leiosEBLog.registerConn(otherConn)
+	o.leiosEBLog.registerConn(originConn, nil, nil)
+	o.leiosEBLog.registerConn(otherConn, nil, nil)
 	vote := lcommon.LeiosPrototypeVote{
 		AnnouncingRbHash: lcommon.NewBlake2b256([]byte("announcing-rb")),
 		VoterId:          7,
@@ -73,7 +77,7 @@ func TestEnqueueLeiosPrototypeVoteFromPeerExcludesOrigin(t *testing.T) {
 	require.NotNil(t, entry)
 	require.NotNil(t, entry.vote)
 	require.Equal(t, vote, *entry.vote)
-	o.leiosEBLog.complete(otherConn, true)
+	o.leiosEBLog.complete(otherConn, nil, true)
 
 	// Once the other peer receives the vote, the skipped origin cursor no
 	// longer prevents normal head pruning.
@@ -82,11 +86,13 @@ func TestEnqueueLeiosPrototypeVoteFromPeerExcludesOrigin(t *testing.T) {
 }
 
 func TestLeiosForgedEBLogSkipsOriginAfterPriorDelivery(t *testing.T) {
+	t.Parallel()
+
 	o := &Ouroboros{leiosEBLog: newLeiosForgedEBLog()}
 	const originConn = "peer-origin"
 	const otherConn = "peer-other"
-	o.leiosEBLog.registerConn(originConn)
-	o.leiosEBLog.registerConn(otherConn)
+	o.leiosEBLog.registerConn(originConn, nil, nil)
+	o.leiosEBLog.registerConn(otherConn, nil, nil)
 	localBefore := lcommon.LeiosPrototypeVote{VoterId: 1}
 	fromOriginA := lcommon.LeiosPrototypeVote{VoterId: 2}
 	fromOriginB := lcommon.LeiosPrototypeVote{VoterId: 4}
@@ -102,7 +108,7 @@ func TestLeiosForgedEBLogSkipsOriginAfterPriorDelivery(t *testing.T) {
 	o.EnqueueLeiosPrototypeVoteFromPeer(fromOriginA, originConn)
 	o.EnqueueLeiosPrototypeVoteFromPeer(fromOriginB, originConn)
 	require.Equal(t, 0, o.leiosEBLog.cursors[originConn])
-	o.leiosEBLog.complete(originConn, true)
+	o.leiosEBLog.complete(originConn, nil, true)
 
 	// Completing the preceding delivery advances across both excluded votes
 	// without creating a reservation. The following local vote is still sent.
@@ -124,20 +130,22 @@ func TestLeiosForgedEBLogSkipsOriginAfterPriorDelivery(t *testing.T) {
 		otherEntry, _ := o.leiosEBLog.next(otherConn)
 		require.NotNil(t, otherEntry)
 		require.Equal(t, want, *otherEntry.vote)
-		o.leiosEBLog.complete(otherConn, true)
+		o.leiosEBLog.complete(otherConn, nil, true)
 	}
-	o.leiosEBLog.complete(originConn, true)
+	o.leiosEBLog.complete(originConn, nil, true)
 	require.Empty(t, o.leiosEBLog.items)
 }
 
 func TestLeiosForgedEBLogOriginReconnectSkipsExcludedRetry(t *testing.T) {
+	t.Parallel()
+
 	log := newLeiosForgedEBLog()
 	const originConn = "peer-origin"
 	const failedConnA = "peer-failed-a"
 	const failedConnB = "peer-failed-b"
-	log.registerConn(originConn)
-	log.registerConn(failedConnA)
-	log.registerConn(failedConnB)
+	log.registerConn(originConn, nil, nil)
+	log.registerConn(failedConnA, nil, nil)
+	log.registerConn(failedConnB, nil, nil)
 	excludedVote := lcommon.LeiosPrototypeVote{VoterId: 1}
 	eligibleVote := lcommon.LeiosPrototypeVote{VoterId: 2}
 	log.append(leiosForgedEBEntry{
@@ -149,24 +157,24 @@ func TestLeiosForgedEBLogOriginReconnectSkipsExcludedRetry(t *testing.T) {
 	entry, _ := log.next(failedConnA)
 	require.NotNil(t, entry)
 	require.Equal(t, excludedVote, *entry.vote)
-	log.complete(failedConnA, false)
+	log.complete(failedConnA, nil, false)
 	log.removeConn(failedConnA)
 
 	entry, _ = log.next(failedConnB)
 	require.NotNil(t, entry)
 	require.Equal(t, excludedVote, *entry.vote)
-	log.complete(failedConnB, true)
+	log.complete(failedConnB, nil, true)
 	entry, _ = log.next(failedConnB)
 	require.NotNil(t, entry)
 	require.Equal(t, eligibleVote, *entry.vote)
-	log.complete(failedConnB, false)
+	log.complete(failedConnB, nil, false)
 	log.removeConn(failedConnB)
 
 	// Re-registering the source must leave the excluded retry owed and claim
 	// only the eligible retry. Delivering the latter must decrement its own
 	// count rather than being misclassified as a normal delivery.
 	log.removeConn(originConn)
-	log.registerConn(originConn)
+	log.registerConn(originConn, nil, nil)
 	require.Equal(t, 1, log.cursors[originConn])
 	require.Equal(t, 1, log.retryCursors[originConn])
 	require.Equal(t, 1, log.retries[0])
@@ -175,17 +183,17 @@ func TestLeiosForgedEBLogOriginReconnectSkipsExcludedRetry(t *testing.T) {
 	require.NotNil(t, entry)
 	require.Equal(t, eligibleVote, *entry.vote)
 	require.True(t, log.reservations[originConn].retry)
-	log.complete(originConn, true)
+	log.complete(originConn, nil, true)
 	require.Equal(t, 1, log.retries[0])
 	require.NotContains(t, log.retries, 1)
 
 	const eligibleRetryConn = "peer-eligible-retry"
-	log.registerConn(eligibleRetryConn)
+	log.registerConn(eligibleRetryConn, nil, nil)
 	entry, _ = log.next(eligibleRetryConn)
 	require.NotNil(t, entry)
 	require.Equal(t, excludedVote, *entry.vote)
 	require.True(t, log.reservations[eligibleRetryConn].retry)
-	log.complete(eligibleRetryConn, true)
+	log.complete(eligibleRetryConn, nil, true)
 	log.removeConn(eligibleRetryConn)
 	log.removeConn(originConn)
 	require.Empty(t, log.items)
@@ -193,9 +201,11 @@ func TestLeiosForgedEBLogOriginReconnectSkipsExcludedRetry(t *testing.T) {
 }
 
 func TestLeiosForgedEBLogCommitsOnlyAfterDelivery(t *testing.T) {
+	t.Parallel()
+
 	log := newLeiosForgedEBLog()
 	const connKey = "peer-a"
-	log.registerConn(connKey)
+	log.registerConn(connKey, nil, nil)
 	first := ocommon.Point{Slot: 1, Hash: []byte{1}}
 	second := ocommon.Point{Slot: 2, Hash: []byte{2}}
 	log.append(leiosForgedEBEntry{point: &first})
@@ -209,16 +219,18 @@ func TestLeiosForgedEBLogCommitsOnlyAfterDelivery(t *testing.T) {
 	require.NotNil(t, entry)
 	require.Equal(t, first, *entry.point)
 
-	log.complete(connKey, true)
+	log.complete(connKey, nil, true)
 	entry, _ = log.next(connKey)
 	require.NotNil(t, entry)
 	require.Equal(t, second, *entry.point)
 }
 
 func TestLeiosForgedEBLogRetriesFailedDeliveryAfterReconnect(t *testing.T) {
+	t.Parallel()
+
 	log := newLeiosForgedEBLog()
 	const failedConn = "peer-a"
-	log.registerConn(failedConn)
+	log.registerConn(failedConn, nil, nil)
 	vote := lcommon.LeiosPrototypeVote{
 		AnnouncingRbHash: lcommon.NewBlake2b256([]byte("announcing-rb")),
 		VoterId:          7,
@@ -229,7 +241,7 @@ func TestLeiosForgedEBLogRetriesFailedDeliveryAfterReconnect(t *testing.T) {
 	entry, _ := log.next(failedConn)
 	require.NotNil(t, entry)
 	require.Equal(t, vote, *entry.vote)
-	log.complete(failedConn, false)
+	log.complete(failedConn, nil, false)
 	// A failed send is immediately retryable while the connection remains up.
 	retry, _ := log.next(failedConn)
 	require.NotNil(t, retry)
@@ -237,55 +249,59 @@ func TestLeiosForgedEBLogRetriesFailedDeliveryAfterReconnect(t *testing.T) {
 	log.removeConn(failedConn)
 
 	const reconnected = "peer-b"
-	log.registerConn(reconnected)
+	log.registerConn(reconnected, nil, nil)
 	retry, _ = log.next(reconnected)
 	require.NotNil(t, retry)
 	require.Equal(t, vote, *retry.vote)
-	log.complete(reconnected, true)
+	log.complete(reconnected, nil, true)
 	log.removeConn(reconnected)
 
 	// Successful retry releases the pinned entry; a later peer starts at tail.
 	const laterConn = "peer-c"
-	log.registerConn(laterConn)
+	log.registerConn(laterConn, nil, nil)
 	entry, _ = log.next(laterConn)
 	require.Nil(t, entry)
 }
 
 func TestLeiosForgedEBLogOtherPeerDoesNotConsumeFailedRetry(t *testing.T) {
+	t.Parallel()
+
 	log := newLeiosForgedEBLog()
 	const failedConn = "peer-a"
 	const healthyConn = "peer-b"
-	log.registerConn(failedConn)
-	log.registerConn(healthyConn)
+	log.registerConn(failedConn, nil, nil)
+	log.registerConn(healthyConn, nil, nil)
 	point := ocommon.Point{Slot: 1, Hash: []byte{1}}
 	log.append(leiosForgedEBEntry{point: &point})
 
 	entry, _ := log.next(failedConn)
 	require.NotNil(t, entry)
 	require.Equal(t, point, *entry.point)
-	log.complete(failedConn, false)
+	log.complete(failedConn, nil, false)
 
 	entry, _ = log.next(healthyConn)
 	require.NotNil(t, entry)
 	require.Equal(t, point, *entry.point)
-	log.complete(healthyConn, true)
+	log.complete(healthyConn, nil, true)
 	log.removeConn(failedConn)
 	log.removeConn(healthyConn)
 
 	const reconnected = "peer-a-reconnected"
-	log.registerConn(reconnected)
+	log.registerConn(reconnected, nil, nil)
 	retry, _ := log.next(reconnected)
 	require.NotNil(t, retry)
 	require.Equal(t, point, *retry.point)
-	log.complete(reconnected, true)
+	log.complete(reconnected, nil, true)
 }
 
 func TestLeiosForgedEBLogReconnectClearsConsecutiveRetries(t *testing.T) {
+	t.Parallel()
+
 	log := newLeiosForgedEBLog()
 	const firstFailedConn = "peer-a"
 	const secondFailedConn = "peer-b"
-	log.registerConn(firstFailedConn)
-	log.registerConn(secondFailedConn)
+	log.registerConn(firstFailedConn, nil, nil)
+	log.registerConn(secondFailedConn, nil, nil)
 	first := ocommon.Point{Slot: 1, Hash: []byte{1}}
 	second := ocommon.Point{Slot: 2, Hash: []byte{2}}
 	log.append(leiosForgedEBEntry{point: &first})
@@ -294,34 +310,34 @@ func TestLeiosForgedEBLogReconnectClearsConsecutiveRetries(t *testing.T) {
 	entry, _ := log.next(firstFailedConn)
 	require.NotNil(t, entry)
 	require.Equal(t, first, *entry.point)
-	log.complete(firstFailedConn, false)
+	log.complete(firstFailedConn, nil, false)
 	log.removeConn(firstFailedConn)
 
 	entry, _ = log.next(secondFailedConn)
 	require.NotNil(t, entry)
 	require.Equal(t, first, *entry.point)
-	log.complete(secondFailedConn, true)
+	log.complete(secondFailedConn, nil, true)
 	entry, _ = log.next(secondFailedConn)
 	require.NotNil(t, entry)
 	require.Equal(t, second, *entry.point)
-	log.complete(secondFailedConn, false)
+	log.complete(secondFailedConn, nil, false)
 	log.removeConn(secondFailedConn)
 
 	const reconnected = "peer-reconnected"
-	log.registerConn(reconnected)
+	log.registerConn(reconnected, nil, nil)
 	entry, _ = log.next(reconnected)
 	require.NotNil(t, entry)
 	require.Equal(t, first, *entry.point)
-	log.complete(reconnected, true)
+	log.complete(reconnected, nil, true)
 	entry, _ = log.next(reconnected)
 	require.NotNil(t, entry)
 	require.Equal(t, second, *entry.point)
-	log.complete(reconnected, true)
+	log.complete(reconnected, nil, true)
 	log.removeConn(reconnected)
 
 	require.Empty(t, log.retries)
 	const laterConn = "peer-later"
-	log.registerConn(laterConn)
+	log.registerConn(laterConn, nil, nil)
 	entry, _ = log.next(laterConn)
 	require.Nil(t, entry)
 }
@@ -332,6 +348,8 @@ func TestLeiosForgedEBLogReconnectClearsConsecutiveRetries(t *testing.T) {
 // bitmap. Each served transaction is the on-the-wire byte-string wrap of the
 // forged body, so it decodes back to the original body on the requesting side.
 func TestServeForgedEndorserBlockTxs(t *testing.T) {
+	t.Parallel()
+
 	o := &Ouroboros{leiosEBLog: newLeiosForgedEBLog()}
 
 	// Three forged transaction bodies (arbitrary raw CBOR is fine; they are

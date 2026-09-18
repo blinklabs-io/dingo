@@ -23,6 +23,7 @@ import (
 
 	dingoversion "github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -55,12 +56,21 @@ type ProtocolParamsProvider interface {
 	// in-memory ledger state, the returned pparams are the
 	// post-fork pparams. The forger uses this to produce
 	// era-correct blocks at fork boundaries.
+	// Returns nil when the slot's protocol parameters cannot be resolved.
 	ProtocolParamsForSlot(slot uint64) lcommon.ProtocolParameters
 }
 
 // ChainTipProvider provides access to the current chain tip.
 type ChainTipProvider interface {
 	Tip() ochainsync.Tip
+}
+
+// ChainTipSigningProvider binds a callback to the chain-tip lock. Production
+// chain implementations use this to keep the parent snapshot stable through
+// header encoding and KES signing. Providers that do not implement it retain
+// the best-effort final tip check for compatibility with embedders.
+type ChainTipSigningProvider interface {
+	WithTip(func(ochainsync.Tip) error) error
 }
 
 // EpochNonceProvider provides the epoch nonce for VRF proof generation.
@@ -86,15 +96,15 @@ type TxValidator interface {
 	// txs (enables spending intra-block outputs).
 	ValidateTxWithOverlay(
 		tx ledger.Transaction,
-		consumedUtxos map[string]struct{},
-		createdUtxos map[string]lcommon.Utxo,
+		consumedUtxos map[utxoref.Key]struct{},
+		createdUtxos map[utxoref.Key]lcommon.Utxo,
 	) error
 }
 
 type TxValidationFunc = func(
 	tx ledger.Transaction,
-	consumedUtxos map[string]struct{},
-	createdUtxos map[string]lcommon.Utxo,
+	consumedUtxos map[utxoref.Key]struct{},
+	createdUtxos map[utxoref.Key]lcommon.Utxo,
 ) error
 
 // TxValidationSessionProvider pins an ordered validation pass to one ledger
@@ -180,15 +190,33 @@ func NewDefaultBlockBuilder(
 	}, nil
 }
 
-// BuildBlock creates a new block for the given slot.
-// Returns the block and its CBOR encoding.
+// BuildBlock creates a new block for the given slot, extending the live chain
+// tip. Returns the block and its CBOR encoding.
 func (b *DefaultBlockBuilder) BuildBlock(
 	slot uint64,
 	kesPeriod uint64,
 ) (ledger.Block, []byte, error) {
 	generation := b.creds.acquireCredentialGeneration()
 	defer generation.release()
-	return b.buildBlock(slot, kesPeriod, LeiosBlockData{}, generation)
+	return b.buildBlock(slot, kesPeriod, LeiosBlockData{}, generation, nil)
+}
+
+// BuildBlockOnContext creates a new block on an explicitly named parent
+// instead of the live chain tip. See BlockContext.
+//
+// leios must be empty: an equal-slot alternative is a plain ranking block, and
+// a non-empty value is rejected rather than carried. The block also carries no
+// mempool transactions, because no validator here can select them against the
+// state at blockCtx.Parent. Both are explained at their guards in buildBlock.
+func (b *DefaultBlockBuilder) BuildBlockOnContext(
+	slot uint64,
+	kesPeriod uint64,
+	leios LeiosBlockData,
+	blockCtx BlockContext,
+) (ledger.Block, []byte, error) {
+	generation := b.creds.acquireCredentialGeneration()
+	defer generation.release()
+	return b.buildBlock(slot, kesPeriod, leios, generation, &blockCtx)
 }
 
 // BlockForger.buildBlock discovers the Leios capability with a runtime type
@@ -198,6 +226,7 @@ func (b *DefaultBlockBuilder) BuildBlock(
 // this one is loud, but it is the same class of defect the guard prevents.
 var (
 	_ LeiosBlockBuilder                = (*DefaultBlockBuilder)(nil)
+	_ AlternativeBlockBuilder          = (*DefaultBlockBuilder)(nil)
 	_ credentialGenerationBlockBuilder = (*DefaultBlockBuilder)(nil)
 )
 
@@ -210,7 +239,7 @@ func (b *DefaultBlockBuilder) BuildBlockWithLeios(
 ) (ledger.Block, []byte, error) {
 	generation := b.creds.acquireCredentialGeneration()
 	defer generation.release()
-	return b.buildBlock(slot, kesPeriod, leios, generation)
+	return b.buildBlock(slot, kesPeriod, leios, generation, nil)
 }
 
 func (b *DefaultBlockBuilder) buildBlockWithCredentialGeneration(
@@ -218,8 +247,9 @@ func (b *DefaultBlockBuilder) buildBlockWithCredentialGeneration(
 	kesPeriod uint64,
 	leios LeiosBlockData,
 	generation *credentialGeneration,
+	blockCtx *BlockContext,
 ) (ledger.Block, []byte, error) {
-	return b.buildBlock(slot, kesPeriod, leios, generation)
+	return b.buildBlock(slot, kesPeriod, leios, generation, blockCtx)
 }
 
 // errParentChangedDuringBuild indicates the chain tip moved while
@@ -229,6 +259,29 @@ func (b *DefaultBlockBuilder) buildBlockWithCredentialGeneration(
 // adoption would reject anyway once it re-checks the parent.
 var errParentChangedDuringBuild = errors.New(
 	"selected parent changed during block assembly",
+)
+
+// errParentSlotNotBelowBlock indicates the resolved parent does not sit
+// strictly below the slot being forged. Praos requires strictly increasing
+// slots and ledger.validateBlockOrder enforces it, so such a block would be
+// rejected after signing -- by this node and by every peer. The live-tip path
+// hits this exactly when the tip already holds the slot being forged, which is
+// the contested case an explicit BlockContext exists to serve.
+// errParentSlotNotBelowBlock indicates that a normal live-tip block would
+// name a parent at the same or a later slot. Such a block is invalid under
+// Praos slot ordering; equal-slot alternatives must use their explicit
+// predecessor context rather than the live tip.
+var errParentSlotNotBelowBlock = errors.New(
+	"parent slot is not below the forged slot",
+)
+
+// errLeiosDataOnAlternative indicates Leios data was supplied together with an
+// explicit block context. An equal-slot alternative is a plain ranking block:
+// see the guard in buildBlock for why certificate and announcement data
+// resolved against the live tip cannot be carried by a block that does not
+// build on it.
+var errLeiosDataOnAlternative = errors.New(
+	"an alternative block cannot carry leios data",
 )
 
 // tipsEqual reports whether two chain tips reference the same point and
@@ -245,6 +298,7 @@ func (b *DefaultBlockBuilder) buildBlock(
 	kesPeriod uint64,
 	leios LeiosBlockData,
 	credentials *credentialGeneration,
+	blockCtx *BlockContext,
 ) (ledger.Block, []byte, error) {
 	// Keep the protocol lifetime guard inside the generation-backed path so
 	// both exported builder entrypoints and BlockForger fail before reading the
@@ -266,10 +320,22 @@ func (b *DefaultBlockBuilder) buildBlock(
 	// Get current chain tip
 	currentTip := b.chainTip.Tip()
 
+	// Resolve the block context: the parent this block names and the block
+	// number it carries. Default (blockCtx nil) is to extend the live tip.
+	parentPoint := currentTip.Point
+
 	// Block numbers are 0-indexed in Cardano: the first block after
 	// genesis is BlockNo 0. When the tip is genesis (empty hash), the
 	// chain has no blocks yet so the next block number is 0.
 	isGenesis := len(currentTip.Point.Hash) == 0
+	if blockCtx == nil && !isGenesis && slot <= currentTip.Point.Slot {
+		return nil, nil, fmt.Errorf(
+			"%w: parent slot %d, block slot %d",
+			errParentSlotNotBelowBlock,
+			currentTip.Point.Slot,
+			slot,
+		)
+	}
 
 	var nextBlockNumber uint64
 	if !isGenesis {
@@ -279,6 +345,57 @@ func (b *DefaultBlockBuilder) buildBlock(
 			)
 		}
 		nextBlockNumber = currentTip.BlockNumber + 1
+	}
+
+	// An explicit context replaces both, naming the contested tip's
+	// predecessor as parent and reusing the contested tip's block number --
+	// ouroboros-consensus mkCurrentBlockContext's EQ branch, which forges
+	// "an alternative to @hdr@: same block no and same predecessor".
+	if blockCtx != nil {
+		// An alternative is a plain ranking block. Leios data is resolved
+		// against "the parent", which the providers answer from the live tip
+		// -- here the rival, which is precisely the block this one does not
+		// build on. A certificate selected that way certifies an endorser
+		// block announced by a chain this block is not on, and a new
+		// announcement would introduce an endorser block whose announcing
+		// chain may be the one that loses the battle. The forger already
+		// omits both; refuse here too so the exported entrypoint cannot be
+		// called into that state.
+		if !leios.empty() {
+			return nil, nil, errLeiosDataOnAlternative
+		}
+		// The candidate only makes sense against the tip it was derived
+		// from. If the chain has already moved, the contest is over;
+		// abandon before doing any work rather than after signing.
+		if !tipsEqual(currentTip, blockCtx.Rival) {
+			return nil, nil, fmt.Errorf(
+				"%w: contested tip %x/%d is no longer the chain tip (%x/%d)",
+				errParentChangedDuringBuild,
+				blockCtx.Rival.Point.Hash,
+				blockCtx.Rival.BlockNumber,
+				currentTip.Point.Hash,
+				currentTip.BlockNumber,
+			)
+		}
+		if len(blockCtx.Parent.Hash) == 0 {
+			return nil, nil, errors.New(
+				"explicit block context requires a resolved parent",
+			)
+		}
+		parentPoint = blockCtx.Parent
+		nextBlockNumber = blockCtx.BlockNumber
+		isGenesis = false
+	}
+
+	// Whichever way the parent was resolved, it must sit strictly below the
+	// slot being forged. See errParentSlotNotBelowBlock.
+	if !isGenesis && parentPoint.Slot >= slot {
+		return nil, nil, fmt.Errorf(
+			"%w: parent slot %d, forged slot %d",
+			errParentSlotNotBelowBlock,
+			parentPoint.Slot,
+			slot,
+		)
 	}
 
 	// Get protocol parameters for the slot being forged. This
@@ -319,6 +436,7 @@ func (b *DefaultBlockBuilder) buildBlock(
 		transactionWitnessSets = []cbor.RawMessage{}
 		transactionMetadataSet = make(map[uint]cbor.RawMessage)
 		blockSize              uint64
+		encodedBodySize        segmentedBodySize
 		totalExUnits           lcommon.ExUnits
 		maxTxSize              = limits.maxTxSize
 		maxBlockSize           = limits.maxBlockSize
@@ -334,6 +452,28 @@ func (b *DefaultBlockBuilder) buildBlock(
 	)
 
 	mempoolTxs := b.mempool.Transactions()
+	if blockCtx != nil {
+		// An alternative is built on the rival's predecessor, but every
+		// transaction validator reachable from here answers against the
+		// ledger's live state -- which has the rival applied. A mempool
+		// transaction spending a UTxO the rival created passes that check
+		// and would be selected, and adoption then rolls the rival back
+		// before applying this block: the transaction's input no longer
+		// exists, so applying our own adopted block fails and the node is
+		// left wedged at the fork point.
+		//
+		// Selecting against a validation snapshot taken at blockCtx.Parent
+		// is the fix, but no validator exposes one: LedgerState's
+		// WithTxValidationSession and ValidateTxWithOverlay both read the
+		// current UTxO set, and the overlay can only add pending state, not
+		// un-apply the block at the tip. Until such a snapshot exists, fail
+		// closed and forge the alternative with no transactions at all. An
+		// empty ranking block is valid against the parent state whatever
+		// the rival did, and it still carries the VRF and opcert that
+		// decide the battle, which is the whole purpose of forging it. The
+		// transactions stay in the mempool for the next block.
+		mempoolTxs = nil
+	}
 	if leiosCert != nil {
 		// A prototype CertRB carries the Leios certificate and no Dijkstra
 		// transactions; node-to-client later inlines the certified EB txs.
@@ -354,11 +494,11 @@ func (b *DefaultBlockBuilder) buildBlock(
 	// Track UTxO inputs consumed by transactions already selected
 	// for this block. This detects intra-block double-spends where
 	// two mempool transactions attempt to spend the same UTxO.
-	consumedInputs := make(map[string]struct{})
+	consumedInputs := make(map[utxoref.Key]struct{})
 	// Track UTxO outputs created by already-selected transactions.
 	// Passed to ValidateTxWithOverlay so later transactions in the
 	// same block can spend outputs from earlier intra-block txs.
-	createdOutputs := make(map[string]lcommon.Utxo)
+	createdOutputs := make(map[utxoref.Key]lcommon.Utxo)
 
 	// selectTransactions iterates mempoolTxs and adds them to the block
 	// candidate lists (closed over below) until a limit is hit. It runs
@@ -386,20 +526,6 @@ func (b *DefaultBlockBuilder) buildBlock(
 					"max_tx_size", maxTxSize,
 				)
 				continue
-			}
-
-			// Check MaxBlockSize limit. Dijkstra's block body is not the
-			// segmented tx-body/witness/metadata layout, so it gets an exact
-			// candidate block-body size check after tx decoding below.
-			if limits.era != eraDijkstra && blockSize+txSize > maxBlockSize {
-				b.logger.Debug(
-					"block size limit reached",
-					"component", "forging",
-					"current_size", blockSize,
-					"tx_size", txSize,
-					"max_block_size", maxBlockSize,
-				)
-				break
 			}
 
 			// Decode the transaction CBOR into a typed era-specific
@@ -439,14 +565,10 @@ func (b *DefaultBlockBuilder) buildBlock(
 			// Check for intra-block double-spends using the consensus spent
 			// set. A phase-2-invalid transaction consumes collateral, not
 			// its regular inputs.
-			txInputKeys := make([]string, 0, len(fullTx.Consumed()))
+			txInputKeys := make([]utxoref.Key, 0, len(fullTx.Consumed()))
 			doubleSpend := false
 			for _, input := range fullTx.Consumed() {
-				key := fmt.Sprintf(
-					"%s:%d",
-					input.Id().String(),
-					input.Index(),
-				)
+				key := utxoref.ForInput(input)
 				if _, exists := consumedInputs[key]; exists {
 					b.logger.Debug(
 						"skipping transaction - double-spend within block",
@@ -591,6 +713,21 @@ func (b *DefaultBlockBuilder) buildBlock(
 					break
 				}
 			}
+			if limits.era != eraDijkstra {
+				candidateSize := encodedBodySize.withTransaction(
+					bodyBytes, witnessBytes, metadataCbor,
+				)
+				if candidateSize.size(limits.era) > maxBlockSize {
+					b.logger.Debug(
+						"block body size limit reached",
+						"component", "forging",
+						"candidate_body_size", candidateSize.size(limits.era),
+						"max_block_body_size", maxBlockSize,
+					)
+					break
+				}
+				encodedBodySize = candidateSize
+			}
 			transactionBodies = append(transactionBodies, bodyBytes)
 			transactionWitnessSets = append(
 				transactionWitnessSets,
@@ -614,12 +751,7 @@ func (b *DefaultBlockBuilder) buildBlock(
 			// Record created outputs so later transactions in this block
 			// can spend intra-block outputs without hitting the DB.
 			for _, utxo := range fullTx.Produced() {
-				key := fmt.Sprintf(
-					"%s:%d",
-					utxo.Id.Id().String(),
-					utxo.Id.Index(),
-				)
-				createdOutputs[key] = utxo
+				createdOutputs[utxoref.ForUtxo(utxo)] = utxo
 			}
 
 			b.logger.Debug(
@@ -649,8 +781,8 @@ func (b *DefaultBlockBuilder) buildBlock(
 		selectErr = selectTransactions(
 			func(
 				_ ledger.Transaction,
-				_ map[string]struct{},
-				_ map[string]lcommon.Utxo,
+				_ map[utxoref.Key]struct{},
+				_ map[utxoref.Key]lcommon.Utxo,
 			) error {
 				return nil
 			},
@@ -664,8 +796,9 @@ func (b *DefaultBlockBuilder) buildBlock(
 		)
 	}
 
-	// currentTip, captured above, is already baked into nextBlockNumber
-	// and will be baked into prevHash below. If a concurrent block
+	// The chain tip captured above is what nextBlockNumber and prevHash were
+	// resolved from -- directly on the live-tip path, and as the contested
+	// block on the explicit-context path. If a concurrent block
 	// advanced the chain while transactions were being selected above,
 	// binding to that stale parent would only be caught later, after VRF
 	// and KES signing, when chain adoption re-checks the parent and
@@ -852,13 +985,13 @@ func (b *DefaultBlockBuilder) buildBlock(
 	// Cardano protocol).
 	var prevHash *lcommon.Blake2b256
 	if !isGenesis {
-		if len(currentTip.Point.Hash) != 32 {
+		if len(parentPoint.Hash) != 32 {
 			return nil, nil, fmt.Errorf(
-				"invalid tip hash length: expected 32 (Blake2b-256), got %d",
-				len(currentTip.Point.Hash),
+				"invalid parent hash length: expected 32 (Blake2b-256), got %d",
+				len(parentPoint.Hash),
 			)
 		}
-		h := lcommon.NewBlake2b256(currentTip.Point.Hash)
+		h := lcommon.NewBlake2b256(parentPoint.Hash)
 		prevHash = &h
 	}
 
@@ -936,28 +1069,54 @@ func (b *DefaultBlockBuilder) buildBlock(
 		}
 	}
 
-	// Sign the block header with KES.
-	// First, we need to serialize the header body for signing.
-	headerBodyCbor, err := cbor.Encode(headerBody)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to encode header body: %w", err)
-	}
+	// Sign the block header with KES. A production Chain binds this callback
+	// to its mutex, so the parent cannot change between the final comparison
+	// and the signature. The fallback preserves compatibility with external
+	// providers that only expose Tip; their final read remains advisory and
+	// AddBlock is still the authoritative admission check.
+	var headerCbor []byte
+	encodeAndSign := func(reTip ochainsync.Tip) error {
+		if !tipsEqual(reTip, currentTip) {
+			return fmt.Errorf(
+				"%w: parent tip changed from %x/%d to %x/%d before signing",
+				errParentChangedDuringBuild,
+				currentTip.Point.Hash,
+				currentTip.BlockNumber,
+				reTip.Point.Hash,
+				reTip.BlockNumber,
+			)
+		}
+		// First, serialize the header body for signing.
+		headerBodyCbor, err := cbor.Encode(headerBody)
+		if err != nil {
+			return fmt.Errorf("failed to encode header body: %w", err)
+		}
 
-	signature, err := credentials.kesSign(kesPeriod, headerBodyCbor)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to sign block header: %w", err)
-	}
+		signature, err := credentials.kesSign(kesPeriod, headerBodyCbor)
+		if err != nil {
+			return fmt.Errorf("failed to sign block header: %w", err)
+		}
 
-	// Build the block CBOR using the pre-encoded header body to
-	// ensure the prevHash encoding (null vs bytes) matches what was
-	// signed. Re-encoding via the gouroboros struct types would
-	// lose the null encoding for genesis blocks.
-	headerCbor, err := cbor.Encode(rawBlockHeader{
-		Body:      cbor.RawMessage(headerBodyCbor),
-		Signature: signature,
-	})
+		// Build the block CBOR using the pre-encoded header body to
+		// ensure the prevHash encoding (null vs bytes) matches what was
+		// signed. Re-encoding via the gouroboros struct types would
+		// lose the null encoding for genesis blocks.
+		headerCbor, err = cbor.Encode(rawBlockHeader{
+			Body:      cbor.RawMessage(headerBodyCbor),
+			Signature: signature,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to encode block header: %w", err)
+		}
+		return nil
+	}
+	if provider, ok := b.chainTip.(ChainTipSigningProvider); ok {
+		err = provider.WithTip(encodeAndSign)
+	} else {
+		err = encodeAndSign(b.chainTip.Tip())
+	}
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to encode block header: %w", err)
+		return nil, nil, err
 	}
 	blockCbor, err := encodeBlockCbor(
 		limits.era,

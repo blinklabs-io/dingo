@@ -75,8 +75,10 @@ func (OutputSetEmptyByronError) Error() string {
 	return "transaction has no outputs"
 }
 
-// OutputNotPositiveByronError is returned when a Byron transaction
-// output has a non-positive value.
+// OutputNotPositiveByronError is retained for API compatibility.
+//
+// Deprecated: Byron consensus permits zero-value outputs, so validation no
+// longer returns this error.
 type OutputNotPositiveByronError struct {
 	Index  int
 	Amount *big.Int
@@ -85,6 +87,21 @@ type OutputNotPositiveByronError struct {
 func (e OutputNotPositiveByronError) Error() string {
 	return fmt.Sprintf(
 		"output %d has non-positive value: %s",
+		e.Index,
+		e.Amount.String(),
+	)
+}
+
+// OutputNegativeByronError is returned when a Byron transaction output has a
+// negative value.
+type OutputNegativeByronError struct {
+	Index  int
+	Amount *big.Int
+}
+
+func (e OutputNegativeByronError) Error() string {
+	return fmt.Sprintf(
+		"output %d has negative value: %s",
 		e.Index,
 		e.Amount.String(),
 	)
@@ -124,6 +141,29 @@ func (e BadInputsByronError) Error() string {
 type ValueNotConservedByronError struct {
 	Consumed *big.Int
 	Produced *big.Int
+}
+
+// FeeTooLowByronError is returned when a Byron transaction's implicit fee is
+// below the fee required by the Byron genesis fee policy.
+type FeeTooLowByronError struct {
+	Actual   *big.Int
+	Required *big.Int
+	Size     uint64
+}
+
+func (e FeeTooLowByronError) Error() string {
+	return fmt.Sprintf(
+		"fee %s is below Byron minimum %s for transaction size %d",
+		e.Actual.String(),
+		e.Required.String(),
+		e.Size,
+	)
+}
+
+// ByronFeePolicyProvider supplies the active Byron genesis fee policy. Both
+// values are scaled by 10^9.
+type ByronFeePolicyProvider interface {
+	ByronFeePolicy() (summand int64, multiplier int64, err error)
 }
 
 func (e ValueNotConservedByronError) Error() string {
@@ -171,7 +211,7 @@ type byronValidationRuleFunc func(tx lcommon.Transaction) error
 var byronValidationRules = []byronValidationRuleFunc{
 	byronValidateInputsNotEmpty,
 	byronValidateOutputsNotEmpty,
-	byronValidateOutputsPositive,
+	byronValidateOutputsNonNegative,
 	byronValidateNoDuplicateInputs,
 }
 
@@ -180,6 +220,7 @@ var byronValidationRules = []byronValidationRuleFunc{
 var byronUtxoValidationRules = []lcommon.UtxoValidationRuleFunc{
 	byronValidateBadInputs,
 	byronValidateValueConserved,
+	byronValidateMinFee,
 	byronValidateWitnesses,
 }
 
@@ -205,19 +246,15 @@ func byronValidateOutputsNotEmpty(
 	return nil
 }
 
-// byronValidateOutputsPositive ensures that all outputs have
-// positive values.
-func byronValidateOutputsPositive(
+// byronValidateOutputsNonNegative ensures that output amounts are not
+// negative. Zero-value outputs are valid in Byron.
+func byronValidateOutputsNonNegative(
 	tx lcommon.Transaction,
 ) error {
-	zero := new(big.Int)
 	for i, output := range tx.Outputs() {
 		amount := output.Amount()
-		if amount == nil || amount.Cmp(zero) <= 0 {
-			if amount == nil {
-				amount = new(big.Int)
-			}
-			return OutputNotPositiveByronError{
+		if amount != nil && amount.Sign() < 0 {
+			return OutputNegativeByronError{
 				Index:  i,
 				Amount: amount,
 			}
@@ -302,6 +339,72 @@ func byronValidateValueConserved(
 		return ValueNotConservedByronError{
 			Consumed: consumed,
 			Produced: produced,
+		}
+	}
+	return nil
+}
+
+// byronValidateMinFee enforces the Byron genesis fee policy. Byron fees are
+// implicit, so the consumed-minus-produced value computed by the conservation
+// rule is the transaction fee.
+func byronValidateMinFee(
+	tx lcommon.Transaction,
+	_ uint64,
+	ls lcommon.LedgerState,
+	_ lcommon.ProtocolParameters,
+) error {
+	provider, ok := ls.(ByronFeePolicyProvider)
+	if !ok {
+		// Lightweight ledger-state implementations used by structural callers do
+		// not necessarily expose chain configuration. The production
+		// LedgerState does, and validates the policy there.
+		return nil
+	}
+	summand, multiplier, err := provider.ByronFeePolicy()
+	if err != nil {
+		return fmt.Errorf("get Byron fee policy: %w", err)
+	}
+	if multiplier < 0 || summand < 0 {
+		return fmt.Errorf(
+			"invalid Byron fee policy: multiplier %d summand %d",
+			multiplier,
+			summand,
+		)
+	}
+	size := TxSizeForFee(tx)
+	required := new(big.Int).Mul(
+		big.NewInt(multiplier),
+		new(big.Int).SetUint64(size),
+	)
+	required.Add(required, big.NewInt(summand))
+	const feeDivisor = int64(1_000_000_000)
+	quotient, remainder := new(big.Int), new(big.Int)
+	quotient.QuoRem(required, big.NewInt(feeDivisor), remainder)
+	if remainder.Sign() > 0 {
+		quotient.Add(quotient, big.NewInt(1))
+	}
+	required = quotient
+
+	actual := new(big.Int)
+	for _, input := range tx.Inputs() {
+		utxo, lookupErr := ls.UtxoById(input)
+		if lookupErr != nil || utxo.Output == nil {
+			continue
+		}
+		if amount := utxo.Output.Amount(); amount != nil {
+			actual.Add(actual, amount)
+		}
+	}
+	for _, output := range tx.Outputs() {
+		if amount := output.Amount(); amount != nil {
+			actual.Sub(actual, amount)
+		}
+	}
+	if actual.Cmp(required) < 0 {
+		return FeeTooLowByronError{
+			Actual:   actual,
+			Required: required,
+			Size:     size,
 		}
 	}
 	return nil

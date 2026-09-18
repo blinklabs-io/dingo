@@ -19,9 +19,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/pprof"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -29,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/internal/config"
+	"github.com/blinklabs-io/dingo/internal/health"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/prometheus/client_golang/prometheus"
@@ -58,16 +61,14 @@ func gracefulShutdown(
 	logger *slog.Logger,
 	metricsServer *http.Server,
 	debugServer *http.Server,
+	healthServer *http.Server,
 	d *dingo.Node,
 	timeout time.Duration,
 ) error {
-	var debugShutdown func(context.Context) error
-	if debugServer != nil {
-		debugShutdown = debugServer.Shutdown
-	}
 	shutdownErr := shutdownNodeResources(
 		metricsServer.Shutdown,
-		debugShutdown,
+		optionalShutdown(debugServer),
+		optionalShutdown(healthServer),
 		d.Stop,
 		timeout,
 	)
@@ -81,9 +82,19 @@ func gracefulShutdown(
 	return shutdownErr
 }
 
+// optionalShutdown adapts a listener that may be disabled (a nil *http.Server)
+// to the shutdown func shutdownNodeResources takes.
+func optionalShutdown(srv *http.Server) func(context.Context) error {
+	if srv == nil {
+		return nil
+	}
+	return srv.Shutdown
+}
+
 func shutdownNodeResources(
 	metricsServerShutdown func(context.Context) error,
 	debugServerShutdown func(context.Context) error,
+	healthServerShutdown func(context.Context) error,
 	nodeStop func() error,
 	timeout time.Duration,
 ) error {
@@ -104,6 +115,14 @@ func shutdownNodeResources(
 			err = errors.Join(
 				err,
 				fmt.Errorf("debug server shutdown: %w", shutdownErr),
+			)
+		}
+	}
+	if healthServerShutdown != nil {
+		if shutdownErr := healthServerShutdown(shutdownCtx); shutdownErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("health server shutdown: %w", shutdownErr),
 			)
 		}
 	}
@@ -156,6 +175,54 @@ func newPprofDebugServer(cfg *config.Config) *http.Server {
 	}
 }
 
+// NewHealthServer builds the dedicated liveness/readiness listener, or nil
+// when healthPort is 0.
+//
+// Two properties are load-bearing and are covered by tests:
+//
+//  1. It is not gated on storage mode. All three API listeners are started
+//     only when storageMode.IsAPI(), and the shipped docker-compose.yml runs
+//     the default `core` mode, so a probe wired the way the APIs are would be
+//     inert in exactly the configuration the image ships with.
+//  2. It binds cfg.BindAddr, the address the relay and metrics listeners
+//     already use, not the API listeners' loopback-by-default address. A
+//     probe is operational surface: a Docker HEALTHCHECK runs inside the
+//     container and would be satisfied by loopback, but a Kubernetes kubelet
+//     probe or an ECS/ALB target-group check reaches the container from
+//     outside, and loopback would fail those closed.
+//
+// It is exported because `dingo mithril sync` serves the same listener while
+// bootstrapping, with a nil tipGap. That bootstrap runs as its own process
+// before serve, for hours on mainnet, and the image's HEALTHCHECK is probing
+// throughout it; without a listener there the probe is refused and an
+// orchestrator replaces the container mid-download. A nil tipGap is the
+// accurate answer for it: live, and not ready because there is no chain tip
+// yet.
+func NewHealthServer(
+	cfg *config.Config,
+	tipGap health.TipGapFunc,
+) *http.Server {
+	if cfg.HealthPort == 0 {
+		return nil
+	}
+	readyTipGapSlots := uint64(cfg.HealthReadyGapSlots)
+	if readyTipGapSlots == 0 {
+		readyTipGapSlots = config.DefaultHealthReadyGapSlots
+	}
+	return &http.Server{
+		// JoinHostPort, not "%s:%d": an IPv6 bindAddr such as "::" has to
+		// be bracketed or net.Listen rejects the address.
+		Addr: net.JoinHostPort(
+			cfg.BindAddr,
+			strconv.FormatUint(uint64(cfg.HealthPort), 10),
+		),
+		Handler:           health.NewMux(tipGap, readyTipGapSlots),
+		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+}
+
 // logStartupConfig debug-logs the effective node configuration through
 // Config's redacted representation (Config.LogValue), so a debug log never
 // persists a Koios API key, an inline API auth token, or a storage provider
@@ -177,7 +244,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		if network == "" {
 			network = "preview"
 		}
-		cardanoConfigPath = network + "/config.json"
+		cardanoConfigPath = cardano.EmbeddedConfigPath(network)
 	}
 
 	var nodeCfg *cardano.CardanoNodeConfig
@@ -231,10 +298,9 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			listeners,
 			dingo.ListenerConfig{
 				ListenNetwork: "tcp",
-				ListenAddress: fmt.Sprintf(
-					"%s:%d",
+				ListenAddress: net.JoinHostPort(
 					cfg.BindAddr,
-					cfg.RelayPort,
+					strconv.FormatUint(uint64(cfg.RelayPort), 10),
 				),
 				ReuseAddress: true,
 			},
@@ -246,10 +312,9 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			listeners,
 			dingo.ListenerConfig{
 				ListenNetwork: "tcp",
-				ListenAddress: fmt.Sprintf(
-					"%s:%d",
+				ListenAddress: net.JoinHostPort(
 					cfg.PrivateBindAddr,
-					cfg.PrivatePort,
+					strconv.FormatUint(uint64(cfg.PrivatePort), 10),
 				),
 				UseNtC: true,
 			},
@@ -351,10 +416,9 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	// pprof or other handlers registered on DefaultServeMux.
 	metricsMux := http.NewServeMux()
 	metricsMux.Handle("/metrics", promhttp.Handler())
-	metricsAddr := fmt.Sprintf(
-		"%s:%d",
+	metricsAddr := net.JoinHostPort(
 		cfg.BindAddr,
-		cfg.MetricsPort,
+		strconv.FormatUint(uint64(cfg.MetricsPort), 10),
 	)
 	logger.Info(
 		"serving prometheus metrics on "+metricsAddr,
@@ -377,6 +441,16 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			"component", "node",
 		)
 	}
+	// Liveness/readiness listener, on a port of its own so an orchestrator
+	// or load balancer can probe the node without being handed the metrics
+	// or pprof surface. Started for every storage mode.
+	healthServer := NewHealthServer(cfg, d.TipGapSlots)
+	if healthServer != nil {
+		logger.Info(
+			"serving health probes on "+healthServer.Addr,
+			"component", "node",
+		)
+	}
 	// Wait for interrupt/termination signal
 	signalCtx, signalCtxStop := signal.NotifyContext(
 		context.Background(),
@@ -393,6 +467,9 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	go serveAuxiliaryListener("metrics", metricsServer, logger)
 	if debugServer != nil {
 		go serveAuxiliaryListener("pprof debug", debugServer, logger)
+	}
+	if healthServer != nil {
+		go serveAuxiliaryListener("health", healthServer, logger)
 	}
 	go func() {
 		//nolint:contextcheck
@@ -415,6 +492,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			logger,
 			metricsServer,
 			debugServer,
+			healthServer,
 			d,
 			shutdownTimeout,
 		); err != nil {
@@ -430,6 +508,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			logger,
 			metricsServer,
 			debugServer,
+			healthServer,
 			d,
 			shutdownTimeout,
 		); err != nil {
@@ -441,13 +520,10 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	logger.Error("node error", "error", err)
 	signalCtxStop()
 
-	var debugShutdown func(context.Context) error
-	if debugServer != nil {
-		debugShutdown = debugServer.Shutdown
-	}
 	cleanupErr := shutdownNodeResources(
 		metricsServer.Shutdown,
-		debugShutdown,
+		optionalShutdown(debugServer),
+		optionalShutdown(healthServer),
 		d.Stop,
 		shutdownTimeout,
 	)
@@ -475,7 +551,7 @@ func applyRootPeerTargetFallback(cfg *config.Config, target int) {
 // values Run derives from it (the resolved cardano-node config, listeners,
 // peer-sharing decision, storage mode, and parsed durations/strategy), into
 // a dingo.Config. It is split out from Run so that the full field mapping
-// -- including cfg.API, the shared api.tls/api.auth policy defaults -- can
+// -- including cfg.API, the shared api.tls policy defaults -- can
 // be asserted directly in tests without needing to start the node.
 func buildDingoConfig(
 	cfg *config.Config,
@@ -538,13 +614,22 @@ func buildDingoConfig(
 			Frequency: cfg.HistoryExpiry.Frequency,
 		}),
 		dingo.WithKoiosParity(dingo.KoiosParityConfig{
-			Enabled:    cfg.KoiosParity.Enabled,
-			Network:    cfg.KoiosParity.Network,
-			CachePath:  cfg.KoiosParity.CachePath,
-			APIKey:     cfg.KoiosParity.APIKey,
-			Strict:     cfg.KoiosParity.Strict,
-			GraceHours: cfg.KoiosParity.GraceHours,
-			Accounts:   &cfg.KoiosParity.Accounts,
+			Enabled:           cfg.KoiosParity.Enabled,
+			Network:           cfg.KoiosParity.Network,
+			CachePath:         cfg.KoiosParity.CachePath,
+			APIKey:            cfg.KoiosParity.APIKey,
+			BaseURL:           cfg.KoiosParity.BaseURL,
+			AllowInsecureHTTP: cfg.KoiosParity.AllowInsecureHTTP,
+			Strict:            cfg.KoiosParity.Strict,
+			GraceHours:        cfg.KoiosParity.GraceHours,
+			Accounts:          &cfg.KoiosParity.Accounts,
+			// AccountChunkSize and AccountChunkMaxBytes were omitted here
+			// while every other KoiosParity field was forwarded, so
+			// --koios-parity-account-chunk-size and
+			// --koios-parity-account-chunk-max-bytes silently did nothing on
+			// the serve path and the package defaults always won.
+			AccountChunkSize:     cfg.KoiosParity.AccountChunkSize,
+			AccountChunkMaxBytes: cfg.KoiosParity.AccountChunkMaxBytes,
 		}),
 		dingo.WithCORSAllowedOrigins(cfg.CORSAllowedOrigins),
 		dingo.WithOffchainMetadataConfig(
@@ -581,7 +666,6 @@ func buildDingoConfig(
 			Enabled:                     cfg.Midnight.Enabled,
 			ServerEnabled:               cfg.Midnight.ServerEnabled,
 			ReflectionEnabled:           cfg.Midnight.ReflectionEnabled,
-			AllowInsecureRemote:         cfg.Midnight.AllowInsecureRemote,
 			Port:                        cfg.Midnight.Port,
 			Host:                        cfg.Midnight.Host,
 			CNightPolicyID:              cfg.Midnight.CNightPolicyID,
@@ -685,6 +769,18 @@ func buildDingoConfig(
 		),
 		dingo.WithForgeStaleGapThresholdSlots(
 			cfg.ForgeStaleGapThresholdSlots,
+		),
+		dingo.WithForgePrimaryChainTipToleranceSlots(
+			cfg.ForgePrimaryChainTipToleranceSlots,
+		),
+		dingo.WithForgeUpstreamStalenessSlots(
+			cfg.ForgeUpstreamStalenessSlots,
+		),
+		dingo.WithForgeAppliedTipStalenessSlots(
+			cfg.ForgeAppliedTipStalenessSlots,
+		),
+		dingo.WithForgeEndorserBlockStalenessSlots(
+			cfg.ForgeEndorserBlockStalenessSlots,
 		),
 		dingo.WithValidateForgedBlock(cfg.ValidateForgedBlock),
 		// CIP-0163 reward-account inactivity expiry (consensus-affecting)

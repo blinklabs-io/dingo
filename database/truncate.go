@@ -15,11 +15,74 @@
 package database
 
 import (
+	"errors"
 	"fmt"
+	"sync"
+	"time"
 
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/prometheus/client_golang/prometheus"
 )
+
+// truncateAfterSlotDuration records how long a full TruncateAfterSlot sweep
+// takes. The sweep's cost is a function of table size rather than rollback
+// depth, so on a large metadata database a single depth-1 rollback can hold the
+// ledger write lock for tens of seconds. That window is not otherwise
+// observable: the ledger simply goes silent between "rolling back to X" and
+// "chain rolled back", and chainsync cannot make progress for its duration.
+//
+// The histogram is a package-level singleton rather than a promauto
+// registration so that registering the same or multiple registries never
+// panics; see RegisterBlockByHashMetrics for the same reasoning.
+var (
+	truncateAfterSlotDurationOnce sync.Once
+	truncateAfterSlotDuration     *prometheus.HistogramVec
+)
+
+// truncateResultSuccess and truncateResultFailure are the values of the
+// histogram's "result" label. A failed sweep can have a very different
+// duration profile from a successful one (it aborts at whichever sweep
+// failed), so mixing them into one distribution would misreport the
+// chain-freeze cost.
+const (
+	truncateResultSuccess = "success"
+	truncateResultFailure = "failure"
+)
+
+func truncateAfterSlotDurationHistogram() *prometheus.HistogramVec {
+	truncateAfterSlotDurationOnce.Do(func() {
+		truncateAfterSlotDuration = prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name: "dingo_database_truncate_after_slot_duration_seconds",
+				Help: "Duration of TruncateAfterSlot metadata rollback sweeps",
+				// 1ms to ~65s: a healthy rollback is milliseconds,
+				// a large-database sweep is tens of seconds.
+				Buckets: prometheus.ExponentialBuckets(0.001, 2, 17),
+			},
+			[]string{"result"},
+		)
+	})
+	return truncateAfterSlotDuration
+}
+
+// RegisterTruncateMetrics exposes the rollback-truncation duration histogram on
+// the given Prometheus registry. Registering the same registry more than once
+// is a no-op.
+func RegisterTruncateMetrics(reg prometheus.Registerer) error {
+	if reg == nil {
+		return nil
+	}
+	err := reg.Register(truncateAfterSlotDurationHistogram())
+	if err == nil {
+		return nil
+	}
+	if _, ok := errors.AsType[prometheus.AlreadyRegisteredError](err); !ok {
+		return err
+	}
+	return nil
+}
 
 // TruncateAfterSlot reverts all metadata rows and blob-referenced UTxO/
 // transaction CBOR added strictly after point.Slot: certificates, account
@@ -55,7 +118,55 @@ func (d *Database) TruncateAfterSlot(
 	point ocommon.Point,
 	mithrilFloor uint64,
 	txn *Txn,
-) (ochainsync.Tip, []byte, error) {
+) (retTip ochainsync.Tip, retNonce []byte, retErr error) {
+	started := time.Now()
+	// Set only when this call opened and committed its own transaction.
+	// Distinct from `owned`, which is also false when the caller supplied
+	// txn and therefore cannot express "durably committed here".
+	committedInternally := false
+	defer func() {
+		elapsed := time.Since(started)
+		// The duration is recorded either way -- a sweep that failed still
+		// held the ledger write lock for that long -- but under a label so
+		// success and failure are distinguishable.
+		result := truncateResultSuccess
+		if retErr != nil {
+			result = truncateResultFailure
+		}
+		truncateAfterSlotDurationHistogram().
+			WithLabelValues(result).
+			Observe(elapsed.Seconds())
+		if d.logger == nil {
+			return
+		}
+		// Logged at Info: the ledger holds its write lock across this call,
+		// so its duration is the length of a chain-freeze window and needs
+		// to be visible without enabling Debug.
+		//
+		// Note this reports the sweep, not the commit. When the caller
+		// supplies txn, it owns the commit and can still roll back after
+		// this returns, so the message deliberately says the sweep
+		// completed rather than claiming the truncation was durable.
+		if retErr != nil {
+			d.logger.Warn(
+				"metadata rollback truncation failed",
+				"component", "database",
+				"rollback_slot", point.Slot,
+				"duration", elapsed.String(),
+				"duration_seconds", elapsed.Seconds(),
+				"error", retErr,
+			)
+			return
+		}
+		d.logger.Info(
+			"metadata rollback truncation sweep complete",
+			"component", "database",
+			"rollback_slot", point.Slot,
+			"duration", elapsed.String(),
+			"duration_seconds", elapsed.Seconds(),
+			"committed", committedInternally,
+		)
+	}()
 	owned := false
 	if txn == nil {
 		txn = d.Transaction(true)
@@ -305,6 +416,78 @@ func (d *Database) TruncateAfterSlot(
 				err,
 			)
 		}
+		// GetBlockNonce returns (nil, nil) -- not an error -- when no row
+		// matches the point. Routine operation only ever keeps block_nonce
+		// rows for the last 3 epochs plus each epoch's single checkpoint row
+		// (see ledger/state.go's cleanupBlockNoncesBefore), so a disaster-
+		// recovery truncate to an older point can land on a slot whose own
+		// row has already been pruned. Silently continuing with an empty
+		// nonce here would seed the resumed evolving-nonce fold
+		// (LedgerState.loadTip -> ledgerProcessBlocks' runningNonce) with
+		// the wrong value, corrupting every block nonce computed for the
+		// rest of the epoch and, through it, the following epoch's nonce --
+		// causing VRF verification to fail for every header in that epoch,
+		// from every honest peer, with no error at truncate time to explain
+		// why. Byron-era blocks are the sole legitimate empty-nonce case
+		// (PBFT has no Praos nonce), so exempt them.
+		if len(newNonce) == 0 &&
+			truncateBlock.Type != byron.BlockTypeByronEbb &&
+			truncateBlock.Type != byron.BlockTypeByronMain {
+			// A pruned target nonce is USUALLY reconstructible whenever a
+			// checkpoint row (is_checkpoint=1, retained forever, written
+			// once per epoch) survives at or before the target's own slot:
+			// LedgerState's startup heal (healTruncateGapBlockNonces) folds
+			// the evolving nonce forward from that checkpoint through the
+			// still-present block CBOR between it and the target -- this
+			// truncate only ever deletes blocks strictly AFTER its target,
+			// never at or before it, so that history is guaranteed present
+			// -- and persists the correct nonce before any epoch nonce or
+			// VRF check runs. This package intentionally has no ledger/era
+			// or chain-topology knowledge to perform that fold itself (see
+			// AGENTS.md's database/ledger boundary), so this check is
+			// deliberately coarse: it only verifies that SOME checkpoint row
+			// exists at or before the target slot, not that it sits on the
+			// current primary chain (a checkpoint written for a
+			// later-abandoned fork is never guaranteed cleaned up by every
+			// rollback path). The ledger layer's heal re-derives the anchor
+			// with full primary-chain awareness and is the actual safety
+			// boundary: it hard-fails startup rather than silently leaving
+			// the tip nonce empty if the checkpoint this check found turns
+			// out not to be usable after all.
+			//
+			// No checkpoint before the target means reconstruction has
+			// nothing to fold from -- reject exactly as before, since
+			// resuming nonce computation from an empty value would
+			// silently corrupt every epoch nonce computed afterward.
+			hasCheckpoint, cpErr := d.hasBlockNonceCheckpointAtOrBeforeSlot(
+				point.Slot,
+				txn,
+			)
+			if cpErr != nil {
+				return ochainsync.Tip{}, nil, fmt.Errorf(
+					"check for a block_nonce checkpoint before truncate target: %w",
+					cpErr,
+				)
+			}
+			if !hasCheckpoint {
+				return ochainsync.Tip{}, nil, fmt.Errorf(
+					"truncate target at slot %d (hash %x) has no stored "+
+						"block nonce and no earlier checkpoint exists to "+
+						"reconstruct it from: the block_nonce row may have "+
+						"been pruned by routine 3-epoch retention; resuming "+
+						"nonce computation from an empty value would "+
+						"silently corrupt the epoch nonce for every epoch "+
+						"computed afterward and fail VRF verification for "+
+						"the whole following epoch -- choose a truncate "+
+						"target within the retained window, or restore the "+
+						"block_nonce history for this point first",
+					point.Slot,
+					point.Hash,
+				)
+			}
+			// Leave newNonce nil: the caller's tip will carry no nonce
+			// until LedgerState's startup heal reconstructs it.
+		}
 	}
 	// Write tip to DB
 	if err := d.SetTip(newTip, txn); err != nil {
@@ -322,6 +505,7 @@ func (d *Database) TruncateAfterSlot(
 			)
 		}
 		owned = false
+		committedInternally = true
 	}
 	return newTip, newNonce, nil
 }

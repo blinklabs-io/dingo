@@ -399,8 +399,10 @@ type rewardStateBundle struct {
 // pool, lowers its apparent performance, and under-credits every member and
 // leader reward on the node — a divergence proportional to the excluded pool's
 // share of active stake. It is therefore computed from the full reward-stake
-// distribution, and the reward calculation requires the reward_pool_input rows
-// to sum to no more than it rather than to exactly it.
+// distribution. Reward calculation checks the reward_pool_input rows sum to
+// exactly that minus the snapshot's tracked ExcludedActiveStake when it is
+// set (dingo #4025); a snapshot captured before that tracking existed (nil)
+// falls back to checking the rows sum to no more than it.
 func (m *Manager) buildRewardStateInputs(
 	epoch uint64,
 	snapshotType string,
@@ -432,20 +434,31 @@ func (m *Manager) buildRewardStateInputs(
 		return nil, err
 	}
 
+	totalActiveStake := sumPoolStakes(rewardDistribution.PoolStakes)
+	// The full reward-stake distribution's sum minus the post-exclusion
+	// distribution's sum is exactly the stake degraded-pool exclusion removed
+	// from reward_pool_input. Persisting it lets reward calculation verify
+	// the input rows sum to precisely totalActiveStake minus this value
+	// instead of only checking they do not exceed it (dingo #4025); without
+	// it, a proportionally reduced (rather than merely incomplete) input set
+	// would pass the same non-exceeding bound silently.
+	excludedActiveStake := types.Uint64(
+		totalActiveStake - sumPoolStakes(effective.PoolStakes),
+	)
+
 	return &rewardStateBundle{
 		snapshot: &models.RewardSnapshot{
-			Epoch:        epoch,
-			SnapshotType: snapshotType,
-			TotalActiveStake: types.Uint64(
-				sumPoolStakes(rewardDistribution.PoolStakes),
-			),
-			TotalPoolCount:     uint64(len(effective.PoolStakes)),
-			TotalDelegators:    sumDelegators(effective.DelegatorCount),
-			CapturedSlot:       distribution.Slot,
-			BoundarySlot:       evt.BoundarySlot,
-			EpochNonce:         evt.EpochNonce,
-			ProtocolVersion:    evt.ProtocolVersion,
-			CalculationVersion: models.RewardStakeCalculationVersion,
+			Epoch:               epoch,
+			SnapshotType:        snapshotType,
+			TotalActiveStake:    types.Uint64(totalActiveStake),
+			ExcludedActiveStake: &excludedActiveStake,
+			TotalPoolCount:      uint64(len(effective.PoolStakes)),
+			TotalDelegators:     sumDelegators(effective.DelegatorCount),
+			CapturedSlot:        distribution.Slot,
+			BoundarySlot:        evt.BoundarySlot,
+			EpochNonce:          evt.EpochNonce,
+			ProtocolVersion:     evt.ProtocolVersion,
+			CalculationVersion:  models.RewardStakeCalculationVersion,
 		},
 		poolInputs:  poolInputs,
 		stakeInputs: stakeInputs,
@@ -542,16 +555,24 @@ func (m *Manager) saveRewardStateInputRows(
 // account, malformed credential tag, missing margin, or a malformed owner
 // key hash), excludes that single pool from a working copy of the stake
 // distribution, logs a warning, and retries. Real Cardano reward semantics
-// already exclude a pool with no resolvable registration from the active
-// reward stake: its delegators simply do not participate in pool reward
-// distribution for the epoch: they are not otherwise penalized. Any other
-// error (for example a totals mismatch within the stake distribution
+// resolve active reward stake from registered, delegated credentials alone
+// (resolveActiveInstantStakeCredentials in cardano-ledger never consults the
+// stake-pool set), so a pool with no resolvable registration does not shrink
+// the active reward stake: its delegators keep contributing to the sigma_a
+// denominator, and the pool itself simply does not participate in pool
+// reward distribution for the epoch since its own registration data cannot
+// be used to compute one; its delegators are not otherwise penalized. Any
+// other error (for example a totals mismatch within the stake distribution
 // itself, or a missing ended-epoch row) is a genuine data-integrity problem
 // unrelated to pool registration quality and is returned unchanged so the
 // caller still hard-fails on it.
 //
 // The returned distribution is the one actually consumed to build
-// poolInputs/stakeInputs, so its totals are safe to use for RewardSnapshot.
+// poolInputs/stakeInputs, so its TotalPoolCount and TotalDelegators are safe
+// to use for RewardSnapshot. TotalActiveStake is not derived from this
+// returned, post-exclusion distribution: buildRewardStateInputs computes it
+// from the pre-exclusion rewardDistribution so a degraded pool's delegators
+// keep contributing to the sigma_a denominator.
 func (m *Manager) rewardInputsSkippingDegradedPools(
 	epoch uint64,
 	distribution *StakeDistribution,
@@ -1066,10 +1087,16 @@ const poolSnapshotRetentionMaxDepth uint64 = 24
 // reward-history endpoint (GET /accounts/{stake_address}/rewards, dingo #1875)
 // can serve an account's full reward history instead of only the trailing few
 // epochs — the same "silently look empty past the window" failure mode #2987
-// already identified for epoch_summary. See
-// rewardstate.DeleteStateBeforeEpoch (core, prunes both tables) and
-// rewardstate.DeleteStakeInputBeforeEpoch (API, prunes only
-// reward_stake_input) for the implementation and full rationale.
+// already identified for epoch_summary. reward_account_output is likewise
+// retained without bound whenever SetRewardAccountOutputRetentionUnbounded(true)
+// has been called (node.go wires this from the koios-parity observer's Enabled
+// config): that observer only validates a closed epoch after fetching and
+// comparing over the network, which can fall arbitrarily far behind chain
+// progression during a from-genesis or catch-up sync, so the fixed 4-epoch
+// window otherwise prunes an epoch's rows before the observer ever reads them
+// (dingo #4188). See rewardstate.DeleteStateBeforeEpoch (core, prunes both
+// tables) and rewardstate.DeleteStakeInputBeforeEpoch (API/koios-parity, prunes
+// only reward_stake_input) for the implementation and full rationale.
 //
 // epoch_summary is deliberately NOT pruned. It is a single small row per epoch
 // (aggregate stake/pool/delegator totals plus the epoch nonce and boundary
@@ -1111,10 +1138,14 @@ func (m *Manager) cleanupOldSnapshots(
 		if before < deleteBeforeEpoch {
 			m.logger.Info(
 				"retaining historical pool stake snapshots for deferred header validation",
-				"component", "snapshot",
-				"current_epoch", currentEpoch,
-				"default_before_epoch", deleteBeforeEpoch,
-				"pinned_before_epoch", before,
+				"component",
+				"snapshot",
+				"current_epoch",
+				currentEpoch,
+				"default_before_epoch",
+				deleteBeforeEpoch,
+				"pinned_before_epoch",
+				before,
 			)
 		}
 		poolTxn := m.db.Transaction(true)
@@ -1160,8 +1191,10 @@ func (m *Manager) cleanupOldSnapshots(
 	meta := m.db.Metadata()
 	metaTxn := txn.Metadata()
 
-	if m.db.StorageMode() == types.StorageModeAPI {
-		// API storage mode: retain reward_account_output without bound (see
+	if m.db.StorageMode() == types.StorageModeAPI ||
+		m.RewardAccountOutputRetentionUnbounded() {
+		// API storage mode, or the in-process Koios parity observer enabled
+		// (dingo #4188): retain reward_account_output without bound (see
 		// doc comment above) and prune only reward_stake_input.
 		if err := meta.DeleteRewardStakeInputBeforeEpoch(
 			deleteBeforeEpoch,

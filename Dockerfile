@@ -32,9 +32,9 @@ RUN `go env GOPATH`/bin/antithesis-go-instrumentor /code /antithesis
 WORKDIR /antithesis/customer
 RUN make build
 
-FROM ghcr.io/blinklabs-io/cardano-cli:11.0.0.0-1 AS cardano-cli
-FROM ghcr.io/blinklabs-io/cardano-configs:20260829-1 AS cardano-configs
-FROM ghcr.io/blinklabs-io/nview:0.15.0 AS nview
+FROM ghcr.io/blinklabs-io/cardano-cli:11.2.3.1-1 AS cardano-cli
+FROM ghcr.io/blinklabs-io/cardano-configs:20260915-1 AS cardano-configs
+FROM ghcr.io/blinklabs-io/nview:0.15.1 AS nview
 FROM ghcr.io/blinklabs-io/txtop:0.16.0 AS txtop
 
 FROM debian:bookworm-slim AS dingo
@@ -96,9 +96,31 @@ VOLUME /ipc
 ENV DINGO_SOCKET_PATH=/ipc/dingo.socket
 ENV CARDANO_NODE_SOCKET_PATH=/ipc/dingo.socket
 ENV CARDANO_SOCKET_PATH=/ipc/dingo.socket
-EXPOSE 3001 3002 9090 12798
+EXPOSE 3001 3002 9090 12798 12799
+# Probes the dedicated health listener's LIVENESS path, not /readyz, and not
+# /metrics as this previously did.
+#
+#   - /metrics only proved the metrics listener had bound; it says nothing
+#     about the node, and it disappears if metricsPort is repurposed.
+#   - /readyz would be wrong here: Docker, Swarm and ECS respond to an
+#     unhealthy container by replacing it, and a node doing an initial sync
+#     is legitimately not ready for hours or days, so it would never survive
+#     long enough to finish. Readiness belongs in a Kubernetes
+#     readinessProbe or a load-balancer target check, where failing it
+#     drains traffic instead of killing the node.
+#
+# The liveness body still carries the readiness verdict and the observed tip
+# gap, so `docker inspect` shows why a live node is not yet serving.
+#
+# The port follows DINGO_HEALTH_PORT, which is the only one of the three
+# healthPort sources (flag, YAML, environment) a HEALTHCHECK can read. An
+# explicit 0 disables the listener, so the check reports healthy rather than
+# probing a port nothing is bound to and driving the container into a
+# replacement loop.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-  CMD wget -qO/dev/null http://127.0.0.1:12798/metrics || exit 1
+  CMD health_port="${DINGO_HEALTH_PORT:-12799}"; \
+  [ "$health_port" = "0" ] && exit 0; \
+  wget -qO/dev/null "http://127.0.0.1:$health_port/health" || exit 1
 # UID/GID are pinned (not left to adduser's dynamic system-UID allocation)
 # so they're stable and documentable across image rebuilds: this container
 # never runs as root, so a custom --db-snapshot-dir (or any other data path)

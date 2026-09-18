@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/require"
 )
@@ -66,6 +67,9 @@ func newRestoreInternalTestBlock() models.Block {
 // TestSyncDirTreeSyncsEveryDirectory verifies syncDirTree calls syncDir
 // for every directory in a nested tree, including the root itself, and
 // does not call it for regular files.
+// Not t.Parallel: this and the two tests below swap the package-level
+// syncDir seam, which every concurrent Restore in this package would
+// otherwise observe.
 func TestSyncDirTreeSyncsEveryDirectory(t *testing.T) {
 	root := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "a", "b"), 0o755))
@@ -125,7 +129,7 @@ func TestRestoreValidatedFailsClosedWhenStagingSyncFails(t *testing.T) {
 		nil,
 		snapshotDir,
 		targetDir,
-		RestoreStorageConfig{},
+		RestoreStorageConfig{Blob: testutil.BadgerBlobConfig()},
 	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, injectedErr)
@@ -177,7 +181,7 @@ func TestRestoreValidatedSurfacesPostRenameSyncFailure(t *testing.T) {
 		nil,
 		snapshotDir,
 		targetDir,
-		RestoreStorageConfig{},
+		RestoreStorageConfig{Blob: testutil.BadgerBlobConfig()},
 	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, injectedErr)

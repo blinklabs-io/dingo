@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/require"
 )
@@ -52,7 +53,7 @@ func newTestDatabaseAt(
 	}
 	blobStore, err := plugin.Resolve[blob.BlobStore](
 		context.Background(), host,
-		plugin.CapabilityStorageBlob, "badger", nil,
+		plugin.CapabilityStorageBlob, "badger", testutil.BadgerBlobConfig(),
 		blob.ProviderDependencies{
 			DataDir: blobDir, StorageMode: config.StorageMode,
 			Logger: config.Logger, PromRegistry: config.PromRegistry,
@@ -105,7 +106,7 @@ func storesWithFreshBlob(tb testing.TB, metaDir string) Stores {
 	require.NoError(tb, sqlite.RegisterProvider(host))
 	blobStore, err := plugin.Resolve[blob.BlobStore](
 		context.Background(), host,
-		plugin.CapabilityStorageBlob, "badger", nil,
+		plugin.CapabilityStorageBlob, "badger", testutil.BadgerBlobConfig(),
 		blob.ProviderDependencies{DataDir: tb.TempDir()},
 	)
 	require.NoError(tb, err)
@@ -119,6 +120,8 @@ func storesWithFreshBlob(tb testing.TB, metaDir string) Stores {
 }
 
 func TestBlobStoreIDIsMintedOnceAndStable(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	db, err := newTestDatabaseAt(t, dir, dir, &Config{
 		DataDir:     dir,
@@ -145,6 +148,8 @@ func TestBlobStoreIDIsMintedOnceAndStable(t *testing.T) {
 }
 
 func TestBlobStoreIDMismatchIsFatal(t *testing.T) {
+	t.Parallel()
+
 	// A metadata store paired with a blob store it was not initialised
 	// with, which is what a swapped or emptied bucket looks like.
 	metaDir := t.TempDir()
@@ -176,6 +181,8 @@ func TestBlobStoreIDMismatchIsFatal(t *testing.T) {
 // mirroring the identical blob-then-sync-then-metadata barrier txn.go
 // applies to combined commits.
 func TestBlobStoreIDSyncsAfterMint(t *testing.T) {
+	t.Parallel()
+
 	store := &mockBlobStore{}
 	db := &Database{blobRef: newBlobStoreRef(store)}
 
@@ -199,6 +206,8 @@ func TestBlobStoreIDSyncsAfterMint(t *testing.T) {
 // distinct from types.ErrBlobKeyNotFound, the ordinary first-use case that
 // mints an id -- fails closed instead of silently omitting the identity gate.
 func TestPhase1RejectsBlobStoreIDReadFailure(t *testing.T) {
+	t.Parallel()
+
 	readErr := errors.New("simulated corrupted blob store read")
 	store := &mockBlobStore{getErr: readErr}
 	db := &Database{
@@ -219,6 +228,8 @@ func TestPhase1RejectsBlobStoreIDReadFailure(t *testing.T) {
 // error from blobStoreID rather than being swallowed. blobStoreID must never
 // claim an id is durable when Sync could not confirm it.
 func TestBlobStoreIDSyncFailurePropagates(t *testing.T) {
+	t.Parallel()
+
 	syncErr := errors.New("simulated sync failure")
 	store := &mockBlobStore{syncErr: syncErr}
 	db := &Database{blobRef: newBlobStoreRef(store)}

@@ -43,6 +43,8 @@ import (
 // epoch1347.LastEpochBlockNonce is the last block of epoch 1346 (the carried
 // value), not the last block of epoch 1347.
 func TestEpochNonceUsesCarriedLastEpochBlockNonce(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 
@@ -202,6 +204,8 @@ func TestEpochNonceUsesCarriedLastEpochBlockNonce(t *testing.T) {
 // path is unaffected (bootstrap epoch imports a non-nil lastEpochBlockNonce and
 // never takes this branch).
 func TestEpochNonceGenesisEdgeUsesNeutralLab(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 

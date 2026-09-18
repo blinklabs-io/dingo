@@ -163,6 +163,14 @@ func (s *Store) SetNodeSettingsGates(
 	if err := s.ensureReady(); err != nil {
 		return err
 	}
+	epochVal, err := checkedInt64(recordedEpoch)
+	if err != nil {
+		return fmt.Errorf("set node settings gates: recorded epoch: %w", err)
+	}
+	slotVal, err := checkedInt64(recordedSlot)
+	if err != nil {
+		return fmt.Errorf("set node settings gates: recorded slot: %w", err)
+	}
 	queries, err := newManagementQueries(s.dialect.Name(), s.writeDB)
 	if err != nil {
 		return err
@@ -172,8 +180,8 @@ func (s *Store) SetNodeSettingsGates(
 			context.Background(),
 			name,
 			value,
-			int64(recordedEpoch),
-			int64(recordedSlot),
+			epochVal,
+			slotVal,
 		); err != nil {
 			return fmt.Errorf(
 				"set node settings gates: upsert %q: %w",
@@ -201,6 +209,22 @@ func (s *Store) InsertNodeSettingsGateIfAbsent(
 	if err := s.ensureReady(); err != nil {
 		return false, err
 	}
+	epochVal, err := checkedInt64(recordedEpoch)
+	if err != nil {
+		return false, fmt.Errorf(
+			"insert node settings gate %q if absent: recorded epoch: %w",
+			name,
+			err,
+		)
+	}
+	slotVal, err := checkedInt64(recordedSlot)
+	if err != nil {
+		return false, fmt.Errorf(
+			"insert node settings gate %q if absent: recorded slot: %w",
+			name,
+			err,
+		)
+	}
 	queries, err := newManagementQueries(s.dialect.Name(), s.writeDB)
 	if err != nil {
 		return false, err
@@ -209,8 +233,8 @@ func (s *Store) InsertNodeSettingsGateIfAbsent(
 		context.Background(),
 		name,
 		value,
-		int64(recordedEpoch),
-		int64(recordedSlot),
+		epochVal,
+		slotVal,
 	)
 	if err != nil {
 		return false, fmt.Errorf(
@@ -252,13 +276,27 @@ func (s *Store) InsertNodeSettingsGatesIfAbsent(
 	if len(gates) == 0 {
 		return false, nil
 	}
+	epochVal, err := checkedInt64(recordedEpoch)
+	if err != nil {
+		return false, fmt.Errorf(
+			"insert node settings gates if absent: recorded epoch: %w",
+			err,
+		)
+	}
+	slotVal, err := checkedInt64(recordedSlot)
+	if err != nil {
+		return false, fmt.Errorf(
+			"insert node settings gates if absent: recorded slot: %w",
+			err,
+		)
+	}
 	names := make([]string, 0, len(gates))
 	for name := range gates {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	inserted := 0
-	err := s.withWriteTransaction(
+	err = s.withWriteTransaction(
 		nil,
 		func(db queryer, ctx context.Context) error {
 			queries, err := newManagementQueries(s.dialect.Name(), db)
@@ -270,8 +308,8 @@ func (s *Store) InsertNodeSettingsGatesIfAbsent(
 					ctx,
 					name,
 					gates[name],
-					int64(recordedEpoch),
-					int64(recordedSlot),
+					epochVal,
+					slotVal,
 				)
 				if err != nil {
 					return fmt.Errorf(

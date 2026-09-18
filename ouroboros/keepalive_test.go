@@ -29,6 +29,8 @@ import (
 )
 
 func TestKeepaliveClientResponsePublishesPeerActivity(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	_, evtCh := bus.Subscribe(chainselection.PeerActivityEventType)
 	o := newOuroboros(OuroborosConfig{EventBus: bus})
@@ -37,11 +39,7 @@ func TestKeepaliveClientResponsePublishesPeerActivity(t *testing.T) {
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.2"), Port: 3001},
 	}
 
-	err := o.keepaliveClientResponse(
-		okeepalive.CallbackContext{ConnectionId: connId},
-		42,
-	)
-	require.NoError(t, err)
+	o.keepaliveClientResponse(connId, 42)
 
 	select {
 	case evt := <-evtCh:
@@ -62,6 +60,8 @@ func keepaliveTimeoutFor(cfgTimeout time.Duration) time.Duration {
 }
 
 func TestKeepaliveConnOptsTimeout(t *testing.T) {
+	t.Parallel()
+
 	// Unset: gouroboros default (10s) is left in place.
 	assert.Equal(
 		t,

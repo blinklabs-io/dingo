@@ -43,6 +43,8 @@ func newTestLog(t *testing.T) *Log {
 // Undo replays in reverse order so a later change is reversed before an earlier
 // one, and it distinguishes restore-a-prior-value from delete-what-we-created.
 func TestUndoReversesRecordedChanges(t *testing.T) {
+	t.Parallel()
+
 	log := newTestLog(t)
 	require.NoError(t, log.RecordValue("existing", []byte("prior")))
 	log.RecordMissing("created")
@@ -83,6 +85,8 @@ func TestUndoReversesRecordedChanges(t *testing.T) {
 // Undo(n) reverses only the first n applied changes, so a commit that failed on
 // key i does not try to undo keys it never touched.
 func TestUndoOnlyReversesAppliedPrefix(t *testing.T) {
+	t.Parallel()
+
 	log := newTestLog(t)
 	log.RecordMissing("a")
 	log.RecordMissing("b")
@@ -103,6 +107,8 @@ func TestUndoOnlyReversesAppliedPrefix(t *testing.T) {
 // A single unreachable key must not abandon the rest of the compensation, and
 // every failure has to surface so the caller can report a partial commit.
 func TestUndoContinuesAfterFailureAndJoinsErrors(t *testing.T) {
+	t.Parallel()
+
 	log := newTestLog(t)
 	require.NoError(t, log.RecordValue("first", []byte("1")))
 	log.RecordMissing("second")
@@ -140,6 +146,8 @@ func TestUndoContinuesAfterFailureAndJoinsErrors(t *testing.T) {
 // Prior values live on disk, not in memory: the spool file grows with recorded
 // values and is removed on Close.
 func TestRecordValueSpoolsToDiskAndCloseRemovesIt(t *testing.T) {
+	t.Parallel()
+
 	log, err := NewLog("dingo-compensate-test-")
 	require.NoError(t, err)
 	name := log.file.Name()
@@ -178,6 +186,8 @@ func TestRecordValueSpoolsToDiskAndCloseRemovesIt(t *testing.T) {
 // RecordMissing uses no spool space, so the common append-only commit keeps the
 // compensation log empty on disk.
 func TestRecordMissingUsesNoSpoolSpace(t *testing.T) {
+	t.Parallel()
+
 	log, err := NewLog("dingo-compensate-test-")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = log.Close() })
@@ -195,6 +205,8 @@ func TestRecordMissingUsesNoSpoolSpace(t *testing.T) {
 
 // Undo clamps n rather than panicking on an out-of-range prefix.
 func TestUndoClampsOversizedPrefix(t *testing.T) {
+	t.Parallel()
+
 	log := newTestLog(t)
 	log.RecordMissing("only")
 
@@ -213,6 +225,8 @@ func TestUndoClampsOversizedPrefix(t *testing.T) {
 // A closed log cannot spool or restore, and says so instead of silently
 // reporting a clean compensation.
 func TestClosedLogReportsErrors(t *testing.T) {
+	t.Parallel()
+
 	log, err := NewLog("dingo-compensate-test-")
 	require.NoError(t, err)
 	require.NoError(t, log.RecordValue("key", []byte("value")))
@@ -231,6 +245,8 @@ func TestClosedLogReportsErrors(t *testing.T) {
 // which is what makes it possible to overwrite or delete such an object inside a
 // transaction.
 func TestRecordValueFromStreamsWithoutSizeCap(t *testing.T) {
+	t.Parallel()
+
 	log := newTestLog(t)
 
 	// Exceed the plugins' bounded-read limit without allocating it: a repeating
@@ -289,6 +305,8 @@ func TestRecordValueFromStreamsWithoutSizeCap(t *testing.T) {
 
 // Mixing buffered and streamed entries must not overlap their spool regions.
 func TestRecordValueAndRecordValueFromShareSpoolCorrectly(t *testing.T) {
+	t.Parallel()
+
 	log := newTestLog(t)
 	require.NoError(t, log.RecordValue("a", []byte("first")))
 	require.NoError(t, log.RecordValueFrom("b", strings.NewReader("second")))
@@ -336,6 +354,8 @@ func (r *patternReader) Read(p []byte) (int, error) {
 // the whole object. Spooling the capture side alone would still leave the
 // restore side able to exhaust memory on a failed multi-key commit.
 func TestUndoStreamsRestoreWithoutMaterializing(t *testing.T) {
+	t.Parallel()
+
 	log := newTestLog(t)
 	const size = int64(256<<20) + 4096
 	require.NoError(

@@ -240,6 +240,8 @@ func runDeferredOrderingScenario(
 // chain-mutation order. TestDeferredPerHandlerFlushInvertsAcrossHandlers pins
 // that inversion so this guard is not vacuous.
 func TestDeferredChainUpdatesPublishInChainMutationOrder(t *testing.T) {
+	t.Parallel()
+
 	got := runDeferredOrderingScenario(t, sharedSequencer)
 	require.Equal(
 		t,
@@ -257,6 +259,8 @@ func TestDeferredChainUpdatesPublishInChainMutationOrder(t *testing.T) {
 // drove the chain.update subscriber's block apply/undo notifications out of
 // order, and it is what the shared sequencer (asserted above) prevents.
 func TestDeferredPerHandlerFlushInvertsAcrossHandlers(t *testing.T) {
+	t.Parallel()
+
 	got := runDeferredOrderingScenario(t, perHandlerFlush)
 	require.Equal(
 		t,

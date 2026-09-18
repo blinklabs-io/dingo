@@ -21,11 +21,14 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -40,6 +43,36 @@ import (
 type captureSlogHandler struct {
 	records []slog.Record
 }
+
+type trackingDownloadBody struct {
+	reader bytes.Reader
+	read   atomic.Int64
+}
+
+func (b *trackingDownloadBody) Read(p []byte) (int, error) {
+	n, err := b.reader.Read(p)
+	b.read.Add(int64(n))
+	return n, err
+}
+
+func (b *trackingDownloadBody) Close() error { return nil }
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+type contextBlockingBody struct {
+	ctx context.Context
+}
+
+func (b *contextBlockingBody) Read([]byte) (int, error) {
+	<-b.ctx.Done()
+	return 0, b.ctx.Err()
+}
+
+func (*contextBlockingBody) Close() error { return nil }
 
 func (h *captureSlogHandler) Enabled(context.Context, slog.Level) bool {
 	return true
@@ -59,6 +92,8 @@ func (h *captureSlogHandler) WithGroup(string) slog.Handler {
 }
 
 func TestDownloadSnapshot(t *testing.T) {
+	t.Parallel()
+
 	content := []byte("fake-snapshot-archive-data-for-testing")
 
 	server := httptest.NewServer(
@@ -107,6 +142,8 @@ func TestDownloadSnapshot(t *testing.T) {
 }
 
 func TestDownloadSnapshotRoutineLogsAtDebug(t *testing.T) {
+	t.Parallel()
+
 	content := []byte("snapshot")
 	server := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -147,6 +184,8 @@ func TestDownloadSnapshotRoutineLogsAtDebug(t *testing.T) {
 }
 
 func TestNewPooledDownloadTransportUsesHTTP1Connections(t *testing.T) {
+	t.Parallel()
+
 	transport := newPooledDownloadTransport(4)
 
 	require.False(t, transport.DisableKeepAlives)
@@ -161,6 +200,8 @@ func TestNewPooledDownloadTransportUsesHTTP1Connections(t *testing.T) {
 }
 
 func TestDownloadSnapshotResume(t *testing.T) {
+	t.Parallel()
+
 	// Full content: "AAABBB"
 	fullContent := []byte("AAABBB")
 
@@ -208,14 +249,109 @@ func TestDownloadSnapshotResume(t *testing.T) {
 	require.Equal(t, fullContent, data)
 }
 
+// injectedIdle drives a download's idle detection from the test instead of
+// from the wall clock. Production reports progress after each body write, so
+// a test names the byte offsets it wants a stall at; the injector then fires
+// the moment the download next arms its body watchdog, which is where a real
+// timer would have fired had the transfer genuinely stopped there.
+//
+// Only idleTimeoutReader.Read resets a watchdog, so an injected idle is
+// always delivered around a body read and never to the watchdog covering the
+// request headers, whose expiry would abort an attempt before it read
+// anything and turn a resume into a restart.
+type injectedIdle struct {
+	mu      sync.Mutex
+	at      map[int64]struct{}
+	pending bool
+	count   int
+}
+
+func newInjectedIdle(offsets ...int64) *injectedIdle {
+	at := make(map[int64]struct{}, len(offsets))
+	for _, offset := range offsets {
+		at[offset] = struct{}{}
+	}
+	return &injectedIdle{at: at}
+}
+
+// progress is a DownloadConfig.OnProgress callback. It arms an idle timeout
+// when a report lands on a requested offset.
+func (i *injectedIdle) progress(p DownloadProgress) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if _, ok := i.at[p.BytesDownloaded]; !ok {
+		return
+	}
+	delete(i.at, p.BytesDownloaded)
+	i.pending = true
+}
+
+// watchdog is a DownloadConfig.idleWatchdogs factory. The configured timeout
+// is deliberately ignored: this watchdog expires when the test says so.
+func (i *injectedIdle) watchdog(_ time.Duration, onIdle func()) idleWatchdog {
+	return &injectedIdleWatchdog{injector: i, onIdle: onIdle}
+}
+
+// arm requests an idle timeout that no progress report can trigger, for a
+// stall before the attempt reads anything. Call it before the response is
+// written: only a body read consumes the request, so arming early is what
+// keeps the delivery point fixed.
+func (i *injectedIdle) arm() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.pending = true
+}
+
+func (i *injectedIdle) take() bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if !i.pending {
+		return false
+	}
+	i.pending = false
+	i.count++
+	return true
+}
+
+// delivered reports how many injected idle timeouts the download consumed.
+func (i *injectedIdle) delivered() int {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.count
+}
+
+// remaining reports how many requested offsets were never reached.
+func (i *injectedIdle) remaining() int {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return len(i.at)
+}
+
+type injectedIdleWatchdog struct {
+	injector *injectedIdle
+	onIdle   func()
+}
+
+func (w *injectedIdleWatchdog) Reset() {
+	if w.injector.take() {
+		w.onIdle()
+	}
+}
+
+// Stop has no concurrent callback to wait for because Reset invokes the
+// injected callback synchronously in this deterministic test double.
+func (w *injectedIdleWatchdog) Stop() {}
+
 func TestDownloadSnapshotIdleTimeoutRetriesAndResumes(t *testing.T) {
+	t.Parallel()
+
 	fullContent := []byte("AAABBB")
 	var requestCount atomic.Int32
 	resumeRangeCh := make(chan string, 1)
 
 	server := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			switch requestCount.Add(1) {
+			switch n := requestCount.Add(1); n {
 			case 1:
 				w.Header().
 					Set("Content-Length", fmt.Sprintf("%d", len(fullContent)))
@@ -225,7 +361,7 @@ func TestDownloadSnapshotIdleTimeoutRetriesAndResumes(t *testing.T) {
 					flusher.Flush()
 				}
 				<-r.Context().Done()
-			default:
+			case 2:
 				select {
 				case resumeRangeCh <- r.Header.Get("Range"):
 				default:
@@ -234,11 +370,29 @@ func TestDownloadSnapshotIdleTimeoutRetriesAndResumes(t *testing.T) {
 				w.Header().Set("Content-Length", "3")
 				w.WriteHeader(http.StatusPartialContent)
 				_, _ = w.Write(fullContent[3:])
+			default:
+				// A request the script does not cover means the download
+				// retried without the test injecting an idle timeout.
+				// Report that here instead of serving a range the client
+				// did not ask for, which would resurface later as an
+				// unrelated Content-Range restart failure.
+				t.Errorf(
+					"unexpected download request %d with Range %q",
+					n,
+					r.Header.Get("Range"),
+				)
+				http.Error(
+					w,
+					"unexpected request",
+					http.StatusConflict,
+				)
 			}
 		}),
 	)
 	t.Cleanup(server.Close)
 
+	// Stall the transfer once, after the first three bytes have landed.
+	idle := newInjectedIdle(3)
 	destDir := t.TempDir()
 	cfg := DownloadConfig{
 		URL:               server.URL + "/snapshot.tar.zst",
@@ -246,36 +400,39 @@ func TestDownloadSnapshotIdleTimeoutRetriesAndResumes(t *testing.T) {
 		DestDir:           destDir,
 		Filename:          "idle-retry.tar.zst",
 		ExpectedSize:      int64(len(fullContent)),
-		IdleTimeout:       50 * time.Millisecond,
-		MaxIdleRetries:    1,
+		// Any positive value enables idle detection; the injector, not
+		// this duration, decides when the transfer counts as idle.
+		IdleTimeout:    time.Minute,
+		MaxIdleRetries: 1,
+		OnProgress:     idle.progress,
+		idleWatchdogs:  idle.watchdog,
 	}
-	timeout := cfg.IdleTimeout*time.Duration(cfg.MaxIdleRetries+1) +
-		500*time.Millisecond
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		testutil.AsyncWait,
+	)
 	defer cancel()
 
-	path, err := DownloadSnapshot(
-		ctx,
-		cfg,
-	)
+	path, err := DownloadSnapshot(ctx, cfg)
 	require.NoError(t, err)
 	require.Equal(t, filepath.Join(destDir, "idle-retry.tar.zst"), path)
 	require.Equal(t, int32(2), requestCount.Load())
+	require.Equal(
+		t,
+		1,
+		idle.delivered(),
+		"download did not act on the injected idle timeout",
+	)
+	require.Zero(t, idle.remaining(), "injected stall was never reached")
 	require.Equal(
 		t,
 		"bytes=3-",
 		testutil.RequireReceive(
 			t,
 			resumeRangeCh,
-			time.Second,
+			testutil.AsyncWait,
 			"retry resume range",
 		),
-	)
-	testutil.RequireNoReceive(
-		t,
-		resumeRangeCh,
-		100*time.Millisecond,
-		"no extra resume retries",
 	)
 
 	data, err := os.ReadFile(path)
@@ -283,15 +440,75 @@ func TestDownloadSnapshotIdleTimeoutRetriesAndResumes(t *testing.T) {
 	require.Equal(t, fullContent, data)
 }
 
-func TestDownloadSnapshotIdleRetriesResetAfterProgress(t *testing.T) {
-	fullContent := []byte("AAABBBCCC")
+func TestDownloadSnapshotIdleTimeoutUsesConfiguredTimer(t *testing.T) {
+	t.Parallel()
+
 	var requestCount atomic.Int32
-	rangeCh := make(chan string, 2)
+	client := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			requestCount.Add(1)
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Status:        "200 OK",
+				Header:        http.Header{"Content-Length": []string{"2"}},
+				Body:          &contextBlockingBody{ctx: r.Context()},
+				ContentLength: 2,
+				Request:       r,
+			}, nil
+		}),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), testutil.AsyncWait)
+	defer cancel()
+	_, err := DownloadSnapshot(ctx, DownloadConfig{
+		URL:               "https://example.com/snapshot.tar.zst",
+		AllowInsecureHTTP: true,
+		DestDir:           t.TempDir(),
+		Filename:          "configured-idle-timeout.tar.zst",
+		IdleTimeout:       20 * time.Millisecond,
+		MaxIdleRetries:    1,
+		HTTPClient:        client,
+	})
+	require.ErrorIs(t, err, errDownloadIdleTimeout)
+	require.Contains(t, err.Error(), "writing snapshot data")
+	require.Equal(t, int32(2), requestCount.Load())
+}
+
+func TestDownloadSnapshotIdleRetriesResetAfterProgress(t *testing.T) {
+	t.Parallel()
+
+	// Three stalls against a budget of one, arranged so the download only
+	// survives them if progress restores the budget: the first and third
+	// attempts read nothing and each spend a retry, and the second reads
+	// three bytes. Spending two retries either side of that progress is
+	// what distinguishes a budget that resets from one that merely is not
+	// charged for a productive attempt.
+	fullContent := []byte("AAABBB")
+	var requestCount atomic.Int32
+	rangeCh := make(chan string, 4)
+	idle := newInjectedIdle(3)
 
 	server := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			switch requestCount.Add(1) {
+			select {
+			case rangeCh <- r.Header.Get("Range"):
+			default:
+			}
+			switch n := requestCount.Add(1); n {
 			case 1:
+				// Stall before a single byte arrives.
+				idle.arm()
+				w.Header().Set(
+					"Content-Length",
+					fmt.Sprintf("%d", len(fullContent)),
+				)
+				w.WriteHeader(http.StatusOK)
+				if flusher, ok := w.(http.Flusher); ok {
+					flusher.Flush()
+				}
+				<-r.Context().Done()
+			case 2:
+				// Make progress, then stall at three bytes.
 				w.Header().Set(
 					"Content-Length",
 					fmt.Sprintf("%d", len(fullContent)),
@@ -302,28 +519,35 @@ func TestDownloadSnapshotIdleRetriesResetAfterProgress(t *testing.T) {
 					flusher.Flush()
 				}
 				<-r.Context().Done()
-			case 2:
-				select {
-				case rangeCh <- r.Header.Get("Range"):
-				default:
-				}
-				w.Header().Set("Content-Range", "bytes 3-8/9")
-				w.Header().Set("Content-Length", "6")
+			case 3:
+				// Stall again without adding a byte.
+				idle.arm()
+				w.Header().Set("Content-Range", "bytes 3-5/6")
+				w.Header().Set("Content-Length", "3")
 				w.WriteHeader(http.StatusPartialContent)
-				_, _ = w.Write(fullContent[3:6])
 				if flusher, ok := w.(http.Flusher); ok {
 					flusher.Flush()
 				}
 				<-r.Context().Done()
-			default:
-				select {
-				case rangeCh <- r.Header.Get("Range"):
-				default:
-				}
-				w.Header().Set("Content-Range", "bytes 6-8/9")
+			case 4:
+				w.Header().Set("Content-Range", "bytes 3-5/6")
 				w.Header().Set("Content-Length", "3")
 				w.WriteHeader(http.StatusPartialContent)
-				_, _ = w.Write(fullContent[6:])
+				_, _ = w.Write(fullContent[3:])
+			default:
+				// See TestDownloadSnapshotIdleTimeoutRetriesAndResumes:
+				// an unscripted request is a defect in the retry path,
+				// not a range to serve.
+				t.Errorf(
+					"unexpected download request %d with Range %q",
+					n,
+					r.Header.Get("Range"),
+				)
+				http.Error(
+					w,
+					"unexpected request",
+					http.StatusConflict,
+				)
 			}
 		}),
 	)
@@ -336,11 +560,17 @@ func TestDownloadSnapshotIdleRetriesResetAfterProgress(t *testing.T) {
 		DestDir:           destDir,
 		Filename:          "idle-progress-reset.tar.zst",
 		ExpectedSize:      int64(len(fullContent)),
-		IdleTimeout:       50 * time.Millisecond,
-		MaxIdleRetries:    1,
+		// Any positive value enables idle detection; the injector, not
+		// this duration, decides when the transfer counts as idle.
+		IdleTimeout:    time.Minute,
+		MaxIdleRetries: 1,
+		OnProgress:     idle.progress,
+		idleWatchdogs:  idle.watchdog,
 	}
-	timeout := 3*cfg.IdleTimeout + 500*time.Millisecond
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		testutil.AsyncWait,
+	)
 	defer cancel()
 
 	path, err := DownloadSnapshot(ctx, cfg)
@@ -350,27 +580,28 @@ func TestDownloadSnapshotIdleRetriesResetAfterProgress(t *testing.T) {
 		filepath.Join(destDir, "idle-progress-reset.tar.zst"),
 		path,
 	)
-	require.Equal(t, int32(3), requestCount.Load())
+	require.Equal(t, int32(4), requestCount.Load())
 	require.Equal(
 		t,
-		"bytes=3-",
-		testutil.RequireReceive(
-			t,
-			rangeCh,
-			time.Second,
-			"first retry resume range",
-		),
+		3,
+		idle.delivered(),
+		"download did not act on all three injected idle timeouts",
 	)
-	require.Equal(
-		t,
-		"bytes=6-",
-		testutil.RequireReceive(
+	require.Zero(t, idle.remaining(), "an injected stall was never reached")
+	for i, want := range []string{"", "", "bytes=3-", "bytes=3-"} {
+		require.Equal(
 			t,
-			rangeCh,
-			time.Second,
-			"second retry resume range",
-		),
-	)
+			want,
+			testutil.RequireReceive(
+				t,
+				rangeCh,
+				testutil.AsyncWait,
+				"request range",
+			),
+			"request %d range",
+			i+1,
+		)
+	}
 
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
@@ -378,6 +609,8 @@ func TestDownloadSnapshotIdleRetriesResetAfterProgress(t *testing.T) {
 }
 
 func TestDownloadSnapshotRejectsNegativeMaxIdleRetries(t *testing.T) {
+	t.Parallel()
+
 	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
 		URL:            "http://example.invalid/snapshot.tar.zst",
 		DestDir:        t.TempDir(),
@@ -393,6 +626,8 @@ func TestDownloadSnapshotRejectsNegativeMaxIdleRetries(t *testing.T) {
 // untrusted, so the scheme is checked up front rather than relying on
 // httpsOnlyRedirect, which only governs where a redirect may lead.
 func TestDownloadSnapshotRejectsPlainHTTPByDefault(t *testing.T) {
+	t.Parallel()
+
 	called := false
 	server := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -419,6 +654,8 @@ func TestDownloadSnapshotRejectsPlainHTTPByDefault(t *testing.T) {
 // DownloadConfig.AllowInsecureHTTP is a working, explicit escape hatch
 // (used throughout this package's own httptest-based tests).
 func TestDownloadSnapshotAllowsPlainHTTPWithEscapeHatch(t *testing.T) {
+	t.Parallel()
+
 	content := []byte("fake-snapshot-data")
 	server := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -444,6 +681,8 @@ func TestDownloadSnapshotAllowsPlainHTTPWithEscapeHatch(t *testing.T) {
 // against the loopback TLS test server's self-signed certificate, which
 // is expected — the point is that it isn't rejected for its scheme).
 func TestDownloadSnapshotAcceptsHTTPSByDefault(t *testing.T) {
+	t.Parallel()
+
 	server := httptest.NewTLSServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
@@ -460,18 +699,32 @@ func TestDownloadSnapshotAcceptsHTTPSByDefault(t *testing.T) {
 	require.NotContains(t, err.Error(), "must use https")
 }
 
+// armed reports whether an idle period is currently running. Tests assert on
+// it so they can read the timer's state at once, instead of waiting out a
+// wall-clock interval and inferring the state from what did not happen.
+func (t *idleTimer) armed() bool {
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.current != nil
+}
+
+// TestIdleTimeoutReaderStopsTimerBetweenReads proves the reader disarms its
+// watchdog once a read returns, so a consumer that is slow to ask for the
+// next chunk is not mistaken for a stalled transfer. The timeout is long and
+// never waited on: the assertion reads the timer's armed state, so the test
+// neither pays for the interval nor races it.
 func TestIdleTimeoutReaderStopsTimerBetweenReads(t *testing.T) {
-	idleCh := make(chan struct{}, 1)
-	reader := newIdleTimeoutReader(
-		bytes.NewReader([]byte("abc")),
-		20*time.Millisecond,
-		func() {
-			select {
-			case idleCh <- struct{}{}:
-			default:
-			}
-		},
-	)
+	t.Parallel()
+
+	var idleCount atomic.Int32
+	timer := newIdleTimer(time.Hour, func() {
+		idleCount.Add(1)
+	})
+	reader := newIdleTimeoutReader(bytes.NewReader([]byte("abc")), timer)
+	require.True(t, timer.armed(), "constructor should arm the timer")
 
 	buf := make([]byte, 1)
 	n, err := reader.Read(buf)
@@ -479,15 +732,34 @@ func TestIdleTimeoutReaderStopsTimerBetweenReads(t *testing.T) {
 	require.Equal(t, 1, n)
 	require.Equal(t, []byte("a"), buf)
 
-	testutil.RequireNoReceive(
+	require.False(
 		t,
-		idleCh,
-		50*time.Millisecond,
+		timer.armed(),
 		"idle timer should be stopped between reads",
+	)
+	require.Zero(t, idleCount.Load())
+}
+
+func TestIdleTimerRunsCallback(t *testing.T) {
+	t.Parallel()
+
+	fired := make(chan struct{})
+	timer := newIdleTimer(10*time.Millisecond, func() {
+		close(fired)
+	})
+	t.Cleanup(timer.Stop)
+
+	testutil.RequireReceive(
+		t,
+		fired,
+		testutil.AsyncWait,
+		"idle timer callback",
 	)
 }
 
 func TestDownloadSnapshotContextCancel(t *testing.T) {
+	t.Parallel()
+
 	server := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Simulate a slow response that never completes
@@ -511,6 +783,8 @@ func TestDownloadSnapshotContextCancel(t *testing.T) {
 }
 
 func TestDownloadSnapshotServerError(t *testing.T) {
+	t.Parallel()
+
 	server := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			http.Error(
@@ -534,6 +808,8 @@ func TestDownloadSnapshotServerError(t *testing.T) {
 }
 
 func TestDownloadSnapshotTransientRetrySucceeds(t *testing.T) {
+	t.Parallel()
+
 	content := []byte("ok-after-transient")
 	var requestCount atomic.Int32
 
@@ -575,6 +851,8 @@ func TestDownloadSnapshotTransientRetrySucceeds(t *testing.T) {
 }
 
 func TestDownloadSnapshotTransientRetryExhausted(t *testing.T) {
+	t.Parallel()
+
 	var requestCount atomic.Int32
 
 	server := httptest.NewServer(
@@ -604,6 +882,8 @@ func TestDownloadSnapshotTransientRetryExhausted(t *testing.T) {
 }
 
 func TestIsTransientDownloadError(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name      string
 		err       error
@@ -654,6 +934,8 @@ func TestIsTransientDownloadError(t *testing.T) {
 }
 
 func TestDownloadSnapshotSizeVerification(t *testing.T) {
+	t.Parallel()
+
 	content := []byte("exact-size-content")
 
 	server := httptest.NewServer(
@@ -684,6 +966,8 @@ func TestDownloadSnapshotSizeVerification(t *testing.T) {
 }
 
 func TestDownloadSnapshotSizeMismatch(t *testing.T) {
+	t.Parallel()
+
 	content := []byte("short-content")
 
 	server := httptest.NewServer(
@@ -710,6 +994,187 @@ func TestDownloadSnapshotSizeMismatch(t *testing.T) {
 	require.Contains(t, err.Error(), "download size mismatch")
 }
 
+func TestDownloadSnapshotBoundsResponseRead(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		expect  int64
+		wantErr bool
+	}{
+		{name: "exact boundary", body: "abc", expect: 3},
+		{name: "over boundary", body: "abcdefgh", expect: 3, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			responseBody := &trackingDownloadBody{}
+			responseBody.reader = *bytes.NewReader([]byte(tc.body))
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       responseBody,
+					Header:     make(http.Header),
+				}, nil
+			})}
+			path, err := DownloadSnapshot(context.Background(), DownloadConfig{
+				URL:                 "https://example.test/snapshot.tar.zst",
+				DestDir:             t.TempDir(),
+				Filename:            "bounded.tar.zst",
+				ExpectedSize:        tc.expect,
+				HTTPClient:          client,
+				MaxTransientRetries: -1,
+			})
+			if tc.wantErr {
+				require.Error(t, err)
+				require.ErrorIs(t, err, ErrDownloadTooLarge)
+				require.Contains(t, err.Error(), "exceeds expected size")
+				require.Empty(t, path)
+				require.LessOrEqual(t, responseBody.read.Load(), tc.expect+1)
+				return
+			}
+			require.NoError(t, err)
+			data, readErr := os.ReadFile(path)
+			require.NoError(t, readErr)
+			require.Equal(t, tc.body, string(data))
+			require.Equal(t, tc.expect, responseBody.read.Load())
+		})
+	}
+}
+
+func TestDownloadSnapshotMaxExpectedSizeDoesNotOverflow(t *testing.T) {
+	body := &trackingDownloadBody{}
+	body.reader = *bytes.NewReader([]byte("x"))
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: body, Header: make(http.Header)}, nil
+	})}
+	path, err := DownloadSnapshot(context.Background(), DownloadConfig{
+		URL:          "https://example.test/snapshot.tar.zst",
+		DestDir:      t.TempDir(),
+		Filename:     "max.tar.zst",
+		ExpectedSize: math.MaxInt64,
+		MaxBytes:     math.MaxInt64,
+		HTTPClient:   client,
+	})
+	require.ErrorContains(t, err, "download size mismatch")
+	require.Equal(t, int64(1), body.read.Load())
+	require.Empty(t, path)
+}
+
+func TestDownloadSnapshotConfiguredByteLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name, prefix, body, contentRange string
+		status                           int
+		contentLength, wantRead          int64
+		wantError, removed               bool
+	}{
+		{name: "below", body: "ab", status: 200, contentLength: -1, wantRead: 2},
+		{name: "exact", body: "abc", status: 200, contentLength: -1, wantRead: 3},
+		{name: "stream oversized", body: "abcdefgh", status: 200, contentLength: -1, wantRead: 4, wantError: true, removed: true},
+		{name: "header oversized", body: "abcdefgh", status: 200, contentLength: 8, wantError: true},
+		{name: "resume exact", prefix: "a", body: "bc", status: 206, contentRange: "bytes 1-2/3", contentLength: -1, wantRead: 2},
+		{name: "resume oversized", prefix: "a", body: "bcdefgh", status: 206, contentRange: "bytes 1-7/8", contentLength: -1, wantRead: 3, wantError: true, removed: true},
+		{name: "resume header oversized", prefix: "a", body: "bcdefgh", status: 206, contentRange: "bytes 1-7/8", contentLength: math.MaxInt64, wantError: true},
+		{name: "range ignored", prefix: "ab", body: "abc", status: 200, contentLength: -1, wantRead: 3},
+		{name: "range ignored oversized", prefix: "ab", body: "abcdefgh", status: 200, contentLength: -1, wantRead: 4, wantError: true, removed: true},
+		{name: "already complete", prefix: "abc", status: 416, contentRange: "bytes */3", contentLength: -1},
+		{name: "existing oversized", prefix: "abcd", status: 416, contentRange: "bytes */4", contentLength: -1, wantError: true, removed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			dest := filepath.Join(dir, "archive")
+			if tc.prefix != "" {
+				require.NoError(t, os.WriteFile(dest, []byte(tc.prefix), 0o600))
+			}
+			body := &trackingDownloadBody{reader: *bytes.NewReader([]byte(tc.body))}
+			requests := 0
+			cfg := DownloadConfig{
+				URL: "https://example.test/archive", DestDir: dir, Filename: "archive",
+				MaxBytes: 3,
+				HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					requests++
+					if tc.prefix != "" {
+						require.Equal(t, fmt.Sprintf("bytes=%d-", len(tc.prefix)), r.Header.Get("Range"))
+					}
+					return &http.Response{StatusCode: tc.status, Body: body,
+						ContentLength: tc.contentLength, Header: http.Header{"Content-Range": {tc.contentRange}}}, nil
+				})},
+			}
+			path, err := DownloadSnapshot(context.Background(), cfg)
+			require.Equal(t, tc.wantRead, body.read.Load(), "response read must stay within remaining file budget plus one probe byte")
+			if tc.wantError {
+				require.ErrorIs(t, err, ErrDownloadTooLarge)
+				require.Empty(t, path)
+				if tc.removed {
+					require.NoFileExists(t, dest)
+				}
+			} else {
+				require.NoError(t, err)
+				data, err := os.ReadFile(path)
+				require.NoError(t, err)
+				want := tc.body
+				if tc.status != 200 {
+					want = tc.prefix + tc.body
+				}
+				require.Equal(t, want, string(data))
+			}
+			wantRequests := 1
+			if len(tc.prefix) > 3 {
+				wantRequests = 0
+			}
+			require.Equal(t, wantRequests, requests, "size errors must not retry")
+		})
+	}
+}
+
+func TestDownloadSnapshotRestartByteLimit(t *testing.T) {
+	for _, advertised := range []bool{false, true} {
+		for _, content := range []string{"abc", "abcdefgh"} {
+			t.Run(fmt.Sprintf("advertised=%t/length=%d", advertised, len(content)), func(t *testing.T) {
+				dir := t.TempDir()
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "archive"), []byte("a"), 0o600))
+				body := &trackingDownloadBody{reader: *bytes.NewReader([]byte(content))}
+				requests := 0
+				path, err := DownloadSnapshot(context.Background(), DownloadConfig{
+					URL: "https://example.test/archive", DestDir: dir, Filename: "archive", MaxBytes: 3,
+					HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+						requests++
+						if requests == 1 {
+							return &http.Response{StatusCode: 206, Body: io.NopCloser(strings.NewReader("ignored")), Header: http.Header{"Content-Range": {"bytes 2-3/4"}}}, nil
+						}
+						require.Empty(t, r.Header.Get("Range"))
+						length := int64(-1)
+						if advertised {
+							length = int64(len(content))
+						}
+						return &http.Response{StatusCode: 200, Body: body, ContentLength: length, Header: make(http.Header)}, nil
+					})},
+				})
+				require.Equal(t, 2, requests)
+				if len(content) > 3 {
+					require.ErrorIs(t, err, ErrDownloadTooLarge)
+					wantRead := int64(4)
+					if advertised {
+						wantRead = 0
+					}
+					require.Equal(t, wantRead, body.read.Load())
+				} else {
+					require.NoError(t, err)
+					data, err := os.ReadFile(path)
+					require.NoError(t, err)
+					require.Equal(t, content, string(data))
+				}
+			})
+		}
+	}
+}
+
+func TestDownloadConfigByteLimit(t *testing.T) {
+	require.Equal(t, DefaultMaxDownloadBytes, (DownloadConfig{}).sizeLimit())
+	require.Error(t, (DownloadConfig{MaxBytes: -1}).Validate())
+	require.ErrorIs(t, (DownloadConfig{MaxBytes: 3, ExpectedSize: 4}).Validate(), ErrDownloadTooLarge)
+	require.NoError(t, (DownloadConfig{MaxBytes: math.MaxInt64, ExpectedSize: math.MaxInt64}).Validate())
+	require.Equal(t, int64(2), (DownloadConfig{MaxBytes: 3, ExpectedSize: 2}).sizeLimit())
+}
+
 // TestDownloadSnapshotRejectsPreexistingSymlinkEscape proves the TOCTOU
 // fix for issue #3147: a symlink placed at the download destination
 // path *before* the download starts, pointing outside DestDir, must
@@ -718,6 +1183,8 @@ func TestDownloadSnapshotSizeMismatch(t *testing.T) {
 // the OS and follow such a symlink, writing attacker-controlled data
 // outside DestDir.
 func TestDownloadSnapshotRejectsPreexistingSymlinkEscape(t *testing.T) {
+	t.Parallel()
+
 	if runtime.GOOS == "windows" {
 		t.Skip("creating symlinks requires elevated privileges on windows")
 	}
@@ -760,6 +1227,8 @@ func TestDownloadSnapshotRejectsPreexistingSymlinkEscape(t *testing.T) {
 // would silently succeed and write through such a symlink, because
 // neither call inspects what it is binding to before using it.
 func TestDownloadSnapshotRefusesSymlinkedDestDir(t *testing.T) {
+	t.Parallel()
+
 	server := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte("data"))
@@ -802,6 +1271,8 @@ func TestDownloadSnapshotRefusesSymlinkedDestDir(t *testing.T) {
 // publish.yml), but this proves the behavior rather than just the
 // absence of a CVE identifier.
 func TestOsRootRejectsFinalSymlinkWithTrailingSlash(t *testing.T) {
+	t.Parallel()
+
 	if runtime.GOOS == "windows" {
 		t.Skip("creating symlinks requires elevated privileges on windows")
 	}
@@ -829,6 +1300,8 @@ func TestOsRootRejectsFinalSymlinkWithTrailingSlash(t *testing.T) {
 }
 
 func TestDownloadSnapshotDefaultFilename(t *testing.T) {
+	t.Parallel()
+
 	server := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte("data"))
@@ -852,6 +1325,8 @@ func TestDownloadSnapshotDefaultFilename(t *testing.T) {
 }
 
 func TestParseContentRangeStart(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name   string
 		header string
@@ -908,6 +1383,8 @@ func TestParseContentRangeStart(t *testing.T) {
 }
 
 func TestDownloadSnapshotResumeContentRangeMismatch(t *testing.T) {
+	t.Parallel()
+
 	// Server returns 206 but with the wrong Content-Range start
 	// offset. The downloader should detect this and restart from
 	// scratch.
@@ -973,6 +1450,8 @@ func TestDownloadSnapshotResumeContentRangeMismatch(t *testing.T) {
 }
 
 func TestDownloadSnapshotResumeMissingContentRange(t *testing.T) {
+	t.Parallel()
+
 	// Server returns 206 without a Content-Range header. The
 	// downloader should treat this as a mismatch (since
 	// parseContentRangeStart returns -1) and restart from scratch.
@@ -1060,7 +1539,46 @@ func createTestArchive(
 	return buf.Bytes()
 }
 
+func TestExtractArchiveZstdLimits(t *testing.T) {
+	archive := createTestArchive(t, map[string]string{"payload": strings.Repeat("x", 4096)})
+	var frame zstd.Header
+	require.NoError(t, frame.Decode(archive))
+	require.True(t, frame.SingleSegment)
+	require.Greater(t, frame.FrameContentSize, uint64(1024))
+	require.Less(t, frame.FrameContentSize, uint64(1<<20))
+	archivePath := filepath.Join(t.TempDir(), "archive.tar.zst")
+	require.NoError(t, os.WriteFile(archivePath, archive, 0o600))
+	for _, tc := range []struct {
+		name           string
+		window, memory uint64
+		wantError      bool
+	}{
+		{name: "valid", window: 1 << 20, memory: 1 << 20},
+		{name: "window exceeded", window: 1024, memory: 1 << 20, wantError: true},
+		{name: "memory exceeded", window: 1 << 20, memory: 1024, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "extracted")
+			_, err := ExtractArchive(context.Background(), archivePath, dir, nil, WithZstdLimits(tc.window, tc.memory))
+			if tc.wantError {
+				// For a single-segment frame, the pinned decoder derives the
+				// window from FCS. Both the memory check in framedec.reset
+				// and the async window check return ErrDecoderSizeExceeded.
+				require.ErrorIs(t, err, zstd.ErrDecoderSizeExceeded)
+				require.NoDirExists(t, dir)
+			} else {
+				require.NoError(t, err)
+				data, err := os.ReadFile(filepath.Join(dir, "payload"))
+				require.NoError(t, err)
+				require.Equal(t, strings.Repeat("x", 4096), string(data))
+			}
+		})
+	}
+}
+
 func TestExtractArchive(t *testing.T) {
+	t.Parallel()
+
 	files := map[string]string{
 		"immutable/00000.chunk":     "chunk0 data",
 		"immutable/00000.primary":   "primary0 data",
@@ -1096,6 +1614,8 @@ func TestExtractArchive(t *testing.T) {
 }
 
 func TestExtractArchiveDirectoryTraversal(t *testing.T) {
+	t.Parallel()
+
 	// Create an archive with a path traversal attempt
 	archiveData := createTestArchive(t, map[string]string{
 		"../../../etc/passwd": "evil",
@@ -1113,6 +1633,8 @@ func TestExtractArchiveDirectoryTraversal(t *testing.T) {
 }
 
 func TestExtractArchiveWithDirectories(t *testing.T) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 
 	zw, err := zstd.NewWriter(&buf)
@@ -1161,6 +1683,8 @@ func TestExtractArchiveWithDirectories(t *testing.T) {
 }
 
 func TestValidRelPath(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name  string
 		path  string

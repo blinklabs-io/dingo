@@ -53,6 +53,8 @@ func datumOptionOutput(
 func TestCanonicalUTxOEntry_DistinguishesInlineDatumFromHashOnlyReference(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	addr, err := lcommon.NewAddressFromParts(
 		lcommon.AddressTypeKeyNone,
 		lcommon.AddressNetworkTestnet,
@@ -79,7 +81,9 @@ func TestCanonicalUTxOEntry_DistinguishesInlineDatumFromHashOnlyReference(
 	hashOnly := datumOptionOutput(t, addr, hashOnlyOptionCbor)
 
 	require.Equal(
-		t, hash, hashOnly.DatumHash(),
+		t,
+		hash,
+		hashOnly.DatumHash(),
 		"the fixture must carry the identical DatumHash to isolate the form-only difference",
 	)
 	require.NotNil(t, inline.Datum(), "inline form must have a non-nil Datum()")

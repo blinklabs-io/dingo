@@ -214,16 +214,23 @@ func deriveRewardInputs(
 		totalDelegators += agg.delegators
 	}
 
+	// This basis excludes no pool: every pool it could aggregate from the
+	// import is included in poolInputs, so TotalActiveStake is exactly their
+	// summed delegated stake with nothing held back (dingo #4025).
+	noExcludedActiveStake := types.Uint64(0)
+
 	return &rewardInputBundle{
 		epoch: epoch,
 		snapshot: &models.RewardSnapshot{
-			Epoch:            epoch,
-			SnapshotType:     "mark",
-			TotalActiveStake: types.Uint64(totalStake),
-			TotalPoolCount:   uint64(len(poolInputs)),
-			TotalDelegators:  totalDelegators,
-			CapturedSlot:     capturedSlot,
-			BoundarySlot:     boundarySlot,
+			Epoch:               epoch,
+			SnapshotType:        "mark",
+			TotalActiveStake:    types.Uint64(totalStake),
+			ExcludedActiveStake: &noExcludedActiveStake,
+			TotalPoolCount:      uint64(len(poolInputs)),
+			TotalDelegators:     totalDelegators,
+			CapturedSlot:        capturedSlot,
+			BoundarySlot:        boundarySlot,
+			CalculationVersion:  models.RewardStakeCalculationVersion,
 			// Provisional, not authoritative: this basis was reconstructed
 			// from an imported snapshot rather than captured at this node's
 			// own SNAP point, so a later authoritative capture must be free
@@ -567,10 +574,14 @@ func seedImportedRewardInputs(
 			if logger != nil {
 				logger.Warn(
 					"not seeding reward inputs for an imported epoch: the derived basis contains no pool inputs, so that epoch's reward round will be skipped and its rewards never credited",
-					"component", "ledgerstate",
-					"epoch", c.epoch,
-					"snapshot", c.name,
-					"error", reason,
+					"component",
+					"ledgerstate",
+					"epoch",
+					c.epoch,
+					"snapshot",
+					c.name,
+					"error",
+					reason,
 				)
 			}
 			continue
@@ -691,17 +702,17 @@ func emptyRewardSeedFailureReason(snap *ParsedSnapShot) string {
 	reasons := make([]string, 0, len(pools))
 	for _, pool := range pools {
 		pool = boundRewardSeedFailurePoolKey(pool)
-		reasons = append(reasons, fmt.Sprintf("pool %s has no parameters", pool))
+		reasons = append(
+			reasons,
+			fmt.Sprintf("pool %s has no parameters", pool),
+		)
 	}
 	return generic + ": " + boundRewardSeedFailureReasons(reasons)
 }
 
 func boundRewardSeedFailureReasons(reasons []string) string {
 	sort.Strings(reasons)
-	shown := len(reasons)
-	if shown > maxRewardSeedFailurePools {
-		shown = maxRewardSeedFailurePools
-	}
+	shown := min(len(reasons), maxRewardSeedFailurePools)
 	bounded := append([]string(nil), reasons[:shown]...)
 	if omitted := len(reasons) - shown; omitted > 0 {
 		bounded = append(

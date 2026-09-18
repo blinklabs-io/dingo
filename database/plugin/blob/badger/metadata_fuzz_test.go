@@ -28,7 +28,7 @@ func FuzzCompactBlockMetadataRoundTrip(f *testing.F) {
 
 	f.Fuzz(
 		func(t *testing.T, id uint64, typeValue uint64, height uint64, prevHash []byte) {
-			if len(prevHash) > blockMetadataPrevHashMaxLen {
+			if len(prevHash) > types.BlockMetadataPrevHashMaxLen {
 				return
 			}
 
@@ -76,10 +76,10 @@ func FuzzUnmarshalBlockMetadata(f *testing.F) {
 		if err != nil {
 			return
 		}
-		if len(metadata.PrevHash) > blockMetadataPrevHashMaxLen {
+		if len(metadata.PrevHash) > types.BlockMetadataPrevHashMaxLen {
 			t.Fatalf("metadata prev hash length = %d, want <= %d",
 				len(metadata.PrevHash),
-				blockMetadataPrevHashMaxLen,
+				types.BlockMetadataPrevHashMaxLen,
 			)
 		}
 	})

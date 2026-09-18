@@ -18,4 +18,4 @@ package lifecycle
 
 // RegisterBuiltinDestinations is a no-op in this build: S3/GCS support is
 // only compiled in with -tags dingo_extra_plugins.
-func RegisterBuiltinDestinations(*DestinationRegistry) {}
+func RegisterBuiltinDestinations(*DestinationRegistry, ...ManifestOption) {}
