@@ -3352,17 +3352,32 @@ per-candidate effective-key computation (registration history and retirement
 are tracked independently, so retiring never rewrites what a pool's
 registrations said), so a retired candidate and a different, genuinely active
 pool that later re-registered the same, by-then-free key can both appear as
-candidates for one lookup. The Go loop tries each ranked candidate through the
-existing `activePoolOrNil` in turn and returns the first one that is still
-active, rather than checking retirement on only whichever candidate a single
-`ORDER BY ... LIMIT 1` happened to pick -- otherwise the retired candidate
-being tried first resolves the whole lookup to nil even though the key is
-genuinely in use (caught by review on this PR;
-`TestGetPoolByVrfKeyHashSkipsRetiredCandidateForActiveOwner`). Retirement
-itself is still checked via the existing `activePoolOrNil`, unchanged:
-retirement timing is a separate concern from this deferral, and reusing that
-check avoids a second, divergent implementation of POOLREAP cancellation
-precedence.
+candidates for one lookup. The Go loop tries each ranked candidate in turn and
+returns the first one the query already confirms is active, rather than
+checking retirement on only whichever candidate a single `ORDER BY ... LIMIT 1`
+happened to pick (caught by review on this PR;
+`TestGetPoolByVrfKeyHashSkipsRetiredCandidateForActiveOwner`).
+
+Retirement is resolved against `epochStartSlot`'s own epoch (`epoch_bound`),
+not the live database tip, via a `pool_active` CTE applied to *both* tiers --
+not only tier 1, since restricting it to tier 1 alone still let a retired
+pool's same-epoch registration leak through tier 2 unfiltered. `pool_active`
+mirrors `GetActivePoolKeyHashesAtSlot`'s precedence rule (a later registration
+cancels an earlier retirement; a retirement whose target epoch is still ahead
+of `epoch_bound` has not taken effect), compared against each candidate's own
+`effective_reg` row rather than a fresh `<=`-bounded lookup. This exists
+because a pool that retires and later submits a fresh registration for a
+*different* key un-retires via that new registration -- cardano-ledger treats
+it as a first registration, not a deferred re-registration, since the pool had
+left `psStakePools` -- and checking retirement against "now" (the earlier
+`activePoolOrNil` call this replaced) let that pool's stale, pre-retirement
+registration for its *old* key still resolve as active, reporting the old key
+in use when the pool no longer held it: this method's own bug class,
+reintroduced (caught by review on this PR;
+`TestGetPoolByVrfKeyHashFreesKeyAfterRetirementThenDifferentKeyReRegistration`).
+`epoch_bound` resolves to `NULL`, not an error, when no epoch row covers
+`epochStartSlot`; a retirement is then never treated as confirmed-effective,
+failing toward "still active" rather than incorrectly freeing a key.
 
 `epochStartSlot` must be pinned once at the start of the validation or query
 that calls this, not re-read from a live snapshot on every call:
@@ -3374,7 +3389,12 @@ validation (e.g. evaluating scripts) can span a writer publishing a newer
 epoch boundary, and reading it live would let one certificate's deferral
 check disagree with another's in the same transaction or block, or with
 itself across repeated calls (caught by review on this PR;
-`TestLedgerViewIsVrfKeyInUseIgnoresConcurrentSnapshotRepublish`).
+`TestLedgerViewIsVrfKeyInUseIgnoresConcurrentSnapshotRepublish`). The pin is
+also verified through each real construction site directly rather than only
+against a hand-set field on a bare `&LedgerView{}`
+(`TestLedgerStateNewViewPinsEpochStartSlot`,
+`TestLedgerStateValidateTxPinsEpochStartSlot`,
+`TestLedgerStateEvaluateTxPinsEpochStartSlot`).
 
 ### `GetPoolsRetiringAtEpoch`
 
