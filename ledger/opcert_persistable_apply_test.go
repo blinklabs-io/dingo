@@ -94,6 +94,7 @@ func TestLedgerProcessBlockRejectsOpCertCounterAbovePersistableBound(
 			nil,
 			nil,
 			0,
+			0,
 			false,
 		)
 		return err

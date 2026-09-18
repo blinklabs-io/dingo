@@ -70,10 +70,11 @@ const (
 	// non-progressing peer forever.
 	catchUpPinStallTimeout = 20 * time.Second
 
-	// defaultSwitchBackCooldown is the default minimum time a connection must
-	// stay abandoned before the longer-chain escape (see
-	// pinIncumbentDuringCatchUpLocked) may hand the active connection back to
-	// it. See ChainSelectorConfig.SwitchBackCooldown.
+	// defaultSwitchBackCooldown is the default minimum time between
+	// discretionary releases of the anti-flap pin (see
+	// pinIncumbentDuringCatchUpLocked): per connection, before an abandoned
+	// peer may reclaim the active connection, and globally, between any two
+	// discretionary hand-offs. See ChainSelectorConfig.SwitchBackCooldown.
 	defaultSwitchBackCooldown = 2 * time.Second
 )
 
@@ -159,15 +160,16 @@ type ChainSelectorConfig struct {
 	// export a counter.
 	OnRollbackRegistration func(RollbackRegistrationOutcome)
 	// SwitchBackCooldown bounds the rate of active-connection handoffs
-	// driven by the anti-flap pin's longer-chain escape
-	// (pinIncumbentDuringCatchUpLocked): once the active connection moves
-	// away from a peer, that peer cannot reclaim it via the longer-chain
-	// escape again until this much time has passed, even if it currently
-	// leads by more than catchUpPinHeadMargin. This is a rate limit, not a
-	// correctness rule -- the peer is still adopted once the cooldown
-	// expires (or immediately via the incumbent-unselectable or
-	// progress-stall escapes, which this never gates) -- and it exists
-	// because two peers whose delivered frontiers repeatedly leapfrog each
+	// driven by the anti-flap pin's discretionary escapes -- longer-chain
+	// and progress-stall (pinIncumbentDuringCatchUpLocked). Once the active
+	// connection moves away from a peer, that peer cannot reclaim it through
+	// either escape until this much time has passed, and no discretionary
+	// hand-off to any connection happens within this much time of the
+	// previous one, even if the challenger currently leads by more than
+	// catchUpPinHeadMargin. This is a rate limit, not a correctness rule --
+	// the challenger is still adopted once the cooldown expires, and the
+	// mandatory incumbent-unselectable release is never gated -- and it
+	// exists because peers whose delivered frontiers repeatedly leapfrog each
 	// other by more than the margin can otherwise hand the chainsync/
 	// blockfetch pipeline back and forth on every such crossing. 0 (the
 	// zero value) is replaced with defaultSwitchBackCooldown by
@@ -212,6 +214,25 @@ type ChainSelector struct {
 	// moved away from it. Read and written under mutex. See
 	// switchBackDebouncedLocked and recordSwitchAwayLocked.
 	recentlyLeft map[ouroboros.ConnectionId]time.Time
+	// lastDiscretionarySwitchAt records when the active connection last moved
+	// away from an incumbent via a DISCRETIONARY release of
+	// pinIncumbentDuringCatchUpLocked (the longer-chain or progress-stall
+	// escape) -- never via the mandatory incumbent-unselectable release, which
+	// must stay instantaneous. It is the global counterpart to recentlyLeft:
+	// recentlyLeft alone only debounces handing the connection BACK to the
+	// SPECIFIC peer just abandoned, so three or more peers whose delivered
+	// frontiers take turns marginally leading each other can rotate through
+	// the debounce forever -- by the time evaluation returns to a given
+	// connection, it is never the one "just" left, so switchBackDebouncedLocked
+	// never fires for it, even though the active connection is still handed
+	// off roughly once per cooldown window with zero net forward progress
+	// (confirmed live: three peers thrashing every ~2s, block height frozen).
+	// Gating every discretionary release on this single timestamp bounds the
+	// active-connection handoff rate to at most once per switchBackCooldown
+	// regardless of how many distinct peers are rotating through it. Read and
+	// written under mutex. See switchBackDebouncedLocked and
+	// recordSwitchAwayLocked.
+	lastDiscretionarySwitchAt time.Time
 
 	// lastCorroborationFailedConn dedups GenesisCorroborationFailedEvent so a
 	// persistently uncorroborated fast source does not emit an event on every
@@ -1800,6 +1821,10 @@ func (cs *ChainSelector) localTipStalledLocked() bool {
 //   - the challenger is genuinely ahead of the incumbent by more than
 //     catchUpPinHeadMargin blocks (a real longer chain, not a head micro-fork).
 //
+// The last two releases are DISCRETIONARY and are rate-limited by
+// SwitchBackCooldown, both per abandoned connection and globally across every
+// discretionary hand-off; the releases above them are mandatory and ungated.
+//
 // Otherwise it PINS (returns true, keep the incumbent).
 //
 // Must be called with cs.mutex held.
@@ -1827,6 +1852,7 @@ func (cs *ChainSelector) pinIncumbentDuringCatchUpLocked(
 	if incumbentTip.awaitingFirstHeader {
 		return false
 	}
+	// Release if the incumbent is no longer a viable selection target.
 	// Release if the incumbent is no longer a viable selection target. This is
 	// a MANDATORY release, never subject to the switch-back debounce below:
 	// there is no "keeping" a connection that is gone, ineligible, stale, or
@@ -1839,14 +1865,25 @@ func (cs *ChainSelector) pinIncumbentDuringCatchUpLocked(
 	// alive and selectable, and the escape is a per-evaluation judgment call
 	// that the challenger looks better right now. Both existing escapes have
 	// no memory of very recent switches, so both are gated by the same
-	// switch-back debounce, not just the longer-chain one: refuse to hand the
-	// active connection back to a peer abandoned less than switchBackCooldown
-	// ago, even though it currently satisfies an escape, unless the
-	// challenger was never recently active. This does not weaken either
-	// escape's liveness guarantee -- a genuinely new candidate (not the peer
-	// we just left) is adopted immediately regardless of which escape fired --
-	// it only stops the active connection ping-ponging between a small set of
-	// very recently active peers.
+	// switch-back debounce: refuse to hand the active connection back to a
+	// peer abandoned less than switchBackCooldown ago (switchBackDebouncedLocked,
+	// per-connection), AND refuse ANY discretionary hand-off at all less than
+	// switchBackCooldown after the previous one, to whichever connection
+	// (switchBackRateLimitedLocked, global). The per-connection check alone
+	// stops two peers ping-ponging, but three or more peers whose delivered
+	// frontiers take turns marginally leading each other defeat it: by the
+	// time evaluation cycles back around to a given connection, enough real
+	// time has usually passed that IT is never "recently abandoned", even
+	// though the active connection is still being handed off roughly once per
+	// evaluation with zero net forward progress. Confirmed live: three peer
+	// connections thrashing every ~2s indefinitely, applied block height
+	// frozen throughout. The global rate limit closes that gap: at most one
+	// discretionary hand-off per cooldown window, no matter how many distinct
+	// peers are rotating through it. A genuinely new challenger is delayed by
+	// at most one cooldown window rather than exempted outright -- consistent
+	// with this being a rate limit, not a correctness rule, and required
+	// because "never seen as active before" is exactly the property a small
+	// rotating set of real peers can each satisfy in turn forever.
 	//
 	// This matters most for the progress-stall escape just below: once the
 	// applied local tip stalls, localTipStalledLocked stays true on EVERY
@@ -1872,6 +1909,16 @@ func (cs *ChainSelector) pinIncumbentDuringCatchUpLocked(
 			)
 			return true
 		}
+		if cs.switchBackRateLimitedLocked() {
+			cs.config.Logger.Debug(
+				"debouncing discretionary switch: global rate limit",
+				"incumbent", previousBest.String(),
+				"challenger", challengerConn.String(),
+				"switch_back_cooldown", cs.switchBackCooldown,
+			)
+			return true
+		}
+		cs.lastDiscretionarySwitchAt = cs.now()
 		return false
 	}
 	// Otherwise this is a head micro-fork / same-height sibling: pin the
@@ -1914,6 +1961,24 @@ func (cs *ChainSelector) switchBackDebouncedLocked(
 		return false
 	}
 	return cs.now().Sub(leftAt) < cs.switchBackCooldown
+}
+
+// switchBackRateLimitedLocked reports whether a discretionary release
+// (longer-chain or progress-stall escape) happened less than
+// switchBackCooldown ago, regardless of which connection was involved. This
+// is the global counterpart to switchBackDebouncedLocked: it bounds the
+// discretionary hand-off rate to at most once per cooldown window even when
+// three or more distinct peers rotate through the incumbent role, each one
+// individually clearing the per-connection debounce by the time evaluation
+// returns to it. Must be called with cs.mutex held.
+func (cs *ChainSelector) switchBackRateLimitedLocked() bool {
+	if cs.switchBackCooldown <= 0 {
+		return false
+	}
+	if cs.lastDiscretionarySwitchAt.IsZero() {
+		return false
+	}
+	return cs.now().Sub(cs.lastDiscretionarySwitchAt) < cs.switchBackCooldown
 }
 
 // recordSwitchAwayLocked notes that the active connection just moved away
