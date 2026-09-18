@@ -150,6 +150,14 @@ type hardForkSummaryCacheEntry struct {
 // The result is cached per hardForkSummaryCacheKey (see its doc comment); the
 // underlying epoch-cache walk is O(known epochs), which otherwise grows
 // without bound as the chain ages (issue #2093).
+//
+// The returned Summary is shared by every caller holding the same cache entry
+// and must be treated as read only. Callers must not assign to its fields,
+// append to Eras, or write through an interior pointer such as the one
+// CurrentEra returns; doing so would corrupt the era boundaries every
+// concurrent reader sees. Copy it first if a mutable Summary is needed. The
+// alternative — returning a deep copy per call — would restore the per-call
+// allocation this cache exists to remove.
 func (ls *LedgerState) HardForkSummary() (*hardfork.Summary, error) {
 	return ls.hardForkSummaryAnchoredAt(0)
 }
@@ -169,6 +177,9 @@ func (ls *LedgerState) HardForkSummary() (*hardfork.Summary, error) {
 //
 // horizonAnchorSlot 0 keeps the published tip, which is what every caller
 // without an applied block in hand wants.
+//
+// The returned Summary is cached and shared; see HardForkSummary for the
+// read-only contract every caller of either method is bound by.
 func (ls *LedgerState) hardForkSummaryAnchoredAt(
 	horizonAnchorSlot uint64,
 ) (*hardfork.Summary, error) {
