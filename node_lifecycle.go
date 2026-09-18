@@ -922,7 +922,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 			MaxInboundConns:        n.config.maxInboundConns,
 			MaxNtCConns:            n.config.maxNtCConns,
 			MaxNtCConnectionsPerIP: n.config.maxNtCConnectionsPerIP,
-			ConnClosedFunc:         n.handleConnManagerClosed,
+			ConnClosedOwnerFunc:    n.handleConnManagerClosedOwner,
 		},
 	)
 	n.connManagerRecycleSubId = n.subscribeConnectionRecycleRequests(

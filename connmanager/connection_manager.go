@@ -37,6 +37,10 @@ import (
 // broad EventBus event stays NtN-only.
 type ConnectionManagerConnClosedFunc func(ouroboros.ConnectionId, bool, error)
 
+// ConnectionManagerConnClosedOwnerFunc receives the closed connection itself,
+// preserving ownership when a connection ID is reused by a replacement.
+type ConnectionManagerConnClosedOwnerFunc func(*ouroboros.Connection, bool, error)
+
 const (
 	// metricNamePrefix is the common prefix for all connection manager metrics
 	metricNamePrefix = "cardano_node_metrics_connectionManager_"
@@ -98,12 +102,13 @@ type ConnectionManager struct {
 const DefaultMaxConnectionsPerIP = 5
 
 type ConnectionManagerConfig struct {
-	PromRegistry     prometheus.Registerer
-	Logger           *slog.Logger
-	EventBus         *event.EventBus
-	ConnClosedFunc   ConnectionManagerConnClosedFunc
-	Listeners        []ListenerConfig
-	OutboundConnOpts []ouroboros.ConnectionOptionFunc
+	PromRegistry        prometheus.Registerer
+	Logger              *slog.Logger
+	EventBus            *event.EventBus
+	ConnClosedFunc      ConnectionManagerConnClosedFunc
+	ConnClosedOwnerFunc ConnectionManagerConnClosedOwnerFunc
+	Listeners           []ListenerConfig
+	OutboundConnOpts    []ouroboros.ConnectionOptionFunc
 	// ListenersProvider and OutboundConnOptsProvider supply the two fields
 	// above lazily, on first use rather than at construction. They take
 	// precedence over the plain fields and are each invoked exactly once.
@@ -805,6 +810,7 @@ func (c *ConnectionManager) addConnectionImpl(
 			// call, an evicted NtC connection's chainsync server-side client
 			// state (and its live chain iterator) would never be released.
 			c.notifyEvictedConnectionClosed(connId, existingIsNtC)
+			c.notifyEvictedConnectionClosedOwner(existingConn, existingIsNtC)
 			c.connectionsMutex.Lock()
 
 		default:
@@ -846,6 +852,7 @@ func (c *ConnectionManager) addConnectionImpl(
 				existing.onClose()
 			}
 			c.notifyEvictedConnectionClosed(connId, existingIsNtC)
+			c.notifyEvictedConnectionClosedOwner(existingConn, existingIsNtC)
 			c.connectionsMutex.Lock()
 		}
 	}
@@ -909,6 +916,9 @@ func (c *ConnectionManager) addConnectionImpl(
 		if c.config.ConnClosedFunc != nil {
 			c.config.ConnClosedFunc(connId, isNtC, err)
 		}
+		if c.config.ConnClosedOwnerFunc != nil {
+			c.config.ConnClosedOwnerFunc(conn, isNtC, err)
+		}
 	}()
 	return true
 }
@@ -938,6 +948,15 @@ func (c *ConnectionManager) notifyEvictedConnectionClosed(
 		return
 	}
 	c.config.ConnClosedFunc(connId, isNtC, errConnectionReplaced)
+}
+
+func (c *ConnectionManager) notifyEvictedConnectionClosedOwner(
+	conn *ouroboros.Connection,
+	isNtC bool,
+) {
+	if c.config.ConnClosedOwnerFunc != nil {
+		c.config.ConnClosedOwnerFunc(conn, isNtC, errConnectionReplaced)
+	}
 }
 
 func (c *ConnectionManager) RemoveConnection(

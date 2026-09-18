@@ -111,6 +111,20 @@ type LedgerView struct {
 	// in charge, which is correct for every caller with no applied block in
 	// hand (mempool validation, standalone evaluation).
 	horizonAnchorSlot uint64
+	// epochStartSlot is the current epoch's start slot, pinned from the same
+	// snapshot pp was captured from at every real validation/evaluation call
+	// site (see the pinCommitteeState call sites in state.go). IsVrfKeyInUse
+	// reads this rather than calling ls.loadConsensusSnapshot() live: a
+	// validation operation can run long enough that the writer publishes a
+	// newer snapshot -- and therefore a new epoch boundary -- in the
+	// meantime, which would let the deferral check for one certificate
+	// disagree with the check for another certificate in the same
+	// transaction or block, or with itself if IsVrfKeyInUse or
+	// PoolCurrentState were called more than once against the same input.
+	// This mirrors why syntheticV2CostModel below is pinned rather than
+	// read live. Zero is a safe default for callers with no meaningful
+	// current epoch (a bare view built outside real validation).
+	epochStartSlot uint64
 	// syntheticV2CostModel is pinned from the same snapshot pparams (pp) was
 	// captured from -- see pinSyntheticV2CostModel and
 	// SyntheticV2CostModelInEffect. It must not be re-read live from
@@ -614,11 +628,20 @@ func (lv *LedgerView) IsPoolRegistered(pkh lcommon.PoolKeyHash) bool {
 
 // IsVrfKeyInUse checks if a VRF key hash is registered by another pool.
 // Returns (inUse, owningPoolId, error).
+//
+// The reservation checked here is the one effective as of the start of the
+// current epoch, not a pool's most recent registration: a re-registration
+// submitted during the epoch in progress is deferred to the next boundary
+// (cardano-ledger's psFutureStakePoolParams), so the pool's prior key stays
+// reserved until then. See GetPoolByVrfKeyHash. The epoch boundary used is
+// lv.epochStartSlot, pinned once at view construction -- not re-read from
+// the live consensus snapshot here, per epochStartSlot's field doc comment.
 func (lv *LedgerView) IsVrfKeyInUse(
 	vrfKeyHash lcommon.Blake2b256,
 ) (bool, lcommon.PoolKeyHash, error) {
 	pool, err := lv.ls.db.GetPoolByVrfKeyHash(
 		vrfKeyHash.Bytes(),
+		lv.epochStartSlot,
 		lv.txn,
 	)
 	if err != nil {

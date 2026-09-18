@@ -71,8 +71,16 @@ type GovernanceProposal struct {
 	GovActionCbor []byte
 	ExpiredEpoch  *uint64
 	ExpiredSlot   *uint64 // Slot when expired (for rollback safety)
-	AddedSlot     uint64
-	DeletedSlot   *uint64
+	// DroppedEpoch/DroppedSlot record when an expired proposal's deposit was
+	// actually refunded and the proposal left final consideration.
+	// cardano-ledger does not refund the deposit in the same epoch it detects
+	// expiry -- that happens one full epoch later, the same one-epoch delay
+	// ratification has before enactment. ExpiredEpoch/ExpiredSlot alone would
+	// collapse that delay, so the drop is tracked separately (dingo#4411).
+	DroppedEpoch *uint64
+	DroppedSlot  *uint64
+	AddedSlot    uint64
+	DeletedSlot  *uint64
 }
 
 // GovernanceVote represents a vote cast by a Constitutional Committee member,

@@ -142,7 +142,12 @@ func TestNtCCleanupCollisionReleasesBeforeBlockedCallback(t *testing.T) {
 				)
 				close(addDone)
 			}()
-			testutil.RequireReceive(t, entered, time.Second, "replacement callback")
+			testutil.RequireReceive(
+				t,
+				entered,
+				time.Second,
+				"replacement callback",
+			)
 			requireNtCCleanupCounts(t, manager, testCase.remaining)
 			require.Equal(t, int32(1), releases.Load())
 			require.Nil(t, manager.GetConnectionById(first.Id()))
@@ -153,13 +158,27 @@ func TestNtCCleanupCollisionReleasesBeforeBlockedCallback(t *testing.T) {
 			require.Same(t, second, manager.GetConnectionById(second.Id()))
 			require.False(t, manager.RemoveConnection(first.Id(), first))
 			probeRelease := manager.reserveNtCSlot(address)
-			require.NotNil(t, probeRelease, "replacement leaked admission capacity")
+			require.NotNil(
+				t,
+				probeRelease,
+				"replacement leaked admission capacity",
+			)
 			t.Cleanup(probeRelease)
 			finishFirst()
 			finishSecond()
 			waitForConnectionManagerWatchers(t, manager)
-			require.Equal(t, int32(1), releases.Load(), "stale watcher double release")
-			require.Equal(t, int32(2), calls.Load(), "stale watcher close callback")
+			require.Equal(
+				t,
+				int32(1),
+				releases.Load(),
+				"stale watcher double release",
+			)
+			require.Equal(
+				t,
+				int32(2),
+				calls.Load(),
+				"stale watcher close callback",
+			)
 			requireNtCCleanupCounts(t, manager, 1)
 			probeRelease()
 			requireNtCCleanupCounts(t, manager, 0)
