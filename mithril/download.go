@@ -164,6 +164,14 @@ type DownloadConfig struct {
 	// escape hatch for local development and tests (e.g. against an
 	// httptest server) and should not be set in production.
 	AllowInsecureHTTP bool
+	// idleWatchdogs, when non-nil, replaces the wall-clock watchdog that
+	// decides a transfer has gone idle. It is unexported so only this
+	// package's own tests can supply one: they need idleness to occur at a
+	// chosen point in the byte stream, because a wall-clock bound short
+	// enough to keep a test fast is also short enough for a loaded machine
+	// to trip on its own, and one that is safely long makes every run wait
+	// for it. Production leaves this nil and gets newIdleTimer.
+	idleWatchdogs func(time.Duration, func()) idleWatchdog
 }
 
 // Validate checks DownloadConfig values before use.
@@ -213,36 +221,58 @@ func (cfg DownloadConfig) sizeLimitError() error {
 		ErrDownloadTooLarge, cfg.maxBytes())
 }
 
+// idleWatchdog bounds the time a download may spend making no progress.
+// A download arms one while it waits for response headers and re-arms one
+// around every body read; an armed watchdog that expires cancels the
+// download so the retry loop can resume from the bytes already on disk.
+// A watchdog is armed by its constructor.
+type idleWatchdog interface {
+	// Reset abandons any running idle period and starts a new one.
+	Reset()
+	// Stop abandons any running idle period without starting another. It
+	// returns only once a callback that was already firing has returned.
+	Stop()
+}
+
+// newIdleWatchdog builds the watchdog enforcing this download's idle
+// timeout, or nil when idle detection is disabled.
+func (cfg DownloadConfig) newIdleWatchdog(onIdle func()) idleWatchdog {
+	timeout := cfg.idleTimeout()
+	if timeout <= 0 {
+		return nil
+	}
+	if cfg.idleWatchdogs != nil {
+		return cfg.idleWatchdogs(timeout, onIdle)
+	}
+	return newIdleTimer(timeout, onIdle)
+}
+
 type idleTimeoutReader struct {
-	reader io.Reader
-	timer  *idleTimer
+	reader   io.Reader
+	watchdog idleWatchdog
 }
 
 func newIdleTimeoutReader(
 	reader io.Reader,
-	timeout time.Duration,
-	onIdle func(),
+	watchdog idleWatchdog,
 ) *idleTimeoutReader {
-	if timeout <= 0 {
-		return &idleTimeoutReader{reader: reader}
-	}
 	return &idleTimeoutReader{
-		reader: reader,
-		timer:  newIdleTimer(timeout, onIdle),
+		reader:   reader,
+		watchdog: watchdog,
 	}
 }
 
 func (r *idleTimeoutReader) Read(p []byte) (int, error) {
-	if r.timer != nil {
-		r.timer.Reset()
-		defer r.timer.Stop()
+	if r.watchdog != nil {
+		r.watchdog.Reset()
+		defer r.watchdog.Stop()
 	}
 	return r.reader.Read(p)
 }
 
 func (r *idleTimeoutReader) Stop() {
-	if r.timer != nil {
-		r.timer.Stop()
+	if r.watchdog != nil {
+		r.watchdog.Stop()
 	}
 }
 
@@ -775,12 +805,9 @@ func downloadSnapshotOnce(
 			CheckRedirect: httpsOnlyRedirect,
 		}
 	}
-	var headerTimer *idleTimer
-	if idleTimeout > 0 {
-		headerTimer = newIdleTimer(idleTimeout, func() {
-			cancelDownload(downloadIdleTimeoutCause(idleTimeout))
-		})
-	}
+	headerTimer := cfg.newIdleWatchdog(func() {
+		cancelDownload(downloadIdleTimeoutCause(idleTimeout))
+	})
 	resp, err := client.Do( //nolint:gosec // URL from caller-provided config; HTTPS-only redirect policy prevents downgrade
 		req,
 	)
@@ -877,11 +904,9 @@ func downloadSnapshotOnce(
 					err,
 				)
 			}
-			if idleTimeout > 0 {
-				headerTimer = newIdleTimer(idleTimeout, func() {
-					cancelDownload(downloadIdleTimeoutCause(idleTimeout))
-				})
-			}
+			headerTimer = cfg.newIdleWatchdog(func() {
+				cancelDownload(downloadIdleTimeoutCause(idleTimeout))
+			})
 			resp2, err := client.Do( //nolint:gosec // same URL retried after Content-Range mismatch
 				req,
 			)
@@ -1042,9 +1067,12 @@ func downloadSnapshotOnce(
 		onProgress:  cfg.OnProgress,
 	}
 
-	body := newIdleTimeoutReader(resp.Body, idleTimeout, func() {
-		cancelDownload(downloadIdleTimeoutCause(idleTimeout))
-	})
+	body := newIdleTimeoutReader(
+		resp.Body,
+		cfg.newIdleWatchdog(func() {
+			cancelDownload(downloadIdleTimeoutCause(idleTimeout))
+		}),
+	)
 	// Copy only the remaining file budget, then probe one byte without
 	// writing it. Separate probing avoids limit+1 overflow at MaxInt64.
 	_, copyErr := io.Copy(pw, io.LimitReader(body, cfg.sizeLimit()-existingSize))
