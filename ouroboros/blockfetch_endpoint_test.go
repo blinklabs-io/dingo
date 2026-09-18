@@ -65,6 +65,7 @@ func TestBlockfetchServerSendBatch_ExactEndpointContract(t *testing.T) {
 				{result: testBlockfetchIteratorBlock(201)},
 			},
 			wantBlocks: 1,
+			wantDone:   true,
 		},
 	}
 	for _, test := range tests {

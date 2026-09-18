@@ -389,12 +389,11 @@ Loop:
 				break Loop
 			}
 			if next.Block.Slot > end.Slot {
-				o.closeBlockfetchConnection(
-					conn,
-					connectionID,
-					"blockfetch range end was not reached",
-				)
-				return errors.New("blockfetch range end was not reached")
+				// The end point was validated before streaming started, so an
+				// overshoot means the chain changed under the iterator. BlockFetch
+				// has no rollback message; end this batch cleanly and let the peer
+				// request again against the new chain.
+				break Loop
 			}
 			if next.Block.Slot == end.Slot &&
 				bytes.Equal(next.Point.Hash, end.Hash) {

@@ -1086,6 +1086,9 @@ func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
 	defer ls.chainsyncMutex.Unlock()
 	ls.chainsyncBlockfetchMutex.Lock()
 	defer ls.chainsyncBlockfetchMutex.Unlock()
+	// A close is the terminal ordering barrier for every request on this
+	// connection, including one whose BatchDone was never delivered.
+	ls.completeBlockfetchRequestLocked(e.ConnectionId)
 	if sameConnectionId(ls.selectedBlockfetchConnId, e.ConnectionId) {
 		ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
 	}
@@ -7452,6 +7455,11 @@ func (ls *LedgerState) blockfetchRequestRangeStart(
 }
 
 func (ls *LedgerState) blockfetchRequestRangeCleanup() {
+	// A normal BatchDone completes its own request before reaching cleanup.
+	// Timeout, disconnect, and winner-takes-batch cleanup paths have no later
+	// completion event to release the other reservations, so close both here.
+	ls.completeBlockfetchRequestLocked(ls.activeBlockfetchConnId)
+	ls.completeBlockfetchRequestLocked(ls.shadowBlockfetchConnId)
 	// Stop the timeout timer if running and invalidate any pending callbacks
 	if ls.chainsyncBlockfetchTimeoutTimer != nil {
 		ls.chainsyncBlockfetchTimeoutTimer.Stop()

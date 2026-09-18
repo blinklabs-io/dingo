@@ -2430,6 +2430,10 @@ func TestHandleBlockfetchTimeoutLocked_RetriesQueuedRangeUsingActivePeer(
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3002},
 	}
+	shadowConnId := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3003},
+	}
 	hash1 := lcommon.NewBlake2b256([]byte("hdr-1"))
 	testChain := &chain.Chain{}
 	err := testChain.AddBlockHeader(mockHeader{
@@ -2444,6 +2448,11 @@ func TestHandleBlockfetchTimeoutLocked_RetriesQueuedRangeUsingActivePeer(
 	ls := &LedgerState{
 		chain:                  testChain,
 		activeBlockfetchConnId: connId1,
+		shadowBlockfetchConnId: shadowConnId,
+		blockfetchRequestsInFlight: map[string]chan struct{}{
+			connIdKey(connId1):      make(chan struct{}),
+			connIdKey(shadowConnId): make(chan struct{}),
+		},
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
@@ -2467,6 +2476,37 @@ func TestHandleBlockfetchTimeoutLocked_RetriesQueuedRangeUsingActivePeer(
 	assert.Equal(t, connId2, requestedConn)
 	assert.Equal(t, connId2, ls.activeBlockfetchConnId)
 	assert.Equal(t, 1, testChain.HeaderCount())
+	assert.NotContains(t, ls.blockfetchRequestsInFlight, connIdKey(connId1))
+	assert.NotContains(t, ls.blockfetchRequestsInFlight, connIdKey(shadowConnId))
+	assert.Contains(t, ls.blockfetchRequestsInFlight, connIdKey(connId2))
+}
+
+func TestHandleConnectionClosedReleasesRequestWithoutBatchDone(t *testing.T) {
+	t.Parallel()
+
+	connId := testChainsyncConnId(6120, 3001)
+	done := make(chan struct{})
+	ls := &LedgerState{
+		chain: &chain.Chain{},
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+		blockfetchRequestsInFlight: map[string]chan struct{}{
+			connIdKey(connId): done,
+		},
+	}
+
+	ls.handleConnectionClosedEvent(event.NewEvent(
+		ConnectionClosedEventType,
+		ConnectionClosedEvent{ConnectionId: connId},
+	))
+
+	assert.NotContains(t, ls.blockfetchRequestsInFlight, connIdKey(connId))
+	select {
+	case <-done:
+	default:
+		t.Fatal("connection close did not release blockfetch request waiter")
+	}
 }
 
 // TestHandleBlockfetchTimeoutLocked_RetryRetargetsSelection asserts a timeout

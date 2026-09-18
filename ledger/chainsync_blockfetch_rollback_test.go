@@ -192,11 +192,22 @@ func (f *blockfetchRollbackFixture) queueForkAHeaderAndStartBatch(
 // blockfetch event subscriber, where it is buffered pending a commit batch.
 func (f *blockfetchRollbackFixture) deliverForkABody(t *testing.T) {
 	t.Helper()
+	f.ls.handleEventBlockfetch(f.forkABlockEvent())
+	require.Len(
+		t,
+		f.ls.pendingBlockfetchEvents,
+		1,
+		"the body must be buffered, not committed, for the abandoned "+
+			"batch to still hold it when the fork is resolved",
+	)
+}
+
+func (f *blockfetchRollbackFixture) forkABlockEvent() event.Event {
 	point := ocommon.NewPoint(
 		f.currentTip.Point.Slot+10,
 		f.forkAHash.Bytes(),
 	)
-	f.ls.handleEventBlockfetch(event.NewEvent(
+	return event.NewEvent(
 		BlockfetchEventType,
 		BlockfetchEvent{
 			ConnectionId: f.connId,
@@ -209,13 +220,6 @@ func (f *blockfetchRollbackFixture) deliverForkABody(t *testing.T) {
 				blockNumber: f.currentTip.BlockNumber + 1,
 			},
 		},
-	))
-	require.Len(
-		t,
-		f.ls.pendingBlockfetchEvents,
-		1,
-		"the body must be buffered, not committed, for the abandoned "+
-			"batch to still hold it when the fork is resolved",
 	)
 }
 
@@ -310,6 +314,54 @@ func TestForkRestartKeepsReplacementHeadersWhenAbandonedBatchArrives(
 		"a body for a superseded chain must be discarded before it "+
 			"reaches chain insertion",
 	)
+}
+
+func TestForkRestartDropsAbandonedBodyArrivingAfterRestart(t *testing.T) {
+	f := newBlockfetchRollbackFixture(t)
+	f.queueForkAHeaderAndStartBatch(t)
+	f.rollbackToAncestorAndQueueForkB(t)
+
+	require.NoError(
+		t,
+		restartQueuedBlockfetchAfterForkForTest(f.ls, f.connId, nil),
+	)
+
+	// The old request cannot be cancelled. Its final body can arrive after the
+	// replacement request has been installed on the same connection and must
+	// remain associated with the abandoned request until its BatchDone barrier.
+	f.ls.handleEventBlockfetch(f.forkABlockEvent())
+	require.Empty(t, f.ls.pendingBlockfetchEvents)
+	require.Equal(t, 1, f.ls.chain.HeaderCount())
+
+	f.ls.handleEventBlockfetch(event.NewEvent(
+		BlockfetchEventType,
+		BlockfetchEvent{
+			ConnectionId: f.connId,
+			BatchDone:    true,
+		},
+	))
+
+	point := ocommon.NewPoint(
+		f.currentTip.Point.Slot+5,
+		f.forkBHash.Bytes(),
+	)
+	f.ls.handleEventBlockfetch(event.NewEvent(
+		BlockfetchEventType,
+		BlockfetchEvent{
+			ConnectionId: f.connId,
+			Point:        point,
+			Type:         1,
+			Block: &blockfetchTestBlock{
+				hash:        f.forkBHash,
+				prevHash:    lcommon.NewBlake2b256(f.ancestorTip.Point.Hash),
+				slot:        point.Slot,
+				blockNumber: f.ancestorTip.BlockNumber + 1,
+			},
+		},
+	))
+
+	require.Len(t, f.ls.pendingBlockfetchEvents, 1)
+	require.Equal(t, point, f.ls.pendingBlockfetchEvents[0].Point)
 }
 
 // The bounded-recovery half of #3771: a batch that delivered bodies but

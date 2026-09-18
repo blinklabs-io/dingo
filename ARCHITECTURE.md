@@ -651,8 +651,9 @@ that does not resolve takes the same
 `NoBlocks` and stuck-peer accounting as the other invalid-range rejections.
 Once a batch starts, blocks are streamed through the exact requested end slot
 and hash; earlier blocks at the same slot, including Byron epoch-boundary
-blocks, do not complete the range. Iterator exhaustion, rollback, or passing the end slot
-without the requested hash closes the connection without `BatchDone`. The
+blocks, do not complete the range. Iterator exhaustion, rollback, or passing
+the end slot after a concurrent chain change ends the batch cleanly with
+`BatchDone`, so the peer can request again against the current chain. The
 range sender is asynchronous so the mini-protocol callback can
 return promptly, but it applies backpressure between messages by waiting for
 the underlying gouroboros protocol send queue to drain. This keeps large Leios

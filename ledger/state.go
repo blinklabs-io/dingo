@@ -1081,11 +1081,12 @@ type LedgerState struct {
 	// blockfetchDiscardConnId identifies an abandoned request whose late
 	// blocks and BatchDone must be ignored until the replacement request starts.
 	blockfetchDiscardConnId ouroboros.ConnectionId
-	// chainRollbackGeneration counts attempted primary-chain rollbacks,
-	// including failed attempts. It is bumped before the chain is changed, so
-	// a reader that has observed a rollback's effect on the chain always
-	// observes the new value. Written by the rollback paths and read by the
-	// blockfetch paths, so it is atomic.
+	// chainRollbackGeneration identifies primary-chain rollback attempts that
+	// pass undo validation. It is bumped before the chain is changed, so a
+	// reader that has observed a rollback's effect on the chain always observes
+	// the new value; a validation refusal restores the previous value under the
+	// blockfetch mutex. Written by rollback paths and read by blockfetch paths,
+	// so it is atomic.
 	chainRollbackGeneration atomic.Uint64
 	// Failures to obtain one specific queued header range, keyed by its
 	// start point and counting both a NoBlocks reply (a synchronous
@@ -4000,7 +4001,7 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 			// failure streak, so blockfetchMaxSameRangeFailures refusals
 			// would drop a perfectly good header range. Both the bump and
 			// this restore run under chainsyncBlockfetchMutex, which every
-			// blockfetchBatchSuperseded reader also holds, so no reader can
+			// blockfetchBatchStillCurrent reader also holds, so no reader can
 			// observe the intermediate value.
 			ls.chainRollbackGeneration.Store(priorGeneration)
 			return err
