@@ -491,6 +491,29 @@ func (p *PeerChainTip) SelectionTip() ochainsync.Tip {
 	return p.Tip
 }
 
+// AwaitingFirstHeader reports whether chain selection registered this peer
+// from a chainsync rollback (newPeerChainTipFromRollback, the post-FindIntersect
+// MsgRollBackward on a connection it was not tracking) and the peer has not
+// delivered a header since. For such a peer SelectionTip is the point its
+// session intersected at, carrying no block number, and it does not move until
+// the peer's first RollForward arrives: it is evidence of the intersection and
+// nothing else. Callers that reason about how far a peer has got need to tell
+// that apart from a delivered frontier.
+//
+// It reads the awaitingFirstHeader flag rather than testing for a zero
+// delivered block number, because the two are not the same property. A tracked
+// peer that has delivered headers and then rolls back to a point outside its
+// retained delivered-header history is also left with a zero block number
+// (ApplyRollback keeps the point and cannot recover a block number for it),
+// but it has delivered headers on this connection and is not awaiting its
+// first one. So is a peer whose delivered frontier genuinely is origin.
+func (p *PeerChainTip) AwaitingFirstHeader() bool {
+	if p == nil {
+		return false
+	}
+	return p.awaitingFirstHeader
+}
+
 // Touch marks the peer as recently active without changing its advertised tip.
 func (p *PeerChainTip) Touch() {
 	p.LastUpdated = time.Now()

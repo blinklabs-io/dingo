@@ -686,6 +686,239 @@ func (s *Store) refreshRewardLiveStakeRefs(
 	return nil
 }
 
+// stakeCredentialDelta pairs a stake credential with the signed lovelace
+// change one write's UTxO mutations made to its live-UTxO total. See
+// refreshRewardLiveStakeAggregateDelta.
+type stakeCredentialDelta struct {
+	ref   models.StakeCredentialRef
+	delta int64
+}
+
+// refsToStakeCredentialDeltas widens a plain ref slice -- a certificate-only
+// touch, which never changes the utxo table -- into zero-delta entries so it
+// can be merged with a slice that does carry a real UTxO delta.
+func refsToStakeCredentialDeltas(
+	refs []models.StakeCredentialRef,
+) []stakeCredentialDelta {
+	if len(refs) == 0 {
+		return nil
+	}
+	ret := make([]stakeCredentialDelta, len(refs))
+	for i, ref := range refs {
+		ret[i] = stakeCredentialDelta{ref: ref}
+	}
+	return ret
+}
+
+// mergeStakeCredentialDeltas merges delta slices into one entry per
+// credential, summing every occurrence's delta -- unlike
+// mergeStakeCredentialRefs, which keeps only a ref's first occurrence, this
+// has to add every occurrence's contribution or a credential appearing in
+// both a consumed input and a produced output within the same transaction
+// (an ordinary change pattern) would silently drop one side of its net
+// effect. Order follows first occurrence, matching mergeStakeCredentialRefs.
+func mergeStakeCredentialDeltas(
+	deltaSlices ...[]stakeCredentialDelta,
+) []stakeCredentialDelta {
+	total := 0
+	for _, deltas := range deltaSlices {
+		total += len(deltas)
+	}
+	if total == 0 {
+		return nil
+	}
+	sums := make(map[string]int64, total)
+	refs := make(map[string]models.StakeCredentialRef, total)
+	order := make([]string, 0, total)
+	for _, deltas := range deltaSlices {
+		for _, d := range deltas {
+			key := d.ref.MapKey()
+			if _, ok := refs[key]; !ok {
+				order = append(order, key)
+				refs[key] = d.ref
+			}
+			sums[key] += d.delta
+		}
+	}
+	ret := make([]stakeCredentialDelta, len(order))
+	for i, key := range order {
+		ret[i] = stakeCredentialDelta{ref: refs[key], delta: sums[key]}
+	}
+	return ret
+}
+
+// refreshRewardLiveStakeDeltas is refreshRewardLiveStakeRefs's incremental
+// counterpart, applying each entry's exact signed UTxO delta instead of
+// re-deriving it with a full scan. See refreshRewardLiveStakeAggregateDelta
+// for which callers this is safe for.
+func (s *Store) refreshRewardLiveStakeDeltas(
+	ctx context.Context,
+	db queryer,
+	deltas []stakeCredentialDelta,
+	slot uint64,
+) error {
+	for i := range deltas {
+		if err := s.refreshRewardLiveStakeAggregateDelta(
+			ctx, db, deltas[i].ref, slot, deltas[i].delta,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// producedStakeCredentialDelta builds the delta a produced UTxO output
+// contributes to its stake credential's running live-UTxO total.
+//
+// inserted reports whether this write actually created the output's row.
+// insertUtxoModel's conflict-tolerant form is an ON CONFLICT (tx_id,
+// output_idx) DO NOTHING insert, so an output whose row already exists -- a
+// snapshot import creates outputs before their producing transaction is
+// replayed, and a gap-closure or Leios re-apply can revisit a transaction
+// already stored -- leaves the utxo table unchanged. A delta must state the
+// change this write made to that table, not the change it intended, so a
+// conflicting output contributes 0: its amount is already inside the running
+// total that the row it collided with was counted into. Counting it again
+// would inflate the credential's live stake permanently, since the
+// incremental path has no scan to correct it (dingo #4421).
+//
+// amount is already bounded within int64 by CheckedUint64FromBigInt
+// (UtxoLedgerToModel's caller), well inside a real lovelace value's range
+// (ada's total supply is far below both int64's and uint64's ceiling), but
+// this checks explicitly rather than trusting that indirectly like
+// sumCredentialUtxoStakeQuery's doc comment argues for the SQL-side sum.
+func producedStakeCredentialDelta(
+	tag uint8,
+	key []byte,
+	amount types.Uint64,
+	inserted bool,
+) (stakeCredentialDelta, error) {
+	if uint64(amount) > math.MaxInt64 {
+		return stakeCredentialDelta{}, fmt.Errorf(
+			"produced UTxO amount overflow: %d",
+			uint64(amount),
+		)
+	}
+	ret := stakeCredentialDelta{ref: models.NewStakeCredentialRef(tag, key)}
+	if inserted {
+		ret.delta = int64(amount)
+	}
+	return ret, nil
+}
+
+// utxoStakeConsumedDeltaQuery is queryUtxoStakeConsumedDeltas' batched
+// lookup, built the same way utxoStakeRefsByTxIDQuery is: driven by distinct
+// tx_id values with the (tx_id, output_idx) pair filtered in Go, so SQLite's
+// planner stays on the unique tx_id_output_idx index instead of falling back
+// to a full idx_utxo_staking_deleted_amount scan once the batch has more than
+// a handful of terms (dingo #4067).
+func utxoStakeConsumedDeltaQuery(n int) string {
+	return "SELECT tx_id, output_idx, credential_tag, staking_key, amount " +
+		"FROM utxo WHERE tx_id IN (" +
+		strings.TrimSuffix(strings.Repeat("?,", n), ",") + ")"
+}
+
+// queryUtxoStakeConsumedDeltas is queryUtxoStakeRefs's counterpart for the
+// setTransactionWithAccumulator fast path: alongside each spent input's
+// credential it also reads the row's amount, so the caller can pass
+// refreshRewardLiveStakeAggregateDelta the exact negative delta a spend
+// contributes instead of falling back to sumCredentialUtxoStake's full scan.
+//
+// ids must name only the inputs this write actually transitioned from live to
+// deleted -- the ones whose UPDATE reported a row affected -- and not every
+// input the transaction lists. An input the write skipped because the row was
+// already spent (by an earlier certified endorser block on the Leios closure
+// path, or by an earlier application of this same transaction) changed
+// nothing in the utxo table, so subtracting its amount would drive the
+// credential's running total permanently below its real live stake, or fail
+// the write outright on applyUtxoStakeDelta's underflow guard. Those inputs
+// belong in the caller's zero-delta touch set instead (dingo #4421).
+//
+// deleted_slot is not filtered on: ids names exactly the inputs this
+// transaction just spent, by (tx_id, output_idx), so the deleted_slot value
+// (already set to this transaction's slot by the caller) does not change
+// which row answers the lookup.
+func queryUtxoStakeConsumedDeltas(
+	ctx context.Context,
+	db queryer,
+	ids []models.UtxoId,
+) ([]stakeCredentialDelta, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	txIDs, wanted := distinctUtxoTxIDs(ids)
+	sums := make(map[string]int64, len(ids))
+	refs := make(map[string]models.StakeCredentialRef, len(ids))
+	order := make([]string, 0, len(ids))
+	for start := 0; start < len(txIDs); start += 400 {
+		end := min(start+400, len(txIDs))
+		batch := txIDs[start:end]
+		args := make([]any, len(batch))
+		for i, txID := range batch {
+			args[i] = txID
+		}
+		query := utxoStakeConsumedDeltaQuery(len(batch))
+		rows, err := db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, err
+		}
+		scanErr := func() error {
+			defer rows.Close()
+			for rows.Next() {
+				var txID []byte
+				var outputIdx sql.NullInt64
+				var tag int64
+				var key []byte
+				var raw sql.NullString
+				if err := rows.Scan(
+					&txID, &outputIdx, &tag, &key, &raw,
+				); err != nil {
+					return err
+				}
+				if len(key) == 0 || !outputIdx.Valid {
+					continue
+				}
+				outs, ok := wanted[string(txID)]
+				if !ok {
+					continue
+				}
+				if _, ok := outs[uint32(outputIdx.Int64)]; !ok {
+					continue
+				}
+				if !raw.Valid || raw.String == "" {
+					continue
+				}
+				amount, err := parseUint64("consumed UTxO amount", raw.String)
+				if err != nil {
+					return err
+				}
+				if amount > math.MaxInt64 {
+					return fmt.Errorf(
+						"consumed UTxO amount overflow: %d",
+						amount,
+					)
+				}
+				ref := models.NewStakeCredentialRef(uint8(tag), key)
+				mapKey := ref.MapKey()
+				if _, ok := refs[mapKey]; !ok {
+					order = append(order, mapKey)
+					refs[mapKey] = ref
+				}
+				sums[mapKey] -= int64(amount)
+			}
+			return rows.Err()
+		}()
+		if scanErr != nil {
+			return nil, scanErr
+		}
+	}
+	ret := make([]stakeCredentialDelta, len(order))
+	for i, key := range order {
+		ret[i] = stakeCredentialDelta{ref: refs[key], delta: sums[key]}
+	}
+	return ret, nil
+}
+
 func currentTipSlot(ctx context.Context, db queryer) (uint64, error) {
 	var slot sql.NullInt64
 	err := db.QueryRowContext(

@@ -641,6 +641,13 @@ type Config struct {
 	// diagnostic use only (e.g. repeated restarts against a database already
 	// known to be consistent).
 	//
+	// reward_live_stake.utxo_stake is a running total maintained
+	// incrementally by the block-application path (dingo #4421), so this
+	// check is also the only automatic reconciliation of that total against
+	// the live UTxO set. Skipping it leaves any drift in place for the whole
+	// life of the process, including across the epoch boundaries whose stake
+	// snapshots consume it.
+	//
 	// It does not affect the stake-snapshot provenance check that runs in the
 	// same startup step: that one is cheap, indexed, and fails closed, so it
 	// runs unconditionally.

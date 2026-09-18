@@ -2180,7 +2180,9 @@ func (n *Node) nodeSettingsGateValues() nodesettings.Values {
 // it is safe when the database is already known to be consistent (e.g.
 // repeated restarts during investigation of an unrelated issue), but unsafe
 // to leave enabled permanently since it is what catches a stale or
-// pre-migration reward_live_stake table.
+// pre-migration reward_live_stake table -- and, since reward_live_stake.utxo_stake
+// became an incrementally maintained running total (dingo #4421), the only
+// automatic reconciliation of that total against the live UTxO set.
 //
 // Both probes are read-only and run on the read-only metadata connection; the
 // writer is opened only for an actual rebuild. See ARCHITECTURE.md.

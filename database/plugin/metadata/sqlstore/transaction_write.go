@@ -405,7 +405,7 @@ func (s *Store) setTransactionWithAccumulator(
 				0,
 				len(transaction.Produced()),
 			)
-			producedStakeRefs := make([]models.StakeCredentialRef, 0)
+			producedStakeDeltas := make([]stakeCredentialDelta, 0)
 			for _, produced := range transaction.Produced() {
 				model, err := models.UtxoLedgerToModel(produced, point.Slot)
 				if err != nil {
@@ -423,7 +423,10 @@ func (s *Store) setTransactionWithAccumulator(
 					id := uint(transactionID)
 					model.TransactionID = &id
 				}
-				if err := s.insertUtxoModel(ctx, db, &model, true); err != nil {
+				inserted, err := s.insertUtxoModelChecked(
+					ctx, db, &model, true,
+				)
+				if err != nil {
 					return fmt.Errorf(
 						"create output %x#%d: %w",
 						model.TxId,
@@ -433,12 +436,16 @@ func (s *Store) setTransactionWithAccumulator(
 				}
 				producedModels = append(producedModels, model)
 				if len(model.StakingKey) > 0 {
-					producedStakeRefs = append(producedStakeRefs,
-						models.NewStakeCredentialRef(
-							model.CredentialTag,
-							model.StakingKey,
-						),
+					gain, err := producedStakeCredentialDelta(
+						model.CredentialTag,
+						model.StakingKey,
+						model.Amount,
+						inserted,
 					)
+					if err != nil {
+						return err
+					}
+					producedStakeDeltas = append(producedStakeDeltas, gain)
 				}
 			}
 			if err := s.applyTransactionAPIDetails(
@@ -452,7 +459,17 @@ func (s *Store) setTransactionWithAccumulator(
 			); err != nil {
 				return err
 			}
-			refs := make([]models.UtxoId, 0, len(transaction.Consumed()))
+			// spentRefs holds only the inputs this write actually moved from
+			// live to deleted, and is what the live-stake delta is derived
+			// from. skippedRefs holds the inputs whose UPDATE matched nothing
+			// because the row was already spent -- by an earlier certified
+			// endorser block on the Leios closure path, or by an earlier
+			// application of this same transaction. Those changed nothing in
+			// the utxo table, so they contribute no delta (dingo #4421); they
+			// are still refreshed at zero delta so the set of credentials this
+			// write touches is unchanged from the full-scan path.
+			spentRefs := make([]models.UtxoId, 0, len(transaction.Consumed()))
+			var skippedRefs []models.UtxoId
 			seenConsumed := make(
 				map[string]struct{},
 				len(transaction.Consumed()),
@@ -467,10 +484,10 @@ func (s *Store) setTransactionWithAccumulator(
 					continue
 				}
 				seenConsumed[refKey] = struct{}{}
-				refs = append(refs, models.UtxoId{
+				utxoID := models.UtxoId{
 					Hash: input.Id().Bytes(),
 					Idx:  input.Index(),
-				})
+				}
 				result, err := db.ExecContext(ctx, `
 UPDATE utxo
 SET deleted_slot = ?, spent_at_tx_id = ?
@@ -489,8 +506,10 @@ WHERE tx_id = ? AND output_idx = ?
 					return err
 				}
 				if affected > 0 {
+					spentRefs = append(spentRefs, utxoID)
 					continue
 				}
+				skippedRefs = append(skippedRefs, utxoID)
 				var (
 					deletedSlot uint64
 					spentBy     []byte
@@ -541,33 +560,51 @@ FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 			if historicalBackfill {
 				return nil
 			}
-			stakeRefs, err := queryUtxoStakeRefs(ctx, db, refs, false)
+			consumedStakeDeltas, err := queryUtxoStakeConsumedDeltas(
+				ctx,
+				db,
+				spentRefs,
+			)
 			if err != nil {
 				return err
 			}
-			// Merge and dedupe every credential this transaction touched --
-			// via its certificates, consumed inputs, and produced outputs --
-			// into one refresh pass. Each source is already deduped against
-			// itself (applyTransactionCertificates and queryUtxoStakeRefs
-			// both key by MapKey), but producedStakeRefs is not, and none of
-			// the three is deduped against the others: a transaction with
+			// An input this write did not actually spend still names a
+			// credential the full-scan path would have refreshed, so keep it
+			// in the touch set at zero delta rather than dropping it.
+			var skippedStakeDeltas []stakeCredentialDelta
+			if len(skippedRefs) > 0 {
+				skippedStakeRefs, err := queryUtxoStakeRefs(
+					ctx, db, skippedRefs, false,
+				)
+				if err != nil {
+					return err
+				}
+				skippedStakeDeltas = refsToStakeCredentialDeltas(
+					skippedStakeRefs,
+				)
+			}
+			// Merge every credential this transaction touched -- via its
+			// certificates, consumed inputs, and produced outputs -- into
+			// one incremental refresh pass instead of the full
+			// sumCredentialUtxoStake rescan refreshRewardLiveStakeRefs would
+			// run once per occurrence (dingo #4421): a transaction with
 			// several outputs to the same staking credential (an ordinary
 			// change pattern), or one that both spends from and pays back to
 			// the credential a certificate in the same transaction just
-			// registered or delegated, would otherwise run
-			// refreshRewardLiveStakeAggregate's sumCredentialUtxoStake scan
-			// once per occurrence instead of once per credential. Every one
-			// of this transaction's mutations is already applied to db by
-			// this point, so merging changes nothing about the refreshed
-			// values -- it only removes the repeat scans (see
-			// TestSetTransactionRefreshesSharedCredentialOnce).
-			return s.refreshRewardLiveStakeRefs(
+			// registered or delegated, has its per-source deltas summed into
+			// one net delta before refreshRewardLiveStakeAggregateDelta
+			// applies it, so the result matches what a full-scan recompute
+			// after all of this transaction's mutations would find (see
+			// TestSetTransactionRefreshesSharedCredentialOnce and
+			// TestSetTransactionIncrementalDeltaMatchesFullScan).
+			return s.refreshRewardLiveStakeDeltas(
 				ctx,
 				db,
-				mergeStakeCredentialRefs(
-					certificateRefs,
-					stakeRefs,
-					producedStakeRefs,
+				mergeStakeCredentialDeltas(
+					refsToStakeCredentialDeltas(certificateRefs),
+					consumedStakeDeltas,
+					skippedStakeDeltas,
+					producedStakeDeltas,
 				),
 				point.Slot,
 			)
@@ -642,7 +679,7 @@ RETURNING id`,
 				}
 			}
 			collateralReturn := transaction.CollateralReturn()
-			producedStakeRefs := make([]models.StakeCredentialRef, 0)
+			producedStakeDeltas := make([]stakeCredentialDelta, 0)
 			for _, produced := range transaction.Produced() {
 				model, err := models.UtxoLedgerToModel(produced, point.Slot)
 				if err != nil {
@@ -659,29 +696,38 @@ RETURNING id`,
 				} else {
 					model.TransactionID = &id
 				}
-				if err := s.insertUtxoModel(ctx, db, &model, true); err != nil {
+				inserted, err := s.insertUtxoModelChecked(
+					ctx, db, &model, true,
+				)
+				if err != nil {
 					return err
 				}
 				if len(model.StakingKey) > 0 {
-					producedStakeRefs = append(
-						producedStakeRefs,
-						models.NewStakeCredentialRef(
-							model.CredentialTag,
-							model.StakingKey,
-						),
+					gain, err := producedStakeCredentialDelta(
+						model.CredentialTag,
+						model.StakingKey,
+						model.Amount,
+						inserted,
 					)
+					if err != nil {
+						return err
+					}
+					producedStakeDeltas = append(producedStakeDeltas, gain)
 				}
 			}
-			// Merge and dedupe as setTransaction does: certificateRefs and
-			// producedStakeRefs are each already deduped against themselves,
-			// but not against each other, and a certificate touching the same
-			// credential as one of this gap block's produced outputs would
-			// otherwise trigger a repeat sumCredentialUtxoStake scan for the
-			// same final total.
-			return s.refreshRewardLiveStakeRefs(
+			// Merge as setTransactionWithAccumulator does: certificateRefs
+			// and producedStakeDeltas are each already deduped/summed
+			// against themselves, but not against each other, and a
+			// certificate touching the same credential as one of this gap
+			// block's produced outputs would otherwise apply that
+			// credential's delta twice instead of once net.
+			return s.refreshRewardLiveStakeDeltas(
 				ctx,
 				db,
-				mergeStakeCredentialRefs(certificateRefs, producedStakeRefs),
+				mergeStakeCredentialDeltas(
+					refsToStakeCredentialDeltas(certificateRefs),
+					producedStakeDeltas,
+				),
 				point.Slot,
 			)
 		},
@@ -953,9 +999,31 @@ func (s *Store) insertUtxoModel(
 	utxo *models.Utxo,
 	ignoreConflict bool,
 ) error {
+	_, err := s.insertUtxoModelChecked(ctx, db, utxo, ignoreConflict)
+	return err
+}
+
+// insertUtxoModelChecked is insertUtxoModel plus the one fact a caller
+// maintaining a running live-stake total needs: whether this call actually
+// created the row, or left a pre-existing (tx_id, output_idx) row untouched
+// through insertUtxoQueryIgnoreConflict's ON CONFLICT DO NOTHING. Only the
+// former changed the live UTxO set, and only the former may contribute a
+// delta -- see producedStakeCredentialDelta.
+//
+// The signal is the same one the provenance repair below already relies on:
+// a conflicting DO NOTHING insert yields no RETURNING row, which every
+// dialect surfaces as sql.ErrNoRows (dialect_queryer.go maps MySQL's
+// zero-rows-affected case onto an empty row set explicitly).
+func (s *Store) insertUtxoModelChecked(
+	ctx context.Context,
+	db queryer,
+	utxo *models.Utxo,
+	ignoreConflict bool,
+) (bool, error) {
+	inserted := true
 	params, err := createUtxoParams(utxo)
 	if err != nil {
-		return err
+		return false, err
 	}
 	query := insertUtxoQuery
 	if ignoreConflict {
@@ -980,6 +1048,7 @@ func (s *Store) insertUtxoModel(
 		params.PaymentScript,
 	).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) && ignoreConflict {
+		inserted = false
 		err = db.QueryRowContext(ctx, `
 SELECT id FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 			params.TxID,
@@ -1006,7 +1075,7 @@ WHERE id = ?`,
 		}
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
 	utxo.ID = uint(id)
 	// A pointer address names a certificate position rather than carrying a
@@ -1015,7 +1084,7 @@ WHERE id = ?`,
 	// conflict path too: an output a snapshot import created before its
 	// producing transaction was replayed has no pointer row yet.
 	if err := persistUtxoPointer(ctx, db, id, utxo.Pointer); err != nil {
-		return err
+		return false, err
 	}
 	for i := range utxo.Assets {
 		asset := &utxo.Assets[i]
@@ -1032,7 +1101,7 @@ WHERE id = ?`,
 			},
 		)
 		if err != nil {
-			return err
+			return false, err
 		}
 		var assetID uint
 		if err := s.queryRowCached(ctx, db, getAssetIDQuery,
@@ -1040,11 +1109,11 @@ WHERE id = ?`,
 			asset.PolicyId,
 			asset.Name,
 		).Scan(&assetID); err != nil {
-			return err
+			return false, err
 		}
 		asset.ID = assetID
 	}
-	return nil
+	return inserted, nil
 }
 
 func collateralFeeForTransaction(
