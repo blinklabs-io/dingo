@@ -1211,7 +1211,6 @@ func TestLedgerView_PendingMIRRewardDeltas(t *testing.T) {
 	t.Parallel()
 
 	ls, db, gdb := newMIRTestLedger(t)
-	ls.currentEpoch = models.Epoch{StartSlot: 100}
 
 	cred := mirCred28(0x77)
 	other := mirCred28(0x78)
@@ -1239,7 +1238,7 @@ func TestLedgerView_PendingMIRRewardDeltas(t *testing.T) {
 	txn := db.Transaction(false)
 	var totals map[eras.MIRCredentialKey]*big.Int
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		lv := &LedgerView{ls: ls, txn: txn}
+		lv := (&LedgerView{ls: ls, txn: txn}).pinMIREpochStartSlot(100)
 		var err error
 		totals, err = lv.PendingMIRRewardDeltas(200)
 		return err
@@ -1254,6 +1253,68 @@ func TestLedgerView_PendingMIRRewardDeltas(t *testing.T) {
 	assert.Equal(t, big.NewInt(5), totals[otherKey])
 }
 
+// TestLedgerView_PendingMIRRewardDeltas_PinnedSurvivesConcurrentRollover
+// proves the fix for a human review finding on PR #4415: PendingMIRRewardDeltas
+// must use the epoch start slot pinned to this validation's own consensus
+// snapshot (pinMIREpochStartSlot), not a fresh read of LedgerState.currentEpoch,
+// because a concurrent writer can roll the epoch over while this transaction's
+// validation is still in flight. A pinned view must keep seeing the epoch its
+// own snapshot was taken in; an unpinned view -- falling back to whatever
+// consensus snapshot is live right now -- reproduces the bug the review
+// flagged: the rolled-over epoch's later start slot exceeds the still-valid
+// uptoSlot, tripping the "before this epoch" guard and silently reporting no
+// pending deltas at all.
+func TestLedgerView_PendingMIRRewardDeltas_PinnedSurvivesConcurrentRollover(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, db, gdb := newMIRTestLedger(t)
+	ls.Lock()
+	ls.currentEpoch = models.Epoch{StartSlot: 100}
+	ls.publishSnapshotsLocked()
+	ls.Unlock()
+
+	cred := mirCred28(0x7A)
+	seedMIRDistribution(t, gdb, mirPotReserves, 150,
+		[]models.MoveInstantaneousRewardsReward{
+			{Credential: cred, Amount: big.NewInt(10)},
+		})
+
+	txn := db.Transaction(false)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		// Pin the view to epoch A's start slot, exactly as validateTxCore /
+		// ledgerProcessBlock / WithTxValidationSession do from their own
+		// txValidationSnapshot before calling ValidateTxFunc.
+		pinned := (&LedgerView{ls: ls, txn: txn}).pinMIREpochStartSlot(100)
+
+		// A concurrent writer rolls over to epoch B, published after this
+		// transaction's own snapshot was taken but before it finishes
+		// validating -- exactly the race the review finding described.
+		ls.Lock()
+		ls.currentEpoch = models.Epoch{StartSlot: 500}
+		ls.publishSnapshotsLocked()
+		ls.Unlock()
+
+		pinnedTotals, err := pinned.PendingMIRRewardDeltas(150)
+		require.NoError(t, err)
+		key := eras.MIRCredentialKey{Credential: lcommon.NewBlake2b224(cred)}
+		require.Contains(t, pinnedTotals, key,
+			"a pinned view must still see epoch A's own certificates after a concurrent rollover to epoch B")
+		assert.Equal(t, big.NewInt(10), pinnedTotals[key])
+
+		// An unpinned view falls back to the now-current (rolled-over)
+		// snapshot and reproduces the bug: epochStartSlot=500 exceeds
+		// uptoSlot=150, so the guard returns no pending deltas at all.
+		unpinned := &LedgerView{ls: ls, txn: txn}
+		unpinnedTotals, err := unpinned.PendingMIRRewardDeltas(150)
+		require.NoError(t, err)
+		assert.Empty(t, unpinnedTotals,
+			"documents the bug an unpinned read reproduces: it must not be relied on")
+		return nil
+	}))
+}
+
 // TestLedgerView_PendingMIRRewardDeltas_BeforeEpochStart verifies that a
 // validating slot before the current epoch's start (a stale/overlay call)
 // returns no pending deltas rather than an inverted or negative range.
@@ -1261,12 +1322,11 @@ func TestLedgerView_PendingMIRRewardDeltas_BeforeEpochStart(t *testing.T) {
 	t.Parallel()
 
 	ls, db, _ := newMIRTestLedger(t)
-	ls.currentEpoch = models.Epoch{StartSlot: 100}
 
 	txn := db.Transaction(false)
 	var totals map[eras.MIRCredentialKey]*big.Int
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		lv := &LedgerView{ls: ls, txn: txn}
+		lv := (&LedgerView{ls: ls, txn: txn}).pinMIREpochStartSlot(100)
 		var err error
 		totals, err = lv.PendingMIRRewardDeltas(50)
 		return err
@@ -1283,7 +1343,6 @@ func TestLedgerView_PendingMIRRewardDeltas_SeparatesPots(t *testing.T) {
 	t.Parallel()
 
 	ls, db, gdb := newMIRTestLedger(t)
-	ls.currentEpoch = models.Epoch{StartSlot: 100}
 
 	cred := mirCred28(0x79)
 	seedMIRDistribution(t, gdb, mirPotReserves, 150,
@@ -1298,7 +1357,7 @@ func TestLedgerView_PendingMIRRewardDeltas_SeparatesPots(t *testing.T) {
 	txn := db.Transaction(false)
 	var totals map[eras.MIRCredentialKey]*big.Int
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		lv := &LedgerView{ls: ls, txn: txn}
+		lv := (&LedgerView{ls: ls, txn: txn}).pinMIREpochStartSlot(100)
 		var err error
 		totals, err = lv.PendingMIRRewardDeltas(200)
 		return err
