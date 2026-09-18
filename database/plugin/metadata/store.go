@@ -216,16 +216,44 @@ type GovernanceStore interface {
 	// GetExpiringGovernanceProposals returns proposals whose
 	// `expires_epoch` is strictly less than the given epoch and that
 	// have not yet been enacted, expired, or soft-deleted. Used at
-	// epoch boundaries to mark expired proposals and return deposits.
+	// epoch boundaries to mark proposals expired (ineligible for further
+	// ratification). Their deposit is not returned yet -- see
+	// GetExpiredAwaitingDropGovernanceProposals.
 	GetExpiringGovernanceProposals(
 		epoch uint64,
 		txn types.Txn,
 	) ([]*models.GovernanceProposal, error)
 
-	// GetExpiredGovernanceProposalsAt returns proposals that were expired at
-	// the given epoch-boundary slot. Used to replay deposit-return side effects
-	// when stake reward pot reset is reapplied after a boundary commit crash.
+	// GetExpiredGovernanceProposalsAt returns proposals that were marked
+	// expired at the given epoch-boundary slot. Used to replay the "mark
+	// expired" side effect when a boundary commit crash requires
+	// reprocessing the same boundary.
 	GetExpiredGovernanceProposalsAt(
+		epoch uint64,
+		slot uint64,
+		txn types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
+	// GetExpiredAwaitingDropGovernanceProposals returns proposals that were
+	// marked expired in a prior epoch but whose deposit has not yet been
+	// returned. cardano-ledger does not refund an expired proposal's deposit
+	// in the same epoch it is marked expired -- that happens one full epoch
+	// later, the same one-epoch delay ratification has before enactment.
+	// Used at epoch start, before marking any new proposals expired, to
+	// return the deposit and finalize ("drop") proposals expired as of a
+	// prior boundary (dingo#4411). Only proposals whose expired_epoch is
+	// strictly below the given epoch are returned, so a reprocessed
+	// boundary cannot drop a proposal in the epoch that expired it.
+	GetExpiredAwaitingDropGovernanceProposals(
+		epoch uint64,
+		txn types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
+	// GetDroppedGovernanceProposalsAt returns proposals that were dropped
+	// (deposit returned, finalized) at the given epoch-boundary slot. Used to
+	// replay the deposit-return side effect when stake reward pot reset is
+	// reapplied after a boundary commit crash.
+	GetDroppedGovernanceProposalsAt(
 		epoch uint64,
 		slot uint64,
 		txn types.Txn,

@@ -11651,10 +11651,40 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    truncated, trailing, unsupported, or mismatched action data fails before
    enactment, tally, or ledger-view use. After enactment, descendants of the
    winning purpose-chain action remain active; competing siblings and their
-   descendant subtrees are expired and refunded. Natural expiry instead
-   removes the expired action's descendant subtree. These lifecycle writes use
+   descendant subtrees are marked expired and refunded in that same tick,
+   because `cardano-ledger` unions the enacted action with the siblings its
+   enactment removed before returning their deposits. Natural expiry instead
+   marks the expired action's own descendant subtree without refunding it,
+   leaving that to the DROP step below. These lifecycle writes use
    `expired_slot` and reward journals so slot rollback restores both proposal
    availability and deposits.
+
+   **DROP** (dingo#4411): marking a proposal expired does not itself return
+   its deposit. `cardano-ledger`'s RATIFY rule flags an action expired when
+   `gasExpiresAfter < reCurrentEpoch`, and the pulser carrying that verdict
+   was seeded with the previous boundary's epoch, so the removal and refund
+   land one full boundary after the epoch that expired it -- the same
+   one-epoch delay ratification has before enactment. Refunding immediately
+   made the very next epoch's mark snapshot double-count the deposit for any
+   return account still delegated to a pool, inflating that pool's stake and
+   its network-wide total by the deposit amount.
+   `GetExpiredAwaitingDropGovernanceProposals` finds proposals whose
+   `expired_epoch` is strictly below the current epoch and whose deposit has
+   not yet been returned, refunds each (`refundProposalDeposit`), and stamps
+   `governance_proposal_drop` (`dropped_epoch`/`dropped_slot`). That epoch
+   bound, rather than this step's position ahead of the expiry step, is what
+   enforces the delay: a boundary reprocessed after a commit crash reruns
+   against expiries the first pass already wrote. The drop state lives in a
+   companion table, not columns on `governance_proposal`, because that table
+   was last rebuilt via rename-and-recreate with an unqualified `SELECT *` in
+   the `governance-proposal-optional-anchor` migration, which cannot tolerate
+   columns added to it afterward; the `governance-proposal-dropped-epoch`
+   migration backfills a drop row for every proposal an upgraded database had
+   already expired and refunded under the previous behavior. Proposals already
+   durably dropped at this exact boundary are replayed fail-closed via
+   `GetDroppedGovernanceProposalsAt`, mirroring the enacted-proposal replay
+   above; that same read is what replays an enactment-driven orphan's refund,
+   since those are stamped dropped in the tick that removed them.
 
    The governance adapter resolves both Conway and Dijkstra protocol-parameter
    types. Action decoding follows the active parameter type, so a Dijkstra
