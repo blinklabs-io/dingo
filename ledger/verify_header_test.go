@@ -1181,6 +1181,8 @@ func TestValidateBlockHeaderCryptoDoesNotAdvanceEpochCache(t *testing.T) {
 // Cached epoch resolution bypasses forecasting, but must not bypass the
 // nonce-availability contract shared by crypto and state verification callers.
 func TestHeaderVerificationEpoch_CachedNonceWithoutForecastConfig(t *testing.T) {
+	t.Parallel()
+
 	for _, allowAdvance := range []bool{false, true} {
 		for _, tc := range []struct {
 			name  string
@@ -1190,6 +1192,8 @@ func TestHeaderVerificationEpoch_CachedNonceWithoutForecastConfig(t *testing.T) 
 			{name: "available nonce", nonce: bytes.Repeat([]byte{1}, 32)},
 		} {
 			t.Run(tc.name+fmt.Sprint("/advance=", allowAdvance), func(t *testing.T) {
+				t.Parallel()
+
 				ls := &LedgerState{
 					epochCache: []models.Epoch{{
 						EpochId: 5, StartSlot: 500, LengthInSlots: 100,

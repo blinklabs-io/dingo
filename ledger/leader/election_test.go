@@ -1463,6 +1463,8 @@ func TestElectionCanceledWaiterAfterReplacement(t *testing.T) {
 // default is a leader-slot list cardano-node will reject. computeSchedule must
 // return the resolution error rather than produce one.
 func TestComputeScheduleDeclinesUnresolvableConsensusMode(t *testing.T) {
+	t.Parallel()
+
 	poolId := lcommon.PoolKeyHash{}
 	stakeProvider := newMockStakeProvider()
 	stakeProvider.totalStake = 1_000_000

@@ -412,6 +412,8 @@ func TestHardForkSummary_RejectsCumulativeDurationOverflow(t *testing.T) {
 // of these cases would leave End nil with a zero safe zone and make every
 // future slot appear forecastable.
 func TestHardForkSummary_RejectsUnavailableShape(t *testing.T) {
+	t.Parallel()
+
 	testCases := []struct {
 		name           string
 		cfg            func(*testing.T) *cardano.CardanoNodeConfig
@@ -444,6 +446,8 @@ func TestHardForkSummary_RejectsUnavailableShape(t *testing.T) {
 
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
 			var cfg *cardano.CardanoNodeConfig
 			if testCase.cfg != nil {
 				cfg = testCase.cfg(t)

@@ -90,6 +90,8 @@ func newShelleyOnlyForecastLedger(t testing.TB) *LedgerState {
 // the build failure unwrapped recycles the honest peer that served the header
 // and stalls the node at every epoch boundary.
 func TestHeaderVerificationEpoch_ForecastBuildFailureDeferred(t *testing.T) {
+	t.Parallel()
+
 	ls := newShelleyOnlyForecastLedger(t)
 
 	// Confirm the premise: the config genuinely cannot build a summary.
@@ -110,6 +112,8 @@ func TestHeaderVerificationEpoch_ForecastBuildFailureDeferred(t *testing.T) {
 // verbatim leaves the slot clock (ledger/slot_clock.go) unable to resolve a
 // slot boundary, retrying every 100ms for the life of the process.
 func TestSlotToTime_CachedSlotWithoutForecast(t *testing.T) {
+	t.Parallel()
+
 	ls := newShelleyOnlyForecastLedger(t)
 
 	// SlotToEpoch already answers from the cache alone.
@@ -141,6 +145,21 @@ func TestSlotToTime_CachedSlotWithoutForecast(t *testing.T) {
 		"a slot before the epoch cache must not be answered without a forecast")
 }
 
+func TestSlotToTime_NearNowWithoutForecast(t *testing.T) {
+	t.Parallel()
+
+	ls := newShelleyOnlyForecastLedger(t)
+	const slot = uint64(532_000)
+	want := ls.config.CardanoNodeConfig.ShelleyGenesis().SystemStart.Add(
+		time.Duration(slot) * time.Second,
+	)
+	ls.timeConv().nowFunc = func() time.Time { return want }
+
+	when, err := ls.SlotToTime(slot)
+	require.NoError(t, err)
+	assert.Equal(t, want, when)
+}
+
 // TestConsensusModeForEpoch_UnresolvableShapeFailsClosed pins the
 // forward-looking era walk as fail-closed. An unavailable shape breaks the
 // walk, and answering with the CURRENT era's mode for a future epoch reports
@@ -149,6 +168,8 @@ func TestSlotToTime_CachedSlotWithoutForecast(t *testing.T) {
 // differ by mode and not merely by error: with the shape resolvable the
 // forecast is CPraos.
 func TestConsensusModeForEpoch_UnresolvableShapeFailsClosed(t *testing.T) {
+	t.Parallel()
+
 	newLedger := func(cfg *cardano.CardanoNodeConfig) *LedgerState {
 		enabled := true
 		cfg.ExperimentalHardForksEnabled = &enabled

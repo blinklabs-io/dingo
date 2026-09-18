@@ -32,6 +32,8 @@ import (
 )
 
 func TestProtocolParamsForSlot_UnavailableShape(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range []struct {
 		name   string
 		cfg    *cardano.CardanoNodeConfig
@@ -53,6 +55,8 @@ func TestProtocolParamsForSlot_UnavailableShape(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
 			ls := &LedgerState{
 				currentEra: tc.era,
 				currentEpoch: models.Epoch{
@@ -73,12 +77,16 @@ func TestProtocolParamsForSlot_UnavailableShape(t *testing.T) {
 }
 
 func TestProtocolParamsForSlot_UnavailableTransition(t *testing.T) {
+	t.Parallel()
+
 	for _, missingSuccessor := range []bool{false, true} {
 		name := "hard fork error"
 		if missingSuccessor {
 			name = "missing successor"
 		}
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
 			ls := &LedgerState{
 				currentEra: eras.ShelleyEraDesc,
 				currentEpoch: models.Epoch{
@@ -104,6 +112,8 @@ func TestProtocolParamsForSlot_UnavailableTransition(t *testing.T) {
 }
 
 func TestProtocolParamsForSlot_PendingUpdateFailure(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	// A selected but undecodable proposal is an error, not an absent update.
@@ -128,12 +138,16 @@ func TestProtocolParamsForSlot_PendingUpdateFailure(t *testing.T) {
 }
 
 func TestGenesisOverlayRejectsUnavailableProtocolParams(t *testing.T) {
+	t.Parallel()
+
 	for _, available := range []bool{false, true} {
 		name := "unavailable"
 		if available {
 			name = "available"
 		}
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
 			cfg := newGenesisDelegateShelleyGenesisCfg(t,
 				strings.Repeat("22", 28), strings.Repeat("33", 32))
 			epoch := models.Epoch{
