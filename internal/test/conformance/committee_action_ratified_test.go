@@ -514,6 +514,134 @@ func TestRatifyProposalsGatesTreasuryWithdrawalDuringConwayBootstrap(
 	)
 }
 
+// TestCommitteeActionRatifiedRefusesUpdateCommitteeOverTermLimit pins
+// committeeTermsWithinLimit end to end: a PR review found that
+// proposal.ProposedMembersByCredential is empty at ratification in every
+// vector the corpus and this file's other tests exercise, so
+// syntheticUpdateCommitteeGovAction's loop over it never runs anywhere --
+// the term-limit check ShouldRatify performs off that synthetic action has
+// no coverage proving it can actually refuse. This constructs a proposed
+// member whose expiry is far beyond CommitteeTermLimit and gives the
+// proposal trivial (always-met) DRep/SPO thresholds, so the only thing that
+// can block ratification is the term-limit check.
+func TestCommitteeActionRatifiedRefusesUpdateCommitteeOverTermLimit(
+	t *testing.T,
+) {
+	m, err := NewDingoStateManager()
+	require.NoError(t, err)
+	defer func() { require.NoError(t, m.Close()) }()
+
+	m.protocolParams = &conway.ConwayProtocolParameters{
+		ProtocolVersion:    common.ProtocolParametersProtocolVersion{Major: 10},
+		CommitteeTermLimit: 5,
+		DRepVotingThresholds: conway.DRepVotingThresholds{
+			CommitteeNormal:       trivialThreshold,
+			CommitteeNoConfidence: trivialThreshold,
+		},
+		PoolVotingThresholds: conway.PoolVotingThresholds{
+			CommitteeNormal:       trivialThreshold,
+			CommitteeNoConfidence: trivialThreshold,
+		},
+	}
+
+	const currentEpoch = 5
+	proposal := &conformance.ProposalState{
+		GovActionInfo: conformance.GovActionInfo{
+			ActionType: common.GovActionTypeUpdateCommittee,
+			Votes:      map[string]uint8{},
+			ProposedMembersByCredential: map[mockledger.RewardAccountKey]uint64{
+				{
+					CredType:   common.CredentialTypeAddrKeyHash,
+					Credential: testHash28(0xfc),
+				}: currentEpoch + 100, // 100 > CommitteeTermLimit (5)
+			},
+		},
+	}
+
+	txn := m.db.Transaction(false)
+	defer txn.Release()
+
+	ratified, err := m.committeeActionRatified(txn, proposal, currentEpoch)
+	require.NoError(t, err)
+	require.False(
+		t,
+		ratified,
+		"an UpdateCommittee proposal whose member term exceeds "+
+			"CommitteeTermLimit must not ratify even when DRep/SPO "+
+			"thresholds are trivially met",
+	)
+}
+
+// TestCommitteeActionRatifiedUsesPassedEpochNotManagerField pins the fix for
+// an epoch-source inconsistency a PR review found unpinned: reverting
+// drepStakeForCommitteeAction's IsDRepCredentialActive call back to
+// m.currentEpoch left the whole package green, because every other test
+// either sets m.currentEpoch to match the currentEpoch argument or never
+// exercises a DRep whose active window depends on which of the two is used.
+// This sets m.currentEpoch to 0 and passes a different currentEpoch (5) to
+// committeeActionRatified, with a credential-backed DRep active only
+// through epoch 3: using currentEpoch correctly excludes it (expired), so
+// the proposal's only vote is gone and ratification must fail; using
+// m.currentEpoch would wrongly count it as still active and ratify.
+func TestCommitteeActionRatifiedUsesPassedEpochNotManagerField(t *testing.T) {
+	m, err := NewDingoStateManager()
+	require.NoError(t, err)
+	defer func() { require.NoError(t, m.Close()) }()
+
+	m.protocolParams = &conway.ConwayProtocolParameters{
+		ProtocolVersion: common.ProtocolParametersProtocolVersion{Major: 10},
+		DRepVotingThresholds: conway.DRepVotingThresholds{
+			MotionNoConfidence: cbor.Rat{Rat: big.NewRat(1, 2)},
+		},
+		PoolVotingThresholds: conway.PoolVotingThresholds{
+			MotionNoConfidence: trivialThreshold,
+		},
+	}
+	// m.currentEpoch is left at its zero value deliberately -- the real
+	// path (ProcessEpochBoundary) always sets it to match the currentEpoch
+	// argument, but a direct call (as every test in this file makes) can
+	// exercise the two diverging, which is exactly what this test needs.
+
+	drepCredentialHash := testHash28(0xfd)
+	drepStakeCredential := mockledger.RewardAccountKey{
+		CredType:   common.CredentialTypeAddrKeyHash,
+		Credential: testHash28(0xfe),
+	}
+	m.govState.DRepDelegationsByCredential[drepStakeCredential] = common.Drep{
+		Type:       common.DrepTypeAddrKeyHash,
+		Credential: drepCredentialHash[:],
+	}
+	drepKey := mockledger.RewardAccountKey{
+		CredType:   common.CredentialTypeAddrKeyHash,
+		Credential: drepCredentialHash,
+	}
+	m.govState.DRepRegistrationsByCredential[drepKey] = true
+	m.govState.DRepExpiries[drepKey] = 3 // active only through epoch 3
+	m.govState.RewardAccountBalances[drepStakeCredential] = 1_000_000
+
+	proposal := &conformance.ProposalState{
+		GovActionInfo: conformance.GovActionInfo{
+			ActionType: common.GovActionTypeNoConfidence,
+			Votes: map[string]uint8{
+				formatVoteKey(common.VoterTypeDRepKeyHash, drepCredentialHash): 1,
+			},
+		},
+	}
+
+	txn := m.db.Transaction(false)
+	defer txn.Release()
+
+	ratified, err := m.committeeActionRatified(txn, proposal, 5)
+	require.NoError(t, err)
+	require.False(
+		t,
+		ratified,
+		"a DRep whose registration expired at epoch 3 must be excluded "+
+			"when committeeActionRatified is called with currentEpoch 5, "+
+			"leaving no yes stake to ratify with",
+	)
+}
+
 // formatVoteKey builds a GovActionInfo.Votes key exactly as
 // recordVotesInGovState does: "<voter type digit>:<hex credential hash>".
 func formatVoteKey(voterType uint8, credential common.Blake2b224) string {
