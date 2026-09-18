@@ -719,7 +719,10 @@ established sessions. TCP clients also share a separate per-source budget,
 consume the total NtC budget without per-IP accounting. NtC admission never
 consumes N2N slots or N2N per-IP capacity. Admission reserves both budgets
 before launching a handshake worker; failed setup releases the reservation,
-and successful setup transfers its release to the connection's close watcher.
+and successful setup transfers the once-only release to the registered
+connection entry. Normal removal and collision eviction release outside the
+connection-map lock and before close callbacks run; the connection's close
+watcher is the backstop if an evicted entry is no longer present in the map.
 The `cardano_node_metrics_connectionManager_ntcRejectedConns_total` counter
 records rejections with `total_limit` or `per_ip_limit` as its `reason` label.
 
