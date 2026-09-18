@@ -2405,9 +2405,11 @@ func (ls *LedgerState) Close() (retErr error) {
 	// Unconditional, like the header-replay and reward-precompute waits
 	// below and unlike this function's bounded ones: returning early here
 	// would reintroduce exactly the use-after-close this is meant to
-	// prevent. A run is bounded by cleanupConsumedUtxoBatchSize -- one short
-	// delete transaction, deliberately sized so it cannot monopolize
-	// SQLite -- so there is no unbounded drain to guard against.
+	// prevent. A run may first wait for an in-flight rollback or recovery to
+	// release consumedUtxoPruneMutex; that boundary never waits for cleanup, so
+	// the two cannot form a lock cycle. Once admitted, cleanup performs one
+	// cleanupConsumedUtxoBatchSize-bounded delete transaction, deliberately
+	// sized so it cannot monopolize SQLite.
 	ls.cleanupMu.Lock()
 	if ls.timerCleanupConsumedUtxos != nil {
 		ls.timerCleanupConsumedUtxos.Stop()
