@@ -183,6 +183,24 @@ func newUtxorpcConnectHarness(
 	for i := range blocks {
 		require.NoError(t, db.BlockCreate(blocks[i], nil))
 	}
+	// These blocks are inserted directly (db.BlockCreate) rather than run
+	// through LedgerState's normal block-application path, so no
+	// block_nonce row exists for any of them -- unlike a really-synced
+	// chain, which writes one for every applied block including a
+	// per-epoch checkpoint. Without at least one checkpoint here,
+	// ls.Start below hits healTruncateGapBlockNonces with an empty tip
+	// nonce and nothing to reconstruct from -- correctly refused, but for
+	// this harness gap rather than a genuine unreconstructable truncate.
+	// The nonce value is a fixed placeholder, not folded from real VRF
+	// output: these tests assert Connect RPC behavior, not nonce
+	// correctness.
+	require.NoError(t, db.SetBlockNonce(
+		blocks[0].Hash,
+		blocks[0].Slot,
+		bytes.Repeat([]byte{0x5c}, 32),
+		true, // isCheckpoint
+		nil,
+	))
 	indexedTxHashes := indexFixtureTransactionsForReadTx(
 		t,
 		db,
