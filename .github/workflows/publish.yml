@@ -7,10 +7,11 @@ on:
       - 'v*.*.*'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  # Never interrupt a tag release after publication has started. Branch image
-  # builds can be superseded by a newer main push.
-  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+  # Main runs build images and binaries but do not publish release artifacts.
+  # Give each main run its own group so a newer push cannot cancel the
+  # backstop for an earlier merged commit. Keep every other ref serialized.
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.ref }}
+  cancel-in-progress: false
 
 env:
   APPLICATION_NAME: 'dingo'
