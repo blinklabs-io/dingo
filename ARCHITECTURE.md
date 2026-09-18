@@ -1084,7 +1084,7 @@ dingo/
 │   ├── historyexpiry/   # Ledger-window-based local block history expiry
 │   │   └── pruner.go    # Background expiry scanner
 │   ├── test/            # Test utilities
-│   │   ├── conformance/ # Amaru conformance tests
+│   │   ├── conformance/ # Cardano Blueprint ledger-rule conformance tests
 │   │   ├── devnet/      # DevNet end-to-end tests
 │   │   └── testutil/    # Shared test helpers
 │   └── version/         # Version information
