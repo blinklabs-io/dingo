@@ -34,6 +34,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -975,6 +976,161 @@ func TestValidateTxDijkstraRejectsSameOperatorReuseOfSupersededFutureKey(
 	)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "already registered")
+}
+
+// TestLedgerStateNewViewPinsEpochStartSlot is the regression test for a
+// human reviewer finding on this PR: every prior epochStartSlot-pinning
+// test set the field by hand on a bare &LedgerView{ls: ls}, so a real
+// construction site (NewView, ledgerProcessBlock, validateTxCore,
+// ValidateTxWithOverlay, EvaluateTx) could drop its own epochStartSlot:
+// assignment without any test failing. This calls the real NewView
+// directly and asserts the pin happened there.
+func TestLedgerStateNewViewPinsEpochStartSlot(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	ls.Lock()
+	ls.currentEpoch = models.Epoch{StartSlot: 42}
+	ls.publishSnapshotsLocked()
+	ls.Unlock()
+
+	view := ls.NewView(nil)
+	assert.Equal(t, uint64(42), view.epochStartSlot)
+}
+
+// TestLedgerStateValidateTxPinsEpochStartSlot is the companion regression
+// test for validateTxCore (reached through the real, public ls.ValidateTx
+// entry point): a custom era descriptor's ValidateTxFunc captures the
+// *LedgerView it is actually given, so this proves the pin reaches
+// IsVrfKeyInUse's caller through the real path, not a hand-set field.
+func TestLedgerStateValidateTxPinsEpochStartSlot(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+
+	var capturedEpochStartSlot uint64
+	var captured bool
+	capturingEra := eras.ShelleyEraDesc
+	capturingEra.ValidateTxFunc = func(
+		_ lcommon.Transaction,
+		_ uint64,
+		ls lcommon.LedgerState,
+		_ lcommon.ProtocolParameters,
+	) error {
+		lv, ok := ls.(*LedgerView)
+		require.True(t, ok, "validateTxCore must pass a *LedgerView")
+		capturedEpochStartSlot = lv.epochStartSlot
+		captured = true
+		return nil
+	}
+
+	ls := &LedgerState{
+		db:             db,
+		currentEra:     capturingEra,
+		currentPParams: dijkstraTestProtocolParameters(),
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	ls.metrics.init(prometheus.NewRegistry())
+	ls.Lock()
+	ls.currentEpoch = models.Epoch{StartSlot: 77}
+	ls.publishSnapshotsLocked()
+	ls.Unlock()
+
+	input, err := mockledger.NewSimpleTransactionInput(
+		bytes.Repeat([]byte{0xd9}, lcommon.Blake2b256Size),
+		0,
+	)
+	require.NoError(t, err)
+	output, err := mockledger.NewTransactionOutputBuilder().
+		WithAddress("addr1qytna5k2fq9ler0fuk45j7zfwv7t2zwhp777nvdjqqfr5tz8ztpwnk8zq5ngetcz5k5mckgkajnygtsra9aej2h3ek5seupmvd").
+		WithLovelace(1_000_000).
+		Build()
+	require.NoError(t, err)
+	txBuilder := mockledger.NewTransactionBuilder()
+	txBuilder.WithId(bytes.Repeat([]byte{0xd9}, lcommon.Blake2b256Size))
+	txBuilder.WithType(gledger.TxTypeShelley)
+	txBuilder.WithValid(true)
+	txBuilder.WithInputs(input)
+	txBuilder.WithOutputs(output)
+	tx, err := txBuilder.Build()
+	require.NoError(t, err)
+
+	require.NoError(t, ls.ValidateTx(tx))
+	require.True(t, captured, "ValidateTxFunc must have been called")
+	assert.Equal(t, uint64(77), capturedEpochStartSlot)
+
+	require.NoError(t, dbtest.CloseDatabase(db))
+}
+
+// TestLedgerStateEvaluateTxPinsEpochStartSlot is the EvaluateTx companion
+// of the two tests above.
+func TestLedgerStateEvaluateTxPinsEpochStartSlot(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+
+	var capturedEpochStartSlot uint64
+	var captured bool
+	capturingEra := eras.ShelleyEraDesc
+	capturingEra.EvaluateTxFunc = func(
+		_ lcommon.Transaction,
+		ls lcommon.LedgerState,
+		_ lcommon.ProtocolParameters,
+	) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error) {
+		lv, ok := ls.(*LedgerView)
+		require.True(t, ok, "EvaluateTx must pass a *LedgerView")
+		capturedEpochStartSlot = lv.epochStartSlot
+		captured = true
+		return 0, lcommon.ExUnits{}, nil, nil
+	}
+
+	ls := &LedgerState{
+		db:             db,
+		currentEra:     capturingEra,
+		currentPParams: dijkstraTestProtocolParameters(),
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	ls.metrics.init(prometheus.NewRegistry())
+	ls.Lock()
+	ls.currentEpoch = models.Epoch{StartSlot: 88}
+	ls.publishSnapshotsLocked()
+	ls.Unlock()
+
+	input, err := mockledger.NewSimpleTransactionInput(
+		bytes.Repeat([]byte{0xda}, lcommon.Blake2b256Size),
+		0,
+	)
+	require.NoError(t, err)
+	output, err := mockledger.NewTransactionOutputBuilder().
+		WithAddress("addr1qytna5k2fq9ler0fuk45j7zfwv7t2zwhp777nvdjqqfr5tz8ztpwnk8zq5ngetcz5k5mckgkajnygtsra9aej2h3ek5seupmvd").
+		WithLovelace(1_000_000).
+		Build()
+	require.NoError(t, err)
+	txBuilder := mockledger.NewTransactionBuilder()
+	txBuilder.WithId(bytes.Repeat([]byte{0xda}, lcommon.Blake2b256Size))
+	txBuilder.WithType(gledger.TxTypeShelley)
+	txBuilder.WithValid(true)
+	txBuilder.WithInputs(input)
+	txBuilder.WithOutputs(output)
+	tx, err := txBuilder.Build()
+	require.NoError(t, err)
+
+	_, _, _, err = ls.EvaluateTx(tx)
+	require.NoError(t, err)
+	require.True(t, captured, "EvaluateTxFunc must have been called")
+	assert.Equal(t, uint64(88), capturedEpochStartSlot)
+
+	require.NoError(t, dbtest.CloseDatabase(db))
 }
 
 func TestLedgerViewSkipPhase2Validation(t *testing.T) {
