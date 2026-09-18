@@ -1198,15 +1198,19 @@ func (m *DingoStateManager) recordVotesInGovState(tx common.Transaction) {
 // retirement epoch against the current epoch at read time -- so there is
 // nothing further to persist at the boundary itself.
 //
-// Ratification/enactment decisions are made by the same
-// vector-validated heuristic the harness has always used (see
-// ratifyProposals/enactProposal below), not by invoking the full
-// governance.ProcessEpoch orchestration: ProcessEpoch's real ratification
-// path performs stake-weighted DRep/SPO/committee tallying against the
-// database's live stake distribution, which synthetic per-vector seed data
-// isn't guaranteed to model with the fidelity that requires, and a
-// mismatch there would show up as vector regressions, not as an
-// isolated persistence gap. Enactment side effects that a ratified
+// Ratification/enactment decisions are made by ratifyProposals/enactProposal
+// below, not by invoking the full governance.ProcessEpoch orchestration.
+// Most action types still use the vector-validated vote-shape heuristic the
+// harness has always used; NoConfidence and UpdateCommittee are the
+// exception (see committeeActionRatified), deciding ratification with a
+// real stake-weighted DRep/SPO tally against the database's live stake
+// distribution via credentialVotingStake/GetControlledAmountByCredential.
+// The rest of ProcessEpoch's real orchestration -- committee/SPO/DRep
+// denominators computed once per epoch tick, parent-chain and per-purpose
+// bookkeeping -- is not invoked here, and synthetic per-vector seed data
+// isn't guaranteed to model that fidelity, so a mismatch there would show
+// up as vector regressions, not as an isolated persistence gap. Enactment
+// side effects that a ratified
 // proposal must apply (committee membership, protocol parameters,
 // constitution, treasury withdrawal) are instead persisted by calling the
 // real governance.EnactProposal directly against the already-persisted
@@ -1300,10 +1304,12 @@ func (m *DingoStateManager) pruneCommitteeResignations() {
 	}
 }
 
-// ratifyProposals performs the harness's simplified proposal ratification
-// (unchanged decision logic -- see the ProcessEpochBoundary doc comment for
-// why this isn't governance.ProcessEpoch's stake-weighted tally), and
-// persists each ratification decision to the real backend row.
+// ratifyProposals performs the harness's proposal ratification -- a
+// vote-shape heuristic for most action types, a real stake-weighted DRep/SPO
+// tally for NoConfidence/UpdateCommittee (see committeeActionRatified and
+// the ProcessEpochBoundary doc comment for why this still isn't
+// governance.ProcessEpoch's full orchestration) -- and persists each
+// ratification decision to the real backend row.
 func (m *DingoStateManager) ratifyProposals(
 	txn *database.Txn,
 	currentEpoch uint64,
@@ -1329,29 +1335,9 @@ func (m *DingoStateManager) ratifyProposals(
 			continue
 		}
 
-		if len(proposal.Votes) == 0 {
-			continue
-		}
-
-		voterTypesWithYes := make(map[uint8]bool)
-		for voterKey, voteValue := range proposal.Votes {
-			if voteValue != 1 {
-				continue
-			}
-			if len(voterKey) > 0 {
-				voterTypesWithYes[voterKey[0]-'0'] = true
-			}
-		}
-
-		hasCC := voterTypesWithYes[0] || voterTypesWithYes[1]
-		hasDRep := voterTypesWithYes[2] || voterTypesWithYes[3]
-		hasSPO := voterTypesWithYes[4] || voterTypesWithYes[5]
-
 		var meetsRequirements bool
-		//exhaustive:ignore
-		switch proposal.ActionType {
-		case common.GovActionTypeNoConfidence,
-			common.GovActionTypeUpdateCommittee:
+		if proposal.ActionType == common.GovActionTypeNoConfidence ||
+			proposal.ActionType == common.GovActionTypeUpdateCommittee {
 			// cardano-ledger's votingCommitteeThresholdInternal returns
 			// NoVotingAllowed for the committee on both of these action
 			// types, so a hasCC requirement here means the harness would
@@ -1360,6 +1346,13 @@ func (m *DingoStateManager) ratifyProposals(
 			// one SPO) as another vector that must NOT ratify once active
 			// proposal deposits are counted as part of the depositor's
 			// active voting stake (CIP-1694). See issue #4007.
+			//
+			// This must run before the zero-explicit-vote guard below: a
+			// DRep or silent pool delegated AlwaysNoConfidence casts an
+			// automatic yes on a NoConfidence action without ever appearing
+			// in proposal.Votes (see drepStakeForCommitteeAction/
+			// spoStakeForCommitteeAction), so a proposal backed only by that
+			// implicit vote must still reach committeeActionRatified.
 			var err error
 			meetsRequirements, err = m.committeeActionRatified(
 				txn, proposal, currentEpoch,
@@ -1370,23 +1363,47 @@ func (m *DingoStateManager) ratifyProposals(
 					id, err,
 				)
 			}
-		case common.GovActionTypeHardForkInitiation:
-			// Conway bootstrap explicitly admits HardForkInitiation
-			// alongside ParameterChange (ledger/governance's ShouldRatify),
-			// so no bootstrap gate applies to either of those two.
-			meetsRequirements = hasCC && hasDRep && hasSPO
-		case common.GovActionTypeParameterChange:
-			meetsRequirements = hasCC && hasDRep
-		case common.GovActionTypeNewConstitution,
-			common.GovActionTypeTreasuryWithdrawal:
-			// Unlike ParameterChange/HardForkInitiation, ShouldRatify
-			// refuses these two outright during Conway bootstrap regardless
-			// of votes. This heuristic path has no tally to hand ShouldRatify
-			// (see committeeActionRatified for the pair that does), so the
-			// bootstrap ineligibility has to be checked directly here.
-			meetsRequirements = hasCC && hasDRep && !m.inConwayBootstrap()
-		default:
-			meetsRequirements = len(voterTypesWithYes) >= 2
+		} else {
+			if len(proposal.Votes) == 0 {
+				continue
+			}
+
+			voterTypesWithYes := make(map[uint8]bool)
+			for voterKey, voteValue := range proposal.Votes {
+				if voteValue != 1 {
+					continue
+				}
+				if len(voterKey) > 0 {
+					voterTypesWithYes[voterKey[0]-'0'] = true
+				}
+			}
+
+			hasCC := voterTypesWithYes[0] || voterTypesWithYes[1]
+			hasDRep := voterTypesWithYes[2] || voterTypesWithYes[3]
+			hasSPO := voterTypesWithYes[4] || voterTypesWithYes[5]
+
+			//exhaustive:ignore
+			switch proposal.ActionType {
+			case common.GovActionTypeHardForkInitiation:
+				// Conway bootstrap explicitly admits HardForkInitiation
+				// alongside ParameterChange (ledger/governance's
+				// ShouldRatify), so no bootstrap gate applies to either of
+				// those two.
+				meetsRequirements = hasCC && hasDRep && hasSPO
+			case common.GovActionTypeParameterChange:
+				meetsRequirements = hasCC && hasDRep
+			case common.GovActionTypeNewConstitution,
+				common.GovActionTypeTreasuryWithdrawal:
+				// Unlike ParameterChange/HardForkInitiation, ShouldRatify
+				// refuses these two outright during Conway bootstrap
+				// regardless of votes. This heuristic path has no tally to
+				// hand ShouldRatify (see committeeActionRatified for the
+				// pair that does), so the bootstrap ineligibility has to be
+				// checked directly here.
+				meetsRequirements = hasCC && hasDRep && !m.inConwayBootstrap()
+			default:
+				meetsRequirements = len(voterTypesWithYes) >= 2
+			}
 		}
 
 		if !meetsRequirements {
@@ -1449,7 +1466,7 @@ func (m *DingoStateManager) committeeActionRatified(
 
 	deposits := m.activeProposalDeposits(currentEpoch)
 	drepYes, drepTotal, err := m.drepStakeForCommitteeAction(
-		txn, proposal, deposits,
+		txn, proposal, deposits, currentEpoch,
 	)
 	if err != nil {
 		return false, err
@@ -1520,39 +1537,25 @@ func (m *DingoStateManager) committeeInNoConfidence(
 // syntheticUpdateCommitteeGovAction builds just enough of a
 // common.UpdateCommitteeGovAction for ShouldRatify's committeeTermsWithinLimit
 // check: that function only reads CredEpochs' values (each proposed member's
-// expiry epoch), never its keys, so the keys need only be distinct pointers.
+// expiry epoch), never its keys. ProposedMembers is always a hash-only
+// projection of ProposedMembersByCredential (ouroboros-mock's
+// committeeMembersByHash only ever drops entries already covered by a full
+// credential identity, never adds ones absent from it), so
+// ProposedMembersByCredential alone is a complete source -- mirroring
+// initialCommitteeProposalCbor, which builds a real UpdateCommitteeGovAction
+// the same way for the CBOR-reconstruction path.
 func syntheticUpdateCommitteeGovAction(
 	proposal *conformance.ProposalState,
 ) *common.UpdateCommitteeGovAction {
 	credEpochs := make(
 		map[*common.Credential]uint64,
-		len(proposal.ProposedMembersByCredential)+len(proposal.ProposedMembers),
+		len(proposal.ProposedMembersByCredential),
 	)
-	for _, expiry := range proposal.ProposedMembersByCredential {
-		credEpochs[new(common.Credential)] = expiry
-	}
-	for hash, expiry := range proposal.ProposedMembers {
-		if hasCredentialHash(proposal.ProposedMembersByCredential, hash) {
-			continue
-		}
-		credEpochs[new(common.Credential)] = expiry
+	for credential, expiry := range proposal.ProposedMembersByCredential {
+		cred := credential.AsCredential()
+		credEpochs[&cred] = expiry
 	}
 	return &common.UpdateCommitteeGovAction{CredEpochs: credEpochs}
-}
-
-// hasCredentialHash reports whether values already has an entry whose
-// credential hash equals hash, used to avoid double-counting a legacy
-// hash-only entry that a full-credential-identity entry already covers.
-func hasCredentialHash[V any](
-	values map[mockledger.RewardAccountKey]V,
-	hash common.Blake2b224,
-) bool {
-	for credential := range values {
-		if credential.Credential == hash {
-			return true
-		}
-	}
-	return false
 }
 
 // activeProposalDeposits sums, per return-account credential, the deposits
@@ -1608,6 +1611,7 @@ func (m *DingoStateManager) drepStakeForCommitteeAction(
 	txn *database.Txn,
 	proposal *conformance.ProposalState,
 	deposits map[mockledger.RewardAccountKey]uint64,
+	currentEpoch uint64,
 ) (uint64, uint64, error) {
 	isNoConfidence := proposal.ActionType == common.GovActionTypeNoConfidence
 	yesStake := new(big.Int)
@@ -1640,7 +1644,7 @@ func (m *DingoStateManager) drepStakeForCommitteeAction(
 				voterType = common.VoterTypeDRepScriptHash
 			}
 			if !m.govState.IsDRepCredentialActive(
-				drepCredential, m.currentEpoch,
+				drepCredential, currentEpoch,
 			) {
 				continue
 			}

@@ -343,6 +343,56 @@ func TestProcessEpochBoundaryRatifiesNoConfidenceWithoutCommitteeVote(
 	)
 }
 
+// TestProcessEpochBoundaryRatifiesNoConfidenceWithNoExplicitVotes pins a
+// blocker a PR review found: ratifyProposals returned early on
+// `len(proposal.Votes) == 0` before ever reaching the NoConfidence/
+// UpdateCommittee branch, so a proposal backed only by an implicit
+// AlwaysNoConfidence delegation -- no proposal.Votes entry at all, exactly
+// TestCommitteeActionRatifiedNoConfidenceUsesMotionThresholdAndImplicitYes's
+// state -- was silently skipped every epoch boundary and never ratified,
+// even though committeeActionRatified alone (called directly) correctly
+// says yes. Driving that same state through the real ProcessEpochBoundary
+// entry point is what exposes the gap a direct call cannot.
+func TestProcessEpochBoundaryRatifiesNoConfidenceWithNoExplicitVotes(
+	t *testing.T,
+) {
+	m, err := NewDingoStateManager()
+	require.NoError(t, err)
+	defer func() { require.NoError(t, m.Close()) }()
+
+	m.protocolParams = noConfidenceCommitteeParams()
+
+	credential := mockledger.RewardAccountKey{
+		CredType:   common.CredentialTypeAddrKeyHash,
+		Credential: testHash28(0xfa),
+	}
+	m.govState.DRepDelegationsByCredential[credential] = common.Drep{
+		Type: common.DrepTypeNoConfidence,
+	}
+	m.govState.RewardAccountBalances[credential] = 1_000_000
+
+	const govActionID = "fbfbfbfb#0"
+	m.govState.Proposals[govActionID] = &conformance.ProposalState{
+		GovActionInfo: conformance.GovActionInfo{
+			ActionType:     common.GovActionTypeNoConfidence,
+			SubmittedEpoch: 0,
+			ExpiresAfter:   10,
+			Votes:          map[string]uint8{},
+		},
+	}
+
+	require.NoError(t, m.ProcessEpochBoundary(1))
+
+	require.NotNil(
+		t,
+		m.govState.Proposals[govActionID].RatifiedEpoch,
+		"a NoConfidence proposal backed only by an implicit "+
+			"AlwaysNoConfidence delegation, with no entries in "+
+			"proposal.Votes at all, must still ratify through "+
+			"ProcessEpochBoundary",
+	)
+}
+
 // TestCommitteeActionRatifiedRefusesDuringConwayBootstrap pins the Conway
 // bootstrap gate directly: the exact same DRep/SPO-backed NoConfidence
 // setup that TestProcessEpochBoundaryRatifiesNoConfidenceWithoutCommitteeVote
