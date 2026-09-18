@@ -1231,7 +1231,19 @@ like a mutation and are not, and both are ordinary rather than exceptional:
   `queryUtxoStakeConsumedDeltas`.
 
 Both are still refreshed at zero delta, so the set of credentials a write
-touches is identical to the full-scan path's. Counting either one drifts the
+touches is identical to the full-scan path's.
+
+The read of the running total and the upsert that replaces it are separate
+statements, as they always were on the full-scan path. What makes that safe is
+that block application is the only writer of a credential's `reward_live_stake`
+row and applies one block at a time; SQLite reinforces it with `writeDB`'s
+`SetMaxOpenConns(1)`, while the Postgres and MySQL providers share one pool of
+up to 100 connections and rely on the apply loop alone. The consequence of
+breaking that property is worse for the incremental path than for the full-scan
+one -- a lost update there is recomputed from the `utxo` table on the next
+touch, and here it persists until the startup comparison runs -- so a writer
+added off the apply loop needs an atomic read-and-write, not a reuse of
+`refreshRewardLiveStakeAggregateDelta`. Counting either one drifts the
 credential permanently, and an over-large loss additionally fails
 `applyUtxoStakeDelta`'s underflow guard, which aborts block application rather
 than merely reporting wrong stake. `TestSetTransactionReapplyAppliesNoSecondDelta`,

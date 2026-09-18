@@ -182,6 +182,19 @@ func applyUtxoStakeDelta(
 // full design, including why the other callers deliberately do not use this
 // path.
 //
+// The read and the upsert are not one atomic statement, so they rely on the
+// same property the full-scan path always has: block application is the only
+// writer of a credential's reward_live_stake row and applies one block at a
+// time, so no second write transaction can change utxo_stake between them.
+// (On SQLite that is reinforced by writeDB's SetMaxOpenConns(1); on Postgres
+// and MySQL, whose providers share one pool of up to 100 connections, the
+// ledger's single apply loop is the whole of it.) The consequence of breaking
+// that property is worse here than on the full-scan path -- a lost update
+// there is recomputed from the utxo table on the next touch, while a lost
+// update here persists until RewardLiveStakeNeedsBackfill runs -- so a future
+// caller that writes this table off the apply loop must make the read and
+// write atomic rather than reuse this function as-is.
+//
 // If no running total is recorded yet for this credential,
 // sumCredentialUtxoStake's full scan establishes a fresh, authoritative
 // baseline instead of trusting delta against an unknown prior value -- cheap
