@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"net"
-	"path/filepath"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -220,7 +219,10 @@ func TestNtCAdmissionUnix(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix-domain sockets are not the Windows NtC transport")
 	}
-	listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "ntc.sock"))
+	listener, err := net.Listen(
+		"unix",
+		unixTestSocketPath(t, unixTestTempDir(t), "ntc.sock"),
+	)
 	require.NoError(t, err)
 	manager := startNtCAdmissionManager(t, ConnectionManagerConfig{
 		MaxNtCConns: 2, MaxNtCConnectionsPerIP: 1,

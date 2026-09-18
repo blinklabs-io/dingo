@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
@@ -414,6 +415,78 @@ func (d *Database) TruncateAfterSlot(
 				"failed to get block nonce: %w",
 				err,
 			)
+		}
+		// GetBlockNonce returns (nil, nil) -- not an error -- when no row
+		// matches the point. Routine operation only ever keeps block_nonce
+		// rows for the last 3 epochs plus each epoch's single checkpoint row
+		// (see ledger/state.go's cleanupBlockNoncesBefore), so a disaster-
+		// recovery truncate to an older point can land on a slot whose own
+		// row has already been pruned. Silently continuing with an empty
+		// nonce here would seed the resumed evolving-nonce fold
+		// (LedgerState.loadTip -> ledgerProcessBlocks' runningNonce) with
+		// the wrong value, corrupting every block nonce computed for the
+		// rest of the epoch and, through it, the following epoch's nonce --
+		// causing VRF verification to fail for every header in that epoch,
+		// from every honest peer, with no error at truncate time to explain
+		// why. Byron-era blocks are the sole legitimate empty-nonce case
+		// (PBFT has no Praos nonce), so exempt them.
+		if len(newNonce) == 0 &&
+			truncateBlock.Type != byron.BlockTypeByronEbb &&
+			truncateBlock.Type != byron.BlockTypeByronMain {
+			// A pruned target nonce is USUALLY reconstructible whenever a
+			// checkpoint row (is_checkpoint=1, retained forever, written
+			// once per epoch) survives at or before the target's own slot:
+			// LedgerState's startup heal (healTruncateGapBlockNonces) folds
+			// the evolving nonce forward from that checkpoint through the
+			// still-present block CBOR between it and the target -- this
+			// truncate only ever deletes blocks strictly AFTER its target,
+			// never at or before it, so that history is guaranteed present
+			// -- and persists the correct nonce before any epoch nonce or
+			// VRF check runs. This package intentionally has no ledger/era
+			// or chain-topology knowledge to perform that fold itself (see
+			// AGENTS.md's database/ledger boundary), so this check is
+			// deliberately coarse: it only verifies that SOME checkpoint row
+			// exists at or before the target slot, not that it sits on the
+			// current primary chain (a checkpoint written for a
+			// later-abandoned fork is never guaranteed cleaned up by every
+			// rollback path). The ledger layer's heal re-derives the anchor
+			// with full primary-chain awareness and is the actual safety
+			// boundary: it hard-fails startup rather than silently leaving
+			// the tip nonce empty if the checkpoint this check found turns
+			// out not to be usable after all.
+			//
+			// No checkpoint before the target means reconstruction has
+			// nothing to fold from -- reject exactly as before, since
+			// resuming nonce computation from an empty value would
+			// silently corrupt every epoch nonce computed afterward.
+			hasCheckpoint, cpErr := d.hasBlockNonceCheckpointAtOrBeforeSlot(
+				point.Slot,
+				txn,
+			)
+			if cpErr != nil {
+				return ochainsync.Tip{}, nil, fmt.Errorf(
+					"check for a block_nonce checkpoint before truncate target: %w",
+					cpErr,
+				)
+			}
+			if !hasCheckpoint {
+				return ochainsync.Tip{}, nil, fmt.Errorf(
+					"truncate target at slot %d (hash %x) has no stored "+
+						"block nonce and no earlier checkpoint exists to "+
+						"reconstruct it from: the block_nonce row may have "+
+						"been pruned by routine 3-epoch retention; resuming "+
+						"nonce computation from an empty value would "+
+						"silently corrupt the epoch nonce for every epoch "+
+						"computed afterward and fail VRF verification for "+
+						"the whole following epoch -- choose a truncate "+
+						"target within the retained window, or restore the "+
+						"block_nonce history for this point first",
+					point.Slot,
+					point.Hash,
+				)
+			}
+			// Leave newNonce nil: the caller's tip will carry no nonce
+			// until LedgerState's startup heal reconstructs it.
 		}
 	}
 	// Write tip to DB

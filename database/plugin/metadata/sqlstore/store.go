@@ -54,6 +54,18 @@ type Config struct {
 	// migration readiness gate succeeds. SQLite uses it for periodic VACUUM.
 	Maintenance         func(context.Context) error
 	MaintenanceInterval time.Duration
+	// Checkpoint is an optional provider-owned hook run on its own ticker,
+	// independent of Maintenance/MaintenanceInterval: SQLite uses it to
+	// attempt a periodic WAL TRUNCATE checkpoint (see sqlite.checkpointWAL)
+	// so the on-disk WAL file can be shrunk back down on a schedule, rather
+	// than relying solely on the commit-triggered wal_autocheckpoint passive
+	// checkpoint, which never truncates. This is best-effort: an active read
+	// snapshot can leave a given attempt busy, deferring the reduction to a
+	// later tick instead of guaranteeing an unconditional size ceiling. Left
+	// unset (or CheckpointInterval <= 0), this ticker never starts -- the
+	// same convention Maintenance/MaintenanceInterval already use.
+	Checkpoint         func(context.Context) error
+	CheckpointInterval time.Duration
 	// BackupTo and RestoreFrom are optional provider-owned lifecycle hooks.
 	// SQLite supplies them for its file-backed store; other dialects may leave
 	// them unset until a native snapshot mechanism is available.
@@ -86,14 +98,20 @@ type Config struct {
 	// PromRegistry is optional. When set, Store registers
 	// dingo_database_sql_operations_total, a counter of every statement
 	// issued through Store's shared query chokepoint (instrumentedQueryer),
-	// labeled by its best-effort operation classification (see
-	// classifySQLStatement in metrics.go), and
+	// labeled by its best-effort operation classification, and
 	// dingo_database_sql_query_duration_seconds, a histogram of each such
 	// statement's wall-clock duration labeled by that same op
 	// classification plus, when known, the sqlc-generated query name (see
-	// classifySQLStatement). Left nil, instrumentation is a no-op -- the
-	// same convention database/plugin/blob/badger uses for its own
-	// promRegistry.
+	// classifySQLStatement in metrics.go). Store also registers six
+	// dingo_database_sql_pool_* connection-pool metrics per pool, labeled
+	// pool="write"|"read" and sampled live from WritePoolStats/
+	// ReadPoolStats on every scrape (see newSQLPoolMetrics in metrics.go)
+	// -- most notably pool_wait_count_total and
+	// pool_wait_duration_seconds_total, which for pool="write" are the
+	// direct signal for contention on the single writer connection every
+	// current provider caps that pool to. Left nil, instrumentation is a
+	// no-op -- the same convention database/plugin/blob/badger uses for its
+	// own promRegistry.
 	PromRegistry prometheus.Registerer
 }
 
@@ -124,12 +142,21 @@ type Store struct {
 	maintenanceCancel context.CancelFunc
 	maintenanceDone   chan struct{}
 	maintenanceState  atomic.Uint32
-	ready             atomic.Bool
-	closed            atomic.Bool
-	startMu           sync.Mutex
-	bulkMu            sync.RWMutex
-	bulkConnMu        sync.Mutex
-	bulkConn          *sql.Conn
+
+	// checkpoint/checkpointEvery back an independent ticker from
+	// maintenance/maintenanceEvery -- see Config.Checkpoint's doc comment for
+	// why WAL checkpointing needs a much shorter cadence than VACUUM.
+	checkpoint       func(context.Context) error
+	checkpointEvery  time.Duration
+	checkpointCancel context.CancelFunc
+	checkpointDone   chan struct{}
+	checkpointState  atomic.Uint32
+	ready            atomic.Bool
+	closed           atomic.Bool
+	startMu          sync.Mutex
+	bulkMu           sync.RWMutex
+	bulkConnMu       sync.Mutex
+	bulkConn         *sql.Conn
 
 	closeOnce sync.Once
 	closeErr  error
@@ -138,6 +165,16 @@ type Store struct {
 	// prepared_stmt.go for the mechanism and correctness argument.
 	stmtMu sync.Mutex
 	stmts  map[string]*sql.Stmt
+
+	// sumCredentialUtxoStakeCalls counts invocations of
+	// sumCredentialUtxoStake, the per-credential full live-UTxO aggregate
+	// scan that refreshRewardLiveStakeAggregate runs on every touch (see
+	// live_stake.go). It exists purely for test observability -- proving
+	// that a transaction touching one stake credential through a
+	// certificate, a consumed input, and a produced output triggers that
+	// scan at most once, not once per occurrence. No production code path
+	// reads it.
+	sumCredentialUtxoStakeCalls atomic.Int64
 
 	// sqlOperations and sqlQueryDuration are nil when Config.PromRegistry
 	// was nil; see instrumentedQueryer and metrics.go.
@@ -192,7 +229,7 @@ func New(config Config) (*Store, error) {
 			"sqlstore: migration locker is required when migrations are configured",
 		)
 	}
-	return &Store{
+	store := &Store{
 		writeDB:                     config.WriteDB,
 		readDB:                      config.ReadDB,
 		dialect:                     config.Dialect,
@@ -204,6 +241,8 @@ func New(config Config) (*Store, error) {
 		diskSize:                    config.DiskSize,
 		maintenance:                 config.Maintenance,
 		maintenanceEvery:            config.MaintenanceInterval,
+		checkpoint:                  config.Checkpoint,
+		checkpointEvery:             config.CheckpointInterval,
 		backupTo:                    config.BackupTo,
 		restoreFrom:                 config.RestoreFrom,
 		prepare:                     config.Prepare,
@@ -211,7 +250,17 @@ func New(config Config) (*Store, error) {
 		validateBackup:              config.ValidateBackup,
 		sqlOperations:               newSQLOperationsCounter(config.PromRegistry),
 		sqlQueryDuration:            newSQLQueryDurationHistogram(config.PromRegistry),
-	}, nil
+	}
+	// Registered against store.WritePoolStats/ReadPoolStats (not
+	// config.WriteDB.Stats/config.ReadDB.Stats directly) so every backend
+	// (SQLite, Postgres, MySQL) gets write/read pool contention metrics for
+	// free through the same two accessor methods callers already use, with
+	// no provider-specific wiring required. See newSQLPoolMetrics' doc
+	// comment for the metric shapes and why the write pool is the one that
+	// matters.
+	newSQLPoolMetrics(config.PromRegistry, "write", store.WritePoolStats)
+	newSQLPoolMetrics(config.PromRegistry, "read", store.ReadPoolStats)
+	return store, nil
 }
 
 func (s *Store) BackupTo(ctx context.Context, dstPath string) error {
@@ -355,9 +404,11 @@ func (s *Store) Start(ctx context.Context) error {
 	// failure here does not abort Start.
 	s.prepareHotStatements(ctx)
 	s.ready.Store(true)
-	// Maintenance owns its own lifetime and must not inherit the startup
-	// context, which callers commonly cancel as soon as Start returns.
-	s.startMaintenance() //nolint:contextcheck
+	// Maintenance and the checkpoint ticker both own their own lifetime and
+	// must not inherit the startup context, which callers commonly cancel as
+	// soon as Start returns.
+	s.startMaintenance()      //nolint:contextcheck
+	s.startCheckpointTicker() //nolint:contextcheck
 	return nil
 }
 
@@ -428,9 +479,10 @@ func (s *Store) Close() error {
 	return s.CloseContext(context.Background())
 }
 
-// CloseContext cancels maintenance and closes each owned pool. The lifecycle
-// context is also passed to the maintenance wait so cancellation can interrupt
-// a long-running VACUUM before the provider shutdown deadline expires.
+// CloseContext cancels maintenance and the checkpoint ticker and closes each
+// owned pool. The lifecycle context is also passed to those waits so
+// cancellation can interrupt a long-running VACUUM or in-flight checkpoint
+// before the provider shutdown deadline expires.
 func (s *Store) CloseContext(ctx context.Context) error {
 	if ctx == nil {
 		return errors.New("sqlstore: close context is nil")
@@ -439,6 +491,7 @@ func (s *Store) CloseContext(ctx context.Context) error {
 	defer s.startMu.Unlock()
 	s.closeOnce.Do(func() {
 		s.closeMaintenanceAdmission()
+		s.closeCheckpointAdmission()
 		s.closed.Store(true)
 		s.ready.Store(false)
 		// Invalidate the prepared-statement cache before the pools it was
@@ -455,10 +508,38 @@ func (s *Store) CloseContext(ctx context.Context) error {
 			// sessions where session_replication_role is connection-scoped.
 			_ = s.restoreNormalPragmas(ctx)
 		}
+		// Cancel both tickers up front, before waiting on either. Cancelling
+		// stops each ticker's select loop from admitting a new tick, but it
+		// does not interrupt a tick already in flight: neither Maintenance's
+		// VACUUM nor SQLite's checkpointWAL observes context cancellation
+		// once its underlying driver call has started, so a tick that began
+		// just before Close is called still runs to completion regardless of
+		// ctx. checkpointWAL bounds that wait to checkpointBusyTimeout (see
+		// its doc comment) rather than the 30-second busy_timeout an
+		// in-flight checkpoint against writeDB used to allow, so in practice
+		// neither ticker's goroutine outlives this call by more than that
+		// bound. Requesting both cancellations here -- rather than only
+		// reaching the second one after the first successfully waited --
+		// still matters: it lets the two waits below run against tickers
+		// that are both already trying to stop, instead of serializing one
+		// ticker's shutdown behind the other's.
 		if s.maintenanceCancel != nil {
 			s.maintenanceCancel()
+		}
+		if s.checkpointCancel != nil {
+			s.checkpointCancel()
+		}
+		if s.maintenanceCancel != nil {
 			select {
 			case <-s.maintenanceDone:
+			case <-ctx.Done():
+				s.closeErr = errors.Join(ctx.Err(), s.closePools())
+				return
+			}
+		}
+		if s.checkpointCancel != nil {
+			select {
+			case <-s.checkpointDone:
 			case <-ctx.Done():
 				s.closeErr = errors.Join(ctx.Err(), s.closePools())
 				return
@@ -545,6 +626,76 @@ func (s *Store) closeMaintenanceAdmission() {
 	for {
 		state := s.maintenanceState.Load()
 		if state == 2 || s.maintenanceState.CompareAndSwap(state, 2) {
+			return
+		}
+	}
+}
+
+// startCheckpointTicker runs s.checkpoint on its own ticker, independent of
+// startMaintenance's 24-hour-scale cadence: WAL checkpointing needs to run
+// every 1-5 minutes to bound WAL growth, not once a day. Mirrors
+// startMaintenance's admission/cancellation shape (checkpointState,
+// checkpointCancel, checkpointDone) exactly, as a distinct instance rather
+// than a shared one, so a slow VACUUM can never delay or skip a checkpoint
+// tick and vice versa.
+func (s *Store) startCheckpointTicker() {
+	if s.checkpoint == nil || s.checkpointEvery <= 0 {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.checkpointCancel = cancel
+	s.checkpointDone = make(chan struct{})
+	go func() {
+		defer close(s.checkpointDone)
+		ticker := time.NewTicker(s.checkpointEvery)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				// Admission is an atomic state transition, identical in
+				// shape to closeMaintenanceAdmission: Close moves the state
+				// to closed before cancelling the callback context, so a
+				// racing tick cannot start a checkpoint against closing
+				// pools.
+				if !s.checkpointState.CompareAndSwap(0, 1) {
+					return
+				}
+				if ctx.Err() != nil || s.closed.Load() {
+					s.checkpointState.CompareAndSwap(1, 0)
+					return
+				}
+				started := time.Now()
+				err := s.checkpoint(ctx)
+				s.checkpointState.CompareAndSwap(1, 0)
+				if err != nil {
+					if ctx.Err() == nil {
+						s.logger.Error(
+							"metadata database WAL checkpoint failed",
+							"dialect", s.dialect.Name(),
+							"duration", time.Since(started),
+							"error", err,
+						)
+					} else {
+						return
+					}
+					continue
+				}
+				s.logger.Debug(
+					"metadata database WAL checkpoint complete",
+					"dialect", s.dialect.Name(),
+					"duration", time.Since(started),
+				)
+			}
+		}
+	}()
+}
+
+func (s *Store) closeCheckpointAdmission() {
+	for {
+		state := s.checkpointState.Load()
+		if state == 2 || s.checkpointState.CompareAndSwap(state, 2) {
 			return
 		}
 	}
