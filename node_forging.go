@@ -15,6 +15,7 @@
 package dingo
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -73,7 +74,10 @@ func (n *Node) validateBlockProducerStartup() (*forging.PoolCredentials, error) 
 	supportedSlot, supported, err := n.ledgerState.
 		WallClockSlotFromConfirmedHistory()
 	if err != nil {
-		return nil, fmt.Errorf("wall-clock slot from confirmed history: %w", err)
+		return nil, fmt.Errorf(
+			"wall-clock slot from confirmed history: %w",
+			err,
+		)
 	}
 	return n.validateBlockProducerStartupForClock(supportedSlot, supported)
 }
@@ -81,7 +85,6 @@ func (n *Node) validateBlockProducerStartup() (*forging.PoolCredentials, error) 
 func (n *Node) validateBlockProducerStartupAtSlot(
 	currentSlot uint64,
 ) (creds *forging.PoolCredentials, retErr error) {
-	creds = forging.NewPoolCredentials()
 	agentBacked := n.config.shelleyKESAgentSocket != ""
 	if agentBacked {
 		// Agent startup installs the client before the remaining credential
@@ -93,26 +96,38 @@ func (n *Node) validateBlockProducerStartupAtSlot(
 			}
 		}()
 	}
-	if n.config.shelleyKESAgentSocket != "" {
-		if err := n.loadBlockProducerCredentialsFromAgent(
-			creds,
-			currentSlot,
-		); err != nil {
-			return nil, fmt.Errorf(
-				"load pool credentials from KES agent: %w",
-				err,
-			)
-		}
-	} else if err := creds.LoadFromFiles(
-		n.config.shelleyVRFKey,
-		n.config.shelleyKESKey,
-		n.config.shelleyOperationalCertificate,
-	); err != nil {
-		return nil, fmt.Errorf("load pool credentials: %w", err)
+	creds, err := n.validateBlockProducerCredentialMaterial(currentSlot)
+	if err != nil {
+		return nil, err
 	}
-	if err := creds.ValidateOpCert(); err != nil {
-		return nil, fmt.Errorf("validate operational certificate: %w", err)
+	genesis, err := n.blockProducerShelleyGenesis()
+	if err != nil {
+		return nil, err
 	}
+	if err := creds.ValidateKESPeriod(genesis, currentSlot); err != nil {
+		return nil, fmt.Errorf("validate KES period: %w", err)
+	}
+	currentPeriod, err := forging.CurrentKESPeriodFromGenesis(
+		genesis,
+		currentSlot,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("compute current KES period: %w", err)
+	}
+	opCert := creds.GetOpCert()
+	if opCert == nil {
+		return nil, errors.New("block producer operational certificate is nil")
+	}
+	n.config.logger.Info(
+		"block producer credentials validated",
+		"component", "node",
+		"pool_id", creds.GetPoolID().String(),
+		"current_slot", currentSlot,
+		"current_kes_period", currentPeriod,
+		"opcert_kes_period", opCert.KESPeriod,
+		"opcert_counter", opCert.IssueNumber,
+		"opcert_expiry_period", creds.OpCertExpiryPeriod(),
+	)
 	return creds, nil
 }
 
@@ -134,11 +149,18 @@ func (n *Node) validateBlockProducerStartupAtSlot(
 func (n *Node) validateBlockProducerStartupForClock(
 	slot uint64,
 	supported bool,
-) (*forging.PoolCredentials, error) {
+) (creds *forging.PoolCredentials, retErr error) {
 	if supported {
 		return n.validateBlockProducerStartupAtSlot(slot)
 	}
-	creds, err := n.validateBlockProducerCredentialMaterial()
+	if n.config.shelleyKESAgentSocket != "" {
+		defer func() {
+			if retErr != nil {
+				n.closeKESAgentClient()
+			}
+		}()
+	}
+	creds, err := n.validateBlockProducerCredentialMaterial(slot)
 	if err != nil {
 		return nil, err
 	}
@@ -162,10 +184,14 @@ func (n *Node) validateBlockProducerStartupForClock(
 			"deferring the operational-certificate KES-period plausibility check until the ledger catches up. "+
 			"The opcert KES lifetime is re-checked per slot and forging cannot proceed while it fails; "+
 			"sync progress additionally gates forging whenever an upstream peer is active.",
-		"component", "node",
-		"tip_slot", tipSlot,
-		"opcert_kes_period", opCert.KESPeriod,
-		"opcert_expiry_period", creds.OpCertExpiryPeriod(),
+		"component",
+		"node",
+		"tip_slot",
+		tipSlot,
+		"opcert_kes_period",
+		opCert.KESPeriod,
+		"opcert_expiry_period",
+		creds.OpCertExpiryPeriod(),
 	)
 	return creds, nil
 }
@@ -176,9 +202,21 @@ func (n *Node) validateBlockProducerStartupForClock(
 // plausibility check lives in validateBlockProducerStartupAtSlot; callers
 // needing the certificate armed but not yet placed in time combine this with
 // PoolCredentials.ArmKesProtocolLifetime.
-func (n *Node) validateBlockProducerCredentialMaterial() (*forging.PoolCredentials, error) {
+func (n *Node) validateBlockProducerCredentialMaterial(
+	currentSlot uint64,
+) (*forging.PoolCredentials, error) {
 	creds := forging.NewPoolCredentials()
-	if err := creds.LoadFromFiles(
+	if n.config.shelleyKESAgentSocket != "" {
+		if err := n.loadBlockProducerCredentialsFromAgent(
+			creds,
+			currentSlot,
+		); err != nil {
+			return nil, fmt.Errorf(
+				"load pool credentials from KES agent: %w",
+				err,
+			)
+		}
+	} else if err := creds.LoadFromFiles(
 		n.config.shelleyVRFKey,
 		n.config.shelleyKESKey,
 		n.config.shelleyOperationalCertificate,
@@ -229,16 +267,34 @@ func (n *Node) startKESAgentServeKey(
 	creds *forging.PoolCredentials,
 	startupSlot uint64,
 ) error {
+	opCertKey, err := bursa.LoadKeyFromFile(
+		n.config.shelleyOperationalCertificate,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"failed to load operational certificate for KES agent serve-key mode: %w",
+			err,
+		)
+	}
 	client, err := kesagent.NewClient(kesagent.Config{
 		SocketPath: n.config.shelleyKESAgentSocket,
 		Mode:       kesagent.ModeServeKey,
 		Logger:     n.config.logger,
+		Metrics:    n.kesAgentClientMetrics(),
 	})
 	if err != nil {
 		return err
 	}
 
 	install := func(pk kesagent.PushedKey) error {
+		if pk.OpCert == nil || !bytes.Equal(
+			pk.OpCert.ColdVKey,
+			opCertKey.OpCertColdVKey,
+		) {
+			return errors.New(
+				"KES agent operational certificate cold key does not match local operational certificate",
+			)
+		}
 		return creds.LoadFromAgentServeKey(
 			n.config.shelleyVRFKey,
 			agentMaterialFromPushedKey(pk),
@@ -261,6 +317,14 @@ func (n *Node) startKESAgentServeKey(
 	// for exactly the reason this callback exists to prevent. Every rotation
 	// crosses it.
 	loopInstall := func(pk kesagent.PushedKey) error {
+		if pk.OpCert == nil || !bytes.Equal(
+			pk.OpCert.ColdVKey,
+			opCertKey.OpCertColdVKey,
+		) {
+			return errors.New(
+				"KES agent operational certificate cold key does not match local operational certificate",
+			)
+		}
 		genesis, err := n.blockProducerShelleyGenesis()
 		if err != nil {
 			return err
@@ -354,6 +418,7 @@ func (n *Node) startKESAgentSign(creds *forging.PoolCredentials) error {
 		KESVKey:           opCertKey.VKey,
 		OpCertStartPeriod: opCertKey.OpCertKesPeriod,
 		Logger:            n.config.logger,
+		Metrics:           n.kesAgentClientMetrics(),
 	})
 	if err != nil {
 		return err
@@ -368,6 +433,13 @@ func (n *Node) startKESAgentSign(creds *forging.PoolCredentials) error {
 	}
 	n.kesAgentClient = client
 	return nil
+}
+
+func (n *Node) kesAgentClientMetrics() *kesagent.Metrics {
+	if n.kesAgentMetrics == nil && n.config.promRegistry != nil {
+		n.kesAgentMetrics = kesagent.NewMetrics(n.config.promRegistry)
+	}
+	return n.kesAgentMetrics
 }
 
 // agentMaterialFromPushedKey adapts a validated kesagent.PushedKey to
@@ -516,10 +588,14 @@ func (n *Node) validateBlockProducerLedgerWithSource(
 			wallSlot > slot {
 			n.config.logger.Warn(
 				"block producer opcert counter rule scoped to the applied chain tip, which is behind wall-clock time",
-				"component", "node",
-				"tip_slot", slot,
-				"wall_clock_slot", wallSlot,
-				"slots_behind", wallSlot-slot,
+				"component",
+				"node",
+				"tip_slot",
+				slot,
+				"wall_clock_slot",
+				wallSlot,
+				"slots_behind",
+				wallSlot-slot,
 			)
 		}
 	}
@@ -547,10 +623,14 @@ func (n *Node) validateBlockProducerLedgerWithViewAtSlot(
 		// node is near the tip, and fails closed there.
 		n.config.logger.Warn(
 			"block producer opcert counter gap rule not evaluated at startup; the forge loop enforces it per leader slot",
-			"component", "node",
-			"pool_id", creds.GetPoolID().String(),
-			"slot", slot,
-			"reason", result.EraUnevaluable,
+			"component",
+			"node",
+			"pool_id",
+			creds.GetPoolID().String(),
+			"slot",
+			slot,
+			"reason",
+			result.EraUnevaluable,
 		)
 	}
 	registered, vrfMatched := result.Registered, result.VRFMatched
@@ -743,15 +823,24 @@ func (n *Node) initBlockForger(
 
 	// Create the block forger with the real leader election
 	forger, err := forging.NewBlockForger(forging.ForgerConfig{
-		Mode:                               forging.ModeProduction,
-		Logger:                             n.config.logger,
-		Credentials:                        creds,
-		LeaderChecker:                      election,
-		BlockBuilder:                       builder,
-		BlockBroadcaster:                   broadcaster,
-		ConfirmedTxs:                       mempoolAdapter,
-		BlockForged:                        blockForged,
-		SlotClock:                          slotClock,
+		Mode:             forging.ModeProduction,
+		Logger:           n.config.logger,
+		Credentials:      creds,
+		LeaderChecker:    election,
+		BlockBuilder:     builder,
+		BlockBroadcaster: broadcaster,
+		ConfirmedTxs:     mempoolAdapter,
+		BlockForged:      blockForged,
+		SlotClock:        slotClock,
+		// Equal-slot alternative forging. When a rival block already
+		// occupies the slot this node leads, the forger builds an
+		// alternative on the rival's predecessor and offers it to chain
+		// selection instead of conceding the slot -- ouroboros-consensus
+		// mkCurrentBlockContext's EQ case. The primary chain supplies the
+		// fork context; LedgerState arbitrates with the same Praos
+		// comparison a peer's competing block goes through.
+		ChainContext:                       n.chainManager.PrimaryChain(),
+		SiblingAdopter:                     n.ledgerState,
 		ForgeSyncToleranceSlots:            n.config.forgeSyncToleranceSlots,
 		ForgeStaleGapThresholdSlots:        n.config.forgeStaleGapThresholdSlots,
 		ForgePrimaryChainTipToleranceSlots: n.config.forgePrimaryChainTipToleranceSlots,
@@ -869,6 +958,18 @@ func (a *forgingMempoolAdapter) Transactions() []forging.MempoolTransaction {
 func (a *forgingMempoolAdapter) RemoveTxsByHash(hashes []string) {
 	a.source.RemoveTxsByHash(hashes)
 }
+
+// The equal-slot alternative path is wired from two existing components
+// rather than from adapters, so these assertions are what keeps that wiring
+// honest: chain.Chain answers the fork context the alternative is built on,
+// and LedgerState arbitrates between the alternative and the block already at
+// the tip. A signature change on either side fails the build here instead of
+// silently reverting block producers to conceding contested slots, which is
+// what a nil provider does.
+var (
+	_ forging.AlternativeChainContextProvider = (*chain.Chain)(nil)
+	_ forging.SiblingBlockAdopter             = (*ledger.LedgerState)(nil)
+)
 
 // blockBroadcaster implements forging.BlockBroadcaster through synchronous
 // local chain admission. Block proposals are requests, not notifications, so

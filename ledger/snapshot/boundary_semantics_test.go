@@ -406,3 +406,100 @@ func TestCalculateEpochBoundaryFallbackHalvesAgree(t *testing.T) {
 		})
 	}
 }
+
+// TestCaptureEpochBoundaryIncludesPriorBoundaryPostSnapshotCreditOnce covers
+// the snapshot-capture half of the ordering blinklabs-io/dingo#4411 depends
+// on: a post-snapshot boundary credit (POOLREAP refund, enacted treasury
+// withdrawal, or governance proposal-deposit refund) applied at epoch N's
+// boundary must be reflected exactly once in epoch N+1's mark snapshot, not
+// zero or twice. This passes both before and after the #4411 fix -- the SNAP
+// read/write split it exercises was already correct; the defect was in when
+// ledger/governance/epoch.go applied a proposal-deposit refund credit in the
+// first place (one epoch too early), which
+// TestProcessEpochDropsExpiredProposalAndRefundsDepositNextEpoch in
+// ledger/governance/epoch_test.go pins as the fail-before/pass-after
+// regression test.
+func TestCaptureEpochBoundaryIncludesPriorBoundaryPostSnapshotCreditOnce(t *testing.T) {
+	t.Parallel()
+
+	db := setupTestDB(t)
+	seedEpochs(t, db, []models.Epoch{
+		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
+		{EpochId: 1, StartSlot: 432000, LengthInSlots: 432000},
+	})
+
+	poolHash := []byte("poolSNAP_1234567890123456789")
+	stakingKey := bytes.Repeat([]byte{0x5a}, 28)
+	seedPoolAndDelegations(t, db, poolHash, []struct {
+		stakingKey  []byte
+		utxoAmounts []types.Uint64
+	}{
+		{stakingKey: stakingKey, utxoAmounts: []types.Uint64{40_000_000}},
+	}, 500)
+
+	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+
+	// Epoch 0 -> 1 boundary: SNAP, then a post-SNAP boundary credit (e.g. a
+	// governance proposal-deposit refund), matching dingo#4411's proposal
+	// refund at the epoch677 boundary.
+	evt1 := event.EpochTransitionEvent{
+		PreviousEpoch:   0,
+		NewEpoch:        1,
+		BoundarySlot:    432_000,
+		EpochNonce:      []byte{0x0a, 0x0b},
+		ProtocolVersion: 8,
+		SnapshotSlot:    431_999,
+	}
+	txn1 := db.Transaction(true)
+	require.NoError(t, mgr.ComputeEpochBoundarySnapshot(
+		context.Background(), txn1, evt1,
+	))
+	require.NoError(t, db.AddPostSnapshotAccountRewardByCredential(
+		0,
+		stakingKey,
+		1_000_000,
+		evt1.BoundarySlot,
+		bytes.Repeat([]byte{0xc1}, 32),
+		txn1,
+	))
+	require.NoError(t, mgr.CaptureEpochBoundarySnapshot(
+		context.Background(), txn1, evt1,
+	))
+	require.NoError(t, txn1.Commit())
+
+	// Sanity: mark[1] must still exclude the credit (existing invariant).
+	mark1, err := db.Metadata().GetPoolStakeSnapshot(1, "mark", poolHash, nil)
+	require.NoError(t, err)
+	require.NotNil(t, mark1)
+	require.Equal(t, uint64(40_000_000), uint64(mark1.TotalStake))
+
+	// Epoch 1 -> 2 boundary: a full epoch later, with no further credits.
+	// The proposal-deposit refund from the previous boundary is now ordinary
+	// pre-SNAP history and must be counted exactly once.
+	evt2 := event.EpochTransitionEvent{
+		PreviousEpoch:   1,
+		NewEpoch:        2,
+		BoundarySlot:    864_000,
+		EpochNonce:      []byte{0x0c, 0x0d},
+		ProtocolVersion: 8,
+		SnapshotSlot:    863_999,
+	}
+	txn2 := db.Transaction(true)
+	require.NoError(t, mgr.ComputeEpochBoundarySnapshot(
+		context.Background(), txn2, evt2,
+	))
+	require.NoError(t, mgr.CaptureEpochBoundarySnapshot(
+		context.Background(), txn2, evt2,
+	))
+	require.NoError(t, txn2.Commit())
+
+	mark2, err := db.Metadata().GetPoolStakeSnapshot(2, "mark", poolHash, nil)
+	require.NoError(t, err)
+	require.NotNil(t, mark2)
+	require.Equal(
+		t,
+		uint64(41_000_000),
+		uint64(mark2.TotalStake),
+		"mark[N+1] must count a prior boundary's post-snapshot credit exactly once",
+	)
+}

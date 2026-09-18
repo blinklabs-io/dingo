@@ -573,6 +573,7 @@ func TestLedgerProcessBlockSurfacesStorageFaultOverRuleVerdict(t *testing.T) {
 					nil,
 					nil,
 					0,
+					0,
 					false,
 				)
 				return err

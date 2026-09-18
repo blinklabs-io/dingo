@@ -29,6 +29,8 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/kesagent"
 	"github.com/blinklabs-io/gouroboros/kes"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 )
 
@@ -409,4 +411,167 @@ func TestValidateBlockProducerStartup_KESAgentClosedWhenValidationFails(
 		"a startup rejected after the agent was dialled must not leave its "+
 			"client and serve-key loop running",
 	)
+}
+
+func TestValidateBlockProducerStartupForClock_KESAgentDeferredPath(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	vrf, _, opcert := devnetCredPaths(t)
+	kesKeyData, err := bursa.LoadKeyFromFile(
+		filepath.Join(devnetKeysDir, "kes.skey"),
+	)
+	require.NoError(t, err)
+	opCertCBOR := devnetOpCertCBOR(t)
+
+	testutil.SkipIfBlockProducerUnsupported(t)
+	sockPath := testutil.UnixSocketPath(t)
+	ln, err := net.Listen("unix", sockPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		writeKesAgentFrame(t, conn, kesagent.Hello{
+			Protocol: kesagent.ProtocolID,
+			Mode:     kesagent.ModeServeKey,
+		})
+		writeKesAgentFrame(t, conn, kesagent.KeyPush{
+			Type:       "key_push",
+			Period:     0,
+			Depth:      kes.CardanoKesDepth,
+			KESSignKey: kesKeyData.SKey,
+			KESVKey:    kesKeyData.VKey,
+			OpCert:     opCertCBOR,
+		})
+		_, _ = conn.Read(make([]byte, 1))
+	}()
+
+	n := newTestNodeForBPWithAgent(
+		t,
+		vrf,
+		opcert,
+		kesagent.ModeServeKey,
+		sockPath,
+		shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour)),
+	)
+	registry := prometheus.NewRegistry()
+	n.config.promRegistry = registry
+	t.Cleanup(n.closeKESAgentClient)
+
+	creds, err := n.validateBlockProducerStartupForClock(0, false)
+	require.NoError(t, err)
+	require.True(t, creds.IsLoaded())
+	require.NotZero(t, creds.OpCertExpiryPeriod())
+	families, err := registry.Gather()
+	require.NoError(t, err)
+	require.Contains(
+		t,
+		metricFamilyNames(families),
+		"dingo_kes_agent_connected",
+	)
+}
+
+func TestValidateBlockProducerStartup_KESAgentPinsLocalColdKey(t *testing.T) {
+	t.Parallel()
+
+	vrf, _, opcert := devnetCredPaths(t)
+	kesKeyData, err := bursa.LoadKeyFromFile(
+		filepath.Join(devnetKeysDir, "kes.skey"),
+	)
+	require.NoError(t, err)
+	opCertCBOR := devnetOpCertCBOR(t)
+	localEnvelope, err := os.ReadFile(opcert)
+	require.NoError(t, err)
+	var envelope struct {
+		Type        string `json:"type"`
+		Description string `json:"description"`
+		CborHex     string `json:"cborHex"`
+	}
+	require.NoError(t, json.Unmarshal(localEnvelope, &envelope))
+	localCBOR, err := hex.DecodeString(envelope.CborHex)
+	require.NoError(t, err)
+	localCBOR[len(localCBOR)-1] ^= 0xff
+	envelope.CborHex = hex.EncodeToString(localCBOR)
+	mismatchedEnvelope, err := json.Marshal(envelope)
+	require.NoError(t, err)
+	mismatchedOpCert := filepath.Join(t.TempDir(), "opcert.cert")
+	require.NoError(
+		t,
+		os.WriteFile(mismatchedOpCert, mismatchedEnvelope, 0o600),
+	)
+
+	testutil.SkipIfBlockProducerUnsupported(t)
+	sockPath := testutil.UnixSocketPath(t)
+	ln, err := net.Listen("unix", sockPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		writeKesAgentFrame(t, conn, kesagent.Hello{
+			Protocol: kesagent.ProtocolID,
+			Mode:     kesagent.ModeServeKey,
+		})
+		writeKesAgentFrame(t, conn, kesagent.KeyPush{
+			Type:       "key_push",
+			Period:     0,
+			Depth:      kes.CardanoKesDepth,
+			KESSignKey: kesKeyData.SKey,
+			KESVKey:    kesKeyData.VKey,
+			OpCert:     opCertCBOR,
+		})
+	}()
+
+	n := newTestNodeForBPWithAgent(
+		t,
+		vrf,
+		mismatchedOpCert,
+		kesagent.ModeServeKey,
+		sockPath,
+		shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour)),
+	)
+	t.Cleanup(n.closeKESAgentClient)
+
+	_, err = n.validateBlockProducerStartupAtSlot(0)
+	require.ErrorContains(t, err, "cold key does not match local")
+	require.Nil(t, n.kesAgentClient)
+}
+
+func TestKESAgentMetricsRegisteredOncePerNode(t *testing.T) {
+	t.Parallel()
+
+	registry := prometheus.NewRegistry()
+	n := &Node{config: Config{promRegistry: registry}}
+	first := n.kesAgentClientMetrics()
+	second := n.kesAgentClientMetrics()
+	require.Same(t, first, second)
+
+	families, err := registry.Gather()
+	require.NoError(t, err)
+	names := metricFamilyNames(families)
+	for _, name := range []string{
+		"dingo_kes_agent_connected",
+		"dingo_kes_agent_reconnect_failures_total",
+		"dingo_kes_agent_sign_success_total",
+		"dingo_kes_agent_sign_failure_total",
+		"dingo_kes_agent_sign_latency_seconds",
+	} {
+		require.Contains(t, names, name)
+	}
+}
+
+func metricFamilyNames(families []*dto.MetricFamily) map[string]struct{} {
+	names := make(map[string]struct{}, len(families))
+	for _, family := range families {
+		names[family.GetName()] = struct{}{}
+	}
+	return names
 }
