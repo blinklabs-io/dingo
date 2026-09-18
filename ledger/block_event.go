@@ -258,6 +258,13 @@ func (ls *LedgerState) validateAndEmitRollbackUndo(
 func (ls *LedgerState) validateAndEmitRollbackUndoEmitted(
 	point ocommon.Point,
 ) (bool, error) {
+	existing, _, pending, loadErr := loadRollbackIntent(ls.db)
+	if loadErr != nil || (pending && !pointMatches(existing, point) &&
+		point.Slot >= existing.Slot) {
+		if err := ls.recoverRollbackIntentLocked(); err != nil {
+			return false, fmt.Errorf("complete previous rollback intent: %w", err)
+		}
+	}
 	if err := ls.chain.ValidateRollback(point); err != nil {
 		return false, err
 	}
@@ -275,8 +282,18 @@ func (ls *LedgerState) validateAndEmitRollbackUndoEmitted(
 	if err != nil {
 		return false, fmt.Errorf("read rollback undo blocks: %w", err)
 	}
-	if err := persistRollbackIntent(ls.db, point, blocks); err != nil {
-		return false, err
+	if len(blocks) == 0 {
+		return false, nil
+	}
+	if err := ls.ensureRollbackIntent(point, blocks); err != nil {
+		if !errors.Is(err, errRollbackIntentTooLarge) {
+			return false, err
+		}
+		ls.config.Logger.Warn(
+			"rollback undo payload exceeds durable outbox limit; continuing with live delivery",
+			"component", "ledger",
+			"error", err,
+		)
 	}
 	ls.emitRollbackTransactionEvents(blocks)
 	return len(blocks) > 0, nil

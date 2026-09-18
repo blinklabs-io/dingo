@@ -297,6 +297,18 @@ func TestRollbackAheadOfLedgerDoesNotArmContinuationAudit(t *testing.T) {
 	ls.publishSnapshotsLocked()
 	ls.Unlock()
 	require.NoError(t, ls.db.SetTip(fixture.ancestorTip, nil))
+	emitted, err := ls.validateAndEmitRollbackUndoEmitted(
+		fixture.currentTip.Point,
+	)
+	require.NoError(t, err)
+	assert.False(t, emitted)
+	_, _, pending, err := loadRollbackIntent(ls.db)
+	require.NoError(t, err)
+	assert.False(
+		t,
+		pending,
+		"validation must not create an intent ahead of the applied tip",
+	)
 
 	require.NoError(
 		t,
@@ -309,7 +321,7 @@ func TestRollbackAheadOfLedgerDoesNotArmContinuationAudit(t *testing.T) {
 		"a rollback ahead of the applied ledger must disarm any prior audit",
 	)
 	assert.Equal(t, fixture.ancestorTip, ls.currentTip)
-	_, _, pending, err := loadRollbackIntent(ls.db)
+	_, _, pending, err = loadRollbackIntent(ls.db)
 	require.NoError(t, err)
 	assert.False(t, pending, "a rollback ahead of the ledger must not leave a recovery intent")
 }

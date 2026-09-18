@@ -3638,6 +3638,8 @@ func TestIteratorPostRollbackBlockDelivery(t *testing.T) {
 }
 
 func TestIteratorCoalescedRollbackDoesNotIncludeUndeliveredBlocks(t *testing.T) {
+	t.Parallel()
+
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
@@ -3666,11 +3668,25 @@ func TestIteratorCoalescedRollbackDoesNotIncludeUndeliveredBlocks(t *testing.T) 
 	if err := c.Rollback(firstTarget); err != nil {
 		t.Fatalf("first Rollback: %v", err)
 	}
-	// Regrow the same suffix before the iterator consumes its pending marker.
+	// Regrow a distinct suffix before the iterator consumes its pending marker.
 	// The regrown suffix was not delivered after the first marker and must not
 	// be duplicated, while the blocks below that marker were delivered earlier
 	// and must remain in the undo payload.
-	for _, b := range testBlocks[4:] {
+	regrown := []*MockBlock{
+		{
+			MockBlockNumber: 5,
+			MockSlot:        70,
+			MockHash:        testHashPrefix + "00a5",
+			MockPrevHash:    testHashPrefix + "0004",
+		},
+		{
+			MockBlockNumber: 6,
+			MockSlot:        90,
+			MockHash:        testHashPrefix + "00a6",
+			MockPrevHash:    testHashPrefix + "00a5",
+		},
+	}
+	for _, b := range regrown {
 		if err := c.AddBlock(b, nil); err != nil {
 			t.Fatalf("regrow: %v", err)
 		}

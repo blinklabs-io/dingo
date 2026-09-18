@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -32,10 +33,74 @@ import (
 // block store before metadata truncation commits.
 const durableRollbackIntentSyncKey = "ledger.rollback.pending"
 
+const (
+	durableRollbackIntentVersion  = 1
+	maxRollbackIntentBlocks       = 4096
+	maxRollbackIntentPayloadBytes = 64 << 20
+)
+
+var (
+	errInvalidRollbackIntent  = errors.New("invalid rollback intent")
+	errRollbackIntentConflict = errors.New("rollback intent conflict")
+	errRollbackIntentTooLarge = errors.New("rollback intent exceeds durable limit")
+)
+
 type durableRollbackIntent struct {
-	Slot   *uint64        `json:"slot"`
-	Hash   *string        `json:"hash"`
-	Blocks []models.Block `json:"blocks"`
+	Version int                    `json:"format_version"`
+	Slot    *uint64                `json:"slot"`
+	Hash    *string                `json:"hash"`
+	Blocks  []durableRollbackBlock `json:"blocks"`
+}
+
+type durableRollbackBlock struct {
+	Hash     []byte `json:"hash"`
+	PrevHash []byte `json:"prev_hash"`
+	Cbor     []byte `json:"cbor"`
+	ID       uint64 `json:"id"`
+	Slot     uint64 `json:"slot"`
+	Number   uint64 `json:"number"`
+	Type     uint   `json:"type"`
+}
+
+func durableBlocks(blocks []models.Block) ([]durableRollbackBlock, error) {
+	if len(blocks) > maxRollbackIntentBlocks {
+		return nil, fmt.Errorf(
+			"%w: %d blocks exceeds %d",
+			errRollbackIntentTooLarge,
+			len(blocks),
+			maxRollbackIntentBlocks,
+		)
+	}
+	total := 0
+	ret := make([]durableRollbackBlock, 0, len(blocks))
+	for _, block := range blocks {
+		total += len(block.Hash) + len(block.PrevHash) + len(block.Cbor)
+		if total > maxRollbackIntentPayloadBytes {
+			return nil, fmt.Errorf(
+				"%w: block bytes exceed %d",
+				errRollbackIntentTooLarge,
+				maxRollbackIntentPayloadBytes,
+			)
+		}
+		ret = append(ret, durableRollbackBlock{
+			Hash: block.Hash, PrevHash: block.PrevHash, Cbor: block.Cbor,
+			ID: block.ID, Slot: block.Slot, Number: block.Number,
+			Type: block.Type,
+		})
+	}
+	return ret, nil
+}
+
+func modelBlocks(blocks []durableRollbackBlock) []models.Block {
+	ret := make([]models.Block, 0, len(blocks))
+	for _, block := range blocks {
+		ret = append(ret, models.Block{
+			Hash: block.Hash, PrevHash: block.PrevHash, Cbor: block.Cbor,
+			ID: block.ID, Slot: block.Slot, Number: block.Number,
+			Type: block.Type,
+		})
+	}
+	return ret
 }
 
 func persistRollbackIntent(
@@ -46,11 +111,16 @@ func persistRollbackIntent(
 	if db == nil || db.Metadata() == nil {
 		return nil
 	}
+	persistedBlocks, err := durableBlocks(blocks)
+	if err != nil {
+		return err
+	}
 	hash := hex.EncodeToString(point.Hash)
-	data, err := json.Marshal(durableRollbackIntent{ //nolint:musttag // persisted envelope fields are tagged.
-		Slot:   &point.Slot,
-		Hash:   &hash,
-		Blocks: blocks,
+	data, err := json.Marshal(durableRollbackIntent{
+		Version: durableRollbackIntentVersion,
+		Slot:    &point.Slot,
+		Hash:    &hash,
+		Blocks:  persistedBlocks,
 	})
 	if err != nil {
 		return fmt.Errorf("encode rollback intent: %w", err)
@@ -72,20 +142,31 @@ func (ls *LedgerState) ensureRollbackIntent(
 	point ocommon.Point,
 	rollbackBlocks []models.Block,
 ) error {
-	existing, _, pending, err := loadRollbackIntent(ls.db)
+	existing, existingBlocks, pending, err := loadRollbackIntent(ls.db)
 	if err != nil {
 		return err
 	}
 	if pending {
 		if existing.Slot != point.Slot ||
 			!bytes.Equal(existing.Hash, point.Hash) {
-			// A record for another point is an interrupted operation. It
-			// cannot safely be replayed as part of this rollback, so discard
-			// the stale outbox and let the current operation establish a new
-			// durable intent rather than wedging every later rollback.
-			if err := clearRollbackIntent(ls.db); err != nil {
-				return fmt.Errorf("clear stale rollback intent: %w", err)
+			if point.Slot >= existing.Slot {
+				return fmt.Errorf(
+					"%w: intent at slot %d must complete before rollback to slot %d",
+					errRollbackIntentConflict,
+					existing.Slot,
+					point.Slot,
+				)
 			}
+			if rollbackBlocks == nil {
+				rollbackBlocks, err = ls.readBlocksAboveSlot(point.Slot)
+				if err != nil {
+					return fmt.Errorf("read rollback undo blocks: %w", err)
+				}
+			}
+			rollbackBlocks = mergeRollbackBlocks(
+				existingBlocks,
+				rollbackBlocks,
+			)
 		} else {
 			return nil
 		}
@@ -96,7 +177,29 @@ func (ls *LedgerState) ensureRollbackIntent(
 			return fmt.Errorf("read rollback undo blocks: %w", err)
 		}
 	}
+	if len(rollbackBlocks) == 0 {
+		return nil
+	}
 	return persistRollbackIntent(ls.db, point, rollbackBlocks)
+}
+
+func mergeRollbackBlocks(
+	existing []models.Block,
+	additional []models.Block,
+) []models.Block {
+	ret := append([]models.Block(nil), existing...)
+	seen := make(map[string]struct{}, len(ret))
+	for _, block := range ret {
+		seen[string(block.Hash)] = struct{}{}
+	}
+	for _, block := range additional {
+		if _, ok := seen[string(block.Hash)]; ok {
+			continue
+		}
+		seen[string(block.Hash)] = struct{}{}
+		ret = append(ret, block)
+	}
+	return ret
 }
 
 func loadRollbackIntent(
@@ -115,27 +218,44 @@ func loadRollbackIntent(
 		return ocommon.Point{}, nil, false, nil
 	}
 	var intent durableRollbackIntent
-	if err := json.Unmarshal([]byte(raw), &intent); err != nil { //nolint:musttag // persisted envelope fields are tagged.
+	if err := json.Unmarshal([]byte(raw), &intent); err != nil {
 		return ocommon.Point{}, nil, false, fmt.Errorf(
-			"decode rollback intent: %w", err,
+			"%w: decode: %v", errInvalidRollbackIntent, err,
+		)
+	}
+	if intent.Version != durableRollbackIntentVersion {
+		return ocommon.Point{}, nil, false, fmt.Errorf(
+			"%w: unsupported format version %d",
+			errInvalidRollbackIntent,
+			intent.Version,
 		)
 	}
 	if intent.Slot == nil || intent.Hash == nil {
-		return ocommon.Point{}, nil, false, errors.New("rollback intent is missing slot or hash")
+		return ocommon.Point{}, nil, false, fmt.Errorf(
+			"%w: missing slot or hash",
+			errInvalidRollbackIntent,
+		)
 	}
 	if (*intent.Slot == 0) != (*intent.Hash == "") {
-		return ocommon.Point{}, nil, false, errors.New("rollback intent has invalid origin point")
+		return ocommon.Point{}, nil, false, fmt.Errorf(
+			"%w: invalid origin point",
+			errInvalidRollbackIntent,
+		)
 	}
 	hash, err := hex.DecodeString(*intent.Hash)
 	if err != nil {
 		return ocommon.Point{}, nil, false, fmt.Errorf(
-			"decode rollback intent hash: %w", err,
+			"%w: decode hash: %v", errInvalidRollbackIntent, err,
 		)
 	}
 	if *intent.Slot > 0 && len(hash) == 0 {
-		return ocommon.Point{}, nil, false, errors.New("rollback intent has empty non-origin hash")
+		return ocommon.Point{}, nil, false, fmt.Errorf(
+			"%w: empty non-origin hash",
+			errInvalidRollbackIntent,
+		)
 	}
-	return ocommon.Point{Slot: *intent.Slot, Hash: hash}, intent.Blocks, true, nil
+	return ocommon.Point{Slot: *intent.Slot, Hash: hash},
+		modelBlocks(intent.Blocks), true, nil
 }
 
 // recoverRollbackIntent finishes a rollback whose durable undo outbox was
@@ -143,7 +263,21 @@ func loadRollbackIntent(
 // owns the block payload because the primary-chain rewind may already have
 // deleted the corresponding block rows.
 func (ls *LedgerState) recoverRollbackIntent() error {
+	ls.transactionEventMutex.Lock()
+	defer ls.transactionEventMutex.Unlock()
+	return ls.recoverRollbackIntentLocked()
+}
+
+func (ls *LedgerState) recoverRollbackIntentLocked() error {
 	point, blocks, pending, err := loadRollbackIntent(ls.db)
+	if errors.Is(err, errInvalidRollbackIntent) {
+		ls.config.Logger.Error(
+			"discarding unreadable rollback intent",
+			"component", "ledger",
+			"error", err,
+		)
+		return clearRollbackIntent(ls.db)
+	}
 	if err != nil || !pending {
 		return err
 	}
@@ -152,23 +286,6 @@ func (ls *LedgerState) recoverRollbackIntent() error {
 		"component", "ledger",
 		"slot", point.Slot,
 	)
-
-	ls.transactionEventMutex.Lock()
-	defer ls.transactionEventMutex.Unlock()
-	if point.Slot > 0 {
-		contains, err := ls.primaryChainContainsPoint(point)
-		if err != nil {
-			return fmt.Errorf("validate rollback intent point: %w", err)
-		}
-		if !contains {
-			return errors.New("rollback intent point is not on the primary chain")
-		}
-	}
-	if ls.config.ChainManager != nil {
-		if err := ls.config.ChainManager.RewindPrimaryChainToPoint(point); err != nil {
-			return fmt.Errorf("recover primary chain rollback: %w", err)
-		}
-	}
 
 	ls.RLock()
 	current := ls.currentTip.Point
@@ -181,9 +298,51 @@ func (ls *LedgerState) recoverRollbackIntent() error {
 		)
 		return clearRollbackIntent(ls.db)
 	}
+	if point.Slot > 0 {
+		contains, err := ls.primaryChainContainsPoint(point)
+		if err != nil {
+			return fmt.Errorf("validate rollback intent point: %w", err)
+		}
+		if !contains {
+			ls.config.Logger.Warn(
+				"replaying rollback undo whose point left the primary chain",
+				"component", "ledger",
+				"intent_slot", point.Slot,
+			)
+			ls.emitRollbackTransactionEvents(blocks)
+			return ls.finishRollbackIntent()
+		}
+	}
+	if ls.config.ChainManager != nil {
+		if err := ls.config.ChainManager.RewindPrimaryChainToPoint(point); err != nil {
+			return fmt.Errorf("recover primary chain rollback: %w", err)
+		}
+	}
+
 	ls.emitRollbackTransactionEvents(blocks)
-	if err := ls.rollback(point); err != nil {
+	if err := ls.rollbackWithBlocks(point, blocks, true); err != nil {
 		return fmt.Errorf("recover rollback intent: %w", err)
 	}
 	return nil
+}
+
+func (ls *LedgerState) finishRollbackIntent() error {
+	_, blocks, pending, err := loadRollbackIntent(ls.db)
+	if err != nil || !pending {
+		return err
+	}
+	if len(blocks) > 0 && ls.config.EventBus != nil {
+		ctx := ls.publishCtx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if !ls.config.EventBus.FlushOrderedContext(ctx, TransactionEventType) {
+			ls.config.Logger.Warn(
+				"retaining rollback intent until ordered undo delivery completes",
+				"component", "ledger",
+			)
+			return nil
+		}
+	}
+	return clearRollbackIntent(ls.db)
 }

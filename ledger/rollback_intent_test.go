@@ -122,11 +122,9 @@ func TestRollbackUndoSurvivesMetadataTruncationFailure(t *testing.T) {
 	) (ochainsync.Tip, []byte, error) {
 		return ochainsync.Tip{}, nil, injected
 	}
-	require.ErrorIs(
-		t,
-		ls.rollbackChainAndStateDeferred(targetPoint, nil),
-		injected,
-	)
+	rollbackErr := ls.rollbackChainAndStateDeferred(targetPoint, nil)
+	require.ErrorIs(t, rollbackErr, ErrChainTruncatedLedgerRollbackFailed)
+	require.Contains(t, rollbackErr.Error(), injected.Error())
 
 	// The first attempt emitted its live undo, but the metadata failure leaves
 	// the outbox as the recovery source of truth after the process disappears.
