@@ -101,7 +101,7 @@ func validImmutableFiles(
 		headerCbor, err := cbor.Encode(header)
 		require.NoError(t, err)
 		blockCbor, err := cbor.Encode([]any{
-			cbor.RawMessage(headerCbor), []any{},
+			cbor.RawMessage(headerCbor), []any{}, []any{}, map[uint]any{},
 		})
 		require.NoError(t, err)
 		blockHash := common.Blake2b256Hash(headerCbor)
