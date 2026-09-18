@@ -1105,6 +1105,49 @@ func TestValidateByronPBFTHeaderRejectsGenesisHashMismatch(t *testing.T) {
 	require.ErrorContains(t, err, "genesis hash")
 }
 
+// TestValidateByronPBFTHeaderRejectsNonZeroEpochEbbAtOrigin is a CodeRabbit
+// finding on PR #4445: an EBB's block number (Difficulty.Value) and slot
+// (derived from ConsensusData.Epoch) are independent fields.
+// chain.firstBlockNumberValid only constrains the former, and
+// validateByronPBFTCurrentSlot only rejects a future slot, not a past one.
+// Without the epoch-0 check, an EBB with Difficulty 0, PrevBlock equal to
+// the configured genesis hash, and any past nonzero epoch would pass every
+// other check here despite skipping every epoch before it -- the first EBB
+// of any Byron chain is always epoch 0, unconditionally.
+func TestValidateByronPBFTHeaderRejectsNonZeroEpochEbbAtOrigin(t *testing.T) {
+	t.Parallel()
+
+	genesisHashValue := lcommon.Blake2b256Hash([]byte("configured genesis"))
+	ls, primaryChain := newByronGenesisAnchorTestLedger(
+		t,
+		genesisHashValue.String(),
+	)
+	require.Zero(t, primaryChain.Tip().Point.Slot)
+	require.Empty(t, primaryChain.Tip().Point.Hash)
+	// Epoch 1 is slot 21600 (byron.ByronSlotsPerEpoch); push the mock clock's
+	// current slot well past that so this is a genuinely past epoch, not one
+	// that would incidentally also fail the future-slot check instead.
+	ls.slotClock = NewSlotClock(
+		newMockSlotTimeProvider(
+			time.Now().Add(-30000*time.Second),
+			time.Second,
+			100,
+		),
+		DefaultSlotClockConfig(),
+	)
+
+	ebb := &byron.ByronEpochBoundaryBlock{
+		BlockHeader: &byron.ByronEpochBoundaryBlockHeader{
+			PrevBlock: genesisHashValue,
+		},
+	}
+	ebb.BlockHeader.ConsensusData.Epoch = 1
+	ebb.BlockHeader.ConsensusData.Difficulty.Value = 0
+
+	err := ls.validateByronPBFTHeaderCrypto(ebb)
+	require.ErrorContains(t, err, "epoch 0")
+}
+
 // TestValidateByronPBFTHeaderRejectsMainBlockAtOrigin is the
 // blinklabs-io/dingo#4399 acceptance criterion that a PBFT-signed regular
 // Byron block must never be accepted as the first block of a from-genesis

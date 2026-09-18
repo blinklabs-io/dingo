@@ -126,6 +126,22 @@ func (ls *LedgerState) validateByronPBFTHeaderCrypto(
 	header := block.Header()
 	if ebbHeader, ok := header.(*ledgerbyron.ByronEpochBoundaryBlockHeader); ok {
 		if ls.atByronChainOrigin() {
+			// An EBB's block number (Difficulty.Value) and slot (derived from
+			// ConsensusData.Epoch) are independent fields: chain.firstBlockNumberValid
+			// only constrains the former, and validateByronPBFTCurrentSlot only
+			// rejects a future slot, not a past one. Without this, an EBB with
+			// Difficulty 0, PrevBlock equal to the configured genesis hash, and
+			// any past nonzero epoch would pass every other check here despite
+			// skipping every epoch before it -- the first EBB of any Byron chain
+			// is always epoch 0, unconditionally.
+			if ebbHeader.ConsensusData.Epoch != 0 {
+				return fmt.Errorf(
+					"byron epoch-boundary block at slot %d: the first block "+
+						"of a from-genesis chain must be epoch 0, got epoch %d",
+					block.SlotNumber(),
+					ebbHeader.ConsensusData.Epoch,
+				)
+			}
 			if err := ls.validateByronGenesisAnchor(ebbHeader); err != nil {
 				return err
 			}
