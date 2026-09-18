@@ -7061,6 +7061,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 							snapshotPParams,
 							snapshotPrevEraPParams,
 							snapshotEpoch.EpochId,
+							snapshotEpoch.StartSlot,
 							snapshotSyntheticV2CostModel,
 						)
 						if err != nil {
@@ -7414,6 +7415,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	pparams lcommon.ProtocolParameters,
 	prevEraPParams lcommon.ProtocolParameters,
 	committeeEpoch uint64,
+	epochStartSlot uint64,
 	syntheticV2CostModel bool,
 ) (*LedgerDelta, error) {
 	// Check that we're processing things in order
@@ -7777,6 +7779,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 					// block can cost an entire epoch of horizon and reject a
 					// canonical Plutus transaction (issue #3844).
 					horizonAnchorSlot: parent.slot,
+					epochStartSlot:    epochStartSlot,
 				}).pinCommitteeState(committeeEpoch, pp).
 					pinSyntheticV2CostModel(synthetic)
 				validateStart := time.Now()
@@ -11316,6 +11319,7 @@ func (ls *LedgerState) NewView(txn *database.Txn) *LedgerView {
 	if snapshot == nil {
 		return view
 	}
+	view.epochStartSlot = snapshot.currentEpoch.StartSlot
 	return view.pinCommitteeState(
 		snapshot.currentEpoch.EpochId,
 		snapshot.currentPParams,
@@ -11634,6 +11638,7 @@ type txValidationSnapshot struct {
 	eraList                      []eras.EraDesc
 	referenceSlot                uint64
 	currentEpoch                 uint64
+	currentEpochStartSlot        uint64
 	syntheticV2CostModelInEffect bool
 }
 
@@ -11663,6 +11668,7 @@ func (ls *LedgerState) txValidationSnapshot() txValidationSnapshot {
 			currentSlotErr,
 		),
 		currentEpoch:                 consensusState.currentEpoch.EpochId,
+		currentEpochStartSlot:        consensusState.currentEpoch.StartSlot,
 		syntheticV2CostModelInEffect: consensusState.syntheticV2CostModelInEffect,
 	}
 }
@@ -11727,6 +11733,7 @@ func (ls *LedgerState) WithTxValidationSession(
 				ls:              ls,
 				intraBlockUtxos: createdUtxos,
 				consumedUtxos:   consumedUtxos,
+				epochStartSlot:  snapshot.currentEpochStartSlot,
 			}).pinCommitteeState(snapshot.currentEpoch, pp).
 				pinSyntheticV2CostModel(synthetic)
 			err = validationEra.ValidateTxFunc(
@@ -11788,7 +11795,9 @@ func (ls *LedgerState) validateTxCore(
 		txn := ls.db.Transaction(false)
 		var lv *LedgerView
 		err := txn.Do(func(txn *database.Txn) error {
-			lv = buildLV(txn).pinCommitteeState(snapshot.currentEpoch, pp).
+			lv = buildLV(txn)
+			lv.epochStartSlot = snapshot.currentEpochStartSlot
+			lv = lv.pinCommitteeState(snapshot.currentEpoch, pp).
 				pinSyntheticV2CostModel(synthetic)
 			return validationEra.ValidateTxFunc(
 				tx,
@@ -11877,8 +11886,9 @@ func (ls *LedgerState) EvaluateTx(
 		var lv *LedgerView
 		err := txn.Do(func(txn *database.Txn) error {
 			lv = (&LedgerView{
-				txn: txn,
-				ls:  ls,
+				txn:            txn,
+				ls:             ls,
+				epochStartSlot: consensusState.currentEpoch.StartSlot,
 			}).pinCommitteeState(
 				consensusState.currentEpoch.EpochId,
 				pp,

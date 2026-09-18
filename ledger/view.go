@@ -111,6 +111,20 @@ type LedgerView struct {
 	// in charge, which is correct for every caller with no applied block in
 	// hand (mempool validation, standalone evaluation).
 	horizonAnchorSlot uint64
+	// epochStartSlot is the current epoch's start slot, pinned from the same
+	// snapshot pp was captured from at every real validation/evaluation call
+	// site (see the pinCommitteeState call sites in state.go). IsVrfKeyInUse
+	// reads this rather than calling ls.loadConsensusSnapshot() live: a
+	// validation operation can run long enough that the writer publishes a
+	// newer snapshot -- and therefore a new epoch boundary -- in the
+	// meantime, which would let the deferral check for one certificate
+	// disagree with the check for another certificate in the same
+	// transaction or block, or with itself if IsVrfKeyInUse or
+	// PoolCurrentState were called more than once against the same input.
+	// This mirrors why syntheticV2CostModel below is pinned rather than
+	// read live. Zero is a safe default for callers with no meaningful
+	// current epoch (a bare view built outside real validation).
+	epochStartSlot uint64
 	// syntheticV2CostModel is pinned from the same snapshot pparams (pp) was
 	// captured from -- see pinSyntheticV2CostModel and
 	// SyntheticV2CostModelInEffect. It must not be re-read live from
@@ -197,6 +211,65 @@ func (lv *LedgerView) MinPoolMargin() *big.Rat {
 // in the MinPoolMarginProvider method signature a compile error instead of a
 // silent runtime no-op for the CIP-23 pool-margin-floor certificate rule.
 var _ eras.MinPoolMarginProvider = (*LedgerView)(nil)
+
+// PendingMIRRewardDeltas returns, for each stake credential, the signed sum of
+// MIR reward deltas already committed this epoch at or before uptoSlot. Every
+// transaction's certificates are written to the database immediately after
+// that transaction validates (see ledgerProcessBlock), before the next
+// transaction in the same block validates, so this query already reflects
+// every prior transaction's MIR certificates this epoch, same block or
+// earlier -- only certificates within the transaction currently being
+// validated are not yet visible here, and validateMIRAccumulatedRewards folds
+// those in memory as it walks the transaction's own certificate list.
+//
+// The epoch start slot comes from lv.epochStartSlot, pinned from the same
+// snapshot pp was captured from at every real validation call site (see
+// epochStartSlot's field doc comment and IsVrfKeyInUse, which pins it for the
+// same reason), never a fresh read of LedgerState.currentEpoch: that field is
+// writer-owned working state (see its doc comment in state.go), and
+// re-reading it independently, later in the same validation call, could
+// observe an epoch rollover that a concurrent writer committed after the
+// rest of this validation was pinned to an earlier snapshot -- silently
+// reporting zero pending deltas for a transaction that is still, in truth,
+// inside the earlier epoch.
+func (lv *LedgerView) PendingMIRRewardDeltas(
+	uptoSlot uint64,
+) (map[eras.MIRCredentialKey]*big.Int, error) {
+	epochStartSlot := lv.epochStartSlot
+	if uptoSlot < epochStartSlot {
+		return nil, nil
+	}
+	effects, err := lv.ls.db.GetMIRCertsInSlotRange(
+		epochStartSlot, uptoSlot+1, lv.txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get MIR certs in slot range: %w", err)
+	}
+	totals := make(map[eras.MIRCredentialKey]*big.Int)
+	for _, effect := range effects {
+		for _, reward := range effect.Rewards {
+			if reward.Amount == nil {
+				continue
+			}
+			key := eras.MIRCredentialKey{
+				Tag:        reward.CredentialTag,
+				Credential: lcommon.NewBlake2b224(reward.Credential),
+				Pot:        effect.Pot,
+			}
+			if existing, ok := totals[key]; ok {
+				totals[key] = new(big.Int).Add(existing, reward.Amount)
+			} else {
+				totals[key] = new(big.Int).Set(reward.Amount)
+			}
+		}
+	}
+	return totals, nil
+}
+
+// var _ eras.MIRPendingRewardsProvider = (*LedgerView)(nil) makes any future
+// drift in the MIRPendingRewardsProvider method signature a compile error
+// instead of a silent runtime no-op for the MIRProducesNegativeUpdate check.
+var _ eras.MIRPendingRewardsProvider = (*LedgerView)(nil)
 
 // The Conway committee certificate and voter rules discover this capability
 // with a runtime type assertion and fail closed when it misses, so signature
@@ -614,11 +687,20 @@ func (lv *LedgerView) IsPoolRegistered(pkh lcommon.PoolKeyHash) bool {
 
 // IsVrfKeyInUse checks if a VRF key hash is registered by another pool.
 // Returns (inUse, owningPoolId, error).
+//
+// The reservation checked here is the one effective as of the start of the
+// current epoch, not a pool's most recent registration: a re-registration
+// submitted during the epoch in progress is deferred to the next boundary
+// (cardano-ledger's psFutureStakePoolParams), so the pool's prior key stays
+// reserved until then. See GetPoolByVrfKeyHash. The epoch boundary used is
+// lv.epochStartSlot, pinned once at view construction -- not re-read from
+// the live consensus snapshot here, per epochStartSlot's field doc comment.
 func (lv *LedgerView) IsVrfKeyInUse(
 	vrfKeyHash lcommon.Blake2b256,
 ) (bool, lcommon.PoolKeyHash, error) {
 	pool, err := lv.ls.db.GetPoolByVrfKeyHash(
 		vrfKeyHash.Bytes(),
+		lv.epochStartSlot,
 		lv.txn,
 	)
 	if err != nil {
