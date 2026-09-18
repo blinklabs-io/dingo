@@ -249,11 +249,33 @@ func TestNewReadSnapshotContextReleasesReservationWhenBarrierAbandoned(
 	defer finish()
 
 	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
+	type snapshotResult struct {
+		txn *Txn
+		err error
+	}
+	resultCh := make(chan snapshotResult, 1)
+	go func() {
+		txn, _, err := NewReadSnapshotContext(ctx, db)
+		resultCh <- snapshotResult{txn: txn, err: err}
+	}()
 
-	txn, _, err := NewReadSnapshotContext(ctx, db)
-	require.Nil(t, txn)
-	require.ErrorIs(t, err, context.Canceled)
+	testutil.WaitForCondition(
+		t,
+		func() bool {
+			return len(store.recorded()) == 1
+		},
+		5*time.Second,
+		"the read connection must be reserved before cancellation",
+	)
+	cancel()
+	result := testutil.RequireReceive(
+		t,
+		resultCh,
+		5*time.Second,
+		"read snapshot must abandon its barrier wait after cancellation",
+	)
+	require.Nil(t, result.txn)
+	require.ErrorIs(t, result.err, context.Canceled)
 	require.Equal(
 		t,
 		[]string{"reserve read", "release reservation"},
