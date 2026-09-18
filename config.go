@@ -252,9 +252,8 @@ type Config struct {
 	blockProducer                                                                       bool
 	shelleyVRFKey, shelleyKESKey, shelleyOperationalCertificate                         string
 	forgeSyncToleranceSlots, forgeStaleGapThresholdSlots                                uint64
-	forgePrimaryChainTipToleranceSlots                                                  uint64
+	forgeHeaderFrontierToleranceSlots                                                   uint64
 	forgeUpstreamStalenessSlots, forgeAppliedTipStalenessSlots                          uint64
-	forgeEndorserBlockStalenessSlots                                                    uint64
 	validateForgedBlock                                                                 bool
 	blockPipelineEnabled                                                                bool
 	blockPipelineValidateEnabled                                                        bool
@@ -859,9 +858,8 @@ func (c *Config) syncCompatFields() {
 	c.genesisBootstrap, c.genesisWindowSlots, c.genesisCorroborationPeers = c.cfg.GenesisBootstrap.Enabled, c.cfg.GenesisBootstrap.WindowSlots, c.cfg.GenesisBootstrap.CorroborationPeers
 	c.blockProducer, c.shelleyVRFKey, c.shelleyKESKey, c.shelleyOperationalCertificate = c.cfg.BlockProducer, c.cfg.ShelleyVRFKey, c.cfg.ShelleyKESKey, c.cfg.ShelleyOperationalCertificate
 	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
-	c.forgePrimaryChainTipToleranceSlots = c.cfg.ForgePrimaryChainTipToleranceSlots
+	c.forgeHeaderFrontierToleranceSlots = c.cfg.ForgeHeaderFrontierToleranceSlots
 	c.forgeUpstreamStalenessSlots, c.forgeAppliedTipStalenessSlots = c.cfg.ForgeUpstreamStalenessSlots, c.cfg.ForgeAppliedTipStalenessSlots
-	c.forgeEndorserBlockStalenessSlots = c.cfg.ForgeEndorserBlockStalenessSlots
 	c.blockPipelineEnabled = c.cfg.BlockPipelineEnabled
 	c.blockPipelineValidateEnabled = c.cfg.BlockPipelineValidateEnabled
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
@@ -1509,20 +1507,17 @@ func WithForgeSyncToleranceSlots(slots uint64) ConfigOptionFunc {
 	}
 }
 
-// WithForgePrimaryChainTipToleranceSlots sets how far the ledger-applied tip may
-// trail this node's own primary chain tip before forging is skipped.
-// Use 0 to fall back to the built-in default.
-func WithForgePrimaryChainTipToleranceSlots(slots uint64) ConfigOptionFunc {
+// WithForgeHeaderFrontierToleranceSlots sets how far the ledger-applied tip may
+// trail this node's own header frontier before forging is skipped.
+func WithForgeHeaderFrontierToleranceSlots(slots uint64) ConfigOptionFunc {
 	return func(c *Config) {
-		c.cfg.ForgePrimaryChainTipToleranceSlots = slots
+		c.cfg.ForgeHeaderFrontierToleranceSlots = slots
 	}
 }
 
 // WithForgeUpstreamStalenessSlots sets how far the newest block this node holds
 // may trail the corroborated upstream sync target before forging is skipped.
-// 0 (the default) DISABLES the bound -- it is not "fall back to a built-in
-// default", and nothing fills it in: see
-// internal/config.DefaultForgeUpstreamStalenessSlots, which is itself 0.
+// Use 0 to fall back to the built-in default.
 func WithForgeUpstreamStalenessSlots(slots uint64) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.ForgeUpstreamStalenessSlots = slots
@@ -1535,21 +1530,6 @@ func WithForgeUpstreamStalenessSlots(slots uint64) ConfigOptionFunc {
 func WithForgeAppliedTipStalenessSlots(slots uint64) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.ForgeAppliedTipStalenessSlots = slots
-	}
-}
-
-// WithForgeEndorserBlockStalenessSlots sets how far a corroborated Leios
-// endorser block may lead the ledger-applied tip before forging is skipped.
-// 0 (the default) DISABLES the bound -- it is not "fall back to a built-in
-// default", and nothing fills it in: see
-// internal/config.DefaultForgeEndorserBlockStalenessSlots, which is itself 0.
-//
-// Deliberately separate from WithForgePrimaryChainTipToleranceSlots: that one
-// bounds a local block-against-block comparison, this one bounds a
-// network-stage announcement watermark against the local applied tip.
-func WithForgeEndorserBlockStalenessSlots(slots uint64) ConfigOptionFunc {
-	return func(c *Config) {
-		c.cfg.ForgeEndorserBlockStalenessSlots = slots
 	}
 }
 
@@ -2302,10 +2282,10 @@ func (c *Config) ForgeSyncToleranceSlots() uint64 {
 	return c.cfg.ForgeSyncToleranceSlots
 }
 
-// ForgePrimaryChainTipToleranceSlots returns how far the ledger-applied tip may
-// trail this node's own primary chain tip before forging is skipped.
-func (c *Config) ForgePrimaryChainTipToleranceSlots() uint64 {
-	return c.cfg.ForgePrimaryChainTipToleranceSlots
+// ForgeHeaderFrontierToleranceSlots returns how far the ledger-applied tip may
+// trail this node's own header frontier before forging is skipped.
+func (c *Config) ForgeHeaderFrontierToleranceSlots() uint64 {
+	return c.cfg.ForgeHeaderFrontierToleranceSlots
 }
 
 // ForgeUpstreamStalenessSlots returns how far the newest block this node holds
@@ -2319,13 +2299,6 @@ func (c *Config) ForgeUpstreamStalenessSlots() uint64 {
 // 0 disables the wall-clock backstop.
 func (c *Config) ForgeAppliedTipStalenessSlots() uint64 {
 	return c.cfg.ForgeAppliedTipStalenessSlots
-}
-
-// ForgeEndorserBlockStalenessSlots returns how far a corroborated Leios
-// endorser block may lead the ledger-applied tip before forging is skipped.
-// 0 disables the bound.
-func (c *Config) ForgeEndorserBlockStalenessSlots() uint64 {
-	return c.cfg.ForgeEndorserBlockStalenessSlots
 }
 
 // ForgeStaleGapThresholdSlots returns the stale gap threshold for warnings.

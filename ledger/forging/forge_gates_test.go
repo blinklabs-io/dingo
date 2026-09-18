@@ -817,15 +817,13 @@ func TestEqualSlotOwnBlockIsIdentifiedByHashNotByFence(t *testing.T) {
 }
 
 // forgerMovingTipSlotClock is a slot clock whose chain tip moves between
-// the read at the top of a forge cycle and the re-read tipBlockOwnership
-// takes. The first ChainTip call answers a point at chainTipSlot, every
+// the read at the top of a forge cycle and the read taken next to the
+// tip hash. The first ChainTip call answers a point at chainTipSlot, every
 // later one a point at movedTipSlot, which is what a rival block landing
 // mid-cycle looks like to the forger. Both points carry chainTipHash: the
-// slot is what moves.
-//
-// hashReads counts calls to the optional ChainTipHashProvider, which
-// tipBlockOwnership no longer consults -- it takes slot and hash from the
-// one ChainTip snapshot. The counter is kept so the test can pin that.
+// slot is what moves, and tipBlockOwnership still reads the hash separately
+// through ChainTipHashProvider, so its two reads remain non-atomic and this
+// double still exercises that.
 type forgerMovingTipSlotClock struct {
 	currentSlot       uint64
 	chainTipSlot      uint64
@@ -847,10 +845,9 @@ func (c *forgerMovingTipSlotClock) SlotsPerKESPeriod() uint64 {
 }
 
 // ChainTip models a tip that moves between reads: the first read sees the
-// original slot and every later one sees the moved slot. Each read returns a
-// self-consistent point, as the SlotClockProvider contract requires, so the
-// staleness this double injects is between successive reads -- exactly the
-// case tipBlockOwnership's re-read exists to catch.
+// original slot and every later one sees the moved slot. tipBlockOwnership
+// still reads the hash through the separate ChainTipHashProvider, so the two
+// reads it makes remain non-atomic and this double still exercises that.
 func (c *forgerMovingTipSlotClock) ChainTip() ocommon.Point {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -864,9 +861,9 @@ func (c *forgerMovingTipSlotClock) ChainTip() ocommon.Point {
 
 // PrimaryChainTip is pinned to the ORIGINAL tip and never moves. This double
 // exists to model the applied tip shifting between the two reads
-// tipBlockOwnership makes; letting the primary tip follow it would put the
-// primary tip ahead of the current slot and trip the past-slot guard before
-// the contested-slot branch this test is about.
+// tipBlockOwnership makes; letting the frontier follow it would put the
+// frontier ahead of the current slot and trip the past-slot guard before the
+// contested-slot branch this test is about.
 func (c *forgerMovingTipSlotClock) PrimaryChainTip() ocommon.Point {
 	c.mu.Lock()
 	defer c.mu.Unlock()

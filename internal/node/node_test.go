@@ -363,81 +363,6 @@ func TestRootPeerTargetComposition(t *testing.T) {
 	}
 }
 
-// TestKoiosParityConfigForwardsEveryField pins that the serve path hands the
-// node every KoiosParity setting.
-//
-// internal/node builds the dingo.KoiosParityConfig by hand, so a field added to
-// internal/config is silently dropped until someone remembers to add it here —
-// which is exactly what happened to AccountChunkSize and AccountChunkMaxBytes,
-// and then to BaseURL. A dropped field does not fail: the option keeps its
-// package default and the operator's setting is ignored with no diagnostic,
-// which for BaseURL meant a run aimed at a self-hosted host silently querying
-// the public one.
-func TestKoiosParityConfigForwardsEveryField(t *testing.T) {
-	src := reflect.TypeFor[config.KoiosParityConfig]()
-	dst := reflect.TypeFor[dingo.KoiosParityConfig]()
-
-	for field := range src.Fields() {
-		name := field.Name
-		if _, ok := dst.FieldByName(name); !ok {
-			continue // not part of the node-facing config
-		}
-		// Match the assignment, not just the field name: checking only that
-		// the name appears would accept a cross-wiring such as
-		// "AccountChunkSize: cfg.KoiosParity.AccountChunkMaxBytes".
-		assign := regexp.MustCompile(
-			`\b` + regexp.QuoteMeta(name) +
-				`:\s*&?cfg\.KoiosParity\.` + regexp.QuoteMeta(name) + `\b`,
-		)
-		if !assign.MatchString(nodeSourceForKoiosParity(t)) {
-			t.Errorf(
-				"internal/config KoiosParityConfig.%s is not forwarded from "+
-					"cfg.KoiosParity.%s in WithKoiosParity; the operator's "+
-					"setting would be silently ignored or cross-wired",
-				name, name,
-			)
-		}
-	}
-}
-
-// TestKoiosParityForwardingGuardCatchesCrossWiring proves the guard checks the
-// assignment rather than the field name. Matching only the name would accept a
-// field wired from the wrong source, which fails exactly as silently as a field
-// left out entirely.
-func TestKoiosParityForwardingGuardCatchesCrossWiring(t *testing.T) {
-	crossWired := `dingo.WithKoiosParity(dingo.KoiosParityConfig{
-		AccountChunkSize: cfg.KoiosParity.AccountChunkMaxBytes,
-	`
-	assign := regexp.MustCompile(
-		`\bAccountChunkSize:\s*&?cfg\.KoiosParity\.AccountChunkSize\b`,
-	)
-	if assign.MatchString(crossWired) {
-		t.Error("guard accepted a cross-wired assignment")
-	}
-	if !strings.Contains(crossWired, "AccountChunkSize:") {
-		t.Error("the weaker name-only check would have accepted it")
-	}
-}
-
-// nodeSourceForKoiosParity returns the WithKoiosParity call site's source.
-func nodeSourceForKoiosParity(t *testing.T) string {
-	t.Helper()
-	b, err := os.ReadFile("node.go")
-	if err != nil {
-		t.Fatalf("read node.go: %v", err)
-	}
-	s := string(b)
-	start := strings.Index(s, "dingo.WithKoiosParity(")
-	if start < 0 {
-		t.Fatal("WithKoiosParity call not found in node.go")
-	}
-	end := strings.Index(s[start:], "}),")
-	if end < 0 {
-		t.Fatal("WithKoiosParity call not terminated")
-	}
-	return s[start : start+end]
-}
-
 // TestBuildDingoConfigWiresForgeTolerances asserts that the forge tolerances a
 // loaded internal/config.Config carries actually reach the dingo.Config that
 // Run hands to dingo.New. This is the composition path the binary really
@@ -446,7 +371,7 @@ func nodeSourceForKoiosParity(t *testing.T) string {
 // With... entry here is silently dropped no matter how completely it is
 // plumbed through YAML, env, flags, defaults and the accessor.
 //
-// ForgePrimaryChainTipToleranceSlots was exactly that: parsed, defaulted,
+// ForgeHeaderFrontierToleranceSlots was exactly that: parsed, defaulted,
 // flagged, documented and asserted at every other layer, yet absent from this
 // list, so an operator's value was discarded and the forger always fell back
 // to its built-in default. The neighbouring tolerances are asserted alongside
@@ -455,12 +380,11 @@ func TestBuildDingoConfigWiresForgeTolerances(t *testing.T) {
 	t.Parallel()
 
 	cfg := &config.Config{
-		ForgeSyncToleranceSlots:            321,
-		ForgeStaleGapThresholdSlots:        654,
-		ForgePrimaryChainTipToleranceSlots: 42,
-		ForgeUpstreamStalenessSlots:        17,
-		ForgeAppliedTipStalenessSlots:      9,
-		ForgeEndorserBlockStalenessSlots:   23,
+		ForgeSyncToleranceSlots:           321,
+		ForgeStaleGapThresholdSlots:       654,
+		ForgeHeaderFrontierToleranceSlots: 42,
+		ForgeUpstreamStalenessSlots:       17,
+		ForgeAppliedTipStalenessSlots:     9,
 	}
 	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
 
@@ -482,9 +406,9 @@ func TestBuildDingoConfigWiresForgeTolerances(t *testing.T) {
 	if got := built.ForgeStaleGapThresholdSlots(); got != 654 {
 		t.Fatalf("expected forgeStaleGapThresholdSlots 654, got %d", got)
 	}
-	if got := built.ForgePrimaryChainTipToleranceSlots(); got != 42 {
+	if got := built.ForgeHeaderFrontierToleranceSlots(); got != 42 {
 		t.Fatalf(
-			"expected forgePrimaryChainTipToleranceSlots 42, got %d; the "+
+			"expected forgeHeaderFrontierToleranceSlots 42, got %d; the "+
 				"loaded value never reached dingo.Config, so the forger "+
 				"silently uses its built-in default",
 			got,
@@ -503,15 +427,6 @@ func TestBuildDingoConfigWiresForgeTolerances(t *testing.T) {
 			"expected forgeAppliedTipStalenessSlots 9, got %d; the loaded "+
 				"value never reached dingo.Config, so the wall-clock "+
 				"staleness backstop stays off however it is configured",
-			got,
-		)
-	}
-	if got := built.ForgeEndorserBlockStalenessSlots(); got != 23 {
-		t.Fatalf(
-			"expected forgeEndorserBlockStalenessSlots 23, got %d; the "+
-				"loaded value never reached dingo.Config, so the "+
-				"endorser-block staleness bound stays off however it is "+
-				"configured",
 			got,
 		)
 	}

@@ -66,19 +66,18 @@ const (
 	// the database contains data from a different genesis.
 	forgeStaleGapThresholdSlots = 1000
 
-	// forgePrimaryChainTipToleranceSlots is how far the ledger-applied tip may
-	// lag this node's own primary chain tip -- chain.Tip(), the newest block
-	// added to the chain, i.e. blocks the node has already admitted and
-	// selected but whose ledger application has not finished -- before the
-	// forger refuses to forge.
+	// forgeHeaderFrontierToleranceSlots is how far the ledger-applied tip may
+	// lag this node's own primary chain tip -- the newest block added to the
+	// i.e. blocks the node has already admitted and selected but whose ledger
+	// application has not finished -- before the forger refuses to forge.
 	//
 	// The two tips feed different halves of block production and must agree.
 	// The builder takes the forged block's PARENT from the primary chain tip
 	// (BlockBuilderConfig.ChainTip), while transaction selection and
 	// validation, protocol parameters, the epoch nonce and leader eligibility
 	// all come from the LEDGER, which is at the applied tip. When the applied
-	// tip trails the primary chain tip, the node signs a block that declares
-	// that tip as its parent while its contents were chosen against a chain
+	// tip trails the frontier, the node signs a block that declares the
+	// frontier as its parent while its contents were chosen against a chain
 	// state tens of slots older -- transactions validated against a stale UTxO
 	// set, on top of a parent whose effects the node has not applied.
 	//
@@ -87,67 +86,21 @@ const (
 	// are local and are meant to describe the same chain, so the bound is
 	// small.
 	//
-	// It is not zero because the ledger pipeline commits in batches, so on a
-	// chain whose blocks arrive every slot or two a gap of a slot or two is
-	// the normal steady state at the head and a zero tolerance would suppress
-	// forging continuously.
-	//
-	// The bound is measured in SLOTS, but the hazard is per unapplied BLOCK:
-	// each block that has been added to the chain and not yet applied is one
-	// block's worth of divergence between the parent the builder would use
-	// and the ledger state the block's contents were chosen against. How many
-	// blocks a given slot bound admits is therefore decided by the chain's
-	// BLOCK DENSITY, and the two ends of that behave very differently:
-	//
-	//   - On a dense chain -- blocks every slot or two, as on the Leios devnet
-	//     in #3973 -- five slots can span several unapplied blocks. That is a
-	//     bounded amount of exactly the incoherence this gate exists to
-	//     prevent, which is why the default is not smaller.
-	//   - On a sparse chain -- mainnet's active slot coefficient puts
-	//     consecutive blocks roughly 20 slots apart -- a SINGLE in-flight
-	//     block already leaves a gap near 20 and trips "slot_gap" on its own.
-	//     Five slots gives such a chain no headroom at all, and the effective
-	//     skip rate there is set by ledger apply latency rather than by this
-	//     constant.
-	//
-	// Both ends err safe (the sparse end refuses more often than the per-block
-	// hazard requires), so this is not an argument for a larger default, and
-	// the default stays calibrated for fast, dense chains. An operator sizing
-	// it for a sparser chain should derive it from that chain's expected block
-	// spacing and the number of unapplied blocks they are willing to forge on
-	// top of -- roughly blocks_tolerated * slots_per_block -- rather than from
-	// the dense-chain "a slot or two" steady state above. Expressing the bound
-	// in blocks, or as an ancestry predicate over the unapplied span, is
-	// tracked in #4143.
-	//
-	// Five slots is a few pipeline batches' worth of headroom on a dense chain
-	// while still being far below the tens-of-slots staleness measured on
-	// producers that then had their blocks orphaned.
-	forgePrimaryChainTipToleranceSlots = 5
+	// It is not zero because the ledger pipeline commits in batches, so a gap
+	// of a slot or two is the normal steady state at the head of a fast chain
+	// and a zero tolerance would suppress forging continuously. Five slots is
+	// a few pipeline batches' worth of headroom while still being far below
+	// the tens-of-slots staleness measured on producers that then had their
+	// blocks orphaned.
+	forgeHeaderFrontierToleranceSlots = 5
 
 	// Reasons for a forge skipped by the primary-chain-tip gate, used as the
 	// "reason" label on dingo_forge_stale_tip_skip_total and in the log line.
-	forgeStaleTipReasonSlotGap          = "slot_gap"
-	forgeStaleTipReasonHashDiverged     = "primary_tip_hash_diverged"
-	forgeStaleTipReasonPrimaryTipBehind = "primary_tip_behind_applied"
-	forgeStaleTipReasonAppliedStale     = "applied_tip_stale"
-	forgeStaleTipReasonEbManifestAhead  = "eb_manifest_ahead"
-	// This reason is recorded from a PRE-leader-check refusal: the primary
-	// chain tip already holds a block at the current slot that the ledger has
-	// not applied, so forging would parent a block for slot S on a tip already
-	// at slot S. The others are counted after leader selection has proven this
-	// node elected; this one is counted from the precomputed VRF schedule
-	// (isScheduledLeaderSlot), which the path already consults to choose its
-	// log level. That basis fails quiet -- a checker with no cached schedule
-	// for the epoch reports false -- so the series can under-count.
-	//
-	// It does not count this node's own unapplied block: the refusal first
-	// asks unappliedTipOwnership whose block sits at the primary chain tip,
-	// by hash against SlotTracker and falling back to the forge fence, and
-	// skips at Debug without counting when the answer is ours. An
-	// inconclusive answer is counted, so a slot lost while both signals were
-	// unavailable is still reported.
-	forgeStaleTipReasonUnappliedRival = "unapplied_rival_at_leader_slot"
+	forgeStaleTipReasonSlotGap         = "slot_gap"
+	forgeStaleTipReasonHashDiverged    = "primary_tip_hash_diverged"
+	forgeStaleTipReasonFrontierBehind  = "primary_tip_behind_applied"
+	forgeStaleTipReasonAppliedStale    = "applied_tip_stale"
+	forgeStaleTipReasonEbManifestAhead = "eb_manifest_ahead"
 )
 
 // forgeStaleTipMessage renders the refusal's log message for a reason.
@@ -222,13 +175,12 @@ type BlockForger struct {
 	metrics *forgingMetrics
 
 	// Configurable forging tolerances
-	forgeSyncToleranceSlots            uint64
-	forgePrimaryChainTipToleranceSlots uint64
-	forgeUpstreamStalenessSlots        uint64
-	forgeAppliedStalenessSlots         uint64
-	forgeEbStalenessSlots              uint64
-	leiosVerifiedEbSlot                func() uint64
-	forgeStaleGapThresholdSlots        uint64
+	forgeSyncToleranceSlots     uint64
+	forgeFrontierToleranceSlots uint64
+	forgeUpstreamStalenessSlots uint64
+	forgeAppliedStalenessSlots  uint64
+	leiosVerifiedEbSlot         func() uint64
+	forgeStaleGapThresholdSlots uint64
 
 	// Optional self-validation before adoption (nil = disabled)
 	blockValidator BlockValidator
@@ -576,10 +528,10 @@ type ForgerConfig struct {
 	// ForgeSyncToleranceSlots controls how far the local chain can lag the
 	// upstream tip before forging is skipped. Zero uses the default.
 	ForgeSyncToleranceSlots uint64
-	// ForgePrimaryChainTipToleranceSlots controls how far the ledger-applied
+	// ForgeHeaderFrontierToleranceSlots controls how far the ledger-applied
 	// tip may lag this node's own primary chain tip before the forger refuses
-	// to build on it. Zero selects forgePrimaryChainTipToleranceSlots.
-	ForgePrimaryChainTipToleranceSlots uint64
+	// to build on it. Zero selects forgeHeaderFrontierToleranceSlots.
+	ForgeHeaderFrontierToleranceSlots uint64
 	// ForgeUpstreamStalenessSlots controls how far the newest block this node
 	// holds may trail the corroborated upstream target before forging is
 	// refused. Zero (the default) DISABLES the bound.
@@ -611,29 +563,6 @@ type ForgerConfig struct {
 	// every peer reporting a stale target -- for which several times the mean
 	// block interval is a sane starting point.
 	ForgeAppliedTipStalenessSlots uint64
-	// ForgeEndorserBlockStalenessSlots controls how far a corroborated Leios
-	// endorser block may lead the ledger-applied tip before forging is
-	// refused. Zero (the default) DISABLES the bound, and with it the whole
-	// endorser-block refusal path.
-	//
-	// It has its own bound rather than borrowing
-	// ForgePrimaryChainTipToleranceSlots, which is documented at its
-	// definition as bounding a purely LOCAL block-against-block comparison
-	// and defaults to 5. LeiosVerifiedEbSlot is a network-stage value: it
-	// advances at leios-notify announcement time, before any header for that
-	// slot has to arrive. Sharing one number would tie two unrelated risk
-	// budgets together -- widening it to tolerate an endorser-block gap would
-	// equally loosen the local coherence check that stops stale-parent
-	// forging.
-	//
-	// Off by default also because the watermark is monotonic and is never
-	// lowered on a fork. An endorser block corroborated for a chain this node
-	// does not adopt leaves the watermark above the local tip, and an
-	// always-on bound would then refuse leader slots for as long as the local
-	// chain sits below that slot -- with every local indicator reading
-	// healthy. Operators who enable it should set it well above the expected
-	// announcement-to-apply lag.
-	ForgeEndorserBlockStalenessSlots uint64
 	// LeiosVerifiedEbSlot optionally reports the highest slot for which this
 	// node has corroborated a Leios endorser block, which is proof a ranking
 	// block exists at that slot even if its header has not arrived. Advisory
@@ -697,15 +626,14 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 	if cfg.ForgeStaleGapThresholdSlots == 0 {
 		cfg.ForgeStaleGapThresholdSlots = forgeStaleGapThresholdSlots
 	}
-	if cfg.ForgePrimaryChainTipToleranceSlots == 0 {
-		cfg.ForgePrimaryChainTipToleranceSlots = forgePrimaryChainTipToleranceSlots
+	if cfg.ForgeHeaderFrontierToleranceSlots == 0 {
+		cfg.ForgeHeaderFrontierToleranceSlots = forgeHeaderFrontierToleranceSlots
 	}
 	f.forgeSyncToleranceSlots = cfg.ForgeSyncToleranceSlots
 	f.forgeStaleGapThresholdSlots = cfg.ForgeStaleGapThresholdSlots
-	f.forgePrimaryChainTipToleranceSlots = cfg.ForgePrimaryChainTipToleranceSlots
+	f.forgeFrontierToleranceSlots = cfg.ForgeHeaderFrontierToleranceSlots
 	f.forgeUpstreamStalenessSlots = cfg.ForgeUpstreamStalenessSlots
 	f.forgeAppliedStalenessSlots = cfg.ForgeAppliedTipStalenessSlots
-	f.forgeEbStalenessSlots = cfg.ForgeEndorserBlockStalenessSlots
 	f.leiosVerifiedEbSlot = cfg.LeiosVerifiedEbSlot
 
 	if cfg.Mode == ModeProduction {
@@ -974,34 +902,34 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 
 	// appliedTip is the LEDGER-APPLIED tip: the chain state transaction
 	// selection, validation, protocol parameters and leader eligibility are
-	// all computed against. primaryTip is this node's own primary chain BLOCK
-	// tip (chain.Tip(), not chain.HeaderTip()), which the builder uses as the
-	// forged block's parent and which runs ahead of appliedTip while the
-	// ledger pipeline works through admitted blocks it has not applied yet.
-	// Block production is only coherent when the two describe the same chain
-	// position.
+	// all computed against. frontier is this node's own primary chain BLOCK
+	// tip (chain.Tip(), not chain.HeaderTip()), which
+	// the builder uses as the forged block's parent and which runs ahead of
+	// appliedTip while the ledger pipeline works through admitted blocks it
+	// has not applied yet. Block production is only coherent when the two
+	// describe the same chain position.
 	//
 	// Each side is read from its own single snapshot, but the two reads cannot
 	// be taken together without new ledger plumbing. The resulting skew is
 	// benign in one direction only, which is why the order matters: appliedTip
 	// is read first, so it can only be staler than reality by the time
-	// primaryTip is read, never fresher. Both possible skews therefore
+	// frontier is read, never fresher. Both possible skews therefore
 	// over-state the gap and can only make this gate refuse a forge that would
 	// have been fine -- never let through one that should have been refused.
 	appliedTip := f.slotClock.ChainTip()
-	primaryTip := f.slotClock.PrimaryChainTip()
+	frontier := f.slotClock.PrimaryChainTip()
 	tipSlot := appliedTip.Slot
 	// parentSlot is the slot of the block a forged block would actually be
-	// parented on. The builder takes the parent from the PRIMARY CHAIN TIP, so
-	// the "a block already exists at this slot" guard below must consider
-	// both tips: inside the tolerance a peer's block at currentSlot can already
-	// be on the primary chain tip while still unapplied, and forging then would
+	// parented on. The builder takes the parent from the FRONTIER, so the
+	// "a block already exists at this slot" guard below must consider both
+	// tips: inside the frontier tolerance a peer's block at currentSlot can
+	// already be on the frontier while still unapplied, and forging then would
 	// parent a block for currentSlot on a tip at slot >= currentSlot -- a
 	// non-increasing slot, admitted locally and broadcast to peers.
-	parentSlot := max(tipSlot, primaryTip.Slot)
+	parentSlot := max(tipSlot, frontier.Slot)
 	applyGap := uint64(0)
-	if primaryTip.Slot > tipSlot {
-		applyGap = primaryTip.Slot - tipSlot
+	if frontier.Slot > tipSlot {
+		applyGap = frontier.Slot - tipSlot
 	}
 	// Equal-slot fork: chain selection replaced the block at the applied tip's
 	// slot with a competing one at the SAME slot that the ledger has not
@@ -1012,74 +940,54 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// An empty hash on either side means genesis or an uninitialised primary
 	// chain, where there is nothing to compare and a fresh node must still be
 	// able to forge.
-	primaryTipDiverged := primaryTip.Slot == tipSlot &&
-		len(primaryTip.Hash) > 0 && len(appliedTip.Hash) > 0 &&
-		!bytes.Equal(primaryTip.Hash, appliedTip.Hash)
-	// Primary chain tip BEHIND the applied tip. applyGap cannot see this (it
-	// is 0) and neither can the equal-slot hash check, so it needs its own
-	// case: the ledger describes a chain position ahead of the parent the
-	// builder would use, and forging would parent a block on a tip whose
-	// descendants the ledger has already applied. It is a real state, not a
-	// hypothetical -- the ledger reconciles it at startup by rolling its own
-	// tip back to the chain tip ("ledger tip ahead of primary chain tip at
-	// startup") -- so refuse while it holds. Guarded on a non-empty primary
-	// chain tip hash so an uninitialised primary chain does not wedge a fresh
-	// node.
-	primaryTipBehind := len(primaryTip.Hash) > 0 && primaryTip.Slot < tipSlot
+	frontierDiverged := frontier.Slot == tipSlot &&
+		len(frontier.Hash) > 0 && len(appliedTip.Hash) > 0 &&
+		!bytes.Equal(frontier.Hash, appliedTip.Hash)
+	// Frontier BEHIND the applied tip. applyGap cannot see this (it is 0) and
+	// neither can the equal-slot hash check, so it needs its own case: the
+	// ledger describes a chain position ahead of the parent the builder would
+	// use, and forging would parent a block on a tip whose descendants the
+	// ledger has already applied. It is a real state, not a hypothetical --
+	// the ledger reconciles it at startup by rolling its own tip back to the
+	// chain tip ("ledger tip ahead of primary chain tip at startup") -- so
+	// refuse while it holds. Guarded on a non-empty frontier hash so an
+	// uninitialised primary chain does not wedge a fresh node.
+	frontierBehind := len(frontier.Hash) > 0 && frontier.Slot < tipSlot
 	// A corroborated Leios endorser block at slot S is proof a ranking block
 	// exists at S, which this node can hold before that header arrives. Fold
-	// it into the primary-chain-tip view the gate reasons about -- but never
-	// into parentSlot, since there is no block here to build on.
+	// it into the frontier the gate reasons about -- but never into
+	// parentSlot, since there is no block here to build on.
 	//
 	// Ignored when beyond the current slot -- ebSlot stays 0 rather than being
 	// clamped down to currentSlot: a corroborated slot past the current one
 	// would mean this node's clock is behind, which is a different fault and
 	// must not be laundered into a forge refusal.
 	ebSlot := uint64(0)
-	if s := f.verifiedEbSlotSafe(); s <= currentSlot {
-		ebSlot = s
+	if f.leiosVerifiedEbSlot != nil {
+		if s := f.leiosVerifiedEbSlot(); s <= currentSlot {
+			ebSlot = s
+		}
 	}
-	// newestKnown is the most recent block this node has evidence of from the
-	// two sources this gate can see: a block on the primary chain (applied or
-	// merely added) and a corroborated endorser block.
-	//
-	// It does NOT include the admitted header frontier -- parentSlot comes
-	// from chain.Tip(), not chain.HeaderTip(). That omission is the whole
-	// reason the upstream staleness bound below is opt-in: the value it is
-	// compared against IS published at header admission, so the two are not
-	// like for like.
+	// newestKnown is the most recent block this node has ANY evidence of: an
+	// applied block, an admitted header, or a corroborated endorser block.
 	newestKnown := max(parentSlot, ebSlot)
 	effectiveGap := uint64(0)
 	if newestKnown > tipSlot {
 		effectiveGap = newestKnown - tipSlot
 	}
 	// How far the newest thing we know about trails the network's corroborated
-	// target. Unlike the primary-chain-tip gap this stays meaningful when
-	// header admission and ledger application stall together, which is
-	// precisely when that gap reads 0 while the node is many slots behind.
+	// target. Unlike the frontier gap this stays meaningful when header
+	// admission and ledger application stall together, which is precisely when
+	// the frontier gap reads 0 while the node is many slots behind.
 	//
 	// There is deliberately no fallback for a live upstream that has not
-	// published a target -- (0, true) from UpstreamSyncStatus, the window
-	// between an active-connection switch and the new peer's first admitted
-	// trusted header.
-	//
-	// That state now REACHES this gate. Before #4013 the sync gate below
-	// refused every slot with upstreamActive && upstreamTip == 0, so it could
-	// not; #4013 bounded that branch by the local tip's lag instead, precisely
-	// so a node at tip forges and its header ends the window. A node at tip
-	// therefore arrives here with a live upstream and a zero target, and what
-	// keeps this bound quiet is the upstreamTarget > newestKnown term below,
-	// which a zero target cannot satisfy -- not the gate underneath.
-	//
-	// Filling the zero in from somewhere would break that. An earlier revision
-	// fell back to the admitted-header frontier; it was unreachable then and
-	// is actively wrong now, because it would compare a HEADER-stage value
-	// against newestKnown's BLOCK-stage one -- the same mismatch that makes
-	// this bound opt-in -- and would refuse leader slots in exactly the window
-	// #4013 opened them up for, re-creating the #4010 wedge on any operator
-	// who enabled the knob. See TestUpstreamSyncStatusReachableStates for the
-	// reachable pairs and
-	// TestForgeUpstreamStalenessIgnoresUnknownUpstreamTarget for this case.
+	// published a target. That state is (0, true) from UpstreamSyncStatus, and
+	// the pre-existing sync gate below already refuses the slot on
+	// upstreamActive && upstreamTip == 0, so it never reaches this gate. An
+	// earlier revision fell back to the admitted-header frontier here; it was
+	// unreachable in production and only appeared to work because a test
+	// double could express (0, false) with a non-zero admitted frontier, which
+	// LedgerState cannot. See TestUpstreamSyncStatusReachableStates.
 	upstreamTarget, upstreamLive := f.slotClock.UpstreamSyncStatus()
 	// Opt-in only. newestKnown counts BLOCKS this node holds, while
 	// upstreamTarget is published at HEADER admission, so between a header's
@@ -1097,38 +1005,19 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	appliedStale := f.forgeAppliedStalenessSlots > 0 &&
 		currentSlot > newestKnown &&
 		currentSlot-newestKnown > f.forgeAppliedStalenessSlots
-	// How far the corroborated endorser block leads the APPLIED tip. Measured
-	// against ebSlot alone rather than effectiveGap so this refusal can only
-	// ever be caused by endorser-block evidence: effectiveGap also carries the
-	// primary chain tip, so with a bound tighter than
-	// forgePrimaryChainTipToleranceSlots it would label a purely local gap
-	// "eb_manifest_ahead" when no endorser block was involved at all.
-	ebGap := uint64(0)
-	if ebSlot > tipSlot {
-		ebGap = ebSlot - tipSlot
-	}
-	// Opt-in only, and with its OWN bound rather than the local
-	// block-against-block tolerance. See ForgeEndorserBlockStalenessSlots for
-	// why sharing that number is wrong in both directions: it ties two
-	// unrelated risk budgets to one knob, and it makes a monotonic,
-	// never-lowered, advisory watermark into an always-on refusal that a node
-	// on a chain the watermark has moved past cannot clear.
-	ebStale := f.forgeEbStalenessSlots > 0 &&
-		ebGap > f.forgeEbStalenessSlots
 
 	// Selected once here, acted on after the leader check below.
 	staleTipReason := ""
 	switch {
-	case primaryTipBehind:
-		staleTipReason = forgeStaleTipReasonPrimaryTipBehind
-	case primaryTipDiverged:
+	case frontierBehind:
+		staleTipReason = forgeStaleTipReasonFrontierBehind
+	case frontierDiverged:
 		staleTipReason = forgeStaleTipReasonHashDiverged
-	case applyGap > f.forgePrimaryChainTipToleranceSlots:
+	case applyGap > f.forgeFrontierToleranceSlots:
 		staleTipReason = forgeStaleTipReasonSlotGap
-	case ebStale:
-		// Only the endorser-block evidence refuses here: the headers alone
-		// looked fine, and this case is unreachable unless an operator has
-		// set ForgeEndorserBlockStalenessSlots.
+	case effectiveGap > f.forgeFrontierToleranceSlots:
+		// Only the endorser-block evidence pushed the gap over the bound: the
+		// headers alone looked fine.
 		staleTipReason = forgeStaleTipReasonEbManifestAhead
 	case upstreamStale, appliedStale:
 		staleTipReason = forgeStaleTipReasonAppliedStale
@@ -1144,11 +1033,10 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// Forge.about_to_lead)
 	//
 	// dingo_forge_tip_gap_slots reports the ledger-apply backlog
-	// (primary chain tip - applied tip) on EVERY leader check. It previously
-	// reset to 0 here and was only set non-zero on the two skip paths below,
-	// so the case that matters -- proceeding to forge while the applied tip
-	// trails the primary chain tip -- reported a gap of exactly 0, and the
-	// gauge read 0 on
+	// (frontier - applied tip) on EVERY leader check. It previously reset to 0
+	// here and was only set non-zero on the two skip paths below, so the case
+	// that matters -- proceeding to forge while the applied tip trails the
+	// frontier -- reported a gap of exactly 0, and the gauge read 0 on
 	// producers that were forging tens of slots stale. The skip paths no
 	// longer overwrite it with their own, differently-defined gaps (tip ahead
 	// of the slot clock; upstream ahead of the tip); both are still logged,
@@ -1161,15 +1049,15 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 
 	// Strictly PAST the current slot, measured against parentSlot -- the slot
 	// the forged block's parent would actually be at -- rather than the applied
-	// tip alone. Comparing against the applied tip alone misses a primary
-	// chain tip that is ahead of the current slot (applied 199, current 200,
-	// primary tip 201), which otherwise reaches the builder and produces a
-	// block whose parent sits at a LATER slot than the block itself.
+	// tip alone. Comparing against the applied tip alone misses a frontier that
+	// is ahead of the current slot (applied 199, current 200, frontier 201),
+	// which otherwise reaches the builder and produces a block whose parent
+	// sits at a LATER slot than the block itself.
 	//
 	// The comparison is strict so an EQUAL slot survives to the two cases
 	// below, which distinguish a competing block at the applied tip from one
-	// only on the primary chain tip. Dropping equal slots here would also
-	// collide with the contested-slot handling in #3955, which needs them.
+	// only on the frontier. Dropping equal slots here would also collide with
+	// the contested-slot handling in #3955, which needs them.
 	if currentSlot < parentSlot {
 		// Detect stale data: if the tip is far ahead of the slot clock,
 		// the database likely contains chain data from a different genesis.
@@ -1190,7 +1078,7 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 				"tip_slot",
 				tipSlot,
 				"primary_tip_slot",
-				primaryTip.Slot,
+				frontier.Slot,
 				"slot_gap",
 				gap,
 			}
@@ -1207,7 +1095,7 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 				"forge skip: chain tip is ahead of the current slot",
 				"current_slot", currentSlot,
 				"tip_slot", tipSlot,
-				"primary_tip_slot", primaryTip.Slot,
+				"primary_tip_slot", frontier.Slot,
 			)
 		}
 		return nil
@@ -1284,80 +1172,29 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		// selection and the contested-slot branch account for it.
 	}
 
-	// The PRIMARY CHAIN TIP already holds a block at the current slot while
-	// the ledger has not applied it yet (parentSlot == currentSlot > tipSlot,
-	// so neither the strictly-past guard nor the equal-applied-tip branch
-	// above fires). The builder parents on the primary chain tip, so forging
-	// here would produce a block for slot S whose parent is already at slot S
-	// -- a non-increasing slot, admitted locally and broadcast to peers.
+	// The FRONTIER already holds a block at the current slot while the ledger
+	// has not applied it yet (parentSlot == currentSlot > tipSlot, so neither
+	// the strictly-past guard nor the equal-applied-tip branch above fires).
+	// The builder parents on the frontier, so forging here would produce a
+	// block for slot S whose parent is already at slot S -- a non-increasing
+	// slot, admitted locally and broadcast to peers.
 	//
 	// This is deliberately separate from the contested-slot branch above.
 	// There the competing block is applied, so tipBlockOwnership can compare
 	// it against SlotTracker by hash and tell our own block from a rival's.
-	// Here the block is unapplied, so that helper cannot: it compares against
-	// the APPLIED tip hash, which by construction names an earlier block, and
-	// answers tipOwnershipUnknown for everything that reaches this branch.
-	// Ownership is still decidable, just from the other tip --
-	// unappliedTipOwnership compares SlotTracker's hash for this slot against
-	// the PRIMARY chain tip's -- and it has to be decided, because this
-	// node's own just-forged, not-yet-applied block arrives here too: the
-	// refusal is right for it (a second block for the slot would equivocate)
-	// but calling it a rival that cost us a leader slot is not.
+	// Here the block is unapplied: tipBlockOwnership reads the applied tip and
+	// answers tipOwnershipUnknown, and the fence only covers slots this node
+	// committed to, so nothing downstream would stop the forge.
 	//
 	// Routed through logGateSkip because this runs before leader selection, so
 	// a slot this node was scheduled to lead would otherwise vanish at Debug.
-	//
-	// The schedule lookup is also what the counter is taken from. This is the
-	// one refusal the gate adds that can lose a scheduled leader slot without
-	// moving any parity counter: it returns before checkLeaderSafe, so
-	// about_to_lead has already incremented and none of node_is_leader,
-	// not_leader or could_not_forge ever will. The same real-world event --
-	// a rival block at our leader slot -- reaches the contested-slot branch
-	// above when the ledger has applied it, where it moves both
-	// slotBattlesTotal and could_not_forge, and lands here when it has not, so
-	// without a counter a dashboard would see the lost block in one case and
-	// not the other purely on pipeline timing.
-	//
-	// Counted on the stale-tip vector because it is the same disagreement the
-	// vector already reports -- applied tip behind primary chain tip -- and a
-	// dashboard summing the reasons then has every locally-caused lost slot in
-	// one series. It is the only reason counted from the VRF schedule rather
-	// than from a completed leader check; see forgeStaleTipReasonUnappliedRival.
 	if currentSlot == parentSlot && parentSlot > tipSlot {
-		// The unapplied block at the primary chain tip is one this node
-		// forged: the slot produced a block rather than losing one, so this
-		// is the routine re-entry the equal-applied-tip branch above logs at
-		// Debug with no counter, and it must read the same way here. Counting
-		// it would make the series over-report a lost leader slot purely
-		// because the ledger has not caught up with our own block yet, which
-		// is the split on pipeline timing this gate exists to remove.
-		if ownership, matchedBy := f.unappliedTipOwnership(
+		f.logGateSkip(
 			currentSlot,
-			primaryTip.Hash,
-		); ownership == tipOwnershipOurs {
-			f.logger.Debug(
-				"forge skip: slot already has our own block",
-				"current_slot", currentSlot,
-				"tip_slot", tipSlot,
-				"primary_tip_slot", primaryTip.Slot,
-				"last_forged_slot", f.lastForgedSlot,
-				"matched_by", matchedBy,
-			)
-			return nil
-		}
-		// One schedule read, shared by the counter and the log level, so a
-		// skip does not run the lookup (or the panic recovery around it)
-		// twice.
-		leaderSlot := f.isScheduledLeaderSlot(currentSlot)
-		if leaderSlot && f.metrics != nil {
-			f.metrics.forgeStaleTipSkipUnappliedRival.Inc()
-		}
-		f.logGateSkipScheduled(
-			leaderSlot,
 			"forge skip: primary chain tip already has a block at this slot",
 			"current_slot", currentSlot,
 			"tip_slot", tipSlot,
-			"primary_tip_slot", primaryTip.Slot,
+			"primary_tip_slot", frontier.Slot,
 		)
 		return nil
 	}
@@ -1381,13 +1218,6 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		if f.metrics != nil {
 			f.metrics.forgeSyncSkip.Inc()
 		}
-		// The gap this gate acted on, for the log line only. It no longer
-		// feeds dingo_forge_tip_gap_slots: that gauge reports the
-		// ledger-apply backlog now and is set once per leader check above,
-		// so overwriting it here would give it a second meaning. The
-		// unknown-target branch acts on the local tip's lag behind the wall
-		// clock, which ledger already exports continuously as
-		// dingo_tip_gap_slots; current_slot and tip_slot below carry it too.
 		upstreamGap := uint64(0)
 		if upstreamTip > tipSlot {
 			upstreamGap = upstreamTip - tipSlot
@@ -1511,12 +1341,12 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// which chooses and validates its transactions, supplies its protocol
 	// parameters and nonce, and decided leader eligibility -- is at the
 	// applied tip. A gap beyond the tolerance, an equal-slot fork the ledger
-	// has not applied, or a primary chain tip behind the applied tip all mean
-	// those two are different chain positions. The upstream sync check above
-	// cannot catch any of them: it compares the applied tip against the
-	// NETWORK, with a tolerance sized for catch-up, and a node whose own
-	// pipeline is the thing lagging can be well inside that tolerance while
-	// its ledger state and its parent disagree.
+	// has not applied, or a frontier behind the applied tip all mean those two
+	// are different chain positions. The upstream sync check above cannot
+	// catch any of them: it compares the applied tip against the NETWORK, with
+	// a tolerance sized for catch-up, and a node whose own pipeline is the
+	// thing lagging can be well inside that tolerance while its ledger state
+	// and its parent disagree.
 	//
 	// Deliberately placed AFTER the leader check. The condition persists for
 	// as long as the pipeline is behind, so gating before leader selection
@@ -1530,64 +1360,37 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	//
 	// Skip loudly rather than silently: a lost leader slot is worth a warning,
 	// and an operator whose pipeline is lagging needs to see it.
-	// See forgePrimaryChainTipToleranceSlots.
+	// See forgeHeaderFrontierToleranceSlots.
 	if staleTipReason != "" {
-		// Count it as could-not-forge before anything else. This refusal runs
-		// after checkLeaderSafe and before forgeNodeIsLeader.Inc(), so without
-		// this the cardano-node parity counters stop balancing on a lost
-		// leader slot: about_to_lead has already moved, node_is_leader never
-		// will, and not_leader increments only on !isLeader. An operator
-		// alerting on could_not_forge would watch a flat line while the
-		// producer stopped forging -- the failure mode this gate is most
-		// likely to cause. Every other post-leader-check refusal in this
-		// function does the same.
-		f.incCouldNotForge()
 		if f.metrics != nil {
 			switch staleTipReason {
 			case forgeStaleTipReasonSlotGap:
 				f.metrics.forgeStaleTipSkipSlotGap.Inc()
 			case forgeStaleTipReasonHashDiverged:
 				f.metrics.forgeStaleTipSkipHashDiverged.Inc()
-			case forgeStaleTipReasonPrimaryTipBehind:
-				f.metrics.forgeStaleTipSkipPrimaryTipBehind.Inc()
+			case forgeStaleTipReasonFrontierBehind:
+				f.metrics.forgeStaleTipSkipFrontierBehind.Inc()
 			case forgeStaleTipReasonAppliedStale:
 				f.metrics.forgeStaleTipSkipAppliedStale.Inc()
 			case forgeStaleTipReasonEbManifestAhead:
 				f.metrics.forgeStaleTipSkipEbAhead.Inc()
 			}
 		}
-		// applied_tip_stale is reached from two independent bounds. Log both,
-		// plus which one actually fired, so a post-mortem does not have to
-		// guess: with only upstream_staleness_slots present a wall-clock
-		// refusal logged a bound of 0 and no way to tell them apart.
-		staleSource := ""
-		switch {
-		case upstreamStale && appliedStale:
-			staleSource = "upstream+wall_clock"
-		case upstreamStale:
-			staleSource = "upstream"
-		case appliedStale:
-			staleSource = "wall_clock"
-		}
 		f.logger.Warn(
-			forgeStaleTipMessage(staleTipReason),
+			"forge skip: ledger tip stale vs primary chain tip",
 			"reason", staleTipReason,
-			"stale_source", staleSource,
 			"current_slot", currentSlot,
 			"tip_slot", tipSlot,
-			"primary_tip_slot", primaryTip.Slot,
+			"primary_tip_slot", frontier.Slot,
 			"eb_slot", ebSlot,
 			"newest_known_slot", newestKnown,
 			"upstream_target_slot", upstreamTarget,
 			"tip_hash", hex.EncodeToString(appliedTip.Hash),
-			"primary_tip_hash", hex.EncodeToString(primaryTip.Hash),
+			"primary_tip_hash", hex.EncodeToString(frontier.Hash),
 			"gap_slots", applyGap,
 			"effective_gap_slots", effectiveGap,
-			"eb_gap_slots", ebGap,
-			"tolerance_slots", f.forgePrimaryChainTipToleranceSlots,
+			"tolerance_slots", f.forgeFrontierToleranceSlots,
 			"upstream_staleness_slots", f.forgeUpstreamStalenessSlots,
-			"applied_staleness_slots", f.forgeAppliedStalenessSlots,
-			"eb_staleness_slots", f.forgeEbStalenessSlots,
 		)
 		return nil
 	}
@@ -1670,6 +1473,23 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 			"block_number", blockCtx.BlockNumber,
 		)
 	}
+
+	// One line per forge with every input the gates weighed, so a post-mortem
+	// of an orphaned block does not have to reconstruct them from surrounding
+	// chatter. Emitted after the LAST gate that can still refuse, so it is
+	// never followed by a skip for this slot; Info, not Debug, because it is
+	// at most one line per block this node actually produces.
+	f.logger.Info(
+		"forge context",
+		"current_slot", currentSlot,
+		"tip_slot", tipSlot,
+		"primary_tip_slot", frontier.Slot,
+		"eb_slot", ebSlot,
+		"newest_known_slot", newestKnown,
+		"upstream_target_slot", upstreamTarget,
+		"gap_slots", applyGap,
+		"effective_gap_slots", effectiveGap,
+	)
 
 	// Commit to this slot before any signing happens for it, including
 	// the Leios endorser block below. The tip check above only rejects
@@ -2252,35 +2072,15 @@ func (f *BlockForger) tipBlockOwnership(
 	if bytes.Equal(tip.Hash, forgedHash) {
 		return tipOwnershipOurs, forgedHash, tip.Hash
 	}
-	return tipOwnershipRival, forgedHash, tip.Hash
-}
-
-// unappliedTipOwnership decides whether the block sitting at the PRIMARY
-// chain tip for slot is one this node forged, without reading the applied
-// tip. tipBlockOwnership cannot answer that question for an unapplied block:
-// it compares SlotTracker against ChainTipHash(), the applied tip, which for
-// every caller of this helper names an earlier block, so it returns
-// tipOwnershipUnknown. Callers must therefore pass the primary chain tip's
-// hash, and may only call this where that tip is known to sit at slot.
-//
-// The hash comparison is the strong signal. When it cannot be made -- no
-// tracked hash for the slot, or an empty hash on either side -- the forge
-// fence is the weaker fallback the equal-applied-tip branch already uses: it
-// records the slots this node committed to without saying which block won, so
-// it can call a lost slot battle ours. That direction is deliberate; it
-// under-reports a loss rather than reporting a block we produced as lost.
-func (f *BlockForger) unappliedTipOwnership(
-	slot uint64,
-	tipHash []byte,
-) (tipOwnership, string) {
-	if f.slotTracker != nil && len(tipHash) > 0 {
-		forgedHash, ok := f.slotTracker.WasForgedByUs(slot)
-		if ok && len(forgedHash) > 0 {
-			if bytes.Equal(forgedHash, tipHash) {
-				return tipOwnershipOurs, "forged_block_hash"
-			}
-			return tipOwnershipRival, "forged_block_hash"
-		}
+	// The caller's tipSlot was sampled at the top of the forge cycle and
+	// the chain can move underneath it, so this hash need not belong to
+	// the slot being decided. Re-read the tip slot next to the hash and
+	// refuse to conclude anything if the tip is no longer at this slot.
+	// The two reads are still not atomic, so this narrows the window
+	// rather than closing it; every remaining disagreement resolves to
+	// tipOwnershipUnknown or to a Warn, never to a forge.
+	if f.slotClock.ChainTip().Slot != slot {
+		return tipOwnershipUnknown, nil, nil
 	}
 	if f.fenceLoaded && slot <= f.lastForgedSlot {
 		return tipOwnershipOurs, "forge_fence"
