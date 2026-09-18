@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
@@ -125,7 +126,13 @@ func (c *advancingEBTestSlotClock) CurrentSlot() (uint64, error) {
 
 func (c *advancingEBTestSlotClock) SlotsPerKESPeriod() uint64 { return 100 }
 
-func (c *advancingEBTestSlotClock) ChainTipSlot() uint64 { return 9 }
+func (c *advancingEBTestSlotClock) ChainTip() ocommon.Point {
+	return ocommon.Point{Slot: 9}
+}
+
+func (c *advancingEBTestSlotClock) PrimaryChainTip() ocommon.Point {
+	return c.ChainTip()
+}
 
 func (c *advancingEBTestSlotClock) NextSlotTime() (time.Time, error) {
 	return c.slotEnd, nil

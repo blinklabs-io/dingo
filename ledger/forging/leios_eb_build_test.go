@@ -39,7 +39,7 @@ func TestBuildLeiosEBBodiesAlignWithRefs(t *testing.T) {
 		{Hash: strings.Repeat("33", 32), Cbor: []byte{0x03, 0x04}},
 	}
 
-	ebCbor, ebHash, bodies, err := buildLeiosEB(txs)
+	ebCbor, ebHash, bodies, err := buildLeiosEB(txs, leiosEBCaps{})
 	require.NoError(t, err)
 	require.NotEmpty(t, ebHash)
 
@@ -68,7 +68,7 @@ func TestBuildLeiosEBBodiesAlignWithRefs(t *testing.T) {
 func TestBuildLeiosEBNoValidRefs(t *testing.T) {
 	_, _, bodies, err := buildLeiosEB([]MempoolTransaction{
 		{Hash: "not-hex", Cbor: []byte{0x01}},
-	})
+	}, leiosEBCaps{})
 	require.ErrorIs(t, err, errNoValidTxRefs)
 	require.Nil(t, bodies)
 }
@@ -215,7 +215,7 @@ func TestBuildLeiosEBReferencesUseFullTransactionHash(t *testing.T) {
 		{Hash: strings.Repeat("aa", 32), Cbor: []byte{0xde, 0xad, 0xbe, 0xef}},
 	}
 
-	ebCbor, _, bodies, err := buildLeiosEB(txs)
+	ebCbor, _, bodies, err := buildLeiosEB(txs, leiosEBCaps{})
 	require.NoError(t, err)
 
 	eb, err := lcommon.NewLeiosEndorserBlockFromCbor(ebCbor)

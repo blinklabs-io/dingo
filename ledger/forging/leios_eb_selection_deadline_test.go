@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
@@ -146,7 +147,15 @@ func (c *ebTestSlotClock) SlotsPerKESPeriod() uint64 {
 	return c.slotsPerKESPeriod
 }
 
-func (c *ebTestSlotClock) ChainTipSlot() uint64 { return c.chainTipSlot }
+func (c *ebTestSlotClock) ChainTip() ocommon.Point {
+	return ocommon.Point{Slot: c.chainTipSlot}
+}
+
+// PrimaryChainTip mirrors the applied tip: the caught-up steady state, so
+// these tests observe no ledger backlog and no staleness refusal.
+func (c *ebTestSlotClock) PrimaryChainTip() ocommon.Point {
+	return c.ChainTip()
+}
 
 func (c *ebTestSlotClock) NextSlotTime() (time.Time, error) {
 	return c.slotEnd, nil
