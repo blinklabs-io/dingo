@@ -1445,28 +1445,45 @@ healthy chain — can have a legal rollback target below `tipSlot -
 retentionSlots` (blinklabs-io/dingo#4353). Pruning to that slot-only horizon
 would then permanently delete the authorization the rollback needs to restore.
 
-`liveImmutableSlot` is the actual bound: the slot of the block `securityParam`
-blocks behind the tip, as `Chain.PointAtDepth` resolves it. `sqlstore` cannot
-compute this itself (`chain` already imports `database`, so the reverse import
-would cycle), so `internal/committeeauth.Syncer` resolves it periodically from
-the live `Chain` and `LedgerState` the node holds and pushes it in through
-`Store.SetCommitteeAuthImmutableSlot` (wired in `node.go`/`node_lifecycle.go`,
-independent of `historyExpiry`). Taking the minimum of the two candidates keeps
-pruning safe whether or not a live value is available yet: no live value falls
-back to the slot-window assumption unchanged, and a live value the assumption
-under-covers wins, since it is always at or below the true bound and a smaller
-horizon only retains more. Retention is per credential, not a global row cap,
-and it only ever deletes below that horizon.
+`liveImmutableSlot` is the actual bound when it is fresh: the slot of the block
+`securityParam` blocks behind the tip, as `Chain.PointAtDepth` resolves it.
+`sqlstore` cannot compute this itself (`chain` already imports `database`, so
+the reverse import would cycle), so `internal/committeeauth.Syncer` resolves it
+periodically from the live `Chain` and `LedgerState` the node holds and pushes
+it in through `Store.SetCommitteeAuthImmutableSlot` (wired in
+`node.go`/`node_lifecycle.go`, independent of `historyExpiry`). A fresh
+`liveImmutableSlot` is at or below every legal rollback target S — the node's
+own rollback check forbids a target shallower than `securityParam` blocks from
+the tip it was resolved against — but nothing is claimed about `tipSlot -
+retentionSlots` relative to S beyond the density assumption above: the minimum
+is safe because `liveImmutableSlot` alone is, not because both candidates are.
+Retention is per credential, not a global row cap, and it only ever deletes
+below the horizon.
+
+**Suspension.** A cached `liveImmutableSlot` can be safe when resolved and
+still be wrong by the time it is used, because "at most `securityParam` blocks
+behind the tip" describes one instant, not a ratchet: a rollback to depth
+`d1 <= securityParam`, a little regrowth, and a second rollback to depth
+`d2 <= securityParam` measured from the new, shorter tip can legally land
+*before* a value cached before the first rollback — ordinary chain churn near
+the tip, not an adversarial scenario. `DeleteCertificatesAfterSlot` therefore
+invalidates the cached value on every rollback, and `committeeAuthHorizon`
+treats "a live syncer is wired (`SetCommitteeAuthImmutableSlot` has been called
+at least once) but currently has no value" — bootstrap before the first
+resolution, a resolution failure, or a post-rollback invalidation awaiting the
+next sync — as a reason to suspend pruning entirely rather than fall back to
+the slot-window assumption alone. A `Store` nothing has ever pushed a live
+value to (every existing test, and any non-node caller such as a backfill or
+inspection tool) keeps the pre-live-sync slot-window-only behavior unchanged.
 
 Rollback safety: `DeleteCertificatesAfterSlot` deletes `auth_committee_hot` rows
-with `added_slot` above the rollback target S, and this horizon is always at or
-below S (both candidates are, so their minimum is too). If a row exists between
-the horizon and S it is retained (everything above the horizon is) and
-dominates every older row; if none does, the correct answer is the one
-pre-horizon row the rule retains. The post-rollback query result is therefore
-identical whether or not pruning ran, and a credential's last row is never
-removed, so a credential that has an authorization can never become one that has
-none.
+with `added_slot` above the rollback target S. Whenever pruning runs at all
+(not suspended), the horizon is at or below S. If a row exists between the
+horizon and S it is retained (everything above the horizon is) and dominates
+every older row; if none does, the correct answer is the one pre-horizon row
+the rule retains. The post-rollback query result is therefore identical
+whether or not pruning ran, and a credential's last row is never removed, so a
+credential that has an authorization can never become one that has none.
 
 The partition is the tagged credential, so a script-hash credential never prunes
 a key-hash credential sharing its 28 bytes. `committee_member` is not pruned:

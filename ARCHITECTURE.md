@@ -2294,11 +2294,19 @@ once immediately at `Start`) and pushes the result into
 resolve itself: `chain` already imports `database`, so the reverse import
 would cycle. A resolution failure (security parameter not yet known, or fewer
 than `securityParam` blocks on chain) pushes `known=false` rather than a
-stale value, which the pruner treats as "no live bound available" and falls
-back to its slot-window assumption -- see DATABASE.md's Committee Hot-Key
-Authorization Retention section for the retention rule this closes a gap in
-(blinklabs-io/dingo#4353) and why a stale or absent live value is always safe
-to fall back from.
+stale value.
+
+The pruner does not treat "no live bound available" as "fall back to the
+slot-window assumption": once `SetCommitteeAuthImmutableSlot` has been called
+at all (a live syncer is wired), a subsequent `known=false` -- from a
+resolution failure above, or from `DeleteCertificatesAfterSlot` invalidating
+the cached value on every rollback, since a value safe when cached is not
+necessarily safe after a rollback -- suspends pruning entirely until the next
+successful resolution. Only a `Store` no syncer has ever been wired to (every
+existing test, and any non-node caller) keeps the slot-window-only fallback.
+See DATABASE.md's Committee Hot-Key Authorization Retention section for the
+full retention rule, the gap this closes (blinklabs-io/dingo#4353), and why
+suspension rather than fallback is required once live tracking is engaged.
 
 ### Tiered CBOR Cache
 

@@ -133,14 +133,21 @@ type Store struct {
 	// the live rollback-safe immutable slot (tip depth securityParam blocks
 	// back), pushed in by SetCommitteeAuthImmutableSlot from outside the
 	// package -- sqlstore cannot import chain (chain already imports
-	// database) to compute it directly. Read through
-	// committeeAuthHorizon(), which falls back to the slot-window assumption
-	// below when no live value has been pushed yet. Plain atomics, not a
+	// database) to compute it directly. committeeAuthImmutableSlotEverSet
+	// distinguishes "no live syncer has ever been wired for this Store"
+	// (committeeAuthHorizon falls back to the slot-window assumption, the
+	// pre-live-sync behavior every existing caller and test still gets)
+	// from "a live syncer is wired but has no current value" (bootstrap
+	// before the first successful resolution, or invalidated by a rollback
+	// in DeleteCertificatesAfterSlot -- pruning suspends rather than fall
+	// back to an assumption a sparse or recently-reorganized chain can
+	// violate). Read through committeeAuthHorizon(). Plain atomics, not a
 	// mutex: the setter runs from an independent periodic sync goroutine
 	// while readers run inline in the certificate write path and the
 	// maintenance sweep, and none of them may block on each other.
-	committeeAuthImmutableSlot      atomic.Uint64
-	committeeAuthImmutableSlotKnown atomic.Bool
+	committeeAuthImmutableSlot        atomic.Uint64
+	committeeAuthImmutableSlotKnown   atomic.Bool
+	committeeAuthImmutableSlotEverSet atomic.Bool
 
 	migrations        []migrations.Migration
 	migrationLocker   migrations.Locker

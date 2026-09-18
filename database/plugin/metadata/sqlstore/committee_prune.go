@@ -33,7 +33,9 @@ import (
 //
 //	keep every row with added_slot > horizon,
 //	plus the single newest row with added_slot <= horizon,
-//	where horizon = min(tipSlot - retentionSlots, liveImmutableSlot).
+//	where horizon = min(tipSlot - retentionSlots, liveImmutableSlot),
+//	and pruning does not run at all while a live syncer is wired but has
+//	no current value (see "Suspension" below).
 //
 // Rollback safety. A chain rollback deletes committee certificate rows with
 // "DELETE FROM auth_committee_hot WHERE added_slot > S" (see
@@ -49,16 +51,19 @@ import (
 // legal S below tipSlot - retentionSlots, and pruning to the wrong horizon
 // permanently deletes the row a legal rollback needs (issue #4353).
 //
-// liveImmutableSlot is that actual bound: the slot securityParam blocks
-// behind the tip, as observed on the live chain (see
+// liveImmutableSlot is that actual bound when it is fresh: the slot
+// securityParam blocks behind the tip, as observed on the live chain (see
 // SetCommitteeAuthImmutableSlot), refreshed periodically from outside this
-// package because sqlstore cannot import chain to compute it directly.
-// Taking the minimum of the two candidates is what keeps this safe under
-// both a stale/absent live value (falls back to the slot-window assumption,
-// today's behavior) and a live value the assumption under-covers (the live
-// value wins, since it is always <= any legal rollback target and using a
-// smaller horizon only retains more). With retentionSlots >= the live bound
-// (whichever candidate is used), horizon <= S always, and:
+// package because sqlstore cannot import chain to compute it directly. A
+// fresh liveImmutableSlot is always <= S: the node's own rollback check
+// forbids any legal target shallower than securityParam blocks from the
+// tip it was resolved against, and every block after that tip -- on any
+// chain the node subsequently adopts -- has a slot no earlier than that
+// tip's own, so the bound only moves forward as long as it is refreshed
+// after every tip change (see "Suspension" for why a stale one is not
+// trustworthy). Nothing is claimed about tipSlot - retentionSlots relative
+// to S beyond the assumption above; the minimum is safe because
+// liveImmutableSlot alone is, not because both candidates are.
 //
 //   - if any row exists in (horizon, S], it is retained (everything above the
 //     horizon is retained) and it dominates every row at or below the
@@ -69,6 +74,26 @@ import (
 // So the post-rollback query result is identical whether or not pruning ran.
 // The rule also never removes a credential's last row, so a credential that
 // has an authorization can never be turned into one that has none.
+//
+// Suspension. A cached liveImmutableSlot can be safe at the moment it is
+// resolved and still be unsafe by the time it is used, because "at most
+// securityParam blocks behind the tip" is a statement about one instant,
+// not a ratchet: a rollback to depth d1 <= securityParam, a little regrowth,
+// and a second rollback to depth d2 <= securityParam measured from the new,
+// shorter tip can legally reach a point *before* a liveImmutableSlot cached
+// from before the first rollback (small oscillating reorgs near the tip are
+// ordinary, not adversarial). DeleteCertificatesAfterSlot therefore
+// invalidates the cached value on every rollback, and committeeAuthHorizon
+// treats "a live syncer is wired (SetCommitteeAuthImmutableSlot has been
+// called at least once) but currently has no value" -- bootstrap before the
+// first resolution, a resolution failure, or a post-rollback invalidation
+// awaiting the next sync -- as a reason to skip pruning entirely rather than
+// fall back to the slot-window assumption, which the whole point of this
+// mechanism is to not rely on alone. A Store nothing has ever pushed a live
+// value to is a different state: no live syncer is wired at all (every test
+// in this file, and any non-node caller such as a backfill or inspection
+// tool), and that keeps the pre-live-sync slot-window-only behavior
+// unchanged, exactly as it shipped before this mechanism existed.
 //
 // The partition is the tagged credential, matching the readers' PARTITION BY
 // and the fact that a key-hash and a script-hash credential sharing 28 bytes
@@ -115,17 +140,22 @@ func (s *Store) committeeAuthRetention() uint64 {
 // SetCommitteeAuthImmutableSlot records the live rollback-safe immutable
 // slot -- the slot of the block securityParam blocks behind the current tip,
 // as resolved by Chain.PointAtDepth -- for committeeAuthHorizon to fold into
-// the retention decision. known false (the zero value, before this is ever
-// called) means no live value is available and pruning falls back to the
-// slot-window assumption alone; callers must pass known=false rather than a
-// stale slot when the depth lookup itself fails, since a wrong slot is not
-// distinguishable from a valid one once stored.
+// the retention decision. known false means no current value is available
+// (the depth lookup failed, the security parameter is not yet known, or the
+// chain does not yet have securityParam blocks) and pruning suspends rather
+// than fall back to the slot-window assumption; callers must pass
+// known=false rather than a stale slot in that case, since a wrong slot is
+// not distinguishable from a valid one once stored. Every call, known or
+// not, marks a live syncer as wired for this Store -- see the package-level
+// comment's "Suspension" section for why that first call changes
+// committeeAuthHorizon's behavior even before any value is ever known.
 //
 // The caller -- a periodic sync outside this package, since sqlstore cannot
 // import chain -- may call this from a goroutine independent of any
 // certificate write or the maintenance sweep, so this is lock-free and never
 // blocks.
 func (s *Store) SetCommitteeAuthImmutableSlot(slot uint64, known bool) {
+	s.committeeAuthImmutableSlotEverSet.Store(true)
 	if !known {
 		s.committeeAuthImmutableSlotKnown.Store(false)
 		return
@@ -136,8 +166,14 @@ func (s *Store) SetCommitteeAuthImmutableSlot(slot uint64, known bool) {
 
 // committeeAuthHorizon returns the retention horizon for a prune call at
 // tipSlot, and whether pruning should run at all. See the package-level
-// comment above for the min-of-two-candidates rule.
+// comment above for the retention rule and why pruning suspends rather than
+// use the slot-window assumption once a live syncer is wired but currently
+// has no value.
 func (s *Store) committeeAuthHorizon(tipSlot uint64) (uint64, bool) {
+	if s.committeeAuthImmutableSlotEverSet.Load() &&
+		!s.committeeAuthImmutableSlotKnown.Load() {
+		return 0, false
+	}
 	retention := s.committeeAuthRetention()
 	if tipSlot <= retention {
 		// The whole chain so far is inside the rollback window.

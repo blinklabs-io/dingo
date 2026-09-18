@@ -711,6 +711,122 @@ func TestAuthCommitteeHotPruningIgnoresHigherLiveImmutableSlot(t *testing.T) {
 			"slot-window assumption alone would leave")
 }
 
+// TestAuthCommitteeHotPruningSuspendsBeforeFirstLiveResolution covers the
+// bootstrap gap: a live syncer wired to a Store (SetCommitteeAuthImmutableSlot
+// called, even with known=false) has not yet resolved a value -- because the
+// chain does not yet have securityParam blocks, the security parameter is
+// not yet known, or the depth lookup failed. Falling back to the slot-window
+// assumption in that state reintroduces the exact bug this mechanism exists
+// to close, so pruning must not run at all until a value is known.
+func TestAuthCommitteeHotPruningSuspendsBeforeFirstLiveResolution(
+	t *testing.T,
+) {
+	t.Parallel()
+	const coldTag = uint8(lcommon.CredentialTypeAddrKeyHash)
+	cold := credentialHash(0xc8)
+	store := newManagementTestStore(t)
+
+	// 20 superseded authorizations far below the slot-window horizon --
+	// exactly the shape TestAuthCommitteeHotWritePathPrunesSupersededAuthorizations
+	// shows the slot-window assumption alone would prune down to one row.
+	for i := 1; i <= 20; i++ {
+		seedAuthorization(
+			t, store, coldTag, cold,
+			uint8(lcommon.CredentialTypeAddrKeyHash), hotHash(0x92, i),
+			uint64(i), uint64(1_000*i), // #nosec G115
+		)
+	}
+	require.Equal(t, 20, authRowCountFor(t, store, coldTag, cold))
+
+	// A live syncer is wired but has not yet resolved a value.
+	store.SetCommitteeAuthImmutableSlot(0, false)
+
+	queryer := newDialectQueryer(store.writeDB, store.dialect.Name())
+	pruned, err := store.pruneCommitteeHotAuthorizations(
+		context.Background(), queryer, coldTag, cold, preprodTipSlot,
+	)
+	require.NoError(t, err)
+	require.Zero(t, pruned)
+	require.Equal(t, 20, authRowCountFor(t, store, coldTag, cold),
+		"pruning must not run on the slot-window assumption alone while a "+
+			"live syncer has not yet resolved a value")
+
+	// Once the syncer resolves a value, pruning resumes normally.
+	store.SetCommitteeAuthImmutableSlot(preprodTipSlot, true)
+	for {
+		pruned, err := store.pruneCommitteeHotAuthorizations(
+			context.Background(), queryer, coldTag, cold, preprodTipSlot,
+		)
+		require.NoError(t, err)
+		if pruned == 0 {
+			break
+		}
+	}
+	require.Equal(t, 1, authRowCountFor(t, store, coldTag, cold),
+		"pruning must resume once a live value is known")
+}
+
+// TestAuthCommitteeHotPruningSuspendsAfterRollbackInvalidatesLiveSlot is the
+// regression for the compounding-rollback gap: a liveImmutableSlot cached
+// before a rollback bounds the *pre-rollback* chain, not necessarily the
+// chain after it -- a shallow rollback, a little regrowth, and a second
+// shallow rollback measured from the new, shorter tip can legally land
+// before the cached value (ordinary chain churn near the tip, not an
+// adversarial scenario). DeleteCertificatesAfterSlot must invalidate the
+// cached value so a write immediately after a rollback does not prune using
+// a bound that no longer applies.
+func TestAuthCommitteeHotPruningSuspendsAfterRollbackInvalidatesLiveSlot(
+	t *testing.T,
+) {
+	t.Parallel()
+	const coldTag = uint8(lcommon.CredentialTypeAddrKeyHash)
+	cold := credentialHash(0xc9)
+	store := newManagementTestStore(t)
+
+	// A live value from before the rollback.
+	store.SetCommitteeAuthImmutableSlot(preprodTipSlot-1_000, true)
+
+	// A rollback occurs (no rows need deleting for this to invalidate the
+	// cache; DeleteCertificatesAfterSlot invalidates unconditionally).
+	require.NoError(t, store.DeleteCertificatesAfterSlot(preprodTipSlot, nil))
+
+	// 20 superseded authorizations the slot-window assumption alone would
+	// prune down to one row, exactly as in the bootstrap-gap test above.
+	for i := 1; i <= 20; i++ {
+		seedAuthorization(
+			t, store, coldTag, cold,
+			uint8(lcommon.CredentialTypeAddrKeyHash), hotHash(0x93, i),
+			uint64(i), uint64(1_000*i), // #nosec G115
+		)
+	}
+
+	queryer := newDialectQueryer(store.writeDB, store.dialect.Name())
+	pruned, err := store.pruneCommitteeHotAuthorizations(
+		context.Background(), queryer, coldTag, cold, preprodTipSlot,
+	)
+	require.NoError(t, err)
+	require.Zero(t, pruned)
+	require.Equal(t, 20, authRowCountFor(t, store, coldTag, cold),
+		"a write immediately after a rollback must not prune using the "+
+			"invalidated pre-rollback live value or the slot-window "+
+			"assumption alone")
+
+	// The next sync resolves a fresh value against the post-rollback chain,
+	// and pruning resumes.
+	store.SetCommitteeAuthImmutableSlot(preprodTipSlot, true)
+	for {
+		pruned, err := store.pruneCommitteeHotAuthorizations(
+			context.Background(), queryer, coldTag, cold, preprodTipSlot,
+		)
+		require.NoError(t, err)
+		if pruned == 0 {
+			break
+		}
+	}
+	require.Equal(t, 1, authRowCountFor(t, store, coldTag, cold),
+		"pruning must resume once a fresh post-rollback value is known")
+}
+
 // TestAuthCommitteeHotPruningIsPerTaggedCredential covers the case where a
 // key-hash and a script-hash cold credential share the same 28 bytes. They are
 // different identities, so each credential is pruned only within its own
