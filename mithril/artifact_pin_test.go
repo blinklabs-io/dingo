@@ -254,6 +254,99 @@ func TestSyncFreshBootstrapSelectsLatestArtifact(t *testing.T) {
 	assert.False(t, hasPin, "a completed sync must leave no artifact pin")
 }
 
+func TestSyncFreshBootstrapSelectsExplicitArtifact(t *testing.T) {
+	t.Parallel()
+
+	fixture := newV2Fixture(t, v2FixtureOptions{
+		missingAncillary:    true,
+		validImmutable:      true,
+		fallbackLedgerState: true,
+	})
+	pinned := fixture.artifact
+	fixture.publishNewerArtifact(t)
+
+	dataDir := t.TempDir()
+	cfg := syncConfigForFixture(fixture, dataDir)
+	cfg.PinnedDigest = pinned.Hash
+	result, err := Sync(context.Background(), cfg)
+	require.NoError(t, err)
+	require.NotNil(t, result.Snapshot)
+	assert.Equal(t, pinned.Hash, result.Snapshot.Digest)
+}
+
+func TestSyncRejectsExplicitPinForAlreadyCurrentDatabase(t *testing.T) {
+	t.Parallel()
+
+	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 5})
+	dataDir := t.TempDir()
+	seedCompleteDB(t, dataDir, "core", 5, true)
+
+	cfg := syncConfigForFixture(fixture, dataDir)
+	cfg.Network = "preview"
+	cfg.PinnedDigest = fixture.artifact.Hash
+	_, err := Sync(context.Background(), cfg)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "complete database")
+}
+
+func TestSyncRejectsExplicitPinForCompleteV1Database(t *testing.T) {
+	t.Parallel()
+
+	dataDir := t.TempDir()
+	seedCompleteDB(t, dataDir, "core", 5, true)
+
+	cfg := SyncConfig{
+		Network:           "preview",
+		DataDir:           dataDir,
+		StorageMode:       "core",
+		Backend:           BackendV1,
+		AggregatorURL:     "http://127.0.0.1:1",
+		AllowInsecureHTTP: true,
+		PinnedDigest:      "snapshot-digest",
+		StoragePlugins:    testStoragePlugins(),
+		DatabaseWorkers:   1,
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	_, err := Sync(context.Background(), cfg)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "complete database")
+	assert.NotContains(t, err.Error(), "catch-up runs")
+}
+
+func TestSyncRejectsExplicitPinForInterruptedCatchUp(t *testing.T) {
+	t.Parallel()
+
+	dataDir := t.TempDir()
+	seedCompleteDB(t, dataDir, "core", 5, true)
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir:     dataDir,
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		StorageMode: "core",
+	})
+	require.NoError(t, err)
+	require.NoError(
+		t,
+		db.SetSyncState("sync_status", syncStatusInProgress, nil),
+	)
+	require.NoError(t, dbtest.CloseDatabase(db))
+
+	cfg := SyncConfig{
+		Network:           "preview",
+		DataDir:           dataDir,
+		StorageMode:       "core",
+		Backend:           BackendV2,
+		AggregatorURL:     "http://127.0.0.1:1",
+		AllowInsecureHTTP: true,
+		PinnedDigest:      "database-artifact-hash",
+		StoragePlugins:    testStoragePlugins(),
+		DatabaseWorkers:   1,
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	_, err = Sync(context.Background(), cfg)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "interrupted catch-up")
+}
+
 // TestSyncRefusesResumeWithoutArtifactPin covers the interrupted database a
 // build without artifact pinning left: the artifact its partial rows belong to
 // cannot be identified, so no artifact may be imported over them.

@@ -787,7 +787,7 @@ var flagSpecs = []flagSpec{
 		"Mithril.PinnedDigest",
 		"mithril-pinned-digest",
 		"",
-		"Mithril artifact digest to use for a fresh bootstrap",
+		"Mithril artifact identity for a fresh bootstrap: v1 snapshot digest or v2 Cardano database artifact hash",
 	),
 	stringFlag(
 		"Mithril.DownloadDir",

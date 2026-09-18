@@ -309,7 +309,7 @@ type SyncConfig struct {
 	DownloadIdleTimeout    string                     // optional; passed to BootstrapConfig
 	DownloadMaxIdleRetries int                        // must be >= 0
 	DownloadMaxBytes       int64                      // per compressed object; zero uses DefaultMaxDownloadBytes
-	PinnedDigest           string                     // optional exact artifact hash/digest for a fresh bootstrap
+	PinnedDigest           string                     // optional exact artifact identity for a fresh bootstrap (v1 snapshot digest; v2 database hash)
 	VerifyCertChain        bool
 	CleanupAfterLoad       bool
 	StoragePlugins         StoragePlugins
@@ -498,6 +498,12 @@ func Sync(
 	if modeErr != nil {
 		return SyncResult{}, fmt.Errorf("determining sync mode: %w", modeErr)
 	}
+	if mode == syncModeCatchUp && cfg.PinnedDigest != "" {
+		return SyncResult{}, errors.New(
+			"explicit Mithril artifact pin requires a fresh database; " +
+				"a complete database cannot select a bootstrap artifact",
+		)
+	}
 	dec, decErr := decideCatchUp(
 		ctx, db, mode, cfg.Backend, cfg.StorageMode, aggregatorURL,
 		cfg.AllowInsecureHTTP, logger,
@@ -510,13 +516,6 @@ func Sync(
 	}
 	catchUp = dec.engage
 	catchUpStart = dec.start
-	if mode == syncModeCatchUp && cfg.PinnedDigest != "" {
-		return SyncResult{}, errors.New(
-			"explicit Mithril artifact pin requires a fresh database; " +
-				"catch-up runs always select the latest compatible artifact",
-		)
-	}
-
 	// Artifact pin. A run that was interrupted after it began mutating the
 	// database must import the artifact those partial rows and ledger-state
 	// phase checkpoints belong to. Re-selecting the aggregator's latest
@@ -556,7 +555,7 @@ func Sync(
 			if pinnedDigest != "" {
 				return SyncResult{}, errors.New(
 					"explicit Mithril artifact pin requires a fresh database; " +
-						"interrupted catch-up runs must select the latest compatible artifact",
+						"an interrupted catch-up cannot select a bootstrap artifact",
 				)
 			}
 			// A catch-up import runs with Reconcile enabled: every live row

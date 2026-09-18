@@ -608,9 +608,10 @@ Or use the subcommand form for more control:
 ```
 
 For reproducible fresh-bootstrap comparisons, pin an exact artifact with
-`--mithril-pinned-digest <digest>` or `DINGO_MITHRIL_PINNED_DIGEST`. The pin is
-rejected for catch-up runs and cannot override the artifact recorded by an
-interrupted import.
+`--mithril-pinned-digest <identity>` or `DINGO_MITHRIL_PINNED_DIGEST`. The
+identity is a snapshot digest for the v1 backend and a Cardano database
+artifact hash for v2. The pin is rejected for catch-up runs and cannot override
+the artifact recorded by an interrupted import.
 
 The Docker entrypoint manages both a first-run or resumed Mithril sync and the
 subsequent `serve` process as direct children. It forwards SIGINT and SIGTERM
