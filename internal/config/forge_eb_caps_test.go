@@ -15,6 +15,9 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -229,4 +232,92 @@ func TestForgeEBSelectionReserveFlagIsApplied(t *testing.T) {
 			cfg.ForgeEBSelectionReserve,
 		)
 	}
+}
+
+// TestForgeEBCapsExplicitZeroSurvivesTheLoadPipeline drives an explicit
+// zero through each source the node reads, in the order cmd/dingo applies
+// them (LoadConfig, ApplyFlags, ApplyDefaults). LoadConfig starts from a
+// configuration that already holds the default caps, so the zero has to
+// displace a non-zero value on the way in and then survive ApplyDefaults;
+// the unit tests above cover each step alone, this one covers the chain.
+func TestForgeEBCapsExplicitZeroSurvivesTheLoadPipeline(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		yaml  string
+		env   map[string]string
+		flags []string
+	}{
+		{
+			name: "yaml",
+			yaml: "forgeEbMaxTxRefs: 0\nforgeEbMaxBytes: 0\n",
+		},
+		{
+			name: "env",
+			env: map[string]string{
+				"DINGO_FORGE_EB_MAX_TX_REFS": "0",
+				"DINGO_FORGE_EB_MAX_BYTES":   "0",
+			},
+		},
+		{
+			name: "cli",
+			flags: []string{
+				"--forge-eb-max-tx-refs=0",
+				"--forge-eb-max-bytes=0",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetGlobalConfig()
+			t.Cleanup(resetGlobalConfig)
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+
+			configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+			if err := os.WriteFile(
+				configFile,
+				[]byte(tc.yaml),
+				0o600,
+			); err != nil {
+				t.Fatalf("write config file: %v", err)
+			}
+
+			cfg, err := LoadConfig(configFile)
+			if err != nil {
+				t.Fatalf("load config: %v", err)
+			}
+
+			cmd := &cobra.Command{Use: "dingo"}
+			RegisterFlags(cmd)
+			if err := cmd.PersistentFlags().Parse(tc.flags); err != nil {
+				t.Fatalf("parse flags: %v", err)
+			}
+			if err := ApplyFlags(cmd, cfg); err != nil {
+				t.Fatalf("apply flags: %v", err)
+			}
+			cfg.ApplyDefaults()
+
+			if cfg.ForgeEBMaxTxRefs == nil || *cfg.ForgeEBMaxTxRefs != 0 {
+				t.Fatalf(
+					"explicit zero forgeEbMaxTxRefs from %s must disable the cap, got %s",
+					tc.name,
+					forgeEBCapString(cfg.ForgeEBMaxTxRefs),
+				)
+			}
+			if cfg.ForgeEBMaxBytes == nil || *cfg.ForgeEBMaxBytes != 0 {
+				t.Fatalf(
+					"explicit zero forgeEbMaxBytes from %s must disable the cap, got %s",
+					tc.name,
+					forgeEBCapString(cfg.ForgeEBMaxBytes),
+				)
+			}
+		})
+	}
+}
+
+func forgeEBCapString(v *uint64) string {
+	if v == nil {
+		return "nil"
+	}
+	return strconv.FormatUint(*v, 10)
 }
