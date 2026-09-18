@@ -584,11 +584,14 @@ At-tip transaction and deferred-header recovery may call
 `rollbackWithOptions(..., repairSameTip=true)` when a failed block left
 metadata mutations above the current durable tip. That first repair restores
 spent UTxOs and removes speculative rows without publishing a local-ledger
-rollback event; repeated delivery of the same failure reuses the repaired
-same-tip state, while deeper scheduled rewinds perform the normal full
-rollback. Replay-holding, deterministic transaction, and header-validation
-recovery use the same option so the repair rule stays consistent across all
-recovery entry points.
+rollback event. Only a recovery that completes its rewind and metadata
+rollback consumes that repair; a trust-boundary decline or other early exit
+leaves it available for the first attempt that changes state. Repeated
+delivery of the same failure, including repeated replay-holding cycles at an
+unchanged tip, reuses the repaired same-tip state, while deeper scheduled
+rewinds perform the normal full rollback. Replay-holding, deterministic
+transaction, and header-validation recovery use the same option so the repair
+rule stays consistent across all recovery entry points.
 
 `rollbackWithResync` reloads `epochCache`, `currentEra`, `currentPParams` and
 the synthetic-PlutusV2-cost-model marker from the database *after* the

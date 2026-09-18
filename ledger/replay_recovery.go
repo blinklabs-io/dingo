@@ -240,12 +240,14 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 		ls.config.ChainManager != nil
 	rewindPoint := candidate.RollbackPoint
 	replayHolding := false
+	wasReplayHolding := false
 	primaryChainAlreadyHeld := false
 	var ledgerTip ochainsync.Tip
 	if rewindPrimaryChain {
 		ls.RLock()
 		ledgerTip = ls.currentTip
 		ls.RUnlock()
+		wasReplayHolding = ls.replayRecoveryHolding
 		replayHolding = ls.observeReplayRecoveryTip(ledgerTip.Point.Slot)
 		if replayHolding {
 			rewindPoint = ledgerTip.Point
@@ -352,7 +354,8 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 	// finish rolling metadata back to its common ancestor.
 	if err := ls.rollbackWithOptions(
 		rewindPoint,
-		replayHolding && pointMatches(rewindPoint, ledgerTip.Point),
+		replayHolding && !wasReplayHolding &&
+			pointMatches(rewindPoint, ledgerTip.Point),
 		true,
 	); err != nil {
 		return false, fmt.Errorf(

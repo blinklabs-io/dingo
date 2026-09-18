@@ -159,15 +159,26 @@ func TestHeaderValidationRecoveryRewindsPastRejectedBlock(t *testing.T) {
 	require.Equal(t, blocks[4].Slot, cm.PrimaryChain().Tip().Point.Slot,
 		"the rejected block and its successor should start on the chain")
 
-	recovered, recoverErr := ls.tryRecoverFromHeaderValidationError(
-		&headerValidationError{
-			BlockPoint: makeTestPoint(blocks[3]),
-			Cause:      errors.New("VRF leader value exceeds threshold"),
-		},
-	)
+	validationErr := &headerValidationError{
+		BlockPoint: makeTestPoint(blocks[3]),
+		Cause:      errors.New("VRF leader value exceeds threshold"),
+	}
+	// A declined attempt has not repaired anything and must not consume the
+	// one same-tip metadata repair available to the first completed recovery.
+	ls.mithrilLedgerSlot = ledgerTip.Point.Slot + 1000
+	recovered, recoverErr := ls.tryRecoverFromHeaderValidationError(validationErr)
+	require.NoError(t, recoverErr)
+	require.False(t, recovered)
+	require.Equal(t, blocks[4].Slot, cm.PrimaryChain().Tip().Point.Slot)
+
+	ls.mithrilLedgerSlot = 0
+	generationBefore := ls.rewardInputGeneration.Load()
+	recovered, recoverErr = ls.tryRecoverFromHeaderValidationError(validationErr)
 	require.NoError(t, recoverErr)
 	require.True(t, recovered,
 		"a rejected block above the ledger tip must be recoverable")
+	require.Greater(t, ls.rewardInputGeneration.Load(), generationBefore,
+		"the first completed rewind must repair same-tip metadata")
 
 	require.Equal(t, ledgerTipBlock.Slot, cm.PrimaryChain().Tip().Point.Slot,
 		"the primary chain must be rewound past the rejected block, or the "+

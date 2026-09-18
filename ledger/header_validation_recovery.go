@@ -93,8 +93,6 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 	sameFailureAtTip := ls.lastHeaderValidationFailure != nil &&
 		pointMatches(ls.lastHeaderValidationFailure.BlockPoint, validationErr.BlockPoint) &&
 		pointMatches(ls.lastHeaderValidationTip, ledgerTip.Point)
-	ls.lastHeaderValidationFailure = validationErr
-	ls.lastHeaderValidationTip = ledgerTip.Point
 
 	// The ledger tip is normally the last block that applied cleanly, so it
 	// already precedes the failing block and rewinding to it drops the
@@ -206,6 +204,10 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 			err,
 		)
 	}
+	// Record only an attempt that completed the rewind and metadata rollback.
+	// A declined or failed attempt must not consume the first same-tip repair.
+	ls.lastHeaderValidationFailure = validationErr
+	ls.lastHeaderValidationTip = ledgerTip.Point
 	if ls.config.EventBus != nil {
 		ls.config.EventBus.Publish(
 			event.ChainsyncResyncEventType,

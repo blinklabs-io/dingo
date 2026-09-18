@@ -707,6 +707,27 @@ func TestTryRecoverFromTxValidationErrorAtTipDoesNotHoldOnSameBlockEscalation(
 	)
 }
 
+func TestAtTipRecoveryRepairsSameTipOnlyOnce(t *testing.T) {
+	t.Parallel()
+
+	ls, _ := newAtTipDescentLedger(t)
+	failure := atTipDescentFailure(500, "same-tip-repair")
+
+	generationBeforeFirst := ls.rewardInputGeneration.Load()
+	recovered, err := ls.tryRecoverFromTxValidationError(failure)
+	require.NoError(t, err)
+	require.True(t, recovered)
+	require.Greater(t, ls.rewardInputGeneration.Load(), generationBeforeFirst,
+		"the first failure at a tip must repair metadata")
+
+	generationBeforeRepeat := ls.rewardInputGeneration.Load()
+	recovered, err = ls.tryRecoverFromTxValidationError(failure)
+	require.NoError(t, err)
+	require.True(t, recovered)
+	require.Equal(t, generationBeforeRepeat, ls.rewardInputGeneration.Load(),
+		"an identical failure at the same tip must reuse the completed repair")
+}
+
 // TestTryRecoverFromTxValidationErrorAtTipResetsDescentOnForwardProgress
 // verifies that a distinct failure at a HIGHER slot (forward progress past the
 // previous failing point) resets the descent tracking, so an unrelated later
@@ -1598,8 +1619,8 @@ func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
 	require.False(t, ls.observeReplayRecoveryTip(ledgerTip.Point.Slot))
 	require.False(t, ls.observeReplayRecoveryTip(ledgerTip.Point.Slot))
 
-	recovered, err := ls.tryRecoverFromTxValidationError(
-		&txValidationError{
+	txErr := func() *txValidationError {
+		return &txValidationError{
 			BlockPoint: ocommon.NewPoint(
 				failingBlock.Slot,
 				failingBlock.Hash,
@@ -1612,10 +1633,15 @@ func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
 				},
 			},
 			Cause: errors.New("bad input"),
-		},
-	)
+		}
+	}
+
+	generationBeforeFirstHold := ls.rewardInputGeneration.Load()
+	recovered, err := ls.tryRecoverFromTxValidationError(txErr())
 	require.NoError(t, err)
 	require.True(t, recovered)
+	require.Greater(t, ls.rewardInputGeneration.Load(), generationBeforeFirstHold,
+		"the first held cycle must repair same-tip metadata")
 
 	require.True(t, ls.replayRecoveryHolding)
 	assert.Equal(
@@ -1645,6 +1671,13 @@ func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
 	)
 	assert.Equal(t, activeConnId.String(), freshResync.ConnectionId.String())
 	assert.Equal(t, ledgerTip.Point, freshResync.Point)
+
+	generationBeforeSecondHold := ls.rewardInputGeneration.Load()
+	recovered, err = ls.tryRecoverFromTxValidationError(txErr())
+	require.NoError(t, err)
+	require.True(t, recovered)
+	require.Equal(t, generationBeforeSecondHold, ls.rewardInputGeneration.Load(),
+		"a repeated held cycle at an unchanged tip must not repair again")
 }
 
 // newReplayRecoveryAuditLedger builds the fallback topology with an
