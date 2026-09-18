@@ -1012,7 +1012,8 @@ type LedgerState struct {
 	chainsyncMutex sync.Mutex
 	// consumedUtxoPruneMutex serializes irreversible consumed-UTxO cleanup
 	// with rollback flows that may truncate the primary chain before restoring
-	// ledger metadata.
+	// ledger metadata. It must never be held while acquiring chainsyncMutex;
+	// ChainSync handlers already hold chainsyncMutex when they enter rollback.
 	consumedUtxoPruneMutex        sync.Mutex
 	chainsyncBlockfetchMutex      sync.Mutex
 	chainsyncBlockfetchReadyMutex sync.Mutex
@@ -3129,11 +3130,6 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 		return
 	}
 	defer ls.cleanupConsumedUtxosRunning.Store(false)
-	// Serialize pruning with chainsync rollback. The rollback path resolves and
-	// validates its target before truncating the primary chain, so the floor
-	// cannot advance between that validation and the ledger mutation.
-	ls.chainsyncMutex.Lock()
-	defer ls.chainsyncMutex.Unlock()
 	if ls.ctx != nil {
 		select {
 		case <-ls.ctx.Done():
@@ -3336,12 +3332,6 @@ type rollbackCommittedError struct {
 func (e *rollbackCommittedError) Error() string { return e.err.Error() }
 
 func (e *rollbackCommittedError) Unwrap() error { return e.err }
-
-func (ls *LedgerState) rollbackWithoutResync(point ocommon.Point) error {
-	return ls.withConsumedUtxoPruneBoundary(func() error {
-		return ls.rollbackWithResync(point, false)
-	})
-}
 
 func (ls *LedgerState) publishLocalLedgerRollback(point ocommon.Point) {
 	if ls.config.EventBus == nil {

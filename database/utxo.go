@@ -1211,7 +1211,9 @@ func (d *Database) UtxosByAssets(
 // refuse a target older than what routine cleanup has already destroyed)
 // need to agree on this key, so it is exported from here as the single
 // source of truth for its name rather than duplicated as a string literal
-// in both packages.
+// in both packages. UtxosDeleteConsumed removes rows outright, while
+// TruncateAfterSlot can only restore rows that still exist; a rollback below
+// this marker would therefore leave the live UTxO set incomplete.
 const ConsumedUtxoPruneFloorSyncKey = "consumed_utxo_prune_floor"
 
 func (d *Database) UtxosDeleteConsumed(

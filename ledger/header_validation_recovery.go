@@ -81,8 +81,6 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 	if !errors.As(err, &validationErr) {
 		return false, nil
 	}
-	ls.consumedUtxoPruneMutex.Lock()
-	defer ls.consumedUtxoPruneMutex.Unlock()
 	// Nothing to rewind: report not-recovered rather than sending the
 	// pipeline back into the same block believing it was handled.
 	if ls.chain == nil || ls.config.ChainManager == nil {
@@ -176,28 +174,42 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 		)
 	}
 
-	if err := ls.rewindPrimaryChainForRecovery(
-		rewindPoint,
-	); err != nil {
-		if ls.yieldedToChainSelection(
-			err, validationErr, rewindPoint, "rewind",
-		) {
-			return true, nil
+	yielded := false
+	err = ls.withConsumedUtxoPruneBoundary(func() error {
+		if err := ls.checkReplayRecoveryRollbackFloor(rewindPoint); err != nil {
+			return err
 		}
-		return false, fmt.Errorf(
-			"rewind primary chain after header validation failure: %w",
-			err,
-		)
+		if err := ls.rewindPrimaryChainForRecovery(
+			rewindPoint,
+		); err != nil {
+			if ls.yieldedToChainSelection(
+				err, validationErr, rewindPoint, "rewind",
+			) {
+				yielded = true
+				return nil
+			}
+			return fmt.Errorf(
+				"rewind primary chain after header validation failure: %w",
+				err,
+			)
+		}
+		// The chain prune alone leaves the ledger reflecting the rejected
+		// block's post-apply state; the matching ledger rollback has to be
+		// explicit, for the same reason it is on the transaction-validation
+		// path.
+		if err := ls.rollbackWithResync(rewindPoint, true); err != nil {
+			return fmt.Errorf(
+				"rollback ledger state after header validation failure: %w",
+				err,
+			)
+		}
+		return nil
+	})
+	if err != nil {
+		return false, err
 	}
-	// The chain prune alone leaves the ledger reflecting the rejected
-	// block's post-apply state; the matching ledger rollback has to be
-	// explicit, for the same reason it is on the transaction-validation
-	// path.
-	if err := ls.rollbackWithResync(rewindPoint, true); err != nil {
-		return false, fmt.Errorf(
-			"rollback ledger state after header validation failure: %w",
-			err,
-		)
+	if yielded {
+		return true, nil
 	}
 	if ls.config.EventBus != nil {
 		ls.config.EventBus.Publish(

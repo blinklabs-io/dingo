@@ -19,24 +19,6 @@ import (
 	"strconv"
 )
 
-// consumedUtxoPruneFloorSyncKey records how far the consumed-UTxO sweep has
-// hard-deleted spent rows.
-//
-// UtxosDeleteConsumed removes rows outright (blob objects and the metadata row
-// that is the source of truth), while TruncateAfterSlot restores spent UTxOs
-// with an UPDATE -- SetUtxosNotDeletedAfterSlot, `deleted_slot > ?`. An UPDATE
-// can only reach rows that still exist, so once a row has been swept, no
-// rollback can put it back. A rollback below the swept slot therefore leaves
-// the live UTxO set missing every output that was consumed in the swept range
-// and reports the tip repaired anyway.
-//
-// The two bounds are meant to line up: the sweep runs at
-// tip-stabilityWindow and a single rollback reaches at most one stability
-// window below the tip. Nothing enforced that, and successive recovery rewinds
-// compound -- each one rewinds a further window below the *already lowered*
-// tip while this floor stays fixed at the highest tip the node reached (issue
-// #3766). Recording the floor lets rollback refuse rather than silently
-// diverge.
 // ConsumedUtxoPruneFloor returns the highest slot the consumed-UTxO sweep has
 // hard-deleted spent rows at or below, or 0 when nothing has been swept.
 // Rolling back below this slot cannot restore the UTxOs consumed above it.

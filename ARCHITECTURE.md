@@ -656,9 +656,10 @@ leads it, and that rollback can be arbitrarily deep, so it can now fail with
 outcome rather than a regression: the rewind it was about to perform could not
 have rebuilt the live UTxO set, so the alternative is a node that starts,
 validates against a UTxO set missing rows, and halts later with no way to tell
-what went wrong. The operator recovery is `dingo database truncate`, which is
-deliberately not bound by this floor (nor by the security parameter) and clears
-the record when it crosses it, or a fresh bootstrap.
+what went wrong. The operator recovery is a `dingo database truncate` target at
+or above the floor, or a fresh bootstrap. Truncate is not bound by the security
+parameter, but it refuses to cross the consumed-UTxO prune floor because the
+deleted rows cannot be reconstructed.
 
 Getting this wrong is subtle, so the constraint is worth stating plainly:
 **the undo events must be emitted before the truncation, by the rollback
