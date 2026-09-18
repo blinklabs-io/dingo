@@ -65,7 +65,7 @@ func TestLeiosAnnouncementElectionBoundAcrossSources(t *testing.T) {
 	o := newOuroboros(
 		OuroborosConfig{EnableLeios: true, LeiosAnnouncementLedger: ledger},
 	)
-	o.leiosEBLog.registerConn("observer")
+	o.leiosEBLog.registerConn("observer", nil, nil)
 	first := electionAnnouncement(t, 10, 1, 1)
 	require.NoError(t, o.acceptLeiosAnnouncement(first, "connection-a"))
 	require.NoError(
