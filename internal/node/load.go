@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -46,11 +47,27 @@ import (
 // larger import batches, so keep the runtime load batch size aligned with the
 // chain import batch cap.
 const (
-	loadBlockBatchSize  = 50
-	progressLogInterval = 10 * time.Second
+	loadBlockBatchSize   = 50
+	progressLogInterval  = 10 * time.Second
+	loadDecodeMinWorkers = 2
+	loadDecodeMaxWorkers = 8
 
 	immutableUtxoOffsetsSyncStateKey = "immutable_utxo_offsets_tip"
 )
+
+// loadDecodeWorkerCount bounds the parallel full-block decoder used by the
+// trusted Mithril load path. Chain insertion and ledger replay remain serial;
+// only the CPU-heavy CBOR decode is parallelized.
+func loadDecodeWorkerCount() int {
+	n := runtime.GOMAXPROCS(0)
+	if n < loadDecodeMinWorkers {
+		return loadDecodeMinWorkers
+	}
+	if n > loadDecodeMaxWorkers {
+		return loadDecodeMaxWorkers
+	}
+	return n
+}
 
 // newLedgerStateForLoad is replaceable in tests so load-mode composition can
 // be verified without replaying a full ImmutableDB fixture.
@@ -914,11 +931,11 @@ func copyBlocksDirect(
 	c *chain.Chain,
 	replayBatches chan<- []gledger.Block,
 ) (int, uint64, error) {
-	immutable, err := immutable.New(immutableDir)
+	immDB, err := immutable.New(immutableDir)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to read immutable DB: %w", err)
 	}
-	immutableTip, err := immutable.GetTip()
+	immutableTip, err := immDB.GetTip()
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to read immutable DB tip: %w", err)
 	}
@@ -937,7 +954,7 @@ func copyBlocksDirect(
 		)
 		return 0, immutableTip.Slot, nil
 	}
-	iter, err := immutable.BlocksFromPoint(chainTip.Point)
+	iter, err := immDB.BlocksFromPoint(chainTip.Point)
 	if err != nil {
 		return 0, 0, fmt.Errorf(
 			"failed to get immutable DB iterator: %w",
@@ -949,11 +966,11 @@ func copyBlocksDirect(
 	startTime := time.Now()
 	lastProgressLog := time.Time{}
 	var lastProgressSlot uint64
-	blockBatch := make([]gledger.Block, 0, loadBlockBatchSize)
 	verifyCfg := lcommon.VerifyConfig{
 		SkipBodyHashValidation: true,
 	}
 	for {
+		rawBatch := make([]immutable.Block, 0, loadBlockBatchSize)
 		for {
 			next, err := iter.Next()
 			if err != nil {
@@ -964,28 +981,26 @@ func copyBlocksDirect(
 			if next == nil {
 				break
 			}
-			tmpBlock, err := gledger.NewBlockFromCbor(
-				next.Type,
-				next.Cbor,
-				verifyCfg,
-			)
-			if err != nil {
-				return blocksCopied, immutableTip.Slot, fmt.Errorf(
-					"decoding block CBOR: %w", err,
-				)
-			}
 			if blocksCopied == 0 &&
 				next.Slot == chainTip.Point.Slot &&
 				bytes.Equal(next.Hash, chainTip.Point.Hash) {
 				continue
 			}
-			blockBatch = append(blockBatch, tmpBlock)
-			if len(blockBatch) == cap(blockBatch) {
+			rawBatch = append(rawBatch, *next)
+			if len(rawBatch) == cap(rawBatch) {
 				break
 			}
 		}
-		if len(blockBatch) == 0 {
+		if len(rawBatch) == 0 {
 			break
+		}
+		blockBatch, err := decodeImmutableBlockBatch(
+			ctx, rawBatch, verifyCfg, loadDecodeWorkerCount(),
+		)
+		if err != nil {
+			return blocksCopied, immutableTip.Slot, fmt.Errorf(
+				"decoding block CBOR: %w", err,
+			)
 		}
 		if err := c.AddBlocks(blockBatch); err != nil {
 			return blocksCopied, immutableTip.Slot, fmt.Errorf(
@@ -1007,7 +1022,6 @@ func copyBlocksDirect(
 		}
 		blocksCopied += len(blockBatch)
 		lastProgressSlot = replayBatch[len(replayBatch)-1].SlotNumber()
-		blockBatch = blockBatch[:0]
 		maybeLogBlockCopyProgress(
 			logger,
 			"copying blocks from immutable DB",
@@ -1023,6 +1037,113 @@ func copyBlocksDirect(
 		}
 	}
 	return blocksCopied, immutableTip.Slot, nil
+}
+
+type immutableDecodeResult struct {
+	index int
+	block gledger.Block
+	err   error
+}
+
+type immutableDecodeJob struct {
+	index int
+	block immutable.Block
+}
+
+// decodeImmutableBlockBatch decodes a bounded batch with ordered results.
+// Sending jobs through a small buffered channel provides backpressure, while
+// the result index prevents completion order from changing chain order. A
+// cancellation stops both the dispatcher and workers without leaving a
+// goroutine blocked on a full channel.
+func decodeImmutableBlockBatch(
+	ctx context.Context,
+	rawBlocks []immutable.Block,
+	verifyCfg lcommon.VerifyConfig,
+	workerCount int,
+) ([]gledger.Block, error) {
+	if len(rawBlocks) == 0 {
+		return nil, nil
+	}
+	if workerCount < 1 {
+		workerCount = 1
+	}
+	if workerCount > len(rawBlocks) {
+		workerCount = len(rawBlocks)
+	}
+	decodeCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	queueSize := workerCount * 2
+	if queueSize > len(rawBlocks) {
+		queueSize = len(rawBlocks)
+	}
+	jobs := make(chan immutableDecodeJob, queueSize)
+	results := make(chan immutableDecodeResult, queueSize)
+	var workers sync.WaitGroup
+	workers.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer workers.Done()
+			for {
+				select {
+				case <-decodeCtx.Done():
+					return
+				case job, ok := <-jobs:
+					if !ok {
+						return
+					}
+					block, err := gledger.NewBlockFromCbor(
+						job.block.Type, job.block.Cbor, verifyCfg,
+					)
+					select {
+					case results <- immutableDecodeResult{
+						index: job.index, block: block, err: err,
+					}:
+					case <-decodeCtx.Done():
+						return
+					}
+				}
+			}
+		}()
+	}
+	go func() {
+		defer close(jobs)
+		for index, block := range rawBlocks {
+			select {
+			case jobs <- immutableDecodeJob{index: index, block: block}:
+			case <-decodeCtx.Done():
+				return
+			}
+		}
+	}()
+	go func() {
+		workers.Wait()
+		close(results)
+	}()
+
+	decoded := make([]gledger.Block, len(rawBlocks))
+	seen := 0
+	var firstErr error
+	for result := range results {
+		if result.err != nil && firstErr == nil {
+			firstErr = result.err
+			cancel()
+			continue
+		}
+		if result.err == nil {
+			decoded[result.index] = result.block
+			seen++
+		}
+	}
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if seen != len(rawBlocks) {
+		return nil, errors.New("parallel immutable block decode ended early")
+	}
+	return decoded, nil
 }
 
 // CopyImmutableBlobsBounded copies immutable blocks into the blob store from

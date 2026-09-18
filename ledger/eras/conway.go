@@ -280,6 +280,7 @@ func buildConwayValidationRules() []indexedUtxoValidationRule {
 		lcommon.UtxoValidationRulePlutusScripts,
 		lcommon.UtxoValidationRuleCommitteeCertificates,
 		lcommon.UtxoValidationRuleUnknownVoters,
+		lcommon.UtxoValidationRuleDelegation,
 	}
 	descriptors := conway.UtxoValidationRuleDescriptors()
 	indexes := make([]int, len(skipRuleIds))
@@ -305,6 +306,10 @@ func buildConwayValidationRules() []indexedUtxoValidationRule {
 		indexedUtxoValidationRule{
 			index:          indexes[4],
 			validationFunc: validateUnknownVoters,
+		},
+		indexedUtxoValidationRule{
+			index:          indexes[5],
+			validationFunc: validateDelegationConwayBootstrapAware,
 		},
 	)
 	slices.SortFunc(ret, func(a, b indexedUtxoValidationRule) int {

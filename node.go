@@ -76,6 +76,7 @@ type Node struct {
 	poolRelayProvider       *ledger.PoolRelayProvider
 	chainsyncState          *chainsync.State
 	chainSelector           *chainselection.ChainSelector
+	chainSelectionMetrics   *chainSelectionMetrics
 	eventBus                *event.EventBus
 	pluginHost              *plugin.Host
 	destinationRegistry     *lifecycle.DestinationRegistry
@@ -187,6 +188,10 @@ type Node struct {
 	// own documented "keeps syncing normally" behavior.
 	snapshotMu sync.Mutex
 
+	// health carries the sync signals the readiness probe reads. See
+	// node_health.go; it survives a live database restore/truncate rebuild.
+	health nodeHealth
+
 	// rebuildableMetrics tracks every Prometheus collector registered by a
 	// component a live database restore/truncate rebuilds, so
 	// closeStorageForLiveLifecycleOp can unregister them before the
@@ -251,6 +256,7 @@ func New(cfg Config) (*Node, error) {
 	n.configWrapPromRegistry()
 	n.registerBuildInfo()
 	n.registerRTSMetrics()
+	n.registerChainSelectionMetrics()
 	// NewEventBus starts background async-worker goroutines, so create the bus
 	// only after configuration validates. If it were created earlier, a
 	// validation failure would return a nil Node while leaving those goroutines
@@ -1105,24 +1111,11 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		!n.config.intersectTip &&
 		len(n.config.intersectPoints) == 0
 	n.chainSelector = chainselection.NewChainSelector(
-		chainselection.ChainSelectorConfig{
-			Logger:                n.config.logger,
-			EventBus:              n.eventBus,
-			SecurityParam:         chainSelectorSecurityParam,
-			GenesisMode:           genesisSelectionMode,
-			GenesisWindowSlots:    genesisWindowSlots,
-			MinCorroboratingPeers: n.config.genesisCorroborationPeers,
-			ConnectionLive: func(connId ouroboros.ConnectionId) bool {
-				return n.connManager != nil &&
-					n.connManager.GetConnectionById(connId) != nil
-			},
-			BlockfetchLatency: func(connId ouroboros.ConnectionId) (time.Duration, bool) {
-				if n.chainsyncState == nil {
-					return 0, false
-				}
-				return n.chainsyncState.BlockfetchLatency(connId)
-			},
-		},
+		n.buildChainSelectorConfig(
+			chainSelectorSecurityParam,
+			genesisSelectionMode,
+			genesisWindowSlots,
+		),
 	)
 	// Seed chain selection from the applied ledger tip before peers connect.
 	// Without this initial observation, the plausibility guard treats the
@@ -1166,7 +1159,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			PromRegistry:        n.config.promRegistry,
 			MaxConnectionsPerIP: n.config.maxConnectionsPerIP,
 			MaxInboundConns:     n.config.maxInboundConns,
-			ConnClosedFunc:      n.handleConnManagerClosed,
+			ConnClosedOwnerFunc: n.handleConnManagerClosedOwner,
 		},
 	)
 	// Wire connection-manager and inbound/outbound connection events.
@@ -1824,8 +1817,7 @@ func (n *Node) handleConnManagerClosed(
 	isNtC bool,
 	_ error,
 ) {
-	// Release both NtC closure waits and NtN notification waits independently
-	// of the protocol receive loop that is running the serving callback.
+	// Release NtC closure waits independently of the protocol receive loop.
 	if o := n.ouroboros(); o != nil {
 		o.ReleaseLeiosServeWaiters(connId)
 	}
@@ -1840,6 +1832,20 @@ func (n *Node) handleConnManagerClosed(
 		// a client that disconnects without a clean Release must not leak
 		// its map entry (blinklabs-io/dingo#382).
 		o.ReleaseLocalStateQueryAcquiredPoint(connId)
+	}
+}
+
+func (n *Node) handleConnManagerClosedOwner(
+	conn *ouroboros.Connection,
+	isNtC bool,
+	err error,
+) {
+	if conn == nil {
+		return
+	}
+	n.handleConnManagerClosed(conn.Id(), isNtC, err)
+	if o := n.ouroboros(); o != nil && conn.LeiosNotify() != nil {
+		o.RemoveLeiosNotifyConnectionOwner(conn.Id(), conn.LeiosNotify().Server)
 	}
 }
 
@@ -1947,6 +1953,36 @@ func (n *Node) subscribeConnectionEvents() {
 		connmanager.InboundConnectionEventType,
 		func(evt event.Event) { n.ouroboros().HandleInboundConnEvent(evt) },
 	)
+}
+
+// buildChainSelectorConfig assembles the ChainSelectorConfig this node passes
+// to chainselection.NewChainSelector. It is the single composition site for
+// the selector's callbacks, so a hook that is not set here is silently absent
+// at runtime no matter what the chainselection package offers.
+func (n *Node) buildChainSelectorConfig(
+	securityParam uint64,
+	genesisMode bool,
+	genesisWindowSlots uint64,
+) chainselection.ChainSelectorConfig {
+	return chainselection.ChainSelectorConfig{
+		Logger:                n.config.logger,
+		EventBus:              n.eventBus,
+		SecurityParam:         securityParam,
+		GenesisMode:           genesisMode,
+		GenesisWindowSlots:    genesisWindowSlots,
+		MinCorroboratingPeers: n.config.genesisCorroborationPeers,
+		ConnectionLive: func(connId ouroboros.ConnectionId) bool {
+			return n.connManager != nil &&
+				n.connManager.GetConnectionById(connId) != nil
+		},
+		BlockfetchLatency: func(connId ouroboros.ConnectionId) (time.Duration, bool) {
+			if n.chainsyncState == nil {
+				return 0, false
+			}
+			return n.chainsyncState.BlockfetchLatency(connId)
+		},
+		OnRollbackRegistration: n.recordRollbackRegistration,
+	}
 }
 
 // subscribeChainSelectorEvents wires the EventBus subscriptions that feed the

@@ -197,7 +197,17 @@ func (o *Ouroboros) localstatequeryServerQuery(
 	o.localstatequeryAcquireMutex.Lock()
 	at := o.localstatequeryAcquiredPoints[ctx.ConnectionId]
 	o.localstatequeryAcquireMutex.Unlock()
-	return o.ledgerState.Query(query.Query, at)
+	protocolVersion := uint16(0)
+	if o.connManager != nil {
+		if conn := o.connManager.GetConnectionById(ctx.ConnectionId); conn != nil {
+			protocolVersion, _ = conn.ProtocolVersion()
+		}
+	}
+	return o.ledgerState.QueryWithProtocolVersion(
+		query.Query,
+		at,
+		protocolVersion,
+	)
 }
 
 func (o *Ouroboros) localstatequeryServerRelease(
