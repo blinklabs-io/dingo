@@ -209,6 +209,36 @@ func TestParsePStateDoesNotReadDepositsAsRetirements(t *testing.T) {
 	}
 }
 
+func TestParsePStateDoesNotReadSmallDepositsAsRetirements(t *testing.T) {
+	t.Parallel()
+
+	poolHash := bytes.Repeat([]byte{0x12}, 28)
+	poolParams := encodeCborMap(t, poolHash, testPoolParams(0x12))
+	smallDeposit := encodeCborMap(t, poolHash, uint64(500_000))
+
+	pools, _, err := parsePStateWithRetirements(
+		encodeTestPState(
+			t,
+			poolParams,
+			encodeCborMap(t),
+			encodeCborMap(t),
+			smallDeposit,
+		),
+	)
+	if err != nil {
+		t.Fatalf("parsePState failed: %v", err)
+	}
+	if len(pools) != 1 {
+		t.Fatalf("expected 1 pool, got %d", len(pools))
+	}
+	if pools[0].RetiringEpoch != nil {
+		t.Fatalf(
+			"small deposit map read as a retirement epoch: %d",
+			*pools[0].RetiringEpoch,
+		)
+	}
+}
+
 // cardano-ledger removes a pool from psRetiring and psStakePoolParams
 // together, so a small-uint map whose keys mostly do not name registered
 // pools is some other map and must not schedule retirements.

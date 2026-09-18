@@ -708,7 +708,27 @@ func parsePStateMaps(ps [][]byte) ([]ParsedPool, map[uint64][][]byte, error) {
 	if len(bestPools) > 0 {
 		mergePoolDeposits(bestPools, ps, bestIdx)
 	}
-	retirements := mergePoolRetirements(bestPools, ps, bestIdx)
+	retirementIndices := make([]int, 0, len(ps))
+	if len(ps) == 4 && bestIdx == 0 {
+		// Shelley PState is [poolParams, futurePoolParams,
+		// retiring, poolDeposits]. The field position is the only
+		// reliable discriminator when a malformed deposit map contains
+		// small values.
+		retirementIndices = append(retirementIndices, 2)
+	} else {
+		for i, elem := range ps {
+			if i == bestIdx || len(elem) == 0 {
+				continue
+			}
+			major := elem[0] >> 5
+			if major == 5 || elem[0] == 0xbf {
+				retirementIndices = append(retirementIndices, i)
+			}
+		}
+	}
+	retirements := mergePoolRetirements(
+		bestPools, ps, retirementIndices,
+	)
 	return bestPools, retirements, bestWarning
 }
 
@@ -801,32 +821,22 @@ const minDepositLovelace = 1_000_000 // 1 ADA
 // hex encoding is twice that.
 const poolKeyHashLen = 28
 
-// mergePoolRetirements decodes the PState `retiring` map -- pool key hash ->
-// the epoch the pool is scheduled to retire at -- and records the epoch on the
-// matching parsed pools.
-//
-// The map is identified by shape rather than by position: PState layouts
-// differ by era (Shelley encodes four elements, Conway seven) and the Conway
-// element order is not fixed, so there is no index to key off. A candidate
-// must map pool key hashes to values that are all below minDepositLovelace,
-// which excludes poolDeposits, and every key must name a pool from
-// poolParams, which holds because cardano-ledger's POOLREAP removes a pool
-// from psRetiring and psStakePoolParams together. futurePoolParams is
-// excluded for free: its values are arrays, so they fail the uint64 decode
-// and leave an empty map.
+// mergePoolRetirements decodes the selected PState retirement maps -- pool key
+// hash -> the epoch the pool is scheduled to retire at -- and records the
+// epoch on matching parsed pools. Unknown keys are retained so the importer
+// can report a partial pool-parameter decode instead of silently dropping a
+// scheduled retirement.
 func mergePoolRetirements(
 	pools []ParsedPool,
 	ps [][]byte,
-	poolParamsIdx int,
+	retirementIndices []int,
 ) map[uint64][][]byte {
 	known := make(map[string]struct{}, len(pools))
 	for i := range pools {
 		known[hex.EncodeToString(pools[i].PoolKeyHash)] = struct{}{}
 	}
-	for i, elem := range ps {
-		if i == poolParamsIdx {
-			continue
-		}
+	for _, i := range retirementIndices {
+		elem := ps[i]
 		retiring := parsePoolUint64Map(elem)
 		if !looksLikeRetiringEpochs(retiring, known) {
 			continue
@@ -860,11 +870,10 @@ func mergePoolRetirements(
 // enough to be an epoch number rather than a lovelace deposit, and mostly
 // naming pools that poolParams also registered.
 //
-// The poolParams check is a majority rather than a requirement on every
-// key. A retiring pool whose params entry failed to parse is absent from
-// pools, and rejecting the whole map over one such key would drop every
-// other pool's retirement too -- the same all-or-nothing loss this decode
-// exists to prevent. Unknown keys simply match no pool in the merge.
+// The poolParams check is a majority rather than a requirement on every key.
+// A retiring pool whose params entry failed to parse is absent from pools,
+// and rejecting the whole map over one such key would drop every other pool's
+// retirement too. Unknown keys are retained for import-time validation.
 func looksLikeRetiringEpochs(
 	m map[string]uint64,
 	known map[string]struct{},

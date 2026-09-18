@@ -27,7 +27,6 @@ import (
 	"os"
 	"slices"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -1199,7 +1198,7 @@ func importPools(
 	cfg ImportConfig,
 	pools []ParsedPool,
 	slot uint64,
-	retirementMaps ...map[uint64][][]byte,
+	retirements map[uint64][][]byte,
 ) error {
 	cfg.Logger.Info(
 		"importing pools",
@@ -1219,12 +1218,10 @@ func importPools(
 
 	inBatch := 0
 	pendingRetirements := make(map[uint64][][]byte)
-	if len(retirementMaps) > 0 {
-		for epoch, keyHashes := range retirementMaps[0] {
-			pendingRetirements[epoch] = append(
-				pendingRetirements[epoch], keyHashes...,
-			)
-		}
+	for epoch, keyHashes := range retirements {
+		pendingRetirements[epoch] = append(
+			pendingRetirements[epoch], slices.Clone(keyHashes)...,
+		)
 	}
 	for _, pool := range pools {
 		select {
@@ -1235,7 +1232,7 @@ func importPools(
 		default:
 		}
 
-		if len(retirementMaps) == 0 && pool.RetiringEpoch != nil {
+		if retirements == nil && pool.RetiringEpoch != nil {
 			epoch := *pool.RetiringEpoch
 			pendingRetirements[epoch] = append(
 				pendingRetirements[epoch],
@@ -1381,7 +1378,6 @@ func importPendingPoolRetirements(
 	metaTxn := txn.Metadata()
 
 	total := 0
-	var missing []string
 	for _, epoch := range epochs {
 		select {
 		case <-ctx.Done():
@@ -1391,19 +1387,19 @@ func importPendingPoolRetirements(
 		default:
 		}
 		keyHashes := byEpoch[epoch]
-		present, absent, err := importedPoolKeys(store, metaTxn, keyHashes)
-		if err != nil {
+		if cfg.State != nil && epoch <= cfg.State.Epoch {
+			return fmt.Errorf(
+				"pool retirement epoch %d is not after snapshot epoch %d",
+				epoch,
+				cfg.State.Epoch,
+			)
+		}
+		if err := assertPoolsImported(store, metaTxn, keyHashes); err != nil {
 			return fmt.Errorf(
 				"checking pools scheduled to retire at epoch %d: %w",
 				epoch,
 				err,
 			)
-		}
-		for _, keyHash := range absent {
-			missing = append(missing, fmt.Sprintf("epoch %d: %x", epoch, keyHash))
-		}
-		if len(present) == 0 {
-			continue
 		}
 		// The snapshot carries no certificate slot for a pending
 		// retirement, so the registrations' own added slot is reused.
@@ -1411,7 +1407,7 @@ func importPendingPoolRetirements(
 		// sorting with the rest of the import and behind any retirement
 		// certificate seen in a later live block.
 		if err := store.RetirePools(
-			metaTxn, present, epoch, slot,
+			metaTxn, keyHashes, epoch, slot,
 		); err != nil {
 			return fmt.Errorf(
 				"retiring pools scheduled for epoch %d: %w",
@@ -1427,13 +1423,6 @@ func importPendingPoolRetirements(
 			"committing pool retirements: %w", err,
 		)
 	}
-	if len(missing) > 0 {
-		return fmt.Errorf(
-			"pools scheduled to retire were not imported: %s",
-			strings.Join(missing, ", "),
-		)
-	}
-
 	cfg.Logger.Info(
 		"imported pending pool retirements",
 		"component", "ledgerstate",
@@ -1443,18 +1432,24 @@ func importPendingPoolRetirements(
 	return nil
 }
 
-func importedPoolKeys(
+// assertPoolsImported fails the import when a pool carrying a scheduled
+// retirement has no row in the pool table. RetirePools silently skips a key
+// hash it cannot resolve, which would reproduce the very gap these rows
+// exist to close, so the mismatch is surfaced instead of logged.
+func assertPoolsImported(
 	store metadata.MetadataStore,
 	metaTxn types.Txn,
 	keyHashes [][]byte,
-) (present, absent [][]byte, err error) {
+) error {
 	poolKeyHashSize := len(lcommon.PoolKeyHash{})
 	lookup := make([]lcommon.PoolKeyHash, 0, len(keyHashes))
 	for _, keyHash := range keyHashes {
 		if len(keyHash) != poolKeyHashSize {
-			return nil, nil, fmt.Errorf(
+			return fmt.Errorf(
 				"malformed pool key hash %x (%d bytes, want %d)",
-				keyHash, len(keyHash), poolKeyHashSize,
+				keyHash,
+				len(keyHash),
+				poolKeyHashSize,
 			)
 		}
 		var pkh lcommon.PoolKeyHash
@@ -1463,20 +1458,20 @@ func importedPoolKeys(
 	}
 	existing, err := store.GetPools(lookup, metaTxn)
 	if err != nil {
-		return nil, nil, fmt.Errorf("loading pools: %w", err)
+		return fmt.Errorf("loading pools: %w", err)
 	}
-	presentSet := make(map[string]struct{}, len(existing))
+	present := make(map[string]struct{}, len(existing))
 	for i := range existing {
-		presentSet[string(existing[i].PoolKeyHash)] = struct{}{}
+		present[string(existing[i].PoolKeyHash)] = struct{}{}
 	}
 	for _, keyHash := range keyHashes {
-		if _, ok := presentSet[string(keyHash)]; ok {
-			present = append(present, keyHash)
-		} else {
-			absent = append(absent, keyHash)
+		if _, ok := present[string(keyHash)]; !ok {
+			return fmt.Errorf(
+				"pool %x not found in the pool table", keyHash,
+			)
 		}
 	}
-	return present, absent, nil
+	return nil
 }
 
 // importDReps imports parsed DReps into the metadata store.
@@ -1627,7 +1622,7 @@ func importSnapShots(
 					cfg.reconcileKeys.addPool(snapshotPools[i].PoolKeyHash)
 				}
 			}
-			if err := importPools(ctx, cfg, snapshotPools, slot); err != nil {
+			if err := importPools(ctx, cfg, snapshotPools, slot, nil); err != nil {
 				return fmt.Errorf(
 					"importing pools from snapshots: %w",
 					err,
