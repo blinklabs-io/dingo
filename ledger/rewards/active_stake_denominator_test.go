@@ -150,3 +150,45 @@ func TestShrunkActiveStakeUnderCreditsEveryReward(t *testing.T) {
 	require.Equal(t, uint64(37_049), shrunk.AccountRewards[1].Amount)
 	require.Equal(t, uint64(46_424), full.AccountRewards[1].Amount)
 }
+
+// TestValidateSnapshotTrackedExcludedActiveStake covers dingo #4025:
+// TestCalculateAcceptsActiveStakeAboveThePoolSet's non-exceeding bound
+// (sum(Pools) <= TotalActiveStake) tolerates one legitimately excluded pool's
+// stake going missing, but tolerates just as well a Pools set proportionally
+// shrunk by some unrelated bug -- pool count, delegator count, and per-pool
+// cross-sums all stay internally consistent, so nothing else catches it. A
+// caller that tracks ExcludedActiveStake (even as zero) gets an exact check
+// instead: Pools must sum to precisely TotalActiveStake minus the tracked
+// exclusion.
+func TestValidateSnapshotTrackedExcludedActiveStake(t *testing.T) {
+	// 1000 (Pools) + 250 (tracked excluded) == 1250 (declared total): exact
+	// match passes, matching the legitimately-excluded-pool case.
+	exact := denominatorSnapshot(1_250)
+	tracked := uint64(250)
+	exact.ExcludedActiveStake = &tracked
+	require.NoError(t, validateSnapshot(exact))
+
+	// The same 250 tracked as excluded, but Pools is proportionally shrunk to
+	// 900 instead of 1000 (as if every pool's stake had been scaled down).
+	// 900+250=1150 != 1250, so this must be rejected even though 900 <= 1250
+	// would have passed the old non-exceeding bound silently.
+	shrunk := denominatorSnapshot(1_250)
+	shrunk.Pools[0].DelegatedStake = 900
+	shrunk.Pools[0].OwnerStake = 450
+	shrunk.Pools[0].Delegators[0].Stake = 450
+	shrunk.Pools[0].Delegators[1].Stake = 450
+	shrunkExcluded := uint64(250)
+	shrunk.ExcludedActiveStake = &shrunkExcluded
+	err := validateSnapshot(shrunk)
+	require.ErrorIs(t, err, ErrInvalidParameters)
+	require.ErrorContains(t, err, "does not match active stake")
+
+	// A tracked exclusion of exactly zero still demands an exact match: no
+	// slack remains once the caller affirmatively says nothing was excluded.
+	noExclusion := denominatorSnapshot(1_250)
+	zero := uint64(0)
+	noExclusion.ExcludedActiveStake = &zero
+	err = validateSnapshot(noExclusion)
+	require.ErrorIs(t, err, ErrInvalidParameters)
+	require.ErrorContains(t, err, "does not match active stake")
+}
