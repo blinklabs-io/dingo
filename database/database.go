@@ -120,10 +120,10 @@ type Database struct {
 	// the sync.RWMutex it replaces, so no constructor change is needed.
 	commitBarrier cancellableBarrier
 
-	// readSnapshotAdmission serializes read-pool reservations that must wait
-	// outside commitBarrier. Without this gate, concurrent snapshots can hold
-	// every read connection while queued on the barrier and starve rollback
-	// paths that need a read connection to finish.
+	// readSnapshotAdmission bounds coordinated snapshots for their full
+	// lifetime. Without this gate, snapshots can hold every read connection
+	// either while queued on the barrier or while streaming a client-paced
+	// response, starving rollback paths that need a read connection to finish.
 	readSnapshotAdmission     chan struct{}
 	readSnapshotAdmissionOnce sync.Once
 
@@ -140,10 +140,18 @@ type Database struct {
 	destructiveTransitionBarrier cancellableBarrier
 }
 
-func (d *Database) acquireReadSnapshotAdmission(ctx context.Context) error {
+func (d *Database) acquireReadSnapshotAdmission(
+	ctx context.Context,
+	limit int,
+) error {
+	if limit < 1 {
+		limit = 1
+	}
 	d.readSnapshotAdmissionOnce.Do(func() {
-		d.readSnapshotAdmission = make(chan struct{}, 1)
-		d.readSnapshotAdmission <- struct{}{}
+		d.readSnapshotAdmission = make(chan struct{}, limit)
+		for range limit {
+			d.readSnapshotAdmission <- struct{}{}
+		}
 	})
 	select {
 	case <-ctx.Done():

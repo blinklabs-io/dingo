@@ -110,6 +110,8 @@ type leiosForgedEBLog struct {
 	items   []leiosForgedEBEntry
 	base    int            // logical index of items[0]
 	cursors map[string]int // connKey → next logical index to serve
+	// owners distinguish connection lifetimes that reuse an address pair.
+	owners map[string]*oleiosnotify.Server
 	// reservations are entries returned to RequestNext but not yet confirmed
 	// sent by the mini-protocol server. retries pin failed reservations until a
 	// subsequently connected peer successfully receives them.
@@ -126,6 +128,7 @@ type leiosForgedEBLog struct {
 func newLeiosForgedEBLog() *leiosForgedEBLog {
 	return &leiosForgedEBLog{
 		cursors:      make(map[string]int),
+		owners:       make(map[string]*oleiosnotify.Server),
 		reservations: make(map[string]leiosDeliveryReservation),
 		retries:      make(map[int]int),
 		retryCursors: make(map[string]int),
@@ -158,14 +161,21 @@ func (l *leiosForgedEBLog) append(entry leiosForgedEBEntry) {
 // lock so a closed request cannot recreate a cursor removed by disconnect.
 func (l *leiosForgedEBLog) nextWhileConnected(
 	connKey string,
-	done <-chan struct{},
+	owner *oleiosnotify.Server,
+	connectionDone <-chan any,
 ) (*leiosForgedEBEntry, chan struct{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	select {
-	case <-done:
+	case <-connectionDone:
 		return nil, l.wakeCh
 	default:
+	}
+	if owner != nil {
+		if existing := l.owners[connKey]; existing != nil && existing != owner {
+			return nil, l.wakeCh
+		}
+		l.owners[connKey] = owner
 	}
 	if reserved, ok := l.reservations[connKey]; ok {
 		idx := reserved.index - l.base
@@ -200,9 +210,16 @@ func (l *leiosForgedEBLog) nextWhileConnected(
 // complete commits a reserved cursor only after the LeiosNotify server has
 // successfully sent its response. A failed send leaves the cursor in place
 // and pins the entry for a reconnect to retry.
-func (l *leiosForgedEBLog) complete(connKey string, delivered bool) {
+func (l *leiosForgedEBLog) complete(
+	connKey string,
+	owner *oleiosnotify.Server,
+	delivered bool,
+) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if owner != nil && l.owners[connKey] != owner {
+		return
+	}
 	reserved, ok := l.reservations[connKey]
 	if !ok {
 		return
@@ -301,9 +318,18 @@ func (l *leiosForgedEBLog) nextRetryLocked(
 	return nextRetry, found
 }
 
-// removeConn unregisters a connection cursor and prunes newly freed entries.
-func (l *leiosForgedEBLog) removeConn(connKey string) {
+func (l *leiosForgedEBLog) removeConnOwned(
+	connKey string,
+	owner *oleiosnotify.Server,
+) {
 	l.mu.Lock()
+	defer l.mu.Unlock()
+	if owner != nil && l.owners[connKey] == owner {
+		l.removeConnLocked(connKey)
+	}
+}
+
+func (l *leiosForgedEBLog) removeConnLocked(connKey string) {
 	if reserved, ok := l.reservations[connKey]; ok {
 		if !reserved.retry {
 			l.retries[reserved.index]++
@@ -311,17 +337,33 @@ func (l *leiosForgedEBLog) removeConn(connKey string) {
 		delete(l.reservations, connKey)
 	}
 	delete(l.cursors, connKey)
+	delete(l.owners, connKey)
 	delete(l.retryCursors, connKey)
 	l.pruneLocked()
-	l.mu.Unlock()
 }
 
 // registerConn pre-registers connKey at the current tail, or at the oldest
 // failed delivery, so entries appended between connection open and the peer's
 // first RequestNext are not pruned before the cursor is established. It is a
-// no-op when connKey is already registered.
-func (l *leiosForgedEBLog) registerConn(connKey string) {
+// preserves the cursor for the same owner. It also wakes parked requests so a
+// replacement can observe the ownership change. A replacement releases the
+// old owner's reservation into the retry queue before registering its cursor.
+func (l *leiosForgedEBLog) registerConn(
+	connKey string,
+	owner *oleiosnotify.Server,
+	isCurrent func() bool,
+) {
 	l.mu.Lock()
+	defer l.mu.Unlock()
+	// Validate manager ownership under the cursor lock. This is the only path
+	// that takes the connection-manager lock while holding l.mu; close callbacks
+	// invoke this code after releasing the manager lock, preserving the order.
+	if isCurrent != nil && !isCurrent() {
+		return
+	}
+	if existing := l.owners[connKey]; existing != nil && existing != owner {
+		l.removeConnLocked(connKey)
+	}
 	if _, exists := l.cursors[connKey]; !exists {
 		cursor := l.base + len(l.items)
 		if retry, found := l.nextRetryLocked(connKey, l.base); found {
@@ -332,7 +374,14 @@ func (l *leiosForgedEBLog) registerConn(connKey string) {
 			l.retryCursors[connKey] = cursor
 		}
 	}
-	l.mu.Unlock()
+	if owner != nil {
+		// Registration identifies the current connection lifetime. A delayed
+		// close callback for an older lifetime is owner-guarded below.
+		l.owners[connKey] = owner
+	}
+	wake := l.wakeCh
+	l.wakeCh = make(chan struct{})
+	close(wake)
 }
 
 // leiosEBLogMaxEntries is the maximum number of forged-EB entries the log
@@ -454,7 +503,11 @@ func (o *Ouroboros) leiosnotifyServerResponseSent(
 	_ protocol.Message,
 	err error,
 ) {
-	o.leiosEBLog.complete(leiosConnectionIdString(ctx.ConnectionId), err == nil)
+	o.leiosEBLog.complete(
+		leiosConnectionIdString(ctx.ConnectionId),
+		ctx.Server,
+		err == nil,
+	)
 }
 
 func (o *Ouroboros) leiosnotifyClientConnOpts() []oleiosnotify.LeiosNotifyOptionFunc {
@@ -495,9 +548,11 @@ func (o *Ouroboros) leiosnotifyClientStart(
 	// Pre-register the server-side cursor now that we know the peer
 	// supports LeiosNotify. This ensures EBs forged between here and
 	// the peer's first RequestNext are not pruned.
-	o.leiosEBLog.registerConn(connKey)
+	o.leiosEBLog.registerConn(connKey, conn.LeiosNotify().Server, func() bool {
+		return o.connManager.GetConnectionById(connId) == conn
+	})
 	if err := conn.LeiosNotify().Client.Sync(); err != nil {
-		o.leiosEBLog.removeConn(connKey)
+		o.leiosEBLog.removeConnOwned(connKey, conn.LeiosNotify().Server)
 		return err
 	}
 	return nil
@@ -630,7 +685,27 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		// relay reset the connection, so tx-body fetch is driven from the
 		// txs-offer below. Failures are best-effort: a transient manifest fetch
 		// error must not tear down the shared connection.
-		o.dispatchLeiosFetch(ctx.ConnectionId, func() {
+		manifestKey := leiosBlockKey(point.Slot, point.Hash)
+		guard, admitted := o.reserveLeiosFetch(ctx.ConnectionId)
+		if !admitted {
+			return nil
+		}
+		if _, loaded := o.leiosManifestFetchInProgress.LoadOrStore(
+			manifestKey, struct{}{},
+		); loaded {
+			guard.inflight.Add(-1)
+			return nil
+		}
+		if o.leiosFetchClaimPublished != nil {
+			o.leiosFetchClaimPublished()
+		}
+		o.dispatchLeiosFetchReserved(guard, func() {
+			defer o.leiosManifestFetchInProgress.Delete(manifestKey)
+			// A transaction offer or historical backfill may have populated
+			// this occurrence while this work waited for its connection guard.
+			if _, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash); ok {
+				return
+			}
 			reqCtx, cancel := leiosFetchRequestContext(
 				context.Background(),
 				time.Time{},
@@ -715,16 +790,25 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		// fetched once. The claim is keyed by slot and hash, not hash alone, so
 		// an in-flight fetch for one occurrence of a hash does not suppress a
 		// legitimate offer of the same content-addressed hash recurring at a
-		// different slot. The claim is released when the fetch finishes (or
-		// below if the per-connection bound is reached).
+		// different slot. Reserve the local fetch slot before publishing the
+		// cross-connection claim, so a full connection cannot transiently hide
+		// this occurrence from a healthy peer.
 		hashKey := leiosBlockKey(point.Slot, point.Hash)
+		guard, admitted := o.reserveLeiosFetch(ctx.ConnectionId)
+		if !admitted {
+			return nil
+		}
 		if _, loaded := o.leiosFetchInProgress.LoadOrStore(
 			hashKey,
 			struct{}{},
 		); loaded {
+			guard.inflight.Add(-1)
 			return nil
 		}
-		if !o.dispatchLeiosFetch(ctx.ConnectionId, func() {
+		if o.leiosFetchClaimPublished != nil {
+			o.leiosFetchClaimPublished()
+		}
+		o.dispatchLeiosFetchReserved(guard, func() {
 			defer o.leiosFetchInProgress.Delete(hashKey)
 			data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 			if !ok {
@@ -833,11 +917,7 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 				"role", "client",
 				"connection_id", connId,
 			)
-		}) {
-			// Per-connection bound reached: release the claim so a later offer
-			// (on this or another connection) can retry.
-			o.leiosFetchInProgress.Delete(hashKey)
-		}
+		})
 	case *oleiosnotify.MsgVotesOffer:
 		// The Leios prototype diffuses full votes inline over leios-notify
 		// (rather than the standalone leios-votes protocol). Feed them to the
@@ -1105,34 +1185,33 @@ func (o *Ouroboros) leiosFetchGuardFor(
 	return g.(*leiosFetchGuard)
 }
 
-// dispatchLeiosFetch runs fn (a leios-fetch client operation) asynchronously,
-// serialized against other fetches on the same connection so the strict
-// request/response client is never used concurrently, and bounded per
-// connection. It returns immediately so the leios-notify handler is never
-// blocked on a multi-second fetch (which otherwise head-of-line blocks every
-// later offer on the connection). Returns false if the per-connection bound is
-// reached and the work was dropped.
-func (o *Ouroboros) dispatchLeiosFetch(
+// reserveLeiosFetch reserves one per-connection fetch slot without publishing
+// any cross-connection work claim. Callers that publish such a claim must
+// reserve first, then release the slot if another caller already owns it.
+func (o *Ouroboros) reserveLeiosFetch(
 	connId ouroboros.ConnectionId,
-	fn func(),
-) bool {
+) (*leiosFetchGuard, bool) {
 	g := o.leiosFetchGuardFor(connId)
 	for {
 		current := g.inflight.Load()
 		if current >= leiosFetchMaxInflightPerConn {
-			return false
+			return g, false
 		}
 		if g.inflight.CompareAndSwap(current, current+1) {
-			break
+			return g, true
 		}
 	}
+}
+
+// dispatchLeiosFetchReserved starts work for a slot already reserved by
+// reserveLeiosFetch. It never performs a second admission check.
+func (o *Ouroboros) dispatchLeiosFetchReserved(g *leiosFetchGuard, fn func()) {
 	go func() {
 		defer g.inflight.Add(-1)
 		g.mu.Lock()
 		defer g.mu.Unlock()
 		fn()
 	}()
-	return true
 }
 
 // leiosTxFetchMaxRoundsPerWindow bounds how many BlockTxsRequest rounds are
@@ -1890,11 +1969,18 @@ func (o *Ouroboros) leiosnotifyServerRequestNext(
 		return nil, nil
 	}
 	connKey := leiosConnectionIdString(ctx.ConnectionId)
-	// Protocol completion waits for this callback to return. Use the
-	// connection manager's independent close notification instead.
-	done, cancel := o.registerLeiosNotifyServeWaiter(ctx.ConnectionId)
+	// Protocol completion waits for this callback to return. The owning
+	// connection can close before connmanager publishes it, so observe its
+	// independent lifecycle channel.
+	done := ctx.ConnectionDoneChan
 	protocolDone := ctx.Server.DoneChan()
-	defer cancel()
+	defer func() {
+		select {
+		case <-ctx.ConnectionDoneChan:
+			o.RemoveLeiosNotifyConnectionOwner(ctx.ConnectionId, ctx.Server)
+		default:
+		}
+	}()
 
 	// If the connection is already closing, return without touching the
 	// cursor map. This prevents re-registering a stale cursor after
@@ -1908,7 +1994,11 @@ func (o *Ouroboros) leiosnotifyServerRequestNext(
 	}
 
 	for {
-		entry, wakeCh := o.leiosEBLog.nextWhileConnected(connKey, done)
+		entry, wakeCh := o.leiosEBLog.nextWhileConnected(
+			connKey,
+			ctx.Server,
+			ctx.ConnectionDoneChan,
+		)
 		if entry != nil {
 			if msg := leiosForgedEBOffer(entry); msg != nil {
 				return msg, nil
@@ -1922,6 +2012,16 @@ func (o *Ouroboros) leiosnotifyServerRequestNext(
 		case <-protocolDone:
 			return nil, errors.New("leios-notify protocol closed")
 		}
+	}
+}
+
+// RemoveLeiosNotifyConnectionOwner removes only the cursor owned by conn.
+func (o *Ouroboros) RemoveLeiosNotifyConnectionOwner(
+	connId ouroboros.ConnectionId,
+	owner *oleiosnotify.Server,
+) {
+	if o.leiosEBLog != nil {
+		o.leiosEBLog.removeConnOwned(leiosConnectionIdString(connId), owner)
 	}
 }
 

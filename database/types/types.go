@@ -348,6 +348,10 @@ type ReadReservation interface {
 // through Txn/ReadTransaction exactly as before.
 type ReadReserver interface {
 	ReserveRead(ctx context.Context) (ReadReservation, error)
+	// ReadSnapshotLimit is the maximum number of coordinated snapshots that
+	// may hold read-pool connections concurrently while leaving capacity for
+	// operational reads during rollback. It must be positive.
+	ReadSnapshotLimit() int
 }
 
 // IrreversibleTxn identifies a transaction whose Rollback cannot undo writes

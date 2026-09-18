@@ -1320,6 +1320,18 @@ func (d *Database) UtxosByAssets(
 	return utxos, nil
 }
 
+// ConsumedUtxoPruneFloorSyncKey is the durable sync_state marker key
+// recording the highest slot the periodic consumed-UTxO cleanup
+// (ledger.LedgerState's cleanupConsumedUtxos, which calls
+// UtxosDeleteConsumed below) has ever begun hard-deleting spent UTxO rows
+// up to. Both ledger (which writes it via persistConsumedUtxoPruneFloor)
+// and database/lifecycle's disaster-recovery Truncate (which reads it to
+// refuse a target older than what routine cleanup has already destroyed)
+// need to agree on this key, so it is exported from here as the single
+// source of truth for its name rather than duplicated as a string literal
+// in both packages.
+const ConsumedUtxoPruneFloorSyncKey = "consumed_utxo_prune_floor"
+
 func (d *Database) UtxosDeleteConsumed(
 	slot uint64,
 	limit int,

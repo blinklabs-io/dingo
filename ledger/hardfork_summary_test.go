@@ -194,6 +194,220 @@ func TestHardForkSummary_EmptyCache(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// TestHardForkSummary_ToleratesUnpopulatedCachedEraParams pins the contract
+// that a past-era cache row with a zero EpochSize or SlotLength — the sentinel
+// an epoch record carries before it is populated — still produces a summary
+// rather than an error. Bounding durations must not turn those rows into a
+// refusal; the zero-divisor path in hardForkCachedEpochDuration is what makes
+// the zero slot length case non-trivial.
+func TestHardForkSummary_ToleratesUnpopulatedCachedEraParams(t *testing.T) {
+	t.Parallel()
+	testCases := []struct {
+		name          string
+		lengthInSlots uint
+		slotLength    uint
+		wantRelTime   time.Duration
+	}{
+		{
+			name:          "minimum valid parameters",
+			lengthInSlots: 1,
+			slotLength:    1,
+			wantRelTime:   time.Millisecond,
+		},
+		{
+			name:        "zero epoch size",
+			slotLength:  1_000,
+			wantRelTime: 0,
+		},
+		{
+			name:          "zero slot length",
+			lengthInSlots: 100,
+			wantRelTime:   0,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			ls := &LedgerState{
+				epochCache: []models.Epoch{
+					{
+						EpochId:       0,
+						StartSlot:     0,
+						SlotLength:    testCase.slotLength,
+						LengthInSlots: testCase.lengthInSlots,
+						EraId:         0,
+					},
+					{
+						EpochId:       1,
+						StartSlot:     100,
+						SlotLength:    1_000,
+						LengthInSlots: 100,
+						EraId:         1,
+					},
+				},
+				currentEra: eras.EraDesc{Id: 1, Name: "Shelley"},
+				currentTip: ochainsync.Tip{
+					Point: ocommon.NewPoint(150, []byte("tip")),
+				},
+				config: LedgerStateConfig{
+					CardanoNodeConfig: minimalShelleyGenesisCfg(t),
+				},
+			}
+			ls.publishSnapshotsLocked()
+
+			summary, err := ls.HardForkSummary()
+			require.NoError(t, err)
+			require.GreaterOrEqual(t, len(summary.Eras), 2)
+			// The first era's own duration is what the degenerate row
+			// contributes, and it is where the second era starts.
+			require.Equal(
+				t,
+				testCase.wantRelTime,
+				summary.Eras[1].Start.RelativeTime,
+			)
+		})
+	}
+}
+
+// TestHardForkSummary_SkipsUnpopulatedEpochDuration covers an unpopulated row
+// in the middle of an era: it contributes nothing to the accumulated relative
+// time, and the era still closes on its populated siblings.
+func TestHardForkSummary_SkipsUnpopulatedEpochDuration(t *testing.T) {
+	t.Parallel()
+	ls := &LedgerState{
+		epochCache: []models.Epoch{
+			{
+				EpochId:       0,
+				StartSlot:     0,
+				SlotLength:    1_000,
+				LengthInSlots: 100,
+				EraId:         0,
+			},
+			{
+				EpochId:       1,
+				StartSlot:     100,
+				SlotLength:    0,
+				LengthInSlots: 100,
+				EraId:         0,
+			},
+			{
+				EpochId:       2,
+				StartSlot:     200,
+				SlotLength:    1_000,
+				LengthInSlots: 100,
+				EraId:         1,
+			},
+		},
+		currentEra: eras.EraDesc{Id: 1, Name: "Shelley"},
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(250, []byte("tip")),
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: minimalShelleyGenesisCfg(t),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	summary, err := ls.HardForkSummary()
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(summary.Eras), 2)
+	// Only epoch 0 contributes: 100 slots * 1000ms.
+	require.Equal(
+		t,
+		100*1_000*time.Millisecond,
+		summary.Eras[1].Start.RelativeTime,
+	)
+}
+
+func TestHardForkSummary_RejectsEpochDurationOverflow(t *testing.T) {
+	t.Parallel()
+	const slotLengthMilliseconds = uint64(1)
+	maxDurationMilliseconds := uint64(1<<63-1) / uint64(time.Millisecond)
+	if uint64(^uint(0)) < maxDurationMilliseconds+1 {
+		t.Skip("uint cannot represent the overflow boundary")
+	}
+
+	testCases := []struct {
+		name          string
+		lengthInSlots uint64
+		wantErr       bool
+	}{
+		{
+			name:          "maximum representable duration",
+			lengthInSlots: maxDurationMilliseconds,
+		},
+		{
+			name:          "multiplication overflow",
+			lengthInSlots: maxDurationMilliseconds + 1,
+			wantErr:       true,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			ls := &LedgerState{
+				epochCache: []models.Epoch{{
+					EpochId:       0,
+					StartSlot:     0,
+					SlotLength:    uint(slotLengthMilliseconds),
+					LengthInSlots: uint(testCase.lengthInSlots),
+					EraId:         1,
+				}},
+				currentTip: ochainsync.Tip{
+					Point: ocommon.NewPoint(0, []byte("tip")),
+				},
+			}
+			ls.publishSnapshotsLocked()
+
+			_, err := ls.HardForkSummary()
+			if testCase.wantErr {
+				require.Error(t, err)
+				require.ErrorContains(t, err, "duration")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestHardForkSummary_RejectsCumulativeDurationOverflow(t *testing.T) {
+	t.Parallel()
+	maxDurationMilliseconds := uint64(1<<63-1) / uint64(time.Millisecond)
+	perEpochLength := maxDurationMilliseconds/2 + 1
+	if uint64(^uint(0)) < perEpochLength {
+		t.Skip("uint cannot represent the overflow boundary")
+	}
+
+	ls := &LedgerState{
+		epochCache: []models.Epoch{
+			{
+				EpochId:       0,
+				StartSlot:     0,
+				SlotLength:    1,
+				LengthInSlots: uint(perEpochLength),
+				EraId:         1,
+			},
+			{
+				EpochId:       1,
+				StartSlot:     perEpochLength,
+				SlotLength:    1,
+				LengthInSlots: uint(perEpochLength),
+				EraId:         1,
+			},
+		},
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(0, []byte("tip")),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	_, err := ls.HardForkSummary()
+	require.Error(t, err)
+	require.ErrorContains(t, err, "duration")
+}
+
 // TestHardForkSummary_MissingShelleyGenesis tolerates a config without a
 // Shelley genesis: SystemStart stays at the
 // zero time. Callers that need wall-clock conversions must provide the
@@ -684,6 +898,94 @@ func TestHardForkSummary_KnownTransitionRejectsPastSuccessorBound(
 		require.ErrorIsf(t, err, hardfork.ErrPastHorizon,
 			"slot %d must be past horizon", slot)
 	}
+}
+
+// TestHardForkSummary_KnownTransitionSuccessorTracksLiveTip is a regression
+// test for a node-side horizon-computation gap distinct from #3844: the
+// appended successor era used to measure its own safe zone only from the
+// announced boundary, never from how far the live tip has actually advanced
+// past it. A node that fails to apply the block crossing that boundary (for
+// any reason -- this is the exact class of bug this fixture reproduces, not
+// its cause) keeps reconstructing this same Summary on every retry with the
+// SAME transitionInfo and epoch cache, since neither changes without a
+// successful apply. Before this fix, the successor's horizon was pinned at
+// boundary+safeZone forever, so once the live tip passed that fixed point
+// every further block or transaction slot fell "past horizon" permanently --
+// a live, canonical chain rejected as though its own tip did not exist, even
+// though nothing about the transition or the chain's own history changed.
+//
+// This reproduces the reported live-incident signature directly: the current
+// published tip's own slot judged past horizon, looping "block processing
+// failed, restarting pipeline" forever with no way to recover because retrying
+// recomputes the identical, still-too-narrow bound every time.
+func TestHardForkSummary_KnownTransitionSuccessorTracksLiveTip(t *testing.T) {
+	t.Parallel()
+
+	const (
+		epochSize     = uint64(100)
+		safeZoneSlots = uint64(250)
+		knownEpoch    = uint64(7)
+		boundarySlot  = uint64(700) // first slot of epoch 7 (400 + (7-4)*100)
+		// The live tip has advanced far past where a boundary-only successor
+		// bound (700+250 snapped to 1_000) could ever reach.
+		liveTipSlot = uint64(50_000)
+	)
+	ls := &LedgerState{
+		epochCache: []models.Epoch{{
+			EpochId:       4,
+			StartSlot:     400,
+			SlotLength:    1_000,
+			LengthInSlots: 100,
+			EraId:         1,
+		}},
+		currentEra:     eras.EraDesc{Id: 1, Name: "Shelley"},
+		transitionInfo: hardfork.NewTransitionKnown(knownEpoch),
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(liveTipSlot, []byte("tip")),
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: minimalShelleyGenesisCfg(t),
+		},
+	}
+	shape := hardfork.Shape{
+		Eras: []hardfork.ShapeEntry{{
+			EraID: 1,
+			Params: hardfork.EraParams{
+				EpochSize:     epochSize,
+				SlotLength:    time.Second,
+				SafeZoneSlots: safeZoneSlots,
+			},
+		}},
+	}
+	ls.cachedShape.Store(&shape)
+	ls.publishSnapshotsLocked()
+
+	sum, err := ls.HardForkSummary()
+	require.NoError(t, err)
+	require.Len(t, sum.Eras, 2)
+	require.NotNil(t, sum.Eras[0].End)
+	assert.Equal(t, boundarySlot, sum.Eras[0].End.Slot)
+
+	// The live tip's own slot -- what the reported incident actually failed
+	// on -- must resolve. Before this fix this returned ErrPastHorizon
+	// because the successor's fixed bound (1_000) never accounted for the
+	// tip having reached 50_000.
+	info, err := sum.SlotToEpoch(liveTipSlot)
+	require.NoError(
+		t, err,
+		"the live tip's own slot must stay within the horizon",
+	)
+	assert.GreaterOrEqual(t, info.Epoch, knownEpoch)
+
+	require.NotNil(t, sum.Eras[1].End)
+	assert.Greater(
+		t,
+		sum.Eras[1].End.Slot,
+		liveTipSlot,
+		"the successor horizon must extend past the live tip, not freeze at "+
+			"boundary+safeZone",
+	)
+	assert.Equal(t, uint64(50_300), sum.Eras[1].End.Slot)
 }
 
 func TestHardForkSummary_RejectsSlotPastSafeZone(t *testing.T) {

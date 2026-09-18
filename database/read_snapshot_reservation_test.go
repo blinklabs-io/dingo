@@ -62,6 +62,8 @@ func (s *reservingSnapshotMetadata) ReserveRead(
 	return &recordingReservation{owner: s}, nil
 }
 
+func (*reservingSnapshotMetadata) ReadSnapshotLimit() int { return 1 }
+
 func (s *reservingSnapshotMetadata) ReadTransaction(
 	context.Context,
 ) types.Txn {
@@ -295,6 +297,8 @@ func (m *reservingDestructiveMetadata) ReserveRead(
 ) (types.ReadReservation, error) {
 	return &destructiveReservation{store: m.destructiveReadSnapshotMetadata, ctx: ctx}, nil
 }
+
+func (*reservingDestructiveMetadata) ReadSnapshotLimit() int { return 1 }
 
 type destructiveReservation struct {
 	store *destructiveReadSnapshotMetadata

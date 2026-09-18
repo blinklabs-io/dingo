@@ -15,11 +15,80 @@
 package ouroboros
 
 import (
+	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+type manualDeadlineContext struct {
+	context.Context
+	deadline time.Time
+	done     chan struct{}
+	canceled atomic.Bool
+	err      error
+}
+
+func (c *manualDeadlineContext) Deadline() (time.Time, bool) {
+	return c.deadline, true
+}
+
+func (c *manualDeadlineContext) Done() <-chan struct{} { return c.done }
+
+func (c *manualDeadlineContext) Err() error {
+	if c.canceled.Load() {
+		return c.err
+	}
+	return nil
+}
+
+func TestLeiosFetchRequestContextReusesEqualParentDeadline(t *testing.T) {
+	t.Parallel()
+
+	deadline := time.Now().Add(-time.Second)
+	parent := &manualDeadlineContext{
+		Context:  context.Background(),
+		deadline: deadline,
+		done:     make(chan struct{}),
+	}
+	child, cancel := leiosFetchRequestContext(parent, deadline)
+	defer cancel()
+
+	// WithDeadline's strict parent-before-child check used to create an
+	// independently expired timer here, even though the parent timer has not
+	// delivered cancellation yet. The child must remain live until the parent
+	// is cancelled.
+	select {
+	case <-child.Done():
+		t.Fatal("child deadline fired before parent cancellation")
+	default:
+	}
+	parent.err = context.DeadlineExceeded
+	parent.canceled.Store(true)
+	close(parent.done)
+	select {
+	case <-child.Done():
+		require.ErrorIs(t, child.Err(), context.DeadlineExceeded)
+	case <-time.After(time.Second):
+		t.Fatal("child did not follow parent cancellation")
+	}
+}
+
+func TestLeiosFetchRequestContextKeepsEarlierAttemptDeadline(t *testing.T) {
+	t.Parallel()
+
+	parent := &manualDeadlineContext{
+		Context:  context.Background(),
+		deadline: time.Now().Add(time.Hour),
+		done:     make(chan struct{}),
+	}
+	child, cancel := leiosFetchRequestContext(parent, time.Now().Add(-time.Second))
+	defer cancel()
+	require.ErrorIs(t, child.Err(), context.DeadlineExceeded)
+	require.NoError(t, parent.Err())
+}
 
 // assertCooldownWindow asserts the guard is in cooldown right up to, but not at,
 // now+want.

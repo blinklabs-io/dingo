@@ -16,12 +16,9 @@ package kupo
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/apilistener"
@@ -30,21 +27,10 @@ import (
 
 // Server is a Kupo-compatible HTTP API backed by Dingo's complete index.
 type Server struct {
-	config    Config
-	logger    *slog.Logger
-	node      KupoNode
-	listener  *apilistener.Listener
-	mu        sync.Mutex
-	lifecycle *serverLifecycle
-	startDone chan struct{}
-}
-
-// serverLifecycle ties a cancellation function to the server it owns. A
-// Start that loses a concurrent publication race must not replace the active
-// server's cancellation function.
-type serverLifecycle struct {
-	server *http.Server
-	cancel context.CancelFunc
+	config   Config
+	logger   *slog.Logger
+	node     KupoNode
+	listener *apilistener.Listener
 }
 
 // New creates a Kupo-compatible server.
@@ -127,14 +113,12 @@ func registerRoutes(mux *http.ServeMux, prefix string, s *Server) {
 
 // Start binds the configured HTTP listener and serves in the background.
 func (s *Server) Start(ctx context.Context) error {
-	startDone, err := s.beginStart()
+	startDone, err := s.listener.BeginStart()
 	if err != nil {
 		return err
 	}
-	defer s.endStart(startDone)
+	defer s.listener.EndStart(startDone)
 
-	serveCtx, cancel := context.WithCancel(ctx)
-	s.mu.Lock()
 	server, bindDone, err := s.listener.Publish(func() *http.Server {
 		return &http.Server{
 			Addr:              s.config.ListenAddress,
@@ -146,33 +130,12 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	})
 	if err != nil {
-		s.mu.Unlock()
-		cancel()
 		return err
 	}
-	s.lifecycle = &serverLifecycle{server: server, cancel: cancel}
-	s.mu.Unlock()
-	go func() { //nolint:gosec // graceful shutdown intentionally outlives ctx
-		<-serveCtx.Done()
-		job, _ := s.listener.TakeIf(server)
-		s.clearLifecycle(server)
-		if job == nil {
-			return
-		}
-		shutdownCtx, cancel := context.WithTimeout(
-			context.Background(),
-			30*time.Second,
-		)
-		defer cancel()
-		if err := s.listener.Shutdown(shutdownCtx, job, apilistener.Graceful); err != nil {
-			s.logger.Error("failed to shutdown Kupo API server", "error", err)
-		}
-	}()
+	s.listener.Watch(ctx, server, apilistener.Graceful)
 	served, err := s.listener.Bind(server, bindDone, s.config.TLS)
 	if err != nil {
-		cancel()
 		s.listener.Unpublish(server)
-		s.clearLifecycle(server)
 		return err
 	}
 	if served {
@@ -183,70 +146,5 @@ func (s *Server) Start(ctx context.Context) error {
 
 // Stop gracefully stops the API and waits until its socket is released.
 func (s *Server) Stop(ctx context.Context) error {
-	for {
-		s.mu.Lock()
-		startDone := s.startDone
-		if startDone != nil {
-			s.mu.Unlock()
-			if err := waitForStart(ctx, startDone); err != nil {
-				return err
-			}
-			continue
-		}
-		lifecycle := s.lifecycle
-		if lifecycle != nil {
-			s.lifecycle = nil
-		}
-		s.mu.Unlock()
-		if lifecycle != nil {
-			lifecycle.cancel()
-		}
-		job, inFlight := s.listener.Take()
-		if job == nil {
-			return s.listener.AwaitTeardown(ctx, inFlight)
-		}
-		return s.listener.Shutdown(ctx, job, apilistener.Graceful)
-	}
-}
-
-func (s *Server) beginStart() (chan struct{}, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.startDone != nil {
-		return nil, errors.New("kupo: server start already in progress")
-	}
-	done := make(chan struct{})
-	s.startDone = done
-	return done, nil
-}
-
-func (s *Server) endStart(done chan struct{}) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.startDone == done {
-		s.startDone = nil
-		close(done)
-	}
-}
-
-func waitForStart(ctx context.Context, done chan struct{}) error {
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		select {
-		case <-done:
-			return nil
-		default:
-		}
-		return fmt.Errorf("timed out waiting for Kupo API server start: %w", ctx.Err())
-	}
-}
-
-func (s *Server) clearLifecycle(server *http.Server) {
-	s.mu.Lock()
-	if s.lifecycle != nil && s.lifecycle.server == server {
-		s.lifecycle = nil
-	}
-	s.mu.Unlock()
+	return s.listener.Stop(ctx, apilistener.Graceful)
 }

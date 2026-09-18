@@ -15,6 +15,7 @@
 package dbtest
 
 import (
+	"database/sql"
 	"testing"
 	"time"
 
@@ -99,4 +100,73 @@ func TestReadSnapshotDoesNotHoldCommitBarrierForTheReadPool(t *testing.T) {
 		30*time.Second,
 		"read snapshot must complete once a read connection is free",
 	)
+}
+
+// TestOpenReadSnapshotsLeaveAConnectionForDestructiveTransitionReads pins the
+// lifetime side of snapshot admission. Client-paced responses may keep their
+// snapshots open indefinitely; they must not occupy the connection a rollback
+// needs for metadata reads inside its destructive transition.
+func TestOpenReadSnapshotsLeaveAConnectionForDestructiveTransitionReads(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+
+	holders := make([]*database.Txn, 0, sqlite.DefaultMaxConnections-1)
+	for range sqlite.DefaultMaxConnections - 1 {
+		txn, _, err := database.NewReadSnapshotContext(t.Context(), db)
+		require.NoError(t, err)
+		holders = append(holders, txn)
+	}
+	require.Equal(
+		t,
+		sqlite.DefaultMaxConnections-1,
+		db.Metadata().(interface{ ReadPoolStats() sql.DBStats }).
+			ReadPoolStats().InUse,
+	)
+
+	finishTransition := db.BeginDestructiveTransition()
+	fifthDone := make(chan *database.Txn, 1)
+	go func() {
+		txn, _, err := database.NewReadSnapshotContext(t.Context(), db)
+		if err != nil {
+			fifthDone <- nil
+			return
+		}
+		fifthDone <- txn
+	}()
+	testutil.RequireNoReceive(
+		t,
+		fifthDone,
+		50*time.Millisecond,
+		"snapshot exceeded the read-pool safety limit",
+	)
+
+	readDone := make(chan struct{})
+	go func() {
+		txn := db.Transaction(false)
+		txn.Release()
+		close(readDone)
+	}()
+	testutil.RequireReceive(
+		t,
+		readDone,
+		5*time.Second,
+		"destructive transition could not acquire its reserved read connection",
+	)
+	finishTransition()
+	holders[0].Release()
+	fifth := testutil.RequireReceive(
+		t,
+		fifthDone,
+		5*time.Second,
+		"queued snapshot did not resume after admission was released",
+	)
+	require.NotNil(t, fifth)
+	fifth.Release()
+	for _, holder := range holders[1:] {
+		holder.Release()
+	}
 }

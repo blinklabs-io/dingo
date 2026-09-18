@@ -83,6 +83,10 @@ type Txn struct {
 	readWrite      bool
 	afterCommit    []func()
 	dispatching    bool
+	// readSnapshotAdmissionHeld keeps one coordinated snapshot slot for this
+	// transaction's lifetime. Releasing only after the read transaction ends
+	// caps established snapshots as well as callers waiting to construct one.
+	readSnapshotAdmissionHeld bool
 
 	// barrierHeld records whether this Txn holds the shared side of
 	// db.commitBarrier (see acquireCommitBarrier). Guarded by lock.
@@ -153,6 +157,10 @@ func (t *Txn) finishLocked() {
 	t.finished = true
 	t.releaseCommitBarrierLocked()
 	t.releaseBlobPinLocked()
+	if t.readSnapshotAdmissionHeld {
+		t.readSnapshotAdmissionHeld = false
+		t.db.releaseReadSnapshotAdmission()
+	}
 }
 
 // releaseBlobPinLocked drops this transaction's pin on the blob store it
@@ -217,17 +225,14 @@ func NewTxnContext(ctx context.Context, db *Database, readWrite bool) *Txn {
 //
 // The metadata store's read-pool connection is reserved BEFORE those holds are
 // taken, when the store supports it (types.ReadReserver). Beginning the read
-// transaction is what waits for that pool, the pool is small -- five
-// connections by default -- and a caller can hold its read transaction for the
-// whole of a streamed HTTP response, so that wait is unbounded in principle.
-// Taking it inside the commit barrier would make it unbounded for everything
-// else too: the barrier's exclusive side blocks construction of every
-// read-write Txn that opens a metadata write transaction, which is how a block
-// is applied. Reserving first moves the wait outside both holds and leaves
-// only the tip read and the blob view inside them. The transaction is still
-// BEGUN inside the barrier, so the commit boundary the two views share is
-// unchanged; a store that does not implement types.ReadReserver keeps the
-// previous behavior exactly.
+// transaction is what waits for that pool, so reserving first keeps an
+// exhausted-pool wait outside both barriers. Admission remains held until the
+// returned transaction finishes and is capped below the pool size: a streamed
+// HTTP response can otherwise occupy every connection for as long as its
+// clients take to read, starving rollback's operational metadata reads. The
+// transaction is still BEGUN inside the barrier, so the commit boundary the
+// two views share is unchanged; a store that does not implement ReadReserver
+// keeps the previous behavior exactly.
 func NewReadSnapshotContext(
 	ctx context.Context,
 	db *Database,
@@ -237,14 +242,23 @@ func NewReadSnapshotContext(
 	}
 	ms := db.Metadata()
 	var reservation types.ReadReservation
+	admissionHeld := false
 	if reserver, ok := ms.(types.ReadReserver); ok {
-		if err := db.acquireReadSnapshotAdmission(ctx); err != nil {
+		if err := db.acquireReadSnapshotAdmission(
+			ctx,
+			reserver.ReadSnapshotLimit(),
+		); err != nil {
 			return nil, ochainsync.Tip{}, fmt.Errorf(
 				"admit read snapshot: %w",
 				err,
 			)
 		}
-		defer db.releaseReadSnapshotAdmission()
+		admissionHeld = true
+		defer func() {
+			if admissionHeld {
+				db.releaseReadSnapshotAdmission()
+			}
+		}()
 		reserved, err := reserver.ReserveRead(ctx)
 		if err != nil {
 			return nil, ochainsync.Tip{}, fmt.Errorf(
@@ -271,6 +285,8 @@ func NewReadSnapshotContext(
 	defer resume()
 
 	t := &Txn{db: db}
+	t.readSnapshotAdmissionHeld = admissionHeld
+	admissionHeld = false
 	pinBlobStoreForTxn(t, db)
 	var tip ochainsync.Tip
 	if ms != nil {

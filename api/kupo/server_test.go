@@ -682,7 +682,7 @@ func TestStopWaitsForInProgressStart(t *testing.T) {
 	t.Parallel()
 
 	server := newTestServer(&mockNode{})
-	startDone, err := server.beginStart()
+	startDone, err := server.listener.BeginStart()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -698,7 +698,7 @@ func TestStopWaitsForInProgressStart(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 
-	server.endStart(startDone)
+	server.listener.EndStart(startDone)
 	if err := <-stopDone; err != nil {
 		t.Fatal(err)
 	}
