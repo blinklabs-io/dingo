@@ -194,6 +194,220 @@ func TestHardForkSummary_EmptyCache(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// TestHardForkSummary_ToleratesUnpopulatedCachedEraParams pins the contract
+// that a past-era cache row with a zero EpochSize or SlotLength — the sentinel
+// an epoch record carries before it is populated — still produces a summary
+// rather than an error. Bounding durations must not turn those rows into a
+// refusal; the zero-divisor path in hardForkCachedEpochDuration is what makes
+// the zero slot length case non-trivial.
+func TestHardForkSummary_ToleratesUnpopulatedCachedEraParams(t *testing.T) {
+	t.Parallel()
+	testCases := []struct {
+		name          string
+		lengthInSlots uint
+		slotLength    uint
+		wantRelTime   time.Duration
+	}{
+		{
+			name:          "minimum valid parameters",
+			lengthInSlots: 1,
+			slotLength:    1,
+			wantRelTime:   time.Millisecond,
+		},
+		{
+			name:        "zero epoch size",
+			slotLength:  1_000,
+			wantRelTime: 0,
+		},
+		{
+			name:          "zero slot length",
+			lengthInSlots: 100,
+			wantRelTime:   0,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			ls := &LedgerState{
+				epochCache: []models.Epoch{
+					{
+						EpochId:       0,
+						StartSlot:     0,
+						SlotLength:    testCase.slotLength,
+						LengthInSlots: testCase.lengthInSlots,
+						EraId:         0,
+					},
+					{
+						EpochId:       1,
+						StartSlot:     100,
+						SlotLength:    1_000,
+						LengthInSlots: 100,
+						EraId:         1,
+					},
+				},
+				currentEra: eras.EraDesc{Id: 1, Name: "Shelley"},
+				currentTip: ochainsync.Tip{
+					Point: ocommon.NewPoint(150, []byte("tip")),
+				},
+				config: LedgerStateConfig{
+					CardanoNodeConfig: minimalShelleyGenesisCfg(t),
+				},
+			}
+			ls.publishSnapshotsLocked()
+
+			summary, err := ls.HardForkSummary()
+			require.NoError(t, err)
+			require.GreaterOrEqual(t, len(summary.Eras), 2)
+			// The first era's own duration is what the degenerate row
+			// contributes, and it is where the second era starts.
+			require.Equal(
+				t,
+				testCase.wantRelTime,
+				summary.Eras[1].Start.RelativeTime,
+			)
+		})
+	}
+}
+
+// TestHardForkSummary_SkipsUnpopulatedEpochDuration covers an unpopulated row
+// in the middle of an era: it contributes nothing to the accumulated relative
+// time, and the era still closes on its populated siblings.
+func TestHardForkSummary_SkipsUnpopulatedEpochDuration(t *testing.T) {
+	t.Parallel()
+	ls := &LedgerState{
+		epochCache: []models.Epoch{
+			{
+				EpochId:       0,
+				StartSlot:     0,
+				SlotLength:    1_000,
+				LengthInSlots: 100,
+				EraId:         0,
+			},
+			{
+				EpochId:       1,
+				StartSlot:     100,
+				SlotLength:    0,
+				LengthInSlots: 100,
+				EraId:         0,
+			},
+			{
+				EpochId:       2,
+				StartSlot:     200,
+				SlotLength:    1_000,
+				LengthInSlots: 100,
+				EraId:         1,
+			},
+		},
+		currentEra: eras.EraDesc{Id: 1, Name: "Shelley"},
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(250, []byte("tip")),
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: minimalShelleyGenesisCfg(t),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	summary, err := ls.HardForkSummary()
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(summary.Eras), 2)
+	// Only epoch 0 contributes: 100 slots * 1000ms.
+	require.Equal(
+		t,
+		100*1_000*time.Millisecond,
+		summary.Eras[1].Start.RelativeTime,
+	)
+}
+
+func TestHardForkSummary_RejectsEpochDurationOverflow(t *testing.T) {
+	t.Parallel()
+	const slotLengthMilliseconds = uint64(1)
+	maxDurationMilliseconds := uint64(1<<63-1) / uint64(time.Millisecond)
+	if uint64(^uint(0)) < maxDurationMilliseconds+1 {
+		t.Skip("uint cannot represent the overflow boundary")
+	}
+
+	testCases := []struct {
+		name          string
+		lengthInSlots uint64
+		wantErr       bool
+	}{
+		{
+			name:          "maximum representable duration",
+			lengthInSlots: maxDurationMilliseconds,
+		},
+		{
+			name:          "multiplication overflow",
+			lengthInSlots: maxDurationMilliseconds + 1,
+			wantErr:       true,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			ls := &LedgerState{
+				epochCache: []models.Epoch{{
+					EpochId:       0,
+					StartSlot:     0,
+					SlotLength:    uint(slotLengthMilliseconds),
+					LengthInSlots: uint(testCase.lengthInSlots),
+					EraId:         1,
+				}},
+				currentTip: ochainsync.Tip{
+					Point: ocommon.NewPoint(0, []byte("tip")),
+				},
+			}
+			ls.publishSnapshotsLocked()
+
+			_, err := ls.HardForkSummary()
+			if testCase.wantErr {
+				require.Error(t, err)
+				require.ErrorContains(t, err, "duration")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestHardForkSummary_RejectsCumulativeDurationOverflow(t *testing.T) {
+	t.Parallel()
+	maxDurationMilliseconds := uint64(1<<63-1) / uint64(time.Millisecond)
+	perEpochLength := maxDurationMilliseconds/2 + 1
+	if uint64(^uint(0)) < perEpochLength {
+		t.Skip("uint cannot represent the overflow boundary")
+	}
+
+	ls := &LedgerState{
+		epochCache: []models.Epoch{
+			{
+				EpochId:       0,
+				StartSlot:     0,
+				SlotLength:    1,
+				LengthInSlots: uint(perEpochLength),
+				EraId:         1,
+			},
+			{
+				EpochId:       1,
+				StartSlot:     perEpochLength,
+				SlotLength:    1,
+				LengthInSlots: uint(perEpochLength),
+				EraId:         1,
+			},
+		},
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(0, []byte("tip")),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	_, err := ls.HardForkSummary()
+	require.Error(t, err)
+	require.ErrorContains(t, err, "duration")
+}
+
 // TestHardForkSummary_MissingShelleyGenesis tolerates a config without a
 // Shelley genesis: SystemStart stays at the
 // zero time. Callers that need wall-clock conversions must provide the

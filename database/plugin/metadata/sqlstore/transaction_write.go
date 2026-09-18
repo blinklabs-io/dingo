@@ -20,12 +20,24 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
-	sqlitequery "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/internal/query/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 )
+
+// transactionFee returns a transaction's fee, treating a nil fee as zero.
+// TransactionBodyBase.Fee returns nil, so any body that does not override it --
+// such as the synthetic transactions used to carry imported certificates --
+// would otherwise panic here. ledger/eras applies the same guard before
+// comparing a fee against the computed minimum.
+func transactionFee(transaction lcommon.Transaction) types.Uint64 {
+	fee := transaction.Fee()
+	if fee == nil {
+		return 0
+	}
+	return types.Uint64(fee.Uint64())
+}
 
 // transactionBatchAccumulator owns statements that are safe to reuse for one
 // metadata transaction.  API backfill keeps one SQL transaction open across a
@@ -313,7 +325,7 @@ func (s *Store) setTransactionWithAccumulator(
 					metadataValue,
 					point.Slot,
 					transaction.Type(),
-					decimalUint64(types.Uint64(transaction.Fee().Uint64())),
+					decimalUint64(transactionFee(transaction)),
 					decimalUint64(types.Uint64(collateralFee)),
 					decimalUint64(types.Uint64(transaction.TTL())),
 					index,
@@ -327,7 +339,7 @@ func (s *Store) setTransactionWithAccumulator(
 					metadataValue,
 					point.Slot,
 					transaction.Type(),
-					decimalUint64(types.Uint64(transaction.Fee().Uint64())),
+					decimalUint64(transactionFee(transaction)),
 					decimalUint64(types.Uint64(collateralFee)),
 					decimalUint64(types.Uint64(transaction.TTL())),
 					index,
@@ -356,6 +368,10 @@ func (s *Store) setTransactionWithAccumulator(
 			); err != nil {
 				return err
 			}
+			// Collected here and merged with this transaction's UTxO-driven
+			// refresh below rather than refreshed immediately: see the
+			// mergeStakeCredentialRefs call beside stakeRefs for why.
+			var certificateRefs []models.StakeCredentialRef
 			if transaction.IsValid() {
 				if err := s.applyTransactionWithdrawals(
 					ctx,
@@ -368,7 +384,8 @@ func (s *Store) setTransactionWithAccumulator(
 				); err != nil {
 					return err
 				}
-				certificateRefs, err := s.applyTransactionCertificates(
+				var err error
+				certificateRefs, err = s.applyTransactionCertificates(
 					ctx,
 					db,
 					transactionID,
@@ -380,13 +397,6 @@ func (s *Store) setTransactionWithAccumulator(
 				)
 				if err != nil {
 					return err
-				}
-				if !historicalBackfill {
-					if err := s.refreshRewardLiveStakeRefs(
-						ctx, db, certificateRefs, point.Slot,
-					); err != nil {
-						return err
-					}
 				}
 			}
 			collateralReturn := transaction.CollateralReturn()
@@ -535,8 +545,32 @@ FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 			if err != nil {
 				return err
 			}
-			stakeRefs = append(stakeRefs, producedStakeRefs...)
-			return s.refreshRewardLiveStakeRefs(ctx, db, stakeRefs, point.Slot)
+			// Merge and dedupe every credential this transaction touched --
+			// via its certificates, consumed inputs, and produced outputs --
+			// into one refresh pass. Each source is already deduped against
+			// itself (applyTransactionCertificates and queryUtxoStakeRefs
+			// both key by MapKey), but producedStakeRefs is not, and none of
+			// the three is deduped against the others: a transaction with
+			// several outputs to the same staking credential (an ordinary
+			// change pattern), or one that both spends from and pays back to
+			// the credential a certificate in the same transaction just
+			// registered or delegated, would otherwise run
+			// refreshRewardLiveStakeAggregate's sumCredentialUtxoStake scan
+			// once per occurrence instead of once per credential. Every one
+			// of this transaction's mutations is already applied to db by
+			// this point, so merging changes nothing about the refreshed
+			// values -- it only removes the repeat scans (see
+			// TestSetTransactionRefreshesSharedCredentialOnce).
+			return s.refreshRewardLiveStakeRefs(
+				ctx,
+				db,
+				mergeStakeCredentialRefs(
+					certificateRefs,
+					stakeRefs,
+					producedStakeRefs,
+				),
+				point.Slot,
+			)
 		},
 	)
 }
@@ -587,7 +621,7 @@ RETURNING id`,
 				point.Hash,
 				point.Slot,
 				transaction.Type(),
-				decimalUint64(types.Uint64(transaction.Fee().Uint64())),
+				decimalUint64(transactionFee(transaction)),
 				decimalUint64(types.Uint64(collateralFee)),
 				decimalUint64(types.Uint64(transaction.TTL())),
 				index,
@@ -596,18 +630,19 @@ RETURNING id`,
 			if err != nil {
 				return err
 			}
-			stakeRefs := make([]models.StakeCredentialRef, 0)
+			var certificateRefs []models.StakeCredentialRef
 			if transaction.IsValid() {
-				certificateRefs, err := s.applyTransactionCertificates(
+				var err error
+				certificateRefs, err = s.applyTransactionCertificates(
 					ctx, db, transactionID, transaction.Certificates(),
 					point, index, certDeposits, allowUnknownDeposits,
 				)
 				if err != nil {
 					return err
 				}
-				stakeRefs = append(stakeRefs, certificateRefs...)
 			}
 			collateralReturn := transaction.CollateralReturn()
+			producedStakeRefs := make([]models.StakeCredentialRef, 0)
 			for _, produced := range transaction.Produced() {
 				model, err := models.UtxoLedgerToModel(produced, point.Slot)
 				if err != nil {
@@ -628,13 +663,27 @@ RETURNING id`,
 					return err
 				}
 				if len(model.StakingKey) > 0 {
-					stakeRefs = append(stakeRefs, models.NewStakeCredentialRef(
-						model.CredentialTag,
-						model.StakingKey,
-					))
+					producedStakeRefs = append(
+						producedStakeRefs,
+						models.NewStakeCredentialRef(
+							model.CredentialTag,
+							model.StakingKey,
+						),
+					)
 				}
 			}
-			return s.refreshRewardLiveStakeRefs(ctx, db, stakeRefs, point.Slot)
+			// Merge and dedupe as setTransaction does: certificateRefs and
+			// producedStakeRefs are each already deduped against themselves,
+			// but not against each other, and a certificate touching the same
+			// credential as one of this gap block's produced outputs would
+			// otherwise trigger a repeat sumCredentialUtxoStake scan for the
+			// same final total.
+			return s.refreshRewardLiveStakeRefs(
+				ctx,
+				db,
+				mergeStakeCredentialRefs(certificateRefs, producedStakeRefs),
+				point.Slot,
+			)
 		},
 	)
 }
@@ -703,7 +752,15 @@ RETURNING id`,
 					outputs[i].StakingKey,
 				))
 			}
-			return s.refreshRewardLiveStakeRefs(ctx, db, refs, 0)
+			// Genesis outputs commonly repeat a staking credential across
+			// several UTxOs; dedupe as setTransaction does so each credential
+			// gets one sumCredentialUtxoStake scan instead of one per output.
+			return s.refreshRewardLiveStakeRefs(
+				ctx,
+				db,
+				mergeStakeCredentialRefs(refs),
+				0,
+			)
 		},
 	)
 }
@@ -858,6 +915,7 @@ RETURNING id`
 // re-parsing and re-planning the identical statement text on every UTxO
 // output insert.
 const insertUtxoQueryIgnoreConflict = `
+-- name: CreateUtxoIfAbsent :one
 INSERT INTO utxo (
     transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
     staking_key, credential_tag, datum_hash, spent_at_tx_id,
@@ -866,6 +924,17 @@ INSERT INTO utxo (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (tx_id, output_idx) DO NOTHING
 RETURNING id`
+
+// importAssetQuery is the conflict-tolerant asset INSERT used by both the
+// snapshot importer and insertUtxoModel. It is a fixed query shape on every
+// imported asset, so keep one prepared statement for the Store lifetime just
+// like the surrounding UTxO importer statements.
+const importAssetQuery = `
+INSERT INTO asset (
+    name, name_hex, policy_id, fingerprint, utxo_id, amount
+) VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT (name, policy_id, utxo_id) DO NOTHING
+`
 
 // getAssetIDQuery looks up the id of the asset row insertUtxoModel's
 // ImportAsset call just created (or matched via its own ON CONFLICT), so
@@ -948,22 +1017,18 @@ WHERE id = ?`,
 	if err := persistUtxoPointer(ctx, db, id, utxo.Pointer); err != nil {
 		return err
 	}
-	q := s.operationalQueries(db)
 	for i := range utxo.Assets {
 		asset := &utxo.Assets[i]
 		asset.UtxoID = utxo.ID
-		err := q.ImportAsset(
-			ctx,
-			sqlitequery.ImportAssetParams{
-				Name:        asset.Name,
-				NameHex:     asset.NameHex,
-				PolicyID:    asset.PolicyId,
-				Fingerprint: asset.Fingerprint,
-				UtxoID:      sql.NullInt64{Int64: id, Valid: true},
-				Amount: sql.NullString{
-					String: decimalUint64(asset.Amount),
-					Valid:  true,
-				},
+		_, err := s.execCached(ctx, db, importAssetQuery,
+			asset.Name,
+			asset.NameHex,
+			asset.PolicyId,
+			asset.Fingerprint,
+			sql.NullInt64{Int64: id, Valid: true},
+			sql.NullString{
+				String: decimalUint64(asset.Amount),
+				Valid:  true,
 			},
 		)
 		if err != nil {

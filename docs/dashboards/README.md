@@ -7,7 +7,7 @@ Monitoring dashboards for [Dingo](https://github.com/blinklabs-io/dingo), the Go
 | Dashboard | File | Description |
 |-----------|------|-------------|
 | **Node Overview** | `node-overview.json` | At-a-glance header (epoch, slot, tip gap, density, blockfetch, mempool, KES, peers, storage, runtime), block height, epoch progress, forging stats |
-| **Block Production** | `block-production.json` | Forge latency heatmap, block delay CDFs, forge rates, KES lifecycle |
+| **Block Production** | `block-production.json` | Forge latency heatmap, block delay CDFs, forge rates, KES lifecycle, per-block composition vs. SQL query volume |
 | **Peer Health** | `peer-health.json` | Hot/warm/cold peers, connection types, peer state timeseries, promotions/demotions, network I/O |
 | **Mempool** | `mempool.json` | Pending TXs, mempool size, TX lifecycle, CBOR cache, event bus |
 | **Resource Usage** | `resources.json` | CPU, memory, GC heatmap, disk I/O, IOPS, PSI pressure, Badger, file descriptors |

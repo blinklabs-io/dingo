@@ -24,7 +24,7 @@ import (
 )
 
 // Keep the default SQLite build free of optional MySQL driver dependencies.
-func isMySQLDDLAlreadyApplied(context.Context, *sql.Conn, string, error) bool {
+func isMySQLDDLAlreadyApplied(context.Context, ddlExecer, string, error) bool {
 	return false
 }
 
@@ -44,7 +44,7 @@ var mysqlIndexPrefixPatternDefault = regexp.MustCompile(`\(\d+\)?`)
 // present before treating the error as an idempotent replay.
 func isMySQLDDLAlreadyAppliedOnConn(
 	ctx context.Context,
-	conn *sql.Conn,
+	conn ddlExecer,
 	statement string,
 	err error,
 ) bool {
@@ -102,7 +102,7 @@ LIMIT 1`, definition[3], definition[2]).Scan(&nonUnique); err != nil {
 // is treated as an idempotent replay.
 func mysqlColumnAlreadyPresentDefault(
 	ctx context.Context,
-	conn *sql.Conn,
+	conn ddlExecer,
 	statement string,
 ) bool {
 	table, column, definition, ok := parseAddColumnStatement(statement)
@@ -120,7 +120,7 @@ LIMIT 1`, table, column).Scan(&reported) == nil &&
 
 func mysqlIndexExistsDefault(
 	ctx context.Context,
-	conn *sql.Conn,
+	conn ddlExecer,
 	table, name string,
 ) bool {
 	var exists int

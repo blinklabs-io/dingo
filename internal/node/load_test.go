@@ -53,6 +53,117 @@ func TestExtractHeaderCbor(t *testing.T) {
 	}
 }
 
+func immutableDecodeBenchmarkBlocks(t *testing.T) []immutable.Block {
+	t.Helper()
+	immutableDir := filepath.Join(
+		"..", "..", "database", "immutable", "testdata",
+	)
+	imm, err := immutable.New(immutableDir)
+	require.NoError(t, err)
+	iter, err := imm.BlocksFromPoint(ocommon.Point{})
+	require.NoError(t, err)
+	defer iter.Close()
+	blocks := make([]immutable.Block, 0, loadBlockBatchSize)
+	for len(blocks) < cap(blocks) {
+		block, err := iter.Next()
+		require.NoError(t, err)
+		if block == nil {
+			break
+		}
+		blocks = append(blocks, *block)
+	}
+	require.Len(t, blocks, loadBlockBatchSize)
+	return blocks
+}
+
+func TestDecodeImmutableBlockBatchPreservesOrder(t *testing.T) {
+	t.Parallel()
+	blocks := immutableDecodeBenchmarkBlocks(t)
+	verifyCfg := lcommon.VerifyConfig{SkipBodyHashValidation: true}
+	serial, err := decodeImmutableBlockBatch(
+		context.Background(), blocks, verifyCfg, 1,
+	)
+	require.NoError(t, err)
+	for _, workers := range []int{2, 4, 8} {
+		got, err := decodeImmutableBlockBatch(
+			context.Background(), blocks, verifyCfg, workers,
+		)
+		require.NoError(t, err)
+		require.Len(t, got, len(serial))
+		for i := range serial {
+			require.Equal(t, serial[i].Hash(), got[i].Hash())
+			require.Equal(t, serial[i].SlotNumber(), got[i].SlotNumber())
+		}
+	}
+}
+
+func TestDecodeImmutableBlockBatchCancellation(t *testing.T) {
+	t.Parallel()
+	blocks := immutableDecodeBenchmarkBlocks(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := decodeImmutableBlockBatch(
+		ctx,
+		blocks,
+		lcommon.VerifyConfig{SkipBodyHashValidation: true},
+		4,
+	)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestDecodeImmutableBlockBatchDecodeErrorCancelsWorkers(t *testing.T) {
+	t.Parallel()
+	blocks := immutableDecodeBenchmarkBlocks(t)
+	blocks[len(blocks)/2].Cbor = []byte{0xff}
+	_, err := decodeImmutableBlockBatch(
+		context.Background(),
+		blocks,
+		lcommon.VerifyConfig{SkipBodyHashValidation: true},
+		8,
+	)
+	require.Error(t, err)
+}
+
+func BenchmarkDecodeImmutableBlockBatch(b *testing.B) {
+	immutableDir := filepath.Join(
+		"..", "..", "database", "immutable", "testdata",
+	)
+	imm, err := immutable.New(immutableDir)
+	if err != nil {
+		b.Fatal(err)
+	}
+	iter, err := imm.BlocksFromPoint(ocommon.Point{})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer iter.Close()
+	blocks := make([]immutable.Block, 0, loadBlockBatchSize)
+	for len(blocks) < cap(blocks) {
+		block, err := iter.Next()
+		if err != nil {
+			b.Fatal(err)
+		}
+		if block == nil {
+			break
+		}
+		blocks = append(blocks, *block)
+	}
+	verifyCfg := lcommon.VerifyConfig{SkipBodyHashValidation: true}
+	for _, workers := range []int{1, 2, 4, 8} {
+		b.Run(fmt.Sprintf("workers=%d", workers), func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				if _, err := decodeImmutableBlockBatch(
+					context.Background(), blocks, verifyCfg, workers,
+				); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 func TestCborArrayHeaderLen(t *testing.T) {
 	t.Parallel()
 

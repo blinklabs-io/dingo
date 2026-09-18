@@ -75,8 +75,10 @@ func (OutputSetEmptyByronError) Error() string {
 	return "transaction has no outputs"
 }
 
-// OutputNotPositiveByronError is returned when a Byron transaction
-// output has a non-positive value.
+// OutputNotPositiveByronError is retained for API compatibility.
+//
+// Deprecated: Byron consensus permits zero-value outputs, so validation no
+// longer returns this error.
 type OutputNotPositiveByronError struct {
 	Index  int
 	Amount *big.Int
@@ -85,6 +87,21 @@ type OutputNotPositiveByronError struct {
 func (e OutputNotPositiveByronError) Error() string {
 	return fmt.Sprintf(
 		"output %d has non-positive value: %s",
+		e.Index,
+		e.Amount.String(),
+	)
+}
+
+// OutputNegativeByronError is returned when a Byron transaction output has a
+// negative value.
+type OutputNegativeByronError struct {
+	Index  int
+	Amount *big.Int
+}
+
+func (e OutputNegativeByronError) Error() string {
+	return fmt.Sprintf(
+		"output %d has negative value: %s",
 		e.Index,
 		e.Amount.String(),
 	)
@@ -194,7 +211,7 @@ type byronValidationRuleFunc func(tx lcommon.Transaction) error
 var byronValidationRules = []byronValidationRuleFunc{
 	byronValidateInputsNotEmpty,
 	byronValidateOutputsNotEmpty,
-	byronValidateOutputsPositive,
+	byronValidateOutputsNonNegative,
 	byronValidateNoDuplicateInputs,
 }
 
@@ -229,19 +246,15 @@ func byronValidateOutputsNotEmpty(
 	return nil
 }
 
-// byronValidateOutputsPositive ensures that all outputs have
-// positive values.
-func byronValidateOutputsPositive(
+// byronValidateOutputsNonNegative ensures that output amounts are not
+// negative. Zero-value outputs are valid in Byron.
+func byronValidateOutputsNonNegative(
 	tx lcommon.Transaction,
 ) error {
-	zero := new(big.Int)
 	for i, output := range tx.Outputs() {
 		amount := output.Amount()
-		if amount == nil || amount.Cmp(zero) <= 0 {
-			if amount == nil {
-				amount = new(big.Int)
-			}
-			return OutputNotPositiveByronError{
+		if amount != nil && amount.Sign() < 0 {
+			return OutputNegativeByronError{
 				Index:  i,
 				Amount: amount,
 			}
