@@ -147,7 +147,10 @@ func TestDecodeImmutableBlockBatchDecodeErrorCancelsWorkers(t *testing.T) {
 			}
 			return nil, decodeErr
 		}
-		workersReady <- struct{}{}
+		select {
+		case workersReady <- struct{}{}:
+		default:
+		}
 		select {
 		case <-ctx.Done():
 			cancelOnce.Do(func() { close(cancelObserved) })
