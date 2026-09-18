@@ -116,10 +116,44 @@ func TestWalletRollbackRestoresFundingForNextPayment(t *testing.T) {
 	w.ReconcileSnapshot([]UTxO{source}, map[string]bool{"tx": false})
 	require.Len(t, w.PendingIDs(), 1, "one absent observation is ambiguous")
 	_, _, err = w.SelectCoins(1_000_000)
-	require.ErrorIs(t, err, ErrInsufficientFunds, "ambiguous input remains reserved")
+	require.ErrorIs(
+		t,
+		err,
+		ErrInsufficientFunds,
+		"ambiguous input remains reserved",
+	)
 	w.ReconcileSnapshot([]UTxO{source}, map[string]bool{"tx": false})
-	require.Empty(t, w.PendingIDs(), "rejected records retire after the grace observation")
+	require.Empty(
+		t,
+		w.PendingIDs(),
+		"rejected records retire after the grace observation",
+	)
 	selected, _, err := w.SelectCoins(1_000_000)
+	require.NoError(t, err)
+	require.Equal(t, source.TxHash, selected[0].TxHash)
+}
+
+func TestWalletAbsenceGraceResetsAfterMempoolReappearance(t *testing.T) {
+	w := NewWallet()
+	source := makeUTxO("funding", 0, 5_000_000)
+	w.Add(source)
+	inputs, _, err := w.SelectCoins(1_000_000)
+	require.NoError(t, err)
+	w.Reserve("tx", inputs, nil, 0)
+
+	w.ReconcileSnapshot([]UTxO{source}, map[string]bool{"tx": false})
+	require.Len(t, w.PendingIDs(), 1)
+	w.ReconcileSnapshot([]UTxO{source}, map[string]bool{"tx": true})
+	w.ReconcileSnapshot([]UTxO{source}, map[string]bool{"tx": false})
+	require.Len(t, w.PendingIDs(), 1,
+		"each transition from present to absent gets a fresh grace observation")
+	_, _, err = w.SelectCoins(1)
+	require.ErrorIs(t, err, ErrInsufficientFunds,
+		"the reappearing transaction's source input must remain reserved")
+
+	w.ReconcileSnapshot([]UTxO{source}, map[string]bool{"tx": false})
+	require.Empty(t, w.PendingIDs())
+	selected, _, err := w.SelectCoins(1)
 	require.NoError(t, err)
 	require.Equal(t, source.TxHash, selected[0].TxHash)
 }
