@@ -3305,6 +3305,97 @@ consensus-critical question is actually asked, using the boundary the node
 already persists for exactly this purpose, avoids adding a row that other
 `added_slot`-scoped readers have to reason about.
 
+### `GetPoolByVrfKeyHash`
+
+Backs `LedgerView.IsVrfKeyInUse`, the reverse of the pair above: given a VRF
+key hash, find whichever pool currently claims it, respecting the same
+`psStakePools`/`psFutureStakePoolParams` deferral instead of the denormalized
+`pool.vrf_key_hash` column, which the certificate-application path
+(`applyPoolRegistrationCertificate`) always overwrites immediately regardless
+of epoch boundary. Reading that column directly let a pool's old VRF key
+appear free to a different pool the moment a re-registration was applied, even
+though cardano-ledger keeps the old key reserved until the next epoch boundary
+merges `psFutureStakePoolParams` into `psStakePools` (issue #4352).
+
+Takes the current epoch's start slot (`epochStartSlot`) and resolves a claim
+in two tiers, checked in order:
+
+1. **Effective owner.** The pool whose most recent registration strictly
+   before `epochStartSlot` has this key (`pre_boundary`), falling back to a
+   candidate's globally earliest registration (`earliest`) when it has none
+   before the boundary -- the same first-registration-is-immediate exception
+   `GetPoolEarliestVrfKeyHashAtSlot` encodes, needed here so a pool's
+   first-ever registration, submitted mid-epoch, still reserves its key
+   against every other pool immediately rather than only from the next
+   boundary.
+2. **Same-epoch claimant.** Any pool with *any* registration this epoch
+   (`added_slot >= epochStartSlot`) naming this key, even one since
+   superseded by a later same-epoch re-registration. Consulted only when (1)
+   finds nothing. This tier exists because `psVRFKeyHashes` retains every key
+   a pool ever placed in `psFutureStakePoolParams` during the epoch, not only
+   the current pending one: a pool cycling `A -> B -> C` within one epoch must
+   still be refused a later same-epoch reuse of `B`. `IsVrfKeyInUse`'s caller
+   (gouroboros's `validatePoolRegistration`) special-cases
+   `owningPool == cert.Operator` by comparing against `PoolCurrentState`
+   (the pool's latest registration, `C` here) rather than its effective one;
+   reporting `B` as claimed by that same pool, not free, is what lets that
+   comparison catch the reuse.
+
+Both candidate sets are pre-filtered to pool IDs with *any* historical
+`pool_registration` row naming the queried key, so the query only walks a
+pool's full history when it has ever plausibly held that key.
+
+The query returns every matching pool ID ranked by tier (1 before 2, `pool_id`
+ascending within a tier), not a single winner picked by `LIMIT 1`: a long-
+retired pool's own last-ever registration can still satisfy tier 1's
+per-candidate effective-key computation (registration history and retirement
+are tracked independently, so retiring never rewrites what a pool's
+registrations said), so a retired candidate and a different, genuinely active
+pool that later re-registered the same, by-then-free key can both appear as
+candidates for one lookup. The Go loop tries each ranked candidate in turn and
+returns the first one the query already confirms is active, rather than
+checking retirement on only whichever candidate a single `ORDER BY ... LIMIT 1`
+happened to pick (caught by review on this PR;
+`TestGetPoolByVrfKeyHashSkipsRetiredCandidateForActiveOwner`).
+
+Retirement is resolved against `epochStartSlot`'s own epoch (`epoch_bound`),
+not the live database tip, via a `pool_active` CTE applied to *both* tiers --
+not only tier 1, since restricting it to tier 1 alone still let a retired
+pool's same-epoch registration leak through tier 2 unfiltered. `pool_active`
+mirrors `GetActivePoolKeyHashesAtSlot`'s precedence rule (a later registration
+cancels an earlier retirement; a retirement whose target epoch is still ahead
+of `epoch_bound` has not taken effect), compared against each candidate's own
+`effective_reg` row rather than a fresh `<=`-bounded lookup. This exists
+because a pool that retires and later submits a fresh registration for a
+*different* key un-retires via that new registration -- cardano-ledger treats
+it as a first registration, not a deferred re-registration, since the pool had
+left `psStakePools` -- and checking retirement against "now" (the earlier
+`activePoolOrNil` call this replaced) let that pool's stale, pre-retirement
+registration for its *old* key still resolve as active, reporting the old key
+in use when the pool no longer held it: this method's own bug class,
+reintroduced (caught by review on this PR;
+`TestGetPoolByVrfKeyHashFreesKeyAfterRetirementThenDifferentKeyReRegistration`).
+`epoch_bound` resolves to `NULL`, not an error, when no epoch row covers
+`epochStartSlot`; a retirement is then never treated as confirmed-effective,
+failing toward "still active" rather than incorrectly freeing a key.
+
+`epochStartSlot` must be pinned once at the start of the validation or query
+that calls this, not re-read from a live snapshot on every call:
+`LedgerView.epochStartSlot` (see `ledger/view.go`) is set at every real
+construction site (`NewView`, `ledgerProcessBlock`, `validateTxCore`,
+`ValidateTxWithOverlay`, `EvaluateTx`) from the same snapshot that pins
+`committeeEpoch` and `pp` alongside it, for the same reason: a long-running
+validation (e.g. evaluating scripts) can span a writer publishing a newer
+epoch boundary, and reading it live would let one certificate's deferral
+check disagree with another's in the same transaction or block, or with
+itself across repeated calls (caught by review on this PR;
+`TestLedgerViewIsVrfKeyInUseIgnoresConcurrentSnapshotRepublish`). The pin is
+also verified through each real construction site directly rather than only
+against a hand-set field on a bare `&LedgerView{}`
+(`TestLedgerStateNewViewPinsEpochStartSlot`,
+`TestLedgerStateValidateTxPinsEpochStartSlot`,
+`TestLedgerStateEvaluateTxPinsEpochStartSlot`).
+
 ### `GetPoolsRetiringAtEpoch`
 
 Pools whose effective retirement takes effect at a given epoch, with the reward
