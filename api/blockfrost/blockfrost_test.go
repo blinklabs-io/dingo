@@ -3636,6 +3636,26 @@ func TestNodeAdapterKeyScriptStakeAddress(t *testing.T) {
 	assert.Equal(t, keyStakeHash, keyStakeAddr.StakeKeyHash().Bytes())
 }
 
+func TestKeyScriptStakeAddressDerivation(t *testing.T) {
+	// Keep direct coverage of the script-credential branch used when the
+	// adapter derives a stake address from a base address.
+	stakeScriptHash := bytes.Repeat([]byte{0x02}, lcommon.AddressHashSize)
+
+	encoded, err := stakeAddressFromCredential(
+		lcommon.Credential{
+			CredType:   lcommon.CredentialTypeScriptHash,
+			Credential: lcommon.CredentialHash(stakeScriptHash),
+		},
+		lcommon.AddressNetworkTestnet,
+	)
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(encoded, "stake_test17"))
+
+	stakeAddr, err := lcommon.NewAddress(encoded)
+	require.NoError(t, err)
+	assert.Equal(t, stakeScriptHash, stakeAddr.StakeKeyHash().Bytes())
+}
+
 func TestHandleAddress(t *testing.T) {
 	t.Parallel()
 
