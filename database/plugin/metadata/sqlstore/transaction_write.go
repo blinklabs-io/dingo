@@ -13,7 +13,6 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -1260,29 +1259,11 @@ WHERE credential_tag = ? AND staking_key = ?`,
 				tag,
 				stakeKey.Bytes(),
 			).Scan(&accountID, &reward, &fallbackActive)
-			rowExists := true
 			if errors.Is(err, sql.ErrNoRows) {
-				rowExists = false
 				reward = sql.NullString{}
 			} else if err != nil {
 				return err
 			}
-			// TEMPORARY DIAGNOSTIC for issue #3788: distinguish "no account
-			// row exists at all" from "a row exists but is inactive" at the
-			// exact moment a historical-backfill withdrawal can't resolve an
-			// active account. Remove once the real cause is confirmed.
-			s.logger.Warn(
-				"historical backfill withdrawal found no active account",
-				"component", "backfill",
-				"credential_tag", tag,
-				"staking_key", hex.EncodeToString(stakeKey.Bytes()),
-				"tx_hash", hex.EncodeToString(txHash),
-				"slot", slot,
-				"amount", amount.String(),
-				"account_row_exists", rowExists,
-				"account_active", fallbackActive.Bool,
-				"account_reward", reward.String,
-			)
 		} else if err != nil {
 			return err
 		}
