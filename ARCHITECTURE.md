@@ -729,7 +729,9 @@ separate MEMPOOL text constructor. Only an actual empty-input validation error
 is encoded as `InputSetEmpty`. The nested UTXOW payload carries its constructor
 directly, with the era in the outer hard-fork envelope. Dijkstra adds the
 MEMPOOL LedgerFailure and LEDGER UtxowFailure wrappers around that payload.
-An error without a supported era-specific representation terminates
+Framing faults and node-side admission faults remain generic, non-ledger reject
+reasons; admission faults use a sanitized message rather than exposing mempool
+occupancy. An error without a supported era-specific representation terminates
 the connection through the protocol error path instead of fabricating a ledger
 failure. Clients must reconnect after that termination.
 

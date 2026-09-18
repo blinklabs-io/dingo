@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
@@ -85,7 +86,7 @@ func (o *Ouroboros) localtxsubmissionServerSubmitTx(
 			"role", "server",
 			"connection_id", ctx.ConnectionId.String(),
 		)
-		return newLocalTxSubmissionRejectReason(tx.EraId, err)
+		return localTxSubmissionRejectReason(tx.EraId, err)
 	}
 	return nil
 }
@@ -105,29 +106,55 @@ type unrepresentableTxSubmissionError struct {
 	err error
 }
 
+func localTxSubmissionRejectReason(eraId uint16, err error) error {
+	if isLocalTxSubmissionInfrastructureError(err) {
+		return errors.New("local transaction submission unavailable")
+	}
+	return newLocalTxSubmissionRejectReason(eraId, err)
+}
+
 func newLocalTxSubmissionRejectReason(
 	eraId uint16,
 	err error,
 ) error {
+	if err == nil {
+		return errors.New("transaction rejection has no cause")
+	}
 	if _, ok := errors.AsType[cborRejectReason](err); ok {
 		return err
 	}
 	var inputSetEmpty shelley.InputSetEmptyUtxoError
 	var inputSetEmptyPtr *shelley.InputSetEmptyUtxoError
-	if errors.As(err, &inputSetEmpty) ||
-		errors.As(err, &inputSetEmptyPtr) {
-		switch eraId {
-		case gledger.EraIdShelley, gledger.EraIdAllegra, gledger.EraIdMary,
-			gledger.EraIdAlonzo, gledger.EraIdBabbage, gledger.EraIdConway,
-			gledger.EraIdDijkstra:
-			return &hardForkApplyTxError{
-				era:           eraId,
-				err:           err,
-				inputSetEmpty: true,
+	isInputSetEmpty := errors.As(err, &inputSetEmpty) ||
+		errors.As(err, &inputSetEmptyPtr)
+	switch eraId {
+	case gledger.EraIdConway, gledger.EraIdDijkstra:
+		return &hardForkApplyTxError{
+			era:           eraId,
+			err:           err,
+			inputSetEmpty: isInputSetEmpty,
+		}
+	default:
+		if isInputSetEmpty {
+			switch eraId {
+			case gledger.EraIdShelley, gledger.EraIdAllegra, gledger.EraIdMary,
+				gledger.EraIdAlonzo, gledger.EraIdBabbage:
+				return &hardForkApplyTxError{
+					era:           eraId,
+					err:           err,
+					inputSetEmpty: true,
+				}
 			}
 		}
 	}
 	return &unrepresentableTxSubmissionError{err: err}
+}
+
+func isLocalTxSubmissionInfrastructureError(err error) bool {
+	var fullErr *mempool.MempoolFullError
+	return errors.Is(err, mempool.ErrNilValidator) ||
+		errors.Is(err, mempool.ErrMempoolStopped) ||
+		errors.As(err, &fullErr)
 }
 
 func (e *hardForkApplyTxError) Error() string {
@@ -168,6 +195,9 @@ func (e *hardForkApplyTxError) MarshalCBOR() ([]byte, error) {
 }
 
 func (e *unrepresentableTxSubmissionError) Error() string {
+	if e.err == nil {
+		return "transaction rejection has no cause"
+	}
 	return e.err.Error()
 }
 
@@ -183,11 +213,10 @@ func (e *unrepresentableTxSubmissionError) MarshalCBOR() ([]byte, error) {
 }
 
 const (
-	conwayLedgerMempoolFailure    = 7
-	dijkstraMempoolFailure        = 2
-	dijkstraMempoolLedgerFailure  = 1
-	dijkstraLedgerUtxowFailure    = 1
-	dijkstraUtxoFailureInputEmpty = 4
+	conwayLedgerMempoolFailure   = 7
+	dijkstraMempoolFailure       = 2
+	dijkstraMempoolLedgerFailure = 1
+	dijkstraLedgerUtxowFailure   = 1
 )
 
 func (e *hardForkApplyTxError) utxowFailure() []any {
@@ -220,8 +249,8 @@ func (e *hardForkApplyTxError) utxowFailure() []any {
 		}
 	case gledger.EraIdDijkstra:
 		return []any{
-			0,
-			[]any{dijkstraUtxoFailureInputEmpty},
+			gledger.ConwayUtxowUtxoFailure,
+			[]any{gledger.ConwayUtxoInputSetEmptyUTxO},
 		}
 	default:
 		return nil

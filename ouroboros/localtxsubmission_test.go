@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/mempool"
 	gouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/connection"
@@ -60,23 +61,63 @@ func TestLocalTxSubmissionServerSubmitTx_NonByteContentReturnsError(
 	require.NotPanics(t, func() {
 		err := o.localtxsubmissionServerSubmitTx(ctx, tx)
 		require.Error(t, err)
+		var reason cborRejectReason
+		require.NotErrorAs(t, err, &reason,
+			"a framing fault must not be encoded as a ledger rejection")
 	})
 }
 
-func TestLocalTxSubmissionRejectReason_ConwayGenericIsUnrepresentable(
+func TestLocalTxSubmissionRejectReason_ConwayGenericUsesMempoolFailure(
 	t *testing.T,
 ) {
 	t.Parallel()
 
 	err := newLocalTxSubmissionRejectReason(
 		gledger.EraIdConway,
-		errors.New("plain validation failure"),
+		errors.New("generic rejection"),
 	)
-	reason, ok := err.(cborRejectReason)
-	require.True(t, ok)
+	var reason cborRejectReason
+	require.ErrorAs(t, err, &reason)
+	wire, marshalErr := reason.MarshalCBOR()
+	require.NoError(t, marshalErr)
+	expected, decodeErr := hex.DecodeString(
+		"8182068182077167656e657269632072656a656374696f6e",
+	)
+	require.NoError(t, decodeErr)
+	assert.Equal(t, expected, wire)
+}
 
-	_, marshalErr := reason.MarshalCBOR()
-	require.ErrorContains(t, marshalErr, "not representable")
+func TestLocalTxSubmissionRejectReason_NilCauseIsGeneric(t *testing.T) {
+	t.Parallel()
+
+	err := newLocalTxSubmissionRejectReason(gledger.EraIdConway, nil)
+	require.Error(t, err)
+	var reason cborRejectReason
+	require.NotErrorAs(t, err, &reason)
+}
+
+func TestLocalTxSubmissionInfrastructureErrorsStayGeneric(t *testing.T) {
+	t.Parallel()
+
+	for _, err := range []error{
+		mempool.ErrNilValidator,
+		fmt.Errorf("wrapped: %w", mempool.ErrMempoolStopped),
+		&mempool.MempoolFullError{CurrentSize: 10, TxSize: 2, Capacity: 10},
+	} {
+		require.True(t, isLocalTxSubmissionInfrastructureError(err))
+		rejectErr := localTxSubmissionRejectReason(gledger.EraIdConway, err)
+		require.EqualError(
+			t,
+			rejectErr,
+			"local transaction submission unavailable",
+		)
+		var reason cborRejectReason
+		require.NotErrorAs(t, rejectErr, &reason,
+			"node faults must not masquerade as Conway ledger failures")
+	}
+	require.False(t, isLocalTxSubmissionInfrastructureError(
+		errors.New("ledger validation failed"),
+	))
 }
 
 func TestLocalTxSubmissionRejectReason_UnsupportedGenericIsUnrepresentable(
@@ -118,9 +159,16 @@ func TestLocalTxSubmissionRejectReason_DijkstraMempoolFailure(t *testing.T) {
 			cause:    shelley.InputSetEmptyUtxoError{},
 			expected: "818207818201820182008104",
 		},
+		"generic rejection": {
+			cause:    errors.New("generic rejection"),
+			expected: "8182078182027167656e657269632072656a656374696f6e",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			err := newLocalTxSubmissionRejectReason(gledger.EraIdDijkstra, tc.cause)
+			err := newLocalTxSubmissionRejectReason(
+				gledger.EraIdDijkstra,
+				tc.cause,
+			)
 			var reason cborRejectReason
 			require.ErrorAs(t, err, &reason)
 			wire, marshalErr := reason.MarshalCBOR()
@@ -129,6 +177,41 @@ func TestLocalTxSubmissionRejectReason_DijkstraMempoolFailure(t *testing.T) {
 			require.NoError(t, decodeErr)
 			assert.Equal(t, expected, wire)
 		})
+	}
+}
+
+func TestLocalTxSubmissionRejectReason_GenericCauseSurvivesClientDecode(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		era        uint16
+		failureTag int
+	}{
+		{era: gledger.EraIdConway, failureTag: conwayLedgerMempoolFailure},
+		{era: gledger.EraIdDijkstra, failureTag: dijkstraMempoolFailure},
+	} {
+		reason := newLocalTxSubmissionRejectReason(
+			tc.era,
+			errors.New("generic rejection"),
+		)
+		var cborReason cborRejectReason
+		require.ErrorAs(t, reason, &cborReason)
+		wire, err := cborReason.MarshalCBOR()
+		require.NoError(t, err)
+
+		decoded, err := gledger.NewTxSubmitErrorFromCbor(wire)
+		require.NoError(t, err)
+		var validation *gledger.ShelleyTxValidationError
+		require.ErrorAs(t, decoded, &validation)
+		require.Len(t, validation.Err.Failures, 1)
+		unknown, ok := validation.Err.Failures[0].(*gledger.UnknownApplyTxFailureError)
+		require.True(t, ok)
+		assert.Equal(t, uint8(tc.era), unknown.Era)
+		assert.Equal(t, tc.failureTag, unknown.FailureType)
+		assert.Contains(t, string(unknown.Cbor), "generic rejection",
+			"the pinned client preserves the constructor payload as raw CBOR")
 	}
 }
 
@@ -309,7 +392,7 @@ func TestLocalTxSubmissionServer_ConwayRejectThenAccept(t *testing.T) {
 			if calls == 1 {
 				return newLocalTxSubmissionRejectReason(
 					gledger.EraIdConway,
-					shelley.InputSetEmptyUtxoError{},
+					errors.New("generic rejection"),
 				)
 			}
 			return nil
@@ -331,7 +414,7 @@ func TestLocalTxSubmissionServer_ConwayRejectThenAccept(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint(olocaltxsubmission.MessageTypeRejectTx), firstType)
 	expectedReject, err := hex.DecodeString(
-		"81820681820182008104",
+		"8182068182077167656e657269632072656a656374696f6e",
 	)
 	require.NoError(t, err)
 	assert.Equal(t, expectedReject, []byte(firstItems[1]))
@@ -361,7 +444,7 @@ func TestLocalTxSubmissionServer_DijkstraRejectThenAccept(t *testing.T) {
 			calls++
 			if calls == 1 {
 				return newLocalTxSubmissionRejectReason(
-					gledger.EraIdDijkstra, shelley.InputSetEmptyUtxoError{},
+					gledger.EraIdDijkstra, errors.New("generic rejection"),
 				)
 			}
 			return nil
@@ -382,7 +465,7 @@ func TestLocalTxSubmissionServer_DijkstraRejectThenAccept(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint(olocaltxsubmission.MessageTypeRejectTx), firstType)
 	expectedReject, err := hex.DecodeString(
-		"818207818201820182008104",
+		"8182078182027167656e657269632072656a656374696f6e",
 	)
 	require.NoError(t, err)
 	assert.Equal(t, expectedReject, []byte(firstItems[1]))
