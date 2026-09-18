@@ -143,6 +143,10 @@ func (o *Ouroboros) registerLeiosServeWaiter(
 	checkLiveness ...bool,
 ) (done <-chan struct{}, cancel func()) {
 	ch := make(chan struct{})
+	if owner == nil {
+		close(ch)
+		return ch, func() {}
+	}
 	o.leiosServeWaitersMu.Lock()
 	if o.leiosServeWaiters == nil {
 		o.leiosServeWaiters = make(
@@ -206,9 +210,9 @@ func (o *Ouroboros) releaseLeiosServeWaiter(
 	}
 }
 
-// ReleaseLeiosServeWaiters is an unscoped test helper that wakes every serving
-// wait pending on connId. Production close handling uses the owner-scoped
-// variant so a delayed callback cannot release a replacement connection.
+// ReleaseLeiosServeWaiters wakes every serving wait pending on connId and
+// clears them. It is retained for tests and whole-instance cleanup; live
+// connection-close handling uses the owner-scoped variant below.
 func (o *Ouroboros) ReleaseLeiosServeWaiters(
 	connId ouroboros.ConnectionId,
 ) {
@@ -219,8 +223,6 @@ func (o *Ouroboros) ReleaseLeiosServeWaiters(
 	for _, waiter := range waiters {
 		close(waiter.ch)
 	}
-	// Wake the NtC closure waiters. LeiosNotify cursor cleanup is owner-specific
-	// and is handled by the connection-owned callback.
 }
 
 // ReleaseLeiosServeWaitersOwner wakes only waits owned by one chainsync

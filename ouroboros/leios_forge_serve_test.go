@@ -130,7 +130,7 @@ func TestLeiosForgedEBLogSkipsOriginAfterPriorDelivery(t *testing.T) {
 		otherEntry, _ := o.leiosEBLog.next(otherConn)
 		require.NotNil(t, otherEntry)
 		require.Equal(t, want, *otherEntry.vote)
-	o.leiosEBLog.complete(otherConn, nil, true)
+		o.leiosEBLog.complete(otherConn, nil, true)
 	}
 	o.leiosEBLog.complete(originConn, nil, true)
 	require.Empty(t, o.leiosEBLog.items)

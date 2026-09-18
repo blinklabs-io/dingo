@@ -675,7 +675,7 @@ func TestLeiosBackfillerSpawnDedupsByHashAndSlotIndependently(t *testing.T) {
 	require.Eventually(
 		t,
 		func() bool { return callCount() == 1 },
-		time.Second,
+		testutil.AsyncWait,
 		time.Millisecond,
 	)
 
@@ -685,7 +685,7 @@ func TestLeiosBackfillerSpawnDedupsByHashAndSlotIndependently(t *testing.T) {
 	require.Eventually(
 		t,
 		func() bool { return callCount() == 2 },
-		time.Second,
+		testutil.AsyncWait,
 		time.Millisecond,
 	)
 
@@ -728,7 +728,7 @@ func TestLeiosBackfillerFetchOnceDedupsWithSpawnInFlight(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		started,
-		time.Second,
+		testutil.AsyncWait,
 		"spawn fetch never started",
 	)
 	go func() {
@@ -749,7 +749,7 @@ func TestLeiosBackfillerFetchOnceDedupsWithSpawnInFlight(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		fetchDone,
-		time.Second,
+		testutil.AsyncWait,
 		"fetchOnce did not finish",
 	)
 }
@@ -806,7 +806,7 @@ func TestLeiosBackfillerAwaitFetchDoesNotSkipFastOnDifferentSlotCompletion(
 		mu.Lock()
 		defer mu.Unlock()
 		return completed[100]
-	}, time.Second, time.Millisecond)
+	}, testutil.AsyncWait, time.Millisecond)
 
 	done := make(chan struct{})
 	go func() {
@@ -831,7 +831,7 @@ func TestLeiosBackfillerAwaitFetchDoesNotSkipFastOnDifferentSlotCompletion(
 	close(releaseB)
 	select {
 	case <-done:
-	case <-time.After(time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("awaitFetch for slot 200 did not return after it completed")
 	}
 }

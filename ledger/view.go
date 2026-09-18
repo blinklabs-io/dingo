@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
+	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -60,15 +61,6 @@ var ErrNotImplemented = errors.New("not implemented")
 // whatever verdict the rule produced from the false negative.
 var ErrLedgerViewStorageFault = errors.New("ledger view storage fault")
 
-// utxoMemoKey identifies a resolved UTxO by its fixed-size components
-// (transaction hash + output index) for LedgerView.utxoMemo. Using the raw
-// hash avoids both the fmt.Sprintf allocation and the hex-encoding
-// UtxoById's consumedUtxos/intraBlockUtxos overlay key already pays for.
-type utxoMemoKey struct {
-	txId  lcommon.Blake2b256
-	index uint32
-}
-
 type LedgerView struct {
 	ls  *LedgerState
 	txn *database.Txn
@@ -78,11 +70,9 @@ type LedgerView struct {
 	committeePParams     lcommon.ProtocolParameters
 	committeeStatePinned bool
 	// intraBlockUtxos tracks outputs created by earlier transactions in the same block.
-	// Key format: hex(txId) + ":" + outputIdx
-	intraBlockUtxos map[string]lcommon.Utxo
+	intraBlockUtxos map[utxoref.Key]lcommon.Utxo
 	// consumedUtxos tracks inputs consumed by pending mempool transactions.
-	// Key format: hex(txId) + ":" + outputIdx
-	consumedUtxos map[string]struct{}
+	consumedUtxos map[utxoref.Key]struct{}
 	// utxoMemoMu guards utxoMemo. Production views are built per transaction
 	// or query and used from one goroutine; the lock keeps a future shared
 	// view safe at negligible cost next to the database read it saves.
@@ -96,7 +86,7 @@ type LedgerView struct {
 	// entry added between calls still takes precedence. Every caller shares
 	// the cached Output and must not mutate it. Lazily allocated; never
 	// shared across views.
-	utxoMemo map[utxoMemoKey]lcommon.Utxo
+	utxoMemo map[utxoref.Key]lcommon.Utxo
 	// skipPhase2Validation is set for accepted block replay, where
 	// the producer's isValid flag is authoritative for Phase-2 results.
 	// Currently unreachable from production: ledgerProcessBlock's sole
@@ -121,6 +111,20 @@ type LedgerView struct {
 	// in charge, which is correct for every caller with no applied block in
 	// hand (mempool validation, standalone evaluation).
 	horizonAnchorSlot uint64
+	// epochStartSlot is the current epoch's start slot, pinned from the same
+	// snapshot pp was captured from at every real validation/evaluation call
+	// site (see the pinCommitteeState call sites in state.go). IsVrfKeyInUse
+	// reads this rather than calling ls.loadConsensusSnapshot() live: a
+	// validation operation can run long enough that the writer publishes a
+	// newer snapshot -- and therefore a new epoch boundary -- in the
+	// meantime, which would let the deferral check for one certificate
+	// disagree with the check for another certificate in the same
+	// transaction or block, or with itself if IsVrfKeyInUse or
+	// PoolCurrentState were called more than once against the same input.
+	// This mirrors why syntheticV2CostModel below is pinned rather than
+	// read live. Zero is a safe default for callers with no meaningful
+	// current epoch (a bare view built outside real validation).
+	epochStartSlot uint64
 	// syntheticV2CostModel is pinned from the same snapshot pparams (pp) was
 	// captured from -- see pinSyntheticV2CostModel and
 	// SyntheticV2CostModelInEffect. It must not be re-read live from
@@ -237,6 +241,11 @@ var _ lcommon.DRepDelegationState = (*LedgerView)(nil)
 // witnesses rather than fail to build.
 var _ eras.ByronProtocolMagicProvider = (*LedgerView)(nil)
 
+// Byron minimum-fee validation requires the fee policy from Byron genesis.
+// Pin the optional capability to the concrete validation view so interface
+// drift fails at build time instead of disabling the rule.
+var _ eras.ByronFeePolicyProvider = (*LedgerView)(nil)
+
 // UtxoValidateValueNotConservedUtxo discovers this capability with a runtime
 // type assertion and, unlike the assertions above, degrades rather than fails
 // when it misses: a failed assertion silently refunds a legacy stake
@@ -264,10 +273,14 @@ func (lv *LedgerView) ByronProtocolMagic() (uint32, error) {
 	return lv.ls.ByronProtocolMagic()
 }
 
+func (lv *LedgerView) ByronFeePolicy() (int64, int64, error) {
+	return lv.ls.ByronFeePolicy()
+}
+
 func (lv *LedgerView) UtxoById(
 	utxoId lcommon.TransactionInput,
 ) (lcommon.Utxo, error) {
-	key := fmt.Sprintf("%s:%d", utxoId.Id().String(), utxoId.Index())
+	key := utxoref.ForInput(utxoId)
 	// Check consumed UTxOs first (spent by pending mempool TX)
 	if lv.consumedUtxos != nil {
 		if _, ok := lv.consumedUtxos[key]; ok {
@@ -285,11 +298,12 @@ func (lv *LedgerView) UtxoById(
 		}
 	}
 	// Consult the memo only after both overlays, so an overlay entry added
-	// between calls on this view still takes precedence.
-	memoKey := utxoMemoKey{txId: utxoId.Id(), index: utxoId.Index()}
+	// between calls on this view still takes precedence. The memo shares
+	// the same key as consumedUtxos/intraBlockUtxos, so no second key needs
+	// to be computed here.
 	lv.utxoMemoMu.Lock()
 	if lv.utxoMemo != nil {
-		if utxo, ok := lv.utxoMemo[memoKey]; ok {
+		if utxo, ok := lv.utxoMemo[key]; ok {
 			lv.utxoMemoMu.Unlock()
 			return utxo, nil
 		}
@@ -324,9 +338,9 @@ func (lv *LedgerView) UtxoById(
 	}
 	lv.utxoMemoMu.Lock()
 	if lv.utxoMemo == nil {
-		lv.utxoMemo = make(map[utxoMemoKey]lcommon.Utxo, 4)
+		lv.utxoMemo = make(map[utxoref.Key]lcommon.Utxo, 4)
 	}
-	lv.utxoMemo[memoKey] = result
+	lv.utxoMemo[key] = result
 	lv.utxoMemoMu.Unlock()
 	return result, nil
 }
@@ -614,11 +628,20 @@ func (lv *LedgerView) IsPoolRegistered(pkh lcommon.PoolKeyHash) bool {
 
 // IsVrfKeyInUse checks if a VRF key hash is registered by another pool.
 // Returns (inUse, owningPoolId, error).
+//
+// The reservation checked here is the one effective as of the start of the
+// current epoch, not a pool's most recent registration: a re-registration
+// submitted during the epoch in progress is deferred to the next boundary
+// (cardano-ledger's psFutureStakePoolParams), so the pool's prior key stays
+// reserved until then. See GetPoolByVrfKeyHash. The epoch boundary used is
+// lv.epochStartSlot, pinned once at view construction -- not re-read from
+// the live consensus snapshot here, per epochStartSlot's field doc comment.
 func (lv *LedgerView) IsVrfKeyInUse(
 	vrfKeyHash lcommon.Blake2b256,
 ) (bool, lcommon.PoolKeyHash, error) {
 	pool, err := lv.ls.db.GetPoolByVrfKeyHash(
 		vrfKeyHash.Bytes(),
+		lv.epochStartSlot,
 		lv.txn,
 	)
 	if err != nil {
@@ -1416,9 +1439,18 @@ func (lv *LedgerView) CommitteeMembers() ([]lcommon.CommitteeMember, error) {
 // DRepRegistration returns a DRep registration by credential.
 // Returns nil if the credential is not registered as an active DRep.
 func (lv *LedgerView) DRepRegistration(
-	credential lcommon.Blake2b224,
+	credential lcommon.Credential,
 ) (*lcommon.DRepRegistration, error) {
-	drep, err := lv.ls.db.GetDrep(credential[:], false, lv.txn)
+	credentialTag, err := models.CredentialTagFromUint(credential.CredType)
+	if err != nil {
+		return nil, err
+	}
+	drep, err := lv.ls.db.GetDrepByCredential(
+		credentialTag,
+		credential.Credential[:],
+		false,
+		lv.txn,
+	)
 	if err != nil {
 		if errors.Is(err, models.ErrDrepNotFound) {
 			return nil, nil
@@ -1427,7 +1459,7 @@ func (lv *LedgerView) DRepRegistration(
 	}
 	deposit, err := lv.ls.db.GetDrepLastRegistrationDeposit(
 		drep.CredentialTag,
-		credential[:],
+		credential.Credential[:],
 		lv.txn,
 	)
 	if err != nil {
@@ -1488,8 +1520,11 @@ func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
 			depositPtr = new(deposit)
 		}
 		reg := lcommon.DRepRegistration{
-			Credential: lcommon.NewBlake2b224(drep.Credential),
-			Deposit:    depositPtr,
+			Credential: lcommon.Credential{
+				CredType:   uint(drep.CredentialTag),
+				Credential: lcommon.NewBlake2b224(drep.Credential),
+			},
+			Deposit: depositPtr,
 		}
 		if drep.AnchorURL != "" || len(drep.AnchorHash) > 0 {
 			if len(drep.AnchorHash) != 32 {

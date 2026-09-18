@@ -25,6 +25,8 @@ import (
 	"time"
 )
 
+const sqlitePragmaRestoreTimeout = 5 * time.Second
+
 type Runner struct {
 	DB       *sql.DB
 	Dialect  string
@@ -136,7 +138,40 @@ func (r *Runner) runMigration(
 	migration Migration,
 	current state,
 	exists bool,
-) error {
+) (runErr error) {
+	var restoreSQLiteForeignKeys func() error
+	if r.Dialect == "sqlite" {
+		var enabled int
+		if err := conn.QueryRowContext(
+			ctx, "PRAGMA foreign_keys",
+		).Scan(&enabled); err != nil {
+			return r.upgradeError(migration, PhaseExpand, err)
+		}
+		restoreSQLiteForeignKeys = func() error {
+			restoreCtx, cancel := context.WithTimeout(
+				context.Background(),
+				sqlitePragmaRestoreTimeout,
+			)
+			defer cancel()
+			_, err := conn.ExecContext(
+				restoreCtx,
+				fmt.Sprintf("PRAGMA foreign_keys = %d", enabled),
+			)
+			return err
+		}
+		defer func() {
+			if err := restoreSQLiteForeignKeys(); err != nil {
+				runErr = errors.Join(runErr, r.upgradeError(
+					migration,
+					PhaseContract,
+					fmt.Errorf("restore foreign_keys pragma: %w", err),
+				))
+			}
+		}()
+		if _, err := conn.ExecContext(ctx, "PRAGMA foreign_keys = OFF"); err != nil {
+			return r.upgradeError(migration, PhaseExpand, err)
+		}
+	}
 	checksum := migration.checksum()
 	if !exists {
 		current = state{
@@ -155,17 +190,7 @@ func (r *Runner) runMigration(
 		if err := r.setDirty(ctx, conn, migration.Version, PhaseExpand); err != nil {
 			return r.upgradeError(migration, PhaseExpand, err)
 		}
-		if err := execDDL(ctx, conn, sqlPhases.Expand, r.Dialect); err != nil {
-			return r.upgradeError(migration, PhaseExpand, err)
-		}
-		if err := r.setPhase(
-			ctx,
-			conn,
-			migration.Version,
-			PhaseBackfill,
-			current.cursor,
-			false,
-		); err != nil {
+		if err := r.runExpand(ctx, conn, migration, current, sqlPhases.Expand); err != nil {
 			return r.upgradeError(migration, PhaseExpand, err)
 		}
 		current.phase = PhaseBackfill
@@ -195,6 +220,38 @@ func (r *Runner) runMigration(
 		"name", migration.Name,
 	)
 	return nil
+}
+
+func (r *Runner) runExpand(
+	ctx context.Context,
+	conn *sql.Conn,
+	migration Migration,
+	current state,
+	statements []string,
+) error {
+	if r.Dialect != "sqlite" {
+		if err := execDDL(ctx, conn, statements, r.Dialect); err != nil {
+			return err
+		}
+		return r.setPhase(
+			ctx, conn, migration.Version, PhaseBackfill, current.cursor, false,
+		)
+	}
+
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := execDDL(ctx, tx, statements, r.Dialect); err != nil {
+		return err
+	}
+	if err := r.setPhase(
+		ctx, tx, migration.Version, PhaseBackfill, current.cursor, false,
+	); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (r *Runner) runBackfill(
@@ -525,6 +582,11 @@ type stateExecer interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 }
 
+type ddlExecer interface {
+	stateExecer
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
 func (r *Runner) setPhase(
 	ctx context.Context,
 	exec stateExecer,
@@ -621,22 +683,22 @@ func (r *Runner) upgradeError(
 
 func execDDL(
 	ctx context.Context,
-	conn *sql.Conn,
+	exec ddlExecer,
 	statements []string,
 	dialect string,
 ) error {
 	for index, statement := range statements {
-		if _, err := conn.ExecContext(ctx, statement); err != nil {
+		if _, err := exec.ExecContext(ctx, statement); err != nil {
 			if dialect == "mysql" &&
-				isMySQLDDLAlreadyAppliedOnConn(ctx, conn, statement, err) {
+				isMySQLDDLAlreadyAppliedOnConn(ctx, exec, statement, err) {
 				continue
 			}
 			if dialect == "sqlite" &&
-				isSQLiteDDLAlreadyAppliedOnConn(ctx, conn, statement, err) {
+				isSQLiteDDLAlreadyAppliedOnConn(ctx, exec, statement, err) {
 				continue
 			}
 			if dialect == "postgres" &&
-				isPostgresDDLAlreadyAppliedOnConn(ctx, conn, statement, err) {
+				isPostgresDDLAlreadyAppliedOnConn(ctx, exec, statement, err) {
 				continue
 			}
 			return fmt.Errorf("statement %d: %w", index+1, err)
@@ -740,7 +802,7 @@ func mysqlColumnTypeMatches(reported sql.NullString, definition string) bool {
 // is only linked under the dingo_extra_plugins build tag.
 func isPostgresDDLAlreadyAppliedOnConn(
 	ctx context.Context,
-	conn *sql.Conn,
+	conn ddlExecer,
 	statement string,
 	err error,
 ) bool {
@@ -771,7 +833,7 @@ WHERE table_name = $1 AND column_name = $2`,
 
 func isSQLiteDDLAlreadyAppliedOnConn(
 	ctx context.Context,
-	conn *sql.Conn,
+	conn ddlExecer,
 	statement string,
 	err error,
 ) bool {

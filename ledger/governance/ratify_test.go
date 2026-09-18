@@ -89,7 +89,7 @@ func ratifyInputs(
 		lcommon.GovActionTypeUpdateCommittee {
 		govAction = &lcommon.UpdateCommitteeGovAction{
 			Type:       uint(lcommon.GovActionTypeUpdateCommittee),
-			CredEpochs: map[*lcommon.Credential]uint{},
+			CredEpochs: map[*lcommon.Credential]uint64{},
 		}
 	}
 	return RatifyInputs{
@@ -506,7 +506,7 @@ func TestShouldRatify_ActionBodyMatrixAcrossBootstrapBoundary(t *testing.T) {
 				if tc.action == lcommon.GovActionTypeUpdateCommittee {
 					govAction = &lcommon.UpdateCommitteeGovAction{
 						Type:       uint(tc.action),
-						CredEpochs: map[*lcommon.Credential]uint{},
+						CredEpochs: map[*lcommon.Credential]uint64{},
 					}
 				}
 				d := ShouldRatify(RatifyInputs{

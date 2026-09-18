@@ -340,11 +340,19 @@ func NewStateWithConfig(
 func (s *State) AddClient(
 	connId connection.ConnectionId,
 	intersectPoint ocommon.Point,
+	owners ...*ochainsync.Server,
 ) (*ChainsyncClientState, error) {
 	s.Lock()
 	defer s.Unlock()
+	var owner *ochainsync.Server
+	if len(owners) > 0 {
+		owner = owners[0]
+	}
 	// Return existing client state if already registered
 	if existing, ok := s.clients[connId]; ok {
+		if owner != nil {
+			s.clientOwners[connId] = owner
+		}
 		return existing, nil
 	}
 	// Create initial chainsync state for connection
@@ -364,6 +372,9 @@ func (s *State) AddClient(
 		Cursor:               intersectPoint,
 		ChainIter:            chainIter,
 		NeedsInitialRollback: true,
+	}
+	if owner != nil {
+		s.clientOwners[connId] = owner
 	}
 	return s.clients[connId], nil
 }
@@ -414,27 +425,17 @@ func (s *State) RemoveClient(connId connection.ConnectionId) {
 	delete(s.clientOwners, connId)
 }
 
-// SetClientOwner associates a server instance with a client connection.
-func (s *State) SetClientOwner(
-	connId connection.ConnectionId,
-	owner *ochainsync.Server,
-) {
-	s.Lock()
-	defer s.Unlock()
-	if _, ok := s.clients[connId]; ok {
-		s.clientOwners[connId] = owner
-	}
-}
-
 // RemoveClientOwner removes a client only when the close belongs to its
-// currently registered server instance.
+// currently registered server instance. An entry created without an owner is
+// still removable, closing the AddClient-to-owner registration race for legacy
+// and test callers.
 func (s *State) RemoveClientOwner(
 	connId connection.ConnectionId,
 	owner *ochainsync.Server,
 ) {
 	s.Lock()
 	defer s.Unlock()
-	if current, ok := s.clientOwners[connId]; !ok || current != owner {
+	if current, ok := s.clientOwners[connId]; ok && current != owner {
 		return
 	}
 	if clientState := s.clients[connId]; clientState != nil &&

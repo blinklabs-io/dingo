@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -128,6 +129,7 @@ type Ouroboros struct {
 	// (blinklabs-io/dingo#382), read by localstatequeryServerQuery, and
 	// cleared by localstatequeryServerRelease and on connection close.
 	localstatequeryAcquiredPoints map[ouroboros.ConnectionId]ledger.QueryPoint
+	localstatequeryOwners         map[ouroboros.ConnectionId]*olocalstatequery.Server
 	localstatequeryAcquireMutex   sync.Mutex
 	blockfetchNoBlocksCounts      map[ouroboros.ConnectionId]blockfetchNoBlocksState
 	// ChainSync measurement tracking for peer scoring
@@ -194,9 +196,12 @@ type Ouroboros struct {
 	// The chainsync server callback owns gouroboros's receive loop while it
 	// runs, so Protocol.DoneChan() cannot close underneath it; the release
 	// signal has to come from connmanager's per-connection ErrorChan watcher
-	// instead (see ReleaseLeiosServeWaitersOwner).
-	leiosServeWaiters   map[ouroboros.ConnectionId][]leiosServeWaiter
-	leiosServeWaitersMu sync.Mutex
+	// instead. Live close handling uses ReleaseLeiosServeWaitersOwner so a
+	// delayed callback cannot release a replacement connection's waiter.
+	leiosServeWaiters      map[ouroboros.ConnectionId][]leiosServeWaiter
+	leiosServeWaitersMu    sync.Mutex
+	leiosNotifyObservers   map[*oleiosnotify.Server]struct{}
+	leiosNotifyObserversMu sync.Mutex
 	// NtC CertRB closure-resolution metrics.
 	leiosMetrics *leiosMetrics
 
@@ -207,13 +212,19 @@ type Ouroboros struct {
 	// multi-second EB fetch from head-of-line blocking every later offer on
 	// the connection.
 	leiosFetchGuards sync.Map // ouroboros.ConnectionId → *leiosFetchGuard
-	// (slot, EB hash) occurrences with a fetch already in progress, so a given
-	// endorser block occurrence is fetched once across all connections (it is
+	// (slot, EB hash) occurrences with a transaction-offer fetch in progress,
+	// deduplicating that work across all connections (it is
 	// offered on every connection). Keyed by slot and hash together, not hash
 	// alone, so an in-flight fetch for one occurrence does not suppress a
 	// legitimate offer of the same content-addressed hash recurring at a
 	// different slot (issue #3513).
 	leiosFetchInProgress sync.Map // leiosBlockKey(point.Slot, point.Hash) → struct{}
+	// Manifest offers have their own claim: a pending manifest fetch must not
+	// suppress a transaction offer needed to complete the same occurrence.
+	leiosManifestFetchInProgress sync.Map // leiosBlockKey(point.Slot, point.Hash) → struct{}
+	// leiosFetchClaimPublished is an instance-local test seam used to hold a
+	// claimed offer before dispatch and expose admission ordering deterministically.
+	leiosFetchClaimPublished func()
 
 	// Locally-forged EB broadcast log (cursors are owned by the log).
 	leiosEBLog *leiosForgedEBLog
@@ -425,6 +436,15 @@ type blockfetchMetrics struct {
 	blocksUnder1s      atomic.Int64
 	blocksUnder3s      atomic.Int64
 	blocksUnder5s      atomic.Int64
+	// Wall-clock time spent decoding one fetched block's raw CBOR bytes
+	// into a gledger.Block, by stage ("decode"). Only observed on a
+	// decode-cache miss, since a hit reuses another connection's already
+	// decoded result and does no decode work of its own. See
+	// dingo_ledger_block_stage_duration_seconds in the ledger package for
+	// the header-verify/validate/apply stages that follow once a decoded
+	// block reaches the ledger.
+	stageDuration *prometheus.HistogramVec
+	stageDecode   prometheus.Observer
 }
 
 // NewOuroboros builds a fully-wired Ouroboros. Every dependency is supplied up
@@ -476,6 +496,9 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		blockFetchStarts:        make(map[ouroboros.ConnectionId]time.Time),
 		localstatequeryAcquiredPoints: make(
 			map[ouroboros.ConnectionId]ledger.QueryPoint,
+		),
+		localstatequeryOwners: make(
+			map[ouroboros.ConnectionId]*olocalstatequery.Server,
 		),
 		blockfetchNoBlocksCounts: make(
 			map[ouroboros.ConnectionId]blockfetchNoBlocksState,
@@ -570,6 +593,52 @@ func (o *Ouroboros) initBlockfetchMetrics() {
 			Help: "percentage of blocks fetched in less than 5 seconds",
 		},
 	)
+	o.blockfetchMetrics.stageDuration = promautoFactory.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "dingo_blockfetch_stage_duration_seconds",
+			Help: "wall-clock time spent in each blockfetch-owned stage of per-block processing, by stage: decode (CBOR-decoding one fetched block's raw bytes, on a decode-cache miss only)",
+			// 100us to ~3.3s, matching
+			// dingo_ledger_block_stage_duration_seconds so the two
+			// histograms are comparable across the same block's stages.
+			Buckets: prometheus.ExponentialBuckets(0.0001, 2, 16),
+		},
+		[]string{"stage"},
+	)
+	o.blockfetchMetrics.stageDecode = o.blockfetchMetrics.stageDuration.
+		WithLabelValues("decode")
+}
+
+// isTrustedNtCListener reports whether l is verified reachable only from
+// this machine, the actual property the relaxed mux/query timeouts and
+// reassembly buffer in ConfigureListeners/localstatequeryServerConnOpts
+// depend on for safety (blinklabs-io/dingo#4183 review) -- "NtC" alone does
+// not imply this: internal/node/node.go builds a UseNtC listener for both
+// cfg.SocketPath (a Unix socket, always local-only by construction) and
+// cfg.PrivateBindAddr:cfg.PrivatePort (an operator-configurable TCP
+// address, defaulting to loopback but not code-enforced to stay there).
+//
+// A Unix-domain listener is trusted unconditionally: reaching it at all
+// already requires filesystem access to this machine, the same trust
+// boundary a TCP loopback bind provides. A TCP listener is trusted only
+// when every address it could actually be reached at resolves to a
+// loopback IP -- net.ResolveTCPAddr is used (not a string compare against
+// "127.0.0.1"/"localhost") so a hostname, IPv6 "::1", or "localhost" are
+// all recognised the same way a client connecting to this listener would
+// resolve them. Anything else (including a wildcard bind like "0.0.0.0",
+// which resolves to the unspecified address, not a loopback one) is
+// untrusted, and gets gouroboros' own anti-DoS defaults instead.
+func isTrustedNtCListener(l connmanager.ListenerConfig) bool {
+	if l.ListenNetwork == "unix" {
+		return true
+	}
+	if l.ListenNetwork != "tcp" {
+		return false
+	}
+	addr, err := net.ResolveTCPAddr("tcp", l.ListenAddress)
+	if err != nil || addr.IP == nil {
+		return false
+	}
+	return addr.IP.IsLoopback()
 }
 
 func (o *Ouroboros) ConfigureListeners(
@@ -578,14 +647,44 @@ func (o *Ouroboros) ConfigureListeners(
 	tmpListeners := make([]connmanager.ListenerConfig, len(listeners))
 	for idx, l := range listeners {
 		if l.UseNtC {
-			// Node-to-client
-			l.ConnectionOpts = append(
-				l.ConnectionOpts,
+			// Node-to-client. trusted gates the relaxed mux/query timeouts
+			// and reassembly buffer to a listener verified local-only (a
+			// Unix socket, or TCP actually bound to loopback) -- see
+			// isTrustedNtCListener's doc comment. Those exist to let a
+			// large, legitimate query (a whole-UTxO-set walk) run past
+			// gouroboros' anti-DoS defaults, which is only safe to grant
+			// unconditionally to a listener no non-local caller can reach
+			// (blinklabs-io/dingo#4183 review): a PrivateBindAddr an
+			// operator has pointed at a non-loopback address gets
+			// gouroboros' own defaults instead, same as any other NtC
+			// server would for an address reachable beyond this machine.
+			//
+			// A TCP address is resolved and rewritten to its numeric form
+			// here, before classification, so the address
+			// isTrustedNtCListener judges and the address startListener
+			// later binds (connmanager/listener.go) are the exact same
+			// literal string. Resolving the original hostname/"localhost"
+			// independently in each place would let two separate DNS
+			// lookups disagree -- a listener classified trusted from one
+			// answer could then bind to a different, non-loopback address
+			// DNS gives on the second lookup, handing that non-loopback
+			// listener the relaxed timeouts and 2GiB reassembly buffer
+			// meant only for a verified-local one (blinklabs-io/dingo#4183
+			// review). A resolution failure here is left for
+			// startListener's own bind to report -- isTrustedNtCListener
+			// treats it as untrusted either way.
+			if l.ListenNetwork == "tcp" {
+				if addr, err := net.ResolveTCPAddr("tcp", l.ListenAddress); err == nil {
+					l.ListenAddress = addr.String()
+				}
+			}
+			trusted := isTrustedNtCListener(l)
+			ntcOpts := []ouroboros.ConnectionOptionFunc{
 				ouroboros.WithNetworkMagic(o.config.NetworkMagic),
 				o.chainsyncConnectionConfigOption(false),
 				ouroboros.WithLocalStateQueryConfig(
 					olocalstatequery.NewConfig(
-						o.localstatequeryServerConnOpts()...,
+						o.localstatequeryServerConnOpts(trusted)...,
 					),
 				),
 				ouroboros.WithLocalTxMonitorConfig(
@@ -598,7 +697,26 @@ func (o *Ouroboros) ConfigureListeners(
 						o.localtxsubmissionServerConnOpts()...,
 					),
 				),
-			)
+			}
+			if trusted {
+				// LocalStateQuery has no protocol-level timeout at all
+				// (Ouroboros Network Specification section 3.13.4: "No
+				// timeouts") -- a large query, like a whole-UTxO-set walk
+				// against this node's disk-backed store, can legitimately
+				// take minutes. gouroboros' mux applies a fixed 120s
+				// segment-read timeout by default as an anti-DoS guard
+				// against an untrusted remote peer, which does not describe
+				// a verified-local-only NtC client; disabling it here is
+				// what stops a slow-but-legitimate reply from getting the
+				// connection killed mid-flight (blinklabs-io/dingo#4082).
+				// Real cardano-node's own mux applies no equivalent timeout
+				// on local NtC connections either.
+				ntcOpts = append(
+					ntcOpts,
+					ouroboros.WithMuxerSegmentReadTimeout(0),
+				)
+			}
+			l.ConnectionOpts = append(l.ConnectionOpts, ntcOpts...)
 		} else {
 			// Node-to-node config: full duplex with both client and
 			// server handlers, matching cardano-node behavior. This
@@ -752,9 +870,10 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 		o.peerGov.UpdatePeerConnectionStability(connId, 0.0)
 	}
 
-	// Remove any chainsync client state
+	// Remove outbound chainsync selection state. Server-side state is removed
+	// by the connection-owner callback so a delayed close cannot delete a
+	// replacement connection that shares the same ConnectionId.
 	if o.chainsyncState != nil {
-		o.chainsyncState.RemoveClient(connId)
 		o.chainsyncState.RemoveClientConnId(connId)
 	}
 	// Remove mempool consumer
@@ -766,11 +885,6 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	delete(o.blockFetchStarts, connId)
 	delete(o.blockfetchNoBlocksCounts, connId)
 	o.blockFetchMutex.Unlock()
-	// Clean up any LocalStateQuery acquired point: a client that disconnects
-	// without a clean Release must not leak its map entry.
-	o.localstatequeryAcquireMutex.Lock()
-	delete(o.localstatequeryAcquiredPoints, connId)
-	o.localstatequeryAcquireMutex.Unlock()
 	// Clean up chainsync stats
 	o.chainsyncMutex.Lock()
 	delete(o.chainsyncStats, connId)

@@ -55,19 +55,6 @@ func (nilIterChainProvider) GetChainFromPoint(
 
 func (nilIterChainProvider) StabilityWindow() uint64 { return 0 }
 
-func newNtCTestConnId(port int) ouroboros.ConnectionId {
-	return ouroboros.ConnectionId{
-		LocalAddr: &net.TCPAddr{
-			IP:   net.IPv4(127, 0, 0, 1),
-			Port: 3001,
-		},
-		RemoteAddr: &net.TCPAddr{
-			IP:   net.IPv4(127, 0, 0, 1),
-			Port: port,
-		},
-	}
-}
-
 func newHandleConnManagerClosedTestNode(t *testing.T) *Node {
 	t.Helper()
 	bus := event.NewEventBus(nil, nil)
@@ -102,7 +89,9 @@ func newHandleConnManagerClosedOwnerConn(
 	localResult, peerResult := make(chan result, 1), make(chan result, 1)
 	go func() {
 		conn, err := ouroboros.NewConnection(append(
-			[]ouroboros.ConnectionOptionFunc{ouroboros.WithConnection(localWire)},
+			[]ouroboros.ConnectionOptionFunc{
+				ouroboros.WithConnection(localWire),
+			},
 			listener.ConnectionOpts...,
 		)...)
 		localResult <- result{conn: conn, err: err}
@@ -117,8 +106,18 @@ func newHandleConnManagerClosedOwnerConn(
 		)...)
 		peerResult <- result{conn: conn, err: err}
 	}()
-	local := testutil.RequireReceive(t, localResult, 10*time.Second, "owner test local handshake")
-	peer := testutil.RequireReceive(t, peerResult, 10*time.Second, "owner test peer handshake")
+	local := testutil.RequireReceive(
+		t,
+		localResult,
+		10*time.Second,
+		"owner test local handshake",
+	)
+	peer := testutil.RequireReceive(
+		t,
+		peerResult,
+		10*time.Second,
+		"owner test peer handshake",
+	)
 	t.Cleanup(func() {
 		if local.conn != nil {
 			_ = local.conn.Close()
@@ -167,13 +166,11 @@ func TestHandleConnManagerClosedOwner_NtC_ReleasesChainsyncClientState(
 	)
 }
 
-// TestHandleConnManagerClosed_NtN_LeavesStateForEventBusPath guards the
-// "exactly once" half of the fix: NtN connections are already cleaned up via
-// Ouroboros.HandleConnClosedEvent, subscribed to the EventBus's
-// ConnectionClosedEventType. If handleConnManagerClosedOwner also released state
-// for isNtC=false, an NtN close would race two independent RemoveClient
-// calls instead of exactly one.
-func TestHandleConnManagerClosedOwner_NtN_LeavesStateForEventBusPath(t *testing.T) {
+// TestHandleConnManagerClosedOwner_NtN_ReleasesState covers the owner-aware
+// connmanager path used for both NtC and NtN. The EventBus path deliberately no
+// longer removes server-side state by connection ID because a delayed event
+// could delete a replacement connection's state.
+func TestHandleConnManagerClosedOwner_NtN_ReleasesState(t *testing.T) {
 	t.Parallel()
 
 	n := newHandleConnManagerClosedTestNode(t)
@@ -187,10 +184,10 @@ func TestHandleConnManagerClosedOwner_NtN_LeavesStateForEventBusPath(t *testing.
 	n.handleConnManagerClosedOwner(conn, false, nil)
 
 	_, ok := n.chainsyncState.LookupClient(connId)
-	require.True(
+	require.False(
 		t,
 		ok,
-		"NtN close must not be released through the NtC-only callback",
+		"NtN close must release the chainsync server-side client state",
 	)
 }
 
@@ -220,17 +217,24 @@ func TestHandleConnManagerClosedOwner_NilChainsyncState(t *testing.T) {
 // full dependency set, and the connection is registered with its connection
 // manager, so the waiter passes the liveness check the same way a live serve
 // does.
-func TestHandleConnManagerClosedOwner_NtC_ReleasesLeiosServeWaiters(t *testing.T) {
+func TestHandleConnManagerClosedOwner_NtC_ReleasesLeiosServeWaiters(
+	t *testing.T,
+) {
 	t.Parallel()
 	testHandleConnManagerClosedReleasesLeiosServeWaiters(t, true)
 }
 
-func TestHandleConnManagerClosedOwner_NtN_ReleasesLeiosServeWaiters(t *testing.T) {
+func TestHandleConnManagerClosedOwner_NtN_ReleasesLeiosServeWaiters(
+	t *testing.T,
+) {
 	t.Parallel()
 	testHandleConnManagerClosedReleasesLeiosServeWaiters(t, false)
 }
 
-func testHandleConnManagerClosedReleasesLeiosServeWaiters(t *testing.T, isNtC bool) {
+func testHandleConnManagerClosedReleasesLeiosServeWaiters(
+	t *testing.T,
+	isNtC bool,
+) {
 	t.Helper()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	n := newHandleConnManagerClosedTestNode(t)

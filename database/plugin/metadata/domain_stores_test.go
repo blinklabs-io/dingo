@@ -52,6 +52,8 @@ var governanceStoreMethods = []string{
 	"GetEnactedGovernanceProposalsAt",
 	"GetExpiringGovernanceProposals",
 	"GetExpiredGovernanceProposalsAt",
+	"GetExpiredAwaitingDropGovernanceProposals",
+	"GetDroppedGovernanceProposalsAt",
 	"GetLastEnactedGovernanceProposal",
 	"SetGovernanceProposal",
 	"ClearGovernanceProposalRatification",
@@ -132,6 +134,7 @@ var utxoStoreMethods = []string{
 	"GetScriptLockedSupply",
 	"GetUtxosByAssets",
 	"IterateLiveUtxos",
+	"IterateUtxosAsOf",
 }
 
 // transactionStoreMethods is the chain-transaction domain: sqlstore's

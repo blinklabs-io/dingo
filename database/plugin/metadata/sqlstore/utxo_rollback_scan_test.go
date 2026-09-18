@@ -25,8 +25,8 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
-	_ "github.com/glebarez/go-sqlite"
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
 )
 
 // The DISTINCT-bearing statements this package used to run in the rollback

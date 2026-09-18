@@ -82,7 +82,7 @@ func TestLeiosServeWaitReleasedByRealPeerDisconnect(t *testing.T) {
 			ebHash,
 			block.Slot,
 			f.conn.Id(),
-			nil,
+			f.conn.ChainSync().Server,
 		)
 		results <- result{cbor: cbor, err: err}
 	}()
@@ -142,7 +142,12 @@ func TestLeiosServeWaitReleaseKeepsReplacementOwner(t *testing.T) {
 	default:
 	}
 	f.o.ReleaseLeiosServeWaitersOwner(f.conn.Id(), replacement)
-	err := testutil.RequireReceive(t, result, 5*time.Second, "replacement serving owner released")
+	err := testutil.RequireReceive(
+		t,
+		result,
+		5*time.Second,
+		"replacement serving owner released",
+	)
 	require.ErrorIs(t, err, errLeiosClosureUnresolved)
 	select {
 	case <-replacementWait:
@@ -156,9 +161,15 @@ func TestLeiosServeWaiterRejectsReplacedOwner(t *testing.T) {
 	f := newChainsyncServerFixtureWithConfig(t, csmock.ModeNtC, OuroborosConfig{
 		EnableLeios: true,
 	})
-	live, cancelLive := f.o.registerLeiosServeWaiter(f.conn.Id(), f.conn.ChainSync().Server)
+	live, cancelLive := f.o.registerLeiosServeWaiter(
+		f.conn.Id(),
+		f.conn.ChainSync().Server,
+	)
 	t.Cleanup(cancelLive)
-	stale, cancelStale := f.o.registerLeiosServeWaiter(f.conn.Id(), new(ochainsync.Server))
+	stale, cancelStale := f.o.registerLeiosServeWaiter(
+		f.conn.Id(),
+		new(ochainsync.Server),
+	)
 	t.Cleanup(cancelStale)
 	select {
 	case <-stale:

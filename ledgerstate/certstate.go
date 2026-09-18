@@ -222,7 +222,28 @@ func parseCertStateConway(
 		if len(elem) == 0 || i == pIdx || i == dIdx || i == drepIdx {
 			continue
 		}
-		hotKeys, resignations := parseCommitteeVState(certState[i:])
+		// Only a credential-to-authorization map can be the committee map.
+		// Testing that first keeps a wrong-candidate element from reaching a
+		// parser that now fails closed, which would abort the whole import
+		// over an element that was never the committee state.
+		if !looksLikeCommitteeCredentialMap(
+			committeeMapElement(certState[i:]),
+		) {
+			continue
+		}
+		hotKeys, resignations, committeeErr := parseCommitteeVState(
+			certState[i:],
+		)
+		if committeeErr != nil {
+			// An element that decodes as a committee map but whose
+			// entries cannot be read is a real decode failure, not a
+			// wrong-candidate miss. Surface it rather than moving on
+			// and silently importing an empty committee.
+			return nil, fmt.Errorf(
+				"parsing committee state: %w",
+				committeeErr,
+			)
+		}
 		if len(hotKeys) == 0 && len(resignations) == 0 {
 			continue
 		}
@@ -1544,7 +1565,13 @@ func parseVState(data []byte) (
 	// hot-key authorizations and resignations alongside the DRep map; retain
 	// the credential tags so imported state cannot alias key and script hashes.
 	dreps, warning := parseDRepMap(vs[0])
-	hotKeys, resignations := parseCommitteeVState(vs[1:])
+	hotKeys, resignations, committeeErr := parseCommitteeVState(vs[1:])
+	if committeeErr != nil {
+		return nil, nil, nil, fmt.Errorf(
+			"parsing committee state: %w",
+			committeeErr,
+		)
+	}
 	return dreps, hotKeys, resignations, warning
 }
 
@@ -1564,7 +1591,8 @@ func looksLikeCommitteeCredentialMap(data []byte) bool {
 	if _, err := parseCredential(entry.KeyRaw); err != nil {
 		return false
 	}
-	_, err := parseCommitteeHotCredential(entry.ValueRaw)
+	// A resignation is still a committee map entry, so accept it here.
+	_, _, err := parseCommitteeAuthorization(entry.ValueRaw)
 	return err == nil
 }
 
@@ -1576,13 +1604,30 @@ func isCborArray(data []byte) bool {
 	return data[0]>>5 == 4 || data[0] == 0x9f
 }
 
+// committeeMapElement resolves the element parseCommitteeVState would read as
+// the committee hot-key map, unwrapping the historical single-array wrapper the
+// parser also accepts. The Conway heuristic scan uses it to test candidacy
+// before committing to a parse that fails closed on a malformed entry.
+func committeeMapElement(fields [][]byte) []byte {
+	if len(fields) == 0 {
+		return nil
+	}
+	if isCborArray(fields[0]) {
+		if nested, err := decodeRawElements(fields[0]); err == nil &&
+			len(nested) >= 2 {
+			return nested[0]
+		}
+	}
+	return fields[0]
+}
+
 func parseCommitteeVState(
 	fields [][]byte,
-) ([]ParsedCommitteeHotKey, []Credential) {
+) ([]ParsedCommitteeHotKey, []Credential, error) {
 	var hotKeys []ParsedCommitteeHotKey
 	var resignations []Credential
 	if len(fields) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	// The canonical shape is [ccHotKeys, ccRes]. Some historical encoders wrap
 	// those two fields in one committee-state array, which may itself be
@@ -1597,11 +1642,33 @@ func parseCommitteeVState(
 		}
 	}
 	entries, err := decodeMapEntries(committeeFields[0])
-	if err == nil {
+	if err == nil && len(entries) > 0 {
 		for _, entry := range entries {
+			// Fail closed on every entry. Dropping one silently leaves that
+			// member's authorization missing, and downstream a missing
+			// authorization is the same Conway unknown-voter rejection this
+			// parser exists to prevent -- a partial committee is as broken as
+			// an empty one, and quieter.
 			cold, coldErr := parseCredential(entry.KeyRaw)
-			hot, hotErr := parseCommitteeHotCredential(entry.ValueRaw)
-			if coldErr != nil || hotErr != nil {
+			if coldErr != nil {
+				return nil, nil, fmt.Errorf(
+					"decoding committee cold credential: %w",
+					coldErr,
+				)
+			}
+			hot, resigned, hotErr := parseCommitteeAuthorization(
+				entry.ValueRaw,
+			)
+			if hotErr != nil {
+				return nil, nil, fmt.Errorf(
+					"decoding committee authorization for cold "+
+						"credential %x: %w",
+					cold.Hash,
+					hotErr,
+				)
+			}
+			if resigned {
+				resignations = append(resignations, cold)
 				continue
 			}
 			hotKeys = append(
@@ -1611,7 +1678,7 @@ func parseCommitteeVState(
 		}
 	}
 	if len(committeeFields) < 2 {
-		return hotKeys, nil
+		return hotKeys, resignations, nil
 	}
 	resignationEntries, resignationErr := decodeMapEntries(committeeFields[1])
 	if resignationErr == nil {
@@ -1621,7 +1688,7 @@ func parseCommitteeVState(
 				resignations = append(resignations, cold)
 			}
 		}
-		return hotKeys, resignations
+		return hotKeys, resignations, nil
 	}
 	if values, arrayErr := decodeRawArray(committeeFields[1]); arrayErr == nil {
 		for _, value := range values {
@@ -1631,18 +1698,114 @@ func parseCommitteeVState(
 			}
 		}
 	}
-	return hotKeys, resignations
+	return hotKeys, resignations, nil
 }
 
-func parseCommitteeHotCredential(data []byte) (Credential, error) {
+// parseCommitteeAuthorization decodes one value of the committee map. The
+// ledger encodes it as the CommitteeAuthorization sum type:
+//
+//	[0, hot_credential]  CommitteeHotCredential -- the member authorized a hot key
+//	[1, maybe_anchor]    CommitteeMemberResigned
+//
+// Older encoders emitted a bare credential or a single-element wrapper, so both
+// are still accepted. Returning the resigned flag separately keeps a resignation
+// from being mistaken for an authorization, and keeps an unrecognized shape an
+// error rather than a silently dropped entry.
+func parseCommitteeAuthorization(
+	data []byte,
+) (Credential, bool, error) {
 	if credential, err := parseCredential(data); err == nil {
-		return credential, nil
+		return credential, false, nil
 	}
 	wrapped, err := decodeRawArray(data)
-	if err != nil || len(wrapped) != 1 {
-		return Credential{}, errors.New("decoding committee hot credential")
+	if err != nil {
+		return Credential{}, false, errors.New(
+			"decoding committee authorization",
+		)
 	}
-	return parseCredential(wrapped[0])
+	switch len(wrapped) {
+	case 1:
+		credential, credErr := parseCredential(wrapped[0])
+		return credential, false, credErr
+	case 2:
+		var tag uint64
+		if _, tagErr := cbor.Decode(wrapped[0], &tag); tagErr != nil {
+			return Credential{}, false, errors.New(
+				"decoding committee authorization tag",
+			)
+		}
+		switch tag {
+		case committeeAuthHotCredential:
+			credential, credErr := parseCredential(wrapped[1])
+			return credential, false, credErr
+		case committeeAuthResigned:
+			// The payload is StrictMaybe Anchor: absent (null) or an
+			// array. Anything else -- an integer, a bare byte string,
+			// a bool -- is not a resignation, and accepting it would
+			// let an unrelated credential-keyed map pass
+			// looksLikeCommitteeCredentialMap and be misread as the
+			// committee map by the Conway element scan.
+			if !isResignationPayload(wrapped[1]) {
+				return Credential{}, false, errors.New(
+					"decoding committee resignation payload",
+				)
+			}
+			return Credential{}, true, nil
+		}
+	}
+	return Credential{}, false, errors.New(
+		"decoding committee authorization",
+	)
+}
+
+// CommitteeAuthorization constructor tags.
+const (
+	committeeAuthHotCredential uint64 = 0
+	committeeAuthResigned      uint64 = 1
+)
+
+// isValidAnchor reports whether data is an anchor: [url, 32-byte hash]. The
+// shape and the hash length match parseConstitution's anchor handling.
+func isValidAnchor(data []byte) bool {
+	anchor, err := decodeRawArray(data)
+	if err != nil || len(anchor) != 2 {
+		return false
+	}
+	var url string
+	if _, err := cbor.Decode(anchor[0], &url); err != nil {
+		return false
+	}
+	var hash []byte
+	if _, err := cbor.Decode(anchor[1], &hash); err != nil {
+		return false
+	}
+	return len(hash) == 32
+}
+
+// isResignationPayload reports whether data is a StrictMaybe Anchor as the
+// ledger encodes it. encodeStrictMaybe writes an empty array for SNothing and a
+// one-element array wrapping the value for SJust, and decodeStrictMaybe rejects
+// every other shape -- including CBOR null and a bare anchor. Accepting those
+// would import as resignations two encodings the node never writes and its own
+// decoder refuses, so they are rejected here and reach the undecodable-entry
+// error path instead.
+func isResignationPayload(data []byte) bool {
+	// decodeRawArray accepts CBOR null, so check the major type first or the
+	// SNothing case below would let null through.
+	if !isCborArray(data) {
+		return false
+	}
+	items, err := decodeRawArray(data)
+	if err != nil {
+		return false
+	}
+	switch len(items) {
+	case 0: // SNothing
+		return true
+	case 1: // SJust anchor
+		return isValidAnchor(items[0])
+	}
+	return false
 }
 
 // parseDRepMap decodes a DRep credential -> DRepState map.
@@ -1987,9 +2150,51 @@ type ParsedGovState struct {
 	Constitution         *ParsedConstitution
 	Committee            []ParsedCommitteeMember
 	CommitteeQuorum      *cbor.Rat
+	CommitteeParseError  error
 	Proposals            []ParsedGovProposal
 	PrevGovActionIds     *ParsedPrevGovActionIds
 	RatifiedGovActionIds []ParsedGovActionId
+	// EnactCommittee and EnactCommitteeQuorum are the committee carried
+	// by RatifyState.rsEnactState. That is not a second copy of
+	// cgsCommittee: RATIFY folds every accepted action into rsEnactState
+	// and ConwayEPOCH copies the result into cgsCommittee at the next
+	// epoch boundary. See EnactedCommitteeChange.
+	EnactCommittee       []ParsedCommitteeMember
+	EnactCommitteeQuorum *cbor.Rat
+	// EnactCommitteeSet reports that cgsDRepPulsingState was present and
+	// decoded far enough to yield rsEnactState's committee field.
+	EnactCommitteeSet bool
+	// EnactedCommitteeChange reports that RatifyState.rsEnacted carries
+	// an action whose enactment rewrites EnactState.ensCommittee, namely
+	// NoConfidence (which clears it) or UpdateCommittee. Those are the
+	// only two, so cgsCommittee and EnactCommittee are required to agree
+	// only when this is false.
+	EnactedCommitteeChange bool
+	// EnactedActionTypesUnknown reports that at least one rsEnacted
+	// proposal could not be decoded, so EnactedCommitteeChange is a
+	// lower bound rather than the full answer.
+	EnactedActionTypesUnknown bool
+	// PulsingStateParseError is set when cgsDRepPulsingState could not be
+	// decoded far enough to recover rsEnactState's committee. Fatal for an
+	// import: the imported committee then has no second view to
+	// corroborate it.
+	PulsingStateParseError error
+}
+
+// parsedPulsingState holds the parts of cgsDRepPulsingState the importer
+// consumes. Its committee error is a named field rather than a second
+// bare return value because the two error channels are not
+// interchangeable: CommitteeErr is fail-closed, while a failure to decode
+// an individual rsEnacted proposal is warning-grade and is returned as
+// the bare error alongside the struct.
+type parsedPulsingState struct {
+	EnactCommittee            []ParsedCommitteeMember
+	EnactCommitteeQuorum      *cbor.Rat
+	EnactCommitteeSet         bool
+	EnactedCommitteeChange    bool
+	EnactedActionTypesUnknown bool
+	RatifiedGovActionIds      []ParsedGovActionId
+	CommitteeErr              error
 }
 
 // ParseGovState decodes governance state from raw CBOR.
@@ -2049,6 +2254,7 @@ func ParseGovState(
 	// Parse committee (field 1) — best-effort
 	committee, quorum, err := parseCommittee(fields[1])
 	if err != nil {
+		result.CommitteeParseError = err
 		warnings = append(warnings, fmt.Errorf(
 			"parsing committee: %w", err,
 		))
@@ -2066,16 +2272,45 @@ func ParseGovState(
 	result.Proposals = proposals
 	result.PrevGovActionIds = prevIds
 
-	if len(fields) >= 7 {
-		ratifiedIds, err := parseDRepPulsingStateRatifiedIds(
-			fields[6],
+	// ConwayGovState encodes exactly seven fields, so a shorter record is
+	// malformed. It is reported as a warning rather than rejected here
+	// because field-count enforcement for the whole record belongs with
+	// GovState shape validation, not with the committee corroboration
+	// below; a truncated record simply leaves EnactCommitteeSet false and
+	// the corroboration unavailable.
+	if len(fields) < 7 {
+		result.PulsingStateParseError = fmt.Errorf(
+			"GovState has %d elements, expected 7; "+
+				"cgsDRepPulsingState is absent",
+			len(fields),
 		)
+		warnings = append(warnings, fmt.Errorf(
+			"parsing drep pulsing state: %w",
+			result.PulsingStateParseError,
+		))
+	} else {
+		pulsing, err := parseDRepPulsingState(fields[6])
 		if err != nil {
 			warnings = append(warnings, fmt.Errorf(
 				"parsing drep pulsing state: %w", err,
 			))
 		}
-		result.RatifiedGovActionIds = ratifiedIds
+		result.EnactCommittee = pulsing.EnactCommittee
+		result.EnactCommitteeQuorum = pulsing.EnactCommitteeQuorum
+		result.EnactCommitteeSet = pulsing.EnactCommitteeSet
+		result.EnactedCommitteeChange = pulsing.EnactedCommitteeChange
+		result.EnactedActionTypesUnknown = pulsing.EnactedActionTypesUnknown
+		result.RatifiedGovActionIds = pulsing.RatifiedGovActionIds
+		if pulsing.CommitteeErr != nil {
+			// Keep the dedicated field for the importer's fail-closed
+			// check and surface it through the returned error so every
+			// caller of this exported function still sees the failure.
+			result.PulsingStateParseError = pulsing.CommitteeErr
+			warnings = append(warnings, fmt.Errorf(
+				"parsing drep pulsing state: %w",
+				pulsing.CommitteeErr,
+			))
+		}
 	}
 
 	return result, errors.Join(warnings...)
@@ -2097,7 +2332,7 @@ func parseConstitution(data []byte) (
 			"decoding constitution: %w", err,
 		)
 	}
-	if len(fields) < 2 {
+	if len(fields) != 2 {
 		return nil, fmt.Errorf(
 			"constitution has %d elements, expected 2",
 			len(fields),
@@ -2363,64 +2598,112 @@ func parseProposals(data []byte) (
 // The enacted field is a sequence of GovActionState values in the same
 // representation used by cgsProposals, so parseGovActionState can
 // recover the exact action IDs without decoding the full enact state.
-func parseDRepPulsingStateRatifiedIds(
+//
+// Every shape below the top-level array is fixed in Conway, so a
+// missing or short element is malformed input rather than an optional
+// encoding: DRepPulsingState always encodes two elements (a pulsing
+// pulser is completed before being written), RatifyState always four,
+// and EnactState always seven with the committee first. Those shapes are
+// therefore recorded in CommitteeErr, which the importer treats as
+// fatal, instead of being skipped silently.
+func parseDRepPulsingState(
 	data []byte,
-) ([]ParsedGovActionId, error) {
+) (parsedPulsingState, error) {
+	var result parsedPulsingState
 	if len(data) == 0 {
-		return nil, nil
+		result.CommitteeErr = errors.New(
+			"DRepPulsingState is empty",
+		)
+		return result, nil
 	}
 	fields, err := decodeRawArray(data)
 	if err != nil {
-		return nil, fmt.Errorf(
+		result.CommitteeErr = fmt.Errorf(
 			"decoding DRepPulsingState: %w", err,
 		)
-	}
-	if len(fields) == 0 {
-		return nil, nil
+		return result, nil
 	}
 	if len(fields) < 2 {
-		return nil, fmt.Errorf(
+		result.CommitteeErr = fmt.Errorf(
 			"DRepPulsingState has %d elements, expected 2",
 			len(fields),
 		)
+		return result, nil
 	}
 
 	ratifyState, err := decodeRawArray(fields[1])
 	if err != nil {
-		return nil, fmt.Errorf(
+		result.CommitteeErr = fmt.Errorf(
 			"decoding RatifyState: %w", err,
 		)
+		return result, nil
 	}
-	if len(ratifyState) < 2 {
-		return nil, fmt.Errorf(
+	if len(ratifyState) != 4 {
+		result.CommitteeErr = fmt.Errorf(
 			"RatifyState has %d elements, expected 4",
 			len(ratifyState),
 		)
+		return result, nil
 	}
+
+	enactFields, err := decodeRawArray(ratifyState[0])
+	if err != nil {
+		result.CommitteeErr = fmt.Errorf(
+			"decoding RatifyState enact state: %w", err,
+		)
+		return result, nil
+	}
+	if len(enactFields) != 7 {
+		result.CommitteeErr = fmt.Errorf(
+			"RatifyState enact state has %d elements, expected 7",
+			len(enactFields),
+		)
+		return result, nil
+	}
+	committee, quorum, err := parseCommittee(enactFields[0])
+	if err != nil {
+		result.CommitteeErr = fmt.Errorf(
+			"decoding enact-state committee: %w", err,
+		)
+		return result, nil
+	}
+	result.EnactCommittee = committee
+	result.EnactCommitteeQuorum = quorum
+	result.EnactCommitteeSet = true
 
 	enacted, err := decodeRawArray(ratifyState[1])
 	if err != nil {
-		return nil, fmt.Errorf(
+		result.EnactedActionTypesUnknown = true
+		return result, fmt.Errorf(
 			"decoding RatifyState enacted proposals: %w", err,
 		)
 	}
+	var idErrs []error
 	ratifiedIds := make([]ParsedGovActionId, 0, len(enacted))
-	var errs []error
 	for _, item := range enacted {
 		prop, err := parseGovActionState(item)
 		if err != nil {
-			errs = append(errs, fmt.Errorf(
+			// The action type is unrecoverable for this entry, so
+			// whether a committee action was enacted is no longer
+			// decidable from rsEnacted.
+			result.EnactedActionTypesUnknown = true
+			idErrs = append(idErrs, fmt.Errorf(
 				"decoding enacted proposal: %w", err,
 			))
 			continue
+		}
+		if prop.ActionType == govActionTypeNoConfidence ||
+			prop.ActionType == govActionTypeUpdateCommittee {
+			result.EnactedCommitteeChange = true
 		}
 		ratifiedIds = append(ratifiedIds, ParsedGovActionId{
 			TxHash:      append([]byte(nil), prop.TxHash...),
 			ActionIndex: prop.ActionIndex,
 		})
 	}
+	result.RatifiedGovActionIds = ratifiedIds
 
-	return ratifiedIds, errors.Join(errs...)
+	return result, errors.Join(idErrs...)
 }
 
 // parseProposalsRoots decodes the GovRelation StrictMaybe at the

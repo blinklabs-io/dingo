@@ -22,8 +22,8 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
-	_ "github.com/glebarez/go-sqlite"
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
 )
 
 func TestCommitteeCredentialMigrationPreservesExistingRows(t *testing.T) {
@@ -33,7 +33,7 @@ func TestCommitteeCredentialMigrationPreservesExistingRows(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 13)
+	require.Len(t, registry, 17)
 	runTo := func(versions []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,

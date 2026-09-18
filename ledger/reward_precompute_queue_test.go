@@ -19,7 +19,6 @@ import (
 	"log/slog"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -71,14 +70,14 @@ func TestRewardPrecomputeCoalescesEpochTransitionBurst(t *testing.T) {
 		testutil.RequireReceive(
 			t,
 			enqueued,
-			time.Second,
+			testutil.AsyncWait,
 			"reward precompute callback did not enqueue first epoch",
 		),
 	)
 	testutil.RequireReceive(
 		t,
 		firstStarted,
-		time.Second,
+		testutil.AsyncWait,
 		"first reward precompute did not start",
 	)
 
@@ -105,7 +104,7 @@ func TestRewardPrecomputeCoalescesEpochTransitionBurst(t *testing.T) {
 			testutil.RequireReceive(
 				t,
 				enqueued,
-				time.Second,
+				testutil.AsyncWait,
 				"reward precompute callback did not enqueue epoch",
 			),
 		)
@@ -120,7 +119,7 @@ func TestRewardPrecomputeCoalescesEpochTransitionBurst(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		done,
-		time.Second,
+		testutil.AsyncWait,
 		"coalesced reward precompute did not finish",
 	)
 
@@ -157,7 +156,7 @@ func TestRewardPrecomputeContinuesAfterPanic(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		firstStarted,
-		time.Second,
+		testutil.AsyncWait,
 		"panicking reward precompute did not start",
 	)
 	ls.queueRewardPrecompute(
@@ -178,7 +177,7 @@ func TestRewardPrecomputeContinuesAfterPanic(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		done,
-		time.Second,
+		testutil.AsyncWait,
 		"reward precompute worker stopped after panic",
 	)
 	require.Equal(t, []uint64{3}, processed)
