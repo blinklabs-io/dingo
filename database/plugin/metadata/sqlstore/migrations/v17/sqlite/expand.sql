@@ -1,7 +1,17 @@
--- The exact stake this snapshot's degraded-pool exclusion removed from
--- reward_pool_input, so reward calculation can check the input rows sum to
--- exactly total_active_stake minus this value instead of only checking they
--- do not exceed it. A NULL value means the row predates this tracking (dingo
--- #4025): the exclusion, if any, is unknown, and only the non-exceeding bound
--- can still be checked for it.
-ALTER TABLE `reward_snapshot` ADD COLUMN `excluded_active_stake` text;
+-- A governance action's deposit must not be refunded in the same epoch the
+-- action is detected as expired: cardano-ledger drops an expired action (and
+-- returns its deposit) one full epoch after marking it expired, mirroring the
+-- existing ratified-this-epoch/enacted-next-epoch delay. A companion table
+-- (rather than columns added to governance_proposal) keeps this migration a
+-- plain CREATE TABLE: governance_proposal was last rebuilt via rename+recreate
+-- in v16 (governance-proposal-optional-anchor), whose `SELECT *` copy is not
+-- safe to replay against a governance_proposal that has gained columns since
+-- (dingo#4411).
+CREATE TABLE IF NOT EXISTS `governance_proposal_drop` (
+    `proposal_id` integer PRIMARY KEY,
+    `dropped_epoch` integer,
+    `dropped_slot` integer,
+    FOREIGN KEY (`proposal_id`) REFERENCES `governance_proposal`(`id`) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS `idx_governance_proposal_drop_epoch` ON `governance_proposal_drop`(`dropped_epoch`);
+CREATE INDEX IF NOT EXISTS `idx_governance_proposal_drop_slot` ON `governance_proposal_drop`(`dropped_slot`);

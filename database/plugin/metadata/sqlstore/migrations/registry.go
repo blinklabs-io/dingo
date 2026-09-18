@@ -50,6 +50,7 @@ const (
 	collateralAssociationSchemaRelease            = "collateral-transaction-associations"
 	rewardStakeVersionRestampSchemaRelease        = "reward-stake-calculation-version-restamp"
 	governanceProposalOptionalAnchorSchemaRelease = "governance-proposal-optional-anchor"
+	governanceProposalDroppedSchemaRelease        = "governance-proposal-dropped-epoch"
 	rewardSnapshotExcludedStakeSchemaRelease      = "reward-snapshot-excluded-active-stake"
 )
 
@@ -93,8 +94,13 @@ var schemaVersions = []struct {
 	},
 	{
 		Version: 17,
-		Name:    rewardSnapshotExcludedStakeSchemaRelease,
+		Name:    governanceProposalDroppedSchemaRelease,
 		Dir:     "v17",
+	},
+	{
+		Version: 18,
+		Name:    rewardSnapshotExcludedStakeSchemaRelease,
+		Dir:     "v18",
 	},
 }
 
@@ -200,9 +206,88 @@ func registryForDialect(dialect string) ([]Migration, error) {
 			migration.BackfillRevision = "1"
 			migration.Backfill = rewardStakeVersionRestampBackfill
 		}
+		if version.Name == governanceProposalDroppedSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = governanceProposalDroppedBackfill
+		}
 		ret = append(ret, migration)
 	}
 	return ret, nil
+}
+
+// governanceProposalDroppedBackfill records every proposal this database
+// already expired as also already dropped, stamping the drop at the expiry it
+// was refunded at.
+//
+// Before v17 the epoch tick refunded an expired proposal's deposit in the
+// same tick that marked it expired, so on an upgraded database every
+// `expired_epoch` row has had its deposit returned. The new drop step selects
+// on `dropped_epoch IS NULL`, which without this backfill matches all of
+// them and refunds each a second time at the first boundary after the
+// upgrade. Stamping dropped_epoch/dropped_slot from expired_epoch/
+// expired_slot also keeps rollback consistent, since
+// DeleteGovernanceProposalsAfterSlot clears both by the same slot bound.
+//
+// The proposal ID cursor makes each batch independently resumable, and the
+// NOT EXISTS predicate makes replay non-destructive.
+func governanceProposalDroppedBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	lastID := int64(0)
+	if batch.Cursor != "" {
+		parsed, err := strconv.ParseInt(batch.Cursor, 10, 64)
+		if err != nil {
+			return BatchResult{}, fmt.Errorf(
+				"parse governance proposal drop backfill cursor: %w",
+				err,
+			)
+		}
+		lastID = parsed
+	}
+	rows, err := batch.Tx.QueryContext(ctx, batch.Rebind(`
+SELECT id, expired_epoch, expired_slot FROM governance_proposal
+WHERE id > ? AND expired_epoch IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM governance_proposal_drop
+    WHERE governance_proposal_drop.proposal_id = governance_proposal.id
+  )
+ORDER BY id LIMIT ?`), lastID, batch.Limit)
+	if err != nil {
+		return BatchResult{}, err
+	}
+	defer rows.Close()
+	type droppedRow struct {
+		id    int64
+		epoch sql.NullInt64
+		slot  sql.NullInt64
+	}
+	var pending []droppedRow
+	for rows.Next() {
+		var row droppedRow
+		if err := rows.Scan(&row.id, &row.epoch, &row.slot); err != nil {
+			return BatchResult{}, err
+		}
+		pending = append(pending, row)
+	}
+	if err := rows.Err(); err != nil {
+		return BatchResult{}, err
+	}
+	if len(pending) == 0 {
+		return BatchResult{Cursor: batch.Cursor, Done: true}, nil
+	}
+	for _, row := range pending {
+		if _, err := batch.Tx.ExecContext(ctx, batch.Rebind(`
+INSERT INTO governance_proposal_drop (
+    proposal_id, dropped_epoch, dropped_slot
+) VALUES (?, ?, ?)`), row.id, row.epoch, row.slot); err != nil {
+			return BatchResult{}, err
+		}
+	}
+	return BatchResult{
+		Cursor: strconv.FormatInt(pending[len(pending)-1].id, 10),
+		Rows:   int64(len(pending)),
+	}, nil
 }
 
 type poolDepositPosition struct {

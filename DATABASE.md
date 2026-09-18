@@ -1053,7 +1053,8 @@ updates preserve the previous activity and expiry epochs.
 | `registration_drep` | `id`, `credential_tag`, `drep_credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; unique `(credential_tag, drep_credential, added_slot)`; index `certificate_id` | DRep registration certificate. `credential_tag` mirrors `drep.credential_tag` for the registered DRep. |
 | `deregistration_drep` | `id`, `credential_tag`, `drep_credential`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `(credential_tag, drep_credential)`, `certificate_id`, `added_slot` | DRep deregistration certificate. |
 | `update_drep` | `id`, `credential_tag`, `credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot` | PK `id`; indexes `(credential_tag, credential)`, `certificate_id`, `added_slot` | DRep update certificate. |
-| `governance_proposal` | `id`, `tx_hash`, `action_index`, `action_type`, `proposed_epoch`, `expires_epoch`, `parent_tx_hash`, `parent_action_idx`, `enacted_epoch`, `enacted_slot`, `ratified_epoch`, `ratified_slot`, `policy_hash`, `anchor_url`, `anchor_hash`, `deposit`, `return_address`, `gov_action_cbor`, `expired_epoch`, `expired_slot`, `added_slot`, `deleted_slot` | PK `id`; unique `(tx_hash, action_index)`; composite `(parent_tx_hash, parent_action_idx)` (`idx_gov_proposal_parent`); indexes action type, epochs, lifecycle slots, `added_slot`, `deleted_slot` | Governance action lifecycle. Votes join by `governance_vote.proposal_id`. `gov_action_cbor` stores the era-specific GovAction CBOR used for enactment and transaction validation; replay may rewrite ratified parameter-change actions at an era boundary, such as Conway to Dijkstra, so old databases should be rebuilt from chain data when this encoding changes. `expires_epoch` is inclusive; validation derives its final slot from the proposal epoch's start and epoch length. The ledger view exposes only rows without `enacted_epoch` or `expired_epoch` as pending actions, while the latest enacted rows for the four CIP-1694 purposes are exposed separately as purpose roots. Same-boundary epoch replay reads proposals whose `enacted_epoch/enacted_slot` or `expired_epoch/expired_slot` already match the boundary to restore treasury/reward side effects after stake reward pot reset. |
+| `governance_proposal` | `id`, `tx_hash`, `action_index`, `action_type`, `proposed_epoch`, `expires_epoch`, `parent_tx_hash`, `parent_action_idx`, `enacted_epoch`, `enacted_slot`, `ratified_epoch`, `ratified_slot`, `policy_hash`, `anchor_url`, `anchor_hash`, `deposit`, `return_address`, `gov_action_cbor`, `expired_epoch`, `expired_slot`, `added_slot`, `deleted_slot` | PK `id`; unique `(tx_hash, action_index)`; composite `(parent_tx_hash, parent_action_idx)` (`idx_gov_proposal_parent`); indexes action type, epochs, lifecycle slots, `added_slot`, `deleted_slot` | Governance action lifecycle. Votes join by `governance_vote.proposal_id`. `gov_action_cbor` stores the era-specific GovAction CBOR used for enactment and transaction validation; replay may rewrite ratified parameter-change actions at an era boundary, such as Conway to Dijkstra, so old databases should be rebuilt from chain data when this encoding changes. `expires_epoch` is inclusive; validation derives its final slot from the proposal epoch's start and epoch length. The ledger view exposes only rows without `enacted_epoch` or `expired_epoch` as pending actions, while the latest enacted rows for the four CIP-1694 purposes are exposed separately as purpose roots. Same-boundary epoch replay reads proposals whose `enacted_epoch/enacted_slot` or `expired_epoch/expired_slot` already match the boundary to restore treasury/reward side effects after stake reward pot reset. `expired_epoch`/`expired_slot` mark a proposal ineligible; they do not by themselves refund its deposit -- see `governance_proposal_drop`. |
+| `governance_proposal_drop` | `proposal_id`, `dropped_epoch`, `dropped_slot` | PK `proposal_id`; indexes `dropped_epoch`, `dropped_slot` | Companion table recording when an expired proposal's deposit was actually returned and the proposal reached final consideration. cardano-ledger does not refund an expired action's deposit in the same epoch it is marked expired -- that happens one full epoch later, the same one-epoch delay ratification has before enactment (dingo#4411). A separate table rather than columns on `governance_proposal` avoids widening a table v16 (`governance-proposal-optional-anchor`) already rebuilds via rename-and-recreate with an unqualified `SELECT *`, which cannot tolerate columns added after it. FK `proposal_id` references `governance_proposal.id` with cascade deletion. A row's absence means the proposal, if expired, is still awaiting its drop. The v17 backfill stamps every proposal an upgraded database had already expired, because the pre-v17 tick refunded at expiry; without it the new drop step would return each of those deposits a second time at the first boundary after the upgrade. |
 | `governance_proposal_ratification_history` | `id`, `proposal_id`, `transition_slot`, `ratified_epoch`, `ratified_slot` | PK `id`; indexes `transition_slot`, `(proposal_id, transition_slot, id)` | Rollback journal for proposal ratification lifecycle. A paired epoch/slot records ratification; NULL marker values record an explicit return to pending. FK `proposal_id` references `governance_proposal.id` with cascade deletion. Rollback deletes transitions above the target and restores the latest remaining state, with `id` breaking ties between transitions at the same slot. |
 | `governance_vote` | `id`, `proposal_id`, `voter_type`, `voter_credential_tag`, `voter_credential`, `vote`, `anchor_url`, `anchor_hash`, `added_slot`, `vote_updated_slot`, `deleted_slot` | PK `id`; unique `(proposal_id, voter_type, voter_credential_tag, voter_credential)`; indexes proposal/voter/lifecycle slots | Vote on a governance proposal. `voter_type`: 0 committee, 1 DRep, 2 SPO. `voter_credential_tag`: 0 key hash, 1 script hash for committee/DRep voters; 0 for SPO key hashes. `vote`: 0 No, 1 Yes, 2 Abstain. |
 | `constitution` | `id`, `anchor_url`, `anchor_hash`, `policy_hash`, `added_slot`, `deleted_slot` | PK `id`; unique `added_slot`; index `deleted_slot` | Current or historical constitution references. |
@@ -3305,6 +3306,97 @@ consensus-critical question is actually asked, using the boundary the node
 already persists for exactly this purpose, avoids adding a row that other
 `added_slot`-scoped readers have to reason about.
 
+### `GetPoolByVrfKeyHash`
+
+Backs `LedgerView.IsVrfKeyInUse`, the reverse of the pair above: given a VRF
+key hash, find whichever pool currently claims it, respecting the same
+`psStakePools`/`psFutureStakePoolParams` deferral instead of the denormalized
+`pool.vrf_key_hash` column, which the certificate-application path
+(`applyPoolRegistrationCertificate`) always overwrites immediately regardless
+of epoch boundary. Reading that column directly let a pool's old VRF key
+appear free to a different pool the moment a re-registration was applied, even
+though cardano-ledger keeps the old key reserved until the next epoch boundary
+merges `psFutureStakePoolParams` into `psStakePools` (issue #4352).
+
+Takes the current epoch's start slot (`epochStartSlot`) and resolves a claim
+in two tiers, checked in order:
+
+1. **Effective owner.** The pool whose most recent registration strictly
+   before `epochStartSlot` has this key (`pre_boundary`), falling back to a
+   candidate's globally earliest registration (`earliest`) when it has none
+   before the boundary -- the same first-registration-is-immediate exception
+   `GetPoolEarliestVrfKeyHashAtSlot` encodes, needed here so a pool's
+   first-ever registration, submitted mid-epoch, still reserves its key
+   against every other pool immediately rather than only from the next
+   boundary.
+2. **Same-epoch claimant.** Any pool with *any* registration this epoch
+   (`added_slot >= epochStartSlot`) naming this key, even one since
+   superseded by a later same-epoch re-registration. Consulted only when (1)
+   finds nothing. This tier exists because `psVRFKeyHashes` retains every key
+   a pool ever placed in `psFutureStakePoolParams` during the epoch, not only
+   the current pending one: a pool cycling `A -> B -> C` within one epoch must
+   still be refused a later same-epoch reuse of `B`. `IsVrfKeyInUse`'s caller
+   (gouroboros's `validatePoolRegistration`) special-cases
+   `owningPool == cert.Operator` by comparing against `PoolCurrentState`
+   (the pool's latest registration, `C` here) rather than its effective one;
+   reporting `B` as claimed by that same pool, not free, is what lets that
+   comparison catch the reuse.
+
+Both candidate sets are pre-filtered to pool IDs with *any* historical
+`pool_registration` row naming the queried key, so the query only walks a
+pool's full history when it has ever plausibly held that key.
+
+The query returns every matching pool ID ranked by tier (1 before 2, `pool_id`
+ascending within a tier), not a single winner picked by `LIMIT 1`: a long-
+retired pool's own last-ever registration can still satisfy tier 1's
+per-candidate effective-key computation (registration history and retirement
+are tracked independently, so retiring never rewrites what a pool's
+registrations said), so a retired candidate and a different, genuinely active
+pool that later re-registered the same, by-then-free key can both appear as
+candidates for one lookup. The Go loop tries each ranked candidate in turn and
+returns the first one the query already confirms is active, rather than
+checking retirement on only whichever candidate a single `ORDER BY ... LIMIT 1`
+happened to pick (caught by review on this PR;
+`TestGetPoolByVrfKeyHashSkipsRetiredCandidateForActiveOwner`).
+
+Retirement is resolved against `epochStartSlot`'s own epoch (`epoch_bound`),
+not the live database tip, via a `pool_active` CTE applied to *both* tiers --
+not only tier 1, since restricting it to tier 1 alone still let a retired
+pool's same-epoch registration leak through tier 2 unfiltered. `pool_active`
+mirrors `GetActivePoolKeyHashesAtSlot`'s precedence rule (a later registration
+cancels an earlier retirement; a retirement whose target epoch is still ahead
+of `epoch_bound` has not taken effect), compared against each candidate's own
+`effective_reg` row rather than a fresh `<=`-bounded lookup. This exists
+because a pool that retires and later submits a fresh registration for a
+*different* key un-retires via that new registration -- cardano-ledger treats
+it as a first registration, not a deferred re-registration, since the pool had
+left `psStakePools` -- and checking retirement against "now" (the earlier
+`activePoolOrNil` call this replaced) let that pool's stale, pre-retirement
+registration for its *old* key still resolve as active, reporting the old key
+in use when the pool no longer held it: this method's own bug class,
+reintroduced (caught by review on this PR;
+`TestGetPoolByVrfKeyHashFreesKeyAfterRetirementThenDifferentKeyReRegistration`).
+`epoch_bound` resolves to `NULL`, not an error, when no epoch row covers
+`epochStartSlot`; a retirement is then never treated as confirmed-effective,
+failing toward "still active" rather than incorrectly freeing a key.
+
+`epochStartSlot` must be pinned once at the start of the validation or query
+that calls this, not re-read from a live snapshot on every call:
+`LedgerView.epochStartSlot` (see `ledger/view.go`) is set at every real
+construction site (`NewView`, `ledgerProcessBlock`, `validateTxCore`,
+`ValidateTxWithOverlay`, `EvaluateTx`) from the same snapshot that pins
+`committeeEpoch` and `pp` alongside it, for the same reason: a long-running
+validation (e.g. evaluating scripts) can span a writer publishing a newer
+epoch boundary, and reading it live would let one certificate's deferral
+check disagree with another's in the same transaction or block, or with
+itself across repeated calls (caught by review on this PR;
+`TestLedgerViewIsVrfKeyInUseIgnoresConcurrentSnapshotRepublish`). The pin is
+also verified through each real construction site directly rather than only
+against a hand-set field on a bare `&LedgerView{}`
+(`TestLedgerStateNewViewPinsEpochStartSlot`,
+`TestLedgerStateValidateTxPinsEpochStartSlot`,
+`TestLedgerStateEvaluateTxPinsEpochStartSlot`).
+
 ### `GetPoolsRetiringAtEpoch`
 
 Pools whose effective retirement takes effect at a given epoch, with the reward
@@ -3576,6 +3668,39 @@ WHERE expired_epoch = $1
 ORDER BY proposed_epoch ASC, added_slot ASC, tx_hash ASC, action_index ASC;
 ```
 
+Marking a proposal expired (`expired_epoch`/`expired_slot`) never itself refunds
+the deposit: cardano-ledger drops an expired action, and returns its deposit,
+one full epoch after marking it expired -- the same one-epoch delay
+ratification has before enactment. `governance_proposal_drop` is a companion
+table (not columns on `governance_proposal`) recording when that drop actually
+happened, keyed by `proposal_id`:
+
+```sql
+-- GetExpiredAwaitingDropGovernanceProposals(epoch): proposals expired in a
+-- prior epoch whose deposit has not yet been returned. The `expired_epoch <
+-- $1` bound is the one-epoch delay itself, not a restatement of the caller's
+-- step order: a boundary reprocessed after a commit crash reruns this query
+-- against expiries the first pass already wrote, and an unbounded predicate
+-- would refund them in the epoch that expired them.
+SELECT gp.*
+FROM governance_proposal gp
+LEFT JOIN governance_proposal_drop gpd ON gpd.proposal_id = gp.id
+WHERE gp.expired_epoch < $1
+  AND gpd.dropped_epoch IS NULL
+  AND gp.deleted_slot IS NULL
+ORDER BY gp.proposed_epoch ASC, gp.added_slot ASC, gp.tx_hash ASC, gp.action_index ASC;
+
+-- GetDroppedGovernanceProposalsAt(epoch, slot): epoch-boundary replay lookup,
+-- mirroring GetEnactedGovernanceProposalsAt/GetExpiredGovernanceProposalsAt.
+SELECT gp.*
+FROM governance_proposal gp
+LEFT JOIN governance_proposal_drop gpd ON gpd.proposal_id = gp.id
+WHERE gpd.dropped_epoch = $1
+  AND gpd.dropped_slot = $2
+  AND gp.deleted_slot IS NULL
+ORDER BY gp.proposed_epoch ASC, gp.added_slot ASC, gp.tx_hash ASC, gp.action_index ASC;
+```
+
 ### `GetChildGovernanceProposals`
 
 Used during the Conway epoch boundary orphan sweep (`removeOrphanedProposals`). Returns all active proposals that reference a given enacted or expired proposal as their parent. The composite index `idx_gov_proposal_parent` on `(parent_tx_hash, parent_action_idx)` makes this lookup O(children) rather than O(table).
@@ -3592,6 +3717,13 @@ ORDER BY proposed_epoch ASC, added_slot ASC, tx_hash ASC, action_index ASC;
 ```
 
 The sweep is transitive (BFS): each orphaned proposal is itself used as a seed to find its own children, continuing until the graph is exhausted. Orphaned proposals are marked with `expired_epoch`/`expired_slot` at the boundary slot so the existing slot-based rollback path in `DeleteGovernanceProposalsAfterSlot` reverts them cleanly.
+
+Which tick returns an orphan's deposit depends on why it was removed, because cardano-ledger unions the enacted action with the siblings its enactment removed and returns all of those deposits in one tick, while an expired action is removed a tick after it was flagged:
+
+- Removed because a competing sibling enacted: refunded in the enacting tick, alongside the winner's own deposit, and stamped into `governance_proposal_drop` at that boundary so the drop step does not return it again.
+- Removed as the descendant subtree of a naturally expired action: marked expired only, and refunded one epoch later alongside its expired ancestor.
+
+A proposal reachable both ways takes the enactment tick, which is when cardano-ledger would have removed it.
 
 ### `GetPParams`, `GetPParamUpdates`, and `GetTip`
 

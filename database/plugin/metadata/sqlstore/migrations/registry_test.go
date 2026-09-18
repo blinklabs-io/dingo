@@ -27,7 +27,7 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 17)
+	require.Len(t, registry, 18)
 	require.Equal(t, 1, registry[0].Version)
 	require.Equal(t, "v1alpha1", registry[0].Name)
 	require.GreaterOrEqual(t, len(registry[0].SQL["sqlite"].Expand), 303)
@@ -152,6 +152,23 @@ func TestSQLiteRegistry(t *testing.T) {
 	require.Equal(t, governanceProposalOptionalAnchorSchemaRelease, registry[15].Name)
 	require.Len(t, registry[15].SQL["sqlite"].Expand, 21)
 	require.Empty(t, registry[15].Backfill)
+	require.Equal(t, 17, registry[16].Version)
+	require.Equal(t, governanceProposalDroppedSchemaRelease, registry[16].Name)
+	require.Contains(
+		t,
+		registry[16].SQL["sqlite"].Expand,
+		"CREATE TABLE IF NOT EXISTS `governance_proposal_drop` (\n"+
+			"    `proposal_id` integer PRIMARY KEY,\n"+
+			"    `dropped_epoch` integer,\n"+
+			"    `dropped_slot` integer,\n"+
+			"    FOREIGN KEY (`proposal_id`) REFERENCES `governance_proposal`(`id`) ON DELETE CASCADE\n"+
+			")",
+	)
+	// An upgraded database already refunded every proposal it marked
+	// expired, so v17 must stamp those as dropped rather than let the new
+	// drop step refund them again.
+	require.NotNil(t, registry[16].Backfill)
+	require.Equal(t, "1", registry[16].BackfillRevision)
 }
 
 // TestPointerStakeMigrationTranslatesForProviders pins the postgres and mysql
@@ -277,7 +294,7 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 17)
+	require.Len(t, registry, 18)
 	require.Contains(
 		t,
 		registry[0].SQL["mysql"].Expand,
