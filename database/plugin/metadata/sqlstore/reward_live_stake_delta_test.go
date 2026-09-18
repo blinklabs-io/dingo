@@ -651,3 +651,123 @@ func BenchmarkRefreshRewardLiveStakeAggregateDeltaAtScale(b *testing.B) {
 		})
 	}
 }
+
+// TestSetTransactionReapplyAppliesNoSecondDelta covers the invariant the
+// incremental path rests on: a delta must state the change this write made to
+// the utxo table, not the change the transaction describes. Re-applying an
+// already-stored transaction mutates nothing -- the produced output collides
+// with insertUtxoQueryIgnoreConflict's ON CONFLICT DO NOTHING, and the
+// consumed input's UPDATE matches no row because this same transaction
+// already spent it -- so the credential's running total must not move.
+//
+// Counting those no-op mutations again drives the stored value away from the
+// authoritative scan in both directions at once (a spurious gain for the
+// output, a spurious loss for the input), and a loss larger than the
+// credential's recorded total fails applyUtxoStakeDelta's underflow guard,
+// which aborts block application rather than merely reporting wrong stake.
+func TestSetTransactionReapplyAppliesNoSecondDelta(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	ctx := context.Background()
+	fx := buildSharedCredentialTx(t, 0x41)
+	seedConsumedUtxo(t, store, fx)
+	establishRunningTotal(t, store, fx.ref, 1)
+
+	require.NoError(t, store.SetTransaction(
+		fx.tx, fx.point, 0, fx.certDeposits, false, nil,
+	))
+	require.Equal(t, fx.producedAmount, readUtxoStake(t, store, fx.ref))
+
+	require.NoError(t, store.SetTransaction(
+		fx.tx, fx.point, 0, fx.certDeposits, false, nil,
+	))
+	want, err := store.sumCredentialUtxoStake(ctx, store.writeDB, fx.ref)
+	require.NoError(t, err)
+	require.Equal(t, fx.producedAmount, want, "the utxo table must not move")
+	require.Equal(
+		t,
+		want,
+		readUtxoStake(t, store, fx.ref),
+		"a re-applied transaction must not move the running total",
+	)
+}
+
+// TestSetTransactionLeiosClosureSkippedInputAppliesNoDelta covers the same
+// invariant on the Leios closure path, where an input already spent by a
+// *different* certified endorser-block transaction is deliberately a no-op
+// (see setTransactionWithAccumulator's tolerateConsumedInputConflict branch).
+// The row stays deleted with its original spender, so this write removed no
+// live stake and must subtract none.
+func TestSetTransactionLeiosClosureSkippedInputAppliesNoDelta(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	ctx := context.Background()
+	fx := buildSharedCredentialTx(t, 0x43)
+	seedConsumedUtxo(t, store, fx)
+
+	otherSpender := make([]byte, 32)
+	otherSpender[0] = 0xfe
+	_, err := store.writeDB.ExecContext(ctx, `
+UPDATE utxo SET deleted_slot = 900, spent_at_tx_id = ?
+WHERE tx_id = ? AND output_idx = 0`, otherSpender, fx.consumedTxID)
+	require.NoError(t, err)
+
+	// A second live UTxO keeps the credential's reward_live_stake row in
+	// place, so the write exercises the warm incremental path rather than
+	// refreshRewardLiveStakeAggregateDelta's cold-start full-scan fallback.
+	const retained = 9_000_000
+	otherTx := make([]byte, 32)
+	otherTx[0] = 0x77
+	require.NoError(t, store.withWriteTransaction(
+		nil,
+		func(db queryer, ctx context.Context) error {
+			return insertLiveUtxoTx(ctx, db, fx.ref, otherTx[0], retained)
+		},
+	))
+	establishRunningTotal(t, store, fx.ref, 1)
+	require.Equal(t, uint64(retained), readUtxoStake(t, store, fx.ref))
+
+	require.NoError(t, store.SetTransactionLeiosClosure(
+		fx.tx, fx.point, 0, fx.certDeposits, false, nil,
+	))
+	want, err := store.sumCredentialUtxoStake(ctx, store.writeDB, fx.ref)
+	require.NoError(t, err)
+	require.Equal(t, uint64(retained+fx.producedAmount), want)
+	require.Equal(
+		t,
+		want,
+		readUtxoStake(t, store, fx.ref),
+		"an already-spent input must contribute no loss delta",
+	)
+}
+
+// TestSetGapBlockTransactionReapplyAppliesNoSecondDelta is the same check for
+// SetGapBlockTransaction, the other caller on the incremental path. It is the
+// likeliest place for a colliding produced output in practice: gap closure
+// replays blocks whose outputs a Mithril snapshot import may already have
+// created.
+func TestSetGapBlockTransactionReapplyAppliesNoSecondDelta(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	ctx := context.Background()
+	fx := buildSharedCredentialTx(t, 0x44)
+
+	require.NoError(t, store.SetGapBlockTransaction(
+		fx.tx, fx.point, 0, fx.certDeposits, nil,
+	))
+	first := readUtxoStake(t, store, fx.ref)
+	require.Equal(t, fx.producedAmount, first)
+
+	require.NoError(t, store.SetGapBlockTransaction(
+		fx.tx, fx.point, 0, fx.certDeposits, nil,
+	))
+	want, err := store.sumCredentialUtxoStake(ctx, store.writeDB, fx.ref)
+	require.NoError(t, err)
+	require.Equal(t, fx.producedAmount, want, "the utxo table must not move")
+	require.Equal(
+		t,
+		want,
+		readUtxoStake(t, store, fx.ref),
+		"a replayed gap block must not double-count its produced outputs",
+	)
+}

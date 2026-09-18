@@ -1204,6 +1204,40 @@ one:
    persisting until the next node startup, not forever. It is exercised
    directly by `TestRewardLiveStakeNeedsBackfillHealsCorruptedRunningTotal`.
 
+   The one configuration that removes this layer is
+   `skipRewardLiveStakeBackfillCheck`, which suppresses the comparison (not
+   just the repair) to avoid its full live-UTxO scan on every start. With the
+   incremental path in place that setting leaves a corrupted running total
+   undetected for as long as the node keeps running on it, so it is
+   diagnostic-only and must not be left enabled on a node whose stake
+   snapshots matter.
+
+The invariant every incremental caller must hold is narrower than "knows the
+amount": **a delta states the change this write actually made to the `utxo`
+table, not the change the transaction describes.** Two write outcomes look
+like a mutation and are not, and both are ordinary rather than exceptional:
+
+- A produced output whose row already exists. `insertUtxoModel`'s
+  conflict-tolerant form is `ON CONFLICT (tx_id, output_idx) DO NOTHING`, and
+  a snapshot import creates outputs before their producing transaction is
+  replayed, so gap closure and any re-application collide with a row that is
+  already counted. It contributes 0, not its amount
+  (`insertUtxoModelChecked` reports which happened).
+- A consumed input whose `UPDATE ... WHERE deleted_slot = 0 AND spent_at_tx_id
+  IS NULL` matched no row, because an earlier certified endorser-block
+  transaction (the Leios closure path) or an earlier application of this same
+  transaction already spent it. It contributes 0, not its negative amount;
+  only inputs the write itself moved from live to deleted reach
+  `queryUtxoStakeConsumedDeltas`.
+
+Both are still refreshed at zero delta, so the set of credentials a write
+touches is identical to the full-scan path's. Counting either one drifts the
+credential permanently, and an over-large loss additionally fails
+`applyUtxoStakeDelta`'s underflow guard, which aborts block application rather
+than merely reporting wrong stake. `TestSetTransactionReapplyAppliesNoSecondDelta`,
+`TestSetTransactionLeiosClosureSkippedInputAppliesNoDelta`, and
+`TestSetGapBlockTransactionReapplyAppliesNoSecondDelta` cover the three cases.
+
 A credential's first-ever touch (no `reward_live_stake` row yet) always falls
 back to the authoritative scan to establish a baseline rather than trusting a
 delta against an unknown prior value; this is cheap specifically because such

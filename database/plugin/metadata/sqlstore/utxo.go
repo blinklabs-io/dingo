@@ -766,8 +766,21 @@ func (s *Store) refreshRewardLiveStakeDeltas(
 	return nil
 }
 
-// producedStakeCredentialDelta builds the positive delta a newly produced
-// UTxO output contributes to its stake credential's running live-UTxO total.
+// producedStakeCredentialDelta builds the delta a produced UTxO output
+// contributes to its stake credential's running live-UTxO total.
+//
+// inserted reports whether this write actually created the output's row.
+// insertUtxoModel's conflict-tolerant form is an ON CONFLICT (tx_id,
+// output_idx) DO NOTHING insert, so an output whose row already exists -- a
+// snapshot import creates outputs before their producing transaction is
+// replayed, and a gap-closure or Leios re-apply can revisit a transaction
+// already stored -- leaves the utxo table unchanged. A delta must state the
+// change this write made to that table, not the change it intended, so a
+// conflicting output contributes 0: its amount is already inside the running
+// total that the row it collided with was counted into. Counting it again
+// would inflate the credential's live stake permanently, since the
+// incremental path has no scan to correct it (dingo #4421).
+//
 // amount is already bounded within int64 by CheckedUint64FromBigInt
 // (UtxoLedgerToModel's caller), well inside a real lovelace value's range
 // (ada's total supply is far below both int64's and uint64's ceiling), but
@@ -777,6 +790,7 @@ func producedStakeCredentialDelta(
 	tag uint8,
 	key []byte,
 	amount types.Uint64,
+	inserted bool,
 ) (stakeCredentialDelta, error) {
 	if uint64(amount) > math.MaxInt64 {
 		return stakeCredentialDelta{}, fmt.Errorf(
@@ -784,10 +798,11 @@ func producedStakeCredentialDelta(
 			uint64(amount),
 		)
 	}
-	return stakeCredentialDelta{
-		ref:   models.NewStakeCredentialRef(tag, key),
-		delta: int64(amount),
-	}, nil
+	ret := stakeCredentialDelta{ref: models.NewStakeCredentialRef(tag, key)}
+	if inserted {
+		ret.delta = int64(amount)
+	}
+	return ret, nil
 }
 
 // utxoStakeConsumedDeltaQuery is queryUtxoStakeConsumedDeltas' batched
@@ -807,6 +822,17 @@ func utxoStakeConsumedDeltaQuery(n int) string {
 // credential it also reads the row's amount, so the caller can pass
 // refreshRewardLiveStakeAggregateDelta the exact negative delta a spend
 // contributes instead of falling back to sumCredentialUtxoStake's full scan.
+//
+// ids must name only the inputs this write actually transitioned from live to
+// deleted -- the ones whose UPDATE reported a row affected -- and not every
+// input the transaction lists. An input the write skipped because the row was
+// already spent (by an earlier certified endorser block on the Leios closure
+// path, or by an earlier application of this same transaction) changed
+// nothing in the utxo table, so subtracting its amount would drive the
+// credential's running total permanently below its real live stake, or fail
+// the write outright on applyUtxoStakeDelta's underflow guard. Those inputs
+// belong in the caller's zero-delta touch set instead (dingo #4421).
+//
 // deleted_slot is not filtered on: ids names exactly the inputs this
 // transaction just spent, by (tx_id, output_idx), so the deleted_slot value
 // (already set to this transaction's slot by the caller) does not change
