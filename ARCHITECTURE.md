@@ -285,10 +285,17 @@ graph TB
         HExpiry["History Expiry<br/><i>internal/historyexpiry/</i>"]
     end
 
+    subgraph "Committee Auth Sync"
+        CAuthSync["Committee Auth Sync<br/><i>internal/committeeauth/</i>"]
+    end
+
     EB["EventBus<br/><i>event/</i>"]
 
     Node --> CM & PG & OB & ChM & LS & MP & DB & EB
     Node -.->|"optional"| BF & LE & URPC & BFA & Mesh & Bark & MidnightIndex & Midnight & HExpiry & DBLC
+    Node --> CAuthSync
+    CAuthSync -->|"PointAtDepth(securityParam)"| ChM
+    CAuthSync -->|"SetCommitteeAuthImmutableSlot"| DB
 
     PG -->|"outbound conn requests"| CM
     CM -->|"connections"| OB
@@ -1086,6 +1093,8 @@ dingo/
 │   │   └── load.go      # Block loading implementation
 │   ├── historyexpiry/   # Ledger-window-based local block history expiry
 │   │   └── pruner.go    # Background expiry scanner
+│   ├── committeeauth/   # Live rollback-safe immutable-slot sync for committee auth pruning
+│   │   └── syncer.go    # Background PointAtDepth -> SetCommitteeAuthImmutableSlot sync
 │   ├── test/            # Test utilities
 │   │   ├── conformance/ # Cardano Blueprint ledger-rule conformance tests
 │   │   ├── devnet/      # DevNet end-to-end tests
@@ -1116,6 +1125,7 @@ type Node struct {
     utxorpc        *utxorpc.Utxorpc               // UTxO RPC server
     bark           *bark.Bark                     // Bark C2/archive server
     historyExpiry  *historyexpiry.Pruner          // Local block history expiry
+    committeeAuthSync *committeeauth.Syncer       // Live immutable-slot sync for committee auth pruning
     blockfrostAPI  *blockfrost.Blockfrost         // Blockfrost REST API
     meshAPI        *mesh.Server                   // Mesh (Rosetta) API
     midnightServer *midnightserver.Server         // Midnight MidnightState gRPC server
@@ -2268,6 +2278,38 @@ fallback:
   and Concurrency for the rules that make that safe. The wrapper takes the
   store it replaces as its upstream and forwards `Close` to it, so the
   replaced store is kept alive rather than retired.
+
+### Committee Auth Immutable-Slot Sync
+
+Unconditional and independent of `historyExpiry.enabled`: `node.go` and
+`node_lifecycle.go` both start `internal/committeeauth.Syncer` whenever the
+ledger and database are available, regardless of history-expiry
+configuration. The metadata store's committee hot-key authorization pruner
+(`database/plugin/metadata/sqlstore/committee_prune.go`) always runs on every
+applied certificate and on its own 24-hour maintenance sweep, so it always
+needs a safe retention bound -- unlike history expiry, which only runs when a
+node opts in.
+
+The syncer resolves `LedgerState.SecurityParam()` and
+`Chain.PointAtDepth(securityParam)` on a timer (default five minutes, plus
+once immediately at `Start`) and pushes the result into
+`Database.SetCommitteeAuthImmutableSlot`, which the metadata package cannot
+resolve itself: `chain` already imports `database`, so the reverse import
+would cycle. A resolution failure (security parameter not yet known, or fewer
+than `securityParam` blocks on chain) pushes `known=false` rather than a
+stale value.
+
+The pruner does not treat "no live bound available" as "fall back to the
+slot-window assumption": once `SetCommitteeAuthImmutableSlot` has been called
+at all (a live syncer is wired), a subsequent `known=false` -- from a
+resolution failure above, or from `DeleteCertificatesAfterSlot` invalidating
+the cached value on every rollback, since a value safe when cached is not
+necessarily safe after a rollback -- suspends pruning entirely until the next
+successful resolution. Only a `Store` no syncer has ever been wired to (every
+existing test, and any non-node caller) keeps the slot-window-only fallback.
+See DATABASE.md's Committee Hot-Key Authorization Retention section for the
+full retention rule, the gap this closes (blinklabs-io/dingo#4353), and why
+suspension rather than fallback is required once live tracking is engaged.
 
 ### Tiered CBOR Cache
 
