@@ -7482,7 +7482,13 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   **derived-match** field below matched. It does not claim parity for fields
   classified as **intentionally-incomparable** or **unsupported**. The same
   field-level matrix is emitted in every JSON report, and human-readable
-  status output reports the class counts. `internal/koiosparity/coverage_test.go`
+  status output reports the class counts.
+  `TestArchitectureDocumentsKoiosCoverageMatrix` (`internal/docsparity/`)
+  compares the endpoint, field and classification of every row in the table
+  below against that matrix in both directions, so a reclassified, added, or
+  removed field fails `make docs-parity` until the table records it; the
+  mapping/reason prose is not compared.
+  `internal/koiosparity/coverage_test.go`
   requires every field in the consumed Koios response structs to remain
   classified when those structs change (the `/account_reward_history` entries
   below are not covered by that test's automatic struct-field check, since
@@ -9960,9 +9966,9 @@ documentation in agreement with the configuration it describes. Every rule
 derives its expectation from a source of truth in the tree rather than
 restating a value: the minimum Go release comes from the `go` directive in
 `go.mod`, the build contract from the Makefile's rule graph and `##` help
-text, and the DevNet topology from `internal/test/devnet/docker-compose.yml`,
-its `.env` profile default, and the wrapper scripts. Run the focused check
-with:
+text, the DevNet topology from `internal/test/devnet/docker-compose.yml`, its
+`.env` profile default, and the wrapper scripts, and the Koios coverage table
+from `koiosparity.KoiosCoverageMatrix`. Run the focused check with:
 
 ```shell
 make docs-parity

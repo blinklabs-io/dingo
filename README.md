@@ -1057,7 +1057,7 @@ make test                                    # All tests with race detection
 go test -v -race -run TestName ./package/    # Single test
 make bench                                   # Benchmarks
 make bench-mempool                           # Compare FIFO and DAG mempools
-make docs-parity                             # Docs agree with go.mod, Makefile, compose
+make docs-parity                             # Docs agree with go.mod, Makefile, compose, Koios matrix
 make sql-check                               # Generated sqlc output is current
 ```
 
