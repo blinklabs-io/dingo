@@ -1431,17 +1431,37 @@ later certificate will revisit that partition.
 
 Retention rule, applied per `(cold_credential_tag, cold_credential)`: keep every
 row with `added_slot` above the horizon, plus the single newest row at or below
-it, where the horizon is the applied block's slot minus the rollback window.
-The window is `sqlstore.DefaultCommitteeAuthRetentionSlots` (129600 slots = 3k/f
-for k=2160, f=0.05 — the Shelley stability window, and the same immutability
-bound `internal/historyexpiry` uses to expire block history), overridable with
-`sqlstore.Config.CommitteeAuthRetentionSlots`. Retention is per credential, not
-a global row cap, and it only ever deletes below that window.
+it, where the horizon is `min(tipSlot - retentionSlots, liveImmutableSlot)`.
+
+`retentionSlots` is `sqlstore.DefaultCommitteeAuthRetentionSlots` (129600 slots
+= 3k/f for k=2160, f=0.05 — the Shelley stability window, and the same
+immutability bound `internal/historyexpiry` uses to expire block history),
+overridable with `sqlstore.Config.CommitteeAuthRetentionSlots`. It only
+approximates the rollback bound: Ouroboros bounds a legal rollback in *blocks*
+(`securityParam`), not slots, and `Chain.rollbackForkDepth` enforces exactly
+that block count, so a chain sparser than the 3k/f assumption — a devnet with a
+low active-slot coefficient, or an occasional sparse span of an otherwise
+healthy chain — can have a legal rollback target below `tipSlot -
+retentionSlots` (blinklabs-io/dingo#4353). Pruning to that slot-only horizon
+would then permanently delete the authorization the rollback needs to restore.
+
+`liveImmutableSlot` is the actual bound: the slot of the block `securityParam`
+blocks behind the tip, as `Chain.PointAtDepth` resolves it. `sqlstore` cannot
+compute this itself (`chain` already imports `database`, so the reverse import
+would cycle), so `internal/committeeauth.Syncer` resolves it periodically from
+the live `Chain` and `LedgerState` the node holds and pushes it in through
+`Store.SetCommitteeAuthImmutableSlot` (wired in `node.go`/`node_lifecycle.go`,
+independent of `historyExpiry`). Taking the minimum of the two candidates keeps
+pruning safe whether or not a live value is available yet: no live value falls
+back to the slot-window assumption unchanged, and a live value the assumption
+under-covers wins, since it is always at or below the true bound and a smaller
+horizon only retains more. Retention is per credential, not a global row cap,
+and it only ever deletes below that horizon.
 
 Rollback safety: `DeleteCertificatesAfterSlot` deletes `auth_committee_hot` rows
-with `added_slot` above the rollback target S, and Ouroboros bounds S at or
-above the immutable tip, so the horizon is always at or below S. If a row exists
-between the horizon and S it is retained (everything above the horizon is) and
+with `added_slot` above the rollback target S, and this horizon is always at or
+below S (both candidates are, so their minimum is too). If a row exists between
+the horizon and S it is retained (everything above the horizon is) and
 dominates every older row; if none does, the correct answer is the one
 pre-horizon row the rule retains. The post-rollback query result is therefore
 identical whether or not pruning ran, and a credential's last row is never

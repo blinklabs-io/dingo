@@ -606,6 +606,111 @@ func TestAuthCommitteeHotPruningSurvivesRollbackAcrossPrunedBoundary(
 		"the post-rollback tally must be identical with and without pruning")
 }
 
+// TestAuthCommitteeHotPruningRespectsLiveImmutableSlotOnSparseChain is the
+// regression case for issue #4353: the slot-window assumption
+// (tipSlot - DefaultCommitteeAuthRetentionSlots) approximates the rollback
+// bound by assuming typical block density, but Ouroboros's actual rollback
+// limit is k blocks, not a slot count. A sparse chain can have a legal
+// rollback target far below what the slot-window assumption expects,
+// permanently deleting the authorization that rollback needs to restore.
+// With SetCommitteeAuthImmutableSlot reflecting the true block-depth bound,
+// that authorization survives pruning and rollback restores it correctly.
+func TestAuthCommitteeHotPruningRespectsLiveImmutableSlotOnSparseChain(
+	t *testing.T,
+) {
+	t.Parallel()
+	const coldTag = uint8(lcommon.CredentialTypeAddrKeyHash)
+	cold := credentialHash(0xc6)
+	store := newManagementTestStore(t)
+	seatMember(t, store, coldTag, cold, 1)
+
+	// H1, H2, H3 authorized at slots 1,000, 200,000, and 400,000 -- the exact
+	// state from the issue.
+	seedAuthorization(t, store, coldTag, cold,
+		uint8(lcommon.CredentialTypeAddrKeyHash), hotHash(0x90, 1), 1, 1_000)
+	seedAuthorization(t, store, coldTag, cold,
+		uint8(lcommon.CredentialTypeAddrKeyHash), hotHash(0x90, 2), 2, 200_000)
+	seedAuthorization(t, store, coldTag, cold,
+		uint8(lcommon.CredentialTypeAddrKeyHash), hotHash(0x90, 3), 3, 400_000)
+
+	const tipSlot = 400_000
+	// The slot-window assumption alone would compute horizon = 400,000 -
+	// 129,600 = 270,400, keeping H2 (the newest row at or below it) and H3
+	// (above it), and deleting H1. A sparse chain's actual security-param
+	// depth can sit well below that: 150,000 stands in here for "the slot of
+	// the block k blocks behind the tip" on a chain sparse enough that k
+	// blocks span far more than the assumed 129,600 slots -- e.g. 100 blocks
+	// back for k=2160 on an appropriately sparse chain. 150,000 is between
+	// H1 and H2.
+	const liveImmutableSlot = 150_000
+	store.SetCommitteeAuthImmutableSlot(liveImmutableSlot, true)
+
+	queryer := newDialectQueryer(store.writeDB, store.dialect.Name())
+	for {
+		pruned, err := store.pruneCommitteeHotAuthorizations(
+			context.Background(), queryer, coldTag, cold, tipSlot,
+		)
+		require.NoError(t, err)
+		if pruned == 0 {
+			break
+		}
+	}
+	require.Equal(t, 3, authRowCountFor(t, store, coldTag, cold),
+		"the live immutable-slot bound must lower the horizon below H2, "+
+			"retaining H1 alongside H2 and H3")
+
+	// A legal rollback to the immutable point: 100 blocks back, well within
+	// any k relevant here. This undoes H2 and H3.
+	require.NoError(
+		t,
+		store.DeleteCertificatesAfterSlot(liveImmutableSlot, nil),
+	)
+
+	members, err := store.GetActiveCommitteeMembers(nil)
+	require.NoError(t, err)
+	require.Len(t, members, 1)
+	require.Equal(
+		t, hotHash(0x90, 1), members[0].HotCredential,
+		"H1 must become the active authorization again after the legal "+
+			"sparse-chain rollback",
+	)
+}
+
+// TestAuthCommitteeHotPruningIgnoresHigherLiveImmutableSlot covers the other
+// direction of the min(): a live value above the slot-window horizon must
+// not make pruning more aggressive than the existing assumption. Only a
+// lower live value may lower the horizon.
+func TestAuthCommitteeHotPruningIgnoresHigherLiveImmutableSlot(t *testing.T) {
+	t.Parallel()
+	const coldTag = uint8(lcommon.CredentialTypeAddrKeyHash)
+	cold := credentialHash(0xc7)
+	store := newManagementTestStore(t)
+	seatMember(t, store, coldTag, cold, 1)
+
+	horizon := preprodTipSlot - DefaultCommitteeAuthRetentionSlots
+	seedAuthorization(t, store, coldTag, cold,
+		uint8(lcommon.CredentialTypeAddrKeyHash), hotHash(0x91, 1), 1,
+		horizon-100)
+	seedAuthorization(t, store, coldTag, cold,
+		uint8(lcommon.CredentialTypeAddrKeyHash), hotHash(0x91, 2), 2,
+		horizon-50)
+
+	// A live value above the slot-window horizon must be clamped away by the
+	// min(), not used directly -- otherwise a live value could prune a row a
+	// rollback still needs.
+	store.SetCommitteeAuthImmutableSlot(preprodTipSlot, true)
+
+	queryer := newDialectQueryer(store.writeDB, store.dialect.Name())
+	pruned, err := store.pruneCommitteeHotAuthorizations(
+		context.Background(), queryer, coldTag, cold, preprodTipSlot,
+	)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), pruned)
+	require.Equal(t, 1, authRowCountFor(t, store, coldTag, cold),
+		"only the newest pre-horizon row must survive, exactly as the "+
+			"slot-window assumption alone would leave")
+}
+
 // TestAuthCommitteeHotPruningIsPerTaggedCredential covers the case where a
 // key-hash and a script-hash cold credential share the same 28 bytes. They are
 // different identities, so each credential is pruned only within its own

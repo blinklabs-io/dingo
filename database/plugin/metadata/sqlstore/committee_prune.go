@@ -33,15 +33,32 @@ import (
 //
 //	keep every row with added_slot > horizon,
 //	plus the single newest row with added_slot <= horizon,
-//	where horizon = tipSlot - retentionSlots.
+//	where horizon = min(tipSlot - retentionSlots, liveImmutableSlot).
 //
 // Rollback safety. A chain rollback deletes committee certificate rows with
 // "DELETE FROM auth_committee_hot WHERE added_slot > S" (see
 // DeleteCertificatesAfterSlot), so after a rollback to S the newest surviving
-// row is the answer the readers need. Ouroboros bounds S from below: a
-// rollback cannot cross the immutable tip, so S >= tipSlot - stabilityWindow
-// for every reachable rollback target. Choosing retentionSlots >= the
-// stability window therefore gives horizon <= S always, and:
+// row is the answer the readers need. The node's own rollback check
+// (Chain.rollbackForkDepth vs. securityParam) bounds S from below in BLOCKS,
+// not slots: S is the slot of the block securityParam blocks behind the tip,
+// whatever that slot is. tipSlot - retentionSlots only approximates that
+// bound by assuming mainnet/preprod-typical block density (retentionSlots is
+// 3k/f); a sparse chain -- fewer blocks per slot than that assumption, which
+// low-activeSlotCoefficient devnets hit routinely and which nothing stops a
+// sparse span of the honest chain from doing occasionally -- can have a
+// legal S below tipSlot - retentionSlots, and pruning to the wrong horizon
+// permanently deletes the row a legal rollback needs (issue #4353).
+//
+// liveImmutableSlot is that actual bound: the slot securityParam blocks
+// behind the tip, as observed on the live chain (see
+// SetCommitteeAuthImmutableSlot), refreshed periodically from outside this
+// package because sqlstore cannot import chain to compute it directly.
+// Taking the minimum of the two candidates is what keeps this safe under
+// both a stale/absent live value (falls back to the slot-window assumption,
+// today's behavior) and a live value the assumption under-covers (the live
+// value wins, since it is always <= any legal rollback target and using a
+// smaller horizon only retains more). With retentionSlots >= the live bound
+// (whichever candidate is used), horizon <= S always, and:
 //
 //   - if any row exists in (horizon, S], it is retained (everything above the
 //     horizon is retained) and it dominates every row at or below the
@@ -95,6 +112,46 @@ func (s *Store) committeeAuthRetention() uint64 {
 	return s.committeeAuthRetentionSlots
 }
 
+// SetCommitteeAuthImmutableSlot records the live rollback-safe immutable
+// slot -- the slot of the block securityParam blocks behind the current tip,
+// as resolved by Chain.PointAtDepth -- for committeeAuthHorizon to fold into
+// the retention decision. known false (the zero value, before this is ever
+// called) means no live value is available and pruning falls back to the
+// slot-window assumption alone; callers must pass known=false rather than a
+// stale slot when the depth lookup itself fails, since a wrong slot is not
+// distinguishable from a valid one once stored.
+//
+// The caller -- a periodic sync outside this package, since sqlstore cannot
+// import chain -- may call this from a goroutine independent of any
+// certificate write or the maintenance sweep, so this is lock-free and never
+// blocks.
+func (s *Store) SetCommitteeAuthImmutableSlot(slot uint64, known bool) {
+	if !known {
+		s.committeeAuthImmutableSlotKnown.Store(false)
+		return
+	}
+	s.committeeAuthImmutableSlot.Store(slot)
+	s.committeeAuthImmutableSlotKnown.Store(true)
+}
+
+// committeeAuthHorizon returns the retention horizon for a prune call at
+// tipSlot, and whether pruning should run at all. See the package-level
+// comment above for the min-of-two-candidates rule.
+func (s *Store) committeeAuthHorizon(tipSlot uint64) (uint64, bool) {
+	retention := s.committeeAuthRetention()
+	if tipSlot <= retention {
+		// The whole chain so far is inside the rollback window.
+		return 0, false
+	}
+	horizon := tipSlot - retention
+	if s.committeeAuthImmutableSlotKnown.Load() {
+		if live := s.committeeAuthImmutableSlot.Load(); live < horizon {
+			horizon = live
+		}
+	}
+	return horizon, true
+}
+
 // pruneCommitteeHotAuthorizations deletes superseded auth_committee_hot rows
 // for one cold credential, up to committeeAuthPruneBatch rows per call. It is
 // called from the certificate write path right after a new authorization row
@@ -110,12 +167,10 @@ func (s *Store) pruneCommitteeHotAuthorizations(
 	coldCredential []byte,
 	tipSlot uint64,
 ) (int64, error) {
-	retention := s.committeeAuthRetention()
-	if tipSlot <= retention {
-		// The whole chain so far is inside the rollback window.
+	horizon, ok := s.committeeAuthHorizon(tipSlot)
+	if !ok {
 		return 0, nil
 	}
-	horizon := tipSlot - retention
 	// The inner ORDER BY ... LIMIT ? OFFSET 1 is the rule: skip the single
 	// newest row at or below the horizon, take up to a batch of the rest. The
 	// extra SELECT wrapper materializes a derived table, which MySQL requires
@@ -167,11 +222,10 @@ func (s *Store) pruneCommitteeHotAuthorizationsMaintenance(
 	if err != nil {
 		return fmt.Errorf("read tip for committee hot maintenance: %w", err)
 	}
-	retention := s.committeeAuthRetention()
-	if tip.Point.Slot <= retention {
+	horizon, ok := s.committeeAuthHorizon(tip.Point.Slot)
+	if !ok {
 		return nil
 	}
-	horizon := tip.Point.Slot - retention
 	db := s.instrumentedQueryer(s.writeDB)
 	for {
 		result, err := db.ExecContext(ctx, `

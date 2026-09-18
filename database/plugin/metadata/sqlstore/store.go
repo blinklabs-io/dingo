@@ -129,6 +129,19 @@ type Store struct {
 	// which applies the default, rather than directly.
 	committeeAuthRetentionSlots uint64
 
+	// committeeAuthImmutableSlot and committeeAuthImmutableSlotKnown cache
+	// the live rollback-safe immutable slot (tip depth securityParam blocks
+	// back), pushed in by SetCommitteeAuthImmutableSlot from outside the
+	// package -- sqlstore cannot import chain (chain already imports
+	// database) to compute it directly. Read through
+	// committeeAuthHorizon(), which falls back to the slot-window assumption
+	// below when no live value has been pushed yet. Plain atomics, not a
+	// mutex: the setter runs from an independent periodic sync goroutine
+	// while readers run inline in the certificate write path and the
+	// maintenance sweep, and none of them may block on each other.
+	committeeAuthImmutableSlot      atomic.Uint64
+	committeeAuthImmutableSlotKnown atomic.Bool
+
 	migrations        []migrations.Migration
 	migrationLocker   migrations.Locker
 	diskSize          func() (int64, error)
@@ -248,8 +261,12 @@ func New(config Config) (*Store, error) {
 		prepare:                     config.Prepare,
 		reset:                       config.Reset,
 		validateBackup:              config.ValidateBackup,
-		sqlOperations:               newSQLOperationsCounter(config.PromRegistry),
-		sqlQueryDuration:            newSQLQueryDurationHistogram(config.PromRegistry),
+		sqlOperations: newSQLOperationsCounter(
+			config.PromRegistry,
+		),
+		sqlQueryDuration: newSQLQueryDurationHistogram(
+			config.PromRegistry,
+		),
 	}
 	// Registered against store.WritePoolStats/ReadPoolStats (not
 	// config.WriteDB.Stats/config.ReadDB.Stats directly) so every backend
