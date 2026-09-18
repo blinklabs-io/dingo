@@ -688,20 +688,44 @@ func TestApplyMIRCerts_PotTransferOverflowLogsDiscardReason(t *testing.T) {
 
 // TestApplyMIRCerts_UnknownSourcePotIsNoOp verifies that a pot-to-pot
 // transfer naming a source pot other than reserves (0) or treasury (1)
-// discards the boundary as a no-op rather than failing the epoch rollover: a
-// hard error here would wedge the node, since the stored certificate is
-// re-read and re-fails on every deterministic retry. See
-// TestApplyMIRCerts_UnknownPotDiscardsBoundary for the equivalent
+// discards the whole boundary rather than failing the epoch rollover or
+// merely being skipped: an otherwise-valid credit at the same boundary must
+// not be applied either. A lone unknown-pot transfer with nothing else at
+// the boundary can't tell discard apart from skip, since both leave an
+// empty boundary and the same unchanged state; seeding a valid credit
+// alongside it separates them, the same way
+// TestApplyMIRCerts_UnknownPotDiscardsBoundary does for the equivalent
 // distribution-certificate case.
 func TestApplyMIRCerts_UnknownSourcePotIsNoOp(t *testing.T) {
 	t.Parallel()
 
 	ls, db, gdb := newMIRTestLedger(t)
+	cred := mirCred28(0x16)
+	seedMIRDistribution(
+		t,
+		gdb,
+		mirPotReserves,
+		400,
+		[]models.MoveInstantaneousRewardsReward{
+			{Credential: cred, Amount: new(big.Int).SetUint64(500)},
+		},
+	)
 	seedMIRPotTransfer(t, gdb, 2, 500, 500)
+	require.NoError(t, db.CreateAccount(nil, &models.Account{
+		StakingKey: cred,
+		Active:     true,
+	}))
 	require.NoError(t, db.Metadata().SetNetworkState(1_000, 10_000, 50, nil))
 
 	require.NoError(t, applyMIRCertsErr(ls, db, 0, 1_000),
 		"unknown source pot must not fail the epoch boundary")
+
+	account, err := db.GetAccountByCredential(0, cred, false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	assert.Equal(t, uint64(0), uint64(account.Reward),
+		"an unknown source pot elsewhere in the boundary discards the whole "+
+			"boundary, including an otherwise-valid credit")
 
 	state, err := db.Metadata().GetNetworkState(nil)
 	require.NoError(t, err)
