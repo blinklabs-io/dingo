@@ -204,7 +204,7 @@ func TestBootstrapResultCloseHandlesIsIdempotent(t *testing.T) {
 func TestImportLedgerStateRefusesUnvettedResult(t *testing.T) {
 	t.Parallel()
 
-	_, _, err := importLedgerState(
+	_, _, _, err := importLedgerState(
 		t.Context(),
 		nil,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -263,7 +263,7 @@ func TestImportLedgerStateRefusesSymlinkedState(t *testing.T) {
 
 	// Control: an ordinary state file is discovered and read, reaching the
 	// parser. Without this the refusal below could be any other failure.
-	_, _, err := importLedgerState(
+	_, _, _, err := importLedgerState(
 		t.Context(), nil, discard, nil, build(t, false),
 		false, ^uint64(0), nil,
 	)
@@ -271,7 +271,7 @@ func TestImportLedgerStateRefusesSymlinkedState(t *testing.T) {
 	require.ErrorContains(t, err, "parsing ledger state",
 		"the control tree must be read, or the refusal proves nothing")
 
-	_, _, err = importLedgerState(
+	_, _, _, err = importLedgerState(
 		t.Context(), nil, discard, nil, build(t, true),
 		false, ^uint64(0), nil,
 	)
@@ -329,7 +329,7 @@ func TestImportLedgerStateRefusesUnsafeAncillaryTree(t *testing.T) {
 		t.Cleanup(func() { _ = ancRoot.Close() })
 
 		extractDir, extractRoot := newExtract(t)
-		_, _, err = importLedgerState(
+		_, _, _, err = importLedgerState(
 			t.Context(), nil, discard, nil,
 			&BootstrapResult{
 				AncillaryDir:  anc,
@@ -352,7 +352,7 @@ func TestImportLedgerStateRefusesUnsafeAncillaryTree(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = ancRoot.Close() })
 
-		_, _, err = importLedgerState(
+		_, _, _, err = importLedgerState(
 			t.Context(), nil, discard, nil,
 			&BootstrapResult{
 				AncillaryDir:  anc,
@@ -414,7 +414,7 @@ func TestImportLedgerStateWillNotLookPastAVerifiedTree(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = extractRoot.Close() })
 
-		_, _, err = importLedgerState(
+		_, _, _, err = importLedgerState(
 			t.Context(), nil, discard, nil,
 			&BootstrapResult{
 				AncillaryDir:      anc,
@@ -443,6 +443,141 @@ func TestImportLedgerStateWillNotLookPastAVerifiedTree(t *testing.T) {
 		// being unreachable.
 		assert.ErrorContains(t, run(t, false), "parsing ledger state")
 	})
+}
+
+// TestSelectLedgerStateSnapshotAcceptsVerifiedAncillaryStateNewerThanCertifiedTip
+// pins issues #3850 / #4038: a verified ancillary tree whose only ledger state
+// sits above maxTrustedSlot is the shape the aggregator ordinarily ships (the
+// ancillary ledger state comes from the source node's volatile database), not
+// the emptied/tampered tree TestImportLedgerStateWillNotLookPastAVerifiedTree
+// covers. The manifest signature vouches for that state directly, so it must
+// be selected and flagged beyondCertifiedTip rather than refused.
+func TestSelectLedgerStateSnapshotAcceptsVerifiedAncillaryStateNewerThanCertifiedTip(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	anc := t.TempDir()
+	slotDir := filepath.Join(anc, "ledger", "300")
+	require.NoError(t, os.MkdirAll(slotDir, 0o750))
+	stateBytes := []byte("newer than certified")
+	require.NoError(t, os.WriteFile(
+		filepath.Join(slotDir, "state"), stateBytes, 0o640,
+	))
+	ancRoot, err := openVerifiedDir(anc)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ancRoot.Close() })
+
+	const maxTrustedSlot = 100 // nothing in the tree is at or below this
+	sum := sha256.Sum256(stateBytes)
+
+	snapshot, stateDir, signedBy, beyondCertifiedTip, err :=
+		selectLedgerStateSnapshot(
+			discard,
+			&BootstrapResult{
+				AncillaryDir:      anc,
+				AncillaryRoot:     ancRoot,
+				AncillaryVerified: true,
+				AncillaryDigests: map[string]string{
+					"ledger/300/state": hex.EncodeToString(sum[:]),
+				},
+			},
+			maxTrustedSlot,
+		)
+	require.NoError(t, err)
+	require.NotNil(t, snapshot)
+	defer snapshot.Close()
+
+	assert.True(
+		t, beyondCertifiedTip,
+		"a verified ancillary state past maxTrustedSlot must be flagged, "+
+			"so the caller knows why it is allowed past the certified-tip guard",
+	)
+	assert.Equal(t, anc, stateDir)
+	assert.NotNil(t, signedBy)
+
+	got, err := io.ReadAll(snapshot.State)
+	require.NoError(t, err)
+	assert.Equal(t, "newer than certified", string(got))
+}
+
+// TestSelectLedgerStateSnapshotStillRefusesAGenuinelyEmptyVerifiedTree is the
+// negative case alongside the test above: a verified tree with no ledger
+// state at any slot — not just none at or below maxTrustedSlot — must still
+// refuse rather than report beyondCertifiedTip. This is the emptied/tampered
+// shape the verified-tree guard exists to catch, and accepting it here would
+// be exactly the downgrade TestImportLedgerStateWillNotLookPastAVerifiedTree
+// already pins at the importLedgerState level.
+func TestSelectLedgerStateSnapshotStillRefusesAGenuinelyEmptyVerifiedTree(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	anc := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(anc, "ledger"), 0o750))
+	ancRoot, err := openVerifiedDir(anc)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ancRoot.Close() })
+
+	_, _, _, beyondCertifiedTip, err := selectLedgerStateSnapshot(
+		discard,
+		&BootstrapResult{
+			AncillaryDir:      anc,
+			AncillaryRoot:     ancRoot,
+			AncillaryVerified: true,
+			AncillaryDigests:  map[string]string{"ledger/100/state": "00"},
+		},
+		100,
+	)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "refusing to import one from elsewhere")
+	assert.False(t, beyondCertifiedTip)
+}
+
+// TestImportLedgerStateAcceptsAVerifiedAncillaryStateNewerThanCertifiedTip is
+// the same case as the selectLedgerStateSnapshot test above, exercised through
+// importLedgerState itself, so the search-stage fix is proven where the real
+// caller enters it. It only needs to reach the parser (proving the search
+// selected the newer state instead of refusing) — parsing minimal non-ledger
+// bytes is expected to fail on its own terms, exactly as the existing
+// "unverified tree falls through" subtest above already relies on.
+func TestImportLedgerStateAcceptsAVerifiedAncillaryStateNewerThanCertifiedTip(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	anc := t.TempDir()
+	slotDir := filepath.Join(anc, "ledger", "300")
+	require.NoError(t, os.MkdirAll(slotDir, 0o750))
+	stateBytes := []byte{0x81, 0x00}
+	require.NoError(t, os.WriteFile(
+		filepath.Join(slotDir, "state"), stateBytes, 0o640,
+	))
+	ancRoot, err := openVerifiedDir(anc)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ancRoot.Close() })
+	sum := sha256.Sum256(stateBytes)
+
+	_, _, _, err = importLedgerState(
+		t.Context(), nil, discard, nil,
+		&BootstrapResult{
+			AncillaryDir:      anc,
+			AncillaryRoot:     ancRoot,
+			AncillaryVerified: true,
+			AncillaryDigests: map[string]string{
+				"ledger/300/state": hex.EncodeToString(sum[:]),
+			},
+		},
+		false, 100, nil,
+	)
+	assert.ErrorContains(t, err, "parsing ledger state")
+	assert.NotErrorIs(t, err, ledgerstate.ErrNoUsableLedgerState)
 }
 
 // TestDownloadAncillaryReportsArchiveWhenTreeUnusable pins that a downloaded
@@ -980,7 +1115,7 @@ func TestImportLedgerStateRefusesStateSubstitutedAfterTheManifest(
 			}
 
 			// Control: the tree the manifest covered is read.
-			_, _, err := importLedgerState(
+			_, _, _, err := importLedgerState(
 				t.Context(), nil, discard, nil, build(t, false),
 				false, ^uint64(0), nil,
 			)
@@ -988,7 +1123,7 @@ func TestImportLedgerStateRefusesStateSubstitutedAfterTheManifest(
 			require.ErrorContains(t, err, "parsing ledger state",
 				"the signed tree must be read, or the refusal proves nothing")
 
-			_, _, err = importLedgerState(
+			_, _, _, err = importLedgerState(
 				t.Context(), nil, discard, nil, build(t, true),
 				false, ^uint64(0), nil,
 			)
@@ -1024,7 +1159,7 @@ func TestImportLedgerStateRefusesAStateTheManifestDoesNotCover(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = root.Close() })
 
-	_, _, err = importLedgerState(
+	_, _, _, err = importLedgerState(
 		t.Context(), nil, discard, nil,
 		&BootstrapResult{
 			AncillaryDir:      dir,

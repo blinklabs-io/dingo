@@ -123,6 +123,22 @@ var (
 	}
 )
 
+// blocksFromOrigin returns testBlocks renumbered to start at block number 0,
+// which a chain emptied back to origin requires of its first block (see the
+// origin continuity check in chain.go). Hashes, slots and prev hashes are
+// unchanged, so the sequence stays contiguous; testBlocks itself keeps its
+// original numbering because a chain that has never been mutated is not
+// anchored and accepts it.
+func blocksFromOrigin() []*MockBlock {
+	out := make([]*MockBlock, 0, len(testBlocks))
+	for i, testBlock := range testBlocks {
+		renumbered := *testBlock
+		renumbered.MockBlockNumber = uint64(i)
+		out = append(out, &renumbered)
+	}
+	return out
+}
+
 func TestChainBasic(t *testing.T) {
 	t.Parallel()
 
@@ -761,7 +777,11 @@ func TestChainIteratorReverseRollbackToOriginClamps(t *testing.T) {
 	// Regrow the chain. With clamping, the iterator stays terminated.
 	// Without the fix, blockByIndex at the old (stale) tip index would
 	// hand out the regrown chain's block of the same index.
-	for _, testBlock := range testBlocks {
+	//
+	// The regrown chain is numbered from 0 because a chain emptied back to
+	// origin only accepts block number 0 as its first block; see
+	// blocksFromOrigin and the origin continuity check in chain.go.
+	for _, testBlock := range blocksFromOrigin() {
 		if err := c.AddBlock(testBlock, nil); err != nil {
 			t.Fatalf(
 				"unexpected error re-adding block to chain: %s", err,

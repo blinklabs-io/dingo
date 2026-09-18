@@ -139,6 +139,7 @@ func TestUtxoByIdMemoReducesDbReads_LedgerProcessBlock(t *testing.T) {
 			fx.dingoLS.currentPParams,
 			nil, // prevEraPParams
 			0,   // committeeEpoch
+			0,   // epochStartSlot
 			false,
 		)
 		return err
@@ -465,6 +466,7 @@ func TestLedgerProcessBlockRejectsIntraBlockDoubleSpend(t *testing.T) {
 			fx.era,
 			fx.pparams,
 			nil,
+			0,
 			0,
 			false,
 		)
