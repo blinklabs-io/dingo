@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -182,5 +183,106 @@ func TestEvaluateTxBabbagePreviewDuplicateRequiredSigner(t *testing.T) {
 		redeemerExUnits,
 		"evaluated execution units must equal the "+
 			"producer-declared budget exactly",
+	)
+}
+
+// loadPreviewBabbageFixture decodes the shared preview-babbage-tx-41098839.cbor
+// fixture and its funding transactions into a ready-to-use mock ledger state,
+// factored out of TestEvaluateTxBabbagePreviewDuplicateRequiredSigner so the
+// TxInfo-cache tests below can reuse the same real transaction without
+// re-deriving its inputs.
+func loadPreviewBabbageFixture(
+	t *testing.T,
+) (lcommon.Transaction, *mockLedgerState) {
+	t.Helper()
+	tx, err := babbage.NewBabbageTransactionFromCbor(
+		readPreviewBabbageFixture(t, previewBabbageTxFile),
+	)
+	require.NoError(t, err)
+
+	var inputTxBytes [][]byte
+	_, err = cbor.Decode(
+		readPreviewBabbageFixture(t, previewBabbageInputsFile),
+		&inputTxBytes,
+	)
+	require.NoError(t, err)
+	require.Len(t, inputTxBytes, len(previewBabbageFundingTxIds))
+
+	ls := newMockLedgerState()
+	ls.networkId = uint(lcommon.AddressNetworkTestnet)
+	ls.slotToTime = func(slot uint64) (time.Time, error) {
+		return time.Unix(int64(slot)+previewSystemStart, 0).UTC(), nil
+	}
+	for idx, raw := range inputTxBytes {
+		inputTx, err := babbage.NewBabbageTransactionFromCbor(raw)
+		require.NoError(t, err)
+		require.Equal(
+			t,
+			previewBabbageFundingTxIds[idx],
+			inputTx.Hash().String(),
+		)
+		for outputIdx, output := range inputTx.Outputs() {
+			input := shelley.NewShelleyTransactionInput(
+				inputTx.Hash().String(),
+				outputIdx,
+			)
+			ls.addUtxo(&input, output)
+		}
+	}
+	return tx, ls
+}
+
+// wantSlotToTimeCallsPerTxInfoBuild is the fixture's own validity interval
+// shape: both a lower and an upper bound are present, so validityRangeInfo
+// (called once per TxInfo build) calls SlotToTime twice.
+const wantSlotToTimeCallsPerTxInfoBuild = 2
+
+// TestEvaluateTxBabbagePreviewBuildsTxInfoOnce and
+// TestValidateTxBabbagePreviewBuildsTxInfoOnce pin the fix for the babbage
+// redeemer loop rebuilding its Plutus TxInfo (and re-translating the
+// transaction's validity interval through SlotToTime) once per redeemer
+// instead of once per transaction -- the same class of redundant,
+// per-invocation rebuild that cachedEvalContext already fixed for the cost
+// model side of script evaluation. This fixture carries exactly one redeemer
+// (see TestEvaluateTxBabbagePreviewDuplicateRequiredSigner's declared-budget
+// assertion), so even here -- the best case for the old code -- TxInfo was
+// still built twice: once outside the loop merely to read .Redeemers, and
+// again inside the loop's PlutusV2 case, for 2x wantSlotToTimeCallsPerTxInfoBuild
+// SlotToTime calls. A transaction with more redeemers of the same language
+// version would have paid for one extra rebuild per redeemer instead of a
+// single fixed extra.
+func TestEvaluateTxBabbagePreviewBuildsTxInfoOnce(t *testing.T) {
+	tx, ls := loadPreviewBabbageFixture(t)
+
+	_, _, _, err := EvaluateTxBabbage(
+		tx,
+		ls,
+		previewBabbageProtocolParams(t),
+	)
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		wantSlotToTimeCallsPerTxInfoBuild,
+		ls.slotToTimeCalls,
+		"TxInfo must be built exactly once per transaction, not once per redeemer",
+	)
+}
+
+func TestValidateTxBabbagePreviewBuildsTxInfoOnce(t *testing.T) {
+	withoutBabbageUtxoValidationRules(t)
+	tx, ls := loadPreviewBabbageFixture(t)
+
+	err := ValidateTxBabbage(
+		tx,
+		41_098_839,
+		ls,
+		previewBabbageProtocolParams(t),
+	)
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		wantSlotToTimeCallsPerTxInfoBuild,
+		ls.slotToTimeCalls,
+		"TxInfo must be built exactly once per transaction, not once per redeemer",
 	)
 }

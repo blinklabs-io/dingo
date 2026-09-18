@@ -2586,6 +2586,7 @@ func (c *Chain) iterNext(
 			ret.RollbackBlocks = iter.rollbackBlocks
 			iter.lastPoint = iter.rollbackPoint
 			iter.needsRollback = false
+			iter.rollbackBlocks = nil
 			if iter.rollbackPoint.Slot > 0 ||
 				len(iter.rollbackPoint.Hash) > 0 {
 				// Lookup block index for rollback point

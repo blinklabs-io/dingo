@@ -1167,6 +1167,109 @@ gate above to keep failing closed on; only that database, and only from that
 epoch, genuinely requires a rebootstrap from immutable blocks or a trusted
 snapshot.
 
+#### Incremental live-UTxO stake maintenance (dingo #4421)
+
+`reward_live_stake.utxo_stake` is a per-credential running total, not just a
+cached recomputation. Before this change, every touch (a UTxO gain or loss)
+recomputed a credential's entire live-UTxO total from scratch with
+`sumCredentialUtxoStake`'s `SELECT SUM(...) FROM utxo WHERE ... AND
+deleted_slot = 0` -- correct, and self-healing by construction (the `utxo`
+table is always the source of truth), but O(live UTxOs held by that
+credential) on every single touch. One real credential already held 20,003
+live UTxOs during from-genesis Preview sync, and this function alone
+accounted for 26-28% of total process CPU.
+
+The block-application hot path (`setTransactionWithAccumulator`, which
+`SetTransaction`, `SetTransactionBatched`, `SetTransactionBatchedHistorical`,
+and `SetTransactionLeiosClosure` all funnel through, plus
+`SetGapBlockTransaction`) now computes the exact signed lovelace delta its own
+UTxO mutations make to each touched credential -- a produced output's amount,
+the negative of a consumed input's amount, 0 for a certificate-only touch --
+merges same-credential deltas within one transaction
+(`mergeStakeCredentialDeltas`), and applies the net delta to the stored
+running total (`refreshRewardLiveStakeAggregateDelta`, an indexed
+`(credential_tag, staking_key)` point read plus checked arithmetic) instead of
+rescanning. Every other caller (rollback sweeps, `DeleteUtxos`,
+`SetGenesisTransaction`, certificate/account-only refreshes such as pool
+retirement and expiry) is unchanged and still calls the original full-scan
+`refreshRewardLiveStakeAggregate`/`refreshRewardLiveStakeRefs`.
+
+This trades away the full-scan path's self-healing property for the
+credentials it accelerates, so the design leans on three layers instead of
+one:
+
+1. **Crash atomicity.** The delta is applied inside the same write
+   transaction as the UTxO row mutation it accounts for (the same
+   `withWriteTransaction` scope every other write in this package already
+   uses), so a crash mid-apply rolls both back together. There is no window
+   where the UTxO table changes but the running total does not, or vice versa.
+2. **Every full-scan touch re-syncs.** A rollback sweep, `DeleteUtxos`, or any
+   other caller still on the authoritative path recomputes and overwrites
+   `utxo_stake` from scratch for whatever credentials it touches, healing any
+   drift the incremental path may have introduced for those credentials as a
+   side effect of running at all.
+3. **Startup reconciliation is the explicit backstop.** `RewardLiveStakeNeedsBackfill`
+   (above) already compares every credential's stored `utxo_stake` against a
+   fresh authoritative scan on every startup, before block application
+   resumes (`Node.backfillRewardLiveStake`, called ahead of
+   `LedgerState.Start`), and `RebuildRewardLiveStake` corrects the whole table
+   on any mismatch. This pre-existing mechanism is not new, but it is now
+   load-bearing for the incremental path too: any bug that silently corrupts
+   the running total (a missed or double-applied delta) is limited to
+   persisting until the next node startup, not forever. It is exercised
+   directly by `TestRewardLiveStakeNeedsBackfillHealsCorruptedRunningTotal`.
+
+   The one configuration that removes this layer is
+   `skipRewardLiveStakeBackfillCheck`, which suppresses the comparison (not
+   just the repair) to avoid its full live-UTxO scan on every start. With the
+   incremental path in place that setting leaves a corrupted running total
+   undetected for as long as the node keeps running on it, so it is
+   diagnostic-only and must not be left enabled on a node whose stake
+   snapshots matter.
+
+The invariant every incremental caller must hold is narrower than "knows the
+amount": **a delta states the change this write actually made to the `utxo`
+table, not the change the transaction describes.** Two write outcomes look
+like a mutation and are not, and both are ordinary rather than exceptional:
+
+- A produced output whose row already exists. `insertUtxoModel`'s
+  conflict-tolerant form is `ON CONFLICT (tx_id, output_idx) DO NOTHING`, and
+  a snapshot import creates outputs before their producing transaction is
+  replayed, so gap closure and any re-application collide with a row that is
+  already counted. It contributes 0, not its amount
+  (`insertUtxoModelChecked` reports which happened).
+- A consumed input whose `UPDATE ... WHERE deleted_slot = 0 AND spent_at_tx_id
+  IS NULL` matched no row, because an earlier certified endorser-block
+  transaction (the Leios closure path) or an earlier application of this same
+  transaction already spent it. It contributes 0, not its negative amount;
+  only inputs the write itself moved from live to deleted reach
+  `queryUtxoStakeConsumedDeltas`.
+
+Both are still refreshed at zero delta, so the set of credentials a write
+touches is identical to the full-scan path's.
+
+The read of the running total and the upsert that replaces it are separate
+statements, as they always were on the full-scan path. What makes that safe is
+that block application is the only writer of a credential's `reward_live_stake`
+row and applies one block at a time; SQLite reinforces it with `writeDB`'s
+`SetMaxOpenConns(1)`, while the Postgres and MySQL providers share one pool of
+up to 100 connections and rely on the apply loop alone. The consequence of
+breaking that property is worse for the incremental path than for the full-scan
+one -- a lost update there is recomputed from the `utxo` table on the next
+touch, and here it persists until the startup comparison runs -- so a writer
+added off the apply loop needs an atomic read-and-write, not a reuse of
+`refreshRewardLiveStakeAggregateDelta`. Counting either one drifts the
+credential permanently, and an over-large loss additionally fails
+`applyUtxoStakeDelta`'s underflow guard, which aborts block application rather
+than merely reporting wrong stake. `TestSetTransactionReapplyAppliesNoSecondDelta`,
+`TestSetTransactionLeiosClosureSkippedInputAppliesNoDelta`, and
+`TestSetGapBlockTransactionReapplyAppliesNoSecondDelta` cover the three cases.
+
+A credential's first-ever touch (no `reward_live_stake` row yet) always falls
+back to the authoritative scan to establish a baseline rather than trusting a
+delta against an unknown prior value; this is cheap specifically because such
+a credential has, by construction, few live UTxOs at that point.
+
 #### Snapshot and Reward-State Retention
 
 Every epoch transition runs `cleanupOldSnapshots`, which prunes to the four

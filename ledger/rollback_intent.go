@@ -219,8 +219,9 @@ func loadRollbackIntent(
 	}
 	var intent durableRollbackIntent
 	if err := json.Unmarshal([]byte(raw), &intent); err != nil {
+		detail := err.Error()
 		return ocommon.Point{}, nil, false, fmt.Errorf(
-			"%w: decode: %v", errInvalidRollbackIntent, err,
+			"%w: decode: %s", errInvalidRollbackIntent, detail,
 		)
 	}
 	if intent.Version != durableRollbackIntentVersion {
@@ -244,8 +245,9 @@ func loadRollbackIntent(
 	}
 	hash, err := hex.DecodeString(*intent.Hash)
 	if err != nil {
+		detail := err.Error()
 		return ocommon.Point{}, nil, false, fmt.Errorf(
-			"%w: decode hash: %v", errInvalidRollbackIntent, err,
+			"%w: decode hash: %s", errInvalidRollbackIntent, detail,
 		)
 	}
 	if *intent.Slot > 0 && len(hash) == 0 {

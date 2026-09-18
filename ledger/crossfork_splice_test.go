@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	omockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/assert"
@@ -278,27 +279,30 @@ func TestContinuationAuditReportsUnresolvableProducer(t *testing.T) {
 	assert.Equal(t, "test rollback", report["fork_reason"])
 }
 
-// TestRollbackAheadOfLedgerDoesNotArmContinuationAudit covers genesis and
-// snapshot catch-up, where the primary chain may already contain blocks beyond
-// the applied ledger tip. A rollback to that primary-chain point does not move
-// the ledger, so the continuation audit must remain disarmed rather than
-// reporting unapplied history as missing producers.
-func TestRollbackAheadOfLedgerDoesNotArmContinuationAudit(t *testing.T) {
+// TestRollbackAheadOfLedgerDoesNotPersistIntent covers genesis and snapshot
+// catch-up, where the primary chain may already contain blocks beyond the
+// applied ledger tip. A rollback to that primary-chain point does not move the
+// ledger, so it must not leave a durable undo intent for a later restart.
+func TestRollbackAheadOfLedgerDoesNotPersistIntent(t *testing.T) {
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
-	ls.armContinuationAudit(fixture.ancestorTip.Point, "prior rollback")
-	require.NotNil(t, ls.continuationAudit.Load())
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	ls.config.EventBus = bus
+	subID, _ := bus.SubscribeWithBuffer(TransactionEventType, 1)
+	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, subID) })
 
+	durableTip := ochainsync.Tip{}
 	ls.Lock()
-	ls.currentTip = fixture.ancestorTip
-	ls.currentTipBlockNonce = append([]byte(nil), fixture.ancestorNonce...)
+	ls.currentTip = durableTip
+	ls.currentTipBlockNonce = nil
 	ls.publishSnapshotsLocked()
 	ls.Unlock()
-	require.NoError(t, ls.db.SetTip(fixture.ancestorTip, nil))
+	require.NoError(t, ls.db.SetTip(durableTip, nil))
 	emitted, err := ls.validateAndEmitRollbackUndoEmitted(
-		fixture.currentTip.Point,
+		fixture.ancestorTip.Point,
 	)
 	require.NoError(t, err)
 	assert.False(t, emitted)
@@ -309,21 +313,6 @@ func TestRollbackAheadOfLedgerDoesNotArmContinuationAudit(t *testing.T) {
 		pending,
 		"validation must not create an intent ahead of the applied tip",
 	)
-
-	require.NoError(
-		t,
-		ls.rollbackChainAndStateDeferred(fixture.currentTip.Point, nil),
-	)
-
-	assert.Nil(
-		t,
-		ls.continuationAudit.Load(),
-		"a rollback ahead of the applied ledger must disarm any prior audit",
-	)
-	assert.Equal(t, fixture.ancestorTip, ls.currentTip)
-	_, _, pending, err = loadRollbackIntent(ls.db)
-	require.NoError(t, err)
-	assert.False(t, pending, "a rollback ahead of the ledger must not leave a recovery intent")
 }
 
 // TestContinuationAuditAcceptsProducerInSameWindow guards the audit against

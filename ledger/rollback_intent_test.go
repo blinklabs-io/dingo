@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"log/slog"
@@ -105,14 +106,18 @@ func TestRollbackUndoSurvivesMetadataTruncationFailure(t *testing.T) {
 		BlockNumber: raw[0].BlockNumber,
 	}
 	require.NoError(t, db.SetBlockNonce(
-		targetPoint.Hash, targetPoint.Slot, []byte("target"), true, nil,
+		targetPoint.Hash, targetPoint.Slot, bytes.Repeat([]byte{0x11}, 32), true, nil,
 	))
 	require.NoError(t, db.SetBlockNonce(
-		currentTip.Point.Hash, currentTip.Point.Slot, []byte("current"), false, nil,
+		currentTip.Point.Hash,
+		currentTip.Point.Slot,
+		bytes.Repeat([]byte{0x22}, 32),
+		false,
+		nil,
 	))
 	require.NoError(t, db.SetTip(currentTip, nil))
 	ls.currentTip = currentTip
-	ls.currentTipBlockNonce = []byte("current")
+	ls.currentTipBlockNonce = bytes.Repeat([]byte{0x22}, 32)
 
 	injected := errors.New("injected metadata truncation failure")
 	ls.rollbackTruncateAfterSlotFunc = func(
@@ -170,7 +175,7 @@ func TestRollbackUndoSurvivesMetadataTruncationFailure(t *testing.T) {
 	})
 	require.NoError(t, err)
 	recoveredLS.currentTip = currentTip
-	recoveredLS.currentTipBlockNonce = []byte("current")
+	recoveredLS.currentTipBlockNonce = bytes.Repeat([]byte{0x22}, 32)
 	recoveredLS.rollbackTruncateAfterSlotFunc = nil
 	require.NoError(t, recoveredLS.recoverRollbackIntent())
 

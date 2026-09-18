@@ -1892,6 +1892,11 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 			ls.handleRewardPrecomputeEpochTransition,
 		)
 	}
+	// Complete a rollback whose durable undo outbox survived an interrupted
+	// chain or metadata mutation before reconciliation can publish new work.
+	if err := ls.recoverRollbackIntent(); err != nil {
+		return fmt.Errorf("recover interrupted ledger rollback: %w", err)
+	}
 	// The subscription above cannot fire for an epoch that began before this
 	// process did, so catch up the in-progress epoch's reward round here.
 	// Without it, a node started mid-epoch calculates that round inline inside
