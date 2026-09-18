@@ -874,8 +874,18 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 // undisturbed), falling back to the same historical boundary reconstruction
 // CaptureEpochBoundarySnapshot itself falls back to when nothing is stashed
 // (no ComputeEpochBoundarySnapshot hook installed, or its read failed), and
-// applying the same era-crossing discard rule via boundaryChangesEra so this
-// read and the later persisted row always agree.
+// applying the same era-crossing discard rule via boundaryChangesEra.
+//
+// On the peek path this returns byte-for-byte what the later persisted row
+// holds, because both read the one stashed distribution. On the fallback path
+// it does not: the caller runs this at the SNAP point, while
+// CaptureEpochBoundarySnapshot runs its own fallback at the end of the
+// rollover, and the reconstruction counts reward deltas up to and including
+// the boundary slot -- so the persisted row also absorbs the POOLREAP deposit
+// refunds and enactment credits recorded there. The SNAP-point value is the
+// one cardano-ledger's RATIFY consumes, which is why this is called where it
+// is; ledger's TestProcessEpochRollover_SnapStakeReadOrdering locks that
+// position.
 func (m *Manager) CurrentBoundarySPOStakeRows(
 	ctx context.Context,
 	txn *database.Txn,

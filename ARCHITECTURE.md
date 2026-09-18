@@ -11642,7 +11642,10 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    `snapshot.Manager.CurrentBoundarySPOStakeRows`) resolves the same
    distribution, with reward-account auto-vote resolved, for step 7's RATIFY
    phase -- see "Boundary Capture And Events" for why RATIFY cannot simply
-   read the persisted row.
+   read the persisted row. That call's position is locked in by the same test:
+   its no-stash fallback reconstructs the boundary itself and counts reward
+   deltas through the boundary slot, so running it below step 5 or step 7
+   would tally SPO votes against a mark carrying those steps' credits.
 4. Shelley-style protocol-parameter updates (`ComputeAndApplyPParamUpdates`).
 5. Embedded POOLREAP (`applyPoolRetirements`): refund the deposits of pools
    whose retirement epoch is the new epoch. The refunded amount is the deposit
