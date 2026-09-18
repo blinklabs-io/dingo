@@ -408,11 +408,19 @@ func TestKoiosCoverageTableRejectsDuplicateRows(t *testing.T) {
 	// the whole point, so which row survives only has to be deterministic.
 	exactKey := koiosFieldKey{endpoint: "/tip", field: "abs_slot"}
 	if got := table.exact[exactKey].class; got != "exact-match" {
-		t.Errorf("exact row for %v kept class %q, want the first row", exactKey, got)
+		t.Errorf(
+			"exact row for %v kept class %q, want the first row",
+			exactKey,
+			got,
+		)
 	}
 	wildcardKey := koiosFieldKey{endpoint: "/epoch_params", field: "pvt_*"}
 	if got := table.wildcard[wildcardKey].class; got != "exact-match" {
-		t.Errorf("wildcard row for %v kept class %q, want the first row", wildcardKey, got)
+		t.Errorf(
+			"wildcard row for %v kept class %q, want the first row",
+			wildcardKey,
+			got,
+		)
 	}
 }
 
@@ -509,6 +517,96 @@ func TestKoiosCoverageTableReadsEverySuchTable(t *testing.T) {
 		field:    "bogus",
 	}]; !ok {
 		t.Error("the second table's rows were not read")
+	}
+}
+
+func TestKoiosCoverageTableIgnoresFencedCopies(t *testing.T) {
+	t.Parallel()
+
+	header := "| " + strings.Join(koiosCoverageHeader, " | ") + " |"
+	doc := strings.Join([]string{
+		header,
+		"| --- | --- | --- | --- |",
+		"| `/tip` | exact-match | `abs_slot` | mapped |",
+		"",
+		"```markdown",
+		header,
+		"| --- | --- | --- | --- |",
+		"| `/tip` | unsupported | `abs_slot` | example only |",
+		"```",
+	}, "\n")
+
+	table, err := parseKoiosCoverageTable(doc)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(table.problems) != 0 {
+		t.Fatalf(
+			"fenced copy changed the coverage contract: %v",
+			table.problems,
+		)
+	}
+	key := koiosFieldKey{endpoint: "/tip", field: "abs_slot"}
+	if got := table.exact[key].class; got != "exact-match" {
+		t.Errorf("parsed class %q, want the unfenced row", got)
+	}
+}
+
+func TestKoiosCoverageTableBoundsAdjacentTables(t *testing.T) {
+	t.Parallel()
+
+	header := "| " + strings.Join(koiosCoverageHeader, " | ") + " |"
+	doc := strings.Join([]string{
+		header,
+		"| --- | --- | --- | --- |",
+		"| `/tip` | exact-match | `abs_slot` | mapped |",
+		header,
+		"| --- | --- | --- | --- |",
+		"| `/tip` | unsupported | `abs_slot` | contradicts the first table |",
+		"| `/nope` | exact-match | `bogus` | second table row |",
+	}, "\n")
+
+	table, err := parseKoiosCoverageTable(doc)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(table.problems) != 1 ||
+		!strings.Contains(
+			table.problems[0],
+			"duplicate coverage row for /tip abs_slot",
+		) {
+		t.Fatalf(
+			"adjacent tables produced unexpected problems: %v",
+			table.problems,
+		)
+	}
+	if _, ok := table.exact[koiosFieldKey{
+		endpoint: "/nope",
+		field:    "bogus",
+	}]; !ok {
+		t.Error("the adjacent table's distinct row was not read")
+	}
+}
+
+func TestKoiosCoverageTableAcceptsWildcardOnlyRows(t *testing.T) {
+	t.Parallel()
+
+	doc := strings.Join([]string{
+		"| " + strings.Join(koiosCoverageHeader, " | ") + " |",
+		"| --- | --- | --- | --- |",
+		"| `/epoch_params` | unsupported | `pvt_*` | grouped fields |",
+	}, "\n")
+
+	table, err := parseKoiosCoverageTable(doc)
+	if err != nil {
+		t.Fatalf("parse wildcard-only table: %v", err)
+	}
+	if len(table.exact) != 0 {
+		t.Fatalf("wildcard-only table produced exact rows: %v", table.exact)
+	}
+	key := koiosFieldKey{endpoint: "/epoch_params", field: "pvt_*"}
+	if got := table.wildcard[key].class; got != "unsupported" {
+		t.Errorf("wildcard class %q, want unsupported", got)
 	}
 }
 
