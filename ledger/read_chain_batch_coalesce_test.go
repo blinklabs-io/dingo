@@ -21,6 +21,8 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 )
 
@@ -189,4 +191,87 @@ func TestLedgerReadChainIteratorNearTipFlushesSingleBlockPromptly(
 	require.False(t, result.rollback)
 	require.Len(t, result.blocks, 1)
 	close(result.done)
+}
+
+// TestLedgerReadChainIteratorCommitBatchBlocksSkipsEmptyPasses pins the
+// dingo_ledger_commit_batch_blocks histogram to actual submissions. A gather
+// pass whose very first non-blocking probe returns chain.ErrIteratorChainTip
+// gathers nothing -- the coalescing wait does not apply, because there is no
+// partial batch to protect -- yet it still delivers a zero-block result
+// downstream. Observing those would accumulate zeros in the lowest bucket of
+// the distribution the histogram exists to measure, exactly during the bulk
+// replay where the premature-flush symptom is read off it.
+func TestLedgerReadChainIteratorCommitBatchBlocksSkipsEmptyPasses(
+	t *testing.T,
+) {
+	// Not t.Parallel: swaps the package-level
+	// gatherCoalesceRetryInterval/gatherCoalesceMaxAttempts seam via
+	// shrinkGatherCoalesceRetryInterval.
+	shrinkGatherCoalesceRetryInterval(t, time.Millisecond, 2)
+
+	block1, point1 := buildDecodableTestBlock(t, 10, 1)
+	block2, point2 := buildDecodableTestBlock(t, 20, 2)
+
+	// The leading nil is consumed by the first, non-blocking probe, so that
+	// pass gathers no blocks at all and flushes an empty result. The two
+	// blocks then arrive on the following pass.
+	script := []*chain.ChainIteratorResult{
+		nil,
+		{Point: point1, Block: block1},
+		{Point: point2, Block: block2},
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	iter := &scriptedGapLedgerReadIterator{ctx: ctx, script: script}
+
+	ls := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
+	ls.metrics.init(prometheus.NewRegistry())
+
+	resultCh := make(chan readChainResult, 1)
+	go ls.ledgerReadChainIterator(ctx, iter, resultCh)
+
+	empty := testutil.RequireReceive(
+		t, resultCh, testutil.AsyncWait,
+		"reader never delivered the empty pass",
+	)
+	require.NoError(t, empty.err)
+	require.Empty(t, empty.blocks)
+	require.Zero(
+		t,
+		readCommitBatchBlocksSampleCount(t, ls),
+		"an empty gather pass must not be recorded as a commit",
+	)
+	close(empty.done)
+
+	batch := testutil.RequireReceive(
+		t, resultCh, testutil.AsyncWait,
+		"reader never delivered the gathered batch",
+	)
+	require.NoError(t, batch.err)
+	require.Len(t, batch.blocks, 2)
+	count, sum := readCommitBatchBlocks(t, ls)
+	require.Equal(t, uint64(1), count)
+	require.InDelta(t, 2.0, sum, 0.0001)
+	close(batch.done)
+}
+
+func readCommitBatchBlocks(
+	t *testing.T,
+	ls *LedgerState,
+) (uint64, float64) {
+	t.Helper()
+	metric := &dto.Metric{}
+	require.NoError(t, ls.metrics.commitBatchBlocks.Write(metric))
+	return metric.GetHistogram().GetSampleCount(),
+		metric.GetHistogram().GetSampleSum()
+}
+
+func readCommitBatchBlocksSampleCount(
+	t *testing.T,
+	ls *LedgerState,
+) uint64 {
+	t.Helper()
+	count, _ := readCommitBatchBlocks(t, ls)
+	return count
 }

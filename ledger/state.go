@@ -5415,11 +5415,18 @@ func (ls *LedgerState) ledgerReadChainIterator(
 					// drainBlockPipelineBeforeRollback, and proceed before
 					// this pass's already-gathered blocks are submitted --
 					// exactly the race blockPipelineGatherMutex exists to
-					// close. The wait is short and bounded, so a genuine
-					// rollback is delayed by at most
-					// gatherCoalesceMaxAttempts*gatherCoalesceRetryInterval,
-					// comparable to the delay it already tolerates while
-					// this lock is held through decoding a full batch.
+					// close. The wait is bounded, but the bound is per
+					// gap, not per gather pass: coalesceAttempts is reset
+					// every time a block is appended below, so one pass
+					// can wait once per block it gathers. A rollback
+					// blocked on the write lock therefore waits up to
+					// batchSize*gatherCoalesceMaxAttempts*gatherCoalesceRetryInterval
+					// (about 1s at the defaults) in the worst case, and
+					// about batchSize*gatherCoalesceRetryInterval (100ms)
+					// when each gap resolves on its first retry. That is
+					// accepted because the whole wait is gated on
+					// !isNearTip: it applies only while catching up, where
+					// rollbacks are rare and no forging depends on them.
 					if len(rawBatch) > 0 && len(rawBatch) < cap(rawBatch) &&
 						coalesceAttempts < gatherCoalesceMaxAttempts &&
 						!ls.isNearTip(rawBatch[len(rawBatch)-1].Slot) {
@@ -5509,7 +5516,12 @@ func (ls *LedgerState) ledgerReadChainIterator(
 				blocks: nextBatch,
 				done:   make(chan struct{}),
 			}
-			if ls.metrics.commitBatchBlocks != nil {
+			// Only real submissions are observed. A non-blocking probe
+			// that finds nothing ready still delivers a zero-block
+			// result downstream, and counting those would pile zeros
+			// into the lowest bucket of the very distribution this
+			// histogram exists to measure.
+			if len(nextBatch) > 0 && ls.metrics.commitBatchBlocks != nil {
 				ls.metrics.commitBatchBlocks.Observe(float64(len(nextBatch)))
 			}
 		}

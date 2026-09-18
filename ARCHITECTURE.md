@@ -12003,11 +12003,16 @@ stays held through `decodeReadChainBatch` (see `gatherLockHeld`'s doc
 comment) — releasing it here would let a rollback's write lock be granted,
 see an empty `blockPipeline` via `drainBlockPipelineBeforeRollback`, and
 proceed before this pass's already-gathered blocks are submitted, reopening
-the exact race `blockPipelineGatherMutex` exists to close. A genuine rollback
-is delayed by at most `gatherCoalesceMaxAttempts*gatherCoalesceRetryInterval`,
-comparable to the delay this lock already tolerates while held through
-decoding a full batch. The `dingo_ledger_commit_batch_blocks` histogram
-records `len(nextBatch)` at every submission so the effect on the batch-size
+the exact race `blockPipelineGatherMutex` exists to close. The bound on that
+wait is per gap rather than per gather pass — the attempt counter is reset
+each time a block is appended — so a rollback blocked on the write lock waits
+up to `batchSize*gatherCoalesceMaxAttempts*gatherCoalesceRetryInterval` (about
+1s at the defaults) in the worst case, and about
+`batchSize*gatherCoalesceRetryInterval` (100ms) when each gap resolves on its
+first retry. That is accepted because the wait is gated on `!isNearTip` and so
+applies only while catching up, where rollbacks are rare and no forging
+depends on them. The `dingo_ledger_commit_batch_blocks` histogram records
+`len(nextBatch)` at every non-empty submission so the effect on the batch-size
 distribution is observable without re-running a full disk-I/O measurement.
 
 The pipeline is started in `LedgerState.Start` (before the goroutine that
