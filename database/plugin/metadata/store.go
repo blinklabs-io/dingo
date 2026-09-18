@@ -1834,11 +1834,27 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]models.PoolRegistration, error)
 
-	// GetPoolByVrfKeyHash retrieves an active pool by its VRF key hash.
-	// Returns nil if no active pool uses this VRF key.
+	// GetPoolByVrfKeyHash retrieves the pool that currently claims the
+	// given VRF key hash, as of the given epoch's start slot. Returns nil
+	// if no active pool claims it.
+	//
+	// A pool re-registering with a new VRF key mid-epoch does not free its
+	// old key until epochStartSlot advances past that re-registration
+	// (cardano-ledger defers a re-registration through
+	// psFutureStakePoolParams until the next epoch boundary; only a pool's
+	// first-ever registration is immediate). Callers must pass the current
+	// epoch's start slot, not an arbitrary point in the past.
+	//
+	// A key a pool proposed earlier in the same epoch and then superseded
+	// with a later re-registration (A -> B -> C) also still counts as
+	// claimed by that pool for the rest of the epoch, even though it is
+	// no longer that pool's pending value either: psVRFKeyHashes retains
+	// every key placed in psFutureStakePoolParams during the epoch, not
+	// only the current one.
 	GetPoolByVrfKeyHash(
-		[]byte, // vrfKeyHash
-		types.Txn,
+		vrfKeyHash []byte,
+		epochStartSlot uint64,
+		txn types.Txn,
 	) (*models.Pool, error)
 
 	// GetActivePoolRelays retrieves all relays from currently active pools.

@@ -161,15 +161,15 @@ func newSiblingFixture(t *testing.T) *siblingFixture {
 	}
 	require.NoError(t, db.SetBlockNonce(
 		parentTip.Point.Hash, parentTip.Point.Slot,
-		[]byte("nonce-parent"), true, nil,
+		siblingTestBytes(32, 0xa1), true, nil,
 	))
 	require.NoError(t, db.SetBlockNonce(
 		rivalTip.Point.Hash, rivalTip.Point.Slot,
-		[]byte("nonce-rival"), false, nil,
+		siblingTestBytes(32, 0xb2), false, nil,
 	))
 	require.NoError(t, db.SetTip(rivalTip, nil))
 	ls.currentTip = rivalTip
-	ls.currentTipBlockNonce = []byte("nonce-rival")
+	ls.currentTipBlockNonce = siblingTestBytes(32, 0xb2)
 	ls.chainsyncState = SyncingChainsyncState
 	ls.publishSnapshotsLocked()
 

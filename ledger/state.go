@@ -1375,6 +1375,9 @@ type LedgerState struct {
 	// cleanupWG, so a lifecycle test can hold a run in flight and assert
 	// that Close drains it.
 	cleanupConsumedUtxosRunHook func()
+	// startupRewardPrecomputeHook is test-only observability for the startup
+	// catch-up boundary; it runs after the real queue call.
+	startupRewardPrecomputeHook func()
 	// Test hook replacing the primary-chain membership read the continuation
 	// audit makes. A healthy store never fails that read, so without it the
 	// audit's handling of a failed read cannot be driven from a test.
@@ -1881,6 +1884,14 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 			event.EpochTransitionEventType,
 			ls.handleRewardPrecomputeEpochTransition,
 		)
+	}
+	// The subscription above cannot fire for an epoch that began before this
+	// process did, so catch up the in-progress epoch's reward round here.
+	// Without it, a node started mid-epoch calculates that round inline inside
+	// the next epoch-rollover transaction instead of ahead of it.
+	ls.queueStartupRewardPrecompute()
+	if ls.startupRewardPrecomputeHook != nil {
+		ls.startupRewardPrecomputeHook()
 	}
 	// Now that both tip and epoch are loaded, check whether the safe zone
 	// already covers the epoch end (TransitionImpossible).  This handles the
@@ -7732,9 +7743,9 @@ func (ls *LedgerState) ledgerProcessBlock(
 					// block can cost an entire epoch of horizon and reject a
 					// canonical Plutus transaction (issue #3844).
 					horizonAnchorSlot: parent.slot,
+					epochStartSlot:    epochStartSlot,
 				}).pinCommitteeState(committeeEpoch, pp).
-					pinSyntheticV2CostModel(synthetic).
-					pinMIREpochStartSlot(epochStartSlot)
+					pinSyntheticV2CostModel(synthetic)
 				validateStart := time.Now()
 				err := validationEra.ValidateTxFunc(
 					tx,
@@ -11272,6 +11283,7 @@ func (ls *LedgerState) NewView(txn *database.Txn) *LedgerView {
 	if snapshot == nil {
 		return view
 	}
+	view.epochStartSlot = snapshot.currentEpoch.StartSlot
 	return view.pinCommitteeState(
 		snapshot.currentEpoch.EpochId,
 		snapshot.currentPParams,
@@ -11685,9 +11697,9 @@ func (ls *LedgerState) WithTxValidationSession(
 				ls:              ls,
 				intraBlockUtxos: createdUtxos,
 				consumedUtxos:   consumedUtxos,
+				epochStartSlot:  snapshot.currentEpochStartSlot,
 			}).pinCommitteeState(snapshot.currentEpoch, pp).
-				pinSyntheticV2CostModel(synthetic).
-				pinMIREpochStartSlot(snapshot.currentEpochStartSlot)
+				pinSyntheticV2CostModel(synthetic)
 			err = validationEra.ValidateTxFunc(
 				tx,
 				snapshot.referenceSlot,
@@ -11747,9 +11759,10 @@ func (ls *LedgerState) validateTxCore(
 		txn := ls.db.Transaction(false)
 		var lv *LedgerView
 		err := txn.Do(func(txn *database.Txn) error {
-			lv = buildLV(txn).pinCommitteeState(snapshot.currentEpoch, pp).
-				pinSyntheticV2CostModel(synthetic).
-				pinMIREpochStartSlot(snapshot.currentEpochStartSlot)
+			lv = buildLV(txn)
+			lv.epochStartSlot = snapshot.currentEpochStartSlot
+			lv = lv.pinCommitteeState(snapshot.currentEpoch, pp).
+				pinSyntheticV2CostModel(synthetic)
 			return validationEra.ValidateTxFunc(
 				tx,
 				snapshot.referenceSlot,
@@ -11837,8 +11850,9 @@ func (ls *LedgerState) EvaluateTx(
 		var lv *LedgerView
 		err := txn.Do(func(txn *database.Txn) error {
 			lv = (&LedgerView{
-				txn: txn,
-				ls:  ls,
+				txn:            txn,
+				ls:             ls,
+				epochStartSlot: consensusState.currentEpoch.StartSlot,
 			}).pinCommitteeState(
 				consensusState.currentEpoch.EpochId,
 				pp,

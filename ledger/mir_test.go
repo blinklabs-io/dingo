@@ -1238,7 +1238,7 @@ func TestLedgerView_PendingMIRRewardDeltas(t *testing.T) {
 	txn := db.Transaction(false)
 	var totals map[eras.MIRCredentialKey]*big.Int
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		lv := (&LedgerView{ls: ls, txn: txn}).pinMIREpochStartSlot(100)
+		lv := &LedgerView{ls: ls, txn: txn, epochStartSlot: 100}
 		var err error
 		totals, err = lv.PendingMIRRewardDeltas(200)
 		return err
@@ -1254,13 +1254,14 @@ func TestLedgerView_PendingMIRRewardDeltas(t *testing.T) {
 }
 
 // TestLedgerView_PendingMIRRewardDeltas_PinnedSurvivesConcurrentRollover
-// proves the fix for a human review finding on PR #4415: PendingMIRRewardDeltas
-// must use the epoch start slot pinned to this validation's own consensus
-// snapshot (pinMIREpochStartSlot), not a fresh read of LedgerState.currentEpoch,
-// because a concurrent writer can roll the epoch over while this transaction's
-// validation is still in flight. A pinned view must keep seeing the epoch its
-// own snapshot was taken in; an unpinned view -- falling back to whatever
-// consensus snapshot is live right now -- reproduces the bug the review
+// addresses a human review finding on PR #4415: PendingMIRRewardDeltas must
+// read lv.epochStartSlot, a value pinned once when this view was built for a
+// specific transaction's validation, never a fresh read of
+// LedgerState.currentEpoch -- because a concurrent writer can roll the epoch
+// over while this transaction's validation is still in flight. A view
+// pinned before the rollover must keep seeing the epoch its own snapshot was
+// taken in; a view built fresh after the rollover (ls.NewView, exactly what
+// a caller must not do mid-validation) reproduces the bug the review
 // flagged: the rolled-over epoch's later start slot exceeds the still-valid
 // uptoSlot, tripping the "before this epoch" guard and silently reporting no
 // pending deltas at all.
@@ -1286,7 +1287,7 @@ func TestLedgerView_PendingMIRRewardDeltas_PinnedSurvivesConcurrentRollover(
 		// Pin the view to epoch A's start slot, exactly as validateTxCore /
 		// ledgerProcessBlock / WithTxValidationSession do from their own
 		// txValidationSnapshot before calling ValidateTxFunc.
-		pinned := (&LedgerView{ls: ls, txn: txn}).pinMIREpochStartSlot(100)
+		pinned := &LedgerView{ls: ls, txn: txn, epochStartSlot: 100}
 
 		// A concurrent writer rolls over to epoch B, published after this
 		// transaction's own snapshot was taken but before it finishes
@@ -1303,14 +1304,14 @@ func TestLedgerView_PendingMIRRewardDeltas_PinnedSurvivesConcurrentRollover(
 			"a pinned view must still see epoch A's own certificates after a concurrent rollover to epoch B")
 		assert.Equal(t, big.NewInt(10), pinnedTotals[key])
 
-		// An unpinned view falls back to the now-current (rolled-over)
-		// snapshot and reproduces the bug: epochStartSlot=500 exceeds
+		// A view built fresh after the rollover picks up the new epoch's
+		// start slot and reproduces the bug: epochStartSlot=500 exceeds
 		// uptoSlot=150, so the guard returns no pending deltas at all.
-		unpinned := &LedgerView{ls: ls, txn: txn}
-		unpinnedTotals, err := unpinned.PendingMIRRewardDeltas(150)
+		freshAfterRollover := ls.NewView(txn)
+		freshTotals, err := freshAfterRollover.PendingMIRRewardDeltas(150)
 		require.NoError(t, err)
-		assert.Empty(t, unpinnedTotals,
-			"documents the bug an unpinned read reproduces: it must not be relied on")
+		assert.Empty(t, freshTotals,
+			"documents why a validation call must reuse its own pinned view, never build a fresh one mid-flight")
 		return nil
 	}))
 }
@@ -1326,7 +1327,7 @@ func TestLedgerView_PendingMIRRewardDeltas_BeforeEpochStart(t *testing.T) {
 	txn := db.Transaction(false)
 	var totals map[eras.MIRCredentialKey]*big.Int
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		lv := (&LedgerView{ls: ls, txn: txn}).pinMIREpochStartSlot(100)
+		lv := &LedgerView{ls: ls, txn: txn, epochStartSlot: 100}
 		var err error
 		totals, err = lv.PendingMIRRewardDeltas(50)
 		return err
@@ -1357,7 +1358,7 @@ func TestLedgerView_PendingMIRRewardDeltas_SeparatesPots(t *testing.T) {
 	txn := db.Transaction(false)
 	var totals map[eras.MIRCredentialKey]*big.Int
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		lv := (&LedgerView{ls: ls, txn: txn}).pinMIREpochStartSlot(100)
+		lv := &LedgerView{ls: ls, txn: txn, epochStartSlot: 100}
 		var err error
 		totals, err = lv.PendingMIRRewardDeltas(200)
 		return err

@@ -69,10 +69,6 @@ type LedgerView struct {
 	committeeEpoch       uint64
 	committeePParams     lcommon.ProtocolParameters
 	committeeStatePinned bool
-	// MIR accumulation must use the same immutable consensus publication as
-	// the validation that owns this view; see PendingMIRRewardDeltas.
-	mirEpochStartSlot       uint64
-	mirEpochStartSlotPinned bool
 	// intraBlockUtxos tracks outputs created by earlier transactions in the same block.
 	intraBlockUtxos map[utxoref.Key]lcommon.Utxo
 	// consumedUtxos tracks inputs consumed by pending mempool transactions.
@@ -115,6 +111,20 @@ type LedgerView struct {
 	// in charge, which is correct for every caller with no applied block in
 	// hand (mempool validation, standalone evaluation).
 	horizonAnchorSlot uint64
+	// epochStartSlot is the current epoch's start slot, pinned from the same
+	// snapshot pp was captured from at every real validation/evaluation call
+	// site (see the pinCommitteeState call sites in state.go). IsVrfKeyInUse
+	// reads this rather than calling ls.loadConsensusSnapshot() live: a
+	// validation operation can run long enough that the writer publishes a
+	// newer snapshot -- and therefore a new epoch boundary -- in the
+	// meantime, which would let the deferral check for one certificate
+	// disagree with the check for another certificate in the same
+	// transaction or block, or with itself if IsVrfKeyInUse or
+	// PoolCurrentState were called more than once against the same input.
+	// This mirrors why syntheticV2CostModel below is pinned rather than
+	// read live. Zero is a safe default for callers with no meaningful
+	// current epoch (a bare view built outside real validation).
+	epochStartSlot uint64
 	// syntheticV2CostModel is pinned from the same snapshot pparams (pp) was
 	// captured from -- see pinSyntheticV2CostModel and
 	// SyntheticV2CostModelInEffect. It must not be re-read live from
@@ -185,27 +195,6 @@ func (lv *LedgerView) pinCommitteeState(
 	return lv
 }
 
-// pinMIREpochStartSlot pins the current epoch's start slot to the same
-// immutable consensus snapshot the rest of this transaction's validation was
-// pinned to (see txValidationSnapshot), so PendingMIRRewardDeltas cannot
-// observe an epoch rollover that raced in after that snapshot was taken.
-func (lv *LedgerView) pinMIREpochStartSlot(startSlot uint64) *LedgerView {
-	lv.mirEpochStartSlot = startSlot
-	lv.mirEpochStartSlotPinned = true
-	return lv
-}
-
-// epochStartSlotSnapshot returns the pinned epoch start slot when one was set
-// by pinMIREpochStartSlot, falling back to the current lock-free consensus
-// snapshot otherwise (mirroring committeeSnapshot's fallback for a view built
-// outside a pinned validation session).
-func (lv *LedgerView) epochStartSlotSnapshot() uint64 {
-	if lv.mirEpochStartSlotPinned {
-		return lv.mirEpochStartSlot
-	}
-	return lv.ls.loadConsensusSnapshot().currentEpoch.StartSlot
-}
-
 func (lv *LedgerView) SkipPhase2Validation() bool {
 	return lv.skipPhase2Validation
 }
@@ -233,19 +222,20 @@ var _ eras.MinPoolMarginProvider = (*LedgerView)(nil)
 // validated are not yet visible here, and validateMIRAccumulatedRewards folds
 // those in memory as it walks the transaction's own certificate list.
 //
-// The epoch start slot comes from epochStartSlotSnapshot, which uses the
-// pinned value set by pinMIREpochStartSlot when this view was built for a
-// specific transaction's validation, never a fresh RLock read of
-// LedgerState.currentEpoch: that field is writer-owned working state (see its
-// doc comment in state.go), and re-reading it independently, later in the
-// same validation call, could observe an epoch rollover that a concurrent
-// writer committed after the rest of this validation was pinned to an
-// earlier snapshot -- silently reporting zero pending deltas for a
-// transaction that is still, in truth, inside the earlier epoch.
+// The epoch start slot comes from lv.epochStartSlot, pinned from the same
+// snapshot pp was captured from at every real validation call site (see
+// epochStartSlot's field doc comment and IsVrfKeyInUse, which pins it for the
+// same reason), never a fresh read of LedgerState.currentEpoch: that field is
+// writer-owned working state (see its doc comment in state.go), and
+// re-reading it independently, later in the same validation call, could
+// observe an epoch rollover that a concurrent writer committed after the
+// rest of this validation was pinned to an earlier snapshot -- silently
+// reporting zero pending deltas for a transaction that is still, in truth,
+// inside the earlier epoch.
 func (lv *LedgerView) PendingMIRRewardDeltas(
 	uptoSlot uint64,
 ) (map[eras.MIRCredentialKey]*big.Int, error) {
-	epochStartSlot := lv.epochStartSlotSnapshot()
+	epochStartSlot := lv.epochStartSlot
 	if uptoSlot < epochStartSlot {
 		return nil, nil
 	}
@@ -697,11 +687,20 @@ func (lv *LedgerView) IsPoolRegistered(pkh lcommon.PoolKeyHash) bool {
 
 // IsVrfKeyInUse checks if a VRF key hash is registered by another pool.
 // Returns (inUse, owningPoolId, error).
+//
+// The reservation checked here is the one effective as of the start of the
+// current epoch, not a pool's most recent registration: a re-registration
+// submitted during the epoch in progress is deferred to the next boundary
+// (cardano-ledger's psFutureStakePoolParams), so the pool's prior key stays
+// reserved until then. See GetPoolByVrfKeyHash. The epoch boundary used is
+// lv.epochStartSlot, pinned once at view construction -- not re-read from
+// the live consensus snapshot here, per epochStartSlot's field doc comment.
 func (lv *LedgerView) IsVrfKeyInUse(
 	vrfKeyHash lcommon.Blake2b256,
 ) (bool, lcommon.PoolKeyHash, error) {
 	pool, err := lv.ls.db.GetPoolByVrfKeyHash(
 		vrfKeyHash.Bytes(),
+		lv.epochStartSlot,
 		lv.txn,
 	)
 	if err != nil {
