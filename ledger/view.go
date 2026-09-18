@@ -212,6 +212,65 @@ func (lv *LedgerView) MinPoolMargin() *big.Rat {
 // silent runtime no-op for the CIP-23 pool-margin-floor certificate rule.
 var _ eras.MinPoolMarginProvider = (*LedgerView)(nil)
 
+// PendingMIRRewardDeltas returns, for each stake credential, the signed sum of
+// MIR reward deltas already committed this epoch at or before uptoSlot. Every
+// transaction's certificates are written to the database immediately after
+// that transaction validates (see ledgerProcessBlock), before the next
+// transaction in the same block validates, so this query already reflects
+// every prior transaction's MIR certificates this epoch, same block or
+// earlier -- only certificates within the transaction currently being
+// validated are not yet visible here, and validateMIRAccumulatedRewards folds
+// those in memory as it walks the transaction's own certificate list.
+//
+// The epoch start slot comes from lv.epochStartSlot, pinned from the same
+// snapshot pp was captured from at every real validation call site (see
+// epochStartSlot's field doc comment and IsVrfKeyInUse, which pins it for the
+// same reason), never a fresh read of LedgerState.currentEpoch: that field is
+// writer-owned working state (see its doc comment in state.go), and
+// re-reading it independently, later in the same validation call, could
+// observe an epoch rollover that a concurrent writer committed after the
+// rest of this validation was pinned to an earlier snapshot -- silently
+// reporting zero pending deltas for a transaction that is still, in truth,
+// inside the earlier epoch.
+func (lv *LedgerView) PendingMIRRewardDeltas(
+	uptoSlot uint64,
+) (map[eras.MIRCredentialKey]*big.Int, error) {
+	epochStartSlot := lv.epochStartSlot
+	if uptoSlot < epochStartSlot {
+		return nil, nil
+	}
+	effects, err := lv.ls.db.GetMIRCertsInSlotRange(
+		epochStartSlot, uptoSlot+1, lv.txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get MIR certs in slot range: %w", err)
+	}
+	totals := make(map[eras.MIRCredentialKey]*big.Int)
+	for _, effect := range effects {
+		for _, reward := range effect.Rewards {
+			if reward.Amount == nil {
+				continue
+			}
+			key := eras.MIRCredentialKey{
+				Tag:        reward.CredentialTag,
+				Credential: lcommon.NewBlake2b224(reward.Credential),
+				Pot:        effect.Pot,
+			}
+			if existing, ok := totals[key]; ok {
+				totals[key] = new(big.Int).Add(existing, reward.Amount)
+			} else {
+				totals[key] = new(big.Int).Set(reward.Amount)
+			}
+		}
+	}
+	return totals, nil
+}
+
+// var _ eras.MIRPendingRewardsProvider = (*LedgerView)(nil) makes any future
+// drift in the MIRPendingRewardsProvider method signature a compile error
+// instead of a silent runtime no-op for the MIRProducesNegativeUpdate check.
+var _ eras.MIRPendingRewardsProvider = (*LedgerView)(nil)
+
 // The Conway committee certificate and voter rules discover this capability
 // with a runtime type assertion and fail closed when it misses, so signature
 // drift would silently reject every transaction whose validation performs a

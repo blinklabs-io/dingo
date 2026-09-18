@@ -350,6 +350,20 @@ type mockLedgerState struct {
 	// exercise ValidateTxBabbage/EvaluateTxBabbage's ErrNoCostModelForPlutusV2
 	// check (blinklabs-io/dingo#3962) without a real *ledger.LedgerView.
 	syntheticV2CostModel bool
+	// pendingMIR backs PendingMIRRewardDeltas, letting a test simulate
+	// InstantaneousRewards already accumulated earlier in the current epoch
+	// without a real *ledger.LedgerView or database.
+	pendingMIR map[MIRCredentialKey]*big.Int
+}
+
+// PendingMIRRewardDeltas implements eras.MIRPendingRewardsProvider for tests.
+// The real implementation (*ledger.LedgerView) derives this from the database;
+// this mock just returns whatever a test has staged in pendingMIR, ignoring
+// uptoSlot.
+func (m *mockLedgerState) PendingMIRRewardDeltas(
+	_ uint64,
+) (map[MIRCredentialKey]*big.Int, error) {
+	return m.pendingMIR, nil
 }
 
 // SyntheticV2CostModelInEffect implements the eras package's local
