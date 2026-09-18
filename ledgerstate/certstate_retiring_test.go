@@ -337,8 +337,8 @@ func TestParsePStateRetainsUnparsedRetirementKeys(t *testing.T) {
 	if got := len(retirements[658]); got != 1 {
 		t.Fatalf("expected one parsed retirement, got %d", got)
 	}
-	if got := len(retirements[659]); got != 1 ||
-		!bytes.Equal(retirements[659][0], unparsedHash) {
+	keys, ok := retirements[659]
+	if !ok || len(keys) != 1 || !bytes.Equal(keys[0], unparsedHash) {
 		t.Fatalf("unparsed retirement key was not retained: %x", retirements[659])
 	}
 }
