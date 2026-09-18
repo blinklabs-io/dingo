@@ -206,9 +206,14 @@ INSERT INTO auth_committee_hot (
 		AddedSlot:       2,
 	}, nil))
 	poolCred := repeatByte(28, 0xDD)
+	// governance.stakeEpochFor(currentEpoch) resolves to currentEpoch itself
+	// (dingo#4441): EvaluateRatifiableHardForkInitiation's mid-epoch check
+	// tallies the SPO vote against mark[currentEpoch], the mark snapshot
+	// already durably written at the boundary that opened the currently
+	// active epoch.
 	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
 		&models.PoolStakeSnapshot{
-			Epoch:        currentEpoch - 2,
+			Epoch:        currentEpoch,
 			SnapshotType: models.PoolStakeSnapshotTypeMark,
 			PoolKeyHash:  poolCred,
 			TotalStake:   types.Uint64(1_000),

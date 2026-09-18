@@ -6690,6 +6690,25 @@ func (ls *LedgerState) processEpochRollover(
 		return nil, err
 	}
 
+	// governance.ProcessEpoch's RATIFY phase tallies every SPO-gated action
+	// against mark[currentEpoch.EpochId+1] -- this same boundary's own mark
+	// snapshot (see governance.stakeEpochFor's doc comment) -- but that row
+	// is not written to pool_stake_snapshot until captureEpochBoundarySnapshot
+	// runs, near the end of this same rollover, well after governance runs.
+	// Resolve it now from the same SNAP-point read captureEpochBoundary
+	// SnapshotStake just took (or, if that hook is unset or its fast path
+	// failed, the same historical reconstruction the persisted write itself
+	// falls back to), unconsumed so the later authoritative write still finds
+	// it. A hard failure here aborts the rollover rather than letting
+	// governance silently fall back to reading the not-yet-written row and
+	// see zero SPO stake for every gated action at every boundary.
+	currentBoundarySPOState, err := ls.currentBoundarySPOStakeState(
+		txn, currentEpoch, epochStartSlot,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("resolve current-boundary SPO stake: %w", err)
+	}
+
 	updateQuorum := 0
 	if shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis(); shelleyGenesis != nil {
 		updateQuorum = shelleyGenesis.UpdateQuorum
@@ -6757,16 +6776,17 @@ func (ls *LedgerState) processEpochRollover(
 		conwayGenesis = ls.config.CardanoNodeConfig.ConwayGenesis()
 	}
 	govOut, err := governance.ProcessEpoch(&governance.EpochInput{
-		DB:                    ls.db,
-		Txn:                   txn,
-		Logger:                ls.config.Logger,
-		PrevEpoch:             currentEpoch.EpochId,
-		NewEpoch:              currentEpoch.EpochId + 1,
-		BoundarySlot:          epochStartSlot,
-		PParams:               newPParams,
-		UpdateFn:              currentEra.PParamsUpdateFunc,
-		ConwayGenesis:         conwayGenesis,
-		DelegatorInactivityOn: ls.config.DelegatorInactivityEnabled,
+		DB:                      ls.db,
+		Txn:                     txn,
+		Logger:                  ls.config.Logger,
+		PrevEpoch:               currentEpoch.EpochId,
+		NewEpoch:                currentEpoch.EpochId + 1,
+		BoundarySlot:            epochStartSlot,
+		PParams:                 newPParams,
+		UpdateFn:                currentEra.PParamsUpdateFunc,
+		ConwayGenesis:           conwayGenesis,
+		DelegatorInactivityOn:   ls.config.DelegatorInactivityEnabled,
+		CurrentBoundarySPOState: currentBoundarySPOState,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("process governance epoch: %w", err)
@@ -7068,6 +7088,43 @@ func (ls *LedgerState) captureEpochBoundarySnapshotStake(
 		)
 	}
 	return nil
+}
+
+// currentBoundarySPOStakeState resolves the SPO pool-stake voting state
+// governance.ProcessEpoch's RATIFY phase must use for this boundary
+// (mark[prevEpoch.EpochId+1] -- see governance.stakeEpochFor's doc comment),
+// via the optional hook wired to the snapshot manager's
+// CurrentBoundarySPOStakeRows. A nil hook returns a nil state (no override;
+// governance falls back to its own DB read, correct only for a standalone
+// caller that seeded that row directly, never for a real rollover -- see
+// SetCurrentBoundarySPOStakeHook's doc comment for why a production node
+// must always have this wired).
+func (ls *LedgerState) currentBoundarySPOStakeState(
+	txn *database.Txn,
+	prevEpoch models.Epoch,
+	boundarySlot uint64,
+) (*governance.SPOVotingState, error) {
+	hook := ls.currentBoundarySPOStakeHookFn()
+	if hook == nil {
+		return nil, nil
+	}
+	evt := event.EpochTransitionEvent{
+		PreviousEpoch: prevEpoch.EpochId,
+		NewEpoch:      prevEpoch.EpochId + 1,
+		BoundarySlot:  boundarySlot,
+		SnapshotSlot:  epochBoundarySnapshotSlot(boundarySlot),
+	}
+	rows, err := hook(txn, evt)
+	if err != nil {
+		return nil, err
+	}
+	// Bounded by the total ADA supply (<< math.MaxUint64); no overflow guard
+	// needed, matching every other pool-stake summation in this rollover.
+	var total uint64
+	for _, r := range rows {
+		total += uint64(r.TotalStake)
+	}
+	return &governance.SPOVotingState{Dist: rows, TotalStake: total}, nil
 }
 
 // captureEpochBoundarySnapshot invokes the optional authoritative snapshot hook
