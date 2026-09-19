@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -330,7 +331,7 @@ func validateKoiosNetwork(network string) error {
 // host that does rate-limit still backs off correctly on 429.
 func NewKoiosClient(
 	network, apiKey, baseURL string,
-	allowInsecureHTTP bool,
+	allowInsecureHTTP, allowPrivateAddresses bool,
 ) (*KoiosClient, error) {
 	if err := validateKoiosNetwork(network); err != nil {
 		return nil, err
@@ -338,7 +339,11 @@ func NewKoiosClient(
 	base := koiosBaseURLs[network]
 	burstLimit := koiosBurstLimitSafe
 	if trimmed := strings.TrimRight(strings.TrimSpace(baseURL), "/"); trimmed != "" {
-		if err := validateKoiosBaseURL(trimmed, allowInsecureHTTP); err != nil {
+		if err := validateKoiosBaseURL(
+			trimmed,
+			allowInsecureHTTP,
+			allowPrivateAddresses,
+		); err != nil {
 			return nil, err
 		}
 		base = trimmed
@@ -361,6 +366,11 @@ func NewKoiosClient(
 				koiosTLSHandshakeTimeout,
 				koiosResponseHeaderTimeout,
 				koiosExpectContinueTimeout,
+				allowPrivateAddresses,
+			),
+			CheckRedirect: koiosRedirectPolicy(
+				allowInsecureHTTP,
+				allowPrivateAddresses,
 			),
 		},
 		// Public and Free tiers share the 100/10s burst cap; Pro/Premium are
@@ -377,9 +387,9 @@ func NewKoiosClient(
 //
 // It starts from http.DefaultTransport.Clone() rather than a bare
 // &http.Transport{} so this client keeps DefaultTransport's other tuning
-// (HTTP/2 negotiation, proxy-from-environment, idle connection pooling) and
-// only overrides the fields this package cares about giving explicit,
-// shorter-than-the-client-timeout bounds.
+// (HTTP/2 negotiation and idle connection pooling). Proxy and alternate dial
+// hooks are then cleared so every connection passes through the destination
+// policy below.
 //
 // dialTimeout/dialKeepAlive configure the net.Dialer used for
 // DialContext -- redundant with DefaultTransport's own dial defaults today,
@@ -397,6 +407,7 @@ func NewKoiosClient(
 func newKoiosTransport(
 	dialTimeout, dialKeepAlive time.Duration,
 	tlsHandshakeTimeout, responseHeaderTimeout, expectContinueTimeout time.Duration,
+	allowPrivateAddresses bool,
 ) *http.Transport {
 	// http.DefaultTransport is documented as *http.Transport today, but
 	// nothing enforces that at compile time; a comma-ok assertion with a
@@ -408,12 +419,23 @@ func newKoiosTransport(
 	if base, ok := http.DefaultTransport.(*http.Transport); ok {
 		transport = base.Clone()
 	} else {
-		transport = &http.Transport{Proxy: http.ProxyFromEnvironment}
+		transport = &http.Transport{}
 	}
-	transport.DialContext = (&net.Dialer{
+	dialer := &net.Dialer{
 		Timeout:   dialTimeout,
 		KeepAlive: dialKeepAlive,
-	}).DialContext
+	}
+	restricted := &koiosRestrictedDialer{
+		dialContext:           dialer.DialContext,
+		lookupIPAddr:          net.DefaultResolver.LookupIPAddr,
+		allowPrivateAddresses: allowPrivateAddresses,
+	}
+	transport.Proxy = nil
+	transport.DialContext = restricted.DialContext
+	// Clear deprecated hooks that could bypass DialContext.
+	transport.Dial = nil    //nolint:staticcheck
+	transport.DialTLS = nil //nolint:staticcheck
+	transport.DialTLSContext = nil
 	transport.TLSHandshakeTimeout = tlsHandshakeTimeout
 	transport.ResponseHeaderTimeout = responseHeaderTimeout
 	transport.ExpectContinueTimeout = expectContinueTimeout
@@ -475,7 +497,10 @@ func isPublicKoiosHost(rawURL string) bool {
 // against forged reference data can report a false PASS -- the one outcome a
 // parity checker must never produce. allowInsecureHTTP is the local dev/test
 // escape hatch, mirroring Mithril.AllowInsecureHTTP.
-func validateKoiosBaseURL(rawURL string, allowInsecureHTTP bool) error {
+func validateKoiosBaseURL(
+	rawURL string,
+	allowInsecureHTTP, allowPrivateAddresses bool,
+) error {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		// rawURL is never echoed: an operator can put credentials in it as
@@ -487,6 +512,12 @@ func validateKoiosBaseURL(rawURL string, allowInsecureHTTP bool) error {
 		return errors.New(
 			"koios base URL has no host; give the full v1 API root, e.g. https://host/api/v1",
 		)
+	}
+	if err := validateKoiosHost(
+		parsed.Hostname(),
+		allowPrivateAddresses,
+	); err != nil {
+		return err
 	}
 	// get and post build an endpoint by appending a path and its own query to
 	// this root. A root that already carries a query or fragment would put the
@@ -521,6 +552,154 @@ func validateKoiosBaseURL(rawURL string, allowInsecureHTTP bool) error {
 			parsed.Scheme,
 		)
 	}
+}
+
+func koiosRedirectPolicy(
+	allowInsecureHTTP, allowPrivateAddresses bool,
+) func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return errors.New("too many redirects")
+		}
+		if req.URL == nil || req.URL.Host == "" {
+			return errors.New("koios redirect URL has no host")
+		}
+		switch strings.ToLower(req.URL.Scheme) {
+		case "https":
+		case "http":
+			if !allowInsecureHTTP {
+				return errors.New("koios redirect uses plain HTTP")
+			}
+		default:
+			return fmt.Errorf(
+				"koios redirect must use http or https, got scheme %q",
+				req.URL.Scheme,
+			)
+		}
+		return validateKoiosHost(req.URL.Hostname(), allowPrivateAddresses)
+	}
+}
+
+type koiosRestrictedDialer struct {
+	dialContext           func(context.Context, string, string) (net.Conn, error)
+	lookupIPAddr          func(context.Context, string) ([]net.IPAddr, error)
+	allowPrivateAddresses bool
+}
+
+func (d *koiosRestrictedDialer) DialContext(
+	ctx context.Context,
+	network, address string,
+) (net.Conn, error) {
+	if d.allowPrivateAddresses {
+		return d.dialContext(ctx, network, address)
+	}
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateKoiosHost(host, false); err != nil {
+		return nil, err
+	}
+	addrs, err := d.lookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	if len(addrs) == 0 {
+		return nil, errors.New("koios destination resolved to no addresses")
+	}
+	for _, addr := range addrs {
+		if isBlockedKoiosIP(addr.IP) {
+			return nil, errors.New(
+				"koios destination resolved to a private or special-use address",
+			)
+		}
+	}
+	var lastErr error
+	for _, addr := range addrs {
+		conn, dialErr := d.dialContext(
+			ctx,
+			network,
+			net.JoinHostPort(addr.IP.String(), port),
+		)
+		if dialErr == nil {
+			return conn, nil
+		}
+		lastErr = dialErr
+	}
+	if lastErr == nil {
+		lastErr = errors.New("koios destination dial failed")
+	}
+	return nil, lastErr
+}
+
+func validateKoiosHost(host string, allowPrivateAddresses bool) error {
+	if host == "" {
+		return errors.New("koios destination has no host")
+	}
+	if allowPrivateAddresses {
+		return nil
+	}
+	normalized := strings.TrimSuffix(strings.ToLower(host), ".")
+	if normalized == "localhost" || strings.HasSuffix(normalized, ".localhost") {
+		return errors.New("koios destination is a private or special-use host")
+	}
+	if ip := net.ParseIP(host); ip != nil && isBlockedKoiosIP(ip) {
+		return errors.New("koios destination is a private or special-use address")
+	}
+	return nil
+}
+
+func isBlockedKoiosIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
+	return !ip.IsGlobalUnicast() ||
+		ip.IsPrivate() ||
+		ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() ||
+		ip.IsMulticast() ||
+		ip.IsInterfaceLocalMulticast() ||
+		isSpecialUseKoiosIP(ip)
+}
+
+var specialUseKoiosPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("192.31.196.0/24"),
+	netip.MustParsePrefix("192.52.193.0/24"),
+	netip.MustParsePrefix("192.88.99.0/24"),
+	netip.MustParsePrefix("192.175.48.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("64:ff9b::/96"),
+	netip.MustParsePrefix("64:ff9b:1::/48"),
+	netip.MustParsePrefix("100::/64"),
+	netip.MustParsePrefix("2001::/23"),
+	netip.MustParsePrefix("2001:db8::/32"),
+	netip.MustParsePrefix("2002::/16"),
+	netip.MustParsePrefix("3fff::/20"),
+	netip.MustParsePrefix("5f00::/16"),
+}
+
+func isSpecialUseKoiosIP(ip net.IP) bool {
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return true
+	}
+	addr = addr.Unmap()
+	for _, prefix := range specialUseKoiosPrefixes {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
 }
 
 // redactURLError strips the URL from a *url.Error so a parse failure cannot

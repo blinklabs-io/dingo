@@ -413,7 +413,7 @@ func TestRecordKoiosSourceProbeFailureKeepsCache(t *testing.T) {
 	require.Positive(t, before)
 
 	// httptest serves plain HTTP, so this needs the insecure escape hatch.
-	client, err := NewKoiosClient("preview", "", dead.URL+"/api/v1", true)
+	client, err := NewKoiosClient("preview", "", dead.URL+"/api/v1", true, true)
 	require.NoError(t, err)
 
 	err = recordKoiosSource(
@@ -453,7 +453,7 @@ func TestRecordKoiosSourceProbeSuccessSwitches(t *testing.T) {
 	seedOracleRows(t, cache, "preview")
 	require.Positive(t, countOracleRows(t, cache, "preview"))
 
-	client, err := NewKoiosClient("preview", "", live.URL+"/api/v1", true)
+	client, err := NewKoiosClient("preview", "", live.URL+"/api/v1", true, true)
 	require.NoError(t, err)
 	require.NoError(t, recordKoiosSource(
 		context.Background(), cache, "preview", client,
@@ -481,7 +481,7 @@ func TestRecordKoiosSourceUnchangedMakesNoRequest(t *testing.T) {
 	defer srv.Close()
 
 	cache := newSourceTestCache(t)
-	client, err := NewKoiosClient("preview", "", srv.URL+"/api/v1", true)
+	client, err := NewKoiosClient("preview", "", srv.URL+"/api/v1", true, true)
 	require.NoError(t, err)
 
 	// First call switches away from the attributed public root and probes.

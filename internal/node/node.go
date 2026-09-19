@@ -614,15 +614,16 @@ func buildDingoConfig(
 			Frequency: cfg.HistoryExpiry.Frequency,
 		}),
 		dingo.WithKoiosParity(dingo.KoiosParityConfig{
-			Enabled:           cfg.KoiosParity.Enabled,
-			Network:           cfg.KoiosParity.Network,
-			CachePath:         cfg.KoiosParity.CachePath,
-			APIKey:            cfg.KoiosParity.APIKey,
-			BaseURL:           cfg.KoiosParity.BaseURL,
-			AllowInsecureHTTP: cfg.KoiosParity.AllowInsecureHTTP,
-			Strict:            cfg.KoiosParity.Strict,
-			GraceHours:        cfg.KoiosParity.GraceHours,
-			Accounts:          &cfg.KoiosParity.Accounts,
+			Enabled:               cfg.KoiosParity.Enabled,
+			Network:               cfg.KoiosParity.Network,
+			CachePath:             cfg.KoiosParity.CachePath,
+			APIKey:                cfg.KoiosParity.APIKey,
+			BaseURL:               cfg.KoiosParity.BaseURL,
+			AllowInsecureHTTP:     cfg.KoiosParity.AllowInsecureHTTP,
+			AllowPrivateAddresses: cfg.KoiosParity.AllowPrivateAddresses,
+			Strict:                cfg.KoiosParity.Strict,
+			GraceHours:            cfg.KoiosParity.GraceHours,
+			Accounts:              &cfg.KoiosParity.Accounts,
 			// AccountChunkSize and AccountChunkMaxBytes were omitted here
 			// while every other KoiosParity field was forwarded, so
 			// --koios-parity-account-chunk-size and

@@ -381,6 +381,12 @@ koiosParity:
   # Can be overridden with DINGO_KOIOS_PARITY_ALLOW_INSECURE_HTTP
   # CLI: --koios-parity-allow-insecure-http
   allowInsecureHttp: false
+  # Allow a private, loopback, or special-use baseUrl. Leave false for the
+  # default outbound request guard; set true only for an intentionally local
+  # or private self-hosted Koios deployment.
+  # Can be overridden with DINGO_KOIOS_PARITY_ALLOW_PRIVATE_ADDRESSES
+  # CLI: --koios-parity-allow-private-addresses
+  allowPrivateAddresses: false
   # Stop/cancel the node on the first Koios/tool error or exact parity
   # mismatch instead of logging it and continuing normal operation.
   # Can be overridden with DINGO_KOIOS_PARITY_STRICT

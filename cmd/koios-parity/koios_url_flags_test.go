@@ -62,6 +62,21 @@ func TestKoiosAllowInsecureHTTPFlagBeatsEnv(t *testing.T) {
 	assert.False(t, koiosAllowInsecureHTTP(cmd))
 }
 
+func TestKoiosAllowPrivateAddressesFlagBeatsEnv(t *testing.T) {
+	t.Setenv("KOIOS_ALLOW_PRIVATE_ADDRESSES", "true")
+
+	cmd := newKoiosURLFlagCmd()
+	require.NoError(
+		t,
+		cmd.ParseFlags([]string{"--koios-allow-private-addresses=false"}),
+	)
+	assert.False(t, koiosAllowPrivateAddresses(cmd))
+
+	cmd = newKoiosURLFlagCmd()
+	require.NoError(t, cmd.ParseFlags(nil))
+	assert.True(t, koiosAllowPrivateAddresses(cmd))
+}
+
 // TestKoiosBaseURLFlagBeatsEnv pins the same rule for the host itself,
 // including an explicit empty value meaning "use the public host".
 func TestKoiosBaseURLFlagBeatsEnv(t *testing.T) {

@@ -30,6 +30,8 @@ import (
 // Koios instance. The requests have to actually reach that host, not the public
 // one, so the assertion is a served request rather than a field comparison.
 func TestNewKoiosClientBaseURLOverride(t *testing.T) {
+	t.Parallel()
+
 	var hits atomic.Int32
 	srv := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -46,7 +48,7 @@ func TestNewKoiosClientBaseURLOverride(t *testing.T) {
 
 	// httptest serves plain HTTP, so this is the one case that needs the
 	// insecure escape hatch.
-	client, err := NewKoiosClient("preview", "", srv.URL+"/api/v1", true)
+	client, err := NewKoiosClient("preview", "", srv.URL+"/api/v1", true, true)
 	require.NoError(t, err)
 
 	epoch, err := client.GetTipEpoch(context.Background())
@@ -54,6 +56,76 @@ func TestNewKoiosClientBaseURLOverride(t *testing.T) {
 	assert.Equal(t, uint64(42), epoch)
 	assert.Equal(t, int32(1), hits.Load(),
 		"the request must reach the configured host")
+}
+
+func TestNewKoiosClientAllowsPrivateAddressOnlyWhenExplicit(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[{"epoch_no":42}]`))
+		}),
+	)
+	defer srv.Close()
+
+	_, err := NewKoiosClient("preview", "", srv.URL+"/api/v1", true, false)
+	require.Error(t, err)
+
+	client, err := NewKoiosClient(
+		"preview", "", srv.URL+"/api/v1", true, true,
+	)
+	require.NoError(t, err)
+	_, err = client.GetTipEpoch(context.Background())
+	require.NoError(t, err)
+}
+
+func TestNewKoiosClientRejectsPrivateAddressByDefault(t *testing.T) {
+	t.Parallel()
+
+	for _, raw := range []string{
+		"https://127.0.0.1/api/v1",
+		"https://[::1]/api/v1",
+		"https://169.254.169.254/latest/meta-data",
+		"https://localhost/api/v1",
+		"https://192.0.2.1/api/v1",
+		"https://0.0.0.1/api/v1",
+		"https://[64:ff9b::7f00:1]/api/v1",
+		"https://[2001:db8::1]/api/v1",
+		"https://[2002:7f00:1::]/api/v1",
+	} {
+		_, err := NewKoiosClient("preview", "", raw, false, false)
+		require.Error(t, err, "base URL %q must be rejected", raw)
+	}
+}
+
+func TestNewKoiosClientRestrictsRedirectsAndDisablesProxy(t *testing.T) {
+	t.Parallel()
+
+	client, err := NewKoiosClient("preview", "", "", false, false)
+	require.NoError(t, err)
+	require.NotNil(t, client.http.CheckRedirect)
+
+	req, err := http.NewRequest(
+		http.MethodGet,
+		"https://127.0.0.1/api/v1/tip",
+		nil,
+	)
+	require.NoError(t, err)
+	require.Error(t, client.http.CheckRedirect(req, nil))
+
+	publicReq, err := http.NewRequest(
+		http.MethodGet,
+		"https://mirror.example/api/v1/tip",
+		nil,
+	)
+	require.NoError(t, err)
+	require.NoError(t, client.http.CheckRedirect(publicReq, nil))
+
+	transport, ok := client.http.Transport.(*http.Transport)
+	require.True(t, ok)
+	assert.Nil(t, transport.Proxy,
+		"ambient proxy settings must not bypass destination validation")
 }
 
 // TestNewKoiosClientBaseURLTrimsTrailingSlash pins the ergonomics: an operator
@@ -64,6 +136,7 @@ func TestNewKoiosClientBaseURLTrimsTrailingSlash(t *testing.T) {
 		"",
 		"https://host.example/api/v1/",
 		false,
+		false,
 	)
 	require.NoError(t, err)
 	assert.Equal(t, "https://host.example/api/v1", client.baseURL)
@@ -73,6 +146,7 @@ func TestNewKoiosClientBaseURLTrimsTrailingSlash(t *testing.T) {
 		"",
 		"  https://host.example/api/v1  ",
 		false,
+		false,
 	)
 	require.NoError(t, err)
 	assert.Equal(t, "https://host.example/api/v1", spaced.baseURL)
@@ -81,7 +155,7 @@ func TestNewKoiosClientBaseURLTrimsTrailingSlash(t *testing.T) {
 // TestNewKoiosClientDefaultsToPublicHost pins that an empty override changes
 // nothing, including the burst cap that koios.rest's tiers require.
 func TestNewKoiosClientDefaultsToPublicHost(t *testing.T) {
-	client, err := NewKoiosClient("preview", "", "", false)
+	client, err := NewKoiosClient("preview", "", "", false, false)
 	require.NoError(t, err)
 	assert.Equal(t, koiosBaseURLs["preview"], client.baseURL)
 	require.NotNil(t, client.limiter)
@@ -98,6 +172,7 @@ func TestNewKoiosClientCustomHostDropsBurstCap(t *testing.T) {
 		"preview",
 		"",
 		"https://host.example/api/v1",
+		false,
 		false,
 	)
 	require.NoError(t, err)
@@ -121,6 +196,7 @@ func TestNewKoiosClientRejectsUnsupportedNetworkWithOverride(t *testing.T) {
 		"",
 		"https://host.example/api/v1",
 		false,
+		false,
 	)
 	require.Error(t, err)
 }
@@ -132,7 +208,7 @@ func TestNewKoiosClientRejectsUnsupportedNetworkWithOverride(t *testing.T) {
 // tool must never produce.
 func TestNewKoiosClientRejectsPlainHTTPByDefault(t *testing.T) {
 	_, err := NewKoiosClient(
-		"preview", "secret-token", "http://host.example/api/v1", false,
+		"preview", "secret-token", "http://host.example/api/v1", false, false,
 	)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "plain HTTP")
@@ -144,7 +220,7 @@ func TestNewKoiosClientRejectsPlainHTTPByDefault(t *testing.T) {
 // opt-out, mirroring Mithril.AllowInsecureHTTP.
 func TestNewKoiosClientAllowsPlainHTTPWithEscapeHatch(t *testing.T) {
 	client, err := NewKoiosClient(
-		"preview", "", "http://host.example/api/v1", true,
+		"preview", "", "http://host.example/api/v1", true, false,
 	)
 	require.NoError(t, err)
 	assert.Equal(t, "http://host.example/api/v1", client.baseURL)
@@ -159,7 +235,7 @@ func TestNewKoiosClientRejectsMalformedBaseURL(t *testing.T) {
 		"ftp://host.example/api/v1",
 		"://broken",
 	} {
-		_, err := NewKoiosClient("preview", "", raw, false)
+		_, err := NewKoiosClient("preview", "", raw, false, false)
 		require.Error(t, err, "base URL %q must be rejected", raw)
 	}
 }
@@ -168,7 +244,7 @@ func TestNewKoiosClientRejectsMalformedBaseURL(t *testing.T) {
 // only looks at a custom URL: the built-in hosts are https already, and an
 // empty override must not be able to trip it.
 func TestNewKoiosClientPlainHTTPGuardDoesNotAffectPublicHost(t *testing.T) {
-	client, err := NewKoiosClient("preview", "", "", false)
+	client, err := NewKoiosClient("preview", "", "", false, false)
 	require.NoError(t, err)
 	assert.True(t, strings.HasPrefix(client.baseURL, "https://"))
 }
@@ -183,7 +259,7 @@ func TestNewKoiosClientKeepsBurstCapForPublicHostOverride(t *testing.T) {
 		"https://PREPROD.KOIOS.REST/api/v1",
 		"https://koios.rest/api/v1",
 	} {
-		client, err := NewKoiosClient("preview", "", raw, false)
+		client, err := NewKoiosClient("preview", "", raw, false, false)
 		require.NoError(t, err)
 		require.NotNil(t, client.limiter)
 		assert.Equal(t, koiosBurstLimitSafe, client.limiter.limit,
@@ -192,7 +268,7 @@ func TestNewKoiosClientKeepsBurstCapForPublicHostOverride(t *testing.T) {
 
 	// A host that merely mentions the string is not the public host.
 	client, err := NewKoiosClient(
-		"preview", "", "https://koios.rest.example.com/api/v1", false,
+		"preview", "", "https://koios.rest.example.com/api/v1", false, false,
 	)
 	require.NoError(t, err)
 	assert.LessOrEqual(t, client.limiter.limit, 0)
@@ -208,7 +284,7 @@ func TestNewKoiosClientRejectsQueryOrFragment(t *testing.T) {
 		"https://host.example/api/v1#frag",
 		"https://host.example/api/v1?",
 	} {
-		_, err := NewKoiosClient("preview", "", raw, false)
+		_, err := NewKoiosClient("preview", "", raw, false, false)
 		require.Error(t, err, "base URL %q must be rejected", raw)
 	}
 }
@@ -226,7 +302,7 @@ func TestValidateKoiosBaseURLErrorsOmitTheURL(t *testing.T) {
 		"https://host.example/api/v1?api_key=" + secret,
 		"://dingo:" + secret + "@broken",
 	} {
-		err := validateKoiosBaseURL(raw, false)
+		err := validateKoiosBaseURL(raw, false, false)
 		require.Error(t, err, "base URL %q must be rejected", raw)
 		assert.NotContains(t, err.Error(), secret,
 			"validation error must not echo the URL's credentials")
@@ -241,7 +317,7 @@ func TestNewKoiosClientPublicHostSpellings(t *testing.T) {
 		"https://preview.koios.rest./api/v1",
 		"https://PREVIEW.KOIOS.REST./api/v1",
 	} {
-		client, err := NewKoiosClient("preview", "", raw, false)
+		client, err := NewKoiosClient("preview", "", raw, false, false)
 		require.NoError(t, err)
 		assert.Equal(t, koiosBurstLimitSafe, client.limiter.limit,
 			"%q is the public host and keeps its cap", raw)
@@ -258,6 +334,7 @@ func TestNewKoiosClientRejectsBareFragment(t *testing.T) {
 		"",
 		"https://host.example/api/v1#",
 		false,
+		false,
 	)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "fragment")
@@ -273,6 +350,7 @@ func TestResolvedBaseURLDropsUserinfo(t *testing.T) {
 		"key",
 		"https://dingo:hunter2@koios.example/api/v1",
 		false,
+		false,
 	)
 	require.NoError(t, err)
 	resolved := c.ResolvedBaseURL()
@@ -285,7 +363,7 @@ func TestResolvedBaseURLDropsUserinfo(t *testing.T) {
 // host actually queried when no override is given, rather than reporting the
 // empty override back.
 func TestResolvedBaseURLReportsTheDefaultHost(t *testing.T) {
-	c, err := NewKoiosClient("preview", "", "", false)
+	c, err := NewKoiosClient("preview", "", "", false, false)
 	require.NoError(t, err)
 	assert.Equal(t, koiosBaseURLs["preview"], c.ResolvedBaseURL())
 }

@@ -85,6 +85,100 @@ func newTestKoiosClient(baseURL string) *KoiosClient {
 	}
 }
 
+func TestKoiosRestrictedDialerRejectsPrivateDNSAnswer(t *testing.T) {
+	t.Parallel()
+
+	var dialed atomic.Bool
+	dialer := &koiosRestrictedDialer{
+		lookupIPAddr: func(context.Context, string) ([]net.IPAddr, error) {
+			return []net.IPAddr{{IP: net.ParseIP("10.0.0.7")}}, nil
+		},
+		dialContext: func(context.Context, string, string) (net.Conn, error) {
+			dialed.Store(true)
+			return nil, errors.New("unexpected dial")
+		},
+	}
+
+	_, err := dialer.DialContext(
+		context.Background(), "tcp", "public-looking.example:443",
+	)
+	require.Error(t, err)
+	assert.False(t, dialed.Load(),
+		"a private DNS answer must be rejected before any connection")
+}
+
+func TestKoiosRestrictedDialerRejectsMixedPublicAndPrivateDNSAnswers(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	var dialed atomic.Bool
+	dialer := &koiosRestrictedDialer{
+		lookupIPAddr: func(context.Context, string) ([]net.IPAddr, error) {
+			return []net.IPAddr{
+				{IP: net.ParseIP("93.184.216.34")},
+				{IP: net.ParseIP("127.0.0.1")},
+			}, nil
+		},
+		dialContext: func(context.Context, string, string) (net.Conn, error) {
+			dialed.Store(true)
+			return nil, errors.New("unexpected dial")
+		},
+	}
+
+	_, err := dialer.DialContext(
+		context.Background(), "tcp", "rebinding.example:443",
+	)
+	require.Error(t, err)
+	assert.False(t, dialed.Load(),
+		"one blocked DNS answer must reject the whole resolution set")
+}
+
+func TestKoiosRestrictedDialerRejectsSpecialUseIPv6DNSAnswer(t *testing.T) {
+	t.Parallel()
+
+	var dialed atomic.Bool
+	dialer := &koiosRestrictedDialer{
+		lookupIPAddr: func(context.Context, string) ([]net.IPAddr, error) {
+			return []net.IPAddr{{IP: net.ParseIP("64:ff9b::7f00:1")}}, nil
+		},
+		dialContext: func(context.Context, string, string) (net.Conn, error) {
+			dialed.Store(true)
+			return nil, errors.New("unexpected dial")
+		},
+	}
+
+	_, err := dialer.DialContext(
+		context.Background(), "tcp", "translated.example:443",
+	)
+	require.Error(t, err)
+	assert.False(t, dialed.Load())
+}
+
+func TestKoiosRestrictedDialerDialsValidatedPublicIP(t *testing.T) {
+	t.Parallel()
+
+	var target string
+	dialer := &koiosRestrictedDialer{
+		lookupIPAddr: func(context.Context, string) ([]net.IPAddr, error) {
+			return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
+		},
+		dialContext: func(_ context.Context, _, address string) (net.Conn, error) {
+			target = address
+			client, server := net.Pipe()
+			server.Close()
+			return client, nil
+		},
+	}
+
+	conn, err := dialer.DialContext(
+		context.Background(), "tcp", "mirror.example:443",
+	)
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
+	assert.Equal(t, "93.184.216.34:443", target)
+}
+
 func TestGetRetriesOn503ThenSucceeds(t *testing.T) {
 	t.Parallel()
 
@@ -604,6 +698,7 @@ func TestNewKoiosTransportResponseHeaderTimeout(t *testing.T) {
 			koiosTLSHandshakeTimeout,
 			responseHeaderTimeout,
 			koiosExpectContinueTimeout,
+			true,
 		),
 	}
 
@@ -706,6 +801,7 @@ func TestNewKoiosTransportDialTimeout(t *testing.T) {
 			koiosTLSHandshakeTimeout,
 			koiosResponseHeaderTimeout,
 			koiosExpectContinueTimeout,
+			true,
 		),
 	}
 
@@ -778,6 +874,7 @@ func TestNewKoiosTransportFallsBackWhenDefaultTransportIsNotHTTPTransport(
 			koiosTLSHandshakeTimeout,
 			koiosResponseHeaderTimeout,
 			koiosExpectContinueTimeout,
+			false,
 		)
 		require.NotNil(t, transport)
 		assert.NotNil(
