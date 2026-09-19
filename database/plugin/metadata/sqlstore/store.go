@@ -838,6 +838,90 @@ func (s *Store) beginWriteTx(ctx context.Context) (*sql.Tx, func(), error) {
 	return tx, nil, err
 }
 
+// ReserveRead takes one read-pool connection without beginning a
+// transaction on it, implementing types.ReadReserver.
+//
+// database.NewReadSnapshotContext uses it to keep the read-pool wait out of
+// the commit barrier it holds while fixing its two read views. Its lifetime
+// admission cap also leaves one connection outside coordinated snapshots for
+// operational reads during rollback.
+func (s *Store) ReserveRead(
+	ctx context.Context,
+) (types.ReadReservation, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if !s.ready.Load() {
+		return nil, errors.New("sqlstore: store is not ready")
+	}
+	conn, err := s.readDB.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &readReservation{owner: s, conn: conn, ctx: ctx}, nil
+}
+
+// ReadSnapshotLimit leaves one read-pool connection available for operational
+// reads performed inside destructive transitions while coordinated snapshots
+// remain open for client-paced responses.
+func (s *Store) ReadSnapshotLimit() int {
+	return max(1, s.readDB.Stats().MaxOpenConnections-1)
+}
+
+// readReservation holds a reserved read-pool connection. releaseOnce makes
+// Release idempotent so the reserving caller can defer it unconditionally
+// alongside a Begin that may already have handed ownership to a sqlTxn.
+type readReservation struct {
+	owner       *Store
+	conn        *sql.Conn
+	ctx         context.Context
+	releaseOnce sync.Once
+	begun       bool
+}
+
+func (r *readReservation) Begin() types.Txn {
+	if r.begun {
+		return &sqlTxn{
+			owner:    r.owner,
+			ctx:      r.ctx,
+			beginErr: errors.New("sqlstore: read reservation already begun"),
+		}
+	}
+	r.begun = true
+	tx, err := r.conn.BeginTx(r.ctx, r.owner.dialect.BeginOptions(true))
+	if err != nil {
+		// Nothing owns the connection now, so the reservation returns it
+		// here rather than leaving it to a Rollback that reports beginErr
+		// without reaching releaseConnection.
+		r.releaseConn()
+		return &sqlTxn{owner: r.owner, ctx: r.ctx, beginErr: err}
+	}
+	return &sqlTxn{
+		owner:   r.owner,
+		tx:      tx,
+		ctx:     r.ctx,
+		release: r.releaseConn,
+	}
+}
+
+func (r *readReservation) Release() {
+	if r.begun {
+		return
+	}
+	r.releaseConn()
+}
+
+func (r *readReservation) releaseConn() {
+	r.releaseOnce.Do(func() {
+		if err := r.conn.Close(); err != nil {
+			r.owner.logger.Debug(
+				"sqlstore: release reserved read connection",
+				"error", err,
+			)
+		}
+	})
+}
+
 type queryer interface {
 	Execer
 	PrepareContext(context.Context, string) (*sql.Stmt, error)

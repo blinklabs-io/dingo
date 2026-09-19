@@ -463,6 +463,12 @@ func (cm *ChainManager) loadPrimaryChain() error {
 // Do not call this before SetLedger: it returns ErrSecurityParamNotConfigured
 // rather than silently pruning without a bound. RewindPrimaryChainAtStartup
 // is for that case.
+//
+// This rewinds chain state only. A caller that follows it with a ledger
+// metadata rollback must bracket both calls with
+// database.Database.BeginDestructiveTransition, so a coordinated read snapshot
+// cannot open between the two physical transactions and observe metadata that
+// still describes blocks the chain has already deleted.
 func (cm *ChainManager) RewindPrimaryChainToPoint(
 	point ocommon.Point,
 ) error {
@@ -553,6 +559,11 @@ func (cm *ChainManager) addBlock(
 func (cm *ChainManager) removeBlockByIndex(
 	blockIndex uint64,
 ) (models.Block, error) {
+	// This per-block deletion is one step of a logical primary-chain
+	// rollback, and deliberately takes no destructive-transition barrier:
+	// rollbackLocked calls it once per block, so acquiring the barrier here
+	// would release it between blocks. The ledger rollback caller holds it
+	// across the whole chain-delete -> metadata-truncate sequence instead.
 	// Record removed block event for each non-primary chain
 	for chainId := range cm.chains {
 		if chainId == primaryChainId {
