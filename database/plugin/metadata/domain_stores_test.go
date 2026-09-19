@@ -238,6 +238,13 @@ var stakeSnapshotStoreMethods = []string{
 // withdrawal-history and witness readers beside them, which read
 // account_reward_delta and the account witness tables and stay with the
 // account domain.
+//
+// SetCommitteeAuthImmutableSlot belongs here rather than in
+// GovernanceStore: it feeds committee_prune.go's retention decision, the
+// direct counterpart to DeleteCertificatesAfterSlot's rollback delete, and
+// is consumed from the certificate write path in transaction_certificates.go
+// (applySpecializedCertificate's AuthCommitteeHotCertificate case) -- not a
+// reader of committee state itself.
 var certificateStoreMethods = []string{
 	"DeleteCertificatesAfterSlot",
 	"GetMIRCertsInSlotRange",
@@ -247,6 +254,7 @@ var certificateStoreMethods = []string{
 	"CountAccountDelegationHistoryByCredential",
 	"GetAccountRegistrationHistoryByCredential",
 	"CountAccountRegistrationHistoryByCredential",
+	"SetCommitteeAuthImmutableSlot",
 }
 
 // domains is every interface split out of MetadataStore so far, checked as

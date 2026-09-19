@@ -99,8 +99,8 @@ func (p *sigmaAuditEpochProvider) ActiveSlotCoeff() float64 {
 
 func (p *sigmaAuditEpochProvider) ConsensusModeForEpoch(
 	uint64,
-) consensus.ConsensusMode {
-	return consensus.ConsensusModeCPraos
+) (consensus.ConsensusMode, error) {
+	return consensus.ConsensusModeCPraos, nil
 }
 
 // ActiveSlotCoeffRat is only reachable through the optional

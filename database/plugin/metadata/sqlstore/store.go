@@ -129,6 +129,26 @@ type Store struct {
 	// which applies the default, rather than directly.
 	committeeAuthRetentionSlots uint64
 
+	// committeeAuthImmutableSlot and committeeAuthImmutableSlotKnown cache
+	// the live rollback-safe immutable slot (tip depth securityParam blocks
+	// back), pushed in by SetCommitteeAuthImmutableSlot from outside the
+	// package -- sqlstore cannot import chain (chain already imports
+	// database) to compute it directly. committeeAuthImmutableSlotEverSet
+	// distinguishes "no live syncer has ever been wired for this Store"
+	// (committeeAuthHorizon falls back to the slot-window assumption, the
+	// pre-live-sync behavior every existing caller and test still gets)
+	// from "a live syncer is wired but has no current value" (bootstrap
+	// before the first successful resolution, or invalidated by a rollback
+	// in DeleteCertificatesAfterSlot -- pruning suspends rather than fall
+	// back to an assumption a sparse or recently-reorganized chain can
+	// violate). Read through committeeAuthHorizon(). Plain atomics, not a
+	// mutex: the setter runs from an independent periodic sync goroutine
+	// while readers run inline in the certificate write path and the
+	// maintenance sweep, and none of them may block on each other.
+	committeeAuthImmutableSlot        atomic.Uint64
+	committeeAuthImmutableSlotKnown   atomic.Bool
+	committeeAuthImmutableSlotEverSet atomic.Bool
+
 	migrations        []migrations.Migration
 	migrationLocker   migrations.Locker
 	diskSize          func() (int64, error)
@@ -248,8 +268,12 @@ func New(config Config) (*Store, error) {
 		prepare:                     config.Prepare,
 		reset:                       config.Reset,
 		validateBackup:              config.ValidateBackup,
-		sqlOperations:               newSQLOperationsCounter(config.PromRegistry),
-		sqlQueryDuration:            newSQLQueryDurationHistogram(config.PromRegistry),
+		sqlOperations: newSQLOperationsCounter(
+			config.PromRegistry,
+		),
+		sqlQueryDuration: newSQLQueryDurationHistogram(
+			config.PromRegistry,
+		),
 	}
 	// Registered against store.WritePoolStats/ReadPoolStats (not
 	// config.WriteDB.Stats/config.ReadDB.Stats directly) so every backend

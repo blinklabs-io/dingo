@@ -6671,7 +6671,7 @@ func (ls *LedgerState) processEpochRollover(
 	// and its pot movements are visible to POOLREAP, governance and the ADA-pot
 	// capture below.
 	if err := ls.applyMIRCerts(
-		txn, currentEpoch.StartSlot, epochStartSlot,
+		txn, currentEpoch.StartSlot, epochStartSlot, currentEpoch.EraId,
 	); err != nil {
 		return nil, fmt.Errorf("apply MIR certs: %w", err)
 	}

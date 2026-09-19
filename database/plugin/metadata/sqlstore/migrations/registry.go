@@ -51,6 +51,7 @@ const (
 	rewardStakeVersionRestampSchemaRelease        = "reward-stake-calculation-version-restamp"
 	governanceProposalOptionalAnchorSchemaRelease = "governance-proposal-optional-anchor"
 	governanceProposalDroppedSchemaRelease        = "governance-proposal-dropped-epoch"
+	rewardSnapshotExcludedStakeSchemaRelease      = "reward-snapshot-excluded-active-stake"
 )
 
 // schemaVersions names every migration in ascending version order.
@@ -95,6 +96,11 @@ var schemaVersions = []struct {
 		Version: 17,
 		Name:    governanceProposalDroppedSchemaRelease,
 		Dir:     "v17",
+	},
+	{
+		Version: 18,
+		Name:    rewardSnapshotExcludedStakeSchemaRelease,
+		Dir:     "v18",
 	},
 }
 

@@ -781,6 +781,11 @@ mithril:
   # out upstream)
   # CLI: --mithril-backend
   backend: "v2"
+  # Optional exact artifact identity for a fresh bootstrap: a v1 snapshot
+  # digest or v2 Cardano database artifact hash. It is rejected for catch-up
+  # runs and cannot override an interrupted import's durable pin.
+  # CLI: --mithril-pinned-digest  Env: DINGO_MITHRIL_PINNED_DIGEST
+  pinnedDigest: ""
   # Directory for downloading snapshot archives
   # If empty, a randomized temporary directory is created automatically
   # downloadDir: ""

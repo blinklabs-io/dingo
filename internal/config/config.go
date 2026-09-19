@@ -706,6 +706,8 @@ type Config struct {
 	InboundCooldown          time.Duration `yaml:"inboundCooldown"          envconfig:"DINGO_INBOUND_COOLDOWN"`
 	MaxConnectionsPerIP      int           `yaml:"maxConnectionsPerIP"      envconfig:"DINGO_MAX_CONNECTIONS_PER_IP"`
 	MaxInboundConns          int           `yaml:"maxInboundConns"          envconfig:"DINGO_MAX_INBOUND_CONNS"`
+	MaxNtCConns              int           `yaml:"maxNtCConns"              envconfig:"DINGO_MAX_NTC_CONNS"`
+	MaxNtCConnectionsPerIP   int           `yaml:"maxNtCConnectionsPerIP"   envconfig:"DINGO_MAX_NTC_CONNECTIONS_PER_IP"`
 
 	// Cache configuration for the tiered CBOR cache system
 	Cache CacheConfig `yaml:"cache"`
@@ -1083,6 +1085,11 @@ type MithrilConfig struct {
 	// incremental Cardano database artifacts; "v1" uses the legacy full
 	// snapshot archives, which upstream Mithril is phasing out.
 	Backend string `yaml:"backend"                envconfig:"DINGO_MITHRIL_BACKEND"`
+	// PinnedDigest selects an exact Mithril artifact for a fresh bootstrap: a
+	// v1 snapshot digest or v2 Cardano database artifact hash. It is rejected
+	// for catch-up runs and may not conflict with the durable artifact pin used
+	// to resume an interrupted import.
+	PinnedDigest string `yaml:"pinnedDigest"           envconfig:"DINGO_MITHRIL_PINNED_DIGEST"`
 	// DownloadDir is the directory where snapshot archives are downloaded.
 	// If empty, a randomized temporary directory is created automatically.
 	DownloadDir string `yaml:"downloadDir"            envconfig:"DINGO_MITHRIL_DOWNLOAD_DIR"`

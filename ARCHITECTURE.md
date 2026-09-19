@@ -286,10 +286,17 @@ graph TB
         HExpiry["History Expiry<br/><i>internal/historyexpiry/</i>"]
     end
 
+    subgraph "Committee Auth Sync"
+        CAuthSync["Committee Auth Sync<br/><i>internal/committeeauth/</i>"]
+    end
+
     EB["EventBus<br/><i>event/</i>"]
 
     Node --> CM & PG & OB & ChM & LS & MP & DB & EB
     Node -.->|"optional"| BF & LE & URPC & BFA & Mesh & Bark & MidnightIndex & Midnight & HExpiry & DBLC
+    Node --> CAuthSync
+    CAuthSync -->|"PointAtDepth(securityParam)"| ChM
+    CAuthSync -->|"SetCommitteeAuthImmutableSlot"| DB
 
     PG -->|"outbound conn requests"| CM
     CM -->|"connections"| OB
@@ -722,7 +729,10 @@ established sessions. TCP clients also share a separate per-source budget,
 consume the total NtC budget without per-IP accounting. NtC admission never
 consumes N2N slots or N2N per-IP capacity. Admission reserves both budgets
 before launching a handshake worker; failed setup releases the reservation,
-and successful setup transfers its release to the connection's close watcher.
+and successful setup transfers the once-only release to the registered
+connection entry. Normal removal and collision eviction release outside the
+connection-map lock and before close callbacks run; the connection's close
+watcher is the backstop if an evicted entry is no longer present in the map.
 The `cardano_node_metrics_connectionManager_ntcRejectedConns_total` counter
 records rejections with `total_limit` or `per_ip_limit` as its `reason` label.
 
@@ -1086,8 +1096,10 @@ dingo/
 │   │   └── load.go      # Block loading implementation
 │   ├── historyexpiry/   # Ledger-window-based local block history expiry
 │   │   └── pruner.go    # Background expiry scanner
+│   ├── committeeauth/   # Live rollback-safe immutable-slot sync for committee auth pruning
+│   │   └── syncer.go    # Background PointAtDepth -> SetCommitteeAuthImmutableSlot sync
 │   ├── test/            # Test utilities
-│   │   ├── conformance/ # Amaru conformance tests
+│   │   ├── conformance/ # Cardano Blueprint ledger-rule conformance tests
 │   │   ├── devnet/      # DevNet end-to-end tests
 │   │   └── testutil/    # Shared test helpers
 │   └── version/         # Version information
@@ -1116,6 +1128,7 @@ type Node struct {
     utxorpc        *utxorpc.Utxorpc               // UTxO RPC server
     bark           *bark.Bark                     // Bark C2/archive server
     historyExpiry  *historyexpiry.Pruner          // Local block history expiry
+    committeeAuthSync *committeeauth.Syncer       // Live immutable-slot sync for committee auth pruning
     blockfrostAPI  *blockfrost.Blockfrost         // Blockfrost REST API
     kupoAPI        *kupo.Server                    // Kupo chain-index API
     meshAPI        *mesh.Server                   // Mesh (Rosetta) API
@@ -2271,6 +2284,38 @@ fallback:
   store it replaces as its upstream and forwards `Close` to it, so the
   replaced store is kept alive rather than retired.
 
+### Committee Auth Immutable-Slot Sync
+
+Unconditional and independent of `historyExpiry.enabled`: `node.go` and
+`node_lifecycle.go` both start `internal/committeeauth.Syncer` whenever the
+ledger and database are available, regardless of history-expiry
+configuration. The metadata store's committee hot-key authorization pruner
+(`database/plugin/metadata/sqlstore/committee_prune.go`) always runs on every
+applied certificate and on its own 24-hour maintenance sweep, so it always
+needs a safe retention bound -- unlike history expiry, which only runs when a
+node opts in.
+
+The syncer resolves `LedgerState.SecurityParam()` and
+`Chain.PointAtDepth(securityParam)` on a timer (default five minutes, plus
+once immediately at `Start`) and pushes the result into
+`Database.SetCommitteeAuthImmutableSlot`, which the metadata package cannot
+resolve itself: `chain` already imports `database`, so the reverse import
+would cycle. A resolution failure (security parameter not yet known, or fewer
+than `securityParam` blocks on chain) pushes `known=false` rather than a
+stale value.
+
+The pruner does not treat "no live bound available" as "fall back to the
+slot-window assumption": once `SetCommitteeAuthImmutableSlot` has been called
+at all (a live syncer is wired), a subsequent `known=false` -- from a
+resolution failure above, or from `DeleteCertificatesAfterSlot` invalidating
+the cached value on every rollback, since a value safe when cached is not
+necessarily safe after a rollback -- suspends pruning entirely until the next
+successful resolution. Only a `Store` no syncer has ever been wired to (every
+existing test, and any non-node caller) keeps the slot-window-only fallback.
+See DATABASE.md's Committee Hot-Key Authorization Retention section for the
+full retention rule, the gap this closes (blinklabs-io/dingo#4353), and why
+suspension rather than fallback is required once live tracking is engaged.
+
 ### Tiered CBOR Cache
 
 Instead of storing full CBOR data redundantly, Dingo uses offset-based references with a tiered cache:
@@ -3034,8 +3079,26 @@ main-block issuers. Byron epoch boundary blocks still enforce the current-slot
 bound and tick due delegations, but do not carry a PBFT issuer signature or
 advance the issuer window.
 
-Before resolving or eagerly forecasting an epoch for a live header,
+Cached epochs resolve without forecast configuration, but still require a
+published nonce. Before forecasting an uncached epoch for a live header,
 `headerVerificationEpoch` checks the slot against `LedgerState.HardForkSummary`.
+A summary that cannot be *built* at all is classified as deferred rather than
+rejected, separately from a slot past a horizon a built summary reports: the
+shape, the genesis behind it, and the epoch cache are all local inputs, and
+`ouroboros/chainsync.go` routes every non-deferred header error to
+`ConnectionRecycleRequestedEvent`, so reporting a local fault as a header
+rejection recycles the honest peer that served the header. `ByronGenesisFile` is
+optional while `eras.BuildShapeForEras` builds Byron era params for every
+config, so a Shelley-only config reaches that branch for every uncached slot.
+An unavailable configured shape or current era also makes future-slot protocol
+parameters unavailable, as do a missing scheduled successor, a failed hard fork,
+or a failed pending-parameter update. The forger refuses to build a block for
+such a slot instead of using current parameters for the future epoch.
+Genesis-overlay validation also declines to answer, but classifies the
+condition as deferred for the same reason an unbuildable summary is deferred:
+every source it reads is local, so a header rejection there would recycle the
+honest peer that served the header rather than re-verifying it once the
+parameters resolve.
 The in-memory summary reads the same configured era safe zone and
 `TransitionInfo` as the NtC era-history query, but the two horizons are not
 interchangeable: the NtC query answers a point in time, while the live summary
@@ -3192,9 +3255,15 @@ supply; the safety argument above does not depend on it, because apply-time
 re-validation is authoritative regardless.)
 
 Slot/epoch query adapters preserve `hardfork.ErrPastHorizon` in their error
-chains so callers can defer until the ledger advances. `EpochInfo` serves an
-already materialized epoch directly from the immutable epoch cache before
-forecasting. The operational slot clock is the deliberate exception to
+chains so callers can defer until the ledger advances. `EpochInfo` and
+`SlotToEpoch` serve an already materialized epoch directly from the immutable
+epoch cache before forecasting. `SlotToTime` does the same when no summary can
+be built: it walks the cache for the covering epoch and accumulates relative
+time from the first entry's `StartSlot`, the same anchor
+`hardForkSummaryAnchoredAt` uses, so a slot whose era parameters are already
+known converts without a forecast rather than dropping the slot clock into its
+retry loop. A slot the cache does not cover has no era parameters to read and
+still fails, subject only to the near-now fallback below. The operational slot clock is the deliberate exception to
 wall-clock forecast refusal: near-now `TimeToSlot` and `SlotToTime` calls
 extrapolate the current era while a stale node catches up, but arbitrary time
 queries and all header validation remain bounded. The accepted window is one
@@ -3616,7 +3685,15 @@ sync through the TPraos eras hands the client a payload it cannot read as
 promised. Which era is which is not restated for the wire: the layout is chosen
 from `consensusModeForEraID`, the same mapping `ConsensusModeForEpoch` uses to
 decide how leader eligibility is checked, so the protocol the reply names and
-the protocol the node elects under cannot disagree. Byron, which ran PBFT and
+the protocol the node elects under cannot disagree. `ConsensusModeForEpoch`
+answers a cached epoch, the current epoch or earlier, and a confirmed
+`HardForkInitiation` boundary from state the node already holds; only a further
+future epoch needs the configured era walk, and there it fails closed on an
+unresolvable shape rather than reporting the current era's mode across a
+scheduled fork. Header verification defers on that error (the shape is a local
+input, not the peer's fault) and leader-schedule computation declines to
+produce a schedule, since the mode selects both the VRF leader-value derivation
+and the threshold. Byron, which ran PBFT and
 has no state of this shape, maps to CPraos there and so takes the modern layout,
 along with any era not explicitly listed.
 
