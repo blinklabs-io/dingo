@@ -135,3 +135,52 @@ func TestQueryDRepStateAcceptsExactLengthCredential(t *testing.T) {
 	}]
 	require.True(t, found, "DRep missing from GetDRepState result")
 }
+
+// TestStakePoolsResultRejectsWrongLengthKeyHash covers GetStakePools, whose
+// pool ids come from an unbounded key-hash column. A padded hash is a
+// well-formed pool id on the wire and names a pool that does not exist.
+func TestStakePoolsResultRejectsWrongLengthKeyHash(t *testing.T) {
+	t.Parallel()
+	result, err := stakePoolsResult([][]byte{shortHash(0xC1)})
+	require.Error(t, err)
+	require.Nil(t, result)
+	require.Contains(t, err.Error(), "blake2b-224")
+}
+
+// TestDRepAnchorRejectsWrongLengthHash covers the anchor data hash, which is
+// Blake2b-256 and identifies the off-chain metadata a client fetches and
+// checks. A truncated stored value becomes an anchor no document can match.
+func TestDRepAnchorRejectsWrongLengthHash(t *testing.T) {
+	t.Parallel()
+	anchor, err := drepAnchor(&models.Drep{
+		AnchorURL:  "https://example.invalid/drep.json",
+		AnchorHash: make([]byte, lcommon.Blake2b256Size-1),
+	})
+	require.Error(t, err)
+	require.Nil(t, anchor)
+	require.Contains(t, err.Error(), "blake2b-256")
+}
+
+// TestDRepAnchorAbsentIsNotAnError is the control for the case above: a DRep
+// registered without an anchor still yields a nil anchor rather than the new
+// length error.
+func TestDRepAnchorAbsentIsNotAnError(t *testing.T) {
+	t.Parallel()
+	anchor, err := drepAnchor(&models.Drep{})
+	require.NoError(t, err)
+	require.Nil(t, anchor)
+}
+
+// TestStakeCredentialFromVoteRejectsWrongLengthCredential covers the
+// governance vote credential, which keys the committee and DRep vote maps in
+// a GetGovState result.
+func TestStakeCredentialFromVoteRejectsWrongLengthCredential(t *testing.T) {
+	t.Parallel()
+	cred, err := stakeCredentialFromVote(&models.GovernanceVote{
+		VoterCredentialTag: uint8(lcommon.CredentialTypeAddrKeyHash),
+		VoterCredential:    shortHash(0xD1),
+	})
+	require.Error(t, err)
+	require.Equal(t, olocalstatequery.StakeCredential{}, cred)
+	require.Contains(t, err.Error(), "blake2b-224")
+}
