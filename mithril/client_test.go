@@ -23,8 +23,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -964,6 +966,109 @@ func TestDoGetRedactsCredentialURLFromTransportError(t *testing.T) {
 	} {
 		assert.NotContains(t, err.Error(), secret)
 	}
+}
+
+func TestDoGetRedactsCredentialURLFromErrorResponse(t *testing.T) {
+	t.Parallel()
+
+	const credentialURL = "https://aggregator.example/aggregator/snapshots" +
+		"?token=query-secret&X-Amz-Signature=signature"
+	httpClient := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusInternalServerError,
+				Body: io.NopCloser(strings.NewReader(
+					"request rejected: " + req.URL.String(),
+				)),
+			}, nil
+		}),
+	}
+	client := NewClient(
+		"https://aggregator.example/aggregator",
+		WithHTTPClient(httpClient),
+	)
+
+	_, err := client.doGet(context.Background(), credentialURL)
+	require.Error(t, err)
+	assert.Contains(
+		t,
+		err.Error(),
+		"https://aggregator.example/aggregator/snapshots",
+	)
+	for _, secret := range []string{
+		"token",
+		"query-secret",
+		"X-Amz-Signature",
+		"signature",
+	} {
+		assert.NotContains(t, err.Error(), secret)
+	}
+}
+
+func TestClientRedactsMalformedRedirectLocation(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(
+		w http.ResponseWriter,
+		r *http.Request,
+	) {
+		w.Header().Set(
+			"Location",
+			"https://cdn.example/%zz?X-Amz-Signature=redirect-signature",
+		)
+		w.WriteHeader(http.StatusFound)
+	}))
+	t.Cleanup(server.Close)
+	httpClient := server.Client()
+	httpClient.CheckRedirect = httpsOnlyRedirect
+	client := NewClient(server.URL, WithHTTPClient(httpClient))
+
+	_, err := client.ListSnapshots(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unparsable location")
+	for _, secret := range []string{
+		"X-Amz-Signature",
+		"redirect-signature",
+	} {
+		assert.NotContains(t, err.Error(), secret)
+	}
+}
+
+func TestClientRejectsRedirectWithUserinfo(t *testing.T) {
+	t.Parallel()
+
+	var redirectTarget string
+	targetReached := false
+	server := httptest.NewTLSServer(http.HandlerFunc(func(
+		w http.ResponseWriter,
+		r *http.Request,
+	) {
+		if r.URL.Path == "/target" {
+			targetReached = true
+			assert.Empty(t, r.Header.Get("Authorization"))
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Location", redirectTarget)
+		w.WriteHeader(http.StatusFound)
+	}))
+	t.Cleanup(server.Close)
+	redirectTarget = strings.Replace(
+		server.URL,
+		"https://",
+		"https://operator:redirect-secret@",
+		1,
+	) + "/target"
+	httpClient := server.Client()
+	httpClient.CheckRedirect = httpsOnlyRedirect
+	client := NewClient(server.URL, WithHTTPClient(httpClient))
+
+	_, err := client.ListSnapshots(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "redirect with userinfo blocked")
+	assert.NotContains(t, err.Error(), "operator")
+	assert.NotContains(t, err.Error(), "redirect-secret")
+	assert.False(t, targetReached, "redirect target must not receive Basic Auth")
 }
 
 func TestRequireSecureURLRedactsCredentialDiagnostics(t *testing.T) {

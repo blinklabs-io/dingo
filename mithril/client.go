@@ -722,6 +722,12 @@ func httpsOnlyRedirect(
 			redactLocationURI(req.URL.String()),
 		)
 	}
+	if req.URL.User != nil {
+		return fmt.Errorf(
+			"redirect with userinfo blocked: %s",
+			redactLocationURI(req.URL.String()),
+		)
+	}
 	return nil
 }
 
@@ -1027,11 +1033,11 @@ func (c *Client) doGet(
 		bodyBytes, _ := io.ReadAll(
 			io.LimitReader(resp.Body, 1024),
 		)
-		return nil, fmt.Errorf(
+		return nil, redactLocationError(fmt.Errorf(
 			"unexpected status %d: %s",
 			resp.StatusCode,
 			string(bodyBytes),
-		)
+		), reqURL)
 	}
 
 	return &limitedReadCloser{

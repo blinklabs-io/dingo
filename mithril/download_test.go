@@ -242,6 +242,115 @@ func TestDownloadSnapshotRedactsCredentialURLFromErrors(t *testing.T) {
 	}
 }
 
+func TestDownloadSnapshotRedactsCredentialURLFromErrorResponse(t *testing.T) {
+	t.Parallel()
+
+	const credentialURL = "https://download.example/snapshot.tar.zst?" +
+		"X-Amz-Credential=credential&X-Amz-Signature=signature"
+	client := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusInternalServerError,
+				Body: io.NopCloser(strings.NewReader(
+					"request rejected: " + req.URL.String(),
+				)),
+			}, nil
+		}),
+	}
+
+	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
+		URL:                 credentialURL,
+		DestDir:             t.TempDir(),
+		Filename:            "snapshot.tar.zst",
+		HTTPClient:          client,
+		MaxTransientRetries: -1,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "https://download.example/snapshot.tar.zst")
+	for _, secret := range []string{
+		"X-Amz-Credential",
+		"credential",
+		"X-Amz-Signature",
+		"signature",
+	} {
+		assert.NotContains(t, err.Error(), secret)
+	}
+}
+
+func TestDownloadSnapshotRedactsMalformedRedirectLocation(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(
+		w http.ResponseWriter,
+		r *http.Request,
+	) {
+		w.Header().Set(
+			"Location",
+			"https://cdn.example/%zz?X-Amz-Signature=redirect-signature",
+		)
+		w.WriteHeader(http.StatusFound)
+	}))
+	t.Cleanup(server.Close)
+
+	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
+		URL:                 server.URL + "/snapshot.tar.zst",
+		DestDir:             t.TempDir(),
+		Filename:            "snapshot.tar.zst",
+		HTTPClient:          server.Client(),
+		MaxTransientRetries: -1,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unparsable location")
+	for _, secret := range []string{
+		"X-Amz-Signature",
+		"redirect-signature",
+	} {
+		assert.NotContains(t, err.Error(), secret)
+	}
+}
+
+func TestDownloadSnapshotRejectsRedirectWithUserinfo(t *testing.T) {
+	t.Parallel()
+
+	var redirectTarget string
+	targetReached := false
+	server := httptest.NewTLSServer(http.HandlerFunc(func(
+		w http.ResponseWriter,
+		r *http.Request,
+	) {
+		if r.URL.Path == "/target" {
+			targetReached = true
+			assert.Empty(t, r.Header.Get("Authorization"))
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Location", redirectTarget)
+		w.WriteHeader(http.StatusFound)
+	}))
+	t.Cleanup(server.Close)
+	redirectTarget = strings.Replace(
+		server.URL,
+		"https://",
+		"https://operator:redirect-secret@",
+		1,
+	) + "/target"
+	httpClient := server.Client()
+	httpClient.CheckRedirect = httpsOnlyRedirect
+
+	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
+		URL:                 server.URL + "/snapshot.tar.zst",
+		DestDir:             t.TempDir(),
+		Filename:            "snapshot.tar.zst",
+		HTTPClient:          httpClient,
+		MaxTransientRetries: -1,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "redirect with userinfo blocked")
+	assert.NotContains(t, err.Error(), "operator")
+	assert.NotContains(t, err.Error(), "redirect-secret")
+	assert.False(t, targetReached, "redirect target must not receive Basic Auth")
+}
+
 func TestNewPooledDownloadTransportUsesHTTP1Connections(t *testing.T) {
 	t.Parallel()
 

@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 )
 
@@ -204,45 +205,36 @@ func (e *redactedErrorText) Error() string { return e.message }
 
 func (e *redactedErrorText) Unwrap() error { return e.cause }
 
-// redactLocationError copies the URL-bearing error returned by net/http and
-// removes query parameters and userinfo from both its URL field and any
-// repeated URL in the transport error text. The copy keeps errors.Is and
-// errors.As useful without mutating an error owned by the HTTP client.
+var locationURLPattern = regexp.MustCompile(`https?://[^\s"'<>]+`)
+
+// redactLocationText removes all URL-like locations from an error's printable
+// text. Redirect parsing errors quote a Location value only in their text, so
+// this cannot rely on the originating request or url.Error.URL alone.
+func redactLocationText(message string, rawLocation string) string {
+	if rawLocation != "" {
+		message = strings.ReplaceAll(
+			message,
+			rawLocation,
+			redactLocationURI(rawLocation),
+		)
+	}
+	return locationURLPattern.ReplaceAllStringFunc(
+		message,
+		redactLocationURI,
+	)
+}
+
+// redactLocationError replaces an error's printable URL locations while
+// preserving the complete original unwrap chain. The presentation wrapper
+// keeps errors.Is and errors.As useful, including for intermediate wrappers
+// that a copied url.Error would discard.
 func redactLocationError(err error, rawLocation string) error {
 	if err == nil {
 		return nil
 	}
-	urlErr, ok := errors.AsType[*url.Error](err)
-	if !ok {
-		if rawLocation == "" {
-			return err
-		}
-		message := strings.ReplaceAll(
-			err.Error(),
-			rawLocation,
-			redactLocationURI(rawLocation),
-		)
-		if message != err.Error() {
-			return &redactedErrorText{message: message, cause: err}
-		}
+	message := redactLocationText(err.Error(), rawLocation)
+	if message == err.Error() {
 		return err
 	}
-	redacted := *urlErr
-	rawURL := redacted.URL
-	redacted.URL = redactLocationURI(rawURL)
-	redacted.Err = redactLocationError(redacted.Err, rawLocation)
-	if rawURL != "" && redacted.Err != nil {
-		message := strings.ReplaceAll(
-			redacted.Err.Error(),
-			rawURL,
-			redacted.URL,
-		)
-		if message != redacted.Err.Error() {
-			redacted.Err = &redactedErrorText{
-				message: message,
-				cause:   redacted.Err,
-			}
-		}
-	}
-	return &redacted
+	return &redactedErrorText{message: message, cause: err}
 }
