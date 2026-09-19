@@ -796,6 +796,45 @@ type tokenRegistryStage struct {
 	skipped  int
 }
 
+// tokenRegistryStageEntry is the private, ephemeral representation written to
+// the staging file. Keep it limited to fields the metadata upsert consumes and
+// tag every field explicitly so the format does not depend on Go field names.
+type tokenRegistryStageEntry struct {
+	Decimals    *int   `json:"decimals,omitempty"`
+	Subject     string `json:"subject"`
+	Name        string `json:"name,omitempty"`
+	Ticker      string `json:"ticker,omitempty"`
+	Description string `json:"description,omitempty"`
+	URL         string `json:"url,omitempty"`
+	Logo        string `json:"logo,omitempty"`
+}
+
+func newTokenRegistryStageEntry(
+	entry *models.TokenRegistryEntry,
+) tokenRegistryStageEntry {
+	return tokenRegistryStageEntry{
+		Decimals:    entry.Decimals,
+		Subject:     entry.Subject,
+		Name:        entry.Name,
+		Ticker:      entry.Ticker,
+		Description: entry.Description,
+		URL:         entry.URL,
+		Logo:        entry.Logo,
+	}
+}
+
+func (entry tokenRegistryStageEntry) model() models.TokenRegistryEntry {
+	return models.TokenRegistryEntry{
+		Decimals:    entry.Decimals,
+		Subject:     entry.Subject,
+		Name:        entry.Name,
+		Ticker:      entry.Ticker,
+		Description: entry.Description,
+		URL:         entry.URL,
+		Logo:        entry.Logo,
+	}
+}
+
 func (s *tokenRegistryStage) close(remove func(string) error) error {
 	name := s.file.Name()
 	return errors.Join(s.file.Close(), remove(name))
@@ -942,7 +981,7 @@ func (s *TokenRegistrySync) stageSnapshot(
 				s.maxBatchBytes,
 			)
 		}
-		encoded, err := json.Marshal(entry)
+		encoded, err := json.Marshal(newTokenRegistryStageEntry(entry))
 		if err != nil {
 			return nil, fmt.Errorf("stage token registry mapping: %w", err)
 		}
@@ -1021,12 +1060,13 @@ func (s *TokenRegistrySync) applyStagedSnapshot(
 		if err := ctx.Err(); err != nil {
 			return 0, err
 		}
-		var entry models.TokenRegistryEntry
-		if err := decoder.Decode(&entry); errors.Is(err, io.EOF) {
+		var stagedEntry tokenRegistryStageEntry
+		if err := decoder.Decode(&stagedEntry); errors.Is(err, io.EOF) {
 			break
 		} else if err != nil {
 			return 0, fmt.Errorf("read token registry staging file: %w", err)
 		}
+		entry := stagedEntry.model()
 		entryBytes := tokenRegistryEntryRetainedBytes(&entry)
 		if entryBytes > s.maxBatchBytes {
 			return 0, fmt.Errorf(
