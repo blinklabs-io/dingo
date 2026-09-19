@@ -631,3 +631,37 @@ func TestExtraEntropyFromPParamsStopsAtPraos(t *testing.T) {
 		)
 	}
 }
+
+// TestAssembleEpochNonceNeutralCandidateReturnsEntropy pins the identity law of
+// the nonce ⭒ operator on its left operand. cardano-ledger's Semigroup Nonce
+// gives NeutralNonce <> x = x, so a neutral candidate with a non-neutral
+// extraEntropy and no lab must yield the entropy itself.
+//
+// gouroboros' CalculateRollingNonce cannot serve this case: it coerces its
+// right operand from a raw VRF output, so for an all-zero left operand it
+// returns blake2b_256(right) rather than right.
+func TestAssembleEpochNonceNeutralCandidateReturnsEntropy(t *testing.T) {
+	t.Parallel()
+
+	entropy := mustDecodeHex(t, mainnetEpoch259ExtraEntropy)
+	neutral := make([]byte, lcommon.Blake2b256Size)
+
+	got, err := assembleEpochNonce(neutral, nil, entropy)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		entropy,
+		got,
+		"NeutralNonce is the identity of the nonce operator, so a neutral "+
+			"candidate must leave extraEntropy unchanged",
+	)
+
+	hashed := lcommon.Blake2b256Hash(entropy)
+	require.NotEqual(
+		t,
+		hashed.Bytes(),
+		got,
+		"the entropy must not be re-hashed, which is what the rolling-nonce "+
+			"helper would do for a neutral left operand",
+	)
+}

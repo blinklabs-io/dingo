@@ -218,16 +218,23 @@ func assembleEpochNonce(
 			return cloneNonce(candidateNonce), nil
 		}
 		// candidateNonce ⭒ NeutralNonce ⭒ extraEntropy collapses to
-		// candidateNonce ⭒ extraEntropy. CalculateEpochNonce cannot express
-		// that, since it requires a 32-byte lab; CalculateRollingNonce is
-		// gouroboros' implementation of the bare ⭒ operator.
-		result, err := lcommon.CalculateRollingNonce(
-			candidateNonce, extraEntropy,
-		)
-		if err != nil {
-			return nil, err
+		// candidateNonce ⭒ extraEntropy, which CalculateEpochNonce cannot
+		// express because it requires a 32-byte lab.
+		//
+		// CalculateRollingNonce is NOT the bare ⭒ operator and must not be
+		// substituted here: it coerces its right operand from a raw VRF
+		// output, so for an all-zero left operand it returns
+		// blake2b_256(right) where ⭒ requires right unchanged
+		// (cardano-ledger BaseTypes: NeutralNonce <> x = x).
+		if isNeutralNonce(candidateNonce) {
+			return cloneNonce(extraEntropy), nil
 		}
-		return result.Bytes(), nil
+		// Nonce(a) ⭒ Nonce(b) = Nonce(blake2b_256(a || b))
+		buf := make([]byte, 0, len(candidateNonce)+len(extraEntropy))
+		buf = append(buf, candidateNonce...)
+		buf = append(buf, extraEntropy...)
+		mixed := lcommon.Blake2b256Hash(buf)
+		return mixed.Bytes(), nil
 	}
 	result, err := lcommon.CalculateEpochNonce(
 		candidateNonce,
@@ -238,4 +245,16 @@ func assembleEpochNonce(
 		return nil, err
 	}
 	return result.Bytes(), nil
+}
+
+// isNeutralNonce reports whether nonce is the NeutralNonce, the identity of
+// the ⭒ operator. cardano-ledger encodes it as the absence of a value; the
+// all-zero 32 bytes is its wire form here.
+func isNeutralNonce(nonce []byte) bool {
+	for _, b := range nonce {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
 }
