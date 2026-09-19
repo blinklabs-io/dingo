@@ -205,6 +205,25 @@ func (e *redactedErrorText) Error() string { return e.message }
 
 func (e *redactedErrorText) Unwrap() error { return e.cause }
 
+// As prevents errors.As from exposing a credential-bearing url.Error from the
+// preserved chain. Other target types traverse that original chain unchanged,
+// retaining identity for intermediate wrappers and leaf errors.
+func (e *redactedErrorText) As(target any) bool {
+	urlErrTarget, ok := target.(**url.Error)
+	if !ok {
+		return false
+	}
+	var urlErr *url.Error
+	if !errors.As(e.cause, &urlErr) {
+		return false
+	}
+	redacted := *urlErr
+	redacted.URL = redactLocationURI(urlErr.URL)
+	redacted.Err = redactLocationError(urlErr.Err, "")
+	*urlErrTarget = &redacted
+	return true
+}
+
 var locationURLPattern = regexp.MustCompile(`https?://[^\s"'<>]+`)
 
 // redactLocationText removes all URL-like locations from an error's printable

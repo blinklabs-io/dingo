@@ -38,6 +38,16 @@ func (e *redactionTestError) Error() string {
 
 func (e *redactionTestError) Unwrap() error { return e.cause }
 
+type redactionIntermediateError struct {
+	cause error
+}
+
+func (e *redactionIntermediateError) Error() string {
+	return fmt.Sprintf("intermediate: %v", e.cause)
+}
+
+func (e *redactionIntermediateError) Unwrap() error { return e.cause }
+
 func TestRedactLocationURI(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -91,7 +101,7 @@ func TestRedactLocationErrorPreservesIntermediateWrappers(t *testing.T) {
 		URL: location,
 		Err: transportErr,
 	}
-	inner := &redactionTestError{name: "inner", cause: urlErr}
+	inner := &redactionIntermediateError{cause: urlErr}
 	outer := &redactionTestError{name: "outer", cause: inner}
 
 	redacted := redactLocationError(outer, "")
@@ -102,11 +112,17 @@ func TestRedactLocationErrorPreservesIntermediateWrappers(t *testing.T) {
 	var gotOuter *redactionTestError
 	require.ErrorAs(t, redacted, &gotOuter)
 	assert.Same(t, outer, gotOuter)
+	var gotInner *redactionIntermediateError
+	require.ErrorAs(t, redacted, &gotInner)
+	assert.Same(t, inner, gotInner)
 	var gotURLErr *url.Error
 	require.ErrorAs(t, redacted, &gotURLErr)
-	assert.Same(t, urlErr, gotURLErr)
+	assert.NotSame(t, urlErr, gotURLErr)
+	assert.Equal(t, "https://cdn.example/archive.tar.zst", gotURLErr.URL)
+	require.ErrorIs(t, gotURLErr, transportErr)
 
 	assert.Contains(t, redacted.Error(), "https://cdn.example/archive.tar.zst")
+	assert.Contains(t, gotURLErr.Error(), "https://cdn.example/archive.tar.zst")
 	for _, secret := range []string{
 		"X-Amz-Credential",
 		"credential",
@@ -114,6 +130,7 @@ func TestRedactLocationErrorPreservesIntermediateWrappers(t *testing.T) {
 		"signature",
 	} {
 		assert.NotContains(t, redacted.Error(), secret)
+		assert.NotContains(t, gotURLErr.Error(), secret)
 	}
 }
 
