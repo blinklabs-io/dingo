@@ -16,6 +16,7 @@ package koiosparity
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"net"
 	"net/http"
@@ -853,13 +854,52 @@ func (fakeRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
 	return nil, errors.New("fakeRoundTripper: not implemented")
 }
 
-// TestNewKoiosTransportFallsBackWhenDefaultTransportIsNotHTTPTransport proves
-// newKoiosTransport's comma-ok assertion on http.DefaultTransport: when the
-// package-level default is not a *http.Transport (a bare .(*http.Transport)
-// assertion would panic here), newKoiosTransport must still return a usable
-// *http.Transport with every explicit timeout this package configures, rather
-// than crashing NewKoiosClient.
-func TestNewKoiosTransportFallsBackWhenDefaultTransportIsNotHTTPTransport(
+func TestNewKoiosTransportIgnoresAmbientInsecureTLSConfig(t *testing.T) {
+	// Not t.Parallel: swaps the process-global http.DefaultTransport.
+	original := http.DefaultTransport
+	http.DefaultTransport = &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // deliberately poisoned process-global fixture
+	}
+	t.Cleanup(func() { http.DefaultTransport = original })
+
+	transport := newKoiosTransport(
+		koiosDialTimeout,
+		koiosDialKeepAlive,
+		koiosTLSHandshakeTimeout,
+		koiosResponseHeaderTimeout,
+		koiosExpectContinueTimeout,
+		false,
+	)
+	assert.Nil(t, transport.TLSClientConfig)
+}
+
+func TestNewKoiosTransportIgnoresAmbientTLSNextProto(t *testing.T) {
+	// Not t.Parallel: swaps the process-global http.DefaultTransport.
+	original := http.DefaultTransport
+	http.DefaultTransport = &http.Transport{
+		TLSNextProto: map[string]func(string, *tls.Conn) http.RoundTripper{
+			"h2": func(string, *tls.Conn) http.RoundTripper {
+				return fakeRoundTripper{}
+			},
+		},
+	}
+	t.Cleanup(func() { http.DefaultTransport = original })
+
+	transport := newKoiosTransport(
+		koiosDialTimeout,
+		koiosDialKeepAlive,
+		koiosTLSHandshakeTimeout,
+		koiosResponseHeaderTimeout,
+		koiosExpectContinueTimeout,
+		false,
+	)
+	assert.Nil(t, transport.TLSNextProto)
+}
+
+// TestNewKoiosTransportDoesNotConsultNonHTTPDefaultTransport proves the
+// security-owned transport does not depend on the process-global default's
+// concrete type or behavior.
+func TestNewKoiosTransportDoesNotConsultNonHTTPDefaultTransport(
 	t *testing.T,
 ) {
 	// Not t.Parallel: swaps the process-global http.DefaultTransport.
@@ -880,8 +920,11 @@ func TestNewKoiosTransportFallsBackWhenDefaultTransportIsNotHTTPTransport(
 		assert.NotNil(
 			t,
 			transport.DialContext,
-			"fallback transport must still get the configured DialContext",
+			"security-owned transport must get the configured DialContext",
 		)
+		assert.True(t, transport.ForceAttemptHTTP2)
+		assert.Equal(t, 100, transport.MaxIdleConns)
+		assert.Equal(t, 90*time.Second, transport.IdleConnTimeout)
 		assert.Equal(
 			t,
 			koiosTLSHandshakeTimeout,

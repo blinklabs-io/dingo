@@ -385,11 +385,11 @@ func NewKoiosClient(
 // addition to (never instead of) the http.Client-level Timeout set alongside
 // it in NewKoiosClient.
 //
-// It starts from http.DefaultTransport.Clone() rather than a bare
-// &http.Transport{} so this client keeps DefaultTransport's other tuning
-// (HTTP/2 negotiation and idle connection pooling). Proxy and alternate dial
-// hooks are then cleared so every connection passes through the destination
-// policy below.
+// It uses a fresh transport rather than cloning http.DefaultTransport. The
+// process-global default may have custom TLS verification or alternate
+// protocol handlers installed, either of which would escape this client's
+// security boundary. The inert HTTP/2 and idle-pool tuning from the standard
+// default is copied explicitly below.
 //
 // dialTimeout/dialKeepAlive configure the net.Dialer used for
 // DialContext -- redundant with DefaultTransport's own dial defaults today,
@@ -409,17 +409,13 @@ func newKoiosTransport(
 	tlsHandshakeTimeout, responseHeaderTimeout, expectContinueTimeout time.Duration,
 	allowPrivateAddresses bool,
 ) *http.Transport {
-	// http.DefaultTransport is documented as *http.Transport today, but
-	// nothing enforces that at compile time; a comma-ok assertion with a
-	// safe fallback (matching mithril/download.go's newDownloadTransport)
-	// means a future replacement of the package-level default degrades to a
-	// fresh transport with this function's explicit timeouts still applied,
-	// instead of panicking.
-	var transport *http.Transport
-	if base, ok := http.DefaultTransport.(*http.Transport); ok {
-		transport = base.Clone()
-	} else {
-		transport = &http.Transport{}
+	transport := &http.Transport{
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   tlsHandshakeTimeout,
+		ResponseHeaderTimeout: responseHeaderTimeout,
+		ExpectContinueTimeout: expectContinueTimeout,
 	}
 	dialer := &net.Dialer{
 		Timeout:   dialTimeout,
@@ -436,9 +432,6 @@ func newKoiosTransport(
 	transport.Dial = nil    //nolint:staticcheck
 	transport.DialTLS = nil //nolint:staticcheck
 	transport.DialTLSContext = nil
-	transport.TLSHandshakeTimeout = tlsHandshakeTimeout
-	transport.ResponseHeaderTimeout = responseHeaderTimeout
-	transport.ExpectContinueTimeout = expectContinueTimeout
 	return transport
 }
 

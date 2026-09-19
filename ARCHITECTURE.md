@@ -8530,9 +8530,10 @@ never the reverse.
   link-local, multicast, and other special-use destinations at the initial
   URL, after every redirect, and again after DNS resolution immediately before
   dialing. The transport dials the validated IP directly and does not inherit
-  environment proxy settings or alternate dial hooks, so DNS rebinding and an
-  ambient proxy cannot bypass that policy. An intentional private deployment
-  requires the separate `AllowPrivateAddresses` opt-in
+  environment proxy settings, alternate dial hooks, process-global TLS
+  settings, or alternate protocol handlers, so DNS rebinding, an ambient
+  proxy, or a weakened default transport cannot bypass that policy. An intentional
+  private deployment requires the separate `AllowPrivateAddresses` opt-in
   (`--koios-parity-allow-private-addresses` /
   `DINGO_KOIOS_PARITY_ALLOW_PRIVATE_ADDRESSES` on the node and
   `--koios-allow-private-addresses` / `KOIOS_ALLOW_PRIVATE_ADDRESSES` on the
