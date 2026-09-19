@@ -509,6 +509,9 @@ sample is still available:
 ./internal/test/devnet/run-tests.sh --conformance --accelerated -run TestLedgerStateConsensus
 ```
 
+The runner compiles the host-side tests before starting the nodes so a cold
+build cannot consume the bootstrap sampling window.
+
 `GetStakeDistribution` and `GetUTxOWhole` (the two queries `SnapshotAtTip`
 needs beyond the ones already used elsewhere in this harness) did not have
 server-side support in Dingo before this scenario — they were part of the
