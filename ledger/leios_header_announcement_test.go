@@ -124,10 +124,9 @@ func TestChainsyncHeaderAdmissionAnnouncesOnlyWhenCryptoVerified(
 	)
 	point := ocommon.NewPoint(header.slot, header.hash.Bytes())
 
-	// Mark the header as covered by an imported Mithril snapshot so the policy
-	// returns trustedWithoutVerification and the handler takes the AddBlockHeader
-	// branch -- the real end-to-end unverified admission. Header crypto is not
-	// bypassed merely because live validation is disabled.
+	// The fixture has no cached epoch nonce, so the policy defers verification
+	// and the handler takes the AddBlockHeader branch -- the real end-to-end
+	// unverified admission.
 	t.Run("unverified admission is queued, not announced", func(t *testing.T) {
 		fixture := newHeaderStreamLedger(t)
 		verifyNow, trusted := fixture.ls.chainsyncHeaderCryptoPolicy(
