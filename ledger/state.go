@@ -754,6 +754,24 @@ type LedgerStateConfig struct {
 	// unblocking a diagnostic or validation run, not a default for a node
 	// whose treasury accounting is expected to be trustworthy on its own.
 	TrustCanonicalTreasuryValueOnMismatch bool
+	// TrustCanonicalReferenceScriptOnMismatch, when true, recovers from a
+	// repeated, deterministic lcommon.MalformedReferenceScriptsError by
+	// trusting that a canonical block a peer already accepted is valid
+	// despite this node's own Plutus reference-script well-formedness
+	// verdict, and applying it instead of retrying the same rejection
+	// forever. Unlike the sibling Trust* mismatch settings, there is no
+	// local value to reconcile: the fix is to skip this one validation
+	// rule's verdict for that one (block, transaction) pair, once, after
+	// the ordinary retry has already failed identically once -- see
+	// LedgerState.trustReferenceScriptValidationError. This does not
+	// correct the underlying script-validator disagreement
+	// (blinklabs-io/dingo#3885 follow-up); it only lets replay make
+	// progress past a block a canonical peer already accepted. Off by
+	// default, for the same reason the sibling settings are: appropriate
+	// for unblocking a diagnostic or validation run, not a default for a
+	// node whose script validation is expected to be trustworthy on its
+	// own.
+	TrustCanonicalReferenceScriptOnMismatch bool
 	// MinPoolMargin is the CIP-23 minimum pool margin (minimum variable fee) in
 	// basis points, [0, 10000] (150 = 1.5%); 0 disables it. It is a consensus-
 	// affecting operator setting (not derived from the network) that takes
@@ -1214,6 +1232,22 @@ type LedgerState struct {
 	// treasury-value mismatch at the same time and each needs its own
 	// "already seen" identity.
 	treasuryMismatchReconcileSeen *deterministicTxRecoveryLatch
+	// referenceScriptMismatchSeen records the (block, tx) identity of the
+	// last lcommon.MalformedReferenceScriptsError
+	// recoverFromDeterministicTxValidationError observed, mirroring
+	// rewardMismatchReconcileSeen's role: proves the rejection recurred
+	// before referenceScriptMismatchTrusted is set, matching every other
+	// Trust* mismatch path's "one full attempt before anything special"
+	// shape.
+	referenceScriptMismatchSeen *deterministicTxRecoveryLatch
+	// referenceScriptMismatchTrusted records the (block, tx) identity a
+	// confirmed-deterministic malformed-reference-script rejection has
+	// earned trust for. Unlike the sibling Trust* latches, this one is
+	// consulted from the validation call site itself (see
+	// LedgerState.trustReferenceScriptValidationError), not only from
+	// recovery, since there is no local value to reconcile here -- the
+	// fix is to skip the check on the block's next delivery instead.
+	referenceScriptMismatchTrusted *deterministicTxRecoveryLatch
 	// Consecutive successful recovery attempts refused at the Mithril trust
 	// boundary without advancing the applied tip (issues #3261 and #3301).
 	// The refusal's only escape is peer rotation, which cannot help for a
@@ -8020,6 +8054,21 @@ func (ls *LedgerState) ledgerProcessBlock(
 					ls.trustDijkstraTxValidationError(validationEra.Id) {
 					ls.config.Logger.Warn(
 						"Dijkstra tx validation disagreement (trusting Leios-certified block)",
+						"component",
+						"ledger",
+						"tx_hash",
+						tx.Hash().String(),
+						"block_slot",
+						point.Slot,
+						"error",
+						err.Error(),
+					)
+					err = nil
+				}
+				if err != nil &&
+					ls.trustReferenceScriptValidationError(err, point, tx.Hash().Bytes()) {
+					ls.config.Logger.Warn(
+						"TrustCanonicalReferenceScriptOnMismatch: applying a block despite a locally malformed reference script a canonical peer already accepted",
 						"component",
 						"ledger",
 						"tx_hash",

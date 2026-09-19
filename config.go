@@ -261,6 +261,7 @@ type Config struct {
 	minPoolMargin                                                                       uint
 	trustCanonicalWithdrawalOnRewardMismatch                                            bool
 	trustCanonicalTreasuryValueOnMismatch                                               bool
+	trustCanonicalReferenceScriptOnMismatch                                             bool
 	pledgeLeverageEnabled                                                               bool
 	pledgeLeverage                                                                      uint
 	fullPotRewardsEnabled, unsafeFullPotRewardsOnStandardNetworks                       bool
@@ -869,6 +870,7 @@ func (c *Config) syncCompatFields() {
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
 	c.trustCanonicalWithdrawalOnRewardMismatch = c.cfg.TrustCanonicalWithdrawalOnRewardMismatch
 	c.trustCanonicalTreasuryValueOnMismatch = c.cfg.TrustCanonicalTreasuryValueOnMismatch
+	c.trustCanonicalReferenceScriptOnMismatch = c.cfg.TrustCanonicalReferenceScriptOnMismatch
 	c.fullPotRewardsEnabled, c.unsafeFullPotRewardsOnStandardNetworks = c.cfg.FullPotRewardsEnabled, c.cfg.UnsafeFullPotRewardsOnStandardNetworks
 	c.delegatorInactivityEnabled, c.delegatorInactivity = c.cfg.DelegatorInactivityEnabled, c.cfg.DelegatorInactivity
 	c.leiosVoteSigningKeyFile = c.cfg.LeiosVoteSigningKeyFile
@@ -952,6 +954,12 @@ func WithTrustCanonicalWithdrawalOnRewardMismatch(v bool) ConfigOptionFunc {
 func WithTrustCanonicalTreasuryValueOnMismatch(v bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.TrustCanonicalTreasuryValueOnMismatch, c.trustCanonicalTreasuryValueOnMismatch = v, v
+	}
+}
+
+func WithTrustCanonicalReferenceScriptOnMismatch(v bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.TrustCanonicalReferenceScriptOnMismatch, c.trustCanonicalReferenceScriptOnMismatch = v, v
 	}
 }
 
@@ -2332,6 +2340,14 @@ func (c *Config) TrustCanonicalWithdrawalOnRewardMismatch() bool {
 // LedgerStateConfig.TrustCanonicalTreasuryValueOnMismatch's doc comment.
 func (c *Config) TrustCanonicalTreasuryValueOnMismatch() bool {
 	return c.cfg.TrustCanonicalTreasuryValueOnMismatch
+}
+
+// TrustCanonicalReferenceScriptOnMismatch reports whether a repeated,
+// deterministic malformed-reference-script rejection trusts and applies the
+// canonical block instead. See
+// LedgerStateConfig.TrustCanonicalReferenceScriptOnMismatch's doc comment.
+func (c *Config) TrustCanonicalReferenceScriptOnMismatch() bool {
+	return c.cfg.TrustCanonicalReferenceScriptOnMismatch
 }
 
 // ForgePrimaryChainTipToleranceSlots returns how far the ledger-applied tip may

@@ -594,3 +594,39 @@ func TestBuildDingoConfigWiresTrustCanonicalTreasuryValueOnMismatch(
 		)
 	}
 }
+
+// TestBuildDingoConfigWiresTrustCanonicalReferenceScriptOnMismatch is the
+// same class of bug TestBuildDingoConfigWiresForgeTolerances documents, for
+// TrustCanonicalReferenceScriptOnMismatch's own dingo.NewConfig option-list
+// entry.
+func TestBuildDingoConfigWiresTrustCanonicalReferenceScriptOnMismatch(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		TrustCanonicalReferenceScriptOnMismatch: true,
+	}
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+
+	built := buildDingoConfig(
+		cfg,
+		logger,
+		nil,
+		nil,
+		false,
+		dingo.StorageModeCore,
+		30*time.Second,
+		chainsync.DefaultStallTimeout,
+		chainsync.HeaderSyncStrategyPrimary,
+	)
+
+	if got := built.TrustCanonicalReferenceScriptOnMismatch(); !got {
+		t.Fatalf(
+			"expected TrustCanonicalReferenceScriptOnMismatch true, got %v; "+
+				"the loaded value never reached dingo.Config, so the "+
+				"trust path never runs however it is configured",
+			got,
+		)
+	}
+}

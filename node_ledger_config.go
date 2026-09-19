@@ -143,6 +143,8 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		TrustCanonicalWithdrawalOnRewardMismatch: n.config.trustCanonicalWithdrawalOnRewardMismatch,
 		// Off by default; see LedgerStateConfig.TrustCanonicalTreasuryValueOnMismatch.
 		TrustCanonicalTreasuryValueOnMismatch: n.config.trustCanonicalTreasuryValueOnMismatch,
+		// Off by default; see LedgerStateConfig.TrustCanonicalReferenceScriptOnMismatch.
+		TrustCanonicalReferenceScriptOnMismatch: n.config.trustCanonicalReferenceScriptOnMismatch,
 		// CIP-50 pledge-leverage reward cap. Operator-set (not derived from
 		// the network) and off by default; enable only where every node
 		// also enables it.

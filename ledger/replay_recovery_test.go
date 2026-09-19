@@ -2250,6 +2250,82 @@ func TestReplayRecoveryReconcilesTreasuryValueMismatchWhenOpted(t *testing.T) {
 		"the redelivery must overwrite the local treasury with the canonical supplied value")
 }
 
+// TestReplayRecoveryTrustsReferenceScriptMismatchWhenOpted pins
+// LedgerStateConfig.TrustCanonicalReferenceScriptOnMismatch (dingo#3885
+// follow-up): with it enabled, a repeated
+// lcommon.MalformedReferenceScriptsError earns trust for that exact
+// (block, transaction) pair, so a subsequent validation attempt for the
+// same transaction is let through by trustReferenceScriptValidationError
+// instead of being rejected forever. Unlike the sibling Trust* mismatch
+// tests, there is no local value to read back here -- the fix is consulted
+// from the validation call site itself, so this test exercises that
+// checker directly. Reverting the TrustCanonicalReferenceScriptOnMismatch
+// branch in place would make the second assertion below observe no trust
+// earned.
+func TestReplayRecoveryTrustsReferenceScriptMismatchWhenOpted(t *testing.T) {
+	t.Parallel()
+
+	ls := newReplayRecoveryAuditLedger(t, true)
+	ls.config.TrustCanonicalReferenceScriptOnMismatch = true
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	resyncCh := deterministicResyncChannel(t, ls, bus)
+
+	blockPoint := ocommon.NewPoint(160, testHashBytes("audit-failing"))
+	txHash := testHashBytes("reconcile-refscript-tx")
+
+	validation := func() *txValidationError {
+		return &txValidationError{
+			BlockPoint: blockPoint,
+			TxHash:     txHash,
+			Cause: fmt.Errorf(
+				"conway utxo validation rule 45: %w",
+				lcommon.MalformedReferenceScriptsError{},
+			),
+		}
+	}
+
+	// The first rejection must behave exactly like the flag-off sibling:
+	// reject and rewind, earning no trust yet.
+	recovered, err := ls.tryRecoverFromTxValidationError(validation())
+	require.NoError(t, err)
+	require.True(t, recovered)
+	assert.False(t,
+		ls.trustReferenceScriptValidationError(
+			lcommon.MalformedReferenceScriptsError{}, blockPoint, txHash,
+		),
+		"the first rejection must not earn trust yet")
+	testutil.RequireReceive(
+		t, resyncCh, testutil.AsyncWait,
+		"the first rejection must request a fresh ChainSync intersection",
+	)
+
+	// The redelivery is what marks this deterministic, and is where
+	// TrustCanonicalReferenceScriptOnMismatch earns trust for the next
+	// delivery of this exact transaction.
+	recovered, err = ls.tryRecoverFromTxValidationError(validation())
+	require.NoError(
+		t,
+		err,
+		"trusting must let ordinary rewind-and-retry continue, not halt",
+	)
+	require.True(t, recovered)
+	assert.True(t,
+		ls.trustReferenceScriptValidationError(
+			lcommon.MalformedReferenceScriptsError{}, blockPoint, txHash,
+		),
+		"the redelivery must earn trust for this exact (block, tx) pair")
+
+	// A different transaction must not incidentally inherit that trust.
+	assert.False(t,
+		ls.trustReferenceScriptValidationError(
+			lcommon.MalformedReferenceScriptsError{},
+			blockPoint,
+			testHashBytes("unrelated-tx"),
+		),
+		"trust must not leak to an unrelated transaction")
+}
+
 func TestReplayRecoveryRejectsDeterministicPlutusFailure(t *testing.T) {
 	t.Parallel()
 

@@ -822,6 +822,20 @@ type Config struct {
 	// run, not for a node whose treasury accounting is expected to be
 	// trustworthy on its own.
 	TrustCanonicalTreasuryValueOnMismatch bool `yaml:"trustCanonicalTreasuryValueOnMismatch" envconfig:"DINGO_TRUST_CANONICAL_TREASURY_VALUE_ON_MISMATCH"`
+
+	// TrustCanonicalReferenceScriptOnMismatch recovers from a repeated,
+	// deterministic lcommon.MalformedReferenceScriptsError by trusting that a
+	// canonical block a peer already accepted is valid despite this node's
+	// own Plutus reference-script well-formedness verdict, and applying it
+	// instead of retrying the same rejection forever. Unlike the sibling
+	// Trust* mismatch settings, there is no local value to reconcile here:
+	// the block's transaction itself is trusted, once, for that one
+	// (block, transaction) pair. Off by default, for the same reason the
+	// sibling settings are: appropriate for unblocking a diagnostic or
+	// validation run against a decode edge case in this node's own script
+	// validator, not a default for a node whose script validation is
+	// expected to be trustworthy on its own.
+	TrustCanonicalReferenceScriptOnMismatch bool `yaml:"trustCanonicalReferenceScriptOnMismatch" envconfig:"DINGO_TRUST_CANONICAL_REFERENCE_SCRIPT_ON_MISMATCH"`
 	// CIP-50 pledge-leverage staking rewards. Consensus-affecting; defaults
 	// off. PledgeLeverageEnabled turns on the L*pledge reward cap and
 	// PledgeLeverage is L in [1, 10000]. Enable only on a network where every

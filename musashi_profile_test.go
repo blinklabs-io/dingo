@@ -222,6 +222,11 @@ func TestPrototypeTrustBypassesOffWithoutConfig(t *testing.T) {
 // (--trust-canonical-treasury-value-on-mismatch), off by default, not tied
 // to network identity anywhere in node.go/config.go.
 //
+// TrustCanonicalReferenceScriptOnMismatch is the same case again, for the
+// sibling malformed-reference-script mismatch: a plain operator flag
+// (--trust-canonical-reference-script-on-mismatch), off by default, not tied
+// to network identity anywhere in node.go/config.go.
+//
 // A new Skip*/Trust*/Unsafe* field on LedgerStateConfig fails this test on
 // purpose. Adding one is a deliberate widening of where dingo stops validating,
 // and it should be classified here — prototype-only or not — rather than
@@ -237,6 +242,7 @@ func TestMusashiProfileTrustBypassScope(t *testing.T) {
 		"TrustedReplay":                            false,
 		"TrustCanonicalWithdrawalOnRewardMismatch": false,
 		"TrustCanonicalTreasuryValueOnMismatch":    false,
+		"TrustCanonicalReferenceScriptOnMismatch":  false,
 	}
 
 	cfgType := reflect.TypeFor[ledger.LedgerStateConfig]()
