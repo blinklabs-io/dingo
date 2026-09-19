@@ -575,3 +575,138 @@ func metricFamilyNames(families []*dto.MetricFamily) map[string]struct{} {
 	}
 	return names
 }
+
+// TestKESAgentStartupWiresClientMetrics covers the wiring rather than the
+// collector: kesagent.NewMetrics runs only from kesAgentClientMetrics, and
+// that is reached only from the two kesagent.Config literals in
+// node_forging.go, so a registry holding dingo_kes_agent_* after startup is
+// evidence the literal passes Metrics. TestKESAgentMetricsRegisteredOncePerNode
+// calls the helper itself and therefore cannot see a Config literal that
+// leaves Metrics nil. Serve-key additionally reads dingo_kes_agent_connected,
+// which only the client sets on a completed handshake.
+func TestKESAgentStartupWiresClientMetrics(t *testing.T) {
+	t.Parallel()
+
+	vrf, _, opcert := devnetCredPaths(t)
+	kesKeyData, err := bursa.LoadKeyFromFile(
+		filepath.Join(devnetKeysDir, "kes.skey"),
+	)
+	require.NoError(t, err)
+	opCertCBOR := devnetOpCertCBOR(t)
+
+	testutil.SkipIfBlockProducerUnsupported(t)
+	sockPath := testutil.UnixSocketPath(t)
+	ln, err := net.Listen("unix", sockPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		writeKesAgentFrame(t, conn, kesagent.Hello{
+			Protocol: kesagent.ProtocolID,
+			Mode:     kesagent.ModeServeKey,
+		})
+		writeKesAgentFrame(t, conn, kesagent.KeyPush{
+			Type:       "key_push",
+			Period:     0,
+			Depth:      kes.CardanoKesDepth,
+			KESSignKey: kesKeyData.SKey,
+			KESVKey:    kesKeyData.VKey,
+			OpCert:     opCertCBOR,
+		})
+		buf := make([]byte, 1)
+		_, _ = conn.Read(buf)
+	}()
+
+	registry := prometheus.NewRegistry()
+	n := newTestNodeForBPWithAgent(
+		t,
+		vrf,
+		opcert,
+		kesagent.ModeServeKey,
+		sockPath,
+		shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour)),
+	)
+	n.config.promRegistry = registry
+	t.Cleanup(n.closeKESAgentClient)
+
+	_, err = n.validateBlockProducerStartupAtSlot(0)
+	require.NoError(t, err)
+
+	families, err := registry.Gather()
+	require.NoError(t, err)
+	names := metricFamilyNames(families)
+	for _, name := range []string{
+		"dingo_kes_agent_connected",
+		"dingo_kes_agent_reconnect_failures_total",
+		"dingo_kes_agent_sign_success_total",
+		"dingo_kes_agent_sign_failure_total",
+		"dingo_kes_agent_sign_latency_seconds",
+	} {
+		require.Contains(t, names, name)
+	}
+	require.Equal(t, 1.0, gaugeValue(t, families, "dingo_kes_agent_connected"))
+}
+
+// TestKESAgentSignModeStartupWiresClientMetrics is the sign-mode half of the
+// same class: node_forging.go carries exactly two kesagent.Config literals,
+// and each needs its own Metrics field.
+func TestKESAgentSignModeStartupWiresClientMetrics(t *testing.T) {
+	t.Parallel()
+
+	vrf, _, opcert := devnetCredPaths(t)
+
+	testutil.SkipIfBlockProducerUnsupported(t)
+	sockPath := testutil.UnixSocketPath(t)
+	ln, err := net.Listen("unix", sockPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+
+	registry := prometheus.NewRegistry()
+	n := newTestNodeForBPWithAgent(
+		t,
+		vrf,
+		opcert,
+		kesagent.ModeSign,
+		sockPath,
+		shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour)),
+	)
+	n.config.promRegistry = registry
+	t.Cleanup(n.closeKESAgentClient)
+
+	_, err = n.validateBlockProducerStartupAtSlot(0)
+	require.NoError(t, err)
+
+	families, err := registry.Gather()
+	require.NoError(t, err)
+	names := metricFamilyNames(families)
+	for _, name := range []string{
+		"dingo_kes_agent_connected",
+		"dingo_kes_agent_reconnect_failures_total",
+		"dingo_kes_agent_sign_success_total",
+		"dingo_kes_agent_sign_failure_total",
+		"dingo_kes_agent_sign_latency_seconds",
+	} {
+		require.Contains(t, names, name)
+	}
+}
+
+func gaugeValue(
+	t testing.TB,
+	families []*dto.MetricFamily,
+	name string,
+) float64 {
+	t.Helper()
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		require.Len(t, family.GetMetric(), 1)
+		return family.GetMetric()[0].GetGauge().GetValue()
+	}
+	t.Fatalf("metric family %q not gathered", name)
+	return 0
+}
