@@ -81,6 +81,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/committeeauth"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/fsyncdir"
 	"github.com/blinklabs-io/dingo/internal/historyexpiry"
@@ -334,6 +335,17 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 			err = errors.Join(
 				err,
 				fmt.Errorf("history expiry shutdown: %w", stopErr),
+			)
+		}
+	}
+	if n.committeeAuthSync != nil {
+		if stopErr := n.committeeAuthSync.Stop(ctx); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf(
+					"committee auth immutable slot sync shutdown: %w",
+					stopErr,
+				),
 			)
 		}
 	}
@@ -706,6 +718,21 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		}
 	}
 
+	// Unconditional and independent of history expiry: see the matching
+	// comment in node.go's startup path.
+	n.committeeAuthSync = committeeauth.NewSyncer(committeeauth.SyncerConfig{
+		PointAtDepth:     n.ledgerState.Chain().PointAtDepth,
+		SecurityParam:    n.ledgerState.SecurityParam,
+		SetImmutableSlot: n.db.SetCommitteeAuthImmutableSlot,
+		Logger:           n.config.logger,
+	})
+	if err := n.committeeAuthSync.Start(n.ctx); err != nil { //nolint:contextcheck
+		n.config.logger.Warn(
+			"failed to restart committee auth immutable slot sync",
+			"error", err,
+		)
+	}
+
 	if err := n.backfillRewardLiveStake(); err != nil {
 		return err
 	}
@@ -923,10 +950,12 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 			OutboundConnOptsProvider: func() []ouroboros.ConnectionOptionFunc {
 				return n.ouroboros().OutboundConnOpts()
 			},
-			PromRegistry:        n.config.promRegistry,
-			MaxConnectionsPerIP: n.config.maxConnectionsPerIP,
-			MaxInboundConns:     n.config.maxInboundConns,
-			ConnClosedOwnerFunc: n.handleConnManagerClosedOwner,
+			PromRegistry:           n.config.promRegistry,
+			MaxConnectionsPerIP:    n.config.maxConnectionsPerIP,
+			MaxInboundConns:        n.config.maxInboundConns,
+			MaxNtCConns:            n.config.maxNtCConns,
+			MaxNtCConnectionsPerIP: n.config.maxNtCConnectionsPerIP,
+			ConnClosedOwnerFunc:    n.handleConnManagerClosedOwner,
 		},
 	)
 	n.connManagerRecycleSubId = n.subscribeConnectionRecycleRequests(

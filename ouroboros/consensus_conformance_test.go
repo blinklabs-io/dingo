@@ -45,9 +45,50 @@ func TestConsensusConformanceVectors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CapturedVectors: %v", err)
 	}
-	if len(vectors) == 0 {
-		t.Skip("no captured vectors embedded")
+	const expectedScenarioCount = 5
+	if len(vectors) != expectedScenarioCount {
+		t.Fatalf(
+			"consensus profile has %d scenarios, want %d; update the profile summary and tests with the shared corpus",
+			len(vectors),
+			expectedScenarioCount,
+		)
 	}
+	expectedNames := map[string]bool{
+		"intersect_origin_one_rollforward": true,
+		"within_k_fork_v1":                 true,
+		"fork_and_select_v1":               true,
+		"slot_battle_v1":                   true,
+		"exceeds_k_no_switch_v1":           true,
+	}
+	profileCounts := map[string]int{
+		"single-peer": 0,
+		"fork-switch": 0,
+		"no-switch":   0,
+	}
+	for _, cv := range vectors {
+		if !expectedNames[cv.Name] {
+			t.Fatalf("unexpected consensus scenario %q", cv.Name)
+		}
+		delete(expectedNames, cv.Name)
+		switch {
+		case len(cv.Vector.Capture.Peers) == 1:
+			profileCounts["single-peer"]++
+		case cv.Vector.Capture.ExpectedOutput.ExpectedRollback != nil:
+			profileCounts["fork-switch"]++
+		default:
+			profileCounts["no-switch"]++
+		}
+	}
+	if len(expectedNames) != 0 {
+		t.Fatalf("consensus profile is missing scenarios: %v", expectedNames)
+	}
+	t.Logf(
+		"Consensus conformance profile: total=%d single-peer=%d fork-switch=%d no-switch=%d",
+		len(vectors),
+		profileCounts["single-peer"],
+		profileCounts["fork-switch"],
+		profileCounts["no-switch"],
+	)
 	for _, cv := range vectors {
 		t.Run(cv.Name, func(t *testing.T) {
 			a := newReplayAdapter(t, cv.Vector.Capture)

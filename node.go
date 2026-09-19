@@ -43,6 +43,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/blinklabs-io/dingo/internal/chainsyncrecycler"
+	"github.com/blinklabs-io/dingo/internal/committeeauth"
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/historyexpiry"
@@ -91,6 +92,7 @@ type Node struct {
 	leiosPipelineManager    *leios.PipelineManager
 	bark                    *bark.Bark
 	historyExpiry           *historyexpiry.Pruner
+	committeeAuthSync       *committeeauth.Syncer
 	koiosParityObserver     *koiosparity.Observer
 	midnightServer          *midnightserver.Server
 	offchainMetadataFetcher *offchainmetadata.Fetcher
@@ -821,6 +823,29 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		})
 	}
 
+	// Unconditional and independent of history expiry: the committee
+	// hot-key authorization pruner in the metadata store always runs and
+	// always needs the live immutable-slot bound to be safe on a sparse
+	// chain (issue #4353). A sync failure here is not fatal -- the pruner
+	// falls back to its slot-window assumption when no live value has been
+	// pushed -- so this only logs.
+	n.committeeAuthSync = committeeauth.NewSyncer(committeeauth.SyncerConfig{
+		PointAtDepth:     state.Chain().PointAtDepth,
+		SecurityParam:    state.SecurityParam,
+		SetImmutableSlot: n.db.SetCommitteeAuthImmutableSlot,
+		Logger:           n.config.logger,
+	})
+	if err := n.committeeAuthSync.Start(n.ctx); err != nil {
+		n.config.logger.Warn(
+			"failed to start committee auth immutable slot sync",
+			"error", err,
+		)
+	} else {
+		started = append(started, func() {
+			_ = n.committeeAuthSync.Stop(context.Background())
+		})
+	}
+
 	if err := n.backfillRewardLiveStake(); err != nil {
 		return err
 	}
@@ -1165,10 +1190,12 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			OutboundConnOptsProvider: func() []ouroboros.ConnectionOptionFunc {
 				return n.ouroboros().OutboundConnOpts()
 			},
-			PromRegistry:        n.config.promRegistry,
-			MaxConnectionsPerIP: n.config.maxConnectionsPerIP,
-			MaxInboundConns:     n.config.maxInboundConns,
-			ConnClosedOwnerFunc: n.handleConnManagerClosedOwner,
+			PromRegistry:           n.config.promRegistry,
+			MaxConnectionsPerIP:    n.config.maxConnectionsPerIP,
+			MaxInboundConns:        n.config.maxInboundConns,
+			MaxNtCConns:            n.config.maxNtCConns,
+			MaxNtCConnectionsPerIP: n.config.maxNtCConnectionsPerIP,
+			ConnClosedOwnerFunc:    n.handleConnManagerClosedOwner,
 		},
 	)
 	// Wire connection-manager and inbound/outbound connection events.
@@ -2164,7 +2191,9 @@ func (n *Node) nodeSettingsGateValues() nodesettings.Values {
 // it is safe when the database is already known to be consistent (e.g.
 // repeated restarts during investigation of an unrelated issue), but unsafe
 // to leave enabled permanently since it is what catches a stale or
-// pre-migration reward_live_stake table.
+// pre-migration reward_live_stake table -- and, since reward_live_stake.utxo_stake
+// became an incrementally maintained running total (dingo #4421), the only
+// automatic reconciliation of that total against the live UTxO set.
 //
 // Both probes are read-only and run on the read-only metadata connection; the
 // writer is opened only for an actual rebuild. See ARCHITECTURE.md.

@@ -189,6 +189,7 @@ CREATE TABLE reward_snapshot (
     protocol_version INTEGER NOT NULL,
     authoritative BOOLEAN NOT NULL DEFAULT FALSE,
     calculation_version INTEGER NOT NULL DEFAULT 0,
+    excluded_active_stake TEXT,
     UNIQUE (epoch, snapshot_type)
 );
 

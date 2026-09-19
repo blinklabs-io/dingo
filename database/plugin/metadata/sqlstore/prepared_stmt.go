@@ -30,6 +30,7 @@ var hotStatements = []string{
 	sumCredentialUtxoStakeQuery,
 	rewardLiveStakeAccountQuery,
 	rewardLiveStakeUpsertQuery,
+	rewardLiveStakeUtxoStakeQuery,
 	insertUtxoQuery,
 	insertUtxoQueryIgnoreConflict,
 	importAssetQuery,

@@ -285,10 +285,17 @@ graph TB
         HExpiry["History Expiry<br/><i>internal/historyexpiry/</i>"]
     end
 
+    subgraph "Committee Auth Sync"
+        CAuthSync["Committee Auth Sync<br/><i>internal/committeeauth/</i>"]
+    end
+
     EB["EventBus<br/><i>event/</i>"]
 
     Node --> CM & PG & OB & ChM & LS & MP & DB & EB
     Node -.->|"optional"| BF & LE & URPC & BFA & Mesh & Bark & MidnightIndex & Midnight & HExpiry & DBLC
+    Node --> CAuthSync
+    CAuthSync -->|"PointAtDepth(securityParam)"| ChM
+    CAuthSync -->|"SetCommitteeAuthImmutableSlot"| DB
 
     PG -->|"outbound conn requests"| CM
     CM -->|"connections"| OB
@@ -719,7 +726,10 @@ established sessions. TCP clients also share a separate per-source budget,
 consume the total NtC budget without per-IP accounting. NtC admission never
 consumes N2N slots or N2N per-IP capacity. Admission reserves both budgets
 before launching a handshake worker; failed setup releases the reservation,
-and successful setup transfers its release to the connection's close watcher.
+and successful setup transfers the once-only release to the registered
+connection entry. Normal removal and collision eviction release outside the
+connection-map lock and before close callbacks run; the connection's close
+watcher is the backstop if an evicted entry is no longer present in the map.
 The `cardano_node_metrics_connectionManager_ntcRejectedConns_total` counter
 records rejections with `total_limit` or `per_ip_limit` as its `reason` label.
 
@@ -1083,8 +1093,10 @@ dingo/
 │   │   └── load.go      # Block loading implementation
 │   ├── historyexpiry/   # Ledger-window-based local block history expiry
 │   │   └── pruner.go    # Background expiry scanner
+│   ├── committeeauth/   # Live rollback-safe immutable-slot sync for committee auth pruning
+│   │   └── syncer.go    # Background PointAtDepth -> SetCommitteeAuthImmutableSlot sync
 │   ├── test/            # Test utilities
-│   │   ├── conformance/ # Amaru conformance tests
+│   │   ├── conformance/ # Cardano Blueprint ledger-rule conformance tests
 │   │   ├── devnet/      # DevNet end-to-end tests
 │   │   └── testutil/    # Shared test helpers
 │   └── version/         # Version information
@@ -1113,6 +1125,7 @@ type Node struct {
     utxorpc        *utxorpc.Utxorpc               // UTxO RPC server
     bark           *bark.Bark                     // Bark C2/archive server
     historyExpiry  *historyexpiry.Pruner          // Local block history expiry
+    committeeAuthSync *committeeauth.Syncer       // Live immutable-slot sync for committee auth pruning
     blockfrostAPI  *blockfrost.Blockfrost         // Blockfrost REST API
     meshAPI        *mesh.Server                   // Mesh (Rosetta) API
     midnightServer *midnightserver.Server         // Midnight MidnightState gRPC server
@@ -2266,6 +2279,38 @@ fallback:
   store it replaces as its upstream and forwards `Close` to it, so the
   replaced store is kept alive rather than retired.
 
+### Committee Auth Immutable-Slot Sync
+
+Unconditional and independent of `historyExpiry.enabled`: `node.go` and
+`node_lifecycle.go` both start `internal/committeeauth.Syncer` whenever the
+ledger and database are available, regardless of history-expiry
+configuration. The metadata store's committee hot-key authorization pruner
+(`database/plugin/metadata/sqlstore/committee_prune.go`) always runs on every
+applied certificate and on its own 24-hour maintenance sweep, so it always
+needs a safe retention bound -- unlike history expiry, which only runs when a
+node opts in.
+
+The syncer resolves `LedgerState.SecurityParam()` and
+`Chain.PointAtDepth(securityParam)` on a timer (default five minutes, plus
+once immediately at `Start`) and pushes the result into
+`Database.SetCommitteeAuthImmutableSlot`, which the metadata package cannot
+resolve itself: `chain` already imports `database`, so the reverse import
+would cycle. A resolution failure (security parameter not yet known, or fewer
+than `securityParam` blocks on chain) pushes `known=false` rather than a
+stale value.
+
+The pruner does not treat "no live bound available" as "fall back to the
+slot-window assumption": once `SetCommitteeAuthImmutableSlot` has been called
+at all (a live syncer is wired), a subsequent `known=false` -- from a
+resolution failure above, or from `DeleteCertificatesAfterSlot` invalidating
+the cached value on every rollback, since a value safe when cached is not
+necessarily safe after a rollback -- suspends pruning entirely until the next
+successful resolution. Only a `Store` no syncer has ever been wired to (every
+existing test, and any non-node caller) keeps the slot-window-only fallback.
+See DATABASE.md's Committee Hot-Key Authorization Retention section for the
+full retention rule, the gap this closes (blinklabs-io/dingo#4353), and why
+suspension rather than fallback is required once live tracking is engaged.
+
 ### Tiered CBOR Cache
 
 Instead of storing full CBOR data redundantly, Dingo uses offset-based references with a tiered cache:
@@ -3029,8 +3074,26 @@ main-block issuers. Byron epoch boundary blocks still enforce the current-slot
 bound and tick due delegations, but do not carry a PBFT issuer signature or
 advance the issuer window.
 
-Before resolving or eagerly forecasting an epoch for a live header,
+Cached epochs resolve without forecast configuration, but still require a
+published nonce. Before forecasting an uncached epoch for a live header,
 `headerVerificationEpoch` checks the slot against `LedgerState.HardForkSummary`.
+A summary that cannot be *built* at all is classified as deferred rather than
+rejected, separately from a slot past a horizon a built summary reports: the
+shape, the genesis behind it, and the epoch cache are all local inputs, and
+`ouroboros/chainsync.go` routes every non-deferred header error to
+`ConnectionRecycleRequestedEvent`, so reporting a local fault as a header
+rejection recycles the honest peer that served the header. `ByronGenesisFile` is
+optional while `eras.BuildShapeForEras` builds Byron era params for every
+config, so a Shelley-only config reaches that branch for every uncached slot.
+An unavailable configured shape or current era also makes future-slot protocol
+parameters unavailable, as do a missing scheduled successor, a failed hard fork,
+or a failed pending-parameter update. The forger refuses to build a block for
+such a slot instead of using current parameters for the future epoch.
+Genesis-overlay validation also declines to answer, but classifies the
+condition as deferred for the same reason an unbuildable summary is deferred:
+every source it reads is local, so a header rejection there would recycle the
+honest peer that served the header rather than re-verifying it once the
+parameters resolve.
 The in-memory summary reads the same configured era safe zone and
 `TransitionInfo` as the NtC era-history query, but the two horizons are not
 interchangeable: the NtC query answers a point in time, while the live summary
@@ -3187,9 +3250,15 @@ supply; the safety argument above does not depend on it, because apply-time
 re-validation is authoritative regardless.)
 
 Slot/epoch query adapters preserve `hardfork.ErrPastHorizon` in their error
-chains so callers can defer until the ledger advances. `EpochInfo` serves an
-already materialized epoch directly from the immutable epoch cache before
-forecasting. The operational slot clock is the deliberate exception to
+chains so callers can defer until the ledger advances. `EpochInfo` and
+`SlotToEpoch` serve an already materialized epoch directly from the immutable
+epoch cache before forecasting. `SlotToTime` does the same when no summary can
+be built: it walks the cache for the covering epoch and accumulates relative
+time from the first entry's `StartSlot`, the same anchor
+`hardForkSummaryAnchoredAt` uses, so a slot whose era parameters are already
+known converts without a forecast rather than dropping the slot clock into its
+retry loop. A slot the cache does not cover has no era parameters to read and
+still fails, subject only to the near-now fallback below. The operational slot clock is the deliberate exception to
 wall-clock forecast refusal: near-now `TimeToSlot` and `SlotToTime` calls
 extrapolate the current era while a stale node catches up, but arbitrary time
 queries and all header validation remain bounded. The accepted window is one
@@ -3611,7 +3680,15 @@ sync through the TPraos eras hands the client a payload it cannot read as
 promised. Which era is which is not restated for the wire: the layout is chosen
 from `consensusModeForEraID`, the same mapping `ConsensusModeForEpoch` uses to
 decide how leader eligibility is checked, so the protocol the reply names and
-the protocol the node elects under cannot disagree. Byron, which ran PBFT and
+the protocol the node elects under cannot disagree. `ConsensusModeForEpoch`
+answers a cached epoch, the current epoch or earlier, and a confirmed
+`HardForkInitiation` boundary from state the node already holds; only a further
+future epoch needs the configured era walk, and there it fails closed on an
+unresolvable shape rather than reporting the current era's mode across a
+scheduled fork. Header verification defers on that error (the shape is a local
+input, not the peer's fault) and leader-schedule computation declines to
+produce a schedule, since the mode selects both the VRF leader-value derivation
+and the threshold. Byron, which ran PBFT and
 has no state of this shape, maps to CPraos there and so takes the modern layout,
 along with any era not explicitly listed.
 
@@ -4414,7 +4491,7 @@ The `chainsync.State` tracks multiple concurrent chainsync clients:
 - Stall detection with configurable timeout
 - Grace period before recycling stalled connections
 - Cooldown to prevent rapid reconnection flapping
-- Plateau detection: if the applied tip does not advance and the downloaded primary-chain tip does not change while peers are ahead, the recycler first asks ledger to reconcile any live primary-chain/ledger divergence (`ReconcileLivePrimaryChainLedgerDivergence`). Primary-chain movement, including rollback, resets the plateau clock even when ledger application is temporarily behind, avoiding a resync of an active catch-up stream. When the local repair succeeds, connection-level recovery is skipped so ledger replay can resume from the repaired tip. If no divergence is found, or the divergence's common ancestor sits more than the security parameter K behind the primary chain tip — a rewind that far is declined rather than forced through, per the bound below — the active chainsync connection is recycled — except when the primary (header) chain has already caught up to the peer and the gap is dominated by downloaded-but-not-yet-applied blocks (`isLedgerApplicationBacklog`, `internal/chainsyncrecycler/recycler.go`). That plateau is a ledger-application backlog, not a chainsync stall, so the healthy connection is left running and the condition is logged at INFO instead of recycling (recycling cannot advance the applied tip and only churns the connection)
+- Plateau detection: if the applied tip does not advance and the downloaded primary-chain tip does not change while peers are ahead, the recycler first asks ledger to reconcile any live primary-chain/ledger divergence (`ReconcileLivePrimaryChainLedgerDivergence`). Primary-chain movement, including rollback, resets the plateau clock even when ledger application is temporarily behind, avoiding a resync of an active catch-up stream. When the local repair succeeds, connection-level recovery is skipped so ledger replay can resume from the repaired tip. If no divergence is found, or the divergence's common ancestor sits more than the security parameter K behind the primary chain tip — a rewind that far is declined rather than forced through, per the bound below — the active chainsync connection is recycled — except when the primary (header) chain has already caught up to the peer and the gap is dominated by downloaded-but-not-yet-applied blocks (`isLedgerApplicationBacklog`, `internal/chainsyncrecycler/recycler.go`). That plateau is a ledger-application backlog, not a chainsync stall, so the healthy connection is left running and the condition is logged at INFO instead of recycling (recycling cannot advance the applied tip and only churns the connection). The "peers are ahead" comparison reads a peer's DELIVERED frontier. A peer that has delivered no header has that frontier pinned at the point its session intersected at, which immediately after a plateau resync is the stalled local tip itself, so comparing against it would disarm this watchdog exactly when it has just acted. While such a peer is still awaiting its first header (`PeerChainTip.AwaitingFirstHeader`, `chainselection/peer_tip.go`) the recycler therefore falls back to that peer's ADVERTISED tip, but only when the advertised tip is higher and only when the advertising peer IS the connection this plateau would recycle (`advertisesForOwnConnection`, compared by `ConnectionId` rather than by rendered address, so a replacement connection reusing a listen port does not inherit a stale peer's claim). An untrusted advertised tip can therefore only ever be spent on its own connection, and the substituted value also flows into `isLedgerApplicationBacklog` as the best-peer tip, so it sets the backlog-versus-stall classification too. "Awaiting its first header" means the `awaitingFirstHeader` flag chain selection sets only when it registers a peer from a rollback and clears on that peer's first delivered header, not a delivered block number of 0: a tracked peer that has delivered headers and then rolls back to a point outside its retained delivered-header history is also left with a block number of 0 (`ApplyRollback` keeps the point and cannot recover one), but it has delivered headers on this connection, so it is judged on its delivered frontier and its advertised tip is never substituted. That fallback is reachable only because chain selection tracks such a peer in the first place: a plateau resync closes the connection (`LocalTipPlateau` is in `chainsyncResyncRequiresFreshConnection`, `ouroboros/chainsync.go`), the `ConnectionClosedEvent` subscription in `node.go` calls `ChainSelector.RemovePeer`, and the replacement's only chainsync traffic until the next block is its post-`FindIntersect` `MsgRollBackward` — registered as a peer by `registerPeerFromRollbackLocked` and made selectable with a delivered block number of 0 by the `awaitingFirstHeader` exemption in `isPeerSelectableLocked` (`chainselection/selector.go`). Without that registration `GetBestPeer()` is nil through the whole window and the plateau check returns before the fallback, so the two belong together
 - The recycler itself is `internal/chainsyncrecycler.Recycler`, a `Start`/`Stop` background component that owns only the stall/plateau decision logic. It never reads node fields: the node passes a `ComponentProvider` (`nodeRecyclerComponents`, `node_chainsync_recycler.go`) that hands each tick the live `LedgerSource`, `ChainsyncState`, and `ChainSelector`, plus an `EventPublisher` for the recycle/resync/client-remove requests it decides on. Those are interfaces defined in the recycler package and satisfied structurally by `ledger.LedgerState`, `chainsync.State`, `chainselection.ChainSelector`, and the `EventBus`, so the dependency only goes one way and the whole component is exercised against fakes without constructing a node
 - Every tick `TryLock`s `n.liveLifecycleMu` (the mutex a live Restore/Truncate holds for its entire quiesce-through-reinitialize duration, since those calls actually nil/rebuild `n.ledgerState`/`n.chainsyncState`) (in the provider, for the whole callback) and skips entirely on contention, rather than just nil-checking those fields once up front: they are plain, unsynchronized fields a live restore/truncate reassigns, and the tick dereferences them many more times after any initial check, so holding the lock for the whole tick — not only the check — is what actually closes the race rather than merely narrowing its window. Snapshot deliberately does *not* hold `liveLifecycleMu` (it takes a separate `snapshotMu` instead, excluding a concurrent Restore/Truncate without contending with this tick) — see `snapshotMu`'s doc comment (`node.go`) — since Snapshot never touches either field and blocking this tick for its whole local-copy-plus-cloud-upload duration would contradict Snapshot's own documented "keeps syncing normally" behavior
 - Ledger callbacks that need the replaceable chainsync state use the same lock through `withLiveChainsyncState`. Both `Run()`'s initial publication and a Restore/Truncate's replacement hold that lock while constructing and assigning the state. Callbacks skip while the lock is held instead of blocking: the lifecycle operation can be waiting for the ledger goroutine to stop, so a blocking lock would deadlock quiesce.
@@ -7642,7 +7719,13 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   **derived-match** field below matched. It does not claim parity for fields
   classified as **intentionally-incomparable** or **unsupported**. The same
   field-level matrix is emitted in every JSON report, and human-readable
-  status output reports the class counts. `internal/koiosparity/coverage_test.go`
+  status output reports the class counts.
+  `TestArchitectureDocumentsKoiosCoverageMatrix` (`internal/docsparity/`)
+  compares the endpoint, field and classification of every row in the table
+  below against that matrix in both directions, so a reclassified, added, or
+  removed field fails `make docs-parity` until the table records it; the
+  mapping/reason prose is not compared.
+  `internal/koiosparity/coverage_test.go`
   requires every field in the consumed Koios response structs to remain
   classified when those structs change (the `/account_reward_history` entries
   below are not covered by that test's automatic struct-field check, since
@@ -10120,9 +10203,9 @@ documentation in agreement with the configuration it describes. Every rule
 derives its expectation from a source of truth in the tree rather than
 restating a value: the minimum Go release comes from the `go` directive in
 `go.mod`, the build contract from the Makefile's rule graph and `##` help
-text, and the DevNet topology from `internal/test/devnet/docker-compose.yml`,
-its `.env` profile default, and the wrapper scripts. Run the focused check
-with:
+text, the DevNet topology from `internal/test/devnet/docker-compose.yml`, its
+`.env` profile default, and the wrapper scripts, and the Koios coverage table
+from `koiosparity.KoiosCoverageMatrix`. Run the focused check with:
 
 ```shell
 make docs-parity
@@ -11742,6 +11825,27 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    no-op — no credit, debit or transfer is written — and the rollover still
    succeeds; the certificates are scoped to the ended epoch's slot range, so a
    discarded MIR is not retried at the next boundary.
+
+   The reference DELEG transition rejects a distribution certificate at
+   transaction-validation time before any of this runs, via
+   `MIRProducesNegativeUpdate`, whenever folding its delta into a credential's
+   InstantaneousRewards accumulated so far in the epoch would drive it
+   negative — this is what makes the boundary's own capacity check above
+   normally unreachable for a fully validated chain. gouroboros's shelley
+   validation rules implement the sibling pre-Alonzo check
+   (`MIRNegativesNotCurrentlyAllowedError`, which rejects any negative delta
+   before protocol version 5) but not this one, because it needs epoch-scoped
+   ledger state their `common.LedgerState` interface does not expose.
+   `ledger/eras.validateMIRAccumulatedRewards`, called from `ValidateTxAlonzo`
+   and `ValidateTxBabbage`, is dingo's implementation: it walks a
+   transaction's move-instantaneous-rewards certificates in order, seeding a
+   running per-credential total from `*LedgerView.PendingMIRRewardDeltas`
+   (certificates already committed earlier in the epoch, same block or
+   earlier — every transaction's certificates are written immediately after
+   that transaction validates, so this is always caught up as of the
+   currently validating slot) and folding in each certificate's own delta as
+   it goes, so a later certificate in the same transaction sees the effect of
+   an earlier one.
 3. SNAP-point mark stake read (`captureEpochBoundarySnapshotStake` →
    `snapshot.Manager.ComputeEpochBoundarySnapshot`, when a stake hook is
    installed): read the mark snapshot's stake distribution here, after the two
