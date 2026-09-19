@@ -761,8 +761,8 @@ type LedgerStateConfig struct {
 	// verdict, and applying it instead of retrying the same rejection
 	// forever. Unlike the sibling Trust* mismatch settings, there is no
 	// local value to reconcile: the fix is to skip this one validation
-	// rule's verdict for that one (block, transaction) pair, once, after
-	// the ordinary retry has already failed identically once -- see
+	// rule's verdict for that one transaction, once, after the ordinary
+	// retry has already failed identically once -- see
 	// LedgerState.trustReferenceScriptValidationError. This does not
 	// correct the underlying script-validator disagreement
 	// (blinklabs-io/dingo#3885 follow-up); it only lets replay make
@@ -1232,22 +1232,26 @@ type LedgerState struct {
 	// treasury-value mismatch at the same time and each needs its own
 	// "already seen" identity.
 	treasuryMismatchReconcileSeen *deterministicTxRecoveryLatch
-	// referenceScriptMismatchSeen records the (block, tx) identity of the
-	// last lcommon.MalformedReferenceScriptsError
-	// recoverFromDeterministicTxValidationError observed, mirroring
-	// rewardMismatchReconcileSeen's role: proves the rejection recurred
-	// before referenceScriptMismatchTrusted is set, matching every other
-	// Trust* mismatch path's "one full attempt before anything special"
-	// shape.
-	referenceScriptMismatchSeen *deterministicTxRecoveryLatch
-	// referenceScriptMismatchTrusted records the (block, tx) identity a
-	// confirmed-deterministic malformed-reference-script rejection has
-	// earned trust for. Unlike the sibling Trust* latches, this one is
-	// consulted from the validation call site itself (see
-	// LedgerState.trustReferenceScriptValidationError), not only from
-	// recovery, since there is no local value to reconcile here -- the
-	// fix is to skip the check on the block's next delivery instead.
-	referenceScriptMismatchTrusted *deterministicTxRecoveryLatch
+	// referenceScriptMismatchSeen and referenceScriptMismatchTrusted record
+	// lcommon.MalformedReferenceScriptsError sightings by transaction hash
+	// alone, not by (block, tx) identity like the sibling Trust* latches:
+	// the verdict is a property of the transaction's own reference-script
+	// bytes, so the exact same transaction can recur inside multiple
+	// different candidate blocks at the same slot (different producers,
+	// different block hashes, same shared-mempool transaction) and must
+	// still be recognized as the same confirmed-deterministic rejection
+	// regardless of which block wraps it. A single deterministicTxRecoveryLatch
+	// (keyed on one (block, tx) pair at a time) cannot hold two different
+	// transactions' trust simultaneously -- confirmed live, a block
+	// carrying two independently-malformed transactions made each one's
+	// mark overwrite the other's, so neither transaction was ever trusted
+	// on the same attempt and the block never validated. Keyed by
+	// transaction hash (string(tx.Hash().Bytes())) instead. Unbounded for
+	// the lifetime of the process; acceptable for an operator-opted-in
+	// diagnostic path expected to match a small, rare set of transactions,
+	// not a general cache.
+	referenceScriptMismatchSeen    map[string]struct{}
+	referenceScriptMismatchTrusted map[string]struct{}
 	// Consecutive successful recovery attempts refused at the Mithril trust
 	// boundary without advancing the applied tip (issues #3261 and #3301).
 	// The refusal's only escape is peer rotation, which cannot help for a
@@ -8066,7 +8070,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 					err = nil
 				}
 				if err != nil &&
-					ls.trustReferenceScriptValidationError(err, point, tx.Hash().Bytes()) {
+					ls.trustReferenceScriptValidationError(err, tx.Hash().Bytes()) {
 					ls.config.Logger.Warn(
 						"TrustCanonicalReferenceScriptOnMismatch: applying a block despite a locally malformed reference script a canonical peer already accepted",
 						"component",

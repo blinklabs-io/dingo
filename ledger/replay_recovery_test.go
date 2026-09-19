@@ -2254,14 +2254,13 @@ func TestReplayRecoveryReconcilesTreasuryValueMismatchWhenOpted(t *testing.T) {
 // LedgerStateConfig.TrustCanonicalReferenceScriptOnMismatch (dingo#3885
 // follow-up): with it enabled, a repeated
 // lcommon.MalformedReferenceScriptsError earns trust for that exact
-// (block, transaction) pair, so a subsequent validation attempt for the
-// same transaction is let through by trustReferenceScriptValidationError
-// instead of being rejected forever. Unlike the sibling Trust* mismatch
-// tests, there is no local value to read back here -- the fix is consulted
-// from the validation call site itself, so this test exercises that
-// checker directly. Reverting the TrustCanonicalReferenceScriptOnMismatch
-// branch in place would make the second assertion below observe no trust
-// earned.
+// transaction, so a subsequent validation attempt for the same transaction
+// is let through by trustReferenceScriptValidationError instead of being
+// rejected forever. Unlike the sibling Trust* mismatch tests, there is no
+// local value to read back here -- the fix is consulted from the
+// validation call site itself, so this test exercises that checker
+// directly. Reverting the TrustCanonicalReferenceScriptOnMismatch branch in
+// place would make the second assertion below observe no trust earned.
 func TestReplayRecoveryTrustsReferenceScriptMismatchWhenOpted(t *testing.T) {
 	t.Parallel()
 
@@ -2271,12 +2270,11 @@ func TestReplayRecoveryTrustsReferenceScriptMismatchWhenOpted(t *testing.T) {
 	t.Cleanup(bus.Close)
 	resyncCh := deterministicResyncChannel(t, ls, bus)
 
-	blockPoint := ocommon.NewPoint(160, testHashBytes("audit-failing"))
 	txHash := testHashBytes("reconcile-refscript-tx")
 
 	validation := func() *txValidationError {
 		return &txValidationError{
-			BlockPoint: blockPoint,
+			BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
 			TxHash:     txHash,
 			Cause: fmt.Errorf(
 				"conway utxo validation rule 45: %w",
@@ -2292,7 +2290,7 @@ func TestReplayRecoveryTrustsReferenceScriptMismatchWhenOpted(t *testing.T) {
 	require.True(t, recovered)
 	assert.False(t,
 		ls.trustReferenceScriptValidationError(
-			lcommon.MalformedReferenceScriptsError{}, blockPoint, txHash,
+			lcommon.MalformedReferenceScriptsError{}, txHash,
 		),
 		"the first rejection must not earn trust yet")
 	testutil.RequireReceive(
@@ -2312,18 +2310,87 @@ func TestReplayRecoveryTrustsReferenceScriptMismatchWhenOpted(t *testing.T) {
 	require.True(t, recovered)
 	assert.True(t,
 		ls.trustReferenceScriptValidationError(
-			lcommon.MalformedReferenceScriptsError{}, blockPoint, txHash,
+			lcommon.MalformedReferenceScriptsError{}, txHash,
 		),
-		"the redelivery must earn trust for this exact (block, tx) pair")
+		"the redelivery must earn trust for this exact transaction")
 
 	// A different transaction must not incidentally inherit that trust.
 	assert.False(t,
 		ls.trustReferenceScriptValidationError(
 			lcommon.MalformedReferenceScriptsError{},
-			blockPoint,
 			testHashBytes("unrelated-tx"),
 		),
 		"trust must not leak to an unrelated transaction")
+}
+
+// TestReplayRecoveryTrustsReferenceScriptMismatchForMultipleTransactions
+// pins the fix for a bug caught live (dingo#3885 follow-up): a block
+// carrying two independently malformed-reference-script transactions made
+// each transaction's confirmed-deterministic mark overwrite the other's,
+// because the original implementation kept only one (block, tx) identity
+// at a time. Neither transaction was ever trusted on the same attempt, so
+// the block never validated -- observed live as the same two transactions
+// cycling between "trusting" and "applying" forever with no tip progress.
+// Trust is now keyed by transaction hash in a map, so two different
+// transactions confirmed deterministic in the same window must both stay
+// trusted simultaneously. Reverting to a single shared identity in place
+// would make the second assertion below observe the first transaction's
+// trust lost once the second is confirmed.
+func TestReplayRecoveryTrustsReferenceScriptMismatchForMultipleTransactions(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls := newReplayRecoveryAuditLedger(t, true)
+	ls.config.TrustCanonicalReferenceScriptOnMismatch = true
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	_ = deterministicResyncChannel(t, ls, bus)
+
+	blockPoint := ocommon.NewPoint(160, testHashBytes("audit-failing"))
+	txHashA := testHashBytes("reconcile-refscript-tx-a")
+	txHashB := testHashBytes("reconcile-refscript-tx-b")
+
+	validationFor := func(txHash []byte) *txValidationError {
+		return &txValidationError{
+			BlockPoint: blockPoint,
+			TxHash:     txHash,
+			Cause: fmt.Errorf(
+				"conway utxo validation rule 45: %w",
+				lcommon.MalformedReferenceScriptsError{},
+			),
+		}
+	}
+
+	// Confirm transaction A deterministic (two rejections).
+	_, err := ls.tryRecoverFromTxValidationError(validationFor(txHashA))
+	require.NoError(t, err)
+	_, err = ls.tryRecoverFromTxValidationError(validationFor(txHashA))
+	require.NoError(t, err)
+	require.True(t,
+		ls.trustReferenceScriptValidationError(
+			lcommon.MalformedReferenceScriptsError{}, txHashA,
+		),
+		"transaction A must be trusted after its own two rejections")
+
+	// Now confirm transaction B deterministic, in the same block.
+	_, err = ls.tryRecoverFromTxValidationError(validationFor(txHashB))
+	require.NoError(t, err)
+	_, err = ls.tryRecoverFromTxValidationError(validationFor(txHashB))
+	require.NoError(t, err)
+	require.True(t,
+		ls.trustReferenceScriptValidationError(
+			lcommon.MalformedReferenceScriptsError{}, txHashB,
+		),
+		"transaction B must be trusted after its own two rejections")
+
+	// Transaction A's trust must still hold: confirming B must not have
+	// overwritten it.
+	assert.True(t,
+		ls.trustReferenceScriptValidationError(
+			lcommon.MalformedReferenceScriptsError{}, txHashA,
+		),
+		"transaction A must remain trusted after transaction B is confirmed")
 }
 
 func TestReplayRecoveryRejectsDeterministicPlutusFailure(t *testing.T) {

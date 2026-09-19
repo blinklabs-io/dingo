@@ -743,61 +743,64 @@ func (ls *LedgerState) markTreasuryMismatchReconcileSeen(
 	)
 }
 
-// referenceScriptMismatchSeenLocked reports whether validationErr's exact
-// (block, tx) identity was already recorded by a previous call, the first
-// stage of the two-stage confirmation
-// TrustCanonicalReferenceScriptOnMismatch requires before
-// trustReferenceScriptValidationError will act on it. Callers hold at least
-// the read lock.
+// referenceScriptMismatchSeenLocked reports whether txHash was already
+// recorded by a previous call, the first stage of the two-stage
+// confirmation TrustCanonicalReferenceScriptOnMismatch requires before
+// trustReferenceScriptValidationError will act on it. Keyed on transaction
+// hash alone -- see referenceScriptMismatchSeen's doc comment on
+// LedgerState for why. Callers hold at least the read lock.
 func (ls *LedgerState) referenceScriptMismatchSeenLocked(
-	validationErr *txValidationError,
+	txHash []byte,
 ) bool {
-	return ls.referenceScriptMismatchSeen.matchesIdentity(validationErr)
+	_, ok := ls.referenceScriptMismatchSeen[string(txHash)]
+	return ok
 }
 
-// markReferenceScriptMismatchSeen records validationErr's (block, tx)
-// identity so the next identical rejection is recognized as a confirmed
-// repeat, at which point markReferenceScriptMismatchTrusted actually earns
-// the block trust.
+// markReferenceScriptMismatchSeen records txHash so the next identical
+// rejection is recognized as a confirmed repeat, at which point
+// markReferenceScriptMismatchTrusted actually earns the transaction trust.
 func (ls *LedgerState) markReferenceScriptMismatchSeen(
-	validationErr *txValidationError,
+	txHash []byte,
 ) {
 	ls.Lock()
 	defer ls.Unlock()
-	ls.referenceScriptMismatchSeen = newDeterministicTxRecoveryLatch(
-		0,
-		validationErr,
-	)
+	if ls.referenceScriptMismatchSeen == nil {
+		ls.referenceScriptMismatchSeen = make(map[string]struct{})
+	}
+	ls.referenceScriptMismatchSeen[string(txHash)] = struct{}{}
 }
 
-// markReferenceScriptMismatchTrusted records validationErr's (block, tx)
-// identity as trusted: the next time this exact transaction is validated,
-// trustReferenceScriptValidationError lets it through despite a repeated
-// lcommon.MalformedReferenceScriptsError verdict.
+// markReferenceScriptMismatchTrusted records txHash as trusted: the next
+// time this exact transaction is validated, trustReferenceScriptValidationError
+// lets it through despite a repeated lcommon.MalformedReferenceScriptsError
+// verdict, regardless of which candidate block it arrives in.
 func (ls *LedgerState) markReferenceScriptMismatchTrusted(
-	validationErr *txValidationError,
+	txHash []byte,
 ) {
 	ls.Lock()
 	defer ls.Unlock()
-	ls.referenceScriptMismatchTrusted = newDeterministicTxRecoveryLatch(
-		0,
-		validationErr,
-	)
+	if ls.referenceScriptMismatchTrusted == nil {
+		ls.referenceScriptMismatchTrusted = make(map[string]struct{})
+	}
+	ls.referenceScriptMismatchTrusted[string(txHash)] = struct{}{}
 }
 
 // trustReferenceScriptValidationError reports whether a validation failure
-// for the transaction identified by (blockPoint, txHash) should be trusted
-// and applied despite a repeated, confirmed-deterministic
+// for the transaction identified by txHash should be trusted and applied
+// despite a repeated, confirmed-deterministic
 // lcommon.MalformedReferenceScriptsError, per
 // LedgerStateConfig.TrustCanonicalReferenceScriptOnMismatch's doc comment.
 // Called from the per-transaction validation call site in
 // ledgerProcessBlock, not only from recovery, since there is no local value
 // to reconcile here -- unlike the sibling Trust* mismatch settings, the fix
-// is to skip this one rule's verdict for this one (block, transaction) pair
-// once trust has been earned by markReferenceScriptMismatchTrusted.
+// is to skip this one rule's verdict for this one transaction once trust
+// has been earned by markReferenceScriptMismatchTrusted. Keyed on
+// transaction hash alone, not (block, tx) identity: the verdict is a
+// property of the transaction's own reference-script bytes, so the same
+// transaction recurring in a different candidate block (different
+// producer, different block hash) must still be recognized.
 func (ls *LedgerState) trustReferenceScriptValidationError(
 	err error,
-	blockPoint ocommon.Point,
 	txHash []byte,
 ) bool {
 	if !ls.config.TrustCanonicalReferenceScriptOnMismatch {
@@ -806,10 +809,10 @@ func (ls *LedgerState) trustReferenceScriptValidationError(
 	if _, ok := errors.AsType[lcommon.MalformedReferenceScriptsError](err); !ok {
 		return false
 	}
-	validationErr := &txValidationError{BlockPoint: blockPoint, TxHash: txHash}
 	ls.RLock()
 	defer ls.RUnlock()
-	return ls.referenceScriptMismatchTrusted.matchesIdentity(validationErr)
+	_, ok := ls.referenceScriptMismatchTrusted[string(txHash)]
+	return ok
 }
 
 // recoverFromDeterministicTxValidationError drops a primary-chain block that
@@ -939,23 +942,23 @@ func (ls *LedgerState) recoverFromDeterministicTxValidationError(
 			validationErr.Cause,
 		); ok {
 			ls.RLock()
-			seenBefore := ls.referenceScriptMismatchSeenLocked(validationErr)
+			seenBefore := ls.referenceScriptMismatchSeenLocked(validationErr.TxHash)
 			ls.RUnlock()
 			if !seenBefore {
-				// First sighting of this exact (block, tx): record it and let
+				// First sighting of this exact transaction: record it and let
 				// the ordinary rewind-and-retry below run once more first,
 				// matching every other Trust* mismatch path's "one full
 				// attempt before anything special" shape.
-				ls.markReferenceScriptMismatchSeen(validationErr)
+				ls.markReferenceScriptMismatchSeen(validationErr.TxHash)
 			} else {
 				// Confirmed deterministic: earn trust for this exact
-				// (block, tx) so trustReferenceScriptValidationError lets it
-				// through the next time this transaction is validated. The
-				// rewind-and-retry below still runs this cycle -- there is
-				// no local value to fix in place, unlike the sibling
-				// Trust* settings, so the earned trust only takes effect on
-				// the block's next delivery.
-				ls.markReferenceScriptMismatchTrusted(validationErr)
+				// transaction so trustReferenceScriptValidationError lets it
+				// through the next time it is validated, in whichever
+				// candidate block carries it. The rewind-and-retry below
+				// still runs this cycle -- there is no local value to fix in
+				// place, unlike the sibling Trust* settings, so the earned
+				// trust only takes effect on the transaction's next delivery.
+				ls.markReferenceScriptMismatchTrusted(validationErr.TxHash)
 				if ls.config.Logger != nil {
 					ls.config.Logger.Warn(
 						"TrustCanonicalReferenceScriptOnMismatch: trusting a repeated deterministic malformed-reference-script rejection; the next delivery of this block will skip the check",

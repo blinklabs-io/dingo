@@ -829,8 +829,8 @@ type Config struct {
 	// own Plutus reference-script well-formedness verdict, and applying it
 	// instead of retrying the same rejection forever. Unlike the sibling
 	// Trust* mismatch settings, there is no local value to reconcile here:
-	// the block's transaction itself is trusted, once, for that one
-	// (block, transaction) pair. Off by default, for the same reason the
+	// the transaction itself is trusted, once, regardless of which
+	// candidate block carries it. Off by default, for the same reason the
 	// sibling settings are: appropriate for unblocking a diagnostic or
 	// validation run against a decode edge case in this node's own script
 	// validator, not a default for a node whose script validation is
