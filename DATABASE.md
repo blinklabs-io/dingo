@@ -3962,3 +3962,13 @@ API-mode Mithril backfill replays historical withdrawal transactions after
 importing the snapshot's current reward balances. Its transaction-ingest
 option records the withdrawal history without applying the live-path
 balance-sufficiency check; normal ledger ingestion retains that validation.
+
+# Consumed UTxO prune floor
+
+`sync_state.consumed_utxo_prune_floor` records the highest slot through which
+`UtxosDeleteConsumed` permanently removed spent UTxO rows. It is written in
+the same transaction as the deletion, only moves forward, and is read
+fail-closed so rollback cannot reconstruct a live set below the recorded
+floor. `TruncateAfterSlot` restores spent UTxOs with an update. The
+`database/lifecycle.Truncate` refuses a target below the floor before
+`TruncateAfterSlot` begins, because already-deleted rows cannot be restored.
