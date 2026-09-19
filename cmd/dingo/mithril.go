@@ -617,6 +617,7 @@ func runMithrilSync(
 		AggregatorURL:          cfg.Mithril.AggregatorURL,
 		AllowInsecureHTTP:      cfg.Mithril.AllowInsecureHTTP,
 		DownloadDir:            cfg.Mithril.DownloadDir,
+		PinnedDigest:           cfg.Mithril.PinnedDigest,
 		DownloadIdleTimeout:    cfg.Mithril.DownloadIdleTimeout,
 		DownloadMaxIdleRetries: cfg.Mithril.DownloadMaxIdleRetries,
 		VerifyCertChain:        cfg.Mithril.VerifyCertificates,

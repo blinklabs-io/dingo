@@ -89,7 +89,7 @@ func TestRollbackWithResyncFailsFastWhenEpochReloadFailsAfterCommit(
 		fatalErr = err
 	}
 
-	rbErr := ls.rollbackWithoutResync(fixture.ancestorTip.Point)
+	rbErr := ls.rollbackWithOptions(fixture.ancestorTip.Point, false, false)
 
 	require.Error(
 		t,
@@ -138,7 +138,7 @@ func TestRollbackWithResyncSucceedsWithoutFatalWhenReloadWorks(t *testing.T) {
 		fatalCalled = true
 	}
 
-	rbErr := ls.rollbackWithoutResync(fixture.ancestorTip.Point)
+	rbErr := ls.rollbackWithOptions(fixture.ancestorTip.Point, false, false)
 
 	require.NoError(t, rbErr)
 	require.False(
@@ -325,7 +325,7 @@ func TestRollbackWithResyncFailsFastOnEachPostCommitReloadFailure(
 				fatalErrs = append(fatalErrs, err)
 			}
 
-			rbErr := ls.rollbackWithoutResync(fixture.ancestorTip.Point)
+			rbErr := ls.rollbackWithOptions(fixture.ancestorTip.Point, false, false)
 
 			var committedErr *rollbackCommittedError
 			require.ErrorAs(t, rbErr, &committedErr)

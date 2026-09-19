@@ -398,7 +398,7 @@ func TestLeiosNotifyBlockAnnouncementIsConsumedAndDeduplicated(t *testing.T) {
 	require.NoError(t, err)
 
 	o := newOuroboros(OuroborosConfig{ConnManager: cm, EnableLeios: true})
-	o.leiosEBLog.registerConn("test")
+	o.leiosEBLog.registerConn("test", nil, nil)
 	err = o.leiosnotifyClientNotification(
 		oleiosnotify.CallbackContext{ConnectionId: conn.Id()},
 		oleiosnotify.NewMsgBlockAnnouncement(headerRaw),
@@ -435,7 +435,7 @@ func TestLeiosNotifyBlockAnnouncementIsConsumedAndDeduplicated(t *testing.T) {
 	entry, _ = o.leiosEBLog.next("test")
 	require.NotNil(t, entry)
 	require.Equal(t, headerRaw, entry.announcement)
-	o.leiosEBLog.complete("test", true)
+	o.leiosEBLog.complete("test", nil, true)
 	entry, _ = o.leiosEBLog.next("test")
 	require.Nil(t, entry)
 
@@ -524,7 +524,7 @@ func TestLeiosNotifyAnnouncementOCINVerdictControlsDiffusion(t *testing.T) {
 				EnableLeios:             true,
 				LeiosAnnouncementLedger: announcementLedger,
 			})
-			o.leiosEBLog.registerConn("relay")
+			o.leiosEBLog.registerConn("relay", nil, nil)
 
 			err = o.leiosnotifyClientNotification(
 				oleiosnotify.CallbackContext{ConnectionId: conn.Id()},
@@ -1431,7 +1431,7 @@ func TestServeLeiosRankingBlockCborDisconnectsOnUnresolvedCertifiedBlock(
 	certRB := testDijkstraCertRBRaw(t, 5, make([]byte, lcommon.Blake2b256Size))
 	block := models.Block{Cbor: certRB, Slot: 5, Hash: []byte{0x05}}
 
-	got, err := o.serveLeiosRankingBlockCbor(block, gouroboros.ConnectionId{})
+	got, err := o.serveLeiosRankingBlockCbor(block, gouroboros.ConnectionId{}, nil)
 	require.Error(t, err)
 	require.ErrorIs(t, err, errLeiosClosureUnresolved)
 	require.Nil(t, got)
@@ -1447,7 +1447,7 @@ func TestServeLeiosRankingBlockCborServesRawForNonCertifiedBlock(t *testing.T) {
 	_, blockRaw := testDijkstraBlockRaw(t, 6)
 	block := models.Block{Cbor: blockRaw, Slot: 6, Hash: []byte{0x06}}
 
-	got, err := o.serveLeiosRankingBlockCbor(block, gouroboros.ConnectionId{})
+	got, err := o.serveLeiosRankingBlockCbor(block, gouroboros.ConnectionId{}, nil)
 	require.NoError(t, err)
 	require.Equal(t, []byte(blockRaw), got)
 }
@@ -1644,6 +1644,7 @@ func TestServeLeiosCertRbWithWaitErrorsOnTimeout(t *testing.T) {
 		ebHash,
 		77,
 		gouroboros.ConnectionId{},
+		nil,
 	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, errLeiosClosureUnresolved)

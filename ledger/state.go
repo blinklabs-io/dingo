@@ -1009,7 +1009,12 @@ type LedgerState struct {
 	// of the apply cursor (nil when no endorser-block fetcher is configured).
 	leiosBackfill *leiosBackfiller
 	sync.RWMutex
-	chainsyncMutex                sync.Mutex
+	chainsyncMutex sync.Mutex
+	// consumedUtxoPruneMutex serializes irreversible consumed-UTxO cleanup
+	// with rollback flows that may truncate the primary chain before restoring
+	// ledger metadata. It must never be held while acquiring chainsyncMutex;
+	// ChainSync handlers already hold chainsyncMutex when they enter rollback.
+	consumedUtxoPruneMutex        sync.Mutex
 	chainsyncBlockfetchMutex      sync.Mutex
 	chainsyncBlockfetchReadyMutex sync.Mutex
 	// bufferedHeaderMutex guards bufferedHeaderEvents alone. That map is
@@ -1069,6 +1074,25 @@ type LedgerState struct {
 	firstBlockReceived            bool                // true after latency sample recorded for this batch
 	shadowBlockReceivedHashes     map[string]struct{} // blocks delivered this batch (dedup shadow vs primary)
 	batchBlocksReceived           int                 // total blocks received in current blockfetch batch (including mid-batch flushes)
+	batchBlocksApplied            int                 // blocks from the current batch that actually extended the chain
+	// blockfetchBatchChainGeneration is the value chainRollbackGeneration
+	// held when the current batch was requested. A batch is fetched for the
+	// header queue that existed at request time; a rollback replaces both that
+	// queue and the continuation point, so every block still arriving for the
+	// older generation belongs to a chain the node has abandoned and must be
+	// discarded rather than applied (issue #3771). Guarded by
+	// chainsyncBlockfetchMutex, like the rest of the per-batch state.
+	blockfetchBatchChainGeneration uint64
+	// blockfetchDiscardConnId identifies an abandoned request whose late
+	// blocks and BatchDone must be ignored until the replacement request starts.
+	blockfetchDiscardConnId ouroboros.ConnectionId
+	// chainRollbackGeneration identifies primary-chain rollback attempts that
+	// pass undo validation. It is bumped before the chain is changed, so a
+	// reader that has observed a rollback's effect on the chain always observes
+	// the new value; a validation refusal restores the previous value under the
+	// blockfetch mutex. Written by rollback paths and read by blockfetch paths,
+	// so it is atomic.
+	chainRollbackGeneration atomic.Uint64
 	// Failures to obtain one specific queued header range, keyed by its
 	// start point and counting both a NoBlocks reply (a synchronous
 	// GetBlockRange error) and a batch that completed without delivering a
@@ -1984,14 +2008,33 @@ func (ls *LedgerState) subscribeBlockfetchEvents(
 	)
 }
 
-// loadMithrilTrustBoundary reads the persisted Mithril trust boundary. A
-// read error, or a mithril_ledger_slot row that is empty or does not parse,
-// must fail ledger start rather than silently continuing as a non-Mithril
-// database: with mithrilLedgerSlot left at its zero value, the gap-nonce heal
-// (healMithrilGapBlockNonces) no-ops and the boundary exemption in header
-// verification disappears, so header verification later fails a VRF/nonce
-// check that misattributes the cause to peers. An absent key is the
-// legitimate "not a Mithril DB" case and must continue to return nil.
+// rollbackBelowConsumedUtxoPruneFloor reports whether rolling back to point
+// would leave the live UTxO set short of outputs the consumed-UTxO sweep has
+// already removed, and returns the floor it compared against.
+//
+// The persisted sync-state row is read directly rather than mirrored in memory.
+// A mirror is only ever refreshed after the sweep's own transaction commits, so
+// between that commit and the refresh it reports a floor lower than the one the
+// database holds -- permissive in exactly the direction that re-opens the
+// silent divergence this check exists to prevent (issue #3766). A rollback is
+// rare and already opens transactions of its own, so it can afford the read.
+//
+// It fails closed: a read or parse failure is returned, and the caller refuses
+// the rollback. Treating an unreadable floor as "nothing has been swept" would
+// defeat the check exactly when the metadata store is least trustworthy.
+func (ls *LedgerState) rollbackBelowConsumedUtxoPruneFloor(
+	point ocommon.Point,
+) (bool, uint64, error) {
+	if ls.db == nil {
+		return false, 0, nil
+	}
+	floor, err := ls.db.ConsumedUtxoPruneFloor(nil)
+	if err != nil {
+		return false, 0, err
+	}
+	return floor > 0 && point.Slot < floor, floor, nil
+}
+
 func (ls *LedgerState) loadMithrilTrustBoundary() error {
 	// Read Mithril ledger state point if present. Blocks at or below
 	// this point were verified by the Mithril certificate chain during
@@ -2426,9 +2469,11 @@ func (ls *LedgerState) Close() (retErr error) {
 	// Unconditional, like the header-replay and reward-precompute waits
 	// below and unlike this function's bounded ones: returning early here
 	// would reintroduce exactly the use-after-close this is meant to
-	// prevent. A run is bounded by cleanupConsumedUtxoBatchSize -- one short
-	// delete transaction, deliberately sized so it cannot monopolize
-	// SQLite -- so there is no unbounded drain to guard against.
+	// prevent. A run may first wait for an in-flight rollback or recovery to
+	// release consumedUtxoPruneMutex; that boundary never waits for cleanup, so
+	// the two cannot form a lock cycle. Once admitted, cleanup performs one
+	// cleanupConsumedUtxoBatchSize-bounded delete transaction, deliberately
+	// sized so it cannot monopolize SQLite.
 	ls.cleanupMu.Lock()
 	if ls.timerCleanupConsumedUtxos != nil {
 		ls.timerCleanupConsumedUtxos.Stop()
@@ -3224,6 +3269,8 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 		// "absent" for a ref that was actually there (blinklabs-io/dingo#382
 		// review). Returning here just skips this run; the next periodic
 		// tick tries again from the same (or a later) floor.
+		ls.consumedUtxoPruneMutex.Lock()
+		defer ls.consumedUtxoPruneMutex.Unlock()
 		if err := ls.persistConsumedUtxoPruneFloor(floor, nil); err != nil {
 			ls.config.Logger.Error(
 				"failed to persist consumed UTxO prune floor",
@@ -3235,8 +3282,9 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 		// No lock needed here - the database handles its own consistency
 		// and we're not accessing any in-memory LedgerState fields.
 		// The tipSlot was captured above with a read lock.
-		_, err := ls.db.UtxosDeleteConsumed(
-			floor,
+		pruneSlot := tipSlot - stabilityWindow
+		pruned, err := ls.db.UtxosDeleteConsumed(
+			pruneSlot,
 			cleanupConsumedUtxoBatchSize,
 			nil,
 		)
@@ -3246,12 +3294,98 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 				"component", "ledger",
 				"error", err,
 			)
+			return
+		}
+		// These rows are gone for good: TruncateAfterSlot restores spent
+		// UTxOs with an UPDATE, which cannot reach a row that no longer
+		// exists. UtxosDeleteConsumed persisted the floor in the same
+		// transaction that removed them, so rollback already refuses to
+		// target a point below it (issue #3766).
+		if pruned > 0 {
+			ls.config.Logger.Debug(
+				"consumed UTxO sweep raised the prune floor",
+				"component", "ledger",
+				"prune_floor_slot", pruneSlot,
+				"utxos", pruned,
+			)
 		}
 	}
 }
 
+// resolveRollbackTarget returns the point a rollback will actually truncate to,
+// applying the same-slot competitor redirect whose rationale is set out at its
+// call site in LedgerState.rollback. Both
+// LedgerState.rollback and rollbackChainAndStateDeferred resolve the target before
+// deciding whether it is legal: rollbackChainAndStateDeferred truncates the primary
+// chain before it calls rollback, so checking the unresolved point there would
+// let a redirect below a boundary surface only after the chain had already
+// moved (issues #3678, #3766).
+func (ls *LedgerState) resolveRollbackTarget(
+	point ocommon.Point,
+	currentTip ochainsync.Tip,
+) (ocommon.Point, error) {
+	sameSlotCompetitor := point.Slot == currentTip.Point.Slot &&
+		!bytes.Equal(point.Hash, currentTip.Point.Hash)
+	if sameSlotCompetitor {
+		tipNonce, nonceErr := ls.db.GetBlockNonce(currentTip.Point, nil)
+		if nonceErr != nil {
+			return ocommon.Point{}, fmt.Errorf(
+				"read applied nonce for contested tip at slot %d: %w",
+				currentTip.Point.Slot,
+				nonceErr,
+			)
+		}
+		sameSlotCompetitor = len(tipNonce) > 0
+	}
+	if sameSlotCompetitor {
+		// latestLedgerPrimaryChainAncestor searches block nonces over the
+		// half-open range [start, point.Slot), so passing point already means
+		// "strictly below the contested slot". Passing point.Slot-1 would skip
+		// an applied ancestor sitting at exactly point.Slot-1.
+		ancestor, ok, ancestorErr := ls.latestLedgerPrimaryChainAncestor(
+			point,
+			false,
+		)
+		if ancestorErr != nil {
+			return ocommon.Point{}, fmt.Errorf(
+				"resolve applied ancestor below contested slot %d: %w",
+				point.Slot,
+				ancestorErr,
+			)
+		}
+		if !ok {
+			return ocommon.Point{}, fmt.Errorf(
+				"no applied ancestor below contested slot %d: %w",
+				point.Slot,
+				ErrNoAppliedAncestorBelowContestedSlot,
+			)
+		}
+		ls.config.Logger.Warn(
+			"rollback target shares the applied tip's slot with a different hash, redirecting below the contested slot",
+			"component", "ledger",
+			"contested_slot", point.Slot,
+			"rollback_hash", hex.EncodeToString(point.Hash),
+			"ledger_tip_hash", hex.EncodeToString(currentTip.Point.Hash),
+			"ancestor_slot", ancestor.Slot,
+			"ancestor_hash", hex.EncodeToString(ancestor.Hash),
+		)
+		point = ancestor
+	}
+	return point, nil
+}
+
 func (ls *LedgerState) rollback(point ocommon.Point) error {
-	return ls.rollbackWithOptions(point, false, true)
+	return ls.withConsumedUtxoPruneBoundary(func() error {
+		return ls.rollbackWithOptions(point, false, true)
+	})
+}
+
+func (ls *LedgerState) withConsumedUtxoPruneBoundary(
+	fn func() error,
+) error {
+	ls.consumedUtxoPruneMutex.Lock()
+	defer ls.consumedUtxoPruneMutex.Unlock()
+	return fn()
 }
 
 // rollbackCommittedError reports an error found after the metadata rollback
@@ -3264,10 +3398,6 @@ type rollbackCommittedError struct {
 func (e *rollbackCommittedError) Error() string { return e.err.Error() }
 
 func (e *rollbackCommittedError) Unwrap() error { return e.err }
-
-func (ls *LedgerState) rollbackWithoutResync(point ocommon.Point) error {
-	return ls.rollbackWithOptions(point, false, false)
-}
 
 func (ls *LedgerState) publishLocalLedgerRollback(point ocommon.Point) {
 	if ls.config.EventBus == nil {
@@ -3348,61 +3478,47 @@ func (ls *LedgerState) rollbackWithOptions(
 	// applied -- enforceDurableTipFloor also repairs an in-memory tip that
 	// leads the durable state -- so there is nothing at the contested slot to
 	// undo and the slot-only predicates are already correct for it.
-	sameSlotCompetitor := point.Slot == currentTip.Point.Slot &&
-		!bytes.Equal(point.Hash, currentTip.Point.Hash)
-	if sameSlotCompetitor {
-		tipNonce, nonceErr := ls.db.GetBlockNonce(currentTip.Point, nil)
-		if nonceErr != nil {
-			return fmt.Errorf(
-				"read applied nonce for contested tip at slot %d: %w",
-				currentTip.Point.Slot,
-				nonceErr,
-			)
-		}
-		sameSlotCompetitor = len(tipNonce) > 0
+	resolved, resolveErr := ls.resolveRollbackTarget(point, currentTip)
+	if resolveErr != nil {
+		return resolveErr
 	}
-	if sameSlotCompetitor {
-		// latestLedgerPrimaryChainAncestor searches block nonces over the
-		// half-open range [start, point.Slot), so passing point already means
-		// "strictly below the contested slot". Passing point.Slot-1 would skip
-		// an applied ancestor sitting at exactly point.Slot-1.
-		ancestor, ok, ancestorErr := ls.latestLedgerPrimaryChainAncestor(
-			point,
-			false,
-		)
-		if ancestorErr != nil {
-			return fmt.Errorf(
-				"resolve applied ancestor below contested slot %d: %w",
-				point.Slot,
-				ancestorErr,
-			)
-		}
-		if !ok {
-			return fmt.Errorf(
-				"no applied ancestor below contested slot %d: %w",
-				point.Slot,
-				ErrNoAppliedAncestorBelowContestedSlot,
-			)
-		}
-		ls.config.Logger.Warn(
-			"rollback target shares the applied tip's slot with a different hash, redirecting below the contested slot",
-			"component",
-			"ledger",
-			"contested_slot",
-			point.Slot,
-			"rollback_hash",
-			hex.EncodeToString(point.Hash),
-			"ledger_tip_hash",
-			hex.EncodeToString(currentTip.Point.Hash),
-			"ancestor_slot",
-			ancestor.Slot,
-			"ancestor_hash",
-			hex.EncodeToString(ancestor.Hash),
-		)
-		point = ancestor
-	}
+	point = resolved
 	if mithrilLedgerSlot > 0 && point.Slot < mithrilLedgerSlot {
 		return ErrRollbackExceedsMithrilBoundary
+	}
+	// Refuse a target the consumed-UTxO sweep has already made unrestorable.
+	// TruncateAfterSlot restores spent UTxOs with an UPDATE keyed on
+	// deleted_slot, so rows the sweep hard-deleted cannot come back; rolling
+	// back below the sweep floor would move the tip and report a repair while
+	// leaving the live set short of every output consumed above the target.
+	// Refusing before any mutation leaves the ledger where it was (issue
+	// #3766).
+	belowPruneFloor, pruneFloor, floorErr := ls.rollbackBelowConsumedUtxoPruneFloor(
+		point,
+	)
+	if floorErr != nil {
+		return fmt.Errorf(
+			"determine consumed UTxO prune floor: %w",
+			floorErr,
+		)
+	}
+	if belowPruneFloor {
+		ls.config.Logger.Error(
+			"rollback target is below the consumed UTxO prune floor, refusing to rewind",
+			"component", "ledger",
+			"rollback_slot", point.Slot,
+			"rollback_hash", hex.EncodeToString(point.Hash),
+			"ledger_tip_slot", currentTip.Point.Slot,
+			"utxo_prune_floor_slot", pruneFloor,
+			"hint",
+			"UTxOs consumed above the prune floor were hard-deleted and cannot be restored by a rewind",
+		)
+		return fmt.Errorf(
+			"%w: target slot %d, prune floor %d",
+			ErrRollbackBelowUtxoPruneFloor,
+			point.Slot,
+			pruneFloor,
+		)
 	}
 	// Bracket every rollback mutation so split reward precomputation cannot
 	// persist results that mixed pre- and post-rollback blocks, pots, protocol
@@ -3782,7 +3898,7 @@ func (ls *LedgerState) rollbackWithOptions(
 		"component",
 		"ledger",
 	)
-	floorErr := ls.enforceDurableTipFloor()
+	floorErr = ls.enforceDurableTipFloor()
 	if postCommitReloadErr != nil {
 		// The metadata rollback already committed and ls.currentTip already
 		// reflects it, but epochCache/currentEra/currentPParams (or the
@@ -3791,7 +3907,7 @@ func (ls *LedgerState) rollbackWithOptions(
 		// holding a pre-rollback value that no longer matches the database.
 		// Call FatalErrorFunc directly, rather than relying on whichever
 		// caller happens to be on the stack to notice the returned error and
-		// escalate it, so every caller of rollback/rollbackWithoutResync
+		// escalate it, so every caller of rollback/rollbackWithOptions
 		// gets the same guarantee: a supervised restart reloads this state
 		// fresh from the database before the next block is validated
 		// against it. This runs even when the tip-floor check failed too:
@@ -3917,11 +4033,48 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 	point ocommon.Point,
 	pubs *pendingPublishes,
 ) error {
+	ls.consumedUtxoPruneMutex.Lock()
+	defer ls.consumedUtxoPruneMutex.Unlock()
 	ls.RLock()
 	mithrilLedgerSlot := ls.mithrilLedgerSlot
+	currentTip := ls.currentTip
 	ls.RUnlock()
-	if mithrilLedgerSlot > 0 && point.Slot < mithrilLedgerSlot {
+	// Check the boundaries here as well as in ls.rollback: this function
+	// truncates the primary chain first and synchronizes the ledger
+	// afterwards, so a refusal raised only by ls.rollback would leave the
+	// chain rewound past a point the ledger cannot follow.
+	//
+	// Both checks run against the *resolved* target. ls.rollback redirects a
+	// same-slot competitor to the newest applied ancestor strictly below the
+	// contested slot, so a target sitting exactly on a boundary can resolve to
+	// one below it; checking the unresolved point would admit it here and
+	// refuse it only after chain.Rollback had already run (issues #3678,
+	// #3766). The tip can still move between this check and ls.rollback's own
+	// -- the pre-existing Mithril check has the same window -- and ls.rollback
+	// remains the backstop that refuses before mutating the ledger.
+	resolved, resolveErr := ls.resolveRollbackTarget(point, currentTip)
+	if resolveErr != nil {
+		return resolveErr
+	}
+	if mithrilLedgerSlot > 0 && resolved.Slot < mithrilLedgerSlot {
 		return ErrRollbackExceedsMithrilBoundary
+	}
+	belowPruneFloor, pruneFloor, floorErr := ls.rollbackBelowConsumedUtxoPruneFloor(
+		resolved,
+	)
+	if floorErr != nil {
+		return fmt.Errorf(
+			"determine consumed UTxO prune floor: %w",
+			floorErr,
+		)
+	}
+	if belowPruneFloor {
+		return fmt.Errorf(
+			"%w: target slot %d, prune floor %d",
+			ErrRollbackBelowUtxoPruneFloor,
+			resolved.Slot,
+			pruneFloor,
+		)
 	}
 	// Exclude ledgerReadChainIterator's gather-then-submit cycle for the
 	// entire remainder of this function -- see blockPipelineGatherMutex's
@@ -3972,9 +4125,26 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 	// Exclude that window so blocksAboveSlot can never publish an Undo for the
 	// new state before the matching Apply reaches the ordered lane.
 	err := func() error {
+		ls.chainsyncBlockfetchMutex.Lock()
+		defer ls.chainsyncBlockfetchMutex.Unlock()
+		priorGeneration := ls.chainRollbackGeneration.Load()
+		ls.chainRollbackGeneration.Add(1)
 		ls.transactionEventMutex.Lock()
 		defer ls.transactionEventMutex.Unlock()
 		if err := ls.validateAndEmitRollbackUndo(point); err != nil {
+			// Validation refused the point before the chain was touched --
+			// over-K, ErrRollbackPointNotOnChain, or models.ErrBlockNotFound,
+			// all of which handleEventChainsyncRollback treats as
+			// recoverable. Restore the generation so an in-flight batch is
+			// not discarded for a rollback that never happened: a discard
+			// leaves batchBlocksApplied at zero, and
+			// handleEventBlockfetchBatchDone feeds that into the same-range
+			// failure streak, so blockfetchMaxSameRangeFailures refusals
+			// would drop a perfectly good header range. Both the bump and
+			// this restore run under chainsyncBlockfetchMutex, which every
+			// blockfetchBatchStillCurrent reader also holds, so no reader can
+			// observe the intermediate value.
+			ls.chainRollbackGeneration.Store(priorGeneration)
 			return err
 		}
 		if _, rbErr := ls.chain.RollbackDeferred(point); rbErr != nil {
@@ -4000,7 +4170,7 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 	// dropped and no chain.update is produced at all). drainChain is
 	// idempotent per chain.
 	pubs.drainChain(ls.chain)
-	if err := ls.rollback(point); err != nil {
+	if err := ls.rollbackWithOptions(point, false, true); err != nil {
 		// ls.rollback can fail with the ledger already sitting on the
 		// rollback point: the no-op branch it takes when the tip
 		// already matches returns enforceDurableTipFloor's error
@@ -7032,6 +7202,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 							snapshotPParams,
 							snapshotPrevEraPParams,
 							snapshotEpoch.EpochId,
+							snapshotEpoch.StartSlot,
 							snapshotSyntheticV2CostModel,
 						)
 						if err != nil {
@@ -7385,6 +7556,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	pparams lcommon.ProtocolParameters,
 	prevEraPParams lcommon.ProtocolParameters,
 	committeeEpoch uint64,
+	epochStartSlot uint64,
 	syntheticV2CostModel bool,
 ) (*LedgerDelta, error) {
 	// Check that we're processing things in order
@@ -7748,6 +7920,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 					// block can cost an entire epoch of horizon and reject a
 					// canonical Plutus transaction (issue #3844).
 					horizonAnchorSlot: parent.slot,
+					epochStartSlot:    epochStartSlot,
 				}).pinCommitteeState(committeeEpoch, pp).
 					pinSyntheticV2CostModel(synthetic)
 				validateStart := time.Now()
@@ -8175,27 +8348,33 @@ func (ls *LedgerState) reconstructTransitionInfo() {
 	}
 }
 
-// eraShape returns the resolved hardfork.Shape for this LedgerState's
-// CardanoNodeConfig, building and caching it on first access. cfg is
-// immutable for the LedgerState's lifetime, so the cached shape is too.
-//
-// Returns an empty Shape (no error) when CardanoNodeConfig is unset or when
-// BuildShape fails; callers must treat an empty Shape as "shape unavailable"
-// and skip shape-derived work.
-func (ls *LedgerState) eraShape() hardfork.Shape {
+// eraShapeWithError returns the resolved hardfork.Shape for this LedgerState's
+// CardanoNodeConfig, building and caching it on first access. cfg is immutable
+// for the LedgerState's lifetime, so the cached shape is too.
+func (ls *LedgerState) eraShapeWithError() (hardfork.Shape, error) {
 	if s := ls.cachedShape.Load(); s != nil {
-		return *s
+		return *s, nil
 	}
 	cfg := ls.config.CardanoNodeConfig
 	if cfg == nil {
-		return hardfork.Shape{}
+		return hardfork.Shape{}, errors.New(
+			"cardano node config is unavailable",
+		)
 	}
 	s, err := eras.BuildShapeWithDijkstra(cfg, ls.config.EnableDijkstra)
 	if err != nil {
-		return hardfork.Shape{}
+		return hardfork.Shape{}, fmt.Errorf("build hard-fork shape: %w", err)
 	}
 	ls.cachedShape.CompareAndSwap(nil, &s)
-	return *ls.cachedShape.Load()
+	return *ls.cachedShape.Load(), nil
+}
+
+// eraShape returns the resolved hardfork.Shape, or an empty Shape when the
+// node configuration cannot supply one. Callers that use the shape as a
+// consensus forecast must call eraShapeWithError and fail closed instead.
+func (ls *LedgerState) eraShape() hardfork.Shape {
+	shape, _ := ls.eraShapeWithError()
+	return shape
 }
 
 // evaluateTriggerAtEpoch sets transitionInfo to TransitionKnown(e) when the
@@ -8320,10 +8499,10 @@ func (ls *LedgerState) evaluateProtocolVersionBump() {
 	if ls.currentPParams == nil {
 		return
 	}
-	forecasted := ls.forecastPendingPParamUpdate(
+	forecasted, err := ls.forecastPendingPParamUpdate(
 		ls.currentEra, targetEpoch, ls.currentPParams,
 	)
-	if forecasted == nil {
+	if err != nil || forecasted == nil {
 		return
 	}
 	oldVer, oldErr := GetProtocolVersion(ls.currentPParams)
@@ -9309,6 +9488,8 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 	if ls.chain == nil || ls.config.ChainManager == nil {
 		return nil
 	}
+	ls.consumedUtxoPruneMutex.Lock()
+	defer ls.consumedUtxoPruneMutex.Unlock()
 	ls.RLock()
 	ledgerTip := ls.currentTip
 	ls.RUnlock()
@@ -9400,7 +9581,7 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 			// validateAndEmitRollbackUndo contract, and the next
 			// reconciliation attempt lands right back in this same
 			// branch and retries both.
-			if err := ls.rollbackWithoutResync(chainTip.Point); err != nil {
+			if err := ls.rollbackWithOptions(chainTip.Point, false, false); err != nil {
 				if _, ok := errors.AsType[*rollbackCommittedError](err); ok {
 					ls.emitRollbackTransactionEvents(undoBlocks)
 				}
@@ -9667,7 +9848,7 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		// TestReconcilePrimaryChainTipWithLedgerTipRecoversUndoAfterCrashBetweenRewindAndEmit).
 		// A true durable, atomic handoff across every rollback path --
 		// not just this one -- is tracked as issue #3817.
-		if err := ls.rollbackWithoutResync(ancestor); err != nil {
+		if err := ls.rollbackWithOptions(ancestor, false, false); err != nil {
 			if _, ok := errors.AsType[*rollbackCommittedError](err); ok {
 				ls.emitRollbackTransactionEvents(undoBlocks)
 			}
@@ -9926,7 +10107,7 @@ func (ls *LedgerState) enforceDurableTipFloor() error {
 		"applied_floor_hash",
 		hex.EncodeToString(floor.Hash),
 	)
-	return ls.rollback(floor)
+	return ls.rollbackWithOptions(floor, false, true)
 }
 
 func (ls *LedgerState) latestLedgerPrimaryChainAncestor(
@@ -10728,6 +10909,8 @@ func (ls *LedgerState) GetCurrentPParamsForReporting() lcommon.ProtocolParameter
 // schedule was produced — administrative overrides, on-chain update
 // proposals, or HardForkInitiation gov actions all surface as
 // TriggerAtEpoch entries on the shape.
+// A future epoch whose configured shape or current era is unavailable returns
+// nil so callers cannot forge or verify it using stale current parameters.
 func (ls *LedgerState) ProtocolParamsForSlot(
 	slot uint64,
 ) lcommon.ProtocolParameters {
@@ -10768,9 +10951,12 @@ func (ls *LedgerState) ProtocolParamsForSlot(
 	if slotEpoch <= currentEpoch.EpochId {
 		return currentPParams
 	}
-	shape := ls.eraShape()
-	if len(shape.Eras) == 0 {
-		return currentPParams
+	shape, err := ls.eraShapeWithError()
+	if err != nil {
+		return nil
+	}
+	if _, ok := shape.EraForID(currentEra.Id); !ok {
+		return nil
 	}
 	pparams := currentPParams
 	// Before walking any era hard fork, apply the pending in-era
@@ -10785,9 +10971,13 @@ func (ls *LedgerState) ProtocolParamsForSlot(
 	// the already-collected proposals, so it does not depend on the
 	// target epoch's pparams row being persisted yet (it is not, during
 	// from-genesis before the node has ticked into that epoch).
-	if updated := ls.forecastPendingPParamUpdate(
+	updated, err := ls.forecastPendingPParamUpdate(
 		currentEra, currentEpoch.EpochId+1, pparams,
-	); updated != nil {
+	)
+	if err != nil {
+		return nil
+	}
+	if updated != nil {
 		pparams = updated
 	}
 	// Walk forward from the current era, applying each successor's
@@ -10808,7 +10998,7 @@ func (ls *LedgerState) ProtocolParamsForSlot(
 		nextID := eraID + 1
 		nextEraPtr, ok := ls.eraById(nextID)
 		if !ok || nextEraPtr == nil {
-			break
+			return nil
 		}
 		nextEra := *nextEraPtr
 		if nextEra.HardForkFunc == nil {
@@ -10828,7 +11018,7 @@ func (ls *LedgerState) ProtocolParamsForSlot(
 				"to_era", nextID,
 				"error", err,
 			)
-			return currentPParams
+			return nil
 		}
 		pparams = newPParams
 		eraID = nextID
@@ -10844,17 +11034,18 @@ func (ls *LedgerState) ProtocolParamsForSlot(
 // snapshot is never touched, and it performs no writes. It returns nil when
 // there is nothing to apply — no DB, missing era update funcs, or no
 // proposal meeting quorum for targetEpoch — in which case the caller keeps
-// the era-fork-only forecast, identical to prior behavior.
+// the era-fork-only forecast. Database, decode, clone, and apply failures return
+// an error so the caller cannot mistake a failed forecast for no pending update.
 func (ls *LedgerState) forecastPendingPParamUpdate(
 	era eras.EraDesc,
 	targetEpoch uint64,
 	pparams lcommon.ProtocolParameters,
-) lcommon.ProtocolParameters {
+) (lcommon.ProtocolParameters, error) {
 	if ls.db == nil ||
 		pparams == nil ||
 		era.DecodePParamsUpdateFunc == nil ||
 		era.PParamsUpdateFunc == nil {
-		return nil
+		return nil, nil
 	}
 	// Quorum is the Shelley-genesis updateQuorum, exactly as the rollover
 	// uses when enacting the same proposals (processEpochRollover).
@@ -10886,9 +11077,9 @@ func (ls *LedgerState) forecastPendingPParamUpdate(
 			"era", era.Id,
 			"error", err,
 		)
-		return nil
+		return nil, err
 	}
-	return updated
+	return updated, nil
 }
 
 // CurrentEpoch returns the current epoch number.
@@ -10917,9 +11108,17 @@ func (ls *LedgerState) CurrentEpoch() uint64 {
 //     overrides surface here too), advancing once per scheduled
 //     boundary at-or-before the target epoch.
 //  4. Fall back to the current era if nothing applies.
+//
+// Step 3 is a forecast, so it fails closed: an era shape the node
+// configuration cannot supply returns an error rather than the current
+// era's mode. Silently answering with the current era's mode for a future
+// epoch is what a scheduled hard fork changes, and the wrong mode changes
+// both the VRF leader-value derivation and the threshold, so callers must
+// decline to answer instead of producing a mode nothing established.
+// Steps 1, 2 and 4 read state the node already holds and never error.
 func (ls *LedgerState) ConsensusModeForEpoch(
 	epoch uint64,
-) consensus.ConsensusMode {
+) (consensus.ConsensusMode, error) {
 	snapshot := ls.loadConsensusSnapshot()
 	cache := snapshot.epochCache
 	currentEra := snapshot.currentEra
@@ -10928,12 +11127,12 @@ func (ls *LedgerState) ConsensusModeForEpoch(
 
 	for _, e := range cache {
 		if e.EpochId == epoch {
-			return consensusModeForEraID(e.EraId)
+			return consensusModeForEraID(e.EraId), nil
 		}
 	}
 
 	if epoch <= currentEpoch.EpochId {
-		return consensusModeForEraID(currentEra.Id)
+		return consensusModeForEraID(currentEra.Id), nil
 	}
 
 	// HardForkInitiation path: if a confirmed transition pins the next
@@ -10946,15 +11145,33 @@ func (ls *LedgerState) ConsensusModeForEpoch(
 		epoch >= transitionInfo.KnownEpoch {
 		nextID := currentEra.Id + 1
 		if _, ok := ls.eraById(nextID); ok {
-			return consensusModeForEraID(nextID)
+			return consensusModeForEraID(nextID), nil
 		}
 	}
 
-	shape := ls.eraShape()
+	shape, err := ls.eraShapeWithError()
+	if err != nil {
+		return 0, fmt.Errorf(
+			"consensus mode for epoch %d is unresolvable: %w",
+			epoch,
+			err,
+		)
+	}
 	eraID := currentEra.Id
 	for {
 		entry, ok := shape.EraForID(eraID)
-		if !ok || entry.NextEraTrigger.Kind != hardfork.TriggerAtEpoch {
+		if !ok {
+			// An era missing from the shape stops the walk before it can
+			// rule out a scheduled fork at or before the target epoch, so
+			// the forecast is unresolvable rather than "no fork".
+			return 0, fmt.Errorf(
+				"consensus mode for epoch %d is unresolvable: "+
+					"era %d is unavailable in the hard-fork shape",
+				epoch,
+				eraID,
+			)
+		}
+		if entry.NextEraTrigger.Kind != hardfork.TriggerAtEpoch {
 			break
 		}
 		if entry.NextEraTrigger.Epoch > epoch {
@@ -10962,11 +11179,16 @@ func (ls *LedgerState) ConsensusModeForEpoch(
 		}
 		nextID := eraID + 1
 		if _, ok := ls.eraById(nextID); !ok {
-			break
+			return 0, fmt.Errorf(
+				"consensus mode for epoch %d is unresolvable: "+
+					"successor era %d is unavailable",
+				epoch,
+				nextID,
+			)
 		}
 		eraID = nextID
 	}
-	return consensusModeForEraID(eraID)
+	return consensusModeForEraID(eraID), nil
 }
 
 // consensusModeForEraID maps an era ID to its Praos consensus variant.
@@ -11287,6 +11509,7 @@ func (ls *LedgerState) NewView(txn *database.Txn) *LedgerView {
 	if snapshot == nil {
 		return view
 	}
+	view.epochStartSlot = snapshot.currentEpoch.StartSlot
 	return view.pinCommitteeState(
 		snapshot.currentEpoch.EpochId,
 		snapshot.currentPParams,
@@ -11605,6 +11828,7 @@ type txValidationSnapshot struct {
 	eraList                      []eras.EraDesc
 	referenceSlot                uint64
 	currentEpoch                 uint64
+	currentEpochStartSlot        uint64
 	syntheticV2CostModelInEffect bool
 }
 
@@ -11634,6 +11858,7 @@ func (ls *LedgerState) txValidationSnapshot() txValidationSnapshot {
 			currentSlotErr,
 		),
 		currentEpoch:                 consensusState.currentEpoch.EpochId,
+		currentEpochStartSlot:        consensusState.currentEpoch.StartSlot,
 		syntheticV2CostModelInEffect: consensusState.syntheticV2CostModelInEffect,
 	}
 }
@@ -11698,6 +11923,7 @@ func (ls *LedgerState) WithTxValidationSession(
 				ls:              ls,
 				intraBlockUtxos: createdUtxos,
 				consumedUtxos:   consumedUtxos,
+				epochStartSlot:  snapshot.currentEpochStartSlot,
 			}).pinCommitteeState(snapshot.currentEpoch, pp).
 				pinSyntheticV2CostModel(synthetic)
 			err = validationEra.ValidateTxFunc(
@@ -11759,7 +11985,9 @@ func (ls *LedgerState) validateTxCore(
 		txn := ls.db.Transaction(false)
 		var lv *LedgerView
 		err := txn.Do(func(txn *database.Txn) error {
-			lv = buildLV(txn).pinCommitteeState(snapshot.currentEpoch, pp).
+			lv = buildLV(txn)
+			lv.epochStartSlot = snapshot.currentEpochStartSlot
+			lv = lv.pinCommitteeState(snapshot.currentEpoch, pp).
 				pinSyntheticV2CostModel(synthetic)
 			return validationEra.ValidateTxFunc(
 				tx,
@@ -11848,8 +12076,9 @@ func (ls *LedgerState) EvaluateTx(
 		var lv *LedgerView
 		err := txn.Do(func(txn *database.Txn) error {
 			lv = (&LedgerView{
-				txn: txn,
-				ls:  ls,
+				txn:            txn,
+				ls:             ls,
+				epochStartSlot: consensusState.currentEpoch.StartSlot,
 			}).pinCommitteeState(
 				consensusState.currentEpoch.EpochId,
 				pp,
