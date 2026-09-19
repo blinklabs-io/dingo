@@ -343,16 +343,26 @@ func (s *Store) MarkUtxosDeletedAtSlot(
 			if err != nil {
 				return err
 			}
-			chunkSize := (s.dialect.ParameterLimit() - 1) / 2
-			for start := 0; start < len(ids); start += chunkSize {
-				end := min(start+chunkSize, len(ids))
-				predicate, args := utxoIDPredicate(ids[start:end])
-				args = append([]any{slot}, args...)
+			rowIDs, err := queryUtxoRowIDs(ctx, db, ids)
+			if err != nil {
+				return err
+			}
+			chunkSize := s.dialect.ParameterLimit() - 1
+			for start := 0; start < len(rowIDs); start += chunkSize {
+				end := min(start+chunkSize, len(rowIDs))
+				args := make([]any, end-start+1)
+				args[0] = slot
+				placeholders := make([]string, end-start)
+				for i, rowID := range rowIDs[start:end] {
+					placeholders[i] = "?"
+					args[i+1] = rowID
+				}
 				if _, err := db.ExecContext(
 					ctx,
 					s.dialect.Rebind(
 						"UPDATE utxo SET deleted_slot = ? "+
-							"WHERE deleted_slot = 0 AND ("+predicate+")",
+							"WHERE deleted_slot = 0 AND id IN ("+
+							strings.Join(placeholders, ",")+")",
 					),
 					args...,
 				); err != nil {
@@ -1158,6 +1168,83 @@ func utxoIDPredicate(ids []models.UtxoId) (string, []any) {
 		args = append(args, ids[i].Hash, ids[i].Idx)
 	}
 	return strings.Join(parts, " OR "), args
+}
+
+// utxoRowIDsByTxIDQuery returns the index-friendly first half of
+// MarkUtxosDeletedAtSlot's two-step update. Querying the distinct tx_id
+// values avoids the OR-of-pairs predicate that makes SQLite prefer a
+// deleted_slot index over tx_id_output_idx for larger batches. The caller
+// filters the returned rows to the requested output indexes before updating
+// their primary keys in the same write transaction.
+func utxoRowIDsByTxIDQuery(ids []models.UtxoId) (string, []any) {
+	txIDs, _ := distinctUtxoTxIDs(ids)
+	args := make([]any, len(txIDs))
+	for i, txID := range txIDs {
+		args[i] = txID
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(txIDs)), ",")
+	return "SELECT id, tx_id, output_idx FROM utxo WHERE tx_id IN (" +
+		placeholders + ")", args
+}
+
+// queryUtxoRowIDs resolves the primary keys of exactly the requested UTxO
+// references. It deliberately reads every output for the requested tx_id
+// values, then applies output-index matching in Go: adding a deleted_slot
+// predicate or an OR of exact pairs makes SQLite abandon tx_id_output_idx.
+// The caller keeps this lookup and its primary-key update in one write
+// transaction, so no other writer can change the selected rows in between.
+func queryUtxoRowIDs(
+	ctx context.Context,
+	db queryer,
+	ids []models.UtxoId,
+) ([]int64, error) {
+	ids = dedupeUtxoIDs(ids)
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	_, wanted := distinctUtxoTxIDs(ids)
+	rowIDs := make([]int64, 0, len(ids))
+	seen := make(map[int64]struct{}, len(ids))
+	for start := 0; start < len(ids); start += 400 {
+		end := min(start+400, len(ids))
+		query, args := utxoRowIDsByTxIDQuery(ids[start:end])
+		rows, err := db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var rowID int64
+			var txID []byte
+			var outputIdx sql.NullInt64
+			if err := rows.Scan(&rowID, &txID, &outputIdx); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			if !outputIdx.Valid || outputIdx.Int64 < 0 ||
+				outputIdx.Int64 > math.MaxUint32 {
+				continue
+			}
+			outputs, ok := wanted[string(txID)]
+			if !ok {
+				continue
+			}
+			if _, ok := outputs[uint32(outputIdx.Int64)]; ok {
+				if _, ok := seen[rowID]; ok {
+					continue
+				}
+				seen[rowID] = struct{}{}
+				rowIDs = append(rowIDs, rowID)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return rowIDs, nil
 }
 
 func (s *Store) GetUtxo(

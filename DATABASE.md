@@ -2371,22 +2371,18 @@ Batched live-UTxO lookup by a list of (tx hash, output index) references —
 used by the `GetUTxOByTxIn` n2c query and the `utxorpc` `ReadUtxos` RPC to
 resolve multiple TxIns/keys in one round trip instead of one query per input
 (#392). Refs with no matching live UTxO are simply absent from the result;
-callers must not treat a partial result as an error. Builds an OR-chain of
-`(tx_id = ? AND output_idx = ?)` predicates — the same portable pattern used
-by `MarkUtxosDeletedAtSlot`/`utxoIDPredicate` elsewhere in this file — chunked
-at 400 refs (800 bind variables) to stay within SQLite's conservative
-999-parameter limit:
+callers must not treat a partial result as an error. It groups the requested
+references by distinct transaction hash, queries every output for batches of
+up to 400 hashes, then filters to the requested output indexes and live rows in
+Go. This keeps SQLite on the leading column of `tx_id_output_idx`; combining a
+large OR-chain of exact pairs with `deleted_slot = 0` can otherwise make the
+planner scan a deleted-slot index instead.
 
 ```sql
 SELECT u.*, a.*
 FROM utxo u
 LEFT JOIN asset a ON a.utxo_id = u.id
-WHERE u.deleted_slot = 0
-  AND (
-    (u.tx_id = decode($1, 'hex') AND u.output_idx = $2)
-    OR (u.tx_id = decode($3, 'hex') AND u.output_idx = $4)
-    -- ... one pair of bind variables per requested ref
-  );
+WHERE u.tx_id IN (decode($1, 'hex'), decode($2, 'hex'));
 ```
 
 ### `GetUtxosByRefsAsOf`
@@ -2394,24 +2390,18 @@ WHERE u.deleted_slot = 0
 `GetUtxosByRefs`'s point-pinned sibling (blinklabs-io/dingo#382/#1900), used
 by the point-pinned `GetUTxOByTxIn` n2c query
 (`ledger.LedgerState.queryShelleyUtxoByTxIn`) when the LocalStateQuery
-session has an acquired point. Same chunked OR-predicate shape and 400-ref
-chunking as `GetUtxosByRefs`, plus two extra bind variables per chunk for
-the as-of-slot bound: a row matches when it was created at-or-before the
-pinned slot and is either still live or was spent strictly after it —
-`added_slot`/`deleted_slot` already carry exactly that per-row history, so
-this is a real historical reconstruction rather than an approximation:
+session has an acquired point. It uses the same transaction-hash lookup shape
+as `GetUtxosByRefs`, then filters in Go to requested output indexes and to the
+as-of-slot bounds: a row matches when it was created at-or-before the pinned
+slot and is either still live or was spent strictly after it —
+`added_slot`/`deleted_slot` already carry exactly that per-row history, so this
+is a real historical reconstruction rather than an approximation:
 
 ```sql
 SELECT u.*, a.*
 FROM utxo u
 LEFT JOIN asset a ON a.utxo_id = u.id
-WHERE u.added_slot <= $1
-  AND (u.deleted_slot = 0 OR u.deleted_slot > $2)
-  AND (
-    (u.tx_id = decode($3, 'hex') AND u.output_idx = $4)
-    OR (u.tx_id = decode($5, 'hex') AND u.output_idx = $6)
-    -- ... one pair of bind variables per requested ref
-  );
+WHERE u.tx_id IN (decode($1, 'hex'), decode($2, 'hex'));
 ```
 
 A ref this query does not return is ambiguous once the pinned slot is old
@@ -2426,6 +2416,28 @@ mirroring `UtxosDeleteConsumed`'s own pruning threshold exactly) with
 `ErrHistoricalStateUnavailable` before calling this, rather than trust a
 possibly-incomplete result. API storage mode never prunes spent rows at
 all, so no floor applies there.
+
+### `MarkUtxosDeletedAtSlot`
+
+This batched mutation resolves the primary keys of the requested
+`(tx_id, output_idx)` pairs by transaction-hash batches, filters sibling
+outputs in Go, then updates the selected keys in the caller's existing write
+transaction. The update still requires `deleted_slot = 0`, so already-spent
+rows remain unchanged. Keeping lookup and update in one write transaction
+preserves SQLite's single-writer safety while avoiding a large OR-chain whose
+`deleted_slot = 0` predicate can defeat `tx_id_output_idx`.
+
+```sql
+SELECT id, tx_id, output_idx
+FROM utxo
+WHERE tx_id IN (decode($1, 'hex'), decode($2, 'hex'));
+
+-- After exact-pair filtering in Go:
+UPDATE utxo
+SET deleted_slot = $1
+WHERE deleted_slot = 0
+  AND id IN ($2, $3);
+```
 
 ### `SaveRewardAccountOutputs` ID resolution
 
