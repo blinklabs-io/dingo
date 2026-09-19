@@ -356,12 +356,19 @@ func TestPublishBlocksOnFullChannelUntilDrained(t *testing.T) {
 	typ := EventType("backpressure.test")
 
 	const buffer = 64
-	_, ch := eb.SubscribeWithBuffer(typ, buffer)
+	subId, ch := eb.SubscribeWithBuffer(typ, buffer)
 
 	// Fill the subscriber's channel buffer completely.
 	for i := range buffer {
 		eb.Publish(typ, NewEvent(typ, i))
 	}
+
+	// Synchronize on deliverWait's full-buffer wait path rather than on the
+	// overflow goroutine merely starting: the goroutine can pause after
+	// close(started) but before Publish reaches its blocking send, which
+	// would let the checks below pass without proving delivery blocked.
+	blocked := make(chan struct{})
+	eb.channelSubsById[subId].onBlocked = func() { close(blocked) }
 
 	done := make(chan struct{})
 	go func() {
@@ -369,10 +376,12 @@ func TestPublishBlocksOnFullChannelUntilDrained(t *testing.T) {
 		eb.Publish(typ, NewEvent(typ, "overflow"))
 	}()
 
+	<-blocked
+	require.Len(t, ch, cap(ch), "the subscriber buffer must be full")
 	select {
 	case <-done:
 		t.Fatal("Publish returned while the subscriber buffer was full")
-	case <-time.After(50 * time.Millisecond):
+	default:
 		// Expected: the publisher is backpressured.
 	}
 
