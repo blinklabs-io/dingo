@@ -12193,6 +12193,40 @@ state. A single decode failure anywhere in a batch discards the whole
 batch, matching the pre-pipeline behavior of never handing a
 partially-decoded batch downstream.
 
+**Coalescing a gather pass's premature flush (dingo#4464).** Each gather pass
+fills `rawBatch` (capacity `batchSize`, 50) by calling the chain iterator's
+non-blocking `Next(false)` until either the batch is full or a call returns
+`chain.ErrIteratorChainTip`. A single reported cause of dingo#4464's SQLite
+write amplification was that the second condition alone used to flush
+immediately, even with only one or two blocks gathered: during bulk replay a
+momentary `ErrIteratorChainTip` commonly means the goroutine appending blocks
+to `ls.chain` is a beat behind this reader, not that the chain stopped
+growing. `ledgerReadChainIterator` now gives that case a short bounded chance
+to catch up — up to `gatherCoalesceMaxAttempts` retries (default 10) spaced
+`gatherCoalesceRetryInterval` apart (default 2ms) — but only while
+`ls.isNearTip(rawBatch[len(rawBatch)-1].Slot)` is false and `rawBatch` already
+holds at least one real block. Once near the live upstream tip, the wait is
+skipped entirely: a solitary new block still commits immediately, matching
+the pre-existing latency behavior. Unlike the genuinely-blocking wait for a
+still-empty batch, this wait deliberately does **not** release
+`blockPipelineGatherMutex`: `rawBatch` already holds real gathered blocks a
+concurrent rollback must not race ahead of, for the same reason the lock
+stays held through `decodeReadChainBatch` (see `gatherLockHeld`'s doc
+comment) — releasing it here would let a rollback's write lock be granted,
+see an empty `blockPipeline` via `drainBlockPipelineBeforeRollback`, and
+proceed before this pass's already-gathered blocks are submitted, reopening
+the exact race `blockPipelineGatherMutex` exists to close. The bound on that
+wait is per gap rather than per gather pass — the attempt counter is reset
+each time a block is appended — so a rollback blocked on the write lock waits
+up to `batchSize*gatherCoalesceMaxAttempts*gatherCoalesceRetryInterval` (about
+1s at the defaults) in the worst case, and about
+`batchSize*gatherCoalesceRetryInterval` (100ms) when each gap resolves on its
+first retry. That is accepted because the wait is gated on `!isNearTip` and so
+applies only while catching up, where rollbacks are rare and no forging
+depends on them. The `dingo_ledger_commit_batch_blocks` histogram records
+`len(nextBatch)` at every non-empty submission so the effect on the batch-size
+distribution is observable without re-running a full disk-I/O measurement.
+
 The pipeline is started in `LedgerState.Start` (before the goroutine that
 is its only submitter) and stopped in `Close` (after that goroutine has
 drained), bounded by `CloseBlockPipelineDrainTimeout`, so its worker

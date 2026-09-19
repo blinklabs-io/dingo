@@ -68,6 +68,26 @@ import (
 // shrink it instead of waiting on a real multi-minute timer.
 var cleanupConsumedUtxosInterval = 5 * time.Minute
 
+// gatherCoalesceRetryInterval and gatherCoalesceMaxAttempts bound how long
+// ledgerReadChainIterator's batch-gather loop will wait, after a non-blocking
+// iter.Next(false) reports chain.ErrIteratorChainTip, for more blocks to
+// become available before flushing an under-full batch -- but only while the
+// ledger is not yet near the upstream tip (see isNearTip). During bulk
+// historical replay a momentary gap here does not mean the chain has stopped
+// growing; it commonly means the goroutine that appends blocks to ls.chain
+// (blockfetch/pipeline apply) is a beat behind this reader, and vice versa.
+// Without this bounded wait, that race flushed batches at ~6-9 of the
+// intended batchSize (50) blocks instead of coalescing them, multiplying
+// SQLite's physical write volume well beyond logical growth (dingo#4464).
+// Once isNearTip is true, this wait is skipped entirely: a solitary new
+// block at live tip must still commit promptly rather than wait for a batch
+// that will never fill. Vars, not consts, so tests can shrink the interval
+// instead of waiting on real sleeps.
+var (
+	gatherCoalesceRetryInterval = 2 * time.Millisecond
+	gatherCoalesceMaxAttempts   = 10
+)
+
 const (
 	// Keep each cleanup transaction short enough that it cannot monopolize
 	// SQLite while blockfetch handlers persist sync state during shutdown or
@@ -5505,6 +5525,10 @@ func (ls *LedgerState) ledgerReadChainIterator(
 				gatherLockHeld = false
 			}
 		}
+		// coalesceAttempts counts consecutive chain-tip probes since the
+		// last block was actually appended to rawBatch in this pass; see
+		// gatherCoalesceMaxAttempts.
+		coalesceAttempts := 0
 		// Gather up next batch of raw blocks
 		for {
 			// Check cancellation on every iteration, not just once per
@@ -5540,6 +5564,51 @@ func (ls *LedgerState) ledgerReadChainIterator(
 						reportErr(fmt.Errorf("get next block from chain iterator: %w", err))
 						return
 					}
+					// Reached chain tip on a non-blocking probe. While still
+					// catching up (not isNearTip), a momentary gap here does
+					// not mean the chain stopped growing -- give it a short
+					// bounded chance to add more before flushing an
+					// under-full batch (see gatherCoalesceMaxAttempts's doc
+					// comment; dingo#4464). Once near the live tip, skip
+					// straight to flushing: a solitary new block must still
+					// commit promptly rather than wait for a batch that will
+					// never fill.
+					//
+					// Deliberately do NOT releaseGatherLock() here, unlike
+					// the genuinely-blocking wait below: rawBatch already
+					// holds real gathered blocks that a concurrent rollback
+					// must not be allowed to race ahead of (the same reason
+					// the lock stays held through decodeReadChainBatch --
+					// see gatherLockHeld's doc comment above). Releasing it
+					// across this wait would let a rollback's write lock be
+					// granted, see an empty blockPipeline via
+					// drainBlockPipelineBeforeRollback, and proceed before
+					// this pass's already-gathered blocks are submitted --
+					// exactly the race blockPipelineGatherMutex exists to
+					// close. The wait is bounded, but the bound is per
+					// gap, not per gather pass: coalesceAttempts is reset
+					// every time a block is appended below, so one pass
+					// can wait once per block it gathers. A rollback
+					// blocked on the write lock therefore waits up to
+					// batchSize*gatherCoalesceMaxAttempts*gatherCoalesceRetryInterval
+					// (about 1s at the defaults) in the worst case, and
+					// about batchSize*gatherCoalesceRetryInterval (100ms)
+					// when each gap resolves on its first retry. That is
+					// accepted because the whole wait is gated on
+					// !isNearTip: it applies only while catching up, where
+					// rollbacks are rare and no forging depends on them.
+					if len(rawBatch) > 0 && len(rawBatch) < cap(rawBatch) &&
+						coalesceAttempts < gatherCoalesceMaxAttempts &&
+						!ls.isNearTip(rawBatch[len(rawBatch)-1].Slot) {
+						coalesceAttempts++
+						select {
+						case <-ctx.Done():
+							releaseGatherLock()
+							return
+						case <-time.After(gatherCoalesceRetryInterval):
+						}
+						continue
+					}
 					shouldBlock = true
 					// Break out of inner loop to flush DB transaction and log
 					break
@@ -5568,6 +5637,9 @@ func (ls *LedgerState) ledgerReadChainIterator(
 			// gathering for this pass finishes (see decodeReadChainBatch),
 			// potentially in parallel across the whole batch.
 			rawBatch = append(rawBatch, next.Block)
+			// Real progress was made -- give the next gap its own full
+			// coalesce budget rather than accumulating across the batch.
+			coalesceAttempts = 0
 			// Don't exceed our pre-allocated capacity
 			if len(rawBatch) == cap(rawBatch) {
 				break
@@ -5613,6 +5685,14 @@ func (ls *LedgerState) ledgerReadChainIterator(
 			result = readChainResult{
 				blocks: nextBatch,
 				done:   make(chan struct{}),
+			}
+			// Only real submissions are observed. A non-blocking probe
+			// that finds nothing ready still delivers a zero-block
+			// result downstream, and counting those would pile zeros
+			// into the lowest bucket of the very distribution this
+			// histogram exists to measure.
+			if len(nextBatch) > 0 && ls.metrics.commitBatchBlocks != nil {
+				ls.metrics.commitBatchBlocks.Observe(float64(len(nextBatch)))
 			}
 		}
 		select {
