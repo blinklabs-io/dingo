@@ -209,6 +209,24 @@ func TestPrototypeTrustBypassesOffWithoutConfig(t *testing.T) {
 // locally, which is a different trust context from following an untrusted
 // network.
 //
+// TrustCanonicalWithdrawalOnRewardMismatch is also listed as known but not
+// network-derived: it is a plain operator flag
+// (--trust-canonical-withdrawal-on-reward-mismatch), off by default, for
+// recovering a deterministic reward-withdrawal mismatch (dingo#3885) by
+// trusting a peer's own withdrawal amount over this node's reward
+// reconstruction. Nothing in node.go/config.go ties it to network identity,
+// so the Musashi profile can never enable it implicitly.
+//
+// TrustCanonicalTreasuryValueOnMismatch is the same case for the sibling
+// treasury-value mismatch: a plain operator flag
+// (--trust-canonical-treasury-value-on-mismatch), off by default, not tied
+// to network identity anywhere in node.go/config.go.
+//
+// TrustCanonicalReferenceScriptOnMismatch is the same case again, for the
+// sibling malformed-reference-script mismatch: a plain operator flag
+// (--trust-canonical-reference-script-on-mismatch), off by default, not tied
+// to network identity anywhere in node.go/config.go.
+//
 // A new Skip*/Trust*/Unsafe* field on LedgerStateConfig fails this test on
 // purpose. Adding one is a deliberate widening of where dingo stops validating,
 // and it should be classified here — prototype-only or not — rather than
@@ -219,9 +237,12 @@ func TestMusashiProfileTrustBypassScope(t *testing.T) {
 	// Settings that relax validation, and whether the Musashi network profile
 	// is permitted to enable them on its own.
 	knownTrustSettings := map[string]bool{
-		"SkipLeaderStakeThresholdCheck": true,
-		"SkipDijkstraTxValidation":      true,
-		"TrustedReplay":                 false,
+		"SkipLeaderStakeThresholdCheck":            true,
+		"SkipDijkstraTxValidation":                 true,
+		"TrustedReplay":                            false,
+		"TrustCanonicalWithdrawalOnRewardMismatch": false,
+		"TrustCanonicalTreasuryValueOnMismatch":    false,
+		"TrustCanonicalReferenceScriptOnMismatch":  false,
 	}
 
 	cfgType := reflect.TypeFor[ledger.LedgerStateConfig]()

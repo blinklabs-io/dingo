@@ -717,6 +717,61 @@ type LedgerStateConfig struct {
 	// until the Leios certificate / endorser-availability surface is complete
 	// (#2587).
 	SkipDijkstraTxValidation bool
+	// TrustCanonicalWithdrawalOnRewardMismatch, when true, recovers from a
+	// deterministic shelley.IncorrectWithdrawalAmountError (a canonical
+	// block's withdrawal disagrees with this node's own reconstructed
+	// reward-account balance) by overwriting the local balance with the
+	// withdrawal's own claimed amount and letting ordinary rewind-and-retry
+	// re-validate the same block, instead of retrying the same rejection
+	// forever. Every peer having already accepted the block is the basis
+	// for trusting its withdrawal amount over this node's own reward
+	// reconstruction for that one credential; see
+	// recoverFromDeterministicTxValidationError's doc comment for why this
+	// is not attempted for the sibling models.ErrRewardWithdrawalExceedsBalance
+	// case. This does not correct the underlying reward-calculation
+	// disagreement (blinklabs-io/dingo#3885) -- only the one credential's
+	// balance, only after the ordinary retry has already failed
+	// identically once. Off by default: reaching for a peer's figure over
+	// this node's own computation is appropriate for unblocking a
+	// diagnostic or validation run, not a default for a node whose
+	// reward accounting is expected to be trustworthy on its own.
+	TrustCanonicalWithdrawalOnRewardMismatch bool
+	// TrustCanonicalTreasuryValueOnMismatch, when true, recovers from a
+	// deterministic lcommon.CurrentTreasuryValueMismatchError (a canonical
+	// block's supplied current-treasury-value field disagrees with this
+	// node's own network-state treasury total) by overwriting the local
+	// treasury total with the block's own claimed value and letting ordinary
+	// rewind-and-retry re-validate the same block, instead of retrying the
+	// same rejection forever. Every peer having already accepted the block is
+	// the basis for trusting its treasury figure over this node's own
+	// accounting, the same reasoning
+	// TrustCanonicalWithdrawalOnRewardMismatch already applies to a reward
+	// balance. This does not correct the underlying reward/treasury
+	// calculation disagreement (blinklabs-io/dingo#3885 follow-up) -- only
+	// the treasury total, only after the ordinary retry has already failed
+	// identically once. Off by default, for the same reason
+	// TrustCanonicalWithdrawalOnRewardMismatch is: appropriate for
+	// unblocking a diagnostic or validation run, not a default for a node
+	// whose treasury accounting is expected to be trustworthy on its own.
+	TrustCanonicalTreasuryValueOnMismatch bool
+	// TrustCanonicalReferenceScriptOnMismatch, when true, recovers from a
+	// repeated, deterministic lcommon.MalformedReferenceScriptsError by
+	// trusting that a canonical block a peer already accepted is valid
+	// despite this node's own Plutus reference-script well-formedness
+	// verdict, and applying it instead of retrying the same rejection
+	// forever. Unlike the sibling Trust* mismatch settings, there is no
+	// local value to reconcile: the fix is to skip this one validation
+	// rule's verdict for that one transaction, once, after the ordinary
+	// retry has already failed identically once -- see
+	// LedgerState.trustReferenceScriptValidationError. This does not
+	// correct the underlying script-validator disagreement
+	// (blinklabs-io/dingo#3885 follow-up); it only lets replay make
+	// progress past a block a canonical peer already accepted. Off by
+	// default, for the same reason the sibling settings are: appropriate
+	// for unblocking a diagnostic or validation run, not a default for a
+	// node whose script validation is expected to be trustworthy on its
+	// own.
+	TrustCanonicalReferenceScriptOnMismatch bool
 	// MinPoolMargin is the CIP-23 minimum pool margin (minimum variable fee) in
 	// basis points, [0, 10000] (150 = 1.5%); 0 disables it. It is a consensus-
 	// affecting operator setting (not derived from the network) that takes
@@ -1158,6 +1213,45 @@ type LedgerState struct {
 	// rejected, but peers are no longer rotated for it. See
 	// deterministicTxRecoveryLatch in ledger/replay_recovery.go.
 	deterministicTxRecoveryResync *deterministicTxRecoveryLatch
+	// rewardMismatchReconcileSeen records the (block, tx) identity of the
+	// last shelley.IncorrectWithdrawalAmountError
+	// reconcileRewardWithdrawalMismatch considered, independent of
+	// deterministicTxRecoveryResync's own tip-slot-ordered reset rules: a
+	// live replay's applied tip can rewind and re-advance to different
+	// nearby slots across repeated attempts at the same failing block (peer
+	// churn, fork exploration), which resets deterministicTxRecoveryResync's
+	// own "spent" state before the identical rejection recurs, observed
+	// live (dingo#3885 follow-up) as the reconciliation branch never firing
+	// despite the same tx_hash/failing_block_slot repeating for minutes.
+	// Matching on (block, tx) identity alone, with no tip-slot condition,
+	// is what proves determinism for this narrower purpose instead.
+	rewardMismatchReconcileSeen *deterministicTxRecoveryLatch
+	// treasuryMismatchReconcileSeen is rewardMismatchReconcileSeen's sibling
+	// for lcommon.CurrentTreasuryValueMismatchError, tracked independently
+	// since a block can fail on a reward-withdrawal mismatch and a
+	// treasury-value mismatch at the same time and each needs its own
+	// "already seen" identity.
+	treasuryMismatchReconcileSeen *deterministicTxRecoveryLatch
+	// referenceScriptMismatchSeen and referenceScriptMismatchTrusted record
+	// lcommon.MalformedReferenceScriptsError sightings by transaction hash
+	// alone, not by (block, tx) identity like the sibling Trust* latches:
+	// the verdict is a property of the transaction's own reference-script
+	// bytes, so the exact same transaction can recur inside multiple
+	// different candidate blocks at the same slot (different producers,
+	// different block hashes, same shared-mempool transaction) and must
+	// still be recognized as the same confirmed-deterministic rejection
+	// regardless of which block wraps it. A single deterministicTxRecoveryLatch
+	// (keyed on one (block, tx) pair at a time) cannot hold two different
+	// transactions' trust simultaneously -- confirmed live, a block
+	// carrying two independently-malformed transactions made each one's
+	// mark overwrite the other's, so neither transaction was ever trusted
+	// on the same attempt and the block never validated. Keyed by
+	// transaction hash (string(tx.Hash().Bytes())) instead. Unbounded for
+	// the lifetime of the process; acceptable for an operator-opted-in
+	// diagnostic path expected to match a small, rare set of transactions,
+	// not a general cache.
+	referenceScriptMismatchSeen    map[string]struct{}
+	referenceScriptMismatchTrusted map[string]struct{}
 	// Consecutive successful recovery attempts refused at the Mithril trust
 	// boundary without advancing the applied tip (issues #3261 and #3301).
 	// The refusal's only escape is peer rotation, which cannot help for a
@@ -3308,6 +3402,23 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 			)
 		}
 	}
+}
+
+// utxoPruningDeferredForCatchup reports whether cleanupConsumedUtxos would
+// defer a run at tipSlot/stabilityWindow right now, mirroring its own two
+// defer conditions above (unknown upstream target, or known but not yet
+// near it) without duplicating its logging. checkUtxoRetentionWindow uses
+// this so its own "fresh from-tip" retention estimate only applies when
+// cleanup is actually keeping pace with the tip -- see that function's doc
+// comment for the false-rejection this closes.
+func (ls *LedgerState) utxoPruningDeferredForCatchup(
+	tipSlot, stabilityWindow uint64,
+) bool {
+	upstreamTip, upstreamActive := ls.UpstreamSyncStatus()
+	if upstreamActive && upstreamTip == 0 {
+		return true
+	}
+	return upstreamTip != 0 && !nearUpstreamTip(tipSlot, upstreamTip, stabilityWindow)
 }
 
 // resolveRollbackTarget returns the point a rollback will actually truncate to,
@@ -7947,6 +8058,21 @@ func (ls *LedgerState) ledgerProcessBlock(
 					ls.trustDijkstraTxValidationError(validationEra.Id) {
 					ls.config.Logger.Warn(
 						"Dijkstra tx validation disagreement (trusting Leios-certified block)",
+						"component",
+						"ledger",
+						"tx_hash",
+						tx.Hash().String(),
+						"block_slot",
+						point.Slot,
+						"error",
+						err.Error(),
+					)
+					err = nil
+				}
+				if err != nil &&
+					ls.trustReferenceScriptValidationError(err, tx.Hash().Bytes()) {
+					ls.config.Logger.Warn(
+						"TrustCanonicalReferenceScriptOnMismatch: applying a block despite a locally malformed reference script a canonical peer already accepted",
 						"component",
 						"ledger",
 						"tx_hash",

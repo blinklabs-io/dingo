@@ -2012,6 +2012,387 @@ func TestReplayRecoveryRejectsRepeatedIncorrectWithdrawalAmount(t *testing.T) {
 	}
 }
 
+// TestReplayRecoveryReconcilesRewardWithdrawalMismatchWhenOpted pins
+// LedgerStateConfig.TrustCanonicalWithdrawalOnRewardMismatch (dingo#3885
+// follow-up): with it enabled, a repeated shelley.IncorrectWithdrawalAmountError
+// overwrites the local reward balance with the canonical block's own claimed
+// amount instead of rejecting the block forever, matching the recovery
+// blinklabs-io/dingo#3885's own thread reports operators already apply
+// manually. Reverting the TrustCanonicalWithdrawalOnRewardMismatch branch in
+// place would make the second assertion below observe the balance
+// unchanged.
+func TestReplayRecoveryReconcilesRewardWithdrawalMismatchWhenOpted(t *testing.T) {
+	t.Parallel()
+
+	ls := newReplayRecoveryAuditLedger(t, true)
+	ls.config.TrustCanonicalWithdrawalOnRewardMismatch = true
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	resyncCh := deterministicResyncChannel(t, ls, bus)
+
+	credential := reapCred28(0x99)
+	raw, err := dbtest.RawSQLiteMetadata(t, ls.db)
+	require.NoError(t, err)
+	_, err = raw.Exec(`INSERT INTO account (staking_key, active, reward)
+VALUES (?, TRUE, '5545905')`, credential)
+	require.NoError(t, err)
+	rewardAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		credential,
+	)
+	require.NoError(t, err)
+
+	validation := func() *txValidationError {
+		return &txValidationError{
+			BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+			TxHash:     testHashBytes("reconcile-withdrawal-tx"),
+			Cause: fmt.Errorf(
+				"shelley UTxO rule: %w",
+				shelley.IncorrectWithdrawalAmountError{
+					RewardAddress: rewardAddr,
+					Provided:      big.NewInt(5545784),
+					Balance:       5545905,
+				},
+			),
+		}
+	}
+
+	readBalance := func() uint64 {
+		account, err := ls.db.Metadata().GetAccountByCredential(0, credential, false, nil)
+		require.NoError(t, err)
+		require.NotNil(t, account)
+		return uint64(account.Reward)
+	}
+
+	// The first rejection must behave exactly like the flag-off sibling
+	// test: reject and rewind, without touching local state yet -- only a
+	// repeated, genuinely deterministic failure justifies trusting a peer
+	// over this node's own reconstruction.
+	recovered, err := ls.tryRecoverFromTxValidationError(validation())
+	require.NoError(t, err)
+	require.True(t, recovered)
+	assert.Equal(t, uint64(5545905), readBalance(),
+		"the first rejection must not reconcile anything yet")
+	testutil.RequireReceive(
+		t, resyncCh, testutil.AsyncWait,
+		"the first rejection must request a fresh ChainSync intersection",
+	)
+
+	// The redelivery is what marks this deterministic, and is where
+	// TrustCanonicalWithdrawalOnRewardMismatch reconciles.
+	recovered, err = ls.tryRecoverFromTxValidationError(validation())
+	require.NoError(
+		t,
+		err,
+		"reconciliation must let ordinary rewind-and-retry continue, not halt",
+	)
+	require.True(t, recovered)
+	assert.Equal(t, uint64(5545784), readBalance(),
+		"the redelivery must overwrite the local balance with the canonical withdrawal amount")
+}
+
+// TestReplayRecoveryReconcilesRewardWithdrawalMismatchAcrossFluctuatingTip
+// pins the fix for the reconciliation branch never firing live despite the
+// same tx_hash/failing_block_slot repeating for minutes (dingo#3885
+// follow-up): a live replay's applied tip briefly advances past the slot
+// recorded when the first rejection was handled (peer churn, fork
+// exploration), which clears deterministicTxRecoveryResync via
+// resetDeterministicTxRecovery -- the same call site
+// ledgerProcessBlocksFromSource's tip-advance critical section uses -- and
+// then rewinds back to a different nearby slot for the retry, so resyncSpent
+// alone never went true again even though the exact same (block, tx) kept
+// recurring. rewardMismatchReconcileSeen must recognize the repeat by
+// (block, tx) identity regardless of the shared latch's tip-slot state.
+// Reverting to gating on resyncSpent in place makes this test's second
+// assertion fail exactly as observed live.
+func TestReplayRecoveryReconcilesRewardWithdrawalMismatchAcrossFluctuatingTip(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls := newReplayRecoveryAuditLedger(t, true)
+	ls.config.TrustCanonicalWithdrawalOnRewardMismatch = true
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+
+	credential := reapCred28(0x77)
+	raw, err := dbtest.RawSQLiteMetadata(t, ls.db)
+	require.NoError(t, err)
+	_, err = raw.Exec(`INSERT INTO account (staking_key, active, reward)
+VALUES (?, TRUE, '5545905')`, credential)
+	require.NoError(t, err)
+	rewardAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		credential,
+	)
+	require.NoError(t, err)
+
+	validation := func() *txValidationError {
+		return &txValidationError{
+			BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+			TxHash:     testHashBytes("reconcile-withdrawal-tx-fluctuating"),
+			Cause: fmt.Errorf(
+				"shelley UTxO rule: %w",
+				shelley.IncorrectWithdrawalAmountError{
+					RewardAddress: rewardAddr,
+					Provided:      big.NewInt(5545784),
+					Balance:       5545905,
+				},
+			),
+		}
+	}
+
+	readBalance := func() uint64 {
+		account, err := ls.db.Metadata().GetAccountByCredential(0, credential, false, nil)
+		require.NoError(t, err)
+		require.NotNil(t, account)
+		return uint64(account.Reward)
+	}
+
+	recovered, err := ls.tryRecoverFromTxValidationError(validation())
+	require.NoError(t, err)
+	require.True(t, recovered)
+	assert.Equal(t, uint64(5545905), readBalance())
+
+	// Simulate the live shape exactly: other tip-advance activity (a
+	// competing fork briefly explored further) pushes the applied tip past
+	// the slot recorded on the first attempt, which clears
+	// deterministicTxRecoveryResync via resetDeterministicTxRecovery (the
+	// same call site ledgerProcessBlocksFromSource's tip-advance critical
+	// section uses), and then chain selection rewinds back to a lower
+	// nearby slot for the retry. Just moving currentTip to a lower slot
+	// without first crossing that reset threshold would leave the old
+	// tip-slot-ordered latch's "spent" condition (tipSlot <= l.TipSlot)
+	// still satisfied, so this step is what actually reproduces the bug.
+	ls.resetDeterministicTxRecovery(200)
+	ls.currentTip.Point = ocommon.NewPoint(120, testHashBytes("audit-replay"))
+
+	recovered, err = ls.tryRecoverFromTxValidationError(validation())
+	require.NoError(t, err)
+	require.True(t, recovered)
+	assert.Equal(t, uint64(5545784), readBalance(),
+		"the shared deterministic-resync latch being cleared by unrelated "+
+			"tip-advance activity must not stop the repeat from being "+
+			"recognized as the same failing block/tx")
+}
+
+// TestReplayRecoveryReconcilesTreasuryValueMismatchWhenOpted pins
+// LedgerStateConfig.TrustCanonicalTreasuryValueOnMismatch (dingo#3885
+// treasury follow-up): with it enabled, a repeated
+// lcommon.CurrentTreasuryValueMismatchError overwrites the local network-state
+// treasury total with the canonical block's own supplied value instead of
+// rejecting the block forever, mirroring
+// TestReplayRecoveryReconcilesRewardWithdrawalMismatchWhenOpted's shape for
+// the sibling flag. Reverting the TrustCanonicalTreasuryValueOnMismatch
+// branch in place would make the second assertion below observe the
+// treasury unchanged.
+func TestReplayRecoveryReconcilesTreasuryValueMismatchWhenOpted(t *testing.T) {
+	t.Parallel()
+
+	ls := newReplayRecoveryAuditLedger(t, true)
+	ls.config.TrustCanonicalTreasuryValueOnMismatch = true
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	resyncCh := deterministicResyncChannel(t, ls, bus)
+
+	require.NoError(
+		t,
+		ls.db.Metadata().SetNetworkState(4_237_121_584_651_539, 10_688_089_610_838_378, 1, nil),
+	)
+
+	validation := func() *txValidationError {
+		return &txValidationError{
+			BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+			TxHash:     testHashBytes("reconcile-treasury-tx"),
+			Cause: fmt.Errorf(
+				"conway utxo validation rule 0: %w",
+				lcommon.CurrentTreasuryValueMismatchError{
+					Supplied: big.NewInt(4_237_121_584_667_741),
+					Expected: 4_237_121_584_651_539,
+				},
+			),
+		}
+	}
+
+	readTreasury := func() uint64 {
+		state, err := ls.db.Metadata().GetNetworkState(nil)
+		require.NoError(t, err)
+		require.NotNil(t, state)
+		return uint64(state.Treasury)
+	}
+
+	// The first rejection must behave exactly like the flag-off sibling: reject
+	// and rewind, without touching local state yet.
+	recovered, err := ls.tryRecoverFromTxValidationError(validation())
+	require.NoError(t, err)
+	require.True(t, recovered)
+	assert.Equal(t, uint64(4_237_121_584_651_539), readTreasury(),
+		"the first rejection must not reconcile anything yet")
+	testutil.RequireReceive(
+		t, resyncCh, testutil.AsyncWait,
+		"the first rejection must request a fresh ChainSync intersection",
+	)
+
+	// The redelivery is what marks this deterministic, and is where
+	// TrustCanonicalTreasuryValueOnMismatch reconciles.
+	recovered, err = ls.tryRecoverFromTxValidationError(validation())
+	require.NoError(
+		t,
+		err,
+		"reconciliation must let ordinary rewind-and-retry continue, not halt",
+	)
+	require.True(t, recovered)
+	assert.Equal(t, uint64(4_237_121_584_667_741), readTreasury(),
+		"the redelivery must overwrite the local treasury with the canonical supplied value")
+}
+
+// TestReplayRecoveryTrustsReferenceScriptMismatchWhenOpted pins
+// LedgerStateConfig.TrustCanonicalReferenceScriptOnMismatch (dingo#3885
+// follow-up): with it enabled, a repeated
+// lcommon.MalformedReferenceScriptsError earns trust for that exact
+// transaction, so a subsequent validation attempt for the same transaction
+// is let through by trustReferenceScriptValidationError instead of being
+// rejected forever. Unlike the sibling Trust* mismatch tests, there is no
+// local value to read back here -- the fix is consulted from the
+// validation call site itself, so this test exercises that checker
+// directly. Reverting the TrustCanonicalReferenceScriptOnMismatch branch in
+// place would make the second assertion below observe no trust earned.
+func TestReplayRecoveryTrustsReferenceScriptMismatchWhenOpted(t *testing.T) {
+	t.Parallel()
+
+	ls := newReplayRecoveryAuditLedger(t, true)
+	ls.config.TrustCanonicalReferenceScriptOnMismatch = true
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	resyncCh := deterministicResyncChannel(t, ls, bus)
+
+	txHash := testHashBytes("reconcile-refscript-tx")
+
+	validation := func() *txValidationError {
+		return &txValidationError{
+			BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+			TxHash:     txHash,
+			Cause: fmt.Errorf(
+				"conway utxo validation rule 45: %w",
+				lcommon.MalformedReferenceScriptsError{},
+			),
+		}
+	}
+
+	// The first rejection must behave exactly like the flag-off sibling:
+	// reject and rewind, earning no trust yet.
+	recovered, err := ls.tryRecoverFromTxValidationError(validation())
+	require.NoError(t, err)
+	require.True(t, recovered)
+	assert.False(t,
+		ls.trustReferenceScriptValidationError(
+			lcommon.MalformedReferenceScriptsError{}, txHash,
+		),
+		"the first rejection must not earn trust yet")
+	testutil.RequireReceive(
+		t, resyncCh, testutil.AsyncWait,
+		"the first rejection must request a fresh ChainSync intersection",
+	)
+
+	// The redelivery is what marks this deterministic, and is where
+	// TrustCanonicalReferenceScriptOnMismatch earns trust for the next
+	// delivery of this exact transaction.
+	recovered, err = ls.tryRecoverFromTxValidationError(validation())
+	require.NoError(
+		t,
+		err,
+		"trusting must let ordinary rewind-and-retry continue, not halt",
+	)
+	require.True(t, recovered)
+	assert.True(t,
+		ls.trustReferenceScriptValidationError(
+			lcommon.MalformedReferenceScriptsError{}, txHash,
+		),
+		"the redelivery must earn trust for this exact transaction")
+
+	// A different transaction must not incidentally inherit that trust.
+	assert.False(t,
+		ls.trustReferenceScriptValidationError(
+			lcommon.MalformedReferenceScriptsError{},
+			testHashBytes("unrelated-tx"),
+		),
+		"trust must not leak to an unrelated transaction")
+}
+
+// TestReplayRecoveryTrustsReferenceScriptMismatchForMultipleTransactions
+// pins the fix for a bug caught live (dingo#3885 follow-up): a block
+// carrying two independently malformed-reference-script transactions made
+// each transaction's confirmed-deterministic mark overwrite the other's,
+// because the original implementation kept only one (block, tx) identity
+// at a time. Neither transaction was ever trusted on the same attempt, so
+// the block never validated -- observed live as the same two transactions
+// cycling between "trusting" and "applying" forever with no tip progress.
+// Trust is now keyed by transaction hash in a map, so two different
+// transactions confirmed deterministic in the same window must both stay
+// trusted simultaneously. Reverting to a single shared identity in place
+// would make the second assertion below observe the first transaction's
+// trust lost once the second is confirmed.
+func TestReplayRecoveryTrustsReferenceScriptMismatchForMultipleTransactions(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls := newReplayRecoveryAuditLedger(t, true)
+	ls.config.TrustCanonicalReferenceScriptOnMismatch = true
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	_ = deterministicResyncChannel(t, ls, bus)
+
+	blockPoint := ocommon.NewPoint(160, testHashBytes("audit-failing"))
+	txHashA := testHashBytes("reconcile-refscript-tx-a")
+	txHashB := testHashBytes("reconcile-refscript-tx-b")
+
+	validationFor := func(txHash []byte) *txValidationError {
+		return &txValidationError{
+			BlockPoint: blockPoint,
+			TxHash:     txHash,
+			Cause: fmt.Errorf(
+				"conway utxo validation rule 45: %w",
+				lcommon.MalformedReferenceScriptsError{},
+			),
+		}
+	}
+
+	// Confirm transaction A deterministic (two rejections).
+	_, err := ls.tryRecoverFromTxValidationError(validationFor(txHashA))
+	require.NoError(t, err)
+	_, err = ls.tryRecoverFromTxValidationError(validationFor(txHashA))
+	require.NoError(t, err)
+	require.True(t,
+		ls.trustReferenceScriptValidationError(
+			lcommon.MalformedReferenceScriptsError{}, txHashA,
+		),
+		"transaction A must be trusted after its own two rejections")
+
+	// Now confirm transaction B deterministic, in the same block.
+	_, err = ls.tryRecoverFromTxValidationError(validationFor(txHashB))
+	require.NoError(t, err)
+	_, err = ls.tryRecoverFromTxValidationError(validationFor(txHashB))
+	require.NoError(t, err)
+	require.True(t,
+		ls.trustReferenceScriptValidationError(
+			lcommon.MalformedReferenceScriptsError{}, txHashB,
+		),
+		"transaction B must be trusted after its own two rejections")
+
+	// Transaction A's trust must still hold: confirming B must not have
+	// overwritten it.
+	assert.True(t,
+		ls.trustReferenceScriptValidationError(
+			lcommon.MalformedReferenceScriptsError{}, txHashA,
+		),
+		"transaction A must remain trusted after transaction B is confirmed")
+}
+
 func TestReplayRecoveryRejectsDeterministicPlutusFailure(t *testing.T) {
 	t.Parallel()
 

@@ -474,6 +474,9 @@ func isDeterministicTxValidationError(err error) bool {
 	if isRewardWithdrawalMismatch(err) {
 		return true
 	}
+	if _, ok := errors.AsType[lcommon.CurrentTreasuryValueMismatchError](err); ok {
+		return true
+	}
 	_, ok := errors.AsType[eras.DuplicateInputByronError](err)
 	return ok
 }
@@ -531,6 +534,88 @@ func isRewardWithdrawalStateDivergence(err error) bool {
 	return errors.Is(err, models.ErrRewardWithdrawalExceedsBalance)
 }
 
+// reconcileRewardWithdrawalMismatch overwrites the local reward balance for
+// incorrectWithdrawal.RewardAddress's credential with the amount the
+// canonical block itself claims (Provided), so the ordinary rewind-and-retry
+// in recoverFromDeterministicTxValidationError can re-validate and apply the
+// same block normally afterward. Deliberately does not apply the withdrawal
+// itself (that would clear the balance to zero, which the pending block's
+// own validation would then reject just as surely, only against zero
+// instead of against the wrong reconstructed balance) -- only called when
+// LedgerStateConfig.TrustCanonicalWithdrawalOnRewardMismatch is enabled and
+// the ordinary retry has already failed identically once; see that field's
+// doc comment for why this is opt-in.
+func (ls *LedgerState) reconcileRewardWithdrawalMismatch(
+	incorrectWithdrawal shelley.IncorrectWithdrawalAmountError,
+) error {
+	if incorrectWithdrawal.Provided == nil || !incorrectWithdrawal.Provided.IsUint64() {
+		return fmt.Errorf(
+			"reward withdrawal reconciliation: non-uint64 provided amount %v",
+			incorrectWithdrawal.Provided,
+		)
+	}
+	stakeKey := incorrectWithdrawal.RewardAddress.StakeKeyHash()
+	if stakeKey == lcommon.NewBlake2b224(nil) {
+		return errors.New(
+			"reward withdrawal reconciliation: missing stake credential",
+		)
+	}
+	credentialTag, ok := models.StakeCredentialTagFromAddress(
+		incorrectWithdrawal.RewardAddress,
+	)
+	if !ok {
+		return errors.New(
+			"reward withdrawal reconciliation: derive credential tag",
+		)
+	}
+	return ls.db.Metadata().ReconcileAccountRewardBalance(
+		credentialTag,
+		stakeKey.Bytes(),
+		incorrectWithdrawal.Provided.Uint64(),
+		nil,
+	)
+}
+
+// reconcileTreasuryValueMismatch overwrites the local network-state treasury
+// total with the amount the canonical block itself claims (Supplied), so the
+// ordinary rewind-and-retry in recoverFromDeterministicTxValidationError can
+// re-validate and apply the same block normally afterward. Reserves are
+// carried through unchanged from the current network state: this reconciles
+// only the treasury discrepancy a peer's block has just proven, not a
+// two-value guess. Only called when
+// LedgerStateConfig.TrustCanonicalTreasuryValueOnMismatch is enabled and the
+// ordinary retry has already failed identically once; see that field's doc
+// comment for why this is opt-in.
+func (ls *LedgerState) reconcileTreasuryValueMismatch(
+	mismatch lcommon.CurrentTreasuryValueMismatchError,
+	blockSlot uint64,
+) error {
+	if mismatch.Supplied == nil || !mismatch.Supplied.IsUint64() {
+		return fmt.Errorf(
+			"treasury value reconciliation: non-uint64 supplied amount %v",
+			mismatch.Supplied,
+		)
+	}
+	state, err := ls.db.Metadata().GetNetworkState(nil)
+	if err != nil {
+		return fmt.Errorf(
+			"treasury value reconciliation: get network state: %w",
+			err,
+		)
+	}
+	if state == nil {
+		return errors.New(
+			"treasury value reconciliation: missing network state",
+		)
+	}
+	return ls.db.Metadata().SetNetworkState(
+		mismatch.Supplied.Uint64(),
+		uint64(state.Reserves),
+		blockSlot,
+		nil,
+	)
+}
+
 // deterministicTxRecoveryLatch records the single fresh-intersection request
 // already spent on one failing block at one applied ledger tip. Keyed on the
 // failing block and transaction as well as the tip, so a different rejected
@@ -562,6 +647,21 @@ func (l *deterministicTxRecoveryLatch) matches(
 ) bool {
 	return l != nil &&
 		tipSlot <= l.TipSlot &&
+		l.matchesIdentity(validationErr)
+}
+
+// matchesIdentity compares only the failing block and transaction, with no
+// tip-slot condition -- unlike matches, this is stable across a tip that
+// rewinds and re-advances to different nearby slots between repeated
+// attempts at the very same failing block (peer churn, fork exploration),
+// which is exactly what would otherwise repeatedly reset a tip-slot-ordered
+// latch's "already spent" state before the identical rejection recurs. Used
+// by rewardMismatchReconcileSeen, which needs only "have I already seen
+// this exact rejection once", not anything about how the tip got here.
+func (l *deterministicTxRecoveryLatch) matchesIdentity(
+	validationErr *txValidationError,
+) bool {
+	return l != nil &&
 		validationErr.BlockPoint.Slot == l.BlockPoint.Slot &&
 		bytes.Equal(validationErr.BlockPoint.Hash, l.BlockPoint.Hash) &&
 		bytes.Equal(validationErr.TxHash, l.TxHash)
@@ -592,6 +692,127 @@ func (ls *LedgerState) markDeterministicTxRecoveryResync(
 		tipSlot,
 		validationErr,
 	)
+}
+
+// rewardMismatchReconcileSeenLocked reports whether validationErr's exact
+// (block, tx) identity was already recorded by a previous call -- see
+// rewardMismatchReconcileSeen's doc comment for why this does not use
+// deterministicTxRecoveryResync's own tip-slot-ordered latch.
+func (ls *LedgerState) rewardMismatchReconcileSeenLocked(
+	validationErr *txValidationError,
+) bool {
+	return ls.rewardMismatchReconcileSeen.matchesIdentity(validationErr)
+}
+
+// markRewardMismatchReconcileSeen records validationErr's (block, tx)
+// identity so the next identical rejection is recognized as a repeat.
+func (ls *LedgerState) markRewardMismatchReconcileSeen(
+	validationErr *txValidationError,
+) {
+	ls.Lock()
+	defer ls.Unlock()
+	ls.rewardMismatchReconcileSeen = newDeterministicTxRecoveryLatch(
+		0,
+		validationErr,
+	)
+}
+
+// treasuryMismatchReconcileSeenLocked reports whether validationErr's exact
+// (block, tx) identity was already recorded by a previous call -- see
+// rewardMismatchReconcileSeen's doc comment for why this does not use
+// deterministicTxRecoveryResync's own tip-slot-ordered latch. Independent of
+// rewardMismatchReconcileSeen: a block can carry both a reward-withdrawal
+// mismatch and a treasury-value mismatch, and each needs its own "already
+// seen" state.
+func (ls *LedgerState) treasuryMismatchReconcileSeenLocked(
+	validationErr *txValidationError,
+) bool {
+	return ls.treasuryMismatchReconcileSeen.matchesIdentity(validationErr)
+}
+
+// markTreasuryMismatchReconcileSeen records validationErr's (block, tx)
+// identity so the next identical rejection is recognized as a repeat.
+func (ls *LedgerState) markTreasuryMismatchReconcileSeen(
+	validationErr *txValidationError,
+) {
+	ls.Lock()
+	defer ls.Unlock()
+	ls.treasuryMismatchReconcileSeen = newDeterministicTxRecoveryLatch(
+		0,
+		validationErr,
+	)
+}
+
+// referenceScriptMismatchSeenLocked reports whether txHash was already
+// recorded by a previous call, the first stage of the two-stage
+// confirmation TrustCanonicalReferenceScriptOnMismatch requires before
+// trustReferenceScriptValidationError will act on it. Keyed on transaction
+// hash alone -- see referenceScriptMismatchSeen's doc comment on
+// LedgerState for why. Callers hold at least the read lock.
+func (ls *LedgerState) referenceScriptMismatchSeenLocked(
+	txHash []byte,
+) bool {
+	_, ok := ls.referenceScriptMismatchSeen[string(txHash)]
+	return ok
+}
+
+// markReferenceScriptMismatchSeen records txHash so the next identical
+// rejection is recognized as a confirmed repeat, at which point
+// markReferenceScriptMismatchTrusted actually earns the transaction trust.
+func (ls *LedgerState) markReferenceScriptMismatchSeen(
+	txHash []byte,
+) {
+	ls.Lock()
+	defer ls.Unlock()
+	if ls.referenceScriptMismatchSeen == nil {
+		ls.referenceScriptMismatchSeen = make(map[string]struct{})
+	}
+	ls.referenceScriptMismatchSeen[string(txHash)] = struct{}{}
+}
+
+// markReferenceScriptMismatchTrusted records txHash as trusted: the next
+// time this exact transaction is validated, trustReferenceScriptValidationError
+// lets it through despite a repeated lcommon.MalformedReferenceScriptsError
+// verdict, regardless of which candidate block it arrives in.
+func (ls *LedgerState) markReferenceScriptMismatchTrusted(
+	txHash []byte,
+) {
+	ls.Lock()
+	defer ls.Unlock()
+	if ls.referenceScriptMismatchTrusted == nil {
+		ls.referenceScriptMismatchTrusted = make(map[string]struct{})
+	}
+	ls.referenceScriptMismatchTrusted[string(txHash)] = struct{}{}
+}
+
+// trustReferenceScriptValidationError reports whether a validation failure
+// for the transaction identified by txHash should be trusted and applied
+// despite a repeated, confirmed-deterministic
+// lcommon.MalformedReferenceScriptsError, per
+// LedgerStateConfig.TrustCanonicalReferenceScriptOnMismatch's doc comment.
+// Called from the per-transaction validation call site in
+// ledgerProcessBlock, not only from recovery, since there is no local value
+// to reconcile here -- unlike the sibling Trust* mismatch settings, the fix
+// is to skip this one rule's verdict for this one transaction once trust
+// has been earned by markReferenceScriptMismatchTrusted. Keyed on
+// transaction hash alone, not (block, tx) identity: the verdict is a
+// property of the transaction's own reference-script bytes, so the same
+// transaction recurring in a different candidate block (different
+// producer, different block hash) must still be recognized.
+func (ls *LedgerState) trustReferenceScriptValidationError(
+	err error,
+	txHash []byte,
+) bool {
+	if !ls.config.TrustCanonicalReferenceScriptOnMismatch {
+		return false
+	}
+	if _, ok := errors.AsType[lcommon.MalformedReferenceScriptsError](err); !ok {
+		return false
+	}
+	ls.RLock()
+	defer ls.RUnlock()
+	_, ok := ls.referenceScriptMismatchTrusted[string(txHash)]
+	return ok
 }
 
 // recoverFromDeterministicTxValidationError drops a primary-chain block that
@@ -638,6 +859,118 @@ func (ls *LedgerState) recoverFromDeterministicTxValidationError(
 		validationErr,
 	)
 	ls.RUnlock()
+	if ls.config.TrustCanonicalWithdrawalOnRewardMismatch {
+		if incorrectWithdrawal, ok := errors.AsType[shelley.IncorrectWithdrawalAmountError](
+			validationErr.Cause,
+		); ok {
+			ls.RLock()
+			seenBefore := ls.rewardMismatchReconcileSeenLocked(validationErr)
+			ls.RUnlock()
+			if !seenBefore {
+				// First sighting of this exact (block, tx): record it and
+				// let the ordinary rewind-and-retry below run once more
+				// first, matching every other deterministic-error path's
+				// "one full attempt before anything special" shape, rather
+				// than reconciling on a rejection that has not yet proven
+				// itself deterministic.
+				ls.markRewardMismatchReconcileSeen(validationErr)
+			} else {
+				logFields := []any{
+					"component", "ledger",
+					"failing_block_slot", validationErr.BlockPoint.Slot,
+					"reward_address", incorrectWithdrawal.RewardAddress.String(),
+					"canonical_withdrawal_amount", incorrectWithdrawal.Provided,
+					"local_reward_balance", incorrectWithdrawal.Balance,
+				}
+				if err := ls.reconcileRewardWithdrawalMismatch(incorrectWithdrawal); err != nil {
+					if ls.config.Logger != nil {
+						ls.config.Logger.Error(
+							"TrustCanonicalWithdrawalOnRewardMismatch reconciliation failed; falling back to ordinary rewind-and-retry",
+							append(logFields, "error", err)...,
+						)
+					}
+				} else if ls.config.Logger != nil {
+					ls.config.Logger.Warn(
+						"TrustCanonicalWithdrawalOnRewardMismatch: overwrote the local reward balance to match a canonical peer's withdrawal; retrying the same block",
+						logFields...,
+					)
+				}
+			}
+		}
+	}
+	if ls.config.TrustCanonicalTreasuryValueOnMismatch {
+		if treasuryMismatch, ok := errors.AsType[lcommon.CurrentTreasuryValueMismatchError](
+			validationErr.Cause,
+		); ok {
+			ls.RLock()
+			seenBefore := ls.treasuryMismatchReconcileSeenLocked(validationErr)
+			ls.RUnlock()
+			if !seenBefore {
+				// First sighting of this exact (block, tx): record it and let
+				// the ordinary rewind-and-retry below run once more first,
+				// matching the reward-withdrawal reconciliation's "one full
+				// attempt before anything special" shape.
+				ls.markTreasuryMismatchReconcileSeen(validationErr)
+			} else {
+				logFields := []any{
+					"component", "ledger",
+					"failing_block_slot", validationErr.BlockPoint.Slot,
+					"canonical_treasury_value", treasuryMismatch.Supplied,
+					"local_treasury_value", treasuryMismatch.Expected,
+				}
+				if err := ls.reconcileTreasuryValueMismatch(
+					treasuryMismatch,
+					validationErr.BlockPoint.Slot,
+				); err != nil {
+					if ls.config.Logger != nil {
+						ls.config.Logger.Error(
+							"TrustCanonicalTreasuryValueOnMismatch reconciliation failed; falling back to ordinary rewind-and-retry",
+							append(logFields, "error", err)...,
+						)
+					}
+				} else if ls.config.Logger != nil {
+					ls.config.Logger.Warn(
+						"TrustCanonicalTreasuryValueOnMismatch: overwrote the local treasury value to match a canonical peer's claim; retrying the same block",
+						logFields...,
+					)
+				}
+			}
+		}
+	}
+	if ls.config.TrustCanonicalReferenceScriptOnMismatch {
+		if _, ok := errors.AsType[lcommon.MalformedReferenceScriptsError](
+			validationErr.Cause,
+		); ok {
+			ls.RLock()
+			seenBefore := ls.referenceScriptMismatchSeenLocked(validationErr.TxHash)
+			ls.RUnlock()
+			if !seenBefore {
+				// First sighting of this exact transaction: record it and let
+				// the ordinary rewind-and-retry below run once more first,
+				// matching every other Trust* mismatch path's "one full
+				// attempt before anything special" shape.
+				ls.markReferenceScriptMismatchSeen(validationErr.TxHash)
+			} else {
+				// Confirmed deterministic: earn trust for this exact
+				// transaction so trustReferenceScriptValidationError lets it
+				// through the next time it is validated, in whichever
+				// candidate block carries it. The rewind-and-retry below
+				// still runs this cycle -- there is no local value to fix in
+				// place, unlike the sibling Trust* settings, so the earned
+				// trust only takes effect on the transaction's next delivery.
+				ls.markReferenceScriptMismatchTrusted(validationErr.TxHash)
+				if ls.config.Logger != nil {
+					ls.config.Logger.Warn(
+						"TrustCanonicalReferenceScriptOnMismatch: trusting a repeated deterministic malformed-reference-script rejection; the next delivery of this block will skip the check",
+						"component", "ledger",
+						"failing_block_slot", validationErr.BlockPoint.Slot,
+						"tx_hash", hex.EncodeToString(validationErr.TxHash),
+						"error", validationErr.Cause,
+					)
+				}
+			}
+		}
+	}
 	if resyncSpent && isRewardWithdrawalStateDivergence(validationErr.Cause) {
 		if ls.config.Logger != nil {
 			ls.config.Logger.Error(

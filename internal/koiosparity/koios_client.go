@@ -25,6 +25,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -89,24 +90,32 @@ const (
 
 	// The following bound the connection-establishment and response-wait
 	// phases of a single Koios HTTP attempt independently of the overall
-	// koiosClientTimeout, as defense-in-depth rather than a replacement for
-	// it. Without them, only two of the four phases below are actually
-	// bounded by anything narrower than koiosClientTimeout:
+	// koiosRequestTimeout (below), as defense-in-depth rather than a
+	// replacement for it. Without them, only two of the four phases below
+	// are actually bounded by anything narrower than koiosRequestTimeout:
 	// http.DefaultTransport's own defaults already give a dial a 30s budget
 	// and a TLS handshake a 10s budget (see net/http.DefaultTransport in the
 	// Go standard library), but it sets no ResponseHeaderTimeout at all, so
 	// "connection accepted, server writes nothing" is caught today only by
-	// the coarse, whole-round-trip koiosClientTimeout -- which also has to
+	// the coarse, whole-round-trip koiosRequestTimeout -- which also has to
 	// cover dial, TLS, and body reads, so a slow dial/handshake eats into
 	// the time actually available to notice a stuck server. Every value
-	// here is chosen to be clearly shorter than koiosClientTimeout so a
+	// here is chosen to be clearly shorter than koiosRequestTimeout so a
 	// phase-specific failure attributes cleanly instead of surfacing as an
 	// undifferentiated overall timeout.
-	koiosClientTimeout         = 60 * time.Second
+	//
+	// This package originally paired these with a 60s overall client
+	// timeout (koiosClientTimeout, since removed): koiosRequestTimeout
+	// replaced it at 20s after live investigation found individual requests
+	// stalling for nearly the full 60s (see koiosRequestTimeout's own doc
+	// comment). koiosResponseHeaderTimeout is lowered from its original 30s
+	// to stay under that tighter 20s bound -- at 30s it could never fire
+	// before koiosRequestTimeout already had, making it dead weight (human
+	// review, Chris Guiney, dingo#4319).
 	koiosDialTimeout           = 10 * time.Second
 	koiosDialKeepAlive         = 30 * time.Second
 	koiosTLSHandshakeTimeout   = 10 * time.Second
-	koiosResponseHeaderTimeout = 30 * time.Second
+	koiosResponseHeaderTimeout = 15 * time.Second
 	koiosExpectContinueTimeout = 1 * time.Second
 )
 
@@ -328,6 +337,32 @@ func validateKoiosNetwork(network string) error {
 // another deployment, so applying it there would throttle against a limit that
 // does not exist. The per-request retry and timeout handling is unchanged, so a
 // host that does rate-limit still backs off correctly on 429.
+// koiosIdleConnTimeout bounds how long an idle keep-alive connection stays
+// in the client's pool before Go proactively closes it. Shorter than
+// http.DefaultTransport's 90s default, on the theory that a stale
+// server/CDN-closed keep-alive connection reused anyway (write succeeds,
+// read then hangs) contributes to the stalls koiosRequestTimeout's doc
+// comment describes. Confirmed live that this alone did not eliminate
+// them, so koiosRequestTimeout was also shortened rather than relying on
+// this by itself -- kept anyway since it cannot hurt and may reduce how
+// often the stall condition is hit in the first place.
+const koiosIdleConnTimeout = 30 * time.Second
+
+// koiosRequestTimeout bounds a single HTTP request/response round trip.
+// Lowered from 60s: confirmed live against a Koios mirror that individual
+// requests occasionally stalled for almost exactly 60s (this client's old
+// Timeout value) before an immediate retry succeeded in well under a
+// second -- observed on /tx_info and /pool_history calls, including under
+// CheckStakeDistribution's own bounded concurrency, so this is not purely
+// a sequential-reuse artifact and may also be transient overload on a
+// community-hosted mirror under concurrent load. Every real (non-stalled)
+// call measured during this investigation completed in under 2s, so 20s
+// leaves a wide margin above normal latency while cutting the wall-clock
+// cost of a stall from 60s to 20s per occurrence, and (with
+// koiosMaxRetries=3) the pathological worst case from minutes to well
+// under a minute.
+const koiosRequestTimeout = 20 * time.Second
+
 func NewKoiosClient(
 	network, apiKey, baseURL string,
 	allowInsecureHTTP bool,
@@ -354,7 +389,7 @@ func NewKoiosClient(
 		baseURL: base,
 		apiKey:  apiKey,
 		http: &http.Client{
-			Timeout: koiosClientTimeout,
+			Timeout: koiosRequestTimeout,
 			Transport: newKoiosTransport(
 				koiosDialTimeout,
 				koiosDialKeepAlive,
@@ -394,6 +429,12 @@ func NewKoiosClient(
 // sending a request body when the client sets the Expect header; this
 // client never sets Expect, so it is inert today and included purely for
 // completeness against a future caller of this transport that does.
+//
+// Also sets IdleConnTimeout to koiosIdleConnTimeout, shorter than
+// DefaultTransport's 90s default -- see that constant's doc comment for
+// why (a stale, server/CDN-closed keep-alive connection reused anyway is
+// suspected to contribute to the stalls koiosRequestTimeout's doc comment
+// describes).
 func newKoiosTransport(
 	dialTimeout, dialKeepAlive time.Duration,
 	tlsHandshakeTimeout, responseHeaderTimeout, expectContinueTimeout time.Duration,
@@ -417,6 +458,7 @@ func newKoiosTransport(
 	transport.TLSHandshakeTimeout = tlsHandshakeTimeout
 	transport.ResponseHeaderTimeout = responseHeaderTimeout
 	transport.ExpectContinueTimeout = expectContinueTimeout
+	transport.IdleConnTimeout = koiosIdleConnTimeout
 	return transport
 }
 
@@ -1455,6 +1497,209 @@ func (k *KoiosClient) GetAccountRewardHistory(
 		)
 	}
 	return items, nil
+}
+
+// KoiosTxInfoBatchSize bounds how many transaction hashes go into a single
+// /tx_info request: each 64-char hex hash plus JSON quoting/comma overhead is
+// ~70 bytes, so this many hashes stays comfortably under Koios's request-body
+// size cap (confirmed live: an unbatched request for a full block's worth of
+// hashes was rejected outright with a plain-text "Payload too large" body
+// that fails JSON decoding, rather than any structured error).
+//
+// Exported so a caller accumulating hashes across multiple blocks before
+// calling GetTxInfos (e.g. nodeparity's from-genesis UTxO reconstruction,
+// blinklabs-io/dingo#1900) can flush at the same size GetTxInfos itself
+// batches at, rather than duplicating this number.
+const KoiosTxInfoBatchSize = 40
+
+// KoiosTxInfoUtxoRef is one entry in a KoiosTxInfoItem's Inputs: just enough
+// to identify a UTxO ref ("<tx_hash>#<tx_index>"), not its content -- an
+// input is being consumed, so only its identity is ever needed to remove it
+// from a running reconstruction, never what it contained.
+type KoiosTxInfoUtxoRef struct {
+	TxHash  string `json:"tx_hash"`
+	TxIndex int    `json:"tx_index"`
+}
+
+// KoiosTxInfoAsset is one multi-asset entry on a KoiosTxInfoOutput.
+// PolicyID and AssetName are both hex, matching gouroboros'
+// Blake2b224.String()/hex.EncodeToString conventions exactly (Koios's own
+// documented examples are lowercase hex the same way), which is what lets
+// CanonicalKoiosUTxOEntry produce a string directly comparable to
+// nodeparity's canonicalUTxOEntry without any re-encoding.
+type KoiosTxInfoAsset struct {
+	PolicyID  string `json:"policy_id"`
+	AssetName string `json:"asset_name"`
+	Quantity  string `json:"quantity"`
+}
+
+// KoiosTxInfoInlineDatum is the non-null shape of a KoiosTxInfoOutput's
+// InlineDatum -- only its presence matters here (to distinguish the
+// "inline" and "hash-only" datum forms), not its content.
+type KoiosTxInfoInlineDatum struct {
+	Bytes string `json:"bytes"`
+}
+
+// KoiosTxInfoReferenceScript is the non-null shape of a KoiosTxInfoOutput's
+// ReferenceScript.
+type KoiosTxInfoReferenceScript struct {
+	Hash string `json:"hash"`
+}
+
+// KoiosTxInfoOutput is one output from a KoiosTxInfoItem's Outputs, with
+// enough content to build the same canonical encoding
+// nodeparity.canonicalUTxOEntry builds from a live LocalStateQuery
+// GetUTxOWhole result: address, ADA value, multi-asset tokens, datum
+// presence/form, and reference script hash.
+type KoiosTxInfoOutput struct {
+	TxHash      string `json:"tx_hash"`
+	TxIndex     int    `json:"tx_index"`
+	PaymentAddr struct {
+		Bech32 string `json:"bech32"`
+	} `json:"payment_addr"`
+	// Value is the ADA-only amount (lovelace, as a plain decimal string,
+	// e.g. "157832856") -- multi-asset tokens are reported separately in
+	// AssetList, mirroring gouroboros' own TransactionOutput.Amount()
+	// (ADA only) versus .Assets() (everything else) split.
+	Value string `json:"value"`
+	// DatumHash is non-nil whenever the output carries ANY datum, hash-only
+	// or inline -- mirroring gouroboros' TransactionOutput.DatumHash(),
+	// which is likewise set for both forms (only .Datum() itself
+	// distinguishes them, matching InlineDatum here).
+	DatumHash       *string                     `json:"datum_hash"`
+	InlineDatum     *KoiosTxInfoInlineDatum     `json:"inline_datum"`
+	ReferenceScript *KoiosTxInfoReferenceScript `json:"reference_script"`
+	AssetList       []KoiosTxInfoAsset          `json:"asset_list"`
+}
+
+// KoiosTxInfoItem is one transaction from /tx_info: which refs it consumes
+// (Inputs) and which outputs it creates, with enough content on each output
+// for full content-based UTxO comparison (see CanonicalKoiosUTxOEntry), not
+// merely existence. Requesting with _inputs/_assets/_scripts:true (done by
+// GetTxInfos) is required for Inputs, AssetList, and the datum/reference-
+// script fields to be populated at all -- Koios omits all of them by
+// default.
+type KoiosTxInfoItem struct {
+	TxHash  string               `json:"tx_hash"`
+	Inputs  []KoiosTxInfoUtxoRef `json:"inputs"`
+	Outputs []KoiosTxInfoOutput  `json:"outputs"`
+}
+
+// CanonicalKoiosUTxOEntry builds a deterministic string encoding of out,
+// directly comparable (byte-for-byte, when the two sides genuinely agree)
+// to nodeparity's own canonicalUTxOEntry -- same field order, same "|"
+// separators, same asset sort order (policy then asset name, both already
+// hex so a plain string sort matches gouroboros' own raw-byte
+// bytes.Compare sort), same datum "form:hash" encoding. Kept in this
+// package (not nodeparity) since it depends only on Koios's own response
+// shape, not on gouroboros.
+func CanonicalKoiosUTxOEntry(out KoiosTxInfoOutput) string {
+	var sb strings.Builder
+	sb.WriteString(out.PaymentAddr.Bech32)
+	sb.WriteString("|")
+	sb.WriteString(out.Value)
+
+	if len(out.AssetList) > 0 {
+		assets := make([]KoiosTxInfoAsset, len(out.AssetList))
+		copy(assets, out.AssetList)
+		sort.Slice(assets, func(i, j int) bool {
+			if assets[i].PolicyID != assets[j].PolicyID {
+				return assets[i].PolicyID < assets[j].PolicyID
+			}
+			return assets[i].AssetName < assets[j].AssetName
+		})
+		for _, a := range assets {
+			fmt.Fprintf(&sb, "|%s.%s=%s", a.PolicyID, a.AssetName, a.Quantity)
+		}
+	}
+
+	if out.DatumHash != nil {
+		form := "hash"
+		if out.InlineDatum != nil {
+			form = "inline"
+		}
+		fmt.Fprintf(&sb, "|datum=%s:%s", form, *out.DatumHash)
+	}
+	if out.ReferenceScript != nil {
+		fmt.Fprintf(&sb, "|scriptref=%s", out.ReferenceScript.Hash)
+	}
+	return sb.String()
+}
+
+// GetTxInfos fetches input refs and full output content for every one of
+// txHashes, batched to stay under Koios's request-size cap.
+//
+// Unlike GetPoolEpochHistory's "missing means missing" contract (a
+// legitimate outcome there -- a pool with no snapshot row yet), a
+// transaction hash given to GetTxInfos is never optional: the caller
+// (nodeparity's from-genesis UTxO reconstruction, blinklabs-io/dingo#1900)
+// asked for it because a block it already trusts contains that exact
+// transaction, so Koios omitting it from the response means either
+// transient incompleteness or that this specific hash isn't indexed yet --
+// applying only the hashes that did come back would silently and
+// permanently lose that transaction's spends/creates from the running
+// reconstruction. Requires exactly one result per requested hash --
+// erroring, not silently dropping, on any that are missing or duplicated --
+// and returns them in request order (not Koios's response order) so a
+// caller applying dependent transactions (a UTxO created by one hash and
+// spent by a later one in the same request) does so in the same order the
+// chain itself does.
+func (k *KoiosClient) GetTxInfos(
+	ctx context.Context,
+	txHashes []string,
+) ([]KoiosTxInfoItem, error) {
+	byHash := make(map[string]KoiosTxInfoItem, len(txHashes))
+	for start := 0; start < len(txHashes); start += KoiosTxInfoBatchSize {
+		end := min(start+KoiosTxInfoBatchSize, len(txHashes))
+		payload := struct {
+			TxHashes []string `json:"_tx_hashes"`
+			Inputs   bool     `json:"_inputs"`
+			Assets   bool     `json:"_assets"`
+			Scripts  bool     `json:"_scripts"`
+		}{
+			TxHashes: txHashes[start:end],
+			Inputs:   true,
+			Assets:   true,
+			Scripts:  true,
+		}
+		resp, err := k.post(ctx, "/tx_info", payload)
+		if err != nil {
+			return nil, fmt.Errorf("tx_info batch [%d:%d]: %w", start, end, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf(
+				"koios /tx_info: status %d body: %s",
+				resp.StatusCode,
+				resp.Body,
+			)
+		}
+		var items []KoiosTxInfoItem
+		if err := json.Unmarshal(resp.Body, &items); err != nil {
+			return nil, fmt.Errorf("koios /tx_info decode: %w", err)
+		}
+		for _, item := range items {
+			if _, dup := byHash[item.TxHash]; dup {
+				return nil, fmt.Errorf(
+					"koios /tx_info: duplicate result for tx hash %s",
+					item.TxHash,
+				)
+			}
+			byHash[item.TxHash] = item
+		}
+	}
+
+	all := make([]KoiosTxInfoItem, len(txHashes))
+	for i, hash := range txHashes {
+		item, ok := byHash[hash]
+		if !ok {
+			return nil, fmt.Errorf(
+				"koios /tx_info: no result for requested tx hash %s",
+				hash,
+			)
+		}
+		all[i] = item
+	}
+	return all, nil
 }
 
 // parseTotalFromContentRange extracts the total count from a Content-Range header
