@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -134,7 +135,13 @@ func TestDecodeImmutableBlockBatchDecodeErrorCancelsWorkers(t *testing.T) {
 	cancelObserved := make(chan struct{})
 	var cancelOnce sync.Once
 	const workerCount = 8
-	workersReady := make(chan struct{}, workerCount-1)
+	// The first job fails only once the other workers are parked in the
+	// decoder, so the failure always has a live observer. Counting parked
+	// workers rather than handing tokens to job 0 keeps the barrier lossless:
+	// workers released by the cancellation pick up further jobs and re-enter
+	// the decoder, and those late arrivals must neither block nor be dropped.
+	var parked atomic.Int64
+	allParked := make(chan struct{})
 	decoder := func(
 		ctx context.Context,
 		index int,
@@ -142,20 +149,15 @@ func TestDecodeImmutableBlockBatchDecodeErrorCancelsWorkers(t *testing.T) {
 		_ lcommon.VerifyConfig,
 	) (gledger.Block, error) {
 		if index == 0 {
-			for range workerCount - 1 {
-				<-workersReady
-			}
+			<-allParked
 			return nil, decodeErr
 		}
-		select {
-		case workersReady <- struct{}{}:
-		default:
+		if parked.Add(1) == workerCount-1 {
+			close(allParked)
 		}
-		select {
-		case <-ctx.Done():
-			cancelOnce.Do(func() { close(cancelObserved) })
-			return nil, ctx.Err()
-		}
+		<-ctx.Done()
+		cancelOnce.Do(func() { close(cancelObserved) })
+		return nil, ctx.Err()
 	}
 	resultCh := make(chan error, 1)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -172,7 +174,9 @@ func TestDecodeImmutableBlockBatchDecodeErrorCancelsWorkers(t *testing.T) {
 	}()
 	select {
 	case <-cancelObserved:
-	case <-time.After(2 * time.Second):
+	// Failsafe only: a cancellation that never reaches the workers would
+	// otherwise hang until the package test timeout with no goroutine dump.
+	case <-time.After(30 * time.Second):
 		cancel()
 		require.Fail(t, "worker cancellation was not observed")
 	}
