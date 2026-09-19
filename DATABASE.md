@@ -263,18 +263,15 @@ member cannot authorize a hot key until it is removed from the committee and
 elected again.
 
 Committee validation derives its authority signal from the include-deleted
-member set, which separates the two empty states. Removal is a soft delete, so
-a committee emptied by a NoConfidence enactment still has rows carrying
-`deleted_slot`: that is an authoritative empty committee, and a former
-member's authorization or resignation is rejected. No rows at all means no
-committee history is currently persisted, which is not proof that none ever
-was: it is the whole Conway era on a genesis-synced node, because only
-`UpdateCommittee` enactment and Mithril snapshot import write the table and the
-Conway genesis committee is never persisted (blinklabs-io/dingo#3785), but a
-rollback to before the first enactment also returns the table to no rows. That
-state is ambiguous either way, so certificate and voter validation decline to
-reject on committee grounds they cannot establish. A failed lookup still fails
-closed in both cases.
+member set and the loaded Conway genesis. Genesis initialization seeds a
+nonempty genesis committee. Removal is a soft delete, so a committee emptied
+by a NoConfidence enactment still has rows carrying `deleted_slot` and remains
+authoritative. An explicitly empty genesis committee is also authoritative,
+without requiring a sentinel row. Certificate and voter membership checks
+remain enforced in both empty states. No rows without an empty genesis
+declaration do not establish authority; validation cannot infer non-membership
+from missing state. A failed database lookup still fails closed, even with an
+empty genesis committee.
 
 Migration `v9` (`committee-term-start-presence`, integer version 9) adds
 `committee_member.term_start_slot_set`. Existing rows are marked present

@@ -946,18 +946,16 @@ func TestLedgerViewProposedCommitteeMemberChainsFromNoConfidenceRoot(
 // separates the two empty committee states, which decides whether committee
 // validation rejects.
 //
-// No rows at all means never populated. Dingo does not seed the Conway genesis
-// committee (blinklabs-io/dingo#3785), so on a genesis-synced node that state
-// is ambiguous, and claiming authority would reject an authorization from a
-// real genesis committee member. Rows that are all soft-deleted mean the
-// committee was seated and is now authoritatively empty, as after a
+// Without a genesis declaration, no rows at all is ambiguous. Rows that are
+// all soft-deleted mean the committee was seated and is now authoritatively
+// empty, as after a
 // NoConfidence enactment, which must still reject a former member.
 func TestLedgerViewCommitteeStateAvailableTracksSeatedMembers(t *testing.T) {
 	t.Parallel()
 
 	lv, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
 
-	// A reachable store with no committee rows at all is not authoritative.
+	// A reachable store with no rows or genesis declaration is not authoritative.
 	available, err := lv.CommitteeStateAvailable()
 	require.NoError(t, err)
 	require.False(
