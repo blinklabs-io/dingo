@@ -19,9 +19,44 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/internal/koiosparity"
+	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/blinklabs-io/dingo/internal/koiosparity"
 )
+
+// TestResolveStartPoint pins from-genesis's resume-from-point behavior
+// (dingo#1900 follow-up): a killed or restarted process has no on-disk
+// checkpoint of its own, so from-genesis --at-slot/--at-hash lets a caller
+// that already trusts a prior run's epochs resume from that point instead
+// of Origin. Reverting resolveStartPoint to always return
+// pcommon.NewPointOrigin() would make the second and third subtests fail.
+func TestResolveStartPoint(t *testing.T) {
+	t.Run("nil resumeFrom defaults to Origin", func(t *testing.T) {
+		got, err := resolveStartPoint(nil)
+		require.NoError(t, err)
+		assert.Equal(t, pcommon.NewPointOrigin(), got)
+	})
+
+	t.Run("valid resumeFrom resolves to that exact point", func(t *testing.T) {
+		got, err := resolveStartPoint(&Tip{
+			Slot: 55784796,
+			Hash: "e18e33065526668044300543396ef5259764dafe4159e7038b4148dd77c4bc91",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, uint64(55784796), got.Slot)
+		assert.NotEqual(t, pcommon.NewPointOrigin(), got)
+	})
+
+	t.Run("invalid hash is rejected immediately, not left to fail later", func(t *testing.T) {
+		_, err := resolveStartPoint(&Tip{
+			Slot: 100,
+			Hash: "not-hex",
+		})
+		require.Error(t, err)
+	})
+}
 
 // TestUTxOVerdict pins the fix for a Koios outage during tx_info
 // reconstruction being reported as a false "utxo set match" instead of

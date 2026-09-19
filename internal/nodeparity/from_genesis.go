@@ -367,6 +367,20 @@ func applyTxInfoResults(
 	return anyFailed
 }
 
+// resolveStartPoint converts resumeFrom into the chain point RunFromGenesis
+// should start its ChainSync session (and UTxO baseline capture) from,
+// defaulting to Origin when resumeFrom is nil.
+func resolveStartPoint(resumeFrom *Tip) (pcommon.Point, error) {
+	if resumeFrom == nil {
+		return pcommon.NewPointOrigin(), nil
+	}
+	resolved, err := resumeFrom.point()
+	if err != nil {
+		return pcommon.Point{}, fmt.Errorf("resume point: %w", err)
+	}
+	return resolved, nil
+}
+
 // RunFromGenesis is documented at the top of this file.
 func RunFromGenesis(
 	ctx context.Context,
@@ -376,6 +390,7 @@ func RunFromGenesis(
 	koios *koiosparity.KoiosClient,
 	report FromGenesisReporter,
 	logf func(format string, args ...any),
+	resumeFrom *Tip,
 ) error {
 	if !KoiosNetworks[network] {
 		return fmt.Errorf(
@@ -385,6 +400,11 @@ func RunFromGenesis(
 	}
 	if logf == nil {
 		logf = func(string, ...any) {}
+	}
+
+	startPoint, err := resolveStartPoint(resumeFrom)
+	if err != nil {
+		return err
 	}
 
 	var (
@@ -400,8 +420,16 @@ func RunFromGenesis(
 		// runs (see the reconnect loop's doc comment further down) -- a
 		// fresh session after a reconnect resumes chainsync from here
 		// instead of Origin, so hours of already-verified epochs are never
-		// replayed.
-		lastPoint = pcommon.NewPointOrigin()
+		// replayed. Starts at startPoint instead of Origin when resumeFrom
+		// is set (dingo#4152 follow-up: a killed node-parity process has no
+		// on-disk checkpoint, so a caller that already trusts a prior run's
+		// epochs up to some point passes it back in here to skip re-deriving
+		// them, the same way a mid-run reconnect already skips re-deriving
+		// anything before its own lastPoint) -- captureGenesisBaseline is
+		// keyed off this same variable's first value, so the UTxO
+		// reconstruction is seeded from Dingo's live answer at startPoint
+		// rather than genesis too, with no separate code path needed.
+		lastPoint = startPoint
 		// progressed records whether the current chainsync session has
 		// successfully processed at least one point since it was
 		// (re)established -- see sessionRetryDelay's doc comment for why

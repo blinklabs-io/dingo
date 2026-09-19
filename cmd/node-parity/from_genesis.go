@@ -202,7 +202,16 @@ exists to work around in the first place.
 
 Runs until interrupted (Ctrl-C) or the chain-sync session ends. Prints one
 summary line per epoch and a running total on exit; exits nonzero if any
-epoch found a real mismatch.`,
+epoch found a real mismatch.
+
+Pass --at-slot and --at-hash together to resume from an already-validated
+point instead of genesis: a killed or restarted process has no on-disk
+checkpoint of its own, so a caller that already trusts a prior run's epochs
+up to some point (e.g. its logged final "run summary") passes that point's
+slot/hash back in here to seed both the chain-sync start point and the UTxO
+reconstruction baseline (captured fresh from Dingo at that point, the same
+way genesis's own baseline is), skipping the epochs already covered instead
+of re-deriving them from scratch.`,
 		Args: cobra.NoArgs,
 		RunE: fromGenesisRun,
 	}
@@ -233,7 +242,8 @@ func fromGenesisRun(cmd *cobra.Command, _ []string) error {
 	if globalFlags.dingoAddr == "" {
 		return errors.New("--dingo-addr is required")
 	}
-	if err := rejectAtPointFlags("from-genesis"); err != nil {
+	resumeFrom, err := requireAtPoint()
+	if err != nil {
 		return err
 	}
 	magic, err := networkMagic(network)
@@ -267,6 +277,7 @@ func fromGenesisRun(cmd *cobra.Command, _ []string) error {
 
 	err = nodeparity.RunFromGenesis(
 		cmd.Context(), globalFlags.dingoAddr, network, magic, koios, report, logf,
+		resumeFrom,
 	)
 
 	logger.Info("run summary",
