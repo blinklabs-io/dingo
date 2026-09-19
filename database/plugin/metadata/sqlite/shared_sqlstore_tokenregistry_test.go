@@ -215,6 +215,13 @@ type tokenRegistryPruneStore interface {
 	) (int, error)
 }
 
+type transactionalTokenRegistryStore interface {
+	tokenRegistryPruneStore
+	Transaction(context.Context) types.Txn
+	GetSyncState(string, types.Txn) (string, error)
+	SetSyncState(string, string, types.Txn) error
+}
+
 // TestSharedSQLStoreTokenRegistryPrune covers the reconciliation half of a
 // snapshot: subjects the upstream registry has dropped must stop being served,
 // which an upsert-only sync cannot achieve on its own.
@@ -286,4 +293,75 @@ func TestSharedSQLStoreTokenRegistryPruneKeepsCurrentSnapshot(t *testing.T) {
 	entry, err := store.GetTokenRegistryEntry(testSubjectNut, nil)
 	require.NoError(t, err)
 	require.NotNil(t, entry)
+}
+
+func TestSharedSQLStoreTokenRegistrySnapshotTransaction(t *testing.T) {
+	t.Parallel()
+	var store transactionalTokenRegistryStore
+	sqlStore, _ := newSharedSQLStore(t)
+	store = sqlStore
+	ctx := t.Context()
+	firstSync := testSyncedAt
+	_, err := store.UpsertTokenRegistryEntries(
+		ctx,
+		[]models.TokenRegistryEntry{
+			{Subject: testSubjectNut, Name: "old nutcoin"},
+			{Subject: testSubjectDjed, Name: "old Djed"},
+		},
+		firstSync,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NoError(t, store.SetSyncState("token-registry-test", "old", nil))
+
+	apply := func(txn types.Txn) {
+		t.Helper()
+		secondSync := firstSync.Add(time.Hour)
+		_, applyErr := store.UpsertTokenRegistryEntries(
+			ctx,
+			[]models.TokenRegistryEntry{{
+				Subject: testSubjectNut,
+				Name:    "new nutcoin",
+			}},
+			secondSync,
+			txn,
+		)
+		require.NoError(t, applyErr)
+		_, applyErr = store.PruneTokenRegistryEntriesBefore(
+			ctx,
+			secondSync,
+			txn,
+		)
+		require.NoError(t, applyErr)
+		require.NoError(
+			t,
+			store.SetSyncState("token-registry-test", "new", txn),
+		)
+	}
+
+	txn := store.Transaction(ctx)
+	apply(txn)
+	require.NoError(t, txn.Rollback())
+	nut, err := store.GetTokenRegistryEntry(testSubjectNut, nil)
+	require.NoError(t, err)
+	require.Equal(t, "old nutcoin", nut.Name)
+	djed, err := store.GetTokenRegistryEntry(testSubjectDjed, nil)
+	require.NoError(t, err)
+	require.NotNil(t, djed)
+	state, err := store.GetSyncState("token-registry-test", nil)
+	require.NoError(t, err)
+	require.Equal(t, "old", state)
+
+	txn = store.Transaction(ctx)
+	apply(txn)
+	require.NoError(t, txn.Commit())
+	nut, err = store.GetTokenRegistryEntry(testSubjectNut, nil)
+	require.NoError(t, err)
+	require.Equal(t, "new nutcoin", nut.Name)
+	djed, err = store.GetTokenRegistryEntry(testSubjectDjed, nil)
+	require.NoError(t, err)
+	require.Nil(t, djed)
+	state, err = store.GetSyncState("token-registry-test", nil)
+	require.NoError(t, err)
+	require.Equal(t, "new", state)
 }

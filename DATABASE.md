@@ -1110,11 +1110,15 @@ timestamp of the snapshot being applied; it is the only writer, called by
 which is how a subject the upstream registry has dropped stops being served —
 an upsert-only sync could never retire one. It runs only after a snapshot has
 applied in full, since pruning against a partial snapshot would delete live
-subjects the failed run never reached. `GetTokenRegistryEntry` looks a subject
-up for the API and returns `nil` for an unknown subject rather than an error,
-so the endpoint serves a null `metadata` field. Subjects are lower-cased on
-both write and read, so a registry that publishes an upper-case subject still
-matches a lookup built from on-chain bytes.
+subjects the failed run never reached. The sync passes one metadata transaction
+through the snapshot stamp, every upsert batch, the prune, and the ETag/source
+identity writes; a limit, store, state, or commit failure therefore leaves the
+previously served rows and validator state unchanged on SQLite, PostgreSQL, and
+MySQL. `GetTokenRegistryEntry` looks a subject up for the API and returns `nil`
+for an unknown subject rather than an error, so the endpoint serves a null
+`metadata` field. Subjects are lower-cased on both write and read, so a registry
+that publishes an upper-case subject still matches a lookup built from
+on-chain bytes.
 
 The API-mode off-chain metadata fetcher discovers pointers from `pool_registration.metadata_url`, DRep anchor rows, governance proposal/vote anchors, constitutions, and committee resignations. The cache is not consensus state: rollbacks may leave old cache rows behind, and APIs should join/cache-hit by the current on-chain `(source_type, url, hash)` pointer.
 

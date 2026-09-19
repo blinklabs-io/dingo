@@ -2191,13 +2191,15 @@ unlike a remote metadata server lookup.
 
 The sync streams a gzipped tarball of the registry repository, parses each
 `mappings/*.json` document with `ParseTokenRegistryEntry`, and upserts entries
-into `token_registry_entry` in batches of 500. Nothing is written to disk and
-no more than one mapping plus one batch is held at a time, so peak memory is
-independent of registry size: the roughly 240MB compressed / 316MB uncompressed
-mainnet registry, about 8,000 mappings, syncs within single-digit MB of heap
-growth. A mapping that fails to parse is skipped and counted rather than
-failing the snapshot, since one bad file out of thousands should not cost the
-whole sync.
+into `token_registry_entry` in batches of at most 500. The compressed response,
+aggregate decompressed tar stream, archive-header count, accepted mapping count,
+single mapping, and retained batch payload each have independent limits. All
+tar content counts against the expansion budget, including directories and
+non-mapping files, and the accepted-entry limit also bounds row-upsert work.
+Nothing is written to disk and no more than one mapping plus one bounded batch
+is retained at a time. A mapping that fails to parse is skipped and counted
+rather than failing the snapshot, since one bad file out of thousands should
+not cost the whole sync. Exhausting any aggregate limit rejects the artifact.
 
 Re-downloading that artifact on every interval would be indefensible, so the
 sync records the HTTP entity tag of the last successfully applied snapshot in
@@ -2244,18 +2246,12 @@ exactly the subjects the new snapshot dropped. Each snapshot takes the later of
 the wall clock and the recorded stamp, so the sequence stays strictly
 increasing across process boundaries.
 
-The three values are written with separate calls, so a crash can land between
-them, and the write order is what makes the surviving state safe rather than a
-transaction spanning it. The stamp goes first, *before* the rows it stamps, so
-that "recorded stamp ≥ the table's highest stamp" holds at every instant: a
-crash mid-apply leaves the stamp ahead of the table, and the next snapshot is
-then guaranteed a strictly greater stamp and prunes what the interrupted one
-left behind. Recording it afterwards would leave the table ahead of the stamp,
-which is the unsafe direction. The tag then goes before the identity, because
-the identity is the gate — the tag is replayed only when the recorded identity
-matches — so a crash between them leaves the gate shut and the next run
-re-applies in full, rather than leaving it open over a tag that was never
-updated. The snapshot stamp is truncated to a
+The stamp, all row-upsert batches, reconciliation prune, entity tag, and source
+identity are applied through one metadata transaction. Until commit, API
+readers continue to see the previous complete snapshot. An expansion limit,
+entry limit, store error, state error, cancellation, or commit failure rolls
+the transaction back, so neither rows nor validator state advance. The
+snapshot stamp is truncated to a
 whole second, because MySQL's `datetime` column carries no fractional seconds:
 an unrounded stamp would be stored rounded while the prune compared against
 the original, deleting the very snapshot just written. Stamps are also forced
@@ -2266,16 +2262,9 @@ snapshot dropped. Turning `storeLogos` off
 needs no special handling: the upsert overwrites every property column, so the
 next snapshot clears previously stored logos.
 
-Batches are committed as they fill rather than as one transaction, so a
-failure partway through a snapshot leaves earlier batches applied. That is a
-deliberate trade: wrapping roughly 8,000 upserts in a single transaction would
-hold the metadata store's write lock across the whole download and parse,
-stalling block indexing on a node that is also following the chain, to buy
-atomicity for a best-effort cache consensus never reads. The partial state is
-safe and transient — every row written is the registry's current value for
-that subject, so some subjects are fresher than others but none are wrong, and
-because neither the prune nor the ETag advances on a failed snapshot, the next
-run re-applies the whole thing and reconciles.
+Batch flushes execute inside that transaction, bounding retained payload
+without exposing partial rows. The transaction spans decompression and parsing,
+but every dimension of that work is bounded and cancellation rolls it back.
 
 Snapshot application is serialized end to end. `SyncOnce` is exported and the
 worker loop calls it, so two applications can overlap; interleaved snapshots
