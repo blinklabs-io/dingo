@@ -1438,10 +1438,14 @@ func precomputedRewardPoolInputsMatchSnapshot(
 			)
 		}
 	}
-	// Same bound as validateRewardCalculatorInputs: pools excluded for degraded
-	// registration data keep their stake in the snapshot's sigma_a denominator
-	// but contribute no reward_pool_input row.
-	if totalDelegated > uint64(snapshot.TotalActiveStake) {
+	// Same check as validateRewardCalculatorInputs: pools excluded for
+	// degraded registration data keep their stake in the snapshot's sigma_a
+	// denominator but contribute no reward_pool_input row.
+	matches, err := rewardStakeSumMatchesSnapshot(totalDelegated, snapshot)
+	if err != nil {
+		return false, err
+	}
+	if !matches {
 		return false, nil
 	}
 	if totalDelegators != snapshot.TotalDelegators {
@@ -2464,6 +2468,32 @@ func addRewardUint64(a, b uint64) (uint64, bool) {
 	return a + b, false
 }
 
+// rewardStakeSumMatchesSnapshot reports whether summed -- a reward-input row
+// set's total pool/delegated stake -- is consistent with snapshot's
+// TotalActiveStake. A tracked ExcludedActiveStake (dingo #4025) makes the
+// check exact: summed plus the tracked exclusion must equal the total
+// precisely, catching a row set reduced by any amount rather than only one
+// missing pool's worth. A nil ExcludedActiveStake means snapshot predates
+// that tracking, so only the legacy non-exceeding bound still applies.
+func rewardStakeSumMatchesSnapshot(
+	summed uint64,
+	snapshot *models.RewardSnapshot,
+) (bool, error) {
+	if snapshot.ExcludedActiveStake == nil {
+		return summed <= uint64(snapshot.TotalActiveStake), nil
+	}
+	total, overflow := addRewardUint64(
+		summed,
+		uint64(*snapshot.ExcludedActiveStake),
+	)
+	if overflow {
+		return false, errors.New(
+			"reward pool input stake plus excluded active stake overflow",
+		)
+	}
+	return total == uint64(snapshot.TotalActiveStake), nil
+}
+
 type stakeRewardEpochs struct {
 	snapshot    uint64
 	performance uint64
@@ -3154,8 +3184,9 @@ func (ls *LedgerState) rewardCalculatorSnapshot(
 	}
 
 	ret := rewards.Snapshot{
-		TotalActiveStake: uint64(snapshot.TotalActiveStake),
-		Pools:            make([]rewards.Pool, 0, len(poolInputs)),
+		TotalActiveStake:    uint64(snapshot.TotalActiveStake),
+		ExcludedActiveStake: (*uint64)(snapshot.ExcludedActiveStake),
+		Pools:               make([]rewards.Pool, 0, len(poolInputs)),
 	}
 	for _, input := range poolInputs {
 		if input == nil {
@@ -3281,14 +3312,28 @@ func validateRewardCalculatorInputs(
 	// reward_snapshot.total_active_stake is the sigma_a denominator and covers
 	// every delegating credential observed at the boundary, including those
 	// whose pool was excluded from reward_pool_input for degraded registration
-	// data (see snapshot.buildRewardStateInputs). The rows may therefore sum to
-	// less than it; summing to more means the row set and the snapshot describe
-	// different boundaries.
-	if totalPoolStake > uint64(snapshot.TotalActiveStake) {
+	// data (see snapshot.buildRewardStateInputs). A tracked
+	// excluded_active_stake (dingo #4025) makes the rows' sum plus that
+	// exclusion match the total exactly; without it (a pre-#4025 row), only
+	// the legacy non-exceeding bound can still be enforced, since the
+	// exclusion's size is unknown.
+	matches, err := rewardStakeSumMatchesSnapshot(totalPoolStake, snapshot)
+	if err != nil {
+		return err
+	}
+	if !matches {
+		if snapshot.ExcludedActiveStake == nil {
+			return fmt.Errorf(
+				"reward pool input total delegated stake %d exceeds snapshot active stake %d",
+				totalPoolStake,
+				uint64(snapshot.TotalActiveStake),
+			)
+		}
 		return fmt.Errorf(
-			"reward pool input total delegated stake %d exceeds snapshot active stake %d",
+			"reward pool input total delegated stake %d does not match snapshot active stake %d minus excluded active stake %d",
 			totalPoolStake,
 			uint64(snapshot.TotalActiveStake),
+			uint64(*snapshot.ExcludedActiveStake),
 		)
 	}
 	if totalDelegators != snapshot.TotalDelegators {

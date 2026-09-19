@@ -1030,6 +1030,36 @@ deletes those delta and withdrawal-witness rows and refreshes
 no stale logical withdrawal row and deterministically applies the subtraction
 again.
 
+API-mode Mithril historical metadata backfill (`historicalBackfill`) replays
+already-ledger-validated canonical withdrawals from before the imported
+snapshot, so it skips both the era-neutral upper-bound check and the
+`account.reward` debit -- the imported snapshot balance already reflects every
+credit and debit through the snapshot's boundary, and re-subtracting a
+pre-boundary withdrawal from it would double-count. The withdrawal is still
+required to resolve an *active* `account` row for the credential during live
+ingestion; during historical backfill it is not, because a withdrawal that was
+valid on the canonical chain can name a stake credential with no active
+account row for two distinct reasons (issue #3788), which are not treated
+alike:
+
+- No `account` row exists at all: the credential was deregistered before the
+  snapshot was taken, or never active in it. There is no real prior balance to
+  recover, so the backfill records the `account_reward_delta` row with
+  `previous_reward = 0` from the credential alone, and neither creates nor
+  reactivates an `account` row -- the journal's join to `account` is already
+  unenforced (see above), so the history is retained without fabricating
+  current stake-registration state.
+- A row exists but is inactive. `applyTransactionCertificates` runs
+  unconditionally regardless of `historicalBackfill`, so backfill's own
+  certificate replay can transiently deactivate a row Mithril imported active,
+  between a historical deregistration certificate and a later
+  re-registration certificate for the same credential; a deregistration's
+  account upsert never clears `reward`, so the row can still hold the
+  credential's real balance while inactive. The backfill falls back to an
+  inactive-inclusive lookup and journals that real `reward` as
+  `previous_reward` instead of discarding it as `0`, while still leaving the
+  row itself untouched.
+
 ### Pools
 
 | Table | Columns | Keys / indexes | Relationships and notes |
@@ -1038,7 +1068,7 @@ again.
 | `pool_registration` | `id`, `pool_id`, `pool_key_hash`, `vrf_key_hash`, `reward_account`, `reward_account_credential_tag`, `pledge`, `cost`, `margin`, `metadata_url`, `metadata_hash`, `certificate_id`, `added_slot`, `deposit_amount`, `deposit_held`, `leios_key_public`, `leios_key_possession_proof` | PK `id`; unique `(pool_id, added_slot)`; indexes `pool_key_hash`, `certificate_id` | Pool registration certificate. Join `pool_id -> pool.id` and `certificate_id -> certs.id`. `reward_account_credential_tag`: 0 key hash, 1 script hash. `deposit_amount` is the protocol parameter in force for that certificate; nullable `deposit_held` is the amount actually retained for the registration cycle and refunded by POOLREAP. Migration `v12` reconstructs legacy rows from registration, retirement, and epoch history, carries deposits across re-registrations, starts a new cycle after a completed reap, preserves populated values on replay, and fails closed with a resync-required error when a reap cannot be placed safely. Live certificate ingestion cannot fail block application for missing epoch history, so it preserves the pre-migration charged-amount fallback in that case. An unknown retained amount remains NULL; refund queries then use `deposit_amount` as the legacy fallback. `leios_key_public`/`leios_key_possession_proof` mirror `pool`'s columns of the same name for this specific registration (see above). Genesis staking replay reuses the existing slot-0 row and replaces its owner/relay children from the immutable genesis configuration, making startup repair a partially-written genesis registration instead of inserting children against a missing parent. This behavior is covered by the SQLite metadata contract suite. |
 | `pool_registration_owner` | `id`, `pool_registration_id`, `pool_id`, `key_hash` | PK `id`; indexes `pool_registration_id`, `pool_id` | Owners for a pool registration. Join `pool_registration_id -> pool_registration.id`; `pool_id -> pool.id`. |
 | `pool_registration_relay` | `id`, `pool_registration_id`, `pool_id`, `ipv4`, `ipv6`, `hostname`, `port` | PK `id`; indexes `pool_registration_id`, `pool_id` | Relay addresses for a pool registration. |
-| `pool_retirement` | `id`, `pool_id`, `pool_key_hash`, `certificate_id`, `epoch`, `added_slot` | PK `id`; indexes `pool_id`, `pool_key_hash`, `certificate_id`, `added_slot` | Pool retirement certificate. Synthetic retirements written by a Mithril v2 catch-up (reconcile) or by the initial Mithril bootstrap import have `certificate_id = 0` and no `certs` row (`epoch`/`added_slot` are the catch-up or snapshot point); joins on `certificate_id` must be LEFT JOINs to keep them visible, and active-pool queries rank them ahead of certificate-backed rows at the same slot. The bootstrap case covers a pool that appears in the imported active pool distribution (`pool_stake_snapshot` `"actv"`) but is absent from the certified live pool params: it retired at the snapshot's epoch boundary yet still leads the current epoch's already-fixed schedule, so the import synthesizes a `pool`/`pool_registration` pair carrying only its pool key hash and pool-distr `vrf_key_hash` (pledge/cost/margin/reward-account left zero) plus this retirement tombstone. That keeps the producer resolvable via `GetPool(includeInactive=true)` for the header VRF-key binding check while the tombstone excludes it from active-pool and stake queries. Imported reward seeding separately intersects its shared registration fallback with each target snapshot's positive-stake delegated pool keys before the target snapshot's complete parameters overlay it. A synthesized pool that belongs only to another snapshot therefore cannot leak into this epoch's reward inputs, while an actually referenced pool remains subject to the all-or-nothing reconciliation gate if neither source supplies complete economics. This matches how a genesis-synced node retains a retired pool without treating it as active. |
+| `pool_retirement` | `id`, `pool_id`, `pool_key_hash`, `certificate_id`, `epoch`, `added_slot` | PK `id`; indexes `pool_id`, `pool_key_hash`, `certificate_id`, `added_slot` | Pool retirement certificate. Synthetic retirements written by a Mithril v2 catch-up (reconcile) or by the initial Mithril bootstrap import have `certificate_id = 0` and no `certs` row (`added_slot` is the catch-up or snapshot point; `epoch` is that same point except for the pending-retirement case below, where it is a future epoch); joins on `certificate_id` must be LEFT JOINs to keep them visible, and active-pool queries rank them ahead of certificate-backed rows at the same slot. The bootstrap case covers a pool that appears in the imported active pool distribution (`pool_stake_snapshot` `"actv"`) but is absent from the certified live pool params: it retired at the snapshot's epoch boundary yet still leads the current epoch's already-fixed schedule, so the import synthesizes a `pool`/`pool_registration` pair carrying only its pool key hash and pool-distr `vrf_key_hash` (pledge/cost/margin/reward-account left zero) plus this retirement tombstone. That keeps the producer resolvable via `GetPool(includeInactive=true)` for the header VRF-key binding check while the tombstone excludes it from active-pool and stake queries. Imported reward seeding separately intersects its shared registration fallback with each target snapshot's positive-stake delegated pool keys before the target snapshot's complete parameters overlay it. A synthesized pool that belongs only to another snapshot therefore cannot leak into this epoch's reward inputs, while an actually referenced pool remains subject to the all-or-nothing reconciliation gate if neither source supplies complete economics. This matches how a genesis-synced node retains a retired pool without treating it as active. The bootstrap import writes a second, distinct kind of `certificate_id = 0` row for a pool the snapshot shows as *pending* retirement: the PState `retiring` map schedules a live pool to retire at a later epoch, so the row carries that future `epoch` while the pool keeps its `pool_registration` economics and its `deposit_held`, and continues to earn rewards and lead slots until the boundary refunds it. Dropping these rows leaves the node holding a deposit the network has already refunded to the pool's reward account, so the two ledgers disagree about that account's balance. |
 | `pool_opcert_sequence` | `id`, `pool_key_hash`, `slot`, `sequence` | PK `id`; unique `(pool_key_hash, slot)`; index `slot`; index `(pool_key_hash, sequence)` | Observed operational certificate sequence by slot. Read before write inside the block-apply transaction to enforce inbound opcert counter monotonicity; per-slot rows let rollback drop entries past the rollback slot and recompute `pool.latest_op_cert_sequence`. A Mithril restore imports the certified HeaderState counter map at its trusted tip; validation selects observations strictly after that boundary, falls back to the certified row at the boundary, and ignores stale pre-boundary rows. Those imported rows are counters, not blocks — a bootstrap applies no block at or below its anchor, and one slot cannot hold a block from every pool — so `CountPoolBlocksInSlotRange` and `GetPoolBlockIssuersInSlotRange`, the two readers that mean "blocks minted", raise their start slot past the recorded `mithril_ledger_slot` before reading. Without that they credit every pool holding a certified counter with a block it never minted and inflate the epoch total by the size of the pool set, which reaches pool reward performance, the `reward_pool_input` counts seeded at the epoch boundary, and Blockfrost `blocks_minted`. `LatestPoolOpCertSequenceAtOrBefore` uses the same rows to provide Leios announcement validation with the highest issuer counter no later than the selected chain's immutable-tip slot; absence by that bound is distinct from counter zero and classifies the dangling announcement as stale. Reward calculation can read the ordered raw issuer rows for an ended epoch and exclude TPraos overlay slots before deriving pool performance. Raising the start slot removes the imported counter rows, but it leaves no blocks at all for an epoch that ended below the anchor; `imported_pool_block_count` is the positive record of what those epochs actually minted. `LatestPoolOpCertSequences` reduces the whole table to one highest `sequence` per `pool_key_hash` (`GROUP BY pool_key_hash`) for the `GetChainDepState` query; because the table is keyed by issuer rather than joined to `pool`, that set includes cold keys whose pool has left the active set, which is what the chain still enforces against. That aggregate has no slot bound available to narrow it — the table takes a row per block minted, is pruned only by rollback, and holds nothing above the tip — so `(pool_key_hash, sequence)` exists to serve it from an index alone: SQLite and PostgreSQL fold it without reading a table row, and MySQL can skip through the index a pool at a time. It is declared by migration `v1alpha1`. The cost is one further index maintained per minted block. `sequence` is a signed engine integer, so the recorded counter domain is `[0, 2^63-1]` even though the reference decodes the operational certificate counter as a full-width `uint64`. That column carries the monotonicity ordering as well as the value -- the `MAX(sequence)` reads above, the `latest_op_cert_sequence < ?` guard on the denormalized `pool` maximum, and the `(pool_key_hash, sequence)` index -- so a counter above the domain would order below every smaller one. `eras.MaxPersistableOpCertCounter` names the bound; block application refuses a higher counter before applying the block, and the Mithril restore path (`ledgerstate.importOpCertCounters`) refuses it before writing the certified baseline, rather than failing this write part-way through. Every row written before that bound was named is inside it: `checkedInt64` has always refused a higher value, so no row needs rewriting. |
 
 ### DReps, Governance, and Committee
@@ -1053,7 +1083,8 @@ updates preserve the previous activity and expiry epochs.
 | `registration_drep` | `id`, `credential_tag`, `drep_credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; unique `(credential_tag, drep_credential, added_slot)`; index `certificate_id` | DRep registration certificate. `credential_tag` mirrors `drep.credential_tag` for the registered DRep. |
 | `deregistration_drep` | `id`, `credential_tag`, `drep_credential`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `(credential_tag, drep_credential)`, `certificate_id`, `added_slot` | DRep deregistration certificate. |
 | `update_drep` | `id`, `credential_tag`, `credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot` | PK `id`; indexes `(credential_tag, credential)`, `certificate_id`, `added_slot` | DRep update certificate. |
-| `governance_proposal` | `id`, `tx_hash`, `action_index`, `action_type`, `proposed_epoch`, `expires_epoch`, `parent_tx_hash`, `parent_action_idx`, `enacted_epoch`, `enacted_slot`, `ratified_epoch`, `ratified_slot`, `policy_hash`, `anchor_url`, `anchor_hash`, `deposit`, `return_address`, `gov_action_cbor`, `expired_epoch`, `expired_slot`, `added_slot`, `deleted_slot` | PK `id`; unique `(tx_hash, action_index)`; composite `(parent_tx_hash, parent_action_idx)` (`idx_gov_proposal_parent`); indexes action type, epochs, lifecycle slots, `added_slot`, `deleted_slot` | Governance action lifecycle. Votes join by `governance_vote.proposal_id`. `gov_action_cbor` stores the era-specific GovAction CBOR used for enactment and transaction validation; replay may rewrite ratified parameter-change actions at an era boundary, such as Conway to Dijkstra, so old databases should be rebuilt from chain data when this encoding changes. `expires_epoch` is inclusive; validation derives its final slot from the proposal epoch's start and epoch length. The ledger view exposes only rows without `enacted_epoch` or `expired_epoch` as pending actions, while the latest enacted rows for the four CIP-1694 purposes are exposed separately as purpose roots. Same-boundary epoch replay reads proposals whose `enacted_epoch/enacted_slot` or `expired_epoch/expired_slot` already match the boundary to restore treasury/reward side effects after stake reward pot reset. |
+| `governance_proposal` | `id`, `tx_hash`, `action_index`, `action_type`, `proposed_epoch`, `expires_epoch`, `parent_tx_hash`, `parent_action_idx`, `enacted_epoch`, `enacted_slot`, `ratified_epoch`, `ratified_slot`, `policy_hash`, `anchor_url`, `anchor_hash`, `deposit`, `return_address`, `gov_action_cbor`, `expired_epoch`, `expired_slot`, `added_slot`, `deleted_slot` | PK `id`; unique `(tx_hash, action_index)`; composite `(parent_tx_hash, parent_action_idx)` (`idx_gov_proposal_parent`); indexes action type, epochs, lifecycle slots, `added_slot`, `deleted_slot` | Governance action lifecycle. Votes join by `governance_vote.proposal_id`. `gov_action_cbor` stores the era-specific GovAction CBOR used for enactment and transaction validation; replay may rewrite ratified parameter-change actions at an era boundary, such as Conway to Dijkstra, so old databases should be rebuilt from chain data when this encoding changes. `expires_epoch` is inclusive; validation derives its final slot from the proposal epoch's start and epoch length. The ledger view exposes only rows without `enacted_epoch` or `expired_epoch` as pending actions, while the latest enacted rows for the four CIP-1694 purposes are exposed separately as purpose roots. Same-boundary epoch replay reads proposals whose `enacted_epoch/enacted_slot` or `expired_epoch/expired_slot` already match the boundary to restore treasury/reward side effects after stake reward pot reset. `expired_epoch`/`expired_slot` mark a proposal ineligible; they do not by themselves refund its deposit -- see `governance_proposal_drop`. |
+| `governance_proposal_drop` | `proposal_id`, `dropped_epoch`, `dropped_slot` | PK `proposal_id`; indexes `dropped_epoch`, `dropped_slot` | Companion table recording when an expired proposal's deposit was actually returned and the proposal reached final consideration. cardano-ledger does not refund an expired action's deposit in the same epoch it is marked expired -- that happens one full epoch later, the same one-epoch delay ratification has before enactment (dingo#4411). A separate table rather than columns on `governance_proposal` avoids widening a table v16 (`governance-proposal-optional-anchor`) already rebuilds via rename-and-recreate with an unqualified `SELECT *`, which cannot tolerate columns added after it. FK `proposal_id` references `governance_proposal.id` with cascade deletion. A row's absence means the proposal, if expired, is still awaiting its drop. The v17 backfill stamps every proposal an upgraded database had already expired, because the pre-v17 tick refunded at expiry; without it the new drop step would return each of those deposits a second time at the first boundary after the upgrade. |
 | `governance_proposal_ratification_history` | `id`, `proposal_id`, `transition_slot`, `ratified_epoch`, `ratified_slot` | PK `id`; indexes `transition_slot`, `(proposal_id, transition_slot, id)` | Rollback journal for proposal ratification lifecycle. A paired epoch/slot records ratification; NULL marker values record an explicit return to pending. FK `proposal_id` references `governance_proposal.id` with cascade deletion. Rollback deletes transitions above the target and restores the latest remaining state, with `id` breaking ties between transitions at the same slot. |
 | `governance_vote` | `id`, `proposal_id`, `voter_type`, `voter_credential_tag`, `voter_credential`, `vote`, `anchor_url`, `anchor_hash`, `added_slot`, `vote_updated_slot`, `deleted_slot` | PK `id`; unique `(proposal_id, voter_type, voter_credential_tag, voter_credential)`; indexes proposal/voter/lifecycle slots | Vote on a governance proposal. `voter_type`: 0 committee, 1 DRep, 2 SPO. `voter_credential_tag`: 0 key hash, 1 script hash for committee/DRep voters; 0 for SPO key hashes. `vote`: 0 No, 1 Yes, 2 Abstain. |
 | `constitution` | `id`, `anchor_url`, `anchor_hash`, `policy_hash`, `added_slot`, `deleted_slot` | PK `id`; unique `added_slot`; index `deleted_slot` | Current or historical constitution references. |
@@ -1102,7 +1133,7 @@ process the same pointer unless the claim expires before a result is recorded.
 | `epoch_summary` | `id`, `epoch`, `total_active_stake`, `total_pool_count`, `total_delegators`, `epoch_nonce`, `boundary_slot`, `snapshot_ready` | PK `id`; unique `epoch` | Aggregate epoch snapshot state, written by the same transaction that captures the Mark snapshot. Retained for the life of the database (see the retention note below), so it is the durable record of every epoch boundary the node captured and a missing row means the boundary was never captured. Re-crossing a boundary after a rollback upserts the row, replacing the stake/pool/delegator totals, nonce, and boundary slot; `snapshot_ready` is sticky (`snapshot_ready OR excluded.snapshot_ready`) so a later partial write cannot clear it. `GetTotalActiveStake` reads `total_active_stake` from here for `"mark"` queries whenever `snapshot_ready` is set, which keeps historical epoch totals answerable after the per-pool rows are pruned. |
 | `reward_live_stake` | `id`, `credential_tag`, `staking_key`, `pool_key_hash`, `utxo_stake`, `reward_stake`, `total_stake`, `registered`, `pool_delegation_slot`, `pool_delegation_block_index`, `pool_delegation_cert_index`, `updated_slot`, `calculation_version` | PK `id`; unique `(credential_tag, staking_key)`; index `(pool_key_hash, credential_tag, staking_key)` | Live per-stake-credential aggregate maintained transactionally with UTxO, account, delegation, and reward-balance writes. `calculation_version` is set on every rebuild and incremental update. Authoritative epoch-boundary capture reads all registered, delegated rows through `GetLiveStakeInputsForPools`: zero-stake rows contribute to Mark delegator counts, while positive rows also become `reward_stake_input`. The pool/credential index supports this ordered boundary scan without retaining the legacy index on `total_stake`. Startup compares calculation version, keys, values, registration, and delegation state with canonical metadata and rebuilds on any mismatch. That comparison (`RewardLiveStakeNeedsBackfill`) scans every live `utxo` row twice regardless of whether a rebuild turns out to be needed, so its cost is paid on every startup; `skipRewardLiveStakeBackfillCheck` suppresses the whole step for diagnostic use, leaving the aggregate unverified until the next startup that runs it. The `(credential_tag, staking_key)` uniqueness protects the invariant that each stake credential contributes to exactly one reward aggregate and pool input. `pool_key_hash` mirrors `account.pool`, but only when `refreshRewardLiveStakeAggregate` runs for the credential, which a POOLREAP does not trigger — so `ClearDelegationsToRetiredPool` nulls it here alongside the account row, resetting `pool_delegation_slot`/`pool_delegation_block_index`/`pool_delegation_cert_index` to zero and stamping `updated_slot` with the boundary slot. Since `GetLiveStakeInputsForPools` selects on this column, leaving it behind would keep the reaped pool's delegators in the stake distribution the boundary capture reads (issue #3794). |
 | `reward_ada_pots` | `id`, `epoch`, `treasury`, `reserves`, `fees`, `rewards`, `captured_slot` | PK `id`; unique `epoch`; index `captured_slot` | Reward ADA pots captured at an epoch boundary, except epoch 0's, which is seeded from the slot-0 genesis baseline because epoch 0 has no rollover. Reward application reads the row for its pots epoch and skips the epoch when it is absent. Retained for the life of the database (see the retention note below). |
-| `reward_snapshot` | `id`, `epoch`, `snapshot_type`, `total_active_stake`, `total_pool_count`, `total_delegators`, `captured_slot`, `boundary_slot`, `epoch_nonce`, `protocol_version`, `authoritative`, `calculation_version` | PK `id`; unique `(epoch, snapshot_type)`; indexes `captured_slot`, `boundary_slot` | Reward snapshot metadata recorded by the epoch rotation path. `authoritative` is `true` for a snapshot captured inside the ledger epoch-rollover write transaction at the SNAP point (`CaptureEpochBoundarySnapshot`) and `false` for the event-driven fallback (`captureMarkSnapshot`). `protocol_version` is the protocol major version the snapshot's new epoch runs at, taken from the post-enactment protocol parameters, so it matches the `EpochTransitionEvent` published for the same boundary; a boundary that crosses two eras in one block captures the snapshot after both hard-fork transitions so the recorded major is the final era's, not the source era's. Seeded and Mithril-imported rows leave it zero. `total_active_stake` is the reward calculation's sigma_a denominator, populated by `GetLiveStakeInputsForPools` from every registered, non-expired credential delegating to a pool active at the snapshot slot, including those whose pool was excluded from `reward_pool_input` for missing or malformed registration data; `total_pool_count` and `total_delegators` describe the `reward_pool_input` rows actually written, so the rows' delegated stake sums to no more than `total_active_stake` rather than to exactly it. `calculation_version` ties authoritative Mark metadata to the stake algorithm that produced its pool rows; version 2 carries that full denominator, while a version 1 row understates it for any epoch that excluded a pool. The fallback claims the `(epoch, mark)` row atomically and skips when an authoritative row already exists, so it cannot overwrite the authoritative capture. Retained for the life of the database. Guard claim/release require the same non-nil metadata transaction. |
+| `reward_snapshot` | `id`, `epoch`, `snapshot_type`, `total_active_stake`, `total_pool_count`, `total_delegators`, `captured_slot`, `boundary_slot`, `epoch_nonce`, `protocol_version`, `authoritative`, `calculation_version`, `excluded_active_stake` | PK `id`; unique `(epoch, snapshot_type)`; indexes `captured_slot`, `boundary_slot` | Reward snapshot metadata recorded by the epoch rotation path. `authoritative` is `true` for a snapshot captured inside the ledger epoch-rollover write transaction at the SNAP point (`CaptureEpochBoundarySnapshot`) and `false` for the event-driven fallback (`captureMarkSnapshot`). `protocol_version` is the protocol major version the snapshot's new epoch runs at, taken from the post-enactment protocol parameters, so it matches the `EpochTransitionEvent` published for the same boundary; a boundary that crosses two eras in one block captures the snapshot after both hard-fork transitions so the recorded major is the final era's, not the source era's. Seeded and Mithril-imported rows leave it zero. `total_active_stake` is the reward calculation's sigma_a denominator, populated by `GetLiveStakeInputsForPools` from every registered, non-expired credential delegating to a pool active at the snapshot slot, including those whose pool was excluded from `reward_pool_input` for missing or malformed registration data; `total_pool_count` and `total_delegators` describe the `reward_pool_input` rows actually written. `excluded_active_stake` (nullable) is the exact portion of `total_active_stake` contributed by excluded pools; when set, reward calculation requires the `reward_pool_input` rows' delegated stake to sum to precisely `total_active_stake` minus this value, and a `NULL` row (captured before this column existed, dingo #4025) falls back to the older, weaker check that the rows sum to no more than `total_active_stake`. `calculation_version` ties authoritative Mark metadata to the stake algorithm that produced its pool rows; version 2 carries that full denominator, while a version 1 row understates it for any epoch that excluded a pool. The fallback claims the `(epoch, mark)` row atomically and skips when an authoritative row already exists, so it cannot overwrite the authoritative capture. Retained for the life of the database. Guard claim/release require the same non-nil metadata transaction. |
 | `reward_seed_failure` | `epoch`, `snapshot_type`, `failure_reason`, `captured_slot` | PK `(epoch, snapshot_type)` | Durable provenance for an imported reward basis that failed reconciliation or lacked historical protocol parameters. Ledgerstate writes or replaces it in the import transaction, the reward boundary includes the reason when the corresponding `reward_snapshot` is absent, and successful seeding clears it. Rollback removes markers above the rollback slot. |
 | `imported_pool_block_count` | `epoch`, `pool_key_hash`, `blocks_produced`, `captured_slot` | PK `(epoch, pool_key_hash)` | Per-pool blocks minted during an epoch, taken from a bootstrap snapshot's `NewEpochState` `nesBprev` and `nesBcur` rather than counted from applied blocks. `nesBprev` fills the epoch before the snapshot's, which ended entirely below the anchor, and `nesBcur` the pre-anchor part of the snapshot's own epoch; those are exactly the performance epochs of the first two reward rounds a bootstrapped node crosses. Written by `ledgerstate.importBlocksMade` in the same transaction as the tip and the certified opcert counters, replacing the epoch's rows so a catch-up import does not leave one epoch holding counts taken at two anchors. `LedgerState.rewardBlockCounts` adds these to the counts it observed above the anchor; the two are disjoint, because a bootstrap applies no block at or below its anchor and `CountPoolBlocksInSlotRange` raises its start slot past the recorded `mithril_ledger_slot`. Presence and the epoch total live in `imported_epoch_block_total`, not here, because a `BlocksMade` map with no entries writes no rows at all. Rollback removes rows above the rollback slot. Retained for the life of the database (see the retention note below). Logical join to `pool.pool_key_hash`. |
 | `imported_epoch_block_total` | `epoch`, `total_blocks`, `captured_slot` | PK `epoch` | One row per epoch whose block counts came from a bootstrap snapshot, holding the total its `imported_pool_block_count` rows sum to (the reference's `Map.foldr (+) 0` over `BlocksMade`). Written unconditionally by `ledgerstate.importBlocksMade`, including for a map with no entries: an epoch in which no pool minted a block is a state the certified snapshot asserts, and the per-pool rows alone cannot express it. The row's presence is what `LedgerState.rewardBlockCounts` reads as "these counts are known"; its absence for an epoch the anchor covers means the counts are unknown, and the reward round is declined rather than distributed at zero performance. The total is checked against the per-pool rows on every read, so a set truncated by a partial write is an error rather than a smaller self-consistent epoch that would raise every surviving pool's share of the blocks. Rollback removes rows above the rollback slot. Retained for the life of the database (see the retention note below). |
@@ -1151,6 +1182,109 @@ bump did change and is deliberately left at its old version for the startup
 gate above to keep failing closed on; only that database, and only from that
 epoch, genuinely requires a rebootstrap from immutable blocks or a trusted
 snapshot.
+
+#### Incremental live-UTxO stake maintenance (dingo #4421)
+
+`reward_live_stake.utxo_stake` is a per-credential running total, not just a
+cached recomputation. Before this change, every touch (a UTxO gain or loss)
+recomputed a credential's entire live-UTxO total from scratch with
+`sumCredentialUtxoStake`'s `SELECT SUM(...) FROM utxo WHERE ... AND
+deleted_slot = 0` -- correct, and self-healing by construction (the `utxo`
+table is always the source of truth), but O(live UTxOs held by that
+credential) on every single touch. One real credential already held 20,003
+live UTxOs during from-genesis Preview sync, and this function alone
+accounted for 26-28% of total process CPU.
+
+The block-application hot path (`setTransactionWithAccumulator`, which
+`SetTransaction`, `SetTransactionBatched`, `SetTransactionBatchedHistorical`,
+and `SetTransactionLeiosClosure` all funnel through, plus
+`SetGapBlockTransaction`) now computes the exact signed lovelace delta its own
+UTxO mutations make to each touched credential -- a produced output's amount,
+the negative of a consumed input's amount, 0 for a certificate-only touch --
+merges same-credential deltas within one transaction
+(`mergeStakeCredentialDeltas`), and applies the net delta to the stored
+running total (`refreshRewardLiveStakeAggregateDelta`, an indexed
+`(credential_tag, staking_key)` point read plus checked arithmetic) instead of
+rescanning. Every other caller (rollback sweeps, `DeleteUtxos`,
+`SetGenesisTransaction`, certificate/account-only refreshes such as pool
+retirement and expiry) is unchanged and still calls the original full-scan
+`refreshRewardLiveStakeAggregate`/`refreshRewardLiveStakeRefs`.
+
+This trades away the full-scan path's self-healing property for the
+credentials it accelerates, so the design leans on three layers instead of
+one:
+
+1. **Crash atomicity.** The delta is applied inside the same write
+   transaction as the UTxO row mutation it accounts for (the same
+   `withWriteTransaction` scope every other write in this package already
+   uses), so a crash mid-apply rolls both back together. There is no window
+   where the UTxO table changes but the running total does not, or vice versa.
+2. **Every full-scan touch re-syncs.** A rollback sweep, `DeleteUtxos`, or any
+   other caller still on the authoritative path recomputes and overwrites
+   `utxo_stake` from scratch for whatever credentials it touches, healing any
+   drift the incremental path may have introduced for those credentials as a
+   side effect of running at all.
+3. **Startup reconciliation is the explicit backstop.** `RewardLiveStakeNeedsBackfill`
+   (above) already compares every credential's stored `utxo_stake` against a
+   fresh authoritative scan on every startup, before block application
+   resumes (`Node.backfillRewardLiveStake`, called ahead of
+   `LedgerState.Start`), and `RebuildRewardLiveStake` corrects the whole table
+   on any mismatch. This pre-existing mechanism is not new, but it is now
+   load-bearing for the incremental path too: any bug that silently corrupts
+   the running total (a missed or double-applied delta) is limited to
+   persisting until the next node startup, not forever. It is exercised
+   directly by `TestRewardLiveStakeNeedsBackfillHealsCorruptedRunningTotal`.
+
+   The one configuration that removes this layer is
+   `skipRewardLiveStakeBackfillCheck`, which suppresses the comparison (not
+   just the repair) to avoid its full live-UTxO scan on every start. With the
+   incremental path in place that setting leaves a corrupted running total
+   undetected for as long as the node keeps running on it, so it is
+   diagnostic-only and must not be left enabled on a node whose stake
+   snapshots matter.
+
+The invariant every incremental caller must hold is narrower than "knows the
+amount": **a delta states the change this write actually made to the `utxo`
+table, not the change the transaction describes.** Two write outcomes look
+like a mutation and are not, and both are ordinary rather than exceptional:
+
+- A produced output whose row already exists. `insertUtxoModel`'s
+  conflict-tolerant form is `ON CONFLICT (tx_id, output_idx) DO NOTHING`, and
+  a snapshot import creates outputs before their producing transaction is
+  replayed, so gap closure and any re-application collide with a row that is
+  already counted. It contributes 0, not its amount
+  (`insertUtxoModelChecked` reports which happened).
+- A consumed input whose `UPDATE ... WHERE deleted_slot = 0 AND spent_at_tx_id
+  IS NULL` matched no row, because an earlier certified endorser-block
+  transaction (the Leios closure path) or an earlier application of this same
+  transaction already spent it. It contributes 0, not its negative amount;
+  only inputs the write itself moved from live to deleted reach
+  `queryUtxoStakeConsumedDeltas`.
+
+Both are still refreshed at zero delta, so the set of credentials a write
+touches is identical to the full-scan path's.
+
+The read of the running total and the upsert that replaces it are separate
+statements, as they always were on the full-scan path. What makes that safe is
+that block application is the only writer of a credential's `reward_live_stake`
+row and applies one block at a time; SQLite reinforces it with `writeDB`'s
+`SetMaxOpenConns(1)`, while the Postgres and MySQL providers share one pool of
+up to 100 connections and rely on the apply loop alone. The consequence of
+breaking that property is worse for the incremental path than for the full-scan
+one -- a lost update there is recomputed from the `utxo` table on the next
+touch, and here it persists until the startup comparison runs -- so a writer
+added off the apply loop needs an atomic read-and-write, not a reuse of
+`refreshRewardLiveStakeAggregateDelta`. Counting either one drifts the
+credential permanently, and an over-large loss additionally fails
+`applyUtxoStakeDelta`'s underflow guard, which aborts block application rather
+than merely reporting wrong stake. `TestSetTransactionReapplyAppliesNoSecondDelta`,
+`TestSetTransactionLeiosClosureSkippedInputAppliesNoDelta`, and
+`TestSetGapBlockTransactionReapplyAppliesNoSecondDelta` cover the three cases.
+
+A credential's first-ever touch (no `reward_live_stake` row yet) always falls
+back to the authoritative scan to establish a baseline rather than trusting a
+delta against an unknown prior value; this is cheap specifically because such
+a credential has, by construction, few live UTxOs at that point.
 
 #### Snapshot and Reward-State Retention
 
@@ -1327,22 +1461,59 @@ later certificate will revisit that partition.
 
 Retention rule, applied per `(cold_credential_tag, cold_credential)`: keep every
 row with `added_slot` above the horizon, plus the single newest row at or below
-it, where the horizon is the applied block's slot minus the rollback window.
-The window is `sqlstore.DefaultCommitteeAuthRetentionSlots` (129600 slots = 3k/f
-for k=2160, f=0.05 — the Shelley stability window, and the same immutability
-bound `internal/historyexpiry` uses to expire block history), overridable with
-`sqlstore.Config.CommitteeAuthRetentionSlots`. Retention is per credential, not
-a global row cap, and it only ever deletes below that window.
+it, where the horizon is `min(tipSlot - retentionSlots, liveImmutableSlot)`.
+
+`retentionSlots` is `sqlstore.DefaultCommitteeAuthRetentionSlots` (129600 slots
+= 3k/f for k=2160, f=0.05 — the Shelley stability window, and the same
+immutability bound `internal/historyexpiry` uses to expire block history),
+overridable with `sqlstore.Config.CommitteeAuthRetentionSlots`. It only
+approximates the rollback bound: Ouroboros bounds a legal rollback in *blocks*
+(`securityParam`), not slots, and `Chain.rollbackForkDepth` enforces exactly
+that block count, so a chain sparser than the 3k/f assumption — a devnet with a
+low active-slot coefficient, or an occasional sparse span of an otherwise
+healthy chain — can have a legal rollback target below `tipSlot -
+retentionSlots` (blinklabs-io/dingo#4353). Pruning to that slot-only horizon
+would then permanently delete the authorization the rollback needs to restore.
+
+`liveImmutableSlot` is the actual bound when it is fresh: the slot of the block
+`securityParam` blocks behind the tip, as `Chain.PointAtDepth` resolves it.
+`sqlstore` cannot compute this itself (`chain` already imports `database`, so
+the reverse import would cycle), so `internal/committeeauth.Syncer` resolves it
+periodically from the live `Chain` and `LedgerState` the node holds and pushes
+it in through `Store.SetCommitteeAuthImmutableSlot` (wired in
+`node.go`/`node_lifecycle.go`, independent of `historyExpiry`). A fresh
+`liveImmutableSlot` is at or below every legal rollback target S — the node's
+own rollback check forbids a target shallower than `securityParam` blocks from
+the tip it was resolved against — but nothing is claimed about `tipSlot -
+retentionSlots` relative to S beyond the density assumption above: the minimum
+is safe because `liveImmutableSlot` alone is, not because both candidates are.
+Retention is per credential, not a global row cap, and it only ever deletes
+below the horizon.
+
+**Suspension.** A cached `liveImmutableSlot` can be safe when resolved and
+still be wrong by the time it is used, because "at most `securityParam` blocks
+behind the tip" describes one instant, not a ratchet: a rollback to depth
+`d1 <= securityParam`, a little regrowth, and a second rollback to depth
+`d2 <= securityParam` measured from the new, shorter tip can legally land
+*before* a value cached before the first rollback — ordinary chain churn near
+the tip, not an adversarial scenario. `DeleteCertificatesAfterSlot` therefore
+invalidates the cached value on every rollback, and `committeeAuthHorizon`
+treats "a live syncer is wired (`SetCommitteeAuthImmutableSlot` has been called
+at least once) but currently has no value" — bootstrap before the first
+resolution, a resolution failure, or a post-rollback invalidation awaiting the
+next sync — as a reason to suspend pruning entirely rather than fall back to
+the slot-window assumption alone. A `Store` nothing has ever pushed a live
+value to (every existing test, and any non-node caller such as a backfill or
+inspection tool) keeps the pre-live-sync slot-window-only behavior unchanged.
 
 Rollback safety: `DeleteCertificatesAfterSlot` deletes `auth_committee_hot` rows
-with `added_slot` above the rollback target S, and Ouroboros bounds S at or
-above the immutable tip, so the horizon is always at or below S. If a row exists
-between the horizon and S it is retained (everything above the horizon is) and
-dominates every older row; if none does, the correct answer is the one
-pre-horizon row the rule retains. The post-rollback query result is therefore
-identical whether or not pruning ran, and a credential's last row is never
-removed, so a credential that has an authorization can never become one that has
-none.
+with `added_slot` above the rollback target S. Whenever pruning runs at all
+(not suspended), the horizon is at or below S. If a row exists between the
+horizon and S it is retained (everything above the horizon is) and dominates
+every older row; if none does, the correct answer is the one pre-horizon row
+the rule retains. The post-rollback query result is therefore identical
+whether or not pruning ran, and a credential's last row is never removed, so a
+credential that has an authorization can never become one that has none.
 
 The partition is the tagged credential, so a script-hash credential never prunes
 a key-hash credential sharing its 28 bytes. `committee_member` is not pruned:
@@ -3305,6 +3476,97 @@ consensus-critical question is actually asked, using the boundary the node
 already persists for exactly this purpose, avoids adding a row that other
 `added_slot`-scoped readers have to reason about.
 
+### `GetPoolByVrfKeyHash`
+
+Backs `LedgerView.IsVrfKeyInUse`, the reverse of the pair above: given a VRF
+key hash, find whichever pool currently claims it, respecting the same
+`psStakePools`/`psFutureStakePoolParams` deferral instead of the denormalized
+`pool.vrf_key_hash` column, which the certificate-application path
+(`applyPoolRegistrationCertificate`) always overwrites immediately regardless
+of epoch boundary. Reading that column directly let a pool's old VRF key
+appear free to a different pool the moment a re-registration was applied, even
+though cardano-ledger keeps the old key reserved until the next epoch boundary
+merges `psFutureStakePoolParams` into `psStakePools` (issue #4352).
+
+Takes the current epoch's start slot (`epochStartSlot`) and resolves a claim
+in two tiers, checked in order:
+
+1. **Effective owner.** The pool whose most recent registration strictly
+   before `epochStartSlot` has this key (`pre_boundary`), falling back to a
+   candidate's globally earliest registration (`earliest`) when it has none
+   before the boundary -- the same first-registration-is-immediate exception
+   `GetPoolEarliestVrfKeyHashAtSlot` encodes, needed here so a pool's
+   first-ever registration, submitted mid-epoch, still reserves its key
+   against every other pool immediately rather than only from the next
+   boundary.
+2. **Same-epoch claimant.** Any pool with *any* registration this epoch
+   (`added_slot >= epochStartSlot`) naming this key, even one since
+   superseded by a later same-epoch re-registration. Consulted only when (1)
+   finds nothing. This tier exists because `psVRFKeyHashes` retains every key
+   a pool ever placed in `psFutureStakePoolParams` during the epoch, not only
+   the current pending one: a pool cycling `A -> B -> C` within one epoch must
+   still be refused a later same-epoch reuse of `B`. `IsVrfKeyInUse`'s caller
+   (gouroboros's `validatePoolRegistration`) special-cases
+   `owningPool == cert.Operator` by comparing against `PoolCurrentState`
+   (the pool's latest registration, `C` here) rather than its effective one;
+   reporting `B` as claimed by that same pool, not free, is what lets that
+   comparison catch the reuse.
+
+Both candidate sets are pre-filtered to pool IDs with *any* historical
+`pool_registration` row naming the queried key, so the query only walks a
+pool's full history when it has ever plausibly held that key.
+
+The query returns every matching pool ID ranked by tier (1 before 2, `pool_id`
+ascending within a tier), not a single winner picked by `LIMIT 1`: a long-
+retired pool's own last-ever registration can still satisfy tier 1's
+per-candidate effective-key computation (registration history and retirement
+are tracked independently, so retiring never rewrites what a pool's
+registrations said), so a retired candidate and a different, genuinely active
+pool that later re-registered the same, by-then-free key can both appear as
+candidates for one lookup. The Go loop tries each ranked candidate in turn and
+returns the first one the query already confirms is active, rather than
+checking retirement on only whichever candidate a single `ORDER BY ... LIMIT 1`
+happened to pick (caught by review on this PR;
+`TestGetPoolByVrfKeyHashSkipsRetiredCandidateForActiveOwner`).
+
+Retirement is resolved against `epochStartSlot`'s own epoch (`epoch_bound`),
+not the live database tip, via a `pool_active` CTE applied to *both* tiers --
+not only tier 1, since restricting it to tier 1 alone still let a retired
+pool's same-epoch registration leak through tier 2 unfiltered. `pool_active`
+mirrors `GetActivePoolKeyHashesAtSlot`'s precedence rule (a later registration
+cancels an earlier retirement; a retirement whose target epoch is still ahead
+of `epoch_bound` has not taken effect), compared against each candidate's own
+`effective_reg` row rather than a fresh `<=`-bounded lookup. This exists
+because a pool that retires and later submits a fresh registration for a
+*different* key un-retires via that new registration -- cardano-ledger treats
+it as a first registration, not a deferred re-registration, since the pool had
+left `psStakePools` -- and checking retirement against "now" (the earlier
+`activePoolOrNil` call this replaced) let that pool's stale, pre-retirement
+registration for its *old* key still resolve as active, reporting the old key
+in use when the pool no longer held it: this method's own bug class,
+reintroduced (caught by review on this PR;
+`TestGetPoolByVrfKeyHashFreesKeyAfterRetirementThenDifferentKeyReRegistration`).
+`epoch_bound` resolves to `NULL`, not an error, when no epoch row covers
+`epochStartSlot`; a retirement is then never treated as confirmed-effective,
+failing toward "still active" rather than incorrectly freeing a key.
+
+`epochStartSlot` must be pinned once at the start of the validation or query
+that calls this, not re-read from a live snapshot on every call:
+`LedgerView.epochStartSlot` (see `ledger/view.go`) is set at every real
+construction site (`NewView`, `ledgerProcessBlock`, `validateTxCore`,
+`ValidateTxWithOverlay`, `EvaluateTx`) from the same snapshot that pins
+`committeeEpoch` and `pp` alongside it, for the same reason: a long-running
+validation (e.g. evaluating scripts) can span a writer publishing a newer
+epoch boundary, and reading it live would let one certificate's deferral
+check disagree with another's in the same transaction or block, or with
+itself across repeated calls (caught by review on this PR;
+`TestLedgerViewIsVrfKeyInUseIgnoresConcurrentSnapshotRepublish`). The pin is
+also verified through each real construction site directly rather than only
+against a hand-set field on a bare `&LedgerView{}`
+(`TestLedgerStateNewViewPinsEpochStartSlot`,
+`TestLedgerStateValidateTxPinsEpochStartSlot`,
+`TestLedgerStateEvaluateTxPinsEpochStartSlot`).
+
 ### `GetPoolsRetiringAtEpoch`
 
 Pools whose effective retirement takes effect at a given epoch, with the reward
@@ -3470,7 +3732,7 @@ row from `dingo_db_missing` to the informational `pool_departed`.
 
 ### `GetMIRCertsInSlotRange`
 
-MIR certificates for the epoch range `[startSlot, endSlot)`, applied at the epoch boundary as the Shelley INSTANT rule. Distribution certs (`other_pot = 0`) credit registered reward accounts and debit the source pot in `network_state`; pot-to-pot transfer certs (`other_pot > 0`) move that amount between treasury and reserves. Every cert in the range is aggregated before any is applied: distribution totals count only credentials with a registered, active account, transfers are folded into the available pot balances, and the boundary writes a single `network_state` row. If either pot cannot cover its total the boundary is a no-op rather than an error, so an over-budget cert cannot fail the epoch rollover on every retry. The `mir.id` value is retained by the processed effect as the per-MIR reward-credit discriminator so multiple MIR certs can credit the same account at one boundary without collapsing into one `account_reward_delta` row.
+MIR certificates for the epoch range `[startSlot, endSlot)`, applied at the epoch boundary as the Shelley INSTANT rule. Distribution certs (`other_pot = 0`) credit registered reward accounts and debit the source pot in `network_state`; pot-to-pot transfer certs (`other_pot > 0`) move that amount between treasury and reserves. Every cert in the range is aggregated before any is applied: distribution totals count only credentials with a registered, active account, transfers are folded into the available pot balances, and the boundary writes a single `network_state` row. If either pot cannot cover its total the boundary is a no-op rather than an error, so an over-budget cert cannot fail the epoch rollover on every retry. MIR has no transaction hash to serve as the `account_reward_delta` discriminator, so the source pot is hashed into a synthetic one instead: this keeps a reserves credit and a treasury credit to the same account at one boundary as distinct journal rows, while multiple MIR certs crediting the same account from the same pot in one boundary fold into a single row. The fold itself is protocol-era-conditional, matching cardano-ledger's `InstantaneousRewards` accumulation for each era: additive for protocol major 5 (Alonzo) onward, and replaced by the latest certificate's amount for majors 2-4 (Shelley, Allegra, Mary).
 
 ```sql
 SELECT mir.id, mir.pot, mir.other_pot, mir.added_slot,
@@ -3576,6 +3838,39 @@ WHERE expired_epoch = $1
 ORDER BY proposed_epoch ASC, added_slot ASC, tx_hash ASC, action_index ASC;
 ```
 
+Marking a proposal expired (`expired_epoch`/`expired_slot`) never itself refunds
+the deposit: cardano-ledger drops an expired action, and returns its deposit,
+one full epoch after marking it expired -- the same one-epoch delay
+ratification has before enactment. `governance_proposal_drop` is a companion
+table (not columns on `governance_proposal`) recording when that drop actually
+happened, keyed by `proposal_id`:
+
+```sql
+-- GetExpiredAwaitingDropGovernanceProposals(epoch): proposals expired in a
+-- prior epoch whose deposit has not yet been returned. The `expired_epoch <
+-- $1` bound is the one-epoch delay itself, not a restatement of the caller's
+-- step order: a boundary reprocessed after a commit crash reruns this query
+-- against expiries the first pass already wrote, and an unbounded predicate
+-- would refund them in the epoch that expired them.
+SELECT gp.*
+FROM governance_proposal gp
+LEFT JOIN governance_proposal_drop gpd ON gpd.proposal_id = gp.id
+WHERE gp.expired_epoch < $1
+  AND gpd.dropped_epoch IS NULL
+  AND gp.deleted_slot IS NULL
+ORDER BY gp.proposed_epoch ASC, gp.added_slot ASC, gp.tx_hash ASC, gp.action_index ASC;
+
+-- GetDroppedGovernanceProposalsAt(epoch, slot): epoch-boundary replay lookup,
+-- mirroring GetEnactedGovernanceProposalsAt/GetExpiredGovernanceProposalsAt.
+SELECT gp.*
+FROM governance_proposal gp
+LEFT JOIN governance_proposal_drop gpd ON gpd.proposal_id = gp.id
+WHERE gpd.dropped_epoch = $1
+  AND gpd.dropped_slot = $2
+  AND gp.deleted_slot IS NULL
+ORDER BY gp.proposed_epoch ASC, gp.added_slot ASC, gp.tx_hash ASC, gp.action_index ASC;
+```
+
 ### `GetChildGovernanceProposals`
 
 Used during the Conway epoch boundary orphan sweep (`removeOrphanedProposals`). Returns all active proposals that reference a given enacted or expired proposal as their parent. The composite index `idx_gov_proposal_parent` on `(parent_tx_hash, parent_action_idx)` makes this lookup O(children) rather than O(table).
@@ -3592,6 +3887,13 @@ ORDER BY proposed_epoch ASC, added_slot ASC, tx_hash ASC, action_index ASC;
 ```
 
 The sweep is transitive (BFS): each orphaned proposal is itself used as a seed to find its own children, continuing until the graph is exhausted. Orphaned proposals are marked with `expired_epoch`/`expired_slot` at the boundary slot so the existing slot-based rollback path in `DeleteGovernanceProposalsAfterSlot` reverts them cleanly.
+
+Which tick returns an orphan's deposit depends on why it was removed, because cardano-ledger unions the enacted action with the siblings its enactment removed and returns all of those deposits in one tick, while an expired action is removed a tick after it was flagged:
+
+- Removed because a competing sibling enacted: refunded in the enacting tick, alongside the winner's own deposit, and stamped into `governance_proposal_drop` at that boundary so the drop step does not return it again.
+- Removed as the descendant subtree of a naturally expired action: marked expired only, and refunded one epoch later alongside its expired ancestor.
+
+A proposal reachable both ways takes the enactment tick, which is when cardano-ledger would have removed it.
 
 ### `GetPParams`, `GetPParamUpdates`, and `GetTip`
 

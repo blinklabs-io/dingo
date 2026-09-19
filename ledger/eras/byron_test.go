@@ -346,10 +346,31 @@ type mockLedgerState struct {
 	// slotToTime, when set, replaces the zero-time default so a test can
 	// supply a real network's slot-to-time mapping.
 	slotToTime func(uint64) (time.Time, error)
+	// slotToTimeCalls counts SlotToTime invocations, the same way utxoLookups
+	// counts UtxoById ones. validityRangeInfo -- called once per TxInfo build,
+	// via NewTxInfoV1FromTransaction/NewTxInfoV2FromTransaction/
+	// NewTxInfoV3FromTransaction -- calls SlotToTime once per validity bound
+	// present, so this is a direct proxy for how many times a transaction's
+	// TxInfo was (re)built.
+	slotToTimeCalls int
 	// syntheticV2CostModel backs SyntheticV2CostModelInEffect, so a test can
 	// exercise ValidateTxBabbage/EvaluateTxBabbage's ErrNoCostModelForPlutusV2
 	// check (blinklabs-io/dingo#3962) without a real *ledger.LedgerView.
 	syntheticV2CostModel bool
+	// pendingMIR backs PendingMIRRewardDeltas, letting a test simulate
+	// InstantaneousRewards already accumulated earlier in the current epoch
+	// without a real *ledger.LedgerView or database.
+	pendingMIR map[MIRCredentialKey]*big.Int
+}
+
+// PendingMIRRewardDeltas implements eras.MIRPendingRewardsProvider for tests.
+// The real implementation (*ledger.LedgerView) derives this from the database;
+// this mock just returns whatever a test has staged in pendingMIR, ignoring
+// uptoSlot.
+func (m *mockLedgerState) PendingMIRRewardDeltas(
+	_ uint64,
+) (map[MIRCredentialKey]*big.Int, error) {
+	return m.pendingMIR, nil
 }
 
 // SyntheticV2CostModelInEffect implements the eras package's local
@@ -420,6 +441,7 @@ func (m *mockLedgerState) IsStakeCredentialRegistered(
 func (m *mockLedgerState) SlotToTime(
 	slot uint64,
 ) (time.Time, error) {
+	m.slotToTimeCalls++
 	if m.slotToTime != nil {
 		return m.slotToTime(slot)
 	}
