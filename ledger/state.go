@@ -1074,6 +1074,25 @@ type LedgerState struct {
 	firstBlockReceived            bool                // true after latency sample recorded for this batch
 	shadowBlockReceivedHashes     map[string]struct{} // blocks delivered this batch (dedup shadow vs primary)
 	batchBlocksReceived           int                 // total blocks received in current blockfetch batch (including mid-batch flushes)
+	batchBlocksApplied            int                 // blocks from the current batch that actually extended the chain
+	// blockfetchBatchChainGeneration is the value chainRollbackGeneration
+	// held when the current batch was requested. A batch is fetched for the
+	// header queue that existed at request time; a rollback replaces both that
+	// queue and the continuation point, so every block still arriving for the
+	// older generation belongs to a chain the node has abandoned and must be
+	// discarded rather than applied (issue #3771). Guarded by
+	// chainsyncBlockfetchMutex, like the rest of the per-batch state.
+	blockfetchBatchChainGeneration uint64
+	// blockfetchDiscardConnId identifies an abandoned request whose late
+	// blocks and BatchDone must be ignored until the replacement request starts.
+	blockfetchDiscardConnId ouroboros.ConnectionId
+	// chainRollbackGeneration identifies primary-chain rollback attempts that
+	// pass undo validation. It is bumped before the chain is changed, so a
+	// reader that has observed a rollback's effect on the chain always observes
+	// the new value; a validation refusal restores the previous value under the
+	// blockfetch mutex. Written by rollback paths and read by blockfetch paths,
+	// so it is atomic.
+	chainRollbackGeneration atomic.Uint64
 	// Failures to obtain one specific queued header range, keyed by its
 	// start point and counting both a NoBlocks reply (a synchronous
 	// GetBlockRange error) and a batch that completed without delivering a
@@ -4099,9 +4118,26 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 	// Exclude that window so blocksAboveSlot can never publish an Undo for the
 	// new state before the matching Apply reaches the ordered lane.
 	err := func() error {
+		ls.chainsyncBlockfetchMutex.Lock()
+		defer ls.chainsyncBlockfetchMutex.Unlock()
+		priorGeneration := ls.chainRollbackGeneration.Load()
+		ls.chainRollbackGeneration.Add(1)
 		ls.transactionEventMutex.Lock()
 		defer ls.transactionEventMutex.Unlock()
 		if err := ls.validateAndEmitRollbackUndo(point); err != nil {
+			// Validation refused the point before the chain was touched --
+			// over-K, ErrRollbackPointNotOnChain, or models.ErrBlockNotFound,
+			// all of which handleEventChainsyncRollback treats as
+			// recoverable. Restore the generation so an in-flight batch is
+			// not discarded for a rollback that never happened: a discard
+			// leaves batchBlocksApplied at zero, and
+			// handleEventBlockfetchBatchDone feeds that into the same-range
+			// failure streak, so blockfetchMaxSameRangeFailures refusals
+			// would drop a perfectly good header range. Both the bump and
+			// this restore run under chainsyncBlockfetchMutex, which every
+			// blockfetchBatchStillCurrent reader also holds, so no reader can
+			// observe the intermediate value.
+			ls.chainRollbackGeneration.Store(priorGeneration)
 			return err
 		}
 		if _, rbErr := ls.chain.RollbackDeferred(point); rbErr != nil {

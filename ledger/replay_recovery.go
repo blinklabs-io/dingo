@@ -904,8 +904,13 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 	if securityParam <= 0 {
 		return false, chain.ErrSecurityParamNotConfigured
 	}
+	var pending pendingPublishes
+	defer pending.flush()
+	pending.drainChain(ls.chain)
 	// Keep every Undo enqueue and its corresponding chain truncation atomic
 	// with respect to a block-apply commit's AfterCommit Apply publication.
+	ls.chainsyncBlockfetchMutex.Lock()
+	defer ls.chainsyncBlockfetchMutex.Unlock()
 	ls.transactionEventMutex.Lock()
 	defer ls.transactionEventMutex.Unlock()
 
@@ -998,7 +1003,7 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 			}
 			return committed, stepErr(err)
 		}
-		if err := ls.chain.Rollback(next); err != nil {
+		if _, err := ls.chain.RollbackDeferred(next); err != nil {
 			if !emitted &&
 				errors.Is(err, chain.ErrRollbackExceedsSecurityParam) &&
 				overKRetries < maxWindowedRewindRetries {
