@@ -22,8 +22,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -960,6 +962,58 @@ func TestClientAllowsPlainHTTPAggregatorWithEscapeHatch(t *testing.T) {
 	client := NewClient(server.URL, WithAllowInsecureHTTP())
 	_, err := client.ListSnapshots(context.Background())
 	require.NoError(t, err)
+}
+
+func TestClientRejectsPrivateAggregatorByDefault(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	client := NewClient(
+		"https://127.0.0.1",
+		WithHTTPClient(&http.Client{Transport: roundTripFunc(func(
+			*http.Request,
+		) (*http.Response, error) {
+			called = true
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body: io.NopCloser(strings.NewReader(
+					`[]`,
+				)),
+			}, nil
+		})}),
+	)
+
+	_, err := client.ListSnapshots(context.Background())
+	require.ErrorContains(t, err, "not allowed")
+	require.False(t, called, "a rejected aggregator must not be requested")
+}
+
+func TestClientRejectsUnrestrictedCustomTransport(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	client := NewClient(
+		"https://aggregator.example",
+		WithHTTPClient(&http.Client{Transport: roundTripFunc(func(
+			*http.Request,
+		) (*http.Response, error) {
+			called = true
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body: io.NopCloser(strings.NewReader(
+					`[]`,
+				)),
+			}, nil
+		})}),
+	)
+
+	_, err := client.ListSnapshots(context.Background())
+	require.ErrorContains(
+		t,
+		err,
+		"cannot enforce private-address restrictions",
+	)
+	require.False(t, called, "an unrestricted transport must not be used")
 }
 
 func TestVerifyCertChainGenesis(t *testing.T) {
