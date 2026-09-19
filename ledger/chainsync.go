@@ -6236,6 +6236,19 @@ func writeCborMajorType(buf *bytes.Buffer, majorType, n int) {
 // For the very first epoch transition (0→1), lastEpochBlockNonce
 // is nil (NeutralNonce), so epochNonce = candidateNonce.
 //
+// newEpochPParams are the protocol parameters epoch N+1 will run under, i.e.
+// the result of this boundary's own parameter enactment. Their extraEntropy is
+// the third term of the cardano-ledger TICKN assembly:
+//
+//	epochNonce(N+1) = candidateNonce(N) ⭒ lastEpochBlockNonce(N) ⭒ extraEntropy
+//
+// It is read from the enacted parameters rather than the ending epoch's
+// because TICKN is driven by a ledger view forecast to the new epoch, which
+// applies the boundary's parameter update first (TICKF /
+// validatingTickTransitionFORECAST). Mainnet set a non-neutral extraEntropy
+// for exactly one epoch, 259, whose eta0 is the value the update enacted at
+// that boundary carried.
+//
 // Returns (epochNonce, evolvingNonce, candidateNonce, labNonce, error).
 // The caller must store candidateNonce as the new epoch's CandidateNonce
 // and labNonce as the new epoch's LastEpochBlockNonce so an empty next
@@ -6245,6 +6258,7 @@ func (ls *LedgerState) calculateEpochNonce(
 	epochStartSlot uint64,
 	currentEra eras.EraDesc,
 	currentEpoch models.Epoch,
+	newEpochPParams lcommon.ProtocolParameters,
 ) ([]byte, []byte, []byte, []byte, error) {
 	// No epoch nonce in Byron. NOTE: currentEra is the SOURCE era being
 	// rolled over, not necessarily the era the new epoch will run at — a
@@ -6422,9 +6436,11 @@ func (ls *LedgerState) calculateEpochNonce(
 		return nil, nil, nil, nil, err
 	}
 
+	extraEntropy := extraEntropyFromPParams(newEpochPParams)
+
 	// If nil/empty, it's NeutralNonce (identity): result is
 	// just candidateNonce.
-	if len(labForEta) == 0 {
+	if len(labForEta) == 0 && len(extraEntropy) == 0 {
 		// NeutralNonce is the identity element of ⭒:
 		//   candidateNonce ⭒ NeutralNonce = candidateNonce
 		// So the epoch nonce is just the candidate nonce.
@@ -6444,10 +6460,9 @@ func (ls *LedgerState) calculateEpochNonce(
 		return candidateNonce, evolvingNonce, candidateNonce, labNonceToSave, nil
 	}
 
-	// candidateNonce ⭒ labForEta
-	// = blake2b_256(candidateNonce || labForEta)
+	// candidateNonce ⭒ labForEta ⭒ extraEntropy
 	if len(candidateNonce) < 32 ||
-		len(labForEta) < 32 {
+		(len(labForEta) > 0 && len(labForEta) < 32) {
 		return nil, nil, nil, nil, fmt.Errorf(
 			"epoch nonce requires 32-byte inputs: "+
 				"candidateNonce=%d, labForEta=%d",
@@ -6455,10 +6470,10 @@ func (ls *LedgerState) calculateEpochNonce(
 			len(labForEta),
 		)
 	}
-	result, err := lcommon.CalculateEpochNonce(
+	result, err := assembleEpochNonce(
 		candidateNonce,
 		labForEta,
-		nil,
+		extraEntropy,
 	)
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf(
@@ -6474,10 +6489,11 @@ func (ls *LedgerState) calculateEpochNonce(
 		hex.EncodeToString(labForEta),
 		"lab_nonce_to_save",
 		hex.EncodeToString(labNonceToSave),
-		"epoch_nonce", hex.EncodeToString(result.Bytes()),
+		"epoch_nonce", hex.EncodeToString(result),
 		"evolving_nonce", hex.EncodeToString(evolvingNonce),
+		"extra_entropy", hex.EncodeToString(extraEntropy),
 	)
-	return result.Bytes(), evolvingNonce, candidateNonce, labNonceToSave, nil
+	return result, evolvingNonce, candidateNonce, labNonceToSave, nil
 }
 
 // processEpochRollover processes an epoch rollover and returns the result without
@@ -6665,6 +6681,7 @@ func (ls *LedgerState) processEpochRollover(
 			0,
 			currentEra,
 			currentEpoch,
+			ownedPParams,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("calculate epoch nonce: %w", err)
@@ -7024,11 +7041,17 @@ func (ls *LedgerState) processEpochRollover(
 	if err != nil {
 		return nil, fmt.Errorf("calculate epoch length: %w", err)
 	}
+	// newPParams is this boundary's enacted result, already carrying any
+	// governance or update-system change for the new epoch: it is written to
+	// result.NewCurrentPParams above and persisted by the enactment steps that
+	// precede this point. That is the set whose extraEntropy the new epoch's
+	// nonce mixes.
 	tmpNonce, tmpEvolvingNonce, tmpCandidateNonce, tmpLabNonce, err := ls.calculateEpochNonce(
 		txn,
 		epochStartSlot,
 		currentEra,
 		currentEpoch,
+		newPParams,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("calculate epoch nonce: %w", err)

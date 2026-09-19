@@ -7096,7 +7096,8 @@ and terminates at the exact requested end point; a mismatch falls through to
 the next bootstrap peer before any block is stored.
 
 The epoch nonce for the boundary into epoch N+1 is
-`candidateNonce(N) ⭒ epoch(N).LastEpochBlockNonce`, where the carried
+`candidateNonce(N) ⭒ epoch(N).LastEpochBlockNonce ⭒ extraEntropy(N+1)`,
+where the carried
 `LastEpochBlockNonce` is cardano-ledger's `praosStateLastEpochBlockNonce`:
 `prevHashToNonce(lastBlock.prevHash)` — the PARENT hash of the last block of the
 closing epoch (a one-block Praos lag), computed by `LedgerState.epochLabNonce`
@@ -7106,6 +7107,20 @@ epoch nonce from the network at every self-computed boundary (only the imported
 bootstrap boundary escapes it), wedging the node at the tip of the following
 epoch. For an empty closing epoch (no blocks of its own) the previous carried
 nonce is passed through unchanged.
+
+`extraEntropy` is the protocol parameter of the same name, the third term of
+cardano-ledger's TICKN rule. It belongs to the epoch being entered, not the one
+closing: `processEpochRollover` passes the parameters its own enactment just
+produced, and the pre-rollover header-verification path
+(`computeEpochNonceForSlot`) forecasts them the way TICKF does, taking the
+recorded parameters for that epoch and applying the pending genesis-key update
+the boundary will enact. Startup lab recovery recomputes a past epoch's nonce
+from the parameters recorded for that epoch, with no forecast. Only the TPraos
+eras carry the parameter -- Praos drops the term from Babbage on, so Babbage and
+later protocol parameters have no such field. Mainnet set a non-neutral value
+for exactly one epoch, 259; every other mainnet epoch and every preprod and
+preview epoch carries `NeutralNonce`, the identity of `⭒`, which leaves the
+result unchanged.
 
 In API storage mode, the shared SQL metadata providers can defer selected query
 indexes during bulk load. Deferred indexes are classified as critical or lazy in

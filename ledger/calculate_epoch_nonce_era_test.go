@@ -163,6 +163,7 @@ func TestCalculateEpochNonce_TPraosToPraosUsesSourceEpochStabilityWindow(
 			ls.currentEpoch.StartSlot+uint64(ls.currentEpoch.LengthInSlots),
 			eras.BabbageEraDesc,
 			ls.currentEpoch,
+			nil,
 		)
 		candidate = c
 		return err
