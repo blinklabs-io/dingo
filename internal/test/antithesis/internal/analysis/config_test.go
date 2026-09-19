@@ -55,6 +55,7 @@ func TestParseAnalysisDurationBounds(t *testing.T) {
 	require.Zero(t, got)
 }
 
+// Not t.Parallel: t.Setenv makes this test process-global.
 func TestLoadConfigAnalysisDurations(t *testing.T) {
 	t.Setenv("ANALYSIS_INITIAL_WAIT", "0")
 	t.Setenv("ANALYSIS_CHECK_INTERVAL", "1")

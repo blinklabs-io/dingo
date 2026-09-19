@@ -1285,6 +1285,16 @@ type LedgerState struct {
 	// goroutine against the pipeline's own progress.
 	beforeReadResultDoneSignal func()
 
+	// beforeWindowedRewindStep is a test-only hook, nil in production. It
+	// runs in rollbackPrimaryChainInSecurityParamWindows at the top of every
+	// loop iteration, before that step reads the chain's live tip. A test
+	// can use it to extend the primary chain from inside the step itself,
+	// which makes "the chain grew while a windowed rewind step was in
+	// flight" a guaranteed per-iteration event instead of a race between the
+	// rewind and a separate goroutine that may or may not be scheduled in
+	// time.
+	beforeWindowedRewindStep func()
+
 	// replayMu serializes replayWG.Add with Close's replayWG.Wait to
 	// prevent Add-after-Wait panics from the TOCTOU race between
 	// closed.Load() and Add(1) in replayBufferedHeadersAsync (#2107).

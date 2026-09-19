@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
@@ -46,7 +47,12 @@ func TestDeliverWaitsForCapacityThenDelivers(t *testing.T) {
 	go func() {
 		done <- sub.Deliver(NewEvent("test", "second"))
 	}()
-	<-blocked
+	testutil.RequireReceive(
+		t,
+		blocked,
+		testutil.AsyncWait,
+		"delivery never reached the full-buffer wait",
+	)
 	require.Len(t, sub.ch, cap(sub.ch), "the delivery buffer must be full")
 	select {
 	case <-done:
@@ -81,7 +87,12 @@ func TestDeliverUnblocksOnClose(t *testing.T) {
 	go func() {
 		done <- sub.Deliver(NewEvent("test", "blocked"))
 	}()
-	<-blocked
+	testutil.RequireReceive(
+		t,
+		blocked,
+		testutil.AsyncWait,
+		"delivery never reached the full-buffer wait",
+	)
 	require.Len(t, sub.ch, cap(sub.ch), "the delivery buffer must be full")
 	select {
 	case <-done:
@@ -126,7 +137,12 @@ func TestDeliverBlockingUnblocksOnClose(t *testing.T) {
 	go func() {
 		done <- sub.DeliverBlocking(NewEvent("test", "blocked"))
 	}()
-	<-blocked
+	testutil.RequireReceive(
+		t,
+		blocked,
+		testutil.AsyncWait,
+		"delivery never reached the full-buffer wait",
+	)
 	require.Len(t, sub.ch, cap(sub.ch), "the delivery buffer must be full")
 	select {
 	case <-done:

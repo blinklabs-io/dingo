@@ -858,6 +858,9 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 		nonConvergingSteps int
 	)
 	for {
+		if ls.beforeWindowedRewindStep != nil {
+			ls.beforeWindowedRewindStep()
+		}
 		tip := ls.chain.Tip()
 		if tip.Point.Slot == point.Slot &&
 			bytes.Equal(tip.Point.Hash, point.Hash) {

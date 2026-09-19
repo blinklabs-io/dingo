@@ -157,9 +157,9 @@ func TestPublishAsyncBlocksWhenQueueFull(t *testing.T) {
 	testutil.RequireReceive(
 		t, started, time.Second, "publisher did not start",
 	)
-	require.Eventually(t, func() bool {
+	testutil.WaitForCondition(t, func() bool {
 		return len(subCh) == cap(subCh)
-	}, time.Second, time.Millisecond,
+	}, testutil.AsyncWait,
 		"the subscriber buffer must fill while nothing drains it",
 	)
 	testutil.RequireNoReceive(
@@ -351,9 +351,9 @@ func TestPublishAsyncUnblocksOnStop(t *testing.T) {
 	testutil.RequireReceive(
 		t, started, time.Second, "publisher did not start",
 	)
-	require.Eventually(t, func() bool {
+	testutil.WaitForCondition(t, func() bool {
 		return len(subCh) == cap(subCh)
-	}, time.Second, time.Millisecond,
+	}, testutil.AsyncWait,
 		"the subscriber buffer must fill while nothing drains it",
 	)
 	testutil.RequireNoReceive(

@@ -15,15 +15,12 @@
 package ledger
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"slices"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -148,64 +145,38 @@ func TestWindowedRewindConvergesWhilePrimaryChainExtends(t *testing.T) {
 		"rewind window must match the chain manager's k",
 	)
 
-	// Extend the primary chain by one block every time the rewind moves the
-	// tip, mimicking blockfetch appending while recovery descends. One block
-	// per step is slower than the window each step covers, so a rewind that
-	// re-reads the live tip still converges.
-	stop := make(chan struct{})
-	// rewindInProgress marks the window during which the rewind call below
-	// is actually in flight: 1 from just before it is invoked to just before
-	// it returns, 0 otherwise. Recording it alongside each successful append
-	// (both atomics, so Go's memory model orders the two consistently) is
-	// what proves overlap -- a plain append counter alone cannot, since the
-	// appender keeps running until close(stop) and could land its only
-	// successful append after the rewind already returned.
-	var rewindInProgress atomic.Int32
-	var appendDuringRewind atomic.Int64
-	var appender sync.WaitGroup
-	appender.Go(func() {
-		lastPoint := pc.Tip().Point
-		for seq := 0; ; seq++ {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			tip := pc.Tip()
-			if tip.Point.Slot == lastPoint.Slot &&
-				bytes.Equal(tip.Point.Hash, lastPoint.Hash) {
-				continue
-			}
-			next := chain.RawBlock{
-				Slot: tip.Point.Slot + 1,
-				Hash: testHashBytes(
-					fmt.Sprintf("windowed-race-append-%d", seq),
-				),
-				BlockNumber: tip.BlockNumber + 1,
-				Type:        1,
-				PrevHash:    tip.Point.Hash,
-				Cbor:        []byte{0x80},
-			}
-			if err := pc.AddRawBlocks([]chain.RawBlock{next}); err != nil {
-				// The tip moved again between the read and the add;
-				// re-read and try the next one.
-				continue
-			}
-			if rewindInProgress.Load() == 1 {
-				appendDuringRewind.Add(1)
-			}
-			lastPoint = ocommon.NewPoint(next.Slot, next.Hash)
+	// Extend the primary chain by one block on every windowed-rewind loop
+	// iteration, mimicking blockfetch appending while recovery descends.
+	// beforeWindowedRewindStep runs synchronously inside
+	// rollbackPrimaryChainInSecurityParamWindows at the top of every loop
+	// iteration, so an append here is guaranteed to land during a step the
+	// rewind is actually taking -- not merely likely to, the way a
+	// separately scheduled goroutine racing the rewind would only
+	// probabilistically overlap it, with no guarantee it is ever scheduled
+	// between the rewind starting and returning. One block per step is
+	// slower than the window each step covers, so a rewind that re-reads
+	// the live tip still converges.
+	var stepCount int
+	ls.beforeWindowedRewindStep = func() {
+		stepCount++
+		tip := pc.Tip()
+		next := chain.RawBlock{
+			Slot: tip.Point.Slot + 1,
+			Hash: testHashBytes(
+				fmt.Sprintf("windowed-race-append-%d", stepCount),
+			),
+			BlockNumber: tip.BlockNumber + 1,
+			Type:        1,
+			PrevHash:    tip.Point.Hash,
+			Cbor:        []byte{0x80},
 		}
-	})
+		require.NoError(t, pc.AddRawBlocks([]chain.RawBlock{next}))
+	}
 
 	target := ocommon.NewPoint(raw[0].Slot, raw[0].Hash)
-	rewindInProgress.Store(1)
 	committed, rewindErr := ls.rollbackPrimaryChainInSecurityParamWindows(
 		target,
 	)
-	rewindInProgress.Store(0)
-	close(stop)
-	appender.Wait()
 
 	require.NotErrorIs(
 		t,
@@ -219,15 +190,15 @@ func TestWindowedRewindConvergesWhilePrimaryChainExtends(t *testing.T) {
 		committed,
 		"a descent that reached its target committed its steps",
 	)
-	// Prove the race this test exists for was actually exercised: the
-	// appender must have landed at least one append while the rewind was
-	// actually in flight, not merely at some point before close(stop) (a
-	// rewind's own rollback shrinks the tip, so comparing tip block numbers
-	// before and after cannot show this).
+	// The hook is called from inside the rewind's own loop, so every call it
+	// receives is by construction a step the rewind is actively taking; the
+	// loop must take at least one such step to reach a target this far
+	// behind the seeded chain. This is therefore a guaranteed fact about the
+	// run rather than a probability the scheduler could fail to realize.
 	require.Positive(
 		t,
-		appendDuringRewind.Load(),
-		"the appender must have extended the chain concurrently with the rewind",
+		stepCount,
+		"the windowed rewind must take at least one step that extends the chain",
 	)
 }
 
