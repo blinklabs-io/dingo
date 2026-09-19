@@ -193,6 +193,7 @@ type TokenRegistrySync struct {
 	maxBatchBytes        int64
 	storeLogos           bool
 	allowPrivate         bool
+	removeStageFile      func(string) error
 	now                  func() time.Time
 	lastSyncedAt         time.Time
 	mu                   sync.Mutex
@@ -293,6 +294,7 @@ func NewTokenRegistrySync(
 		maxBatchBytes:        maxBatchBytes,
 		storeLogos:           cfg.StoreLogos,
 		allowPrivate:         cfg.AllowPrivateAddresses,
+		removeStageFile:      os.Remove,
 		now:                  time.Now,
 		syncSlot:             make(chan struct{}, 1),
 	}, nil
@@ -470,7 +472,9 @@ func (s *TokenRegistrySync) runOnce(ctx context.Context) {
 // 304 and costs one request with no body. The tag is recorded only after the
 // whole snapshot has been applied, so an interrupted sync retries in full
 // rather than recording progress it did not make.
-func (s *TokenRegistrySync) SyncOnce(ctx context.Context) (int, error) {
+func (s *TokenRegistrySync) SyncOnce(
+	ctx context.Context,
+) (written int, retErr error) {
 	// Serialized end to end, and abandonable. SyncOnce is exported and the
 	// worker loop calls it, so two applications can overlap; interleaved
 	// snapshots would let an older one finish last, overwrite the newer
@@ -582,7 +586,24 @@ func (s *TokenRegistrySync) SyncOnce(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer stage.close()
+	defer func() {
+		cleanupErr := stage.close(s.removeStageFile)
+		if cleanupErr == nil {
+			return
+		}
+		if retErr != nil {
+			s.logger.Warn(
+				"cleaning token registry staging file failed after sync error",
+				"error", cleanupErr,
+			)
+			return
+		}
+		written = 0
+		retErr = fmt.Errorf(
+			"clean token registry staging file: %w",
+			cleanupErr,
+		)
+	}()
 	// An archive carrying no mapping files at all is not evidence that the
 	// registry is empty -- it is what an upstream layout change, a
 	// truncated artifact, or a mirror serving the wrong repository looks
@@ -620,7 +641,7 @@ func (s *TokenRegistrySync) SyncOnce(ctx context.Context) (int, error) {
 	); err != nil {
 		return 0, fmt.Errorf("record token registry sync stamp: %w", err)
 	}
-	written, err := s.applyStagedSnapshot(
+	written, err = s.applyStagedSnapshot(
 		ctx,
 		stage,
 		syncedAt,
@@ -775,10 +796,9 @@ type tokenRegistryStage struct {
 	skipped  int
 }
 
-func (s *tokenRegistryStage) close() {
+func (s *tokenRegistryStage) close(remove func(string) error) error {
 	name := s.file.Name()
-	_ = s.file.Close()
-	_ = os.Remove(name)
+	return errors.Join(s.file.Close(), remove(name))
 }
 
 // stageSnapshot streams and validates the remote archive into a bounded local
@@ -821,7 +841,12 @@ func (s *TokenRegistrySync) stageSnapshot(
 	stage := &tokenRegistryStage{file: stageFile}
 	defer func() {
 		if retErr != nil {
-			stage.close()
+			if cleanupErr := stage.close(s.removeStageFile); cleanupErr != nil {
+				s.logger.Warn(
+					"cleaning token registry staging file failed after ingestion error",
+					"error", cleanupErr,
+				)
+			}
 		}
 	}()
 	var stagedBytes int64

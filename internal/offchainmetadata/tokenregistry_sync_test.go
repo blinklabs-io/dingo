@@ -24,6 +24,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1243,6 +1244,69 @@ func TestTokenRegistrySyncRetriesAfterRolledBackSnapshot(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, len(subjects), written)
 	require.Len(t, store.snapshot(), len(subjects))
+}
+
+func TestTokenRegistrySyncReportsStagingCleanupFailure(t *testing.T) {
+	server := newRegistryServer(t, tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut, "nutcoin", "NUT", "",
+		),
+	}))
+	store := newFakeTokenRegistryStore()
+	sync := newTestSync(t, store, server.URL, nil)
+	cleanupErr := errors.New("simulated staging cleanup failure")
+	var stagePath string
+	sync.removeStageFile = func(path string) error {
+		stagePath = path
+		require.NoError(t, os.Remove(path))
+		return cleanupErr
+	}
+
+	written, err := sync.SyncOnce(t.Context())
+
+	require.Zero(t, written)
+	require.ErrorIs(t, err, cleanupErr)
+	require.Len(
+		t,
+		store.snapshot(),
+		1,
+		"the snapshot commits before its staging file is removed",
+	)
+	require.NotEmpty(t, store.state(TokenRegistrySyncStateKey))
+	_, statErr := os.Stat(stagePath)
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+}
+
+func TestTokenRegistrySyncPreservesPrimaryErrorWhenCleanupFails(
+	t *testing.T,
+) {
+	server := newRegistryServer(t, tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut, "nutcoin", "NUT", "",
+		),
+	}))
+	store := newFakeTokenRegistryStore()
+	primaryErr := errors.New("simulated upsert failure")
+	store.upsertErr = primaryErr
+	sync, logs := captureSync(t, store, server.URL)
+	cleanupErr := errors.New("simulated staging cleanup failure")
+	sync.removeStageFile = func(path string) error {
+		require.NoError(t, os.Remove(path))
+		return cleanupErr
+	}
+
+	written, err := sync.SyncOnce(t.Context())
+
+	require.Zero(t, written)
+	require.ErrorIs(t, err, primaryErr)
+	require.NotErrorIs(t, err, cleanupErr)
+	require.Empty(t, store.snapshot())
+	require.Contains(
+		t,
+		logs.String(),
+		"cleaning token registry staging file failed after sync error",
+	)
+	require.Contains(t, logs.String(), cleanupErr.Error())
 }
 
 // TestTokenRegistrySyncDoesNotPruneEmptySnapshot guards the worst failure
