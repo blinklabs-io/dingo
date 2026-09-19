@@ -180,6 +180,18 @@ jobs:
         # internal/test/conformance on real Postgres and MySQL as well as
         # SQLite, which took 917s of a 20m budget in run 33521250798.
         run: go test -v -tags dingo_extra_plugins -ldflags="-s -w" -timeout 30m ./...
+      # A nested module has its own go.mod, so the root `./...` above stops at
+      # its directory boundary and a green go-test says nothing about it. That
+      # blind spot let internal/test/antithesis ship a failing package behind a
+      # fully green pipeline. One step per module, mirroring golangci-lint.yml;
+      # internal/docsparity's TestGoTestCoversEveryGoModule derives the module
+      # list from the tree and fails until every go.mod has a run here.
+      - name: go-test-antithesis
+        working-directory: internal/test/antithesis
+        run: go test -ldflags="-s -w" -timeout 10m ./...
+      - name: go-test-gov-lens
+        working-directory: examples/dingo-gov-lens
+        run: go test -ldflags="-s -w" -timeout 10m ./...
 
   # Race detection on every pull request, not only on a release tag. The
   # release-only arrangement is what abandoned v0.70.3: a genuine race-detector
