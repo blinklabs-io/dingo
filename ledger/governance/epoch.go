@@ -63,6 +63,27 @@ type EpochInput struct {
 	// to NewEpoch. Defaults false (gate off), keeping the tally
 	// byte-identical to the pre-CIP behavior.
 	DelegatorInactivityOn bool
+	// CurrentBoundarySPOState, when non-nil, is the SPO pool-stake voting
+	// state for stakeEpochFor(NewEpoch) -- which is NewEpoch itself, per
+	// stakeEpochFor's doc comment -- supplied by the caller instead of being
+	// loaded from the persisted "mark" pool_stake_snapshot table.
+	//
+	// The persisted mark[NewEpoch] row does not exist yet at this point in a
+	// real epoch-rollover transaction: it is written only at the very end of
+	// the rollover (ledger's epochSnapshotHook), after this RATIFY phase
+	// runs, because the write needs the new epoch's nonce and post-enactment
+	// protocol version. A real caller (ledger/chainsync.go) must therefore
+	// supply the same-boundary distribution it already computed earlier in
+	// the same transaction (or reconstructed the same way the persisted row
+	// will be) rather than let this fall through to LoadSPOVotingState, which
+	// would silently see zero rows and zero stake for every SPO-gated action
+	// at every boundary.
+	//
+	// Nil is correct for standalone/test callers that seed mark[NewEpoch]
+	// directly and for EvaluateRatifiableHardForkInitiation's mid-epoch path,
+	// whose target epoch's mark row was already durably written at a prior,
+	// already-committed boundary.
+	CurrentBoundarySPOState *SPOVotingState
 }
 
 // EpochOutput reports what happened during the tick so the
@@ -519,9 +540,17 @@ func ProcessEpoch(
 			return nil, fmt.Errorf("load drep voting state: %w", err)
 		}
 		tallyCtx.DRepState = drepState
-		spoState, err = LoadSPOVotingState(in.DB, in.Txn, tallyCtx.StakeEpoch)
-		if err != nil {
-			return nil, fmt.Errorf("load spo voting state: %w", err)
+		if in.CurrentBoundarySPOState != nil {
+			// See CurrentBoundarySPOState's doc comment: stakeEpochFor
+			// always resolves to NewEpoch, whose mark row this same
+			// transaction has not written yet, so the caller-supplied
+			// same-boundary distribution takes priority over the DB read.
+			spoState = in.CurrentBoundarySPOState
+		} else {
+			spoState, err = LoadSPOVotingState(in.DB, in.Txn, tallyCtx.StakeEpoch)
+			if err != nil {
+				return nil, fmt.Errorf("load spo voting state: %w", err)
+			}
 		}
 		tallyCtx.SPOState = spoState
 	}
@@ -905,18 +934,41 @@ func ratificationEnactmentPrecondition(
 	return treasuryRemaining, nil
 }
 
-// stakeEpochFor returns the epoch whose "mark" snapshot should be used
-// for vote-weight calculations in the given new epoch. Mark captured
-// at end of N is used for voting in N+2, hence newEpoch-2. For early
-// epochs we fall back to newEpoch-1 or 0.
+// stakeEpochFor returns the epoch whose "mark" snapshot the SPO
+// ratification tally at the boundary into newEpoch must use.
+//
+// Derived from cardano-ledger's Conway/Rules/Epoch.hs (master and tag
+// cardano-ledger-conway-1.16.0.0 agree): SNAP runs first in the EPOCH
+// transition, producing snapshots1, and `ssStakeMarkPoolDistr snapshots1`
+// seeds the fresh DRep pulser for the epoch the boundary opens
+// (`setFreshDRepPulsingState eNo stakePoolDistr`). That pulser is not
+// evaluated until RATIFY at the *next* boundary transition -- so upstream's
+// RATIFY at the boundary into epoch X consumes the mark captured by SNAP at
+// the boundary into X-1.
+//
+// Dingo does not run an incremental pulser: it makes the ratify decision in
+// full at one boundary tick and defers ENACT to the next tick (see
+// ProcessEpoch's ENACT-before-RATIFY ordering and its caller in
+// ledger/chainsync.go). So dingo's decision at the boundary into M is what
+// reproduces upstream's decision at the boundary into M+1 -- which, by the
+// rule above, consumes mark[(M+1)-1] = mark[M]. M here is newEpoch: this
+// tick's ratify decision, taken at the boundary into newEpoch, must use
+// mark[newEpoch].
+//
+// Confirmed against the Preview Plomin hard fork (dingo#4441): mark[742]'s
+// SPO yes ratio was 0.6283 (>= the 0.51 pvtHardForkInitiation threshold),
+// matching the real network's ratified_epoch=742/enacted_epoch=743; mark[740]
+// (0.4779) and mark[741] (0.4757) do not clear the threshold and reproduce
+// the observed permanent-stall bug when used instead.
+//
+// The persisted mark[newEpoch] row is not readable from the
+// pool_stake_snapshot table until the very end of the boundary transaction
+// that computes this value (it needs the new epoch's nonce and
+// post-enactment protocol version, both decided after RATIFY runs) -- see
+// EpochInput.CurrentBoundarySPOState, which is how a real epoch-rollover
+// caller supplies this same-boundary data instead.
 func stakeEpochFor(newEpoch uint64) uint64 {
-	switch {
-	case newEpoch >= 2:
-		return newEpoch - 2
-	case newEpoch >= 1:
-		return newEpoch - 1
-	}
-	return 0
+	return newEpoch
 }
 
 // countActiveDReps returns the number of credential-backed DReps

@@ -721,6 +721,11 @@ func mutateConwayPParams(
 	}
 }
 
+// TestStakeEpochFor pins stakeEpochFor to the identity function: the
+// ratify decision taken at the boundary into newEpoch uses mark[newEpoch],
+// the mark snapshot captured by SNAP at that same boundary. See
+// stakeEpochFor's doc comment for the upstream derivation and dingo#4441
+// for the live incident (Preview Plomin hard fork) this fixed.
 func TestStakeEpochFor(t *testing.T) {
 	t.Parallel()
 
@@ -729,10 +734,11 @@ func TestStakeEpochFor(t *testing.T) {
 		expected uint64
 	}{
 		{0, 0},
-		{1, 0},
-		{2, 0},
-		{3, 1},
-		{10, 8},
+		{1, 1},
+		{2, 2},
+		{3, 3},
+		{10, 10},
+		{742, 742},
 	}
 	for _, tt := range tests {
 		assert.Equal(t, tt.expected, stakeEpochFor(tt.newEpoch))

@@ -934,6 +934,19 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			return n.snapshotMgr.CaptureEpochBoundarySnapshot(n.ctx, txn, evt)
 		},
 	)
+	// Wire governance's same-boundary SPO stake read (dingo#4441): RATIFY
+	// tallies mark[NewEpoch] -- this same boundary's own mark snapshot -- but
+	// that row is not durably written until the hook above runs, later in
+	// the same rollover. Without this, governance would silently see zero
+	// SPO stake for every SPO-gated action at every boundary.
+	n.ledgerState.SetCurrentBoundarySPOStakeHook(
+		func(
+			txn *database.Txn,
+			evt event.EpochTransitionEvent,
+		) ([]*models.PoolStakeSnapshot, error) {
+			return n.snapshotMgr.CurrentBoundarySPOStakeRows(n.ctx, txn, evt)
+		},
+	)
 
 	// Optional in-process Koios reward-parity observer (dingo #3098). Wired
 	// (and, critically, subscribed to event.EpochTransitionEventType) before
