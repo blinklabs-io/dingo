@@ -251,6 +251,8 @@ type Config struct {
 	genesisCorroborationPeers                                                           int
 	blockProducer                                                                       bool
 	shelleyVRFKey, shelleyKESKey, shelleyOperationalCertificate                         string
+	shelleyKESAgentSocket, shelleyKESAgentMode                                          string
+	shelleyKESAgentSignTimeout                                                          time.Duration
 	forgeSyncToleranceSlots, forgeStaleGapThresholdSlots                                uint64
 	forgePrimaryChainTipToleranceSlots                                                  uint64
 	forgeUpstreamStalenessSlots, forgeAppliedTipStalenessSlots                          uint64
@@ -858,6 +860,7 @@ func (c *Config) syncCompatFields() {
 	c.maxNtCConns, c.maxNtCConnectionsPerIP = c.cfg.MaxNtCConns, c.cfg.MaxNtCConnectionsPerIP
 	c.genesisBootstrap, c.genesisWindowSlots, c.genesisCorroborationPeers = c.cfg.GenesisBootstrap.Enabled, c.cfg.GenesisBootstrap.WindowSlots, c.cfg.GenesisBootstrap.CorroborationPeers
 	c.blockProducer, c.shelleyVRFKey, c.shelleyKESKey, c.shelleyOperationalCertificate = c.cfg.BlockProducer, c.cfg.ShelleyVRFKey, c.cfg.ShelleyKESKey, c.cfg.ShelleyOperationalCertificate
+	c.shelleyKESAgentSocket, c.shelleyKESAgentMode, c.shelleyKESAgentSignTimeout = c.cfg.ShelleyKESAgentSocket, c.cfg.ShelleyKESAgentMode, c.cfg.ShelleyKESAgentSignTimeout
 	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
 	c.forgePrimaryChainTipToleranceSlots = c.cfg.ForgePrimaryChainTipToleranceSlots
 	c.forgeUpstreamStalenessSlots, c.forgeAppliedTipStalenessSlots = c.cfg.ForgeUpstreamStalenessSlots, c.cfg.ForgeAppliedTipStalenessSlots
