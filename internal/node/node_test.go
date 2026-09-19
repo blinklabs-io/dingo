@@ -516,3 +516,44 @@ func TestBuildDingoConfigWiresForgeTolerances(t *testing.T) {
 		)
 	}
 }
+
+// TestBuildDingoConfigWiresTrustCanonicalWithdrawalOnRewardMismatch is the
+// same class of bug TestBuildDingoConfigWiresForgeTolerances documents
+// (dingo#3885 follow-up): TrustCanonicalWithdrawalOnRewardMismatch was
+// parsed, defaulted, flagged, documented and asserted at every other layer,
+// but buildDingoConfig's explicit dingo.NewConfig option list had no
+// dingo.WithTrustCanonicalWithdrawalOnRewardMismatch entry, so an operator's
+// --trust-canonical-withdrawal-on-reward-mismatch flag was silently dropped
+// and the reconciliation path never ran -- observed live as 194 identical
+// rejections of the same block with the flag enabled.
+func TestBuildDingoConfigWiresTrustCanonicalWithdrawalOnRewardMismatch(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		TrustCanonicalWithdrawalOnRewardMismatch: true,
+	}
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+
+	built := buildDingoConfig(
+		cfg,
+		logger,
+		nil,
+		nil,
+		false,
+		dingo.StorageModeCore,
+		30*time.Second,
+		chainsync.DefaultStallTimeout,
+		chainsync.HeaderSyncStrategyPrimary,
+	)
+
+	if got := built.TrustCanonicalWithdrawalOnRewardMismatch(); !got {
+		t.Fatalf(
+			"expected TrustCanonicalWithdrawalOnRewardMismatch true, got "+
+				"%v; the loaded value never reached dingo.Config, so the "+
+				"reconciliation path never runs however it is configured",
+			got,
+		)
+	}
+}

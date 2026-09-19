@@ -139,6 +139,8 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		// CIP-23 minimum pool margin (minimum variable fee). Operator-set,
 		// off by default (0), effective only in Dijkstra and later.
 		MinPoolMargin: n.config.minPoolMargin,
+		// Off by default; see LedgerStateConfig.TrustCanonicalWithdrawalOnRewardMismatch.
+		TrustCanonicalWithdrawalOnRewardMismatch: n.config.trustCanonicalWithdrawalOnRewardMismatch,
 		// CIP-50 pledge-leverage reward cap. Operator-set (not derived from
 		// the network) and off by default; enable only where every node
 		// also enables it.

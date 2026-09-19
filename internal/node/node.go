@@ -747,6 +747,9 @@ func buildDingoConfig(
 		dingo.WithStorageMode(storageMode),
 		// CIP-23 minimum pool margin (consensus-affecting)
 		dingo.WithMinPoolMargin(cfg.MinPoolMargin),
+		dingo.WithTrustCanonicalWithdrawalOnRewardMismatch(
+			cfg.TrustCanonicalWithdrawalOnRewardMismatch,
+		),
 		// CIP-50 pledge-leverage staking rewards (consensus-affecting)
 		dingo.WithPledgeLeverage(
 			cfg.PledgeLeverageEnabled,

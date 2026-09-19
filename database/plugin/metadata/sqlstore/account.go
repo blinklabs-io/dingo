@@ -1549,6 +1549,55 @@ ON CONFLICT (
 	)
 }
 
+// ReconcileAccountRewardBalance overwrites an account's reward balance with
+// correctedAmount, without treating the change as a withdrawal: no
+// account_reward_delta row, no clearing to zero, no idempotency guard beyond
+// the UPDATE itself.
+//
+// This exists for exactly one narrow, explicitly opt-in recovery path
+// (LedgerStateConfig.TrustCanonicalWithdrawalOnRewardMismatch, dingo#4152
+// follow-up): a validated peer's block proves the locally reconstructed
+// reward balance for one credential disagrees with the chain by some small
+// amount, and the operator has chosen to trust the peer's figure over the
+// node's own reconstruction rather than halt the ledger pipeline
+// indefinitely on shelley.IncorrectWithdrawalAmountError. Correcting the
+// balance to the withdrawal's own Provided amount, rather than to zero,
+// deliberately does not apply the withdrawal itself -- it only makes the
+// account's balance agree with what the pending block's own validation
+// rule expects, so replay recovery's ordinary rewind-and-retry can
+// re-validate and apply that same block normally afterward, through the
+// same path a correct reconstruction would have taken.
+func (s *Store) ReconcileAccountRewardBalance(
+	credentialTag uint8,
+	stakeKey []byte,
+	correctedAmount uint64,
+	txn types.Txn,
+) error {
+	return s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			result, err := db.ExecContext(ctx, `
+UPDATE account SET reward = ?
+WHERE credential_tag = ? AND staking_key = ? AND active = TRUE`,
+				strconv.FormatUint(correctedAmount, 10),
+				credentialTag,
+				stakeKey,
+			)
+			if err != nil {
+				return err
+			}
+			affected, err := result.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if affected == 0 {
+				return models.ErrAccountNotFound
+			}
+			return nil
+		},
+	)
+}
+
 func (s *Store) DeleteAccountRewardsAfterSlot(
 	slot uint64,
 	txn types.Txn,

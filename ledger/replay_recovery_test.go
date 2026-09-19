@@ -1956,6 +1956,174 @@ func TestReplayRecoveryRejectsRepeatedIncorrectWithdrawalAmount(t *testing.T) {
 	}
 }
 
+// TestReplayRecoveryReconcilesRewardWithdrawalMismatchWhenOpted pins
+// LedgerStateConfig.TrustCanonicalWithdrawalOnRewardMismatch (dingo#3885
+// follow-up): with it enabled, a repeated shelley.IncorrectWithdrawalAmountError
+// overwrites the local reward balance with the canonical block's own claimed
+// amount instead of rejecting the block forever, matching the recovery
+// blinklabs-io/dingo#3885's own thread reports operators already apply
+// manually. Reverting the TrustCanonicalWithdrawalOnRewardMismatch branch in
+// place would make the second assertion below observe the balance
+// unchanged.
+func TestReplayRecoveryReconcilesRewardWithdrawalMismatchWhenOpted(t *testing.T) {
+	t.Parallel()
+
+	ls := newReplayRecoveryAuditLedger(t, true)
+	ls.config.TrustCanonicalWithdrawalOnRewardMismatch = true
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	resyncCh := deterministicResyncChannel(t, ls, bus)
+
+	credential := reapCred28(0x99)
+	raw, err := dbtest.RawSQLiteMetadata(t, ls.db)
+	require.NoError(t, err)
+	_, err = raw.Exec(`INSERT INTO account (staking_key, active, reward)
+VALUES (?, TRUE, '5545905')`, credential)
+	require.NoError(t, err)
+	rewardAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		credential,
+	)
+	require.NoError(t, err)
+
+	validation := func() *txValidationError {
+		return &txValidationError{
+			BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+			TxHash:     testHashBytes("reconcile-withdrawal-tx"),
+			Cause: fmt.Errorf(
+				"shelley UTxO rule: %w",
+				shelley.IncorrectWithdrawalAmountError{
+					RewardAddress: rewardAddr,
+					Provided:      big.NewInt(5545784),
+					Balance:       5545905,
+				},
+			),
+		}
+	}
+
+	readBalance := func() uint64 {
+		account, err := ls.db.Metadata().GetAccountByCredential(0, credential, false, nil)
+		require.NoError(t, err)
+		require.NotNil(t, account)
+		return uint64(account.Reward)
+	}
+
+	// The first rejection must behave exactly like the flag-off sibling
+	// test: reject and rewind, without touching local state yet -- only a
+	// repeated, genuinely deterministic failure justifies trusting a peer
+	// over this node's own reconstruction.
+	recovered, err := ls.tryRecoverFromTxValidationError(validation())
+	require.NoError(t, err)
+	require.True(t, recovered)
+	assert.Equal(t, uint64(5545905), readBalance(),
+		"the first rejection must not reconcile anything yet")
+	testutil.RequireReceive(
+		t, resyncCh, testutil.AsyncWait,
+		"the first rejection must request a fresh ChainSync intersection",
+	)
+
+	// The redelivery is what marks this deterministic, and is where
+	// TrustCanonicalWithdrawalOnRewardMismatch reconciles.
+	recovered, err = ls.tryRecoverFromTxValidationError(validation())
+	require.NoError(
+		t,
+		err,
+		"reconciliation must let ordinary rewind-and-retry continue, not halt",
+	)
+	require.True(t, recovered)
+	assert.Equal(t, uint64(5545784), readBalance(),
+		"the redelivery must overwrite the local balance with the canonical withdrawal amount")
+}
+
+// TestReplayRecoveryReconcilesRewardWithdrawalMismatchAcrossFluctuatingTip
+// pins the fix for the reconciliation branch never firing live despite the
+// same tx_hash/failing_block_slot repeating for minutes (dingo#3885
+// follow-up): a live replay's applied tip briefly advances past the slot
+// recorded when the first rejection was handled (peer churn, fork
+// exploration), which clears deterministicTxRecoveryResync via
+// resetDeterministicTxRecovery -- the same call site
+// ledgerProcessBlocksFromSource's tip-advance critical section uses -- and
+// then rewinds back to a different nearby slot for the retry, so resyncSpent
+// alone never went true again even though the exact same (block, tx) kept
+// recurring. rewardMismatchReconcileSeen must recognize the repeat by
+// (block, tx) identity regardless of the shared latch's tip-slot state.
+// Reverting to gating on resyncSpent in place makes this test's second
+// assertion fail exactly as observed live.
+func TestReplayRecoveryReconcilesRewardWithdrawalMismatchAcrossFluctuatingTip(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls := newReplayRecoveryAuditLedger(t, true)
+	ls.config.TrustCanonicalWithdrawalOnRewardMismatch = true
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+
+	credential := reapCred28(0x77)
+	raw, err := dbtest.RawSQLiteMetadata(t, ls.db)
+	require.NoError(t, err)
+	_, err = raw.Exec(`INSERT INTO account (staking_key, active, reward)
+VALUES (?, TRUE, '5545905')`, credential)
+	require.NoError(t, err)
+	rewardAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		credential,
+	)
+	require.NoError(t, err)
+
+	validation := func() *txValidationError {
+		return &txValidationError{
+			BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+			TxHash:     testHashBytes("reconcile-withdrawal-tx-fluctuating"),
+			Cause: fmt.Errorf(
+				"shelley UTxO rule: %w",
+				shelley.IncorrectWithdrawalAmountError{
+					RewardAddress: rewardAddr,
+					Provided:      big.NewInt(5545784),
+					Balance:       5545905,
+				},
+			),
+		}
+	}
+
+	readBalance := func() uint64 {
+		account, err := ls.db.Metadata().GetAccountByCredential(0, credential, false, nil)
+		require.NoError(t, err)
+		require.NotNil(t, account)
+		return uint64(account.Reward)
+	}
+
+	recovered, err := ls.tryRecoverFromTxValidationError(validation())
+	require.NoError(t, err)
+	require.True(t, recovered)
+	assert.Equal(t, uint64(5545905), readBalance())
+
+	// Simulate the live shape exactly: other tip-advance activity (a
+	// competing fork briefly explored further) pushes the applied tip past
+	// the slot recorded on the first attempt, which clears
+	// deterministicTxRecoveryResync via resetDeterministicTxRecovery (the
+	// same call site ledgerProcessBlocksFromSource's tip-advance critical
+	// section uses), and then chain selection rewinds back to a lower
+	// nearby slot for the retry. Just moving currentTip to a lower slot
+	// without first crossing that reset threshold would leave the old
+	// tip-slot-ordered latch's "spent" condition (tipSlot <= l.TipSlot)
+	// still satisfied, so this step is what actually reproduces the bug.
+	ls.resetDeterministicTxRecovery(200)
+	ls.currentTip.Point = ocommon.NewPoint(120, testHashBytes("audit-replay"))
+
+	recovered, err = ls.tryRecoverFromTxValidationError(validation())
+	require.NoError(t, err)
+	require.True(t, recovered)
+	assert.Equal(t, uint64(5545784), readBalance(),
+		"the shared deterministic-resync latch being cleared by unrelated "+
+			"tip-advance activity must not stop the repeat from being "+
+			"recognized as the same failing block/tx")
+}
+
 func TestReplayRecoveryRejectsDeterministicPlutusFailure(t *testing.T) {
 	t.Parallel()
 

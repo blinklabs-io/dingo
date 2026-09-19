@@ -259,6 +259,7 @@ type Config struct {
 	blockPipelineEnabled                                                                bool
 	blockPipelineValidateEnabled                                                        bool
 	minPoolMargin                                                                       uint
+	trustCanonicalWithdrawalOnRewardMismatch                                            bool
 	pledgeLeverageEnabled                                                               bool
 	pledgeLeverage                                                                      uint
 	fullPotRewardsEnabled, unsafeFullPotRewardsOnStandardNetworks                       bool
@@ -864,6 +865,7 @@ func (c *Config) syncCompatFields() {
 	c.blockPipelineEnabled = c.cfg.BlockPipelineEnabled
 	c.blockPipelineValidateEnabled = c.cfg.BlockPipelineValidateEnabled
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
+	c.trustCanonicalWithdrawalOnRewardMismatch = c.cfg.TrustCanonicalWithdrawalOnRewardMismatch
 	c.fullPotRewardsEnabled, c.unsafeFullPotRewardsOnStandardNetworks = c.cfg.FullPotRewardsEnabled, c.cfg.UnsafeFullPotRewardsOnStandardNetworks
 	c.delegatorInactivityEnabled, c.delegatorInactivity = c.cfg.DelegatorInactivityEnabled, c.cfg.DelegatorInactivity
 	c.leiosVoteSigningKeyFile = c.cfg.LeiosVoteSigningKeyFile
@@ -936,6 +938,12 @@ func WithGenesisCorroborationPeers(peers int) ConfigOptionFunc {
 
 func WithMinPoolMargin(v uint) ConfigOptionFunc {
 	return func(c *Config) { c.cfg.MinPoolMargin, c.minPoolMargin = v, v }
+}
+
+func WithTrustCanonicalWithdrawalOnRewardMismatch(v bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.TrustCanonicalWithdrawalOnRewardMismatch, c.trustCanonicalWithdrawalOnRewardMismatch = v, v
+	}
 }
 
 func WithPledgeLeverage(enabled bool, v uint) ConfigOptionFunc {
@@ -2269,6 +2277,14 @@ func (c *Config) ShelleyOperationalCertificate() string {
 // ForgeSyncToleranceSlots returns the sync tolerance for block forging.
 func (c *Config) ForgeSyncToleranceSlots() uint64 {
 	return c.cfg.ForgeSyncToleranceSlots
+}
+
+// TrustCanonicalWithdrawalOnRewardMismatch reports whether a repeated,
+// deterministic reward-withdrawal mismatch reconciles the local balance to
+// the canonical block's claimed amount. See
+// LedgerStateConfig.TrustCanonicalWithdrawalOnRewardMismatch's doc comment.
+func (c *Config) TrustCanonicalWithdrawalOnRewardMismatch() bool {
+	return c.cfg.TrustCanonicalWithdrawalOnRewardMismatch
 }
 
 // ForgePrimaryChainTipToleranceSlots returns how far the ledger-applied tip may

@@ -717,6 +717,25 @@ type LedgerStateConfig struct {
 	// until the Leios certificate / endorser-availability surface is complete
 	// (#2587).
 	SkipDijkstraTxValidation bool
+	// TrustCanonicalWithdrawalOnRewardMismatch, when true, recovers from a
+	// deterministic shelley.IncorrectWithdrawalAmountError (a canonical
+	// block's withdrawal disagrees with this node's own reconstructed
+	// reward-account balance) by overwriting the local balance with the
+	// withdrawal's own claimed amount and letting ordinary rewind-and-retry
+	// re-validate the same block, instead of retrying the same rejection
+	// forever. Every peer having already accepted the block is the basis
+	// for trusting its withdrawal amount over this node's own reward
+	// reconstruction for that one credential; see
+	// recoverFromDeterministicTxValidationError's doc comment for why this
+	// is not attempted for the sibling models.ErrRewardWithdrawalExceedsBalance
+	// case. This does not correct the underlying reward-calculation
+	// disagreement (blinklabs-io/dingo#3885) -- only the one credential's
+	// balance, only after the ordinary retry has already failed
+	// identically once. Off by default: reaching for a peer's figure over
+	// this node's own computation is appropriate for unblocking a
+	// diagnostic or validation run, not a default for a node whose
+	// reward accounting is expected to be trustworthy on its own.
+	TrustCanonicalWithdrawalOnRewardMismatch bool
 	// MinPoolMargin is the CIP-23 minimum pool margin (minimum variable fee) in
 	// basis points, [0, 10000] (150 = 1.5%); 0 disables it. It is a consensus-
 	// affecting operator setting (not derived from the network) that takes
@@ -1134,6 +1153,19 @@ type LedgerState struct {
 	// rejected, but peers are no longer rotated for it. See
 	// deterministicTxRecoveryLatch in ledger/replay_recovery.go.
 	deterministicTxRecoveryResync *deterministicTxRecoveryLatch
+	// rewardMismatchReconcileSeen records the (block, tx) identity of the
+	// last shelley.IncorrectWithdrawalAmountError
+	// reconcileRewardWithdrawalMismatch considered, independent of
+	// deterministicTxRecoveryResync's own tip-slot-ordered reset rules: a
+	// live replay's applied tip can rewind and re-advance to different
+	// nearby slots across repeated attempts at the same failing block (peer
+	// churn, fork exploration), which resets deterministicTxRecoveryResync's
+	// own "spent" state before the identical rejection recurs, observed
+	// live (dingo#3885 follow-up) as the reconciliation branch never firing
+	// despite the same tx_hash/failing_block_slot repeating for minutes.
+	// Matching on (block, tx) identity alone, with no tip-slot condition,
+	// is what proves determinism for this narrower purpose instead.
+	rewardMismatchReconcileSeen *deterministicTxRecoveryLatch
 	// Consecutive successful recovery attempts refused at the Mithril trust
 	// boundary without advancing the applied tip (issues #3261 and #3301).
 	// The refusal's only escape is peer rotation, which cannot help for a

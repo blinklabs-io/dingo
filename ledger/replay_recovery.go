@@ -484,6 +484,48 @@ func isRewardWithdrawalStateDivergence(err error) bool {
 	return errors.Is(err, models.ErrRewardWithdrawalExceedsBalance)
 }
 
+// reconcileRewardWithdrawalMismatch overwrites the local reward balance for
+// incorrectWithdrawal.RewardAddress's credential with the amount the
+// canonical block itself claims (Provided), so the ordinary rewind-and-retry
+// in recoverFromDeterministicTxValidationError can re-validate and apply the
+// same block normally afterward. Deliberately does not apply the withdrawal
+// itself (that would clear the balance to zero, which the pending block's
+// own validation would then reject just as surely, only against zero
+// instead of against the wrong reconstructed balance) -- only called when
+// LedgerStateConfig.TrustCanonicalWithdrawalOnRewardMismatch is enabled and
+// the ordinary retry has already failed identically once; see that field's
+// doc comment for why this is opt-in.
+func (ls *LedgerState) reconcileRewardWithdrawalMismatch(
+	incorrectWithdrawal shelley.IncorrectWithdrawalAmountError,
+) error {
+	if incorrectWithdrawal.Provided == nil || !incorrectWithdrawal.Provided.IsUint64() {
+		return fmt.Errorf(
+			"reward withdrawal reconciliation: non-uint64 provided amount %v",
+			incorrectWithdrawal.Provided,
+		)
+	}
+	stakeKey := incorrectWithdrawal.RewardAddress.StakeKeyHash()
+	if stakeKey == lcommon.NewBlake2b224(nil) {
+		return errors.New(
+			"reward withdrawal reconciliation: missing stake credential",
+		)
+	}
+	credentialTag, ok := models.StakeCredentialTagFromAddress(
+		incorrectWithdrawal.RewardAddress,
+	)
+	if !ok {
+		return errors.New(
+			"reward withdrawal reconciliation: derive credential tag",
+		)
+	}
+	return ls.db.Metadata().ReconcileAccountRewardBalance(
+		credentialTag,
+		stakeKey.Bytes(),
+		incorrectWithdrawal.Provided.Uint64(),
+		nil,
+	)
+}
+
 // deterministicTxRecoveryLatch records the single fresh-intersection request
 // already spent on one failing block at one applied ledger tip. Keyed on the
 // failing block and transaction as well as the tip, so a different rejected
@@ -515,6 +557,21 @@ func (l *deterministicTxRecoveryLatch) matches(
 ) bool {
 	return l != nil &&
 		tipSlot <= l.TipSlot &&
+		l.matchesIdentity(validationErr)
+}
+
+// matchesIdentity compares only the failing block and transaction, with no
+// tip-slot condition -- unlike matches, this is stable across a tip that
+// rewinds and re-advances to different nearby slots between repeated
+// attempts at the very same failing block (peer churn, fork exploration),
+// which is exactly what would otherwise repeatedly reset a tip-slot-ordered
+// latch's "already spent" state before the identical rejection recurs. Used
+// by rewardMismatchReconcileSeen, which needs only "have I already seen
+// this exact rejection once", not anything about how the tip got here.
+func (l *deterministicTxRecoveryLatch) matchesIdentity(
+	validationErr *txValidationError,
+) bool {
+	return l != nil &&
 		validationErr.BlockPoint.Slot == l.BlockPoint.Slot &&
 		bytes.Equal(validationErr.BlockPoint.Hash, l.BlockPoint.Hash) &&
 		bytes.Equal(validationErr.TxHash, l.TxHash)
@@ -543,6 +600,29 @@ func (ls *LedgerState) markDeterministicTxRecoveryResync(
 	defer ls.Unlock()
 	ls.deterministicTxRecoveryResync = newDeterministicTxRecoveryLatch(
 		tipSlot,
+		validationErr,
+	)
+}
+
+// rewardMismatchReconcileSeenLocked reports whether validationErr's exact
+// (block, tx) identity was already recorded by a previous call -- see
+// rewardMismatchReconcileSeen's doc comment for why this does not use
+// deterministicTxRecoveryResync's own tip-slot-ordered latch.
+func (ls *LedgerState) rewardMismatchReconcileSeenLocked(
+	validationErr *txValidationError,
+) bool {
+	return ls.rewardMismatchReconcileSeen.matchesIdentity(validationErr)
+}
+
+// markRewardMismatchReconcileSeen records validationErr's (block, tx)
+// identity so the next identical rejection is recognized as a repeat.
+func (ls *LedgerState) markRewardMismatchReconcileSeen(
+	validationErr *txValidationError,
+) {
+	ls.Lock()
+	defer ls.Unlock()
+	ls.rewardMismatchReconcileSeen = newDeterministicTxRecoveryLatch(
+		0,
 		validationErr,
 	)
 }
@@ -591,6 +671,45 @@ func (ls *LedgerState) recoverFromDeterministicTxValidationError(
 		validationErr,
 	)
 	ls.RUnlock()
+	if ls.config.TrustCanonicalWithdrawalOnRewardMismatch {
+		if incorrectWithdrawal, ok := errors.AsType[shelley.IncorrectWithdrawalAmountError](
+			validationErr.Cause,
+		); ok {
+			ls.RLock()
+			seenBefore := ls.rewardMismatchReconcileSeenLocked(validationErr)
+			ls.RUnlock()
+			if !seenBefore {
+				// First sighting of this exact (block, tx): record it and
+				// let the ordinary rewind-and-retry below run once more
+				// first, matching every other deterministic-error path's
+				// "one full attempt before anything special" shape, rather
+				// than reconciling on a rejection that has not yet proven
+				// itself deterministic.
+				ls.markRewardMismatchReconcileSeen(validationErr)
+			} else {
+				logFields := []any{
+					"component", "ledger",
+					"failing_block_slot", validationErr.BlockPoint.Slot,
+					"reward_address", incorrectWithdrawal.RewardAddress.String(),
+					"canonical_withdrawal_amount", incorrectWithdrawal.Provided,
+					"local_reward_balance", incorrectWithdrawal.Balance,
+				}
+				if err := ls.reconcileRewardWithdrawalMismatch(incorrectWithdrawal); err != nil {
+					if ls.config.Logger != nil {
+						ls.config.Logger.Error(
+							"TrustCanonicalWithdrawalOnRewardMismatch reconciliation failed; falling back to ordinary rewind-and-retry",
+							append(logFields, "error", err)...,
+						)
+					}
+				} else if ls.config.Logger != nil {
+					ls.config.Logger.Warn(
+						"TrustCanonicalWithdrawalOnRewardMismatch: overwrote the local reward balance to match a canonical peer's withdrawal; retrying the same block",
+						logFields...,
+					)
+				}
+			}
+		}
+	}
 	if resyncSpent && isRewardWithdrawalStateDivergence(validationErr.Cause) {
 		if ls.config.Logger != nil {
 			ls.config.Logger.Error(

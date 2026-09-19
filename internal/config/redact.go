@@ -253,6 +253,7 @@ var logPlainConfigFields = []string{
 	"Topology",
 	"Tracing",
 	"TracingStdout",
+	"TrustCanonicalWithdrawalOnRewardMismatch",
 	"UnsafeFullPotRewardsOnStandardNetworks",
 	"ValidateForgedBlock",
 	"ValidateHistorical",

@@ -791,6 +791,17 @@ type Config struct {
 	// value only where every node also enables the same value. See
 	// ARCHITECTURE.md ("Reward Calculation And Precomputation").
 	MinPoolMargin uint `yaml:"minPoolMargin"                          envconfig:"DINGO_MIN_POOL_MARGIN"`
+
+	// TrustCanonicalWithdrawalOnRewardMismatch recovers from a repeated,
+	// deterministic reward-withdrawal validation mismatch by trusting the
+	// canonical block's own withdrawal amount over this node's own reward
+	// reconstruction for that one credential, instead of retrying the same
+	// rejection forever. Off by default: see
+	// LedgerStateConfig.TrustCanonicalWithdrawalOnRewardMismatch's doc
+	// comment for why this is appropriate for unblocking a diagnostic or
+	// validation run, not for a node whose reward accounting is expected
+	// to be trustworthy on its own.
+	TrustCanonicalWithdrawalOnRewardMismatch bool `yaml:"trustCanonicalWithdrawalOnRewardMismatch" envconfig:"DINGO_TRUST_CANONICAL_WITHDRAWAL_ON_REWARD_MISMATCH"`
 	// CIP-50 pledge-leverage staking rewards. Consensus-affecting; defaults
 	// off. PledgeLeverageEnabled turns on the L*pledge reward cap and
 	// PledgeLeverage is L in [1, 10000]. Enable only on a network where every
