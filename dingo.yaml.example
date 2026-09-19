@@ -330,10 +330,29 @@ tokenRegistry:
   # Can be overridden with DINGO_TOKEN_REGISTRY_MAX_BYTES
   # CLI: --token-registry-max-bytes
   maxBytes: 0
+  # Cap on all decompressed tar content. 0 uses the default (2GB).
+  # Can be overridden with DINGO_TOKEN_REGISTRY_MAX_DECOMPRESSED_BYTES
+  # CLI: --token-registry-max-decompressed-bytes
+  maxDecompressedBytes: 0
   # Cap on a single registry mapping document. 0 uses the default (4MB).
   # Can be overridden with DINGO_TOKEN_REGISTRY_MAX_ENTRY_BYTES
   # CLI: --token-registry-max-entry-bytes
   maxEntryBytes: 0
+  # Cap on all tar entries, including non-mapping files. 0 uses the default
+  # (100000).
+  # Can be overridden with DINGO_TOKEN_REGISTRY_MAX_ARCHIVE_ENTRIES
+  # CLI: --token-registry-max-archive-entries
+  maxArchiveEntries: 0
+  # Cap on parsed mappings and database row-upsert work. 0 uses the default
+  # (50000).
+  # Can be overridden with DINGO_TOKEN_REGISTRY_MAX_ACCEPTED_ENTRIES
+  # CLI: --token-registry-max-accepted-entries
+  maxAcceptedEntries: 0
+  # Cap on retained mapping payload in each database batch. 0 uses the
+  # default (64MB).
+  # Can be overridden with DINGO_TOKEN_REGISTRY_MAX_BATCH_BYTES
+  # CLI: --token-registry-max-batch-bytes
+  maxBatchBytes: 0
   # Persist base64 token logos. Logos are roughly 90% of registry bytes and
   # most consumers only need name/ticker/decimals, so this is off by default.
   # Can be overridden with DINGO_TOKEN_REGISTRY_STORE_LOGOS

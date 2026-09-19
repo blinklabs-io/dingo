@@ -26,6 +26,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -55,6 +56,7 @@ type fakeTokenRegistryStore struct {
 	syncStateErr    map[string]error
 	commitErr       error
 	maxBatchBytes   int64
+	transactionHook func()
 }
 
 type fakeTokenRegistryTxn struct {
@@ -167,6 +169,12 @@ func (f *fakeTokenRegistryStore) SetSyncState(
 
 func (f *fakeTokenRegistryStore) Transaction(_ context.Context) types.Txn {
 	f.mu.Lock()
+	hook := f.transactionHook
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	f.mu.Lock()
 	defer f.mu.Unlock()
 	entries := make(map[string]models.TokenRegistryEntry, len(f.entries))
 	maps.Copy(entries, f.entries)
@@ -176,6 +184,21 @@ func (f *fakeTokenRegistryStore) Transaction(_ context.Context) types.Txn {
 		store: f, entries: entries, syncState: syncState,
 	}
 }
+
+type completionReadCloser struct {
+	reader   *bytes.Reader
+	consumed atomic.Bool
+}
+
+func (r *completionReadCloser) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	if r.reader.Len() == 0 {
+		r.consumed.Store(true)
+	}
+	return n, err
+}
+
+func (r *completionReadCloser) Close() error { return nil }
 
 func (t *fakeTokenRegistryTxn) Commit() error {
 	t.store.mu.Lock()
@@ -652,6 +675,47 @@ func TestTokenRegistrySyncBoundsRetainedBatchBytes(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, len(subjects), written)
 	require.LessOrEqual(t, store.maxBatchBytes, maxBatchBytes)
+}
+
+func TestTokenRegistrySyncIngestsArtifactBeforeTransaction(t *testing.T) {
+	body := tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut, "nutcoin", "NUT", "",
+		),
+	})
+	tracked := &completionReadCloser{reader: bytes.NewReader(body)}
+	client := &http.Client{Transport: roundTripFunc(func(
+		_ *http.Request,
+	) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"ETag": []string{`"etag"`}},
+			Body:       tracked,
+		}, nil
+	})}
+	store := newFakeTokenRegistryStore()
+	transactionStarted := false
+	store.transactionHook = func() {
+		transactionStarted = true
+		require.True(
+			t,
+			tracked.consumed.Load(),
+			"metadata transaction began before artifact ingestion completed",
+		)
+	}
+	sync, err := NewTokenRegistrySync(TokenRegistryConfig{
+		Store:                 store,
+		SourceURL:             "https://registry.example.test/archive.tar.gz",
+		HTTPClient:            client,
+		AllowPrivateAddresses: true,
+	})
+	require.NoError(t, err)
+
+	written, err := sync.SyncOnce(t.Context())
+
+	require.NoError(t, err)
+	require.Equal(t, 1, written)
+	require.True(t, transactionStarted)
 }
 
 func TestTokenRegistrySyncSkipsOversizedMapping(t *testing.T) {

@@ -311,9 +311,29 @@ var flagSpecs = []flagSpec{
 		"CIP-26 token registry max compressed download bytes (0 = default)",
 	),
 	int64Flag(
+		"TokenRegistry.MaxDecompressedBytes",
+		"token-registry-max-decompressed-bytes",
+		"CIP-26 token registry max expanded archive bytes (0 = default)",
+	),
+	int64Flag(
 		"TokenRegistry.MaxEntryBytes",
 		"token-registry-max-entry-bytes",
 		"CIP-26 token registry max bytes per mapping (0 = default)",
+	),
+	intFlag(
+		"TokenRegistry.MaxArchiveEntries",
+		"token-registry-max-archive-entries",
+		"CIP-26 token registry max archive entries (0 = default)",
+	),
+	intFlag(
+		"TokenRegistry.MaxAcceptedEntries",
+		"token-registry-max-accepted-entries",
+		"CIP-26 token registry max accepted mappings (0 = default)",
+	),
+	int64Flag(
+		"TokenRegistry.MaxBatchBytes",
+		"token-registry-max-batch-bytes",
+		"CIP-26 token registry max retained batch bytes (0 = default)",
 	),
 	boolFlag(
 		"TokenRegistry.StoreLogos",

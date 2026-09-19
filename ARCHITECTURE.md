@@ -2196,10 +2196,15 @@ aggregate decompressed tar stream, archive-header count, accepted mapping count,
 single mapping, and retained batch payload each have independent limits. All
 tar content counts against the expansion budget, including directories and
 non-mapping files, and the accepted-entry limit also bounds row-upsert work.
-Nothing is written to disk and no more than one mapping plus one bounded batch
-is retained at a time. A mapping that fails to parse is skipped and counted
-rather than failing the snapshot, since one bad file out of thousands should
-not cost the whole sync. Exhausting any aggregate limit rejects the artifact.
+Operators may lower the four aggregate limits with
+`tokenRegistry.maxDecompressedBytes`, `maxArchiveEntries`,
+`maxAcceptedEntries`, and `maxBatchBytes`; zero selects the defaults and
+negative values fail configuration validation.
+Parsed entries are written to a bounded, process-local temporary staging file;
+no more than one mapping is retained during ingestion. A mapping that fails to
+parse is skipped and counted rather than failing the snapshot, since one bad
+file out of thousands should not cost the whole sync. Exhausting any aggregate
+limit rejects the artifact and removes the staging file.
 
 Re-downloading that artifact on every interval would be indefensible, so the
 sync records the HTTP entity tag of the last successfully applied snapshot in
@@ -2262,9 +2267,12 @@ snapshot dropped. Turning `storeLogos` off
 needs no special handling: the upsert overwrites every property column, so the
 next snapshot clears previously stored logos.
 
-Batch flushes execute inside that transaction, bounding retained payload
-without exposing partial rows. The transaction spans decompression and parsing,
-but every dimension of that work is bounded and cancellation rolls it back.
+Only after download, decompression, parsing, and staging complete does the sync
+open the metadata transaction. It replays the staged entries in bounded
+batches, prunes, records state, commits, and removes the staging file. This
+keeps network and archive-processing latency outside SQLite's global writer
+lock and outside the write transaction on PostgreSQL and MySQL, without
+exposing partial rows.
 
 Snapshot application is serialized end to end. `SyncOnce` is exported and the
 worker loop calls it, so two applications can overlap; interleaved snapshots

@@ -1114,7 +1114,9 @@ subjects the failed run never reached. The sync passes one metadata transaction
 through the snapshot stamp, every upsert batch, the prune, and the ETag/source
 identity writes; a limit, store, state, or commit failure therefore leaves the
 previously served rows and validator state unchanged on SQLite, PostgreSQL, and
-MySQL. `GetTokenRegistryEntry` looks a subject up for the API and returns `nil`
+MySQL. Archive ingestion completes into a bounded temporary staging file before
+that transaction begins, so download and parsing do not hold a backend writer
+lock. `GetTokenRegistryEntry` looks a subject up for the API and returns `nil`
 for an unknown subject rather than an error, so the endpoint serves a null
 `metadata` field. Subjects are lower-cased on both write and read, so a registry
 that publishes an upper-case subject still matches a lookup built from

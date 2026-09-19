@@ -499,6 +499,31 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		}
 	}
 
+	if c.TokenRegistry.MaxDecompressedBytes < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid tokenRegistry.maxDecompressedBytes: %d (must not be negative)",
+			c.TokenRegistry.MaxDecompressedBytes,
+		))
+	}
+	if c.TokenRegistry.MaxArchiveEntries < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid tokenRegistry.maxArchiveEntries: %d (must not be negative)",
+			c.TokenRegistry.MaxArchiveEntries,
+		))
+	}
+	if c.TokenRegistry.MaxAcceptedEntries < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid tokenRegistry.maxAcceptedEntries: %d (must not be negative)",
+			c.TokenRegistry.MaxAcceptedEntries,
+		))
+	}
+	if c.TokenRegistry.MaxBatchBytes < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid tokenRegistry.maxBatchBytes: %d (must not be negative)",
+			c.TokenRegistry.MaxBatchBytes,
+		))
+	}
+
 	// Block production needs all three credential paths
 	if c.BlockProducer {
 		var missing []string
