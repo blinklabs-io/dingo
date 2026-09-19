@@ -824,14 +824,54 @@ func isPostgresDDLAlreadyAppliedOnConn(
 	var reported sql.NullString
 	if queryErr := conn.QueryRowContext(
 		ctx,
-		`SELECT data_type FROM information_schema.columns
-WHERE table_name = $1 AND column_name = $2`,
+		postgresColumnTypeQuery,
 		table,
 		column,
 	).Scan(&reported); queryErr != nil {
 		return false
 	}
 	return addColumnTypeMatches(reported, definition)
+}
+
+// postgresColumnTypeQuery reports an existing column's declared type, scoped
+// to the one relation the migration's own unqualified DDL resolved against.
+//
+// to_regclass applies the connection's search_path exactly as the ALTER TABLE
+// statement did, so the answer describes the table the statement touched. A
+// bare "WHERE table_name = $1" would instead match a same-named table in any
+// schema of the same database, and a Dingo metadata schema is not necessarily
+// alone in its database: the postgres provider's schema is operator-selectable
+// through search_path (see storagetest.PostgresDSNWithSearchPath), the
+// conformance and storage-migration suites pin one schema per run inside a
+// shared database, and DATABASE.md already records why resetDatabase's
+// schema_migrations exemption is keyed on (schema, name) rather than on name
+// alone. Resolving to NULL yields no rows, which each caller treats as "not
+// determinable" rather than as a confirmed answer.
+const postgresColumnTypeQuery = `SELECT c.data_type
+FROM pg_class rel
+JOIN pg_namespace ns ON ns.oid = rel.relnamespace
+JOIN information_schema.columns c
+  ON c.table_schema = ns.nspname AND c.table_name = rel.relname
+WHERE rel.oid = to_regclass($1) AND c.column_name = $2`
+
+// postgresRelationExists reports whether an unqualified table name resolves to
+// a relation on this connection. A DROP COLUMN guard needs it to tell "the
+// column is already gone" apart from "the whole table is missing"; only the
+// former is an idempotent replay.
+func postgresRelationExists(
+	ctx context.Context,
+	conn ddlExecer,
+	table string,
+) bool {
+	var resolved sql.NullString
+	if err := conn.QueryRowContext(
+		ctx,
+		`SELECT to_regclass($1)::text`,
+		table,
+	).Scan(&resolved); err != nil {
+		return false
+	}
+	return resolved.Valid
 }
 
 func isSQLiteDDLAlreadyAppliedOnConn(
@@ -955,11 +995,15 @@ func isPostgresDropColumnAlreadyAppliedOnConn(
 	if !ok {
 		return false
 	}
+	// A table that does not resolve at all means the "does not exist" error
+	// names the relation rather than the column, which is not a replay.
+	if !postgresRelationExists(ctx, conn, table) {
+		return false
+	}
 	var present sql.NullString
 	queryErr := conn.QueryRowContext(
 		ctx,
-		`SELECT column_name FROM information_schema.columns
-WHERE table_name = $1 AND column_name = $2`,
+		postgresColumnTypeQuery,
 		table,
 		column,
 	).Scan(&present)
