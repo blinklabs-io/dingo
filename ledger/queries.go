@@ -36,6 +36,25 @@ import (
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
+// blake2b224FromBytes converts a database-sourced hash column to a
+// Blake2b224, rejecting any length other than Blake2b224Size.
+// ledger.NewBlake2b224 zero-pads a short value and truncates a long one, so
+// using it here would turn a malformed row into a well-formed result key that
+// can collide with an unrelated credential. Replace this with
+// lcommon.NewBlake2b224Checked once a gouroboros release carries it.
+func blake2b224FromBytes(b []byte) (ledger.Blake2b224, error) {
+	var out ledger.Blake2b224
+	if len(b) != lcommon.Blake2b224Size {
+		return out, fmt.Errorf(
+			"invalid blake2b-224 hash: expected %d bytes, got %d",
+			lcommon.Blake2b224Size,
+			len(b),
+		)
+	}
+	copy(out[:], b)
+	return out, nil
+}
+
 // MaxLocalStateQueryItems bounds caller-controlled credential filters on query
 // paths that perform per-item work or build account maps from batched reads.
 // Explicit over-limit filters are rejected before database access.
@@ -1018,7 +1037,10 @@ func (ls *LedgerState) queryShelleyStakeSnapshots(
 		)
 		for _, byPool := range []map[string]uint64{mark, set, snapshotGo} {
 			for hash := range byPool {
-				key := ledger.NewBlake2b224([]byte(hash))
+				key, err := blake2b224FromBytes([]byte(hash))
+				if err != nil {
+					return nil, fmt.Errorf("pool stake snapshot: %w", err)
+				}
 				if _, ok := poolSnapshots[key]; ok {
 					continue
 				}
@@ -1518,9 +1540,13 @@ func (ls *LedgerState) queryShelleyDRepState(
 				return nil, err
 			}
 		}
+		credential, err := blake2b224FromBytes(drep.Credential)
+		if err != nil {
+			return nil, fmt.Errorf("drep state: %w", err)
+		}
 		key := olocalstatequery.StakeCredential{
 			Tag:   uint64(drep.CredentialTag),
-			Bytes: ledger.NewBlake2b224(drep.Credential),
+			Bytes: credential,
 		}
 		result[key] = olocalstatequery.DRepStateEntry{
 			Expiry:     drep.ExpiryEpoch,
