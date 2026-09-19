@@ -7117,10 +7117,13 @@ recorded parameters for that epoch and applying the pending genesis-key update
 the boundary will enact. Startup lab recovery recomputes a past epoch's nonce
 from the parameters recorded for that epoch, with no forecast. Only the TPraos
 eras carry the parameter -- Praos drops the term from Babbage on, so Babbage and
-later protocol parameters have no such field. Mainnet set a non-neutral value
-for exactly one epoch, 259; every other mainnet epoch and every preprod and
-preview epoch carries `NeutralNonce`, the identity of `⭒`, which leaves the
-result unchanged.
+later protocol parameters have no such field. A boundary that hard-forks out of
+Alonzo drops the term as well, which the parameter type alone cannot express:
+the parameters that boundary enacts are still Alonzo-typed while their protocol
+version is already Babbage's, so the term is gated on that version. Mainnet set
+a non-neutral value for exactly one epoch, 259; every other mainnet epoch and
+every preprod and preview epoch carries `NeutralNonce`, the identity of `⭒`,
+which leaves the result unchanged.
 
 In API storage mode, the shared SQL metadata providers can defer selected query
 indexes during bulk load. Deferred indexes are classified as critical or lazy in

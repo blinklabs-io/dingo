@@ -20,6 +20,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
@@ -64,20 +65,32 @@ func extraEntropyFromPParams(pparams lcommon.ProtocolParameters) []byte {
 		if pp == nil {
 			return nil
 		}
-		return extraEntropyNonceBytes(pp.ExtraEntropy)
+		return tpraosExtraEntropy(pp.ProtocolMajor, pp.ExtraEntropy)
 	case *mary.MaryProtocolParameters:
 		if pp == nil {
 			return nil
 		}
-		return extraEntropyNonceBytes(pp.ExtraEntropy)
+		return tpraosExtraEntropy(pp.ProtocolMajor, pp.ExtraEntropy)
 	case *alonzo.AlonzoProtocolParameters:
 		if pp == nil {
 			return nil
 		}
-		return extraEntropyNonceBytes(pp.ExtraEntropy)
+		return tpraosExtraEntropy(pp.ProtocolMajor, pp.ExtraEntropy)
 	default:
 		return nil
 	}
+}
+
+// tpraosExtraEntropy drops the term once the parameter set's own protocol
+// version has left TPraos. The concrete type cannot decide this on its own at
+// a hard-fork boundary out of Alonzo: the parameters the boundary enacts are
+// still Alonzo-typed while their protocol version is already Babbage's, and
+// the first Praos epoch is ticked by Praos, which takes no extraEntropy term.
+func tpraosExtraEntropy(protocolMajor uint, nonce lcommon.Nonce) []byte {
+	if protocolMajor >= babbage.MinProtocolVersionBabbage {
+		return nil
+	}
+	return extraEntropyNonceBytes(nonce)
 }
 
 func extraEntropyNonceBytes(nonce lcommon.Nonce) []byte {

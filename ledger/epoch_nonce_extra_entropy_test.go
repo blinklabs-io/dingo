@@ -25,8 +25,11 @@ import (
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/require"
 )
 
@@ -567,4 +570,64 @@ func TestRecordedExtraEntropyForEpochTracksParameterHistory(t *testing.T) {
 	got, err := ls.recordedExtraEntropyForEpoch(259, eras.ConwayEraDesc.Id)
 	require.NoError(t, err)
 	require.Nil(t, got)
+}
+
+// TestExtraEntropyFromPParamsStopsAtPraos pins the era boundary of the TICKN
+// extraEntropy term against the parameter set's protocol version rather than
+// its Go type. A hard fork out of Alonzo enacts Alonzo-typed parameters whose
+// protocol version is already Babbage's, and the first Praos epoch takes no
+// extraEntropy term.
+func TestExtraEntropyFromPParamsStopsAtPraos(t *testing.T) {
+	t.Parallel()
+
+	entropy := mustDecodeHex(t, mainnetEpoch259ExtraEntropy)
+	var nonce lcommon.Nonce
+	nonce.Type = lcommon.NonceTypeNonce
+	copy(nonce.Value[:], entropy)
+
+	for _, tc := range []struct {
+		name   string
+		params lcommon.ProtocolParameters
+		want   []byte
+	}{
+		{
+			"shelley",
+			&shelley.ShelleyProtocolParameters{
+				ProtocolMajor: 2,
+				ExtraEntropy:  nonce,
+			},
+			entropy,
+		},
+		{
+			"mary",
+			&mary.MaryProtocolParameters{
+				ProtocolMajor: 4,
+				ExtraEntropy:  nonce,
+			},
+			entropy,
+		},
+		{
+			"alonzo",
+			&alonzo.AlonzoProtocolParameters{
+				ProtocolMajor: 6,
+				ExtraEntropy:  nonce,
+			},
+			entropy,
+		},
+		{
+			"alonzo parameters carrying the babbage protocol version",
+			&alonzo.AlonzoProtocolParameters{
+				ProtocolMajor: babbage.MinProtocolVersionBabbage,
+				ExtraEntropy:  nonce,
+			},
+			nil,
+		},
+	} {
+		require.Equal(
+			t,
+			tc.want,
+			extraEntropyFromPParams(tc.params),
+			tc.name,
+		)
+	}
 }
