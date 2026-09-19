@@ -2722,7 +2722,7 @@ func TestReplayRecoveryRejectsDeterministicMissingRedeemer(t *testing.T) {
 }
 
 // The spend purpose is one of the seven tags the upstream
-// UtxoValidateRequiredRedeemers rule reports at the gouroboros v0.204.4 pin,
+// UtxoValidateRequiredRedeemers rule reports at the gouroboros v0.205.4 pin,
 // and it reaches its redeemer check only on inputs that already resolved, so
 // its verdict is as replay-invariant as the other six. A joined error chain
 // must still reach isRewardWithdrawalMismatch: ValidateTxConway runs every
@@ -2765,6 +2765,16 @@ func TestIsDeterministicMissingRedeemerAcrossJoinedErrors(t *testing.T) {
 		t,
 		isDeterministicTxValidationError(lcommon.InputResolutionError{}),
 		"an unresolved input is decided by local UTxO state",
+	)
+	// The inverse verdict from the same Dijkstra rule. An unresolved consumed
+	// input is skipped rather than resolved, so its spend purpose never
+	// reaches the required set and a legitimate spend redeemer reads as extra;
+	// resolving the input removes the verdict, so widening the classification
+	// to cover it would strand the rewind that repairs it.
+	require.False(
+		t,
+		isDeterministicTxValidationError(conway.ExtraRedeemerError{}),
+		"an extra redeemer verdict is decided by local UTxO state",
 	)
 	require.True(
 		t,

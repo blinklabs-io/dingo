@@ -408,7 +408,7 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 // non-terminal for that duplicate verdict for exactly that reason.
 //
 // A missing redeemer is deterministic for every script purpose, spending
-// included. Four rules report it at the gouroboros v0.204.4 pin, all as the
+// included. Four rules report it at the gouroboros v0.205.4 pin, all as the
 // one common type; the conway and babbage names are aliases of
 // lcommon.MissingRedeemerForScriptError rather than distinct types, so
 // matching the common type covers all of them. Each of the four either fails
@@ -422,7 +422,7 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 //     so the rule returns InputResolutionError or ReferenceInputResolutionError
 //     instead of a verdict. Its Dijkstra sub-transaction levels resolve
 //     through resolveBodyInputs instead, which skips what it cannot resolve
-//     and leaves the failure to UtxoValidateBadInputsUtxo. At v0.204.4 it
+//     and leaves the failure to UtxoValidateBadInputsUtxo. At v0.205.4 it
 //     derives purposes from script.ScriptPurposes and reports every tag, not
 //     spend alone.
 //   - common.ValidateScriptWitnesses, behind UtxoValidateScriptWitnesses,
@@ -454,7 +454,13 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 // The genuinely state-dependent cases carry their own types --
 // InputResolutionError, ReferenceInputResolutionError, and
 // shelley.BadInputsUtxoError -- which this function does not classify, so they
-// keep taking the producer-resolution rewind. A false-positive malformed-
+// keep taking the producer-resolution rewind. conway.ExtraRedeemerError is
+// state-dependent in the opposite direction and is likewise left unclassified:
+// dijkstraWitnessRuleLevels skips a consumed input it cannot resolve, so
+// dijkstraRequiredPlutusPurposes never derives that spend purpose and
+// validateDijkstraPlutusRedeemers reads the transaction's legitimate spend
+// redeemer as extra. Resolving the input removes the verdict, which is exactly
+// what the producer-resolution rewind is for. A false-positive malformed-
 // script verdict must also stay non-terminal: recovery rewinds and asks chain
 // selection for another candidate rather than halting, so a locally mistaken
 // rejection still leaves the node able to follow a chain a peer later offers.
