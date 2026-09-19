@@ -495,12 +495,14 @@ sequenceDiagram
     Peer->>OB: RollBackward(point)
     OB->>EB: publish ChainsyncEvent(rollback)
     EB->>LS: handleEventChainsyncRollback()
+    LS->>DB: persist rollback undo outbox (point + block bodies)
+    LS->>EB: publish TransactionEvent(rollback: true) per tx
     LS->>ChM: chain.Rollback(point)
     ChM->>DB: delete blocks/txs after point
     ChM->>DB: restore account/pool/DRep state
     LS->>DB: recompute CIP-0163 account expiration (epoch-owned)
     LS->>LS: reload epoch cache, repair lab nonces
-    LS->>EB: publish TransactionEvent(rollback: true) per tx
+    LS->>DB: clear rollback undo outbox after truncation commits
 ```
 
 An admitted ChainSync rollback atomically refreshes the tracked client's
@@ -619,6 +621,37 @@ the `ledger.block` undo events, which are a different event type and so a
 different lane. Before #2287 the undo events were emitted from a `go`
 statement onto the reordering shared pool, which lost the same race twice
 over.
+
+Before that enqueue, the rollback path writes `ledger.rollback.pending` in
+`sync_state`. The versioned record contains the rollback point and explicitly
+tagged block fields needed to decode the undo transactions. It is written after
+rollback validation but before either the undo enqueue or `chain.Rollback`,
+because the latter deletes the block bodies. Success clears the record only
+after metadata truncation, cache reload, durable-floor enforcement, and an
+ordered-lane delivery barrier. Startup replays the stored payload while holding
+the transaction-event mutex, finishes the chain rewind if necessary, and then
+completes metadata truncation. This is an at-least-once outbox: an interruption
+after delivery and before clearing may replay an undo, so consumers must
+tolerate duplicate rollback notifications.
+
+The record is bounded to 4096 blocks and 64 MiB of raw block fields. A larger
+rollback continues with live ordered delivery and logs that crash recovery is
+degraded instead of allocating and writing an unbounded JSON value. Consecutive
+deeper rollback windows merge their payloads into the pending record rather
+than overwriting an earlier window. A record that cannot drive a truncation --
+one whose point leads the applied ledger tip, or whose point has left the
+primary chain -- still emits its captured undo before it is retired, because
+the chain truncation that preceded it already deleted those bodies. Only an
+undecodable or unsupported record is dropped without delivery, and none of
+these outcomes makes startup permanently fail on the same value.
+
+When a lagging ledger iterator reports a rollback after `chain.Rollback` has
+already removed the abandoned blocks, the iterator result carries the chain's
+captured `RollbackBlocks` payload (newest first) into
+`processChainIteratorRollback`. That path uses the captured models to persist
+`ledger.rollback.pending` before metadata truncation; it does not attempt to
+re-read block bodies that chain selection has already deleted. Multiple queued
+iterator rollbacks retain the combined removed-block payload in rollback order.
 
 The forward path keeps async semantics deliberately: its after-commit callback
 only enqueues onto the ordered lane, so subscribers cannot observe an Apply

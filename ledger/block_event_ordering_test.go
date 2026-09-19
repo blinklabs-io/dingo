@@ -180,7 +180,7 @@ func TestRollbackTxEventsPrecedeLaterForwardTxEvents(t *testing.T) {
 	t.Parallel()
 
 	blocks := loadTestBlocksWithTxs(t, 2)
-	// Newest first, as blocksAboveSlot yields them.
+	// Newest first, as readBlocksAboveSlot yields them.
 	undoOrder := []models.Block{blocks[1], blocks[0]}
 
 	bus := event.NewEventBus(nil, nil)
@@ -556,7 +556,8 @@ func TestRollbackAndForwardTxEventsStayOrderedAcrossRepeatedCycles(
 //
 // The fixture's blocks carry stub CBOR, so the emitter takes its decode-failure
 // branch and reports a LedgerErrorEvent per block. That is precisely the
-// signal wanted here: the event can only be produced if blocksAboveSlot found
+// signal wanted here: the event can only be produced if readBlocksAboveSlot
+// found
 // the block, which it can only do before the truncation. Wire the emitter in
 // after chain.Rollback instead and no event is produced at all.
 func TestRollbackChainAndStateEmitsUndoEventsBeforeTruncating(t *testing.T) {
@@ -624,7 +625,7 @@ func TestRejectedRollbackEmitsNoUndoEvents(t *testing.T) {
 
 	// A point at the ancestor's slot but carrying a hash no block has:
 	// ValidateRollback rejects it, and crucially it sits *below* the tip,
-	// so blocksAboveSlot would find the block at the tip and emit undo
+	// so readBlocksAboveSlot would find the block at the tip and emit undo
 	// events for it if the rejection were not checked first. A point above
 	// the tip would not exercise this at all -- there is nothing above it
 	// to emit for.
@@ -740,7 +741,7 @@ func TestReconciliationUndoBlocksCoversConcurrentlyAppliedBlock(t *testing.T) {
 
 	// Both the originally-applied block and the one applied during the
 	// race must have been considered for undo: each is unresolvable
-	// through blocksAboveSlot's old (blob-scan) path but resolvable as
+	// through readBlocksAboveSlot's old (blob-scan) path but resolvable as
 	// a decode failure here, so seeing both decode errors is proof both
 	// were included, in newest-first order.
 	first := testutil.RequireReceive(
@@ -775,7 +776,7 @@ func TestReconciliationUndoBlocksCoversConcurrentlyAppliedBlock(t *testing.T) {
 // rollbackChainAndState uses for a peer-driven rollback, so ledger.tx
 // subscribers still see an undo for blocks this reconciliation discards.
 // Before this fix the reconciler called RewindPrimaryChainToPoint directly
-// and never read blocksAboveSlot at all, so this decode error -- proof the
+// and never read readBlocksAboveSlot at all, so this decode error -- proof the
 // undo path ran -- was never emitted.
 func TestReconcilePrimaryChainTipWithLedgerTipEmitsUndoEventsBeforeTruncating(
 	t *testing.T,
