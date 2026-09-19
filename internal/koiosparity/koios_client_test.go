@@ -309,6 +309,37 @@ func TestGetFailsAfterExhausting408RetriesReturnsPermanent(t *testing.T) {
 	require.EqualValues(t, 4, attempts.Load())
 }
 
+// TestGet408RetriesDoNotConsumeThe5xxBudget pins the two retry budgets as
+// independent. A degraded Koios window mixes 408s with 502/503s, so if 408
+// retries were charged against koiosMaxRetries the first interleaved 5xx
+// would fail the whole request — defeating the 408 budget after roughly a
+// minute of a window that can last an hour.
+func TestGet408RetriesDoNotConsumeThe5xxBudget(t *testing.T) {
+	t.Parallel()
+
+	var attempts atomic.Int32
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch attempts.Add(1) {
+			case 1, 2:
+				w.WriteHeader(http.StatusRequestTimeout)
+			case 3:
+				w.WriteHeader(http.StatusServiceUnavailable)
+			default:
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`[{"epoch_no":1}]`))
+			}
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClientFast408(srv.URL, 16)
+	resp, err := k.get(context.Background(), "/tip", -1, -1)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.EqualValues(t, 4, attempts.Load())
+}
+
 // TestGetDoesNotRetryOn404 guards the fix's boundary: a genuinely permanent
 // status must still fail immediately with no retry, unaffected by 408
 // getting its own budget.
@@ -588,6 +619,38 @@ func TestPostFailsAfterExhausting408RetriesReturnsPermanent(t *testing.T) {
 	)
 	require.Error(t, err)
 	require.True(t, errors.Is(err, ErrKoiosPermanent))
+	require.EqualValues(t, 4, attempts.Load())
+}
+
+// TestPost408RetriesDoNotConsumeThe5xxBudget mirrors
+// TestGet408RetriesDoNotConsumeThe5xxBudget for post().
+func TestPost408RetriesDoNotConsumeThe5xxBudget(t *testing.T) {
+	t.Parallel()
+
+	var attempts atomic.Int32
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch attempts.Add(1) {
+			case 1, 2:
+				w.WriteHeader(http.StatusRequestTimeout)
+			case 3:
+				w.WriteHeader(http.StatusServiceUnavailable)
+			default:
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`[{"stake_address":"stake1x"}]`))
+			}
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClientFast408(srv.URL, 16)
+	resp, err := k.post(
+		context.Background(),
+		"/account_reward_history",
+		map[string]any{"_stake_addresses": []string{"stake1x"}},
+	)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.EqualValues(t, 4, attempts.Load())
 }
 
