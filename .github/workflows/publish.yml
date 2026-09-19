@@ -103,9 +103,19 @@ jobs:
       - name: config-parity
         run: make config-parity
 
-  # Stage 1, alongside lint. Not a dependency of anything: a new advisory
-  # landing upstream must not block publication while it is triaged. It still
-  # fails the run.
+  # Stage 1, alongside lint. Unlike go-test.yml's copy, this one gates
+  # create-draft-release below.
+  #
+  # That is a restored gate, not a new one. `make govulncheck` used to be the
+  # last step of the `ci` job and create-draft-release needed `[ci]`, so a
+  # reachable vulnerability blocked a release. Splitting those steps into
+  # separate jobs dropped the dependency along with the job, which would have
+  # let a tag publish binaries and a GitHub release while govulncheck was
+  # failing.
+  #
+  # It still does not gate the main-push path. The `ci` job was tag-only, so
+  # main never had this gate, and a new advisory landing upstream must not
+  # block every merge in the repository while it is triaged.
   govulncheck:
     name: govulncheck
     runs-on: ubuntu-latest
@@ -382,6 +392,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs:
+      - govulncheck
       - go-test-linux
       - go-test-linux-race
       - go-test-windows

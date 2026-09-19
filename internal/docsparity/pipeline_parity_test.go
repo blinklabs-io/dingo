@@ -194,13 +194,49 @@ func TestPipelineStagesAreOrdered(t *testing.T) {
 	}
 }
 
-// buildGates names, for each build job, the test job for its own runner OS.
+// TestReleaseGatesOnGovulncheck checks that a tag cannot publish while
+// govulncheck is failing.
+//
+// This was lost once already. `make govulncheck` was the last step of
+// publish.yml's `ci` job and create-draft-release needed `[ci]`, so the gate
+// was implicit in the job boundary. Splitting those steps into separate jobs
+// dropped it, and nothing failed, because a missing edge in a dependency graph
+// looks exactly like a graph that never had one.
+//
+// go-test.yml is deliberately not checked here. Its govulncheck job gates
+// nothing, so a new upstream advisory fails the run without blocking every
+// merge in the repository while it is triaged.
+func TestReleaseGatesOnGovulncheck(t *testing.T) {
+	root := repoRoot(t)
+	jobs := pipelineJobs(t, root, publishPipeline)
+
+	job, ok := jobs["create-draft-release"]
+	if !ok {
+		t.Fatalf("%s has no create-draft-release job", publishPipeline)
+	}
+	needs := jobNeeds(t, publishPipeline, "create-draft-release", job)
+	if !contains(needs, "govulncheck") {
+		t.Errorf(
+			"%s: create-draft-release does not need govulncheck; a tag could "+
+				"upload binaries and publish a release with a reachable "+
+				"vulnerability",
+			publishPipeline,
+		)
+	}
+}
+
+// buildGates names, for each build job, every test job for its own runner OS.
 // Gating a build on its own platform and no other is what lets the Linux
 // binaries start while the Windows suite is still running.
-var buildGates = map[string]string{
-	"build-linux":   "go-test-linux",
-	"build-windows": "go-test-windows",
-	"build-macos":   "go-test-macos",
+//
+// Linux has two suites and a build must wait for both. Naming only one would
+// leave the other free to be dropped from the build's dependencies with this
+// check still green, which is exactly the hole that would let build-linux run
+// without the race suite.
+var buildGates = map[string][]string{
+	"build-linux":   {"go-test-linux", "go-test-linux-race"},
+	"build-windows": {"go-test-windows"},
+	"build-macos":   {"go-test-macos"},
 }
 
 // otherPlatformTests are the test jobs a given build job must NOT depend on.
@@ -229,14 +265,16 @@ func TestBuildsGateOnTheirOwnPlatform(t *testing.T) {
 			}
 			needs := jobNeeds(t, workflow, build, job)
 
-			if !contains(needs, buildGates[build]) {
-				t.Errorf(
-					"%s: %s does not need %s; a build must not start until "+
-						"its own platform's tests pass",
-					workflow,
-					build,
-					buildGates[build],
-				)
+			for _, gate := range buildGates[build] {
+				if !contains(needs, gate) {
+					t.Errorf(
+						"%s: %s does not need %s; a build must not start "+
+							"until every suite for its own platform passes",
+						workflow,
+						build,
+						gate,
+					)
+				}
 			}
 			for _, foreign := range otherPlatformTests[build] {
 				if contains(needs, foreign) {
@@ -262,23 +300,43 @@ func TestBuildsGateOnTheirOwnPlatform(t *testing.T) {
 func TestPipelineTriggersDoNotOverlap(t *testing.T) {
 	root := repoRoot(t)
 
-	pr := workflowTriggers(t, root, prPipeline)
-	published := workflowTriggers(t, root, publishPipeline)
-
-	if _, ok := pr["push"]; ok {
-		t.Errorf(
-			"%s triggers on push; pushes to main and to a tag belong to %s "+
-				"alone, or a merge runs both pipelines",
-			prPipeline,
-			publishPipeline,
-		)
+	// The complete allowlist per pipeline, not a list of events to reject.
+	// Rejecting named events only would pass an addition nobody thought of:
+	// pull_request_target on publish.yml would start both pipelines for one
+	// pull request, and would do it with a writable token against unreviewed
+	// code.
+	allowed := map[string][]string{
+		prPipeline:      {"pull_request", "workflow_dispatch"},
+		publishPipeline: {"push"},
 	}
-	if _, ok := published["pull_request"]; ok {
-		t.Errorf(
-			"%s triggers on pull_request; pull requests belong to %s alone",
-			publishPipeline,
-			prPipeline,
-		)
+
+	for _, workflow := range []string{prPipeline, publishPipeline} {
+		want := make(map[string]struct{}, len(allowed[workflow]))
+		for _, event := range allowed[workflow] {
+			want[event] = struct{}{}
+		}
+
+		got := workflowTriggers(t, root, workflow)
+		for event := range got {
+			if _, ok := want[event]; !ok {
+				t.Errorf(
+					"%s triggers on %s, which is not in its allowlist %v; "+
+						"exactly one pipeline may run for any given event",
+					workflow,
+					event,
+					allowed[workflow],
+				)
+			}
+		}
+		for event := range want {
+			if _, ok := got[event]; !ok {
+				t.Errorf(
+					"%s no longer triggers on %s",
+					workflow,
+					event,
+				)
+			}
+		}
 	}
 }
 
@@ -333,7 +391,7 @@ func contains(values []string, want string) bool {
 	return false
 }
 
-func sortedKeys(m map[string]string) []string {
+func sortedKeys(m map[string][]string) []string {
 	out := make([]string, 0, len(m))
 	for key := range m {
 		out = append(out, key)
