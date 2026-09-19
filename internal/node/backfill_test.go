@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -61,6 +62,21 @@ func newFileTestDB(t *testing.T) *database.Database {
 		dbtest.CloseDatabase(db) //nolint:errcheck
 	})
 	return db
+}
+
+func addValidBackfillBlocks(t *testing.T, db *database.Database, count int) {
+	t.Helper()
+	blocks, err := testfixtures.GenerateConwayChainAt(1, 0, count)
+	require.NoError(t, err)
+	for _, block := range blocks {
+		require.NoError(t, db.BlockCreate(models.Block{
+			Slot:   block.SlotNumber(),
+			Hash:   block.Hash().Bytes(),
+			Number: block.BlockNumber(),
+			Cbor:   block.Cbor(),
+			Type:   uint(block.Type()),
+		}, nil))
+	}
 }
 
 func TestBackfillProcessBlockGovernanceRenewsDRepFromCertificateOnly(
@@ -364,16 +380,7 @@ func TestRun_IncompleteCheckpointAtZeroStartsAtSlotZero(t *testing.T) {
 	}
 	require.NoError(t, db.Metadata().SetBackfillCheckpoint(cp, nil))
 
-	for _, slot := range []uint64{0, 1} {
-		hash := make([]byte, 32)
-		hash[0] = byte(slot + 1)
-		require.NoError(t, db.BlockCreate(models.Block{
-			Slot: slot,
-			Hash: hash,
-			Cbor: []byte{0x82, 0x01},
-			Type: 1,
-		}, nil))
-	}
+	addValidBackfillBlocks(t, db, 2)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	bf := NewBackfill(db, nil, logger)
@@ -401,16 +408,7 @@ func TestRun_EndSlotLeavesLaterBlocksForLedgerReplay(t *testing.T) {
 		},
 		nil,
 	))
-	for _, slot := range []uint64{0, 1, 2} {
-		hash := make([]byte, 32)
-		hash[0] = byte(slot + 1)
-		require.NoError(t, db.BlockCreate(models.Block{
-			Slot: slot,
-			Hash: hash,
-			Cbor: []byte{0x82, 0x01},
-			Type: 1,
-		}, nil))
-	}
+	addValidBackfillBlocks(t, db, 3)
 
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))
@@ -426,7 +424,6 @@ func TestRun_EndSlotLeavesLaterBlocksForLedgerReplay(t *testing.T) {
 	require.True(t, checkpoint.Completed)
 	require.Equal(t, uint64(1), checkpoint.LastSlot)
 	require.Equal(t, uint64(1), checkpoint.TotalSlots)
-	require.Contains(t, logs.String(), `"slot":0`)
 	require.Contains(t, logs.String(), `"slot":1`)
 	require.NotContains(t, logs.String(), `"slot":2`)
 }
@@ -449,16 +446,7 @@ func TestRun_EmitsFinalProgressForShortRun(t *testing.T) {
 	}
 	require.NoError(t, db.Metadata().SetBackfillCheckpoint(cp, nil))
 
-	for _, slot := range []uint64{0, 1} {
-		hash := make([]byte, 32)
-		hash[0] = byte(slot + 1)
-		require.NoError(t, db.BlockCreate(models.Block{
-			Slot: slot,
-			Hash: hash,
-			Cbor: []byte{0x82, 0x01},
-			Type: 1,
-		}, nil))
-	}
+	addValidBackfillBlocks(t, db, 2)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	bf := NewBackfill(db, nil, logger)
@@ -473,15 +461,7 @@ func TestRun_EmitsFinalProgressForShortRun(t *testing.T) {
 	assert.Equal(t, uint64(2), progress[0].Stats.Blocks)
 }
 
-// TestRun_IncompleteCheckpointAtZeroVisitsSlotZero proves the iterator
-// actually starts at slot 0 (rather than LastSlot+1 = 1). Asserting only
-// the final cp.LastSlot is too weak: it's left at 1 in both the correct
-// resume-from-zero case and the buggy skip-slot-zero case. We verify
-// directly by feeding intentionally-unparseable CBOR for both blocks and
-// observing the per-block "skipping unparseable block" log line for
-// slot 0 — that log fires from inside the iteration loop and so only
-// emits when the iterator visits that slot.
-func TestRun_IncompleteCheckpointAtZeroVisitsSlotZero(t *testing.T) {
+func TestRun_MalformedBlockDoesNotAdvanceCheckpoint(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
@@ -497,39 +477,27 @@ func TestRun_IncompleteCheckpointAtZeroVisitsSlotZero(t *testing.T) {
 	}
 	require.NoError(t, db.Metadata().SetBackfillCheckpoint(cp, nil))
 
-	for _, slot := range []uint64{0, 1} {
-		hash := make([]byte, 32)
-		hash[0] = byte(slot + 1)
-		require.NoError(t, db.BlockCreate(models.Block{
-			Slot: slot,
-			Hash: hash,
-			Cbor: []byte{0x82, 0x01},
-			Type: 1,
-		}, nil))
-	}
+	hash := make([]byte, 32)
+	hash[0] = 1
+	require.NoError(t, db.BlockCreate(models.Block{
+		Slot: 1,
+		Hash: hash,
+		Cbor: []byte{0x82, 0x01},
+		Type: 1,
+	}, nil))
 
-	var logs bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	}))
-	bf := NewBackfill(db, nil, logger)
+	bf := NewBackfill(db, nil, slog.Default())
+	err := bf.Run(context.Background())
+	require.ErrorContains(t, err, "parsing block at slot 1")
 
-	require.NoError(t, bf.Run(context.Background()))
-
-	// One unparseable-block warning per visited slot proves the
-	// iterator's slot boundary directly. Both must appear; missing
-	// slot 0 means resume started at 1 and silently skipped the
-	// first block.
-	output := logs.String()
-	assert.Contains(t, output, `"msg":"skipping unparseable block"`)
-	assert.Contains(
-		t,
-		output,
-		`"slot":0`,
-		"iterator must visit slot 0 when resuming from a checkpoint with LastSlot=0",
+	checkpoint, err := db.Metadata().GetBackfillCheckpoint(
+		BackfillPhase,
+		nil,
 	)
-	assert.Contains(t, output, `"slot":1`,
-		"iterator must also visit slot 1")
+	require.NoError(t, err)
+	require.NotNil(t, checkpoint)
+	assert.Equal(t, uint64(0), checkpoint.LastSlot)
+	assert.False(t, checkpoint.Completed)
 }
 
 // TestBackfill_AutoDetectsImmutableUtxoOffsetsTip ensures that without an
