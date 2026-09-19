@@ -828,6 +828,18 @@ watcher is the backstop if an evicted entry is no longer present in the map.
 The `cardano_node_metrics_connectionManager_ntcRejectedConns_total` counter
 records rejections with `total_limit` or `per_ip_limit` as its `reason` label.
 
+LocalTxSubmission preserves typed CBOR rejection reasons. Untyped Conway
+failures use the ledger's `ConwayMempoolFailure` constructor; Dijkstra uses its
+separate MEMPOOL text constructor. Only an actual empty-input validation error
+is encoded as `InputSetEmpty`. The nested UTXOW payload carries its constructor
+directly, with the era in the outer hard-fork envelope. Dijkstra adds the
+MEMPOOL LedgerFailure and LEDGER UtxowFailure wrappers around that payload.
+Framing faults and node-side admission faults remain generic, non-ledger reject
+reasons; admission faults use a sanitized message rather than exposing mempool
+occupancy. An error without a supported era-specific representation terminates
+the connection through the protocol error path instead of fabricating a ledger
+failure. Clients must reconnect after that termination.
+
 ```mermaid
 graph TB
     subgraph "Peer Governor"
