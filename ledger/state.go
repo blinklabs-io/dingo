@@ -3764,12 +3764,6 @@ func (ls *LedgerState) rollbackWithOptions(
 		}
 		return &rollbackCommittedError{err: healErr}
 	}
-	if healErr := ls.healTruncateGapBlockNonces(context.Background()); healErr != nil {
-		if ls.config.FatalErrorFunc != nil {
-			ls.config.FatalErrorFunc(healErr)
-		}
-		return &rollbackCommittedError{err: healErr}
-	}
 	if publishResync && !sameTip {
 		ls.publishLocalLedgerRollback(point)
 	}
