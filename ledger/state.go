@@ -3519,10 +3519,18 @@ func (ls *LedgerState) rollbackWithResync(
 	// rollbacks from exposing an apparently stable even generation.
 	ls.rewardInputRollbackActive.Add(1)
 	ls.rewardInputGeneration.Add(1)
+	restartRewardPrecompute := false
 	defer func() {
 		ls.rewardInputGeneration.Add(1)
-		ls.rewardInputRollbackActive.Add(-1)
+		remaining := ls.rewardInputRollbackActive.Add(-1)
+		if restartRewardPrecompute && remaining == 0 {
+			ls.queueStartupRewardPrecompute()
+		}
 	}()
+	ls.rewardPrecomputeMu.Lock()
+	ls.rewardPrecomputePending = nil
+	ls.rewardPrecomputeRetry = nil
+	ls.rewardPrecomputeMu.Unlock()
 	// Track new tip value built during transaction
 	var newTip ochainsync.Tip
 	var newNonce []byte
@@ -3917,6 +3925,9 @@ func (ls *LedgerState) rollbackWithResync(
 	if floorErr != nil {
 		return &rollbackCommittedError{err: floorErr}
 	}
+	// Queue only after the surviving epoch and tip have been reloaded and
+	// the deferred generation update has made the inputs stable again.
+	restartRewardPrecompute = true
 	return nil
 }
 

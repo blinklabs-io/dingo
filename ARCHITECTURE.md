@@ -12102,7 +12102,15 @@ no distinct completion sentinel and is re-derived idempotently by the precompute
 and boundary paths instead of being short-circuited; that recomputation is
 deterministic and reproduces the same empty result, so it costs only redundant
 work, never correctness. A rollback or authoritative snapshot replacement
-therefore drops stale work and leaves the boundary path to recalculate. Pre-Babbage precomputation is deferred until applied block
+therefore drops stale work. Successful rollback also clears pending transitions
+and prefilter retries from the abandoned chain and queues the surviving epoch
+again after its tip, epoch state, and reward-input generation are restored.
+The replacement captures the applied tip, so a pre-Babbage round already past
+its prefilter slot does not defer back to the epoch's start. Prefilter retries
+carry their calculation's generation, preventing an old calculation from
+reinstalling a retry after rollback. Failed or no-op rollbacks do not queue a
+replacement; the boundary retains its authoritative fallback.
+Pre-Babbage precomputation is deferred until applied block
 progress reaches the RUPD prefilter slot, which queues a retry using the actual
 captured slot; later eras can precompute immediately.
 `LedgerState.Start` queues the same work once for the epoch already in progress

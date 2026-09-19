@@ -171,6 +171,7 @@ type stakeRewardApplication struct {
 type stakeRewardPrecomputeRetry struct {
 	epochEvent event.EpochTransitionEvent
 	cutoffSlot uint64
+	generation uint64
 }
 
 // reportSkips distinguishes the authoritative application from the
@@ -355,7 +356,9 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 			"captured_slot", capturedSlot,
 			"prefilter_slot", prefilterSlot,
 		)
-		ls.deferStakeRewardPrecompute(newEpoch, prefilterSlot)
+		ls.deferStakeRewardPrecompute(
+			newEpoch, prefilterSlot, rewardInputGeneration,
+		)
 		return nil, false, nil
 	}
 
@@ -1841,6 +1844,7 @@ func (ls *LedgerState) queueStartupRewardPrecomputeWith(
 ) {
 	ls.RLock()
 	epoch := ls.currentEpoch
+	capturedSlot := max(epoch.StartSlot, ls.currentTip.Point.Slot)
 	ls.RUnlock()
 	// An epoch with no length has not been established yet (fresh database),
 	// and queueRewardPrecompute drops an event without a nonce, so there is
@@ -1850,7 +1854,7 @@ func (ls *LedgerState) queueStartupRewardPrecomputeWith(
 	}
 	evt := event.EpochTransitionEvent{
 		NewEpoch:     epoch.EpochId,
-		BoundarySlot: epoch.StartSlot,
+		BoundarySlot: capturedSlot,
 		EpochNonce:   epoch.Nonce,
 	}
 	if epoch.EpochId > 0 {
@@ -1891,8 +1895,17 @@ func (ls *LedgerState) queueRewardPrecompute(
 	precompute func(event.EpochTransitionEvent) error,
 ) {
 	ls.rewardPrecomputeMu.Lock()
+	defer ls.rewardPrecomputeMu.Unlock()
+	ls.queueRewardPrecomputeLocked(epochEvent, precompute)
+}
+
+// The caller holds rewardPrecomputeMu so releasing a prefilter retry and
+// invalidating it during rollback cannot enqueue events in the wrong order.
+func (ls *LedgerState) queueRewardPrecomputeLocked(
+	epochEvent event.EpochTransitionEvent,
+	precompute func(event.EpochTransitionEvent) error,
+) {
 	if ls.closed.Load() {
-		ls.rewardPrecomputeMu.Unlock()
 		return
 	}
 	// Store an independent copy because EventBus callbacks do not own the
@@ -1900,12 +1913,10 @@ func (ls *LedgerState) queueRewardPrecompute(
 	epochEvent.EpochNonce = slices.Clone(epochEvent.EpochNonce)
 	ls.rewardPrecomputePending = &epochEvent
 	if ls.rewardPrecomputeRunning {
-		ls.rewardPrecomputeMu.Unlock()
 		return
 	}
 	ls.rewardPrecomputeRunning = true
 	ls.rewardPrecomputeWG.Add(1)
-	ls.rewardPrecomputeMu.Unlock()
 
 	go ls.runRewardPrecompute(precompute)
 }
@@ -1917,6 +1928,7 @@ func (ls *LedgerState) queueRewardPrecompute(
 func (ls *LedgerState) deferStakeRewardPrecompute(
 	newEpoch uint64,
 	cutoffSlot uint64,
+	generation uint64,
 ) {
 	if newEpoch == 0 {
 		return
@@ -1926,8 +1938,14 @@ func (ls *LedgerState) deferStakeRewardPrecompute(
 			NewEpoch: newEpoch - 1,
 		},
 		cutoffSlot: cutoffSlot,
+		generation: generation,
 	}
 	ls.rewardPrecomputeMu.Lock()
+	if ls.rewardInputRollbackActive.Load() != 0 ||
+		ls.rewardInputGeneration.Load() != generation {
+		ls.rewardPrecomputeMu.Unlock()
+		return
+	}
 	if ls.rewardPrecomputeRetry == nil ||
 		ls.rewardPrecomputeRetry.epochEvent.NewEpoch <= retry.epochEvent.NewEpoch {
 		ls.rewardPrecomputeRetry = retry
@@ -1946,16 +1964,19 @@ func (ls *LedgerState) maybeQueueStakeRewardPrecomputeRetry(
 	capturedSlot uint64,
 ) {
 	ls.rewardPrecomputeMu.Lock()
+	defer ls.rewardPrecomputeMu.Unlock()
 	retry := ls.rewardPrecomputeRetry
 	if retry == nil || capturedSlot < retry.cutoffSlot || ls.closed.Load() {
-		ls.rewardPrecomputeMu.Unlock()
 		return
 	}
 	ls.rewardPrecomputeRetry = nil
+	if ls.rewardInputRollbackActive.Load() != 0 ||
+		retry.generation != ls.rewardInputGeneration.Load() {
+		return
+	}
 	epochEvent := retry.epochEvent
 	epochEvent.BoundarySlot = capturedSlot
-	ls.rewardPrecomputeMu.Unlock()
-	ls.queueRewardPrecompute(
+	ls.queueRewardPrecomputeLocked(
 		epochEvent,
 		ls.precomputeStakeRewardsAfterEpochTransition,
 	)
