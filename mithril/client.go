@@ -719,7 +719,7 @@ func httpsOnlyRedirect(
 	if req.URL.Scheme != "https" {
 		return fmt.Errorf(
 			"redirect to non-HTTPS URL blocked: %s",
-			req.URL,
+			redactLocationURI(req.URL.String()),
 		)
 	}
 	return nil
@@ -739,13 +739,24 @@ func requireSecureURL(
 ) error {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
-		return fmt.Errorf("parsing %s %q: %w", label, rawURL, err)
+		return fmt.Errorf(
+			"parsing %s %q: malformed URL",
+			label,
+			redactLocationURI(rawURL),
+		)
 	}
 	if parsed.Hostname() == "" {
 		return fmt.Errorf(
 			"parsing %s %q: URL must include a host",
 			label,
-			rawURL,
+			redactLocationURI(rawURL),
+		)
+	}
+	if parsed.User != nil {
+		return fmt.Errorf(
+			"parsing %s %q: URL must not include userinfo",
+			label,
+			redactLocationURI(rawURL),
 		)
 	}
 	switch parsed.Scheme {
@@ -760,7 +771,7 @@ func requireSecureURL(
 		"%s %q must use https; set an explicit allow-insecure-http "+
 			"option for local development or tests",
 		label,
-		rawURL,
+		redactLocationURI(rawURL),
 	)
 }
 
@@ -1002,7 +1013,10 @@ func (c *Client) doGet(
 		req,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("executing request: %w", err)
+		return nil, fmt.Errorf(
+			"executing request: %w",
+			redactLocationError(err, reqURL),
+		)
 	}
 	if resp == nil || resp.Body == nil {
 		return nil, errors.New("nil response from server")

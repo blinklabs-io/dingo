@@ -21,11 +21,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -901,6 +903,11 @@ func TestRequireSecureURL(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "https URL with userinfo rejected",
+			rawURL:  "https://operator:secret@aggregator.example/aggregator",
+			wantErr: true,
+		},
+		{
 			name:              "https URL with no host rejected even with escape hatch",
 			rawURL:            "https:///aggregator",
 			allowInsecureHTTP: true,
@@ -918,6 +925,64 @@ func TestRequireSecureURL(t *testing.T) {
 				require.NoError(t, err)
 			}
 		})
+	}
+}
+
+func TestDoGetRedactsCredentialURLFromTransportError(t *testing.T) {
+	t.Parallel()
+
+	const credentialURL = "https://aggregator.example/aggregator/snapshots" +
+		"?token=query-secret&X-Amz-Signature=signature"
+	transportErr := errors.New("transport failure")
+	httpClient := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return nil, fmt.Errorf(
+				"request failed for %s: %w",
+				req.URL,
+				transportErr,
+			)
+		}),
+	}
+	client := NewClient(
+		"https://aggregator.example/aggregator",
+		WithHTTPClient(httpClient),
+	)
+
+	_, err := client.doGet(context.Background(), credentialURL)
+	require.Error(t, err)
+	require.ErrorIs(t, err, transportErr)
+	assert.Contains(
+		t,
+		err.Error(),
+		"https://aggregator.example/aggregator/snapshots",
+	)
+	for _, secret := range []string{
+		"token",
+		"query-secret",
+		"X-Amz-Signature",
+		"signature",
+	} {
+		assert.NotContains(t, err.Error(), secret)
+	}
+}
+
+func TestRequireSecureURLRedactsCredentialDiagnostics(t *testing.T) {
+	t.Parallel()
+
+	for _, rawURL := range []string{
+		"http://operator:super-secret@aggregator.example/aggregator" +
+			"?token=query-secret",
+		"::not a URL::?token=query-secret",
+	} {
+		err := requireSecureURL(rawURL, "test URL", false)
+		require.Error(t, err)
+		for _, secret := range []string{
+			"operator",
+			"super-secret",
+			"query-secret",
+		} {
+			require.NotContains(t, err.Error(), secret)
+		}
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -155,8 +156,10 @@ func TestDownloadSnapshotRoutineLogsAtDebug(t *testing.T) {
 
 	handler := &captureSlogHandler{}
 	logger := slog.New(handler)
+	credentialURL := server.URL +
+		"/snapshot.tar.zst?X-Amz-Credential=credential&X-Amz-Signature=signature"
 	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
-		URL:               server.URL + "/snapshot.tar.zst",
+		URL:               credentialURL,
 		AllowInsecureHTTP: true,
 		DestDir:           t.TempDir(),
 		Filename:          "snapshot.tar.zst",
@@ -176,10 +179,66 @@ func TestDownloadSnapshotRoutineLogsAtDebug(t *testing.T) {
 				continue
 			}
 			assert.Equal(t, slog.LevelDebug, record.Level, message)
+			if message == "downloading snapshot" {
+				foundURL := false
+				record.Attrs(func(attr slog.Attr) bool {
+					if attr.Key != "url" {
+						return true
+					}
+					foundURL = true
+					assert.Equal(
+						t,
+						server.URL+"/snapshot.tar.zst",
+						attr.Value.String(),
+					)
+					return true
+				})
+				require.True(t, foundURL, "download log is missing url")
+			}
 			found = true
 			break
 		}
 		require.True(t, found, "missing log record %q", message)
+	}
+}
+
+func TestDownloadSnapshotRedactsCredentialURLFromErrors(t *testing.T) {
+	t.Parallel()
+
+	const credentialURL = "https://download.example/" +
+		"snapshot.tar.zst?X-Amz-Credential=credential&X-Amz-Signature=signature"
+	transportErr := errors.New("transport failure")
+	client := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return nil, fmt.Errorf(
+				"request failed for %s: %w",
+				req.URL,
+				transportErr,
+			)
+		}),
+	}
+
+	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
+		URL:                 credentialURL,
+		DestDir:             t.TempDir(),
+		Filename:            "snapshot.tar.zst",
+		HTTPClient:          client,
+		MaxTransientRetries: -1,
+	})
+	require.Error(t, err)
+	require.ErrorIs(t, err, transportErr)
+	assert.Contains(
+		t,
+		err.Error(),
+		"https://download.example/snapshot.tar.zst",
+	)
+	for _, secret := range []string{
+		"X-Amz-Credential",
+		"credential",
+		"X-Amz-Signature",
+		"signature",
+	} {
+		assert.NotContains(t, err.Error(), secret)
 	}
 }
 

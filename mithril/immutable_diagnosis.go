@@ -191,3 +191,58 @@ func redactLocationURI(raw string) string {
 	}
 	return redacted.String()
 }
+
+// redactedErrorText preserves an error's unwrap chain while replacing its
+// printable form. This lets retry classification continue to reach network
+// errors without returning a credential-bearing URL to logs or callers.
+type redactedErrorText struct {
+	message string
+	cause   error
+}
+
+func (e *redactedErrorText) Error() string { return e.message }
+
+func (e *redactedErrorText) Unwrap() error { return e.cause }
+
+// redactLocationError copies the URL-bearing error returned by net/http and
+// removes query parameters and userinfo from both its URL field and any
+// repeated URL in the transport error text. The copy keeps errors.Is and
+// errors.As useful without mutating an error owned by the HTTP client.
+func redactLocationError(err error, rawLocation string) error {
+	if err == nil {
+		return nil
+	}
+	urlErr, ok := errors.AsType[*url.Error](err)
+	if !ok {
+		if rawLocation == "" {
+			return err
+		}
+		message := strings.ReplaceAll(
+			err.Error(),
+			rawLocation,
+			redactLocationURI(rawLocation),
+		)
+		if message != err.Error() {
+			return &redactedErrorText{message: message, cause: err}
+		}
+		return err
+	}
+	redacted := *urlErr
+	rawURL := redacted.URL
+	redacted.URL = redactLocationURI(rawURL)
+	redacted.Err = redactLocationError(redacted.Err, rawLocation)
+	if rawURL != "" && redacted.Err != nil {
+		message := strings.ReplaceAll(
+			redacted.Err.Error(),
+			rawURL,
+			redacted.URL,
+		)
+		if message != redacted.Err.Error() {
+			redacted.Err = &redactedErrorText{
+				message: message,
+				cause:   redacted.Err,
+			}
+		}
+	}
+	return &redacted
+}

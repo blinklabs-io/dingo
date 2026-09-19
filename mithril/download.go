@@ -821,7 +821,10 @@ func downloadSnapshotOnce(
 		) {
 			return "", fmt.Errorf("downloading snapshot: %w", cause)
 		}
-		return "", fmt.Errorf("downloading snapshot: %w", err)
+		return "", fmt.Errorf(
+			"downloading snapshot: %w",
+			redactLocationError(err, cfg.URL),
+		)
 	}
 	if resp == nil || resp.Body == nil {
 		return "", errors.New("nil response from download server")
@@ -924,7 +927,7 @@ func downloadSnapshotOnce(
 				}
 				return "", fmt.Errorf(
 					"restarting download: %w",
-					err,
+					redactLocationError(err, cfg.URL),
 				)
 			}
 			if resp2 == nil || resp2.Body == nil {
@@ -1053,7 +1056,7 @@ func downloadSnapshotOnce(
 	cfg.Logger.Debug(
 		"downloading snapshot",
 		"component", "mithril",
-		"url", cfg.URL,
+		"url", redactLocationURI(cfg.URL),
 		"total_bytes", totalSize,
 		"destination", destPath,
 	)
