@@ -8350,6 +8350,51 @@ second sync:
     bounded retry loop hammering both full Koios scans on every attempt would
     burn meaningfully more of the daily rate-limit/quota budget than the
     per-epoch fetch itself does.
+  - **Decoupled aggregate/account queues (dingo #4339).** Two independent
+    background goroutines, each with their own pending set and wake channel,
+    drain `Observer.pending`/`wake` (`run`, always started) and
+    `Observer.pendingAccounts`/`wakeAccounts` (`runAccounts`, started only
+    when `AccountsEnabled`). `run`/`processEpoch` only ever fetches pool and
+    epoch-aggregate reference data (`fetchIfNeeded` no longer touches
+    accounts) and calls `CheckEpoch` with `accountsEnabled=false`, regardless
+    of `ObserverConfig.AccountsEnabled`; `runAccounts`/`processAccountEpoch`
+    fetches per-account reference data (`fetchAccountsIfNeeded`, #3097) and
+    calls `CheckEpoch` with `accountsEnabled=true`. Before this split, a
+    single goroutine fetched pools+params+accounts and checked one epoch at a
+    time in strict ascending order, so one epoch's per-account fetch — on
+    Preview, thousands of chunked `/account_reward_history` requests against
+    the configured burst limit, observed at roughly 17 minutes/epoch — blocked
+    every later epoch's fast aggregate check from running at all: a strict-mode
+    reward-round defect at a later epoch could sit undetected for as long as
+    the account backlog took to drain, even though the aggregate comparison
+    that would have caught it takes on the order of 30-45 seconds. `HandleEpoch
+    TransitionEvent` and `seedBacklog` enqueue every epoch onto `pending`
+    unconditionally and onto `pendingAccounts` only when `AccountsEnabled`; an
+    epoch missing only per-account coverage (`GetEpochsMissingAccountCoverage`,
+    or `GetEpochsNeedingCheck`'s account-coverage-staleness clause) is queued
+    to `pendingAccounts` alone; the aggregate queue's own `GetEpochsNeedingCheck`
+    call for `seedBacklog` always passes `accountsEnabled=false`, so an epoch
+    whose pool/aggregate data is already fresh is never re-queued into `pending`
+    purely because its account coverage happens to be stale. An epoch with no
+    `koios_epoch_info` row at all is visible to `GetUncachedEpochs` alone —
+    `GetEpochsNeedingCheck` selects from that table and
+    `GetEpochsMissingAccountCoverage` requires a row in it — so `seedBacklog`
+    queues that result onto both sets when `AccountsEnabled`, without which
+    #3097's comparison would not run for any never-fetched epoch until a later
+    restart re-seeded it, which is the entire backlog on a bulk-syncing node.
+    Both goroutines share `fail`'s exactly-once `FatalFunc` dispatch, now an
+    atomic compare-and-swap on `fatalFired` rather than a plain bool, since
+    either goroutine's failure can fire it concurrently with the other's.
+    Because the account queue must not assume the aggregate queue has already
+    reached an epoch, `processAccountEpoch` calls `fetchIfNeeded` too; that
+    call is gated per epoch with `singleflight` (`Observer.aggFetch`), since
+    the cache-presence gates inside it only suppress a fetch that has already
+    finished and an epoch transition wakes both queues with the same epoch at
+    once — ungated, each queue resolves the pool universe and fetches
+    `/epoch_info`, `/epoch_params`, `/totals` and every chunked `/pool_history`
+    request independently, doubling the aggregate half of the Koios quota
+    budget. Keying per epoch rather than serializing all aggregate fetches
+    keeps the queues independent except on the epoch they share.
 - **Composition** (`node.go`, `node_koiosparity.go`, `node_shutdown.go`,
   `node_lifecycle.go`): `Node.Run()` configures `n.snapshotMgr` and installs
   both epoch-boundary reward-snapshot hooks (`SetEpochBoundarySnapshotStakeHook`/
