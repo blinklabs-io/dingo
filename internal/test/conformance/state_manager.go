@@ -1198,15 +1198,19 @@ func (m *DingoStateManager) recordVotesInGovState(tx common.Transaction) {
 // retirement epoch against the current epoch at read time -- so there is
 // nothing further to persist at the boundary itself.
 //
-// Ratification/enactment decisions are made by the same
-// vector-validated heuristic the harness has always used (see
-// ratifyProposals/enactProposal below), not by invoking the full
-// governance.ProcessEpoch orchestration: ProcessEpoch's real ratification
-// path performs stake-weighted DRep/SPO/committee tallying against the
-// database's live stake distribution, which synthetic per-vector seed data
-// isn't guaranteed to model with the fidelity that requires, and a
-// mismatch there would show up as vector regressions, not as an
-// isolated persistence gap. Enactment side effects that a ratified
+// Ratification/enactment decisions are made by ratifyProposals/enactProposal
+// below, not by invoking the full governance.ProcessEpoch orchestration.
+// Most action types still use the vector-validated vote-shape heuristic the
+// harness has always used; NoConfidence and UpdateCommittee are the
+// exception (see committeeActionRatified), deciding ratification with a
+// real stake-weighted DRep/SPO tally against the database's live stake
+// distribution via credentialVotingStake/GetControlledAmountByCredential.
+// The rest of ProcessEpoch's real orchestration -- committee/SPO/DRep
+// denominators computed once per epoch tick, parent-chain and per-purpose
+// bookkeeping -- is not invoked here, and synthetic per-vector seed data
+// isn't guaranteed to model that fidelity, so a mismatch there would show
+// up as vector regressions, not as an isolated persistence gap. Enactment
+// side effects that a ratified
 // proposal must apply (committee membership, protocol parameters,
 // constitution, treasury withdrawal) are instead persisted by calling the
 // real governance.EnactProposal directly against the already-persisted
@@ -1300,10 +1304,12 @@ func (m *DingoStateManager) pruneCommitteeResignations() {
 	}
 }
 
-// ratifyProposals performs the harness's simplified proposal ratification
-// (unchanged decision logic -- see the ProcessEpochBoundary doc comment for
-// why this isn't governance.ProcessEpoch's stake-weighted tally), and
-// persists each ratification decision to the real backend row.
+// ratifyProposals performs the harness's proposal ratification -- a
+// vote-shape heuristic for most action types, a real stake-weighted DRep/SPO
+// tally for NoConfidence/UpdateCommittee (see committeeActionRatified and
+// the ProcessEpochBoundary doc comment for why this still isn't
+// governance.ProcessEpoch's full orchestration) -- and persists each
+// ratification decision to the real backend row.
 func (m *DingoStateManager) ratifyProposals(
 	txn *database.Txn,
 	currentEpoch uint64,
@@ -1329,37 +1335,75 @@ func (m *DingoStateManager) ratifyProposals(
 			continue
 		}
 
-		if len(proposal.Votes) == 0 {
-			continue
-		}
-
-		voterTypesWithYes := make(map[uint8]bool)
-		for voterKey, voteValue := range proposal.Votes {
-			if voteValue != 1 {
+		var meetsRequirements bool
+		if proposal.ActionType == common.GovActionTypeNoConfidence ||
+			proposal.ActionType == common.GovActionTypeUpdateCommittee {
+			// cardano-ledger's votingCommitteeThresholdInternal returns
+			// NoVotingAllowed for the committee on both of these action
+			// types, so a hasCC requirement here means the harness would
+			// never ratify either. Vote *shape* also cannot replace a real
+			// tally: a vector can carry the same yes-voter shape (one DRep,
+			// one SPO) as another vector that must NOT ratify once active
+			// proposal deposits are counted as part of the depositor's
+			// active voting stake (CIP-1694). See issue #4007.
+			//
+			// This must run before the zero-explicit-vote guard below: a
+			// DRep or silent pool delegated AlwaysNoConfidence casts an
+			// automatic yes on a NoConfidence action without ever appearing
+			// in proposal.Votes (see drepStakeForCommitteeAction/
+			// spoStakeForCommitteeAction), so a proposal backed only by that
+			// implicit vote must still reach committeeActionRatified.
+			var err error
+			meetsRequirements, err = m.committeeActionRatified(
+				txn, proposal, currentEpoch,
+			)
+			if err != nil {
+				return fmt.Errorf(
+					"evaluate committee-action ratification for %s: %w",
+					id, err,
+				)
+			}
+		} else {
+			if len(proposal.Votes) == 0 {
 				continue
 			}
-			if len(voterKey) > 0 {
-				voterTypesWithYes[voterKey[0]-'0'] = true
+
+			voterTypesWithYes := make(map[uint8]bool)
+			for voterKey, voteValue := range proposal.Votes {
+				if voteValue != 1 {
+					continue
+				}
+				if len(voterKey) > 0 {
+					voterTypesWithYes[voterKey[0]-'0'] = true
+				}
 			}
-		}
 
-		hasCC := voterTypesWithYes[0] || voterTypesWithYes[1]
-		hasDRep := voterTypesWithYes[2] || voterTypesWithYes[3]
-		hasSPO := voterTypesWithYes[4] || voterTypesWithYes[5]
+			hasCC := voterTypesWithYes[0] || voterTypesWithYes[1]
+			hasDRep := voterTypesWithYes[2] || voterTypesWithYes[3]
+			hasSPO := voterTypesWithYes[4] || voterTypesWithYes[5]
 
-		var meetsRequirements bool
-		//exhaustive:ignore
-		switch proposal.ActionType {
-		case common.GovActionTypeNoConfidence,
-			common.GovActionTypeHardForkInitiation:
-			meetsRequirements = hasCC && hasDRep && hasSPO
-		case common.GovActionTypeUpdateCommittee,
-			common.GovActionTypeNewConstitution,
-			common.GovActionTypeParameterChange,
-			common.GovActionTypeTreasuryWithdrawal:
-			meetsRequirements = hasCC && hasDRep
-		default:
-			meetsRequirements = len(voterTypesWithYes) >= 2
+			//exhaustive:ignore
+			switch proposal.ActionType {
+			case common.GovActionTypeHardForkInitiation:
+				// Conway bootstrap explicitly admits HardForkInitiation
+				// alongside ParameterChange (ledger/governance's
+				// ShouldRatify), so no bootstrap gate applies to either of
+				// those two.
+				meetsRequirements = hasCC && hasDRep && hasSPO
+			case common.GovActionTypeParameterChange:
+				meetsRequirements = hasCC && hasDRep
+			case common.GovActionTypeNewConstitution,
+				common.GovActionTypeTreasuryWithdrawal:
+				// Unlike ParameterChange/HardForkInitiation, ShouldRatify
+				// refuses these two outright during Conway bootstrap
+				// regardless of votes. This heuristic path has no tally to
+				// hand ShouldRatify (see committeeActionRatified for the
+				// pair that does), so the bootstrap ineligibility has to be
+				// checked directly here.
+				meetsRequirements = hasCC && hasDRep && !m.inConwayBootstrap()
+			default:
+				meetsRequirements = len(voterTypesWithYes) >= 2
+			}
 		}
 
 		if !meetsRequirements {
@@ -1376,6 +1420,354 @@ func (m *DingoStateManager) ratifyProposals(
 		}
 	}
 	return nil
+}
+
+// inConwayBootstrap reports whether the active protocol parameters are at
+// Conway's bootstrap major version (common.ProtocolVersionConway, 9),
+// during which ledger/governance's ShouldRatify refuses several action
+// types (NoConfidence, UpdateCommittee, NewConstitution,
+// TreasuryWithdrawal, Info) outright, regardless of votes.
+func (m *DingoStateManager) inConwayBootstrap() bool {
+	conwayPP, ok := m.protocolParams.(*conway.ConwayProtocolParameters)
+	return ok && conwayPP.ProtocolVersion.Major == common.ProtocolVersionConway
+}
+
+// committeeActionRatified evaluates NoConfidence/UpdateCommittee
+// ratification with a real stake-weighted DRep/SPO tally: it builds a
+// deposit-inclusive governance.ProposalTally itself (reading UTxO stake from
+// the real backend via m.db, since this state manager -- unlike
+// MockStateManager -- has no in-memory UTxO set) and hands the actual
+// ratification decision to ledger/governance's real ShouldRatify. That keeps
+// threshold selection (MotionNoConfidence vs. CommitteeNormal/
+// CommitteeNoConfidence), the Conway bootstrap gate, and
+// committeeTermsWithinLimit under production's own tests instead of a second,
+// hand-maintained copy of each -- an earlier revision duplicated the
+// threshold selection and bootstrap gate here, and the duplication itself
+// went untested and drifted (see PR #4333 review history).
+//
+// The one thing this cannot delegate to ShouldRatify is the tally itself:
+// production's DRep voting-power query does not yet add a proposal's own
+// deposit to its return account's DRep voting power (CIP-1694 counts an
+// active proposal's deposit as part of the depositor's active voting stake).
+// That gap is tracked separately as issue #4355 -- it affects every
+// DRep-gated action type's real ratification, not just these two.
+func (m *DingoStateManager) committeeActionRatified(
+	txn *database.Txn,
+	proposal *conformance.ProposalState,
+	currentEpoch uint64,
+) (bool, error) {
+	conwayPP, ok := m.protocolParams.(*conway.ConwayProtocolParameters)
+	if !ok {
+		return false, fmt.Errorf(
+			"committee action ratification: protocol parameters are %T, want *conway.ConwayProtocolParameters",
+			m.protocolParams,
+		)
+	}
+
+	deposits := m.activeProposalDeposits(currentEpoch)
+	drepYes, drepTotal, err := m.drepStakeForCommitteeAction(
+		txn, proposal, deposits, currentEpoch,
+	)
+	if err != nil {
+		return false, err
+	}
+	spoYes, spoTotal, err := m.spoStakeForCommitteeAction(
+		txn, proposal, deposits,
+	)
+	if err != nil {
+		return false, err
+	}
+
+	committeeNoConfidence, err := m.committeeInNoConfidence(txn)
+	if err != nil {
+		return false, err
+	}
+
+	// ShouldRatify's UpdateCommittee branch requires a decoded GovAction to
+	// check committeeTermsWithinLimit; build one directly from the
+	// proposed-member expiries already tracked in-memory rather than
+	// round-tripping through CBOR. committeeTermsWithinLimit only reads
+	// CredEpochs' values, so the keys need only be distinct pointers.
+	var govAction common.GovAction
+	if proposal.ActionType == common.GovActionTypeUpdateCommittee {
+		govAction = syntheticUpdateCommitteeGovAction(proposal)
+	}
+
+	decision := governance.ShouldRatify(governance.RatifyInputs{
+		Tally: &governance.ProposalTally{
+			ActionType:     uint8(proposal.ActionType), //nolint:gosec // bounded by the small fixed set of GovActionType values
+			DRepYesStake:   drepYes,
+			DRepTotalStake: drepTotal,
+			SPOYesStake:    spoYes,
+			SPOTotalStake:  spoTotal,
+		},
+		PParams:               conwayPP,
+		GovAction:             govAction,
+		CurrentEpoch:          currentEpoch,
+		MajorVersion:          conwayPP.ProtocolVersion.Major,
+		CommitteeNoConfidence: committeeNoConfidence,
+	})
+	return decision.Ratified, nil
+}
+
+// committeeInNoConfidence reports whether the current committee-purpose root
+// (the most recently enacted NoConfidence/UpdateCommittee action) is itself
+// a NoConfidence action, mirroring ledger/governance's unexported
+// committeeNoConfidenceState. ShouldRatify uses this, not simply whether a
+// committee member is currently seated, to select CommitteeNormal vs.
+// CommitteeNoConfidence for an UpdateCommittee proposal.
+func (m *DingoStateManager) committeeInNoConfidence(
+	txn *database.Txn,
+) (bool, error) {
+	rootID := m.govState.Roots.ConstitutionalCommittee
+	if rootID == nil {
+		return false, nil
+	}
+	root, err := m.lookupGovernanceProposal(txn, *rootID)
+	if err != nil {
+		return false, err
+	}
+	if root == nil {
+		return false, nil
+	}
+	return common.GovActionType(root.ActionType) ==
+		common.GovActionTypeNoConfidence, nil
+}
+
+// syntheticUpdateCommitteeGovAction builds just enough of a
+// common.UpdateCommitteeGovAction for ShouldRatify's committeeTermsWithinLimit
+// check: that function only reads CredEpochs' values (each proposed member's
+// expiry epoch), never its keys. ProposedMembers is always a hash-only
+// projection of ProposedMembersByCredential (ouroboros-mock's
+// committeeMembersByHash only ever drops entries already covered by a full
+// credential identity, never adds ones absent from it), so
+// ProposedMembersByCredential alone is a complete source -- mirroring
+// initialCommitteeProposalCbor, which builds a real UpdateCommitteeGovAction
+// the same way for the CBOR-reconstruction path.
+func syntheticUpdateCommitteeGovAction(
+	proposal *conformance.ProposalState,
+) *common.UpdateCommitteeGovAction {
+	credEpochs := make(
+		map[*common.Credential]uint64,
+		len(proposal.ProposedMembersByCredential),
+	)
+	for credential, expiry := range proposal.ProposedMembersByCredential {
+		cred := credential.AsCredential()
+		credEpochs[&cred] = expiry
+	}
+	return &common.UpdateCommitteeGovAction{CredEpochs: credEpochs}
+}
+
+// activeProposalDeposits sums, per return-account credential, the deposits
+// of every proposal still active at currentEpoch. Per CIP-1694 an active
+// proposal's deposit counts as part of the depositor's active voting stake.
+func (m *DingoStateManager) activeProposalDeposits(
+	currentEpoch uint64,
+) map[mockledger.RewardAccountKey]uint64 {
+	deposits := make(map[mockledger.RewardAccountKey]uint64)
+	for _, proposal := range m.govState.Proposals {
+		if proposal == nil || proposal.ReturnAccount == nil ||
+			proposal.Deposit == 0 || currentEpoch > proposal.ExpiresAfter {
+			continue
+		}
+		deposits[*proposal.ReturnAccount] += proposal.Deposit
+	}
+	return deposits
+}
+
+// credentialVotingStake returns a stake credential's total voting stake:
+// its real, live UTxO stake (read from the backend, since this state
+// manager -- unlike MockStateManager -- has no in-memory UTxO set) plus its
+// reward balance plus any active-proposal deposits routed to it.
+func (m *DingoStateManager) credentialVotingStake(
+	txn *database.Txn,
+	credential mockledger.RewardAccountKey,
+	deposits map[mockledger.RewardAccountKey]uint64,
+) (uint64, error) {
+	tag := conformanceCredentialTag(credential.AsCredential())
+	utxoStake, err := m.db.GetControlledAmountByCredential(
+		tag, credential.Credential[:], txn,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return utxoStake +
+		m.govState.RewardAccountBalances[credential] +
+		deposits[credential], nil
+}
+
+// drepStakeForCommitteeAction tallies DRep-delegated yes/total stake for a
+// NoConfidence/UpdateCommittee proposal, for governance.ProposalTally's
+// DRepYesStake/DRepTotalStake (threshold comparison is ShouldRatify's job,
+// not this function's). AlwaysAbstain delegators are excluded entirely.
+// AlwaysNoConfidence delegators count toward the total always, and toward
+// yes too when the proposal itself is a NoConfidence action -- mirroring
+// production's tallyDRepVotes, which treats the AlwaysNoConfidence virtual
+// DRep as an automatic yes specifically on a NoConfidence action and an
+// automatic no otherwise. A credential-backed DRep must be active to count,
+// and an explicit Abstain vote on this proposal excludes its delegated
+// stake from the total.
+func (m *DingoStateManager) drepStakeForCommitteeAction(
+	txn *database.Txn,
+	proposal *conformance.ProposalState,
+	deposits map[mockledger.RewardAccountKey]uint64,
+	currentEpoch uint64,
+) (uint64, uint64, error) {
+	isNoConfidence := proposal.ActionType == common.GovActionTypeNoConfidence
+	yesStake := new(big.Int)
+	totalStake := new(big.Int)
+	for credential, delegation := range m.govState.DRepDelegationsByCredential {
+		switch delegation.Type {
+		case common.DrepTypeAbstain:
+			continue
+		case common.DrepTypeNoConfidence:
+			stake, err := m.credentialVotingStake(txn, credential, deposits)
+			if err != nil {
+				return 0, 0, err
+			}
+			stakeInt := new(big.Int).SetUint64(stake)
+			totalStake.Add(totalStake, stakeInt)
+			if isNoConfidence {
+				yesStake.Add(yesStake, stakeInt)
+			}
+		case common.DrepTypeAddrKeyHash, common.DrepTypeScriptHash:
+			if len(delegation.Credential) != common.Blake2b224Size {
+				continue
+			}
+			drepCredential := common.Credential{
+				CredType:   common.CredentialTypeAddrKeyHash,
+				Credential: common.NewBlake2b224(delegation.Credential),
+			}
+			voterType := common.VoterTypeDRepKeyHash
+			if delegation.Type == common.DrepTypeScriptHash {
+				drepCredential.CredType = common.CredentialTypeScriptHash
+				voterType = common.VoterTypeDRepScriptHash
+			}
+			if !m.govState.IsDRepCredentialActive(
+				drepCredential, currentEpoch,
+			) {
+				continue
+			}
+			stake, err := m.credentialVotingStake(txn, credential, deposits)
+			if err != nil {
+				return 0, 0, err
+			}
+			stakeInt := new(big.Int).SetUint64(stake)
+			vote, voted := proposal.Votes[fmt.Sprintf(
+				"%d:%s",
+				voterType,
+				hex.EncodeToString(drepCredential.Credential[:]),
+			)]
+			if voted && vote == 2 {
+				continue
+			}
+			totalStake.Add(totalStake, stakeInt)
+			if voted && vote == 1 {
+				yesStake.Add(yesStake, stakeInt)
+			}
+		}
+	}
+	yes, err := bigIntToUint64(yesStake, "drep yes stake")
+	if err != nil {
+		return 0, 0, err
+	}
+	total, err := bigIntToUint64(totalStake, "drep total stake")
+	if err != nil {
+		return 0, 0, err
+	}
+	return yes, total, nil
+}
+
+// spoStakeForCommitteeAction tallies pool-delegated yes/total stake for a
+// NoConfidence/UpdateCommittee proposal, for governance.ProposalTally's
+// SPOYesStake/SPOTotalStake. There is no Conway-bootstrap branch here:
+// ShouldRatify itself refuses both action types outright during bootstrap
+// before ever reading this tally, so a bootstrap-specific adjustment to the
+// tally would never run (an earlier revision carried one that PR #4333
+// review found was already dead code for exactly this reason). A silent
+// pool whose reward account delegates AlwaysAbstain is excluded; one that
+// delegates AlwaysNoConfidence counts as an implicit Yes when the proposal
+// is a NoConfidence action (an implicit No otherwise, same as production's
+// tallySPOVotes PoolRewardAccountAutoVoteNoConfidence handling); every other
+// silent pool counts as an implicit No.
+func (m *DingoStateManager) spoStakeForCommitteeAction(
+	txn *database.Txn,
+	proposal *conformance.ProposalState,
+	deposits map[mockledger.RewardAccountKey]uint64,
+) (uint64, uint64, error) {
+	poolStake := make(map[common.PoolKeyHash]*big.Int)
+	for credential, pool := range m.govState.PoolDelegationsByCredential {
+		if !m.govState.IsPoolRegistered(pool) {
+			continue
+		}
+		stake, err := m.credentialVotingStake(txn, credential, deposits)
+		if err != nil {
+			return 0, 0, err
+		}
+		if current, ok := poolStake[pool]; ok {
+			current.Add(current, new(big.Int).SetUint64(stake))
+		} else {
+			poolStake[pool] = new(big.Int).SetUint64(stake)
+		}
+	}
+
+	isNoConfidence := proposal.ActionType == common.GovActionTypeNoConfidence
+	yesStake := new(big.Int)
+	totalStake := new(big.Int)
+	for pool, stake := range poolStake {
+		vote, voted := proposal.Votes[fmt.Sprintf(
+			"%d:%s",
+			common.VoterTypeStakingPoolKeyHash,
+			hex.EncodeToString(pool[:]),
+		)]
+		if voted {
+			switch vote {
+			case 1:
+				yesStake.Add(yesStake, stake)
+				totalStake.Add(totalStake, stake)
+			case 0:
+				totalStake.Add(totalStake, stake)
+			}
+			continue
+		}
+		if rewardAccount, ok := m.govState.PoolRewardAccounts[pool]; ok {
+			if delegation, ok := m.govState.DRepDelegationsByCredential[rewardAccount]; ok {
+				switch delegation.Type {
+				case common.DrepTypeAbstain:
+					continue
+				case common.DrepTypeNoConfidence:
+					totalStake.Add(totalStake, stake)
+					if isNoConfidence {
+						yesStake.Add(yesStake, stake)
+					}
+					continue
+				}
+			}
+		}
+		totalStake.Add(totalStake, stake)
+	}
+	yes, err := bigIntToUint64(yesStake, "spo yes stake")
+	if err != nil {
+		return 0, 0, err
+	}
+	total, err := bigIntToUint64(totalStake, "spo total stake")
+	if err != nil {
+		return 0, 0, err
+	}
+	return yes, total, nil
+}
+
+// bigIntToUint64 converts a non-negative stake total to uint64, failing
+// closed instead of silently truncating if it ever somehow exceeds uint64
+// range (real ADA amounts never approach this bound).
+func bigIntToUint64(v *big.Int, name string) (uint64, error) {
+	if !v.IsUint64() {
+		return 0, fmt.Errorf(
+			"committee action ratification: %s overflows uint64: %s",
+			name, v.String(),
+		)
+	}
+	return v.Uint64(), nil
 }
 
 // persistRatification sets the real governance_proposal row's ratification
