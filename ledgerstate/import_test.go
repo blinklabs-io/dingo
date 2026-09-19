@@ -1130,6 +1130,7 @@ func TestImportSnapShotsFallbackPoolsResolveCurrentEpoch(t *testing.T) {
 			MarginDen:     1,
 		}},
 		999,
+		nil,
 	))
 
 	// Now call persistImportedSnapshot for the current epoch,
@@ -1354,6 +1355,7 @@ func TestImportPoolsPreservesRewardAccountCredentialTag(t *testing.T) {
 			},
 		},
 		456,
+		nil,
 	))
 
 	pool, err := db.Metadata().GetPool(
@@ -1373,6 +1375,114 @@ func TestImportPoolsPreservesRewardAccountCredentialTag(t *testing.T) {
 		uint8(1),
 		pool.Registration[0].RewardAccountCredentialTag,
 	)
+}
+
+func TestImportPoolsWritesPendingRetirementForBothQueries(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	poolKeyHash := bytes.Repeat([]byte{0x61}, 28)
+	deposit := uint64(500_000_000)
+	cfg := ImportConfig{
+		Database: db,
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		State:    &RawLedgerState{Epoch: 650},
+	}
+	require.NoError(t, importPools(
+		context.Background(),
+		cfg,
+		[]ParsedPool{{
+			PoolKeyHash:   poolKeyHash,
+			VrfKeyHash:    bytes.Repeat([]byte{0x62}, 32),
+			RewardAccount: bytes.Repeat([]byte{0x63}, 28),
+			Deposit:       deposit,
+		}},
+		10,
+		map[uint64][][]byte{656: {poolKeyHash}},
+	))
+
+	retiring, err := db.Metadata().GetRetiringPools(650, nil)
+	require.NoError(t, err)
+	require.Len(t, retiring, 1)
+	require.Equal(t, poolKeyHash, retiring[0].PoolKeyHash)
+	require.Equal(t, uint64(656), retiring[0].Epoch)
+
+	refunds, err := db.GetPoolsRetiringAtEpoch(656, 11, nil)
+	require.NoError(t, err)
+	require.Len(t, refunds, 1)
+	require.Equal(t, poolKeyHash, refunds[0].PoolKeyHash)
+	require.Equal(t, deposit, uint64(refunds[0].DepositHeld))
+}
+
+func TestImportPoolsRejectsUnmatchedRetirementBeforeWritingRows(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	poolKeyHash := bytes.Repeat([]byte{0x64}, 28)
+	missingKeyHash := bytes.Repeat([]byte{0x65}, 28)
+	cfg := ImportConfig{
+		Database: db,
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		State:    &RawLedgerState{Epoch: 650},
+	}
+	err = importPools(
+		context.Background(),
+		cfg,
+		[]ParsedPool{{
+			PoolKeyHash: poolKeyHash,
+			VrfKeyHash:  bytes.Repeat([]byte{0x66}, 32),
+		}},
+		10,
+		map[uint64][][]byte{
+			656: {poolKeyHash},
+			657: {missingKeyHash},
+		},
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not found in the pool table")
+
+	retiring, err := db.Metadata().GetRetiringPools(650, nil)
+	require.NoError(t, err)
+	require.Empty(t, retiring)
+	refunds, err := db.GetPoolsRetiringAtEpoch(656, 11, nil)
+	require.NoError(t, err)
+	require.Empty(t, refunds)
+}
+
+func TestImportPoolsRejectsPastPendingRetirement(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	poolKeyHash := bytes.Repeat([]byte{0x67}, 28)
+	cfg := ImportConfig{
+		Database: db,
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		State:    &RawLedgerState{Epoch: 650},
+	}
+	err = importPools(
+		context.Background(),
+		cfg,
+		[]ParsedPool{{
+			PoolKeyHash: poolKeyHash,
+			VrfKeyHash:  bytes.Repeat([]byte{0x68}, 32),
+		}},
+		10,
+		map[uint64][][]byte{3: {poolKeyHash}},
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not after snapshot epoch")
+	retiring, err := db.Metadata().GetRetiringPools(650, nil)
+	require.NoError(t, err)
+	require.Empty(t, retiring)
 }
 
 // TestIndefiniteUTxOMapPartialCommitIsSafeToRetry proves the cubic-dev-ai
