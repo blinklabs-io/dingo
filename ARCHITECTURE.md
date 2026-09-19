@@ -3416,8 +3416,8 @@ dependency across two points in the pipeline:
   hash is its pool id. `opCertFromHeader` extracts the opcert across the
   Shelley- and Babbage-family header layouts; `verifyOpCertColdSignature`
   verifies the cold-key signature over the raw cardano-ledger `OCertSignable`
-  bytes (not `gouroboros`' `ledger.VerifyOpCertSignature`, which hashes a CBOR
-  array that does not match real opcerts), and `ledger.ValidateKesPeriod`
+  bytes by delegating to `gouroboros`' `ledger.VerifyOpCertSignature`, and
+  `ledger.ValidateKesPeriod`
   (against `maxKESEvolutions` from Shelley genesis) checks expiry. Running
   here rejects forged or expired opcerts before the block body is fetched.
   These checks now run unconditionally except for the same single
@@ -6122,6 +6122,15 @@ VRF and KES secret-key loads check permissions on the open file handle and
 reject group/other access on Unix or insecure DACL grants on Windows before
 reading the key. Operational certificates contain public data and remain
 exempt from the secret-key permission check.
+
+Both `PoolCredentials.ValidateOpCert` and `keystore.KeyStore.ValidateOpCert`
+verify the cold-key signature, not only that the loaded KES key matches the
+certificate's hot vkey. The cold vkey is what each derives its pool id from,
+so a certificate carrying an unrelated or corrupt cold vkey/signature pair
+would otherwise yield a pool id whose cold key never authorized that hot key.
+`keystore` delegates to the same `ledger.VerifyOpCertSignature` the inbound
+block-header path uses, so a certificate this node forges under is checked
+against the rule its peers apply to the resulting blocks.
 
 `PoolCredentials.LoadFromFiles` parses replacement files before taking the
 credential write lock, then atomically installs all key material and the opcert
