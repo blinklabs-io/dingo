@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -222,11 +223,12 @@ type Credential struct {
 
 // ParsedCertState holds the parsed delegation, pool, and DRep state.
 type ParsedCertState struct {
-	Accounts              []ParsedAccount
-	Pools                 []ParsedPool
-	DReps                 []ParsedDRep
-	CommitteeHotKeys      []ParsedCommitteeHotKey
-	CommitteeResignations []Credential
+	Accounts               []ParsedAccount
+	Pools                  []ParsedPool
+	PendingPoolRetirements map[uint64][][]byte
+	DReps                  []ParsedDRep
+	CommitteeHotKeys       []ParsedCommitteeHotKey
+	CommitteeResignations  []Credential
 }
 
 type ParsedCommitteeHotKey struct {
@@ -297,6 +299,11 @@ type ParsedPool struct {
 	MetadataUrl                string
 	MetadataHash               []byte // 32 bytes
 	Deposit                    uint64
+	// RetiringEpoch is the epoch this pool is scheduled to retire at, from
+	// the PState `retiring` map, or nil when no retirement is pending. The
+	// pool is still live: it keeps its deposit, earns rewards and leads
+	// slots until the boundary, so this only schedules the retirement.
+	RetiringEpoch *uint64
 	// LeiosKeyPublic and LeiosKeyPossessionProof are the pool's registered
 	// Dijkstra/Leios BLS voting key and its proof of possession, or nil when
 	// the snapshot's pool params carry no leiosKey field. Proof-of-possession
@@ -1033,6 +1040,7 @@ func importCertState(
 	if len(certState.Pools) > 0 {
 		if err := importPools(
 			ctx, cfg, certState.Pools, slot,
+			certState.PendingPoolRetirements,
 		); err != nil {
 			return 0, fmt.Errorf("importing pools: %w", err)
 		}
@@ -1190,6 +1198,7 @@ func importPools(
 	cfg ImportConfig,
 	pools []ParsedPool,
 	slot uint64,
+	retirements map[uint64][][]byte,
 ) error {
 	cfg.Logger.Info(
 		"importing pools",
@@ -1208,6 +1217,12 @@ func importPools(
 	}()
 
 	inBatch := 0
+	pendingRetirements := make(map[uint64][][]byte)
+	for epoch, keyHashes := range retirements {
+		pendingRetirements[epoch] = append(
+			pendingRetirements[epoch], slices.Clone(keyHashes)...,
+		)
+	}
 	for _, pool := range pools {
 		select {
 		case <-ctx.Done():
@@ -1215,6 +1230,14 @@ func importPools(
 				"pool import cancelled: %w", ctx.Err(),
 			)
 		default:
+		}
+
+		if retirements == nil && pool.RetiringEpoch != nil {
+			epoch := *pool.RetiringEpoch
+			pendingRetirements[epoch] = append(
+				pendingRetirements[epoch],
+				slices.Clone(pool.PoolKeyHash),
+			)
 		}
 
 		var margin *types.Rat
@@ -1314,6 +1337,139 @@ func importPools(
 		}
 		txn.Release()
 		txn = nil
+	}
+
+	return importPendingPoolRetirements(
+		ctx, cfg, pendingRetirements, slot,
+	)
+}
+
+// importPendingPoolRetirements records the retirements the snapshot has
+// already scheduled but not yet applied, from the PState `retiring` map.
+// It runs after every pool batch has committed because RetirePools resolves
+// each key hash against the pool table and so needs the registrations
+// written first.
+//
+// These pools are still live -- they keep their deposit, earn rewards and
+// lead slots until the retirement epoch -- so only the retirement row is
+// written here. Without it the node holds the deposit past the boundary
+// where the network refunds it to the pool's reward account, the two
+// ledgers then disagree about that account's balance, and the node rejects
+// the first block withdrawing from it.
+func importPendingPoolRetirements(
+	ctx context.Context,
+	cfg ImportConfig,
+	byEpoch map[uint64][][]byte,
+	slot uint64,
+) error {
+	if len(byEpoch) == 0 {
+		return nil
+	}
+
+	epochs := make([]uint64, 0, len(byEpoch))
+	for epoch := range byEpoch {
+		epochs = append(epochs, epoch)
+	}
+	slices.Sort(epochs)
+
+	store := cfg.Database.Metadata()
+	txn := cfg.Database.MetadataTxn(true)
+	defer txn.Release()
+	metaTxn := txn.Metadata()
+
+	total := 0
+	for _, epoch := range epochs {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf(
+				"pool retirement import cancelled: %w", ctx.Err(),
+			)
+		default:
+		}
+		keyHashes := byEpoch[epoch]
+		if cfg.State != nil && epoch <= cfg.State.Epoch {
+			return fmt.Errorf(
+				"pool retirement epoch %d is not after snapshot epoch %d",
+				epoch,
+				cfg.State.Epoch,
+			)
+		}
+		if err := assertPoolsImported(store, metaTxn, keyHashes); err != nil {
+			return fmt.Errorf(
+				"checking pools scheduled to retire at epoch %d: %w",
+				epoch,
+				err,
+			)
+		}
+		// The snapshot carries no certificate slot for a pending
+		// retirement, so the registrations' own added slot is reused.
+		// Cert ordering ties break on added_slot, which keeps these rows
+		// sorting with the rest of the import and behind any retirement
+		// certificate seen in a later live block.
+		if err := store.RetirePools(
+			metaTxn, keyHashes, epoch, slot,
+		); err != nil {
+			return fmt.Errorf(
+				"retiring pools scheduled for epoch %d: %w",
+				epoch,
+				err,
+			)
+		}
+		total += len(keyHashes)
+	}
+
+	if err := txn.Commit(); err != nil {
+		return fmt.Errorf(
+			"committing pool retirements: %w", err,
+		)
+	}
+	cfg.Logger.Info(
+		"imported pending pool retirements",
+		"component", "ledgerstate",
+		"pools", total,
+		"epochs", len(epochs),
+	)
+	return nil
+}
+
+// assertPoolsImported fails the import when a pool carrying a scheduled
+// retirement has no row in the pool table. RetirePools silently skips a key
+// hash it cannot resolve, which would reproduce the very gap these rows
+// exist to close, so the mismatch is surfaced instead of logged.
+func assertPoolsImported(
+	store metadata.MetadataStore,
+	metaTxn types.Txn,
+	keyHashes [][]byte,
+) error {
+	poolKeyHashSize := len(lcommon.PoolKeyHash{})
+	lookup := make([]lcommon.PoolKeyHash, 0, len(keyHashes))
+	for _, keyHash := range keyHashes {
+		if len(keyHash) != poolKeyHashSize {
+			return fmt.Errorf(
+				"malformed pool key hash %x (%d bytes, want %d)",
+				keyHash,
+				len(keyHash),
+				poolKeyHashSize,
+			)
+		}
+		var pkh lcommon.PoolKeyHash
+		copy(pkh[:], keyHash)
+		lookup = append(lookup, pkh)
+	}
+	existing, err := store.GetPools(lookup, metaTxn)
+	if err != nil {
+		return fmt.Errorf("loading pools: %w", err)
+	}
+	present := make(map[string]struct{}, len(existing))
+	for i := range existing {
+		present[string(existing[i].PoolKeyHash)] = struct{}{}
+	}
+	for _, keyHash := range keyHashes {
+		if _, ok := present[string(keyHash)]; !ok {
+			return fmt.Errorf(
+				"pool %x not found in the pool table", keyHash,
+			)
+		}
 	}
 	return nil
 }
@@ -1466,7 +1622,7 @@ func importSnapShots(
 					cfg.reconcileKeys.addPool(snapshotPools[i].PoolKeyHash)
 				}
 			}
-			if err := importPools(ctx, cfg, snapshotPools, slot); err != nil {
+			if err := importPools(ctx, cfg, snapshotPools, slot, nil); err != nil {
 				return fmt.Errorf(
 					"importing pools from snapshots: %w",
 					err,
@@ -2452,6 +2608,22 @@ func importOpCertCounters(
 		}
 		var poolKeyHash lcommon.PoolKeyHash
 		copy(poolKeyHash[:], poolKey)
+		// decodeOpCertCounters decodes the certified counter map at the
+		// reference's full uint64 width, independently of the header types
+		// the gouroboros pin declares, so this is the one write path into
+		// pool_opcert_sequence whose counters were never narrowed or checked
+		// against a chain rule first. Refuse an unrecordable counter here,
+		// naming the bound the way block application and forging name it,
+		// rather than letting it reach checkedInt64 and abort the import
+		// with a message that reports only that an unsigned SQL value
+		// exceeds int64.
+		if err := eras.ValidateOpCertPersistableCounter(sequence); err != nil {
+			return fmt.Errorf(
+				"storing certified opcert counter for pool %x: %w",
+				poolKeyHash,
+				err,
+			)
+		}
 		if err := store.UpdatePoolOpCertSequence(
 			poolKeyHash, sequence, slot, txn,
 		); err != nil {
@@ -2862,7 +3034,6 @@ func validateImportedRewardPParams(
 			currentEpoch,
 		)
 	}
-
 	store := cfg.Database.Metadata()
 	currentAvailable, err := importedPParamsAvailable(
 		store,
@@ -3167,12 +3338,48 @@ func importGovState(
 	if govState == nil {
 		return nil
 	}
+	if govState.CommitteeParseError != nil {
+		return fmt.Errorf(
+			"parsing imported committee: %w",
+			govState.CommitteeParseError,
+		)
+	}
+	if govState.PulsingStateParseError != nil {
+		return fmt.Errorf(
+			"parsing imported governance pulsing state: %w",
+			govState.PulsingStateParseError,
+		)
+	}
 	if err != nil {
 		// Non-fatal warnings from committee/proposals parsing
 		cfg.Logger.Warn(
 			"governance state parsed with warnings",
 			"component", "ledgerstate",
 			"error", err,
+		)
+	}
+	// cgsCommittee is the committee in force at the snapshot.
+	// RatifyState.rsEnactState is not a second copy of it: RATIFY folds
+	// every accepted action into rsEnactState via ENACT
+	// (cardano-ledger Conway/Rules/Ratify.hs, ratifyTransition), and
+	// ConwayEPOCH copies the result into cgsCommittee at the *next*
+	// boundary (Conway/Rules/Epoch.hs, "cgsCommitteeL .~ ensCommittee").
+	// Only NoConfidence and UpdateCommittee rewrite ensCommittee
+	// (Conway/Rules/Enact.hs), so the two views corroborate each other
+	// exactly when rsEnacted carries neither. A snapshot from an epoch
+	// that ratified a committee action is expected to disagree, and the
+	// importer records those actions as ratified below so the next
+	// boundary enacts them.
+	if govState.EnactCommitteeSet &&
+		!govState.EnactedCommitteeChange &&
+		!govState.EnactedActionTypesUnknown &&
+		!committeeStatesEqual(
+			govState.Committee, govState.CommitteeQuorum,
+			govState.EnactCommittee, govState.EnactCommitteeQuorum,
+		) {
+		return errors.New(
+			"governance committee disagrees between cgsCommittee " +
+				"and rsEnactState with no committee action in rsEnacted",
 		)
 	}
 
@@ -3448,6 +3655,63 @@ func importGovState(
 	return nil
 }
 
+// committeeStatesEqual compares two decoded views of the same
+// StrictMaybe (Committee era). The quorum carries the SNothing/SJust
+// distinction: parseCommittee returns a nil quorum only for SNothing, so
+// an absent committee and a seated committee with an empty member map do
+// not compare equal.
+func committeeStatesEqual(
+	left []ParsedCommitteeMember,
+	leftQuorum *cbor.Rat,
+	right []ParsedCommitteeMember,
+	rightQuorum *cbor.Rat,
+) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	leftKeys := committeeMemberKeys(left)
+	rightKeys := committeeMemberKeys(right)
+	for i := range leftKeys {
+		if leftKeys[i] != rightKeys[i] {
+			return false
+		}
+	}
+	if (leftQuorum == nil) != (rightQuorum == nil) {
+		return false
+	}
+	if leftQuorum == nil {
+		return true
+	}
+	if (leftQuorum.Rat == nil) != (rightQuorum.Rat == nil) {
+		return false
+	}
+	if leftQuorum.Rat == nil {
+		return true
+	}
+	return leftQuorum.Cmp(rightQuorum.Rat) == 0
+}
+
+// committeeMemberKeys renders each member as a sortable key and returns
+// them ordered, so the comparison does not depend on the order the CBOR
+// member map was decoded in.
+func committeeMemberKeys(members []ParsedCommitteeMember) []string {
+	keys := make([]string, 0, len(members))
+	for _, member := range members {
+		keys = append(keys, committeeMemberKey(member))
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func committeeMemberKey(member ParsedCommitteeMember) string {
+	return fmt.Sprintf(
+		"%d:%x:%d",
+		member.ColdCredential.Type,
+		member.ColdCredential.Hash,
+		member.ExpiresEpoch,
+	)
+}
+
 func persistImportedCommitteeCertificates(
 	db *database.Database,
 	certState *ParsedCertState,
@@ -3719,11 +3983,12 @@ func committeeRootActionType(noConfidence bool) uint8 {
 // need to depend on the gouroboros lcommon package — these match the
 // CIP-1694 GovActionType wire values.
 const (
-	govActionTypeParameterChange    uint8 = 0
-	govActionTypeHardForkInitiation uint8 = 1
-	govActionTypeNoConfidence       uint8 = 3
-	govActionTypeUpdateCommittee    uint8 = 4
-	govActionTypeNewConstitution    uint8 = 5
+	govActionTypeParameterChange     uint8 = 0
+	govActionTypeHardForkInitiation  uint8 = 1
+	govActionTypeTreasuryWithdrawals uint8 = 2
+	govActionTypeNoConfidence        uint8 = 3
+	govActionTypeUpdateCommittee     uint8 = 4
+	govActionTypeNewConstitution     uint8 = 5
 )
 
 func snapshotEpochAnchorSlot(

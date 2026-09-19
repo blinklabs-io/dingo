@@ -77,6 +77,8 @@ jobs:
           sudo ./aws/install --update
           aws --endpoint-url "$AWS_ENDPOINT" s3api create-bucket --bucket "$DINGO_TEST_S3_BUCKET"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
           go-version: 1.26.x
@@ -107,12 +109,12 @@ jobs:
           AWS_ENDPOINT: "http://127.0.0.1:9000/"
           AWS_REGION: us-east-1
           DINGO_TEST_S3_BUCKET: dingo-test
-        run: go test -tags dingo_extra_plugins -ldflags="-s -w" -timeout 30m ./...
+        run: go test -v -tags dingo_extra_plugins -ldflags="-s -w" -timeout 30m ./...
       - name: go-test-race
         # Optional service backends are deliberately unconfigured here. This
         # matches go-test.yml's race job while retaining a finite package-level
         # hang guard for the complete SQLite-backed race suite.
-        run: go test -tags dingo_extra_plugins -ldflags="-s -w" -race -timeout 30m ./...
+        run: go test -v -tags dingo_extra_plugins -ldflags="-s -w" -race -timeout 30m ./...
       - name: govulncheck
         run: make govulncheck
 
@@ -212,6 +214,8 @@ jobs:
       CGO_ENABLED: 0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
           go-version: ${{ matrix.go-version }}
@@ -231,7 +235,7 @@ jobs:
         # same link-size optimization and explicit package timeout used by the
         # Linux release validation job, and cap the job so a stuck test cannot
         # hold the release indefinitely.
-        run: go test -ldflags="-s -w" -timeout 20m ./...
+        run: go test -v -ldflags="-s -w" -timeout 20m ./...
 
   build-binaries:
     strategy:
@@ -271,6 +275,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
           go-version: 1.26.x
@@ -335,6 +340,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0 https://github.com/docker/setup-buildx-action/releases/tag/v4.3.0
       - name: Login to Docker Hub
@@ -487,6 +493,8 @@ jobs:
           done <<< "$IMAGE_TAGS"
       # Checkout repo so README.md is available for next step
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          persist-credentials: false
       # Update Docker Hub from README
       - name: Docker Hub Description
         uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa # v5.0.0 https://github.com/peter-evans/dockerhub-description/releases/tag/v5.0.0

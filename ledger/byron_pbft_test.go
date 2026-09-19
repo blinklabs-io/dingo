@@ -92,7 +92,7 @@ func newSignedByronPBFTBlock(
 	template models.Block,
 	protocolMagic uint32,
 	epoch uint64,
-	slot uint16,
+	slot uint64,
 	difficulty uint64,
 	previousHash lcommon.Blake2b256,
 	issuer byronPBFTTestKey,
@@ -134,7 +134,7 @@ func newSignedByronPBFTBlock(
 	epochSlot := struct {
 		cbor.StructAsArray
 		Epoch uint64
-		Slot  uint16
+		Slot  uint64
 	}{Epoch: epoch, Slot: slot}
 	chainDifficulty := struct {
 		cbor.StructAsArray
@@ -145,7 +145,7 @@ func newSignedByronPBFTBlock(
 		BlockVersion    byron.ByronBlockVersion
 		SoftwareVersion byron.ByronSoftwareVersion
 		Attributes      any
-		ExtraProof      lcommon.Blake2b256
+		ExtraProof      []byte
 	}{
 		BlockVersion:    header.ExtraData.BlockVersion,
 		SoftwareVersion: header.ExtraData.SoftwareVersion,
@@ -1014,4 +1014,239 @@ func TestValidateByronPBFTHeaderRejectsFutureEbb(t *testing.T) {
 
 	err := ls.validateByronPBFTHeaderCrypto(ebb)
 	require.ErrorContains(t, err, "current slot")
+}
+
+// newByronGenesisAnchorTestLedger builds a LedgerState wired to a fresh,
+// real *chain.Chain and a Byron genesis hash, for testing
+// validateByronPBFTHeaderCrypto's origin-anchor checks
+// (blinklabs-io/dingo#4399). The chain starts at origin unless the caller
+// adds blocks to it first.
+func newByronGenesisAnchorTestLedger(
+	t *testing.T,
+	genesisHash string,
+) (*LedgerState, *chain.Chain) {
+	t.Helper()
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	require.NoError(
+		t,
+		cm.SetLedger(testSecurityParamLedger{securityParam: 10}),
+	)
+	primaryChain := cm.PrimaryChain()
+
+	nodeConfig, err := cardano.NewCardanoNodeConfigFromEmbedFS(
+		cardano.EmbeddedConfigFS,
+		"mainnet/config.json",
+	)
+	require.NoError(t, err)
+	nodeConfig.ByronGenesisHash = genesisHash
+
+	ls := &LedgerState{
+		chain:  primaryChain,
+		config: LedgerStateConfig{CardanoNodeConfig: nodeConfig},
+	}
+	ls.slotClock = NewSlotClock(
+		newMockSlotTimeProvider(
+			time.Now().Add(-100*time.Second),
+			time.Second,
+			100,
+		),
+		DefaultSlotClockConfig(),
+	)
+	return ls, primaryChain
+}
+
+// TestValidateByronPBFTHeaderAcceptsGenesisAnchoredEbb is the
+// blinklabs-io/dingo#4399 positive case: at origin, an epoch-boundary block
+// whose previous hash matches the configured Byron genesis hash is accepted.
+func TestValidateByronPBFTHeaderAcceptsGenesisAnchoredEbb(t *testing.T) {
+	t.Parallel()
+
+	genesisHashValue := lcommon.Blake2b256Hash([]byte("configured genesis"))
+	ls, primaryChain := newByronGenesisAnchorTestLedger(
+		t,
+		genesisHashValue.String(),
+	)
+	require.Zero(t, primaryChain.Tip().Point.Slot)
+	require.Empty(t, primaryChain.Tip().Point.Hash)
+
+	ebb := &byron.ByronEpochBoundaryBlock{
+		BlockHeader: &byron.ByronEpochBoundaryBlockHeader{
+			PrevBlock: genesisHashValue,
+		},
+	}
+
+	require.NoError(t, ls.validateByronPBFTHeaderCrypto(ebb))
+}
+
+// TestValidateByronPBFTHeaderRejectsGenesisHashMismatch is the
+// blinklabs-io/dingo#4399 regression itself: at origin, an epoch-boundary
+// block whose previous hash does not match the configured Byron genesis
+// hash must be rejected, even though it is otherwise correctly placed and
+// sized. The reference rejects this with ChainValidationGenesisHashMismatch.
+func TestValidateByronPBFTHeaderRejectsGenesisHashMismatch(t *testing.T) {
+	t.Parallel()
+
+	genesisHash := lcommon.Blake2b256Hash([]byte("configured genesis")).
+		String()
+	ls, primaryChain := newByronGenesisAnchorTestLedger(t, genesisHash)
+	require.Zero(t, primaryChain.Tip().Point.Slot)
+	require.Empty(t, primaryChain.Tip().Point.Hash)
+
+	wrongPrevBlock := lcommon.Blake2b256Hash([]byte("wrong prev hash"))
+	ebb := &byron.ByronEpochBoundaryBlock{
+		BlockHeader: &byron.ByronEpochBoundaryBlockHeader{
+			PrevBlock: wrongPrevBlock,
+		},
+	}
+
+	err := ls.validateByronPBFTHeaderCrypto(ebb)
+	require.ErrorContains(t, err, "genesis hash")
+}
+
+// TestValidateByronPBFTHeaderRejectsNonZeroEpochEbbAtOrigin is a CodeRabbit
+// finding on PR #4445: an EBB's block number (Difficulty.Value) and slot
+// (derived from ConsensusData.Epoch) are independent fields.
+// chain.firstBlockNumberValid only constrains the former, and
+// validateByronPBFTCurrentSlot only rejects a future slot, not a past one.
+// Without the epoch-0 check, an EBB with Difficulty 0, PrevBlock equal to
+// the configured genesis hash, and any past nonzero epoch would pass every
+// other check here despite skipping every epoch before it -- the first EBB
+// of any Byron chain is always epoch 0, unconditionally.
+func TestValidateByronPBFTHeaderRejectsNonZeroEpochEbbAtOrigin(t *testing.T) {
+	t.Parallel()
+
+	genesisHashValue := lcommon.Blake2b256Hash([]byte("configured genesis"))
+	ls, primaryChain := newByronGenesisAnchorTestLedger(
+		t,
+		genesisHashValue.String(),
+	)
+	require.Zero(t, primaryChain.Tip().Point.Slot)
+	require.Empty(t, primaryChain.Tip().Point.Hash)
+	// Epoch 1 is slot 21600 (byron.ByronSlotsPerEpoch); push the mock clock's
+	// current slot well past that so this is a genuinely past epoch, not one
+	// that would incidentally also fail the future-slot check instead.
+	ls.slotClock = NewSlotClock(
+		newMockSlotTimeProvider(
+			time.Now().Add(-30000*time.Second),
+			time.Second,
+			100,
+		),
+		DefaultSlotClockConfig(),
+	)
+
+	ebb := &byron.ByronEpochBoundaryBlock{
+		BlockHeader: &byron.ByronEpochBoundaryBlockHeader{
+			PrevBlock: genesisHashValue,
+		},
+	}
+	ebb.BlockHeader.ConsensusData.Epoch = 1
+	ebb.BlockHeader.ConsensusData.Difficulty.Value = 0
+
+	err := ls.validateByronPBFTHeaderCrypto(ebb)
+	require.ErrorContains(t, err, "epoch 0")
+}
+
+// TestValidateByronPBFTHeaderRejectsMainBlockAtOrigin is the
+// blinklabs-io/dingo#4399 acceptance criterion that a PBFT-signed regular
+// Byron block must never be accepted as the first block of a from-genesis
+// chain, even one that (like the genuine first block) carries block number
+// and difficulty 0. Only an epoch-boundary block may open the chain. This
+// must be rejected before any PBFT signature verification runs -- the
+// header below carries no signature at all, and still must be rejected.
+func TestValidateByronPBFTHeaderRejectsMainBlockAtOrigin(t *testing.T) {
+	t.Parallel()
+
+	genesisHash := lcommon.Blake2b256Hash([]byte("configured genesis")).
+		String()
+	ls, primaryChain := newByronGenesisAnchorTestLedger(t, genesisHash)
+	require.Zero(t, primaryChain.Tip().Point.Slot)
+	require.Empty(t, primaryChain.Tip().Point.Hash)
+
+	mainBlock := &byron.ByronMainBlock{
+		BlockHeader: &byron.ByronMainBlockHeader{},
+	}
+
+	err := ls.validateByronPBFTHeaderCrypto(mainBlock)
+	require.ErrorContains(t, err, "epoch-boundary block")
+}
+
+// TestValidateByronPBFTHeaderSkipsGenesisAnchorAwayFromOrigin confirms the
+// anchor check is scoped to the chain's first block only. An epoch-boundary
+// block at a later epoch boundary chains onto the previous block, not
+// genesis, and a ledger started from a trusted snapshot or bulk import at a
+// non-origin point has the same shape: its primary chain tip is that
+// trusted point, not origin. Both must reach the ordinary current-slot
+// check unaffected by the genesis hash, matching pre-#4399 behavior.
+func TestValidateByronPBFTHeaderSkipsGenesisAnchorAwayFromOrigin(t *testing.T) {
+	t.Parallel()
+
+	genesisHash := lcommon.Blake2b256Hash([]byte("configured genesis")).
+		String()
+	ls, primaryChain := newByronGenesisAnchorTestLedger(t, genesisHash)
+	require.NoError(t, primaryChain.AddRawBlocks([]chain.RawBlock{
+		{
+			Slot:        0,
+			Hash:        bytes.Repeat([]byte{0xaa}, 32),
+			BlockNumber: 0,
+			Type:        gledger.BlockTypeByronEbb,
+			Cbor:        []byte{0x80},
+		},
+	}))
+	require.NotZero(t, primaryChain.Tip().Point.Hash)
+
+	// A prev hash that matches neither genesis nor the block just added:
+	// away from origin, neither should matter to this check.
+	wrongPrevBlock := lcommon.Blake2b256Hash([]byte("neither genesis nor tip"))
+	ebb := &byron.ByronEpochBoundaryBlock{
+		BlockHeader: &byron.ByronEpochBoundaryBlockHeader{
+			PrevBlock: wrongPrevBlock,
+		},
+	}
+	ebb.BlockHeader.ConsensusData.Epoch = 1
+
+	err := ls.validateByronPBFTHeaderCrypto(ebb)
+	require.ErrorContains(t, err, "current slot")
+	require.NotContains(t, err.Error(), "genesis hash")
+}
+
+// TestValidateByronPBFTHeaderAppliesGenesisAnchorAfterRollbackToOrigin is
+// the blinklabs-io/dingo#4399 acceptance criterion that the EBB-only
+// anchor rule applies identically after a rollback empties the chain back
+// to origin, not only on a chain that has never been touched.
+// chain.Chain.atOriginAfterMutation documents the equivalent chain-layer
+// distinction for the block-number half of this same anchor.
+func TestValidateByronPBFTHeaderAppliesGenesisAnchorAfterRollbackToOrigin(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	genesisHash := lcommon.Blake2b256Hash([]byte("configured genesis")).
+		String()
+	ls, primaryChain := newByronGenesisAnchorTestLedger(t, genesisHash)
+	require.NoError(t, primaryChain.AddRawBlocks([]chain.RawBlock{
+		{
+			Slot:        0,
+			Hash:        bytes.Repeat([]byte{0xaa}, 32),
+			BlockNumber: 0,
+			Type:        gledger.BlockTypeByronEbb,
+			Cbor:        []byte{0x80},
+		},
+	}))
+	require.NotZero(t, primaryChain.Tip().Point.Hash)
+
+	require.NoError(t, primaryChain.RollbackUnbounded(ocommon.Point{}))
+	require.Zero(t, primaryChain.Tip().Point.Slot)
+	require.Empty(t, primaryChain.Tip().Point.Hash)
+
+	wrongPrevBlock := lcommon.Blake2b256Hash([]byte("wrong prev hash"))
+	ebb := &byron.ByronEpochBoundaryBlock{
+		BlockHeader: &byron.ByronEpochBoundaryBlockHeader{
+			PrevBlock: wrongPrevBlock,
+		},
+	}
+
+	err := ls.validateByronPBFTHeaderCrypto(ebb)
+	require.ErrorContains(t, err, "genesis hash")
 }

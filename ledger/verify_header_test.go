@@ -21,6 +21,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
@@ -991,12 +992,22 @@ func newTestShelleyGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.05,
 		"securityParam": 432,
+		"slotLength": 1,
+		"epochLength": 432000,
 		"slotsPerKESPeriod": 129600,
 		"maxKESEvolutions": 62,
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
-	err := cfg.LoadShelleyGenesisFromReader(
+	byronGenesisJSON := `{
+		"blockVersionData": { "slotDuration": "20000" },
+		"protocolConsts": { "k": 432 }
+	}`
+	err := cfg.LoadByronGenesisFromReader(
+		strings.NewReader(byronGenesisJSON),
+	)
+	require.NoError(t, err)
+	err = cfg.LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),
 	)
 	require.NoError(t, err)
@@ -1074,6 +1085,7 @@ func TestVerifyBlockHeaderCrypto_RejectsBlockOutsideKnownEpochs(
 			{
 				EpochId:       0,
 				StartSlot:     0,
+				SlotLength:    1_000,
 				LengthInSlots: 1000,
 				Nonce:         []byte{0x01, 0x02, 0x03},
 			},
@@ -1094,7 +1106,7 @@ func TestVerifyBlockHeaderCrypto_RejectsBlockOutsideKnownEpochs(
 		err,
 		"block outside known epochs must be rejected, not skipped",
 	)
-	assert.Contains(t, err.Error(), "no epoch data for slot")
+	assert.Contains(t, err.Error(), "past era horizon")
 }
 
 func TestHeaderVerificationEpochRejectsPastForecastBeforeCacheAdvance(
@@ -1166,6 +1178,43 @@ func TestValidateBlockHeaderCryptoDoesNotAdvanceEpochCache(t *testing.T) {
 		"header-only validation must not advance the shared epoch cache")
 }
 
+// Cached epoch resolution bypasses forecasting, but must not bypass the
+// nonce-availability contract shared by crypto and state verification callers.
+func TestHeaderVerificationEpoch_CachedNonceWithoutForecastConfig(t *testing.T) {
+	t.Parallel()
+
+	for _, allowAdvance := range []bool{false, true} {
+		for _, tc := range []struct {
+			name  string
+			nonce []byte
+		}{
+			{name: "missing nonce"},
+			{name: "available nonce", nonce: bytes.Repeat([]byte{1}, 32)},
+		} {
+			t.Run(tc.name+fmt.Sprint("/advance=", allowAdvance), func(t *testing.T) {
+				t.Parallel()
+
+				ls := &LedgerState{
+					epochCache: []models.Epoch{{
+						EpochId: 5, StartSlot: 500, LengthInSlots: 100,
+						EraId: eras.BabbageEraDesc.Id, Nonce: tc.nonce,
+					}},
+				}
+				ls.publishSnapshotsLocked()
+				epoch, err := ls.headerVerificationEpoch(550, allowAdvance)
+				if len(tc.nonce) == 0 {
+					require.ErrorIs(t, err, errEpochNonceUnavailable,
+						"cached lookup must retain the nonce-availability contract")
+					return
+				}
+				require.NoError(t, err, "known epochs do not need forecast configuration")
+				assert.Equal(t, uint64(5), epoch.EpochId)
+				assert.Equal(t, tc.nonce, epoch.Nonce)
+			})
+		}
+	}
+}
+
 // TestVerifyBlockHeaderCrypto_RejectsBlockWithNoNonce verifies that a block
 // in an epoch that has no nonce (e.g., epoch rollover not yet processed)
 // is rejected.
@@ -1191,8 +1240,8 @@ func TestVerifyBlockHeaderCrypto_RejectsBlockWithNoNonce(t *testing.T) {
 	ls.publishSnapshotsLocked()
 	block := &mockBabbageBlock{slot: 500}
 	err := ls.verifyBlockHeaderCrypto(block)
-	assert.Error(t, err, "block with missing nonce must be rejected")
-	assert.Contains(t, err.Error(), "has no nonce")
+	require.ErrorIs(t, err, errEpochNonceUnavailable,
+		"missing nonce must be classified before downstream crypto checks")
 }
 
 // TestVerifyBlockHeaderCrypto_EpochBoundaryUsesCorrectNonce verifies that
@@ -1593,12 +1642,17 @@ func newHighFreqShelleyGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.99,
 		"securityParam": 432,
+		"slotLength": 1,
+		"epochLength": 432000,
 		"slotsPerKESPeriod": 129600,
 		"maxKESEvolutions": 62,
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
-	err := cfg.LoadShelleyGenesisFromReader(
+	byronGenesisJSON := `{"blockVersionData":{"slotDuration":"20000"},"protocolConsts":{"k":432}}`
+	err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON))
+	require.NoError(t, err)
+	err = cfg.LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),
 	)
 	require.NoError(t, err)
@@ -1629,6 +1683,8 @@ func newGenesisDelegateShelleyGenesisCfgWithActiveSlots(
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": ` + activeSlotsCoeff + `,
 		"securityParam": 432,
+		"slotLength": 1,
+		"epochLength": 432000,
 		"slotsPerKESPeriod": 129600,
 		"maxKESEvolutions": 62,
 		"systemStart": "2022-10-25T00:00:00Z",
@@ -1643,7 +1699,10 @@ func newGenesisDelegateShelleyGenesisCfgWithActiveSlots(
 		}
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
-	err := cfg.LoadShelleyGenesisFromReader(
+	byronGenesisJSON := `{"blockVersionData":{"slotDuration":"20000"},"protocolConsts":{"k":432}}`
+	err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON))
+	require.NoError(t, err)
+	err = cfg.LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),
 	)
 	require.NoError(t, err)
@@ -1678,6 +1737,11 @@ INSERT INTO genesis_delegation (
 // with an epoch cache that places any slot in [0, 1_000_000) at epoch 5
 // (so snapshotEpoch = 3). The Shelley genesis uses activeSlotsCoeff=0.99
 // to match createTestBlock's VRF eligibility threshold.
+//
+// currentEra matches the cache's EraId. Leaving it at the zero value made it
+// Byron, which has no Praos leader election at all, so era-keyed code read
+// under this fixture (calculateStabilityWindow, for one) took the Byron branch
+// while the cache and the genesis it was configured from said Shelley.
 func newEligibilityTestLedger(
 	t *testing.T,
 	epochNonce []byte,
@@ -1695,10 +1759,13 @@ func newEligibilityTestLedger(
 			{
 				EpochId:       5,
 				StartSlot:     0,
+				SlotLength:    1000,
 				LengthInSlots: 1_000_000,
+				EraId:         eras.ShelleyEraDesc.Id,
 				Nonce:         epochNonce,
 			},
 		},
+		currentEra: eras.ShelleyEraDesc,
 		config: LedgerStateConfig{
 			CardanoNodeConfig: newHighFreqShelleyGenesisCfg(t),
 			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -4550,15 +4617,16 @@ func TestPrunePoolSnapshotsWithRetentionFloor_KeepsReadoptableDeferredHeader(
 			EpochId:       11,
 			StartSlot:     20_000,
 			LengthInSlots: 1_000,
+			EraId:         eras.ShelleyEraDesc.Id,
 			Nonce:         tb.epochNonce,
 		},
 	}
-	// The test config carries no Byron genesis, so the stability window is the
-	// 50_000-slot default; with the tip at 60_000 the rollback horizon cuts off
-	// at slot 10_000.
-	ls.currentTip = ochainsync.Tip{Point: ocommon.Point{Slot: 60_000}}
+	// The fixture is Shelley (k=432, f=0.99), so the stability window is
+	// ceil(3k/f) = 1_310 slots; with the tip at 21_000 the rollback horizon
+	// cuts off at slot 19_690, between the two points below.
+	ls.currentTip = ochainsync.Tip{Point: ocommon.Point{Slot: 21_000}}
 	ls.publishSnapshotsLocked()
-	require.Equal(t, uint64(50_000), ls.calculateStabilityWindow())
+	require.Equal(t, uint64(1_310), ls.calculateStabilityWindow())
 
 	// Behind the tip but INSIDE the horizon: a rollback can still re-adopt it.
 	readoptable := ocommon.Point{Slot: 20_500, Hash: []byte{0x11}}
@@ -4733,5 +4801,72 @@ func TestDeleteDeferredMarkerUnlessReadmitted_RestoreFailurePropagates(
 		t,
 		batchErr,
 		"deletePersistedDeferredMarkers must propagate the lost-pin error",
+	)
+}
+
+// TestGenesisOverlayUnresolvablePParamsDefers pins the classification of an
+// overlay decision the node cannot make from its own state. A nil pparams
+// result means the snapshot, the persisted row and the era forecast all
+// declined to answer for this slot, which is a local gap; classifying it as a
+// hard rejection routes it to ConnectionRecycleRequestedEvent and drops the
+// peer that served an honest header.
+func TestGenesisOverlayUnresolvablePParamsDefers(t *testing.T) {
+	t.Parallel()
+
+	genesisCfg := newGenesisDelegateShelleyGenesisCfgWithActiveSlots(
+		t,
+		strings.Repeat("00", lcommon.Blake2b224Size),
+		strings.Repeat("00", lcommon.Blake2b256Size),
+		"0.05",
+	)
+	// No database and no current protocol parameters: every source
+	// genesisOverlayProtocolParamsForBlock consults is unavailable, so it
+	// returns nil for a slot the epoch cache does cover.
+	ls := &LedgerState{
+		currentEpoch: models.Epoch{
+			EpochId:       1,
+			StartSlot:     86_400,
+			LengthInSlots: 86_400,
+			SlotLength:    1,
+			EraId:         eras.AlonzoEraDesc.Id,
+		},
+		currentEra: eras.AlonzoEraDesc,
+		epochCache: []models.Epoch{
+			{
+				EpochId:       1,
+				StartSlot:     86_400,
+				LengthInSlots: 86_400,
+				SlotLength:    1,
+				EraId:         eras.AlonzoEraDesc.Id,
+			},
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: genesisCfg,
+			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	block := &mockBoundaryAlonzoBlock{
+		Block: &mockBabbageBlock{slot: 172_780},
+		slot:  172_780,
+	}
+	require.Nil(
+		t,
+		ls.genesisOverlayProtocolParamsForBlock(block),
+		"fixture must reach the unresolvable-parameters branch",
+	)
+
+	_, status, err := ls.genesisOverlayDelegationForBlock(
+		block,
+		genesisCfg.ShelleyGenesis(),
+	)
+	require.Error(t, err)
+	assert.Equal(t, genesisOverlayNone, status)
+	assert.ErrorIs(t, err, errHeaderVerificationDeferred)
+	assert.True(
+		t,
+		IsHeaderVerificationDeferred(err),
+		"an unresolvable overlay parameter set must not recycle the peer",
 	)
 }

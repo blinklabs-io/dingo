@@ -26,6 +26,48 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
+// rewardLiveStakeAccountQuery is refreshRewardLiveStakeAggregate's account
+// lookup: a plain SELECT with no RETURNING clause, run once per UTxO a stake
+// credential gains or loses -- the same call frequency as
+// sumCredentialUtxoStakeQuery, which it is always paired with in that
+// function. Like sumCredentialUtxoStakeQuery it is safe to route through
+// dialectQueryer.QueryRowContext's ordinary path for every dialect: that
+// wrapper only special-cases a query matched by hasReturningID (a trailing
+// "RETURNING id"), which this query never has, so translate() plus a direct
+// QueryRowContext call is exactly what a cached *sql.Stmt (already
+// dialect-translated at prepare time, see prepareHotStatements) reproduces.
+const rewardLiveStakeAccountQuery = `
+SELECT reward, pool, active, added_slot
+FROM account
+WHERE credential_tag = ? AND staking_key = ?`
+
+// rewardLiveStakeUpsertQuery is refreshRewardLiveStakeAggregate's other
+// per-touch query: the upsert that records the freshly recomputed total.
+// It has no RETURNING clause either (the row's id is never read back here),
+// so it always goes through ExecContext -- both as a one-shot call and,
+// once cached, via a *sql.Stmt returned by stmtForQueryer -- with no
+// dialect-specific branch to bypass. dialectQueryer.translate's ON CONFLICT
+// rewrite for MySQL happens once, at PrepareContext time, exactly as it does
+// for a one-shot ExecContext call today.
+const rewardLiveStakeUpsertQuery = `
+INSERT INTO reward_live_stake (
+    credential_tag, staking_key, pool_key_hash, utxo_stake, reward_stake,
+    total_stake, registered, pool_delegation_slot,
+    pool_delegation_block_index, pool_delegation_cert_index, updated_slot,
+    calculation_version
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+ON CONFLICT (credential_tag, staking_key) DO UPDATE SET
+    pool_key_hash = excluded.pool_key_hash,
+    utxo_stake = excluded.utxo_stake,
+    reward_stake = excluded.reward_stake,
+    total_stake = excluded.total_stake,
+    registered = excluded.registered,
+    pool_delegation_slot = excluded.pool_delegation_slot,
+    pool_delegation_block_index = excluded.pool_delegation_block_index,
+    pool_delegation_cert_index = excluded.pool_delegation_cert_index,
+    updated_slot = excluded.updated_slot,
+    calculation_version = excluded.calculation_version`
+
 func (s *Store) refreshRewardLiveStakeAggregate(
 	ctx context.Context,
 	db queryer,
@@ -35,23 +77,182 @@ func (s *Store) refreshRewardLiveStakeAggregate(
 	if len(ref.Key) == 0 {
 		return nil
 	}
+	utxoStake, err := s.sumCredentialUtxoStake(ctx, db, ref)
+	if err != nil {
+		return fmt.Errorf("sum reward live stake UTxOs: %w", err)
+	}
+	return s.applyRewardLiveStakeAggregate(ctx, db, ref, slot, utxoStake)
+}
+
+// rewardLiveStakeUtxoStakeQuery reads the running live-UTxO total
+// refreshRewardLiveStakeAggregateDelta trusts instead of recomputing it with
+// sumCredentialUtxoStake's full scan. It is the same (credential_tag,
+// staking_key) point lookup the upsert's conflict target already indexes
+// (idx_reward_live_stake_cred), so this is an indexed single-row read, not a
+// scan.
+const rewardLiveStakeUtxoStakeQuery = `
+SELECT utxo_stake FROM reward_live_stake
+WHERE credential_tag = ? AND staking_key = ?`
+
+// currentCredentialUtxoStake reads a credential's currently stored running
+// UTxO total. The bool return distinguishes "no row yet" (a brand new
+// credential, or one whose row was deleted after its stake dropped to zero --
+// see applyRewardLiveStakeAggregate's delete branch) from "row exists with
+// stake 0", since only the latter is a trustworthy baseline to apply a delta
+// against.
+func (s *Store) currentCredentialUtxoStake(
+	ctx context.Context,
+	db queryer,
+	ref models.StakeCredentialRef,
+) (uint64, bool, error) {
+	var raw sql.NullString
+	err := s.queryRowCached(
+		ctx, db, rewardLiveStakeUtxoStakeQuery, ref.Tag, ref.Key,
+	).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	if !raw.Valid || raw.String == "" {
+		return 0, false, nil
+	}
+	value, err := parseUint64("reward live stake UTxO total", raw.String)
+	if err != nil {
+		return 0, false, err
+	}
+	return value, true, nil
+}
+
+// applyUtxoStakeDelta adjusts a credential's running UTxO total by delta,
+// the exact signed lovelace amount one write's UTxO mutations contributed to
+// it. It fails closed on underflow (a negative result, which can only mean
+// the running total was already wrong -- a delta larger in magnitude than
+// the credential is recorded as holding) and on overflow, rather than
+// silently wrapping either into a value sumCredentialUtxoStake's own
+// overflow check would otherwise have to catch downstream.
+func applyUtxoStakeDelta(
+	current uint64,
+	delta int64,
+	ref models.StakeCredentialRef,
+) (uint64, error) {
+	if delta < 0 {
+		dec := uint64(-delta)
+		if dec > current {
+			return 0, fmt.Errorf(
+				"reward live stake UTxO underflow for credential %d:%x (current %d, delta %d)",
+				ref.Tag,
+				ref.Key,
+				current,
+				delta,
+			)
+		}
+		return current - dec, nil
+	}
+	inc := uint64(delta)
+	if inc > ^uint64(0)-current {
+		return 0, fmt.Errorf(
+			"reward live stake UTxO overflow for credential %d:%x (current %d, delta %d)",
+			ref.Tag,
+			ref.Key,
+			current,
+			delta,
+		)
+	}
+	return current + inc, nil
+}
+
+// refreshRewardLiveStakeAggregateDelta is refreshRewardLiveStakeAggregate's
+// incremental counterpart: instead of recomputing a credential's entire
+// live-UTxO total from scratch (sumCredentialUtxoStake's O(live UTxOs for
+// this credential) scan, dingo #4421), it reads the running total already
+// stored in reward_live_stake and adjusts it by delta -- the exact signed
+// change this one write's UTxO mutations made to the credential's total, an
+// O(1) indexed point lookup plus an in-memory add.
+//
+// This is safe only for a caller that can state delta exactly: a produced
+// output's amount, the negative of a consumed input's amount, or 0 for a
+// certificate-only touch that never mutated the utxo table. A caller that
+// cannot state delta exactly (a bulk rollback sweep affecting an unknown mix
+// of rows, for instance) must keep using refreshRewardLiveStakeAggregate's
+// full scan instead -- see setTransactionWithAccumulator and
+// SetGapBlockTransaction for the two callers that qualify today, and
+// DATABASE.md's "Incremental live-UTxO stake maintenance" section for the
+// full design, including why the other callers deliberately do not use this
+// path.
+//
+// The read and the upsert are not one atomic statement, so they rely on the
+// same property the full-scan path always has: block application is the only
+// writer of a credential's reward_live_stake row and applies one block at a
+// time, so no second write transaction can change utxo_stake between them.
+// (On SQLite that is reinforced by writeDB's SetMaxOpenConns(1); on Postgres
+// and MySQL, whose providers share one pool of up to 100 connections, the
+// ledger's single apply loop is the whole of it.) The consequence of breaking
+// that property is worse here than on the full-scan path -- a lost update
+// there is recomputed from the utxo table on the next touch, while a lost
+// update here persists until RewardLiveStakeNeedsBackfill runs -- so a future
+// caller that writes this table off the apply loop must make the read and
+// write atomic rather than reuse this function as-is.
+//
+// If no running total is recorded yet for this credential,
+// sumCredentialUtxoStake's full scan establishes a fresh, authoritative
+// baseline instead of trusting delta against an unknown prior value -- cheap
+// here specifically because a credential with no running total has, by
+// construction, few live UTxOs at this point (a credential that has been
+// touched enough to accumulate many either already has a running total, or
+// the touch that dropped it to zero deleted the row and this is its first
+// touch since).
+func (s *Store) refreshRewardLiveStakeAggregateDelta(
+	ctx context.Context,
+	db queryer,
+	ref models.StakeCredentialRef,
+	slot uint64,
+	delta int64,
+) error {
+	if len(ref.Key) == 0 {
+		return nil
+	}
+	current, ok, err := s.currentCredentialUtxoStake(ctx, db, ref)
+	if err != nil {
+		return fmt.Errorf("read running reward live stake UTxO total: %w", err)
+	}
+	var utxoStake uint64
+	if ok {
+		utxoStake, err = applyUtxoStakeDelta(current, delta, ref)
+		if err != nil {
+			return err
+		}
+	} else {
+		utxoStake, err = s.sumCredentialUtxoStake(ctx, db, ref)
+		if err != nil {
+			return fmt.Errorf("sum reward live stake UTxOs: %w", err)
+		}
+	}
+	return s.applyRewardLiveStakeAggregate(ctx, db, ref, slot, utxoStake)
+}
+
+// applyRewardLiveStakeAggregate is refreshRewardLiveStakeAggregate and
+// refreshRewardLiveStakeAggregateDelta's shared tail: given a credential's
+// UTxO total (however it was obtained), read its account state and upsert
+// the combined reward_live_stake row. Neither caller-specific computation
+// above changes any of this logic.
+func (s *Store) applyRewardLiveStakeAggregate(
+	ctx context.Context,
+	db queryer,
+	ref models.StakeCredentialRef,
+	slot uint64,
+	utxoStake uint64,
+) error {
 	var reward sql.NullString
 	var pool []byte
 	var active sql.NullBool
 	var addedSlot sql.NullInt64
-	accountErr := db.QueryRowContext(ctx, `
-SELECT reward, pool, active, added_slot
-FROM account
-WHERE credential_tag = ? AND staking_key = ?`,
-		ref.Tag,
-		ref.Key,
+	accountErr := s.queryRowCached(
+		ctx, db, rewardLiveStakeAccountQuery, ref.Tag, ref.Key,
 	).Scan(&reward, &pool, &active, &addedSlot)
 	if accountErr != nil && !errors.Is(accountErr, sql.ErrNoRows) {
 		return fmt.Errorf("query reward live stake account: %w", accountErr)
-	}
-	utxoStake, err := sumCredentialUtxoStake(ctx, db, ref)
-	if err != nil {
-		return fmt.Errorf("sum reward live stake UTxOs: %w", err)
 	}
 	rewardStake := uint64(0)
 	registered := false
@@ -94,24 +295,8 @@ WHERE credential_tag = ? AND staking_key = ?`,
 	if err != nil {
 		return err
 	}
-	_, err = db.ExecContext(ctx, `
-INSERT INTO reward_live_stake (
-    credential_tag, staking_key, pool_key_hash, utxo_stake, reward_stake,
-    total_stake, registered, pool_delegation_slot,
-    pool_delegation_block_index, pool_delegation_cert_index, updated_slot,
-    calculation_version
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
-ON CONFLICT (credential_tag, staking_key) DO UPDATE SET
-    pool_key_hash = excluded.pool_key_hash,
-    utxo_stake = excluded.utxo_stake,
-    reward_stake = excluded.reward_stake,
-    total_stake = excluded.total_stake,
-    registered = excluded.registered,
-    pool_delegation_slot = excluded.pool_delegation_slot,
-    pool_delegation_block_index = excluded.pool_delegation_block_index,
-    pool_delegation_cert_index = excluded.pool_delegation_cert_index,
-    updated_slot = excluded.updated_slot,
-    calculation_version = excluded.calculation_version`,
+	_, err = s.execCached(
+		ctx, db, rewardLiveStakeUpsertQuery,
 		ref.Tag,
 		ref.Key,
 		pool,
@@ -168,18 +353,38 @@ ON CONFLICT (credential_tag, staking_key) DO UPDATE SET
 // invariant already rules out, not a live behavior change -- the same
 // single-writer argument LatestPoolOpCertSequence relied on for its NULL
 // case (commit cee516017).
-func sumCredentialUtxoStake(
+//
+// This is a method (rather than the free function it used to be) so it can
+// reach s.lookupCachedStmt: profiling a synced node found this single query
+// -- called on every UTxO a stake credential gains or loses, via
+// refreshRewardLiveStakeAggregate -- was 17.55% of total process CPU, the
+// largest single hotspot found. It was already the single-aggregate rewrite
+// described above rather than the row-streaming sumUint64Rows path, so the
+// remaining cost was the one-shot QueryRowContext call pattern itself
+// recompiling the statement on every invocation; see prepared_stmt.go for
+// why caching and reusing one *sql.Stmt here is safe and
+// BenchmarkSumCredentialUtxoStake for the measured effect.
+const sumCredentialUtxoStakeQuery = `
+SELECT SUM(CAST(amount AS BIGINT))
+FROM utxo
+WHERE credential_tag = ? AND staking_key = ? AND deleted_slot = 0`
+
+func (s *Store) sumCredentialUtxoStake(
 	ctx context.Context,
 	db queryer,
 	ref models.StakeCredentialRef,
 ) (uint64, error) {
+	s.sumCredentialUtxoStakeCalls.Add(1)
+	// No cached statement means Start (the only place that populates it) has
+	// not run since a Reset/RestoreFrom last invalidated the cache;
+	// queryRowCached falls back to a plain one-shot call against db itself in
+	// that case rather than trying to populate the cache here -- db already
+	// holds whatever connection it needs (see prepareHotStatements for why a
+	// fresh PrepareContext against s.writeDB at this point could deadlock
+	// against db's own open transaction).
+	row := s.queryRowCached(ctx, db, sumCredentialUtxoStakeQuery, ref.Tag, ref.Key)
 	var total sql.NullInt64
-	err := db.QueryRowContext(ctx, `
-SELECT SUM(CAST(amount AS BIGINT))
-FROM utxo
-WHERE credential_tag = ? AND staking_key = ? AND deleted_slot = 0`,
-		ref.Tag, ref.Key,
-	).Scan(&total)
+	err := row.Scan(&total)
 	if err != nil {
 		return 0, err
 	}
@@ -667,6 +872,13 @@ func (s *Store) StaleConsensusStakeSnapshotsExist(
 		)
 	}
 	var stale bool
+	// The reward_snapshot clause deliberately does not restrict to
+	// authoritative rows: a non-authoritative fallback row (written by
+	// captureMarkSnapshot) is a real source for reward calculation whenever
+	// no authoritative row has been captured yet, so it must fail this gate
+	// on its own version rather than rely on authoritativeMarkRewardSnapshotExists
+	// separately rejecting a version mismatch when the fallback is consulted
+	// (dingo #4026).
 	err = db.QueryRowContext(ctx, `
 SELECT EXISTS (
     SELECT 1 FROM pool_stake_snapshot
@@ -675,7 +887,6 @@ SELECT EXISTS (
 ) OR EXISTS (
     SELECT 1 FROM reward_snapshot
     WHERE snapshot_type = 'mark'
-      AND authoritative = TRUE
       AND calculation_version <> ?
 )`,
 		models.RewardStakeCalculationVersion,
@@ -688,6 +899,50 @@ SELECT EXISTS (
 		)
 	}
 	return stale, nil
+}
+
+// StaleConsensusStakeSnapshotEpochs is diagnostics only, for the operator-
+// facing error StaleConsensusStakeSnapshotsExist gates on; it is not itself
+// part of the fail-closed check.
+func (s *Store) StaleConsensusStakeSnapshotEpochs(
+	txn types.Txn,
+) ([]uint64, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"stale consensus stake snapshot epochs: resolve db: %w",
+			err,
+		)
+	}
+	rows, err := db.QueryContext(ctx, `
+SELECT epoch FROM pool_stake_snapshot
+WHERE snapshot_type IN ('mark', 'set', 'go') AND calculation_version <> ?
+UNION
+SELECT epoch FROM reward_snapshot
+WHERE snapshot_type = 'mark' AND calculation_version <> ?
+ORDER BY epoch`,
+		models.RewardStakeCalculationVersion,
+		models.RewardStakeCalculationVersion,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"listing stale stake snapshot epochs: %w",
+			err,
+		)
+	}
+	defer rows.Close()
+	var epochs []uint64
+	for rows.Next() {
+		var epoch uint64
+		if err := rows.Scan(&epoch); err != nil {
+			return nil, err
+		}
+		epochs = append(epochs, epoch)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return epochs, nil
 }
 
 func (s *Store) GetLiveStakeInputsForPools(

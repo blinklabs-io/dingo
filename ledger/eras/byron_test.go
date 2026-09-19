@@ -88,6 +88,7 @@ type testByronTx struct {
 	byron.ByronTransaction
 	inputs  []lcommon.TransactionInput
 	outputs []lcommon.TransactionOutput
+	cbor    []byte
 }
 
 func (t *testByronTx) Inputs() []lcommon.TransactionInput {
@@ -96,6 +97,10 @@ func (t *testByronTx) Inputs() []lcommon.TransactionInput {
 
 func (t *testByronTx) Outputs() []lcommon.TransactionOutput {
 	return t.outputs
+}
+
+func (t *testByronTx) Cbor() []byte {
+	return t.cbor
 }
 
 func TestValidateTxByron_ValidTransaction(t *testing.T) {
@@ -109,6 +114,38 @@ func TestValidateTxByron_ValidTransaction(t *testing.T) {
 	}
 	err := ValidateTxByron(tx, 0, nil, nil)
 	assert.NoError(t, err)
+}
+
+func TestValidateTxByron_MainnetZeroValueOutput(t *testing.T) {
+	// This transaction is from the canonical mainnet block at slot 4,427,376.
+	// Byron consensus permits its first output to contain zero lovelace.
+	txCbor, err := hex.DecodeString(
+		"839f8200d8185824825820f27d4ccc224c706184fad5cfb38ee067c334f70a1c57f576fab2ad80992e976a01ff9f8282d818582183581c7aef491d0bb12165ecbd33388686fac0c64d17c1c90ab1c84cce1b81a0001abc1cd901008282d818582183581cb3ad626374eb2b751a233fc06e3ab81f10a4069936b218462cba129ca0001a1cbad9181a089105e8ffa0",
+	)
+	require.NoError(t, err)
+	// Koios exposes the canonical Byron transaction body. Wrap it in the
+	// transaction envelope with an empty witness set for structural validation.
+	fullTxCbor := append([]byte{0x82}, txCbor...)
+	fullTxCbor = append(fullTxCbor, 0x9f, 0xff)
+	tx, err := byron.NewByronTransactionFromCbor(fullTxCbor)
+	require.NoError(t, err)
+	require.Len(t, tx.Outputs(), 2)
+	assert.Zero(t, tx.Outputs()[0].Amount().Sign())
+	assert.NoError(t, ValidateTxByron(tx, 4_427_376, nil, nil))
+}
+
+func TestValidateTxByron_NegativeValueOutput(t *testing.T) {
+	tx := &testByronTx{
+		inputs: []lcommon.TransactionInput{
+			newTestInput(0x01, 0),
+		},
+		outputs: []lcommon.TransactionOutput{
+			testOutput{amount: big.NewInt(-100)},
+		},
+	}
+	err := ValidateTxByron(tx, 0, nil, nil)
+	require.Error(t, err)
+	assert.ErrorAs(t, err, &OutputNegativeByronError{})
 }
 
 func TestValidateTxByron_MainnetRedeemWitness(t *testing.T) {
@@ -238,49 +275,6 @@ func TestValidateTxByron_NilOutputs(t *testing.T) {
 	assert.ErrorAs(t, err, &OutputSetEmptyByronError{})
 }
 
-func TestValidateTxByron_ZeroValueOutput(t *testing.T) {
-	tx := &testByronTx{
-		inputs: []lcommon.TransactionInput{
-			newTestInput(0x01, 0),
-		},
-		outputs: []lcommon.TransactionOutput{
-			newTestOutput(0),
-		},
-	}
-	err := ValidateTxByron(tx, 0, nil, nil)
-	require.Error(t, err)
-	assert.ErrorAs(t, err, &OutputNotPositiveByronError{})
-	assert.Contains(t, err.Error(), "non-positive value")
-}
-
-func TestValidateTxByron_NegativeValueOutput(t *testing.T) {
-	tx := &testByronTx{
-		inputs: []lcommon.TransactionInput{
-			newTestInput(0x01, 0),
-		},
-		outputs: []lcommon.TransactionOutput{
-			testOutput{amount: big.NewInt(-100)},
-		},
-	}
-	err := ValidateTxByron(tx, 0, nil, nil)
-	require.Error(t, err)
-	assert.ErrorAs(t, err, &OutputNotPositiveByronError{})
-}
-
-func TestValidateTxByron_NilAmountOutput(t *testing.T) {
-	tx := &testByronTx{
-		inputs: []lcommon.TransactionInput{
-			newTestInput(0x01, 0),
-		},
-		outputs: []lcommon.TransactionOutput{
-			testOutput{amount: nil},
-		},
-	}
-	err := ValidateTxByron(tx, 0, nil, nil)
-	require.Error(t, err)
-	assert.ErrorAs(t, err, &OutputNotPositiveByronError{})
-}
-
 func TestValidateTxByron_DuplicateInputs(t *testing.T) {
 	tx := &testByronTx{
 		inputs: []lcommon.TransactionInput{
@@ -325,21 +319,6 @@ func TestValidateTxByron_MultipleErrors(t *testing.T) {
 	assert.ErrorAs(t, err, &OutputSetEmptyByronError{})
 }
 
-func TestValidateTxByron_SecondOutputZeroValue(t *testing.T) {
-	tx := &testByronTx{
-		inputs: []lcommon.TransactionInput{
-			newTestInput(0x01, 0),
-		},
-		outputs: []lcommon.TransactionOutput{
-			newTestOutput(1_000_000),
-			newTestOutput(0), // second output is zero
-		},
-	}
-	err := ValidateTxByron(tx, 0, nil, nil)
-	require.Error(t, err)
-	assert.ErrorAs(t, err, &OutputNotPositiveByronError{})
-}
-
 func TestByronEraDesc_HasValidateTxFunc(t *testing.T) {
 	assert.NotNil(
 		t,
@@ -360,15 +339,38 @@ type mockLedgerState struct {
 	utxos                map[string]lcommon.Utxo
 	networkId            uint
 	protocolMagic        uint32
+	byronFeeSummand      int64
+	byronFeeMultiplier   int64
 	skipPhase2Validation bool
 	utxoLookups          int
 	// slotToTime, when set, replaces the zero-time default so a test can
 	// supply a real network's slot-to-time mapping.
 	slotToTime func(uint64) (time.Time, error)
+	// slotToTimeCalls counts SlotToTime invocations, the same way utxoLookups
+	// counts UtxoById ones. validityRangeInfo -- called once per TxInfo build,
+	// via NewTxInfoV1FromTransaction/NewTxInfoV2FromTransaction/
+	// NewTxInfoV3FromTransaction -- calls SlotToTime once per validity bound
+	// present, so this is a direct proxy for how many times a transaction's
+	// TxInfo was (re)built.
+	slotToTimeCalls int
 	// syntheticV2CostModel backs SyntheticV2CostModelInEffect, so a test can
 	// exercise ValidateTxBabbage/EvaluateTxBabbage's ErrNoCostModelForPlutusV2
 	// check (blinklabs-io/dingo#3962) without a real *ledger.LedgerView.
 	syntheticV2CostModel bool
+	// pendingMIR backs PendingMIRRewardDeltas, letting a test simulate
+	// InstantaneousRewards already accumulated earlier in the current epoch
+	// without a real *ledger.LedgerView or database.
+	pendingMIR map[MIRCredentialKey]*big.Int
+}
+
+// PendingMIRRewardDeltas implements eras.MIRPendingRewardsProvider for tests.
+// The real implementation (*ledger.LedgerView) derives this from the database;
+// this mock just returns whatever a test has staged in pendingMIR, ignoring
+// uptoSlot.
+func (m *mockLedgerState) PendingMIRRewardDeltas(
+	_ uint64,
+) (map[MIRCredentialKey]*big.Int, error) {
+	return m.pendingMIR, nil
 }
 
 // SyntheticV2CostModelInEffect implements the eras package's local
@@ -413,6 +415,10 @@ func (m *mockLedgerState) ByronProtocolMagic() (uint32, error) {
 	return m.protocolMagic, nil
 }
 
+func (m *mockLedgerState) ByronFeePolicy() (int64, int64, error) {
+	return m.byronFeeSummand, m.byronFeeMultiplier, nil
+}
+
 func (m *mockLedgerState) SkipPhase2Validation() bool {
 	return m.skipPhase2Validation
 }
@@ -435,6 +441,7 @@ func (m *mockLedgerState) IsStakeCredentialRegistered(
 func (m *mockLedgerState) SlotToTime(
 	slot uint64,
 ) (time.Time, error) {
+	m.slotToTimeCalls++
 	if m.slotToTime != nil {
 		return m.slotToTime(slot)
 	}
@@ -515,7 +522,7 @@ func (m *mockLedgerState) CommitteeMembers() (
 }
 
 func (m *mockLedgerState) DRepRegistration(
-	_ lcommon.Blake2b224,
+	_ lcommon.Credential,
 ) (*lcommon.DRepRegistration, error) {
 	return nil, nil
 }
@@ -706,6 +713,55 @@ func TestByronValidateValueConserved_SkipsMissingInputs(
 	// Only input1 counted: 2M consumed vs 1M produced -> ok
 	err := byronValidateValueConserved(tx, 0, ls, nil)
 	assert.NoError(t, err)
+}
+
+func TestValidateTxByron_MinimumFee(t *testing.T) {
+	t.Parallel()
+
+	const txSize = 10
+
+	tests := []struct {
+		name      string
+		output    uint64
+		wantError bool
+	}{
+		{
+			name:   "fee equals minimum",
+			output: 988,
+		},
+		{
+			name:      "fee is one lovelace below minimum",
+			output:    989,
+			wantError: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			input := newTestInput(0x01, 0)
+			ls := newMockLedgerState()
+			ls.byronFeeSummand = 1_000_000_001
+			ls.byronFeeMultiplier = 1_000_000_000
+			ls.addUtxo(input, newTestOutput(1_000))
+			tx := &testByronTx{
+				inputs:  []lcommon.TransactionInput{input},
+				outputs: []lcommon.TransactionOutput{newTestOutput(test.output)},
+				cbor:    make([]byte, txSize),
+			}
+
+			err := ValidateTxByron(tx, 0, ls, nil)
+			if test.wantError {
+				require.Error(t, err)
+				var feeErr FeeTooLowByronError
+				require.ErrorAs(t, err, &feeErr)
+				assert.Equal(t, big.NewInt(11), feeErr.Actual)
+				assert.Equal(t, big.NewInt(12), feeErr.Required)
+				assert.Equal(t, uint64(txSize), feeErr.Size)
+				return
+			}
+			assert.NoError(t, err)
+		})
+	}
 }
 
 func TestValidateTxByron_WithLedgerState_Valid(

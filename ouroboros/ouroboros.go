@@ -196,9 +196,8 @@ type Ouroboros struct {
 	// runs, so Protocol.DoneChan() cannot close underneath it; the release
 	// signal has to come from connmanager's per-connection ErrorChan watcher
 	// instead (see ReleaseLeiosServeWaiters).
-	leiosServeWaiters         map[ouroboros.ConnectionId][]chan struct{}
-	leiosServeWaitersReleased map[ouroboros.ConnectionId]time.Time
-	leiosServeWaitersMu       sync.Mutex
+	leiosServeWaiters   map[ouroboros.ConnectionId][]chan struct{}
+	leiosServeWaitersMu sync.Mutex
 	// NtC CertRB closure-resolution metrics.
 	leiosMetrics *leiosMetrics
 
@@ -209,13 +208,19 @@ type Ouroboros struct {
 	// multi-second EB fetch from head-of-line blocking every later offer on
 	// the connection.
 	leiosFetchGuards sync.Map // ouroboros.ConnectionId → *leiosFetchGuard
-	// (slot, EB hash) occurrences with a fetch already in progress, so a given
-	// endorser block occurrence is fetched once across all connections (it is
+	// (slot, EB hash) occurrences with a transaction-offer fetch in progress,
+	// deduplicating that work across all connections (it is
 	// offered on every connection). Keyed by slot and hash together, not hash
 	// alone, so an in-flight fetch for one occurrence does not suppress a
 	// legitimate offer of the same content-addressed hash recurring at a
 	// different slot (issue #3513).
 	leiosFetchInProgress sync.Map // leiosBlockKey(point.Slot, point.Hash) → struct{}
+	// Manifest offers have their own claim: a pending manifest fetch must not
+	// suppress a transaction offer needed to complete the same occurrence.
+	leiosManifestFetchInProgress sync.Map // leiosBlockKey(point.Slot, point.Hash) → struct{}
+	// leiosFetchClaimPublished is an instance-local test seam used to hold a
+	// claimed offer before dispatch and expose admission ordering deterministically.
+	leiosFetchClaimPublished func()
 
 	// Locally-forged EB broadcast log (cursors are owned by the log).
 	leiosEBLog *leiosForgedEBLog
@@ -475,17 +480,16 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		context.Background(),
 	)
 	o := &Ouroboros{
-		config:                    cfg,
-		registerer:                newTrackingRegisterer(cfg.PromRegistry),
-		eventBus:                  cfg.EventBus,
-		connManager:               cfg.ConnManager,
-		ledgerState:               cfg.LedgerState,
-		leiosAnnouncementLedger:   cfg.LeiosAnnouncementLedger,
-		mempool:                   cfg.Mempool,
-		chainsyncState:            cfg.ChainsyncState,
-		peerGov:                   cfg.PeerGov,
-		blockFetchStarts:          make(map[ouroboros.ConnectionId]time.Time),
-		leiosServeWaitersReleased: make(map[ouroboros.ConnectionId]time.Time),
+		config:                  cfg,
+		registerer:              newTrackingRegisterer(cfg.PromRegistry),
+		eventBus:                cfg.EventBus,
+		connManager:             cfg.ConnManager,
+		ledgerState:             cfg.LedgerState,
+		leiosAnnouncementLedger: cfg.LeiosAnnouncementLedger,
+		mempool:                 cfg.Mempool,
+		chainsyncState:          cfg.ChainsyncState,
+		peerGov:                 cfg.PeerGov,
+		blockFetchStarts:        make(map[ouroboros.ConnectionId]time.Time),
 		localstatequeryAcquiredPoints: make(
 			map[ouroboros.ConnectionId]ledger.QueryPoint,
 		),
@@ -892,9 +896,6 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	if o.leiosVotes != nil {
 		o.leiosVotes.RemoveConnection(leiosConnectionIdString(connId))
 	}
-	// Release the EB log cursor for this connection; frees any log
-	// entries that were only being held for this connection.
-	o.leiosEBLog.removeConn(leiosConnectionIdString(connId))
 	// Drop the per-connection leios-fetch guard. In-flight fetch goroutines
 	// hold their own reference, so they finish safely after this.
 	o.leiosFetchGuards.Delete(connId)

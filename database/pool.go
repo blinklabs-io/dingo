@@ -216,17 +216,24 @@ func (d *Database) GetPools(
 	return d.metadata.GetPools(pkhs, txn.Metadata())
 }
 
-// GetPoolByVrfKeyHash retrieves an active pool by its VRF key hash.
-// Returns nil if no active pool uses this VRF key.
+// GetPoolByVrfKeyHash retrieves the pool that currently claims the given
+// VRF key hash, as of the given epoch's start slot. Returns nil if no
+// active pool claims it. See metadata.MetadataStore's GetPoolByVrfKeyHash
+// for the epoch-boundary deferral rule this respects.
 func (d *Database) GetPoolByVrfKeyHash(
 	vrfKeyHash []byte,
+	epochStartSlot uint64,
 	txn *Txn,
 ) (*models.Pool, error) {
 	if txn == nil {
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	return d.metadata.GetPoolByVrfKeyHash(vrfKeyHash, txn.Metadata())
+	return d.metadata.GetPoolByVrfKeyHash(
+		vrfKeyHash,
+		epochStartSlot,
+		txn.Metadata(),
+	)
 }
 
 // GetActivePoolRelays returns all relays from currently active pools.
