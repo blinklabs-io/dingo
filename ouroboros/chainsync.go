@@ -822,6 +822,7 @@ func (o *Ouroboros) chainsyncServerFindIntersect(
 	_, err = o.chainsyncState.AddClient(
 		ctx.ConnectionId,
 		*intersectPoint,
+		ctx.Server,
 	)
 	if err != nil {
 		return retPoint, tip, fmt.Errorf(
@@ -857,6 +858,7 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 	clientState, err := o.chainsyncState.AddClient(
 		ctx.ConnectionId,
 		tip.Point,
+		ctx.Server,
 	)
 	if err != nil {
 		return fmt.Errorf(

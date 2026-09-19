@@ -1731,18 +1731,18 @@ paths, where the point is to report before the goroutine unwinds.
   than they drain and wedge the subscriber permanently — via exactly the
   two-topic coupling above — which silently stops the node from following the
   chain while it continues to forge
-- An NtC close still needs to release the chainsync server-side (N2C) client
-  state `chainsyncServerFindIntersect`/`chainsyncServerRequestNext` register
-  in `chainsync.State` via `AddClient` — most importantly, its live
-  `chain.ChainIterator`. Since that release can't ride the suppressed
-  `connmanager.conn_closed` event, `ConnectionManager` calls a separate,
-  unconditional `ConnClosedFunc(connId, isNtC, err)` for every connection
-  close (NtC and NtN alike) as a direct per-connection call rather than an
-  EventBus fan-out, so a reconnect storm costs no subscriber buffer capacity.
-  `Node.handleConnManagerClosed`, wired as `ConnClosedFunc`, calls
-  `chainsyncState.RemoveClient` only when `isNtC` is true — the NtN half of
-  cleanup still runs exactly once, through `Ouroboros.HandleConnClosedEvent`
-  on the `connmanager.conn_closed` subscription above
+- Every close must release server-side ChainSync state (including its live
+  `chain.ChainIterator`), LocalStateQuery pins, Leios serving waits, and
+  LeiosNotify cursors without deleting a replacement connection that reused
+  the same `ConnectionId`. `ConnectionManager` therefore calls the direct
+  `ConnClosedOwnerFunc` for NtC and NtN with the concrete connection. Protocol
+  registration records each server instance as the owner, and
+  `Node.handleConnManagerClosedOwner` removes state only while that owner is
+  still current. The ID-only `connmanager.conn_closed` EventBus path retains
+  outbound peer and selection cleanup but does not delete owner-scoped server
+  state. LeiosNotify also observes the connection lifecycle channel after a
+  request callback returns an offer, so its cursor is removed even while the
+  protocol waits for the next request
 - Each ChainSync protocol instance owns its FindIntersect work-budget bucket.
   Dingo's cached connection option builds a fresh ChainSync configuration for
   every connection, so separate clients cannot share budget state or recreate
@@ -4595,6 +4595,8 @@ active or while corroboration is incomplete.
 When full-block header verification needs an epoch nonce that is not cached yet, blockfetch first flushes already-received predecessor blocks from the pending batch into the primary chain, then `ensureEpochForSlot` may forecast the nonce only within the cache tail's era. A confirmed transition or configured epoch trigger stops that forecast at the hard-fork boundary and defers verification without penalizing the peer; the full ledger rollover remains the only path that publishes successor-era parameters and rotates snapshots. Chainsync-header VRF/KES/opcert crypto verification runs only when the header's epoch nonce is already present in the in-memory epoch cache, so headers beyond that window are queued as unverified until blockfetch. The chain header queue records whether the first queued header was stateless-crypto verified; blockfetch skips only that duplicate stateless work. The stateful header checks (registered VRF key binding and Praos leader-stake eligibility) still run on the fetched full block. If those stateful facts are ahead of the ledger apply cursor — for example a pool registration or epoch mark snapshot is in predecessor/endorser data that blockfetch has seen but `ledgerProcessBlock` has not applied yet — blockfetch records that block point for deferred validation rather than recycling the peer. The marker is both in memory and durable in `sync_state` as `deferred_header_validation:<slot>:<hash>` before the block is inserted, so a restart cannot replay the persisted block without the pending stateful check. `ledgerProcessBlock` consults that marker even if normal replay validation is disabled, replays the deferred stateful check strictly after referenced Leios endorser-block metadata is processed and before the ranking block's own transactions are applied, then clears the durable marker in the apply transaction.
 
 #### Leios CertRB Serving (NtC)
+
+CertRB serving waiters are owned by the concrete chainsync server instance as well as the connection ID; the owner-aware close callback cannot release a replacement lifetime that reused the ID.
 
 When Leios is enabled, a certifying ranking block (CertRB) carries a Leios certificate and empty transaction segments; the certified endorser block's (EB) transactions live in the EB's transaction closure, fetched asynchronously from peers over the leiosnotify / leiosfetch client protocols and cached in `Ouroboros.leiosEndorserBlocks` (keyed by slot and hash together, TTL-, entry-, and byte-bounded — a mismatched offer size or an over-budget entry is rejected rather than cached, including one reloaded from the blob-store spillover used for historical serving, which is served to the caller but left uncached when it exceeds the per-entry budget). Before retaining any fetched transaction, Dingo checks it in its received manifest position against that reference's body hash and full-transaction size; substituted, reordered, and malformed or trailing wire values are rejected. Before serving a Dijkstra block over node-to-client chainsync, `chainsyncServerBlockCbor` resolves the certified EB (`certifiedEndorserBlockHash` reads the parent block's `leios_announcement` via the header prev-hash) and splices the cached closure into the block's empty transaction segment (`spliceEndorserTxsIntoDijkstraBlock`) so clients receive complete transactions. The header is preserved byte-for-byte, so the served block's hash is unchanged; its `block_body_hash` intentionally no longer matches, which is acceptable over NtC because local clients do not re-verify the body hash.
 
