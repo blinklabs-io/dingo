@@ -182,15 +182,33 @@ func checkpointWAL(
 		}()
 		db.SetMaxOpenConns(1)
 
+		// Drain the WAL with PASSIVE first.  A direct TRUNCATE checkpoint can
+		// hold SQLite's writer lock while it copies a large WAL, starving the
+		// import writer until its busy timeout expires.  PASSIVE does not wait
+		// for or block writers; TRUNCATE is only attempted after it reports
+		// that all frames have already been checkpointed.
 		var busy, walLog, checkpointed int
-		row := db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
+		row := db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)")
 		if err := row.Scan(&busy, &walLog, &checkpointed); err != nil {
 			return fmt.Errorf("WAL checkpoint: %w", err)
 		}
+		if busy != 0 || walLog != checkpointed {
+			logger.Warn(
+				"WAL checkpoint could not fully complete "+
+					"(a reader is still holding an old snapshot); "+
+					"will retry next tick",
+				"wal_frames", walLog,
+				"checkpointed_frames", checkpointed,
+			)
+			return nil
+		}
+		row = db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
+		if err := row.Scan(&busy, &walLog, &checkpointed); err != nil {
+			return fmt.Errorf("WAL truncate: %w", err)
+		}
 		if busy != 0 {
 			logger.Warn(
-				"WAL checkpoint(TRUNCATE) could not fully complete "+
-					"(a reader is still holding an old snapshot); "+
+				"WAL checkpoint(TRUNCATE) could not fully complete; "+
 					"will retry next tick",
 				"wal_frames", walLog,
 				"checkpointed_frames", checkpointed,
