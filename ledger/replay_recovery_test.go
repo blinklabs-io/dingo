@@ -482,13 +482,18 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 	ls.reachedTip.Store(true)
 	ls.publishSnapshotsLocked()
 
-	seedReplayRecoveryTransaction(
-		t,
-		db,
-		testHashBytes("producer-tx-live"),
-		producerBlock.Hash,
-		producerBlock.Slot,
-	)
+	producerTxHash := testHashBytes("producer-tx-live")
+	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+		TxId:      producerTxHash,
+		OutputIdx: 0,
+		AddedSlot: producerBlock.Slot,
+		Amount:    types.Uint64(100),
+	}))
+	require.NoError(t, db.MarkUtxosDeletedAtSlot(
+		nil,
+		[]types.UtxoKey{{TxId: producerTxHash, OutputIdx: 0}},
+		failingBlock.Slot,
+	))
 
 	validationErr := &txValidationError{
 		BlockPoint: ocommon.NewPoint(
@@ -510,7 +515,7 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 	// and request chainsync resync. This is the simple case — peers
 	// may switch to a different fork that is compatible with our
 	// ledger.
-	recovered, err := ls.tryRecoverFromTxValidationError(validationErr)
+	recovered, err := ls.recoverAtTipFromTxValidationError(validationErr)
 	require.NoError(t, err)
 	require.True(t, recovered)
 
@@ -525,6 +530,10 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 		ocommon.NewPoint(failingBlock.Slot, failingBlock.Hash),
 	)
 	assert.ErrorIs(t, err, models.ErrBlockNotFound)
+	utxo, err := db.Metadata().GetUtxoIncludingSpent(producerTxHash, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, utxo)
+	assert.Zero(t, utxo.DeletedSlot, "at-tip recovery must restore spent UTxOs")
 
 	// Second and third attempts: same failing (slot, block, tx).
 	// The pipeline should keep recovering with progressively deeper
@@ -532,7 +541,7 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 	// keep replaying the same losing fork and we need to expose a
 	// wider candidate set for chainselection.
 	for i := 2; i <= maxAtTipRecoveryAttempts; i++ {
-		recovered, err = ls.tryRecoverFromTxValidationError(validationErr)
+		recovered, err = ls.recoverAtTipFromTxValidationError(validationErr)
 		require.NoError(t, err, "attempt %d should still recover", i)
 		require.True(t, recovered, "attempt %d should still recover", i)
 	}
@@ -547,7 +556,7 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 	// scheduled rewind. A persistent bad candidate chain is a peer/fork
 	// selection problem; the node should keep trying fresh ChainSync
 	// connections instead of halting the ledger pipeline.
-	recovered, err = ls.tryRecoverFromTxValidationError(validationErr)
+	recovered, err = ls.recoverAtTipFromTxValidationError(validationErr)
 	require.NoError(t, err)
 	require.True(t, recovered)
 	require.NotNil(t, ls.lastAtTipRecovery)
@@ -698,6 +707,71 @@ func TestTryRecoverFromTxValidationErrorAtTipDoesNotHoldOnSameBlockEscalation(
 		0.0,
 		promtestutil.ToFloat64(ls.metrics.atTipRecoveryNonConverging),
 	)
+}
+
+func TestAtTipRecoveryRepairsSameTipOnlyOnce(t *testing.T) {
+	t.Parallel()
+
+	ls, _ := newAtTipDescentLedger(t)
+	failure := atTipDescentFailure(500, "same-tip-repair")
+
+	generationBeforeFirst := ls.rewardInputGeneration.Load()
+	recovered, err := ls.tryRecoverFromTxValidationError(failure)
+	require.NoError(t, err)
+	require.True(t, recovered)
+	require.Greater(t, ls.rewardInputGeneration.Load(), generationBeforeFirst,
+		"the first failure at a tip must repair metadata")
+
+	generationBeforeRepeat := ls.rewardInputGeneration.Load()
+	recovered, err = ls.tryRecoverFromTxValidationError(failure)
+	require.NoError(t, err)
+	require.True(t, recovered)
+	require.Equal(t, generationBeforeRepeat, ls.rewardInputGeneration.Load(),
+		"an identical failure at the same tip must reuse the completed repair")
+}
+
+// tryRecoverFromTxValidationError tests isDeterministicTxValidationError
+// before IsAtTip, so an at-tip deterministic rejection is recovered by
+// recoverFromDeterministicTxValidationError rather than by
+// recoverAtTipFromTxValidationError. That site rewinds to the ledger tip it
+// already sits at, so it needs the same-tip repair, and the same
+// first-occurrence bound on it: the deterministic resync latch that already
+// stops peer rotation also gates the repair, so a redelivered identical
+// rejection reuses the restored state instead of re-running the sweep.
+func TestDeterministicRecoveryRepairsSameTipOnlyOnce(t *testing.T) {
+	t.Parallel()
+
+	ls := newReplayRecoveryAuditLedger(t, true)
+	ls.reachedTip.Store(true)
+	require.True(t, ls.IsAtTip())
+	failing := &txValidationError{
+		BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+		TxHash:     testHashBytes("duplicate-input-tx"),
+		Cause: shelley.DuplicateInputError{
+			Input: &replayRecoveryInput{
+				txId:  testHashBytes("duplicate-reference"),
+				index: 0,
+			},
+			InputType: "reference",
+		},
+	}
+
+	generationBeforeFirst := ls.rewardInputGeneration.Load()
+	recovered, err := ls.tryRecoverFromTxValidationError(failing)
+	require.NoError(t, err)
+	require.True(t, recovered)
+	require.Nil(t, ls.lastAtTipRecovery,
+		"the deterministic branch must be the site under test")
+	require.Greater(t, ls.rewardInputGeneration.Load(), generationBeforeFirst,
+		"the first deterministic rejection at a tip must repair metadata")
+
+	generationBeforeRepeat := ls.rewardInputGeneration.Load()
+	recovered, err = ls.tryRecoverFromTxValidationError(failing)
+	require.NoError(t, err)
+	require.True(t, recovered)
+	require.Equal(t, generationBeforeRepeat, ls.rewardInputGeneration.Load(),
+		"a redelivered identical deterministic rejection at the same tip "+
+			"must reuse the completed repair")
 }
 
 // TestTryRecoverFromTxValidationErrorAtTipResetsDescentOnForwardProgress
@@ -1596,8 +1670,8 @@ func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
 	require.False(t, ls.observeReplayRecoveryTip(ledgerTip.Point.Slot))
 	require.False(t, ls.observeReplayRecoveryTip(ledgerTip.Point.Slot))
 
-	recovered, err := ls.tryRecoverFromTxValidationError(
-		&txValidationError{
+	txErr := func() *txValidationError {
+		return &txValidationError{
 			BlockPoint: ocommon.NewPoint(
 				failingBlock.Slot,
 				failingBlock.Hash,
@@ -1610,10 +1684,15 @@ func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
 				},
 			},
 			Cause: errors.New("bad input"),
-		},
-	)
+		}
+	}
+
+	generationBeforeFirstHold := ls.rewardInputGeneration.Load()
+	recovered, err := ls.tryRecoverFromTxValidationError(txErr())
 	require.NoError(t, err)
 	require.True(t, recovered)
+	require.Greater(t, ls.rewardInputGeneration.Load(), generationBeforeFirstHold,
+		"the first held cycle must repair same-tip metadata")
 
 	require.True(t, ls.replayRecoveryHolding)
 	assert.Equal(
@@ -1643,6 +1722,13 @@ func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
 	)
 	assert.Equal(t, activeConnId.String(), freshResync.ConnectionId.String())
 	assert.Equal(t, ledgerTip.Point, freshResync.Point)
+
+	generationBeforeSecondHold := ls.rewardInputGeneration.Load()
+	recovered, err = ls.tryRecoverFromTxValidationError(txErr())
+	require.NoError(t, err)
+	require.True(t, recovered)
+	require.Equal(t, generationBeforeSecondHold, ls.rewardInputGeneration.Load(),
+		"a repeated held cycle at an unchanged tip must not repair again")
 }
 
 // newReplayRecoveryAuditLedger builds the fallback topology with an

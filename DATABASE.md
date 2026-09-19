@@ -3990,3 +3990,11 @@ fail-closed so rollback cannot reconstruct a live set below the recorded
 floor. `TruncateAfterSlot` restores spent UTxOs with an update. The
 `database/lifecycle.Truncate` refuses a target below the floor before
 `TruncateAfterSlot` begins, because already-deleted rows cannot be restored.
+
+# At-tip recovery repair
+
+At-tip validation recovery can explicitly run the metadata rollback sweep
+against the current durable tip when a failed block may have left spent UTxOs
+or other speculative rows above it. The first repair restores those rows;
+retries of the same failure reuse the repaired state instead of repeating the
+full sweep. Ordinary same-tip rollback remains a no-op.
