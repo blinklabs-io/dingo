@@ -961,8 +961,6 @@ func (b *Backfill) Run(ctx context.Context) error {
 
 		pp := b.getPParams(epochId)
 
-		// Process block. Nesting avoids early-continue so
-		// every path reaches the common tail below.
 		var blockTxCount int
 
 		parsedBlock, parseErr := gledger.NewBlockFromCbor(
@@ -974,11 +972,10 @@ func (b *Backfill) Run(ctx context.Context) error {
 		intervalStats.BlockReadDecode += time.Since(readDecodeStart)
 		intervalStats.Blocks++
 		if parseErr != nil {
-			b.logger.Warn(
-				"skipping unparseable block",
-				"component", "backfill",
-				"slot", blk.Slot,
-				"error", parseErr,
+			saveCommittedCheckpoint()
+			return fmt.Errorf(
+				"parsing block at slot %d: %w",
+				blk.Slot, parseErr,
 			)
 		} else {
 			point := ocommon.NewPoint(
@@ -1009,11 +1006,10 @@ func (b *Backfill) Run(ctx context.Context) error {
 				// Track CBOR offset discovery for txs and produced UTxOs.
 				intervalStats.OffsetComputation += time.Since(offsetStart)
 				if oErr != nil {
-					b.logger.Warn(
-						"skipping block with offset error",
-						"component", "backfill",
-						"slot", blk.Slot,
-						"error", oErr,
+					saveCommittedCheckpoint()
+					return fmt.Errorf(
+						"computing offsets for block at slot %d: %w",
+						blk.Slot, oErr,
 					)
 				} else {
 					// Store transaction metadata into the shared batch
