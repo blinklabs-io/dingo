@@ -405,6 +405,25 @@ func (s *Store) RebuildRewardLiveStake(
 	slot uint64,
 	txn types.Txn,
 ) error {
+	return s.rebuildRewardLiveStake(slot, txn, false)
+}
+
+// RebuildRewardLiveStakeFromRunningTotals finalizes the aggregate using the
+// running UTxO totals maintained during Mithril ledger-state import. It is
+// valid only after that import has completed: historical API replay preserves
+// the snapshot's live UTxO set while filling in transaction history.
+func (s *Store) RebuildRewardLiveStakeFromRunningTotals(
+	slot uint64,
+	txn types.Txn,
+) error {
+	return s.rebuildRewardLiveStake(slot, txn, true)
+}
+
+func (s *Store) rebuildRewardLiveStake(
+	slot uint64,
+	txn types.Txn,
+	fromRunningTotals bool,
+) error {
 	slotValue, err := checkedInt64(slot)
 	if err != nil {
 		return err
@@ -412,63 +431,120 @@ func (s *Store) RebuildRewardLiveStake(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
-			if _, err := db.ExecContext(
-				ctx,
-				"DELETE FROM reward_live_stake",
-			); err != nil {
-				return fmt.Errorf("clear reward live stake: %w", err)
+			if !fromRunningTotals {
+				if _, err := db.ExecContext(
+					ctx,
+					"DELETE FROM reward_live_stake",
+				); err != nil {
+					return fmt.Errorf("clear reward live stake: %w", err)
+				}
+			} else {
+				// A fresh Mithril import normally starts with an empty aggregate, but
+				// clearing orphan rows keeps the fast path correct if a prior run left
+				// aggregate state behind while its sync marker was lost.
+				if _, err := db.ExecContext(ctx, `
+DELETE FROM reward_live_stake
+WHERE NOT EXISTS (
+    SELECT 1 FROM account
+    WHERE account.credential_tag = reward_live_stake.credential_tag
+      AND account.staking_key = reward_live_stake.staking_key
+)
+AND NOT EXISTS (
+    SELECT 1 FROM utxo
+    WHERE utxo.deleted_slot = 0
+      AND utxo.staking_key IS NOT NULL
+      AND LENGTH(utxo.staking_key) > 0
+      AND utxo.credential_tag = reward_live_stake.credential_tag
+      AND utxo.staking_key = reward_live_stake.staking_key
+)`); err != nil {
+					return fmt.Errorf("clear orphan reward live stake: %w", err)
+				}
 			}
 			// Keep amount arithmetic in Go. SQL INTEGER is signed and cannot
 			// represent every valid lovelace value.
-			utxoRows, err := db.QueryContext(ctx,
-				`SELECT credential_tag, staking_key, amount FROM utxo
-WHERE deleted_slot = 0 AND staking_key IS NOT NULL AND LENGTH(staking_key) > 0`)
-			if err != nil {
-				return fmt.Errorf("load reward live stake UTxOs: %w", err)
-			}
 			type credentialKey struct {
 				tag uint8
 				key string
 			}
 			utxoStakes := make(map[credentialKey]uint64)
-			for utxoRows.Next() {
-				var tag uint8
-				var key []byte
-				var raw sql.NullString
-				if err := utxoRows.Scan(&tag, &key, &raw); err != nil {
-					utxoRows.Close()
-					return fmt.Errorf("scan reward live stake UTxO: %w", err)
-				}
-				if !raw.Valid || raw.String == "" {
-					continue
-				}
-				amount, err := parseUint64(
-					"reward live stake UTxO amount",
-					raw.String,
-				)
+			if !fromRunningTotals {
+				utxoRows, err := db.QueryContext(ctx,
+					`SELECT credential_tag, staking_key, amount FROM utxo
+WHERE deleted_slot = 0 AND staking_key IS NOT NULL AND LENGTH(staking_key) > 0`)
 				if err != nil {
-					utxoRows.Close()
-					return err
+					return fmt.Errorf("load reward live stake UTxOs: %w", err)
 				}
-				ref := credentialKey{tag: tag, key: string(key)}
-				if ^uint64(0)-utxoStakes[ref] < amount {
-					utxoRows.Close()
-					return fmt.Errorf(
-						"reward live stake UTxO overflow for credential %d:%x",
-						tag,
-						key,
+				for utxoRows.Next() {
+					var tag uint8
+					var key []byte
+					var raw sql.NullString
+					if err := utxoRows.Scan(&tag, &key, &raw); err != nil {
+						utxoRows.Close()
+						return fmt.Errorf("scan reward live stake UTxO: %w", err)
+					}
+					if !raw.Valid || raw.String == "" {
+						continue
+					}
+					amount, err := parseUint64(
+						"reward live stake UTxO amount",
+						raw.String,
 					)
+					if err != nil {
+						utxoRows.Close()
+						return err
+					}
+					ref := credentialKey{tag: tag, key: string(key)}
+					if ^uint64(0)-utxoStakes[ref] < amount {
+						utxoRows.Close()
+						return fmt.Errorf(
+							"reward live stake UTxO overflow for credential %d:%x",
+							tag,
+							key,
+						)
+					}
+					utxoStakes[ref] += amount
 				}
-				utxoStakes[ref] += amount
-			}
-			if err := utxoRows.Err(); err != nil {
-				utxoRows.Close()
-				return fmt.Errorf("iterate reward live stake UTxOs: %w", err)
-			}
-			if err := utxoRows.Close(); err != nil {
-				return fmt.Errorf("close reward live stake UTxOs: %w", err)
+				if err := utxoRows.Err(); err != nil {
+					utxoRows.Close()
+					return fmt.Errorf("iterate reward live stake UTxOs: %w", err)
+				}
+				if err := utxoRows.Close(); err != nil {
+					return fmt.Errorf("close reward live stake UTxOs: %w", err)
+				}
 			}
 
+			credentialSource := `
+    SELECT credential_tag, staking_key FROM account
+    UNION
+    SELECT credential_tag, staking_key FROM utxo
+    WHERE deleted_slot = 0
+      AND staking_key IS NOT NULL
+      AND LENGTH(staking_key) > 0`
+			utxoStakeSelect := "NULL"
+			hasLiveUtxoSelect := "FALSE"
+			runningTotalJoin := ""
+			if fromRunningTotals {
+				credentialSource = `
+    SELECT credential_tag, staking_key FROM account
+	UNION
+	SELECT credential_tag, staking_key FROM utxo
+	WHERE deleted_slot = 0
+	  AND staking_key IS NOT NULL
+	  AND LENGTH(staking_key) > 0`
+				utxoStakeSelect = "reward_live_stake.utxo_stake"
+				hasLiveUtxoSelect = `EXISTS (
+    SELECT 1 FROM utxo
+    WHERE utxo.deleted_slot = 0
+      AND utxo.staking_key IS NOT NULL
+      AND LENGTH(utxo.staking_key) > 0
+      AND utxo.credential_tag = creds.credential_tag
+      AND utxo.staking_key = creds.staking_key
+)`
+				runningTotalJoin = `
+LEFT JOIN reward_live_stake
+  ON reward_live_stake.credential_tag = creds.credential_tag
+ AND reward_live_stake.staking_key = creds.staking_key`
+			}
 			rows, err := db.QueryContext(ctx, `
 WITH latest_delegation AS (
     SELECT credential_tag, staking_key, pool_key_hash, added_slot,
@@ -516,22 +592,18 @@ SELECT creds.credential_tag, creds.staking_key,
        account.reward, account.active, account.added_slot,
        latest_delegation.added_slot,
        latest_delegation.block_index,
-       latest_delegation.cert_index
-FROM (
-    SELECT credential_tag, staking_key FROM account
-    UNION
-    SELECT credential_tag, staking_key FROM utxo
-    WHERE deleted_slot = 0
-      AND staking_key IS NOT NULL
-      AND LENGTH(staking_key) > 0
-) creds
+       latest_delegation.cert_index,
+       `+hasLiveUtxoSelect+`,
+       `+utxoStakeSelect+`
+FROM (`+credentialSource+`) creds
 LEFT JOIN account
   ON account.credential_tag = creds.credential_tag
  AND account.staking_key = creds.staking_key
 LEFT JOIN latest_delegation
   ON latest_delegation.credential_tag = account.credential_tag
  AND latest_delegation.staking_key = account.staking_key
-			 AND latest_delegation.pool_key_hash = account.pool`,
+				 AND latest_delegation.pool_key_hash = account.pool`+
+				runningTotalJoin,
 			)
 			if err != nil {
 				return fmt.Errorf("load reward live stake credentials: %w", err)
@@ -549,13 +621,17 @@ LEFT JOIN latest_delegation
 				delegationSlot  sql.NullInt64
 				delegationBlock sql.NullInt64
 				delegationCert  sql.NullInt64
+				hasLiveUtxo     bool
+				utxoStake       sql.NullString
 			}
 			credentials := make([]rewardLiveStakeCredential, 0)
 			for rows.Next() {
 				var credential rewardLiveStakeCredential
 				if err := rows.Scan(&credential.tag, &credential.key, &credential.pool,
 					&credential.reward, &credential.active, &credential.addedSlot,
-					&credential.delegationSlot, &credential.delegationBlock, &credential.delegationCert,
+					&credential.delegationSlot, &credential.delegationBlock,
+					&credential.delegationCert, &credential.hasLiveUtxo,
+					&credential.utxoStake,
 				); err != nil {
 					_ = rows.Close()
 					return fmt.Errorf(
@@ -585,6 +661,23 @@ LEFT JOIN latest_delegation
 				pool := credential.pool
 				ref := credentialKey{tag: tag, key: string(key)}
 				utxoStake := utxoStakes[ref]
+				if fromRunningTotals && credential.utxoStake.Valid {
+					utxoStake, err = parseUint64(
+						"reward live stake running UTxO total",
+						credential.utxoStake.String,
+					)
+					if err != nil {
+						return err
+					}
+				}
+				if fromRunningTotals && credential.hasLiveUtxo &&
+					!credential.utxoStake.Valid {
+					return fmt.Errorf(
+						"missing reward live stake running total for credential %d:%x",
+						tag,
+						key,
+					)
+				}
 				rewardStake := uint64(0)
 				if credential.reward.Valid && credential.reward.String != "" {
 					rewardStake, err = parseUint64(
