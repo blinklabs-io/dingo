@@ -35,7 +35,7 @@ var errRollbackEpochReloadInjected = errors.New(
 
 // getEpochsFailingMetadataStore fails GetEpochs while leaving every other
 // metadata operation -- including the rollback truncation itself -- working,
-// so the injected failure lands exactly where rollbackWithResync reloads
+// so the injected failure lands exactly where rollbackWithOptions reloads
 // epochCache/currentEra/currentPParams, after the metadata transaction that
 // performs the truncation has already committed.
 type getEpochsFailingMetadataStore struct {
@@ -50,7 +50,7 @@ func (s getEpochsFailingMetadataStore) GetEpochs(
 }
 
 // TestRollbackWithResyncFailsFastWhenEpochReloadFailsAfterCommit pins case R3
-// of blinklabs-io/dingo#1649: rollbackWithResync's post-commit reload of
+// of blinklabs-io/dingo#1649: rollbackWithOptions's post-commit reload of
 // epochCache/currentEra/currentPParams can fail after the metadata truncation
 // has already committed. Today that failure is logged at Warn and the
 // rollback still reports success (nil), leaving those in-memory caches at
@@ -150,7 +150,7 @@ func TestRollbackWithResyncSucceedsWithoutFatalWhenReloadWorks(t *testing.T) {
 }
 
 // epochsOverrideMetadataStore returns a fixed epoch list from the
-// transaction-less GetEpochs read rollbackWithResync performs after its
+// transaction-less GetEpochs read rollbackWithOptions performs after its
 // metadata transaction commits, so a test can steer that reload into a
 // specific era without writing epoch rows the truncation would delete.
 type epochsOverrideMetadataStore struct {
@@ -206,7 +206,7 @@ func (s syncStateReadFailingMetadataStore) GetSyncState(
 }
 
 // TestRollbackWithResyncFailsFastOnEachPostCommitReloadFailure covers every
-// post-commit reload failure rollbackWithResync reports, one injection each,
+// post-commit reload failure rollbackWithOptions reports, one injection each,
 // including a failure the durable tip-floor check runs into as well.
 func TestRollbackWithResyncFailsFastOnEachPostCommitReloadFailure(
 	t *testing.T,
