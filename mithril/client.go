@@ -710,22 +710,11 @@ func newMithrilClient(aggregatorURL string, allowInsecureHTTP bool) *Client {
 	return NewClient(aggregatorURL)
 }
 
-// httpsOnlyRedirect rejects redirects to non-HTTPS URLs to prevent
-// downgrade attacks and SSRF.
-func httpsOnlyRedirect(
-	req *http.Request,
-	via []*http.Request,
-) error {
-	return mithrilRedirectPolicy(nil, false)(req, via)
-}
-
 // requireSecureURL rejects a non-HTTPS rawURL. allowInsecureHTTP widens
 // that to also accept http, and only http — a malformed URL or any
-// other scheme is always rejected, escape hatch or not. It complements
-// httpsOnlyRedirect: that guards where a redirect may lead, this guards
-// the initial request, which a redirect policy never sees. label
-// identifies the URL's role (e.g. "mithril aggregator URL") in the
-// returned error.
+// other scheme is always rejected, escape hatch or not. It guards the
+// initial request, which a redirect policy never sees. label identifies
+// the URL's role (e.g. "mithril aggregator URL") in the returned error.
 func requireSecureURL(
 	rawURL string,
 	label string,

@@ -673,8 +673,8 @@ func TestDownloadSnapshotRejectsNegativeMaxIdleRetries(t *testing.T) {
 // TestDownloadSnapshotRejectsPlainHTTPByDefault proves a plain-HTTP
 // artifact URL is rejected before any request is attempted
 // (DSA-2026-04-24-03): the aggregator-supplied download location is
-// untrusted, so the scheme is checked up front rather than relying on
-// httpsOnlyRedirect, which only governs where a redirect may lead.
+// untrusted, so the scheme is checked up front rather than relying on a
+// redirect policy, which only governs where a redirect may lead.
 func TestDownloadSnapshotRejectsPlainHTTPByDefault(t *testing.T) {
 	t.Parallel()
 

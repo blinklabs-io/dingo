@@ -86,7 +86,7 @@ func secureMithrilHTTPTransport(
 	transport, ok := base.(*http.Transport)
 	if !ok {
 		return nil, fmt.Errorf(
-			"Mithril HTTP transport %T cannot enforce private-address restrictions",
+			"mithril HTTP transport %T cannot enforce private-address restrictions",
 			base,
 		)
 	}
