@@ -631,9 +631,12 @@ The record is bounded to 4096 blocks and 64 MiB of raw block fields. A larger
 rollback continues with live ordered delivery and logs that crash recovery is
 degraded instead of allocating and writing an unbounded JSON value. Consecutive
 deeper rollback windows merge their payloads into the pending record rather
-than overwriting an earlier window. An invalid, unsupported, ahead-of-ledger,
-or no-longer-canonical record is logged and cleared or replayed without making
-startup permanently fail on the same value.
+than overwriting an earlier window. A record that cannot drive a truncation --
+one whose point leads the applied ledger tip, or whose point has left the
+primary chain -- still emits its captured undo before it is retired, because
+the chain truncation that preceded it already deleted those bodies. Only an
+undecodable or unsupported record is dropped without delivery, and none of
+these outcomes makes startup permanently fail on the same value.
 
 When a lagging ledger iterator reports a rollback after `chain.Rollback` has
 already removed the abandoned blocks, the iterator result carries the chain's

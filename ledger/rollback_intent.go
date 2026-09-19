@@ -293,12 +293,18 @@ func (ls *LedgerState) recoverRollbackIntentLocked() error {
 	current := ls.currentTip.Point
 	ls.RUnlock()
 	if current.Slot < point.Slot {
+		// No metadata rollback is possible below the applied tip, but the
+		// captured bodies are the outbox's only copy: the chain truncation
+		// that preceded this record already deleted them. Deliver the undo
+		// before retiring the record, as the off-primary-chain branch below
+		// does, so the at-least-once contract holds on every exit.
 		ls.config.Logger.Warn(
-			"discarding rollback intent ahead of the applied ledger tip",
+			"replaying rollback undo whose intent leads the applied ledger tip",
 			"component", "ledger", "ledger_tip_slot", current.Slot,
 			"intent_slot", point.Slot,
 		)
-		return clearRollbackIntent(ls.db)
+		ls.emitRollbackTransactionEvents(blocks)
+		return ls.finishRollbackIntent()
 	}
 	if point.Slot > 0 {
 		contains, err := ls.primaryChainContainsPoint(point)

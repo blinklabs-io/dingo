@@ -502,8 +502,11 @@ delivery complete. Recovery is at-least-once and consumers must tolerate a
 duplicate undo after a crash. The durable payload is limited to 4096 blocks
 and 64 MiB of raw block fields; a larger rollback logs a degraded-recovery
 warning and continues with live delivery rather than writing an unbounded
-value. Malformed or unsupported records are logged and removed so one damaged
-notification record cannot permanently prevent startup.
+value. A record recovery cannot replay as a truncation -- its point leads the
+applied ledger tip, or has left the primary chain -- still has its captured
+undo delivered before the record is removed. Malformed or unsupported records
+are logged and removed so one damaged notification record cannot permanently
+prevent startup.
 
 The truncate deletion range ends at the newest block in the indexed blob chain, not at the metadata ledger tip. During live synchronization, BlockFetch can have persisted a speculative blob tail that the ledger has not applied yet. If the requested target equals the metadata tip, that tail must still be deleted; treating the operation as a no-op would leave non-contiguous block indexes visible after the live node rebuild and prevent ChainSync from making forward progress.
 

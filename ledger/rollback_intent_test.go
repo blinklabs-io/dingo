@@ -196,3 +196,147 @@ func TestRollbackUndoSurvivesMetadataTruncationFailure(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, targetTip, dbTip)
 }
+
+// TestRecoverRollbackIntentAheadOfLedgerDeliversUndo pins the at-least-once
+// outbox contract on the branch that cannot complete the rollback: an intent
+// whose point sits above the applied ledger tip has nothing left to truncate,
+// but its captured bodies are the only remaining record of blocks a consumer
+// was already told to apply, so they must be delivered before the record is
+// cleared.
+func TestRecoverRollbackIntentAheadOfLedgerDeliversUndo(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
+
+	blocks := loadTestBlocksWithTxs(t, 2)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	subID, txCh := bus.SubscribeWithBuffer(TransactionEventType, 64)
+	require.NotZero(t, subID)
+	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, subID) })
+
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+		EventBus:          bus,
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+
+	intentPoint := ocommon.NewPoint(blocks[0].Slot, blocks[0].Hash)
+	require.NoError(
+		t,
+		persistRollbackIntent(db, intentPoint, []models.Block{blocks[1]}),
+	)
+
+	// The applied ledger sits below the intent point, so no metadata rollback
+	// is possible and the record cannot be replayed as a rollback.
+	ls.currentTip = ochainsync.Tip{}
+	ls.currentTipBlockNonce = nil
+	require.NoError(t, ls.recoverRollbackIntent())
+
+	undoEvent := testutil.RequireReceive(
+		t, txCh, 2*time.Second,
+		"expected undo delivery for a discarded ahead-of-ledger intent",
+	)
+	undo, ok := undoEvent.Data.(TransactionEvent)
+	require.True(t, ok)
+	require.True(t, undo.Rollback)
+	require.Equal(t, blocks[1].Slot, undo.Point.Slot)
+	require.Equal(t, blocks[1].Hash, undo.Point.Hash)
+
+	_, _, pending, err := loadRollbackIntent(db)
+	require.NoError(t, err)
+	require.False(t, pending)
+}
+
+// TestEnsureRollbackIntentRetainsSupersededPayload pins the coalescing of a
+// deeper rollback onto a pending record. The first rollback's chain truncation
+// already deleted the bodies its intent captured, so re-reading the live chain
+// at the deeper point cannot see them; overwriting the record with that re-read
+// loses the only copy.
+func TestEnsureRollbackIntentRetainsSupersededPayload(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
+
+	blocks := loadTestBlocksWithTxs(t, 3)
+	raw := make([]chain.RawBlock, len(blocks))
+	for i, block := range blocks {
+		raw[i] = chain.RawBlock{
+			Slot:        block.Slot,
+			Hash:        append([]byte(nil), block.Hash...),
+			BlockNumber: block.Number,
+			Type:        block.Type,
+			Cbor:        append([]byte(nil), block.Cbor...),
+		}
+		if i > 0 {
+			raw[i].PrevHash = append([]byte(nil), raw[i-1].Hash...)
+		}
+	}
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks(raw))
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	subID, _ := bus.SubscribeWithBuffer(TransactionEventType, 64)
+	require.NotZero(t, subID)
+	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, subID) })
+
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+		EventBus:          bus,
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(raw[2].Slot, raw[2].Hash),
+		BlockNumber: raw[2].BlockNumber,
+	}
+	require.NoError(t, db.SetTip(tip, nil))
+	ls.currentTip = tip
+
+	middlePoint := ocommon.NewPoint(raw[1].Slot, raw[1].Hash)
+	require.NoError(t, ls.validateAndEmitRollbackUndo(middlePoint))
+	_, firstBlocks, pending, err := loadRollbackIntent(db)
+	require.NoError(t, err)
+	require.True(t, pending)
+	require.Len(t, firstBlocks, 1)
+	require.Equal(t, blocks[2].Slot, firstBlocks[0].Slot)
+
+	// The chain truncation that follows the first intent deletes the captured
+	// body, so it exists nowhere else once the record is rewritten.
+	require.NoError(t, cm.PrimaryChain().Rollback(middlePoint))
+	stillThere, err := ls.readBlocksAboveSlot(middlePoint.Slot)
+	require.NoError(t, err)
+	require.Empty(t, stillThere)
+
+	deeperPoint := ocommon.NewPoint(raw[0].Slot, raw[0].Hash)
+	require.NoError(t, ls.ensureRollbackIntent(deeperPoint, nil))
+
+	gotPoint, gotBlocks, pending, err := loadRollbackIntent(db)
+	require.NoError(t, err)
+	require.True(t, pending)
+	require.Equal(t, deeperPoint, gotPoint)
+	gotSlots := make([]uint64, 0, len(gotBlocks))
+	for _, block := range gotBlocks {
+		gotSlots = append(gotSlots, block.Slot)
+	}
+	require.ElementsMatch(
+		t,
+		[]uint64{blocks[1].Slot, blocks[2].Slot},
+		gotSlots,
+		"a deeper rollback must retain the superseded record's payload",
+	)
+}
