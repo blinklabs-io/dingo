@@ -1176,8 +1176,7 @@ func utxoIDPredicate(ids []models.UtxoId) (string, []any) {
 // deleted_slot index over tx_id_output_idx for larger batches. The caller
 // filters the returned rows to the requested output indexes before updating
 // their primary keys in the same write transaction.
-func utxoRowIDsByTxIDQuery(ids []models.UtxoId) (string, []any) {
-	txIDs, _ := distinctUtxoTxIDs(ids)
+func utxoRowIDsByTxIDQuery(txIDs [][]byte) (string, []any) {
 	args := make([]any, len(txIDs))
 	for i, txID := range txIDs {
 		args[i] = txID
@@ -1202,46 +1201,45 @@ func queryUtxoRowIDs(
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	_, wanted := distinctUtxoTxIDs(ids)
+	txIDs, wanted := distinctUtxoTxIDs(ids)
 	rowIDs := make([]int64, 0, len(ids))
 	seen := make(map[int64]struct{}, len(ids))
-	for start := 0; start < len(ids); start += 400 {
-		end := min(start+400, len(ids))
-		query, args := utxoRowIDsByTxIDQuery(ids[start:end])
+	for start := 0; start < len(txIDs); start += 400 {
+		end := min(start+400, len(txIDs))
+		query, args := utxoRowIDsByTxIDQuery(txIDs[start:end])
 		rows, err := db.QueryContext(ctx, query, args...)
 		if err != nil {
 			return nil, err
 		}
-		for rows.Next() {
-			var rowID int64
-			var txID []byte
-			var outputIdx sql.NullInt64
-			if err := rows.Scan(&rowID, &txID, &outputIdx); err != nil {
-				rows.Close()
-				return nil, err
-			}
-			if !outputIdx.Valid || outputIdx.Int64 < 0 ||
-				outputIdx.Int64 > math.MaxUint32 {
-				continue
-			}
-			outputs, ok := wanted[string(txID)]
-			if !ok {
-				continue
-			}
-			if _, ok := outputs[uint32(outputIdx.Int64)]; ok {
-				if _, ok := seen[rowID]; ok {
+		scanErr := func() error {
+			defer rows.Close()
+			for rows.Next() {
+				var rowID int64
+				var txID []byte
+				var outputIdx sql.NullInt64
+				if err := rows.Scan(&rowID, &txID, &outputIdx); err != nil {
+					return err
+				}
+				if !outputIdx.Valid || outputIdx.Int64 < 0 ||
+					outputIdx.Int64 > math.MaxUint32 {
 					continue
 				}
-				seen[rowID] = struct{}{}
-				rowIDs = append(rowIDs, rowID)
+				outputs, ok := wanted[string(txID)]
+				if !ok {
+					continue
+				}
+				if _, ok := outputs[uint32(outputIdx.Int64)]; ok {
+					if _, ok := seen[rowID]; ok {
+						continue
+					}
+					seen[rowID] = struct{}{}
+					rowIDs = append(rowIDs, rowID)
+				}
 			}
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		if err := rows.Close(); err != nil {
-			return nil, err
+			return rows.Err()
+		}()
+		if scanErr != nil {
+			return nil, scanErr
 		}
 	}
 	return rowIDs, nil
