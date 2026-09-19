@@ -98,6 +98,11 @@ type Backfill struct {
 	// volatile suffix are left for the normal validating ledger pipeline.
 	endSlot    uint64
 	endSlotSet bool
+	// useRunningTotalsFinalization is enabled only by the Mithril API import
+	// path, whose preceding ledger-state import established a complete live
+	// UTxO running total. Ordinary API backfill may start from a database that
+	// never had that invariant, so it retains the authoritative rebuild.
+	useRunningTotalsFinalization bool
 
 	// Counters surfaced in the completion log to make the optimisation
 	// observable.
@@ -194,6 +199,13 @@ func (b *Backfill) SetImmutableUtxoOffsetsTipSlot(slot uint64) {
 func (b *Backfill) SetEndSlot(slot uint64) {
 	b.endSlot = slot
 	b.endSlotSet = true
+}
+
+// SetUseRunningTotalsFinalization enables the Mithril-only final aggregate
+// merge. Callers must have populated reward_live_stake from a complete trusted
+// ledger-state UTxO import before running historical backfill.
+func (b *Backfill) SetUseRunningTotalsFinalization(enabled bool) {
+	b.useRunningTotalsFinalization = enabled
 }
 
 // NeedsBackfill checks if there's an incomplete backfill checkpoint.
@@ -1092,12 +1104,18 @@ func (b *Backfill) Run(ctx context.Context) error {
 		saveCommittedCheckpoint()
 		return err
 	}
-	// Historical replay intentionally leaves the imported snapshot reward
-	// balances untouched and skips per-transaction live-stake refreshes. The
-	// derived aggregate is rebuilt once from canonical account and live-UTxO
-	// metadata after all historical rows are present, avoiding millions of
-	// repeated indexed UTxO sums during API backfill.
-	if err := b.db.RebuildRewardLiveStake(tipSlot, nil); err != nil {
+	var rebuildErr error
+	if b.useRunningTotalsFinalization {
+		// Historical replay intentionally leaves the imported snapshot live UTxO
+		// set untouched and skips per-transaction live-stake refreshes. The
+		// ledger-state importer already maintained one running total per live
+		// credential, so merge the final account/delegation state into those
+		// totals instead of scanning every live UTxO again.
+		rebuildErr = b.db.RebuildRewardLiveStakeFromRunningTotals(tipSlot, nil)
+	} else {
+		rebuildErr = b.db.RebuildRewardLiveStake(tipSlot, nil)
+	}
+	if err := rebuildErr; err != nil {
 		saveCommittedCheckpoint()
 		return fmt.Errorf(
 			"rebuilding reward live stake after backfill: %w",
