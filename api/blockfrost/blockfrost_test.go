@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	cardano "github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -3544,15 +3545,10 @@ INSERT INTO address_transaction (
 	assert.Nil(t, info.StakeAddress)
 }
 
-func TestKeyScriptStakeAddressDerivation(t *testing.T) {
+func TestNodeAdapterKeyScriptStakeAddress(t *testing.T) {
 	t.Parallel()
 
-	// gouroboros StakeAddress() now resolves type-2 base addresses (key
-	// payment / script staking) directly (blinklabs-io/gouroboros#2328);
-	// the adapter no longer needs its own fallback derivation for this
-	// case. Assert the two stay equivalent so a gouroboros regression
-	// back to the old nil-for-KeyScript behavior is caught here rather
-	// than as a missing StakeAddress in production responses.
+	adapter, store, db := newDBBackedAdapter(t)
 	paymentHash := bytes.Repeat([]byte{0x01}, lcommon.AddressHashSize)
 	stakeScriptHash := bytes.Repeat([]byte{0x02}, lcommon.AddressHashSize)
 	addr, err := lcommon.NewAddressFromParts(
@@ -3562,23 +3558,102 @@ func TestKeyScriptStakeAddressDerivation(t *testing.T) {
 		stakeScriptHash,
 	)
 	require.NoError(t, err)
-	stakeAddr := addr.StakeAddress()
-	require.NotNil(t, stakeAddr)
+	utxo := models.Utxo{
+		TxId:          fill32(0x31),
+		PaymentKey:    paymentHash,
+		StakingKey:    stakeScriptHash,
+		CredentialTag: 1,
+		AddedSlot:     10,
+		Amount:        types.Uint64(1_000_000),
+	}
+	insertAdapterUtxo(t, store, &utxo)
+	storePointerOutputCbor(t, db, utxo.TxId, 0, addr, 1_000_000)
+
+	info, err := adapter.Address(addr.String())
+	require.NoError(t, err)
+	require.NotNil(t, info.StakeAddress)
+	assert.True(t, strings.HasPrefix(*info.StakeAddress, "stake_test17"))
+
+	stakeAddr, err := lcommon.NewAddress(*info.StakeAddress)
+	require.NoError(t, err)
+	assert.Equal(t, uint(lcommon.AddressNetworkTestnet), stakeAddr.NetworkId())
+	assert.Equal(t, uint8(lcommon.AddressTypeNoneScript), stakeAddr.Type())
+	assert.Equal(t, stakeScriptHash, stakeAddr.StakeKeyHash().Bytes())
+
+	mainnetCfg, err := cardano.NewCardanoNodeConfigFromEmbedFS(
+		cardano.EmbeddedConfigFS,
+		"mainnet/config.json",
+	)
+	require.NoError(t, err)
+	mainnetAdapter, mainnetStore, mainnetDB := newDBBackedAdapter(t, mainnetCfg)
+	mainnetAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyScript,
+		lcommon.AddressNetworkMainnet,
+		paymentHash,
+		stakeScriptHash,
+	)
+	require.NoError(t, err)
+	mainnetUtxo := utxo
+	insertAdapterUtxo(t, mainnetStore, &mainnetUtxo)
+	storePointerOutputCbor(t, mainnetDB, mainnetUtxo.TxId, 0, mainnetAddr, 1_000_000)
+
+	mainnetInfo, err := mainnetAdapter.Address(mainnetAddr.String())
+	require.NoError(t, err)
+	require.NotNil(t, mainnetInfo.StakeAddress)
+	assert.True(t, strings.HasPrefix(*mainnetInfo.StakeAddress, "stake17"))
+	mainnetStakeAddr, err := lcommon.NewAddress(*mainnetInfo.StakeAddress)
+	require.NoError(t, err)
+	mainnetStakeBytes, err := mainnetStakeAddr.Bytes()
+	require.NoError(t, err)
+	assert.Equal(t, uint8(0xf1), mainnetStakeBytes[0])
+
+	keyStakeHash := bytes.Repeat([]byte{0x03}, lcommon.AddressHashSize)
+	keyAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyKey,
+		lcommon.AddressNetworkTestnet,
+		paymentHash,
+		keyStakeHash,
+	)
+	require.NoError(t, err)
+	keyUtxo := models.Utxo{
+		TxId:          fill32(0x32),
+		PaymentKey:    paymentHash,
+		StakingKey:    keyStakeHash,
+		CredentialTag: 0,
+		AddedSlot:     10,
+		Amount:        types.Uint64(1_000_000),
+	}
+	insertAdapterUtxo(t, store, &keyUtxo)
+	storePointerOutputCbor(t, db, keyUtxo.TxId, 0, keyAddr, 1_000_000)
+
+	keyInfo, err := adapter.Address(keyAddr.String())
+	require.NoError(t, err)
+	require.NotNil(t, keyInfo.StakeAddress)
+	assert.True(t, strings.HasPrefix(*keyInfo.StakeAddress, "stake_test1u"))
+	keyStakeAddr, err := lcommon.NewAddress(*keyInfo.StakeAddress)
+	require.NoError(t, err)
+	assert.Equal(t, uint8(lcommon.AddressTypeNoneKey), keyStakeAddr.Type())
+	assert.Equal(t, keyStakeHash, keyStakeAddr.StakeKeyHash().Bytes())
+}
+
+func TestKeyScriptStakeAddressDerivation(t *testing.T) {
+	// Keep direct coverage of the script-credential branch used when the
+	// adapter derives a stake address from a base address.
+	stakeScriptHash := bytes.Repeat([]byte{0x02}, lcommon.AddressHashSize)
 
 	encoded, err := stakeAddressFromCredential(
 		lcommon.Credential{
 			CredType:   lcommon.CredentialTypeScriptHash,
-			Credential: lcommon.CredentialHash(addr.StakeKeyHash()),
+			Credential: lcommon.CredentialHash(stakeScriptHash),
 		},
 		lcommon.AddressNetworkTestnet,
 	)
 	require.NoError(t, err)
 	assert.True(t, strings.HasPrefix(encoded, "stake_test17"))
-	assert.Equal(t, encoded, stakeAddr.String())
 
-	decoded, err := lcommon.NewAddress(encoded)
+	stakeAddr, err := lcommon.NewAddress(encoded)
 	require.NoError(t, err)
-	assert.Equal(t, stakeScriptHash, decoded.StakeKeyHash().Bytes())
+	assert.Equal(t, stakeScriptHash, stakeAddr.StakeKeyHash().Bytes())
 }
 
 func TestHandleAddress(t *testing.T) {

@@ -7,10 +7,11 @@ on:
       - 'v*.*.*'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  # Never interrupt a tag release after publication has started. Branch image
-  # builds can be superseded by a newer main push.
-  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+  # Main runs build images and binaries but do not publish release artifacts.
+  # Give each main run its own group so a newer push cannot cancel the
+  # backstop for an earlier merged commit. Keep every other ref serialized.
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.ref }}
+  cancel-in-progress: false
 
 env:
   APPLICATION_NAME: 'dingo'
@@ -109,12 +110,12 @@ jobs:
           AWS_ENDPOINT: "http://127.0.0.1:9000/"
           AWS_REGION: us-east-1
           DINGO_TEST_S3_BUCKET: dingo-test
-        run: go test -tags dingo_extra_plugins -ldflags="-s -w" -timeout 30m ./...
+        run: go test -v -tags dingo_extra_plugins -ldflags="-s -w" -timeout 30m ./...
       - name: go-test-race
         # Optional service backends are deliberately unconfigured here. This
         # matches go-test.yml's race job while retaining a finite package-level
         # hang guard for the complete SQLite-backed race suite.
-        run: go test -tags dingo_extra_plugins -ldflags="-s -w" -race -timeout 30m ./...
+        run: go test -v -tags dingo_extra_plugins -ldflags="-s -w" -race -timeout 30m ./...
       - name: govulncheck
         run: make govulncheck
 
@@ -235,7 +236,7 @@ jobs:
         # same link-size optimization and explicit package timeout used by the
         # Linux release validation job, and cap the job so a stuck test cannot
         # hold the release indefinitely.
-        run: go test -ldflags="-s -w" -timeout 20m ./...
+        run: go test -v -ldflags="-s -w" -timeout 20m ./...
 
   build-binaries:
     strategy:

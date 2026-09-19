@@ -23,11 +23,13 @@ import (
 	"log/slog"
 	"math/big"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	nodeconfig "github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -1242,10 +1244,15 @@ func TestTryRecoverFromTxValidationErrorRecoversDependencyClosure(
 	)
 	require.NoError(t, db.SetTip(currentTip, nil))
 
+	// This recovery test uses a synthetic Shelley-only cache. Keep the config
+	// Shelley-only so the forecast shape does not alter recovery semantics.
+	recoveryCfg := &nodeconfig.CardanoNodeConfig{}
+	err = recoveryCfg.LoadShelleyGenesisFromReader(strings.NewReader(`{"activeSlotsCoeff":0.05,"securityParam":432,"slotsPerKESPeriod":129600,"systemStart":"2022-10-25T00:00:00Z"}`))
+	require.NoError(t, err)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
-		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+		CardanoNodeConfig: recoveryCfg,
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
 		),
@@ -1735,6 +1742,55 @@ func TestReplayRecoveryArmsAuditAfterPrimaryAndLedgerRewind(t *testing.T) {
 	window := ls.continuationAudit.Load()
 	require.NotNil(t, window)
 	assert.Equal(t, ls.Tip().Point, window.forkPoint)
+}
+
+func TestReplayRecoveryRefusesBelowPruneFloorBeforeChainRewind(t *testing.T) {
+	ls := newReplayRecoveryAuditLedger(t, true)
+	const pruneFloorSyncKey = database.ConsumedUtxoPruneFloorSyncKey
+	require.NoError(t, ls.db.SetSyncState(pruneFloorSyncKey, "120", nil))
+	chainTipBefore := ls.chain.Tip().Point
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
+	resyncSubID := bus.SubscribeFunc(
+		event.ChainsyncResyncEventType,
+		func(evt event.Event) {
+			resync, ok := evt.Data.(event.ChainsyncResyncEvent)
+			if ok && resync.Reason ==
+				event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor {
+				resyncCh <- resync
+			}
+		},
+	)
+	t.Cleanup(func() {
+		bus.Unsubscribe(event.ChainsyncResyncEventType, resyncSubID)
+	})
+	ls.config.EventBus = bus
+
+	recovered, err := ls.tryRecoverFromTxValidationError(&txValidationError{
+		BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+		TxHash:     testHashBytes("audit-prune-floor-failing-tx"),
+		Inputs: []lcommon.TransactionInput{
+			&replayRecoveryInput{txId: testHashBytes("missing-audit-producer")},
+		},
+		Cause: errors.New("bad input"),
+	})
+
+	require.NoError(t, err)
+	require.True(t, recovered)
+	require.Equal(t, chainTipBefore, ls.chain.Tip().Point)
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		2*time.Second,
+		"replay recovery must request a fresh ChainSync intersection below the prune floor",
+	)
+	require.Less(
+		t,
+		resync.Point.Slot,
+		uint64(120),
+		"the refused replay target must remain below the persisted prune floor",
+	)
 }
 
 func TestReplayRecoveryRejectsDeterministicDuplicateInput(t *testing.T) {

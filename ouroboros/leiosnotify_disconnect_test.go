@@ -118,9 +118,15 @@ func TestLeiosNotifyConnectionCleanupPreservesAnotherOwner(t *testing.T) {
 	first := new(leiosnotify.Server)
 	second := new(leiosnotify.Server)
 	log.registerConn("peer", first, nil)
-	log.append(leiosForgedEBEntry{point: &ocommon.Point{Slot: 1, Hash: []byte{1}}})
+	log.append(
+		leiosForgedEBEntry{point: &ocommon.Point{Slot: 1, Hash: []byte{1}}},
+	)
 	entry, _ := log.nextWhileConnected("peer", second, nil)
-	require.Nil(t, entry, "an unpublished owner must not take over a live cursor")
+	require.Nil(
+		t,
+		entry,
+		"an unpublished owner must not take over a live cursor",
+	)
 	log.removeConnOwned("peer", second)
 	require.Contains(t, log.cursors, "peer")
 	require.Same(t, first, log.owners["peer"])
@@ -288,7 +294,9 @@ func TestLeiosNotifyStaleRegistrationCannotReplaceLiveOwner(t *testing.T) {
 	oldOwner := new(leiosnotify.Server)
 	liveOwner := new(leiosnotify.Server)
 	log.registerConn("peer", liveOwner, nil)
-	log.append(leiosForgedEBEntry{point: &ocommon.Point{Slot: 1, Hash: []byte{1}}})
+	log.append(
+		leiosForgedEBEntry{point: &ocommon.Point{Slot: 1, Hash: []byte{1}}},
+	)
 	entry, _ := log.nextWhileConnected("peer", liveOwner, nil)
 	require.NotNil(t, entry)
 	reservation := log.reservations["peer"]
@@ -387,6 +395,58 @@ func TestLeiosNotifyDisconnectAfterOfferReturnReleasesCursor(t *testing.T) {
 		1,
 		"undelivered offer must remain retryable",
 	)
+}
+
+func TestLeiosNotifyOfferKeepsConnectionClosureObserver(t *testing.T) {
+	t.Parallel()
+
+	o := newOuroboros(OuroborosConfig{})
+	server := leiosnotify.NewServer(protocol.ProtocolOptions{}, nil)
+	t.Cleanup(server.Stop)
+	connectionDone := make(chan any)
+	connID := gouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001},
+		RemoteAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3002},
+	}
+	key := leiosConnectionIdString(connID)
+	type result struct {
+		msg protocol.Message
+		err error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		msg, err := o.leiosnotifyServerRequestNext(leiosnotify.CallbackContext{
+			Server:             server,
+			ConnectionId:       connID,
+			ConnectionDoneChan: connectionDone,
+		})
+		resultCh <- result{msg: msg, err: err}
+	}()
+	testutil.WaitForCondition(t, func() bool {
+		o.leiosEBLog.mu.Lock()
+		defer o.leiosEBLog.mu.Unlock()
+		_, registered := o.leiosEBLog.cursors[key]
+		return registered
+	}, time.Second, "request-next callback to register its cursor")
+	point := ocommon.NewPoint(1, []byte{1})
+	o.leiosEBLog.append(leiosForgedEBEntry{point: &point})
+	got := testutil.RequireReceive(
+		t,
+		resultCh,
+		time.Second,
+		"request-next callback to return an offer",
+	)
+	require.NoError(t, got.err)
+	require.NotNil(t, got.msg)
+	require.Contains(t, o.leiosEBLog.cursors, key)
+
+	close(connectionDone)
+	testutil.WaitForCondition(t, func() bool {
+		o.leiosEBLog.mu.Lock()
+		defer o.leiosEBLog.mu.Unlock()
+		_, retained := o.leiosEBLog.cursors[key]
+		return !retained
+	}, time.Second, "connection observer to remove returned offer cursor")
 }
 
 func TestLeiosNotifyCompletedProtocolReturnsWithoutCursor(t *testing.T) {

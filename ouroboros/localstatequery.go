@@ -225,11 +225,18 @@ func (o *Ouroboros) localstatequeryServerAcquire(
 		}
 		o.localstatequeryAcquireMutex.Lock()
 		o.localstatequeryAcquiredPoints[ctx.ConnectionId] = point
+		if o.localstatequeryOwners == nil {
+			o.localstatequeryOwners = make(
+				map[ouroboros.ConnectionId]*olocalstatequery.Server,
+			)
+		}
+		o.localstatequeryOwners[ctx.ConnectionId] = ctx.Server
 		o.localstatequeryAcquireMutex.Unlock()
 		return nil
 	}
 	o.localstatequeryAcquireMutex.Lock()
 	delete(o.localstatequeryAcquiredPoints, ctx.ConnectionId)
+	delete(o.localstatequeryOwners, ctx.ConnectionId)
 	o.localstatequeryAcquireMutex.Unlock()
 	return nil
 }
@@ -257,25 +264,44 @@ func (o *Ouroboros) localstatequeryServerQuery(
 func (o *Ouroboros) localstatequeryServerRelease(
 	ctx olocalstatequery.CallbackContext,
 ) error {
-	o.localstatequeryAcquireMutex.Lock()
-	delete(o.localstatequeryAcquiredPoints, ctx.ConnectionId)
-	o.localstatequeryAcquireMutex.Unlock()
+	o.releaseLocalStateQueryAcquiredPointOwner(ctx.ConnectionId, ctx.Server)
 	return nil
 }
 
-// ReleaseLocalStateQueryAcquiredPoint clears connId's pinned point, the same
-// cleanup localstatequeryServerRelease performs for a clean client Release.
-// A NtC client that disconnects without ever calling Release skips that
-// callback entirely, so without this the map entry would otherwise persist
-// until this Ouroboros instance itself is discarded -- a one-entry-per-
-// pinned-client leak. Called from the node's NtC connection-closed callback
-// (handleConnManagerClosed), the NtC counterpart to HandleConnClosedEvent's
-// equivalent cleanup for NtN closes.
+func (o *Ouroboros) releaseLocalStateQueryAcquiredPointOwner(
+	connId ouroboros.ConnectionId,
+	owner *olocalstatequery.Server,
+) {
+	o.localstatequeryAcquireMutex.Lock()
+	defer o.localstatequeryAcquireMutex.Unlock()
+	_, ok := o.localstatequeryAcquiredPoints[connId]
+	currentOwner := o.localstatequeryOwners[connId]
+	if !ok || (currentOwner != nil && currentOwner != owner) {
+		return
+	}
+	delete(o.localstatequeryAcquiredPoints, connId)
+	delete(o.localstatequeryOwners, connId)
+}
+
+// ReleaseLocalStateQueryAcquiredPointOwner clears connId's pinned point only
+// when owner still owns it. An ownerless entry is cleared by any close, which
+// supports state created before owner tracking or by test helpers.
+func (o *Ouroboros) ReleaseLocalStateQueryAcquiredPointOwner(
+	connId ouroboros.ConnectionId,
+	owner *olocalstatequery.Server,
+) {
+	o.releaseLocalStateQueryAcquiredPointOwner(connId, owner)
+}
+
+// ReleaseLocalStateQueryAcquiredPoint unconditionally clears connId's pinned
+// point. It is retained for tests and whole-instance cleanup; live connection
+// close handling uses ReleaseLocalStateQueryAcquiredPointOwner.
 func (o *Ouroboros) ReleaseLocalStateQueryAcquiredPoint(
 	connId ouroboros.ConnectionId,
 ) {
 	o.localstatequeryAcquireMutex.Lock()
 	delete(o.localstatequeryAcquiredPoints, connId)
+	delete(o.localstatequeryOwners, connId)
 	o.localstatequeryAcquireMutex.Unlock()
 }
 
@@ -289,6 +315,7 @@ func (o *Ouroboros) SetLocalStateQueryAcquiredPointForTesting(
 ) {
 	o.localstatequeryAcquireMutex.Lock()
 	o.localstatequeryAcquiredPoints[connId] = point
+	delete(o.localstatequeryOwners, connId)
 	o.localstatequeryAcquireMutex.Unlock()
 }
 

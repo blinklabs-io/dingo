@@ -1407,6 +1407,16 @@ type CertificateStore interface {
 	// the given slot. This is used during chain rollbacks to undo certificate
 	// state changes.
 	DeleteCertificatesAfterSlot(uint64, types.Txn) error
+
+	// SetCommitteeAuthImmutableSlot records the live rollback-safe immutable
+	// slot -- the slot of the block securityParam blocks behind the current
+	// tip -- that committee hot-key authorization pruning uses to bound its
+	// retention window. known false means no live value is available and
+	// pruning falls back to its slot-window assumption alone. The
+	// certificate store cannot resolve this itself (sqlstore cannot import
+	// chain), so a periodic caller outside the database package pushes it in;
+	// see committee_prune.go for the retention rule this feeds.
+	SetCommitteeAuthImmutableSlot(slot uint64, known bool)
 }
 
 // MetadataStore composes every capability for callers that predate the

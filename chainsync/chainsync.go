@@ -226,7 +226,8 @@ type State struct {
 	config        Config
 
 	// Server-side clients (node-to-client connections)
-	clients map[ouroboros.ConnectionId]*ChainsyncClientState
+	clients      map[ouroboros.ConnectionId]*ChainsyncClientState
+	clientOwners map[ouroboros.ConnectionId]*ochainsync.Server
 
 	// Tracked outbound clients (node-to-node connections)
 	trackedClients     map[ouroboros.ConnectionId]*TrackedClient
@@ -310,6 +311,7 @@ func NewStateWithConfig(
 		chainProvider:  chainProvider,
 		config:         cfg,
 		clients:        make(map[ouroboros.ConnectionId]*ChainsyncClientState),
+		clientOwners:   make(map[ouroboros.ConnectionId]*ochainsync.Server),
 		trackedClients: make(map[ouroboros.ConnectionId]*TrackedClient),
 		seenHeaders:    make(map[uint64][]headerRecord),
 		observedHeaders: make(
@@ -338,11 +340,19 @@ func NewStateWithConfig(
 func (s *State) AddClient(
 	connId connection.ConnectionId,
 	intersectPoint ocommon.Point,
+	owners ...*ochainsync.Server,
 ) (*ChainsyncClientState, error) {
 	s.Lock()
 	defer s.Unlock()
+	var owner *ochainsync.Server
+	if len(owners) > 0 {
+		owner = owners[0]
+	}
 	// Return existing client state if already registered
 	if existing, ok := s.clients[connId]; ok {
+		if owner != nil {
+			s.clientOwners[connId] = owner
+		}
 		return existing, nil
 	}
 	// Create initial chainsync state for connection
@@ -362,6 +372,9 @@ func (s *State) AddClient(
 		Cursor:               intersectPoint,
 		ChainIter:            chainIter,
 		NeedsInitialRollback: true,
+	}
+	if owner != nil {
+		s.clientOwners[connId] = owner
 	}
 	return s.clients[connId], nil
 }
@@ -409,6 +422,28 @@ func (s *State) RemoveClient(connId connection.ConnectionId) {
 	}
 	// Remove client state entry
 	delete(s.clients, connId)
+	delete(s.clientOwners, connId)
+}
+
+// RemoveClientOwner removes a client only when the close belongs to its
+// currently registered server instance. An entry created without an owner is
+// still removable, closing the AddClient-to-owner registration race for legacy
+// and test callers.
+func (s *State) RemoveClientOwner(
+	connId connection.ConnectionId,
+	owner *ochainsync.Server,
+) {
+	s.Lock()
+	defer s.Unlock()
+	if current, ok := s.clientOwners[connId]; ok && current != owner {
+		return
+	}
+	if clientState := s.clients[connId]; clientState != nil &&
+		clientState.ChainIter != nil {
+		clientState.ChainIter.Cancel()
+	}
+	delete(s.clients, connId)
+	delete(s.clientOwners, connId)
 }
 
 // GetClientConnId returns the active chainsync client

@@ -214,17 +214,23 @@ func deriveRewardInputs(
 		totalDelegators += agg.delegators
 	}
 
+	// This basis excludes no pool: every pool it could aggregate from the
+	// import is included in poolInputs, so TotalActiveStake is exactly their
+	// summed delegated stake with nothing held back (dingo #4025).
+	noExcludedActiveStake := types.Uint64(0)
+
 	return &rewardInputBundle{
 		epoch: epoch,
 		snapshot: &models.RewardSnapshot{
-			Epoch:              epoch,
-			SnapshotType:       "mark",
-			TotalActiveStake:   types.Uint64(totalStake),
-			TotalPoolCount:     uint64(len(poolInputs)),
-			TotalDelegators:    totalDelegators,
-			CapturedSlot:       capturedSlot,
-			BoundarySlot:       boundarySlot,
-			CalculationVersion: models.RewardStakeCalculationVersion,
+			Epoch:               epoch,
+			SnapshotType:        "mark",
+			TotalActiveStake:    types.Uint64(totalStake),
+			ExcludedActiveStake: &noExcludedActiveStake,
+			TotalPoolCount:      uint64(len(poolInputs)),
+			TotalDelegators:     totalDelegators,
+			CapturedSlot:        capturedSlot,
+			BoundarySlot:        boundarySlot,
+			CalculationVersion:  models.RewardStakeCalculationVersion,
 			// Provisional, not authoritative: this basis was reconstructed
 			// from an imported snapshot rather than captured at this node's
 			// own SNAP point, so a later authoritative capture must be free

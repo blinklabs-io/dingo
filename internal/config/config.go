@@ -641,6 +641,13 @@ type Config struct {
 	// diagnostic use only (e.g. repeated restarts against a database already
 	// known to be consistent).
 	//
+	// reward_live_stake.utxo_stake is a running total maintained
+	// incrementally by the block-application path (dingo #4421), so this
+	// check is also the only automatic reconciliation of that total against
+	// the live UTxO set. Skipping it leaves any drift in place for the whole
+	// life of the process, including across the epoch boundaries whose stake
+	// snapshots consume it.
+	//
 	// It does not affect the stake-snapshot provenance check that runs in the
 	// same startup step: that one is cheap, indexed, and fails closed, so it
 	// runs unconditionally.
@@ -699,6 +706,8 @@ type Config struct {
 	InboundCooldown          time.Duration `yaml:"inboundCooldown"          envconfig:"DINGO_INBOUND_COOLDOWN"`
 	MaxConnectionsPerIP      int           `yaml:"maxConnectionsPerIP"      envconfig:"DINGO_MAX_CONNECTIONS_PER_IP"`
 	MaxInboundConns          int           `yaml:"maxInboundConns"          envconfig:"DINGO_MAX_INBOUND_CONNS"`
+	MaxNtCConns              int           `yaml:"maxNtCConns"              envconfig:"DINGO_MAX_NTC_CONNS"`
+	MaxNtCConnectionsPerIP   int           `yaml:"maxNtCConnectionsPerIP"   envconfig:"DINGO_MAX_NTC_CONNECTIONS_PER_IP"`
 
 	// Cache configuration for the tiered CBOR cache system
 	Cache CacheConfig `yaml:"cache"`
@@ -1082,6 +1091,11 @@ type MithrilConfig struct {
 	// incremental Cardano database artifacts; "v1" uses the legacy full
 	// snapshot archives, which upstream Mithril is phasing out.
 	Backend string `yaml:"backend"                envconfig:"DINGO_MITHRIL_BACKEND"`
+	// PinnedDigest selects an exact Mithril artifact for a fresh bootstrap: a
+	// v1 snapshot digest or v2 Cardano database artifact hash. It is rejected
+	// for catch-up runs and may not conflict with the durable artifact pin used
+	// to resume an interrupted import.
+	PinnedDigest string `yaml:"pinnedDigest"           envconfig:"DINGO_MITHRIL_PINNED_DIGEST"`
 	// DownloadDir is the directory where snapshot archives are downloaded.
 	// If empty, a randomized temporary directory is created automatically.
 	DownloadDir string `yaml:"downloadDir"            envconfig:"DINGO_MITHRIL_DOWNLOAD_DIR"`
