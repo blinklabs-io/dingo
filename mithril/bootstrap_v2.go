@@ -882,12 +882,14 @@ func downloadImmutables(
 	// archive. Sized to the worker count; idle connections are closed
 	// when the pool finishes. Carried on the (by-value) cfg so each
 	// fetchImmutableArchive call reuses it without a signature change.
-	dlTransport := newPooledDownloadTransport(immutableDownloadWorkers)
+	dlTransport := newPooledDownloadTransport(
+		immutableDownloadWorkers,
+		cfg.AllowInsecureHTTP,
+	)
 	defer dlTransport.CloseIdleConnections()
 	cfg.httpClient = &http.Client{
-		Timeout:       0,
-		Transport:     dlTransport,
-		CheckRedirect: httpsOnlyRedirect,
+		Timeout:   0,
+		Transport: dlTransport,
 	}
 
 	// Optional download<->processing pipeline: chunks are fetched in
