@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -488,8 +489,8 @@ func TestWithTxValidationSessionSurfacesStorageFaultOverNilVerdict(
 	err := ls.WithTxValidationSession(func(
 		validate func(
 			tx lcommon.Transaction,
-			consumedUtxos map[string]struct{},
-			createdUtxos map[string]lcommon.Utxo,
+			consumedUtxos map[utxoref.Key]struct{},
+			createdUtxos map[utxoref.Key]lcommon.Utxo,
 		) error,
 		stillCurrent func() bool,
 	) error {
@@ -571,6 +572,7 @@ func TestLedgerProcessBlockSurfacesStorageFaultOverRuleVerdict(t *testing.T) {
 					testEra,
 					nil,
 					nil,
+					0,
 					0,
 					false,
 				)

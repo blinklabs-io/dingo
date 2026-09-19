@@ -69,6 +69,13 @@ const (
 	// is the key safety valve that guarantees the node can never pin to a
 	// non-progressing peer forever.
 	catchUpPinStallTimeout = 20 * time.Second
+
+	// defaultSwitchBackCooldown is the default minimum time between
+	// discretionary releases of the anti-flap pin (see
+	// pinIncumbentDuringCatchUpLocked): per connection, before an abandoned
+	// peer may reclaim the active connection, and globally, between any two
+	// discretionary hand-offs. See ChainSelectorConfig.SwitchBackCooldown.
+	defaultSwitchBackCooldown = 2 * time.Second
 )
 
 // safeBlockDiff computes the difference between two block numbers as int64,
@@ -95,6 +102,29 @@ func safeUint64ToInt64(v uint64) int64 {
 	}
 	return int64(v)
 }
+
+// RollbackRegistrationOutcome is the result of handling a chainsync rollback
+// for a connection the selector is not tracking (see
+// registerPeerFromRollbackLocked). It is reported to
+// ChainSelectorConfig.OnRollbackRegistration so the composition layer can count
+// registrations and refusals without chainselection depending on a metrics
+// library.
+type RollbackRegistrationOutcome string
+
+const (
+	// RollbackRegistrationRegistered means the peer was registered from the
+	// rollback and is now visible to chain selection.
+	RollbackRegistrationRegistered RollbackRegistrationOutcome = "registered"
+	// RollbackRegistrationClosedConnection means the rollback arrived for a
+	// connection that is no longer live, so no entry was created.
+	RollbackRegistrationClosedConnection RollbackRegistrationOutcome = "rejected_closed_connection"
+	// RollbackRegistrationImplausibleTip means the advertised tip failed the
+	// same plausibility bound the roll-forward path applies to a new peer.
+	RollbackRegistrationImplausibleTip RollbackRegistrationOutcome = "rejected_implausible_tip"
+	// RollbackRegistrationAtCapacity means the tracked-peer table was full and
+	// no peer could be evicted to make room.
+	RollbackRegistrationAtCapacity RollbackRegistrationOutcome = "rejected_at_capacity"
+)
 
 // ChainSelectorConfig holds configuration for the ChainSelector.
 type ChainSelectorConfig struct {
@@ -124,6 +154,27 @@ type ChainSelectorConfig struct {
 	// connection and whether any samples exist. Used only to choose a
 	// peer when two peers advertise the exact same selected block.
 	BlockfetchLatency func(ouroboros.ConnectionId) (time.Duration, bool)
+	// OnRollbackRegistration is called, outside the selector lock, with the
+	// outcome of every attempt to register a peer from a chainsync rollback for
+	// an untracked connection. Optional; the composition layer uses it to
+	// export a counter.
+	OnRollbackRegistration func(RollbackRegistrationOutcome)
+	// SwitchBackCooldown bounds the rate of active-connection handoffs
+	// driven by the anti-flap pin's discretionary escapes -- longer-chain
+	// and progress-stall (pinIncumbentDuringCatchUpLocked). Once the active
+	// connection moves away from a peer, that peer cannot reclaim it through
+	// either escape until this much time has passed, and no discretionary
+	// hand-off to any connection happens within this much time of the
+	// previous one, even if the challenger currently leads by more than
+	// catchUpPinHeadMargin. This is a rate limit, not a correctness rule --
+	// the challenger is still adopted once the cooldown expires, and the
+	// mandatory incumbent-unselectable release is never gated -- and it
+	// exists because peers whose delivered frontiers repeatedly leapfrog each
+	// other by more than the margin can otherwise hand the chainsync/
+	// blockfetch pipeline back and forth on every such crossing. 0 (the
+	// zero value) is replaced with defaultSwitchBackCooldown by
+	// NewChainSelector, matching EvaluationInterval and StaleTipThreshold.
+	SwitchBackCooldown time.Duration
 }
 
 // ChainSelector tracks chain tips from multiple peers and selects the best
@@ -155,6 +206,33 @@ type ChainSelector struct {
 	localTipProgressAt    time.Time
 	// nowFn is injectable for deterministic tests; defaults to time.Now.
 	nowFn func() time.Time
+
+	// switchBackCooldown is the resolved value of
+	// ChainSelectorConfig.SwitchBackCooldown (defaulted by NewChainSelector).
+	switchBackCooldown time.Duration
+	// recentlyLeft records, per connection, when the active connection last
+	// moved away from it. Read and written under mutex. See
+	// switchBackDebouncedLocked and recordSwitchAwayLocked.
+	recentlyLeft map[ouroboros.ConnectionId]time.Time
+	// lastDiscretionarySwitchAt records when the active connection last moved
+	// away from an incumbent via a DISCRETIONARY release of
+	// pinIncumbentDuringCatchUpLocked (the longer-chain or progress-stall
+	// escape) -- never via the mandatory incumbent-unselectable release, which
+	// must stay instantaneous. It is the global counterpart to recentlyLeft:
+	// recentlyLeft alone only debounces handing the connection BACK to the
+	// SPECIFIC peer just abandoned, so three or more peers whose delivered
+	// frontiers take turns marginally leading each other can rotate through
+	// the debounce forever -- by the time evaluation returns to a given
+	// connection, it is never the one "just" left, so switchBackDebouncedLocked
+	// never fires for it, even though the active connection is still handed
+	// off roughly once per cooldown window with zero net forward progress
+	// (confirmed live: three peers thrashing every ~2s, block height frozen).
+	// Gating every discretionary release on this single timestamp bounds the
+	// active-connection handoff rate to at most once per switchBackCooldown
+	// regardless of how many distinct peers are rotating through it. Read and
+	// written under mutex. See switchBackDebouncedLocked and
+	// recordSwitchAwayLocked.
+	lastDiscretionarySwitchAt time.Time
 
 	// lastCorroborationFailedConn dedups GenesisCorroborationFailedEvent so a
 	// persistently uncorroborated fast source does not emit an event on every
@@ -222,6 +300,9 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 	if cfg.StaleTipThreshold == 0 {
 		cfg.StaleTipThreshold = defaultStaleTipThreshold
 	}
+	if cfg.SwitchBackCooldown == 0 {
+		cfg.SwitchBackCooldown = defaultSwitchBackCooldown
+	}
 	maxPeers := cfg.MaxTrackedPeers
 	if maxPeers <= 0 {
 		maxPeers = DefaultMaxTrackedPeers
@@ -239,15 +320,17 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 		cfg.MinCorroboratingPeers = 1
 	}
 	cs := &ChainSelector{
-		config:            cfg,
-		securityParam:     cfg.SecurityParam,
-		maxTrackedPeers:   maxPeers,
-		mode:              SelectionModePraos,
-		peerTips:          make(map[ouroboros.ConnectionId]*PeerChainTip),
-		eligible:          make(map[ouroboros.ConnectionId]bool),
-		priority:          make(map[ouroboros.ConnectionId]int),
-		evaluationTrigger: make(chan struct{}, 1),
-		nowFn:             time.Now,
+		config:             cfg,
+		securityParam:      cfg.SecurityParam,
+		maxTrackedPeers:    maxPeers,
+		mode:               SelectionModePraos,
+		peerTips:           make(map[ouroboros.ConnectionId]*PeerChainTip),
+		eligible:           make(map[ouroboros.ConnectionId]bool),
+		priority:           make(map[ouroboros.ConnectionId]int),
+		evaluationTrigger:  make(chan struct{}, 1),
+		nowFn:              time.Now,
+		switchBackCooldown: cfg.SwitchBackCooldown,
+		recentlyLeft:       make(map[ouroboros.ConnectionId]time.Time),
 	}
 	if cfg.GenesisMode {
 		cs.mode = SelectionModeGenesis
@@ -336,6 +419,16 @@ func (cs *ChainSelector) bestKnownGenesisSlotLocked() uint64 {
 	var best uint64
 	for connId, pt := range cs.peerTips {
 		if !cs.isPeerSelectableLocked(connId, pt, false) {
+			continue
+		}
+		// A peer registered from a rollback has delivered no header: its
+		// ObservedTip is the intersection point the node itself proposed, so
+		// crediting it as delivered evidence would let any peer that
+		// re-intersects at the local tip and advertises a tip within the
+		// window force an immediate Genesis exit. That is precisely what the
+		// delivered-vs-advertised guard below exists to prevent, so such a
+		// peer raises no exit horizon until its first header arrives.
+		if pt.awaitingFirstHeader {
 			continue
 		}
 		advertised := pt.Tip.Point.Slot
@@ -466,104 +559,9 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
 
-		// Reject implausible delivered frontiers that jump too far ahead of a
-		// trusted reference point. Before any local block has been applied,
-		// retain the advertised-tip bound as well: the first peer bootstraps the
-		// reference, and later peers cannot immediately inject a far claim. Once
-		// a local tip exists, the advertisement can legitimately be arbitrarily
-		// far ahead during catch-up; only its delivered frontier drives
-		// selection and must remain plausible. Three cases:
-		//  1. Known peer: compare against the peer's own previous
-		//     observed frontier — chainsync advances incrementally so the delta
-		//     is always small. Always checked (even if prev == 0).
-		//  2. New peer with existing peers: compare against the
-		//     best observed peer frontier to prevent a malicious newcomer
-		//     from injecting an extremely high delivered block number.
-		//  3. First peer ever: no reference exists, accept to
-		//     allow bootstrap.
-		if cs.securityParam > 0 {
-			// Callers without a distinct delivered frontier pass the
-			// advertised tip for both values, as UpdatePeerTip does. An
-			// all-zero delivered frontier therefore means the peer has
-			// delivered nothing, and is bounded as block 0 rather than
-			// being credited with its untrusted advertisement.
-			observedBlock := observedTip.BlockNumber
-			observedReject := false
-			advertisedReject := false
-			hasReference := false
-			var referenceBlock uint64
-			var advertisedReferenceBlock uint64
-			var maxPlausibleBlock uint64
-			var maxPlausibleAdvertisedBlock uint64
-			if prevTip, exists := cs.peerTips[connId]; exists {
-				// Case 1: known peer — compare against the peer's own
-				// previous delivered frontier.
-				hasReference = true
-				referenceBlock = prevTip.SelectionTip().BlockNumber
-				advertisedReferenceBlock = prevTip.Tip.BlockNumber
-			} else if len(cs.peerTips) > 0 {
-				// Case 2: new peer — check against the best observed and
-				// advertised frontiers separately.
-				hasReference = true
-				for _, pt := range cs.peerTips {
-					blockNumber := pt.SelectionTip().BlockNumber
-					if blockNumber > referenceBlock {
-						referenceBlock = blockNumber
-					}
-					if pt.Tip.BlockNumber > advertisedReferenceBlock {
-						advertisedReferenceBlock = pt.Tip.BlockNumber
-					}
-				}
-			}
-			if hasReference {
-				maxPlausibleBlock = safeAddUint64(
-					referenceBlock,
-					cs.securityParam,
-				)
-				observedReject = observedBlock > maxPlausibleBlock
-				maxPlausibleAdvertisedBlock = safeAddUint64(
-					advertisedReferenceBlock,
-					cs.securityParam,
-				)
-				advertisedReject = tip.BlockNumber >
-					maxPlausibleAdvertisedBlock
-			}
-			// Catch-up relaxation: after a stall, recorded peer tips
-			// go stale while the network advances. A peer whose
-			// delta from the stale reference exceeds K looks
-			// implausible, but the network legitimately moved on.
-			// Accept the tip if it is within 2*K of the local tip
-			// AND the reference itself is stale (reference <=
-			// local tip, meaning the node hasn't updated peer
-			// records since the stall began).
-			if observedReject && cs.localTip.BlockNumber > 0 &&
-				referenceBlock <= cs.localTip.BlockNumber {
-				maxPlausibleBlock = safeAddUint64(
-					cs.localTip.BlockNumber,
-					safeAddUint64(cs.securityParam, cs.securityParam),
-				)
-				observedReject = observedBlock > maxPlausibleBlock
-			}
-			// Case 3: len(peerTips)==0 && peer not known → bootstrap
-			if observedReject ||
-				(advertisedReject && cs.localTip.BlockNumber == 0) {
-				cs.config.Logger.Warn(
-					"rejecting implausible peer tip",
-					"connection_id", connId.String(),
-					"claimed_block", tip.BlockNumber,
-					"observed_block", observedBlock,
-					"reference_block", referenceBlock,
-					"advertised_reference_block",
-					advertisedReferenceBlock,
-					"local_block", cs.localTip.BlockNumber,
-					"security_param", cs.securityParam,
-					"max_plausible_block", maxPlausibleBlock,
-					"max_plausible_advertised_block",
-					maxPlausibleAdvertisedBlock,
-				)
-				accepted = false
-				return
-			}
+		if !cs.checkPeerTipPlausibleLocked(connId, tip, observedTip) {
+			accepted = false
+			return
 		}
 
 		trackHashes := cs.genesisCorroborationActiveLocked()
@@ -584,19 +582,11 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 				safeAddUint64(cs.securityParam, 1),
 			)
 		} else {
-			// Evict the least-recently-updated peer if at capacity
-			if len(cs.peerTips) >= cs.maxTrackedPeers {
-				evictedConn = cs.evictLeastRecentPeerLocked()
-				if evictedConn == nil {
-					cs.config.Logger.Warn(
-						"cannot accept new peer: at capacity and best peer is the only tracked peer",
-						"connection_id", connId.String(),
-						"peer_count", len(cs.peerTips),
-						"max_tracked_peers", cs.maxTrackedPeers,
-					)
-					accepted = false
-					return
-				}
+			var ok bool
+			evictedConn, ok = cs.makeRoomForNewPeerLocked(connId)
+			if !ok {
+				accepted = false
+				return
 			}
 			peerTip := &PeerChainTip{
 				ConnectionId:   connId,
@@ -670,6 +660,155 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 	}
 
 	return true
+}
+
+// checkPeerTipPlausibleLocked reports whether a tip observation from connId
+// may be recorded, applying the shared plausibility bound used by every path
+// that records a peer frontier (roll forward and the roll-backward
+// registration of a peer that has no entry yet). It logs and returns false
+// when the observation is rejected. Callers must hold cs.mutex.
+func (cs *ChainSelector) checkPeerTipPlausibleLocked(
+	connId ouroboros.ConnectionId,
+	tip ochainsync.Tip,
+	observedTip ochainsync.Tip,
+) bool {
+	// Reject implausible delivered frontiers that jump too far ahead of a
+	// trusted reference point. Before any local block has been applied,
+	// retain the advertised-tip bound as well: the first peer bootstraps the
+	// reference, and later peers cannot immediately inject a far claim. Once
+	// a local tip exists, the advertisement can legitimately be arbitrarily
+	// far ahead during catch-up; only its delivered frontier drives
+	// selection and must remain plausible. Three cases:
+	//  1. Known peer: compare against the peer's own previous
+	//     observed frontier — chainsync advances incrementally so the delta
+	//     is always small. Always checked (even if prev == 0).
+	//  2. New peer with existing peers: compare against the
+	//     best observed peer frontier to prevent a malicious newcomer
+	//     from injecting an extremely high delivered block number.
+	//  3. First peer ever: no reference exists, accept to
+	//     allow bootstrap.
+	//
+	// A peer registered from a chainsync rollback has delivered no header, so
+	// it is not a reference for anyone, including itself: counting its zero
+	// delivered frontier would turn case 3 into a reference of 0 and reject
+	// the next peer's first legitimate header, and counting its unverified
+	// advertisement would raise the bootstrap advertised bound. It is bounded
+	// like a brand-new peer when its own first header arrives.
+	if cs.securityParam > 0 {
+		// Callers without a distinct delivered frontier pass the
+		// advertised tip for both values, as UpdatePeerTip does. An
+		// all-zero delivered frontier therefore means the peer has
+		// delivered nothing, and is bounded as block 0 rather than
+		// being credited with its untrusted advertisement.
+		observedBlock := observedTip.BlockNumber
+		observedReject := false
+		advertisedReject := false
+		hasReference := false
+		var referenceBlock uint64
+		var advertisedReferenceBlock uint64
+		var maxPlausibleBlock uint64
+		var maxPlausibleAdvertisedBlock uint64
+		prevTip, known := cs.peerTips[connId]
+		if known && prevTip.awaitingFirstHeader {
+			known = false
+		}
+		if known {
+			// Case 1: known peer — compare against the peer's own
+			// previous delivered frontier.
+			hasReference = true
+			referenceBlock = prevTip.SelectionTip().BlockNumber
+			advertisedReferenceBlock = prevTip.Tip.BlockNumber
+		} else if len(cs.peerTips) > 0 {
+			// Case 2: new peer — check against the best observed and
+			// advertised frontiers separately.
+			for _, pt := range cs.peerTips {
+				if pt.awaitingFirstHeader {
+					continue
+				}
+				hasReference = true
+				blockNumber := pt.SelectionTip().BlockNumber
+				if blockNumber > referenceBlock {
+					referenceBlock = blockNumber
+				}
+				if pt.Tip.BlockNumber > advertisedReferenceBlock {
+					advertisedReferenceBlock = pt.Tip.BlockNumber
+				}
+			}
+		}
+		if hasReference {
+			maxPlausibleBlock = safeAddUint64(
+				referenceBlock,
+				cs.securityParam,
+			)
+			observedReject = observedBlock > maxPlausibleBlock
+			maxPlausibleAdvertisedBlock = safeAddUint64(
+				advertisedReferenceBlock,
+				cs.securityParam,
+			)
+			advertisedReject = tip.BlockNumber >
+				maxPlausibleAdvertisedBlock
+		}
+		// Catch-up relaxation: after a stall, recorded peer tips
+		// go stale while the network advances. A peer whose
+		// delta from the stale reference exceeds K looks
+		// implausible, but the network legitimately moved on.
+		// Accept the tip if it is within 2*K of the local tip
+		// AND the reference itself is stale (reference <=
+		// local tip, meaning the node hasn't updated peer
+		// records since the stall began).
+		if observedReject && cs.localTip.BlockNumber > 0 &&
+			referenceBlock <= cs.localTip.BlockNumber {
+			maxPlausibleBlock = safeAddUint64(
+				cs.localTip.BlockNumber,
+				safeAddUint64(cs.securityParam, cs.securityParam),
+			)
+			observedReject = observedBlock > maxPlausibleBlock
+		}
+		// Case 3: len(peerTips)==0 && peer not known → bootstrap
+		if observedReject ||
+			(advertisedReject && cs.localTip.BlockNumber == 0) {
+			cs.config.Logger.Warn(
+				"rejecting implausible peer tip",
+				"connection_id", connId.String(),
+				"claimed_block", tip.BlockNumber,
+				"observed_block", observedBlock,
+				"reference_block", referenceBlock,
+				"advertised_reference_block",
+				advertisedReferenceBlock,
+				"local_block", cs.localTip.BlockNumber,
+				"security_param", cs.securityParam,
+				"max_plausible_block", maxPlausibleBlock,
+				"max_plausible_advertised_block",
+				maxPlausibleAdvertisedBlock,
+			)
+			return false
+		}
+	}
+	return true
+}
+
+// makeRoomForNewPeerLocked makes room in the tracked-peer table for a new
+// entry for connId, evicting the least-recently-updated peer when the table
+// is at capacity. It returns the evicted connection (nil when no eviction was
+// needed) and whether there is room; the caller publishes PeerEvictedEvent for
+// a non-nil eviction outside the lock. Callers must hold cs.mutex.
+func (cs *ChainSelector) makeRoomForNewPeerLocked(
+	connId ouroboros.ConnectionId,
+) (*ouroboros.ConnectionId, bool) {
+	if len(cs.peerTips) < cs.maxTrackedPeers {
+		return nil, true
+	}
+	evicted := cs.evictLeastRecentPeerLocked()
+	if evicted == nil {
+		cs.config.Logger.Warn(
+			"cannot accept new peer: at capacity and best peer is the only tracked peer",
+			"connection_id", connId.String(),
+			"peer_count", len(cs.peerTips),
+			"max_tracked_peers", cs.maxTrackedPeers,
+		)
+		return nil, false
+	}
+	return evicted, true
 }
 
 func (cs *ChainSelector) TouchPeerActivity(connId ouroboros.ConnectionId) {
@@ -772,6 +911,7 @@ func (cs *ChainSelector) deletePeerLocked(connId ouroboros.ConnectionId) {
 	delete(cs.peerTips, connId)
 	delete(cs.eligible, connId)
 	delete(cs.priority, connId)
+	delete(cs.recentlyLeft, connId)
 }
 
 // RemovePeer removes a peer from tracking.
@@ -1110,55 +1250,71 @@ func (cs *ChainSelector) isPeerSelectableLocked(
 		return false
 	}
 	selectionTip := peerTip.SelectionTip()
-	if cs.securityParam > 0 && cs.localTip.BlockNumber > 0 &&
-		safeAddUint64(selectionTip.BlockNumber, cs.securityParam) <
-			cs.localTip.BlockNumber {
-		if logSkip {
-			cs.config.Logger.Debug(
-				"skipping implausibly-behind peer",
-				"connection_id", connId.String(),
-				"peer_block_number", selectionTip.BlockNumber,
-				"local_block_number", cs.localTip.BlockNumber,
-				"security_param", cs.securityParam,
-			)
-		}
-		return false
-	}
-	// Skip peers whose tip is far behind the best known peer tip.
-	// During catch-up, switching to a behind peer causes pipeline
-	// stalls and dropped rollbacks that cost minutes of sync time.
-	// Use securityParam (K) as the threshold — peers within K blocks
-	// of the best are acceptable (normal fork variance), but peers
-	// further behind are not useful for syncing.
-	//
-	// The gap is measured on DELIVERED frontiers, which is a transport
-	// property: it says how many headers each peer has served us so far, not
-	// what chain each peer holds. Two peers that advertise the identical
-	// canonical tip are TREATED AS the same chain unless retained delivered
-	// history contradicts them (see sameCanonicalChain), so a delivered-frontier
-	// gap between them is read as delivery speed and must not make either one
-	// ineligible.
-	// Excluding the trailing peer here also excluded the incumbent, which
-	// skipped the anti-flap pin entirely (see pinIncumbentDuringCatchUpLocked)
-	// and let the active connection flap between two canonical public roots.
-	if cs.securityParam > 0 {
-		bestBlock := cs.bestKnownBlockNumber()
-		if bestBlock > 0 &&
-			safeAddUint64(
-				selectionTip.BlockNumber,
-				cs.securityParam,
-			) < bestBlock &&
-			!cs.frontierLeadIsTransportOnlyLocked(peerTip, bestBlock) {
+	// The two behind-filters below compare delivered block numbers. A peer
+	// registered from a rollback has not delivered a header yet, so its
+	// delivered block number is 0 meaning "unknown", not "at block 0"; reading
+	// it as a block number would skip the peer until its next MsgRollForward,
+	// which is exactly the post-recycle chain-selection stall this exemption
+	// exists to avoid. Such a peer still never outranks one with a real
+	// delivered frontier: block 0 loses every Praos comparison, so it can only
+	// be selected when nothing better is tracked.
+	if !peerTip.awaitingFirstHeader {
+		if cs.securityParam > 0 && cs.localTip.BlockNumber > 0 &&
+			safeAddUint64(selectionTip.BlockNumber, cs.securityParam) <
+				cs.localTip.BlockNumber {
 			if logSkip {
 				cs.config.Logger.Debug(
-					"skipping peer behind best known tip",
+					"skipping implausibly-behind peer",
 					"connection_id", connId.String(),
 					"peer_block_number", selectionTip.BlockNumber,
-					"best_known_block", bestBlock,
+					"local_block_number", cs.localTip.BlockNumber,
 					"security_param", cs.securityParam,
 				)
 			}
 			return false
+		}
+		// Skip peers whose tip is far behind the best known peer tip.
+		// During catch-up, switching to a behind peer causes pipeline
+		// stalls and dropped rollbacks that cost minutes of sync time.
+		// Use securityParam (K) as the threshold — peers within K blocks
+		// of the best are acceptable (normal fork variance), but peers
+		// further behind are not useful for syncing.
+		//
+		// The gap is measured on DELIVERED frontiers, which is a transport
+		// property: it says how many headers each peer has served us so far,
+		// not what chain each peer holds. Two peers that advertise the
+		// identical canonical tip are TREATED AS the same chain unless
+		// retained delivered history contradicts them (see
+		// sameCanonicalChain), so a delivered-frontier gap between them is
+		// read as delivery speed and must not make either one ineligible.
+		// Excluding the trailing peer here also excluded the incumbent, which
+		// skipped the anti-flap pin entirely (see
+		// pinIncumbentDuringCatchUpLocked) and let the active connection flap
+		// between two canonical public roots.
+		//
+		// A peer awaiting its first header is already exempt from this filter
+		// (outer branch) and can never be the leading frontier this escape
+		// compares against: its delivered block number is 0, and the escape
+		// only considers leaders holding a bestBlock > 0 frontier.
+		if cs.securityParam > 0 {
+			bestBlock := cs.bestKnownBlockNumber()
+			if bestBlock > 0 &&
+				safeAddUint64(
+					selectionTip.BlockNumber,
+					cs.securityParam,
+				) < bestBlock &&
+				!cs.frontierLeadIsTransportOnlyLocked(peerTip, bestBlock) {
+				if logSkip {
+					cs.config.Logger.Debug(
+						"skipping peer behind best known tip",
+						"connection_id", connId.String(),
+						"peer_block_number", selectionTip.BlockNumber,
+						"best_known_block", bestBlock,
+						"security_param", cs.securityParam,
+					)
+				}
+				return false
+			}
 		}
 	}
 	// Genesis corroboration gate: a fast source must be corroborated by the
@@ -1657,10 +1813,17 @@ func (cs *ChainSelector) localTipStalledLocked() bool {
 //     near-genesis behavior and existing tests unchanged.
 //   - the incumbent is no longer selectable (gone/disconnected/ineligible/
 //     stale/implausible).
+//   - the incumbent was registered from a rollback and has not delivered a
+//     header yet (awaitingFirstHeader) — it has no head to micro-fork from, so
+//     a real delivered frontier always replaces it.
 //   - the applied local tip has stalled past catchUpPinStallTimeout
 //     (progress-aware escape — cannot pin to a dead peer forever).
 //   - the challenger is genuinely ahead of the incumbent by more than
 //     catchUpPinHeadMargin blocks (a real longer chain, not a head micro-fork).
+//
+// The last two releases are DISCRETIONARY and are rate-limited by
+// SwitchBackCooldown, both per abandoned connection and globally across every
+// discretionary hand-off; the releases above them are mandatory and ungated.
 //
 // Otherwise it PINS (returns true, keep the incumbent).
 //
@@ -1668,6 +1831,7 @@ func (cs *ChainSelector) localTipStalledLocked() bool {
 func (cs *ChainSelector) pinIncumbentDuringCatchUpLocked(
 	previousBest ouroboros.ConnectionId,
 	incumbentTip *PeerChainTip,
+	challengerConn ouroboros.ConnectionId,
 	challengerTip *PeerChainTip,
 ) bool {
 	// Inactive near genesis / before any local tip has been applied.
@@ -1677,38 +1841,159 @@ func (cs *ChainSelector) pinIncumbentDuringCatchUpLocked(
 	if incumbentTip == nil || challengerTip == nil {
 		return false
 	}
+	// Release if the incumbent was registered from a rollback and has not
+	// delivered a header yet. Such a peer has no head to micro-fork from, so
+	// there is nothing for the anti-flap pin to protect: it is selectable only
+	// because nothing better was tracked, and a peer with a real delivered
+	// frontier must always be able to take the pipeline from it. The
+	// longer-chain escape below cannot do that on its own, because the
+	// incumbent's selection block number is 0 ("nothing delivered yet"), so
+	// every challenger within catchUpPinHeadMargin of genesis still pins.
+	if incumbentTip.awaitingFirstHeader {
+		return false
+	}
 	// Release if the incumbent is no longer a viable selection target.
+	// Release if the incumbent is no longer a viable selection target. This is
+	// a MANDATORY release, never subject to the switch-back debounce below:
+	// there is no "keeping" a connection that is gone, ineligible, stale, or
+	// implausible, whoever the challenger is.
 	if !cs.isPeerSelectableLocked(previousBest, incumbentTip, false) {
 		return false
 	}
-	// Progress-aware escape: never pin to a stalled incumbent forever.
-	if cs.localTipStalledLocked() {
-		return false
-	}
-	// Longer-chain escape: a challenger genuinely taller than the incumbent
-	// by more than the head margin is a real longer chain, not a sibling
-	// head-fork — release so the node converges to it promptly.
+
+	// Every release condition below is DISCRETIONARY: the incumbent is still
+	// alive and selectable, and the escape is a per-evaluation judgment call
+	// that the challenger looks better right now. Both existing escapes have
+	// no memory of very recent switches, so both are gated by the same
+	// switch-back debounce: refuse to hand the active connection back to a
+	// peer abandoned less than switchBackCooldown ago (switchBackDebouncedLocked,
+	// per-connection), AND refuse ANY discretionary hand-off at all less than
+	// switchBackCooldown after the previous one, to whichever connection
+	// (switchBackRateLimitedLocked, global). The per-connection check alone
+	// stops two peers ping-ponging, but three or more peers whose delivered
+	// frontiers take turns marginally leading each other defeat it: by the
+	// time evaluation cycles back around to a given connection, enough real
+	// time has usually passed that IT is never "recently abandoned", even
+	// though the active connection is still being handed off roughly once per
+	// evaluation with zero net forward progress. Confirmed live: three peer
+	// connections thrashing every ~2s indefinitely, applied block height
+	// frozen throughout. The global rate limit closes that gap: at most one
+	// discretionary hand-off per cooldown window, no matter how many distinct
+	// peers are rotating through it. A genuinely new challenger is delayed by
+	// at most one cooldown window rather than exempted outright -- consistent
+	// with this being a rate limit, not a correctness rule, and required
+	// because "never seen as active before" is exactly the property a small
+	// rotating set of real peers can each satisfy in turn forever.
 	//
-	// "Taller" is measured on delivered frontiers, so it only means a longer
-	// chain when the two peers disagree about where the chain ends. When they
-	// advertise the identical canonical tip they are treated as the same chain
-	// unless retained delivered history contradicts them (sameCanonicalChain is
-	// an allowance, not proof), and the challenger is then read as merely
-	// further along in serving that chain to us; handing the
-	// pipeline over buys no chain and costs a chainsync/blockfetch reset plus,
-	// via the ledger's fresh-cursor path, a close of the connection we just
-	// selected. The stall escape above still releases an incumbent that stops
-	// driving local tip progress, so this cannot pin to a peer that is not
-	// actually feeding us.
-	incumbentBlock := incumbentTip.SelectionTip().BlockNumber
-	challengerBlock := challengerTip.SelectionTip().BlockNumber
-	if challengerBlock > safeAddUint64(incumbentBlock, catchUpPinHeadMargin) &&
-		!sameCanonicalChain(incumbentTip, challengerTip) {
+	// This matters most for the progress-stall escape just below: once the
+	// applied local tip stalls, localTipStalledLocked stays true on EVERY
+	// subsequent evaluation until progress resumes, so an unguarded stall
+	// escape provides no pinning at all for as long as the stall lasts --
+	// every evaluation falls through to bare Praos ranking with zero
+	// hysteresis. If the switching itself is what is preventing a batch from
+	// ever completing (observed live: rapid reselection racing
+	// ledger.handleChainSwitchEvent's connection handoff), the stall
+	// condition never clears on its own, and the resulting thrash is
+	// indistinguishable from the longer-chain-escape storm this pin was
+	// already hardened against -- just reached through the other escape.
+	if cs.localTipStalledLocked() || cs.longerChainEscapeLocked(
+		incumbentTip,
+		challengerTip,
+	) {
+		if cs.switchBackDebouncedLocked(challengerConn) {
+			cs.config.Logger.Debug(
+				"debouncing switch back to recently abandoned connection",
+				"incumbent", previousBest.String(),
+				"challenger", challengerConn.String(),
+				"switch_back_cooldown", cs.switchBackCooldown,
+			)
+			return true
+		}
+		if cs.switchBackRateLimitedLocked() {
+			cs.config.Logger.Debug(
+				"debouncing discretionary switch: global rate limit",
+				"incumbent", previousBest.String(),
+				"challenger", challengerConn.String(),
+				"switch_back_cooldown", cs.switchBackCooldown,
+			)
+			return true
+		}
+		cs.lastDiscretionarySwitchAt = cs.now()
 		return false
 	}
 	// Otherwise this is a head micro-fork / same-height sibling: pin the
 	// incumbent and do not hand off the pipeline.
 	return true
+}
+
+// longerChainEscapeLocked reports whether challengerTip is genuinely taller
+// than incumbentTip by more than catchUpPinHeadMargin -- a real longer chain,
+// not a sibling head-fork.
+//
+// "Taller" is measured on delivered frontiers, so it only means a longer
+// chain when the two peers disagree about where the chain ends. When they
+// advertise the identical canonical tip they are treated as the same chain
+// unless retained delivered history contradicts them (sameCanonicalChain is
+// an allowance, not proof), and the challenger is then read as merely further
+// along in serving that chain to us; handing the pipeline over buys no chain
+// and costs a chainsync/blockfetch reset plus, via the ledger's fresh-cursor
+// path, a close of the connection we just selected.
+func (cs *ChainSelector) longerChainEscapeLocked(
+	incumbentTip *PeerChainTip,
+	challengerTip *PeerChainTip,
+) bool {
+	incumbentBlock := incumbentTip.SelectionTip().BlockNumber
+	challengerBlock := challengerTip.SelectionTip().BlockNumber
+	return challengerBlock > safeAddUint64(incumbentBlock, catchUpPinHeadMargin) &&
+		!sameCanonicalChain(incumbentTip, challengerTip)
+}
+
+// switchBackDebouncedLocked reports whether connId was the active connection
+// until less than switchBackCooldown ago. Must be called with cs.mutex held.
+func (cs *ChainSelector) switchBackDebouncedLocked(
+	connId ouroboros.ConnectionId,
+) bool {
+	if cs.switchBackCooldown <= 0 {
+		return false
+	}
+	leftAt, ok := cs.recentlyLeft[connId]
+	if !ok {
+		return false
+	}
+	return cs.now().Sub(leftAt) < cs.switchBackCooldown
+}
+
+// switchBackRateLimitedLocked reports whether a discretionary release
+// (longer-chain or progress-stall escape) happened less than
+// switchBackCooldown ago, regardless of which connection was involved. This
+// is the global counterpart to switchBackDebouncedLocked: it bounds the
+// discretionary hand-off rate to at most once per cooldown window even when
+// three or more distinct peers rotate through the incumbent role, each one
+// individually clearing the per-connection debounce by the time evaluation
+// returns to it. Must be called with cs.mutex held.
+func (cs *ChainSelector) switchBackRateLimitedLocked() bool {
+	if cs.switchBackCooldown <= 0 {
+		return false
+	}
+	if cs.lastDiscretionarySwitchAt.IsZero() {
+		return false
+	}
+	return cs.now().Sub(cs.lastDiscretionarySwitchAt) < cs.switchBackCooldown
+}
+
+// recordSwitchAwayLocked notes that the active connection just moved away
+// from left, arming the switch-back debounce for it, and clears any stale
+// entry for the newly adopted connection (it is active now, not abandoned).
+// Must be called with cs.mutex held.
+func (cs *ChainSelector) recordSwitchAwayLocked(
+	left ouroboros.ConnectionId,
+	adopted ouroboros.ConnectionId,
+) {
+	if cs.recentlyLeft == nil {
+		cs.recentlyLeft = make(map[ouroboros.ConnectionId]time.Time)
+	}
+	cs.recentlyLeft[left] = cs.now()
+	delete(cs.recentlyLeft, adopted)
 }
 
 func (cs *ChainSelector) evaluateBestPeerLocked() (
@@ -1771,6 +2056,7 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 			} else if cs.pinIncumbentDuringCatchUpLocked(
 				*previousBest,
 				previousPeerTip,
+				*newBest,
 				newPeerTip,
 			) {
 				// Anti-flap incumbent pin: the challenger is canonically
@@ -1804,6 +2090,9 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 		}
 		newTip := newPeerTip.Tip
 		newObservedTip := newPeerTip.SelectionTip()
+		if previousBest != nil {
+			cs.recordSwitchAwayLocked(*previousBest, *newBest)
+		}
 		cs.bestPeerConn = newBest
 		switchOccurred = true
 
@@ -1934,7 +2223,11 @@ func (cs *ChainSelector) HandlePeerActivityEvent(evt event.Event) {
 }
 
 // HandlePeerRollbackEvent trims Genesis observed history and refreshes the
-// tracked peer tip after a rollback.
+// tracked peer tip after a rollback. When the connection has no tracked entry
+// it registers one from the rollback (see registerPeerFromRollbackLocked),
+// because a rollback for an untracked connection is the normal post-
+// FindIntersect MsgRollBackward of a fresh or recycled connection and dropping
+// it leaves the peer unselectable until its next MsgRollForward.
 func (cs *ChainSelector) HandlePeerRollbackEvent(evt event.Event) {
 	e, ok := evt.Data.(PeerRollbackEvent)
 	if !ok {
@@ -1945,19 +2238,137 @@ func (cs *ChainSelector) HandlePeerRollbackEvent(evt event.Event) {
 		return
 	}
 
+	// Fast path: a tracked peer needs no liveness decision, so the rollback is
+	// applied in place under a single lock acquisition.
+	if cs.applyRollbackToTrackedPeer(e) {
+		cs.EvaluateAndSwitch()
+		return
+	}
+
+	// Unknown connection. Evaluate liveness BEFORE taking cs.mutex:
+	// ConnectionLive is supplied by the composition layer and reaches into the
+	// connection manager, so calling it under the selector lock lets connection
+	// teardown ordering block -- or re-enter -- the chain-selection event path.
+	// updatePeerTipObservedPraosView checks liveness outside the lock for the
+	// same reason. A rollback can race the ConnectionClosedEvent that removed
+	// the peer, and re-registering a dead connection would resurrect an entry
+	// nothing will clean up except the stale-peer sweep.
+	if cs.config.ConnectionLive != nil &&
+		!cs.config.ConnectionLive(e.ConnectionId) {
+		cs.config.Logger.Debug(
+			"ignoring rollback from closed connection",
+			"connection_id", e.ConnectionId.String(),
+			"slot", e.Point.Slot,
+		)
+		if cs.config.OnRollbackRegistration != nil {
+			cs.config.OnRollbackRegistration(
+				RollbackRegistrationClosedConnection,
+			)
+		}
+		return
+	}
+
 	var shouldEvaluate bool
+	var evictedConn *ouroboros.ConnectionId
+	var outcome RollbackRegistrationOutcome
 	func() {
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
+		// Re-check under the lock: a concurrent roll forward (or another
+		// rollback) may have created the entry while liveness was evaluated.
 		if peerTip, exists := cs.peerTips[e.ConnectionId]; exists {
 			peerTip.ApplyRollback(e.Point, e.Tip)
 			shouldEvaluate = true
+			return
 		}
+		evictedConn, outcome = cs.registerPeerFromRollbackLocked(e)
+		shouldEvaluate = outcome == RollbackRegistrationRegistered
 	}()
+
+	// Publish eviction and report the registration outcome outside the lock,
+	// matching the roll-forward path: subscribers call back into the selector.
+	if evictedConn != nil && cs.config.EventBus != nil {
+		cs.config.EventBus.Publish(
+			PeerEvictedEventType,
+			event.NewEvent(
+				PeerEvictedEventType,
+				PeerEvictedEvent{ConnectionId: *evictedConn},
+			),
+		)
+	}
+	if outcome != "" && cs.config.OnRollbackRegistration != nil {
+		cs.config.OnRollbackRegistration(outcome)
+	}
 
 	if shouldEvaluate {
 		cs.EvaluateAndSwitch()
 	}
+}
+
+// applyRollbackToTrackedPeer applies a rollback to an already-tracked peer and
+// reports whether it did. It takes cs.mutex itself and calls no configured
+// callback while holding it.
+func (cs *ChainSelector) applyRollbackToTrackedPeer(e PeerRollbackEvent) bool {
+	cs.mutex.Lock()
+	defer cs.mutex.Unlock()
+	peerTip, exists := cs.peerTips[e.ConnectionId]
+	if !exists {
+		return false
+	}
+	peerTip.ApplyRollback(e.Point, e.Tip)
+	return true
+}
+
+// registerPeerFromRollbackLocked registers a peer that reported a rollback on a
+// connection the selector is not tracking. On a fresh connection the client
+// sends MsgFindIntersect, the server answers MsgIntersectFound, and the first
+// MsgRequestNext yields MsgRollBackward to the intersection point carrying the
+// server's current tip -- and that is the only chainsync traffic until the next
+// block is minted. A connection recycle (for example the leios-fetch failover,
+// which tears down the whole multiplexed connection) deletes the peer's entry,
+// so discarding this rollback leaves the replacement connection invisible to
+// chain selection for a full block interval. On a node whose only
+// chainsync-selectable upstream was recycled that is a complete chain-selection
+// outage, with the header frontier frozen while the ledger keeps applying.
+//
+// Registration applies the same admission checks the roll-forward path applies
+// to a new peer -- connection liveness (checked by the caller, outside the
+// lock), tip plausibility, and tracked-peer capacity -- and records only the
+// confirmed intersection point as the delivered frontier (see
+// newPeerChainTipFromRollback). It returns any evicted
+// connection, for the caller to publish outside the lock, and the outcome.
+// Callers must hold cs.mutex, and must have established that the connection is
+// live before acquiring it (HandlePeerRollbackEvent does); no configured
+// callback is invoked from here, so nothing under the lock can re-enter the
+// selector or block on the connection manager.
+func (cs *ChainSelector) registerPeerFromRollbackLocked(
+	e PeerRollbackEvent,
+) (*ouroboros.ConnectionId, RollbackRegistrationOutcome) {
+	if !cs.checkPeerTipPlausibleLocked(
+		e.ConnectionId,
+		e.Tip,
+		ochainsync.Tip{Point: e.Point},
+	) {
+		return nil, RollbackRegistrationImplausibleTip
+	}
+	evictedConn, ok := cs.makeRoomForNewPeerLocked(e.ConnectionId)
+	if !ok {
+		return nil, RollbackRegistrationAtCapacity
+	}
+	cs.peerTips[e.ConnectionId] = newPeerChainTipFromRollback(
+		e.ConnectionId,
+		e.Point,
+		e.Tip,
+	)
+	cs.advanceSelectionModeLocked()
+	cs.config.Logger.Info(
+		"registered peer from chainsync rollback",
+		"connection_id", e.ConnectionId.String(),
+		"rollback_slot", e.Point.Slot,
+		"advertised_block", e.Tip.BlockNumber,
+		"advertised_slot", e.Tip.Point.Slot,
+	)
+	return evictedConn, RollbackRegistrationRegistered
 }
 
 // onPeerRollbackPanic is the SubscribeFuncStrict onPanic hook for the

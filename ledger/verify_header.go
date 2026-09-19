@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	utxorpc "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
@@ -449,14 +450,30 @@ func (ls *LedgerState) headerVerificationEpoch(
 ) (models.Epoch, error) {
 	// The epoch cache can be forecast forward for near-future headers, but it
 	// must never be advanced past the HFC safe zone or a known era boundary.
-	// Check the immutable summary first so ErrPastHorizon is surfaced before
-	// ensureEpochForSlot mutates any forecasted nonce state.
-	if snapshot := ls.loadConsensusSnapshot(); snapshot != nil &&
-		len(snapshot.epochCache) > 0 {
+	// Resolve known epochs without requiring forecast configuration. Only
+	// future slots need the immutable summary before cache mutation, and
+	// checking it first surfaces ErrPastHorizon before ensureEpochForSlot
+	// mutates any forecasted nonce state.
+	_, cachedEpochErr := ls.epochForSlot(blockSlot)
+	if snapshot := ls.loadConsensusSnapshot(); cachedEpochErr != nil &&
+		snapshot != nil && len(snapshot.epochCache) > 0 {
 		summary, err := ls.HardForkSummary()
 		if err != nil {
+			// A summary that cannot be BUILT says nothing about the header:
+			// the era shape, the genesis it is derived from, or the epoch
+			// cache is unavailable, all of which are local faults. Byron
+			// genesis alone is enough to reach here, because
+			// eras.BuildShapeForEras builds Byron era params for every
+			// config while ByronGenesisFile is optional. Since
+			// ouroboros/chainsync.go routes every non-deferred header error
+			// to ConnectionRecycleRequestedEvent, returning this unwrapped
+			// recycles the honest peer that served the header and stalls
+			// catch-up at each epoch boundary. Classify it as deferred so
+			// the block stays queued for in-order re-verification instead.
 			return models.Epoch{}, fmt.Errorf(
-				"block header verification rejected: build forecast for slot %d: %w",
+				"%w: block header verification deferred: "+
+					"build forecast for slot %d: %w",
+				errHeaderVerificationDeferred,
 				blockSlot,
 				err,
 			)
@@ -745,10 +762,29 @@ func (ls *LedgerState) genesisOverlayDelegationForBlock(
 	block ledger.Block,
 	shelleyGenesis *shelley.ShelleyGenesis,
 ) (genesisDelegation, genesisOverlaySlotStatus, error) {
+	pparams := ls.genesisOverlayProtocolParamsForBlock(block)
+	if pparams == nil {
+		// Unresolvable overlay parameters are a local state gap, not a peer
+		// fault: the snapshot's current pparams, the persisted pparams row
+		// for the block's epoch, and the era forecast behind
+		// ProtocolParamsForSlot can each be unavailable while the applied
+		// ledger catches up. ouroboros/chainsync.go routes every
+		// non-deferred header error to ConnectionRecycleRequestedEvent, so
+		// rejecting here drops the honest peer that served the header.
+		// Classify it as deferred, the same way this file already classifies
+		// an unbuildable forecast and an unresolvable consensus mode, so the
+		// header is re-verified in order once the parameters resolve.
+		return genesisDelegation{}, genesisOverlayNone, fmt.Errorf(
+			"%w: block header verification deferred at slot %d: "+
+				"protocol parameters unavailable for genesis overlay",
+			errHeaderVerificationDeferred,
+			block.SlotNumber(),
+		)
+	}
 	return ls.genesisOverlayDelegationForSlotWithParams(
 		block.SlotNumber(),
 		shelleyGenesis,
-		ls.genesisOverlayProtocolParamsForBlock(block),
+		pparams,
 	)
 }
 
@@ -1154,7 +1190,20 @@ func (ls *LedgerState) verifyBlockLeaderEligibilityWithCache(
 	}
 
 	// Consensus mode determines the VRF leader-value derivation path.
-	mode := ls.ConsensusModeForEpoch(epochId)
+	mode, modeErr := ls.ConsensusModeForEpoch(epochId)
+	if modeErr != nil {
+		// The mode selects both the leader-value derivation and the
+		// threshold, so without it eligibility cannot be evaluated. The era
+		// shape it is resolved from comes from the local node configuration,
+		// so an unresolvable mode is not the peer's fault: defer instead of
+		// recycling the connection that served the header.
+		return fmt.Errorf(
+			"%w: block header verification deferred at slot %d: %w",
+			errHeaderVerificationDeferred,
+			block.SlotNumber(),
+			modeErr,
+		)
+	}
 
 	// Extract the VRF output from the header body CBOR.
 	vrfResult, ok, err := headerVrfResultFromBodyCbor(block.Header())
@@ -1718,24 +1767,47 @@ func (ls *LedgerState) electingVrfKeyHashWithCache(
 // electingPoolParamsCutoffSlot reports the slot up to which pool registrations
 // were in force in the snapshot that elected this block's producer.
 //
-// That is not the snapshot's own capture slot. A snapshot freezes stake as it
-// stands at the capture, but it freezes pool *parameters* as of one epoch
-// earlier, because cardano-ledger's EPOCH rule runs SNAP before it merges
-// psFutureStakePoolParams into psStakePoolParams. A re-registration submitted
-// during epoch N is therefore not merged until the boundary into N+1, and the
-// snapshot taken at that same boundary is captured before the merge -- so it
-// still carries the parameters that were in force through the end of N-1.
+// Which slot that is depends on the era in force during the epoch the snapshot
+// was captured in, because the two rules involved run in the opposite order on
+// either side of the Dijkstra hard fork. The merge of psFutureStakePoolParams
+// into psStakePools -- where a re-registration submitted during the epoch
+// waits -- lives in cardano-ledger's POOLREAP rule; SNAP is what freezes the
+// snapshot. The EPOCH rule sequences them:
 //
-// Concretely, on Preview a pool rotated its VRF key at slot 3279920 (epoch 37)
+//   - Conway and earlier run SNAP first, then POOLREAP
+//     (Conway.Rules.Epoch: `trans @(EraRule "SNAP")` precedes
+//     `trans @(EraRule "POOLREAP")`). The snapshot taken at the boundary out
+//     of epoch N is captured before that epoch's re-registrations merge, so it
+//     still carries the parameters in force through the end of N-1. The cutoff
+//     is the last slot of the epoch preceding the capture.
+//
+//   - Dijkstra runs POOLREAP first, then SNAP
+//     (Dijkstra.Rules.Epoch: POOLREAP is the first transition in
+//     epochTransition, SNAP the last). The re-registrations submitted during
+//     epoch N are merged before the snapshot is frozen, so the snapshot
+//     carries them. The cutoff is the capture slot itself.
+//
+// Both halves are load-bearing and each was learned from a node wedging on a
+// canonical block.
+//
+// On Preview (Conway) a pool rotated its VRF key at slot 3279920 (epoch 37)
 // and the chain kept electing it on the old key through epoch 39. Binding the
-// key to the electing snapshot's capture slot (3283199, after the rotation)
-// resolves the new key and wedges epoch 39, one epoch later than the wedge that
-// binding to the live registration produces (issue #3842).
+// key to the capture slot (3283199, after the rotation) resolves the new key
+// and wedges epoch 39, one epoch later than the wedge that binding to the live
+// registration produces (issue #3842).
 //
-// The cutoff is the last slot of the epoch preceding the one the snapshot was
-// captured in, which is exactly the capture slot of the previous snapshot.
-// Deriving it from the epoch boundary rather than reading that snapshot row
-// keeps it defined for a pool that is absent from the earlier snapshot.
+// On a Dijkstra network a pool rotated its VRF key at slot 639855 (epoch 29,
+// epochs of 21600 slots from 604800). The mark snapshot electing epoch 31 was
+// captured at 647999, and the chain elected the pool on the rotated key from
+// epoch 31. Lagging the cutoff to 626399 resolves the pre-rotation key and
+// wedges on the first block the pool produces after the rotation is in force
+// (issue #4326).
+//
+// For the lagged case the cutoff is the last slot of the epoch preceding the
+// one the snapshot was captured in, which is exactly the capture slot of the
+// previous snapshot. Deriving it from the epoch boundary rather than reading
+// that snapshot row keeps it defined for a pool that is absent from the
+// earlier snapshot.
 //
 //nolint:unused // retained as a test helper
 func (ls *LedgerState) electingPoolParamsCutoffSlot(
@@ -1785,12 +1857,35 @@ func (ls *LedgerState) electingPoolParamsCutoffSlotWithCache(
 		// exists.
 		return 0, 0, false, nil //nolint:nilerr // unplaceable capture is "unavailable", not an error
 	}
+	if poolParamsMergedBeforeSnapshot(capturedEpoch.EraId) {
+		// POOLREAP ran before SNAP, so the capture already carries every
+		// registration accepted through the end of the captured epoch.
+		// Returning the capture slot for both values also makes the
+		// GetPoolEarliestVrfKeyHashAtSlot fallback in
+		// electingVrfKeyHashWithCache a no-op here, which is correct: that
+		// fallback exists for the deferral this era does not have, and it
+		// searches the same range the primary lookup just searched.
+		return snapshot.CapturedSlot, snapshot.CapturedSlot, true, nil
+	}
 	if capturedEpoch.StartSlot == 0 {
 		// Captured in the first epoch: there is no preceding epoch to take
 		// parameters from, so registration history cannot answer.
 		return 0, 0, false, nil
 	}
 	return capturedEpoch.StartSlot - 1, snapshot.CapturedSlot, true, nil
+}
+
+// poolParamsMergedBeforeSnapshot reports whether the EPOCH rule in force
+// during the epoch a stake snapshot was captured in merges
+// psFutureStakePoolParams into psStakePools before SNAP freezes the snapshot.
+//
+// The era to ask about is the captured epoch's own, not the validated block's:
+// the EPOCH transition out of epoch N runs under the protocol version in force
+// during N, and HARDFORK is a sub-rule of that same transition. A block two
+// epochs after a hard fork into Dijkstra can therefore be elected by a
+// snapshot that Conway's ordering froze.
+func poolParamsMergedBeforeSnapshot(eraId uint) bool {
+	return eraId >= dijkstra.EraIdDijkstra
 }
 
 // verifyRegisteredVrfKey rejects a block whose VRF verification key (carried in
@@ -1895,6 +1990,45 @@ func registeredPoolVrfKeyHash(
 	}
 	copy(vrfHash[:], pool.VrfKeyHash)
 	return vrfHash, true
+}
+
+// registeredPoolVrfKeyHashAsOfSlot is registeredPoolVrfKeyHash's
+// point-in-time counterpart: it resolves the VRF key hash a pool was held
+// to as of a specific historical slot rather than its current one.
+//
+// pool.Registration is loaded (loadPoolsAssociations) ordered added_slot
+// DESC, so the first entry at or before slot is the registration that was
+// in force at that point -- the same "later re-registration wins" rule
+// registeredPoolVrfKeyHash applies for "now", just bounded to a slot in the
+// past. A pool that re-registers with a new VRF key after slot must not
+// have that later key attributed to it here (blinklabs-io/dingo#4237): a
+// pinned GetStakeDistribution reply pairs each pool's historical stake with
+// the key that was actually in force at that slot, not whatever is
+// registered today.
+//
+// Unlike registeredPoolVrfKeyHash, this does not fall back to pool.VrfKeyHash
+// on a miss: that field is the pool's current, always-latest VRF key, and
+// falling back to it here would silently reintroduce the same bug for any
+// pool with no registration on record at or before slot.
+func registeredPoolVrfKeyHashAsOfSlot(
+	pool *models.Pool,
+	slot uint64,
+) (lcommon.Blake2b256, bool) {
+	var vrfHash lcommon.Blake2b256
+	if pool == nil {
+		return vrfHash, false
+	}
+	for _, reg := range pool.Registration {
+		if reg.AddedSlot > slot {
+			continue
+		}
+		if len(reg.VrfKeyHash) != len(vrfHash) {
+			return vrfHash, false
+		}
+		copy(vrfHash[:], reg.VrfKeyHash)
+		return vrfHash, true
+	}
+	return vrfHash, false
 }
 
 // maxKESEvolutions returns the maximum number of KES evolutions allowed before

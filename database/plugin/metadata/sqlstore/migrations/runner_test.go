@@ -370,12 +370,10 @@ func addColumnMigration() Migration {
 	}
 }
 
-// An expand phase runs each statement in its own autocommit and the phase
-// advance is a separate write, so a process that stops in between replays the
-// whole phase. An ALTER TABLE ADD COLUMN cannot carry its own IF NOT EXISTS
-// guard -- migrations are authored in SQLite syntax, which has no such form --
-// so the runner has to recognize the already-added column; otherwise the replay
-// fails and the migration never reaches the statements after it.
+// Runner releases before SQLite expand phases became transactional could leave
+// an added column behind while the migration state still named PhaseExpand.
+// Preserve compatibility with such databases by recognizing the matching
+// already-added column when the whole phase replays.
 func TestRunnerReplaysExpandPhaseWithAppliedAddColumn(t *testing.T) {
 	t.Parallel()
 	db := openTestDB(t)
@@ -442,7 +440,9 @@ func TestRunnerReportsAddColumnTypeMismatch(t *testing.T) {
 	require.ErrorContains(t, err, "failed in "+string(PhaseExpand))
 	require.ErrorContains(t, err, "statement 2")
 	var count int
-	require.NoError(t, db.QueryRow("SELECT COUNT(*) FROM item").Scan(&count))
+	require.NoError(t, db.QueryRow(
+		"SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'item'",
+	).Scan(&count))
 	require.Zero(t, count)
 }
 
@@ -453,8 +453,8 @@ func TestRunnerReportsAddColumnTypeMismatch(t *testing.T) {
 // dialect, so this pins the guard against that translation drifting.
 func TestAddColumnPatternMatchesShippedMigrations(t *testing.T) {
 	t.Parallel()
-	// v2 adds four columns, v5 two, and v7/v8 one each.
-	const shippedAddColumns = 14
+	// v2 adds four columns, v5 two, v7/v8 one each, and v17 one more.
+	const shippedAddColumns = 15
 	// The replay guard compares the type the statement declares with the type
 	// the live schema reports, so every shipped ADD COLUMN has to declare a
 	// type whose two spellings are already known to agree after
@@ -635,11 +635,68 @@ func TestRunnerDoesNotSkipNonAddColumnFailure(t *testing.T) {
 	require.Equal(t, string(PhaseExpand), phase)
 }
 
-// execDDL runs each statement in its own autocommit and the phase advance is a
-// separate write, so any version can be replayed from its expand phase after an
-// interrupted upgrade. Replaying expand also replays backfill and contract, so
-// this covers every phase of every shipped version against a database that
-// already has the version's full effect applied.
+func TestRunnerRollsBackFailedSQLiteExpand(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	conn, err := db.Conn(context.Background())
+	require.NoError(t, err)
+	runner := testRunner(db, Migration{})
+	require.NoError(t, runner.ensureStateTable(context.Background(), conn))
+	require.NoError(t, conn.Close())
+	_, err = db.Exec("CREATE TABLE item (id INTEGER PRIMARY KEY)")
+	require.NoError(t, err)
+	migration := Migration{
+		Version:          1,
+		Name:             "atomic_expand",
+		BackfillRevision: "1",
+		SQL: map[string]SQL{
+			"sqlite": {
+				Expand: []string{
+					"ALTER TABLE item RENAME TO item_old",
+					"CREATE TABLE item (id INTEGER PRIMARY KEY)",
+					"INSERT INTO missing_table VALUES (1)",
+				},
+			},
+		},
+	}
+
+	err = testRunner(db, migration).Run(context.Background())
+	require.ErrorContains(t, err, "statement 3")
+
+	var original, renamed int
+	require.NoError(t, db.QueryRow(
+		"SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'item'",
+	).Scan(&original))
+	require.NoError(t, db.QueryRow(
+		"SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'item_old'",
+	).Scan(&renamed))
+	require.Equal(t, 1, original)
+	require.Zero(t, renamed)
+}
+
+func TestRunnerRestoresSQLiteForeignKeysAfterCancellation(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	db.SetMaxOpenConns(1)
+	ctx, cancel := context.WithCancel(context.Background())
+	migration := testMigration(itemBackfill(nil))
+	migration.Backfill = func(context.Context, Batch) (BatchResult, error) {
+		cancel()
+		return BatchResult{}, context.Canceled
+	}
+
+	err := testRunner(db, migration).Run(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+
+	var enabled int
+	require.NoError(t, db.QueryRow("PRAGMA foreign_keys").Scan(&enabled))
+	require.Equal(t, 1, enabled)
+}
+
+// Replaying expand also replays backfill and contract, so this covers every
+// phase of every shipped version against a database that already has the
+// version's full effect applied. It also retains compatibility with databases
+// left in PhaseExpand by runner releases that predate atomic SQLite expansion.
 //
 // Every subtest's first Run() call was byte-for-byte identical work -- same
 // fresh database, same full registry, same stateless NewProcessLocker -- so it

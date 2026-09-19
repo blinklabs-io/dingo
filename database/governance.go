@@ -185,6 +185,54 @@ func (d *Database) GetExpiredGovernanceProposalsAt(
 	return proposals, nil
 }
 
+// GetExpiredAwaitingDropGovernanceProposals returns proposals whose
+// expired_epoch is strictly below the given epoch and whose deposit has not
+// yet been returned. Used at epoch start, before marking any new proposals
+// expired, to return the deposit and finalize proposals expired as of a prior
+// boundary (dingo#4411).
+func (d *Database) GetExpiredAwaitingDropGovernanceProposals(
+	epoch uint64,
+	txn *Txn,
+) ([]*models.GovernanceProposal, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(false)
+		defer txn.Release()
+	}
+	proposals, err := d.governanceStore().
+		GetExpiredAwaitingDropGovernanceProposals(epoch, txn.Metadata())
+	if err != nil {
+		return nil, fmt.Errorf(
+			"failed to get expired-awaiting-drop governance proposals: %w",
+			err,
+		)
+	}
+	return proposals, nil
+}
+
+// GetDroppedGovernanceProposalsAt returns proposals dropped (deposit
+// returned) at the exact epoch-boundary slot. Used by epoch replay to
+// restore deposit-return effects.
+func (d *Database) GetDroppedGovernanceProposalsAt(
+	epoch uint64,
+	slot uint64,
+	txn *Txn,
+) ([]*models.GovernanceProposal, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(false)
+		defer txn.Release()
+	}
+	proposals, err := d.governanceStore().GetDroppedGovernanceProposalsAt(
+		epoch, slot, txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"failed to get boundary-dropped governance proposals: %w",
+			err,
+		)
+	}
+	return proposals, nil
+}
+
 // GetRatifiedGovernanceProposals returns proposals ratified but not yet
 // enacted, ordered by (ratified_epoch, ratified_slot, id). Used at epoch
 // start for enactment.

@@ -3207,7 +3207,8 @@ func (q *Queries) GetRewardSeedFailure(ctx context.Context, arg GetRewardSeedFai
 const getRewardSnapshot = `-- name: GetRewardSnapshot :one
 SELECT id, epoch, snapshot_type, total_active_stake, total_pool_count,
        total_delegators, captured_slot, boundary_slot, epoch_nonce,
-       protocol_version, authoritative, calculation_version
+       protocol_version, authoritative, calculation_version,
+       excluded_active_stake
 FROM reward_snapshot
 WHERE epoch = ? AND snapshot_type = ?
 `
@@ -3233,6 +3234,7 @@ func (q *Queries) GetRewardSnapshot(ctx context.Context, arg GetRewardSnapshotPa
 		&i.ProtocolVersion,
 		&i.Authoritative,
 		&i.CalculationVersion,
+		&i.ExcludedActiveStake,
 	)
 	return i, err
 }
@@ -4012,24 +4014,26 @@ const insertRewardSnapshot = `-- name: InsertRewardSnapshot :one
 INSERT INTO reward_snapshot (
     epoch, snapshot_type, total_active_stake, total_pool_count,
     total_delegators, captured_slot, boundary_slot, epoch_nonce,
-    protocol_version, authoritative, calculation_version
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    protocol_version, authoritative, calculation_version,
+    excluded_active_stake
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (epoch, snapshot_type) DO NOTHING
 RETURNING id
 `
 
 type InsertRewardSnapshotParams struct {
-	Epoch              int64
-	SnapshotType       string
-	TotalActiveStake   string
-	TotalPoolCount     int64
-	TotalDelegators    int64
-	CapturedSlot       int64
-	BoundarySlot       int64
-	EpochNonce         []byte
-	ProtocolVersion    int64
-	Authoritative      bool
-	CalculationVersion int64
+	Epoch               int64
+	SnapshotType        string
+	TotalActiveStake    string
+	TotalPoolCount      int64
+	TotalDelegators     int64
+	CapturedSlot        int64
+	BoundarySlot        int64
+	EpochNonce          []byte
+	ProtocolVersion     int64
+	Authoritative       bool
+	CalculationVersion  int64
+	ExcludedActiveStake sql.NullString
 }
 
 func (q *Queries) InsertRewardSnapshot(ctx context.Context, arg InsertRewardSnapshotParams) (int64, error) {
@@ -4045,6 +4049,7 @@ func (q *Queries) InsertRewardSnapshot(ctx context.Context, arg InsertRewardSnap
 		arg.ProtocolVersion,
 		arg.Authoritative,
 		arg.CalculationVersion,
+		arg.ExcludedActiveStake,
 	)
 	var id int64
 	err := row.Scan(&id)
@@ -4479,8 +4484,9 @@ const saveRewardSnapshot = `-- name: SaveRewardSnapshot :one
 INSERT INTO reward_snapshot (
     epoch, snapshot_type, total_active_stake, total_pool_count,
     total_delegators, captured_slot, boundary_slot, epoch_nonce,
-    protocol_version, authoritative, calculation_version
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    protocol_version, authoritative, calculation_version,
+    excluded_active_stake
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (epoch, snapshot_type) DO UPDATE SET
     total_active_stake = excluded.total_active_stake,
     total_pool_count = excluded.total_pool_count,
@@ -4490,22 +4496,24 @@ ON CONFLICT (epoch, snapshot_type) DO UPDATE SET
     epoch_nonce = excluded.epoch_nonce,
     protocol_version = excluded.protocol_version,
     authoritative = excluded.authoritative,
-    calculation_version = excluded.calculation_version
+    calculation_version = excluded.calculation_version,
+    excluded_active_stake = excluded.excluded_active_stake
 RETURNING id
 `
 
 type SaveRewardSnapshotParams struct {
-	Epoch              int64
-	SnapshotType       string
-	TotalActiveStake   string
-	TotalPoolCount     int64
-	TotalDelegators    int64
-	CapturedSlot       int64
-	BoundarySlot       int64
-	EpochNonce         []byte
-	ProtocolVersion    int64
-	Authoritative      bool
-	CalculationVersion int64
+	Epoch               int64
+	SnapshotType        string
+	TotalActiveStake    string
+	TotalPoolCount      int64
+	TotalDelegators     int64
+	CapturedSlot        int64
+	BoundarySlot        int64
+	EpochNonce          []byte
+	ProtocolVersion     int64
+	Authoritative       bool
+	CalculationVersion  int64
+	ExcludedActiveStake sql.NullString
 }
 
 func (q *Queries) SaveRewardSnapshot(ctx context.Context, arg SaveRewardSnapshotParams) (int64, error) {
@@ -4521,6 +4529,7 @@ func (q *Queries) SaveRewardSnapshot(ctx context.Context, arg SaveRewardSnapshot
 		arg.ProtocolVersion,
 		arg.Authoritative,
 		arg.CalculationVersion,
+		arg.ExcludedActiveStake,
 	)
 	var id int64
 	err := row.Scan(&id)
@@ -5098,21 +5107,23 @@ SET total_active_stake = ?,
     epoch_nonce = ?,
     protocol_version = ?,
     authoritative = FALSE,
-    calculation_version = ?
+    calculation_version = ?,
+    excluded_active_stake = ?
 WHERE epoch = ? AND snapshot_type = ? AND authoritative = FALSE
 `
 
 type UpdateFallbackRewardSnapshotParams struct {
-	TotalActiveStake   string
-	TotalPoolCount     int64
-	TotalDelegators    int64
-	CapturedSlot       int64
-	BoundarySlot       int64
-	EpochNonce         []byte
-	ProtocolVersion    int64
-	CalculationVersion int64
-	Epoch              int64
-	SnapshotType       string
+	TotalActiveStake    string
+	TotalPoolCount      int64
+	TotalDelegators     int64
+	CapturedSlot        int64
+	BoundarySlot        int64
+	EpochNonce          []byte
+	ProtocolVersion     int64
+	CalculationVersion  int64
+	ExcludedActiveStake sql.NullString
+	Epoch               int64
+	SnapshotType        string
 }
 
 func (q *Queries) UpdateFallbackRewardSnapshot(ctx context.Context, arg UpdateFallbackRewardSnapshotParams) (int64, error) {
@@ -5125,6 +5136,7 @@ func (q *Queries) UpdateFallbackRewardSnapshot(ctx context.Context, arg UpdateFa
 		arg.EpochNonce,
 		arg.ProtocolVersion,
 		arg.CalculationVersion,
+		arg.ExcludedActiveStake,
 		arg.Epoch,
 		arg.SnapshotType,
 	)

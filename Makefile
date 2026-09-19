@@ -95,7 +95,7 @@ lint: import-boundaries ## Run import-boundaries, golangci-lint, nilaway, and mo
 import-boundaries: ## Check reviewed package import boundaries
 	go test ./internal/architecture
 
-docs-parity: ## Check docs against go.mod, the Makefile, and the DevNet compose file
+docs-parity: ## Check docs against go.mod, the Makefile, the DevNet compose file, and the Koios coverage matrix
 	go test ./internal/docsparity
 
 config-parity: ## Fail if the embedded network configs drift from docker-cardano-configs

@@ -670,12 +670,16 @@ func TestPeerGovernorOptionsIgnoreNonPositiveValues(t *testing.T) {
 	WithInactivityTimeout(-5 * time.Minute)(cfg)
 	WithMaxConnectionsPerIP(-2)(cfg)
 	WithMaxInboundConns(0)(cfg)
+	WithMaxNtCConns(-3)(cfg)
+	WithMaxNtCConnectionsPerIP(0)(cfg)
 
 	assert.Zero(t, cfg.cfg.MinHotPeers)
 	assert.Zero(t, cfg.cfg.ReconcileInterval)
 	assert.Zero(t, cfg.cfg.InactivityTimeout)
 	assert.Zero(t, cfg.cfg.MaxConnectionsPerIP)
 	assert.Zero(t, cfg.cfg.MaxInboundConns)
+	assert.Zero(t, cfg.cfg.MaxNtCConns)
+	assert.Zero(t, cfg.cfg.MaxNtCConnectionsPerIP)
 }
 
 func TestPeerGovernorOptionsApplyPositiveValues(t *testing.T) {
@@ -688,12 +692,20 @@ func TestPeerGovernorOptionsApplyPositiveValues(t *testing.T) {
 	WithInactivityTimeout(2 * time.Minute)(cfg)
 	WithMaxConnectionsPerIP(4)(cfg)
 	WithMaxInboundConns(25)(cfg)
+	WithMaxNtCConns(30)(cfg)
+	WithMaxNtCConnectionsPerIP(6)(cfg)
 
 	assert.Equal(t, 3, cfg.cfg.MinHotPeers)
 	assert.Equal(t, 30*time.Second, cfg.cfg.ReconcileInterval)
 	assert.Equal(t, 2*time.Minute, cfg.cfg.InactivityTimeout)
 	assert.Equal(t, 4, cfg.cfg.MaxConnectionsPerIP)
 	assert.Equal(t, 25, cfg.cfg.MaxInboundConns)
+	assert.Equal(t, 30, cfg.cfg.MaxNtCConns)
+	assert.Equal(t, 6, cfg.cfg.MaxNtCConnectionsPerIP)
+
+	cfg.syncCompatFields()
+	assert.Equal(t, 30, cfg.maxNtCConns)
+	assert.Equal(t, 6, cfg.maxNtCConnectionsPerIP)
 }
 
 // TestWithGenesisCorroborationPeers covers the public programmatic API path for

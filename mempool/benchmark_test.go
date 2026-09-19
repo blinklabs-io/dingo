@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/plugin"
+	"github.com/blinklabs-io/dingo/utxoref"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -72,15 +73,11 @@ func (v benchmarkValidator) ValidateTx(tx gledger.Transaction) error {
 
 func (v benchmarkValidator) ValidateTxWithOverlay(
 	tx gledger.Transaction,
-	consumed map[string]struct{},
-	_ map[string]lcommon.Utxo,
+	consumed map[utxoref.Key]struct{},
+	_ map[utxoref.Key]lcommon.Utxo,
 ) error {
 	for _, input := range tx.Inputs() {
-		key := fmt.Sprintf(
-			"%s:%d",
-			input.Id().String(),
-			input.Index(),
-		)
+		key := utxoref.ForInput(input)
 		if _, ok := consumed[key]; ok {
 			return fmt.Errorf("%w: %s", errBenchmarkDoubleSpend, key)
 		}
