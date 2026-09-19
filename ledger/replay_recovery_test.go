@@ -728,6 +728,50 @@ func TestAtTipRecoveryRepairsSameTipOnlyOnce(t *testing.T) {
 		"an identical failure at the same tip must reuse the completed repair")
 }
 
+// tryRecoverFromTxValidationError tests isDeterministicTxValidationError
+// before IsAtTip, so an at-tip deterministic rejection is recovered by
+// recoverFromDeterministicTxValidationError rather than by
+// recoverAtTipFromTxValidationError. That site rewinds to the ledger tip it
+// already sits at, so it needs the same-tip repair, and the same
+// first-occurrence bound on it: the deterministic resync latch that already
+// stops peer rotation also gates the repair, so a redelivered identical
+// rejection reuses the restored state instead of re-running the sweep.
+func TestDeterministicRecoveryRepairsSameTipOnlyOnce(t *testing.T) {
+	t.Parallel()
+
+	ls := newReplayRecoveryAuditLedger(t, true)
+	ls.reachedTip.Store(true)
+	require.True(t, ls.IsAtTip())
+	failing := &txValidationError{
+		BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+		TxHash:     testHashBytes("duplicate-input-tx"),
+		Cause: shelley.DuplicateInputError{
+			Input: &replayRecoveryInput{
+				txId:  testHashBytes("duplicate-reference"),
+				index: 0,
+			},
+			InputType: "reference",
+		},
+	}
+
+	generationBeforeFirst := ls.rewardInputGeneration.Load()
+	recovered, err := ls.tryRecoverFromTxValidationError(failing)
+	require.NoError(t, err)
+	require.True(t, recovered)
+	require.Nil(t, ls.lastAtTipRecovery,
+		"the deterministic branch must be the site under test")
+	require.Greater(t, ls.rewardInputGeneration.Load(), generationBeforeFirst,
+		"the first deterministic rejection at a tip must repair metadata")
+
+	generationBeforeRepeat := ls.rewardInputGeneration.Load()
+	recovered, err = ls.tryRecoverFromTxValidationError(failing)
+	require.NoError(t, err)
+	require.True(t, recovered)
+	require.Equal(t, generationBeforeRepeat, ls.rewardInputGeneration.Load(),
+		"a redelivered identical deterministic rejection at the same tip "+
+			"must reuse the completed repair")
+}
+
 // TestTryRecoverFromTxValidationErrorAtTipResetsDescentOnForwardProgress
 // verifies that a distinct failure at a HIGHER slot (forward progress past the
 // previous failing point) resets the descent tracking, so an unrelated later

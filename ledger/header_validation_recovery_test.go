@@ -502,3 +502,79 @@ func TestYieldedToChainSelectionClassifiesOnlyNotOnChain(t *testing.T) {
 		})
 	}
 }
+
+// The same-tip repair is bounded to the first completed recovery.
+// tryRecoverFromHeaderValidationError passes repairSameTip only while
+// lastHeaderValidationFailure does not already record this failure at this
+// tip, so a redelivery of the identical rejected header reuses the state the
+// first repair produced instead of paying a full metadata sweep on every
+// retry of a header the network keeps offering.
+func TestHeaderValidationRecoveryRepairsSameTipOnlyOnce(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
+
+	blocks := make([]models.Block, 0, 5)
+	for slot := uint64(1); slot <= 5; slot++ {
+		block := makeTestBlock(slot, slot)
+		if len(blocks) > 0 {
+			block.PrevHash = append([]byte(nil), blocks[len(blocks)-1].Hash...)
+		}
+		blocks = append(blocks, block)
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
+
+	ledgerTipBlock := blocks[2]
+	ledgerTip := ochainsync.Tip{
+		Point:       makeTestPoint(ledgerTipBlock),
+		BlockNumber: ledgerTipBlock.Number,
+	}
+	require.NoError(t, db.SetTip(ledgerTip, nil))
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+
+	ls := &LedgerState{
+		db:    db,
+		chain: cm.PrimaryChain(),
+		config: LedgerStateConfig{
+			ChainManager: cm,
+			EventBus:     bus,
+			Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.currentTip = ledgerTip
+	ls.metrics.init(prometheus.NewRegistry())
+	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+
+	validationErr := &headerValidationError{
+		BlockPoint: makeTestPoint(blocks[3]),
+		Cause:      errors.New("VRF leader value exceeds threshold"),
+	}
+
+	generationBeforeFirst := ls.rewardInputGeneration.Load()
+	recovered, recoverErr := ls.tryRecoverFromHeaderValidationError(
+		validationErr,
+	)
+	require.NoError(t, recoverErr)
+	require.True(t, recovered)
+	require.Greater(t, ls.rewardInputGeneration.Load(), generationBeforeFirst,
+		"the first completed rewind must repair same-tip metadata")
+	require.Equal(t, ledgerTipBlock.Slot, ls.currentTip.Point.Slot)
+
+	generationBeforeRepeat := ls.rewardInputGeneration.Load()
+	recovered, recoverErr = ls.tryRecoverFromHeaderValidationError(
+		validationErr,
+	)
+	require.NoError(t, recoverErr)
+	require.True(t, recovered)
+	require.Equal(t, generationBeforeRepeat, ls.rewardInputGeneration.Load(),
+		"a redelivered identical header at the same tip must reuse the "+
+			"completed repair")
+}
