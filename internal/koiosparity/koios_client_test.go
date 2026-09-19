@@ -138,22 +138,32 @@ func TestKoiosRestrictedDialerRejectsMixedPublicAndPrivateDNSAnswers(
 func TestKoiosRestrictedDialerRejectsSpecialUseIPv6DNSAnswer(t *testing.T) {
 	t.Parallel()
 
-	var dialed atomic.Bool
-	dialer := &koiosRestrictedDialer{
-		lookupIPAddr: func(context.Context, string) ([]net.IPAddr, error) {
-			return []net.IPAddr{{IP: net.ParseIP("64:ff9b::7f00:1")}}, nil
-		},
-		dialContext: func(context.Context, string, string) (net.Conn, error) {
-			dialed.Store(true)
-			return nil, errors.New("unexpected dial")
-		},
-	}
+	for _, ip := range []string{
+		"64:ff9b::7f00:1",
+		"100:0:0:1::1",
+		"2620:4f:8000::1",
+	} {
+		t.Run(ip, func(t *testing.T) {
+			t.Parallel()
 
-	_, err := dialer.DialContext(
-		context.Background(), "tcp", "translated.example:443",
-	)
-	require.Error(t, err)
-	assert.False(t, dialed.Load())
+			var dialed atomic.Bool
+			dialer := &koiosRestrictedDialer{
+				lookupIPAddr: func(context.Context, string) ([]net.IPAddr, error) {
+					return []net.IPAddr{{IP: net.ParseIP(ip)}}, nil
+				},
+				dialContext: func(context.Context, string, string) (net.Conn, error) {
+					dialed.Store(true)
+					return nil, errors.New("unexpected dial")
+				},
+			}
+
+			_, err := dialer.DialContext(
+				context.Background(), "tcp", "translated.example:443",
+			)
+			require.Error(t, err)
+			assert.False(t, dialed.Load())
+		})
+	}
 }
 
 func TestKoiosRestrictedDialerDialsValidatedPublicIP(t *testing.T) {

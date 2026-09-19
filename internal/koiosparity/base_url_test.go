@@ -91,8 +91,10 @@ func TestNewKoiosClientRejectsPrivateAddressByDefault(t *testing.T) {
 		"https://192.0.2.1/api/v1",
 		"https://0.0.0.1/api/v1",
 		"https://[64:ff9b::7f00:1]/api/v1",
+		"https://[100:0:0:1::1]/api/v1",
 		"https://[2001:db8::1]/api/v1",
 		"https://[2002:7f00:1::]/api/v1",
+		"https://[2620:4f:8000::1]/api/v1",
 	} {
 		_, err := NewKoiosClient("preview", "", raw, false, false)
 		require.Error(t, err, "base URL %q must be rejected", raw)
