@@ -1524,6 +1524,7 @@ func importDReps(
 			AnchorURL:     drep.AnchorURL,
 			AnchorHash:    drep.AnchorHash,
 			AddedSlot:     slot,
+			ExpiryEpoch:   drep.ExpiryEpoch,
 			Active:        drep.Active,
 		}
 

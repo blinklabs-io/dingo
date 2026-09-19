@@ -42,20 +42,19 @@ permissions:
   contents: read
 
 concurrency:
-  # github.run_id is unique per run, so each main push and each tag gets a
-  # group of its own and runs to completion.
+  # Main runs build images and binaries but do not publish release artifacts.
+  # Give each main run its own group so a newer push cannot cancel the
+  # backstop for an earlier merged commit. Keep every other ref serialized, so
+  # re-pushing a tag cannot run two publications at once.
   #
-  # The obvious alternative, grouping main pushes by ref so a newer merge
-  # supersedes an older one, is what this repository ran before and moved away
-  # from: GitHub keeps at most one pending run per group and cancels the
-  # earlier pending one, so in a burst of merges the intermediate commits are
-  # skipped rather than tested, and 8 of 10 main runs ended cancelled. That
-  # was traded away to protect the runner queue; the staging above is what
-  # protects it now, by cutting a merge's peak from sixteen concurrent jobs to
-  # about five. If bursts still saturate the 20-job account limit, switching
-  # this group to github.ref is the lever, at the cost of the per-commit
-  # backstop.
-  group: ${{ github.workflow }}-${{ github.run_id }}
+  # Grouping main pushes by ref instead, so a newer merge supersedes an older
+  # one, is what this repository ran before #4458 and moved away from: GitHub
+  # keeps at most one pending run per group and cancels the earlier pending
+  # one, so in a burst of merges the intermediate commits are skipped rather
+  # than tested, and 8 of 10 main runs ended cancelled. What protects the
+  # runner queue is the staging above instead, which cuts a merge's peak from
+  # sixteen concurrent jobs to about five.
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.ref }}
   # Never interrupt a tag release after publication has started.
   cancel-in-progress: false
 
