@@ -811,6 +811,17 @@ type Config struct {
 	// validation run, not for a node whose reward accounting is expected
 	// to be trustworthy on its own.
 	TrustCanonicalWithdrawalOnRewardMismatch bool `yaml:"trustCanonicalWithdrawalOnRewardMismatch" envconfig:"DINGO_TRUST_CANONICAL_WITHDRAWAL_ON_REWARD_MISMATCH"`
+
+	// TrustCanonicalTreasuryValueOnMismatch recovers from a repeated,
+	// deterministic treasury-value validation mismatch by trusting the
+	// canonical block's own supplied treasury figure over this node's own
+	// network-state treasury total, instead of retrying the same rejection
+	// forever. Off by default: see
+	// LedgerStateConfig.TrustCanonicalTreasuryValueOnMismatch's doc comment
+	// for why this is appropriate for unblocking a diagnostic or validation
+	// run, not for a node whose treasury accounting is expected to be
+	// trustworthy on its own.
+	TrustCanonicalTreasuryValueOnMismatch bool `yaml:"trustCanonicalTreasuryValueOnMismatch" envconfig:"DINGO_TRUST_CANONICAL_TREASURY_VALUE_ON_MISMATCH"`
 	// CIP-50 pledge-leverage staking rewards. Consensus-affecting; defaults
 	// off. PledgeLeverageEnabled turns on the L*pledge reward cap and
 	// PledgeLeverage is L in [1, 10000]. Enable only on a network where every

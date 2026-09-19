@@ -750,6 +750,9 @@ func buildDingoConfig(
 		dingo.WithTrustCanonicalWithdrawalOnRewardMismatch(
 			cfg.TrustCanonicalWithdrawalOnRewardMismatch,
 		),
+		dingo.WithTrustCanonicalTreasuryValueOnMismatch(
+			cfg.TrustCanonicalTreasuryValueOnMismatch,
+		),
 		// CIP-50 pledge-leverage staking rewards (consensus-affecting)
 		dingo.WithPledgeLeverage(
 			cfg.PledgeLeverageEnabled,

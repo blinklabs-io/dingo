@@ -557,3 +557,40 @@ func TestBuildDingoConfigWiresTrustCanonicalWithdrawalOnRewardMismatch(
 		)
 	}
 }
+
+// TestBuildDingoConfigWiresTrustCanonicalTreasuryValueOnMismatch is the same
+// class of bug TestBuildDingoConfigWiresForgeTolerances documents, for
+// TrustCanonicalTreasuryValueOnMismatch's own dingo.NewConfig option-list
+// entry: parsed, defaulted, flagged and documented at every other layer is
+// worthless if buildDingoConfig's explicit option list never forwards it.
+func TestBuildDingoConfigWiresTrustCanonicalTreasuryValueOnMismatch(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		TrustCanonicalTreasuryValueOnMismatch: true,
+	}
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+
+	built := buildDingoConfig(
+		cfg,
+		logger,
+		nil,
+		nil,
+		false,
+		dingo.StorageModeCore,
+		30*time.Second,
+		chainsync.DefaultStallTimeout,
+		chainsync.HeaderSyncStrategyPrimary,
+	)
+
+	if got := built.TrustCanonicalTreasuryValueOnMismatch(); !got {
+		t.Fatalf(
+			"expected TrustCanonicalTreasuryValueOnMismatch true, got %v; "+
+				"the loaded value never reached dingo.Config, so the "+
+				"reconciliation path never runs however it is configured",
+			got,
+		)
+	}
+}

@@ -474,6 +474,9 @@ func isDeterministicTxValidationError(err error) bool {
 	if isRewardWithdrawalMismatch(err) {
 		return true
 	}
+	if _, ok := errors.AsType[lcommon.CurrentTreasuryValueMismatchError](err); ok {
+		return true
+	}
 	_, ok := errors.AsType[eras.DuplicateInputByronError](err)
 	return ok
 }
@@ -569,6 +572,46 @@ func (ls *LedgerState) reconcileRewardWithdrawalMismatch(
 		credentialTag,
 		stakeKey.Bytes(),
 		incorrectWithdrawal.Provided.Uint64(),
+		nil,
+	)
+}
+
+// reconcileTreasuryValueMismatch overwrites the local network-state treasury
+// total with the amount the canonical block itself claims (Supplied), so the
+// ordinary rewind-and-retry in recoverFromDeterministicTxValidationError can
+// re-validate and apply the same block normally afterward. Reserves are
+// carried through unchanged from the current network state: this reconciles
+// only the treasury discrepancy a peer's block has just proven, not a
+// two-value guess. Only called when
+// LedgerStateConfig.TrustCanonicalTreasuryValueOnMismatch is enabled and the
+// ordinary retry has already failed identically once; see that field's doc
+// comment for why this is opt-in.
+func (ls *LedgerState) reconcileTreasuryValueMismatch(
+	mismatch lcommon.CurrentTreasuryValueMismatchError,
+	blockSlot uint64,
+) error {
+	if mismatch.Supplied == nil || !mismatch.Supplied.IsUint64() {
+		return fmt.Errorf(
+			"treasury value reconciliation: non-uint64 supplied amount %v",
+			mismatch.Supplied,
+		)
+	}
+	state, err := ls.db.Metadata().GetNetworkState(nil)
+	if err != nil {
+		return fmt.Errorf(
+			"treasury value reconciliation: get network state: %w",
+			err,
+		)
+	}
+	if state == nil {
+		return errors.New(
+			"treasury value reconciliation: missing network state",
+		)
+	}
+	return ls.db.Metadata().SetNetworkState(
+		mismatch.Supplied.Uint64(),
+		uint64(state.Reserves),
+		blockSlot,
 		nil,
 	)
 }
@@ -674,6 +717,32 @@ func (ls *LedgerState) markRewardMismatchReconcileSeen(
 	)
 }
 
+// treasuryMismatchReconcileSeenLocked reports whether validationErr's exact
+// (block, tx) identity was already recorded by a previous call -- see
+// rewardMismatchReconcileSeen's doc comment for why this does not use
+// deterministicTxRecoveryResync's own tip-slot-ordered latch. Independent of
+// rewardMismatchReconcileSeen: a block can carry both a reward-withdrawal
+// mismatch and a treasury-value mismatch, and each needs its own "already
+// seen" state.
+func (ls *LedgerState) treasuryMismatchReconcileSeenLocked(
+	validationErr *txValidationError,
+) bool {
+	return ls.treasuryMismatchReconcileSeen.matchesIdentity(validationErr)
+}
+
+// markTreasuryMismatchReconcileSeen records validationErr's (block, tx)
+// identity so the next identical rejection is recognized as a repeat.
+func (ls *LedgerState) markTreasuryMismatchReconcileSeen(
+	validationErr *txValidationError,
+) {
+	ls.Lock()
+	defer ls.Unlock()
+	ls.treasuryMismatchReconcileSeen = newDeterministicTxRecoveryLatch(
+		0,
+		validationErr,
+	)
+}
+
 // recoverFromDeterministicTxValidationError drops a primary-chain block that
 // contains a transaction with a deterministic structural error. The ledger
 // tip is the last applied good point; rewinding both stores to it rejects the
@@ -751,6 +820,45 @@ func (ls *LedgerState) recoverFromDeterministicTxValidationError(
 				} else if ls.config.Logger != nil {
 					ls.config.Logger.Warn(
 						"TrustCanonicalWithdrawalOnRewardMismatch: overwrote the local reward balance to match a canonical peer's withdrawal; retrying the same block",
+						logFields...,
+					)
+				}
+			}
+		}
+	}
+	if ls.config.TrustCanonicalTreasuryValueOnMismatch {
+		if treasuryMismatch, ok := errors.AsType[lcommon.CurrentTreasuryValueMismatchError](
+			validationErr.Cause,
+		); ok {
+			ls.RLock()
+			seenBefore := ls.treasuryMismatchReconcileSeenLocked(validationErr)
+			ls.RUnlock()
+			if !seenBefore {
+				// First sighting of this exact (block, tx): record it and let
+				// the ordinary rewind-and-retry below run once more first,
+				// matching the reward-withdrawal reconciliation's "one full
+				// attempt before anything special" shape.
+				ls.markTreasuryMismatchReconcileSeen(validationErr)
+			} else {
+				logFields := []any{
+					"component", "ledger",
+					"failing_block_slot", validationErr.BlockPoint.Slot,
+					"canonical_treasury_value", treasuryMismatch.Supplied,
+					"local_treasury_value", treasuryMismatch.Expected,
+				}
+				if err := ls.reconcileTreasuryValueMismatch(
+					treasuryMismatch,
+					validationErr.BlockPoint.Slot,
+				); err != nil {
+					if ls.config.Logger != nil {
+						ls.config.Logger.Error(
+							"TrustCanonicalTreasuryValueOnMismatch reconciliation failed; falling back to ordinary rewind-and-retry",
+							append(logFields, "error", err)...,
+						)
+					}
+				} else if ls.config.Logger != nil {
+					ls.config.Logger.Warn(
+						"TrustCanonicalTreasuryValueOnMismatch: overwrote the local treasury value to match a canonical peer's claim; retrying the same block",
 						logFields...,
 					)
 				}

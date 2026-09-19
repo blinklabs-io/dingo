@@ -2180,6 +2180,76 @@ VALUES (?, TRUE, '5545905')`, credential)
 			"recognized as the same failing block/tx")
 }
 
+// TestReplayRecoveryReconcilesTreasuryValueMismatchWhenOpted pins
+// LedgerStateConfig.TrustCanonicalTreasuryValueOnMismatch (dingo#3885
+// treasury follow-up): with it enabled, a repeated
+// lcommon.CurrentTreasuryValueMismatchError overwrites the local network-state
+// treasury total with the canonical block's own supplied value instead of
+// rejecting the block forever, mirroring
+// TestReplayRecoveryReconcilesRewardWithdrawalMismatchWhenOpted's shape for
+// the sibling flag. Reverting the TrustCanonicalTreasuryValueOnMismatch
+// branch in place would make the second assertion below observe the
+// treasury unchanged.
+func TestReplayRecoveryReconcilesTreasuryValueMismatchWhenOpted(t *testing.T) {
+	t.Parallel()
+
+	ls := newReplayRecoveryAuditLedger(t, true)
+	ls.config.TrustCanonicalTreasuryValueOnMismatch = true
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	resyncCh := deterministicResyncChannel(t, ls, bus)
+
+	require.NoError(
+		t,
+		ls.db.Metadata().SetNetworkState(4_237_121_584_651_539, 10_688_089_610_838_378, 1, nil),
+	)
+
+	validation := func() *txValidationError {
+		return &txValidationError{
+			BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+			TxHash:     testHashBytes("reconcile-treasury-tx"),
+			Cause: fmt.Errorf(
+				"conway utxo validation rule 0: %w",
+				lcommon.CurrentTreasuryValueMismatchError{
+					Supplied: big.NewInt(4_237_121_584_667_741),
+					Expected: 4_237_121_584_651_539,
+				},
+			),
+		}
+	}
+
+	readTreasury := func() uint64 {
+		state, err := ls.db.Metadata().GetNetworkState(nil)
+		require.NoError(t, err)
+		require.NotNil(t, state)
+		return uint64(state.Treasury)
+	}
+
+	// The first rejection must behave exactly like the flag-off sibling: reject
+	// and rewind, without touching local state yet.
+	recovered, err := ls.tryRecoverFromTxValidationError(validation())
+	require.NoError(t, err)
+	require.True(t, recovered)
+	assert.Equal(t, uint64(4_237_121_584_651_539), readTreasury(),
+		"the first rejection must not reconcile anything yet")
+	testutil.RequireReceive(
+		t, resyncCh, testutil.AsyncWait,
+		"the first rejection must request a fresh ChainSync intersection",
+	)
+
+	// The redelivery is what marks this deterministic, and is where
+	// TrustCanonicalTreasuryValueOnMismatch reconciles.
+	recovered, err = ls.tryRecoverFromTxValidationError(validation())
+	require.NoError(
+		t,
+		err,
+		"reconciliation must let ordinary rewind-and-retry continue, not halt",
+	)
+	require.True(t, recovered)
+	assert.Equal(t, uint64(4_237_121_584_667_741), readTreasury(),
+		"the redelivery must overwrite the local treasury with the canonical supplied value")
+}
+
 func TestReplayRecoveryRejectsDeterministicPlutusFailure(t *testing.T) {
 	t.Parallel()
 

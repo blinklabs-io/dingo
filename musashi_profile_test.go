@@ -217,6 +217,11 @@ func TestPrototypeTrustBypassesOffWithoutConfig(t *testing.T) {
 // reconstruction. Nothing in node.go/config.go ties it to network identity,
 // so the Musashi profile can never enable it implicitly.
 //
+// TrustCanonicalTreasuryValueOnMismatch is the same case for the sibling
+// treasury-value mismatch: a plain operator flag
+// (--trust-canonical-treasury-value-on-mismatch), off by default, not tied
+// to network identity anywhere in node.go/config.go.
+//
 // A new Skip*/Trust*/Unsafe* field on LedgerStateConfig fails this test on
 // purpose. Adding one is a deliberate widening of where dingo stops validating,
 // and it should be classified here — prototype-only or not — rather than
@@ -231,6 +236,7 @@ func TestMusashiProfileTrustBypassScope(t *testing.T) {
 		"SkipDijkstraTxValidation":                 true,
 		"TrustedReplay":                            false,
 		"TrustCanonicalWithdrawalOnRewardMismatch": false,
+		"TrustCanonicalTreasuryValueOnMismatch":    false,
 	}
 
 	cfgType := reflect.TypeFor[ledger.LedgerStateConfig]()

@@ -141,6 +141,8 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		MinPoolMargin: n.config.minPoolMargin,
 		// Off by default; see LedgerStateConfig.TrustCanonicalWithdrawalOnRewardMismatch.
 		TrustCanonicalWithdrawalOnRewardMismatch: n.config.trustCanonicalWithdrawalOnRewardMismatch,
+		// Off by default; see LedgerStateConfig.TrustCanonicalTreasuryValueOnMismatch.
+		TrustCanonicalTreasuryValueOnMismatch: n.config.trustCanonicalTreasuryValueOnMismatch,
 		// CIP-50 pledge-leverage reward cap. Operator-set (not derived from
 		// the network) and off by default; enable only where every node
 		// also enables it.

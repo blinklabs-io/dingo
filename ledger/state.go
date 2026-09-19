@@ -736,6 +736,24 @@ type LedgerStateConfig struct {
 	// diagnostic or validation run, not a default for a node whose
 	// reward accounting is expected to be trustworthy on its own.
 	TrustCanonicalWithdrawalOnRewardMismatch bool
+	// TrustCanonicalTreasuryValueOnMismatch, when true, recovers from a
+	// deterministic lcommon.CurrentTreasuryValueMismatchError (a canonical
+	// block's supplied current-treasury-value field disagrees with this
+	// node's own network-state treasury total) by overwriting the local
+	// treasury total with the block's own claimed value and letting ordinary
+	// rewind-and-retry re-validate the same block, instead of retrying the
+	// same rejection forever. Every peer having already accepted the block is
+	// the basis for trusting its treasury figure over this node's own
+	// accounting, the same reasoning
+	// TrustCanonicalWithdrawalOnRewardMismatch already applies to a reward
+	// balance. This does not correct the underlying reward/treasury
+	// calculation disagreement (blinklabs-io/dingo#3885 follow-up) -- only
+	// the treasury total, only after the ordinary retry has already failed
+	// identically once. Off by default, for the same reason
+	// TrustCanonicalWithdrawalOnRewardMismatch is: appropriate for
+	// unblocking a diagnostic or validation run, not a default for a node
+	// whose treasury accounting is expected to be trustworthy on its own.
+	TrustCanonicalTreasuryValueOnMismatch bool
 	// MinPoolMargin is the CIP-23 minimum pool margin (minimum variable fee) in
 	// basis points, [0, 10000] (150 = 1.5%); 0 disables it. It is a consensus-
 	// affecting operator setting (not derived from the network) that takes
@@ -1190,6 +1208,12 @@ type LedgerState struct {
 	// Matching on (block, tx) identity alone, with no tip-slot condition,
 	// is what proves determinism for this narrower purpose instead.
 	rewardMismatchReconcileSeen *deterministicTxRecoveryLatch
+	// treasuryMismatchReconcileSeen is rewardMismatchReconcileSeen's sibling
+	// for lcommon.CurrentTreasuryValueMismatchError, tracked independently
+	// since a block can fail on a reward-withdrawal mismatch and a
+	// treasury-value mismatch at the same time and each needs its own
+	// "already seen" identity.
+	treasuryMismatchReconcileSeen *deterministicTxRecoveryLatch
 	// Consecutive successful recovery attempts refused at the Mithril trust
 	// boundary without advancing the applied tip (issues #3261 and #3301).
 	// The refusal's only escape is peer rotation, which cannot help for a
