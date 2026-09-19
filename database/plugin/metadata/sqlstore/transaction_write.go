@@ -1232,10 +1232,38 @@ WHERE credential_tag = ? AND staking_key = ? AND active = TRUE`,
 			tag,
 			stakeKey.Bytes(),
 		).Scan(&accountID, &reward)
+		accountFound := true
 		if errors.Is(err, sql.ErrNoRows) {
-			return models.ErrAccountNotFound
-		}
-		if err != nil {
+			if !historicalBackfill {
+				return models.ErrAccountNotFound
+			}
+			accountFound = false
+			// Historical API backfill can replay a withdrawal whose stake
+			// credential has no *active* account row for one of two reasons:
+			// no account row exists at all (deregistered before the imported
+			// Mithril snapshot, or never active in it -- issue #3788), or
+			// backfill's own certificate replay (applyTransactionCertificates
+			// runs unconditionally, historicalBackfill or not) has
+			// temporarily deactivated a row Mithril imported active, between
+			// a historical deregistration certificate and a later
+			// re-registration certificate for the same credential.
+			// Deregistration's account upsert never clears `reward`, so a
+			// merely-inactive row can still hold the credential's real
+			// balance; only fall back to an unknown (zero) previous balance
+			// when no row exists at all, rather than discarding a real one.
+			var fallbackActive sql.NullBool
+			err = db.QueryRowContext(ctx, `
+SELECT id, reward, active FROM account
+WHERE credential_tag = ? AND staking_key = ?`,
+				tag,
+				stakeKey.Bytes(),
+			).Scan(&accountID, &reward, &fallbackActive)
+			if errors.Is(err, sql.ErrNoRows) {
+				reward = sql.NullString{}
+			} else if err != nil {
+				return err
+			}
+		} else if err != nil {
 			return err
 		}
 		var exists bool
@@ -1272,7 +1300,11 @@ SELECT EXISTS (
 		// Historical API backfill replays withdrawals before the imported
 		// snapshot balance's intervening credits are available. Record the
 		// withdrawal history, but leave that trusted boundary balance untouched.
-		if !historicalBackfill {
+		// accountFound is guaranteed true here whenever historicalBackfill is
+		// false (the account lookup above returns early otherwise); the extra
+		// check keeps this update from ever reactivating or fabricating a
+		// current stake-registration account.
+		if !historicalBackfill && accountFound {
 			rewardAfter := previous - amount.Uint64()
 			if _, err := db.ExecContext(ctx, `
 UPDATE account SET reward = ? WHERE id = ?`,
