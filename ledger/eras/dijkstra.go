@@ -203,7 +203,11 @@ func CertDepositDijkstra(
 	pp lcommon.ProtocolParameters,
 ) (uint64, error) {
 	tmpPparams, ok := pp.(*gdijkstra.DijkstraProtocolParameters)
-	if !ok {
+	// The nil check is part of the guard, not redundant with it: a typed-nil
+	// *DijkstraProtocolParameters satisfies the assertion, so testing only ok
+	// lets every case below dereference nil. CertDepositConway has always
+	// spelled it this way; this one had not.
+	if !ok || tmpPparams == nil {
 		return 0, ErrIncompatibleProtocolParams
 	}
 	switch cert.(type) {

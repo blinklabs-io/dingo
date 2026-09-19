@@ -908,7 +908,7 @@ func (a *epochInfoAdapter) ActiveSlotCoeffRat() *big.Rat {
 
 func (a *epochInfoAdapter) ConsensusModeForEpoch(
 	epoch uint64,
-) consensus.ConsensusMode {
+) (consensus.ConsensusMode, error) {
 	return a.ledgerState.ConsensusModeForEpoch(epoch)
 }
 

@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"io"
 	"os/exec"
+	"path"
 	"strings"
 	"testing"
 
@@ -86,6 +87,12 @@ var pinnedEmbeddedGenesisHashes = map[string]embeddedGenesisHashes{
 		conway:   "e2951aa7f08dcd89bb6ca7fcf9acae5c46bdefb5a9affbac769bbe1902e982eb",
 		dijkstra: "aa1238f505479a9b104d2cc001b4bf951062cd527200bea9a1857bdd0dc41085",
 	},
+	"prime-testnet": {
+		byron:   "acd3e7c4cc071ae176fa253e654f0dd4e759892b16e958d8bd3c393f5c6c66d2",
+		shelley: "0b67b0cb16e973478888efb1c7f69fca8e80489369afed94624a588e94a94f2b",
+		alonzo:  "0f715ff78fcab739c6cb2cc1073eb87d0ffe3514218bfa0337d416f6fbaf7886",
+		conway:  "01649daebfc1ae5646c6aab2bf07533cdf626fd49e270ac4258be7fe253c3cc1",
+	},
 }
 
 // unpinnableEmbeddedNetworks lists embedded networks that deliberately ship no
@@ -144,7 +151,7 @@ func TestEmbeddedGenesisHashesMatchPinnedValues(t *testing.T) {
 
 			cfg, err := NewCardanoNodeConfigFromEmbedFS(
 				EmbeddedConfigFS,
-				network+"/config.json",
+				EmbeddedConfigPath(network),
 			)
 			require.NoError(t, err)
 
@@ -165,7 +172,7 @@ func TestEmbeddedGenesisHashesMatchPinnedValues(t *testing.T) {
 
 // TestEmbeddedNetworksDeclareGenesisHashes checks that every genesis and
 // checkpoints file a shipped network references also has a declared hash in
-// that network's config.json.
+// that network's config file.
 //
 // validateGenesisHash only compares when the expected hash is non-empty, so a
 // file shipped without one is accepted unconditionally at runtime. That gate
@@ -182,7 +189,7 @@ func TestEmbeddedNetworksDeclareGenesisHashes(t *testing.T) {
 
 			cfg, err := NewCardanoNodeConfigFromEmbedFS(
 				EmbeddedConfigFS,
-				network+"/config.json",
+				EmbeddedConfigPath(network),
 			)
 			require.NoError(t, err)
 
@@ -274,7 +281,16 @@ func TestEmbeddedGenesisHashIsLineEndingInvariant(t *testing.T) {
 		t.Run(network, func(t *testing.T) {
 			t.Parallel()
 
-			f, err := EmbeddedConfigFS.Open(network + "/shelley-genesis.json")
+			configPath := EmbeddedConfigPath(network)
+			cfg, err := NewCardanoNodeConfigFromEmbedFS(
+				EmbeddedConfigFS,
+				configPath,
+			)
+			require.NoError(t, err)
+			f, err := EmbeddedConfigFS.Open(path.Join(
+				path.Dir(configPath),
+				cfg.ShelleyGenesisFile,
+			))
 			require.NoError(t, err)
 			defer f.Close()
 			raw, err := io.ReadAll(f)
@@ -302,7 +318,7 @@ func TestEmbeddedGenesisHashIsLineEndingInvariant(t *testing.T) {
 			}
 
 			byronFile, err := EmbeddedConfigFS.Open(
-				network + "/byron-genesis.json",
+				path.Join(path.Dir(configPath), cfg.ByronGenesisFile),
 			)
 			require.NoError(t, err)
 			defer byronFile.Close()
@@ -397,17 +413,29 @@ func TestCommittedGenesisFilesUseLF(t *testing.T) {
 			continue
 		}
 		network := entry.Name()
-		files, err := EmbeddedConfigFS.ReadDir(network)
+		configPath := EmbeddedConfigPath(network)
+		cfg, err := NewCardanoNodeConfigFromEmbedFS(
+			EmbeddedConfigFS,
+			configPath,
+		)
 		require.NoError(t, err)
-		for _, file := range files {
-			name := file.Name()
-			if !strings.HasSuffix(name, "-genesis.json") &&
-				name != "checkpoints.json" {
+		for _, name := range []string{
+			cfg.ByronGenesisFile,
+			cfg.ShelleyGenesisFile,
+			cfg.AlonzoGenesisFile,
+			cfg.ConwayGenesisFile,
+			cfg.DijkstraGenesisFile,
+			cfg.CheckpointsFile,
+		} {
+			if name == "" {
 				continue
 			}
 			checked++
 			// git addresses blobs with forward slashes on every platform.
-			repoPath := "config/cardano/" + network + "/" + name
+			repoPath := "config/cardano/" + path.Join(
+				path.Dir(configPath),
+				name,
+			)
 			assert.Zero(
 				t,
 				bytes.Count(committedBytes(t, root, repoPath), []byte("\r")),
