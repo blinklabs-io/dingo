@@ -153,8 +153,9 @@ type replayRecoveryCandidate struct {
 	ProducerBlock models.Block
 	RollbackPoint ocommon.Point
 	Strategy      string
-	// ProducerUnresolved distinguishes the security-parameter fallback from
-	// strategies that found a concrete producer. Strategy remains a log label.
+	// ProducerUnresolved reports that at least one failing input had no
+	// resolvable producer, whichever candidate supplied the rollback anchor.
+	// It gates the primary-chain rewind; Strategy remains a log label.
 	ProducerUnresolved bool
 }
 
@@ -1686,14 +1687,12 @@ func (ls *LedgerState) findReplayRecoveryCandidate(
 		if fallbackCandidate != nil && (candidate == nil ||
 			fallbackCandidate.ProducerBlock.Slot < candidate.ProducerBlock.Slot) {
 			candidate = fallbackCandidate
-		} else if fallbackCandidate != nil {
-			// Keep the deeper known-producer anchor, but still rewind the
-			// primary chain because another input has unresolved provenance.
-			candidate.ProducerUnresolved = true
-		}
-		if candidate != nil && fallbackCandidate != nil {
-			// Keep the deeper known-producer anchor, but still rewind the
-			// primary chain because another input has unresolved provenance.
+		} else if candidate != nil {
+			// The deeper known producer keeps the rollback anchor, but an
+			// input with no resolvable provenance still requires the primary
+			// chain rewind. Keyed on the surviving candidate rather than on
+			// fallbackCandidate, which is nil whenever the bounded fallback
+			// found no retained anchor.
 			candidate.ProducerUnresolved = true
 		}
 	}

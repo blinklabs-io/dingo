@@ -396,6 +396,126 @@ func TestFindReplayRecoveryCandidateHandlesPrunedFallbackTail(
 	}
 }
 
+// TestFindReplayRecoveryCandidateFlagsUnresolvedWithoutLocalFallbackAnchor
+// pins the primary-chain rewind for the topology a pruned prefix creates: one
+// failing input resolves to a retained producer while another has no recorded
+// provenance, and the bounded security-parameter fallback finds no retained
+// anchor at all. The surviving metadata candidate supplies the rollback point,
+// but ProducerUnresolved must still be set, because it is what gates the
+// primary-chain rewind, the non-converging hold and the resync escape.
+func TestFindReplayRecoveryCandidateFlagsUnresolvedWithoutLocalFallbackAnchor(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	for _, securityParam := range []int{2, 3, 4, 5} {
+		t.Run(fmt.Sprintf("security param %d", securityParam), func(t *testing.T) {
+			t.Parallel()
+
+			db, err := dbtest.NewDatabase(
+				t,
+				&database.Config{DataDir: t.TempDir()},
+			)
+			require.NoError(t, err)
+			cm, err := chain.NewManager(db, nil)
+			require.NoError(t, err)
+
+			blocks := []chain.RawBlock{
+				testRawBlock("no-anchor-one", 80, 1, nil),
+				testRawBlock("no-anchor-two", 100, 2, nil),
+				testRawBlock("no-anchor-three", 120, 3, nil),
+				testRawBlock("no-anchor-producer", 140, 4, nil),
+				testRawBlock("no-anchor-current", 160, 5, nil),
+			}
+			for i := 1; i < len(blocks); i++ {
+				blocks[i].PrevHash = blocks[i-1].Hash
+			}
+			require.NoError(t, cm.PrimaryChain().AddRawBlocks(blocks))
+
+			// Prune the first two blocks, leaving the producer's own parent
+			// retained but every fallback anchor index below the window.
+			pruned := make([]models.Block, 2)
+			for i := range pruned {
+				pruned[i], err = database.BlockByHash(db, blocks[i].Hash)
+				require.NoError(t, err)
+			}
+			txn := db.BlobTxn(true)
+			require.NoError(t, txn.Do(func(txn *database.Txn) error {
+				for _, block := range pruned {
+					if err := database.BlockDeleteTxn(txn, block); err != nil {
+						return err
+					}
+				}
+				return nil
+			}))
+
+			nodeConfig := newTestShelleyGenesisCfg(t)
+			nodeConfig.ShelleyGenesis().SecurityParam = securityParam
+			ls, err := NewLedgerState(LedgerStateConfig{
+				Database:          db,
+				ChainManager:      cm,
+				CardanoNodeConfig: nodeConfig,
+				Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			})
+			require.NoError(t, err)
+			ls.currentEra.Id = 1
+			require.NoError(t, cm.SetLedger(ls))
+			ls.metrics.init(prometheus.NewRegistry())
+
+			currentTip := ochainsync.Tip{
+				Point:       ocommon.NewPoint(blocks[4].Slot, blocks[4].Hash),
+				BlockNumber: blocks[4].BlockNumber,
+			}
+			require.NoError(t, db.SetTip(currentTip, nil))
+			ls.currentTip = currentTip
+			ls.publishSnapshotsLocked()
+
+			knownTxHash := testHashBytes("no-anchor-known-producer-tx")
+			seedReplayRecoveryTransaction(
+				t,
+				db,
+				knownTxHash,
+				blocks[3].Hash,
+				blocks[3].Slot,
+			)
+
+			fallback, err := ls.replayRecoveryFallbackCandidate(
+				currentTip.Point,
+				[]lcommon.TransactionInput{
+					&replayRecoveryInput{
+						txId:  testHashBytes("no-anchor-unresolved-tx"),
+						index: 0,
+					},
+				},
+			)
+			require.NoError(t, err)
+			require.Nil(t, fallback, "fixture must leave no retained fallback anchor")
+
+			candidate, err := ls.findReplayRecoveryCandidate(&txValidationError{
+				BlockPoint: currentTip.Point,
+				TxHash:     testHashBytes("no-anchor-failure"),
+				Inputs: []lcommon.TransactionInput{
+					&replayRecoveryInput{txId: knownTxHash, index: 0},
+					&replayRecoveryInput{
+						txId:  testHashBytes("no-anchor-unresolved-tx"),
+						index: 0,
+					},
+				},
+				Cause: errors.New("bad input"),
+			})
+			require.NoError(t, err)
+			require.NotNil(t, candidate)
+			assert.Equal(t, "metadata", candidate.Strategy)
+			assert.Equal(t, blocks[2].Slot, candidate.RollbackPoint.Slot)
+			assert.True(
+				t,
+				candidate.ProducerUnresolved,
+				"unresolved provenance must still force the primary-chain rewind",
+			)
+		})
+	}
+}
+
 func TestTryRecoverFromTxValidationErrorRejectsReplayBelowMithrilBoundary(
 	t *testing.T,
 ) {
