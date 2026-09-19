@@ -497,10 +497,10 @@ func missingCriticalDeferredIndexes(
 	return missing, true
 }
 
-// RepairCriticalDeferredIndexes rebuilds the API/rollback-critical
-// subset, and reports when a prior run left deferred indexes pending. It
-// leaves the pending marker in place so RepairDeferredIndexes can finish
-// the lazy remainder later.
+// RepairCriticalDeferredIndexes rebuilds the full manifest when no bulk-load
+// cycle is pending. During a pending cycle, it preserves that marker and
+// rebuilds only the API/rollback-critical subset so RepairDeferredIndexes can
+// finish the lazy remainder later.
 func RepairCriticalDeferredIndexes(
 	db *database.Database,
 	logger *slog.Logger,
@@ -518,8 +518,15 @@ func RepairCriticalDeferredIndexes(
 			"critical deferred metadata indexes pending from a prior run; " +
 				"rebuilding before serving API traffic",
 		)
+		return ensureCriticalDeferredIndexes(manager, logger)
 	}
-	return ensureCriticalDeferredIndexes(manager, logger)
+	// A clear marker means no bulk-load cycle is active. Restore copies can
+	// still be missing any manifest entry because their recorded migrations do
+	// not re-run, so finish the whole manifest before accepting traffic.
+	if err := ensureCriticalDeferredIndexes(manager, logger); err != nil {
+		return err
+	}
+	return manager.BuildDeferredIndexes()
 }
 
 // RepairDeferredIndexes rebuilds any deferred indexes that were
@@ -527,9 +534,8 @@ func RepairCriticalDeferredIndexes(
 // when no rebuild is outstanding: BuildDeferredIndexes is itself
 // idempotent and clears the marker.
 //
-// With no cycle outstanding it still restores any missing critical index,
-// because the rollback path the node is about to run depends on those and
-// the marker cannot answer whether they exist.
+// With no cycle outstanding it restores the complete manifest because a
+// restored database can have recorded migrations but missing index entries.
 func RepairDeferredIndexes(
 	db *database.Database,
 	logger *slog.Logger,
@@ -543,7 +549,13 @@ func RepairDeferredIndexes(
 		return err
 	}
 	if !pending {
-		return ensureCriticalDeferredIndexes(manager, logger)
+		// A restore can carry missing deferred indexes without the pending
+		// marker. Rebuild the complete manifest before any rollback or query
+		// runs; BuildDeferredIndexes is idempotent on a healthy database.
+		if err := ensureCriticalDeferredIndexes(manager, logger); err != nil {
+			return err
+		}
+		return manager.BuildDeferredIndexes()
 	}
 	logger.Warn(
 		"deferred metadata indexes pending from a prior run; " +

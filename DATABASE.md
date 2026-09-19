@@ -859,6 +859,15 @@ versioned migration that created it is recorded complete, so its
 `CREATE INDEX IF NOT EXISTS` never runs again. Taking an index out of the
 manifest therefore means adding it to `Retained`.
 
+Snapshot restore validates the staged metadata store before it atomically
+activates the restored directory. During that validation, stores that support
+deferred indexes rebuild the complete manifest idempotently. This repairs a
+backup made while a prior bulk-load cycle had removed indexes, even though its
+recorded migrations are already complete. Normal startup makes the same full
+repair when no deferred-index marker is present; an active marker still builds
+only the critical subset before traffic and leaves the lazy remainder to its
+existing deferred-rebuild path.
+
 ### Midnight Indexer
 
 | Table | Columns | Keys / indexes | Relationships and notes |

@@ -1151,7 +1151,11 @@ func validateRestoredDatabase(
 	defer host.StopCapability( //nolint:errcheck
 		context.WithoutCancel(ctx), plugin.CapabilityStorageMetadata,
 	)
-
+	if manager, ok := metadataStore.(metadata.DeferredIndexManager); ok {
+		if err := manager.BuildDeferredIndexes(); err != nil {
+			return fmt.Errorf("restore deferred metadata indexes: %w", err)
+		}
+	}
 	db, err := database.New(&database.Config{
 		DataDir:     targetDataDir,
 		StorageMode: manifest.StorageMode,

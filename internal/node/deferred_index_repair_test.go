@@ -115,6 +115,55 @@ func TestRepairCriticalDeferredIndexesRestoresCriticalIndexWithoutMarker(
 	requireNoPendingMarker(t, raw)
 }
 
+// TestRepairDeferredIndexesRestoresLazyIndexWithoutMarker covers a restored
+// database whose complete migration history hides a missing lazy index.
+func TestRepairDeferredIndexesRestoresLazyIndexWithoutMarker(t *testing.T) {
+	db := newFileTestDB(t)
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	lazy := dbtest.LazyManifestIndex(t)
+	_, err = raw.Exec("DROP INDEX IF EXISTS " + lazy)
+	require.NoError(t, err)
+	_, err = raw.Exec(
+		"DELETE FROM sync_state WHERE sync_key = ?", deferred.SyncStateKey,
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, RepairDeferredIndexes(
+		db,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	))
+
+	require.True(t, dbtest.MetadataIndexExists(t, raw, lazy))
+	requireNoPendingMarker(t, raw)
+}
+
+// TestRepairCriticalDeferredIndexesRestoresLazyIndexWithoutMarker covers the
+// API-mode startup path, which must not leave a restored database missing its
+// non-critical manifest entries once no bulk-load cycle is active.
+func TestRepairCriticalDeferredIndexesRestoresLazyIndexWithoutMarker(
+	t *testing.T,
+) {
+	db := newFileTestDB(t)
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	lazy := dbtest.LazyManifestIndex(t)
+	_, err = raw.Exec("DROP INDEX IF EXISTS " + lazy)
+	require.NoError(t, err)
+	_, err = raw.Exec(
+		"DELETE FROM sync_state WHERE sync_key = ?", deferred.SyncStateKey,
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, RepairCriticalDeferredIndexes(
+		db,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	))
+
+	require.True(t, dbtest.MetadataIndexExists(t, raw, lazy))
+	requireNoPendingMarker(t, raw)
+}
+
 // requireNoPendingMarker asserts the repair did not invent a bulk-load cycle:
 // the marker means "a drop/rebuild is outstanding", and setting it on a
 // database with a complete manifest would send the next startup through a
