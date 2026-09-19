@@ -3978,7 +3978,7 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 	// can only see, or only outrun, what has already happened before it.
 	//
 	// Draining first matters because validateAndEmitRollbackUndo's emit
-	// (emitRollbackTransactionEvents, via blocksAboveSlot) works from what
+	// (emitRollbackTransactionEvents, via readBlocksAboveSlot) works from what
 	// is already committed to the db. Blocks the pipeline is still
 	// decoding/validating/applying for the fork about to be abandoned are
 	// not there yet. If they finished applying (and published their own
@@ -3987,7 +3987,7 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 	// physically delete them -- a ledger.tx subscriber would keep derived
 	// state for a transaction the chain silently dropped. Draining first
 	// lets any such in-flight blocks finish applying and publish their
-	// forward events, so blocksAboveSlot's read (and the undo events it
+	// forward events, so readBlocksAboveSlot's read (and the undo events it
 	// drives) covers them too.
 	//
 	// Emitting before truncating matters for the opposite reason: the
@@ -4010,7 +4010,7 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 		"chainsync rollback",
 	)
 	// A database commit becomes visible before its AfterCommit callbacks run.
-	// Exclude that window so blocksAboveSlot can never publish an Undo for the
+	// Exclude that window so readBlocksAboveSlot can never publish an Undo for the
 	// new state before the matching Apply reaches the ordered lane.
 	err := func() error {
 		ls.transactionEventMutex.Lock()

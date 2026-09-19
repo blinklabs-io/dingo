@@ -235,7 +235,7 @@ func (ls *LedgerState) publishBlockEvent(
 // itself fail -- reconcilePrimaryChainTipWithLedgerTip had the identical
 // shape (issue #3516) until it was closed by decoupling
 // LedgerState.rollback's durable commit from its resync-event publish
-// (wolf31o2 review, PR #3611: see rollbackWithResync/rollbackWithoutResync
+// (wolf31o2 review, PR #3611: see rollbackWithBlocks/rollbackWithoutResync
 // and the reconciler's two branches). Whether the same decoupling is safe
 // to adopt here too remains tracked as issue #3817.
 func (ls *LedgerState) validateAndEmitRollbackUndo(
@@ -300,8 +300,9 @@ func (ls *LedgerState) validateAndEmitRollbackUndoEmitted(
 }
 
 // readBlocksAboveSlot returns the blocks a rollback to slot would discard,
-// newest first. Unlike blocksAboveSlot, it returns storage errors so the
-// caller can fail before mutating the chain without a durable undo payload.
+// newest first. It returns storage errors rather than degrading to a partial
+// read, so a caller can fail before mutating the chain without having captured
+// a durable undo payload.
 func (ls *LedgerState) readBlocksAboveSlot(slot uint64) ([]models.Block, error) {
 	if ls.config.EventBus == nil || ls.db == nil {
 		return nil, nil
@@ -340,7 +341,7 @@ func (ls *LedgerState) readBlocksAboveSlot(slot uint64) ([]models.Block, error) 
 // between ancestor (exclusive) and ledgerTipSlot (inclusive), newest first,
 // for the primary-chain/ledger divergence reconciler (issue #3516).
 //
-// It deliberately does not reuse blocksAboveSlot: that helper reads
+// It deliberately does not reuse readBlocksAboveSlot: that helper reads
 // whatever the primary chain's blob store currently holds above a slot,
 // which is correct for a live, not-yet-applied rollback (the blocks being
 // discarded are still there), but wrong here. By the time this reconciler
@@ -368,7 +369,8 @@ func (ls *LedgerState) readBlocksAboveSlot(slot uint64) ([]models.Block, error) 
 // connection, all considerably worse than an incomplete notification -- an
 // unresolved point is skipped, logged at error level, and counted via
 // reconciliationUndoUnresolved so the gap is observable rather than silent.
-// This is the same best-effort degradation blocksAboveSlot uses for a
+// This is the same best-effort degradation emitRollbackTransactionEvents
+// uses for a
 // decode failure: the reconciliation is what keeps the ledger correct, and
 // it must not fail because a notification could not be built.
 //
