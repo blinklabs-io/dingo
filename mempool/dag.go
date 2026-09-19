@@ -17,6 +17,8 @@ package mempool
 import (
 	"fmt"
 	"slices"
+
+	"github.com/blinklabs-io/dingo/utxoref"
 )
 
 // dagNode stores only graph/index metadata. Transaction bodies remain owned by
@@ -25,7 +27,7 @@ import (
 type dagNode struct {
 	parents  map[string]struct{}
 	children map[string]struct{}
-	produced []string
+	produced []utxoref.Key
 }
 
 // transactionDAG indexes producer/consumer relationships between pending
@@ -33,14 +35,14 @@ type dagNode struct {
 // locks, so the graph itself does not need a mutex.
 type transactionDAG struct {
 	nodes          map[string]*dagNode
-	producerByUtxo map[string]string
+	producerByUtxo map[utxoref.Key]string
 	order          []string
 }
 
 func newTransactionDAG() *transactionDAG {
 	return &transactionDAG{
 		nodes:          make(map[string]*dagNode),
-		producerByUtxo: make(map[string]string),
+		producerByUtxo: make(map[utxoref.Key]string),
 	}
 }
 
@@ -51,7 +53,7 @@ func (d *transactionDAG) add(tx appliedTx) {
 	node := &dagNode{
 		parents:  make(map[string]struct{}),
 		children: make(map[string]struct{}),
-		produced: make([]string, 0, len(tx.created)),
+		produced: make([]utxoref.Key, 0, len(tx.created)),
 	}
 	for _, input := range tx.consumed {
 		if parentHash, ok := d.producerByUtxo[input]; ok {

@@ -280,6 +280,7 @@ func buildConwayValidationRules() []indexedUtxoValidationRule {
 		lcommon.UtxoValidationRulePlutusScripts,
 		lcommon.UtxoValidationRuleCommitteeCertificates,
 		lcommon.UtxoValidationRuleUnknownVoters,
+		lcommon.UtxoValidationRuleDelegation,
 	}
 	descriptors := conway.UtxoValidationRuleDescriptors()
 	indexes := make([]int, len(skipRuleIds))
@@ -305,6 +306,10 @@ func buildConwayValidationRules() []indexedUtxoValidationRule {
 		indexedUtxoValidationRule{
 			index:          indexes[4],
 			validationFunc: validateUnknownVoters,
+		},
+		indexedUtxoValidationRule{
+			index:          indexes[5],
+			validationFunc: validateDelegationConwayBootstrapAware,
 		},
 	)
 	slices.SortFunc(ret, func(a, b indexedUtxoValidationRule) int {
@@ -562,7 +567,7 @@ func validateTxPlutusConwayWithContext(
 	if !hasRedeemers {
 		return nil
 	}
-	txInfos := newConwayTxInfoCache(
+	txInfos := newTxInfoCache(
 		ls,
 		tx,
 		plutusCtx.scriptInputs.resolvedAllInputs,
@@ -1060,7 +1065,7 @@ func collectConwayAvailableScripts(
 	return ret
 }
 
-type conwayTxInfoCache struct {
+type txInfoCache struct {
 	ls             lcommon.LedgerState
 	tx             lcommon.Transaction
 	resolvedInputs []lcommon.Utxo
@@ -1072,25 +1077,31 @@ type conwayTxInfoCache struct {
 	txInfoV3Built  bool
 }
 
-// newConwayTxInfoCache builds the per-tx PlutusV1/V2/V3 TxInfo cache.
+// newTxInfoCache builds the per-tx PlutusV1/V2/V3 TxInfo cache, shared by
+// ValidateTxConway/EvaluateTxConway and ValidateTxBabbage/EvaluateTxBabbage
+// (Babbage never reaches v3, but the type is otherwise era-neutral). Building
+// a TxInfo re-derives the whole transaction's Plutus-Data-encoded inputs,
+// outputs, certificates, mint, and withdrawals, and translates the validity
+// interval through SlotToTime, so it must happen at most once per (tx,
+// language version) regardless of how many redeemers share that version.
 //
 // The cache takes no protocol version. gouroboros v0.192.0 renders the
 // PlutusV1/V2 txInfoMint the same way at every protocol version, matching
 // cardano-ledger's ungated transMintValue, so there is nothing left for a
 // version to select.
-func newConwayTxInfoCache(
+func newTxInfoCache(
 	ls lcommon.LedgerState,
 	tx lcommon.Transaction,
 	resolvedInputs []lcommon.Utxo,
-) *conwayTxInfoCache {
-	return &conwayTxInfoCache{
+) *txInfoCache {
+	return &txInfoCache{
 		ls:             ls,
 		tx:             tx,
 		resolvedInputs: resolvedInputs,
 	}
 }
 
-func (c *conwayTxInfoCache) v1() (script.TxInfoV1, error) {
+func (c *txInfoCache) v1() (script.TxInfoV1, error) {
 	if !c.txInfoV1Built {
 		txInfo, err := script.NewTxInfoV1FromTransaction(
 			c.ls,
@@ -1109,7 +1120,7 @@ func (c *conwayTxInfoCache) v1() (script.TxInfoV1, error) {
 	return c.txInfoV1, nil
 }
 
-func (c *conwayTxInfoCache) v2() (script.TxInfoV2, error) {
+func (c *txInfoCache) v2() (script.TxInfoV2, error) {
 	if !c.txInfoV2Built {
 		txInfo, err := script.NewTxInfoV2FromTransaction(
 			c.ls,
@@ -1128,7 +1139,7 @@ func (c *conwayTxInfoCache) v2() (script.TxInfoV2, error) {
 	return c.txInfoV2, nil
 }
 
-func (c *conwayTxInfoCache) v3() (script.TxInfoV3, error) {
+func (c *txInfoCache) v3() (script.TxInfoV3, error) {
 	if !c.txInfoV3Built {
 		txInfo, err := script.NewTxInfoV3FromTransaction(
 			c.ls,
@@ -1153,7 +1164,7 @@ func evaluateConwayPlutusScript(
 	datum data.PlutusData,
 	budget lcommon.ExUnits,
 	pp *conway.ConwayProtocolParameters,
-	txInfos *conwayTxInfoCache,
+	txInfos *txInfoCache,
 	restrictive bool,
 	syntheticV2CostModel bool,
 ) (lcommon.ExUnits, error, error) {
@@ -1407,7 +1418,7 @@ func EvaluateTxConway(
 	// Evaluate scripts
 	var retTotalExUnits lcommon.ExUnits
 	retRedeemerExUnits := make(map[lcommon.RedeemerKey]lcommon.ExUnits)
-	txInfos := newConwayTxInfoCache(
+	txInfos := newTxInfoCache(
 		ls,
 		tx,
 		scriptInputs.resolvedAllInputs,

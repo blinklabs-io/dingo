@@ -180,6 +180,16 @@ var flagSpecs = []flagSpec{
 		"pprof bind address (wildcard exposure requires an explicit override)",
 	),
 	uintFlag("DebugPort", "debug-port", "debug pprof port (0 = disabled)"),
+	uintFlag(
+		"HealthPort",
+		"health-port",
+		"liveness/readiness probe port (0 = disabled)",
+	),
+	uintFlag(
+		"HealthReadyGapSlots",
+		"health-ready-gap-slots",
+		"slots the chain tip may trail the wall clock and still be ready",
+	),
 	boolPtrFlag(
 		"PeerSharing",
 		"peer-sharing",
@@ -526,6 +536,12 @@ var flagSpecs = []flagSpec{
 		"max simultaneous connections per IP",
 	),
 	intFlag("MaxInboundConns", "max-inbound-conns", "max inbound connections"),
+	intFlag("MaxNtCConns", "max-ntc-conns", "max node-to-client connections"),
+	intFlag(
+		"MaxNtCConnectionsPerIP",
+		"max-ntc-connections-per-ip",
+		"max node-to-client connections per IP",
+	),
 
 	// Cache
 	intFlag(
@@ -772,6 +788,12 @@ var flagSpecs = []flagSpec{
 		"mithril-backend",
 		"",
 		"Mithril artifact backend: v1 (legacy snapshots) or v2 (incremental database)",
+	),
+	stringFlag(
+		"Mithril.PinnedDigest",
+		"mithril-pinned-digest",
+		"",
+		"Mithril artifact identity for a fresh bootstrap: v1 snapshot digest or v2 Cardano database artifact hash",
 	),
 	stringFlag(
 		"Mithril.DownloadDir",

@@ -106,7 +106,7 @@ func checkPoolMarginFloor(
 		if margin.Cmp(minMargin) < 0 {
 			return fmt.Errorf(
 				"pool %x margin %s below minimum pool margin %s",
-				reg.Operator,
+				reg.Operator.Bytes(),
 				margin.RatString(),
 				minMargin.RatString(),
 			)
@@ -271,8 +271,15 @@ func validateUnknownVoters(
 		switch voter.Type {
 		case lcommon.VoterTypeDRepKeyHash,
 			lcommon.VoterTypeDRepScriptHash:
+			credentialType := uint(lcommon.CredentialTypeAddrKeyHash)
+			if voter.Type == lcommon.VoterTypeDRepScriptHash {
+				credentialType = lcommon.CredentialTypeScriptHash
+			}
 			registration, err := ls.DRepRegistration(
-				lcommon.Blake2b224(voter.Hash),
+				lcommon.Credential{
+					CredType:   credentialType,
+					Credential: lcommon.Blake2b224(voter.Hash),
+				},
 			)
 			if err != nil {
 				return err
@@ -317,6 +324,71 @@ func validateUnknownVoters(
 	return nil
 }
 
+// isConwayBootstrapPhase reports whether pp is Conway protocol parameters
+// with major version PV9: the initial Conway "bootstrap phase", before the
+// Plomin hard fork lifts its restrictions at PV10. Mirrors gouroboros's
+// unexported conway.isInConwayBootstrapPhase, which this package cannot call
+// directly.
+func isConwayBootstrapPhase(pp lcommon.ProtocolParameters) bool {
+	conwayPp, ok := pp.(*conway.ConwayProtocolParameters)
+	if !ok {
+		return false
+	}
+	major := conwayPp.ProtocolVersion.Major
+	return major >= lcommon.ProtocolVersionConway &&
+		major < lcommon.ProtocolVersionPlomin
+}
+
+// validateDelegationConwayBootstrapAware wraps the upstream Conway
+// delegation-certificate rule (conway.UtxoValidateDelegation) to relax the
+// vote-delegation DRep-registration check during the Conway bootstrap phase
+// (PV9), matching cardano-ledger's checkDRepRegistered in
+// Cardano.Ledger.Conway.Rules.Deleg:
+//
+//	checkDRepRegistered = \case
+//	  DRepAlwaysAbstain -> pure ()
+//	  DRepAlwaysNoConfidence -> pure ()
+//	  DRepCredential targetDRep -> do
+//	    unless (hardforkConwayBootstrapPhase (pp ^. ppProtocolVersionL)) $
+//	      targetDRep `Map.member` dReps ?! injectFailure
+//	        (DelegateeDRepNotRegisteredDELEG targetDRep)
+//
+// Only the DRep-registered branch is bootstrap-relaxed upstream: stake
+// credential registration, pool registration, and every other delegation
+// check in conway.UtxoValidateDelegation stay fully enforced, since this
+// wrapper defers to the upstream function unchanged and only swallows the
+// one error it can produce for a target DRep that has not registered yet.
+//
+// Without this, a genuinely valid PV9 vote-delegation certificate (or the
+// combined stake-vote-delegation/registration certificate variants, which
+// share the same DRep-registration check and error type) targeting a DRep
+// that only registers later is rejected forever, wedging block application.
+// Live incident: dingo rejected a Preview block at slot 55847379 (epoch
+// 646, ~2024-08-01) delegating to DRep credential
+// 0e4bdd698b4cc2f2e518b4b1fa5190d0bc566ac42f93c26986ecaa79, which Koios
+// shows registering only around 2025-02-20 (block_time 1740052671) — seven
+// months after the delegation. cardano-ledger's PV10 (Plomin) HARDFORK rule
+// (updateDRepDelegations, ported in dingo as
+// LedgerState.ClearDanglingDRepDelegations) exists specifically to clean up
+// this kind of dangling pre-PV10 delegation, which only makes sense if the
+// delegation was accepted onto the chain in the first place.
+func validateDelegationConwayBootstrapAware(
+	tx lcommon.Transaction,
+	slot uint64,
+	ls lcommon.LedgerState,
+	pp lcommon.ProtocolParameters,
+) error {
+	err := conway.UtxoValidateDelegation(tx, slot, ls, pp)
+	if err == nil {
+		return nil
+	}
+	var drepErr conway.DelegateVoteToUnregisteredDRepError
+	if errors.As(err, &drepErr) && isConwayBootstrapPhase(pp) {
+		return nil
+	}
+	return err
+}
+
 // validatePlutusOutcome requires the locally evaluated phase-2 result to
 // match the transaction's declared validity flag. A failed script is the
 // expected outcome for an invalid transaction; every other validation error
@@ -352,7 +424,7 @@ func validatePlutusOutcome(tx lcommon.Transaction, phase2Err error) error {
 // transactions. cardano-ledger only translates the validity interval while
 // assembling the context for the Plutus scripts a transaction actually needs
 // (Alonzo collectPlutusScriptsWithContext), and ValidateTxConway already
-// follows that shape here via conwayTxInfoCache.
+// follows that shape here via txInfoCache.
 func txHasRedeemers(tx lcommon.Transaction) bool {
 	witnesses := tx.Witnesses()
 	if witnesses == nil {

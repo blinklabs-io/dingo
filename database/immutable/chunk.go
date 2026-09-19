@@ -110,11 +110,10 @@ func (c *chunk) Next() (*Block, error) {
 			)
 		}
 		blockData := make([]byte, int(blockSize))
-		// Seek to offset
-		if _, err := c.file.Seek(currOffset, 0); err != nil {
-			return nil, err
-		}
-		n, err := c.file.Read(blockData)
+		// ReadAt avoids a separate seek syscall for every block. It also leaves
+		// the reader position untouched, which is important because the same
+		// chunk file is independently used by the index reader.
+		n, err := c.file.ReadAt(blockData, currOffset)
 		if err != nil {
 			return nil, err
 		}
@@ -195,11 +194,9 @@ func (c *chunk) Next() (*Block, error) {
 			)
 		}
 		blockData := make([]byte, int(blockSize))
-		// Seek to offset
-		if _, err := c.file.Seek(currOffset, 0); err != nil {
-			return nil, err
-		}
-		n, err := c.file.Read(blockData)
+		// See the final-entry path above: one positional read replaces the
+		// seek/read pair without changing the bytes handed to the decoder.
+		n, err := c.file.ReadAt(blockData, currOffset)
 		if err != nil {
 			return nil, err
 		}

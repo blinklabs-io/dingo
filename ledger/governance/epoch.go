@@ -73,6 +73,7 @@ type EpochOutput struct {
 	EnactedCount      int
 	RatifiedCount     int
 	ExpiredCount      int
+	DroppedCount      int
 	OrphanedCount     int
 	HardForkInitiated bool
 	// PlutusV2CostModelWritten is true when any proposal enacted this tick
@@ -285,20 +286,91 @@ func ProcessEpoch(
 		}
 	}
 
+	// --- DROP (deposit return for proposals expired in a prior epoch) --
+	//
+	// cardano-ledger does not return an expired governance action's deposit
+	// in the same epoch it is detected as expired. Its RATIFY rule flags an
+	// action expired when `gasExpiresAfter < reCurrentEpoch`, and the pulser
+	// carrying that verdict was seeded with the *previous* boundary's epoch
+	// (Conway Rules/Epoch.hs `setFreshDRepPulsingState eNo`), so the removal
+	// and refund land one full boundary after the epoch that expired it --
+	// the same one-epoch delay ratification has before enactment above.
+	//
+	// The `expired_epoch < NewEpoch` bound inside the query below is what
+	// enforces the delay, not this step's position ahead of EXPIRY: a
+	// boundary reprocessed after a commit crash reruns EXPIRY's writes from
+	// the first pass, so ordering alone would let the rerun drop them in the
+	// epoch that expired them (dingo#4411: refunding an epoch early inflated
+	// the very next mark snapshot's total active stake by the deposit amount
+	// for any refund landing on a delegated, still-registered account).
+	replayedDropped, err := in.DB.GetDroppedGovernanceProposalsAt(
+		in.NewEpoch,
+		in.BoundarySlot,
+		in.Txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get boundary-dropped proposals: %w", err)
+	}
+	droppable, err := in.DB.GetExpiredAwaitingDropGovernanceProposals(
+		in.NewEpoch,
+		in.Txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get expired-awaiting-drop proposals: %w", err)
+	}
+	dropProposal := func(p *models.GovernanceProposal, replay bool) error {
+		if err := refundProposalDeposit(
+			in.DB,
+			in.Txn,
+			p,
+			in.BoundarySlot,
+		); err != nil {
+			return fmt.Errorf(
+				"refund dropped proposal deposit %s#%d: %w",
+				shortHash(p.TxHash),
+				p.ActionIndex,
+				err,
+			)
+		}
+		if replay {
+			return nil
+		}
+		droppedEpoch := in.NewEpoch
+		droppedSlot := in.BoundarySlot
+		p.DroppedEpoch = &droppedEpoch
+		p.DroppedSlot = &droppedSlot
+		if err := in.DB.SetGovernanceProposal(p, in.Txn); err != nil {
+			return fmt.Errorf("mark dropped: %w", err)
+		}
+		out.DroppedCount++
+		return nil
+	}
+	for _, p := range replayedDropped {
+		if err := dropProposal(p, true); err != nil {
+			return nil, err
+		}
+	}
+	for _, p := range droppable {
+		if err := dropProposal(p, false); err != nil {
+			return nil, err
+		}
+	}
+
 	// --- EXPIRY -------------------------------------------------------
 	// Fetch proposals whose expiry epoch is in the past but which have
 	// not yet been enacted, expired, or deleted. The active-proposals
 	// query used below excludes these by construction (it filters
 	// `expires_epoch >= NewEpoch`), so we need a dedicated read to mark
-	// them expired and return their deposits.
+	// them expired. Marking expired does not return the deposit -- see the
+	// DROP step above, which does so exactly one epoch later.
 	expired, err := in.DB.GetExpiringGovernanceProposals(
 		in.NewEpoch, in.Txn,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get expiring proposals: %w", err)
 	}
-	// Same replay window as enacted proposals: expired deposits that were
-	// routed to treasury must be restored after the reward pot reset.
+	// Replay window for the "mark expired" write itself (idempotent, but
+	// kept symmetric with the enact/drop replay reads above).
 	replayedExpired, err := in.DB.GetExpiredGovernanceProposalsAt(
 		in.NewEpoch,
 		in.BoundarySlot,
@@ -308,19 +380,6 @@ func ProcessEpoch(
 		return nil, fmt.Errorf("get boundary-expired proposals: %w", err)
 	}
 	expireProposal := func(p *models.GovernanceProposal, replay bool) error {
-		if err := refundProposalDeposit(
-			in.DB,
-			in.Txn,
-			p,
-			in.BoundarySlot,
-		); err != nil {
-			return fmt.Errorf(
-				"refund expired proposal deposit %s#%d: %w",
-				shortHash(p.TxHash),
-				p.ActionIndex,
-				err,
-			)
-		}
 		if replay {
 			return nil
 		}
@@ -1005,10 +1064,7 @@ func removeOrphanedProposals(
 			proposal,
 		)
 	}
-	queue := make([]*models.GovernanceProposal, 0)
-	for _, proposal := range expired {
-		queue = append(queue, children[proposalIdentityKey(proposal)]...)
-	}
+	enactmentSeeds := make([]*models.GovernanceProposal, 0)
 	for _, winner := range enacted {
 		winnerPurpose := govActionPurposeOf(
 			lcommon.GovActionType(winner.ActionType),
@@ -1020,47 +1076,94 @@ func removeOrphanedProposals(
 			if govActionPurposeOf(
 				lcommon.GovActionType(sibling.ActionType),
 			) == winnerPurpose {
-				queue = append(queue, sibling)
+				enactmentSeeds = append(enactmentSeeds, sibling)
 			}
 		}
 	}
+	expirySeeds := make([]*models.GovernanceProposal, 0)
+	for _, proposal := range expired {
+		expirySeeds = append(
+			expirySeeds, children[proposalIdentityKey(proposal)]...,
+		)
+	}
+
+	// cardano-ledger removes competing siblings of an enacted action in the
+	// same EPOCH tick as the enactment and unions them with the enacted
+	// action's own deposit before calling returnProposalDeposits (Conway
+	// Rules/Epoch.hs `allRemovedGovActions`), so an enactment-driven removal
+	// refunds now, exactly like the winner's deposit did in EnactProposal.
+	// Only the expiry-driven sweep defers, because dingo marks a proposal
+	// expired one boundary before cardano-ledger removes it; that half is
+	// left for the next tick's DROP step. The enactment sweep runs first so
+	// a proposal reachable both ways takes the enacting epoch, which is when
+	// cardano-ledger would have removed it.
 	removed := make(map[string]struct{})
 	count := 0
-	for len(queue) > 0 {
-		proposal := queue[0]
-		queue = queue[1:]
-		identity := proposalIdentityKey(proposal)
-		if _, ok := removed[identity]; ok {
-			continue
+	sweep := func(
+		seeds []*models.GovernanceProposal,
+		refundNow bool,
+	) error {
+		queue := append(
+			make([]*models.GovernanceProposal, 0, len(seeds)), seeds...,
+		)
+		for len(queue) > 0 {
+			proposal := queue[0]
+			queue = queue[1:]
+			identity := proposalIdentityKey(proposal)
+			if _, ok := removed[identity]; ok {
+				continue
+			}
+			removed[identity] = struct{}{}
+			expiredEpoch := epoch
+			expiredSlot := slot
+			proposal.ExpiredEpoch = &expiredEpoch
+			proposal.ExpiredSlot = &expiredSlot
+			if refundNow {
+				if err := refundProposalDeposit(
+					db, txn, proposal, slot,
+				); err != nil {
+					return fmt.Errorf(
+						"refund removed proposal deposit %s#%d: %w",
+						shortHash(proposal.TxHash),
+						proposal.ActionIndex,
+						err,
+					)
+				}
+				// Stamping the drop here keeps the refund a single event:
+				// the DROP step skips a proposal that already carries
+				// dropped_epoch, and a reprocessed boundary replays this
+				// refund through GetDroppedGovernanceProposalsAt instead of
+				// issuing a second one.
+				droppedEpoch := epoch
+				droppedSlot := slot
+				proposal.DroppedEpoch = &droppedEpoch
+				proposal.DroppedSlot = &droppedSlot
+			}
+			if err := db.SetGovernanceProposal(proposal, txn); err != nil {
+				return fmt.Errorf(
+					"mark removed proposal expired %s#%d: %w",
+					shortHash(proposal.TxHash), proposal.ActionIndex, err,
+				)
+			}
+			if logger != nil {
+				logger.Info(
+					"removed competing governance proposal",
+					"component", "governance",
+					"tx_hash", shortHash(proposal.TxHash),
+					"action_index", proposal.ActionIndex,
+					"epoch", epoch,
+				)
+			}
+			queue = append(queue, children[identity]...)
+			count++
 		}
-		removed[identity] = struct{}{}
-		if err := refundProposalDeposit(db, txn, proposal, slot); err != nil {
-			return count, fmt.Errorf(
-				"refund removed proposal deposit %s#%d: %w",
-				shortHash(proposal.TxHash), proposal.ActionIndex, err,
-			)
-		}
-		expiredEpoch := epoch
-		expiredSlot := slot
-		proposal.ExpiredEpoch = &expiredEpoch
-		proposal.ExpiredSlot = &expiredSlot
-		if err := db.SetGovernanceProposal(proposal, txn); err != nil {
-			return count, fmt.Errorf(
-				"mark removed proposal expired %s#%d: %w",
-				shortHash(proposal.TxHash), proposal.ActionIndex, err,
-			)
-		}
-		if logger != nil {
-			logger.Info(
-				"removed competing governance proposal",
-				"component", "governance",
-				"tx_hash", shortHash(proposal.TxHash),
-				"action_index", proposal.ActionIndex,
-				"epoch", epoch,
-			)
-		}
-		queue = append(queue, children[identity]...)
-		count++
+		return nil
+	}
+	if err := sweep(enactmentSeeds, true); err != nil {
+		return count, err
+	}
+	if err := sweep(expirySeeds, false); err != nil {
+		return count, err
 	}
 	return count, nil
 }

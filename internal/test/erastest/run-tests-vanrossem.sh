@@ -78,6 +78,9 @@ if ! docker compose version &>/dev/null; then
   die "docker compose plugin is not installed"
 fi
 
+log "Preflighting genesis allocation..."
+"${SCRIPT_DIR}/../preflight-genesis-supply.sh" "${TESTNET_YAML}"
+
 log "Building images..."
 compose build dingo-producer configurator
 

@@ -17,6 +17,7 @@ package koiosparity
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -1059,8 +1060,8 @@ func compareEpochAccounts(
 	}
 
 	var out []CheckMismatch
-	dingoRows, decodeErrs := creditedAccountRewards(dingoOutputs)
-	for _, decodeErr := range decodeErrs {
+	dingoRows, credentialErrs, poolErrs := creditedAccountRewards(dingoOutputs)
+	for _, decodeErr := range credentialErrs {
 		logger.Warn(
 			"koiosparity: failed to decode reward_account_output credential",
 			"epoch",
@@ -1072,6 +1073,28 @@ func compareEpochAccounts(
 			Network:    network,
 			Epoch:      epoch,
 			Field:      "account_reward_address_decode",
+			DingoValue: fmt.Sprintf("error: %v", decodeErr),
+			KoiosValue: "",
+			Category:   CategoryDBError,
+			CheckedAt:  now,
+		})
+	}
+	// Reported apart from the credential failures above: a corrupt
+	// pool_key_hash is a different column with a different cause, and
+	// account_reward_pool_decode is the field CompareAccountEpoch already
+	// uses for a pool identifier that will not decode.
+	for _, decodeErr := range poolErrs {
+		logger.Warn(
+			"koiosparity: failed to decode reward_account_output pool_key_hash",
+			"epoch",
+			stakeEpoch,
+			"error",
+			decodeErr,
+		)
+		out = append(out, CheckMismatch{
+			Network:    network,
+			Epoch:      epoch,
+			Field:      "account_reward_pool_decode",
 			DingoValue: fmt.Sprintf("error: %v", decodeErr),
 			KoiosValue: "",
 			Category:   CategoryDBError,
@@ -1128,30 +1151,55 @@ func compareEpochAccounts(
 // epoch's decode failures itself, and otherwise merely suppresses the
 // lifecycle diff. Filtering before decoding would make an uncredited row's
 // corrupt credential vanish entirely and silently disable that diff.
+//
+// Credential and pool decode failures are returned separately because the
+// caller reports them under different fields and different log messages: they
+// are different storage problems in different columns, and folding them into
+// one slice made a corrupt pool_key_hash read as a stake-address problem
+// during triage.
 func creditedAccountRewards(
 	outputs []*models.RewardAccountOutput,
-) ([]DingoAccountReward, []error) {
-	rows := make([]DingoAccountReward, 0, len(outputs))
-	var errs []error
+) (rows []DingoAccountReward, credentialErrs, poolErrs []error) {
+	rows = make([]DingoAccountReward, 0, len(outputs))
 	for _, row := range outputs {
 		addr, err := StakeAddressFromCredential(
 			row.StakingKey,
 			row.CredentialTag,
 		)
 		if err != nil {
-			errs = append(errs, err)
+			credentialErrs = append(credentialErrs, err)
 			continue
 		}
 		if !row.Spendable || row.Guarded {
 			continue
 		}
+		// Decoded after the crediting filter, unlike the credential above:
+		// the pool identifier has no consumer outside this comparison, so an
+		// uncredited row's pool hash is not worth reporting, while an
+		// undecodable credential still is (accountLifecycleMismatches relies
+		// on it).
+		//
+		// An absent pool key hash is not a decode failure. It names the "no
+		// pool" contribution, matching Koios's null pool_id_bech32 for reward
+		// types that have none, and aggregates as its own source.
+		poolID := ""
+		if len(row.PoolKeyHash) > 0 {
+			poolID, err = PoolKeyHashHexToBech32(
+				hex.EncodeToString(row.PoolKeyHash),
+			)
+			if err != nil {
+				poolErrs = append(poolErrs, err)
+				continue
+			}
+		}
 		rows = append(rows, DingoAccountReward{
 			StakeAddress: addr,
 			RewardType:   row.RewardType,
 			Amount:       strconv.FormatUint(uint64(row.Amount), 10),
+			PoolIDBech32: poolID,
 		})
 	}
-	return rows, errs
+	return rows, credentialErrs, poolErrs
 }
 
 // accountLifecycleMismatches (dingo #3099) reports the two account

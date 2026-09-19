@@ -281,20 +281,27 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 	// would hand validateRewardCalculatorInputs a snapshot whose pool stake
 	// cannot reconcile against an empty credential set, and that error fails the
 	// whole epoch rollover. Reaching this needs a rewind across more than the
-	// retained epochs, far beyond k, so it is not expected on a healthy chain
-	// and is logged rather than passed over quietly.
+	// retained epochs, far beyond k, so it is not expected on a healthy chain.
+	//
+	// Routed through reportSkippedStakeRewards like every other skip in this
+	// function: this used to log inline at Warn with no metric, so the same
+	// permanent-shortfall condition the other three skips count and describe in
+	// detail went untracked by monitoring built on skippedStakeRewardRounds. The
+	// reportSkips gate matches its siblings too, so the opportunistic precompute
+	// pass (which reads the same possibly-not-yet-retained inputs ahead of the
+	// boundary and is expected to miss sometimes) does not double-report a round
+	// the authoritative call still applies.
 	if len(stakeInputs) == 0 && rewardSnapshot.TotalDelegators > 0 {
-		ls.config.Logger.Warn(
-			"skipping stake rewards: reward stake inputs for the snapshot epoch are no longer retained",
-			"component",
-			"ledger",
-			"new_epoch",
-			newEpoch,
-			"reward_snapshot_epoch",
-			rewardSnapshotEpoch,
-			"snapshot_delegators",
-			rewardSnapshot.TotalDelegators,
-		)
+		if reportSkips {
+			ls.reportSkippedStakeRewards(
+				newEpoch,
+				"reward stake inputs for the snapshot epoch are no longer retained",
+				"reward_snapshot_epoch",
+				rewardSnapshotEpoch,
+				"snapshot_delegators",
+				rewardSnapshot.TotalDelegators,
+			)
+		}
 		return nil, false, nil
 	}
 
@@ -1431,10 +1438,14 @@ func precomputedRewardPoolInputsMatchSnapshot(
 			)
 		}
 	}
-	// Same bound as validateRewardCalculatorInputs: pools excluded for degraded
-	// registration data keep their stake in the snapshot's sigma_a denominator
-	// but contribute no reward_pool_input row.
-	if totalDelegated > uint64(snapshot.TotalActiveStake) {
+	// Same check as validateRewardCalculatorInputs: pools excluded for
+	// degraded registration data keep their stake in the snapshot's sigma_a
+	// denominator but contribute no reward_pool_input row.
+	matches, err := rewardStakeSumMatchesSnapshot(totalDelegated, snapshot)
+	if err != nil {
+		return false, err
+	}
+	if !matches {
 		return false, nil
 	}
 	if totalDelegators != snapshot.TotalDelegators {
@@ -1799,6 +1810,56 @@ func finalizePrecomputedRewardOutputs(
 		}
 	}
 	return updated, nil
+}
+
+// queueStartupRewardPrecompute queues the stake-reward precompute for the
+// epoch that is already in progress.
+//
+// The EventBus subscription that normally drives the precompute only fires at
+// an epoch boundary, so a node started mid-epoch never queues the round its
+// next boundary will apply. applyStakeRewards then finds no precompute and
+// falls back to calculateStakeRewardApplication -- the whole round, over every
+// delegator in the mark snapshot -- inside the epoch-rollover write
+// transaction, on the block-processing goroutine. On mainnet that scan takes
+// minutes, during which no block is applied and any leader slot in the window
+// is lost. The async path exists precisely so the calculation never holds
+// SQLite's single writer (see precomputeStakeRewards); this restores it for
+// the one case the event cannot cover.
+//
+// Idempotent and self-limiting: precomputeStakeRewardsCalculate returns early
+// when a valid precompute already exists, so a restart that has one costs a
+// lookup, and a node still syncing defers on the reward prefilter slot rather
+// than scanning inputs it does not yet have.
+func (ls *LedgerState) queueStartupRewardPrecompute() {
+	ls.queueStartupRewardPrecomputeWith(
+		ls.precomputeStakeRewardsAfterEpochTransition,
+	)
+}
+
+func (ls *LedgerState) queueStartupRewardPrecomputeWith(
+	precompute func(event.EpochTransitionEvent) error,
+) {
+	ls.RLock()
+	epoch := ls.currentEpoch
+	ls.RUnlock()
+	// An epoch with no length has not been established yet (fresh database),
+	// and queueRewardPrecompute drops an event without a nonce, so there is
+	// nothing to catch up on in either case.
+	if epoch.LengthInSlots == 0 || len(epoch.Nonce) == 0 {
+		return
+	}
+	evt := event.EpochTransitionEvent{
+		NewEpoch:     epoch.EpochId,
+		BoundarySlot: epoch.StartSlot,
+		EpochNonce:   epoch.Nonce,
+	}
+	if epoch.EpochId > 0 {
+		evt.PreviousEpoch = epoch.EpochId - 1
+	}
+	if epoch.StartSlot > 0 {
+		evt.SnapshotSlot = epoch.StartSlot - 1
+	}
+	ls.queueRewardPrecompute(evt, precompute)
 }
 
 func (ls *LedgerState) handleRewardPrecomputeEpochTransition(evt event.Event) {
@@ -2407,6 +2468,32 @@ func addRewardUint64(a, b uint64) (uint64, bool) {
 	return a + b, false
 }
 
+// rewardStakeSumMatchesSnapshot reports whether summed -- a reward-input row
+// set's total pool/delegated stake -- is consistent with snapshot's
+// TotalActiveStake. A tracked ExcludedActiveStake (dingo #4025) makes the
+// check exact: summed plus the tracked exclusion must equal the total
+// precisely, catching a row set reduced by any amount rather than only one
+// missing pool's worth. A nil ExcludedActiveStake means snapshot predates
+// that tracking, so only the legacy non-exceeding bound still applies.
+func rewardStakeSumMatchesSnapshot(
+	summed uint64,
+	snapshot *models.RewardSnapshot,
+) (bool, error) {
+	if snapshot.ExcludedActiveStake == nil {
+		return summed <= uint64(snapshot.TotalActiveStake), nil
+	}
+	total, overflow := addRewardUint64(
+		summed,
+		uint64(*snapshot.ExcludedActiveStake),
+	)
+	if overflow {
+		return false, errors.New(
+			"reward pool input stake plus excluded active stake overflow",
+		)
+	}
+	return total == uint64(snapshot.TotalActiveStake), nil
+}
+
 type stakeRewardEpochs struct {
 	snapshot    uint64
 	performance uint64
@@ -2476,20 +2563,26 @@ func (ls *LedgerState) reportSkippedStakeRewards(
 	reason string,
 	epochKey string,
 	epochValue uint64,
+	extra ...any,
 ) {
 	ls.metrics.incSkippedStakeRewardRounds()
 	if ls.config.Logger == nil {
 		return
 	}
+	args := make([]any, 0, 6+len(extra))
+	args = append(args,
+		"component", "ledger",
+		"new_epoch", newEpoch,
+		epochKey, epochValue,
+	)
+	args = append(args, extra...)
 	ls.config.Logger.Warn(
 		"skipping stake rewards: "+reason+
 			"; this epoch's rewards will never be credited, leaving reward"+
 			" balances and the leadership stake distribution permanently"+
 			" short (the required basis was never persisted; inspect earlier"+
 			" bootstrap and ledgerstate import warnings for the cause)",
-		"component", "ledger",
-		"new_epoch", newEpoch,
-		epochKey, epochValue,
+		args...,
 	)
 }
 
@@ -3091,8 +3184,9 @@ func (ls *LedgerState) rewardCalculatorSnapshot(
 	}
 
 	ret := rewards.Snapshot{
-		TotalActiveStake: uint64(snapshot.TotalActiveStake),
-		Pools:            make([]rewards.Pool, 0, len(poolInputs)),
+		TotalActiveStake:    uint64(snapshot.TotalActiveStake),
+		ExcludedActiveStake: (*uint64)(snapshot.ExcludedActiveStake),
+		Pools:               make([]rewards.Pool, 0, len(poolInputs)),
 	}
 	for _, input := range poolInputs {
 		if input == nil {
@@ -3218,14 +3312,28 @@ func validateRewardCalculatorInputs(
 	// reward_snapshot.total_active_stake is the sigma_a denominator and covers
 	// every delegating credential observed at the boundary, including those
 	// whose pool was excluded from reward_pool_input for degraded registration
-	// data (see snapshot.buildRewardStateInputs). The rows may therefore sum to
-	// less than it; summing to more means the row set and the snapshot describe
-	// different boundaries.
-	if totalPoolStake > uint64(snapshot.TotalActiveStake) {
+	// data (see snapshot.buildRewardStateInputs). A tracked
+	// excluded_active_stake (dingo #4025) makes the rows' sum plus that
+	// exclusion match the total exactly; without it (a pre-#4025 row), only
+	// the legacy non-exceeding bound can still be enforced, since the
+	// exclusion's size is unknown.
+	matches, err := rewardStakeSumMatchesSnapshot(totalPoolStake, snapshot)
+	if err != nil {
+		return err
+	}
+	if !matches {
+		if snapshot.ExcludedActiveStake == nil {
+			return fmt.Errorf(
+				"reward pool input total delegated stake %d exceeds snapshot active stake %d",
+				totalPoolStake,
+				uint64(snapshot.TotalActiveStake),
+			)
+		}
 		return fmt.Errorf(
-			"reward pool input total delegated stake %d exceeds snapshot active stake %d",
+			"reward pool input total delegated stake %d does not match snapshot active stake %d minus excluded active stake %d",
 			totalPoolStake,
 			uint64(snapshot.TotalActiveStake),
+			uint64(*snapshot.ExcludedActiveStake),
 		)
 	}
 	if totalDelegators != snapshot.TotalDelegators {

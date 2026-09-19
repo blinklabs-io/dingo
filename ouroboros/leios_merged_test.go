@@ -398,7 +398,7 @@ func TestLeiosNotifyBlockAnnouncementIsConsumedAndDeduplicated(t *testing.T) {
 	require.NoError(t, err)
 
 	o := newOuroboros(OuroborosConfig{ConnManager: cm, EnableLeios: true})
-	o.leiosEBLog.registerConn("test")
+	o.leiosEBLog.registerConn("test", nil, nil)
 	err = o.leiosnotifyClientNotification(
 		oleiosnotify.CallbackContext{ConnectionId: conn.Id()},
 		oleiosnotify.NewMsgBlockAnnouncement(headerRaw),
@@ -435,7 +435,7 @@ func TestLeiosNotifyBlockAnnouncementIsConsumedAndDeduplicated(t *testing.T) {
 	entry, _ = o.leiosEBLog.next("test")
 	require.NotNil(t, entry)
 	require.Equal(t, headerRaw, entry.announcement)
-	o.leiosEBLog.complete("test", true)
+	o.leiosEBLog.complete("test", nil, true)
 	entry, _ = o.leiosEBLog.next("test")
 	require.Nil(t, entry)
 
@@ -524,7 +524,7 @@ func TestLeiosNotifyAnnouncementOCINVerdictControlsDiffusion(t *testing.T) {
 				EnableLeios:             true,
 				LeiosAnnouncementLedger: announcementLedger,
 			})
-			o.leiosEBLog.registerConn("relay")
+			o.leiosEBLog.registerConn("relay", nil, nil)
 
 			err = o.leiosnotifyClientNotification(
 				oleiosnotify.CallbackContext{ConnectionId: conn.Id()},

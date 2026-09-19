@@ -285,6 +285,12 @@ func (b *Blockfrost) handler() http.Handler {
 func (b *Blockfrost) Start(
 	ctx context.Context,
 ) error {
+	startDone, err := b.listener.BeginStart()
+	if err != nil {
+		return err
+	}
+	defer b.listener.EndStart(startDone)
+
 	server, bindDone, err := b.listener.Publish(func() *http.Server {
 		return &http.Server{
 			Addr:              b.config.ListenAddress,
@@ -299,39 +305,10 @@ func (b *Blockfrost) Start(
 		return err
 	}
 
-	// Launched before the bind so a context cancelled mid-bind still tears the
-	// server down: Take is what makes an in-flight bind close its own socket.
-	go func() { //nolint:gosec // G118: goroutine intentionally outlives ctx to perform graceful shutdown
-		<-ctx.Done()
-		job, _ := b.listener.TakeIf(server)
-		// Nil when a concurrent Stop won the detach -- it owns the teardown
-		// and its caller is already waiting on it -- or when this server was
-		// already stopped and a restart published another one, which is not
-		// this monitor's to touch. Either way there is nothing to do here.
-		if job != nil {
-			b.logger.Debug(
-				"context cancelled, shutting down " +
-					"Blockfrost API server",
-			)
-			//nolint:contextcheck
-			shutdownCtx, cancel := context.WithTimeout(
-				context.Background(),
-				30*time.Second,
-			)
-			defer cancel()
-			//nolint:contextcheck
-			if err := b.listener.Shutdown(
-				shutdownCtx, job, apilistener.Graceful,
-			); err != nil {
-				b.logger.Error(
-					"failed to shutdown Blockfrost "+
-						"API server on context "+
-						"cancellation",
-					"error", err,
-				)
-			}
-		}
-	}()
+	// Watched before the bind so a context cancelled mid-bind still tears the
+	// server down: the detach is what makes an in-flight bind close its own
+	// socket.
+	b.listener.Watch(ctx, server, apilistener.Graceful)
 
 	// Bound with deterministic error detection: the socket is opened
 	// synchronously so a port conflict surfaces here rather than in a log line
@@ -342,9 +319,9 @@ func (b *Blockfrost) Start(
 		return err
 	}
 	if !served {
-		// A concurrent Stop or context cancellation detached this server while
-		// it was binding, so Bind closed the socket rather than serving it.
-		// Saying the listener came up would be false.
+		// A context cancellation detached this server while it was binding, so
+		// Bind closed the socket rather than serving it. Saying the listener
+		// came up would be false.
 		return nil
 	}
 
@@ -361,12 +338,7 @@ func (b *Blockfrost) Start(
 func (b *Blockfrost) Stop(
 	ctx context.Context,
 ) error {
-	job, inFlight := b.listener.Take()
-	if job == nil {
-		return b.listener.AwaitTeardown(ctx, inFlight)
-	}
-	b.logger.Debug("shutting down Blockfrost API server")
-	return b.listener.Shutdown(ctx, job, apilistener.Graceful)
+	return b.listener.Stop(ctx, apilistener.Graceful)
 }
 
 // readRequestBody bounds both bytes and time before transaction processing.

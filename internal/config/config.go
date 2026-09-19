@@ -91,6 +91,15 @@ const (
 	DefaultRejectionWatermark          = 1.0
 	DefaultForgeSyncToleranceSlots     = 100
 	DefaultForgeStaleGapThresholdSlots = 1000
+	DefaultHealthPort                  = 12799
+	// DefaultHealthReadyGapSlots matches
+	// DefaultForgeStaleGapThresholdSlots: both answer "has this node
+	// stopped following the chain?", and a readiness probe that flapped
+	// more readily than the forger's own staleness gate would evict a
+	// node the forger still considers current. At Cardano's f=0.05 an
+	// empty 1000-slot stretch is not something a live chain produces, so
+	// crossing it means the tip is genuinely stuck, not merely quiet.
+	DefaultHealthReadyGapSlots = 1000
 	// DefaultForgePrimaryChainTipToleranceSlots bounds how far the
 	// ledger-applied tip may trail this node's own primary chain tip before
 	// forging is skipped. Small by design: both tips are local and are meant
@@ -600,7 +609,19 @@ type Config struct {
 	// pprof on a wildcard or management-network address.
 	DebugBindAddr string `yaml:"debugBindAddr"                       envconfig:"DINGO_DEBUG_BIND_ADDR"`
 	DebugPort     uint   `yaml:"debugPort"                           envconfig:"DINGO_DEBUG_PORT"`
-	IntersectTip  bool   `yaml:"intersectTip"                                                                                 split_words:"true"`
+	// HealthPort serves the liveness (/health, /healthz) and readiness
+	// (/readyz) probes on a listener of their own, so an operator can
+	// expose them to an orchestrator or load balancer without also
+	// exposing Prometheus metrics, pprof, or any API. It binds BindAddr,
+	// the same address the relay and metrics listeners use and distinct
+	// from the API listeners' own bind address: a probe is operational
+	// surface, not API surface. 0 disables the listener.
+	HealthPort uint `yaml:"healthPort"                          envconfig:"DINGO_HEALTH_PORT"`
+	// HealthReadyGapSlots is how far the chain tip may trail the
+	// wall-clock slot while /readyz still reports ready. Liveness ignores
+	// it entirely; see internal/health for why the two are separate.
+	HealthReadyGapSlots uint `yaml:"healthReadyGapSlots"                 envconfig:"DINGO_HEALTH_READY_GAP_SLOTS"`
+	IntersectTip        bool `yaml:"intersectTip"                                                                                 split_words:"true"`
 	// ValidateHistorical validates the complete replay from the selected
 	// intersection. The default from-origin sync path must not trust peers to
 	// have validated historical blocks for us.
@@ -619,6 +640,13 @@ type Config struct {
 	// pre-migration reward_live_stake table -- so this is for advanced/
 	// diagnostic use only (e.g. repeated restarts against a database already
 	// known to be consistent).
+	//
+	// reward_live_stake.utxo_stake is a running total maintained
+	// incrementally by the block-application path (dingo #4421), so this
+	// check is also the only automatic reconciliation of that total against
+	// the live UTxO set. Skipping it leaves any drift in place for the whole
+	// life of the process, including across the epoch boundaries whose stake
+	// snapshots consume it.
 	//
 	// It does not affect the stake-snapshot provenance check that runs in the
 	// same startup step: that one is cheap, indexed, and fails closed, so it
@@ -678,6 +706,8 @@ type Config struct {
 	InboundCooldown          time.Duration `yaml:"inboundCooldown"          envconfig:"DINGO_INBOUND_COOLDOWN"`
 	MaxConnectionsPerIP      int           `yaml:"maxConnectionsPerIP"      envconfig:"DINGO_MAX_CONNECTIONS_PER_IP"`
 	MaxInboundConns          int           `yaml:"maxInboundConns"          envconfig:"DINGO_MAX_INBOUND_CONNS"`
+	MaxNtCConns              int           `yaml:"maxNtCConns"              envconfig:"DINGO_MAX_NTC_CONNS"`
+	MaxNtCConnectionsPerIP   int           `yaml:"maxNtCConnectionsPerIP"   envconfig:"DINGO_MAX_NTC_CONNECTIONS_PER_IP"`
 
 	// Cache configuration for the tiered CBOR cache system
 	Cache CacheConfig `yaml:"cache"`
@@ -1050,6 +1080,11 @@ type MithrilConfig struct {
 	// incremental Cardano database artifacts; "v1" uses the legacy full
 	// snapshot archives, which upstream Mithril is phasing out.
 	Backend string `yaml:"backend"                envconfig:"DINGO_MITHRIL_BACKEND"`
+	// PinnedDigest selects an exact Mithril artifact for a fresh bootstrap: a
+	// v1 snapshot digest or v2 Cardano database artifact hash. It is rejected
+	// for catch-up runs and may not conflict with the durable artifact pin used
+	// to resume an interrupted import.
+	PinnedDigest string `yaml:"pinnedDigest"           envconfig:"DINGO_MITHRIL_PINNED_DIGEST"`
 	// DownloadDir is the directory where snapshot archives are downloaded.
 	// If empty, a randomized temporary directory is created automatically.
 	DownloadDir string `yaml:"downloadDir"            envconfig:"DINGO_MITHRIL_DOWNLOAD_DIR"`
@@ -1161,6 +1196,8 @@ func newDefaultConfig() *Config {
 		MetricsPort:                         12798,
 		DebugBindAddr:                       DefaultDebugBindAddr,
 		DebugPort:                           0,
+		HealthPort:                          DefaultHealthPort,
+		HealthReadyGapSlots:                 DefaultHealthReadyGapSlots,
 		PrivateBindAddr:                     "127.0.0.1",
 		PrivatePort:                         3002,
 		RelayPort:                           3001,
@@ -1579,6 +1616,12 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.ForgeStaleGapThresholdSlots == 0 {
 		c.ForgeStaleGapThresholdSlots = DefaultForgeStaleGapThresholdSlots
+	}
+	// Zero would make every probe ready only at an exact-tip match, which
+	// no live node sustains; take the default instead. Disabling the
+	// readiness signal is done by disabling the listener (healthPort 0).
+	if c.HealthReadyGapSlots == 0 {
+		c.HealthReadyGapSlots = DefaultHealthReadyGapSlots
 	}
 	if c.ForgePrimaryChainTipToleranceSlots == 0 {
 		c.ForgePrimaryChainTipToleranceSlots = DefaultForgePrimaryChainTipToleranceSlots

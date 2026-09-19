@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"bytes"
 	"fmt"
 	"testing"
 	"time"
@@ -28,6 +29,7 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/ouroboros-mock/consensus"
 	"github.com/blinklabs-io/ouroboros-mock/consensus/format"
+	"github.com/stretchr/testify/require"
 )
 
 // TestConsensusConformanceVectors replays the upstream consensus-
@@ -43,9 +45,50 @@ func TestConsensusConformanceVectors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CapturedVectors: %v", err)
 	}
-	if len(vectors) == 0 {
-		t.Skip("no captured vectors embedded")
+	const expectedScenarioCount = 5
+	if len(vectors) != expectedScenarioCount {
+		t.Fatalf(
+			"consensus profile has %d scenarios, want %d; update the profile summary and tests with the shared corpus",
+			len(vectors),
+			expectedScenarioCount,
+		)
 	}
+	expectedNames := map[string]bool{
+		"intersect_origin_one_rollforward": true,
+		"within_k_fork_v1":                 true,
+		"fork_and_select_v1":               true,
+		"slot_battle_v1":                   true,
+		"exceeds_k_no_switch_v1":           true,
+	}
+	profileCounts := map[string]int{
+		"single-peer": 0,
+		"fork-switch": 0,
+		"no-switch":   0,
+	}
+	for _, cv := range vectors {
+		if !expectedNames[cv.Name] {
+			t.Fatalf("unexpected consensus scenario %q", cv.Name)
+		}
+		delete(expectedNames, cv.Name)
+		switch {
+		case len(cv.Vector.Capture.Peers) == 1:
+			profileCounts["single-peer"]++
+		case cv.Vector.Capture.ExpectedOutput.ExpectedRollback != nil:
+			profileCounts["fork-switch"]++
+		default:
+			profileCounts["no-switch"]++
+		}
+	}
+	if len(expectedNames) != 0 {
+		t.Fatalf("consensus profile is missing scenarios: %v", expectedNames)
+	}
+	t.Logf(
+		"Consensus conformance profile: total=%d single-peer=%d fork-switch=%d no-switch=%d",
+		len(vectors),
+		profileCounts["single-peer"],
+		profileCounts["fork-switch"],
+		profileCounts["no-switch"],
+	)
 	for _, cv := range vectors {
 		t.Run(cv.Name, func(t *testing.T) {
 			a := newReplayAdapter(t, cv.Vector.Capture)
@@ -135,6 +178,32 @@ func TestConsensusConformanceKGuardIsLive(t *testing.T) {
 	}
 }
 
+func TestSelectedPeerTraceUsesPeerIdentityForEqualTips(t *testing.T) {
+	t.Parallel()
+	tip := format.Tip{Slot: 10, Hash: format.HexBytes{0xaa}, BlockNumber: 10}
+	first := format.ServedMessage{
+		Protocol:   format.ProtocolChainSync,
+		MsgType:    format.ChainSyncMsgRollForward,
+		Tip:        &tip,
+		HeaderCbor: format.HexBytes{0x01},
+	}
+	second := first
+	second.HeaderCbor = format.HexBytes{0x02}
+	capture := &format.ConsensusCapture{Peers: []format.PeerInput{
+		{PeerID: 1, Served: []format.ServedMessage{first}},
+		{PeerID: 2, Served: []format.ServedMessage{second}},
+	}}
+	a := newReplayAdapter(t, capture)
+	selected := a.connFor(2)
+	other := a.connFor(1)
+	chainTip := toGouroborosTip(tip)
+	require.True(t, a.cs.UpdatePeerTip(selected, chainTip, nil))
+	require.True(t, a.cs.UpdatePeerTip(other, chainTip, nil))
+	require.Equal(t, selected, *a.cs.GetBestPeer())
+
+	require.Equal(t, capture.Peers[1].Served, a.selectedPeerTrace())
+}
+
 const (
 	tipEventBuffer    = 4096
 	switchEventBuffer = 1024
@@ -164,17 +233,26 @@ type switchBarrier struct{}
 // the vector's peer_id; the adapter synthesizes a stable ConnectionId per
 // peer_id.
 type replayAdapter struct {
-	t        *testing.T
-	o        *Ouroboros
-	cs       *chainselection.ChainSelector
-	bus      *event.EventBus
-	conns    map[uint64]ouroboros.ConnectionId
-	tipCh    <-chan event.Event
-	switchCh <-chan event.Event
-	switches []format.SwitchEvent
+	t          *testing.T
+	o          *Ouroboros
+	cs         *chainselection.ChainSelector
+	bus        *event.EventBus
+	conns      map[uint64]ouroboros.ConnectionId
+	capture    *format.ConsensusCapture
+	tipCh      <-chan event.Event
+	switchCh   <-chan event.Event
+	switches   []format.SwitchEvent
+	headers    map[string]replayHeader
+	downstream []format.ServedMessage
 
 	headersFed    int
 	tipEventsSeen int
+}
+
+type replayHeader struct {
+	hash     []byte
+	prevHash []byte
+	slot     uint64
 }
 
 func newReplayAdapter(
@@ -226,8 +304,10 @@ func newReplayAdapter(
 		cs:       cs,
 		bus:      bus,
 		conns:    make(map[uint64]ouroboros.ConnectionId),
+		capture:  capture,
 		tipCh:    tipCh,
 		switchCh: switchCh,
+		headers:  make(map[string]replayHeader),
 	}
 }
 
@@ -243,6 +323,13 @@ func (a *replayAdapter) RollForward(
 		era, hdr, toGouroborosTip(tip),
 	); err != nil {
 		return err
+	}
+	hash := hdr.Hash()
+	prevHash := hdr.PrevHash()
+	a.headers[string(hash[:])] = replayHeader{
+		hash:     append([]byte(nil), hash[:]...),
+		prevHash: append([]byte(nil), prevHash[:]...),
+		slot:     hdr.SlotNumber(),
 	}
 	a.headersFed++
 	return nil
@@ -292,6 +379,7 @@ func (a *replayAdapter) Stabilize() {
 	})
 	a.cs.EvaluateAndSwitch()
 	a.collectSwitchesThroughBarrier()
+	a.downstream = a.selectedPeerTrace()
 }
 
 // collectSwitchesThroughBarrier records every chain switch the selector has
@@ -317,8 +405,9 @@ func (a *replayAdapter) collectSwitchesThroughBarrier() {
 			return
 		case chainselection.ChainSwitchEvent:
 			a.switches = append(a.switches, format.SwitchEvent{
-				PreviousTip: fromGouroborosTip(e.PreviousTip),
-				NewTip:      fromGouroborosTip(e.NewTip),
+				PreviousTip:   fromGouroborosTip(e.PreviousTip),
+				NewTip:        fromGouroborosTip(e.NewTip),
+				RollbackPoint: a.rollbackPoint(e),
 			})
 		default:
 			// Only the selector and the barrier above publish on this
@@ -348,6 +437,93 @@ func (a *replayAdapter) BestTip() (format.Tip, bool) {
 
 func (a *replayAdapter) DrainSwitchEvents() []format.SwitchEvent {
 	return a.switches
+}
+
+func (a *replayAdapter) DrainDownstreamChainSync() []format.ServedMessage {
+	return a.downstream
+}
+
+func (a *replayAdapter) selectedPeerTrace() []format.ServedMessage {
+	best := a.cs.GetBestPeer()
+	if best == nil {
+		return nil
+	}
+	for _, peer := range a.capture.Peers {
+		if a.connFor(peer.PeerID) == *best {
+			return cloneServedMessages(peer.Served)
+		}
+	}
+	return nil
+}
+
+func (a *replayAdapter) rollbackPoint(e chainselection.ChainSwitchEvent) *format.Point {
+	previous := e.PreviousObservedTip
+	if len(previous.Point.Hash) == 0 && previous.Point.Slot == 0 {
+		previous = e.PreviousTip
+	}
+	newTip := e.NewObservedTip
+	if !e.NewObservedTipSet {
+		newTip = e.NewTip
+	}
+
+	newAncestors := a.ancestors(newTip)
+	for current := previous; ; {
+		key := string(current.Point.Hash)
+		if header, ok := newAncestors[key]; ok {
+			return &format.Point{
+				Slot: header.slot,
+				Hash: append(format.HexBytes(nil), header.hash...),
+			}
+		}
+		header, ok := a.headers[key]
+		if !ok || isZeroHash(header.prevHash) {
+			break
+		}
+		current.Point.Hash = append([]byte(nil), header.prevHash...)
+		current.Point.Slot = 0
+	}
+	return &format.Point{}
+}
+
+func (a *replayAdapter) ancestors(tip ochainsync.Tip) map[string]replayHeader {
+	ancestors := make(map[string]replayHeader)
+	current := tip.Point.Hash
+	for len(current) != 0 && !isZeroHash(current) {
+		header, ok := a.headers[string(current)]
+		if !ok {
+			break
+		}
+		ancestors[string(current)] = header
+		current = header.prevHash
+	}
+	return ancestors
+}
+
+func isZeroHash(hash []byte) bool {
+	return len(hash) == 0 || bytes.Equal(hash, make([]byte, len(hash)))
+}
+
+func tipsEqual(a, b format.Tip) bool {
+	return a.Slot == b.Slot && a.BlockNumber == b.BlockNumber && bytes.Equal(a.Hash, b.Hash)
+}
+
+func cloneServedMessages(messages []format.ServedMessage) []format.ServedMessage {
+	cloned := make([]format.ServedMessage, len(messages))
+	for i, message := range messages {
+		cloned[i] = message
+		cloned[i].HeaderCbor = append(format.HexBytes(nil), message.HeaderCbor...)
+		if message.Tip != nil {
+			tip := *message.Tip
+			tip.Hash = append(format.HexBytes(nil), message.Tip.Hash...)
+			cloned[i].Tip = &tip
+		}
+		if message.Point != nil {
+			point := *message.Point
+			point.Hash = append(format.HexBytes(nil), message.Point.Hash...)
+			cloned[i].Point = &point
+		}
+	}
+	return cloned
 }
 
 func (a *replayAdapter) connFor(peerID uint64) ouroboros.ConnectionId {

@@ -19,6 +19,7 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -116,11 +117,11 @@ func (ls *LedgerState) validateForgedTxs(block ledger.Block) error {
 	}
 
 	// consumedUtxos: inputs spent within this block (prevents intra-block
-	// double-spend); key: "<txId>:<outputIndex>".
+	// double-spend).
 	// createdUtxos: outputs produced within this block and not yet in the
-	// persistent UTxO set; key: same format.
-	consumedUtxos := make(map[string]struct{}, len(txs)*2)
-	createdUtxos := make(map[string]lcommon.Utxo, len(txs)*4)
+	// persistent UTxO set.
+	consumedUtxos := make(map[utxoref.Key]struct{}, len(txs)*2)
+	createdUtxos := make(map[utxoref.Key]lcommon.Utxo, len(txs)*4)
 
 	for _, tx := range txs {
 		if err := ls.ValidateTxWithOverlay(tx, consumedUtxos, createdUtxos); err != nil {
@@ -134,24 +135,14 @@ func (ls *LedgerState) validateForgedTxs(block ledger.Block) error {
 
 		// Advance the overlay with this transaction's effects.
 		for _, utxo := range tx.Produced() {
-			key := fmt.Sprintf(
-				"%s:%d",
-				utxo.Id.Id().String(),
-				utxo.Id.Index(),
-			)
-			createdUtxos[key] = utxo
+			createdUtxos[utxoref.ForUtxo(utxo)] = utxo
 		}
 		// Use Consumed() instead of Inputs(): for a phase-2 failed Plutus tx
 		// the regular inputs are NOT spent; only the collateral inputs are.
 		// Inputs() would falsely mark regular inputs as consumed and reject
 		// a later tx in the same block that spends those still-valid UTxOs.
 		for _, input := range tx.Consumed() {
-			key := fmt.Sprintf(
-				"%s:%d",
-				input.Id().String(),
-				input.Index(),
-			)
-			consumedUtxos[key] = struct{}{}
+			consumedUtxos[utxoref.ForInput(input)] = struct{}{}
 		}
 	}
 

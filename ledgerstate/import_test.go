@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
@@ -83,6 +84,72 @@ func TestImportOpCertCountersStoresCertifiedBaseline(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, found)
 	require.Equal(t, uint64(490), sequence)
+}
+
+// TestImportOpCertCountersRefusesUnpersistableCounter covers the one write
+// path into pool_opcert_sequence carrying counters that were never checked
+// against a chain rule. decodeOpCertCounters decodes the certified
+// HeaderState map at the reference's full uint64 width, so a counter above
+// eras.MaxPersistableOpCertCounter reaches this path and must be refused by
+// name, not at checkedInt64, whose message reports only that an unsigned SQL
+// value exceeds int64.
+func TestImportOpCertCountersRefusesUnpersistableCounter(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	poolKeyHash := bytes.Repeat([]byte{0x78}, 28)
+	txn := db.MetadataTxn(true)
+	err = importOpCertCounters(
+		db.Metadata(),
+		map[string]uint64{
+			string(poolKeyHash): eras.MaxPersistableOpCertCounter + 1,
+		},
+		100,
+		txn.Metadata(),
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "9223372036854775807")
+	require.Contains(t, err.Error(), "pool_opcert_sequence")
+	require.NotContains(t, err.Error(), "exceeds int64")
+	require.NoError(t, txn.Rollback())
+	txn.Release()
+
+	sequence, found, err := db.LatestPoolOpCertSequence(
+		testPoolKeyHash(poolKeyHash), nil,
+	)
+	require.NoError(t, err)
+	require.False(t, found)
+	require.Equal(t, uint64(0), sequence)
+}
+
+// TestImportOpCertCountersStoresCounterAtBound is the other side of that
+// boundary: the highest counter the metadata store records must still import,
+// so the new check cannot be satisfied by refusing more than it should.
+func TestImportOpCertCountersStoresCounterAtBound(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	poolKeyHash := bytes.Repeat([]byte{0x79}, 28)
+	txn := db.MetadataTxn(true)
+	require.NoError(t, importOpCertCounters(
+		db.Metadata(),
+		map[string]uint64{
+			string(poolKeyHash): eras.MaxPersistableOpCertCounter,
+		},
+		100,
+		txn.Metadata(),
+	))
+	require.NoError(t, txn.Commit())
+	txn.Release()
+
+	sequence, found, err := db.LatestPoolOpCertSequence(
+		testPoolKeyHash(poolKeyHash), nil,
+	)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, eras.MaxPersistableOpCertCounter, sequence)
 }
 
 func TestSnapshotImportTargetsAlignWithRotation(t *testing.T) {
@@ -1063,6 +1130,7 @@ func TestImportSnapShotsFallbackPoolsResolveCurrentEpoch(t *testing.T) {
 			MarginDen:     1,
 		}},
 		999,
+		nil,
 	))
 
 	// Now call persistImportedSnapshot for the current epoch,
@@ -1287,6 +1355,7 @@ func TestImportPoolsPreservesRewardAccountCredentialTag(t *testing.T) {
 			},
 		},
 		456,
+		nil,
 	))
 
 	pool, err := db.Metadata().GetPool(
@@ -1306,6 +1375,114 @@ func TestImportPoolsPreservesRewardAccountCredentialTag(t *testing.T) {
 		uint8(1),
 		pool.Registration[0].RewardAccountCredentialTag,
 	)
+}
+
+func TestImportPoolsWritesPendingRetirementForBothQueries(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	poolKeyHash := bytes.Repeat([]byte{0x61}, 28)
+	deposit := uint64(500_000_000)
+	cfg := ImportConfig{
+		Database: db,
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		State:    &RawLedgerState{Epoch: 650},
+	}
+	require.NoError(t, importPools(
+		context.Background(),
+		cfg,
+		[]ParsedPool{{
+			PoolKeyHash:   poolKeyHash,
+			VrfKeyHash:    bytes.Repeat([]byte{0x62}, 32),
+			RewardAccount: bytes.Repeat([]byte{0x63}, 28),
+			Deposit:       deposit,
+		}},
+		10,
+		map[uint64][][]byte{656: {poolKeyHash}},
+	))
+
+	retiring, err := db.Metadata().GetRetiringPools(650, nil)
+	require.NoError(t, err)
+	require.Len(t, retiring, 1)
+	require.Equal(t, poolKeyHash, retiring[0].PoolKeyHash)
+	require.Equal(t, uint64(656), retiring[0].Epoch)
+
+	refunds, err := db.GetPoolsRetiringAtEpoch(656, 11, nil)
+	require.NoError(t, err)
+	require.Len(t, refunds, 1)
+	require.Equal(t, poolKeyHash, refunds[0].PoolKeyHash)
+	require.Equal(t, deposit, uint64(refunds[0].DepositHeld))
+}
+
+func TestImportPoolsRejectsUnmatchedRetirementBeforeWritingRows(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	poolKeyHash := bytes.Repeat([]byte{0x64}, 28)
+	missingKeyHash := bytes.Repeat([]byte{0x65}, 28)
+	cfg := ImportConfig{
+		Database: db,
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		State:    &RawLedgerState{Epoch: 650},
+	}
+	err = importPools(
+		context.Background(),
+		cfg,
+		[]ParsedPool{{
+			PoolKeyHash: poolKeyHash,
+			VrfKeyHash:  bytes.Repeat([]byte{0x66}, 32),
+		}},
+		10,
+		map[uint64][][]byte{
+			656: {poolKeyHash},
+			657: {missingKeyHash},
+		},
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not found in the pool table")
+
+	retiring, err := db.Metadata().GetRetiringPools(650, nil)
+	require.NoError(t, err)
+	require.Empty(t, retiring)
+	refunds, err := db.GetPoolsRetiringAtEpoch(656, 11, nil)
+	require.NoError(t, err)
+	require.Empty(t, refunds)
+}
+
+func TestImportPoolsRejectsPastPendingRetirement(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	poolKeyHash := bytes.Repeat([]byte{0x67}, 28)
+	cfg := ImportConfig{
+		Database: db,
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		State:    &RawLedgerState{Epoch: 650},
+	}
+	err = importPools(
+		context.Background(),
+		cfg,
+		[]ParsedPool{{
+			PoolKeyHash: poolKeyHash,
+			VrfKeyHash:  bytes.Repeat([]byte{0x68}, 32),
+		}},
+		10,
+		map[uint64][][]byte{3: {poolKeyHash}},
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not after snapshot epoch")
+	retiring, err := db.Metadata().GetRetiringPools(650, nil)
+	require.NoError(t, err)
+	require.Empty(t, retiring)
 }
 
 // TestIndefiniteUTxOMapPartialCommitIsSafeToRetry proves the cubic-dev-ai
@@ -1703,6 +1880,10 @@ func testGovStateData(
 			},
 			nil,
 		},
+		map[uint64]uint64{},
+		map[uint64]uint64{},
+		map[uint64]uint64{},
+		drepPulsingStateWithEnactCommittee(t, []any{}),
 	}
 	data, err := cbor.Encode(govState)
 	require.NoError(t, err)
