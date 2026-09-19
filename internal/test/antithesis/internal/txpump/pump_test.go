@@ -21,8 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/gouroboros/cbor"
-	"github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/stretchr/testify/require"
 )
 
@@ -147,15 +146,17 @@ func TestDeriveTestTxIDUsesCardanoTransactionBodyHash(t *testing.T) {
 		make([]byte, 28),
 		make([]byte, 28),
 		MinFee,
-		[]byte{0x60, 1},
+		// A payment-key-hash enterprise address: the 0x60 header and a
+		// 28-byte hash. A shorter payload is rejected by any real decoder.
+		append([]byte{0x60}, make([]byte, 28)...),
 	)
 	require.NoError(t, err)
 
-	var txParts []cbor.RawMessage
-	_, err = cbor.Decode(txBytes, &txParts)
+	// gouroboros decodes the transaction the way a node does, so its hash is
+	// an oracle independent of deriveTestTxID's own CBOR handling. Comparing
+	// against a second Blake2b-256 of the same decoded element would restate
+	// the implementation instead of checking it.
+	tx, err := ledger.NewTransactionFromCbor(uint(conwayEraID), txBytes)
 	require.NoError(t, err)
-	require.NotEmpty(t, txParts)
-
-	want := common.Blake2b256Hash(txParts[0]).String()
-	require.Equal(t, want, deriveTestTxID(txBytes))
+	require.Equal(t, tx.Hash().String(), deriveTestTxID(txBytes))
 }
