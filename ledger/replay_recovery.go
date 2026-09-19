@@ -153,8 +153,9 @@ type replayRecoveryCandidate struct {
 	ProducerBlock models.Block
 	RollbackPoint ocommon.Point
 	Strategy      string
-	// ProducerUnresolved distinguishes the security-parameter fallback from
-	// strategies that found a concrete producer. Strategy remains a log label.
+	// ProducerUnresolved reports that at least one failing input had no
+	// resolvable producer, whichever candidate supplied the rollback anchor.
+	// It gates the primary-chain rewind; Strategy remains a log label.
 	ProducerUnresolved bool
 }
 
@@ -1753,6 +1754,25 @@ func (ls *LedgerState) findReplayRecoveryCandidate(
 			resolved.ProducerBlock,
 		)
 		if err != nil {
+			if errors.Is(err, models.ErrBlockNotFound) {
+				// The transaction metadata identifies a producer, but its
+				// parent is outside the locally retained chain. Treat the
+				// provenance as unresolved so the bounded security-parameter
+				// fallback can choose a safe local anchor.
+				if ls.config.Logger != nil {
+					ls.config.Logger.Warn(
+						"replay recovery producer parent is missing from the local block store",
+						"component", "ledger",
+						"producer_block_hash",
+						hex.EncodeToString(resolved.ProducerBlock.Hash),
+						"producer_block_slot", resolved.ProducerBlock.Slot,
+						"producer_parent_hash",
+						hex.EncodeToString(resolved.ProducerBlock.PrevHash),
+					)
+				}
+				unresolvedInputs = append(unresolvedInputs, resolved.Input)
+				continue
+			}
 			return nil, err
 		}
 		if candidate == nil ||
@@ -1791,6 +1811,13 @@ func (ls *LedgerState) findReplayRecoveryCandidate(
 		if fallbackCandidate != nil && (candidate == nil ||
 			fallbackCandidate.ProducerBlock.Slot < candidate.ProducerBlock.Slot) {
 			candidate = fallbackCandidate
+		} else if candidate != nil {
+			// The deeper known producer keeps the rollback anchor, but an
+			// input with no resolvable provenance still requires the primary
+			// chain rewind. Keyed on the surviving candidate rather than on
+			// fallbackCandidate, which is nil whenever the bounded fallback
+			// found no retained anchor.
+			candidate.ProducerUnresolved = true
 		}
 	}
 	return candidate, nil
@@ -2052,6 +2079,13 @@ func (ls *LedgerState) replayRecoveryFallbackCandidate(
 	}
 	anchorBlock, err := ls.db.BlockByIndex(targetIndex, nil)
 	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			// A pruned prefix can put the security-parameter target below
+			// the retained block store. There is no safe local anchor to
+			// return in that case; let the caller continue without replay
+			// recovery rather than inventing a rollback point.
+			return nil, nil
+		}
 		return nil, fmt.Errorf(
 			"lookup replay fallback block %d: %w",
 			targetIndex,
@@ -2060,6 +2094,12 @@ func (ls *LedgerState) replayRecoveryFallbackCandidate(
 	}
 	rollbackPoint, err := ls.replayRecoveryParentPoint(anchorBlock)
 	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			// The retained anchor itself has no retained parent. Without a
+			// real parent point, rolling back would require guessing across
+			// the retention or trust boundary.
+			return nil, nil
+		}
 		return nil, err
 	}
 	return &replayRecoveryCandidate{
