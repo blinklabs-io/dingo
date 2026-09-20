@@ -314,15 +314,23 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 	if err != nil {
 		return nil, false, err
 	}
-	blockCounts, totalBlocks, blockCountsKnown, err := ls.rewardBlockCounts(
-		meta,
-		metaTxn,
-		performanceEpoch,
-		poolInputs,
-		performanceDecentralization,
-	)
-	if err != nil {
-		return nil, false, err
+	// The RUPD calculated during epoch 0 reads genesis's empty nesBprev,
+	// not epoch 0's nesBcur. Those blocks first enter the update applied at
+	// epoch 2. Keep the epoch-1 round: d >= 0.8 still forces eta to 1.
+	var blockCounts map[string]uint64
+	var totalBlocks uint64
+	blockCountsKnown := true
+	if newEpoch > 1 {
+		blockCounts, totalBlocks, blockCountsKnown, err = ls.rewardBlockCounts(
+			meta,
+			metaTxn,
+			performanceEpoch,
+			poolInputs,
+			performanceDecentralization,
+		)
+		if err != nil {
+			return nil, false, err
+		}
 	}
 	// The performance epoch ended below this node's Mithril trust anchor and
 	// the snapshot's own block counts for it were not imported, so beta is
@@ -2504,23 +2512,12 @@ type stakeRewardEpochs struct {
 func stakeRewardEpochsForApplication(
 	newEpoch uint64,
 ) (stakeRewardEpochs, bool) {
-	// cardano-ledger's NEWEPOCH rule applies monetary expansion and the
-	// treasury tax at every boundary from the network's first Shelley-era
-	// epoch onward, including the two boundaries that precede any Go stake
-	// distribution. Both are bootstrap rounds: the pots move, but no pool or
-	// account rewards are distributed.
-	//
-	// Into epoch 1, the pot inputs are the slot-0 genesis baseline (the epoch
-	// 0 ADA pots row) and the fee pot is empty, because no epoch precedes
-	// epoch 0. Into epoch 2, the first RUPD calculation is made during epoch 1
-	// from epoch 0's block performance and the epoch 1 ADA pots.
-	//
-	// Networks with a Byron prefix have no Shelley reward round at either
-	// boundary, and applyStakeRewards' Byron performance-epoch guard
-	// suppresses both there. Networks that declare Shelley at genesis run
-	// both: preview's epoch 0 is Alonzo, and omitting the 0->1 round left its
-	// treasury at 0 and its reserves at the genesis value, which propagated
-	// into every later epoch (dingo #3381).
+	// The first two RUPD calculations have empty Go distributions. Epoch 0
+	// reads genesis pots and empty previous block counts; epoch 1 reads the
+	// epoch-1 pots and epoch 0's blocks. Both updates must be applied, even
+	// though empty counts yield no expansion when d < 0.8. Preview's d=1
+	// requires expansion at both boundaries. The Byron performance-epoch
+	// guard in applyStakeRewards suppresses rounds before Shelley.
 	if newEpoch == 1 || newEpoch == 2 {
 		return stakeRewardEpochs{
 			snapshot:    0,

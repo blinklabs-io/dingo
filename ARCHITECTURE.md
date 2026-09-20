@@ -2737,6 +2737,13 @@ tax are applied but no pool or account rewards are distributed; the post-tax
 amount returns to reserves. The epoch-1 round reads the slot-0 genesis ADA pots
 (the epoch-0 row, whose fee pot is empty because no epoch precedes epoch 0);
 the epoch-2 round uses epoch 0's block performance with the epoch-1 ADA pots.
+The epoch-1 round reads genesis's **empty previous block counts** (`nesBprev`),
+not epoch 0's current counts (`nesBcur`). Its performance factor is therefore
+zero when `d < 0.8`, so Conway-at-genesis networks leave treasury and reserves
+unchanged at that boundary. Preview's genesis `d = 1` instead forces performance
+to 1 and requires the first treasury transfer; omitting the round is incorrect.
+This follows cardano-ledger's [TICK input to RUPD](https://github.com/IntersectMBO/cardano-ledger/blob/9975f3d3f36869822eee7225c8422aacafe57790/eras/shelley/impl/src/Cardano/Ledger/Shelley/Rules/Tick.hs)
+and [startStep performance calculation](https://github.com/IntersectMBO/cardano-ledger/blob/9975f3d3f36869822eee7225c8422aacafe57790/eras/shelley/impl/src/Cardano/Ledger/Shelley/LedgerState/PulsingReward.hs).
 Networks with a Byron prefix have no Shelley reward round at either boundary,
 and `applyStakeRewards`' Byron performance-epoch guard suppresses both there;
 networks that declare Shelley at genesis, such as preview, run both. Later
@@ -11816,8 +11823,9 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    snapshot and the prior epoch's ADA-pot row); see "Reward Calculation And
    Precomputation". Epochs 1 and 2 are the bootstrap exceptions: each applies
    expansion and treasury tax synchronously with an empty Go distribution and
-   returns the post-tax amount to reserves. Neither is precomputed because zero
-   output rows cannot provide rollback-safe precompute provenance.
+   returns the post-tax amount to reserves. Epoch 1 uses empty previous block
+   counts, so its expansion is zero unless `d >= 0.8`. Neither is precomputed
+   because zero output rows cannot provide rollback-safe precompute provenance.
 2. Embedded MIR (`applyMIRCerts`): apply the Shelley-era INSTANT rule for the
    move-instantaneous-rewards certificates accumulated during the ended epoch —
    credit their rewards to registered reward accounts and apply the pot-to-pot
