@@ -23,6 +23,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"strings"
 	"time"
@@ -30,6 +31,14 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
+
+// maxLocalStateQueryReadBufferSize caps the reassembly of a multi-segment
+// LocalStateQuery reply, overriding gouroboros' 16MB anti-DoS default, which
+// a whole-UTxO-set reply exceeds on a real chain. 2GiB is one byte wider than
+// a 32-bit int can hold, so the value is clamped to math.MaxInt there; the
+// clamp is not a weaker bound, because a bytes.Buffer on such a target cannot
+// reach either size before the process exhausts its address space.
+const maxLocalStateQueryReadBufferSize = min(2*1024*1024*1024, math.MaxInt)
 
 // dialTimeout bounds how long Dial waits for the initial connection and
 // handshake.
@@ -114,7 +123,9 @@ func Dial(
 		ouroboros.WithLocalStateQueryConfig(
 			olocalstatequery.NewConfig(
 				olocalstatequery.WithQueryTimeout(0),
-				olocalstatequery.WithMaxReadBufferSize(2*1024*1024*1024),
+				olocalstatequery.WithMaxReadBufferSize(
+					maxLocalStateQueryReadBufferSize,
+				),
 			),
 		),
 		// Without an explicit logger, gouroboros' Protocol.Logger() falls

@@ -11539,7 +11539,7 @@ func (ls *LedgerState) ByronProtocolMagic() (uint32, error) {
 	if protocolMagic < 0 {
 		return 0, errors.New("byron protocol magic is negative")
 	}
-	if protocolMagic > math.MaxUint32 {
+	if int64(protocolMagic) > math.MaxUint32 {
 		return 0, fmt.Errorf(
 			"byron protocol magic exceeds uint32: %d",
 			protocolMagic,

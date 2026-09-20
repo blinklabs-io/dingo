@@ -962,7 +962,9 @@ func incrementalSession(
 		ouroboros.WithMuxerSegmentReadTimeout(0),
 		ouroboros.WithLocalStateQueryConfig(localstatequery.NewConfig(
 			localstatequery.WithQueryTimeout(0),
-			localstatequery.WithMaxReadBufferSize(2*1024*1024*1024),
+			localstatequery.WithMaxReadBufferSize(
+				maxLocalStateQueryReadBufferSize,
+			),
 		)),
 		ouroboros.WithChainSyncConfig(chainsync.NewConfig(
 			chainsync.WithRollForwardFunc(

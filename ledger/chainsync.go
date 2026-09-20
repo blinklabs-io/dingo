@@ -6128,13 +6128,13 @@ func buildGenesisBlockCbor(
 			outputLen := len(outputCbor)
 
 			// Validate sizes fit in uint32 (fail fast instead of silent truncation)
-			if offset > math.MaxUint32 {
+			if !fitsUint32(offset) {
 				return nil, fmt.Errorf(
 					"genesis CBOR offset %d exceeds uint32 max",
 					offset,
 				)
 			}
-			if outputLen > math.MaxUint32 {
+			if !fitsUint32(outputLen) {
 				return nil, fmt.Errorf(
 					"genesis output CBOR length %d exceeds uint32 max",
 					outputLen,
@@ -6196,7 +6196,7 @@ func writeCborMajorType(buf *bytes.Buffer, majorType, n int) {
 		buf.WriteByte(header | 25)
 		buf.WriteByte(byte(n >> 8))
 		buf.WriteByte(byte(n))
-	case n < 4294967296:
+	case int64(n) < 4294967296:
 		buf.WriteByte(header | 26)
 		buf.WriteByte(byte(n >> 24))
 		buf.WriteByte(byte(n >> 16))

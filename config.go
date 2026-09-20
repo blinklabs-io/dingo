@@ -655,7 +655,8 @@ func (n *Node) configValidate() error {
 		}
 		if byronGenesis := n.config.CardanoNodeConfig().ByronGenesis(); byronGenesis != nil {
 			byronProtocolMagic := byronGenesis.ProtocolConsts.ProtocolMagic
-			if byronProtocolMagic < 0 || byronProtocolMagic > math.MaxUint32 {
+			if byronProtocolMagic < 0 ||
+				int64(byronProtocolMagic) > math.MaxUint32 {
 				return fmt.Errorf(
 					"byron genesis protocol magic %d is out of uint32 range",
 					byronProtocolMagic,
@@ -2010,7 +2011,7 @@ func pluginInt64(value any) int64 {
 	case int:
 		return int64(v)
 	case uint:
-		if v > math.MaxInt64 {
+		if uint64(v) > math.MaxInt64 {
 			return math.MaxInt64
 		}
 		return int64(v)
