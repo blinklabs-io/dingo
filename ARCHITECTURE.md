@@ -3432,11 +3432,12 @@ dependency across two points in the pipeline:
   registered pool's cold key is, by construction, the vkey whose Blake2b224
   hash is its pool id. `opCertFromHeader` extracts the opcert across the
   Shelley- and Babbage-family header layouts; `verifyOpCertColdSignature`
-  duplicates `gouroboros`' generic `VerifyBlock` cold-signature check as
-  defense in depth, while `ledger.ValidateKesPeriod` (against
-  `maxKESEvolutions` from Shelley genesis) adds the state-dependent expiry
-  check that the generic verifier cannot perform. Running here rejects forged
-  or expired opcerts before the block body is fetched.
+  delegates the raw cardano-ledger `OCertSignable` check to `gouroboros`'
+  `ledger.VerifyOpCertSignature`, duplicating `VerifyBlock`'s generic
+  cold-signature check as defense in depth. `ledger.ValidateKesPeriod`
+  (against `maxKESEvolutions` from Shelley genesis) adds the state-dependent
+  expiry check that the generic verifier cannot perform. Running here rejects
+  forged or expired opcerts before the block body is fetched.
   These checks now run unconditionally except for the same single
   exemption header verification uses elsewhere in this document: a slot
   an imported Mithril snapshot already covers (issue #3528). A coarse
@@ -6144,6 +6145,19 @@ VRF and KES secret-key loads check permissions on the open file handle and
 reject group/other access on Unix or insecure DACL grants on Windows before
 reading the key. Operational certificates contain public data and remain
 exempt from the secret-key permission check.
+
+Both `PoolCredentials.ValidateOpCert` and `keystore.KeyStore.ValidateOpCert`
+verify the cold-key signature, not only that the loaded KES key matches the
+certificate's hot vkey. The cold vkey is what each derives its pool id from,
+so a certificate carrying an unrelated or corrupt cold vkey/signature pair
+would otherwise yield a pool id whose cold key never authorized that hot key.
+Both delegate to the same `ledger.VerifyOpCertSignature` the inbound
+block-header path uses, so a certificate this node forges under is checked
+against the rule its peers apply to the resulting blocks. That matters beyond
+sharing the byte layout: `VerifyOpCertSignature` verifies under the strict
+Ed25519 criteria of cardano-node's `Ed25519DSIGN`, which rejects small-order
+public and R points, while `crypto/ed25519.Verify` accepts the edwards25519
+identity cold key with an all-zero S for any certificate body.
 
 `PoolCredentials.LoadFromFiles` parses replacement files before taking the
 credential write lock, then atomically installs all key material and the opcert
