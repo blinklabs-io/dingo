@@ -28,7 +28,6 @@ import (
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 type ChainId uint64
@@ -100,12 +99,25 @@ func NewManager(
 		),
 	}
 	if registry != nil {
-		cm.rollbackPointNotOnChain = promauto.With(registry).NewCounter(
-			prometheus.CounterOpts{
-				Name: "dingo_chain_rollback_point_not_on_chain_total",
-				Help: "rollback targets rejected because the chain no longer holds the resolved block at its retained index",
-			},
-		)
+		counter := prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "dingo_chain_rollback_point_not_on_chain_total",
+			Help: "rollback targets rejected because the chain no longer holds the resolved block at its retained index",
+		})
+		if err := registry.Register(counter); err != nil {
+			var alreadyRegistered prometheus.AlreadyRegisteredError
+			if !errors.As(err, &alreadyRegistered) {
+				return nil, fmt.Errorf("register rollback point metric: %w", err)
+			}
+			existing, ok := alreadyRegistered.ExistingCollector.(prometheus.Counter)
+			if !ok {
+				return nil, fmt.Errorf(
+					"registered rollback point metric has type %T, want prometheus.Counter",
+					alreadyRegistered.ExistingCollector,
+				)
+			}
+			counter = existing
+		}
+		cm.rollbackPointNotOnChain = counter
 	}
 	if err := cm.loadPrimaryChain(); err != nil {
 		return nil, err
