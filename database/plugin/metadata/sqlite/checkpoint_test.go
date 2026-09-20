@@ -16,6 +16,7 @@ package sqlite
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -26,6 +27,42 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
+
+func TestCheckpointWALDoesNotTruncateBusyPassiveCheckpoint(t *testing.T) {
+	var modes []string
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	err := checkpointWALWith(
+		context.Background(),
+		logger,
+		func(_ context.Context, mode string) (int, int, int, error) {
+			modes = append(modes, mode)
+			if mode == "PASSIVE" {
+				return 1, 10, 5, nil
+			}
+			t.Fatal("TRUNCATE must not run after an incomplete PASSIVE checkpoint")
+			return 0, 0, 0, nil
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, []string{"PASSIVE"}, modes)
+}
+
+func TestCheckpointWALTruncatesOnlyAfterPassiveDrainsWAL(t *testing.T) {
+	var modes []string
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	err := checkpointWALWith(
+		context.Background(),
+		logger,
+		func(_ context.Context, mode string) (int, int, int, error) {
+			modes = append(modes, mode)
+			return 0, 10, 10, nil
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, []string{"PASSIVE", "TRUNCATE"}, modes)
+}
 
 // TestCheckpointWALTruncatesFile proves checkpointWAL's central claim: a
 // PASSIVE checkpoint (what wal_autocheckpoint invokes automatically after

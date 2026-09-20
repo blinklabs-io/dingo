@@ -182,40 +182,62 @@ func checkpointWAL(
 		}()
 		db.SetMaxOpenConns(1)
 
-		// Drain the WAL with PASSIVE first.  A direct TRUNCATE checkpoint can
-		// hold SQLite's writer lock while it copies a large WAL, starving the
-		// import writer until its busy timeout expires.  PASSIVE does not wait
-		// for or block writers; TRUNCATE is only attempted after it reports
-		// that all frames have already been checkpointed.
-		var busy, walLog, checkpointed int
-		row := db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)")
-		if err := row.Scan(&busy, &walLog, &checkpointed); err != nil {
-			return fmt.Errorf("WAL checkpoint: %w", err)
-		}
-		if busy != 0 || walLog != checkpointed {
-			logger.Warn(
-				"WAL checkpoint could not fully complete "+
-					"(a reader is still holding an old snapshot); "+
-					"will retry next tick",
-				"wal_frames", walLog,
-				"checkpointed_frames", checkpointed,
-			)
-			return nil
-		}
-		row = db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
-		if err := row.Scan(&busy, &walLog, &checkpointed); err != nil {
-			return fmt.Errorf("WAL truncate: %w", err)
-		}
-		if busy != 0 {
-			logger.Warn(
-				"WAL checkpoint(TRUNCATE) could not fully complete; "+
-					"will retry next tick",
-				"wal_frames", walLog,
-				"checkpointed_frames", checkpointed,
-			)
-		}
+		return checkpointWALWith(
+			ctx,
+			logger,
+			func(ctx context.Context, mode string) (int, int, int, error) {
+				var busy, walLog, checkpointed int
+				row := db.QueryRowContext(
+					ctx,
+					fmt.Sprintf("PRAGMA wal_checkpoint(%s)", mode),
+				)
+				if err := row.Scan(&busy, &walLog, &checkpointed); err != nil {
+					return 0, 0, 0, err
+				}
+				return busy, walLog, checkpointed, nil
+			},
+		)
+	}
+}
+
+// checkpointWALWith drains the WAL without asking SQLite to truncate it while
+// a reader still holds an old snapshot. A direct TRUNCATE checkpoint can hold
+// SQLite's writer lock while it copies a large WAL, starving import writers.
+// PASSIVE does not wait for readers; TRUNCATE is only attempted after PASSIVE
+// reports that every WAL frame has already been checkpointed.
+func checkpointWALWith(
+	ctx context.Context,
+	logger *slog.Logger,
+	checkpoint func(context.Context, string) (int, int, int, error),
+) error {
+	busy, walLog, checkpointed, err := checkpoint(ctx, "PASSIVE")
+	if err != nil {
+		return fmt.Errorf("WAL checkpoint: %w", err)
+	}
+	if busy != 0 || walLog != checkpointed {
+		logger.Warn(
+			"WAL checkpoint could not fully complete "+
+				"(a reader is still holding an old snapshot); "+
+				"will retry next tick",
+			"wal_frames", walLog,
+			"checkpointed_frames", checkpointed,
+		)
 		return nil
 	}
+
+	busy, walLog, checkpointed, err = checkpoint(ctx, "TRUNCATE")
+	if err != nil {
+		return fmt.Errorf("WAL truncate: %w", err)
+	}
+	if busy != 0 {
+		logger.Warn(
+			"WAL checkpoint(TRUNCATE) could not fully complete; "+
+				"will retry next tick",
+			"wal_frames", walLog,
+			"checkpointed_frames", checkpointed,
+		)
+	}
+	return nil
 }
 
 // walConversionTimeout bounds how long a node waits for another opener to
