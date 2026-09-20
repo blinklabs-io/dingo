@@ -15,6 +15,7 @@
 package database
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/nodesettings"
@@ -36,8 +37,8 @@ func (d *Database) checkAlonzoPParamsUnit() error {
 	}
 	unit, ok := gates[nodesettings.AlonzoPParamsUnitGateName]
 	if !ok {
-		return fmt.Errorf(
-			"Alonzo protocol-parameter unit marker is missing; " +
+		return errors.New(
+			"alonzo protocol-parameter unit marker is missing; " +
 				"recreate both metadata and blob stores and resync from genesis",
 		)
 	}
@@ -45,13 +46,13 @@ func (d *Database) checkAlonzoPParamsUnit() error {
 	case nodesettings.AlonzoPParamsUnitWordV1:
 		return nil
 	case nodesettings.AlonzoPParamsUnitLegacyByteV0:
-		return fmt.Errorf(
+		return errors.New(
 			"persisted Alonzo protocol parameters use legacy byte units; " +
 				"recreate both metadata and blob stores and resync from genesis",
 		)
 	default:
 		return fmt.Errorf(
-			"Alonzo protocol-parameter unit marker has unknown value %q; "+
+			"alonzo protocol-parameter unit marker has unknown value %q; "+
 				"recreate both metadata and blob stores and resync from genesis",
 			unit,
 		)
