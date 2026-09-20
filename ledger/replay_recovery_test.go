@@ -2146,6 +2146,201 @@ func TestReplayRecoveryRejectsDeterministicMalformedScriptWitnesses(t *testing.T
 	assert.Equal(t, ls.Tip().Point, resync.Point)
 }
 
+// UtxoValidateProposalReturnAccounts checks a proposal's return address
+// against ls.IsStakeCredentialRegistered -- reward-account registration
+// state, not a UTxO input -- and never resolves any of the transaction's
+// referenced inputs. Left unclassified, this verdict fell through to
+// findReplayRecoveryCandidate, which picked one of the transaction's own
+// referenced inputs and searched for a "missing" producer that does not
+// exist, wasting time before the eventual deliberate halt (dingo#4531,
+// observed live on Preview: ~40s per occurrence against transaction
+// 89e26414e949af4e2b60d422727a5e2bbf2242276345ccf14802576a20faf135).
+func TestReplayRecoveryRejectsDeterministicProposalReturnAccountDoesNotExist(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls := newReplayRecoveryAuditLedger(t, true)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	resyncCh := deterministicResyncChannel(t, ls, bus)
+
+	badAddr, err := lcommon.NewAddress(
+		"stake_test1ur03nykas2c79sl38zwwsqrsrnzfxqx70nn3k7h40j60ajsle7at7",
+	)
+	require.NoError(t, err)
+
+	recovered, err := ls.tryRecoverFromTxValidationError(&txValidationError{
+		BlockPoint: ocommon.NewPoint(
+			160,
+			testHashBytes("proposal-return-account-block"),
+		),
+		TxHash: testHashBytes("proposal-return-account-tx"),
+		Inputs: []lcommon.TransactionInput{
+			&replayRecoveryInput{txId: testHashBytes("unresolved-producer")},
+		},
+		Cause: fmt.Errorf(
+			"conway utxo validation rule 8: %w",
+			conway.ProposalReturnAccountDoesNotExistError{Address: badAddr},
+		),
+	})
+	require.NoError(t, err)
+	require.True(
+		t,
+		recovered,
+		"a proposal return account rejection must rewind past the block rather than search for a missing-input producer",
+	)
+	assert.Equal(t, uint64(140), ls.Tip().Point.Slot)
+	assert.Equal(t, ls.Tip().Point, ls.chain.Tip().Point)
+	assert.Nil(t, ls.lastAtTipRecovery)
+
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		2*time.Second,
+		"a proposal return account rejection must request a fresh ChainSync intersection",
+	)
+	assert.Equal(t, ls.Tip().Point, resync.Point)
+}
+
+// isDeterministicTxValidationError's ConwayGovPredFailure coverage: every
+// type here is raised by a UtxoValidate* rule in
+// github.com/blinklabs-io/gouroboros/ledger/conway/rules.go that reads only
+// the failing transaction's own proposal/vote/certificate content, protocol
+// parameters, or non-UTxO governance state (DRep/pool/committee
+// registration, reward-account registration, existing governance-action
+// state) -- never a UTxO input. findReplayRecoveryCandidate's approach of
+// picking one of the transaction's referenced inputs and searching for its
+// producer therefore can never apply, the same reasoning already
+// established for isRewardWithdrawalMismatch's non-UTxO reward-balance
+// check. See the raising code cited per case.
+func TestIsDeterministicTxValidationErrorConwayGovPredFailures(t *testing.T) {
+	t.Parallel()
+
+	addr, err := lcommon.NewAddress(
+		"stake_test1ur03nykas2c79sl38zwwsqrsrnzfxqx70nn3k7h40j60ajsle7at7",
+	)
+	require.NoError(t, err)
+
+	deterministicCases := map[string]error{
+		// UtxoValidateProposalReturnAccounts: ls.IsStakeCredentialRegistered.
+		"ProposalReturnAccountDoesNotExist": conway.ProposalReturnAccountDoesNotExistError{
+			Address: addr,
+		},
+		// UtxoValidateProposalReturnAccounts: same rule, treasury withdrawal
+		// destination addresses.
+		"TreasuryWithdrawalReturnAccountsDoNotExist": conway.TreasuryWithdrawalReturnAccountsDoNotExistError{
+			Addresses: []lcommon.Address{addr},
+		},
+		// UtxoValidateProposalDeposit: proposal.Deposit() vs protocol
+		// parameter, no ledger state at all.
+		"ProposalDepositIncorrect": conway.ProposalDepositIncorrectError{
+			Supplied: 1,
+			Expected: 2,
+		},
+		// UtxoValidateUnknownGovActionIds: resolver over tx.VotingProcedures()
+		// and governance-action state, never a UTxO input.
+		"UnknownGovActionId": conway.UnknownGovActionIdError{
+			ActionIds: []lcommon.GovActionId{{}},
+		},
+		// UtxoValidateUnknownVoters: DRep/pool/committee registration state.
+		"UnknownVoter": conway.UnknownVoterError{
+			Voter: lcommon.Voter{Type: lcommon.VoterTypeStakingPoolKeyHash},
+		},
+		// UtxoValidateVotingOnExpiredGovAction: governance-action expiry
+		// state.
+		"VotingOnExpiredGovAction": conway.VotingOnExpiredGovActionError{
+			Voter:      lcommon.Voter{Type: lcommon.VoterTypeStakingPoolKeyHash},
+			ExpirySlot: 1,
+			Slot:       2,
+		},
+		// UtxoValidateGovActionWellFormedness: UpdateCommittee credentials
+		// listed in both the removed set and the added map, tx content only.
+		"ConflictingCommitteeUpdate": conway.ConflictingCommitteeUpdateError{
+			Credentials: []lcommon.Credential{{}},
+		},
+		// UtxoValidateGovActionWellFormedness: structural check on the
+		// proposal's own governance action, tx content only.
+		"MalformedGovAction": conway.MalformedGovActionError{
+			Reason: "governance action cannot be nil",
+		},
+		// UtxoValidateHardForkVersion: proposed version vs the referenced
+		// ancestor governance action (or current protocol version).
+		"BadHardForkProtocolVersion": conway.BadHardForkProtocolVersionError{},
+		// UtxoValidateProposalAncestry: PrevGovActionId resolved against
+		// governance-action purpose-chain state.
+		"InvalidGovActionAncestor": conway.InvalidGovActionAncestorError{
+			Reason: "referenced ancestor governance action does not exist",
+		},
+		// UtxoValidateEmptyTreasuryWithdrawals: structural, tx content only.
+		"EmptyTreasuryWithdrawals":     conway.EmptyTreasuryWithdrawalsError{},
+		"ZeroTreasuryWithdrawalAmount": conway.ZeroTreasuryWithdrawalAmountError{},
+		// UtxoValidateBootstrapAllowedGovActions /
+		// UtxoValidateBootstrapParameterGroups: tx content vs protocol
+		// parameters.
+		"BootstrapDisallowedGovAction":       conway.BootstrapDisallowedGovActionError{},
+		"BootstrapDisallowedParameterChange": conway.BootstrapDisallowedParameterChangeError{},
+		// UtxoValidateProposalNetworkIds: tx content vs the ledger's network
+		// ID, a network-wide constant.
+		"WrongNetworkProposalAddress": conway.WrongNetworkProposalAddressError{},
+		// UtxoValidateBootstrapVotingRestrictions /
+		// UtxoValidateStakePoolVotingRestrictions /
+		// UtxoValidateCCVotingRestrictions: voter type vs the resolved
+		// governance-action type, never a UTxO input.
+		"BootstrapVotingRestriction": conway.BootstrapVotingRestrictionError{},
+		"StakePoolVotingRestriction": conway.StakePoolVotingRestrictionError{},
+		"CCVotingRestriction":        conway.CCVotingRestrictionError{},
+	}
+	for name, err := range deterministicCases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			assert.True(
+				t,
+				isDeterministicTxValidationError(err),
+				"%T must be classified deterministic",
+				err,
+			)
+			assert.True(
+				t,
+				isDeterministicTxValidationError(
+					fmt.Errorf("conway utxo validation rule: %w", err),
+				),
+				"a wrapped %T must still be classified deterministic",
+				err,
+			)
+		})
+	}
+
+	// Negative cases: Conway errors that are not ConwayGovPredFailure
+	// members, or whose raising code consults something other than the
+	// failing transaction's own content and non-UTxO governance state, must
+	// not be swept in by an overreaching classification.
+	notDeterministicCases := map[string]error{
+		// UtxoValidateGuardrailsScriptHash: a lookup failure against
+		// ls.Constitution() reflects a local ledger-state read error, not a
+		// verdict about the transaction.
+		"ConstitutionLookup": conway.ConstitutionLookupError{
+			Err: errors.New("boom"),
+		},
+		// common.ValidatePlutusScriptsWellFormed's spending-side sibling:
+		// missing a datum is a UTXOW verdict, not a ConwayGovPredFailure.
+		"MissingDatumForSpendingScript": conway.MissingDatumForSpendingScriptError{},
+		// A plain, unclassified error must not be swept in.
+		"Generic": errors.New("some other validation failure"),
+	}
+	for name, err := range notDeterministicCases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			assert.False(
+				t,
+				isDeterministicTxValidationError(err),
+				"%T must not be classified deterministic",
+				err,
+			)
+		})
+	}
+}
+
 // A duplicate-input failure reaching the deterministic branch while the node
 // is at tip takes that branch rather than recoverAtTipFromTxValidationError's
 // escalating-depth schedule. Deepening the rewind cannot change a verdict that

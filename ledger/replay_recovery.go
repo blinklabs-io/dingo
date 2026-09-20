@@ -474,7 +474,124 @@ func isDeterministicTxValidationError(err error) bool {
 	if isRewardWithdrawalMismatch(err) {
 		return true
 	}
+	if isConwayGovPredFailureError(err) {
+		return true
+	}
 	_, ok := errors.AsType[eras.DuplicateInputByronError](err)
+	return ok
+}
+
+// isConwayGovPredFailureError identifies the ConwayGovPredFailure rejections
+// raised by the UtxoValidate* rules in
+// github.com/blinklabs-io/gouroboros/ledger/conway/rules.go (v0.205.5).
+// Dijkstra reuses these same conway error types for its own governance
+// rules, so this covers both eras.
+//
+// Every case here was read at its raising site and confirmed to depend only
+// on the failing transaction's own proposal/vote/certificate content,
+// protocol parameters, or non-UTxO governance ledger state (DRep, stake
+// pool, and committee registration; reward-account registration; existing
+// governance-action state) -- never a UTxO input:
+//
+//   - ProposalReturnAccountDoesNotExistError,
+//     TreasuryWithdrawalReturnAccountsDoNotExistError:
+//     UtxoValidateProposalReturnAccounts checks ls.IsStakeCredentialRegistered
+//     against the proposal's own return/withdrawal addresses (issue #4531,
+//     the incident this classification was added for: a doomed ~40s replay-
+//     recovery loop against one of the transaction's 11 referenced inputs,
+//     none of which the rejection had anything to do with).
+//   - ProposalDepositIncorrectError: UtxoValidateProposalDeposit compares
+//     proposal.Deposit() to a protocol parameter; no ledger state at all.
+//   - UnknownGovActionIdError, VotingOnExpiredGovActionError:
+//     UtxoValidateUnknownGovActionIds / UtxoValidateVotingOnExpiredGovAction
+//     resolve the transaction's own referenced governance-action IDs against
+//     governance-action state.
+//   - UnknownVoterError: UtxoValidateUnknownVoters resolves the
+//     transaction's own voters against DRep/pool/committee registration
+//     state.
+//   - ConflictingCommitteeUpdateError, MalformedGovActionError:
+//     UtxoValidateGovActionWellFormedness inspects only the proposal's own
+//     governance-action fields.
+//   - BadHardForkProtocolVersionError: UtxoValidateHardForkVersion compares
+//     the proposed version to the current protocol version or a referenced
+//     ancestor governance action.
+//   - InvalidGovActionAncestorError: UtxoValidateProposalAncestry resolves
+//     the proposal's own PrevGovActionId against governance-action
+//     purpose-chain state.
+//   - EmptyTreasuryWithdrawalsError, ZeroTreasuryWithdrawalAmountError:
+//     UtxoValidateEmptyTreasuryWithdrawals inspects only the proposal's own
+//     TreasuryWithdrawalGovAction.
+//   - BootstrapDisallowedGovActionError, BootstrapDisallowedParameterChangeError,
+//     BootstrapVotingRestrictionError: the bootstrap-phase rules compare the
+//     transaction's own proposals/votes to protocol parameters and (for
+//     voting) the resolved governance-action type.
+//   - WrongNetworkProposalAddressError: UtxoValidateProposalNetworkIds
+//     compares the proposal's own addresses to the ledger's network ID, a
+//     network-wide constant rather than per-branch UTxO state.
+//   - StakePoolVotingRestrictionError, CCVotingRestrictionError: the SPO/CC
+//     voting-restriction rules compare the voter type to the resolved
+//     governance-action type.
+//
+// Excluded on the same reading: ConstitutionLookupError and
+// MalformedConstitutionError (UtxoValidateGuardrailsScriptHash) report a
+// failure or malformed value from ls.Constitution() itself -- a local
+// ledger-state read problem, not a verdict about the transaction -- and the
+// non-governance Conway errors (missing witnesses/redeemers/datums, extra
+// redeemers, Plutus-version restrictions) are UTXOW-family verdicts outside
+// ConwayGovPredFailure and are not addressed here.
+func isConwayGovPredFailureError(err error) bool {
+	if _, ok := errors.AsType[conway.ProposalReturnAccountDoesNotExistError](err); ok {
+		return true
+	}
+	if _, ok := errors.AsType[conway.TreasuryWithdrawalReturnAccountsDoNotExistError](err); ok {
+		return true
+	}
+	if _, ok := errors.AsType[conway.ProposalDepositIncorrectError](err); ok {
+		return true
+	}
+	if _, ok := errors.AsType[conway.UnknownGovActionIdError](err); ok {
+		return true
+	}
+	if _, ok := errors.AsType[conway.UnknownVoterError](err); ok {
+		return true
+	}
+	if _, ok := errors.AsType[conway.VotingOnExpiredGovActionError](err); ok {
+		return true
+	}
+	if _, ok := errors.AsType[conway.ConflictingCommitteeUpdateError](err); ok {
+		return true
+	}
+	if _, ok := errors.AsType[conway.MalformedGovActionError](err); ok {
+		return true
+	}
+	if _, ok := errors.AsType[conway.BadHardForkProtocolVersionError](err); ok {
+		return true
+	}
+	if _, ok := errors.AsType[conway.InvalidGovActionAncestorError](err); ok {
+		return true
+	}
+	if _, ok := errors.AsType[conway.EmptyTreasuryWithdrawalsError](err); ok {
+		return true
+	}
+	if _, ok := errors.AsType[conway.ZeroTreasuryWithdrawalAmountError](err); ok {
+		return true
+	}
+	if _, ok := errors.AsType[conway.BootstrapDisallowedGovActionError](err); ok {
+		return true
+	}
+	if _, ok := errors.AsType[conway.BootstrapDisallowedParameterChangeError](err); ok {
+		return true
+	}
+	if _, ok := errors.AsType[conway.WrongNetworkProposalAddressError](err); ok {
+		return true
+	}
+	if _, ok := errors.AsType[conway.BootstrapVotingRestrictionError](err); ok {
+		return true
+	}
+	if _, ok := errors.AsType[conway.StakePoolVotingRestrictionError](err); ok {
+		return true
+	}
+	_, ok := errors.AsType[conway.CCVotingRestrictionError](err)
 	return ok
 }
 
