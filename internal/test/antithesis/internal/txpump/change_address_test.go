@@ -120,3 +120,51 @@ func TestPlutusUnlockReturnsChangeToLockedWalletAddress(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, controlled, change, "Plutus unlock change must remain queryable by the wallet")
 }
+
+// TestUnsignedWorkloadSubmissionsKeepDeterministicChangeAddress pins the
+// fallback that keeps keyless harness wallets submitting: with no signing key
+// on the selected input, change returns to the address derived from the input
+// transaction hash, and acceptance stays on the pacing-only path.
+func TestUnsignedWorkloadSubmissionsKeepDeterministicChangeAddress(t *testing.T) {
+	for _, workload := range []struct {
+		name   string
+		submit func(*Pump, *NodeClient, int) bool
+	}{
+		{"delegation", (*Pump).submitDelegation},
+		{"governance", (*Pump).submitGovernance},
+		{"plutus lock", (*Pump).submitPlutus},
+	} {
+		t.Run(workload.name, func(t *testing.T) {
+			pump := testPump(time.Now().Add(-time.Second), time.Second)
+			pump.cfg.DelegationStakeKeyHash = hex.EncodeToString(sampleStakeKeyHash)
+			pump.cfg.DelegationPoolKeyHash = hex.EncodeToString(samplePoolKeyHash)
+			pump.wallet.Add(UTxO{TxHash: sampleHash, Index: 0, Amount: 600_000_000})
+			submitted := make(chan []byte, 1)
+			cfg := localtxsubmission.NewConfig(localtxsubmission.WithSubmitTxFunc(
+				func(_ localtxsubmission.CallbackContext, tx localtxsubmission.MsgSubmitTxTransaction) error {
+					submitted <- tx.Raw.Content.([]byte)
+					return nil
+				},
+			))
+			client := newProtocolTestClient(t, ouroboros.WithLocalTxSubmissionConfig(cfg))
+			require.True(t, workload.submit(pump, client, 1))
+			var raw []byte
+			select {
+			case raw = <-submitted:
+			case <-time.After(5 * time.Second):
+				t.Fatal("submission callback was not reached")
+			}
+			var tx conway.ConwayTransaction
+			_, err := cbor.Decode(raw, &tx)
+			require.NoError(t, err)
+			outputs := tx.Outputs()
+			require.NotEmpty(t, outputs)
+			change, err := outputs[len(outputs)-1].Address().Bytes()
+			require.NoError(t, err)
+			require.Equal(t, deterministicAddr(sampleHash), change,
+				"a keyless input must keep the deterministic change address")
+			require.Empty(t, pump.wallet.PendingIDs(),
+				"an unsigned wallet keeps the pacing-only acceptance path")
+		})
+	}
+}
