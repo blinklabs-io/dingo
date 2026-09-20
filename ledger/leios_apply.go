@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -71,13 +72,18 @@ const certifiedEndorserBlockRetryDelay = time.Second
 // (LeiosTx = encodeBytes(txCbor)). A non-byte-string entry — major type != 2 —
 // is already the bare transaction. elems[0] is the transaction body, which is
 // both the transaction-offset payload and, hashed, the transaction id.
+// Both decodes read bytes a peer delivered over leios-fetch, so they go
+// through safedecode.Cbor: a decoder panic becomes the error this function
+// already returns instead of unwinding into whatever goroutine is applying
+// the endorser block. The function decodes into locals and returns them, so
+// there is no shared state a contained panic could leave half-updated.
 func decodeEndorserTxEnvelope(
 	raw cbor.RawMessage,
 ) (txCbor []byte, elems []cbor.RawMessage, err error) {
 	txCbor = []byte(raw)
 	if len(txCbor) > 0 && txCbor[0]>>5 == 2 {
-		var inner []byte
-		if _, err := cbor.Decode(txCbor, &inner); err != nil {
+		inner, _, err := safedecode.Cbor[[]byte](txCbor)
+		if err != nil {
 			return nil, nil, fmt.Errorf(
 				"unwrap CBOR-in-CBOR entry: %w",
 				err,
@@ -85,7 +91,8 @@ func decodeEndorserTxEnvelope(
 		}
 		txCbor = inner
 	}
-	if _, err := cbor.Decode(txCbor, &elems); err != nil {
+	elems, _, err = safedecode.Cbor[[]cbor.RawMessage](txCbor)
+	if err != nil {
 		return nil, nil, fmt.Errorf("decode envelope: %w", err)
 	}
 	if len(elems) < 2 {
@@ -183,7 +190,11 @@ func (ls *LedgerState) applyEndorserBlock(
 		// DetermineTransactionType is heuristic and cannot reliably identify a
 		// bare standalone transaction without block/era context (it returns
 		// "unknown transaction type" for these), so it must not be used here.
-		tx, err := ledger.NewTransactionFromCbor(ledger.TxTypeDijkstra, txCbor)
+		// Peer-supplied transaction bytes, decoded before any storage is
+		// mutated, so the guard cannot convert a crash into a partially
+		// applied endorser block: every return below this loop's decode
+		// failure leaves the ledger untouched.
+		tx, err := safedecode.Transaction(ledger.TxTypeDijkstra, txCbor)
 		if err != nil {
 			return 0, 0, fmt.Errorf("decode endorser tx %d: %w", i, err)
 		}
