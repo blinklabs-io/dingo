@@ -149,8 +149,12 @@ func (w *Wallet) RecordAccepted(
 }
 
 // ReconcileSnapshot replaces spendable state with the acquired LSQ snapshot.
-// LocalTxMonitor presence keeps a transaction's input reservation. Once it is
-// absent, only source inputs present in the LSQ snapshot can be restored.
+// LocalTxMonitor presence keeps a transaction's input reservation and clears
+// any grace earned by an earlier absence. One absent observation is ambiguous,
+// because a node can drop a forged transaction from the mempool before the
+// spend reaches LSQ, so the record and its still-present inputs stay reserved
+// for one further round. A second consecutive absence retires the record and
+// restores only the source inputs the snapshot still carries.
 func (w *Wallet) ReconcileSnapshot(snapshot []UTxO, presence map[string]bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
