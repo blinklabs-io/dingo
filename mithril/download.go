@@ -156,12 +156,13 @@ type DownloadConfig struct {
 	// HTTPClient, when non-nil, is reused for the download instead of
 	// constructing a fresh client per call. Callers that fetch many
 	// files (the v2 immutable pool) pass one shared keep-alive client so
-	// connections are pooled across files. When nil, a per-call client
-	// with keep-alives disabled is used (single-archive downloads).
+	// connections are pooled across files. Unless AllowInsecureHTTP is set,
+	// custom transports are cloned and restricted before use. When nil, a
+	// per-call client with keep-alives disabled is used.
 	HTTPClient *http.Client
-	// AllowInsecureHTTP permits URL to use plain HTTP instead of HTTPS.
-	// By default, Validate rejects a non-HTTPS URL; this is an explicit
-	// escape hatch for local development and tests (e.g. against an
+	// AllowInsecureHTTP permits URL to use plain HTTP or resolve to a
+	// local/private address. By default, Validate rejects either; this is an
+	// explicit escape hatch for local development and tests (e.g. against an
 	// httptest server) and should not be set in production.
 	AllowInsecureHTTP bool
 	// idleWatchdogs, when non-nil, replaces the wall-clock watchdog that
@@ -455,16 +456,15 @@ func rootFileSize(root *os.Root, filename string) int64 {
 	return fi.Size()
 }
 
-func newDownloadTransport() *http.Transport {
+func newDownloadTransport(allowPrivate bool) *restrictedHTTPTransport {
+	var transport *http.Transport
 	if base, ok := http.DefaultTransport.(*http.Transport); ok {
-		transport := base.Clone()
-		transport.DisableKeepAlives = true
-		return transport
+		transport = base.Clone()
+	} else {
+		transport = &http.Transport{}
 	}
-	return &http.Transport{
-		Proxy:             http.ProxyFromEnvironment,
-		DisableKeepAlives: true,
-	}
+	transport.DisableKeepAlives = true
+	return newRestrictedHTTPTransport(transport, allowPrivate)
 }
 
 // newPooledDownloadTransport returns a transport that keeps connections
@@ -477,7 +477,10 @@ func newDownloadTransport() *http.Transport {
 // default http.Transport caps idle connections per host at 2, so without
 // raising MaxIdleConnsPerHost most workers would close and re-handshake
 // their connection after every file and keep-alive would buy nothing.
-func newPooledDownloadTransport(maxConns int) *http.Transport {
+func newPooledDownloadTransport(
+	maxConns int,
+	allowPrivate bool,
+) *restrictedHTTPTransport {
 	if maxConns < 1 {
 		maxConns = 1
 	}
@@ -510,7 +513,7 @@ func newPooledDownloadTransport(maxConns int) *http.Transport {
 	}
 	tlsConfig.NextProtos = []string{"http/1.1"}
 	transport.TLSClientConfig = tlsConfig
-	return transport
+	return newRestrictedHTTPTransport(transport, allowPrivate)
 }
 
 // progressWriter wraps an io.Writer to track bytes written and
@@ -635,6 +638,22 @@ func downloadSnapshot(
 	if err := cfg.Validate(); err != nil {
 		return "", nil, err
 	}
+	if cfg.HTTPClient == nil {
+		transport := newDownloadTransport(cfg.AllowInsecureHTTP)
+		defer transport.CloseIdleConnections()
+		cfg.HTTPClient = &http.Client{
+			Timeout:   0, // No timeout for large downloads
+			Transport: transport,
+		}
+	}
+	client, err := secureMithrilHTTPClient(
+		cfg.HTTPClient,
+		cfg.AllowInsecureHTTP,
+	)
+	if err != nil {
+		return "", nil, err
+	}
+	cfg.HTTPClient = client
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
@@ -792,23 +811,15 @@ func downloadSnapshotOnce(
 		)
 	}
 
-	// Reuse a shared keep-alive client when the caller provides one (the
-	// v2 immutable pool); otherwise build a per-call client with
-	// keep-alives disabled for single-archive downloads.
+	// downloadSnapshot secures the client once before entering its retry loop.
+	// The v2 immutable pool's pre-secured transport is shared across calls.
 	client := cfg.HTTPClient
-	if client == nil {
-		transport := newDownloadTransport()
-		defer transport.CloseIdleConnections()
-		client = &http.Client{
-			Timeout:       0, // No timeout for large downloads
-			Transport:     transport,
-			CheckRedirect: httpsOnlyRedirect,
-		}
-	}
 	headerTimer := cfg.newIdleWatchdog(func() {
 		cancelDownload(downloadIdleTimeoutCause(idleTimeout))
 	})
-	resp, err := client.Do( //nolint:gosec // URL from caller-provided config; HTTPS-only redirect policy prevents downgrade
+	// Initial, redirect, and dial-time destinations are restricted by the
+	// secured client created before the retry loop.
+	resp, err := client.Do( //nolint:gosec
 		req,
 	)
 	if headerTimer != nil {

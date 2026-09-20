@@ -948,6 +948,7 @@ func TestDoGetRedactsCredentialURLFromTransportError(t *testing.T) {
 	client := NewClient(
 		"https://aggregator.example/aggregator",
 		WithHTTPClient(httpClient),
+		WithAllowInsecureHTTP(),
 	)
 
 	_, err := client.doGet(context.Background(), credentialURL)
@@ -986,6 +987,7 @@ func TestDoGetRedactsCredentialURLFromErrorResponse(t *testing.T) {
 	client := NewClient(
 		"https://aggregator.example/aggregator",
 		WithHTTPClient(httpClient),
+		WithAllowInsecureHTTP(),
 	)
 
 	_, err := client.doGet(context.Background(), credentialURL)
@@ -1020,8 +1022,11 @@ func TestClientRedactsMalformedRedirectLocation(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 	httpClient := server.Client()
-	httpClient.CheckRedirect = httpsOnlyRedirect
-	client := NewClient(server.URL, WithHTTPClient(httpClient))
+	client := NewClient(
+		server.URL,
+		WithHTTPClient(httpClient),
+		WithAllowInsecureHTTP(),
+	)
 
 	_, err := client.ListSnapshots(context.Background())
 	require.Error(t, err)
@@ -1060,12 +1065,15 @@ func TestClientRejectsRedirectWithUserinfo(t *testing.T) {
 		1,
 	) + "/target"
 	httpClient := server.Client()
-	httpClient.CheckRedirect = httpsOnlyRedirect
-	client := NewClient(server.URL, WithHTTPClient(httpClient))
+	client := NewClient(
+		server.URL,
+		WithHTTPClient(httpClient),
+		WithAllowInsecureHTTP(),
+	)
 
 	_, err := client.ListSnapshots(context.Background())
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "redirect with userinfo blocked")
+	assert.Contains(t, err.Error(), "must not include userinfo")
 	assert.NotContains(t, err.Error(), "operator")
 	assert.NotContains(t, err.Error(), "redirect-secret")
 	assert.False(t, targetReached, "redirect target must not receive Basic Auth")
@@ -1130,6 +1138,58 @@ func TestClientAllowsPlainHTTPAggregatorWithEscapeHatch(t *testing.T) {
 	client := NewClient(server.URL, WithAllowInsecureHTTP())
 	_, err := client.ListSnapshots(context.Background())
 	require.NoError(t, err)
+}
+
+func TestClientRejectsPrivateAggregatorByDefault(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	client := NewClient(
+		"https://127.0.0.1",
+		WithHTTPClient(&http.Client{Transport: roundTripFunc(func(
+			*http.Request,
+		) (*http.Response, error) {
+			called = true
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body: io.NopCloser(strings.NewReader(
+					`[]`,
+				)),
+			}, nil
+		})}),
+	)
+
+	_, err := client.ListSnapshots(context.Background())
+	require.ErrorContains(t, err, "not allowed")
+	require.False(t, called, "a rejected aggregator must not be requested")
+}
+
+func TestClientRejectsUnrestrictedCustomTransport(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	client := NewClient(
+		"https://aggregator.example",
+		WithHTTPClient(&http.Client{Transport: roundTripFunc(func(
+			*http.Request,
+		) (*http.Response, error) {
+			called = true
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body: io.NopCloser(strings.NewReader(
+					`[]`,
+				)),
+			}, nil
+		})}),
+	)
+
+	_, err := client.ListSnapshots(context.Background())
+	require.ErrorContains(
+		t,
+		err,
+		"cannot enforce private-address restrictions",
+	)
+	require.False(t, called, "an unrestricted transport must not be used")
 }
 
 func TestVerifyCertChainGenesis(t *testing.T) {
