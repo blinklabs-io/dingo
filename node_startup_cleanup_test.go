@@ -36,40 +36,52 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// forgeLoopFrame and electionLoopFrame name the goroutines BlockForger.Start
-// and Election.Start launch. Both Stop calls join their workers, so the frames
-// disappearing is evidence of a join rather than of a cancellation: these
-// tests never cancel the context the components were started with.
+// forgeCreatedBy and electionCreatedBy identify the goroutines that
+// BlockForger.Start and Election.Start launch. Both Stop calls join their
+// workers, so these lines disappearing is evidence of a join rather than of
+// a cancellation: these tests never cancel the context the components were
+// started with.
 //
-// The scan behind them covers every goroutine in the test binary, which is
-// sound because these are the only tests in this package that start a forger
-// or an election; the rest hold an unstarted forging.BlockForger value.
+// The match is on the "created by" line rather than on the worker's own
+// entry frame, because two renderings of a live goroutine carry no entry
+// frame at all: one created by `go` but not yet scheduled has an empty
+// stack, and one running on another thread prints "stack unavailable".
+// runtime.Stack emits the "created by" line in every case, so matching it is
+// not a race against the scheduler. Matching the entry frame is: under a
+// loaded test binary the forge loop had reliably not been scheduled by the
+// time the assertion ran.
+//
+// The scan covers every goroutine in the test binary, which is sound because
+// these are the only tests in this package that start a forger or an election;
+// the rest hold an unstarted forging.BlockForger value.
 const (
-	forgeLoopFrame    = "forging.(*BlockForger).runLoop"
-	electionLoopFrame = "leader.(*Election).epochTransitionLoop"
+	forgeCreatedBy = "created by " +
+		"github.com/blinklabs-io/dingo/ledger/forging.(*BlockForger).Start"
+	electionCreatedBy = "created by " +
+		"github.com/blinklabs-io/dingo/ledger/leader.(*Election).start"
 )
 
-// goroutineStacksContain reports whether any live goroutine's stack mentions
-// frame.
-func goroutineStacksContain(frame string) bool {
+// goroutineStacksContain reports whether any live goroutine's dump mentions
+// marker.
+func goroutineStacksContain(marker string) bool {
 	buf := make([]byte, 1<<16)
 	for {
 		n := runtime.Stack(buf, true)
 		if n < len(buf) {
-			return strings.Contains(string(buf[:n]), frame)
+			return strings.Contains(string(buf[:n]), marker)
 		}
 		buf = make([]byte, 2*len(buf))
 	}
 }
 
-func requireGoroutineGone(t *testing.T, frame string) {
+func requireGoroutineGone(t *testing.T, marker string) {
 	t.Helper()
 	require.Eventually(
 		t,
-		func() bool { return !goroutineStacksContain(frame) },
+		func() bool { return !goroutineStacksContain(marker) },
 		10*time.Second,
 		10*time.Millisecond,
-		"goroutine %s never exited; its Stop was not run", frame,
+		"goroutine %q never exited; its Stop was not run", marker,
 	)
 }
 
@@ -184,12 +196,12 @@ func TestStartBlockProducerStopIsRegisteredBeforeLeiosVotingCanFail(
 		n.blockForger.IsRunning(),
 		"forger must be running for this test to mean anything",
 	)
-	require.True(t, goroutineStacksContain(forgeLoopFrame))
+	require.True(t, goroutineStacksContain(forgeCreatedBy))
 
 	runStopsLIFO(started)
 
-	requireGoroutineGone(t, forgeLoopFrame)
-	requireGoroutineGone(t, electionLoopFrame)
+	requireGoroutineGone(t, forgeCreatedBy)
+	requireGoroutineGone(t, electionCreatedBy)
 	require.False(t, n.blockForger.IsRunning())
 	require.Len(
 		t,
@@ -212,11 +224,11 @@ func TestStartBlockProducerStopJoinsBothComponentsOnSuccess(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, started, 1)
 	require.True(t, n.blockForger.IsRunning())
-	require.True(t, goroutineStacksContain(forgeLoopFrame))
+	require.True(t, goroutineStacksContain(forgeCreatedBy))
 
 	runStopsLIFO(started)
 
 	require.False(t, n.blockForger.IsRunning())
-	requireGoroutineGone(t, forgeLoopFrame)
-	requireGoroutineGone(t, electionLoopFrame)
+	requireGoroutineGone(t, forgeCreatedBy)
+	requireGoroutineGone(t, electionCreatedBy)
 }
