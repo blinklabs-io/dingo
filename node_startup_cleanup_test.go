@@ -197,6 +197,11 @@ func TestStartBlockProducerStopIsRegisteredBeforeLeiosVotingCanFail(
 		"forger must be running for this test to mean anything",
 	)
 	require.True(t, goroutineStacksContain(forgeCreatedBy))
+	require.True(
+		t,
+		goroutineStacksContain(electionCreatedBy),
+		"election workers must be running for this test to mean anything",
+	)
 
 	runStopsLIFO(started)
 
@@ -225,6 +230,11 @@ func TestStartBlockProducerStopJoinsBothComponentsOnSuccess(t *testing.T) {
 	require.Len(t, started, 1)
 	require.True(t, n.blockForger.IsRunning())
 	require.True(t, goroutineStacksContain(forgeCreatedBy))
+	require.True(
+		t,
+		goroutineStacksContain(electionCreatedBy),
+		"election workers must be running for this test to mean anything",
+	)
 
 	runStopsLIFO(started)
 
