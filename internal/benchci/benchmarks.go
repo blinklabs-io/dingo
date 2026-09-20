@@ -15,9 +15,10 @@
 package benchci
 
 // CuratedBenchmarks lists the fixed-GOMAXPROCS benchmarks tracked across
-// issue #1895's four dimensions: block validation throughput, sync speed,
-// network throughput, and resource usage. Keep this in sync with the
-// Makefile bench-ci target's first `go test -bench` regex.
+// issue #1895's four dimensions -- block validation throughput, sync speed,
+// network throughput, and resource usage -- plus the ledger query-latency
+// series added with the RealData fixture repair (#3441). Keep this in sync
+// with the Makefile bench-ci target's first `go test -bench` regex.
 var CuratedBenchmarks = []string{
 	// Block validation throughput (ledger/benchmark_test.go).
 	"BenchmarkBlockProcessingThroughput",
@@ -58,6 +59,22 @@ var CuratedBenchmarks = []string{
 	"BenchmarkCborOffsetDecode",             // database/cbor_cache_bench_test.go
 	"BenchmarkStorageModeIngest",            // ledger/benchmark_test.go
 	"BenchmarkStorageModeIngestSteadyState", // ledger/benchmark_test.go
+
+	// Query latency. Each of these seeds the record it queries from the
+	// immutable fixture and fails if the query does not hit, so a
+	// benchcheck delta here is a query-cost change rather than a miss
+	// timed under a RealData name (ledger/benchmark_test.go).
+	"BenchmarkUtxoLookupByAddressRealData",
+	"BenchmarkUtxoLookupByRefRealData",
+	"BenchmarkTransactionHistoryQueriesRealData",
+	"BenchmarkAccountLookupByStakeKeyRealData",
+	"BenchmarkPoolLookupByKeyHashRealData",
+	"BenchmarkDRepLookupByKeyHashRealData",
+	"BenchmarkDatumLookupByHashRealData",
+	"BenchmarkProtocolParametersLookupByEpochRealData",
+	"BenchmarkBlockNonceLookupRealData",
+	"BenchmarkStakeRegistrationLookupsRealData",
+	"BenchmarkPoolRegistrationLookupsRealData",
 }
 
 // LockContentionBenchmarks lists the GOMAXPROCS lock-contention sweep
