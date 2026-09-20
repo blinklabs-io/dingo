@@ -905,8 +905,11 @@ func (k *KoiosClient) get(
 				// Logged through the package-level default rather than
 				// an injected logger: one KoiosClient serves the
 				// concurrent chunk fetchers, so it deliberately holds no
-				// logger field (dingo #3796), and every binary that
-				// builds one calls slog.SetDefault first.
+				// logger field (dingo #3796). cmd/dingo and
+				// cmd/node-parity call slog.SetDefault before building
+				// one, and cmd/koios-parity logs through slog.Default()
+				// itself, so this lands wherever the binary's own output
+				// goes.
 				slog.Warn(
 					"koiosparity: koios request timed out (408), retrying",
 					"path", path,
