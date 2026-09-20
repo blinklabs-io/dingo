@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"math/big"
 	"testing"
@@ -23,8 +24,11 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -343,4 +347,216 @@ func TestSkippedPrunedStakeInputsSuppressedDuringPrecompute(t *testing.T) {
 		"an opportunistic precompute miss must stay silent, like its three "+
 			"sibling skips, since the authoritative call still gets to apply "+
 			"the round")
+}
+
+// TestApplyStakeRewardsReconstructsRetentionPrunedInputs is the positive
+// control for dingo #2987's retention-vs-resume gap: reward_stake_input is
+// aged out of retention (as it is for the other tests in this file), but this
+// time the underlying certificate/UTxO/reward-delta history the historical
+// CTE reconstructs from is real, matching the shape
+// `dingo database truncate` + replay produces (the reward_snapshot/
+// reward_pool_input rows a prior run captured survive the rollback, but the
+// per-credential reward_stake_input rows they depended on had already aged
+// out of the live run's retention window before the rollback ever happened).
+// Unlike TestApplyStakeRewardsSkipsPrunedStakeInputs, the round here must
+// actually apply -- crediting the owner and the delegator their share of the
+// epoch's rewards -- rather than skip.
+func TestApplyStakeRewardsReconstructsRetentionPrunedInputs(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newRewardCalculationTestLedger(t)
+	meta := db.Metadata()
+
+	poolHash := bytes.Repeat([]byte{0xd1}, 28)
+	ownerKey := bytes.Repeat([]byte{0x71}, 28)
+	delegatorKey := bytes.Repeat([]byte{0x72}, 28)
+	// The pool's reward account is the owner's own credential (a common
+	// real-world setup), so it is already registered via the owner's
+	// db.CreateAccount call below -- an unregistered reward account would
+	// make the leader's whole share Unspendable and diverted to treasury
+	// instead of credited, which is not what this test is checking.
+	rewardAccount := ownerKey
+
+	pool := &models.Pool{
+		PoolKeyHash:   poolHash,
+		VrfKeyHash:    make([]byte, 32),
+		Pledge:        5_000_000,
+		Cost:          340_000_000,
+		Margin:        &types.Rat{Rat: big.NewRat(1, 100)},
+		RewardAccount: rewardAccount,
+	}
+	reg := &models.PoolRegistration{
+		PoolKeyHash:   poolHash,
+		AddedSlot:     0,
+		Pledge:        5_000_000,
+		Cost:          340_000_000,
+		Margin:        &types.Rat{Rat: big.NewRat(1, 100)},
+		VrfKeyHash:    make([]byte, 32),
+		RewardAccount: rewardAccount,
+		Owners: []models.PoolRegistrationOwner{
+			{KeyHash: append([]byte(nil), ownerKey...)},
+		},
+	}
+	require.NoError(t, db.ImportPool(nil, pool, reg), "import pool")
+	for i, key := range [][]byte{ownerKey, delegatorKey} {
+		require.NoError(t, db.CreateAccount(nil, &models.Account{
+			StakingKey: key,
+			Pool:       poolHash,
+			AddedSlot:  0,
+			Active:     true,
+		}), "create account %d", i)
+		require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+			TxId:       bytes.Repeat([]byte{byte(0x10 + i)}, 32),
+			OutputIdx:  0,
+			StakingKey: key,
+			Amount:     types.Uint64(20_000_000),
+			AddedSlot:  0,
+		}), "create utxo %d", i)
+	}
+	require.NoError(t, db.AddAccountRewardByCredential(
+		0, ownerKey, 2_000_000, 10, bytes.Repeat([]byte{0xa1}, 32), nil,
+	))
+	require.NoError(t, db.AddAccountRewardByCredential(
+		0, delegatorKey, 3_000_000, 10, bytes.Repeat([]byte{0xa2}, 32), nil,
+	))
+
+	// Legitimately capture epoch 1's mark snapshot -- reward_snapshot,
+	// reward_pool_input and reward_stake_input all get real, mutually
+	// consistent values from the fixture above, the same as a live node's
+	// own epoch rollover would produce. buildRewardStateInputs needs the
+	// ended (outgoing) epoch's own row too, matching
+	// captureMarkAcrossBoundary's pattern in ledger/snapshot.
+	require.NoError(t, meta.SetEpoch(
+		0, 0, nil, nil, nil, nil,
+		eras.ShelleyEraDesc.Id, 1, 100, nil,
+	))
+	require.NoError(t, meta.SetEpoch(
+		0, retentionRewardSnapshotEpoch, nil, nil, nil, nil,
+		eras.ShelleyEraDesc.Id, 1, 100, nil,
+	))
+	mgr := snapshot.NewManager(db, event.NewEventBus(nil, nil), nil)
+	evt := event.EpochTransitionEvent{
+		PreviousEpoch:   0,
+		NewEpoch:        retentionRewardSnapshotEpoch,
+		BoundarySlot:    100,
+		EpochNonce:      []byte{0x0a, 0x0b},
+		ProtocolVersion: 7,
+		SnapshotSlot:    99,
+	}
+	captureTxn := db.Transaction(true)
+	require.NoError(t, mgr.ComputeEpochBoundarySnapshot(
+		context.Background(), captureTxn, evt,
+	))
+	require.NoError(t, mgr.CaptureEpochBoundarySnapshot(
+		context.Background(), captureTxn, evt,
+	))
+	require.NoError(t, captureTxn.Commit())
+
+	capturedStakeInputs, err := meta.GetRewardStakeInputs(
+		retentionRewardSnapshotEpoch, nil,
+	)
+	require.NoError(t, err)
+	require.NotEmpty(
+		t, capturedStakeInputs,
+		"the legitimate capture must have produced real per-credential rows",
+	)
+
+	// Simulate ordinary retention pruning removing the per-credential rows
+	// well before any truncate/rollback happens, leaving reward_snapshot and
+	// reward_pool_input (both retained for the life of the database) as the
+	// only surviving evidence of epoch 1.
+	require.NoError(t, meta.DeleteRewardStakeInputBeforeEpoch(
+		retentionRewardSnapshotEpoch+1, nil,
+	))
+	prunedStakeInputs, err := meta.GetRewardStakeInputs(
+		retentionRewardSnapshotEpoch, nil,
+	)
+	require.NoError(t, err)
+	require.Empty(
+		t, prunedStakeInputs,
+		"reward_stake_input must actually be pruned for this test to be a "+
+			"real reconstruction",
+	)
+
+	seedRetentionRewardEpochs(t, db)
+
+	// Give the pool real block production during the performance epoch
+	// (slots [100,200)) so its apparent performance -- and therefore its
+	// share of this round's reward -- is nonzero; otherwise a successfully
+	// applied round crediting exactly zero would be indistinguishable from
+	// a skipped one by account balance alone.
+	var poolID lcommon.PoolKeyHash
+	copy(poolID[:], poolHash)
+	for i := range uint64(10) {
+		require.NoError(t, db.UpdatePoolOpCertSequence(
+			poolID, i+1, 140+i, nil,
+		))
+	}
+
+	beforeOwner, err := db.GetAccountByCredential(0, ownerKey, false, nil)
+	require.NoError(t, err)
+	beforeDelegator, err := db.GetAccountByCredential(
+		0, delegatorKey, false, nil,
+	)
+	require.NoError(t, err)
+
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return ls.applyStakeRewards(
+			txn, retentionNewEpoch, retentionBoundarySlot,
+		)
+	}), "a retention-pruned epoch with real underlying data must "+
+		"reconstruct and apply, not skip")
+
+	afterOwner, err := db.GetAccountByCredential(0, ownerKey, false, nil)
+	require.NoError(t, err)
+	afterDelegator, err := db.GetAccountByCredential(
+		0, delegatorKey, false, nil,
+	)
+	require.NoError(t, err)
+	poolOutputs, err := meta.GetRewardPoolOutputs(
+		retentionRewardSnapshotEpoch, nil,
+	)
+	require.NoError(t, err)
+	require.Len(
+		t, poolOutputs, 1,
+		"the round must persist a pool output, proving it applied instead "+
+			"of skipping",
+	)
+	assert.Positive(
+		t, uint64(poolOutputs[0].TotalReward),
+		"the reconstructed pool's block production must earn a nonzero "+
+			"reward this round",
+	)
+	assert.Greater(
+		t, uint64(afterOwner.Reward), uint64(beforeOwner.Reward),
+		"the owner must be credited a share of this epoch's reward, not "+
+			"skipped",
+	)
+	// The fixture's pool cost (340_000_000) exceeds the whole round's
+	// reward pot, so cardano-ledger's formula correctly gives the entire
+	// reward to the leader and nothing to members -- this is expected pool
+	// economics, not evidence the delegator's credential was skipped. The
+	// account_reward_output row (rather than a balance increase) is what
+	// proves the delegator was genuinely evaluated by the reconstructed
+	// stake inputs rather than dropped.
+	assert.Equal(
+		t, uint64(beforeDelegator.Reward), uint64(afterDelegator.Reward),
+		"the fixture's pool cost consumes the whole reward pot, so the "+
+			"member share is legitimately zero this round",
+	)
+	// A zero-share member legitimately gets no account_reward_output row (only
+	// spendable, nonzero credits are persisted there) -- reward_stake_input's
+	// re-population, asserted below, is what proves the reconstruction
+	// considered the delegator rather than dropping it.
+
+	rebuiltStakeInputs, err := meta.GetRewardStakeInputs(
+		retentionRewardSnapshotEpoch, nil,
+	)
+	require.NoError(t, err)
+	assert.Len(
+		t, rebuiltStakeInputs, len(capturedStakeInputs),
+		"the reconstruction should persist the same credential set the "+
+			"original live capture held, self-healing the pruned rows",
+	)
 }
