@@ -425,13 +425,13 @@ func TestApplyStakeRewardsReconstructsRetentionPrunedInputs(t *testing.T) {
 	// consistent values from the fixture above, the same as a live node's
 	// own epoch rollover would produce. buildRewardStateInputs needs the
 	// ended (outgoing) epoch's own row too, matching
-	// captureMarkAcrossBoundary's pattern in ledger/snapshot.
+	// captureMarkAcrossBoundary's pattern in ledger/snapshot: epoch 0 starts
+	// at slot 0 and epoch 1 at the boundary slot (100), set only after the
+	// SNAP-point read, so GetEpochBySlot(99) resolves to exactly one epoch
+	// (0) both before and during the capture instead of matching two rows
+	// with the same start slot.
 	require.NoError(t, meta.SetEpoch(
 		0, 0, nil, nil, nil, nil,
-		eras.ShelleyEraDesc.Id, 1, 100, nil,
-	))
-	require.NoError(t, meta.SetEpoch(
-		0, retentionRewardSnapshotEpoch, nil, nil, nil, nil,
 		eras.ShelleyEraDesc.Id, 1, 100, nil,
 	))
 	mgr := snapshot.NewManager(db, event.NewEventBus(nil, nil), nil)
@@ -446,6 +446,10 @@ func TestApplyStakeRewardsReconstructsRetentionPrunedInputs(t *testing.T) {
 	captureTxn := db.Transaction(true)
 	require.NoError(t, mgr.ComputeEpochBoundarySnapshot(
 		context.Background(), captureTxn, evt,
+	))
+	require.NoError(t, meta.SetEpoch(
+		100, retentionRewardSnapshotEpoch, nil, nil, nil, nil,
+		eras.ShelleyEraDesc.Id, 1, 100, captureTxn.Metadata(),
 	))
 	require.NoError(t, mgr.CaptureEpochBoundarySnapshot(
 		context.Background(), captureTxn, evt,
@@ -536,10 +540,7 @@ func TestApplyStakeRewardsReconstructsRetentionPrunedInputs(t *testing.T) {
 	// The fixture's pool cost (340_000_000) exceeds the whole round's
 	// reward pot, so cardano-ledger's formula correctly gives the entire
 	// reward to the leader and nothing to members -- this is expected pool
-	// economics, not evidence the delegator's credential was skipped. The
-	// account_reward_output row (rather than a balance increase) is what
-	// proves the delegator was genuinely evaluated by the reconstructed
-	// stake inputs rather than dropped.
+	// economics, not evidence the delegator's credential was skipped.
 	assert.Equal(
 		t, uint64(beforeDelegator.Reward), uint64(afterDelegator.Reward),
 		"the fixture's pool cost consumes the whole reward pot, so the "+

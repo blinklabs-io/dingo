@@ -2870,11 +2870,23 @@ func (ls *LedgerState) rebuildPrunedRewardStakeInputs(
 		// an intolerable gap.
 		largestOwner := largestOwnerInputByPool[key]
 		counterparty := largestNonOwnerInputByPool[key]
+		// The donor is whichever row this transfer subtracts diff from:
+		// counterparty when the owner subset reconstructed too little
+		// (expected > actual, so largestOwner gains and counterparty pays),
+		// largestOwner when it reconstructed too much (the reverse). Only
+		// the donor's balance can underflow, so it is the one that must be
+		// checked against diff before either assignment below runs.
+		var donor *models.RewardStakeInput
+		if largestOwner != nil && counterparty != nil {
+			donor = largestOwner
+			if expected > actual {
+				donor = counterparty
+			}
+		}
 		tolerable := expected > 0 &&
 			diff <= rewardStakeReconstructionToleranceRatio.absoluteCeiling &&
 			diff*rewardStakeReconstructionToleranceRatio.denominator <= expected
-		if !tolerable || largestOwner == nil || counterparty == nil ||
-			(expected < actual && uint64(counterparty.Stake) < diff) {
+		if !tolerable || donor == nil || uint64(donor.Stake) < diff {
 			ls.config.Logger.Warn(
 				"reconstructed reward owner stake inputs disagree with the "+
 					"retained pool owner total; leaving this epoch's "+
@@ -3032,6 +3044,16 @@ func (ls *LedgerState) rebuildPrunedRewardStakeInputs(
 	// the authoritative call at the real boundary runs on a writable
 	// transaction and persists normally -- so a write failure here must not
 	// fail the calculation that already has the reconstructed rows in hand.
+	//
+	// saveRewardRows commits each row as it inserts rather than as one
+	// atomic unit, so a failure partway through this batch can otherwise
+	// leave the epoch holding a partial set. A later read would see that as
+	// "already reconstructed" (len(stakeInputs) != 0) rather than pruned,
+	// skip reconstruction entirely, and fail pool-total validation against
+	// the incomplete rows on every subsequent attempt. Delete whatever
+	// partial set the failed save left behind so the epoch reads back
+	// exactly as pruned -- empty -- and the next attempt reconstructs fresh
+	// instead of wedging on it.
 	if err := meta.SaveRewardStakeInputs(rebuilt, metaTxn); err != nil {
 		ls.config.Logger.Warn(
 			"failed to persist reconstructed reward stake inputs; "+
@@ -3040,6 +3062,15 @@ func (ls *LedgerState) rebuildPrunedRewardStakeInputs(
 			"reward_snapshot_epoch", rewardSnapshotEpoch,
 			"error", err.Error(),
 		)
+		if cleanupErr := meta.DeleteRewardStakeInputsForEpoch(
+			rewardSnapshotEpoch, metaTxn,
+		); cleanupErr != nil {
+			return nil, fmt.Errorf(
+				"clean up partially persisted reconstructed reward stake "+
+					"inputs for epoch %d after save failure: %w",
+				rewardSnapshotEpoch, cleanupErr,
+			)
+		}
 	}
 	return rebuilt, nil
 }
