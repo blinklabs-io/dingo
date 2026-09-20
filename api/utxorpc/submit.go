@@ -27,6 +27,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -72,7 +73,7 @@ func (s *submitServiceServer) SubmitTx(
 	if err != nil {
 		return nil, fmt.Errorf("failed decoding tx: %w", err)
 	}
-	tx, err := gledger.NewTransactionFromCbor(txType, txRawBytes)
+	tx, err := safedecode.Transaction(txType, txRawBytes)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"failed to decode transaction from CBOR: %w",

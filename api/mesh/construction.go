@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -936,7 +937,7 @@ func (s *Server) handleConstructionSubmit(
 		return
 	}
 
-	tx, err := gledger.NewTransactionFromCbor(
+	tx, err := safedecode.Transaction(
 		txType, txBytes,
 	)
 	if err != nil {
