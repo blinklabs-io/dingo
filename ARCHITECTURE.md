@@ -6128,9 +6128,13 @@ verify the cold-key signature, not only that the loaded KES key matches the
 certificate's hot vkey. The cold vkey is what each derives its pool id from,
 so a certificate carrying an unrelated or corrupt cold vkey/signature pair
 would otherwise yield a pool id whose cold key never authorized that hot key.
-`keystore` delegates to the same `ledger.VerifyOpCertSignature` the inbound
+Both delegate to the same `ledger.VerifyOpCertSignature` the inbound
 block-header path uses, so a certificate this node forges under is checked
-against the rule its peers apply to the resulting blocks.
+against the rule its peers apply to the resulting blocks. That matters beyond
+sharing the byte layout: `VerifyOpCertSignature` verifies under the strict
+Ed25519 criteria of cardano-node's `Ed25519DSIGN`, which rejects small-order
+public and R points, while `crypto/ed25519.Verify` accepts the edwards25519
+identity cold key with an all-zero S for any certificate body.
 
 `PoolCredentials.LoadFromFiles` parses replacement files before taking the
 credential write lock, then atomically installs all key material and the opcert

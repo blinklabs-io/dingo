@@ -101,3 +101,39 @@ func TestValidateOpCertRejectsMalformedColdVKey(t *testing.T) {
 		"ValidateOpCert accepted an operational certificate with a malformed cold vkey",
 	)
 }
+
+// TestValidateOpCertRejectsSmallOrderColdKey pins the criteria of the
+// cold-signature check rather than its presence. crypto/ed25519 accepts the
+// edwards25519 identity public key with an all-zero S for any message, while
+// libsodium -- which cardano-node reaches through Ed25519DSIGN -- rejects both
+// points as small-order. Verification must follow the node, or this keystore
+// accepts a certificate whose blocks every conformant peer discards.
+func TestValidateOpCertRejectsSmallOrderColdKey(t *testing.T) {
+	t.Parallel()
+
+	ks := loadedOpCertKeyStore(t)
+	identityVKey := append([]byte{0x01}, make([]byte, 31)...)
+	identitySignature := append(
+		append([]byte{0x01}, make([]byte, 31)...),
+		make([]byte, 32)...,
+	)
+	signable := lcommon.OpCertSignableBytes(
+		ks.opCert.KESVKey,
+		ks.opCert.IssueNumber,
+		ks.opCert.KESPeriod,
+	)
+	require.True(
+		t,
+		ed25519.Verify(identityVKey, signable, identitySignature),
+		"crypto/ed25519 no longer accepts the identity pair; this test no longer discriminates",
+	)
+
+	ks.opCert.ColdVKey = identityVKey
+	ks.opCert.Signature = identitySignature
+
+	require.Error(
+		t,
+		ks.ValidateOpCert(),
+		"ValidateOpCert accepted an operational certificate signed under the identity cold key",
+	)
+}
