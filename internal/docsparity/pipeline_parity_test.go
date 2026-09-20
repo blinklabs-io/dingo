@@ -40,7 +40,9 @@ const (
 var pipelineStages = []string{
 	"lint",
 	"govulncheck",
+	"examples-web",
 	"go-test-linux-quick",
+	"go-test-modules",
 	"go-test-linux",
 	"go-test-linux-race",
 	"go-test-windows",
