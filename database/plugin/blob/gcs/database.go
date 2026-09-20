@@ -497,12 +497,48 @@ type gcsStreamIterator struct {
 	key    string
 	valid  bool
 	err    error
+
+	// pendingStart holds the position reset was given, and started reports
+	// whether the listing for it has been issued yet. The listing is deferred
+	// to the first read because NewIterator rewinds the iterator before the
+	// caller gets to seek it: an eager reset(nil) there lists from the start
+	// of the prefix and the Seek that follows throws that page away. Callers
+	// that refill a batch by reopening the iterator -- database's block
+	// iterator does so every blobIteratorBatchSize keys -- pay one such
+	// discarded page per batch.
+	pendingStart []byte
+	started      bool
+	closed       bool
 }
 
+// reset arms the iterator at start without contacting GCS. The listing itself
+// is issued by begin, on the first read.
 func (it *gcsStreamIterator) reset(start []byte) {
 	if it.cancel != nil {
 		it.cancel()
+		it.cancel = nil
 	}
+	it.iter = nil
+	it.key = ""
+	it.valid = false
+	it.err = nil
+	it.pendingStart = start
+	it.started = false
+}
+
+// ensureStarted issues the listing armed by reset, once. A closed iterator
+// stays closed rather than reopening a listing on a later Valid or Err.
+func (it *gcsStreamIterator) ensureStarted() {
+	if it.started || it.closed {
+		return
+	}
+	it.begin()
+}
+
+func (it *gcsStreamIterator) begin() {
+	it.started = true
+	start := it.pendingStart
+	it.pendingStart = nil
 	ctx, cancel := it.store.opContext()
 	it.cancel = cancel
 	query := &storage.Query{Prefix: it.store.fullKey(string(it.prefix))}
@@ -510,9 +546,6 @@ func (it *gcsStreamIterator) reset(start []byte) {
 		query.StartOffset = it.store.fullKey(string(start))
 	}
 	it.iter = it.store.bucket.Objects(ctx, query)
-	it.key = ""
-	it.valid = false
-	it.err = nil
 	it.advance()
 }
 
@@ -551,6 +584,7 @@ func (it *gcsStreamIterator) Rewind() { it.reset(nil) }
 func (it *gcsStreamIterator) Seek(prefix []byte) { it.reset(prefix) }
 
 func (it *gcsStreamIterator) Valid() bool {
+	it.ensureStarted()
 	return it.err == nil && it.valid
 }
 
@@ -558,7 +592,13 @@ func (it *gcsStreamIterator) ValidForPrefix(prefix []byte) bool {
 	return it.Valid() && strings.HasPrefix(it.key, string(prefix))
 }
 
-func (it *gcsStreamIterator) Next() { it.advance() }
+// Next advances past the current key. On an iterator whose listing is still
+// deferred, begin positions it on the first key and the advance below moves off
+// it, which is what Seek-then-Next did when the listing was eager.
+func (it *gcsStreamIterator) Next() {
+	it.ensureStarted()
+	it.advance()
+}
 
 func (it *gcsStreamIterator) Item() types.BlobItem {
 	if !it.Valid() {
@@ -573,10 +613,15 @@ func (it *gcsStreamIterator) Close() {
 		it.cancel = nil
 	}
 	it.iter = nil
+	it.pendingStart = nil
+	it.closed = true
 	it.valid = false
 }
 
-func (it *gcsStreamIterator) Err() error { return it.err }
+func (it *gcsStreamIterator) Err() error {
+	it.ensureStarted()
+	return it.err
+}
 
 type gcsReverseIterator struct {
 	store *BlobStoreGCS
