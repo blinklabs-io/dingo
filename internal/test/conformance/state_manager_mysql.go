@@ -168,10 +168,9 @@ func newDingoMysqlStateManagerAtDatabase(
 // DSN naming a database that does not exist yet, though it always does here
 // once the store has been constructed once.
 //
-// MySQL has no multi-table TRUNCATE, so unlike PostgreSQL this backend still
-// issues one statement per table -- but only for tables a vector actually
-// wrote, rather than all 84 every time. See reset_cost.go for why TRUNCATE is
-// kept over a single batched DELETE.
+// MySQL has no multi-table TRUNCATE, so the batching PostgreSQL gets from one
+// TRUNCATE statement is unavailable; deleteMysqlTables batches into one
+// transaction instead. See reset_cost.go for the measurements.
 func newMysqlResetter(rootDSN, database string) (*backendResetter, error) {
 	cfg, err := mysqldriver.ParseDSN(rootDSN)
 	if err != nil {
@@ -199,93 +198,28 @@ func newMysqlResetter(rootDSN, database string) (*backendResetter, error) {
 			db *sql.DB,
 			qualified []string,
 		) error {
-			return truncateMysqlTables(ctx, db, qualified)
-		},
-		extraDirty: func(
-			ctx context.Context,
-			db *sql.DB,
-			tables []string,
-		) ([]string, error) {
-			return mysqlAdvancedAutoIncrementTables(ctx, db, database, tables)
+			return deleteMysqlTables(ctx, db, qualified)
 		},
 	}, nil
 }
 
-// mysqlAdvancedAutoIncrementTables returns the tables whose AUTO_INCREMENT
-// counter has moved past its initial value.
+// deleteMysqlTables empties exactly the given tables in one transaction, with
+// foreign key checks disabled.
 //
-// Truncating only tables that currently hold rows would otherwise let a
-// counter survive a Reset: a vector that inserts rows and deletes them again
-// leaves the table empty but its AUTO_INCREMENT advanced, and MySQL's TRUNCATE
-// is what resets that. Skipping the TRUNCATE keeps the advanced counter for the
-// next vector.
+// DELETE rather than TRUNCATE: TRUNCATE is DDL that implicitly commits, and
+// InnoDB implements it by dropping and recreating the table's tablespace, so
+// its cost is per table and does not fall when the table is nearly empty --
+// which every table here is, holding only what one vector wrote. DELETE of the
+// whole table is an ordinary DML statement, so every table a vector dirtied
+// fits in one transaction and one commit.
 //
-// The result is filtered to the managed set. information_schema reports every
-// table in the database, and truncating one this resetter does not manage would
-// break the extraDirty contract -- most importantly for schema_migrations,
-// which listMysqlConformanceTables excludes deliberately: emptying the
-// migration runner's own bookkeeping desyncs tracked migration state from the
-// physical schema, and the next construction re-applies already-applied DDL and
-// fails on a duplicate column. That table carries no AUTO_INCREMENT today, so
-// the unfiltered form was harmless by coincidence rather than by construction.
-//
-// This is MySQL-only on purpose. PostgreSQL's TRUNCATE here does not carry
-// RESTART IDENTITY, so it never reset sequences either before or after the
-// dirty-table optimization; adding the same probe there would imply a
-// guarantee that side has never provided.
-func mysqlAdvancedAutoIncrementTables(
-	ctx context.Context,
-	db *sql.DB,
-	database string,
-	tables []string,
-) ([]string, error) {
-	if len(tables) == 0 {
-		return nil, nil
-	}
-	rows, err := db.QueryContext(
-		ctx,
-		"SELECT table_name FROM information_schema.tables "+
-			"WHERE table_schema = ? AND auto_increment > 1",
-		database,
-	)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"list mysql advanced auto_increment tables: %w",
-			err,
-		)
-	}
-	defer rows.Close()
-	managed := make(map[string]struct{}, len(tables))
-	for _, table := range tables {
-		managed[table] = struct{}{}
-	}
-	var advanced []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, fmt.Errorf("scan mysql table name: %w", err)
-		}
-		if _, ok := managed[name]; !ok {
-			continue
-		}
-		advanced = append(advanced, name)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf(
-			"list mysql advanced auto_increment tables: %w",
-			err,
-		)
-	}
-	return advanced, nil
-}
-
-// truncateMysqlTables empties exactly the given tables with foreign key
-// checks disabled.
-//
-// The disable/restore pair must run on the same session as the TRUNCATEs --
+// The disable/restore pair must run on the same session as the deletes --
 // FOREIGN_KEY_CHECKS is a session variable, and a pooled *sql.DB may hand each
 // statement a different connection -- so this pins one conn for the duration.
-func truncateMysqlTables(
+// Disabling them is what lets the deletes run in discovery order rather than
+// in dependency order; the whole managed set is emptied together, so no
+// partial reset is ever issued.
+func deleteMysqlTables(
 	ctx context.Context,
 	db *sql.DB,
 	qualified []string,
@@ -303,12 +237,23 @@ func truncateMysqlTables(
 	defer func() {
 		_, _ = conn.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS=1")
 	}()
+
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin mysql reset transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
 	for _, table := range qualified {
-		if _, err := conn.ExecContext(
-			ctx, "TRUNCATE TABLE "+table,
+		// #nosec G202 -- table is an information_schema name that
+		// mysqlQuoteIdentifier has already quoted; never caller input.
+		if _, err := tx.ExecContext(
+			ctx, "DELETE FROM "+table,
 		); err != nil {
-			return fmt.Errorf("truncate mysql table %s: %w", table, err)
+			return fmt.Errorf("delete from mysql table %s: %w", table, err)
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit mysql reset transaction: %w", err)
 	}
 	return nil
 }

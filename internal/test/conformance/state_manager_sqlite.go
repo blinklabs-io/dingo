@@ -99,9 +99,18 @@ func newSqliteResetter(databasePath string) (*backendResetter, error) {
 	// hoists it ahead of the rest of the _pragma list regardless of DSN
 	// order; anything ahead of it would otherwise run with no busy handler
 	// installed.
+	//
+	// synchronous(0) removes the fsync the reset transaction's commit would
+	// otherwise pay, which is nearly all of that transaction's cost: over a
+	// full replay the delete phase fell from 33.3s to 3.9s. The setting is
+	// per connection in SQLite, so the metadata store's own writes keep the
+	// provider's durability; only Reset gives it up, and Reset writes to a
+	// throwaway test database that is deleted when the test ends, so
+	// surviving a crash mid-Reset buys nothing.
 	dsn := sqliteResetFileURI(databasePath) +
 		"?_pragma=busy_timeout(30000)" +
-		"&_pragma=foreign_keys(0)"
+		"&_pragma=foreign_keys(0)" +
+		"&_pragma=synchronous(0)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf(

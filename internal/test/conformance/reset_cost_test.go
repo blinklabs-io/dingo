@@ -155,7 +155,7 @@ func TestBackendResetterSkipsTruncateEntirelyWhenClean(t *testing.T) {
 	)
 }
 
-// nonEmptyTables' query has to be valid in two dialects at once, and the way
+// The probe query has to be valid in two dialects at once, and the way
 // it can be wrong is a syntax error rather than a wrong answer: the index must
 // be a single-quoted SQL string literal, since double quotes are an identifier
 // reference in PostgreSQL and would select a column named after the number.
@@ -241,9 +241,11 @@ func TestNonEmptyTablesMysql(t *testing.T) {
 }
 
 // assertProbeFindsOnlyPopulated creates three tables, populates the middle
-// one, and asserts nonEmptyTables reports that one and only that one. The
-// empty-in, empty-out case is asserted first, since "no table holds rows" is
-// the case that lets a vector skip DDL entirely.
+// one, and asserts the dirty-table probe reports that one and only that one.
+// The empty-in, empty-out case is asserted first, since "no table holds rows"
+// is the case that lets a vector skip clearing entirely. It drives
+// backendResetter.dirtyTables rather than the rendered query, so the prepared
+// statement the real reset path uses is what is exercised.
 func assertProbeFindsOnlyPopulated(
 	t *testing.T,
 	db *sql.DB,
@@ -262,7 +264,10 @@ func assertProbeFindsOnlyPopulated(
 		require.NoError(t, err, "create %s", qualified[i])
 	}
 
-	dirty, err := nonEmptyTables(ctx, db, qualified)
+	resetter := &backendResetter{db: db}
+	defer func() { _ = resetter.closeProbe() }()
+
+	dirty, err := resetter.dirtyTables(ctx, qualified)
 	require.NoError(t, err, "probe over three empty tables")
 	require.Empty(t, dirty, "no table holds rows yet")
 
@@ -271,7 +276,7 @@ func assertProbeFindsOnlyPopulated(
 	)
 	require.NoError(t, err)
 
-	dirty, err = nonEmptyTables(ctx, db, qualified)
+	dirty, err = resetter.dirtyTables(ctx, qualified)
 	require.NoError(t, err, "probe with one populated table")
 	require.Equal(
 		t,
@@ -285,7 +290,7 @@ func assertProbeFindsOnlyPopulated(
 	)
 	require.NoError(t, err)
 
-	dirty, err = nonEmptyTables(ctx, db, qualified)
+	dirty, err = resetter.dirtyTables(ctx, qualified)
 	require.NoError(t, err, "probe with two populated tables")
 	require.ElementsMatch(
 		t,
@@ -342,60 +347,5 @@ func TestBackendResetterDeduplicatesExtraDirtyTables(t *testing.T) {
 		[][]string{{`"s"."b"`}},
 		f.truncated,
 		"a table reported by both criteria must be truncated once",
-	)
-}
-
-// TestMysqlAdvancedAutoIncrementTablesFiltersToManaged proves the probe reports
-// only tables the resetter manages, even though information_schema returns
-// every table in the database with an advanced counter.
-//
-// The managed set deliberately excludes schema_migrations
-// (listMysqlConformanceTables). Truncating the migration runner's own
-// bookkeeping desyncs tracked migration state from the physical schema, and the
-// next construction re-applies already-applied DDL and fails on a duplicate
-// column. An unfiltered probe would sweep any such table in the moment it
-// gained an AUTO_INCREMENT column.
-func TestMysqlAdvancedAutoIncrementTablesFiltersToManaged(t *testing.T) {
-	skipIfMysqlConformanceNotConfigured(t)
-
-	cfg, err := mysqldriver.ParseDSN(mysqlConformanceRootDSN())
-	require.NoError(t, err)
-	cfg.DBName = ""
-	db, err := sql.Open("mysql", cfg.FormatDSN())
-	require.NoError(t, err)
-
-	database := "aiprobe_" + strconv.FormatInt(time.Now().UnixNano(), 36)
-	_, err = db.Exec("CREATE DATABASE " + mysqlQuoteIdentifier(database))
-	require.NoError(t, err)
-	dropAndCloseOnCleanup(
-		t, db, "DROP DATABASE "+mysqlQuoteIdentifier(database),
-	)
-
-	ctx := context.Background()
-	for _, name := range []string{"managed", "unmanaged"} {
-		qualified := mysqlQuoteIdentifier(database) + "." +
-			mysqlQuoteIdentifier(name)
-		_, err = db.ExecContext(ctx, "CREATE TABLE "+qualified+
-			" (id INT AUTO_INCREMENT PRIMARY KEY, v INT)")
-		require.NoError(t, err)
-		// Advance the counter, then empty the table: exactly the
-		// write-then-delete shape that leaves a table empty with a live
-		// AUTO_INCREMENT.
-		_, err = db.ExecContext(ctx, "INSERT INTO "+qualified+" (v) VALUES (1)")
-		require.NoError(t, err)
-		_, err = db.ExecContext(ctx, "DELETE FROM "+qualified)
-		require.NoError(t, err)
-	}
-
-	advanced, err := mysqlAdvancedAutoIncrementTables(
-		ctx, db, database, []string{"managed"},
-	)
-	require.NoError(t, err)
-	require.Equal(
-		t,
-		[]string{"managed"},
-		advanced,
-		"only the managed table should be reported, not every table in the "+
-			"database with an advanced counter",
 	)
 }

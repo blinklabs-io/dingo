@@ -17,9 +17,11 @@
 package conformance
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -376,4 +378,54 @@ func dropPostgresSchema(dsn, schema string) error {
 		return fmt.Errorf("drop postgres schema %q: %w", schema, err)
 	}
 	return nil
+}
+
+// TestDeletePostgresTablesClearsDespiteForeignKeys proves the reset empties a
+// child and its parent without ordering the deletes by dependency. The
+// managed table list comes from information_schema in whatever order the
+// server returns it, and the conformance schema's foreign keys are NOT
+// DEFERRABLE, so sequential deletes in that order would fail on the first
+// table that still has referencing rows.
+func TestDeletePostgresTablesClearsDespiteForeignKeys(t *testing.T) {
+	skipIfPostgresConformanceNotConfigured(t)
+
+	db, err := sql.Open("pgx", postgresConformanceDSN())
+	require.NoError(t, err)
+
+	schema := "fkreset_" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	_, err = db.Exec(`CREATE SCHEMA ` + pgQuoteIdent(schema))
+	require.NoError(t, err)
+	dropAndCloseOnCleanup(
+		t, db, `DROP SCHEMA `+pgQuoteIdent(schema)+` CASCADE`,
+	)
+
+	ctx := context.Background()
+	parent := pgQuoteQualified(schema, "parent")
+	child := pgQuoteQualified(schema, "child")
+	_, err = db.ExecContext(ctx,
+		`CREATE TABLE `+parent+` (id bigserial PRIMARY KEY)`)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx,
+		`CREATE TABLE `+child+` (id bigserial PRIMARY KEY, `+
+			`parent_id bigint REFERENCES `+parent+`(id))`)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO `+parent+` DEFAULT VALUES`)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO `+child+` (parent_id) SELECT id FROM `+parent)
+	require.NoError(t, err)
+
+	// Parent first: the order a dependency-aware reset could not use.
+	require.NoError(t, deletePostgresTables(
+		ctx, db, schema, []string{parent, child},
+	))
+
+	for _, qualified := range []string{parent, child} {
+		var count int
+		require.NoError(t, db.QueryRowContext(
+			ctx, `SELECT count(*) FROM `+qualified,
+		).Scan(&count))
+		require.Zero(t, count, "%s must be empty after reset", qualified)
+	}
 }

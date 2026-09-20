@@ -17,9 +17,11 @@
 package conformance
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -355,4 +357,59 @@ func dropMysqlDatabase(rootDSN, database string) error {
 		return fmt.Errorf("drop mysql database %q: %w", database, err)
 	}
 	return nil
+}
+
+// TestDeleteMysqlTablesClearsDespiteForeignKeys proves the reset empties a
+// child and its parent in one transaction without ordering the deletes by
+// dependency. The managed table list comes from information_schema in
+// whatever order the server returns it, so a reset that respected foreign
+// keys would fail on the first table that still has referencing rows.
+func TestDeleteMysqlTablesClearsDespiteForeignKeys(t *testing.T) {
+	skipIfMysqlConformanceNotConfigured(t)
+
+	cfg, err := mysqldriver.ParseDSN(mysqlConformanceRootDSN())
+	require.NoError(t, err)
+	cfg.DBName = ""
+	db, err := sql.Open("mysql", cfg.FormatDSN())
+	require.NoError(t, err)
+
+	database := "fkreset_" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	_, err = db.Exec("CREATE DATABASE " + mysqlQuoteIdentifier(database))
+	require.NoError(t, err)
+	dropAndCloseOnCleanup(
+		t, db, "DROP DATABASE "+mysqlQuoteIdentifier(database),
+	)
+
+	ctx := context.Background()
+	qualify := func(name string) string {
+		return mysqlQuoteIdentifier(database) + "." +
+			mysqlQuoteIdentifier(name)
+	}
+	_, err = db.ExecContext(ctx, "CREATE TABLE "+qualify("parent")+
+		" (id INT AUTO_INCREMENT PRIMARY KEY)")
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, "CREATE TABLE "+qualify("child")+
+		" (id INT AUTO_INCREMENT PRIMARY KEY, parent_id INT, "+
+		"CONSTRAINT fk_parent FOREIGN KEY (parent_id) REFERENCES "+
+		qualify("parent")+" (id))")
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, "INSERT INTO "+qualify("parent")+
+		" (id) VALUES (1)")
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, "INSERT INTO "+qualify("child")+
+		" (parent_id) VALUES (1)")
+	require.NoError(t, err)
+
+	// Parent first: the order a dependency-aware reset could not use.
+	require.NoError(t, deleteMysqlTables(
+		ctx, db, []string{qualify("parent"), qualify("child")},
+	))
+
+	for _, name := range []string{"parent", "child"} {
+		var count int
+		require.NoError(t, db.QueryRowContext(
+			ctx, "SELECT COUNT(*) FROM "+qualify(name),
+		).Scan(&count))
+		require.Zero(t, count, "%s must be empty after reset", name)
+	}
 }

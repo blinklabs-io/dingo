@@ -141,10 +141,17 @@ and, more importantly, scans and drops tables across *every* non-system
 schema in the target database, not just the process-scoped conformance
 schema, so calling it here would also destroy `database/plugin/metadata/postgres`'s
 own concurrently running tests' tables in the shared `dingo_test` database.
-Reset instead `TRUNCATE`s every table in that process-scoped schema in
+Reset instead empties every dirty table in that process-scoped schema in
 place, over a separate admin connection, discovering the table list from
 `information_schema` rather than hardcoding it (see
-`state_manager_postgres.go`'s `wipeMetadata`). This keeps the already-open
+`state_manager_postgres.go`'s `wipeMetadata`). It deletes rather than
+truncates: `TRUNCATE` rewrites each table's relation file, so its cost is per
+table and does not fall when the table holds only what one vector wrote —
+measured on a `postgres:16` container configured like the CI service, 12
+dirty tables cost 501ms as one `TRUNCATE ... CASCADE` against 22ms as a
+single statement of data-modifying CTEs. That one statement is also what
+removes the need to order the deletes by dependency, since the schema's
+foreign keys are `NOT DEFERRABLE`; see `deletePostgresTables`. This keeps the already-open
 store's connection pool live throughout -- no close, no reopen, no
 re-migration -- which is what keeps the cost of a Reset (and so the whole
 vector suite, which resets once per vector) from being a real
@@ -201,12 +208,24 @@ specifically rather than the `MYSQL_PASSWORD` the plugin's own tests use.
 the Postgres backend above: `NewDingoMysqlStateManager` creates one
 `os.MkdirTemp` directory the first time it's called in a process (via
 `sync.Once`) and reuses it for every later call in that same process,
-paired with the process-scoped database, and `Reset()` `TRUNCATE`s every
+paired with the process-scoped database, and `Reset()` empties every dirty
 table in that database in place, over a separate admin connection (rather
 than calling `Resettable.Reset`, which drops tables individually without
 recreating them), keeping the already-open store's connection pool live
 throughout instead of paying for a close/reopen/re-migrate cycle on every
-vector. `TestMain` drops the process database and removes this directory
+vector.
+
+MySQL has no multi-table `TRUNCATE`, and InnoDB implements `TRUNCATE` by
+dropping and recreating the table's tablespace, so its cost is per table and
+does not fall when the table holds the handful of rows one vector wrote.
+`deleteMysqlTables` batches a `DELETE` per dirty table into one transaction
+instead — measured on a `mysql:8` container with the CI service's settings,
+1,687ms of `TRUNCATE` per reset against 23ms of batched `DELETE`. `DELETE`
+does not restart `AUTO_INCREMENT` and `TRUNCATE` does; nothing here needs it
+restarted, because the Postgres backend's `TRUNCATE` carries no `RESTART
+IDENTITY` and so has never restarted its sequences between vectors either,
+while `TestRulesConformanceVectorsPostgres` asserts that backend reproduces
+the SQLite baseline vector for vector. `TestMain` drops the process database and removes this directory
 once, after every test in the process has finished -- see
 `conformance_main_test.go`.
 
@@ -252,7 +271,10 @@ Cross-repo change cascades that must re-run this suite:
    [Corpus replay budget](#corpus-replay-budget).
 5. Between vectors, `Reset()` clears the real backend (not just in-memory
    bookkeeping) so each vector starts from a genuinely empty database --
-   see each backend's own "Reset semantics" above for how.
+   see each backend's own "Reset semantics" above for how. The corpus is
+   2,574 Blueprint vectors plus one synthetic rollback fixture, and the
+   rollback fixture resets a second time when it rolls back, so a replay
+   makes 2,576 `Reset` calls.
 
 ## Dingo validation entry point coverage
 
