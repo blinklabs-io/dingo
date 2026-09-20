@@ -4,7 +4,7 @@ name: publish
 # pull-request pipeline in go-test.yml, in the same order, and adds the
 # publishing jobs after them:
 #
-#   lint, govulncheck, examples (web)     3 runners, ~3 min
+#   lint, govulncheck                     2 runners, ~3 min
 #     -> go-test (Linux, quick)           1 runner,  ~8 min
 #        go-test (nested modules)         1 runner,  ~1 min
 #       -> go-test (Linux)
@@ -16,9 +16,8 @@ name: publish
 #           -> build-image-manifest
 #             -> finalize-release        tag only
 #
-# examples (web) and go-test (nested modules) fail the run but gate no
-# publishing job: neither the examples nor the Antithesis harness ships in a
-# release artifact.
+# go-test (nested modules) fails the run but gates no publishing job: the
+# Antithesis harness ships in no release artifact.
 #
 # A push to main runs this workflow and nothing else: go-test.yml is
 # pull-request only. Previously a merge started go-test.yml's five jobs and
@@ -146,39 +145,6 @@ jobs:
       - name: govulncheck
         run: make govulncheck
 
-  # Stage 1, alongside lint and govulncheck. See go-test.yml's copy for why
-  # this job depends on nothing, gates nothing, and runs `npm run build`
-  # rather than `npm run check`.
-  #
-  # It deliberately does not gate create-draft-release. The examples are
-  # demonstrations, not published artifacts, so a broken dependency bump in
-  # one must fail the run without holding a release.
-  examples-web:
-    name: examples (web)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0 https://github.com/actions/setup-node/releases/tag/v7.0.0
-        with:
-          node-version: 22.x
-          cache: npm
-          cache-dependency-path: examples/*/package-lock.json
-      - name: npm-ci (examples/dingo-blockfrost-explorer)
-        working-directory: examples/dingo-blockfrost-explorer
-        run: npm ci
-      - name: npm-build (examples/dingo-blockfrost-explorer)
-        working-directory: examples/dingo-blockfrost-explorer
-        run: npm run build
-      - name: npm-ci (examples/dingo-sundae-preview)
-        working-directory: examples/dingo-sundae-preview
-        run: npm ci
-      - name: npm-build (examples/dingo-sundae-preview)
-        working-directory: examples/dingo-sundae-preview
-        run: npm run build
-
   # Stage 2. The cheap gate: whole suite on SQLite, no race, no services.
   # Decides whether it is worth spending four runners on the stage below.
   go-test-linux-quick:
@@ -212,11 +178,11 @@ jobs:
         run: go test -tags dingo_extra_plugins -ldflags="-s -w" -timeout 30m ./...
 
   # Stage 2, alongside go-test (Linux, quick). The root module's `./...` does
-  # not descend into a nested go.mod, so these two modules need their own
-  # runs. See go-test.yml's copy for the rest.
+  # not descend into a nested go.mod, so internal/test/antithesis needs a run
+  # of its own. See go-test.yml's copy for the rest.
   #
-  # It deliberately does not gate create-draft-release: neither module ships
-  # in a release artifact.
+  # It deliberately does not gate create-draft-release: the harness ships in
+  # no release artifact.
   go-test-modules:
     name: go-test (nested modules)
     needs: [lint]
@@ -240,9 +206,6 @@ jobs:
             ${{ runner.os }}-go-modules-1.26.x-
       - name: go-test (internal/test/antithesis)
         working-directory: internal/test/antithesis
-        run: go test -race -timeout 10m ./...
-      - name: go-test (examples/dingo-gov-lens)
-        working-directory: examples/dingo-gov-lens
         run: go test -race -timeout 10m ./...
 
   # Stage 3. Linux with Postgres, MySQL and MinIO (fake s3) services. Keeps

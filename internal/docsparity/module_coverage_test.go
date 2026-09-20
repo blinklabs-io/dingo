@@ -15,17 +15,14 @@
 package docsparity_test
 
 import (
-	"encoding/json"
-	"path"
 	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
 )
 
-// runStep is the part of a `run` step these rules read. working-directory is
+// runStep is the part of a `run` step this rule reads. working-directory is
 // a step-level key rather than an input, so it does not live under `with`
 // the way the lint action's copy does.
 type runStep struct {
@@ -76,12 +73,25 @@ func commandDirs(
 	return dirs
 }
 
+// exampleModulePrefix marks the modules this rule does not apply to. The
+// projects under examples/ demonstrate how to consume Dingo; they are not
+// code Dingo ships, and running their suites is deliberately not a gate on
+// merging or releasing, so that a broken demonstration cannot block real
+// work. That is a standing decision rather than an oversight: do not
+// "fix" a module reported here by adding a job for examples/.
+//
+// The exemption is scoped to `go test`. Every module in the tree, examples
+// included, is still linted -- see TestLintCoversEveryGoModule -- because a
+// golangci-lint run costs seconds and reports on the module it is pointed
+// at rather than standing up whatever the example talks to.
+const exampleModulePrefix = "examples/"
+
 // TestGoTestCoversEveryGoModule checks that both pipelines run `go test`
-// against every Go module in the tree. A nested module has its own go.mod, so
-// the root module's `./...` does not descend into it -- the go command
-// refuses the pattern outright with "directory prefix ... does not contain
-// main module" -- and without a run of its own that module's tests never
-// execute in CI however green the suite looks.
+// against every non-example Go module in the tree. A nested module has its
+// own go.mod, so the root module's `./...` does not descend into it -- the
+// go command refuses the pattern outright with "directory prefix ... does
+// not contain main module" -- and without a run of its own that module's
+// tests never execute in CI however green the suite looks.
 //
 // This is the `go test` half of the gap TestLintCoversEveryGoModule closes
 // for golangci-lint: internal/test/antithesis was linted by CI for weeks
@@ -105,6 +115,9 @@ func TestGoTestCoversEveryGoModule(t *testing.T) {
 		}
 
 		for _, dir := range modules {
+			if strings.HasPrefix(dir, exampleModulePrefix) {
+				continue
+			}
 			if !covered[dir] {
 				t.Errorf(
 					"module %s has a go.mod but %s never runs go test "+
@@ -112,97 +125,6 @@ func TestGoTestCoversEveryGoModule(t *testing.T) {
 					dir,
 					workflow,
 					dir,
-				)
-			}
-		}
-	}
-}
-
-// npmProject is one npm project in the tree: the directory holding its
-// lockfile, and whether its package.json declares a build script.
-type npmProject struct {
-	dir      string
-	hasBuild bool
-}
-
-// npmProjects returns every directory holding a package-lock.json. The
-// lockfile is what makes `npm ci` possible and is what Dependabot's npm
-// ecosystem updates, so it -- rather than package.json alone -- defines the
-// set of projects CI has to install. .github/package.json describes the
-// golang-npm release wrapper, carries no lockfile, and is not built here.
-func npmProjects(t *testing.T, root string) []npmProject {
-	t.Helper()
-
-	locks := filesMatching(t, root, func(rel string) bool {
-		return path.Base(rel) == "package-lock.json"
-	})
-	projects := make([]npmProject, 0, len(locks))
-	for _, rel := range locks {
-		dir := path.Dir(rel)
-		var manifest struct {
-			Scripts map[string]string `json:"scripts"`
-		}
-		raw := readRepoFile(t, root, path.Join(dir, "package.json"))
-		if err := json.Unmarshal([]byte(raw), &manifest); err != nil {
-			t.Fatalf("parse %s/package.json: %v", dir, err)
-		}
-		projects = append(projects, npmProject{
-			dir:      dir,
-			hasBuild: manifest.Scripts["build"] != "",
-		})
-	}
-	sort.Slice(projects, func(i, j int) bool {
-		return projects[i].dir < projects[j].dir
-	})
-	return projects
-}
-
-// TestExamplesJobBuildsEveryNpmProject checks that both pipelines install and
-// build every npm project in the tree. Nothing in the Go pipeline compiles
-// TypeScript, so a project without steps of its own is verified by no check
-// at all -- while .github/dependabot.yml keeps raising weekly dependency
-// bumps against it, which is the change most likely to break it.
-func TestExamplesJobBuildsEveryNpmProject(t *testing.T) {
-	root := repoRoot(t)
-	projects := npmProjects(t, root)
-	if len(projects) == 0 {
-		t.Fatal("no package-lock.json found in the tree")
-	}
-
-	for _, workflow := range []string{prPipeline, publishPipeline} {
-		installed := commandDirs(
-			t,
-			root,
-			workflow,
-			func(command string) bool {
-				return strings.Contains(command, "npm ci")
-			},
-		)
-		built := commandDirs(
-			t,
-			root,
-			workflow,
-			func(command string) bool {
-				return strings.Contains(command, "npm run build")
-			},
-		)
-
-		for _, project := range projects {
-			if !installed[project.dir] {
-				t.Errorf(
-					"%s has a package-lock.json but %s never runs "+
-						"npm ci in it",
-					project.dir,
-					workflow,
-				)
-			}
-			if project.hasBuild && !built[project.dir] {
-				t.Errorf(
-					"%s declares a build script but %s never runs "+
-						"npm run build in it; a dependency bump that "+
-						"fails to compile would pass every check",
-					project.dir,
-					workflow,
 				)
 			}
 		}

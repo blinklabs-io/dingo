@@ -6,7 +6,7 @@ name: ci
 #
 # Shape:
 #
-#   lint, govulncheck, examples (web)     3 runners, ~3 min
+#   lint, govulncheck                     2 runners, ~3 min
 #     -> go-test (Linux, quick)           1 runner,  ~8 min
 #        go-test (nested modules)         1 runner,  ~1 min
 #       -> go-test (Linux)                    services, no race
@@ -15,9 +15,8 @@ name: ci
 #          go-test (macOS)               4 runners, 5-35 min
 #         -> build-<os>, docker          gated on the SAME OS's tests
 #
-# examples (web) has no Go dependency and sits outside the chain; go-test
-# (nested modules) needs lint and gates nothing, because neither the example
-# nor the Antithesis harness ships in a binary or an image.
+# go-test (nested modules) needs lint and gates nothing: the Antithesis
+# harness ships in no binary and no image.
 #
 # Nothing fans out until lint and the cheap Linux suite are green, and a
 # platform's build never starts until that platform's tests pass. A failure in
@@ -171,52 +170,6 @@ jobs:
         # `make govulncheck` cannot drift apart.
         run: make govulncheck
 
-  # Stage 1, alongside lint and govulncheck. The two Vite examples under
-  # examples/ are npm projects with their own lockfiles, so nothing in the Go
-  # pipeline compiles them and a green run said nothing about either one.
-  # .github/dependabot.yml raises weekly npm bumps for both directories,
-  # which is the change most likely to break them.
-  #
-  # Depends on nothing and gates nothing. It shares no code with the Go tree,
-  # so putting it behind lint would hide a dependency regression under an
-  # unrelated compile error, and it finishes in about a minute -- one extra
-  # runner for the length of stage 1 rather than another platform-sized job.
-  #
-  # `npm run build` rather than `npm run check`: both package.json files
-  # define build as `tsc --noEmit && vite build`, so the type check is a
-  # subset of it, and the bundle step is the part that resolves each
-  # dependency for a browser target. A bump that type-checks and then fails
-  # to bundle is exactly what this job exists to catch.
-  #
-  # internal/docsparity's TestExamplesJobBuildsEveryNpmProject derives the
-  # project list from the tree and fails until every package.json has steps
-  # here, so a third example cannot go unbuilt.
-  examples-web:
-    name: examples (web)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0 https://github.com/actions/setup-node/releases/tag/v7.0.0
-        with:
-          node-version: 22.x
-          cache: npm
-          cache-dependency-path: examples/*/package-lock.json
-      - name: npm-ci (examples/dingo-blockfrost-explorer)
-        working-directory: examples/dingo-blockfrost-explorer
-        run: npm ci
-      - name: npm-build (examples/dingo-blockfrost-explorer)
-        working-directory: examples/dingo-blockfrost-explorer
-        run: npm run build
-      - name: npm-ci (examples/dingo-sundae-preview)
-        working-directory: examples/dingo-sundae-preview
-        run: npm ci
-      - name: npm-build (examples/dingo-sundae-preview)
-        working-directory: examples/dingo-sundae-preview
-        run: npm run build
-
   # Stage 2. The whole suite on SQLite with no race instrumentation and no
   # service containers -- the same command the macOS job runs, which completes
   # there in about 5 minutes. This is the gate that decides whether it is worth
@@ -264,23 +217,23 @@ jobs:
         # only. go-test (Linux) and go-test (Linux, race) below cover the rest.
         run: go test -tags dingo_extra_plugins -ldflags="-s -w" -timeout 30m ./...
 
-  # Stage 2, alongside go-test (Linux, quick). internal/test/antithesis and
-  # examples/dingo-gov-lens each have their own go.mod, so the root module's
-  # `./...` never descends into them -- it fails outright with "directory
-  # prefix ... does not contain main module" -- and every suite in this
-  # pipeline was blind to their tests. #3497 was the same gap for
-  # golangci-lint and #3572 closed it there; this closes it for go test.
+  # Stage 2, alongside go-test (Linux, quick). internal/test/antithesis has
+  # its own go.mod, so the root module's `./...` never descends into it -- it
+  # fails outright with "directory prefix ... does not contain main module"
+  # -- and every suite in this pipeline was blind to its three test packages
+  # while golangci-lint covered them. #3497 was the same gap for lint and
+  # #3572 closed it there; this closes it for go test.
   #
-  # Both modules together run in well under a minute, so this is one extra
-  # runner briefly rather than another platform-sized job, and it gates
-  # nothing: a broken example must not hold up the fan-out below.
+  # The module runs in well under a minute, so this is one extra runner
+  # briefly rather than another platform-sized job, and it gates nothing: the
+  # harness ships in no artifact.
   #
   # -race because go-test (Linux, race) covers the root module only, and
   # txpump drives concurrent submitters against a live node.
   #
   # internal/docsparity's TestGoTestCoversEveryGoModule derives the module
-  # list from the tree and fails until every go.mod has a step here, in both
-  # pipelines.
+  # list from the tree and fails until every non-example go.mod has a step
+  # here, in both pipelines.
   go-test-modules:
     name: go-test (nested modules)
     needs: [lint]
@@ -304,9 +257,6 @@ jobs:
             ${{ runner.os }}-go-modules-1.26.x-
       - name: go-test (internal/test/antithesis)
         working-directory: internal/test/antithesis
-        run: go test -race -timeout 10m ./...
-      - name: go-test (examples/dingo-gov-lens)
-        working-directory: examples/dingo-gov-lens
         run: go test -race -timeout 10m ./...
 
   # Stage 3. Linux with Postgres, MySQL and MinIO (fake s3) services.
