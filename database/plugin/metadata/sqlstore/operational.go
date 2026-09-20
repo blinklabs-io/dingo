@@ -1011,6 +1011,28 @@ func (s *Store) GetPParamUpdates(
 	return ret, nil
 }
 
+func (s *Store) HasPParamsForEra(
+	eraID uint,
+	txn types.Txn,
+) (bool, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return false, err
+	}
+	sqlEraID, err := checkedInt64(uint64(eraID))
+	if err != nil {
+		return false, err
+	}
+	count, err := s.operationalQueries(db).CountPParamsByEra(
+		ctx,
+		sql.NullInt64{Int64: sqlEraID, Valid: true},
+	)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 func (s *Store) SetPParams(
 	params []byte,
 	slot, epoch uint64,

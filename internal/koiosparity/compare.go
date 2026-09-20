@@ -420,10 +420,6 @@ func CompareEpochTotals(
 // Deliberately NOT compared, each verified against real preview data before
 // being excluded:
 //
-//   - coins_per_utxo_size. Koios reports Alonzo's per-word figure (34482 on
-//     preview epochs 0-2) where Dingo stores 4310; the two agree from Babbage
-//     onward. Which side is right for Alonzo needs its own investigation, so
-//     including it would attach an unexplained permanent FAIL to those epochs.
 //   - decentralisation and min_utxo_value. Neither exists in the Babbage or
 //     Conway parameter structs, so on every currently live era there is no
 //     Dingo-side value to compare.
@@ -531,6 +527,7 @@ func CompareEpochProtocolParams(
 		{"pparams_max_value_size", dingoParams.MaxValueSize, koios.MaxValueSize},
 		{"pparams_collateral_percentage", dingoParams.CollateralPercentage, koios.CollateralPercentage},
 		{"pparams_max_collateral_inputs", dingoParams.MaxCollateralInputs, koios.MaxCollateralInputs},
+		{"pparams_coins_per_utxo_size", dingoParams.CoinsPerUtxoSize, koios.CoinsPerUtxoSize},
 	} {
 		if f.dingo == "" && f.koios == "" {
 			// Both sides agree the era does not define this parameter.

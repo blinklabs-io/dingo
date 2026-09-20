@@ -694,6 +694,9 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		if err := n.ledgerState.RecoverCommitTimestampConflict(); err != nil {
 			return fmt.Errorf("failed to recover database: %w", err)
 		}
+		if err := n.enforceRecoveredNodeSettings(); err != nil {
+			return err
+		}
 	}
 
 	if n.config.historyExpiry.Enabled {

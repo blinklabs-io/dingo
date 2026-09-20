@@ -773,9 +773,10 @@ type LedgerStateConfig struct {
 	// applied after the rollback. See ARCHITECTURE.md ("Phase 5: rollback
 	// coordination").
 	BlockPipelineEnabled bool
-	// BlockPipelineValidateEnabled adds parallel VRF/KES validation to the
-	// decode pipeline (issue #1894 phase 3). Dingo supplements the generic
-	// stage with the OpCert cold-key signature and MaxKESEvolutions checks,
+	// BlockPipelineValidateEnabled adds parallel header-crypto validation to the
+	// decode pipeline (issue #1894 phase 3). The generic stage covers VRF, KES,
+	// and the OpCert cold-key signature; Dingo supplements it with the
+	// MaxKESEvolutions check,
 	// and enforces results only where the serial path has validation state:
 	// not trusted historical/Mithril replay and only with a cached epoch
 	// nonce. A rejection is returned as headerValidationError so the already-
@@ -1562,16 +1563,16 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 			pipeline.WithDecodeWorkers(workerCount),
 		}
 		if cfg.BlockPipelineValidateEnabled {
-			// Wire VRF/KES validation (phase 3). Eta0Provider reads the
+			// Wire header-crypto validation (phase 3). Eta0Provider reads the
 			// published epoch cache without forecasting or mutation; a
 			// missing nonce is handled by the serial-equivalence gate in
 			// decodeReadChainBatch.
 			//
-			// VerifyConfig scopes gouroboros' generic stage to VRF/KES.
-			// decodeReadChainBatch supplements a successful result with
-			// Dingo's OpCert signature/expiry checks. Body/transaction and
-			// registered-pool state validation remain in their existing
-			// ledger paths.
+			// VerifyConfig scopes gouroboros' generic stage to
+			// VRF/KES/OpCert-signature checks. decodeReadChainBatch supplements
+			// a successful result with Dingo's OpCert expiry check.
+			// Body/transaction and registered-pool state validation remain in
+			// their existing ledger paths.
 			pipelineOpts = append(
 				pipelineOpts,
 				pipeline.WithValidateWorkers(workerCount),
@@ -2093,6 +2094,7 @@ func (ls *LedgerState) loadMithrilTrustBoundary() error {
 }
 
 func (ls *LedgerState) RecoverCommitTimestampConflict() error {
+	var committedRollbackErr error
 	// Load current ledger tip
 	tmpTip, err := ls.db.GetTip(nil)
 	if err != nil {
@@ -2108,20 +2110,30 @@ func (ls *LedgerState) RecoverCommitTimestampConflict() error {
 		// method handles its own locking for in-memory state updates.
 		chainTip := ls.chain.Tip()
 		if err = ls.rollback(chainTip.Point); err != nil {
-			return fmt.Errorf(
+			wrappedErr := fmt.Errorf(
 				"failed to rollback ledger: %w",
 				err,
 			)
+			var committedErr *rollbackCommittedError
+			if !errors.As(err, &committedErr) {
+				return wrappedErr
+			}
+			// The metadata truncate committed even though an in-memory reload
+			// or a post-commit repair failed. Continue through durable marker
+			// reconciliation before returning the original failure, so the
+			// next supervised start is not stranded behind a stale legacy
+			// classification for rows the committed rollback removed.
+			committedRollbackErr = wrappedErr
 		}
 	}
 	// Get the current tip after potential rollback for orphan cleanup.
 	// This ensures we use the post-rollback tip, not the stale tmpTip.
 	currentTip, err := ls.db.GetTip(nil)
 	if err != nil {
-		return fmt.Errorf(
+		return errors.Join(committedRollbackErr, fmt.Errorf(
 			"failed to get current tip for orphan cleanup: %w",
 			err,
-		)
+		))
 	}
 	// Clean up orphaned blobs that may exist beyond the metadata tip.
 	// This handles the case where blob committed but metadata failed.
@@ -2132,7 +2144,13 @@ func (ls *LedgerState) RecoverCommitTimestampConflict() error {
 			"error", cleanupErr,
 		)
 	}
-	return nil
+	if err := ls.db.ReconcileAlonzoPParamsUnitAfterRecovery(); err != nil {
+		return errors.Join(committedRollbackErr, fmt.Errorf(
+			"reconcile Alonzo protocol-parameter unit after recovery: %w",
+			err,
+		))
+	}
+	return committedRollbackErr
 }
 
 // orphanedBlock holds information needed to delete an orphaned block from blob store.
@@ -5899,7 +5917,7 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 						block.Hash().Bytes(),
 					),
 					Cause: fmt.Errorf(
-						"block pipeline VRF/KES validation: %w",
+						"block pipeline header crypto validation: %w",
 						valErr,
 					),
 				}
@@ -5907,7 +5925,7 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 			}
 			if !item.IsValid() {
 				ls.config.Logger.Error(
-					"block failed pipeline VRF/KES validation",
+					"block failed pipeline header crypto validation",
 					"slot", block.SlotNumber(),
 				)
 				retErr = &headerValidationError{
@@ -5916,7 +5934,7 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 						block.Hash().Bytes(),
 					),
 					Cause: errors.New(
-						"block failed pipeline VRF/KES validation",
+						"block failed pipeline header crypto validation",
 					),
 				}
 				continue

@@ -68,6 +68,19 @@ func (q *Queries) ClearSyncState(ctx context.Context) error {
 	return err
 }
 
+const countPParamsByEra = `-- name: CountPParamsByEra :one
+SELECT COUNT(*)
+FROM pparams
+WHERE era_id = ?
+`
+
+func (q *Queries) CountPParamsByEra(ctx context.Context, eraID sql.NullInt64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countPParamsByEra, eraID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countTransactionsByMetadataLabel = `-- name: CountTransactionsByMetadataLabel :one
 SELECT COUNT(*) FROM transaction_metadata_label WHERE label = ?
 `

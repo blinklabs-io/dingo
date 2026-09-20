@@ -1301,12 +1301,15 @@ func TestSpliceEndorserTxsIntoDijkstraBlockFillsCertRB(t *testing.T) {
 	require.Equal(t, []byte(ebTxs[0]), []byte(mergedTxs[0]))
 	require.Equal(t, []byte(ebTxs[1]), []byte(mergedTxs[1]))
 
-	// The merged block deliberately has a stale body hash: the preserved header
-	// still commits to the original empty body, so a full parse (which verifies
-	// the body hash) rejects it. This is why the merge is node-to-client only,
-	// where clients trust the node and do not re-verify the body hash.
+	// The merged block is deliberately not a consensus Dijkstra body: it carries
+	// both the certificate and the closure transactions, and its preserved
+	// header still commits to the original empty body. The strict decoder now
+	// rejects the CIP-0164 certificate-or-transactions violation before it gets
+	// as far as the stale body hash. This is why the merge is node-to-client
+	// only, where clients consume the prototype's merged representation instead
+	// of re-validating it as a chain block.
 	_, err = gdijkstra.NewDijkstraBlockFromCbor(merged)
-	require.ErrorContains(t, err, "body hash")
+	require.ErrorContains(t, err, "certificate or transactions")
 }
 
 func TestSpliceEndorserTxsRejectsBlockWithExistingTxs(t *testing.T) {
