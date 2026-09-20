@@ -17,47 +17,14 @@
 package aws
 
 import (
-	"fmt"
-	"io"
 	"log/slog"
+
+	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/logadapter"
 )
 
 // S3Logger is a thin wrapper giving our logger a consistent interface.
-type S3Logger struct {
-	logger *slog.Logger
-}
+type S3Logger = logadapter.Logger
 
 func NewS3Logger(logger *slog.Logger) *S3Logger {
-	if logger == nil {
-		logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
-	}
-	return &S3Logger{logger: logger}
-}
-
-func (g *S3Logger) Infof(msg string, args ...any) {
-	g.logger.Info(
-		fmt.Sprintf(msg, args...),
-		"component", "database",
-	)
-}
-
-func (g *S3Logger) Warningf(msg string, args ...any) {
-	g.logger.Warn(
-		fmt.Sprintf(msg, args...),
-		"component", "database",
-	)
-}
-
-func (g *S3Logger) Debugf(msg string, args ...any) {
-	g.logger.Debug(
-		fmt.Sprintf(msg, args...),
-		"component", "database",
-	)
-}
-
-func (g *S3Logger) Errorf(msg string, args ...any) {
-	g.logger.Error(
-		fmt.Sprintf(msg, args...),
-		"component", "database",
-	)
+	return logadapter.New(logger)
 }

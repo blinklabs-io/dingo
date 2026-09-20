@@ -240,6 +240,18 @@ func (d *Database) MetadataTxn(readWrite bool) *Txn {
 	return NewMetadataOnlyTxn(d, readWrite)
 }
 
+// withMetadataWriteTxn runs fn in txn, or owns a metadata write transaction
+// when txn is nil. Callers keep ownership of transactions they provide.
+func (d *Database) withMetadataWriteTxn(
+	txn *Txn,
+	fn func(*Txn) error,
+) error {
+	if txn != nil {
+		return fn(txn)
+	}
+	return d.MetadataTxn(true).Do(fn)
+}
+
 // Close cleans up the database connections
 func (d *Database) Close() error {
 	d.closeOnce.Do(func() {
