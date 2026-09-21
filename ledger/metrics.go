@@ -308,6 +308,16 @@ type stateMetrics struct {
 // its metric fields are nil; instrumenting a path that those tests exercise
 // must not turn a metric into a nil dereference.
 
+// observeCommitBatchBlocks records one gathered batch's block count; see
+// commitBatchBlocks. Passes that gather nothing are not observed at all --
+// see the call site in ledgerReadChainIterator.
+func (m *stateMetrics) observeCommitBatchBlocks(blocks int) {
+	if m == nil || m.commitBatchBlocks == nil {
+		return
+	}
+	m.commitBatchBlocks.Observe(float64(blocks))
+}
+
 func (m *stateMetrics) observeLeaderThresholdMargin(margin float64) {
 	if m == nil || m.leaderThresholdMargin == nil {
 		return

@@ -72,17 +72,18 @@ var cleanupConsumedUtxosInterval = 5 * time.Minute
 // ledgerReadChainIterator's batch-gather loop will wait, after a non-blocking
 // iter.Next(false) reports chain.ErrIteratorChainTip, for more blocks to
 // become available before flushing an under-full batch -- but only while the
-// ledger is not yet near the upstream tip (see isNearTip). During bulk
+// node has not yet reached tip since boot (see reachedTip) and this slot is
+// not near the upstream tip (see isNearTip). During bulk
 // historical replay a momentary gap here does not mean the chain has stopped
 // growing; it commonly means the goroutine that appends blocks to ls.chain
 // (blockfetch/pipeline apply) is a beat behind this reader, and vice versa.
 // Without this bounded wait, that race flushed batches at ~6-9 of the
 // intended batchSize (50) blocks instead of coalescing them, multiplying
 // SQLite's physical write volume well beyond logical growth (dingo#4464).
-// Once isNearTip is true, this wait is skipped entirely: a solitary new
-// block at live tip must still commit promptly rather than wait for a batch
-// that will never fill. Vars, not consts, so tests can shrink the interval
-// instead of waiting on real sleeps.
+// Once the node is at or near the tip, this wait is skipped entirely: a
+// solitary new block at live tip must still commit promptly rather than wait
+// for a batch that will never fill. Vars, not consts, so tests can shrink the
+// interval instead of waiting on real sleeps.
 var (
 	gatherCoalesceRetryInterval = 2 * time.Millisecond
 	gatherCoalesceMaxAttempts   = 10
@@ -5529,6 +5530,21 @@ func (ls *LedgerState) ledgerReadChainIterator(
 		// last block was actually appended to rawBatch in this pass; see
 		// gatherCoalesceMaxAttempts.
 		coalesceAttempts := 0
+		// Read the stability window once here, before any
+		// blockPipelineGatherMutex read lock is taken, rather than through
+		// ls.isNearTip inside the gather span. calculateStabilityWindow
+		// takes ls.RLock, and Go's RWMutex parks a reader behind a pending
+		// writer, so evaluating it under the gather lock would let a block
+		// apply's ls.Lock() stall this pass with that lock held -- folding
+		// an unbounded wait into the coalescing bound below, which is
+		// derived purely from batchSize and the gatherCoalesce* settings.
+		// Everything else the span reads is an atomic. The window only
+		// changes at an era boundary and is re-read every pass, so at worst
+		// one pass of at most batchSize blocks is judged against the
+		// previous era's window -- and the window is a multi-thousand-slot
+		// threshold, so that cannot flip the near-tip answer at an era
+		// boundary reached during bulk replay.
+		stabilityWindow := ls.calculateStabilityWindow()
 		// Gather up next batch of raw blocks
 		for {
 			// Check cancellation on every iteration, not just once per
@@ -5593,13 +5609,31 @@ func (ls *LedgerState) ledgerReadChainIterator(
 					// batchSize*gatherCoalesceMaxAttempts*gatherCoalesceRetryInterval
 					// (about 1s at the defaults) in the worst case, and
 					// about batchSize*gatherCoalesceRetryInterval (100ms)
-					// when each gap resolves on its first retry. That is
-					// accepted because the whole wait is gated on
-					// !isNearTip: it applies only while catching up, where
-					// rollbacks are rare and no forging depends on them.
+					// when each gap resolves on its first retry. Those
+					// figures are a real bound only because every term
+					// tested below is an atomic read: stabilityWindow is
+					// taken before the gather lock precisely so no
+					// ls.RLock is evaluated here (see its comment above).
+					//
+					// reachedTip, not isNearTip alone, decides whether the
+					// wait applies at all. UpstreamTipSlot returns 0
+					// whenever no live upstream connection is selected, and
+					// isNearTipWithStabilityWindow folds an unknown
+					// upstream into "not near" -- so a caught-up node that
+					// merely lost its upstream would otherwise start paying
+					// this wait again, gather lock held, including for its
+					// own forged blocks. reachedTip latches the first time
+					// the node reaches the stability window and never
+					// clears, so the pair confines the wait to initial
+					// catch-up, where rollbacks are rare and no forging
+					// depends on them.
 					if len(rawBatch) > 0 && len(rawBatch) < cap(rawBatch) &&
 						coalesceAttempts < gatherCoalesceMaxAttempts &&
-						!ls.isNearTip(rawBatch[len(rawBatch)-1].Slot) {
+						!ls.reachedTip.Load() &&
+						!ls.isNearTipWithStabilityWindow(
+							rawBatch[len(rawBatch)-1].Slot,
+							stabilityWindow,
+						) {
 						coalesceAttempts++
 						select {
 						case <-ctx.Done():
@@ -5691,8 +5725,8 @@ func (ls *LedgerState) ledgerReadChainIterator(
 			// result downstream, and counting those would pile zeros
 			// into the lowest bucket of the very distribution this
 			// histogram exists to measure.
-			if len(nextBatch) > 0 && ls.metrics.commitBatchBlocks != nil {
-				ls.metrics.commitBatchBlocks.Observe(float64(len(nextBatch)))
+			if len(nextBatch) > 0 {
+				ls.metrics.observeCommitBatchBlocks(len(nextBatch))
 			}
 		}
 		select {

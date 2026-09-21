@@ -12224,11 +12224,23 @@ momentary `ErrIteratorChainTip` commonly means the goroutine appending blocks
 to `ls.chain` is a beat behind this reader, not that the chain stopped
 growing. `ledgerReadChainIterator` now gives that case a short bounded chance
 to catch up — up to `gatherCoalesceMaxAttempts` retries (default 10) spaced
-`gatherCoalesceRetryInterval` apart (default 2ms) — but only while
-`ls.isNearTip(rawBatch[len(rawBatch)-1].Slot)` is false and `rawBatch` already
-holds at least one real block. Once near the live upstream tip, the wait is
-skipped entirely: a solitary new block still commits immediately, matching
-the pre-existing latency behavior. Unlike the genuinely-blocking wait for a
+`gatherCoalesceRetryInterval` apart (default 2ms) — but only while `rawBatch`
+already holds at least one real block, the node has not reached tip since boot
+(`ls.reachedTip`), and the last gathered slot is not near the upstream tip.
+Once at or near the live upstream tip, the wait is skipped entirely: a
+solitary new block still commits immediately, matching the pre-existing
+latency behavior.
+
+`reachedTip` is part of that gate rather than `isNearTip` alone because
+`UpstreamTipSlot` returns 0 whenever no live upstream connection is selected,
+and `isNearTipWithStabilityWindow` folds an unknown upstream into "not near".
+Without the `reachedTip` term, a caught-up node that merely lost its upstream
+would resume paying this wait per gap, gather lock held, including for its own
+forged blocks. `reachedTip` latches the first time the node reaches the
+stability window and never clears, so the two terms together confine the wait
+to initial catch-up.
+
+Unlike the genuinely-blocking wait for a
 still-empty batch, this wait deliberately does **not** release
 `blockPipelineGatherMutex`: `rawBatch` already holds real gathered blocks a
 concurrent rollback must not race ahead of, for the same reason the lock
@@ -12242,9 +12254,24 @@ each time a block is appended — so a rollback blocked on the write lock waits
 up to `batchSize*gatherCoalesceMaxAttempts*gatherCoalesceRetryInterval` (about
 1s at the defaults) in the worst case, and about
 `batchSize*gatherCoalesceRetryInterval` (100ms) when each gap resolves on its
-first retry. That is accepted because the wait is gated on `!isNearTip` and so
-applies only while catching up, where rollbacks are rare and no forging
-depends on them. The `dingo_ledger_commit_batch_blocks` histogram records
+first retry.
+
+Those figures are a bound only because nothing evaluated inside the held span
+can block on another lock. `ls.isNearTip` would break that: it reaches
+`calculateStabilityWindow`, which takes `ls.RLock`, and Go's `RWMutex` parks a
+reader behind a pending writer, so a block apply holding `ls.Lock()` could
+stall the pass with `blockPipelineGatherMutex` still held — an unbounded term
+the figures above do not include. The stability window is therefore read once
+per gather pass **before** the gather lock is taken, and the span calls
+`ls.isNearTipWithStabilityWindow` with that value; every other term it tests
+(`reachedTip`, `UpstreamTipSlot`) is an atomic read. Re-reading the window per
+pass means at worst one pass of at most `batchSize` blocks is judged against
+the previous era's window, which is a multi-thousand-slot threshold and cannot
+flip the near-tip answer.
+
+The bound is accepted because the wait applies only while catching up, where
+rollbacks are rare and no forging depends on them. The
+`dingo_ledger_commit_batch_blocks` histogram records
 `len(nextBatch)` at every non-empty submission so the effect on the batch-size
 distribution is observable without re-running a full disk-I/O measurement.
 

@@ -193,6 +193,286 @@ func TestLedgerReadChainIteratorNearTipFlushesSingleBlockPromptly(
 	close(result.done)
 }
 
+// farUpstreamTipSlot is far enough past the single-digit slots these tests
+// build blocks at to sit well outside the stability window a nil
+// CardanoNodeConfig falls back to (blockfetchBatchSlotThresholdDefault,
+// 50000), so isNearTip reports "still catching up" against a KNOWN upstream
+// tip rather than against the unknown-upstream default.
+const farUpstreamTipSlot = 1_000_000
+
+// pausingGapLedgerReadIterator returns one block, then parks inside the Next
+// call that reports the first chain-tip gap: it closes gapEntered and waits
+// on resume before returning chain.ErrIteratorChainTip. Parking there leaves
+// ledgerReadChainIterator holding blockPipelineGatherMutex's read lock with
+// one block already gathered and holding no ledger lock, which is the only
+// point from which a test can both release the reader into the coalescing
+// branch and control what other locks are held when it gets there.
+type pausingGapLedgerReadIterator struct {
+	ctx        context.Context
+	first      *chain.ChainIteratorResult
+	calls      int
+	gapEntered chan struct{}
+	resume     chan struct{}
+}
+
+func (p *pausingGapLedgerReadIterator) Next(
+	blocking bool,
+) (*chain.ChainIteratorResult, error) {
+	idx := p.calls
+	p.calls++
+	if idx == 0 {
+		return p.first, nil
+	}
+	// Next is called serially from the reader goroutine, so indexing is a
+	// deterministic way to name the first gap without a sync.Once.
+	if idx == 1 {
+		close(p.gapEntered)
+		<-p.resume
+	}
+	if !blocking {
+		return nil, chain.ErrIteratorChainTip
+	}
+	<-p.ctx.Done()
+	return nil, p.ctx.Err()
+}
+
+// tryLockGatherMutex reports whether blockPipelineGatherMutex's write lock --
+// the one rollbackChainAndStateDeferred takes -- is obtainable right now,
+// releasing it again if it is, so it can be polled.
+func tryLockGatherMutex(ls *LedgerState) bool {
+	if ls.blockPipelineGatherMutex.TryLock() {
+		ls.blockPipelineGatherMutex.Unlock()
+		return true
+	}
+	return false
+}
+
+// TestLedgerReadChainIteratorHoldsGatherMutexAcrossCoalesceWait pins the
+// safety property the dingo#4464 coalescing branch rests on: unlike the
+// genuinely-blocking wait for a still-empty batch, the coalescing wait keeps
+// blockPipelineGatherMutex's read lock held, because rawBatch already holds
+// real gathered blocks a concurrent rollback must not race ahead of.
+//
+// TestLedgerReadChainIteratorHoldsGatherMutexAcrossGather does not reach
+// here: its scripted reader pauses inside Next, never inside this wait, so
+// releasing the lock across the wait leaves the whole ledger package green.
+// This test closes that gap by probing for the write lock while the reader
+// is inside the wait -- a release there makes the probe succeed.
+func TestLedgerReadChainIteratorHoldsGatherMutexAcrossCoalesceWait(
+	t *testing.T,
+) {
+	// Not t.Parallel: swaps the package-level
+	// gatherCoalesceRetryInterval/gatherCoalesceMaxAttempts seam via
+	// shrinkGatherCoalesceRetryInterval.
+	//
+	// One attempt, so the pass makes exactly one coalescing wait, and an
+	// interval long enough that the probe below fits comfortably inside
+	// that single wait rather than racing its end.
+	const coalesceWait = 500 * time.Millisecond
+	shrinkGatherCoalesceRetryInterval(t, coalesceWait, 1)
+
+	block, point := buildDecodableTestBlock(t, 10, 1)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	iter := &pausingGapLedgerReadIterator{
+		ctx:        ctx,
+		first:      &chain.ChainIteratorResult{Point: point, Block: block},
+		gapEntered: make(chan struct{}),
+		resume:     make(chan struct{}),
+	}
+
+	ls := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
+	ls.advanceUpstreamTipSlot(farUpstreamTipSlot)
+
+	resultCh := make(chan readChainResult, 1)
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	}()
+
+	testutil.RequireReceive(
+		t, iter.gapEntered, testutil.AsyncWait,
+		"reader never reached the chain-tip gap that triggers coalescing",
+	)
+	// Releasing the iterator sends the reader straight into the coalescing
+	// wait: one block is gathered, the batch is under capacity, no attempt
+	// has been spent, and the tip is far away.
+	close(iter.resume)
+
+	require.Never(
+		t,
+		func() bool { return tryLockGatherMutex(ls) },
+		coalesceWait/2,
+		2*time.Millisecond,
+		"blockPipelineGatherMutex.Lock() succeeded while the reader was "+
+			"inside the coalescing wait holding blocks it has not yet "+
+			"submitted -- a concurrent rollback would drain an empty "+
+			"blockPipeline and proceed ahead of them",
+	)
+	// Half the wait has elapsed at most, so the batch cannot have been
+	// delivered yet. A delivery here would mean the probe above ran after
+	// the pass ended rather than during the wait.
+	select {
+	case <-resultCh:
+		t.Fatal(
+			"batch was delivered before the coalescing wait elapsed -- the " +
+				"probe above did not cover the wait",
+		)
+	default:
+	}
+
+	result := testutil.RequireReceive(
+		t, resultCh, testutil.AsyncWait,
+		"reader never delivered its coalesced batch",
+	)
+	require.NoError(t, result.err)
+	require.Len(t, result.blocks, 1)
+	close(result.done)
+
+	cancel()
+	testutil.RequireReceive(
+		t, readerDone, testutil.AsyncWait,
+		"ledgerReadChainIterator did not exit after cancellation",
+	)
+}
+
+// TestLedgerReadChainIteratorTakesNoLedgerLockInsideGatherSpan pins the other
+// half of that bound. ARCHITECTURE.md states a worst case for how long a
+// rollback blocked on blockPipelineGatherMutex waits, derived purely from
+// batchSize, gatherCoalesceMaxAttempts and gatherCoalesceRetryInterval. That
+// figure only holds if nothing inside the held span can block on anything
+// else. ls.isNearTip reaches calculateStabilityWindow, which takes ls.RLock,
+// and Go's RWMutex parks a reader behind a pending writer -- so evaluating it
+// inside the span folds an unbounded block-apply wait into the stated bound.
+//
+// Here a block apply's ls.Lock() is taken while the reader sits in the gather
+// span, and the gather pass must still finish and release the gather mutex.
+func TestLedgerReadChainIteratorTakesNoLedgerLockInsideGatherSpan(
+	t *testing.T,
+) {
+	// Not t.Parallel: swaps the package-level
+	// gatherCoalesceRetryInterval/gatherCoalesceMaxAttempts seam via
+	// shrinkGatherCoalesceRetryInterval.
+	shrinkGatherCoalesceRetryInterval(t, time.Millisecond, 1)
+
+	block, point := buildDecodableTestBlock(t, 10, 1)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	iter := &pausingGapLedgerReadIterator{
+		ctx:        ctx,
+		first:      &chain.ChainIteratorResult{Point: point, Block: block},
+		gapEntered: make(chan struct{}),
+		resume:     make(chan struct{}),
+	}
+
+	ls := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
+	ls.advanceUpstreamTipSlot(farUpstreamTipSlot)
+
+	resultCh := make(chan readChainResult, 1)
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	}()
+
+	testutil.RequireReceive(
+		t, iter.gapEntered, testutil.AsyncWait,
+		"reader never reached the chain-tip gap that triggers coalescing",
+	)
+
+	// The reader is parked inside Next holding the gather read lock and no
+	// ledger lock, so this is obtainable now. Holding it across the resume
+	// below is what a concurrent block apply does.
+	ls.Lock()
+	ledgerLockHeld := true
+	defer func() {
+		if ledgerLockHeld {
+			ls.Unlock()
+		}
+	}()
+
+	close(iter.resume)
+
+	require.Eventually(
+		t,
+		func() bool { return tryLockGatherMutex(ls) },
+		testutil.AsyncWait,
+		5*time.Millisecond,
+		"gather pass never released blockPipelineGatherMutex while the "+
+			"ledger write lock was held -- it takes ls.RLock inside the "+
+			"gather span, so the documented coalescing bound also includes "+
+			"however long a block apply holds the ledger lock",
+	)
+
+	ls.Unlock()
+	ledgerLockHeld = false
+
+	result := testutil.RequireReceive(
+		t, resultCh, testutil.AsyncWait,
+		"reader never delivered its coalesced batch",
+	)
+	require.NoError(t, result.err)
+	require.Len(t, result.blocks, 1)
+	close(result.done)
+
+	cancel()
+	testutil.RequireReceive(
+		t, readerDone, testutil.AsyncWait,
+		"ledgerReadChainIterator did not exit after cancellation",
+	)
+}
+
+// TestLedgerReadChainIteratorSkipsCoalesceAfterReachingTip covers the case
+// isNearTip alone cannot see. UpstreamTipSlot returns 0 whenever no live
+// upstream connection is selected, and isNearTipWithStabilityWindow folds an
+// unknown upstream into "not near" -- so a node that has already caught up
+// and then loses its upstream would start paying the coalescing wait again,
+// gather lock held, including for its own forged blocks. reachedTip latches
+// once the node first reaches the stability window and never clears, so it
+// distinguishes "catching up and not yet connected" from "was at tip, lost
+// the upstream".
+//
+// The retry interval here is minutes against a seconds-long receive
+// deadline, so a regression cannot pass by winning a timing race: a correct
+// implementation returns near-instantly, a regressed one is still asleep.
+func TestLedgerReadChainIteratorSkipsCoalesceAfterReachingTip(t *testing.T) {
+	// Not t.Parallel: swaps the package-level
+	// gatherCoalesceRetryInterval/gatherCoalesceMaxAttempts seam via
+	// shrinkGatherCoalesceRetryInterval.
+	shrinkGatherCoalesceRetryInterval(t, 10*time.Minute, 10)
+
+	block, point := buildDecodableTestBlock(t, 10, 1)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	iter := &scriptedGapLedgerReadIterator{
+		ctx:    ctx,
+		script: []*chain.ChainIteratorResult{{Point: point, Block: block}, nil},
+	}
+
+	// No upstream tip: UpstreamTipSlot returns 0 and isNearTip is false for
+	// every slot, exactly as during bulk replay. reachedTip is what tells
+	// the two apart.
+	ls := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
+	ls.reachedTip.Store(true)
+
+	resultCh := make(chan readChainResult, 1)
+	go ls.ledgerReadChainIterator(ctx, iter, resultCh)
+
+	result := testutil.RequireReceive(
+		t, resultCh, 10*time.Second,
+		"a node that already reached tip and then lost its upstream waited "+
+			"on the bulk-replay coalescing batch instead of committing",
+	)
+	require.NoError(t, result.err)
+	require.False(t, result.rollback)
+	require.Len(t, result.blocks, 1)
+	close(result.done)
+}
+
 // TestLedgerReadChainIteratorCommitBatchBlocksSkipsEmptyPasses pins the
 // dingo_ledger_commit_batch_blocks histogram to actual submissions. A gather
 // pass whose very first non-blocking probe returns chain.ErrIteratorChainTip
