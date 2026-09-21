@@ -2698,6 +2698,48 @@ func TestCalculateFullPotNoBaseRewardFallsBackToReserves(t *testing.T) {
 	require.Equal(t, off.UpdatedPots, on.UpdatedPots)
 }
 
+// TestCalculateFullPotExcludesZeroBlockPool pins the CIP-0163 interaction with
+// mkPoolRewardInfo's Left exclusion: a pool that made no blocks contributes a
+// zero base reward B_i, so the largest-remainder apportionment gives it neither
+// a floor share (0*R/W == 0) nor a leftover lovelace (its remainder is 0, and
+// the D leftovers only ever reach pools with a nonzero remainder, since
+// D == sum(rem)/W < the count of such pools). Decentralization is 4/5, where
+// apparentPerformance returns 1 regardless of blocksProduced, so without the
+// zero-block guard the idle pool would be apportioned a share of the pot.
+func TestCalculateFullPotExcludesZeroBlockPool(t *testing.T) {
+	t.Parallel()
+
+	snap := fullPotTwoPoolSnapshot()
+	idle := &snap.Pools[1]
+	idle.BlocksProduced = 0
+	forging := snap.Pools[0]
+
+	params := testParams()
+	params.FullPotRewardsEnabled = true
+	params.Decentralization = big.NewRat(4, 5)
+	result, err := Calculate(Pots{Reserves: 100_000_000}, snap, params)
+	require.NoError(t, err)
+
+	require.Equal(t, idle.ID, result.PoolRewards[1].PoolID)
+	require.Zero(t, result.PoolRewards[1].PoolReward, "idle pool total")
+	require.Zero(t, result.PoolRewards[1].LeaderReward, "idle leader reward")
+	for _, reward := range result.AccountRewards {
+		require.NotEqual(t, idle.ID, reward.PoolID,
+			"an idle pool pays neither its operator nor its members")
+	}
+
+	// The forging pool is the only nonzero base reward, so the Hamilton
+	// apportionment hands it the entire pot rather than leaving the idle
+	// pool's would-be share undistributed.
+	require.Equal(t, forging.ID, result.PoolRewards[0].PoolID)
+	require.Equal(
+		t,
+		result.AvailableRewards,
+		result.PoolRewards[0].PoolReward,
+		"forging pool takes the whole pot",
+	)
+}
+
 // TestCalculateFullPotComposesWithMinPoolMargin verifies that when BOTH CIP-0163
 // full-pot distribution and the CIP-23 minimum pool margin are enabled, each
 // pool's full-pot-scaled leader reward is computed with the CIP-23 effective
