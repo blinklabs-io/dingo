@@ -851,10 +851,16 @@ func (s *Store) GetAccountSumsByCredential(
 	sumSigned := func(query string, args ...any) (*big.Int, error) {
 		return sumSignedRows(ctx, db, s.dialect.Rebind(query), args...)
 	}
+	// reconciled_amount IS NULL excludes ReconcileAccountRewardBalance's
+	// synthetic withdrawal-shaped rows (see that method's doc comment
+	// above): their "amount" is the pre-correction balance the correction
+	// proved wrong, not coin a delegator actually withdrew, so it must not
+	// be summed into Blockfrost's withdrawals_sum.
 	ret.WithdrawalsSum, err = sum(`
 SELECT amount
 FROM account_reward_delta
-WHERE withdrawal = TRUE AND credential_tag = ? AND staking_key = ?`,
+WHERE withdrawal = TRUE AND reconciled_amount IS NULL
+  AND credential_tag = ? AND staking_key = ?`,
 		credentialTag,
 		stakingKey,
 	)
@@ -1344,13 +1350,13 @@ func (s *Store) AddAccountRewardByCredential(
 		txn,
 		func(db queryer, ctx context.Context) error {
 			var accountID int64
-			var reward sql.NullString
+			var reward, rewardDeficit sql.NullString
 			err := db.QueryRowContext(ctx, `
-SELECT id, reward FROM account
+SELECT id, reward, reward_deficit FROM account
 WHERE credential_tag = ? AND staking_key = ? AND active = TRUE`,
 				credentialTag,
 				stakeKey,
-			).Scan(&accountID, &reward)
+			).Scan(&accountID, &reward, &rewardDeficit)
 			if errors.Is(err, sql.ErrNoRows) {
 				return models.ErrAccountNotFound
 			}
@@ -1366,6 +1372,13 @@ WHERE credential_tag = ? AND staking_key = ? AND active = TRUE`,
 					"account reward overflow for stake key %x",
 					stakeKey,
 				)
+			}
+			deficit, err := parseNullUint64(
+				"account reward deficit",
+				rewardDeficit,
+			)
+			if err != nil {
+				return err
 			}
 			result, err := db.ExecContext(ctx, `
 INSERT INTO account_reward_delta (
@@ -1391,9 +1404,17 @@ ON CONFLICT (
 			if affected == 0 {
 				return nil
 			}
+			// netRewardDeficit absorbs any outstanding reward_deficit (left
+			// behind by a past DeleteAccountRewardsAfterSlot rollback that
+			// could not fully explain a balance gap; see that method and the
+			// v22 migration's doc comment) into this credit, instead of
+			// crediting current+amount unconditionally and letting the
+			// discarded shortfall stay permanently baked into the balance.
+			newReward, newDeficit := netRewardDeficit(current+amount, deficit)
 			result, err = db.ExecContext(ctx, `
-UPDATE account SET reward = ? WHERE id = ?`,
-				strconv.FormatUint(current+amount, 10),
+UPDATE account SET reward = ?, reward_deficit = ? WHERE id = ?`,
+				strconv.FormatUint(newReward, 10),
+				nullableRewardDeficit(newDeficit),
 				accountID,
 			)
 			if err != nil {
@@ -1414,6 +1435,38 @@ UPDATE account SET reward = ? WHERE id = ?`,
 			)
 		},
 	)
+}
+
+// netRewardDeficit nets an outstanding reward_deficit against a newly
+// credited balance. AddAccountRewardByCredential is the only path that ever
+// credits an account additively without also re-anchoring it to an
+// externally-sourced true balance (contrast ApplyAccountRewardWithdrawal and
+// ReconcileAccountRewardBalance, which both clear reward_deficit to zero
+// because they establish that anchor directly) -- so it is the only path
+// that can safely absorb a deficit: doing so anywhere else would apply the
+// correction against a balance that is about to be overwritten by ground
+// truth anyway. It returns the balance to store and the deficit remaining
+// after this credit, which is always <= the deficit passed in.
+func netRewardDeficit(newTotal, deficit uint64) (uint64, uint64) {
+	if deficit == 0 {
+		return newTotal, 0
+	}
+	if deficit >= newTotal {
+		return 0, deficit - newTotal
+	}
+	return newTotal - deficit, 0
+}
+
+// nullableRewardDeficit renders a reward_deficit value for storage: zero is
+// stored as NULL (the v22 migration's "no outstanding deficit" sentinel)
+// rather than the string "0", so existing reads via parseNullUint64 keep
+// treating "no row ever recorded a deficit" and "the deficit nets to zero"
+// identically.
+func nullableRewardDeficit(deficit uint64) any {
+	if deficit == 0 {
+		return nil
+	}
+	return strconv.FormatUint(deficit, 10)
 }
 
 func (s *Store) AddPostSnapshotAccountRewardByCredential(
@@ -1509,8 +1562,14 @@ SELECT EXISTS (
 			if err != nil {
 				return err
 			}
+			// A withdrawal re-anchors the balance to a fresh,
+			// externally-sourced true value (zero), which makes any
+			// reward_deficit accumulated before it (see
+			// DeleteAccountRewardsAfterSlot and netRewardDeficit) moot --
+			// clear it rather than let a stale deficit apply against
+			// whatever this credential accrues next.
 			if _, err := db.ExecContext(ctx, `
-UPDATE account SET reward = '0' WHERE id = ?`,
+UPDATE account SET reward = '0', reward_deficit = NULL WHERE id = ?`,
 				accountID,
 			); err != nil {
 				return err
@@ -1653,14 +1712,18 @@ WHERE credential_tag = ? AND staking_key = ? AND active = TRUE`,
 			if err != nil {
 				return err
 			}
-			if _, err := db.ExecContext(ctx, `
-UPDATE account SET reward = ? WHERE id = ?`,
-				strconv.FormatUint(correctedAmount, 10),
-				accountID,
-			); err != nil {
-				return err
-			}
-			if _, err := db.ExecContext(ctx, `
+			// The idempotency-journal insert must run, and be checked,
+			// before the balance write -- not after. A redelivered/retried
+			// identical reconciliation call is expected (see this method's
+			// doc comment on discriminator-based idempotency); running the
+			// balance UPDATE unconditionally before this insert clobbered
+			// any legitimate accrual that landed between the original
+			// delivery and the redelivery back to the stale reconciled
+			// value, because the redelivery's UPDATE always ran even though
+			// its INSERT then correctly no-opped on the conflict. Checking
+			// rows-affected first makes the whole correction a no-op on
+			// redelivery, balance write included.
+			result, err := db.ExecContext(ctx, `
 INSERT INTO account_reward_delta (
     staking_key, credential_tag, tx_hash, amount, previous_reward,
     added_slot, withdrawal, reconciled_amount
@@ -1675,6 +1738,24 @@ ON CONFLICT (
 				strconv.FormatUint(current, 10),
 				slotValue,
 				strconv.FormatUint(correctedAmount, 10),
+			)
+			if err != nil {
+				return err
+			}
+			affected, err := result.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if affected == 0 {
+				return nil
+			}
+			// The correction is itself a fresh, externally-sourced true
+			// balance, which makes any reward_deficit accumulated before it
+			// (see DeleteAccountRewardsAfterSlot and netRewardDeficit) moot.
+			if _, err := db.ExecContext(ctx, `
+UPDATE account SET reward = ?, reward_deficit = NULL WHERE id = ?`,
+				strconv.FormatUint(correctedAmount, 10),
+				accountID,
 			); err != nil {
 				return err
 			}
@@ -1798,18 +1879,25 @@ ORDER BY added_slot DESC, id DESC`,
 			refs := make(map[string]models.StakeCredentialRef)
 			for _, item := range deltas {
 				var id int64
-				var reward sql.NullString
+				var reward, rewardDeficit sql.NullString
 				err := db.QueryRowContext(ctx, `
-SELECT id, reward FROM account
+SELECT id, reward, reward_deficit FROM account
 WHERE credential_tag = ? AND staking_key = ?`,
 					item.tag,
 					item.key,
-				).Scan(&id, &reward)
+				).Scan(&id, &reward, &rewardDeficit)
 				ref := models.NewStakeCredentialRef(item.tag, item.key)
 				refs[ref.MapKey()] = ref
 				if errors.Is(err, sql.ErrNoRows) {
 					continue
 				}
+				if err != nil {
+					return err
+				}
+				deficit, err := parseNullUint64(
+					"account reward deficit",
+					rewardDeficit,
+				)
 				if err != nil {
 					return err
 				}
@@ -1840,13 +1928,29 @@ WHERE credential_tag = ? AND staking_key = ?`,
 						// imprecise reward balance for this one credential
 						// rather than refusing the entire rollback: the
 						// alternative is a truncate that can never succeed
-						// against a database old enough to carry such a gap,
-						// for a value normal replay will reconcile again from
-						// the next real withdrawal or reward-crediting event
-						// this credential sees post-rollback.
+						// against a database old enough to carry such a gap.
+						// Unlike before, the discarded shortfall is not lost:
+						// it is added to reward_deficit, which
+						// AddAccountRewardByCredential (via netRewardDeficit)
+						// nets out of the next real accrual this credential
+						// sees post-rollback, converging the balance back
+						// toward the canonical figure instead of a node that
+						// hit this clamp diverging from one that never saw
+						// the gap forever.
+						shortfall := item.amount - current
+						if deficit > ^uint64(0)-shortfall {
+							// Deficit accumulation itself overflowing is
+							// astronomically implausible (it would require
+							// more clamped shortfall than the entire supply
+							// can express), but saturate rather than wrap if
+							// it ever happens.
+							deficit = ^uint64(0)
+						} else {
+							deficit += shortfall
+						}
 						if s.logger != nil {
 							s.logger.Warn(
-								"account reward rollback underflow; clamping to zero and continuing",
+								"account reward rollback underflow; clamping to zero, recording deficit, and continuing",
 								"component",
 								"database",
 								"staking_key",
@@ -1857,6 +1961,8 @@ WHERE credential_tag = ? AND staking_key = ?`,
 								current,
 								"delta_amount",
 								item.amount,
+								"recorded_deficit",
+								deficit,
 							)
 						}
 						value = 0
@@ -1865,8 +1971,9 @@ WHERE credential_tag = ? AND staking_key = ?`,
 					}
 				}
 				if _, err := db.ExecContext(ctx, `
-UPDATE account SET reward = ? WHERE id = ?`,
+UPDATE account SET reward = ?, reward_deficit = ? WHERE id = ?`,
 					strconv.FormatUint(value, 10),
+					nullableRewardDeficit(deficit),
 					id,
 				); err != nil {
 					return err

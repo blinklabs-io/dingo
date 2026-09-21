@@ -16,6 +16,7 @@ package sqlstore
 
 import (
 	"bytes"
+	"database/sql"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -240,5 +241,180 @@ func TestApplyAccountRewardWithdrawalAppliesAfterReconciliationForSameTxHash(
 		"the real withdrawal for the reconciled transaction must actually "+
 			"apply and zero the balance, not be short-circuited by the "+
 			"reconciliation row's idempotency check",
+	)
+}
+
+// rewardDeficit reads the account table's reward_deficit column directly,
+// bypassing the models.Account projection (which never exposes this
+// internal bookkeeping column), so tests can assert on it precisely.
+func rewardDeficit(t *testing.T, store *Store, key []byte) uint64 {
+	t.Helper()
+	var deficit sql.NullString
+	err := store.writeDB.QueryRow(
+		`SELECT reward_deficit FROM account WHERE staking_key = ?`,
+		key,
+	).Scan(&deficit)
+	require.NoError(t, err)
+	value, err := parseNullUint64("account reward deficit", deficit)
+	require.NoError(t, err)
+	return value
+}
+
+// TestAddAccountRewardByCredentialNetsRollbackDeficitInsteadOfDivergingForever
+// pins the fix for a second, independent bug in the same underflow clamp
+// TestDeleteAccountRewardsAfterSlotClampsUnexplainableUnderflow pins: that
+// test only proves the clamp lets the rollback succeed. It says nothing
+// about what happens to the account afterward, and before this fix, nothing
+// good did: AddAccountRewardByCredential is purely additive (current +
+// amount), with no way to know a past rollback silently discarded a
+// shortfall, so a node that hit the clamp would credit every future reward
+// on top of a balance permanently short by exactly the discarded amount --
+// while a node that never saw the underlying gap (e.g. one that resynced
+// clean after this codebase's own bugs were fixed) would credit the same
+// future rewards on top of the correct balance. The two nodes diverge
+// forever with no future event ever correcting it.
+//
+// This reproduces that at the unit level and shows the balance now
+// converges to the mathematically correct figure -- the same value plain
+// (non-clamping, allow-negative) arithmetic would have produced -- once
+// enough future accrual offsets the recorded deficit, instead of
+// permanently baking in the shortfall:
+//
+//	current=500,000, rollback amount=5,000,000 => true value would be
+//	-4,500,000 if negative balances were representable.
+//	+2,000,000 accrual => true value -2,500,000 (still negative: clamped
+//	balance must stay 0, deficit shrinks to 2,500,000).
+//	+3,000,000 accrual => true value +500,000 (deficit fully absorbed:
+//	balance becomes 500,000, deficit clears to zero).
+//
+// Before this fix, the same sequence left the balance at 5,000,000
+// (2,000,000 + 3,000,000 credited on top of the clamped zero) -- permanently
+// 4,500,000 higher than the mathematically correct, canonical figure.
+func TestAddAccountRewardByCredentialNetsRollbackDeficitInsteadOfDivergingForever(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	key := bytes.Repeat([]byte{0x9d}, 28)
+
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
+		StakingKey: key, CredentialTag: 0, Active: true,
+	}))
+
+	// A normal accrual that a later rollback will need to invert.
+	require.NoError(t, store.AddAccountRewardByCredential(
+		0, key, 5_000_000, 100, bytes.Repeat([]byte{0xf1}, 32), nil,
+	))
+	// A reconciliation lowers the balance out from under the accrual above.
+	require.NoError(t, store.ReconcileAccountRewardBalance(
+		0, key, 500_000, 150, bytes.Repeat([]byte{0xf2}, 32), nil,
+	))
+	// Simulate an old-format gap (as
+	// TestDeleteAccountRewardsAfterSlotClampsUnexplainableUnderflow does) by
+	// deleting the delta row that would otherwise make the rollback below
+	// invertible without underflowing.
+	_, err := store.writeDB.Exec(
+		`DELETE FROM account_reward_delta WHERE added_slot = 150`,
+	)
+	require.NoError(t, err)
+
+	// Rolling back past the original accrual underflows (current 500,000 <
+	// rollback amount 5,000,000): the clamp fires, and the 4,500,000
+	// shortfall must be recorded rather than discarded.
+	require.NoError(t, store.DeleteAccountRewardsAfterSlot(80, nil))
+	got, err := store.GetAccountByCredential(0, key, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(0), uint64(got.Reward))
+	require.Equal(t, uint64(4_500_000), rewardDeficit(t, store, key))
+
+	// A real post-rollback accrual smaller than the deficit must be fully
+	// absorbed: the visible balance stays zero, and the deficit shrinks.
+	require.NoError(t, store.AddAccountRewardByCredential(
+		0, key, 2_000_000, 200, bytes.Repeat([]byte{0xf3}, 32), nil,
+	))
+	got, err = store.GetAccountByCredential(0, key, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(0), uint64(got.Reward))
+	require.Equal(t, uint64(2_500_000), rewardDeficit(t, store, key))
+
+	// A further accrual exceeding the remaining deficit must net out the
+	// deficit entirely and credit only the remainder -- converging to
+	// exactly the value plain, non-clamping arithmetic would have produced,
+	// not the 5,000,000 a purely additive credit on top of the clamped zero
+	// would otherwise leave permanently diverged from canonical.
+	require.NoError(t, store.AddAccountRewardByCredential(
+		0, key, 3_000_000, 300, bytes.Repeat([]byte{0xf4}, 32), nil,
+	))
+	got, err = store.GetAccountByCredential(0, key, true, nil)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		uint64(500_000),
+		uint64(got.Reward),
+		"the deficit must be netted out of later accrual, converging to the "+
+			"canonical value instead of permanently diverging by the "+
+			"discarded shortfall",
+	)
+	require.Equal(t, uint64(0), rewardDeficit(t, store, key))
+}
+
+// TestReconcileAccountRewardBalanceRedeliverySurvivesLaterAccrual pins the
+// fix for a bug in ReconcileAccountRewardBalance's write ordering: the
+// UPDATE that changes account.reward used to run unconditionally, before
+// the idempotency-journal INSERT ... ON CONFLICT DO NOTHING that decides
+// whether this call is a first delivery or a redelivery of an
+// already-applied correction. A redelivered/retried identical reconcile
+// call is an expected occurrence this method's own doc comment says the
+// discriminator exists to absorb -- but because the UPDATE ran regardless
+// of whether the INSERT actually inserted a new row, a redelivery clobbered
+// any legitimate accrual that had landed between the original delivery and
+// the redelivery, resetting the balance back to the stale reconciled value
+// instead of leaving the later accrual untouched.
+func TestReconcileAccountRewardBalanceRedeliverySurvivesLaterAccrual(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	key := bytes.Repeat([]byte{0x9e}, 28)
+	txHash := bytes.Repeat([]byte{0xa1}, 32)
+
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
+		StakingKey: key, CredentialTag: 0, Active: true,
+	}))
+	require.NoError(t, store.AddAccountRewardByCredential(
+		0, key, 3_000_000, 100, bytes.Repeat([]byte{0xa0}, 32), nil,
+	))
+
+	// The reconciliation corrects the balance.
+	require.NoError(t, store.ReconcileAccountRewardBalance(
+		0, key, 2_999_998, 150, txHash, nil,
+	))
+	got, err := store.GetAccountByCredential(0, key, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(2_999_998), uint64(got.Reward))
+
+	// A real, distinct accrual lands afterward.
+	require.NoError(t, store.AddAccountRewardByCredential(
+		0, key, 1_000_000, 200, bytes.Repeat([]byte{0xa2}, 32), nil,
+	))
+	got, err = store.GetAccountByCredential(0, key, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(3_999_998), uint64(got.Reward))
+
+	// The exact same reconciliation event is redelivered (identical
+	// credential, corrected amount, slot, and txHash -- e.g. a retried
+	// replay-recovery step). It must be a complete no-op: the idempotency
+	// insert no-ops on conflict, and the balance write must not run either.
+	require.NoError(t, store.ReconcileAccountRewardBalance(
+		0, key, 2_999_998, 150, txHash, nil,
+	))
+	got, err = store.GetAccountByCredential(0, key, true, nil)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		uint64(3_999_998),
+		uint64(got.Reward),
+		"a redelivered reconciliation must not clobber a legitimate later "+
+			"accrual back to the stale reconciled value",
 	)
 }

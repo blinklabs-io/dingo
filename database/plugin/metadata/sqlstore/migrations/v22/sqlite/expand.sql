@@ -1,0 +1,15 @@
+-- Tracks a reward deficit DeleteAccountRewardsAfterSlot could not restore
+-- because the delta chain it was walking could not explain the gap (see
+-- account.go's "account reward rollback underflow" clamp). Before this
+-- column existed, that clamp reset the balance to zero and discarded the
+-- shortfall permanently: AddAccountRewardByCredential is purely additive
+-- (current + amount, no reconciliation of past deficits), so a node that
+-- hit the clamp and a node that never saw the gap would diverge forever --
+-- later crediting never corrected it. reward_deficit records the discarded
+-- shortfall so AddAccountRewardByCredential can net it out of later
+-- accruals instead, converging the balance back toward the canonical figure
+-- once enough future rewards accrue. NULL means no outstanding deficit;
+-- ApplyAccountRewardWithdrawal and ReconcileAccountRewardBalance both clear
+-- it to NULL, since each already establishes a fresh, externally-sourced
+-- true balance that makes any earlier deficit moot.
+ALTER TABLE `account` ADD COLUMN `reward_deficit` text;

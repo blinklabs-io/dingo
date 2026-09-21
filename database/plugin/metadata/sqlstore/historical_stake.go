@@ -1187,7 +1187,12 @@ FROM account_reward_delta witness
 JOIN active_delegation active
   ON active.credential_tag = witness.credential_tag
  AND active.staking_key = witness.staking_key
-WHERE witness.withdrawal = TRUE`)
+WHERE witness.withdrawal = TRUE AND witness.reconciled_amount IS NULL`)
+	// reconciled_amount IS NULL excludes ReconcileAccountRewardBalance's
+	// synthetic withdrawal-shaped rows (see that method's doc comment in
+	// account.go) from counting as witnessed activity: a system-generated
+	// balance correction must not gate CIP-0163 expiration/voting-power
+	// renewal the way a real withdrawal does.
 	args := make([]any, 1, 5)
 	args[0] = slot
 	activationCTE := ""

@@ -502,9 +502,14 @@ func (s *Store) AccountsWitnessedAfterSlot(
 SELECT credential_tag, staking_key FROM account_withdrawal_witness
 WHERE added_slot > ?`)
 	args = append(args, slot)
+	// reconciled_amount IS NULL excludes ReconcileAccountRewardBalance's
+	// synthetic withdrawal-shaped rows (see that method's doc comment in
+	// account.go): a balance correction is not a delegator witnessing
+	// activity, so it must not count toward CIP-0163 inactivity-expiry
+	// renewal, mirroring mergeWitnessSlots' withdrawalsOnly path above.
 	parts = append(parts, `
 SELECT credential_tag, staking_key FROM account_reward_delta
-WHERE withdrawal = TRUE AND added_slot > ?`)
+WHERE withdrawal = TRUE AND reconciled_amount IS NULL AND added_slot > ?`)
 	args = append(args, slot)
 	rows, err := db.QueryContext(ctx, `
 SELECT credential_tag, staking_key
@@ -800,7 +805,15 @@ func mergeWitnessSlots(
 	args = append(args, maxSlot)
 	withdrawal := ""
 	if withdrawalsOnly {
-		withdrawal = "withdrawal = TRUE AND "
+		// withdrawalsOnly is only ever set for the account_reward_delta
+		// table (see AccountLastWitnessSlots), which also carries
+		// ReconcileAccountRewardBalance's synthetic withdrawal-shaped rows
+		// (reconciled_amount IS NOT NULL; see that method's doc comment in
+		// account.go). Those rows are a system-generated balance
+		// correction, not a delegator witnessing activity, so they must not
+		// count toward CIP-0163 inactivity-expiry renewal the way a real
+		// withdrawal does.
+		withdrawal = "withdrawal = TRUE AND reconciled_amount IS NULL AND "
 	}
 	rows, err := db.QueryContext(ctx, `
 SELECT credential_tag, staking_key, MAX(added_slot)
