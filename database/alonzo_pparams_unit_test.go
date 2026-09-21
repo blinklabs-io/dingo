@@ -15,6 +15,7 @@
 package database
 
 import (
+	"bytes"
 	"database/sql"
 	"path/filepath"
 	"testing"
@@ -461,4 +462,102 @@ func TestRepairAlonzoPParamsUnitIsIdempotent(t *testing.T) {
 		)
 		require.Equal(t, uint64(genesisWord), alonzoRowKey17(t, dataDir))
 	}
+}
+
+// alonzoRowCbor reads the single persisted Alonzo row's stored bytes back
+// verbatim, so a test can assert the repair left them untouched rather than
+// only that the decoded key 17 still reads the same.
+func alonzoRowCbor(t *testing.T, dataDir string) []byte {
+	t.Helper()
+	sqlDB, err := sql.Open(
+		"sqlite",
+		filepath.Join(dataDir, "metadata.sqlite"),
+	)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, sqlDB.Close()) }()
+	var stored []byte
+	require.NoError(t, sqlDB.QueryRow(
+		`SELECT cbor FROM pparams WHERE era_id = ?`,
+		alonzo.EraIdAlonzo,
+	).Scan(&stored))
+	return stored
+}
+
+// TestRepairAlonzoPParamsUnitRefusesRowThatDoesNotRoundTrip pins the one
+// repair property the rest of the suite cannot observe: a row that decodes
+// as Alonzo, and whose key 17 holds exactly the lossy per-byte value the
+// repair is looking for, is still refused when re-encoding it does not
+// reproduce the stored bytes.
+//
+// The row here is the canonical encoding with key 17's minimal uint16 head
+// widened to a non-minimal uint32 one. That is a real shape -- the value
+// decodes unchanged, so every check before the round-trip gate passes -- and
+// rewriting it would silently re-serialize the whole struct, replacing bytes
+// this node never wrote and cannot prove equivalent. The gate exists to
+// refuse that, and without it this database would be rewritten and blessed.
+func TestRepairAlonzoPParamsUnitRefusesRowThatDoesNotRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	const genesisWord = 34482
+	canonical := alonzoPParamsCbor(t, genesisWord/8)
+	minimalHead := []byte{0x19, 0x10, 0xd6}
+	nonMinimalHead := []byte{0x1a, 0x00, 0x00, 0x10, 0xd6}
+	require.Equal(
+		t,
+		1,
+		bytes.Count(canonical, minimalHead),
+		"key 17's minimal encoding must appear exactly once to widen it",
+	)
+	stored := bytes.Replace(canonical, minimalHead, nonMinimalHead, 1)
+	var decoded alonzo.AlonzoProtocolParameters
+	_, err := cbor.Decode(stored, &decoded)
+	require.NoError(t, err, "the widened row must still decode as Alonzo")
+	require.Equal(
+		t,
+		uint64(genesisWord/8),
+		decoded.AdaPerUtxoByte,
+		"the widened row must still hold the lossy per-byte value",
+	)
+
+	dataDir := t.TempDir()
+	cfg := &Config{
+		DataDir:                   dataDir,
+		StorageMode:               "core",
+		Network:                   "preprod",
+		AlonzoLovelacePerUtxoWord: genesisWord,
+	}
+	db, err := newTestDatabase(t, cfg)
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParams(stored, 0, 0, alonzo.EraIdAlonzo, nil))
+	require.NoError(t, closeTestDatabase(db))
+	require.Equal(
+		t,
+		stored,
+		alonzoRowCbor(t, dataDir),
+		"the store must keep the row's bytes verbatim for this to test anything",
+	)
+
+	sqlDB, err := sql.Open("sqlite", filepath.Join(dataDir, "metadata.sqlite"))
+	require.NoError(t, err)
+	_, err = sqlDB.Exec(
+		`UPDATE node_settings_gate SET value = ? WHERE name = ?`,
+		nodesettings.AlonzoPParamsUnitLegacyByteV0,
+		nodesettings.AlonzoPParamsUnitGateName,
+	)
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.Close())
+
+	_, err = newTestDatabase(t, cfg)
+	require.ErrorContains(
+		t,
+		err,
+		"does not round-trip through the Alonzo codec",
+	)
+	require.ErrorContains(t, err, "resync from genesis")
+	require.Equal(
+		t,
+		nodesettings.AlonzoPParamsUnitLegacyByteV0,
+		alonzoPParamsUnitMarkerAt(t, dataDir),
+	)
+	require.Equal(t, stored, alonzoRowCbor(t, dataDir))
 }

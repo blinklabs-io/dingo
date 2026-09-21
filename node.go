@@ -34,6 +34,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
@@ -609,11 +610,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			HotTxEntries:    n.config.cacheHotTxEntries,
 			HotTxMaxBytes:   n.config.cacheHotTxMaxBytes,
 		},
-	}
-	if nc := n.config.cardanoNodeConfig; nc != nil {
-		if ag := nc.AlonzoGenesis(); ag != nil {
-			dbConfig.AlonzoLovelacePerUtxoWord = ag.LovelacePerUtxoWord
-		}
+		AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
+			n.config.cardanoNodeConfig, "", n.config.network,
+		),
 	}
 	db, err := database.New(dbConfig, stores)
 	if db == nil {

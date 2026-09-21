@@ -10768,13 +10768,27 @@ rewritten. An Alonzo-era on-chain update to key 17 was applied verbatim, so
 any other value is chain-sourced, and that row — like a missing genesis
 value or a metadata store that cannot rewrite rows — still fails closed with
 a resync instruction naming the reason.
+Because a zero `Config.AlonzoLovelacePerUtxoWord` is what "missing genesis
+value" means, supplying it is a property of every database open rather than
+of the node's own: an open that omits it turns a repairable database into a
+resync. `config/cardano.AlonzoLovelacePerUtxoWord` resolves it from a
+loaded cardano-node config or, for the sites that hold only a config path
+and network, by loading one, and returns zero on every failure.
+`database/lifecycle` sits under the database import boundary and cannot
+load one at all, so its validating open takes the value through
+`RestoreStorageConfig` from whichever composition root drove the restore.
+`internal/architecture`'s
+`TestDatabaseConfigSuppliesAlonzoLovelacePerUtxoWord` fails any production
+`database.Config` literal that omits the field, since no single open's own
+test can speak for the others.
 It deliberately excludes every bool-derived gate
 (`history_expiry_active`, `historical_validation_relaxed`,
 `strict_utxo_validation_relaxed`, `pledge_leverage`, `full_pot_rewards`,
 `delegator_inactivity`, `min_pool_margin`): `database.Config` has two callers
 that construct a partial config with only `DataDir`, `Logger`,
-`StorageMode`, and `Network` set (`mithril/sync.go`,
-`database/lifecycle/restore.go`), and a bool's zero value cannot be told
+`StorageMode`, `Network`, and `AlonzoLovelacePerUtxoWord` set
+(`mithril/sync.go`, `database/lifecycle/restore.go`), and a bool's zero
+value cannot be told
 apart from "the operator turned it off." Computing
 `historical_validation_relaxed` from a zero `validateHistorical` would
 fabricate a relaxed ("on") taint against every normally-created database;
