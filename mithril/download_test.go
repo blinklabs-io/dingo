@@ -22,6 +22,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -41,6 +42,17 @@ import (
 
 type captureSlogHandler struct {
 	records []slog.Record
+}
+
+func TestRestrictedDialContextRejectsPrivateAddresses(t *testing.T) {
+	dialed := false
+	dial := restrictedDialContext(func(context.Context, string, string) (net.Conn, error) {
+		dialed = true
+		return nil, nil
+	}, false)
+	_, err := dial(context.Background(), "tcp", "127.0.0.1:80")
+	require.Error(t, err)
+	require.False(t, dialed)
 }
 
 type trackingDownloadBody struct {
@@ -174,7 +186,7 @@ func TestDownloadSnapshotRoutineLogsAtDebug(t *testing.T) {
 func TestNewPooledDownloadTransportUsesHTTP1Connections(t *testing.T) {
 	t.Parallel()
 
-	transport := newPooledDownloadTransport(4)
+	transport := newPooledDownloadTransport(4, true)
 
 	require.False(t, transport.DisableKeepAlives)
 	require.False(t, transport.ForceAttemptHTTP2)

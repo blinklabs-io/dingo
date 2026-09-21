@@ -425,15 +425,18 @@ func rootFileSize(root *os.Root, filename string) int64 {
 	return fi.Size()
 }
 
-func newDownloadTransport() *http.Transport {
+func newDownloadTransport(allowPrivate bool) *http.Transport {
 	if base, ok := http.DefaultTransport.(*http.Transport); ok {
 		transport := base.Clone()
 		transport.DisableKeepAlives = true
+		transport.Proxy = nil
+		transport.DialContext = restrictedDialContext((&net.Dialer{}).DialContext, allowPrivate)
 		return transport
 	}
 	return &http.Transport{
-		Proxy:             http.ProxyFromEnvironment,
+		Proxy:             nil,
 		DisableKeepAlives: true,
+		DialContext:       restrictedDialContext((&net.Dialer{}).DialContext, allowPrivate),
 	}
 }
 
@@ -447,7 +450,7 @@ func newDownloadTransport() *http.Transport {
 // default http.Transport caps idle connections per host at 2, so without
 // raising MaxIdleConnsPerHost most workers would close and re-handshake
 // their connection after every file and keep-alive would buy nothing.
-func newPooledDownloadTransport(maxConns int) *http.Transport {
+func newPooledDownloadTransport(maxConns int, allowPrivate bool) *http.Transport {
 	if maxConns < 1 {
 		maxConns = 1
 	}
@@ -455,12 +458,14 @@ func newPooledDownloadTransport(maxConns int) *http.Transport {
 	if base, ok := http.DefaultTransport.(*http.Transport); ok {
 		transport = base.Clone()
 	} else {
-		transport = &http.Transport{Proxy: http.ProxyFromEnvironment}
+		transport = &http.Transport{}
 	}
 	transport.DisableKeepAlives = false
 	transport.MaxIdleConns = maxConns * 2
 	transport.MaxIdleConnsPerHost = maxConns
 	transport.MaxConnsPerHost = maxConns
+	transport.Proxy = nil
+	transport.DialContext = restrictedDialContext((&net.Dialer{}).DialContext, allowPrivate)
 	transport.IdleConnTimeout = 90 * time.Second
 	// The immutable archive pool intentionally uses one HTTP/1.1
 	// connection per worker. HTTP/2 multiplexes every worker through the
@@ -481,6 +486,39 @@ func newPooledDownloadTransport(maxConns int) *http.Transport {
 	tlsConfig.NextProtos = []string{"http/1.1"}
 	transport.TLSClientConfig = tlsConfig
 	return transport
+}
+
+func restrictedDialContext(next func(context.Context, string, string) (net.Conn, error), allowPrivate bool) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, err
+		}
+		ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		if err != nil {
+			return nil, err
+		}
+		var last error
+		for _, ip := range ips {
+			if !allowPrivate && restrictedIP(ip.IP) {
+				last = fmt.Errorf("refusing restricted Mithril destination %s", ip.IP)
+				continue
+			}
+			conn, err := next(ctx, network, net.JoinHostPort(ip.IP.String(), port))
+			if err == nil {
+				return conn, nil
+			}
+			last = err
+		}
+		if last == nil {
+			last = errors.New("Mithril hostname has no usable address")
+		}
+		return nil, last
+	}
+}
+
+func restrictedIP(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast()
 }
 
 // progressWriter wraps an io.Writer to track bytes written and
@@ -767,7 +805,7 @@ func downloadSnapshotOnce(
 	// keep-alives disabled for single-archive downloads.
 	client := cfg.HTTPClient
 	if client == nil {
-		transport := newDownloadTransport()
+		transport := newDownloadTransport(cfg.AllowInsecureHTTP)
 		defer transport.CloseIdleConnections()
 		client = &http.Client{
 			Timeout:       0, // No timeout for large downloads
