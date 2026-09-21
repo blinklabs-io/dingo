@@ -42,61 +42,68 @@ type healthProbeServer struct {
 	addr   string
 }
 
-// serveHealthProbe serves the probe on listener, binding cfg's health
-// address itself when listener is nil, and returns nil when healthPort is 0
-// and the operator has disabled it.
-//
-// The tip gap is deliberately nil: nothing here follows the chain, so the
-// probe reports live and not ready, which is exactly the state an operator
-// and an orchestrator should see during a bootstrap. Liveness is what keeps
-// the container alive; readiness is what keeps it out of a load balancer.
+// boundHealthProbe is a health probe whose socket is already bound: the
+// server that will answer on it, and the listener it will answer on.
 //
 // Binding and serving are separate steps because a port number and a bound
 // socket are not the same fact. Between learning that a port is free and
 // binding it, anything else on the host -- including this process asking the
 // kernel for an arbitrary port -- can take it, and the probe then does not
-// come up. A caller that already owns the socket passes the live listener
-// instead, and cannot lose that race; the bound address is reported from the
-// listener either way, so the log names the port actually being served
-// rather than the one that was requested.
+// come up. `healthPort` 0 is the operator's opt-out rather than "pick one",
+// so the probe has no kernel-assigned form to fall back on.
+type boundHealthProbe struct {
+	server   *http.Server
+	listener net.Listener
+}
+
+// bindHealthProbe binds cfg's health address, returning a nil probe when
+// healthPort is 0 and the operator has disabled it.
 //
-// A supplied listener is closed when healthPort is 0: the operator's opt-out
-// still wins, and nothing would ever serve on it.
-func serveHealthProbe(
-	logger *slog.Logger,
-	cfg *config.Config,
-	component string,
-	listener net.Listener,
-) (*healthProbeServer, error) {
+// The tip gap is deliberately nil: nothing outside `serve` follows the chain,
+// so the probe reports live and not ready, which is exactly the state an
+// operator and an orchestrator should see during a bootstrap. Liveness is
+// what keeps the container alive; readiness is what keeps it out of a load
+// balancer.
+func bindHealthProbe(cfg *config.Config) (*boundHealthProbe, error) {
 	server := node.NewHealthServer(cfg, nil)
 	if server == nil {
-		if listener != nil {
-			_ = listener.Close()
-		}
 		return nil, nil
 	}
-	if listener == nil {
-		addr := server.Addr
-		bound, err := net.Listen("tcp", addr)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"starting health listener on %s: %w",
-				addr,
-				err,
-			)
-		}
-		listener = bound
+	listener, err := net.Listen("tcp", server.Addr)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"starting health listener on %s: %w",
+			server.Addr,
+			err,
+		)
 	}
-	actualAddr := listener.Addr().String()
+	return &boundHealthProbe{server: server, listener: listener}, nil
+}
+
+// serveHealthProbe serves probe on the socket it already owns, and returns
+// nil when probe is nil and there is nothing to serve.
+//
+// The bound address is reported from the listener, so the log names the port
+// actually being served rather than the one that was requested.
+func serveHealthProbe(
+	logger *slog.Logger,
+	component string,
+	probe *boundHealthProbe,
+) *healthProbeServer {
+	if probe == nil {
+		return nil
+	}
+	actualAddr := probe.listener.Addr().String()
 	logger.Info(
 		"serving health probes on "+actualAddr,
 		"component", component,
 	)
+	server := probe.server
 	server.Addr = actualAddr
 	errCh := make(chan error, 1)
 	go func() {
 		defer close(errCh)
-		if err := server.Serve(listener); err != nil &&
+		if err := server.Serve(probe.listener); err != nil &&
 			!errors.Is(err, http.ErrServerClosed) {
 			errCh <- fmt.Errorf("health server: %w", err)
 		}
@@ -105,7 +112,7 @@ func serveHealthProbe(
 		server: server,
 		errCh:  errCh,
 		addr:   actualAddr,
-	}, nil
+	}
 }
 
 func (s *healthProbeServer) Shutdown(ctx context.Context) error {

@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"os"
 	"slices"
 	"time"
@@ -390,7 +389,19 @@ func mithrilSyncRunE(
 	if network == "" {
 		network = "preview"
 	}
-	return runMithrilSync(cmd.Context(), cfg, logger, network, nil)
+	// Bind the probe here, in the command, so the socket production serves
+	// on is the one the tests hand over too. A bind failure is not fatal to
+	// a bootstrap: it loses the probe, not the snapshot.
+	healthProbe, healthErr := bindHealthProbe(cfg)
+	if healthErr != nil {
+		logger.Warn(
+			"failed to start health probe server; continuing",
+			"component", "mithril",
+			"port", cfg.HealthPort,
+			"error", healthErr,
+		)
+	}
+	return runMithrilSync(cmd.Context(), cfg, logger, network, healthProbe)
 }
 
 // errMithrilInactivityIncompatible reports why Mithril bootstrap and the
@@ -414,16 +425,15 @@ func errMithrilInactivityIncompatible() error {
 // runMithrilSync bootstraps from a Mithril snapshot, serving the metrics,
 // health and pprof listeners for as long as it runs.
 //
-// healthListener lets a caller that has already bound the health port hand
-// the live socket over instead of naming a port for the probe to rebind;
-// nil makes the probe bind cfg.HealthPort itself, which is what the command
-// does.
+// healthProbe carries the already-bound health socket from the caller; nil
+// means the operator disabled the probe or its port could not be bound, and
+// the bootstrap runs without it.
 func runMithrilSync(
 	ctx context.Context,
 	cfg *config.Config,
 	logger *slog.Logger,
 	network string,
-	healthListener net.Listener,
+	healthProbe *boundHealthProbe,
 ) (err error) {
 	metrics, metricsHandler := newMithrilSyncMetricsHandler(network)
 	metricsServer, err := startPrometheusMetricsServerWithHandler(
@@ -474,20 +484,7 @@ func runMithrilSync(
 			}
 		}()
 	}
-	healthServer, healthErr := serveHealthProbe(
-		logger,
-		cfg,
-		"mithril",
-		healthListener,
-	)
-	if healthErr != nil {
-		logger.Warn(
-			"failed to start health probe server; continuing",
-			"component", "mithril",
-			"port", cfg.HealthPort,
-			"error", healthErr,
-		)
-	}
+	healthServer := serveHealthProbe(logger, "mithril", healthProbe)
 	defer func() {
 		if healthServer == nil {
 			return
