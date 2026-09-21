@@ -809,6 +809,11 @@ func importUTxOs(
 	)
 
 	store := cfg.Database.Metadata()
+	// The concrete store cannot change mid-import, so resolve the deferred
+	// importer once rather than per batch. Skipping the per-batch aggregate
+	// refresh is only sound because ImportLedgerState rebuilds
+	// reward_live_stake in full once every phase has been imported.
+	importer, supportsDeferredRefresh := store.(deferredRewardLiveStakeImporter)
 	totalImported := 0
 	lastProgressLog := time.Time{}
 	lastLoggedPercent := -5.0
@@ -845,7 +850,6 @@ func importUTxOs(
 		txn := cfg.Database.MetadataTxn(true)
 		defer txn.Release()
 
-		importer, supportsDeferredRefresh := store.(deferredRewardLiveStakeImporter)
 		var err error
 		if supportsDeferredRefresh {
 			err = importer.ImportUtxosDeferredRewardLiveStakeRefresh(
