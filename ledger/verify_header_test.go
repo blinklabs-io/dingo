@@ -628,24 +628,32 @@ func TestVerifyBlockHeader_TamperedVRFProof(t *testing.T) {
 	)
 }
 
-// TestVerifyBlockHeader_TamperedOpCertSignature verifies that the
-// VerifyBlock-based crypto path (verifyBlockHeaderHex) does not, by itself,
-// validate the OpCert cold-key signature: it runs with SkipStakePoolValidation.
-// Inbound OpCert validation lives in the sibling verifyOpCertHeaderCrypto
-// (exercised by verify_opcert_test.go), which verifyBlockHeaderCrypto invokes
-// alongside this path. This test pins the boundary so the two layers stay
-// distinct.
+// TestVerifyBlockHeader_TamperedOpCertSignature verifies that a tampered
+// OpCert cold signature is rejected.
+//
+// Historically the VerifyBlock-based crypto path (verifyBlockHeaderHex) did
+// not itself validate the OpCert cold-key signature (it runs with
+// SkipStakePoolValidation), so this boundary was pinned the other way: no
+// error from this path, with the sibling verifyOpCertHeaderCrypto (exercised
+// by verify_opcert_test.go) named as the sole layer responsible for catching
+// it. gouroboros#2427 closed a real gap upstream (VerifyBlock previously
+// checked only the KES signature against the header's own hot vkey, so a
+// forged header carrying a real pool's issuer vkey with an attacker's hot/KES
+// keys passed unchanged) by verifying the OpCert cold signature directly
+// inside VerifyBlock, before the KES check that depends on it. This path now
+// rejects a tampered OpCert on its own, redundantly with dingo's own
+// verifyOpCertHeaderCrypto layer (defense in depth, not a bug) -- update this
+// test if that redundancy is ever intentionally removed on either side.
 func TestVerifyBlockHeader_TamperedOpCertSignature(t *testing.T) {
 	t.Parallel()
 
 	tb := createTestBlock(t, [32]byte{4}, 77, tamperOpCertSig)
 	err := verifyBlockHeader(tb.block, tb.epochNonce, tb.slotsPerKesPeriod)
-	// The hex/VerifyBlock layer does not verify the OpCert signature, so
-	// tampering does not cause an error here; verifyOpCertHeaderCrypto does.
-	assert.NoError(
+	require.ErrorContains(
 		t,
 		err,
-		"OpCert signature not validated by the VerifyBlock crypto layer",
+		"cold signature",
+		"gouroboros#2427: VerifyBlock now verifies the OpCert cold signature directly",
 	)
 }
 

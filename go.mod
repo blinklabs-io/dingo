@@ -19,14 +19,14 @@ require (
 	github.com/aws/smithy-go v1.28.1
 	github.com/blinklabs-io/bark v0.2.0
 	github.com/blinklabs-io/bursa v0.17.1
-	github.com/blinklabs-io/gouroboros v0.205.5
+	github.com/blinklabs-io/gouroboros v0.206.0
 	github.com/blinklabs-io/ouroboros-mock v0.20.2
 	github.com/blinklabs-io/plutigo v0.7.1
 	github.com/blockfrost/blockfrost-go v0.5.0
 	github.com/btcsuite/btcd/btcutil v1.2.0
 	github.com/consensys/gnark-crypto v0.21.0
 	github.com/dgraph-io/badger/v4 v4.9.6
-	github.com/fxamacker/cbor/v2 v2.9.3
+	github.com/fxamacker/cbor/v2 v2.9.4
 	github.com/getsops/sops/v3 v3.13.3
 	github.com/go-sql-driver/mysql v1.10.1
 	github.com/google/uuid v1.6.0

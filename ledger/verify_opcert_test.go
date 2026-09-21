@@ -462,7 +462,7 @@ func TestValidateLeiosAnnouncementHeaderRunsCryptoBeforeOCINClassification(
 
 	bad := createTestBlock(t, [32]byte{0xD5}, 0, tamperOpCertSig)
 	staleness, err = ls.ValidateLeiosAnnouncementHeader(bad.block.Header())
-	require.ErrorContains(t, err, "cold-key signature")
+	require.ErrorContains(t, err, "cold signature")
 	require.Equal(
 		t,
 		LeiosAnnouncementFreshOCIN,
