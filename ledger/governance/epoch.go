@@ -43,11 +43,19 @@ const slowGovernanceTallyThreshold = 30 * time.Second
 // does hold pool stake -- so the chain has SPO stake and this boundary's copy
 // of it is simply unavailable.
 //
-// A real epoch rollover always hits this when
-// LedgerState.SetCurrentBoundarySPOStakeHook is not installed, because
-// mark[NewEpoch] is written at the end of the same rollover, after RATIFY.
-// Tallying anyway would put zero in the SPO denominator and silently refuse
-// every SPO-gated action forever, so the boundary fails loudly instead.
+// A real epoch rollover reaches this whenever
+// LedgerState.SetCurrentBoundarySPOStakeHook is not installed and the chain
+// already carries a mark[NewEpoch-1], because mark[NewEpoch] is written at
+// the end of the same rollover, after RATIFY. Tallying anyway would put zero
+// in the SPO denominator and silently refuse every SPO-gated action forever,
+// so the boundary fails loudly instead.
+//
+// The previous boundary's mark is what makes the empty read a contradiction,
+// so a boundary with no earlier mark is outside this guard: an un-wired
+// caller there tallies zero and ratifies nothing with no error, even when
+// live delegation would have cleared the threshold. ledger's
+// TestHardForkInitiation_NeverRatifiesWithoutCurrentBoundaryHook pins that
+// residual case.
 var ErrMissingCurrentBoundarySPOState = errors.New(
 	"no same-boundary SPO stake distribution for the RATIFY tally",
 )

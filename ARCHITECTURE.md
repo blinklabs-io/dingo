@@ -11694,12 +11694,17 @@ calls it right after the SNAP-point stake read and passes the result to
 prefers over its own `LoadSPOVotingState` DB read. A production node must wire
 this hook alongside the other two: without it, RATIFY falls back to reading the
 not-yet-written row and finds zero SPO stake for every gated action at every
-boundary -- worse than the epoch-lag bug this fixed, not better. That state is
-not reachable silently. When the fallback read comes back empty while
-`mark[NewEpoch-1]` still holds pool stake, `ProcessEpoch` returns
-`ErrMissingCurrentBoundarySPOState` and the boundary fails rather than tally a
-zero denominator; the previous boundary's mark is what distinguishes a missing
-hook from a chain that has never held snapshot stake.
+boundary -- worse than the epoch-lag bug this fixed, not better. When the
+fallback read comes back empty while `mark[NewEpoch-1]` still holds pool stake,
+`ProcessEpoch` returns `ErrMissingCurrentBoundarySPOState` and the boundary
+fails rather than tally a zero denominator; the previous boundary's mark is
+what makes the empty read a contradiction rather than a fact. That gate leaves
+one case silent, and it is not covered by any error: a boundary with no earlier
+mark at all, where an un-wired caller ratifies nothing and reports nothing even
+though live delegation would have cleared the threshold.
+`TestHardForkInitiation_NeverRatifiesWithoutCurrentBoundaryHook` pins that
+residual behavior, so wiring the hook -- not the guard -- is what a node relies
+on.
 
 The mid-epoch predictor is a separate consumer and does not take this route.
 `governance.EvaluateRatifiableHardForkInitiation`, which

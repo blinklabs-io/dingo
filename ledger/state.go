@@ -3099,11 +3099,16 @@ type currentBoundarySPOStakeHookHolder struct {
 // pool_stake_snapshot row, which holds no stake at all -- so every SPO-gated
 // action would tally a zero denominator and never ratify, which is strictly
 // worse than the epoch-lag bug this fixed (dingo#4441): permanent
-// non-ratification instead of a wrong but eventually-correct epoch. That
-// outcome is not reachable silently: governance.ProcessEpoch rejects the
-// empty read with governance.ErrMissingCurrentBoundarySPOState and the
-// boundary fails. A production node must always wire this alongside the
-// other two epoch-boundary hooks.
+// non-ratification instead of a wrong but eventually-correct epoch.
+// governance.ProcessEpoch rejects that empty read with
+// governance.ErrMissingCurrentBoundarySPOState, so the boundary fails rather
+// than tally a zero denominator -- but only once mark[NewEpoch-1] holds
+// stake, which is the signal that distinguishes a missing hook from a chain
+// with no earlier mark. A boundary with no earlier mark keeps the silent
+// outcome: it ratifies nothing and reports no error, which
+// TestHardForkInitiation_NeverRatifiesWithoutCurrentBoundaryHook pins. A
+// production node must always wire this alongside the other two
+// epoch-boundary hooks.
 func (ls *LedgerState) SetCurrentBoundarySPOStakeHook(
 	fn func(*database.Txn, event.EpochTransitionEvent) ([]*models.PoolStakeSnapshot, error),
 ) {
