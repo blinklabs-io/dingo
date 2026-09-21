@@ -2089,6 +2089,20 @@ type MetadataStore interface {
 		types.Txn,
 	) error
 
+	// ReconcileAccountRewardBalance overwrites an account's reward balance
+	// directly, without clearing to zero -- see the sqlstore implementation's
+	// doc comment for the narrow, explicitly opt-in recovery path this
+	// exists for, and for why it still records an invertible delta row keyed
+	// on slot/txHash despite not being a real withdrawal.
+	ReconcileAccountRewardBalance(
+		uint8, // credentialTag
+		[]byte, // stakeKey
+		uint64, // correctedAmount
+		uint64, // slot
+		[]byte, // txHash
+		types.Txn,
+	) error
+
 	// AddAccountRewardByCredential credits rewards using the full stake credential identity.
 	// The credential tag prevents key and script reward accounts with the same hash from merging.
 	//

@@ -39,6 +39,29 @@ type historicalWithdrawal struct {
 	slot     int64
 	id       int64
 	previous uint64
+	// reconciled is the balance ReconcileAccountRewardBalance corrected this
+	// row's credential to, non-nil only for the synthetic withdrawal-shaped
+	// row that correction writes (account.go). A boundary at or after the
+	// row's slot resolves through account.reward directly and never consults
+	// this row at all, so this field only ever affects a boundary strictly
+	// before the correction -- see resolvedWithdrawalBalance.
+	reconciled *uint64
+}
+
+// resolvedWithdrawalBalance returns the balance historicalRewardsBatch should
+// treat withdrawal as having cleared, for a boundary before withdrawal's
+// slot. An ordinary withdrawal cleared previous_reward to zero, so that is
+// the right value for a target boundary that predates it. A
+// ReconcileAccountRewardBalance correction is not a real withdrawal: it
+// overwrote the balance to reconciled directly, and previous_reward there is
+// only the pre-correction balance the correction proved wrong (dingo #4529)
+// -- resolving through it would keep reproducing that same wrong value for
+// every boundary before the correction.
+func (w historicalWithdrawal) resolvedWithdrawalBalance() uint64 {
+	if w.reconciled != nil {
+		return *w.reconciled
+	}
+	return w.previous
 }
 
 // historicalRewards evaluates future reward credits only for the selected
@@ -99,6 +122,13 @@ func historicalRewardsAtBoundary(
 // historicalRewardsBatch evaluates future reward credits in Go. Amounts are
 // persisted as decimal text and can exceed a signed SQL integer; keeping the
 // ordering logic here avoids lossy CAST/SUM arithmetic in SQLite.
+//
+// The nearest withdrawal-shaped row at or after the target slot resolves to
+// its resolvedWithdrawalBalance (ordinarily previous_reward, the balance a
+// real withdrawal cleared), minus any future credit that landed before that
+// row. See historicalWithdrawal.resolvedWithdrawalBalance for why a
+// ReconcileAccountRewardBalance correction resolves differently (dingo
+// #4529).
 func historicalRewardsBatch(
 	ctx context.Context,
 	db queryer,
@@ -159,7 +189,8 @@ func historicalRewardsBatch(
 	}
 	withdrawalArgs := append([]any{withdrawalValue}, predicateArgs...)
 	rows, err = db.QueryContext(ctx, `
-SELECT credential_tag, staking_key, id, added_slot, previous_reward
+SELECT credential_tag, staking_key, id, added_slot, previous_reward,
+       reconciled_amount
 FROM account_reward_delta
 WHERE withdrawal = TRUE AND added_slot `+withdrawalOp+` ? AND (`+predicate+`)
 	ORDER BY credential_tag, staking_key, added_slot, id`, withdrawalArgs...)
@@ -170,8 +201,10 @@ WHERE withdrawal = TRUE AND added_slot `+withdrawalOp+` ? AND (`+predicate+`)
 		var tag uint8
 		var key []byte
 		var id, addedSlot int64
-		var raw sql.NullString
-		if err := rows.Scan(&tag, &key, &id, &addedSlot, &raw); err != nil {
+		var raw, reconciledRaw sql.NullString
+		if err := rows.Scan(
+			&tag, &key, &id, &addedSlot, &raw, &reconciledRaw,
+		); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -190,10 +223,23 @@ WHERE withdrawal = TRUE AND added_slot `+withdrawalOp+` ? AND (`+predicate+`)
 				return nil, err
 			}
 		}
+		var reconciled *uint64
+		if reconciledRaw.Valid && reconciledRaw.String != "" {
+			value, err := parseUint64(
+				"historical reconciled reward",
+				reconciledRaw.String,
+			)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			reconciled = &value
+		}
 		withdrawals[ref] = historicalWithdrawal{
-			slot:     addedSlot,
-			id:       id,
-			previous: previous,
+			slot:       addedSlot,
+			id:         id,
+			previous:   previous,
+			reconciled: reconciled,
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -270,10 +316,11 @@ WHERE withdrawal = FALSE AND `+futureRewardPredicate+` AND (`+predicate+`)
 	ret := make(map[historicalRewardKey]uint64, len(base)+len(total))
 	maps.Copy(ret, base)
 	for ref, withdrawal := range withdrawals {
-		if beforeWithdrawal[ref] > withdrawal.previous {
+		resolved := withdrawal.resolvedWithdrawalBalance()
+		if beforeWithdrawal[ref] > resolved {
 			return nil, errors.New("historical reward underflow")
 		}
-		ret[ref] = withdrawal.previous - beforeWithdrawal[ref]
+		ret[ref] = resolved - beforeWithdrawal[ref]
 	}
 	for ref, credits := range total {
 		if _, hasWithdrawal := withdrawals[ref]; hasWithdrawal {

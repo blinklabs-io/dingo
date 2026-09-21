@@ -53,6 +53,7 @@ const (
 	governanceProposalDroppedSchemaRelease        = "governance-proposal-dropped-epoch"
 	rewardSnapshotExcludedStakeSchemaRelease      = "reward-snapshot-excluded-active-stake"
 	assetNameHexColumnDropSchemaRelease           = "asset-name-hex-column-drop"
+	accountRewardReconciledAmountSchemaRelease    = "account-reward-delta-reconciled-amount"
 )
 
 // schemaVersions names every migration in ascending version order.
@@ -107,6 +108,11 @@ var schemaVersions = []struct {
 		Version: 19,
 		Name:    assetNameHexColumnDropSchemaRelease,
 		Dir:     "v19",
+	},
+	{
+		Version: 20,
+		Name:    accountRewardReconciledAmountSchemaRelease,
+		Dir:     "v20",
 	},
 }
 

@@ -201,6 +201,17 @@ type AccountRewardDelta struct {
 	// boundary slot, which idx_account_reward_delta_credential/added_slot
 	// already narrow.
 	PostSnapshot bool
+	// ReconciledAmount is set only on the synthetic withdrawal-shaped row
+	// ReconcileAccountRewardBalance writes when a canonical peer's block
+	// proves the locally reconstructed reward balance wrong (see that
+	// method's doc comment, sqlstore/account.go). It records the corrected
+	// balance separately from PreviousReward (the pre-correction balance the
+	// correction proved wrong), so historicalRewardsBatch can resolve a
+	// boundary before the correction's slot to the corrected balance instead
+	// of reproducing the same wrong value (dingo #4529), while
+	// DeleteAccountRewardsAfterSlot's rollback path keeps using
+	// PreviousReward exactly as before. Nil for every ordinary withdrawal.
+	ReconciledAmount *types.Uint64
 }
 
 // AccountWithdrawalWitness records every valid reward-withdrawal map entry,

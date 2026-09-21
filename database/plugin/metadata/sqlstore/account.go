@@ -18,6 +18,7 @@ package sqlstore
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/big"
@@ -1549,6 +1550,185 @@ ON CONFLICT (
 	)
 }
 
+// ReconcileAccountRewardBalance overwrites an account's reward balance with
+// correctedAmount, without treating the change as a withdrawal: the balance
+// is not cleared to zero, and the recorded account_reward_delta row exists
+// only so a later rollback (DeleteAccountRewardsAfterSlot, including via
+// `dingo database truncate`) can invert this exact overwrite -- it is not a
+// real on-chain event and carries no withdrawal semantics of its own.
+//
+// Before this delta row existed, a rollback/truncate crossing this slot had
+// no record that the balance had been overwritten out-of-band: it would
+// walk the delta chain as if this account's history were unbroken, and
+// eventually try to undo an earlier, legitimate accrual delta against a
+// current balance the overwrite had silently changed, failing with
+// "account reward rollback underflow" (dingo#4510 follow-up, discovered
+// while trying to truncate a database that had exercised this reconciliation
+// path). Recording a withdrawal-shaped delta with previous_reward set to the
+// pre-overwrite balance lets DeleteAccountRewardsAfterSlot's existing
+// withdrawal branch (which restores previous_reward verbatim, ignoring
+// amount) correctly restore that balance regardless of what correctedAmount
+// was.
+//
+// The same delta row is also read by historicalRewardsBatch
+// (historical_stake.go), which reconstructs a credential's reward balance as
+// of an arbitrary past slot by walking every withdrawal-shaped row on or
+// after that slot and resolving to the row's balance-before-the-row (dingo
+// #4529): for an ordinary withdrawal that is exactly previous_reward, the
+// balance a real withdrawal cleared to zero. Using previous_reward the same
+// way here would resolve every boundary before this correction's slot to
+// the pre-correction balance -- the very value this reconciliation exists to
+// say was wrong -- reproducing the same small, persistent understatement in
+// every historical/epoch-boundary stake read that predates the correction.
+// reconciled_amount records correctedAmount separately so
+// historicalRewardsBatch can resolve those boundaries to the corrected
+// balance instead, while previous_reward keeps meaning exactly what
+// DeleteAccountRewardsAfterSlot has always used it for. It is NULL for every
+// ordinary withdrawal row and set only here.
+//
+// This exists for a narrow, explicitly opt-in reward-balance recovery path
+// (dingo#4152 follow-up; not present in this codebase as of this change --
+// see dingo#4560's review discussion): a validated peer's block proves the
+// locally reconstructed reward balance for one credential disagrees with the
+// chain by some small amount, and the operator has chosen to trust the
+// peer's figure over the node's own reconstruction rather than halt the
+// ledger pipeline indefinitely on shelley.IncorrectWithdrawalAmountError.
+// This method and the reconciled_amount column it writes are retained as
+// independently valid historical-reconstruction/rollback-repair
+// infrastructure even without that recovery path wired up to a caller;
+// wiring a caller back in is out of scope here and would need real
+// independent-corroboration evidence, not a bare redelivery-based trust
+// flag. Correcting the
+// balance to the withdrawal's own Provided amount, rather than to zero,
+// deliberately does not apply the withdrawal itself -- it only makes the
+// account's balance agree with what the pending block's own validation
+// rule expects, so replay recovery's ordinary rewind-and-retry can
+// re-validate and apply that same block normally afterward, through the
+// same path a correct reconstruction would have taken.
+//
+// slot and txHash identify the block/transaction whose validation triggered
+// this reconciliation. The row this writes is keyed on a discriminator
+// derived from txHash (reconciliationDiscriminator), not txHash itself: the
+// real transaction is expected to be re-validated and applied normally on
+// the very next retry (see above), through ApplyAccountRewardWithdrawal,
+// whose own idempotency check looks up a withdrawal row by the identical
+// (tx_hash, credential_tag, staking_key) triple. Keying this row on the
+// unmodified txHash would make that lookup find THIS row instead of the
+// real withdrawal's own, short-circuit as "already applied", and never
+// zero the balance the retried withdrawal is supposed to withdraw --
+// leaving account.reward permanently stuck at correctedAmount. The
+// discriminator keeps this row idempotent against a redelivery of the same
+// reconciliation event while staying distinct from any real tx_hash.
+func (s *Store) ReconcileAccountRewardBalance(
+	credentialTag uint8,
+	stakeKey []byte,
+	correctedAmount uint64,
+	slot uint64,
+	txHash []byte,
+	txn types.Txn,
+) error {
+	discriminator := reconciliationDiscriminator(txHash)
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return err
+	}
+	return s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			var accountID int64
+			var reward sql.NullString
+			err := db.QueryRowContext(ctx, `
+SELECT id, reward FROM account
+WHERE credential_tag = ? AND staking_key = ? AND active = TRUE`,
+				credentialTag,
+				stakeKey,
+			).Scan(&accountID, &reward)
+			if errors.Is(err, sql.ErrNoRows) {
+				return models.ErrAccountNotFound
+			}
+			if err != nil {
+				return err
+			}
+			current, err := parseNullUint64("account reward", reward)
+			if err != nil {
+				return err
+			}
+			if _, err := db.ExecContext(ctx, `
+UPDATE account SET reward = ? WHERE id = ?`,
+				strconv.FormatUint(correctedAmount, 10),
+				accountID,
+			); err != nil {
+				return err
+			}
+			if _, err := db.ExecContext(ctx, `
+INSERT INTO account_reward_delta (
+    staking_key, credential_tag, tx_hash, amount, previous_reward,
+    added_slot, withdrawal, reconciled_amount
+) VALUES (?, ?, ?, ?, ?, ?, TRUE, ?)
+ON CONFLICT (
+    withdrawal, tx_hash, credential_tag, staking_key, added_slot
+) DO NOTHING`,
+				stakeKey,
+				credentialTag,
+				discriminator,
+				strconv.FormatUint(current, 10),
+				strconv.FormatUint(current, 10),
+				slotValue,
+				strconv.FormatUint(correctedAmount, 10),
+			); err != nil {
+				return err
+			}
+			// Every other account.reward mutator in this file
+			// (AddAccountRewardByCredential, AddPostSnapshotAccountRewardByCredential,
+			// ApplyAccountRewardWithdrawal) refreshes reward_live_stake as its
+			// last step. Omitting it here left reward_live_stake -- the
+			// incrementally maintained aggregate the live/fast mark-snapshot
+			// path reads -- silently stale after every
+			// ReconcileAccountRewardBalance correction, while
+			// account.reward held the corrected value. That is a real
+			// divergence between the two supposedly-equivalent reward
+			// aggregates in its own right, independent of whether it is the
+			// specific mechanism behind any one observed stake-drift report
+			// (see dingo #4529, still under investigation as of this fix).
+			return s.refreshRewardLiveStakeAggregate(
+				ctx,
+				db,
+				models.NewStakeCredentialRef(credentialTag, stakeKey),
+				slot,
+			)
+		},
+	)
+}
+
+// reconciliationDiscriminatorPrefix marks an account_reward_delta row as a
+// ReconcileAccountRewardBalance correction rather than a real withdrawal,
+// mirroring mirRewardSourceHash's synthetic-discriminator pattern in
+// ledger/mir.go for the same reason: this table's tx_hash column doubles as
+// a generic per-writer discriminator wherever no natural one applies (or, as
+// here, where the natural one must not be reused -- see
+// reconciliationDiscriminator).
+const reconciliationDiscriminatorPrefix = "dingo:reconcile:"
+
+// reconciliationDiscriminator derives the account_reward_delta identity for
+// a ReconcileAccountRewardBalance correction from the real transaction hash
+// that triggered it, without reusing that hash directly.
+// ApplyAccountRewardWithdrawal's own idempotency check looks up a withdrawal
+// row by the exact (tx_hash, credential_tag, staking_key) triple the real
+// withdrawal will also use once replay recovery re-validates and applies it
+// (see ReconcileAccountRewardBalance's doc comment); keying this row on the
+// unmodified hash would make that lookup match this row instead, report the
+// real withdrawal as already applied, and never zero the balance it is
+// supposed to withdraw. Prefixing keeps this row idempotent against a
+// redelivery of the same reconciliation event (same txHash in, same
+// discriminator out) while guaranteeing it can never equal a real 32-byte
+// transaction hash.
+func reconciliationDiscriminator(txHash []byte) []byte {
+	out := make([]byte, 0, len(reconciliationDiscriminatorPrefix)+len(txHash))
+	out = append(out, reconciliationDiscriminatorPrefix...)
+	out = append(out, txHash...)
+	return out
+}
+
 func (s *Store) DeleteAccountRewardsAfterSlot(
 	slot uint64,
 	txn types.Txn,
@@ -1643,12 +1823,41 @@ WHERE credential_tag = ? AND staking_key = ?`,
 						return err
 					}
 					if current < item.amount {
-						return fmt.Errorf(
-							"account reward rollback underflow for stake key %x",
-							item.key,
-						)
+						// The delta chain assumes an unbroken history: every
+						// balance change between here and the current value
+						// is accounted for by exactly one row this loop will
+						// walk. A gap -- most commonly an out-of-band balance
+						// correction that intentionally records no delta of
+						// its own (see ReconcileAccountRewardBalance's doc
+						// comment) predating this database's own fix for
+						// that -- breaks that assumption and would otherwise
+						// make this a hard failure for every caller of
+						// DeleteAccountRewardsAfterSlot, including
+						// `dingo database truncate`, whose own doc comment
+						// promises exactly the disaster-recovery scenario an
+						// unbroken delta chain cannot always guarantee.
+						// Clamping to zero and continuing accepts an
+						// imprecise reward balance for this one credential
+						// rather than refusing the entire rollback: the
+						// alternative is a truncate that can never succeed
+						// against a database old enough to carry such a gap,
+						// for a value normal replay will reconcile again from
+						// the next real withdrawal or reward-crediting event
+						// this credential sees post-rollback.
+						if s.logger != nil {
+							s.logger.Warn(
+								"account reward rollback underflow; clamping to zero and continuing",
+								"component", "database",
+								"staking_key", hex.EncodeToString(item.key),
+								"credential_tag", item.tag,
+								"current_reward", current,
+								"delta_amount", item.amount,
+							)
+						}
+						value = 0
+					} else {
+						value = current - item.amount
 					}
-					value = current - item.amount
 				}
 				if _, err := db.ExecContext(ctx, `
 UPDATE account SET reward = ? WHERE id = ?`,
