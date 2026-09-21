@@ -428,9 +428,13 @@ func TestCalculateNetworkEfficiencyHonorsDecentralizationThreshold(
 	require.Equal(t, big.NewRat(2, 1), result.ExpectedBlocks)
 	require.Equal(t, big.NewRat(1, 1), result.Efficiency)
 	require.Equal(t, uint64(1_000_000), result.Incentives)
-	require.Equal(t, uint64(46_283), result.EffectiveRewards)
-	require.Equal(t, uint64(953_717), result.Undistributed)
-	require.Equal(t, uint64(99_953_717), result.UpdatedPots.Reserves)
+	// The pool has no BlocksProduced set, so it made zero blocks this epoch:
+	// it earns nothing at every decentralization value, matching
+	// mkPoolRewardInfo's Left (dingo#3978). The whole available pot falls
+	// through to reserves as undistributed.
+	require.Equal(t, uint64(0), result.EffectiveRewards)
+	require.Equal(t, uint64(1_000_000), result.Undistributed)
+	require.Equal(t, uint64(100_000_000), result.UpdatedPots.Reserves)
 
 	params.Decentralization = big.NewRat(1, 1)
 	result, err = Calculate(Pots{Reserves: 100_000_000}, snapshot, params)
@@ -438,8 +442,8 @@ func TestCalculateNetworkEfficiencyHonorsDecentralizationThreshold(
 	require.Equal(t, big.NewRat(0, 1), result.ExpectedBlocks)
 	require.Equal(t, big.NewRat(1, 1), result.Efficiency)
 	require.Equal(t, uint64(1_000_000), result.Incentives)
-	require.Equal(t, uint64(46_283), result.EffectiveRewards)
-	require.Equal(t, uint64(953_717), result.Undistributed)
+	require.Equal(t, uint64(0), result.EffectiveRewards)
+	require.Equal(t, uint64(1_000_000), result.Undistributed)
 }
 
 func TestCalculateRoutesUnspendableRewardsToTreasury(t *testing.T) {
@@ -1332,6 +1336,78 @@ func TestApparentPerformanceHonorsDecentralizationThreshold(t *testing.T) {
 		big.NewRat(2, 1),
 		apparentPerformance(big.NewRat(0, 1), 10, 100, 2, 10),
 	)
+}
+
+// TestCalculatePoolRewardZeroBlocksEarnsNothing matches cardano-ledger's
+// mkPoolRewardInfo, which returns Left (excluding the pool from reward
+// construction entirely) whenever a pool made no blocks in the epoch -
+// Cardano.Ledger.Shelley.Rewards.hs, mkPoolRewardInfo. apparentPerformance
+// alone does not encode that rule: it returns 1 once d >= 4/5 regardless of
+// blocksProduced, matching mkApparentPerformance exactly (dingo#3978), so a
+// pool with zero blocks earned the pool's optimalReward instead of nothing.
+func TestCalculatePoolRewardZeroBlocksEarnsNothing(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name           string
+		decentralized  *big.Rat
+		blocksProduced uint64
+		wantEarns      bool
+	}{
+		{
+			name:           "zero blocks at d >= 4/5 earns nothing",
+			decentralized:  big.NewRat(4, 5),
+			blocksProduced: 0,
+			wantEarns:      false,
+		},
+		{
+			name:           "zero blocks below d = 4/5 earns nothing (control)",
+			decentralized:  big.NewRat(1, 2),
+			blocksProduced: 0,
+			wantEarns:      false,
+		},
+		{
+			name:           "pool that produced blocks earns at d >= 4/5 (control)",
+			decentralized:  big.NewRat(4, 5),
+			blocksProduced: 5,
+			wantEarns:      true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			params := testParams()
+			params.Decentralization = tc.decentralized
+			pool := Pool{
+				ID:             testPoolID(1),
+				Margin:         big.NewRat(1, 10),
+				Pledge:         100,
+				Cost:           50,
+				DelegatedStake: 1_000,
+				OwnerStake:     500,
+				BlocksProduced: tc.blocksProduced,
+			}
+
+			reward, err := calculatePoolRewards(
+				pool,
+				1_000_000,
+				10_000,
+				10_000,
+				100,
+				params,
+			)
+			require.NoError(t, err)
+
+			if tc.wantEarns {
+				require.NotZero(t, reward.OptimalReward, "optimal reward")
+				require.NotZero(t, reward.PoolReward, "pool reward")
+				require.NotZero(t, reward.LeaderReward, "leader reward")
+			} else {
+				require.Zero(t, reward.PoolReward, "pool reward")
+				require.Zero(t, reward.LeaderReward, "leader reward")
+			}
+		})
+	}
 }
 
 func TestRewardEfficiencyHonorsDecentralizationThreshold(t *testing.T) {
