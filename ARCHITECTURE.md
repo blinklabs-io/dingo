@@ -728,14 +728,22 @@ that does not resolve takes the same
 `NoBlocks` and stuck-peer accounting as the other invalid-range rejections.
 The requested slot span itself is not bounded up front — on a sparse or
 low-active-slot-coefficient network, a valid run of consecutive blocks can
-span far more slots than mainnet's stability window (#4354) — instead,
-`MaxBlockFetchBlocks` caps the number of blocks served per range. That bound
-is not sized to this implementation's own chainsync client; it governs every
-peer, so it carries an order of magnitude of headroom above that client's own
-batch size to stay well clear of what an honest `cardano-node` peer's
-byte-watermarked BlockFetch client can legitimately request for small blocks
-on a higher-latency link. A range that would exceed it closes the connection
-mid-batch rather than being rejected up front, since `StartBatch` has already
+span far more slots than mainnet's stability window (#4354) — instead, the
+range's block count (both endpoints' block numbers are already resolved by
+the validation above) is checked against
+`maxBlockFetchBlocksForSecurityParam`, scaled to the serving network's own
+security parameter K rather than fixed: an honest peer's candidate fragment,
+and so a legitimate range, scales with K, not with any one implementation's
+batch size, and `blockfetchMaxBlocksFloor` keeps a small- or unconfigured-K
+network from capping below what this implementation's own chainsync client
+batches. A range whose block count exceeds this bound takes the same
+`NoBlocks` and stuck-peer accounting as the other invalid-range rejections,
+so an honest peer gets a signal it can act on instead of a transport reset it
+would only repeat by retrying the identical range. `blockfetchServerSendBatch`
+still enforces the same bound again while streaming, as a backstop for cases
+the up-front check cannot cover — a concurrent rollback after validation, or
+a Byron-EBB block-number tie undercounting the range — closing the
+connection if it is ever reached, since `StartBatch` has by then already
 committed the protocol exchange. Once a batch starts, blocks are streamed
 through the exact requested end slot and hash; earlier blocks at the same
 slot, including Byron epoch-boundary blocks, do not complete the range.

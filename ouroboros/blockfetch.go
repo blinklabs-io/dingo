@@ -35,36 +35,58 @@ import (
 // on late blocks) is sufficient for dashboard accuracy.
 const blockfetchMetricsCdfUpdateInterval = 32
 
-// MaxBlockFetchBlocks is the maximum number of blocks served for a single
-// BlockFetch range request. This prevents a peer from using a single
-// request to make the server stream the entire chain.
+// blockfetchMaxBlocksFloor is the minimum cap on blocks served for a single
+// BlockFetch range request, applied regardless of the network's security
+// parameter K. This prevents a peer from using a single request to make the
+// server stream the entire chain, while never capping below
+// ledger.BlockfetchBatchSize (500), the largest range this implementation's
+// own chainsync client ever requests in one call: without this floor, a
+// custom or test network configured with a small K would reject Dingo's own
+// chainsync batches.
+const blockfetchMaxBlocksFloor = 10 * ledger.BlockfetchBatchSize
+
+// maxBlockFetchBlocksForSecurityParam returns the maximum number of blocks
+// served for a single BlockFetch range request. The bound is on the actual
+// resource cost (blocks iterated and sent) rather than on slot distance: on
+// a sparse or low-active-slot-coefficient custom network, a run of
+// consecutive real blocks can span far more slots than mainnet's 3k/f
+// stability window, so rejecting purely on slot distance discards valid
+// requests (#4354).
 //
-// The bound is on the actual resource cost (blocks iterated and sent)
-// rather than on slot distance: on a sparse or low-active-slot-coefficient
-// custom network, a run of consecutive real blocks can span far more slots
-// than mainnet's 3k/f stability window, so rejecting purely on slot
-// distance discards valid requests (#4354).
-//
-// This is not sized to Dingo's own chainsync client, which never batches
-// more than ledger.BlockfetchBatchSize (500) blocks into one range: the cap
-// governs every peer, and cardano-node's BlockFetch client has no
-// block-count limit of its own, only a byte-based in-flight watermark
-// (ouroboros-network Decision.hs/DeltaQ.hs) that -- for small Praos-era
-// blocks, at the default pre-keepalive-sample GSV or on a higher-latency
-// link -- can legitimately span roughly a thousand blocks in one request.
-// 5000 keeps an order of magnitude of headroom above Dingo's own batch size
-// (see TestMaxBlockFetchBlocksHasHeadroomOverChainsyncBatchSize) and well
-// above that realistic upper bound, so it still bounds worst-case resource
-// usage per request without rejecting an honest bulk-syncing peer.
-const MaxBlockFetchBlocks = 5000
+// It is not sized to Dingo's own chainsync client; it governs every peer,
+// and an honest peer's candidate fragment -- and so a legitimate BlockFetch
+// range -- scales with the network's own security parameter K, not with any
+// one implementation's batch size. 3*K reuses the same numerator the
+// removed slot-distance check (3k/f) used, reinterpreted as a block count
+// once the active-slot-coefficient factor no longer applies; it is a chosen
+// safety margin, not a protocol guarantee. blockfetchMaxBlocksFloor keeps a
+// small-K network from capping below Dingo's own batch size.
+func maxBlockFetchBlocksForSecurityParam(k int) int {
+	if k < 0 {
+		k = 0
+	}
+	if dynamic := 3 * k; dynamic > blockfetchMaxBlocksFloor {
+		return dynamic
+	}
+	return blockfetchMaxBlocksFloor
+}
 
 // errBlockfetchRangeExceededMaxBlocks is returned by blockfetchServerSendBatch
-// when a range would serve more than MaxBlockFetchBlocks. blockfetchServerRequestRange's
-// async goroutine reports every non-nil error through
-// reportBlockfetchServerAsyncError, which logs at Error and closes the
-// connection again; this sentinel lets that reporter recognize the case
-// already fully handled (WARN logged, connection closed) at the point the
-// cap was hit, and skip the redundant Error log and second Close() call.
+// when a range would serve more blocks than maxBlockFetchBlocksForSecurityParam
+// allows. blockfetchServerRequestRange's async goroutine reports every
+// non-nil error through reportBlockfetchServerAsyncError, which logs at
+// Error and closes the connection again; this sentinel lets that reporter
+// recognize the case already fully handled (WARN logged, connection closed)
+// at the point the cap was hit, and skip the redundant Error log and second
+// Close() call.
+//
+// In practice this should be rare: blockfetchServerRequestRange rejects an
+// oversized range with NoBlocks before StartBatch for any range whose block
+// count is knowable up front, so an honest peer gets a recoverable signal
+// instead of reaching this backstop. It stays as defense in depth for cases
+// the up-front check cannot cover, such as a concurrent rollback changing
+// the chain after validation or a Byron-EBB block-number tie undercounting
+// the range.
 var errBlockfetchRangeExceededMaxBlocks = errors.New(
 	"blockfetch range exceeded maximum block count",
 )
@@ -248,10 +270,8 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 	// The requested slot span is not validated here: on a sparse or
 	// low-active-slot-coefficient network, a valid run of consecutive
 	// blocks can span far more slots than mainnet's stability window
-	// (#4354). Resource usage is instead bounded by actual block count in
-	// blockfetchServerSendBatch (MaxBlockFetchBlocks), which reflects the
-	// real per-request cost of serving it, with headroom for any honest
-	// peer's usage rather than a fixed slot-distance formula.
+	// (#4354). Resource usage is instead bounded by actual block count,
+	// below, scaled to the network's own security parameter.
 	//
 	// Validate that the start point exists in our chain (#397)
 	chainIter, err := o.ledgerState.GetChainFromPoint(start, true)
@@ -303,6 +323,49 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 		return nil
 	}
 	endIter.Cancel()
+	maxBlocks := maxBlockFetchBlocksForSecurityParam(o.ledgerState.SecurityParam())
+	// maxBlockFetchBlocksForSecurityParam never returns negative.
+	maxBlocksU64 := uint64(maxBlocks) // #nosec G115
+	// Validate that the range does not exceed the block-count bound (#4354).
+	// This mirrors the other invalid-range rejections above instead of
+	// silently dropping the connection mid-batch: an honest peer whose range
+	// is genuinely larger than the network supports gets a clean, accounted
+	// NoBlocks it can act on, rather than a transport reset it would only
+	// repeat by retrying the identical range. Best-effort: if either
+	// endpoint's block cannot be resolved here -- for example, a race with a
+	// concurrent rollback after the checks above -- skip this early check
+	// and let blockfetchServerSendBatch's own resource bound enforce it
+	// during streaming instead.
+	if startBlock, startErr := o.ledgerState.GetBlock(start); startErr == nil {
+		if endBlock, endErr := o.ledgerState.GetBlock(end); endErr == nil &&
+			endBlock.Number >= startBlock.Number {
+			blockCount := endBlock.Number - startBlock.Number + 1
+			if blockCount > maxBlocksU64 {
+				o.config.Logger.Debug(
+					"blockfetch: range exceeds maximum block count, sending NoBlocks",
+					"connection_id", ctx.ConnectionId.String(),
+					"start_slot", start.Slot,
+					"end_slot", end.Slot,
+					"block_count", blockCount,
+					"max_blocks", maxBlocks,
+				)
+				chainIter.Cancel()
+				if err := ctx.Server.NoBlocks(); err != nil {
+					return fmt.Errorf(
+						"blockfetch NoBlocks after oversized range: %w",
+						err,
+					)
+				}
+				o.blockfetchRecordNoBlocksAndMaybeClose(
+					ctx.ConnectionId,
+					start,
+					"blockfetch: closing stuck peer after repeated oversized range requests",
+					"blockfetch: peer stuck on oversized range",
+				)
+				return nil
+			}
+		}
+	}
 	o.blockfetchResetNoBlocks(ctx.ConnectionId)
 	// Start async process to send requested block range
 	go func() {
@@ -318,6 +381,7 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 			chainIter,
 			ctx.Server,
 			conn,
+			maxBlocks,
 		)
 		if err != nil {
 			o.reportBlockfetchServerAsyncError(
@@ -339,6 +403,7 @@ func (o *Ouroboros) blockfetchServerSendBatch(
 	chainIter blockfetchRangeIterator,
 	server blockfetchBatchServer,
 	conn blockfetchConnection,
+	maxBlocks int,
 ) error {
 	defer chainIter.Cancel()
 	if err := server.StartBatch(); err != nil {
@@ -412,21 +477,22 @@ Loop:
 				reachedEnd = true
 			}
 			blocksServed++
-			if blocksServed > MaxBlockFetchBlocks {
-				// Both endpoints were already validated against the
-				// serving chain, so this is a resource bound, not a
-				// correctness check -- an honest peer can legitimately
-				// reach it on a sparse network with a wide slot span, not
-				// just a hostile one. StartBatch() has already committed
-				// the protocol to this batch, so the only safe recovery
-				// is to drop the transport (mirrors the other
-				// post-StartBatch error paths below).
+			if blocksServed > maxBlocks {
+				// blockfetchServerRequestRange already rejects an oversized
+				// range with NoBlocks before StartBatch when both
+				// endpoints' block numbers are resolvable, so reaching this
+				// backstop means that check could not run or undercounted
+				// (a concurrent rollback, or a Byron-EBB block-number tie).
+				// StartBatch() has already committed the protocol to this
+				// batch, so the only safe recovery left is to drop the
+				// transport (mirrors the other post-StartBatch error paths
+				// below).
 				o.config.Logger.Warn(
 					"blockfetch: range exceeded maximum block count, closing connection",
 					"connection_id", connectionID,
 					"start_slot", start.Slot,
 					"end_slot", end.Slot,
-					"max_blocks", MaxBlockFetchBlocks,
+					"max_blocks", maxBlocks,
 				)
 				o.closeBlockfetchConnection(
 					conn,

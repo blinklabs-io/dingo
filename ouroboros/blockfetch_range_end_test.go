@@ -17,12 +17,15 @@ package ouroboros
 import (
 	"context"
 	"crypto/sha256"
+	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
@@ -108,6 +111,22 @@ func newBlockfetchRangeFixtureWithSlots(
 	slots []uint64,
 ) *blockfetchRangeFixture {
 	t.Helper()
+	return newBlockfetchRangeFixtureWithSlotsAndConfig(t, slots, nil)
+}
+
+// newBlockfetchRangeFixtureWithSlotsAndConfig is
+// newBlockfetchRangeFixtureWithSlots generalized to an optional
+// *cardano.CardanoNodeConfig, so a test can control what
+// o.ledgerState.SecurityParam() (LedgerState.SecurityParam, distinct from
+// the ChainManager-level testSecurityParamLedger below) returns. A nil
+// config leaves LedgerState without a CardanoNodeConfig, so SecurityParam()
+// falls back to blockfetchBatchSlotThresholdDefault.
+func newBlockfetchRangeFixtureWithSlotsAndConfig(
+	t *testing.T,
+	slots []uint64,
+	cardanoConfig *cardano.CardanoNodeConfig,
+) *blockfetchRangeFixture {
+	t.Helper()
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
@@ -141,9 +160,10 @@ func newBlockfetchRangeFixtureWithSlots(
 		Level: slog.LevelDebug,
 	}))
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
-		Database:     db,
-		ChainManager: cm,
-		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: cardanoConfig,
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
 
@@ -315,4 +335,111 @@ func TestBlockfetchServerRequestRange_SparseNetworkRangeServedOverWire(
 		f.readMessageTypes(t, 5),
 		"a sparse-network range spanning more than 129600 slots must still be served in full, not answered with NoBlocks",
 	)
+}
+
+// smallSecurityParamCardanoConfig builds a minimal Byron+Shelley genesis
+// config whose security parameter K is k, so
+// LedgerState.SecurityParam() -- and so maxBlockFetchBlocksForSecurityParam
+// -- is small and test-controlled instead of falling back to
+// blockfetchBatchSlotThresholdDefault (50000, far too large to build a
+// real-chain test around).
+func smallSecurityParamCardanoConfig(
+	t *testing.T,
+	k int,
+) *cardano.CardanoNodeConfig {
+	t.Helper()
+	byronGenesisJSON := fmt.Sprintf(
+		`{"protocolConsts": {"k": %d, "protocolMagic": 2}}`,
+		k,
+	)
+	shelleyGenesisJSON := fmt.Sprintf(
+		`{"activeSlotsCoeff": 0.05, "securityParam": %d, "systemStart": "2022-10-25T00:00:00Z"}`,
+		k,
+	)
+	cfg := &cardano.CardanoNodeConfig{
+		ShelleyGenesisHash: "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d",
+	}
+	require.NoError(
+		t,
+		cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)),
+	)
+	require.NoError(
+		t,
+		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+	)
+	return cfg
+}
+
+// TestBlockfetchServerRequestRange_OversizedRangeRejectedWithNoBlocks is
+// review comment feedback on #4354's original fix: enforcing the block-count
+// bound only in blockfetchServerSendBatch, after StartBatch, made an
+// over-cap range unrecoverable for an honest peer -- the transport drops
+// with no protocol-level signal, and retrying the identical range repeats
+// the same drop forever. Both endpoints are already resolved against the
+// chain before StartBatch, so the bound belongs on the NoBlocks path with
+// the other invalid-range rejections instead. This drives a real
+// MsgRequestRange whose block count exceeds the (test-configured, small-K)
+// cap over the actual wire and asserts a clean single NoBlocks answer, not
+// a dropped connection.
+func TestBlockfetchServerRequestRange_OversizedRangeRejectedWithNoBlocks(
+	t *testing.T,
+) {
+	// k=1 forces blockfetchMaxBlocksFloor (not 3*k) to be the binding
+	// bound, keeping the fixture's block count in the low thousands rather
+	// than needing a k large enough for 3*k itself to matter.
+	maxBlocks := maxBlockFetchBlocksForSecurityParam(1)
+	blockCount := maxBlocks + 1
+	slots := make([]uint64, blockCount)
+	for i := range slots {
+		slots[i] = uint64(i + 1)
+	}
+	f := newBlockfetchRangeFixtureWithSlotsAndConfig(
+		t,
+		slots,
+		smallSecurityParamCardanoConfig(t, 1),
+	)
+
+	f.requestRange(t, f.point(0), f.point(blockCount-1))
+
+	assert.Equal(
+		t,
+		[]byte{blockfetch.MessageTypeNoBlocks},
+		f.readMessageTypes(t, 1),
+		"a range whose block count exceeds the cap must be answered with a clean NoBlocks, not a dropped connection",
+	)
+}
+
+// The oversized-range rejection must feed the same stuck-peer valve every
+// other invalid-range rejection in blockfetchServerRequestRange feeds,
+// mirroring TestBlockfetchServerRequestRange_RepeatedBadEndPointReachesCloseThreshold.
+func TestBlockfetchServerRequestRange_RepeatedOversizedRangeReachesCloseThreshold(
+	t *testing.T,
+) {
+	maxBlocks := maxBlockFetchBlocksForSecurityParam(1)
+	blockCount := maxBlocks + 1
+	slots := make([]uint64, blockCount)
+	for i := range slots {
+		slots[i] = uint64(i + 1)
+	}
+	f := newBlockfetchRangeFixtureWithSlotsAndConfig(
+		t,
+		slots,
+		smallSecurityParamCardanoConfig(t, 1),
+	)
+	start := f.point(0)
+	end := f.point(blockCount - 1)
+
+	for i := 1; i <= blockfetchMaxConsecutiveNoBlocks; i++ {
+		f.requestRange(t, start, end)
+		assert.Equal(
+			t,
+			[]byte{blockfetch.MessageTypeNoBlocks},
+			f.readMessageTypes(t, 1),
+			"request %d should be answered with NoBlocks",
+			i,
+		)
+	}
+	testutil.WaitForCondition(t, func() bool {
+		return f.o.connManager.GetConnectionById(f.connID) == nil
+	}, 10*time.Second, "threshold must close the peer")
 }

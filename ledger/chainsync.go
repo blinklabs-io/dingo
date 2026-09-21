@@ -54,9 +54,9 @@ const (
 	// BlockfetchBatchSize is the maximum number of blocks this chainsync
 	// client requests in a single BlockFetch range, so as not to exceed the
 	// configured recv queue size in the block-fetch protocol. Exported so
-	// ouroboros.MaxBlockFetchBlocks, the server-side cap on how many blocks
-	// a single BlockFetch range request is served, can assert it stays
-	// comfortably above this client's own usage.
+	// the server-side floor on how many blocks a single BlockFetch range
+	// request is served (ouroboros.blockfetchMaxBlocksFloor) can assert it
+	// stays comfortably above this client's own usage.
 	BlockfetchBatchSize = 500
 
 	// When we're still meaningfully behind tip, wait for a header runway
