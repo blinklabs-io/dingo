@@ -1001,8 +1001,13 @@ func TestByronValidateMinFee_RedeemExemptionRequiresResolvableInputs(
 }
 
 // TestByronValidateMinFee_NoInputsNotRedeemOnly ensures an empty input set is
-// not treated as vacuously redeem-only. The empty-input set has its own
-// structural rule; the fee rule must not exempt it.
+// not treated as vacuously redeem-only, where the reference all would be
+// vacuously true. The empty-input set has its own structural rule, so this
+// guard is unobservable in production, but it pins the intended semantics.
+//
+// The output must be zero so the implicit fee is exactly zero rather than
+// negative. A negative fee is below every requirement including zero, which
+// would make this pass whether or not the guard exists.
 func TestByronValidateMinFee_NoInputsNotRedeemOnly(t *testing.T) {
 	t.Parallel()
 
@@ -1012,7 +1017,7 @@ func TestByronValidateMinFee_NoInputsNotRedeemOnly(t *testing.T) {
 
 	tx := &testByronTx{
 		inputs:  []lcommon.TransactionInput{},
-		outputs: []lcommon.TransactionOutput{newTestOutput(1_000)},
+		outputs: []lcommon.TransactionOutput{newTestOutput(0)},
 		cbor:    make([]byte, 10),
 	}
 
@@ -1020,4 +1025,8 @@ func TestByronValidateMinFee_NoInputsNotRedeemOnly(t *testing.T) {
 	require.Error(t, err)
 	var feeErr FeeTooLowByronError
 	require.ErrorAs(t, err, &feeErr)
+	// Exactly zero, so the assertion discriminates the guard rather than
+	// riding on a negative fee.
+	assert.Zero(t, feeErr.Actual.Sign())
+	assert.Positive(t, feeErr.Required.Sign())
 }
