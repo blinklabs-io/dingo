@@ -487,9 +487,10 @@ func checkEpoch(
 			"epoch", epoch,
 		)
 		return &EpochCompareResult{
-			Network: network,
-			Epoch:   epoch,
-			Status:  StatusPass,
+			Network:       network,
+			Epoch:         epoch,
+			Status:        StatusPass,
+			CheckedScopes: checkedScopes(accountsEnabled),
 		}, nil
 	}
 
@@ -535,9 +536,10 @@ func checkEpoch(
 			earliestAvailable,
 		)
 		return &EpochCompareResult{
-			Network: network,
-			Epoch:   epoch,
-			Status:  StatusPass,
+			Network:       network,
+			Epoch:         epoch,
+			Status:        StatusPass,
+			CheckedScopes: checkedScopes(accountsEnabled),
 		}, nil
 	}
 
@@ -1007,6 +1009,9 @@ func checkEpoch(
 		KoiosPoolCount: len(koiosPools),
 		OnlyDingo:      onlyDingo,
 		OnlyKoios:      onlyKoios,
+		// The same set the mismatch commit above replaces, so the verdict and
+		// the evidence behind it always name the same phases.
+		CheckedScopes: checkedScopes(accountStatus != ""),
 	}, nil
 }
 

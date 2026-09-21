@@ -145,6 +145,12 @@ const (
 )
 
 // EpochCompareResult holds the comparison outcome for one epoch.
+//
+// Status covers exactly the phases named in CheckedScopes, which is not
+// necessarily the whole epoch: the observer runs the aggregate and account
+// phases on independent queues, so both emit a result for the same epoch and
+// an aggregate-only PASS says nothing about the account phase's verdict. Read
+// CheckedScopes before treating Status as the epoch's answer.
 type EpochCompareResult struct {
 	Network        string
 	Epoch          uint64
@@ -154,6 +160,14 @@ type EpochCompareResult struct {
 	KoiosPoolCount int
 	OnlyDingo      []string
 	OnlyKoios      []string
+	// CheckedScopes names the check phases this result's Status is a verdict
+	// on, drawn from ScopeAggregate/ScopeAccount.
+	CheckedScopes []string
+}
+
+// CoversScope reports whether Status is a verdict on the named check phase.
+func (r *EpochCompareResult) CoversScope(scope string) bool {
+	return slices.Contains(r.CheckedScopes, scope)
 }
 
 // CompareEpochAggregates compares epoch-level fields from Dingo's database

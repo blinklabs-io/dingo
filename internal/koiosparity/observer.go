@@ -707,7 +707,7 @@ func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 			)
 			return
 		}
-		o.reportError(epoch, fmt.Errorf("fetch koios reference: %w", err))
+		o.reportError(epoch, false, fmt.Errorf("fetch koios reference: %w", err))
 		return
 	}
 
@@ -734,7 +734,7 @@ func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 			)
 			return
 		}
-		o.reportError(epoch, fmt.Errorf("check: %w", err))
+		o.reportError(epoch, false, fmt.Errorf("check: %w", err))
 		return
 	}
 	o.emitResult(result)
@@ -746,8 +746,12 @@ func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 		))
 		return
 	}
+	// scopes keeps an aggregate-only pass from reading as the whole epoch's
+	// verdict: the account queue checks the same epoch independently and may
+	// still be running, or may already have failed it.
 	o.cfg.Logger.Info("koiosparity observer: epoch validated",
-		"network", o.cfg.Network, "epoch", epoch)
+		"network", o.cfg.Network, "epoch", epoch,
+		"scopes", result.CheckedScopes)
 }
 
 // processAccountEpoch fetches (if not already cached) and checks exactly one
@@ -777,7 +781,7 @@ func (o *Observer) processAccountEpoch(ctx context.Context, epoch uint64) {
 			)
 			return
 		}
-		o.reportError(epoch, fmt.Errorf("fetch koios reference: %w", err))
+		o.reportError(epoch, true, fmt.Errorf("fetch koios reference: %w", err))
 		return
 	}
 	if err := o.fetchAccountsIfNeeded(ctx, epoch); err != nil {
@@ -793,7 +797,7 @@ func (o *Observer) processAccountEpoch(ctx context.Context, epoch uint64) {
 			)
 			return
 		}
-		o.reportError(epoch, fmt.Errorf("fetch koios reference: %w", err))
+		o.reportError(epoch, true, fmt.Errorf("fetch koios reference: %w", err))
 		return
 	}
 
@@ -820,7 +824,7 @@ func (o *Observer) processAccountEpoch(ctx context.Context, epoch uint64) {
 			)
 			return
 		}
-		o.reportError(epoch, fmt.Errorf("check: %w", err))
+		o.reportError(epoch, true, fmt.Errorf("check: %w", err))
 		return
 	}
 	o.emitResult(result)
@@ -838,8 +842,12 @@ func (o *Observer) processAccountEpoch(ctx context.Context, epoch uint64) {
 		))
 		return
 	}
+	// scopes keeps an aggregate-only pass from reading as the whole epoch's
+	// verdict: the account queue checks the same epoch independently and may
+	// still be running, or may already have failed it.
 	o.cfg.Logger.Info("koiosparity observer: epoch validated",
-		"network", o.cfg.Network, "epoch", epoch)
+		"network", o.cfg.Network, "epoch", epoch,
+		"scopes", result.CheckedScopes)
 }
 
 // cancelled reports whether err is (or wraps) a context cancellation/
@@ -871,13 +879,23 @@ func cancelled(ctx context.Context, err error) bool {
 // check_epoch_status on this class of failure either (a fetch or query
 // error that occurs before any comparison could run), so this stays
 // consistent with that existing behavior.
-func (o *Observer) reportError(epoch uint64, err error) {
+//
+// accountsChecked names the phases the caller's check would have covered, so
+// the synthesized result carries the same CheckedScopes a completed check
+// from that queue would have. Without it an ERROR from the aggregate queue
+// would be indistinguishable from one covering the account phase too.
+func (o *Observer) reportError(
+	epoch uint64,
+	accountsChecked bool,
+	err error,
+) {
 	o.fail(epoch, err)
 	now := time.Now()
 	o.emitResult(&EpochCompareResult{
-		Network: o.cfg.Network,
-		Epoch:   epoch,
-		Status:  StatusError,
+		Network:       o.cfg.Network,
+		Epoch:         epoch,
+		Status:        StatusError,
+		CheckedScopes: checkedScopes(accountsChecked),
 		Mismatches: []CheckMismatch{{
 			Network:    o.cfg.Network,
 			Epoch:      epoch,

@@ -1171,12 +1171,21 @@ func TestObserverStartSeedsBacklogForMissingAccountCoverage(t *testing.T) {
 
 	require.NoError(t, o.Start(context.Background()))
 
-	result := testutil.RequireReceive(
-		t,
-		results,
-		5*time.Second,
-		"epoch 5 should be picked up from Start's backlog purely due to missing account coverage",
-	)
+	// The aggregate queue checks the same epoch and reports first in the
+	// common case; only the account queue's result speaks for the coverage
+	// this test is about, so skip past anything that does not carry it.
+	var result *EpochCompareResult
+	for {
+		result = testutil.RequireReceive(
+			t,
+			results,
+			5*time.Second,
+			"epoch 5 should be picked up from Start's backlog purely due to missing account coverage",
+		)
+		if result.CoversScope(ScopeAccount) {
+			break
+		}
+	}
 	require.Equal(t, koiosEpoch, result.Epoch)
 	require.Equal(
 		t,
@@ -1881,10 +1890,22 @@ func TestObserverFailureReportsSignificantMismatchCount(t *testing.T) {
 	got := slices.Clone(results)
 	mu.Unlock()
 
+	// The failing verdict is the account queue's. The aggregate queue checks
+	// the same epoch independently and passes it, so selecting by arrival
+	// order would read whichever queue happened to finish last.
+	var result EpochCompareResult
+	var found int
+	for i := range got {
+		if got[i].CoversScope(ScopeAccount) {
+			result = got[i]
+			found++
+		}
+	}
+	require.Equal(t, 1, found,
+		"exactly one result should carry the account phase's verdict")
+
 	// The scenario has to actually contain an informational mismatch, or the
 	// two numbers coincide and the assertion below proves nothing.
-	require.NotEmpty(t, got)
-	result := got[len(got)-1]
 	require.Equal(t, StatusFail, result.Status)
 	require.Greater(
 		t,
