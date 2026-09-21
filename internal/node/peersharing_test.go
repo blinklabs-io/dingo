@@ -21,9 +21,6 @@ import (
 	"testing"
 )
 
-//go:fix inline
-func boolPtr(v bool) *bool { return new(v) }
-
 func TestResolvePeerSharing(t *testing.T) {
 	t.Parallel()
 

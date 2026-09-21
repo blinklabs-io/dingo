@@ -1904,6 +1904,7 @@ func TestReplayRecoveryHaltsRepeatedRewardWithdrawalMismatch(t *testing.T) {
 	ls := newReplayRecoveryAuditLedger(t, true)
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Close)
+	resyncCh := deterministicResyncChannel(t, ls, bus)
 	ls.config.EventBus = bus
 	validation := func() *txValidationError {
 		return &txValidationError{
@@ -1919,6 +1920,18 @@ func TestReplayRecoveryHaltsRepeatedRewardWithdrawalMismatch(t *testing.T) {
 	recovered, err := ls.tryRecoverFromTxValidationError(validation())
 	require.NoError(t, err)
 	require.True(t, recovered)
+	// Verify the first attempt entered deterministic recovery rather than
+	// passing through an unrelated guard: it rewinds the primary chain and
+	// requests a fresh intersection at the applied ledger tip.
+	assert.Equal(t, uint64(140), ls.Tip().Point.Slot)
+	assert.Equal(t, ls.Tip().Point, ls.chain.Tip().Point)
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		testutil.AsyncWait,
+		"the first reward withdrawal mismatch must enter deterministic recovery",
+	)
+	assert.Equal(t, ls.Tip().Point, resync.Point)
 
 	recovered, err = ls.tryRecoverFromTxValidationError(validation())
 	require.ErrorIs(t, err, errHaltLedgerPipeline)

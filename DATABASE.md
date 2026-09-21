@@ -1345,8 +1345,9 @@ before-epoch delete method exists for any retained table on
 extra retention rule the two windowed reward tables do not: it is the
 leader-eligibility basis a *queued/deferred header* validates against. If the
 mark snapshot such a header needs (`StakeSnapshotEpoch(epoch) = epoch-1`) were
-pruned out from under it, `leaderEligibilityStake` (`ledger/verify_header.go`)
-would read the missing rows back as a zero-stake answer. `cleanupOldSnapshots`
+pruned out from under it, `leaderEligibilityStakeWithCache`
+(`ledger/verify_header.go`) would read the missing rows back as a zero-stake
+answer. `cleanupOldSnapshots`
 therefore prunes `pool_stake_snapshot` *through a retention guard*
 (`Manager.SetPoolSnapshotRetentionGuard`, wired at node start to
 `LedgerState.PrunePoolSnapshotsWithRetentionFloor`). Under one dedicated lock
