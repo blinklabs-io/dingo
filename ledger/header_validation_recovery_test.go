@@ -214,6 +214,10 @@ func TestLedgerProcessBlocksRecoversReadChainValidationFailure(t *testing.T) {
 	}
 	require.NoError(t, db.SetTip(ledgerTip, nil))
 
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	_, resyncEvents := bus.Subscribe(event.ChainsyncResyncEventType)
+
 	ls := &LedgerState{
 		db:                db,
 		chain:             cm.PrimaryChain(),
@@ -221,6 +225,7 @@ func TestLedgerProcessBlocksRecoversReadChainValidationFailure(t *testing.T) {
 		validationEnabled: true,
 		config: LedgerStateConfig{
 			ChainManager: cm,
+			EventBus:     bus,
 			Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
@@ -244,6 +249,25 @@ func TestLedgerProcessBlocksRecoversReadChainValidationFailure(t *testing.T) {
 	case <-done:
 	default:
 		t.Fatal("reader result was not released after validation recovery")
+	}
+	// Prove the rewind was performed by tryRecoverFromHeaderValidationError
+	// specifically, not by some other path that happens to leave the same
+	// tip: only that recovery publishes this resync reason.
+	select {
+	case evt := <-resyncEvents:
+		data, ok := evt.Data.(event.ChainsyncResyncEvent)
+		require.True(t, ok)
+		require.Equal(
+			t,
+			event.ChainsyncResyncReasonHeaderValidationRecovery,
+			data.Reason,
+		)
+		require.Equal(t, ledgerTipBlock.Slot, data.Point.Slot)
+	default:
+		t.Fatal(
+			"header-validation recovery must publish a resync so chainsync " +
+				"re-delivers",
+		)
 	}
 }
 
