@@ -536,6 +536,12 @@ var flagSpecs = []flagSpec{
 		"max simultaneous connections per IP",
 	),
 	intFlag("MaxInboundConns", "max-inbound-conns", "max inbound connections"),
+	intFlag("MaxNtCConns", "max-ntc-conns", "max node-to-client connections"),
+	intFlag(
+		"MaxNtCConnectionsPerIP",
+		"max-ntc-connections-per-ip",
+		"max node-to-client connections per IP",
+	),
 
 	// Cache
 	intFlag(
@@ -782,6 +788,12 @@ var flagSpecs = []flagSpec{
 		"mithril-backend",
 		"",
 		"Mithril artifact backend: v1 (legacy snapshots) or v2 (incremental database)",
+	),
+	stringFlag(
+		"Mithril.PinnedDigest",
+		"mithril-pinned-digest",
+		"",
+		"Mithril artifact identity for a fresh bootstrap: v1 snapshot digest or v2 Cardano database artifact hash",
 	),
 	stringFlag(
 		"Mithril.DownloadDir",

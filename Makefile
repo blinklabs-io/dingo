@@ -80,7 +80,9 @@ golines: ## Enforce 80-character line limit
 # golangci-lint covers one module for one GOOS per run. The loop reaches every
 # nested module, and the GOOS=windows run reaches files behind
 # `//go:build windows`, which the host build excludes. CI runs the same scopes
-# in .github/workflows/golangci-lint.yml.
+# in the `lint` job of .github/workflows/go-test.yml and of
+# .github/workflows/publish.yml; internal/docsparity's
+# TestLintCoversEveryGoModule fails until every go.mod has a step in both.
 lint: import-boundaries ## Run import-boundaries, golangci-lint, nilaway, and modernize
 	@for dir in $(GO_MODULE_DIRS); do \
 		echo "golangci-lint run ./... ($$dir)"; \
@@ -95,7 +97,7 @@ lint: import-boundaries ## Run import-boundaries, golangci-lint, nilaway, and mo
 import-boundaries: ## Check reviewed package import boundaries
 	go test ./internal/architecture
 
-docs-parity: ## Check docs against go.mod, the Makefile, and the DevNet compose file
+docs-parity: ## Check docs against go.mod, the Makefile, the DevNet compose file, and the Koios coverage matrix
 	go test ./internal/docsparity
 
 config-parity: ## Fail if the embedded network configs drift from docker-cardano-configs

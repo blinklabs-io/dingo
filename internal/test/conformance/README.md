@@ -1,6 +1,7 @@
-# Ledger Rules Conformance Tests
+# Ledger-Rule Conformance Tests
 
-This package runs the [Amaru ledger rules conformance vectors](https://github.com/pragma-org/amaru)
+This package runs the pinned [Cardano Blueprint ledger conformance
+corpus](https://github.com/cardano-scaling/cardano-blueprint/tree/main/src/ledger/conformance-test-vectors)
 against Dingo's ledger implementation. The shared harness and embedded test
 data live in `github.com/blinklabs-io/ouroboros-mock/conformance`; this package
 provides `DingoStateManager`, an adapter that drives Dingo's real
@@ -27,12 +28,38 @@ voting power (CIP-1694 active voting stake -- tracked as issue #4355).
 
 ## What the vectors cover
 
-The vectors exercise **Conway era** ledger rules:
+The pinned archive contains the Conway ImpSpec ledger corpus plus one synthetic
+rollback fixture. Its paths group inherited rule specifications under Shelley,
+Allegra, Mary, Alonzo, Babbage, and Conway labels, but Dingo executes every
+archive vector through the Conway validation entry point:
 
 - UTxO validation — inputs, outputs, fees, collateral
 - Certificate processing — stake, pool, DRep, committee
 - Governance — proposals, voting, enactment
 - Script execution — native scripts, Plutus V1/V2/V3
+
+The corpus is ledger-rule coverage only. It does not prove consensus,
+networking, node-to-node protocol, or end-to-end compatibility with
+`cardano-node`.
+
+## Node conformance matrix
+
+| Profile | Source | Default Dingo test | What it proves | What it excludes |
+| --- | --- | --- | --- | --- |
+| Ledger rules | Pinned Cardano Blueprint archive in `ouroboros-mock` | `go test ./internal/test/conformance/` | Dingo's ledger entry points and backend behavior against the shared ledger corpus | Consensus, networking, and reference-node behavior |
+| Deterministic consensus | Shared `ouroboros-mock/consensus` captured scenarios | `go test ./ouroboros/ -run TestConsensusConformance` | Final chain choice, within-k and beyond-k behavior, rollback/intersection points, tie-breaking, and downstream ChainSync observations | Live sockets, full block bodies, and cardano-node process behavior |
+| Reference node | DevNet `--conformance` profile | `./internal/test/devnet/run-tests.sh --conformance` | Dingo beside `cardano-node` in the configured live topology | Not run by the ledger or deterministic consensus profiles |
+
+The deterministic corpus currently contains five scenarios: one origin
+roll-forward smoke test, one within-k fork, one longer fork using `local_tip`,
+one equal-length slot battle, and one beyond-k no-switch case. The tests log
+the exact scenario and ledger coverage counts; a passing ledger profile must
+not be summarized as complete node conformance.
+
+The Tweag Node-vs-Environment runner/test-generator approach remains a
+feasibility reference rather than a dependency: no stable reusable upstream
+artifact is pinned here, so these shared local captures preserve equivalent
+fork-choice and rollback scenarios until one exists.
 
 ## Running the tests
 
@@ -252,8 +279,10 @@ implementations for the committee-certificate, unknown-voter, Plutus, fee and
 PlutusV1/V2 feature rules; the pre-Alonzo eras replace the upstream fee and
 max-size rules outright).
 
-Stubbing `ValidateTxConway` to `return nil` leaves
-`TestRulesConformanceVectors` reporting 315/315, 100%.
+The pinned `ouroboros-mock v0.20.2` corpus contains 2,574 Blueprint vectors
+and one synthetic rollback fixture. A complete SQLite run therefore reports
+2,575/2,575, 100%, with the breakdown by era and rule family shown in the
+verbose test output.
 
 `entry_points_test.go` and `entry_points_replay_test.go` close that gap:
 
@@ -361,8 +390,13 @@ access patterns. That needs **one** pass per dialect, not several.
 ## Updating vectors
 
 The vectors themselves are **embedded in `ouroboros-mock`**, not in this repo.
-To update the corpus, bump the `ouroboros-mock` dependency in `go.mod` and
-re-run the suite. Do not add or mutate vectors locally.
+The current import is `ouroboros-mock v0.20.2`, whose `conformance/CORPUS.md`
+records Blueprint revision `0f0c17e1ca24b062c868d216ae50708fc19c83ab`, archive
+SHA-256
+`574ff7a17857dfc1f0cf477f7eb9eba1c2a0f901453396a779de4b2392ef6863`, and
+the vector/protocol-parameter inventory. To update the corpus, bump the
+`ouroboros-mock` dependency in `go.mod`, update the expected count and this
+provenance entry, and re-run the suite. Do not add or mutate vectors locally.
 
 ## Debugging a failing vector
 

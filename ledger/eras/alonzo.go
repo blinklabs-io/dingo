@@ -195,6 +195,11 @@ func ValidateTxAlonzo(
 			)
 		}
 	}
+	if err := validateMIRAccumulatedRewards(
+		tx, slot, ls, tmpPparams.ProtocolMajorVersion(),
+	); err != nil {
+		errs = append(errs, err)
+	}
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
