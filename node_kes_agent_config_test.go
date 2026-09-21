@@ -90,6 +90,22 @@ func devnetOpCertCBOR(t testing.TB) []byte {
 	return raw
 }
 
+// devnetKESKey parses the devnet KES signing key the fake agent pushes. It
+// reads the envelope bytes rather than calling bursa.LoadKeyFromFile: that
+// function applies bursa's secret-key file policy, which rejects the checked-out
+// fixture under any umask on Unix and rejects the Windows runner's file owner
+// outright. What these cases need is the key material, not a check of how the
+// repository stores it; PoolCredentials.LoadFromFiles remains the path that
+// enforces the policy on an operator's own key.
+func devnetKESKey(t testing.TB) *bursa.LoadedKey {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(devnetKeysDir, "kes.skey"))
+	require.NoError(t, err)
+	key, err := bursa.LoadKeyFromBytes(data)
+	require.NoError(t, err)
+	return key
+}
+
 func newTestNodeForBPWithAgent(
 	t *testing.T,
 	vrf, opcert string,
@@ -112,9 +128,8 @@ func newTestNodeForBPWithAgent(
 func TestValidateBlockProducerStartup_KESAgentServeKeyMode(t *testing.T) {
 	t.Parallel()
 
-	vrf, kesSKey, opcert := devnetCredPaths(t)
-	kesKeyData, err := bursa.LoadKeyFromFile(kesSKey)
-	require.NoError(t, err)
+	vrf, _, opcert := devnetCredPaths(t)
+	kesKeyData := devnetKESKey(t)
 	opCertCBOR := devnetOpCertCBOR(t)
 
 	testutil.SkipIfBlockProducerUnsupported(t)
@@ -170,9 +185,8 @@ func TestValidateBlockProducerStartup_KESAgentServeKeyMode(t *testing.T) {
 func TestValidateBlockProducerStartup_KESAgentSignMode(t *testing.T) {
 	t.Parallel()
 
-	vrf, kesSKey, opcert := devnetCredPaths(t)
-	kesKeyData, err := bursa.LoadKeyFromFile(kesSKey)
-	require.NoError(t, err)
+	vrf, _, opcert := devnetCredPaths(t)
+	kesKeyData := devnetKESKey(t)
 
 	testutil.SkipIfBlockProducerUnsupported(t)
 	sockPath := testutil.UnixSocketPath(t)
@@ -250,9 +264,8 @@ func TestValidateBlockProducerStartup_KESAgentServeKeyRotationStaysValidated(
 ) {
 	t.Parallel()
 
-	vrf, kesSKey, opcert := devnetCredPaths(t)
-	kesKeyData, err := bursa.LoadKeyFromFile(kesSKey)
-	require.NoError(t, err)
+	vrf, _, opcert := devnetCredPaths(t)
+	kesKeyData := devnetKESKey(t)
 	opCertCBOR := devnetOpCertCBOR(t)
 	decodedOpCert, err := bursa.DecodeOpCert(opCertCBOR)
 	require.NoError(t, err)
@@ -352,9 +365,8 @@ func TestValidateBlockProducerStartup_KESAgentClosedWhenValidationFails(
 ) {
 	t.Parallel()
 
-	vrf, kesSKey, opcert := devnetCredPaths(t)
-	kesKeyData, err := bursa.LoadKeyFromFile(kesSKey)
-	require.NoError(t, err)
+	vrf, _, opcert := devnetCredPaths(t)
+	kesKeyData := devnetKESKey(t)
 	opCertCBOR := devnetOpCertCBOR(t)
 
 	testutil.SkipIfBlockProducerUnsupported(t)
@@ -410,9 +422,8 @@ func TestValidateBlockProducerStartupForClock_KESAgentDeferredPath(
 ) {
 	t.Parallel()
 
-	vrf, kesSKey, opcert := devnetCredPaths(t)
-	kesKeyData, err := bursa.LoadKeyFromFile(kesSKey)
-	require.NoError(t, err)
+	vrf, _, opcert := devnetCredPaths(t)
+	kesKeyData := devnetKESKey(t)
 	opCertCBOR := devnetOpCertCBOR(t)
 
 	testutil.SkipIfBlockProducerUnsupported(t)
@@ -469,9 +480,8 @@ func TestValidateBlockProducerStartupForClock_KESAgentDeferredPath(
 func TestValidateBlockProducerStartup_KESAgentPinsLocalColdKey(t *testing.T) {
 	t.Parallel()
 
-	vrf, kesSKey, opcert := devnetCredPaths(t)
-	kesKeyData, err := bursa.LoadKeyFromFile(kesSKey)
-	require.NoError(t, err)
+	vrf, _, opcert := devnetCredPaths(t)
+	kesKeyData := devnetKESKey(t)
 	opCertCBOR := devnetOpCertCBOR(t)
 	localEnvelope, err := os.ReadFile(opcert)
 	require.NoError(t, err)
@@ -575,9 +585,8 @@ func metricFamilyNames(families []*dto.MetricFamily) map[string]struct{} {
 func TestKESAgentStartupWiresClientMetrics(t *testing.T) {
 	t.Parallel()
 
-	vrf, kesSKey, opcert := devnetCredPaths(t)
-	kesKeyData, err := bursa.LoadKeyFromFile(kesSKey)
-	require.NoError(t, err)
+	vrf, _, opcert := devnetCredPaths(t)
+	kesKeyData := devnetKESKey(t)
 	opCertCBOR := devnetOpCertCBOR(t)
 
 	testutil.SkipIfBlockProducerUnsupported(t)
