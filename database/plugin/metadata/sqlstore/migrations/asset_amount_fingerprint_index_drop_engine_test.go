@@ -42,7 +42,11 @@ import (
 // translated statements (backtick-to-quote rewrite) actually apply and
 // replay cleanly, not just that the guard code would tolerate a failure.
 
-func requirePostgresAssetIndexesAbsent(t *testing.T, db *sql.DB, schema string) {
+func requirePostgresAssetIndexesAbsent(
+	t *testing.T,
+	db *sql.DB,
+	schema string,
+) {
 	t.Helper()
 	for _, name := range []string{"idx_asset_amount", "idx_asset_fingerprint"} {
 		var count int
