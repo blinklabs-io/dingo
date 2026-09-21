@@ -1028,7 +1028,7 @@ func downloadSnapshotOnce(
 	cfg.Logger.Debug(
 		"downloading snapshot",
 		"component", "mithril",
-		"url", cfg.URL,
+		"url", redactLocationURI(cfg.URL),
 		"total_bytes", totalSize,
 		"destination", destPath,
 	)
