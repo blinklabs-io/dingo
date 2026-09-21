@@ -21,7 +21,9 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -121,6 +123,70 @@ func TestVerifyPointQueryable_PastRetentionFloor_Rejected(t *testing.T) {
 	err := ls.VerifyPointQueryable(nil, QueryPoint{Slot: 350, Hash: hash})
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
+}
+
+// TestVerifyPointQueryable_APIStorageMode_PastRetentionFloor_Accepted covers
+// checkAsOfEpochRecency's apiStorageMode early-return branch (ledger/pool_stake_distribution.go):
+// pool-stake snapshots are never pruned when the database runs in API
+// storage mode, so a point whose mark-snapshot epoch would be rejected under
+// the default (core) retention window must still be accepted here, matching
+// cleanupOldSnapshots' own API-mode carve-out that this check mirrors.
+//
+// Same shape as TestVerifyPointQueryable_PastRetentionFloor_Rejected -- an
+// epoch 3 pinned point 7 epochs behind live epoch 10, well outside the
+// 3-epoch stake-snapshot retention window -- except the database is opened
+// in API storage mode instead of the default core mode, and epoch 3 carries
+// its own persisted epoch row and pparams row (so the historical-epoch reads
+// further down VerifyPointQueryable, which that rejected-in-core-mode test
+// never reaches, succeed here on their own merits rather than accidentally
+// masking the check under test). That test proves core mode must reject
+// this point; this test proves API mode must accept the identical point
+// instead. No-opping the apiStorageMode branch in checkAsOfEpochRecency
+// (i.e. falling through to the pruning-window check regardless of storage
+// mode) makes this test fail with ErrHistoricalStateUnavailable instead of
+// the required nil.
+func TestVerifyPointQueryable_APIStorageMode_PastRetentionFloor_Accepted(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDBForCleanup(t, types.StorageModeAPI)
+	ls := newPoolDistr2Ledger(t, db)
+	ls.currentEra = eras.ConwayEraDesc
+	ls.currentPParams = conwayPParamsWithCostModels(
+		map[uint][]int64{0: {9, 9, 9}},
+	)
+	ls.currentEpoch = models.Epoch{EpochId: 10}
+	ls.publishSnapshotsLocked()
+
+	conwayEraId := uint(eras.ConwayEraDesc.Id)
+	hash := repeatedBytes(32, 0x0B)
+	seedBlockAtSlot(t, ls, 350, hash)
+	require.NoError(t, ls.db.SetEpoch(
+		300, 3, nil, nil, nil, nil, conwayEraId, 1, 100, nil,
+	))
+	require.NoError(t, ls.db.SetEpoch(
+		1000, 10, nil, nil, nil, nil, conwayEraId, 1, 100, nil,
+	))
+	historicalPParams := conwayPParamsWithCostModels(
+		map[uint][]int64{0: {1, 1, 1}},
+	)
+	historicalCbor, err := cbor.Encode(historicalPParams)
+	require.NoError(t, err)
+	require.NoError(t, ls.db.SetPParams(
+		historicalCbor, 300, 3, conwayEraId, nil,
+	))
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(1050, repeatedBytes(32, 0x0C)),
+	}, nil))
+
+	// Epoch 3 is 7 epochs behind the live epoch (10) -- outside the
+	// 3-epoch stake-snapshot retention window that applies in core storage
+	// mode (see TestVerifyPointQueryable_PastRetentionFloor_Rejected). In
+	// API storage mode, pool-stake snapshots are never pruned, so this must
+	// be accepted instead.
+	verifyErr := ls.VerifyPointQueryable(nil, QueryPoint{Slot: 350, Hash: hash})
+	require.NoError(t, verifyErr)
 }
 
 // TestVerifyPointQueryable_NoNetworkStateRow_Rejected is the regression a
