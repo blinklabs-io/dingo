@@ -8345,10 +8345,18 @@ second sync:
     prior `PASS`.
   - **Strict mode** (`ObserverConfig.Strict`, the default via
     `KoiosParityConfig`) calls `FatalFunc` — wired by `node.go` to
-    `n.cancelForFatal` — exactly once, on the first Koios/tool error or exact
-    parity mismatch, and stops processing the rest of the current batch. The
-    node records that error before cancellation and returns it from `Run`, so
-    the CLI exits non-zero instead of mistaking the stop for a clean signal.
+    `n.cancelForFatal` — exactly once, on the first fatal-eligible failure,
+    and stops processing the rest of the current batch. Fatal-eligible means
+    a confirmed `StatusFail` parity mismatch or a genuine fetch/query error
+    (`reportError`'s path, where no comparison ran at all). A `StatusError`
+    result from `processEpoch` (e.g. `reference_lag`, `dingo_db_error`) is
+    logged and persisted the same as any other non-pass result but never
+    calls `FatalFunc`: `DetermineStatus`'s doc comment defines ERROR as "the
+    comparison could not be trusted, not that it disagreed", and treating it
+    as fatal shut a strict-mode node down on transient Koios-side staleness
+    with zero confirmed divergences (dingo #4645). The node records the fatal
+    error before cancellation and returns it from `Run`, so the CLI exits
+    non-zero instead of mistaking the stop for a clean signal.
     `Run` resolves that recorded fatal error on every return path, not only its
     steady-state shutdown wait: if the observer fails while the rest of node
     startup is still in progress, a later startup step can observe only

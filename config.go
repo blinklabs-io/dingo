@@ -102,9 +102,11 @@ type KoiosParityConfig struct {
 	AllowInsecureHTTP bool
 	// APIKey is the Koios Bearer token for higher-rate-limit access.
 	APIKey string
-	// Strict stops/cancels the node on the first Koios/tool error or exact
-	// parity mismatch rather than logging it and continuing normal
-	// operation.
+	// Strict stops/cancels the node on the first confirmed parity mismatch
+	// or genuine fetch/query error, rather than logging it and continuing
+	// normal operation. An ERROR-only result (e.g. reference_lag — the
+	// comparison could not yet be trusted, not that it disagreed) never
+	// stops/cancels the node, strict or not; see koiosparity.Observer.fail.
 	Strict bool
 	// GraceHours is the window after an epoch closes during which a missing
 	// Dingo-side row is treated as reference/sync lag rather than a

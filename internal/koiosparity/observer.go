@@ -67,9 +67,14 @@ type ObserverConfig struct {
 	// live, in-process *database.Database.
 	Source RewardParitySource
 	// Strict stops the observer (and, via FatalFunc, the node driving it)
-	// on the first Koios/tool error or exact parity mismatch. When false,
-	// a failure is logged and recorded in the cache, and the observer keeps
-	// validating subsequent epochs — an explicit, non-default choice for
+	// on the first confirmed parity mismatch (StatusFail) or genuine
+	// fetch/query error. An ERROR-only result (StatusError, e.g.
+	// reference_lag — the comparison itself could not yet be trusted, not
+	// that it disagreed; see DetermineStatus) is still logged and recorded
+	// in the cache but never triggers FatalFunc, in strict mode or not
+	// (dingo #4645). When Strict is false, a StatusFail/genuine error is
+	// also just logged and recorded, and the observer keeps validating
+	// subsequent epochs — an explicit, non-default choice for
 	// advisory/observability-only use, since the issue this implements
 	// requires Strict behavior to be available and be the operator default
 	// (see dingo.KoiosParityConfig / DefaultKoiosParityConfig), not that
@@ -586,10 +591,16 @@ func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 	}
 	if result.Status != StatusPass {
 		significant := CountSignificant(result.Mismatches)
+		// Only StatusFail is a confirmed Dingo/Koios disagreement.
+		// StatusError (e.g. reference_lag, dingo_db_error) means the
+		// comparison itself could not be trusted yet — see
+		// DetermineStatus's doc comment — so it must never trigger a
+		// strict-mode fatal shutdown (dingo #4645); it is still logged and
+		// persisted like any other non-pass result.
 		o.fail(epoch, fmt.Errorf(
 			"parity %s at epoch %d (%d significant of %d mismatch(es))",
 			result.Status, epoch, significant, len(result.Mismatches),
-		))
+		), result.Status == StatusFail)
 		return
 	}
 	o.cfg.Logger.Info("koiosparity observer: epoch validated",
@@ -626,7 +637,11 @@ func cancelled(ctx context.Context, err error) bool {
 // error that occurs before any comparison could run), so this stays
 // consistent with that existing behavior.
 func (o *Observer) reportError(epoch uint64, err error) {
-	o.fail(epoch, err)
+	// A fetch/query error is always fatal-eligible in strict mode: unlike
+	// processEpoch's StatusError case, no comparison ran at all here, so
+	// there is no "not yet trustworthy" result to defer — this is a tool
+	// failure, not compare.go's severity classification.
+	o.fail(epoch, err, true)
 	if o.cfg.OnResult != nil {
 		now := time.Now()
 		o.cfg.OnResult(&EpochCompareResult{
@@ -920,9 +935,15 @@ func (o *Observer) fetchAccountsIfNeeded(
 }
 
 // fail logs a per-epoch failure and, in strict mode, fires FatalFunc exactly
-// once (the first failure across the observer's lifetime) — only ever
-// called from run's single goroutine, so fatalFired needs no lock.
-func (o *Observer) fail(epoch uint64, err error) {
+// once (the first fatal-eligible failure across the observer's lifetime) —
+// only ever called from run's single goroutine, so fatalFired needs no lock.
+// fatal distinguishes a confirmed failure (StatusFail, or a genuine
+// fetch/query error via reportError) from a result that is merely not yet
+// trustworthy (StatusError, e.g. reference_lag) — see the two call sites.
+// A non-fatal call still logs and (via processEpoch's own persistence) is
+// still recorded, so an ERROR-only epoch is never silently dropped; it just
+// never reaches FatalFunc.
+func (o *Observer) fail(epoch uint64, err error, fatal bool) {
 	o.cfg.Logger.Error(
 		"koiosparity observer: epoch validation failed",
 		"network",
@@ -933,8 +954,10 @@ func (o *Observer) fail(epoch uint64, err error) {
 		err,
 		"strict",
 		o.cfg.Strict,
+		"fatal",
+		fatal,
 	)
-	if !o.cfg.Strict || o.fatalFired {
+	if !o.cfg.Strict || !fatal || o.fatalFired {
 		return
 	}
 	o.fatalFired = true
