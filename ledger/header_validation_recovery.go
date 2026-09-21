@@ -174,34 +174,50 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 		)
 	}
 
-	transitionErr := ls.withDestructiveDatabaseTransition(func() error {
-		if err := ls.rewindPrimaryChainForRecovery(
-			rewindPoint,
-		); err != nil {
-			return fmt.Errorf(
-				"rewind primary chain after header validation failure: %w",
-				err,
-			)
+	yielded := false
+	err = ls.withConsumedUtxoPruneBoundary(func() error {
+		if err := ls.checkReplayRecoveryRollbackFloor(rewindPoint); err != nil {
+			return err
 		}
-		// The chain prune alone leaves the ledger reflecting the rejected
-		// block's post-apply state; the matching ledger rollback has to be
-		// explicit, for the same reason it is on the transaction-validation
-		// path.
-		if err := ls.rollback(rewindPoint); err != nil {
-			return fmt.Errorf(
-				"rollback ledger state after header validation failure: %w",
-				err,
-			)
-		}
-		return nil
+		// The destructive boundary nests inside the prune boundary here and
+		// at every other rollback entry point, so the two locks are always
+		// taken in the same order. The floor check above stays outside it:
+		// it is a read, and a refused recovery must not hold coordinated
+		// snapshots off.
+		return ls.withDestructiveDatabaseTransition(func() error {
+			if err := ls.rewindPrimaryChainForRecovery(
+				rewindPoint,
+			); err != nil {
+				if ls.yieldedToChainSelection(
+					err, validationErr, rewindPoint, "rewind",
+				) {
+					yielded = true
+					return nil
+				}
+				return fmt.Errorf(
+					"rewind primary chain after header validation failure: %w",
+					err,
+				)
+			}
+			// The chain prune alone leaves the ledger reflecting the rejected
+			// block's post-apply state; the matching ledger rollback has to be
+			// explicit, for the same reason it is on the transaction-validation
+			// path. rollbackWithResync rather than ls.rollback: ls.rollback
+			// takes consumedUtxoPruneMutex, which this callback already holds.
+			if err := ls.rollbackWithResync(rewindPoint, true); err != nil {
+				return fmt.Errorf(
+					"rollback ledger state after header validation failure: %w",
+					err,
+				)
+			}
+			return nil
+		})
 	})
-	if transitionErr != nil {
-		if ls.yieldedToChainSelection(
-			transitionErr, validationErr, rewindPoint, "rewind",
-		) {
-			return true, nil
-		}
-		return false, transitionErr
+	if err != nil {
+		return false, err
+	}
+	if yielded {
+		return true, nil
 	}
 	if ls.config.EventBus != nil {
 		ls.config.EventBus.Publish(

@@ -1336,6 +1336,36 @@ func (s *Store) DeleteRewardStakeInputBeforeEpoch(
 	)
 }
 
+// DeleteRewardStakeInputsForEpoch deletes exactly one epoch's
+// reward_stake_input rows, leaving reward_pool_input (and every other
+// reward-state table) for that epoch untouched. It exists for a caller that
+// reconstructs stake inputs it does not yet hold -- rebuildPrunedRewardStakeInputs
+// in ledger/reward_calculation.go -- to clean up a partial write after
+// SaveRewardStakeInputs fails partway through a batch: saveRewardRows commits
+// each row as it goes rather than as one atomic unit, so a mid-batch failure
+// can otherwise leave the epoch looking non-empty (and therefore already
+// reconstructed) to the very check that triggered the rebuild, permanently
+// wedging that epoch's reward round on the incomplete set. DeleteRewardInputsForEpoch
+// is not used for this because it also deletes reward_pool_input, which is
+// retained for the life of the database and is the input this reconstruction
+// itself reconciles against.
+func (s *Store) DeleteRewardStakeInputsForEpoch(
+	epoch uint64,
+	txn types.Txn,
+) error {
+	return s.deleteRewardPair(
+		"stake inputs for epoch",
+		epoch,
+		txn,
+		func(q *sqlitequery.Queries, ctx context.Context, value int64) error {
+			return q.DeleteRewardStakeInputsForEpoch(
+				ctx,
+				value,
+			)
+		},
+	)
+}
+
 func (s *Store) saveRewardRows(
 	description string,
 	count int,

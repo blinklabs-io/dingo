@@ -1329,7 +1329,9 @@ func (d *Database) UtxosByAssets(
 // refuse a target older than what routine cleanup has already destroyed)
 // need to agree on this key, so it is exported from here as the single
 // source of truth for its name rather than duplicated as a string literal
-// in both packages.
+// in both packages. UtxosDeleteConsumed removes rows outright, while
+// TruncateAfterSlot can only restore rows that still exist; a rollback below
+// this marker would therefore leave the live UTxO set incomplete.
 const ConsumedUtxoPruneFloorSyncKey = "consumed_utxo_prune_floor"
 
 func (d *Database) UtxosDeleteConsumed(
@@ -1360,6 +1362,16 @@ func (d *Database) UtxosDeleteConsumed(
 		)
 	}
 	utxoCount := len(utxos)
+	var pruneFloor uint64
+	if utxoCount > 0 {
+		// Read the floor before deleting anything. A malformed or unreadable
+		// value must not follow irreversible blob deletes. No-op sweeps skip
+		// this read so they do not fail on an unused corrupt floor.
+		pruneFloor, err = d.ConsumedUtxoPruneFloor(txn)
+		if err != nil {
+			return 0, err
+		}
+	}
 	deleteUtxos := make([]models.UtxoId, utxoCount)
 	for idx, utxo := range utxos {
 		deleteUtxos[idx] = models.UtxoId{Hash: utxo.TxId, Idx: utxo.OutputIdx}
@@ -1382,6 +1394,19 @@ func (d *Database) UtxosDeleteConsumed(
 	err = d.utxoStore().DeleteUtxos(deleteUtxos, txn.Metadata())
 	if err != nil {
 		return 0, err
+	}
+
+	// Record how deep spent rows have been removed, in the same transaction
+	// that removes them. TruncateAfterSlot restores spent UTxOs with an
+	// UPDATE, which cannot reach a row that no longer exists, so a rollback
+	// below this slot silently leaves the live set short of every output
+	// consumed above it (issue #3766). The floor only ever moves up: a sweep
+	// at a lower slot does not make rows an earlier, higher sweep removed
+	// restorable again.
+	if utxoCount > 0 && slot > pruneFloor {
+		if err := d.writeConsumedUtxoPruneFloor(slot, txn); err != nil {
+			return 0, err
+		}
 	}
 
 	if owned {

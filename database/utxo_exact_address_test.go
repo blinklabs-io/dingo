@@ -1247,7 +1247,6 @@ func TestUtxosByAddressLoadsAssets(t *testing.T) {
 		Amount:     types.Uint64(1_000_000),
 		Assets: []models.Asset{{
 			Name:        assetName,
-			NameHex:     []byte("6173736574"),
 			PolicyId:    policyID,
 			Fingerprint: []byte("fingerprint"),
 			Amount:      5,

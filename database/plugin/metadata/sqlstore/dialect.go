@@ -156,7 +156,7 @@ var mysqlDeferredIndexPrefixColumns = map[string]map[string]bool{
 	},
 	"transaction": {"block_hash": true},
 	"asset": {
-		"name_hex": true, "policy_id": true, "fingerprint": true,
+		"policy_id": true, "fingerprint": true,
 		"amount": true,
 	},
 	"certs":           {"block_hash": true},

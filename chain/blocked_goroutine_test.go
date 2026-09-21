@@ -48,3 +48,21 @@ func waitUntilParkedIn(t *testing.T, symbol string) {
 		"no goroutine parked on a lock in "+symbol,
 	)
 }
+
+// waitUntilGoroutineIn waits until a goroutine has reached symbol, including
+// waits on channels rather than only sync locks. It goes through
+// testutil.GoroutineParkedIn for the same reason waitUntilParkedIn does: a
+// fixed buffer handed to runtime.Stack truncates the dump silently, and a
+// goroutine past the cut reads as absent.
+func waitUntilGoroutineIn(t *testing.T, symbol string) {
+	t.Helper()
+	testutil.WaitForConditionWithInterval(
+		t,
+		func() bool {
+			return testutil.GoroutineParkedIn(symbol)
+		},
+		5*time.Second,
+		time.Millisecond,
+		"no goroutine reached "+symbol,
+	)
+}
