@@ -20,6 +20,8 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
@@ -29,6 +31,39 @@ import (
 
 func rat(num, denom int64) *cbor.Rat {
 	return &cbor.Rat{Rat: big.NewRat(num, denom)}
+}
+
+func TestProtocolParamsResponsePreservesEraNativeUtxoUnit(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		pp   common.ProtocolParameters
+		want string
+	}{
+		{
+			name: "Alonzo words",
+			pp: &alonzo.AlonzoProtocolParameters{
+				AdaPerUtxoByte: 34482,
+			},
+			want: "34482",
+		},
+		{
+			name: "Babbage bytes",
+			pp: &babbage.BabbageProtocolParameters{
+				AdaPerUtxoByte: 4310,
+			},
+			want: "4310",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			info, err := protocolParamsInfoFromNative(tt.pp, 1)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, info.CoinsPerUtxoSize)
+		})
+	}
 }
 
 // TestProtocolParamsResponseConway verifies that Conway-era governance and

@@ -84,6 +84,9 @@ type DingoProtocolParams struct {
 	MaxValueSize         string
 	CollateralPercentage string
 	MaxCollateralInputs  string
+	// CoinsPerUtxoSize preserves the era-native unit: words in Alonzo and
+	// bytes from Babbage onward, matching Koios /epoch_params.
+	CoinsPerUtxoSize string
 
 	// CostModels holds the per-language Plutus operation prices, keyed by the
 	// same language names Koios uses ("PlutusV1", "PlutusV2", ...) rather
@@ -248,7 +251,7 @@ func ProtocolParamsFromNative(
 		fillPlutusParams(
 			out, pp.ExecutionCosts, pp.MaxTxExUnits, pp.MaxBlockExUnits,
 			pp.MaxValueSize, pp.CollateralPercentage, pp.MaxCollateralInputs,
-			pp.CostModels,
+			pp.AdaPerUtxoByte, pp.CostModels,
 		)
 	case *babbage.BabbageProtocolParameters:
 		out.EraID = babbage.EraIdBabbage
@@ -263,7 +266,7 @@ func ProtocolParamsFromNative(
 		fillPlutusParams(
 			out, pp.ExecutionCosts, pp.MaxTxExUnits, pp.MaxBlockExUnits,
 			pp.MaxValueSize, pp.CollateralPercentage, pp.MaxCollateralInputs,
-			pp.CostModels,
+			pp.AdaPerUtxoByte, pp.CostModels,
 		)
 	case *conway.ConwayProtocolParameters:
 		out.EraID = conway.EraIdConway
@@ -299,7 +302,7 @@ func fillConwayFamilyParams(
 	fillPlutusParams(
 		out, pp.ExecutionCosts, pp.MaxTxExUnits, pp.MaxBlockExUnits,
 		pp.MaxValueSize, pp.CollateralPercentage, pp.MaxCollateralInputs,
-		pp.CostModels,
+		pp.AdaPerUtxoByte, pp.CostModels,
 	)
 }
 
@@ -334,6 +337,7 @@ func fillPlutusParams(
 	executionCosts lcommon.ExUnitPrice,
 	maxTxExUnits, maxBlockExUnits lcommon.ExUnits,
 	maxValueSize, collateralPercentage, maxCollateralInputs uint,
+	coinsPerUtxoSize uint64,
 	costModels map[uint][]int64,
 ) {
 	out.CostModels = namedCostModels(costModels)
@@ -346,6 +350,7 @@ func fillPlutusParams(
 	out.MaxValueSize = uintString(maxValueSize)
 	out.CollateralPercentage = uintString(collateralPercentage)
 	out.MaxCollateralInputs = uintString(maxCollateralInputs)
+	out.CoinsPerUtxoSize = strconv.FormatUint(coinsPerUtxoSize, 10)
 }
 
 // namedCostModels re-keys Dingo's stored cost models from the numeric
