@@ -12251,15 +12251,35 @@ see an empty `blockPipeline` via `drainBlockPipelineBeforeRollback`, and
 proceed before this pass's already-gathered blocks are submitted, reopening
 the exact race `blockPipelineGatherMutex` exists to close. The bound on that
 wait is per gap rather than per gather pass — the attempt counter is reset
-each time a block is appended — so a rollback blocked on the write lock waits
+each time a block is appended — so a rollback blocked on the write lock sleeps
 up to `batchSize*gatherCoalesceMaxAttempts*gatherCoalesceRetryInterval` (about
 1s at the defaults) in the worst case, and about
 `batchSize*gatherCoalesceRetryInterval` (100ms) when each gap resolves on its
 first retry.
 
-Those figures are a bound only because nothing evaluated inside the held span
-can block on another lock, and neither half of the near-tip test satisfies that
-where it is written. `calculateStabilityWindow` takes `ls.RLock`, and Go's
+Those figures cover the sleeping only, not the whole hold. Every retry returns
+to the top of the inner loop and re-probes with `iter.Next(false)`, and that
+probe is not lock-free: `chain.Chain.iterNext` takes `c.mutex.Lock` and
+`c.manager.mutex.RLock` and does a metadata block lookup under them. `c.mutex`
+is the lock the block-append path holds to advance the tip —
+`addBlockInternal` across one `addBlockLocked`, `addRawBlocks` across a whole
+`blockImportBatchSize` batch inside its transaction — so the contending writer
+is the very goroutine this wait exists to wait for. The full worst case adds up
+to `batchSize*gatherCoalesceMaxAttempts` such acquisitions, each bounded by the
+longest append critical section rather than by any coalescing setting.
+
+That probe cannot be hoisted out of the span the way the near-tip terms below
+were. It is not a term the span incidentally evaluates: re-probing the iterator
+is the operation the retry performs, and the gather lock cannot be released
+around it without reopening the rollback race this wait is written to avoid.
+`TestLedgerReadChainIteratorBoundsChainProbesPerCoalesceGap` pins the
+multiplier instead: a gap that never resolves costs exactly
+`gatherCoalesceMaxAttempts+1` probes, and every one of them runs with the
+gather read lock held.
+
+The near-tip test is the hoistable case. Both of its halves can block on
+another lock where they were originally written, and neither is needed inside
+the span at all. `calculateStabilityWindow` takes `ls.RLock`, and Go's
 `RWMutex` parks a reader behind a pending writer, so a block apply holding
 `ls.Lock()` could stall the pass with `blockPipelineGatherMutex` still held.
 `UpstreamTipSlot` is an atomic load only when no node is wired in: under the
@@ -12268,15 +12288,17 @@ node's own wiring it calls `GetActiveConnectionFunc`, which is
 (`liveLifecycleMu`) and `chainsync.State.GetClientConnId`
 (`clientConnIdMutex`), and then `ConnectionLiveFunc`, which reaches
 `ConnectionManager.GetConnectionById` (`connectionsMutex`, an exclusive
-`Lock`). Either one evaluated in the span adds an unbounded term the figures
-above do not include.
+`Lock`). Either one evaluated in the span adds a further term the figures
+above do not include, and unlike the iterator probe, neither has to be there.
 
 Both are therefore read once per gather pass **before** the gather lock is
 taken, and the span tests the snapshots through `nearKnownUpstreamTip`, which
 is `isNearTipWithStabilityWindow` against a tip the caller already holds — so
 the two share the rule that folds an unknown upstream into "not near" rather
-than restating it. Every term the span itself tests is then an atomic read
-(`reachedTip`) or a local. Snapshotting per pass is sound in both cases: the
+than restating it. Every term of the near-tip test the span evaluates is then
+an atomic read (`reachedTip`) or a local, leaving the iterator probe above as
+the span's only lock-taking work. Snapshotting per pass is sound in both
+cases: the
 window only changes at an era boundary, so at worst one pass of at most
 `batchSize` blocks is judged against the previous era's window, a
 multi-thousand-slot threshold that cannot flip the near-tip answer; and the

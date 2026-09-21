@@ -680,3 +680,124 @@ func readCommitBatchBlocksSampleCount(
 	count, _ := readCommitBatchBlocks(t, ls)
 	return count
 }
+
+// countingGapLedgerReadIterator returns one block and then reports a
+// chain-tip gap on every later non-blocking call, recording how many such
+// probes were made and how many of them ran while blockPipelineGatherMutex
+// was held. A real iterator's Next takes chain.Chain's tip mutex and the
+// chain manager's read lock (chain.Chain.iterNext), so each in-span probe is
+// one acquisition of the lock the block-append path holds -- the term
+// ARCHITECTURE.md's coalescing bound has to account for separately from the
+// sleeping, because unlike the near-tip terms it cannot be hoisted out of
+// the span.
+type countingGapLedgerReadIterator struct {
+	ctx    context.Context
+	first  *chain.ChainIteratorResult
+	ls     *LedgerState
+	mu     sync.Mutex
+	calls  int
+	probes int
+	inSpan int
+}
+
+func (c *countingGapLedgerReadIterator) Next(
+	blocking bool,
+) (*chain.ChainIteratorResult, error) {
+	c.mu.Lock()
+	idx := c.calls
+	c.calls++
+	c.mu.Unlock()
+	if idx == 0 {
+		return c.first, nil
+	}
+	if !blocking {
+		// Probe for the write lock before answering, so the sample
+		// describes the span the reader is actually inside when it
+		// makes this call rather than the moment after it returns.
+		held := !tryLockGatherMutex(c.ls)
+		c.mu.Lock()
+		c.probes++
+		if held {
+			c.inSpan++
+		}
+		c.mu.Unlock()
+		return nil, chain.ErrIteratorChainTip
+	}
+	<-c.ctx.Done()
+	return nil, c.ctx.Err()
+}
+
+func (c *countingGapLedgerReadIterator) counts() (int, int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.probes, c.inSpan
+}
+
+// TestLedgerReadChainIteratorBoundsChainProbesPerCoalesceGap pins the
+// multiplier in the coalescing bound ARCHITECTURE.md states. The sleeping is
+// bounded by the gatherCoalesce* settings, but each retry also re-probes the
+// iterator while blockPipelineGatherMutex is still held, and that probe
+// reaches chain.Chain.iterNext's c.mutex -- the lock addBlockInternal and
+// addRawBlocks hold to advance the tip. The number of those acquisitions is
+// what the documented worst case multiplies by, so it is the part a later
+// change can silently inflate.
+//
+// A gap that never resolves must therefore cost exactly
+// gatherCoalesceMaxAttempts+1 probes: the one that first reports the tip,
+// plus one per retry the budget allows. Dropping the
+// coalesceAttempts < gatherCoalesceMaxAttempts term in place makes the
+// reader probe forever and never deliver the batch.
+func TestLedgerReadChainIteratorBoundsChainProbesPerCoalesceGap(
+	t *testing.T,
+) {
+	// Not t.Parallel: swaps the package-level
+	// gatherCoalesceRetryInterval/gatherCoalesceMaxAttempts seam via
+	// shrinkGatherCoalesceRetryInterval.
+	const attempts = 4
+	shrinkGatherCoalesceRetryInterval(t, time.Millisecond, attempts)
+
+	block, point := buildDecodableTestBlock(t, 10, 1)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	ls := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
+	ls.advanceUpstreamTipSlot(farUpstreamTipSlot)
+
+	iter := &countingGapLedgerReadIterator{
+		ctx:   ctx,
+		first: &chain.ChainIteratorResult{Point: point, Block: block},
+		ls:    ls,
+	}
+
+	resultCh := make(chan readChainResult, 1)
+	go ls.ledgerReadChainIterator(ctx, iter, resultCh)
+
+	// The whole pass is attempts*1ms of sleeping, so a deadline in seconds
+	// separates "flushed after exhausting the budget" from "still retrying"
+	// without racing scheduler jitter.
+	result := testutil.RequireReceive(
+		t, resultCh, 10*time.Second,
+		"reader never flushed its batch -- the coalesce budget did not "+
+			"stop the retry loop, so the probe count the documented bound "+
+			"multiplies by is unbounded",
+	)
+	require.NoError(t, result.err)
+	require.False(t, result.rollback)
+	require.Len(t, result.blocks, 1)
+	close(result.done)
+
+	probes, inSpan := iter.counts()
+	require.Equal(
+		t, attempts+1, probes,
+		"a gap that never resolves must cost one chain probe to find the "+
+			"tip plus one per allowed retry; ARCHITECTURE.md's worst case "+
+			"multiplies batchSize by gatherCoalesceMaxAttempts on that basis",
+	)
+	require.Equal(
+		t, probes, inSpan,
+		"every coalesce probe must run with blockPipelineGatherMutex held "+
+			"-- that is what makes each one an acquisition of the chain tip "+
+			"lock inside the span, and what the bound has to account for",
+	)
+}

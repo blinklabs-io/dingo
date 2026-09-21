@@ -5558,10 +5558,13 @@ func (ls *LedgerState) ledgerReadChainIterator(
 		//     reaches ConnectionManager.GetConnectionById
 		//     (connectionsMutex, an exclusive Lock).
 		//
-		// Either one evaluated under the gather lock folds an unbounded
+		// Either one evaluated under the gather lock folds a further
 		// wait into the coalescing bound below, which is derived purely
-		// from batchSize and the gatherCoalesce* settings. Read here, the
-		// span itself tests nothing but atomics and locals.
+		// from batchSize and the gatherCoalesce* settings, and unlike
+		// the iterator probe that bound already has to account for
+		// (see the retry comment below), neither has to be in the span
+		// at all. Read here, the near-tip test the span performs
+		// touches nothing but atomics and locals.
 		//
 		// Both are safe to snapshot per pass. The window only changes at an
 		// era boundary, so at worst one pass of at most batchSize blocks is
@@ -5637,14 +5640,37 @@ func (ls *LedgerState) ledgerReadChainIterator(
 					// batchSize*gatherCoalesceMaxAttempts*gatherCoalesceRetryInterval
 					// (about 1s at the defaults) in the worst case, and
 					// about batchSize*gatherCoalesceRetryInterval (100ms)
-					// when each gap resolves on its first retry. Those
-					// figures are a real bound only because every term
-					// tested below is an atomic read or a local:
-					// stabilityWindow and upstreamTipSlot are both taken
-					// before the gather lock precisely so that neither
-					// ls.RLock nor the chainsync and connection-manager
-					// mutexes UpstreamTipSlot reaches are evaluated here
-					// (see their comment above).
+					// when each gap resolves on its first retry.
+					//
+					// Those figures cover the sleeping only. Every retry
+					// returns to the top of this loop and re-probes, and
+					// iter.Next is not lock-free: chain.Chain.iterNext
+					// takes c.mutex and c.manager.mutex and looks up block
+					// metadata under them, and c.mutex is the lock the
+					// block-append path holds to advance the tip --
+					// addBlockInternal across one addBlockLocked,
+					// addRawBlocks across a whole blockImportBatchSize
+					// batch inside its transaction. The contending writer
+					// is therefore the goroutine this wait exists to wait
+					// for, and the full worst case adds one such
+					// acquisition per retry, each bounded by the longest
+					// append critical section rather than by any
+					// coalescing setting.
+					//
+					// That probe cannot be hoisted the way the near-tip
+					// terms were. It is not a term the span incidentally
+					// evaluates: re-probing the iterator is the retry, and
+					// releasing the gather lock around it reopens the race
+					// described just above. The multiplier is pinned
+					// instead, by
+					// TestLedgerReadChainIteratorBoundsChainProbesPerCoalesceGap.
+					//
+					// The near-tip terms are the hoistable case, and are
+					// hoisted: stabilityWindow and upstreamTipSlot are
+					// both taken before the gather lock precisely so that
+					// neither ls.RLock nor the chainsync and
+					// connection-manager mutexes UpstreamTipSlot reaches
+					// are evaluated here (see their comment above).
 					//
 					// reachedTip, not the near-tip test alone, decides
 					// whether the wait applies at all. UpstreamTipSlot
