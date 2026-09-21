@@ -687,8 +687,7 @@ func TestBuildDingoConfigForwardsScalarConfigFields(t *testing.T) {
 	}
 	var matches []match
 
-	for i := range cfgType.NumField() {
-		f := cfgType.Field(i)
+	for f := range cfgType.Fields() {
 		if f.PkgPath != "" { // unexported field (e.g. provenance)
 			continue
 		}
