@@ -378,10 +378,26 @@ Loop:
 				break Loop
 			}
 			if next.Rollback {
+				// A rollback raced this in-flight batch: the iterator
+				// surfaced a rollback sentinel with a zero-value Block.
+				// Serving it would stream a [0, null] block that a fetching
+				// peer decodes as a nil-header Byron EBB and crashes
+				// dereferencing it in SlotNumber(). Blockfetch has no
+				// rollback message, so end the batch cleanly; the client
+				// re-requests against its updated chain. Mirrors the
+				// next.Rollback handling in chainsync.
 				break Loop
 			}
 			if next.Block.Slot > end.Slot {
+				// The end point was validated before streaming started, so an
+				// overshoot means the chain changed under the iterator. BlockFetch
+				// has no rollback message; end this batch cleanly and let the peer
+				// request again against the new chain.
 				break Loop
+			}
+			if next.Block.Slot == end.Slot &&
+				bytes.Equal(next.Point.Hash, end.Hash) {
+				reachedEnd = true
 			}
 			blockBytes := next.Block.Cbor
 			err := server.Block(
@@ -420,23 +436,10 @@ Loop:
 				return err
 			}
 			// Make sure we don't hang waiting for the next block if we've already hit the end
-			if next.Point.Slot == end.Slot &&
-				bytes.Equal(next.Point.Hash, end.Hash) {
-				reachedEnd = true
+			if reachedEnd {
 				break Loop
 			}
 		}
-	}
-	if !reachedEnd {
-		o.closeBlockfetchConnection(
-			conn,
-			connectionID,
-			"blockfetch iterator ended before requested end point",
-		)
-		return fmt.Errorf(
-			"blockfetch iterator ended before requested end point at slot %d",
-			end.Slot,
-		)
 	}
 	// Signal batch completion
 	if err := server.BatchDone(); err != nil {

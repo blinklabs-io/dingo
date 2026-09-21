@@ -486,16 +486,17 @@ func (s *Store) ClaimFallbackRewardSnapshot(
 			updated, err := queries.UpdateFallbackRewardSnapshot(
 				ctx,
 				sqlitequery.UpdateFallbackRewardSnapshotParams{
-					TotalActiveStake:   params.TotalActiveStake,
-					TotalPoolCount:     params.TotalPoolCount,
-					TotalDelegators:    params.TotalDelegators,
-					CapturedSlot:       params.CapturedSlot,
-					BoundarySlot:       params.BoundarySlot,
-					EpochNonce:         params.EpochNonce,
-					ProtocolVersion:    params.ProtocolVersion,
-					CalculationVersion: params.CalculationVersion,
-					Epoch:              params.Epoch,
-					SnapshotType:       params.SnapshotType,
+					TotalActiveStake:    params.TotalActiveStake,
+					TotalPoolCount:      params.TotalPoolCount,
+					TotalDelegators:     params.TotalDelegators,
+					CapturedSlot:        params.CapturedSlot,
+					BoundarySlot:        params.BoundarySlot,
+					EpochNonce:          params.EpochNonce,
+					ProtocolVersion:     params.ProtocolVersion,
+					CalculationVersion:  params.CalculationVersion,
+					ExcludedActiveStake: params.ExcludedActiveStake,
+					Epoch:               params.Epoch,
+					SnapshotType:        params.SnapshotType,
 				},
 			)
 			if err == nil && updated == 1 {
@@ -1335,6 +1336,36 @@ func (s *Store) DeleteRewardStakeInputBeforeEpoch(
 	)
 }
 
+// DeleteRewardStakeInputsForEpoch deletes exactly one epoch's
+// reward_stake_input rows, leaving reward_pool_input (and every other
+// reward-state table) for that epoch untouched. It exists for a caller that
+// reconstructs stake inputs it does not yet hold -- rebuildPrunedRewardStakeInputs
+// in ledger/reward_calculation.go -- to clean up a partial write after
+// SaveRewardStakeInputs fails partway through a batch: saveRewardRows commits
+// each row as it goes rather than as one atomic unit, so a mid-batch failure
+// can otherwise leave the epoch looking non-empty (and therefore already
+// reconstructed) to the very check that triggered the rebuild, permanently
+// wedging that epoch's reward round on the incomplete set. DeleteRewardInputsForEpoch
+// is not used for this because it also deletes reward_pool_input, which is
+// retained for the life of the database and is the input this reconstruction
+// itself reconciles against.
+func (s *Store) DeleteRewardStakeInputsForEpoch(
+	epoch uint64,
+	txn types.Txn,
+) error {
+	return s.deleteRewardPair(
+		"stake inputs for epoch",
+		epoch,
+		txn,
+		func(q *sqlitequery.Queries, ctx context.Context, value int64) error {
+			return q.DeleteRewardStakeInputsForEpoch(
+				ctx,
+				value,
+			)
+		},
+	)
+}
+
 func (s *Store) saveRewardRows(
 	description string,
 	count int,
@@ -1386,17 +1417,18 @@ func (s *Store) deleteRewardPair(
 }
 
 type rewardSnapshotQueryParams struct {
-	Epoch              int64
-	SnapshotType       string
-	TotalActiveStake   string
-	TotalPoolCount     int64
-	TotalDelegators    int64
-	CapturedSlot       int64
-	BoundarySlot       int64
-	EpochNonce         []byte
-	ProtocolVersion    int64
-	Authoritative      bool
-	CalculationVersion int64
+	Epoch               int64
+	SnapshotType        string
+	TotalActiveStake    string
+	TotalPoolCount      int64
+	TotalDelegators     int64
+	CapturedSlot        int64
+	BoundarySlot        int64
+	EpochNonce          []byte
+	ProtocolVersion     int64
+	Authoritative       bool
+	CalculationVersion  int64
+	ExcludedActiveStake sql.NullString
 }
 
 func rewardSnapshotParams(
@@ -1430,18 +1462,26 @@ func rewardSnapshotParams(
 	if err != nil {
 		return rewardSnapshotQueryParams{}, err
 	}
+	var excludedActiveStake sql.NullString
+	if snapshot.ExcludedActiveStake != nil {
+		excludedActiveStake = sql.NullString{
+			String: decimalUint64(*snapshot.ExcludedActiveStake),
+			Valid:  true,
+		}
+	}
 	return rewardSnapshotQueryParams{
-		Epoch:              epoch,
-		SnapshotType:       snapshot.SnapshotType,
-		TotalActiveStake:   decimalUint64(snapshot.TotalActiveStake),
-		TotalPoolCount:     totalPoolCount,
-		TotalDelegators:    totalDelegators,
-		CapturedSlot:       capturedSlot,
-		BoundarySlot:       boundarySlot,
-		EpochNonce:         snapshot.EpochNonce,
-		ProtocolVersion:    protocolVersion,
-		Authoritative:      snapshot.Authoritative,
-		CalculationVersion: calculationVersion,
+		Epoch:               epoch,
+		SnapshotType:        snapshot.SnapshotType,
+		TotalActiveStake:    decimalUint64(snapshot.TotalActiveStake),
+		TotalPoolCount:      totalPoolCount,
+		TotalDelegators:     totalDelegators,
+		CapturedSlot:        capturedSlot,
+		BoundarySlot:        boundarySlot,
+		EpochNonce:          snapshot.EpochNonce,
+		ProtocolVersion:     protocolVersion,
+		Authoritative:       snapshot.Authoritative,
+		CalculationVersion:  calculationVersion,
+		ExcludedActiveStake: excludedActiveStake,
 	}, nil
 }
 
@@ -1455,19 +1495,31 @@ func rewardSnapshotFromSQLite(
 	if err != nil {
 		return nil, err
 	}
+	var excludedActiveStake *types.Uint64
+	if row.ExcludedActiveStake.Valid {
+		excluded, err := parseUint64(
+			"reward excluded active stake",
+			row.ExcludedActiveStake.String,
+		)
+		if err != nil {
+			return nil, err
+		}
+		excludedActiveStake = (*types.Uint64)(&excluded)
+	}
 	return &models.RewardSnapshot{
-		ID:                 uint(row.ID),
-		Epoch:              uint64(row.Epoch),
-		SnapshotType:       row.SnapshotType,
-		TotalActiveStake:   types.Uint64(totalActiveStake),
-		TotalPoolCount:     uint64(row.TotalPoolCount),
-		TotalDelegators:    uint64(row.TotalDelegators),
-		CapturedSlot:       uint64(row.CapturedSlot),
-		BoundarySlot:       uint64(row.BoundarySlot),
-		EpochNonce:         row.EpochNonce,
-		ProtocolVersion:    uint(row.ProtocolVersion),
-		Authoritative:      row.Authoritative,
-		CalculationVersion: uint(row.CalculationVersion),
+		ID:                  uint(row.ID),
+		Epoch:               uint64(row.Epoch),
+		SnapshotType:        row.SnapshotType,
+		TotalActiveStake:    types.Uint64(totalActiveStake),
+		ExcludedActiveStake: excludedActiveStake,
+		TotalPoolCount:      uint64(row.TotalPoolCount),
+		TotalDelegators:     uint64(row.TotalDelegators),
+		CapturedSlot:        uint64(row.CapturedSlot),
+		BoundarySlot:        uint64(row.BoundarySlot),
+		EpochNonce:          row.EpochNonce,
+		ProtocolVersion:     uint(row.ProtocolVersion),
+		Authoritative:       row.Authoritative,
+		CalculationVersion:  uint(row.CalculationVersion),
 	}, nil
 }
 

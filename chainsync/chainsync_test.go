@@ -28,6 +28,7 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/protocol"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
@@ -1509,6 +1510,29 @@ func TestLookupClientReturnsSnapshot(t *testing.T) {
 	clientState.Cursor.Hash[0] = 0x02
 	require.True(t, snapshot.NeedsInitialRollback)
 	require.Equal(t, []byte{0x01}, snapshot.Cursor.Hash)
+}
+
+func TestRemoveClientOwnerKeepsReplacementWithSameConnectionID(t *testing.T) {
+	t.Parallel()
+
+	provider := &mockChainProvider{}
+	s := chainsync.NewStateWithConfig(nil, provider, chainsync.DefaultConfig())
+	conn := newTestConnId(1)
+	oldOwner := ochainsync.NewServer(protocol.ProtocolOptions{}, nil)
+	replacement := ochainsync.NewServer(protocol.ProtocolOptions{}, nil)
+
+	_, err := s.AddClient(conn, ocommon.Point{}, oldOwner)
+	require.NoError(t, err)
+	_, err = s.AddClient(conn, ocommon.Point{}, replacement)
+	require.NoError(t, err)
+
+	s.RemoveClientOwner(conn, oldOwner)
+	_, retained := s.LookupClient(conn)
+	require.True(t, retained)
+
+	s.RemoveClientOwner(conn, replacement)
+	_, retained = s.LookupClient(conn)
+	require.False(t, retained)
 }
 
 // TestLookupClientPerClientLockDoesNotBlockOtherClients guards against a

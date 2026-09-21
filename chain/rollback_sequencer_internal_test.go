@@ -16,13 +16,92 @@ package chain
 
 import (
 	"testing"
+	"time"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestCallerTxnEventsWaitForCommit verifies that transaction-owned updates
+// keep their sequencer position but cannot reach subscribers before commit,
+// and disappear with the in-memory add when the transaction aborts.
+func TestCallerTxnEventsWaitForCommit(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name        string
+		finish      func(*database.Txn) error
+		wantPublish bool
+	}{
+		{
+			name:        "commit publishes",
+			finish:      (*database.Txn).Commit,
+			wantPublish: true,
+		},
+		{
+			name:   "rollback retracts",
+			finish: (*database.Txn).Rollback,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+			bus := event.NewEventBus(nil, nil)
+			t.Cleanup(bus.Stop)
+			subID, updates := bus.Subscribe(ChainUpdateEventType)
+			defer bus.Unsubscribe(ChainUpdateEventType, subID)
+			cm, err := NewManager(db, bus)
+			require.NoError(t, err)
+			c := cm.PrimaryChain()
+			blocks, err := testfixtures.GenerateConwayChain(1)
+			require.NoError(t, err)
+			point := ocommon.Point{
+				Slot: blocks[0].SlotNumber(),
+				Hash: blocks[0].Hash().Bytes(),
+			}
+			txn := db.BlobTxn(true)
+			defer txn.Release()
+			_, err = c.AddBlockWithPointDeferred(blocks[0], point, txn)
+			require.NoError(t, err)
+			c.PublishPendingChainUpdates()
+			testutil.RequireNoReceive(
+				t,
+				updates,
+				50*time.Millisecond,
+				"caller transaction event published before the transaction finished",
+			)
+			require.NoError(t, tc.finish(txn))
+			if tc.wantPublish {
+				evt := testutil.RequireReceive(
+					t,
+					updates,
+					time.Second,
+					"committed caller transaction did not publish",
+				)
+				_, ok := evt.Data.(ChainBlockEvent)
+				require.True(t, ok)
+				require.Equal(t, point, c.Tip().Point)
+				return
+			}
+			c.PublishPendingChainUpdates()
+			testutil.RequireNoReceive(
+				t,
+				updates,
+				50*time.Millisecond,
+				"aborted caller transaction left an update queued",
+			)
+			require.Equal(t, ocommon.Point{}, c.Tip().Point)
+		})
+	}
+}
 
 // TestNonDeferredRollbackQueuesEventsOnSequencer pins the mechanism rather
 // than the timing. A non-deferred Rollback used to publish its chain.update
@@ -84,8 +163,10 @@ func TestNonDeferredRollbackQueuesEventsOnSequencer(t *testing.T) {
 	// The sequencer holds every returned event, plus the header
 	// invalidation, which is deliberately never handed back to the caller.
 	c.pendingUpdatesMutex.Lock()
-	queued := make([]event.Event, len(c.pendingUpdates))
-	copy(queued, c.pendingUpdates)
+	queued := make([]event.Event, 0, len(c.pendingUpdates))
+	for _, update := range c.pendingUpdates {
+		queued = append(queued, update.event)
+	}
 	c.pendingUpdatesMutex.Unlock()
 	countByType := func(evts []event.Event, want event.EventType) int {
 		n := 0

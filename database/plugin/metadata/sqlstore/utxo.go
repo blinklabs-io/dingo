@@ -78,7 +78,6 @@ func (s *Store) CreateUtxo(txn types.Txn, utxo *models.Utxo) error {
 					ctx,
 					sqlitequery.CreateAssetParams{
 						Name:        asset.Name,
-						NameHex:     asset.NameHex,
 						PolicyID:    asset.PolicyId,
 						Fingerprint: asset.Fingerprint,
 						UtxoID: sql.NullInt64{
@@ -591,7 +590,6 @@ func (s *Store) importUtxos(
 					asset := item.Assets[j]
 					if _, err := s.execCached(ctx, db, importAssetQuery,
 						asset.Name,
-						asset.NameHex,
 						asset.PolicyId,
 						asset.Fingerprint,
 						validInt64(id),
@@ -2197,7 +2195,7 @@ func (s *Store) loadUtxoAssetsPointers(
 			args[i] = id
 		}
 		rows, err := db.QueryContext(ctx, s.dialect.Rebind(
-			"SELECT name, name_hex, policy_id, fingerprint, id, utxo_id, amount FROM asset WHERE utxo_id IN ("+bindPlaceholders(
+			"SELECT name, policy_id, fingerprint, id, utxo_id, amount FROM asset WHERE utxo_id IN ("+bindPlaceholders(
 				end-start,
 			)+") ORDER BY id",
 		), args...)
@@ -2207,11 +2205,11 @@ func (s *Store) loadUtxoAssetsPointers(
 		err = func() error {
 			defer rows.Close()
 			for rows.Next() {
-				var name, nameHex, policyID, fingerprint []byte
+				var name, policyID, fingerprint []byte
 				var id int64
 				var utxoID sql.NullInt64
 				var amount sql.NullString
-				if err := rows.Scan(&name, &nameHex, &policyID, &fingerprint, &id, &utxoID, &amount); err != nil {
+				if err := rows.Scan(&name, &policyID, &fingerprint, &id, &utxoID, &amount); err != nil {
 					return err
 				}
 				if !utxoID.Valid {
@@ -2226,7 +2224,6 @@ func (s *Store) loadUtxoAssetsPointers(
 				}
 				asset := models.Asset{
 					Name:        name,
-					NameHex:     nameHex,
 					PolicyId:    policyID,
 					Fingerprint: fingerprint,
 					ID:          uint(id),

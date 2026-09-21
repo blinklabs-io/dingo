@@ -37,7 +37,6 @@ type AddressTransaction struct {
 
 type Asset struct {
 	Name        []byte
-	NameHex     []byte
 	PolicyID    []byte
 	Fingerprint []byte
 	ID          int64
@@ -409,18 +408,19 @@ type RewardSeedFailure struct {
 }
 
 type RewardSnapshot struct {
-	ID                 int64
-	Epoch              int64
-	SnapshotType       string
-	TotalActiveStake   string
-	TotalPoolCount     int64
-	TotalDelegators    int64
-	CapturedSlot       int64
-	BoundarySlot       int64
-	EpochNonce         []byte
-	ProtocolVersion    int64
-	Authoritative      bool
-	CalculationVersion int64
+	ID                  int64
+	Epoch               int64
+	SnapshotType        string
+	TotalActiveStake    string
+	TotalPoolCount      int64
+	TotalDelegators     int64
+	CapturedSlot        int64
+	BoundarySlot        int64
+	EpochNonce          []byte
+	ProtocolVersion     int64
+	Authoritative       bool
+	CalculationVersion  int64
+	ExcludedActiveStake sql.NullString
 }
 
 type RewardStakeInput struct {

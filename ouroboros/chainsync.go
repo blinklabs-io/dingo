@@ -487,6 +487,7 @@ func chainsyncResyncRequiresFreshConnection(reason string) bool {
 		event.ChainsyncResyncReasonRollbackExceedsK,
 		event.ChainsyncResyncReasonRollbackExceedsMithril,
 		event.ChainsyncResyncReasonPeerTipBehindMithril,
+		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
 		event.ChainsyncResyncReasonForkResolutionExceedsK,
 		event.ChainsyncResyncReasonRollbackLoop:
 		return true
@@ -821,6 +822,7 @@ func (o *Ouroboros) chainsyncServerFindIntersect(
 	_, err = o.chainsyncState.AddClient(
 		ctx.ConnectionId,
 		*intersectPoint,
+		ctx.Server,
 	)
 	if err != nil {
 		return retPoint, tip, fmt.Errorf(
@@ -856,6 +858,7 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 	clientState, err := o.chainsyncState.AddClient(
 		ctx.ConnectionId,
 		tip.Point,
+		ctx.Server,
 	)
 	if err != nil {
 		return fmt.Errorf(

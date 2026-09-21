@@ -56,6 +56,15 @@ func (d *Database) DeleteCertificatesAfterSlot(
 	return nil
 }
 
+// SetCommitteeAuthImmutableSlot records the live rollback-safe immutable
+// slot that committee hot-key authorization pruning uses to bound its
+// retention window. known false means no live value is available. This is
+// an in-memory cache update, not a durable write, so it takes no
+// transaction. See metadata.CertificateStore.SetCommitteeAuthImmutableSlot.
+func (d *Database) SetCommitteeAuthImmutableSlot(slot uint64, known bool) {
+	d.certificateStore().SetCommitteeAuthImmutableSlot(slot, known)
+}
+
 // GetPoolRegistrations returns a list of pool registration certificates
 func (d *Database) GetPoolRegistrations(
 	poolKeyHash lcommon.PoolKeyHash,
