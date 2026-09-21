@@ -57,7 +57,6 @@ func (s *Store) GetAssetByPolicyAndName(
 	}
 	return models.Asset{
 		Name:        row.Name,
-		NameHex:     row.NameHex,
 		PolicyId:    row.PolicyID,
 		Fingerprint: row.Fingerprint,
 		ID:          uint(row.ID),

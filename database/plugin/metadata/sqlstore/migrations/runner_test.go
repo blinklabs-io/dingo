@@ -713,11 +713,23 @@ func TestRunnerReplaysEveryShippedVersionFromExpand(t *testing.T) {
 	t.Parallel()
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
-	baseline := fullyMigratedBaseline(t, registry)
-	for _, migration := range registry {
+	// Each version replays against a database migrated exactly through that
+	// version, not through the latest one: that is the only state a crash
+	// mid-expand can actually leave behind, since a version only starts once
+	// every earlier one reached PhaseComplete and no version reopens after a
+	// later one has run. A single shared "migrated to latest" baseline worked
+	// for every version before v19 only because versions 1-18 are all purely
+	// additive (ADD COLUMN/CREATE TABLE/CREATE INDEX): replaying an old
+	// version's DDL against the newest schema was harmless. v19 (dingo#4464)
+	// drops a column and index a later replay can no longer see, so
+	// replaying v1's CREATE INDEX on `asset`(`name_hex`) against a database
+	// that already ran v19 fails with "no such column" -- a state v1 can
+	// never actually be found in.
+	baselines := perVersionBaselines(t, registry)
+	for i, migration := range registry {
 		t.Run(migration.Name, func(t *testing.T) {
 			t.Parallel()
-			db := openTestDBFromBaseline(t, baseline)
+			db := openTestDBFromBaseline(t, baselines[i])
 			runner := &Runner{
 				DB:       db,
 				Dialect:  "sqlite",
@@ -752,29 +764,36 @@ SELECT phase, dirty, completed_at FROM schema_migrations WHERE version = ?`,
 	}
 }
 
-// fullyMigratedBaseline runs the full registry once against a fresh database
-// and returns its file bytes. journal_mode=MEMORY never materializes a
-// rollback journal file at all, so the closed database file alone is a
-// complete, valid database each subtest can copy.
-func fullyMigratedBaseline(t *testing.T, registry []Migration) []byte {
+// perVersionBaselines runs the registry once, incrementally, and returns the
+// database file bytes captured immediately after each version reaches
+// PhaseComplete -- baselines[i] is migrated exactly through registry[i], not
+// through the latest version. Calling Run repeatedly with a growing Registry
+// slice is the same incremental-upgrade path a real node takes release over
+// release, so this applies every migration's DDL only once in total, the
+// same total work fullyMigratedBaseline's single shared baseline did.
+func perVersionBaselines(t *testing.T, registry []Migration) [][]byte {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "baseline.sqlite")
-	db, err := sql.Open(
-		"sqlite",
-		"file:"+path+"?_pragma=foreign_keys(1)&"+testDBPragmas,
-	)
-	require.NoError(t, err)
-	runner := &Runner{
-		DB:       db,
-		Dialect:  "sqlite",
-		Registry: registry,
-		Locker:   NewProcessLocker(),
+	baselines := make([][]byte, len(registry))
+	for i := range registry {
+		db, err := sql.Open(
+			"sqlite",
+			"file:"+path+"?_pragma=foreign_keys(1)&"+testDBPragmas,
+		)
+		require.NoError(t, err)
+		runner := &Runner{
+			DB:       db,
+			Dialect:  "sqlite",
+			Registry: registry[:i+1],
+			Locker:   NewProcessLocker(),
+		}
+		require.NoError(t, runner.Run(context.Background()))
+		require.NoError(t, db.Close())
+		data, err := os.ReadFile(path)
+		require.NoError(t, err)
+		baselines[i] = data
 	}
-	require.NoError(t, runner.Run(context.Background()))
-	require.NoError(t, db.Close())
-	data, err := os.ReadFile(path)
-	require.NoError(t, err)
-	return data
+	return baselines
 }
 
 // openTestDBFromBaseline seeds a subtest's own database file from a byte copy
