@@ -245,6 +245,7 @@ func (s *Service) Restore(
 		lifecycle.RestoreStorageConfig{
 			Blob:     s.cfg.Plugins.Storage.Blob.Config,
 			Metadata: s.cfg.Plugins.Storage.Metadata.Config,
+			Logger:   s.logger,
 		},
 	)
 	if err != nil {

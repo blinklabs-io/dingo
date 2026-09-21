@@ -20,9 +20,12 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
@@ -127,6 +130,11 @@ func syncDirTree(root string) error {
 type RestoreStorageConfig struct {
 	Blob     map[string]any
 	Metadata map[string]any
+	// Logger, when set, receives the restore's deferred-index repair
+	// progress. A full manifest rebuild on a multi-million-row table takes
+	// minutes and is otherwise silent. Nil disables that reporting; nothing
+	// else in this package logs.
+	Logger *slog.Logger
 }
 
 // Restore populates targetDataDir (which must not already exist, or must
@@ -1105,6 +1113,56 @@ func restoreBlobStore(
 // checkCommitTimestamp checks validate internal consistency, then
 // additionally confirms the restored tip matches what the manifest
 // recorded before closing it again.
+// rebuildRestoredDeferredIndexes repairs the staged metadata copy's deferred
+// indexes before the restore activates it.
+//
+// The build runs on ctx where the store supports it
+// (metadata.ContextDeferredIndexBuilder): a restore is cancellable, and an
+// uninterruptible rebuild would outlive the cancellation by however long the
+// largest index takes. It is still a staging-directory operation either way,
+// so targetDataDir is untouched whichever path runs.
+func rebuildRestoredDeferredIndexes(
+	ctx context.Context,
+	manager metadata.DeferredIndexManager,
+	logger *slog.Logger,
+) error {
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+	if lister, ok := manager.(metadata.MissingDeferredIndexLister); ok {
+		missing, err := lister.MissingDeferredIndexes()
+		if err != nil {
+			logger.Warn(
+				"could not list missing deferred metadata indexes in the "+
+					"restored database; rebuilding without naming them",
+				"error", err,
+			)
+		} else if len(missing) > 0 {
+			logger.Info(
+				"rebuilding missing deferred metadata indexes in the "+
+					"restored database",
+				"indexes", strings.Join(missing, ","),
+				"count", len(missing),
+			)
+		}
+	}
+	start := time.Now()
+	var err error
+	if builder, ok := manager.(metadata.ContextDeferredIndexBuilder); ok {
+		err = builder.BuildDeferredIndexesContext(ctx)
+	} else {
+		err = manager.BuildDeferredIndexes()
+	}
+	if err != nil {
+		return fmt.Errorf("restore deferred metadata indexes: %w", err)
+	}
+	logger.Info(
+		"deferred metadata index repair complete in the restored database",
+		"duration", time.Since(start),
+	)
+	return nil
+}
+
 func validateRestoredDatabase(
 	ctx context.Context,
 	host *plugin.Host,
@@ -1152,8 +1210,12 @@ func validateRestoredDatabase(
 		context.WithoutCancel(ctx), plugin.CapabilityStorageMetadata,
 	)
 	if manager, ok := metadataStore.(metadata.DeferredIndexManager); ok {
-		if err := manager.BuildDeferredIndexes(); err != nil {
-			return fmt.Errorf("restore deferred metadata indexes: %w", err)
+		if err := rebuildRestoredDeferredIndexes(
+			ctx,
+			manager,
+			storageConfig.Logger,
+		); err != nil {
+			return err
 		}
 	}
 	db, err := database.New(&database.Config{

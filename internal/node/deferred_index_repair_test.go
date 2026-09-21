@@ -326,3 +326,99 @@ func TestRepairDeferredIndexesNamesMissingIndexAgainstRealStore(t *testing.T) {
 		"the operator must be told which index the wait is for",
 	)
 }
+
+// namedMissingAllManager answers the full-manifest lister and records the log
+// as BuildDeferredIndexes sees it, so the ordering assertion below reads the
+// same "before the build" evidence its critical-subset sibling does.
+type namedMissingAllManager struct {
+	missing []string
+	logged  string
+	log     *bytes.Buffer
+}
+
+func (m *namedMissingAllManager) DropDeferredIndexes() error { return nil }
+
+func (m *namedMissingAllManager) BuildCriticalDeferredIndexes() error {
+	return nil
+}
+
+func (m *namedMissingAllManager) BuildDeferredIndexes() error {
+	m.logged = m.log.String()
+	return nil
+}
+
+func (m *namedMissingAllManager) HasDeferredIndexesPending() (bool, error) {
+	return false, nil
+}
+
+func (m *namedMissingAllManager) MissingDeferredIndexes() ([]string, error) {
+	return m.missing, nil
+}
+
+// TestEnsureAllDeferredIndexesNamesMissingBeforeBuilding covers the repair a
+// restored database takes: the full manifest is rebuilt, and that rebuild is
+// as silent while it runs as the critical subset's, with more entries to get
+// through. The names must reach the log before the build is entered.
+func TestEnsureAllDeferredIndexesNamesMissingBeforeBuilding(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	manager := &namedMissingAllManager{
+		missing: []string{"idx_asset_fingerprint", "idx_utxo_added_slot"},
+		log:     &buf,
+	}
+
+	require.NoError(t, ensureAllDeferredIndexes(manager, logger))
+
+	require.Contains(
+		t,
+		manager.logged,
+		"rebuilding missing deferred metadata indexes",
+		"the rebuild must be announced before it starts",
+	)
+	require.Contains(t, manager.logged, "idx_asset_fingerprint")
+	require.Contains(t, manager.logged, "idx_utxo_added_slot")
+	require.Contains(
+		t,
+		buf.String(),
+		"deferred metadata index check complete",
+	)
+	require.Contains(t, buf.String(), "duration")
+}
+
+// TestEnsureAllDeferredIndexesQuietWhenManifestComplete keeps the healthy
+// path silent, matching the critical-subset check.
+func TestEnsureAllDeferredIndexesQuietWhenManifestComplete(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	manager := &namedMissingAllManager{log: &buf}
+
+	require.NoError(t, ensureAllDeferredIndexes(manager, logger))
+
+	require.Empty(t, buf.String())
+}
+
+// TestRepairDeferredIndexesAnnouncesLazyRebuild drives the real store through
+// the startup repair path and requires the lazy entry it rebuilds to be named
+// in the log, not rebuilt silently.
+func TestRepairDeferredIndexesAnnouncesLazyRebuild(t *testing.T) {
+	db := newFileTestDB(t)
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	lazy := dbtest.LazyManifestIndex(t)
+	_, err = raw.Exec("DROP INDEX IF EXISTS " + lazy)
+	require.NoError(t, err)
+	_, err = raw.Exec(
+		"DELETE FROM sync_state WHERE sync_key = ?", deferred.SyncStateKey,
+	)
+	require.NoError(t, err)
+
+	var buf bytes.Buffer
+	require.NoError(t, RepairDeferredIndexes(
+		db,
+		slog.New(slog.NewTextHandler(&buf, nil)),
+	))
+
+	require.Contains(t, buf.String(), "rebuilding missing deferred metadata")
+	require.Contains(t, buf.String(), lazy)
+	require.True(t, dbtest.MetadataIndexExists(t, raw, lazy))
+}

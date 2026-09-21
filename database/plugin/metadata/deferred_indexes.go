@@ -14,6 +14,8 @@
 
 package metadata
 
+import "context"
+
 // DeferredIndexManager is an optional interface that metadata stores
 // implement to participate in bulk-load index deferral. The Mithril
 // sync orchestrator probes the store with a type assertion and skips
@@ -60,6 +62,28 @@ type DeferredIndexManager interface {
 //
 // Stores that do not implement this report nothing and fall back to logging
 // after the fact.
+// MissingDeferredIndexLister is MissingCriticalDeferredIndexLister for the
+// complete manifest. The full-manifest repair a restored database needs is as
+// silent as the critical one, and has more entries to build.
+type MissingDeferredIndexLister interface {
+	// MissingDeferredIndexes returns the names of the manifest entries
+	// missing from the schema, in manifest order. It performs no DDL.
+	MissingDeferredIndexes() ([]string, error)
+}
+
+// ContextDeferredIndexBuilder is an optional companion to
+// DeferredIndexManager for callers that own a cancellable context.
+//
+// BuildDeferredIndexes runs its DDL on a context the store creates, so a
+// caller whose own context is cancelled still waits for the build to finish.
+// Restore stages a full rebuild inside a cancellable operation and uses this
+// instead; stores that do not implement it fall back to the uninterruptible
+// call.
+type ContextDeferredIndexBuilder interface {
+	// BuildDeferredIndexesContext is BuildDeferredIndexes bound to ctx.
+	BuildDeferredIndexesContext(ctx context.Context) error
+}
+
 type MissingCriticalDeferredIndexLister interface {
 	// MissingCriticalDeferredIndexes returns the names of the
 	// Critical=true manifest entries missing from the schema, in

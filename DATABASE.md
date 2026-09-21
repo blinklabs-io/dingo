@@ -868,6 +868,14 @@ repair when no deferred-index marker is present; an active marker still builds
 only the critical subset before traffic and leaves the lazy remainder to its
 existing deferred-rebuild path.
 
+That rebuild runs on the restore's own context where the store implements
+`metadata.ContextDeferredIndexBuilder`, so a cancelled restore is not held for
+the length of a full index build. Every repair path names the entries it is
+about to build before starting — `metadata.MissingDeferredIndexLister` for the
+full manifest, `metadata.MissingCriticalDeferredIndexLister` for the critical
+subset — and reports the elapsed time afterwards, because the build itself
+emits nothing while it runs.
+
 ### Midnight Indexer
 
 | Table | Columns | Keys / indexes | Relationships and notes |

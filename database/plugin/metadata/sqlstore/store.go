@@ -789,17 +789,29 @@ func (s *Store) withWriteTransaction(
 	txn types.Txn,
 	fn func(queryer, context.Context) error,
 ) error {
+	return s.withWriteTransactionContext(context.Background(), txn, fn)
+}
+
+// withWriteTransactionContext is withWriteTransaction with an explicit ctx
+// for the implicit-transaction case, so a caller that owns a cancellable
+// context (a restore, say) can interrupt a long DDL statement instead of
+// waiting it out. A caller-supplied txn still carries its own ctx, per
+// dbFromTxn, and ctx is ignored in that case.
+func (s *Store) withWriteTransactionContext(
+	ctx context.Context,
+	txn types.Txn,
+	fn func(queryer, context.Context) error,
+) error {
 	if err := s.ensureReady(); err != nil {
 		return err
 	}
 	if txn != nil {
-		db, ctx, err := s.dbFromTxn(txn)
+		db, txnCtx, err := s.dbFromTxn(txn)
 		if err != nil {
 			return err
 		}
-		return fn(db, ctx)
+		return fn(db, txnCtx)
 	}
-	ctx := context.Background()
 	sqlTransaction, release, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return err
