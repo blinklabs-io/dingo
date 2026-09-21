@@ -53,7 +53,7 @@ func TestHistoricalRewardsAtBoundaryResolvesReconciliationToCorrectedAmount(
 		0, key, 5_000_000, 100, bytes.Repeat([]byte{0xd1}, 32), nil,
 	))
 
-	// slot 150: TrustCanonicalWithdrawalOnRewardMismatch proves the true
+	// slot 150: a ReconcileAccountRewardBalance correction proves the true
 	// balance was 5_000_014, not 5_000_000 -- the same shape of small,
 	// persistent understatement described in dingo #4529.
 	require.NoError(t, store.ReconcileAccountRewardBalance(

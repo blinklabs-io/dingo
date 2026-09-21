@@ -23,8 +23,8 @@ import (
 )
 
 // TestDeleteAccountRewardsAfterSlotSurvivesReconciliation pins the fix for a
-// bug caught live while trying to truncate a database that had exercised
-// TrustCanonicalWithdrawalOnRewardMismatch: ReconcileAccountRewardBalance
+// bug caught live while trying to truncate a database that had recorded a
+// ReconcileAccountRewardBalance correction: ReconcileAccountRewardBalance
 // used to overwrite account.reward with no account_reward_delta row at all,
 // so a later rollback/truncate crossing that slot walked the delta chain as
 // if the account's history were unbroken, and failed with "account reward
@@ -45,8 +45,8 @@ func TestDeleteAccountRewardsAfterSlotSurvivesReconciliation(t *testing.T) {
 		0, key, 3_000_000, 100, bytes.Repeat([]byte{0xb1}, 32), nil,
 	))
 
-	// TrustCanonicalWithdrawalOnRewardMismatch overwrites the balance to
-	// match a canonical peer's claim, at slot 150, in response to a specific
+	// ReconcileAccountRewardBalance overwrites the balance to match a
+	// canonical peer's claim, at slot 150, in response to a specific
 	// failing transaction.
 	require.NoError(t, store.ReconcileAccountRewardBalance(
 		0, key, 2_999_998, 150, bytes.Repeat([]byte{0xb2}, 32), nil,
@@ -185,8 +185,8 @@ func TestDeleteAccountRewardsAfterSlotClampsUnexplainableUnderflow(
 
 // TestApplyAccountRewardWithdrawalAppliesAfterReconciliationForSameTxHash
 // pins the fix for a bug caught by review on the reconciliation mechanism
-// itself: TrustCanonicalWithdrawalOnRewardMismatch deliberately corrects the
-// balance to the withdrawal's own claimed pre-withdrawal amount rather than
+// itself: ReconcileAccountRewardBalance deliberately corrects the balance to
+// the withdrawal's own claimed pre-withdrawal amount rather than
 // to zero, on the assumption that the same transaction's real withdrawal
 // gets re-validated and applied normally on the very next retry (see
 // ReconcileAccountRewardBalance's doc comment). Before this fix, the
