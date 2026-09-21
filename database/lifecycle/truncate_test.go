@@ -902,3 +902,88 @@ func TestTruncateRejectsPreCancelledContextWithoutRecordingMarker(
 		"a pre-cancelled Truncate must not record a pending marker",
 	)
 }
+
+// TestTruncateRejectsConsumedUtxoPruneFloorAboveTarget covers the interaction
+// between CIP-0135 truncate and the consumed-UTxO prune floor (issue #3766).
+//
+// The floor records how deep the consumed-UTxO sweep hard-deleted spent rows,
+// and ledger.LedgerState.rollback refuses any target below it. Truncate is
+// deliberately refuses to go deeper, because a floor left above the new tip
+// identifies UTxOs that cannot be restored. A truncate at or above the floor
+// leaves the floor in place.
+func TestTruncateRejectsConsumedUtxoPruneFloorAboveTarget(t *testing.T) {
+	const sweptSlot uint64 = 35
+
+	sweptTxId := bytes.Repeat([]byte{0x3B}, 32)
+
+	requireSweptUtxoAbsent := func(t *testing.T, f *chainFixture) {
+		t.Helper()
+		utxo, err := f.db.Metadata().GetUtxoIncludingSpent(sweptTxId, 0, nil)
+		require.NoError(t, err)
+		require.Nil(
+			t,
+			utxo,
+			"the swept row was hard-deleted; a truncate must not "+
+				"re-materialize it, since nothing can restore its contents",
+		)
+	}
+
+	newFixtureWithFloor := func(t *testing.T) *chainFixture {
+		t.Helper()
+		f := buildTestChain(t, 5)
+		txn := f.db.MetadataTxn(true)
+		require.NoError(t, txn.Do(func(txn *database.Txn) error {
+			return f.db.CreateUtxo(txn, &models.Utxo{
+				TxId:        sweptTxId,
+				OutputIdx:   0,
+				AddedSlot:   10,
+				DeletedSlot: 30,
+				Amount:      types.Uint64(1),
+			})
+		}))
+		pruned, err := f.db.UtxosDeleteConsumed(sweptSlot, 100, nil)
+		require.NoError(t, err)
+		require.Equal(t, 1, pruned)
+		requireSweptUtxoAbsent(t, f)
+		floor, err := f.db.ConsumedUtxoPruneFloor(nil)
+		require.NoError(t, err)
+		require.Equal(t, sweptSlot, floor)
+		return f
+	}
+
+	t.Run("target below the floor is rejected", func(t *testing.T) {
+		f := newFixtureWithFloor(t)
+		// blocks[1] is at slot 20, below the swept slot.
+		_, err := lifecycle.Truncate(
+			context.Background(), f.db, f.blocks[1], 0, false, 0,
+		)
+		require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
+		floor, err := f.db.ConsumedUtxoPruneFloor(nil)
+		require.NoError(t, err)
+		require.Equal(
+			t,
+			sweptSlot,
+			floor,
+			"a rejected truncate must preserve the prune floor",
+		)
+		requireSweptUtxoAbsent(t, f)
+	})
+
+	t.Run("target above the floor keeps it", func(t *testing.T) {
+		f := newFixtureWithFloor(t)
+		// blocks[3] is at slot 40, above the swept slot.
+		_, err := lifecycle.Truncate(
+			context.Background(), f.db, f.blocks[3], 0, false, 0,
+		)
+		require.NoError(t, err)
+		floor, err := f.db.ConsumedUtxoPruneFloor(nil)
+		require.NoError(t, err)
+		require.Equal(
+			t,
+			sweptSlot,
+			floor,
+			"a truncate that does not cross the floor must leave it intact",
+		)
+		requireSweptUtxoAbsent(t, f)
+	})
+}

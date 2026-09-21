@@ -47,6 +47,7 @@ func TestBlockfetchServerSendBatch_ExactEndpointContract(t *testing.T) {
 				{result: &chain.ChainIteratorResult{Rollback: true}},
 			},
 			wantBlocks: 1,
+			wantDone:   true,
 		},
 		{
 			name: "nil result after partial delivery",
@@ -55,6 +56,7 @@ func TestBlockfetchServerSendBatch_ExactEndpointContract(t *testing.T) {
 				{},
 			},
 			wantBlocks: 1,
+			wantDone:   true,
 		},
 		{
 			name: "overshoots endpoint",
@@ -63,6 +65,7 @@ func TestBlockfetchServerSendBatch_ExactEndpointContract(t *testing.T) {
 				{result: testBlockfetchIteratorBlock(201)},
 			},
 			wantBlocks: 1,
+			wantDone:   true,
 		},
 	}
 	for _, test := range tests {

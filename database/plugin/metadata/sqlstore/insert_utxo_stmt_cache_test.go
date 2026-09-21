@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	sqlitequery "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/internal/query/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
@@ -144,6 +145,96 @@ func TestInsertUtxoModelReusesCachedStatementAcrossTransactions(t *testing.T) {
 	require.Equal(t, types.Uint64(7), got2.Amount)
 }
 
+// TestImportUtxosReusesCachedStatementAcrossTransactions proves the snapshot
+// importer uses the same cached insert as the ordinary UTxO path. It also
+// exercises the ON CONFLICT DO NOTHING + fallback lookup that assigns the
+// existing row ID, preserving idempotent imports.
+func TestImportUtxosReusesCachedStatementAcrossTransactions(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+
+	first := *utxoForInsertCacheTest(21, 0, 5_000_000)
+	require.NoError(t, store.ImportUtxos([]models.Utxo{first}, nil))
+	gotFirst, err := store.GetUtxo(first.TxId, first.OutputIdx, nil)
+	require.NoError(t, err)
+	require.NotNil(t, gotFirst)
+
+	store.stmtMu.Lock()
+	cachedBefore := store.stmts[insertUtxoQueryIgnoreConflict]
+	store.stmtMu.Unlock()
+	require.NotNil(
+		t,
+		cachedBefore,
+		"expected importer insert to use the cached statement on SQLite",
+	)
+
+	second := *utxoForInsertCacheTest(22, 0, 7)
+	require.NoError(t, store.ImportUtxos([]models.Utxo{second}, nil))
+	gotSecond, err := store.GetUtxo(second.TxId, second.OutputIdx, nil)
+	require.NoError(t, err)
+	require.NotNil(t, gotSecond)
+	require.NotEqual(t, gotFirst.ID, gotSecond.ID)
+
+	store.stmtMu.Lock()
+	cachedAfter := store.stmts[insertUtxoQueryIgnoreConflict]
+	store.stmtMu.Unlock()
+	require.Same(
+		t,
+		cachedBefore,
+		cachedAfter,
+		"expected the importer to reuse the same cached statement",
+	)
+
+	duplicate := first
+	duplicate.Amount = 999
+	require.NoError(t, store.ImportUtxos([]models.Utxo{duplicate}, nil))
+	gotDuplicate, err := store.GetUtxo(first.TxId, first.OutputIdx, nil)
+	require.NoError(t, err)
+	require.NotNil(t, gotDuplicate)
+	require.Equal(t, gotFirst.ID, gotDuplicate.ID)
+	require.Equal(
+		t,
+		types.Uint64(5_000_000),
+		gotDuplicate.Amount,
+		"conflicting import must preserve the existing UTxO row",
+	)
+}
+
+// TestImportUtxosBoundsTxScopedStatementRetentionInOneTransaction exercises
+// the production shape: one import batch keeps a write transaction open while
+// it inserts many outputs. Reusing one Tx-scoped derivative keeps database/sql
+// from retaining one prepared statement per imported output.
+func TestImportUtxosBoundsTxScopedStatementRetentionInOneTransaction(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	ctx := context.Background()
+
+	const outputCount = 2_000
+	utxos := make([]models.Utxo, outputCount)
+	for i := range outputCount {
+		utxos[i] = *utxoForBenchmarkIteration(uint64(i + 1))
+	}
+
+	txn := store.Transaction(ctx)
+	sqlTransaction, ok := txn.(*sqlTxn)
+	require.True(t, ok)
+	require.NoError(t, sqlTransaction.beginErr)
+	require.NoError(t, store.ImportUtxos(utxos, txn))
+
+	retained := retainedTxStmtCount(t, sqlTransaction.tx)
+	require.NoError(t, txn.Commit())
+	require.LessOrEqual(
+		t,
+		retained,
+		1,
+		"expected one Tx-scoped importer statement for %d outputs, got %d",
+		outputCount,
+		retained,
+	)
+}
+
 // TestInsertUtxoModelCachesAssetIDLookup proves getAssetIDQuery -- the other
 // query insertUtxoModel now routes through the hot-statement cache -- is
 // populated, reused across independent write transactions, and still
@@ -156,7 +247,6 @@ func TestInsertUtxoModelCachesAssetIDLookup(t *testing.T) {
 	utxo.Assets = []models.Asset{
 		{
 			Name:        []byte("token"),
-			NameHex:     []byte("746f6b656e"),
 			PolicyId:    bytes.Repeat([]byte{0xAA}, 28),
 			Fingerprint: []byte("asset1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
 			Amount:      types.Uint64(42),
@@ -178,7 +268,6 @@ func TestInsertUtxoModelCachesAssetIDLookup(t *testing.T) {
 	utxo2.Assets = []models.Asset{
 		{
 			Name:        []byte("token2"),
-			NameHex:     []byte("746f6b656e32"),
 			PolicyId:    bytes.Repeat([]byte{0xBB}, 28),
 			Fingerprint: []byte("asset1bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
 			Amount:      types.Uint64(7),
@@ -236,7 +325,6 @@ func TestInsertUtxoModelBoundsTxScopedStatementRetentionInOneTransaction(
 				utxo.Assets = []models.Asset{
 					{
 						Name:     []byte("token"),
-						NameHex:  []byte("746f6b656e"),
 						PolicyId: bytes.Repeat([]byte{0xCC}, 28),
 						Fingerprint: []byte(
 							"asset1cccccccccccccccccccccccccccccccccccccccc",
@@ -255,13 +343,13 @@ func TestInsertUtxoModelBoundsTxScopedStatementRetentionInOneTransaction(
 	retained := retainedTxStmtCount(t, sqlTransaction.tx)
 	require.NoError(t, txn.Commit())
 
-	// insertUtxoModel here consults exactly two distinct cached queries --
-	// insertUtxoQueryIgnoreConflict and getAssetIDQuery -- so 2 is the exact
-	// bound, not just an upper one.
+	// insertUtxoModel here consults exactly three distinct cached queries --
+	// insertUtxoQueryIgnoreConflict, importAssetQuery, and getAssetIDQuery --
+	// so 3 is the exact bound, not just an upper one.
 	require.LessOrEqual(
 		t,
 		retained,
-		2,
+		3,
 		"expected bounded Tx-scoped statement retention for %d outputs, got %d",
 		outputCount,
 		retained,
@@ -446,5 +534,102 @@ func BenchmarkInsertUtxoModel(b *testing.B) {
 				b.Fatal(err)
 			}
 		}
+	})
+}
+
+// legacyImportUtxoStatement reproduces importUtxos' former generated sqlc
+// call. The benchmark keeps both paths in one transaction so the measured
+// difference is statement preparation/reuse, not transaction setup.
+func legacyImportUtxoStatement(
+	ctx context.Context,
+	db queryer,
+	utxo *models.Utxo,
+) (int64, error) {
+	params, err := createUtxoParams(utxo)
+	if err != nil {
+		return 0, err
+	}
+	return sqlitequery.New(db).CreateUtxoIfAbsent(
+		ctx,
+		sqlitequery.CreateUtxoIfAbsentParams(params),
+	)
+}
+
+func cachedImportUtxoStatement(
+	ctx context.Context,
+	store *Store,
+	db queryer,
+	utxo *models.Utxo,
+) (int64, error) {
+	params, err := createUtxoParams(utxo)
+	if err != nil {
+		return 0, err
+	}
+	var id int64
+	err = store.queryRowCached(ctx, db, insertUtxoQueryIgnoreConflict,
+		params.TransactionID,
+		params.CollateralReturnForTxID,
+		params.TxID,
+		params.PaymentKey,
+		params.StakingKey,
+		params.CredentialTag,
+		params.DatumHash,
+		nullBytes(params.SpentAtTxID),
+		nullBytes(params.ReferencedByTxID),
+		nullBytes(params.CollateralByTxID),
+		params.AddedSlot,
+		params.DeletedSlot,
+		params.Amount,
+		params.OutputIdx,
+		params.PaymentScript,
+	).Scan(&id)
+	return id, err
+}
+
+// BenchmarkImportUtxoStatement measures the exact importer insert before and
+// after transaction-scoped prepared-statement reuse. Unique transaction IDs
+// keep every iteration on the insert path rather than the conflict fallback.
+func BenchmarkImportUtxoStatement(b *testing.B) {
+	ctx := context.Background()
+
+	b.Run("one_shot_uncached", func(b *testing.B) {
+		store := newMigratedSQLiteStore(b)
+		txn := store.Transaction(ctx)
+		db, txCtx, err := store.dbFromTxn(txn)
+		require.NoError(b, err)
+		i := uint64(0)
+		b.ResetTimer()
+		for b.Loop() {
+			i++
+			utxo := utxoForBenchmarkIteration(i)
+			if _, err := legacyImportUtxoStatement(txCtx, db, utxo); err != nil {
+				b.Fatal(err)
+			}
+		}
+		b.StopTimer()
+		require.NoError(b, txn.Commit())
+	})
+
+	b.Run("transaction_scoped_cache", func(b *testing.B) {
+		store := newMigratedSQLiteStore(b)
+		txn := store.Transaction(ctx)
+		db, txCtx, err := store.dbFromTxn(txn)
+		require.NoError(b, err)
+		i := uint64(0)
+		b.ResetTimer()
+		for b.Loop() {
+			i++
+			utxo := utxoForBenchmarkIteration(i)
+			if _, err := cachedImportUtxoStatement(
+				txCtx,
+				store,
+				db,
+				utxo,
+			); err != nil {
+				b.Fatal(err)
+			}
+		}
+		b.StopTimer()
+		require.NoError(b, txn.Commit())
 	})
 }

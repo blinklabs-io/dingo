@@ -111,6 +111,20 @@ type LedgerView struct {
 	// in charge, which is correct for every caller with no applied block in
 	// hand (mempool validation, standalone evaluation).
 	horizonAnchorSlot uint64
+	// epochStartSlot is the current epoch's start slot, pinned from the same
+	// snapshot pp was captured from at every real validation/evaluation call
+	// site (see the pinCommitteeState call sites in state.go). IsVrfKeyInUse
+	// reads this rather than calling ls.loadConsensusSnapshot() live: a
+	// validation operation can run long enough that the writer publishes a
+	// newer snapshot -- and therefore a new epoch boundary -- in the
+	// meantime, which would let the deferral check for one certificate
+	// disagree with the check for another certificate in the same
+	// transaction or block, or with itself if IsVrfKeyInUse or
+	// PoolCurrentState were called more than once against the same input.
+	// This mirrors why syntheticV2CostModel below is pinned rather than
+	// read live. Zero is a safe default for callers with no meaningful
+	// current epoch (a bare view built outside real validation).
+	epochStartSlot uint64
 	// syntheticV2CostModel is pinned from the same snapshot pparams (pp) was
 	// captured from -- see pinSyntheticV2CostModel and
 	// SyntheticV2CostModelInEffect. It must not be re-read live from
@@ -197,6 +211,65 @@ func (lv *LedgerView) MinPoolMargin() *big.Rat {
 // in the MinPoolMarginProvider method signature a compile error instead of a
 // silent runtime no-op for the CIP-23 pool-margin-floor certificate rule.
 var _ eras.MinPoolMarginProvider = (*LedgerView)(nil)
+
+// PendingMIRRewardDeltas returns, for each stake credential, the signed sum of
+// MIR reward deltas already committed this epoch at or before uptoSlot. Every
+// transaction's certificates are written to the database immediately after
+// that transaction validates (see ledgerProcessBlock), before the next
+// transaction in the same block validates, so this query already reflects
+// every prior transaction's MIR certificates this epoch, same block or
+// earlier -- only certificates within the transaction currently being
+// validated are not yet visible here, and validateMIRAccumulatedRewards folds
+// those in memory as it walks the transaction's own certificate list.
+//
+// The epoch start slot comes from lv.epochStartSlot, pinned from the same
+// snapshot pp was captured from at every real validation call site (see
+// epochStartSlot's field doc comment and IsVrfKeyInUse, which pins it for the
+// same reason), never a fresh read of LedgerState.currentEpoch: that field is
+// writer-owned working state (see its doc comment in state.go), and
+// re-reading it independently, later in the same validation call, could
+// observe an epoch rollover that a concurrent writer committed after the
+// rest of this validation was pinned to an earlier snapshot -- silently
+// reporting zero pending deltas for a transaction that is still, in truth,
+// inside the earlier epoch.
+func (lv *LedgerView) PendingMIRRewardDeltas(
+	uptoSlot uint64,
+) (map[eras.MIRCredentialKey]*big.Int, error) {
+	epochStartSlot := lv.epochStartSlot
+	if uptoSlot < epochStartSlot {
+		return nil, nil
+	}
+	effects, err := lv.ls.db.GetMIRCertsInSlotRange(
+		epochStartSlot, uptoSlot+1, lv.txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get MIR certs in slot range: %w", err)
+	}
+	totals := make(map[eras.MIRCredentialKey]*big.Int)
+	for _, effect := range effects {
+		for _, reward := range effect.Rewards {
+			if reward.Amount == nil {
+				continue
+			}
+			key := eras.MIRCredentialKey{
+				Tag:        reward.CredentialTag,
+				Credential: lcommon.NewBlake2b224(reward.Credential),
+				Pot:        effect.Pot,
+			}
+			if existing, ok := totals[key]; ok {
+				totals[key] = new(big.Int).Add(existing, reward.Amount)
+			} else {
+				totals[key] = new(big.Int).Set(reward.Amount)
+			}
+		}
+	}
+	return totals, nil
+}
+
+// var _ eras.MIRPendingRewardsProvider = (*LedgerView)(nil) makes any future
+// drift in the MIRPendingRewardsProvider method signature a compile error
+// instead of a silent runtime no-op for the MIRProducesNegativeUpdate check.
+var _ eras.MIRPendingRewardsProvider = (*LedgerView)(nil)
 
 // The Conway committee certificate and voter rules discover this capability
 // with a runtime type assertion and fail closed when it misses, so signature
@@ -614,11 +687,20 @@ func (lv *LedgerView) IsPoolRegistered(pkh lcommon.PoolKeyHash) bool {
 
 // IsVrfKeyInUse checks if a VRF key hash is registered by another pool.
 // Returns (inUse, owningPoolId, error).
+//
+// The reservation checked here is the one effective as of the start of the
+// current epoch, not a pool's most recent registration: a re-registration
+// submitted during the epoch in progress is deferred to the next boundary
+// (cardano-ledger's psFutureStakePoolParams), so the pool's prior key stays
+// reserved until then. See GetPoolByVrfKeyHash. The epoch boundary used is
+// lv.epochStartSlot, pinned once at view construction -- not re-read from
+// the live consensus snapshot here, per epochStartSlot's field doc comment.
 func (lv *LedgerView) IsVrfKeyInUse(
 	vrfKeyHash lcommon.Blake2b256,
 ) (bool, lcommon.PoolKeyHash, error) {
 	pool, err := lv.ls.db.GetPoolByVrfKeyHash(
 		vrfKeyHash.Bytes(),
+		lv.epochStartSlot,
 		lv.txn,
 	)
 	if err != nil {
@@ -1413,12 +1495,121 @@ func (lv *LedgerView) CommitteeMembers() ([]lcommon.CommitteeMember, error) {
 	return members, nil
 }
 
+// drepRegistrationDeposit resolves the deposit reported to gouroboros for a
+// DRep registration.
+//
+// A recorded deposit -- including a recorded zero -- is authoritative and is
+// passed through unchanged. When nothing is recorded, this reports the DRep
+// deposit under the current era and protocol parameters instead of the
+// absence.
+//
+// The absence is not a harmless nil. gouroboros fails closed on it: a
+// DeregistrationDrepCertificate against a registration with Deposit == nil
+// returns DRepDepositStateInconsistentError, so the block is rejected and a
+// node that reaches it stops making progress. The reference ledger's DRepState
+// carries a non-optional deposit, so a registration without one is a state
+// only this implementation can produce -- and it does: InsertDrepIfAbsent
+// (ledger/governance/processing.go, the vote-replay recovery path) writes an
+// active drep row and no registration_drep row at all when a valid DRep vote
+// proves a credential exists but the metadata row was lost. That DRep is
+// active, can be deregistered, and has no recorded deposit.
+//
+// Reporting the current parameter is the same answer the write path would have
+// recorded: it runs the era's certificate-deposit function over the same
+// registration certificate type that ledger.calculateCertificateDeposit does,
+// so the value equals what a registration applied now would store. Absence is
+// still reported when the current era charges no DRep deposit, which leaves
+// gouroboros to fail closed rather than inventing a zero refund.
+//
+// The substitution is logged because it is not free. The recorded deposit is
+// historical and this one is current, so the two agree only while dRepDeposit
+// has not changed since the DRep registered. If it has, gouroboros compares
+// the block's refund against the wrong expected value and reports
+// CertificateRefundIncorrectError, which reads as a bad block rather than as
+// the local state gap it actually is. The log line is what keeps that
+// distinguishable from a node serving a genuinely recorded deposit.
+func (lv *LedgerView) drepRegistrationDeposit(
+	credential lcommon.Blake2b224,
+	recorded *uint64,
+) *uint64 {
+	if recorded != nil {
+		return recorded
+	}
+	deposit, ok := lv.currentDRepDeposit()
+	if !ok {
+		return nil
+	}
+	if lv.ls != nil && lv.ls.config.Logger != nil {
+		lv.ls.config.Logger.Warn(
+			"registered DRep has no recorded registration deposit; substituting the current protocol parameter",
+			"component", "ledger",
+			"drep_credential", hex.EncodeToString(credential[:]),
+			"substituted_deposit", deposit,
+		)
+	}
+	return &deposit
+}
+
+// currentDRepDeposit returns the DRep registration deposit under the current
+// era and protocol parameters, read from a single published consensus
+// snapshot so the era and the parameters cannot be torn apart. The second
+// return is false when there is no current DRep deposit to report.
+//
+// Whether the era carries a DRep deposit is decided by asking the protocol
+// parameters for one, not by inferring it from what the era's
+// certificate-deposit function happens to return. CertDepositShelley through
+// CertDepositBabbage have no *RegistrationDrepCertificate case and fall
+// through to "default: return 0, nil", so a pre-Conway snapshot would
+// otherwise yield (0, true) and hand gouroboros a fabricated zero refund
+// where it must fail closed instead.
+//
+// drepDepositParams is the same capability
+// conway.UtxoValidateCertificateDeposits asserts to obtain the deposit it
+// compares against, so this guard admits exactly the eras whose parameters
+// that rule can read, and a future era gains it by implementing the accessor
+// rather than by being added to a list here.
+func (lv *LedgerView) currentDRepDeposit() (uint64, bool) {
+	snapshot := lv.ls.loadConsensusSnapshot()
+	if snapshot == nil || snapshot.currentPParams == nil ||
+		snapshot.currentEra.CertDepositFunc == nil {
+		return 0, false
+	}
+	if _, ok := snapshot.currentPParams.(drepDepositParams); !ok {
+		return 0, false
+	}
+	deposit, err := snapshot.currentEra.CertDepositFunc(
+		&lcommon.RegistrationDrepCertificate{},
+		snapshot.currentPParams,
+	)
+	if err != nil {
+		return 0, false
+	}
+	return deposit, true
+}
+
+// drepDepositParams is implemented by the protocol parameters of every era
+// that charges a DRep registration deposit. It mirrors the assertion
+// conway.UtxoValidateCertificateDeposits makes to read drepDeposit, so the
+// two agree on which eras have one.
+type drepDepositParams interface {
+	DRepDepositAmount() *big.Int
+}
+
 // DRepRegistration returns a DRep registration by credential.
 // Returns nil if the credential is not registered as an active DRep.
 func (lv *LedgerView) DRepRegistration(
-	credential lcommon.Blake2b224,
+	credential lcommon.Credential,
 ) (*lcommon.DRepRegistration, error) {
-	drep, err := lv.ls.db.GetDrep(credential[:], false, lv.txn)
+	credentialTag, err := models.CredentialTagFromUint(credential.CredType)
+	if err != nil {
+		return nil, err
+	}
+	drep, err := lv.ls.db.GetDrepByCredential(
+		credentialTag,
+		credential.Credential[:],
+		false,
+		lv.txn,
+	)
 	if err != nil {
 		if errors.Is(err, models.ErrDrepNotFound) {
 			return nil, nil
@@ -1427,7 +1618,7 @@ func (lv *LedgerView) DRepRegistration(
 	}
 	deposit, err := lv.ls.db.GetDrepLastRegistrationDeposit(
 		drep.CredentialTag,
-		credential[:],
+		credential.Credential[:],
 		lv.txn,
 	)
 	if err != nil {
@@ -1435,7 +1626,10 @@ func (lv *LedgerView) DRepRegistration(
 	}
 	reg := &lcommon.DRepRegistration{
 		Credential: credential,
-		Deposit:    deposit,
+		Deposit: lv.drepRegistrationDeposit(
+			credential.Credential,
+			deposit,
+		),
 	}
 	if drep.AnchorURL != "" || len(drep.AnchorHash) > 0 {
 		if len(drep.AnchorHash) != 32 {
@@ -1488,8 +1682,14 @@ func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
 			depositPtr = new(deposit)
 		}
 		reg := lcommon.DRepRegistration{
-			Credential: lcommon.NewBlake2b224(drep.Credential),
-			Deposit:    depositPtr,
+			Credential: lcommon.Credential{
+				CredType:   uint(drep.CredentialTag),
+				Credential: lcommon.NewBlake2b224(drep.Credential),
+			},
+			Deposit: lv.drepRegistrationDeposit(
+				lcommon.NewBlake2b224(drep.Credential),
+				depositPtr,
+			),
 		}
 		if drep.AnchorURL != "" || len(drep.AnchorHash) > 0 {
 			if len(drep.AnchorHash) != 32 {

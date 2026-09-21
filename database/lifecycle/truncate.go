@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -635,6 +636,68 @@ func Truncate(
 			target.Slot,
 			mithrilFloor,
 		)
+	}
+
+	// The periodic consumed-UTxO cleanup that runs during normal operation
+	// (ledger.LedgerState's cleanupConsumedUtxos) hard-deletes spent UTxO
+	// rows once their DeletedSlot falls at-or-behind a slot floor it
+	// durably records here in sync_state
+	// (database.ConsumedUtxoPruneFloorSyncKey; see ledger's
+	// persistConsumedUtxoPruneFloor/readConsumedUtxoPruneFloor). Once a row
+	// is hard-deleted it is gone from the metadata table entirely --
+	// TruncateAfterSlot's UtxosUnspend below cannot resurrect it, it just
+	// silently matches zero rows for that UTxO. TruncateAfterSlot's own
+	// doc comment nonetheless promises every UTxO spent after point.Slot
+	// is "restored as unspent", so a target older than this floor would
+	// silently leave the live UTxO set short of UTxOs the surviving chain
+	// still needs, corrupting balances and validation for descendant
+	// blocks with no error at truncate time to explain why -- the same
+	// shape as the block_nonce retention gap TruncateAfterSlot itself now
+	// rejects (see its doc comment): fail closed here, before any
+	// mutation, rather than let routine retention silently corrupt a deep
+	// disaster-recovery truncate.
+	//
+	// Only core storage mode prunes spent rows at all; API mode retains
+	// them indefinitely for historical queries (see cleanupConsumedUtxos'
+	// identical check), so no floor applies there. A read/parse failure on
+	// the marker fails the truncate closed rather than silently skipping
+	// the check it exists to enforce, matching the Mithril check above.
+	if db.StorageMode() != types.StorageModeAPI {
+		prunedFloorRaw, err := db.GetSyncState(
+			database.ConsumedUtxoPruneFloorSyncKey,
+			nil,
+		)
+		if err != nil {
+			return 0, fmt.Errorf(
+				"%w: read consumed UTxO prune floor: %w",
+				ErrTruncateNotStarted,
+				err,
+			)
+		}
+		if prunedFloorRaw != "" {
+			prunedFloor, perr := strconv.ParseUint(prunedFloorRaw, 10, 64)
+			if perr != nil {
+				return 0, fmt.Errorf(
+					"%w: parse consumed UTxO prune floor marker %q: %w",
+					ErrTruncateNotStarted,
+					prunedFloorRaw,
+					perr,
+				)
+			}
+			if prunedFloor > 0 && target.Slot < prunedFloor {
+				return 0, fmt.Errorf(
+					"%w: target slot %d is older than this database's "+
+						"consumed-UTxO retention floor (%d); a UTxO spent "+
+						"between the target and that floor may already "+
+						"have been hard-deleted by routine cleanup and "+
+						"cannot be reliably restored as unspent -- choose "+
+						"a shallower target",
+					ErrTruncateNotStarted,
+					target.Slot,
+					prunedFloor,
+				)
+			}
+		}
 	}
 
 	// A context already cancelled before any mutation is attempted must be

@@ -30,8 +30,10 @@ var hotStatements = []string{
 	sumCredentialUtxoStakeQuery,
 	rewardLiveStakeAccountQuery,
 	rewardLiveStakeUpsertQuery,
+	rewardLiveStakeUtxoStakeQuery,
 	insertUtxoQuery,
 	insertUtxoQueryIgnoreConflict,
+	importAssetQuery,
 	getAssetIDQuery,
 }
 
@@ -236,6 +238,14 @@ func (s *Store) stmtForQueryer(
 	}
 }
 
+// txScopedStmtAfterDerive, when non-nil, runs synchronously inside
+// txScopedStmt immediately after tx.StmtContext returns and before the
+// derived statement is (re-)inserted into s.txStmts. Production code never
+// sets this -- it exists only so a test can force the eviction race window
+// between derivation and insertion deterministically instead of relying on
+// scheduler timing (see TestTxScopedStmtDoesNotLeakAcrossConcurrentEviction).
+var txScopedStmtAfterDerive func()
+
 // txScopedStmt returns the *sql.Stmt tx should use for cached, deriving it
 // with (*sql.Tx).StmtContext only on the first call for this (tx, cached)
 // pair within the transaction's lifetime and returning the same derived
@@ -273,6 +283,25 @@ func (s *Store) stmtForQueryer(
 // itself is finished, so this cache never outlives the transaction it was
 // built for and never grows across transactions: a later transaction gets a
 // new *sql.Tx from the driver and therefore a fresh, empty entry here.
+//
+// This requires tx to be used by exactly one goroutine at a time, start to
+// finish: derivation above runs with s.txStmtMu released (StmtContext can
+// block on I/O), so a concurrent Commit/Rollback on the SAME *sqlTxn could
+// run releaseConnection/evictTxStmts in that window and have this call's own
+// insert below recreate the now-evicted entry afterward, retaining a *sql.Stmt
+// tied to an already-finished transaction for the Store's lifetime
+// (TestTxScopedStmtDoesNotLeakAcrossConcurrentEviction reproduces this
+// directly, by calling txScopedStmt and evictTxStmts concurrently against one
+// tx). dingo's real write path never creates that window: withWriteTransaction
+// and database.Txn.Do both run the caller's callback to completion,
+// synchronously, in the same goroutine that then calls Commit/Rollback, and
+// the one place in the ledger that fans a single logical read out across
+// goroutines against a shared *database.Txn -- queryShelleyUtxoWhole's
+// resolve pool (ledger/queries_utxowhole.go) -- deliberately gives each
+// worker its own transaction instead of sharing the caller's, exactly to
+// avoid this. A caller-supplied txn threaded through several sequential
+// domain calls (the common "if txn == nil { txn = ... }" shape used
+// throughout database/*.go) stays on one goroutine the same way.
 func (s *Store) txScopedStmt(
 	ctx context.Context,
 	tx *sql.Tx,
@@ -292,6 +321,9 @@ func (s *Store) txScopedStmt(
 	// discards the loser rather than leaking it, so the map never disagrees
 	// with which one is "the" cached derivative even under that race.
 	derived := tx.StmtContext(ctx, cached)
+	if txScopedStmtAfterDerive != nil {
+		txScopedStmtAfterDerive()
+	}
 
 	s.txStmtMu.Lock()
 	defer s.txStmtMu.Unlock()

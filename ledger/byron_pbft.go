@@ -124,8 +124,45 @@ func (ls *LedgerState) validateByronPBFTHeaderCrypto(
 	// Header-only blocks cannot preserve the enclosing block discriminator, so
 	// distinguish EBBs from main blocks by their concrete header type.
 	header := block.Header()
-	if _, ok := header.(*ledgerbyron.ByronEpochBoundaryBlockHeader); ok {
+	if ebbHeader, ok := header.(*ledgerbyron.ByronEpochBoundaryBlockHeader); ok {
+		if ls.atByronChainOrigin() {
+			// An EBB's block number (Difficulty.Value) and slot (derived from
+			// ConsensusData.Epoch) are independent fields: chain.firstBlockNumberValid
+			// only constrains the former, and validateByronPBFTCurrentSlot only
+			// rejects a future slot, not a past one. Without this, an EBB with
+			// Difficulty 0, PrevBlock equal to the configured genesis hash, and
+			// any past nonzero epoch would pass every other check here despite
+			// skipping every epoch before it -- the first EBB of any Byron chain
+			// is always epoch 0, unconditionally.
+			if ebbHeader.ConsensusData.Epoch != 0 {
+				return fmt.Errorf(
+					"byron epoch-boundary block at slot %d: the first block "+
+						"of a from-genesis chain must be epoch 0, got epoch %d",
+					block.SlotNumber(),
+					ebbHeader.ConsensusData.Epoch,
+				)
+			}
+			if err := ls.validateByronGenesisAnchor(ebbHeader); err != nil {
+				return err
+			}
+		}
 		return ls.validateByronPBFTCurrentSlot(block)
+	}
+	// Only an epoch-boundary block may be the first block of a from-genesis
+	// (or post-rollback-to-origin) chain. The chain package's own anchor
+	// (chain.firstBlockNumberValid) only checks that the candidate's block
+	// number is 0; it cannot also require the candidate to be an EBB, because
+	// it has no notion of Byron block kinds at all. A PBFT-signed regular
+	// block claiming block number 0 would otherwise pass that check and reach
+	// the crypto verification below, which validates the signature but not
+	// that this is the right kind of block to open the chain
+	// (blinklabs-io/dingo#4399).
+	if ls.atByronChainOrigin() {
+		return fmt.Errorf(
+			"byron block at slot %d: only an epoch-boundary block may be "+
+				"the first block of a from-genesis chain",
+			block.SlotNumber(),
+		)
 	}
 	mainHeader, ok := header.(*ledgerbyron.ByronMainBlockHeader)
 	if !ok || header == nil {
@@ -149,6 +186,73 @@ func (ls *LedgerState) validateByronPBFTHeaderCrypto(
 	}
 	if err := ls.validateByronPBFTCurrentSlot(block); err != nil {
 		return err
+	}
+	return nil
+}
+
+// atByronChainOrigin reports whether the primary chain currently sits at
+// origin -- no blocks yet -- either because this is a genuine from-genesis
+// start or because a rollback emptied the chain back to origin
+// (chain.Chain.atOriginAfterMutation covers the same two cases at the chain
+// layer, for the block-number half of this same anchor).
+//
+// A nil chain reports false rather than true. Production wiring always sets
+// a chain before any header reaches this validation; a nil chain only occurs
+// in a bare LedgerState built directly in a test, and treating that as
+// "at origin" would force every such test to configure a Byron genesis hash
+// it has no reason to care about.
+func (ls *LedgerState) atByronChainOrigin() bool {
+	ls.RLock()
+	c := ls.chain
+	ls.RUnlock()
+	if c == nil {
+		return false
+	}
+	tip := c.Tip()
+	return tip.Point.Slot == 0 && len(tip.Point.Hash) == 0
+}
+
+// validateByronGenesisAnchor requires the first epoch-boundary block of a
+// from-genesis (or post-rollback-to-origin) Byron chain to chain onto the
+// configured Byron genesis hash. The reference tracks the previous hash as
+// either the configured genesis hash or a prior header hash, and rejects a
+// mismatch at the first block with ChainValidationGenesisHashMismatch. The
+// chain package cannot enforce this itself -- it has no knowledge of the
+// network's genesis hash (see chain.firstBlockNumberValid) -- so binding the
+// anchor belongs here, in the ledger/config-aware layer
+// (blinklabs-io/dingo#4399).
+//
+// A ledger started from a snapshot or bulk import at a trusted non-origin
+// point never reaches this function with an unanchored EBB: its primary
+// chain tip is that trusted point, not origin, so atByronChainOrigin already
+// reports false and this check does not run.
+func (ls *LedgerState) validateByronGenesisAnchor(
+	header *ledgerbyron.ByronEpochBoundaryBlockHeader,
+) error {
+	if ls.config.CardanoNodeConfig == nil {
+		return errors.New(
+			"byron genesis hash is not configured; cannot anchor the first epoch-boundary block",
+		)
+	}
+	genesisHash := ls.config.CardanoNodeConfig.ByronGenesisHash
+	if genesisHash == "" {
+		return errors.New(
+			"byron genesis hash is not configured; cannot anchor the first epoch-boundary block",
+		)
+	}
+	if header == nil {
+		return errors.New(
+			"cannot anchor a nil Byron epoch-boundary block header",
+		)
+	}
+	prevHash := header.PrevBlock.String()
+	if prevHash != genesisHash {
+		return fmt.Errorf(
+			"byron epoch-boundary block at slot %d: previous hash %s does not match configured Byron genesis hash %s",
+			header.SlotNumber(),
+			prevHash,
+			genesisHash,
+		)
 	}
 	return nil
 }

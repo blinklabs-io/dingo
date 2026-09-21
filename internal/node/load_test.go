@@ -11,7 +11,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -50,6 +52,175 @@ func TestExtractHeaderCbor(t *testing.T) {
 	}
 	if !bytes.Equal(got, header) {
 		t.Fatalf("unexpected header bytes: got %x want %x", got, header)
+	}
+}
+
+func immutableDecodeBenchmarkBlocks(t *testing.T) []immutable.Block {
+	t.Helper()
+	immutableDir := filepath.Join(
+		"..", "..", "database", "immutable", "testdata",
+	)
+	imm, err := immutable.New(immutableDir)
+	require.NoError(t, err)
+	iter, err := imm.BlocksFromPoint(ocommon.Point{})
+	require.NoError(t, err)
+	defer iter.Close()
+	blocks := make([]immutable.Block, 0, loadBlockBatchSize)
+	for len(blocks) < cap(blocks) {
+		block, err := iter.Next()
+		require.NoError(t, err)
+		if block == nil {
+			break
+		}
+		blocks = append(blocks, *block)
+	}
+	require.Len(t, blocks, loadBlockBatchSize)
+	return blocks
+}
+
+func TestDecodeImmutableBlockBatchPreservesOrder(t *testing.T) {
+	t.Parallel()
+	blocks := immutableDecodeBenchmarkBlocks(t)
+	verifyCfg := lcommon.VerifyConfig{SkipBodyHashValidation: true}
+	serial, err := decodeImmutableBlockBatch(
+		context.Background(), blocks, verifyCfg, 1,
+	)
+	require.NoError(t, err)
+	for _, workers := range []int{2, 4, 8} {
+		got, err := decodeImmutableBlockBatch(
+			context.Background(), blocks, verifyCfg, workers,
+		)
+		require.NoError(t, err)
+		require.Len(t, got, len(serial))
+		for i := range serial {
+			require.Equal(t, serial[i].Hash(), got[i].Hash())
+			require.Equal(t, serial[i].SlotNumber(), got[i].SlotNumber())
+		}
+	}
+}
+
+func TestDecodeImmutableBlockBatchReportsRealDecodeError(t *testing.T) {
+	t.Parallel()
+
+	blocks := immutableDecodeBenchmarkBlocks(t)
+	blocks[len(blocks)/2].Cbor = []byte{0xff}
+
+	_, err := decodeImmutableBlockBatch(
+		context.Background(),
+		blocks,
+		lcommon.VerifyConfig{SkipBodyHashValidation: true},
+		1,
+	)
+	require.Error(t, err)
+}
+
+func TestDecodeImmutableBlockBatchCancellation(t *testing.T) {
+	t.Parallel()
+	blocks := immutableDecodeBenchmarkBlocks(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := decodeImmutableBlockBatch(
+		ctx,
+		blocks,
+		lcommon.VerifyConfig{SkipBodyHashValidation: true},
+		4,
+	)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestDecodeImmutableBlockBatchDecodeErrorCancelsWorkers(t *testing.T) {
+	t.Parallel()
+	blocks := immutableDecodeBenchmarkBlocks(t)
+	decodeErr := errors.New("decode failed")
+	cancelObserved := make(chan struct{})
+	var cancelOnce sync.Once
+	const workerCount = 8
+	// The first job fails only once the other workers are parked in the
+	// decoder, so the failure always has a live observer. Counting parked
+	// workers rather than handing tokens to job 0 keeps the barrier lossless:
+	// workers released by the cancellation pick up further jobs and re-enter
+	// the decoder, and those late arrivals must neither block nor be dropped.
+	var parked atomic.Int64
+	allParked := make(chan struct{})
+	decoder := func(
+		ctx context.Context,
+		index int,
+		_ immutable.Block,
+		_ lcommon.VerifyConfig,
+	) (gledger.Block, error) {
+		if index == 0 {
+			<-allParked
+			return nil, decodeErr
+		}
+		if parked.Add(1) == workerCount-1 {
+			close(allParked)
+		}
+		<-ctx.Done()
+		cancelOnce.Do(func() { close(cancelObserved) })
+		return nil, ctx.Err()
+	}
+	resultCh := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_, err := decodeImmutableBlockBatchWithDecoder(
+			ctx,
+			blocks,
+			lcommon.VerifyConfig{SkipBodyHashValidation: true},
+			workerCount,
+			decoder,
+		)
+		resultCh <- err
+	}()
+	select {
+	case <-cancelObserved:
+	// Failsafe only: a cancellation that never reaches the workers would
+	// otherwise hang until the package test timeout with no goroutine dump.
+	case <-time.After(30 * time.Second):
+		cancel()
+		require.Fail(t, "worker cancellation was not observed")
+	}
+	err := <-resultCh
+	require.ErrorIs(t, err, decodeErr)
+}
+
+func BenchmarkDecodeImmutableBlockBatch(b *testing.B) {
+	immutableDir := filepath.Join(
+		"..", "..", "database", "immutable", "testdata",
+	)
+	imm, err := immutable.New(immutableDir)
+	if err != nil {
+		b.Fatal(err)
+	}
+	iter, err := imm.BlocksFromPoint(ocommon.Point{})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer iter.Close()
+	blocks := make([]immutable.Block, 0, loadBlockBatchSize)
+	for len(blocks) < cap(blocks) {
+		block, err := iter.Next()
+		if err != nil {
+			b.Fatal(err)
+		}
+		if block == nil {
+			break
+		}
+		blocks = append(blocks, *block)
+	}
+	verifyCfg := lcommon.VerifyConfig{SkipBodyHashValidation: true}
+	for _, workers := range []int{1, 2, 4, 8} {
+		b.Run(fmt.Sprintf("workers=%d", workers), func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				if _, err := decodeImmutableBlockBatch(
+					context.Background(), blocks, verifyCfg, workers,
+				); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }
 

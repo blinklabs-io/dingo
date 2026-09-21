@@ -271,8 +271,15 @@ func validateUnknownVoters(
 		switch voter.Type {
 		case lcommon.VoterTypeDRepKeyHash,
 			lcommon.VoterTypeDRepScriptHash:
+			credentialType := uint(lcommon.CredentialTypeAddrKeyHash)
+			if voter.Type == lcommon.VoterTypeDRepScriptHash {
+				credentialType = lcommon.CredentialTypeScriptHash
+			}
 			registration, err := ls.DRepRegistration(
-				lcommon.Blake2b224(voter.Hash),
+				lcommon.Credential{
+					CredType:   credentialType,
+					Credential: lcommon.Blake2b224(voter.Hash),
+				},
 			)
 			if err != nil {
 				return err
@@ -417,7 +424,7 @@ func validatePlutusOutcome(tx lcommon.Transaction, phase2Err error) error {
 // transactions. cardano-ledger only translates the validity interval while
 // assembling the context for the Plutus scripts a transaction actually needs
 // (Alonzo collectPlutusScriptsWithContext), and ValidateTxConway already
-// follows that shape here via conwayTxInfoCache.
+// follows that shape here via txInfoCache.
 func txHasRedeemers(tx lcommon.Transaction) bool {
 	witnesses := tx.Witnesses()
 	if witnesses == nil {

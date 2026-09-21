@@ -533,7 +533,7 @@ func TestEmbeddedConfigsPassGenesisConsistency(t *testing.T) {
 		t.Run(network, func(t *testing.T) {
 			cfg, err := NewCardanoNodeConfigFromEmbedFS(
 				EmbeddedConfigFS,
-				network+"/config.json",
+				EmbeddedConfigPath(network),
 			)
 			require.NoError(t, err)
 			require.NoError(t, cfg.validateGenesisConsistency())

@@ -116,6 +116,38 @@ func TestValidateTxByron_ValidTransaction(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestValidateTxByron_MainnetZeroValueOutput(t *testing.T) {
+	// This transaction is from the canonical mainnet block at slot 4,427,376.
+	// Byron consensus permits its first output to contain zero lovelace.
+	txCbor, err := hex.DecodeString(
+		"839f8200d8185824825820f27d4ccc224c706184fad5cfb38ee067c334f70a1c57f576fab2ad80992e976a01ff9f8282d818582183581c7aef491d0bb12165ecbd33388686fac0c64d17c1c90ab1c84cce1b81a0001abc1cd901008282d818582183581cb3ad626374eb2b751a233fc06e3ab81f10a4069936b218462cba129ca0001a1cbad9181a089105e8ffa0",
+	)
+	require.NoError(t, err)
+	// Koios exposes the canonical Byron transaction body. Wrap it in the
+	// transaction envelope with an empty witness set for structural validation.
+	fullTxCbor := append([]byte{0x82}, txCbor...)
+	fullTxCbor = append(fullTxCbor, 0x9f, 0xff)
+	tx, err := byron.NewByronTransactionFromCbor(fullTxCbor)
+	require.NoError(t, err)
+	require.Len(t, tx.Outputs(), 2)
+	assert.Zero(t, tx.Outputs()[0].Amount().Sign())
+	assert.NoError(t, ValidateTxByron(tx, 4_427_376, nil, nil))
+}
+
+func TestValidateTxByron_NegativeValueOutput(t *testing.T) {
+	tx := &testByronTx{
+		inputs: []lcommon.TransactionInput{
+			newTestInput(0x01, 0),
+		},
+		outputs: []lcommon.TransactionOutput{
+			testOutput{amount: big.NewInt(-100)},
+		},
+	}
+	err := ValidateTxByron(tx, 0, nil, nil)
+	require.Error(t, err)
+	assert.ErrorAs(t, err, &OutputNegativeByronError{})
+}
+
 func TestValidateTxByron_MainnetRedeemWitness(t *testing.T) {
 	// This is the transaction that failed at Mainnet slot 3313. Its witness
 	// is a constructor-2 redeem witness with the [vkey, signature] payload
@@ -243,49 +275,6 @@ func TestValidateTxByron_NilOutputs(t *testing.T) {
 	assert.ErrorAs(t, err, &OutputSetEmptyByronError{})
 }
 
-func TestValidateTxByron_ZeroValueOutput(t *testing.T) {
-	tx := &testByronTx{
-		inputs: []lcommon.TransactionInput{
-			newTestInput(0x01, 0),
-		},
-		outputs: []lcommon.TransactionOutput{
-			newTestOutput(0),
-		},
-	}
-	err := ValidateTxByron(tx, 0, nil, nil)
-	require.Error(t, err)
-	assert.ErrorAs(t, err, &OutputNotPositiveByronError{})
-	assert.Contains(t, err.Error(), "non-positive value")
-}
-
-func TestValidateTxByron_NegativeValueOutput(t *testing.T) {
-	tx := &testByronTx{
-		inputs: []lcommon.TransactionInput{
-			newTestInput(0x01, 0),
-		},
-		outputs: []lcommon.TransactionOutput{
-			testOutput{amount: big.NewInt(-100)},
-		},
-	}
-	err := ValidateTxByron(tx, 0, nil, nil)
-	require.Error(t, err)
-	assert.ErrorAs(t, err, &OutputNotPositiveByronError{})
-}
-
-func TestValidateTxByron_NilAmountOutput(t *testing.T) {
-	tx := &testByronTx{
-		inputs: []lcommon.TransactionInput{
-			newTestInput(0x01, 0),
-		},
-		outputs: []lcommon.TransactionOutput{
-			testOutput{amount: nil},
-		},
-	}
-	err := ValidateTxByron(tx, 0, nil, nil)
-	require.Error(t, err)
-	assert.ErrorAs(t, err, &OutputNotPositiveByronError{})
-}
-
 func TestValidateTxByron_DuplicateInputs(t *testing.T) {
 	tx := &testByronTx{
 		inputs: []lcommon.TransactionInput{
@@ -330,21 +319,6 @@ func TestValidateTxByron_MultipleErrors(t *testing.T) {
 	assert.ErrorAs(t, err, &OutputSetEmptyByronError{})
 }
 
-func TestValidateTxByron_SecondOutputZeroValue(t *testing.T) {
-	tx := &testByronTx{
-		inputs: []lcommon.TransactionInput{
-			newTestInput(0x01, 0),
-		},
-		outputs: []lcommon.TransactionOutput{
-			newTestOutput(1_000_000),
-			newTestOutput(0), // second output is zero
-		},
-	}
-	err := ValidateTxByron(tx, 0, nil, nil)
-	require.Error(t, err)
-	assert.ErrorAs(t, err, &OutputNotPositiveByronError{})
-}
-
 func TestByronEraDesc_HasValidateTxFunc(t *testing.T) {
 	assert.NotNil(
 		t,
@@ -372,10 +346,31 @@ type mockLedgerState struct {
 	// slotToTime, when set, replaces the zero-time default so a test can
 	// supply a real network's slot-to-time mapping.
 	slotToTime func(uint64) (time.Time, error)
+	// slotToTimeCalls counts SlotToTime invocations, the same way utxoLookups
+	// counts UtxoById ones. validityRangeInfo -- called once per TxInfo build,
+	// via NewTxInfoV1FromTransaction/NewTxInfoV2FromTransaction/
+	// NewTxInfoV3FromTransaction -- calls SlotToTime once per validity bound
+	// present, so this is a direct proxy for how many times a transaction's
+	// TxInfo was (re)built.
+	slotToTimeCalls int
 	// syntheticV2CostModel backs SyntheticV2CostModelInEffect, so a test can
 	// exercise ValidateTxBabbage/EvaluateTxBabbage's ErrNoCostModelForPlutusV2
 	// check (blinklabs-io/dingo#3962) without a real *ledger.LedgerView.
 	syntheticV2CostModel bool
+	// pendingMIR backs PendingMIRRewardDeltas, letting a test simulate
+	// InstantaneousRewards already accumulated earlier in the current epoch
+	// without a real *ledger.LedgerView or database.
+	pendingMIR map[MIRCredentialKey]*big.Int
+}
+
+// PendingMIRRewardDeltas implements eras.MIRPendingRewardsProvider for tests.
+// The real implementation (*ledger.LedgerView) derives this from the database;
+// this mock just returns whatever a test has staged in pendingMIR, ignoring
+// uptoSlot.
+func (m *mockLedgerState) PendingMIRRewardDeltas(
+	_ uint64,
+) (map[MIRCredentialKey]*big.Int, error) {
+	return m.pendingMIR, nil
 }
 
 // SyntheticV2CostModelInEffect implements the eras package's local
@@ -446,6 +441,7 @@ func (m *mockLedgerState) IsStakeCredentialRegistered(
 func (m *mockLedgerState) SlotToTime(
 	slot uint64,
 ) (time.Time, error) {
+	m.slotToTimeCalls++
 	if m.slotToTime != nil {
 		return m.slotToTime(slot)
 	}
@@ -526,7 +522,7 @@ func (m *mockLedgerState) CommitteeMembers() (
 }
 
 func (m *mockLedgerState) DRepRegistration(
-	_ lcommon.Blake2b224,
+	_ lcommon.Credential,
 ) (*lcommon.DRepRegistration, error) {
 	return nil, nil
 }

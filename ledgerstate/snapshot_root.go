@@ -283,15 +283,44 @@ func OpenSnapshotAtOrBefore(
 	root *os.Root,
 	maxSlot uint64,
 ) (*SnapshotFiles, error) {
+	files, _, err := findSnapshotWithinBound(root, maxSlot)
+	return files, err
+}
+
+// OpenNewestSnapshot is OpenSnapshotAtOrBefore with no trust boundary: it
+// returns the newest ledger state anywhere in the tree, together with the slot
+// it was found at.
+//
+// It exists for one narrow, deliberate exception to "at or before the
+// certified tip": a verified Mithril ancillary tree whose signed manifest
+// vouches for a ledger state that happens to be newer than the certified
+// ImmutableDB tip. mithril/sync_import.go documents why that shape is ordinary
+// rather than adversarial, and why it is the only caller allowed to reach for
+// this instead of OpenSnapshotAtOrBefore. Every safety check
+// OpenSnapshotAtOrBefore applies — symlink refusal, substitution detection,
+// newest-first selection — applies here too; the only difference is that no
+// candidate is filtered out by slot.
+func OpenNewestSnapshot(root *os.Root) (*SnapshotFiles, uint64, error) {
+	return findSnapshotWithinBound(root, ^uint64(0))
+}
+
+// findSnapshotWithinBound is the shared search behind OpenSnapshotAtOrBefore
+// and OpenNewestSnapshot. Passing ^uint64(0) as maxSlot admits every slot,
+// which is what makes OpenNewestSnapshot "the same search, no boundary"
+// rather than a second implementation to keep in sync.
+func findSnapshotWithinBound(
+	root *os.Root,
+	maxSlot uint64,
+) (*SnapshotFiles, uint64, error) {
 	ledgerRoot, ledgerRel, err := openLedgerDirIn(root)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer ledgerRoot.Close()
 
 	entries, err := fs.ReadDir(ledgerRoot.FS(), ".")
 	if err != nil {
-		return nil, fmt.Errorf("reading ledger directory: %w", err)
+		return nil, 0, fmt.Errorf("reading ledger directory: %w", err)
 	}
 
 	// Every entry naming a slot becomes a candidate or a refusal. None is
@@ -335,7 +364,7 @@ func OpenSnapshotAtOrBefore(
 			// Refused rather than ignored. Ignoring it reads as "there is no
 			// slot 200", so a real slot 200 replaced by a link would hand the
 			// import to slot 100 and report nothing wrong.
-			return nil, fmt.Errorf(
+			return nil, 0, fmt.Errorf(
 				"%w: %s is neither a slot directory nor a state file",
 				ErrUnsafeSnapshotPath, path.Join(ledgerRel, name),
 			)
@@ -379,26 +408,33 @@ func OpenSnapshotAtOrBefore(
 		if !candidate.dir {
 			state, err := openVerifiedFile(ledgerRoot, candidate.name)
 			if err != nil {
-				return nil, fmt.Errorf(
+				return nil, 0, fmt.Errorf(
 					"opening ledger state %s: %w", candidate.name, err,
 				)
 			}
 			return &SnapshotFiles{
 				State:     state,
 				StatePath: path.Join(ledgerRel, candidate.name),
-			}, nil
+			}, candidate.slot, nil
 		}
 		files, err := openUTxOHDSnapshot(ledgerRoot, ledgerRel, candidate.name)
 		if err == nil {
-			return files, nil
+			return files, candidate.slot, nil
 		}
 		if errors.Is(err, errNoStateEntry) {
 			continue
 		}
-		return nil, err
+		return nil, 0, err
 	}
 
-	return nil, fmt.Errorf(
+	if maxSlot == ^uint64(0) {
+		return nil, 0, fmt.Errorf(
+			"%w: no ledger state files found under %s",
+			ErrNoUsableLedgerState,
+			root.Name(),
+		)
+	}
+	return nil, 0, fmt.Errorf(
 		"%w: no ledger state files at or before slot %d found under %s",
 		ErrNoUsableLedgerState,
 		maxSlot,

@@ -22,6 +22,74 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 )
 
+const (
+	// maxHardForkDuration is the largest value a time.Duration can hold.
+	maxHardForkDuration = time.Duration(1<<63 - 1)
+	// maxHardForkDurationNanoseconds is maxHardForkDuration expressed as an
+	// unsigned nanosecond count, for bounds checks against unsigned cached
+	// epoch values.
+	maxHardForkDurationNanoseconds = uint64(1<<63 - 1)
+	// maxHardForkSlotLengthMilliseconds is the largest cached slot length, in
+	// milliseconds, that fits in a time.Duration.
+	maxHardForkSlotLengthMilliseconds = maxHardForkDurationNanoseconds / uint64(time.Millisecond)
+)
+
+// hardForkCachedEraParams converts one cached epoch row into hardfork.EraParams,
+// rejecting only a slot length that cannot be represented as a time.Duration.
+//
+// It deliberately does not call EraParams.Validate. A cached epoch row carries
+// a zero EpochSize/SlotLength when the epoch record has not been populated yet
+// (epochRollover treats SlotLength == 0 as exactly that sentinel), and summary
+// construction accepted such rows before durations were bounded. Where valid
+// era parameters are actually required, hardfork.BuildSummary validates the
+// current era's params and returns an error of its own.
+func hardForkCachedEraParams(
+	lengthInSlots uint,
+	slotLengthMilliseconds uint,
+) (hardfork.EraParams, error) {
+	if uint64(slotLengthMilliseconds) > maxHardForkSlotLengthMilliseconds {
+		return hardfork.EraParams{}, fmt.Errorf(
+			"slot length %dms overflows time.Duration",
+			slotLengthMilliseconds,
+		)
+	}
+	return hardfork.EraParams{
+		EpochSize:  uint64(lengthInSlots),
+		SlotLength: time.Duration(slotLengthMilliseconds) * time.Millisecond,
+	}, nil
+}
+
+func hardForkCachedEpochDuration(
+	lengthInSlots uint,
+	slotLengthMilliseconds uint,
+) (time.Duration, error) {
+	params, err := hardForkCachedEraParams(
+		lengthInSlots,
+		slotLengthMilliseconds,
+	)
+	if err != nil {
+		return 0, err
+	}
+	if slotLengthMilliseconds == 0 {
+		// An unpopulated epoch row contributes no wall-clock time, which is
+		// what the unbounded arithmetic this replaced also produced. Returning
+		// early also keeps the division below away from a zero divisor.
+		return 0, nil
+	}
+	slotLengthNanoseconds := uint64(slotLengthMilliseconds) *
+		uint64(time.Millisecond)
+	if uint64(lengthInSlots) >
+		maxHardForkDurationNanoseconds/slotLengthNanoseconds {
+		return 0, fmt.Errorf(
+			"epoch duration overflows time.Duration: length=%d slots, slot length=%s",
+			lengthInSlots,
+			params.SlotLength,
+		)
+	}
+	// #nosec G115 -- the checked product is bounded by MaxInt64.
+	return time.Duration(uint64(lengthInSlots) * slotLengthNanoseconds), nil
+}
+
 // HardForkSummary constructs a hardfork.Summary describing the chain's era
 // history from the LedgerState's current epoch cache, tip, current era, and
 // transition info.
@@ -88,10 +156,20 @@ func (ls *LedgerState) hardForkSummaryAnchoredAt(
 		eraID := first.EraId
 		// Per-epoch params within an era are expected to be constant; we use
 		// the first epoch's values as the era-level params.
-		// first.SlotLength is protocol-bounded (milliseconds per slot).
-		// #nosec G115
-		slotLen := time.Duration(first.SlotLength) * time.Millisecond
-		epochSize := uint64(first.LengthInSlots)
+		eraParams, err := hardForkCachedEraParams(
+			first.LengthInSlots,
+			first.SlotLength,
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"ledger: cached epoch %d (era %d) params invalid: %w",
+				first.EpochId,
+				eraID,
+				err,
+			)
+		}
+		slotLen := eraParams.SlotLength
+		epochSize := eraParams.EpochSize
 
 		start := hardfork.Bound{
 			RelativeTime: relTime,
@@ -104,10 +182,26 @@ func (ls *LedgerState) hardForkSummaryAnchoredAt(
 		j := i
 		for j < len(cache) && cache[j].EraId == eraID {
 			ep := cache[j]
-			// LengthInSlots and SlotLength are protocol-bounded uints.
-			// #nosec G115
-			relTime += time.Duration(ep.LengthInSlots) *
-				time.Duration(ep.SlotLength) * time.Millisecond
+			epochDuration, err := hardForkCachedEpochDuration(
+				ep.LengthInSlots,
+				ep.SlotLength,
+			)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"ledger: cached epoch %d (era %d) params invalid: %w",
+					ep.EpochId,
+					eraID,
+					err,
+				)
+			}
+			if epochDuration > maxHardForkDuration-relTime {
+				return nil, fmt.Errorf(
+					"ledger: cumulative cached epoch duration overflows time.Duration at epoch %d (era %d)",
+					ep.EpochId,
+					eraID,
+				)
+			}
+			relTime += epochDuration
 			j++
 		}
 
@@ -143,10 +237,15 @@ func (ls *LedgerState) hardForkSummaryAnchoredAt(
 	past := eraSummaries[:len(eraSummaries)-1]
 
 	// Use the same configured safe-zone source as the NtC era-history query.
-	// Tests and early bootstrap callers may construct a LedgerState without a
-	// complete node configuration; in that case eraShape is unavailable and
-	// the legacy indefinite safe zone remains the only defensible answer.
-	shape := ls.eraShape()
+	// A missing shape or current-era entry cannot safely supply a forecast:
+	// the cache-derived current era has a zero safe zone and no end bound.
+	shape, err := ls.eraShapeWithError()
+	if err != nil {
+		return nil, fmt.Errorf(
+			"ledger: hard-fork forecast unavailable: %w",
+			err,
+		)
+	}
 	shapeEntry, shapeAvailable := shape.EraForID(current.EraID)
 	if shapeAvailable {
 		current.Params.SafeZoneSlots = shapeEntry.Params.SafeZoneSlots
@@ -156,11 +255,15 @@ func (ls *LedgerState) hardForkSummaryAnchoredAt(
 		}
 	}
 	if !shapeAvailable {
-		return &hardfork.Summary{
-			SystemStart: systemStart,
-			Eras:        append(past, current),
-			Transition:  transitionInfo,
-		}, nil
+		eraName := consensusState.currentEra.Name
+		if eraName == "" {
+			eraName = fmt.Sprintf("ID %d", current.EraID)
+		}
+		return nil, fmt.Errorf(
+			"ledger: hard-fork forecast unavailable: %s era is unavailable "+
+				"in the hard-fork shape",
+			eraName,
+		)
 	}
 
 	effectiveTransition := transitionInfo

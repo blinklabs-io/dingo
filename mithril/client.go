@@ -27,6 +27,7 @@ import (
 	"hash"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -653,21 +654,21 @@ type Client struct {
 // ClientOption is a functional option for configuring a Client.
 type ClientOption func(*Client)
 
-// WithAllowInsecureHTTP permits the client to send requests to a
-// plain-HTTP aggregator URL. By default, NewClient's aggregatorURL
-// and every request it issues must use HTTPS; this is an explicit
-// escape hatch for local development and tests (e.g. against an
-// httptest server) and should not be set in production.
+// WithAllowInsecureHTTP permits the client to send requests to a plain-HTTP
+// aggregator or local/private address. By default, NewClient's aggregatorURL
+// and every request it issues must use HTTPS and resolve to public addresses;
+// this is an explicit escape hatch for local development and tests (e.g.
+// against an httptest server) and should not be set in production.
 func WithAllowInsecureHTTP() ClientOption {
 	return func(c *Client) {
 		c.allowInsecureHTTP = true
 	}
 }
 
-// WithHTTPClient sets a custom *http.Client for the Mithril client.
-// Note: the default client enforces HTTPS-only redirects via
-// httpsOnlyRedirect. A custom client bypasses this protection,
-// so callers should configure their own redirect policy if needed.
+// WithHTTPClient sets a custom *http.Client for the Mithril client. Unless
+// WithAllowInsecureHTTP is also set, its redirect policy is wrapped and its
+// *http.Transport is cloned with proxy, custom-dialer, and private-address
+// bypasses removed. Other RoundTripper implementations are rejected at use.
 func WithHTTPClient(hc *http.Client) ClientOption {
 	return func(c *Client) {
 		if hc != nil {
@@ -685,13 +686,15 @@ func NewClient(
 ) *Client {
 	c := &Client{
 		aggregatorURL: strings.TrimRight(aggregatorURL, "/"),
-		httpClient: &http.Client{
-			Timeout:       30 * time.Second,
-			CheckRedirect: httpsOnlyRedirect,
-		},
 	}
 	for _, opt := range opts {
 		opt(c)
+	}
+	if c.httpClient == nil {
+		c.httpClient = newMithrilHTTPClient(
+			30*time.Second,
+			c.allowInsecureHTTP,
+		)
 	}
 	return c
 }
@@ -707,31 +710,11 @@ func newMithrilClient(aggregatorURL string, allowInsecureHTTP bool) *Client {
 	return NewClient(aggregatorURL)
 }
 
-// httpsOnlyRedirect rejects redirects to non-HTTPS URLs to prevent
-// downgrade attacks and SSRF.
-func httpsOnlyRedirect(
-	req *http.Request,
-	via []*http.Request,
-) error {
-	if len(via) >= 10 {
-		return errors.New("too many redirects")
-	}
-	if req.URL.Scheme != "https" {
-		return fmt.Errorf(
-			"redirect to non-HTTPS URL blocked: %s",
-			req.URL,
-		)
-	}
-	return nil
-}
-
 // requireSecureURL rejects a non-HTTPS rawURL. allowInsecureHTTP widens
 // that to also accept http, and only http — a malformed URL or any
-// other scheme is always rejected, escape hatch or not. It complements
-// httpsOnlyRedirect: that guards where a redirect may lead, this guards
-// the initial request, which a redirect policy never sees. label
-// identifies the URL's role (e.g. "mithril aggregator URL") in the
-// returned error.
+// other scheme is always rejected, escape hatch or not. It guards the
+// initial request, which a redirect policy never sees. label identifies
+// the URL's role (e.g. "mithril aggregator URL") in the returned error.
 func requireSecureURL(
 	rawURL string,
 	label string,
@@ -748,20 +731,36 @@ func requireSecureURL(
 			rawURL,
 		)
 	}
+	if parsed.User != nil {
+		return fmt.Errorf("parsing %s %q: userinfo is not allowed", label, rawURL)
+	}
 	switch parsed.Scheme {
 	case "https":
-		return nil
 	case "http":
-		if allowInsecureHTTP {
-			return nil
+		if !allowInsecureHTTP {
+			return fmt.Errorf(
+				"%s %q must use https; set an explicit allow-insecure-http "+
+					"option for local development or tests",
+				label,
+				rawURL,
+			)
 		}
+	default:
+		return fmt.Errorf(
+			"%s %q must use https; set an explicit allow-insecure-http "+
+				"option for local development or tests",
+			label,
+			rawURL,
+		)
 	}
-	return fmt.Errorf(
-		"%s %q must use https; set an explicit allow-insecure-http "+
-			"option for local development or tests",
-		label,
-		rawURL,
-	)
+	if !allowInsecureHTTP && isBlockedMithrilHost(parsed.Hostname()) {
+		return fmt.Errorf("%s host %q is not allowed", label, parsed.Hostname())
+	}
+	if ip := net.ParseIP(parsed.Hostname()); ip != nil &&
+		!allowInsecureHTTP && isBlockedMithrilIP(ip) {
+		return fmt.Errorf("%s IP %s is not allowed", label, ip)
+	}
+	return nil
 }
 
 // ListSnapshots retrieves the list of available snapshots from the
@@ -998,7 +997,15 @@ func (c *Client) doGet(
 	}
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := c.httpClient.Do( //nolint:gosec // URL is built from trusted aggregatorURL base; HTTPS-only redirect policy prevents downgrade
+	httpClient, err := secureMithrilHTTPClient(
+		c.httpClient,
+		c.allowInsecureHTTP,
+	)
+	if err != nil {
+		return nil, err
+	}
+	// Initial, redirect, and dial-time destinations are restricted above.
+	resp, err := httpClient.Do( //nolint:gosec
 		req,
 	)
 	if err != nil {
