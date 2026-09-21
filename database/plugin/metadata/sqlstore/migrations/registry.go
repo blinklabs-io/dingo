@@ -15,6 +15,7 @@
 package migrations
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"embed"
@@ -54,6 +55,7 @@ const (
 	rewardSnapshotExcludedStakeSchemaRelease      = "reward-snapshot-excluded-active-stake"
 	assetNameHexColumnDropSchemaRelease           = "asset-name-hex-column-drop"
 	accountRewardReconciledAmountSchemaRelease    = "account-reward-delta-reconciled-amount"
+	accountRewardReconciledAmountBackfillRelease  = "account-reward-delta-reconciled-amount-backfill"
 )
 
 // schemaVersions names every migration in ascending version order.
@@ -113,6 +115,11 @@ var schemaVersions = []struct {
 		Version: 20,
 		Name:    accountRewardReconciledAmountSchemaRelease,
 		Dir:     "v20",
+	},
+	{
+		Version: 21,
+		Name:    accountRewardReconciledAmountBackfillRelease,
+		Dir:     "v21",
 	},
 }
 
@@ -221,6 +228,10 @@ func registryForDialect(dialect string) ([]Migration, error) {
 		if version.Name == governanceProposalDroppedSchemaRelease {
 			migration.BackfillRevision = "1"
 			migration.Backfill = governanceProposalDroppedBackfill
+		}
+		if version.Name == accountRewardReconciledAmountBackfillRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = accountRewardReconciledAmountBackfill
 		}
 		ret = append(ret, migration)
 	}
@@ -902,6 +913,130 @@ ORDER BY reward_snapshot.id LIMIT ?`),
 		}
 	}
 	return seenIDs[len(seenIDs)-1], int64(len(seenIDs)), false, nil
+}
+
+// accountRewardReconciledAmountDiscriminatorPrefix marks an
+// account_reward_delta row as a ReconcileAccountRewardBalance correction
+// rather than a real withdrawal. It must stay byte-for-byte identical to
+// sqlstore's reconciliationDiscriminatorPrefix (database/plugin/metadata/
+// sqlstore/account.go); this package cannot import sqlstore, which imports
+// migrations to run the schema upgrade, so the value is duplicated rather
+// than shared.
+const accountRewardReconciledAmountDiscriminatorPrefix = "dingo:reconcile:"
+
+// accountRewardReconciledAmountBackfill recovers reconciled_amount for every
+// pre-v20 ReconcileAccountRewardBalance row, which was written before that
+// column existed and so still carries reconciled_amount = NULL (dingo #4529).
+//
+// A row this correction wrote is identified by its tx_hash carrying the
+// reconciliationDiscriminator prefix rather than a real 32-byte transaction
+// hash (see reconciliationDiscriminator in account.go): the prefix is a
+// distinctive 17-byte ASCII string prepended to the real hash that triggered
+// the correction, so no genuine transaction hash can collide with it. Every
+// other row this migration scans -- an ordinary withdrawal -- keeps its
+// unprefixed hash and reconciled_amount NULL, which is already correct for
+// it and is left untouched.
+//
+// The corrected value itself is recovered from the real withdrawal row the
+// reconciliation's retry wrote for the same credential at the same slot: per
+// ReconcileAccountRewardBalance's doc comment, that retry re-validates and
+// applies the very same block/transaction the correction unblocked, through
+// ApplyAccountRewardWithdrawal, using the discriminator's own un-prefixed
+// suffix as that row's real tx_hash. That row's amount column is the
+// withdrawal's own on-chain claimed amount, which is exactly the value the
+// correction overwrote account.reward to (dingo#4152 follow-up). A poisoned
+// row whose real withdrawal row cannot be found (for example, a reconciled
+// block that was later reorganized away before its retry committed) is left
+// with reconciled_amount NULL, unchanged from today's behavior; this
+// migration only ever improves on the pre-v20 fallback, never regresses it.
+//
+// The id cursor makes each batch independently resumable, and re-running an
+// already-backfilled batch is a no-op: a row with reconciled_amount already
+// set no longer matches this batch's selection predicate.
+func accountRewardReconciledAmountBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	lastID := int64(0)
+	if batch.Cursor != "" {
+		parsed, err := strconv.ParseInt(batch.Cursor, 10, 64)
+		if err != nil {
+			return BatchResult{}, fmt.Errorf(
+				"parse account reward reconciled amount backfill cursor: %w",
+				err,
+			)
+		}
+		lastID = parsed
+	}
+	rows, err := batch.Tx.QueryContext(ctx, batch.Rebind(`
+SELECT id, credential_tag, staking_key, tx_hash, added_slot
+FROM account_reward_delta
+WHERE withdrawal = TRUE AND reconciled_amount IS NULL AND id > ?
+ORDER BY id LIMIT ?`), lastID, batch.Limit)
+	if err != nil {
+		return BatchResult{}, err
+	}
+	defer rows.Close()
+	type candidateRow struct {
+		id            int64
+		credentialTag uint8
+		stakingKey    []byte
+		txHash        []byte
+		addedSlot     int64
+	}
+	var candidates []candidateRow
+	for rows.Next() {
+		var row candidateRow
+		if err := rows.Scan(
+			&row.id, &row.credentialTag, &row.stakingKey, &row.txHash,
+			&row.addedSlot,
+		); err != nil {
+			return BatchResult{}, err
+		}
+		candidates = append(candidates, row)
+	}
+	if err := rows.Err(); err != nil {
+		return BatchResult{}, err
+	}
+	if err := rows.Close(); err != nil {
+		return BatchResult{}, err
+	}
+	if len(candidates) == 0 {
+		return BatchResult{Cursor: batch.Cursor, Done: true}, nil
+	}
+	prefix := []byte(accountRewardReconciledAmountDiscriminatorPrefix)
+	for _, row := range candidates {
+		if !bytes.HasPrefix(row.txHash, prefix) {
+			continue
+		}
+		realHash := row.txHash[len(prefix):]
+		var amount string
+		err := batch.Tx.QueryRowContext(ctx, batch.Rebind(`
+SELECT amount FROM account_reward_delta
+WHERE withdrawal = TRUE AND tx_hash = ? AND credential_tag = ?
+  AND staking_key = ? AND added_slot = ?`),
+			realHash, row.credentialTag, row.stakingKey, row.addedSlot,
+		).Scan(&amount)
+		if errors.Is(err, sql.ErrNoRows) {
+			// The reconciliation's retry never committed a real withdrawal
+			// row for this credential/slot (for example, the reconciled
+			// block was later reorganized away). Nothing to recover from;
+			// leave reconciled_amount NULL rather than guess.
+			continue
+		}
+		if err != nil {
+			return BatchResult{}, err
+		}
+		if _, err := batch.Tx.ExecContext(ctx, batch.Rebind(
+			"UPDATE account_reward_delta SET reconciled_amount = ? WHERE id = ?",
+		), amount, row.id); err != nil {
+			return BatchResult{}, err
+		}
+	}
+	return BatchResult{
+		Cursor: strconv.FormatInt(candidates[len(candidates)-1].id, 10),
+		Rows:   int64(len(candidates)),
+	}, nil
 }
 
 var (

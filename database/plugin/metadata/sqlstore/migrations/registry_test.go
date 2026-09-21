@@ -27,7 +27,7 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 20)
+	require.Len(t, registry, 21)
 	require.Equal(t, 1, registry[0].Version)
 	require.Equal(t, "v1alpha1", registry[0].Name)
 	require.GreaterOrEqual(t, len(registry[0].SQL["sqlite"].Expand), 303)
@@ -182,6 +182,17 @@ func TestSQLiteRegistry(t *testing.T) {
 	require.Equal(t, []string{
 		"ALTER TABLE `account_reward_delta` ADD COLUMN `reconciled_amount` text",
 	}, registry[19].SQL["sqlite"].Expand)
+	require.Equal(t, 21, registry[20].Version)
+	require.Equal(
+		t,
+		accountRewardReconciledAmountBackfillRelease,
+		registry[20].Name,
+	)
+	// No schema change; the release exists solely to backfill reconciled_amount
+	// for rows v20 could not have populated.
+	require.Empty(t, registry[20].SQL["sqlite"].Expand)
+	require.NotNil(t, registry[20].Backfill)
+	require.Equal(t, "1", registry[20].BackfillRevision)
 }
 
 // TestPointerStakeMigrationTranslatesForProviders pins the postgres and mysql
@@ -307,7 +318,7 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 20)
+	require.Len(t, registry, 21)
 	require.Contains(
 		t,
 		registry[0].SQL["mysql"].Expand,

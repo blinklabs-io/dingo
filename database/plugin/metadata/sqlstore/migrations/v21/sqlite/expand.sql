@@ -1,0 +1,12 @@
+-- No schema change. v20 added `reconciled_amount` but never backfilled it,
+-- so every ReconcileAccountRewardBalance row written before v20 existed
+-- (identifiable by its synthetic reconciliationDiscriminator tx_hash, see
+-- account.go) still carries reconciled_amount = NULL. historicalRewardsBatch
+-- (dingo #4529) falls back to previous_reward for such a row, which is
+-- exactly the pre-correction balance the correction proved wrong, producing
+-- a small, persistent, always-understated historical/epoch-boundary stake
+-- read for every boundary before the correction's slot. This release's
+-- backfill recovers the corrected value from the real withdrawal row the
+-- reconciliation's retry wrote for the same credential and slot (its amount
+-- equals the corrected balance the retried withdrawal drained) and stamps it
+-- into reconciled_amount, wherever that real row can be found.
