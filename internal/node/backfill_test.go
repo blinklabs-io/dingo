@@ -66,7 +66,17 @@ func newFileTestDB(t *testing.T) *database.Database {
 
 func addValidBackfillBlocks(t *testing.T, db *database.Database, count int) {
 	t.Helper()
-	blocks, err := testfixtures.GenerateConwayChainAt(1, 0, count)
+	addValidBackfillBlocksFrom(t, db, 0, count)
+}
+
+func addValidBackfillBlocksFrom(
+	t *testing.T,
+	db *database.Database,
+	startSlot uint64,
+	count int,
+) {
+	t.Helper()
+	blocks, err := testfixtures.GenerateConwayChainAt(1, startSlot, count)
 	require.NoError(t, err)
 	for _, block := range blocks {
 		require.NoError(t, db.BlockCreate(models.Block{
@@ -459,6 +469,51 @@ func TestRun_EmitsFinalProgressForShortRun(t *testing.T) {
 	require.Len(t, progress, 1)
 	assert.Equal(t, uint64(1), progress[0].Slot)
 	assert.Equal(t, uint64(2), progress[0].Stats.Blocks)
+}
+
+// TestRun_IncompleteCheckpointAtZeroVisitsSlotZero proves the iterator
+// starts at slot 0 rather than LastSlot+1 when a checkpoint records
+// LastSlot 0, which is ambiguous between "slot 0 completed" and "an initial
+// checkpoint was written before any block did".
+//
+// Asserting the final cp.LastSlot is too weak: it lands on 1 whether or not
+// slot 0 was visited. The malformed block at slot 0 is what makes the
+// difference observable, because fail-closed backfill names the slot it
+// stopped on: a run that skips slot 0 processes the valid block at slot 1
+// and returns no error at all.
+func TestRun_IncompleteCheckpointAtZeroVisitsSlotZero(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+
+	now := time.Now()
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
+		&models.BackfillCheckpoint{
+			Phase:      BackfillPhase,
+			LastSlot:   0,
+			TotalSlots: 1,
+			StartedAt:  now,
+			UpdatedAt:  now,
+			Completed:  false,
+		},
+		nil,
+	))
+
+	hash := make([]byte, 32)
+	hash[0] = 1
+	require.NoError(t, db.BlockCreate(models.Block{
+		Slot: 0,
+		Hash: hash,
+		Cbor: []byte{0x82, 0x01},
+		Type: 1,
+	}, nil))
+	addValidBackfillBlocksFrom(t, db, 1, 1)
+
+	bf := NewBackfill(db, nil, slog.New(
+		slog.NewTextHandler(io.Discard, nil),
+	))
+	err := bf.Run(context.Background())
+	require.ErrorContains(t, err, "parsing block at slot 0")
 }
 
 func TestRun_MalformedBlockDoesNotAdvanceCheckpoint(t *testing.T) {

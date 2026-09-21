@@ -280,15 +280,13 @@ func TestSharedSQLStoreWithdrawalRejectsExcessiveBalance(t *testing.T) {
 // still the historical account and its reward must be preserved. A credential
 // with no account row is an invariant failure and must abort the backfill.
 //
-// Existing inactive account rows retain their historical reward.
-//
-// Existing inactive account rows are not reactivated or mutated.
-//	certificate replay can transiently deactivate a row Mithril imported
-//	active between a historical deregistration and a later
-//	re-registration certificate for the same credential -- and
-//	deregistration's account upsert never clears `reward`. The real
-//	reward must still be journaled, not discarded as 0, and the row must
-//	be neither mutated nor reactivated.
+// An inactive row can arise from backfill's own certificate replay
+// (applyTransactionCertificates runs whether or not historicalBackfill is
+// set) between a historical deregistration and a later re-registration for
+// the same credential. Deregistration's account upsert never clears
+// `reward`, so such a row still holds the credential's real balance: it must
+// be journaled rather than discarded as 0, and the row itself neither
+// mutated nor reactivated.
 //
 // Live ingestion must still require an active account (`SetTransaction`,
 // historicalBackfill=false) in both cases.
@@ -365,20 +363,31 @@ func TestSharedSQLStoreHistoricalBackfillWithdrawalMissingAccount(t *testing.T) 
 				nil,
 			)
 			if !tc.createInactive {
+				// A credential with no account row at all is an invariant
+				// failure: the run must abort, and must leave behind
+				// neither a journal row nor an invented account.
 				require.ErrorContains(t, backfillErr, "account not found")
+				var journaled int
+				require.NoError(t, raw.QueryRow(
+					"SELECT COUNT(*) FROM account_reward_delta "+
+						"WHERE tx_hash = ?",
+					backfillHash.Bytes(),
+				).Scan(&journaled))
+				require.Zero(t, journaled)
+				missing, err := store.GetAccountByCredential(
+					0, stakeKey, true, nil,
+				)
+				require.NoError(t, err)
+				require.Nil(t, missing)
 				return
 			}
 			require.NoError(t, backfillErr)
 
 			account, err := store.GetAccountByCredential(0, stakeKey, true, nil)
 			require.NoError(t, err)
-			if tc.createInactive {
-				require.NotNil(t, account)
-				require.False(t, account.Active)
-				require.Equal(t, tc.inactiveReward, uint64(account.Reward))
-			} else {
-				require.Nil(t, account)
-			}
+			require.NotNil(t, account)
+			require.False(t, account.Active)
+			require.Equal(t, tc.inactiveReward, uint64(account.Reward))
 
 			var deltas int
 			var previousReward string
