@@ -2737,6 +2737,13 @@ tax are applied but no pool or account rewards are distributed; the post-tax
 amount returns to reserves. The epoch-1 round reads the slot-0 genesis ADA pots
 (the epoch-0 row, whose fee pot is empty because no epoch precedes epoch 0);
 the epoch-2 round uses epoch 0's block performance with the epoch-1 ADA pots.
+The epoch-1 round reads genesis's **empty previous block counts** (`nesBprev`),
+not epoch 0's current counts (`nesBcur`). Its performance factor is therefore
+zero when `d < 0.8`, so Conway-at-genesis networks leave treasury and reserves
+unchanged at that boundary. Preview's genesis `d = 1` instead forces performance
+to 1 and requires the first treasury transfer; omitting the round is incorrect.
+This follows cardano-ledger's [TICK input to RUPD](https://github.com/IntersectMBO/cardano-ledger/blob/9975f3d3f36869822eee7225c8422aacafe57790/eras/shelley/impl/src/Cardano/Ledger/Shelley/Rules/Tick.hs)
+and [startStep performance calculation](https://github.com/IntersectMBO/cardano-ledger/blob/9975f3d3f36869822eee7225c8422aacafe57790/eras/shelley/impl/src/Cardano/Ledger/Shelley/LedgerState/PulsingReward.hs).
 Networks with a Byron prefix have no Shelley reward round at either boundary,
 and `applyStakeRewards`' Byron performance-epoch guard suppresses both there;
 networks that declare Shelley at genesis, such as preview, run both. Later
@@ -3416,8 +3423,8 @@ dependency across two points in the pipeline:
   hash is its pool id. `opCertFromHeader` extracts the opcert across the
   Shelley- and Babbage-family header layouts; `verifyOpCertColdSignature`
   verifies the cold-key signature over the raw cardano-ledger `OCertSignable`
-  bytes (not `gouroboros`' `ledger.VerifyOpCertSignature`, which hashes a CBOR
-  array that does not match real opcerts), and `ledger.ValidateKesPeriod`
+  bytes by delegating to `gouroboros`' `ledger.VerifyOpCertSignature`, and
+  `ledger.ValidateKesPeriod`
   (against `maxKESEvolutions` from Shelley genesis) checks expiry. Running
   here rejects forged or expired opcerts before the block body is fetched.
   These checks now run unconditionally except for the same single
@@ -6141,6 +6148,19 @@ reject group/other access on Unix or insecure DACL grants on Windows before
 reading the key. Operational certificates contain public data and remain
 exempt from the secret-key permission check.
 
+Both `PoolCredentials.ValidateOpCert` and `keystore.KeyStore.ValidateOpCert`
+verify the cold-key signature, not only that the loaded KES key matches the
+certificate's hot vkey. The cold vkey is what each derives its pool id from,
+so a certificate carrying an unrelated or corrupt cold vkey/signature pair
+would otherwise yield a pool id whose cold key never authorized that hot key.
+Both delegate to the same `ledger.VerifyOpCertSignature` the inbound
+block-header path uses, so a certificate this node forges under is checked
+against the rule its peers apply to the resulting blocks. That matters beyond
+sharing the byte layout: `VerifyOpCertSignature` verifies under the strict
+Ed25519 criteria of cardano-node's `Ed25519DSIGN`, which rejects small-order
+public and R points, while `crypto/ed25519.Verify` accepts the edwards25519
+identity cold key with an all-zero S for any certificate body.
+
 `PoolCredentials.LoadFromFiles` parses replacement files before taking the
 credential write lock, then atomically installs all key material and the opcert
 as a new, unvalidated generation. Replaced VRF and KES secret material is
@@ -7174,8 +7194,9 @@ Dingo provides three client-facing APIs plus Bark. All are optional and gated by
 
 ### Health probes (`internal/health`)
 
-`internal/node.Run` starts three auxiliary HTTP listeners, all through
-`serveAuxiliaryListener` (bind or serve failures are logged, never fatal):
+`internal/node.Run` starts three auxiliary HTTP listeners, binding each with
+`bindAuxiliaryListener` and serving it with `serveAuxiliaryListenerOn` (bind
+or serve failures are logged, never fatal):
 Prometheus metrics on `metricsPort`, pprof on `debugPort` when enabled, and
 the health listener on `healthPort` (default `12799`, `0` disables).
 
@@ -7210,7 +7231,7 @@ reports healthy without probing when that is `0`, so disabling the listener
 does not put the container into a replacement loop.
 
 `dingo mithril sync` serves the same listener, through
-`cmd/dingo.startHealthProbeServer` over the exported
+`cmd/dingo.bindHealthProbe` and `cmd/dingo.serveHealthProbe` over the exported
 `internal/node.NewHealthServer`, with a nil tip-gap function. That bootstrap
 is a separate process the container entrypoint runs ahead of `serve`, and on
 mainnet it runs for hours while the image's `HEALTHCHECK` is already probing;
@@ -11834,8 +11855,9 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    snapshot and the prior epoch's ADA-pot row); see "Reward Calculation And
    Precomputation". Epochs 1 and 2 are the bootstrap exceptions: each applies
    expansion and treasury tax synchronously with an empty Go distribution and
-   returns the post-tax amount to reserves. Neither is precomputed because zero
-   output rows cannot provide rollback-safe precompute provenance.
+   returns the post-tax amount to reserves. Epoch 1 uses empty previous block
+   counts, so its expansion is zero unless `d >= 0.8`. Neither is precomputed
+   because zero output rows cannot provide rollback-safe precompute provenance.
 2. Embedded MIR (`applyMIRCerts`): apply the Shelley-era INSTANT rule for the
    move-instantaneous-rewards certificates accumulated during the ended epoch —
    credit their rewards to registered reward accounts and apply the pot-to-pot

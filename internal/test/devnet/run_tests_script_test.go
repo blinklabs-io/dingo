@@ -89,6 +89,11 @@ esac
 `
 
 const fakeGoScript = `#!/usr/bin/env bash
+if [[ " $* " == *' -run ^$ '* ]]; then
+  printf 'compile-tests\n' >>"${FAKE_DOCKER_LOG}"
+  exit "${FAKE_GO_COMPILE_EXIT:-0}"
+fi
+printf 'run-tests\n' >>"${FAKE_DOCKER_LOG}"
 exit "${FAKE_GO_EXIT}"
 `
 
@@ -102,6 +107,32 @@ type fakeDevnetResult struct {
 	dockerLog    string
 	stakeDirs    []string
 	artifactDirs []string
+}
+
+func TestRunTestsCompilesBeforeGenesis(t *testing.T) {
+	t.Parallel()
+	for _, args := range [][]string{nil, {"--conformance", "--accelerated"}} {
+		result := runFakeDevnet(t, 0, false, args...)
+		require.Zero(t, result.exitCode, result.output)
+		compile := strings.Index(result.dockerLog, "compile-tests\n")
+		start := strings.Index(result.dockerLog, " up -d")
+		run := strings.Index(result.dockerLog, "run-tests\n")
+		require.NotEqual(t, -1, compile, "tests must compile before genesis")
+		require.NotEqual(t, -1, start, "network did not start")
+		require.NotEqual(t, -1, run, "tests did not execute")
+		require.Less(t, compile, start, "cold compilation consumed chain time")
+		require.Less(t, start, run, "tests must execute against running nodes")
+	}
+}
+
+func TestRunTestsCompileFailureDoesNotStartGenesis(t *testing.T) {
+	t.Parallel()
+	result := runFakeDevnetWithEnv(t, 0, false, map[string]string{
+		"FAKE_GO_COMPILE_EXIT": "29",
+	})
+	require.Equal(t, 29, result.exitCode, result.output)
+	require.NotContains(t, result.dockerLog, " up -d")
+	require.NotContains(t, result.dockerLog, "run-tests\n")
 }
 
 func TestRunTestsPreservesTestStatusWhenCleanupFails(t *testing.T) {
@@ -252,9 +283,10 @@ func runFakeDevnetScript(
 	cmd := exec.CommandContext(ctx, "bash", args...)
 	cmd.Dir = root
 	env := map[string]string{
-		"FAKE_DOCKER_LOG": filepath.Join(tempRoot, "docker.log"),
-		"FAKE_GO_EXIT":    strconv.Itoa(testExit),
-		"MODE":            "dingo",
+		"FAKE_DOCKER_LOG":      filepath.Join(tempRoot, "docker.log"),
+		"FAKE_GO_EXIT":         strconv.Itoa(testExit),
+		"FAKE_GO_COMPILE_EXIT": "0",
+		"MODE":                 "dingo",
 		"PATH": fakeBin + string(
 			os.PathListSeparator,
 		) + os.Getenv(
@@ -307,16 +339,17 @@ func bashUserMapping(t *testing.T) string {
 
 func cleanRunnerEnv(overrides map[string]string) []string {
 	blocked := map[string]struct{}{
-		"COMPOSE_PROFILES":    {},
-		"DEVNET_ACCELERATED":  {},
-		"DEVNET_ARTIFACT_DIR": {},
-		"DEVNET_CIP50_TEST":   {},
-		"FAKE_DOCKER_LOG":     {},
-		"FAKE_GO_EXIT":        {},
-		"MODE":                {},
-		"PATH":                {},
-		"STAKE_KEYS_HOST_DIR": {},
-		"TMPDIR":              {},
+		"COMPOSE_PROFILES":     {},
+		"DEVNET_ACCELERATED":   {},
+		"DEVNET_ARTIFACT_DIR":  {},
+		"DEVNET_CIP50_TEST":    {},
+		"FAKE_DOCKER_LOG":      {},
+		"FAKE_GO_EXIT":         {},
+		"FAKE_GO_COMPILE_EXIT": {},
+		"MODE":                 {},
+		"PATH":                 {},
+		"STAKE_KEYS_HOST_DIR":  {},
+		"TMPDIR":               {},
 	}
 	env := make([]string, 0, len(os.Environ())+len(overrides))
 	for _, item := range os.Environ() {

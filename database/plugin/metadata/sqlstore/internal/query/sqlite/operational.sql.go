@@ -153,14 +153,13 @@ func (q *Queries) CreateAccount(ctx context.Context, arg CreateAccountParams) (i
 
 const createAsset = `-- name: CreateAsset :one
 INSERT INTO asset (
-    name, name_hex, policy_id, fingerprint, utxo_id, amount
-) VALUES (?, ?, ?, ?, ?, ?)
+    name, policy_id, fingerprint, utxo_id, amount
+) VALUES (?, ?, ?, ?, ?)
 RETURNING id
 `
 
 type CreateAssetParams struct {
 	Name        []byte
-	NameHex     []byte
 	PolicyID    []byte
 	Fingerprint []byte
 	UtxoID      sql.NullInt64
@@ -170,7 +169,6 @@ type CreateAssetParams struct {
 func (q *Queries) CreateAsset(ctx context.Context, arg CreateAssetParams) (int64, error) {
 	row := q.db.QueryRowContext(ctx, createAsset,
 		arg.Name,
-		arg.NameHex,
 		arg.PolicyID,
 		arg.Fingerprint,
 		arg.UtxoID,
@@ -1328,7 +1326,7 @@ func (q *Queries) GetActiveDreps(ctx context.Context) ([]Drep, error) {
 }
 
 const getAssetByPolicyAndName = `-- name: GetAssetByPolicyAndName :one
-SELECT name, name_hex, policy_id, fingerprint, id, utxo_id, amount
+SELECT name, policy_id, fingerprint, id, utxo_id, amount
 FROM asset
 WHERE policy_id = ? AND name = ?
 ORDER BY id
@@ -1345,7 +1343,6 @@ func (q *Queries) GetAssetByPolicyAndName(ctx context.Context, arg GetAssetByPol
 	var i Asset
 	err := row.Scan(
 		&i.Name,
-		&i.NameHex,
 		&i.PolicyID,
 		&i.Fingerprint,
 		&i.ID,
@@ -1428,7 +1425,7 @@ func (q *Queries) GetAssetQuantityByPolicyAndName(ctx context.Context, arg GetAs
 }
 
 const getAssetsByUtxoID = `-- name: GetAssetsByUtxoID :many
-SELECT name, name_hex, policy_id, fingerprint, id, utxo_id, amount
+SELECT name, policy_id, fingerprint, id, utxo_id, amount
 FROM asset
 WHERE utxo_id = ?
 ORDER BY id
@@ -1445,7 +1442,6 @@ func (q *Queries) GetAssetsByUtxoID(ctx context.Context, utxoID sql.NullInt64) (
 		var i Asset
 		if err := rows.Scan(
 			&i.Name,
-			&i.NameHex,
 			&i.PolicyID,
 			&i.Fingerprint,
 			&i.ID,
@@ -3789,14 +3785,13 @@ func (q *Queries) ImportAccount(ctx context.Context, arg ImportAccountParams) (i
 
 const importAsset = `-- name: ImportAsset :exec
 INSERT INTO asset (
-    name, name_hex, policy_id, fingerprint, utxo_id, amount
-) VALUES (?, ?, ?, ?, ?, ?)
+    name, policy_id, fingerprint, utxo_id, amount
+) VALUES (?, ?, ?, ?, ?)
 ON CONFLICT (name, policy_id, utxo_id) DO NOTHING
 `
 
 type ImportAssetParams struct {
 	Name        []byte
-	NameHex     []byte
 	PolicyID    []byte
 	Fingerprint []byte
 	UtxoID      sql.NullInt64
@@ -3806,7 +3801,6 @@ type ImportAssetParams struct {
 func (q *Queries) ImportAsset(ctx context.Context, arg ImportAssetParams) error {
 	_, err := q.db.ExecContext(ctx, importAsset,
 		arg.Name,
-		arg.NameHex,
 		arg.PolicyID,
 		arg.Fingerprint,
 		arg.UtxoID,

@@ -141,6 +141,56 @@ func TestDownloadSnapshot(t *testing.T) {
 	require.Equal(t, content, data)
 }
 
+func TestDownloadSnapshotRejectsPrivateDestinationByDefault(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
+		URL:      "https://127.0.0.1/snapshot.tar.zst",
+		DestDir:  t.TempDir(),
+		Filename: "snapshot.tar.zst",
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(
+			*http.Request,
+		) (*http.Response, error) {
+			called = true
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader("archive")),
+			}, nil
+		})},
+	})
+
+	require.ErrorContains(t, err, "not allowed")
+	require.False(t, called, "a rejected destination must not be requested")
+}
+
+func TestDownloadSnapshotRejectsUnrestrictedCustomClient(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
+		URL:      "https://artifacts.example/snapshot.tar.zst",
+		DestDir:  t.TempDir(),
+		Filename: "snapshot.tar.zst",
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(
+			*http.Request,
+		) (*http.Response, error) {
+			called = true
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader("archive")),
+			}, nil
+		})},
+	})
+
+	require.ErrorContains(
+		t,
+		err,
+		"cannot enforce private-address restrictions",
+	)
+	require.False(t, called, "an unrestricted transport must not be used")
+}
+
 func TestDownloadSnapshotRoutineLogsAtDebug(t *testing.T) {
 	t.Parallel()
 
@@ -186,7 +236,7 @@ func TestDownloadSnapshotRoutineLogsAtDebug(t *testing.T) {
 func TestNewPooledDownloadTransportUsesHTTP1Connections(t *testing.T) {
 	t.Parallel()
 
-	transport := newPooledDownloadTransport(4)
+	transport := newPooledDownloadTransport(4, false)
 
 	require.False(t, transport.DisableKeepAlives)
 	require.False(t, transport.ForceAttemptHTTP2)
@@ -623,8 +673,8 @@ func TestDownloadSnapshotRejectsNegativeMaxIdleRetries(t *testing.T) {
 // TestDownloadSnapshotRejectsPlainHTTPByDefault proves a plain-HTTP
 // artifact URL is rejected before any request is attempted
 // (DSA-2026-04-24-03): the aggregator-supplied download location is
-// untrusted, so the scheme is checked up front rather than relying on
-// httpsOnlyRedirect, which only governs where a redirect may lead.
+// untrusted, so the scheme is checked up front rather than relying on a
+// redirect policy, which only governs where a redirect may lead.
 func TestDownloadSnapshotRejectsPlainHTTPByDefault(t *testing.T) {
 	t.Parallel()
 
@@ -1017,6 +1067,7 @@ func TestDownloadSnapshotBoundsResponseRead(t *testing.T) {
 			})}
 			path, err := DownloadSnapshot(context.Background(), DownloadConfig{
 				URL:                 "https://example.test/snapshot.tar.zst",
+				AllowInsecureHTTP:   true,
 				DestDir:             t.TempDir(),
 				Filename:            "bounded.tar.zst",
 				ExpectedSize:        tc.expect,
@@ -1047,12 +1098,13 @@ func TestDownloadSnapshotMaxExpectedSizeDoesNotOverflow(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusOK, Body: body, Header: make(http.Header)}, nil
 	})}
 	path, err := DownloadSnapshot(context.Background(), DownloadConfig{
-		URL:          "https://example.test/snapshot.tar.zst",
-		DestDir:      t.TempDir(),
-		Filename:     "max.tar.zst",
-		ExpectedSize: math.MaxInt64,
-		MaxBytes:     math.MaxInt64,
-		HTTPClient:   client,
+		URL:               "https://example.test/snapshot.tar.zst",
+		AllowInsecureHTTP: true,
+		DestDir:           t.TempDir(),
+		Filename:          "max.tar.zst",
+		ExpectedSize:      math.MaxInt64,
+		MaxBytes:          math.MaxInt64,
+		HTTPClient:        client,
 	})
 	require.ErrorContains(t, err, "download size mismatch")
 	require.Equal(t, int64(1), body.read.Load())
@@ -1087,8 +1139,8 @@ func TestDownloadSnapshotConfiguredByteLimit(t *testing.T) {
 			body := &trackingDownloadBody{reader: *bytes.NewReader([]byte(tc.body))}
 			requests := 0
 			cfg := DownloadConfig{
-				URL: "https://example.test/archive", DestDir: dir, Filename: "archive",
-				MaxBytes: 3,
+				URL: "https://example.test/archive", AllowInsecureHTTP: true,
+				DestDir: dir, Filename: "archive", MaxBytes: 3,
 				HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 					requests++
 					if tc.prefix != "" {
@@ -1134,7 +1186,8 @@ func TestDownloadSnapshotRestartByteLimit(t *testing.T) {
 				body := &trackingDownloadBody{reader: *bytes.NewReader([]byte(content))}
 				requests := 0
 				path, err := DownloadSnapshot(context.Background(), DownloadConfig{
-					URL: "https://example.test/archive", DestDir: dir, Filename: "archive", MaxBytes: 3,
+					URL: "https://example.test/archive", AllowInsecureHTTP: true,
+					DestDir: dir, Filename: "archive", MaxBytes: 3,
 					HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 						requests++
 						if requests == 1 {
