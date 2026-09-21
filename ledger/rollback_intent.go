@@ -138,6 +138,22 @@ func clearRollbackIntent(db *database.Database) error {
 	return db.DeleteSyncState(durableRollbackIntentSyncKey, nil)
 }
 
+// ensureRollbackIntent records the undo payload for a rollback to point.
+//
+// A nil rollbackBlocks means "resolve the payload from the chain", which is
+// only correct before the bodies above point are deleted. Callers that rewind
+// the primary chain first -- reconcilePrimaryChainTipWithLedgerTip's two
+// branches, rewindPrimaryChainForRecovery, and the replay-recovery rewinds --
+// reach this with nil after the bodies are gone, so the read finds nothing and
+// no record is written. Those paths deliver their undo events directly from
+// their own captured blocks and are deliberately outside the outbox; a caller
+// that both captures the blocks and rewinds afterwards must pass them here.
+// Issue #3817 tracks extending the outbox to cover them.
+//
+// A pending record for a different point is completed or merged, never
+// discarded: at or above the pending slot the caller recovers the record and
+// retries, and below it the two payloads are merged, because the older
+// record's bodies no longer exist on the chain to be re-read.
 func (ls *LedgerState) ensureRollbackIntent(
 	point ocommon.Point,
 	rollbackBlocks []models.Block,
