@@ -125,8 +125,18 @@ func (s *Server) Start(ctx context.Context) error {
 			Handler:           s.handler(),
 			ReadHeaderTimeout: 60 * time.Second,
 			ReadTimeout:       60 * time.Second,
-			WriteTimeout:      0,
-			IdleTimeout:       120 * time.Second,
+			// WriteTimeout deliberately 0, as in api/utxorpc: /matches
+			// streams an unbounded result set, so any fixed deadline
+			// truncates a legitimately large response. A slow client
+			// therefore holds its read snapshot, and the reserved metadata
+			// connection behind it, for as long as it takes to read. What
+			// bounds that is the read-snapshot admission cap in
+			// database.NewReadSnapshotContext, set to one below the read
+			// pool size: established snapshots can never take the last
+			// connection, so rollback's metadata reads still proceed while
+			// clients stream.
+			WriteTimeout: 0,
+			IdleTimeout:  120 * time.Second,
 		}
 	})
 	if err != nil {
