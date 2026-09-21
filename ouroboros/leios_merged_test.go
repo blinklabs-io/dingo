@@ -1291,8 +1291,14 @@ func TestSpliceEndorserTxsIntoDijkstraBlockFillsCertRB(t *testing.T) {
 	require.Len(t, origBody, 4)
 	require.Len(t, mergedBody, 4)
 	require.Equal(t, []byte(origBody[0]), []byte(mergedBody[0]))
-	require.Equal(t, []byte(origBody[2]), []byte(mergedBody[2]))
 	require.Equal(t, []byte(origBody[3]), []byte(mergedBody[3]))
+	// The certificate segment is cleared, not preserved: CIP-0164 forbids a
+	// body carrying both a certificate and transactions.
+	require.NotEqual(t, []byte(origBody[2]), []byte(mergedBody[2]))
+	var mergedCert any
+	_, err = cbor.Decode(mergedBody[2], &mergedCert)
+	require.NoError(t, err)
+	require.Nil(t, mergedCert)
 
 	var mergedTxs []cbor.RawMessage
 	_, err = cbor.Decode(mergedBody[1], &mergedTxs)
@@ -1301,15 +1307,25 @@ func TestSpliceEndorserTxsIntoDijkstraBlockFillsCertRB(t *testing.T) {
 	require.Equal(t, []byte(ebTxs[0]), []byte(mergedTxs[0]))
 	require.Equal(t, []byte(ebTxs[1]), []byte(mergedTxs[1]))
 
-	// The merged block is deliberately not a consensus Dijkstra body: it carries
-	// both the certificate and the closure transactions, and its preserved
-	// header still commits to the original empty body. The strict decoder now
-	// rejects the CIP-0164 certificate-or-transactions violation before it gets
-	// as far as the stale body hash. This is why the merge is node-to-client
-	// only, where clients consume the prototype's merged representation instead
-	// of re-validating it as a chain block.
+	// The merged block deliberately has a stale body hash: the preserved header
+	// still commits to the original empty body, so a full parse (which verifies
+	// the body hash) rejects it. This is why the merge is node-to-client only,
+	// where clients trust the node and do not re-verify the body hash.
 	_, err = gdijkstra.NewDijkstraBlockFromCbor(merged)
-	require.ErrorContains(t, err, "certificate or transactions")
+	require.ErrorContains(t, err, "body hash")
+
+	// The stale body hash must be the ONLY thing standing between a client and
+	// the merged block. gouroboros raises the CIP-0164
+	// certificate-or-transactions violation inside
+	// DijkstraBlockBody.UnmarshalCBOR, where no VerifyConfig Skip field reaches
+	// it, so a body carrying both would be undecodable rather than merely
+	// body-hash-stale and no client could read what the node serves.
+	decoded, err := gdijkstra.NewDijkstraBlockFromCbor(
+		merged,
+		lcommon.VerifyConfig{SkipBodyHashValidation: true},
+	)
+	require.NoError(t, err)
+	require.Len(t, decoded.Transactions(), 2)
 }
 
 func TestSpliceEndorserTxsRejectsBlockWithExistingTxs(t *testing.T) {

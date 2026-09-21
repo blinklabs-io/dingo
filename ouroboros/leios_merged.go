@@ -1589,11 +1589,13 @@ func (o *Ouroboros) awaitMergedLeiosRankingBlock(
 // segment, matching the node-to-client "merged" block the prototype serves for
 // a certifying ranking block. The Dijkstra block is [header, block_body] with
 // block_body = [invalid_transactions, transactions, leios_certificate,
-// peras_certificate]; only the transactions element (index 1) is replaced. The
-// header, certificate, peras, and invalid-transactions elements are preserved
-// verbatim so the served block's hash (a hash of the header) is unchanged; the
-// header's block_body_hash intentionally no longer matches, which is acceptable
-// over node-to-client because local clients do not re-verify the body hash.
+// peras_certificate]. The transactions element (index 1) is replaced and the
+// leios_certificate element (index 2) is cleared, because CIP-0164 permits a
+// certificate or transactions and not both. The header, peras, and
+// invalid-transactions elements are preserved verbatim so the served block's
+// hash (a hash of the header) is unchanged; the header's block_body_hash
+// intentionally no longer matches, which is acceptable over node-to-client
+// because local clients do not re-verify the body hash.
 //
 // It returns an error (and the caller serves the raw block) when the block is
 // not a fillable CertRB shape: the top level must have two elements, the body
@@ -1638,8 +1640,18 @@ func spliceEndorserTxsIntoDijkstraBlock(
 	if err != nil {
 		return nil, fmt.Errorf("encode endorser transactions: %w", err)
 	}
+	// The leios_certificate segment is cleared rather than preserved. CIP-0164
+	// permits a certificate or transactions, not both, and gouroboros enforces
+	// that inside DijkstraBlockBody.UnmarshalCBOR, where no VerifyConfig Skip
+	// field reaches it. Keeping the certificate alongside the inlined
+	// transactions would make the served block undecodable by any client
+	// rather than merely body-hash-stale.
+	nilCert, err := cbor.Encode(nil)
+	if err != nil {
+		return nil, fmt.Errorf("encode cleared leios certificate: %w", err)
+	}
 	newBody, err := cbor.Encode([]cbor.RawMessage{
-		body[0], cbor.RawMessage(newTxs), body[2], body[3],
+		body[0], cbor.RawMessage(newTxs), cbor.RawMessage(nilCert), body[3],
 	})
 	if err != nil {
 		return nil, fmt.Errorf("encode merged block body: %w", err)
