@@ -51,6 +51,8 @@ const (
 	rewardStakeVersionRestampSchemaRelease        = "reward-stake-calculation-version-restamp"
 	governanceProposalOptionalAnchorSchemaRelease = "governance-proposal-optional-anchor"
 	governanceProposalDroppedSchemaRelease        = "governance-proposal-dropped-epoch"
+	rewardSnapshotExcludedStakeSchemaRelease      = "reward-snapshot-excluded-active-stake"
+	assetNameHexColumnDropSchemaRelease           = "asset-name-hex-column-drop"
 )
 
 // schemaVersions names every migration in ascending version order.
@@ -95,6 +97,16 @@ var schemaVersions = []struct {
 		Version: 17,
 		Name:    governanceProposalDroppedSchemaRelease,
 		Dir:     "v17",
+	},
+	{
+		Version: 18,
+		Name:    rewardSnapshotExcludedStakeSchemaRelease,
+		Dir:     "v18",
+	},
+	{
+		Version: 19,
+		Name:    assetNameHexColumnDropSchemaRelease,
+		Dir:     "v19",
 	},
 }
 
@@ -991,6 +1003,11 @@ func translateSchemaSQLInSchema(
 				value,
 				"DROP INDEX IF EXISTS `idx_committee_member_cold_cred_hash`",
 				"DROP INDEX `idx_committee_member_cold_cred_hash` ON `committee_member`",
+			)
+			value = strings.ReplaceAll(
+				value,
+				"DROP INDEX IF EXISTS `idx_asset_name_hex`",
+				"DROP INDEX `idx_asset_name_hex` ON `asset`",
 			)
 			if strings.HasPrefix(strings.ToUpper(statement), "CREATE TABLE") {
 				for column := range mysqlForeignKeyColumns[schemaTableName(statement)] {

@@ -244,7 +244,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		if network == "" {
 			network = "preview"
 		}
-		cardanoConfigPath = network + "/config.json"
+		cardanoConfigPath = cardano.EmbeddedConfigPath(network)
 	}
 
 	var nodeCfg *cardano.CardanoNodeConfig

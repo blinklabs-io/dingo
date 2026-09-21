@@ -152,11 +152,37 @@ func (c *SlotTimeConverter) SlotToTime(slot uint64) (time.Time, error) {
 	if when, handled, err := c.slotToTimePrelude(slot); handled {
 		return when, err
 	}
+	epochCache := c.epochCache()
 	sum, err := c.hardForkSummary(0)
 	if err != nil {
+		// A summary that cannot be BUILT is a different failure from a slot
+		// past the forecast horizon: the era shape or genesis it needs is
+		// unavailable, and no slot at all can be converted through it. A slot
+		// the epoch cache already covers is not a forecast, so answer it from
+		// the cache as SlotToEpoch does, rather than stalling the slot clock
+		// (ledger/slot_clock.go) in its 100ms error-retry loop over a slot
+		// whose era parameters are already known.
+		shelleyGenesis := c.shelleyGenesis()
+		if shelleyGenesis == nil {
+			return time.Time{}, err
+		}
+		if when, ok := cachedSlotTime(
+			shelleyGenesis.SystemStart,
+			epochCache,
+			slot,
+		); ok {
+			return when, nil
+		}
+		// Past the cache there are no era parameters to read, so fall back to
+		// the genesis slot length for near-now slots only -- the same bound,
+		// and the same inverse, as TimeToSlot's nearNowSlot fallback on this
+		// branch. Arbitrary slots stay unanswered.
+		if when, ok := genesisSlotTime(shelleyGenesis, slot); ok &&
+			isNearNow(c.now(), when) {
+			return when, nil
+		}
 		return time.Time{}, err
 	}
-	epochCache := c.epochCache()
 	when, sumErr := sum.SlotToTime(slot)
 	if sumErr != nil {
 		// The operational slot clock converts the next wall-clock slot on
@@ -280,6 +306,19 @@ func (c *SlotTimeConverter) TimeToSlot(t time.Time) (uint64, error) {
 // through the configured safe-zone horizon. Returns an error for an empty
 // cache or for slots outside that range.
 func (c *SlotTimeConverter) SlotToEpoch(slot uint64) (models.Epoch, error) {
+	cache := c.epochCache()
+	for _, cachedEpoch := range slices.Backward(cache) {
+		if slot >= cachedEpoch.StartSlot &&
+			slot < cachedEpoch.StartSlot+uint64(cachedEpoch.LengthInSlots) {
+			return epochBoundaryInfo(cachedEpoch), nil
+		}
+	}
+	if len(cache) > 0 && slot < cache[0].StartSlot {
+		return models.Epoch{}, fmt.Errorf(
+			"slot is outside the known epoch range: %w",
+			hardfork.ErrPastHorizon,
+		)
+	}
 	sum, err := c.hardForkSummary(0)
 	if err != nil {
 		return models.Epoch{}, errors.New("no epochs in cache")
@@ -424,6 +463,115 @@ func withinOperationalWindow(
 	// arbitrary future times do not match the operational fallback.
 	d := now.Sub(t)
 	return d >= -tolerance && d < tolerance
+}
+
+// cachedSlotTime returns the wall-clock start time of a slot covered by the
+// epoch cache, computed from the cache alone. It reports false for a slot the
+// cache does not cover, and for a cache it cannot walk contiguously.
+//
+// The relative-time origin is the first cached entry's StartSlot, which is the
+// same anchor hardForkSummaryAnchoredAt uses when it turns the cache into era
+// summaries, so a slot answered here gets the time the summary would have
+// returned for it. Accumulating per epoch rather than per era is equivalent
+// under the constant-params-within-an-era assumption that builder already
+// documents.
+func cachedSlotTime(
+	systemStart time.Time,
+	cache []models.Epoch,
+	slot uint64,
+) (time.Time, bool) {
+	if len(cache) == 0 || slot < cache[0].StartSlot {
+		return time.Time{}, false
+	}
+	relTime := time.Duration(0)
+	for index, epoch := range cache {
+		if epoch.LengthInSlots == 0 || epoch.SlotLength == 0 {
+			return time.Time{}, false
+		}
+		// LengthInSlots and SlotLength are protocol-bounded uints.
+		// #nosec G115
+		slotLength := time.Duration(epoch.SlotLength) * time.Millisecond
+		length := uint64(epoch.LengthInSlots)
+		if index > 0 &&
+			epoch.StartSlot != cache[index-1].StartSlot+
+				uint64(cache[index-1].LengthInSlots) {
+			// A gap or overlap means the accumulated relative time no longer
+			// corresponds to this entry's StartSlot. Refuse rather than
+			// return a time derived from a different span of slots.
+			return time.Time{}, false
+		}
+		if slot < epoch.StartSlot+length {
+			return addRelativeTime(
+				systemStart,
+				relTime,
+				slot-epoch.StartSlot,
+				slotLength,
+			)
+		}
+		next, ok := addDuration(relTime, length, slotLength)
+		if !ok {
+			return time.Time{}, false
+		}
+		relTime = next
+	}
+	return time.Time{}, false
+}
+
+// genesisSlotTime extrapolates a slot's start time from the Shelley genesis
+// slot length alone. It is the exact inverse of nearNowSlot and carries the
+// same caveat: it ignores era history, so callers must restrict it to
+// operational near-now timing.
+func genesisSlotTime(
+	sg *shelley.ShelleyGenesis,
+	slot uint64,
+) (time.Time, bool) {
+	slotLenMs := shelleySlotLengthMs(sg)
+	if slotLenMs == 0 {
+		return time.Time{}, false
+	}
+	// slotLenMs is a protocol-bounded slot length in milliseconds.
+	// #nosec G115
+	return addRelativeTime(
+		sg.SystemStart,
+		0,
+		slot,
+		time.Duration(slotLenMs)*time.Millisecond,
+	)
+}
+
+// addRelativeTime returns systemStart + relTime + slots*slotLength, reporting
+// false when the duration arithmetic would leave time.Duration's range.
+func addRelativeTime(
+	systemStart time.Time,
+	relTime time.Duration,
+	slots uint64,
+	slotLength time.Duration,
+) (time.Time, bool) {
+	total, ok := addDuration(relTime, slots, slotLength)
+	if !ok {
+		return time.Time{}, false
+	}
+	return systemStart.Add(total), true
+}
+
+// addDuration returns base + slots*slotLength, reporting false on overflow.
+func addDuration(
+	base time.Duration,
+	slots uint64,
+	slotLength time.Duration,
+) (time.Duration, bool) {
+	if slotLength <= 0 || base < 0 {
+		return 0, false
+	}
+	if slots > uint64(math.MaxInt64)/uint64(slotLength) {
+		return 0, false
+	}
+	// slots is bounded above, so the conversion cannot overflow.
+	span := time.Duration(slots) * slotLength // #nosec G115
+	if span > math.MaxInt64-base {
+		return 0, false
+	}
+	return base + span, true
 }
 
 // currentEraSummary returns the era currently represented by the latest

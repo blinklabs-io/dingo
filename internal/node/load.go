@@ -568,7 +568,7 @@ func LoadWithDB(
 		if network == "" {
 			network = "preview"
 		}
-		cardanoConfigPath = network + "/config.json"
+		cardanoConfigPath = cardano.EmbeddedConfigPath(network)
 	}
 	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
 		cardanoConfigPath,
@@ -1050,6 +1050,25 @@ type immutableDecodeJob struct {
 	block immutable.Block
 }
 
+// immutableBlockDecoder is a test seam: production decoding ignores the
+// context and index, while tests can fail a selected job and observe the
+// derived cancellation context. NewBlockFromCbor itself is not cancellable.
+type immutableBlockDecoder func(
+	context.Context,
+	int,
+	immutable.Block,
+	lcommon.VerifyConfig,
+) (gledger.Block, error)
+
+func decodeImmutableBlock(
+	_ context.Context,
+	_ int,
+	block immutable.Block,
+	verifyCfg lcommon.VerifyConfig,
+) (gledger.Block, error) {
+	return gledger.NewBlockFromCbor(block.Type, block.Cbor, verifyCfg)
+}
+
 // decodeImmutableBlockBatch decodes a bounded batch with ordered results.
 // Sending jobs through a small buffered channel provides backpressure, while
 // the result index prevents completion order from changing chain order. A
@@ -1060,6 +1079,18 @@ func decodeImmutableBlockBatch(
 	rawBlocks []immutable.Block,
 	verifyCfg lcommon.VerifyConfig,
 	workerCount int,
+) ([]gledger.Block, error) {
+	return decodeImmutableBlockBatchWithDecoder(
+		ctx, rawBlocks, verifyCfg, workerCount, decodeImmutableBlock,
+	)
+}
+
+func decodeImmutableBlockBatchWithDecoder(
+	ctx context.Context,
+	rawBlocks []immutable.Block,
+	verifyCfg lcommon.VerifyConfig,
+	workerCount int,
+	decoder immutableBlockDecoder,
 ) ([]gledger.Block, error) {
 	if len(rawBlocks) == 0 {
 		return nil, nil
@@ -1091,8 +1122,8 @@ func decodeImmutableBlockBatch(
 					if !ok {
 						return
 					}
-					block, err := gledger.NewBlockFromCbor(
-						job.block.Type, job.block.Cbor, verifyCfg,
+					block, err := decoder(
+						decodeCtx, job.index, job.block, verifyCfg,
 					)
 					select {
 					case results <- immutableDecodeResult{
