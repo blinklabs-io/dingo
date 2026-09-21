@@ -783,6 +783,12 @@ func buildDingoConfig(
 			cfg.ForgeEndorserBlockStalenessSlots,
 		),
 		dingo.WithValidateForgedBlock(cfg.ValidateForgedBlock),
+		// Parallel block-decode pipeline (issue #1894 phases 1 and 3). Not
+		// consensus-affecting; off by default.
+		dingo.WithBlockPipelineEnabled(cfg.BlockPipelineEnabled),
+		dingo.WithBlockPipelineValidateEnabled(
+			cfg.BlockPipelineValidateEnabled,
+		),
 		// CIP-0163 reward-account inactivity expiry (consensus-affecting)
 		dingo.WithDelegatorInactivity(
 			cfg.DelegatorInactivityEnabled,

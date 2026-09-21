@@ -1573,6 +1573,25 @@ func WithValidateForgedBlock(enabled bool) ConfigOptionFunc {
 	}
 }
 
+// WithBlockPipelineEnabled enables the parallel block-decode pipeline for the
+// chainsync replay loop (issue #1894 phase 1). Not consensus-affecting; off
+// by default. See LedgerStateConfig.BlockPipelineEnabled.
+func WithBlockPipelineEnabled(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BlockPipelineEnabled = enabled
+	}
+}
+
+// WithBlockPipelineValidateEnabled adds a parallel VRF/KES and OpCert
+// validate stage to the block-decode pipeline (issue #1894 phase 3). Off by
+// default; requires WithBlockPipelineEnabled. See
+// LedgerStateConfig.BlockPipelineValidateEnabled.
+func WithBlockPipelineValidateEnabled(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BlockPipelineValidateEnabled = enabled
+	}
+}
+
 // WithBlockfrostPort specifies the port for the
 // Blockfrost-compatible REST API server. The server binds
 // to the node's bindAddr on this port. 0 disables the
@@ -2336,6 +2355,18 @@ func (c *Config) ForgeStaleGapThresholdSlots() uint64 {
 // ValidateForgedBlock returns whether to self-validate forged blocks.
 func (c *Config) ValidateForgedBlock() bool {
 	return c.cfg.ValidateForgedBlock
+}
+
+// BlockPipelineEnabled returns whether the parallel block-decode pipeline is
+// enabled.
+func (c *Config) BlockPipelineEnabled() bool {
+	return c.cfg.BlockPipelineEnabled
+}
+
+// BlockPipelineValidateEnabled returns whether the parallel VRF/KES and
+// OpCert validate stage of the block-decode pipeline is enabled.
+func (c *Config) BlockPipelineValidateEnabled() bool {
+	return c.cfg.BlockPipelineValidateEnabled
 }
 
 // LeiosVoteSigningKeyFile returns the path to the Leios vote signing key.
