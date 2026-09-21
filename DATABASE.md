@@ -2442,18 +2442,6 @@ FROM utxo WHERE tx_id IN (decode($1, 'hex'), decode($2, 'hex'));
 UPDATE utxo SET deleted_slot = $1 WHERE id IN ($2, $3);
 ```
 
-```sql
-SELECT id, tx_id, output_idx
-FROM utxo
-WHERE tx_id IN (decode($1, 'hex'), decode($2, 'hex'));
-
--- After exact-pair filtering in Go:
-UPDATE utxo
-SET deleted_slot = $1
-WHERE deleted_slot = 0
-  AND id IN ($2, $3);
-```
-
 ### `SaveRewardAccountOutputs` ID resolution
 
 Resolving the generated IDs after a multi-row upsert into
