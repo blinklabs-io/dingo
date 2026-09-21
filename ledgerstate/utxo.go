@@ -932,7 +932,6 @@ func UTxOToModel(u *ParsedUTxO, slot uint64) models.Utxo {
 		utxo.Assets = append(utxo.Assets, models.Asset{
 			PolicyId:    a.PolicyId,
 			Name:        a.Name,
-			NameHex:     []byte(hex.EncodeToString(a.Name)),
 			Amount:      types.Uint64(a.Amount),
 			Fingerprint: []byte(fingerprint.String()),
 		})

@@ -498,6 +498,20 @@ current protocol parameters, stake distribution, and whole UTxO set
 session; `DiffSnapshots(a, b)` reports every divergence between two such
 snapshots.
 
+`TestLedgerStateConsensus` additionally queries treasury/reserves and absolute
+mark/set/go stake snapshots inside the same stable-tip check. Its samples cover
+epochs 1 and 2: the first update must leave the d=0 genesis treasury empty, and
+the next must use epoch 0's block production. Both samples compare pots and
+stake distribution with cardano-node. Run it on a fresh network so the epoch-1
+sample is still available:
+
+```bash
+./internal/test/devnet/run-tests.sh --conformance --accelerated -run TestLedgerStateConsensus
+```
+
+The runner compiles the host-side tests before starting the nodes so a cold
+build cannot consume the bootstrap sampling window.
+
 `GetStakeDistribution` and `GetUTxOWhole` (the two queries `SnapshotAtTip`
 needs beyond the ones already used elsewhere in this harness) did not have
 server-side support in Dingo before this scenario — they were part of the

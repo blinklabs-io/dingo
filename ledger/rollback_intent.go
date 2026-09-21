@@ -265,9 +265,16 @@ func loadRollbackIntent(
 // owns the block payload because the primary-chain rewind may already have
 // deleted the corresponding block rows.
 func (ls *LedgerState) recoverRollbackIntent() error {
-	ls.transactionEventMutex.Lock()
-	defer ls.transactionEventMutex.Unlock()
-	return ls.recoverRollbackIntentLocked()
+	// consumedUtxoPruneMutex before transactionEventMutex, matching
+	// rollbackChainAndStateDeferred and reconcilePrimaryChainTipWithLedgerTip.
+	// recoverRollbackIntentLocked truncates through rollbackWithBlocks, so it
+	// must not run concurrently with the consumed-UTxO sweep; the in-rollback
+	// callers already hold both and reach the Locked variant directly.
+	return ls.withConsumedUtxoPruneBoundary(func() error {
+		ls.transactionEventMutex.Lock()
+		defer ls.transactionEventMutex.Unlock()
+		return ls.recoverRollbackIntentLocked()
+	})
 }
 
 func (ls *LedgerState) recoverRollbackIntentLocked() error {

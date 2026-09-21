@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -154,6 +155,27 @@ func TestCleanupConsumedUtxos_PersistsPruneFloor(t *testing.T) {
 	assert.Equal(
 		t, uint64(50_000), after,
 		"must persist tipSlot minus the default stability window",
+	)
+}
+
+func TestCleanupConsumedUtxos_DoesNotWaitForChainsyncMutex(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDBForCleanup(t, types.StorageModeCore)
+	ls := newLedgerStateForCleanup(db, 100_000)
+	ls.chainsyncMutex.Lock()
+	defer ls.chainsyncMutex.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		ls.cleanupConsumedUtxos()
+		close(done)
+	}()
+	testutil.RequireReceive(
+		t,
+		done,
+		testutil.AsyncWait,
+		"consumed UTxO cleanup must not acquire chainsyncMutex",
 	)
 }
 

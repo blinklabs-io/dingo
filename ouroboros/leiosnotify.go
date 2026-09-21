@@ -1992,6 +1992,7 @@ func (o *Ouroboros) leiosnotifyServerRequestNext(
 		return nil, nil
 	default:
 	}
+	o.observeLeiosNotifyConnectionOwner(ctx)
 
 	for {
 		entry, wakeCh := o.leiosEBLog.nextWhileConnected(
@@ -2013,6 +2014,35 @@ func (o *Ouroboros) leiosnotifyServerRequestNext(
 			return nil, errors.New("leios-notify protocol closed")
 		}
 	}
+}
+
+func (o *Ouroboros) observeLeiosNotifyConnectionOwner(
+	ctx oleiosnotify.CallbackContext,
+) {
+	if ctx.Server == nil || ctx.ConnectionDoneChan == nil {
+		return
+	}
+	o.leiosNotifyObserversMu.Lock()
+	if o.leiosNotifyObservers == nil {
+		o.leiosNotifyObservers = make(map[*oleiosnotify.Server]struct{})
+	}
+	if _, exists := o.leiosNotifyObservers[ctx.Server]; exists {
+		o.leiosNotifyObserversMu.Unlock()
+		return
+	}
+	o.leiosNotifyObservers[ctx.Server] = struct{}{}
+	o.leiosNotifyObserversMu.Unlock()
+
+	go func() {
+		select {
+		case <-ctx.ConnectionDoneChan:
+		case <-ctx.Server.DoneChan():
+		}
+		o.RemoveLeiosNotifyConnectionOwner(ctx.ConnectionId, ctx.Server)
+		o.leiosNotifyObserversMu.Lock()
+		delete(o.leiosNotifyObservers, ctx.Server)
+		o.leiosNotifyObserversMu.Unlock()
+	}()
 }
 
 // RemoveLeiosNotifyConnectionOwner removes only the cursor owned by conn.
