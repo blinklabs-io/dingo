@@ -53,9 +53,11 @@ type ProposalTally struct {
 }
 
 // TallyContext carries the inputs needed to tally a proposal.
-// StakeEpoch is the epoch whose "mark" snapshot provides SPO stake
-// distribution — callers should pass stakeEpochFor(currentEpoch), which
-// resolves to currentEpoch itself. See stakeEpochFor's doc comment.
+// StakeEpoch is the epoch whose "mark" snapshot provides the SPO stake
+// distribution. The boundary tick passes stakeEpochFor(newEpoch), which
+// resolves to newEpoch itself; the mid-epoch ratifiability check passes
+// predictedBoundaryStakeEpochFor(currentEpoch), which is a different and
+// necessarily older snapshot. Both doc comments explain why.
 type TallyContext struct {
 	DB           *database.Database
 	Txn          *database.Txn
