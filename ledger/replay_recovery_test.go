@@ -518,6 +518,152 @@ func TestFindReplayRecoveryCandidateFlagsUnresolvedWithoutLocalFallbackAnchor(
 	}
 }
 
+// newPrunedProducerLedger builds a five-block primary chain, deletes the
+// producer block itself from the block store, and returns the ledger state
+// together with the chain. Deleting a block leaves both the transaction
+// metadata row and the tx blob offset pointing at it, which is the dangling
+// reference a pruned prefix produces one level below the missing parent case.
+func newPrunedProducerLedger(
+	t *testing.T,
+	db *database.Database,
+	securityParam int,
+) ([]chain.RawBlock, *LedgerState) {
+	t.Helper()
+
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	blocks := []chain.RawBlock{
+		testRawBlock("pruned-producer-one", 80, 1, nil),
+		testRawBlock("pruned-producer-two", 100, 2, nil),
+		testRawBlock("pruned-producer-three", 120, 3, nil),
+		testRawBlock("pruned-producer-four", 140, 4, nil),
+		testRawBlock("pruned-producer-current", 160, 5, nil),
+	}
+	for i := 1; i < len(blocks); i++ {
+		blocks[i].PrevHash = blocks[i-1].Hash
+	}
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks(blocks))
+
+	stored, err := database.BlockByHash(db, blocks[3].Hash)
+	require.NoError(t, err)
+	txn := db.BlobTxn(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return database.BlockDeleteTxn(txn, stored)
+	}))
+	_, err = database.BlockByHash(db, blocks[3].Hash)
+	require.ErrorIs(
+		t,
+		err,
+		models.ErrBlockNotFound,
+		"fixture must leave the producer block absent from the block store",
+	)
+
+	nodeConfig := newTestShelleyGenesisCfg(t)
+	nodeConfig.ShelleyGenesis().SecurityParam = securityParam
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: nodeConfig,
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	ls.currentEra.Id = 1
+	require.NoError(t, cm.SetLedger(ls))
+	ls.metrics.init(prometheus.NewRegistry())
+
+	currentTip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(blocks[4].Slot, blocks[4].Hash),
+		BlockNumber: blocks[4].BlockNumber,
+	}
+	require.NoError(t, db.SetTip(currentTip, nil))
+	ls.currentTip = currentTip
+	ls.publishSnapshotsLocked()
+	return blocks, ls
+}
+
+// TestFindReplayRecoveryCandidateFallsBackWhenProducerBlockIsMissing covers
+// the metadata arm of the dangling producer reference: the transaction row
+// survives the block's deletion, so the index still names a producer block
+// the block store cannot return.
+func TestFindReplayRecoveryCandidateFallsBackWhenProducerBlockIsMissing(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	blocks, ls := newPrunedProducerLedger(t, db, 2)
+
+	producerTxHash := testHashBytes("pruned-producer-metadata-tx")
+	seedReplayRecoveryTransaction(
+		t,
+		db,
+		producerTxHash,
+		blocks[3].Hash,
+		blocks[3].Slot,
+	)
+
+	candidate, err := ls.findReplayRecoveryCandidate(&txValidationError{
+		BlockPoint: ocommon.NewPoint(blocks[4].Slot, blocks[4].Hash),
+		TxHash:     testHashBytes("pruned-producer-metadata-failure"),
+		Inputs: []lcommon.TransactionInput{
+			&replayRecoveryInput{txId: producerTxHash, index: 0},
+		},
+		Cause: errors.New("bad input"),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, candidate)
+	assert.Equal(t, "security-param-fallback", candidate.Strategy)
+	assert.True(t, candidate.ProducerUnresolved)
+	assert.Equal(t, blocks[1].Slot, candidate.RollbackPoint.Slot)
+}
+
+// TestFindReplayRecoveryCandidateFallsBackWhenTxBlobBlockIsMissing covers the
+// blob arm of the same reference. DeleteBlock removes the block's blob and
+// indexes but not the tx offsets recorded against it, so the offset resolves
+// to a point the block store no longer holds.
+func TestFindReplayRecoveryCandidateFallsBackWhenTxBlobBlockIsMissing(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	blocks, ls := newPrunedProducerLedger(t, db, 2)
+
+	producerTxHash := testHashBytes("pruned-producer-blob-tx")
+	offset := &database.CborOffset{
+		BlockSlot:  blocks[3].Slot,
+		ByteOffset: 0,
+		ByteLength: 1,
+	}
+	copy(offset.BlockHash[:], blocks[3].Hash)
+	blobTxn := db.BlobTxn(true)
+	require.NoError(t, blobTxn.Do(func(txn *database.Txn) error {
+		return txn.BlobStore().
+			SetTx(txn.Blob(), producerTxHash, database.EncodeTxOffset(offset))
+	}))
+
+	// No transaction metadata row: resolution goes through the tx blob.
+	storedTx, err := db.GetTransactionByHash(producerTxHash, nil)
+	require.NoError(t, err)
+	require.Nil(t, storedTx, "fixture must not seed transaction metadata")
+
+	candidate, err := ls.findReplayRecoveryCandidate(&txValidationError{
+		BlockPoint: ocommon.NewPoint(blocks[4].Slot, blocks[4].Hash),
+		TxHash:     testHashBytes("pruned-producer-blob-failure"),
+		Inputs: []lcommon.TransactionInput{
+			&replayRecoveryInput{txId: producerTxHash, index: 0},
+		},
+		Cause: errors.New("bad input"),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, candidate)
+	assert.Equal(t, "security-param-fallback", candidate.Strategy)
+	assert.True(t, candidate.ProducerUnresolved)
+	assert.Equal(t, blocks[1].Slot, candidate.RollbackPoint.Slot)
+}
+
 func TestTryRecoverFromTxValidationErrorRejectsReplayBelowMithrilBoundary(
 	t *testing.T,
 ) {

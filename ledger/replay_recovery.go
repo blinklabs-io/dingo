@@ -2095,28 +2095,47 @@ func (ls *LedgerState) resolveReplayRecoveryProducer(
 	}
 	if producerTx != nil && len(producerTx.BlockHash) > 0 {
 		producerBlock, err := database.BlockByHash(ls.db, producerTx.BlockHash)
-		if err != nil {
+		switch {
+		case err == nil:
+			if producerBlock.Slot >= pending.MaxSlot {
+				return nil, false, nil
+			}
+			tx := ls.replayRecoveryResolveTxFromBlock(
+				producerBlock,
+				pending.Input.Id().Bytes(),
+				chainIndex,
+			)
+			return &replayRecoveryResolvedProducer{
+				Input:         pending.Input,
+				ProducerTx:    producerTx,
+				ProducerBlock: producerBlock,
+				Tx:            tx,
+				Strategy:      "metadata",
+			}, false, nil
+		case errors.Is(err, models.ErrBlockNotFound):
+			// The transaction index names a producer block the block store
+			// no longer holds, the same dangling reference a pruned prefix
+			// leaves on a producer's parent. Fall through to the tx blob
+			// and, failing that, report the input as unresolved so the
+			// bounded fallback picks a retained anchor.
+			if ls.config.Logger != nil {
+				ls.config.Logger.Warn(
+					"replay recovery producer block is missing from the local block store",
+					"component", "ledger",
+					"producer_tx_hash",
+					hex.EncodeToString(producerTx.Hash),
+					"producer_block_hash",
+					hex.EncodeToString(producerTx.BlockHash),
+					"producer_block_slot", producerTx.Slot,
+				)
+			}
+		default:
 			return nil, false, fmt.Errorf(
 				"lookup producer block %x: %w",
 				producerTx.BlockHash,
 				err,
 			)
 		}
-		if producerBlock.Slot >= pending.MaxSlot {
-			return nil, false, nil
-		}
-		tx := ls.replayRecoveryResolveTxFromBlock(
-			producerBlock,
-			pending.Input.Id().Bytes(),
-			chainIndex,
-		)
-		return &replayRecoveryResolvedProducer{
-			Input:         pending.Input,
-			ProducerTx:    producerTx,
-			ProducerBlock: producerBlock,
-			Tx:            tx,
-			Strategy:      "metadata",
-		}, false, nil
 	}
 	producerBlock, found, err := ls.replayRecoveryBlockFromTxBlob(
 		pending.Input.Id().Bytes(),
@@ -2335,6 +2354,21 @@ func (ls *LedgerState) replayRecoveryBlockFromTxBlob(
 
 	block, err := database.BlockByPoint(ls.db, point)
 	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			// The tx blob offset names a block the block store no longer
+			// holds. Report it as not found rather than as an error, so the
+			// caller treats the input as unresolved.
+			if ls.config.Logger != nil {
+				ls.config.Logger.Warn(
+					"replay recovery tx blob names a block missing from the local block store",
+					"component", "ledger",
+					"tx_hash", hex.EncodeToString(txHash),
+					"block_slot", point.Slot,
+					"block_hash", hex.EncodeToString(point.Hash),
+				)
+			}
+			return models.Block{}, false, nil
+		}
 		return models.Block{}, false, fmt.Errorf(
 			"lookup producer block from tx blob %s: %w",
 			hex.EncodeToString(txHash),
