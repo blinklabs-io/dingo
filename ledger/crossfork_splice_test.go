@@ -279,6 +279,39 @@ func TestContinuationAuditReportsUnresolvableProducer(t *testing.T) {
 	assert.Equal(t, "test rollback", report["fork_reason"])
 }
 
+// TestRollbackAheadOfLedgerDoesNotArmContinuationAudit covers genesis and
+// snapshot catch-up, where the primary chain may already contain blocks beyond
+// the applied ledger tip. A rollback to that primary-chain point does not move
+// the ledger, so the continuation audit must remain disarmed rather than
+// reporting unapplied history as missing producers.
+func TestRollbackAheadOfLedgerDoesNotArmContinuationAudit(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	ls.armContinuationAudit(fixture.ancestorTip.Point, "prior rollback")
+	require.NotNil(t, ls.continuationAudit.Load())
+
+	ls.Lock()
+	ls.currentTip = fixture.ancestorTip
+	ls.currentTipBlockNonce = append([]byte(nil), fixture.ancestorNonce...)
+	ls.publishSnapshotsLocked()
+	ls.Unlock()
+	require.NoError(t, ls.db.SetTip(fixture.ancestorTip, nil))
+
+	require.NoError(
+		t,
+		ls.rollbackChainAndStateDeferred(fixture.currentTip.Point, nil),
+	)
+
+	assert.Nil(
+		t,
+		ls.continuationAudit.Load(),
+		"a rollback ahead of the applied ledger must disarm any prior audit",
+	)
+	assert.Equal(t, fixture.ancestorTip, ls.currentTip)
+}
+
 // TestRollbackAheadOfLedgerDoesNotPersistIntent covers genesis and snapshot
 // catch-up, where the primary chain may already contain blocks beyond the
 // applied ledger tip. A rollback to that primary-chain point does not move the
