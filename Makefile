@@ -39,6 +39,7 @@ VERSION ?= $(shell git describe --tags --exact-match 2>/dev/null)
 COMMIT_HASH ?= $(shell git rev-parse --short HEAD)
 GO_LDFLAGS=-ldflags "-s -w -X '$(GOMODULE)/internal/version.Version=$(VERSION)' -X '$(GOMODULE)/internal/version.CommitHash=$(COMMIT_HASH)'"
 BUILD_TAGS ?= dingo_extra_plugins
+CGO_ENABLED ?= 0
 GO_TAG_FLAGS=$(if $(strip $(BUILD_TAGS)),-tags "$(BUILD_TAGS)",)
 # Cover all blinklabs-io modules dingo depends on (gouroboros, plutigo, bursa,
 # bark, ouroboros-mock, ...) without descending into third-party/stdlib deps.
@@ -186,7 +187,7 @@ test-devnet: ## Run the default all-Dingo DevNet integration tests
 # Build our program binaries
 # Depends on GO_FILES to determine when rebuild is needed
 $(BINARIES): mod-tidy $(GO_FILES)
-	CGO_ENABLED=0 \
+	CGO_ENABLED=$(CGO_ENABLED) \
 	go build \
 		$(GO_TAG_FLAGS) \
 		$(GO_LDFLAGS) \
