@@ -1033,6 +1033,81 @@ func (s *Store) HasPParamsForEra(
 	return count > 0, nil
 }
 
+// ListPParamsForEra returns every persisted protocol-parameter row for one
+// era in ascending row order. Unlike GetPParams it neither filters by epoch
+// nor collapses to the latest row: the Alonzo unit repair
+// (database/alonzo_pparams_unit.go) has to inspect and rewrite all of them,
+// because every historical row is served to clients that query that epoch.
+func (s *Store) ListPParamsForEra(
+	eraID uint,
+	txn types.Txn,
+) ([]models.PParams, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	sqlEraID, err := checkedInt64(uint64(eraID))
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.operationalQueries(db).ListPParamsByEra(
+		ctx,
+		sql.NullInt64{Int64: sqlEraID, Valid: true},
+	)
+	if err != nil {
+		return nil, err
+	}
+	ret := make([]models.PParams, 0, len(rows))
+	for _, row := range rows {
+		addedSlot, err := checkedUint64(row.AddedSlot.Int64)
+		if err != nil {
+			return nil, fmt.Errorf("list pparams for era: %w", err)
+		}
+		epoch, err := checkedUint64(row.Epoch.Int64)
+		if err != nil {
+			return nil, fmt.Errorf("list pparams for era: %w", err)
+		}
+		rowEraID, err := checkedUint(row.EraID.Int64)
+		if err != nil {
+			return nil, fmt.Errorf("list pparams for era: %w", err)
+		}
+		ret = append(ret, models.PParams{
+			Cbor:      row.Cbor,
+			ID:        uint(row.ID),
+			AddedSlot: addedSlot,
+			Epoch:     epoch,
+			EraId:     rowEraID,
+		})
+	}
+	return ret, nil
+}
+
+// UpdatePParamsCbor replaces one protocol-parameter row's CBOR in place,
+// keyed by the row id ListPParamsForEra returned. It exists for the Alonzo
+// unit repair and deliberately cannot move a row between eras, epochs, or
+// slots.
+func (s *Store) UpdatePParamsCbor(
+	id uint,
+	params []byte,
+	txn types.Txn,
+) error {
+	db, ctx, err := s.dbFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	sqlID, err := checkedInt64(uint64(id))
+	if err != nil {
+		return err
+	}
+	return s.operationalQueries(db).UpdatePParamsCbor(
+		ctx,
+		sqlitequery.UpdatePParamsCborParams{
+			Cbor: params,
+			ID:   sqlID,
+		},
+	)
+}
+
 func (s *Store) SetPParams(
 	params []byte,
 	slot, epoch uint64,

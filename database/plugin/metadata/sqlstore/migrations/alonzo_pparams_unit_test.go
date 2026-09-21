@@ -22,6 +22,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/stretchr/testify/require"
 	_ "modernc.org/sqlite"
 )
@@ -86,7 +87,10 @@ func TestAlonzoPParamsUnitBackfillMarksFreshDatabaseWordV1(t *testing.T) {
 func TestAlonzoPParamsUnitBackfillMarksLegacyAlonzoRows(t *testing.T) {
 	t.Parallel()
 	db, runTo := alonzoPParamsUnitBackfillDB(t)
-	seedPParamsEra(t, db, 4)
+	// Seeded through gouroboros' own era id, so a renumbering upstream
+	// diverges from the era_id the backfill hardcodes and fails here rather
+	// than silently leaving Alonzo rows unclassified.
+	seedPParamsEra(t, db, alonzo.EraIdAlonzo)
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
 

@@ -57,6 +57,12 @@ const (
 	alonzoPParamsUnitSchemaRelease                = "alonzo-pparams-unit-provenance"
 )
 
+// alonzoEraID is the pparams.era_id value Alonzo rows carry. A migration is a
+// frozen historical artifact, so it holds its own copy rather than importing
+// gouroboros' alonzo.EraIdAlonzo: the two must agree, and a future upstream
+// renumbering must not silently reclassify rows this backfill already read.
+const alonzoEraID = 4
+
 // schemaVersions names every migration in ascending version order.
 var schemaVersions = []struct {
 	Version int
@@ -256,7 +262,7 @@ func alonzoPParamsUnitBackfill(
 	if err := batch.Tx.QueryRowContext(
 		ctx,
 		batch.Rebind(`SELECT COUNT(*) FROM pparams WHERE era_id = ?`),
-		4,
+		alonzoEraID,
 	).Scan(&alonzoRows); err != nil {
 		return BatchResult{}, fmt.Errorf(
 			"classify persisted Alonzo protocol parameters: %w",

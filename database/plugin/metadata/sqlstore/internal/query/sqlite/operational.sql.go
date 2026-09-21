@@ -4063,6 +4063,42 @@ func (q *Queries) InsertRewardSnapshot(ctx context.Context, arg InsertRewardSnap
 	return id, err
 }
 
+const listPParamsByEra = `-- name: ListPParamsByEra :many
+SELECT cbor, id, added_slot, epoch, era_id
+FROM pparams
+WHERE era_id = ?
+ORDER BY id
+`
+
+func (q *Queries) ListPParamsByEra(ctx context.Context, eraID sql.NullInt64) ([]Pparam, error) {
+	rows, err := q.db.QueryContext(ctx, listPParamsByEra, eraID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Pparam{}
+	for rows.Next() {
+		var i Pparam
+		if err := rows.Scan(
+			&i.Cbor,
+			&i.ID,
+			&i.AddedSlot,
+			&i.Epoch,
+			&i.EraID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const pruneTokenRegistryEntriesStaleBefore = `-- name: PruneTokenRegistryEntriesStaleBefore :execrows
 DELETE FROM token_registry_entry
 WHERE updated_at < ?
@@ -5151,6 +5187,22 @@ func (q *Queries) UpdateFallbackRewardSnapshot(ctx context.Context, arg UpdateFa
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const updatePParamsCbor = `-- name: UpdatePParamsCbor :exec
+UPDATE pparams
+SET cbor = ?
+WHERE id = ?
+`
+
+type UpdatePParamsCborParams struct {
+	Cbor []byte
+	ID   int64
+}
+
+func (q *Queries) UpdatePParamsCbor(ctx context.Context, arg UpdatePParamsCborParams) error {
+	_, err := q.db.ExecContext(ctx, updatePParamsCbor, arg.Cbor, arg.ID)
+	return err
 }
 
 const upsertMidnightAriadneParams = `-- name: UpsertMidnightAriadneParams :one

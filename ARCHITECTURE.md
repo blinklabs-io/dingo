@@ -10750,13 +10750,24 @@ Phase 1 runs inside `database.New` (`database/commit_timestamp.go`'s
 supply — `storage_mode`, `network`, `network_magic`, `start_era`, the plugin
 selections, and `blob_store_id` — persisting first-start values via
 `writeGateValues`. Before those ordinary gates, it validates the dedicated
-`alonzo_pparams_unit` provenance marker written by metadata migration v20;
-legacy per-byte Alonzo rows fail closed because their original per-word value
-cannot be reconstructed exactly. Before rejecting a legacy marker, phase 1
-idempotently upgrades it only when an exact era-only query finds no Alonzo row.
-That also closes the crash window after rollback commits deletion of the last
-Alonzo row but before recovery rewrites the marker: the following ordinary
-startup can finish the durable repair even though commit timestamps now match.
+`alonzo_pparams_unit` provenance marker written by metadata migration v20.
+Before rejecting a legacy marker, phase 1 tries two idempotent repairs.
+It upgrades the marker when an exact era-only query finds no Alonzo row,
+which also closes the crash window after rollback commits deletion of the
+last Alonzo row but before recovery rewrites the marker: the following
+ordinary startup can finish the durable repair even though commit timestamps
+now match. Otherwise `repairAlonzoPParamsUnit`
+(`database/alonzo_pparams_unit.go`) rewrites the surviving rows from Alonzo
+genesis: releases up to gouroboros v0.205.5 stored
+`lovelacePerUTxOWord / 8`, so a row still holding that quotient identifies
+itself and `Config.AlonzoLovelacePerUtxoWord` supplies the exact value it
+came from. A row already holding the corrected word value is accepted, which
+is what makes the repair crash-idempotent across the row rewrites and the
+marker write, and every row must re-encode to its stored bytes before it is
+rewritten. An Alonzo-era on-chain update to key 17 was applied verbatim, so
+any other value is chain-sourced, and that row — like a missing genesis
+value or a metadata store that cannot rewrite rows — still fails closed with
+a resync instruction naming the reason.
 It deliberately excludes every bool-derived gate
 (`history_expiry_active`, `historical_validation_relaxed`,
 `strict_utxo_validation_relaxed`, `pledge_leverage`, `full_pot_rewards`,

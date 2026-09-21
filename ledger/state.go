@@ -775,9 +775,13 @@ type LedgerStateConfig struct {
 	BlockPipelineEnabled bool
 	// BlockPipelineValidateEnabled adds parallel header-crypto validation to the
 	// decode pipeline (issue #1894 phase 3). The generic stage covers VRF, KES,
-	// and the OpCert cold-key signature; Dingo supplements it with the
-	// MaxKESEvolutions check,
-	// and enforces results only where the serial path has validation state:
+	// and the OpCert cold-key signature; Dingo's supplement re-runs that
+	// cold-key signature check as defense in depth and adds the
+	// state-dependent MaxKESEvolutions expiry check the generic verifier
+	// cannot perform, so a validated header pays two Ed25519 verifications
+	// of the same opcert. See ARCHITECTURE.md ("Operational Certificate
+	// Validation").
+	// It enforces results only where the serial path has validation state:
 	// not trusted historical/Mithril replay and only with a cached epoch
 	// nonce. A rejection is returned as headerValidationError so the already-
 	// persisted chain can be rewound rather than retried forever.
@@ -1569,10 +1573,11 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 			// decodeReadChainBatch.
 			//
 			// VerifyConfig scopes gouroboros' generic stage to
-			// VRF/KES/OpCert-signature checks. decodeReadChainBatch supplements
-			// a successful result with Dingo's OpCert expiry check.
-			// Body/transaction and registered-pool state validation remain in
-			// their existing ledger paths.
+			// VRF/KES/OpCert-signature checks. decodeReadChainBatch
+			// supplements a successful result with verifyOpCertHeaderCrypto,
+			// which repeats the OpCert cold-key signature check and adds the
+			// OpCert expiry check. Body/transaction and registered-pool state
+			// validation remain in their existing ledger paths.
 			pipelineOpts = append(
 				pipelineOpts,
 				pipeline.WithValidateWorkers(workerCount),

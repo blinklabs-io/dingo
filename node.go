@@ -610,6 +610,11 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			HotTxMaxBytes:   n.config.cacheHotTxMaxBytes,
 		},
 	}
+	if nc := n.config.cardanoNodeConfig; nc != nil {
+		if ag := nc.AlonzoGenesis(); ag != nil {
+			dbConfig.AlonzoLovelacePerUtxoWord = ag.LovelacePerUtxoWord
+		}
+	}
 	db, err := database.New(dbConfig, stores)
 	if db == nil {
 		if err != nil {

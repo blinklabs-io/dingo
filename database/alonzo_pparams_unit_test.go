@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/nodesettings"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/stretchr/testify/require"
 	_ "modernc.org/sqlite"
@@ -260,4 +261,204 @@ func TestCheckNodeSettingsRepairsStrandedLegacyMarker(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, nodesettings.AlonzoPParamsUnitWordV1,
 		gates[nodesettings.AlonzoPParamsUnitGateName])
+}
+
+// alonzoPParamsUnitMarkerAt reads the unit marker straight out of a closed
+// database's metadata store.
+func alonzoPParamsUnitMarkerAt(t *testing.T, dataDir string) string {
+	t.Helper()
+	sqlDB, err := sql.Open(
+		"sqlite",
+		filepath.Join(dataDir, "metadata.sqlite"),
+	)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, sqlDB.Close()) }()
+	var marker string
+	require.NoError(t, sqlDB.QueryRow(
+		`SELECT value FROM node_settings_gate WHERE name = ?`,
+		nodesettings.AlonzoPParamsUnitGateName,
+	).Scan(&marker))
+	return marker
+}
+
+// alonzoPParamsCbor encodes an Alonzo protocol-parameter row holding the
+// supplied key 17 value, the way the ledger persists one.
+func alonzoPParamsCbor(t *testing.T, adaPerUtxoByte uint64) []byte {
+	t.Helper()
+	params := alonzo.AlonzoProtocolParameters{
+		AdaPerUtxoByte: adaPerUtxoByte,
+	}
+	encoded, err := cbor.Encode(&params)
+	require.NoError(t, err)
+	return encoded
+}
+
+// alonzoRowKey17 reads key 17 back out of the single persisted Alonzo row.
+func alonzoRowKey17(t *testing.T, dataDir string) uint64 {
+	t.Helper()
+	sqlDB, err := sql.Open(
+		"sqlite",
+		filepath.Join(dataDir, "metadata.sqlite"),
+	)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, sqlDB.Close()) }()
+	var stored []byte
+	require.NoError(t, sqlDB.QueryRow(
+		`SELECT cbor FROM pparams WHERE era_id = ?`,
+		alonzo.EraIdAlonzo,
+	).Scan(&stored))
+	var params alonzo.AlonzoProtocolParameters
+	_, err = cbor.Decode(stored, &params)
+	require.NoError(t, err)
+	return params.AdaPerUtxoByte
+}
+
+func TestRepairAlonzoPParamsUnitFromGenesis(t *testing.T) {
+	t.Parallel()
+
+	const genesisWord = 34482
+
+	tests := []struct {
+		name       string
+		stored     uint64
+		word       uint64
+		wantMarker string
+		wantKey17  uint64
+		wantErr    string
+	}{
+		{
+			name:       "lossy per-byte row is rewritten from genesis",
+			stored:     genesisWord / 8,
+			word:       genesisWord,
+			wantMarker: nodesettings.AlonzoPParamsUnitWordV1,
+			wantKey17:  genesisWord,
+		},
+		{
+			// A crash between the row rewrite and the marker write leaves
+			// this shape behind, and the next start has to finish rather
+			// than demand a resync.
+			name:       "already corrected row clears the marker",
+			stored:     genesisWord,
+			word:       genesisWord,
+			wantMarker: nodesettings.AlonzoPParamsUnitWordV1,
+			wantKey17:  genesisWord,
+		},
+		{
+			name:      "chain-sourced row fails closed",
+			stored:    genesisWord/8 + 1,
+			word:      genesisWord,
+			wantKey17: genesisWord/8 + 1,
+			wantErr:   "came from an on-chain update",
+		},
+		{
+			name:      "no genesis word supplied fails closed",
+			stored:    genesisWord / 8,
+			wantKey17: genesisWord / 8,
+			wantErr:   "lovelacePerUTxOWord was not supplied",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dataDir := t.TempDir()
+			cfg := &Config{
+				DataDir:                   dataDir,
+				StorageMode:               "core",
+				Network:                   "preprod",
+				AlonzoLovelacePerUtxoWord: tt.word,
+			}
+			db, err := newTestDatabase(t, cfg)
+			require.NoError(t, err)
+			require.NoError(t, db.SetPParams(
+				alonzoPParamsCbor(t, tt.stored),
+				0,
+				0,
+				alonzo.EraIdAlonzo,
+				nil,
+			))
+			require.NoError(t, closeTestDatabase(db))
+
+			sqlDB, err := sql.Open(
+				"sqlite",
+				filepath.Join(dataDir, "metadata.sqlite"),
+			)
+			require.NoError(t, err)
+			_, err = sqlDB.Exec(
+				`UPDATE node_settings_gate SET value = ? WHERE name = ?`,
+				nodesettings.AlonzoPParamsUnitLegacyByteV0,
+				nodesettings.AlonzoPParamsUnitGateName,
+			)
+			require.NoError(t, err)
+			require.NoError(t, sqlDB.Close())
+
+			reopened, err := newTestDatabase(t, cfg)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				require.ErrorContains(t, err, "resync from genesis")
+				require.Equal(
+					t,
+					nodesettings.AlonzoPParamsUnitLegacyByteV0,
+					alonzoPParamsUnitMarkerAt(t, dataDir),
+				)
+				require.Equal(t, tt.wantKey17, alonzoRowKey17(t, dataDir))
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(
+				t,
+				tt.wantMarker,
+				alonzoPParamsUnitMarkerAt(t, dataDir),
+			)
+			require.NoError(t, closeTestDatabase(reopened))
+			require.Equal(t, tt.wantKey17, alonzoRowKey17(t, dataDir))
+		})
+	}
+}
+
+// TestRepairAlonzoPParamsUnitIsIdempotent reopens a repaired database to
+// confirm the second start neither re-reports legacy units nor rewrites the
+// row again.
+func TestRepairAlonzoPParamsUnitIsIdempotent(t *testing.T) {
+	t.Parallel()
+
+	const genesisWord = 34482
+	dataDir := t.TempDir()
+	cfg := &Config{
+		DataDir:                   dataDir,
+		StorageMode:               "core",
+		Network:                   "preprod",
+		AlonzoLovelacePerUtxoWord: genesisWord,
+	}
+	db, err := newTestDatabase(t, cfg)
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParams(
+		alonzoPParamsCbor(t, genesisWord/8),
+		0,
+		0,
+		alonzo.EraIdAlonzo,
+		nil,
+	))
+	require.NoError(t, closeTestDatabase(db))
+
+	sqlDB, err := sql.Open("sqlite", filepath.Join(dataDir, "metadata.sqlite"))
+	require.NoError(t, err)
+	_, err = sqlDB.Exec(
+		`UPDATE node_settings_gate SET value = ? WHERE name = ?`,
+		nodesettings.AlonzoPParamsUnitLegacyByteV0,
+		nodesettings.AlonzoPParamsUnitGateName,
+	)
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.Close())
+
+	for range 2 {
+		reopened, err := newTestDatabase(t, cfg)
+		require.NoError(t, err)
+		require.NoError(t, closeTestDatabase(reopened))
+		require.Equal(
+			t,
+			nodesettings.AlonzoPParamsUnitWordV1,
+			alonzoPParamsUnitMarkerAt(t, dataDir),
+		)
+		require.Equal(t, uint64(genesisWord), alonzoRowKey17(t, dataDir))
+	}
 }
