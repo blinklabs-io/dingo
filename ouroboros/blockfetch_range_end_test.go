@@ -92,6 +92,22 @@ func (f *blockfetchRangeFixture) readMessageTypes(
 
 func newBlockfetchRangeFixture(t *testing.T) *blockfetchRangeFixture {
 	t.Helper()
+	slots := make([]uint64, 3)
+	for i := range slots {
+		slots[i] = uint64(i+1) * 10
+	}
+	return newBlockfetchRangeFixtureWithSlots(t, slots)
+}
+
+// newBlockfetchRangeFixtureWithSlots is newBlockfetchRangeFixture generalized
+// to caller-chosen slots, so a test can reproduce a sparse or
+// low-active-slot-coefficient custom network where consecutive real blocks
+// span far more slots than mainnet's stability window (#4354).
+func newBlockfetchRangeFixtureWithSlots(
+	t *testing.T,
+	slots []uint64,
+) *blockfetchRangeFixture {
+	t.Helper()
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
@@ -104,13 +120,13 @@ func newBlockfetchRangeFixture(t *testing.T) *blockfetchRangeFixture {
 		cm.SetLedger(testSecurityParamLedger{securityParam: 2160}),
 	)
 
-	blocks := make([]chain.RawBlock, 0, 3)
+	blocks := make([]chain.RawBlock, 0, len(slots))
 	var prevHash []byte
-	for i := range 3 {
+	for i, slot := range slots {
 		sum := sha256.Sum256([]byte{byte(i)})
 		hash := append([]byte(nil), sum[:]...)
 		blocks = append(blocks, chain.RawBlock{
-			Slot:        uint64(i+1) * 10,
+			Slot:        slot,
 			Hash:        hash,
 			BlockNumber: uint64(i),
 			Type:        1,
@@ -259,5 +275,44 @@ func TestBlockfetchServerRequestRange_InChainRangeStillServedInFull(
 		},
 		f.readMessageTypes(t, 5),
 		"an in-chain range must still stream every block it covers",
+	)
+}
+
+// TestBlockfetchServerRequestRange_SparseNetworkRangeServedOverWire is issue
+// #4354, end to end: a real MsgRequestRange whose endpoint slots differ by
+// more than 129600 (the old, now-removed MaxBlockFetchRange) must still be
+// served in full when every requested block is a real point on the chain --
+// this is what a sparse or low-active-slot-coefficient custom network
+// produces when a client batches consecutive blocks for BlockFetch. Both
+// endpoints are validated against the chain by blockfetchServerRequestRange
+// before this ever reaches the block-count bound in blockfetchServerSendBatch,
+// so this also exercises that endpoint-validation path with a genuinely
+// oversized slot span.
+func TestBlockfetchServerRequestRange_SparseNetworkRangeServedOverWire(
+	t *testing.T,
+) {
+	const slotGap = 70000 // 2 gaps * 70000 > 129600 across 3 blocks
+	slots := []uint64{slotGap, 2 * slotGap, 3 * slotGap}
+	f := newBlockfetchRangeFixtureWithSlots(t, slots)
+	require.Greater(
+		t,
+		f.blocks[2].Slot-f.blocks[0].Slot,
+		uint64(129600),
+		"test setup must exercise a slot span larger than the old fixed limit",
+	)
+
+	f.requestRange(t, f.point(0), f.point(2))
+
+	assert.Equal(
+		t,
+		[]byte{
+			blockfetch.MessageTypeStartBatch,
+			blockfetch.MessageTypeBlock,
+			blockfetch.MessageTypeBlock,
+			blockfetch.MessageTypeBlock,
+			blockfetch.MessageTypeBatchDone,
+		},
+		f.readMessageTypes(t, 5),
+		"a sparse-network range spanning more than 129600 slots must still be served in full, not answered with NoBlocks",
 	)
 }
