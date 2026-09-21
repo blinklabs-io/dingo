@@ -53,20 +53,44 @@ func heldHealthProbe(t *testing.T, cfg *config.Config) *boundHealthProbe {
 	return &boundHealthProbe{server: server, listener: ln}
 }
 
-// freeHealthPort reports a loopback port nothing holds. The caller binds it
-// immediately: the number is not a reservation, so anything between the pick
-// and the bind can take it.
-func freeHealthPort(t *testing.T) uint {
+// bindProbeOnFreePort has bindHealthProbe bind a loopback port nothing holds,
+// and reports the port it was asked for alongside the probe.
+//
+// A port number is not a reservation -- the premise of this whole change --
+// so the pick can be taken before bindHealthProbe binds it, by anything in
+// the process asking the kernel for an arbitrary port. Testing the bind
+// against a configured port needs a candidate all the same, so the loss is
+// retried rather than treated as a failure of the code under test; a bind
+// that fails for any other reason is reported on the last attempt.
+func bindProbeOnFreePort(t *testing.T) (*boundHealthProbe, uint) {
 	t.Helper()
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	_, port, err := net.SplitHostPort(ln.Addr().String())
-	require.NoError(t, err)
-	require.NoError(t, ln.Close())
-	parsed, err := strconv.ParseUint(port, 10, 16)
-	require.NoError(t, err)
-	return uint(parsed)
+	const attempts = 20
+	var lastErr error
+	for range attempts {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		_, port, err := net.SplitHostPort(ln.Addr().String())
+		require.NoError(t, err)
+		require.NoError(t, ln.Close())
+		parsed, err := strconv.ParseUint(port, 10, 16)
+		require.NoError(t, err)
+
+		probe, err := bindHealthProbe(
+			&config.Config{BindAddr: "127.0.0.1", HealthPort: uint(parsed)},
+		)
+		if err == nil {
+			require.NotNil(t, probe)
+			t.Cleanup(func() { _ = probe.listener.Close() })
+			return probe, uint(parsed)
+		}
+		lastErr = err
+	}
+	require.NoErrorf(
+		t, lastErr,
+		"no free loopback port survived the pick in %d attempts", attempts,
+	)
+	return nil, 0
 }
 
 // TestServeHealthProbeServesLiveAndNotReady pins the classification a
@@ -139,13 +163,7 @@ func TestServeHealthProbeSkipsNilProbe(t *testing.T) {
 func TestBindHealthProbeBindsConfiguredPort(t *testing.T) {
 	t.Parallel()
 
-	port := freeHealthPort(t)
-	probe, err := bindHealthProbe(
-		&config.Config{BindAddr: "127.0.0.1", HealthPort: port},
-	)
-	require.NoError(t, err)
-	require.NotNil(t, probe)
-	t.Cleanup(func() { _ = probe.listener.Close() })
+	probe, port := bindProbeOnFreePort(t)
 	require.Equal(
 		t,
 		net.JoinHostPort("127.0.0.1", strconv.FormatUint(uint64(port), 10)),
