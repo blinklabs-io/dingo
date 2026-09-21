@@ -361,7 +361,9 @@ func NewKoiosClient(
 				koiosTLSHandshakeTimeout,
 				koiosResponseHeaderTimeout,
 				koiosExpectContinueTimeout,
+				allowInsecureHTTP,
 			),
+			CheckRedirect: sameOriginRedirect(base),
 		},
 		// Public and Free tiers share the 100/10s burst cap; Pro/Premium are
 		// higher, but we don't learn the tier from the key alone, so stay at
@@ -397,6 +399,7 @@ func NewKoiosClient(
 func newKoiosTransport(
 	dialTimeout, dialKeepAlive time.Duration,
 	tlsHandshakeTimeout, responseHeaderTimeout, expectContinueTimeout time.Duration,
+	allowPrivate bool,
 ) *http.Transport {
 	// http.DefaultTransport is documented as *http.Transport today, but
 	// nothing enforces that at compile time; a comma-ok assertion with a
@@ -414,10 +417,58 @@ func newKoiosTransport(
 		Timeout:   dialTimeout,
 		KeepAlive: dialKeepAlive,
 	}).DialContext
+	transport.DialContext = restrictedDialContext(transport.DialContext, allowPrivate)
+	transport.Proxy = nil
 	transport.TLSHandshakeTimeout = tlsHandshakeTimeout
 	transport.ResponseHeaderTimeout = responseHeaderTimeout
 	transport.ExpectContinueTimeout = expectContinueTimeout
 	return transport
+}
+
+func sameOriginRedirect(base string) func(*http.Request, []*http.Request) error {
+	origin, _ := url.Parse(base)
+	return func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return errors.New("too many redirects")
+		}
+		if req.URL.Scheme != origin.Scheme || !strings.EqualFold(req.URL.Host, origin.Host) {
+			return errors.New("koios redirect changes origin")
+		}
+		return nil
+	}
+}
+
+func restrictedDialContext(next func(context.Context, string, string) (net.Conn, error), allowPrivate bool) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, err
+		}
+		ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		if err != nil {
+			return nil, err
+		}
+		var last error
+		for _, ip := range ips {
+			if !allowPrivate && restrictedIP(ip.IP) {
+				last = fmt.Errorf("refusing restricted Koios destination %s", ip.IP)
+				continue
+			}
+			conn, err := next(ctx, network, net.JoinHostPort(ip.IP.String(), port))
+			if err == nil {
+				return conn, nil
+			}
+			last = err
+		}
+		if last == nil {
+			last = errors.New("Koios hostname has no usable address")
+		}
+		return nil, last
+	}
+}
+
+func restrictedIP(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast()
 }
 
 // ResolvedBaseURL reports the API root this client actually queries, with any

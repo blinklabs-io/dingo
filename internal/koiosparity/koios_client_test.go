@@ -109,6 +109,17 @@ func TestGetRetriesOn503ThenSucceeds(t *testing.T) {
 	require.EqualValues(t, 2, attempts.Load())
 }
 
+func TestRestrictedDialContextRejectsPrivateAddresses(t *testing.T) {
+	dialed := false
+	dial := restrictedDialContext(func(context.Context, string, string) (net.Conn, error) {
+		dialed = true
+		return nil, nil
+	}, false)
+	_, err := dial(context.Background(), "tcp", "127.0.0.1:80")
+	require.Error(t, err)
+	require.False(t, dialed)
+}
+
 func TestGetRetriesOnBodyReadFailure(t *testing.T) {
 	t.Parallel()
 
@@ -604,6 +615,7 @@ func TestNewKoiosTransportResponseHeaderTimeout(t *testing.T) {
 			koiosTLSHandshakeTimeout,
 			responseHeaderTimeout,
 			koiosExpectContinueTimeout,
+			true,
 		),
 	}
 
@@ -706,6 +718,7 @@ func TestNewKoiosTransportDialTimeout(t *testing.T) {
 			koiosTLSHandshakeTimeout,
 			koiosResponseHeaderTimeout,
 			koiosExpectContinueTimeout,
+			true,
 		),
 	}
 
@@ -778,6 +791,7 @@ func TestNewKoiosTransportFallsBackWhenDefaultTransportIsNotHTTPTransport(
 			koiosTLSHandshakeTimeout,
 			koiosResponseHeaderTimeout,
 			koiosExpectContinueTimeout,
+			true,
 		)
 		require.NotNil(t, transport)
 		assert.NotNil(
