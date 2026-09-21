@@ -16,6 +16,7 @@ package ouroboros
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -91,6 +92,35 @@ type blockfetchConnection interface {
 	Close() error
 }
 
+// blockFetchKey identifies one outstanding RequestRange call. gouroboros'
+// nextRequestId is scoped per connection, so requestId alone is not globally
+// unique; connId alone is exactly the clobber this key exists to avoid, since
+// pipelining lets more than one request be outstanding on the same
+// connection at once.
+type blockFetchKey struct {
+	connId    ouroboros.ConnectionId
+	requestId uint64
+}
+
+// blockfetchRangeRequester is the subset of *blockfetch.Client
+// BlockfetchClientRequestRange calls. Extracted so its dispatch and
+// blockFetchStarts bookkeeping can be tested without a live connection
+// registered in connManager.
+type blockfetchRangeRequester interface {
+	RequestRange(
+		ctx context.Context,
+		req blockfetch.RangeRequest,
+	) (uint64, error)
+}
+
+// blockfetchConnClientFunc resolves the live request-range client for a
+// connection. The production value (blockfetchConnClientLive) looks it up
+// through connManager; tests override the Ouroboros field this is stored in
+// to exercise BlockfetchClientRequestRange without a live connection.
+type blockfetchConnClientFunc func(
+	ouroboros.ConnectionId,
+) (blockfetchRangeRequester, error)
+
 func (o *Ouroboros) blockfetchServerConnOpts() []blockfetch.BlockFetchOptionFunc {
 	return []blockfetch.BlockFetchOptionFunc{
 		blockfetch.WithRequestRangeFunc(
@@ -108,9 +138,15 @@ func (o *Ouroboros) blockfetchClientConnOpts() []blockfetch.BlockFetchOptionFunc
 		blockfetch.WithBlockRawFunc(
 			o.instrumentBlockfetchBlockRaw(o.blockfetchClientBlockRaw),
 		),
-		blockfetch.WithBatchDoneFunc(
-			o.instrumentBlockfetchBatchDone(o.blockfetchClientBatchDone),
+		// RangeDoneFunc replaces BatchDoneFunc: with RequestPipelining
+		// enabled, every request's terminal outcome (success, NoBlocks, or
+		// any transport/protocol failure) is reported here instead, exactly
+		// once per request, whether or not it ever started streaming.
+		// BatchDoneFunc is never invoked for a pipelined request.
+		blockfetch.WithRangeDoneFunc(
+			o.instrumentBlockfetchRangeDone(o.blockfetchClientRangeDone),
 		),
+		blockfetch.WithRequestPipelining(true),
 		blockfetch.WithBatchStartTimeout(60 * time.Second),
 		blockfetch.WithBlockTimeout(60 * time.Second),
 	}
@@ -590,40 +626,69 @@ func (o *Ouroboros) blockfetchResetNoBlocks(connId ouroboros.ConnectionId) {
 	o.blockFetchMutex.Unlock()
 }
 
-// BlockfetchClientRequestRange is called by the ledger when it needs to request a range of block bodies
+// blockfetchConnClientLive resolves the live blockfetch client for a
+// connection through connManager. This is the production value of the
+// Ouroboros.blockfetchConnClient seam; see blockfetchConnClientFunc.
+func (o *Ouroboros) blockfetchConnClientLive(
+	connId ouroboros.ConnectionId,
+) (blockfetchRangeRequester, error) {
+	if o.connManager == nil {
+		return nil, errors.New("ConnManager not initialized")
+	}
+	conn := o.connManager.GetConnectionById(connId)
+	if conn == nil {
+		return nil, fmt.Errorf("failed to lookup connection ID: %s", connId.String())
+	}
+	return conn.BlockFetch().Client, nil
+}
+
+// BlockfetchClientRequestRange is called by the ledger when it needs to
+// request a range of block bodies. It returns the request ID gouroboros
+// assigned the range, which the caller can use to distinguish this request's
+// events from another one outstanding on the same connection.
+//
+// RequestRange (unlike the GetBlockRange this replaced) returns as soon as
+// the request is sent, not once the range has been delivered: the terminal
+// outcome always arrives later through blockfetchClientRangeDone via
+// RangeDoneFunc, including for a request that fails synchronously here for a
+// reason other than never having been sent. Peer-governance failure scoring
+// on a synchronous error is therefore this function's own responsibility --
+// blockfetchClientRangeDone only ever sees a request that was actually
+// queued.
 func (o *Ouroboros) BlockfetchClientRequestRange(
 	connId ouroboros.ConnectionId,
 	start ocommon.Point,
 	end ocommon.Point,
-) error {
-	if o.connManager == nil {
-		return errors.New("ConnManager not initialized")
+) (uint64, error) {
+	client, err := o.blockfetchConnClient(connId)
+	if err != nil {
+		return 0, err
 	}
-	conn := o.connManager.GetConnectionById(connId)
-	if conn == nil {
-		return fmt.Errorf("failed to lookup connection ID: %s", connId.String())
-	}
-	// Record start time for metrics and scoring
-	o.blockFetchMutex.Lock()
-	o.blockFetchStarts[connId] = time.Now()
-	o.blockFetchMutex.Unlock()
-	if err := conn.BlockFetch().Client.GetBlockRange(start, end); err != nil {
-		// Clean up start time and record failed observation
-		o.blockFetchMutex.Lock()
-		startTime, exists := o.blockFetchStarts[connId]
-		delete(o.blockFetchStarts, connId)
-		o.blockFetchMutex.Unlock()
-		if exists && o.peerGov != nil {
-			latencyMs := time.Since(startTime).Milliseconds()
+	dispatchStart := time.Now()
+	// context.Background() is deliberate: sendRequestRange's internal waits
+	// (admission against the in-flight byte budget, and the queue-append send
+	// token) already select on the connection's own protocol shutdown channel
+	// in addition to ctx.Done(), so a request unblocks on connection teardown
+	// even though this caller's context is never canceled directly.
+	requestId, err := client.RequestRange(
+		context.Background(),
+		blockfetch.RangeRequest{Start: start, End: end},
+	)
+	if err != nil {
+		if o.peerGov != nil {
+			latencyMs := time.Since(dispatchStart).Milliseconds()
 			o.peerGov.UpdatePeerBlockFetchObservation(
 				connId,
 				float64(latencyMs),
 				false,
 			)
 		}
-		return err
+		return 0, err
 	}
-	return nil
+	o.blockFetchMutex.Lock()
+	o.blockFetchStarts[blockFetchKey{connId: connId, requestId: requestId}] = dispatchStart
+	o.blockFetchMutex.Unlock()
+	return requestId, nil
 }
 
 func (o *Ouroboros) blockfetchClientBlock(
@@ -632,8 +697,9 @@ func (o *Ouroboros) blockfetchClientBlock(
 	block gledger.Block,
 ) error {
 	// Update metrics and peer scoring
+	key := blockFetchKey{connId: ctx.ConnectionId, requestId: ctx.RequestId}
 	o.blockFetchMutex.Lock()
-	startTime, exists := o.blockFetchStarts[ctx.ConnectionId]
+	startTime, exists := o.blockFetchStarts[key]
 	o.blockFetchMutex.Unlock()
 	if exists {
 		fetchDuration := time.Since(startTime)
@@ -701,6 +767,7 @@ func (o *Ouroboros) blockfetchClientBlock(
 				ledger.BlockfetchEventType,
 				ledger.BlockfetchEvent{
 					ConnectionId: ctx.ConnectionId,
+					RequestId:    ctx.RequestId,
 					Point: ocommon.NewPoint(
 						block.SlotNumber(),
 						block.Hash().Bytes(),
@@ -714,12 +781,20 @@ func (o *Ouroboros) blockfetchClientBlock(
 	return nil
 }
 
-func (o *Ouroboros) blockfetchClientBatchDone(
+// blockfetchClientRangeDone is the RangeDoneFunc for a pipelined request. It
+// replaces blockfetchClientBatchDone: with RequestPipelining enabled, every
+// request's terminal outcome -- success, NoBlocks, or any other
+// transport/protocol failure -- is reported here exactly once, whether or not
+// the request ever reached MsgStartBatch. rangeErr is nil for a request that
+// completed successfully.
+func (o *Ouroboros) blockfetchClientRangeDone(
 	ctx blockfetch.CallbackContext,
+	rangeErr error,
 ) error {
 	// Clean up start time
+	key := blockFetchKey{connId: ctx.ConnectionId, requestId: ctx.RequestId}
 	o.blockFetchMutex.Lock()
-	delete(o.blockFetchStarts, ctx.ConnectionId)
+	delete(o.blockFetchStarts, key)
 	o.blockFetchMutex.Unlock()
 	if o.eventBus != nil &&
 		o.eventBus.HasSubscribers(ledger.BlockfetchEventType) {
@@ -729,7 +804,9 @@ func (o *Ouroboros) blockfetchClientBatchDone(
 				ledger.BlockfetchEventType,
 				ledger.BlockfetchEvent{
 					ConnectionId: ctx.ConnectionId,
+					RequestId:    ctx.RequestId,
 					BatchDone:    true,
+					RangeErr:     rangeErr,
 				},
 			),
 		)
@@ -773,12 +850,12 @@ func (o *Ouroboros) instrumentBlockfetchBlockRaw(
 	}
 }
 
-func (o *Ouroboros) instrumentBlockfetchBatchDone(
-	fn func(blockfetch.CallbackContext) error,
-) func(blockfetch.CallbackContext) error {
-	return func(ctx blockfetch.CallbackContext) error {
+func (o *Ouroboros) instrumentBlockfetchRangeDone(
+	fn func(blockfetch.CallbackContext, error) error,
+) func(blockfetch.CallbackContext, error) error {
+	return func(ctx blockfetch.CallbackContext, rangeErr error) error {
 		start := time.Now()
-		err := fn(ctx)
+		err := fn(ctx, rangeErr)
 		o.recordProtocolMessage("blockfetch", err, time.Since(start))
 		return err
 	}

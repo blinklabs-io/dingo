@@ -955,8 +955,9 @@ func BenchmarkBlockfetchClientBlockMetrics(b *testing.B) {
 
 	connId := testConnId()
 	ctx := blockfetch.CallbackContext{ConnectionId: connId}
+	key := blockFetchKey{connId: connId, requestId: ctx.RequestId}
 	o.blockFetchMutex.Lock()
-	o.blockFetchStarts[connId] = time.Now().Add(-50 * time.Millisecond)
+	o.blockFetchStarts[key] = time.Now().Add(-50 * time.Millisecond)
 	o.blockFetchMutex.Unlock()
 
 	b.ResetTimer()
@@ -964,7 +965,7 @@ func BenchmarkBlockfetchClientBlockMetrics(b *testing.B) {
 		// Reset fetch start each iteration so delaySeconds is
 		// consistent across all iterations.
 		o.blockFetchMutex.Lock()
-		o.blockFetchStarts[connId] = time.Now().Add(-50 * time.Millisecond)
+		o.blockFetchStarts[key] = time.Now().Add(-50 * time.Millisecond)
 		o.blockFetchMutex.Unlock()
 
 		block := blocks[i%len(blocks)]

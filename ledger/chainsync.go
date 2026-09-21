@@ -46,6 +46,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -4585,20 +4586,6 @@ func (ls *LedgerState) ensureBlockfetchDrainingAfterForkQueueFailure(
 	}
 }
 
-// blockfetchNoBlocksErrorText is the error text emitted by the gouroboros
-// blockfetch client for MsgNoBlocks. That client currently exposes NoBlocks
-// as a plain error rather than a sentinel, so keep the classification at this
-// adapter boundary and do not treat every synchronous request error as a
-// range-unavailable result.
-const blockfetchNoBlocksErrorText = "block(s) not found"
-
-func isBlockfetchNoBlocksError(err error) bool {
-	return err != nil && strings.HasSuffix(
-		strings.TrimSpace(err.Error()),
-		blockfetchNoBlocksErrorText,
-	)
-}
-
 // blockfetchRangeFailureState counts definitive failures to obtain one
 // specific queued range, identified by its start point. Keying by point is
 // what lets the count survive the unrelated traffic that separates real
@@ -4872,6 +4859,12 @@ func (ls *LedgerState) startQueuedBlockfetchLocked(
 // an optional test synchronization signal for the prior-request drain.
 func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 	connId ouroboros.ConnectionId,
+	//nolint:unparam // pending's only use here was the synchronous NoBlocks
+	// branch this commit removes (NoBlocks now resolves asynchronously, in
+	// handleEventBlockfetchBatchDone). Kept rather than threaded out of every
+	// caller and test helper, since the dispatch-timing rework this function
+	// is meant to support needs it again for its own disruption-path
+	// publishes.
 	pending *pendingPublishes,
 	waitStarted chan<- struct{},
 ) error {
@@ -4955,22 +4948,15 @@ func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 		}
 		ls.blockfetchRequestRangeCleanup()
 		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
-		// A peer whose range server rejects the start point answers
-		// NoBlocks, which gouroboros resolves into this synchronous error
-		// rather than a BatchDone event. Several callers only log what we
-		// return (notably the fork-resolution restarts), so genuine NoBlocks
-		// must be recorded here, at the single point every queued-range
-		// request passes through. Other synchronous errors are transport,
-		// shutdown, or wiring failures and must not poison this range's
-		// unavailable count.
-		if isBlockfetchNoBlocksError(err) {
-			ls.noteBlockfetchRangeUnavailable(
-				connId,
-				headerStart,
-				fmt.Sprintf("blockfetch request returned NoBlocks: %v", err),
-				pending,
-			)
-		}
+		// A synchronous error here can no longer be NoBlocks: RequestRange
+		// (unlike GetBlockRange, which this replaced) reports NoBlocks only
+		// through RangeDoneFunc, delivered asynchronously as a BlockfetchEvent
+		// and handled in handleEventBlockfetchBatchDone instead. What remains
+		// here is a request that failed before ever being queued or sent --
+		// connection lookup, context cancellation, or a protocol-shutdown
+		// race -- none of which say anything about whether this range is
+		// obtainable, so it must not poison noteBlockfetchRangeUnavailable's
+		// count the way a genuine NoBlocks does.
 		return err
 	}
 	ls.chainsyncBlockfetchMutex.Lock()
@@ -5061,7 +5047,7 @@ func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 				ls.blockfetchShadowRequestsInFlight[shadowConnKey] = struct{}{}
 				shadowRequestDone := ls.beginBlockfetchRequestLocked(shadowConn)
 				ls.chainsyncBlockfetchMutex.Unlock()
-				err := ls.config.BlockfetchRequestRangeFunc(
+				_, err := ls.config.BlockfetchRequestRangeFunc(
 					shadowConn,
 					headerStart,
 					headerEnd,
@@ -7520,7 +7506,10 @@ func (ls *LedgerState) blockfetchRequestRangeStart(
 	if ls.config.BlockfetchRequestRangeFunc == nil {
 		return errors.New("blockfetch request range func not configured")
 	}
-	err := ls.config.BlockfetchRequestRangeFunc(
+	// The request ID is not yet consumed here; only one request is ever
+	// dispatched at a time in this commit, so there is no second in-flight
+	// slot for it to disambiguate against.
+	_, err := ls.config.BlockfetchRequestRangeFunc(
 		connId,
 		start,
 		end,
@@ -7729,6 +7718,27 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(
 		ls.chainsyncBlockfetchTimeoutTimer = nil
 	}
 	ls.chainsyncBlockfetchTimerGeneration++
+	// e.RangeErr carries a pipelined request's terminal outcome (see
+	// RangeDoneFunc), which BatchDone never previously communicated at all.
+	// A NoBlocks-shaped error needs no distinct handling here: gouroboros
+	// only resolves NoBlocks before MsgStartBatch is ever sent, so it always
+	// leaves batchBlocksApplied at 0 with the queued headers untouched --
+	// exactly the shape the appliedBlockCount==0 branch below already routes
+	// through noteBlockfetchRangeUnavailable. Anything else non-nil is a
+	// transport, protocol, or decode failure that can still have delivered
+	// and applied some prefix of the range before failing; that has no
+	// equivalent recovery path today (the prior GetBlockRange-based
+	// BatchDoneFunc carried no error at all for this case), so it is logged
+	// rather than silently dropped.
+	if e.RangeErr != nil && !errors.Is(e.RangeErr, blockfetch.ErrNoBlocks) {
+		ls.config.Logger.Warn(
+			"blockfetch range request resolved with an error",
+			"component", "ledger",
+			"connection_id", e.ConnectionId.String(),
+			"applied_block_count", ls.batchBlocksApplied,
+			"error", e.RangeErr,
+		)
+	}
 	if err := ls.flushPendingBlockfetchBlocksDeferred(pending); err != nil {
 		ls.blockfetchRequestRangeCleanup()
 		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}

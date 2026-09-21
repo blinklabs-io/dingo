@@ -127,12 +127,12 @@ func TestDetectConnectionSwitchHandsOffQueuedHeadersToNewActiveConnection(
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				_ = connId
 				_ = start
 				_ = end
 				requestCount++
-				return nil
+				return 0, nil
 			},
 			ConnectionSwitchFunc: func() {
 				switchCalls++
@@ -473,11 +473,11 @@ func TestHandleEventBlockfetchBlockAllowsBlocksFromActiveBatch(t *testing.T) {
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				_ = connId
 				_ = start
 				_ = end
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -574,11 +574,11 @@ func TestHandleEventBlockfetchBlockAllowsEquivalentConnectionId(t *testing.T) {
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				_ = connId
 				_ = start
 				_ = end
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -618,11 +618,11 @@ func TestHandleEventBlockfetchBlockDropsBlocksFromStaleConnection(
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				_ = connId
 				_ = start
 				_ = end
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -673,10 +673,10 @@ func TestHandleEventBlockfetchBatchDoneUsesSelectedConnectionAfterSwitch(
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				requestCount++
 				requestedConnId = connId
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -734,10 +734,10 @@ func TestHandleEventBlockfetchBatchDoneFallsBackToCurrentConnection(
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				requestCount++
 				requestedConnId = connId
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -982,14 +982,14 @@ func newChainSwitchFallbackFixture(
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				_ = start
 				_ = end
 				if sameConnectionId(connId, connId2) {
 					testChain.ClearHeaders()
-					return errors.New("connection closed")
+					return 0, errors.New("connection closed")
 				}
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -1352,11 +1352,11 @@ func TestHandleChainSwitchEventReplaysBufferedHeadersForSelectedConnection(
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				_ = connId
 				_ = start
 				_ = end
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -1622,11 +1622,11 @@ func TestHandleEventChainsyncBlockHeader_ProcessesEligibleNonActivePeer(
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				_ = start
 				_ = end
 				requestedConn = connId
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -1671,12 +1671,12 @@ func TestHandleEventChainsyncBlockHeaderBuffersMinimumBatchWhenBehind(
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				_ = connId
 				_ = start
 				_ = end
 				requestCount++
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -1718,12 +1718,12 @@ func TestHandleEventChainsyncBlockHeaderScalesBatchWhenFarBehind(t *testing.T) {
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				_ = connId
 				_ = start
 				_ = end
 				requestCount++
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -2143,12 +2143,12 @@ func TestHandleEventChainsyncBlockHeaderStartsBlockfetchForSmallBlockGap(
 				requestConnId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				requestCount++
 				assert.Equal(t, connId, requestConnId)
 				assert.Equal(t, uint64(1064), start.Slot)
 				assert.Equal(t, uint64(1064), end.Slot)
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -2202,12 +2202,12 @@ func TestHandleEventChainsyncBlockHeaderStartsBlockfetchForSparseBlockGap(
 				requestConnId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				requestCount++
 				assert.Equal(t, connId, requestConnId)
 				assert.Equal(t, uint64(107374026), start.Slot)
 				assert.Equal(t, uint64(107374047), end.Slot)
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -2284,12 +2284,12 @@ func TestHandleEventChainsyncAwaitReplyStartsBlockfetchForActiveConnection(
 				requestConnId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				requestCount++
 				assert.Equal(t, connId, requestConnId)
 				assert.Equal(t, uint64(1001), start.Slot)
 				assert.Equal(t, uint64(1004), end.Slot)
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -2344,11 +2344,11 @@ func TestHandleEventBlockfetchBatchDoneEmptyBatchRetriesAlternateConnection(
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				_ = start
 				_ = end
 				requestedConnIds = append(requestedConnIds, connId)
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -2396,9 +2396,9 @@ func TestHandleEventBlockfetchBatchDoneEmptyBatchNearTipRetries(
 				_ ouroboros.ConnectionId,
 				_ ocommon.Point,
 				_ ocommon.Point,
-			) error {
+			) (uint64, error) {
 				requestCount++
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -2462,11 +2462,11 @@ func TestHandleBlockfetchTimeoutLocked_RetriesQueuedRangeUsingActivePeer(
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				_ = start
 				_ = end
 				requestedConn = connId
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -2552,9 +2552,9 @@ func TestHandleBlockfetchTimeoutLocked_RetryRetargetsSelection(
 				connId ouroboros.ConnectionId,
 				_ ocommon.Point,
 				_ ocommon.Point,
-			) error {
+			) (uint64, error) {
 				requestedConn = connId
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -2637,14 +2637,14 @@ func TestHandleBlockfetchTimeoutLocked_RetryFailureUsesAlternateSelectedPeer(
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				_ = start
 				_ = end
 				requestedConnIds = append(requestedConnIds, connId)
 				if connId == connId2 {
-					return errors.New("retry failed")
+					return 0, errors.New("retry failed")
 				}
-				return nil
+				return 0, nil
 			},
 		},
 	}

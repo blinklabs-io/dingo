@@ -247,9 +247,9 @@ func TestTryResolveForkExtensionRestartsBlockfetchAfterQueueOverflow(
 		_ ouroboros.ConnectionId,
 		_ ocommon.Point,
 		_ ocommon.Point,
-	) error {
+	) (uint64, error) {
 		requestCount++
-		return nil
+		return 0, nil
 	}
 
 	evt := ChainsyncEvent{
@@ -331,8 +331,8 @@ func TestEnsureBlockfetchDrainingAfterForkQueueFailureRecoversWhenStartFails(
 		_ ouroboros.ConnectionId,
 		_ ocommon.Point,
 		_ ocommon.Point,
-	) error {
-		return errors.New("simulated blockfetch request failure")
+	) (uint64, error) {
+		return 0, errors.New("simulated blockfetch request failure")
 	}
 
 	bus := event.NewEventBus(nil, nil)
@@ -425,9 +425,9 @@ func TestTryResolveForkExtensionDoesNotThrashAlreadyRunningBlockfetch(
 		_ ouroboros.ConnectionId,
 		_ ocommon.Point,
 		_ ocommon.Point,
-	) error {
+	) (uint64, error) {
 		controlRequests++
-		return nil
+		return 0, nil
 	}
 	control.ls.ensureBlockfetchDrainingAfterForkQueueFailure(
 		controlConnId,
@@ -455,9 +455,9 @@ func TestTryResolveForkExtensionDoesNotThrashAlreadyRunningBlockfetch(
 		_ ouroboros.ConnectionId,
 		_ ocommon.Point,
 		_ ocommon.Point,
-	) error {
+	) (uint64, error) {
 		requestCount++
-		return nil
+		return 0, nil
 	}
 	// Simulate a blockfetch batch already in flight.
 	fixture.ls.chainsyncBlockfetchReadyChan = make(chan struct{})
