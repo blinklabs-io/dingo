@@ -12351,9 +12351,10 @@ validation change).
 
 - gouroboros validate workers verify the block-local VRF proof, KES signature,
   and OpCert cold-key signature with `ledger.VerifyBlock`;
-- after an item passes that stage, `decodeReadChainBatch` verifies Dingo's
-  remaining stateless OpCert contract: `MaxKESEvolutions` expiry. OpCert
-  counter monotonicity remains a stateful
+- after an item passes that stage, `decodeReadChainBatch` calls
+  `verifyOpCertHeaderCrypto`, which repeats the cold-key signature check as
+  defense in depth and adds the `MaxKESEvolutions` expiry check the generic
+  stage cannot perform. OpCert counter monotonicity remains a stateful
   read-before-write check in `ledgerProcessBlock`.
 
 `NewLedgerState` fails startup when this stage is enabled without a nonzero

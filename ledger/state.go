@@ -779,8 +779,12 @@ type LedgerStateConfig struct {
 	// cold-key signature check as defense in depth and adds the
 	// state-dependent MaxKESEvolutions expiry check the generic verifier
 	// cannot perform, so a validated header pays two Ed25519 verifications
-	// of the same opcert. See ARCHITECTURE.md ("Operational Certificate
-	// Validation").
+	// of the same opcert. That duplication is not specific to this flag:
+	// VerifyBlock checks the OpCert cold signature ungated by any
+	// VerifyConfig Skip field, so the default serial path pays it too, where
+	// verifyBlockHeaderCrypto calls verifyBlockHeaderHex and
+	// verifyOpCertHeaderCrypto back to back. See ARCHITECTURE.md
+	// ("Operational Certificate Validation").
 	// It enforces results only where the serial path has validation state:
 	// not trusted historical/Mithril replay and only with a cached epoch
 	// nonce. A rejection is returned as headerValidationError so the already-

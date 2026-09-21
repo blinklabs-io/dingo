@@ -57,10 +57,7 @@ func (d *Database) checkAlonzoPParamsUnit() error {
 			return nil
 		}
 		var unrepairable errAlonzoPParamsUnitUnrepairable
-		if err != nil && !errors.As(err, &unrepairable) {
-			return err
-		}
-		if err != nil {
+		if errors.As(err, &unrepairable) {
 			return fmt.Errorf(
 				"persisted Alonzo protocol parameters use legacy byte units "+
 					"and cannot be repaired in place (%s); "+
@@ -68,6 +65,12 @@ func (d *Database) checkAlonzoPParamsUnit() error {
 				unrepairable.reason,
 			)
 		}
+		if err != nil {
+			return err
+		}
+		// repairAlonzoPParamsUnit never returns (false, nil), so this is
+		// unreachable. It fails closed rather than accepting a legacy
+		// database if that contract is ever broken.
 		return errors.New(
 			"persisted Alonzo protocol parameters use legacy byte units; " +
 				"recreate both metadata and blob stores and resync from genesis",
@@ -180,9 +183,10 @@ func (e errAlonzoPParamsUnitUnrepairable) Error() string {
 // write cannot share one transaction, so a crash between them leaves some
 // rows converted and the next start has to converge rather than refuse.
 //
-// It returns true only when the marker has been cleared. A false return with
-// a nil error means the repair does not apply; a
-// errAlonzoPParamsUnitUnrepairable error carries the reason it could not.
+// It returns true only when the marker has been cleared. Every other return
+// carries a non-nil error: an errAlonzoPParamsUnitUnrepairable carries the
+// reason the repair could not be applied, and any other error is a store
+// failure. It never returns (false, nil).
 func (d *Database) repairAlonzoPParamsUnit() (bool, error) {
 	word := d.config.AlonzoLovelacePerUtxoWord
 	if word == 0 {
@@ -191,10 +195,11 @@ func (d *Database) repairAlonzoPParamsUnit() (bool, error) {
 		}
 	}
 	legacy := word / 8
-	// A word count below 8 divides to a value the correction cannot be
-	// distinguished from, so no rewrite is provable. Only a synthetic
-	// genesis reaches this.
-	if legacy == word {
+	// A word count below 8 divides to zero, and a row legitimately holding
+	// key 17 = 0 is then indistinguishable from the lossy form this repair
+	// rewrites, so no rewrite is provable. Only a synthetic genesis reaches
+	// this.
+	if legacy == 0 {
 		return false, errAlonzoPParamsUnitUnrepairable{
 			reason: fmt.Sprintf(
 				"Alonzo genesis lovelacePerUTxOWord %d is not separable from its per-byte form",

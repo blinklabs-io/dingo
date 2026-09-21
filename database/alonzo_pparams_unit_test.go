@@ -561,3 +561,47 @@ func TestRepairAlonzoPParamsUnitRefusesRowThatDoesNotRoundTrip(t *testing.T) {
 	)
 	require.Equal(t, stored, alonzoRowCbor(t, dataDir))
 }
+
+// TestRepairAlonzoPParamsUnitRefusesWordBelowEight pins the separability
+// guard. A genesis word below 8 divides to a lossy form of 0, which a row
+// legitimately holding key 17 = 0 cannot be told apart from, so the repair
+// must refuse rather than rewrite it.
+func TestRepairAlonzoPParamsUnitRefusesWordBelowEight(t *testing.T) {
+	t.Parallel()
+
+	const genesisWord = 4 // genesisWord / 8 == 0
+	dataDir := t.TempDir()
+	cfg := &Config{
+		DataDir:                   dataDir,
+		StorageMode:               "core",
+		Network:                   "preprod",
+		AlonzoLovelacePerUtxoWord: genesisWord,
+	}
+	db, err := newTestDatabase(t, cfg)
+	require.NoError(t, err)
+	require.NoError(
+		t,
+		db.SetPParams(alonzoPParamsCbor(t, 0), 0, 0, alonzo.EraIdAlonzo, nil),
+	)
+	require.NoError(t, closeTestDatabase(db))
+
+	sqlDB, err := sql.Open("sqlite", filepath.Join(dataDir, "metadata.sqlite"))
+	require.NoError(t, err)
+	_, err = sqlDB.Exec(
+		`UPDATE node_settings_gate SET value = ? WHERE name = ?`,
+		nodesettings.AlonzoPParamsUnitLegacyByteV0,
+		nodesettings.AlonzoPParamsUnitGateName,
+	)
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.Close())
+
+	_, err = newTestDatabase(t, cfg)
+	require.ErrorContains(t, err, "is not separable from its per-byte form")
+	require.ErrorContains(t, err, "resync from genesis")
+	require.Equal(
+		t,
+		nodesettings.AlonzoPParamsUnitLegacyByteV0,
+		alonzoPParamsUnitMarkerAt(t, dataDir),
+		"a refused repair must leave the legacy marker in place",
+	)
+}
