@@ -142,8 +142,9 @@ const checkpointInterval = 2 * time.Minute
 const checkpointBusyTimeout = 250 * time.Millisecond
 
 // checkpointWAL returns a Store.Checkpoint callback that attempts
-// PRAGMA wal_checkpoint(TRUNCATE) on checkpointInterval's ticker (see
-// openSQLStore), against a dedicated connection opened fresh for each
+// PRAGMA wal_checkpoint on checkpointInterval's ticker (see openSQLStore) --
+// PASSIVE first and TRUNCATE only once PASSIVE reports the WAL fully drained,
+// see checkpointWALWith -- against a dedicated connection opened fresh for each
 // attempt and closed immediately after -- never against writeDB or readDB.
 // See checkpointBusyTimeout's doc comment for why: writeDB's sole connection
 // has to stay free for real writes, and the whole point of this design is to
