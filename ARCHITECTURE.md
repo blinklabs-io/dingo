@@ -3560,7 +3560,10 @@ The `LedgerView` interface provides query access to ledger state:
   authorization. Each membership carries a `term_start_slot`; explicit removal
   followed by re-election creates a fresh term without discarding the prior
   term's rollback history, and an explicit presence bit preserves a valid
-  slot-zero term start. Hot-voter resolution accepts any matching exact tagged
+  slot-zero term start. An enacted `UpdateCommittee` that re-elects a member it
+  does not remove is a renewal and keeps that member's existing
+  `term_start_slot`, so a continuing member's hot-key authorization and its
+  resignation both survive the renewal (issue #4584). Hot-voter resolution accepts any matching exact tagged
   authorization whose member is active at the pinned epoch; expiry is
   inclusive. The legacy hash-only `CommitteeMember` and
   `CommitteeMembers` methods omit ambiguous same-hash key/script identities
