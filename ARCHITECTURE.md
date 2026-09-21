@@ -8437,7 +8437,13 @@ second sync:
     verdict and mismatch rows are attributed to the aggregate phase, which
     re-establishes that scope on its next pass for every queued epoch,
     whereas an unclearable account verdict would be permanently sticky in the
-    accounts-disabled mode where nothing writes that scope.
+    accounts-disabled mode where nothing writes that scope. The in-memory
+    result carries the same distinction: `EpochCompareResult.CheckedScopes`
+    names the phases its `Status` is a verdict on, so an aggregate-only `PASS`
+    — returned for the same epoch the account queue may still be checking, or
+    may already have failed — cannot be read as the epoch's own answer. The
+    observer's `epoch validated` log line and `reportError`'s synthesized
+    `ERROR` carry that set too.
 - **Composition** (`node.go`, `node_koiosparity.go`, `node_shutdown.go`,
   `node_lifecycle.go`): `Node.Run()` configures `n.snapshotMgr` and installs
   both epoch-boundary reward-snapshot hooks (`SetEpochBoundarySnapshotStakeHook`/
