@@ -35,6 +35,7 @@ import (
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
@@ -51,6 +52,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/kes"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -382,7 +384,15 @@ func TestLiveLifecycleRebuildPreservesLeiosHandlers(t *testing.T) {
 	require.NoError(t, n.ouroboros().SetLeiosPipeline(pipeline))
 
 	before := n.ouroboros()
-	require.NoError(t, n.reinitializeNetworkingCore(context.Background()))
+	// Held for the same reason Restore and Truncate hold it around this
+	// call: the node is live here, and its ledger read-chain loop reads
+	// n.chainsyncState under this lock once per gather pass (see
+	// reinitializeNetworkingCore's doc comment). Reassigning it unlocked
+	// races that reader.
+	n.liveLifecycleMu.Lock()
+	rebuildErr := n.reinitializeNetworkingCore(context.Background())
+	n.liveLifecycleMu.Unlock()
+	require.NoError(t, rebuildErr)
 
 	require.NotSame(t, before, n.ouroboros())
 	require.NotNil(
@@ -1310,6 +1320,42 @@ func TestLiveTruncateClosesTmpDBBeforeResumingAfterOpenFailure(t *testing.T) {
 	tip, tipErr := n.db.GetTip(nil)
 	require.NoError(t, tipErr)
 	require.Equal(t, points[len(points)-1].Slot, tip.Point.Slot)
+}
+
+// A live restore/truncate reinitialization follows its own commit-timestamp
+// recovery path. It must run the same deferred settings checks as ordinary
+// startup before resuming any component, including the Alonzo pparams
+// provenance gate added for gouroboros v0.205.7.
+func TestLiveTruncateRecoveryRechecksAlonzoPParamsUnit(t *testing.T) {
+	t.Parallel()
+
+	n, points := newLiveLifecycleTestNode(t, 10)
+	require.NoError(t, n.db.SetPParams(
+		[]byte{0x80},
+		0,
+		0,
+		alonzo.EraIdAlonzo,
+		nil,
+	))
+	require.NoError(t, n.db.Metadata().SetNodeSettingsGates(
+		nodesettings.Values{
+			nodesettings.AlonzoPParamsUnitGateName: nodesettings.AlonzoPParamsUnitLegacyByteV0,
+		},
+		0,
+		0,
+	))
+	metaTxn := n.db.Metadata().Transaction(t.Context())
+	require.NoError(t, n.db.Metadata().SetCommitTimestamp(123456789, metaTxn))
+	require.NoError(t, metaTxn.Commit())
+
+	targetSlot := points[len(points)/2].Slot
+	_, err := n.Truncate(
+		context.Background(),
+		dblifecycle.TruncateTarget{Slot: &targetSlot},
+	)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "resume also failed")
+	require.ErrorContains(t, err, "legacy byte units")
 }
 
 // TestLiveRestoreRebuildsStorageAndKeepsNodeUsable verifies the Restore

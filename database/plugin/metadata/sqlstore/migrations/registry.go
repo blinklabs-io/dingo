@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 )
 
 // migrationSQL contains immutable, versioned migration resources.
@@ -53,7 +54,14 @@ const (
 	governanceProposalDroppedSchemaRelease        = "governance-proposal-dropped-epoch"
 	rewardSnapshotExcludedStakeSchemaRelease      = "reward-snapshot-excluded-active-stake"
 	assetNameHexColumnDropSchemaRelease           = "asset-name-hex-column-drop"
+	alonzoPParamsUnitSchemaRelease                = "alonzo-pparams-unit-provenance"
 )
+
+// alonzoEraID is the pparams.era_id value Alonzo rows carry. A migration is a
+// frozen historical artifact, so it holds its own copy rather than importing
+// gouroboros' alonzo.EraIdAlonzo: the two must agree, and a future upstream
+// renumbering must not silently reclassify rows this backfill already read.
+const alonzoEraID = 4
 
 // schemaVersions names every migration in ascending version order.
 var schemaVersions = []struct {
@@ -107,6 +115,11 @@ var schemaVersions = []struct {
 		Version: 19,
 		Name:    assetNameHexColumnDropSchemaRelease,
 		Dir:     "v19",
+	},
+	{
+		Version: 20,
+		Name:    alonzoPParamsUnitSchemaRelease,
+		Dir:     "v20",
 	},
 }
 
@@ -216,9 +229,64 @@ func registryForDialect(dialect string) ([]Migration, error) {
 			migration.BackfillRevision = "1"
 			migration.Backfill = governanceProposalDroppedBackfill
 		}
+		if version.Name == alonzoPParamsUnitSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = alonzoPParamsUnitBackfill
+		}
 		ret = append(ret, migration)
 	}
 	return ret, nil
+}
+
+func alonzoPParamsUnitBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	var existing string
+	err := batch.Tx.QueryRowContext(
+		ctx,
+		batch.Rebind(`SELECT value FROM node_settings_gate WHERE name = ?`),
+		nodesettings.AlonzoPParamsUnitGateName,
+	).Scan(&existing)
+	switch {
+	case err == nil:
+		return BatchResult{Done: true}, nil
+	case !errors.Is(err, sql.ErrNoRows):
+		return BatchResult{}, fmt.Errorf(
+			"read Alonzo protocol-parameter unit marker: %w",
+			err,
+		)
+	}
+
+	var alonzoRows int64
+	if err := batch.Tx.QueryRowContext(
+		ctx,
+		batch.Rebind(`SELECT COUNT(*) FROM pparams WHERE era_id = ?`),
+		alonzoEraID,
+	).Scan(&alonzoRows); err != nil {
+		return BatchResult{}, fmt.Errorf(
+			"classify persisted Alonzo protocol parameters: %w",
+			err,
+		)
+	}
+	unit := nodesettings.AlonzoPParamsUnitWordV1
+	if alonzoRows > 0 {
+		unit = nodesettings.AlonzoPParamsUnitLegacyByteV0
+	}
+	if _, err := batch.Tx.ExecContext(
+		ctx,
+		batch.Rebind(`INSERT INTO node_settings_gate (
+    name, value, recorded_epoch, recorded_slot
+) VALUES (?, ?, 0, 0)`),
+		nodesettings.AlonzoPParamsUnitGateName,
+		unit,
+	); err != nil {
+		return BatchResult{}, fmt.Errorf(
+			"record Alonzo protocol-parameter unit marker: %w",
+			err,
+		)
+	}
+	return BatchResult{Rows: 1, Done: true}, nil
 }
 
 // governanceProposalDroppedBackfill records every proposal this database
