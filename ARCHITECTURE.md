@@ -1750,10 +1750,10 @@ paths, where the point is to report before the goroutine unwinds.
   gouroboros' `RequestRange`, which (with request pipelining enabled) returns
   as soon as the request is sent rather than waiting for the range to
   complete, but it can still block first: `sendRequestRange` waits for the
-  client's in-flight-byte budget to admit the request and for its own
-  queue-append send token, both of which can be held up by another request's
-  receive callback — the same callback that publishes `ledger.blockfetch` and
-  needs the ledger mutex to do it. `startQueuedBlockfetchLocked` reserves the
+  client's in-flight-byte budget to admit the request, and that budget is only
+  released as an earlier request's blocks are delivered — by the same receive
+  callback that publishes `ledger.blockfetch` and needs the ledger mutex to do
+  it. `startQueuedBlockfetchLocked` reserves the
   batch and arms its timer under the mutex, releases the mutex for the primary
   and shadow requests, then reacquires it before inspecting state. If a
   callback completed or replaced the batch while the request was outside the
@@ -1772,7 +1772,10 @@ paths, where the point is to report before the goroutine unwinds.
   resolves `NoBlocks` before `MsgStartBatch` is ever sent, so it always leaves
   `batchBlocksApplied` at 0 with the queued headers untouched, which is
   exactly the shape the existing "batch completed without extending the
-  chain" branch already routes through `noteBlockfetchRangeUnavailable`.
+  chain" branch already routes through `noteBlockfetchRangeUnavailable`. Any
+  other non-nil `RangeErr` wears that same shape without establishing
+  anything about the range, so it is logged and explicitly excluded from
+  that branch.
 - The blast radius of such a stall is not local. `LedgerState.handleConnectionClosedEvent`
   takes `chainsyncMutex`, so a stall there stops `ledger.conn_closed` draining;
   the `node.go` handler translating `connmanager.conn_closed` into
@@ -4084,10 +4087,18 @@ together in `handleEventBlockfetchBatchDone`'s "no blocks applied, headers
 still queued" branch — a `NoBlocks` reply always has that shape, since
 gouroboros never calls a block or `StartBatch` callback for it. Counting them
 separately would let the two alternate while each stayed under its own bound.
-A synchronous `RequestRange` dispatch error — connection lookup failure,
-context cancellation, or a protocol-shutdown race, arising before the request
-is ever queued — does not count, because it does not establish that the peer
-cannot serve the range.
+A failure that does not establish that the peer cannot serve the range never
+counts, by either route it can now take. A synchronous `RequestRange`
+dispatch error — connection lookup failure, context cancellation, or a
+protocol-shutdown race, arising before the request is ever queued — is
+returned to the caller and not recorded. A transport, protocol, or decode
+failure that resolves the request later arrives as a `BatchDone` event whose
+`RangeErr` is non-nil and is not `blockfetch.ErrNoBlocks`; because it leaves
+the same "no blocks applied, headers still queued" shape a genuine
+`NoBlocks` does, `handleEventBlockfetchBatchDone` suppresses the
+range-failure branch for it explicitly. Without that suppression a range
+that is still obtainable would be dropped, and a chainsync re-intersect
+forced, after three peer disconnections against the same queued range.
 
 The count is keyed to the range's start point, not kept as a global
 consecutive streak, and this is what makes it able to fire at all. Failures

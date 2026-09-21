@@ -1097,8 +1097,8 @@ type LedgerState struct {
 	// blockfetchContinuationPending prevents a chainsync handler from starting
 	// a competing batch in the short interval after the blockfetch subscriber
 	// schedules its next request on a worker. The worker must run outside the
-	// subscriber goroutine because GetBlockRange waits for BatchDone, which is
-	// delivered back through that same subscriber.
+	// subscriber goroutine because the dispatch blocks on drains fed by that
+	// same subscriber; see startQueuedBlockfetchFromEventLocked.
 	blockfetchContinuationPending bool
 	blockfetchContinuationMu      sync.Mutex
 	blockfetchContinuationWG      sync.WaitGroup
@@ -1128,9 +1128,9 @@ type LedgerState struct {
 	// so it is atomic.
 	chainRollbackGeneration atomic.Uint64
 	// Failures to obtain one specific queued header range, keyed by its
-	// start point and counting both a NoBlocks reply (a synchronous
-	// GetBlockRange error) and a batch that completed without delivering a
-	// block. Bounded by blockfetchMaxSameRangeFailures so an unfetchable
+	// start point and counting both a NoBlocks reply and a batch that
+	// completed without delivering a block, each reported through the
+	// BatchDone event. Bounded by blockfetchMaxSameRangeFailures so an unfetchable
 	// queued range cannot be retried indefinitely (which also latches the
 	// header that blocks local forging). Deliberately survives interleaved
 	// deliveries for other ranges and header-queue churn; discarded when

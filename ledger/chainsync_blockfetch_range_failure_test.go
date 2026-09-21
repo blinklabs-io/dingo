@@ -1212,3 +1212,75 @@ func TestStartQueuedBlockfetchSkipsDispatchWhenCanceledBeforeDispatch(
 		"a canceled start must not claim the active blockfetch connection",
 	)
 }
+
+// TestBatchDoneTransportRangeErrDoesNotAccumulate pins the asynchronous half
+// of the invariant TestStartQueuedBlockfetchTransientErrorsDoNotAccumulate
+// covers synchronously: a failure that does not establish NoBlocks must not
+// advance the range-unavailable count. RequestRange resolves every terminal
+// outcome through RangeDoneFunc, so a transport, shutdown, or decode failure
+// that once returned synchronously from GetBlockRange now arrives here as a
+// BatchDone event carrying RangeErr, with no block applied and the headers
+// still queued -- the same shape as a genuine NoBlocks. Counting it would
+// drop a queued range that is still obtainable and force a chainsync
+// re-intersect, which is exactly the false positive
+// blockfetchMaxSameRangeFailures documents as out of scope.
+func TestBatchDoneTransportRangeErrDoesNotAccumulate(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name string
+		err  error
+	}{
+		{name: "transport reset", err: errors.New("connection reset by peer")},
+		{
+			name: "protocol shutdown",
+			err:  errors.New("protocol is shutting down"),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ls, _, resyncChan := newNoBlocksLedgerState(
+				t,
+				"hdr-async-transient-"+test.name,
+			)
+			connId := testChainsyncConnId(6115, 3001)
+			require.NoError(
+				t,
+				startQueuedBlockfetchForTest(ls, connId, nil),
+			)
+
+			for range blockfetchMaxSameRangeFailures * 3 {
+				if ls.chain.HeaderCount() == 0 {
+					break
+				}
+				require.NoError(t, handleEventBlockfetchBatchDoneForTest(
+					ls,
+					BlockfetchEvent{
+						ConnectionId: connId,
+						BatchDone:    true,
+						RangeErr:     test.err,
+					},
+					nil,
+				))
+			}
+
+			assert.Equal(
+				t,
+				1,
+				ls.chain.HeaderCount(),
+				"an obtainable range must survive a transport failure",
+			)
+			assert.Equal(
+				t,
+				0,
+				ls.blockfetchRangeFailure.count,
+				"transport range errors must not advance the unavailable count",
+			)
+			testutil.RequireNoReceive(
+				t,
+				resyncChan,
+				100*time.Millisecond,
+				"transport range errors must not trigger resync",
+			)
+		})
+	}
+}

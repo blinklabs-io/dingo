@@ -637,7 +637,10 @@ func (o *Ouroboros) blockfetchConnClientLive(
 	}
 	conn := o.connManager.GetConnectionById(connId)
 	if conn == nil {
-		return nil, fmt.Errorf("failed to lookup connection ID: %s", connId.String())
+		return nil, fmt.Errorf(
+			"failed to lookup connection ID: %s",
+			connId.String(),
+		)
 	}
 	return conn.BlockFetch().Client, nil
 }

@@ -72,11 +72,13 @@ const (
 	// Maximum number of definitive failures to obtain one queued header range
 	// before the queue is dropped. Both failure shapes count against the same
 	// range, because a peer that rolled the queued block back can produce
-	// either one: a NoBlocks reply (surfacing synchronously as a
-	// GetBlockRange error) when its range server rejects the start point,
-	// or a StartBatch/BatchDone pair carrying no blocks. Transport, shutdown,
-	// and wiring errors from GetBlockRange do not count: they do not establish
-	// that the peer cannot serve the range.
+	// either one: a NoBlocks reply when its range server rejects the start
+	// point, or a StartBatch/BatchDone pair carrying no blocks. Both reach
+	// handleEventBlockfetchBatchDone, the first carrying
+	// blockfetch.ErrNoBlocks in the event's RangeErr. Transport, shutdown,
+	// and wiring errors do not count, whether they fail the dispatch
+	// synchronously or resolve the request later through RangeErr: they do
+	// not establish that the peer cannot serve the range.
 	//
 	// The count is keyed to the range start point rather than being a
 	// global consecutive streak, and it deliberately survives both
@@ -4872,12 +4874,13 @@ func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 	// timeout state under that lock, but never hold it across the network
 	// request below. BlockFetch delivers blocks from its protocol receive
 	// goroutine, and that delivery waits for this same mutex in
-	// handleEventBlockfetch. A request on a busy client can wait for the
-	// previous delivery to finish, so calling GetBlockRange while holding the
-	// mutex creates a lock cycle:
+	// handleEventBlockfetch. RequestRange parks until the client's in-flight
+	// byte budget admits the range, and that budget is only released as the
+	// previous request's blocks are delivered, so dispatching while holding
+	// the mutex creates a lock cycle:
 	//
-	//   chainsync -> GetBlockRange.acquireBusy -> blockfetch event -> ledger
-	//   blockfetch mutex
+	//   chainsync -> RequestRange in-flight wait -> blockfetch event ->
+	//   ledger blockfetch mutex
 	//
 	// The lock is temporarily released around each external request and is
 	// reacquired before any state is inspected or changed. Callers still own
@@ -5102,10 +5105,13 @@ func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 }
 
 // startQueuedBlockfetchFromEventLocked schedules a continuation without
-// running the synchronous blockfetch request on the ledger.blockfetch
-// subscriber. GetBlockRange does not return until the peer sends BatchDone;
-// invoking it from handleEventBlockfetchBatchDone would block the only
-// subscriber that can consume that BatchDone and the following block events.
+// running the blockfetch dispatch on the ledger.blockfetch subscriber. That
+// dispatch blocks: it waits for the previous request's events to drain
+// (waitForBlockfetchRequestLocked), and RequestRange itself parks until the
+// client's in-flight byte budget admits the range. Both are released by
+// events this same subscriber delivers, so dispatching from
+// handleEventBlockfetchBatchDone would stall the only goroutine that can
+// consume the following block and BatchDone events.
 //
 // The caller owns chainsyncBlockfetchMutex. The continuation worker acquires
 // it before entering startQueuedBlockfetchLocked, so the pending flag closes
@@ -7475,7 +7481,7 @@ func (ls *LedgerState) endBlockfetchRequestLocked(
 }
 
 // completeBlockfetchRequestLocked releases a request after its BatchDone
-// event has been handled. GetBlockRange can return before the EventBus
+// event has been handled. The dispatch returns long before the EventBus
 // subscriber drains that event; keeping the request in flight until then
 // prevents a same-connection restart from admitting old queued events.
 // The caller owns chainsyncBlockfetchMutex.
@@ -7677,7 +7683,7 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(
 	e BlockfetchEvent,
 	pending *pendingPublishes,
 ) error {
-	// GetBlockRange may have returned before this event reached the ledger
+	// The dispatch returned before this event reached the ledger
 	// subscriber. Complete the request here so a same-connection restart waits
 	// for the old protocol request's events to drain.
 	ls.completeBlockfetchRequestLocked(e.ConnectionId)
@@ -7724,13 +7730,20 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(
 	// only resolves NoBlocks before MsgStartBatch is ever sent, so it always
 	// leaves batchBlocksApplied at 0 with the queued headers untouched --
 	// exactly the shape the appliedBlockCount==0 branch below already routes
-	// through noteBlockfetchRangeUnavailable. Anything else non-nil is a
-	// transport, protocol, or decode failure that can still have delivered
-	// and applied some prefix of the range before failing; that has no
-	// equivalent recovery path today (the prior GetBlockRange-based
-	// BatchDoneFunc carried no error at all for this case), so it is logged
-	// rather than silently dropped.
-	if e.RangeErr != nil && !errors.Is(e.RangeErr, blockfetch.ErrNoBlocks) {
+	// through noteBlockfetchRangeUnavailable.
+	//
+	// Anything else non-nil is a transport, protocol, or decode failure.
+	// Those used to resolve the request before MsgStartBatch and so returned
+	// synchronously from GetBlockRange, where they were deliberately not
+	// counted against the range (see blockfetchMaxSameRangeFailures); under
+	// RequestRange they arrive here instead, wearing the same
+	// no-block-applied shape as a genuine NoBlocks. Counting them would drop
+	// a queued range that is still obtainable and force a chainsync
+	// re-intersect, so the unavailable-count branch below is suppressed for
+	// them and the failure is logged rather than silently dropped.
+	transportRangeErr := e.RangeErr != nil &&
+		!errors.Is(e.RangeErr, blockfetch.ErrNoBlocks)
+	if transportRangeErr {
 		ls.config.Logger.Warn(
 			"blockfetch range request resolved with an error",
 			"component", "ledger",
@@ -7760,10 +7773,12 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(
 		)
 	}
 	// A batch that completed without delivering a block while headers stayed
-	// queued is one of the two shapes of "could not obtain the queued range"
-	// (the other is a NoBlocks reply, recorded in
-	// startQueuedBlockfetchLocked). Both feed the same streak.
-	if appliedBlockCount == 0 && remainingHeaders > 0 {
+	// queued is one of the two shapes of "could not obtain the queued range";
+	// the other is a NoBlocks reply, which reaches this same branch carrying
+	// blockfetch.ErrNoBlocks in e.RangeErr. Both feed the same streak. A
+	// transport-shaped RangeErr wears the same shape but establishes nothing
+	// about the range, so it is excluded.
+	if appliedBlockCount == 0 && remainingHeaders > 0 && !transportRangeErr {
 		batchStart, _ := ls.chain.HeaderRange(blockfetchBatchSize)
 		if ls.noteBlockfetchRangeUnavailable(
 			e.ConnectionId,
@@ -7840,9 +7855,10 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(
 		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 		return nil
 	}
-	// GetBlockRange waits for the BatchDone event that is being handled here.
-	// Continue on a worker so this subscriber remains available to drain the
-	// next batch's block and BatchDone events.
+	// The dispatch blocks on drains this subscriber feeds (see
+	// startQueuedBlockfetchFromEventLocked). Continue on a worker so this
+	// subscriber remains available for the next batch's block and BatchDone
+	// events.
 	ls.startQueuedBlockfetchFromEventLocked(
 		nextConnId,
 		nextConnId,
