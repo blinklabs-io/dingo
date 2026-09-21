@@ -8563,6 +8563,80 @@ second sync:
     bounded retry loop hammering both full Koios scans on every attempt would
     burn meaningfully more of the daily rate-limit/quota budget than the
     per-epoch fetch itself does.
+  - **Decoupled aggregate/account queues (dingo #4339).** Two independent
+    background goroutines, each with their own pending set and wake channel,
+    drain `Observer.pending`/`wake` (`run`, always started) and
+    `Observer.pendingAccounts`/`wakeAccounts` (`runAccounts`, started only
+    when `AccountsEnabled`). `run`/`processEpoch` only ever fetches pool and
+    epoch-aggregate reference data (`fetchIfNeeded` no longer touches
+    accounts) and calls `CheckEpoch` with `accountsEnabled=false`, regardless
+    of `ObserverConfig.AccountsEnabled`; `runAccounts`/`processAccountEpoch`
+    fetches per-account reference data (`fetchAccountsIfNeeded`, #3097) and
+    calls `CheckEpoch` with `accountsEnabled=true`. Before this split, a
+    single goroutine fetched pools+params+accounts and checked one epoch at a
+    time in strict ascending order, so one epoch's per-account fetch — on
+    Preview, thousands of chunked `/account_reward_history` requests against
+    the configured burst limit, observed at roughly 17 minutes/epoch — blocked
+    every later epoch's fast aggregate check from running at all: a strict-mode
+    reward-round defect at a later epoch could sit undetected for as long as
+    the account backlog took to drain, even though the aggregate comparison
+    that would have caught it takes on the order of 30-45 seconds. `HandleEpoch
+    TransitionEvent` and `seedBacklog` enqueue every epoch onto `pending`
+    unconditionally and onto `pendingAccounts` only when `AccountsEnabled`; an
+    epoch missing only per-account coverage (`GetEpochsMissingAccountCoverage`,
+    or `GetEpochsNeedingCheck`'s account-coverage-staleness clause) is queued
+    to `pendingAccounts` alone; the aggregate queue's own `GetEpochsNeedingCheck`
+    call for `seedBacklog` always passes `accountsEnabled=false`, so an epoch
+    whose pool/aggregate data is already fresh is never re-queued into `pending`
+    purely because its account coverage happens to be stale. An epoch with no
+    `koios_epoch_info` row at all is visible to `GetUncachedEpochs` alone —
+    `GetEpochsNeedingCheck` selects from that table and
+    `GetEpochsMissingAccountCoverage` requires a row in it — so `seedBacklog`
+    queues that result onto both sets when `AccountsEnabled`, without which
+    #3097's comparison would not run for any never-fetched epoch until a later
+    restart re-seeded it, which is the entire backlog on a bulk-syncing node.
+    Both goroutines share `fail`'s exactly-once `FatalFunc` dispatch, now an
+    atomic compare-and-swap on `fatalFired` rather than a plain bool, since
+    either goroutine's failure can fire it concurrently with the other's.
+    Because the account queue must not assume the aggregate queue has already
+    reached an epoch, `processAccountEpoch` calls `fetchIfNeeded` too; that
+    call is gated per epoch with `singleflight` (`Observer.aggFetch`), since
+    the cache-presence gates inside it only suppress a fetch that has already
+    finished and an epoch transition wakes both queues with the same epoch at
+    once — ungated, each queue resolves the pool universe and fetches
+    `/epoch_info`, `/epoch_params`, `/totals` and every chunked `/pool_history`
+    request independently, doubling the aggregate half of the Koios quota
+    budget. Keying per epoch rather than serializing all aggregate fetches
+    keeps the queues independent except on the epoch they share.
+  - **Phase-scoped check results (dingo #4339).** Both queues write the same
+    `check_epoch_status` row and the same `check_mismatches` rows for an
+    epoch, at unrelated times, so neither the verdict nor the evidence can be
+    owned by whichever phase wrote last. `check_epoch_status` therefore
+    carries a status and mismatch count per phase (`aggregate_status`/
+    `aggregate_mismatch_count`, `account_status`/`account_mismatch_count`)
+    and recomputes the `status`/`mismatch_count` columns every reader already
+    uses as their merge — `FAIL` if either phase failed, else `ERROR` if
+    either errored, else `PASS`. A write carries only the phases it ran: the
+    aggregate phase leaves `account_status` empty and the stored account
+    result passes through untouched. `check_mismatches` rows carry the same
+    distinction in a `scope` column, tagged from provenance rather than
+    derived from `category`, which cannot separate the phases because both
+    emit `dingo_db_error`; `CommitEpochMismatches` deletes and reinserts only
+    the scopes its caller recomputed. Together these give the two properties
+    a single column cannot hold at once: neither phase's pass erases the
+    other's failure, and each phase's failure clears as soon as that same
+    phase passes again, rather than outliving the divergence that caused it.
+    Cache files predating the split migrate additively; the pre-existing
+    verdict and mismatch rows are attributed to the aggregate phase, which
+    re-establishes that scope on its next pass for every queued epoch,
+    whereas an unclearable account verdict would be permanently sticky in the
+    accounts-disabled mode where nothing writes that scope. The in-memory
+    result carries the same distinction: `EpochCompareResult.CheckedScopes`
+    names the phases its `Status` is a verdict on, so an aggregate-only `PASS`
+    — returned for the same epoch the account queue may still be checking, or
+    may already have failed — cannot be read as the epoch's own answer. The
+    observer's `epoch validated` log line and `reportError`'s synthesized
+    `ERROR` carry that set too.
 - **Composition** (`node.go`, `node_koiosparity.go`, `node_shutdown.go`,
   `node_lifecycle.go`): `Node.Run()` configures `n.snapshotMgr` and installs
   both epoch-boundary reward-snapshot hooks (`SetEpochBoundarySnapshotStakeHook`/
