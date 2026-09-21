@@ -40,6 +40,9 @@ COMMIT_HASH ?= $(shell git rev-parse --short HEAD)
 GO_LDFLAGS=-ldflags "-s -w -X '$(GOMODULE)/internal/version.Version=$(VERSION)' -X '$(GOMODULE)/internal/version.CommitHash=$(COMMIT_HASH)'"
 BUILD_TAGS ?= dingo_extra_plugins
 GO_TAG_FLAGS=$(if $(strip $(BUILD_TAGS)),-tags "$(BUILD_TAGS)",)
+# Cover all blinklabs-io modules dingo depends on (gouroboros, plutigo, bursa,
+# bark, ouroboros-mock, ...) without descending into third-party/stdlib deps.
+NILAWAY_FLAGS ?= -include-pkgs=github.com/blinklabs-io
 # Generated sqlc and protobuf packages are validated by their generators;
 # run modernize only against hand-written packages to avoid generator drift.
 MODERNIZE_PACKAGES=$(shell go list $(GO_TAG_FLAGS) -f '{{if .GoFiles}}{{.ImportPath}}{{end}}' ./... | grep -Ev '/database/plugin/(blob/(aws|gcs)|metadata/(mysql|postgres)|metadata/sqlstore/internal/query/(mysql|postgres|sqlite))$$|/midnight$$')
@@ -91,7 +94,7 @@ lint: import-boundaries ## Run import-boundaries, golangci-lint, nilaway, and mo
 	GOOS=windows golangci-lint run ./...
 	# Test fixtures establish preconditions with testify assertions that nilaway
 	# cannot track across calls; analyze production code here.
-	nilaway $(GO_TAG_FLAGS) -exclude-test-files ./...
+	nilaway $(GO_TAG_FLAGS) $(NILAWAY_FLAGS) -exclude-test-files ./...
 	modernize $(GO_TAG_FLAGS) $(MODERNIZE_PACKAGES)
 
 import-boundaries: ## Check reviewed package import boundaries

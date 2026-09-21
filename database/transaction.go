@@ -1825,9 +1825,7 @@ func (d *Database) DeleteTransactionMetadataLabelsAfterSlot(
 	slot uint64,
 	txn *Txn,
 ) error {
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		defer txn.Rollback() //nolint:errcheck
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
 		if err := d.transactionStore().DeleteTransactionMetadataLabelsAfterSlot(
 			slot,
 			txn.Metadata(),
@@ -1838,19 +1836,8 @@ func (d *Database) DeleteTransactionMetadataLabelsAfterSlot(
 				err,
 			)
 		}
-		return txn.Commit()
-	}
-	if err := d.transactionStore().DeleteTransactionMetadataLabelsAfterSlot(
-		slot,
-		txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf(
-			"delete transaction metadata labels after slot %d: %w",
-			slot,
-			err,
-		)
-	}
-	return nil
+		return nil
+	})
 }
 
 // deleteTxBlobs deletes blob data for the given transaction hashes. Metadata

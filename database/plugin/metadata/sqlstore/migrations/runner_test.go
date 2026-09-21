@@ -453,7 +453,7 @@ func TestRunnerReportsAddColumnTypeMismatch(t *testing.T) {
 // dialect, so this pins the guard against that translation drifting.
 func TestAddColumnPatternMatchesShippedMigrations(t *testing.T) {
 	t.Parallel()
-	// v2 adds four columns, v5 two, v7/v8 one each, v17 one more, and v20
+	// v2 adds four columns, v5 two, v7/v8 one each, v17 one more, and v21
 	// one more.
 	const shippedAddColumns = 16
 	// The replay guard compares the type the statement declares with the type

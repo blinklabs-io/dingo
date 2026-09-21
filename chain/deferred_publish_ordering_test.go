@@ -212,13 +212,14 @@ func runDeferredOrderingScenario(
 			)
 		}
 	}
-	// No third chain.update may follow (exactly-once, no duplicate drain).
+	// Both publishing goroutines have completed, so no third update can still
+	// be in flight. Check the subscriber without using a timing window.
 	select {
 	case evt := <-ch:
 		if kind, ok := classify(evt); ok {
 			t.Fatalf("unexpected extra chain.update published: %s", kind)
 		}
-	case <-time.After(200 * time.Millisecond):
+	default:
 	}
 	return got
 }
