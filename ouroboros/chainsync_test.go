@@ -2437,6 +2437,13 @@ func TestChainsyncResyncMithrilReasonsDenyPeerAndRequireFreshConnection(
 			wantDeniesPeer: false,
 		},
 		{
+			reason: event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+			// The rollback cannot be crossed locally, so the stale bearer
+			// must be replaced before the peer can retry its chain.
+			wantFresh:      true,
+			wantDeniesPeer: false,
+		},
+		{
 			reason: event.
 				ChainsyncResyncReasonReplayRecoveryNonConverging,
 			wantFresh:      true,

@@ -218,12 +218,6 @@ var Manifest = []Index{
 		Notes:   "Rollback and transaction history ordering", Critical: true,
 	},
 	{
-		Name:    "idx_asset_name_hex",
-		Table:   "asset",
-		Columns: []string{"name_hex"},
-		Notes:   "Asset name lookup",
-	},
-	{
 		Name: "idx_asset_policy_id", Table: "asset",
 		Columns: []string{"policy_id"},
 		Notes:   "Policy lookup", Critical: true,
