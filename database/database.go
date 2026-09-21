@@ -242,6 +242,11 @@ func (d *Database) MetadataTxn(readWrite bool) *Txn {
 
 // withMetadataWriteTxn runs fn in txn, or owns a metadata write transaction
 // when txn is nil. Callers keep ownership of transactions they provide.
+//
+// An owned transaction runs through Txn.Do, so a panic inside fn is recovered,
+// rolled back and returned as ErrTxnPanic. The hand-rolled owned-transaction
+// blocks this replaced let the panic propagate past their deferred rollback,
+// so this is a behavior change for every method that adopts it.
 func (d *Database) withMetadataWriteTxn(
 	txn *Txn,
 	fn func(*Txn) error,
