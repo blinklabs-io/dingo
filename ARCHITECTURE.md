@@ -12281,6 +12281,102 @@ state. A single decode failure anywhere in a batch discards the whole
 batch, matching the pre-pipeline behavior of never handing a
 partially-decoded batch downstream.
 
+**Coalescing a gather pass's premature flush (dingo#4464).** Each gather pass
+fills `rawBatch` (capacity `batchSize`, 50) by calling the chain iterator's
+non-blocking `Next(false)` until either the batch is full or a call returns
+`chain.ErrIteratorChainTip`. A single reported cause of dingo#4464's SQLite
+write amplification was that the second condition alone used to flush
+immediately, even with only one or two blocks gathered: during bulk replay a
+momentary `ErrIteratorChainTip` commonly means the goroutine appending blocks
+to `ls.chain` is a beat behind this reader, not that the chain stopped
+growing. `ledgerReadChainIterator` now gives that case a short bounded chance
+to catch up — up to `gatherCoalesceMaxAttempts` retries (default 10) spaced
+`gatherCoalesceRetryInterval` apart (default 2ms) — but only while `rawBatch`
+already holds at least one real block, the node has not reached tip since boot
+(`ls.reachedTip`), and the last gathered slot is not near the upstream tip.
+Once at or near the live upstream tip, the wait is skipped entirely: a
+solitary new block still commits immediately, matching the pre-existing
+latency behavior.
+
+`reachedTip` is part of that gate rather than `isNearTip` alone because
+`UpstreamTipSlot` returns 0 whenever no live upstream connection is selected,
+and the near-tip test folds an unknown upstream into "not near".
+Without the `reachedTip` term, a caught-up node that merely lost its upstream
+would resume paying this wait per gap, gather lock held, including for its own
+forged blocks. `reachedTip` latches the first time the node reaches the
+stability window and never clears, so the two terms together confine the wait
+to initial catch-up.
+
+Unlike the genuinely-blocking wait for a
+still-empty batch, this wait deliberately does **not** release
+`blockPipelineGatherMutex`: `rawBatch` already holds real gathered blocks a
+concurrent rollback must not race ahead of, for the same reason the lock
+stays held through `decodeReadChainBatch` (see `gatherLockHeld`'s doc
+comment) — releasing it here would let a rollback's write lock be granted,
+see an empty `blockPipeline` via `drainBlockPipelineBeforeRollback`, and
+proceed before this pass's already-gathered blocks are submitted, reopening
+the exact race `blockPipelineGatherMutex` exists to close. The bound on that
+wait is per gap rather than per gather pass — the attempt counter is reset
+each time a block is appended — so a rollback blocked on the write lock sleeps
+up to `batchSize*gatherCoalesceMaxAttempts*gatherCoalesceRetryInterval` (about
+1s at the defaults) in the worst case, and about
+`batchSize*gatherCoalesceRetryInterval` (100ms) when each gap resolves on its
+first retry.
+
+Those figures cover the sleeping only, not the whole hold. Every retry returns
+to the top of the inner loop and re-probes with `iter.Next(false)`, and that
+probe is not lock-free: `chain.Chain.iterNext` takes `c.mutex.Lock` and
+`c.manager.mutex.RLock` and does a metadata block lookup under them. `c.mutex`
+is the lock the block-append path holds to advance the tip —
+`addBlockInternal` across one `addBlockLocked`, `addRawBlocks` across a whole
+`blockImportBatchSize` batch inside its transaction — so the contending writer
+is the very goroutine this wait exists to wait for. The full worst case adds up
+to `batchSize*gatherCoalesceMaxAttempts` such acquisitions, each bounded by the
+longest append critical section rather than by any coalescing setting.
+
+That probe cannot be hoisted out of the span the way the near-tip terms below
+were. It is not a term the span incidentally evaluates: re-probing the iterator
+is the operation the retry performs, and the gather lock cannot be released
+around it without reopening the rollback race this wait is written to avoid.
+`TestLedgerReadChainIteratorBoundsChainProbesPerCoalesceGap` pins the
+multiplier instead: a gap that never resolves costs exactly
+`gatherCoalesceMaxAttempts+1` probes, and every one of them runs with the
+gather read lock held.
+
+The near-tip test is the hoistable case. Both of its halves can block on
+another lock where they were originally written, and neither is needed inside
+the span at all. `calculateStabilityWindow` takes `ls.RLock`, and Go's
+`RWMutex` parks a reader behind a pending writer, so a block apply holding
+`ls.Lock()` could stall the pass with `blockPipelineGatherMutex` still held.
+`UpstreamTipSlot` is an atomic load only when no node is wired in: under the
+node's own wiring it calls `GetActiveConnectionFunc`, which is
+`node_ledger_config.go`'s closure into `withLiveChainsyncState`
+(`liveLifecycleMu`) and `chainsync.State.GetClientConnId`
+(`clientConnIdMutex`), and then `ConnectionLiveFunc`, which reaches
+`ConnectionManager.GetConnectionById` (`connectionsMutex`, an exclusive
+`Lock`). Either one evaluated in the span adds a further term the figures
+above do not include, and unlike the iterator probe, neither has to be there.
+
+Both are therefore read once per gather pass **before** the gather lock is
+taken, and the span tests the snapshots through `nearKnownUpstreamTip`, which
+is `isNearTipWithStabilityWindow` against a tip the caller already holds — so
+the two share the rule that folds an unknown upstream into "not near" rather
+than restating it. Every term of the near-tip test the span evaluates is then
+an atomic read (`reachedTip`) or a local, leaving the iterator probe above as
+the span's only lock-taking work. Snapshotting per pass is sound in both
+cases: the
+window only changes at an era boundary, so at worst one pass of at most
+`batchSize` blocks is judged against the previous era's window, a
+multi-thousand-slot threshold that cannot flip the near-tip answer; and the
+upstream tip advances about one slot per second against a pass bounded by the
+~1s figure above, feeding a comparison against that same window.
+
+The bound is accepted because the wait applies only while catching up, where
+rollbacks are rare and no forging depends on them. The
+`dingo_ledger_commit_batch_blocks` histogram records
+`len(nextBatch)` at every non-empty submission so the effect on the batch-size
+distribution is observable without re-running a full disk-I/O measurement.
+
 The pipeline is started in `LedgerState.Start` (before the goroutine that
 is its only submitter) and stopped in `Close` (after that goroutine has
 drained), bounded by `CloseBlockPipelineDrainTimeout`, so its worker
