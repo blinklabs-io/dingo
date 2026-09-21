@@ -43,6 +43,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/blinklabs-io/dingo/internal/chainsyncrecycler"
+	"github.com/blinklabs-io/dingo/internal/committeeauth"
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/historyexpiry"
@@ -62,7 +63,9 @@ import (
 	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/blinklabs-io/dingo/plugin"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	okeepalive "github.com/blinklabs-io/gouroboros/protocol/keepalive"
+	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
 type Node struct {
@@ -90,6 +93,7 @@ type Node struct {
 	leiosPipelineManager    *leios.PipelineManager
 	bark                    *bark.Bark
 	historyExpiry           *historyexpiry.Pruner
+	committeeAuthSync       *committeeauth.Syncer
 	koiosParityObserver     *koiosparity.Observer
 	midnightServer          *midnightserver.Server
 	offchainMetadataFetcher *offchainmetadata.Fetcher
@@ -809,6 +813,29 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 
 		started = append(started, func() {
 			_ = n.historyExpiry.Stop(context.Background())
+		})
+	}
+
+	// Unconditional and independent of history expiry: the committee
+	// hot-key authorization pruner in the metadata store always runs and
+	// always needs the live immutable-slot bound to be safe on a sparse
+	// chain (issue #4353). A sync failure here is not fatal -- the pruner
+	// falls back to its slot-window assumption when no live value has been
+	// pushed -- so this only logs.
+	n.committeeAuthSync = committeeauth.NewSyncer(committeeauth.SyncerConfig{
+		PointAtDepth:     state.Chain().PointAtDepth,
+		SecurityParam:    state.SecurityParam,
+		SetImmutableSlot: n.db.SetCommitteeAuthImmutableSlot,
+		Logger:           n.config.logger,
+	})
+	if err := n.committeeAuthSync.Start(n.ctx); err != nil {
+		n.config.logger.Warn(
+			"failed to start committee auth immutable slot sync",
+			"error", err,
+		)
+	} else {
+		started = append(started, func() {
+			_ = n.committeeAuthSync.Stop(context.Background())
 		})
 	}
 
@@ -1801,53 +1828,39 @@ func taintValue(relaxed bool) string {
 	return nodesettings.LatchOff
 }
 
-// handleConnManagerClosed releases the chainsync server-side (N2C) client
-// state -- including its live chain iterator -- and any pending Leios
-// endorser-closure serving wait, for a node-to-client connection that just
-// closed.
-//
-// NtC closes are deliberately excluded from the ConnectionClosedEventType
-// fan-out (see the connection manager's publish site) because every current
-// subscriber does node-to-node work and a local client reconnecting in a
-// tight loop would otherwise wedge the EventBus. This callback is the NtC
-// counterpart to HandleConnClosedEvent, which already performs the
-// equivalent RemoveClient cleanup for NtN closes via that event. Guarding
-// chainsync cleanup on isNtC keeps RemoveClient exactly-once; serving waits
-// are released directly for both connection modes.
-func (n *Node) handleConnManagerClosed(
-	connId ouroboros.ConnectionId,
-	isNtC bool,
-	_ error,
-) {
-	// Release NtC closure waits independently of the protocol receive loop.
-	if o := n.ouroboros(); o != nil {
-		o.ReleaseLeiosServeWaiters(connId)
-	}
-	if !isNtC {
-		return
-	}
-	if n.chainsyncState != nil {
-		n.chainsyncState.RemoveClient(connId)
-	}
-	if o := n.ouroboros(); o != nil {
-		// Clear any LocalStateQuery pinned point this connection acquired:
-		// a client that disconnects without a clean Release must not leak
-		// its map entry (blinklabs-io/dingo#382).
-		o.ReleaseLocalStateQueryAcquiredPoint(connId)
-	}
-}
-
 func (n *Node) handleConnManagerClosedOwner(
 	conn *ouroboros.Connection,
-	isNtC bool,
-	err error,
+	_ bool,
+	_ error,
 ) {
 	if conn == nil {
 		return
 	}
-	n.handleConnManagerClosed(conn.Id(), isNtC, err)
-	if o := n.ouroboros(); o != nil && conn.LeiosNotify() != nil {
-		o.RemoveLeiosNotifyConnectionOwner(conn.Id(), conn.LeiosNotify().Server)
+	var chainsyncOwner *ochainsync.Server
+	if protocol := conn.ChainSync(); protocol != nil {
+		chainsyncOwner = protocol.Server
+	}
+	if n.chainsyncState != nil {
+		n.chainsyncState.RemoveClientOwner(conn.Id(), chainsyncOwner)
+	}
+	if o := n.ouroboros(); o != nil {
+		if chainsyncOwner != nil {
+			o.ReleaseLeiosServeWaitersOwner(
+				conn.Id(),
+				chainsyncOwner,
+			)
+		}
+		var localStateQueryOwner *olocalstatequery.Server
+		if protocol := conn.LocalStateQuery(); protocol != nil {
+			localStateQueryOwner = protocol.Server
+		}
+		o.ReleaseLocalStateQueryAcquiredPointOwner(
+			conn.Id(),
+			localStateQueryOwner,
+		)
+		if protocol := conn.LeiosNotify(); protocol != nil {
+			o.RemoveLeiosNotifyConnectionOwner(conn.Id(), protocol.Server)
+		}
 	}
 }
 

@@ -1,30 +1,191 @@
 name: publish
 
+# The main and release pipeline. It carries the same stages as the
+# pull-request pipeline in go-test.yml, in the same order, and adds the
+# publishing jobs after them:
+#
+#   lint, govulncheck                     2 runners, ~3 min
+#     -> go-test (Linux, quick)           1 runner,  ~8 min
+#       -> go-test (Linux)
+#          go-test (Linux, race)
+#          go-test (Windows)
+#          go-test (macOS)               4 runners, 5-35 min
+#         -> create-draft-release        tag only, needs all four
+#         -> build-<os>, build-images    gated on the SAME OS's tests
+#           -> build-image-manifest
+#             -> finalize-release        tag only
+#
+# A push to main runs this workflow and nothing else: go-test.yml is
+# pull-request only. Previously a merge started go-test.yml's five jobs and
+# this workflow's ten independently, sixteen runners at once, and the images
+# and binaries published without waiting for any of them. Now the same merge
+# peaks at about five concurrent jobs and nothing is pushed until the tests
+# that cover it are green.
+#
+# The difference between a main push and a release tag is signing and
+# publishing the final artifacts. Both run every stage above and both push
+# branch- or version-tagged images; only a tag creates a GitHub release,
+# uploads binary archives, attests them, and finalizes the release.
+#
+# The stages are duplicated from go-test.yml rather than factored into a
+# reusable workflow, because `needs:` cannot cross workflow files and a called
+# workflow would rename every check context. internal/docsparity's
+# TestPipelineStagesMatch fails when the two files drift.
+
 on:
   push:
     branches: ['main']
     tags:
       - 'v*.*.*'
 
+permissions:
+  contents: read
+
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  # Never interrupt a tag release after publication has started. Branch image
-  # builds can be superseded by a newer main push.
-  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+  # Main runs build images and binaries but do not publish release artifacts.
+  # Give each main run its own group so a newer push cannot cancel the
+  # backstop for an earlier merged commit. Keep every other ref serialized, so
+  # re-pushing a tag cannot run two publications at once.
+  #
+  # Grouping main pushes by ref instead, so a newer merge supersedes an older
+  # one, is what this repository ran before #4458 and moved away from: GitHub
+  # keeps at most one pending run per group and cancels the earlier pending
+  # one, so in a burst of merges the intermediate commits are skipped rather
+  # than tested, and 8 of 10 main runs ended cancelled. What protects the
+  # runner queue is the staging above instead, which cuts a merge's peak from
+  # sixteen concurrent jobs to about five.
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.ref }}
+  # Never interrupt a tag release after publication has started.
+  cancel-in-progress: false
 
 env:
   APPLICATION_NAME: 'dingo'
   RELEASE_TAG: ${{ github.ref_name }}
 
 jobs:
-  # Release validation happens before creating the draft release. Main pushes
-  # publish images and binaries without paying for the full test suite.
-  ci:
-    name: ci (Linux)
-    if: github.ref_type == 'tag'
-    permissions:
-      contents: read
+  # Stage 1. See go-test.yml's lint job for why these are steps of one job
+  # rather than a matrix, and why internal/docsparity derives the module list
+  # from the tree.
+  lint:
+    name: lint
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+        with:
+          go-version: 1.26.x
+          cache: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-1.26.x-
+      - name: golangci-lint (root)
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0 https://github.com/golangci/golangci-lint-action/releases/tag/v9.3.0
+      - name: golangci-lint (internal/test/antithesis)
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0 https://github.com/golangci/golangci-lint-action/releases/tag/v9.3.0
+        with:
+          working-directory: internal/test/antithesis
+      - name: golangci-lint (examples/dingo-gov-lens)
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0 https://github.com/golangci/golangci-lint-action/releases/tag/v9.3.0
+        with:
+          working-directory: examples/dingo-gov-lens
+      - name: golangci-lint (root, GOOS=windows)
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0 https://github.com/golangci/golangci-lint-action/releases/tag/v9.3.0
+        env:
+          GOOS: windows
+      - name: config-parity
+        run: make config-parity
+
+  # Stage 1, alongside lint. Unlike go-test.yml's copy, this one gates
+  # create-draft-release below.
+  #
+  # That is a restored gate, not a new one. `make govulncheck` used to be the
+  # last step of the `ci` job and create-draft-release needed `[ci]`, so a
+  # reachable vulnerability blocked a release. Splitting those steps into
+  # separate jobs dropped the dependency along with the job, which would have
+  # let a tag publish binaries and a GitHub release while govulncheck was
+  # failing.
+  #
+  # It still does not gate the main-push path. The `ci` job was tag-only, so
+  # main never had this gate, and a new advisory landing upstream must not
+  # block every merge in the repository while it is triaged.
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          # This job runs `go run ...@latest`, so third-party code executes in
+          # the workspace. Do not leave GITHUB_TOKEN in the local git config.
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+        with:
+          go-version: 1.26.x
+          cache: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-1.26.x-
+      - name: govulncheck
+        run: make govulncheck
+
+  # Stage 2. The cheap gate: whole suite on SQLite, no race, no services.
+  # Decides whether it is worth spending four runners on the stage below.
+  go-test-linux-quick:
+    name: go-test (Linux, quick)
+    needs: [lint]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+        with:
+          go-version: 1.26.x
+          cache: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-1.26.x-
+      - name: go-build
+        run: go build -tags dingo_extra_plugins ./cmd/dingo
+      - name: go-build-minimal
+        run: go build ./cmd/dingo
+      - name: sqlc-generation-drift
+        run: make sql-check
+      - name: go-test
+        run: go test -tags dingo_extra_plugins -ldflags="-s -w" -timeout 30m ./...
+
+  # Stage 3. Linux with Postgres, MySQL and MinIO (fake s3) services. Keeps
+  # the real PostgreSQL, MySQL and S3 coverage that the release gate has
+  # always had, uninstrumented: the conformance package alone approaches the
+  # 30m package timeout when PostgreSQL and MySQL run alongside SQLite under
+  # -race, so service-backed coverage and race coverage are separate jobs.
+  go-test-linux:
+    name: go-test (Linux)
+    needs: [go-test-linux-quick]
+    strategy:
+      matrix:
+        go-version: [1.26.x]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
     services:
       postgres:
         image: postgres:16
@@ -63,65 +224,180 @@ jobs:
         ports:
           - 9000:9000
           - 9001:9001
+    env:
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: '5432'
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DATABASE: dingo_test
+      MYSQL_HOST: localhost
+      MYSQL_PORT: '3306'
+      MYSQL_USER: mysql
+      MYSQL_PASSWORD: mysql
+      MYSQL_DATABASE: dingo_test
+      MYSQL_ROOT_PASSWORD: mysql
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_ENDPOINT: "http://127.0.0.1:9000/"
+      AWS_REGION: us-east-1
+      DINGO_TEST_S3_BUCKET: dingo-test
     steps:
       - name: setup-s3-bucket
-        env:
-          AWS_ACCESS_KEY_ID: minioadmin
-          AWS_SECRET_ACCESS_KEY: minioadmin
-          AWS_ENDPOINT: "http://127.0.0.1:9000/"
-          AWS_REGION: us-east-1
-          DINGO_TEST_S3_BUCKET: dingo-test
         run: |
-          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-          unzip -q awscliv2.zip
-          sudo ./aws/install --update
-          aws --endpoint-url "$AWS_ENDPOINT" s3api create-bucket --bucket "$DINGO_TEST_S3_BUCKET"
+            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+            unzip -q awscliv2.zip
+            sudo ./aws/install --update
+            aws --endpoint-url "$AWS_ENDPOINT" s3api create-bucket --bucket "$DINGO_TEST_S3_BUCKET"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: 1.26.x
+          go-version: ${{ matrix.go-version }}
+          cache: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-${{ matrix.go-version }}-
       - name: go-build
         run: go build -tags dingo_extra_plugins ./cmd/dingo
-      - name: go-build-minimal
-        run: go build ./cmd/dingo
-      - name: go-test-services
-        # Keep the real PostgreSQL, MySQL, and S3 coverage from the Linux
-        # pull-request gate. The conformance package alone approaches the 30m
-        # package timeout when PostgreSQL and MySQL run alongside SQLite under
-        # -race, so service-backed coverage and race coverage are separate
-        # release gates just as they are in go-test.yml.
+      - name: install-mariadb-client
+        # See go-test.yml: mysqlSSLArgs targets the MariaDB client the runtime
+        # image ships, which ubuntu-latest's preinstalled mysqldump is not.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mariadb-client
+          mysqldump --version
+      - name: sqlstore-database-integration
         env:
-          POSTGRES_HOST: localhost
-          POSTGRES_PORT: '5432'
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DATABASE: dingo_test
-          MYSQL_HOST: localhost
-          MYSQL_PORT: '3306'
-          MYSQL_USER: mysql
-          MYSQL_PASSWORD: mysql
-          MYSQL_DATABASE: dingo_test
-          MYSQL_ROOT_PASSWORD: mysql
-          AWS_ACCESS_KEY_ID: minioadmin
-          AWS_SECRET_ACCESS_KEY: minioadmin
-          AWS_ENDPOINT: "http://127.0.0.1:9000/"
-          AWS_REGION: us-east-1
-          DINGO_TEST_S3_BUCKET: dingo-test
+          DINGO_POSTGRES_DSN: postgres://postgres:postgres@127.0.0.1:5432/dingo_test?sslmode=disable
+          DINGO_MYSQL_DSN: root:mysql@tcp(127.0.0.1:3306)/dingo_test?parseTime=true
+        run: >-
+          go test -tags 'dingo_extra_plugins dingo_db_integration'
+          ./database/plugin/metadata/sqlstore
+          ./database/plugin/metadata/postgres
+          ./database/plugin/metadata/mysql
+          -timeout 10m
+      - name: go-test-live-lifecycle
+        run: make test-live-lifecycle
+      - name: go-test
         run: go test -v -tags dingo_extra_plugins -ldflags="-s -w" -timeout 30m ./...
-      - name: go-test-race
-        # Optional service backends are deliberately unconfigured here. This
-        # matches go-test.yml's race job while retaining a finite package-level
-        # hang guard for the complete SQLite-backed race suite.
-        run: go test -v -tags dingo_extra_plugins -ldflags="-s -w" -race -timeout 30m ./...
-      - name: govulncheck
-        run: make govulncheck
 
-  create-draft-release:
+  # Stage 3. Optional service backends are deliberately unconfigured here, so
+  # internal/test/conformance replays its vectors against SQLite only. Same
+  # command as go-test.yml's race job, so a pull request cannot pass a check
+  # the release then fails.
+  go-test-linux-race:
+    name: go-test (Linux, race)
+    needs: [go-test-linux-quick]
+    strategy:
+      matrix:
+        go-version: [1.26.x]
     runs-on: ubuntu-latest
-    needs: [ci]
-    if: github.ref_type == 'tag' && needs.ci.result == 'success'
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-race-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-race-${{ matrix.go-version }}-
+      - name: go-build
+        run: go build -tags dingo_extra_plugins ./cmd/dingo
+      - name: go-test-race
+        run: go test -v -tags dingo_extra_plugins -ldflags="-s -w" -race -timeout 30m ./...
+
+  # Stage 3. Platform coverage on the merge and release path, not only on a
+  # pull request: a merge conflict, a stale base, or a force-push can land a
+  # tree no pull request ever tested on these platforms.
+  go-test-windows:
+    name: go-test (Windows)
+    needs: [go-test-linux-quick]
+    strategy:
+      matrix:
+        go-version: [1.26.x]
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      CGO_ENABLED: 0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~\AppData\Local\go-build
+          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-${{ matrix.go-version }}-
+      - name: go-build
+        run: go build ./...
+      - name: go-test
+        run: go test -v -ldflags="-s -w" -timeout 30m ./...
+
+  go-test-macos:
+    name: go-test (macOS)
+    needs: [go-test-linux-quick]
+    strategy:
+      matrix:
+        go-version: [1.26.x]
+    runs-on: macos-latest
+    timeout-minutes: 90
+    env:
+      CGO_ENABLED: 0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/Library/Caches/go-build
+          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-${{ matrix.go-version }}-
+      - name: go-build
+        run: go build ./...
+      - name: go-test
+        run: go test -v -ldflags="-s -w" -timeout 30m ./...
+
+  # A release draft is created only once every platform is green, so a tag
+  # cannot reach a half-published state the way v0.70.3 did.
+  create-draft-release:
+    name: create-draft-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs:
+      - govulncheck
+      - go-test-linux
+      - go-test-linux-race
+      - go-test-windows
+      - go-test-macos
+    if: github.ref_type == 'tag'
     permissions:
       contents: write
     outputs:
@@ -173,98 +449,80 @@ jobs:
 
             return response.data.id;
 
-  # Run the platform-specific suite only after Linux release validation and
-  # draft creation have succeeded.
-  go-test-other:
-    # Deliberately unnamed, so GitHub generates `go-test-other (<platform>,
-    # <go-version>)`. A custom `name:` carrying matrix references collided with
-    # the platform jobs in go-test.yml, which render on a tag's own main-branch
-    # push, and branch protection matches a check by name — two workflows
-    # claiming one context make a required check ambiguous. It also rendered
-    # literally as
-    # `go-test (${{ matrix.platform }}) (${{ matrix.go-version }})` on every
-    # non-tag push, because this job is skipped there and a skipped matrix job
-    # never expands its matrix.
-    needs: [ci, create-draft-release]
-    # The only job in this workflow without an explicit grant, so it inherited
-    # repository or organization defaults. It builds and runs tests and needs
-    # nothing else; matches build-image-manifest's read-only grant.
+  # Stage 4. One build job per runner OS, each gated on that OS's own tests,
+  # replacing a 7-entry matrix of one-target jobs. See
+  # .github/scripts/build-targets.sh.
+  #
+  # On a tag these also wait for create-draft-release, because the archives
+  # they produce are uploaded to that draft. On a main push there is no draft
+  # and no upload: the binaries are built as a cross-compilation check and
+  # discarded, which is the whole of the difference between main and a release
+  # for this stage.
+  #
+  # `always()` is required because create-draft-release is skipped on a main
+  # push, and a skipped dependency would otherwise skip these too. Each test
+  # dependency is then checked explicitly, or a failed one would pass the
+  # guard.
+  build-linux:
+    name: build (Linux)
+    needs: [go-test-linux, go-test-linux-race, create-draft-release]
+    if: >-
+      always()
+      && needs.go-test-linux.result == 'success'
+      && needs.go-test-linux-race.result == 'success'
+      && (github.ref_type != 'tag' || needs.create-draft-release.result == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
-      contents: read
-    if: always() && github.ref_type == 'tag' && needs.ci.result == 'success' && needs.create-draft-release.result == 'success'
-    strategy:
-      matrix:
-        go-version: [1.26.x]
-        platform: [macos-latest, windows-latest]
-        include:
-          - platform: macos-latest
-            cache_path: ~/Library/Caches/go-build
-          - platform: windows-latest
-            cache_path: ~\AppData\Local\go-build
-    runs-on: ${{ matrix.platform }}
-    # Generous on purpose. Hang protection comes from the per-package
-    # `-timeout 20m` below; this cap only has to exceed a legitimate full-suite
-    # run, which here means checkout, setup-go, a build, and `go test ./...`
-    # across 100+ packages on a slower runner. The equivalent Linux job sets no
-    # job cap at all, so a tight one here is the outlier and would fail
-    # `go-test-other` with no single stuck package, blocking build-binaries and
-    # finalize-release.
-    timeout-minutes: 90
-    env:
-      CGO_ENABLED: 0
+      attestations: write
+      contents: write
+      id-token: write
     steps:
+      - run: git config --global --add safe.directory "$PWD"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: ${{ matrix.go-version }}
+          go-version: 1.26.x
           cache: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: |
             ~/go/pkg/mod
-            ${{ matrix.cache_path }}
-          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-${{ matrix.go-version }}-
-      - name: go-build
-        run: go build ./cmd/dingo
-      - name: go-test
-        # Windows runners are substantially slower for this suite. Keep the
-        # same link-size optimization and explicit package timeout used by the
-        # Linux release validation job, and cap the job so a stuck test cannot
-        # hold the release indefinitely.
-        run: go test -v -ldflags="-s -w" -timeout 20m ./...
+            ${{ runner.os }}-go-1.26.x-
+      - name: Build binaries
+        env:
+          BUILD_TARGETS: linux/amd64 linux/arm64 freebsd/amd64 freebsd/arm64
+          # Empty on a main push, which tells the script to skip packaging.
+          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: .github/scripts/build-targets.sh
+      - name: Upload release assets
+        if: github.ref_type == 'tag'
+        env:
+          RELEASE_ID: ${{ needs.create-draft-release.outputs.RELEASE_ID }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          RELEASE_UPLOAD_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: .github/scripts/upload-release-assets.sh
+      - name: Attest binaries
+        if: github.ref_type == 'tag'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2 https://github.com/actions/attest/releases/tag/v4.2.2
+        with:
+          subject-path: dist/*/${{ env.APPLICATION_NAME }}
 
-  build-binaries:
-    strategy:
-      matrix:
-        include:
-          - runner: macos-latest
-            os: darwin
-            arch: arm64
-          - runner: ubuntu-latest
-            os: freebsd
-            arch: amd64
-          - runner: ubuntu-latest
-            os: freebsd
-            arch: arm64
-          - runner: ubuntu-latest
-            os: linux
-            arch: amd64
-          - runner: ubuntu-latest
-            os: linux
-            arch: arm64
-          - runner: windows-latest
-            os: windows
-            arch: amd64
-          - runner: windows-latest
-            os: windows
-            arch: arm64
-    runs-on: ${{ matrix.runner }}
-    needs: [create-draft-release, go-test-other]
-    if: always() && (github.ref_type != 'tag' || (needs.create-draft-release.result == 'success' && needs.go-test-other.result == 'success'))
+  build-windows:
+    name: build (Windows)
+    needs: [go-test-windows, create-draft-release]
+    if: >-
+      always()
+      && needs.go-test-windows.result == 'success'
+      && (github.ref_type != 'tag' || needs.create-draft-release.result == 'success')
+    runs-on: windows-latest
+    timeout-minutes: 60
     permissions:
       attestations: write
       contents: write
@@ -284,41 +542,86 @@ jobs:
         with:
           path: |
             ~/go/pkg/mod
-            ${{ runner.os == 'macOS' && '~/Library/Caches/go-build' || runner.os == 'Windows' && '~\\AppData\\Local\\go-build' || '~/.cache/go-build' }}
+            ~\AppData\Local\go-build
           key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-1.26.x-
-      - name: Build binary
-        run: GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} make build
-        shell: bash
-      - name: Upload release asset
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Build binaries
         env:
-          MATRIX_ARCH: ${{ matrix.arch }}
-          MATRIX_OS: ${{ matrix.os }}
+          BUILD_TARGETS: windows/amd64 windows/arm64
+          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: .github/scripts/build-targets.sh
+        shell: bash
+      - name: Upload release assets
+        if: github.ref_type == 'tag'
+        env:
           RELEASE_ID: ${{ needs.create-draft-release.outputs.RELEASE_ID }}
           REPOSITORY_OWNER: ${{ github.repository_owner }}
           RELEASE_UPLOAD_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          _binary_name="$APPLICATION_NAME"
-          if [ "$MATRIX_OS" = "windows" ]; then
-            _binary_name="${APPLICATION_NAME}.exe"
-          fi
-          _filename="${APPLICATION_NAME}-${RELEASE_TAG}-${MATRIX_OS}-${MATRIX_ARCH}.tar.gz"
-          tar czf "$_filename" "$_binary_name"
-          curl \
-            -H "Authorization: token $RELEASE_UPLOAD_TOKEN" \
-            -H "Content-Type: application/octet-stream" \
-            --data-binary "@${_filename}" \
-            "https://uploads.github.com/repos/${REPOSITORY_OWNER}/${APPLICATION_NAME}/releases/${RELEASE_ID}/assets?name=${_filename}"
+        run: .github/scripts/upload-release-assets.sh
         shell: bash
-      - name: Attest binary
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Attest binaries
+        if: github.ref_type == 'tag'
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2 https://github.com/actions/attest/releases/tag/v4.2.2
         with:
-          subject-path: "${{ matrix.os == 'windows' && format('{0}.exe', env.APPLICATION_NAME) || env.APPLICATION_NAME }}"
+          subject-path: dist/*/${{ env.APPLICATION_NAME }}.exe
 
+  build-macos:
+    name: build (macOS)
+    needs: [go-test-macos, create-draft-release]
+    if: >-
+      always()
+      && needs.go-test-macos.result == 'success'
+      && (github.ref_type != 'tag' || needs.create-draft-release.result == 'success')
+    runs-on: macos-latest
+    timeout-minutes: 60
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
+    steps:
+      - run: git config --global --add safe.directory "$PWD"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+        with:
+          go-version: 1.26.x
+          cache: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/Library/Caches/go-build
+          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-1.26.x-
+      - name: Build binaries
+        env:
+          BUILD_TARGETS: darwin/arm64
+          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: .github/scripts/build-targets.sh
+      - name: Upload release assets
+        if: github.ref_type == 'tag'
+        env:
+          RELEASE_ID: ${{ needs.create-draft-release.outputs.RELEASE_ID }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          RELEASE_UPLOAD_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: .github/scripts/upload-release-assets.sh
+      - name: Attest binaries
+        if: github.ref_type == 'tag'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2 https://github.com/actions/attest/releases/tag/v4.2.2
+        with:
+          subject-path: dist/*/${{ env.APPLICATION_NAME }}
+
+  # Stage 4. Images are linux artifacts, so they gate on the Linux tests.
+  # Attestation is signing, which is why it is tag-only: a main push publishes
+  # a branch-tagged image and stops there. Previously these attestations ran
+  # on main under continue-on-error, which meant a main push both attested and
+  # ignored the result.
   build-images:
+    name: build-images
     strategy:
       fail-fast: false
       matrix:
@@ -328,8 +631,13 @@ jobs:
           - os: ubuntu-24.04-arm
             arch: arm64
     runs-on: ${{ matrix.os }}
-    needs: [create-draft-release, go-test-other]
-    if: always() && (github.ref_type != 'tag' || (needs.create-draft-release.result == 'success' && needs.go-test-other.result == 'success'))
+    needs: [go-test-linux, go-test-linux-race, create-draft-release]
+    if: >-
+      always()
+      && needs.go-test-linux.result == 'success'
+      && needs.go-test-linux-race.result == 'success'
+      && (github.ref_type != 'tag' || needs.create-draft-release.result == 'success')
+    timeout-minutes: 60
     permissions:
       attestations: write
       contents: read
@@ -372,7 +680,7 @@ jobs:
             type=semver,pattern={{version}}
       - name: Build images
         id: push
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0 https://github.com/docker/build-push-action/releases/tag/v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0 https://github.com/docker/build-push-action/releases/tag/v7.4.0
         with:
           outputs: "type=registry,push=true"
           platforms: linux/${{ matrix.arch }}
@@ -382,14 +690,14 @@ jobs:
             VERSION=${{ github.ref_type == 'tag' && github.ref_name || '' }}
             COMMIT_HASH=${{ github.sha }}
       - name: Attest Docker Hub image
-        continue-on-error: ${{ github.ref_type != 'tag' }}
+        if: github.ref_type == 'tag'
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2 https://github.com/actions/attest/releases/tag/v4.2.2
         with:
           subject-name: docker.io/blinklabs/dingo
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
       - name: Attest GHCR image
-        continue-on-error: ${{ github.ref_type != 'tag' }}
+        if: github.ref_type == 'tag'
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2 https://github.com/actions/attest/releases/tag/v4.2.2
         with:
           subject-name: ghcr.io/${{ github.repository }}
@@ -416,7 +724,7 @@ jobs:
       - name: Build and push antithesis image
         if: matrix.arch == 'amd64'
         id: antithesis-push
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0 https://github.com/docker/build-push-action/releases/tag/v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0 https://github.com/docker/build-push-action/releases/tag/v7.4.0
         with:
           outputs: "type=registry,push=true"
           platforms: linux/amd64
@@ -427,16 +735,14 @@ jobs:
             VERSION=${{ github.ref_type == 'tag' && github.ref_name || '' }}
             COMMIT_HASH=${{ github.sha }}
       - name: Attest antithesis Docker Hub image
-        if: matrix.arch == 'amd64'
-        continue-on-error: ${{ github.ref_type != 'tag' }}
+        if: matrix.arch == 'amd64' && github.ref_type == 'tag'
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2 https://github.com/actions/attest/releases/tag/v4.2.2
         with:
           subject-name: docker.io/blinklabs/dingo
           subject-digest: ${{ steps.antithesis-push.outputs.digest }}
           push-to-registry: true
       - name: Attest antithesis GHCR image
-        if: matrix.arch == 'amd64'
-        continue-on-error: ${{ github.ref_type != 'tag' }}
+        if: matrix.arch == 'amd64' && github.ref_type == 'tag'
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2 https://github.com/actions/attest/releases/tag/v4.2.2
         with:
           subject-name: ghcr.io/${{ github.repository }}
@@ -444,11 +750,13 @@ jobs:
           push-to-registry: true
 
   build-image-manifest:
+    name: build-image-manifest
     needs: [build-images]
     permissions:
       contents: read
       packages: write
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0 https://github.com/docker/setup-buildx-action/releases/tag/v4.3.0
@@ -506,11 +814,27 @@ jobs:
           short-description: "Dingo is a Cardano blockchain data node"
 
   finalize-release:
+    name: finalize-release
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: write
-    needs: [create-draft-release, go-test-other, build-binaries, build-images, build-image-manifest]
-    if: always() && github.ref_type == 'tag' && needs.create-draft-release.result == 'success' && needs.go-test-other.result == 'success' && needs.build-binaries.result == 'success' && needs.build-images.result == 'success' && needs.build-image-manifest.result == 'success'
+    needs:
+      - create-draft-release
+      - build-linux
+      - build-windows
+      - build-macos
+      - build-images
+      - build-image-manifest
+    if: >-
+      always()
+      && github.ref_type == 'tag'
+      && needs.create-draft-release.result == 'success'
+      && needs.build-linux.result == 'success'
+      && needs.build-windows.result == 'success'
+      && needs.build-macos.result == 'success'
+      && needs.build-images.result == 'success'
+      && needs.build-image-manifest.result == 'success'
     steps:
       - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0 https://github.com/actions/github-script/releases/tag/v9.0.0
         with:

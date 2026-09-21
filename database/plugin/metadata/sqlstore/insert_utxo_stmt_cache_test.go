@@ -247,7 +247,6 @@ func TestInsertUtxoModelCachesAssetIDLookup(t *testing.T) {
 	utxo.Assets = []models.Asset{
 		{
 			Name:        []byte("token"),
-			NameHex:     []byte("746f6b656e"),
 			PolicyId:    bytes.Repeat([]byte{0xAA}, 28),
 			Fingerprint: []byte("asset1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
 			Amount:      types.Uint64(42),
@@ -269,7 +268,6 @@ func TestInsertUtxoModelCachesAssetIDLookup(t *testing.T) {
 	utxo2.Assets = []models.Asset{
 		{
 			Name:        []byte("token2"),
-			NameHex:     []byte("746f6b656e32"),
 			PolicyId:    bytes.Repeat([]byte{0xBB}, 28),
 			Fingerprint: []byte("asset1bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
 			Amount:      types.Uint64(7),
@@ -327,7 +325,6 @@ func TestInsertUtxoModelBoundsTxScopedStatementRetentionInOneTransaction(
 				utxo.Assets = []models.Asset{
 					{
 						Name:     []byte("token"),
-						NameHex:  []byte("746f6b656e"),
 						PolicyId: bytes.Repeat([]byte{0xCC}, 28),
 						Fingerprint: []byte(
 							"asset1cccccccccccccccccccccccccccccccccccccccc",

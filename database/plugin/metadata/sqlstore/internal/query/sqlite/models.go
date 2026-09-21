@@ -37,7 +37,6 @@ type AddressTransaction struct {
 
 type Asset struct {
 	Name        []byte
-	NameHex     []byte
 	PolicyID    []byte
 	Fingerprint []byte
 	ID          int64
