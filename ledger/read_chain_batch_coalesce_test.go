@@ -16,11 +16,13 @@ package ledger
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
@@ -422,6 +424,129 @@ func TestLedgerReadChainIteratorTakesNoLedgerLockInsideGatherSpan(
 	testutil.RequireReceive(
 		t, readerDone, testutil.AsyncWait,
 		"ledgerReadChainIterator did not exit after cancellation",
+	)
+}
+
+// gatherSpanLockProbe records, for every LedgerStateConfig callback
+// UpstreamTipSlot makes, whether blockPipelineGatherMutex was already held at
+// the moment of the call. TryLock cannot block, so calling it from the reader
+// goroutine that may itself hold the read lock is safe: a held read lock
+// simply makes it fail.
+type gatherSpanLockProbe struct {
+	mu             sync.Mutex
+	activeConnCals int
+	connLiveCalls  int
+	insideSpan     int
+}
+
+func (p *gatherSpanLockProbe) record(ls *LedgerState, activeConn bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if activeConn {
+		p.activeConnCals++
+	} else {
+		p.connLiveCalls++
+	}
+	if !tryLockGatherMutex(ls) {
+		p.insideSpan++
+	}
+}
+
+func (p *gatherSpanLockProbe) counts() (int, int, int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.activeConnCals, p.connLiveCalls, p.insideSpan
+}
+
+// TestLedgerReadChainIteratorTakesNoConnectionLocksInsideGatherSpan closes the
+// half of the bound that
+// TestLedgerReadChainIteratorTakesNoLedgerLockInsideGatherSpan cannot see.
+// That test leaves GetActiveConnectionFunc nil, so UpstreamTipSlot
+// falls through to the syncUpstreamTipSlot atomic and never reaches the node's
+// real wiring. Under that wiring UpstreamTipSlot is not an atomic read at all:
+// GetActiveConnectionFunc is node_ledger_config.go's closure into
+// withLiveChainsyncState (liveLifecycleMu) and chainsync State.GetClientConnId
+// (clientConnIdMutex), and ConnectionLiveFunc reaches
+// ConnectionManager.GetConnectionById (connectionsMutex). Evaluating it inside
+// the span that holds blockPipelineGatherMutex therefore folds three more
+// mutexes into a figure ARCHITECTURE.md derives purely from batchSize and the
+// gatherCoalesce* settings.
+//
+// The upstream tip is read once per gather pass, alongside the stability
+// window and before the pass takes any gather read lock, so these callbacks
+// must never run with that lock held.
+func TestLedgerReadChainIteratorTakesNoConnectionLocksInsideGatherSpan(
+	t *testing.T,
+) {
+	// Not t.Parallel: swaps the package-level
+	// gatherCoalesceRetryInterval/gatherCoalesceMaxAttempts seam via
+	// shrinkGatherCoalesceRetryInterval.
+	shrinkGatherCoalesceRetryInterval(t, time.Millisecond, 5)
+
+	block1, point1 := buildDecodableTestBlock(t, 10, 1)
+	block2, point2 := buildDecodableTestBlock(t, 20, 2)
+
+	// One gap between two blocks, so the pass enters the coalescing branch --
+	// and therefore evaluates the near-tip term -- with a block already
+	// gathered and the gather read lock held.
+	script := []*chain.ChainIteratorResult{
+		{Point: point1, Block: block1},
+		nil,
+		{Point: point2, Block: block2},
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	iter := &scriptedGapLedgerReadIterator{ctx: ctx, script: script}
+
+	probe := &gatherSpanLockProbe{}
+	connId := testRecycleConnId()
+	ls := &LedgerState{}
+	ls.config = LedgerStateConfig{
+		Logger: testLogger(),
+		GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
+			probe.record(ls, true)
+			return &connId
+		},
+		ConnectionLiveFunc: func(ouroboros.ConnectionId) bool {
+			probe.record(ls, false)
+			return true
+		},
+	}
+
+	resultCh := make(chan readChainResult, 1)
+	go ls.ledgerReadChainIterator(ctx, iter, resultCh)
+
+	result := testutil.RequireReceive(
+		t, resultCh, testutil.AsyncWait,
+		"reader never delivered a batch",
+	)
+	require.NoError(t, result.err)
+	require.Len(t, result.blocks, 2)
+	close(result.done)
+
+	activeConnCalls, connLiveCalls, insideSpan := probe.counts()
+	// Without these the assertion below would hold vacuously: a pass that
+	// never reads the upstream tip at all never takes the locks either.
+	require.Positive(
+		t,
+		activeConnCalls,
+		"gather pass never read the upstream tip, so this test asserts nothing",
+	)
+	require.Positive(
+		t,
+		connLiveCalls,
+		"gather pass never checked whether the upstream connection is live, "+
+			"so this test asserts nothing",
+	)
+	require.Zero(
+		t,
+		insideSpan,
+		"UpstreamTipSlot ran with blockPipelineGatherMutex held, so the "+
+			"liveLifecycleMu, clientConnIdMutex and connectionsMutex "+
+			"acquisitions it makes are inside the span whose wait "+
+			"ARCHITECTURE.md bounds from batchSize and the gatherCoalesce* "+
+			"settings alone",
 	)
 }
 

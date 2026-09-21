@@ -3132,7 +3132,19 @@ func (ls *LedgerState) isNearTip(slot uint64) bool {
 func (ls *LedgerState) isNearTipWithStabilityWindow(
 	slot, stabilityWindow uint64,
 ) bool {
-	upstreamTip := ls.UpstreamTipSlot()
+	return nearKnownUpstreamTip(slot, ls.UpstreamTipSlot(), stabilityWindow)
+}
+
+// nearKnownUpstreamTip is isNearTipWithStabilityWindow against an upstream tip
+// the caller has already read: it folds an unknown upstream (0) into "not
+// near", so the two agree by construction rather than by two copies of the
+// same rule. Callers that must evaluate proximity without calling
+// UpstreamTipSlot snapshot the tip themselves and call this. Under the node's
+// own wiring UpstreamTipSlot is not lock-free -- GetActiveConnectionFunc
+// reaches liveLifecycleMu and chainsync's clientConnIdMutex, and
+// ConnectionLiveFunc reaches ConnectionManager.connectionsMutex -- so a caller
+// holding a lock of its own cannot afford to evaluate it in place.
+func nearKnownUpstreamTip(slot, upstreamTip, stabilityWindow uint64) bool {
 	if upstreamTip == 0 {
 		return false
 	}
@@ -5530,21 +5542,37 @@ func (ls *LedgerState) ledgerReadChainIterator(
 		// last block was actually appended to rawBatch in this pass; see
 		// gatherCoalesceMaxAttempts.
 		coalesceAttempts := 0
-		// Read the stability window once here, before any
+		// Read both terms of the near-tip test once here, before any
 		// blockPipelineGatherMutex read lock is taken, rather than through
-		// ls.isNearTip inside the gather span. calculateStabilityWindow
-		// takes ls.RLock, and Go's RWMutex parks a reader behind a pending
-		// writer, so evaluating it under the gather lock would let a block
-		// apply's ls.Lock() stall this pass with that lock held -- folding
-		// an unbounded wait into the coalescing bound below, which is
-		// derived purely from batchSize and the gatherCoalesce* settings.
-		// Everything else the span reads is an atomic. The window only
-		// changes at an era boundary and is re-read every pass, so at worst
-		// one pass of at most batchSize blocks is judged against the
-		// previous era's window -- and the window is a multi-thousand-slot
-		// threshold, so that cannot flip the near-tip answer at an era
-		// boundary reached during bulk replay.
+		// ls.isNearTip inside the gather span. Neither is lock-free:
+		//
+		//   - calculateStabilityWindow takes ls.RLock, and Go's RWMutex
+		//     parks a reader behind a pending writer, so evaluating it
+		//     under the gather lock would let a block apply's ls.Lock()
+		//     stall this pass with that lock held.
+		//   - UpstreamTipSlot is an atomic load only when no node is wired
+		//     in. Under the real wiring it calls GetActiveConnectionFunc --
+		//     node_ledger_config.go's closure into withLiveChainsyncState
+		//     (liveLifecycleMu) and chainsync State.GetClientConnId
+		//     (clientConnIdMutex) -- and then ConnectionLiveFunc, which
+		//     reaches ConnectionManager.GetConnectionById
+		//     (connectionsMutex, an exclusive Lock).
+		//
+		// Either one evaluated under the gather lock folds an unbounded
+		// wait into the coalescing bound below, which is derived purely
+		// from batchSize and the gatherCoalesce* settings. Read here, the
+		// span itself tests nothing but atomics and locals.
+		//
+		// Both are safe to snapshot per pass. The window only changes at an
+		// era boundary, so at worst one pass of at most batchSize blocks is
+		// judged against the previous era's window -- a multi-thousand-slot
+		// threshold, which cannot flip the near-tip answer. The upstream tip
+		// is a chain frontier that advances about one slot per second while
+		// a whole pass is bounded by the ~1s figure below, and the answer it
+		// feeds is a stability-window comparison, so a pass-old reading
+		// cannot flip it either.
 		stabilityWindow := ls.calculateStabilityWindow()
+		upstreamTipSlot := ls.UpstreamTipSlot()
 		// Gather up next batch of raw blocks
 		for {
 			// Check cancellation on every iteration, not just once per
@@ -5611,14 +5639,17 @@ func (ls *LedgerState) ledgerReadChainIterator(
 					// about batchSize*gatherCoalesceRetryInterval (100ms)
 					// when each gap resolves on its first retry. Those
 					// figures are a real bound only because every term
-					// tested below is an atomic read: stabilityWindow is
-					// taken before the gather lock precisely so no
-					// ls.RLock is evaluated here (see its comment above).
+					// tested below is an atomic read or a local:
+					// stabilityWindow and upstreamTipSlot are both taken
+					// before the gather lock precisely so that neither
+					// ls.RLock nor the chainsync and connection-manager
+					// mutexes UpstreamTipSlot reaches are evaluated here
+					// (see their comment above).
 					//
-					// reachedTip, not isNearTip alone, decides whether the
-					// wait applies at all. UpstreamTipSlot returns 0
-					// whenever no live upstream connection is selected, and
-					// isNearTipWithStabilityWindow folds an unknown
+					// reachedTip, not the near-tip test alone, decides
+					// whether the wait applies at all. UpstreamTipSlot
+					// returns 0 whenever no live upstream connection is
+					// selected, and nearKnownUpstreamTip folds an unknown
 					// upstream into "not near" -- so a caught-up node that
 					// merely lost its upstream would otherwise start paying
 					// this wait again, gather lock held, including for its
@@ -5630,8 +5661,9 @@ func (ls *LedgerState) ledgerReadChainIterator(
 					if len(rawBatch) > 0 && len(rawBatch) < cap(rawBatch) &&
 						coalesceAttempts < gatherCoalesceMaxAttempts &&
 						!ls.reachedTip.Load() &&
-						!ls.isNearTipWithStabilityWindow(
+						!nearKnownUpstreamTip(
 							rawBatch[len(rawBatch)-1].Slot,
+							upstreamTipSlot,
 							stabilityWindow,
 						) {
 						coalesceAttempts++

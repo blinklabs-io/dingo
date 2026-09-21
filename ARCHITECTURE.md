@@ -12233,7 +12233,7 @@ latency behavior.
 
 `reachedTip` is part of that gate rather than `isNearTip` alone because
 `UpstreamTipSlot` returns 0 whenever no live upstream connection is selected,
-and `isNearTipWithStabilityWindow` folds an unknown upstream into "not near".
+and the near-tip test folds an unknown upstream into "not near".
 Without the `reachedTip` term, a caught-up node that merely lost its upstream
 would resume paying this wait per gap, gather lock held, including for its own
 forged blocks. `reachedTip` latches the first time the node reaches the
@@ -12257,17 +12257,30 @@ up to `batchSize*gatherCoalesceMaxAttempts*gatherCoalesceRetryInterval` (about
 first retry.
 
 Those figures are a bound only because nothing evaluated inside the held span
-can block on another lock. `ls.isNearTip` would break that: it reaches
-`calculateStabilityWindow`, which takes `ls.RLock`, and Go's `RWMutex` parks a
-reader behind a pending writer, so a block apply holding `ls.Lock()` could
-stall the pass with `blockPipelineGatherMutex` still held — an unbounded term
-the figures above do not include. The stability window is therefore read once
-per gather pass **before** the gather lock is taken, and the span calls
-`ls.isNearTipWithStabilityWindow` with that value; every other term it tests
-(`reachedTip`, `UpstreamTipSlot`) is an atomic read. Re-reading the window per
-pass means at worst one pass of at most `batchSize` blocks is judged against
-the previous era's window, which is a multi-thousand-slot threshold and cannot
-flip the near-tip answer.
+can block on another lock, and neither half of the near-tip test satisfies that
+where it is written. `calculateStabilityWindow` takes `ls.RLock`, and Go's
+`RWMutex` parks a reader behind a pending writer, so a block apply holding
+`ls.Lock()` could stall the pass with `blockPipelineGatherMutex` still held.
+`UpstreamTipSlot` is an atomic load only when no node is wired in: under the
+node's own wiring it calls `GetActiveConnectionFunc`, which is
+`node_ledger_config.go`'s closure into `withLiveChainsyncState`
+(`liveLifecycleMu`) and `chainsync.State.GetClientConnId`
+(`clientConnIdMutex`), and then `ConnectionLiveFunc`, which reaches
+`ConnectionManager.GetConnectionById` (`connectionsMutex`, an exclusive
+`Lock`). Either one evaluated in the span adds an unbounded term the figures
+above do not include.
+
+Both are therefore read once per gather pass **before** the gather lock is
+taken, and the span tests the snapshots through `nearKnownUpstreamTip`, which
+is `isNearTipWithStabilityWindow` against a tip the caller already holds — so
+the two share the rule that folds an unknown upstream into "not near" rather
+than restating it. Every term the span itself tests is then an atomic read
+(`reachedTip`) or a local. Snapshotting per pass is sound in both cases: the
+window only changes at an era boundary, so at worst one pass of at most
+`batchSize` blocks is judged against the previous era's window, a
+multi-thousand-slot threshold that cannot flip the near-tip answer; and the
+upstream tip advances about one slot per second against a pass bounded by the
+~1s figure above, feeding a comparison against that same window.
 
 The bound is accepted because the wait applies only while catching up, where
 rollbacks are rare and no forging depends on them. The
