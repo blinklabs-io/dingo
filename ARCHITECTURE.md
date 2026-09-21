@@ -7176,8 +7176,9 @@ Dingo provides three client-facing APIs plus Bark. All are optional and gated by
 
 ### Health probes (`internal/health`)
 
-`internal/node.Run` starts three auxiliary HTTP listeners, all through
-`serveAuxiliaryListener` (bind or serve failures are logged, never fatal):
+`internal/node.Run` starts three auxiliary HTTP listeners, binding each with
+`bindAuxiliaryListener` and serving it with `serveAuxiliaryListenerOn` (bind
+or serve failures are logged, never fatal):
 Prometheus metrics on `metricsPort`, pprof on `debugPort` when enabled, and
 the health listener on `healthPort` (default `12799`, `0` disables).
 
@@ -7212,7 +7213,7 @@ reports healthy without probing when that is `0`, so disabling the listener
 does not put the container into a replacement loop.
 
 `dingo mithril sync` serves the same listener, through
-`cmd/dingo.startHealthProbeServer` over the exported
+`cmd/dingo.bindHealthProbe` and `cmd/dingo.serveHealthProbe` over the exported
 `internal/node.NewHealthServer`, with a nil tip-gap function. That bootstrap
 is a separate process the container entrypoint runs ahead of `serve`, and on
 mainnet it runs for hours while the image's `HEALTHCHECK` is already probing;
