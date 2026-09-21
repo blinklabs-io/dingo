@@ -37,6 +37,21 @@ import (
 // instead of presenting as a silent stalled epoch rollover.
 const slowGovernanceTallyThreshold = 30 * time.Second
 
+// ErrMissingCurrentBoundarySPOState reports that the RATIFY phase has no SPO
+// stake distribution to tally against: EpochInput.CurrentBoundarySPOState was
+// nil, the mark[NewEpoch] fallback read returned no rows, and mark[NewEpoch-1]
+// does hold pool stake -- so the chain has SPO stake and this boundary's copy
+// of it is simply unavailable.
+//
+// A real epoch rollover always hits this when
+// LedgerState.SetCurrentBoundarySPOStakeHook is not installed, because
+// mark[NewEpoch] is written at the end of the same rollover, after RATIFY.
+// Tallying anyway would put zero in the SPO denominator and silently refuse
+// every SPO-gated action forever, so the boundary fails loudly instead.
+var ErrMissingCurrentBoundarySPOState = errors.New(
+	"no same-boundary SPO stake distribution for the RATIFY tally",
+)
+
 // EpochInput collects the inputs needed at an epoch boundary
 // to drive the governance state machine.
 type EpochInput struct {
@@ -79,10 +94,16 @@ type EpochInput struct {
 	// would silently see zero rows and zero stake for every SPO-gated action
 	// at every boundary.
 	//
-	// Nil is correct for standalone/test callers that seed mark[NewEpoch]
-	// directly and for EvaluateRatifiableHardForkInitiation's mid-epoch path,
-	// whose target epoch's mark row was already durably written at a prior,
-	// already-committed boundary.
+	// Nil is correct only for a standalone/test caller that seeds
+	// mark[NewEpoch] directly. When it is nil and that row is empty while
+	// the previous boundary's mark holds stake, ProcessEpoch fails the
+	// boundary with ErrMissingCurrentBoundarySPOState rather than tally a
+	// zero SPO denominator.
+	//
+	// EvaluateRatifiableHardForkInitiation does not take this route at all:
+	// it reads mark[CurrentEpoch], a different and already-committed
+	// snapshot, because the one this field carries does not exist until the
+	// boundary runs. See predictedBoundaryStakeEpochFor.
 	CurrentBoundarySPOState *SPOVotingState
 }
 
@@ -551,6 +572,42 @@ func ProcessEpoch(
 			if err != nil {
 				return nil, fmt.Errorf("load spo voting state: %w", err)
 			}
+			// An empty mark[NewEpoch] is not a tally input: tallySPOVotes
+			// returns early on it, leaving a zero SPO denominator that
+			// refuses every SPO-gated action. On a chain that has active
+			// pools it means only one thing -- the same-boundary hook was
+			// never installed, so the row RATIFY needs is still unwritten
+			// -- and the node would diverge from the network without
+			// logging anything. Fail the boundary instead.
+			//
+			// Gated on the previous boundary's mark holding stake, because
+			// that is what makes the empty read a contradiction rather
+			// than a fact: a chain whose pools have never held snapshot
+			// stake has nothing to tally under any wiring. A standalone
+			// caller that seeded mark[NewEpoch] itself has rows here and
+			// never reaches this check.
+			if len(spoState.Dist) == 0 && in.NewEpoch > 0 {
+				prev, err := LoadSPOVotingState(
+					in.DB, in.Txn, in.NewEpoch-1,
+				)
+				if err != nil {
+					return nil, fmt.Errorf(
+						"load previous spo voting state: %w", err,
+					)
+				}
+				if len(prev.Dist) > 0 {
+					return nil, fmt.Errorf(
+						"%w: mark[%d] is empty while mark[%d] holds %d "+
+							"pools and EpochInput.CurrentBoundarySPOState "+
+							"is nil (see "+
+							"LedgerState.SetCurrentBoundarySPOStakeHook)",
+						ErrMissingCurrentBoundarySPOState,
+						tallyCtx.StakeEpoch,
+						in.NewEpoch-1,
+						len(prev.Dist),
+					)
+				}
+			}
 		}
 		tallyCtx.SPOState = spoState
 	}
@@ -969,6 +1026,38 @@ func ratificationEnactmentPrecondition(
 // caller supplies this same-boundary data instead.
 func stakeEpochFor(newEpoch uint64) uint64 {
 	return newEpoch
+}
+
+// predictedBoundaryStakeEpochFor returns the epoch whose "mark" snapshot
+// EvaluateRatifiableHardForkInitiation tallies SPO votes against while
+// currentEpoch is still being applied.
+//
+// It is deliberately not the stakeEpochFor(currentEpoch+1) the boundary it
+// predicts will consume. SNAP captures that snapshot at the boundary itself,
+// from ledger state that keeps moving until the boundary slot, so no
+// mid-epoch caller can read it: LoadSPOVotingState would find no rows and
+// tally a zero SPO denominator, which refuses every action. mark[currentEpoch]
+// -- written at the boundary that opened the current epoch -- is the most
+// recent distribution that is durably committed and can no longer move.
+//
+// So the mid-epoch answer is an estimate, and that is what makes it advisory:
+// votes do freeze at the voting deadline, but the SPO denominator does not,
+// and stake moving across the boundary can carry an action over or under its
+// threshold after this answer was computed. Preview's Plomin hard fork
+// (dingo#4441) straddled the 0.51 SPO threshold exactly that way --
+// mark[741] 0.4757 against mark[742] 0.6283 -- so the mid-epoch check
+// published nothing through epoch 741 and the boundary into 742 ratified.
+// The boundary decision is the authoritative one; this one only surfaces it
+// early when the two snapshots agree.
+//
+// Estimating mark[currentEpoch+1] from live stake instead would be worse:
+// LedgerState.transitionInfo feeds hardfork.BuildSummary, which bounds the
+// current era at the announced boundary and appends a successor era, and
+// verify_header.go's forecast-horizon gate reads that summary. An estimate
+// that can still move before the boundary buys an earlier announcement by
+// risking a wrong one, and a wrong era layout is the more damaging error.
+func predictedBoundaryStakeEpochFor(currentEpoch uint64) uint64 {
+	return currentEpoch
 }
 
 // countActiveDReps returns the number of credential-backed DReps

@@ -3096,11 +3096,14 @@ type currentBoundarySPOStakeHookHolder struct {
 // end of the rollover (epochSnapshotHook), after RATIFY has already run --
 // see stakeEpochFor's doc comment for the upstream derivation. Without this
 // hook installed, governance falls back to reading the not-yet-written
-// pool_stake_snapshot row and silently sees zero stake for every SPO-gated
-// action at every boundary, which is strictly worse than the epoch-lag bug
-// this fixed (dingo#4441): permanent non-ratification instead of a wrong but
-// eventually-correct epoch. A production node must always wire this
-// alongside the other two epoch-boundary hooks.
+// pool_stake_snapshot row, which holds no stake at all -- so every SPO-gated
+// action would tally a zero denominator and never ratify, which is strictly
+// worse than the epoch-lag bug this fixed (dingo#4441): permanent
+// non-ratification instead of a wrong but eventually-correct epoch. That
+// outcome is not reachable silently: governance.ProcessEpoch rejects the
+// empty read with governance.ErrMissingCurrentBoundarySPOState and the
+// boundary fails. A production node must always wire this alongside the
+// other two epoch-boundary hooks.
 func (ls *LedgerState) SetCurrentBoundarySPOStakeHook(
 	fn func(*database.Txn, event.EpochTransitionEvent) ([]*models.PoolStakeSnapshot, error),
 ) {
@@ -8599,13 +8602,22 @@ func (ls *LedgerState) evaluateTransitionImpossible() {
 // checking whether any in-flight HardForkInitiation governance action
 // would be ratified if the boundary tick fired now.
 //
-// Why this is correct mid-epoch: governance votes stop being accepted
-// at slot epochEnd - 2*stabilityWindow (the voting deadline). After
-// that point the inputs to the ratification computation are frozen —
-// no new vote, registration, or pool change can flip the outcome — so
-// "would ratify now" equals "will ratify at the next boundary tick".
-// Before the deadline the answer is volatile and surfacing it would
-// give clients a stale view, so the function returns early.
+// Why this is worth publishing mid-epoch: governance votes stop being
+// accepted at slot epochEnd - 2*stabilityWindow (the voting deadline),
+// so after that point no new vote can flip the outcome. Before the
+// deadline the answer is volatile and surfacing it would give clients
+// a stale view, so the function returns early.
+//
+// The vote freeze is not a freeze of every input, and the SPO stake
+// denominator in particular keeps moving after it: the boundary tallies
+// the mark snapshot SNAP captures at the boundary itself, while this
+// check can only read the last committed one — see
+// governance.predictedBoundaryStakeEpochFor. So "would ratify now" is a
+// prediction of the boundary tick, not a preview of it, and the boundary
+// can still decide differently. A prediction the boundary does not honor
+// is bounded to the epoch that made it: the rollover resets
+// transitionInfo to Unknown when no era transition happened, and
+// applyEraTransition clears it when one did.
 //
 // Priority order on a successful detection: TransitionKnown supersedes
 // both TransitionUnknown and TransitionImpossible because it carries

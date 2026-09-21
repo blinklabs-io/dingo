@@ -11693,8 +11693,25 @@ calls it right after the SNAP-point stake read and passes the result to
 `governance.ProcessEpoch` as `EpochInput.CurrentBoundarySPOState`, which RATIFY
 prefers over its own `LoadSPOVotingState` DB read. A production node must wire
 this hook alongside the other two: without it, RATIFY falls back to reading the
-not-yet-written row and sees zero SPO stake for every gated action at every
-boundary -- worse than the epoch-lag bug this fixed, not better.
+not-yet-written row and finds zero SPO stake for every gated action at every
+boundary -- worse than the epoch-lag bug this fixed, not better. That state is
+not reachable silently. When the fallback read comes back empty while
+`mark[NewEpoch-1]` still holds pool stake, `ProcessEpoch` returns
+`ErrMissingCurrentBoundarySPOState` and the boundary fails rather than tally a
+zero denominator; the previous boundary's mark is what distinguishes a missing
+hook from a chain that has never held snapshot stake.
+
+The mid-epoch predictor is a separate consumer and does not take this route.
+`governance.EvaluateRatifiableHardForkInitiation`, which
+`LedgerState.evaluateHardForkInitiationStability` runs once per epoch after the
+voting deadline to surface an upcoming era boundary through `TransitionInfo`,
+tallies `mark[CurrentEpoch]` -- the last durably committed mark -- because the
+`mark[CurrentEpoch+1]` the boundary will read does not exist until that boundary
+runs. Its answer is therefore a prediction rather than a preview: votes freeze at
+the deadline but the SPO denominator does not, and stake moving across the
+boundary can carry an action over or under its threshold. See
+`governance.predictedBoundaryStakeEpochFor` for why estimating the boundary
+snapshot from live state instead would be the worse trade.
 
 The split is what makes the capture reference-ordered. cardano-ledger runs SNAP
 before POOLREAP and before governance enactment, and the live `reward_live_stake`

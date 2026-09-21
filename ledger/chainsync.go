@@ -7210,7 +7210,10 @@ func (ls *LedgerState) captureEpochBoundarySnapshotStake(
 // governance falls back to its own DB read, correct only for a standalone
 // caller that seeded that row directly, never for a real rollover -- see
 // SetCurrentBoundarySPOStakeHook's doc comment for why a production node
-// must always have this wired).
+// must always have this wired). An un-wired rollover does not silently
+// tally zero stake: governance.ProcessEpoch fails the boundary with
+// governance.ErrMissingCurrentBoundarySPOState once the fallback read comes
+// back empty while the previous boundary's mark holds stake.
 func (ls *LedgerState) currentBoundarySPOStakeState(
 	txn *database.Txn,
 	prevEpoch models.Epoch,
