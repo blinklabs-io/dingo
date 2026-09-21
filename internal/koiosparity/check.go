@@ -918,6 +918,12 @@ func checkEpoch(
 	// comment). Gated behind the account-coverage completeness check so an
 	// interrupted or not-yet-run account fetch can never be silently treated
 	// as "nothing to compare" — see KoiosAccountCoverage's doc comment.
+	// Read before the account phase appends to allMismatches, so the two
+	// phases' verdicts stay separable without re-partitioning the combined
+	// slice afterwards.
+	aggregateStatus := DetermineStatus(allMismatches)
+	aggregateCount := len(allMismatches)
+
 	var accountMismatches []CheckMismatch
 	if accountsEnabled && hasStakeEpoch {
 		rewardsPending := accountRewardsPending(dingoPoolMap)
@@ -942,9 +948,6 @@ func checkEpoch(
 		allMismatches = append(allMismatches, accountMismatches...)
 	}
 
-	aggregateCount := len(allMismatches) - len(accountMismatches)
-	aggregateMismatches := allMismatches[:aggregateCount]
-	aggregateStatus := DetermineStatus(aggregateMismatches)
 	accountStatus := ""
 	if accountsEnabled && hasStakeEpoch {
 		// Recorded even when the account comparison produced nothing, so a
@@ -978,7 +981,7 @@ func checkEpoch(
 		OnlyDingoPools:         MarshalPoolList(onlyDingo),
 		OnlyKoiosPools:         MarshalPoolList(onlyKoios),
 		AggregateStatus:        aggregateStatus,
-		AggregateMismatchCount: len(aggregateMismatches),
+		AggregateMismatchCount: aggregateCount,
 		AccountStatus:          accountStatus,
 		AccountMismatchCount:   len(accountMismatches),
 	}); err != nil {

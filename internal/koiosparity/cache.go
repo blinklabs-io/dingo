@@ -22,7 +22,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -1782,11 +1781,8 @@ func (c *Cache) CommitEpochMismatches(
 		scopes = AllMismatchScopes
 	}
 	replacing := make(map[string]bool, len(scopes))
-	args := make([]any, 0, 2+len(scopes))
-	args = append(args, network, epoch)
 	for _, scope := range scopes {
 		replacing[scope] = true
-		args = append(args, scope)
 	}
 	tx, err := c.db.Begin()
 	if err != nil {
@@ -1797,12 +1793,18 @@ func (c *Cache) CommitEpochMismatches(
 			_ = tx.Rollback()
 		}
 	}()
-	if _, err = tx.Exec(
-		"DELETE FROM check_mismatches WHERE network = ? AND epoch = ? AND scope IN (?"+
-			strings.Repeat(", ?", len(scopes)-1)+")",
-		args...,
-	); err != nil {
-		return err
+	// One statement per scope rather than a built IN list: there are only
+	// ever a handful of scopes, they all run in this transaction, and the
+	// statement stays a constant instead of a concatenation.
+	for scope := range replacing {
+		if _, err = tx.Exec(
+			"DELETE FROM check_mismatches WHERE network = ? AND epoch = ? AND scope = ?",
+			network,
+			epoch,
+			scope,
+		); err != nil {
+			return err
+		}
 	}
 	if len(mismatches) > 0 {
 		var stmt *sql.Stmt
