@@ -17,8 +17,6 @@ package forging
 
 import (
 	"bytes"
-	"crypto/ed25519"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -32,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/keystore"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/kes"
+	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/blinklabs-io/gouroboros/vrf"
@@ -857,24 +856,22 @@ func (pc *PoolCredentials) validateOpCertUnsafe() error {
 		)
 	}
 
-	// Verify cold key signature over the raw signable representation:
-	//   KES vkey (32 bytes) || issue number (8 bytes BE) || KES period (8 bytes BE)
-	// See: cardano-ledger OCertSignable.getSignableRepresentation
-	if len(pc.opCert.ColdVKey) != ed25519.PublicKeySize {
-		return fmt.Errorf(
-			"invalid cold verification key size: expected %d, got %d",
-			ed25519.PublicKeySize,
-			len(pc.opCert.ColdVKey),
-		)
-	}
-	var certBody [48]byte
-	copy(certBody[:32], pc.opCert.KESVKey)
-	binary.BigEndian.PutUint64(certBody[32:40], pc.opCert.IssueNumber)
-	binary.BigEndian.PutUint64(certBody[40:48], pc.opCert.KESPeriod)
-	if !ed25519.Verify(pc.opCert.ColdVKey, certBody[:], pc.opCert.Signature) {
-		return errors.New(
-			"OpCert signature verification failed: cold key signature is invalid",
-		)
+	// Verify the cold key signature over the raw cardano-ledger OCertSignable
+	// representation (KES vkey || issue number BE64 || KES period BE64).
+	// Delegated to gouroboros rather than re-derived here: that is the same
+	// function the inbound block-header path uses, and it verifies through the
+	// strict Ed25519 criteria of cardano-node's Ed25519DSIGN. crypto/ed25519
+	// applies no small-order check and accepts the edwards25519 identity
+	// public key with an all-zero S for any message, so verifying with it
+	// would let this node forge under a certificate every peer rejects.
+	// Field sizes are checked by VerifyOpCertSignature.
+	if err := ledger.VerifyOpCertSignature(&ledger.OpCert{
+		KesVkey:       pc.opCert.KESVKey,
+		IssueNumber:   pc.opCert.IssueNumber,
+		KesPeriod:     pc.opCert.KESPeriod,
+		ColdSignature: pc.opCert.Signature,
+	}, pc.opCert.ColdVKey); err != nil {
+		return fmt.Errorf("OpCert signature verification failed: %w", err)
 	}
 
 	return nil
