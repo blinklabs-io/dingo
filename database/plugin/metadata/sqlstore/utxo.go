@@ -350,20 +350,13 @@ func (s *Store) MarkUtxosDeletedAtSlot(
 			chunkSize := s.dialect.ParameterLimit() - 1
 			for start := 0; start < len(rowIDs); start += chunkSize {
 				end := min(start+chunkSize, len(rowIDs))
-				args := make([]any, end-start+1)
-				args[0] = slot
-				placeholders := make([]string, end-start)
-				for i, rowID := range rowIDs[start:end] {
-					placeholders[i] = "?"
-					args[i+1] = rowID
-				}
+				query, args := markUtxosDeletedQuery(
+					rowIDs[start:end],
+					slot,
+				)
 				if _, err := db.ExecContext(
 					ctx,
-					s.dialect.Rebind(
-						"UPDATE utxo SET deleted_slot = ? "+
-							"WHERE deleted_slot = 0 AND id IN ("+
-							strings.Join(placeholders, ",")+")",
-					),
+					s.dialect.Rebind(query),
 					args...,
 				); err != nil {
 					return err
@@ -1176,22 +1169,56 @@ func utxoIDPredicate(ids []models.UtxoId) (string, []any) {
 // deleted_slot index over tx_id_output_idx for larger batches. The caller
 // filters the returned rows to the requested output indexes before updating
 // their primary keys in the same write transaction.
+//
+// deleted_slot is projected so the liveness filter runs in Go too: carrying
+// it as a predicate on the update instead makes SQLite drive that statement
+// from idx_utxo_deleted_payment_script rather than the primary key whenever
+// sqlite_stat1 is absent -- see markUtxosDeletedQuery.
 func utxoRowIDsByTxIDQuery(txIDs [][]byte) (string, []any) {
 	args := make([]any, len(txIDs))
 	for i, txID := range txIDs {
 		args[i] = txID
 	}
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(txIDs)), ",")
-	return "SELECT id, tx_id, output_idx FROM utxo WHERE tx_id IN (" +
-		placeholders + ")", args
+	return "SELECT id, tx_id, output_idx, deleted_slot FROM utxo " +
+		"WHERE tx_id IN (" + placeholders + ")", args
 }
 
 // queryUtxoRowIDs resolves the primary keys of exactly the requested UTxO
-// references. It deliberately reads every output for the requested tx_id
-// values, then applies output-index matching in Go: adding a deleted_slot
-// predicate or an OR of exact pairs makes SQLite abandon tx_id_output_idx.
-// The caller keeps this lookup and its primary-key update in one write
-// transaction, so no other writer can change the selected rows in between.
+// references that are still live. It deliberately reads every output for the
+// requested tx_id values, then applies output-index and liveness matching in
+// Go: adding a deleted_slot predicate or an OR of exact pairs makes SQLite
+// abandon tx_id_output_idx. The caller keeps this lookup and its primary-key
+// update in one write transaction, so no other writer can change the selected
+// rows in between, which is what lets the update carry no liveness predicate
+// of its own.
+// markUtxosDeletedQuery builds the second half of MarkUtxosDeletedAtSlot's
+// two-step update: a primary-key update of the row IDs queryUtxoRowIDs
+// already established are live.
+//
+// It carries no "deleted_slot = 0" predicate on purpose. With one, SQLite
+// plans the statement as SEARCH utxo USING INDEX
+// idx_utxo_deleted_payment_script (deleted_slot=?) from two terms upwards
+// whenever sqlite_stat1 is absent -- every live row visited and "id IN (...)"
+// evaluated per row, which is the whole-table pass issue #4067 reports, moved
+// from the lookup to the update. Populated statistics change the plan, but a
+// long-running node's utxo statistics are stale or absent, so the plan has to
+// hold without them. Liveness is filtered in queryUtxoRowIDs instead, inside
+// the same write transaction as this update.
+func markUtxosDeletedQuery(rowIDs []int64, slot int64) (string, []any) {
+	args := make([]any, len(rowIDs)+1)
+	args[0] = slot
+	for i, rowID := range rowIDs {
+		args[i+1] = rowID
+	}
+	placeholders := strings.TrimSuffix(
+		strings.Repeat("?,", len(rowIDs)),
+		",",
+	)
+	return "UPDATE utxo SET deleted_slot = ? WHERE id IN (" +
+		placeholders + ")", args
+}
+
 func queryUtxoRowIDs(
 	ctx context.Context,
 	db queryer,
@@ -1217,11 +1244,22 @@ func queryUtxoRowIDs(
 				var rowID int64
 				var txID []byte
 				var outputIdx sql.NullInt64
-				if err := rows.Scan(&rowID, &txID, &outputIdx); err != nil {
+				var deletedSlot sql.NullInt64
+				if err := rows.Scan(
+					&rowID,
+					&txID,
+					&outputIdx,
+					&deletedSlot,
+				); err != nil {
 					return err
 				}
 				if !outputIdx.Valid || outputIdx.Int64 < 0 ||
 					outputIdx.Int64 > math.MaxUint32 {
+					continue
+				}
+				// Matches the "deleted_slot = 0" predicate this lookup
+				// replaces: a NULL or already-set deleted_slot is not live.
+				if !deletedSlot.Valid || deletedSlot.Int64 != 0 {
 					continue
 				}
 				outputs, ok := wanted[string(txID)]

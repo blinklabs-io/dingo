@@ -2421,11 +2421,26 @@ all, so no floor applies there.
 
 This batched mutation resolves the primary keys of the requested
 `(tx_id, output_idx)` pairs by transaction-hash batches, filters sibling
-outputs in Go, then updates the selected keys in the caller's existing write
-transaction. The update still requires `deleted_slot = 0`, so already-spent
-rows remain unchanged. Keeping lookup and update in one write transaction
-preserves SQLite's single-writer safety while avoiding a large OR-chain whose
-`deleted_slot = 0` predicate can defeat `tx_id_output_idx`.
+outputs and already-spent rows in Go, then updates the selected keys in the
+caller's existing write transaction. Keeping lookup and update in one write
+transaction preserves SQLite's single-writer safety while avoiding a large
+OR-chain whose `deleted_slot = 0` predicate can defeat `tx_id_output_idx`.
+
+The update itself carries no `deleted_slot = 0` predicate. With one, SQLite
+plans it as a search of `idx_utxo_deleted_payment_script` on `deleted_slot`
+from two row IDs upwards whenever `sqlite_stat1` is absent, evaluating
+`id IN (...)` against every live row — the same whole-table pass the lookup
+change removes. Liveness is established by the lookup, in the same write
+transaction, so no other writer can spend a selected row in between:
+
+```sql
+-- lookup, per batch of up to 400 distinct transaction hashes
+SELECT id, tx_id, output_idx, deleted_slot
+FROM utxo WHERE tx_id IN (decode($1, 'hex'), decode($2, 'hex'));
+
+-- update, per batch of row IDs the lookup returned as live
+UPDATE utxo SET deleted_slot = $1 WHERE id IN ($2, $3);
+```
 
 ```sql
 SELECT id, tx_id, output_idx

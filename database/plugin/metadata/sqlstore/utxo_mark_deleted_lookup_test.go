@@ -16,6 +16,7 @@ package sqlstore
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -137,5 +138,62 @@ func TestMarkUtxosDeletedAtSlotUpdatesOnlyRequestedLiveRows(t *testing.T) {
 			row.outputIdx,
 		).Scan(&got))
 		require.Equal(t, want[i], got)
+	}
+}
+
+// TestMarkUtxosDeletedAtSlotUpdatePlansOnPrimaryKey pins the plan of the
+// statement MarkUtxosDeletedAtSlot actually executes -- markUtxosDeletedQuery
+// builds the only UPDATE in that method -- rather than only the lookup that
+// precedes it.
+//
+// The lookup fix alone left the update carrying "deleted_slot = 0", and with
+// no sqlite_stat1 SQLite drives that form from
+// idx_utxo_deleted_payment_script (deleted_slot=?) from two terms upwards,
+// evaluating "id IN (...)" against every live row. That is issue #4067's
+// whole-table pass moved from the first statement to the second. Statistics
+// hide it, so this test must not run ANALYZE.
+func TestMarkUtxosDeletedAtSlotUpdatePlansOnPrimaryKey(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	seedStakeRefLookupUtxos(t, store, 50_000, 256)
+
+	for _, nRows := range []int{1, 2, 4, 64, 400, 998} {
+		t.Run(fmt.Sprintf("rows=%d", nRows), func(t *testing.T) {
+			rowIDs := make([]int64, nRows)
+			for i := range rowIDs {
+				rowIDs[i] = int64(i + 1)
+			}
+
+			query, args := markUtxosDeletedQuery(rowIDs, 1)
+			plan := queryPlan(t, store.writeDB, query, args...)
+			require.Contains(
+				t, plan, "INTEGER PRIMARY KEY",
+				"the update must resolve rows by primary key: %s", plan,
+			)
+			require.NotContains(t, plan, "idx_utxo_deleted")
+
+			// Control: the guarded form this replaced, planned on the same
+			// statistics-free database.
+			guardedArgs := make([]any, 0, len(args))
+			guardedArgs = append(guardedArgs, args...)
+			guardedPlan := queryPlan(
+				t,
+				store.writeDB,
+				strings.Replace(
+					query,
+					"WHERE id IN (",
+					"WHERE deleted_slot = 0 AND id IN (",
+					1,
+				),
+				guardedArgs...,
+			)
+			if nRows >= 2 {
+				require.Contains(
+					t, guardedPlan, "idx_utxo_deleted",
+					"expected the guarded update to fall back to a "+
+						"deleted-slot index: %s", guardedPlan,
+				)
+			}
+		})
 	}
 }
