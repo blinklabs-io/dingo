@@ -57,6 +57,13 @@ type Config struct {
 	NetworkMagic uint32
 	// StartEra is the experimental start era ("dijkstra" or empty).
 	StartEra string
+	// AlonzoLovelacePerUtxoWord is Alonzo genesis' lovelacePerUTxOWord. It
+	// is supplied by the configuration layer solely so a database carrying
+	// the pre-gouroboros-v0.205.7 per-byte value in its Alonzo
+	// protocol-parameter rows can be repaired in place instead of resynced
+	// (see alonzo_pparams_unit.go). Zero means "not supplied", which leaves
+	// such a database failing closed.
+	AlonzoLovelacePerUtxoWord uint64
 	// BlobPlugin and MetadataPlugin name the storage providers that
 	// produced this database.
 	BlobPlugin     string

@@ -34,6 +34,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
@@ -609,6 +610,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			HotTxEntries:    n.config.cacheHotTxEntries,
 			HotTxMaxBytes:   n.config.cacheHotTxMaxBytes,
 		},
+		AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
+			n.config.cardanoNodeConfig, "", n.config.network,
+		),
 	}
 	db, err := database.New(dbConfig, stores)
 	if db == nil {
@@ -770,28 +774,8 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		if err := n.ledgerState.RecoverCommitTimestampConflict(); err != nil {
 			return fmt.Errorf("failed to recover database: %w", err)
 		}
-		// The deferred phase 1 pass: database.New returned before ever
-		// calling CheckNodeSettings on this path (checkCommitTimestamp
-		// fails first, and New returns its error immediately rather than
-		// continuing on to phase 1), so storage_mode, network,
-		// network_magic, start_era, and the plugin selections have not
-		// been validated or persisted for this startup at all. The
-		// database is consistent now that recovery has completed, so it
-		// is safe to run that check here, before the deferred phase 2
-		// pass below.
-		n.config.logger.Info("running deferred node settings phase 1 check")
-		if err := n.db.CheckNodeSettings(); err != nil {
-			return fmt.Errorf("node settings phase 1: %w", err)
-		}
-		// The deferred phase 2 pass from above: the database is
-		// consistent now, so a gate mismatch can no longer be confused
-		// with the repair that just ran. This still lands before history
-		// expiry, the Midnight indexer, and every network listener below,
-		// so it completes before anything can apply a block or act on a
-		// ledger feature flag phase 2 would have rejected.
-		n.config.logger.Info("running deferred node settings gate enforcement")
-		if err := n.db.EnforceNodeSettings(n.nodeSettingsGateValues()); err != nil {
-			return fmt.Errorf("node settings: %w", err)
+		if err := n.enforceRecoveredNodeSettings(); err != nil {
+			return err
 		}
 	}
 
@@ -2103,11 +2087,9 @@ func (n *Node) subscribeChainSelectorEvents() {
 
 // nodeSettingsGateValues assembles the phase 2 gate values -- the era
 // genesis hashes and the ledger-semantics gates -- from n.config, for
-// EnforceNodeSettings. It is called from two sites in Run: once for the
-// normal startup path, and once for the deferred pass that runs
-// immediately after RecoverCommitTimestampConflict when recovery was
-// needed. Factored out so both sites build the same map from a single
-// definition rather than two copies that could drift.
+// EnforceNodeSettings. Normal startup and the shared post-recovery helper use
+// the same map so ordinary Run and live restore/truncate reinitialization
+// cannot drift.
 func (n *Node) nodeSettingsGateValues() nodesettings.Values {
 	gateValues := nodesettings.Values{
 		// The two validation taints live here, not in phase 1. Only full
@@ -2148,6 +2130,23 @@ func (n *Node) nodeSettingsGateValues() nodesettings.Values {
 		gateValues["dijkstra_genesis_hash"] = nodeCfg.DijkstraGenesisHash
 	}
 	return gateValues
+}
+
+// enforceRecoveredNodeSettings runs both settings phases after commit-
+// timestamp recovery. database.New returns before phase 1 on that path, and
+// phase 2 is deliberately deferred until storage is consistent. Both normal
+// startup and live restore/truncate reinitialization call this helper so
+// neither recovery route can resume against an incompatible database.
+func (n *Node) enforceRecoveredNodeSettings() error {
+	n.config.logger.Info("running deferred node settings phase 1 check")
+	if err := n.db.CheckNodeSettings(); err != nil {
+		return fmt.Errorf("node settings phase 1: %w", err)
+	}
+	n.config.logger.Info("running deferred node settings gate enforcement")
+	if err := n.db.EnforceNodeSettings(n.nodeSettingsGateValues()); err != nil {
+		return fmt.Errorf("node settings: %w", err)
+	}
+	return nil
 }
 
 // backfillRewardLiveStake repairs databases created before the live reward

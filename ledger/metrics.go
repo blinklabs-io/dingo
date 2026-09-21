@@ -947,7 +947,7 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	m.blockPipelineBlocksValidated = promautoFactory.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "dingo_ledger_block_pipeline_blocks_validated",
-			Help: "cumulative blocks that passed the block-processing pipeline's VRF/KES validate stage; 0 unless blockPipelineValidateEnabled is set",
+			Help: "cumulative blocks that passed the block-processing pipeline's VRF/KES/OpCert validate stage; 0 unless blockPipelineValidateEnabled is set",
 		},
 	)
 	m.blockPipelineDecodeErrors = promautoFactory.NewGauge(
@@ -959,7 +959,7 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	m.blockPipelineValidationErrors = promautoFactory.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "dingo_ledger_block_pipeline_validation_errors",
-			Help: "cumulative block-processing pipeline VRF/KES validation failures, including expected Byron-era non-validation",
+			Help: "cumulative block-processing pipeline VRF/KES/OpCert validation failures, including expected Byron-era non-validation",
 		},
 	)
 	m.blockPipelineQueueDepth = promautoFactory.NewGauge(

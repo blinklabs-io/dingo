@@ -2849,6 +2849,16 @@ provide protocol-version-aware input accounting, intra-block output handling,
 and the era's aggregate limit. The explicit non-validating Musashi profile
 retains its Dijkstra validation bypass.
 
+The pinned gouroboros decoder also enforces the era-specific wire domains
+before Dingo applies a block: pointer-address component widths, DRep and
+governance-action shapes, Conway/Dijkstra multiasset zero rules, and the
+Dijkstra Leios signer-bitfield ceiling and certificate-or-transactions body
+choice. Its Alonzo rules preserve the reference per-word minimum-UTxO value,
+the Alonzo-to-Babbage transition converts that value to the per-byte unit used
+from Babbage onward, and the collateral rules use ceiling arithmetic. These
+checks are dependency-owned so Dingo does not maintain a second, potentially
+divergent decoder or rule implementation.
+
 The `ledger/eras/` package provides era-specific validation rules for each Cardano era. The default active era table is Byron through Conway. Experimental Dijkstra support is added to the active table when Dingo starts on the `musashi` network (the IOG Leios prototype testnet, matched by network name or magic 164), with `runMode: "leios"`, or with `startEra: "dijkstra"` — see `Config.experimentalDijkstraEnabled`. Keying on the network lets `dingo -n musashi` follow the Musashi testnet past the Conway-to-Dijkstra hard fork without an explicit run mode. The Dijkstra descriptor uses `github.com/blinklabs-io/gouroboros/ledger/dijkstra`, including that release's generated CDDL shape for the nullable Leios/Peras certificate slots.
 
 Several eras replace or drop an upstream `UtxoValidationRules` entry so Dingo
@@ -3422,11 +3432,12 @@ dependency across two points in the pipeline:
   registered pool's cold key is, by construction, the vkey whose Blake2b224
   hash is its pool id. `opCertFromHeader` extracts the opcert across the
   Shelley- and Babbage-family header layouts; `verifyOpCertColdSignature`
-  verifies the cold-key signature over the raw cardano-ledger `OCertSignable`
-  bytes by delegating to `gouroboros`' `ledger.VerifyOpCertSignature`, and
-  `ledger.ValidateKesPeriod`
-  (against `maxKESEvolutions` from Shelley genesis) checks expiry. Running
-  here rejects forged or expired opcerts before the block body is fetched.
+  delegates the raw cardano-ledger `OCertSignable` check to `gouroboros`'
+  `ledger.VerifyOpCertSignature`, duplicating `VerifyBlock`'s generic
+  cold-signature check as defense in depth. `ledger.ValidateKesPeriod`
+  (against `maxKESEvolutions` from Shelley genesis) adds the state-dependent
+  expiry check that the generic verifier cannot perform. Running here rejects
+  forged or expired opcerts before the block body is fetched.
   These checks now run unconditionally except for the same single
   exemption header verification uses elsewhere in this document: a slot
   an imported Mithril snapshot already covers (issue #3528). A coarse
@@ -4644,7 +4655,7 @@ When full-block header verification needs an epoch nonce that is not cached yet,
 
 CertRB serving waiters are owned by the concrete chainsync server instance as well as the connection ID; the owner-aware close callback cannot release a replacement lifetime that reused the ID.
 
-When Leios is enabled, a certifying ranking block (CertRB) carries a Leios certificate and empty transaction segments; the certified endorser block's (EB) transactions live in the EB's transaction closure, fetched asynchronously from peers over the leiosnotify / leiosfetch client protocols and cached in `Ouroboros.leiosEndorserBlocks` (keyed by slot and hash together, TTL-, entry-, and byte-bounded — a mismatched offer size or an over-budget entry is rejected rather than cached, including one reloaded from the blob-store spillover used for historical serving, which is served to the caller but left uncached when it exceeds the per-entry budget). Before retaining any fetched transaction, Dingo checks it in its received manifest position against that reference's body hash and full-transaction size; substituted, reordered, and malformed or trailing wire values are rejected. Before serving a Dijkstra block over node-to-client chainsync, `chainsyncServerBlockCbor` resolves the certified EB (`certifiedEndorserBlockHash` reads the parent block's `leios_announcement` via the header prev-hash) and splices the cached closure into the block's empty transaction segment (`spliceEndorserTxsIntoDijkstraBlock`) so clients receive complete transactions. The header is preserved byte-for-byte, so the served block's hash is unchanged; its `block_body_hash` intentionally no longer matches, which is acceptable over NtC because local clients do not re-verify the body hash.
+When Leios is enabled, a certifying ranking block (CertRB) carries a Leios certificate and empty transaction segments; the certified endorser block's (EB) transactions live in the EB's transaction closure, fetched asynchronously from peers over the leiosnotify / leiosfetch client protocols and cached in `Ouroboros.leiosEndorserBlocks` (keyed by slot and hash together, TTL-, entry-, and byte-bounded — a mismatched offer size or an over-budget entry is rejected rather than cached, including one reloaded from the blob-store spillover used for historical serving, which is served to the caller but left uncached when it exceeds the per-entry budget). Before retaining any fetched transaction, Dingo checks it in its received manifest position against that reference's body hash and full-transaction size; substituted, reordered, and malformed or trailing wire values are rejected. Before serving a Dijkstra block over node-to-client chainsync, `chainsyncServerBlockCbor` resolves the certified EB (`certifiedEndorserBlockHash` reads the parent block's `leios_announcement` via the header prev-hash) and splices the cached closure into the block's empty transaction segment (`spliceEndorserTxsIntoDijkstraBlock`) so clients receive complete transactions. The body's `leios_certificate` element is cleared as the transactions are inlined: CIP-0164 permits a certificate or transactions and not both, and `gouroboros` enforces that inside `DijkstraBlockBody.UnmarshalCBOR`, where no `VerifyConfig` Skip field reaches it, so a merged body retaining the certificate would be undecodable by any client rather than merely body-hash-stale. The header is preserved byte-for-byte, so the served block's hash is unchanged; its `block_body_hash` intentionally no longer matches, which is acceptable over NtC because local clients do not re-verify the body hash.
 
 If the closure is not yet cached when the block is served, the server waits a bounded window for the async client path to populate it — `storeLeiosEndorserBlock` wakes waiters via per-EB channels under `leiosMu`. The window is the same one ledger application uses to gate a ranking block on its endorser block: the Leios pipeline timing's `EndorserBlockWaitSlots` (the certify-by deadline) converted to wall-clock via the Shelley slot length (`LedgerState.EndorserBlockWaitDuration`), not an independent constant; `OuroborosConfig.LeiosClosureWaitTimeout` can override it. The wait is additionally bounded by the serving connection's own lifetime: `serveLeiosCertRbWithWait` registers a per-connection waiter (`registerLeiosServeWaiter`, keyed by `ConnectionId` in `Ouroboros.leiosServeWaiters`) and derives its context from `leiosConnDoneContext` wrapping that waiter's channel, so a client that disconnects while the wait is pending releases it immediately rather than leaving it parked for the rest of the window.
 
@@ -5425,6 +5436,11 @@ pump. DAG intake currently requests one transaction ID per TxSubmission round
 trip, which can reduce inbound throughput on high-latency peer links. This is
 required because gouroboros acknowledges every ID returned by a peer; support
 for acknowledging only the fetched prefix would permit batched requests.
+FIFO intake requests at most ten IDs per round, matching gouroboros's
+`MaxUnackedTxIds` window. The protocol rejects a request that would exceed that
+window and applies a byte budget to TxSubmission's pending messages, so a peer
+cannot make Dingo materialize an unbounded transaction reply before the normal
+per-reply validation below runs.
 
 TxSubmission checks reply counts and aggregate body bytes against the
 outstanding request before decoding any transaction; the aggregate budget
@@ -7799,8 +7815,8 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   | `/epoch_params` | exact-match | `min_fee_a`, `min_fee_b`, `max_block_size`, `max_tx_size`, `max_bh_size`, `key_deposit`, `pool_deposit`, `max_epoch`, `optimal_pool_count`, `protocol_major`, `protocol_minor`, `min_pool_cost` | Exact values against the effective `pparams` row for K. A wrong `max_tx_size` is the #3928 wedge class. |
   | `/epoch_params` | exact-match | `influence`, `monetary_expand_rate`, `treasury_growth_rate`, `price_mem`, `price_step` | Compared as rationals: Koios publishes `0.0577`/`7.21e-05` where Dingo stores `577/10000`/`721/10000000`. |
   | `/epoch_params` | exact-match | `max_tx_ex_mem`, `max_tx_ex_steps`, `max_block_ex_mem`, `max_block_ex_steps`, `max_val_size`, `collateral_percent`, `max_collateral_inputs` | Exact values against the effective `pparams` row. These gate phase-2 validation, where a divergence is silent until a script transaction fails. |
+  | `/epoch_params` | exact-match | `coins_per_utxo_size` | Exact era-native value against the effective `pparams` row: per word in Alonzo and per byte from Babbage onward. |
   | `/epoch_params` | exact-match | `cost_models` | Entry-for-entry equality per Plutus language. Dingo's numeric keys (`0`, `1`) map to Koios's `PlutusV1`/`PlutusV2` names and the positional arrays agree exactly (166 and 175 entries on preview). Findings name the language and first differing entry rather than dumping the array. |
-  | `/epoch_params` | unsupported | `coins_per_utxo_size` | Koios reports Alonzo's per-word figure where Dingo stores per-byte (34482 vs 4310 on preview epochs 0-2); they agree from Babbage on. Cached for reference pending its own investigation. |
   | `/epoch_params` | unsupported | `decentralisation`, `min_utxo_value`, `extra_entropy` | Pre-Babbage parameters absent from every live era's parameter struct. |
   | `/epoch_params` | unsupported | `nonce`, `block_hash` | Epoch identity, not protocol parameters. |
   | `/epoch_params` | unsupported | `pvt_*`, `pvtpp_security_group`, `dvt_*`, `committee_min_size`, `committee_max_term_length`, `gov_action_lifetime`, `gov_action_deposit`, `drep_deposit`, `drep_activity`, `min_fee_ref_script_cost_per_byte` | Conway governance and reference-script parameters. Real and worth covering, but their cross-side representation is not yet verified against a Conway-era reference chain. |
@@ -9393,6 +9409,14 @@ against a Preview-scale (or larger) node can legitimately take minutes, and
 gouroboros' defaults exist as anti-DoS guards against an untrusted remote
 peer, not a description of every real caller.
 
+The muxer accounts incomplete-message reassembly across the whole connection,
+not once per registered mini-protocol: the connection allowance is the largest
+registered protocol cap, and a protocol that cannot reserve its next segment
+fails instead of waiting behind a peer-controlled partial message. Raising the
+trusted LocalStateQuery cap to 2GiB therefore deliberately raises that trusted
+connection's aggregate allowance to 2GiB; ordinary NtN and untrusted NtC
+connections retain the default aggregate cap.
+
 That relaxation is unsafe to grant unconditionally, though: `internal/node/node.go`
 builds two separate `UseNtC` listeners from ordinary operator config -- a
 Unix socket (`cfg.SocketPath`) and a TCP listener
@@ -10726,13 +10750,46 @@ Phase 1 runs inside `database.New` (`database/commit_timestamp.go`'s
 `CheckNodeSettings`) and validates every gate a bare database open can
 supply — `storage_mode`, `network`, `network_magic`, `start_era`, the plugin
 selections, and `blob_store_id` — persisting first-start values via
-`writeGateValues`. It deliberately excludes every bool-derived gate
+`writeGateValues`. Before those ordinary gates, it validates the dedicated
+`alonzo_pparams_unit` provenance marker written by metadata migration v20.
+Before rejecting a legacy marker, phase 1 tries two idempotent repairs.
+It upgrades the marker when an exact era-only query finds no Alonzo row,
+which also closes the crash window after rollback commits deletion of the
+last Alonzo row but before recovery rewrites the marker: the following
+ordinary startup can finish the durable repair even though commit timestamps
+now match. Otherwise `repairAlonzoPParamsUnit`
+(`database/alonzo_pparams_unit.go`) rewrites the surviving rows from Alonzo
+genesis: releases up to gouroboros v0.205.5 stored
+`lovelacePerUTxOWord / 8`, so a row still holding that quotient identifies
+itself and `Config.AlonzoLovelacePerUtxoWord` supplies the exact value it
+came from. A row already holding the corrected word value is accepted, which
+is what makes the repair crash-idempotent across the row rewrites and the
+marker write, and every row must re-encode to its stored bytes before it is
+rewritten. An Alonzo-era on-chain update to key 17 was applied verbatim, so
+any other value is chain-sourced, and that row — like a missing genesis
+value or a metadata store that cannot rewrite rows — still fails closed with
+a resync instruction naming the reason.
+Because a zero `Config.AlonzoLovelacePerUtxoWord` is what "missing genesis
+value" means, supplying it is a property of every database open rather than
+of the node's own: an open that omits it turns a repairable database into a
+resync. `config/cardano.AlonzoLovelacePerUtxoWord` resolves it from a
+loaded cardano-node config or, for the sites that hold only a config path
+and network, by loading one, and returns zero on every failure.
+`database/lifecycle` sits under the database import boundary and cannot
+load one at all, so its validating open takes the value through
+`RestoreStorageConfig` from whichever composition root drove the restore.
+`internal/architecture`'s
+`TestDatabaseConfigSuppliesAlonzoLovelacePerUtxoWord` fails any production
+`database.Config` literal that omits the field, since no single open's own
+test can speak for the others.
+It deliberately excludes every bool-derived gate
 (`history_expiry_active`, `historical_validation_relaxed`,
 `strict_utxo_validation_relaxed`, `pledge_leverage`, `full_pot_rewards`,
 `delegator_inactivity`, `min_pool_margin`): `database.Config` has two callers
 that construct a partial config with only `DataDir`, `Logger`,
-`StorageMode`, and `Network` set (`mithril/sync.go`,
-`database/lifecycle/restore.go`), and a bool's zero value cannot be told
+`StorageMode`, `Network`, and `AlonzoLovelacePerUtxoWord` set
+(`mithril/sync.go`, `database/lifecycle/restore.go`), and a bool's zero
+value cannot be told
 apart from "the operator turned it off." Computing
 `historical_validation_relaxed` from a zero `validateHistorical` would
 fabricate a relaxed ("on") taint against every normally-created database;
@@ -10787,8 +10844,9 @@ first call site only logs that enforcement is deferred and does not call
 known-inconsistent commit state, and evaluating gates against it could
 report a mismatch that has nothing to do with the operator's configuration
 and would mask the recovery path that is about to repair that same
-inconsistency. The deferred call runs later in the same `Run`, immediately
-after `n.ledgerState.RecoverCommitTimestampConflict()` succeeds and before
+inconsistency. The deferred call runs later in the same `Run`, through the
+shared `Node.enforceRecoveredNodeSettings` helper immediately after
+`n.ledgerState.RecoverCommitTimestampConflict()` succeeds and before
 `n.config.historyExpiry.Enabled` starts the pruner, the Midnight indexer is
 created, or any network listener starts — so it still lands before
 anything can apply a block or act on a ledger feature flag phase 2 would
@@ -10804,6 +10862,14 @@ startup happened to reach, not the epoch it actually took effect in. A
 mismatch found by the deferred call fails startup the same way the normal
 path's does, by returning an error out of `Run`, which unwinds through the
 same `started` cleanup stack every other startup failure does.
+
+Live restore/truncate reinitialization uses the same post-recovery helper, so
+its independent commit-timestamp recovery route cannot resume components
+without both settings phases. Recovery also reconciles migration v20's
+conservative marker: it changes `legacy-byte-v0` to `word-v1` only when the
+successful rollback left no Alonzo protocol-parameter row at all. A surviving
+Alonzo row remains legacy and fails closed; a missing or unknown marker is
+never inferred.
 
 The recovery path defers phase 1 the same way, and for a reason that is
 easy to miss: `database.New`'s `init` calls `checkCommitTimestamp` before
@@ -12284,11 +12350,12 @@ validation change).
 `--block-pipeline-validate-enabled`; default off) requires
 `BlockPipelineEnabled` and adds two checks to replay:
 
-- gouroboros validate workers verify the block-local VRF proof and KES
-  signature with `ledger.VerifyBlock`;
-- after an item passes that stage, `decodeReadChainBatch` verifies Dingo's
-  remaining stateless OpCert contract: the cold-key Ed25519 signature and
-  `MaxKESEvolutions` expiry. OpCert counter monotonicity remains a stateful
+- gouroboros validate workers verify the block-local VRF proof, KES signature,
+  and OpCert cold-key signature with `ledger.VerifyBlock`;
+- after an item passes that stage, `decodeReadChainBatch` calls
+  `verifyOpCertHeaderCrypto`, which repeats the cold-key signature check as
+  defense in depth and adds the `MaxKESEvolutions` expiry check the generic
+  stage cannot perform. OpCert counter monotonicity remains a stateful
   read-before-write check in `ledgerProcessBlock`.
 
 `NewLedgerState` fails startup when this stage is enabled without a nonzero

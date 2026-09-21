@@ -74,6 +74,7 @@ import (
 	"github.com/blinklabs-io/dingo/bark"
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainsync"
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
@@ -693,6 +694,9 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 	if dbNeedsRecovery {
 		if err := n.ledgerState.RecoverCommitTimestampConflict(); err != nil {
 			return fmt.Errorf("failed to recover database: %w", err)
+		}
+		if err := n.enforceRecoveredNodeSettings(); err != nil {
+			return err
 		}
 	}
 
@@ -1334,6 +1338,9 @@ func (n *Node) databaseConfig() *database.Config {
 			HotTxEntries:    n.config.cacheHotTxEntries,
 			HotTxMaxBytes:   n.config.cacheHotTxMaxBytes,
 		},
+		AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
+			n.config.cardanoNodeConfig, "", n.config.network,
+		),
 	}
 }
 
@@ -1637,6 +1644,9 @@ func (n *Node) Restore(
 		lifecycle.RestoreStorageConfig{
 			Blob:     n.config.pluginSelections[plugin.CapabilityStorageBlob].Config,
 			Metadata: n.config.pluginSelections[plugin.CapabilityStorageMetadata].Config,
+			AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
+				n.config.cardanoNodeConfig, "", n.config.network,
+			),
 		},
 	)
 	if err != nil {
