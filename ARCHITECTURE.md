@@ -8051,6 +8051,29 @@ second sync:
     request independently, doubling the aggregate half of the Koios quota
     budget. Keying per epoch rather than serializing all aggregate fetches
     keeps the queues independent except on the epoch they share.
+  - **Phase-scoped check results (dingo #4339).** Both queues write the same
+    `check_epoch_status` row and the same `check_mismatches` rows for an
+    epoch, at unrelated times, so neither the verdict nor the evidence can be
+    owned by whichever phase wrote last. `check_epoch_status` therefore
+    carries a status and mismatch count per phase (`aggregate_status`/
+    `aggregate_mismatch_count`, `account_status`/`account_mismatch_count`)
+    and recomputes the `status`/`mismatch_count` columns every reader already
+    uses as their merge — `FAIL` if either phase failed, else `ERROR` if
+    either errored, else `PASS`. A write carries only the phases it ran: the
+    aggregate phase leaves `account_status` empty and the stored account
+    result passes through untouched. `check_mismatches` rows carry the same
+    distinction in a `scope` column, tagged from provenance rather than
+    derived from `category`, which cannot separate the phases because both
+    emit `dingo_db_error`; `CommitEpochMismatches` deletes and reinserts only
+    the scopes its caller recomputed. Together these give the two properties
+    a single column cannot hold at once: neither phase's pass erases the
+    other's failure, and each phase's failure clears as soon as that same
+    phase passes again, rather than outliving the divergence that caused it.
+    Cache files predating the split migrate additively; the pre-existing
+    verdict and mismatch rows are attributed to the aggregate phase, which
+    re-establishes that scope on its next pass for every queued epoch,
+    whereas an unclearable account verdict would be permanently sticky in the
+    accounts-disabled mode where nothing writes that scope.
 - **Composition** (`node.go`, `node_koiosparity.go`, `node_shutdown.go`,
   `node_lifecycle.go`): `Node.Run()` configures `n.snapshotMgr` and installs
   both epoch-boundary reward-snapshot hooks (`SetEpochBoundarySnapshotStakeHook`/
