@@ -12116,7 +12116,15 @@ in a read-only transaction; a separate short write transaction re-reads the
 owning `RewardSnapshot` and persists only if its captured/boundary slots and
 content still match, no rollback generation spanning performance blocks, ADA
 pots, protocol state, and account certificate history changed, and no non-empty
-result was concurrently persisted or applied. Completion is inferred from the
+result was concurrently persisted or applied. If retention pruned the owning
+snapshot's per-credential `reward_stake_input` rows, the read phase reconstructs
+and reconciles them without writing, then carries them in the computed
+`stakeRewardApplication`; only the guarded short write phase persists those
+rows with the outputs and ADA-pot update. The synchronous boundary path saves
+the same reconstructed rows atomically in its existing rollover transaction.
+Equal-stake reconciliation uses pool hash, credential tag, and staking key as a
+total tie-break, so metadata iteration order cannot change the recovered reward
+basis. Completion is inferred from the
 persisted `reward_ada_pots.rewards` total plus the output-row set rather than an
 explicit marker, so an epoch whose total reward pot is legitimately zero carries
 no distinct completion sentinel and is re-derived idempotently by the precompute
