@@ -729,21 +729,6 @@ var flagSpecs = []flagSpec{
 		"min-pool-margin",
 		"CIP-23 minimum pool margin in basis points [0,10000] (150 = 1.5%); 0 disables (enable only where every node also enables it)",
 	),
-	boolFlag(
-		"TrustCanonicalWithdrawalOnRewardMismatch",
-		"trust-canonical-withdrawal-on-reward-mismatch",
-		"on a repeated deterministic reward-withdrawal mismatch, trust the canonical block's withdrawal amount over this node's own reward reconstruction for that credential instead of retrying forever (diagnostic/validation use; off by default)",
-	),
-	boolFlag(
-		"TrustCanonicalTreasuryValueOnMismatch",
-		"trust-canonical-treasury-value-on-mismatch",
-		"on a repeated deterministic treasury-value mismatch, trust the canonical block's supplied treasury value over this node's own network-state treasury total instead of retrying forever (diagnostic/validation use; off by default)",
-	),
-	boolFlag(
-		"TrustCanonicalReferenceScriptOnMismatch",
-		"trust-canonical-reference-script-on-mismatch",
-		"on a repeated deterministic malformed-reference-script rejection, trust that a canonical block a peer already accepted is valid and apply it instead of retrying forever (diagnostic/validation use; off by default)",
-	),
 	// CIP-0163 full-pot reward distribution (consensus-affecting; default off)
 	boolFlag(
 		"FullPotRewardsEnabled",

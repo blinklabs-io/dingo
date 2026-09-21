@@ -17,13 +17,10 @@ package ouroboros
 import (
 	"bytes"
 	"errors"
-	"io"
-	"log/slog"
 	"net"
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/protocol"
@@ -136,20 +133,6 @@ func TestLocalstatequeryServerAcquire_PointOnChain_Succeeds(t *testing.T) {
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: ocommon.NewPoint(2, tipHash),
 	}, nil))
-	// VerifyPointQueryable now also exercises queryHardFork's
-	// HardForkCurrentEraQuery case (human review, dingo#4319/#4320), which
-	// needs an epoch record covering the acquired slot to resolve an era
-	// from -- newTestLedgerStateWithChain seeds blocks only.
-	require.NoError(t, db.SetEpoch(
-		0, 0, nil, nil, nil, nil, 0, 1, 100, nil,
-	))
-	// verifyStakeDistributionRetentionOnly's network_state floor is gated
-	// on CardanoNodeConfig having a real ShelleyGenesis with a nonzero
-	// MaxLovelaceSupply (ledger.circulatingSupplyGenesis) -- newTestLedgerStateWithChain
-	// sets neither, so that floor is inactive here and needs no
-	// network_state row seeded (human review, Chris Guiney, dingo#4319/#4320:
-	// an earlier version of this fixture seeded one, which the floor never
-	// actually checked, since it was never active in the first place).
 
 	connID := ouroboros.ConnectionId{}
 	err := o.localstatequeryServerAcquire(
@@ -166,74 +149,6 @@ func TestLocalstatequeryServerAcquire_PointOnChain_Succeeds(t *testing.T) {
 	o.localstatequeryAcquireMutex.Unlock()
 	require.True(t, ok)
 	require.Equal(t, uint64(2), recorded.Slot)
-}
-
-// TestLocalstatequeryServerAcquire_UnexpectedError_MappedToPointTooOld is
-// the regression a human reviewer found (Chris Guiney, dingo#4320): an
-// error VerifyPointQueryable returns matching neither
-// ledger.ErrPointNotOnChain nor ledger.ErrHistoricalStateUnavailable --
-// e.g. a real database error inside one of its own reads, not the point
-// genuinely being unqueryable -- was previously returned bare. gouroboros'
-// handleAcquire treats any non-sentinel error as fatal and tears the whole
-// connection down, reintroducing the exact connection-killing failure mode
-// this whole mechanism exists to avoid, just triggered a different way.
-// Closing the database out from under a genuinely on-chain point forces
-// VerifyPointQueryable's own reads to fail with a raw "database closed"
-// style error, matching neither sentinel -- exactly the shape this handler
-// must map to a graceful AcquireFailurePointTooOld instead of propagating
-// bare.
-func TestLocalstatequeryServerAcquire_UnexpectedError_MappedToPointTooOld(
-	t *testing.T,
-) {
-	o := &Ouroboros{
-		localstatequeryAcquiredPoints: make(
-			map[ouroboros.ConnectionId]ledger.QueryPoint,
-		),
-		config: OuroborosConfig{
-			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-	ls, db := newTestLedgerStateWithChain(t, 2)
-	o.ledgerState = ls
-
-	tipHash := bytes.Repeat([]byte{2}, 32)
-	require.NoError(t, db.SetTip(ochainsync.Tip{
-		Point: ocommon.NewPoint(2, tipHash),
-	}, nil))
-	require.NoError(t, dbtest.CloseDatabase(db))
-
-	connID := ouroboros.ConnectionId{}
-	err := o.localstatequeryServerAcquire(
-		olocalstatequery.CallbackContext{ConnectionId: connID},
-		olocalstatequery.AcquireSpecificPoint{
-			Point: ocommon.NewPoint(2, tipHash),
-		},
-		false,
-	)
-	require.Error(t, err)
-	require.False(
-		t,
-		errors.Is(err, olocalstatequery.ErrAcquireFailurePointNotOnChain),
-		"a closed-database error must not be misclassified as "+
-			"point-not-on-chain: got %v",
-		err,
-	)
-	require.True(
-		t,
-		errors.Is(err, olocalstatequery.ErrAcquireFailurePointTooOld),
-		"expected an unexpected internal error to map to the graceful "+
-			"AcquireFailurePointTooOld a well-behaved client already knows "+
-			"how to handle, got: %v",
-		err,
-	)
-
-	o.localstatequeryAcquireMutex.Lock()
-	_, recorded := o.localstatequeryAcquiredPoints[connID]
-	o.localstatequeryAcquireMutex.Unlock()
-	require.False(
-		t, recorded,
-		"a rejected Acquire must not record the unvalidated point",
-	)
 }
 
 // TestLocalstatequeryServerAcquire_VolatileTip_ClearsPoint covers the

@@ -74,12 +74,9 @@ func (ls *LedgerState) queryShelleyCurrentProtocolParams(
 		txn = ls.db.Transaction(false)
 		defer txn.Release()
 	}
-	targetEpoch, found, err := ls.resolveAsOfEpoch(txn, at)
+	targetEpoch, err := ls.resolveAsOfEpoch(txn, at)
 	if err != nil {
 		return nil, err
-	}
-	if !found {
-		return nil, errEpochNotResolved(at)
 	}
 	liveEpoch := snapshot.currentEpoch.EpochId
 	if targetEpoch == liveEpoch {
