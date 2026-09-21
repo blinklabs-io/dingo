@@ -1847,11 +1847,16 @@ WHERE credential_tag = ? AND staking_key = ?`,
 						if s.logger != nil {
 							s.logger.Warn(
 								"account reward rollback underflow; clamping to zero and continuing",
-								"component", "database",
-								"staking_key", hex.EncodeToString(item.key),
-								"credential_tag", item.tag,
-								"current_reward", current,
-								"delta_amount", item.amount,
+								"component",
+								"database",
+								"staking_key",
+								hex.EncodeToString(item.key),
+								"credential_tag",
+								item.tag,
+								"current_reward",
+								current,
+								"delta_amount",
+								item.amount,
 							)
 						}
 						value = 0

@@ -174,7 +174,11 @@ func TestSQLiteRegistry(t *testing.T) {
 	require.Equal(t, 19, registry[18].Version)
 	require.Equal(t, assetNameHexColumnDropSchemaRelease, registry[18].Name)
 	require.Equal(t, 20, registry[19].Version)
-	require.Equal(t, accountRewardReconciledAmountSchemaRelease, registry[19].Name)
+	require.Equal(
+		t,
+		accountRewardReconciledAmountSchemaRelease,
+		registry[19].Name,
+	)
 	require.Equal(t, []string{
 		"ALTER TABLE `account_reward_delta` ADD COLUMN `reconciled_amount` text",
 	}, registry[19].SQL["sqlite"].Expand)

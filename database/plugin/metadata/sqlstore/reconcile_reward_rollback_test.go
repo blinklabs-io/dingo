@@ -139,7 +139,9 @@ func TestDeleteAccountRewardsAfterSlotIgnoresReconciledAmountOnRollback(
 // disaster-recovery rollback of arbitrary depth; a hard failure here would
 // make that promise false for any database old enough to carry such a gap.
 // Clamping to zero and continuing is the documented, deliberate trade-off.
-func TestDeleteAccountRewardsAfterSlotClampsUnexplainableUnderflow(t *testing.T) {
+func TestDeleteAccountRewardsAfterSlotClampsUnexplainableUnderflow(
+	t *testing.T,
+) {
 	t.Parallel()
 	store := newManagementTestStore(t)
 	key := bytes.Repeat([]byte{0x9b}, 28)
