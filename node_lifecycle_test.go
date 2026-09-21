@@ -382,7 +382,15 @@ func TestLiveLifecycleRebuildPreservesLeiosHandlers(t *testing.T) {
 	require.NoError(t, n.ouroboros().SetLeiosPipeline(pipeline))
 
 	before := n.ouroboros()
-	require.NoError(t, n.reinitializeNetworkingCore(context.Background()))
+	// Held for the same reason Restore and Truncate hold it around this
+	// call: the node is live here, and its ledger read-chain loop reads
+	// n.chainsyncState under this lock once per gather pass (see
+	// reinitializeNetworkingCore's doc comment). Reassigning it unlocked
+	// races that reader.
+	n.liveLifecycleMu.Lock()
+	rebuildErr := n.reinitializeNetworkingCore(context.Background())
+	n.liveLifecycleMu.Unlock()
+	require.NoError(t, rebuildErr)
 
 	require.NotSame(t, before, n.ouroboros())
 	require.NotNil(

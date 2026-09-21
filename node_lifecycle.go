@@ -887,6 +887,14 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 // peerGov. Must run after reinitializeBackgroundManagers (mempool/
 // chainsyncState come after the background managers in Run()'s order,
 // though nothing here actually depends on them).
+//
+// Callers must hold n.liveLifecycleMu. Every field reassigned here is read
+// by live background goroutines that take that lock to see a stable set --
+// withLiveChainsyncState for n.chainsyncState, WithLiveComponents for the
+// wider group -- and the ledger's read-chain loop reaches n.chainsyncState
+// that way once per gather pass, through GetActiveConnectionFunc. Restore
+// and Truncate hold it across the whole quiesce-through-reinitialize
+// sequence; a caller that reaches this directly has to take it too.
 func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	mempoolSelection := n.config.pluginSelections[plugin.CapabilityMempool]
 	var err error
