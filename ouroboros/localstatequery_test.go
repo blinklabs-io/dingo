@@ -26,11 +26,39 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/protocol"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	"github.com/stretchr/testify/require"
 )
+
+func TestReleaseLocalStateQueryAcquiredPointOwnerKeepsReplacement(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	connID := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001},
+		RemoteAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3002},
+	}
+	oldOwner := olocalstatequery.NewServer(protocol.ProtocolOptions{}, nil)
+	replacement := olocalstatequery.NewServer(protocol.ProtocolOptions{}, nil)
+	o := &Ouroboros{
+		localstatequeryAcquiredPoints: map[ouroboros.ConnectionId]ledger.QueryPoint{
+			connID: {Slot: 100, Hash: []byte{0xAB}},
+		},
+		localstatequeryOwners: map[ouroboros.ConnectionId]*olocalstatequery.Server{
+			connID: replacement,
+		},
+	}
+
+	o.ReleaseLocalStateQueryAcquiredPointOwner(connID, oldOwner)
+	require.True(t, o.HasLocalStateQueryAcquiredPointForTesting(connID))
+
+	o.ReleaseLocalStateQueryAcquiredPointOwner(connID, replacement)
+	require.False(t, o.HasLocalStateQueryAcquiredPointForTesting(connID))
+}
 
 // TestLocalstatequeryServerAcquire_PointAheadOfTip_GracefulFailure is the
 // blinklabs-io/dingo#4156 regression. Before this fix, localstatequeryServerAcquire
@@ -49,7 +77,9 @@ import (
 // its server (handleAcquire/handleReAcquire) translates into a wire-level
 // AcquireFailure reply -- not with an arbitrary error gouroboros has no
 // graceful handling for.
-func TestLocalstatequeryServerAcquire_PointAheadOfTip_GracefulFailure(t *testing.T) {
+func TestLocalstatequeryServerAcquire_PointAheadOfTip_GracefulFailure(
+	t *testing.T,
+) {
 	o := &Ouroboros{
 		localstatequeryAcquiredPoints: make(
 			map[ouroboros.ConnectionId]ledger.QueryPoint,
@@ -323,7 +353,10 @@ func TestLocalstatequeryProtocol_PointAheadOfTip_ConnectionSurvivesAndStaysUsabl
 	)
 	require.True(
 		t,
-		errors.Is(acquireErr, olocalstatequery.ErrAcquireFailurePointNotOnChain),
+		errors.Is(
+			acquireErr,
+			olocalstatequery.ErrAcquireFailurePointNotOnChain,
+		),
 		"expected a graceful AcquireFailurePointNotOnChain reply over the "+
 			"wire, got: %v",
 		acquireErr,

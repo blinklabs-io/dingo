@@ -426,8 +426,9 @@ WHERE epoch = ?;
 INSERT INTO reward_snapshot (
     epoch, snapshot_type, total_active_stake, total_pool_count,
     total_delegators, captured_slot, boundary_slot, epoch_nonce,
-    protocol_version, authoritative, calculation_version
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    protocol_version, authoritative, calculation_version,
+    excluded_active_stake
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (epoch, snapshot_type) DO UPDATE SET
     total_active_stake = excluded.total_active_stake,
     total_pool_count = excluded.total_pool_count,
@@ -437,7 +438,8 @@ ON CONFLICT (epoch, snapshot_type) DO UPDATE SET
     epoch_nonce = excluded.epoch_nonce,
     protocol_version = excluded.protocol_version,
     authoritative = excluded.authoritative,
-    calculation_version = excluded.calculation_version
+    calculation_version = excluded.calculation_version,
+    excluded_active_stake = excluded.excluded_active_stake
 RETURNING id;
 
 -- name: DeleteProvisionalRewardSnapshot :exec
@@ -448,8 +450,9 @@ WHERE epoch = ? AND snapshot_type = ? AND authoritative = false;
 INSERT INTO reward_snapshot (
     epoch, snapshot_type, total_active_stake, total_pool_count,
     total_delegators, captured_slot, boundary_slot, epoch_nonce,
-    protocol_version, authoritative, calculation_version
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    protocol_version, authoritative, calculation_version,
+    excluded_active_stake
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (epoch, snapshot_type) DO NOTHING
 RETURNING id;
 
@@ -463,13 +466,15 @@ SET total_active_stake = ?,
     epoch_nonce = ?,
     protocol_version = ?,
     authoritative = FALSE,
-    calculation_version = ?
+    calculation_version = ?,
+    excluded_active_stake = ?
 WHERE epoch = ? AND snapshot_type = ? AND authoritative = FALSE;
 
 -- name: GetRewardSnapshot :one
 SELECT id, epoch, snapshot_type, total_active_stake, total_pool_count,
        total_delegators, captured_slot, boundary_slot, epoch_nonce,
-       protocol_version, authoritative, calculation_version
+       protocol_version, authoritative, calculation_version,
+       excluded_active_stake
 FROM reward_snapshot
 WHERE epoch = ? AND snapshot_type = ?;
 
@@ -923,7 +928,7 @@ FROM utxo
 WHERE tx_id = ? AND output_idx = ?;
 
 -- name: GetAssetsByUtxoID :many
-SELECT name, name_hex, policy_id, fingerprint, id, utxo_id, amount
+SELECT name, policy_id, fingerprint, id, utxo_id, amount
 FROM asset
 WHERE utxo_id = ?
 ORDER BY id;
@@ -1006,12 +1011,12 @@ RETURNING id;
 
 -- name: CreateAsset :one
 INSERT INTO asset (
-    name, name_hex, policy_id, fingerprint, utxo_id, amount
-) VALUES (?, ?, ?, ?, ?, ?)
+    name, policy_id, fingerprint, utxo_id, amount
+) VALUES (?, ?, ?, ?, ?)
 RETURNING id;
 
 -- name: GetAssetByPolicyAndName :one
-SELECT name, name_hex, policy_id, fingerprint, id, utxo_id, amount
+SELECT name, policy_id, fingerprint, id, utxo_id, amount
 FROM asset
 WHERE policy_id = ? AND name = ?
 ORDER BY id
@@ -1088,8 +1093,8 @@ RETURNING id;
 
 -- name: ImportAsset :exec
 INSERT INTO asset (
-    name, name_hex, policy_id, fingerprint, utxo_id, amount
-) VALUES (?, ?, ?, ?, ?, ?)
+    name, policy_id, fingerprint, utxo_id, amount
+) VALUES (?, ?, ?, ?, ?)
 ON CONFLICT (name, policy_id, utxo_id) DO NOTHING;
 
 -- name: GetUtxoIDByRef :one

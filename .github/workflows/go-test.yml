@@ -1,9 +1,39 @@
-name: go-test
+name: ci
 
-# Runs on pull requests and on pushes to main. Both matter: the pull-request
-# run is where breakage should be caught, and the main run is the backstop that
-# catches anything a merge conflict, a stale base, or a paths filter let
-# through. Release-tag validation lives in publish.yml.
+# The pull-request pipeline. Every stage a change has to clear before it can
+# merge lives here, in dependency order, so a cheap failure costs one runner
+# instead of ten.
+#
+# Shape:
+#
+#   lint, govulncheck                     2 runners, ~3 min
+#     -> go-test (Linux, quick)           1 runner,  ~8 min
+#       -> go-test (Linux)                    services, no race
+#          go-test (Linux, race)              race, no services
+#          go-test (Windows)
+#          go-test (macOS)               4 runners, 5-35 min
+#         -> build-<os>, docker          gated on the SAME OS's tests
+#
+# Nothing fans out until lint and the cheap Linux suite are green, and a
+# platform's build never starts until that platform's tests pass. A failure in
+# any job fails the run, so the pipeline's conclusion is the merge signal.
+#
+# Why it is shaped this way: blinklabs-io is on the free plan, which allows 20
+# concurrent jobs across every repository in the organization and 5 concurrent
+# macOS jobs. dingo merges ~20 times a day with 57% of merges landing within
+# 15 minutes of the one before, and the previous flat fan-out (10 jobs on a
+# pull request, 16 on a merge, all starting at once) drove dingo alone to the
+# full 20-job cap and pushed p90 queue waits to 17 minutes here and 22 minutes
+# in ouroboros-mock. Staging the work keeps a single change under ~4
+# concurrent jobs for all but its last minutes.
+#
+# This workflow does not run on main. Pushes to main and to a tag run
+# publish.yml, which carries the same stages ahead of the publishing jobs; the
+# only difference between a main push and a release is signing and publishing
+# the final artifacts. The stages are deliberately duplicated between the two
+# files rather than factored into a reusable workflow, because `needs:` cannot
+# cross workflow files and a called workflow would rename every check context.
+# internal/docsparity's TestPipelineStagesMatch fails when the two drift.
 #
 # Windows and macOS were dropped from pull-request CI in #3070 and race
 # instrumentation was left to release time, to reduce Actions usage. Dingo is a
@@ -11,46 +41,187 @@ name: go-test
 # more than it saved: go-test-platforms failed on four consecutive main pushes
 # (#3728, Windows-only DevNet breakage), and the v0.70.3 tag was abandoned when
 # the release-only race gate failed in run 33315370942 with the tag already
-# pushed. Both classes are visible on a pull request again here.
+# pushed. Both classes are visible on a pull request here.
 on:
   pull_request:
-  push:
-    branches: ['main']
-  # go-test-platforms.yml carried the platform jobs and offered this so a
-  # branch could be checked before merging. The jobs run on every pull request
-  # now, but keep the manual entry point for a branch with no pull request yet.
+  # Keeps a manual entry point for a branch with no pull request yet.
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  # Pull-request runs still supersede themselves: a new push to the branch
-  # cancels the run for the commit it replaced, so a force-push or a rapid
-  # series of pushes cannot accumulate runners.
-  #
-  # Main pushes must not supersede each other. The previous fallback to
-  # github.ref put every main push in one group, and merges land faster than
-  # this suite finishes, so each merge cancelled the run in flight: 8 of the
-  # 10 main runs before this change ended cancelled. cancel-in-progress: false
-  # would not have fixed it, because GitHub keeps at most one pending run per
-  # group and cancels the earlier pending one, so intermediate commits would
-  # have been skipped by superseding instead of by cancellation. github.run_id
-  # is unique per run and defined on every event, so each main push and each
-  # workflow_dispatch gets a group of its own and runs to completion. That is
-  # what makes the main run a backstop for every merged commit rather than
-  # only for whichever commit happens to be last in a burst.
+  # A new push to the branch cancels the run for the commit it replaced, so a
+  # force-push or a rapid series of pushes cannot accumulate runners.
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
-  # Linux job with Postgres, MySQL and MinIO (fake s3) services for integration tests
+  # Stage 1. The cheapest signal in the pipeline and the gate for everything
+  # below it: golangci-lint typechecks the whole tree, so a change that does
+  # not compile is rejected here for ~3 runner-minutes rather than after four
+  # platform jobs have each spent twenty.
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+        with:
+          go-version: 1.26.x
+          cache: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-1.26.x-
+      # One step per Go module, plus a second root-module run for the
+      # windows build constraint.
+      #
+      # These are steps of a single `lint` job rather than a matrix on
+      # purpose. Branch protection matches a required context by name, and a
+      # matrix would render `lint (root)`, `lint (examples/dingo-gov-lens)`
+      # and so on.
+      #
+      # internal/docsparity's TestLintCoversEveryGoModule derives the module
+      # list from the tree and fails until every go.mod has a step here, so a
+      # nested module added later cannot go unlinted just because these steps
+      # are written out by hand.
+      - name: golangci-lint (root)
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0 https://github.com/golangci/golangci-lint-action/releases/tag/v9.3.0
+      - name: golangci-lint (internal/test/antithesis)
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0 https://github.com/golangci/golangci-lint-action/releases/tag/v9.3.0
+        with:
+          working-directory: internal/test/antithesis
+      - name: golangci-lint (examples/dingo-gov-lens)
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0 https://github.com/golangci/golangci-lint-action/releases/tag/v9.3.0
+        with:
+          working-directory: examples/dingo-gov-lens
+      # Files behind `//go:build windows` are excluded from the linux build,
+      # so every linter above is blind to them. keystore/keyfile_windows.go is
+      # the bulk of that code.
+      - name: golangci-lint (root, GOOS=windows)
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0 https://github.com/golangci/golangci-lint-action/releases/tag/v9.3.0
+        env:
+          GOOS: windows
+      # Folded in from the retired config-parity.yml pull-request job. The
+      # network configs under config/cardano/ exist twice: embedded in the
+      # binary here (config/cardano/embed.go), and in
+      # blinklabs-io/docker-cardano-configs, which the release image ships as
+      # /opt/cardano/config/. CARDANO_NETWORK=<net> resolves to one or the
+      # other depending on how dingo was deployed, so the same network name
+      # means the same chain only while the two stay identical.
+      #
+      # Compares against the cardano-configs image tag the Dockerfile pins,
+      # which is what a built image actually contains, so a config change is
+      # satisfiable inside one pull request: bump the pinned tag and update
+      # config/cardano/ in the same commit. The scheduled drift report against
+      # that repository's main branch stays in config-parity.yml.
+      #
+      # Run through the Makefile so this CI check and `make config-parity`
+      # cannot drift apart.
+      - name: config-parity
+        run: make config-parity
+
+  # Stage 1, alongside lint. Deliberately not a dependency of anything: a new
+  # advisory landing upstream must not block every merge in the repository
+  # while it is triaged. It still fails the run, which is the same standing it
+  # had as a job of the old go-test workflow.
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          # This job runs `go run ...@latest`, so third-party code executes in
+          # the workspace. Do not leave GITHUB_TOKEN in the local git config.
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+        with:
+          go-version: 1.26.x
+          cache: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-1.26.x-
+      - name: govulncheck
+        # govulncheck exits non-zero only for vulnerabilities this module
+        # actually calls, so the unreachable findings it also prints (currently
+        # GO-2026-5932, an unmaintained golang.org/x/crypto package with no
+        # fixed version) do not fail the job.
+        # Both the toolchain and the scanner float on purpose: a pin on either
+        # one parks a new advisory behind a stale version instead of forcing it
+        # to be fixed. Run through the Makefile so this CI check and
+        # `make govulncheck` cannot drift apart.
+        run: make govulncheck
+
+  # Stage 2. The whole suite on SQLite with no race instrumentation and no
+  # service containers -- the same command the macOS job runs, which completes
+  # there in about 5 minutes. This is the gate that decides whether it is worth
+  # spending four runners on the stage below: a broken test reaches a human
+  # after one runner rather than after ~83 runner-minutes of platform and race
+  # coverage.
+  go-test-linux-quick:
+    name: go-test (Linux, quick)
+    needs: [lint]
+    runs-on: ubuntu-latest
+    # Backstop against a wedged runner only, replacing GitHub's 360-minute
+    # default. The per-package -timeout below is the diagnostic.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+        with:
+          go-version: 1.26.x
+          cache: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-1.26.x-
+      - name: go-build
+        run: go build -tags dingo_extra_plugins ./cmd/dingo
+      - name: go-build-minimal
+        # The default build has no plugin build tags, so a change that only
+        # compiles with dingo_extra_plugins breaks the released binary. Cheap
+        # enough to belong in the gate rather than below it.
+        run: go build ./cmd/dingo
+      - name: sqlc-generation-drift
+        # Checked-in sqlc output going stale is a one-line failure; there is no
+        # reason to find it after the expensive stage.
+        run: make sql-check
+      - name: go-test
+        # No services and no -race: the Postgres and MySQL variants in
+        # internal/test/conformance gate on POSTGRES_PASSWORD / MYSQL_DSN and
+        # friends and t.Skip when unset, so this replays vectors against SQLite
+        # only. go-test (Linux) and go-test (Linux, race) below cover the rest.
+        run: go test -tags dingo_extra_plugins -ldflags="-s -w" -timeout 30m ./...
+
+  # Stage 3. Linux with Postgres, MySQL and MinIO (fake s3) services.
+  #
+  # Do not add a matrix dimension to this job or rename it without updating
+  # branch protection: GitHub appends the matrix combination to a job name
+  # that contains no expression, so this renders as the required context
+  # "go-test (Linux) (1.26.x)".
   go-test-linux:
-    # Do not add a matrix dimension to this job or rename it without updating
-    # branch protection: GitHub appends the matrix combination to a job name
-    # that contains no expression, so this renders as the required context
-    # "go-test (Linux) (1.26.x)".
     name: go-test (Linux)
+    needs: [go-test-linux-quick]
     strategy:
       matrix:
         go-version: [1.26.x]
@@ -139,10 +310,6 @@ jobs:
             ${{ runner.os }}-go-${{ matrix.go-version }}-
       - name: go-build
         run: go build -tags dingo_extra_plugins ./cmd/dingo
-      - name: go-build-minimal
-        run: go build ./cmd/dingo
-      - name: sqlc-generation-drift
-        run: make sql-check
       - name: install-mariadb-client
         # database/plugin/metadata/mysql's backup/restore CLI arg mapping
         # (mysqlSSLArgs) targets the mysqldump/mysql client this repo's own
@@ -174,33 +341,35 @@ jobs:
         # producer is forging and the syncer is connected over loopback.
         run: make test-live-lifecycle
       - name: go-test
-        # No race instrumentation here on purpose: this is the fast Linux
-        # signal, and go-test-linux-race covers the same packages in parallel.
-        # -timeout is 30m rather than 20m because this job's service DSNs put
-        # internal/test/conformance on real Postgres and MySQL as well as
-        # SQLite, which took 917s of a 20m budget in run 33521250798.
-        run: go test -tags dingo_extra_plugins -ldflags="-s -w" -timeout 30m ./...
+        # No race instrumentation here on purpose: go-test (Linux, race)
+        # covers the same packages in parallel. -timeout is 30m rather than
+        # 20m because this job's service DSNs put internal/test/conformance on
+        # real Postgres and MySQL as well as SQLite, which took 917s of a 20m
+        # budget in run 33521250798.
+        run: go test -v -tags dingo_extra_plugins -ldflags="-s -w" -timeout 30m ./...
 
-  # Race detection on every pull request, not only on a release tag. The
-  # release-only arrangement is what abandoned v0.70.3: a genuine race-detector
-  # failure in ./ledger surfaced with the tag already pushed, and the whole
-  # publication was skipped.
+  # Stage 3. Race detection on every pull request, not only on a release tag.
+  # The release-only arrangement is what abandoned v0.70.3: a genuine
+  # race-detector failure in ./ledger surfaced with the tag already pushed, and
+  # the whole publication was skipped.
   #
-  # Deliberately a separate job from go-test-linux rather than a -race flag
-  # added to it. Race instrumentation roughly doubles the suite, so folding it
-  # in would have made the one Linux gate the slowest signal on every pull
-  # request; running it alongside keeps first-failure feedback where it was.
+  # Deliberately a sibling of go-test (Linux) rather than another step of it.
+  # Race instrumentation roughly doubles the suite, so folding the two together
+  # would put the Linux stage at ~57 minutes on one runner and make every merge
+  # wait for it. Two runners for 35 minutes is the balance point: the stage
+  # still costs less than half the old flat fan-out.
   #
   # It also runs without the service containers on purpose. The Postgres and
   # MySQL variants in internal/test/conformance gate on POSTGRES_PASSWORD /
   # POSTGRES_DSN and MYSQL_ROOT_PASSWORD / MYSQL_DSN and t.Skip when unset (see
   # conformance_postgres_test.go's postgresConfigured), so with no job env here
-  # that suite replays its vectors against SQLite only. go-test-linux already
+  # that suite replays its vectors against SQLite only. go-test (Linux) already
   # covers those two backends, and replaying them under race instrumentation
   # would dominate this job -- conformance alone took 917s uninstrumented with
   # the services attached, against 86s SQLite-only.
   go-test-linux-race:
     name: go-test (Linux, race)
+    needs: [go-test-linux-quick]
     strategy:
       matrix:
         go-version: [1.26.x]
@@ -225,44 +394,39 @@ jobs:
             ~/.cache/go-build
           # Race-instrumented objects are a separate build-cache population
           # from the plain ones, so this job keys its own entry rather than
-          # thrashing go-test-linux's.
+          # thrashing go-test (Linux)'s.
           key: ${{ runner.os }}-go-race-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-race-${{ matrix.go-version }}-
       - name: go-build
         run: go build -tags dingo_extra_plugins ./cmd/dingo
       - name: go-test-race
-        # Same command as publish.yml's tagged release gate, so a pull request
-        # cannot pass a check the release then fails. 30m rather than 20m
-        # because ./ledger alone runs 9-13 minutes under the race detector and
-        # reached the old 20m limit in run 33315370942.
-        run: go test -tags dingo_extra_plugins -ldflags="-s -w" -race -timeout 30m ./...
+        # Same command as publish.yml's release gate, so a pull request cannot
+        # pass a check the release then fails. 30m rather than 20m because
+        # ./ledger alone runs 9-13 minutes under the race detector and reached
+        # the old 20m limit in run 33315370942.
+        run: go test -v -tags dingo_extra_plugins -ldflags="-s -w" -race -timeout 30m ./...
 
-  # windows-latest and macos-latest also run the full ./... suite in
-  # publish.yml's go-test-other, but only at release-tag time, after a change
-  # has already merged. That is how the Windows-only DevNet breakage in #3728
-  # reached main four merges running, and how the Windows extraction code in
-  # mithril (NtCreateFile/NtSetInformationFile handle-relative rename and
-  # removal, see extract_handlerelative_windows.go and #3228) went unverified
-  # on real Windows CI. Both platforms run on every pull request here.
+  # Stage 3. windows-latest and macos-latest run the full ./... suite here so
+  # platform breakage is caught before merge. That is how the Windows-only
+  # DevNet breakage in #3728 reached main four merges running, and how the
+  # Windows extraction code in mithril (NtCreateFile/NtSetInformationFile
+  # handle-relative rename and removal, see extract_handlerelative_windows.go
+  # and #3228) went unverified on real Windows CI.
   #
   # These are separate jobs rather than one platform matrix so that a failure
   # on one platform cannot cancel the other's run, and so each renders a stable
-  # check name distinct from publish.yml's go-test (windows-latest) /
-  # go-test (macos-latest).
-  # Deliberately advisory: this job is not a required branch-protection
-  # context, and must not become one while the Windows suite behaves as it
-  # does. It is the slowest and least predictable of the three platforms --
-  # 17m44s in run 33519632627 against 42m+ in run 33529462211 for the same
-  # command, and it has a history of wedging rather than failing. Tracked
-  # separately in #3746. Blocking merges on it would
-  # stall the queue on runner variance rather than on a defect.
+  # check name.
   #
-  # Advisory means "not required", not continue-on-error. A red X here is a
-  # real result to read, and suppressing the exit status would hide exactly
-  # the Windows-only breakage this job exists to surface.
+  # Windows is a blocking job: it gates build-windows and a failure here fails
+  # the run. It is also the slowest and least predictable of the three
+  # platforms -- 17m44s in run 33519632627 against 42m+ in run 33529462211 for
+  # the same command -- and it has a history of wedging rather than failing,
+  # tracked in #3746. If that variance starts stalling the queue rather than
+  # catching defects, the lever is #3746, not loosening the gate.
   go-test-windows:
     name: go-test (Windows)
+    needs: [go-test-linux-quick]
     strategy:
       matrix:
         go-version: [1.26.x]
@@ -301,17 +465,20 @@ jobs:
         # no stuck test, so an intermediate bound tight enough to be useful is
         # also tight enough to kill a slow-but-healthy run and destroy the
         # attribution this job exists to provide.
-        run: go test -ldflags="-s -w" -timeout 30m ./...
+        run: go test -v -ldflags="-s -w" -timeout 30m ./...
 
   go-test-macos:
     name: go-test (macOS)
+    needs: [go-test-linux-quick]
     strategy:
       matrix:
         go-version: [1.26.x]
     runs-on: macos-latest
     # See go-test-windows. macOS is the cheapest of the three by a wide
     # margin -- the suite ran 4m07s in run 33519632627 -- so the same generous
-    # cap costs nothing here.
+    # cap costs nothing here. The free plan allows only 5 concurrent macOS
+    # jobs across the whole organization, which is the reason this stage runs
+    # one macOS job rather than a matrix.
     timeout-minutes: 90
     env:
       CGO_ENABLED: 0
@@ -334,16 +501,26 @@ jobs:
       - name: go-build
         run: go build ./...
       - name: go-test
-        run: go test -ldflags="-s -w" -timeout 30m ./...
+        run: go test -v -ldflags="-s -w" -timeout 30m ./...
 
-  govulncheck:
-    name: govulncheck
+  # Stage 4. One build job per runner OS, each gated on that OS's own tests.
+  #
+  # This replaced a 7-entry matrix of one-target jobs. Every binary builds
+  # CGO_ENABLED=0 (see the $(BINARIES) rule in the Makefile), so the targets
+  # that share a runner OS cross-compile in a loop on a single runner: 7 jobs
+  # became 3, and no target waits on an unrelated platform's tests.
+  build-linux:
+    name: build (Linux)
+    needs: [go-test-linux, go-test-linux-race]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
+      # make build reads the version from `git describe`, which refuses to run
+      # in a checkout git considers foreign-owned.
+      - run: git config --global --add safe.directory "$PWD"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
-          # This job runs `go run ...@latest`, so third-party code executes in
-          # the workspace. Do not leave GITHUB_TOKEN in the local git config.
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
@@ -357,15 +534,104 @@ jobs:
           key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-1.26.x-
-      - name: govulncheck
-        # This CI check is not currently a required branch-protection context.
-        # govulncheck exits non-zero only for vulnerabilities this module
-        # actually calls, so the unreachable findings it also prints (currently
-        # GO-2026-5932, an unmaintained golang.org/x/crypto package with no
-        # fixed version) do not fail the job.
-        # Both the toolchain and the scanner float on purpose: a pin on either
-        # one parks a new advisory behind a stale version instead of forcing it
-        # to be fixed. The stdlib version reported against is whatever go.mod's
-        # toolchain floor and this runner resolve to. Run through the Makefile
-        # so this CI check and `make govulncheck` cannot drift apart.
-        run: make govulncheck
+      - name: build
+        env:
+          BUILD_TARGETS: linux/amd64 linux/arm64 freebsd/amd64 freebsd/arm64
+        run: .github/scripts/build-targets.sh
+
+  build-windows:
+    name: build (Windows)
+    needs: [go-test-windows]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - run: git config --global --add safe.directory "$PWD"
+        shell: bash
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+        with:
+          go-version: 1.26.x
+          cache: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~\AppData\Local\go-build
+          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-1.26.x-
+      - name: build
+        env:
+          BUILD_TARGETS: windows/amd64 windows/arm64
+        run: .github/scripts/build-targets.sh
+        shell: bash
+
+  build-macos:
+    name: build (macOS)
+    needs: [go-test-macos]
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - run: git config --global --add safe.directory "$PWD"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+        with:
+          go-version: 1.26.x
+          cache: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/Library/Caches/go-build
+          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-1.26.x-
+      - name: build
+        env:
+          BUILD_TARGETS: darwin/arm64
+        run: .github/scripts/build-targets.sh
+
+  # Stage 4. Folded in from the retired ci-docker.yml.
+  #
+  # No paths filter. The previous one listed Dockerfile, cmd, docs, internal
+  # and go.*, which excluded most of the tree the image actually compiles --
+  # ledger, database, api, chain, mempool and the rest -- so a change confined
+  # to those never built an image until publish.yml did it on main, after
+  # merge. The job is ~3 minutes (run 33526005799), which is not worth a
+  # filter to maintain.
+  docker:
+    name: docker
+    needs: [go-test-linux, go-test-linux-race]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GHCR_IMAGE_NAME: ghcr.io/blinklabs-io/dingo
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          fetch-depth: '0'
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1 https://github.com/docker/setup-buildx-action/releases/tag/v4.4.1
+      - name: check
+        run: docker build --check .
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0 https://github.com/docker/metadata-action/releases/tag/v6.2.0
+        with:
+          images: ${{ env.GHCR_IMAGE_NAME }}
+      - name: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0 https://github.com/docker/build-push-action/releases/tag/v7.4.0
+        with:
+          context: .
+          push: false
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=
+            COMMIT_HASH=${{ github.sha }}

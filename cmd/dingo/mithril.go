@@ -389,7 +389,19 @@ func mithrilSyncRunE(
 	if network == "" {
 		network = "preview"
 	}
-	return runMithrilSync(cmd.Context(), cfg, logger, network)
+	// Bind the probe here, in the command, so the socket production serves
+	// on is the one the tests hand over too. A bind failure is not fatal to
+	// a bootstrap: it loses the probe, not the snapshot.
+	healthProbe, healthErr := bindHealthProbe(cfg)
+	if healthErr != nil {
+		logger.Warn(
+			"failed to start health probe server; continuing",
+			"component", "mithril",
+			"port", cfg.HealthPort,
+			"error", healthErr,
+		)
+	}
+	return runMithrilSync(cmd.Context(), cfg, logger, network, healthProbe)
 }
 
 // errMithrilInactivityIncompatible reports why Mithril bootstrap and the
@@ -410,11 +422,18 @@ func errMithrilInactivityIncompatible() error {
 	)
 }
 
+// runMithrilSync bootstraps from a Mithril snapshot, serving the metrics,
+// health and pprof listeners for as long as it runs.
+//
+// healthProbe carries the already-bound health socket from the caller; nil
+// means the operator disabled the probe or its port could not be bound, and
+// the bootstrap runs without it.
 func runMithrilSync(
 	ctx context.Context,
 	cfg *config.Config,
 	logger *slog.Logger,
 	network string,
+	healthProbe *boundHealthProbe,
 ) (err error) {
 	metrics, metricsHandler := newMithrilSyncMetricsHandler(network)
 	metricsServer, err := startPrometheusMetricsServerWithHandler(
@@ -465,19 +484,7 @@ func runMithrilSync(
 			}
 		}()
 	}
-	healthServer, healthErr := startHealthProbeServer(
-		logger,
-		cfg,
-		"mithril",
-	)
-	if healthErr != nil {
-		logger.Warn(
-			"failed to start health probe server; continuing",
-			"component", "mithril",
-			"port", cfg.HealthPort,
-			"error", healthErr,
-		)
-	}
+	healthServer := serveHealthProbe(logger, "mithril", healthProbe)
 	defer func() {
 		if healthServer == nil {
 			return
@@ -617,6 +624,7 @@ func runMithrilSync(
 		AggregatorURL:          cfg.Mithril.AggregatorURL,
 		AllowInsecureHTTP:      cfg.Mithril.AllowInsecureHTTP,
 		DownloadDir:            cfg.Mithril.DownloadDir,
+		PinnedDigest:           cfg.Mithril.PinnedDigest,
 		DownloadIdleTimeout:    cfg.Mithril.DownloadIdleTimeout,
 		DownloadMaxIdleRetries: cfg.Mithril.DownloadMaxIdleRetries,
 		VerifyCertChain:        cfg.Mithril.VerifyCertificates,
