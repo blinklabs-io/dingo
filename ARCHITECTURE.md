@@ -5102,6 +5102,22 @@ yields no candidate and the branch is rejected instead. Presence is asked of
 reconstructs it by decoding the producing block on a blob miss, which turned a
 UTxO that demonstrably exists into a hard error out of recovery.
 
+A retention-pruned prefix or a Mithril bootstrap leaves the transaction index
+pointing at blocks the block store no longer holds. Three lookups on the
+candidate path can therefore miss: the producer block named by a transaction
+row, the block named by a transaction blob offset, and the producer block's
+own parent. All three are reported as unresolved provenance rather than as an
+error, each with a `Warn` naming the block, so the bounded
+security-parameter fallback chooses a retained anchor instead of aborting
+replay. When the fallback's own anchor index, or that anchor's parent, is also
+outside the retained window, `replayRecoveryFallbackCandidate` returns no
+candidate at all: recovery declines rather than inventing a rollback point
+across the retention or trust boundary, and the original validation error
+surfaces. `replayRecoveryCandidate.ProducerUnresolved` is keyed on the
+surviving candidate rather than on the fallback, so a deeper known producer
+keeps the rollback anchor while unresolved provenance still forces the
+primary-chain rewind, the non-converging hold and the resync escape.
+
 The unresolved-producer fallback also tracks the applied ledger high-water
 mark across attempts. Different candidate continuations can move the failing
 block forward slightly while rebuilding to the same applied tip, so failure
