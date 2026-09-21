@@ -647,3 +647,118 @@ func TestCommitteeActionRatifiedUsesPassedEpochNotManagerField(t *testing.T) {
 func formatVoteKey(voterType uint8, credential common.Blake2b224) string {
 	return string(rune('0'+voterType)) + ":" + hex.EncodeToString(credential[:])
 }
+
+// TestCommitteeActionRatifiedExcludesProposalDepositFromSPOStake pins a PR
+// #4333 review finding: an active proposal deposit raises the return
+// account's DRep voting power, but it is not delegated stake behind a pool
+// and must not enter the SPO tally. Production reads SPO stake straight from
+// the stake distribution snapshot (tallySPOVotes over LoadSPOVotingState's
+// Dist), which carries no deposit adjustment.
+//
+// The stake is arranged so the deposit decides the outcome. The yes pool
+// holds 2,000,000 and the silent (implicit no) pool holds 1,000,000, so the
+// SPO ratio is 2/3 against a 1/2 threshold and the proposal ratifies. Route
+// a 3,000,000 deposit to the silent pool's delegator and, if the SPO tally
+// counted it, that pool would hold 4,000,000, dropping the ratio to 1/3 and
+// refusing the proposal. Passing the deposit map back into
+// spoStakeForCommitteeAction therefore fails this test.
+func TestCommitteeActionRatifiedExcludesProposalDepositFromSPOStake(
+	t *testing.T,
+) {
+	m, err := NewDingoStateManager()
+	require.NoError(t, err)
+	defer func() { require.NoError(t, m.Close()) }()
+
+	reachable := cbor.Rat{Rat: big.NewRat(1, 2)}
+	m.protocolParams = &conway.ConwayProtocolParameters{
+		ProtocolVersion: common.ProtocolParametersProtocolVersion{Major: 10},
+		DRepVotingThresholds: conway.DRepVotingThresholds{
+			MotionNoConfidence:    reachable,
+			CommitteeNormal:       reachable,
+			CommitteeNoConfidence: reachable,
+		},
+		PoolVotingThresholds: conway.PoolVotingThresholds{
+			MotionNoConfidence:    reachable,
+			CommitteeNormal:       reachable,
+			CommitteeNoConfidence: reachable,
+		},
+	}
+
+	// DRep side: an AlwaysNoConfidence delegator is an implicit yes on a
+	// NoConfidence action, so the DRep ratio is 1 and the decision turns on
+	// the SPO side alone. This credential delegates to no pool, so it stays
+	// out of the SPO tally entirely.
+	drepStakeCredential := mockledger.RewardAccountKey{
+		CredType:   common.CredentialTypeAddrKeyHash,
+		Credential: testHash28(0xa1),
+	}
+	m.govState.DRepDelegationsByCredential[drepStakeCredential] = common.Drep{
+		Type: common.DrepTypeNoConfidence,
+	}
+	m.govState.RewardAccountBalances[drepStakeCredential] = 1_000_000
+
+	// Yes pool: 2,000,000 of delegated stake, voting yes explicitly.
+	yesPoolHash := testHash28(0xa2)
+	yesPoolDelegator := mockledger.RewardAccountKey{
+		CredType:   common.CredentialTypeAddrKeyHash,
+		Credential: testHash28(0xa3),
+	}
+	m.govState.PoolRegistrations[yesPoolHash] = true
+	m.govState.PoolDelegationsByCredential[yesPoolDelegator] = yesPoolHash
+	m.govState.RewardAccountBalances[yesPoolDelegator] = 2_000_000
+
+	// Silent pool: 1,000,000 of delegated stake and no reward-account DRep
+	// delegation, so it is an implicit no and contributes to the denominator.
+	silentPoolHash := testHash28(0xa4)
+	silentPoolDelegator := mockledger.RewardAccountKey{
+		CredType:   common.CredentialTypeAddrKeyHash,
+		Credential: testHash28(0xa5),
+	}
+	m.govState.PoolRegistrations[silentPoolHash] = true
+	m.govState.PoolDelegationsByCredential[silentPoolDelegator] = silentPoolHash
+	m.govState.RewardAccountBalances[silentPoolDelegator] = 1_000_000
+
+	// An unrelated active proposal whose deposit is returned to the silent
+	// pool's delegator. Large enough to invert the SPO ratio if counted.
+	depositReturnAccount := silentPoolDelegator
+	m.govState.Proposals["dddddddd#0"] = &conformance.ProposalState{
+		GovActionInfo: conformance.GovActionInfo{
+			ActionType:     common.GovActionTypeInfo,
+			SubmittedEpoch: 0,
+			ExpiresAfter:   10,
+			Votes:          map[string]uint8{},
+			Deposit:        3_000_000,
+			ReturnAccount:  &depositReturnAccount,
+		},
+	}
+
+	proposal := &conformance.ProposalState{
+		GovActionInfo: conformance.GovActionInfo{
+			ActionType:   common.GovActionTypeNoConfidence,
+			ExpiresAfter: 10,
+			Votes: map[string]uint8{
+				formatVoteKey(
+					common.VoterTypeStakingPoolKeyHash,
+					yesPoolHash,
+				): 1,
+			},
+		},
+	}
+
+	txn := m.db.Transaction(false)
+	defer txn.Release()
+
+	// The assertion deliberately goes through committeeActionRatified rather
+	// than calling spoStakeForCommitteeAction directly: a direct call would
+	// bind this test to that helper's signature, so restoring the deposit
+	// argument would break the build instead of failing the assertion. Going
+	// through the decision keeps the revert behavioural.
+	ratified, err := m.committeeActionRatified(txn, proposal, 5)
+	require.NoError(t, err)
+	require.True(
+		t,
+		ratified,
+		"SPO ratio is 2/3 against a 1/2 threshold once the proposal "+
+			"deposit is excluded from pool stake",
+	)
+}

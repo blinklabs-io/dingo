@@ -1471,9 +1471,7 @@ func (m *DingoStateManager) committeeActionRatified(
 	if err != nil {
 		return false, err
 	}
-	spoYes, spoTotal, err := m.spoStakeForCommitteeAction(
-		txn, proposal, deposits,
-	)
+	spoYes, spoTotal, err := m.spoStakeForCommitteeAction(txn, proposal)
 	if err != nil {
 		return false, err
 	}
@@ -1684,7 +1682,15 @@ func (m *DingoStateManager) drepStakeForCommitteeAction(
 // ShouldRatify itself refuses both action types outright during bootstrap
 // before ever reading this tally, so a bootstrap-specific adjustment to the
 // tally would never run (an earlier revision carried one that PR #4333
-// review found was already dead code for exactly this reason). A silent
+// review found was already dead code for exactly this reason).
+//
+// Active-proposal deposits are deliberately excluded from this tally: a
+// deposit raises the return account's DRep voting power, not the delegated
+// stake behind a pool. Production reads SPO stake straight from the stake
+// distribution snapshot (tallySPOVotes over LoadSPOVotingState's Dist in
+// ledger/governance/tally.go), which carries no deposit adjustment, so
+// credentialVotingStake is called here with a nil deposit map while
+// drepStakeForCommitteeAction keeps the deposit-inclusive one. A silent
 // pool whose reward account delegates AlwaysAbstain is excluded; one that
 // delegates AlwaysNoConfidence counts as an implicit Yes when the proposal
 // is a NoConfidence action (an implicit No otherwise, same as production's
@@ -1693,14 +1699,13 @@ func (m *DingoStateManager) drepStakeForCommitteeAction(
 func (m *DingoStateManager) spoStakeForCommitteeAction(
 	txn *database.Txn,
 	proposal *conformance.ProposalState,
-	deposits map[mockledger.RewardAccountKey]uint64,
 ) (uint64, uint64, error) {
 	poolStake := make(map[common.PoolKeyHash]*big.Int)
 	for credential, pool := range m.govState.PoolDelegationsByCredential {
 		if !m.govState.IsPoolRegistered(pool) {
 			continue
 		}
-		stake, err := m.credentialVotingStake(txn, credential, deposits)
+		stake, err := m.credentialVotingStake(txn, credential, nil)
 		if err != nil {
 			return 0, 0, err
 		}
