@@ -31,23 +31,31 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// freeHealthPort returns a port nothing is listening on. The probe listener
-// cannot take a kernel-assigned 0 the way the metrics listener does, because
-// healthPort 0 is the operator's opt-out.
-func freeHealthPort(t *testing.T) uint {
+// reservedHealthListener binds a loopback port and returns the live listener
+// with the port it bound. The listener is never released: the caller hands it
+// to the probe, which serves on the socket the test already owns.
+//
+// Returning a port number from a listener that has been closed again would be
+// a race, not a reservation. healthPort 0 is the operator's opt-out rather
+// than "pick one", so the probe cannot take a kernel-assigned port the way
+// the metrics listener does, and in the gap between releasing the number and
+// rebinding it anything asking the kernel for an arbitrary port takes it --
+// including the mithril metrics listener started moments later in this same
+// process, which is exactly what happens when MetricsPort is 0.
+func reservedHealthListener(t *testing.T) (net.Listener, uint) {
 	t.Helper()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
 	_, port, err := net.SplitHostPort(ln.Addr().String())
-	require.NoError(t, ln.Close())
 	require.NoError(t, err)
 	parsed, err := strconv.ParseUint(port, 10, 16)
 	require.NoError(t, err)
-	return uint(parsed)
+	return ln, uint(parsed)
 }
 
-// TestStartHealthProbeServerServesLiveAndNotReady pins the classification a
+// TestServeHealthProbeServesLiveAndNotReady pins the classification a
 // bootstrap has to report: the process is up, so liveness answers 200 and the
 // container survives, while readiness answers 503 because nothing here is
 // following the chain.
@@ -57,18 +65,23 @@ func freeHealthPort(t *testing.T) uint {
 // one answering /health 503 -- or refusing the connection, as a bootstrap with
 // no listener does -- is replaced by Swarm or ECS partway through a download
 // that takes hours.
-func TestStartHealthProbeServerServesLiveAndNotReady(t *testing.T) {
+func TestServeHealthProbeServesLiveAndNotReady(t *testing.T) {
 	t.Parallel()
 
+	listener, port := reservedHealthListener(t)
 	cfg := &config.Config{
 		BindAddr:   "127.0.0.1",
-		HealthPort: freeHealthPort(t),
+		HealthPort: port,
 	}
-	server, err := startHealthProbeServer(
-		slog.New(slog.NewTextHandler(io.Discard, nil)), cfg, "mithril",
+	server, err := serveHealthProbe(
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		cfg,
+		"mithril",
+		listener,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, server)
+	require.Equal(t, listener.Addr().String(), server.addr)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -98,19 +111,68 @@ func TestStartHealthProbeServerServesLiveAndNotReady(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, readyResp.StatusCode)
 }
 
-// TestStartHealthProbeServerDisabledOnZeroPort covers the operator opt-out the
+// TestServeHealthProbeDisabledOnZeroPort covers the operator opt-out the
 // image's HEALTHCHECK also reads: healthPort 0 means no listener, and the
 // probe is skipped rather than bound on an arbitrary port.
-func TestStartHealthProbeServerDisabledOnZeroPort(t *testing.T) {
+func TestServeHealthProbeDisabledOnZeroPort(t *testing.T) {
 	t.Parallel()
 
-	server, err := startHealthProbeServer(
+	server, err := serveHealthProbe(
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		&config.Config{BindAddr: "127.0.0.1", HealthPort: 0},
 		"mithril",
+		nil,
 	)
 	require.NoError(t, err)
 	require.Nil(t, server)
+}
+
+// TestServeHealthProbeClosesSuppliedListenerWhenDisabled covers the one way
+// handing a live listener over could leak one: healthPort 0 still disables
+// the probe, so the socket the caller bound has to be released rather than
+// left bound for the life of the process.
+func TestServeHealthProbeClosesSuppliedListenerWhenDisabled(t *testing.T) {
+	t.Parallel()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+
+	server, err := serveHealthProbe(
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		&config.Config{BindAddr: "127.0.0.1", HealthPort: 0},
+		"mithril",
+		listener,
+	)
+	require.NoError(t, err)
+	require.Nil(t, server)
+
+	_, acceptErr := listener.Accept()
+	require.ErrorIs(t, acceptErr, net.ErrClosed)
+}
+
+// TestServeHealthProbeReportsBindFailure is the operator's collision
+// case: the configured health port is already taken, so the probe cannot
+// come up and the caller is told which address failed rather than being left
+// to infer it.
+//
+// It also pins that the no-listener path binds cfg's address and not some
+// other one -- the port in the error is the port the test occupied.
+func TestServeHealthProbeReportsBindFailure(t *testing.T) {
+	t.Parallel()
+
+	occupied, port := reservedHealthListener(t)
+
+	server, err := serveHealthProbe(
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		&config.Config{BindAddr: "127.0.0.1", HealthPort: port},
+		"mithril",
+		nil,
+	)
+	require.Nil(t, server)
+	require.ErrorContains(
+		t, err, "starting health listener on "+occupied.Addr().String(),
+	)
 }
 
 // TestMithrilSyncServesHealthProbe is the wiring assertion: the bootstrap
@@ -130,16 +192,20 @@ func TestMithrilSyncServesHealthProbe(t *testing.T) {
 
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	listener, port := reservedHealthListener(t)
 	cfg := &config.Config{
 		BindAddr:   "127.0.0.1",
-		HealthPort: freeHealthPort(t),
+		HealthPort: port,
 	}
 	cfg.Mithril.Backend = "not-a-backend"
 
-	err := runMithrilSync(context.Background(), cfg, logger, "preview")
+	err := runMithrilSync(
+		context.Background(), cfg, logger, "preview", listener,
+	)
 	require.ErrorContains(t, err, "unsupported Mithril backend")
 	require.Contains(
-		t, logs.String(), "serving health probes on",
+		t, logs.String(),
+		"serving health probes on "+listener.Addr().String(),
 		"mithril sync must serve the health probe while it bootstraps",
 	)
 }

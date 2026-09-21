@@ -42,26 +42,50 @@ type healthProbeServer struct {
 	addr   string
 }
 
-// startHealthProbeServer binds the probe listener, or returns nil when
-// healthPort is 0 and the operator has disabled it.
+// serveHealthProbe serves the probe on listener, binding cfg's health
+// address itself when listener is nil, and returns nil when healthPort is 0
+// and the operator has disabled it.
 //
 // The tip gap is deliberately nil: nothing here follows the chain, so the
 // probe reports live and not ready, which is exactly the state an operator
 // and an orchestrator should see during a bootstrap. Liveness is what keeps
 // the container alive; readiness is what keeps it out of a load balancer.
-func startHealthProbeServer(
+//
+// Binding and serving are separate steps because a port number and a bound
+// socket are not the same fact. Between learning that a port is free and
+// binding it, anything else on the host -- including this process asking the
+// kernel for an arbitrary port -- can take it, and the probe then does not
+// come up. A caller that already owns the socket passes the live listener
+// instead, and cannot lose that race; the bound address is reported from the
+// listener either way, so the log names the port actually being served
+// rather than the one that was requested.
+//
+// A supplied listener is closed when healthPort is 0: the operator's opt-out
+// still wins, and nothing would ever serve on it.
+func serveHealthProbe(
 	logger *slog.Logger,
 	cfg *config.Config,
 	component string,
+	listener net.Listener,
 ) (*healthProbeServer, error) {
 	server := node.NewHealthServer(cfg, nil)
 	if server == nil {
+		if listener != nil {
+			_ = listener.Close()
+		}
 		return nil, nil
 	}
-	addr := server.Addr
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, fmt.Errorf("starting health listener on %s: %w", addr, err)
+	if listener == nil {
+		addr := server.Addr
+		bound, err := net.Listen("tcp", addr)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"starting health listener on %s: %w",
+				addr,
+				err,
+			)
+		}
+		listener = bound
 	}
 	actualAddr := listener.Addr().String()
 	logger.Info(

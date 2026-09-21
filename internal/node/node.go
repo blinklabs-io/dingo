@@ -147,7 +147,32 @@ func serveAuxiliaryListener(
 	srv *http.Server,
 	logger *slog.Logger,
 ) {
-	if err := srv.ListenAndServe(); err != nil &&
+	listener, err := net.Listen("tcp", srv.Addr)
+	if err != nil {
+		logger.Error(
+			name+" listener stopped; continuing without it",
+			"component", "node",
+			"addr", srv.Addr,
+			"error", err,
+		)
+		return
+	}
+	serveAuxiliaryListenerOn(name, srv, listener, logger)
+}
+
+// serveAuxiliaryListenerOn is serveAuxiliaryListener on a socket the caller
+// has already bound. Binding is separated from serving so a caller that owns
+// the listener can hand it over instead of naming a port: a port number
+// learned from a listener that was then closed is not a reservation, and
+// anything asking the kernel for an arbitrary port can take it before the
+// rebind.
+func serveAuxiliaryListenerOn(
+	name string,
+	srv *http.Server,
+	listener net.Listener,
+	logger *slog.Logger,
+) {
+	if err := srv.Serve(listener); err != nil &&
 		!errors.Is(err, http.ErrServerClosed) {
 		logger.Error(
 			name+" listener stopped; continuing without it",

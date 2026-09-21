@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"slices"
 	"time"
@@ -389,7 +390,7 @@ func mithrilSyncRunE(
 	if network == "" {
 		network = "preview"
 	}
-	return runMithrilSync(cmd.Context(), cfg, logger, network)
+	return runMithrilSync(cmd.Context(), cfg, logger, network, nil)
 }
 
 // errMithrilInactivityIncompatible reports why Mithril bootstrap and the
@@ -410,11 +411,19 @@ func errMithrilInactivityIncompatible() error {
 	)
 }
 
+// runMithrilSync bootstraps from a Mithril snapshot, serving the metrics,
+// health and pprof listeners for as long as it runs.
+//
+// healthListener lets a caller that has already bound the health port hand
+// the live socket over instead of naming a port for the probe to rebind;
+// nil makes the probe bind cfg.HealthPort itself, which is what the command
+// does.
 func runMithrilSync(
 	ctx context.Context,
 	cfg *config.Config,
 	logger *slog.Logger,
 	network string,
+	healthListener net.Listener,
 ) (err error) {
 	metrics, metricsHandler := newMithrilSyncMetricsHandler(network)
 	metricsServer, err := startPrometheusMetricsServerWithHandler(
@@ -465,10 +474,11 @@ func runMithrilSync(
 			}
 		}()
 	}
-	healthServer, healthErr := startHealthProbeServer(
+	healthServer, healthErr := serveHealthProbe(
 		logger,
 		cfg,
 		"mithril",
+		healthListener,
 	)
 	if healthErr != nil {
 		logger.Warn(
