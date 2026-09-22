@@ -91,27 +91,27 @@ package nodeparity
 //
 // Each of the three runs its own independent Acquire, on its own
 // connection, rather than sharing one the way Check's live-tip-agreement
-// mode does: Dingo's Acquire-time validation (VerifyPointQueryable,
-// blinklabs-io/dingo#382) rejects a point if ANY point-aware query type's
-// own retention floor has passed it, not only the one the caller actually
-// intends to ask. UTxO's retention floor is by far the tightest of the
-// three during a from-genesis replay, so a shared Acquire needlessly cut
-// protocol-params and stake off at UTxO's window instead of their own,
-// much longer ones (protocol params are effectively unbounded; stake is
-// capped at 3 epochs behind Dingo's own live epoch, unrelated to UTxO's
-// floor) -- confirmed live switching to separate Acquire calls let
-// protocol-params/stake keep succeeding for 20+ consecutive epochs where
-// they previously stopped at the first one UTxO's floor rejected.
+// mode does. At this head, UTxO's own retention floor
+// (checkUtxoRetentionWindow) is enforced at query time, scoped to the UTxO
+// query alone, so a shared Acquire would not by itself cut
+// protocol-params/stake off at UTxO's window. Open PR #4320 adds
+// Acquire-time validation (VerifyPointQueryable) that rejects a point up
+// front if ANY point-aware query type's own retention floor has passed it,
+// not only the one the caller actually intends to ask -- once that merges,
+// a shared Acquire would cut protocol-params and stake off at UTxO's much
+// tighter floor instead of their own, much longer ones (protocol params
+// are effectively unbounded; stake is capped at 3 epochs behind Dingo's
+// own live epoch). Kept as separate Acquire calls now so this file does
+// not need to change again once #4320 lands.
 //
 // Running Dingo with --storage-mode api removes the UTxO half of that
 // exposure entirely (checkUtxoRetentionWindow already skips its own
-// retention check in that mode, the same way cleanupConsumedUtxos does),
-// and is required for the stake comparison to reach more than a handful of
-// epochs too: pool-stake snapshot pruning (ledger/snapshot/rotation.go's
-// cleanupOldSnapshots) now also retains without bound in API mode,
-// mirroring UTxO's own existing carve-out -- confirmed live, 24
-// consecutive epochs with zero Acquire failures on either connection type,
-// where CORE mode reliably started failing by epoch 9.
+// retention check in that mode, the same way cleanupConsumedUtxos does).
+// At this head, pool-stake snapshot pruning (ledger/snapshot/rotation.go's
+// cleanupOldSnapshots) does NOT have an equivalent API-mode carve-out --
+// prunePoolSnapshots runs the same fixed window regardless of storage mode
+// -- so the stake comparison is still bounded by that window in every
+// storage mode until #4320 (which adds the carve-out) merges.
 
 import (
 	"context"
