@@ -1148,6 +1148,29 @@ func rebuildRestoredDeferredIndexes(
 	}
 	start := time.Now()
 	var err error
+	if builder, ok := manager.(metadata.DeferredIndexProgressBuilder); ok {
+		err = builder.BuildDeferredIndexesContextWithProgress(
+			ctx,
+			func(index string) {
+				logger.Info("building deferred metadata index", "index", index)
+			},
+			func(index string, elapsed time.Duration) {
+				logger.Info(
+					"deferred metadata index ready",
+					"index", index,
+					"duration", elapsed,
+				)
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("restore deferred metadata indexes: %w", err)
+		}
+		logger.Info(
+			"deferred metadata index repair complete in the restored database",
+			"duration", time.Since(start),
+		)
+		return nil
+	}
 	if builder, ok := manager.(metadata.ContextDeferredIndexBuilder); ok {
 		err = builder.BuildDeferredIndexesContext(ctx)
 	} else {

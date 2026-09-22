@@ -14,7 +14,10 @@
 
 package metadata
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // DeferredIndexManager is an optional interface that metadata stores
 // implement to participate in bulk-load index deferral. The Mithril
@@ -82,6 +85,16 @@ type MissingDeferredIndexLister interface {
 type ContextDeferredIndexBuilder interface {
 	// BuildDeferredIndexesContext is BuildDeferredIndexes bound to ctx.
 	BuildDeferredIndexesContext(ctx context.Context) error
+}
+
+// DeferredIndexProgressBuilder is an optional companion used by restore
+// paths that need progress while a large index build is running.
+type DeferredIndexProgressBuilder interface {
+	BuildDeferredIndexesContextWithProgress(
+		ctx context.Context,
+		before func(string),
+		after func(string, time.Duration),
+	) error
 }
 
 type MissingCriticalDeferredIndexLister interface {

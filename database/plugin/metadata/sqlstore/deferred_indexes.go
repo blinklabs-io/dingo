@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
@@ -30,6 +31,7 @@ var (
 	_ metadata.MissingCriticalDeferredIndexLister = (*Store)(nil)
 	_ metadata.MissingDeferredIndexLister         = (*Store)(nil)
 	_ metadata.ContextDeferredIndexBuilder        = (*Store)(nil)
+	_ metadata.DeferredIndexProgressBuilder       = (*Store)(nil)
 )
 
 // withDeferredIndexWrite runs fn in one write transaction, with every
@@ -164,15 +166,43 @@ func (s *Store) BuildDeferredIndexesContext(ctx context.Context) error {
 	return s.buildDeferredIndexes(ctx, deferred.Manifest, true)
 }
 
+// BuildDeferredIndexesContextWithProgress is the cancellable full-manifest
+// rebuild used by restore so operators can see which index is taking time.
+func (s *Store) BuildDeferredIndexesContextWithProgress(
+	ctx context.Context,
+	before func(string),
+	after func(string, time.Duration),
+) error {
+	return s.buildDeferredIndexesWithProgress(
+		ctx, deferred.Manifest, true, before, after,
+	)
+}
+
 func (s *Store) buildDeferredIndexes(
 	buildCtx context.Context,
 	indexes []deferred.Index,
 	clearPending bool,
 ) error {
+	return s.buildDeferredIndexesWithProgress(
+		buildCtx, indexes, clearPending, nil, nil,
+	)
+}
+
+func (s *Store) buildDeferredIndexesWithProgress(
+	buildCtx context.Context,
+	indexes []deferred.Index,
+	clearPending bool,
+	before func(string),
+	after func(string, time.Duration),
+) error {
 	return s.withDeferredIndexWriteContext(
 		buildCtx,
 		func(db queryer, ctx context.Context) error {
 			for _, index := range indexes {
+				if before != nil {
+					before(index.Name)
+				}
+				started := time.Now()
 				exists, err := s.deferredIndexExists(ctx, db, index)
 				if err != nil {
 					return fmt.Errorf(
@@ -180,6 +210,9 @@ func (s *Store) buildDeferredIndexes(
 						index.Name,
 						err,
 					)
+				}
+				if after != nil {
+					after(index.Name, time.Since(started))
 				}
 				if exists {
 					continue
@@ -198,6 +231,9 @@ func (s *Store) buildDeferredIndexes(
 						index.Name,
 						err,
 					)
+				}
+				if after != nil {
+					after(index.Name, time.Since(started))
 				}
 			}
 			if clearPending {
