@@ -32,13 +32,11 @@ import (
 // cardanoNodeConfigWithMaxLovelaceSupply builds a *cardano.CardanoNodeConfig
 // whose ShelleyGenesis().MaxLovelaceSupply is nonzero -- the exact condition
 // circulatingSupplyGenesis (ledger/queries.go) gates
-// verifyStakeDistributionRetentionOnly's network_state floor on. Without
-// this, that floor is inactive and a fixture cannot actually exercise it
-// either direction (human review, Chris Guiney, dingo#4319/#4320: a first
-// version of TestVerifyPointQueryable_NoNetworkStateRow_Rejected used a
-// fixture with no CardanoNodeConfig at all, so it happened to pass, but
-// only because the gate it meant to test was never active -- pinning
-// over-rejection, not the real requirement).
+// verifyStakeDistributionRetentionOnly's network_state floor on. A fixture
+// with no CardanoNodeConfig at all leaves that floor inactive, so a case
+// built without this helper can pass for the wrong reason: pinning
+// over-rejection when the gate it means to test was never active, not the
+// real requirement.
 func cardanoNodeConfigWithMaxLovelaceSupply(t *testing.T, maxLovelaceSupply uint64) *cardano.CardanoNodeConfig {
 	t.Helper()
 	cfg := &cardano.CardanoNodeConfig{}
@@ -49,12 +47,10 @@ func cardanoNodeConfigWithMaxLovelaceSupply(t *testing.T, maxLovelaceSupply uint
 }
 
 // TestVerifyPointQueryable_WithinAllFloors_Accepted covers the accept
-// direction (human review, Chris Guiney, dingo#4319/#4320: "VerifyPointQueryable
-// has no reference in any _test.go in the repository... only the accept
-// direction keeps working clients alive"): a point inside every
-// point-aware query type's own retention floor -- on chain, within the
-// UTxO/stake/pparams/era windows -- must be accepted so a well-behaved
-// client's Acquire actually succeeds, not just so a stale one is rejected.
+// direction: a point inside every point-aware query type's own retention
+// floor -- on chain, within the UTxO/stake/pparams/era windows -- must be
+// accepted so a well-behaved client's Acquire actually succeeds, not just
+// so a stale one is rejected.
 func TestVerifyPointQueryable_WithinAllFloors_Accepted(t *testing.T) {
 	t.Parallel()
 
@@ -75,12 +71,11 @@ func TestVerifyPointQueryable_WithinAllFloors_Accepted(t *testing.T) {
 	hash := repeatedBytes(32, 0x0B)
 	seedBlockAtSlot(t, ls, 350, hash)
 	seedEpochs(t, ls, map[uint64]uint64{300: 3})
-	// verifyStakeDistributionRetentionOnly's second floor (human review,
-	// Chris Guiney, dingo#4319/#4320) requires a network_state row at or
-	// before the pinned slot, matching what PoolStakeDistribution's own
-	// totalCirculatingSupply call separately requires -- without this row,
-	// a point can be inside the epoch-based retention window and still get
-	// rejected.
+	// verifyStakeDistributionRetentionOnly's second floor requires a
+	// network_state row at or before the pinned slot, matching what
+	// PoolStakeDistribution's own totalCirculatingSupply call separately
+	// requires -- without this row, a point can be inside the epoch-based
+	// retention window and still get rejected.
 	require.NoError(t, db.Metadata().SetNetworkState(0, 1_000, 300, nil))
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: ocommon.NewPoint(350, hash),
@@ -189,14 +184,13 @@ func TestVerifyPointQueryable_APIStorageMode_PastRetentionFloor_Accepted(
 	require.NoError(t, verifyErr)
 }
 
-// TestVerifyPointQueryable_NoNetworkStateRow_Rejected is the regression a
-// human reviewer found (Chris Guiney, dingo#4319/#4320):
-// verifyStakeDistributionRetentionOnly's first version checked only
-// checkAsOfEpochRecency's mark-snapshot floor, but PoolStakeDistribution's
-// own totalCirculatingSupply call separately requires a network_state row
-// at or before the pinned slot (asOfSlot, non-nil for a pinned point) and
-// rejects with ErrHistoricalStateUnavailable when missing. Before this
-// second floor was added, VerifyPointQueryable accepted this exact point,
+// TestVerifyPointQueryable_NoNetworkStateRow_Rejected covers a regression:
+// checking only checkAsOfEpochRecency's mark-snapshot floor is not enough,
+// since PoolStakeDistribution's own totalCirculatingSupply call separately
+// requires a network_state row at or before the pinned slot (asOfSlot,
+// non-nil for a pinned point) and rejects with ErrHistoricalStateUnavailable
+// when missing. Before this second floor was added, VerifyPointQueryable
+// accepted this exact point,
 // and a client that then Acquired it and issued GetPoolDistr2 or
 // GetStakeDistribution got that same error from a live query instead --
 // handleQuery returns it bare, tearing the connection down, the identical
@@ -237,14 +231,13 @@ func TestVerifyPointQueryable_NoNetworkStateRow_Rejected(t *testing.T) {
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
 }
 
-// TestVerifyPointQueryable_NoNetworkStateRow_AcceptedWhenFloorInactive is
-// the regression a human reviewer found (Chris Guiney, dingo#4319/#4320):
-// verifyStakeDistributionRetentionOnly's network_state floor was
-// unconditional, so it rejected a point every real query would have
-// answered whenever totalCirculatingSupply itself never reaches
-// GetNetworkStateAsOfSlot -- no CardanoNodeConfig (as here, and as every
-// other ledger test in this repository already constructs a LedgerState),
-// no ShelleyGenesis, or a genesis with no MaxLovelaceSupply. Identical to
+// TestVerifyPointQueryable_NoNetworkStateRow_AcceptedWhenFloorInactive
+// covers the companion case: an unconditional network_state floor would
+// reject a point every real query would have answered whenever
+// totalCirculatingSupply itself never reaches GetNetworkStateAsOfSlot --
+// no CardanoNodeConfig (as here, and as every other ledger test in this
+// repository already constructs a LedgerState), no ShelleyGenesis, or a
+// genesis with no MaxLovelaceSupply. Identical to
 // TestVerifyPointQueryable_NoNetworkStateRow_Rejected (same missing row)
 // except CardanoNodeConfig is left nil, so this one must accept where that
 // one must reject -- proving the floor is genuinely conditional, not just
@@ -274,10 +267,10 @@ func TestVerifyPointQueryable_NoNetworkStateRow_AcceptedWhenFloorInactive(
 	require.NoError(t, err)
 }
 
-// TestVerifyPointQueryable_UnknownEraId_Rejected is the regression a human
-// reviewer found (Chris Guiney, dingo#4319/#4320): VerifyPointQueryable's
-// queryHardFork call (HardForkCurrentEraQuery) is the only one of its five
-// checks that ever inspects an epoch row's era at all, so nothing else here
+// TestVerifyPointQueryable_UnknownEraId_Rejected covers a regression:
+// VerifyPointQueryable's queryHardFork call (HardForkCurrentEraQuery) is
+// the only one of its five checks that ever inspects an epoch row's era at
+// all, so nothing else here
 // would catch it being silently dropped. Both existing regression tests
 // pass whether or not that call exists, because neither fixture gives it
 // anything to reject on: WithinAllFloors_Accepted's epoch row names a real
@@ -317,10 +310,11 @@ func TestVerifyPointQueryable_UnknownEraId_Rejected(t *testing.T) {
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
 }
 
-// TestVerifyPointQueryable_UtxoFloorOnly_Rejected is wolf31o2's review
-// finding on this PR: deleting the checkUtxoRetentionWindow call, or the
-// queryShelleyCurrentProtocolParams call, from VerifyPointQueryable leaves
-// every existing TestVerifyPointQueryable* case green --
+// TestVerifyPointQueryable_UtxoFloorOnly_Rejected covers a gap the other
+// TestVerifyPointQueryable* cases leave open: deleting the
+// checkUtxoRetentionWindow call, or the queryShelleyCurrentProtocolParams
+// call, from VerifyPointQueryable leaves every existing
+// TestVerifyPointQueryable* case green --
 // PastRetentionFloor_Rejected is rejected by the stake floor either way, and
 // no fixture has a UTxO-floor rejection as its only failure. Identical to
 // TestVerifyPointQueryable_WithinAllFloors_Accepted (on chain, within the
@@ -353,10 +347,11 @@ func TestVerifyPointQueryable_UtxoFloorOnly_Rejected(t *testing.T) {
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
 }
 
-// TestVerifyPointQueryable_PParamsRowOnly_Rejected is wolf31o2's review
-// finding on this PR: deleting the checkUtxoRetentionWindow call, or this
-// queryShelleyCurrentProtocolParams call, from VerifyPointQueryable leaves
-// every existing TestVerifyPointQueryable* case green -- neither deletion
+// TestVerifyPointQueryable_PParamsRowOnly_Rejected covers a gap the other
+// TestVerifyPointQueryable* cases leave open: deleting the
+// checkUtxoRetentionWindow call, or this queryShelleyCurrentProtocolParams
+// call, from VerifyPointQueryable leaves every existing
+// TestVerifyPointQueryable* case green -- neither deletion
 // changes PastRetentionFloor_Rejected's outcome, since the stake floor
 // already rejects that fixture, and no case has a missing pparams row as its
 // only failure. The pinned point's epoch (3) sits exactly at the

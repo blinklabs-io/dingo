@@ -99,15 +99,14 @@ func checkAsOfEpochRecency(
 
 // verifyStakeDistributionRetentionOnly checks the same retention floors
 // PoolStakeDistribution enforces, without materializing anything
-// PoolStakeDistribution actually reads (human review, Chris Guiney,
-// dingo#4319/#4320): VerifyPointQueryable previously called
-// PoolStakeDistribution(nil, at, txn) -- the unfiltered form -- purely to
-// see whether it returned an error, discarding the result. That reads the
-// whole mark-snapshot via markStakeByPool and runs totalCirculatingSupply's
-// as-of-slot reconstruction, real work on every pinned Acquire that a
-// client issuing GetPoolDistr2 afterward then pays for a second time, and
-// one that never asks for stake distribution at all (e.g. GetEpochNo) pays
-// for once with nothing to show for it.
+// PoolStakeDistribution actually reads: VerifyPointQueryable previously
+// called PoolStakeDistribution(nil, at, txn) -- the unfiltered form --
+// purely to see whether it returned an error, discarding the result. That
+// reads the whole mark-snapshot via markStakeByPool and runs
+// totalCirculatingSupply's as-of-slot reconstruction, real work on every
+// pinned Acquire that a client issuing GetPoolDistr2 afterward then pays
+// for a second time, and one that never asks for stake distribution at all
+// (e.g. GetEpochNo) pays for once with nothing to show for it.
 //
 // Two independent floors, not one: checkAsOfEpochRecency covers the
 // mark-snapshot pruning window, but PoolStakeDistribution (both directly,
@@ -115,24 +114,23 @@ func checkAsOfEpochRecency(
 // with asOfSlot=at.Slot for a pinned at, which separately requires a
 // network_state row at or before that slot -- rejecting with
 // ErrHistoricalStateUnavailable when none exists (see that function's doc
-// comment). A first version of this function checked only the epoch floor:
-// reproduced live that it then accepted a point both GetPoolDistr2 and
-// GetStakeDistribution still rejected, because no network_state row
-// happened to cover that slot even though the epoch itself was recent
-// enough -- reopening the bare "handleQuery returns that error, connection
-// drops" failure this whole change exists to close. Checking only that a
-// covering row exists (not reading genesis config or computing a value)
-// keeps this as cheap as the epoch check.
+// comment). Checking only the epoch floor accepts a point both
+// GetPoolDistr2 and GetStakeDistribution still reject, because no
+// network_state row happened to cover that slot even though the epoch
+// itself was recent enough -- reopening the bare "handleQuery returns that
+// error, connection drops" failure this whole change exists to close.
+// Checking only that a covering row exists (not reading genesis config or
+// computing a value) keeps this as cheap as the epoch check.
 //
 // The network_state floor is gated on the exact same condition
-// totalCirculatingSupply itself gates its GetNetworkStateAsOfSlot read on
-// (human review, Chris Guiney, dingo#4319/#4320): a first version of this
-// gate was unconditional, so it rejected a point every real query would
-// have happily answered whenever ls.config.CardanoNodeConfig is nil or its
+// totalCirculatingSupply itself gates its GetNetworkStateAsOfSlot read on:
+// an unconditional gate would reject a point every real query would have
+// happily answered whenever ls.config.CardanoNodeConfig is nil or its
 // ShelleyGenesis carries no MaxLovelaceSupply -- totalCirculatingSupply
 // itself never reaches GetNetworkStateAsOfSlot in that case, falling back
-// to totalActiveStake instead, so requiring a network_state row here was
-// stricter than what PoolStakeDistribution actually needs.
+// to totalActiveStake instead, so requiring a network_state row here
+// unconditionally would be stricter than what PoolStakeDistribution
+// actually needs.
 func (ls *LedgerState) verifyStakeDistributionRetentionOnly(
 	txn *database.Txn,
 	at QueryPoint,

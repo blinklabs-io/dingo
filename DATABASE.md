@@ -1324,13 +1324,13 @@ only (`cleanupOldSnapshots`, `ledger/snapshot/rotation.go`, issue #1900): API
 mode's whole purpose is retaining full history for historical queries, and a
 fixed 3-epoch pool-snapshot window contradicts that for `GetStakeDistribution`/
 `GetPoolDistr2` pinned to an older epoch, the same way an unbounded UTxO table
-does for `GetUTxOWhole`. Confirmed live (node-parity from-genesis validation):
-with only UTxO's own window removed, a historical Acquire still failed at
-exactly this pool-snapshot floor instead, since `VerifyPointQueryable`'s
-Acquire-time gate (issue #382) checks stake retention on every Acquire
-regardless of which query type the caller actually intends to ask. Unlike
-`reward_account_output`, the Koios parity observer does not separately extend
-`pool_stake_snapshot`'s retention -- only API storage mode does.
+does for `GetUTxOWhole`. `VerifyPointQueryable`'s Acquire-time gate (issue
+#382) checks stake retention on every Acquire regardless of which query type
+the caller actually intends to ask, so even removing only UTxO's own window
+still leaves a historical Acquire failing at this pool-snapshot floor
+instead. Unlike `reward_account_output`, the Koios parity observer does not
+separately extend `pool_stake_snapshot`'s retention -- only API storage mode
+does.
 
 `reward_stake_input` is pruned to the window in every case, regardless of
 storage mode or the observer.

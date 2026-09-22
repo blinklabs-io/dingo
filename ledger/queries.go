@@ -224,15 +224,14 @@ func (ls *LedgerState) VerifyPointOnChain(at QueryPoint) error {
 // written once rather than once per handler.
 //
 // found is false only on the pinned path, when at.Slot has no covering
-// epoch record at all (human review, dingo#4319/#4320: confirmed live and
-// reproduced against this tree that a pinned point whose slot genuinely
-// falls outside every epoch record's range previously fell through to
-// epoch 0 here, and a caller that then looked up epoch 0's row got a
-// real, successful answer for the wrong epoch -- Byron/epoch-0 era,
-// protocol params, or circulating supply, silently substituted for
-// whatever epoch the point actually belonged to). Callers must reject
-// with ErrHistoricalStateUnavailable when found is false rather than
-// proceeding with epoch 0.
+// epoch record at all: a pinned point whose slot genuinely falls outside
+// every epoch record's range previously fell through to epoch 0 here, and
+// a caller that then looked up epoch 0's row got a real, successful answer
+// for the wrong epoch -- Byron/epoch-0 era, protocol params, or
+// circulating supply, silently substituted for whatever epoch the point
+// actually belonged to. Callers must reject with
+// ErrHistoricalStateUnavailable when found is false rather than proceeding
+// with epoch 0.
 //
 // The unpinned path's current == nil case is a different, legitimate
 // convention (epochAtTip's own, matched here): a chain that has applied no
@@ -323,9 +322,8 @@ func (ls *LedgerState) queryShelleyEpochNo(
 // checkUtxoRetentionWindow, stake/pool distribution via
 // PoolStakeDistribution's own recency check, current protocol parameters
 // via queryShelleyCurrentProtocolParams's persisted-row lookup, current era
-// via queryHardFork's HardForkCurrentEraQuery case -- added after human
-// review found this same PR introduced two new ErrHistoricalStateUnavailable
-// returns in that path without covering it here, dingo#4319/#4320).
+// via queryHardFork's HardForkCurrentEraQuery case, which independently
+// returns ErrHistoricalStateUnavailable and so must be covered here too).
 //
 // Called from the LocalStateQuery server's Acquire handler
 // (ouroboros/localstatequery.go), not from Query itself: the Ouroboros
@@ -335,11 +333,11 @@ func (ls *LedgerState) queryShelleyEpochNo(
 // no Failure transition at all, unlike Acquiring (which supports
 // AcquireFailurePointTooOld/PointNotOnChain). A point Acquire allowed but
 // a later query could not actually answer therefore has no protocol-legal
-// way to report that -- confirmed live: the connection simply drops
-// ("protocol is shutting down" client-side) instead of returning a clean
-// rejection, for any of the retention-bounded query types above, whenever
-// their own floor is stricter than whatever check an earlier,
-// successful call on the same connection happened to exercise.
+// way to report that: the connection simply drops ("protocol is shutting
+// down" client-side) instead of returning a clean rejection, for any of
+// the retention-bounded query types above, whenever their own floor is
+// stricter than whatever check an earlier, successful call on the same
+// connection happened to exercise.
 //
 // Real cardano-node never hits this: its own historical retention is one
 // uniform window (the security parameter k) shared by every query type, so
@@ -358,9 +356,9 @@ func (ls *LedgerState) queryShelleyEpochNo(
 // Unpinned (at.pinned() false) always succeeds: the live tip trivially
 // satisfies every retention window.
 //
-// KNOWN GAP (CodeRabbit review, dingo#4319): this check runs in its own
-// transaction, which closes before the caller (localstatequeryServerAcquire)
-// records at as this connection's acquired point. cleanupConsumedUtxos runs
+// KNOWN GAP: this check runs in its own transaction, which closes before
+// the caller (localstatequeryServerAcquire) records at as this
+// connection's acquired point. cleanupConsumedUtxos runs
 // as an unsynchronized background goroutine (ledger/state.go, `go
 // ls.cleanupConsumedUtxos()`), not serialized against Acquire in any way, so
 // it -- or an equivalent cleanup pass in ledger/snapshot's rotation.go, or
@@ -398,11 +396,10 @@ func (ls *LedgerState) VerifyPointQueryable(
 	}
 	// queryHardFork's HardForkCurrentEraQuery case (GetCurrentEra) is
 	// point-aware and returns ErrHistoricalStateUnavailable when
-	// resolveAsOfEpoch can't resolve at to an epoch (human review,
-	// dingo#4319/#4320) -- exercised here for the same reason every other
-	// check above is: Querying has no Failure transition, so a rejection
-	// surfacing from Query instead of here drops the connection rather
-	// than returning a clean AcquireFailure.
+	// resolveAsOfEpoch can't resolve at to an epoch -- exercised here for
+	// the same reason every other check above is: Querying has no Failure
+	// transition, so a rejection surfacing from Query instead of here
+	// drops the connection rather than returning a clean AcquireFailure.
 	if _, err := ls.queryHardFork(
 		&olocalstatequery.HardForkQuery{Query: &olocalstatequery.HardForkCurrentEraQuery{}},
 		at, txn,
@@ -563,8 +560,8 @@ func (ls *LedgerState) queryChainPoint() (any, error) {
 // reply -- "cbor: cannot unmarshal array into Go value of type
 // babbage.BabbageProtocolParameters (cannot decode CBOR array to struct
 // with different number of elements)" when the pinned point's real era
-// differs from dingo's live one, confirmed live pinning at genesis (slot
-// 0) against a dingo instance already many eras past it
+// differs from dingo's live one -- e.g. pinning at genesis (slot 0)
+// against a dingo instance already many eras past it
 // (blinklabs-io/dingo#1900 node-parity --from-genesis validation).
 func (ls *LedgerState) queryHardFork(
 	query *olocalstatequery.HardForkQuery,
@@ -1436,10 +1433,9 @@ func (ls *LedgerState) totalActiveStake(
 // network_state at all -- shared with
 // verifyStakeDistributionRetentionOnly's own network_state floor
 // (ledger/pool_stake_distribution.go) so the two conditions cannot drift
-// apart (human review, Chris Guiney, dingo#4319/#4320: an earlier,
-// unconditional version of that floor rejected a point every one of this
-// function's real callers would have answered just fine via the
-// totalActiveStake fallback below).
+// apart: an unconditional floor there would reject a point every one of
+// this function's real callers would have answered just fine via the
+// totalActiveStake fallback below.
 func (ls *LedgerState) totalCirculatingSupply(
 	epoch uint64,
 	asOfSlot *uint64,

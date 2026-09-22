@@ -176,9 +176,9 @@ func (o *Ouroboros) localstatequeryServerAcquire(
 		// already unanswerable by a specific query type with its own,
 		// stricter retention floor (UTxO whole/by-ref, stake/pool
 		// distribution, current protocol parameters at a historical
-		// epoch) -- confirmed live, this hit the exact same
-		// connection-killing gap #4156 fixed for the on-chain check alone,
-		// just for a different, retention-based rejection reason
+		// epoch) -- this hits the exact same connection-killing gap #4156
+		// fixed for the on-chain check alone, just for a different,
+		// retention-based rejection reason
 		// (blinklabs-io/dingo#382 protocol-compliance finding).
 		// VerifyPointQueryable's own doc comment covers verifyPointOnChain
 		// too, so this subsumes VerifyPointOnChain rather than needing
@@ -201,10 +201,9 @@ func (o *Ouroboros) localstatequeryServerAcquire(
 			// An error matching neither sentinel means something
 			// unexpected (a real database error, say) happened inside
 			// VerifyPointQueryable's own reads rather than the point
-			// genuinely being unqueryable (human review, Chris Guiney,
-			// dingo#4320): returning it bare here has gouroboros'
-			// handleAcquire treat it as a fatal protocol error and tear
-			// down the connection, reintroducing the exact
+			// genuinely being unqueryable: returning it bare here has
+			// gouroboros' handleAcquire treat it as a fatal protocol error
+			// and tear down the connection, reintroducing the exact
 			// connection-killing failure mode this whole mechanism exists
 			// to avoid, just triggered by a different kind of error. Map
 			// it to the same AcquireFailurePointTooOld a well-behaved

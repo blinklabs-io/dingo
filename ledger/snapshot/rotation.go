@@ -1125,14 +1125,14 @@ func (m *Manager) cleanupOldSnapshots(
 	// historical queries, and a fixed 3-epoch pool-snapshot window
 	// contradicts that for GetStakeDistribution/GetPoolDistr2 pinned to an
 	// older epoch the same way an unbounded UTxO table does for
-	// GetUTxOWhole. Confirmed live (blinklabs-io/dingo#1900 node-parity
-	// validation): with only UTxO's own window removed, a historical
-	// Acquire still failed at exactly this pool-snapshot floor instead,
-	// since VerifyPointQueryable's Acquire-time gate (blinklabs-io/dingo#382)
-	// checks stake retention on every Acquire regardless of which query
-	// type the caller actually intends to ask -- there is no protocol-level
-	// way to know that in advance, so the whole Acquire is only as
-	// long-lived as its strictest per-query floor.
+	// GetUTxOWhole. VerifyPointQueryable's Acquire-time gate
+	// (blinklabs-io/dingo#382) checks stake retention on every Acquire
+	// regardless of which query type the caller actually intends to ask,
+	// so even removing only UTxO's own window still leaves a historical
+	// Acquire failing at this pool-snapshot floor instead -- there is no
+	// protocol-level way to know in advance which query type a session
+	// will ask, so the whole Acquire is only as long-lived as its
+	// strictest per-query floor.
 	if m.db.StorageMode() != types.StorageModeAPI {
 		// Pool-stake snapshots may still be needed below the default window by a
 		// queued/deferred header that validates leader eligibility against an

@@ -138,19 +138,18 @@ func TestLocalstatequeryServerAcquire_PointOnChain_Succeeds(t *testing.T) {
 		Point: ocommon.NewPoint(2, tipHash),
 	}, nil))
 	// VerifyPointQueryable now also exercises queryHardFork's
-	// HardForkCurrentEraQuery case (human review, dingo#4319/#4320), which
-	// needs an epoch record covering the acquired slot to resolve an era
-	// from -- newTestLedgerStateWithChain seeds blocks only.
+	// HardForkCurrentEraQuery case, which needs an epoch record covering
+	// the acquired slot to resolve an era from --
+	// newTestLedgerStateWithChain seeds blocks only.
 	require.NoError(t, db.SetEpoch(
 		0, 0, nil, nil, nil, nil, 0, 1, 100, nil,
 	))
 	// verifyStakeDistributionRetentionOnly's network_state floor is gated
 	// on CardanoNodeConfig having a real ShelleyGenesis with a nonzero
-	// MaxLovelaceSupply (ledger.circulatingSupplyGenesis) -- newTestLedgerStateWithChain
-	// sets neither, so that floor is inactive here and needs no
-	// network_state row seeded (human review, Chris Guiney, dingo#4319/#4320:
-	// an earlier version of this fixture seeded one, which the floor never
-	// actually checked, since it was never active in the first place).
+	// MaxLovelaceSupply (ledger.circulatingSupplyGenesis) --
+	// newTestLedgerStateWithChain sets neither, so that floor is inactive
+	// here and needs no network_state row seeded: the floor never actually
+	// checks one when it isn't active in the first place.
 
 	connID := ouroboros.ConnectionId{}
 	err := o.localstatequeryServerAcquire(
@@ -169,9 +168,8 @@ func TestLocalstatequeryServerAcquire_PointOnChain_Succeeds(t *testing.T) {
 	require.Equal(t, uint64(2), recorded.Slot)
 }
 
-// TestLocalstatequeryServerAcquire_UnexpectedError_MappedToPointTooOld is
-// the regression a human reviewer found (Chris Guiney, dingo#4320): an
-// error VerifyPointQueryable returns matching neither
+// TestLocalstatequeryServerAcquire_UnexpectedError_MappedToPointTooOld
+// covers a regression: an error VerifyPointQueryable returns matching neither
 // ledger.ErrPointNotOnChain nor ledger.ErrHistoricalStateUnavailable --
 // e.g. a real database error inside one of its own reads, not the point
 // genuinely being unqueryable -- was previously returned bare. gouroboros'
@@ -237,14 +235,15 @@ func TestLocalstatequeryServerAcquire_UnexpectedError_MappedToPointTooOld(
 	)
 }
 
-// TestLocalstatequeryServerAcquire_PastRetentionFloor_MappedToPointTooOld is
-// wolf31o2's review finding on this PR: reverting localstatequeryServerAcquire's
-// call from VerifyPointQueryable back to the narrower VerifyPointOnChain left
-// every other test in this file green -- UnexpectedError_MappedToPointTooOld
-// still passes because a closed database fails VerifyPointOnChain too, and no
-// other test Acquires a point that is genuinely still on-chain but past a
-// query-type-specific retention floor. This Acquires slot 1 of a real
-// two-block chain (on-chain, so VerifyPointOnChain alone would accept it)
+// TestLocalstatequeryServerAcquire_PastRetentionFloor_MappedToPointTooOld
+// covers a gap the other tests in this file leave open: reverting
+// localstatequeryServerAcquire's call from VerifyPointQueryable back to the
+// narrower VerifyPointOnChain leaves every other test in this file green --
+// UnexpectedError_MappedToPointTooOld still passes because a closed database
+// fails VerifyPointOnChain too, and no other test Acquires a point that is
+// genuinely still on-chain but past a query-type-specific retention floor.
+// This Acquires slot 1 of a real two-block chain (on-chain, so
+// VerifyPointOnChain alone would accept it)
 // after marking the durable consumed-UTxO prune floor
 // (database.ConsumedUtxoPruneFloorSyncKey) at slot 2 --
 // checkUtxoRetentionWindow (ledger/queries.go), reached only through
