@@ -704,9 +704,6 @@ func excludeRewardInputPool(dist *StakeDistribution, poolKeyHash []byte) bool {
 	return true
 }
 
-// sumPoolStakes totals all pool stakes, mirroring sumDelegators. Recomputed
-// directly from the map (rather than tracked incrementally) so it cannot
-// drift from dist.PoolStakes after pools are excluded.
 // rewardTotalActiveStake returns the sigma_a denominator for a reward-stake
 // distribution: the stake of every delegated credential the calculator saw,
 // which includes credentials whose pool has left the active set and is
@@ -725,6 +722,9 @@ func rewardTotalActiveStake(dist *StakeDistribution) uint64 {
 	return bucketed
 }
 
+// sumPoolStakes totals all pool stakes, mirroring sumDelegators. Recomputed
+// directly from the map (rather than tracked incrementally) so it cannot
+// drift from dist.PoolStakes after pools are excluded.
 func sumPoolStakes(stakes map[lcommon.PoolKeyHash]uint64) uint64 {
 	var total uint64
 	for _, stake := range stakes {

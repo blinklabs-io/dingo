@@ -137,12 +137,9 @@ func (d *BlobStoreBadger) RemainingTxnEntries(
 	// checkSize rejects the entry that would *reach* either limit, so the
 	// last entry this transaction can still accept is one below each.
 	byCount := db.MaxBatchCount() - 1 - badgerTxn.stagedEntries.Load()
-	// A staged delete has the caller-supplied key size and an empty value, but
-	// badger may still charge it through the value-log-pointer path when the
-	// value threshold is low enough (including 0). Use the same sizing rule the
-	// transaction's own charge() path uses so the estimate never reports room
-	// for more deletes than badger itself will accept.
-	perEntry := badgerEntrySize(max(entryBytes, 0), 0, d.valueThreshold)
+	// An entry never costs less than its overhead, so a zero or negative
+	// entryBytes cannot make the byte budget look unlimited.
+	perEntry := max(int64(entryBytes), 0) + badgerEntryOverhead
 	byBytes := (db.MaxBatchSize() - 1 - badgerTxn.stagedBytes.Load()) /
 		perEntry
 	remaining := max(min(byCount, byBytes), 0)

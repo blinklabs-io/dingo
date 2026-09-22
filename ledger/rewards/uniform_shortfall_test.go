@@ -145,9 +145,11 @@ func TestActiveStakeUndercountUnderCreditsUniformly(t *testing.T) {
 		t, pots, shortfallSnapshot(shortfallActiveStake, shortfallTotalBlocks),
 	)
 	short := shortfallActiveStake - shortfallActiveStake/1000
-	undercounted := shortfallCalculate(
-		t, pots, shortfallSnapshot(short, shortfallTotalBlocks),
+	undercountedSnapshot := shortfallSnapshot(
+		shortfallActiveStake, shortfallTotalBlocks,
 	)
+	undercountedSnapshot.TotalActiveStake = short
+	undercounted := shortfallCalculate(t, pots, undercountedSnapshot)
 	for i, pct := range shortfallPercent(base, undercounted) {
 		if pct < 0.0999 || pct > 0.1001 {
 			t.Errorf(

@@ -1029,6 +1029,7 @@ func (ls *LedgerState) precomputedStakeRewardApplication(
 		totalRewardPot:           uint64(pots.Rewards),
 		totalCirculation:         totalCirculation,
 		totalBlocks:              totalBlocks,
+		rewardEfficiency:         rewards.Efficiency(totalBlocks, params),
 		precomputed:              true,
 		outputsUpdated:           outputsUpdated,
 		snapshotCapturedSlot:     rewardSnapshot.CapturedSlot,
@@ -4443,9 +4444,7 @@ func stakeRewardSourceHash(
 	return h.Sum(nil)
 }
 
-// rewardEfficiencyLogValue renders eta for the applied-rewards log line. The
-// precompute reuse path re-derives the stored outputs rather than recomputing
-// the round, so it carries no Result and leaves the value nil.
+// rewardEfficiencyLogValue renders eta for the applied-rewards log line.
 func rewardEfficiencyLogValue(efficiency *big.Rat) string {
 	if efficiency == nil {
 		return ""
