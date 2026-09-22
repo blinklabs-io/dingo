@@ -63,7 +63,7 @@ func TestGetAssetByPolicyAndNameRecoversExternalNameHex(t *testing.T) {
 // TestAssetAmountAndFingerprintReadCorrectlyWithoutIndexes proves an asset's
 // amount and fingerprint still round-trip correctly through the store once
 // idx_asset_amount and idx_asset_fingerprint no longer exist (dingo#4598,
-// migration v20). Unlike dingo#4482's asset.name_hex, neither column was
+// migration v21). Unlike dingo#4482's asset.name_hex, neither column was
 // dropped: both are genuinely read and returned via the blockfrost/mesh API
 // adapters, so only the dead indexes are gone -- this pins that the values
 // themselves are unaffected. store comes from newMigratedSQLiteStore, which

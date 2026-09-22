@@ -96,18 +96,18 @@ func TestValidateInboundBlockExUnitsAggregatesDeclaredBudgets(t *testing.T) {
 	t.Parallel()
 
 	newTx := func(memory, steps int64) lcommon.Transaction {
-		return &mockFeeTx{
-			witnesses: &mockWitnessSet{
-				redeemers: &mockRedeemers{entries: []struct {
-					key lcommon.RedeemerKey
-					val lcommon.RedeemerValue
-				}{
-					{val: lcommon.RedeemerValue{ExUnits: lcommon.ExUnits{
-						Memory: memory,
-						Steps:  steps,
-					}}},
-				}},
+		return &dijkstra.DijkstraTransaction{
+			WitnessSet: dijkstra.DijkstraTransactionWitnessSet{
+				WsRedeemers: dijkstra.DijkstraRedeemers{
+					Redeemers: map[lcommon.RedeemerKey]lcommon.RedeemerValue{
+						{}: {ExUnits: lcommon.ExUnits{
+							Memory: memory,
+							Steps:  steps,
+						}},
+					},
+				},
 			},
+			TxIsValid: false,
 		}
 	}
 	pparams := &conway.ConwayProtocolParameters{

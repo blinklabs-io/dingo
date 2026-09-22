@@ -28,7 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Migration v20 (asset-amount-fingerprint-index-drop, dingo#4598) is the
+// Migration v21 (asset-amount-fingerprint-index-drop, dingo#4598) is the
 // registry's second DROP INDEX migration, after v19's asset.name_hex drop.
 // Unlike v19, it carries no DROP COLUMN, so SQLite's and PostgreSQL's native
 // "DROP INDEX IF EXISTS" tolerate replay without reaching any guard in
@@ -54,7 +54,7 @@ func requirePostgresAssetIndexesAbsent(
 SELECT count(*) FROM pg_indexes
 WHERE schemaname = $1 AND indexname = $2`,
 			schema, name).Scan(&count))
-		require.Zero(t, count, "%s must not survive migration v20", name)
+		require.Zero(t, count, "%s must not survive migration v21", name)
 	}
 	// The columns themselves must survive: only the indexes are dropped.
 	for _, column := range []string{"amount", "fingerprint"} {
@@ -65,19 +65,19 @@ WHERE table_schema = $1 AND table_name = 'asset' AND column_name = $2`,
 			schema, column).Scan(&count))
 		require.Equal(
 			t, 1, count,
-			"asset.%s must survive migration v20", column,
+			"asset.%s must survive migration v21", column,
 		)
 	}
 }
 
-// TestAssetAmountFingerprintIndexDropAppliesOnPostgres drives v20 to
+// TestAssetAmountFingerprintIndexDropAppliesOnPostgres drives v21 to
 // completion against a real PostgreSQL server, then forces its expand phase
 // to replay, confirming "DROP INDEX IF EXISTS" tolerates replay natively.
 func TestAssetAmountFingerprintIndexDropAppliesOnPostgres(t *testing.T) {
 	t.Parallel()
 	dsn := postgresEngineTestDSN(t)
 
-	schema := "dingo_v20_replay"
+	schema := "dingo_v21_replay"
 	admin, err := sql.Open("pgx", dsn)
 	require.NoError(t, err)
 	defer admin.Close()
@@ -109,23 +109,23 @@ func TestAssetAmountFingerprintIndexDropAppliesOnPostgres(t *testing.T) {
 	require.NoError(t, runner.Run(context.Background()))
 	requirePostgresAssetIndexesAbsent(t, db, schema)
 
-	// Reproduce a crash between v20's DDL and its phase advance.
+	// Reproduce a crash between v21's DDL and its phase advance.
 	_, err = db.Exec(`
 UPDATE schema_migrations SET phase = 'expand', dirty = true, completed_at = NULL
-WHERE version = $1`, 20)
+WHERE version = $1`, 21)
 	require.NoError(t, err)
 
 	require.NoError(
 		t,
 		runner.Run(context.Background()),
-		"v20 must replay its expand phase against PostgreSQL",
+		"v21 must replay its expand phase against PostgreSQL",
 	)
 	requirePostgresAssetIndexesAbsent(t, db, schema)
 
 	var phase string
 	var dirty bool
 	require.NoError(t, db.QueryRow(`
-SELECT phase, dirty FROM schema_migrations WHERE version = $1`, 20).
+SELECT phase, dirty FROM schema_migrations WHERE version = $1`, 21).
 		Scan(&phase, &dirty))
 	require.Equal(t, "complete", phase)
 	require.False(t, dirty)
@@ -140,7 +140,7 @@ func TestAssetAmountFingerprintIndexDropReplaysOnMySQL(t *testing.T) {
 	t.Parallel()
 	rootDSN := mysqlEngineTestRootDSN(t)
 
-	database := "dingo_v20_replay"
+	database := "dingo_v21_replay"
 	admin, err := sql.Open("mysql", rootDSN)
 	require.NoError(t, err)
 	defer admin.Close()
@@ -176,13 +176,13 @@ func TestAssetAmountFingerprintIndexDropReplaysOnMySQL(t *testing.T) {
 
 	_, err = db.Exec(`
 UPDATE schema_migrations SET phase = 'expand', dirty = 1, completed_at = NULL
-WHERE version = ?`, 20)
+WHERE version = ?`, 21)
 	require.NoError(t, err)
 
 	require.NoError(
 		t,
 		runner.Run(context.Background()),
-		"v20 must replay its expand phase against MySQL",
+		"v21 must replay its expand phase against MySQL",
 	)
 	requireMySQLAssetIndexesAbsent(t, db, database)
 }
@@ -196,7 +196,7 @@ SELECT count(*) FROM information_schema.statistics
 WHERE table_schema = ? AND table_name = 'asset'
   AND index_name = ?`,
 			database, name).Scan(&count))
-		require.Zero(t, count, "%s must not survive migration v20", name)
+		require.Zero(t, count, "%s must not survive migration v21", name)
 	}
 	for _, column := range []string{"amount", "fingerprint"} {
 		var count int
@@ -206,7 +206,7 @@ WHERE table_schema = ? AND table_name = 'asset' AND column_name = ?`,
 			database, column).Scan(&count))
 		require.Equal(
 			t, 1, count,
-			"asset.%s must survive migration v20", column,
+			"asset.%s must survive migration v21", column,
 		)
 	}
 }

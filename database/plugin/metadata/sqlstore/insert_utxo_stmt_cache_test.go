@@ -200,6 +200,37 @@ func TestImportUtxosReusesCachedStatementAcrossTransactions(t *testing.T) {
 	)
 }
 
+func TestImportUtxosDeferredRewardLiveStakeRefreshRebuildsCorrectly(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	utxo := *utxoForInsertCacheTest(23, 0, 5_000_000)
+	utxo.CredentialTag = 0
+	utxo.StakingKey = bytes.Repeat([]byte{0x23}, lcommon.AddressHashSize)
+
+	require.NoError(t, store.ImportUtxosDeferredRewardLiveStakeRefresh(
+		[]models.Utxo{utxo},
+		nil,
+	))
+	var aggregateCount int
+	require.NoError(t, store.writeDB.QueryRowContext(
+		context.Background(),
+		"SELECT COUNT(*) FROM reward_live_stake",
+	).Scan(&aggregateCount))
+	require.Zero(t, aggregateCount,
+		"deferred import must not refresh the aggregate per batch")
+
+	require.NoError(t, store.RebuildRewardLiveStake(utxo.AddedSlot, nil))
+	var utxoStake string
+	require.NoError(t, store.writeDB.QueryRowContext(
+		context.Background(),
+		"SELECT utxo_stake FROM reward_live_stake WHERE credential_tag = 0 AND staking_key = ?",
+		utxo.StakingKey,
+	).Scan(&utxoStake))
+	require.Equal(t, "5000000", utxoStake)
+}
+
 // TestImportUtxosBoundsTxScopedStatementRetentionInOneTransaction exercises
 // the production shape: one import batch keeps a write transaction open while
 // it inserts many outputs. Reusing one Tx-scoped derivative keeps database/sql

@@ -25,13 +25,13 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// TestAssetAmountFingerprintIndexDropRemovesIndexes proves migration v20
+// TestAssetAmountFingerprintIndexDropRemovesIndexes proves migration v21
 // (asset-amount-fingerprint-index-drop, dingo#4598) drops idx_asset_amount
 // and idx_asset_fingerprint from a database migrated all the way through,
 // while leaving the asset.amount and asset.fingerprint columns themselves
 // untouched -- unlike dingo#4482's asset.name_hex, both columns are still
 // genuinely read and returned via the blockfrost/mesh API adapters. Before
-// this migration existed, a fully migrated (through v19) database still
+// this migration existed, a fully migrated (through v20) database still
 // carried both indexes: a real WAL-frame-churn measurement during genesis
 // sync found neither backs any WHERE/JOIN/ORDER BY predicate anywhere in the
 // tree (dingo#4464).
@@ -74,12 +74,12 @@ func TestAssetAmountFingerprintIndexDropRemovesIndexes(t *testing.T) {
 	require.True(
 		t,
 		wantColumns["amount"],
-		"asset.amount must survive migration v20 -- only its index is dropped",
+		"asset.amount must survive migration v21 -- only its index is dropped",
 	)
 	require.True(
 		t,
 		wantColumns["fingerprint"],
-		"asset.fingerprint must survive migration v20 -- only its index is dropped",
+		"asset.fingerprint must survive migration v21 -- only its index is dropped",
 	)
 
 	idxRows, err := db.Query(`PRAGMA index_list("asset")`)
@@ -97,13 +97,13 @@ func TestAssetAmountFingerprintIndexDropRemovesIndexes(t *testing.T) {
 			t,
 			"idx_asset_amount",
 			name,
-			"idx_asset_amount must not survive migration v20",
+			"idx_asset_amount must not survive migration v21",
 		)
 		require.NotEqual(
 			t,
 			"idx_asset_fingerprint",
 			name,
-			"idx_asset_fingerprint must not survive migration v20",
+			"idx_asset_fingerprint must not survive migration v21",
 		)
 	}
 	require.NoError(t, idxRows.Err())

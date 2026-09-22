@@ -167,7 +167,7 @@ func TestNodeStopSkipsDatabaseCloseWhenPhase1DrainUnconfirmed(t *testing.T) {
 		}}
 	}
 
-	db, err := dbtest.NewDatabase(t, nil)
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 
 	n := &Node{db: db}

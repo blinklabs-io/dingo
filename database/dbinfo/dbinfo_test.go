@@ -122,21 +122,3 @@ func TestReadDetectsEmptyStringMetadataPluginField(t *testing.T) {
 	require.Error(t, err)
 	require.True(t, errors.Is(err, dbinfo.ErrIncompleteSidecar))
 }
-
-// TestWriteThenReadStillRoundTripsWithNonEmptyPlugin guards against the
-// ErrIncompleteSidecar fix being over-broad: a well-formed sidecar with a
-// real plugin name must still read back cleanly with no error, exactly as
-// TestWriteThenReadRoundTrips already covers -- this pins the same
-// round-trip using a different plugin name so the fix's added check
-// (`info.MetadataPlugin == ""`) is verified not to trip on any non-empty
-// value, not just "postgres".
-func TestWriteThenReadStillRoundTripsWithNonEmptyPlugin(t *testing.T) {
-	dir := t.TempDir()
-	require.NoError(t, dbinfo.Write(dir, dbinfo.Info{
-		FormatVersion:  dbinfo.CurrentFormatVersion,
-		MetadataPlugin: "mysql",
-	}))
-	info, err := dbinfo.Read(dir)
-	require.NoError(t, err)
-	require.Equal(t, "mysql", info.MetadataPlugin)
-}
