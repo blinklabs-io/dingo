@@ -4205,7 +4205,13 @@ competing chain; ordinary blockfetch completion or connection handoff retains
 ownership of that queue. Fork resolution reconstructs the peer's fetched
 header path with `findPeerForkPath`, locates the exact common ancestor, and
 counts both the peer and primary-chain blocks in
-`(intersectionSlot, intersectionSlot + genesisWindow]`. Greater density wins;
+`(intersectionSlot, intersectionSlot + genesisWindow]`. A `database.BlockByHash`
+hit is accepted as that ancestor only when its slot is at or before the local
+tip snapshot taken at fork-resolution entry; a hit past the tip (which could
+occur if a block row were left stranded in the persistent hash index by an
+incomplete rollback) is treated as unresolved so the peer-header-history walk
+keeps looking, rather than letting recovery roll back toward a point beyond
+where the node actually is. Greater density wins;
 equal density falls back to the normal Praos length/select-view comparison.
 Node composition injects an atomic Genesis-mode/window query from
 `ChainSelector` into ledger, so the same resolver automatically returns to
