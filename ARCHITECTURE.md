@@ -4205,7 +4205,13 @@ competing chain; ordinary blockfetch completion or connection handoff retains
 ownership of that queue. Fork resolution reconstructs the peer's fetched
 header path with `findPeerForkPath`, locates the exact common ancestor, and
 counts both the peer and primary-chain blocks in
-`(intersectionSlot, intersectionSlot + genesisWindow]`. Greater density wins;
+`(intersectionSlot, intersectionSlot + genesisWindow]`. A `database.BlockByHash`
+hit is accepted as that ancestor only when its slot is at or before the local
+tip snapshot taken at fork-resolution entry; a hit past the tip (which could
+occur if a block row were left stranded in the persistent hash index by an
+incomplete rollback) is treated as unresolved so the peer-header-history walk
+keeps looking, rather than letting recovery roll back toward a point beyond
+where the node actually is. Greater density wins;
 equal density falls back to the normal Praos length/select-view comparison.
 Node composition injects an atomic Genesis-mode/window query from
 `ChainSelector` into ledger, so the same resolver automatically returns to
@@ -12460,7 +12466,15 @@ in a read-only transaction; a separate short write transaction re-reads the
 owning `RewardSnapshot` and persists only if its captured/boundary slots and
 content still match, no rollback generation spanning performance blocks, ADA
 pots, protocol state, and account certificate history changed, and no non-empty
-result was concurrently persisted or applied. Completion is inferred from the
+result was concurrently persisted or applied. If retention pruned the owning
+snapshot's per-credential `reward_stake_input` rows, the read phase reconstructs
+and reconciles them without writing, then carries them in the computed
+`stakeRewardApplication`; only the guarded short write phase persists those
+rows with the outputs and ADA-pot update. The synchronous boundary path saves
+the same reconstructed rows atomically in its existing rollover transaction.
+Equal-stake reconciliation uses pool hash, credential tag, and staking key as a
+total tie-break, so metadata iteration order cannot change the recovered reward
+basis. Completion is inferred from the
 persisted `reward_ada_pots.rewards` total plus the output-row set rather than an
 explicit marker, so an epoch whose total reward pot is legitimately zero carries
 no distinct completion sentinel and is re-derived idempotently by the precompute

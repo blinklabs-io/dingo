@@ -1436,15 +1436,25 @@ reward, leader reward, member reward total). What is not answerable outside the
 window is anything per-delegator: which credentials backed a pool's stake, and
 what each account was paid.
 
-Retaining a `reward_snapshot` whose `reward_stake_input` rows have been pruned
-cannot produce a wrong reward calculation. `applyStakeRewards` detects the
-combination — a snapshot claiming delegators over an empty credential set — logs
-it and skips the epoch, the same outcome as an epoch with no pots row; without
-that check `validateRewardCalculatorInputs` would fail with a stake-total
-mismatch and take the whole epoch rollover down with it. The precompute-reuse
-path reaches the same validation and treats the failure as "no usable
-precompute", so it recalculates and then hits the same skip. Reaching either
-needs a rewind across more than the retained epochs, far beyond `k`.
+When a retained `reward_snapshot` and `reward_pool_input` set has lost its
+windowed `reward_stake_input` rows, reward calculation reconstructs the
+per-credential rows from historical delegation, UTxO, reward-delta, and pool
+registration state at the retained snapshot slots. The result is accepted only
+when every pool's delegated stake, owner stake, and delegator count reconcile
+with its retained pool input; a small bounded rounding difference is assigned
+with a total order over stake, pool key hash, credential tag, and staking key,
+so database and query iteration order cannot change which credential receives
+the adjustment. An incomplete or materially mismatched reconstruction is
+logged and skipped instead of reaching `validateRewardCalculatorInputs` with a
+bad bundle and aborting the epoch rollover.
+
+Reconstruction itself performs reads only. A synchronous boundary calculation
+carries the rows into `applyStakeRewardApplication` and saves them in the same
+metadata write transaction as the reward application. Async precompute carries
+the same rows in `stakeRewardApplication`; after its rollback-generation and
+snapshot-content guard succeeds, the short write phase saves the rows together
+with the outputs and updated ADA pots. A failed save therefore rolls the owning
+transaction back instead of exposing a partial reconstructed credential set.
 
 Rollback is separate from retention and unaffected by it. Retention only ever
 deletes rows below the window, so it never competes with a rewind. Rollback
@@ -2178,8 +2188,38 @@ leaves the row naming the blob, which stays reachable and uncounted, and the
 retry does not double-count it (registered by `RegisterBlobOrphanMetrics`,
 readable in-process via `BlobOrphanCount`). That counter is the only signal
 that a blob store is accumulating dead data, so a non-zero and growing value is
-worth alerting on: it means blob deletes are failing, and the objects already
-lost are not recoverable by any automatic path.
+worth alerting on: the objects already lost are not recoverable by any
+automatic path.
+
+A rising counter has two causes. The first is a blob delete that failed
+outright. The second is a delete this code declined to attempt: when a caller
+stages its deletes in an enclosing transaction, that transaction has a finite
+budget, and a rollback large enough to exhaust it would leave the transaction
+unable to commit at all — including the commit timestamp — which fails the
+whole rollback and, on the startup path, leaves the node unable to start.
+`deleteUtxoBlobs` and `deleteTxBlobs` therefore stage only as many deletes as
+the store reports room for, keeping a reserve for the commit itself, and count
+the remainder as stranded rather than risk the commit. A bounded skip is
+expected during a large rollback: the metadata is still removed, so the store
+stays correct, and the cost is disk rather than an unstartable node.
+
+The two causes are not distinguished by severity. A skip adds its count to the
+same `deleteErrors` total as a failure, so both reach `recordBlobOrphansOnCommit`,
+both return `ErrBlobDeleteIncomplete`, both produce the same warn-level summary
+carrying `failed` and `total`, and both make the caller log its own error-level
+line about unreachable objects. The only discriminator is an additional
+warn-level line emitted at the moment of the skip, carrying `skipped`, `staged`
+and `total`; its absence means every counted object was a genuine delete
+failure.
+
+The budget comes from the optional `blob.TxnBudget` extension
+(`RemainingTxnEntries`). Badger implements it, mirroring the accounting behind
+`Txn.checkSize` so the answer matches the limit the transaction will actually
+be held to. The cloud plugins do not: S3 and GCS stage their mutations in
+memory and apply them in `Commit`, so there is no per-transaction entry budget
+to report. A store that does not implement the extension is staged unbounded,
+exactly as before this bound existed, and can only ever produce the first
+case — the bound changes behaviour only where a budget can be reported.
 
 ### Archive And History Expiry Contract
 
@@ -3202,11 +3242,10 @@ denominator instead of the leader-election/reward/SPO one. `expiryEpoch == 0`
 disables the gate and the generated SQL and bind args are byte-identical to
 the pre-CIP query. A nonzero value adds
 `AND (<alias>.expiration_epoch = 0 OR <alias>.expiration_epoch >= expiryEpoch)`
-to both the inner subquery's `WHERE ... active = 1/true` (aliased `ax`, or an
-`EXISTS` correlation for the single-DRep and by-type variants) and the outer
-query's `WHERE ... active = 1/true` (aliased `a`), keeping an account iff it
-has never been witnessed-expired or its expiration is not yet due.
-`ledger/governance.LoadDRepVotingState` computes `expiryEpoch` as
+to both the inner subquery's `WHERE ... active = 1/true` (aliased `ax`) and
+the outer query's `WHERE ... active = 1/true` (aliased `a`), keeping an
+account iff it has never been witnessed-expired or its expiration is not yet
+due. `ledger/governance.LoadDRepVotingState` computes `expiryEpoch` as
 `currentEpoch` when `LedgerStateConfig.DelegatorInactivityEnabled` is true and
 `0` otherwise, and passes it to `GetDRepVotingPowerBatch` (regular DReps) and
 `GetDRepVotingPowerByType` (the `AlwaysAbstain`/`AlwaysNoConfidence`
@@ -3215,6 +3254,22 @@ gate flag in from config through `governance.ProcessEpoch`'s `EpochInput`.
 `GetDRepVotingPower` (the single-DRep, non-batch form used by point-in-time
 API/ledger-view queries, not the epoch-boundary tally) accepts the same
 parameter but its callers always pass `0`.
+
+`GetDRepVotingPowerByType`'s inner subquery joins outward from `account`
+to `utxo` with the same join shape as `GetDRepVotingPowerBatch` below, but
+filters on `drep_type` where the batch form filters on `drep`. Its inner
+`GROUP BY` is `(credential_tag, staking_key)` and its outer `GROUP BY` is
+`drep_type`; the batch form additionally carries `drep_type` through the
+inner grouping and the subquery join, because its outer grouping is
+`(drep, drep_type)`. Before blinklabs-io/dingo#4364 it instead
+scanned every live `utxo` row and ran a correlated `EXISTS` subquery against
+`account` per row — on a node with millions of live UTxOs and a small
+delegated-account set, that shape cost 620-650ms per call against 16-35ms for
+the account-first join, with byte-identical results, and ran at every epoch
+boundary via `LoadDRepVotingState`. `GetDRepVotingPower` (the single-credential
+form) still uses the pre-#4364 `EXISTS` correlation; its only callers are
+`LedgerView.GetDRepVotingPower` and the Blockfrost adapter's single-DRep
+lookup, neither on the per-epoch tally path.
 
 The expiry clause's bind position is always textually ahead of the
 pre-existing predicate it shares a `WHERE` with (the `IN (...)` chunk for the
