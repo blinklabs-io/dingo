@@ -1124,7 +1124,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if genesisWindowSlots == 0 {
 		genesisWindowSlots = chainselection.GenesisWindowSlotsForParams(
 			chainSelectorSecurityParam,
-			n.ledgerState.ActiveSlotCoeff(),
+			n.ledgerState.ActiveSlotCoeffRat(),
 		)
 	}
 	genesisSelectionMode := n.config.genesisBootstrap &&
