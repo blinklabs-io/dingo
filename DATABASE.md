@@ -3216,8 +3216,12 @@ API/ledger-view queries, not the epoch-boundary tally) accepts the same
 parameter but its callers always pass `0`.
 
 `GetDRepVotingPowerByType`'s inner subquery joins outward from `account`
-to `utxo` exactly like `GetDRepVotingPowerBatch` below, filtering/grouping by
-`drep_type` instead of `drep`. Before blinklabs-io/dingo#4364 it instead
+to `utxo` with the same join shape as `GetDRepVotingPowerBatch` below, but
+filters on `drep_type` where the batch form filters on `drep`. Its inner
+`GROUP BY` is `(credential_tag, staking_key)` and its outer `GROUP BY` is
+`drep_type`; the batch form additionally carries `drep_type` through the
+inner grouping and the subquery join, because its outer grouping is
+`(drep, drep_type)`. Before blinklabs-io/dingo#4364 it instead
 scanned every live `utxo` row and ran a correlated `EXISTS` subquery against
 `account` per row — on a node with millions of live UTxOs and a small
 delegated-account set, that shape cost 620-650ms per call against 16-35ms for
