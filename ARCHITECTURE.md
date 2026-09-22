@@ -1796,9 +1796,17 @@ paths, where the point is to report before the goroutine unwinds.
   promotion time) and immediately tops the pipeline back up to depth 1,
   instead of waiting for a fresh round-trip. This is what closed issue #4651:
   before it, a batch boundary always paid a full peer round-trip with the
-  connection idle. A rollback/fork/timeout/connection-switch path discards a
-  pre-queued request unconditionally rather than trying to preserve or
-  migrate it. `LedgerState.blockfetchRequestsInFlight` (per connection key) and
+  connection idle. Promotion's precondition is that the live header queue
+  still *starts* at the pre-queued request's own range: a completed batch
+  having applied a block does not mean it applied every header it claimed
+  (a body that does not fit the chain tip is swallowed as "ignored", and a
+  transport-shaped `RangeErr` can end a range after a partial delivery), and
+  promoting past a still-queued prefix would strand it — chain insertion
+  requires blocks in queued order. A rollback/fork/timeout/connection-switch
+  path, and a refused promotion, discard a pre-queued request unconditionally
+  rather than trying to preserve or migrate it, arming the late-event latch so
+  its still-outstanding terminal event is never attributed to the replacement
+  batch. `LedgerState.blockfetchRequestsInFlight` (per connection key) and
   the `blockfetchDiscardConnId` late-event latch are therefore both
   generalized to handle up to two outstanding/abandoned requests on the same
   connection at once instead of one.

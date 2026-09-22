@@ -147,10 +147,14 @@ func (ls *LedgerState) markBlockfetchRequestForDiscardLocked(
 // request. Its real terminal event, whenever it arrives, is routed to the
 // discard latch instead of being force-completed here, matching how
 // restartQueuedBlockfetchAfterForkLocked's same-connection branch treats the
-// active batch it is also abandoning: the ledger-level bookkeeping
-// (blockfetchRequestsInFlight) stays intact until the genuine BatchDone
-// drains it, so a same-connection redispatch still waits for it. The caller
-// must hold chainsyncBlockfetchMutex.
+// active batch it is also abandoning. On that path the ledger-level
+// bookkeeping (blockfetchRequestsInFlight) stays intact until the genuine
+// BatchDone drains it, so a same-connection redispatch still waits for it;
+// blockfetchRequestRangeCleanup instead releases that bookkeeping itself
+// before calling this, because its own callers have no later event left to
+// release it. Either way the latch, not the reservation, is what keeps the
+// late terminal event from being attributed to the replacement batch. The
+// caller must hold chainsyncBlockfetchMutex.
 func (ls *LedgerState) discardNextBlockfetchRequestLocked() {
 	next := ls.nextBlockfetchRequest
 	if next == nil {
@@ -184,6 +188,33 @@ func (ls *LedgerState) tryPromoteQueuedBlockfetchLocked() bool {
 	ls.nextBlockfetchRequest = nil
 	if next.rollbackGeneration != ls.blockfetchRollbackGeneration.Load() ||
 		next.chainGeneration != ls.chainRollbackGeneration.Load() {
+		ls.markBlockfetchRequestForDiscardLocked(next.connId)
+		return false
+	}
+	// The completed batch applying a block is not the same thing as its
+	// applying every header it claimed. A body that does not fit the chain
+	// tip is swallowed as "ignored" rather than returned (see
+	// chain.BlockNotFitChainTipError and noteNonExtendingBlockRejection), and
+	// a transport-shaped RangeErr can terminate a range after a partial
+	// delivery; either leaves the rest of the claimed headers queued at the
+	// front. This request starts past that claimed range, so promoting it
+	// would leave the still-queued prefix with nothing fetching it -- chain
+	// insertion requires blocks in queued order, so the promoted batch's
+	// bodies could never be applied -- and the refill below, which skips from
+	// the live queue head by headerCount, would land on a range overlapping
+	// both. The live queue head being exactly this request's own start is the
+	// precondition promotion needs; refuse otherwise and let the caller
+	// dispatch afresh from wherever the queue really is.
+	queueHead, _, available := ls.chain.HeaderRangeAfter(0, 1)
+	if available == 0 || !pointMatches(queueHead, next.headerStart) {
+		ls.config.Logger.Debug(
+			"discarding pre-queued blockfetch request past the queue head",
+			"component", "ledger",
+			"connection_id", next.connId.String(),
+			"request_start_slot", next.headerStart.Slot,
+			"queue_head_slot", queueHead.Slot,
+			"queued_headers", available,
+		)
 		ls.markBlockfetchRequestForDiscardLocked(next.connId)
 		return false
 	}

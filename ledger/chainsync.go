@@ -7603,10 +7603,16 @@ func (ls *LedgerState) blockfetchRequestRangeCleanup() {
 	// shadow requests above: there is no batch left for it to be promoted
 	// into. It shares activeBlockfetchConnId's connection, so
 	// completeBlockfetchRequestLocked pops it as the connection's next
-	// outstanding entry.
-	if ls.nextBlockfetchRequest != nil {
-		ls.completeBlockfetchRequestLocked(ls.nextBlockfetchRequest.connId)
-		ls.nextBlockfetchRequest = nil
+	// outstanding entry. Unlike the active batch -- whose terminal event has
+	// already been handled on the paths reaching here from
+	// handleEventBlockfetchBatchDone -- this one is still outstanding with
+	// the peer, so releasing its bookkeeping is not enough: arm the discard
+	// latch too, or its own later terminal event is accepted as the
+	// replacement batch's completion on a same-connection redispatch and
+	// completes that batch with nothing applied.
+	if next := ls.nextBlockfetchRequest; next != nil {
+		ls.completeBlockfetchRequestLocked(next.connId)
+		ls.discardNextBlockfetchRequestLocked()
 	}
 	// Stop the timeout timer if running and invalidate any pending callbacks
 	if ls.chainsyncBlockfetchTimeoutTimer != nil {

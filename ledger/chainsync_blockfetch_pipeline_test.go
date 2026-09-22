@@ -751,3 +751,247 @@ func TestBlockfetchPipeliningAndShadowGatesAreDisjoint(t *testing.T) {
 		})
 	}
 }
+
+// buildPartiallyAppliedCatchupChain queues headers for slots
+// [firstSlot, lastSlot] out of a 1..lastSlot hash chain, using the same hash
+// derivation buildDeepCatchupChain uses. It models the header queue left
+// behind by a batch that claimed a range but applied only part of it: headers
+// pop only as their block is applied, so the queue head is the first
+// unapplied header rather than the head the dispatch saw.
+func buildPartiallyAppliedCatchupChain(
+	t *testing.T,
+	firstSlot, lastSlot int,
+) (*chain.Chain, map[int]lcommon.Blake2b256) {
+	t.Helper()
+	testChain := &chain.Chain{}
+	hashes := make(map[int]lcommon.Blake2b256, lastSlot)
+	prevHash := lcommon.NewBlake2b256(nil)
+	for i := 1; i <= lastSlot; i++ {
+		hash := lcommon.NewBlake2b256(
+			testHashBytes(fmt.Sprintf("deep-catchup-hdr-%d", i-1)),
+		)
+		hashes[i] = hash
+		if i >= firstSlot {
+			require.NoError(t, testChain.AddBlockHeader(mockHeader{
+				hash:        hash,
+				prevHash:    prevHash,
+				blockNumber: uint64(i),
+				slot:        uint64(i),
+			}))
+		}
+		prevHash = hash
+	}
+	require.Equal(t, lastSlot-firstSlot+1, testChain.HeaderCount())
+	return testChain, hashes
+}
+
+// TestHandleEventBlockfetchBatchDoneRefusesPartiallyAppliedPromotion pins the
+// precondition promotion actually needs. A completed batch applying at least
+// one block does not mean it applied every header it claimed: a body that
+// does not fit the chain tip is swallowed as "ignored" rather than returned
+// (chain.BlockNotFitChainTipError, see issue #4272), and a transport-shaped
+// RangeErr can terminate a range after a partial delivery. Either leaves the
+// rest of the claimed headers queued at the front.
+//
+// The pre-queued request starts *after* the claimed range, so promoting it
+// there would leave the still-queued prefix with nothing fetching it: the
+// promoted batch's bodies cannot be inserted ahead of it, and the pipeline
+// refill -- which skips from the live queue head by the promoted request's
+// own header count -- lands on a range overlapping both. Promotion must
+// refuse unless the live queue head is exactly the request's own start.
+func TestHandleEventBlockfetchBatchDoneRefusesPartiallyAppliedPromotion(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	// The completed batch claimed slots 1..500 and applied only 1..30, so
+	// slots 31..500 are still queued ahead of the pre-queued 501..600.
+	const appliedSlots = 30
+	testChain, hashes := buildPartiallyAppliedCatchupChain(
+		t,
+		appliedSlots+1,
+		blockfetchBatchSize+100,
+	)
+	connId := testChainsyncConnId(6307, 3001)
+
+	var requests []deepCatchupRequest
+	ls := &LedgerState{
+		chain:                        testChain,
+		activeBlockfetchConnId:       connId,
+		chainsyncBlockfetchReadyChan: make(chan struct{}),
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			BlockfetchRequestRangeFunc: func(
+				gotConnId ouroboros.ConnectionId,
+				start ocommon.Point,
+				end ocommon.Point,
+			) (uint64, error) {
+				requests = append(requests, deepCatchupRequest{
+					connId: gotConnId,
+					start:  start,
+					end:    end,
+				})
+				return uint64(len(requests)), nil
+			},
+		},
+	}
+	ls.publishSnapshotsLocked()
+	ls.batchBlocksApplied = appliedSlots
+
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.beginBlockfetchRequestLocked(connId) // the active batch's own request
+	ls.beginBlockfetchRequestLocked(connId) // the pre-queued one (FIFO: second)
+	ls.nextBlockfetchRequest = &queuedBlockfetchRequest{
+		connId:    connId,
+		requestId: 2,
+		headerStart: ocommon.NewPoint(
+			blockfetchBatchSize+1,
+			hashes[blockfetchBatchSize+1].Bytes(),
+		),
+		headerEnd: ocommon.NewPoint(
+			blockfetchBatchSize+100,
+			hashes[blockfetchBatchSize+100].Bytes(),
+		),
+		headerCount: 100,
+	}
+	ls.chainsyncBlockfetchMutex.Unlock()
+
+	queueHead, _, available := ls.chain.HeaderRangeAfter(0, 1)
+	require.Equal(t, blockfetchBatchSize+100-appliedSlots, available+
+		ls.chain.HeaderCount()-1)
+	require.Equal(
+		t,
+		uint64(appliedSlots+1),
+		queueHead.Slot,
+		"fixture: the queue head must be the first unapplied header",
+	)
+
+	ls.chainsyncBlockfetchMutex.Lock()
+	err := ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
+		ConnectionId: connId,
+		BatchDone:    true,
+	}, nil)
+	ls.chainsyncBlockfetchMutex.Unlock()
+	require.NoError(t, err)
+
+	ls.chainsyncBlockfetchMutex.Lock()
+	assert.Nil(
+		t,
+		ls.nextBlockfetchRequest,
+		"a request whose start is no longer the queue head must not be "+
+			"promoted or left pre-queued",
+	)
+	assert.Equal(
+		t,
+		connId,
+		ls.blockfetchDiscardConnId,
+		"the refused request's late terminal event must be filtered",
+	)
+	ls.chainsyncBlockfetchMutex.Unlock()
+
+	// Unblock and drain the fresh-dispatch continuation the refusal falls
+	// through to, then check what it asked the peer for.
+	ls.chainsyncBlockfetchMutex.Lock()
+	err = ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
+		ConnectionId: connId,
+		BatchDone:    true,
+	}, nil)
+	ls.chainsyncBlockfetchMutex.Unlock()
+	require.NoError(t, err)
+	ls.blockfetchContinuationMu.Lock()
+	ls.blockfetchContinuationWG.Wait()
+	ls.blockfetchContinuationMu.Unlock()
+
+	require.NotEmpty(
+		t,
+		requests,
+		"the refusal must fall through to a fresh dispatch",
+	)
+	assert.Equal(
+		t,
+		uint64(appliedSlots+1),
+		requests[0].start.Slot,
+		"the fresh dispatch must start at the first still-queued header, "+
+			"not past the range the partially applied batch abandoned",
+	)
+
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.blockfetchRequestRangeCleanup()
+	ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
+	ls.chainsyncBlockfetchMutex.Unlock()
+}
+
+// TestBlockfetchRequestRangeCleanupFiltersAbandonedQueuedRequest pins the
+// other half of abandoning a pre-queued request: releasing its in-flight
+// bookkeeping is not enough. Unlike the active batch, whose terminal event
+// has already been handled on the paths that reach this cleanup from
+// handleEventBlockfetchBatchDone, a pre-queued request is still outstanding
+// with the peer. Dropping it without arming the discard latch lets its own
+// later terminal event be accepted as the replacement batch's completion on
+// a same-connection redispatch, completing that batch with nothing applied.
+func TestBlockfetchRequestRangeCleanupFiltersAbandonedQueuedRequest(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	testChain, hashes := buildDeepCatchupChain(t, 80)
+	connId := testChainsyncConnId(6308, 3001)
+
+	ls := &LedgerState{
+		chain:                        testChain,
+		activeBlockfetchConnId:       connId,
+		chainsyncBlockfetchReadyChan: make(chan struct{}),
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.nextBlockfetchRequest = &queuedBlockfetchRequest{
+		connId:      connId,
+		headerStart: ocommon.NewPoint(51, hashes[50].Bytes()),
+		headerEnd:   ocommon.NewPoint(80, hashes[79].Bytes()),
+		headerCount: 30,
+	}
+	ls.blockfetchRequestRangeCleanup()
+	discardConnId := ls.blockfetchDiscardConnId
+	discardRemaining := ls.blockfetchDiscardBatchesRemaining
+	ls.chainsyncBlockfetchMutex.Unlock()
+
+	assert.Equal(
+		t,
+		connId,
+		discardConnId,
+		"cleanup must arm the discard latch for the still-outstanding "+
+			"pre-queued request it abandons",
+	)
+	assert.Equal(t, 1, discardRemaining)
+
+	// A replacement batch on the same connection: the abandoned request's own
+	// terminal event arrives first (gouroboros resolves one connection's
+	// requests FIFO) and must not complete it.
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+	replacementReadyChan := ls.chainsyncBlockfetchReadyChan
+	ls.batchBlocksApplied = 0
+	err := ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
+		ConnectionId: connId,
+		BatchDone:    true,
+	}, nil)
+	stillActive := ls.chainsyncBlockfetchReadyChan
+	ls.chainsyncBlockfetchMutex.Unlock()
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		replacementReadyChan,
+		stillActive,
+		"the abandoned request's late terminal event must be filtered, not "+
+			"accepted as the replacement batch's completion",
+	)
+
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.blockfetchRequestRangeCleanup()
+	ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
+	ls.chainsyncBlockfetchMutex.Unlock()
+}
