@@ -764,6 +764,15 @@ func RunFromGenesis(
 						pendingTxHashes = pendingTxHashes[:0]
 
 						if utxoRefs != nil {
+							// A rollback-triggered re-baseline replaces utxoRefs
+							// with Dingo's own current answer, same as the
+							// tx_info-chunk-failure re-baseline in
+							// flushPendingTxInfos above -- comparing this epoch's
+							// result against that would trivially match by
+							// construction, not confirm anything against Koios.
+							// Taint this epoch the same way so the verdict
+							// reports "not run" instead of a false match.
+							utxoTaintedThisEpoch = true
 							refs, err := captureGenesisBaseline(ctx, dingoAddr, magic, point)
 							if err != nil {
 								utxoRefs = nil
