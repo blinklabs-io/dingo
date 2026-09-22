@@ -9500,6 +9500,12 @@ func (ls *LedgerState) loadTip() error {
 }
 
 func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
+	return ls.withDestructiveDatabaseTransition(
+		ls.reconcilePrimaryChainTipWithLedgerTipLocked,
+	)
+}
+
+func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTipLocked() error {
 	if ls.chain == nil || ls.config.ChainManager == nil {
 		return nil
 	}
