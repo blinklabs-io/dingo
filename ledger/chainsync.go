@@ -51,9 +51,13 @@ import (
 )
 
 const (
-	// Max number of blocks to fetch in a single blockfetch call
-	// This prevents us exceeding the configured recv queue size in the block-fetch protocol
-	blockfetchBatchSize = 500
+	// BlockfetchBatchSize is the maximum number of blocks this chainsync
+	// client requests in a single BlockFetch range, so as not to exceed the
+	// configured recv queue size in the block-fetch protocol. Exported so
+	// the server-side floor on how many blocks a single BlockFetch range
+	// request is served (ouroboros.blockfetchMaxBlocksFloor) can assert it
+	// stays comfortably above this client's own usage.
+	BlockfetchBatchSize = 500
 
 	// When we're still meaningfully behind tip, wait for a header runway
 	// before starting blockfetch so each batch amortises peer round-trip
@@ -1919,7 +1923,7 @@ func desiredBlockfetchBatchHeaders(
 	// small batches for low latency. The previous values (max 8 when
 	// gapBlocks > 64) starved the blockfetch pipeline during catchup —
 	// every blockfetch round-trip carried only a handful of blocks even
-	// though `chain.HeaderRange(blockfetchBatchSize)` is willing to span
+	// though `chain.HeaderRange(BlockfetchBatchSize)` is willing to span
 	// up to 500.
 	var minHeaders int
 	switch {
@@ -3448,7 +3452,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	// Allow us to build up a few blockfetch batches worth of headers,
 	// but never exceed the chain's actual header queue capacity.
 	allowedHeaderCount := min(
-		blockfetchBatchSize*4,
+		BlockfetchBatchSize*4,
 		ls.chain.MaxQueuedHeaders(),
 	)
 	headerCount := ls.chain.HeaderCount()
@@ -4649,7 +4653,7 @@ func (ls *LedgerState) noteBlockfetchRangeUnavailable(
 		return false
 	}
 	if start.Slot == 0 && len(start.Hash) == 0 {
-		start, _ = ls.chain.HeaderRange(blockfetchBatchSize)
+		start, _ = ls.chain.HeaderRange(BlockfetchBatchSize)
 	}
 	if ls.blockfetchRangeFailure.matches(start) {
 		ls.blockfetchRangeFailure.count++
@@ -4916,7 +4920,7 @@ func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 	ls.blockfetchBatchChainGeneration = ls.chainRollbackGeneration.Load()
 	ls.activeBlockfetchStart = time.Now()
 	ls.firstBlockReceived = false
-	headerStart, headerEnd := ls.chain.HeaderRange(blockfetchBatchSize)
+	headerStart, headerEnd := ls.chain.HeaderRange(BlockfetchBatchSize)
 	// Tag the batch with the rollback generation current at request time.
 	// The blocks it delivers are only valid for the chain segment these
 	// queued headers describe; a rollback that abandons that segment
@@ -7623,7 +7627,7 @@ func (ls *LedgerState) handleBlockfetchTimeoutLocked(
 		return
 	}
 
-	headerStart, headerEnd := ls.chain.HeaderRange(blockfetchBatchSize)
+	headerStart, headerEnd := ls.chain.HeaderRange(BlockfetchBatchSize)
 	retryConnId := ls.selectRetryBlockfetchConn(currentConnId)
 	ls.blockfetchRequestRangeCleanup()
 	ls.config.Logger.Warn(
@@ -7754,7 +7758,7 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(
 	// (the other is a NoBlocks reply, recorded in
 	// startQueuedBlockfetchLocked). Both feed the same streak.
 	if appliedBlockCount == 0 && remainingHeaders > 0 {
-		batchStart, _ := ls.chain.HeaderRange(blockfetchBatchSize)
+		batchStart, _ := ls.chain.HeaderRange(BlockfetchBatchSize)
 		if ls.noteBlockfetchRangeUnavailable(
 			e.ConnectionId,
 			batchStart,

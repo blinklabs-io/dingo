@@ -719,23 +719,45 @@ to do real work should hand off to their own goroutine, which
 `event/doc.go` already requires of every subscriber callback.
 
 The BlockFetch server path mirrors the retrieval flow for downstream peers:
-when a peer requests a range, `ouroboros/blockfetch.go` validates the bounds,
-opens chain iterators at the requested start and end points to validate both
-endpoints against the serving chain, then sends `StartBatch`. Checking only
+when a peer requests a range, `ouroboros/blockfetch.go` opens chain iterators
+at the requested start and end points to validate both endpoints against the
+serving chain, then sends `StartBatch`. Checking only
 the end slot let a peer name an end point the server does not hold and receive
 a slot-bounded prefix of the server's own chain in its place. An end point
 that does not resolve takes the same
 `NoBlocks` and stuck-peer accounting as the other invalid-range rejections.
-Once a batch starts, blocks are streamed through the exact requested end slot
-and hash; earlier blocks at the same slot, including Byron epoch-boundary
-blocks, do not complete the range. Iterator exhaustion, rollback, or passing
-the end slot after a concurrent chain change ends the batch cleanly with
-`BatchDone`, so the peer can request again against the current chain. The
-range sender is asynchronous so the mini-protocol callback can
-return promptly, but it applies backpressure between messages by waiting for
-the underlying gouroboros protocol send queue to drain. This keeps large Leios
-catch-up ranges from filling the mux pending-message queue and turning a slow
-consumer into a connection-level protocol violation.
+The requested slot span itself is not bounded up front — on a sparse or
+low-active-slot-coefficient network, a valid run of consecutive blocks can
+span far more slots than mainnet's stability window (#4354) — instead, the
+range's block count (both endpoints' block numbers are already resolved by
+the validation above) is checked against
+`maxBlockFetchBlocksForSecurityParam`, scaled to the serving network's own
+security parameter K rather than fixed: an honest peer's candidate fragment,
+and so a legitimate range, scales with K, not with any one implementation's
+batch size, and `blockfetchMaxBlocksFloor` keeps a small- or unconfigured-K
+network from capping below what this implementation's own chainsync client
+batches. A range whose block count exceeds this bound takes the same
+`NoBlocks` and stuck-peer accounting as the other invalid-range rejections,
+so an honest peer gets a signal it can act on instead of a transport reset it
+would only repeat by retrying the identical range. `blockfetchServerSendBatch`
+still enforces the same bound again while streaming, as a backstop for cases
+the up-front check cannot cover — a concurrent rollback after validation, or
+a Byron-EBB block-number tie undercounting the range — closing the
+connection if it is ever reached, since `StartBatch` has by then already
+committed the protocol exchange. Once a batch starts, blocks are streamed
+through the exact requested end slot and hash; earlier blocks at the same
+slot, including Byron epoch-boundary blocks, do not complete the range.
+Iterator exhaustion or passing the end slot after a concurrent chain change
+ends the batch cleanly with `BatchDone` so the peer can request again against
+the current chain; a rollback does the same for this server's own send loop,
+though a `BatchDone` with blocks still outstanding is itself a protocol
+failure on a `cardano-node` peer's receiving end, which is a pre-existing
+property of blockfetch's own state machine, not something this path
+introduces. The range sender is asynchronous so the mini-protocol callback
+can return promptly, but it applies backpressure between messages by waiting
+for the underlying gouroboros protocol send queue to drain. This keeps large
+Leios catch-up ranges from filling the mux pending-message queue and turning a
+slow consumer into a connection-level protocol violation.
 
 On the client path, BlockFetch events carry fully decoded blocks. The ledger
 subscriber therefore buffers one eight-block chain-store commit batch; when it
