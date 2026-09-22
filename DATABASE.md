@@ -2178,8 +2178,38 @@ leaves the row naming the blob, which stays reachable and uncounted, and the
 retry does not double-count it (registered by `RegisterBlobOrphanMetrics`,
 readable in-process via `BlobOrphanCount`). That counter is the only signal
 that a blob store is accumulating dead data, so a non-zero and growing value is
-worth alerting on: it means blob deletes are failing, and the objects already
-lost are not recoverable by any automatic path.
+worth alerting on: the objects already lost are not recoverable by any
+automatic path.
+
+A rising counter has two causes. The first is a blob delete that failed
+outright. The second is a delete this code declined to attempt: when a caller
+stages its deletes in an enclosing transaction, that transaction has a finite
+budget, and a rollback large enough to exhaust it would leave the transaction
+unable to commit at all — including the commit timestamp — which fails the
+whole rollback and, on the startup path, leaves the node unable to start.
+`deleteUtxoBlobs` and `deleteTxBlobs` therefore stage only as many deletes as
+the store reports room for, keeping a reserve for the commit itself, and count
+the remainder as stranded rather than risk the commit. A bounded skip is
+expected during a large rollback: the metadata is still removed, so the store
+stays correct, and the cost is disk rather than an unstartable node.
+
+The two causes are not distinguished by severity. A skip adds its count to the
+same `deleteErrors` total as a failure, so both reach `recordBlobOrphansOnCommit`,
+both return `ErrBlobDeleteIncomplete`, both produce the same warn-level summary
+carrying `failed` and `total`, and both make the caller log its own error-level
+line about unreachable objects. The only discriminator is an additional
+warn-level line emitted at the moment of the skip, carrying `skipped`, `staged`
+and `total`; its absence means every counted object was a genuine delete
+failure.
+
+The budget comes from the optional `blob.TxnBudget` extension
+(`RemainingTxnEntries`). Badger implements it, mirroring the accounting behind
+`Txn.checkSize` so the answer matches the limit the transaction will actually
+be held to. The cloud plugins do not: S3 and GCS stage their mutations in
+memory and apply them in `Commit`, so there is no per-transaction entry budget
+to report. A store that does not implement the extension is staged unbounded,
+exactly as before this bound existed, and can only ever produce the first
+case — the bound changes behaviour only where a budget can be reported.
 
 ### Archive And History Expiry Contract
 
