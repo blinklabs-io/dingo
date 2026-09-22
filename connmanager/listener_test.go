@@ -809,48 +809,6 @@ func TestAcceptLoopResetBackoffOnSuccess(t *testing.T) {
 	// the loop continued operating normally after the success.
 }
 
-// concurrentMockListener delivers connections from multiple goroutines
-// simultaneously to exercise the race condition in the inbound limit check.
-type concurrentMockListener struct {
-	mu       sync.Mutex
-	closed   atomic.Bool
-	closeCh  chan struct{}
-	connCh   chan net.Conn
-	accepted atomic.Int32
-}
-
-func newConcurrentMockListener() *concurrentMockListener {
-	return &concurrentMockListener{
-		closeCh: make(chan struct{}),
-		connCh:  make(chan net.Conn, 200),
-	}
-}
-
-func (m *concurrentMockListener) Accept() (net.Conn, error) {
-	if m.closed.Load() {
-		return nil, net.ErrClosed
-	}
-	select {
-	case conn := <-m.connCh:
-		m.accepted.Add(1)
-		return conn, nil
-	case <-m.closeCh:
-		return nil, net.ErrClosed
-	}
-}
-
-func (m *concurrentMockListener) Close() error {
-	if m.closed.Swap(true) {
-		return nil
-	}
-	close(m.closeCh)
-	return nil
-}
-
-func (m *concurrentMockListener) Addr() net.Addr {
-	return &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 12345}
-}
-
 func TestTryReserveInboundSlot_Concurrent(t *testing.T) {
 	t.Parallel()
 

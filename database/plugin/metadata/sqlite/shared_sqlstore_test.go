@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -43,6 +44,49 @@ func newSharedSQLStore(
 		require.NoError(t, store.Close())
 	})
 	return store, writeDB
+}
+
+// diskSizeUntilComplete calls store.DiskSize until one call completes or
+// deadline passes, returning the last result. Safe to call off the test
+// goroutine: it never touches *testing.T.
+//
+// DiskSize bounds its own PRAGMA reads at sqliteDiskSizeQueryTimeout and
+// reports a deadline rather than stalling a Prometheus scrape behind a slow
+// connection. That budget is a production guarantee, not a test assumption,
+// and it can legitimately expire while this package runs its tests in
+// parallel under -race, each with its own SQLite database: one such run
+// returned "SQLite page count: context deadline exceeded". Retrying keeps
+// the assertion that DiskSize works without also asserting that five
+// seconds is always enough on a loaded machine; a DiskSize that is wedged
+// rather than slow never completes on any attempt.
+func diskSizeUntilComplete(
+	store *sqlstore.Store,
+	deadline time.Time,
+) (int64, error) {
+	// Backoff, not synchronization: an error DiskSize returns immediately
+	// -- a closed or missing database -- would otherwise spin hot until
+	// the deadline.
+	const retryPause = 50 * time.Millisecond
+	for {
+		size, err := store.DiskSize()
+		if err == nil || !time.Now().Before(deadline) {
+			return size, err
+		}
+		time.Sleep(retryPause)
+	}
+}
+
+// requireDiskSize is diskSizeUntilComplete on the test goroutine, requiring
+// that some call completes and reports a positive size.
+func requireDiskSize(t *testing.T, store *sqlstore.Store) int64 {
+	t.Helper()
+	size, err := diskSizeUntilComplete(
+		store,
+		time.Now().Add(testutil.AsyncWait),
+	)
+	require.NoError(t, err, "no DiskSize call completed")
+	require.Positive(t, size)
+	return size
 }
 
 func TestOpenSharedSQLStoreFilePoolsAndWAL(t *testing.T) {
@@ -78,9 +122,7 @@ func TestOpenSharedSQLStoreFilePoolsAndWAL(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, len(registry), migrationCount)
 
-	size, err := store.DiskSize()
-	require.NoError(t, err)
-	require.Positive(t, size)
+	requireDiskSize(t, store)
 	require.FileExists(t, filepath.Join(dataDir, "metadata.sqlite"))
 }
 
@@ -117,17 +159,33 @@ func TestDiskSizeDoesNotBlockOnBusyWriteConnection(t *testing.T) {
 	)
 	go func() {
 		defer close(done)
-		size, diskSizeErr = store.DiskSize()
+		size, diskSizeErr = diskSizeUntilComplete(
+			store,
+			time.Now().Add(testutil.AsyncWait),
+		)
 	}()
 
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal(
-			"DiskSize blocked behind the write transaction's sole connection",
-		)
-	}
-	require.NoError(t, diskSizeErr)
+	// A failure deadline, not a latency budget. The property is that
+	// DiskSize does not queue behind the write pool's only connection,
+	// and a DiskSize that did queue behind it would not return late --
+	// it would not return at all, because nothing rolls the transaction
+	// back until cleanup. A generous deadline therefore costs a passing
+	// run nothing (RequireReceive returns the instant DiskSize does) and
+	// still catches the regression; a 2s one only added a second failure
+	// mode, because opening a connection and reading two PRAGMAs takes
+	// well over two seconds on a machine running the rest of this package
+	// under -race in parallel.
+	testutil.RequireReceive(
+		t,
+		done,
+		testutil.AsyncWait,
+		"DiskSize blocked behind the write transaction's sole connection",
+	)
+	require.NoError(
+		t, diskSizeErr,
+		"no DiskSize call completed while the write transaction held the "+
+			"write pool's only connection",
+	)
 	require.Positive(t, size)
 }
 
@@ -186,10 +244,12 @@ func TestDiskSizeDoesNotLeaveReadDBConnectionOpen(t *testing.T) {
 		"test setup: expected a clean readDB baseline before DiskSize",
 	)
 
-	// One DiskSize() call, mirroring a single Prometheus scrape of
-	// dingo_database_sql_disk_bytes (see metrics.go).
-	_, err = store.DiskSize()
-	require.NoError(t, err)
+	// A completed DiskSize() call, mirroring a Prometheus scrape of
+	// dingo_database_sql_disk_bytes (see metrics.go). An attempt that hits
+	// DiskSize's own query deadline is a scrape too and must leave readDB
+	// just as untouched, so retrying until one completes does not weaken
+	// the assertion below.
+	requireDiskSize(t, store)
 
 	require.Zerof(
 		t,

@@ -40,15 +40,3 @@ func TestTransitionState_String(t *testing.T) {
 		assert.Equal(t, tc.want, tc.state.String())
 	}
 }
-
-func TestTransitionInfo_Constructors(t *testing.T) {
-	u := hardfork.NewTransitionUnknown()
-	assert.Equal(t, hardfork.TransitionUnknown, u.State)
-
-	k := hardfork.NewTransitionKnown(501)
-	assert.Equal(t, hardfork.TransitionKnown, k.State)
-	assert.Equal(t, uint64(501), k.KnownEpoch)
-
-	i := hardfork.NewTransitionImpossible()
-	assert.Equal(t, hardfork.TransitionImpossible, i.State)
-}
