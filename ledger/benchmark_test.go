@@ -867,16 +867,18 @@ func BenchmarkUtxoLookupByAddressRealData(b *testing.B) {
 	// Confirm the query hits before timing it. A RealData benchmark that
 	// measures the miss path publishes its NoData twin's figure under
 	// another name.
-	found, err := db.UtxosByAddress(
-		[]ledger.Address{addrs[0]},
-		database.MaxUtxosByAddressResults,
-		nil,
-	)
-	if err != nil {
-		b.Fatal(err)
-	}
-	if len(found) == 0 {
-		b.Fatalf("seeded address %s has no UTxO", addrs[0].String())
+	for _, addr := range addrs {
+		found, err := db.UtxosByAddress(
+			[]ledger.Address{addr},
+			database.MaxUtxosByAddressResults,
+			nil,
+		)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(found) == 0 {
+			b.Fatalf("seeded address %s has no UTxO", addr.String())
+		}
 	}
 
 	// Reset timer after seeding
@@ -953,17 +955,15 @@ func BenchmarkUtxoLookupByRefRealData(b *testing.B) {
 	)
 
 	// Confirm the query hits before timing it
-	if _, err := db.UtxoByRef(
-		seeded[0].TxId,
-		seeded[0].OutputIdx,
-		nil,
-	); err != nil {
-		b.Fatalf(
-			"seeded UTxO %x#%d is not readable: %v",
-			seeded[0].TxId,
-			seeded[0].OutputIdx,
-			err,
-		)
+	for _, utxo := range seeded {
+		if _, err := db.UtxoByRef(utxo.TxId, utxo.OutputIdx, nil); err != nil {
+			b.Fatalf(
+				"seeded UTxO %x#%d is not readable: %v",
+				utxo.TxId,
+				utxo.OutputIdx,
+				err,
+			)
+		}
 	}
 
 	// Reset timer after seeding
