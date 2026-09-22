@@ -3340,10 +3340,10 @@ func (ls *LedgerState) rewardParameters(
 	// Dijkstra and later. Single chokepoint feeding both the boundary apply and
 	// the async precompute, so both agree.
 	applyMinPoolMarginConfig(&params, ls.config)
-	// CIP-50: overlay the operator-configured pledge-leverage feature gate onto
-	// the on-chain-derived parameters. This is the single chokepoint feeding
-	// both the boundary apply and the async precompute path, so both agree.
-	applyPledgeLeverageConfig(&params, ls.config)
+	// CIP-50 is an enacted Dijkstra protocol parameter. Retain the experimental
+	// operator setting only for pre-Dijkstra devnets, where no such parameter
+	// exists; in Dijkstra the chain value (including nil) is authoritative.
+	applyPledgeLeveragePParams(&params, performancePParams, ls.config)
 	// CIP-0163: overlay the operator-configured full-pot feature gate onto the
 	// on-chain-derived parameters. This is the single chokepoint feeding both
 	// the boundary apply and the async precompute path, so both agree.
@@ -4276,15 +4276,19 @@ func rewardFromAccountOutput(
 	}, nil
 }
 
-// applyPledgeLeverageConfig copies the CIP-50 pledge-leverage feature gate from
-// the ledger config onto the reward parameters, converting the integer L to the
-// rational the rewards package expects. When the feature is disabled the
-// pledge-leverage value is cleared (PledgeLeverage stays nil), preserving the
-// pre-CIP-50 formula.
-func applyPledgeLeverageConfig(
+// applyPledgeLeveragePParams uses the enacted Dijkstra CIP-50 parameter when
+// available. Before Dijkstra, the legacy operator setting remains available
+// for experimental local networks.
+func applyPledgeLeveragePParams(
 	params *rewards.Parameters,
+	pparams lcommon.ProtocolParameters,
 	cfg LedgerStateConfig,
 ) {
+	if pp, ok := pparams.(*dijkstra.DijkstraProtocolParameters); ok {
+		params.PledgeLeverage = cloneCBORRat(pp.MaxPledgeLeverage)
+		params.PledgeLeverageEnabled = params.PledgeLeverage != nil
+		return
+	}
 	params.PledgeLeverageEnabled = cfg.PledgeLeverageEnabled
 	if cfg.PledgeLeverageEnabled {
 		params.PledgeLeverage = new(

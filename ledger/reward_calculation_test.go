@@ -34,6 +34,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/require"
 )
@@ -4985,11 +4986,11 @@ func TestRewardParametersRejectIncompletePParams(t *testing.T) {
 	require.ErrorContains(t, err, "missing treasury expansion")
 }
 
-func TestApplyPledgeLeverageConfigEnabledSetsRationalL(t *testing.T) {
+func TestApplyPledgeLeveragePreDijkstraUsesExperimentalConfig(t *testing.T) {
 	t.Parallel()
 
 	params := rewards.Parameters{}
-	applyPledgeLeverageConfig(&params, LedgerStateConfig{
+	applyPledgeLeveragePParams(&params, &shelley.ShelleyProtocolParameters{}, LedgerStateConfig{
 		PledgeLeverageEnabled: true,
 		PledgeLeverage:        100,
 	})
@@ -4997,17 +4998,28 @@ func TestApplyPledgeLeverageConfigEnabledSetsRationalL(t *testing.T) {
 	require.Equal(t, big.NewRat(100, 1), params.PledgeLeverage)
 }
 
-func TestApplyPledgeLeverageConfigDisabledClearsL(t *testing.T) {
+func TestApplyPledgeLeverageDijkstraPParamOverridesConfig(t *testing.T) {
 	t.Parallel()
 
-	params := rewards.Parameters{
-		PledgeLeverageEnabled: true,
-		PledgeLeverage:        big.NewRat(50, 1),
-	}
-	applyPledgeLeverageConfig(&params, LedgerStateConfig{
-		PledgeLeverageEnabled: false,
-		PledgeLeverage:        100,
-	})
+	params := rewards.Parameters{}
+	applyPledgeLeveragePParams(
+		&params,
+		&dijkstra.DijkstraProtocolParameters{MaxPledgeLeverage: rewardCalcRat(5, 1)},
+		LedgerStateConfig{PledgeLeverageEnabled: true, PledgeLeverage: 100},
+	)
+	require.True(t, params.PledgeLeverageEnabled)
+	require.Equal(t, big.NewRat(5, 1), params.PledgeLeverage)
+}
+
+func TestApplyPledgeLeverageDijkstraNilIgnoresConfig(t *testing.T) {
+	t.Parallel()
+
+	params := rewards.Parameters{}
+	applyPledgeLeveragePParams(
+		&params,
+		&dijkstra.DijkstraProtocolParameters{},
+		LedgerStateConfig{PledgeLeverageEnabled: true, PledgeLeverage: 100},
+	)
 	require.False(t, params.PledgeLeverageEnabled)
 	require.Nil(t, params.PledgeLeverage)
 }

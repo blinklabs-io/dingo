@@ -12460,18 +12460,15 @@ validator is left unclamped, so when the feature is active and any pool in the
 epoch's snapshot is below the floor, reuse is conservatively bypassed for that
 whole epoch's snapshot and the fresh authoritative calculation is used.
 
-CIP-50 pledge-leverage rewards are an optional, consensus-affecting feature gate
-that defaults off. When `LedgerStateConfig.PledgeLeverageEnabled` is set (from
-operator config, not derived from the network), a pool's reward-eligible stake
-`sigma'` in `optimalPoolRewardChecked` (`ledger/rewards`) is additionally capped
-at `L` times its pledge, so `sigma' = min(sigma, z0, L*p)`; a zero-pledge pool
-then earns nothing. `L` is threaded from config onto `rewards.Parameters` at the
-single `LedgerState.rewardParameters` chokepoint (`applyPledgeLeverageConfig`),
-so the boundary-apply and precompute paths compute identical rewards. Disabled,
-the term is nil and the formula is byte-for-byte the pre-CIP-50 calculation.
-Because it changes reward amounts and therefore ADA pots and reward accounts, it
-must be enabled only on a network where every node also enables it (a devnet or
-custom network); enabling it off-consensus forks the node.
+CIP-50 pledge leverage uses the enacted Dijkstra `maxPledgeLeverage` protocol
+parameter. `rewardParameters` reads it from the performance epoch's protocol
+parameters, matching cardano-ledger's previous-epoch reward inputs. A nil value
+(including the Dijkstra genesis default) leaves the original formula unchanged;
+otherwise `optimalPoolRewardChecked` computes
+`sigma' = min(sigma, z0, L*p)`. A zero-pledge pool then earns nothing. This
+single parameter path feeds both boundary application and asynchronous reward
+precomputation. The operator setting remains an experimental override only for
+pre-Dijkstra local networks, where the protocol parameter does not exist.
 
 After an epoch-transition event, ledger can precompute the next delayed reward
 update into `reward_pool_output` and `reward_account_output`. Calculation runs

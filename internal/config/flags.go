@@ -769,16 +769,16 @@ var flagSpecs = []flagSpec{
 		"CIP-0163 inactivity window in epochs, in [1,10000] (used when delegator-inactivity-enabled)",
 	),
 
-	// CIP-50 pledge-leverage staking rewards (consensus-affecting; default off)
+	// Experimental pre-Dijkstra CIP-50 override (consensus-affecting; default off)
 	boolFlag(
 		"PledgeLeverageEnabled",
 		"pledge-leverage-enabled",
-		"enable the CIP-50 pledge-leverage reward cap (only where every node also enables it)",
+		"enable the experimental pre-Dijkstra pledge-leverage cap (match across local-network nodes)",
 	),
 	uintFlag(
 		"PledgeLeverage",
 		"pledge-leverage",
-		"CIP-50 max pledge leverage L in [1,10000] (used when pledge-leverage-enabled)",
+		"experimental pre-Dijkstra max pledge leverage L in [1,10000]",
 	),
 
 	// Leios voting (experimental)
