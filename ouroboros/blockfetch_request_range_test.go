@@ -245,3 +245,141 @@ func TestBlockfetchClientRequestRangeUnblocksOnStopWhileWaitingForCapacity(
 		)
 	}
 }
+
+// terminalBeforeIdRequester resolves each request terminally, through the
+// RangeDoneFunc path, before handing its ID back to the dispatcher. That is
+// the ordering RequestRange permits but a live peer only rarely produces:
+// the request is on the wire when RequestRange returns, so the protocol's
+// receive goroutine can run blockfetchClientRangeDone to completion while the
+// dispatcher is still on its way to recording the start time.
+type terminalBeforeIdRequester struct {
+	o      *Ouroboros
+	connId ouroboros.ConnectionId
+	nextID uint64
+}
+
+func (f *terminalBeforeIdRequester) RequestRange(
+	_ context.Context,
+	_ blockfetch.RangeRequest,
+) (uint64, error) {
+	f.nextID++
+	if err := f.o.blockfetchClientRangeDone(
+		blockfetch.CallbackContext{
+			ConnectionId: f.connId,
+			RequestId:    f.nextID,
+		},
+		nil,
+	); err != nil {
+		return 0, err
+	}
+	return f.nextID, nil
+}
+
+// TestBlockfetchClientRequestRangeTerminalBeforeIdLeavesNoStartEntry asserts
+// that a request whose terminal callback lands first records no start time.
+// blockfetchClientRangeDone is a request's only deleter and runs exactly once,
+// so an entry inserted after it has already fired is never removed: it sits in
+// blockFetchStarts until the connection is torn down, and a peer that answers
+// every request that quickly grows the map for the life of the connection.
+func TestBlockfetchClientRequestRangeTerminalBeforeIdLeavesNoStartEntry(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	connId := testConnId()
+	o := newOuroboros(OuroborosConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	fake := &terminalBeforeIdRequester{o: o, connId: connId}
+	o.blockfetchConnClient = func(
+		ouroboros.ConnectionId,
+	) (blockfetchRangeRequester, error) {
+		return fake, nil
+	}
+
+	start := ocommon.NewPoint(1, make([]byte, lcommon.Blake2b256Size))
+	end := ocommon.NewPoint(2, make([]byte, lcommon.Blake2b256Size))
+
+	const requests = 4
+	for range requests {
+		_, err := o.BlockfetchClientRequestRange(connId, start, end)
+		require.NoError(t, err)
+	}
+
+	o.blockFetchMutex.Lock()
+	startCount := len(o.blockFetchStarts)
+	earlyCount := len(o.blockFetchDoneEarly)
+	o.blockFetchMutex.Unlock()
+
+	assert.Equal(
+		t,
+		0,
+		startCount,
+		"a request already reported terminal must leave no start-time entry",
+	)
+	assert.Equal(
+		t,
+		0,
+		earlyCount,
+		"each dispatch must consume its own terminal marker",
+	)
+}
+
+// TestBlockfetchClientRequestRangeTerminalAfterIdStillTimes is the control
+// for the test above: in the ordinary ordering the start time is recorded and
+// the terminal callback removes it, leaving both maps empty by a different
+// route. Without it, a fix that simply stopped recording start times would
+// satisfy the race test while destroying the timing this map exists for.
+func TestBlockfetchClientRequestRangeTerminalAfterIdStillTimes(t *testing.T) {
+	t.Parallel()
+
+	connId := testConnId()
+	fake := &fakeBlockfetchRangeRequester{}
+	o := newOuroboros(OuroborosConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	o.blockfetchConnClient = func(
+		ouroboros.ConnectionId,
+	) (blockfetchRangeRequester, error) {
+		return fake, nil
+	}
+
+	start := ocommon.NewPoint(1, make([]byte, lcommon.Blake2b256Size))
+	end := ocommon.NewPoint(2, make([]byte, lcommon.Blake2b256Size))
+
+	requestId, err := o.BlockfetchClientRequestRange(connId, start, end)
+	require.NoError(t, err)
+
+	o.blockFetchMutex.Lock()
+	_, recorded := o.blockFetchStarts[blockFetchKey{
+		connId:    connId,
+		requestId: requestId,
+	}]
+	o.blockFetchMutex.Unlock()
+	require.True(
+		t,
+		recorded,
+		"the ordinary ordering must still record a start time",
+	)
+
+	require.NoError(t, o.blockfetchClientRangeDone(
+		blockfetch.CallbackContext{
+			ConnectionId: connId,
+			RequestId:    requestId,
+		},
+		nil,
+	))
+
+	o.blockFetchMutex.Lock()
+	startCount := len(o.blockFetchStarts)
+	earlyCount := len(o.blockFetchDoneEarly)
+	o.blockFetchMutex.Unlock()
+
+	assert.Equal(t, 0, startCount, "the terminal callback must clear the entry")
+	assert.Equal(
+		t,
+		0,
+		earlyCount,
+		"a terminal callback that found its entry must leave no marker",
+	)
+}

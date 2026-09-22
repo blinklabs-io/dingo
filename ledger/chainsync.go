@@ -7790,7 +7790,14 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(
 		}
 	}
 	upstreamTipSlot := ls.UpstreamTipSlot()
+	// Excluded for the same reason as the unavailable-count branch above: a
+	// transport-shaped RangeErr says nothing about whether the queued range
+	// is obtainable, and this branch's no-alternate-connection leg clears
+	// the header queue and forces a chainsync re-intersect. Falling through
+	// instead re-dispatches the queued headers on the next blockfetch
+	// connection, which is the recovery a failed transport actually wants.
 	if appliedBlockCount == 0 &&
+		!transportRangeErr &&
 		remainingHeaders > 0 &&
 		upstreamTipSlot > ls.Tip().Point.Slot &&
 		upstreamTipSlot-ls.Tip().Point.Slot >= blockfetchMinBatchGapSlots {

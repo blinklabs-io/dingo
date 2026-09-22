@@ -1284,3 +1284,64 @@ func TestBatchDoneTransportRangeErrDoesNotAccumulate(t *testing.T) {
 		})
 	}
 }
+
+// TestBatchDoneTransportRangeErrKeepsHeadersAcrossLargeTipGap covers the
+// second no-blocks recovery branch, which TestBatchDoneTransportRangeErrDoes
+// NotAccumulate cannot reach: that test leaves the upstream tip unset, so the
+// branch's tip-gap condition is false throughout. With a gap of at least
+// blockfetchMinBatchGapSlots and no alternate connection to retry on, the
+// branch clears the queued headers and asks chainsync to re-intersect.
+//
+// A transport-shaped RangeErr establishes nothing about the queued range --
+// it never reached the peer's answer -- so discarding the headers there
+// throws away work that the next connection can still fetch, and pays a
+// chainsync re-intersect for it. The range must survive instead.
+func TestBatchDoneTransportRangeErrKeepsHeadersAcrossLargeTipGap(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, _, resyncChan := newNoBlocksLedgerState(t, "hdr-async-gap-transient")
+	connId := testChainsyncConnId(6116, 3001)
+	require.NoError(t, startQueuedBlockfetchForTest(ls, connId, nil))
+
+	// selectRetryBlockfetchConn falls back to the reporting connection when
+	// no GetActiveConnectionFunc is configured, which is the branch's
+	// "no alternate connection" leg -- the one that drops the headers.
+	require.Nil(
+		t,
+		ls.config.GetActiveConnectionFunc,
+		"this test's harness must offer no alternate retry connection",
+	)
+	const upstreamTipSlot = uint64(blockfetchMinBatchGapSlots) * 4
+	ls.syncUpstreamTipSlot.Store(upstreamTipSlot)
+	require.GreaterOrEqual(
+		t,
+		upstreamTipSlot-ls.Tip().Point.Slot,
+		uint64(blockfetchMinBatchGapSlots),
+		"the tip gap must reach the branch this test exercises",
+	)
+
+	require.NoError(t, handleEventBlockfetchBatchDoneForTest(
+		ls,
+		BlockfetchEvent{
+			ConnectionId: connId,
+			BatchDone:    true,
+			RangeErr:     errors.New("connection reset by peer"),
+		},
+		nil,
+	))
+
+	assert.Equal(
+		t,
+		1,
+		ls.chain.HeaderCount(),
+		"an obtainable range must survive a transport failure behind a large tip gap",
+	)
+	testutil.RequireNoReceive(
+		t,
+		resyncChan,
+		100*time.Millisecond,
+		"a transport range error must not trigger resync",
+	)
+}

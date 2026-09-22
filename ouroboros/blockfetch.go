@@ -688,8 +688,18 @@ func (o *Ouroboros) BlockfetchClientRequestRange(
 		}
 		return 0, err
 	}
+	// RequestRange returns once the request is on the wire, so a peer that
+	// replies immediately can drive blockfetchClientRangeDone to completion
+	// on the protocol's receive goroutine before this insert runs. Recording
+	// the start time anyway would leave an entry whose only deleter has
+	// already fired, so consume the marker it left instead.
+	key := blockFetchKey{connId: connId, requestId: requestId}
 	o.blockFetchMutex.Lock()
-	o.blockFetchStarts[blockFetchKey{connId: connId, requestId: requestId}] = dispatchStart
+	if _, doneEarly := o.blockFetchDoneEarly[key]; doneEarly {
+		delete(o.blockFetchDoneEarly, key)
+	} else {
+		o.blockFetchStarts[key] = dispatchStart
+	}
 	o.blockFetchMutex.Unlock()
 	return requestId, nil
 }
@@ -794,10 +804,17 @@ func (o *Ouroboros) blockfetchClientRangeDone(
 	ctx blockfetch.CallbackContext,
 	rangeErr error,
 ) error {
-	// Clean up start time
+	// Clean up start time. An absent entry means this callback beat the
+	// dispatching BlockfetchClientRequestRange to the map, so leave a marker
+	// for it to consume rather than letting it insert an entry that no
+	// further callback will ever remove.
 	key := blockFetchKey{connId: ctx.ConnectionId, requestId: ctx.RequestId}
 	o.blockFetchMutex.Lock()
-	delete(o.blockFetchStarts, key)
+	if _, started := o.blockFetchStarts[key]; started {
+		delete(o.blockFetchStarts, key)
+	} else {
+		o.blockFetchDoneEarly[key] = struct{}{}
+	}
 	o.blockFetchMutex.Unlock()
 	if o.eventBus != nil &&
 		o.eventBus.HasSubscribers(ledger.BlockfetchEventType) {

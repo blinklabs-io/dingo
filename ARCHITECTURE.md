@@ -1774,8 +1774,12 @@ paths, where the point is to report before the goroutine unwinds.
   exactly the shape the existing "batch completed without extending the
   chain" branch already routes through `noteBlockfetchRangeUnavailable`. Any
   other non-nil `RangeErr` wears that same shape without establishing
-  anything about the range, so it is logged and explicitly excluded from
-  that branch.
+  anything about the range, so it is logged and explicitly excluded from both
+  recovery branches that shape reaches: the `noteBlockfetchRangeUnavailable`
+  streak, and the large-upstream-gap branch whose no-alternate-connection leg
+  clears the header queue and requests a chainsync re-intersect. A transport
+  failure instead falls through to the ordinary continuation, which
+  re-dispatches the still-queued range on the next blockfetch connection.
 - The blast radius of such a stall is not local. `LedgerState.handleConnectionClosedEvent`
   takes `chainsyncMutex`, so a stall there stops `ledger.conn_closed` draining;
   the `node.go` handler translating `connmanager.conn_closed` into

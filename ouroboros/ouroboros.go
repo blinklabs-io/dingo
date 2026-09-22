@@ -124,7 +124,16 @@ type Ouroboros struct {
 	// outstanding on the same connection at once, and a connId-only key would
 	// have one request's start time silently overwrite another's.
 	blockFetchStarts map[blockFetchKey]time.Time
-	blockFetchMutex  sync.Mutex
+	// blockFetchDoneEarly holds the keys of requests whose RangeDoneFunc ran
+	// before BlockfetchClientRequestRange recorded their start time.
+	// RequestRange returns once the request is on the wire, so the peer's
+	// terminal reply can reach blockfetchClientRangeDone on the protocol's
+	// receive goroutine while the requester is still between that return and
+	// its blockFetchStarts insert. The insert consumes the marker instead of
+	// adding an entry that nothing would ever delete, since the request's
+	// one and only terminal callback has already run.
+	blockFetchDoneEarly map[blockFetchKey]struct{}
+	blockFetchMutex     sync.Mutex
 	// blockfetchConnClient resolves the live request-range client for a
 	// connection. Defaults to blockfetchConnClientLive; tests override it to
 	// exercise BlockfetchClientRequestRange without a live connection.
@@ -502,6 +511,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		chainsyncState:          cfg.ChainsyncState,
 		peerGov:                 cfg.PeerGov,
 		blockFetchStarts:        make(map[blockFetchKey]time.Time),
+		blockFetchDoneEarly:     make(map[blockFetchKey]struct{}),
 		localstatequeryAcquiredPoints: make(
 			map[ouroboros.ConnectionId]ledger.QueryPoint,
 		),
@@ -897,6 +907,17 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	for key := range o.blockFetchStarts {
 		if key.connId == connId {
 			delete(o.blockFetchStarts, key)
+		}
+	}
+	// A terminal-before-registration marker is normally consumed by the
+	// dispatching call itself. It survives only when that call ends up
+	// returning an error instead -- gouroboros can fail an already-queued
+	// request during protocol shutdown, so its RangeDoneFunc runs while the
+	// send that queued it is still on its way to failing -- which is a
+	// teardown, and is therefore exactly this path.
+	for key := range o.blockFetchDoneEarly {
+		if key.connId == connId {
+			delete(o.blockFetchDoneEarly, key)
 		}
 	}
 	delete(o.blockfetchNoBlocksCounts, connId)
