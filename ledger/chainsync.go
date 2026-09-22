@@ -51,9 +51,13 @@ import (
 )
 
 const (
-	// Max number of blocks to fetch in a single blockfetch call
-	// This prevents us exceeding the configured recv queue size in the block-fetch protocol
-	blockfetchBatchSize = 500
+	// BlockfetchBatchSize is the maximum number of blocks this chainsync
+	// client requests in a single BlockFetch range, so as not to exceed the
+	// configured recv queue size in the block-fetch protocol. Exported so
+	// the server-side floor on how many blocks a single BlockFetch range
+	// request is served (ouroboros.blockfetchMaxBlocksFloor) can assert it
+	// stays comfortably above this client's own usage.
+	BlockfetchBatchSize = 500
 
 	// When we're still meaningfully behind tip, wait for a header runway
 	// before starting blockfetch so each batch amortises peer round-trip
@@ -1734,6 +1738,7 @@ func (ls *LedgerState) headerAlreadyOnPrimaryChain(
 func (ls *LedgerState) findPeerForkPath(
 	e ChainsyncEvent,
 	initialPrevHash []byte,
+	localTipSlot uint64,
 ) (*ocommon.Point, []ChainsyncEvent, error) {
 	prevHash := append([]byte(nil), initialPrevHash...)
 	history := ls.peerHeaderHistory[connIdKey(e.ConnectionId)]
@@ -1750,15 +1755,19 @@ func (ls *LedgerState) findPeerForkPath(
 		// for current stores. Blocks persisted before the hash index was added
 		// may still miss until the operator backfills the index.
 		ancestorBlock, err := ls.blockByHash(prevHash)
-		if err == nil {
+		switch {
+		case err == nil && ancestorBlock.Slot <= localTipSlot:
 			point := ocommon.NewPoint(
 				ancestorBlock.Slot,
 				ancestorBlock.Hash,
 			)
 			slices.Reverse(pathReversed)
 			return &point, pathReversed, nil
-		}
-		if !errors.Is(err, models.ErrBlockNotFound) {
+		case err == nil:
+			// An ancestor of two chains is at or before both tips, so a
+			// hash-index hit past the local tip is not reachable and must be
+			// treated as unresolved.
+		case !errors.Is(err, models.ErrBlockNotFound):
 			return nil, nil, fmt.Errorf(
 				"lookup ancestor hash %x: %w",
 				prevHash,
@@ -1919,7 +1928,7 @@ func desiredBlockfetchBatchHeaders(
 	// small batches for low latency. The previous values (max 8 when
 	// gapBlocks > 64) starved the blockfetch pipeline during catchup —
 	// every blockfetch round-trip carried only a handful of blocks even
-	// though `chain.HeaderRange(blockfetchBatchSize)` is willing to span
+	// though `chain.HeaderRange(BlockfetchBatchSize)` is willing to span
 	// up to 500.
 	var minHeaders int
 	switch {
@@ -3067,7 +3076,8 @@ func (ls *LedgerState) findPeerForkPathCached(
 		}
 
 		ancestorBlock, err := ls.blockByHash(prevHash)
-		if err == nil {
+		switch {
+		case err == nil && ancestorBlock.Slot <= expectedAncestor.Slot:
 			ancestor := ocommon.NewPoint(ancestorBlock.Slot, ancestorBlock.Hash)
 			cachePeerHeaderHistoryPath(steps, cache, ancestor, 0)
 			if !pointMatches(ancestor, expectedAncestor) {
@@ -3079,8 +3089,12 @@ func (ls *LedgerState) findPeerForkPathCached(
 			}
 			slices.Reverse(pathReversed)
 			return &ancestor, pathReversed, nil
-		}
-		if !errors.Is(err, models.ErrBlockNotFound) {
+		case err == nil:
+			// An ancestor of two chains is at or before both tips, so a
+			// hash-index hit past the local tip is not reachable and must be
+			// treated as unresolved -- and never cached, or every hop that
+			// led here would be memoized as resolving to it.
+		case !errors.Is(err, models.ErrBlockNotFound):
 			return nil, nil, fmt.Errorf(
 				"lookup ancestor hash %x: %w",
 				prevHash,
@@ -3448,7 +3462,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	// Allow us to build up a few blockfetch batches worth of headers,
 	// but never exceed the chain's actual header queue capacity.
 	allowedHeaderCount := min(
-		blockfetchBatchSize*4,
+		BlockfetchBatchSize*4,
 		ls.chain.MaxQueuedHeaders(),
 	)
 	headerCount := ls.chain.HeaderCount()
@@ -3924,7 +3938,11 @@ func (ls *LedgerState) tryResolveFork(
 		)
 		return false, nil
 	}
-	ancestorPoint, forkPath, err := ls.findPeerForkPath(e, prevHashBytes)
+	ancestorPoint, forkPath, err := ls.findPeerForkPath(
+		e,
+		prevHashBytes,
+		localTip.Point.Slot,
+	)
 	if err != nil {
 		return false, fmt.Errorf(
 			"unexpected error looking up common ancestor for prev hash %s: %w",
@@ -4649,7 +4667,7 @@ func (ls *LedgerState) noteBlockfetchRangeUnavailable(
 		return false
 	}
 	if start.Slot == 0 && len(start.Hash) == 0 {
-		start, _ = ls.chain.HeaderRange(blockfetchBatchSize)
+		start, _ = ls.chain.HeaderRange(BlockfetchBatchSize)
 	}
 	if ls.blockfetchRangeFailure.matches(start) {
 		ls.blockfetchRangeFailure.count++
@@ -4916,7 +4934,7 @@ func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 	ls.blockfetchBatchChainGeneration = ls.chainRollbackGeneration.Load()
 	ls.activeBlockfetchStart = time.Now()
 	ls.firstBlockReceived = false
-	headerStart, headerEnd := ls.chain.HeaderRange(blockfetchBatchSize)
+	headerStart, headerEnd := ls.chain.HeaderRange(BlockfetchBatchSize)
 	// Tag the batch with the rollback generation current at request time.
 	// The blocks it delivers are only valid for the chain segment these
 	// queued headers describe; a rollback that abandons that segment
@@ -7623,7 +7641,7 @@ func (ls *LedgerState) handleBlockfetchTimeoutLocked(
 		return
 	}
 
-	headerStart, headerEnd := ls.chain.HeaderRange(blockfetchBatchSize)
+	headerStart, headerEnd := ls.chain.HeaderRange(BlockfetchBatchSize)
 	retryConnId := ls.selectRetryBlockfetchConn(currentConnId)
 	ls.blockfetchRequestRangeCleanup()
 	ls.config.Logger.Warn(
@@ -7754,7 +7772,7 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(
 	// (the other is a NoBlocks reply, recorded in
 	// startQueuedBlockfetchLocked). Both feed the same streak.
 	if appliedBlockCount == 0 && remainingHeaders > 0 {
-		batchStart, _ := ls.chain.HeaderRange(blockfetchBatchSize)
+		batchStart, _ := ls.chain.HeaderRange(BlockfetchBatchSize)
 		if ls.noteBlockfetchRangeUnavailable(
 			e.ConnectionId,
 			batchStart,

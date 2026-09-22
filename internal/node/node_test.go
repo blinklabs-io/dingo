@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -529,6 +530,350 @@ func TestBuildDingoConfigWiresForgeTolerances(t *testing.T) {
 				"endorser-block staleness bound stays off however it is "+
 				"configured",
 			got,
+		)
+	}
+}
+
+// TestBuildDingoConfigWiresBlockPipelineFlags is the regression test for
+// dingo#4599: BlockPipelineEnabled and BlockPipelineValidateEnabled were
+// correctly parsed into internal/config.Config but buildDingoConfig never
+// called a With... option to forward either one, so dingo.NewConfig built
+// its internal config from fresh Go zero values and the parallel block
+// decode pipeline (ledger/state.go's
+// "if cfg.BlockPipelineEnabled && !cfg.ManualBlockProcessing") never
+// constructed on the live serve path, regardless of the flag or environment
+// variable.
+func TestBuildDingoConfigWiresBlockPipelineFlags(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		BlockPipelineEnabled:         true,
+		BlockPipelineValidateEnabled: true,
+	}
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+
+	built := buildDingoConfig(
+		cfg,
+		logger,
+		nil,
+		nil,
+		false,
+		dingo.StorageModeCore,
+		30*time.Second,
+		chainsync.DefaultStallTimeout,
+		chainsync.HeaderSyncStrategyPrimary,
+	)
+
+	if !built.BlockPipelineEnabled() {
+		t.Fatal(
+			"expected BlockPipelineEnabled to flow through, got false; " +
+				"the loaded value never reached dingo.Config, so the " +
+				"parallel block decode pipeline never activates on the " +
+				"serve path however it is configured",
+		)
+	}
+	if !built.BlockPipelineValidateEnabled() {
+		t.Fatal(
+			"expected BlockPipelineValidateEnabled to flow through, got " +
+				"false; the loaded value never reached dingo.Config, so " +
+				"the pipeline's parallel VRF/KES validate stage never " +
+				"activates on the serve path however it is configured",
+		)
+	}
+}
+
+// TestBuildDingoConfigForwardsScalarConfigFields is recurrence-prevention
+// coverage for the defect class dingo#4599 belongs to, not just the single
+// field it reported: buildDingoConfig hand-lists roughly 85 individual
+// dingo.With...(...) calls, one per field, and has now silently dropped a
+// field from that list twice -- AccountChunkSize/AccountChunkMaxBytes for
+// KoiosParity (caught and fixed separately, see the comment on
+// dingo.WithKoiosParity's call site in node.go), then
+// BlockPipelineEnabled/BlockPipelineValidateEnabled (this issue) -- with no
+// general check that every field actually made the list.
+//
+// It enumerates every top-level internal/config.Config field whose Kind is a
+// plain scalar (bool, a signed/unsigned integer, float64, string, or
+// []string) and that has a plausibly corresponding dingo.Config field --
+// matched case-insensitively by name and required to share the same
+// reflect.Kind. It fills every matched field with a distinctive non-zero
+// value, runs the result through buildDingoConfig (the same function and
+// option list Run() calls), and asserts every matched field reads back
+// unchanged from the built dingo.Config.
+//
+// Deliberately out of scope, and not checked here -- a fully general,
+// structurally-verified diff across every nested type was not pursued,
+// because dingo.Config's fields are unexported and frequently intentionally
+// renamed, reshaped or split (a []string becomes a *bool-defaulted pointer;
+// DatabaseWorkers and DatabaseQueueSize become one DatabaseWorkerPoolConfig
+// struct field; BackfillBatchSize is read directly off internal/config.Config
+// by cmd/dingo and never touches dingo.Config at all), so a mechanical
+// field-shape comparison would have to hand-write the same per-field mapping
+// this test exists to avoid maintaining:
+//
+//   - Nested config structs (Plugins, API, KoiosParity, Midnight,
+//     TokenRegistry, OffchainMetadata, HistoryExpiry, GenesisBootstrap,
+//     Cache, Chainsync, DatabaseLifecycle, Logging, Mithril): each is either
+//     forwarded by hand-mapping to a differently-named dingo type or, for
+//     DatabaseLifecycle, passed through as the identical named type.
+//     KoiosParity has its own dedicated field-by-field test above
+//     (TestKoiosParityConfigForwardsEveryField); Midnight, API and the Bark
+//     fields have their own narrower pinning tests elsewhere in this file.
+//   - PeerSharing, StorageMode, RelayPort and ShutdownTimeout: Run()
+//     resolves each of these into a separate buildDingoConfig parameter
+//     (peerSharing, storageMode, shutdownTimeout) before calling it, rather
+//     than buildDingoConfig reading the cfg field directly. Matching on the
+//     cfg field's name would either false-positive (StorageMode: same name
+//     and Kind as dingo.Config's storageMode field, but resolved through the
+//     parameter, not a cfg passthrough) or match nothing anyway (PeerSharing
+//     is a *bool against a bool field; RelayPort forwards to a
+//     differently-named outboundSourcePort field).
+//   - A cfg field with no same-named dingo.Config field is skipped
+//     silently rather than reported, so this mechanism cannot see a gap
+//     whose dingo.Config counterpart was renamed. The fields in that
+//     position today -- the port, path and bind-address fields, Topology,
+//     CardanoConfig and LedgerCatchupTimeout -- are consumed directly by
+//     internal/node, cmd/dingo or internal/config and never enter
+//     dingo.Config at all.
+//   - SlotsPerKESPeriod, MaxKESEvolutions, Mithril and BackfillBatchSize:
+//     dingo.Config exposes an accessor reading straight from its embedded
+//     cfg pointer, with no backing private field and no With... option at
+//     all. Grepping the repository found no production caller of any of the
+//     first three accessors, so whether buildDingoConfig forwards them
+//     presently has no observable effect either way; BackfillBatchSize is
+//     read directly off the loaded internal/config.Config by cmd/dingo and
+//     mithril/sync.go instead.
+//
+// Known, pre-existing gaps of this same shape found while writing this test
+// are excluded below rather than fixed here; dingo#4600 tracks them.
+func TestBuildDingoConfigForwardsScalarConfigFields(t *testing.T) {
+	t.Parallel()
+
+	// knownGaps are real forwarding gaps of the same shape as dingo#4599,
+	// found while writing this test and deliberately not fixed in the same
+	// commit as that unrelated fix; dingo#4600 tracks all three. Remove an
+	// entry here once its fix lands, so this test starts asserting it.
+	knownGaps := map[string]string{
+		"MaxNtCConns": "dingo.WithMaxNtCConns exists but buildDingoConfig " +
+			"never calls it, so --max-ntc-conns is silently ignored",
+		"MaxNtCConnectionsPerIP": "dingo.WithMaxNtCConnectionsPerIP exists " +
+			"but buildDingoConfig never calls it, so " +
+			"--max-ntc-connections-per-ip is silently ignored",
+		"SkipRewardLiveStakeBackfillCheck": "no With... option exists at " +
+			"all for this field, and buildDingoConfig has no call to set " +
+			"it, so --skip-reward-live-stake-backfill-check is silently " +
+			"ignored on the serve path despite being consumed by node.go",
+	}
+	// excluded are cfg fields resolved through a separate buildDingoConfig
+	// parameter, or otherwise not part of the direct cfg-to-dingo.Config
+	// passthrough this test checks; see the function doc comment.
+	excluded := map[string]bool{
+		"PeerSharing":     true,
+		"StorageMode":     true,
+		"RelayPort":       true,
+		"ShutdownTimeout": true,
+	}
+
+	cfgVal := reflect.New(reflect.TypeFor[config.Config]()).Elem()
+	cfgType := cfgVal.Type()
+
+	dingoType := reflect.ValueOf(dingo.NewConfig()).Type()
+	dingoFieldIndex := map[string]int{}
+	for i := range dingoType.NumField() {
+		dingoFieldIndex[strings.ToLower(dingoType.Field(i).Name)] = i
+	}
+
+	isScalarKind := func(k reflect.Kind) bool {
+		switch k {
+		case reflect.Bool, reflect.String,
+			reflect.Float32, reflect.Float64,
+			reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+			reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+			return true
+		default:
+			return false
+		}
+	}
+
+	type match struct {
+		name       string
+		dingoIndex int
+		kind       reflect.Kind
+	}
+	var matches []match
+
+	for f := range cfgType.Fields() {
+		if f.PkgPath != "" { // unexported field (e.g. provenance)
+			continue
+		}
+		if excluded[f.Name] {
+			continue
+		}
+		if _, ok := knownGaps[f.Name]; ok {
+			continue
+		}
+		kind := f.Type.Kind()
+		supported := isScalarKind(kind) ||
+			(kind == reflect.Slice && f.Type.Elem().Kind() == reflect.String)
+		if !supported {
+			continue
+		}
+		di, ok := dingoFieldIndex[strings.ToLower(f.Name)]
+		if !ok {
+			continue
+		}
+		dField := dingoType.Field(di)
+		if dField.Type.Kind() != kind {
+			continue
+		}
+		if kind == reflect.Slice &&
+			dField.Type.Elem().Kind() != reflect.String {
+			continue
+		}
+		matches = append(matches, match{
+			name:       f.Name,
+			dingoIndex: di,
+			kind:       kind,
+		})
+	}
+
+	// A sharp drop here means the matching logic regressed and is silently
+	// checking far fewer fields than intended, not that the config shrank.
+	if len(matches) < 40 {
+		t.Fatalf(
+			"only matched %d scalar fields between internal/config.Config "+
+				"and dingo.Config, expected at least 40; the field-matching "+
+				"logic may have regressed and this test may be silently "+
+				"checking almost nothing",
+			len(matches),
+		)
+	}
+
+	// Fill every matched field with a distinctive, non-zero, non-default
+	// value.
+	want := make(map[string]any, len(matches))
+	for i, m := range matches {
+		fv := cfgVal.FieldByName(m.name)
+		switch m.kind {
+		case reflect.Bool:
+			fv.SetBool(true)
+			want[m.name] = true
+		case reflect.String:
+			s := fmt.Sprintf("dingo4599-%s-%d", m.name, i)
+			fv.SetString(s)
+			want[m.name] = s
+		case reflect.Float32, reflect.Float64:
+			v := 1.5 + float64(i)
+			fv.SetFloat(v)
+			want[m.name] = v
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32,
+			reflect.Int64:
+			v := int64(10 + i)
+			fv.SetInt(v)
+			want[m.name] = v
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32,
+			reflect.Uint64:
+			v := uint64(10 + i) // #nosec G115 -- i is a small loop index
+			fv.SetUint(v)
+			want[m.name] = v
+		case reflect.Slice:
+			s := []string{fmt.Sprintf("dingo4599-%s-%d", m.name, i)}
+			fv.Set(reflect.ValueOf(s))
+			want[m.name] = s
+		}
+	}
+
+	cfg, ok := cfgVal.Addr().Interface().(*config.Config)
+	if !ok {
+		t.Fatal("cfgVal.Addr().Interface() did not assert to *config.Config")
+	}
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+
+	built := buildDingoConfig(
+		cfg,
+		logger,
+		nil,
+		nil,
+		false,
+		dingo.StorageModeCore,
+		30*time.Second,
+		chainsync.DefaultStallTimeout,
+		chainsync.HeaderSyncStrategyPrimary,
+	)
+	builtVal := reflect.ValueOf(built)
+
+	for _, m := range matches {
+		got := builtVal.Field(m.dingoIndex)
+		switch m.kind {
+		case reflect.Bool:
+			if want, got := want[m.name].(bool), got.Bool(); got != want {
+				t.Errorf(
+					"internal/config.Config.%s did not reach dingo.Config: "+
+						"got %v, want %v; this field is silently dropped "+
+						"on the serve path",
+					m.name, got, want,
+				)
+			}
+		case reflect.String:
+			if want, got := want[m.name].(string), got.String(); got != want {
+				t.Errorf(
+					"internal/config.Config.%s did not reach dingo.Config: "+
+						"got %q, want %q; this field is silently dropped "+
+						"on the serve path",
+					m.name, got, want,
+				)
+			}
+		case reflect.Float32, reflect.Float64:
+			if want, got := want[m.name].(float64), got.Float(); got != want {
+				t.Errorf(
+					"internal/config.Config.%s did not reach dingo.Config: "+
+						"got %v, want %v; this field is silently dropped "+
+						"on the serve path",
+					m.name, got, want,
+				)
+			}
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32,
+			reflect.Int64:
+			if want, got := want[m.name].(int64), got.Int(); got != want {
+				t.Errorf(
+					"internal/config.Config.%s did not reach dingo.Config: "+
+						"got %v, want %v; this field is silently dropped "+
+						"on the serve path",
+					m.name, got, want,
+				)
+			}
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32,
+			reflect.Uint64:
+			if want, got := want[m.name].(uint64), got.Uint(); got != want {
+				t.Errorf(
+					"internal/config.Config.%s did not reach dingo.Config: "+
+						"got %v, want %v; this field is silently dropped "+
+						"on the serve path",
+					m.name, got, want,
+				)
+			}
+		case reflect.Slice:
+			want := want[m.name].([]string)
+			gotSlice := make([]string, got.Len())
+			for i := range got.Len() {
+				gotSlice[i] = got.Index(i).String()
+			}
+			if !slices.Equal(gotSlice, want) {
+				t.Errorf(
+					"internal/config.Config.%s did not reach dingo.Config: "+
+						"got %v, want %v; this field is silently dropped "+
+						"on the serve path",
+					m.name, gotSlice, want,
+				)
+			}
+		}
+	}
+
+	for name, reason := range knownGaps {
+		t.Logf(
+			"known forwarding gap excluded from this test: %s: %s",
+			name,
+			reason,
 		)
 	}
 }
