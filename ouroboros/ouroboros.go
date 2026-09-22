@@ -597,11 +597,11 @@ func (o *Ouroboros) initBlockfetchMetrics() {
 		prometheus.HistogramOpts{
 			Name: "dingo_blockfetch_stage_duration_seconds",
 			Help: "wall-clock time spent in each blockfetch-owned stage of per-block processing, by stage: decode (CBOR-decoding one fetched block's raw bytes, on a decode-cache miss only)",
-			// 100us to ~52.4s, matching
+			// 100us to ~419s, matching
 			// dingo_ledger_block_stage_duration_seconds's bucket range (see
 			// its doc comment for why) so the two histograms stay
 			// comparable across the same block's stages.
-			Buckets: prometheus.ExponentialBuckets(0.0001, 2, 20),
+			Buckets: prometheus.ExponentialBuckets(0.0001, 2, 23),
 		},
 		[]string{"stage"},
 	)

@@ -74,7 +74,10 @@ type stateMetrics struct {
 	// transaction's era ledger-rule validation, including Plutus
 	// evaluation, inside ledgerProcessBlock), and apply (writing a
 	// flushed LedgerDeltaBatch's UTXO and transaction rows to the
-	// metadata store). See dingo_blockfetch_stage_duration_seconds in the
+	// metadata store), and epoch_rollover (the epoch-boundary transaction
+	// in ledgerProcessBlocksFromSource: era transitions, reward
+	// application and the governance tally, during which no block is
+	// applied). See dingo_blockfetch_stage_duration_seconds in the
 	// ouroboros package for the wire-decode stage, which runs before a
 	// block reaches the ledger at all. Together the two metrics answer
 	// "where does per-block processing time go", which no existing
@@ -82,9 +85,10 @@ type stateMetrics struct {
 	blockStageDuration *prometheus.HistogramVec
 	// Pre-materialized observers for the stage label values, so the hot
 	// path does not resolve a label on every block or transaction.
-	blockStageHeaderVerify prometheus.Observer
-	blockStageValidate     prometheus.Observer
-	blockStageApply        prometheus.Observer
+	blockStageHeaderVerify  prometheus.Observer
+	blockStageValidate      prometheus.Observer
+	blockStageApply         prometheus.Observer
+	blockStageEpochRollover prometheus.Observer
 	// Per-stage maximum wall-clock duration ever observed since process
 	// start, each holding math.Float64bits of a seconds value and advanced
 	// by updateMaxDuration's compare-and-swap loop at the same
@@ -99,20 +103,20 @@ type stateMetrics struct {
 	// no second copy of the value that can fall behind this one.
 	//
 	// A histogram quantile is only an estimate bounded by its bucket edges,
-	// however wide they are; this is the exact worst-ever-seen value, so a
-	// multi-second stall like blinklabs-io/dingo#4364 (epoch-boundary DRep
-	// voting-power query, fixed separately -- this metric only makes it
-	// visible) shows up exactly instead of "somewhere past the last bucket
-	// boundary".
+	// however wide they are; this is the exact worst-ever-seen value, so an
+	// epoch-boundary stall like blinklabs-io/dingo#4364 (block application
+	// blocked for 25s to over 300s) shows up exactly on the epoch_rollover
+	// stage instead of "somewhere past the last bucket boundary".
 	//
 	// Deliberately monotonic non-resetting ("worst ever seen"), not a
 	// windowed maximum: a windowed maximum needs a periodic-reset custom
 	// Collector, real complexity for a question -- "did we ever see
 	// something this bad" -- that a simple non-resetting maximum already
 	// answers.
-	blockStageHeaderVerifyMax atomic.Uint64
-	blockStageValidateMax     atomic.Uint64
-	blockStageApplyMax        atomic.Uint64
+	blockStageHeaderVerifyMax  atomic.Uint64
+	blockStageValidateMax      atomic.Uint64
+	blockStageApplyMax         atomic.Uint64
+	blockStageEpochRolloverMax atomic.Uint64
 	// Incremented when a stored governance proposal's CBOR fails to
 	// decode during the mid-epoch ratifiability check, so the failures
 	// surface as a metric instead of just log volume.
@@ -387,9 +391,10 @@ const (
 // Stage labels for blockStageDuration. See its field doc comment for what
 // each stage covers.
 const (
-	blockStageHeaderVerify = "header_verify"
-	blockStageValidate     = "validate"
-	blockStageApply        = "apply"
+	blockStageHeaderVerify  = "header_verify"
+	blockStageValidate      = "validate"
+	blockStageApply         = "apply"
+	blockStageEpochRollover = "epoch_rollover"
 )
 
 // observeBlockStage records one sample of wall-clock time spent in the named
@@ -414,6 +419,9 @@ func (m *stateMetrics) observeBlockStage(stage string, d time.Duration) {
 	case blockStageApply:
 		obs = m.blockStageApply
 		record = &m.blockStageApplyMax
+	case blockStageEpochRollover:
+		obs = m.blockStageEpochRollover
+		record = &m.blockStageEpochRolloverMax
 	}
 	if obs == nil {
 		// Unknown stage, or metrics were never initialised: neither field
@@ -479,9 +487,10 @@ func (m *stateMetrics) registerBlockStageMaxDuration(
 	factory promauto.Factory,
 ) {
 	for stage, record := range map[string]*atomic.Uint64{
-		blockStageHeaderVerify: &m.blockStageHeaderVerifyMax,
-		blockStageValidate:     &m.blockStageValidateMax,
-		blockStageApply:        &m.blockStageApplyMax,
+		blockStageHeaderVerify:  &m.blockStageHeaderVerifyMax,
+		blockStageValidate:      &m.blockStageValidateMax,
+		blockStageApply:         &m.blockStageApplyMax,
+		blockStageEpochRollover: &m.blockStageEpochRolloverMax,
 	} {
 		factory.NewGaugeFunc(
 			prometheus.GaugeOpts{
@@ -884,23 +893,15 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	m.blockStageDuration = promautoFactory.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name: "dingo_ledger_block_stage_duration_seconds",
-			Help: "wall-clock time spent in each ledger-owned stage of per-block processing, by stage: header_verify (VRF/KES/signature checks on blockfetch arrival), validate (one transaction's era ledger-rule validation, including Plutus evaluation), apply (writing a flushed delta batch's UTXO and transaction rows to the metadata store)",
-			// 100us to ~52.4s. Most observations are sub-100ms (a single
+			Help: "wall-clock time spent in each ledger-owned stage of per-block processing, by stage: header_verify (VRF/KES/signature checks on blockfetch arrival), validate (one transaction's era ledger-rule validation, including Plutus evaluation), apply (writing a flushed delta batch's UTXO and transaction rows to the metadata store), epoch_rollover (the epoch-boundary transaction, including reward application and the governance tally, during which no block is applied)",
+			// 100us to ~419s. Most observations are sub-100ms (a single
 			// cheap signature check, one transaction's validation, one
 			// delta-batch flush), which is why resolution stays fine down
-			// there; the upper end is deliberately wide enough to resolve
-			// multi-second apply stalls like blinklabs-io/dingo#4364
-			// (epoch-boundary DRep voting-power query blocking apply for
-			// 4-8s, observed live -- fixed separately, but every one of
-			// those observations landed in this histogram's +Inf overflow
-			// bucket under the old ~3.3s ceiling, indistinguishable from a
-			// 4s, 8s, or 60s stall). The new ceiling exceeds both
-			// blockfetchBusyTimeout and noProgressStuckBackoffMax (30s
-			// each, see chainsync.go/state.go): a stall large enough to
-			// resolve here is already large enough that other parts of the
-			// system have started reacting to it as stuck, so the
-			// histogram's range is never the limiting signal.
-			Buckets: prometheus.ExponentialBuckets(0.0001, 2, 20),
+			// there. The upper end has to resolve epoch_rollover:
+			// blinklabs-io/dingo#4364 measured block application blocked
+			// for 25s to 318s across preview boundaries, all of which the
+			// old ~3.3s ceiling put in +Inf.
+			Buckets: prometheus.ExponentialBuckets(0.0001, 2, 23),
 		},
 		[]string{"stage"},
 	)
@@ -912,6 +913,9 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	)
 	m.blockStageApply = m.blockStageDuration.WithLabelValues(
 		blockStageApply,
+	)
+	m.blockStageEpochRollover = m.blockStageDuration.WithLabelValues(
+		blockStageEpochRollover,
 	)
 	m.registerBlockStageMaxDuration(promautoFactory)
 	m.governanceProposalDecodeFailures = promautoFactory.NewCounter(

@@ -74,15 +74,12 @@ func TestBlockfetchClientBlockRawNoopDecodeStageWhenMetricsDisabled(
 	assert.Nil(t, o.blockfetchMetrics)
 }
 
-// TestBlockfetchStageDurationBucketsCoverTailStalls is the sibling
-// regression test to
-// ledger.TestBlockStageDurationBucketsCoverTailStalls: dingo_blockfetch_stage_duration_seconds
-// shared the identical narrow ExponentialBuckets(0.0001, 2, 16) config
-// (largest boundary ~3.2768s) as dingo_ledger_block_stage_duration_seconds,
-// which is the metric blinklabs-io/dingo#4364's multi-second epoch-boundary
-// stalls overflowed into +Inf. The two histograms are documented as sharing
-// the same bucket range so they stay comparable across the same block's
-// stages, so this must widen in lockstep.
+// TestBlockfetchStageDurationBucketsCoverTailStalls pins
+// dingo_blockfetch_stage_duration_seconds to the same range as
+// dingo_ledger_block_stage_duration_seconds (see
+// ledger.TestBlockStageDurationBucketsCoverTailStalls). The two histograms are
+// documented as sharing one bucket range so they stay comparable across the
+// same block's stages, so this must widen in lockstep.
 func TestBlockfetchStageDurationBucketsCoverTailStalls(t *testing.T) {
 	t.Parallel()
 
@@ -104,7 +101,7 @@ func TestBlockfetchStageDurationBucketsCoverTailStalls(t *testing.T) {
 	assert.GreaterOrEqual(
 		t,
 		largest,
-		30.0,
+		318.0,
 		"largest finite bucket boundary (%vs) must match "+
 			"dingo_ledger_block_stage_duration_seconds's widened range",
 		largest,

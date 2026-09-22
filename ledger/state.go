@@ -6644,6 +6644,10 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			var rolloverResult *EpochRolloverResult
 			var eraTransitions []*EraTransitionResult
 
+			// Block application is blocked for this whole transaction,
+			// including reward application and the governance tally, so
+			// it is timed as its own stage whether it commits or fails.
+			rolloverStart := time.Now()
 			// Execute transaction WITHOUT holding ls.Lock()
 			//nolint:contextcheck // SubmitAsyncDBTxn has no context-aware variant.
 			err := ls.SubmitAsyncDBTxn(func(txn *database.Txn) error {
@@ -6751,6 +6755,10 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				}
 				return nil
 			}, true)
+			ls.metrics.observeBlockStage(
+				blockStageEpochRollover,
+				time.Since(rolloverStart),
+			)
 			if err != nil {
 				// This runs on the pass after a boundary-crossing batch
 				// deferred its remainder to cachedNextBatch, which (per the

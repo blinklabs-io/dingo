@@ -43,7 +43,7 @@ func blockStageSampleCount(
 }
 
 // TestObserveBlockStageRecordsUnderEachLabel is the regression test for the
-// per-block stage histogram wiring: each of the three known stages must
+// per-block stage histogram wiring: each of the four known stages must
 // record its own duration sample under its own label, so a dashboard can
 // break down where per-block ledger time goes.
 func TestObserveBlockStageRecordsUnderEachLabel(t *testing.T) {
@@ -56,6 +56,7 @@ func TestObserveBlockStageRecordsUnderEachLabel(t *testing.T) {
 	m.observeBlockStage(blockStageValidate, 20*time.Millisecond)
 	m.observeBlockStage(blockStageApply, 30*time.Millisecond)
 	m.observeBlockStage(blockStageValidate, 5*time.Millisecond)
+	m.observeBlockStage(blockStageEpochRollover, 40*time.Second)
 
 	count, _ := blockStageSampleCount(t, &m, blockStageHeaderVerify)
 	assert.Equal(t, uint64(1), count)
@@ -64,20 +65,22 @@ func TestObserveBlockStageRecordsUnderEachLabel(t *testing.T) {
 	assert.InDelta(t, 0.025, sum, 0.0001)
 	count, _ = blockStageSampleCount(t, &m, blockStageApply)
 	assert.Equal(t, uint64(1), count)
+	count, _ = blockStageSampleCount(t, &m, blockStageEpochRollover)
+	assert.Equal(t, uint64(1), count)
 
-	// Three distinct label series, no more.
+	// Four distinct label series, no more.
 	assert.Equal(
 		t,
-		3,
+		4,
 		testutil.CollectAndCount(m.blockStageDuration),
 	)
 }
 
 // TestObserveBlockStageIgnoresUnknownStage confirms an unrecognized stage
 // label is silently dropped rather than panicking or creating a stray label
-// series. init pre-materializes the three known stage series, so this
+// series. init pre-materializes the four known stage series, so this
 // checks their sample counts stay zero rather than the series count, which
-// is already 3 regardless of any observation.
+// is already 4 regardless of any observation.
 func TestObserveBlockStageIgnoresUnknownStage(t *testing.T) {
 	t.Parallel()
 
@@ -88,14 +91,15 @@ func TestObserveBlockStageIgnoresUnknownStage(t *testing.T) {
 
 	assert.Equal(
 		t,
-		3,
+		4,
 		testutil.CollectAndCount(m.blockStageDuration),
-		"init pre-materializes exactly the three known stage series",
+		"init pre-materializes exactly the four known stage series",
 	)
 	for _, stage := range []string{
 		blockStageHeaderVerify,
 		blockStageValidate,
 		blockStageApply,
+		blockStageEpochRollover,
 	} {
 		count, _ := blockStageSampleCount(t, &m, stage)
 		assert.Zerof(
@@ -117,16 +121,12 @@ func TestObserveBlockStageNoopWhenMetricsDisabled(t *testing.T) {
 	m.observeBlockStage(blockStageHeaderVerify, time.Millisecond)
 }
 
-// TestBlockStageDurationBucketsCoverTailStalls is the regression test for the
-// blinklabs-io/dingo#4364 observability gap: with the old
-// ExponentialBuckets(0.0001, 2, 16) config the largest finite bucket
-// boundary was ~3.2768s, so a multi-second epoch-boundary stall (#4364
-// measured 4-8s live) landed in the +Inf overflow bucket, indistinguishable
-// from a 4s, 8s, or 60s stall. The new range must comfortably clear the
-// thresholds at which the rest of the system already treats a stall as
-// "something is wrong" -- blockfetchBusyTimeout and
-// noProgressStuckBackoffMax, both 30s (chainsync.go/state.go) -- or a stall
-// large enough to matter is still unresolvable here.
+// TestBlockStageDurationBucketsCoverTailStalls pins the histogram's upper
+// range to the epoch-boundary stalls it has to resolve.
+// blinklabs-io/dingo#4364 measured block application blocked for 25s to 318s
+// across preview boundaries; with the old ExponentialBuckets(0.0001, 2, 16)
+// ceiling of ~3.3s every one of those landed in +Inf, indistinguishable from
+// each other.
 func TestBlockStageDurationBucketsCoverTailStalls(t *testing.T) {
 	t.Parallel()
 
@@ -148,11 +148,9 @@ func TestBlockStageDurationBucketsCoverTailStalls(t *testing.T) {
 	assert.GreaterOrEqual(
 		t,
 		largest,
-		30.0,
-		"largest finite bucket boundary (%vs) must be at least as large as "+
-			"blockfetchBusyTimeout/noProgressStuckBackoffMax (30s), or a "+
-			"stall the rest of the system already treats as stuck still "+
-			"lands in +Inf here",
+		318.0,
+		"largest finite bucket boundary (%vs) must resolve the 318s "+
+			"epoch-boundary stall measured in #4364",
 		largest,
 	)
 }
@@ -205,6 +203,7 @@ func TestBlockStageMaxDurationExportsRunningMaximum(t *testing.T) {
 		blockStageHeaderVerify,
 		blockStageValidate,
 		blockStageApply,
+		blockStageEpochRollover,
 	} {
 		assert.Equal(
 			t,
@@ -234,7 +233,11 @@ func TestBlockStageMaxDurationExportsRunningMaximum(t *testing.T) {
 		"a larger observation must raise the record",
 	)
 
-	for _, stage := range []string{blockStageHeaderVerify, blockStageValidate} {
+	for _, stage := range []string{
+		blockStageHeaderVerify,
+		blockStageValidate,
+		blockStageEpochRollover,
+	} {
 		assert.Equal(
 			t,
 			0.0,
