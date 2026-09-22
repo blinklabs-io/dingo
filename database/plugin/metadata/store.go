@@ -2089,6 +2089,19 @@ type MetadataStore interface {
 		types.Txn,
 	) error
 
+	// CorrectAccountRewardCredit overwrites a single, already-applied stake
+	// reward credit's amount in place -- see the sqlstore implementation's
+	// doc comment for the dingo #4529 stale-delegation reward-corruption
+	// repair path this exists for.
+	CorrectAccountRewardCredit(
+		uint8, // credentialTag
+		[]byte, // stakeKey
+		uint64, // addedSlot
+		[]byte, // sourceHash
+		uint64, // correctedAmount
+		types.Txn,
+	) error
+
 	// AddAccountRewardByCredential credits rewards using the full stake credential identity.
 	// The credential tag prevents key and script reward accounts with the same hash from merging.
 	//
