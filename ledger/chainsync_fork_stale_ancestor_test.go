@@ -27,36 +27,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestFindPeerForkPathRejectsAncestorAheadOfTip is a regression test for a
-// logical defect in findPeerForkPath: it resolved a "common ancestor" by a
-// raw database.BlockByHash hash lookup with no check that the found block
-// was actually at or before the local tip. A block row left behind in the
-// persistent block index by an incomplete rollback cleanup (chain.Chain.
-// rollbackLocked's per-index removeBlockByIndex loop has no atomicity across
-// the whole range it deletes: a transient failure partway through leaves
-// higher-index blocks stranded, still reachable via BlockByHash's hash
-// index, even though the ledger's tip has already moved back below them)
-// would then be trusted as a valid ancestor even though its slot was AFTER
-// the local tip -- impossible for a genuine common ancestor of two chains,
-// one of which sits at that tip.
-//
-// Trusting it would drive tryResolveFork to roll back toward a point ahead
-// of where the node actually was. Every subsequent blockfetch batch would be
-// built from headers past that bogus point and could never apply ("ignoring
-// blockfetch block: ... does not fit on current chain tip"), so the ledger
-// pipeline would make no progress, restart after restart, until it hit the
-// no-progress halt -- reproducibly, since the stale row survives a process
-// restart. (This defect was found and fixed while investigating a real
-// mr-slave production halt on 2026-09-21/22; that incident's actual cause
-// turned out to be a separate reward/withdrawal-balance validation mismatch,
-// not this code path, but the defect fixed here is real and independently
-// worth guarding against.)
-//
-// This test seeds exactly that stale row directly through
-// database.Database.BlockCreate (bypassing chain.Chain's own tip-consistency
-// checks, which is the point: it simulates the leftover artifact an
-// incomplete rollback leaves, not a block chain.Chain would ever admit
-// itself) and proves findPeerForkPath must not resolve it as an ancestor.
+// TestFindPeerForkPathRejectsAncestorAheadOfTip is a regression test for
+// findPeerForkPath: a hash-index hit past the local tip is not reachable and
+// must be treated as unresolved. It seeds the stale row directly through
+// database.Database.BlockCreate, bypassing chain.Chain's own
+// tip-consistency checks, since that is the point: it simulates the
+// leftover artifact an incomplete rollback leaves, not a block chain.Chain
+// would ever admit itself.
 func TestFindPeerForkPathRejectsAncestorAheadOfTip(t *testing.T) {
 	t.Parallel()
 
