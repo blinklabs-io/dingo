@@ -4060,11 +4060,31 @@ against the first bootstrap peer; after a local tip exists, the delivered
 frontier is the authority. This lets a node resume when the honest advertised
 tip is arbitrarily far ahead: the next delivered header is still checked
 incrementally against the previous delivered frontier (with the local-tip
-catch-up allowance). It also prevents a peer's unbounded advertisement from
-suppressing other peers or forcing a chain-switch resync. A tip update that
-carries no delivered frontier at all is recorded as having delivered nothing:
-the advertised tip is never substituted for a missing observed frontier, and
-the peer is bounded and compared as block 0 until it delivers a header.
+catch-up allowance, `localTip + 2*securityParam`). It also prevents a peer's
+unbounded advertisement from suppressing other peers or forcing a
+chain-switch resync. A tip update that carries no delivered frontier at all
+is recorded as having delivered nothing: the advertised tip is never
+substituted for a missing observed frontier, and the peer is bounded and
+compared as block 0 until it delivers a header.
+
+The catch-up allowance is itself bounded, and that bound used to be absolute:
+a node whose delivered frontier legitimately races more than `2*securityParam`
+blocks ahead of a slow-to-apply local tip — bulk header delivery outpacing
+ledger application, or a from-genesis sync with no other live peer reference —
+could never accept that peer. A rejected frontier is never recorded, so it
+could never itself become a fresher reference; the node stayed permanently
+behind (dingo #3624). Because a frontier this far ahead of local ledger state
+has itself deferred VRF/KES verification
+(`ledger.ValidateChainSelectionHeaderCrypto`), the selector cannot trust a
+single such claim outright, so it requires corroboration instead:
+`checkPeerTipPlausibleLocked` records a delivered frontier that exceeds the
+catch-up allowance per connection (`ChainSelector.farTipClaims`, bounded to
+`maxTrackedPeers` and pruned with the peer in `deletePeerLocked`) and accepts
+it once another, independent connection has recorded a frontier within
+`securityParam` of it (`corroborateFarTipClaimLocked`). A single lying or
+as-yet-unverifiable connection still cannot escape the ceiling; two
+independently connected peers agreeing on the same far frontier can, which is
+enough to break the ratchet without trusting any one connection's claim.
 Genesis exit may consult the advertised slot only through the separately
 documented delivered-frontier gate below. A RollBackward restores the
 delivered frontier from a bounded `k+1` header history; if the point is no longer retained, the

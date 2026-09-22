@@ -190,9 +190,18 @@ type ChainSelector struct {
 	evaluationTrigger chan struct{}
 	bestPeerConn      *ouroboros.ConnectionId
 	localTip          ochainsync.Tip
-	mutex             sync.RWMutex
-	ctx               context.Context
-	cancel            context.CancelFunc
+	// farTipClaims records, per connection, the most recent delivered
+	// frontier that exceeded the catch-up plausibility ceiling. Entries are
+	// provisional: they never enter peerTips and so never influence chain
+	// selection, corroboration, or the Genesis exit horizon by themselves.
+	// They exist only so that a second, independent connection delivering a
+	// similar far frontier can corroborate the first and let both through --
+	// see corroborateFarTipClaimLocked. Bounded to maxTrackedPeers entries
+	// and pruned in deletePeerLocked. Guarded by mutex.
+	farTipClaims map[ouroboros.ConnectionId]uint64
+	mutex        sync.RWMutex
+	ctx          context.Context
+	cancel       context.CancelFunc
 
 	// Anti-flap incumbent pin state (guarded by mutex).
 	//
@@ -763,6 +772,31 @@ func (cs *ChainSelector) checkPeerTipPlausibleLocked(
 				safeAddUint64(cs.securityParam, cs.securityParam),
 			)
 			observedReject = observedBlock > maxPlausibleBlock
+			// The 2*K catch-up ceiling still assumes the honest network tip
+			// is at most a bounded stall away from the local tip. That
+			// assumption fails for a node legitimately far behind (a
+			// from-genesis sync, a long outage): the true gap to the honest
+			// tip has no upper bound, so a fixed ceiling anchored to
+			// localTip makes an honestly-delivered frontier permanently
+			// unreachable. A rejected frontier is never recorded, so it can
+			// never itself become a fresher reference -- a one-way ratchet
+			// (dingo #3624).
+			//
+			// Every reference the selector holds is stale here (that is
+			// what put us in this branch), and this frontier's own leader
+			// eligibility is itself unverifiable this far ahead of local
+			// ledger state (ValidateChainSelectionHeaderCrypto defers), so
+			// nothing already verified can tell an honest far frontier from
+			// a fabricated one. Require independent agreement instead: a
+			// frontier beyond the catch-up ceiling is trusted only once
+			// another, distinct connection has independently delivered a
+			// frontier within K of it. A lone claim, honest or fabricated,
+			// still cannot break the ratchet by itself.
+			if observedReject &&
+				cs.corroborateFarTipClaimLocked(connId, observedBlock) {
+				observedReject = false
+				maxPlausibleBlock = observedBlock
+			}
 		}
 		// Case 3: len(peerTips)==0 && peer not known → bootstrap
 		if observedReject ||
@@ -783,8 +817,56 @@ func (cs *ChainSelector) checkPeerTipPlausibleLocked(
 			)
 			return false
 		}
+		// Accepted: this connection no longer needs to be tracked as a
+		// pending far-tip claim, whether or not it ever was one.
+		delete(cs.farTipClaims, connId)
 	}
 	return true
+}
+
+// corroborateFarTipClaimLocked records connId's delivered frontier, which
+// exceeded the catch-up plausibility ceiling, and reports whether it is now
+// corroborated: at least one OTHER distinct connection has independently
+// delivered a frontier within securityParam of it. Corroborated claims are
+// trusted because a single connection (lying or fabricating headers this
+// node cannot yet verify) cannot make a second, unrelated connection agree
+// with it; two independent peers legitimately delivering close to the same
+// real network frontier is the expected shape of an honest far-behind
+// catch-up.
+//
+// Entries recorded here are provisional: they never enter cs.peerTips and so
+// never influence chain selection, corroboration, or the Genesis exit
+// horizon by themselves.
+//
+// Must be called with cs.mutex held and cs.securityParam > 0.
+func (cs *ChainSelector) corroborateFarTipClaimLocked(
+	connId ouroboros.ConnectionId,
+	claimed uint64,
+) bool {
+	if cs.farTipClaims == nil {
+		cs.farTipClaims = make(map[ouroboros.ConnectionId]uint64)
+	}
+	if _, exists := cs.farTipClaims[connId]; !exists &&
+		len(cs.farTipClaims) >= cs.maxTrackedPeers {
+		// Bounded like peerTips: connection churn must not grow this map
+		// without limit. The claim can still corroborate on a later
+		// update once room frees up.
+		return false
+	}
+	cs.farTipClaims[connId] = claimed
+	for otherConn, otherClaimed := range cs.farTipClaims {
+		if otherConn == connId {
+			continue
+		}
+		lo, hi := claimed, otherClaimed
+		if lo > hi {
+			lo, hi = hi, lo
+		}
+		if safeAddUint64(lo, cs.securityParam) >= hi {
+			return true
+		}
+	}
+	return false
 }
 
 // makeRoomForNewPeerLocked makes room in the tracked-peer table for a new
@@ -912,6 +994,7 @@ func (cs *ChainSelector) deletePeerLocked(connId ouroboros.ConnectionId) {
 	delete(cs.eligible, connId)
 	delete(cs.priority, connId)
 	delete(cs.recentlyLeft, connId)
+	delete(cs.farTipClaims, connId)
 }
 
 // RemovePeer removes a peer from tracking.

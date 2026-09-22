@@ -1820,6 +1820,134 @@ func TestUpdatePeerTipAcceptsDuringCatchUp(t *testing.T) {
 	)
 }
 
+// TestUpdatePeerTipFarBehindHonestPeerPermanentlyRejectedAlone reproduces
+// dingo #3624: a node far behind the honest network tip (from-genesis sync,
+// or a long outage) rejects every update from an honest peer reporting the
+// real tip, forever, because the catch-up ceiling is an absolute
+// localTip+2*K bound and a rejected frontier is never recorded -- so it can
+// never become a fresher reference for itself. The gap here (>4M blocks at
+// K=432) mirrors the live reproduction posted on the issue.
+func TestUpdatePeerTipFarBehindHonestPeerPermanentlyRejectedAlone(t *testing.T) {
+	t.Parallel()
+
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: 432, // Preview k
+	})
+
+	// Local tip: from-genesis sync, far behind the real network tip.
+	cs.SetLocalTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100000000, Hash: []byte("local")},
+		BlockNumber: 175516,
+	})
+
+	// Another already-tracked peer whose own recorded frontier is also
+	// near the local tip (itself stalled or freshly (re)connected) -- this
+	// is what makes the reference stale and puts every later peer through
+	// the catch-up branch rather than the ordinary Case 2 check.
+	staleConn := newTestConnectionId(1)
+	cs.UpdatePeerTip(staleConn, ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100000100, Hash: []byte("stale")},
+		BlockNumber: 175000,
+	}, nil)
+
+	// The honest peer: its real, current tip is genuinely millions of
+	// blocks ahead, not the result of any reorg or spoof.
+	honestConn := newTestConnectionId(2)
+	honestTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 200000000, Hash: []byte("honest")},
+		BlockNumber: 4687076,
+	}
+
+	accepted := cs.UpdatePeerTip(honestConn, honestTip, nil)
+	assert.False(
+		t,
+		accepted,
+		"a single far-ahead honest peer must not yet be trusted without corroboration",
+	)
+
+	// The peer keeps reporting the same real tip (chainsync has no way to
+	// report anything else) and is rejected every single time: it never
+	// became "known", so every update re-runs the same stale Case 2
+	// comparison against the same stale reference. This is the ratchet.
+	for range 5 {
+		accepted = cs.UpdatePeerTip(honestConn, honestTip, nil)
+		assert.False(
+			t,
+			accepted,
+			"an uncorroborated far tip must stay rejected on every retry",
+		)
+	}
+	assert.Nil(
+		t,
+		cs.GetPeerTip(honestConn),
+		"a permanently-rejected peer must never be tracked",
+	)
+}
+
+// TestUpdatePeerTipFarBehindCorroboratedAcrossPeersBreaksRatchet is the
+// positive side of the same scenario: a second, independent connection
+// reporting close to the same far tip corroborates the first, and both are
+// then accepted. Without corroboration widening the catch-up ceiling, a
+// second honest peer gains nothing -- it is rejected by the exact same
+// stale reference as the first, and the node can never recover regardless
+// of how many honest peers connect.
+func TestUpdatePeerTipFarBehindCorroboratedAcrossPeersBreaksRatchet(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: 432, // Preview k
+	})
+
+	cs.SetLocalTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100000000, Hash: []byte("local")},
+		BlockNumber: 175516,
+	})
+
+	staleConn := newTestConnectionId(1)
+	cs.UpdatePeerTip(staleConn, ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100000100, Hash: []byte("stale")},
+		BlockNumber: 175000,
+	}, nil)
+
+	honestConn1 := newTestConnectionId(2)
+	honestTip1 := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 200000000, Hash: []byte("honest1")},
+		BlockNumber: 4687076,
+	}
+	accepted := cs.UpdatePeerTip(honestConn1, honestTip1, nil)
+	assert.False(t, accepted, "first honest peer is rejected alone")
+
+	// A second, independent connection reports a tip within K of the
+	// first's claim -- independent agreement the selector cannot fake by
+	// itself.
+	honestConn2 := newTestConnectionId(3)
+	honestTip2 := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 200000100, Hash: []byte("honest2")},
+		BlockNumber: 4687076 + 100,
+	}
+	accepted = cs.UpdatePeerTip(honestConn2, honestTip2, nil)
+	assert.True(
+		t,
+		accepted,
+		"a far tip corroborated by an independent connection must be accepted",
+	)
+	require.NotNil(t, cs.GetPeerTip(honestConn2))
+
+	// The first peer's next update is no longer measured against the
+	// stale reference: honestConn2 is now tracked with a live frontier
+	// near the real tip, so the ordinary Case 2 check (not the catch-up
+	// branch) accepts it directly. The ratchet is broken.
+	accepted = cs.UpdatePeerTip(honestConn1, honestTip1, nil)
+	assert.True(
+		t,
+		accepted,
+		"the first peer must be accepted once corroborated",
+	)
+	require.NotNil(t, cs.GetPeerTip(honestConn1))
+}
+
 func TestUpdatePeerTipAcceptsNextObservedBlockWhenAdvertisedTipIsFarAhead(
 	t *testing.T,
 ) {
