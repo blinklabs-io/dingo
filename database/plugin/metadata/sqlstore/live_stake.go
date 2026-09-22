@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -419,6 +420,149 @@ func (s *Store) RebuildRewardLiveStakeFromRunningTotals(
 	return s.rebuildRewardLiveStake(slot, txn, true)
 }
 
+// verifyRewardLiveStakeRunningTotals enforces the running-total path's
+// precondition: the ledger-state importer must have recorded a utxo_stake for
+// every credential that still holds a live UTxO, because that path never
+// rescans the live UTxO set to derive one.
+//
+// This is one indexed semi-join over the distinct live-UTxO credentials
+// rather than a correlated EXISTS evaluated per credential inside the
+// finalizer's own SELECT. The per-credential form made the finalizer's cost
+// grow with the credential population twice over, and it is a large part of
+// why that SELECT could hold its write transaction -- and so the WAL snapshot
+// -- far longer than the work required (#4610).
+func (s *Store) verifyRewardLiveStakeRunningTotals(
+	ctx context.Context,
+	db queryer,
+) error {
+	row := db.QueryRowContext(ctx, `
+SELECT live.credential_tag, live.staking_key
+FROM (
+    SELECT DISTINCT credential_tag, staking_key
+    FROM utxo
+    WHERE deleted_slot = 0
+      AND staking_key IS NOT NULL
+      AND LENGTH(staking_key) > 0
+) live
+WHERE NOT EXISTS (
+    SELECT 1 FROM reward_live_stake
+    WHERE reward_live_stake.credential_tag = live.credential_tag
+      AND reward_live_stake.staking_key = live.staking_key
+      AND reward_live_stake.utxo_stake IS NOT NULL
+)
+LIMIT 1`)
+	var tag uint8
+	var key []byte
+	switch err := row.Scan(&tag, &key); {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil
+	case err != nil:
+		return fmt.Errorf("verify reward live stake running totals: %w", err)
+	}
+	return fmt.Errorf(
+		"missing reward live stake running total for credential %d:%x",
+		tag,
+		key,
+	)
+}
+
+// rewardLiveStakeCredentialQuery builds the finalizer's canonical credential
+// SELECT.
+//
+// latest_delegation ranks each credential's whole stake-assignment history,
+// but the outer LEFT JOIN can only match a credential whose account row is
+// active with a non-NULL pool, and the caller discards the delegation columns
+// for every other credential. Restricting the ranked input to those
+// credentials is therefore result-preserving -- the filter is per-credential,
+// not per-row, so it cannot change which row wins rn = 1 for a credential it
+// keeps -- and it is what stops the finalizer ranking, and joining certs and
+// transactions for, the assignment history of credentials that deregistered
+// long ago. That history is unbounded in the chain's age while the live
+// credential population is not, which is how this query came to hold its
+// write transaction, and so a WAL snapshot, for hours (#4610).
+func rewardLiveStakeCredentialQuery(fromRunningTotals bool) string {
+	const credentialSource = `
+    SELECT credential_tag, staking_key FROM account
+    UNION
+    SELECT credential_tag, staking_key FROM utxo
+    WHERE deleted_slot = 0
+      AND staking_key IS NOT NULL
+      AND LENGTH(staking_key) > 0`
+	utxoStakeSelect := "NULL"
+	runningTotalJoin := ""
+	if fromRunningTotals {
+		utxoStakeSelect = "reward_live_stake.utxo_stake"
+		runningTotalJoin = `
+LEFT JOIN reward_live_stake
+  ON reward_live_stake.credential_tag = creds.credential_tag
+ AND reward_live_stake.staking_key = creds.staking_key`
+	}
+	return `
+WITH latest_delegation AS (
+    SELECT credential_tag, staking_key, pool_key_hash, added_slot,
+           block_index, cert_index
+    FROM (
+        SELECT delegation.*,
+               ROW_NUMBER() OVER (
+                   PARTITION BY credential_tag, staking_key
+                   ORDER BY added_slot DESC, block_index DESC, cert_index DESC
+               ) AS rn
+        FROM (
+            SELECT sd.credential_tag, sd.staking_key, sd.pool_key_hash,
+                   sd.added_slot, COALESCE(tx.block_index, 0) AS block_index,
+                   COALESCE(c.cert_index, 0) AS cert_index
+            FROM stake_delegation sd
+            LEFT JOIN certs c ON c.id = sd.certificate_id
+            LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
+            UNION ALL
+            SELECT srd.credential_tag, srd.staking_key, srd.pool_key_hash,
+                   srd.added_slot, COALESCE(tx.block_index, 0),
+                   COALESCE(c.cert_index, 0)
+            FROM stake_registration_delegation srd
+            LEFT JOIN certs c ON c.id = srd.certificate_id
+            LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
+            UNION ALL
+            SELECT svd.credential_tag, svd.staking_key, svd.pool_key_hash,
+                   svd.added_slot, COALESCE(tx.block_index, 0),
+                   COALESCE(c.cert_index, 0)
+            FROM stake_vote_delegation svd
+            LEFT JOIN certs c ON c.id = svd.certificate_id
+            LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
+            UNION ALL
+            SELECT svrd.credential_tag, svrd.staking_key, svrd.pool_key_hash,
+                   svrd.added_slot, COALESCE(tx.block_index, 0),
+                   COALESCE(c.cert_index, 0)
+            FROM stake_vote_registration_delegation svrd
+            LEFT JOIN certs c ON c.id = svrd.certificate_id
+            LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
+        ) delegation
+        WHERE EXISTS (
+            SELECT 1 FROM account
+            WHERE account.credential_tag = delegation.credential_tag
+              AND account.staking_key = delegation.staking_key
+              AND account.active = TRUE
+              AND account.pool IS NOT NULL
+        )
+    ) ranked_delegation
+    WHERE rn = 1
+)
+SELECT creds.credential_tag, creds.staking_key,
+       CASE WHEN account.active = TRUE THEN account.pool ELSE NULL END,
+       account.reward, account.active, account.added_slot,
+       latest_delegation.added_slot,
+       latest_delegation.block_index,
+       latest_delegation.cert_index,
+       ` + utxoStakeSelect + `
+FROM (` + credentialSource + `) creds
+LEFT JOIN account
+  ON account.credential_tag = creds.credential_tag
+ AND account.staking_key = creds.staking_key
+LEFT JOIN latest_delegation
+  ON latest_delegation.credential_tag = account.credential_tag
+ AND latest_delegation.staking_key = account.staking_key
+		 AND latest_delegation.pool_key_hash = account.pool` + runningTotalJoin
+}
+
 func (s *Store) rebuildRewardLiveStake(
 	slot uint64,
 	txn types.Txn,
@@ -513,97 +657,18 @@ WHERE deleted_slot = 0 AND staking_key IS NOT NULL AND LENGTH(staking_key) > 0`)
 				}
 			}
 
-			credentialSource := `
-    SELECT credential_tag, staking_key FROM account
-    UNION
-    SELECT credential_tag, staking_key FROM utxo
-    WHERE deleted_slot = 0
-      AND staking_key IS NOT NULL
-      AND LENGTH(staking_key) > 0`
-			utxoStakeSelect := "NULL"
-			hasLiveUtxoSelect := "FALSE"
-			runningTotalJoin := ""
 			if fromRunningTotals {
-				credentialSource = `
-    SELECT credential_tag, staking_key FROM account
-	UNION
-	SELECT credential_tag, staking_key FROM utxo
-	WHERE deleted_slot = 0
-	  AND staking_key IS NOT NULL
-	  AND LENGTH(staking_key) > 0`
-				utxoStakeSelect = "reward_live_stake.utxo_stake"
-				hasLiveUtxoSelect = `EXISTS (
-    SELECT 1 FROM utxo
-    WHERE utxo.deleted_slot = 0
-      AND utxo.staking_key IS NOT NULL
-      AND LENGTH(utxo.staking_key) > 0
-      AND utxo.credential_tag = creds.credential_tag
-      AND utxo.staking_key = creds.staking_key
-)`
-				runningTotalJoin = `
-LEFT JOIN reward_live_stake
-  ON reward_live_stake.credential_tag = creds.credential_tag
- AND reward_live_stake.staking_key = creds.staking_key`
+				if err := s.verifyRewardLiveStakeRunningTotals(
+					ctx,
+					db,
+				); err != nil {
+					return err
+				}
 			}
-			rows, err := db.QueryContext(ctx, `
-WITH latest_delegation AS (
-    SELECT credential_tag, staking_key, pool_key_hash, added_slot,
-           block_index, cert_index
-    FROM (
-        SELECT delegation.*,
-               ROW_NUMBER() OVER (
-                   PARTITION BY credential_tag, staking_key
-                   ORDER BY added_slot DESC, block_index DESC, cert_index DESC
-               ) AS rn
-        FROM (
-            SELECT sd.credential_tag, sd.staking_key, sd.pool_key_hash,
-                   sd.added_slot, COALESCE(tx.block_index, 0) AS block_index,
-                   COALESCE(c.cert_index, 0) AS cert_index
-            FROM stake_delegation sd
-            LEFT JOIN certs c ON c.id = sd.certificate_id
-            LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
-            UNION ALL
-            SELECT srd.credential_tag, srd.staking_key, srd.pool_key_hash,
-                   srd.added_slot, COALESCE(tx.block_index, 0),
-                   COALESCE(c.cert_index, 0)
-            FROM stake_registration_delegation srd
-            LEFT JOIN certs c ON c.id = srd.certificate_id
-            LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
-            UNION ALL
-            SELECT svd.credential_tag, svd.staking_key, svd.pool_key_hash,
-                   svd.added_slot, COALESCE(tx.block_index, 0),
-                   COALESCE(c.cert_index, 0)
-            FROM stake_vote_delegation svd
-            LEFT JOIN certs c ON c.id = svd.certificate_id
-            LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
-            UNION ALL
-            SELECT svrd.credential_tag, svrd.staking_key, svrd.pool_key_hash,
-                   svrd.added_slot, COALESCE(tx.block_index, 0),
-                   COALESCE(c.cert_index, 0)
-            FROM stake_vote_registration_delegation svrd
-            LEFT JOIN certs c ON c.id = svrd.certificate_id
-            LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
-        ) delegation
-    ) ranked_delegation
-    WHERE rn = 1
-)
-SELECT creds.credential_tag, creds.staking_key,
-       CASE WHEN account.active = TRUE THEN account.pool ELSE NULL END,
-       account.reward, account.active, account.added_slot,
-       latest_delegation.added_slot,
-       latest_delegation.block_index,
-       latest_delegation.cert_index,
-       `+hasLiveUtxoSelect+`,
-       `+utxoStakeSelect+`
-FROM (`+credentialSource+`) creds
-LEFT JOIN account
-  ON account.credential_tag = creds.credential_tag
- AND account.staking_key = creds.staking_key
-LEFT JOIN latest_delegation
-  ON latest_delegation.credential_tag = account.credential_tag
- AND latest_delegation.staking_key = account.staking_key
-				 AND latest_delegation.pool_key_hash = account.pool`+
-				runningTotalJoin,
+			queryStart := time.Now()
+			rows, err := db.QueryContext(
+				ctx,
+				rewardLiveStakeCredentialQuery(fromRunningTotals),
 			)
 			if err != nil {
 				return fmt.Errorf("load reward live stake credentials: %w", err)
@@ -621,7 +686,6 @@ LEFT JOIN latest_delegation
 				delegationSlot  sql.NullInt64
 				delegationBlock sql.NullInt64
 				delegationCert  sql.NullInt64
-				hasLiveUtxo     bool
 				utxoStake       sql.NullString
 			}
 			credentials := make([]rewardLiveStakeCredential, 0)
@@ -630,7 +694,7 @@ LEFT JOIN latest_delegation
 				if err := rows.Scan(&credential.tag, &credential.key, &credential.pool,
 					&credential.reward, &credential.active, &credential.addedSlot,
 					&credential.delegationSlot, &credential.delegationBlock,
-					&credential.delegationCert, &credential.hasLiveUtxo,
+					&credential.delegationCert,
 					&credential.utxoStake,
 				); err != nil {
 					_ = rows.Close()
@@ -654,6 +718,13 @@ LEFT JOIN latest_delegation
 					err,
 				)
 			}
+			s.logger.Info(
+				"reward live stake rebuild: loaded credentials",
+				"credentials", len(credentials),
+				"from_running_totals", fromRunningTotals,
+				"duration", time.Since(queryStart).String(),
+			)
+			upsertStart := time.Now()
 			values := make([]rewardLiveStakeRow, 0, len(credentials))
 			for _, credential := range credentials {
 				tag := credential.tag
@@ -669,14 +740,6 @@ LEFT JOIN latest_delegation
 					if err != nil {
 						return err
 					}
-				}
-				if fromRunningTotals && credential.hasLiveUtxo &&
-					!credential.utxoStake.Valid {
-					return fmt.Errorf(
-						"missing reward live stake running total for credential %d:%x",
-						tag,
-						key,
-					)
 				}
 				rewardStake := uint64(0)
 				if credential.reward.Valid && credential.reward.String != "" {
@@ -732,6 +795,12 @@ LEFT JOIN latest_delegation
 			if err := s.insertRewardLiveStakeRows(ctx, db, values, slotValue); err != nil {
 				return err
 			}
+			s.logger.Info(
+				"reward live stake rebuild: complete",
+				"rows", len(values),
+				"upsert_duration", time.Since(upsertStart).String(),
+				"total_duration", time.Since(queryStart).String(),
+			)
 			return nil
 		},
 	)
