@@ -55,10 +55,11 @@ func TestWaitForSignalOrErrorPrefersQueuedError(t *testing.T) {
 	}
 }
 
-// A bind failure on a non-essential observability listener (metrics or pprof)
-// must be logged and non-fatal: it returns instead of blocking, and never
-// signals an error that would take down an otherwise-healthy node.
-func TestServeAuxiliaryListenerBindFailureIsNonFatal(t *testing.T) {
+// A bind failure on a non-essential observability listener (metrics, pprof
+// or the health probe) must be logged and non-fatal: Run gets no listener
+// back and carries on, rather than an error that would take down an
+// otherwise-healthy node.
+func TestBindAuxiliaryListenerBindFailureIsNonFatal(t *testing.T) {
 	t.Parallel()
 
 	// Occupy a port so the auxiliary listener cannot bind.
@@ -76,26 +77,41 @@ func TestServeAuxiliaryListenerBindFailureIsNonFatal(t *testing.T) {
 		ReadHeaderTimeout: time.Second,
 	}
 
-	done := make(chan struct{})
-	go func() {
-		serveAuxiliaryListener("metrics", srv, logger)
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
+	if listener := bindAuxiliaryListener("metrics", srv, logger); listener != nil {
+		listener.Close()
 		t.Fatal(
-			"serveAuxiliaryListener did not return on bind failure; " +
-				"a non-essential listener must not block or be fatal",
+			"bindAuxiliaryListener returned a listener for an occupied port",
 		)
 	}
-	// Read after the goroutine finished, so no concurrent buffer access.
 	if logged := buf.String(); !strings.Contains(logged, "metrics") {
 		t.Fatalf(
 			"expected a log mentioning the metrics listener, got: %q",
 			logged,
 		)
+	}
+}
+
+// The bind Run performs hands the socket straight to serveAuxiliaryListenerOn,
+// so a free port yields a listener bound to the server's own address.
+func TestBindAuxiliaryListenerBindsServerAddress(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	srv := &http.Server{
+		Addr:              "127.0.0.1:0",
+		Handler:           http.NewServeMux(),
+		ReadHeaderTimeout: time.Second,
+	}
+
+	listener := bindAuxiliaryListener("metrics", srv, logger)
+	if listener == nil {
+		t.Fatalf("expected a bound listener, got none; logs: %q", buf.String())
+	}
+	defer listener.Close()
+	if host, _, err := net.SplitHostPort(listener.Addr().String()); err != nil ||
+		host != "127.0.0.1" {
+		t.Fatalf("listener bound to %s, want 127.0.0.1", listener.Addr())
 	}
 }
 

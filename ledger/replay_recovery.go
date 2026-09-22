@@ -153,8 +153,9 @@ type replayRecoveryCandidate struct {
 	ProducerBlock models.Block
 	RollbackPoint ocommon.Point
 	Strategy      string
-	// ProducerUnresolved distinguishes the security-parameter fallback from
-	// strategies that found a concrete producer. Strategy remains a log label.
+	// ProducerUnresolved reports that at least one failing input had no
+	// resolvable producer, whichever candidate supplied the rollback anchor.
+	// It gates the primary-chain rewind; Strategy remains a log label.
 	ProducerUnresolved bool
 }
 
@@ -942,6 +943,9 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 		nonConvergingSteps int
 	)
 	for {
+		if ls.beforeWindowedRewindStep != nil {
+			ls.beforeWindowedRewindStep()
+		}
 		tip := ls.chain.Tip()
 		if tip.Point.Slot == point.Slot &&
 			bytes.Equal(tip.Point.Hash, point.Hash) {
@@ -1898,6 +1902,25 @@ func (ls *LedgerState) findReplayRecoveryCandidate(
 			resolved.ProducerBlock,
 		)
 		if err != nil {
+			if errors.Is(err, models.ErrBlockNotFound) {
+				// The transaction metadata identifies a producer, but its
+				// parent is outside the locally retained chain. Treat the
+				// provenance as unresolved so the bounded security-parameter
+				// fallback can choose a safe local anchor.
+				if ls.config.Logger != nil {
+					ls.config.Logger.Warn(
+						"replay recovery producer parent is missing from the local block store",
+						"component", "ledger",
+						"producer_block_hash",
+						hex.EncodeToString(resolved.ProducerBlock.Hash),
+						"producer_block_slot", resolved.ProducerBlock.Slot,
+						"producer_parent_hash",
+						hex.EncodeToString(resolved.ProducerBlock.PrevHash),
+					)
+				}
+				unresolvedInputs = append(unresolvedInputs, resolved.Input)
+				continue
+			}
 			return nil, err
 		}
 		if candidate == nil ||
@@ -1936,6 +1959,13 @@ func (ls *LedgerState) findReplayRecoveryCandidate(
 		if fallbackCandidate != nil && (candidate == nil ||
 			fallbackCandidate.ProducerBlock.Slot < candidate.ProducerBlock.Slot) {
 			candidate = fallbackCandidate
+		} else if candidate != nil {
+			// The deeper known producer keeps the rollback anchor, but an
+			// input with no resolvable provenance still requires the primary
+			// chain rewind. Keyed on the surviving candidate rather than on
+			// fallbackCandidate, which is nil whenever the bounded fallback
+			// found no retained anchor.
+			candidate.ProducerUnresolved = true
 		}
 	}
 	return candidate, nil
@@ -2068,28 +2098,47 @@ func (ls *LedgerState) resolveReplayRecoveryProducer(
 	}
 	if producerTx != nil && len(producerTx.BlockHash) > 0 {
 		producerBlock, err := database.BlockByHash(ls.db, producerTx.BlockHash)
-		if err != nil {
+		switch {
+		case err == nil:
+			if producerBlock.Slot >= pending.MaxSlot {
+				return nil, false, nil
+			}
+			tx := ls.replayRecoveryResolveTxFromBlock(
+				producerBlock,
+				pending.Input.Id().Bytes(),
+				chainIndex,
+			)
+			return &replayRecoveryResolvedProducer{
+				Input:         pending.Input,
+				ProducerTx:    producerTx,
+				ProducerBlock: producerBlock,
+				Tx:            tx,
+				Strategy:      "metadata",
+			}, false, nil
+		case errors.Is(err, models.ErrBlockNotFound):
+			// The transaction index names a producer block the block store
+			// no longer holds, the same dangling reference a pruned prefix
+			// leaves on a producer's parent. Fall through to the tx blob
+			// and, failing that, report the input as unresolved so the
+			// bounded fallback picks a retained anchor.
+			if ls.config.Logger != nil {
+				ls.config.Logger.Warn(
+					"replay recovery producer block is missing from the local block store",
+					"component", "ledger",
+					"producer_tx_hash",
+					hex.EncodeToString(producerTx.Hash),
+					"producer_block_hash",
+					hex.EncodeToString(producerTx.BlockHash),
+					"producer_block_slot", producerTx.Slot,
+				)
+			}
+		default:
 			return nil, false, fmt.Errorf(
 				"lookup producer block %x: %w",
 				producerTx.BlockHash,
 				err,
 			)
 		}
-		if producerBlock.Slot >= pending.MaxSlot {
-			return nil, false, nil
-		}
-		tx := ls.replayRecoveryResolveTxFromBlock(
-			producerBlock,
-			pending.Input.Id().Bytes(),
-			chainIndex,
-		)
-		return &replayRecoveryResolvedProducer{
-			Input:         pending.Input,
-			ProducerTx:    producerTx,
-			ProducerBlock: producerBlock,
-			Tx:            tx,
-			Strategy:      "metadata",
-		}, false, nil
 	}
 	producerBlock, found, err := ls.replayRecoveryBlockFromTxBlob(
 		pending.Input.Id().Bytes(),
@@ -2197,6 +2246,13 @@ func (ls *LedgerState) replayRecoveryFallbackCandidate(
 	}
 	anchorBlock, err := ls.db.BlockByIndex(targetIndex, nil)
 	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			// A pruned prefix can put the security-parameter target below
+			// the retained block store. There is no safe local anchor to
+			// return in that case; let the caller continue without replay
+			// recovery rather than inventing a rollback point.
+			return nil, nil
+		}
 		return nil, fmt.Errorf(
 			"lookup replay fallback block %d: %w",
 			targetIndex,
@@ -2205,6 +2261,12 @@ func (ls *LedgerState) replayRecoveryFallbackCandidate(
 	}
 	rollbackPoint, err := ls.replayRecoveryParentPoint(anchorBlock)
 	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			// The retained anchor itself has no retained parent. Without a
+			// real parent point, rolling back would require guessing across
+			// the retention or trust boundary.
+			return nil, nil
+		}
 		return nil, err
 	}
 	return &replayRecoveryCandidate{
@@ -2295,6 +2357,21 @@ func (ls *LedgerState) replayRecoveryBlockFromTxBlob(
 
 	block, err := database.BlockByPoint(ls.db, point)
 	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			// The tx blob offset names a block the block store no longer
+			// holds. Report it as not found rather than as an error, so the
+			// caller treats the input as unresolved.
+			if ls.config.Logger != nil {
+				ls.config.Logger.Warn(
+					"replay recovery tx blob names a block missing from the local block store",
+					"component", "ledger",
+					"tx_hash", hex.EncodeToString(txHash),
+					"block_slot", point.Slot,
+					"block_hash", hex.EncodeToString(point.Hash),
+				)
+			}
+			return models.Block{}, false, nil
+		}
 		return models.Block{}, false, fmt.Errorf(
 			"lookup producer block from tx blob %s: %w",
 			hex.EncodeToString(txHash),
