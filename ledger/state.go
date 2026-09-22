@@ -1153,15 +1153,17 @@ type LedgerState struct {
 	// lock order and deadlocks the node (issue #3717). The eviction+floor read is
 	// atomic; a header admitted after the lock is released is handled by the next
 	// cleanup pass (the floor is a lower-watermark recomputed each pass).
-	deferredHeaderValidation   map[string]struct{}
-	deferredHeaderValidationMu sync.Mutex
-	checkpointWrittenForEpoch  bool
-	closed                     atomic.Bool
-	closeMu                    sync.Mutex
-	closeDone                  chan struct{}
-	closeErr                   error
-	inRecovery                 bool // guards against recursive recovery in SubmitAsyncDBTxn
-	lastAtTipRecovery          *atTipRecoveryAttempt
+	deferredHeaderValidation    map[string]struct{}
+	deferredHeaderValidationMu  sync.Mutex
+	checkpointWrittenForEpoch   bool
+	closed                      atomic.Bool
+	closeMu                     sync.Mutex
+	closeDone                   chan struct{}
+	closeErr                    error
+	inRecovery                  bool // guards against recursive recovery in SubmitAsyncDBTxn
+	lastAtTipRecovery           *atTipRecoveryAttempt
+	lastHeaderValidationFailure *headerValidationError
+	lastHeaderValidationTip     ocommon.Point
 	// At-tip recovery non-convergence tracking (issue #2939). A descending
 	// series of *distinct* (block, tx) validation failures each resets the
 	// same-block escalation to attempt 1, so the escalate-and-cap logic in
@@ -3445,7 +3447,7 @@ func (ls *LedgerState) resolveRollbackTarget(
 
 func (ls *LedgerState) rollback(point ocommon.Point) error {
 	return ls.withConsumedUtxoPruneBoundary(func() error {
-		return ls.rollbackWithResync(point, true)
+		return ls.rollbackWithOptions(point, false, true)
 	})
 }
 
@@ -3484,8 +3486,12 @@ func (ls *LedgerState) publishLocalLedgerRollback(point ocommon.Point) {
 	)
 }
 
-func (ls *LedgerState) rollbackWithResync(
+// rollbackWithOptions restores metadata even when point is already the
+// in-memory ledger tip when repairSameTip is set. At-tip validation recovery
+// can leave consumed UTxOs above the durable tip after a partial apply.
+func (ls *LedgerState) rollbackWithOptions(
 	point ocommon.Point,
+	repairSameTip bool,
 	publishResync bool,
 ) error {
 	// Rolling back to the point we already sit at is a no-op. Skip
@@ -3500,8 +3506,9 @@ func (ls *LedgerState) rollbackWithResync(
 	currentTip := ls.currentTip
 	mithrilLedgerSlot := ls.mithrilLedgerSlot
 	ls.RUnlock()
-	if currentTip.Point.Slot == point.Slot &&
-		bytes.Equal(currentTip.Point.Hash, point.Hash) {
+	sameTip := currentTip.Point.Slot == point.Slot &&
+		bytes.Equal(currentTip.Point.Hash, point.Hash)
+	if sameTip && !repairSameTip {
 		return ls.enforceDurableTipFloor()
 	}
 	if point.Slot > currentTip.Point.Slot {
@@ -3944,7 +3951,7 @@ func (ls *LedgerState) rollbackWithResync(
 		}
 		return &rollbackCommittedError{err: healErr}
 	}
-	if publishResync {
+	if publishResync && !sameTip {
 		ls.publishLocalLedgerRollback(point)
 	}
 	var hash string
@@ -3971,7 +3978,7 @@ func (ls *LedgerState) rollbackWithResync(
 		// holding a pre-rollback value that no longer matches the database.
 		// Call FatalErrorFunc directly, rather than relying on whichever
 		// caller happens to be on the stack to notice the returned error and
-		// escalate it, so every caller of rollback/rollbackWithoutResync
+		// escalate it, so every caller of rollback/rollbackWithOptions
 		// gets the same guarantee: a supervised restart reloads this state
 		// fresh from the database before the next block is validated
 		// against it. This runs even when the tip-floor check failed too:
@@ -4234,7 +4241,7 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 	// dropped and no chain.update is produced at all). drainChain is
 	// idempotent per chain.
 	pubs.drainChain(ls.chain)
-	if err := ls.rollbackWithResync(point, true); err != nil {
+	if err := ls.rollbackWithOptions(point, false, true); err != nil {
 		// ls.rollback can fail with the ledger already sitting on the
 		// rollback point: the no-op branch it takes when the tip
 		// already matches returns enforceDurableTipFloor's error
@@ -9784,7 +9791,7 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 			// validateAndEmitRollbackUndo contract, and the next
 			// reconciliation attempt lands right back in this same
 			// branch and retries both.
-			if err := ls.rollbackWithResync(chainTip.Point, false); err != nil {
+			if err := ls.rollbackWithOptions(chainTip.Point, false, false); err != nil {
 				if _, ok := errors.AsType[*rollbackCommittedError](err); ok {
 					ls.emitRollbackTransactionEvents(undoBlocks)
 				}
@@ -10051,7 +10058,7 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		// TestReconcilePrimaryChainTipWithLedgerTipRecoversUndoAfterCrashBetweenRewindAndEmit).
 		// A true durable, atomic handoff across every rollback path --
 		// not just this one -- is tracked as issue #3817.
-		if err := ls.rollbackWithResync(ancestor, false); err != nil {
+		if err := ls.rollbackWithOptions(ancestor, false, false); err != nil {
 			if _, ok := errors.AsType[*rollbackCommittedError](err); ok {
 				ls.emitRollbackTransactionEvents(undoBlocks)
 			}
@@ -10310,7 +10317,7 @@ func (ls *LedgerState) enforceDurableTipFloor() error {
 		"applied_floor_hash",
 		hex.EncodeToString(floor.Hash),
 	)
-	return ls.rollbackWithResync(floor, true)
+	return ls.rollbackWithOptions(floor, false, true)
 }
 
 func (ls *LedgerState) latestLedgerPrimaryChainAncestor(
