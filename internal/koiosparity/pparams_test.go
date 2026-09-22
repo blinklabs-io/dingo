@@ -149,7 +149,7 @@ func TestProtocolParamsFromNativePreservesEraNativeUtxoUnit(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := protocolParamsFromNative(tt.pp)
+			got, err := ProtocolParamsFromNative(tt.pp)
 			require.NoError(t, err)
 			require.Equal(t, tt.want, got.CoinsPerUtxoSize)
 		})
