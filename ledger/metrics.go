@@ -15,6 +15,8 @@
 package ledger
 
 import (
+	"math"
+	"sync/atomic"
 	"time"
 
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -83,6 +85,32 @@ type stateMetrics struct {
 	blockStageHeaderVerify prometheus.Observer
 	blockStageValidate     prometheus.Observer
 	blockStageApply        prometheus.Observer
+	// blockStageMaxDuration tracks, per stage, the maximum wall-clock
+	// duration ever observed since process start (blockStageDuration's doc
+	// comment above covers what each stage means). A histogram quantile is
+	// only an estimate bounded by its bucket edges, however wide they are;
+	// this is the exact worst-ever-seen value, so a multi-second stall like
+	// blinklabs-io/dingo#4364 (epoch-boundary DRep voting-power query, fixed
+	// separately -- this metric only makes it visible) shows up exactly
+	// instead of "somewhere past the last bucket boundary".
+	//
+	// Deliberately monotonic non-resetting ("worst ever seen"), not a
+	// windowed maximum: a windowed maximum needs a periodic-reset custom
+	// Collector, real complexity for a question -- "did we ever see
+	// something this bad" -- that a simple non-resetting maximum already
+	// answers.
+	blockStageMaxDuration *prometheus.GaugeVec
+	// Backing atomic.Uint64 (holding math.Float64bits of the current
+	// maximum seconds value) and pre-materialized Gauge for each stage,
+	// updated by updateMaxDuration's compare-and-swap loop at the same
+	// observeBlockStage call site that records blockStageDuration, so the
+	// two can never drift out of sync with each other.
+	blockStageHeaderVerifyMax      atomic.Uint64
+	blockStageValidateMax          atomic.Uint64
+	blockStageApplyMax             atomic.Uint64
+	blockStageHeaderVerifyMaxGauge prometheus.Gauge
+	blockStageValidateMaxGauge     prometheus.Gauge
+	blockStageApplyMaxGauge        prometheus.Gauge
 	// Incremented when a stored governance proposal's CBOR fails to
 	// decode during the mid-epoch ratifiability check, so the failures
 	// surface as a metric instead of just log volume.
@@ -363,23 +391,74 @@ const (
 )
 
 // observeBlockStage records one sample of wall-clock time spent in the named
-// per-block processing stage. Safe to call before init (or when metrics are
-// disabled), matching the other observe helpers in this file.
+// per-block processing stage, into both blockStageDuration (the histogram)
+// and blockStageMaxDuration (the exact running maximum for that stage) --
+// the same call site feeds both, so they cannot drift out of sync with each
+// other. Safe to call before init (or when metrics are disabled), matching
+// the other observe helpers in this file.
 func (m *stateMetrics) observeBlockStage(stage string, d time.Duration) {
 	if m == nil {
 		return
 	}
 	var obs prometheus.Observer
+	var max *atomic.Uint64
+	var maxGauge prometheus.Gauge
 	switch stage {
 	case blockStageHeaderVerify:
 		obs = m.blockStageHeaderVerify
+		max = &m.blockStageHeaderVerifyMax
+		maxGauge = m.blockStageHeaderVerifyMaxGauge
 	case blockStageValidate:
 		obs = m.blockStageValidate
+		max = &m.blockStageValidateMax
+		maxGauge = m.blockStageValidateMaxGauge
 	case blockStageApply:
 		obs = m.blockStageApply
+		max = &m.blockStageApplyMax
+		maxGauge = m.blockStageApplyMaxGauge
 	}
-	if obs != nil {
-		obs.Observe(d.Seconds())
+	if obs == nil {
+		// Unknown stage: neither field was resolved, so there is nothing to
+		// update on either metric.
+		return
+	}
+	seconds := d.Seconds()
+	obs.Observe(seconds)
+	if maxGauge != nil {
+		updateMaxDuration(max, maxGauge, seconds)
+	}
+}
+
+// updateMaxDuration performs a lock-free "keep the maximum ever observed"
+// update: it compares observed against the current value of max (an
+// atomic.Uint64 holding math.Float64bits of the running maximum) and, only
+// when observed is strictly larger, compare-and-swaps it in and reflects the
+// new maximum into gauge. On the hot per-block path this costs one atomic
+// load and, in the common case where observed does not beat the record, no
+// write at all -- no lock, no allocation.
+//
+// Two goroutines can each win a CAS in quick succession (say 5s then 10s)
+// and race their gauge.Set calls in the other order, so the exposed gauge
+// can very rarely and only momentarily show an older, smaller value than the
+// true maximum held in max; the next observation exceeding the
+// currently-displayed value corrects it immediately. max itself is never
+// wrong: CompareAndSwap only succeeds when observed is greater than the
+// value it is replacing, so it is monotonically non-decreasing regardless of
+// gauge.Set ordering.
+func updateMaxDuration(
+	max *atomic.Uint64,
+	gauge prometheus.Gauge,
+	observed float64,
+) {
+	for {
+		old := max.Load()
+		if observed <= math.Float64frombits(old) {
+			return
+		}
+		if max.CompareAndSwap(old, math.Float64bits(observed)) {
+			gauge.Set(observed)
+			return
+		}
 	}
 }
 
@@ -772,10 +851,22 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		prometheus.HistogramOpts{
 			Name: "dingo_ledger_block_stage_duration_seconds",
 			Help: "wall-clock time spent in each ledger-owned stage of per-block processing, by stage: header_verify (VRF/KES/signature checks on blockfetch arrival), validate (one transaction's era ledger-rule validation, including Plutus evaluation), apply (writing a flushed delta batch's UTXO and transaction rows to the metadata store)",
-			// 100us to ~3.3s. Block-processing work here ranges from a
-			// single cheap signature check to a Plutus-heavy transaction
-			// or a large multi-block delta-batch flush.
-			Buckets: prometheus.ExponentialBuckets(0.0001, 2, 16),
+			// 100us to ~52.4s. Most observations are sub-100ms (a single
+			// cheap signature check, one transaction's validation, one
+			// delta-batch flush), which is why resolution stays fine down
+			// there; the upper end is deliberately wide enough to resolve
+			// multi-second apply stalls like blinklabs-io/dingo#4364
+			// (epoch-boundary DRep voting-power query blocking apply for
+			// 4-8s, observed live -- fixed separately, but every one of
+			// those observations landed in this histogram's +Inf overflow
+			// bucket under the old ~3.3s ceiling, indistinguishable from a
+			// 4s, 8s, or 60s stall). The new ceiling exceeds both
+			// blockfetchBusyTimeout and noProgressStuckBackoffMax (30s
+			// each, see chainsync.go/state.go): a stall large enough to
+			// resolve here is already large enough that other parts of the
+			// system have started reacting to it as stuck, so the
+			// histogram's range is never the limiting signal.
+			Buckets: prometheus.ExponentialBuckets(0.0001, 2, 20),
 		},
 		[]string{"stage"},
 	)
@@ -786,6 +877,22 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		blockStageValidate,
 	)
 	m.blockStageApply = m.blockStageDuration.WithLabelValues(
+		blockStageApply,
+	)
+	m.blockStageMaxDuration = promautoFactory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "dingo_ledger_block_stage_max_duration_seconds",
+			Help: "maximum wall-clock duration ever observed for each ledger-owned per-block processing stage (see dingo_ledger_block_stage_duration_seconds), since process start; monotonically non-decreasing, and exact rather than bucket-bounded",
+		},
+		[]string{"stage"},
+	)
+	m.blockStageHeaderVerifyMaxGauge = m.blockStageMaxDuration.WithLabelValues(
+		blockStageHeaderVerify,
+	)
+	m.blockStageValidateMaxGauge = m.blockStageMaxDuration.WithLabelValues(
+		blockStageValidate,
+	)
+	m.blockStageApplyMaxGauge = m.blockStageMaxDuration.WithLabelValues(
 		blockStageApply,
 	)
 	m.governanceProposalDecodeFailures = promautoFactory.NewCounter(
