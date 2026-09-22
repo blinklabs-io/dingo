@@ -102,6 +102,20 @@ type genesisFakeServer struct {
 
 	epochBySlot      map[uint64]int
 	lastAcquiredSlot uint64
+
+	// failUtxoWholeCount, when nonzero, makes the first failUtxoWholeCount
+	// calls to ShelleyUtxoWholeQuery (i.e. every GetUTxOWhole call, whether
+	// from captureGenesisBaseline's initial capture or a later
+	// re-baseline/comparison call) fail with a synthetic transient error
+	// instead of answering, then succeed from the next call onward --
+	// simulating captureGenesisBaseline itself failing (as opposed to a
+	// rollback/tx_info-triggered re-baseline, which
+	// TestRunFromGenesis_UTxOTaintLifecycle and
+	// TestRunFromGenesis_TxInfoChunkFailureTaintsEpoch already cover), for
+	// TestRunFromGenesis_UTxOBaselineRetryRecovers. Zero (the default)
+	// never fails, leaving every other test's behavior unchanged.
+	failUtxoWholeCount int
+	utxoWholeCalls     int
 }
 
 func newGenesisFakeServer(t *testing.T, blockCount int) *genesisFakeServer {
@@ -269,6 +283,16 @@ func (s *genesisFakeServer) lsqConfig() localstatequery.Config {
 							Pools: map[ledger.PoolId]localstatequery.PoolDistr2IndividualStake{},
 						}, nil
 					case *localstatequery.ShelleyUtxoWholeQuery:
+						s.mu.Lock()
+						s.utxoWholeCalls++
+						fail := s.utxoWholeCalls <= s.failUtxoWholeCount
+						s.mu.Unlock()
+						if fail {
+							return nil, errors.New(
+								"simulated transient dial failure: " +
+									"can't assign requested address",
+							)
+						}
 						return localstatequery.UTxOsResult{
 							Results: map[localstatequery.UtxoId]ledger.BabbageTransactionOutput{},
 						}, nil
@@ -527,6 +551,122 @@ func TestRunFromGenesis_TxInfoChunkFailureTaintsEpoch(t *testing.T) {
 	assert.True(t, report.UTxOAttempted)
 	require.Error(t, report.UTxOErr)
 	assert.ErrorIs(t, report.UTxOErr, errUTxOTainted)
+
+	cancel()
+	select {
+	case err := <-done:
+		assert.True(t, err == nil || errors.Is(err, context.Canceled))
+	case <-time.After(10 * time.Second):
+		t.Fatal("RunFromGenesis did not exit after ctx cancellation")
+	}
+}
+
+// TestRunFromGenesis_UTxOBaselineRetryRecovers drives RunFromGenesis through
+// a captureGenesisBaseline failure at the very first (genesis) capture --
+// distinct from TestRunFromGenesis_UTxOTaintLifecycle's rollback-triggered
+// re-baseline and TestRunFromGenesis_TxInfoChunkFailureTaintsEpoch's
+// tx_info-chunk-triggered re-baseline, both of which already re-baseline
+// successfully. This test fails the underlying GetUTxOWhole call itself
+// (server.failUtxoWholeCount), simulating dingo#1900's live "can't assign
+// requested address" transient dial error during a re-baseline attempt.
+//
+// Confirmed by reverting from_genesis.go's fix in place (deleting the
+// `if utxoAttempted && utxoRefs == nil { ... }` retry block just before the
+// UTxO verdict switch) and re-running this test: report1, report2, and
+// report3 all come back with UTxOAttempted == false, proving the historical
+// bug -- one failed captureGenesisBaseline call permanently disables UTxO
+// comparison for every subsequent epoch of the run, never attempting to
+// recover even though only the very first call was ever configured to fail.
+//
+// With the fix restored: block 0's genesis capture (GetUTxOWhole call #1)
+// fails and reports nothing (shares its epoch with the mandatory initial
+// rollback). Block 1's epoch boundary retries (call #2, which succeeds,
+// since failUtxoWholeCount == 1) -- report1 must be tainted, not a false
+// "clean" match against the just-recovered baseline. Block 2's epoch
+// boundary finds utxoRefs already non-nil (no retry needed) and runs a real
+// comparison (call #3) -- report2 must be clean, proving UTxO checking
+// actually resumed rather than staying stuck. Block 3 confirms report3 is
+// still clean, ruling out a one-shot fluke.
+func TestRunFromGenesis_UTxOBaselineRetryRecovers(t *testing.T) {
+	const magic = 42
+	const blockCount = 5
+
+	server := newGenesisFakeServer(t, blockCount)
+	server.failUtxoWholeCount = 1
+	server.epochBySlot = map[uint64]int{
+		server.chain.Points[0].Slot: 1,
+		server.chain.Points[1].Slot: 2,
+		server.chain.Points[2].Slot: 3,
+		server.chain.Points[3].Slot: 4,
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	server.serve(t, listener, magic)
+
+	// A 404-everything Koios fake, same as the sibling tests above --
+	// CheckStakeDistribution never calls Koios at all with zero pools, and
+	// CheckProtocolParams tolerates a Koios fetch failure as a mismatch, not
+	// a ProtocolParamsErr; this test only asserts on UTxOErr.
+	koiosSrv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(koiosSrv.Close)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true)
+	require.NoError(t, err)
+
+	results := make(chan EpochResult, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RunFromGenesis(
+			ctx, listener.Addr().String(), "preview", magic, koios, nil,
+			func(r EpochResult) { results <- r },
+			nil, nil,
+		)
+	}()
+
+	recv := func() EpochResult {
+		t.Helper()
+		select {
+		case r := <-results:
+			return r
+		case <-time.After(10 * time.Second):
+			t.Fatal("timed out waiting for an epoch result")
+			return EpochResult{}
+		}
+	}
+
+	// Block 0: genesis baseline capture attempted and fails (GetUTxOWhole
+	// call #1, the only call configured to fail) -- shares its epoch with
+	// the mandatory initial rollback, so it never starts a new epoch
+	// boundary and reports nothing.
+	server.allowStep(t)
+
+	// Block 1: first real epoch boundary. utxoRefs is still nil from
+	// block 0's failed capture, so the fix's retry fires here (call #2,
+	// which succeeds) -- must be tainted, not a false "clean" match against
+	// the just-recovered baseline.
+	server.allowStep(t)
+	report1 := recv()
+	assert.True(t, report1.UTxOAttempted)
+	require.Error(t, report1.UTxOErr)
+	assert.ErrorIs(t, report1.UTxOErr, errUTxOTainted)
+
+	// Block 2: utxoRefs is now non-nil and untainted -- a real comparison
+	// (call #3) must run and come back clean, proving checking actually
+	// resumed rather than staying permanently disabled.
+	server.allowStep(t)
+	report2 := recv()
+	assert.True(t, report2.UTxOAttempted)
+	assert.NoError(t, report2.UTxOErr)
+
+	// Block 3: still clean -- rules out a one-shot fluke.
+	server.allowStep(t)
+	report3 := recv()
+	assert.True(t, report3.UTxOAttempted)
+	assert.NoError(t, report3.UTxOErr)
 
 	cancel()
 	select {

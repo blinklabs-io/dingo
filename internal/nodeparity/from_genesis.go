@@ -350,9 +350,16 @@ func acquireWithRetry(
 //
 // A failure here (most commonly the point having already aged out of
 // Dingo's UTxO retention floor before this call ran -- see
-// checkUtxoRetentionWindow) is non-fatal to the caller: the UTxO half of
-// this comparison is simply unavailable for the rest of this run, but
-// protocol-params and stake-distribution checking continues regardless.
+// checkUtxoRetentionWindow, or a transient dial/connection error) is
+// non-fatal to the caller: the UTxO half of this comparison is simply
+// unavailable this epoch, but protocol-params and stake-distribution
+// checking continues regardless. It is not permanently disabled for the
+// rest of the run -- RunFromGenesis retries this same call again at the
+// next epoch boundary for as long as no trustworthy baseline is held (see
+// its own utxoRefs == nil retry, keyed off this function's own failure),
+// so a transient failure (e.g. a one-off dial error) recovers on its own
+// once the underlying issue clears, instead of wedging UTxO comparison off
+// forever.
 func captureGenesisBaseline(
 	ctx context.Context,
 	dingoAddr string,
@@ -392,8 +399,13 @@ type utxoVerdictMode int
 
 const (
 	// utxoVerdictNoBaseline: the genesis baseline was never captured (or
-	// capturing it failed) -- the UTxO half of this comparison is
-	// unavailable, this epoch and for the rest of the run.
+	// the most recent attempt to capture/re-baseline it failed) -- the
+	// UTxO half of this comparison is unavailable this epoch. Not
+	// permanent: RunFromGenesis retries captureGenesisBaseline again at
+	// the next epoch boundary for as long as utxoRefs stays nil, so this
+	// verdict can give way to utxoVerdictTainted (a successful retry,
+	// tainting the recovery epoch itself) or utxoVerdictCompare (once a
+	// trustworthy baseline is held again) on a later epoch.
 	utxoVerdictNoBaseline utxoVerdictMode = iota
 	// utxoVerdictTainted: a tx_info failure this epoch forced a re-baseline
 	// from Dingo's own answer (see flushPendingTxInfos) -- comparing now
@@ -565,16 +577,20 @@ func RunFromGenesis(
 		// this gates resetting the reconnect backoff.
 		progressed bool
 		// utxoTaintedThisEpoch is set whenever a tx_info failure forced a
-		// mid-epoch re-baseline (see flushPendingTxInfos) and cleared once
-		// that epoch's result has been reported. A re-baseline replaces
-		// utxoRefs with Dingo's own current answer, which the epoch
-		// comparison below then diffs against Dingo's own answer again --
-		// trivially equal by construction, not a real confirmation that
-		// Koios agrees with anything. Without this flag, a Koios outage
-		// during an epoch would be reported as "utxo set match" instead of
-		// "not run": the re-baseline is the right recovery for later
-		// epochs, but this epoch's own verdict must say the comparison did
-		// not happen.
+		// mid-epoch re-baseline (see flushPendingTxInfos), a rollback forced
+		// one (see the roll-backward callback below), or a previously failed
+		// baseline capture is successfully retried at this epoch's own
+		// boundary (see the utxoRefs == nil retry just before the verdict
+		// switch below) -- and cleared once that epoch's result has been
+		// reported. Each of these replaces utxoRefs with Dingo's own current
+		// answer, which the epoch comparison below would otherwise diff
+		// against Dingo's own answer again -- trivially equal by
+		// construction, not a real confirmation that Koios agrees with
+		// anything. Without this flag, a Koios outage (or a transient
+		// baseline-capture failure) during an epoch would be reported as
+		// "utxo set match" instead of "not run": the re-baseline is the
+		// right recovery for later epochs, but this epoch's own verdict must
+		// say the comparison did not happen.
 		utxoTaintedThisEpoch bool
 	)
 
@@ -648,7 +664,8 @@ func RunFromGenesis(
 				utxoRefs = nil
 				logf(
 					"nodeparity: re-baseline after tx_info failure also failed "+
-						"(UTxO comparison disabled for the rest of this run): %v",
+						"(UTxO comparison skipped this epoch, will retry at the "+
+						"next epoch boundary): %v",
 					err,
 				)
 			} else {
@@ -757,7 +774,8 @@ func RunFromGenesis(
 							if err != nil {
 								logf(
 									"nodeparity: genesis UTxO baseline unavailable "+
-										"(UTxO comparison disabled for this run): %v",
+										"(UTxO comparison skipped until a retry "+
+										"succeeds, at the next epoch boundary): %v",
 									err,
 								)
 							} else {
@@ -816,6 +834,50 @@ func RunFromGenesis(
 						result.ProtocolParamsAndStakeElapsed = time.Since(psStart)
 
 						utxoStart := time.Now()
+						// No trustworthy baseline is currently held -- either
+						// the initial capture above never succeeded, or a
+						// later re-baseline (flushPendingTxInfos or the
+						// roll-backward callback below) itself failed. Retry
+						// now, at this epoch boundary, instead of leaving
+						// UTxO comparison permanently disabled for the rest
+						// of the run once any single captureGenesisBaseline
+						// call fails: confirmed live (dingo#1900) that a
+						// one-off transient dial error ("can't assign
+						// requested address") during a re-baseline attempt
+						// otherwise wedged utxoRefs at nil for the rest of a
+						// multi-hour run, even though the connectivity issue
+						// itself cleared within seconds. utxoAttempted gates
+						// this so the very first, still-in-progress capture
+						// attempt above (same block, same point) is not
+						// immediately redialed a second time here.
+						if utxoAttempted && utxoRefs == nil {
+							refs, err := captureGenesisBaseline(ctx, dingoAddr, magic, point)
+							if err != nil {
+								logf(
+									"nodeparity: UTxO baseline retry failed this "+
+										"epoch (comparison skipped again, will "+
+										"retry next epoch boundary): %v",
+									err,
+								)
+							} else {
+								utxoRefs = refs
+								// Freshly captured directly from Dingo at
+								// this exact point -- comparing it against
+								// Dingo's own answer for the same point right
+								// below would trivially match by
+								// construction, exactly like the
+								// tx_info-chunk-failure and rollback
+								// re-baselines elsewhere in this function --
+								// taint this recovery epoch too.
+								utxoTaintedThisEpoch = true
+								logf(
+									"nodeparity: UTxO baseline retry "+
+										"succeeded, comparison resumes next "+
+										"epoch: %d refs",
+									len(refs),
+								)
+							}
+						}
 						switch mode, verdictErr := utxoVerdict(
 							utxoTaintedThisEpoch, utxoRefs,
 						); mode {
@@ -901,8 +963,8 @@ func RunFromGenesis(
 								logf(
 									"nodeparity: rollback to slot %d invalidated the "+
 										"UTxO reconstruction and re-baselining failed "+
-										"(UTxO comparison disabled for the rest of this "+
-										"run): %v",
+										"(UTxO comparison skipped this epoch, will "+
+										"retry at the next epoch boundary): %v",
 									point.Slot, err,
 								)
 							} else {
