@@ -3202,11 +3202,10 @@ denominator instead of the leader-election/reward/SPO one. `expiryEpoch == 0`
 disables the gate and the generated SQL and bind args are byte-identical to
 the pre-CIP query. A nonzero value adds
 `AND (<alias>.expiration_epoch = 0 OR <alias>.expiration_epoch >= expiryEpoch)`
-to both the inner subquery's `WHERE ... active = 1/true` (aliased `ax`, or an
-`EXISTS` correlation for the single-DRep and by-type variants) and the outer
-query's `WHERE ... active = 1/true` (aliased `a`), keeping an account iff it
-has never been witnessed-expired or its expiration is not yet due.
-`ledger/governance.LoadDRepVotingState` computes `expiryEpoch` as
+to both the inner subquery's `WHERE ... active = 1/true` (aliased `ax`) and
+the outer query's `WHERE ... active = 1/true` (aliased `a`), keeping an
+account iff it has never been witnessed-expired or its expiration is not yet
+due. `ledger/governance.LoadDRepVotingState` computes `expiryEpoch` as
 `currentEpoch` when `LedgerStateConfig.DelegatorInactivityEnabled` is true and
 `0` otherwise, and passes it to `GetDRepVotingPowerBatch` (regular DReps) and
 `GetDRepVotingPowerByType` (the `AlwaysAbstain`/`AlwaysNoConfidence`
@@ -3215,6 +3214,18 @@ gate flag in from config through `governance.ProcessEpoch`'s `EpochInput`.
 `GetDRepVotingPower` (the single-DRep, non-batch form used by point-in-time
 API/ledger-view queries, not the epoch-boundary tally) accepts the same
 parameter but its callers always pass `0`.
+
+`GetDRepVotingPowerByType`'s inner subquery joins outward from `account`
+to `utxo` exactly like `GetDRepVotingPowerBatch` below, filtering/grouping by
+`drep_type` instead of `drep`. Before blinklabs-io/dingo#4364 it instead
+scanned every live `utxo` row and ran a correlated `EXISTS` subquery against
+`account` per row — on a node with millions of live UTxOs and a small
+delegated-account set, that shape cost 620-650ms per call against 16-35ms for
+the account-first join, with byte-identical results, and ran at every epoch
+boundary via `LoadDRepVotingState`. `GetDRepVotingPower` (the single-credential
+form) still uses the pre-#4364 `EXISTS` correlation; its only callers are
+`LedgerView.GetDRepVotingPower` and the Blockfrost adapter's single-DRep
+lookup, neither on the per-epoch tally path.
 
 The expiry clause's bind position is always textually ahead of the
 pre-existing predicate it shares a `WHERE` with (the `IN (...)` chunk for the
