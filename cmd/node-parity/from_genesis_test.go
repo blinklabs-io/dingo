@@ -184,14 +184,13 @@ func TestFromGenesisCounters_RecordEpoch(t *testing.T) {
 }
 
 // TestFromGenesisCounters_Result pins fromGenesisRun's actual exit-code
-// decision (human review, dingo#4319): a Dingo-side query error after a
-// successful Acquire, a Koios-side data fault, and an expected
-// retention-floor Acquire rejection all land in the same *Incomplete
-// counters recordEpoch fills in, with no mismatch counted for any of them
-// -- so a run in which Dingo failed every single query, all epoch, would
-// exit 0 without the "verified nothing" check below: every mismatch
-// counter stays exactly 0, indistinguishable from a run that genuinely
-// checked everything and found no divergence.
+// decision: a Dingo-side query error after a successful Acquire, a
+// Koios-side data fault, and an expected retention-floor Acquire rejection
+// all land in the same *Incomplete counters recordEpoch fills in, with no
+// mismatch counted for any of them -- so a run in which Dingo failed every
+// single query, all epoch, would exit 0 without the "verified nothing"
+// check below: every mismatch counter stays exactly 0, indistinguishable
+// from a run that genuinely checked everything and found no divergence.
 func TestFromGenesisCounters_Result(t *testing.T) {
 	t.Run("no epochs reached: nil, not a false 'verified nothing' failure", func(t *testing.T) {
 		var c fromGenesisCounters
