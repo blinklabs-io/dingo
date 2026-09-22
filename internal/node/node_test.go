@@ -645,15 +645,14 @@ func TestBuildDingoConfigWiresBlockPipelineFlags(t *testing.T) {
 //     mithril/sync.go instead.
 //
 // Known, pre-existing gaps of this same shape found while writing this test
-// are excluded below rather than fixed here -- see the dingo#4599 task
-// handoff for the follow-up.
+// are excluded below rather than fixed here; dingo#4600 tracks them.
 func TestBuildDingoConfigForwardsScalarConfigFields(t *testing.T) {
 	t.Parallel()
 
 	// knownGaps are real forwarding gaps of the same shape as dingo#4599,
 	// found while writing this test and deliberately not fixed in the same
-	// commit as that unrelated fix. Remove an entry here once its follow-up
-	// fix lands, so this test starts asserting it.
+	// commit as that unrelated fix; dingo#4600 tracks all three. Remove an
+	// entry here once its fix lands, so this test starts asserting it.
 	knownGaps := map[string]string{
 		"MaxNtCConns": "dingo.WithMaxNtCConns exists but buildDingoConfig " +
 			"never calls it, so --max-ntc-conns is silently ignored",
