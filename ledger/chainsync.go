@@ -1734,6 +1734,7 @@ func (ls *LedgerState) headerAlreadyOnPrimaryChain(
 func (ls *LedgerState) findPeerForkPath(
 	e ChainsyncEvent,
 	initialPrevHash []byte,
+	localTipSlot uint64,
 ) (*ocommon.Point, []ChainsyncEvent, error) {
 	prevHash := append([]byte(nil), initialPrevHash...)
 	history := ls.peerHeaderHistory[connIdKey(e.ConnectionId)]
@@ -1750,15 +1751,34 @@ func (ls *LedgerState) findPeerForkPath(
 		// for current stores. Blocks persisted before the hash index was added
 		// may still miss until the operator backfills the index.
 		ancestorBlock, err := ls.blockByHash(prevHash)
-		if err == nil {
+		switch {
+		case err == nil && ancestorBlock.Slot <= localTipSlot:
 			point := ocommon.NewPoint(
 				ancestorBlock.Slot,
 				ancestorBlock.Hash,
 			)
 			slices.Reverse(pathReversed)
 			return &point, pathReversed, nil
-		}
-		if !errors.Is(err, models.ErrBlockNotFound) {
+		case err == nil:
+			// A block-index hit whose slot is AFTER our own tip cannot be a
+			// common ancestor: an ancestor of two chains is by definition at
+			// or before both, and one of those chains sits at localTipSlot.
+			// database.BlockByHash has no notion of "still reachable from the
+			// current tip" -- it is a raw hash lookup against the persistent
+			// block index, so it can return a row a rollback should have
+			// removed but didn't (e.g. chain.Chain.rollbackLocked's
+			// removeBlockByIndex loop returning early on a transient error
+			// partway through, which chain.Chain.Rollback then surfaces as a
+			// hard failure with no automatic retry of the remainder -- see
+			// its documented "Reject rollbacks that exceed the security
+			// parameter" neighbor for the shape of that loop). Trusting such a
+			// row would hand the caller a "common ancestor" ahead of the true
+			// tip, which would then drive every subsequent blockfetch batch
+			// onto blocks that could never apply. Treat the hit as
+			// unresolved, exactly like ErrBlockNotFound below, so the
+			// peer-header-history walk gets a chance to find a genuine
+			// ancestor instead.
+		case !errors.Is(err, models.ErrBlockNotFound):
 			return nil, nil, fmt.Errorf(
 				"lookup ancestor hash %x: %w",
 				prevHash,
@@ -3924,7 +3944,11 @@ func (ls *LedgerState) tryResolveFork(
 		)
 		return false, nil
 	}
-	ancestorPoint, forkPath, err := ls.findPeerForkPath(e, prevHashBytes)
+	ancestorPoint, forkPath, err := ls.findPeerForkPath(
+		e,
+		prevHashBytes,
+		localTip.Point.Slot,
+	)
 	if err != nil {
 		return false, fmt.Errorf(
 			"unexpected error looking up common ancestor for prev hash %s: %w",
