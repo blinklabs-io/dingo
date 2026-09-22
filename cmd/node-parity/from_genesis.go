@@ -33,6 +33,16 @@ var koiosFlags struct {
 	baseURL           string
 	allowInsecureHTTP bool
 	verbose           bool
+	// cachePath, when set, points this run's CheckProtocolParams/
+	// CheckStakeDistribution calls at a koiosparity.Cache (koios_check.go's
+	// doc comments on those two functions) instead of calling Koios fresh
+	// for every epoch -- typically the SAME cache.db a dingo instance's own
+	// embedded koios-parity observer is already writing to, so the two
+	// processes build up one shared reference set instead of each fetching
+	// it independently. See OpenCache's own doc comment for why this is
+	// safe for two processes to write concurrently (WAL mode, a
+	// single-connection pool per process, busy_timeout as a backstop).
+	cachePath string
 }
 
 // splitStakeMismatches partitions mismatches into real Dingo/Koios
@@ -249,6 +259,10 @@ of re-deriving them from scratch.`,
 		&koiosFlags.verbose, "verbose", false,
 		"log each individual UTxO ref that differs (address/amount/assets/datum/scriptref), not just per-epoch counts",
 	)
+	cmd.Flags().StringVar(
+		&koiosFlags.cachePath, "koios-cache-path", "",
+		"path to a koios-parity cache.db for protocol-params/stake-distribution reference data (optional; safe to share a dingo instance's own --koios-parity-cache-path); default: fetch fresh from Koios every epoch with no caching",
+	)
 	return cmd
 }
 
@@ -284,6 +298,16 @@ func fromGenesisRun(cmd *cobra.Command, _ []string) error {
 		Level: logLevel,
 	}))
 
+	var cache *koiosparity.Cache
+	if koiosFlags.cachePath != "" {
+		cache, err = koiosparity.OpenCache(koiosFlags.cachePath, logger)
+		if err != nil {
+			return fmt.Errorf("open koios cache: %w", err)
+		}
+		defer cache.Close() //nolint:errcheck
+		logger.Info("koios cache enabled", "path", koiosFlags.cachePath)
+	}
+
 	var counters fromGenesisCounters
 	report := func(r nodeparity.EpochResult) {
 		counters.recordEpoch(r, logger)
@@ -294,7 +318,7 @@ func fromGenesisRun(cmd *cobra.Command, _ []string) error {
 	}
 
 	err = nodeparity.RunFromGenesis(
-		cmd.Context(), globalFlags.dingoAddr, network, magic, koios, report, logf,
+		cmd.Context(), globalFlags.dingoAddr, network, magic, koios, cache, report, logf,
 		resumeFrom,
 	)
 

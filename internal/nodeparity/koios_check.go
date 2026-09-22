@@ -117,6 +117,7 @@ import (
 	"fmt"
 	"math/big"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
@@ -201,10 +202,33 @@ type protocolParamsClient interface {
 	GetCurrentEra() (int, error)
 }
 
+// CheckProtocolParams compares Dingo's own current protocol parameters
+// (queried live via client, already Acquired to the point under test)
+// against Koios's /epoch_params for epoch, returning every field-level
+// disagreement CompareEpochProtocolParams finds.
+//
+// cache, when non-nil, is consulted before ever calling Koios: koios_epoch_params
+// rows are immutable once Koios publishes them for a given (network, epoch) --
+// the same assumption internal/koiosparity's own observer already relies on
+// (UpsertEpochParams's doc comment) -- so a cache hit is trusted outright and
+// this function makes zero Koios calls for that epoch. A cache miss still
+// calls Koios exactly as before, and the freshly-fetched row is written back
+// via UpsertEpochParams so a later call (this run, a future from-genesis run,
+// or dingo's own embedded koios-parity observer sharing the same cache file)
+// never re-fetches it. Every write here targets the SAME koios_epoch_params
+// table dingo's embedded observer writes to concurrently -- see cache.go's
+// OpenCache doc comment (WAL + busy_timeout + a single-connection pool per
+// process) for why two independent processes sharing one cache.db this way is
+// safe. A cache read/write error never fails the check itself: the cache is
+// strictly an optimization layer over the same live Koios call this function
+// already tolerates failing (koiosErr below), so a cache-only hiccup (e.g. a
+// lock wait timeout while dingo's observer holds the writer slot) degrades to
+// "fetch live," not to a hard error.
 func CheckProtocolParams(
 	ctx context.Context,
 	client protocolParamsClient,
 	koios *koiosparity.KoiosClient,
+	cache *koiosparity.Cache,
 	network string,
 	epoch uint64,
 ) ([]koiosparity.CheckMismatch, error) {
@@ -240,11 +264,27 @@ func CheckProtocolParams(
 		return nil, err
 	}
 
-	koiosResp, koiosErr := koios.GetEpochParams(ctx, epoch)
 	var koiosParams *koiosparity.KoiosEpochParams
-	if koiosErr == nil {
-		row := koiosparity.EpochParamsFromKoios(network, epoch, koiosResp, time.Now().UTC())
-		koiosParams = &row
+	var koiosErr error
+	if cache != nil {
+		if cached, err := cache.GetEpochParams(network, epoch); err == nil {
+			koiosParams = cached
+		}
+	}
+	if koiosParams == nil {
+		koiosResp, err := koios.GetEpochParams(ctx, epoch)
+		koiosErr = err
+		if koiosErr == nil {
+			row := koiosparity.EpochParamsFromKoios(network, epoch, koiosResp, time.Now().UTC())
+			koiosParams = &row
+			if cache != nil {
+				// Best-effort: a cache write failure (e.g. a lock wait timeout
+				// against dingo's own concurrently-writing observer) must not
+				// fail a check that already has a trustworthy live answer --
+				// see this function's doc comment.
+				_ = cache.UpsertEpochParams(row)
+			}
+		}
 	}
 
 	// graceHours=0, epochEndTime=zero: koios-parity's grace window exists
@@ -349,6 +389,41 @@ func stakeDiffLovelace(
 // documented tier limits this comparison must not trip either).
 const stakeCheckConcurrency = 8
 
+// parseFloatOrZero parses s as a float64, returning 0 for "" or an
+// unparseable string -- used only for koios_pool_epoch's SaturationPct/
+// EpochRos columns, which evaluatePoolStake never reads (it only reads
+// ActiveStake), so a lossy or zeroed value here can never affect a
+// comparison verdict.
+func parseFloatOrZero(s string) float64 {
+	v, _ := strconv.ParseFloat(s, 64)
+	return v
+}
+
+// parseFloatPtrOrNil parses s as a float64, returning nil for "" (Koios's own
+// null marker in the cached row -- see KoiosPoolEpoch's doc comment) rather
+// than a zero value that would be indistinguishable from a real 0.0.
+func parseFloatPtrOrNil(s string) *float64 {
+	if s == "" {
+		return nil
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return nil
+	}
+	return &v
+}
+
+// strPtrOrNil returns nil for "" (Koios's own null marker in the cached
+// row), and a pointer to s otherwise -- the inverse of strOrEmpty
+// (internal/koiosparity/fetch.go), which this mirrors so a cached row round
+// -trips back into the same *string-shaped null Koios itself reports.
+func strPtrOrNil(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
 // evaluatePoolStake decides one pool's StakeMismatch (nil for a clean
 // match), given Dingo's own stake for it and Koios's /pool_history answer
 // (nil if Koios has no row for this pool/epoch at all) -- the whole
@@ -419,10 +494,26 @@ func evaluatePoolStake(
 // VRF keys are not compared. The per-pool /pool_history calls run with
 // bounded concurrency (stakeCheckConcurrency) rather than sequentially --
 // see that constant's doc comment.
+//
+// cache, when non-nil, is consulted once up front (a single
+// GetAllPoolsForEpoch read for the whole epoch, not one read per pool) rather
+// than per pool goroutine: koios_pool_epoch rows are immutable once Koios
+// closes an epoch, the same assumption CheckProtocolParams's own cache.go
+// doc comment makes for koios_epoch_params, so a cached row is trusted
+// outright and that pool's /pool_history call is skipped entirely. Any pool
+// this epoch's cache does not yet cover still calls Koios exactly as before,
+// and the freshly-fetched row is written back via UpsertPoolEpoch for later
+// reuse -- see CheckProtocolParams's doc comment for the concurrent-write
+// safety argument, which applies identically here (same cache.db, same
+// per-process single-connection WAL pool). A cache error (read or write)
+// never fails the check: it degrades to "fetch this pool live from Koios,"
+// never to a hard error.
 func CheckStakeDistribution(
 	ctx context.Context,
 	client *localstatequery.Client,
 	koios *koiosparity.KoiosClient,
+	cache *koiosparity.Cache,
+	network string,
 	epoch uint64,
 ) ([]StakeMismatch, error) {
 	pd, err := client.GetPoolDistr2(nil)
@@ -439,11 +530,39 @@ func CheckStakeDistribution(
 		pools = append(pools, poolStake{pid.String(), entry.TotalPoolStake})
 	}
 
+	var cached map[string]koiosparity.KoiosPoolEpoch
+	if cache != nil {
+		if rows, err := cache.GetAllPoolsForEpoch(network, epoch); err == nil {
+			cached = make(map[string]koiosparity.KoiosPoolEpoch, len(rows))
+			for _, row := range rows {
+				cached[row.PoolBech32] = row
+			}
+		}
+	}
+
 	results := make([]*StakeMismatch, len(pools))
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(stakeCheckConcurrency)
 	for i, p := range pools {
 		g.Go(func() error {
+			if row, ok := cached[p.bech32]; ok {
+				hist := &koiosparity.KoiosPoolHistoryItem{
+					EpochNo:        row.Epoch,
+					ActiveStake:    row.ActiveStake,
+					BlockCnt:       row.BlockCnt,
+					DelegatorCnt:   row.Delegators,
+					FixedCost:      row.FixedCost,
+					PoolFees:       row.PoolFees,
+					DelegRewards:   row.DelegRewards,
+					EpochRos:       parseFloatOrZero(row.EpochRos),
+					SaturationPct:  parseFloatOrZero(row.SaturationPct),
+					Margin:         parseFloatPtrOrNil(row.Margin),
+					ActiveStakePct: parseFloatPtrOrNil(row.ActiveStakePct),
+					MemberRewards:  strPtrOrNil(row.MemberRewards),
+				}
+				results[i] = evaluatePoolStake(p.bech32, p.stake, hist)
+				return nil
+			}
 			hist, err := koios.GetPoolEpochHistory(gctx, p.bech32, epoch)
 			if err != nil {
 				return fmt.Errorf(
@@ -452,6 +571,14 @@ func CheckStakeDistribution(
 				)
 			}
 			results[i] = evaluatePoolStake(p.bech32, p.stake, hist)
+			if cache != nil && hist != nil {
+				// Best-effort, same rationale as CheckProtocolParams's cache
+				// write: a hiccup here must not fail a check that already has
+				// a trustworthy live answer.
+				_ = cache.UpsertPoolEpoch(koiosparity.PoolEpochFromKoiosHistoryItem(
+					network, epoch, p.bech32, hist, time.Now().UTC(),
+				))
+			}
 			return nil
 		})
 	}

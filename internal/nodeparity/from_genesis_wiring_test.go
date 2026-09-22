@@ -383,7 +383,7 @@ func TestRunFromGenesis_UTxOTaintLifecycle(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- RunFromGenesis(
-			ctx, listener.Addr().String(), "preview", magic, koios,
+			ctx, listener.Addr().String(), "preview", magic, koios, nil,
 			func(r EpochResult) { results <- r },
 			nil, nil,
 		)
@@ -499,7 +499,7 @@ func TestRunFromGenesis_TxInfoChunkFailureTaintsEpoch(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- RunFromGenesis(
-			ctx, listener.Addr().String(), "preview", magic, koios,
+			ctx, listener.Addr().String(), "preview", magic, koios, nil,
 			func(r EpochResult) { results <- r },
 			nil, nil,
 		)

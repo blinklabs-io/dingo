@@ -28,11 +28,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/protocol"
 	"github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/protocol/localstatequery"
@@ -123,6 +126,116 @@ const (
 	acquireRetries    = 10
 	acquireRetryDelay = 200 * time.Millisecond
 )
+
+// protocolParamsAndStakeRetries/protocolParamsAndStakeRetryDelay bound how
+// many times runProtocolParamsAndStake redials and retries the whole
+// {Acquire, CheckProtocolParams, CheckStakeDistribution} sequence when the
+// shared connection dies during or between the two checks -- see that
+// function's own doc comment. Matches acquireRetries/acquireRetryDelay's
+// existing budget (2s worst case) rather than inventing a second one.
+const (
+	protocolParamsAndStakeRetries    = acquireRetries
+	protocolParamsAndStakeRetryDelay = acquireRetryDelay
+)
+
+// isRetryableDingoConnErr reports whether err looks like the shared
+// connection itself died -- gouroboros's protocol.ErrProtocolShuttingDown
+// (returned once a peer/mux teardown has already happened -- see
+// localstatequery.Client's own doc comments in gouroboros), or a raw
+// EOF/closed-connection error from beneath it -- as opposed to a genuine
+// query-level failure (a malformed response, an era that cannot be
+// resolved, a Koios-side error) that redialing cannot fix. Only the former
+// is worth runProtocolParamsAndStake's whole-sequence retry: retrying the
+// latter would just burn the retry budget for no benefit, and could mask a
+// real bug behind "looks like churn."
+func isRetryableDingoConnErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, protocol.ErrProtocolShuttingDown) ||
+		errors.Is(err, io.EOF) ||
+		errors.Is(err, net.ErrClosed)
+}
+
+// runProtocolParamsAndStake runs CheckProtocolParams then
+// CheckStakeDistribution against dingoAddr at point, on one shared
+// connection/Acquire per attempt -- see koios_check.go's doc comment for why
+// the two share an Acquire rather than the UTxO check's own separate one.
+//
+// Unlike the single-attempt version this replaced, a connection that dies
+// during or between the two calls (isRetryableDingoConnErr) is not an
+// immediately-reported hard failure: the whole pair is retried against a
+// freshly redialed connection, up to protocolParamsAndStakeRetries times,
+// applying incrementalSession's already-proven persistent-connection
+// pattern (dingo#4183: hold one connection per attempt, and recover from its
+// death by reconnecting) to this from-genesis code path.
+//
+// Confirmed live (dingo#1900 node-parity/koios-parity from-genesis run on
+// preview): the prior version's CheckStakeDistribution failed outright on
+// its first call (client.GetPoolDistr2 returning
+// protocol.ErrProtocolShuttingDown) on every epoch starting at epoch 4, with
+// no chance to recover, because the shared connection from acquireWithRetry
+// had already died sometime between it and the immediately preceding
+// CheckProtocolParams call on that same connection -- and nothing at this
+// call site ever redialed and retried the pair.
+func runProtocolParamsAndStake(
+	ctx context.Context,
+	dingoAddr string,
+	magic uint32,
+	point pcommon.Point,
+	koios *koiosparity.KoiosClient,
+	cache *koiosparity.Cache,
+	network string,
+	epoch uint64,
+) (
+	ppMismatches []koiosparity.CheckMismatch,
+	ppErr error,
+	stakeMismatches []StakeMismatch,
+	stakeErr error,
+) {
+	var lastErr error
+	for attempt := 0; attempt < protocolParamsAndStakeRetries; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err(), nil, ctx.Err()
+			case <-time.After(protocolParamsAndStakeRetryDelay):
+			}
+		}
+
+		conn, lsq, err := acquireWithRetry(ctx, dingoAddr, magic, point)
+		if err != nil {
+			// acquireWithRetry already retried a point-not-on-chain race
+			// internally -- a failure here is either ctx cancellation or a
+			// non-retryable acquire failure (e.g. the point has aged past
+			// Dingo's retention floor), neither of which this loop's own
+			// retry can do anything about.
+			return nil, err, nil, err
+		}
+
+		// Both checks run every attempt, regardless of whether the first
+		// failed -- matching the prior code's own behavior of always
+		// attempting CheckStakeDistribution even when CheckProtocolParams
+		// errored (e.g. a non-connection era-resolution failure leaves the
+		// connection itself perfectly usable for the stake query).
+		ppMismatches, ppErr = CheckProtocolParams(ctx, lsq.Client, koios, cache, network, epoch)
+		stakeMismatches, stakeErr = CheckStakeDistribution(
+			ctx, lsq.Client, koios, cache, network, epoch,
+		)
+		_ = lsq.Client.Release() //nolint:errcheck
+		conn.Close()             //nolint:errcheck
+
+		if isRetryableDingoConnErr(ppErr) || isRetryableDingoConnErr(stakeErr) {
+			lastErr = ppErr
+			if lastErr == nil {
+				lastErr = stakeErr
+			}
+			continue
+		}
+		return ppMismatches, ppErr, stakeMismatches, stakeErr
+	}
+	return nil, lastErr, nil, lastErr
+}
 
 // EpochResult reports one epoch's check outcomes. A nil error paired with a
 // nil/empty mismatch value means that check ran cleanly; a non-nil error
@@ -379,13 +492,22 @@ func resolveStartPoint(resumeFrom *Tip) (pcommon.Point, error) {
 	return resolved, nil
 }
 
-// RunFromGenesis is documented at the top of this file.
+// RunFromGenesis is documented at the top of this file. cache, when non-nil,
+// is threaded into every CheckProtocolParams/CheckStakeDistribution call --
+// see koios_check.go's doc comments on those two functions for what gets
+// cached, why it is safe for dingo's own embedded koios-parity observer to
+// be writing the same cache.db concurrently, and why UTxO reconstruction
+// (CheckUTxO/the roll-forward callback's own UTxO half below) deliberately
+// does not go through it: that reconstruction is a stateful, order-dependent
+// walk fed incrementally from GetTxInfos, not a per-epoch keyed lookup like
+// the other two, and does not fit this cache's schema.
 func RunFromGenesis(
 	ctx context.Context,
 	dingoAddr string,
 	network string,
 	magic uint32,
 	koios *koiosparity.KoiosClient,
+	cache *koiosparity.Cache,
 	report FromGenesisReporter,
 	logf func(format string, args ...any),
 	resumeFrom *Tip,
@@ -669,26 +791,19 @@ func RunFromGenesis(
 
 						result := EpochResult{Epoch: epoch}
 
-						// Protocol params and stake each get their own Acquire,
-						// on their own connection -- see koios_check.go's doc
-						// comment for why sharing one would needlessly cut them
-						// off at UTxO's much tighter retention floor.
+						// Protocol params and stake share one connection/Acquire
+						// per attempt, separate from UTxO's own -- see
+						// koios_check.go's doc comment for why sharing with
+						// UTxO would needlessly cut them off at its much
+						// tighter retention floor, and runProtocolParamsAndStake's
+						// own doc comment for why a connection that dies
+						// during or between the two calls is retried, not
+						// reported as an immediate hard failure.
 						psStart := time.Now()
-						if psConn, lsqPS, err := acquireWithRetry(ctx, dingoAddr, magic, point); err != nil {
-							result.ProtocolParamsErr = err
-							result.StakeErr = err
-						} else {
-							mismatches, err := CheckProtocolParams(ctx, lsqPS.Client, koios, network, epoch)
-							result.ProtocolParamsErr = err
-							result.ProtocolParamsMismatches = mismatches
-
-							stakeMismatches, err := CheckStakeDistribution(ctx, lsqPS.Client, koios, epoch)
-							result.StakeErr = err
-							result.StakeMismatches = stakeMismatches
-
-							_ = lsqPS.Client.Release() //nolint:errcheck
-							psConn.Close()             //nolint:errcheck
-						}
+						result.ProtocolParamsMismatches, result.ProtocolParamsErr,
+							result.StakeMismatches, result.StakeErr = runProtocolParamsAndStake(
+							ctx, dingoAddr, magic, point, koios, cache, network, epoch,
+						)
 						result.ProtocolParamsAndStakeElapsed = time.Since(psStart)
 
 						utxoStart := time.Now()

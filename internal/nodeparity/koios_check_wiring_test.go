@@ -66,6 +66,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -99,6 +100,26 @@ type wiringFakeLSQServer struct {
 	eraErr         error
 	protocolParams *shelley.ShelleyProtocolParameters
 	poolDistr      *localstatequery.PoolDistr2Result
+
+	// killConnOnNextPoolDistr, when set (killNextPoolDistr), closes the
+	// connection a ShelleyPoolDistr2Query arrives on instead of answering it
+	// -- reproducing dingo#1900's confirmed live failure shape (the shared
+	// connection between CheckProtocolParams and CheckStakeDistribution
+	// dying mid-sequence) directly, rather than fabricating an
+	// application-level error a real server could never actually send this
+	// way: gouroboros's client only ever returns protocol.ErrProtocolShuttingDown
+	// (or a raw EOF/closed-connection error) once its own connection is
+	// already gone (dial.go's doc comment), never as a decoded query reply.
+	// activeConn is the connection the most recent query arrived on, so the
+	// handler can close exactly that one.
+	killConnOnNextPoolDistr atomic.Bool
+	activeConn              atomic.Pointer[ouroboros.Connection]
+}
+
+// killNextPoolDistr arms killConnOnNextPoolDistr -- see that field's doc
+// comment.
+func (s *wiringFakeLSQServer) killNextPoolDistr() {
+	s.killConnOnNextPoolDistr.Store(true)
 }
 
 // newWiringFakeLSQServer defaults eraID to Conway, matching koios_check.go's
@@ -185,6 +206,14 @@ func (s *wiringFakeLSQServer) config() localstatequery.Config {
 						}
 						return []any{pp}, nil
 					case *localstatequery.ShelleyPoolDistr2Query:
+						if s.killConnOnNextPoolDistr.CompareAndSwap(true, false) {
+							if conn := s.activeConn.Load(); conn != nil {
+								_ = conn.Close()
+							}
+							return nil, errors.New(
+								"wiringFakeLSQServer: connection killed for test",
+							)
+						}
 						if poolDistr == nil {
 							return localstatequery.PoolDistr2Result{
 								Pools: map[ledger.PoolId]localstatequery.PoolDistr2IndividualStake{},
@@ -226,6 +255,7 @@ func (s *wiringFakeLSQServer) serve(t *testing.T, listener net.Listener, magic u
 					_ = conn.Close()
 					return
 				}
+				s.activeConn.Store(oconn)
 				defer oconn.Close() //nolint:errcheck
 				<-oconn.ErrorChan()
 			}()
@@ -334,7 +364,7 @@ func TestCheckProtocolParams_AppliesWireResolvedEraOverAmbiguousGuess(t *testing
 	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true)
 	require.NoError(t, err)
 
-	mismatches, err := CheckProtocolParams(ctx, client, koios, "preview", epoch)
+	mismatches, err := CheckProtocolParams(ctx, client, koios, nil, "preview", epoch)
 	require.NoError(t, err)
 	for _, m := range mismatches {
 		if m.Field == "pparams_era" {
@@ -409,7 +439,7 @@ func TestCheckStakeDistribution_DetectsRealPoolStakeDivergence(t *testing.T) {
 	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true)
 	require.NoError(t, err)
 
-	mismatches, err := CheckStakeDistribution(ctx, client, koios, epoch)
+	mismatches, err := CheckStakeDistribution(ctx, client, koios, nil, "preview", epoch)
 	require.NoError(t, err)
 	require.Len(
 		t, mismatches, 1,
@@ -492,7 +522,7 @@ func TestCheckProtocolParams_FailsWhenEraQueryFails(t *testing.T) {
 	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true)
 	require.NoError(t, err)
 
-	mismatches, err := CheckProtocolParams(ctx, client, koios, "preview", epoch)
+	mismatches, err := CheckProtocolParams(ctx, client, koios, nil, "preview", epoch)
 	require.Error(t, err)
 	assert.Nil(t, mismatches)
 }
@@ -556,7 +586,7 @@ func TestCheckProtocolParams_PropagatesExplicitEraQueryError(t *testing.T) {
 	require.NoError(t, err)
 
 	mismatches, err := CheckProtocolParams(
-		context.Background(), client, koios, "preview", epoch,
+		context.Background(), client, koios, nil, "preview", epoch,
 	)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "explicit era query failed")
