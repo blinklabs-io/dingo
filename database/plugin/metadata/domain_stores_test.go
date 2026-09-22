@@ -49,6 +49,7 @@ var governanceStoreMethods = []string{
 	"GetGovernanceProposal",
 	"GetActiveGovernanceProposals",
 	"GetRatifiedGovernanceProposals",
+	"GetPendingGovernanceProposalDeposits",
 	"GetEnactedGovernanceProposalsAt",
 	"GetExpiringGovernanceProposals",
 	"GetExpiredGovernanceProposalsAt",

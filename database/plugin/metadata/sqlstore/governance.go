@@ -157,6 +157,32 @@ func (s *Store) GetRatifiedGovernanceProposals(
 	)
 }
 
+// GetPendingGovernanceProposalDeposits returns proposals whose deposit has
+// left the depositor's UTxO but has not yet been returned to their reward
+// account. See the MetadataStore interface doc for why the stake-distribution
+// calculators need this.
+//
+// enacted_slot/dropped_slot are compared strictly greater than slot, not
+// unbounded NULL checks alone: a historical reconstruction evaluates a slot
+// in the past relative to the current tip, where a proposal this query must
+// still treat as outstanding at that slot may since have been enacted or
+// dropped for real. Using only "IS NULL" would incorrectly drop the deposit
+// from a boundary that came before the refund actually happened.
+func (s *Store) GetPendingGovernanceProposalDeposits(
+	slot uint64,
+	txn types.Txn,
+) ([]*models.GovernanceProposal, error) {
+	return s.queryGovernanceProposals(
+		txn,
+		"added_slot <= ? AND deleted_slot IS NULL AND deposit > 0 "+
+			"AND return_address IS NOT NULL "+
+			"AND (enacted_slot IS NULL OR enacted_slot > ?) "+
+			"AND (dropped_slot IS NULL OR dropped_slot > ?)",
+		governanceProposalOrderSQL,
+		slot, slot, slot,
+	)
+}
+
 func (s *Store) GetEnactedGovernanceProposalsAt(
 	epoch uint64,
 	slot uint64,

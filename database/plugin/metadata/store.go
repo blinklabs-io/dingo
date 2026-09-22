@@ -204,6 +204,27 @@ type GovernanceStore interface {
 		types.Txn,
 	) ([]*models.GovernanceProposal, error)
 
+	// GetPendingGovernanceProposalDeposits returns every governance-action
+	// proposal whose deposit is still outstanding as of slot: submitted
+	// (added_slot <= slot), not rolled back (deleted_slot IS NULL), and not
+	// yet refunded. A deposit is refunded either at enactment (enacted_slot)
+	// or at the drop step one epoch after expiry (dropped_slot) -- marking a
+	// proposal expired does not by itself refund it, so an expired-but-not-
+	// yet-dropped proposal's deposit is still outstanding. While outstanding,
+	// the deposit is neither a live UTxO (spent to pay it) nor a reward-
+	// account credit (nothing credits it before the refund), so it is
+	// invisible to reward_live_stake and the historical UTxO/certificate
+	// reconstruction alike. calculateLiveStakeDistributionInTxn and the
+	// historical fallback both add it back onto the depositor's stake input,
+	// or a depositor with an open governance action understates their real
+	// active stake by the deposit amount for as long as the action stays
+	// open -- exactly the shape of dingo#4411's sibling bugs, but for the
+	// pending side of the deposit lifecycle rather than its refund timing.
+	GetPendingGovernanceProposalDeposits(
+		slot uint64,
+		txn types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
 	// GetEnactedGovernanceProposalsAt returns proposals that were enacted at
 	// the given epoch-boundary slot. Used to replay enactment side effects when
 	// stake reward pot reset is reapplied after a boundary commit crash.
