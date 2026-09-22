@@ -85,32 +85,34 @@ type stateMetrics struct {
 	blockStageHeaderVerify prometheus.Observer
 	blockStageValidate     prometheus.Observer
 	blockStageApply        prometheus.Observer
-	// blockStageMaxDuration tracks, per stage, the maximum wall-clock
-	// duration ever observed since process start (blockStageDuration's doc
-	// comment above covers what each stage means). A histogram quantile is
-	// only an estimate bounded by its bucket edges, however wide they are;
-	// this is the exact worst-ever-seen value, so a multi-second stall like
-	// blinklabs-io/dingo#4364 (epoch-boundary DRep voting-power query, fixed
-	// separately -- this metric only makes it visible) shows up exactly
-	// instead of "somewhere past the last bucket boundary".
+	// Per-stage maximum wall-clock duration ever observed since process
+	// start, each holding math.Float64bits of a seconds value and advanced
+	// by updateMaxDuration's compare-and-swap loop at the same
+	// observeBlockStage call site that records blockStageDuration, so the
+	// two can never drift out of sync with each other.
+	// (blockStageDuration's doc comment above covers what each stage means.)
+	//
+	// These atomics are the metric's only state. They are exported as
+	// dingo_ledger_block_stage_max_duration_seconds by GaugeFunc collectors
+	// that read them at scrape time -- see registerBlockStageMaxDuration --
+	// rather than by Gauges that observeBlockStage pushes into, so there is
+	// no second copy of the value that can fall behind this one.
+	//
+	// A histogram quantile is only an estimate bounded by its bucket edges,
+	// however wide they are; this is the exact worst-ever-seen value, so a
+	// multi-second stall like blinklabs-io/dingo#4364 (epoch-boundary DRep
+	// voting-power query, fixed separately -- this metric only makes it
+	// visible) shows up exactly instead of "somewhere past the last bucket
+	// boundary".
 	//
 	// Deliberately monotonic non-resetting ("worst ever seen"), not a
 	// windowed maximum: a windowed maximum needs a periodic-reset custom
 	// Collector, real complexity for a question -- "did we ever see
 	// something this bad" -- that a simple non-resetting maximum already
 	// answers.
-	blockStageMaxDuration *prometheus.GaugeVec
-	// Backing atomic.Uint64 (holding math.Float64bits of the current
-	// maximum seconds value) and pre-materialized Gauge for each stage,
-	// updated by updateMaxDuration's compare-and-swap loop at the same
-	// observeBlockStage call site that records blockStageDuration, so the
-	// two can never drift out of sync with each other.
-	blockStageHeaderVerifyMax      atomic.Uint64
-	blockStageValidateMax          atomic.Uint64
-	blockStageApplyMax             atomic.Uint64
-	blockStageHeaderVerifyMaxGauge prometheus.Gauge
-	blockStageValidateMaxGauge     prometheus.Gauge
-	blockStageApplyMaxGauge        prometheus.Gauge
+	blockStageHeaderVerifyMax atomic.Uint64
+	blockStageValidateMax     atomic.Uint64
+	blockStageApplyMax        atomic.Uint64
 	// Incremented when a stored governance proposal's CBOR fails to
 	// decode during the mid-epoch ratifiability check, so the failures
 	// surface as a metric instead of just log volume.
@@ -401,64 +403,96 @@ func (m *stateMetrics) observeBlockStage(stage string, d time.Duration) {
 		return
 	}
 	var obs prometheus.Observer
-	var max *atomic.Uint64
-	var maxGauge prometheus.Gauge
+	var record *atomic.Uint64
 	switch stage {
 	case blockStageHeaderVerify:
 		obs = m.blockStageHeaderVerify
-		max = &m.blockStageHeaderVerifyMax
-		maxGauge = m.blockStageHeaderVerifyMaxGauge
+		record = &m.blockStageHeaderVerifyMax
 	case blockStageValidate:
 		obs = m.blockStageValidate
-		max = &m.blockStageValidateMax
-		maxGauge = m.blockStageValidateMaxGauge
+		record = &m.blockStageValidateMax
 	case blockStageApply:
 		obs = m.blockStageApply
-		max = &m.blockStageApplyMax
-		maxGauge = m.blockStageApplyMaxGauge
+		record = &m.blockStageApplyMax
 	}
 	if obs == nil {
-		// Unknown stage: neither field was resolved, so there is nothing to
-		// update on either metric.
+		// Unknown stage, or metrics were never initialised: neither field
+		// was resolved, so there is nothing to update on either metric.
+		// Gating the running maximum on the histogram observer too is what
+		// keeps the two reporting the same set of samples.
 		return
 	}
 	seconds := d.Seconds()
 	obs.Observe(seconds)
-	if maxGauge != nil {
-		updateMaxDuration(max, maxGauge, seconds)
-	}
+	updateMaxDuration(record, seconds)
 }
 
 // updateMaxDuration performs a lock-free "keep the maximum ever observed"
-// update: it compares observed against the current value of max (an
-// atomic.Uint64 holding math.Float64bits of the running maximum) and, only
-// when observed is strictly larger, compare-and-swaps it in and reflects the
-// new maximum into gauge. On the hot per-block path this costs one atomic
-// load and, in the common case where observed does not beat the record, no
-// write at all -- no lock, no allocation.
+// update: it compares observed against the current value of record (an
+// atomic.Uint64 holding math.Float64bits of the running maximum) and
+// compare-and-swaps it in only when observed is strictly larger. On the hot
+// per-block path this costs one atomic load and, in the common case where
+// observed does not beat the record, no write at all -- no lock, no
+// allocation.
 //
-// Two goroutines can each win a CAS in quick succession (say 5s then 10s)
-// and race their gauge.Set calls in the other order, so the exposed gauge
-// can very rarely and only momentarily show an older, smaller value than the
-// true maximum held in max; the next observation exceeding the
-// currently-displayed value corrects it immediately. max itself is never
-// wrong: CompareAndSwap only succeeds when observed is greater than the
-// value it is replacing, so it is monotonically non-decreasing regardless of
-// gauge.Set ordering.
-func updateMaxDuration(
-	max *atomic.Uint64,
-	gauge prometheus.Gauge,
-	observed float64,
-) {
+// record is the metric's only state; the exported gauge reads it at scrape
+// time (see registerBlockStageMaxDuration). That is what makes the exported
+// value exactly equal to the record at all times, and it is the reason this
+// does not also push the new value into a Gauge. Pushing would introduce a
+// second copy that can fall behind and stay behind: two goroutines can each
+// win a CAS (say 5s then 10s) and land their Set calls in the other order,
+// leaving the gauge reading 5 while the record holds 10. Nothing recovers
+// that until an observation beats 10 -- an observation of 7 exits at the
+// comparison below without touching the gauge -- so on a metric whose whole
+// purpose is the worst case, the exported value could understate the record
+// for the life of the process.
+func updateMaxDuration(record *atomic.Uint64, observed float64) {
 	for {
-		old := max.Load()
+		old := record.Load()
 		if observed <= math.Float64frombits(old) {
 			return
 		}
-		if max.CompareAndSwap(old, math.Float64bits(observed)) {
-			gauge.Set(observed)
+		if record.CompareAndSwap(old, math.Float64bits(observed)) {
 			return
 		}
+	}
+}
+
+// blockStageMaxDurationHelp documents
+// dingo_ledger_block_stage_max_duration_seconds. Shared by all three
+// per-stage collectors, which must agree on it: the Prometheus registry
+// rejects two collectors that export the same metric name with different
+// help text.
+const blockStageMaxDurationHelp = "maximum wall-clock duration ever observed for each ledger-owned per-block processing stage (see dingo_ledger_block_stage_duration_seconds), since process start; monotonically non-decreasing, and exact rather than bucket-bounded"
+
+// registerBlockStageMaxDuration exports each stage's running maximum as one
+// series of dingo_ledger_block_stage_max_duration_seconds.
+//
+// One GaugeFunc per stage carrying the stage as a constant label, rather
+// than a single GaugeVec: a GaugeVec's members hold their own copy of the
+// value and must be Set, which is a second place the number lives and can
+// go stale (see updateMaxDuration). A GaugeFunc reads the atomic at scrape
+// time, so the exported value is the record by construction. This is the
+// same pull-based pattern the sqlstore and sqlite metadata plugins already
+// use for values they do not own a copy of.
+func (m *stateMetrics) registerBlockStageMaxDuration(
+	factory promauto.Factory,
+) {
+	for stage, record := range map[string]*atomic.Uint64{
+		blockStageHeaderVerify: &m.blockStageHeaderVerifyMax,
+		blockStageValidate:     &m.blockStageValidateMax,
+		blockStageApply:        &m.blockStageApplyMax,
+	} {
+		factory.NewGaugeFunc(
+			prometheus.GaugeOpts{
+				Name:        "dingo_ledger_block_stage_max_duration_seconds",
+				Help:        blockStageMaxDurationHelp,
+				ConstLabels: prometheus.Labels{"stage": stage},
+			},
+			func() float64 {
+				return math.Float64frombits(record.Load())
+			},
+		)
 	}
 }
 
@@ -879,22 +913,7 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	m.blockStageApply = m.blockStageDuration.WithLabelValues(
 		blockStageApply,
 	)
-	m.blockStageMaxDuration = promautoFactory.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "dingo_ledger_block_stage_max_duration_seconds",
-			Help: "maximum wall-clock duration ever observed for each ledger-owned per-block processing stage (see dingo_ledger_block_stage_duration_seconds), since process start; monotonically non-decreasing, and exact rather than bucket-bounded",
-		},
-		[]string{"stage"},
-	)
-	m.blockStageHeaderVerifyMaxGauge = m.blockStageMaxDuration.WithLabelValues(
-		blockStageHeaderVerify,
-	)
-	m.blockStageValidateMaxGauge = m.blockStageMaxDuration.WithLabelValues(
-		blockStageValidate,
-	)
-	m.blockStageApplyMaxGauge = m.blockStageMaxDuration.WithLabelValues(
-		blockStageApply,
-	)
+	m.registerBlockStageMaxDuration(promautoFactory)
 	m.governanceProposalDecodeFailures = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "dingo_governance_proposal_decode_failures_total",

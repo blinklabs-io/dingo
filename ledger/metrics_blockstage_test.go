@@ -15,9 +15,7 @@
 package ledger
 
 import (
-	"math"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -159,92 +157,135 @@ func TestBlockStageDurationBucketsCoverTailStalls(t *testing.T) {
 	)
 }
 
-// TestUpdateMaxDurationTracksRunningMaximum drives updateMaxDuration
-// sequentially: it must start unset (zero), move up on a larger
-// observation, and hold on a smaller one.
-func TestUpdateMaxDurationTracksRunningMaximum(t *testing.T) {
+// blockStageMaxDurationValue returns the value reg exports for the given
+// stage label of dingo_ledger_block_stage_max_duration_seconds. It reads the
+// registry rather than a collector handle held on stateMetrics, because the
+// metric deliberately keeps no exported-value state of its own to hold: the
+// three GaugeFunc collectors read the running-maximum atomics at scrape time.
+func blockStageMaxDurationValue(
+	t *testing.T,
+	reg *prometheus.Registry,
+	stage string,
+) float64 {
+	t.Helper()
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	for _, family := range families {
+		if family.GetName() != "dingo_ledger_block_stage_max_duration_seconds" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				if label.GetName() == "stage" &&
+					label.GetValue() == stage {
+					return metric.GetGauge().GetValue()
+				}
+			}
+		}
+	}
+	t.Fatalf(
+		"no dingo_ledger_block_stage_max_duration_seconds series for stage %q",
+		stage,
+	)
+	return 0
+}
+
+// TestBlockStageMaxDurationExportsRunningMaximum drives the exported metric
+// through observeBlockStage: it must start at zero, rise on a larger
+// observation, hold on a smaller one, and move only the stage that was
+// observed.
+func TestBlockStageMaxDurationExportsRunningMaximum(t *testing.T) {
 	t.Parallel()
 
-	var max atomic.Uint64
-	gauge := prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "test_block_stage_max_duration_seconds",
-	})
+	reg := prometheus.NewRegistry()
+	var m stateMetrics
+	m.init(reg)
 
-	assert.Equal(
-		t,
-		0.0,
-		testutil.ToFloat64(gauge),
-		"gauge must start at zero before any observation",
-	)
+	for _, stage := range []string{
+		blockStageHeaderVerify,
+		blockStageValidate,
+		blockStageApply,
+	} {
+		assert.Equal(
+			t,
+			0.0,
+			blockStageMaxDurationValue(t, reg, stage),
+			"stage %q must export zero before any observation",
+			stage,
+		)
+	}
 
-	updateMaxDuration(&max, gauge, 5.0)
-	assert.Equal(t, 5.0, testutil.ToFloat64(gauge))
+	m.observeBlockStage(blockStageApply, 5*time.Second)
+	assert.Equal(t, 5.0, blockStageMaxDurationValue(t, reg, blockStageApply))
 
-	updateMaxDuration(
-		&max,
-		gauge,
-		2.0,
-	) // smaller: must not move the record down
+	m.observeBlockStage(blockStageApply, 2*time.Second)
 	assert.Equal(
 		t,
 		5.0,
-		testutil.ToFloat64(gauge),
-		"a smaller observation after a larger one must not decrease the record",
+		blockStageMaxDurationValue(t, reg, blockStageApply),
+		"a smaller observation after a larger one must not lower the record",
 	)
 
-	updateMaxDuration(&max, gauge, 9.0) // larger: moves the record up
-	assert.Equal(t, 9.0, testutil.ToFloat64(gauge))
+	m.observeBlockStage(blockStageApply, 9*time.Second)
+	assert.Equal(
+		t,
+		9.0,
+		blockStageMaxDurationValue(t, reg, blockStageApply),
+		"a larger observation must raise the record",
+	)
+
+	for _, stage := range []string{blockStageHeaderVerify, blockStageValidate} {
+		assert.Equal(
+			t,
+			0.0,
+			blockStageMaxDurationValue(t, reg, stage),
+			"observing %q must not move stage %q",
+			blockStageApply,
+			stage,
+		)
+	}
 }
 
-// TestUpdateMaxDurationConcurrentWritersNeverLowerTheRecord hammers
-// updateMaxDuration from many goroutines at once (run with -race: the
-// point is to prove the atomic.Uint64 compare-and-swap loop is actually
-// race-free under concurrent writers, not just correct single-threaded).
-// Each writer submits a larger value and then a smaller one, so both
-// directions are exercised concurrently against every other writer.
+// TestBlockStageMaxDurationExportedValueEqualsRecord hammers one stage from
+// many goroutines at once and requires the exported value to equal the
+// largest duration any writer submitted -- exactly, not merely to be bounded
+// by it.
 //
-// The assertion is on the atomic record itself, not a snapshot of the
-// exposed gauge: two writers can each win a CAS in close succession and
-// race their gauge.Set calls in the other order (documented on
-// updateMaxDuration), so the gauge is only asserted never to exceed the
-// true record, not to equal it exactly at this specific instant. The
-// atomic record is the correctness invariant the CAS loop actually
-// guarantees.
-func TestUpdateMaxDurationConcurrentWritersNeverLowerTheRecord(t *testing.T) {
+// Exact equality is the point. It is what distinguishes reading the
+// running-maximum atomic at scrape time from pushing each new maximum into a
+// Gauge: with a pushed Gauge two writers can each win the compare-and-swap
+// and land their Set calls in the other order, leaving the exported value
+// below the record with nothing to recover it until an observation beats the
+// record itself (see updateMaxDuration). Run with -race, which also covers
+// the compare-and-swap loop under concurrent writers.
+func TestBlockStageMaxDurationExportedValueEqualsRecord(t *testing.T) {
 	t.Parallel()
 
-	var max atomic.Uint64
-	gauge := prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "test_concurrent_block_stage_max_duration_seconds",
-	})
+	reg := prometheus.NewRegistry()
+	var m stateMetrics
+	m.init(reg)
 
 	const writers = 64
 	var wg sync.WaitGroup
 	wg.Add(writers)
 	for i := range writers {
-		observed := float64(i)
+		// Each writer submits a larger value and then a smaller one, so
+		// both directions race against every other writer.
+		observed := time.Duration(i) * time.Millisecond
 		go func() {
 			defer wg.Done()
-			updateMaxDuration(&max, gauge, observed)
-			updateMaxDuration(&max, gauge, observed/2)
+			m.observeBlockStage(blockStageApply, observed)
+			m.observeBlockStage(blockStageApply, observed/2)
 		}()
 	}
 	wg.Wait()
 
-	gotMax := math.Float64frombits(max.Load())
+	want := (time.Duration(writers-1) * time.Millisecond).Seconds()
 	assert.Equal(
 		t,
-		float64(writers-1),
-		gotMax,
-		"the atomic record must equal the largest value any writer observed, "+
+		want,
+		blockStageMaxDurationValue(t, reg, blockStageApply),
+		"the exported value must equal the largest observed duration, "+
 			"regardless of goroutine interleaving",
 	)
-	exposed := testutil.ToFloat64(gauge)
-	assert.LessOrEqual(
-		t,
-		exposed,
-		gotMax,
-		"the exposed gauge must never show a value above the true record",
-	)
-	assert.GreaterOrEqual(t, exposed, 0.0)
 }
