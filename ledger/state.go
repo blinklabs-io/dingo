@@ -3447,7 +3447,7 @@ func (ls *LedgerState) rollbackWithBlocks(
 		if err := ls.enforceDurableTipFloor(); err != nil {
 			return err
 		}
-		return ls.finishRollbackIntent()
+		return ls.finishRollbackIntentForPoint(point)
 	}
 	durableTip, err := ls.db.GetTip(nil)
 	if err != nil {
@@ -3462,7 +3462,7 @@ func (ls *LedgerState) rollbackWithBlocks(
 			"rollback_hash", hex.EncodeToString(point.Hash),
 			"ledger_tip_hash", hex.EncodeToString(durableTip.Point.Hash),
 		)
-		return ls.finishRollbackIntent()
+		return ls.finishRollbackIntentForPoint(point)
 	}
 	// A target sharing the applied tip's slot with a different hash cannot be
 	// expressed by the UTxO and transaction truncation predicates in

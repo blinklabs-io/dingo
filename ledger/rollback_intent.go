@@ -377,3 +377,16 @@ func (ls *LedgerState) finishRollbackIntent() error {
 	}
 	return clearRollbackIntent(ls.db)
 }
+
+func (ls *LedgerState) finishRollbackIntentForPoint(
+	point ocommon.Point,
+) error {
+	pendingPoint, _, pending, err := loadRollbackIntent(ls.db)
+	if err != nil || !pending {
+		return err
+	}
+	if !pointMatches(pendingPoint, point) {
+		return nil
+	}
+	return ls.finishRollbackIntent()
+}

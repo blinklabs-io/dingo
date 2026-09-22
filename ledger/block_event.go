@@ -268,6 +268,31 @@ func (ls *LedgerState) validateAndEmitRollbackUndoEmitted(
 	if err := ls.chain.ValidateRollback(point); err != nil {
 		return false, err
 	}
+	ls.RLock()
+	currentTip := ls.currentTip
+	mithrilLedgerSlot := ls.mithrilLedgerSlot
+	ls.RUnlock()
+	resolved, err := ls.resolveRollbackTarget(point, currentTip)
+	if err != nil {
+		return false, err
+	}
+	if mithrilLedgerSlot > 0 && resolved.Slot < mithrilLedgerSlot {
+		return false, ErrRollbackExceedsMithrilBoundary
+	}
+	belowPruneFloor, pruneFloor, err := ls.rollbackBelowConsumedUtxoPruneFloor(
+		resolved,
+	)
+	if err != nil {
+		return false, fmt.Errorf("determine consumed UTxO prune floor: %w", err)
+	}
+	if belowPruneFloor {
+		return false, fmt.Errorf(
+			"%w: target slot %d, prune floor %d",
+			ErrRollbackBelowUtxoPruneFloor,
+			resolved.Slot,
+			pruneFloor,
+		)
+	}
 	// The primary chain can be ahead of the applied ledger during catch-up.
 	// No ledger state will be rolled back in that case, so do not persist an
 	// intent that a crash could later misinterpret as an interrupted rollback.
