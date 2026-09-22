@@ -2766,11 +2766,12 @@ func TestIsDeterministicMissingRedeemerAcrossJoinedErrors(t *testing.T) {
 		isDeterministicTxValidationError(lcommon.InputResolutionError{}),
 		"an unresolved input is decided by local UTxO state",
 	)
-	// The inverse verdict from the same Dijkstra rule. An unresolved consumed
-	// input is skipped rather than resolved, so its spend purpose never
-	// reaches the required set and a legitimate spend redeemer reads as extra;
-	// resolving the input removes the verdict, so widening the classification
-	// to cover it would strand the rewind that repairs it.
+	// The shared ExtraRedeemerError type has both a transaction-only Conway
+	// emitter and a state-dependent Dijkstra emitter. The latter is the reason
+	// this type remains unclassified: an unresolved consumed input is skipped,
+	// so its spend purpose never reaches the required set and a legitimate spend
+	// redeemer reads as extra; resolving the input removes the verdict. The
+	// type alone cannot distinguish those emitters.
 	require.False(
 		t,
 		isDeterministicTxValidationError(conway.ExtraRedeemerError{}),
