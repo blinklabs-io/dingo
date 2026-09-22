@@ -15,6 +15,7 @@
 package sqlstore
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -52,6 +53,20 @@ INSERT INTO stake_delegation
     (staking_key, credential_tag, pool_key_hash, certificate_id, added_slot)
 VALUES (?, ?, ?, ?, ?)`, key, tag, pool, certID, addedSlot)
 	require.NoError(t, err)
+}
+
+// snapshotRow returns one key's aggregate row, failing when the rebuild
+// wrote none: every assertion below would otherwise hold for the zero value.
+func snapshotRow(
+	t testing.TB,
+	snapshot map[string]rewardLiveStakeSnapshotRow,
+	tag uint8,
+	key []byte,
+) rewardLiveStakeSnapshotRow {
+	t.Helper()
+	row, ok := snapshot[fmt.Sprintf("%d:%s", tag, key)]
+	require.True(t, ok, "no reward live stake row for %d:%x", tag, key)
+	return row
 }
 
 // TestRebuildRewardLiveStakeLatestDelegationSelection pins the delegation
@@ -122,7 +137,7 @@ func TestRebuildRewardLiveStakeLatestDelegationSelection(t *testing.T) {
 	require.NoError(t, store.RebuildRewardLiveStake(100, nil))
 	snapshot := readRewardLiveStakeSnapshot(t, store)
 
-	matched := snapshot["0:"+string(matching.Key)]
+	matched := snapshotRow(t, snapshot, 0, matching.Key)
 	require.Equal(t, string(poolA), matched.pool)
 	require.Equal(t, int64(12), matched.delegationSlot)
 	require.Equal(t, int64(3), matched.delegationBlock)
@@ -130,19 +145,18 @@ func TestRebuildRewardLiveStakeLatestDelegationSelection(t *testing.T) {
 
 	// No latest_delegation match, so the account's own added_slot stands and
 	// the older poolA assignment at slot 22 is not promoted.
-	stale := snapshot["0:"+string(superseded.Key)]
+	stale := snapshotRow(t, snapshot, 0, superseded.Key)
 	require.Equal(t, string(poolA), stale.pool)
 	require.Equal(t, int64(20), stale.delegationSlot)
 	require.Equal(t, int64(0), stale.delegationBlock)
 	require.Equal(t, int64(0), stale.delegationCert)
 
-	require.Contains(t, snapshot, "0:"+string(inactive.Key))
-	unregistered := snapshot["0:"+string(inactive.Key)]
+	unregistered := snapshotRow(t, snapshot, 0, inactive.Key)
 	require.False(t, unregistered.registered)
 	require.Empty(t, unregistered.pool)
 	require.Equal(t, int64(0), unregistered.delegationSlot)
 
-	undelegated := snapshot["0:"+string(noPool.Key)]
+	undelegated := snapshotRow(t, snapshot, 0, noPool.Key)
 	require.True(t, undelegated.registered)
 	require.Empty(t, undelegated.pool)
 	require.Equal(t, int64(0), undelegated.delegationSlot)
@@ -180,6 +194,6 @@ func TestRebuildRewardLiveStakeFromRunningTotalsLatestDelegationSelection(
 		readRewardLiveStakeSnapshot(t, runningTotals),
 	)
 	snapshot := readRewardLiveStakeSnapshot(t, runningTotals)
-	require.Equal(t, int64(32), snapshot["1:"+string([]byte{0x30, 0x31})].delegationSlot)
-	require.Equal(t, int64(10), snapshot["0:"+string([]byte{0x10, 0x11})].delegationSlot)
+	require.Equal(t, int64(32), snapshotRow(t, snapshot, 1, []byte{0x30, 0x31}).delegationSlot)
+	require.Equal(t, int64(10), snapshotRow(t, snapshot, 0, []byte{0x10, 0x11}).delegationSlot)
 }

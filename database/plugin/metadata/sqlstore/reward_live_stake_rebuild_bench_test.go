@@ -110,11 +110,11 @@ VALUES (?, 0, ?, NULL, ?)`)
 }
 
 // BenchmarkRebuildRewardLiveStakeFromRunningTotals measures the Mithril
-// bootstrap finalizer at stake-identity populations of the order the live
-// path reaches. The dead=0 case is the worst case for the ranked query's
-// account restriction, where every assignment belongs to a live delegator;
-// the dead=1200000 case is the shape a long-lived chain actually has. This is
-// the scale regression guard for #4610.
+// bootstrap finalizer across several rebuild batches. The two cases should
+// cost about the same: the rebuild never reads the assignment history of a
+// key with no active account, so the dead=1200000 case, the shape a
+// long-lived chain has, must not grow with that history. This is the scale
+// regression guard for #4610.
 func BenchmarkRebuildRewardLiveStakeFromRunningTotals(b *testing.B) {
 	for _, dead := range []int{0, 1_200_000} {
 		b.Run(fmt.Sprintf("dead=%d", dead), func(b *testing.B) {
