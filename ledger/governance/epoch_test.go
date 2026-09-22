@@ -677,6 +677,123 @@ func TestProcessEpochReturnsMissingRewardAccountRefundToTreasury(
 	assert.Equal(t, uint64(6), *proposal.DroppedEpoch)
 }
 
+func TestGovActionPriorityMatchesConwayRATIFYOrder(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		actionType lcommon.GovActionType
+		want       int
+	}{
+		{"no confidence", lcommon.GovActionTypeNoConfidence, 0},
+		{"update committee", lcommon.GovActionTypeUpdateCommittee, 1},
+		{"new constitution", lcommon.GovActionTypeNewConstitution, 2},
+		{"hard fork initiation", lcommon.GovActionTypeHardForkInitiation, 3},
+		{"parameter change", lcommon.GovActionTypeParameterChange, 4},
+		{"treasury withdrawal", lcommon.GovActionTypeTreasuryWithdrawal, 5},
+		{"info", lcommon.GovActionTypeInfo, 6},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			proposal := &models.GovernanceProposal{
+				ActionType: uint8(test.actionType),
+			}
+			assert.Equal(t, test.want, govActionPriority(proposal))
+		})
+	}
+}
+
+func TestProcessEpochRatifiesChainedParameterChangesAgainstStagedState(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, store := newTallyTestDB(t)
+	pparams := conwayPParamsFixture(10)
+	pparams.MinCommitteeSize = 1
+	pparams.DRepVotingThresholds.PpGovGroup = newRat(0, 1)
+	pparams.DRepVotingThresholds.PpEconomicGroup = newRat(1, 1)
+	updatedThresholds := pparams.DRepVotingThresholds
+	updatedThresholds.PpEconomicGroup = newRat(0, 1)
+
+	parentHash := testBytes(32, 0x71)
+	childHash := testBytes(32, 0x72)
+	parentActionIndex := uint32(0)
+	parentAction, err := cbor.Encode(&conway.ConwayParameterChangeGovAction{
+		Type: uint(lcommon.GovActionTypeParameterChange),
+		ParamUpdate: conway.ConwayProtocolParameterUpdate{
+			DRepVotingThresholds: &updatedThresholds,
+		},
+	})
+	require.NoError(t, err)
+	poolDeposit := uint(2_000_000)
+	childAction, err := cbor.Encode(&conway.ConwayParameterChangeGovAction{
+		Type: uint(lcommon.GovActionTypeParameterChange),
+		ParamUpdate: conway.ConwayProtocolParameterUpdate{
+			PoolDeposit: &poolDeposit,
+		},
+	})
+	require.NoError(t, err)
+	parent := &models.GovernanceProposal{
+		TxHash:        parentHash,
+		ActionType:    uint8(lcommon.GovActionTypeParameterChange),
+		ProposedEpoch: stabilityTestEpoch - 1,
+		ExpiresEpoch:  stabilityTestEpoch + 10,
+		AnchorURL:     "https://example.invalid/parent",
+		AnchorHash:    testBytes(32, 0x73),
+		ReturnAddress: testBytes(29, 0x74),
+		GovActionCbor: parentAction,
+		AddedSlot:     400,
+	}
+	child := &models.GovernanceProposal{
+		TxHash:          childHash,
+		ActionType:      uint8(lcommon.GovActionTypeParameterChange),
+		ProposedEpoch:   stabilityTestEpoch - 1,
+		ExpiresEpoch:    stabilityTestEpoch + 10,
+		ParentTxHash:    parentHash,
+		ParentActionIdx: &parentActionIndex,
+		AnchorURL:       "https://example.invalid/child",
+		AnchorHash:      testBytes(32, 0x75),
+		ReturnAddress:   testBytes(29, 0x76),
+		GovActionCbor:   childAction,
+		AddedSlot:       401,
+	}
+	require.NoError(t, db.SetGovernanceProposal(parent, nil))
+	require.NoError(t, db.SetGovernanceProposal(child, nil))
+	parent, err = db.GetGovernanceProposal(parentHash, 0, nil)
+	require.NoError(t, err)
+	child, err = db.GetGovernanceProposal(childHash, 0, nil)
+	require.NoError(t, err)
+	drepCred := seedDRepWithStake(t, db, 100)
+	seedDRepYesVote(t, db, parent.ID, drepCred)
+	seedHardForkCommitteeAndSPOVotes(t, db, store, parent, child)
+
+	txn := db.MetadataTxn(true)
+	defer txn.Release()
+	out, err := ProcessEpoch(&EpochInput{
+		DB:           db,
+		Txn:          txn,
+		PrevEpoch:    stabilityTestEpoch - 1,
+		NewEpoch:     stabilityTestEpoch,
+		BoundarySlot: stabilityTestEpoch * 100,
+		PParams:      pparams,
+		UpdateFn:     eras.PParamsUpdateConway,
+	})
+	require.NoError(t, err)
+	require.NoError(t, txn.Commit())
+	assert.Equal(t, 2, out.RatifiedCount)
+
+	parent, err = db.GetGovernanceProposal(parentHash, 0, nil)
+	require.NoError(t, err)
+	child, err = db.GetGovernanceProposal(childHash, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, parent.RatifiedEpoch)
+	require.NotNil(t, child.RatifiedEpoch)
+	assert.Equal(t, stabilityTestEpoch, *parent.RatifiedEpoch)
+	assert.Equal(t, stabilityTestEpoch, *child.RatifiedEpoch)
+}
+
 // TestProcessEpochBootstrapParameterChangeWithoutCommitteeDoesNotRatify
 // verifies that the epoch-boundary caller does not treat PV9's committee
 // minimum-size exception as approval from an absent committee.
