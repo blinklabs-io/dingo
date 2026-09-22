@@ -70,18 +70,17 @@ type ObserverConfig struct {
 	// live, in-process *database.Database.
 	Source RewardParitySource
 	// Strict stops the observer (and, via FatalFunc, the node driving it)
-	// on the first confirmed parity mismatch (StatusFail) or genuine
-	// fetch/query error. An ERROR-only result (StatusError, e.g.
-	// reference_lag — the comparison itself could not yet be trusted, not
-	// that it disagreed; see DetermineStatus) is still logged and recorded
-	// in the cache but never triggers FatalFunc, in strict mode or not
-	// (dingo #4645). When Strict is false, a StatusFail/genuine error is
-	// also just logged and recorded, and the observer keeps validating
-	// subsequent epochs — an explicit, non-default choice for
-	// advisory/observability-only use, since the issue this implements
-	// requires Strict behavior to be available and be the operator default
-	// (see dingo.KoiosParityConfig / DefaultKoiosParityConfig), not that
-	// non-strict mode is forbidden to exist.
+	// on the first Koios/tool error or non-pass parity result, except an
+	// epoch whose only significant mismatches are reference_lag: Koios's
+	// own data had not caught up, so that result is logged and recorded
+	// but never triggers FatalFunc (dingo #4645; see Observer.fail). When
+	// Strict is false, every failure is logged and recorded in the cache,
+	// and the observer keeps validating subsequent epochs — an explicit,
+	// non-default choice for advisory/observability-only use, since the
+	// issue this implements requires Strict behavior to be available and be
+	// the operator default (see dingo.KoiosParityConfig /
+	// DefaultKoiosParityConfig), not that non-strict mode is forbidden to
+	// exist.
 	Strict bool
 	// AccountsEnabled runs #3097's per-account exact-parity fetch+check
 	// phase (FetchAccountRewardsForEpoch / CompareAccountEpoch) alongside
@@ -748,7 +747,7 @@ func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 		o.fail(epoch, fmt.Errorf(
 			"parity %s at epoch %d (%d significant of %d mismatch(es))",
 			result.Status, epoch, significant, len(result.Mismatches),
-		), result.Status == StatusFail)
+		), !referenceLagOnly(result.Mismatches))
 		return
 	}
 	// scopes keeps an aggregate-only pass from reading as the whole epoch's
@@ -844,7 +843,7 @@ func (o *Observer) processAccountEpoch(ctx context.Context, epoch uint64) {
 		o.fail(epoch, fmt.Errorf(
 			"parity %s at epoch %d (%d significant of %d mismatch(es))",
 			result.Status, epoch, significant, len(result.Mismatches),
-		), result.Status == StatusFail)
+		), !referenceLagOnly(result.Mismatches))
 		return
 	}
 	// scopes keeps an aggregate-only pass from reading as the whole epoch's
@@ -1216,11 +1215,14 @@ func (o *Observer) fetchAccountsIfNeeded(
 
 // fail logs a per-epoch failure and, in strict mode, fires FatalFunc exactly
 // once (the first fatal-eligible failure across the observer's lifetime).
-// fatal distinguishes a confirmed failure (StatusFail, or a genuine
-// fetch/query error via reportError) from a result that is merely not yet
-// trustworthy (StatusError, e.g. reference_lag) — see the call sites. A
-// non-fatal call still logs, and the caller has already persisted the
-// result, but it never reaches FatalFunc or sets fatalFired.
+// fatal is false only for a result whose significant mismatches are all
+// reference_lag (see referenceLagOnly): Koios's own data had not caught up,
+// so the comparison could not be trusted yet (dingo #4645). Such a call is
+// still logged, and processEpoch/processAccountEpoch have already persisted
+// the result, but it never reaches FatalFunc and never sets fatalFired, so
+// run/runAccounts keep processing later epochs. Every other non-pass result,
+// including dingo_db_missing and dingo_db_error, and every reportError call
+// stays fatal in strict mode.
 //
 // run and runAccounts's goroutines can both call this concurrently (dingo
 // #4339's queue split), so the exactly-once guarantee is enforced with an
