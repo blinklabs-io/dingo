@@ -294,12 +294,29 @@ type stateMetrics struct {
 	utxoCreatedTotal  *prometheus.CounterVec
 	utxoConsumedTotal *prometheus.CounterVec
 	certificatesTotal *prometheus.CounterVec
+	// commitBatchBlocks observes len(nextBatch) each time
+	// ledgerReadChainIterator submits a gathered batch of blocks downstream
+	// for a single DB transaction (batchSize caps it at 50). Added
+	// alongside the dingo#4464 premature-flush fix so a future run can
+	// confirm the batch-size distribution actually shifted upward, rather
+	// than relying on re-measuring physical disk I/O.
+	commitBatchBlocks prometheus.Histogram
 }
 
 // The accessors below tolerate an uninitialised stateMetrics. A LedgerState
 // built directly -- as the ledger's own unit tests do -- never calls init, so
 // its metric fields are nil; instrumenting a path that those tests exercise
 // must not turn a metric into a nil dereference.
+
+// observeCommitBatchBlocks records one gathered batch's block count; see
+// commitBatchBlocks. Passes that gather nothing are not observed at all --
+// see the call site in ledgerReadChainIterator.
+func (m *stateMetrics) observeCommitBatchBlocks(blocks int) {
+	if m == nil || m.commitBatchBlocks == nil {
+		return
+	}
+	m.commitBatchBlocks.Observe(float64(blocks))
+}
 
 func (m *stateMetrics) observeLeaderThresholdMargin(margin float64) {
 	if m == nil || m.leaderThresholdMargin == nil {
@@ -947,7 +964,7 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	m.blockPipelineBlocksValidated = promautoFactory.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "dingo_ledger_block_pipeline_blocks_validated",
-			Help: "cumulative blocks that passed the block-processing pipeline's VRF/KES validate stage; 0 unless blockPipelineValidateEnabled is set",
+			Help: "cumulative blocks that passed the block-processing pipeline's VRF/KES/OpCert validate stage; 0 unless blockPipelineValidateEnabled is set",
 		},
 	)
 	m.blockPipelineDecodeErrors = promautoFactory.NewGauge(
@@ -959,7 +976,7 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	m.blockPipelineValidationErrors = promautoFactory.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "dingo_ledger_block_pipeline_validation_errors",
-			Help: "cumulative block-processing pipeline VRF/KES validation failures, including expected Byron-era non-validation",
+			Help: "cumulative block-processing pipeline VRF/KES/OpCert validation failures, including expected Byron-era non-validation",
 		},
 	)
 	m.blockPipelineQueueDepth = promautoFactory.NewGauge(
@@ -1047,5 +1064,18 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 			Help: "certificates in applied blocks, by era",
 		},
 		[]string{"era"},
+	)
+	m.commitBatchBlocks = promautoFactory.NewHistogram(
+		prometheus.HistogramOpts{
+			Name: "dingo_ledger_commit_batch_blocks",
+			Help: "blocks gathered into one batch by the chain-read loop before it is submitted for a single DB transaction; batchSize (50) is the cap. A distribution clustered well below the cap during bulk sync means batches are flushing prematurely (see dingo#4464).",
+			// Explicit buckets rather than exponential/linear: batchSize
+			// caps this at 50, and the values worth distinguishing are
+			// small (the premature-flush symptom) versus close to the cap
+			// (healthy batching), not a smooth curve between them.
+			Buckets: []float64{
+				1, 2, 3, 5, 8, 10, 15, 20, 25, 30, 35, 40, 45, 50,
+			},
+		},
 	)
 }

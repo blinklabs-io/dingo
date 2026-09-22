@@ -55,6 +55,18 @@ const (
 // something rather than filling in for free.
 const NoStartEra = "none"
 
+// AlonzoPParamsUnitGateName is the node_settings_gate row that records the
+// unit used by persisted Alonzo protocol parameters.
+const AlonzoPParamsUnitGateName = "alonzo_pparams_unit"
+
+// AlonzoPParamsUnitWordV1 records Alonzo parameters whose lovelace-per-UTxO
+// value retains the genesis word unit until the Babbage transition.
+const AlonzoPParamsUnitWordV1 = "word-v1"
+
+// AlonzoPParamsUnitLegacyByteV0 records Alonzo parameters whose
+// lovelace-per-UTxO value was converted to bytes before persistence.
+const AlonzoPParamsUnitLegacyByteV0 = "legacy-byte-v0"
+
 // EncodeLatchBool renders a LatchBool value. carried is the associated
 // setting, such as a pledge leverage factor, and is empty for gates that
 // carry nothing.

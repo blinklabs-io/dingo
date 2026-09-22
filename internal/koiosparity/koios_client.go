@@ -62,6 +62,50 @@ const (
 
 	koiosRetryBackoff5xx = 2 * time.Second
 
+	// koios408MaxRetriesDefault/koios408InitialBackoffDefault/
+	// koios408MaxBackoffDefault give HTTP 408 ("Request Time-out") its own,
+	// much longer retry budget than koiosMaxRetries/koiosRetryBackoff5xx
+	// (dingo #4486). 408 means the upstream (or an intermediate gateway --
+	// the observed incident's body was the literal
+	// "<h1>408 Request Time-out</h1>") took too long to answer *this*
+	// request; it says nothing about whether the next one will succeed,
+	// unlike the 400/404/422/401/403 class the fallthrough in get()/post()
+	// still treats as permanent. The dingo #4486 incident saw Koios degrade
+	// for close to an hour; koiosMaxRetries's budget (3 attempts, exhausting
+	// in a few minutes even combined with burst-429 cooldowns) gives up long
+	// before a real outage like that clears -- and under
+	// --koios-parity-strict=true, that premature give-up is what took the
+	// node down.
+	//
+	// The shape is a capped exponential backoff bounded by attempt count,
+	// not wall-clock elapsed time, so it stays finite and its progress is
+	// observable (each retry is logged -- see get()/post()) instead of one
+	// huge, silent sleep. With today's defaults (16 attempts, 15 backoff
+	// waits, 20s initial, 5m cap) the wait sequence is 20s, 40s, 80s, 160s,
+	// then eleven waits at the 5-minute cap: 20+40+80+160=300s plus
+	// 11*300s=3300s is 3600s -- 60 minutes total before giving up, chosen to
+	// match the incident's own degraded-window length rather than an
+	// arbitrary smaller number.
+	//
+	// Exhausting the budget returns ErrKoiosPermanent, where an exhausted
+	// 5xx budget returns a plain error. That asymmetry is deliberate and is
+	// about the layer above: Observer.fetchPoolsIfNeeded/
+	// fetchAccountsIfNeeded/fetchParamsWithRetry retry a non-permanent
+	// error FetchRetryAttempts times (5 by default) and return a permanent
+	// one immediately, so a non-permanent 408 exhaustion would multiply
+	// this 60-minute budget into a five-hour stall. ErrKoiosPermanent caps
+	// the total wait at one budget. It does not change the eventual
+	// outcome: Observer.fail fires FatalFunc in strict mode for either
+	// error class once the observer stops retrying.
+	//
+	// Exposed as KoiosClient fields (koios408MaxRetries/
+	// koios408InitialBackoff/koios408MaxBackoff) defaulted from these
+	// constants in NewKoiosClient, so tests can shrink the budget instead of
+	// paying the real wall-clock cost.
+	koios408MaxRetriesDefault     = 16
+	koios408InitialBackoffDefault = 20 * time.Second
+	koios408MaxBackoffDefault     = 5 * time.Minute
+
 	// koiosAccountChunkSize bounds how many stake addresses go into a single
 	// /account_reward_history POST request. Koios does not document a hard
 	// limit on the _stake_addresses array for this endpoint, so this is a
@@ -285,6 +329,15 @@ type KoiosClient struct {
 	apiKey  string
 	http    *http.Client
 	limiter *burstLimiter
+
+	// koios408MaxRetries/koios408InitialBackoff/koios408MaxBackoff configure
+	// the extended 408 retry budget -- see the koios408*Default constants'
+	// doc comment for the reasoning. NewKoiosClient defaults these to the
+	// package constants; tests override them directly to avoid paying the
+	// real wall-clock budget.
+	koios408MaxRetries     int
+	koios408InitialBackoff time.Duration
+	koios408MaxBackoff     time.Duration
 }
 
 // validateKoiosNetwork rejects any network this tool doesn't support
@@ -366,7 +419,10 @@ func NewKoiosClient(
 		// Public and Free tiers share the 100/10s burst cap; Pro/Premium are
 		// higher, but we don't learn the tier from the key alone, so stay at
 		// the Free-safe ceiling for every client on the public host.
-		limiter: newBurstLimiter(burstLimit, koiosBurstWindow),
+		limiter:                newBurstLimiter(burstLimit, koiosBurstWindow),
+		koios408MaxRetries:     koios408MaxRetriesDefault,
+		koios408InitialBackoff: koios408InitialBackoffDefault,
+		koios408MaxBackoff:     koios408MaxBackoffDefault,
 	}, nil
 }
 
@@ -624,6 +680,31 @@ func waitCtx(ctx context.Context, d time.Duration) error {
 	}
 }
 
+// koios408BackoffDelay returns the wait before the 408 retry that follows
+// attempt (0-based). It doubles from initial and caps at maxDelay -- see
+// koios408MaxRetriesDefault's doc comment for why 408 gets this shape
+// instead of koiosRetryBackoff5xx's flat multiply-by-attempt.
+func koios408BackoffDelay(
+	attempt int,
+	initial, maxDelay time.Duration,
+) time.Duration {
+	if attempt <= 0 {
+		if initial > maxDelay {
+			return maxDelay
+		}
+		return initial
+	}
+	// attempt is bounded by koios408MaxRetries, a small caller-controlled
+	// constant (16 by default), so this shift cannot overflow even from an
+	// initial in the tens-of-seconds range; delay <= 0 defends against it
+	// anyway rather than relying on that bound alone.
+	delay := initial << uint(attempt)
+	if delay <= 0 || delay > maxDelay {
+		return maxDelay
+	}
+	return delay
+}
+
 // koiosResponse is a fully-drained Koios HTTP response: the body is read out
 // and the underlying connection closed before get() returns, so callers never
 // need to manage resp.Body themselves and a body read failure can be retried
@@ -672,8 +753,10 @@ func readBodyLimited(r io.Reader) ([]byte, error) {
 }
 
 // get executes a GET request against the Koios API with optional Range header,
-// retrying transport errors, 5xx responses, burst 429s, and body-read failures.
-// rangeStart/rangeEnd < 0 means no Range header.
+// retrying transport errors, 5xx responses, burst 429s, body-read failures,
+// and 408 request timeouts (the last via its own, much longer backoff budget
+// -- see koios408MaxRetriesDefault's doc comment). rangeStart/rangeEnd < 0
+// means no Range header.
 //
 // The body is read to completion inside the retry loop (not left to the
 // caller) so a connection that drops mid-transfer — after a successful status
@@ -708,18 +791,32 @@ func (k *KoiosClient) get(
 		return fmt.Errorf(failFmt, failArgs...)
 	}
 
-	for attempt := range koiosMaxRetries {
+	// The two retryable classifications count their own attempts, because a
+	// shared counter is not a shared budget: a degraded Koios window mixes
+	// 408s with 502/503s, and charging the 408 retries against
+	// koiosMaxRetries made the first interleaved 5xx fail the whole request
+	// after about a minute -- collapsing the 408 budget this fix exists to
+	// provide. otherAttempt is the transport/5xx/429/body-read counter that
+	// retryOrFail bounds at koiosMaxRetries; timeoutAttempt is the 408
+	// counter bounded at k.koios408MaxRetries. The loop bound is their sum,
+	// so exhausting both in one call still cannot fall out of the loop.
+	otherAttempt := 0
+	timeoutAttempt := 0
+	maxAttempts := koiosMaxRetries + k.koios408MaxRetries
+
+	for range maxAttempts {
 		if err := k.limiter.wait(ctx); err != nil {
 			return nil, err
 		}
 		resp, doErr := k.http.Do(req.Clone(ctx))
 		if doErr != nil {
-			if err := retryOrFail(attempt,
-				koiosRetryBackoff5xx*time.Duration(attempt+1),
+			if err := retryOrFail(otherAttempt,
+				koiosRetryBackoff5xx*time.Duration(otherAttempt+1),
 				"koios GET %s: %w", path, doErr,
 			); err != nil {
 				return nil, err
 			}
+			otherAttempt++
 			continue
 		}
 		// http.Client.Do guarantees non-nil resp when err is nil, but nilaway
@@ -741,12 +838,13 @@ func (k *KoiosClient) get(
 			// Treat any other body-read failure (e.g. connection reset
 			// mid-transfer) exactly like a transport error: it's transient
 			// and safe to retry.
-			if err := retryOrFail(attempt,
-				koiosRetryBackoff5xx*time.Duration(attempt+1),
+			if err := retryOrFail(otherAttempt,
+				koiosRetryBackoff5xx*time.Duration(otherAttempt+1),
 				"koios GET %s: read body: %w", path, readErr,
 			); err != nil {
 				return nil, err
 			}
+			otherAttempt++
 			continue
 		}
 
@@ -768,12 +866,13 @@ func (k *KoiosClient) get(
 			}
 			// Burst 429: OpenAPI documents a ~60s sleep for the IP; honour
 			// Retry-After when the gateway sends it.
-			if err := retryOrFail(attempt, retryAfterDelay(resp),
+			if err := retryOrFail(otherAttempt, retryAfterDelay(resp),
 				"koios burst rate-limited after %d retries on %s (Public/Free = %d req/%s; wait ~%s between bursts): %s",
 				koiosMaxRetries, path, koiosBurstLimitPublic, koiosBurstWindow, koiosBurstCooldown, bodyStr,
 			); err != nil {
 				return nil, err
 			}
+			otherAttempt++
 			continue
 		}
 		if resp.StatusCode >= 500 {
@@ -781,21 +880,64 @@ func (k *KoiosClient) get(
 			// hiccup (e.g. 503 "No server is available to handle this
 			// request"), not a permanent rejection of the request — retry
 			// with backoff like a transport error instead of failing fast.
-			if err := retryOrFail(attempt,
-				koiosRetryBackoff5xx*time.Duration(attempt+1),
+			if err := retryOrFail(otherAttempt,
+				koiosRetryBackoff5xx*time.Duration(otherAttempt+1),
 				"koios server error after %d retries on %s: status %d body: %s",
 				koiosMaxRetries, path, resp.StatusCode, strings.TrimSpace(string(body)),
 			); err != nil {
 				return nil, err
 			}
+			otherAttempt++
 			continue
+		}
+		if resp.StatusCode == http.StatusRequestTimeout {
+			// 408 is a gateway/upstream timeout on this specific request
+			// (dingo #4486), not a deterministic rejection of it like the
+			// 400/404/422/401/403 class below -- give it its own, much
+			// longer capped-exponential budget instead of failing fast.
+			bodyStr := strings.TrimSpace(string(body))
+			if timeoutAttempt < k.koios408MaxRetries-1 {
+				delay := koios408BackoffDelay(
+					timeoutAttempt,
+					k.koios408InitialBackoff,
+					k.koios408MaxBackoff,
+				)
+				// Logged through the package-level default rather than
+				// an injected logger: one KoiosClient serves the
+				// concurrent chunk fetchers, so it deliberately holds no
+				// logger field (dingo #3796). cmd/dingo and
+				// cmd/node-parity call slog.SetDefault before building
+				// one, and cmd/koios-parity logs through slog.Default()
+				// itself, so this lands wherever the binary's own output
+				// goes.
+				slog.Warn(
+					"koiosparity: koios request timed out (408), retrying",
+					"path", path,
+					"attempt", timeoutAttempt+1,
+					"max_retries", k.koios408MaxRetries,
+					"backoff", delay,
+				)
+				if err := waitCtx(ctx, delay); err != nil {
+					return nil, err
+				}
+				timeoutAttempt++
+				continue
+			}
+			return nil, fmt.Errorf(
+				"%w: koios GET %s: status 408 request timeout after %d retries: body: %s",
+				ErrKoiosPermanent,
+				path,
+				k.koios408MaxRetries,
+				bodyStr,
+			)
 		}
 
 		// Every other non-2xx status (401/403 auth failures, 400/404/422 bad
-		// request or unsupported query, etc.) was never retried above and
-		// will never succeed by retrying — mark it permanent so callers stop
-		// scheduling further doomed requests instead of treating it as an
-		// isolated, retryable blip.
+		// request or unsupported query, etc. -- 408 is handled above, not
+		// here) was never retried above and will never succeed by
+		// retrying — mark it permanent so callers stop scheduling further
+		// doomed requests instead of treating it as an isolated, retryable
+		// blip.
 		if resp.StatusCode != http.StatusOK &&
 			resp.StatusCode != http.StatusPartialContent {
 			return nil, fmt.Errorf(
@@ -814,18 +956,18 @@ func (k *KoiosClient) get(
 		}, nil
 	}
 	// Unreachable: every loop iteration either returns or continues; the range
-	// is bounded by koiosMaxRetries and the last iteration always returns via
+	// is bounded by maxAttempts and the last iteration always returns via
 	// retryOrFail's fail branch. Guard satisfies nilaway's nil-flow analysis.
 	return nil, errors.New("koios: internal: no response after retry loop")
 }
 
 // post executes a POST request with a JSON-encoded body against the Koios
-// API, retrying transport errors, 5xx responses, burst 429s, and body-read
-// failures with exactly the same policy as get() (see get()'s doc comment
-// for the retry/classification rationale) — the only structural difference
-// is that a POST body must be rebuilt fresh on every attempt (a
-// bytes.Reader, once drained by http.Client.Do, cannot be replayed the way
-// get()'s bodyless request can via req.Clone).
+// API, retrying transport errors, 5xx responses, burst 429s, body-read
+// failures, and 408 request timeouts with exactly the same policy as get()
+// (see get()'s doc comment for the retry/classification rationale) — the
+// only structural difference is that a POST body must be rebuilt fresh on
+// every attempt (a bytes.Reader, once drained by http.Client.Do, cannot be
+// replayed the way get()'s bodyless request can via req.Clone).
 func (k *KoiosClient) post(
 	ctx context.Context,
 	path string,
@@ -849,7 +991,13 @@ func (k *KoiosClient) post(
 		return fmt.Errorf(failFmt, failArgs...)
 	}
 
-	for attempt := range koiosMaxRetries {
+	// See get()'s identical comment for why each classification counts its
+	// own attempts and why the loop bound is their sum.
+	otherAttempt := 0
+	timeoutAttempt := 0
+	maxAttempts := koiosMaxRetries + k.koios408MaxRetries
+
+	for range maxAttempts {
 		if err := k.limiter.wait(ctx); err != nil {
 			return nil, err
 		}
@@ -874,12 +1022,13 @@ func (k *KoiosClient) post(
 
 		resp, doErr := k.http.Do(req)
 		if doErr != nil {
-			if err := retryOrFail(attempt,
-				koiosRetryBackoff5xx*time.Duration(attempt+1),
+			if err := retryOrFail(otherAttempt,
+				koiosRetryBackoff5xx*time.Duration(otherAttempt+1),
 				"koios POST %s: %w", path, doErr,
 			); err != nil {
 				return nil, err
 			}
+			otherAttempt++
 			continue
 		}
 		if resp == nil {
@@ -896,12 +1045,13 @@ func (k *KoiosClient) post(
 				// a transient blip — never retry it (see readBodyLimited).
 				return nil, fmt.Errorf("koios POST %s: %w", path, readErr)
 			}
-			if err := retryOrFail(attempt,
-				koiosRetryBackoff5xx*time.Duration(attempt+1),
+			if err := retryOrFail(otherAttempt,
+				koiosRetryBackoff5xx*time.Duration(otherAttempt+1),
 				"koios POST %s: read body: %w", path, readErr,
 			); err != nil {
 				return nil, err
 			}
+			otherAttempt++
 			continue
 		}
 
@@ -920,23 +1070,57 @@ func (k *KoiosClient) post(
 					hint,
 				)
 			}
-			if err := retryOrFail(attempt, retryAfterDelay(resp),
+			if err := retryOrFail(otherAttempt, retryAfterDelay(resp),
 				"koios burst rate-limited after %d retries on %s (Public/Free = %d req/%s; wait ~%s between bursts): %s",
 				koiosMaxRetries, path, koiosBurstLimitPublic, koiosBurstWindow, koiosBurstCooldown, bodyStr,
 			); err != nil {
 				return nil, err
 			}
+			otherAttempt++
 			continue
 		}
 		if resp.StatusCode >= 500 {
-			if err := retryOrFail(attempt,
-				koiosRetryBackoff5xx*time.Duration(attempt+1),
+			if err := retryOrFail(otherAttempt,
+				koiosRetryBackoff5xx*time.Duration(otherAttempt+1),
 				"koios server error after %d retries on %s: status %d body: %s",
 				koiosMaxRetries, path, resp.StatusCode, strings.TrimSpace(string(body)),
 			); err != nil {
 				return nil, err
 			}
+			otherAttempt++
 			continue
+		}
+		if resp.StatusCode == http.StatusRequestTimeout {
+			// See get()'s identical branch for the classification rationale.
+			bodyStr := strings.TrimSpace(string(body))
+			if timeoutAttempt < k.koios408MaxRetries-1 {
+				delay := koios408BackoffDelay(
+					timeoutAttempt,
+					k.koios408InitialBackoff,
+					k.koios408MaxBackoff,
+				)
+				// See get()'s identical branch for why this logs through
+				// the package-level default.
+				slog.Warn(
+					"koiosparity: koios request timed out (408), retrying",
+					"path", path,
+					"attempt", timeoutAttempt+1,
+					"max_retries", k.koios408MaxRetries,
+					"backoff", delay,
+				)
+				if err := waitCtx(ctx, delay); err != nil {
+					return nil, err
+				}
+				timeoutAttempt++
+				continue
+			}
+			return nil, fmt.Errorf(
+				"%w: koios POST %s: status 408 request timeout after %d retries: body: %s",
+				ErrKoiosPermanent,
+				path,
+				k.koios408MaxRetries,
+				bodyStr,
+			)
 		}
 
 		if resp.StatusCode != http.StatusOK &&

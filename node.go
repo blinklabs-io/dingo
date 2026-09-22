@@ -34,6 +34,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
@@ -51,6 +52,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/node/ledgerpeers"
 	"github.com/blinklabs-io/dingo/internal/offchainmetadata"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
+	"github.com/blinklabs-io/dingo/kesagent"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/leader"
@@ -109,8 +111,16 @@ type Node struct {
 	// ouroborosConfig retains the settings half of the config Run built, so a
 	// live restore can reconstruct ouroboros against rebuilt dependencies
 	// without recomputing them and drifting from Run.
-	ouroborosConfig              ouroborosPkg.OuroborosConfig
-	blockForger                  *forging.BlockForger
+	ouroborosConfig ouroborosPkg.OuroborosConfig
+	blockForger     *forging.BlockForger
+	// kesAgentClient is set when shelleyKESAgentSocket is configured, in
+	// either serve-key or sign mode. validateBlockProducerStartup owns
+	// dialing/closing it (closing the prior one before replacing it, so a
+	// live-lifecycle rebuild via reinitializeBlockProducer cannot leak a
+	// connection); node_shutdown.go closes it during graceful shutdown.
+	kesAgentClient               *kesagent.Client
+	kesAgentCancel               context.CancelFunc
+	kesAgentMetrics              *kesagent.Metrics
 	leaderElection               *leader.Election
 	rtsMetrics                   *rtsMetrics
 	shutdownFuncs                []func(context.Context) error
@@ -609,6 +619,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			HotTxEntries:    n.config.cacheHotTxEntries,
 			HotTxMaxBytes:   n.config.cacheHotTxMaxBytes,
 		},
+		AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
+			n.config.cardanoNodeConfig, "", n.config.network,
+		),
 	}
 	db, err := database.New(dbConfig, stores)
 	if db == nil {
@@ -770,28 +783,8 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		if err := n.ledgerState.RecoverCommitTimestampConflict(); err != nil {
 			return fmt.Errorf("failed to recover database: %w", err)
 		}
-		// The deferred phase 1 pass: database.New returned before ever
-		// calling CheckNodeSettings on this path (checkCommitTimestamp
-		// fails first, and New returns its error immediately rather than
-		// continuing on to phase 1), so storage_mode, network,
-		// network_magic, start_era, and the plugin selections have not
-		// been validated or persisted for this startup at all. The
-		// database is consistent now that recovery has completed, so it
-		// is safe to run that check here, before the deferred phase 2
-		// pass below.
-		n.config.logger.Info("running deferred node settings phase 1 check")
-		if err := n.db.CheckNodeSettings(); err != nil {
-			return fmt.Errorf("node settings phase 1: %w", err)
-		}
-		// The deferred phase 2 pass from above: the database is
-		// consistent now, so a gate mismatch can no longer be confused
-		// with the repair that just ran. This still lands before history
-		// expiry, the Midnight indexer, and every network listener below,
-		// so it completes before anything can apply a block or act on a
-		// ledger feature flag phase 2 would have rejected.
-		n.config.logger.Info("running deferred node settings gate enforcement")
-		if err := n.db.EnforceNodeSettings(n.nodeSettingsGateValues()); err != nil {
-			return fmt.Errorf("node settings: %w", err)
+		if err := n.enforceRecoveredNodeSettings(); err != nil {
+			return err
 		}
 	}
 
@@ -852,15 +845,6 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// are required: the indexer depends on the api-mode indexes to function,
 	// and storage mode alone is no longer sufficient to start it (an api-mode
 	// deployment may not want Midnight indexing at all).
-	//
-	// Registered on the cleanup stack at both points below. OnceFunc makes
-	// whichever runs second a no-op, so the indexer is stopped exactly once
-	// however far startup got.
-	stopMidnightIndexer := sync.OnceFunc(func() {
-		if n.midnightIndexer != nil {
-			n.midnightIndexer.Stop()
-		}
-	})
 	if midnightIndexerActive(n.config.storageMode, n.config.midnight) {
 		if err := n.ledgerState.PrepareEpochCacheForStartup(); err != nil {
 			return fmt.Errorf(
@@ -879,14 +863,6 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		if err := n.midnightIndexer.Start(); err != nil {
 			return fmt.Errorf("starting midnight indexer: %w", err)
 		}
-		// Registered here as well as after the ledger state below, because
-		// Start leaves a live block-event subscription behind and every step
-		// in between can fail. On those failures only this registration is
-		// on the stack cleanupFailedStartup unwinds, so the earlier-
-		// registered (later-run) n.db.Close() no longer closes the database
-		// under an in-flight indexer write -- the use-after-close risk
-		// Indexer.Stop's doc comment describes.
-		started = append(started, stopMidnightIndexer)
 	}
 
 	// Initialize snapshot manager for stake snapshot capture and wire the
@@ -1001,10 +977,10 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			)
 		}
 	})
-	// Registered after LedgerState so it is torn down first (reverse order):
-	// midnight.Stop() → ledgerState.Close().
+	// Register midnight indexer cleanup after LedgerState so it is torn down
+	// first (reverse order): midnight.Stop() → ledgerState.Close().
 	if n.midnightIndexer != nil {
-		started = append(started, stopMidnightIndexer)
+		started = append(started, func() { n.midnightIndexer.Stop() })
 	}
 	// Capture genesis stake snapshot (epoch 0) so leader election works at epoch 2
 	if err := n.snapshotMgr.CaptureGenesisSnapshot(ctx); err != nil {
@@ -1312,19 +1288,6 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if err != nil {
 		return fmt.Errorf("failed to construct ouroboros: %w", err)
 	}
-	// The asynchronous Leios endorser-block persistence writer, the EventBus
-	// subscriptions ouroboros makes on its own behalf, and its Prometheus
-	// collectors are all released by Close. Registering it on both the
-	// unwind stack and a defer covers startup failure and graceful shutdown;
-	// Close is idempotent.
-	//
-	// Published and registered before the handlers are attached below, so
-	// nothing the constructor already owns is stranded by a wiring failure
-	// there. Nothing dereferences the instance in between: the peer governor
-	// and connection manager that resolve it are started further down.
-	n.ouroborosRef.Store(ouro)
-	defer func() { _ = n.ouroboros().Close() }()
-	started = append(started, func() { _ = n.ouroboros().Close() })
 	// The Leios managers were started earlier in Run, before this instance
 	// existed, so their handlers are attached here rather than at their own
 	// construction. reinitializeNetworkingCore does the same after its
@@ -1332,6 +1295,14 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if err := n.attachLeiosHandlers(ouro); err != nil {
 		return err
 	}
+	n.ouroborosRef.Store(ouro)
+	// The asynchronous Leios endorser-block persistence writer, the EventBus
+	// subscriptions ouroboros makes on its own behalf, and its Prometheus
+	// collectors are all released by Close. Registering it on both the
+	// unwind stack and a defer covers startup failure and graceful shutdown;
+	// Close is idempotent.
+	defer func() { _ = n.ouroboros().Close() }()
+	started = append(started, func() { _ = n.ouroboros().Close() })
 	// A closure, not a method value, even though n.ouroboros already exists
 	// here: a live restore replaces the instance, and a method value would
 	// pin this subscription to the replaced one forever, so outbound
@@ -1703,10 +1674,62 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 
 	// Initialize block forger if production mode is enabled
 	if n.config.blockProducer {
-		//nolint:contextcheck // n.ctx is the node's lifecycle context, correct parent for forger
-		started, err = n.startBlockProducer(n.ctx, started)
+		creds, err := n.validateBlockProducerStartup()
 		if err != nil {
-			return err
+			return fmt.Errorf(
+				"block producer startup validation failed: %w",
+				err,
+			)
+		}
+		// Registered before the checks below, not after the forger is
+		// built: validateBlockProducerStartup may have dialled a KES agent
+		// and started its serve-key loop, and every step between here and
+		// the end of this block can fail. Registering afterwards left that
+		// client and its background loop outside the rollback stack. Every
+		// stop in the closure is nil-guarded, so it is safe this early.
+		started = append(started, func() {
+			if n.blockForger != nil {
+				n.blockForger.Stop()
+			}
+			n.closeKESAgentClient()
+			if n.leaderElection != nil {
+				logErrIfNotNil(
+					n.config.logger,
+					"failed to stop leader election during cleanup",
+					n.leaderElection.Stop(),
+				)
+			}
+		})
+		// Cross-check loaded credentials against ledger state. Mismatch
+		// against on-chain pool registration is fatal; "not yet
+		// registered" is a warning so operators can stage credentials
+		// before submitting the registration cert.
+		if err := n.validateBlockProducerLedger(creds); err != nil {
+			return fmt.Errorf(
+				"block producer credentials failed ledger check: %w",
+				err,
+			)
+		}
+		//nolint:contextcheck // n.ctx is the node's lifecycle context, correct parent for forger
+		if err := n.initBlockForger(n.ctx, creds); err != nil {
+			return fmt.Errorf("failed to initialize block forger: %w", err)
+		}
+		// Enable Leios vote emission when a vote signing key is
+		// configured (experimental, leios mode only)
+		if err := n.enableLeiosVoting(creds); err != nil {
+			return fmt.Errorf("failed to enable leios voting: %w", err)
+		}
+		// Wire forger's slot tracker into ledger state for slot
+		// battle detection. The forger is created after the ledger
+		// state, so we use the late-binding setter.
+		if n.blockForger != nil {
+			n.ledgerState.SetForgedBlockChecker(
+				n.blockForger.SlotTracker(),
+			)
+			n.ledgerState.SetForgingEnabled(true)
+			n.ledgerState.SetSlotBattleRecorder(
+				n.blockForger,
+			)
 		}
 	}
 
@@ -2080,11 +2103,9 @@ func (n *Node) subscribeChainSelectorEvents() {
 
 // nodeSettingsGateValues assembles the phase 2 gate values -- the era
 // genesis hashes and the ledger-semantics gates -- from n.config, for
-// EnforceNodeSettings. It is called from two sites in Run: once for the
-// normal startup path, and once for the deferred pass that runs
-// immediately after RecoverCommitTimestampConflict when recovery was
-// needed. Factored out so both sites build the same map from a single
-// definition rather than two copies that could drift.
+// EnforceNodeSettings. Normal startup and the shared post-recovery helper use
+// the same map so ordinary Run and live restore/truncate reinitialization
+// cannot drift.
 func (n *Node) nodeSettingsGateValues() nodesettings.Values {
 	gateValues := nodesettings.Values{
 		// The two validation taints live here, not in phase 1. Only full
@@ -2125,6 +2146,23 @@ func (n *Node) nodeSettingsGateValues() nodesettings.Values {
 		gateValues["dijkstra_genesis_hash"] = nodeCfg.DijkstraGenesisHash
 	}
 	return gateValues
+}
+
+// enforceRecoveredNodeSettings runs both settings phases after commit-
+// timestamp recovery. database.New returns before phase 1 on that path, and
+// phase 2 is deliberately deferred until storage is consistent. Both normal
+// startup and live restore/truncate reinitialization call this helper so
+// neither recovery route can resume against an incompatible database.
+func (n *Node) enforceRecoveredNodeSettings() error {
+	n.config.logger.Info("running deferred node settings phase 1 check")
+	if err := n.db.CheckNodeSettings(); err != nil {
+		return fmt.Errorf("node settings phase 1: %w", err)
+	}
+	n.config.logger.Info("running deferred node settings gate enforcement")
+	if err := n.db.EnforceNodeSettings(n.nodeSettingsGateValues()); err != nil {
+		return fmt.Errorf("node settings: %w", err)
+	}
+	return nil
 }
 
 // backfillRewardLiveStake repairs databases created before the live reward
