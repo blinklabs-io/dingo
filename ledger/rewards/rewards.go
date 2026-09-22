@@ -1085,6 +1085,15 @@ func calculatePoolRewards(
 		pool.Pledge > pool.OwnerStake {
 		return ret, nil
 	}
+	// mkPoolRewardInfo (Cardano.Ledger.Shelley.Rewards.hs) returns Left,
+	// excluding the pool from reward construction entirely, when the pool made
+	// no blocks this epoch. apparentPerformance alone does not encode that: it
+	// returns 1 once d >= 4/5 regardless of blocksProduced, matching
+	// mkApparentPerformance exactly, so without this guard a zero-block pool
+	// would be credited the pool's optimalReward instead of nothing (dingo#3978).
+	if pool.BlocksProduced == 0 {
+		return ret, nil
+	}
 
 	ret.ApparentPerformance = apparentPerformance(
 		params.Decentralization,

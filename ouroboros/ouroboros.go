@@ -129,6 +129,7 @@ type Ouroboros struct {
 	// (blinklabs-io/dingo#382), read by localstatequeryServerQuery, and
 	// cleared by localstatequeryServerRelease and on connection close.
 	localstatequeryAcquiredPoints map[ouroboros.ConnectionId]ledger.QueryPoint
+	localstatequeryOwners         map[ouroboros.ConnectionId]*olocalstatequery.Server
 	localstatequeryAcquireMutex   sync.Mutex
 	blockfetchNoBlocksCounts      map[ouroboros.ConnectionId]blockfetchNoBlocksState
 	// ChainSync measurement tracking for peer scoring
@@ -195,9 +196,12 @@ type Ouroboros struct {
 	// The chainsync server callback owns gouroboros's receive loop while it
 	// runs, so Protocol.DoneChan() cannot close underneath it; the release
 	// signal has to come from connmanager's per-connection ErrorChan watcher
-	// instead (see ReleaseLeiosServeWaiters).
-	leiosServeWaiters   map[ouroboros.ConnectionId][]chan struct{}
-	leiosServeWaitersMu sync.Mutex
+	// instead. Live close handling uses ReleaseLeiosServeWaitersOwner so a
+	// delayed callback cannot release a replacement connection's waiter.
+	leiosServeWaiters      map[ouroboros.ConnectionId][]leiosServeWaiter
+	leiosServeWaitersMu    sync.Mutex
+	leiosNotifyObservers   map[*oleiosnotify.Server]struct{}
+	leiosNotifyObserversMu sync.Mutex
 	// NtC CertRB closure-resolution metrics.
 	leiosMetrics *leiosMetrics
 
@@ -493,6 +497,9 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		localstatequeryAcquiredPoints: make(
 			map[ouroboros.ConnectionId]ledger.QueryPoint,
 		),
+		localstatequeryOwners: make(
+			map[ouroboros.ConnectionId]*olocalstatequery.Server,
+		),
 		blockfetchNoBlocksCounts: make(
 			map[ouroboros.ConnectionId]blockfetchNoBlocksState,
 		),
@@ -511,7 +518,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		leiosEndorserBlocks:      make(map[string]*leiosEndorserBlockData),
 		leiosClosureWaiters:      make(map[string][]chan struct{}),
 		leiosServeWaiters: make(
-			map[ouroboros.ConnectionId][]chan struct{},
+			map[ouroboros.ConnectionId][]leiosServeWaiter,
 		),
 		leiosEBLog:                 newLeiosForgedEBLog(),
 		leiosAnnouncements:         make(map[string]leiosAnnouncement),
@@ -863,9 +870,10 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 		o.peerGov.UpdatePeerConnectionStability(connId, 0.0)
 	}
 
-	// Remove any chainsync client state
+	// Remove outbound chainsync selection state. Server-side state is removed
+	// by the connection-owner callback so a delayed close cannot delete a
+	// replacement connection that shares the same ConnectionId.
 	if o.chainsyncState != nil {
-		o.chainsyncState.RemoveClient(connId)
 		o.chainsyncState.RemoveClientConnId(connId)
 	}
 	// Remove mempool consumer
@@ -877,11 +885,6 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	delete(o.blockFetchStarts, connId)
 	delete(o.blockfetchNoBlocksCounts, connId)
 	o.blockFetchMutex.Unlock()
-	// Clean up any LocalStateQuery acquired point: a client that disconnects
-	// without a clean Release must not leak its map entry.
-	o.localstatequeryAcquireMutex.Lock()
-	delete(o.localstatequeryAcquiredPoints, connId)
-	o.localstatequeryAcquireMutex.Unlock()
 	// Clean up chainsync stats
 	o.chainsyncMutex.Lock()
 	delete(o.chainsyncStats, connId)

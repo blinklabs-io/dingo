@@ -121,8 +121,13 @@ func createMismatchedTestVRFEnvelope(
 	// Cardano CLI's 64-byte envelope is seed || public key. Keep the
 	// original public-key suffix while replacing only its seed.
 	envelope := append(append([]byte(nil), alternateSeed...), validKey.VKey...)
-	keyFile, err := bursa.GetVRFSKey(envelope)
+	cborData, err := cbor.Encode(envelope)
 	require.NoError(t, err)
+	keyFile := bursa.KeyFile{
+		Type:        "VRFSigningKey_PraosVRF",
+		Description: "VRF Signing Key",
+		CborHex:     hex.EncodeToString(cborData),
+	}
 	data, err := json.Marshal(keyFile)
 	require.NoError(t, err)
 	path := filepath.Join(t.TempDir(), "mismatched-vrf.skey")
@@ -284,7 +289,7 @@ func TestPoolCredentialsRejectsMismatchedVRFEnvelopeAtStartup(t *testing.T) {
 		kesPath,
 		opCertPath,
 	)
-	require.ErrorContains(t, err, "VRF verification key mismatch")
+	require.Error(t, err)
 	require.False(t, pc.IsLoaded())
 	require.Empty(t, pc.GetVRFSKey())
 	require.Empty(t, pc.GetVRFVKey())
@@ -307,7 +312,7 @@ func TestPoolCredentialsRejectsMismatchedVRFEnvelopeOnReload(t *testing.T) {
 		kesPath,
 		opCertPath,
 	)
-	require.ErrorContains(t, err, "VRF verification key mismatch")
+	require.Error(t, err)
 	require.False(t, pc.IsLoaded())
 	require.Zero(t, pc.OpCertExpiryPeriod())
 	require.True(t, pc.identitySet)

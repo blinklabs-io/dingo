@@ -1291,8 +1291,14 @@ func TestSpliceEndorserTxsIntoDijkstraBlockFillsCertRB(t *testing.T) {
 	require.Len(t, origBody, 4)
 	require.Len(t, mergedBody, 4)
 	require.Equal(t, []byte(origBody[0]), []byte(mergedBody[0]))
-	require.Equal(t, []byte(origBody[2]), []byte(mergedBody[2]))
 	require.Equal(t, []byte(origBody[3]), []byte(mergedBody[3]))
+	// The certificate segment is cleared, not preserved: CIP-0164 forbids a
+	// body carrying both a certificate and transactions.
+	require.NotEqual(t, []byte(origBody[2]), []byte(mergedBody[2]))
+	var mergedCert any
+	_, err = cbor.Decode(mergedBody[2], &mergedCert)
+	require.NoError(t, err)
+	require.Nil(t, mergedCert)
 
 	var mergedTxs []cbor.RawMessage
 	_, err = cbor.Decode(mergedBody[1], &mergedTxs)
@@ -1307,6 +1313,19 @@ func TestSpliceEndorserTxsIntoDijkstraBlockFillsCertRB(t *testing.T) {
 	// where clients trust the node and do not re-verify the body hash.
 	_, err = gdijkstra.NewDijkstraBlockFromCbor(merged)
 	require.ErrorContains(t, err, "body hash")
+
+	// The stale body hash must be the ONLY thing standing between a client and
+	// the merged block. gouroboros raises the CIP-0164
+	// certificate-or-transactions violation inside
+	// DijkstraBlockBody.UnmarshalCBOR, where no VerifyConfig Skip field reaches
+	// it, so a body carrying both would be undecodable rather than merely
+	// body-hash-stale and no client could read what the node serves.
+	decoded, err := gdijkstra.NewDijkstraBlockFromCbor(
+		merged,
+		lcommon.VerifyConfig{SkipBodyHashValidation: true},
+	)
+	require.NoError(t, err)
+	require.Len(t, decoded.Transactions(), 2)
 }
 
 func TestSpliceEndorserTxsRejectsBlockWithExistingTxs(t *testing.T) {
@@ -1431,7 +1450,7 @@ func TestServeLeiosRankingBlockCborDisconnectsOnUnresolvedCertifiedBlock(
 	certRB := testDijkstraCertRBRaw(t, 5, make([]byte, lcommon.Blake2b256Size))
 	block := models.Block{Cbor: certRB, Slot: 5, Hash: []byte{0x05}}
 
-	got, err := o.serveLeiosRankingBlockCbor(block, gouroboros.ConnectionId{})
+	got, err := o.serveLeiosRankingBlockCbor(block, gouroboros.ConnectionId{}, nil)
 	require.Error(t, err)
 	require.ErrorIs(t, err, errLeiosClosureUnresolved)
 	require.Nil(t, got)
@@ -1447,7 +1466,7 @@ func TestServeLeiosRankingBlockCborServesRawForNonCertifiedBlock(t *testing.T) {
 	_, blockRaw := testDijkstraBlockRaw(t, 6)
 	block := models.Block{Cbor: blockRaw, Slot: 6, Hash: []byte{0x06}}
 
-	got, err := o.serveLeiosRankingBlockCbor(block, gouroboros.ConnectionId{})
+	got, err := o.serveLeiosRankingBlockCbor(block, gouroboros.ConnectionId{}, nil)
 	require.NoError(t, err)
 	require.Equal(t, []byte(blockRaw), got)
 }
@@ -1644,6 +1663,7 @@ func TestServeLeiosCertRbWithWaitErrorsOnTimeout(t *testing.T) {
 		ebHash,
 		77,
 		gouroboros.ConnectionId{},
+		nil,
 	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, errLeiosClosureUnresolved)

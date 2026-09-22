@@ -153,8 +153,9 @@ type replayRecoveryCandidate struct {
 	ProducerBlock models.Block
 	RollbackPoint ocommon.Point
 	Strategy      string
-	// ProducerUnresolved distinguishes the security-parameter fallback from
-	// strategies that found a concrete producer. Strategy remains a log label.
+	// ProducerUnresolved reports that at least one failing input had no
+	// resolvable producer, whichever candidate supplied the rollback anchor.
+	// It gates the primary-chain rewind; Strategy remains a log label.
 	ProducerUnresolved bool
 }
 
@@ -240,12 +241,14 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 		ls.config.ChainManager != nil
 	rewindPoint := candidate.RollbackPoint
 	replayHolding := false
+	wasReplayHolding := false
 	primaryChainAlreadyHeld := false
 	var ledgerTip ochainsync.Tip
 	if rewindPrimaryChain {
 		ls.RLock()
 		ledgerTip = ls.currentTip
 		ls.RUnlock()
+		wasReplayHolding = ls.replayRecoveryHolding
 		replayHolding = ls.observeReplayRecoveryTip(ledgerTip.Point.Slot)
 		if replayHolding {
 			rewindPoint = ledgerTip.Point
@@ -335,26 +338,47 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 		ls.publishReplayRecoveryNonConvergingResync(rewindPoint)
 	}
 	primaryChainRewound := false
-	if rewindPrimaryChain && !primaryChainAlreadyHeld {
-		if err := ls.rewindPrimaryChainForRecovery(
+	err = ls.withConsumedUtxoPruneBoundary(func() error {
+		if err := ls.checkReplayRecoveryRollbackFloor(rewindPoint); err != nil {
+			return err
+		}
+		if rewindPrimaryChain && !primaryChainAlreadyHeld {
+			if err := ls.rewindPrimaryChainForRecovery(rewindPoint); err != nil {
+				return fmt.Errorf(
+					"rewind primary chain for replay recovery: %w",
+					err,
+				)
+			}
+			primaryChainRewound = true
+		}
+		// The chain moves first while the rollback anchor is guaranteed to
+		// remain available. If metadata synchronization fails, the primary
+		// chain is still at a retained point and reconciliation can finish.
+		// The cycle that first starts holding at an unchanged tip repairs the
+		// metadata the failed block left above it; the cycles that keep
+		// holding at that same tip reuse what it restored.
+		if err := ls.rollbackWithOptions(
 			rewindPoint,
+			replayHolding && !wasReplayHolding &&
+				pointMatches(rewindPoint, ledgerTip.Point),
+			true,
 		); err != nil {
-			return false, fmt.Errorf(
-				"rewind primary chain for replay recovery: %w",
+			return fmt.Errorf(
+				"rollback ledger state for replay recovery: %w",
 				err,
 			)
 		}
-		primaryChainRewound = true
-	}
-	// The chain moves first while the rollback anchor is guaranteed to remain
-	// available. If metadata synchronization fails, the primary chain is still
-	// at a valid retained point and the standard divergence reconciler can
-	// finish rolling metadata back to its common ancestor.
-	if err := ls.rollback(rewindPoint); err != nil {
-		return false, fmt.Errorf(
-			"rollback ledger state for replay recovery: %w",
-			err,
-		)
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, ErrRollbackBelowUtxoPruneFloor) {
+			// The peer's block requires state older than the retained UTxO
+			// history. Rotate the ChainSync intersection instead of returning
+			// an error that would retry the same peer and target.
+			ls.publishReplayRecoveryPruneFloorResync(rewindPoint)
+			return true, nil
+		}
+		return false, err
 	}
 	// Arm only when the corrective primary-chain rewind actually happened and
 	// metadata now sits at that same point. A replay target ahead of the
@@ -366,6 +390,40 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 		ls.armContinuationAudit(rewindPoint, "replay recovery rewind")
 	}
 	return true, nil
+}
+
+// checkReplayRecoveryRollbackFloor preserves the refuse-before-chain-moves
+// invariant for recovery paths that rewind the primary chain before rolling
+// back ledger metadata. The metadata rollback has the same guard, but it is
+// too late to protect the primary chain from being truncated first.
+func (ls *LedgerState) checkReplayRecoveryRollbackFloor(
+	point ocommon.Point,
+) error {
+	ls.RLock()
+	currentTip := ls.currentTip
+	ls.RUnlock()
+	resolved, err := ls.resolveRollbackTarget(point, currentTip)
+	if err != nil {
+		return fmt.Errorf("resolve replay recovery rollback target: %w", err)
+	}
+	belowPruneFloor, pruneFloor, err := ls.rollbackBelowConsumedUtxoPruneFloor(
+		resolved,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"check replay recovery rollback against consumed UTxO prune floor: %w",
+			err,
+		)
+	}
+	if belowPruneFloor {
+		return fmt.Errorf(
+			"replay recovery rollback target slot %d is below consumed UTxO prune floor %d: %w",
+			resolved.Slot,
+			pruneFloor,
+			ErrRollbackBelowUtxoPruneFloor,
+		)
+	}
+	return nil
 }
 
 // isDeterministicTxValidationError identifies validation failures that cannot
@@ -738,20 +796,41 @@ func (ls *LedgerState) recoverFromDeterministicTxValidationError(
 			validationErr.Cause,
 		)
 	}
-	if err := ls.rewindPrimaryChainForRecovery(rewindPoint); err != nil {
-		if errors.Is(err, chain.ErrRollbackPointNotOnChain) {
-			return true, nil
+	yielded := false
+	err := ls.withConsumedUtxoPruneBoundary(func() error {
+		if err := ls.checkReplayRecoveryRollbackFloor(rewindPoint); err != nil {
+			return err
 		}
-		return false, fmt.Errorf(
-			"rewind primary chain after deterministic transaction validation failure: %w",
-			err,
-		)
+		if err := ls.rewindPrimaryChainForRecovery(rewindPoint); err != nil {
+			if errors.Is(err, chain.ErrRollbackPointNotOnChain) {
+				yielded = true
+				return nil
+			}
+			return fmt.Errorf(
+				"rewind primary chain after deterministic transaction validation failure: %w",
+				err,
+			)
+		}
+		// The first rejection of this block at this tip repairs the metadata
+		// the failed apply left above it; the redelivery that the resync
+		// latch already records reuses what that repair restored.
+		if err := ls.rollbackWithOptions(
+			rewindPoint,
+			!resyncSpent && pointMatches(rewindPoint, ledgerTip.Point),
+			true,
+		); err != nil {
+			return fmt.Errorf(
+				"rollback ledger state after deterministic transaction validation failure: %w",
+				err,
+			)
+		}
+		return nil
+	})
+	if err != nil {
+		return false, err
 	}
-	if err := ls.rollback(rewindPoint); err != nil {
-		return false, fmt.Errorf(
-			"rollback ledger state after deterministic transaction validation failure: %w",
-			err,
-		)
+	if yielded {
+		return true, nil
 	}
 	if resyncSpent {
 		if ls.config.Logger != nil {
@@ -842,6 +921,25 @@ func (ls *LedgerState) resetReplayRecoveryNonProgress(newTipSlot uint64) {
 func (ls *LedgerState) publishReplayRecoveryNonConvergingResync(
 	point ocommon.Point,
 ) {
+	ls.publishReplayRecoveryResync(
+		point,
+		event.ChainsyncResyncReasonReplayRecoveryNonConverging,
+	)
+}
+
+func (ls *LedgerState) publishReplayRecoveryPruneFloorResync(
+	point ocommon.Point,
+) {
+	ls.publishReplayRecoveryResync(
+		point,
+		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+	)
+}
+
+func (ls *LedgerState) publishReplayRecoveryResync(
+	point ocommon.Point,
+	reason string,
+) {
 	if ls.config.EventBus == nil {
 		return
 	}
@@ -857,9 +955,8 @@ func (ls *LedgerState) publishReplayRecoveryNonConvergingResync(
 			event.ChainsyncResyncEventType,
 			event.ChainsyncResyncEvent{
 				ConnectionId: activeConnId,
-				Reason: event.
-					ChainsyncResyncReasonReplayRecoveryNonConverging,
-				Point: point,
+				Reason:       reason,
+				Point:        point,
 			},
 		),
 	)
@@ -893,8 +990,13 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 	if securityParam <= 0 {
 		return false, chain.ErrSecurityParamNotConfigured
 	}
+	var pending pendingPublishes
+	defer pending.flush()
+	pending.drainChain(ls.chain)
 	// Keep every Undo enqueue and its corresponding chain truncation atomic
 	// with respect to a block-apply commit's AfterCommit Apply publication.
+	ls.chainsyncBlockfetchMutex.Lock()
+	defer ls.chainsyncBlockfetchMutex.Unlock()
 	ls.transactionEventMutex.Lock()
 	defer ls.transactionEventMutex.Unlock()
 
@@ -926,6 +1028,9 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 		nonConvergingSteps int
 	)
 	for {
+		if ls.beforeWindowedRewindStep != nil {
+			ls.beforeWindowedRewindStep()
+		}
 		tip := ls.chain.Tip()
 		if tip.Point.Slot == point.Slot &&
 			bytes.Equal(tip.Point.Hash, point.Hash) {
@@ -987,7 +1092,7 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 			}
 			return committed, stepErr(err)
 		}
-		if err := ls.chain.Rollback(next); err != nil {
+		if _, err := ls.chain.RollbackDeferred(next); err != nil {
 			if !emitted &&
 				errors.Is(err, chain.ErrRollbackExceedsSecurityParam) &&
 				overKRetries < maxWindowedRewindRetries {
@@ -1454,6 +1559,50 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 			}
 		}
 	}
+	// Never target a point below the consumed-UTxO prune floor. The sweep
+	// hard-deletes spent rows at or below tip-stabilityWindow, while each
+	// escalating attempt rewinds a further stability window below the
+	// *already lowered* tip -- so successive attempts walk past a floor that
+	// stays fixed at the highest tip the node reached.
+	// database.TruncateAfterSlot restores spent UTxOs with an UPDATE keyed on
+	// deleted_slot, which cannot reach a row that no longer exists, so such a
+	// target moves the tip and reports a repair while leaving the live set
+	// short of every output consumed above it. Blocks the node already applied
+	// cleanly then fail to resolve their inputs, which drives the next, deeper
+	// rewind: the descent that ends at the Mithril anchor with a halted
+	// pipeline (issue #3766).
+	//
+	// Fall back to the ledger tip, which is always at or above the floor and
+	// is what attempt 1 uses. Recovery keeps its non-destructive lever -- a
+	// fresh intersection so peer rotation can offer a different candidate
+	// chain -- and loses only a rewind that could not have repaired anything.
+	belowPruneFloor, pruneFloor, floorErr := ls.rollbackBelowConsumedUtxoPruneFloor(
+		rewindPoint,
+	)
+	if floorErr != nil {
+		ls.config.Logger.Error(
+			"failed to read consumed UTxO prune floor, using ledger tip as the rewind target",
+			"component", "ledger",
+			"rewind_target_slot", rewindPoint.Slot,
+			"error", floorErr.Error(),
+		)
+		rewindPoint = ledgerTip.Point
+	} else if belowPruneFloor {
+		ls.metrics.atTipRecoveryPruneFloorClamped.Inc()
+		ls.config.Logger.Warn(
+			"at-tip recovery rewind target is below the consumed UTxO prune floor, holding at ledger tip instead",
+			"component", "ledger",
+			"tx_hash", hex.EncodeToString(validationErr.TxHash),
+			"failing_block_slot", validationErr.BlockPoint.Slot,
+			"requested_rewind_slot", rewindPoint.Slot,
+			"utxo_prune_floor_slot", pruneFloor,
+			"ledger_tip_slot", ledgerTip.Point.Slot,
+			"attempt", attempts,
+			"hint",
+			"UTxOs consumed above the prune floor were hard-deleted and cannot be restored by a rewind",
+		)
+		rewindPoint = ledgerTip.Point
+	}
 	if ls.recoveryRollbackExceedsMithrilBoundary(rewindPoint) {
 		if err := ls.rejectAtTipRecoveryAtMithrilBoundary(
 			validationErr,
@@ -1501,43 +1650,61 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 		"attempt", attempts,
 		"holding", ls.atTipRecoveryHolding,
 	)
-	if err := ls.rewindPrimaryChainForRecovery(
-		rewindPoint,
-	); err != nil {
-		return false, fmt.Errorf(
-			"rewind primary chain after validation failure: %w",
-			err,
-		)
-	}
-	// Roll back the ledger metadata state to the rewind point. Without
-	// this, the chain is pruned to rewindPoint but the UTxO database
-	// still reflects the failing block's post-apply state — consumed
-	// inputs stay consumed, created outputs stay created. When peers
-	// re-deliver the block we just rewound past, ledger validation
-	// looks up its inputs, finds them already marked consumed, and
-	// fails UtxoValidateBadInputsUtxo and
-	// UtxoValidateValueNotConservedUtxo ("bad input(s)" and "value not
-	// conserved (consumed 0)") again, looping the recovery indefinitely
-	// until process restart. Primary-chain rollback only touches the
-	// chain store — the matching ledger rollback must be explicit.
-	//
-	// Match on the rule names above, not on the number the wrapped error
-	// prints. That number is this era's index into the upstream
-	// gouroboros validation-rule slice, so it shifts whenever upstream
-	// inserts or reorders a rule -- twice in recent memory: v0.202.5
-	// inserted UtxoValidateRequiredRedeemers (22/24 became 29/32) and
-	// v0.202.6 inserted UtxoValidateCurrentTreasuryValue at index 0,
-	// shifting everything by one again (29/32 became 30/33). On the
-	// currently pinned v0.202.6 they print as rule 30 and rule 33, but
-	// treat that as a fact about the pin rather than about the rules, and
-	// re-measure after any gouroboros bump instead of trusting this line.
-	// Stale numbers here have twice pointed diagnosis at the wrong root
-	// cause (#3165, #3678).
-	if err := ls.rollback(rewindPoint); err != nil {
-		return false, fmt.Errorf(
-			"rollback ledger state after validation failure: %w",
-			err,
-		)
+	// The first recovery at a tip may need to repair metadata left behind by
+	// the failed block. Repeating the same failure at the same tip does not:
+	// the first repair already restored every UTxO above that tip, while
+	// re-running it would turn the retry loop into a full database rollback.
+	repairSameTip := !isSameFailure && pointMatches(rewindPoint, ledgerTip.Point)
+	err := ls.withConsumedUtxoPruneBoundary(func() error {
+		if err := ls.checkReplayRecoveryRollbackFloor(rewindPoint); err != nil {
+			return err
+		}
+		if err := ls.rewindPrimaryChainForRecovery(
+			rewindPoint,
+		); err != nil {
+			return fmt.Errorf(
+				"rewind primary chain after validation failure: %w",
+				err,
+			)
+		}
+		// Roll back the ledger metadata state to the rewind point. Without
+		// this, the chain is pruned to rewindPoint but the UTxO database
+		// still reflects the failing block's post-apply state — consumed
+		// inputs stay consumed, created outputs stay created. When peers
+		// re-deliver the block we just rewound past, ledger validation
+		// looks up its inputs, finds them already marked consumed, and
+		// fails UtxoValidateBadInputsUtxo and
+		// UtxoValidateValueNotConservedUtxo ("bad input(s)" and "value not
+		// conserved (consumed 0)") again, looping the recovery indefinitely
+		// until process restart. Primary-chain rollback only touches the
+		// chain store — the matching ledger rollback must be explicit.
+		//
+		// Match on the rule names above, not on the number the wrapped error
+		// prints. That number is this era's index into the upstream
+		// gouroboros validation-rule slice, so it shifts whenever upstream
+		// inserts or reorders a rule -- twice in recent memory: v0.202.5
+		// inserted UtxoValidateRequiredRedeemers (22/24 became 29/32) and
+		// v0.202.6 inserted UtxoValidateCurrentTreasuryValue at index 0,
+		// shifting everything by one again (29/32 became 30/33). On the
+		// currently pinned v0.202.6 they print as rule 30 and rule 33, but
+		// treat that as a fact about the pin rather than about the rules, and
+		// re-measure after any gouroboros bump instead of trusting this line.
+		// Stale numbers here have twice pointed diagnosis at the wrong root
+		// cause (#3165, #3678).
+		if err := ls.rollbackWithOptions(
+			rewindPoint,
+			repairSameTip,
+			true,
+		); err != nil {
+			return fmt.Errorf(
+				"rollback ledger state after validation failure: %w",
+				err,
+			)
+		}
+		return nil
+	})
+	if err != nil {
+		return false, err
 	}
 	if ls.config.EventBus != nil {
 		ls.config.EventBus.Publish(
@@ -1687,11 +1854,19 @@ func (ls *LedgerState) rejectRecoveryAtMithrilBoundary(
 		return fmt.Errorf("%s: %w", errContext, errHaltLedgerPipeline)
 	}
 	logRejection(mithrilLedgerSlot, rewindPoint)
-	if err := ls.rewindPrimaryChainForRecovery(rewindPoint); err != nil {
-		return fmt.Errorf(
-			"rewind primary chain to Mithril trust boundary: %w",
-			err,
-		)
+	if err := ls.withConsumedUtxoPruneBoundary(func() error {
+		if err := ls.checkReplayRecoveryRollbackFloor(rewindPoint); err != nil {
+			return err
+		}
+		if err := ls.rewindPrimaryChainForRecovery(rewindPoint); err != nil {
+			return fmt.Errorf(
+				"rewind primary chain to Mithril trust boundary: %w",
+				err,
+			)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	rejections, exhausted := ls.observeMithrilBoundaryRejection(
 		rewindPoint.Slot,
@@ -1821,6 +1996,25 @@ func (ls *LedgerState) findReplayRecoveryCandidate(
 			resolved.ProducerBlock,
 		)
 		if err != nil {
+			if errors.Is(err, models.ErrBlockNotFound) {
+				// The transaction metadata identifies a producer, but its
+				// parent is outside the locally retained chain. Treat the
+				// provenance as unresolved so the bounded security-parameter
+				// fallback can choose a safe local anchor.
+				if ls.config.Logger != nil {
+					ls.config.Logger.Warn(
+						"replay recovery producer parent is missing from the local block store",
+						"component", "ledger",
+						"producer_block_hash",
+						hex.EncodeToString(resolved.ProducerBlock.Hash),
+						"producer_block_slot", resolved.ProducerBlock.Slot,
+						"producer_parent_hash",
+						hex.EncodeToString(resolved.ProducerBlock.PrevHash),
+					)
+				}
+				unresolvedInputs = append(unresolvedInputs, resolved.Input)
+				continue
+			}
 			return nil, err
 		}
 		if candidate == nil ||
@@ -1859,6 +2053,13 @@ func (ls *LedgerState) findReplayRecoveryCandidate(
 		if fallbackCandidate != nil && (candidate == nil ||
 			fallbackCandidate.ProducerBlock.Slot < candidate.ProducerBlock.Slot) {
 			candidate = fallbackCandidate
+		} else if candidate != nil {
+			// The deeper known producer keeps the rollback anchor, but an
+			// input with no resolvable provenance still requires the primary
+			// chain rewind. Keyed on the surviving candidate rather than on
+			// fallbackCandidate, which is nil whenever the bounded fallback
+			// found no retained anchor.
+			candidate.ProducerUnresolved = true
 		}
 	}
 	return candidate, nil
@@ -1991,28 +2192,47 @@ func (ls *LedgerState) resolveReplayRecoveryProducer(
 	}
 	if producerTx != nil && len(producerTx.BlockHash) > 0 {
 		producerBlock, err := database.BlockByHash(ls.db, producerTx.BlockHash)
-		if err != nil {
+		switch {
+		case err == nil:
+			if producerBlock.Slot >= pending.MaxSlot {
+				return nil, false, nil
+			}
+			tx := ls.replayRecoveryResolveTxFromBlock(
+				producerBlock,
+				pending.Input.Id().Bytes(),
+				chainIndex,
+			)
+			return &replayRecoveryResolvedProducer{
+				Input:         pending.Input,
+				ProducerTx:    producerTx,
+				ProducerBlock: producerBlock,
+				Tx:            tx,
+				Strategy:      "metadata",
+			}, false, nil
+		case errors.Is(err, models.ErrBlockNotFound):
+			// The transaction index names a producer block the block store
+			// no longer holds, the same dangling reference a pruned prefix
+			// leaves on a producer's parent. Fall through to the tx blob
+			// and, failing that, report the input as unresolved so the
+			// bounded fallback picks a retained anchor.
+			if ls.config.Logger != nil {
+				ls.config.Logger.Warn(
+					"replay recovery producer block is missing from the local block store",
+					"component", "ledger",
+					"producer_tx_hash",
+					hex.EncodeToString(producerTx.Hash),
+					"producer_block_hash",
+					hex.EncodeToString(producerTx.BlockHash),
+					"producer_block_slot", producerTx.Slot,
+				)
+			}
+		default:
 			return nil, false, fmt.Errorf(
 				"lookup producer block %x: %w",
 				producerTx.BlockHash,
 				err,
 			)
 		}
-		if producerBlock.Slot >= pending.MaxSlot {
-			return nil, false, nil
-		}
-		tx := ls.replayRecoveryResolveTxFromBlock(
-			producerBlock,
-			pending.Input.Id().Bytes(),
-			chainIndex,
-		)
-		return &replayRecoveryResolvedProducer{
-			Input:         pending.Input,
-			ProducerTx:    producerTx,
-			ProducerBlock: producerBlock,
-			Tx:            tx,
-			Strategy:      "metadata",
-		}, false, nil
 	}
 	producerBlock, found, err := ls.replayRecoveryBlockFromTxBlob(
 		pending.Input.Id().Bytes(),
@@ -2120,6 +2340,13 @@ func (ls *LedgerState) replayRecoveryFallbackCandidate(
 	}
 	anchorBlock, err := ls.db.BlockByIndex(targetIndex, nil)
 	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			// A pruned prefix can put the security-parameter target below
+			// the retained block store. There is no safe local anchor to
+			// return in that case; let the caller continue without replay
+			// recovery rather than inventing a rollback point.
+			return nil, nil
+		}
 		return nil, fmt.Errorf(
 			"lookup replay fallback block %d: %w",
 			targetIndex,
@@ -2128,6 +2355,12 @@ func (ls *LedgerState) replayRecoveryFallbackCandidate(
 	}
 	rollbackPoint, err := ls.replayRecoveryParentPoint(anchorBlock)
 	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			// The retained anchor itself has no retained parent. Without a
+			// real parent point, rolling back would require guessing across
+			// the retention or trust boundary.
+			return nil, nil
+		}
 		return nil, err
 	}
 	return &replayRecoveryCandidate{
@@ -2218,6 +2451,21 @@ func (ls *LedgerState) replayRecoveryBlockFromTxBlob(
 
 	block, err := database.BlockByPoint(ls.db, point)
 	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			// The tx blob offset names a block the block store no longer
+			// holds. Report it as not found rather than as an error, so the
+			// caller treats the input as unresolved.
+			if ls.config.Logger != nil {
+				ls.config.Logger.Warn(
+					"replay recovery tx blob names a block missing from the local block store",
+					"component", "ledger",
+					"tx_hash", hex.EncodeToString(txHash),
+					"block_slot", point.Slot,
+					"block_hash", hex.EncodeToString(point.Hash),
+				)
+			}
+			return models.Block{}, false, nil
+		}
 		return models.Block{}, false, fmt.Errorf(
 			"lookup producer block from tx blob %s: %w",
 			hex.EncodeToString(txHash),

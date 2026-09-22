@@ -233,6 +233,437 @@ func TestTryRecoverFromTxValidationErrorRollsBackToEarliestProducerParent(
 	assert.Equal(t, parentTip, dbTip)
 }
 
+func TestFindReplayRecoveryCandidateFallsBackWhenProducerParentIsMissing(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+
+	anchorBlock := testRawBlock("missing-parent-anchor", 80, 1, nil)
+	parentBlock := testRawBlock(
+		"missing-parent", 100, 2, anchorBlock.Hash,
+	)
+	producerBlock := testRawBlock(
+		"missing-producer-parent",
+		120,
+		3,
+		parentBlock.Hash,
+	)
+	currentBlock := testRawBlock(
+		"missing-parent-current",
+		140,
+		4,
+		producerBlock.Hash,
+	)
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks(
+		[]chain.RawBlock{anchorBlock, parentBlock, producerBlock, currentBlock},
+	))
+	storedParent, err := database.BlockByHash(db, parentBlock.Hash)
+	require.NoError(t, err)
+	txn := db.BlobTxn(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return database.BlockDeleteTxn(txn, storedParent)
+	}))
+
+	nodeConfig := newTestShelleyGenesisCfg(t)
+	nodeConfig.ShelleyGenesis().SecurityParam = 3
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: nodeConfig,
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	ls.currentEra.Id = 1
+	require.NoError(t, cm.SetLedger(ls))
+	ls.metrics.init(prometheus.NewRegistry())
+
+	currentTip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(currentBlock.Slot, currentBlock.Hash),
+		BlockNumber: currentBlock.BlockNumber,
+	}
+	require.NoError(t, db.SetTip(currentTip, nil))
+	ls.currentTip = currentTip
+	ls.publishSnapshotsLocked()
+
+	producerTxHash := testHashBytes("producer-with-missing-parent")
+	seedReplayRecoveryTransaction(
+		t, db, producerTxHash, producerBlock.Hash, producerBlock.Slot,
+	)
+	candidate, err := ls.findReplayRecoveryCandidate(&txValidationError{
+		BlockPoint: currentTip.Point,
+		TxHash:     testHashBytes("missing-parent-failure"),
+		Inputs: []lcommon.TransactionInput{
+			&replayRecoveryInput{txId: producerTxHash, index: 0},
+		},
+		Cause: errors.New("bad input"),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, candidate)
+	assert.Equal(t, "security-param-fallback", candidate.Strategy)
+	assert.Equal(t, anchorBlock.Hash, candidate.ProducerBlock.Hash)
+}
+
+func TestFindReplayRecoveryCandidateHandlesPrunedFallbackTail(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name          string
+		securityParam int
+	}{
+		{name: "producer parent missing", securityParam: 1},
+		{name: "fallback index missing", securityParam: 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+			require.NoError(t, err)
+			cm, err := chain.NewManager(db, nil)
+			require.NoError(t, err)
+
+			blocks := []chain.RawBlock{
+				testRawBlock("pruned-tail-one", 80, 1, nil),
+				testRawBlock("pruned-tail-two", 100, 2, nil),
+				testRawBlock("pruned-tail-three", 120, 3, nil),
+				testRawBlock("pruned-tail-producer", 140, 4, nil),
+				testRawBlock("pruned-tail-current", 160, 5, nil),
+			}
+			for i := 1; i < len(blocks); i++ {
+				blocks[i].PrevHash = blocks[i-1].Hash
+			}
+			require.NoError(t, cm.PrimaryChain().AddRawBlocks(blocks))
+
+			stored := make([]models.Block, 3)
+			for i := range stored {
+				stored[i], err = database.BlockByHash(db, blocks[i].Hash)
+				require.NoError(t, err)
+			}
+			txn := db.BlobTxn(true)
+			require.NoError(t, txn.Do(func(txn *database.Txn) error {
+				for _, block := range stored {
+					if err := database.BlockDeleteTxn(txn, block); err != nil {
+						return err
+					}
+				}
+				return nil
+			}))
+
+			nodeConfig := newTestShelleyGenesisCfg(t)
+			nodeConfig.ShelleyGenesis().SecurityParam = tc.securityParam
+			ls, err := NewLedgerState(LedgerStateConfig{
+				Database:          db,
+				ChainManager:      cm,
+				CardanoNodeConfig: nodeConfig,
+				Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			})
+			require.NoError(t, err)
+			ls.currentEra.Id = 1
+			require.NoError(t, cm.SetLedger(ls))
+			ls.metrics.init(prometheus.NewRegistry())
+
+			currentTip := ochainsync.Tip{
+				Point:       ocommon.NewPoint(blocks[4].Slot, blocks[4].Hash),
+				BlockNumber: blocks[4].BlockNumber,
+			}
+			require.NoError(t, db.SetTip(currentTip, nil))
+			ls.currentTip = currentTip
+			ls.publishSnapshotsLocked()
+
+			producerTxHash := testHashBytes("pruned-tail-producer-tx")
+			seedReplayRecoveryTransaction(
+				t,
+				db,
+				producerTxHash,
+				blocks[3].Hash,
+				blocks[3].Slot,
+			)
+			candidate, err := ls.findReplayRecoveryCandidate(&txValidationError{
+				BlockPoint: currentTip.Point,
+				TxHash:     testHashBytes("pruned-tail-failure"),
+				Inputs: []lcommon.TransactionInput{
+					&replayRecoveryInput{txId: producerTxHash, index: 0},
+				},
+				Cause: errors.New("bad input"),
+			})
+			require.NoError(t, err)
+			require.Nil(t, candidate)
+		})
+	}
+}
+
+// TestFindReplayRecoveryCandidateFlagsUnresolvedWithoutLocalFallbackAnchor
+// pins the primary-chain rewind for the topology a pruned prefix creates: one
+// failing input resolves to a retained producer while another has no recorded
+// provenance, and the bounded security-parameter fallback finds no retained
+// anchor at all. The surviving metadata candidate supplies the rollback point,
+// but ProducerUnresolved must still be set, because it is what gates the
+// primary-chain rewind, the non-converging hold and the resync escape.
+func TestFindReplayRecoveryCandidateFlagsUnresolvedWithoutLocalFallbackAnchor(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	for _, securityParam := range []int{2, 3, 4, 5} {
+		t.Run(fmt.Sprintf("security param %d", securityParam), func(t *testing.T) {
+			t.Parallel()
+
+			db, err := dbtest.NewDatabase(
+				t,
+				&database.Config{DataDir: t.TempDir()},
+			)
+			require.NoError(t, err)
+			cm, err := chain.NewManager(db, nil)
+			require.NoError(t, err)
+
+			blocks := []chain.RawBlock{
+				testRawBlock("no-anchor-one", 80, 1, nil),
+				testRawBlock("no-anchor-two", 100, 2, nil),
+				testRawBlock("no-anchor-three", 120, 3, nil),
+				testRawBlock("no-anchor-producer", 140, 4, nil),
+				testRawBlock("no-anchor-current", 160, 5, nil),
+			}
+			for i := 1; i < len(blocks); i++ {
+				blocks[i].PrevHash = blocks[i-1].Hash
+			}
+			require.NoError(t, cm.PrimaryChain().AddRawBlocks(blocks))
+
+			// Prune the first two blocks, leaving the producer's own parent
+			// retained but every fallback anchor index below the window.
+			pruned := make([]models.Block, 2)
+			for i := range pruned {
+				pruned[i], err = database.BlockByHash(db, blocks[i].Hash)
+				require.NoError(t, err)
+			}
+			txn := db.BlobTxn(true)
+			require.NoError(t, txn.Do(func(txn *database.Txn) error {
+				for _, block := range pruned {
+					if err := database.BlockDeleteTxn(txn, block); err != nil {
+						return err
+					}
+				}
+				return nil
+			}))
+
+			nodeConfig := newTestShelleyGenesisCfg(t)
+			nodeConfig.ShelleyGenesis().SecurityParam = securityParam
+			ls, err := NewLedgerState(LedgerStateConfig{
+				Database:          db,
+				ChainManager:      cm,
+				CardanoNodeConfig: nodeConfig,
+				Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			})
+			require.NoError(t, err)
+			ls.currentEra.Id = 1
+			require.NoError(t, cm.SetLedger(ls))
+			ls.metrics.init(prometheus.NewRegistry())
+
+			currentTip := ochainsync.Tip{
+				Point:       ocommon.NewPoint(blocks[4].Slot, blocks[4].Hash),
+				BlockNumber: blocks[4].BlockNumber,
+			}
+			require.NoError(t, db.SetTip(currentTip, nil))
+			ls.currentTip = currentTip
+			ls.publishSnapshotsLocked()
+
+			knownTxHash := testHashBytes("no-anchor-known-producer-tx")
+			seedReplayRecoveryTransaction(
+				t,
+				db,
+				knownTxHash,
+				blocks[3].Hash,
+				blocks[3].Slot,
+			)
+
+			fallback, err := ls.replayRecoveryFallbackCandidate(
+				currentTip.Point,
+				[]lcommon.TransactionInput{
+					&replayRecoveryInput{
+						txId:  testHashBytes("no-anchor-unresolved-tx"),
+						index: 0,
+					},
+				},
+			)
+			require.NoError(t, err)
+			require.Nil(t, fallback, "fixture must leave no retained fallback anchor")
+
+			candidate, err := ls.findReplayRecoveryCandidate(&txValidationError{
+				BlockPoint: currentTip.Point,
+				TxHash:     testHashBytes("no-anchor-failure"),
+				Inputs: []lcommon.TransactionInput{
+					&replayRecoveryInput{txId: knownTxHash, index: 0},
+					&replayRecoveryInput{
+						txId:  testHashBytes("no-anchor-unresolved-tx"),
+						index: 0,
+					},
+				},
+				Cause: errors.New("bad input"),
+			})
+			require.NoError(t, err)
+			require.NotNil(t, candidate)
+			assert.Equal(t, "metadata", candidate.Strategy)
+			assert.Equal(t, blocks[2].Slot, candidate.RollbackPoint.Slot)
+			assert.True(
+				t,
+				candidate.ProducerUnresolved,
+				"unresolved provenance must still force the primary-chain rewind",
+			)
+		})
+	}
+}
+
+// newPrunedProducerLedger builds a five-block primary chain, deletes the
+// producer block itself from the block store, and returns the ledger state
+// together with the chain. Deleting a block leaves both the transaction
+// metadata row and the tx blob offset pointing at it, which is the dangling
+// reference a pruned prefix produces one level below the missing parent case.
+func newPrunedProducerLedger(
+	t *testing.T,
+	db *database.Database,
+	securityParam int,
+) ([]chain.RawBlock, *LedgerState) {
+	t.Helper()
+
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	blocks := []chain.RawBlock{
+		testRawBlock("pruned-producer-one", 80, 1, nil),
+		testRawBlock("pruned-producer-two", 100, 2, nil),
+		testRawBlock("pruned-producer-three", 120, 3, nil),
+		testRawBlock("pruned-producer-four", 140, 4, nil),
+		testRawBlock("pruned-producer-current", 160, 5, nil),
+	}
+	for i := 1; i < len(blocks); i++ {
+		blocks[i].PrevHash = blocks[i-1].Hash
+	}
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks(blocks))
+
+	stored, err := database.BlockByHash(db, blocks[3].Hash)
+	require.NoError(t, err)
+	txn := db.BlobTxn(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return database.BlockDeleteTxn(txn, stored)
+	}))
+	_, err = database.BlockByHash(db, blocks[3].Hash)
+	require.ErrorIs(
+		t,
+		err,
+		models.ErrBlockNotFound,
+		"fixture must leave the producer block absent from the block store",
+	)
+
+	nodeConfig := newTestShelleyGenesisCfg(t)
+	nodeConfig.ShelleyGenesis().SecurityParam = securityParam
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: nodeConfig,
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	ls.currentEra.Id = 1
+	require.NoError(t, cm.SetLedger(ls))
+	ls.metrics.init(prometheus.NewRegistry())
+
+	currentTip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(blocks[4].Slot, blocks[4].Hash),
+		BlockNumber: blocks[4].BlockNumber,
+	}
+	require.NoError(t, db.SetTip(currentTip, nil))
+	ls.currentTip = currentTip
+	ls.publishSnapshotsLocked()
+	return blocks, ls
+}
+
+// TestFindReplayRecoveryCandidateFallsBackWhenProducerBlockIsMissing covers
+// the metadata arm of the dangling producer reference: the transaction row
+// survives the block's deletion, so the index still names a producer block
+// the block store cannot return.
+func TestFindReplayRecoveryCandidateFallsBackWhenProducerBlockIsMissing(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	blocks, ls := newPrunedProducerLedger(t, db, 2)
+
+	producerTxHash := testHashBytes("pruned-producer-metadata-tx")
+	seedReplayRecoveryTransaction(
+		t,
+		db,
+		producerTxHash,
+		blocks[3].Hash,
+		blocks[3].Slot,
+	)
+
+	candidate, err := ls.findReplayRecoveryCandidate(&txValidationError{
+		BlockPoint: ocommon.NewPoint(blocks[4].Slot, blocks[4].Hash),
+		TxHash:     testHashBytes("pruned-producer-metadata-failure"),
+		Inputs: []lcommon.TransactionInput{
+			&replayRecoveryInput{txId: producerTxHash, index: 0},
+		},
+		Cause: errors.New("bad input"),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, candidate)
+	assert.Equal(t, "security-param-fallback", candidate.Strategy)
+	assert.True(t, candidate.ProducerUnresolved)
+	assert.Equal(t, blocks[1].Slot, candidate.RollbackPoint.Slot)
+}
+
+// TestFindReplayRecoveryCandidateFallsBackWhenTxBlobBlockIsMissing covers the
+// blob arm of the same reference. DeleteBlock removes the block's blob and
+// indexes but not the tx offsets recorded against it, so the offset resolves
+// to a point the block store no longer holds.
+func TestFindReplayRecoveryCandidateFallsBackWhenTxBlobBlockIsMissing(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	blocks, ls := newPrunedProducerLedger(t, db, 2)
+
+	producerTxHash := testHashBytes("pruned-producer-blob-tx")
+	offset := &database.CborOffset{
+		BlockSlot:  blocks[3].Slot,
+		ByteOffset: 0,
+		ByteLength: 1,
+	}
+	copy(offset.BlockHash[:], blocks[3].Hash)
+	blobTxn := db.BlobTxn(true)
+	require.NoError(t, blobTxn.Do(func(txn *database.Txn) error {
+		return txn.BlobStore().
+			SetTx(txn.Blob(), producerTxHash, database.EncodeTxOffset(offset))
+	}))
+
+	// No transaction metadata row: resolution goes through the tx blob.
+	storedTx, err := db.GetTransactionByHash(producerTxHash, nil)
+	require.NoError(t, err)
+	require.Nil(t, storedTx, "fixture must not seed transaction metadata")
+
+	candidate, err := ls.findReplayRecoveryCandidate(&txValidationError{
+		BlockPoint: ocommon.NewPoint(blocks[4].Slot, blocks[4].Hash),
+		TxHash:     testHashBytes("pruned-producer-blob-failure"),
+		Inputs: []lcommon.TransactionInput{
+			&replayRecoveryInput{txId: producerTxHash, index: 0},
+		},
+		Cause: errors.New("bad input"),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, candidate)
+	assert.Equal(t, "security-param-fallback", candidate.Strategy)
+	assert.True(t, candidate.ProducerUnresolved)
+	assert.Equal(t, blocks[1].Slot, candidate.RollbackPoint.Slot)
+}
+
 func TestTryRecoverFromTxValidationErrorRejectsReplayBelowMithrilBoundary(
 	t *testing.T,
 ) {
@@ -482,13 +913,18 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 	ls.reachedTip.Store(true)
 	ls.publishSnapshotsLocked()
 
-	seedReplayRecoveryTransaction(
-		t,
-		db,
-		testHashBytes("producer-tx-live"),
-		producerBlock.Hash,
-		producerBlock.Slot,
-	)
+	producerTxHash := testHashBytes("producer-tx-live")
+	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+		TxId:      producerTxHash,
+		OutputIdx: 0,
+		AddedSlot: producerBlock.Slot,
+		Amount:    types.Uint64(100),
+	}))
+	require.NoError(t, db.MarkUtxosDeletedAtSlot(
+		nil,
+		[]types.UtxoKey{{TxId: producerTxHash, OutputIdx: 0}},
+		failingBlock.Slot,
+	))
 
 	validationErr := &txValidationError{
 		BlockPoint: ocommon.NewPoint(
@@ -510,7 +946,7 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 	// and request chainsync resync. This is the simple case — peers
 	// may switch to a different fork that is compatible with our
 	// ledger.
-	recovered, err := ls.tryRecoverFromTxValidationError(validationErr)
+	recovered, err := ls.recoverAtTipFromTxValidationError(validationErr)
 	require.NoError(t, err)
 	require.True(t, recovered)
 
@@ -525,6 +961,10 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 		ocommon.NewPoint(failingBlock.Slot, failingBlock.Hash),
 	)
 	assert.ErrorIs(t, err, models.ErrBlockNotFound)
+	utxo, err := db.Metadata().GetUtxoIncludingSpent(producerTxHash, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, utxo)
+	assert.Zero(t, utxo.DeletedSlot, "at-tip recovery must restore spent UTxOs")
 
 	// Second and third attempts: same failing (slot, block, tx).
 	// The pipeline should keep recovering with progressively deeper
@@ -532,7 +972,7 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 	// keep replaying the same losing fork and we need to expose a
 	// wider candidate set for chainselection.
 	for i := 2; i <= maxAtTipRecoveryAttempts; i++ {
-		recovered, err = ls.tryRecoverFromTxValidationError(validationErr)
+		recovered, err = ls.recoverAtTipFromTxValidationError(validationErr)
 		require.NoError(t, err, "attempt %d should still recover", i)
 		require.True(t, recovered, "attempt %d should still recover", i)
 	}
@@ -547,7 +987,7 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 	// scheduled rewind. A persistent bad candidate chain is a peer/fork
 	// selection problem; the node should keep trying fresh ChainSync
 	// connections instead of halting the ledger pipeline.
-	recovered, err = ls.tryRecoverFromTxValidationError(validationErr)
+	recovered, err = ls.recoverAtTipFromTxValidationError(validationErr)
 	require.NoError(t, err)
 	require.True(t, recovered)
 	require.NotNil(t, ls.lastAtTipRecovery)
@@ -698,6 +1138,71 @@ func TestTryRecoverFromTxValidationErrorAtTipDoesNotHoldOnSameBlockEscalation(
 		0.0,
 		promtestutil.ToFloat64(ls.metrics.atTipRecoveryNonConverging),
 	)
+}
+
+func TestAtTipRecoveryRepairsSameTipOnlyOnce(t *testing.T) {
+	t.Parallel()
+
+	ls, _ := newAtTipDescentLedger(t)
+	failure := atTipDescentFailure(500, "same-tip-repair")
+
+	generationBeforeFirst := ls.rewardInputGeneration.Load()
+	recovered, err := ls.tryRecoverFromTxValidationError(failure)
+	require.NoError(t, err)
+	require.True(t, recovered)
+	require.Greater(t, ls.rewardInputGeneration.Load(), generationBeforeFirst,
+		"the first failure at a tip must repair metadata")
+
+	generationBeforeRepeat := ls.rewardInputGeneration.Load()
+	recovered, err = ls.tryRecoverFromTxValidationError(failure)
+	require.NoError(t, err)
+	require.True(t, recovered)
+	require.Equal(t, generationBeforeRepeat, ls.rewardInputGeneration.Load(),
+		"an identical failure at the same tip must reuse the completed repair")
+}
+
+// tryRecoverFromTxValidationError tests isDeterministicTxValidationError
+// before IsAtTip, so an at-tip deterministic rejection is recovered by
+// recoverFromDeterministicTxValidationError rather than by
+// recoverAtTipFromTxValidationError. That site rewinds to the ledger tip it
+// already sits at, so it needs the same-tip repair, and the same
+// first-occurrence bound on it: the deterministic resync latch that already
+// stops peer rotation also gates the repair, so a redelivered identical
+// rejection reuses the restored state instead of re-running the sweep.
+func TestDeterministicRecoveryRepairsSameTipOnlyOnce(t *testing.T) {
+	t.Parallel()
+
+	ls := newReplayRecoveryAuditLedger(t, true)
+	ls.reachedTip.Store(true)
+	require.True(t, ls.IsAtTip())
+	failing := &txValidationError{
+		BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+		TxHash:     testHashBytes("duplicate-input-tx"),
+		Cause: shelley.DuplicateInputError{
+			Input: &replayRecoveryInput{
+				txId:  testHashBytes("duplicate-reference"),
+				index: 0,
+			},
+			InputType: "reference",
+		},
+	}
+
+	generationBeforeFirst := ls.rewardInputGeneration.Load()
+	recovered, err := ls.tryRecoverFromTxValidationError(failing)
+	require.NoError(t, err)
+	require.True(t, recovered)
+	require.Nil(t, ls.lastAtTipRecovery,
+		"the deterministic branch must be the site under test")
+	require.Greater(t, ls.rewardInputGeneration.Load(), generationBeforeFirst,
+		"the first deterministic rejection at a tip must repair metadata")
+
+	generationBeforeRepeat := ls.rewardInputGeneration.Load()
+	recovered, err = ls.tryRecoverFromTxValidationError(failing)
+	require.NoError(t, err)
+	require.True(t, recovered)
+	require.Equal(t, generationBeforeRepeat, ls.rewardInputGeneration.Load(),
+		"a redelivered identical deterministic rejection at the same tip "+
+			"must reuse the completed repair")
 }
 
 // TestTryRecoverFromTxValidationErrorAtTipResetsDescentOnForwardProgress
@@ -1596,8 +2101,8 @@ func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
 	require.False(t, ls.observeReplayRecoveryTip(ledgerTip.Point.Slot))
 	require.False(t, ls.observeReplayRecoveryTip(ledgerTip.Point.Slot))
 
-	recovered, err := ls.tryRecoverFromTxValidationError(
-		&txValidationError{
+	txErr := func() *txValidationError {
+		return &txValidationError{
 			BlockPoint: ocommon.NewPoint(
 				failingBlock.Slot,
 				failingBlock.Hash,
@@ -1610,10 +2115,15 @@ func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
 				},
 			},
 			Cause: errors.New("bad input"),
-		},
-	)
+		}
+	}
+
+	generationBeforeFirstHold := ls.rewardInputGeneration.Load()
+	recovered, err := ls.tryRecoverFromTxValidationError(txErr())
 	require.NoError(t, err)
 	require.True(t, recovered)
+	require.Greater(t, ls.rewardInputGeneration.Load(), generationBeforeFirstHold,
+		"the first held cycle must repair same-tip metadata")
 
 	require.True(t, ls.replayRecoveryHolding)
 	assert.Equal(
@@ -1643,6 +2153,13 @@ func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
 	)
 	assert.Equal(t, activeConnId.String(), freshResync.ConnectionId.String())
 	assert.Equal(t, ledgerTip.Point, freshResync.Point)
+
+	generationBeforeSecondHold := ls.rewardInputGeneration.Load()
+	recovered, err = ls.tryRecoverFromTxValidationError(txErr())
+	require.NoError(t, err)
+	require.True(t, recovered)
+	require.Equal(t, generationBeforeSecondHold, ls.rewardInputGeneration.Load(),
+		"a repeated held cycle at an unchanged tip must not repair again")
 }
 
 // newReplayRecoveryAuditLedger builds the fallback topology with an
@@ -1742,6 +2259,89 @@ func TestReplayRecoveryArmsAuditAfterPrimaryAndLedgerRewind(t *testing.T) {
 	window := ls.continuationAudit.Load()
 	require.NotNil(t, window)
 	assert.Equal(t, ls.Tip().Point, window.forkPoint)
+}
+
+func TestReplayRecoveryKeepsPrimaryRewindForDeeperKnownProducer(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls := newReplayRecoveryAuditLedger(t, true)
+	producerBlock, err := ls.db.BlockByIndex(1, nil)
+	require.NoError(t, err)
+	knownTxHash := testHashBytes("known-producer-with-unresolved-sibling")
+	seedReplayRecoveryTransaction(
+		t,
+		ls.db,
+		knownTxHash,
+		producerBlock.Hash,
+		producerBlock.Slot,
+	)
+
+	candidate, err := ls.findReplayRecoveryCandidate(&txValidationError{
+		BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+		TxHash:     testHashBytes("mixed-provenance-failure"),
+		Inputs: []lcommon.TransactionInput{
+			&replayRecoveryInput{txId: knownTxHash, index: 0},
+			&replayRecoveryInput{txId: testHashBytes("unresolved-producer"), index: 0},
+		},
+		Cause: errors.New("bad input"),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, candidate)
+	assert.Equal(t, producerBlock.Slot, candidate.ProducerBlock.Slot)
+	assert.Equal(t, uint64(0), candidate.RollbackPoint.Slot)
+	assert.Equal(t, "metadata", candidate.Strategy)
+	assert.True(t, candidate.ProducerUnresolved)
+}
+
+func TestReplayRecoveryRefusesBelowPruneFloorBeforeChainRewind(t *testing.T) {
+	ls := newReplayRecoveryAuditLedger(t, true)
+	const pruneFloorSyncKey = database.ConsumedUtxoPruneFloorSyncKey
+	require.NoError(t, ls.db.SetSyncState(pruneFloorSyncKey, "120", nil))
+	chainTipBefore := ls.chain.Tip().Point
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
+	resyncSubID := bus.SubscribeFunc(
+		event.ChainsyncResyncEventType,
+		func(evt event.Event) {
+			resync, ok := evt.Data.(event.ChainsyncResyncEvent)
+			if ok && resync.Reason ==
+				event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor {
+				resyncCh <- resync
+			}
+		},
+	)
+	t.Cleanup(func() {
+		bus.Unsubscribe(event.ChainsyncResyncEventType, resyncSubID)
+	})
+	ls.config.EventBus = bus
+
+	recovered, err := ls.tryRecoverFromTxValidationError(&txValidationError{
+		BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+		TxHash:     testHashBytes("audit-prune-floor-failing-tx"),
+		Inputs: []lcommon.TransactionInput{
+			&replayRecoveryInput{txId: testHashBytes("missing-audit-producer")},
+		},
+		Cause: errors.New("bad input"),
+	})
+
+	require.NoError(t, err)
+	require.True(t, recovered)
+	require.Equal(t, chainTipBefore, ls.chain.Tip().Point)
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		2*time.Second,
+		"replay recovery must request a fresh ChainSync intersection below the prune floor",
+	)
+	require.Less(
+		t,
+		resync.Point.Slot,
+		uint64(120),
+		"the refused replay target must remain below the persisted prune floor",
+	)
 }
 
 func TestReplayRecoveryRejectsDeterministicDuplicateInput(t *testing.T) {
@@ -1855,6 +2455,7 @@ func TestReplayRecoveryHaltsRepeatedRewardWithdrawalMismatch(t *testing.T) {
 	ls := newReplayRecoveryAuditLedger(t, true)
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Close)
+	resyncCh := deterministicResyncChannel(t, ls, bus)
 	ls.config.EventBus = bus
 	validation := func() *txValidationError {
 		return &txValidationError{
@@ -1870,6 +2471,18 @@ func TestReplayRecoveryHaltsRepeatedRewardWithdrawalMismatch(t *testing.T) {
 	recovered, err := ls.tryRecoverFromTxValidationError(validation())
 	require.NoError(t, err)
 	require.True(t, recovered)
+	// Verify the first attempt entered deterministic recovery rather than
+	// passing through an unrelated guard: it rewinds the primary chain and
+	// requests a fresh intersection at the applied ledger tip.
+	assert.Equal(t, uint64(140), ls.Tip().Point.Slot)
+	assert.Equal(t, ls.Tip().Point, ls.chain.Tip().Point)
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		testutil.AsyncWait,
+		"the first reward withdrawal mismatch must enter deterministic recovery",
+	)
+	assert.Equal(t, ls.Tip().Point, resync.Point)
 
 	recovered, err = ls.tryRecoverFromTxValidationError(validation())
 	require.ErrorIs(t, err, errHaltLedgerPipeline)
