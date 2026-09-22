@@ -16,6 +16,10 @@
 
 package badger
 
+import "time"
+
+const dirLockReleaseTimeout = 5 * time.Second
+
 // waitForDirLockRelease is a no-op on Windows: os/exec passes a child only the
 // handles it lists explicitly, so no child can inherit Badger's lock handle.
-func waitForDirLockRelease(string) {}
+func waitForDirLockRelease(string, time.Duration) bool { return true }

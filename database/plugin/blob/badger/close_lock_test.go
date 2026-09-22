@@ -24,9 +24,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestCloseReleasesDirectoryLockDuringConcurrentExec pins that Close returns
-// only once the on-disk directory lock is free, even while other goroutines
-// in the process are starting child processes.
+// TestCloseReleasesDirectoryLockDuringConcurrentExec pins that an immediate
+// reopen after Close succeeds while other goroutines in the process are
+// starting child processes.
 //
 // Badger releases its flock by closing the directory descriptor. A child
 // forked while that descriptor is open holds a copy of it until the child
