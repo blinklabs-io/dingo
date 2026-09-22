@@ -804,6 +804,14 @@ func buildDingoConfig(
 		dingo.WithShelleyOperationalCertificate(
 			cfg.ShelleyOperationalCertificate,
 		),
+		// node_forging.go gates agent-backed KES signing on a non-empty
+		// socket path, so dropping any of these three silently falls back
+		// to local-file signing on the serve path.
+		dingo.WithShelleyKESAgentSocket(cfg.ShelleyKESAgentSocket),
+		dingo.WithShelleyKESAgentMode(cfg.ShelleyKESAgentMode),
+		dingo.WithShelleyKESAgentSignTimeout(
+			cfg.ShelleyKESAgentSignTimeout,
+		),
 		dingo.WithForgeSyncToleranceSlots(
 			cfg.ForgeSyncToleranceSlots,
 		),
