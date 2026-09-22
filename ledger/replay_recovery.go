@@ -466,7 +466,7 @@ func (ls *LedgerState) checkReplayRecoveryRollbackFloor(
 // non-terminal for that duplicate verdict for exactly that reason.
 //
 // A missing redeemer is deterministic for every script purpose, spending
-// included. Four rules report it at the gouroboros v0.205.4 pin, all as the
+// included. Four rules report it at the gouroboros v0.205.7 pin, all as the
 // one common type; the conway and babbage names are aliases of
 // lcommon.MissingRedeemerForScriptError rather than distinct types, so
 // matching the common type covers all of them. Each of the four either fails
@@ -480,7 +480,7 @@ func (ls *LedgerState) checkReplayRecoveryRollbackFloor(
 //     so the rule returns InputResolutionError or ReferenceInputResolutionError
 //     instead of a verdict. Its Dijkstra sub-transaction levels resolve
 //     through resolveBodyInputs instead, which skips what it cannot resolve
-//     and leaves the failure to UtxoValidateBadInputsUtxo. At v0.205.4 it
+//     and leaves the failure to UtxoValidateBadInputsUtxo. At v0.205.7 it
 //     derives purposes from script.ScriptPurposes and reports every tag, not
 //     spend alone.
 //   - common.ValidateScriptWitnesses, behind UtxoValidateScriptWitnesses,
@@ -513,12 +513,21 @@ func (ls *LedgerState) checkReplayRecoveryRollbackFloor(
 // InputResolutionError, ReferenceInputResolutionError, and
 // shelley.BadInputsUtxoError -- which this function does not classify, so they
 // keep taking the producer-resolution rewind. conway.ExtraRedeemerError is
-// state-dependent in the opposite direction and is likewise left unclassified:
-// dijkstraWitnessRuleLevels skips a consumed input it cannot resolve, so
-// dijkstraRequiredPlutusPurposes never derives that spend purpose and
-// validateDijkstraPlutusRedeemers reads the transaction's legitimate spend
-// redeemer as extra. Resolving the input removes the verdict, which is exactly
-// what the producer-resolution rewind is for. A false-positive malformed-
+// also left unclassified, because one Go type carries emitters of both kinds
+// and errors.AsType cannot tell them apart. Every Conway-era emitter is
+// decided by the transaction alone: common.ValidateExtraneousRedeemers,
+// behind conway.UtxoValidateExtraneousRedeemers, takes no LedgerState, and
+// Dingo's validateTxPlutusConwayWithContext reads only inputs that
+// resolveConwayScriptInputs already resolved. The Dijkstra emitter is
+// state-dependent: dijkstraWitnessRuleLevels skips a consumed input it cannot
+// resolve, so dijkstraRequiredPlutusPurposes never derives that spend purpose
+// and validateDijkstraPlutusRedeemers reads the transaction's legitimate spend
+// redeemer as extra, a verdict that resolving the input removes. A
+// Conway-era extra-redeemer rejection therefore still takes the
+// producer-resolution rewind although no replay repairs it. Babbage and
+// Alonzo UtxoValidateExtraneousRedeemers return common.ExtraneousRedeemerError
+// from the same transaction-only bounds check, which is likewise
+// unclassified. A false-positive malformed-
 // script verdict must also stay non-terminal: recovery rewinds and asks chain
 // selection for another candidate rather than halting, so a locally mistaken
 // rejection still leaves the node able to follow a chain a peer later offers.
