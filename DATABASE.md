@@ -1563,6 +1563,19 @@ a different analysis.
 
 All blob plugins expose the same logical keys. Badger stores these binary keys directly. GCS and S3 hex-encode the logical key bytes into object names; S3 may prepend the configured object prefix.
 
+### Badger Close and the Directory Lock
+
+Badger holds an exclusive `flock` on its `blob` directory and releases it only
+by closing the descriptor. A child process forked while that descriptor is open
+holds a copy until its exec completes, so on Unix a concurrent `os/exec` call
+can keep the directory locked briefly after `badger.DB.Close` returns. Restore,
+truncate, and startup preflight reopen the same directory in process, so
+`BlobStoreBadger.CloseContext` does not signal completion until
+`waitForDirLockRelease` (`dirlock_unix.go`) has acquired and explicitly
+unlocked the directory, bounded at five seconds. `Close` and `Closed()`
+therefore mean the lock is free. Windows children do not inherit the handle, so
+the wait is a no-op there.
+
 ### Cross-Store Durability Contract
 
 The metadata tip and the block bytes it references live in two independently
