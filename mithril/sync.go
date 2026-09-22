@@ -304,7 +304,7 @@ type SyncConfig struct {
 	CardanoConfigPath      string                     // optional explicit config path (else the network's embedded config)
 	Backend                string                     // Mithril artifact backend; same semantics as BootstrapConfig.Backend (empty selects v2)
 	AggregatorURL          string                     // optional; defaults per-network
-	AllowInsecureHTTP      bool                       // permit plain-HTTP aggregator/artifact URLs; local dev/test only
+	AllowInsecureHTTP      bool                       // permit insecure/local destinations; local dev/test only
 	DownloadDir            string                     // optional; defaults to <DataDir>/.mithril-cache
 	DownloadIdleTimeout    string                     // optional; passed to BootstrapConfig
 	DownloadMaxIdleRetries int                        // must be >= 0
@@ -1485,6 +1485,9 @@ func openDatabase(
 		&database.Config{
 			DataDir: cfg.DataDir, Logger: logger,
 			StorageMode: cfg.StorageMode, Network: cfg.Network,
+			AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
+				cfg.CardanoNodeConfig, cfg.CardanoConfigPath, cfg.Network,
+			),
 		},
 		internalplugins.StorageSelections{
 			Blob:     storagePlugins.Blob,

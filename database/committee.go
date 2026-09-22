@@ -113,30 +113,14 @@ func (d *Database) SetCommitteeMembers(
 	members []*models.CommitteeMember,
 	txn *Txn,
 ) error {
-	owned := false
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		owned = true
-		defer func() {
-			if owned {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
-	if err := d.governanceStore().SetCommitteeMembers(
-		members, txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf("failed to set committee members: %w", err)
-	}
-	if owned {
-		if err := txn.Commit(); err != nil {
-			return fmt.Errorf(
-				"failed to commit committee members: %w", err,
-			)
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		if err := d.governanceStore().SetCommitteeMembers(
+			members, txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf("failed to set committee members: %w", err)
 		}
-		owned = false
-	}
-	return nil
+		return nil
+	})
 }
 
 // SetCommitteeQuorum stores the quorum threshold enacted with a committee.
@@ -151,31 +135,15 @@ func (d *Database) SetCommitteeQuorum(
 	if quorum.Sign() <= 0 {
 		return errors.New("committee quorum must be positive")
 	}
-	owned := false
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		owned = true
-		defer func() {
-			if owned {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
 	stored := &types.Rat{Rat: new(big.Rat).Set(quorum)}
-	if err := d.governanceStore().SetCommitteeQuorum(
-		stored, slot, txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf("failed to set committee quorum: %w", err)
-	}
-	if owned {
-		if err := txn.Commit(); err != nil {
-			return fmt.Errorf(
-				"failed to commit committee quorum: %w", err,
-			)
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		if err := d.governanceStore().SetCommitteeQuorum(
+			stored, slot, txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf("failed to set committee quorum: %w", err)
 		}
-		owned = false
-	}
-	return nil
+		return nil
+	})
 }
 
 // ClearCommitteeQuorum records at the given slot that no quorum is
@@ -186,30 +154,14 @@ func (d *Database) ClearCommitteeQuorum(
 	slot uint64,
 	txn *Txn,
 ) error {
-	owned := false
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		owned = true
-		defer func() {
-			if owned {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
-	if err := d.governanceStore().ClearCommitteeQuorum(
-		slot, txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf("failed to clear committee quorum: %w", err)
-	}
-	if owned {
-		if err := txn.Commit(); err != nil {
-			return fmt.Errorf(
-				"failed to commit cleared committee quorum: %w", err,
-			)
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		if err := d.governanceStore().ClearCommitteeQuorum(
+			slot, txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf("failed to clear committee quorum: %w", err)
 		}
-		owned = false
-	}
-	return nil
+		return nil
+	})
 }
 
 // GetCommitteeQuorum returns the latest enacted committee quorum.
@@ -275,32 +227,18 @@ func (d *Database) DeleteCommitteeMembersAfterSlot(
 	slot uint64,
 	txn *Txn,
 ) error {
-	owned := false
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		owned = true
-		defer func() {
-			if owned {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
-	if err := d.governanceStore().DeleteCommitteeMembersAfterSlot(
-		slot, txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf(
-			"failed to delete committee members after slot %d: %w",
-			slot,
-			err,
-		)
-	}
-	if owned {
-		if err := txn.Commit(); err != nil {
-			return fmt.Errorf("commit transaction: %w", err)
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		if err := d.governanceStore().DeleteCommitteeMembersAfterSlot(
+			slot, txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf(
+				"failed to delete committee members after slot %d: %w",
+				slot,
+				err,
+			)
 		}
-		owned = false
-	}
-	return nil
+		return nil
+	})
 }
 
 // SoftDeleteCommitteeMembers marks the given cold credential hashes as
@@ -310,32 +248,16 @@ func (d *Database) SoftDeleteCommitteeMembers(
 	slot uint64,
 	txn *Txn,
 ) error {
-	owned := false
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		owned = true
-		defer func() {
-			if owned {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
-	if err := d.governanceStore().SoftDeleteCommitteeMembers(
-		coldCredentials, slot, txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf(
-			"failed to soft-delete committee members: %w", err,
-		)
-	}
-	if owned {
-		if err := txn.Commit(); err != nil {
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		if err := d.governanceStore().SoftDeleteCommitteeMembers(
+			coldCredentials, slot, txn.Metadata(),
+		); err != nil {
 			return fmt.Errorf(
-				"failed to commit soft-delete committee members: %w", err,
+				"failed to soft-delete committee members: %w", err,
 			)
 		}
-		owned = false
-	}
-	return nil
+		return nil
+	})
 }
 
 // SoftDeleteAllCommitteeMembers marks all active committee members as
@@ -344,31 +266,14 @@ func (d *Database) SoftDeleteAllCommitteeMembers(
 	slot uint64,
 	txn *Txn,
 ) error {
-	owned := false
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		owned = true
-		defer func() {
-			if owned {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
-	if err := d.governanceStore().SoftDeleteAllCommitteeMembers(
-		slot, txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf(
-			"failed to soft-delete all committee members: %w", err,
-		)
-	}
-	if owned {
-		if err := txn.Commit(); err != nil {
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		if err := d.governanceStore().SoftDeleteAllCommitteeMembers(
+			slot, txn.Metadata(),
+		); err != nil {
 			return fmt.Errorf(
-				"failed to commit soft-delete all committee members: %w",
-				err,
+				"failed to soft-delete all committee members: %w", err,
 			)
 		}
-		owned = false
-	}
-	return nil
+		return nil
+	})
 }

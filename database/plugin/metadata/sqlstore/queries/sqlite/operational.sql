@@ -161,6 +161,22 @@ WHERE epoch <= ? AND era_id = ?
 ORDER BY epoch DESC, id DESC
 LIMIT 1;
 
+-- name: CountPParamsByEra :one
+SELECT COUNT(*)
+FROM pparams
+WHERE era_id = ?;
+
+-- name: ListPParamsByEra :many
+SELECT cbor, id, added_slot, epoch, era_id
+FROM pparams
+WHERE era_id = ?
+ORDER BY id;
+
+-- name: UpdatePParamsCbor :exec
+UPDATE pparams
+SET cbor = ?
+WHERE id = ?;
+
 -- name: GetPParamUpdates :many
 SELECT genesis_hash, cbor, id, added_slot, epoch
 FROM pparam_update
@@ -928,7 +944,7 @@ FROM utxo
 WHERE tx_id = ? AND output_idx = ?;
 
 -- name: GetAssetsByUtxoID :many
-SELECT name, name_hex, policy_id, fingerprint, id, utxo_id, amount
+SELECT name, policy_id, fingerprint, id, utxo_id, amount
 FROM asset
 WHERE utxo_id = ?
 ORDER BY id;
@@ -1011,12 +1027,12 @@ RETURNING id;
 
 -- name: CreateAsset :one
 INSERT INTO asset (
-    name, name_hex, policy_id, fingerprint, utxo_id, amount
-) VALUES (?, ?, ?, ?, ?, ?)
+    name, policy_id, fingerprint, utxo_id, amount
+) VALUES (?, ?, ?, ?, ?)
 RETURNING id;
 
 -- name: GetAssetByPolicyAndName :one
-SELECT name, name_hex, policy_id, fingerprint, id, utxo_id, amount
+SELECT name, policy_id, fingerprint, id, utxo_id, amount
 FROM asset
 WHERE policy_id = ? AND name = ?
 ORDER BY id
@@ -1093,8 +1109,8 @@ RETURNING id;
 
 -- name: ImportAsset :exec
 INSERT INTO asset (
-    name, name_hex, policy_id, fingerprint, utxo_id, amount
-) VALUES (?, ?, ?, ?, ?, ?)
+    name, policy_id, fingerprint, utxo_id, amount
+) VALUES (?, ?, ?, ?, ?)
 ON CONFLICT (name, policy_id, utxo_id) DO NOTHING;
 
 -- name: GetUtxoIDByRef :one

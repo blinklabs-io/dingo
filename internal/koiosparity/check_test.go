@@ -2436,3 +2436,120 @@ func TestCheckEpochSkipsEpochBeforeEarliestAvailableEpoch(t *testing.T) {
 	}
 	require.True(t, found, "epoch should have a persisted check status")
 }
+
+// TestCheckEpochResultNamesOnlyThePhasesItRan pins the verdict boundary the
+// two observer queues (dingo #4339) created: the aggregate queue and the
+// account queue both return an EpochCompareResult for the same epoch, and the
+// aggregate queue's check never looks at account data. Without CheckedScopes
+// its PASS is indistinguishable from the epoch's real verdict, so a consumer
+// reading Status alone would report an epoch clean while a recorded account
+// failure stands — the callback-side form of the stored-status defect
+// UpsertCheckEpochStatus fixes.
+func TestCheckEpochResultNamesOnlyThePhasesItRan(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	const koiosEpoch = uint64(10)
+	const stakeEpoch = uint64(9) // K-1, per koiosStakeEpoch
+
+	db := newTestDatabaseSourceDB(t)
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+
+	sqlDB := sourceSQLDB(t, db)
+	require.NoError(t, sqlDB.Create(&models.EpochSummary{
+		Epoch:            stakeEpoch,
+		TotalActiveStake: types.Uint64(5_000_000),
+		SnapshotReady:    true,
+	}).Error)
+
+	// One account whose Dingo reward differs from the Koios reference below,
+	// so the account phase fails while the aggregate phase has nothing to
+	// disagree about.
+	badKey := testPoolKeyHash(t, 0x42)
+	require.NoError(t, sqlDB.Create(&models.RewardAccountOutput{
+		Epoch:       stakeEpoch,
+		StakingKey:  badKey,
+		PoolKeyHash: testPoolKeyHash(t, 0x22),
+		RewardType:  "member",
+		Amount:      types.Uint64(2_000_000),
+		Spendable:   true,
+	}).Error)
+	badAddr, err := StakeAddressFromCredential(badKey, 0)
+	require.NoError(t, err)
+	seedDingoBabbageProtocolParams(t, sqlDB, koiosEpoch)
+
+	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+	seedKoiosBabbageProtocolParams(t, cache, network, koiosEpoch)
+
+	fetchedAt := time.Now().Add(-time.Hour).UTC()
+	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
+		Network:      network,
+		Epoch:        koiosEpoch,
+		ActiveStake:  "5000000",
+		EpochEndTime: fetchedAt,
+		FetchedAt:    fetchedAt,
+	}, nil, &KoiosTotals{
+		Network:   network,
+		Epoch:     koiosEpoch,
+		FetchedAt: fetchedAt,
+	}))
+	require.NoError(t, cache.CommitAccountRewardsForEpoch(
+		network,
+		koiosEpoch,
+		[]KoiosAccountRewards{{
+			StakeAddress: badAddr,
+			RewardType:   "member",
+			Earned:       "2000001",
+			FetchedAt:    fetchedAt,
+		}},
+		1,
+		true,
+		fetchedAt,
+	))
+
+	withAccounts, err := CheckEpoch(
+		context.Background(),
+		cache,
+		source,
+		network,
+		koiosEpoch,
+		0,
+		true,
+		slog.New(slog.DiscardHandler),
+	)
+	require.NoError(t, err)
+	require.Equal(t, StatusFail, withAccounts.Status)
+	require.True(t, withAccounts.CoversScope(ScopeAggregate))
+	require.True(t, withAccounts.CoversScope(ScopeAccount),
+		"a check that ran the account comparison must say so")
+
+	aggregateOnly, err := CheckEpoch(
+		context.Background(),
+		cache,
+		source,
+		network,
+		koiosEpoch,
+		0,
+		false,
+		slog.New(slog.DiscardHandler),
+	)
+	require.NoError(t, err)
+	require.Equal(t, StatusPass, aggregateOnly.Status,
+		"the scenario must hold a passing aggregate phase, or the "+
+			"assertion below proves nothing")
+	require.True(t, aggregateOnly.CoversScope(ScopeAggregate))
+	require.False(t, aggregateOnly.CoversScope(ScopeAccount),
+		"an aggregate-only check must not present its verdict as the "+
+			"account phase's")
+
+	// The stored verdict is the merge of both phases, so the account failure
+	// the aggregate-only re-check never looked at still stands.
+	statuses, err := cache.GetStatusSummary(network)
+	require.NoError(t, err)
+	require.Len(t, statuses, 1)
+	require.Equal(t, StatusFail, statuses[0].Status)
+	require.Equal(t, StatusFail, statuses[0].AccountStatus)
+}

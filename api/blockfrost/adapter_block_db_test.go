@@ -106,10 +106,9 @@ INSERT INTO utxo (
 	for i := range utxo.Assets {
 		asset := &utxo.Assets[i]
 		_, err = raw.Exec(`
-INSERT INTO asset (name, name_hex, policy_id, fingerprint, utxo_id, amount)
-VALUES (?, ?, ?, ?, ?, ?)`,
+INSERT INTO asset (name, policy_id, fingerprint, utxo_id, amount)
+VALUES (?, ?, ?, ?, ?)`,
 			asset.Name,
-			asset.NameHex,
 			asset.PolicyId,
 			asset.Fingerprint,
 			utxoID,

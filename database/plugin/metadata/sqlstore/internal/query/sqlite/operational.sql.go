@@ -68,6 +68,19 @@ func (q *Queries) ClearSyncState(ctx context.Context) error {
 	return err
 }
 
+const countPParamsByEra = `-- name: CountPParamsByEra :one
+SELECT COUNT(*)
+FROM pparams
+WHERE era_id = ?
+`
+
+func (q *Queries) CountPParamsByEra(ctx context.Context, eraID sql.NullInt64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countPParamsByEra, eraID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countTransactionsByMetadataLabel = `-- name: CountTransactionsByMetadataLabel :one
 SELECT COUNT(*) FROM transaction_metadata_label WHERE label = ?
 `
@@ -153,14 +166,13 @@ func (q *Queries) CreateAccount(ctx context.Context, arg CreateAccountParams) (i
 
 const createAsset = `-- name: CreateAsset :one
 INSERT INTO asset (
-    name, name_hex, policy_id, fingerprint, utxo_id, amount
-) VALUES (?, ?, ?, ?, ?, ?)
+    name, policy_id, fingerprint, utxo_id, amount
+) VALUES (?, ?, ?, ?, ?)
 RETURNING id
 `
 
 type CreateAssetParams struct {
 	Name        []byte
-	NameHex     []byte
 	PolicyID    []byte
 	Fingerprint []byte
 	UtxoID      sql.NullInt64
@@ -170,7 +182,6 @@ type CreateAssetParams struct {
 func (q *Queries) CreateAsset(ctx context.Context, arg CreateAssetParams) (int64, error) {
 	row := q.db.QueryRowContext(ctx, createAsset,
 		arg.Name,
-		arg.NameHex,
 		arg.PolicyID,
 		arg.Fingerprint,
 		arg.UtxoID,
@@ -1328,7 +1339,7 @@ func (q *Queries) GetActiveDreps(ctx context.Context) ([]Drep, error) {
 }
 
 const getAssetByPolicyAndName = `-- name: GetAssetByPolicyAndName :one
-SELECT name, name_hex, policy_id, fingerprint, id, utxo_id, amount
+SELECT name, policy_id, fingerprint, id, utxo_id, amount
 FROM asset
 WHERE policy_id = ? AND name = ?
 ORDER BY id
@@ -1345,7 +1356,6 @@ func (q *Queries) GetAssetByPolicyAndName(ctx context.Context, arg GetAssetByPol
 	var i Asset
 	err := row.Scan(
 		&i.Name,
-		&i.NameHex,
 		&i.PolicyID,
 		&i.Fingerprint,
 		&i.ID,
@@ -1428,7 +1438,7 @@ func (q *Queries) GetAssetQuantityByPolicyAndName(ctx context.Context, arg GetAs
 }
 
 const getAssetsByUtxoID = `-- name: GetAssetsByUtxoID :many
-SELECT name, name_hex, policy_id, fingerprint, id, utxo_id, amount
+SELECT name, policy_id, fingerprint, id, utxo_id, amount
 FROM asset
 WHERE utxo_id = ?
 ORDER BY id
@@ -1445,7 +1455,6 @@ func (q *Queries) GetAssetsByUtxoID(ctx context.Context, utxoID sql.NullInt64) (
 		var i Asset
 		if err := rows.Scan(
 			&i.Name,
-			&i.NameHex,
 			&i.PolicyID,
 			&i.Fingerprint,
 			&i.ID,
@@ -3789,14 +3798,13 @@ func (q *Queries) ImportAccount(ctx context.Context, arg ImportAccountParams) (i
 
 const importAsset = `-- name: ImportAsset :exec
 INSERT INTO asset (
-    name, name_hex, policy_id, fingerprint, utxo_id, amount
-) VALUES (?, ?, ?, ?, ?, ?)
+    name, policy_id, fingerprint, utxo_id, amount
+) VALUES (?, ?, ?, ?, ?)
 ON CONFLICT (name, policy_id, utxo_id) DO NOTHING
 `
 
 type ImportAssetParams struct {
 	Name        []byte
-	NameHex     []byte
 	PolicyID    []byte
 	Fingerprint []byte
 	UtxoID      sql.NullInt64
@@ -3806,7 +3814,6 @@ type ImportAssetParams struct {
 func (q *Queries) ImportAsset(ctx context.Context, arg ImportAssetParams) error {
 	_, err := q.db.ExecContext(ctx, importAsset,
 		arg.Name,
-		arg.NameHex,
 		arg.PolicyID,
 		arg.Fingerprint,
 		arg.UtxoID,
@@ -4054,6 +4061,42 @@ func (q *Queries) InsertRewardSnapshot(ctx context.Context, arg InsertRewardSnap
 	var id int64
 	err := row.Scan(&id)
 	return id, err
+}
+
+const listPParamsByEra = `-- name: ListPParamsByEra :many
+SELECT cbor, id, added_slot, epoch, era_id
+FROM pparams
+WHERE era_id = ?
+ORDER BY id
+`
+
+func (q *Queries) ListPParamsByEra(ctx context.Context, eraID sql.NullInt64) ([]Pparam, error) {
+	rows, err := q.db.QueryContext(ctx, listPParamsByEra, eraID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Pparam{}
+	for rows.Next() {
+		var i Pparam
+		if err := rows.Scan(
+			&i.Cbor,
+			&i.ID,
+			&i.AddedSlot,
+			&i.Epoch,
+			&i.EraID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const pruneTokenRegistryEntriesStaleBefore = `-- name: PruneTokenRegistryEntriesStaleBefore :execrows
@@ -5144,6 +5187,22 @@ func (q *Queries) UpdateFallbackRewardSnapshot(ctx context.Context, arg UpdateFa
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const updatePParamsCbor = `-- name: UpdatePParamsCbor :exec
+UPDATE pparams
+SET cbor = ?
+WHERE id = ?
+`
+
+type UpdatePParamsCborParams struct {
+	Cbor []byte
+	ID   int64
+}
+
+func (q *Queries) UpdatePParamsCbor(ctx context.Context, arg UpdatePParamsCborParams) error {
+	_, err := q.db.ExecContext(ctx, updatePParamsCbor, arg.Cbor, arg.ID)
+	return err
 }
 
 const upsertMidnightAriadneParams = `-- name: UpsertMidnightAriadneParams :one

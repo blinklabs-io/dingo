@@ -31,9 +31,6 @@ const (
 )
 
 //go:fix inline
-func ptrBool(v bool) *bool { return new(v) }
-
-//go:fix inline
 func ptrUint64(v uint64) *uint64 { return new(v) }
 
 var expectedCardanoNodeConfig = &CardanoNodeConfig{
