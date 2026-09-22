@@ -125,6 +125,18 @@ type stakeRewardApplication struct {
 	unspendable      uint64
 	precomputed      bool
 	outputsUpdated   bool
+	// totalCirculation, totalBlocks and rewardEfficiency record the global
+	// reward-round inputs that scale every pool's reward by the same factor,
+	// so a uniform network-wide shortfall can be attributed to the input that
+	// caused it (dingo #4660). Each pool's reward is
+	// (beta/sigmaA) * optimalPoolReward(R, sigma), so totalActiveStake moves it
+	// 1:1, reserves move it through both R and sigma, and totalBlocks cancels
+	// between R's efficiency term and beta -- which is why a block-count
+	// undercount cannot produce a uniform shortfall and the pots and snapshot
+	// totals must be logged to tell the remaining candidates apart.
+	totalCirculation uint64
+	totalBlocks      uint64
+	rewardEfficiency *big.Rat
 	// guardedRewardCredentials is the CIP-0163 reward-crediting guard set,
 	// populated only at application time when the delegator-inactivity gate is
 	// on (nil otherwise, so the gate-off path is byte-identical). Its keys are
@@ -439,6 +451,9 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 		effectiveRewards:            result.EffectiveRewards,
 		undistributed:               result.Undistributed,
 		unspendable:                 result.Unspendable,
+		totalCirculation:            result.TotalCirculation,
+		totalBlocks:                 result.TotalBlocks,
+		rewardEfficiency:            result.Efficiency,
 		snapshotCapturedSlot:        rewardSnapshot.CapturedSlot,
 		snapshotBoundarySlot:        rewardSnapshot.BoundarySlot,
 		snapshotEpochNonce:          rewardSnapshot.EpochNonce,
@@ -561,6 +576,12 @@ func (ls *LedgerState) applyStakeRewardApplication(
 		"effective_rewards", app.effectiveRewards,
 		"undistributed_rewards", app.undistributed,
 		"unspendable_rewards", app.unspendable,
+		"reserves", uint64(app.pots.Reserves),
+		"fees", uint64(app.pots.Fees),
+		"total_active_stake", uint64(app.snapshotTotalActiveStake),
+		"total_circulation", app.totalCirculation,
+		"total_blocks", app.totalBlocks,
+		"reward_efficiency", rewardEfficiencyLogValue(app.rewardEfficiency),
 	)
 	return nil
 }
@@ -994,6 +1015,8 @@ func (ls *LedgerState) precomputedStakeRewardApplication(
 		poolOutputs:              poolOutputs,
 		accountOutputs:           accountOutputs,
 		totalRewardPot:           uint64(pots.Rewards),
+		totalCirculation:         totalCirculation,
+		totalBlocks:              totalBlocks,
 		precomputed:              true,
 		outputsUpdated:           outputsUpdated,
 		snapshotCapturedSlot:     rewardSnapshot.CapturedSlot,
@@ -4361,6 +4384,16 @@ func stakeRewardSourceHash(
 	h.Write(reward.Credential.Hash[:])     //nolint:errcheck
 	h.Write([]byte(reward.Type))           //nolint:errcheck
 	return h.Sum(nil)
+}
+
+// rewardEfficiencyLogValue renders eta for the applied-rewards log line. The
+// precompute reuse path re-derives the stored outputs rather than recomputing
+// the round, so it carries no Result and leaves the value nil.
+func rewardEfficiencyLogValue(efficiency *big.Rat) string {
+	if efficiency == nil {
+		return ""
+	}
+	return efficiency.RatString()
 }
 
 func ratOrZero(r *types.Rat) *big.Rat {
