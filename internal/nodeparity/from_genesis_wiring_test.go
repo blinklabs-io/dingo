@@ -50,6 +50,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/fixtures"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -107,6 +108,36 @@ func newGenesisFakeServer(t *testing.T, blockCount int) *genesisFakeServer {
 	t.Helper()
 	chain, err := csmock.BuildChain(1, ledger.Blake2b256{}, 100, 20, blockCount)
 	require.NoError(t, err)
+	return &genesisFakeServer{chain: chain, step: make(chan struct{})}
+}
+
+// newGenesisFakeServerWithTransactions is like newGenesisFakeServer, but its
+// chain carries one real transaction per block
+// (internal/test/fixtures.GenerateConwayChainWithTransactions) instead of
+// newGenesisFakeServer's empty-body csmock.BuildChain blocks. RunFromGenesis's
+// roll-forward callback only ever appends to pendingTxHashes from a block's
+// own Transactions() (see from_genesis.go), so an empty-body chain never
+// gives flushPendingTxInfos anything to fetch at all -- its own
+// tx_info-chunk-failure taint path (the "if failed" branch inside
+// flushPendingTxInfos, distinct from the rollback-triggered taint
+// TestRunFromGenesis_UTxOTaintLifecycle already covers) goes completely
+// unexercised by every test built on newGenesisFakeServer. See
+// TestRunFromGenesis_TxInfoChunkFailureTaintsEpoch.
+func newGenesisFakeServerWithTransactions(
+	t *testing.T, blockCount int,
+) *genesisFakeServer {
+	t.Helper()
+	blocks, err := fixtures.GenerateConwayChainWithTransactions(blockCount)
+	require.NoError(t, err)
+	chain := csmock.Chain{
+		Blocks: blocks,
+		Points: make([]pcommon.Point, len(blocks)),
+		Tips:   make([]chainsync.Tip, len(blocks)),
+	}
+	for i, block := range blocks {
+		chain.Points[i] = csmock.PointOf(block)
+		chain.Tips[i] = csmock.TipOf(block)
+	}
 	return &genesisFakeServer{chain: chain, step: make(chan struct{})}
 }
 
@@ -402,6 +433,100 @@ func TestRunFromGenesis_UTxOTaintLifecycle(t *testing.T) {
 	report3 := recv()
 	assert.True(t, report3.UTxOAttempted)
 	assert.NoError(t, report3.UTxOErr)
+
+	cancel()
+	select {
+	case err := <-done:
+		assert.True(t, err == nil || errors.Is(err, context.Canceled))
+	case <-time.After(10 * time.Second):
+		t.Fatal("RunFromGenesis did not exit after ctx cancellation")
+	}
+}
+
+// TestRunFromGenesis_TxInfoChunkFailureTaintsEpoch drives RunFromGenesis
+// through a genuine Koios tx_info fetch failure -- no rollback at all --
+// proving flushPendingTxInfos's own "if failed { utxoTaintedThisEpoch =
+// true ... }" branch (from_genesis.go) actually taints the epoch it
+// belongs to. TestRunFromGenesis_UTxOTaintLifecycle above only exercises
+// the rollback callback's separate utxoTaintedThisEpoch = true assignment;
+// its own chain (newGenesisFakeServer's empty-body blocks) never gives
+// flushPendingTxInfos a single transaction hash to fetch, so that taint
+// source's own wiring goes completely unexercised there. Reverting this
+// assignment to a discarded no-op (`_ = true`) in place leaves
+// TestRunFromGenesis_UTxOTaintLifecycle, TestUTxOVerdict, and
+// TestApplyTxInfoResults all green.
+//
+// newGenesisFakeServerWithTransactions gives every block one real
+// transaction. Block 0 is the mandatory genesis baseline (shares its epoch
+// with the forced initial rollback, so it never itself starts a new epoch
+// boundary or reports -- see TestRunFromGenesis_UTxOTaintLifecycle's own
+// doc comment). Block 1 is the first real epoch boundary: its transaction
+// hash is buffered into pendingTxHashes and flushed via flushPendingTxInfos
+// right before that epoch's report is built. The Koios fake here 404s
+// every request, including /tx_info, so that flush fails and this epoch
+// must report errUTxOTainted rather than a false "clean" match against the
+// re-baselined set flushPendingTxInfos falls back to on failure.
+func TestRunFromGenesis_TxInfoChunkFailureTaintsEpoch(t *testing.T) {
+	const magic = 42
+	const blockCount = 2
+
+	server := newGenesisFakeServerWithTransactions(t, blockCount)
+	server.epochBySlot = map[uint64]int{
+		server.chain.Points[0].Slot: 1,
+		server.chain.Points[1].Slot: 2,
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	server.serve(t, listener, magic)
+
+	// A 404-everything Koios fake, same as
+	// TestRunFromGenesis_UTxOTaintLifecycle -- CheckStakeDistribution never
+	// calls Koios at all with zero pools, and CheckProtocolParams tolerates
+	// a Koios fetch failure as a mismatch, not a ProtocolParamsErr; this
+	// test only asserts on UTxOErr. The same 404 also fails GetTxInfos'
+	// /tx_info call, which is the failure this test exists to taint on.
+	koiosSrv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(koiosSrv.Close)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true)
+	require.NoError(t, err)
+
+	results := make(chan EpochResult, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RunFromGenesis(
+			ctx, listener.Addr().String(), "preview", magic, koios,
+			func(r EpochResult) { results <- r },
+			nil, nil,
+		)
+	}()
+
+	recv := func() EpochResult {
+		t.Helper()
+		select {
+		case r := <-results:
+			return r
+		case <-time.After(10 * time.Second):
+			t.Fatal("timed out waiting for an epoch result")
+			return EpochResult{}
+		}
+	}
+
+	// Block 0: genesis baseline capture only -- reports nothing.
+	server.allowStep(t)
+
+	// Block 1: first real epoch boundary, with its own transaction hash
+	// flushed against a Koios server that 404s /tx_info -- must be
+	// tainted, not a false "clean" match against the re-baselined set.
+	server.allowStep(t)
+	report := recv()
+	assert.True(t, report.UTxOAttempted)
+	require.Error(t, report.UTxOErr)
+	assert.ErrorIs(t, report.UTxOErr, errUTxOTainted)
 
 	cancel()
 	select {

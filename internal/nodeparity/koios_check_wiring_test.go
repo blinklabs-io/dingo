@@ -28,15 +28,26 @@ package nodeparity
 // through the functions that actually wire them into a real comparison.
 //
 // Closing that gap means driving both functions through a real
-// *localstatequery.Client (GetCurrentEra, GetCurrentProtocolParams,
-// GetPoolDistr2 are concrete gouroboros methods, not an interface this
-// package could substitute a hand-written fake for) talking to a real
+// *localstatequery.Client (GetCurrentProtocolParams and GetPoolDistr2 are
+// concrete gouroboros methods; CheckStakeDistribution takes the concrete
+// client type and this file substitutes no fake for it) talking to a real
 // gouroboros LocalStateQuery server over a real wire connection, plus a real
 // Koios client talking to an httptest.NewServer fake -- reusing the two
 // conventions this repo already has for each half: incremental_harness_test.go's
 // ouroboros.New(WithServer(true), WithLocalStateQueryConfig(...)) pattern for
 // the LocalStateQuery side, and internal/koiosparity's httptest.NewServer
 // pattern (see e.g. fetch_test.go) for the Koios side.
+//
+// CheckProtocolParams's client parameter is the narrower protocolParamsClient
+// interface (koios_check.go), specifically so
+// TestCheckProtocolParams_PropagatesExplicitEraQueryError below can
+// substitute fakeProtocolParamsClient and decouple GetCurrentProtocolParams
+// succeeding from the later, explicit GetCurrentEra call failing -- a
+// combination no real *localstatequery.Client can ever produce, because it
+// caches its resolved era on first success and never re-queries the wire
+// afterward (see protocolParamsClient's own doc comment). The other two
+// CheckProtocolParams tests below still exercise it over a real wire
+// connection, since neither needs that decoupling.
 //
 // wiringFakeLSQServer is a smaller, purpose-built fake rather than a reuse of
 // incremental_harness_test.go's fakeLSQState: that one always answers
@@ -62,6 +73,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/blinklabs-io/gouroboros/protocol/localstatequery"
@@ -425,24 +437,34 @@ func TestCheckStakeDistribution_DetectsRealPoolStakeDivergence(t *testing.T) {
 // This test does NOT isolate that call site specifically: a wire-level
 // HardForkCurrentEraQuery failure necessarily fails
 // client.GetCurrentProtocolParams's own embedded era lookup first
-// (gouroboros's getCurrentEra caches the era only after a successful
-// lookup, and GetCurrentProtocolParams calls it internally before
-// CheckProtocolParams ever reaches its own explicit GetCurrentEra call), so
-// this test actually observes CheckProtocolParams failing at
-// "dingo protocol params query", one line above applyResolvedEra's own call
-// site. Confirmed by temporarily deleting that call site's error check
-// (`_ = eraID; _ = eraErr` in place of it): this test still passed
+// (gouroboros's Client.getCurrentEra caches the resolved era in c.currentEra
+// only after a successful lookup, and GetCurrentProtocolParams calls it
+// internally before CheckProtocolParams ever reaches its own explicit
+// GetCurrentEra call), so this test actually observes CheckProtocolParams
+// failing at "dingo protocol params query", one line above applyResolvedEra's
+// own call site. Confirmed by temporarily deleting that call site's error
+// check (`_ = eraID; _ = eraErr` in place of it): this test still passed
 // unchanged, proving it does not regression-guard that specific line.
+//
 // There is no way to make only the second, explicit call fail over a real
-// wire connection: once any era lookup succeeds on a connection, the client
-// returns the cached value for the rest of that connection's life, never
-// touching the wire again -- CheckProtocolParams and GetCurrentProtocolParams
-// share the one client instance, so there is no way to warm one call's
-// cache without also warming the other's. Kept anyway because it pins a
-// real, adjacent contract (CheckProtocolParams never fabricates a result
-// once era resolution is broken) that nothing wire-level exercised before;
-// applyResolvedEra's own call site remains covered only by
-// TestApplyResolvedEra's plain-value test.
+// wire connection, and this is not merely a limitation of this test's own
+// server setup: gouroboros's Client.getCurrentEra returns its cached
+// c.currentEra immediately, with no wire round trip, whenever
+// c.currentEra > -1, and sets it only after a query that succeeds -- never
+// on failure, and never reset afterward. CheckProtocolParams's explicit
+// GetCurrentEra call is only ever reached once GetCurrentProtocolParams has
+// already returned successfully on that same client, which is only
+// possible once its own internal getCurrentEra call has already succeeded
+// and cached a value. So whenever the explicit call executes, it is
+// provably a cache hit -- it cannot fail on a real client, full stop, not
+// just in this test's fake-server configuration. Reaching this call site's
+// error branch at all requires decoupling the two outcomes with a test
+// double; see TestCheckProtocolParams_PropagatesExplicitEraQueryError,
+// which does that via protocolParamsClient/fakeProtocolParamsClient and is
+// the test that actually regression-guards this specific line. This test
+// is kept anyway because it still pins a real, adjacent contract
+// (CheckProtocolParams never fabricates a result once era resolution is
+// broken) that nothing else exercises over a real wire connection.
 func TestCheckProtocolParams_FailsWhenEraQueryFails(t *testing.T) {
 	const magic = 764824073
 	const epoch = uint64(107)
@@ -472,5 +494,71 @@ func TestCheckProtocolParams_FailsWhenEraQueryFails(t *testing.T) {
 
 	mismatches, err := CheckProtocolParams(ctx, client, koios, "preview", epoch)
 	require.Error(t, err)
+	assert.Nil(t, mismatches)
+}
+
+// fakeProtocolParamsClient implements protocolParamsClient with fully
+// independent GetCurrentProtocolParams/GetCurrentEra outcomes -- something
+// no real *localstatequery.Client can offer, since it only ever resolves
+// its era once per connection and caches it on success (see
+// protocolParamsClient's own doc comment in koios_check.go). It exists
+// solely for TestCheckProtocolParams_PropagatesExplicitEraQueryError.
+type fakeProtocolParamsClient struct {
+	pp     lcommon.ProtocolParameters
+	eraID  int
+	eraErr error
+}
+
+func (f *fakeProtocolParamsClient) GetCurrentProtocolParams() (lcommon.ProtocolParameters, error) {
+	return f.pp, nil
+}
+
+func (f *fakeProtocolParamsClient) GetCurrentEra() (int, error) {
+	return f.eraID, f.eraErr
+}
+
+// TestCheckProtocolParams_PropagatesExplicitEraQueryError pins
+// koios_check.go's `eraID, eraErr := client.GetCurrentEra()` /
+// `if err := applyResolvedEra(dingoParams, eraID, eraErr); err != nil`
+// call site directly -- the exact thing
+// TestCheckProtocolParams_FailsWhenEraQueryFails's own doc comment proves it
+// cannot reach over a real wire connection, because a real
+// *localstatequery.Client can never let GetCurrentProtocolParams succeed
+// while a later GetCurrentEra on that same client fails (its era cache is
+// set only on success and never re-queries the wire once set).
+// fakeProtocolParamsClient breaks that coupling: GetCurrentProtocolParams
+// always succeeds here, independent of eraErr.
+//
+// Reverting the call site to ignore eraErr (for example replacing it with
+// a hardcoded nil while keeping a `_ = eraErr` no-op so it still compiles)
+// makes applyResolvedEra apply the fake's eraID unconditionally.
+// CheckProtocolParams then proceeds past era resolution, and Koios's
+// /epoch_params 404 is recorded as an ordinary KoiosFault mismatch rather
+// than a hard error -- CheckProtocolParams returns (mismatches, nil)
+// instead of (nil, err), and require.Error below fails.
+func TestCheckProtocolParams_PropagatesExplicitEraQueryError(t *testing.T) {
+	const epoch = uint64(107)
+
+	client := &fakeProtocolParamsClient{
+		pp:     newWiringShelleyProtocolParams(),
+		eraID:  int(conway.EraIdConway),
+		eraErr: errors.New("boom: explicit era query failed"),
+	}
+
+	koiosSrv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		},
+	))
+	t.Cleanup(koiosSrv.Close)
+
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true)
+	require.NoError(t, err)
+
+	mismatches, err := CheckProtocolParams(
+		context.Background(), client, koios, "preview", epoch,
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "explicit era query failed")
 	assert.Nil(t, mismatches)
 }

@@ -121,6 +121,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	"golang.org/x/sync/errgroup"
 )
@@ -178,9 +179,31 @@ func applyResolvedEra(
 	return nil
 }
 
+// protocolParamsClient is the subset of *localstatequery.Client's exported
+// methods CheckProtocolParams calls. A real *localstatequery.Client only
+// ever resolves its era once per connection and caches it on success
+// (gouroboros's Client.getCurrentEra), so on a real client
+// GetCurrentProtocolParams's own internal era lookup and CheckProtocolParams's
+// later explicit GetCurrentEra call below can never disagree: whichever
+// runs first either fails the whole query (GetCurrentProtocolParams's own
+// internal call, which if it fails means GetCurrentProtocolParams itself
+// returns an error before the explicit call is ever reached) or succeeds
+// and caches, making every later call on that same client a guaranteed
+// cache hit. That makes the explicit call's own error branch unreachable
+// through any real wire connection -- no fake LocalStateQuery server
+// configuration can make GetCurrentProtocolParams succeed while a later
+// GetCurrentEra on the same client fails. This interface exists so a test
+// double can decouple the two outcomes anyway and pin that call site's
+// error handling directly; see
+// TestCheckProtocolParams_PropagatesExplicitEraQueryError.
+type protocolParamsClient interface {
+	GetCurrentProtocolParams() (lcommon.ProtocolParameters, error)
+	GetCurrentEra() (int, error)
+}
+
 func CheckProtocolParams(
 	ctx context.Context,
-	client *localstatequery.Client,
+	client protocolParamsClient,
 	koios *koiosparity.KoiosClient,
 	network string,
 	epoch uint64,
