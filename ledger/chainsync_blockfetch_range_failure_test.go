@@ -887,7 +887,7 @@ func TestBlockfetchRangeFailureClearedWhenRangeIsDelivered(t *testing.T) {
 
 	ls, _, _ := newNoBlocksLedgerState(t, "hdr-delivered")
 	connId := testChainsyncConnId(6104, 3001)
-	stuckStart, _ := ls.chain.HeaderRange(blockfetchBatchSize)
+	stuckStart, _ := ls.chain.HeaderRange(BlockfetchBatchSize)
 
 	require.NoError(t, startQueuedBlockfetchForTest(ls, connId, nil))
 	for range blockfetchMaxSameRangeFailures * 3 {
@@ -1168,7 +1168,7 @@ func TestHandleEventBlockfetchBatchDoneEmptyBatchStreakResetsOnProgress(
 	// Alternate empty and productive batches well past the bound. The
 	// productive batches deliver the queued range itself, so its failure
 	// record is discarded each time and the header queue survives.
-	queuedStart, _ := testChain.HeaderRange(blockfetchBatchSize)
+	queuedStart, _ := testChain.HeaderRange(BlockfetchBatchSize)
 	for range blockfetchMaxSameRangeFailures * 3 {
 		require.NoError(
 			t,

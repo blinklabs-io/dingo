@@ -42,7 +42,7 @@ type deepCatchupRequest struct {
 // persistence, no ledger apply) and returns their hashes in queue order. The
 // pipelining tests need a queue deep enough that it is not "near tip" (see
 // shadowBlockfetchMaxHeaders) and, for the two-distinct-requests case, deeper
-// than blockfetchBatchSize so a batch's own claim still leaves a further
+// than BlockfetchBatchSize so a batch's own claim still leaves a further
 // range to pre-queue.
 func buildDeepCatchupChain(
 	t *testing.T,
@@ -73,7 +73,7 @@ func buildDeepCatchupChain(
 // direct fail-before proof for issue #4651: before the dispatch-timing
 // rework, a single dispatch issued exactly one RequestRange call and waited
 // for its BatchDone before dispatching another, paying a full peer
-// round-trip at every batch boundary. With more than blockfetchBatchSize
+// round-trip at every batch boundary. With more than BlockfetchBatchSize
 // headers queued (deep catch-up, not "near tip" -- see
 // shadowBlockfetchMaxHeaders), the first dispatch must also pre-queue a
 // second, non-overlapping range so the peer always has a next request in
@@ -83,7 +83,7 @@ func TestStartQueuedBlockfetchPipelinesSecondRequestDuringDeepCatchup(
 ) {
 	t.Parallel()
 
-	headerCount := blockfetchBatchSize + 50
+	headerCount := BlockfetchBatchSize + 50
 	testChain, _ := buildDeepCatchupChain(t, headerCount)
 	connId := testChainsyncConnId(6300, 3001)
 
@@ -125,10 +125,10 @@ func TestStartQueuedBlockfetchPipelinesSecondRequestDuringDeepCatchup(
 	assert.Equal(t, connId, active.connId)
 	assert.Equal(t, connId, prefetch.connId)
 	assert.Equal(t, uint64(1), active.start.Slot)
-	assert.Equal(t, uint64(blockfetchBatchSize), active.end.Slot)
+	assert.Equal(t, uint64(BlockfetchBatchSize), active.end.Slot)
 	assert.Equal(
 		t,
-		uint64(blockfetchBatchSize+1),
+		uint64(BlockfetchBatchSize+1),
 		prefetch.start.Slot,
 		"the pre-queued request must start immediately after the active "+
 			"batch's own claimed range",
@@ -810,7 +810,7 @@ func TestHandleEventBlockfetchBatchDoneRefusesPartiallyAppliedPromotion(
 	testChain, hashes := buildPartiallyAppliedCatchupChain(
 		t,
 		appliedSlots+1,
-		blockfetchBatchSize+100,
+		BlockfetchBatchSize+100,
 	)
 	connId := testChainsyncConnId(6307, 3001)
 
@@ -845,19 +845,19 @@ func TestHandleEventBlockfetchBatchDoneRefusesPartiallyAppliedPromotion(
 		connId:    connId,
 		requestId: 2,
 		headerStart: ocommon.NewPoint(
-			blockfetchBatchSize+1,
-			hashes[blockfetchBatchSize+1].Bytes(),
+			BlockfetchBatchSize+1,
+			hashes[BlockfetchBatchSize+1].Bytes(),
 		),
 		headerEnd: ocommon.NewPoint(
-			blockfetchBatchSize+100,
-			hashes[blockfetchBatchSize+100].Bytes(),
+			BlockfetchBatchSize+100,
+			hashes[BlockfetchBatchSize+100].Bytes(),
 		),
 		headerCount: 100,
 	}
 	ls.chainsyncBlockfetchMutex.Unlock()
 
 	queueHead, _, available := ls.chain.HeaderRangeAfter(0, 1)
-	require.Equal(t, blockfetchBatchSize+100-appliedSlots, available+
+	require.Equal(t, BlockfetchBatchSize+100-appliedSlots, available+
 		ls.chain.HeaderCount()-1)
 	require.Equal(
 		t,
