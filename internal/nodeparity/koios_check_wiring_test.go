@@ -50,6 +50,7 @@ package nodeparity
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -77,8 +78,15 @@ import (
 // HardForkCurrentEraQuery, ShelleyCurrentProtocolParamsQuery, and
 // ShelleyPoolDistr2Query.
 type wiringFakeLSQServer struct {
-	mu             sync.Mutex
-	eraID          int
+	mu    sync.Mutex
+	eraID int
+	// eraErr, once set (setEraErr), replaces every future
+	// HardForkCurrentEraQuery reply with itself -- see
+	// TestCheckProtocolParams_FailsWhenEraQueryFails for why this
+	// necessarily also fails GetCurrentProtocolParams's own embedded era
+	// lookup, not only CheckProtocolParams's later explicit GetCurrentEra
+	// call.
+	eraErr         error
 	protocolParams *shelley.ShelleyProtocolParameters
 	poolDistr      *localstatequery.PoolDistr2Result
 }
@@ -97,6 +105,12 @@ func (s *wiringFakeLSQServer) setEra(eraID int) {
 	s.eraID = eraID
 }
 
+func (s *wiringFakeLSQServer) setEraErr(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.eraErr = err
+}
+
 func (s *wiringFakeLSQServer) setProtocolParams(pp *shelley.ShelleyProtocolParameters) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -110,11 +124,11 @@ func (s *wiringFakeLSQServer) setPoolDistr(pd *localstatequery.PoolDistr2Result)
 }
 
 func (s *wiringFakeLSQServer) snapshot() (
-	int, *shelley.ShelleyProtocolParameters, *localstatequery.PoolDistr2Result,
+	int, error, *shelley.ShelleyProtocolParameters, *localstatequery.PoolDistr2Result,
 ) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.eraID, s.protocolParams, s.poolDistr
+	return s.eraID, s.eraErr, s.protocolParams, s.poolDistr
 }
 
 // config builds the localstatequery.Config a real gouroboros server uses to
@@ -137,7 +151,7 @@ func (s *wiringFakeLSQServer) config() localstatequery.Config {
 				_ localstatequery.CallbackContext,
 				q localstatequery.QueryWrapper,
 			) (any, error) {
-				eraID, pp, poolDistr := s.snapshot()
+				eraID, eraErr, pp, poolDistr := s.snapshot()
 				block, ok := q.Query.(*localstatequery.BlockQuery)
 				if !ok {
 					return nil, fmt.Errorf("unexpected top-level query %T", q.Query)
@@ -146,6 +160,9 @@ func (s *wiringFakeLSQServer) config() localstatequery.Config {
 				case *localstatequery.HardForkQuery:
 					switch inner.Query.(type) {
 					case *localstatequery.HardForkCurrentEraQuery:
+						if eraErr != nil {
+							return nil, eraErr
+						}
 						return eraID, nil
 					default:
 						return nil, fmt.Errorf("unexpected hardfork query %T", inner.Query)
@@ -398,4 +415,66 @@ func TestCheckStakeDistribution_DetectsRealPoolStakeDivergence(t *testing.T) {
 	assert.Equal(t, int64(600_000), got.DiffLovelace)
 	assert.Empty(t, got.Reason)
 	assert.False(t, got.KoiosFault)
+}
+
+// TestCheckProtocolParams_FailsWhenEraQueryFails drives CheckProtocolParams
+// itself over a real *localstatequery.Client whose wire-level
+// HardForkCurrentEraQuery always fails, proving CheckProtocolParams returns
+// an error with nil mismatches -- never a result built on
+// ProtocolParamsFromNative's ambiguous type-inferred guess -- when Dingo's
+// era cannot be resolved at all. TestApplyResolvedEra already pins
+// applyResolvedEra itself (the helper `if err := applyResolvedEra(...); err
+// != nil` at koios_check.go delegates to) with plain values.
+//
+// This test does NOT isolate that call site specifically: a wire-level
+// HardForkCurrentEraQuery failure necessarily fails
+// client.GetCurrentProtocolParams's own embedded era lookup first
+// (gouroboros's getCurrentEra caches the era only after a successful
+// lookup, and GetCurrentProtocolParams calls it internally before
+// CheckProtocolParams ever reaches its own explicit GetCurrentEra call), so
+// this test actually observes CheckProtocolParams failing at
+// "dingo protocol params query", one line above applyResolvedEra's own call
+// site. Confirmed by temporarily deleting that call site's error check
+// (`_ = eraID; _ = eraErr` in place of it): this test still passed
+// unchanged, proving it does not regression-guard that specific line.
+// There is no way to make only the second, explicit call fail over a real
+// wire connection: once any era lookup succeeds on a connection, the client
+// returns the cached value for the rest of that connection's life, never
+// touching the wire again -- CheckProtocolParams and GetCurrentProtocolParams
+// share the one client instance, so there is no way to warm one call's
+// cache without also warming the other's. Kept anyway because it pins a
+// real, adjacent contract (CheckProtocolParams never fabricates a result
+// once era resolution is broken) that nothing wire-level exercised before;
+// applyResolvedEra's own call site remains covered only by
+// TestApplyResolvedEra's plain-value test.
+func TestCheckProtocolParams_FailsWhenEraQueryFails(t *testing.T) {
+	const magic = 764824073
+	const epoch = uint64(107)
+
+	lsq := newWiringFakeLSQServer()
+	lsq.setEraErr(errors.New("boom: era query failed"))
+	lsq.setProtocolParams(newWiringShelleyProtocolParams())
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	lsq.serve(t, listener, magic)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	client := dialWiringClient(t, ctx, listener.Addr().String(), magic)
+
+	koiosSrv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		},
+	))
+	t.Cleanup(koiosSrv.Close)
+
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true)
+	require.NoError(t, err)
+
+	mismatches, err := CheckProtocolParams(ctx, client, koios, "preview", epoch)
+	require.Error(t, err)
+	assert.Nil(t, mismatches)
 }
