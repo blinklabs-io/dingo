@@ -136,6 +136,7 @@ func TestRebuildRewardLiveStakeLatestDelegationSelection(t *testing.T) {
 	require.Equal(t, int64(0), stale.delegationBlock)
 	require.Equal(t, int64(0), stale.delegationCert)
 
+	require.Contains(t, snapshot, "0:"+string(inactive.Key))
 	unregistered := snapshot["0:"+string(inactive.Key)]
 	require.False(t, unregistered.registered)
 	require.Empty(t, unregistered.pool)

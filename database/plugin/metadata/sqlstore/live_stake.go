@@ -575,6 +575,7 @@ func (s *Store) rebuildRewardLiveStake(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
+			rebuildStart := time.Now()
 			if !fromRunningTotals {
 				if _, err := db.ExecContext(
 					ctx,
@@ -799,7 +800,7 @@ WHERE deleted_slot = 0 AND staking_key IS NOT NULL AND LENGTH(staking_key) > 0`)
 				"reward live stake rebuild: complete",
 				"rows", len(values),
 				"upsert_duration", time.Since(upsertStart).String(),
-				"total_duration", time.Since(queryStart).String(),
+				"total_duration", time.Since(rebuildStart).String(),
 			)
 			return nil
 		},
