@@ -1436,15 +1436,25 @@ reward, leader reward, member reward total). What is not answerable outside the
 window is anything per-delegator: which credentials backed a pool's stake, and
 what each account was paid.
 
-Retaining a `reward_snapshot` whose `reward_stake_input` rows have been pruned
-cannot produce a wrong reward calculation. `applyStakeRewards` detects the
-combination — a snapshot claiming delegators over an empty credential set — logs
-it and skips the epoch, the same outcome as an epoch with no pots row; without
-that check `validateRewardCalculatorInputs` would fail with a stake-total
-mismatch and take the whole epoch rollover down with it. The precompute-reuse
-path reaches the same validation and treats the failure as "no usable
-precompute", so it recalculates and then hits the same skip. Reaching either
-needs a rewind across more than the retained epochs, far beyond `k`.
+When a retained `reward_snapshot` and `reward_pool_input` set has lost its
+windowed `reward_stake_input` rows, reward calculation reconstructs the
+per-credential rows from historical delegation, UTxO, reward-delta, and pool
+registration state at the retained snapshot slots. The result is accepted only
+when every pool's delegated stake, owner stake, and delegator count reconcile
+with its retained pool input; a small bounded rounding difference is assigned
+with a total order over stake, pool key hash, credential tag, and staking key,
+so database and query iteration order cannot change which credential receives
+the adjustment. An incomplete or materially mismatched reconstruction is
+logged and skipped instead of reaching `validateRewardCalculatorInputs` with a
+bad bundle and aborting the epoch rollover.
+
+Reconstruction itself performs reads only. A synchronous boundary calculation
+carries the rows into `applyStakeRewardApplication` and saves them in the same
+metadata write transaction as the reward application. Async precompute carries
+the same rows in `stakeRewardApplication`; after its rollback-generation and
+snapshot-content guard succeeds, the short write phase saves the rows together
+with the outputs and updated ADA pots. A failed save therefore rolls the owning
+transaction back instead of exposing a partial reconstructed credential set.
 
 Rollback is separate from retention and unaffected by it. Retention only ever
 deletes rows below the window, so it never competes with a rewind. Rollback
