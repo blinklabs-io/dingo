@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -224,6 +225,74 @@ func TestLocalstatequeryServerAcquire_UnexpectedError_MappedToPointTooOld(
 		"expected an unexpected internal error to map to the graceful "+
 			"AcquireFailurePointTooOld a well-behaved client already knows "+
 			"how to handle, got: %v",
+		err,
+	)
+
+	o.localstatequeryAcquireMutex.Lock()
+	_, recorded := o.localstatequeryAcquiredPoints[connID]
+	o.localstatequeryAcquireMutex.Unlock()
+	require.False(
+		t, recorded,
+		"a rejected Acquire must not record the unvalidated point",
+	)
+}
+
+// TestLocalstatequeryServerAcquire_PastRetentionFloor_MappedToPointTooOld is
+// wolf31o2's review finding on this PR: reverting localstatequeryServerAcquire's
+// call from VerifyPointQueryable back to the narrower VerifyPointOnChain left
+// every other test in this file green -- UnexpectedError_MappedToPointTooOld
+// still passes because a closed database fails VerifyPointOnChain too, and no
+// other test Acquires a point that is genuinely still on-chain but past a
+// query-type-specific retention floor. This Acquires slot 1 of a real
+// two-block chain (on-chain, so VerifyPointOnChain alone would accept it)
+// after marking the durable consumed-UTxO prune floor
+// (database.ConsumedUtxoPruneFloorSyncKey) at slot 2 --
+// checkUtxoRetentionWindow (ledger/queries.go), reached only through
+// VerifyPointQueryable, rejects it with ErrHistoricalStateUnavailable, which
+// this handler maps to the graceful AcquireFailurePointTooOld. Calling
+// VerifyPointOnChain instead of VerifyPointQueryable at this call site makes
+// this test fail with a nil error.
+func TestLocalstatequeryServerAcquire_PastRetentionFloor_MappedToPointTooOld(
+	t *testing.T,
+) {
+	o := &Ouroboros{
+		localstatequeryAcquiredPoints: make(
+			map[ouroboros.ConnectionId]ledger.QueryPoint,
+		),
+	}
+	ls, db := newTestLedgerStateWithChain(t, 2)
+	o.ledgerState = ls
+
+	tipHash := bytes.Repeat([]byte{2}, 32)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(2, tipHash),
+	}, nil))
+	require.NoError(t, db.SetSyncState(
+		database.ConsumedUtxoPruneFloorSyncKey, "2", nil,
+	))
+
+	pointHash := bytes.Repeat([]byte{1}, 32)
+	connID := ouroboros.ConnectionId{}
+	err := o.localstatequeryServerAcquire(
+		olocalstatequery.CallbackContext{ConnectionId: connID},
+		olocalstatequery.AcquireSpecificPoint{
+			Point: ocommon.NewPoint(1, pointHash),
+		},
+		false,
+	)
+	require.Error(t, err)
+	require.False(
+		t,
+		errors.Is(err, olocalstatequery.ErrAcquireFailurePointNotOnChain),
+		"a point past a retention floor is still genuinely on-chain, not "+
+			"absent from it: got %v",
+		err,
+	)
+	require.True(
+		t,
+		errors.Is(err, olocalstatequery.ErrAcquireFailurePointTooOld),
+		"expected a retention-floor rejection to map to the graceful "+
+			"AcquireFailurePointTooOld, got: %v",
 		err,
 	)
 
