@@ -1888,7 +1888,34 @@ func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
 		if blob == nil {
 			return types.ErrBlobStoreUnavailable
 		}
-		deleteBatch(blob, txn.Blob(), txHashes)
+		// Stage only what this transaction can still hold. Past its budget
+		// the store rejects every further staged write, including the
+		// commit timestamp Txn.Commit puts into this same transaction, so
+		// an unbounded stage costs the caller its whole commit rather than
+		// just the tail of this set (blinklabs-io/dingo#4657). What is left
+		// unstaged is counted with the deletes that failed and reported
+		// through ErrBlobDeleteIncomplete below: the metadata naming these
+		// objects goes away either way, so both are orphans rather than
+		// silently dropped work.
+		staged := len(txHashes)
+		if staged > 0 {
+			staged = stagedBlobDeleteLimit(
+				blob,
+				txn.Blob(),
+				len(types.TxBlobKey(txHashes[0])),
+				staged,
+			)
+		}
+		deleteBatch(blob, txn.Blob(), txHashes[:staged])
+		if skipped := len(txHashes) - staged; skipped > 0 {
+			deleteErrors += skipped
+			d.logger.Warn(
+				"TX blob deletes left unstaged to keep the transaction committable",
+				"skipped", skipped,
+				"staged", staged,
+				"total", len(txHashes),
+			)
+		}
 	} else {
 		for start := 0; start < len(txHashes); start += batchSize {
 			end := min(start+batchSize, len(txHashes))

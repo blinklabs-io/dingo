@@ -35,9 +35,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// productionValidateVerifyConfig mirrors the generic VRF/KES portion of
-// NewLedgerState's pipeline wiring. Dingo adds OpCert verification after the
-// generic stage succeeds.
+// productionValidateVerifyConfig mirrors the generic header-crypto portion of
+// NewLedgerState's pipeline wiring. Dingo adds OpCert KES-period expiry after
+// the generic VRF/KES/OpCert-signature stage succeeds.
 var productionValidateVerifyConfig = lcommon.VerifyConfig{
 	SkipBodyHashValidation:    true,
 	SkipTransactionValidation: true,

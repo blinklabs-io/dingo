@@ -253,6 +253,8 @@ type Config struct {
 	genesisCorroborationPeers                                                           int
 	blockProducer                                                                       bool
 	shelleyVRFKey, shelleyKESKey, shelleyOperationalCertificate                         string
+	shelleyKESAgentSocket, shelleyKESAgentMode                                          string
+	shelleyKESAgentSignTimeout                                                          time.Duration
 	forgeSyncToleranceSlots, forgeStaleGapThresholdSlots                                uint64
 	forgePrimaryChainTipToleranceSlots                                                  uint64
 	forgeUpstreamStalenessSlots, forgeAppliedTipStalenessSlots                          uint64
@@ -860,6 +862,7 @@ func (c *Config) syncCompatFields() {
 	c.maxNtCConns, c.maxNtCConnectionsPerIP = c.cfg.MaxNtCConns, c.cfg.MaxNtCConnectionsPerIP
 	c.genesisBootstrap, c.genesisWindowSlots, c.genesisCorroborationPeers = c.cfg.GenesisBootstrap.Enabled, c.cfg.GenesisBootstrap.WindowSlots, c.cfg.GenesisBootstrap.CorroborationPeers
 	c.blockProducer, c.shelleyVRFKey, c.shelleyKESKey, c.shelleyOperationalCertificate = c.cfg.BlockProducer, c.cfg.ShelleyVRFKey, c.cfg.ShelleyKESKey, c.cfg.ShelleyOperationalCertificate
+	c.shelleyKESAgentSocket, c.shelleyKESAgentMode, c.shelleyKESAgentSignTimeout = c.cfg.ShelleyKESAgentSocket, c.cfg.ShelleyKESAgentMode, c.cfg.ShelleyKESAgentSignTimeout
 	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
 	c.forgePrimaryChainTipToleranceSlots = c.cfg.ForgePrimaryChainTipToleranceSlots
 	c.forgeUpstreamStalenessSlots, c.forgeAppliedTipStalenessSlots = c.cfg.ForgeUpstreamStalenessSlots, c.cfg.ForgeAppliedTipStalenessSlots
@@ -1481,6 +1484,39 @@ func WithShelleyOperationalCertificate(path string) ConfigOptionFunc {
 	}
 }
 
+// WithShelleyKESAgentSocket sources the KES signing key from a running bursa
+// KES agent over the given Unix-domain service socket
+// (CARDANO_SHELLEY_KES_AGENT_SOCKET) instead of a local
+// WithShelleyKESKey file. The VRF key and operational certificate still
+// apply. Leave empty to sign with a local KES key file.
+func WithShelleyKESAgentSocket(path string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ShelleyKESAgentSocket = path
+	}
+}
+
+// WithShelleyKESAgentMode selects the KES agent service mode
+// (CARDANO_SHELLEY_KES_AGENT_MODE): "serve-key", where the agent pushes the
+// evolving KES sign key and the node signs headers locally, or "sign", where
+// the node forwards header bodies and the agent returns signatures so the key
+// never enters the node. Empty resolves to "serve-key" when a socket is set.
+func WithShelleyKESAgentMode(mode string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ShelleyKESAgentMode = mode
+	}
+}
+
+// WithShelleyKESAgentSignTimeout bounds one sign-mode round trip to the KES
+// agent (CARDANO_SHELLEY_KES_AGENT_SIGN_TIMEOUT). It must stay below a slot:
+// forging calls the signer synchronously on the slot-aligned loop, so a
+// longer timeout parks block production for several slots when the agent
+// stops answering. 0 uses the client default of 500ms.
+func WithShelleyKESAgentSignTimeout(timeout time.Duration) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ShelleyKESAgentSignTimeout = timeout
+	}
+}
+
 // WithLeiosVoteSigningKeyFile specifies the path to a hex-encoded BLS12-381
 // Leios vote signing key (DINGO_LEIOS_VOTE_SIGNING_KEY_FILE). When set on a
 // block producer whose pool is a Leios committee member, the node emits
@@ -1572,6 +1608,25 @@ func WithForgeStaleGapThresholdSlots(slots uint64) ConfigOptionFunc {
 func WithValidateForgedBlock(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.ValidateForgedBlock = enabled
+	}
+}
+
+// WithBlockPipelineEnabled enables the parallel block-decode pipeline for the
+// chainsync replay loop (issue #1894 phase 1). Not consensus-affecting; off
+// by default. See LedgerStateConfig.BlockPipelineEnabled.
+func WithBlockPipelineEnabled(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BlockPipelineEnabled = enabled
+	}
+}
+
+// WithBlockPipelineValidateEnabled adds a parallel VRF/KES and OpCert
+// validate stage to the block-decode pipeline (issue #1894 phase 3). Off by
+// default; requires WithBlockPipelineEnabled. See
+// LedgerStateConfig.BlockPipelineValidateEnabled.
+func WithBlockPipelineValidateEnabled(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BlockPipelineValidateEnabled = enabled
 	}
 }
 
@@ -2338,6 +2393,18 @@ func (c *Config) ForgeStaleGapThresholdSlots() uint64 {
 // ValidateForgedBlock returns whether to self-validate forged blocks.
 func (c *Config) ValidateForgedBlock() bool {
 	return c.cfg.ValidateForgedBlock
+}
+
+// BlockPipelineEnabled returns whether the parallel block-decode pipeline is
+// enabled.
+func (c *Config) BlockPipelineEnabled() bool {
+	return c.cfg.BlockPipelineEnabled
+}
+
+// BlockPipelineValidateEnabled returns whether the parallel VRF/KES and
+// OpCert validate stage of the block-decode pipeline is enabled.
+func (c *Config) BlockPipelineValidateEnabled() bool {
+	return c.cfg.BlockPipelineValidateEnabled
 }
 
 // LeiosVoteSigningKeyFile returns the path to the Leios vote signing key.
