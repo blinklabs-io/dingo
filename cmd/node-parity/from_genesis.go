@@ -76,6 +76,20 @@ type fromGenesisCounters struct {
 	epochsChecked                                 int
 	ppMismatches, stakeMismatches, utxoMismatches int
 	ppIncomplete, stakeIncomplete, utxoIncomplete int
+	// ppVerified/stakeVerified/utxoVerified count an epoch whose check
+	// actually ran to a trustworthy conclusion -- a real match or a real
+	// mismatch, either one -- as opposed to being counted incomplete. A
+	// Dingo-side query failure after a successful Acquire
+	// (GetCurrentProtocolParams, GetCurrentEra, GetPoolDistr2,
+	// GetUTxOWhole) lands in the same *Err fields as an expected
+	// retention-floor Acquire rejection or a Koios-side data fault, and
+	// the mismatch counters above are silent on all of them -- a run
+	// whose every epoch's every check was incomplete finds zero
+	// mismatches and would otherwise exit 0, indistinguishable from a run
+	// that genuinely verified everything. fromGenesisRun fails the run
+	// outright if these ever total zero across a run that reached at
+	// least one epoch boundary.
+	ppVerified, stakeVerified, utxoVerified int
 }
 
 // recordEpoch is documented on fromGenesisCounters.
@@ -110,6 +124,7 @@ func (c *fromGenesisCounters) recordEpoch(
 		switch koiosparity.DetermineStatus(r.ProtocolParamsMismatches) {
 		case koiosparity.StatusFail:
 			c.ppMismatches++
+			c.ppVerified++
 			for _, m := range r.ProtocolParamsMismatches {
 				logger.Warn("protocol params mismatch",
 					"epoch", r.Epoch, "field", m.Field,
@@ -124,6 +139,7 @@ func (c *fromGenesisCounters) recordEpoch(
 					"dingo", m.DingoValue, "category", m.Category)
 			}
 		default:
+			c.ppVerified++
 			logger.Info("protocol params match", "epoch", r.Epoch)
 		}
 	}
@@ -136,6 +152,8 @@ func (c *fromGenesisCounters) recordEpoch(
 		realMismatches, faults := splitStakeMismatches(r.StakeMismatches)
 		if len(faults) > 0 {
 			c.stakeIncomplete++
+		} else {
+			c.stakeVerified++
 		}
 		for _, m := range faults {
 			logger.Warn("stake distribution check incomplete",
@@ -165,6 +183,7 @@ func (c *fromGenesisCounters) recordEpoch(
 			"epoch", r.Epoch, "error", r.UTxOErr)
 	} else if len(r.UTxOMissing) > 0 || len(r.UTxOExtra) > 0 || len(r.UTxODiffers) > 0 {
 		c.utxoMismatches++
+		c.utxoVerified++
 		logger.Warn("utxo set mismatch",
 			"epoch", r.Epoch, "missing", len(r.UTxOMissing),
 			"extra", len(r.UTxOExtra), "differs", len(r.UTxODiffers),
@@ -173,6 +192,7 @@ func (c *fromGenesisCounters) recordEpoch(
 			logger.Debug("utxo content differs", "epoch", r.Epoch, "detail", d)
 		}
 	} else {
+		c.utxoVerified++
 		logger.Info("utxo set match",
 			"epoch", r.Epoch, "ref_count", r.UTxORefCount)
 	}
@@ -288,6 +308,9 @@ func fromGenesisRun(cmd *cobra.Command, _ []string) error {
 		"protocol_param_checks_incomplete", counters.ppIncomplete,
 		"stake_checks_incomplete", counters.stakeIncomplete,
 		"utxo_checks_incomplete", counters.utxoIncomplete,
+		"protocol_param_checks_verified", counters.ppVerified,
+		"stake_checks_verified", counters.stakeVerified,
+		"utxo_checks_verified", counters.utxoVerified,
 	)
 
 	// context.Canceled is this command's own documented normal way to
@@ -299,10 +322,29 @@ func fromGenesisRun(cmd *cobra.Command, _ []string) error {
 	if err != nil && !errors.Is(err, context.Canceled) {
 		return err
 	}
-	if counters.ppMismatches > 0 || counters.stakeMismatches > 0 || counters.utxoMismatches > 0 {
+	return counters.result()
+}
+
+// result is fromGenesisRun's actual exit-code decision, pulled out of that
+// hard-to-unit-test entry point so a test can drive it directly with a
+// synthetic fromGenesisCounters (matching recordEpoch's own extraction,
+// above): a real Dingo/Koios mismatch fails the run, and so does a run that
+// reached at least one epoch boundary but verified nothing at all against
+// Koios in any of the three checks, across every epoch it reached -- see
+// fromGenesisCounters' own doc comment for why the *Incomplete counters
+// alone cannot already distinguish that case from a healthy run.
+func (c *fromGenesisCounters) result() error {
+	if c.ppMismatches > 0 || c.stakeMismatches > 0 || c.utxoMismatches > 0 {
 		return fmt.Errorf(
 			"ledger state diverged from Koios: %d protocol-param, %d stake, %d utxo mismatch epoch(s)",
-			counters.ppMismatches, counters.stakeMismatches, counters.utxoMismatches,
+			c.ppMismatches, c.stakeMismatches, c.utxoMismatches,
+		)
+	}
+	if c.epochsChecked > 0 && c.ppVerified == 0 && c.stakeVerified == 0 && c.utxoVerified == 0 {
+		return fmt.Errorf(
+			"verified nothing against Koios across %d epoch(s): every protocol-param, "+
+				"stake, and utxo check was incomplete (%d/%d/%d)",
+			c.epochsChecked, c.ppIncomplete, c.stakeIncomplete, c.utxoIncomplete,
 		)
 	}
 	return nil

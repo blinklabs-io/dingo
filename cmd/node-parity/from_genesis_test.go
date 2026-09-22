@@ -19,6 +19,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/internal/nodeparity"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestSplitStakeMismatches pins the from-genesis report's separation of a
@@ -86,13 +87,16 @@ func TestSplitStakeMismatches(t *testing.T) {
 func TestFromGenesisCounters_RecordEpoch(t *testing.T) {
 	logger := discardLogger()
 
-	t.Run("clean epoch: no counters move", func(t *testing.T) {
+	t.Run("clean epoch: no mismatch/incomplete counters move, all three verified", func(t *testing.T) {
 		var c fromGenesisCounters
 		c.recordEpoch(nodeparity.EpochResult{Epoch: 1, UTxOAttempted: true}, logger)
-		assert.Equal(t, fromGenesisCounters{epochsChecked: 1}, c)
+		assert.Equal(t, fromGenesisCounters{
+			epochsChecked: 1,
+			ppVerified:    1, stakeVerified: 1, utxoVerified: 1,
+		}, c)
 	})
 
-	t.Run("real stake mismatch counts as a mismatch, not incomplete", func(t *testing.T) {
+	t.Run("real stake mismatch counts as a mismatch, not incomplete, and is verified", func(t *testing.T) {
 		var c fromGenesisCounters
 		c.recordEpoch(nodeparity.EpochResult{
 			Epoch: 1,
@@ -103,9 +107,11 @@ func TestFromGenesisCounters_RecordEpoch(t *testing.T) {
 		}, logger)
 		assert.Equal(t, 1, c.stakeMismatches)
 		assert.Equal(t, 0, c.stakeIncomplete)
+		assert.Equal(t, 1, c.stakeVerified,
+			"a real mismatch is still a trustworthy result, not an incomplete one")
 	})
 
-	t.Run("koios-fault-only stake mismatch counts as incomplete, not a mismatch", func(t *testing.T) {
+	t.Run("koios-fault-only stake mismatch counts as incomplete, not a mismatch, and is not verified", func(t *testing.T) {
 		var c fromGenesisCounters
 		c.recordEpoch(nodeparity.EpochResult{
 			Epoch: 1,
@@ -118,49 +124,56 @@ func TestFromGenesisCounters_RecordEpoch(t *testing.T) {
 		assert.Equal(t, 0, c.stakeMismatches,
 			"a Koios data fault must not be counted as a Dingo divergence")
 		assert.Equal(t, 1, c.stakeIncomplete)
+		assert.Equal(t, 0, c.stakeVerified)
 	})
 
-	t.Run("StakeErr counts as incomplete", func(t *testing.T) {
+	t.Run("StakeErr counts as incomplete, not verified", func(t *testing.T) {
 		var c fromGenesisCounters
 		c.recordEpoch(nodeparity.EpochResult{
 			Epoch: 1, StakeErr: assert.AnError, UTxOAttempted: true,
 		}, logger)
 		assert.Equal(t, 0, c.stakeMismatches)
 		assert.Equal(t, 1, c.stakeIncomplete)
+		assert.Equal(t, 0, c.stakeVerified)
 	})
 
-	t.Run("ProtocolParamsErr counts as incomplete", func(t *testing.T) {
+	t.Run("ProtocolParamsErr counts as incomplete, not verified", func(t *testing.T) {
 		var c fromGenesisCounters
 		c.recordEpoch(nodeparity.EpochResult{
 			Epoch: 1, ProtocolParamsErr: assert.AnError, UTxOAttempted: true,
 		}, logger)
 		assert.Equal(t, 0, c.ppMismatches)
 		assert.Equal(t, 1, c.ppIncomplete)
+		assert.Equal(t, 0, c.ppVerified)
 	})
 
-	t.Run("UTxOErr counts as incomplete", func(t *testing.T) {
+	t.Run("UTxOErr counts as incomplete, not verified", func(t *testing.T) {
 		var c fromGenesisCounters
 		c.recordEpoch(nodeparity.EpochResult{
 			Epoch: 1, UTxOAttempted: true, UTxOErr: assert.AnError,
 		}, logger)
 		assert.Equal(t, 0, c.utxoMismatches)
 		assert.Equal(t, 1, c.utxoIncomplete)
+		assert.Equal(t, 0, c.utxoVerified)
 	})
 
-	t.Run("UTxO never attempted counts as incomplete", func(t *testing.T) {
+	t.Run("UTxO never attempted counts as incomplete, not verified", func(t *testing.T) {
 		var c fromGenesisCounters
 		c.recordEpoch(nodeparity.EpochResult{Epoch: 1, UTxOAttempted: false}, logger)
 		assert.Equal(t, 0, c.utxoMismatches)
 		assert.Equal(t, 1, c.utxoIncomplete)
+		assert.Equal(t, 0, c.utxoVerified)
 	})
 
-	t.Run("real UTxO mismatch counts as a mismatch, not incomplete", func(t *testing.T) {
+	t.Run("real UTxO mismatch counts as a mismatch, not incomplete, and is verified", func(t *testing.T) {
 		var c fromGenesisCounters
 		c.recordEpoch(nodeparity.EpochResult{
 			Epoch: 1, UTxOAttempted: true, UTxOMissing: []string{"abc#0"},
 		}, logger)
 		assert.Equal(t, 1, c.utxoMismatches)
 		assert.Equal(t, 0, c.utxoIncomplete)
+		assert.Equal(t, 1, c.utxoVerified,
+			"a real mismatch is still a trustworthy result, not an incomplete one")
 	})
 
 	t.Run("epochsChecked increments once per call, across multiple epochs", func(t *testing.T) {
@@ -168,5 +181,64 @@ func TestFromGenesisCounters_RecordEpoch(t *testing.T) {
 		c.recordEpoch(nodeparity.EpochResult{Epoch: 1, UTxOAttempted: true}, logger)
 		c.recordEpoch(nodeparity.EpochResult{Epoch: 2, UTxOAttempted: true}, logger)
 		assert.Equal(t, 2, c.epochsChecked)
+	})
+}
+
+// TestFromGenesisCounters_Result pins fromGenesisRun's actual exit-code
+// decision (human review, dingo#4319): a Dingo-side query error after a
+// successful Acquire, a Koios-side data fault, and an expected
+// retention-floor Acquire rejection all land in the same *Incomplete
+// counters recordEpoch fills in, with no mismatch counted for any of them
+// -- so a run in which Dingo failed every single query, all epoch, would
+// exit 0 without the "verified nothing" check below: every mismatch
+// counter stays exactly 0, indistinguishable from a run that genuinely
+// checked everything and found no divergence.
+func TestFromGenesisCounters_Result(t *testing.T) {
+	t.Run("no epochs reached: nil, not a false 'verified nothing' failure", func(t *testing.T) {
+		var c fromGenesisCounters
+		assert.NoError(t, c.result(),
+			"a run that never reached an epoch boundary is reported through RunFromGenesis's own error return, not this check")
+	})
+
+	t.Run("epochs reached, everything verified, no mismatches: nil", func(t *testing.T) {
+		c := fromGenesisCounters{
+			epochsChecked: 3,
+			ppVerified:    3, stakeVerified: 3, utxoVerified: 3,
+		}
+		assert.NoError(t, c.result())
+	})
+
+	t.Run("a real mismatch fails the run even if plenty was verified", func(t *testing.T) {
+		c := fromGenesisCounters{
+			epochsChecked: 3,
+			ppVerified:    3, stakeVerified: 3, utxoVerified: 2,
+			utxoMismatches: 1,
+		}
+		require.Error(t, c.result())
+		assert.Contains(t, c.result().Error(), "diverged from Koios")
+	})
+
+	t.Run("every epoch's every check incomplete: fails, even with zero mismatches", func(t *testing.T) {
+		c := fromGenesisCounters{
+			epochsChecked:   5,
+			ppIncomplete:    5,
+			stakeIncomplete: 5,
+			utxoIncomplete:  5,
+		}
+		require.Error(t, c.result(),
+			"reverting this check in place would exit 0 for a run that verified nothing at all")
+		assert.Contains(t, c.result().Error(), "verified nothing")
+	})
+
+	t.Run("at least one check verified in at least one epoch: not a 'verified nothing' failure", func(t *testing.T) {
+		c := fromGenesisCounters{
+			epochsChecked:   5,
+			ppVerified:      1,
+			ppIncomplete:    4,
+			stakeIncomplete: 5,
+			utxoIncomplete:  5,
+		}
+		assert.NoError(t, c.result(),
+			"one genuinely verified check across the whole run is enough to not call this run a total loss")
 	})
 }
