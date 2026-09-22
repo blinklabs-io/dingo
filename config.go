@@ -686,9 +686,11 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 	// Start with a default internal config
 	c := Config{
 		cfg: &internalconfig.Config{
-			BindAddr:    "0.0.0.0",
-			StorageMode: string(StorageModeCore),
-			RunMode:     internalconfig.RunModeServe,
+			BindAddr:             "0.0.0.0",
+			StorageMode:          string(StorageModeCore),
+			RunMode:              internalconfig.RunModeServe,
+			ValidateHistorical:   true,
+			StrictUtxoValidation: true,
 			// Fail closed: self-validate locally-forged blocks before
 			// adoption and diffusion unless an operator explicitly opts
 			// out. Mirrors internalconfig's own package-level default
