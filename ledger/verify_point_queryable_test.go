@@ -316,3 +316,76 @@ func TestVerifyPointQueryable_UnknownEraId_Rejected(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
 }
+
+// TestVerifyPointQueryable_UtxoFloorOnly_Rejected is wolf31o2's review
+// finding on this PR: deleting the checkUtxoRetentionWindow call, or the
+// queryShelleyCurrentProtocolParams call, from VerifyPointQueryable leaves
+// every existing TestVerifyPointQueryable* case green --
+// PastRetentionFloor_Rejected is rejected by the stake floor either way, and
+// no fixture has a UTxO-floor rejection as its only failure. Identical to
+// TestVerifyPointQueryable_WithinAllFloors_Accepted (on chain, within the
+// stake/era windows, no CardanoNodeConfig so the network_state floor never
+// runs) except for a durably persisted consumed-UTxO prune floor (400) above
+// the pinned slot (350) -- only checkUtxoRetentionWindow can reject this
+// point.
+func TestVerifyPointQueryable_UtxoFloorOnly_Rejected(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	ls.currentEra = eras.ConwayEraDesc
+	ls.currentPParams = conwayPParamsWithCostModels(
+		map[uint][]int64{0: {1, 1, 1}},
+	)
+	ls.currentEpoch = models.Epoch{EpochId: 3}
+	ls.publishSnapshotsLocked()
+
+	hash := repeatedBytes(32, 0x0B)
+	seedBlockAtSlot(t, ls, 350, hash)
+	seedEpochs(t, ls, map[uint64]uint64{300: 3})
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(350, hash),
+	}, nil))
+	require.NoError(t, ls.persistConsumedUtxoPruneFloor(400, nil))
+
+	err := ls.VerifyPointQueryable(nil, QueryPoint{Slot: 350, Hash: hash})
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
+}
+
+// TestVerifyPointQueryable_PParamsRowOnly_Rejected is wolf31o2's review
+// finding on this PR: deleting the checkUtxoRetentionWindow call, or this
+// queryShelleyCurrentProtocolParams call, from VerifyPointQueryable leaves
+// every existing TestVerifyPointQueryable* case green -- neither deletion
+// changes PastRetentionFloor_Rejected's outcome, since the stake floor
+// already rejects that fixture, and no case has a missing pparams row as its
+// only failure. The pinned point's epoch (3) sits exactly at the
+// stake-retention window's edge relative to the live epoch (5) -- mark
+// snapshot epoch 2 equals the floor 5-3=2, so checkAsOfEpochRecency accepts
+// it (the same boundary TestQueryShelleyUtxoByTxIn_RetentionWindow_AtFloor_Succeeds
+// covers for the UTxO floor) -- and no CardanoNodeConfig means the
+// network_state floor never runs, so only the missing persisted pparams row
+// for epoch 3 can reject this point.
+func TestVerifyPointQueryable_PParamsRowOnly_Rejected(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	ls.currentEra = eras.ConwayEraDesc
+	ls.currentPParams = conwayPParamsWithCostModels(
+		map[uint][]int64{0: {1, 1, 1}},
+	)
+	ls.currentEpoch = models.Epoch{EpochId: 5}
+	ls.publishSnapshotsLocked()
+
+	hash := repeatedBytes(32, 0x0B)
+	seedBlockAtSlot(t, ls, 350, hash)
+	seedEpochs(t, ls, map[uint64]uint64{300: 3, 700: 5})
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(750, repeatedBytes(32, 0x0C)),
+	}, nil))
+
+	err := ls.VerifyPointQueryable(nil, QueryPoint{Slot: 350, Hash: hash})
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
+}
