@@ -56,6 +56,7 @@ const (
 	assetNameHexColumnDropSchemaRelease           = "asset-name-hex-column-drop"
 	alonzoPParamsUnitSchemaRelease                = "alonzo-pparams-unit-provenance"
 	assetAmountFingerprintIndexDropSchemaRelease  = "asset-amount-fingerprint-index-drop"
+	rewardAdaPotsImportedFeesSchemaRelease        = "reward-ada-pots-imported-epoch-fees"
 )
 
 // alonzoEraID is the pparams.era_id value Alonzo rows carry. A migration is a
@@ -126,6 +127,11 @@ var schemaVersions = []struct {
 		Version: 21,
 		Name:    assetAmountFingerprintIndexDropSchemaRelease,
 		Dir:     "v21",
+	},
+	{
+		Version: 22,
+		Name:    rewardAdaPotsImportedFeesSchemaRelease,
+		Dir:     "v22",
 	},
 }
 

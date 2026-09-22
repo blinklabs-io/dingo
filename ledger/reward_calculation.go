@@ -4380,6 +4380,25 @@ func rewardParametersFromPParams(
 	return params, nil
 }
 
+// rewardEpochFees sums the fees an ended epoch collected, for the
+// RewardAdaPots row of the epoch that follows it.
+//
+// A node running through the whole epoch has every one of its transactions
+// stored locally, so summing the epoch's full slot range is exact. A node
+// bootstrapped from a Mithril snapshot mid-epoch does not: seedImportedRewardBasis
+// seeds that epoch's own pots row with ImportedEpochFees, the fees the
+// snapshot's anchor already accounts for (UTxOState.utxosFees minus
+// SnapShots.ssFee), and CapturedSlot at the anchor. When that row exists,
+// sum stored fees only after the anchor and add the imported amount instead
+// of summing from the epoch start -- summing the whole range would either
+// miss the pre-anchor fees entirely (dingo #3975) or double-count them once
+// the historical backfill (#4061) has stored pre-anchor transactions locally.
+// The two ranges are disjoint by construction, the same way
+// mergeImportedBlockCounts's imported and observed block counts are.
+//
+// A row with no ImportedEpochFees -- every row a live boundary writes, and
+// every imported row written before the field existed -- keeps the
+// whole-epoch local sum.
 func rewardEpochFees(
 	meta metadata.MetadataStore,
 	metaTxn types.Txn,
@@ -4390,6 +4409,33 @@ func rewardEpochFees(
 	}
 	startSlot := epoch.StartSlot
 	endSlot := startSlot + uint64(epoch.LengthInSlots) - 1
+	imported, err := meta.GetRewardAdaPots(epoch.EpochId, metaTxn)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"get imported ADA pots for epoch %d: %w",
+			epoch.EpochId,
+			err,
+		)
+	}
+	if imported != nil && imported.ImportedEpochFees != nil &&
+		imported.CapturedSlot >= startSlot && imported.CapturedSlot <= endSlot {
+		postAnchorFees, err := meta.SumTransactionFeesInSlotRange(
+			imported.CapturedSlot+1, endSlot, metaTxn,
+		)
+		if err != nil {
+			return 0, err
+		}
+		total, overflow := addRewardUint64(
+			postAnchorFees, uint64(*imported.ImportedEpochFees),
+		)
+		if overflow {
+			return 0, fmt.Errorf(
+				"imported epoch fee total overflow for epoch %d",
+				epoch.EpochId,
+			)
+		}
+		return total, nil
+	}
 	return meta.SumTransactionFeesInSlotRange(startSlot, endSlot, metaTxn)
 }
 
