@@ -153,20 +153,20 @@
       "id": 8,
       "type": "timeseries",
       "title": "Block stage latency: p50 / p99",
-      "description": "histogram_quantile(0.50 or 0.99, sum(rate(dingo_ledger_block_stage_duration_seconds_bucket[$__rate_interval])) by (le, stage, variant)) -- p50 and p99 wall-clock time per ledger-owned per-block processing stage (header_verify, validate, apply). histogram_quantile is a bucket-boundary-bounded ESTIMATE, not an exact value. The buckets were widened from a ~3.3s ceiling to ~52.4s (blinklabs-io/dingo#4364: an epoch-boundary DRep voting-power query blocked block application for 4-8s, and every one of those observations previously landed in the histogram's +Inf overflow bucket, indistinguishable from any other stall past 3.3s). Watch the p99 line for this class of stall; see 'Block stage max observed duration' below for the exact worst case, which no quantile can give.",
+      "description": "histogram_quantile(0.50 or 0.99, sum(rate(dingo_ledger_block_stage_duration_seconds_bucket[$__rate_interval])) by (le, stage)) -- p50 and p99 wall-clock time per ledger-owned processing stage: header_verify, validate, apply, and epoch_rollover (the epoch-boundary transaction, during which no block is applied; blinklabs-io/dingo#4364 measured 25s to 318s). histogram_quantile is an estimate bounded by the bucket edges, which run from 100us to ~419s. epoch_rollover records once per epoch, so its quantile is only defined briefly after a boundary; see Block stage max observed duration for the exact worst case.",
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.50, sum(rate(dingo_ledger_block_stage_duration_seconds_bucket[$__rate_interval])) by (le, stage, variant))",
-          "legendFormat": "p50 {{stage}} ({{variant}})",
+          "expr": "histogram_quantile(0.50, sum(rate(dingo_ledger_block_stage_duration_seconds_bucket[$__rate_interval])) by (le, stage))",
+          "legendFormat": "p50 {{stage}}",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.99, sum(rate(dingo_ledger_block_stage_duration_seconds_bucket[$__rate_interval])) by (le, stage, variant))",
-          "legendFormat": "p99 {{stage}} ({{variant}})",
+          "expr": "histogram_quantile(0.99, sum(rate(dingo_ledger_block_stage_duration_seconds_bucket[$__rate_interval])) by (le, stage))",
+          "legendFormat": "p99 {{stage}}",
           "refId": "B"
         }
       ],
@@ -179,14 +179,14 @@
       "id": 9,
       "type": "timeseries",
       "title": "Block stage max observed duration",
-      "description": "dingo_ledger_block_stage_max_duration_seconds -- the exact maximum wall-clock duration ever observed for each ledger-owned per-block stage (header_verify, validate, apply), since process start. Monotonically non-decreasing and never resets. Unlike the p50/p99 panel above, this is not a bucket-bounded estimate: it is the precise worst-ever value, which is what actually surfaces a blinklabs-io/dingo#4364-class multi-second epoch-boundary stall that the old ~3.3s histogram ceiling could not distinguish from a much larger one.",
+      "description": "dingo_ledger_block_stage_max_duration_seconds -- the exact maximum wall-clock duration observed for each ledger-owned stage (header_verify, validate, apply, epoch_rollover) since process start. Monotonically non-decreasing. Unlike the p50/p99 panel it is not bucket-bounded, so the epoch_rollover series reads the full length of a blinklabs-io/dingo#4364-class boundary stall.",
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 32 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "dingo_ledger_block_stage_max_duration_seconds",
-          "legendFormat": "{{stage}} ({{variant}})",
+          "legendFormat": "{{stage}}",
           "refId": "A"
         }
       ],
