@@ -755,8 +755,33 @@ type Config struct {
 	ShelleyVRFKey                 string `yaml:"shelleyVrfKey"                      envconfig:"SHELLEY_VRF_KEY"`
 	ShelleyKESKey                 string `yaml:"shelleyKesKey"                      envconfig:"SHELLEY_KES_KEY"`
 	ShelleyOperationalCertificate string `yaml:"shelleyOperationalCertificate"      envconfig:"SHELLEY_OPERATIONAL_CERTIFICATE"`
-	ForgeSyncToleranceSlots       uint64 `yaml:"forgeSyncToleranceSlots"            envconfig:"DINGO_FORGE_SYNC_TOLERANCE_SLOTS"`
-	ForgeStaleGapThresholdSlots   uint64 `yaml:"forgeStaleGapThresholdSlots"        envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
+	// ShelleyKESAgentSocket, when set, sources the KES signing key from a
+	// running bursa KES agent over the given Unix-domain service socket
+	// instead of a local --shelley-kes-key file. The VRF key and operational
+	// certificate flags still apply. Mirrors cardano-node's
+	// --shelley-kes-agent-socket.
+	//
+	// Block production is supported on Linux and macOS only, so this flag
+	// does not apply on Windows. The path must fit the platform's sun_path
+	// field -- 104 bytes on macOS, 108 on Linux -- because a socket address
+	// is a fixed-size struct. kesagent.NewClient rejects an over-long path at
+	// startup rather than leaving it to surface as a bare "invalid argument"
+	// from connect().
+	ShelleyKESAgentSocket string `yaml:"shelleyKesAgentSocket"              envconfig:"SHELLEY_KES_AGENT_SOCKET"`
+	// ShelleyKESAgentMode selects the agent service mode: "serve-key" (the
+	// agent pushes the evolving KES sign key and the node signs headers
+	// locally) or "sign" (the node forwards header bodies and the agent
+	// returns signatures; the key never enters the node). Defaults to
+	// "serve-key" when a socket is set.
+	ShelleyKESAgentMode string `yaml:"shelleyKesAgentMode"                envconfig:"SHELLEY_KES_AGENT_MODE"`
+	// ShelleyKESAgentSignTimeout bounds one sign-mode round trip to the KES
+	// agent. It must stay below a slot: block production calls the signer
+	// synchronously on the slot-aligned loop, so a longer timeout parks
+	// forging for several slots when the agent stops answering. Zero uses
+	// the client default (500ms).
+	ShelleyKESAgentSignTimeout  time.Duration `yaml:"shelleyKesAgentSignTimeout"         envconfig:"SHELLEY_KES_AGENT_SIGN_TIMEOUT"`
+	ForgeSyncToleranceSlots     uint64        `yaml:"forgeSyncToleranceSlots"            envconfig:"DINGO_FORGE_SYNC_TOLERANCE_SLOTS"`
+	ForgeStaleGapThresholdSlots uint64        `yaml:"forgeStaleGapThresholdSlots"        envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
 	// ForgePrimaryChainTipToleranceSlots bounds how far the ledger-applied tip
 	// may trail this node's own primary chain tip before forging is skipped.
 	// Raise it only if the ledger pipeline is legitimately slow on this
@@ -1578,6 +1603,9 @@ func (c *Config) ApplyDefaults() {
 	// This also keeps manually constructed Config values fail-safe.
 	if c.DebugBindAddr == "" {
 		c.DebugBindAddr = DefaultDebugBindAddr
+	}
+	if c.ShelleyKESAgentSocket != "" && c.ShelleyKESAgentMode == "" {
+		c.ShelleyKESAgentMode = "serve-key"
 	}
 	// Match the Midnight server's default for explicitly empty YAML or
 	// environment values.

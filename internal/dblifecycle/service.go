@@ -32,6 +32,7 @@ import (
 	"log/slog"
 	"strconv"
 
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -124,6 +125,9 @@ func (s *Service) openDatabase(
 			StartEra:       string(s.cfg.StartEra),
 			BlobPlugin:     s.cfg.Plugins.Storage.Blob.Provider,
 			MetadataPlugin: s.cfg.Plugins.Storage.Metadata.Provider,
+			AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
+				nil, s.cfg.CardanoConfig, s.cfg.Network,
+			),
 		},
 		internalplugins.StorageSelections{
 			Blob:     s.cfg.Plugins.Storage.Blob,
@@ -242,16 +246,32 @@ func (s *Service) Restore(
 			}
 			return nil
 		},
-		lifecycle.RestoreStorageConfig{
-			Blob:     s.cfg.Plugins.Storage.Blob.Config,
-			Metadata: s.cfg.Plugins.Storage.Metadata.Config,
-			Logger:   s.logger,
-		},
+		s.RestoreStorageConfig(),
 	)
 	if err != nil {
 		return lifecycle.Manifest{}, err
 	}
 	return manifest, nil
+}
+
+// RestoreStorageConfig is the restore-time storage configuration this
+// Service's own offline Restore uses. It is exported so a caller that
+// restores through database/lifecycle directly against the same
+// configuration -- bark's snapshot verification -- passes the same values
+// rather than a zero literal, which would make a snapshot of a
+// pre-gouroboros-v0.205.7 database fail verification it can pass.
+func (s *Service) RestoreStorageConfig() lifecycle.RestoreStorageConfig {
+	if s == nil || s.cfg == nil {
+		return lifecycle.RestoreStorageConfig{}
+	}
+	return lifecycle.RestoreStorageConfig{
+		Blob:     s.cfg.Plugins.Storage.Blob.Config,
+		Metadata: s.cfg.Plugins.Storage.Metadata.Config,
+		Logger:   s.logger,
+		AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
+			nil, s.cfg.CardanoConfig, s.cfg.Network,
+		),
+	}
 }
 
 // intendedGateValues builds the subset of database/nodesettings.Gates that

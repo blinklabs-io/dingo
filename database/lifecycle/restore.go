@@ -135,6 +135,14 @@ type RestoreStorageConfig struct {
 	// minutes and is otherwise silent. Nil disables that reporting; nothing
 	// else in this package logs.
 	Logger *slog.Logger
+	// AlonzoLovelacePerUtxoWord is passed through to the validating open's
+	// database.Config. It is here rather than derived because this package
+	// sits under the database import boundary and cannot read a
+	// cardano-node config: without it the validating open of a snapshot
+	// taken from a pre-gouroboros-v0.205.7 database refuses the restore
+	// and demands a resync, exactly as a real startup would that omitted
+	// it. Zero preserves that refusal for a caller that has no genesis.
+	AlonzoLovelacePerUtxoWord uint64
 }
 
 // Restore populates targetDataDir (which must not already exist, or must
@@ -1242,9 +1250,10 @@ func validateRestoredDatabase(
 		}
 	}
 	db, err := database.New(&database.Config{
-		DataDir:     targetDataDir,
-		StorageMode: manifest.StorageMode,
-		Network:     manifest.Network,
+		DataDir:                   targetDataDir,
+		StorageMode:               manifest.StorageMode,
+		Network:                   manifest.Network,
+		AlonzoLovelacePerUtxoWord: storageConfig.AlonzoLovelacePerUtxoWord,
 	}, database.Stores{Blob: blobStore, Metadata: metadataStore})
 	if db != nil {
 		defer db.Close()
