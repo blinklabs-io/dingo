@@ -164,11 +164,35 @@ func TestValidateTxByron_OutputNetworkMagic(t *testing.T) {
 			wantExpected:  &magicA,
 		},
 		{
-			name:          "multi-output with one wrong",
+			// The three multi-output cases below pin the bad output at each
+			// position in turn. A validator that only inspected the last
+			// output (or only the first) would still pass a suite that put
+			// the mismatch in just one place; PR review on #4380 found this
+			// gap, since the original matrix only exercised "bad output
+			// last".
+			name:          "multi-output, bad output last",
 			protocolMagic: customNetworkA,
 			outputs:       []*uint32{&magicA, &magicA, &magicB},
 			wantError:     true,
 			wantIndex:     2,
+			wantExpected:  &magicA,
+			wantActual:    &magicB,
+		},
+		{
+			name:          "multi-output, bad output first",
+			protocolMagic: customNetworkA,
+			outputs:       []*uint32{&magicB, &magicA, &magicA},
+			wantError:     true,
+			wantIndex:     0,
+			wantExpected:  &magicA,
+			wantActual:    &magicB,
+		},
+		{
+			name:          "multi-output, bad output in the middle",
+			protocolMagic: customNetworkA,
+			outputs:       []*uint32{&magicA, &magicB, &magicA},
+			wantError:     true,
+			wantIndex:     1,
 			wantExpected:  &magicA,
 			wantActual:    &magicB,
 		},
