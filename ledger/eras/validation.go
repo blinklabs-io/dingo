@@ -424,7 +424,7 @@ func validatePlutusOutcome(tx lcommon.Transaction, phase2Err error) error {
 // transactions. cardano-ledger only translates the validity interval while
 // assembling the context for the Plutus scripts a transaction actually needs
 // (Alonzo collectPlutusScriptsWithContext), and ValidateTxConway already
-// follows that shape here via conwayTxInfoCache.
+// follows that shape here via txInfoCache.
 func txHasRedeemers(tx lcommon.Transaction) bool {
 	witnesses := tx.Witnesses()
 	if witnesses == nil {

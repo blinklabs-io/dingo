@@ -39,6 +39,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/ledger"
 )
 
 // syncLogBuffer is a mutex-guarded log sink. The blockfetch server processes
@@ -160,6 +161,12 @@ func (c *stubBlockfetchConnection) Close() error {
 	return c.closeErr
 }
 
+// testMaxBlocksUnbounded is passed to blockfetchServerSendBatch by tests
+// that exercise something other than the block-count cap itself (iterator
+// errors, rollback, send-drain backpressure, chain-tip exhaustion): large
+// enough that none of their handful of blocks ever approaches it.
+const testMaxBlocksUnbounded = 1 << 30
+
 func testBlockfetchIteratorBlock(slot uint64) *chain.ChainIteratorResult {
 	return &chain.ChainIteratorResult{
 		Point: ocommon.NewPoint(slot, []byte{byte(slot)}),
@@ -241,13 +248,25 @@ func TestBlockfetchServerRequestRange_EqualPoints(t *testing.T) {
 	}, "equal slot range should pass validation and reach LedgerState call")
 }
 
-func TestBlockfetchServerRequestRange_OversizedRange(t *testing.T) {
+// TestBlockfetchServerRequestRange_SparseNetworkSlotSpanNotRejected is issue
+// #4354: a slot span far larger than mainnet's stability window (129600)
+// must not be rejected at the request-validation stage, since a sparse or
+// low-active-slot-coefficient custom network can have a valid run of
+// consecutive blocks spanning far more slots than that. Only actual block
+// count, scaled to the network's security parameter, bounds the response.
+// LedgerState is nil, so the call panics either way -- assert.Panics alone
+// cannot tell "rejected by a slot-range check" (which panics inside the nil
+// ctx.Server.NoBlocks()) apart from "reached GetChainFromPoint" (which
+// panics on the nil LedgerState). Every early-rejection branch in
+// blockfetchServerRequestRange logs before it calls NoBlocks, so an empty
+// log buffer at the point of the panic is what actually proves no rejection
+// branch ran; asserting on specific log wording would pass again if a
+// slot-range check returned with different wording.
+func TestBlockfetchServerRequestRange_SparseNetworkSlotSpanNotRejected(
+	t *testing.T,
+) {
 	t.Parallel()
 
-	// When the slot range exceeds MaxBlockFetchRange, the server should
-	// log a warning and attempt to send NoBlocks. Since Server is nil,
-	// the NoBlocks call will panic. We verify the correct warning was
-	// logged before the panic, proving the range size check was reached.
 	var logBuf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
@@ -257,88 +276,24 @@ func TestBlockfetchServerRequestRange_OversizedRange(t *testing.T) {
 		EventBus: event.NewEventBus(nil, logger),
 	})
 
-	start := ocommon.NewPoint(0, []byte{0x01})
-	end := ocommon.NewPoint(MaxBlockFetchRange+1, []byte{0x02})
+	start := ocommon.NewPoint(0, make([]byte, lcommon.Blake2b256Size))
+	end := ocommon.NewPoint(
+		50_000_000_000, // far beyond 129600, the old MaxBlockFetchRange
+		make([]byte, lcommon.Blake2b256Size),
+	)
 	ctx := blockfetch.CallbackContext{
 		ConnectionId: testConnId(),
 	}
 
 	assert.Panics(t, func() {
 		_ = o.blockfetchServerRequestRange(ctx, start, end)
-	}, "expected panic from nil Server.NoBlocks()")
+	}, "a large slot span must reach the nil LedgerState call (GetChainFromPoint), not be rejected by a slot-range check")
 
-	logOutput := logBuf.String()
-	assert.Contains(
+	assert.Empty(
 		t,
-		logOutput,
-		"range exceeds maximum",
-		"expected log message about oversized range",
+		logBuf.String(),
+		"a large slot span must not log or take any early-rejection branch before reaching GetChainFromPoint",
 	)
-	assert.Contains(
-		t,
-		logOutput,
-		`"level":"DEBUG"`,
-		"oversized range NoBlocks should log at DEBUG, not WARN",
-	)
-	assert.NotContains(
-		t,
-		logOutput,
-		`"level":"WARN"`,
-		"oversized range NoBlocks should not produce a WARN line",
-	)
-}
-
-func TestBlockfetchServerRequestRange_RangeWithinLimit(t *testing.T) {
-	t.Parallel()
-
-	// A range within MaxBlockFetchRange should pass both validation
-	// checks and proceed to GetChainFromPoint. Since LedgerState is nil,
-	// this will panic at that call, proving the range check did not
-	// reject it.
-	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	o := newOuroboros(OuroborosConfig{
-		Logger:   logger,
-		EventBus: event.NewEventBus(nil, logger),
-	})
-
-	start := ocommon.NewPoint(1000, []byte{0x01})
-	end := ocommon.NewPoint(1000+MaxBlockFetchRange-1, []byte{0x02})
-
-	assert.Panics(t, func() {
-		_ = o.blockfetchServerRequestRange(
-			blockfetch.CallbackContext{
-				ConnectionId: testConnId(),
-			},
-			start,
-			end,
-		)
-	}, "range within limit should pass validation and reach LedgerState call")
-}
-
-func TestBlockfetchServerRequestRange_ExactlyAtLimit(t *testing.T) {
-	t.Parallel()
-
-	// A range of exactly MaxBlockFetchRange slots should be accepted
-	// (the check is > not >=). Since LedgerState is nil, this will
-	// panic at GetChainFromPoint, proving the range check passed.
-	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	o := newOuroboros(OuroborosConfig{
-		Logger:   logger,
-		EventBus: event.NewEventBus(nil, logger),
-	})
-
-	start := ocommon.NewPoint(1000, []byte{0x01})
-	end := ocommon.NewPoint(1000+MaxBlockFetchRange, []byte{0x02})
-
-	assert.Panics(t, func() {
-		_ = o.blockfetchServerRequestRange(
-			blockfetch.CallbackContext{
-				ConnectionId: testConnId(),
-			},
-			start,
-			end,
-		)
-	}, "range exactly at limit should pass validation and reach LedgerState call")
 }
 
 func TestBlockfetchServerSendBatch_ClosesConnectionOnIteratorError(
@@ -370,16 +325,18 @@ func TestBlockfetchServerSendBatch_ClosesConnectionOnIteratorError(
 		iter,
 		server,
 		conn,
+		testMaxBlocksUnbounded,
 	)
 
 	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "iterator failed")
 	assert.Equal(t, 1, server.startBatchCalls)
 	assert.Equal(t, 0, server.batchDoneCalls)
 	assert.Equal(t, 1, conn.closeCalls)
 	assert.Equal(t, 1, iter.cancelCalls)
 }
 
-func TestBlockfetchServerSendBatch_RejectsIncompleteRangeAtChainTip(t *testing.T) {
+func TestBlockfetchServerSendBatch_BatchDoneAtChainTip(t *testing.T) {
 	t.Parallel()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	o := newOuroboros(OuroborosConfig{
@@ -401,13 +358,13 @@ func TestBlockfetchServerSendBatch_RejectsIncompleteRangeAtChainTip(t *testing.T
 		iter,
 		server,
 		conn,
+		testMaxBlocksUnbounded,
 	)
 
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "ended before requested end point")
+	assert.NoError(t, err)
 	assert.Equal(t, 1, server.startBatchCalls)
-	assert.Equal(t, 0, server.batchDoneCalls)
-	assert.Equal(t, 1, conn.closeCalls)
+	assert.Equal(t, 1, server.batchDoneCalls)
+	assert.Equal(t, 0, conn.closeCalls)
 	assert.Equal(t, 1, iter.cancelCalls)
 }
 
@@ -448,36 +405,73 @@ func TestBlockfetchServerSendBatch_RollbackEndsBatchWithoutServingBlock(
 		iter,
 		server,
 		conn,
+		testMaxBlocksUnbounded,
 	)
 
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "ended before requested end point")
+	assert.NoError(t, err)
 	assert.Equal(t, 1, server.startBatchCalls)
 	// The rollback sentinel must NOT be streamed as a block.
 	assert.Equal(t, 0, server.blockCalls,
 		"rollback sentinel must not be streamed as a block")
-	assert.Equal(t, 0, server.batchDoneCalls)
-	assert.Equal(t, 1, conn.closeCalls)
+	// Blockfetch has no rollback message, so end the batch cleanly and let the
+	// client re-request against its updated chain.
+	assert.Equal(t, 1, server.batchDoneCalls)
+	assert.Equal(t, 0, conn.closeCalls)
 	assert.Equal(t, 1, iter.cancelCalls)
 }
 
-func TestBlockfetchServerSendBatch_RejectsEndPointHashMismatch(t *testing.T) {
+// sparseBlockfetchSteps builds n consecutive iterator steps starting at
+// startSlot, spaced far enough apart that a run of a few thousand steps
+// spans more than 129600 slots (the old, now-removed MaxBlockFetchRange).
+// This reproduces a sparse or low-active-slot-coefficient custom network
+// where real consecutive blocks span far more slots than mainnet's
+// stability window (#4354).
+func sparseBlockfetchSteps(
+	n int,
+	startSlot uint64,
+) []blockfetchIteratorStep {
+	const slotGap = 300 // a few thousand steps * slotGap > 129600
+	steps := make([]blockfetchIteratorStep, n)
+	for i := range n {
+		steps[i] = blockfetchIteratorStep{
+			result: testBlockfetchIteratorBlock(startSlot + uint64(i)*slotGap),
+		}
+	}
+	return steps
+}
+
+func TestBlockfetchServerSendBatch_ServesSparseRangeUpToMaxBlocks(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	// #4354: valid blocks whose endpoint slots differ by more than 129600
+	// (the old MaxBlockFetchRange) must be served in full rather than
+	// rejected, since resource usage is now bounded by block count. This
+	// exercises blockfetchServerSendBatch's own backstop bound directly
+	// (blockfetchServerRequestRange's up-front NoBlocks rejection is
+	// covered separately in blockfetch_range_end_test.go, over a real
+	// chain), so maxBlocks is passed explicitly rather than derived from a
+	// security parameter.
+	const testMaxBlocks = 5000
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	o := newOuroboros(OuroborosConfig{
 		Logger:   logger,
 		EventBus: event.NewEventBus(nil, logger),
 	})
-	iter := &stubBlockfetchIterator{
-		steps: []blockfetchIteratorStep{
-			{result: testBlockfetchIteratorBlock(200)},
-		},
-	}
+	const startSlot = uint64(1000)
+	steps := sparseBlockfetchSteps(testMaxBlocks, startSlot)
+	iter := &stubBlockfetchIterator{steps: steps}
 	server := &stubBlockfetchBatchServer{}
-	conn := &stubBlockfetchConnection{
-		errChan: make(chan error),
-	}
-	start := ocommon.NewPoint(100, []byte{0x01})
-	end := ocommon.NewPoint(200, []byte{0xff})
+	conn := &stubBlockfetchConnection{errChan: make(chan error)}
+	start := ocommon.NewPoint(startSlot, []byte{0x01})
+	end := steps[len(steps)-1].result.Point
+	require.Greater(
+		t,
+		end.Slot-start.Slot,
+		uint64(129600),
+		"test setup must exercise a slot span larger than the old fixed limit",
+	)
 
 	err := o.blockfetchServerSendBatch(
 		testConnId().String(),
@@ -486,14 +480,126 @@ func TestBlockfetchServerSendBatch_RejectsEndPointHashMismatch(t *testing.T) {
 		iter,
 		server,
 		conn,
+		testMaxBlocks,
+	)
+
+	assert.NoError(t, err)
+	assert.Equal(t, 1, server.startBatchCalls)
+	assert.Equal(
+		t,
+		testMaxBlocks,
+		server.blockCalls,
+		"all valid blocks in a sparse range up to the cap must be served",
+	)
+	assert.Equal(t, 1, server.batchDoneCalls)
+	assert.Equal(
+		t,
+		0,
+		conn.closeCalls,
+		"serving exactly maxBlocks must not close the connection",
+	)
+}
+
+func TestBlockfetchServerSendBatch_ClosesConnectionWhenBlockCountExceedsMax(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	// A range that would serve more than maxBlocks blocks is still bounded:
+	// the server must stop and close the connection instead of streaming an
+	// unbounded response. This is the backstop's own boundary
+	// (blockfetchServerRequestRange rejects this case with a clean NoBlocks
+	// before StartBatch when it can; see
+	// TestBlockfetchServerRequestRange_OversizedRangeRejectedWithNoBlocks in
+	// blockfetch_range_end_test.go), so maxBlocks is passed explicitly.
+	const testMaxBlocks = 5000
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	o := newOuroboros(OuroborosConfig{
+		Logger:   logger,
+		EventBus: event.NewEventBus(nil, logger),
+	})
+	const startSlot = uint64(1000)
+	steps := sparseBlockfetchSteps(testMaxBlocks+1, startSlot)
+	iter := &stubBlockfetchIterator{steps: steps}
+	server := &stubBlockfetchBatchServer{}
+	conn := &stubBlockfetchConnection{errChan: make(chan error)}
+	start := ocommon.NewPoint(startSlot, []byte{0x01})
+	end := steps[len(steps)-1].result.Point
+
+	err := o.blockfetchServerSendBatch(
+		testConnId().String(),
+		start,
+		end,
+		iter,
+		server,
+		conn,
+		testMaxBlocks,
 	)
 
 	assert.Error(t, err)
-	assert.ErrorContains(t, err, "ended before requested end point")
-	assert.Equal(t, 1, server.blockCalls)
+	assert.Equal(t, 1, server.startBatchCalls)
+	assert.Equal(
+		t,
+		testMaxBlocks,
+		server.blockCalls,
+		"the block that would exceed the cap must not be served",
+	)
 	assert.Equal(t, 0, server.batchDoneCalls)
 	assert.Equal(t, 1, conn.closeCalls)
 	assert.Equal(t, 1, iter.cancelCalls)
+}
+
+// TestMaxBlockFetchBlocksForSecurityParam pins
+// maxBlockFetchBlocksForSecurityParam's two behaviors: a small or
+// unconfigured security parameter K must not cap below
+// blockfetchMaxBlocksFloor (or Dingo-to-Dingo catch-up on a small-K network
+// would ride the same connection-closing edge #4354 fixed), and a K large
+// enough to matter -- the class #4354 is about -- must scale the cap
+// linearly with K rather than staying fixed.
+func TestMaxBlockFetchBlocksForSecurityParam(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		k    int
+		want int
+	}{
+		{"negative k floors like zero", -1, blockfetchMaxBlocksFloor},
+		{"zero k uses the floor", 0, blockfetchMaxBlocksFloor},
+		{"small k stays at the floor", 100, blockfetchMaxBlocksFloor},
+		{"mainnet-shaped k scales past the floor", 2160, 3 * 2160},
+		{"large custom-network k scales linearly", 100_000, 3 * 100_000},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(
+				t,
+				tc.want,
+				maxBlockFetchBlocksForSecurityParam(tc.k),
+			)
+		})
+	}
+}
+
+// TestBlockfetchMaxBlocksFloorHasHeadroomOverChainsyncBatchSize pins the
+// coupling blockfetchMaxBlocksFloor's doc comment only asserts in prose:
+// the floor must stay comfortably above ledger.BlockfetchBatchSize, the
+// largest range Dingo's own chainsync client ever requests, or a small- or
+// zero-K network starts riding the same connection-closing edge #4354
+// fixed. Without this, a future change to either constant could silently
+// erode or eliminate that margin.
+func TestBlockfetchMaxBlocksFloorHasHeadroomOverChainsyncBatchSize(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	require.GreaterOrEqual(
+		t,
+		blockfetchMaxBlocksFloor,
+		10*ledger.BlockfetchBatchSize,
+		"blockfetchMaxBlocksFloor must keep at least an order of magnitude of headroom over ledger.BlockfetchBatchSize",
+	)
 }
 
 func TestBlockfetchServerSendBatch_WaitsForSendDrainBetweenMessages(
@@ -517,7 +623,7 @@ func TestBlockfetchServerSendBatch_WaitsForSendDrainBetweenMessages(
 		errChan: make(chan error),
 	}
 	start := ocommon.NewPoint(100, []byte{0x01})
-	end := ocommon.NewPoint(101, []byte{byte(101)})
+	end := ocommon.NewPoint(101, []byte{101})
 
 	err := o.blockfetchServerSendBatch(
 		testConnId().String(),
@@ -526,6 +632,7 @@ func TestBlockfetchServerSendBatch_WaitsForSendDrainBetweenMessages(
 		iter,
 		server,
 		conn,
+		testMaxBlocksUnbounded,
 	)
 
 	assert.NoError(t, err)
@@ -563,7 +670,7 @@ func TestBlockfetchServerSendBatch_ClosesConnectionWhenSendDrainStalls(
 		errChan: make(chan error),
 	}
 	start := ocommon.NewPoint(100, []byte{0x01})
-	end := ocommon.NewPoint(101, []byte{byte(101)})
+	end := ocommon.NewPoint(101, []byte{101})
 
 	err := o.blockfetchServerSendBatch(
 		testConnId().String(),
@@ -572,9 +679,10 @@ func TestBlockfetchServerSendBatch_ClosesConnectionWhenSendDrainStalls(
 		iter,
 		server,
 		conn,
+		testMaxBlocksUnbounded,
 	)
 
-	assert.Error(t, err)
+	require.Error(t, err)
 	assert.Contains(t, err.Error(), "send queue did not drain after Block")
 	assert.Equal(t, 1, server.startBatchCalls)
 	assert.Equal(t, 1, server.blockCalls)

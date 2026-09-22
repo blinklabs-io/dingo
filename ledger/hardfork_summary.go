@@ -90,6 +90,50 @@ func hardForkCachedEpochDuration(
 	return time.Duration(uint64(lengthInSlots) * slotLengthNanoseconds), nil
 }
 
+// hardForkSummaryCacheKey identifies the exact published state and requested
+// horizon anchor a cached hardfork.Summary was built for.
+//
+// generation is the shared consensus/tip snapshot publication counter (see
+// LedgerState.publishSnapshotsLocked and loadStateSnapshots): every trigger
+// that can change hardForkSummaryAnchoredAt's result -- epoch rollover, era
+// transition, rollback, and any transitionInfo state change -- mutates
+// writer-owned state under ls.Lock() and always calls publishSnapshotsLocked
+// before Unlock, which bumps generation and publishes a new immutable
+// consensusSnapshot/tipSnapshot pair. A cache entry keyed on generation is
+// therefore invalidated by construction on every one of those triggers: it is
+// impossible for the underlying epochCache, transitionInfo, or currentTip to
+// change while generation stays the same, because every writer path already
+// goes through that single publish point. This is the same invariant every
+// other lock-free reader of consensusSnapshot/tipSnapshot already relies on;
+// this cache adds no new one.
+//
+// horizonAnchorSlot is part of the key because callers legitimately request
+// different horizons against the same published generation (mempool/near-tip
+// queries via HardForkSummary's anchor of 0, and per-block transaction
+// validation via a LedgerView's pinned predecessor-slot anchor); collapsing
+// those into one cache slot would silently serve one caller's horizon to
+// another using a different anchor at the same generation
+// (TestHardForkSummary_HorizonAnchoredAtAppliedParent exercises exactly this
+// by calling three different anchors against one published generation).
+type hardForkSummaryCacheKey struct {
+	generation        uint64
+	horizonAnchorSlot uint64
+}
+
+// hardForkSummaryCacheEntry is the value atomically published in
+// LedgerState.hardForkSummaryCache.
+//
+// A build for a stale key can race a concurrent build for a newer one and
+// overwrite it; the key comparison in hardForkSummaryAnchoredAt always checks
+// against the *current* snapshot generation (not against whatever the cache
+// happens to hold), so a clobbered entry only costs one extra rebuild on the
+// next call -- it can never serve a wrong answer.
+type hardForkSummaryCacheEntry struct {
+	key     hardForkSummaryCacheKey
+	summary *hardfork.Summary
+	err     error
+}
+
 // HardForkSummary constructs a hardfork.Summary describing the chain's era
 // history from the LedgerState's current epoch cache, tip, current era, and
 // transition info.
@@ -102,6 +146,18 @@ func hardForkCachedEpochDuration(
 //
 // The forecast horizon is measured from the published tip. Callers that know a
 // more recent applied block must use hardForkSummaryAnchoredAt instead.
+//
+// The result is cached per hardForkSummaryCacheKey (see its doc comment); the
+// underlying epoch-cache walk is O(known epochs), which otherwise grows
+// without bound as the chain ages (issue #2093).
+//
+// The returned Summary is shared by every caller holding the same cache entry
+// and must be treated as read only. Callers must not assign to its fields,
+// append to Eras, or write through an interior pointer such as the one
+// CurrentEra returns; doing so would corrupt the era boundaries every
+// concurrent reader sees. Copy it first if a mutable Summary is needed. The
+// alternative — returning a deep copy per call — would restore the per-call
+// allocation this cache exists to remove.
 func (ls *LedgerState) HardForkSummary() (*hardfork.Summary, error) {
 	return ls.hardForkSummaryAnchoredAt(0)
 }
@@ -121,7 +177,42 @@ func (ls *LedgerState) HardForkSummary() (*hardfork.Summary, error) {
 //
 // horizonAnchorSlot 0 keeps the published tip, which is what every caller
 // without an applied block in hand wants.
+//
+// The returned Summary is cached and shared; see HardForkSummary for the
+// read-only contract every caller of either method is bound by.
 func (ls *LedgerState) hardForkSummaryAnchoredAt(
+	horizonAnchorSlot uint64,
+) (*hardfork.Summary, error) {
+	consensusState, tipState := ls.loadStateSnapshots()
+	key := hardForkSummaryCacheKey{
+		generation:        consensusState.generation,
+		horizonAnchorSlot: horizonAnchorSlot,
+	}
+	if cached := ls.hardForkSummaryCache.Load(); cached != nil &&
+		cached.key == key {
+		return cached.summary, cached.err
+	}
+
+	summary, err := ls.buildHardForkSummary(
+		consensusState,
+		tipState,
+		horizonAnchorSlot,
+	)
+	ls.hardForkSummaryCache.Store(&hardForkSummaryCacheEntry{
+		key:     key,
+		summary: summary,
+		err:     err,
+	})
+	return summary, err
+}
+
+// buildHardForkSummary is hardForkSummaryAnchoredAt's uncached body: it walks
+// the given (already-published, immutable) consensus/tip snapshot pair and
+// constructs a fresh hardfork.Summary. Callers must not mutate consensusState
+// or tipState, or any slice they own.
+func (ls *LedgerState) buildHardForkSummary(
+	consensusState *consensusSnapshot,
+	tipState *tipSnapshot,
 	horizonAnchorSlot uint64,
 ) (*hardfork.Summary, error) {
 	// SystemStart is sourced from the Shelley genesis when available. When it
@@ -135,7 +226,6 @@ func (ls *LedgerState) hardForkSummaryAnchoredAt(
 		}
 	}
 
-	consensusState, tipState := ls.loadStateSnapshots()
 	cache := consensusState.epochCache
 	transitionInfo := consensusState.transitionInfo
 	tipSlot := max(tipState.currentTip.Point.Slot, horizonAnchorSlot)
@@ -237,10 +327,15 @@ func (ls *LedgerState) hardForkSummaryAnchoredAt(
 	past := eraSummaries[:len(eraSummaries)-1]
 
 	// Use the same configured safe-zone source as the NtC era-history query.
-	// Tests and early bootstrap callers may construct a LedgerState without a
-	// complete node configuration; in that case eraShape is unavailable and
-	// the legacy indefinite safe zone remains the only defensible answer.
-	shape := ls.eraShape()
+	// A missing shape or current-era entry cannot safely supply a forecast:
+	// the cache-derived current era has a zero safe zone and no end bound.
+	shape, err := ls.eraShapeWithError()
+	if err != nil {
+		return nil, fmt.Errorf(
+			"ledger: hard-fork forecast unavailable: %w",
+			err,
+		)
+	}
 	shapeEntry, shapeAvailable := shape.EraForID(current.EraID)
 	if shapeAvailable {
 		current.Params.SafeZoneSlots = shapeEntry.Params.SafeZoneSlots
@@ -250,11 +345,15 @@ func (ls *LedgerState) hardForkSummaryAnchoredAt(
 		}
 	}
 	if !shapeAvailable {
-		return &hardfork.Summary{
-			SystemStart: systemStart,
-			Eras:        append(past, current),
-			Transition:  transitionInfo,
-		}, nil
+		eraName := consensusState.currentEra.Name
+		if eraName == "" {
+			eraName = fmt.Sprintf("ID %d", current.EraID)
+		}
+		return nil, fmt.Errorf(
+			"ledger: hard-fork forecast unavailable: %s era is unavailable "+
+				"in the hard-fork shape",
+			eraName,
+		)
 	}
 
 	effectiveTransition := transitionInfo

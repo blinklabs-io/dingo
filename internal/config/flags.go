@@ -536,6 +536,12 @@ var flagSpecs = []flagSpec{
 		"max simultaneous connections per IP",
 	),
 	intFlag("MaxInboundConns", "max-inbound-conns", "max inbound connections"),
+	intFlag("MaxNtCConns", "max-ntc-conns", "max node-to-client connections"),
+	intFlag(
+		"MaxNtCConnectionsPerIP",
+		"max-ntc-connections-per-ip",
+		"max node-to-client connections per IP",
+	),
 
 	// Cache
 	intFlag(
@@ -671,6 +677,23 @@ var flagSpecs = []flagSpec{
 		"",
 		"path to Shelley operational certificate",
 	),
+	stringFlag(
+		"ShelleyKESAgentSocket",
+		"shelley-kes-agent-socket",
+		"",
+		"path to a bursa KES agent service socket; sources the KES signing key from the agent instead of --shelley-kes-key (VRF key and opcert flags still apply)",
+	),
+	stringFlag(
+		"ShelleyKESAgentMode",
+		"shelley-kes-agent-mode",
+		"",
+		"KES agent service mode: serve-key (default) or sign",
+	),
+	durationFlag(
+		"ShelleyKESAgentSignTimeout",
+		"shelley-kes-agent-sign-timeout",
+		"timeout for one sign-mode KES agent round trip; must stay below a slot (0 uses the 500ms default)",
+	),
 	uint64Flag(
 		"SlotsPerKESPeriod",
 		"slots-per-kes-period",
@@ -782,6 +805,12 @@ var flagSpecs = []flagSpec{
 		"mithril-backend",
 		"",
 		"Mithril artifact backend: v1 (legacy snapshots) or v2 (incremental database)",
+	),
+	stringFlag(
+		"Mithril.PinnedDigest",
+		"mithril-pinned-digest",
+		"",
+		"Mithril artifact identity for a fresh bootstrap: v1 snapshot digest or v2 Cardano database artifact hash",
 	),
 	stringFlag(
 		"Mithril.DownloadDir",

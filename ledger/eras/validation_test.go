@@ -1588,22 +1588,6 @@ func requireIndexedRulesReplaceRuleIndex(
 	require.Fail(t, message)
 }
 
-func requireIndexedRulesIncludeFunc(
-	t *testing.T,
-	rules []indexedUtxoValidationRule,
-	want lcommon.UtxoValidationRuleFunc,
-	message string,
-) {
-	t.Helper()
-	wantName := utxoValidationRuleName(want)
-	for _, rule := range rules {
-		if utxoValidationRuleName(rule.validationFunc) == wantName {
-			return
-		}
-	}
-	require.Fail(t, message)
-}
-
 func TestTxSizeForFee(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -3828,7 +3812,7 @@ func TestConwayTxInfoCacheRendersMintIndependentOfProtocolVersion(
 
 	// A tx that mints nothing still carries the ada entry, so no mint fixture
 	// is needed to observe the rendering.
-	cache := newConwayTxInfoCache(ls, tx, resolved)
+	cache := newTxInfoCache(ls, tx, resolved)
 	v1, err := cache.v1()
 	require.NoError(t, err)
 	v2, err := cache.v2()

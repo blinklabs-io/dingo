@@ -1,0 +1,233 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package chain
+
+import (
+	"testing"
+	"time"
+
+	"github.com/blinklabs-io/dingo/database"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+)
+
+func newBarrierTestDB(t *testing.T) *database.Database {
+	t.Helper()
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewDatabase: %v", err)
+	}
+	t.Cleanup(func() { _ = dbtest.CloseDatabase(db) })
+	return db
+}
+
+// TestCallerTxnHoldOutlivesTheAdd pins the two boundaries the record has to
+// sit between: it must not end when the add returns, because the caller has
+// not committed yet, and it must end when the transaction concludes, whether
+// that is a commit or a rollback.
+func TestCallerTxnHoldOutlivesTheAdd(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		finish func(*database.Txn) error
+	}{
+		{"commit", func(txn *database.Txn) error { return txn.Commit() }},
+		{"rollback", func(txn *database.Txn) error { return txn.Rollback() }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newBarrierTestDB(t)
+			c := &Chain{persistent: true}
+			txn := db.BlobTxn(true)
+			endAdd := c.beginCallerTxnAdd(txn)
+			if got := c.pendingAdds.heldCount(); got != 1 {
+				t.Fatalf(
+					"add on a caller transaction recorded %d holds, want 1",
+					got,
+				)
+			}
+			endAdd()
+			if got := c.pendingAdds.heldCount(); got != 1 {
+				t.Fatalf(
+					"hold ended with the add rather than with the transaction: %d holds",
+					got,
+				)
+			}
+			if err := tc.finish(txn); err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			if got := c.pendingAdds.heldCount(); got != 0 {
+				t.Fatalf("%s left %d holds outstanding", tc.name, got)
+			}
+		})
+	}
+}
+
+// TestCallerTxnHoldSkipped pins the two cases that must record nothing: a nil
+// transaction, whose store write the chain commits before the tip advances, and
+// a non-persistent chain, which writes to the manager's block cache rather than
+// the store and so has no commit to lag behind.
+func TestCallerTxnHoldSkipped(t *testing.T) {
+	db := newBarrierTestDB(t)
+	persistent := &Chain{persistent: true}
+	persistent.beginCallerTxnAdd(nil)()
+	if got := persistent.pendingAdds.heldCount(); got != 0 {
+		t.Fatalf("nil transaction recorded %d holds", got)
+	}
+	ephemeral := &Chain{}
+	txn := db.BlobTxn(true)
+	defer txn.Release()
+	ephemeral.beginCallerTxnAdd(txn)()
+	if got := ephemeral.pendingAdds.heldCount(); got != 0 {
+		t.Fatalf("non-persistent chain recorded %d holds", got)
+	}
+}
+
+// TestRepeatAddOnHeldTxnTakesTheExclusion pins that every add attempt takes the
+// shared side before touching the transaction's hold. Otherwise two concurrent
+// adds can race a failed first attempt dropping the shared hold while the
+// second attempt has not recorded its snapshot yet.
+func TestRepeatAddOnHeldTxnTakesTheExclusion(t *testing.T) {
+	db := newBarrierTestDB(t)
+	c := &Chain{persistent: true}
+	txn := db.BlobTxn(true)
+	defer txn.Release()
+	c.beginCallerTxnAdd(txn)()
+
+	c.batchCommitMutex.Lock()
+	done := make(chan struct{})
+	started := make(chan struct{})
+	go func() {
+		defer close(done)
+		close(started)
+		c.beginCallerTxnAdd(txn)()
+	}()
+	<-started
+	select {
+	case <-done:
+		t.Fatal("repeat add bypassed the removal path's write exclusion")
+	default:
+	}
+	c.batchCommitMutex.Unlock()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("repeat add did not resume after the exclusion was released")
+	}
+	if got := c.pendingAdds.heldCount(); got != 1 {
+		t.Fatalf("repeat add recorded %d holds, want 1", got)
+	}
+}
+
+// TestFailedConcurrentAttemptCannotDropAnotherSnapshot pins the race between
+// two adds sharing one transaction. The second attempt reserves the hold before
+// the first discards its failed snapshot, so its later record cannot be lost.
+func TestFailedConcurrentAttemptCannotDropAnotherSnapshot(t *testing.T) {
+	t.Parallel()
+
+	db := newBarrierTestDB(t)
+	c := &Chain{persistent: true}
+	txn := db.BlobTxn(true)
+	defer txn.Release()
+	endFirst := c.beginCallerTxnAdd(txn)
+	c.pendingAdds.record(txn, callerTxnAdd{})
+	endSecond := c.beginCallerTxnAdd(txn)
+	c.pendingAdds.discardLast(txn)
+	endFirst()
+	c.pendingAdds.record(txn, callerTxnAdd{})
+	endSecond()
+	if got := len(c.pendingAdds.adds(txn)); got != 1 {
+		t.Fatalf("second add recorded %d snapshots, want 1", got)
+	}
+	if got := c.pendingAdds.heldCount(); got != 1 {
+		t.Fatalf("failed first add dropped the shared hold: %d holds", got)
+	}
+}
+
+// TestAwaitPendingCallerAddsIsBounded pins that the wait is a safety valve
+// rather than a synchronisation point. A caller that abandons its transaction,
+// or that rolls the chain back from inside one it has not finished, must leave
+// that one removal exposed to the window the barrier closes rather than
+// blocking it -- and every chain mutation queued behind it -- for the life of
+// the process.
+func TestAwaitPendingCallerAddsIsBounded(t *testing.T) {
+	db := newBarrierTestDB(t)
+	c := &Chain{persistent: true}
+	txn := db.BlobTxn(true)
+	defer txn.Release()
+	c.beginCallerTxnAdd(txn)()
+	if got := c.pendingAdds.heldCount(); got != 1 {
+		t.Fatalf("recorded %d holds, want 1", got)
+	}
+	outstanding, drained := c.pendingAdds.awaitDrained(10 * time.Millisecond)
+	if drained {
+		t.Fatal("wait reported a drain while a transaction was still open")
+	}
+	if outstanding != 1 {
+		t.Fatalf(
+			"expiry reported %d outstanding transactions, want 1",
+			outstanding,
+		)
+	}
+}
+
+// TestExpiredHoldIsChargedOnce pins that the drain bound is paid once per
+// abandoned transaction rather than once per removal path. A hold is never
+// evicted -- the restoration snapshots it carries are owed to that transaction
+// whenever it concludes -- so without marking it, a caller that leaks one
+// transaction would make every later rollback and RewindPrimaryChainToPoint
+// wait the full pendingAddDrainTimeout for the life of the process.
+func TestExpiredHoldIsChargedOnce(t *testing.T) {
+	t.Parallel()
+
+	db := newBarrierTestDB(t)
+	c := &Chain{persistent: true}
+	txn := db.BlobTxn(true)
+	defer txn.Release()
+	c.beginCallerTxnAdd(txn)()
+
+	// The first removal path pays the bound and is exposed to the window.
+	if _, drained := c.pendingAdds.awaitDrained(50 * time.Millisecond); drained {
+		t.Fatal("wait reported a drain while a transaction was still open")
+	}
+
+	// Every later one fails immediately instead of paying it again.
+	start := time.Now()
+	outstanding, drained := c.pendingAdds.awaitDrained(pendingAddDrainTimeout)
+	elapsed := time.Since(start)
+	if drained {
+		t.Fatal("wait reported a drain while a transaction was still open")
+	}
+	if outstanding != 1 {
+		t.Fatalf("reported %d outstanding transactions, want 1", outstanding)
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf(
+			"a wait after an expired hold paid the bound again: %s",
+			elapsed,
+		)
+	}
+
+	// Concluding the transaction clears the mark with the hold, so the
+	// barrier stops failing waits.
+	if err := txn.Rollback(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	if outstanding, drained := c.pendingAdds.awaitDrained(
+		time.Second,
+	); !drained {
+		t.Fatalf(
+			"barrier did not recover after the transaction concluded: %d outstanding",
+			outstanding,
+		)
+	}
+}

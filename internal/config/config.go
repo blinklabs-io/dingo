@@ -641,6 +641,13 @@ type Config struct {
 	// diagnostic use only (e.g. repeated restarts against a database already
 	// known to be consistent).
 	//
+	// reward_live_stake.utxo_stake is a running total maintained
+	// incrementally by the block-application path (dingo #4421), so this
+	// check is also the only automatic reconciliation of that total against
+	// the live UTxO set. Skipping it leaves any drift in place for the whole
+	// life of the process, including across the epoch boundaries whose stake
+	// snapshots consume it.
+	//
 	// It does not affect the stake-snapshot provenance check that runs in the
 	// same startup step: that one is cheap, indexed, and fails closed, so it
 	// runs unconditionally.
@@ -699,6 +706,8 @@ type Config struct {
 	InboundCooldown          time.Duration `yaml:"inboundCooldown"          envconfig:"DINGO_INBOUND_COOLDOWN"`
 	MaxConnectionsPerIP      int           `yaml:"maxConnectionsPerIP"      envconfig:"DINGO_MAX_CONNECTIONS_PER_IP"`
 	MaxInboundConns          int           `yaml:"maxInboundConns"          envconfig:"DINGO_MAX_INBOUND_CONNS"`
+	MaxNtCConns              int           `yaml:"maxNtCConns"              envconfig:"DINGO_MAX_NTC_CONNS"`
+	MaxNtCConnectionsPerIP   int           `yaml:"maxNtCConnectionsPerIP"   envconfig:"DINGO_MAX_NTC_CONNECTIONS_PER_IP"`
 
 	// Cache configuration for the tiered CBOR cache system
 	Cache CacheConfig `yaml:"cache"`
@@ -746,8 +755,33 @@ type Config struct {
 	ShelleyVRFKey                 string `yaml:"shelleyVrfKey"                      envconfig:"SHELLEY_VRF_KEY"`
 	ShelleyKESKey                 string `yaml:"shelleyKesKey"                      envconfig:"SHELLEY_KES_KEY"`
 	ShelleyOperationalCertificate string `yaml:"shelleyOperationalCertificate"      envconfig:"SHELLEY_OPERATIONAL_CERTIFICATE"`
-	ForgeSyncToleranceSlots       uint64 `yaml:"forgeSyncToleranceSlots"            envconfig:"DINGO_FORGE_SYNC_TOLERANCE_SLOTS"`
-	ForgeStaleGapThresholdSlots   uint64 `yaml:"forgeStaleGapThresholdSlots"        envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
+	// ShelleyKESAgentSocket, when set, sources the KES signing key from a
+	// running bursa KES agent over the given Unix-domain service socket
+	// instead of a local --shelley-kes-key file. The VRF key and operational
+	// certificate flags still apply. Mirrors cardano-node's
+	// --shelley-kes-agent-socket.
+	//
+	// Block production is supported on Linux and macOS only, so this flag
+	// does not apply on Windows. The path must fit the platform's sun_path
+	// field -- 104 bytes on macOS, 108 on Linux -- because a socket address
+	// is a fixed-size struct. kesagent.NewClient rejects an over-long path at
+	// startup rather than leaving it to surface as a bare "invalid argument"
+	// from connect().
+	ShelleyKESAgentSocket string `yaml:"shelleyKesAgentSocket"              envconfig:"SHELLEY_KES_AGENT_SOCKET"`
+	// ShelleyKESAgentMode selects the agent service mode: "serve-key" (the
+	// agent pushes the evolving KES sign key and the node signs headers
+	// locally) or "sign" (the node forwards header bodies and the agent
+	// returns signatures; the key never enters the node). Defaults to
+	// "serve-key" when a socket is set.
+	ShelleyKESAgentMode string `yaml:"shelleyKesAgentMode"                envconfig:"SHELLEY_KES_AGENT_MODE"`
+	// ShelleyKESAgentSignTimeout bounds one sign-mode round trip to the KES
+	// agent. It must stay below a slot: block production calls the signer
+	// synchronously on the slot-aligned loop, so a longer timeout parks
+	// forging for several slots when the agent stops answering. Zero uses
+	// the client default (500ms).
+	ShelleyKESAgentSignTimeout  time.Duration `yaml:"shelleyKesAgentSignTimeout"         envconfig:"SHELLEY_KES_AGENT_SIGN_TIMEOUT"`
+	ForgeSyncToleranceSlots     uint64        `yaml:"forgeSyncToleranceSlots"            envconfig:"DINGO_FORGE_SYNC_TOLERANCE_SLOTS"`
+	ForgeStaleGapThresholdSlots uint64        `yaml:"forgeStaleGapThresholdSlots"        envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
 	// ForgePrimaryChainTipToleranceSlots bounds how far the ledger-applied tip
 	// may trail this node's own primary chain tip before forging is skipped.
 	// Raise it only if the ledger pipeline is legitimately slow on this
@@ -1071,6 +1105,11 @@ type MithrilConfig struct {
 	// incremental Cardano database artifacts; "v1" uses the legacy full
 	// snapshot archives, which upstream Mithril is phasing out.
 	Backend string `yaml:"backend"                envconfig:"DINGO_MITHRIL_BACKEND"`
+	// PinnedDigest selects an exact Mithril artifact for a fresh bootstrap: a
+	// v1 snapshot digest or v2 Cardano database artifact hash. It is rejected
+	// for catch-up runs and may not conflict with the durable artifact pin used
+	// to resume an interrupted import.
+	PinnedDigest string `yaml:"pinnedDigest"           envconfig:"DINGO_MITHRIL_PINNED_DIGEST"`
 	// DownloadDir is the directory where snapshot archives are downloaded.
 	// If empty, a randomized temporary directory is created automatically.
 	DownloadDir string `yaml:"downloadDir"            envconfig:"DINGO_MITHRIL_DOWNLOAD_DIR"`
@@ -1564,6 +1603,9 @@ func (c *Config) ApplyDefaults() {
 	// This also keeps manually constructed Config values fail-safe.
 	if c.DebugBindAddr == "" {
 		c.DebugBindAddr = DefaultDebugBindAddr
+	}
+	if c.ShelleyKESAgentSocket != "" && c.ShelleyKESAgentMode == "" {
+		c.ShelleyKESAgentMode = "serve-key"
 	}
 	// Match the Midnight server's default for explicitly empty YAML or
 	// environment values.

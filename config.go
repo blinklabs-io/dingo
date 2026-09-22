@@ -245,12 +245,14 @@ type Config struct {
 	inboundHotScoreThreshold                                                            float64
 	inboundPruneAfter, inboundCooldown                                                  time.Duration
 	inboundDuplexOnlyForHot                                                             bool
-	maxConnectionsPerIP, maxInboundConns                                                int
+	maxConnectionsPerIP, maxInboundConns, maxNtCConns, maxNtCConnectionsPerIP           int
 	genesisBootstrap                                                                    bool
 	genesisWindowSlots                                                                  uint64
 	genesisCorroborationPeers                                                           int
 	blockProducer                                                                       bool
 	shelleyVRFKey, shelleyKESKey, shelleyOperationalCertificate                         string
+	shelleyKESAgentSocket, shelleyKESAgentMode                                          string
+	shelleyKESAgentSignTimeout                                                          time.Duration
 	forgeSyncToleranceSlots, forgeStaleGapThresholdSlots                                uint64
 	forgePrimaryChainTipToleranceSlots                                                  uint64
 	forgeUpstreamStalenessSlots, forgeAppliedTipStalenessSlots                          uint64
@@ -855,8 +857,10 @@ func (c *Config) syncCompatFields() {
 	c.inboundWarmTarget, c.inboundHotQuota, c.inboundMinTenure = c.cfg.InboundWarmTarget, c.cfg.InboundHotQuota, c.cfg.InboundMinTenure
 	c.inboundHotScoreThreshold, c.inboundPruneAfter, c.inboundDuplexOnlyForHot, c.inboundCooldown = c.cfg.InboundHotScoreThreshold, c.cfg.InboundPruneAfter, c.cfg.InboundDuplexOnlyForHot, c.cfg.InboundCooldown
 	c.maxConnectionsPerIP, c.maxInboundConns = c.cfg.MaxConnectionsPerIP, c.cfg.MaxInboundConns
+	c.maxNtCConns, c.maxNtCConnectionsPerIP = c.cfg.MaxNtCConns, c.cfg.MaxNtCConnectionsPerIP
 	c.genesisBootstrap, c.genesisWindowSlots, c.genesisCorroborationPeers = c.cfg.GenesisBootstrap.Enabled, c.cfg.GenesisBootstrap.WindowSlots, c.cfg.GenesisBootstrap.CorroborationPeers
 	c.blockProducer, c.shelleyVRFKey, c.shelleyKESKey, c.shelleyOperationalCertificate = c.cfg.BlockProducer, c.cfg.ShelleyVRFKey, c.cfg.ShelleyKESKey, c.cfg.ShelleyOperationalCertificate
+	c.shelleyKESAgentSocket, c.shelleyKESAgentMode, c.shelleyKESAgentSignTimeout = c.cfg.ShelleyKESAgentSocket, c.cfg.ShelleyKESAgentMode, c.cfg.ShelleyKESAgentSignTimeout
 	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
 	c.forgePrimaryChainTipToleranceSlots = c.cfg.ForgePrimaryChainTipToleranceSlots
 	c.forgeUpstreamStalenessSlots, c.forgeAppliedTipStalenessSlots = c.cfg.ForgeUpstreamStalenessSlots, c.cfg.ForgeAppliedTipStalenessSlots
@@ -1404,6 +1408,26 @@ func WithMaxInboundConns(n int) ConfigOptionFunc {
 	return func(c *Config) {
 		if n > 0 {
 			c.cfg.MaxInboundConns = n
+		}
+	}
+}
+
+// WithMaxNtCConns specifies the maximum number of node-to-client connections.
+// Non-positive values are ignored. Default: 100.
+func WithMaxNtCConns(n int) ConfigOptionFunc {
+	return func(c *Config) {
+		if n > 0 {
+			c.cfg.MaxNtCConns = n
+		}
+	}
+}
+
+// WithMaxNtCConnectionsPerIP specifies the maximum node-to-client connections
+// from one IP address. Non-positive values are ignored. Default: 5.
+func WithMaxNtCConnectionsPerIP(n int) ConfigOptionFunc {
+	return func(c *Config) {
+		if n > 0 {
+			c.cfg.MaxNtCConnectionsPerIP = n
 		}
 	}
 }
@@ -2170,6 +2194,16 @@ func (c *Config) MaxConnectionsPerIP() int {
 // MaxInboundConns returns the maximum total inbound connections.
 func (c *Config) MaxInboundConns() int {
 	return c.cfg.MaxInboundConns
+}
+
+// MaxNtCConns returns the maximum total node-to-client connections.
+func (c *Config) MaxNtCConns() int {
+	return c.cfg.MaxNtCConns
+}
+
+// MaxNtCConnectionsPerIP returns the maximum node-to-client connections per IP.
+func (c *Config) MaxNtCConnectionsPerIP() int {
+	return c.cfg.MaxNtCConnectionsPerIP
 }
 
 // Cache returns the cache configuration.

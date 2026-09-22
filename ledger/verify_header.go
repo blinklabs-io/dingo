@@ -450,14 +450,30 @@ func (ls *LedgerState) headerVerificationEpoch(
 ) (models.Epoch, error) {
 	// The epoch cache can be forecast forward for near-future headers, but it
 	// must never be advanced past the HFC safe zone or a known era boundary.
-	// Check the immutable summary first so ErrPastHorizon is surfaced before
-	// ensureEpochForSlot mutates any forecasted nonce state.
-	if snapshot := ls.loadConsensusSnapshot(); snapshot != nil &&
-		len(snapshot.epochCache) > 0 {
+	// Resolve known epochs without requiring forecast configuration. Only
+	// future slots need the immutable summary before cache mutation, and
+	// checking it first surfaces ErrPastHorizon before ensureEpochForSlot
+	// mutates any forecasted nonce state.
+	_, cachedEpochErr := ls.epochForSlot(blockSlot)
+	if snapshot := ls.loadConsensusSnapshot(); cachedEpochErr != nil &&
+		snapshot != nil && len(snapshot.epochCache) > 0 {
 		summary, err := ls.HardForkSummary()
 		if err != nil {
+			// A summary that cannot be BUILT says nothing about the header:
+			// the era shape, the genesis it is derived from, or the epoch
+			// cache is unavailable, all of which are local faults. Byron
+			// genesis alone is enough to reach here, because
+			// eras.BuildShapeForEras builds Byron era params for every
+			// config while ByronGenesisFile is optional. Since
+			// ouroboros/chainsync.go routes every non-deferred header error
+			// to ConnectionRecycleRequestedEvent, returning this unwrapped
+			// recycles the honest peer that served the header and stalls
+			// catch-up at each epoch boundary. Classify it as deferred so
+			// the block stays queued for in-order re-verification instead.
 			return models.Epoch{}, fmt.Errorf(
-				"block header verification rejected: build forecast for slot %d: %w",
+				"%w: block header verification deferred: "+
+					"build forecast for slot %d: %w",
+				errHeaderVerificationDeferred,
 				blockSlot,
 				err,
 			)
@@ -746,10 +762,29 @@ func (ls *LedgerState) genesisOverlayDelegationForBlock(
 	block ledger.Block,
 	shelleyGenesis *shelley.ShelleyGenesis,
 ) (genesisDelegation, genesisOverlaySlotStatus, error) {
+	pparams := ls.genesisOverlayProtocolParamsForBlock(block)
+	if pparams == nil {
+		// Unresolvable overlay parameters are a local state gap, not a peer
+		// fault: the snapshot's current pparams, the persisted pparams row
+		// for the block's epoch, and the era forecast behind
+		// ProtocolParamsForSlot can each be unavailable while the applied
+		// ledger catches up. ouroboros/chainsync.go routes every
+		// non-deferred header error to ConnectionRecycleRequestedEvent, so
+		// rejecting here drops the honest peer that served the header.
+		// Classify it as deferred, the same way this file already classifies
+		// an unbuildable forecast and an unresolvable consensus mode, so the
+		// header is re-verified in order once the parameters resolve.
+		return genesisDelegation{}, genesisOverlayNone, fmt.Errorf(
+			"%w: block header verification deferred at slot %d: "+
+				"protocol parameters unavailable for genesis overlay",
+			errHeaderVerificationDeferred,
+			block.SlotNumber(),
+		)
+	}
 	return ls.genesisOverlayDelegationForSlotWithParams(
 		block.SlotNumber(),
 		shelleyGenesis,
-		ls.genesisOverlayProtocolParamsForBlock(block),
+		pparams,
 	)
 }
 
@@ -1155,7 +1190,20 @@ func (ls *LedgerState) verifyBlockLeaderEligibilityWithCache(
 	}
 
 	// Consensus mode determines the VRF leader-value derivation path.
-	mode := ls.ConsensusModeForEpoch(epochId)
+	mode, modeErr := ls.ConsensusModeForEpoch(epochId)
+	if modeErr != nil {
+		// The mode selects both the leader-value derivation and the
+		// threshold, so without it eligibility cannot be evaluated. The era
+		// shape it is resolved from comes from the local node configuration,
+		// so an unresolvable mode is not the peer's fault: defer instead of
+		// recycling the connection that served the header.
+		return fmt.Errorf(
+			"%w: block header verification deferred at slot %d: %w",
+			errHeaderVerificationDeferred,
+			block.SlotNumber(),
+			modeErr,
+		)
+	}
 
 	// Extract the VRF output from the header body CBOR.
 	vrfResult, ok, err := headerVrfResultFromBodyCbor(block.Header())
@@ -1273,17 +1321,6 @@ func (ls *LedgerState) verifyBlockLeaderEligibilityWithCache(
 	}
 
 	return nil
-}
-
-//nolint:unused // retained as a test helper
-func (ls *LedgerState) leaderEligibilityStake(
-	block ledger.Block,
-	epochId uint64,
-	poolKeyHash lcommon.PoolKeyHash,
-) (uint64, uint64, uint64, string, bool, error) {
-	return ls.leaderEligibilityStakeWithCache(
-		block, epochId, poolKeyHash, ls.epochCacheSnapshot(),
-	)
 }
 
 func (ls *LedgerState) leaderEligibilityStakeWithCache(
@@ -1540,16 +1577,6 @@ func (ls *LedgerState) shouldSkipPostMithrilMarkEligibilityWithCache(
 		return snapshot.CapturedSlot >= ep.StartSlot
 	}
 	return false
-}
-
-//nolint:unused // retained as a test helper
-func (ls *LedgerState) shouldUseImportedActivePoolDistribution(
-	block ledger.Block,
-	epochId uint64,
-) (bool, error) {
-	return ls.shouldUseImportedActivePoolDistributionWithCache(
-		block, epochId, ls.epochCacheSnapshot(),
-	)
 }
 
 // shouldUseImportedActivePoolDistributionWithCache resolves the Mithril trust

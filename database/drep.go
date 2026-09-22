@@ -41,33 +41,19 @@ func (d *Database) RestoreDrepStateAtSlot(
 	slot uint64,
 	txn *Txn,
 ) error {
-	owned := false
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		owned = true
-		defer func() {
-			if owned {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
-	if err := d.governanceStore().RestoreDrepStateAtSlot(
-		slot,
-		txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf(
-			"failed to restore DRep state at slot %d: %w",
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		if err := d.governanceStore().RestoreDrepStateAtSlot(
 			slot,
-			err,
-		)
-	}
-	if owned {
-		if err := txn.Commit(); err != nil {
-			return fmt.Errorf("commit transaction: %w", err)
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf(
+				"failed to restore DRep state at slot %d: %w",
+				slot,
+				err,
+			)
 		}
-		owned = false
-	}
-	return nil
+		return nil
+	})
 }
 
 // GetDrep returns a drep by credential hash only (no tag filter).
@@ -158,34 +144,20 @@ func (d *Database) InsertDrepIfAbsent(
 	active bool,
 	txn *Txn,
 ) error {
-	owned := false
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		owned = true
-		defer func() {
-			if owned {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
-	if err := d.governanceStore().InsertDrepIfAbsent(
-		credentialTag,
-		cred,
-		slot,
-		url,
-		hash,
-		active,
-		txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf("failed to insert DRep if absent: %w", err)
-	}
-	if owned {
-		if err := txn.Commit(); err != nil {
-			return fmt.Errorf("commit transaction: %w", err)
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		if err := d.governanceStore().InsertDrepIfAbsent(
+			credentialTag,
+			cred,
+			slot,
+			url,
+			hash,
+			active,
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf("failed to insert DRep if absent: %w", err)
 		}
-		owned = false
-	}
-	return nil
+		return nil
+	})
 }
 
 // GetDRepVotingPower calculates the voting power for a DRep by summing
@@ -298,35 +270,21 @@ func (d *Database) UpdateDRepActivity(
 	inactivityPeriod uint64,
 	txn *Txn,
 ) error {
-	owned := false
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		owned = true
-		defer func() {
-			if owned {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
-	if err := d.governanceStore().UpdateDRepActivity(
-		credentialTag,
-		drepCredential,
-		activityEpoch,
-		inactivityPeriod,
-		txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf(
-			"failed to update DRep activity: %w",
-			err,
-		)
-	}
-	if owned {
-		if err := txn.Commit(); err != nil {
-			return fmt.Errorf("commit transaction: %w", err)
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		if err := d.governanceStore().UpdateDRepActivity(
+			credentialTag,
+			drepCredential,
+			activityEpoch,
+			inactivityPeriod,
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf(
+				"failed to update DRep activity: %w",
+				err,
+			)
 		}
-		owned = false
-	}
-	return nil
+		return nil
+	})
 }
 
 // GetExpiredDReps returns all active DReps whose expiry epoch is at

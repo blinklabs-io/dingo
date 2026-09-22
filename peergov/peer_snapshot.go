@@ -87,14 +87,6 @@ func poolRelayFromSnapshotAccessPoint(
 	}, true
 }
 
-// addLedgerRelays fills the configured ledger-peer target. extraAdds permits a
-// bounded emergency overfill after the target is already satisfied.
-//
-//nolint:unused // Kept as a context-free test helper for existing snapshot tests.
-func (p *PeerGovernor) addLedgerRelays(relays []PoolRelay, extraAdds int) int {
-	return p.addLedgerRelaysContext(context.Background(), relays, extraAdds)
-}
-
 func (p *PeerGovernor) addLedgerRelaysContext(
 	ctx context.Context,
 	relays []PoolRelay,

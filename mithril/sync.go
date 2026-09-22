@@ -131,6 +131,29 @@ type catchUpDecision struct {
 	upToDate bool   // marker already at/beyond the latest artifact: no-op
 }
 
+// validateExplicitArtifactPin rejects a user-selected artifact that conflicts
+// with the durable identity recorded by an interrupted import. A missing
+// durable pin is handled by the existing resume dispatch, which refuses to
+// guess which artifact the partial rows came from.
+func validateExplicitArtifactPin(
+	explicit string,
+	resumePin pinnedArtifact,
+	hasResumePin bool,
+) error {
+	if explicit != "" && hasResumePin && explicit != resumePin.Digest {
+		return fmt.Errorf(
+			"explicit Mithril artifact pin %s conflicts with the interrupted "+
+				"import pin %s",
+			explicit, resumePin.Digest,
+		)
+	}
+	return nil
+}
+
+func resumeArtifactIdentityValidationEnabled(pin pinnedArtifact) bool {
+	return pin.Digest != ""
+}
+
 // decideCatchUp resolves whether this Sync run engages catch-up semantics.
 func decideCatchUp(
 	ctx context.Context,
@@ -278,14 +301,15 @@ type SyncConfig struct {
 	DataDir                string                     // node database path
 	StorageMode            string                     // "api" | "core"
 	CardanoNodeConfig      *cardano.CardanoNodeConfig // genesis + Mithril verification keys; if nil, loaded from EmbeddedConfigFS for Network
-	CardanoConfigPath      string                     // optional explicit config.json path (else "<network>/config.json")
+	CardanoConfigPath      string                     // optional explicit config path (else the network's embedded config)
 	Backend                string                     // Mithril artifact backend; same semantics as BootstrapConfig.Backend (empty selects v2)
 	AggregatorURL          string                     // optional; defaults per-network
-	AllowInsecureHTTP      bool                       // permit plain-HTTP aggregator/artifact URLs; local dev/test only
+	AllowInsecureHTTP      bool                       // permit insecure/local destinations; local dev/test only
 	DownloadDir            string                     // optional; defaults to <DataDir>/.mithril-cache
 	DownloadIdleTimeout    string                     // optional; passed to BootstrapConfig
 	DownloadMaxIdleRetries int                        // must be >= 0
 	DownloadMaxBytes       int64                      // per compressed object; zero uses DefaultMaxDownloadBytes
+	PinnedDigest           string                     // optional exact artifact identity for a fresh bootstrap (v1 snapshot digest; v2 database hash)
 	VerifyCertChain        bool
 	CleanupAfterLoad       bool
 	StoragePlugins         StoragePlugins
@@ -371,7 +395,7 @@ func Sync(
 	if nodeCfg == nil {
 		cardanoConfigPath := cfg.CardanoConfigPath
 		if cardanoConfigPath == "" {
-			cardanoConfigPath = filepath.Join(network, "config.json")
+			cardanoConfigPath = cardano.EmbeddedConfigPath(network)
 		}
 		var err error
 		nodeCfg, err = cardano.LoadCardanoNodeConfigWithFallback(
@@ -474,6 +498,12 @@ func Sync(
 	if modeErr != nil {
 		return SyncResult{}, fmt.Errorf("determining sync mode: %w", modeErr)
 	}
+	if mode == syncModeCatchUp && cfg.PinnedDigest != "" {
+		return SyncResult{}, errors.New(
+			"explicit Mithril artifact pin requires a fresh database; " +
+				"a complete database cannot select a bootstrap artifact",
+		)
+	}
 	dec, decErr := decideCatchUp(
 		ctx, db, mode, cfg.Backend, cfg.StorageMode, aggregatorURL,
 		cfg.AllowInsecureHTTP, logger,
@@ -486,7 +516,6 @@ func Sync(
 	}
 	catchUp = dec.engage
 	catchUpStart = dec.start
-
 	// Artifact pin. A run that was interrupted after it began mutating the
 	// database must import the artifact those partial rows and ledger-state
 	// phase checkpoints belong to. Re-selecting the aggregator's latest
@@ -494,7 +523,7 @@ func Sync(
 	// partially imported one, and the fresh-bootstrap import neither
 	// reconciles nor diverges-checks, so both snapshots' UTxOs, accounts,
 	// pools and DReps are left live.
-	pinnedDigest := ""
+	pinnedDigest := cfg.PinnedDigest
 	var resumePin pinnedArtifact
 	if mode == syncModeResume {
 		pin, hasPin, pinErr := getPinnedArtifact(db)
@@ -503,6 +532,11 @@ func Sync(
 		}
 		switch {
 		case hasPin:
+			if err := validateExplicitArtifactPin(
+				pinnedDigest, pin, hasPin,
+			); err != nil {
+				return SyncResult{}, err
+			}
 			if err := pin.validateForRun(cfg.Backend, network); err != nil {
 				return SyncResult{}, err
 			}
@@ -518,6 +552,12 @@ func Sync(
 				"certified_tip_slot", pin.CertifiedTipSlot,
 			)
 		case catchUp:
+			if pinnedDigest != "" {
+				return SyncResult{}, errors.New(
+					"explicit Mithril artifact pin requires a fresh database; " +
+						"an interrupted catch-up cannot select a bootstrap artifact",
+				)
+			}
 			// A catch-up import runs with Reconcile enabled: every live row
 			// absent from the newly selected snapshot's live set is marked
 			// inactive after the import pass, so selecting a newer artifact
@@ -636,7 +676,7 @@ func Sync(
 		BootstrapConfig{
 			OnChunkContiguous: chunkHook,
 			OnArtifactSelected: func(sel SelectedArtifact) error {
-				if pinnedDigest != "" {
+				if resumeArtifactIdentityValidationEnabled(resumePin) {
 					if (resumePin.Backend != "" &&
 						normalizeBackend(sel.Backend) != resumePin.Backend) ||
 						(resumePin.Network != "" && sel.Network != resumePin.Network) ||
@@ -736,7 +776,7 @@ func Sync(
 	// answering the pinned digest with different content (a republished
 	// beacon) is a recovery decision for the operator, not something to import
 	// over the partial rows.
-	if pinnedDigest != "" {
+	if resumeArtifactIdentityValidationEnabled(resumePin) {
 		if err := resumePin.verifyResolved(
 			bootstrapResult.Snapshot,
 		); err != nil {
@@ -1276,6 +1316,11 @@ func Sync(
 		// construction), so this is explicit rather than the zero-value
 		// default.
 		bf.SetDelegatorInactivityEnabled(false)
+		// The running-total finalizer is safe only after a complete fresh
+		// ledger-state import established every live credential row. An
+		// interrupted API sync may have incomplete aggregate state, so its
+		// resume path must use the authoritative rebuild.
+		bf.SetUseRunningTotalsFinalization(mode == syncModeBootstrap)
 		bf.SetEndSlot(ledgerStateSlot)
 		if err := bf.SetBatchSize(cfg.BackfillBatchSize); err != nil {
 			return SyncResult{}, fmt.Errorf(
@@ -1440,6 +1485,9 @@ func openDatabase(
 		&database.Config{
 			DataDir: cfg.DataDir, Logger: logger,
 			StorageMode: cfg.StorageMode, Network: cfg.Network,
+			AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
+				cfg.CardanoNodeConfig, cfg.CardanoConfigPath, cfg.Network,
+			),
 		},
 		internalplugins.StorageSelections{
 			Blob:     storagePlugins.Blob,

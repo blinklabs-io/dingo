@@ -386,10 +386,22 @@ func byronValidateMinFee(
 	required = quotient
 
 	actual := new(big.Int)
+	// The Byron reference exempts a transaction from the minimum fee when its
+	// complete input UTxO consists of redeem addresses (isRedeemUTxO). A single
+	// non-redeem input is enough to require the normal fee, and an input that
+	// cannot be resolved is not evidence of a redeem address, so both clear the
+	// exemption. An empty input set is not vacuously redeem-only.
+	redeemOnly := len(tx.Inputs()) > 0
 	for _, input := range tx.Inputs() {
 		utxo, lookupErr := ls.UtxoById(input)
 		if lookupErr != nil || utxo.Output == nil {
+			redeemOnly = false
 			continue
+		}
+		addr := utxo.Output.Address()
+		if addr.Type() != lcommon.AddressTypeByron ||
+			addr.ByronType() != lcommon.ByronAddressTypeRedeem {
+			redeemOnly = false
 		}
 		if amount := utxo.Output.Amount(); amount != nil {
 			actual.Add(actual, amount)
@@ -399,6 +411,11 @@ func byronValidateMinFee(
 		if amount := output.Amount(); amount != nil {
 			actual.Sub(actual, amount)
 		}
+	}
+	if redeemOnly {
+		// Redemption still must conserve value, so a negative implicit fee
+		// remains a failure against a zero requirement.
+		required = big.NewInt(0)
 	}
 	if actual.Cmp(required) < 0 {
 		return FeeTooLowByronError{
