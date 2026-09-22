@@ -51,10 +51,9 @@ func setupTestDBWithStorageMode(
 // storage mode's retention behavior is unchanged by dingo #1875: both
 // reward_stake_input and reward_account_output are pruned to the same
 // rotation/reward-replay window. Also pins pool_stake_snapshot's own
-// CORE-mode window (dingo#1900/#382, human review, Chris Guiney: no test
-// previously exercised the apiStorageMode branch cleanupOldSnapshots gained
-// for this table) -- CORE mode's pool-snapshot pruning is unchanged from
-// before that commit.
+// CORE-mode window (dingo#1900/#382: no test previously exercised the
+// apiStorageMode branch cleanupOldSnapshots gained for this table) -- CORE
+// mode's pool-snapshot pruning is unchanged from before that commit.
 func TestCleanupOldSnapshotsCoreModePrunesRewardAccountOutput(t *testing.T) {
 	t.Parallel()
 
@@ -130,10 +129,10 @@ func TestCleanupOldSnapshotsCoreModePrunesRewardAccountOutput(t *testing.T) {
 // retained WITHOUT BOUND (so the Blockfrost account reward-history endpoint
 // can serve an account's full history), while reward_stake_input still
 // cannot be kept and continues to be pruned to the rotation/reward-replay
-// window exactly as in core mode. Also the dingo#1900/#382 regression test
-// (human review, Chris Guiney): pool_stake_snapshot must likewise be
-// retained WITHOUT BOUND in API mode, so a from-genesis historical Acquire
-// pinned well outside the ordinary 3-epoch window can still be validated
+// window exactly as in core mode. Also the dingo#1900/#382 regression test:
+// pool_stake_snapshot must likewise be retained WITHOUT BOUND in API mode,
+// so a from-genesis historical Acquire pinned well outside the ordinary
+// 3-epoch window can still be validated
 // (VerifyPointQueryable's stake-retention check) and answered
 // (GetStakeDistribution/GetPoolDistr2) -- confirmed live before this test
 // existed, but never previously pinned by an automated test.

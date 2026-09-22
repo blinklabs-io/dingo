@@ -95,9 +95,9 @@ func TestQueryHardFork_CurrentEra_PinnedPointResolvesEraAtThatPoint(
 // than silently falling back to the live era (the exact bug this handler
 // otherwise reproduces every time) or panicking on a nil era descriptor.
 //
-// Deliberately seeds an epoch-0 row too (human review, Chris Guiney,
-// dingo#4320): resolveAsOfEpoch previously fell back to epoch 0, with no
-// way to distinguish "genuinely epoch 0" from "no covering row found," when
+// Deliberately seeds an epoch-0 row too: resolveAsOfEpoch previously fell
+// back to epoch 0, with no way to distinguish "genuinely epoch 0" from "no
+// covering row found," when
 // GetEpochBySlot found nothing for the pinned slot. On any genesis-synced
 // node an epoch-0 row always exists, so GetEpoch(0) would then succeed and
 // silently answer Byron for a point actually in a later era -- this test's

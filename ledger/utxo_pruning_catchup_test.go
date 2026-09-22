@@ -24,14 +24,13 @@ import (
 )
 
 // TestUtxoPruningDeferredForCatchup pins both of utxoPruningDeferredForCatchup's
-// defer conditions, plus the two cases that must NOT defer (human review,
-// Chris Guiney, dingo#4320): "No test references utxoPruningDeferredForCatchup.
-// It is the one change here that widens what Acquire accepts, so a mirror
-// that drifts from cleanupConsumedUtxos' own two defer conditions fails
-// open rather than closed." checkUtxoRetentionWindow calls this to decide
-// whether to accept a point below the ordinary stability-window floor, so
-// a false positive here (deferring when it shouldn't) would let Acquire
-// accept a point cleanupConsumedUtxos might have already pruned.
+// defer conditions, plus the two cases that must NOT defer: it is the one
+// change here that widens what Acquire accepts, so a mirror that drifts
+// from cleanupConsumedUtxos' own two defer conditions fails open rather
+// than closed. checkUtxoRetentionWindow calls this to decide whether to
+// accept a point below the ordinary stability-window floor, so a false
+// positive here (deferring when it shouldn't) would let Acquire accept a
+// point cleanupConsumedUtxos might have already pruned.
 func TestUtxoPruningDeferredForCatchup(t *testing.T) {
 	t.Parallel()
 
