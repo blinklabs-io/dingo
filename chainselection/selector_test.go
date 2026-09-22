@@ -1820,14 +1820,14 @@ func TestUpdatePeerTipAcceptsDuringCatchUp(t *testing.T) {
 	)
 }
 
-// TestUpdatePeerTipFarBehindHonestPeerPermanentlyRejectedAlone reproduces
-// dingo #3624: a node far behind the honest network tip (from-genesis sync,
-// or a long outage) rejects every update from an honest peer reporting the
-// real tip, forever, because the catch-up ceiling is an absolute
-// localTip+2*K bound and a rejected frontier is never recorded -- so it can
-// never become a fresher reference for itself. The gap here (>4M blocks at
-// K=432) mirrors the live reproduction posted on the issue.
-func TestUpdatePeerTipFarBehindHonestPeerPermanentlyRejectedAlone(t *testing.T) {
+// TestUpdatePeerTipFarBehindHonestPeerPermanentlyRejectedAlone pins the
+// lone-claim bound: a frontier beyond the localTip+2*K catch-up ceiling that no
+// other connection corroborates stays rejected on every retry, because a
+// rejected frontier is never recorded as a reference. The gap (>4M blocks at
+// K=432) matches the live report on dingo #3624.
+func TestUpdatePeerTipFarBehindHonestPeerPermanentlyRejectedAlone(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	cs := NewChainSelector(ChainSelectorConfig{
@@ -1946,6 +1946,89 @@ func TestUpdatePeerTipFarBehindCorroboratedAcrossPeersBreaksRatchet(
 		"the first peer must be accepted once corroborated",
 	)
 	require.NotNil(t, cs.GetPeerTip(honestConn1))
+}
+
+// TestUpdatePeerTipFarDeliveredFrontierCorroboration drives the corroboration
+// path the way chainsync does: the advertised tip is the real network tip and
+// the delivered header is just past the localTip+2*K catch-up ceiling. Two
+// connections delivering within K of each other corroborate; two delivering
+// more than K apart do not.
+func TestUpdatePeerTipFarDeliveredFrontierCorroboration(t *testing.T) {
+	t.Parallel()
+
+	const (
+		securityParam = 432
+		localBlock    = 175516
+		networkBlock  = 4687076
+	)
+	blockTip := func(block uint64) ochainsync.Tip {
+		return ochainsync.Tip{
+			Point: ocommon.Point{
+				Slot: block * 20,
+				Hash: fmt.Appendf(nil, "block-%d", block),
+			},
+			BlockNumber: block,
+		}
+	}
+	newSelector := func() *ChainSelector {
+		cs := NewChainSelector(ChainSelectorConfig{
+			SecurityParam: securityParam,
+		})
+		cs.SetLocalTip(blockTip(localBlock))
+		// A tracked peer whose frontier is behind the local tip makes every
+		// reference stale, so later peers take the catch-up branch.
+		require.True(t, cs.UpdatePeerTip(
+			newTestConnectionId(1),
+			blockTip(localBlock-500),
+			nil,
+		))
+		return cs
+	}
+	advertised := blockTip(networkBlock)
+	pastCeiling := uint64(localBlock + 2*securityParam + 36)
+
+	t.Run("within K corroborates", func(t *testing.T) {
+		t.Parallel()
+		cs := newSelector()
+		first := newTestConnectionId(2)
+		second := newTestConnectionId(3)
+		assert.False(t, cs.updatePeerTipObserved(
+			first, advertised, blockTip(pastCeiling), nil,
+		), "an uncorroborated far delivered frontier must be rejected")
+		assert.True(t, cs.updatePeerTipObserved(
+			second, advertised, blockTip(pastCeiling+50), nil,
+		), "a delivered frontier within K of another connection's must be accepted")
+		assert.True(t, cs.updatePeerTipObserved(
+			first, advertised, blockTip(pastCeiling+1), nil,
+		), "the first claimant must be accepted on its next header")
+	})
+
+	t.Run("more than K apart does not corroborate", func(t *testing.T) {
+		t.Parallel()
+		cs := newSelector()
+		assert.False(t, cs.updatePeerTipObserved(
+			newTestConnectionId(2), advertised, blockTip(pastCeiling), nil,
+		))
+		assert.False(t, cs.updatePeerTipObserved(
+			newTestConnectionId(3),
+			advertised,
+			blockTip(pastCeiling+securityParam+1),
+			nil,
+		), "frontiers more than K apart must not corroborate each other")
+	})
+
+	t.Run("a closed claimant no longer corroborates", func(t *testing.T) {
+		t.Parallel()
+		cs := newSelector()
+		first := newTestConnectionId(2)
+		assert.False(t, cs.updatePeerTipObserved(
+			first, advertised, blockTip(pastCeiling), nil,
+		))
+		cs.RemovePeer(first)
+		assert.False(t, cs.updatePeerTipObserved(
+			newTestConnectionId(3), advertised, blockTip(pastCeiling+1), nil,
+		), "a removed connection's far claim must not corroborate a new one")
+	})
 }
 
 func TestUpdatePeerTipAcceptsNextObservedBlockWhenAdvertisedTipIsFarAhead(

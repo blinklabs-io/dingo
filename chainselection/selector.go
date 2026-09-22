@@ -194,10 +194,11 @@ type ChainSelector struct {
 	// frontier that exceeded the catch-up plausibility ceiling. Entries are
 	// provisional: they never enter peerTips and so never influence chain
 	// selection, corroboration, or the Genesis exit horizon by themselves.
-	// They exist only so that a second, independent connection delivering a
-	// similar far frontier can corroborate the first and let both through --
-	// see corroborateFarTipClaimLocked. Bounded to maxTrackedPeers entries
-	// and pruned in deletePeerLocked. Guarded by mutex.
+	// They exist only so that a second connection delivering a similar far
+	// frontier is accepted; the first is then accepted on its next update
+	// through the ordinary new-peer check -- see
+	// corroborateFarTipClaimLocked. Bounded to maxTrackedPeers entries and
+	// pruned in deletePeerLocked. Guarded by mutex.
 	farTipClaims map[ouroboros.ConnectionId]uint64
 	mutex        sync.RWMutex
 	ctx          context.Context
@@ -827,12 +828,13 @@ func (cs *ChainSelector) checkPeerTipPlausibleLocked(
 // corroborateFarTipClaimLocked records connId's delivered frontier, which
 // exceeded the catch-up plausibility ceiling, and reports whether it is now
 // corroborated: at least one OTHER distinct connection has independently
-// delivered a frontier within securityParam of it. Corroborated claims are
-// trusted because a single connection (lying or fabricating headers this
-// node cannot yet verify) cannot make a second, unrelated connection agree
-// with it; two independent peers legitimately delivering close to the same
-// real network frontier is the expected shape of an honest far-behind
-// catch-up.
+// delivered a frontier within securityParam of it. One connection cannot
+// corroborate itself; two connections delivering close to the same frontier
+// is the expected shape of an honest far-behind catch-up. Nothing here tells
+// two connections to one operator from two independent peers, so this is not
+// a Sybil defence: acceptance only admits the frontier to selection, and
+// headers from any ingress-eligible peer are still crypto-verified before
+// ledger apply (deferred verification is completed at apply time).
 //
 // Entries recorded here are provisional: they never enter cs.peerTips and so
 // never influence chain selection, corroboration, or the Genesis exit
