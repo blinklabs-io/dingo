@@ -113,13 +113,24 @@ type wiringFakeLSQServer struct {
 	// activeConn is the connection the most recent query arrived on, so the
 	// handler can close exactly that one.
 	killConnOnNextPoolDistr atomic.Bool
-	activeConn              atomic.Pointer[ouroboros.Connection]
+	// killAllPoolDistr, when true, closes the connection on every single
+	// ShelleyPoolDistr2Query -- unlike killConnOnNextPoolDistr, this never
+	// self-clears, simulating sustained connection churn a bounded retry
+	// budget cannot outlast (as opposed to the one-off death
+	// killNextPoolDistr models).
+	killAllPoolDistr atomic.Bool
+	activeConn       atomic.Pointer[ouroboros.Connection]
 }
 
 // killNextPoolDistr arms killConnOnNextPoolDistr -- see that field's doc
 // comment.
 func (s *wiringFakeLSQServer) killNextPoolDistr() {
 	s.killConnOnNextPoolDistr.Store(true)
+}
+
+// alwaysKillPoolDistr arms killAllPoolDistr -- see that field's doc comment.
+func (s *wiringFakeLSQServer) alwaysKillPoolDistr() {
+	s.killAllPoolDistr.Store(true)
 }
 
 // newWiringFakeLSQServer defaults eraID to Conway, matching koios_check.go's
@@ -206,7 +217,7 @@ func (s *wiringFakeLSQServer) config() localstatequery.Config {
 						}
 						return []any{pp}, nil
 					case *localstatequery.ShelleyPoolDistr2Query:
-						if s.killConnOnNextPoolDistr.CompareAndSwap(true, false) {
+						if s.killAllPoolDistr.Load() || s.killConnOnNextPoolDistr.CompareAndSwap(true, false) {
 							if conn := s.activeConn.Load(); conn != nil {
 								_ = conn.Close()
 							}

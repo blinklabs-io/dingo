@@ -153,3 +153,72 @@ func TestRunProtocolParamsAndStake_RecoversFromMidSequenceConnDeath(t *testing.T
 	require.Empty(t, stakeMismatches,
 		"dingo and koios report identical stake once the retry succeeds")
 }
+
+// TestRunProtocolParamsAndStake_ExhaustedRetriesReportsOwnErrorsSeparately
+// proves the retry-exhaustion path does not misattribute one check's failure
+// to the other: with the fake server killing every single
+// ShelleyPoolDistr2Query (a churn level a bounded retry budget cannot
+// outlast, unlike the one-off death above), CheckProtocolParams succeeds on
+// every attempt while CheckStakeDistribution never does. Once
+// protocolParamsAndStakeRetries is exhausted, ppErr must be nil (protocol
+// params genuinely never failed) and stakeErr must carry the stake check's
+// own error -- never the reverse.
+//
+// This pins a real regression: an earlier version of the exhausted-retries
+// return path collapsed both ppErr and stakeErr into one conflated
+// "lastErr" value, so a successful protocol-params result was silently
+// replaced with the stake check's own error once retries ran out. Confirmed
+// live on the from-genesis run this fix targets (dingo#1900): epochs 4
+// onward logged "protocol params check did not run" with the *stake*
+// check's exact error text ("dingo stake distribution query: protocol is
+// shutting down"), even though protocol params was never actually failing.
+// Reverting to that conflated-return shape in place makes this test's
+// ppErr assertion fail.
+func TestRunProtocolParamsAndStake_ExhaustedRetriesReportsOwnErrorsSeparately(t *testing.T) {
+	const magic = 764824073
+	const epoch = uint64(600)
+
+	lsq := newWiringFakeLSQServer()
+	lsq.setEra(int(shelley.EraIdShelley))
+	lsq.setProtocolParams(newWiringShelleyProtocolParams())
+	lsq.setPoolDistr(&localstatequery.PoolDistr2Result{
+		Pools:            map[ledger.PoolId]localstatequery.PoolDistr2IndividualStake{},
+		TotalActiveStake: 0,
+	})
+	// Every attempt's stake query dies; protocol params never does.
+	lsq.alwaysKillPoolDistr()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	lsq.serve(t, listener, magic)
+
+	koiosURL, _ := countingKoiosServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/epoch_params":
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprintf(w, `[{"epoch_no":%d,"era":"Shelley"}]`, epoch)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	koios, err := NewKoiosClient("preview", "", koiosURL, true)
+	require.NoError(t, err)
+
+	// Bounded well under this test's own timeout: protocolParamsAndStakeRetries
+	// attempts at protocolParamsAndStakeRetryDelay apart.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	point := pcommon.NewPointOrigin()
+
+	ppMismatches, ppErr, stakeMismatches, stakeErr := runProtocolParamsAndStake(
+		ctx, listener.Addr().String(), magic, point, koios, nil, "preview", epoch,
+	)
+	require.NoError(t, ppErr,
+		"protocol params succeeded on every attempt and must not inherit the stake check's failure")
+	require.NotNil(t, ppMismatches,
+		"a genuinely successful protocol-params comparison must still return its own (possibly empty) result")
+	require.Error(t, stakeErr,
+		"stake distribution never recovered and must report its own real error")
+	require.Nil(t, stakeMismatches)
+}

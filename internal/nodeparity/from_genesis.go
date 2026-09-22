@@ -193,7 +193,6 @@ func runProtocolParamsAndStake(
 	stakeMismatches []StakeMismatch,
 	stakeErr error,
 ) {
-	var lastErr error
 	for attempt := 0; attempt < protocolParamsAndStakeRetries; attempt++ {
 		if attempt > 0 {
 			select {
@@ -209,7 +208,10 @@ func runProtocolParamsAndStake(
 			// internally -- a failure here is either ctx cancellation or a
 			// non-retryable acquire failure (e.g. the point has aged past
 			// Dingo's retention floor), neither of which this loop's own
-			// retry can do anything about.
+			// retry can do anything about. Neither check ran at all, so
+			// reporting the same err for both is correct here (unlike the
+			// exhausted-retries return below, where the two checks DO run
+			// independently and must keep their own outcomes).
 			return nil, err, nil, err
 		}
 
@@ -226,15 +228,22 @@ func runProtocolParamsAndStake(
 		conn.Close()             //nolint:errcheck
 
 		if isRetryableDingoConnErr(ppErr) || isRetryableDingoConnErr(stakeErr) {
-			lastErr = ppErr
-			if lastErr == nil {
-				lastErr = stakeErr
-			}
 			continue
 		}
 		return ppMismatches, ppErr, stakeMismatches, stakeErr
 	}
-	return nil, lastErr, nil, lastErr
+	// Retries exhausted: return this last attempt's own results exactly as
+	// computed above, NOT a single conflated error forced into both slots.
+	// ppMismatches/ppErr/stakeMismatches/stakeErr are the named return
+	// values, already holding the final loop iteration's real outcome --
+	// critically, ppErr may be nil here (protocol params genuinely
+	// succeeded on this last attempt) even though the loop kept going
+	// because stakeErr was still retryable; reporting anything else would
+	// misattribute the stake connection failure to protocol params too,
+	// which a live run (dingo#1900) surfaced as "protocol params check did
+	// not run" with the *stake* check's own error text once the retry
+	// budget was exhausted under sustained churn.
+	return ppMismatches, ppErr, stakeMismatches, stakeErr
 }
 
 // EpochResult reports one epoch's check outcomes. A nil error paired with a
