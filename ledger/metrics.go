@@ -15,6 +15,8 @@
 package ledger
 
 import (
+	"math"
+	"sync/atomic"
 	"time"
 
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -83,6 +85,60 @@ type stateMetrics struct {
 	blockStageHeaderVerify prometheus.Observer
 	blockStageValidate     prometheus.Observer
 	blockStageApply        prometheus.Observer
+	// Wall-clock time from the start of applying one committed
+	// DB-transaction chunk of blocks (ledger/state.go's batch loop, which
+	// commits at most batchSize=50 blocks per transaction) to the moment
+	// updateTipMetrics reflects that chunk's new tip in
+	// cardano_node_metrics_blockNum_int -- the same gauge the "Block apply
+	// rate" Grafana panel (examples/koios-parity-compose/grafana/dashboards/dingo-sync-progress.json,
+	// panel id 3) derives deriv() from.
+	//
+	// Up to batchSize blocks commit and advance blockNum_int together in
+	// one DB transaction, so there is no narrower point at which an
+	// individual block's own application is separately reflected in the
+	// tip: the DB write batches deltas from every block in the chunk into
+	// one deltaBatch.apply call, and the in-memory tip only advances after
+	// that transaction commits. This is a genuine per-batch measurement,
+	// not an approximation of a per-block one -- see
+	// dingo_ledger_block_apply_batch_size below, which records how many
+	// blocks each observation actually covered, so a reader can relate
+	// this metric to the rate panel without assuming false per-block
+	// precision.
+	//
+	// Deliberately not derived from a rate over
+	// cardano_node_metrics_blockNum_int (e.g. a dashboard-side
+	// "1 / clamp_min(deriv(...), 0.001)"): that only derives a rate from a
+	// gauge's slope, cannot give a true percentile, and is not a real
+	// per-observation duration -- unlike this histogram.
+	blockApplyBatchLatency prometheus.Histogram
+	// Exact maximum wall-clock duration blockApplyBatchLatency has ever
+	// observed since process start, advanced by updateMaxDuration's
+	// compare-and-swap loop at the same observeBlockApplyBatch call site
+	// that records blockApplyBatchLatency, so the two cannot drift out of
+	// sync. Exported by a GaugeFunc that reads this atomic at scrape time
+	// (see registerBlockApplyBatchLatencyMax) rather than by a Gauge that
+	// observeBlockApplyBatch pushes into: with a pushed Gauge, two
+	// goroutines can each win the compare-and-swap and land their Set
+	// calls in the other order, leaving the exported value durably behind
+	// the true maximum until some later observation happens to beat the
+	// record again. Reading the atomic directly at scrape time cannot
+	// exhibit that failure.
+	blockApplyBatchLatencyMax atomic.Uint64
+	// Distribution of blocksProcessed for each blockApplyBatchLatency
+	// observation: how many blocks the committed DB-transaction chunk that
+	// observation timed actually contained. Observed at the same call site
+	// as blockApplyBatchLatency, so "latency / batch size" can approximate
+	// a per-block rate comparable to the "Block apply rate" panel without
+	// this metric itself claiming per-block precision it does not have.
+	//
+	// Not a duplicate of commitBatchBlocks below, which observes
+	// len(nextBatch) where ledgerReadChainIterator submits a gathered
+	// batch. That is the read loop's gather size before the apply loop
+	// chunks it; this is the number of blocks a chunk actually applied and
+	// committed, which is lower whenever the chunk skipped blocks (a
+	// Mithril-gap closure, say). Only this one is paired one-to-one with a
+	// latency observation, which is what makes the ratio meaningful.
+	blockApplyBatchSize prometheus.Histogram
 	// Incremented when a stored governance proposal's CBOR fails to
 	// decode during the mid-epoch ratifiability check, so the failures
 	// surface as a metric instead of just log volume.
@@ -381,6 +437,75 @@ func (m *stateMetrics) observeBlockStage(stage string, d time.Duration) {
 	if obs != nil {
 		obs.Observe(d.Seconds())
 	}
+}
+
+// updateMaxDuration performs a lock-free "keep the maximum ever observed"
+// update: it compares observedSeconds against the current value held in
+// record (an atomic.Uint64 holding math.Float64bits of the running maximum,
+// in seconds) and compare-and-swaps it in only when observedSeconds is
+// strictly larger. On the hot path this costs one atomic load and, in the
+// common case where observedSeconds does not beat the record, no write and
+// no allocation.
+//
+// record is the metric's only state; a GaugeFunc reads it directly at
+// scrape time (see registerBlockApplyBatchLatencyMax) instead of a
+// separately pushed Gauge receiving a Set call. A pushed Gauge would be a
+// second copy of the value that can end up behind the record and stay
+// there: two goroutines can each win a CAS here (say 5s then 10s) and then
+// call Set on the pushed Gauge in the other order, leaving it reading 5
+// while the record holds 10 -- nothing recovers that until a later
+// observation exceeds 10, since an observation of 7 exits this loop at the
+// comparison below without ever touching a pushed Gauge. Reading the atomic
+// directly at scrape time cannot exhibit that failure.
+func updateMaxDuration(record *atomic.Uint64, observedSeconds float64) {
+	for {
+		old := record.Load()
+		if observedSeconds <= math.Float64frombits(old) {
+			return
+		}
+		if record.CompareAndSwap(old, math.Float64bits(observedSeconds)) {
+			return
+		}
+	}
+}
+
+// observeBlockApplyBatch records one committed DB-transaction chunk's ledger
+// apply latency (see blockApplyBatchLatency's doc comment) and how many
+// blocks that chunk contained (blockApplyBatchSize). The ledger/state.go
+// call site only calls this once a chunk with blockCount > 0 has committed
+// and updateTipMetrics has advanced the tip for it; a chunk that applied no
+// blocks (e.g. one that immediately hit an epoch boundary) is not observed
+// at all. Safe to call before init (or when metrics are disabled), matching
+// the other observe helpers in this file.
+func (m *stateMetrics) observeBlockApplyBatch(blockCount int, d time.Duration) {
+	if m == nil || m.blockApplyBatchLatency == nil {
+		return
+	}
+	seconds := d.Seconds()
+	m.blockApplyBatchLatency.Observe(seconds)
+	updateMaxDuration(&m.blockApplyBatchLatencyMax, seconds)
+	if m.blockApplyBatchSize != nil {
+		m.blockApplyBatchSize.Observe(float64(blockCount))
+	}
+}
+
+// registerBlockApplyBatchLatencyMax exports blockApplyBatchLatencyMax as
+// dingo_ledger_block_apply_batch_latency_max_seconds via a GaugeFunc, so the
+// exported value is read directly from the atomic at scrape time rather than
+// through a second, independently-updated copy. See
+// blockApplyBatchLatencyMax's doc comment and updateMaxDuration for why.
+func (m *stateMetrics) registerBlockApplyBatchLatencyMax(
+	factory promauto.Factory,
+) {
+	factory.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "dingo_ledger_block_apply_batch_latency_max_seconds",
+			Help: "maximum wall-clock duration ever observed for dingo_ledger_block_apply_batch_latency_seconds, since process start; monotonically non-decreasing and exact rather than bucket-bounded",
+		},
+		func() float64 {
+			return math.Float64frombits(m.blockApplyBatchLatencyMax.Load())
+		},
+	)
 }
 
 // blockComposition summarizes the shape of one applied block: era,
@@ -787,6 +912,41 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	)
 	m.blockStageApply = m.blockStageDuration.WithLabelValues(
 		blockStageApply,
+	)
+	m.blockApplyBatchLatency = promautoFactory.NewHistogram(
+		prometheus.HistogramOpts{
+			Name: "dingo_ledger_block_apply_batch_latency_seconds",
+			Help: "wall-clock time from the start of applying one committed DB-transaction chunk of blocks to the moment its new tip is reflected in cardano_node_metrics_blockNum_int -- the same gauge the \"Block apply rate\" panel's deriv() reads. Per-batch, not per-block: see dingo_ledger_block_apply_batch_size for how many blocks each observation covers.",
+			// 100us to ~52.4s: four exponential steps past
+			// dingo_ledger_block_stage_duration_seconds's ~3.3s ceiling
+			// (ExponentialBuckets(0.0001, 2, 16)), deliberately wider
+			// rather than matching it. This metric's window contains every
+			// stage that histogram measures individually, for every block
+			// in the chunk -- the Leios endorser-block wait ahead of the
+			// transaction, each block's validate stage, and the chunk's
+			// single shared apply stage -- plus the DB commit and the tip
+			// lock. A batch whose stages each sit near the stage
+			// histogram's own ceiling would land in +Inf at that range and
+			// become indistinguishable from any other slow batch.
+			Buckets: prometheus.ExponentialBuckets(0.0001, 2, 20),
+		},
+	)
+	m.registerBlockApplyBatchLatencyMax(promautoFactory)
+	m.blockApplyBatchSize = promautoFactory.NewHistogram(
+		prometheus.HistogramOpts{
+			Name: "dingo_ledger_block_apply_batch_size",
+			Help: "number of blocks committed in the DB transaction each dingo_ledger_block_apply_batch_latency_seconds observation timed (ledger/state.go caps this at batchSize=50 blocks per transaction). Distinct from dingo_ledger_commit_batch_blocks, which counts blocks the chain-read loop gathered before submitting them: this counts the blocks the chunk actually applied and committed",
+			// Explicit buckets across the full possible range (1 to
+			// batchSize=50): batch size is a small bounded integer, not a
+			// value that benefits from exponential spacing. Literal
+			// boundaries rather than the batchSize constant, matching
+			// dingo_ledger_commit_batch_blocks: prometheus.NewHistogram
+			// panics on out-of-order boundaries, so interpolating a
+			// constant that a later retune could drop below 40 would turn
+			// a tuning change into a startup panic. A retune leaves these
+			// boundaries stale instead, which is recoverable.
+			Buckets: []float64{1, 2, 5, 10, 20, 30, 40, 50},
+		},
 	)
 	m.governanceProposalDecodeFailures = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
