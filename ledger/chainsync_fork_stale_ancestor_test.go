@@ -15,9 +15,13 @@
 package ledger
 
 import (
+	"bytes"
+	"encoding/hex"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	ouroboros "github.com/blinklabs-io/gouroboros"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -150,4 +154,83 @@ func TestFindPeerForkPathAcceptsAncestorAtOrBeforeTip(t *testing.T) {
 	assert.Equal(t, localTip.Point.Slot, ancestorPoint.Slot)
 	assert.Equal(t, localTip.Point.Hash, ancestorPoint.Hash)
 	assert.Len(t, forkPath, 1)
+}
+
+// TestFindPeerForkPathCachedRejectsAncestorAheadOfTip is the sibling
+// regression test for findPeerForkPathCached, requested in review of the
+// findPeerForkPath fix above: the cached resolver took the same raw
+// blockByHash hit with no tip bound, and additionally memoized it via
+// cachePeerHeaderHistoryPath. That means one hop that lands on a
+// stranded ahead-of-tip row doesn't just return a bad answer once -- it
+// caches every hop that led there as "resolves to this bogus ancestor",
+// which recoverPeerHeaderHistoryFromPointLocked's cache-hit branch then
+// keeps returning for that hash regardless of which local tip is being
+// searched for, permanently short-circuiting the walk past the point
+// where it should keep looking for a genuine ancestor.
+func TestFindPeerForkPathCachedRejectsAncestorAheadOfTip(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	localTip := fixture.ls.chain.Tip()
+
+	// headHash is one hop away from the stranded row: the walk must visit
+	// it, record a step for it, and only then reach orphanHash -- this is
+	// what exercises cachePeerHeaderHistoryPath's memoization of the hop
+	// that led to the bad hit, not just the hit itself.
+	headHash := testHashBytes("cached-ancestor-head-ahead-of-tip")
+	orphanHash := testHashBytes("cached-orphan-block-ahead-of-tip")
+	orphanSlot := localTip.Point.Slot + 157
+
+	fixture.ls.lookupBlockByHash = func(hash []byte) (models.Block, error) {
+		if bytes.Equal(hash, orphanHash) {
+			return models.Block{Slot: orphanSlot, Hash: orphanHash}, nil
+		}
+		return models.Block{}, models.ErrBlockNotFound
+	}
+	headPoint := ocommon.NewPoint(orphanSlot+1, testHashBytes("cached-peer-child"))
+	headEvent := ChainsyncEvent{
+		ConnectionId: testChainsyncConnId(6304, 3001),
+		Point:        headPoint,
+		BlockHeader: mockHeader{
+			hash:        lcommon.NewBlake2b256(headPoint.Hash),
+			prevHash:    lcommon.NewBlake2b256(headHash),
+			blockNumber: localTip.BlockNumber + 2,
+			slot:        headPoint.Slot,
+		},
+	}
+	fixture.ls.config.PeerHeaderLookupFunc = func(
+		_ ouroboros.ConnectionId,
+		hash []byte,
+	) (ChainsyncEvent, []byte, bool) {
+		if bytes.Equal(hash, headHash) {
+			return headEvent, orphanHash, true
+		}
+		return ChainsyncEvent{}, nil, false
+	}
+
+	cache := make(map[string]peerHeaderHistoryPathCacheEntry)
+	ancestor, path, err := fixture.ls.findPeerForkPathCached(
+		headEvent,
+		headHash,
+		localTip.Point,
+		nil,
+		cache,
+	)
+	require.NoError(t, err)
+	assert.Nil(
+		t,
+		ancestor,
+		"a block-index hit ahead of the local tip must never be accepted "+
+			"as a common ancestor, cached or not",
+	)
+	assert.Nil(t, path)
+
+	if entry, ok := cache[hex.EncodeToString(headHash)]; ok {
+		assert.False(
+			t,
+			entry.ok,
+			"the hop leading to a stranded ahead-of-tip hit must not be "+
+				"cached as resolving to it",
+		)
+	}
 }

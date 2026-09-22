@@ -1760,24 +1760,9 @@ func (ls *LedgerState) findPeerForkPath(
 			slices.Reverse(pathReversed)
 			return &point, pathReversed, nil
 		case err == nil:
-			// A block-index hit whose slot is AFTER our own tip cannot be a
-			// common ancestor: an ancestor of two chains is by definition at
-			// or before both, and one of those chains sits at localTipSlot.
-			// database.BlockByHash has no notion of "still reachable from the
-			// current tip" -- it is a raw hash lookup against the persistent
-			// block index, so it can return a row a rollback should have
-			// removed but didn't (e.g. chain.Chain.rollbackLocked's
-			// removeBlockByIndex loop returning early on a transient error
-			// partway through, which chain.Chain.Rollback then surfaces as a
-			// hard failure with no automatic retry of the remainder -- see
-			// its documented "Reject rollbacks that exceed the security
-			// parameter" neighbor for the shape of that loop). Trusting such a
-			// row would hand the caller a "common ancestor" ahead of the true
-			// tip, which would then drive every subsequent blockfetch batch
-			// onto blocks that could never apply. Treat the hit as
-			// unresolved, exactly like ErrBlockNotFound below, so the
-			// peer-header-history walk gets a chance to find a genuine
-			// ancestor instead.
+			// An ancestor of two chains is at or before both tips, so a
+			// hash-index hit past the local tip is not reachable and must be
+			// treated as unresolved.
 		case !errors.Is(err, models.ErrBlockNotFound):
 			return nil, nil, fmt.Errorf(
 				"lookup ancestor hash %x: %w",
@@ -3087,7 +3072,8 @@ func (ls *LedgerState) findPeerForkPathCached(
 		}
 
 		ancestorBlock, err := ls.blockByHash(prevHash)
-		if err == nil {
+		switch {
+		case err == nil && ancestorBlock.Slot <= expectedAncestor.Slot:
 			ancestor := ocommon.NewPoint(ancestorBlock.Slot, ancestorBlock.Hash)
 			cachePeerHeaderHistoryPath(steps, cache, ancestor, 0)
 			if !pointMatches(ancestor, expectedAncestor) {
@@ -3099,8 +3085,12 @@ func (ls *LedgerState) findPeerForkPathCached(
 			}
 			slices.Reverse(pathReversed)
 			return &ancestor, pathReversed, nil
-		}
-		if !errors.Is(err, models.ErrBlockNotFound) {
+		case err == nil:
+			// An ancestor of two chains is at or before both tips, so a
+			// hash-index hit past the local tip is not reachable and must be
+			// treated as unresolved -- and never cached, or every hop that
+			// led here would be memoized as resolving to it.
+		case !errors.Is(err, models.ErrBlockNotFound):
 			return nil, nil, fmt.Errorf(
 				"lookup ancestor hash %x: %w",
 				prevHash,
