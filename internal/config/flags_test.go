@@ -355,7 +355,9 @@ func TestSkipRewardLiveStakeBackfillCheckEnvBinding(t *testing.T) {
 // t.Setenv cannot express "unset", so the previous value is saved and
 // restored by hand; t.Setenv("HOME", ...) below already bars t.Parallel, so
 // mutating the process environment directly is safe here.
-func TestSkipRewardLiveStakeBackfillCheckDefaultsToRunningTheCheck(t *testing.T) {
+func TestSkipRewardLiveStakeBackfillCheckDefaultsToRunningTheCheck(
+	t *testing.T,
+) {
 	resetGlobalConfig()
 	t.Setenv("HOME", t.TempDir())
 	const skipEnvVar = "CARDANO_SKIP_REWARD_LIVE_STAKE_BACKFILL_CHECK"
@@ -1008,6 +1010,40 @@ func loadConfigThroughPipeline(
 		return cfg, err
 	}
 	return cfg, nil
+}
+
+// TestPipeline_KESAgentSignTimeoutBounds pins the CLI enforcement of the
+// slot-boundary bound on shelleyKesAgentSignTimeout end to end through
+// loadConfigThroughPipeline, rather than only through cfg.validate directly.
+//
+// Not t.Parallel: loadConfigThroughPipeline's resetGlobalConfig writes the
+// package-level globalConfig directly with no synchronization of its own,
+// like every other loadConfigThroughPipeline-based test in this file.
+func TestPipeline_KESAgentSignTimeoutBounds(t *testing.T) {
+	_, err := loadConfigThroughPipeline(
+		t,
+		"",
+		[]string{"--shelley-kes-agent-sign-timeout=1s"},
+	)
+	if err == nil ||
+		!strings.Contains(err.Error(), "shelleyKesAgentSignTimeout") {
+		t.Fatalf("CLI accepted a one-slot KES agent sign timeout: %v", err)
+	}
+
+	cfg, err := loadConfigThroughPipeline(
+		t,
+		"",
+		[]string{"--shelley-kes-agent-sign-timeout=999ms"},
+	)
+	if err != nil {
+		t.Fatalf("CLI rejected a sub-slot KES agent sign timeout: %v", err)
+	}
+	if cfg.ShelleyKESAgentSignTimeout != 999*time.Millisecond {
+		t.Fatalf(
+			"CLI sign timeout = %s, want 999ms",
+			cfg.ShelleyKESAgentSignTimeout,
+		)
+	}
 }
 
 // TestPipeline_EmptyMidnightHostUsesLoopbackDefault pins the merged-config

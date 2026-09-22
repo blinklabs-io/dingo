@@ -474,6 +474,64 @@ func TestValidate(t *testing.T) {
 			},
 		},
 		{
+			name: "block producer with KES agent socket instead of local key",
+			modify: func(c *Config) {
+				c.BlockProducer = true
+				c.ShelleyVRFKey = "/keys/vrf.skey"
+				c.ShelleyKESAgentSocket = "/run/kes-agent.sock"
+				c.ShelleyOperationalCertificate = "/keys/node.cert"
+			},
+		},
+		{
+			name: "block producer with local and agent KES keys",
+			modify: func(c *Config) {
+				c.BlockProducer = true
+				c.ShelleyVRFKey = "/keys/vrf.skey"
+				c.ShelleyKESKey = "/keys/kes.skey"
+				c.ShelleyKESAgentSocket = "/run/kes-agent.sock"
+				c.ShelleyOperationalCertificate = "/keys/node.cert"
+			},
+			wantErr: "cannot set both shelleyKesKey and shelleyKesAgentSocket",
+		},
+		{
+			name:    "invalid KES agent mode",
+			modify:  func(c *Config) { c.ShelleyKESAgentMode = "signing" },
+			wantErr: "invalid shelleyKesAgentMode",
+		},
+		{
+			name: "negative KES agent sign timeout",
+			modify: func(c *Config) {
+				c.ShelleyKESAgentSignTimeout = -time.Second
+			},
+			wantErr: "shelleyKesAgentSignTimeout",
+		},
+		{
+			name: "explicit KES agent sign timeout",
+			modify: func(c *Config) {
+				c.ShelleyKESAgentSignTimeout = 300 * time.Millisecond
+			},
+		},
+		{
+			name: "KES agent sign timeout defaults at zero",
+			modify: func(c *Config) {
+				c.ShelleyKESAgentSignTimeout = 0
+			},
+		},
+		{
+			name: "KES agent sign timeout at slot boundary",
+			modify: func(c *Config) {
+				c.ShelleyKESAgentSignTimeout = time.Second
+			},
+			wantErr: "shelleyKesAgentSignTimeout",
+		},
+		{
+			name: "KES agent sign timeout above slot boundary",
+			modify: func(c *Config) {
+				c.ShelleyKESAgentSignTimeout = time.Second + time.Nanosecond
+			},
+			wantErr: "shelleyKesAgentSignTimeout",
+		},
+		{
 			name: "no network and no magic",
 			modify: func(c *Config) {
 				c.Network = ""

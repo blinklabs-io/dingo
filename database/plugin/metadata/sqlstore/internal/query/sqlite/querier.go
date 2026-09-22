@@ -14,6 +14,7 @@ type Querier interface {
 	BackfillNodeSettingsNetwork(ctx context.Context, arg BackfillNodeSettingsNetworkParams) (int64, error)
 	ClaimOffchainMetadataFetch(ctx context.Context, arg ClaimOffchainMetadataFetchParams) (int64, error)
 	ClearSyncState(ctx context.Context) error
+	CountPParamsByEra(ctx context.Context, eraID sql.NullInt64) (int64, error)
 	CountTransactionsByMetadataLabel(ctx context.Context, label sql.NullString) (int64, error)
 	CountTransactionsByPaymentCred(ctx context.Context, paymentKey []byte) (int64, error)
 	CountTransactionsInSlotRange(ctx context.Context, arg CountTransactionsInSlotRangeParams) (int64, error)
@@ -189,6 +190,7 @@ type Querier interface {
 	InsertNodeSettingsGateIfAbsent(ctx context.Context, arg InsertNodeSettingsGateIfAbsentParams) (int64, error)
 	InsertOffchainMetadataPointer(ctx context.Context, arg InsertOffchainMetadataPointerParams) (int64, error)
 	InsertRewardSnapshot(ctx context.Context, arg InsertRewardSnapshotParams) (int64, error)
+	ListPParamsByEra(ctx context.Context, eraID sql.NullInt64) ([]Pparam, error)
 	// Reconciles the table against a completed snapshot: every row the snapshot
 	// carried was stamped with its timestamp, so anything older was not in the
 	// snapshot and is no longer published upstream.
@@ -229,6 +231,7 @@ type Querier interface {
 	SumTransactionFeesInSlotRange(ctx context.Context, arg SumTransactionFeesInSlotRangeParams) ([]interface{}, error)
 	UpdateDRepActivity(ctx context.Context, arg UpdateDRepActivityParams) (int64, error)
 	UpdateFallbackRewardSnapshot(ctx context.Context, arg UpdateFallbackRewardSnapshotParams) (int64, error)
+	UpdatePParamsCbor(ctx context.Context, arg UpdatePParamsCborParams) error
 	UpsertMidnightAriadneParams(ctx context.Context, arg UpsertMidnightAriadneParamsParams) (int64, error)
 	UpsertMidnightEpochCandidates(ctx context.Context, arg UpsertMidnightEpochCandidatesParams) (int64, error)
 	UpsertNodeSettingsGate(ctx context.Context, arg UpsertNodeSettingsGateParams) error

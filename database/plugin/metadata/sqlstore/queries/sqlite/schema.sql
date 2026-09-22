@@ -433,7 +433,6 @@ CREATE TABLE utxo (
 
 CREATE TABLE asset (
     name BLOB,
-    name_hex BLOB,
     policy_id BLOB,
     fingerprint BLOB,
     id INTEGER PRIMARY KEY,
