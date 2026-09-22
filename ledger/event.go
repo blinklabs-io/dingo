@@ -62,13 +62,10 @@ type BlockfetchEvent struct {
 	BatchDone    bool          // Set to true for a BatchDone event
 	// RequestId identifies the RequestRange call this event belongs to, from
 	// gouroboros' CallbackContext.RequestId (numbered from 1 in send order,
-	// per connection). It is not used to route delivery in this commit --
-	// only one request is ever outstanding per connection, so an event's
-	// position in the single-subscriber, per-connection-FIFO delivery order
-	// already identifies which request it belongs to -- but it is carried
-	// now so a future caller tracking more than one outstanding request per
-	// connection can assert RequestId against whichever slot it expects an
-	// event to belong to, rather than trusting position alone.
+	// per connection). A BatchDone event releases the ledger's in-flight
+	// entry for this request rather than the connection's oldest one, since
+	// pipelining keeps more than one request outstanding per connection.
+	// Zero means unnumbered and falls back to the oldest entry.
 	RequestId uint64
 	// RangeErr carries a BatchDone event's terminal outcome. gouroboros'
 	// RangeDoneFunc reports every pipelined request's resolution -- success,

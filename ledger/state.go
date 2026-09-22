@@ -1094,9 +1094,33 @@ type LedgerState struct {
 	// slice rather than a single channel: pipelining can leave two requests
 	// outstanding on the same connection at once (the active batch and one
 	// pre-queued "next" request -- see nextBlockfetchRequest), and gouroboros
-	// delivers responses for one connection strictly FIFO, so the entry at
-	// index 0 is always the one whose terminal event resolves next.
-	blockfetchRequestsInFlight          map[string][]chan struct{}
+	// delivers responses for one connection strictly FIFO. A terminal event
+	// releases the entry bound to its own RequestId rather than the front
+	// one: a teardown can release an entry whose request is still outstanding
+	// with the peer, and that request's later terminal event must not
+	// release whichever request replaced it (see
+	// completeBlockfetchRequestForEventLocked).
+	blockfetchRequestsInFlight map[string][]chan struct{}
+	// blockfetchRequestIds maps an entry in blockfetchRequestsInFlight to the
+	// request ID RequestRange returned for it. An entry is absent until its
+	// dispatch returns and binds it.
+	blockfetchRequestIds map[chan struct{}]uint64
+	// blockfetchUnboundReleases records entries removed before their
+	// dispatch returned a request ID, so the late bind knows what happened:
+	// true when the request's own terminal event released it, false when a
+	// teardown did and its terminal event is still to come.
+	blockfetchUnboundReleases map[chan struct{}]bool
+	// blockfetchReleasedRequestIds holds, per connection key, requests a
+	// teardown released while they were still outstanding with the peer.
+	// Each is removed when its own terminal event arrives, which then
+	// releases nothing else.
+	// The value records whether the discard latch was armed for it.
+	blockfetchReleasedRequestIds map[string]map[uint64]bool
+	// activeBlockfetchRequestDone and shadowBlockfetchRequestDone are the
+	// blockfetchRequestsInFlight entries of the active batch's and the shadow
+	// peer's requests, so teardown releases those requests by identity.
+	activeBlockfetchRequestDone         chan struct{}
+	shadowBlockfetchRequestDone         chan struct{}
 	blockfetchShadowRequestsInFlight    map[string]struct{}
 	blockfetchInFlightTimeoutGeneration uint64
 	blockfetchInFlightTimeoutCount      uint8

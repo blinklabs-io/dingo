@@ -1810,8 +1810,7 @@ paths, where the point is to report before the goroutine unwinds.
   (`startQueuedBlockfetchPrefetchLocked`), tracked in
   `LedgerState.nextBlockfetchRequest`. gouroboros resolves one connection's
   requests strictly FIFO, so the batch that has not yet produced its
-  `RangeDoneFunc` terminal event is always unambiguously "the one currently
-  streaming" — no request-ID demultiplexing is needed. When the active
+  `RangeDoneFunc` terminal event is the one currently streaming. When the active
   batch's `BatchDone` arrives having applied at least one block,
   `tryPromoteQueuedBlockfetchLocked` promotes the pre-queued request to
   active (scoring its peer latency from its original dispatch time, not the
@@ -1831,7 +1830,15 @@ paths, where the point is to report before the goroutine unwinds.
   batch. `LedgerState.blockfetchRequestsInFlight` (per connection key) and
   the `blockfetchDiscardConnId` late-event latch are therefore both
   generalized to handle up to two outstanding/abandoned requests on the same
-  connection at once instead of one.
+  connection at once instead of one. Each in-flight entry is bound to the
+  request ID `RequestRange` returned, and a terminal event releases the entry
+  carrying its own `BlockfetchEvent.RequestId`, not the connection's front
+  entry: a teardown releases entries whose requests are still outstanding with
+  the peer, so position no longer identifies the request. A refused promotion
+  leaves the pre-queued request reserved, so a same-connection redispatch waits
+  for its terminal event. A request a teardown released is remembered by ID;
+  its late terminal event releases nothing, and consumes the latch only when
+  the latch was armed for it.
 - The blast radius of such a stall is not local. `LedgerState.handleConnectionClosedEvent`
   takes `chainsyncMutex`, so a stall there stops `ledger.conn_closed` draining;
   the `node.go` handler translating `connmanager.conn_closed` into

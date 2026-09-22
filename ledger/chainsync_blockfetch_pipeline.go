@@ -27,8 +27,10 @@ import (
 // never idles for a full round-trip at a batch boundary. See
 // startQueuedBlockfetchPrefetchLocked and tryPromoteQueuedBlockfetchLocked.
 type queuedBlockfetchRequest struct {
-	connId      ouroboros.ConnectionId
-	requestId   uint64
+	connId    ouroboros.ConnectionId
+	requestId uint64
+	// done is this request's blockfetchRequestsInFlight entry.
+	done        chan struct{}
 	headerStart ocommon.Point
 	headerEnd   ocommon.Point
 	// headerCount is the number of queued headers this request covers (the
@@ -101,6 +103,7 @@ func (ls *LedgerState) startQueuedBlockfetchPrefetchLocked(
 		)
 		return
 	}
+	ls.bindBlockfetchRequestIdLocked(connId, requestDone, requestId)
 	// The active batch this prefetch was meant to follow may have been torn
 	// down (rollback, fork restart, timeout) while the dispatch above ran
 	// without the mutex held. Its own teardown path already discarded
@@ -115,6 +118,7 @@ func (ls *LedgerState) startQueuedBlockfetchPrefetchLocked(
 	ls.nextBlockfetchRequest = &queuedBlockfetchRequest{
 		connId:             connId,
 		requestId:          requestId,
+		done:               requestDone,
 		headerStart:        nextStart,
 		headerEnd:          nextEnd,
 		headerCount:        available,
@@ -151,10 +155,10 @@ func (ls *LedgerState) markBlockfetchRequestForDiscardLocked(
 // bookkeeping (blockfetchRequestsInFlight) stays intact until the genuine
 // BatchDone drains it, so a same-connection redispatch still waits for it;
 // blockfetchRequestRangeCleanup instead releases that bookkeeping itself
-// before calling this, because its own callers have no later event left to
-// release it. Either way the latch, not the reservation, is what keeps the
-// late terminal event from being attributed to the replacement batch. The
-// caller must hold chainsyncBlockfetchMutex.
+// before calling this, by request ID, so the late terminal event releases
+// nothing else when it arrives. Either way the latch, not the reservation, is
+// what keeps the late event's blocks from being attributed to the
+// replacement batch. The caller must hold chainsyncBlockfetchMutex.
 func (ls *LedgerState) discardNextBlockfetchRequestLocked() {
 	next := ls.nextBlockfetchRequest
 	if next == nil {
@@ -230,7 +234,9 @@ func (ls *LedgerState) tryPromoteQueuedBlockfetchLocked() bool {
 	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
 	ls.chainsyncBlockfetchReadyMutex.Unlock()
 	ls.activeBlockfetchConnId = next.connId
+	ls.activeBlockfetchRequestDone = next.done
 	ls.shadowBlockfetchConnId = ouroboros.ConnectionId{}
+	ls.shadowBlockfetchRequestDone = nil
 	ls.shadowBlockReceivedHashes = nil
 	ls.batchBlocksReceived = 0
 	ls.batchBlocksApplied = 0
