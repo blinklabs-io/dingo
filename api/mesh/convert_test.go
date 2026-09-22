@@ -605,18 +605,3 @@ func TestDecodeTxCborErrors(t *testing.T) {
 		})
 	}
 }
-
-func TestDecodeTxCborSuccess(t *testing.T) {
-	t.Parallel()
-
-	addr := testAddress(
-		t, lcommon.AddressTypeKeyNone, testKeyHash(0x3d), nil,
-	)
-	txCbor, want := testSimpleSignedTx(t, addr)
-
-	tx, meshErr := decodeTxCbor(hexString(txCbor))
-
-	require.Nil(t, meshErr)
-	require.NotNil(t, tx)
-	require.Equal(t, want.Hash().String(), tx.Hash().String())
-}

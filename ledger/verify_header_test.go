@@ -628,32 +628,19 @@ func TestVerifyBlockHeader_TamperedVRFProof(t *testing.T) {
 	)
 }
 
-// TestVerifyBlockHeader_TamperedOpCertSignature verifies that a tampered
-// OpCert cold signature is rejected.
-//
-// Historically the VerifyBlock-based crypto path (verifyBlockHeaderHex) did
-// not itself validate the OpCert cold-key signature (it runs with
-// SkipStakePoolValidation), so this boundary was pinned the other way: no
-// error from this path, with the sibling verifyOpCertHeaderCrypto (exercised
-// by verify_opcert_test.go) named as the sole layer responsible for catching
-// it. gouroboros#2427 closed a real gap upstream (VerifyBlock previously
-// checked only the KES signature against the header's own hot vkey, so a
-// forged header carrying a real pool's issuer vkey with an attacker's hot/KES
-// keys passed unchanged) by verifying the OpCert cold signature directly
-// inside VerifyBlock, before the KES check that depends on it. This path now
-// rejects a tampered OpCert on its own, redundantly with dingo's own
-// verifyOpCertHeaderCrypto layer (defense in depth, not a bug) -- update this
-// test if that redundancy is ever intentionally removed on either side.
+// TestVerifyBlockHeader_TamperedOpCertSignature verifies that the generic
+// VerifyBlock crypto path rejects an OpCert whose hot KES key was not
+// authorized by the claimed pool cold key. Dingo's sibling OpCert validation
+// remains defense in depth and additionally enforces KES-period expiry.
 func TestVerifyBlockHeader_TamperedOpCertSignature(t *testing.T) {
 	t.Parallel()
 
 	tb := createTestBlock(t, [32]byte{4}, 77, tamperOpCertSig)
 	err := verifyBlockHeader(tb.block, tb.epochNonce, tb.slotsPerKesPeriod)
-	require.ErrorContains(
+	assert.ErrorContains(
 		t,
 		err,
-		"cold signature",
-		"gouroboros#2427: VerifyBlock now verifies the OpCert cold signature directly",
+		"operational certificate cold signature invalid",
 	)
 }
 
