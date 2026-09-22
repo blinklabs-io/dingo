@@ -24,10 +24,10 @@ import (
 
 // TestSplitStakeMismatches pins the from-genesis report's separation of a
 // real Dingo/Koios divergence from a KoiosFault entry (an unparseable koios
-// active_stake value): a human reviewer's finding was that counting the
-// latter toward stakeMismatches pages on Koios's own data quality rather
-// than a real Dingo bug, mirroring the wrong outcome DetermineStatus
-// already prevents on the protocol-params side.
+// active_stake value): counting the latter toward stakeMismatches would
+// page on Koios's own data quality rather than a real Dingo bug, mirroring
+// the wrong outcome DetermineStatus already prevents on the protocol-params
+// side.
 func TestSplitStakeMismatches(t *testing.T) {
 	real := nodeparity.StakeMismatch{
 		PoolIDBech32: "pool1real",
@@ -75,15 +75,14 @@ func TestSplitStakeMismatches(t *testing.T) {
 }
 
 // TestFromGenesisCounters_RecordEpoch drives recordEpoch directly with a
-// synthetic EpochResult and asserts on the resulting counters -- the
-// regression a human reviewer found (Chris Guiney, dingo#4319):
+// synthetic EpochResult and asserts on the resulting counters.
 // TestSplitStakeMismatches above proves the partition helper is correct in
-// isolation, but reverting recordEpoch's stake branch to the old
-// "stakeMismatches++ for any non-empty StakeMismatches" shape left that
-// test green, since it never calls recordEpoch at all. Also covers the
-// Incomplete counters (dingo#4319): without them, a run whose every check
-// was degraded reports 0 mismatches across the board, indistinguishable
-// from a clean run.
+// isolation, but reverting recordEpoch's stake branch to the
+// "stakeMismatches++ for any non-empty StakeMismatches" shape would leave
+// that test green, since it never calls recordEpoch at all. Also covers the
+// Incomplete counters: without them, a run whose every check was degraded
+// reports 0 mismatches across the board, indistinguishable from a clean
+// run.
 func TestFromGenesisCounters_RecordEpoch(t *testing.T) {
 	logger := discardLogger()
 

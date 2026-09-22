@@ -60,11 +60,11 @@ func TestResolveStartPoint(t *testing.T) {
 
 // TestUTxOVerdict pins the fix for a Koios outage during tx_info
 // reconstruction being reported as a false "utxo set match" instead of
-// "not run" (human review, dingo#4319): utxoTaintedThisEpoch was closure
-// state inside RunFromGenesis's 500+ line function literal, with nothing
-// asserting on it directly. utxoVerdict is that decision, lifted out so it
-// is directly testable: reverting its tainted case in place (returning
-// utxoVerdictCompare instead) would make the first subtest below fail.
+// "not run": utxoTaintedThisEpoch was closure state inside RunFromGenesis's
+// 500+ line function literal, with nothing asserting on it directly.
+// utxoVerdict is that decision, lifted out so it is directly testable:
+// reverting its tainted case in place (returning utxoVerdictCompare
+// instead) would make the first subtest below fail.
 func TestUTxOVerdict(t *testing.T) {
 	someRefs := UTxOSet{"deadbeef#0": "addr|100|||"}
 
@@ -89,11 +89,11 @@ func TestUTxOVerdict(t *testing.T) {
 
 // TestApplyTxInfoResults pins flushPendingTxInfos's actual failure
 // decision -- the one that sets utxoTaintedThisEpoch -- not just
-// utxoVerdict, which only reads that flag (human review, Chris Guiney,
-// dingo#4319): TestUTxOVerdict alone doesn't prove a tx_info fetch failure
-// is what makes utxoTaintedThisEpoch true in the first place. Reverting
-// applyTxInfoResults to always return false (as if every chunk always
-// succeeded) would make the "one chunk fails" subtest below fail.
+// utxoVerdict, which only reads that flag: TestUTxOVerdict alone doesn't
+// prove a tx_info fetch failure is what makes utxoTaintedThisEpoch true in
+// the first place. Reverting applyTxInfoResults to always return false (as
+// if every chunk always succeeded) would make the "one chunk fails" subtest
+// below fail.
 func TestApplyTxInfoResults(t *testing.T) {
 	noopLogf := func(string, ...any) {}
 

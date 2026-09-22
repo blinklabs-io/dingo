@@ -942,14 +942,14 @@ func TestObserverCancellationStopsPromptly(t *testing.T) {
 }
 
 // TestObserverStopIsIdempotent confirms Stop can be called more than once on
-// the same Observer instance without panicking. This models the real
-// double-invocation the reviewer found: node.go's own started-stack cleanup
-// calls Stop() on a startup failure that occurs after the koios-parity
-// observer has already been started but before Run() finishes, and
-// node_shutdown.go's shutdown() (the normal shutdown path, e.g. via
-// Node.Stop() or a signal) independently calls Stop() again on the same
-// instance. Before this fix, Stop() closed an owned "done" channel
-// unconditionally, so a second call panicked with "close of closed channel".
+// the same Observer instance without panicking. This models a real
+// double-invocation: node.go's own started-stack cleanup calls Stop() on a
+// startup failure that occurs after the koios-parity observer has already
+// been started but before Run() finishes, and node_shutdown.go's shutdown()
+// (the normal shutdown path, e.g. via Node.Stop() or a signal) independently
+// calls Stop() again on the same instance. Stop() must not close an owned
+// "done" channel unconditionally -- doing so panics on the second call with
+// "close of closed channel".
 func TestObserverStopIsIdempotent(t *testing.T) {
 	t.Parallel()
 

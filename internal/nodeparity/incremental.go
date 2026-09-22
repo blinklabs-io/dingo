@@ -169,8 +169,7 @@ func (s *cursorState) setRollback(point Tip) (IncrementalCursor, error) {
 // This is deliberately computed fresh from two stable, monotonic
 // quantities (the cursor's current Tip.BlockNumber and this request's own
 // at.BlockNumber) rather than by subtracting a snapshot of the counter's
-// own earlier absolute value, which an earlier version of this fix did and
-// which broke under overlapping requests (blinklabs-io/dingo#4183 review):
+// own earlier absolute value, which breaks under overlapping requests:
 // a full check can take several minutes, long enough for the ChainSync
 // callback goroutine to both advance the counter *and* dispatch a second
 // request before the first one completes. That second request's baseline

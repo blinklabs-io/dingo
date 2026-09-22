@@ -61,9 +61,9 @@ const txInfoOpportunisticFlushThreshold = txInfoConcurrency * koiosparity.KoiosT
 // falls in (queryShelleyEpochNo, an unbounded query with no retention
 // floor), rather than computing it client-side from the raw slot number.
 //
-// A prior version of this file divided block.SlotNumber() by a per-network
-// epoch-length constant -- wrong on preprod, and not fixable by simply
-// using the right constant: preprod's Byron era ran for 4 real epochs
+// Dividing block.SlotNumber() by a per-network epoch-length constant is
+// wrong on preprod, and not fixable by simply using the right constant:
+// preprod's Byron era ran for 4 real epochs
 // (verified against config/cardano/preprod/config.json, which carries no
 // TestShelleyHardForkAtEpoch, unlike preview's explicit 0) at Byron's own
 // epoch length (10*k Byron slots, k=2160 -> 21600 slots/epoch, at Byron's
@@ -72,12 +72,11 @@ const txInfoOpportunisticFlushThreshold = txInfoConcurrency * koiosparity.KoiosT
 // over the raw slot number alone can account for a per-network,
 // historically-fixed Byron-era length without hardcoding it separately --
 // asking Dingo, which already resolves this correctly, avoids needing to
-// know it at all. (Byron's own startTime equaling Shelley's systemStart in
-// both networks' genesis configs, cited by an earlier version of this
-// comment as proof of a zero-length Byron era, proves no such thing: it
-// holds on mainnet too, where Byron ran 208 real epochs -- systemStart is
+// know it at all. Byron's own startTime equaling Shelley's systemStart in
+// both networks' genesis configs is not proof of a zero-length Byron era:
+// it holds on mainnet too, where Byron ran 208 real epochs -- systemStart is
 // the slot-zero wall-clock reference, unrelated to when the Shelley hard
-// fork actually happened.)
+// fork actually happened.
 func currentEpochNo(
 	ctx context.Context,
 	dingoAddr string,
@@ -285,12 +284,12 @@ const (
 
 // utxoVerdict decides utxoVerdictMode purely from local state -- no network
 // I/O -- extracted from RunFromGenesis's roll-forward callback specifically
-// so the regression it fixes is directly assertable (human review,
-// dingo#4319): a Koios outage during tx_info reconstruction being reported
-// as a false "utxo set match" instead of "not run", because
-// utxoTaintedThisEpoch was closure state inside a 500+ line function
-// literal that no test exercised. Reverting the taint check this function
-// replaces would make TestUTxOVerdict's tainted case fail.
+// so the regression it fixes is directly assertable: a Koios outage during
+// tx_info reconstruction being reported as a false "utxo set match" instead
+// of "not run", because utxoTaintedThisEpoch was closure state inside a
+// 500+ line function literal that no test exercised. Reverting the taint
+// check this function replaces would make TestUTxOVerdict's tainted case
+// fail.
 //
 // utxoBaselineErr is not a parameter: whether the genesis baseline capture
 // itself failed (utxoBaselineErr != nil) or was simply never attempted yet
@@ -339,13 +338,12 @@ func nextSessionRetryDelay(
 // flushPendingTxInfos, which threads that result straight into
 // utxoTaintedThisEpoch, so a test can drive the actual failure decision
 // directly with synthetic chunks/results/errs instead of needing a real
-// Koios server (human review, Chris Guiney, dingo#4319): the fix for a
-// Koios outage being reported as a false "utxo set match" was pinned only
-// at utxoVerdict, the function that reads utxoTaintedThisEpoch, never at
-// anything that decides what sets it. Does no network I/O itself --
-// chunks/results/errs are already-fetched, matching the same
-// already-fetched-input shape evaluatePoolStake uses for the identical
-// reason.
+// Koios server: the fix for a Koios outage being reported as a false "utxo
+// set match" was pinned only at utxoVerdict, the function that reads
+// utxoTaintedThisEpoch, never at anything that decides what sets it. Does
+// no network I/O itself -- chunks/results/errs are already-fetched,
+// matching the same already-fetched-input shape evaluatePoolStake uses for
+// the identical reason.
 func applyTxInfoResults(
 	utxoRefs UTxOSet,
 	chunks [][]string,

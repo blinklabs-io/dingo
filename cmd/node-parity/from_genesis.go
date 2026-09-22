@@ -60,18 +60,16 @@ func splitStakeMismatches(
 // out of that closure so a test can drive it directly with a synthetic
 // EpochResult and assert on the resulting counts -- rather than only on
 // splitStakeMismatches in isolation, which proves the partition is correct
-// but not that this counting actually uses it (human review, Chris Guiney,
-// dingo#4319: reverting recordEpoch's stake branch to the old
-// "stakeMismatches++ for any non-empty StakeMismatches" shape left a
-// helper-only test green).
+// but not that this counting actually uses it: reverting recordEpoch's
+// stake branch to the "stakeMismatches++ for any non-empty
+// StakeMismatches" shape would leave a helper-only test green.
 //
 // The six Incomplete counters matter as much as the three Mismatch ones:
 // each increments whenever a check could not be trusted at all (a Koios
 // fetch failure, a Dingo query error, or a Koios-side data fault) rather
 // than confirming a real match. Without them, a run whose Koios side was
 // degraded throughout reports 0 mismatches across the board and exits 0,
-// indistinguishable from a run that genuinely verified everything (human
-// review, Chris Guiney, dingo#4319).
+// indistinguishable from a run that genuinely verified everything.
 type fromGenesisCounters struct {
 	epochsChecked                                 int
 	ppMismatches, stakeMismatches, utxoMismatches int

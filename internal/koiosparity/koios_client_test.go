@@ -815,9 +815,9 @@ func TestGetTxInfosReturnsResultsInRequestOrder(t *testing.T) {
 	require.Equal(t, "bbb", items[1].TxHash)
 }
 
-// TestGetTxInfosErrorsOnIncompleteResponse proves dingo#4319's CodeRabbit
-// finding is fixed: a transaction hash the caller asked for but Koios
-// omitted from the response must fail loudly, not be silently treated as
+// TestGetTxInfosErrorsOnIncompleteResponse proves that a transaction hash
+// the caller asked for but Koios omitted from the response must fail
+// loudly, not be silently treated as
 // "no changes for that hash" -- the from-genesis UTxO reconstruction can't
 // tell the difference between "this hash has no inputs/outputs" and "this
 // hash's real inputs/outputs were silently dropped," so it must never

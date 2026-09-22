@@ -19,15 +19,13 @@ package nodeparity
 // cmd/node-parity call -- rather than only the extracted helpers
 // (applyResolvedEra, evaluatePoolStake) koios_check_test.go already pins.
 //
-// Human review (Chris Guiney, dingo#4319) found that neither function was
-// reached by any test: "nothing in either package calls
-// CheckStakeDistribution at all" and the same for CheckProtocolParams. A
-// follow-up verification confirmed this concretely -- reverting either
-// function's call to its extracted helper in place (not the helper itself)
-// left every existing test green, including TestApplyResolvedEra and
-// TestEvaluatePoolStake, because those drive the helpers directly with
-// synthetic inputs and never go through the functions that actually wire
-// them into a real comparison.
+// Neither function is reached by any other test: nothing in either package
+// calls CheckStakeDistribution, and the same is true for
+// CheckProtocolParams. Reverting either function's call to its extracted
+// helper in place (not the helper itself) would leave every existing test
+// green, including TestApplyResolvedEra and TestEvaluatePoolStake, because
+// those drive the helpers directly with synthetic inputs and never go
+// through the functions that actually wire them into a real comparison.
 //
 // Closing that gap means driving both functions through a real
 // *localstatequery.Client (GetCurrentEra, GetCurrentProtocolParams,
@@ -278,8 +276,7 @@ func newWiringShelleyProtocolParams() *shelley.ShelleyProtocolParameters {
 // shelley.ShelleyProtocolParameters, so a client decoding Allegra-era
 // protocol params gets back a value ProtocolParamsFromNative's type switch
 // alone cannot distinguish from genuine Shelley -- it always guesses
-// "Shelley" (human review, Chris Guiney, dingo#4319; koios_check.go's own
-// doc comment on this exact scenario).
+// "Shelley" (see koios_check.go's own doc comment on this exact scenario).
 //
 // The fake LocalStateQuery server reports the wire-authoritative era as
 // Allegra (HardForkCurrentEraQuery) while replying to
@@ -288,9 +285,8 @@ func newWiringShelleyProtocolParams() *shelley.ShelleyProtocolParameters {
 // "Allegra" for /epoch_params. If CheckProtocolParams's call to
 // applyResolvedEra actually wires the authoritative era into the comparison,
 // dingoParams.EraName becomes "Allegra" and CompareEpochProtocolParams finds
-// no pparams_era disagreement. If that call site is bypassed (the reverted
-// call site this test proves against -- see this package's PR discussion),
-// the ambiguous "Shelley" guess survives untouched and a real pparams_era
+// no pparams_era disagreement. If that call site is bypassed, the ambiguous
+// "Shelley" guess survives untouched and a real pparams_era
 // CategoryValueMismatch appears, which this test fails on.
 func TestCheckProtocolParams_AppliesWireResolvedEraOverAmbiguousGuess(t *testing.T) {
 	const magic = 764824073

@@ -56,7 +56,7 @@ package nodeparity
 //     separate pool_info call per pool per epoch, deferred as follow-up
 //     scope.
 //
-//     KNOWN GAP (CodeRabbit review, dingo#4319): this only iterates the
+//     KNOWN GAP: this only iterates the
 //     pools Dingo itself reports via GetPoolDistr2, so it can detect a
 //     pool whose Dingo-reported stake disagrees with Koios, but not a pool
 //     Dingo's ledger state is missing entirely (a real bug that would look
@@ -72,8 +72,7 @@ package nodeparity
 //     pool_list's current registration status as a stand-in for a
 //     historical epoch's membership would be actively wrong for any epoch
 //     not near Koios's live tip -- worse than the documented gap it would
-//     replace. Deferred rather than rushed; see dingo#4319's follow-up
-//     issue for tracking.
+//     replace. Deferred rather than rushed, as follow-up scope.
 //   - UTxO set: full content (address, ADA amount, multi-asset tokens,
 //     datum presence/form, reference script hash), not just existence --
 //     built from Koios's own /tx_info input/output data via a
@@ -158,12 +157,12 @@ func NewKoiosClient(
 // result to dingoParams, or fails outright if that resolution itself
 // failed. Split out of CheckProtocolParams so the regression this guards
 // against -- a GetCurrentEra error being silently swallowed in favor of an
-// ambiguous type-inferred era guess (human review, Chris Guiney, dingo#4319)
-// -- is provable with plain values, not a live wire round-trip: exercising
-// it through the real localstatequery.Client would make the test depend on
-// gouroboros's exact number of HardForkCurrentEraQuery calls per
-// CheckProtocolParams invocation, which is an internal timing detail of a
-// third-party client, not part of this package's contract.
+// ambiguous type-inferred era guess -- is provable with plain values, not a
+// live wire round-trip: exercising it through the real
+// localstatequery.Client would make the test depend on gouroboros's exact
+// number of HardForkCurrentEraQuery calls per CheckProtocolParams
+// invocation, which is an internal timing detail of a third-party client,
+// not part of this package's contract.
 func applyResolvedEra(
 	dingoParams *koiosparity.DingoProtocolParams,
 	eraID int,
@@ -204,16 +203,15 @@ func CheckProtocolParams(
 	// wire protocol reports, not a second guess.
 	//
 	// A GetCurrentEra error must fail this whole check, not be silently
-	// swallowed in favor of the ambiguous type-inferred guess (human
-	// review, Chris Guiney, dingo#4319): queryHardFork's HardForkCurrentEraQuery
-	// case now returns errEpochNotResolved for a pinned point no epoch row
-	// covers (bcddd518) instead of silently answering era 0, so this call
-	// can newly fail. Ignoring that error in an Allegra epoch left the
-	// type-inferred guess (Shelley) in place, CompareEpochProtocolParams
-	// then reported a real pparams_era CategoryValueMismatch against
-	// Koios's correct "allegra", and DetermineStatus returned StatusFail --
-	// reporting "ledger state diverged from Koios" for what was actually a
-	// failed query, not a real divergence.
+	// swallowed in favor of the ambiguous type-inferred guess:
+	// queryHardFork's HardForkCurrentEraQuery case returns
+	// errEpochNotResolved for a pinned point no epoch row covers, instead of
+	// silently answering era 0, so this call can fail. Falling back to the
+	// type-inferred guess (Shelley) on that failure would let
+	// CompareEpochProtocolParams report a real pparams_era
+	// CategoryValueMismatch against Koios's correct era, and DetermineStatus
+	// would return StatusFail -- reporting "ledger state diverged from
+	// Koios" for what was actually a failed query, not a real divergence.
 	eraID, eraErr := client.GetCurrentEra()
 	if err := applyResolvedEra(dingoParams, eraID, eraErr); err != nil {
 		return nil, err
@@ -271,9 +269,8 @@ type StakeMismatch struct {
 // cases must not be conflated: stakeDiffUnparseableKoios is a Koios-side
 // data fault (KoiosFault: true, excluded from the mismatch count),
 // stakeDiffOverflow is a genuine Dingo-side fault (a real mismatch, not
-// excluded) -- a human reviewer found the two were being conflated,
-// silently hiding a Dingo-side bug as if it were unremarkable Koios noise
-// (dingo#4319).
+// excluded). Conflating the two would silently hide a Dingo-side bug as if
+// it were unremarkable Koios noise.
 type stakeDiffFailureKind int
 
 const (
@@ -334,11 +331,10 @@ const stakeCheckConcurrency = 8
 // (nil if Koios has no row for this pool/epoch at all) -- the whole
 // decision CheckStakeDistribution's per-pool goroutine makes, pulled out so
 // a test can drive it directly with a synthetic hist instead of needing a
-// real Koios server (human review, Chris Guiney, dingo#4319: b11b7c63's
-// stakeDiffOverflow fix was tested only at stakeDiffLovelace directly,
-// never through the function that actually builds the StakeMismatch
-// clients see, so reverting this function's overflow case in place would
-// have left every existing test green).
+// real Koios server. Testing stakeDiffLovelace alone is not enough to prove
+// this function's own overflow-case handling: it never exercises the
+// function that actually builds the StakeMismatch clients see, so a
+// regression there could pass every existing test.
 func evaluatePoolStake(
 	poolBech32 string,
 	dingoStake uint64,

@@ -27,25 +27,24 @@ import (
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
 )
 
-// TestApplyResolvedEra is the regression a human reviewer found (Chris
-// Guiney, dingo#4319): CheckProtocolParams used to ignore a GetCurrentEra
-// error and fall back to ProtocolParamsFromNative's type-inferred era
-// guess, which cannot tell Shelley and Allegra apart. queryHardFork's
-// HardForkCurrentEraQuery case now returns errEpochNotResolved for a
-// pinned point no epoch row covers (bcddd518) instead of silently
-// answering era 0, so GetCurrentEra can newly fail -- and swallowing that
-// error in an Allegra epoch left the wrong guessed era in place, producing
-// a false pparams_era mismatch (CompareEpochProtocolParams/DetermineStatus)
+// TestApplyResolvedEra guards against CheckProtocolParams ignoring a
+// GetCurrentEra error and falling back to ProtocolParamsFromNative's
+// type-inferred era guess, which cannot tell Shelley and Allegra apart.
+// queryHardFork's HardForkCurrentEraQuery case returns errEpochNotResolved
+// for a pinned point no epoch row covers, instead of silently answering era
+// 0, so GetCurrentEra can fail -- and swallowing that error in an Allegra
+// epoch would leave the wrong guessed era in place, producing a false
+// pparams_era mismatch (CompareEpochProtocolParams/DetermineStatus)
 // reported as "ledger state diverged from Koios" for what was actually a
 // failed query, not a real divergence.
 //
 // Exercised directly against applyResolvedEra with plain values rather
-// than over a real localstatequery.Client: the earlier version of this
-// test drove the regression through a fake wire server and asserted on
-// exactly how many HardForkCurrentEraQuery calls occurred, which made it
-// depend on gouroboros's internal call count for GetCurrentProtocolParams
-// -- an implementation detail of a third-party client, not this package's
-// contract -- and that assumption did not hold on every CI runner.
+// than over a real localstatequery.Client: driving the regression through
+// a fake wire server and asserting on exactly how many HardForkCurrentEraQuery
+// calls occurred would make the test depend on gouroboros's internal call
+// count for GetCurrentProtocolParams -- an implementation detail of a
+// third-party client, not this package's contract -- and that assumption
+// does not hold on every CI runner.
 func TestApplyResolvedEra(t *testing.T) {
 	t.Run("era query error fails, does not fall back to a guess", func(t *testing.T) {
 		dingoParams := &koiosparity.DingoProtocolParams{
@@ -148,18 +147,17 @@ func TestStakeDiffLovelaceIsExact(t *testing.T) {
 	}
 }
 
-// TestStakeDiffLovelaceOverflowIsNotAKoiosFault is the regression a human
-// reviewer found (Chris Guiney, dingo#4319): stakeDiffLovelace's IsInt64
-// branch fires when both values parse but their difference is too large to
-// represent -- reachable not just from a corrupted koios string, but from
-// Dingo itself reporting an impossible TotalPoolStake (Cardano's entire max
-// supply fits comfortably inside int64's range, so this only happens if
-// dingoStake itself is implausible). Conflating this with the
-// unparseable-koios-string case labelled it a Koios fault and silently
-// dropped it from the mismatch count, hiding a genuine Dingo-side bug as if
-// it were unremarkable Koios noise. dingoStake is deliberately set well
-// beyond Cardano's real max supply (45 billion ADA / 4.5e16 lovelace) to
-// force the overflow while koiosStakeStr itself parses cleanly.
+// TestStakeDiffLovelaceOverflowIsNotAKoiosFault guards stakeDiffLovelace's
+// IsInt64 branch, which fires when both values parse but their difference
+// is too large to represent -- reachable not just from a corrupted koios
+// string, but from Dingo itself reporting an impossible TotalPoolStake
+// (Cardano's entire max supply fits comfortably inside int64's range, so
+// this only happens if dingoStake itself is implausible). Conflating this
+// with the unparseable-koios-string case would label it a Koios fault and
+// silently drop it from the mismatch count, hiding a genuine Dingo-side bug
+// as if it were unremarkable Koios noise. dingoStake is deliberately set
+// well beyond Cardano's real max supply (45 billion ADA / 4.5e16 lovelace)
+// to force the overflow while koiosStakeStr itself parses cleanly.
 func TestStakeDiffLovelaceOverflowIsNotAKoiosFault(t *testing.T) {
 	const implausibleDingoStake = math.MaxUint64
 
@@ -172,12 +170,11 @@ func TestStakeDiffLovelaceOverflowIsNotAKoiosFault(t *testing.T) {
 
 // TestEvaluatePoolStake pins CheckStakeDistribution's actual per-pool
 // decision -- the StakeMismatch (or nil) it returns for the pool's real
-// caller, not just stakeDiffLovelace's own return values in isolation
-// (human review, Chris Guiney, dingo#4319: TestStakeDiffLovelaceOverflowIsNotAKoiosFault
-// alone doesn't prove this function still builds the right StakeMismatch
-// for an overflowing dingo stake -- reverting its stakeDiffOverflow case in
-// place to the old "same as unparseable, KoiosFault true" shape would have
-// left that test green).
+// caller, not just stakeDiffLovelace's own return values in isolation.
+// TestStakeDiffLovelaceOverflowIsNotAKoiosFault alone does not prove this
+// function still builds the right StakeMismatch for an overflowing dingo
+// stake: reverting its stakeDiffOverflow case to the "same as unparseable,
+// KoiosFault true" shape would leave that test green.
 func TestEvaluatePoolStake(t *testing.T) {
 	t.Run("no koios row, zero dingo stake: both sides agree, no mismatch", func(t *testing.T) {
 		got := evaluatePoolStake("pool1new", 0, nil)
