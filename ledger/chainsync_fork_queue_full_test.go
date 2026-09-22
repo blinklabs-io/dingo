@@ -286,12 +286,16 @@ func TestTryResolveForkExtensionRestartsBlockfetchAfterQueueOverflow(
 	)
 	assert.Equal(
 		t,
-		1,
+		2,
 		requestCount,
 		"a queue-full fork-extension failure must still restart "+
 			"blockfetch for the headers it did manage to queue when "+
 			"nothing is currently fetching them -- otherwise the queue "+
-			"never drains and the node stops advancing permanently",
+			"never drains and the node stops advancing permanently. "+
+			"maxHeaders (10,000) is far deeper than blockfetchBatchSize "+
+			"(500), so the restart is also pipelining-eligible (issue "+
+			"#4651) and pre-queues a second request for the remaining "+
+			"headers instead of waiting for the first batch's round trip",
 	)
 	assert.NotNil(
 		t,

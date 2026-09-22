@@ -4431,8 +4431,13 @@ func (ls *LedgerState) restartQueuedBlockfetchAfterForkLocked(
 	if ls.chainsyncBlockfetchReadyChan != nil {
 		// The old protocol request cannot be cancelled. Keep late events from
 		// being admitted after the replacement generation is installed when
-		// the restart uses the same connection.
-		ls.blockfetchDiscardConnId = ls.activeBlockfetchConnId
+		// the restart uses the same connection. A pre-queued "next" request
+		// (see nextBlockfetchRequest) shares this same connection and is
+		// equally abandoned by this restart, so it adds a second outstanding
+		// request the discard latch must absorb before accepting the
+		// replacement batch's events.
+		ls.markBlockfetchRequestForDiscardLocked(ls.activeBlockfetchConnId)
+		ls.discardNextBlockfetchRequestLocked()
 		if ls.chainsyncBlockfetchTimeoutTimer != nil {
 			ls.chainsyncBlockfetchTimeoutTimer.Stop()
 			ls.chainsyncBlockfetchTimeoutTimer = nil
@@ -4912,7 +4917,14 @@ func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 	ls.blockfetchBatchChainGeneration = ls.chainRollbackGeneration.Load()
 	ls.activeBlockfetchStart = time.Now()
 	ls.firstBlockReceived = false
-	headerStart, headerEnd := ls.chain.HeaderRange(blockfetchBatchSize)
+	// claimedHeaders is how many queued headers this dispatch covers --
+	// HeaderRangeAfter(0, ...) is equivalent to HeaderRange(...) for start/end
+	// but also reports the count, which the pipelining prefetch below needs
+	// to skip past this batch's own claimed range.
+	headerStart, headerEnd, claimedHeaders := ls.chain.HeaderRangeAfter(
+		0,
+		blockfetchBatchSize,
+	)
 	// Tag the batch with the rollback generation current at request time.
 	// The blocks it delivers are only valid for the chain segment these
 	// queued headers describe; a rollback that abandons that segment
@@ -4936,6 +4948,7 @@ func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 		if connIdKey(ls.blockfetchDiscardConnId) != "" &&
 			sameConnectionId(ls.blockfetchDiscardConnId, connId) {
 			ls.blockfetchDiscardConnId = ouroboros.ConnectionId{}
+			ls.blockfetchDiscardBatchesRemaining = 0
 		}
 		ls.endBlockfetchRequestLocked(connId, primaryRequestDone)
 		if ls.blockfetchPrimaryRequestGeneration == primaryRequestGeneration {
@@ -5009,6 +5022,23 @@ func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 		}
 	}
 	nearTip := ls.chain.HeaderCount() <= shadowBlockfetchMaxHeaders
+	if !nearTip {
+		// Deep catch-up: pre-queue a second range request on the same
+		// connection for the headers immediately after this batch's own
+		// claimed range, so the peer always has a next request in hand and
+		// the pipeline never idles for a full round-trip at a batch
+		// boundary (issue #4651). Mutually exclusive with the near-tip
+		// shadow-peer dispatch below by construction, both gated on the same
+		// nearTip value: shadow racing helps at tip, where the queue is too
+		// short to have a "next" range to pre-fetch at all; pipelining helps
+		// during bulk catch-up, where a shadow peer's duplicate-decode cost
+		// buys nothing.
+		ls.startQueuedBlockfetchPrefetchLocked(
+			connId,
+			claimedHeaders,
+			batchReadyChan,
+		)
+	}
 	if nearTip {
 		gatePath := ""
 		gateCutoff := cutoffLabel
@@ -7414,10 +7444,15 @@ func (ls *LedgerState) waitForBlockfetchRequestLockedWithSignal(
 				return fmt.Errorf("blockfetch request canceled: %w", err)
 			}
 		}
-		requestDone, ok := ls.blockfetchRequestsInFlight[key]
-		if !ok {
+		entries, ok := ls.blockfetchRequestsInFlight[key]
+		if !ok || len(entries) == 0 {
 			return nil
 		}
+		// Wait for the oldest outstanding request first; the loop re-checks
+		// after it drains, so a second request pipelined onto the same
+		// connection (see nextBlockfetchRequest) is waited for in turn
+		// before the connection is considered free.
+		requestDone := entries[0]
 		ls.chainsyncBlockfetchMutex.Unlock()
 		if waitStarted != nil {
 			close(waitStarted)
@@ -7454,45 +7489,76 @@ func (ls *LedgerState) waitForBlockfetchRequestLockedWithSignal(
 }
 
 // beginBlockfetchRequestLocked records a request whose callbacks are still
-// allowed to arrive. The caller owns chainsyncBlockfetchMutex.
+// allowed to arrive, appending it to any other request already outstanding on
+// the same connection. Pipelining can leave two requests outstanding on one
+// connection at once (the active batch and one pre-queued "next" request --
+// see nextBlockfetchRequest), and gouroboros delivers responses for a
+// connection strictly FIFO, so appending here and popping from the front in
+// completeBlockfetchRequestLocked keeps the slice in delivery order. The
+// caller owns chainsyncBlockfetchMutex.
 func (ls *LedgerState) beginBlockfetchRequestLocked(
 	connId ouroboros.ConnectionId,
 ) chan struct{} {
 	if ls.blockfetchRequestsInFlight == nil {
-		ls.blockfetchRequestsInFlight = make(map[string]chan struct{})
+		ls.blockfetchRequestsInFlight = make(map[string][]chan struct{})
 	}
 	done := make(chan struct{})
-	ls.blockfetchRequestsInFlight[connIdKey(connId)] = done
+	key := connIdKey(connId)
+	ls.blockfetchRequestsInFlight[key] = append(
+		ls.blockfetchRequestsInFlight[key],
+		done,
+	)
 	return done
 }
 
-// endBlockfetchRequestLocked releases a request's connection for reuse. The
-// caller owns chainsyncBlockfetchMutex.
+// endBlockfetchRequestLocked releases a request that never actually reached
+// the peer (a synchronous dispatch failure). It removes done by identity
+// rather than assuming it is at the front of connId's queue: with pipelining,
+// a second request can already be outstanding on the same connection when
+// this one's own dispatch fails. The caller owns chainsyncBlockfetchMutex.
 func (ls *LedgerState) endBlockfetchRequestLocked(
 	connId ouroboros.ConnectionId,
 	done chan struct{},
 ) {
 	key := connIdKey(connId)
-	if current, ok := ls.blockfetchRequestsInFlight[key]; ok &&
-		current == done {
+	entries := ls.blockfetchRequestsInFlight[key]
+	for i, entry := range entries {
+		if entry == done {
+			entries = slices.Delete(entries, i, i+1)
+			close(done)
+			break
+		}
+	}
+	if len(entries) == 0 {
 		delete(ls.blockfetchRequestsInFlight, key)
-		close(done)
+	} else {
+		ls.blockfetchRequestsInFlight[key] = entries
 	}
 }
 
-// completeBlockfetchRequestLocked releases a request after its BatchDone
-// event has been handled. The dispatch returns long before the EventBus
+// completeBlockfetchRequestLocked releases the oldest outstanding request on
+// connId, after its BatchDone event has been handled or once the ledger has
+// force-abandoned it. The dispatch returns long before the EventBus
 // subscriber drains that event; keeping the request in flight until then
 // prevents a same-connection restart from admitting old queued events.
-// The caller owns chainsyncBlockfetchMutex.
+// gouroboros delivers every response for one connection strictly in the
+// order its requests were sent (see blockFetchKey's doc comment in
+// ouroboros/blockfetch.go), so the front of the slice is always the request
+// resolving now. The caller owns chainsyncBlockfetchMutex.
 func (ls *LedgerState) completeBlockfetchRequestLocked(
 	connId ouroboros.ConnectionId,
 ) {
 	key := connIdKey(connId)
-	if done, ok := ls.blockfetchRequestsInFlight[key]; ok {
-		delete(ls.blockfetchRequestsInFlight, key)
-		close(done)
+	entries := ls.blockfetchRequestsInFlight[key]
+	if len(entries) == 0 {
+		return
 	}
+	close(entries[0])
+	if len(entries) == 1 {
+		delete(ls.blockfetchRequestsInFlight, key)
+		return
+	}
+	ls.blockfetchRequestsInFlight[key] = entries[1:]
 }
 
 func (ls *LedgerState) resetBlockfetchInFlightTimeoutsLocked() {
@@ -7532,6 +7598,16 @@ func (ls *LedgerState) blockfetchRequestRangeCleanup() {
 	// completion event to release the other reservations, so close both here.
 	ls.completeBlockfetchRequestLocked(ls.activeBlockfetchConnId)
 	ls.completeBlockfetchRequestLocked(ls.shadowBlockfetchConnId)
+	// A pre-queued "next" request (see nextBlockfetchRequest) is abandoned by
+	// every path that reaches this cleanup, the same as the active and
+	// shadow requests above: there is no batch left for it to be promoted
+	// into. It shares activeBlockfetchConnId's connection, so
+	// completeBlockfetchRequestLocked pops it as the connection's next
+	// outstanding entry.
+	if ls.nextBlockfetchRequest != nil {
+		ls.completeBlockfetchRequestLocked(ls.nextBlockfetchRequest.connId)
+		ls.nextBlockfetchRequest = nil
+	}
 	// Stop the timeout timer if running and invalidate any pending callbacks
 	if ls.chainsyncBlockfetchTimeoutTimer != nil {
 		ls.chainsyncBlockfetchTimeoutTimer.Stop()
@@ -7694,8 +7770,15 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(
 	// purpose of dispatching a shadow at all.
 	if connIdKey(ls.blockfetchDiscardConnId) != "" &&
 		sameConnectionId(e.ConnectionId, ls.blockfetchDiscardConnId) {
-		// BatchDone is the ordering barrier for the abandoned request.
-		ls.blockfetchDiscardConnId = ouroboros.ConnectionId{}
+		// BatchDone is the ordering barrier for the abandoned request. Up to
+		// two requests (the active batch plus one pre-queued "next" request)
+		// can be abandoned on the same connection at once, so this only
+		// resumes normal acceptance once every one of them has been drained.
+		ls.blockfetchDiscardBatchesRemaining--
+		if ls.blockfetchDiscardBatchesRemaining <= 0 {
+			ls.blockfetchDiscardConnId = ouroboros.ConnectionId{}
+			ls.blockfetchDiscardBatchesRemaining = 0
+		}
 		return nil
 	}
 	if ls.chainsyncBlockfetchReadyChan == nil {
@@ -7846,6 +7929,15 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(
 		if nextConnId, ok := ls.nextBufferedHeaderConnId(); ok {
 			ls.replayBufferedHeadersAsync(nextConnId)
 		}
+		return nil
+	}
+	// A pre-queued "next" request (see nextBlockfetchRequest) can only be
+	// promoted once the batch that just completed actually advanced the
+	// chain: appliedBlockCount == 0 here means the active batch's own
+	// headers are still queued ahead of whatever "next" claims, and
+	// promoting it would strand the chain on a gap it can never fill, since
+	// chain insertion requires blocks in queued order.
+	if appliedBlockCount > 0 && ls.tryPromoteQueuedBlockfetchLocked() {
 		return nil
 	}
 	// Clean up from blockfetch batch

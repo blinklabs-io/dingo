@@ -167,6 +167,66 @@ func TestStartQueuedBlockfetchReleasesMutexAroundRequest(t *testing.T) {
 	ls.chainsyncBlockfetchMutex.Unlock()
 }
 
+// TestWaitForBlockfetchRequestLockedWithSignalWaitsForBothPipelinedRequests
+// pins the blockfetchRequestsInFlight generalization from a single channel to
+// a slice (issue #4651): with pipelining, two requests can be outstanding on
+// the same connection at once (the active batch and one pre-queued "next"
+// request), and gouroboros resolves them strictly FIFO, so the wait must
+// drain both, in order, not return after only the first.
+func TestWaitForBlockfetchRequestLockedWithSignalWaitsForBothPipelinedRequests(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	connId := testChainsyncConnId(6116, 3001)
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.beginBlockfetchRequestLocked(connId)
+	ls.beginBlockfetchRequestLocked(connId)
+	ls.chainsyncBlockfetchMutex.Unlock()
+
+	waitDone := make(chan error, 1)
+	go func() {
+		ls.chainsyncBlockfetchMutex.Lock()
+		defer ls.chainsyncBlockfetchMutex.Unlock()
+		waitDone <- ls.waitForBlockfetchRequestLockedWithSignal(connId, nil)
+	}()
+
+	testutil.RequireNoReceive(
+		t,
+		waitDone,
+		50*time.Millisecond,
+		"wait must not return while either pipelined request is still outstanding",
+	)
+
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.completeBlockfetchRequestLocked(connId) // ends the first (FIFO front)
+	ls.chainsyncBlockfetchMutex.Unlock()
+
+	testutil.RequireNoReceive(
+		t,
+		waitDone,
+		50*time.Millisecond,
+		"wait must not return after only the first of two pipelined requests drains",
+	)
+
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.completeBlockfetchRequestLocked(connId) // ends the second
+	ls.chainsyncBlockfetchMutex.Unlock()
+
+	testutil.RequireReceive(
+		t,
+		waitDone,
+		testutil.AsyncWait,
+		"wait must return once both pipelined requests have drained",
+	)
+}
+
 // TestStartQueuedBlockfetchCancelsPriorRequestWaitDuringShutdown verifies
 // that a chainsync subscriber does not remain in the prior-request drain
 // while the node is shutting down. EventBus.Close waits for an in-flight
@@ -202,8 +262,8 @@ func TestStartQueuedBlockfetchCancelsPriorRequestWaitDuringShutdown(
 				return 0, nil
 			},
 		},
-		blockfetchRequestsInFlight: map[string]chan struct{}{
-			connIdKey(connId): make(chan struct{}),
+		blockfetchRequestsInFlight: map[string][]chan struct{}{
+			connIdKey(connId): {make(chan struct{})},
 		},
 	}
 
@@ -266,8 +326,8 @@ func TestStartQueuedBlockfetchDrainsPriorRequestBeforeConnectionReuse(
 				return 0, nil
 			},
 		},
-		blockfetchRequestsInFlight: map[string]chan struct{}{
-			connIdKey(connId): requestDone,
+		blockfetchRequestsInFlight: map[string][]chan struct{}{
+			connIdKey(connId): {requestDone},
 		},
 	}
 
@@ -1193,7 +1253,7 @@ func TestStartQueuedBlockfetchSkipsDispatchWhenCanceledBeforeDispatch(
 				return 0, nil
 			},
 		},
-		blockfetchRequestsInFlight: map[string]chan struct{}{},
+		blockfetchRequestsInFlight: map[string][]chan struct{}{},
 	}
 
 	// Zero connId: connIdKey is "", so the drain returns nil without

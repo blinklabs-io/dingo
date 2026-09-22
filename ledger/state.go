@@ -1088,8 +1088,15 @@ type LedgerState struct {
 	// blockfetchBatchRollbackGeneration is blockfetchRollbackGeneration as
 	// observed when the current batch was requested. Guarded by
 	// chainsyncBlockfetchMutex, like the rest of the per-batch state.
-	blockfetchBatchRollbackGeneration   uint64
-	blockfetchRequestsInFlight          map[string]chan struct{}
+	blockfetchBatchRollbackGeneration uint64
+	// blockfetchRequestsInFlight tracks, per connection key (connIdKey), every
+	// dispatched request whose terminal event has not yet been handled. A
+	// slice rather than a single channel: pipelining can leave two requests
+	// outstanding on the same connection at once (the active batch and one
+	// pre-queued "next" request -- see nextBlockfetchRequest), and gouroboros
+	// delivers responses for one connection strictly FIFO, so the entry at
+	// index 0 is always the one whose terminal event resolves next.
+	blockfetchRequestsInFlight          map[string][]chan struct{}
 	blockfetchShadowRequestsInFlight    map[string]struct{}
 	blockfetchInFlightTimeoutGeneration uint64
 	blockfetchInFlightTimeoutCount      uint8
@@ -1118,8 +1125,28 @@ type LedgerState struct {
 	// chainsyncBlockfetchMutex, like the rest of the per-batch state.
 	blockfetchBatchChainGeneration uint64
 	// blockfetchDiscardConnId identifies an abandoned request whose late
-	// blocks and BatchDone must be ignored until the replacement request starts.
-	blockfetchDiscardConnId ouroboros.ConnectionId
+	// blocks and BatchDone must be ignored until the replacement request
+	// starts. blockfetchDiscardBatchesRemaining counts how many outstanding
+	// requests on that connection are abandoned: up to two now that a
+	// pre-queued "next" request (see nextBlockfetchRequest) can be abandoned
+	// alongside the active batch at the same teardown. Each matching
+	// BatchDone decrements it; blockfetchDiscardConnId is only cleared once
+	// it reaches zero, so the second abandoned request's late arrival is not
+	// mistaken for the replacement batch's own completion.
+	blockfetchDiscardConnId           ouroboros.ConnectionId
+	blockfetchDiscardBatchesRemaining int
+	// nextBlockfetchRequest holds a blockfetch range request already
+	// dispatched to a peer for the header range immediately after the active
+	// batch's own claimed range, but not yet promoted to active. It lets the
+	// peer start streaming the next batch's blocks as soon as it finishes the
+	// current one instead of waiting for a fresh round-trip once BatchDone
+	// arrives. nil when nothing is pre-queued (near tip, where the shadow
+	// peer strategy is used instead -- see shadowBlockfetchMaxHeaders).
+	// Guarded by chainsyncBlockfetchMutex, like the rest of the per-batch
+	// state. Every rollback/fork/timeout/connection-switch path discards it
+	// unconditionally rather than trying to preserve or migrate it: losing
+	// one pre-fetched batch's head start costs one wasted request.
+	nextBlockfetchRequest *queuedBlockfetchRequest
 	// chainRollbackGeneration identifies primary-chain rollback attempts that
 	// pass undo validation. It is bumped before the chain is changed, so a
 	// reader that has observed a rollback's effect on the chain always observes

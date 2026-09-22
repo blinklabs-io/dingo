@@ -1780,6 +1780,28 @@ paths, where the point is to report before the goroutine unwinds.
   clears the header queue and requests a chainsync re-intersect. A transport
   failure instead falls through to the ordinary continuation, which
   re-dispatches the still-queued range on the next blockfetch connection.
+- During deep catch-up (queued headers past `shadowBlockfetchMaxHeaders`, the
+  same threshold that gates the near-tip shadow-peer dispatch below and is
+  mutually exclusive with it), `startQueuedBlockfetchLockedWithWaitSignal`
+  also pre-queues a second `RequestRange` call on the same connection for the
+  header window immediately after the active batch's own claimed range
+  (`startQueuedBlockfetchPrefetchLocked`), tracked in
+  `LedgerState.nextBlockfetchRequest`. gouroboros resolves one connection's
+  requests strictly FIFO, so the batch that has not yet produced its
+  `RangeDoneFunc` terminal event is always unambiguously "the one currently
+  streaming" — no request-ID demultiplexing is needed. When the active
+  batch's `BatchDone` arrives having applied at least one block,
+  `tryPromoteQueuedBlockfetchLocked` promotes the pre-queued request to
+  active (scoring its peer latency from its original dispatch time, not the
+  promotion time) and immediately tops the pipeline back up to depth 1,
+  instead of waiting for a fresh round-trip. This is what closed issue #4651:
+  before it, a batch boundary always paid a full peer round-trip with the
+  connection idle. A rollback/fork/timeout/connection-switch path discards a
+  pre-queued request unconditionally rather than trying to preserve or
+  migrate it. `LedgerState.blockfetchRequestsInFlight` (per connection key) and
+  the `blockfetchDiscardConnId` late-event latch are therefore both
+  generalized to handle up to two outstanding/abandoned requests on the same
+  connection at once instead of one.
 - The blast radius of such a stall is not local. `LedgerState.handleConnectionClosedEvent`
   takes `chainsyncMutex`, so a stall there stops `ledger.conn_closed` draining;
   the `node.go` handler translating `connmanager.conn_closed` into

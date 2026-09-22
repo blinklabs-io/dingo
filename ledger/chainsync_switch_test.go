@@ -2449,9 +2449,9 @@ func TestHandleBlockfetchTimeoutLocked_RetriesQueuedRangeUsingActivePeer(
 		chain:                  testChain,
 		activeBlockfetchConnId: connId1,
 		shadowBlockfetchConnId: shadowConnId,
-		blockfetchRequestsInFlight: map[string]chan struct{}{
-			connIdKey(connId1):      make(chan struct{}),
-			connIdKey(shadowConnId): make(chan struct{}),
+		blockfetchRequestsInFlight: map[string][]chan struct{}{
+			connIdKey(connId1):      {make(chan struct{})},
+			connIdKey(shadowConnId): {make(chan struct{})},
 		},
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -2491,8 +2491,8 @@ func TestHandleConnectionClosedReleasesRequestWithoutBatchDone(t *testing.T) {
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
-		blockfetchRequestsInFlight: map[string]chan struct{}{
-			connIdKey(connId): done,
+		blockfetchRequestsInFlight: map[string][]chan struct{}{
+			connIdKey(connId): {done},
 		},
 	}
 
