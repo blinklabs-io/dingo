@@ -146,21 +146,55 @@ const (
 	// the time actually available to notice a stuck server. Every value
 	// here is chosen to be clearly shorter than koiosRequestTimeout so a
 	// phase-specific failure attributes cleanly instead of surfacing as an
-	// undifferentiated overall timeout.
-	//
-	// This package originally paired these with a 60s overall client
-	// timeout (koiosClientTimeout, since removed): koiosRequestTimeout
-	// replaced it at 20s after live investigation found individual requests
-	// stalling for nearly the full 60s (see koiosRequestTimeout's own doc
-	// comment). koiosResponseHeaderTimeout is lowered from its original 30s
-	// to stay under that tighter 20s bound -- at 30s it could never fire
-	// before koiosRequestTimeout already had, making it dead weight (human
-	// review, Chris Guiney, dingo#4319).
+	// undifferentiated overall timeout. koiosResponseHeaderTimeout in
+	// particular must stay below koiosRequestTimeout, or it could never
+	// fire before koiosRequestTimeout already had, making it dead weight.
 	koiosDialTimeout           = 10 * time.Second
 	koiosDialKeepAlive         = 30 * time.Second
 	koiosTLSHandshakeTimeout   = 10 * time.Second
 	koiosResponseHeaderTimeout = 15 * time.Second
 	koiosExpectContinueTimeout = 1 * time.Second
+
+	// koiosIdleConnTimeout bounds how long an idle keep-alive connection
+	// stays in the client's pool before Go proactively closes it. Shorter
+	// than http.DefaultTransport's 90s default, on the theory that a stale
+	// server/CDN-closed keep-alive connection reused anyway (write
+	// succeeds, read then hangs) contributes to the stalls
+	// koiosRequestTimeout's own doc comment describes. Confirmed live that
+	// this alone did not eliminate them, so koiosRequestTimeout was also
+	// shortened rather than relying on this by itself -- kept anyway since
+	// it cannot hurt and may reduce how often the stall condition is hit in
+	// the first place.
+	koiosIdleConnTimeout = 30 * time.Second
+
+	// koiosRequestTimeout bounds a single HTTP request/response round
+	// trip. Confirmed live against a Koios mirror that individual requests
+	// occasionally stalled for almost exactly 60s (this client's prior
+	// overall timeout) before an immediate retry succeeded in well under a
+	// second -- observed on /tx_info and /pool_history calls, including
+	// under CheckStakeDistribution's own bounded concurrency, so this is
+	// not purely a sequential-reuse artifact and may also be transient
+	// overload on a community-hosted mirror under concurrent load. Every
+	// real (non-stalled) call measured during this investigation completed
+	// in under 2s, so 20s leaves a wide margin above normal latency while
+	// cutting the wall-clock cost of a stall from 60s to 20s per
+	// occurrence, and (with koiosMaxRetries=3) the pathological worst case
+	// from minutes to well under a minute.
+	//
+	// Applies to every KoiosClient, not only node-parity's live
+	// per-epoch checking that this investigation was run against:
+	// observer.go's in-process Observer and fetch.go's koios-parity fetch
+	// both construct their client through this same NewKoiosClient, and
+	// each one makes is still a single bounded, page-sized Koios API call
+	// (koiosPageSize) -- a long-running bulk fetch is many such calls over
+	// time, not one call carrying a larger payload, so it has no distinct
+	// need for a longer per-request bound.
+	// A request that genuinely stalls past 20s is retried as a transport
+	// error (get's own doc comment) up to koiosMaxRetries times regardless
+	// of caller, so this tightening only shortens how long a stall is
+	// tolerated before that retry fires -- it does not lower the ceiling
+	// on how long a legitimately slow bulk operation may run in total.
+	koiosRequestTimeout = 20 * time.Second
 )
 
 // koiosBaseURLs maps network name to Koios v1 base URL.
@@ -390,32 +424,6 @@ func validateKoiosNetwork(network string) error {
 // another deployment, so applying it there would throttle against a limit that
 // does not exist. The per-request retry and timeout handling is unchanged, so a
 // host that does rate-limit still backs off correctly on 429.
-// koiosIdleConnTimeout bounds how long an idle keep-alive connection stays
-// in the client's pool before Go proactively closes it. Shorter than
-// http.DefaultTransport's 90s default, on the theory that a stale
-// server/CDN-closed keep-alive connection reused anyway (write succeeds,
-// read then hangs) contributes to the stalls koiosRequestTimeout's doc
-// comment describes. Confirmed live that this alone did not eliminate
-// them, so koiosRequestTimeout was also shortened rather than relying on
-// this by itself -- kept anyway since it cannot hurt and may reduce how
-// often the stall condition is hit in the first place.
-const koiosIdleConnTimeout = 30 * time.Second
-
-// koiosRequestTimeout bounds a single HTTP request/response round trip.
-// Lowered from 60s: confirmed live against a Koios mirror that individual
-// requests occasionally stalled for almost exactly 60s (this client's old
-// Timeout value) before an immediate retry succeeded in well under a
-// second -- observed on /tx_info and /pool_history calls, including under
-// CheckStakeDistribution's own bounded concurrency, so this is not purely
-// a sequential-reuse artifact and may also be transient overload on a
-// community-hosted mirror under concurrent load. Every real (non-stalled)
-// call measured during this investigation completed in under 2s, so 20s
-// leaves a wide margin above normal latency while cutting the wall-clock
-// cost of a stall from 60s to 20s per occurrence, and (with
-// koiosMaxRetries=3) the pathological worst case from minutes to well
-// under a minute.
-const koiosRequestTimeout = 20 * time.Second
-
 func NewKoiosClient(
 	network, apiKey, baseURL string,
 	allowInsecureHTTP bool,
