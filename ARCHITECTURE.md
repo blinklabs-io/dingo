@@ -597,7 +597,20 @@ block at the target is re-applied; when no such ancestor exists it fails with
 (issue #3678). `enforceDurableTipFloor` is the path that produces such a
 target.
 
-`rollbackWithResync` reloads `epochCache`, `currentEra`, `currentPParams` and
+At-tip transaction and deferred-header recovery may call
+`rollbackWithOptions(..., repairSameTip=true)` when a failed block left
+metadata mutations above the current durable tip. That first repair restores
+spent UTxOs and removes speculative rows without publishing a local-ledger
+rollback event. Only a recovery that completes its rewind and metadata
+rollback consumes that repair; a trust-boundary decline or other early exit
+leaves it available for the first attempt that changes state. Repeated
+delivery of the same failure, including repeated replay-holding cycles at an
+unchanged tip, reuses the repaired same-tip state, while deeper scheduled
+rewinds perform the normal full rollback. Replay-holding, deterministic
+transaction, and header-validation recovery use the same option so the repair
+rule stays consistent across all recovery entry points.
+
+`rollbackWithOptions` reloads `epochCache`, `currentEra`, `currentPParams` and
 the synthetic-PlutusV2-cost-model marker from the database *after* the
 metadata transaction that truncates it has already committed. A failure to
 reload any of them (a `GetEpochs` error, an unresolvable era ID, a
@@ -605,14 +618,14 @@ reload any of them (a `GetEpochs` error, an unresolvable era ID, a
 failed marker read) cannot be treated as "nothing happened": the truncation
 is already durable, so leaving these caches at their pre-rollback values
 would validate later blocks against state the database no longer has.
-`rollbackWithResync` therefore invokes `LedgerStateConfig.FatalErrorFunc`
+`rollbackWithOptions` therefore invokes `LedgerStateConfig.FatalErrorFunc`
 directly for this class of failure — not merely returning an error and
 leaving escalation to whichever caller is on the stack — and reports it as a
 `rollbackCommittedError`, the same identity `enforceDurableTipFloor`'s own
 post-commit failure already uses. The escalation still happens when that
 tip-floor check fails in the same call, since one failing database read
 usually fails both. Calling
-`FatalErrorFunc` unconditionally from inside `rollbackWithResync` is what
+`FatalErrorFunc` unconditionally from inside `rollbackWithOptions` is what
 makes the guarantee caller-independent: every entry point (peer-driven
 rollback, primary-chain reconciliation, tip-floor enforcement) drives the
 same supervised restart, which reloads these caches fresh from the database
@@ -719,23 +732,45 @@ to do real work should hand off to their own goroutine, which
 `event/doc.go` already requires of every subscriber callback.
 
 The BlockFetch server path mirrors the retrieval flow for downstream peers:
-when a peer requests a range, `ouroboros/blockfetch.go` validates the bounds,
-opens chain iterators at the requested start and end points to validate both
-endpoints against the serving chain, then sends `StartBatch`. Checking only
+when a peer requests a range, `ouroboros/blockfetch.go` opens chain iterators
+at the requested start and end points to validate both endpoints against the
+serving chain, then sends `StartBatch`. Checking only
 the end slot let a peer name an end point the server does not hold and receive
 a slot-bounded prefix of the server's own chain in its place. An end point
 that does not resolve takes the same
 `NoBlocks` and stuck-peer accounting as the other invalid-range rejections.
-Once a batch starts, blocks are streamed through the exact requested end slot
-and hash; earlier blocks at the same slot, including Byron epoch-boundary
-blocks, do not complete the range. Iterator exhaustion, rollback, or passing
-the end slot after a concurrent chain change ends the batch cleanly with
-`BatchDone`, so the peer can request again against the current chain. The
-range sender is asynchronous so the mini-protocol callback can
-return promptly, but it applies backpressure between messages by waiting for
-the underlying gouroboros protocol send queue to drain. This keeps large Leios
-catch-up ranges from filling the mux pending-message queue and turning a slow
-consumer into a connection-level protocol violation.
+The requested slot span itself is not bounded up front — on a sparse or
+low-active-slot-coefficient network, a valid run of consecutive blocks can
+span far more slots than mainnet's stability window (#4354) — instead, the
+range's block count (both endpoints' block numbers are already resolved by
+the validation above) is checked against
+`maxBlockFetchBlocksForSecurityParam`, scaled to the serving network's own
+security parameter K rather than fixed: an honest peer's candidate fragment,
+and so a legitimate range, scales with K, not with any one implementation's
+batch size, and `blockfetchMaxBlocksFloor` keeps a small- or unconfigured-K
+network from capping below what this implementation's own chainsync client
+batches. A range whose block count exceeds this bound takes the same
+`NoBlocks` and stuck-peer accounting as the other invalid-range rejections,
+so an honest peer gets a signal it can act on instead of a transport reset it
+would only repeat by retrying the identical range. `blockfetchServerSendBatch`
+still enforces the same bound again while streaming, as a backstop for cases
+the up-front check cannot cover — a concurrent rollback after validation, or
+a Byron-EBB block-number tie undercounting the range — closing the
+connection if it is ever reached, since `StartBatch` has by then already
+committed the protocol exchange. Once a batch starts, blocks are streamed
+through the exact requested end slot and hash; earlier blocks at the same
+slot, including Byron epoch-boundary blocks, do not complete the range.
+Iterator exhaustion or passing the end slot after a concurrent chain change
+ends the batch cleanly with `BatchDone` so the peer can request again against
+the current chain; a rollback does the same for this server's own send loop,
+though a `BatchDone` with blocks still outstanding is itself a protocol
+failure on a `cardano-node` peer's receiving end, which is a pre-existing
+property of blockfetch's own state machine, not something this path
+introduces. The range sender is asynchronous so the mini-protocol callback
+can return promptly, but it applies backpressure between messages by waiting
+for the underlying gouroboros protocol send queue to drain. This keeps large
+Leios catch-up ranges from filling the mux pending-message queue and turning a
+slow consumer into a connection-level protocol violation.
 
 On the client path, BlockFetch events carry fully decoded blocks. The ledger
 subscriber therefore buffers one eight-block chain-store commit batch; when it
@@ -4183,7 +4218,13 @@ competing chain; ordinary blockfetch completion or connection handoff retains
 ownership of that queue. Fork resolution reconstructs the peer's fetched
 header path with `findPeerForkPath`, locates the exact common ancestor, and
 counts both the peer and primary-chain blocks in
-`(intersectionSlot, intersectionSlot + genesisWindow]`. Greater density wins;
+`(intersectionSlot, intersectionSlot + genesisWindow]`. A `database.BlockByHash`
+hit is accepted as that ancestor only when its slot is at or before the local
+tip snapshot taken at fork-resolution entry; a hit past the tip (which could
+occur if a block row were left stranded in the persistent hash index by an
+incomplete rollback) is treated as unresolved so the peer-header-history walk
+keeps looking, rather than letting recovery roll back toward a point beyond
+where the node actually is. Greater density wins;
 equal density falls back to the normal Praos length/select-view comparison.
 Node composition injects an atomic Genesis-mode/window query from
 `ChainSelector` into ledger, so the same resolver automatically returns to
@@ -12438,7 +12479,15 @@ in a read-only transaction; a separate short write transaction re-reads the
 owning `RewardSnapshot` and persists only if its captured/boundary slots and
 content still match, no rollback generation spanning performance blocks, ADA
 pots, protocol state, and account certificate history changed, and no non-empty
-result was concurrently persisted or applied. Completion is inferred from the
+result was concurrently persisted or applied. If retention pruned the owning
+snapshot's per-credential `reward_stake_input` rows, the read phase reconstructs
+and reconciles them without writing, then carries them in the computed
+`stakeRewardApplication`; only the guarded short write phase persists those
+rows with the outputs and ADA-pot update. The synchronous boundary path saves
+the same reconstructed rows atomically in its existing rollover transaction.
+Equal-stake reconciliation uses pool hash, credential tag, and staking key as a
+total tie-break, so metadata iteration order cannot change the recovered reward
+basis. Completion is inferred from the
 persisted `reward_ada_pots.rewards` total plus the output-row set rather than an
 explicit marker, so an epoch whose total reward pot is legitimately zero carries
 no distinct completion sentinel and is re-derived idempotently by the precompute

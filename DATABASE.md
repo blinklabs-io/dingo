@@ -323,6 +323,14 @@ statement is naturally idempotent on replay, so the runner gained matching
 duplicate-column/duplicate-index guards for `ADD COLUMN`, confirming absence
 against the live schema before swallowing the error.
 
+Migration `v21` (`asset-amount-fingerprint-index-drop`, integer version 21)
+drops `idx_asset_amount` and `idx_asset_fingerprint`, carrying no column drop:
+`asset.amount` and `asset.fingerprint` are genuinely read and returned via the
+blockfrost/mesh API adapters, only their indexes back no predicate (dingo#4598).
+`DROP INDEX IF EXISTS` is natively idempotent on SQLite and PostgreSQL replay,
+so only MySQL's translated `DROP INDEX <name> ON <table>` form reaches the
+runner's existing, already-generic "already applied" guard.
+
 The upgrade runner owns a `schema_migrations` row per contiguous integer version with
 `version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`, `dirty`,
 Unix-millisecond `started_at`/`updated_at`, and nullable `completed_at`.
@@ -813,7 +821,7 @@ post-Mithril-boundary strictness (see below).
 | `utxo` | `id`, `transaction_id`, `collateral_return_for_tx_id`, `tx_id`, `output_idx`, `payment_key`, `credential_tag`, `staking_key`, `datum_hash`, `spent_at_tx_id`, `referenced_by_tx_id`, `collateral_by_tx_id`, `added_slot`, `deleted_slot`, `amount`, `payment_script` | PK `id`; unique `(tx_id, output_idx)`; unique `collateral_return_for_tx_id`; indexes `transaction_id`, `payment_key`, `staking_key`, spend/reference/collateral tx hashes, and `added_slot`; composites `idx_utxo_deleted_staking_amount` (`deleted_slot`, `credential_tag`, `staking_key`, `amount`), `idx_utxo_staking_deleted_amount` (`credential_tag`, `staking_key`, `deleted_slot`, `amount`), and `idx_utxo_deleted_payment_script` (`deleted_slot`, `payment_script`, `amount`) | Produced outputs use `transaction_id -> transaction.id`. Collateral returns use `collateral_return_for_tx_id -> transaction.id`. Inputs/reference/collateral joins are logical: `spent_at_tx_id`, `referenced_by_tx_id`, and `collateral_by_tx_id` store transaction hashes. `credential_tag`: 0 key hash, 1 script hash for stake-bearing outputs. The `(credential_tag, staking_key, deleted_slot, amount)` composite backs stake-credential live UTxO sums such as DRep voting-power tallying. `payment_script` is a bool set at index time from the output address type (true when the payment credential is a script hash); the `(deleted_slot, payment_script, amount)` composite backs the network script-locked supply sum (blockfrost `/network` `supply.locked`). It is derived only at write time, so a database synced before this column existed reports script-locked supply only for UTxOs created after the upgrade until it is rebuilt from chain data. |
 | `utxo_collateral_input` | `utxo_id`, `transaction_hash` | PK `(utxo_id, transaction_hash)`; index `transaction_hash` | Authoritative many-to-many collateral relationship. Migration `v14` backfills one edge from each non-NULL legacy `utxo.collateral_by_tx_id`; apply and rollback maintain edges independently. |
 | `utxo_pointer` | `utxo_id`, `ptr_slot`, `ptr_tx_index`, `ptr_cert_index` | PK `utxo_id`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_pointer_target` (`ptr_slot`, `ptr_tx_index`, `ptr_cert_index`) | One row per output at a pointer address (address types 4 and 5). Such an address names the position of a stake registration certificate -- `(slot, transaction index in block, certificate index in transaction)` -- instead of carrying a stake credential, so the `utxo` row has no `staking_key` and the position is recorded here. The credential is resolved when stake is computed, not at write time, because it is a function of the certificate history at the slot being evaluated: a pointer may name a position no certificate occupies yet, de-registration removes the reference permanently, and Conway stops counting pointer stake altogether. The cascade is how rollback reaches these rows. Nothing validates an address's pointer payload, so a component above `int64` is dropped rather than stored or raised: no certificate can occupy such a position, and failing the write would stall ingestion of a block the network accepted. |
-| `asset` | `id`, `utxo_id`, `policy_id`, `name`, `fingerprint`, `amount` | PK `id`; unique `(name, policy_id, utxo_id)`; named index `idx_asset_policy_id` on `policy_id`; indexes `fingerprint`, `amount` | Multi-asset quantities attached to `utxo.id`. The unique key backs ledger-state import `ON CONFLICT`; the policy-id query index can be deferred during bulk load. Use `utxo.deleted_slot = 0` for live balances. Migration `v19` drops `name_hex` (`hex.EncodeToString(name)`, stored and indexed at write time): every asset lookup keys on `policy_id`/`name`, so nothing ever filtered on it, and `api/blockfrost`'s `NodeAdapter.Asset` and `api/mesh`'s `appendUtxoOps` already recompute the hex encoding from `name` on demand (dingo#4464). |
+| `asset` | `id`, `utxo_id`, `policy_id`, `name`, `fingerprint`, `amount` | PK `id`; unique `(name, policy_id, utxo_id)`; named index `idx_asset_policy_id` on `policy_id` | Multi-asset quantities attached to `utxo.id`. The unique key backs ledger-state import `ON CONFLICT`; the policy-id query index can be deferred during bulk load. Use `utxo.deleted_slot = 0` for live balances. Migration `v19` drops `name_hex` (`hex.EncodeToString(name)`, stored and indexed at write time): every asset lookup keys on `policy_id`/`name`, so nothing ever filtered on it, and `api/blockfrost`'s `NodeAdapter.Asset` and `api/mesh`'s `appendUtxoOps` already recompute the hex encoding from `name` on demand (dingo#4464). Migration `v21` drops `idx_asset_fingerprint` and `idx_asset_amount`: a real WAL-frame-churn measurement during genesis sync found `idx_asset_amount` alone responsible for 23.4% of all frame writes to the metadata database -- the single largest contributor of any index or table -- and `idx_asset_fingerprint` for 3.4%, and neither backs a `WHERE`/`JOIN`/`ORDER BY` predicate anywhere in the tree (dingo#4598). Unlike `name_hex`, the `fingerprint` and `amount` columns themselves are genuinely read and returned via the blockfrost/mesh API adapters, so only the indexes are dropped. |
 | `asset_mint_burn` | `id`, `tx_hash`, `policy_id`, `name`, `fingerprint`, `slot`, `quantity`, `tx_index` | PK `id`; unique `(tx_hash, policy_id, name)` (`idx_asset_mint_burn_unique`); composite `(policy_id, name, slot)` (`idx_asset_mint_burn_lookup`); indexes `fingerprint`, `slot` | API-mode-only mint/burn history: one row per `(transaction, asset)` for every tx that mints or burns the asset. Populated from `tx.AssetMint()` during indexing; `quantity` is a signed decimal string (negative for burns). Unlike `asset` (live holdings), this preserves full history so Blockfrost `/assets/{asset}` can derive `initial_mint_tx_hash` (earliest event by `(slot, tx_index, id)`) and `mint_or_burn_count` (row count). The unique key makes re-applying a transaction after a rollback idempotent. Rows with `slot > rollback_slot` are deleted alongside `transaction` on rollback. |
 | `address_transaction` | `id`, `payment_key`, `credential_tag`, `staking_key`, `transaction_id`, `slot`, `tx_index` | PK `id`; indexes `payment_key`, `transaction_id`, `slot`; composite `(credential_tag, staking_key, slot, tx_index, payment_key)` | API-mode address-to-transaction index. Join to `transaction.id`. `credential_tag`: 0 key hash, 1 script hash for stake-bearing addresses. The composite index supports credential-scoped pagination and its leading columns cover simple credential lookups. |
 | `transaction_metadata_label` | `id`, `transaction_id`, `label`, `slot`, `cbor_value`, `json_value` | PK `id`; unique `(transaction_id, label)`; indexes `label`, `slot` | API-mode per-label metadata index. Join to `transaction.id`. |
@@ -1436,15 +1444,25 @@ reward, leader reward, member reward total). What is not answerable outside the
 window is anything per-delegator: which credentials backed a pool's stake, and
 what each account was paid.
 
-Retaining a `reward_snapshot` whose `reward_stake_input` rows have been pruned
-cannot produce a wrong reward calculation. `applyStakeRewards` detects the
-combination — a snapshot claiming delegators over an empty credential set — logs
-it and skips the epoch, the same outcome as an epoch with no pots row; without
-that check `validateRewardCalculatorInputs` would fail with a stake-total
-mismatch and take the whole epoch rollover down with it. The precompute-reuse
-path reaches the same validation and treats the failure as "no usable
-precompute", so it recalculates and then hits the same skip. Reaching either
-needs a rewind across more than the retained epochs, far beyond `k`.
+When a retained `reward_snapshot` and `reward_pool_input` set has lost its
+windowed `reward_stake_input` rows, reward calculation reconstructs the
+per-credential rows from historical delegation, UTxO, reward-delta, and pool
+registration state at the retained snapshot slots. The result is accepted only
+when every pool's delegated stake, owner stake, and delegator count reconcile
+with its retained pool input; a small bounded rounding difference is assigned
+with a total order over stake, pool key hash, credential tag, and staking key,
+so database and query iteration order cannot change which credential receives
+the adjustment. An incomplete or materially mismatched reconstruction is
+logged and skipped instead of reaching `validateRewardCalculatorInputs` with a
+bad bundle and aborting the epoch rollover.
+
+Reconstruction itself performs reads only. A synchronous boundary calculation
+carries the rows into `applyStakeRewardApplication` and saves them in the same
+metadata write transaction as the reward application. Async precompute carries
+the same rows in `stakeRewardApplication`; after its rollback-generation and
+snapshot-content guard succeeds, the short write phase saves the rows together
+with the outputs and updated ADA pots. A failed save therefore rolls the owning
+transaction back instead of exposing a partial reconstructed credential set.
 
 Rollback is separate from retention and unaffected by it. Retention only ever
 deletes rows below the window, so it never competes with a rewind. Rollback
@@ -2178,8 +2196,38 @@ leaves the row naming the blob, which stays reachable and uncounted, and the
 retry does not double-count it (registered by `RegisterBlobOrphanMetrics`,
 readable in-process via `BlobOrphanCount`). That counter is the only signal
 that a blob store is accumulating dead data, so a non-zero and growing value is
-worth alerting on: it means blob deletes are failing, and the objects already
-lost are not recoverable by any automatic path.
+worth alerting on: the objects already lost are not recoverable by any
+automatic path.
+
+A rising counter has two causes. The first is a blob delete that failed
+outright. The second is a delete this code declined to attempt: when a caller
+stages its deletes in an enclosing transaction, that transaction has a finite
+budget, and a rollback large enough to exhaust it would leave the transaction
+unable to commit at all — including the commit timestamp — which fails the
+whole rollback and, on the startup path, leaves the node unable to start.
+`deleteUtxoBlobs` and `deleteTxBlobs` therefore stage only as many deletes as
+the store reports room for, keeping a reserve for the commit itself, and count
+the remainder as stranded rather than risk the commit. A bounded skip is
+expected during a large rollback: the metadata is still removed, so the store
+stays correct, and the cost is disk rather than an unstartable node.
+
+The two causes are not distinguished by severity. A skip adds its count to the
+same `deleteErrors` total as a failure, so both reach `recordBlobOrphansOnCommit`,
+both return `ErrBlobDeleteIncomplete`, both produce the same warn-level summary
+carrying `failed` and `total`, and both make the caller log its own error-level
+line about unreachable objects. The only discriminator is an additional
+warn-level line emitted at the moment of the skip, carrying `skipped`, `staged`
+and `total`; its absence means every counted object was a genuine delete
+failure.
+
+The budget comes from the optional `blob.TxnBudget` extension
+(`RemainingTxnEntries`). Badger implements it, mirroring the accounting behind
+`Txn.checkSize` so the answer matches the limit the transaction will actually
+be held to. The cloud plugins do not: S3 and GCS stage their mutations in
+memory and apply them in `Commit`, so there is no per-transaction entry budget
+to report. A store that does not implement the extension is staged unbounded,
+exactly as before this bound existed, and can only ever produce the first
+case — the bound changes behaviour only where a budget can be reported.
 
 ### Archive And History Expiry Contract
 
@@ -3202,11 +3250,10 @@ denominator instead of the leader-election/reward/SPO one. `expiryEpoch == 0`
 disables the gate and the generated SQL and bind args are byte-identical to
 the pre-CIP query. A nonzero value adds
 `AND (<alias>.expiration_epoch = 0 OR <alias>.expiration_epoch >= expiryEpoch)`
-to both the inner subquery's `WHERE ... active = 1/true` (aliased `ax`, or an
-`EXISTS` correlation for the single-DRep and by-type variants) and the outer
-query's `WHERE ... active = 1/true` (aliased `a`), keeping an account iff it
-has never been witnessed-expired or its expiration is not yet due.
-`ledger/governance.LoadDRepVotingState` computes `expiryEpoch` as
+to both the inner subquery's `WHERE ... active = 1/true` (aliased `ax`) and
+the outer query's `WHERE ... active = 1/true` (aliased `a`), keeping an
+account iff it has never been witnessed-expired or its expiration is not yet
+due. `ledger/governance.LoadDRepVotingState` computes `expiryEpoch` as
 `currentEpoch` when `LedgerStateConfig.DelegatorInactivityEnabled` is true and
 `0` otherwise, and passes it to `GetDRepVotingPowerBatch` (regular DReps) and
 `GetDRepVotingPowerByType` (the `AlwaysAbstain`/`AlwaysNoConfidence`
@@ -3215,6 +3262,22 @@ gate flag in from config through `governance.ProcessEpoch`'s `EpochInput`.
 `GetDRepVotingPower` (the single-DRep, non-batch form used by point-in-time
 API/ledger-view queries, not the epoch-boundary tally) accepts the same
 parameter but its callers always pass `0`.
+
+`GetDRepVotingPowerByType`'s inner subquery joins outward from `account`
+to `utxo` with the same join shape as `GetDRepVotingPowerBatch` below, but
+filters on `drep_type` where the batch form filters on `drep`. Its inner
+`GROUP BY` is `(credential_tag, staking_key)` and its outer `GROUP BY` is
+`drep_type`; the batch form additionally carries `drep_type` through the
+inner grouping and the subquery join, because its outer grouping is
+`(drep, drep_type)`. Before blinklabs-io/dingo#4364 it instead
+scanned every live `utxo` row and ran a correlated `EXISTS` subquery against
+`account` per row — on a node with millions of live UTxOs and a small
+delegated-account set, that shape cost 620-650ms per call against 16-35ms for
+the account-first join, with byte-identical results, and ran at every epoch
+boundary via `LoadDRepVotingState`. `GetDRepVotingPower` (the single-credential
+form) still uses the pre-#4364 `EXISTS` correlation; its only callers are
+`LedgerView.GetDRepVotingPower` and the Blockfrost adapter's single-DRep
+lookup, neither on the per-epoch tally path.
 
 The expiry clause's bind position is always textually ahead of the
 pre-existing predicate it shares a `WHERE` with (the `IN (...)` chunk for the
@@ -4001,3 +4064,11 @@ fail-closed so rollback cannot reconstruct a live set below the recorded
 floor. `TruncateAfterSlot` restores spent UTxOs with an update. The
 `database/lifecycle.Truncate` refuses a target below the floor before
 `TruncateAfterSlot` begins, because already-deleted rows cannot be restored.
+
+# At-tip recovery repair
+
+At-tip validation recovery can explicitly run the metadata rollback sweep
+against the current durable tip when a failed block may have left spent UTxOs
+or other speculative rows above it. The first repair restores those rows;
+retries of the same failure reuse the repaired state instead of repeating the
+full sweep. Ordinary same-tip rollback remains a no-op.

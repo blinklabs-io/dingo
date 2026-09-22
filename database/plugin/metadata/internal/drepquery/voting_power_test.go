@@ -21,7 +21,67 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestVotingPowerByTypeSQLDialectShapes asserts the account-first shape
+// (blinklabs-io/dingo#4364) holds for every dialect this file supports, not
+// just sqlite, since only sqlite's shape gets an execution test: the inner
+// subquery joins outward from account instead of running a correlated
+// EXISTS against it, and no dialect leaks another dialect's join hint or
+// cast type.
+func TestVotingPowerByTypeSQLDialectShapes(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		dialect      string
+		castType     string
+		active       string
+		expectedJoin string
+	}{
+		{"postgres", "BIGINT", "true", "JOIN utxo\n\t\t\t\t     ON"},
+		{"mysql", "UNSIGNED", "1", "JOIN utxo\n\t\t\t\t     ON"},
+		{"sqlite", "INTEGER", "1", "JOIN utxo INDEXED BY " +
+			sqliteUtxoStakingLiveAmountIndex + "\n\t\t\t\t     ON"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.dialect, func(t *testing.T) {
+			t.Parallel()
+			sql := VotingPowerByTypeSQL(tc.dialect, 0)
+
+			// The account-first join this fix introduces.
+			require.Contains(t, sql, "FROM account ax")
+			require.Contains(t, sql, tc.expectedJoin)
+			require.Contains(
+				t,
+				sql,
+				"ON utxo.credential_tag = ax.credential_tag",
+			)
+			require.Contains(t, sql, "AND utxo.deleted_slot = 0")
+			require.Contains(
+				t,
+				sql,
+				"GROUP BY ax.credential_tag, ax.staking_key",
+			)
+
+			// The pre-fix correlated-EXISTS shape must be gone.
+			require.NotContains(t, sql, "EXISTS")
+			require.NotContains(t, sql, "FROM utxo")
+
+			require.Contains(
+				t,
+				sql,
+				"CAST(utxo.amount AS "+tc.castType+")",
+			)
+			require.Contains(t, sql, "ax.active = "+tc.active)
+
+			// Postgres and mysql must never see sqlite's INDEXED BY hint,
+			// which is invalid syntax for both.
+			if tc.dialect != "sqlite" {
+				require.NotContains(t, sql, "INDEXED BY")
+			}
+		})
+	}
+}
+
 func TestVotingPowerSQLPostgresPlaceholderReuse(t *testing.T) {
+	t.Parallel()
 	credential := []byte("credential")
 	offSQL, offArgs := VotingPowerSQL("postgres", 1, credential, 0)
 	require.NotContains(t, offSQL, "expiration_epoch")

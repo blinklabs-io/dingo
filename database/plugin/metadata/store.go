@@ -2557,14 +2557,6 @@ type MetadataStore interface {
 	// reward history. See rewardstate.DeleteStakeInputBeforeEpoch.
 	DeleteRewardStakeInputBeforeEpoch(uint64, types.Txn) error
 
-	// DeleteRewardStakeInputsForEpoch deletes exactly one epoch's
-	// reward_stake_input rows, leaving reward_pool_input and every other
-	// reward-state table for that epoch untouched. Used to clean up a
-	// partial write after a mid-batch SaveRewardStakeInputs failure, so an
-	// incomplete reconstruction cannot look like a complete one to a later
-	// read of the same epoch.
-	DeleteRewardStakeInputsForEpoch(uint64, types.Txn) error
-
 	// Network state methods
 
 	// SetNetworkState stores the treasury and reserves balances.

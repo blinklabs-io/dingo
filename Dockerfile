@@ -30,7 +30,7 @@ RUN mkdir -p /antithesis
 # Create instrumented code in /antithesis
 RUN `go env GOPATH`/bin/antithesis-go-instrumentor /code /antithesis
 WORKDIR /antithesis/customer
-RUN make build
+RUN make CGO_ENABLED=1 build
 
 FROM ghcr.io/blinklabs-io/cardano-cli:11.2.3.1-1 AS cardano-cli
 FROM ghcr.io/blinklabs-io/cardano-configs:20260915-1 AS cardano-configs
