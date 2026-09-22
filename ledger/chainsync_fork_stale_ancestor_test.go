@@ -156,17 +156,10 @@ func TestFindPeerForkPathAcceptsAncestorAtOrBeforeTip(t *testing.T) {
 	assert.Len(t, forkPath, 1)
 }
 
-// TestFindPeerForkPathCachedRejectsAncestorAheadOfTip is the sibling
-// regression test for findPeerForkPathCached, requested in review of the
-// findPeerForkPath fix above: the cached resolver took the same raw
-// blockByHash hit with no tip bound, and additionally memoized it via
-// cachePeerHeaderHistoryPath. That means one hop that lands on a
-// stranded ahead-of-tip row doesn't just return a bad answer once -- it
-// caches every hop that led there as "resolves to this bogus ancestor",
-// which recoverPeerHeaderHistoryFromPointLocked's cache-hit branch then
-// keeps returning for that hash regardless of which local tip is being
-// searched for, permanently short-circuiting the walk past the point
-// where it should keep looking for a genuine ancestor.
+// TestFindPeerForkPathCachedRejectsAncestorAheadOfTip is the
+// findPeerForkPathCached counterpart to the test above: a hit ahead of the
+// expected ancestor must resolve as unresolved and must not be memoized, or
+// the hop that led to it is cached as resolving to it.
 func TestFindPeerForkPathCachedRejectsAncestorAheadOfTip(t *testing.T) {
 	t.Parallel()
 
