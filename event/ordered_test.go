@@ -19,6 +19,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
 // collectOrdered drains n events from ch and returns their int payloads in
@@ -156,11 +158,18 @@ func TestPublishOrderedWaitsForCapacityRatherThanDropping(t *testing.T) {
 		}
 	}()
 
-	// The publisher must still be parked: nothing is draining yet.
+	// The publisher must still be parked: nothing is draining yet. Wait for
+	// the lane's queue to actually fill rather than assuming it will within
+	// an arbitrary window -- that is what proves the publisher is blocked on
+	// capacity, not merely slow.
+	lane := eb.orderedLane("ordered.full")
+	testutil.WaitForCondition(t, func() bool {
+		return len(lane.queue) == cap(lane.queue)
+	}, testutil.AsyncWait, "the ordered lane never filled up while nothing drained it")
 	select {
 	case <-published:
 		t.Fatal("publisher completed without backpressure from a full lane")
-	case <-time.After(200 * time.Millisecond):
+	default:
 	}
 
 	close(release)
@@ -363,6 +372,9 @@ func TestPublishOrderedContextRejectsCancelledContextWithRoomInLane(
 	select {
 	case evt := <-ch:
 		t.Fatalf("cancelled publish was delivered: %v", evt.Data)
-	case <-time.After(200 * time.Millisecond):
+	default:
+		// PublishOrderedContext already returned false synchronously above,
+		// so nothing further can deliver to ch; no window needs to be waited
+		// out.
 	}
 }

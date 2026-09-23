@@ -1485,6 +1485,9 @@ func openDatabase(
 		&database.Config{
 			DataDir: cfg.DataDir, Logger: logger,
 			StorageMode: cfg.StorageMode, Network: cfg.Network,
+			AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
+				cfg.CardanoNodeConfig, cfg.CardanoConfigPath, cfg.Network,
+			),
 		},
 		internalplugins.StorageSelections{
 			Blob:     storagePlugins.Blob,

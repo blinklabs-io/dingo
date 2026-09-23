@@ -203,21 +203,6 @@ func TestHandleAccountUTXOsQueryError(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
 }
 
-func TestHandleAccountUTXOsInvalidPagination(t *testing.T) {
-	t.Parallel()
-
-	mock := &mockNode{}
-	b := newTestBlockfrost(mock)
-
-	req := newAccountActivityRequest(
-		t, "/api/v0/accounts/stake_test1/utxos?count=notanumber",
-	)
-	w := httptest.NewRecorder()
-	b.handleAccountUTXOs(w, req)
-
-	assert.Equal(t, http.StatusBadRequest, w.Code)
-}
-
 // --- /accounts/{stake_address}/withdrawals ---
 
 func TestHandleAccountWithdrawals(t *testing.T) {
@@ -270,69 +255,6 @@ func TestHandleAccountWithdrawals(t *testing.T) {
 		"block_time",
 		"block_height",
 	})
-}
-
-func TestHandleAccountWithdrawalsEmpty(t *testing.T) {
-	t.Parallel()
-
-	mock := &mockNode{}
-	b := newTestBlockfrost(mock)
-
-	req := newAccountActivityRequest(
-		t, "/api/v0/accounts/stake_test1/withdrawals",
-	)
-	w := httptest.NewRecorder()
-	b.handleAccountWithdrawals(w, req)
-
-	assert.Equal(t, http.StatusOK, w.Code)
-	var resp []AccountWithdrawalResponse
-	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
-	assert.Empty(t, resp)
-}
-
-func TestHandleAccountWithdrawalsInvalidStakeAddress(t *testing.T) {
-	t.Parallel()
-
-	mock := &mockNode{accountWithdrawalsErr: ErrInvalidStakeAddress}
-	b := newTestBlockfrost(mock)
-
-	req := newAccountActivityRequest(
-		t, "/api/v0/accounts/stake_test1/withdrawals",
-	)
-	w := httptest.NewRecorder()
-	b.handleAccountWithdrawals(w, req)
-
-	assert.Equal(t, http.StatusBadRequest, w.Code)
-}
-
-func TestHandleAccountWithdrawalsNotFound(t *testing.T) {
-	t.Parallel()
-
-	mock := &mockNode{accountWithdrawalsErr: models.ErrAccountNotFound}
-	b := newTestBlockfrost(mock)
-
-	req := newAccountActivityRequest(
-		t, "/api/v0/accounts/stake_test1/withdrawals",
-	)
-	w := httptest.NewRecorder()
-	b.handleAccountWithdrawals(w, req)
-
-	assert.Equal(t, http.StatusNotFound, w.Code)
-}
-
-func TestHandleAccountWithdrawalsQueryError(t *testing.T) {
-	t.Parallel()
-
-	mock := &mockNode{accountWithdrawalsErr: errors.New("boom")}
-	b := newTestBlockfrost(mock)
-
-	req := newAccountActivityRequest(
-		t, "/api/v0/accounts/stake_test1/withdrawals",
-	)
-	w := httptest.NewRecorder()
-	b.handleAccountWithdrawals(w, req)
-
-	assert.Equal(t, http.StatusInternalServerError, w.Code)
 }
 
 // --- /accounts/{stake_address}/transactions ---

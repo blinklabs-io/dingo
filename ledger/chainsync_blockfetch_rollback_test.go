@@ -150,7 +150,7 @@ func newBlockfetchRollbackFixture(t *testing.T) *blockfetchRollbackFixture {
 		connId ouroboros.ConnectionId,
 		start ocommon.Point,
 		_ ocommon.Point,
-	) error {
+	) (uint64, error) {
 		f.requests = append(f.requests, start)
 		// The production callback returns after BatchDone has been emitted.
 		// This synthetic callback has no protocol event, so release the
@@ -158,7 +158,7 @@ func newBlockfetchRollbackFixture(t *testing.T) *blockfetchRollbackFixture {
 		f.ls.chainsyncBlockfetchMutex.Lock()
 		f.ls.completeBlockfetchRequestLocked(connId)
 		f.ls.chainsyncBlockfetchMutex.Unlock()
-		return nil
+		return 0, nil
 	}
 	bus.SubscribeFunc(
 		event.ChainsyncResyncEventType,

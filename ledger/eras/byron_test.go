@@ -49,10 +49,11 @@ func (i testInput) ToPlutusData() data.PlutusData { return data.NewConstr(0) }
 
 // testOutput implements lcommon.TransactionOutput for testing.
 type testOutput struct {
-	amount *big.Int
+	amount  *big.Int
+	address lcommon.Address
 }
 
-func (o testOutput) Address() lcommon.Address { return lcommon.Address{} }
+func (o testOutput) Address() lcommon.Address { return o.address }
 
 func (o testOutput) Amount() *big.Int { return o.amount }
 
@@ -80,6 +81,37 @@ func newTestInput(hashByte byte, index uint32) testInput {
 
 func newTestOutput(amount uint64) testOutput {
 	return testOutput{amount: new(big.Int).SetUint64(amount)}
+}
+
+// newTestOutputWithAddress builds an output carrying an explicit address, for
+// rules that classify the address of a consumed UTxO.
+func newTestOutputWithAddress(
+	amount uint64,
+	addr lcommon.Address,
+) testOutput {
+	return testOutput{
+		amount:  new(big.Int).SetUint64(amount),
+		address: addr,
+	}
+}
+
+// newTestByronAddress builds a Byron address of the given Byron address type
+// with a deterministic payment key hash.
+func newTestByronAddress(
+	t *testing.T,
+	byronAddrType uint64,
+	hashByte byte,
+) lcommon.Address {
+	t.Helper()
+	hash := make([]byte, lcommon.AddressHashSize)
+	hash[0] = hashByte
+	addr, err := lcommon.NewByronAddressFromParts(
+		byronAddrType,
+		hash,
+		lcommon.ByronAddressAttributes{},
+	)
+	require.NoError(t, err)
+	return addr
 }
 
 // testByronTx wraps byron.ByronTransaction to override
@@ -336,9 +368,12 @@ var errUtxoNotFound = errors.New("UTxO not found")
 // mockLedgerState implements lcommon.LedgerState for testing
 // UTxO-aware Byron validation rules.
 type mockLedgerState struct {
-	utxos                map[string]lcommon.Utxo
-	networkId            uint
-	protocolMagic        uint32
+	utxos         map[string]lcommon.Utxo
+	networkId     uint
+	protocolMagic uint32
+	// protocolMagicErr, when set, makes ByronProtocolMagic fail, so a test
+	// can prove a rule surfaces the lookup failure rather than skipping.
+	protocolMagicErr     error
 	byronFeeSummand      int64
 	byronFeeMultiplier   int64
 	skipPhase2Validation bool
@@ -412,6 +447,9 @@ func (m *mockLedgerState) UtxoById(
 func (m *mockLedgerState) NetworkId() uint { return m.networkId }
 
 func (m *mockLedgerState) ByronProtocolMagic() (uint32, error) {
+	if m.protocolMagicErr != nil {
+		return 0, m.protocolMagicErr
+	}
 	return m.protocolMagic, nil
 }
 
@@ -853,4 +891,148 @@ func TestValidateTxByron_CombinedStructuralAndUtxoErrors(
 	// Both structural and UTxO errors should be reported
 	assert.ErrorAs(t, err, &DuplicateInputByronError{})
 	assert.ErrorAs(t, err, &BadInputsByronError{})
+}
+
+// TestByronValidateMinFee_RedeemOnlyExemption covers the Byron reference
+// isRedeemUTxO exemption: when every consumed input is a redeem address, the
+// required minimum fee is zero. The presence of a single non-redeem input is
+// not sufficient, so a mixed transaction pays the normal linear fee.
+//
+// This exercises byronValidateMinFee directly so the assertion isolates the
+// fee predicate from the independent redeem-witness requirement.
+func TestByronValidateMinFee_RedeemOnlyExemption(t *testing.T) {
+	t.Parallel()
+
+	const txSize = 10
+
+	redeemA := newTestByronAddress(t, lcommon.ByronAddressTypeRedeem, 0xAA)
+	redeemB := newTestByronAddress(t, lcommon.ByronAddressTypeRedeem, 0xBB)
+	ordinary := newTestByronAddress(t, lcommon.ByronAddressTypePubkey, 0xCC)
+
+	tests := []struct {
+		name      string
+		addresses []lcommon.Address
+		wantError bool
+	}{
+		{
+			name:      "single redeem input pays zero fee",
+			addresses: []lcommon.Address{redeemA},
+		},
+		{
+			name:      "multiple redeem inputs pay zero fee",
+			addresses: []lcommon.Address{redeemA, redeemB},
+		},
+		{
+			name:      "redeem plus ordinary input pays normal fee",
+			addresses: []lcommon.Address{redeemA, ordinary},
+			wantError: true,
+		},
+		{
+			name:      "ordinary input only pays normal fee",
+			addresses: []lcommon.Address{ordinary},
+			wantError: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ls := newMockLedgerState()
+			ls.byronFeeSummand = 1_000_000_001
+			ls.byronFeeMultiplier = 1_000_000_000
+
+			// Each input supplies 1000 lovelace and the single output
+			// reproduces the whole consumed value, so the implicit fee is
+			// exactly zero. Value conservation holds independently.
+			inputs := make([]lcommon.TransactionInput, 0, len(test.addresses))
+			var consumed uint64
+			for i, addr := range test.addresses {
+				input := newTestInput(byte(i+1), 0)
+				ls.addUtxo(input, newTestOutputWithAddress(1_000, addr))
+				inputs = append(inputs, input)
+				consumed += 1_000
+			}
+
+			tx := &testByronTx{
+				inputs:  inputs,
+				outputs: []lcommon.TransactionOutput{newTestOutput(consumed)},
+				cbor:    make([]byte, txSize),
+			}
+
+			err := byronValidateMinFee(tx, 0, ls, nil)
+			if test.wantError {
+				require.Error(t, err)
+				var feeErr FeeTooLowByronError
+				require.ErrorAs(t, err, &feeErr)
+				assert.Zero(t, feeErr.Actual.Sign())
+				assert.Equal(t, 0, feeErr.Required.Cmp(big.NewInt(12)))
+				assert.Equal(t, uint64(txSize), feeErr.Size)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+// TestByronValidateMinFee_RedeemExemptionRequiresResolvableInputs ensures an
+// input that cannot be resolved does not make a transaction look redeem-only.
+// The bad-input rule reports its own error, but the fee rule must still
+// require the normal fee rather than exempting an unresolvable input set.
+func TestByronValidateMinFee_RedeemExemptionRequiresResolvableInputs(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls := newMockLedgerState()
+	ls.byronFeeSummand = 1_000_000_001
+	ls.byronFeeMultiplier = 1_000_000_000
+
+	redeem := newTestByronAddress(t, lcommon.ByronAddressTypeRedeem, 0xAA)
+	resolved := newTestInput(0x01, 0)
+	ls.addUtxo(resolved, newTestOutputWithAddress(1_000, redeem))
+	// missing is never added to the UTxO set.
+	missing := newTestInput(0x02, 0)
+
+	tx := &testByronTx{
+		inputs: []lcommon.TransactionInput{resolved, missing},
+		outputs: []lcommon.TransactionOutput{
+			newTestOutput(1_000),
+		},
+		cbor: make([]byte, 10),
+	}
+
+	err := byronValidateMinFee(tx, 0, ls, nil)
+	require.Error(t, err)
+	var feeErr FeeTooLowByronError
+	require.ErrorAs(t, err, &feeErr)
+}
+
+// TestByronValidateMinFee_NoInputsNotRedeemOnly ensures an empty input set is
+// not treated as vacuously redeem-only, where the reference all would be
+// vacuously true. The empty-input set has its own structural rule, so this
+// guard is unobservable in production, but it pins the intended semantics.
+//
+// The output must be zero so the implicit fee is exactly zero rather than
+// negative. A negative fee is below every requirement including zero, which
+// would make this pass whether or not the guard exists.
+func TestByronValidateMinFee_NoInputsNotRedeemOnly(t *testing.T) {
+	t.Parallel()
+
+	ls := newMockLedgerState()
+	ls.byronFeeSummand = 1_000_000_001
+	ls.byronFeeMultiplier = 1_000_000_000
+
+	tx := &testByronTx{
+		inputs:  []lcommon.TransactionInput{},
+		outputs: []lcommon.TransactionOutput{newTestOutput(0)},
+		cbor:    make([]byte, 10),
+	}
+
+	err := byronValidateMinFee(tx, 0, ls, nil)
+	require.Error(t, err)
+	var feeErr FeeTooLowByronError
+	require.ErrorAs(t, err, &feeErr)
+	// Exactly zero, so the assertion discriminates the guard rather than
+	// riding on a negative fee.
+	assert.Zero(t, feeErr.Actual.Sign())
+	assert.Positive(t, feeErr.Required.Sign())
 }

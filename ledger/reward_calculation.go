@@ -112,19 +112,25 @@ func (ls *LedgerState) applyStakeRewards(
 }
 
 type stakeRewardApplication struct {
-	pparams          lcommon.ProtocolParameters
-	params           rewards.Parameters
-	pots             *models.RewardAdaPots
-	poolOutputs      []*models.RewardPoolOutput
-	accountOutputs   []*models.RewardAccountOutput
-	epochs           stakeRewardEpochs
-	totalRewardPot   uint64
-	availableRewards uint64
-	effectiveRewards uint64
-	undistributed    uint64
-	unspendable      uint64
-	precomputed      bool
-	outputsUpdated   bool
+	pparams        lcommon.ProtocolParameters
+	params         rewards.Parameters
+	pots           *models.RewardAdaPots
+	poolOutputs    []*models.RewardPoolOutput
+	accountOutputs []*models.RewardAccountOutput
+	// reconstructedStakeInputs carries retention-pruned per-credential rows
+	// from the calculation transaction to the transaction that owns the
+	// resulting application. The async precompute calculation is read-only, so
+	// only its guarded write phase may persist these rows. The synchronous path
+	// persists them in the same write transaction that applies the rewards.
+	reconstructedStakeInputs []*models.RewardStakeInput
+	epochs                   stakeRewardEpochs
+	totalRewardPot           uint64
+	availableRewards         uint64
+	effectiveRewards         uint64
+	undistributed            uint64
+	unspendable              uint64
+	precomputed              bool
+	outputsUpdated           bool
 	// guardedRewardCredentials is the CIP-0163 reward-crediting guard set,
 	// populated only at application time when the delegator-inactivity gate is
 	// on (nil otherwise, so the gate-off path is byte-identical). Its keys are
@@ -294,6 +300,7 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 	// itself, also covers the same gap for a live node whose own replay
 	// recovery ever rewinds and reprocesses an epoch boundary older than the
 	// retention window.
+	var reconstructedStakeInputs []*models.RewardStakeInput
 	if len(stakeInputs) == 0 && rewardSnapshot.TotalDelegators > 0 {
 		rebuilt, rebuildErr := ls.rebuildPrunedRewardStakeInputs(
 			meta, metaTxn, rewardSnapshotEpoch, rewardSnapshot, poolInputs,
@@ -305,6 +312,7 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 			)
 		}
 		stakeInputs = rebuilt
+		reconstructedStakeInputs = rebuilt
 	}
 	if len(stakeInputs) == 0 && rewardSnapshot.TotalDelegators > 0 {
 		if reportSkips {
@@ -434,6 +442,7 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 		pots:                        pots,
 		poolOutputs:                 poolOutputs,
 		accountOutputs:              accountOutputs,
+		reconstructedStakeInputs:    reconstructedStakeInputs,
 		totalRewardPot:              result.TotalRewardPot,
 		availableRewards:            result.AvailableRewards,
 		effectiveRewards:            result.EffectiveRewards,
@@ -462,6 +471,9 @@ func (ls *LedgerState) applyStakeRewardApplication(
 	}
 	meta := ls.db.Metadata()
 	metaTxn := txn.Metadata()
+	if err := saveReconstructedRewardStakeInputs(meta, metaTxn, app); err != nil {
+		return err
+	}
 
 	// CIP-0163 reward-crediting guard (Mechanism B, Task 10). A pool's reward
 	// (leader) account is credited its leader reward independent of its own
@@ -2266,6 +2278,9 @@ func (ls *LedgerState) saveStakeRewardPrecompute(
 	capturedSlot uint64,
 	boundarySlot uint64,
 ) error {
+	if err := saveReconstructedRewardStakeInputs(meta, metaTxn, app); err != nil {
+		return err
+	}
 	if err := saveStakeRewardOutputs(meta, metaTxn, app); err != nil {
 		return err
 	}
@@ -2288,6 +2303,27 @@ func (ls *LedgerState) saveStakeRewardPrecompute(
 		"undistributed_rewards", app.undistributed,
 		"unspendable_rewards", app.unspendable,
 	)
+	return nil
+}
+
+func saveReconstructedRewardStakeInputs(
+	meta metadata.MetadataStore,
+	metaTxn types.Txn,
+	app *stakeRewardApplication,
+) error {
+	if app == nil || len(app.reconstructedStakeInputs) == 0 {
+		return nil
+	}
+	if err := meta.SaveRewardStakeInputs(
+		app.reconstructedStakeInputs,
+		metaTxn,
+	); err != nil {
+		return fmt.Errorf(
+			"save reconstructed reward stake inputs for epoch %d: %w",
+			app.epochs.snapshot,
+			err,
+		)
+	}
 	return nil
 }
 
@@ -2617,6 +2653,36 @@ var rewardStakeReconstructionToleranceRatio = struct {
 	absoluteCeiling: 10_000_000,
 }
 
+// compareRewardStakeInputIdentity is the final ordering key for every
+// reconstruction adjustment, so equal stakes cannot inherit query order.
+func compareRewardStakeInputIdentity(
+	a, b *models.RewardStakeInput,
+) int {
+	if cmp := bytes.Compare(a.PoolKeyHash, b.PoolKeyHash); cmp != 0 {
+		return cmp
+	}
+	if a.CredentialTag < b.CredentialTag {
+		return -1
+	}
+	if a.CredentialTag > b.CredentialTag {
+		return 1
+	}
+	return bytes.Compare(a.StakingKey, b.StakingKey)
+}
+
+func rewardStakeInputLess(a, b *models.RewardStakeInput) bool {
+	if a.Stake != b.Stake {
+		return a.Stake < b.Stake
+	}
+	return compareRewardStakeInputIdentity(a, b) < 0
+}
+
+func rewardStakeInputOutranks(
+	candidate, current *models.RewardStakeInput,
+) bool {
+	return current == nil || rewardStakeInputLess(current, candidate)
+}
+
 // rebuildPrunedRewardStakeInputs reconstructs the per-credential
 // reward_stake_input rows for rewardSnapshotEpoch when GetRewardStakeInputs
 // finds them already aged out by retention pruning, but the epoch's
@@ -2625,10 +2691,10 @@ var rewardStakeReconstructionToleranceRatio = struct {
 // CTE the live epoch-boundary capture falls back to
 // (snapshot.Calculator.getBatchPoolsDelegatedStake /
 // GetEpochBoundaryRewardStakeInputsForPools), keyed on the retained
-// snapshot's own captured/boundary slot, then persists the result so later
-// reads do not have to redo the reconstruction. Returns (nil, nil) if the
-// reconstruction itself comes back empty, leaving the caller's existing skip
-// path to handle that as before.
+// snapshot's own captured/boundary slot. The caller carries the result to the
+// write transaction that owns the reward application; this helper is strictly
+// read-only. Returns (nil, nil) if the reconstruction itself comes back empty,
+// leaving the caller's existing skip path to handle that as before.
 func (ls *LedgerState) rebuildPrunedRewardStakeInputs(
 	meta metadata.MetadataStore,
 	metaTxn types.Txn,
@@ -2649,6 +2715,9 @@ func (ls *LedgerState) rebuildPrunedRewardStakeInputs(
 		seen[key] = struct{}{}
 		poolKeyHashes = append(poolKeyHashes, poolInput.PoolKeyHash)
 	}
+	sort.Slice(poolKeyHashes, func(i, j int) bool {
+		return bytes.Compare(poolKeyHashes[i], poolKeyHashes[j]) < 0
+	})
 	// Mirrors snapshot.Manager.expiryEpoch/inactivityPeriod: the CIP-0163 gate
 	// is off unless the operator enabled it, in which case the gate argument
 	// is the snapshot epoch itself (see LedgerStateConfig.DelegatorInactivityEnabled).
@@ -2731,6 +2800,18 @@ func (ls *LedgerState) rebuildPrunedRewardStakeInputs(
 			}
 		}
 	}
+	return ls.reconcileRebuiltRewardStakeInputs(
+		rebuilt,
+		poolInputs,
+		rewardSnapshotEpoch,
+	), nil
+}
+
+func (ls *LedgerState) reconcileRebuiltRewardStakeInputs(
+	rebuilt []*models.RewardStakeInput,
+	poolInputs []*models.RewardPoolInput,
+	rewardSnapshotEpoch uint64,
+) []*models.RewardStakeInput {
 	// The retained reward_pool_input row for each pool carries the exact
 	// per-pool total the live capture observed at the time (DelegatedStake).
 	// validateRewardCalculatorInputs enforces that the per-credential rows
@@ -2740,7 +2821,7 @@ func (ls *LedgerState) rebuildPrunedRewardStakeInputs(
 	// would otherwise surface there as a hard error instead of the softer
 	// outcome a merely-unavailable epoch gets.
 	//
-	// Observed live (dingo #2987 follow-up): every disagreement seen so far
+	// Observed live (dingo #4578): every disagreement seen so far
 	// is retained-pool-total minus reconstructed, a few to a few hundred
 	// thousand lovelace out of a multi-trillion-lovelace pool (roughly 1e-11
 	// to 6e-9 relative) -- consistent with the two computation paths
@@ -2752,23 +2833,35 @@ func (ls *LedgerState) rebuildPrunedRewardStakeInputs(
 	// still reconciles exactly with the retained total; at or above it, this
 	// pool's whole epoch is discarded and falls back to the caller's
 	// existing skip path, the same as before this tolerance existed.
-	expectedByPool := make(map[string]uint64, len(poolInputs))
+	poolInputByKey := make(map[string]*models.RewardPoolInput, len(poolInputs))
+	poolKeys := make([]string, 0, len(poolInputs))
 	for _, poolInput := range poolInputs {
-		expectedByPool[string(poolInput.PoolKeyHash)] = uint64(
-			poolInput.DelegatedStake,
-		)
+		key := string(poolInput.PoolKeyHash)
+		if _, ok := poolInputByKey[key]; !ok {
+			poolKeys = append(poolKeys, key)
+		}
+		poolInputByKey[key] = poolInput
 	}
-	actualByPool := make(map[string]uint64, len(expectedByPool))
-	largestInputByPool := make(map[string]*models.RewardStakeInput, len(expectedByPool))
+	sort.Slice(poolKeys, func(i, j int) bool {
+		return bytes.Compare([]byte(poolKeys[i]), []byte(poolKeys[j])) < 0
+	})
+	actualByPool := make(map[string]uint64, len(poolInputByKey))
+	largestInputByPool := make(
+		map[string]*models.RewardStakeInput,
+		len(poolInputByKey),
+	)
 	for _, input := range rebuilt {
 		key := string(input.PoolKeyHash)
 		actualByPool[key] += uint64(input.Stake)
-		if current := largestInputByPool[key]; current == nil ||
-			input.Stake > current.Stake {
+		if current := largestInputByPool[key]; rewardStakeInputOutranks(
+			input,
+			current,
+		) {
 			largestInputByPool[key] = input
 		}
 	}
-	for key, expected := range expectedByPool {
+	for _, key := range poolKeys {
+		expected := uint64(poolInputByKey[key].DelegatedStake)
 		actual := actualByPool[key]
 		if actual == expected {
 			continue
@@ -2795,7 +2888,7 @@ func (ls *LedgerState) rebuildPrunedRewardStakeInputs(
 				"reconstructed_stake", actual,
 				"retained_pool_stake", expected,
 			)
-			return nil, nil
+			return nil
 		}
 		ls.config.Logger.Warn(
 			"reconstructed reward stake inputs differ from the retained "+
@@ -2820,35 +2913,34 @@ func (ls *LedgerState) rebuildPrunedRewardStakeInputs(
 	// it does not change their amounts, so the same cross-method rounding
 	// gap validateRewardCalculatorInputs would otherwise reject can show up
 	// again here against the retained OwnerStake total.
-	expectedOwnerByPool := make(map[string]uint64, len(poolInputs))
-	for _, poolInput := range poolInputs {
-		expectedOwnerByPool[string(poolInput.PoolKeyHash)] = uint64(
-			poolInput.OwnerStake,
-		)
-	}
-	actualOwnerByPool := make(map[string]uint64, len(expectedOwnerByPool))
+	actualOwnerByPool := make(map[string]uint64, len(poolInputByKey))
 	largestOwnerInputByPool := make(
-		map[string]*models.RewardStakeInput, len(expectedOwnerByPool),
+		map[string]*models.RewardStakeInput, len(poolInputByKey),
 	)
 	largestNonOwnerInputByPool := make(
-		map[string]*models.RewardStakeInput, len(expectedOwnerByPool),
+		map[string]*models.RewardStakeInput, len(poolInputByKey),
 	)
 	for _, input := range rebuilt {
 		key := string(input.PoolKeyHash)
 		if input.Owner {
 			actualOwnerByPool[key] += uint64(input.Stake)
-			if current := largestOwnerInputByPool[key]; current == nil ||
-				input.Stake > current.Stake {
+			if current := largestOwnerInputByPool[key]; rewardStakeInputOutranks(
+				input,
+				current,
+			) {
 				largestOwnerInputByPool[key] = input
 			}
 			continue
 		}
-		if current := largestNonOwnerInputByPool[key]; current == nil ||
-			input.Stake > current.Stake {
+		if current := largestNonOwnerInputByPool[key]; rewardStakeInputOutranks(
+			input,
+			current,
+		) {
 			largestNonOwnerInputByPool[key] = input
 		}
 	}
-	for key, expected := range expectedOwnerByPool {
+	for _, key := range poolKeys {
+		expected := uint64(poolInputByKey[key].OwnerStake)
 		actual := actualOwnerByPool[key]
 		if actual == expected {
 			continue
@@ -2898,7 +2990,7 @@ func (ls *LedgerState) rebuildPrunedRewardStakeInputs(
 				"reconstructed_owner_stake", actual,
 				"retained_pool_owner_stake", expected,
 			)
-			return nil, nil
+			return nil
 		}
 		ls.config.Logger.Warn(
 			"reconstructed reward owner stake inputs differ from the "+
@@ -2940,13 +3032,8 @@ func (ls *LedgerState) rebuildPrunedRewardStakeInputs(
 		rowsByPool[key] = append(rowsByPool[key], input)
 	}
 	pruned := make([]*models.RewardStakeInput, 0, len(rebuilt))
-	for key, poolInput := range func() map[string]*models.RewardPoolInput {
-		byKey := make(map[string]*models.RewardPoolInput, len(poolInputs))
-		for _, pi := range poolInputs {
-			byKey[string(pi.PoolKeyHash)] = pi
-		}
-		return byKey
-	}() {
+	for _, key := range poolKeys {
+		poolInput := poolInputByKey[key]
 		rows := rowsByPool[key]
 		expectedCount := poolInput.DelegatorCount
 		if uint64(len(rows)) == expectedCount {
@@ -2965,18 +3052,18 @@ func (ls *LedgerState) rebuildPrunedRewardStakeInputs(
 				"reconstructed_delegators", len(rows),
 				"retained_pool_delegators", expectedCount,
 			)
-			return nil, nil
+			return nil
 		}
 		excess := uint64(len(rows)) - expectedCount
 		sort.Slice(rows, func(i, j int) bool {
-			return rows[i].Stake < rows[j].Stake
+			return rewardStakeInputLess(rows[i], rows[j])
 		})
 		var largest *models.RewardStakeInput
 		for _, row := range rows {
 			if row.Owner {
 				continue
 			}
-			if largest == nil || row.Stake > largest.Stake {
+			if rewardStakeInputOutranks(row, largest) {
 				largest = row
 			}
 		}
@@ -2992,7 +3079,7 @@ func (ls *LedgerState) rebuildPrunedRewardStakeInputs(
 				"reconstructed_delegators", len(rows),
 				"retained_pool_delegators", expectedCount,
 			)
-			return nil, nil
+			return nil
 		}
 		kept := make([]*models.RewardStakeInput, 0, expectedCount)
 		var foldedCount uint64
@@ -3016,7 +3103,7 @@ func (ls *LedgerState) rebuildPrunedRewardStakeInputs(
 				"reconstructed_delegators", len(rows),
 				"retained_pool_delegators", expectedCount,
 			)
-			return nil, nil
+			return nil
 		}
 		ls.config.Logger.Warn(
 			"reconstructed reward stake inputs have more delegators than "+
@@ -3032,6 +3119,9 @@ func (ls *LedgerState) rebuildPrunedRewardStakeInputs(
 		pruned = append(pruned, kept...)
 	}
 	rebuilt = pruned
+	sort.Slice(rebuilt, func(i, j int) bool {
+		return compareRewardStakeInputIdentity(rebuilt[i], rebuilt[j]) < 0
+	})
 	ls.config.Logger.Warn(
 		"reconstructed reward stake inputs pruned by retention before this "+
 			"epoch's reward round applied",
@@ -3039,40 +3129,7 @@ func (ls *LedgerState) rebuildPrunedRewardStakeInputs(
 		"reward_snapshot_epoch", rewardSnapshotEpoch,
 		"rows", len(rebuilt),
 	)
-	// Best-effort: an opportunistic precompute pass runs on a read-only
-	// transaction and cannot persist. It is allowed to miss and retry --
-	// the authoritative call at the real boundary runs on a writable
-	// transaction and persists normally -- so a write failure here must not
-	// fail the calculation that already has the reconstructed rows in hand.
-	//
-	// saveRewardRows commits each row as it inserts rather than as one
-	// atomic unit, so a failure partway through this batch can otherwise
-	// leave the epoch holding a partial set. A later read would see that as
-	// "already reconstructed" (len(stakeInputs) != 0) rather than pruned,
-	// skip reconstruction entirely, and fail pool-total validation against
-	// the incomplete rows on every subsequent attempt. Delete whatever
-	// partial set the failed save left behind so the epoch reads back
-	// exactly as pruned -- empty -- and the next attempt reconstructs fresh
-	// instead of wedging on it.
-	if err := meta.SaveRewardStakeInputs(rebuilt, metaTxn); err != nil {
-		ls.config.Logger.Warn(
-			"failed to persist reconstructed reward stake inputs; "+
-				"using them for this calculation without caching them",
-			"component", "ledger",
-			"reward_snapshot_epoch", rewardSnapshotEpoch,
-			"error", err.Error(),
-		)
-		if cleanupErr := meta.DeleteRewardStakeInputsForEpoch(
-			rewardSnapshotEpoch, metaTxn,
-		); cleanupErr != nil {
-			return nil, fmt.Errorf(
-				"clean up partially persisted reconstructed reward stake "+
-					"inputs for epoch %d after save failure: %w",
-				rewardSnapshotEpoch, cleanupErr,
-			)
-		}
-	}
-	return rebuilt, nil
+	return rebuilt
 }
 
 func stakeRewardEpochsForNewEpoch(newEpoch uint64) (stakeRewardEpochs, bool) {

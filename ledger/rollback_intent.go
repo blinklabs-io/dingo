@@ -351,7 +351,7 @@ func (ls *LedgerState) recoverRollbackIntentLocked() error {
 	}
 
 	ls.emitRollbackTransactionEvents(blocks)
-	if err := ls.rollbackWithBlocks(point, blocks, true); err != nil {
+	if err := ls.rollbackWithBlocks(point, blocks, false, true); err != nil {
 		return fmt.Errorf("recover rollback intent: %w", err)
 	}
 	return nil

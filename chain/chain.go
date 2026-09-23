@@ -2435,6 +2435,38 @@ func (c *Chain) HeaderRange(count int) (ocommon.Point, ocommon.Point) {
 	return startPoint, endPoint
 }
 
+// HeaderRangeAfter returns the range of up to count queued headers starting
+// skip entries after the head of the queue, and how many headers actually lie
+// in that window.
+//
+// HeaderRange always starts at c.headers[0], because headers only pop once
+// their block is applied -- not when a batch is dispatched for them -- so
+// calling it again before an in-flight batch's blocks are applied returns the
+// identical range. A caller that wants to describe a second, not-yet-fetched
+// batch beyond one already claimed (skip is the header count that batch
+// already covers) needs a windowed read instead.
+//
+// available is 0 when skip is at or past the end of the queue and less than
+// count when the queue is shorter than skip+count; callers must check it
+// rather than treating a zero-value start/end pair as a valid single-header
+// range, since skip==0, count==0 is also a legitimate call shape.
+func (c *Chain) HeaderRangeAfter(
+	skip, count int,
+) (start, end ocommon.Point, available int) {
+	if c == nil || count <= 0 || skip < 0 {
+		return ocommon.Point{}, ocommon.Point{}, 0
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	if skip >= len(c.headers) {
+		return ocommon.Point{}, ocommon.Point{}, 0
+	}
+	available = min(count, len(c.headers)-skip)
+	start = c.headers[skip].point
+	end = c.headers[skip+available-1].point
+	return start, end, available
+}
+
 // FromPoint returns a ChainIterator starting at the specified point. If inclusive is true, the iterator
 // will start at the specified point. Otherwise it will start at the point following the specified point
 func (c *Chain) FromPoint(

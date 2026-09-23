@@ -58,6 +58,17 @@ const txsubmissionRelayTestNetworkMagic = 42
 
 type txsubmissionTestValidator struct{}
 
+func TestTxSubmissionRequestBatchFitsProtocolWindow(t *testing.T) {
+	t.Parallel()
+
+	require.LessOrEqual(
+		t,
+		txsubmissionRequestTxIdsCount,
+		txsubmission.MaxUnackedTxIds,
+		"Dingo's relay batch must fit the upstream outstanding-ID window",
+	)
+}
+
 func (txsubmissionTestValidator) ValidateTx(gledger.Transaction) error {
 	return nil
 }

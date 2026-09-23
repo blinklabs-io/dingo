@@ -164,7 +164,7 @@ func seedHardForkCommitteeAndSPOVotes(
 	poolCred := testBytes(28, 0xD3)
 	seedPoolWithStake(
 		t, store, poolCred, testBytes(29, 0xD4), 100,
-		stakeEpochFor(stabilityTestEpoch),
+		predictedBoundaryStakeEpochFor(stabilityTestEpoch),
 	)
 	for _, proposal := range proposals {
 		require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{

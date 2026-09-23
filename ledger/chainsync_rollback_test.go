@@ -1763,12 +1763,12 @@ func TestRecoverAfterLocalRollbackReplaysPeerHeaderHistory(
 		requestConnId ouroboros.ConnectionId,
 		start ocommon.Point,
 		end ocommon.Point,
-	) error {
+	) (uint64, error) {
 		requestCount++
 		assert.True(t, sameConnectionId(connId, requestConnId))
 		assert.Equal(t, uint64(11), start.Slot)
 		assert.Equal(t, uint64(12), end.Slot)
-		return nil
+		return 0, nil
 	}
 
 	header1Hash := lcommon.NewBlake2b256(testHashBytes("rollback-replay-1"))
@@ -1879,12 +1879,12 @@ func TestRecoverAfterLocalRollbackRetargetsSelectedBlockfetchConn(
 		connId ouroboros.ConnectionId,
 		_ ocommon.Point,
 		_ ocommon.Point,
-	) error {
+	) (uint64, error) {
 		requested = append(requested, connId)
 		if sameConnectionId(connId, activeConnId) {
-			return nil
+			return 0, nil
 		}
-		return errBlockfetchNoBlocks
+		return 0, errBlockfetchNoBlocks
 	}
 
 	header := mockHeader{
@@ -1967,8 +1967,8 @@ func TestRecoverAfterLocalRollbackClearsSelectionWhenEveryConnectionFails(
 		ouroboros.ConnectionId,
 		ocommon.Point,
 		ocommon.Point,
-	) error {
-		return errBlockfetchNoBlocks
+	) (uint64, error) {
+		return 0, errBlockfetchNoBlocks
 	}
 
 	header := mockHeader{
@@ -2026,9 +2026,9 @@ func TestRecoverAfterLocalRollbackReportsBlockfetchFailure(
 		ouroboros.ConnectionId,
 		ocommon.Point,
 		ocommon.Point,
-	) error {
+	) (uint64, error) {
 		requestCount++
-		return errBlockfetchNoBlocks
+		return 0, errBlockfetchNoBlocks
 	}
 
 	header := mockHeader{
