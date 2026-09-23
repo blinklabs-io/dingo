@@ -45,7 +45,10 @@ only by grepping the node's log or querying its `cache.db` directly:
 - Mismatches by category and severity, and epoch results by status, both over
   time (`dingo_koiosparity_mismatch_total`, `dingo_koiosparity_epoch_result_total`)
 
-These metrics are only populated when the koios-parity toggle below is on.
+Every series carries a `queue` label (`aggregate` or `account`): the two
+queues check each epoch independently and the account queue can lag, so
+each panel shows one value per queue. These metrics are only populated when
+the koios-parity toggle below is on.
 
 Tear down (including synced chain data):
 

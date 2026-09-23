@@ -64,7 +64,11 @@ func TestNewObserverWiresPromRegistryIntoMetrics(t *testing.T) {
 		t,
 		1.0,
 		promtestutil.ToFloat64(
-			o.metrics.epochResultTotal.WithLabelValues("preview", "fail"),
+			o.metrics.epochResultTotal.WithLabelValues(
+				"preview",
+				ScopeAggregate,
+				"fail",
+			),
 		),
 		"emitResult must record into the Observer's own metrics",
 	)
@@ -72,7 +76,7 @@ func TestNewObserverWiresPromRegistryIntoMetrics(t *testing.T) {
 		t,
 		42.0,
 		promtestutil.ToFloat64(
-			o.metrics.lastFailEpoch.WithLabelValues("preview"),
+			o.metrics.lastFailEpoch.WithLabelValues("preview", ScopeAggregate),
 		),
 	)
 }

@@ -8838,11 +8838,15 @@ second sync:
     through (`processEpoch`'s and `processAccountEpoch`'s success paths, and
     `reportError`'s synthesized `ERROR` path) — also calls
     `metrics.recordResult`, so all three are covered from one call site:
-    `dingo_koiosparity_epoch_result_total` (by network/status),
-    `dingo_koiosparity_mismatch_total` (by network/category/severity, mirroring
+    `dingo_koiosparity_epoch_result_total` (by network/queue/status),
+    `dingo_koiosparity_mismatch_total` (by network/queue/category/severity, mirroring
     `check_mismatches.category`), `dingo_koiosparity_last_checked_epoch`, and
     `dingo_koiosparity_epoch_mismatch_count` (mirroring
-    `check_epoch_status.mismatch_count`). `dingo_koiosparity_last_fail_epoch`/
+    `check_epoch_status.mismatch_count`). Every series carries a `queue`
+    label (`aggregate`/`account`, from the result's `CheckedScopes`): both
+    queues emit a result for the same epoch and the account queue can lag
+    arbitrarily, so a shared gauge would let a late account-queue PASS
+    overwrite the aggregate queue's latest FAIL. `dingo_koiosparity_last_fail_epoch`/
     `_last_error_epoch` are deliberately sticky — set on a FAIL/ERROR result
     and never cleared by a later PASS — so a stale, undiagnosed mismatch does
     not silently disappear from a dashboard. The metric's severity label comes
@@ -8854,7 +8858,9 @@ second sync:
     `PromRegistry` field; `newMetrics` returns nil for a nil registerer (the
     standalone `cmd/koios-parity` CLI, and any test that builds an
     `ObserverConfig` without one), and every `recordResult` call tolerates a
-    nil receiver.
+    nil receiver. A live restore/truncate re-runs `startKoiosParityObserver`
+    against the same registry, so `newMetrics` reuses already-registered
+    collectors instead of registering them again.
 - **Composition** (`node.go`, `node_koiosparity.go`, `node_shutdown.go`,
   `node_lifecycle.go`): `Node.Run()` configures `n.snapshotMgr` and installs
   both epoch-boundary reward-snapshot hooks (`SetEpochBoundarySnapshotStakeHook`/

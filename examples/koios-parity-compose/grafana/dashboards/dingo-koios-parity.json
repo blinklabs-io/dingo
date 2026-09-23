@@ -15,14 +15,14 @@
       "id": 1,
       "type": "stat",
       "title": "Current epoch mismatch count",
-      "description": "dingo_koiosparity_epoch_mismatch_count -- mismatch row count for the most recently checked epoch (mirrors check_epoch_status.mismatch_count). Zero means the last checked epoch passed cleanly.",
+      "description": "dingo_koiosparity_epoch_mismatch_count -- mismatch row count for the most recently checked epoch, per queue (mirrors check_epoch_status.mismatch_count). The aggregate and account queues check each epoch independently and the account queue can lag, so each has its own value. Zero means that queue's last checked epoch had no mismatch rows.",
       "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "dingo_koiosparity_epoch_mismatch_count",
-          "legendFormat": "{{network}}",
+          "legendFormat": "{{queue}}",
           "refId": "A"
         }
       ],
@@ -56,7 +56,7 @@
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "dingo_koiosparity_last_checked_epoch",
-          "legendFormat": "{{network}}",
+          "legendFormat": "{{queue}}",
           "refId": "A"
         }
       ],
@@ -81,7 +81,7 @@
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "dingo_koiosparity_last_fail_epoch",
-          "legendFormat": "{{network}}",
+          "legendFormat": "{{queue}}",
           "refId": "A"
         }
       ],
@@ -106,7 +106,7 @@
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "dingo_koiosparity_last_error_epoch",
-          "legendFormat": "{{network}}",
+          "legendFormat": "{{queue}}",
           "refId": "A"
         }
       ],
@@ -131,7 +131,7 @@
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "increase(dingo_koiosparity_mismatch_total[$__rate_interval])",
-          "legendFormat": "{{severity}} / {{category}}",
+          "legendFormat": "{{queue}}: {{severity}} / {{category}}",
           "refId": "A"
         }
       ],
@@ -144,14 +144,14 @@
       "id": 6,
       "type": "timeseries",
       "title": "Epoch results by status",
-      "description": "sum by (status) (increase(dingo_koiosparity_epoch_result_total[$__rate_interval])) -- completed epoch validations, by status (pass/fail/error).",
+      "description": "sum by (queue, status) (increase(dingo_koiosparity_epoch_result_total[$__rate_interval])) -- completed epoch validations, by queue and status (pass/fail/error).",
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 14 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum by (status) (increase(dingo_koiosparity_epoch_result_total[$__rate_interval]))",
-          "legendFormat": "{{status}}",
+          "expr": "sum by (queue, status) (increase(dingo_koiosparity_epoch_result_total[$__rate_interval]))",
+          "legendFormat": "{{queue}}: {{status}}",
           "refId": "A"
         }
       ],

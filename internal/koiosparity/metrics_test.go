@@ -71,18 +71,26 @@ func TestRecordResultPass(t *testing.T) {
 		t,
 		1.0,
 		testutil.ToFloat64(
-			m.epochResultTotal.WithLabelValues("preview", "pass"),
+			m.epochResultTotal.WithLabelValues(
+				"preview",
+				ScopeAggregate,
+				"pass",
+			),
 		),
 	)
 	assert.Equal(
 		t,
 		100.0,
-		testutil.ToFloat64(m.lastCheckedEpoch.WithLabelValues("preview")),
+		testutil.ToFloat64(
+			m.lastCheckedEpoch.WithLabelValues("preview", ScopeAggregate),
+		),
 	)
 	assert.Equal(
 		t,
 		0.0,
-		testutil.ToFloat64(m.epochMismatchCount.WithLabelValues("preview")),
+		testutil.ToFloat64(
+			m.epochMismatchCount.WithLabelValues("preview", ScopeAggregate),
+		),
 	)
 	assert.Equal(
 		t,
@@ -131,18 +139,26 @@ func TestRecordResultFailMixedSeverities(t *testing.T) {
 		t,
 		1.0,
 		testutil.ToFloat64(
-			m.epochResultTotal.WithLabelValues("preview", "fail"),
+			m.epochResultTotal.WithLabelValues(
+				"preview",
+				ScopeAggregate,
+				"fail",
+			),
 		),
 	)
 	assert.Equal(
 		t,
 		200.0,
-		testutil.ToFloat64(m.lastCheckedEpoch.WithLabelValues("preview")),
+		testutil.ToFloat64(
+			m.lastCheckedEpoch.WithLabelValues("preview", ScopeAggregate),
+		),
 	)
 	assert.Equal(
 		t,
 		2.0,
-		testutil.ToFloat64(m.epochMismatchCount.WithLabelValues("preview")),
+		testutil.ToFloat64(
+			m.epochMismatchCount.WithLabelValues("preview", ScopeAggregate),
+		),
 		"epochMismatchCount mirrors len(result.Mismatches), including "+
 			"informational rows",
 	)
@@ -150,20 +166,22 @@ func TestRecordResultFailMixedSeverities(t *testing.T) {
 		t,
 		1.0,
 		testutil.ToFloat64(m.mismatchTotal.WithLabelValues(
-			"preview", CategoryValueMismatch, "fail",
+			"preview", ScopeAggregate, CategoryValueMismatch, "fail",
 		)),
 	)
 	assert.Equal(
 		t,
 		1.0,
 		testutil.ToFloat64(m.mismatchTotal.WithLabelValues(
-			"preview", CategoryPoolDeparted, "informational",
+			"preview", ScopeAggregate, CategoryPoolDeparted, "informational",
 		)),
 	)
 	assert.Equal(
 		t,
 		200.0,
-		testutil.ToFloat64(m.lastFailEpoch.WithLabelValues("preview")),
+		testutil.ToFloat64(
+			m.lastFailEpoch.WithLabelValues("preview", ScopeAggregate),
+		),
 	)
 	assert.Equal(
 		t,
@@ -196,13 +214,19 @@ func TestRecordResultError(t *testing.T) {
 		t,
 		1.0,
 		testutil.ToFloat64(
-			m.epochResultTotal.WithLabelValues("preprod", "error"),
+			m.epochResultTotal.WithLabelValues(
+				"preprod",
+				ScopeAggregate,
+				"error",
+			),
 		),
 	)
 	assert.Equal(
 		t,
 		300.0,
-		testutil.ToFloat64(m.lastErrorEpoch.WithLabelValues("preprod")),
+		testutil.ToFloat64(
+			m.lastErrorEpoch.WithLabelValues("preprod", ScopeAggregate),
+		),
 	)
 	assert.Equal(
 		t,
@@ -213,7 +237,7 @@ func TestRecordResultError(t *testing.T) {
 }
 
 // TestRecordResultLastFailErrorEpochAreSticky pins the "when did this last
-// happen" contract from the issue: lastFailEpoch/lastErrorEpoch must NOT
+// happen" contract: lastFailEpoch/lastErrorEpoch must NOT
 // reset when a later epoch passes. A stale, undiagnosed mismatch must not
 // silently disappear from the dashboard just because a later epoch happened
 // to pass.
@@ -241,14 +265,18 @@ func TestRecordResultLastFailErrorEpochAreSticky(t *testing.T) {
 	assert.Equal(
 		t,
 		50.0,
-		testutil.ToFloat64(m.lastFailEpoch.WithLabelValues("preview")),
+		testutil.ToFloat64(
+			m.lastFailEpoch.WithLabelValues("preview", ScopeAggregate),
+		),
 		"lastFailEpoch must stay at the last epoch that failed, "+
 			"not reset because epoch 51 passed",
 	)
 	assert.Equal(
 		t,
 		51.0,
-		testutil.ToFloat64(m.lastCheckedEpoch.WithLabelValues("preview")),
+		testutil.ToFloat64(
+			m.lastCheckedEpoch.WithLabelValues("preview", ScopeAggregate),
+		),
 		"lastCheckedEpoch always advances to the most recently checked epoch",
 	)
 }
