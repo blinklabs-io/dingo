@@ -4316,9 +4316,10 @@ Genesis mode (`genesisBootstrap`, active only for from-origin sync with no
 *density* within a window of `3k/f` slots rather than by longest-chain length,
 so a from-origin node can prefer the denser (honest) chain before it has the
 history to run the full Praos comparison. The window is derived from Shelley
-genesis params (`GenesisWindowSlotsForParams`) or overridden by
-`genesisWindowSlots`. Each tracked peer keeps a bounded recent frontier of
-`(slot, hash)` points (`PeerChainTip.observedPoints`, in lockstep with the
+genesis params (`GenesisWindowSlotsForParams`) as `ceil(3k/f)` over the exact
+genesis rational, matching the reference node's `computeStabilityWindow`, or
+overridden by `genesisWindowSlots`. Each tracked peer keeps a bounded recent
+frontier of `(slot, hash)` points (`PeerChainTip.observedPoints`, in lockstep with the
 `observedSlots` used for density), trimmed to the window and on rollback.
 That rolling frontier ranks peers before a fork is available locally; it is not
 the authoritative fork-choice measurement. When an incoming header conflicts
