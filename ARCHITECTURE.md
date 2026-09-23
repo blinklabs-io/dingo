@@ -4587,7 +4587,10 @@ tokens per second. It follows the reference ChainSync client:
   (`ChainSelector.GenesisSelectionState`, wired as
   `chainsync.Config.PatienceActiveFunc` by `Node.chainsyncConfig`); outside it
   the bucket is held full, like the reference node outside GSM `Syncing`.
-- At zero the bucket latches exhausted. The stall recycler's tick calls
+- At zero the bucket latches exhausted. The latch clears, and the bucket
+  refills, if Genesis selection ends or the client becomes observability-only
+  before it is reported, so a peer is never disconnected once the limit has
+  stopped applying to it. The stall recycler's tick calls
   `CheckPatienceExhausted`, which publishes
   `chainsync.client_patience_exhausted` and increments
   `dingo_chainsync_patience_exhausted_total`, and then requests

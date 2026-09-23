@@ -81,7 +81,9 @@ func (c PatienceConfig) withDefaults() PatienceConfig {
 // rollback earns nothing. The leak pauses while Dingo itself is processing a
 // message and while the peer has delivered its own advertised tip, because
 // neither is time the peer is withholding progress. Once the level reaches
-// zero the bucket latches exhausted; later headers cannot refill it.
+// zero the bucket latches exhausted; later headers cannot refill it. Leaving
+// Genesis selection, or becoming observability-only, clears the latch and
+// refills the bucket.
 type PatienceState struct {
 	// Tokens is the bucket level as of UpdatedAt.
 	Tokens float64
@@ -134,11 +136,17 @@ func (s *State) leakPatienceLocked(
 			p.UpdatedAt = now
 		}
 	}()
-	if p.Exhausted || tc.ObservabilityOnly {
+	// This reset runs before the exhausted latch below: a bucket that emptied
+	// while the limit applied must not be reported once it no longer does,
+	// such as when Genesis selection ends or the client is demoted before the
+	// recycler's next tick.
+	if !active || tc.ObservabilityOnly {
+		p.Tokens = float64(s.config.Patience.Capacity)
+		p.Exhausted = false
+		p.reported = false
 		return
 	}
-	if !active {
-		p.Tokens = float64(s.config.Patience.Capacity)
+	if p.Exhausted {
 		return
 	}
 	if p.Paused || !now.After(p.UpdatedAt) {

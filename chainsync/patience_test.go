@@ -322,3 +322,56 @@ func TestPatienceStartsPausedUntilFirstAcceptedHeader(t *testing.T) {
 	assert.InDelta(t, chainsync.DefaultPatienceCapacity,
 		h.state.GetTrackedClient(conn).Patience.Tokens, 1e-9)
 }
+
+// TestPatienceExhaustionClearsWhenGenesisEnds pins that a bucket which
+// exhausted while Genesis selection was active is not reported for disconnect
+// once selection has stopped before the recycler's tick: the Limit on Patience
+// no longer applies, and the bucket is refilled for any later Genesis period.
+func TestPatienceExhaustionClearsWhenGenesisEnds(t *testing.T) {
+	t.Parallel()
+	h := newPatienceHarness(t, chainsync.DefaultPatienceConfig())
+	conn := newTestConnId(1)
+	require.True(t, h.state.AddClientConnId(conn))
+	h.deliver(conn, 1, farTip(), 0)
+
+	// The next header's arrival latches exhaustion without a recycler tick.
+	h.advance(201 * time.Second)
+	require.True(t, h.state.PatienceMessageArrived(conn, h.now))
+	require.True(t, h.state.GetTrackedClient(conn).Patience.Exhausted)
+
+	h.active.Store(false)
+	assert.Empty(t, h.state.CheckPatienceExhausted())
+	tc := h.state.GetTrackedClient(conn)
+	assert.False(t, tc.Patience.Exhausted)
+	assert.InDelta(t, chainsync.DefaultPatienceCapacity, tc.Patience.Tokens, 1e-9)
+
+	// A later Genesis period starts from a full bucket and can exhaust, and
+	// be reported, again.
+	h.active.Store(true)
+	h.state.PatienceHeaderAccepted(conn, 2, false)
+	h.advance(199 * time.Second)
+	assert.Empty(t, h.state.CheckPatienceExhausted())
+	h.advance(2 * time.Second)
+	assert.Equal(t, []ouroboros.ConnectionId{conn},
+		h.state.CheckPatienceExhausted())
+}
+
+// TestPatienceExhaustionClearsWhenClientBecomesObservabilityOnly pins that a
+// client demoted to observability-only before the recycler's tick is not
+// disconnected by the Limit on Patience, which does not apply to it.
+func TestPatienceExhaustionClearsWhenClientBecomesObservabilityOnly(
+	t *testing.T,
+) {
+	t.Parallel()
+	h := newPatienceHarness(t, chainsync.DefaultPatienceConfig())
+	conn := newTestConnId(1)
+	require.True(t, h.state.AddClientConnId(conn))
+	h.deliver(conn, 1, farTip(), 0)
+	h.advance(201 * time.Second)
+	require.True(t, h.state.PatienceMessageArrived(conn, h.now))
+	require.True(t, h.state.GetTrackedClient(conn).Patience.Exhausted)
+
+	require.True(t, h.state.SetClientObservabilityOnly(conn, true))
+	assert.Empty(t, h.state.CheckPatienceExhausted())
+	assert.False(t, h.state.GetTrackedClient(conn).Patience.Exhausted)
+}
