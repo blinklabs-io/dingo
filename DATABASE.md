@@ -1571,10 +1571,11 @@ holds a copy until its exec completes, so on Unix a concurrent `os/exec` call
 can keep the directory locked briefly after `badger.DB.Close` returns. Restore,
 truncate, and startup preflight reopen the same directory in process, so
 `BlobStoreBadger.CloseContext` does not signal completion until
-`waitForDirLockRelease` (`dirlock_unix.go`) has acquired and explicitly
-unlocked the directory. The wait is bounded at five seconds: a lock held longer
-most likely belongs to another process, so `Close` logs a warning and returns,
-and the next open reports the lock. Windows children do not inherit the handle,
+`waitForDirLockRelease` (`dirlock_unix.go`) has either acquired and explicitly
+unlocked the directory or reached its five-second bound. Completion therefore
+does not guarantee a free lock: one held past the bound most likely belongs to
+another process, so `Close` logs a warning and returns, and the next open
+reports the lock. Windows children do not inherit the handle,
 so the wait is a no-op there.
 
 ### Cross-Store Durability Contract
