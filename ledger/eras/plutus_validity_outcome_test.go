@@ -118,34 +118,12 @@ func newDijkstraGuardingValidityOutcomeTx(
 	}
 }
 
-// dijkstraValidityOutcomeV4CostModelPad covers the 7 PlutusV4 cost-model
-// parameters (multiIndexArray, assetCount) that plutigo's CostModelParamNamesV4
-// appends after PlutusV3's own 350 names, in the same order. No script in this
-// file calls either builtin, so these placeholders never affect a measured
-// cost; they only have to be present and finite. See
-// plutigo lang.CostModelParamNamesV4.
-var dijkstraValidityOutcomeV4CostModelPad = []int64{
-	100,
-	100,
-	100,
-	100,
-	100,
-	100,
-	100,
-}
-
-// dijkstraValidityOutcomePParams builds real, non-empty cost models for every
-// Plutus language version invoked by this file's tests. plutigo v0.7.2's
-// costModelFromList costs any parameter beyond the supplied list at
-// math.MaxInt64 rather than leaving it at a zero-valued default (matching
-// upstream's real "an uncosted parameter cannot run within any budget"
-// semantics, see plutigo#415's cek/cost_model.go change) -- an empty
-// CostModels map, as this fixture carried before, therefore made every CEK
-// machine step cost MaxInt64 and exhausted any real budget on the first step,
-// independent of the trivial guarding script's own true cost. PlutusV3 (index
-// 2) reuses the real Preview epoch-672 cost model; PlutusV4 (index 3) reuses
-// the same list, since PlutusV4's own names are PlutusV3's 350 plus the 7
-// multiIndexArray/assetCount entries above.
+// dijkstraValidityOutcomePParams supplies real Preview epoch-672 cost models.
+// plutigo costs every parameter missing from a supplied list at
+// math.MaxInt64, as plutus-ledger-api does, so an empty CostModels map makes
+// the first CEK machine step exhaust any budget. PlutusV4 reuses the PlutusV3
+// list: its machine-step parameters are costed, and the builtins it leaves at
+// MaxInt64 are never called by these scripts.
 func dijkstraValidityOutcomePParams(
 	t *testing.T,
 ) *gdijkstra.DijkstraProtocolParameters {
@@ -159,10 +137,6 @@ func dijkstraValidityOutcomePParams(
 		readErasFixture(t, previewConwayCostModels),
 		&costModels,
 	))
-	v4CostModel := append(
-		append([]int64{}, costModels.PlutusV3...),
-		dijkstraValidityOutcomeV4CostModelPad...,
-	)
 	return &gdijkstra.DijkstraProtocolParameters{
 		ConwayProtocolParameters: conway.ConwayProtocolParameters{
 			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
@@ -172,7 +146,7 @@ func dijkstraValidityOutcomePParams(
 				0: costModels.PlutusV1,
 				1: costModels.PlutusV2,
 				2: costModels.PlutusV3,
-				3: v4CostModel,
+				3: costModels.PlutusV3,
 			},
 		},
 	}

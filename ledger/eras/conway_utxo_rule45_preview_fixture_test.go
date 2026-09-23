@@ -185,9 +185,10 @@ func TestConwayPlutusV2ScriptStillRejectsMalformedVersionAtExecution(
 		lcommon.ExUnits{Memory: 14_000_000, Steps: 10_000_000_000},
 		evalContext,
 	)
-	require.Error(
+	require.ErrorContains(
 		t,
 		evalErr,
+		"unsupported UPLC program version 89.49.145",
 		"a script with an unsupported UPLC program version must still be "+
 			"rejected when actually executed",
 	)
