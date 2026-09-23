@@ -157,27 +157,38 @@ func isRetryableDingoConnErr(err error) bool {
 		errors.Is(err, net.ErrClosed)
 }
 
+// callbackErr builds the error a chainsync roll-forward or roll-backward
+// callback returns, flattening any cause that satisfies
+// errors.Is(err, protocol.ErrProtocolShuttingDown) into a plain error
+// carrying the same text.
+//
+// gouroboros' recvLoop treats a callback error matching that sentinel as a
+// graceful shutdown and returns WITHOUT calling SendError
+// (protocol/protocol.go), so such an error ends the chainsync session
+// without ever reaching csConn.ErrorChan(). RunFromGenesis's session select
+// would then block forever: no reconnect, no epoch report, no error out of
+// the run. Every error these callbacks produce is a session-ending fault
+// this function's caller must see, never a graceful stop, so none of them
+// may carry that sentinel out.
+func callbackErr(format string, args ...any) error {
+	err := fmt.Errorf(format, args...)
+	if !errors.Is(err, protocol.ErrProtocolShuttingDown) {
+		return err
+	}
+	return errors.New(err.Error())
+}
+
 // runProtocolParamsAndStake runs CheckProtocolParams then
 // CheckStakeDistribution against dingoAddr at point, on one shared
 // connection/Acquire per attempt -- see koios_check.go's doc comment for why
 // the two share an Acquire rather than the UTxO check's own separate one.
 //
-// Unlike the single-attempt version this replaced, a connection that dies
-// during or between the two calls (isRetryableDingoConnErr) is not an
-// immediately-reported hard failure: the whole pair is retried against a
-// freshly redialed connection, up to protocolParamsAndStakeRetries times,
-// applying incrementalSession's already-proven persistent-connection
-// pattern (dingo#4183: hold one connection per attempt, and recover from its
-// death by reconnecting) to this from-genesis code path.
-//
-// Confirmed live (dingo#1900 node-parity/koios-parity from-genesis run on
-// preview): the prior version's CheckStakeDistribution failed outright on
-// its first call (client.GetPoolDistr2 returning
-// protocol.ErrProtocolShuttingDown) on every epoch starting at epoch 4, with
-// no chance to recover, because the shared connection from acquireWithRetry
-// had already died sometime between it and the immediately preceding
-// CheckProtocolParams call on that same connection -- and nothing at this
-// call site ever redialed and retried the pair.
+// A connection that dies during or between the two calls
+// (isRetryableDingoConnErr) is not a hard failure: the whole pair is retried
+// against a freshly redialed connection, up to protocolParamsAndStakeRetries
+// times, the same persistent-connection pattern incrementalSession uses
+// (dingo#4183: hold one connection per attempt, and recover from its death by
+// reconnecting).
 func runProtocolParamsAndStake(
 	ctx context.Context,
 	dingoAddr string,
@@ -232,17 +243,12 @@ func runProtocolParamsAndStake(
 		}
 		return ppMismatches, ppErr, stakeMismatches, stakeErr
 	}
-	// Retries exhausted: return this last attempt's own results exactly as
-	// computed above, NOT a single conflated error forced into both slots.
-	// ppMismatches/ppErr/stakeMismatches/stakeErr are the named return
-	// values, already holding the final loop iteration's real outcome --
-	// critically, ppErr may be nil here (protocol params genuinely
-	// succeeded on this last attempt) even though the loop kept going
-	// because stakeErr was still retryable; reporting anything else would
-	// misattribute the stake connection failure to protocol params too,
-	// which a live run (dingo#1900) surfaced as "protocol params check did
-	// not run" with the *stake* check's own error text once the retry
-	// budget was exhausted under sustained churn.
+	// Retries exhausted: each check keeps its own outcome from the final
+	// attempt, never a single conflated error forced into both slots. ppErr
+	// may legitimately be nil here -- protocol params succeeded on that
+	// attempt and only stakeErr kept the loop going -- and reporting
+	// anything else would attribute the stake connection failure to
+	// protocol params too.
 	return ppMismatches, ppErr, stakeMismatches, stakeErr
 }
 
@@ -271,11 +277,9 @@ type EpochResult struct {
 	UTxORefCount  int
 
 	// Timing breakdown, purely diagnostic: which phase actually spent the
-	// wall-clock time this epoch. Added after live testing found each of
-	// TxInfoFlushCount, ProtocolParamsAndStakeElapsed, and UTxOElapsed had,
-	// in turn, been the dominant cost at different points as chain activity
-	// grew -- rather than continuing to guess and re-fix one at a time,
-	// this makes the split visible every epoch going forward.
+	// wall-clock time this epoch. Any of the three can dominate depending on
+	// how much chain activity the epoch carried, so the split is reported
+	// every epoch rather than inferred.
 	TxInfoFlushCount              int
 	TxInfoFlushElapsed            time.Duration
 	ProtocolParamsAndStakeElapsed time.Duration
@@ -598,13 +602,11 @@ func RunFromGenesis(
 	)
 
 	// flushPendingTxInfos applies every buffered transaction hash's
-	// input/output changes to utxoRefs, instead of the one-call-per-block
-	// approach this originally replaced: confirmed live that firing a
-	// separate /tx_info round trip for every block with at least one
-	// transaction made a from-genesis run's epoch cadence collapse from
-	// seconds to tens of minutes per epoch as real chain activity picked
-	// up -- the per-call network latency to Koios, not payload size, was
-	// the actual bottleneck.
+	// input/output changes to utxoRefs. Hashes accumulate across blocks
+	// rather than being fetched per block: the cost of a /tx_info lookup is
+	// dominated by the round trip to Koios, not by payload size, so one call
+	// per block with a transaction in it collapses a run's epoch cadence
+	// from seconds to tens of minutes once chain activity picks up.
 	//
 	// Splits pendingTxHashes into koiosparity.KoiosTxInfoBatchSize-sized
 	// chunks and fetches them with bounded concurrency (txInfoConcurrency)
@@ -803,7 +805,12 @@ func RunFromGenesis(
 
 						epoch, err := currentEpochNo(ctx, dingoAddr, magic, point)
 						if err != nil {
-							return fmt.Errorf(
+							// callbackErr, not fmt.Errorf: GetEpochNo's own
+							// connection dying returns an error wrapping
+							// protocol.ErrProtocolShuttingDown, which %w would
+							// carry out of this callback and silently end the
+							// session -- see callbackErr's doc comment.
+							return callbackErr(
 								"determine current epoch at slot %d: %w",
 								block.SlotNumber(), err,
 							)
@@ -990,14 +997,28 @@ func RunFromGenesis(
 						// new fork would be silently skipped as already seen.
 						epoch, err := currentEpochNo(ctx, dingoAddr, magic, point)
 						if err != nil {
-							return fmt.Errorf(
+							// callbackErr for the same reason as the
+							// roll-forward callback above.
+							return callbackErr(
 								"determine current epoch at rollback slot %d: %w",
 								point.Slot, err,
 							)
 						}
 						progressed = true
-						haveLastEpoch = true
-						lastEpoch = epoch
+						// Retreat only. Raising lastEpoch here would skip an
+						// epoch entirely: every reconnect opens with a
+						// RollBackward to lastPoint, which is already the
+						// block the failed session died on, so assigning
+						// unconditionally would mark that block's own epoch as
+						// confirmed without ever running its checks, and the
+						// roll-forward callback's `epoch <= lastEpoch` guard
+						// would then return early for every remaining block in
+						// it. An epoch is confirmed by being checked, which
+						// only happens in the roll-forward callback.
+						if !haveLastEpoch || epoch < lastEpoch {
+							haveLastEpoch = true
+							lastEpoch = epoch
+						}
 						return nil
 					},
 				),

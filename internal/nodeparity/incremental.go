@@ -1054,13 +1054,11 @@ func incrementalSession(
 // block (both a caller supplies as -1 when the epoch lookup failed, per
 // checkBlockDelta's contract, which decideFullCheckReason treats as "unknown,
 // do not report a transition"); blocksSinceFullCheck and fullCheckInterval
-// are the values checkpointing this block would compare. Priority order
-// matches the switch statement this replaced: a mismatch always wins over an
-// epoch transition, which always wins over a plain interval checkpoint --
-// deliberate, since a mismatch is the most actionable of the three and an
-// operator investigating one should not have it overwritten in the log by a
-// merely-due interval checkpoint that happened to line up with the same
-// block.
+// are the values checkpointing this block would compare. A mismatch always
+// wins over an epoch transition, which always wins over a plain interval
+// checkpoint: a mismatch is the most actionable of the three, and an
+// operator investigating one must not have it overwritten in the log by a
+// merely-due interval checkpoint that happened to land on the same block.
 func decideFullCheckReason(
 	diffEmpty bool,
 	epoch, beforeEpoch int,

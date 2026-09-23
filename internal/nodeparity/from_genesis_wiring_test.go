@@ -99,6 +99,25 @@ type genesisFakeServer struct {
 	// so a state change (nothing here yet, but see epochBySlot) lands at a
 	// precise point instead of racing an ungated server.
 	step chan struct{}
+	// sessionGone is closed when a new session begins (findIntersect), and
+	// releases any previous session's handler still parked on step.
+	//
+	// Without it, a session whose client abandoned it mid-feed leaves its
+	// handler blocked on the shared step channel, where it silently consumes
+	// the next allowStep meant for the reconnected session -- which then
+	// waits forever for a block the test believes it already released. Only
+	// a test that drives a reconnect (see
+	// from_genesis_epochno_failure_test.go) can reach that state; a
+	// single-session test closes nothing.
+	sessionGone chan struct{}
+	// sessions counts FindIntersect calls, i.e. how many chainsync sessions
+	// this fake has served. waitForSessions lets a test that drives a
+	// reconnect resume stepping only once the NEW session is actually
+	// feeding, rather than as soon as the client logged that the old one
+	// ended -- the reconnect loop logs that before its backoff sleep, so a
+	// step released on the log lands on the dead session's handler.
+	sessions       int
+	sessionStarted chan struct{}
 
 	epochBySlot      map[uint64]int
 	lastAcquiredSlot uint64
@@ -116,13 +135,69 @@ type genesisFakeServer struct {
 	// never fails, leaving every other test's behavior unchanged.
 	failUtxoWholeCount int
 	utxoWholeCalls     int
+
+	// failEpochNoAtSlot, when non-nil, makes ShelleyEpochNoQuery fail once
+	// for each slot in it whose count is still above zero, decrementing as
+	// it goes -- simulating currentEpochNo's own separately-dialed
+	// LocalStateQuery connection dying mid-query at an exact block. The
+	// resulting client-side error wraps protocol.ErrProtocolShuttingDown,
+	// which is the whole point: see
+	// TestRunFromGenesis_EpochNoFailureDoesNotHangSession.
+	failEpochNoAtSlot map[uint64]int
+}
+
+// failEpochNoOnce arranges for the next ShelleyEpochNoQuery Acquired at slot
+// to fail, once.
+func (s *genesisFakeServer) failEpochNoOnce(slot uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failEpochNoAtSlot == nil {
+		s.failEpochNoAtSlot = make(map[uint64]int, 1)
+	}
+	s.failEpochNoAtSlot[slot]++
+}
+
+// takeEpochNoFailure reports whether this ShelleyEpochNoQuery, for the most
+// recently Acquired slot, is one of the failures failEpochNoOnce armed.
+func (s *genesisFakeServer) takeEpochNoFailure() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failEpochNoAtSlot[s.lastAcquiredSlot] <= 0 {
+		return false
+	}
+	s.failEpochNoAtSlot[s.lastAcquiredSlot]--
+	return true
 }
 
 func newGenesisFakeServer(t *testing.T, blockCount int) *genesisFakeServer {
 	t.Helper()
 	chain, err := csmock.BuildChain(1, ledger.Blake2b256{}, 100, 20, blockCount)
 	require.NoError(t, err)
-	return &genesisFakeServer{chain: chain, step: make(chan struct{})}
+	return &genesisFakeServer{
+		chain:          chain,
+		step:           make(chan struct{}),
+		sessionStarted: make(chan struct{}, 16),
+	}
+}
+
+// waitForSessions blocks until this fake has served at least n chainsync
+// sessions (FindIntersect calls).
+func (s *genesisFakeServer) waitForSessions(t *testing.T, n int) {
+	t.Helper()
+	deadline := time.After(30 * time.Second)
+	for {
+		s.mu.Lock()
+		got := s.sessions
+		s.mu.Unlock()
+		if got >= n {
+			return
+		}
+		select {
+		case <-s.sessionStarted:
+		case <-deadline:
+			t.Fatalf("only %d chainsync sessions started, wanted %d", got, n)
+		}
+	}
 }
 
 // newGenesisFakeServerWithTransactions is like newGenesisFakeServer, but its
@@ -152,15 +227,22 @@ func newGenesisFakeServerWithTransactions(
 		chain.Points[i] = csmock.PointOf(block)
 		chain.Tips[i] = csmock.TipOf(block)
 	}
-	return &genesisFakeServer{chain: chain, step: make(chan struct{})}
+	return &genesisFakeServer{
+		chain:          chain,
+		step:           make(chan struct{}),
+		sessionStarted: make(chan struct{}, 16),
+	}
 }
 
 // allowStep permits this server's next gated RollForward reply to proceed.
 func (s *genesisFakeServer) allowStep(t *testing.T) {
 	t.Helper()
+	s.mu.Lock()
+	step := s.step
+	s.mu.Unlock()
 	select {
-	case s.step <- struct{}{}:
-	case <-time.After(5 * time.Second):
+	case step <- struct{}{}:
+	case <-time.After(15 * time.Second):
 		t.Fatal("server did not consume the step signal in time")
 	}
 }
@@ -175,6 +257,22 @@ func (s *genesisFakeServer) findIntersect(
 ) (pcommon.Point, chainsync.Tip, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// FindIntersect starts a session, and a real server opens every session
+	// with a RollBackward (NeedsInitialRollback), not just the first one.
+	// Clearing the flag here is what makes a reconnect after a failed
+	// session behave like a real one -- which is the whole subject of
+	// TestRunFromGenesis_EpochNoFailureDoesNotSkipEpoch. A run that never
+	// reconnects calls this exactly once, so nothing else changes.
+	s.rolledBack = false
+	if s.sessionGone != nil {
+		close(s.sessionGone)
+	}
+	s.sessionGone = make(chan struct{})
+	s.sessions++
+	select {
+	case s.sessionStarted <- struct{}{}:
+	default:
+	}
 	if len(points) > 0 {
 		for i, p := range s.chain.Points {
 			if p.Slot == points[0].Slot {
@@ -212,8 +310,15 @@ func (s *genesisFakeServer) requestNext(ctx chainsync.CallbackContext) error {
 		return ctx.Server.AwaitReply()
 	}
 	step := s.step
+	gone := s.sessionGone
 	s.mu.Unlock()
-	<-step
+	select {
+	case <-step:
+	case <-gone:
+		// A newer session has started; stop feeding this one rather than
+		// consuming a step meant for its successor.
+		return errors.New("chainsync session superseded")
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -297,6 +402,11 @@ func (s *genesisFakeServer) lsqConfig() localstatequery.Config {
 							Results: map[localstatequery.UtxoId]ledger.BabbageTransactionOutput{},
 						}, nil
 					case *localstatequery.ShelleyEpochNoQuery:
+						if s.takeEpochNoFailure() {
+							return nil, errors.New(
+								"simulated epoch-number query failure",
+							)
+						}
 						return []any{s.epochForLastAcquired()}, nil
 					default:
 						return nil, fmt.Errorf("unexpected shelley query %T", inner.Query)

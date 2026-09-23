@@ -7944,7 +7944,16 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   `koios_account_coverage` (one row per `(network, epoch)` recording
   `requested_count`/`fetched_count`/`complete` — see "Per-account exact
   parity (#3097)" below for why `complete` gates every per-account
-  comparison).
+  comparison). #1900 adds `koios_tx_info` (one row per `(network, tx_hash)`
+  holding the decoded `/tx_info` subset `node-parity from-genesis` rebuilds
+  the UTxO set from: body inputs and outputs, plus the collateral inputs,
+  collateral return and phase-2 validity verdict its `Consumed`/`Produced`
+  need). That table is written by `cmd/node-parity from-genesis`, not by the
+  `fetch` subcommand, and unlike the per-epoch tables it needs no TTL —
+  a settled transaction never changes Koios-side. A `payload_version` column
+  stands in for one: it stamps the struct shape each row was written from,
+  and rows carrying an older version are treated as misses and re-fetched,
+  which is how a row gains a field the code did not previously ask for.
 - **Dingo:** read directly from Dingo's metadata database during the `check`
   phase — no HTTP endpoint on the Dingo node is contacted. Three backends are
   supported (`sqlite`, `postgres`, `mysql`), resolved with the same precedence
@@ -9414,6 +9423,23 @@ both sides from a database, after the fact), this tool talks Ouroboros NtC
 directly to two live, independently-running node processes it does not
 start, stop, or otherwise manage.
 
+The `from-genesis` subcommand is the exception to "two nodes": it replaces the
+reference cardano-node with Koios. A real cardano-node cannot fill the
+reference role for a from-genesis replay, because its own replay races ahead
+of a freshly-started Dingo fast enough that no matching historical block is
+left to compare against by the time Dingo reaches it; Koios retains full
+per-epoch history instead. It follows `--dingo-addr`'s chain from genesis over
+one reconnecting ChainSync session and, at every epoch boundary, compares
+protocol parameters, stake distribution, and the whole UTxO set against
+Koios. The UTxO side is a running reconstruction seeded from Dingo at the
+start point and advanced by Koios's own `/tx_info` answers for every
+transaction on the chain, so it stays independent of Dingo after its seed; a
+rollback re-baselines it and marks that epoch's UTxO verdict "not run" rather
+than reporting a comparison that would trivially match. `--koios-cache-path`
+makes those lookups cache-first against a `koios-parity` `cache.db`, which
+may be the one a dingo instance's own embedded observer is writing, provided
+its recorded Koios API root matches `--koios-base-url`.
+
 **Architecture:**
 
 ```text
@@ -9425,12 +9451,16 @@ internal/nodeparity/       # shared library, untagged and importable
   check.go                  # CheckResult, Check, tipsAgree: the point-pinning orchestration (full mode)
   watch.go                  # Watcher, WatchBlocks: persistent per-node ChainSync subscription with reconnect (full mode)
   incremental.go            # IncrementalCursor, RunIncremental: sequential per-block UTxO-delta orchestration (incremental mode)
+  from_genesis.go           # RunFromGenesis: reconnecting from-genesis ChainSync walk, per-epoch checks (Koios mode)
+  koios_check.go            # CheckProtocolParams/CheckStakeDistribution/UTxOChanges: the Koios-backed comparisons
 
-cmd/node-parity/           # thin Cobra CLI wrapper: only 'check' and 'watch' are subcommands
+cmd/node-parity/           # thin Cobra CLI wrapper: 'check', 'watch' and 'from-genesis' are the subcommands
   main.go                  # root command (default action: one check, same as 'check')
   check.go                  # one-shot subcommand (full mode only)
   watch.go                  # --mode=full (block-triggered, --fallback-interval backstop) or
                              # --mode=incremental (sequential per-block, --full-check-interval/--cursor-file)
+  from_genesis.go           # from-genesis subcommand: Koios instead of a reference cardano-node,
+                             # --koios-base-url/--koios-api-key/--koios-cache-path, --at-slot/--at-hash resume
   metrics.go                # not a subcommand -- Prometheus counters plus the /metrics HTTP
                              # server 'watch' starts when --metrics-addr is set; 'check' never
                              # serves metrics, since a one-shot invocation has nothing ongoing

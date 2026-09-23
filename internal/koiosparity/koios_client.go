@@ -157,14 +157,12 @@ const (
 
 	// koiosIdleConnTimeout bounds how long an idle keep-alive connection
 	// stays in the client's pool before Go proactively closes it. Shorter
-	// than http.DefaultTransport's 90s default, on the theory that a stale
-	// server/CDN-closed keep-alive connection reused anyway (write
-	// succeeds, read then hangs) contributes to the stalls
-	// koiosRequestTimeout's own doc comment describes. Confirmed live that
-	// this alone did not eliminate them, so koiosRequestTimeout was also
-	// shortened rather than relying on this by itself -- kept anyway since
-	// it cannot hurt and may reduce how often the stall condition is hit in
-	// the first place.
+	// than http.DefaultTransport's 90s default, so that a stale
+	// server/CDN-closed keep-alive connection is dropped rather than reused
+	// into the write-succeeds-then-read-hangs stall koiosRequestTimeout's
+	// own doc comment describes. It narrows the window for that stall
+	// rather than closing it, which is why koiosRequestTimeout bounds it
+	// too.
 	koiosIdleConnTimeout = 30 * time.Second
 
 	// koiosRequestTimeout bounds a single HTTP request/response round
@@ -1725,6 +1723,48 @@ type KoiosTxInfoAsset struct {
 	Quantity  string `json:"quantity"`
 }
 
+// KoiosTxInfoAssetList is /tx_info's asset_list, which Koios serialises two
+// different ways for the same content: a JSON array on inputs, outputs and
+// collateral_inputs, but a JSON *string* holding that array's text on
+// collateral_output (confirmed against the live API: an output's asset_list
+// decodes as [], the same transaction's collateral_output's as "[]").
+//
+// A plain []KoiosTxInfoAsset fails outright on the string form, which would
+// make GetTxInfos error on every transaction that declares a collateral
+// return -- including valid ones, since a collateral return is declared
+// up front and reported whether or not phase-2 validation later rejected the
+// transaction. Accepting both forms is what lets KoiosTxInfoOutput describe
+// an ordinary output and a collateral return with one type.
+//
+// Marshalling is the plain array form, so a cached row written from this
+// struct always reads back through the array branch.
+type KoiosTxInfoAssetList []KoiosTxInfoAsset
+
+func (a *KoiosTxInfoAssetList) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		*a = nil
+		return nil
+	}
+	if trimmed[0] == '"' {
+		var inner string
+		if err := json.Unmarshal(trimmed, &inner); err != nil {
+			return fmt.Errorf("asset_list string form: %w", err)
+		}
+		if strings.TrimSpace(inner) == "" {
+			*a = nil
+			return nil
+		}
+		trimmed = []byte(inner)
+	}
+	var items []KoiosTxInfoAsset
+	if err := json.Unmarshal(trimmed, &items); err != nil {
+		return err
+	}
+	*a = items
+	return nil
+}
+
 // KoiosTxInfoInlineDatum is the non-null shape of a KoiosTxInfoOutput's
 // InlineDatum -- only its presence matters here (to distinguish the
 // "inline" and "hash-only" datum forms), not its content.
@@ -1761,7 +1801,23 @@ type KoiosTxInfoOutput struct {
 	DatumHash       *string                     `json:"datum_hash"`
 	InlineDatum     *KoiosTxInfoInlineDatum     `json:"inline_datum"`
 	ReferenceScript *KoiosTxInfoReferenceScript `json:"reference_script"`
-	AssetList       []KoiosTxInfoAsset          `json:"asset_list"`
+	AssetList       KoiosTxInfoAssetList        `json:"asset_list"`
+}
+
+// KoiosTxInfoPlutusContract is one entry in a KoiosTxInfoItem's
+// PlutusContracts, decoded only far enough to read the phase-2 validation
+// verdict.
+//
+// /tx_info reports no top-level validity flag (confirmed against the live
+// API: tx_info objects carry no valid_contract key at all). The ledger's
+// single per-transaction is_valid flag is denormalised onto every one of
+// that transaction's Plutus contract rows instead, so any entry answers for
+// the whole transaction.
+type KoiosTxInfoPlutusContract struct {
+	// ValidContract is a pointer so that a null or absent flag is "no
+	// verdict reported" rather than a silent "invalid": only an explicit
+	// false marks a transaction phase-2-invalid.
+	ValidContract *bool `json:"valid_contract"`
 }
 
 // KoiosTxInfoItem is one transaction from /tx_info: which refs it consumes
@@ -1775,6 +1831,53 @@ type KoiosTxInfoItem struct {
 	TxHash  string               `json:"tx_hash"`
 	Inputs  []KoiosTxInfoUtxoRef `json:"inputs"`
 	Outputs []KoiosTxInfoOutput  `json:"outputs"`
+
+	// CollateralInputs, CollateralOutput and PlutusContracts exist for the
+	// phase-2-invalid case only: Inputs/Outputs describe what the
+	// transaction body asked for, which the ledger does not apply when
+	// phase-2 validation fails. See Consumed and Produced.
+	CollateralInputs []KoiosTxInfoUtxoRef        `json:"collateral_inputs"`
+	CollateralOutput *KoiosTxInfoOutput          `json:"collateral_output"`
+	PlutusContracts  []KoiosTxInfoPlutusContract `json:"plutus_contracts"`
+}
+
+// IsValid reports whether the ledger applied this transaction's body, i.e.
+// whether phase-2 script validation passed. A transaction with no Plutus
+// contracts is always valid -- phase-2 validation only applies to script
+// transactions -- and so is one whose contracts report no verdict (see
+// KoiosTxInfoPlutusContract.ValidContract).
+func (i KoiosTxInfoItem) IsValid() bool {
+	for _, pc := range i.PlutusContracts {
+		if pc.ValidContract != nil && !*pc.ValidContract {
+			return false
+		}
+	}
+	return true
+}
+
+// Consumed reports the refs this transaction actually removed from the UTxO
+// set, mirroring gouroboros' Transaction.Consumed() exactly: the body inputs
+// for a valid transaction, the collateral inputs for a phase-2-invalid one.
+func (i KoiosTxInfoItem) Consumed() []KoiosTxInfoUtxoRef {
+	if i.IsValid() {
+		return i.Inputs
+	}
+	return i.CollateralInputs
+}
+
+// Produced reports the outputs this transaction actually added to the UTxO
+// set, mirroring gouroboros' Transaction.Produced() exactly: the body
+// outputs for a valid transaction, and for a phase-2-invalid one the single
+// collateral return if it declared one, nothing otherwise. Koios indexes the
+// collateral return at len(outputs), the same index gouroboros assigns it.
+func (i KoiosTxInfoItem) Produced() []KoiosTxInfoOutput {
+	if i.IsValid() {
+		return i.Outputs
+	}
+	if i.CollateralOutput == nil {
+		return nil
+	}
+	return []KoiosTxInfoOutput{*i.CollateralOutput}
 }
 
 // CanonicalKoiosUTxOEntry builds a deterministic string encoding of out,

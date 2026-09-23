@@ -15,8 +15,13 @@
 package main
 
 import (
+	"io"
+	"log/slog"
+	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/blinklabs-io/dingo/internal/koiosparity"
 	"github.com/blinklabs-io/dingo/internal/nodeparity"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -238,5 +243,119 @@ func TestFromGenesisCounters_Result(t *testing.T) {
 		}
 		assert.NoError(t, c.result(),
 			"one genuinely verified check across the whole run is enough to not call this run a total loss")
+	})
+}
+
+// TestRequireMatchingKoiosSource covers the guard that keeps a shared
+// cache.db from mixing two Koios hosts' answers.
+//
+// OpenCache alone leaves assertClaimedSource with nothing claimed, so every
+// later write succeeds regardless of which host produced the rows already
+// there -- from-genesis would read one oracle's answers and write another's
+// under the existing stamp. The cache this command is normally pointed at is
+// a dingo instance's own, so the mismatch must be refused rather than
+// recorded: RecordKoiosSource would discard every cached row for the network.
+func TestRequireMatchingKoiosSource(t *testing.T) {
+	const network = "preview"
+
+	newCache := func(t *testing.T) (*koiosparity.Cache, string) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "cache.db")
+		cache, err := koiosparity.OpenCache(path, slog.New(
+			slog.NewTextHandler(io.Discard, nil),
+		))
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = cache.Close() })
+		return cache, path
+	}
+
+	newClient := func(t *testing.T, baseURL string) *koiosparity.KoiosClient {
+		t.Helper()
+		client, err := nodeparity.NewKoiosClient(network, "", baseURL, true)
+		require.NoError(t, err)
+		return client
+	}
+
+	t.Run("matching host pins the source", func(t *testing.T) {
+		cache, path := newCache(t)
+		koiosFlags.cachePath = path
+		t.Cleanup(func() { koiosFlags.cachePath = "" })
+
+		// Stamped through a separate handle, so the handle under test has
+		// claimed nothing of its own before requireMatchingKoiosSource runs
+		// -- otherwise this would assert on RecordKoiosSource's own claim
+		// rather than on the pin.
+		other, err := koiosparity.OpenCache(path, slog.New(
+			slog.NewTextHandler(io.Discard, nil),
+		))
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = other.Close() })
+
+		client := newClient(t, "http://mirror.example/api/v1")
+		_, err = other.RecordKoiosSource(
+			network, client.ResolvedBaseURL(), time.Now().UTC(),
+		)
+		require.NoError(t, err)
+
+		require.NoError(t, requireMatchingKoiosSource(cache, client, network))
+
+		// Pinned: another process re-pointing the cache must now fail this
+		// run's writes rather than let them land under a source its answers
+		// never came from.
+		_, err = other.RecordKoiosSource(
+			network, "http://other.example/api/v1", time.Now().UTC(),
+		)
+		require.NoError(t, err)
+
+		err = cache.UpsertTxInfos(
+			network,
+			[]koiosparity.KoiosTxInfoItem{{TxHash: "aa"}},
+			time.Now().UTC(),
+		)
+		require.Error(t, err, "a pinned run must not write after a re-point")
+	})
+
+	t.Run("mismatched host is refused", func(t *testing.T) {
+		cache, path := newCache(t)
+		koiosFlags.cachePath = path
+		t.Cleanup(func() { koiosFlags.cachePath = "" })
+
+		_, err := cache.RecordKoiosSource(
+			network, "http://recorded.example/api/v1", time.Now().UTC(),
+		)
+		require.NoError(t, err)
+
+		client := newClient(t, "http://different.example/api/v1")
+		err = requireMatchingKoiosSource(cache, client, network)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "http://recorded.example/api/v1")
+		assert.Contains(t, err.Error(), "http://different.example/api/v1")
+
+		// Refused, never recorded: the rows the cache already holds are
+		// still there and still attributed to the host that produced them.
+		recorded, ok, err := cache.GetKoiosSource(network)
+		require.NoError(t, err)
+		assert.True(t, ok)
+		assert.Equal(t, "http://recorded.example/api/v1", recorded)
+	})
+
+	t.Run("unstamped cache is judged by its public-root attribution", func(t *testing.T) {
+		cache, path := newCache(t)
+		koiosFlags.cachePath = path
+		t.Cleanup(func() { koiosFlags.cachePath = "" })
+
+		// Nothing recorded: the rows are attributed to the public root for
+		// the network, so a custom host disagrees with them.
+		err := requireMatchingKoiosSource(
+			cache, newClient(t, "http://mirror.example/api/v1"), network,
+		)
+		require.Error(t, err)
+
+		// The default client resolves to that same public root, so it
+		// matches and pins.
+		require.NoError(
+			t,
+			requireMatchingKoiosSource(cache, newClient(t, ""), network),
+		)
 	})
 }

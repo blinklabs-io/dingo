@@ -309,3 +309,111 @@ func TestUTxOChangesAppliesInputsAndOutputs(t *testing.T) {
 		t.Fatalf("expected exactly 2 live refs after the change, got %d: %v", len(set), set)
 	}
 }
+
+// boolPtr is a local helper: the koiosparity package has its own, but a
+// test in this package cannot reach it.
+func boolPtr(b bool) *bool { return &b }
+
+// TestUTxOChangesPhase2InvalidUsesCollateral proves the reconstruction
+// follows what the ledger actually did with a phase-2-invalid transaction,
+// not what its body asked for.
+//
+// Applying such a transaction's body inputs and outputs -- which is what
+// reading Inputs/Outputs directly does -- removes refs the ledger never
+// spent and adds outputs it never created, while missing the collateral it
+// did consume and the collateral return it did produce. Against Dingo's own
+// answer that shows up as a false missing/extra pair on every one of those
+// refs, persisting until the next re-baseline, and Dingo's collateral
+// handling is never actually compared. incremental.go's blockUtxoDelta draws
+// the same distinction via gouroboros' Transaction.Consumed()/Produced().
+//
+// Reverting UTxOChanges to iterate info.Inputs/info.Outputs makes this fail.
+func TestUTxOChangesPhase2InvalidUsesCollateral(t *testing.T) {
+	const (
+		bodyInput  = "bodyin#0"
+		collInput  = "collin#7"
+		collReturn = "failtx#2"
+	)
+	set := UTxOSet{
+		bodyInput: "addr1body|500000",
+		collInput: "addr1coll|9000000",
+	}
+
+	invalid := koiosparity.KoiosTxInfoItem{
+		TxHash: "failtx",
+		Inputs: []koiosparity.KoiosTxInfoUtxoRef{{TxHash: "bodyin", TxIndex: 0}},
+		Outputs: []koiosparity.KoiosTxInfoOutput{
+			{TxHash: "failtx", TxIndex: 0, Value: "400000"},
+			{TxHash: "failtx", TxIndex: 1, Value: "100000"},
+		},
+		CollateralInputs: []koiosparity.KoiosTxInfoUtxoRef{
+			{TxHash: "collin", TxIndex: 7},
+		},
+		CollateralOutput: &koiosparity.KoiosTxInfoOutput{
+			TxHash: "failtx", TxIndex: 2, Value: "8500000",
+		},
+		PlutusContracts: []koiosparity.KoiosTxInfoPlutusContract{
+			{ValidContract: boolPtr(false)},
+		},
+	}
+
+	UTxOChanges(set, []koiosparity.KoiosTxInfoItem{invalid})
+
+	assert.Contains(
+		t, set, bodyInput,
+		"a phase-2-invalid transaction's body inputs are NOT spent",
+	)
+	assert.NotContains(
+		t, set, collInput,
+		"a phase-2-invalid transaction's collateral IS consumed",
+	)
+	assert.NotContains(
+		t, set, "failtx#0",
+		"a phase-2-invalid transaction's body outputs are NOT created",
+	)
+	assert.NotContains(t, set, "failtx#1")
+	require.Contains(
+		t, set, collReturn,
+		"a phase-2-invalid transaction's collateral return IS created",
+	)
+	assert.Equal(
+		t,
+		koiosparity.CanonicalKoiosUTxOEntry(*invalid.CollateralOutput),
+		set[collReturn],
+	)
+}
+
+// TestUTxOChangesValidTxWithCollateralUsesBody is the other half: a
+// transaction that declares collateral but passes phase-2 validation applies
+// its body, and its declared collateral return is never created. Koios
+// reports collateral_inputs and collateral_output for these too, so keying
+// off their presence rather than the validity verdict would corrupt every
+// successful script transaction.
+func TestUTxOChangesValidTxWithCollateralUsesBody(t *testing.T) {
+	set := UTxOSet{"bodyin#0": "addr1body|500000", "collin#7": "addr1coll|9000000"}
+
+	valid := koiosparity.KoiosTxInfoItem{
+		TxHash:  "oktx",
+		Inputs:  []koiosparity.KoiosTxInfoUtxoRef{{TxHash: "bodyin", TxIndex: 0}},
+		Outputs: []koiosparity.KoiosTxInfoOutput{{TxHash: "oktx", TxIndex: 0, Value: "400000"}},
+		CollateralInputs: []koiosparity.KoiosTxInfoUtxoRef{
+			{TxHash: "collin", TxIndex: 7},
+		},
+		CollateralOutput: &koiosparity.KoiosTxInfoOutput{
+			TxHash: "oktx", TxIndex: 1, Value: "8500000",
+		},
+		PlutusContracts: []koiosparity.KoiosTxInfoPlutusContract{
+			{ValidContract: boolPtr(true)},
+		},
+	}
+
+	UTxOChanges(set, []koiosparity.KoiosTxInfoItem{valid})
+
+	assert.NotContains(t, set, "bodyin#0", "a valid transaction spends its body inputs")
+	assert.Contains(t, set, "collin#7", "a valid transaction does not touch its collateral")
+	assert.Contains(t, set, "oktx#0", "a valid transaction creates its body outputs")
+	assert.NotContains(
+		t, set, "oktx#1",
+		"a valid transaction's declared collateral return is never created",
+	)
+}

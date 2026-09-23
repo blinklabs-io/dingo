@@ -90,27 +90,21 @@ package nodeparity
 //
 // Each of the three runs its own independent Acquire, on its own
 // connection, rather than sharing one the way Check's live-tip-agreement
-// mode does. At this head, UTxO's own retention floor
-// (checkUtxoRetentionWindow) is enforced at query time, scoped to the UTxO
-// query alone, so a shared Acquire would not by itself cut
-// protocol-params/stake off at UTxO's window. Open PR #4320 adds
-// Acquire-time validation (VerifyPointQueryable) that rejects a point up
-// front if ANY point-aware query type's own retention floor has passed it,
-// not only the one the caller actually intends to ask -- once that merges,
-// a shared Acquire would cut protocol-params and stake off at UTxO's much
-// tighter floor instead of their own, much longer ones (protocol params
-// are effectively unbounded; stake is capped at 3 epochs behind Dingo's
-// own live epoch). Kept as separate Acquire calls now so this file does
-// not need to change again once #4320 lands.
+// mode does. #4320 added Acquire-time validation (VerifyPointQueryable) that
+// rejects a point up front if ANY point-aware query type's own retention
+// floor has passed it, not only the one the caller actually intends to ask,
+// so a shared Acquire would cut protocol params and stake off at the UTxO
+// query's much tighter floor instead of their own, much longer ones
+// (protocol params are effectively unbounded; stake is capped at 3 epochs
+// behind Dingo's own live epoch). Separate Acquire calls keep each check
+// bounded by its own floor.
 //
 // Running Dingo with --storage-mode api removes the UTxO half of that
-// exposure entirely (checkUtxoRetentionWindow already skips its own
-// retention check in that mode, the same way cleanupConsumedUtxos does).
-// At this head, pool-stake snapshot pruning (ledger/snapshot/rotation.go's
-// cleanupOldSnapshots) does NOT have an equivalent API-mode carve-out --
-// prunePoolSnapshots runs the same fixed window regardless of storage mode
-// -- so the stake comparison is still bounded by that window in every
-// storage mode until #4320 (which adds the carve-out) merges.
+// exposure entirely (checkUtxoRetentionWindow skips its own retention check
+// in that mode, the same way cleanupConsumedUtxos does). #4320 added the
+// equivalent carve-out to pool-stake snapshot pruning
+// (ledger/snapshot/rotation.go's cleanupOldSnapshots), so in API mode the
+// stake comparison is no longer bounded by that window either.
 
 import (
 	"context"
@@ -701,16 +695,27 @@ func fetchTxInfosCached(
 type UTxOSet map[string]string
 
 // UTxOChanges applies one block's transactions to a running UTxOSet using
-// Koios's own reported inputs/outputs for them (via txInfos, typically
-// fetched through koiosparity.KoiosClient.GetTxInfos) -- not Dingo's own
-// decode of the same block -- so the running reconstruction stays
-// independent of Dingo end to end, not just at its genesis seed.
+// Koios's own reported data for them (via txInfos, typically fetched through
+// koiosparity.KoiosClient.GetTxInfos) -- not Dingo's own decode of the same
+// block -- so the running reconstruction stays independent of Dingo end to
+// end, not just at its genesis seed.
+//
+// Applied through KoiosTxInfoItem's Consumed/Produced rather than its raw
+// Inputs/Outputs, which are the transaction body's request, not what the
+// ledger did with it: a phase-2-invalid transaction consumes its collateral
+// and produces its collateral return instead, exactly the distinction
+// incremental.go's blockUtxoDelta already draws by using gouroboros'
+// Transaction.Consumed()/Produced(). Applying the body of one would leave
+// the reconstruction claiming refs the ledger never spent and missing the
+// collateral return it did create -- a false missing/extra pair persisting
+// until the next re-baseline, with Dingo's collateral handling never
+// actually compared.
 func UTxOChanges(set UTxOSet, txInfos []koiosparity.KoiosTxInfoItem) {
 	for _, info := range txInfos {
-		for _, in := range info.Inputs {
+		for _, in := range info.Consumed() {
 			delete(set, fmt.Sprintf("%s#%d", in.TxHash, in.TxIndex))
 		}
-		for _, out := range info.Outputs {
+		for _, out := range info.Produced() {
 			key := fmt.Sprintf("%s#%d", out.TxHash, out.TxIndex)
 			set[key] = koiosparity.CanonicalKoiosUTxOEntry(out)
 		}

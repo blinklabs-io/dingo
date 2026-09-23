@@ -770,12 +770,13 @@ func (c *Cache) GetAllPoolsForEpoch(
 // The payload is the JSON encoding of KoiosTxInfoItem itself, not Koios's raw
 // /tx_info response. That struct is already exactly the subset of /tx_info
 // this codebase consumes (tx_hash, inputs, outputs with address/value/assets/
-// datum/reference-script) -- Koios's real response additionally carries
-// metadata, certificates, withdrawals, redeemers and script bodies that
-// nothing here ever reads, and GetTxInfos does not retain the raw bytes
-// anyway. Storing the decoded struct therefore stores precisely what is read
-// back, and round-trips exactly, since the same json tags encode it as
-// decoded it.
+// datum/reference-script, plus the collateral inputs/return and the phase-2
+// validity verdict Consumed/Produced need) -- Koios's real response
+// additionally carries metadata, certificates, withdrawals, redeemers and
+// script bodies that nothing here ever reads, and GetTxInfos does not retain
+// the raw bytes anyway. Storing the decoded struct therefore stores precisely
+// what is read back, and round-trips exactly, since the same json tags encode
+// it as decoded it.
 //
 // The cost of that choice is that a KoiosTxInfoItem which later grows a field
 // would silently read back as that field's zero value from rows written
@@ -785,7 +786,13 @@ func (c *Cache) GetAllPoolsForEpoch(
 // without a TTL -- settled transactions never change Koios-side, so the only
 // thing that can invalidate a row is this code wanting more of the
 // transaction than it asked for last time.
-const koiosTxInfoPayloadVersion = 1
+//
+// Version 2 added CollateralInputs, CollateralOutput and PlutusContracts.
+// Version 1 rows recorded only the transaction body's inputs and outputs, so
+// reading one back would report a phase-2-invalid transaction as having
+// applied its body -- the bug the new fields exist to fix. They are
+// re-fetched instead.
+const koiosTxInfoPayloadVersion = 2
 
 // txInfoLookupChunk bounds how many hashes go into one
 // "SELECT ... WHERE tx_hash IN (?, ?, ...)" so a caller that hands GetTxInfos

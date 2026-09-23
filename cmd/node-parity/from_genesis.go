@@ -33,15 +33,19 @@ var koiosFlags struct {
 	baseURL           string
 	allowInsecureHTTP bool
 	verbose           bool
-	// cachePath, when set, points this run's CheckProtocolParams/
-	// CheckStakeDistribution calls at a koiosparity.Cache (koios_check.go's
-	// doc comments on those two functions) instead of calling Koios fresh
-	// for every epoch -- typically the SAME cache.db a dingo instance's own
+	// cachePath, when set, points this run's CheckProtocolParams,
+	// CheckStakeDistribution and /tx_info lookups at a koiosparity.Cache
+	// (koios_check.go's doc comments on those functions) instead of calling
+	// Koios fresh -- typically the SAME cache.db a dingo instance's own
 	// embedded koios-parity observer is already writing to, so the two
 	// processes build up one shared reference set instead of each fetching
-	// it independently. See OpenCache's own doc comment for why this is
-	// safe for two processes to write concurrently (WAL mode, a
-	// single-connection pool per process, busy_timeout as a backstop).
+	// it independently. The /tx_info rows (koios_tx_info) dominate it: the
+	// UTxO reconstruction asks for every transaction on the chain, where
+	// the other two ask once per epoch. See OpenCache's own doc comment for
+	// why concurrent writers are safe (WAL mode, a single-connection pool
+	// per process, busy_timeout as a backstop), and
+	// requireMatchingKoiosSource for why sharing requires agreeing on
+	// --koios-base-url.
 	cachePath string
 }
 
@@ -228,9 +232,11 @@ reference cardano-node instead -- both nodes bootstrapped near their live tip
 (e.g. via a Mithril snapshot) avoids the from-genesis race this command
 exists to work around in the first place.
 
-Runs until interrupted (Ctrl-C) or the chain-sync session ends. Prints one
-summary line per epoch and a running total on exit; exits nonzero if any
-epoch found a real mismatch.
+Runs until interrupted (Ctrl-C). A chain-sync session that ends for any other
+reason is reconnected and resumed from the last block seen, so a dropped
+connection or a failed epoch-number query pauses the run rather than ending
+it. Prints one summary line per epoch and a running total on exit; exits
+nonzero if any epoch found a real mismatch.
 
 Pass --at-slot and --at-hash together to resume from an already-validated
 point instead of genesis: a killed or restarted process has no on-disk
@@ -261,9 +267,55 @@ of re-deriving them from scratch.`,
 	)
 	cmd.Flags().StringVar(
 		&koiosFlags.cachePath, "koios-cache-path", "",
-		"path to a koios-parity cache.db for protocol-params/stake-distribution reference data (optional; safe to share a dingo instance's own --koios-parity-cache-path); default: fetch fresh from Koios every epoch with no caching",
+		"path to a koios-parity cache.db for protocol-params, stake-distribution and /tx_info reference data (optional; safe to share a dingo instance's own --koios-parity-cache-path, but its recorded Koios API root must match --koios-base-url); default: fetch fresh from Koios with no caching",
 	)
 	return cmd
+}
+
+// requireMatchingKoiosSource refuses to use cache unless the Koios API root
+// it is stamped with is the one koios actually queries, and pins that root
+// for the rest of the run once it matches.
+//
+// Without this, from-genesis reads whichever host's answers happen to be in
+// the shared cache.db while writing its own under that same stamp -- the
+// mixed-oracle case Cache.RecordKoiosSource's doc comment describes. The
+// sharing this command is built around (the same cache.db a dingo instance's
+// embedded koios-parity observer writes) makes a --koios-base-url that
+// disagrees with the stamp an easy mistake to make.
+//
+// Unlike koiosparity.Fetch, a mismatch is refused rather than recorded:
+// RecordKoiosSource would discard every cached row for the network, and a
+// cache this command is pointed at is typically another process's, holding
+// hours of fetching that a mistyped flag must not be able to destroy. The two
+// remedies are both in the message, and both are cheap; a silent fallback to
+// an uncached run is not offered, because from-genesis runs for hours and the
+// resulting slowdown would surface long after the flag could be fixed.
+//
+// PinRecordedSource on the matching path makes every later cache write fail
+// if another process re-points the cache mid-run, rather than letting this
+// run repopulate rows under a source its answers never came from.
+func requireMatchingKoiosSource(
+	cache *koiosparity.Cache,
+	koios *koiosparity.KoiosClient,
+	network string,
+) error {
+	resolved := koios.ResolvedBaseURL()
+	mismatch, recorded, err := cache.PendingKoiosSourceChange(network, resolved)
+	if err != nil {
+		return fmt.Errorf("check koios cache source: %w", err)
+	}
+	if mismatch {
+		return fmt.Errorf(
+			"koios cache %q holds %s answers from %q but this run queries %q; "+
+				"point --koios-base-url at the recorded host, or give "+
+				"--koios-cache-path a cache of its own",
+			koiosFlags.cachePath, network, recorded, resolved,
+		)
+	}
+	if err := cache.PinRecordedSource(network); err != nil {
+		return fmt.Errorf("pin koios cache source: %w", err)
+	}
+	return nil
 }
 
 func fromGenesisRun(cmd *cobra.Command, _ []string) error {
@@ -305,7 +357,13 @@ func fromGenesisRun(cmd *cobra.Command, _ []string) error {
 			return fmt.Errorf("open koios cache: %w", err)
 		}
 		defer cache.Close() //nolint:errcheck
-		logger.Info("koios cache enabled", "path", koiosFlags.cachePath)
+		if err := requireMatchingKoiosSource(cache, koios, network); err != nil {
+			return err
+		}
+		logger.Info("koios cache enabled",
+			"path", koiosFlags.cachePath,
+			"base_url", koios.ResolvedBaseURL(),
+		)
 	}
 
 	var counters fromGenesisCounters
