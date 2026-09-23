@@ -92,7 +92,7 @@ func (s *Store) GetExpiringGovernanceProposals(
 ) ([]*models.GovernanceProposal, error) {
 	return s.queryGovernanceProposals(
 		txn,
-		"expires_epoch < ? AND enacted_epoch IS NULL "+
+		"expires_epoch < ? AND ratified_epoch IS NULL AND enacted_epoch IS NULL "+
 			"AND expired_epoch IS NULL AND deleted_slot IS NULL",
 		governanceProposalOrderSQL,
 		epoch,

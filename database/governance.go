@@ -112,9 +112,9 @@ func (d *Database) GetActiveGovernanceProposals(
 	return proposals, nil
 }
 
-// GetExpiringGovernanceProposals returns proposals whose expires_epoch is
-// strictly less than the given epoch and that have not yet been enacted,
-// expired, or soft-deleted.
+// GetExpiringGovernanceProposals returns unratified proposals whose
+// expires_epoch is strictly less than the given epoch and that have not yet
+// been enacted, expired, or soft-deleted.
 func (d *Database) GetExpiringGovernanceProposals(
 	epoch uint64,
 	txn *Txn,

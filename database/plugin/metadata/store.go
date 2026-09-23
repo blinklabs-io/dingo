@@ -213,9 +213,9 @@ type GovernanceStore interface {
 		txn types.Txn,
 	) ([]*models.GovernanceProposal, error)
 
-	// GetExpiringGovernanceProposals returns proposals whose
-	// `expires_epoch` is strictly less than the given epoch and that
-	// have not yet been enacted, expired, or soft-deleted. Used at
+	// GetExpiringGovernanceProposals returns unratified proposals whose
+	// `expires_epoch` is strictly less than the given epoch and that have
+	// not yet been enacted, expired, or soft-deleted. Used at
 	// epoch boundaries to mark proposals expired (ineligible for further
 	// ratification). Their deposit is not returned yet -- see
 	// GetExpiredAwaitingDropGovernanceProposals.
