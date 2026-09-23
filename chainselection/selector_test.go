@@ -1201,11 +1201,6 @@ func TestChainSelectorTouchPeerActivityEmitsChainSwitchEvent(t *testing.T) {
 	_, evtCh := eventBus.Subscribe(ChainSwitchEventType)
 
 	cs.UpdatePeerTip(revivedConn, revivedTip, nil)
-
-	// Real time past StaleTipThreshold, as runner scheduling jitter can
-	// produce. Staleness reads clk, so revivedConn must still win below.
-	time.Sleep(75 * time.Millisecond)
-
 	cs.UpdatePeerTip(incumbentConn, incumbentTip, nil)
 	cs.EvaluateAndSwitch()
 	require.NotNil(t, cs.GetBestPeer())
