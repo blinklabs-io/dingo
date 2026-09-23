@@ -1145,6 +1145,44 @@ func TestValidateTxConwayRejectsUnelectedCommitteeVoterAtPV11(t *testing.T) {
 	require.ErrorContains(t, err, "committee voter is not elected")
 }
 
+func TestValidateTxConwayRejectsCommitteeUpdateVoteAtPV10(t *testing.T) {
+	pparams := &conway.ConwayProtocolParameters{}
+	pparams.ProtocolVersion.Major = lcommon.ProtocolVersionPlomin
+	lv, db := committeeTestView(t, pparams)
+	lv.skipPhase2Validation = true
+	cold := committeeTestCredential(0xd5)
+	hot := committeeTestCredential(0xd6)
+	seedCommitteeCredentialAuthorization(t, db, cold, hot, 1, 1)
+	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{{
+		ColdCredentialTag: uint8(cold.CredType),
+		ColdCredHash:      cold.Credential[:],
+		ExpiresEpoch:      10,
+	}}, nil))
+	storeCommitteeUpdateProposal(t, db, 0xd7, cold, 10)
+	require.NoError(t, db.SetEpoch(0, 0, nil, nil, nil, nil, 0, 1, 100, nil))
+	var actionTxID [32]byte
+	copy(actionTxID[:], governanceTestHash(0xd7))
+	actionID := &lcommon.GovActionId{TransactionId: actionTxID}
+	resolvedAction, err := lv.GovActionById(*actionID)
+	require.NoError(t, err)
+	require.NotNil(t, resolvedAction)
+	voter := &lcommon.Voter{
+		Type: lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
+		Hash: [28]byte(hot.Credential),
+	}
+	tx := &conway.ConwayTransaction{
+		Body: conway.ConwayTransactionBody{
+			TxVotingProcedures: lcommon.VotingProcedures{
+				voter: {actionID: {}},
+			},
+		},
+		TxIsValid: true,
+	}
+
+	err = eras.ValidateTxConway(tx, 0, lv, pparams)
+	require.ErrorContains(t, err, "CC cannot vote on UpdateCommittee")
+}
+
 // TestLedgerViewCommitteeResignationSurvivesTermRenewal covers the opposite
 // direction of the same TermStartSlot-stamping defect. cardano-ledger keeps
 // the CommitteeState entry of every cold credential still present in the
