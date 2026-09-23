@@ -152,9 +152,55 @@
     {
       "id": 8,
       "type": "timeseries",
+      "title": "Block stage latency: p50 / p99",
+      "description": "histogram_quantile(0.50 or 0.99, sum(rate(dingo_ledger_block_stage_duration_seconds_bucket[$__rate_interval])) by (le, stage)) -- p50 and p99 wall-clock time per ledger-owned processing stage: header_verify, validate, apply, and epoch_rollover (the epoch-boundary transaction, during which no block is applied; blinklabs-io/dingo#4364 measured 25s to 318s). histogram_quantile is an estimate bounded by the bucket edges, which run from 100us to ~419s. epoch_rollover records once per epoch, so its quantile is only defined briefly after a boundary; see Block stage max observed duration for the exact worst case.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.50, sum(rate(dingo_ledger_block_stage_duration_seconds_bucket[$__rate_interval])) by (le, stage))",
+          "legendFormat": "p50 {{stage}}",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.99, sum(rate(dingo_ledger_block_stage_duration_seconds_bucket[$__rate_interval])) by (le, stage))",
+          "legendFormat": "p99 {{stage}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s" },
+        "overrides": []
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Block stage max observed duration",
+      "description": "dingo_ledger_block_stage_max_duration_seconds -- the exact maximum wall-clock duration observed for each ledger-owned stage (header_verify, validate, apply, epoch_rollover) since process start. Monotonically non-decreasing. Unlike the p50/p99 panel it is not bucket-bounded, so the epoch_rollover series reads the full length of a blinklabs-io/dingo#4364-class boundary stall.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 32 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "dingo_ledger_block_stage_max_duration_seconds",
+          "legendFormat": "{{stage}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s" },
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
       "title": "Block apply batch latency: p50 / p99",
       "description": "histogram_quantile(0.50 or 0.99, sum(rate(dingo_ledger_block_apply_batch_latency_seconds_bucket[$__rate_interval])) by (le)) -- wall-clock time from the start of applying one committed DB-transaction chunk of blocks to the moment its new tip is reflected in cardano_node_metrics_blockNum_int, the same gauge the 'Block apply rate' panel above derives deriv() from. This is a genuine per-batch measurement, not a per-block one: ledger/state.go commits up to 50 blocks per DB transaction and advances blockNum_int once per committed chunk, not once per block (see 'Block apply batch size' below). histogram_quantile is a bucket-boundary-bounded ESTIMATE, not an exact value; see 'Block apply batch latency: max observed' for the exact worst case. There was previously no directly-recorded latency metric consistent with the rate panel at all -- a naive 1/deriv(cardano_node_metrics_blockNum_int) derivation would derive a rate from a gauge's slope rather than record a real per-observation duration, and could not give a true percentile.",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 40 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
@@ -176,11 +222,11 @@
       }
     },
     {
-      "id": 9,
+      "id": 11,
       "type": "timeseries",
       "title": "Block apply batch latency: max observed",
       "description": "dingo_ledger_block_apply_batch_max_latency_seconds -- the exact maximum wall-clock duration ever observed for dingo_ledger_block_apply_batch_latency_seconds, since process start. Monotonically non-decreasing and never resets. Unlike the p50/p99 panel above, this is not a bucket-bounded estimate: it is the precise worst-ever value, read directly from the same atomic the histogram observation updates, so it cannot drift behind the true maximum the way a separately-pushed gauge could.",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 40 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
@@ -196,11 +242,11 @@
       }
     },
     {
-      "id": 10,
+      "id": 12,
       "type": "timeseries",
       "title": "Block apply batch size",
       "description": "sum(rate(dingo_ledger_block_apply_batch_size_sum[$__rate_interval])) / sum(rate(dingo_ledger_block_apply_batch_size_count[$__rate_interval])) -- average blocks committed per dingo_ledger_block_apply_batch_latency_seconds observation (ledger/state.go caps this at 50 blocks per DB transaction). Required context for reading the two panels above: 'batch latency / batch size' approximates the same per-block rate the 'Block apply rate' panel derives, but the latency panels themselves are per-batch, not per-block, so this shows how many blocks each observation actually covers -- a value near 1 during live tip-following, higher during bulk historical catch-up.",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 48 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {

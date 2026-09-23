@@ -25,6 +25,7 @@ import (
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -34,12 +35,14 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
-// errBlockfetchNoBlocks is the error gouroboros' blockfetch client returns
-// from GetBlockRange when the served peer answers MsgNoBlocks, which is what
-// a peer that rolled the requested block back now replies (the range server
-// rejects a start point the chain no longer holds). It reaches the ledger
-// synchronously through BlockfetchRequestRangeFunc, so it never produces a
-// BatchDone event.
+// errBlockfetchNoBlocks is a generic synchronous dispatch failure used by
+// fixtures that need BlockfetchRequestRangeFunc to fail before a request is
+// ever sent (RequestRange can still fail synchronously that way -- a
+// connection lookup failure, for instance). It is not a NoBlocks-shaped
+// error: since gouroboros' RequestRange replaced GetBlockRange, a genuine
+// MsgNoBlocks reply resolves asynchronously through blockfetchClientRangeDone
+// instead, delivered as a BlockfetchEvent with BatchDone set and RangeErr
+// wrapping blockfetch.ErrNoBlocks -- see deliverNoBlocksBatchDoneForTest.
 var errBlockfetchNoBlocks = errors.New(
 	"request block range: block(s) not found",
 )
@@ -128,7 +131,7 @@ func TestStartQueuedBlockfetchReleasesMutexAroundRequest(t *testing.T) {
 		_ ouroboros.ConnectionId,
 		_ ocommon.Point,
 		_ ocommon.Point,
-	) error {
+	) (uint64, error) {
 		acquired := make(chan struct{})
 		go func() {
 			ls.chainsyncBlockfetchMutex.Lock()
@@ -137,9 +140,9 @@ func TestStartQueuedBlockfetchReleasesMutexAroundRequest(t *testing.T) {
 		}()
 		select {
 		case <-acquired:
-			return nil
+			return 0, nil
 		case <-time.After(time.Second):
-			return errors.New(
+			return 0, errors.New(
 				"blockfetch request ran while blockfetch mutex was held",
 			)
 		}
@@ -162,6 +165,66 @@ func TestStartQueuedBlockfetchReleasesMutexAroundRequest(t *testing.T) {
 	ls.blockfetchRequestRangeCleanup()
 	ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 	ls.chainsyncBlockfetchMutex.Unlock()
+}
+
+// TestWaitForBlockfetchRequestLockedWithSignalWaitsForBothPipelinedRequests
+// pins the blockfetchRequestsInFlight generalization from a single channel to
+// a slice (issue #4651): with pipelining, two requests can be outstanding on
+// the same connection at once (the active batch and one pre-queued "next"
+// request), and gouroboros resolves them strictly FIFO, so the wait must
+// drain both, in order, not return after only the first.
+func TestWaitForBlockfetchRequestLockedWithSignalWaitsForBothPipelinedRequests(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	connId := testChainsyncConnId(6116, 3001)
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.beginBlockfetchRequestLocked(connId)
+	ls.beginBlockfetchRequestLocked(connId)
+	ls.chainsyncBlockfetchMutex.Unlock()
+
+	waitDone := make(chan error, 1)
+	go func() {
+		ls.chainsyncBlockfetchMutex.Lock()
+		defer ls.chainsyncBlockfetchMutex.Unlock()
+		waitDone <- ls.waitForBlockfetchRequestLockedWithSignal(connId, nil)
+	}()
+
+	testutil.RequireNoReceive(
+		t,
+		waitDone,
+		50*time.Millisecond,
+		"wait must not return while either pipelined request is still outstanding",
+	)
+
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.completeBlockfetchRequestLocked(connId) // ends the first (FIFO front)
+	ls.chainsyncBlockfetchMutex.Unlock()
+
+	testutil.RequireNoReceive(
+		t,
+		waitDone,
+		50*time.Millisecond,
+		"wait must not return after only the first of two pipelined requests drains",
+	)
+
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.completeBlockfetchRequestLocked(connId) // ends the second
+	ls.chainsyncBlockfetchMutex.Unlock()
+
+	testutil.RequireReceive(
+		t,
+		waitDone,
+		testutil.AsyncWait,
+		"wait must return once both pipelined requests have drained",
+	)
 }
 
 // TestStartQueuedBlockfetchCancelsPriorRequestWaitDuringShutdown verifies
@@ -192,15 +255,15 @@ func TestStartQueuedBlockfetchCancelsPriorRequestWaitDuringShutdown(
 				ouroboros.ConnectionId,
 				ocommon.Point,
 				ocommon.Point,
-			) error {
+			) (uint64, error) {
 				t.Fatal(
 					"blockfetch request started before shutdown wait was canceled",
 				)
-				return nil
+				return 0, nil
 			},
 		},
-		blockfetchRequestsInFlight: map[string]chan struct{}{
-			connIdKey(connId): make(chan struct{}),
+		blockfetchRequestsInFlight: map[string][]chan struct{}{
+			connIdKey(connId): {make(chan struct{})},
 		},
 	}
 
@@ -258,13 +321,13 @@ func TestStartQueuedBlockfetchDrainsPriorRequestBeforeConnectionReuse(
 				ouroboros.ConnectionId,
 				ocommon.Point,
 				ocommon.Point,
-			) error {
+			) (uint64, error) {
 				close(requestStarted)
-				return nil
+				return 0, nil
 			},
 		},
-		blockfetchRequestsInFlight: map[string]chan struct{}{
-			connIdKey(connId): requestDone,
+		blockfetchRequestsInFlight: map[string][]chan struct{}{
+			connIdKey(connId): {requestDone},
 		},
 	}
 
@@ -348,10 +411,10 @@ func TestBlockfetchBatchDoneDoesNotBlockSubscriberOnContinuation(t *testing.T) {
 				ouroboros.ConnectionId,
 				ocommon.Point,
 				ocommon.Point,
-			) error {
+			) (uint64, error) {
 				close(requestStarted)
 				<-releaseRequest
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -473,11 +536,11 @@ func TestBlockfetchContinuationRetargetsSelection(t *testing.T) {
 						connId ouroboros.ConnectionId,
 						_ ocommon.Point,
 						_ ocommon.Point,
-					) error {
+					) (uint64, error) {
 						if test.fail(connId, primary) {
-							return errors.New("request failed")
+							return 0, errors.New("request failed")
 						}
-						return nil
+						return 0, nil
 					},
 				},
 			}
@@ -541,11 +604,11 @@ func TestBlockfetchRetargetPreservesConcurrentSelection(t *testing.T) {
 		ouroboros.ConnectionId,
 		ocommon.Point,
 		ocommon.Point,
-	) error {
+	) (uint64, error) {
 		// Runs with the mutex released, exactly where a real connection
 		// switch would install its own selection.
 		ls.selectedBlockfetchConnId = switched
-		return nil
+		return 0, nil
 	}
 
 	ls.chainsyncBlockfetchMutex.Lock()
@@ -562,9 +625,12 @@ func TestBlockfetchRetargetPreservesConcurrentSelection(t *testing.T) {
 	)
 }
 
-// newNoBlocksLedgerState builds a LedgerState with one queued header whose
-// range every peer refuses with a NoBlocks error, and returns it alongside the
-// request counter and a channel of published resync events.
+// newNoBlocksLedgerState builds a LedgerState with one queued header and a
+// blockfetch dispatch that always succeeds synchronously, the way
+// RequestRange does (it fails synchronously only before a request is ever
+// sent). It returns the ledger, the dispatch-request counter, and a channel
+// of published resync events. Pair it with deliverNoBlocksBatchDoneForTest to
+// simulate the peer's NoBlocks reply, which now resolves asynchronously.
 func newNoBlocksLedgerState(
 	t *testing.T,
 	headerLabel string,
@@ -601,9 +667,9 @@ func newNoBlocksLedgerState(
 				_ ouroboros.ConnectionId,
 				_ ocommon.Point,
 				_ ocommon.Point,
-			) error {
+			) (uint64, error) {
 				requestCount++
-				return errBlockfetchNoBlocks
+				return 0, nil
 			},
 		},
 	}
@@ -611,18 +677,40 @@ func newNoBlocksLedgerState(
 	return ls, &requestCount, resyncChan
 }
 
+// deliverNoBlocksBatchDoneForTest simulates the peer's NoBlocks resolution
+// for connId's active batch. RequestRange (unlike GetBlockRange, which it
+// replaced) never returns NoBlocks as a synchronous dispatch error: gouroboros
+// resolves it asynchronously through blockfetchClientRangeDone instead,
+// delivered here as a BatchDone BlockfetchEvent with RangeErr wrapping
+// blockfetch.ErrNoBlocks.
+func deliverNoBlocksBatchDoneForTest(
+	ls *LedgerState,
+	connId ouroboros.ConnectionId,
+) error {
+	return handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
+		ConnectionId: connId,
+		BatchDone:    true,
+		RangeErr:     blockfetch.ErrNoBlocks,
+	}, nil)
+}
+
 // TestStartQueuedBlockfetchDropsHeadersAfterRepeatedNoBlocks pins the recovery
-// on the path a NoBlocks response actually takes. GetBlockRange resolves the
-// NoBlocks reply into an error returned synchronously from
-// BlockfetchRequestRangeFunc, so the request never reaches BatchDone and the
-// empty-batch accounting in handleEventBlockfetchBatchDone never sees it. The
-// header queue must still be dropped, because a latched header blocks local
-// forging for as long as it is queued.
+// on the path a NoBlocks response actually takes: it arrives asynchronously
+// as a BatchDone event carrying RangeErr, not as an error returned
+// synchronously from the dispatch. The header queue must still be dropped
+// after blockfetchMaxSameRangeFailures consecutive NoBlocks replies, because a
+// latched header blocks local forging for as long as it is queued.
 func TestStartQueuedBlockfetchDropsHeadersAfterRepeatedNoBlocks(t *testing.T) {
 	t.Parallel()
 
 	ls, requestCount, resyncChan := newNoBlocksLedgerState(t, "hdr-no-blocks")
 	connId := testChainsyncConnId(6102, 3001)
+
+	// The initial dispatch succeeds synchronously (nothing has failed yet);
+	// every later dispatch in this test is the automatic continuation
+	// handleEventBlockfetchBatchDone starts after a failure that has not yet
+	// reached the drop threshold.
+	require.NoError(t, startQueuedBlockfetchForTest(ls, connId, nil))
 
 	const attempts = 25
 	require.Greater(
@@ -632,9 +720,10 @@ func TestStartQueuedBlockfetchDropsHeadersAfterRepeatedNoBlocks(t *testing.T) {
 		"attempt count must exceed the bound for this test to prove it",
 	)
 	for range attempts {
-		// Callers treat this error as advisory (several only log it), so
-		// the recovery cannot depend on any caller acting on it.
-		_ = startQueuedBlockfetchForTest(ls, connId, nil)
+		if ls.chain.HeaderCount() == 0 {
+			break
+		}
+		require.NoError(t, deliverNoBlocksBatchDoneForTest(ls, connId))
 	}
 
 	assert.LessOrEqual(
@@ -703,8 +792,8 @@ func TestStartQueuedBlockfetchTransientErrorsDoNotAccumulate(t *testing.T) {
 					ouroboros.ConnectionId,
 					ocommon.Point,
 					ocommon.Point,
-				) error {
-					return requestErr
+				) (uint64, error) {
+					return 0, requestErr
 				}
 			}
 
@@ -750,11 +839,22 @@ func TestRestartQueuedBlockfetchAfterForkDropsHeadersOnRepeatedNoBlocks(
 	)
 	connId := testChainsyncConnId(6103, 3001)
 
+	// The fork-restart path's own special handling (tearing down a stale
+	// in-flight batch on the same connection) only matters for this initial
+	// dispatch; once the batch is running, its repeated NoBlocks replies are
+	// recorded the same way any other dispatch's are, through the BatchDone
+	// events delivered below.
+	require.NoError(
+		t,
+		restartQueuedBlockfetchAfterForkForTest(ls, connId, nil),
+	)
+
 	const attempts = 25
 	for range attempts {
-		// Mirrors the fork-resolution call sites, which discard the error
-		// after logging it.
-		_ = restartQueuedBlockfetchAfterForkForTest(ls, connId, nil)
+		if ls.chain.HeaderCount() == 0 {
+			break
+		}
+		require.NoError(t, deliverNoBlocksBatchDoneForTest(ls, connId))
 	}
 
 	assert.LessOrEqual(
@@ -789,8 +889,9 @@ func TestBlockfetchRangeFailureClearedWhenRangeIsDelivered(t *testing.T) {
 	connId := testChainsyncConnId(6104, 3001)
 	stuckStart, _ := ls.chain.HeaderRange(BlockfetchBatchSize)
 
+	require.NoError(t, startQueuedBlockfetchForTest(ls, connId, nil))
 	for range blockfetchMaxSameRangeFailures * 3 {
-		_ = startQueuedBlockfetchForTest(ls, connId, nil)
+		require.NoError(t, deliverNoBlocksBatchDoneForTest(ls, connId))
 		require.Positive(
 			t,
 			ls.chain.HeaderCount(),
@@ -834,6 +935,7 @@ func TestBlockfetchRangeFailuresAccumulatePerRangeDespiteInterleavedActivity(
 		lcommon.NewBlake2b256([]byte("some-other-range")).Bytes(),
 	)
 
+	require.NoError(t, startQueuedBlockfetchForTest(ls, connId, nil))
 	for attempt := 1; attempt <= blockfetchMaxSameRangeFailures; attempt++ {
 		require.Equal(
 			t,
@@ -842,7 +944,7 @@ func TestBlockfetchRangeFailuresAccumulatePerRangeDespiteInterleavedActivity(
 			"stuck header must be queued for attempt %d",
 			attempt,
 		)
-		_ = startQueuedBlockfetchForTest(ls, connId, nil)
+		require.NoError(t, deliverNoBlocksBatchDoneForTest(ls, connId))
 		if attempt == blockfetchMaxSameRangeFailures {
 			break
 		}
@@ -889,8 +991,9 @@ func TestBlockfetchRangeFailuresDoNotAccumulateAcrossDifferentRanges(
 	ls, _, resyncChan := newNoBlocksLedgerState(t, "hdr-distinct-0")
 	connId := testChainsyncConnId(6106, 3001)
 
+	require.NoError(t, startQueuedBlockfetchForTest(ls, connId, nil))
 	for attempt := range blockfetchMaxSameRangeFailures * 3 {
-		_ = startQueuedBlockfetchForTest(ls, connId, nil)
+		require.NoError(t, deliverNoBlocksBatchDoneForTest(ls, connId))
 		// Each attempt is against a different queued header, as happens
 		// when the chain keeps moving and every miss is a one-off.
 		ls.clearQueuedHeaders()
@@ -969,9 +1072,9 @@ func TestHandleEventBlockfetchBatchDoneStopsRepeatingEmptyBatches(
 				_ ouroboros.ConnectionId,
 				_ ocommon.Point,
 				_ ocommon.Point,
-			) error {
+			) (uint64, error) {
 				requestCount++
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -1054,9 +1157,9 @@ func TestHandleEventBlockfetchBatchDoneEmptyBatchStreakResetsOnProgress(
 				_ ouroboros.ConnectionId,
 				_ ocommon.Point,
 				_ ocommon.Point,
-			) error {
+			) (uint64, error) {
 				requestCount++
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -1143,14 +1246,14 @@ func TestStartQueuedBlockfetchSkipsDispatchWhenCanceledBeforeDispatch(
 				ouroboros.ConnectionId,
 				ocommon.Point,
 				ocommon.Point,
-			) error {
+			) (uint64, error) {
 				t.Fatal(
 					"blockfetch request dispatched after the ledger context was canceled",
 				)
-				return nil
+				return 0, nil
 			},
 		},
-		blockfetchRequestsInFlight: map[string]chan struct{}{},
+		blockfetchRequestsInFlight: map[string][]chan struct{}{},
 	}
 
 	// Zero connId: connIdKey is "", so the drain returns nil without
@@ -1167,5 +1270,138 @@ func TestStartQueuedBlockfetchSkipsDispatchWhenCanceledBeforeDispatch(
 		ouroboros.ConnectionId{},
 		ls.activeBlockfetchConnId,
 		"a canceled start must not claim the active blockfetch connection",
+	)
+}
+
+// TestBatchDoneTransportRangeErrDoesNotAccumulate pins the asynchronous half
+// of the invariant TestStartQueuedBlockfetchTransientErrorsDoNotAccumulate
+// covers synchronously: a failure that does not establish NoBlocks must not
+// advance the range-unavailable count. RequestRange resolves every terminal
+// outcome through RangeDoneFunc, so a transport, shutdown, or decode failure
+// that once returned synchronously from GetBlockRange now arrives here as a
+// BatchDone event carrying RangeErr, with no block applied and the headers
+// still queued -- the same shape as a genuine NoBlocks. Counting it would
+// drop a queued range that is still obtainable and force a chainsync
+// re-intersect, which is exactly the false positive
+// blockfetchMaxSameRangeFailures documents as out of scope.
+func TestBatchDoneTransportRangeErrDoesNotAccumulate(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name string
+		err  error
+	}{
+		{name: "transport reset", err: errors.New("connection reset by peer")},
+		{
+			name: "protocol shutdown",
+			err:  errors.New("protocol is shutting down"),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ls, _, resyncChan := newNoBlocksLedgerState(
+				t,
+				"hdr-async-transient-"+test.name,
+			)
+			connId := testChainsyncConnId(6115, 3001)
+			require.NoError(
+				t,
+				startQueuedBlockfetchForTest(ls, connId, nil),
+			)
+
+			for range blockfetchMaxSameRangeFailures * 3 {
+				if ls.chain.HeaderCount() == 0 {
+					break
+				}
+				require.NoError(t, handleEventBlockfetchBatchDoneForTest(
+					ls,
+					BlockfetchEvent{
+						ConnectionId: connId,
+						BatchDone:    true,
+						RangeErr:     test.err,
+					},
+					nil,
+				))
+			}
+
+			assert.Equal(
+				t,
+				1,
+				ls.chain.HeaderCount(),
+				"an obtainable range must survive a transport failure",
+			)
+			assert.Equal(
+				t,
+				0,
+				ls.blockfetchRangeFailure.count,
+				"transport range errors must not advance the unavailable count",
+			)
+			testutil.RequireNoReceive(
+				t,
+				resyncChan,
+				100*time.Millisecond,
+				"transport range errors must not trigger resync",
+			)
+		})
+	}
+}
+
+// TestBatchDoneTransportRangeErrKeepsHeadersAcrossLargeTipGap covers the
+// second no-blocks recovery branch, which TestBatchDoneTransportRangeErrDoes
+// NotAccumulate cannot reach: that test leaves the upstream tip unset, so the
+// branch's tip-gap condition is false throughout. With a gap of at least
+// blockfetchMinBatchGapSlots and no alternate connection to retry on, the
+// branch clears the queued headers and asks chainsync to re-intersect.
+//
+// A transport-shaped RangeErr establishes nothing about the queued range --
+// it never reached the peer's answer -- so discarding the headers there
+// throws away work that the next connection can still fetch, and pays a
+// chainsync re-intersect for it. The range must survive instead.
+func TestBatchDoneTransportRangeErrKeepsHeadersAcrossLargeTipGap(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, _, resyncChan := newNoBlocksLedgerState(t, "hdr-async-gap-transient")
+	connId := testChainsyncConnId(6116, 3001)
+	require.NoError(t, startQueuedBlockfetchForTest(ls, connId, nil))
+
+	// selectRetryBlockfetchConn falls back to the reporting connection when
+	// no GetActiveConnectionFunc is configured, which is the branch's
+	// "no alternate connection" leg -- the one that drops the headers.
+	require.Nil(
+		t,
+		ls.config.GetActiveConnectionFunc,
+		"this test's harness must offer no alternate retry connection",
+	)
+	const upstreamTipSlot = uint64(blockfetchMinBatchGapSlots) * 4
+	ls.syncUpstreamTipSlot.Store(upstreamTipSlot)
+	require.GreaterOrEqual(
+		t,
+		upstreamTipSlot-ls.Tip().Point.Slot,
+		uint64(blockfetchMinBatchGapSlots),
+		"the tip gap must reach the branch this test exercises",
+	)
+
+	require.NoError(t, handleEventBlockfetchBatchDoneForTest(
+		ls,
+		BlockfetchEvent{
+			ConnectionId: connId,
+			BatchDone:    true,
+			RangeErr:     errors.New("connection reset by peer"),
+		},
+		nil,
+	))
+
+	assert.Equal(
+		t,
+		1,
+		ls.chain.HeaderCount(),
+		"an obtainable range must survive a transport failure behind a large tip gap",
+	)
+	testutil.RequireNoReceive(
+		t,
+		resyncChan,
+		100*time.Millisecond,
+		"a transport range error must not trigger resync",
 	)
 }
