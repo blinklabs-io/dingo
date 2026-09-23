@@ -205,7 +205,7 @@ func repairPendingMithrilRewardState(
 	}
 	if pending {
 		return errors.New(
-			"Mithril reward-state repair did not reconcile the existing database; " +
+			"mithril reward-state repair did not reconcile the existing database; " +
 				"the database is preserved and node startup is blocked until a " +
 				"certified snapshot covers its tip",
 		)
