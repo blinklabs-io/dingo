@@ -3695,6 +3695,11 @@ The `LedgerView` interface provides query access to ledger state:
   present. Cold authorization/resignation certificates and hot committee votes
   therefore match the complete tagged credential; other ledger-state
   implementations retain the upstream compatibility path.
+- Conway transaction validation rejects committee votes on `NoConfidence` and
+  `UpdateCommittee` actions from PV10. From PV11, it also requires each
+  committee hot voter to map to a currently elected cold credential. Dijkstra
+  inherits both gates, while PV10 continues to allow authorized committee
+  members who are not currently elected.
 - Every transaction-validation composition pins committee proposal resolution
   to the same epoch, protocol parameters, consensus generation, and SQL
   transaction used by the rest of that validation. This includes direct and
