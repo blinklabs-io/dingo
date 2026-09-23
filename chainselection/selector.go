@@ -195,11 +195,11 @@ type ChainSelector struct {
 	// provisional: they never enter peerTips and so never influence chain
 	// selection, corroboration, or the Genesis exit horizon by themselves.
 	// They exist only so that a second connection delivering a similar far
-	// frontier is accepted; the first is then accepted on its next update
-	// through the ordinary new-peer check -- see
+	// frontier is accepted; the first claim is then marked corroborated and
+	// bounds that connection's next update -- see
 	// corroborateFarTipClaimLocked. Bounded to maxTrackedPeers entries and
 	// pruned in deletePeerLocked. Guarded by mutex.
-	farTipClaims map[ouroboros.ConnectionId]uint64
+	farTipClaims map[ouroboros.ConnectionId]farTipClaim
 	mutex        sync.RWMutex
 	ctx          context.Context
 	cancel       context.CancelFunc
@@ -766,6 +766,19 @@ func (cs *ChainSelector) checkPeerTipPlausibleLocked(
 		// AND the reference itself is stale (reference <=
 		// local tip, meaning the node hasn't updated peer
 		// records since the stall began).
+		// A corroborated far claim is this connection's own reference, as a
+		// known peer's previous frontier is in Case 1. The frontier that
+		// corroborated it may sit up to K below it, so the Case 2 ceiling
+		// (that frontier + K) alone would reject the claimant's next header.
+		if observedReject {
+			if claim, ok := cs.farTipClaims[connId]; ok && claim.corroborated {
+				claimCeiling := safeAddUint64(claim.block, cs.securityParam)
+				if observedBlock <= claimCeiling {
+					observedReject = false
+					maxPlausibleBlock = claimCeiling
+				}
+			}
+		}
 		if observedReject && cs.localTip.BlockNumber > 0 &&
 			referenceBlock <= cs.localTip.BlockNumber {
 			maxPlausibleBlock = safeAddUint64(
@@ -828,7 +841,9 @@ func (cs *ChainSelector) checkPeerTipPlausibleLocked(
 // corroborateFarTipClaimLocked records connId's delivered frontier, which
 // exceeded the catch-up plausibility ceiling, and reports whether it is now
 // corroborated: at least one OTHER distinct connection has independently
-// delivered a frontier within securityParam of it. One connection cannot
+// delivered a frontier within securityParam of it. Every such other claim is
+// marked corroborated, so its connection's next update is bounded against
+// its own claim rather than against this lower frontier. One connection cannot
 // corroborate itself; two connections delivering close to the same frontier
 // is the expected shape of an honest far-behind catch-up. Nothing here tells
 // two connections to one operator from two independent peers, so this is not
@@ -846,7 +861,7 @@ func (cs *ChainSelector) corroborateFarTipClaimLocked(
 	claimed uint64,
 ) bool {
 	if cs.farTipClaims == nil {
-		cs.farTipClaims = make(map[ouroboros.ConnectionId]uint64)
+		cs.farTipClaims = make(map[ouroboros.ConnectionId]farTipClaim)
 	}
 	if _, exists := cs.farTipClaims[connId]; !exists &&
 		len(cs.farTipClaims) >= cs.maxTrackedPeers {
@@ -855,20 +870,31 @@ func (cs *ChainSelector) corroborateFarTipClaimLocked(
 		// update once room frees up.
 		return false
 	}
-	cs.farTipClaims[connId] = claimed
-	for otherConn, otherClaimed := range cs.farTipClaims {
+	cs.farTipClaims[connId] = farTipClaim{block: claimed}
+	corroborated := false
+	for otherConn, other := range cs.farTipClaims {
 		if otherConn == connId {
 			continue
 		}
-		lo, hi := claimed, otherClaimed
+		lo, hi := claimed, other.block
 		if lo > hi {
 			lo, hi = hi, lo
 		}
 		if safeAddUint64(lo, cs.securityParam) >= hi {
-			return true
+			other.corroborated = true
+			cs.farTipClaims[otherConn] = other
+			corroborated = true
 		}
 	}
-	return false
+	return corroborated
+}
+
+// farTipClaim is a connection's recorded frontier beyond the catch-up
+// plausibility ceiling. corroborated is set once another connection has
+// delivered a frontier within securityParam of block.
+type farTipClaim struct {
+	block        uint64
+	corroborated bool
 }
 
 // makeRoomForNewPeerLocked makes room in the tracked-peer table for a new

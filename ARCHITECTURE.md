@@ -4077,8 +4077,11 @@ trusted: `checkPeerTipPlausibleLocked` records it per connection
 (`ChainSelector.farTipClaims`, bounded to `maxTrackedPeers` and pruned with the
 peer in `deletePeerLocked`) and accepts it once another connection has
 recorded a frontier within `securityParam` of it
-(`corroborateFarTipClaimLocked`). The first claimant is accepted on its next
-update through the ordinary new-peer check against the accepted frontier.
+(`corroborateFarTipClaimLocked`). The earlier claim is then marked
+corroborated and becomes that connection's own reference, like a known peer's
+previous frontier: its next update is accepted within `securityParam` of its
+claim even when the corroborating frontier sits up to `securityParam` below
+it, and the entry is cleared once the connection is accepted.
 A lone far peer therefore stays rejected, and two connections delivering
 frontiers more than `securityParam` apart do not corroborate each other. The
 check counts connections, not operators, so it is not a Sybil defence;

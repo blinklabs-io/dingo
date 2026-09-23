@@ -2003,6 +2003,27 @@ func TestUpdatePeerTipFarDeliveredFrontierCorroboration(t *testing.T) {
 		), "the first claimant must be accepted on its next header")
 	})
 
+	t.Run("corroborated exactly K below keeps the claimant's next header", func(t *testing.T) {
+		t.Parallel()
+		cs := newSelector()
+		first := newTestConnectionId(2)
+		second := newTestConnectionId(3)
+		claim := pastCeiling + securityParam
+		assert.False(t, cs.updatePeerTipObserved(
+			first, advertised, blockTip(claim), nil,
+		))
+		assert.True(t, cs.updatePeerTipObserved(
+			second, advertised, blockTip(claim-securityParam), nil,
+		), "a delivered frontier exactly K below another connection's must corroborate it")
+		assert.True(t, cs.updatePeerTipObserved(
+			first, advertised, blockTip(claim+1), nil,
+		), "the corroborated claimant must be accepted on its next header even though it is more than K above the accepted frontier")
+		require.NotNil(t, cs.GetPeerTip(first))
+		assert.False(t, cs.updatePeerTipObserved(
+			newTestConnectionId(4), advertised, blockTip(claim+securityParam+2), nil,
+		), "the claimant's allowance must not widen the bound for another connection")
+	})
+
 	t.Run("more than K apart does not corroborate", func(t *testing.T) {
 		t.Parallel()
 		cs := newSelector()
