@@ -1181,8 +1181,10 @@ var _ conformance.StateProvider = (*DingoStateProvider)(nil)
 
 // Keep the conformance provider on the same credential-aware committee
 // capability as the production LedgerView.
-var _ eras.CommitteeCredentialState = (*DingoStateProvider)(nil)
-var _ eras.CommitteeVotingState = (*DingoStateProvider)(nil)
+var (
+	_ eras.CommitteeCredentialState = (*DingoStateProvider)(nil)
+	_ eras.CommitteeVotingState     = (*DingoStateProvider)(nil)
+)
 
 // conformance.StateProvider does not include DRepDelegationState: the Conway
 // reward-withdrawal rule discovers it with a runtime type assertion instead.

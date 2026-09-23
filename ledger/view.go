@@ -280,8 +280,10 @@ var _ eras.MIRPendingRewardsProvider = (*LedgerView)(nil)
 // ledger/common.CommitteeCredentialState, so this also proves *LedgerView
 // satisfies the upstream capability. Point it at the upstream type once the
 // gouroboros pin exports it.
-var _ eras.CommitteeCredentialState = (*LedgerView)(nil)
-var _ eras.CommitteeVotingState = (*LedgerView)(nil)
+var (
+	_ eras.CommitteeCredentialState = (*LedgerView)(nil)
+	_ eras.CommitteeVotingState     = (*LedgerView)(nil)
+)
 
 // Keep the optional Conway governance capability wired to the concrete view
 // used for transaction validation. Without this interface, gouroboros falls
