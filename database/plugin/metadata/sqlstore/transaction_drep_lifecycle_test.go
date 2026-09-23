@@ -129,6 +129,49 @@ func TestDormantDRepExpiryBumpIsIdempotentAndRollbackable(t *testing.T) {
 	require.Equal(t, uint64(4), drep.LastActivityEpoch)
 }
 
+func TestDrepActivityRenewalsRestoreAtRollbackPoint(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name         string
+		rollbackSlot uint64
+		wantActivity uint64
+		wantExpiry   uint64
+	}{
+		{name: "before first renewal", rollbackSlot: 50, wantActivity: 4, wantExpiry: 20},
+		{name: "between renewals", rollbackSlot: 150, wantActivity: 25, wantExpiry: 30},
+		{name: "after second renewal", rollbackSlot: 250, wantActivity: 26, wantExpiry: 31},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newMigratedSQLiteStore(t)
+			credential := bytes.Repeat([]byte{byte(tc.rollbackSlot)}, 28)
+			require.NoError(t, store.CreateDrep(nil, &models.Drep{
+				CredentialTag:     0,
+				Credential:        credential,
+				AddedSlot:         10,
+				LastActivityEpoch: 4,
+				ExpiryEpoch:       20,
+				Active:            true,
+			}))
+			for _, renewal := range []struct{ slot, epoch uint64 }{
+				{100, 25},
+				{200, 26},
+				{300, 27},
+			} {
+				require.NoError(t, store.UpdateDRepActivity(
+					0, credential, renewal.slot, renewal.epoch, 5, nil,
+				))
+			}
+
+			require.NoError(t, store.RestoreDrepStateAtSlot(tc.rollbackSlot, nil))
+			drep, err := store.GetDrepByCredential(0, credential, true, nil)
+			require.NoError(t, err)
+			require.Equal(t, tc.wantActivity, drep.LastActivityEpoch)
+			require.Equal(t, tc.wantExpiry, drep.ExpiryEpoch)
+		})
+	}
+}
+
 func TestDrepDeregistrationEffectsPreserveTaggedStateAndRollback(t *testing.T) {
 	t.Parallel()
 
