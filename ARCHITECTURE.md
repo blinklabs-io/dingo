@@ -11662,8 +11662,9 @@ Mithril v2 catch-up against the latest certified state. Catch-up verifies the
 existing chain intersection before reconciling ledger rows, retains the local
 block history, and clears the marker only on completion. If the selected
 artifact does not cover the local tip, startup remains blocked and the database
-is left intact until a covering artifact is available; it is never treated as
-a clean bootstrap.
+is left intact while Dingo retries the repair every five minutes; it is never
+treated as a clean bootstrap. Cancelling startup stops the retry without
+changing the pending repair marker.
 
 The per-credential reward basis is seeded from the same import: mark, set and
 go each carry one epoch's per-credential stake and its credential-to-pool

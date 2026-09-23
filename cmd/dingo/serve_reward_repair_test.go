@@ -19,6 +19,7 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/mithril"
@@ -48,4 +49,42 @@ func TestCheckSyncStateAllowsInterruptedRewardRepairToResume(t *testing.T) {
 
 	require.NoError(t, checkSyncState(cfg, logger),
 		"serve must resume an interrupted in-place repair before node startup")
+}
+
+func TestRetryMithrilRewardStateRepairWaitsForNewSnapshot(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	attempts := 0
+	err := retryMithrilRewardStateRepair(
+		context.Background(),
+		logger,
+		time.Nanosecond,
+		func() error {
+			attempts++
+			if attempts == 1 {
+				return mithril.ErrRewardStateRepairWaitingForSnapshot
+			}
+			return nil
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, 2, attempts)
+}
+
+func TestRetryMithrilRewardStateRepairStopsOnOtherErrors(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	wantErr := context.DeadlineExceeded
+	attempts := 0
+	err := retryMithrilRewardStateRepair(
+		context.Background(), logger, time.Nanosecond,
+		func() error {
+			attempts++
+			return wantErr
+		},
+	)
+	require.ErrorIs(t, err, wantErr)
+	require.Equal(t, 1, attempts)
 }

@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	dingo "github.com/blinklabs-io/dingo"
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -194,8 +195,15 @@ func repairPendingMithrilRewardState(
 	if network == "" {
 		network = "preview"
 	}
-	if err := runMithrilSyncForRewardRepair(
-		ctx, &repairCfg, logger, network,
+	if err := retryMithrilRewardStateRepair(
+		ctx,
+		logger,
+		mithrilRewardRepairRetryInterval,
+		func() error {
+			return runMithrilSyncForRewardRepair(
+				ctx, &repairCfg, logger, network,
+			)
+		},
 	); err != nil {
 		return fmt.Errorf("repairing legacy Mithril reward state: %w", err)
 	}
@@ -211,6 +219,39 @@ func repairPendingMithrilRewardState(
 		)
 	}
 	return nil
+}
+
+const mithrilRewardRepairRetryInterval = 5 * time.Minute
+
+func retryMithrilRewardStateRepair(
+	ctx context.Context,
+	logger *slog.Logger,
+	interval time.Duration,
+	repair func() error,
+) error {
+	for {
+		err := repair()
+		if err == nil || !errors.Is(
+			err,
+			mithril.ErrRewardStateRepairWaitingForSnapshot,
+		) {
+			return err
+		}
+		logger.Warn(
+			"latest certified snapshot does not cover the local tip; "+
+				"preserving the database and retrying in-place repair",
+			"component", "node",
+			"retry_after", mithrilRewardRepairRetryInterval,
+			"error", err,
+		)
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func mithrilRewardRepairPending(

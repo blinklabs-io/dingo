@@ -853,10 +853,9 @@ func Sync(
 		}
 		if upToDate {
 			if cfg.RepairLegacyRewardState {
-				return SyncResult{}, errors.New(
-					"mithril reward-state repair is waiting for a certified snapshot " +
-						"that covers the local chain tip; the existing database was " +
-						"left intact and the node must not serve it yet",
+				return SyncResult{}, fmt.Errorf(
+					"%w; the existing database was left intact and the node must not serve it yet",
+					ErrRewardStateRepairWaitingForSnapshot,
 				)
 			}
 			if cfg.CleanupAfterLoad {
