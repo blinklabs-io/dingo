@@ -1,0 +1,164 @@
+{
+  "title": "Dingo Koios Parity",
+  "uid": "dingo-koios-parity",
+  "editable": true,
+  "schemaVersion": 39,
+  "timezone": "browser",
+  "refresh": "10s",
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "tags": ["dingo", "preview", "koios-parity"],
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Current epoch mismatch count",
+      "description": "dingo_koiosparity_epoch_mismatch_count -- mismatch row count for the most recently checked epoch (mirrors check_epoch_status.mismatch_count). Zero means the last checked epoch passed cleanly.",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "dingo_koiosparity_epoch_mismatch_count",
+          "legendFormat": "{{network}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": { "calcs": ["lastNotNull"] }
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Last checked epoch",
+      "description": "dingo_koiosparity_last_checked_epoch -- most recent epoch the observer has completed a check for. A flat value while the node keeps syncing means the observer has stopped progressing.",
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "dingo_koiosparity_last_checked_epoch",
+          "legendFormat": "{{network}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": { "calcs": ["lastNotNull"] }
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Last FAIL epoch",
+      "description": "dingo_koiosparity_last_fail_epoch -- epoch number of the last result with status FAIL. Sticky: does not reset on a later PASS, so a stale, undiagnosed mismatch stays visible.",
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "dingo_koiosparity_last_fail_epoch",
+          "legendFormat": "{{network}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": { "calcs": ["lastNotNull"] }
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Last ERROR epoch",
+      "description": "dingo_koiosparity_last_error_epoch -- epoch number of the last result with status ERROR (fetch/check failure, dingo_db_missing past grace, dingo_db_error, or acct_coverage_incomplete). Sticky: does not reset on a later PASS.",
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "dingo_koiosparity_last_error_epoch",
+          "legendFormat": "{{network}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": { "calcs": ["lastNotNull"] }
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Mismatches by category and severity",
+      "description": "increase(dingo_koiosparity_mismatch_total[$__rate_interval]) -- mismatch rows recorded, by category and severity (fail/error/informational). The same FAIL-vs-ERROR-vs-informational triage the check_mismatches table already carries, without querying the cache directly.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "increase(dingo_koiosparity_mismatch_total[$__rate_interval])",
+          "legendFormat": "{{severity}} / {{category}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Epoch results by status",
+      "description": "sum by (status) (increase(dingo_koiosparity_epoch_result_total[$__rate_interval])) -- completed epoch validations, by status (pass/fail/error).",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (status) (increase(dingo_koiosparity_epoch_result_total[$__rate_interval]))",
+          "legendFormat": "{{status}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      }
+    }
+  ]
+}

@@ -1844,6 +1844,25 @@ func severityOf(category string) mismatchSeverity {
 	}
 }
 
+// severityLabel maps a mismatchSeverity to the string label value
+// dingo_koiosparity_mismatch_total's severity label uses (metrics.go). Kept
+// as a thin wrapper over severityOf's existing classification, rather than a
+// second switch over category strings, so the metric's severity label and
+// DetermineStatus/CountSignificant's classification of the same category can
+// never drift apart.
+func severityLabel(s mismatchSeverity) string {
+	switch s {
+	case severityFail:
+		return "fail"
+	case severityError:
+		return "error"
+	case severityInformational:
+		return "informational"
+	default:
+		return "informational"
+	}
+}
+
 // CountSignificant returns how many mismatches drove the status DetermineStatus
 // reports — every mismatch that is not purely informational.
 //

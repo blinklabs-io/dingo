@@ -8831,6 +8831,30 @@ second sync:
     may already have failed — cannot be read as the epoch's own answer. The
     observer's `epoch validated` log line and `reportError`'s synthesized
     `ERROR` carry that set too.
+  - **Prometheus metrics** (`internal/koiosparity/metrics.go`). Before this,
+    a FAIL/ERROR result was visible only by grepping the node's log or
+    querying `check_epoch_status`/`check_mismatches` directly. `Observer
+    .emitResult` — the single choke point every `OnResult` call already goes
+    through (`processEpoch`'s and `processAccountEpoch`'s success paths, and
+    `reportError`'s synthesized `ERROR` path) — also calls
+    `metrics.recordResult`, so all three are covered from one call site:
+    `dingo_koiosparity_epoch_result_total` (by network/status),
+    `dingo_koiosparity_mismatch_total` (by network/category/severity, mirroring
+    `check_mismatches.category`), `dingo_koiosparity_last_checked_epoch`, and
+    `dingo_koiosparity_epoch_mismatch_count` (mirroring
+    `check_epoch_status.mismatch_count`). `dingo_koiosparity_last_fail_epoch`/
+    `_last_error_epoch` are deliberately sticky — set on a FAIL/ERROR result
+    and never cleared by a later PASS — so a stale, undiagnosed mismatch does
+    not silently disappear from a dashboard. The metric's severity label comes
+    from `severityLabel`, a thin wrapper over `severityOf` (the same
+    classification `DetermineStatus`/`CountSignificant` already use), so the
+    label can never drift from the persisted `Status`. `ObserverConfig
+    .PromRegistry`, wired from `node_koiosparity.go`'s
+    `n.config.promRegistry`, follows every other component's own
+    `PromRegistry` field; `newMetrics` returns nil for a nil registerer (the
+    standalone `cmd/koios-parity` CLI, and any test that builds an
+    `ObserverConfig` without one), and every `recordResult` call tolerates a
+    nil receiver.
 - **Composition** (`node.go`, `node_koiosparity.go`, `node_shutdown.go`,
   `node_lifecycle.go`): `Node.Run()` configures `n.snapshotMgr` and installs
   both epoch-boundary reward-snapshot hooks (`SetEpochBoundarySnapshotStakeHook`/
