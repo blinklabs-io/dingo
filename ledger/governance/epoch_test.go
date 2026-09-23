@@ -455,7 +455,7 @@ func TestProcessEpochRefundsEnactmentOrphanInTheEnactingEpoch(t *testing.T) {
 		nil, nil, &ratifiedEpoch, &ratifiedSlot,
 	), nil))
 	require.NoError(t, db.SetGovernanceProposal(buildNoConfidenceProposal(
-		t, siblingHash, 0, 12, 25, siblingAddr, 101,
+		t, siblingHash, 0, 4, 25, siblingAddr, 101,
 		nil, nil, nil, nil,
 	), nil))
 
@@ -483,6 +483,7 @@ func TestProcessEpochRefundsEnactmentOrphanInTheEnactingEpoch(t *testing.T) {
 	}
 
 	out := runEpoch(5, 500)
+	assert.Equal(t, 1, out.EnactedCount)
 	assert.Equal(t, 1, out.OrphanedCount)
 
 	winner, err := store.GetAccountByCredential(0, winnerCred, false, nil)

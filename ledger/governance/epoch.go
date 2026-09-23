@@ -365,6 +365,7 @@ func ProcessEpoch(
 		in.Txn,
 		successfullyEnacted,
 		nil,
+		in.PrevEpoch,
 		in.NewEpoch,
 		in.BoundarySlot,
 		in.Logger,
@@ -742,6 +743,7 @@ func ProcessEpoch(
 		nil,
 		expiredSeeds,
 		in.NewEpoch,
+		in.NewEpoch,
 		in.BoundarySlot,
 		in.Logger,
 	)
@@ -1045,11 +1047,12 @@ func removeOrphanedProposals(
 	txn *database.Txn,
 	enacted []*models.GovernanceProposal,
 	expired []*models.GovernanceProposal,
+	activeEpoch uint64,
 	epoch uint64,
 	slot uint64,
 	logger *slog.Logger,
 ) (int, error) {
-	active, err := db.GetActiveGovernanceProposals(epoch, txn)
+	active, err := db.GetActiveGovernanceProposals(activeEpoch, txn)
 	if err != nil {
 		return 0, fmt.Errorf("get active governance proposals: %w", err)
 	}
