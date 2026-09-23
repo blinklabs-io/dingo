@@ -1725,16 +1725,37 @@ type KoiosTxInfoAsset struct {
 
 // KoiosTxInfoAssetList is /tx_info's asset_list, which Koios serialises two
 // different ways for the same content: a JSON array on inputs, outputs and
-// collateral_inputs, but a JSON *string* holding that array's text on
-// collateral_output (confirmed against the live API: an output's asset_list
-// decodes as [], the same transaction's collateral_output's as "[]").
+// collateral_inputs, but a JSON *string* on collateral_output.
 //
-// A plain []KoiosTxInfoAsset fails outright on the string form, which would
-// make GetTxInfos error on every transaction that declares a collateral
-// return -- including valid ones, since a collateral return is declared
-// up front and reported whether or not phase-2 validation later rejected the
-// transaction. Accepting both forms is what lets KoiosTxInfoOutput describe
-// an ordinary output and a collateral return with one type.
+// The string form is NOT JSON-inside-a-string. It is cardano-ledger's Haskell
+// `Show` rendering of the output's MultiAsset value, passed through verbatim
+// (confirmed against the live preview API -- see
+// TestAssetListDecodesLedgerShowMultiAsset for captured real responses):
+//
+//	[]                                      -- no assets
+//	[(PolicyID {policyID = ScriptHash "65a9..."},[("494e4459",32200000000000)])]
+//	[(PolicyID {policyID = ScriptHash "09e5..."},[("474f565f4e4654",1)]),(PolicyID {policyID = ScriptHash "65a9..."},[("494e4459",32200000000000)])]
+//
+// The empty case, "[]", happens to also be valid JSON, which is why the
+// original string-form support (dingo #1900, the phase-2-invalid collateral
+// fix) looked correct: every transaction whose collateral return carried no
+// tokens decoded fine. A collateral return that actually carries tokens --
+// the normal case for a phase-2-invalid Plutus transaction, whose whole
+// purpose is returning the collateral inputs' assets -- renders as the form
+// above, and feeding that to json.Unmarshal fails on its first "(" with
+// "invalid character '(' looking for beginning of value".
+//
+// That failure was not contained to the one field: it failed the enclosing
+// transaction, which failed its whole 40-hash /tx_info chunk, which tainted
+// the epoch and skipped its UTxO comparison entirely -- measured at 5 of 10
+// consecutive chunks on real preview data, matching the ~50% of epochs that
+// were losing UTxO validation.
+//
+// Policy IDs, asset names and quantities in the Show form use exactly the
+// same encodings as the JSON array form (lowercase hex, hex, decimal), which
+// is what lets both branches produce the same KoiosTxInfoAsset and cross-check
+// against each other: a transaction's collateral_inputs (array form) and its
+// collateral_output (Show form) report the same tokens identically.
 //
 // Marshalling is the plain array form, so a cached row written from this
 // struct always reads back through the array branch.
@@ -1746,23 +1767,257 @@ func (a *KoiosTxInfoAssetList) UnmarshalJSON(data []byte) error {
 		*a = nil
 		return nil
 	}
-	if trimmed[0] == '"' {
-		var inner string
-		if err := json.Unmarshal(trimmed, &inner); err != nil {
-			return fmt.Errorf("asset_list string form: %w", err)
+
+	// Array form: inputs, outputs, collateral_inputs, and anything this
+	// struct marshalled itself (including every cached row).
+	if trimmed[0] != '"' {
+		var items []KoiosTxInfoAsset
+		if err := json.Unmarshal(trimmed, &items); err != nil {
+			return fmt.Errorf("asset_list array form: %w", err)
 		}
-		if strings.TrimSpace(inner) == "" {
-			*a = nil
-			return nil
-		}
-		trimmed = []byte(inner)
+		*a = items
+		return nil
 	}
+
+	var inner string
+	if err := json.Unmarshal(trimmed, &inner); err != nil {
+		return fmt.Errorf("asset_list string form: %w", err)
+	}
+	inner = strings.TrimSpace(inner)
+	if inner == "" {
+		*a = nil
+		return nil
+	}
+
+	// Try JSON first: it covers the "[]" empty case, and keeps working if
+	// Koios ever switches the string form to real embedded JSON.
 	var items []KoiosTxInfoAsset
-	if err := json.Unmarshal(trimmed, &items); err != nil {
-		return err
+	if err := json.Unmarshal([]byte(inner), &items); err == nil {
+		*a = items
+		return nil
 	}
-	*a = items
+
+	parsed, err := parseLedgerShowMultiAsset(inner)
+	if err != nil {
+		return fmt.Errorf(
+			"asset_list string form is neither JSON nor a cardano-ledger "+
+				"MultiAsset rendering: %w: %s",
+			err,
+			koiosBodyExcerpt([]byte(inner)),
+		)
+	}
+	*a = parsed
 	return nil
+}
+
+// parseLedgerShowMultiAsset parses cardano-ledger's Haskell `Show` rendering
+// of a MultiAsset -- the form Koios emits for collateral_output.asset_list.
+// See KoiosTxInfoAssetList's doc comment for real examples.
+//
+// The grammar accepted is exactly:
+//
+//	list   := "[" [ entry { "," entry } ] "]"
+//	entry  := "(" policy "," assets ")"
+//	policy := "PolicyID" "{" "policyID" "=" "ScriptHash" quoted "}"
+//	assets := "[" [ asset { "," asset } ] "]"
+//	asset  := "(" quoted "," integer ")"
+//
+// It is deliberately strict rather than a lenient regex scrape. A lenient
+// parser that silently skipped an entry it did not recognise would drop
+// tokens from a reconstructed UTxO, and the UTxO comparison this feeds
+// (nodeparity's from-genesis check) would then report a content mismatch
+// that is this parser's fault rather than Dingo's -- the exact class of false
+// result the check exists to detect. Failing loudly, with the offending text
+// in the error, keeps a future ledger Show change a one-line diagnosis
+// instead of a phantom ledger bug.
+func parseLedgerShowMultiAsset(s string) ([]KoiosTxInfoAsset, error) {
+	sc := &showScanner{s: s}
+	if err := sc.expect("["); err != nil {
+		return nil, err
+	}
+	var out []KoiosTxInfoAsset
+	if !sc.accept("]") {
+		for {
+			policy, assets, err := sc.entry()
+			if err != nil {
+				return nil, err
+			}
+			for _, as := range assets {
+				as.PolicyID = policy
+				out = append(out, as)
+			}
+			if sc.accept(",") {
+				continue
+			}
+			if err := sc.expect("]"); err != nil {
+				return nil, err
+			}
+			break
+		}
+	}
+	sc.skipSpace()
+	if sc.pos != len(sc.s) {
+		return nil, fmt.Errorf("trailing input at offset %d", sc.pos)
+	}
+	return out, nil
+}
+
+// showScanner is a tiny cursor over a Haskell `Show` rendering. It is not a
+// general Haskell parser -- only the MultiAsset shape above is accepted.
+type showScanner struct {
+	s   string
+	pos int
+}
+
+func (sc *showScanner) skipSpace() {
+	for sc.pos < len(sc.s) {
+		switch sc.s[sc.pos] {
+		case ' ', '\t', '\n', '\r':
+			sc.pos++
+		default:
+			return
+		}
+	}
+}
+
+func (sc *showScanner) accept(lit string) bool {
+	sc.skipSpace()
+	if strings.HasPrefix(sc.s[sc.pos:], lit) {
+		sc.pos += len(lit)
+		return true
+	}
+	return false
+}
+
+func (sc *showScanner) expect(lit string) error {
+	if sc.accept(lit) {
+		return nil
+	}
+	return fmt.Errorf("expected %q at offset %d", lit, sc.pos)
+}
+
+// quoted reads a Haskell string literal. Policy IDs and asset names are hex,
+// so no escape beyond the pass-through handled here has ever been observed,
+// but \" and \\ are honoured so a name that did need them cannot truncate
+// the scan and silently drop the rest of the list.
+func (sc *showScanner) quoted() (string, error) {
+	sc.skipSpace()
+	if sc.pos >= len(sc.s) || sc.s[sc.pos] != '"' {
+		return "", fmt.Errorf("expected a quoted string at offset %d", sc.pos)
+	}
+	sc.pos++
+	var b strings.Builder
+	for sc.pos < len(sc.s) {
+		switch c := sc.s[sc.pos]; c {
+		case '\\':
+			if sc.pos+1 >= len(sc.s) {
+				return "", fmt.Errorf(
+					"dangling escape at offset %d", sc.pos,
+				)
+			}
+			b.WriteByte(sc.s[sc.pos+1])
+			sc.pos += 2
+		case '"':
+			sc.pos++
+			return b.String(), nil
+		default:
+			b.WriteByte(c)
+			sc.pos++
+		}
+	}
+	return "", fmt.Errorf("unterminated quoted string at offset %d", sc.pos)
+}
+
+func (sc *showScanner) integer() (string, error) {
+	sc.skipSpace()
+	start := sc.pos
+	if sc.pos < len(sc.s) && sc.s[sc.pos] == '-' {
+		sc.pos++
+	}
+	for sc.pos < len(sc.s) && sc.s[sc.pos] >= '0' && sc.s[sc.pos] <= '9' {
+		sc.pos++
+	}
+	if sc.pos == start || (sc.pos == start+1 && sc.s[start] == '-') {
+		return "", fmt.Errorf("expected an integer at offset %d", start)
+	}
+	return sc.s[start:sc.pos], nil
+}
+
+// entry parses one "(PolicyID {...},[(name,qty),...])" pair, returning the
+// policy ID and its assets with PolicyID left for the caller to fill in.
+func (sc *showScanner) entry() (string, []KoiosTxInfoAsset, error) {
+	for _, lit := range []string{
+		"(", "PolicyID", "{", "policyID", "=", "ScriptHash",
+	} {
+		if err := sc.expect(lit); err != nil {
+			return "", nil, err
+		}
+	}
+	policy, err := sc.quoted()
+	if err != nil {
+		return "", nil, err
+	}
+	for _, lit := range []string{"}", ",", "["} {
+		if err := sc.expect(lit); err != nil {
+			return "", nil, err
+		}
+	}
+	var assets []KoiosTxInfoAsset
+	if !sc.accept("]") {
+		for {
+			if err := sc.expect("("); err != nil {
+				return "", nil, err
+			}
+			name, err := sc.quoted()
+			if err != nil {
+				return "", nil, err
+			}
+			if err := sc.expect(","); err != nil {
+				return "", nil, err
+			}
+			qty, err := sc.integer()
+			if err != nil {
+				return "", nil, err
+			}
+			if err := sc.expect(")"); err != nil {
+				return "", nil, err
+			}
+			assets = append(assets, KoiosTxInfoAsset{
+				AssetName: name,
+				Quantity:  qty,
+			})
+			if sc.accept(",") {
+				continue
+			}
+			if err := sc.expect("]"); err != nil {
+				return "", nil, err
+			}
+			break
+		}
+	}
+	if err := sc.expect(")"); err != nil {
+		return "", nil, err
+	}
+	return policy, assets, nil
+}
+
+// koiosBodyExcerpt renders a short, single-line, printable prefix of some
+// response text for an error message. A malformed field can be long, so the
+// whole value is useless in a log line -- but its first few characters are
+// exactly what identifies the form it arrived in, which is the one thing the
+// bare "invalid character '(' looking for beginning of value" this replaced
+// never told us.
+func koiosBodyExcerpt(body []byte) string {
+	const maxExcerpt = 200
+	s := strings.TrimSpace(string(body))
+	if s == "" {
+		return "<empty>"
+	}
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > maxExcerpt {
+		return s[:maxExcerpt] + "..."
+	}
+	return s
 }
 
 // KoiosTxInfoInlineDatum is the non-null shape of a KoiosTxInfoOutput's
@@ -1970,7 +2225,7 @@ func (k *KoiosClient) GetTxInfos(
 		}
 		var items []KoiosTxInfoItem
 		if err := json.Unmarshal(resp.Body, &items); err != nil {
-			return nil, fmt.Errorf("koios /tx_info decode: %w", err)
+			return nil, describeTxInfoDecodeFailure(resp.Body, err)
 		}
 		for _, item := range items {
 			if _, dup := byHash[item.TxHash]; dup {
@@ -1995,6 +2250,65 @@ func (k *KoiosClient) GetTxInfos(
 		all[i] = item
 	}
 	return all, nil
+}
+
+// describeTxInfoDecodeFailure turns a whole-response /tx_info decode failure
+// into an error that names the offending transaction and preserves the
+// underlying cause, by re-decoding the response one transaction at a time.
+//
+// This is diagnosis, not recovery: the returned error still fails the entire
+// chunk, exactly as before. That is deliberate. GetTxInfos' contract is that
+// every requested hash comes back, because nodeparity's caller applies these
+// to a running UTxO reconstruction -- dropping the one transaction that
+// failed to decode would silently lose its spends and creates, and the
+// reconstruction would then differ from Dingo for a reason that has nothing
+// to do with Dingo. Failing the chunk keeps the caller's existing
+// taint-and-re-baseline path in charge, so the epoch is honestly reported as
+// "utxo check did not run" instead of being compared against a corrupted set.
+//
+// What was wrong before was only the blast radius of the *message*: one
+// unparseable field in one transaction surfaced as a bare
+// "koios /tx_info decode: invalid character '(' ..." with no field, no
+// transaction and no chunk identity, which is what made the underlying
+// collateral_output.asset_list bug (see KoiosTxInfoAssetList) expensive to
+// find.
+//
+// Runs only on the failure path, so the extra decode costs nothing in the
+// normal case.
+func describeTxInfoDecodeFailure(body []byte, decodeErr error) error {
+	var rawItems []json.RawMessage
+	if err := json.Unmarshal(body, &rawItems); err != nil {
+		// The response isn't even an array -- report the original error
+		// plus what actually arrived.
+		return fmt.Errorf(
+			"koios /tx_info decode: %w: response was not a JSON array: %s",
+			decodeErr,
+			koiosBodyExcerpt(body),
+		)
+	}
+	for i, raw := range rawItems {
+		var one KoiosTxInfoItem
+		if err := json.Unmarshal(raw, &one); err == nil {
+			continue
+		} else {
+			var probe struct {
+				TxHash string `json:"tx_hash"`
+			}
+			hash := "<unidentified>"
+			if perr := json.Unmarshal(raw, &probe); perr == nil &&
+				probe.TxHash != "" {
+				hash = probe.TxHash
+			}
+			return fmt.Errorf(
+				"koios /tx_info decode: transaction %s (response index %d): %w",
+				hash,
+				i,
+				err,
+			)
+		}
+	}
+	// Every item decodes alone but the array did not: report the original.
+	return fmt.Errorf("koios /tx_info decode: %w", decodeErr)
 }
 
 // parseTotalFromContentRange extracts the total count from a Content-Range header
