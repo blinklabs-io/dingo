@@ -714,8 +714,11 @@ func TestProcessEpochRatifiesChainedParameterChangesAgainstStagedState(
 	pparams.MinCommitteeSize = 1
 	pparams.DRepVotingThresholds.PpGovGroup = newRat(0, 1)
 	pparams.DRepVotingThresholds.PpEconomicGroup = newRat(1, 1)
+	pparams.DRepVotingThresholds.TreasuryWithdrawal = newRat(1, 1)
 	updatedThresholds := pparams.DRepVotingThresholds
 	updatedThresholds.PpEconomicGroup = newRat(0, 1)
+	childThresholds := pparams.DRepVotingThresholds
+	childThresholds.TreasuryWithdrawal = newRat(0, 1)
 
 	// Give the child a lexically earlier hash and the same anchor slot so
 	// ancestry, rather than the SQL tie-breaker, determines candidate order.
@@ -733,7 +736,24 @@ func TestProcessEpochRatifiesChainedParameterChangesAgainstStagedState(
 	childAction, err := cbor.Encode(&conway.ConwayParameterChangeGovAction{
 		Type: uint(lcommon.GovActionTypeParameterChange),
 		ParamUpdate: conway.ConwayProtocolParameterUpdate{
-			PoolDeposit: &poolDeposit,
+			DRepVotingThresholds: &childThresholds,
+			PoolDeposit:          &poolDeposit,
+		},
+	})
+	require.NoError(t, err)
+	rewardAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		testBytes(28, 0x77),
+	)
+	require.NoError(t, err)
+	rewardAddrBytes, err := rewardAddr.Bytes()
+	require.NoError(t, err)
+	treasuryAction, err := cbor.Encode(&lcommon.TreasuryWithdrawalGovAction{
+		Type: uint(lcommon.GovActionTypeTreasuryWithdrawal),
+		Withdrawals: map[*lcommon.Address]uint64{
+			&rewardAddr: 1,
 		},
 	})
 	require.NoError(t, err)
@@ -761,15 +781,30 @@ func TestProcessEpochRatifiesChainedParameterChangesAgainstStagedState(
 		GovActionCbor:   childAction,
 		AddedSlot:       400,
 	}
+	treasury := &models.GovernanceProposal{
+		TxHash:        testBytes(32, 0x93),
+		ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
+		ProposedEpoch: stabilityTestEpoch - 1,
+		ExpiresEpoch:  stabilityTestEpoch + 10,
+		AnchorURL:     "https://example.invalid/treasury",
+		AnchorHash:    testBytes(32, 0x78),
+		ReturnAddress: rewardAddrBytes,
+		GovActionCbor: treasuryAction,
+		AddedSlot:     400,
+	}
 	require.NoError(t, db.SetGovernanceProposal(parent, nil))
 	require.NoError(t, db.SetGovernanceProposal(child, nil))
+	require.NoError(t, db.SetGovernanceProposal(treasury, nil))
 	parent, err = db.GetGovernanceProposal(parentHash, 0, nil)
 	require.NoError(t, err)
 	child, err = db.GetGovernanceProposal(childHash, 0, nil)
 	require.NoError(t, err)
+	treasury, err = db.GetGovernanceProposal(treasury.TxHash, 0, nil)
+	require.NoError(t, err)
 	drepCred := seedDRepWithStake(t, db, 100)
 	seedDRepYesVote(t, db, parent.ID, drepCred)
-	seedHardForkCommitteeAndSPOVotes(t, db, store, parent, child)
+	require.NoError(t, store.SetNetworkState(10, 20, 1, nil))
+	seedHardForkCommitteeAndSPOVotes(t, db, store, parent, child, treasury)
 
 	txn := db.MetadataTxn(true)
 	defer txn.Release()
@@ -784,7 +819,7 @@ func TestProcessEpochRatifiesChainedParameterChangesAgainstStagedState(
 	})
 	require.NoError(t, err)
 	require.NoError(t, txn.Commit())
-	assert.Equal(t, 2, out.RatifiedCount)
+	assert.Equal(t, 3, out.RatifiedCount)
 
 	parent, err = db.GetGovernanceProposal(parentHash, 0, nil)
 	require.NoError(t, err)
@@ -792,6 +827,9 @@ func TestProcessEpochRatifiesChainedParameterChangesAgainstStagedState(
 	require.NoError(t, err)
 	require.NotNil(t, parent.RatifiedEpoch)
 	require.NotNil(t, child.RatifiedEpoch)
+	treasury, err = db.GetGovernanceProposal(treasury.TxHash, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, treasury.RatifiedEpoch)
 	assert.Equal(t, stabilityTestEpoch, *parent.RatifiedEpoch)
 	assert.Equal(t, stabilityTestEpoch, *child.RatifiedEpoch)
 	assert.Equal(t, newRat(1, 1), pparams.DRepVotingThresholds.PpEconomicGroup)
@@ -809,7 +847,7 @@ func TestProcessEpochRatifiesChainedParameterChangesAgainstStagedState(
 	})
 	require.NoError(t, err)
 	require.NoError(t, enactTxn.Commit())
-	assert.Equal(t, 2, enactOut.EnactedCount)
+	assert.Equal(t, 3, enactOut.EnactedCount)
 	require.True(t, enactOut.PParamsChanged)
 	updatedPParams, ok := enactOut.UpdatedPParams.(*conway.ConwayProtocolParameters)
 	require.True(t, ok)

@@ -12360,6 +12360,9 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    particular it does not add committee-term validation; committee membership
    and term state remain part of the actual enactment path. A parameter update
    is tested against a clone during preflight and that result is discarded.
+   Before priority sorting, RATIFY orders active ParameterChange proposals
+   parent before child. A stable priority sort then keeps that ancestry order
+   within the ParameterChange priority, ahead of later action categories.
    During RATIFY, accepted parameter changes are applied to a local staged
    parameter value and advance the parameter-purpose root, allowing later
    candidates in the same pass to validate against their accepted parent's

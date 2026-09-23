@@ -575,11 +575,11 @@ func ProcessEpoch(
 	// would leave the corresponding lovelace in Dingo's physical treasury pot.
 	ratificationTreasuryRemaining := enactCtx.TreasuryWithdrawalRemaining
 
+	stillActive = orderParameterChangeChains(stillActive)
 	sort.SliceStable(stillActive, func(i, j int) bool {
 		return govActionPriority(stillActive[i]) <
 			govActionPriority(stillActive[j])
 	})
-	stillActive = orderParameterChangeChains(stillActive)
 
 	// Log the tally scale before the loop so an unexpectedly slow or
 	// stalled tally is visible in operator logs (a hang shows a
