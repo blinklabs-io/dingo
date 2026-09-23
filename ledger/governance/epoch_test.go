@@ -792,6 +792,153 @@ func TestProcessEpochRatifiesChainedParameterChangesAgainstStagedState(
 	require.NotNil(t, child.RatifiedEpoch)
 	assert.Equal(t, stabilityTestEpoch, *parent.RatifiedEpoch)
 	assert.Equal(t, stabilityTestEpoch, *child.RatifiedEpoch)
+	assert.Equal(t, newRat(1, 1), pparams.DRepVotingThresholds.PpEconomicGroup)
+
+	enactTxn := db.MetadataTxn(true)
+	defer enactTxn.Release()
+	enactOut, err := ProcessEpoch(&EpochInput{
+		DB:           db,
+		Txn:          enactTxn,
+		PrevEpoch:    stabilityTestEpoch,
+		NewEpoch:     stabilityTestEpoch + 1,
+		BoundarySlot: (stabilityTestEpoch + 1) * 100,
+		PParams:      pparams,
+		UpdateFn:     eras.PParamsUpdateConway,
+	})
+	require.NoError(t, err)
+	require.NoError(t, enactTxn.Commit())
+	assert.Equal(t, 2, enactOut.EnactedCount)
+	require.True(t, enactOut.PParamsChanged)
+	updatedPParams, ok := enactOut.UpdatedPParams.(*conway.ConwayProtocolParameters)
+	require.True(t, ok)
+	assert.Equal(
+		t,
+		newRat(0, 1),
+		updatedPParams.DRepVotingThresholds.PpEconomicGroup,
+	)
+	assert.Equal(t, poolDeposit, updatedPParams.PoolDeposit)
+
+	parent, err = db.GetGovernanceProposal(parentHash, 0, nil)
+	require.NoError(t, err)
+	child, err = db.GetGovernanceProposal(childHash, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, parent.EnactedEpoch)
+	require.NotNil(t, child.EnactedEpoch)
+	assert.Equal(t, stabilityTestEpoch+1, *parent.EnactedEpoch)
+	assert.Equal(t, stabilityTestEpoch+1, *child.EnactedEpoch)
+}
+
+func TestProcessEpochOrdersParameterChangesBeforeTreasuryWithdrawals(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		insertTreasury bool
+	}{
+		{name: "treasury inserted first", insertTreasury: true},
+		{name: "parameter change inserted first", insertTreasury: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			db, store := newTallyTestDB(t)
+			pparams := conwayPParamsFixture(10)
+			pparams.MinCommitteeSize = 1
+			pparams.DRepVotingThresholds.PpGovGroup = newRat(0, 1)
+			pparams.DRepVotingThresholds.TreasuryWithdrawal = newRat(1, 1)
+			updatedThresholds := pparams.DRepVotingThresholds
+			updatedThresholds.TreasuryWithdrawal = newRat(0, 1)
+			parentAction, err := cbor.Encode(
+				&conway.ConwayParameterChangeGovAction{
+					Type: uint(lcommon.GovActionTypeParameterChange),
+					ParamUpdate: conway.ConwayProtocolParameterUpdate{
+						DRepVotingThresholds: &updatedThresholds,
+					},
+				},
+			)
+			require.NoError(t, err)
+			stakeCred := testBytes(28, 0x82)
+			rewardAddr, err := lcommon.NewAddressFromParts(
+				lcommon.AddressTypeNoneKey,
+				lcommon.AddressNetworkTestnet,
+				nil,
+				stakeCred,
+			)
+			require.NoError(t, err)
+			rewardAddrBytes, err := rewardAddr.Bytes()
+			require.NoError(t, err)
+			treasuryAction, err := cbor.Encode(
+				&lcommon.TreasuryWithdrawalGovAction{
+					Type:        uint(lcommon.GovActionTypeTreasuryWithdrawal),
+					Withdrawals: map[*lcommon.Address]uint64{&rewardAddr: 1},
+				},
+			)
+			require.NoError(t, err)
+			require.NoError(t, store.SetNetworkState(10, 20, 1, nil))
+
+			parentSlot, treasurySlot := uint64(200), uint64(100)
+			if !test.insertTreasury {
+				parentSlot, treasurySlot = treasurySlot, parentSlot
+			}
+			parent := &models.GovernanceProposal{
+				TxHash:        testBytes(32, 0x83),
+				ActionType:    uint8(lcommon.GovActionTypeParameterChange),
+				ProposedEpoch: stabilityTestEpoch - 1,
+				ExpiresEpoch:  stabilityTestEpoch + 10,
+				AnchorURL:     "https://example.invalid/priority-parent",
+				AnchorHash:    testBytes(32, 0x84),
+				ReturnAddress: testBytes(29, 0x85),
+				GovActionCbor: parentAction,
+				AddedSlot:     parentSlot,
+			}
+			treasury := &models.GovernanceProposal{
+				TxHash:        testBytes(32, 0x86),
+				ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
+				ProposedEpoch: stabilityTestEpoch - 1,
+				ExpiresEpoch:  stabilityTestEpoch + 10,
+				AnchorURL:     "https://example.invalid/priority-withdrawal",
+				AnchorHash:    testBytes(32, 0x87),
+				ReturnAddress: rewardAddrBytes,
+				GovActionCbor: treasuryAction,
+				AddedSlot:     treasurySlot,
+			}
+			ordered := []*models.GovernanceProposal{parent, treasury}
+			if test.insertTreasury {
+				ordered[0], ordered[1] = treasury, parent
+			}
+			for _, proposal := range ordered {
+				require.NoError(t, db.SetGovernanceProposal(proposal, nil))
+			}
+			parent, err = db.GetGovernanceProposal(parent.TxHash, 0, nil)
+			require.NoError(t, err)
+			treasury, err = db.GetGovernanceProposal(treasury.TxHash, 0, nil)
+			require.NoError(t, err)
+			seedHardForkCommitteeAndSPOVotes(t, db, store, parent, treasury)
+
+			txn := db.MetadataTxn(true)
+			defer txn.Release()
+			out, err := ProcessEpoch(&EpochInput{
+				DB:           db,
+				Txn:          txn,
+				PrevEpoch:    stabilityTestEpoch - 1,
+				NewEpoch:     stabilityTestEpoch,
+				BoundarySlot: stabilityTestEpoch * 100,
+				PParams:      pparams,
+				UpdateFn:     eras.PParamsUpdateConway,
+			})
+			require.NoError(t, err)
+			require.NoError(t, txn.Commit())
+			assert.Equal(t, 2, out.RatifiedCount)
+			parent, err = db.GetGovernanceProposal(parent.TxHash, 0, nil)
+			require.NoError(t, err)
+			treasury, err = db.GetGovernanceProposal(treasury.TxHash, 0, nil)
+			require.NoError(t, err)
+			require.NotNil(t, parent.RatifiedEpoch)
+			require.NotNil(t, treasury.RatifiedEpoch)
+		})
+	}
 }
 
 // TestProcessEpochBootstrapParameterChangeWithoutCommitteeDoesNotRatify
