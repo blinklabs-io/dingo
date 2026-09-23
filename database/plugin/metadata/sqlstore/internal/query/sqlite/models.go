@@ -123,6 +123,18 @@ type Drep struct {
 	Active            sql.NullBool
 }
 
+type DrepExpiryEpochEvent struct {
+	AddedSlot int64
+}
+
+type DrepExpiryHistory struct {
+	CredentialTag             int64
+	Credential                []byte
+	AddedSlot                 int64
+	PreviousExpiryEpoch       int64
+	PreviousLastActivityEpoch int64
+}
+
 type Epoch struct {
 	Nonce               []byte
 	EvolvingNonce       []byte
