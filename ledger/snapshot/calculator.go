@@ -282,6 +282,9 @@ func (c *Calculator) calculateLiveStakeDistributionInTxn(
 	if len(pools) == 0 {
 		return dist, nil
 	}
+	for _, poolHash := range pools {
+		dist.PoolStakes[poolHash] = 0
+	}
 
 	poolKeyHashBytes := make([][]byte, len(pools))
 	for i, poolHash := range pools {
@@ -457,12 +460,12 @@ func (c *Calculator) calculateFromHistoricalStake(
 
 	for _, poolHash := range pools {
 		delegators := delegatorMap[poolHash]
+		stake := stakeMap[poolHash]
+		dist.PoolStakes[poolHash] = stake
 		if delegators > 0 {
-			stake := stakeMap[poolHash]
 			if dist.TotalStake > ^uint64(0)-stake {
 				return errors.New("total active stake overflow")
 			}
-			dist.PoolStakes[poolHash] = stake
 			dist.DelegatorCount[poolHash] = delegators
 			dist.TotalStake += stake
 		}

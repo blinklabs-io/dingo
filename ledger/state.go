@@ -8031,7 +8031,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	// Storage-phase failures always abort the DB transaction so a partial
 	// endorser-block application cannot be committed.
 	if dijkstraEraGate(currentEra) {
-		if err := ls.validateDijkstraLeiosCertificate(block); err != nil {
+		if err := ls.validateDijkstraLeiosCertificate(block, nil); err != nil {
 			return nil, fmt.Errorf("validate Dijkstra Leios certificate: %w", err)
 		}
 		if ls.config.EndorserBlockProvider == nil {
@@ -12199,6 +12199,10 @@ var ErrLeiosValidationParentUnavailable = errors.New(
 	"leios announcement parent is not the current ledger tip",
 )
 
+var ErrLeiosValidationParentSuperseded = errors.New(
+	"leios announcing parent is no longer the current ledger tip",
+)
+
 func (ls *LedgerState) txValidationSnapshot() txValidationSnapshot {
 	consensusState, tipState := ls.loadStateSnapshots()
 	tipSlot := tipState.currentTip.Point.Slot
@@ -12275,7 +12279,7 @@ func (ls *LedgerState) withTxValidationSession(
 	snapshot := ls.txValidationSnapshot()
 	if expectedParentHash != nil &&
 		!bytes.Equal(snapshot.tipPoint.Hash, expectedParentHash) {
-		return ErrLeiosValidationParentUnavailable
+		return ErrLeiosValidationParentSuperseded
 	}
 	if referenceSlot != nil {
 		snapshot.referenceSlot = *referenceSlot
@@ -12297,6 +12301,10 @@ func (ls *LedgerState) withTxValidationSession(
 				return err
 			}
 			if validationEra.ValidateTxFunc == nil {
+				return nil
+			}
+			if validationEra.Id == dijkstra.EraIdDijkstra &&
+				ls.skipDijkstraTxValidation(validationEra.Id) {
 				return nil
 			}
 			pp := snapshot.currentPParams
@@ -12374,6 +12382,10 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 	}
 	slot := header.SlotNumber()
 	parentHash := header.PrevHash().Bytes()
+	parentIsCurrentTip := func() bool {
+		_, currentTip := ls.loadStateSnapshots()
+		return bytes.Equal(currentTip.currentTip.Point.Hash, parentHash)
+	}
 	return ls.withTxValidationSession(
 		parentHash,
 		&slot,
@@ -12392,6 +12404,9 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 					return err
 				}
 				if !stillCurrent() {
+					if !parentIsCurrentTip() {
+						return ErrLeiosValidationParentSuperseded
+					}
 					return ErrLeiosValidationParentUnavailable
 				}
 				tx, err := ledger.NewTransactionFromCbor(
@@ -12420,6 +12435,9 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 				return err
 			}
 			if !stillCurrent() {
+				if !parentIsCurrentTip() {
+					return ErrLeiosValidationParentSuperseded
+				}
 				return ErrLeiosValidationParentUnavailable
 			}
 			return nil

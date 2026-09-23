@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"math/big"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
@@ -135,33 +136,81 @@ func (a *leiosCommitteeParamsAdapter) LeiosCommitteeParameters(
 			)
 		}
 	}()
-	pparams, err := db.GetPParams(
+	dijkstraPParams, err := leiosDijkstraPParamsForSnapshot(
+		db,
 		snapshotEpoch,
-		uint(gdijkstra.EraIdDijkstra),
-		func(raw []byte) (lcommon.ProtocolParameters, error) {
-			var decoded gdijkstra.DijkstraProtocolParameters
-			if err := decoded.UnmarshalCBOR(raw); err != nil {
-				return nil, err
-			}
-			return &decoded, nil
-		},
 		txn,
 	)
 	if err != nil {
-		return 0, nil, fmt.Errorf(
+		return 0, nil, err
+	}
+	return leiosCommitteeParamsFromPParams(dijkstraPParams)
+}
+
+func leiosDijkstraPParamsForSnapshot(
+	db *database.Database,
+	snapshotEpoch uint64,
+	txn *database.Txn,
+) (*gdijkstra.DijkstraProtocolParameters, error) {
+	decode := func(raw []byte) (lcommon.ProtocolParameters, error) {
+		var decoded gdijkstra.DijkstraProtocolParameters
+		if err := decoded.UnmarshalCBOR(raw); err != nil {
+			return nil, err
+		}
+		return &decoded, nil
+	}
+	pparams, err := db.GetPParams(
+		snapshotEpoch,
+		uint(gdijkstra.EraIdDijkstra),
+		decode,
+		txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
 			"load Dijkstra parameters for Leios snapshot epoch %d: %w",
 			snapshotEpoch,
 			err,
 		)
 	}
+	if pparams == nil {
+		// Leios committees use Dijkstra parameters with the preceding Mark
+		// stake snapshot. At the transition that snapshot can predate the first
+		// Dijkstra row, so use the era's initial parameter set.
+		rows, listErr := db.Metadata().ListPParamsForEra(
+			uint(gdijkstra.EraIdDijkstra),
+			txn.Metadata(),
+		)
+		if listErr != nil {
+			return nil, fmt.Errorf(
+				"list Dijkstra parameters for Leios snapshot epoch %d: %w",
+				snapshotEpoch,
+				listErr,
+			)
+		}
+		if len(rows) == 0 {
+			return nil, fmt.Errorf(
+				"Leios snapshot epoch %d has no Dijkstra parameter rows",
+				snapshotEpoch,
+			)
+		}
+		decoded, decodeErr := decode(rows[0].Cbor)
+		if decodeErr != nil {
+			return nil, fmt.Errorf(
+				"decode initial Dijkstra parameters for Leios snapshot epoch %d: %w",
+				snapshotEpoch,
+				decodeErr,
+			)
+		}
+		pparams = decoded
+	}
 	dijkstraPParams, ok := pparams.(*gdijkstra.DijkstraProtocolParameters)
 	if !ok || dijkstraPParams == nil {
-		return 0, nil, fmt.Errorf(
-			"leios snapshot epoch %d has no Dijkstra protocol parameters",
+		return nil, fmt.Errorf(
+			"Leios snapshot epoch %d has no Dijkstra protocol parameters",
 			snapshotEpoch,
 		)
 	}
-	return leiosCommitteeParamsFromPParams(dijkstraPParams)
+	return dijkstraPParams, nil
 }
 
 // leiosCommitteeParamsFromPParams extracts the Dijkstra committee size and

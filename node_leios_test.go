@@ -27,12 +27,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -162,6 +165,74 @@ func TestLeiosCommitteeParamsFromPParamsUsesDijkstraFields(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint16(900), size)
 	assert.Equal(t, 0, tau.Cmp(big.NewRat(3, 4)))
+}
+
+func TestLeiosDijkstraPParamsFallbackUsesFirstEraRow(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	for _, committeeSize := range []uint16{17, 23} {
+		poolThreshold := testLeiosPParamRat()
+		drepThreshold := testLeiosPParamRat()
+		pp := &gdijkstra.DijkstraProtocolParameters{
+			ConwayProtocolParameters: conway.ConwayProtocolParameters{
+				A0:                         &cbor.Rat{Rat: big.NewRat(0, 1)},
+				Rho:                        &cbor.Rat{Rat: big.NewRat(1, 10)},
+				Tau:                        &cbor.Rat{Rat: big.NewRat(1, 10)},
+				MinFeeRefScriptCostPerByte: &cbor.Rat{Rat: big.NewRat(1, 1)},
+				PoolVotingThresholds: conway.PoolVotingThresholds{
+					MotionNoConfidence:    poolThreshold,
+					CommitteeNormal:       poolThreshold,
+					CommitteeNoConfidence: poolThreshold,
+					HardForkInitiation:    poolThreshold,
+					PpSecurityGroup:       poolThreshold,
+				},
+				DRepVotingThresholds: conway.DRepVotingThresholds{
+					MotionNoConfidence:    drepThreshold,
+					CommitteeNormal:       drepThreshold,
+					CommitteeNoConfidence: drepThreshold,
+					UpdateToConstitution:  drepThreshold,
+					HardForkInitiation:    drepThreshold,
+					PpNetworkGroup:        drepThreshold,
+					PpEconomicGroup:       drepThreshold,
+					PpTechnicalGroup:      drepThreshold,
+					PpGovGroup:            drepThreshold,
+					TreasuryWithdrawal:    drepThreshold,
+				},
+			},
+			RefScriptCostMultiplier:   &cbor.Rat{Rat: big.NewRat(1, 1)},
+			MaxPledgeLeverage:         &cbor.Rat{Rat: big.NewRat(1, 1)},
+			MinPoolMargin:             &cbor.Rat{Rat: big.NewRat(0, 1)},
+			LeiosCommitteeSize:        committeeSize,
+			LeiosQuorumStakeThreshold: &cbor.Rat{Rat: big.NewRat(3, 4)},
+			CommitteeStakeCoverage:    &cbor.Rat{Rat: big.NewRat(1, 1)},
+			QuorumStakeThreshold:      &cbor.Rat{Rat: big.NewRat(1, 1)},
+		}
+		raw, marshalErr := pp.MarshalCBOR()
+		require.NoError(t, marshalErr)
+		require.NoError(t, db.SetPParams(
+			raw,
+			uint64(committeeSize),
+			uint64(committeeSize),
+			uint(gdijkstra.EraIdDijkstra),
+			nil,
+		))
+	}
+	txn := db.MetadataTxn(false)
+	defer txn.Rollback()
+
+	pp, err := leiosDijkstraPParamsForSnapshot(db, 9, txn)
+	require.NoError(t, err)
+	assert.Equal(t, uint16(17), pp.LeiosCommitteeSize)
+
+	pp, err = leiosDijkstraPParamsForSnapshot(db, 23, txn)
+	require.NoError(t, err)
+	assert.Equal(t, uint16(23), pp.LeiosCommitteeSize)
+}
+
+func testLeiosPParamRat() cbor.Rat {
+	return cbor.Rat{Rat: big.NewRat(1, 2)}
 }
 
 func TestLeiosCommitteeParamsFromPParamsRejectsMissingValues(t *testing.T) {

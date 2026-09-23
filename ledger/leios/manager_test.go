@@ -436,6 +436,36 @@ func TestVoteManagerValidatesDijkstraCertificateStrictly(t *testing.T) {
 		aggregatedSignature,
 		message,
 	))
+
+	wrongSizeAggregate := make([]byte, lcommon.LeiosBlsSignatureSize)
+	require.Error(t, fixture.mgr.ValidateDijkstraCertificate(
+		5,
+		signers,
+		wrongSizeAggregate,
+		message,
+	))
+
+	highBits := append([]byte(nil), signers...)
+	highBits[len(highBits)-1] |= 1
+	require.Error(t, fixture.mgr.ValidateDijkstraCertificate(
+		5,
+		highBits,
+		aggregatedSignature,
+		message,
+	))
+
+	belowQuorum := make([]byte, lcommon.LeiosSignerBitfieldSize(10))
+	belowQuorum[1] = 1 << 6 // only voter 9, with 10 of 550 active stake
+	belowQuorumSig, err := SignVote(fixture.keys[9], message)
+	require.NoError(t, err)
+	belowQuorumAggregate, err := AggregateSignatures([][]byte{belowQuorumSig})
+	require.NoError(t, err)
+	require.ErrorIs(t, fixture.mgr.ValidateDijkstraCertificate(
+		5,
+		belowQuorum,
+		belowQuorumAggregate,
+		message,
+	), ErrQuorumNotMet)
 }
 
 func TestVoteManagerRejectsKeylessDijkstraCertificateSigner(t *testing.T) {

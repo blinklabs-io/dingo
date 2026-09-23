@@ -459,16 +459,6 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	ctx context.Context,
 	blocks []ledger.Block,
 ) error {
-	// Certificate validation precedes both asynchronous historical backfill
-	// and the apply-time certified fetch. Invalid certificates therefore never
-	// trigger certified endorser-block work, including during replay.
-	if ls.config.ValidateLeiosCertificate != nil {
-		for _, block := range blocks {
-			if err := ls.validateDijkstraLeiosCertificate(block); err != nil {
-				return fmt.Errorf("validate Dijkstra Leios certificate: %w", err)
-			}
-		}
-	}
 	// Index each block's announced endorser block by the block's own hash so a
 	// certifying ranking block can resolve the endorser block its parent
 	// announced without a store round-trip (the parent is normally in the same
@@ -481,6 +471,17 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 			annByHash[infos[i].hash] = leiosEbRef{
 				slot: infos[i].slot,
 				hash: infos[i].ebHash,
+			}
+		}
+	}
+	// Certificate validation precedes both asynchronous historical backfill
+	// and the apply-time certified fetch. Invalid certificates therefore never
+	// trigger certified endorser-block work, including during replay. Resolve a
+	// parent announcement from this batch before falling back to persisted data.
+	if ls.config.ValidateLeiosCertificate != nil {
+		for _, block := range blocks {
+			if err := ls.validateDijkstraLeiosCertificate(block, annByHash); err != nil {
+				return fmt.Errorf("validate Dijkstra Leios certificate: %w", err)
 			}
 		}
 	}
@@ -1124,6 +1125,7 @@ func leiosBlockInfoFrom(blk ledger.Block) leiosBlockInfo {
 
 func (ls *LedgerState) validateDijkstraLeiosCertificate(
 	block ledger.Block,
+	batchAnnouncements map[string]leiosEbRef,
 ) error {
 	dijkstraBlock, ok := block.(*dijkstra.DijkstraBlock)
 	if !ok {
@@ -1154,11 +1156,20 @@ func (ls *LedgerState) validateDijkstraLeiosCertificate(
 	if ls.config.ValidateLeiosCertificate == nil {
 		return errors.New("no Dijkstra Leios certificate validator configured")
 	}
-	_, ebSlot, _, announced, err := ls.leiosCertifiedAnnouncementFromParent(
-		block.PrevHash().Bytes(),
+	var (
+		ebSlot    uint64
+		announced bool
+		err       error
 	)
-	if err != nil {
-		return fmt.Errorf("%w: resolve certified parent announcement: %w", errCertifiedEndorserBlockUnavailable, err)
+	if batchAnnouncement, ok := batchAnnouncements[string(block.PrevHash().Bytes())]; ok {
+		ebSlot, announced = batchAnnouncement.slot, true
+	} else {
+		_, ebSlot, _, announced, err = ls.leiosCertifiedAnnouncementFromParent(
+			block.PrevHash().Bytes(),
+		)
+		if err != nil {
+			return fmt.Errorf("%w: resolve certified parent announcement: %w", errCertifiedEndorserBlockUnavailable, err)
+		}
 	}
 	if !announced {
 		return fmt.Errorf(
