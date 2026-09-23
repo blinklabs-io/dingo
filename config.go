@@ -102,9 +102,11 @@ type KoiosParityConfig struct {
 	AllowInsecureHTTP bool
 	// APIKey is the Koios Bearer token for higher-rate-limit access.
 	APIKey string
-	// Strict stops/cancels the node on the first Koios/tool error or exact
-	// parity mismatch rather than logging it and continuing normal
-	// operation.
+	// Strict stops/cancels the node on the first Koios/tool error or
+	// non-pass parity result, rather than logging it and continuing normal
+	// operation. The one exception is an epoch whose only significant
+	// mismatches are reference_lag (Koios's data has not caught up yet),
+	// which is logged and recorded but never stops the node.
 	Strict bool
 	// GraceHours is the window after an epoch closes during which a missing
 	// Dingo-side row is treated as reference/sync lag rather than a
@@ -686,9 +688,11 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 	// Start with a default internal config
 	c := Config{
 		cfg: &internalconfig.Config{
-			BindAddr:    "0.0.0.0",
-			StorageMode: string(StorageModeCore),
-			RunMode:     internalconfig.RunModeServe,
+			BindAddr:             "0.0.0.0",
+			StorageMode:          string(StorageModeCore),
+			RunMode:              internalconfig.RunModeServe,
+			ValidateHistorical:   true,
+			StrictUtxoValidation: true,
 			// Fail closed: self-validate locally-forged blocks before
 			// adoption and diffusion unless an operator explicitly opts
 			// out. Mirrors internalconfig's own package-level default

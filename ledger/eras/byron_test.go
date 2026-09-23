@@ -368,9 +368,12 @@ var errUtxoNotFound = errors.New("UTxO not found")
 // mockLedgerState implements lcommon.LedgerState for testing
 // UTxO-aware Byron validation rules.
 type mockLedgerState struct {
-	utxos                map[string]lcommon.Utxo
-	networkId            uint
-	protocolMagic        uint32
+	utxos         map[string]lcommon.Utxo
+	networkId     uint
+	protocolMagic uint32
+	// protocolMagicErr, when set, makes ByronProtocolMagic fail, so a test
+	// can prove a rule surfaces the lookup failure rather than skipping.
+	protocolMagicErr     error
 	byronFeeSummand      int64
 	byronFeeMultiplier   int64
 	skipPhase2Validation bool
@@ -444,6 +447,9 @@ func (m *mockLedgerState) UtxoById(
 func (m *mockLedgerState) NetworkId() uint { return m.networkId }
 
 func (m *mockLedgerState) ByronProtocolMagic() (uint32, error) {
+	if m.protocolMagicErr != nil {
+		return 0, m.protocolMagicErr
+	}
 	return m.protocolMagic, nil
 }
 
